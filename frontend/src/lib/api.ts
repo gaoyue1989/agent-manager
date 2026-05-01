@@ -31,5 +31,9 @@ export const api = {
     deploy: (id: number) => request(`/agents/${id}/deploy`, { method: 'POST' }),
     publish: (id: number) => request(`/agents/${id}/publish`, { method: 'POST' }),
     unpublish: (id: number) => request(`/agents/${id}/unpublish`, { method: 'POST' }),
+    imageInfo: (id: number) => request(`/agents/${id}/image-info`),
+    podStatus: (id: number) => request(`/agents/${id}/pod-status`),
+    chat: (id: number, data: { message: string; history?: { role: string; content: string }[] }) =>
+      request(`/agents/${id}/chat`, { method: 'POST', body: JSON.stringify(data) }),
   },
 };

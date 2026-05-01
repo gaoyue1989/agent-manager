@@ -1,7 +1,10 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
+	"os/exec"
+	"strings"
 	"time"
 
 	"agent-manager/backend/internal/docker"
@@ -131,4 +134,107 @@ func (s *DeployService) Unpublish(agentID uint) (*model.Deployment, error) {
 	s.db.Save(agent)
 
 	return dep, nil
+}
+
+func (s *DeployService) GetImageInfo(agentID uint) (map[string]interface{}, error) {
+	var build model.ImageBuild
+	err := s.db.Where("agent_id = ?", agentID).Order("created_at DESC").First(&build).Error
+	if err != nil {
+		return nil, fmt.Errorf("no build found for agent %d", agentID)
+	}
+
+	imageName := ""
+	version := ""
+	if build.ImageTag != "" {
+		parts := strings.Split(build.ImageTag, ":")
+		if len(parts) == 2 {
+			imageName = parts[0]
+			version = parts[1]
+		}
+	}
+
+	return map[string]interface{}{
+		"image_tag":    build.ImageTag,
+		"image_name":   imageName,
+		"registry":     s.registry,
+		"version":      version,
+		"build_status": string(build.Status),
+		"build_time":   build.CreatedAt,
+	}, nil
+}
+
+func (s *DeployService) GetPodStatus(agentID uint) (map[string]interface{}, error) {
+	dep, err := s.agentSvc.GetLatestDeployment(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("no deployment found for agent %d", agentID)
+	}
+
+	if dep.Status != model.DeployRunning {
+		return map[string]interface{}{
+			"sandbox_name": dep.SandboxName,
+			"pod_status":   "not_running",
+			"ready":        false,
+			"message":      fmt.Sprintf("deployment status: %s", dep.Status),
+		}, nil
+	}
+
+	jsonStr, err := s.sandbox.GetPodStatusJSON(dep.SandboxName)
+	if err != nil {
+		return map[string]interface{}{
+			"sandbox_name": dep.SandboxName,
+			"pod_status":   "error",
+			"ready":        false,
+			"error":        err.Error(),
+		}, nil
+	}
+
+	var podData map[string]interface{}
+	json.Unmarshal([]byte(jsonStr), &podData)
+	podData["sandbox_name"] = dep.SandboxName
+	return podData, nil
+}
+
+func (s *DeployService) ChatWithAgent(agentID uint, message string, history []map[string]string) (map[string]interface{}, error) {
+	dep, err := s.agentSvc.GetLatestDeployment(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("no deployment found for agent %d", agentID)
+	}
+
+	if dep.Status != model.DeployRunning {
+		return nil, fmt.Errorf("agent is not running (status: %s)", dep.Status)
+	}
+
+	reqBody := map[string]interface{}{
+		"message": message,
+		"history":  history,
+	}
+	bodyJSON, _ := json.Marshal(reqBody)
+
+	startTime := time.Now()
+	cmd := exec.Command("kubectl", "exec", "-n", "default", dep.SandboxName, "--",
+		"curl", "-s", "-m", "120", "-X", "POST", "http://localhost:8000/chat",
+		"-H", "Content-Type: application/json",
+		"-d", string(bodyJSON))
+	out, err := cmd.CombinedOutput()
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	if err != nil {
+		return map[string]interface{}{
+			"success":    false,
+			"error":      fmt.Sprintf("agent unreachable: %s, output: %s", err.Error(), string(out)),
+			"latency_ms": latencyMs,
+		}, nil
+	}
+
+	var agentResp map[string]interface{}
+	if err2 := json.Unmarshal(out, &agentResp); err2 != nil {
+		return map[string]interface{}{
+			"success":    false,
+			"error":      fmt.Sprintf("parse agent response: %s, raw: %s", err2.Error(), string(out)),
+			"latency_ms": latencyMs,
+		}, nil
+	}
+
+	agentResp["latency_ms"] = latencyMs
+	return agentResp, nil
 }
