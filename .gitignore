@@ -1,0 +1,59 @@
+# Agent Manager .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+codegen/venv/
+codegen/test/output/
+
+# Go
+backend/vendor/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Kind / K8s
+sandbox/manifest.yaml
+sandbox/extensions.yaml
+docs/kind-config.yaml
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# Secrets (keep API keys out of repo)
+!codegen/schema/agent_config.json

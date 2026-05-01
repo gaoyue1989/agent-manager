@@ -1,0 +1,12 @@
+{
+  "name": "customer-service-agent",
+  "description": "智能客服助手，帮助用户解答产品问题",
+  "model": "qwen3.6-plus",
+  "model_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "api_key": "sk-0440b76852944f019bb142a715bc2cab",
+  "system_prompt": "你是一个友好的智能客服助手。你应该：\n1. 热情、耐心地回应用户问题\n2. 提供准确、有用的信息\n3. 如果遇到无法解答的问题，诚实地告知用户\n4. 使用中文与用户交流",
+  "tools": [],
+  "sub_agents": [],
+  "memory": true,
+  "max_iterations": 50
+}

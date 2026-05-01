@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentConfig",
+  "type": "object",
+  "required": ["name", "description", "model", "system_prompt"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Agent 名称"
+    },
+    "description": {
+      "type": "string",
+      "description": "Agent 描述"
+    },
+    "model": {
+      "type": "string",
+      "description": "LLM 模型 ID",
+      "default": "qwen3.6-plus"
+    },
+    "model_endpoint": {
+      "type": "string",
+      "description": "LLM API 端点",
+      "default": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "api_key": {
+      "type": "string",
+      "description": "LLM API Key",
+      "default": "sk-0440b76852944f019bb142a715bc2cab"
+    },
+    "system_prompt": {
+      "type": "string",
+      "description": "系统提示词"
+    },
+    "tools": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "工具列表",
+      "default": []
+    },
+    "sub_agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "system_prompt": {"type": "string"}
+        }
+      },
+      "default": []
+    },
+    "memory": {
+      "type": "boolean",
+      "description": "是否启用记忆",
+      "default": true
+    },
+    "max_iterations": {
+      "type": "integer",
+      "description": "最大迭代次数",
+      "default": 50
+    }
+  }
+}
