@@ -17,8 +17,10 @@ backend/vendor/
 *.dll
 *.so
 *.dylib
+backend/server
 
 # Node
+node_modules/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
@@ -57,3 +59,10 @@ temp/
 
 # Secrets (keep API keys out of repo)
 !codegen/schema/agent_config.json
+
+# Screenshots
+docs/screenshots/
+*.png
+
+# Test scripts
+screenshot.js
