@@ -318,3 +318,21 @@ func chatViaHTTP(endpointURL string, bodyJSON []byte, startTime time.Time) (map[
 	agentResp["latency_ms"] = latencyMs
 	return agentResp, nil
 }
+
+func parseLLMConfig(configJSON string) (apiKey, model, endpoint string) {
+	var cfg struct {
+		APIKey       string `json:"api_key"`
+		Model        string `json:"model"`
+		ModelEndpoint string `json:"model_endpoint"`
+	}
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return "", "qwen3.6-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	}
+	if cfg.Model == "" {
+		cfg.Model = "qwen3.6-plus"
+	}
+	if cfg.ModelEndpoint == "" {
+		cfg.ModelEndpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+	}
+	return cfg.APIKey, cfg.Model, cfg.ModelEndpoint
+}

@@ -188,7 +188,7 @@ func (s *SandboxClient) GetSandboxStatus(name string) (string, error) {
 
 func (s *SandboxClient) GetPodStatus(sandboxName string) (*PodStatusInfo, error) {
 	jsonpath := `{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.containerStatuses[0].ready}{"|"}{.status.containerStatuses[0].restartCount}{"|"}{.metadata.creationTimestamp}{"|"}{.status.podIP}{"|"}{.spec.nodeName}{end}`
-	cmd := exec.Command("kubectl", "get", "pods", "-n", s.namespace, "-l", fmt.Sprintf("agents.x-k8s.io/sandbox-name-hash"),
+	cmd := exec.Command("kubectl", "get", "pods", "-n", s.namespace, "-l", fmt.Sprintf("app=%s", sandboxName),
 		"-o", fmt.Sprintf("jsonpath=%s", jsonpath))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -217,7 +217,7 @@ func (s *SandboxClient) GetPodStatus(sandboxName string) (*PodStatusInfo, error)
 
 func (s *SandboxClient) GetPodStatusJSON(sandboxName string) (string, error) {
 	cmd := exec.Command("kubectl", "get", "pods", "-n", s.namespace, "-l",
-		fmt.Sprintf("agents.x-k8s.io/sandbox-name-hash"), "-o", "json")
+		fmt.Sprintf("app=%s", sandboxName), "-o", "json")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("kubectl get pods json: %s\n%s", err.Error(), string(out))
