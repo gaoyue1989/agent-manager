@@ -17,14 +17,11 @@ backend/vendor/
 *.dll
 *.so
 *.dylib
+backend/bin/
 backend/server
 
-# Node
-node_modules/
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/.turbo/
+# Node (E2E only)
+e2e/node_modules/
 
 # IDE
 .idea/
@@ -61,8 +58,8 @@ temp/
 !codegen/schema/agent_config.json
 
 # Screenshots
-docs/screenshots/
+e2e/screenshots/
 *.png
 
-# Test scripts
-screenshot.js
+# E2E test scripts
+e2e/screenshot.js

@@ -39,6 +39,26 @@ func (b *Builder) Build(localTag, remoteTag, prefix string, storage *minio.Stora
 		}
 	}
 
+	skillsPrefix := prefix + "/skills/"
+	skillsFiles, err := storage.ListFiles(skillsPrefix)
+	if err == nil && len(skillsFiles) > 0 {
+		skillsDir := filepath.Join(tmpDir, "skills")
+		os.MkdirAll(skillsDir, 0755)
+		for _, objName := range skillsFiles {
+			relPath := strings.TrimPrefix(objName, skillsPrefix)
+			if relPath == "" {
+				continue
+			}
+			dstPath := filepath.Join(skillsDir, relPath)
+			os.MkdirAll(filepath.Dir(dstPath), 0755)
+			data, err := storage.GetFile(objName)
+			if err != nil {
+				continue
+			}
+			os.WriteFile(dstPath, []byte(data), 0644)
+		}
+	}
+
 	loginCmd := exec.Command("docker", "login", "-u", b.username, "--password-stdin")
 	loginCmd.Stdin = strings.NewReader(b.password)
 	if out, err := loginCmd.CombinedOutput(); err != nil {

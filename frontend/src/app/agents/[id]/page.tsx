@@ -20,7 +20,6 @@ export default function AgentDetail() {
   const [actionLoading, setActionLoading] = useState('');
   const [podLoading, setPodLoading] = useState(false);
 
-  // Chat state
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState<{ role: string; content: string }[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
@@ -86,6 +85,11 @@ export default function AgentDetail() {
   const isPublished = agent.status === 'published';
   const hasImage = agent.status === 'built' || agent.status === 'deployed' || isPublished || agent.status === 'unpublished';
 
+  const enabledTools: string[] = cfg.enabled_tools || [];
+  const excludedTools: string[] = cfg.excluded_tools || [];
+  const mcpConfig = cfg.mcp_config;
+  const endpointURL = deployments.length > 0 ? (deployments[0].endpoint_url || '') : '';
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
@@ -100,6 +104,9 @@ export default function AgentDetail() {
             <div><span className="text-gray-500">描述:</span> {agent.description || '-'}</div>
             <div><span className="text-gray-500">模型:</span> {cfg.model}</div>
             <div><span className="text-gray-500">提示词:</span> {cfg.system_prompt?.slice(0, 80)}...</div>
+            {endpointURL && (
+              <div><span className="text-gray-500">对外地址:</span> <code className="bg-green-50 text-green-700 px-2 py-0.5 rounded text-xs">{endpointURL}</code></div>
+            )}
           </div>
         </div>
         <div className="bg-white rounded-lg shadow p-6">
@@ -130,6 +137,43 @@ export default function AgentDetail() {
           </div>
         </div>
       </div>
+
+      {(enabledTools.length > 0 || excludedTools.length > 0 || mcpConfig) && (
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <h2 className="font-semibold mb-3">Agent 配置详情</h2>
+          <div className="space-y-3">
+            {enabledTools.length > 0 && (
+              <div>
+                <span className="text-xs font-medium text-gray-500">启用工具 ({enabledTools.length}):</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {enabledTools.map(t => (
+                    <span key={t} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-mono">{t}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {excludedTools.length > 0 && (
+              <div>
+                <span className="text-xs font-medium text-gray-500">排除工具:</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {excludedTools.map(t => (
+                    <span key={t} className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs font-mono">{t}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {mcpConfig && mcpConfig.url && (
+              <div>
+                <span className="text-xs font-medium text-gray-500">MCP 配置:</span>
+                <div className="text-xs mt-1">
+                  <code className="bg-gray-100 px-2 py-0.5 rounded">{mcpConfig.url}</code>
+                  <span className="text-gray-400 ml-2">({mcpConfig.transport})</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {hasImage && imageInfo?.image_tag && (
         <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -165,11 +209,11 @@ export default function AgentDetail() {
               <div><span className="text-gray-500 w-24 inline-block">就绪:</span> {podStatus.ready === 'true' || podStatus.ready === true ? <span className="text-green-600">Ready</span> : <span className="text-red-600">Not Ready</span>}</div>
               <div><span className="text-gray-500 w-24 inline-block">重启次数:</span> {podStatus.restarts ?? '-'}</div>
               <div><span className="text-gray-500 w-24 inline-block">Pod IP:</span> <span className="font-mono">{podStatus.pod_ip || '-'}</span></div>
+              {endpointURL && <div><span className="text-gray-500 w-24 inline-block">对外地址:</span> <code className="bg-green-50 text-green-700 px-2 py-0.5 rounded text-xs">{endpointURL}</code></div>}
             </div>
           ) : (
             <p className="text-gray-400 text-sm">点击"刷新"获取 Pod 状态</p>
           )}
-          <p className="text-xs text-gray-400 mt-3">提示：点击"刷新"按钮可获取最新 Pod 运行状态</p>
         </div>
       )}
 
@@ -221,6 +265,7 @@ export default function AgentDetail() {
               <th className="px-3 py-2 text-left">版本</th>
               <th className="px-3 py-2 text-left">Sandbox</th>
               <th className="px-3 py-2 text-left">状态</th>
+              <th className="px-3 py-2 text-left">对外地址</th>
               <th className="px-3 py-2 text-left">时间</th>
             </tr></thead>
             <tbody>{deployments.map(d => (
@@ -228,6 +273,7 @@ export default function AgentDetail() {
                 <td className="px-3 py-2">v{d.version}</td>
                 <td className="px-3 py-2 font-mono text-xs">{d.sandbox_name}</td>
                 <td className="px-3 py-2">{d.status}</td>
+                <td className="px-3 py-2 font-mono text-xs">{d.endpoint_url || '-'}</td>
                 <td className="px-3 py-2 text-gray-500">{new Date(d.created_at).toLocaleString('zh')}</td>
               </tr>
             ))}</tbody>

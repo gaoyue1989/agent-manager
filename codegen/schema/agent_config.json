@@ -25,17 +25,36 @@
     "api_key": {
       "type": "string",
       "description": "LLM API Key",
-      "default": "sk-0440b76852944f019bb142a715bc2cab"
+      "default": "sk-****"
     },
     "system_prompt": {
       "type": "string",
       "description": "系统提示词"
     },
-    "tools": {
+    "enabled_tools": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "工具列表",
+      "description": "启用的 DeepAgents 内置工具列表",
+      "default": ["write_todos", "ls", "read_file", "write_file", "edit_file", "glob", "grep", "task"]
+    },
+    "excluded_tools": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "禁用的工具列表，优先级高于 enabled_tools",
       "default": []
+    },
+    "mcp_config": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "MCP Server 地址"},
+        "transport": {"type": "string", "enum": ["sse", "stdio"], "description": "传输协议", "default": "sse"},
+        "headers": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "自定义请求头"
+        }
+      },
+      "description": "MCP (Model Context Protocol) 配置"
     },
     "sub_agents": {
       "type": "array",
@@ -47,7 +66,8 @@
           "system_prompt": {"type": "string"}
         }
       },
-      "default": []
+      "default": [],
+      "description": "子 Agent 定义"
     },
     "memory": {
       "type": "boolean",
@@ -58,6 +78,26 @@
       "type": "integer",
       "description": "最大迭代次数",
       "default": 50
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "description": "Skill 名称"},
+          "description": {"type": "string", "description": "Skill 描述"},
+          "path": {"type": "string", "description": "后端存储路径"},
+          "license": {"type": "string", "description": "许可证"},
+          "compatibility": {"type": "string", "description": "兼容性"},
+          "allowed_tools": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "推荐工具"
+          }
+        }
+      },
+      "description": "上传的 Skill 元数据列表",
+      "default": []
     }
   }
 }

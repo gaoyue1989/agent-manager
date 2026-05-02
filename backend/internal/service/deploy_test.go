@@ -11,22 +11,18 @@ import (
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	dsn := "agent_manager:Agent@Manager2026@tcp(127.0.0.1:3307)/agent_manager_test?charset=utf8mb4&parseTime=True&loc=Local"
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true,
+	})
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
-	db.Exec("DROP TABLE IF EXISTS deployments")
-	db.Exec("DROP TABLE IF EXISTS image_builds")
-	db.Exec("DROP TABLE IF EXISTS code_generations")
-	db.Exec("DROP TABLE IF EXISTS agents")
+	db.Migrator().DropTable(&model.Deployment{}, &model.ImageBuild{}, &model.CodeGeneration{}, &model.Agent{})
 	if err := db.AutoMigrate(&model.Agent{}, &model.CodeGeneration{}, &model.ImageBuild{}, &model.Deployment{}); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 	t.Cleanup(func() {
-		db.Exec("DROP TABLE IF EXISTS deployments")
-		db.Exec("DROP TABLE IF EXISTS image_builds")
-		db.Exec("DROP TABLE IF EXISTS code_generations")
-		db.Exec("DROP TABLE IF EXISTS agents")
+		db.Migrator().DropTable(&model.Deployment{}, &model.ImageBuild{}, &model.CodeGeneration{}, &model.Agent{})
 	})
 	return db
 }

@@ -1,0 +1,9 @@
+{
+  "name": "e2e-tests",
+  "scripts": {
+    "test": "node e2e-test.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.42.0"
+  }
+}

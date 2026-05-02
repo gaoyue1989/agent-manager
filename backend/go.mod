@@ -1,11 +1,14 @@
 module agent-manager/backend
 
-go 1.23.0
+go 1.22.0
+
+toolchain go1.22.2
 
 require (
 	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/minio/minio-go/v7 v7.0.73
+	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.7
 	gorm.io/gorm v1.30.0
 )
@@ -46,6 +49,5 @@ require (
 	golang.org/x/sys v0.21.0 // indirect
 	golang.org/x/text v0.20.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/sqlite v1.6.0 // indirect
 )

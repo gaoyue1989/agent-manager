@@ -59,3 +59,30 @@ func (s *Storage) GetFile(objectName string) (string, error) {
 	}
 	return string(data), nil
 }
+
+func (s *Storage) ListFiles(prefix string) ([]string, error) {
+	var result []string
+	for obj := range s.client.ListObjects(context.Background(), s.bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			return result, obj.Err
+		}
+		result = append(result, obj.Key)
+	}
+	return result, nil
+}
+
+func (s *Storage) CheckFileExists(objectName string) bool {
+	_, err := s.client.StatObject(context.Background(), s.bucket, objectName, minio.StatObjectOptions{})
+	return err == nil
+}
+
+func (s *Storage) PutFileString(objectName string, content string) (string, error) {
+	return s.PutFile(objectName, []byte(content))
+}
+
+func (s *Storage) DeleteFile(objectName string) error {
+	return s.client.RemoveObject(context.Background(), s.bucket, objectName, minio.RemoveObjectOptions{})
+}

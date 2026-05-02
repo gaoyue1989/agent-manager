@@ -48,7 +48,7 @@ Response: {"success":true,"data":{"response":"1+1等于2。"},"error":null}
 |------|-----|
 | 模型 | qwen3.6-plus |
 | 接口地址 | https://dashscope.aliyuncs.com/compatible-mode/v1 |
-| API Key | sk-0440b76852944f019bb142a715bc2cab |
+| API Key | sk-**** (通过环境变量 LLM_API_KEY 配置) |
 | 代理 | http://172.20.0.1:7890 |
 
 ## 5. 结论

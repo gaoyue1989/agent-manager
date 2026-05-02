@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -22,10 +23,15 @@ type DeployService struct {
 	sandbox  *k8s.SandboxClient
 	registry string
 	agentSvc *AgentService
+	ingressEnabled bool
 }
 
 func NewDeployService(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService) *DeployService {
-	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc}
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: true}
+}
+
+func NewDeployServiceWithIngress(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool) *DeployService {
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled}
 }
 
 func (s *DeployService) BuildImage(agentID uint) (*model.ImageBuild, error) {
@@ -81,6 +87,12 @@ func (s *DeployService) Deploy(agentID uint) (*model.Deployment, error) {
 	}
 	s.db.Create(dep)
 
+	if err := s.sandbox.CreateService(sandboxName); err != nil {
+		dep.Status = model.DeployFailed
+		s.db.Save(dep)
+		return dep, err
+	}
+
 	now := time.Now()
 	if err := s.sandbox.CreateSandbox(sandboxName, imageTag); err != nil {
 		dep.Status = model.DeployFailed
@@ -105,6 +117,17 @@ func (s *DeployService) Publish(agentID uint) (*model.Deployment, error) {
 	}
 
 	agent, _ := s.agentSvc.GetByID(agentID)
+	sandboxName := fmt.Sprintf("agent-%d", agent.ID)
+
+	endpointURL := ""
+	if s.ingressEnabled {
+		endpointURL, err = s.sandbox.CreateIngress(sandboxName, agent.ID)
+		if err != nil {
+			log.Println("WARNING: failed to create Ingress:", err)
+		}
+		dep.EndpointURL = endpointURL
+	}
+
 	agent.Status = model.StatusPublished
 	s.db.Save(agent)
 
@@ -120,13 +143,26 @@ func (s *DeployService) Unpublish(agentID uint) (*model.Deployment, error) {
 		return nil, err
 	}
 
-	if err := s.sandbox.DeleteSandbox(dep.SandboxName); err != nil {
+	sandboxName := dep.SandboxName
+
+	if s.ingressEnabled {
+		if err := s.sandbox.DeleteIngress(sandboxName); err != nil {
+			log.Println("WARNING: failed to delete Ingress:", err)
+		}
+	}
+
+	if err := s.sandbox.DeleteService(sandboxName); err != nil {
+		log.Println("WARNING: failed to delete Service:", err)
+	}
+
+	if err := s.sandbox.DeleteSandbox(sandboxName); err != nil {
 		return dep, err
 	}
 
 	now := time.Now()
 	dep.UnpublishedAt = &now
 	dep.Status = model.DeployStopped
+	dep.EndpointURL = ""
 	s.db.Save(dep)
 
 	agent, _ := s.agentSvc.GetByID(agentID)
@@ -211,6 +247,15 @@ func (s *DeployService) ChatWithAgent(agentID uint, message string, history []ma
 	bodyJSON, _ := json.Marshal(reqBody)
 
 	startTime := time.Now()
+
+	if s.ingressEnabled && dep.EndpointURL != "" {
+		resp, err := chatViaHTTP(dep.EndpointURL, bodyJSON, startTime)
+		if err == nil {
+			return resp, nil
+		}
+		log.Printf("Ingress chat failed, falling back to kubectl exec: %v", err)
+	}
+
 	cmd := exec.Command("kubectl", "exec", "-n", "default", dep.SandboxName, "--",
 		"curl", "-s", "-m", "120", "-X", "POST", "http://localhost:8000/chat",
 		"-H", "Content-Type: application/json",
@@ -235,6 +280,26 @@ func (s *DeployService) ChatWithAgent(agentID uint, message string, history []ma
 		}, nil
 	}
 
+	agentResp["latency_ms"] = latencyMs
+	return agentResp, nil
+}
+
+func chatViaHTTP(endpointURL string, bodyJSON []byte, startTime time.Time) (map[string]interface{}, error) {
+	chatURL := fmt.Sprintf("%s/chat", endpointURL)
+	cmd := exec.Command("curl", "-s", "-m", "120", "-X", "POST", chatURL,
+		"-H", "Content-Type: application/json",
+		"-d", string(bodyJSON))
+	out, err := cmd.CombinedOutput()
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	if err != nil {
+		return nil, fmt.Errorf("ingress chat failed: %w", err)
+	}
+
+	var agentResp map[string]interface{}
+	if err := json.Unmarshal(out, &agentResp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
 	agentResp["latency_ms"] = latencyMs
 	return agentResp, nil
 }

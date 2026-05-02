@@ -8,21 +8,35 @@ import (
 )
 
 type PodStatusInfo struct {
-	PodName   string `json:"pod_name"`
-	Status    string `json:"status"`
-	Ready     string `json:"ready"`
-	Restarts  string `json:"restarts"`
-	Age       string `json:"age"`
-	IP        string `json:"pod_ip"`
-	Node      string `json:"node"`
+	PodName  string `json:"pod_name"`
+	Status   string `json:"status"`
+	Ready    string `json:"ready"`
+	Restarts string `json:"restarts"`
+	Age      string `json:"age"`
+	IP       string `json:"pod_ip"`
+	Node     string `json:"node"`
 }
 
 type SandboxClient struct {
-	namespace string
+	namespace    string
+	ingressHost  string
+	ingressEnabled bool
 }
 
 func NewSandboxClient() (*SandboxClient, error) {
-	return &SandboxClient{namespace: "default"}, nil
+	return &SandboxClient{
+		namespace:      "default",
+		ingressHost:    "localhost",
+		ingressEnabled: true,
+	}, nil
+}
+
+func NewSandboxClientWithIngress(ingressHost string, ingressEnabled bool) (*SandboxClient, error) {
+	return &SandboxClient{
+		namespace:      "default",
+		ingressHost:    ingressHost,
+		ingressEnabled: ingressEnabled,
+	}, nil
 }
 
 func (s *SandboxClient) CreateSandbox(name, image string) error {
@@ -31,8 +45,13 @@ kind: Sandbox
 metadata:
   name: %s
   namespace: %s
+  labels:
+    app: %s
 spec:
   podTemplate:
+    metadata:
+      labels:
+        app: %s
     spec:
       containers:
       - name: agent
@@ -41,12 +60,25 @@ spec:
         - containerPort: 8000
         env:
         - name: LLM_API_KEY
-          value: "sk-0440b76852944f019bb142a715bc2cab"
+          valueFrom:
+            secretKeyRef:
+              name: agent-secrets
+              key: llm-api-key
+        - name: LLM_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: agent-secrets
+              key: llm-model
+        - name: LLM_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: agent-secrets
+              key: llm-endpoint
         - name: HTTP_PROXY
           value: "http://172.20.0.1:7890"
         - name: HTTPS_PROXY
           value: "http://172.20.0.1:7890"
-`, name, s.namespace, image)
+`, name, s.namespace, name, name, image)
 
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(yaml)
@@ -62,6 +94,94 @@ func (s *SandboxClient) DeleteSandbox(name string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("kubectl delete: %s\n%s", err.Error(), string(out))
+	}
+	return nil
+}
+
+func (s *SandboxClient) CreateService(name string) error {
+	svcYaml := fmt.Sprintf(`apiVersion: v1
+kind: Service
+metadata:
+  name: %s-svc
+  namespace: %s
+spec:
+  selector:
+    app: %s
+  ports:
+  - port: 8000
+    targetPort: 8000
+`, name, s.namespace, name)
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(svcYaml)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl apply service: %s\n%s", err.Error(), string(out))
+	}
+	return nil
+}
+
+func (s *SandboxClient) DeleteService(name string) error {
+	svcName := name + "-svc"
+	cmd := exec.Command("kubectl", "delete", "service", svcName, "-n", s.namespace, "--ignore-not-found")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl delete service: %s\n%s", err.Error(), string(out))
+	}
+	return nil
+}
+
+func (s *SandboxClient) CreateIngress(name string, agentID uint) (string, error) {
+	if !s.ingressEnabled {
+		return "", nil
+	}
+
+	ingressName := name + "-ingress"
+	svcName := name + "-svc"
+	path := fmt.Sprintf("/agent/%d", agentID)
+	endpointURL := fmt.Sprintf("http://%s%s", s.ingressHost, path)
+
+	ingressYaml := fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: %s
+  namespace: %s
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+  - http:
+      paths:
+      - path: %s
+        pathType: Prefix
+        backend:
+          service:
+            name: %s
+            port:
+              number: 8000
+`, ingressName, s.namespace, path, svcName)
+
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(ingressYaml)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("kubectl apply ingress: %s\n%s", err.Error(), string(out))
+	}
+	return endpointURL, nil
+}
+
+func (s *SandboxClient) DeleteIngress(name string) error {
+	if !s.ingressEnabled {
+		return nil
+	}
+
+	ingressName := name + "-ingress"
+	cmd := exec.Command("kubectl", "delete", "ingress", ingressName, "-n", s.namespace, "--ignore-not-found")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl delete ingress: %s\n%s", err.Error(), string(out))
 	}
 	return nil
 }
@@ -155,4 +275,15 @@ func (s *SandboxClient) GetPodStatusJSON(sandboxName string) (string, error) {
 	})
 
 	return string(resultJSON), nil
+}
+
+func (s *SandboxClient) GetServiceEndpoint(name string) (string, error) {
+	svcName := name + "-svc"
+	cmd := exec.Command("kubectl", "get", "service", svcName, "-n", s.namespace,
+		"-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("kubectl get service: %s\n%s", err.Error(), string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
 }

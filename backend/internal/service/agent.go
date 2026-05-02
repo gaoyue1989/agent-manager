@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"agent-manager/backend/internal/model"
 	"agent-manager/backend/internal/minio"
@@ -164,4 +165,57 @@ func extractName(configJSON string) string {
 		return name
 	}
 	return "unknown"
+}
+
+func (s *AgentService) SaveSkills(agentID uint, skillsMeta []map[string]interface{}, skillFiles map[string][]byte) ([]map[string]interface{}, error) {
+	prefix := fmt.Sprintf("agents/%d/skills", agentID)
+
+	for zipPath, data := range skillFiles {
+		cleanedPath := strings.TrimPrefix(zipPath, "./")
+		if cleanedPath == "" {
+			continue
+		}
+		objName := fmt.Sprintf("%s/%s", prefix, cleanedPath)
+		if _, err := s.storage.PutFileString(objName, string(data)); err != nil {
+			return nil, fmt.Errorf("store skill file %s: %w", zipPath, err)
+		}
+	}
+
+	for i := range skillsMeta {
+		skillsMeta[i]["storage_prefix"] = prefix
+	}
+
+	metaJSON, _ := json.Marshal(skillsMeta)
+	metaKey := fmt.Sprintf("%s/.metadata.json", prefix)
+	s.storage.PutFileString(metaKey, string(metaJSON))
+
+	return skillsMeta, nil
+}
+
+func (s *AgentService) ListSkills(agentID uint) ([]map[string]interface{}, error) {
+	metaKey := fmt.Sprintf("agents/%d/skills/.metadata.json", agentID)
+	data, err := s.storage.GetFile(metaKey)
+	if err != nil {
+		return []map[string]interface{}{}, nil
+	}
+
+	var skills []map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &skills); err != nil {
+		return []map[string]interface{}{}, nil
+	}
+	return skills, nil
+}
+
+func (s *AgentService) DeleteSkill(agentID uint, skillName string) error {
+	prefix := fmt.Sprintf("agents/%d/skills/%s", agentID, skillName)
+	files, err := s.storage.ListFiles(prefix)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		s.storage.DeleteFile(file)
+	}
+
+	return nil
 }

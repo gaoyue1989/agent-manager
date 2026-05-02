@@ -1,13 +1,21 @@
 package handler
 
 import (
+	"archive/zip"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"agent-manager/backend/internal/model"
 	"agent-manager/backend/internal/service"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v3"
 )
 
 type AgentHandler struct {
@@ -27,6 +35,10 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 	r.POST("/agents/:id/generate", h.GenerateCode)
 	r.GET("/agents/:id/code", h.GetCode)
 	r.GET("/agents/:id/deployments", h.GetDeployments)
+
+	r.POST("/skills/upload", h.UploadSkills)
+	r.GET("/skills/:agent_id", h.ListSkills)
+	r.DELETE("/skills/:agent_id/:skill_name", h.DeleteSkill)
 }
 
 func (h *AgentHandler) Create(c *gin.Context) {
@@ -41,6 +53,12 @@ func (h *AgentHandler) Create(c *gin.Context) {
 	ct := model.ConfigJSON
 	if req.ConfigType == "yaml" {
 		ct = model.ConfigYAML
+		configJSON, err := yamlToJSON(req.Config)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid yaml: " + err.Error()})
+			return
+		}
+		req.Config = configJSON
 	} else if req.ConfigType == "form" {
 		ct = model.ConfigForm
 	}
@@ -50,6 +68,188 @@ func (h *AgentHandler) Create(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, agent)
+}
+
+func yamlToJSON(yamlStr string) (string, error) {
+	var data interface{}
+	if err := yaml.Unmarshal([]byte(yamlStr), &data); err != nil {
+		return "", err
+	}
+	data = convertYAMLMap(data)
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return "", err
+	}
+	return string(jsonBytes), nil
+}
+
+func convertYAMLMap(in interface{}) interface{} {
+	switch v := in.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{})
+		for k, val := range v {
+			out[k] = convertYAMLMap(val)
+		}
+		return out
+	case []interface{}:
+		for i, val := range v {
+			v[i] = convertYAMLMap(val)
+		}
+		return v
+	default:
+		return v
+	}
+}
+
+type skillMetadata struct {
+	Name          string            `yaml:"name" json:"name"`
+	Description   string            `yaml:"description" json:"description"`
+	License       string            `yaml:"license" json:"license,omitempty"`
+	Compatibility string            `yaml:"compatibility" json:"compatibility,omitempty"`
+	AllowedTools  string            `yaml:"allowed-tools" json:"allowed_tools"`
+	Metadata      map[string]string `yaml:"metadata" json:"metadata,omitempty"`
+}
+
+func (h *AgentHandler) UploadSkills(c *gin.Context) {
+	agentIDStr := c.Query("agent_id")
+	if agentIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id is required"})
+		return
+	}
+	agentID, err := strconv.ParseUint(agentIDStr, 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent_id"})
+		return
+	}
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only .zip files are supported"})
+		return
+	}
+
+	zipData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "read file failed"})
+		return
+	}
+
+	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid zip file: " + err.Error()})
+		return
+	}
+
+	skills := make([]map[string]interface{}, 0)
+	skillFiles := make(map[string][]byte)
+
+	for _, f := range reader.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			continue
+		}
+
+		if strings.HasSuffix(strings.ToUpper(f.Name), "SKILL.MD") {
+			meta := parseSkillMarkdown(data, f.Name)
+			if meta != nil {
+				skills = append(skills, meta)
+			}
+		}
+
+		skillFiles[f.Name] = data
+	}
+
+	if len(skills) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid SKILL.md found in zip"})
+		return
+	}
+
+	storedSkills, err := h.svc.SaveSkills(uint(agentID), skills, skillFiles)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save skills failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"skills": storedSkills})
+}
+
+func parseSkillMarkdown(data []byte, zipPath string) map[string]interface{} {
+	content := string(data)
+	parts := strings.SplitN(content, "---", 3)
+	if len(parts) < 3 {
+		return nil
+	}
+
+	var meta skillMetadata
+	if err := yaml.Unmarshal([]byte(parts[1]), &meta); err != nil {
+		return nil
+	}
+
+	if meta.Name == "" || meta.Description == "" {
+		return nil
+	}
+
+	skillDir := filepath.Dir(zipPath)
+	if strings.HasPrefix(skillDir, "./") {
+		skillDir = skillDir[2:]
+	}
+	if skillDir == "." {
+		skillDir = meta.Name
+	}
+
+	tools := []string{}
+	if meta.AllowedTools != "" {
+		for _, t := range strings.Fields(meta.AllowedTools) {
+			t = strings.TrimSuffix(t, ",")
+			if t != "" {
+				tools = append(tools, t)
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"name":          meta.Name,
+		"description":   meta.Description,
+		"path":          fmt.Sprintf("skills/%s", skillDir),
+		"license":       meta.License,
+		"compatibility": meta.Compatibility,
+		"allowed_tools": tools,
+		"metadata":      meta.Metadata,
+	}
+}
+
+func (h *AgentHandler) ListSkills(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("agent_id"), 10, 32)
+	skills, err := h.svc.ListSkills(uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"skills": skills})
+}
+
+func (h *AgentHandler) DeleteSkill(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("agent_id"), 10, 32)
+	skillName := c.Param("skill_name")
+	if err := h.svc.DeleteSkill(uint(id), skillName); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
 }
 
 func (h *AgentHandler) List(c *gin.Context) {

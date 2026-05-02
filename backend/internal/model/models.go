@@ -91,7 +91,7 @@ type Deployment struct {
 	Version        int          `json:"version" gorm:"not null"`
 	SandboxName    string       `json:"sandbox_name" gorm:"type:varchar(128)"`
 	SandboxStatus  string       `json:"sandbox_status" gorm:"type:varchar(64)"`
-	EndpointURL    string       `json:"endpoint_url" gorm:"type:varchar(512)"`
+	EndpointURL    string       `json:"endpoint_url" gorm:"type:varchar(1024)"`
 	Status         DeployStatus `json:"status" gorm:"type:enum('pending','deploying','running','stopped','failed');default:'pending';index"`
 	DeployedAt     *time.Time   `json:"deployed_at"`
 	UnpublishedAt  *time.Time   `json:"unpublished_at"`

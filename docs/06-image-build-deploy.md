@@ -56,7 +56,7 @@ spec:
         - containerPort: 8000
         env:
         - name: LLM_API_KEY
-          value: "sk-0440b76852944f019bb142a715bc2cab"
+          value: "sk-****"
         - name: HTTP_PROXY
           value: "http://172.20.0.1:7890"
         - name: HTTPS_PROXY

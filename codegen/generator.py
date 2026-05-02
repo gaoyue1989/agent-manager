@@ -13,29 +13,37 @@ from pathlib import Path
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 
+DEEPAGENTS_BUILTIN_TOOLS = [
+    {"name": "write_todos", "source": "TodoListMiddleware", "desc": "管理任务清单"},
+    {"name": "ls", "source": "FilesystemMiddleware", "desc": "列出目录内容"},
+    {"name": "read_file", "source": "FilesystemMiddleware", "desc": "读取文件"},
+    {"name": "write_file", "source": "FilesystemMiddleware", "desc": "写入/创建文件"},
+    {"name": "edit_file", "source": "FilesystemMiddleware", "desc": "编辑文件（查找替换）"},
+    {"name": "glob", "source": "FilesystemMiddleware", "desc": "按模式匹配文件"},
+    {"name": "grep", "source": "FilesystemMiddleware", "desc": "搜索文件内容"},
+    {"name": "execute", "source": "FilesystemMiddleware", "desc": "执行 Shell 命令（需 Sandbox 后端）"},
+    {"name": "task", "source": "SubAgentMiddleware", "desc": "调用子 Agent"},
+]
+
 
 def generate_agent_code(config: dict) -> dict:
-    """
-    根据配置生成 DeepAgents 代码文件
-    
-    Args:
-        config: Agent 配置字典
-        
-    Returns:
-        dict: {"agent.py": str, "Dockerfile": str, "requirements.txt": str}
-    """
+    """根据配置生成 DeepAgents 代码文件"""
     name = config["name"]
     description = config.get("description", "")
     model = config.get("model", "qwen3.6-plus")
     endpoint = config.get("model_endpoint", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    api_key = config.get("api_key", "")
+    api_key = config.get("api_key", os.environ.get("LLM_API_KEY", "sk-****"))
     system_prompt = config.get("system_prompt", "You are a helpful AI assistant.")
-    tools = config.get("tools", [])
+    enabled_tools = config.get("enabled_tools", [t["name"] for t in DEEPAGENTS_BUILTIN_TOOLS])
+    excluded_tools = config.get("excluded_tools", [])
+    mcp_config = config.get("mcp_config")
     sub_agents = config.get("sub_agents", [])
     enable_memory = config.get("memory", True)
     max_iterations = config.get("max_iterations", 50)
+    skills = config.get("skills", [])
+    has_skills = bool(skills)
+    has_mcp = bool(mcp_config and mcp_config.get("url"))
 
-    # 生成 Agent 代码
     agent_py = _render_agent_py(
         name=name,
         description=description,
@@ -43,23 +51,97 @@ def generate_agent_code(config: dict) -> dict:
         endpoint=endpoint,
         api_key=api_key,
         system_prompt=system_prompt,
-        tools=tools,
+        enabled_tools=enabled_tools,
+        excluded_tools=excluded_tools,
+        mcp_config=mcp_config,
         sub_agents=sub_agents,
         enable_memory=enable_memory,
         max_iterations=max_iterations,
+        has_skills=has_skills,
+        skills=skills,
+        has_mcp=has_mcp,
     )
 
-    # 生成 Dockerfile
-    dockerfile = _render_dockerfile(name=name)
+    dockerfile = _render_dockerfile(
+        name=name,
+        has_skills=has_skills,
+    )
 
-    # 生成 requirements.txt
-    requirements = _render_requirements()
+    requirements = _render_requirements(has_mcp=has_mcp)
 
-    return {
+    result = {
         "agent.py": agent_py,
         "Dockerfile": dockerfile,
         "requirements.txt": requirements,
     }
+
+    if has_skills:
+        result["skills/"] = None
+
+    return result
+
+
+def _render_mcp_section(mcp_config: dict | None) -> str:
+    if not mcp_config or not mcp_config.get("url"):
+        return "", ""
+
+    url = mcp_config.get("url", "")
+    transport = mcp_config.get("transport", "sse")
+    headers = mcp_config.get("headers", {})
+
+    headers_str = json.dumps(headers, indent=4)
+
+    init_code = f"""
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+mcp_client = MultiServerMCPClient({{
+    "mcp_server": {{
+        "url": "{url}",
+        "transport": "{transport}",
+        "headers": {headers_str},
+    }}
+}})
+
+async def get_mcp_tools():
+    tools = await mcp_client.get_tools()
+    return tools
+"""
+
+    health_code = """
+@app.get("/mcp/health")
+async def mcp_health():
+    try:
+        await mcp_client.get_tools()
+        return {"status": "healthy", "mcp_server": MCP_CONFIG["url"]}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+"""
+
+    return init_code, health_code
+
+
+def _render_tools_config(enabled_tools: list, excluded_tools: list) -> str:
+    tools_list_str = json.dumps(enabled_tools, ensure_ascii=False)
+    excluded_list_str = json.dumps(excluded_tools, ensure_ascii=False)
+    return f"""ENABLED_TOOLS = {tools_list_str}
+EXCLUDED_TOOLS = {excluded_list_str}"""
+
+
+def _render_skills_config(skills: list, has_skills: bool) -> str:
+    if not has_skills:
+        return """SKILLS_ENABLED = False
+SKILLS_SOURCES = []"""
+
+    sources = ["/skills/"]
+    sources_str = json.dumps(sources)
+    skills_meta = json.dumps([{
+        "name": s.get("name", ""),
+        "description": s.get("description", ""),
+    } for s in skills], ensure_ascii=False, indent=4)
+
+    return f"""SKILLS_ENABLED = True
+SKILLS_SOURCES = {sources_str}
+SKILLS_METADATA = {skills_meta}"""
 
 
 def _render_agent_py(
@@ -69,29 +151,35 @@ def _render_agent_py(
     endpoint: str,
     api_key: str,
     system_prompt: str,
-    tools: list,
+    enabled_tools: list,
+    excluded_tools: list,
+    mcp_config: dict | None,
     sub_agents: list,
     enable_memory: bool,
     max_iterations: int,
+    has_skills: bool,
+    skills: list,
+    has_mcp: bool,
 ) -> str:
-    tools_str = json.dumps(tools, ensure_ascii=False)
+    mcp_init, mcp_health = _render_mcp_section(mcp_config)
+    tools_config = _render_tools_config(enabled_tools, excluded_tools)
+    skills_config = _render_skills_config(skills, has_skills)
     sub_agents_str = json.dumps(sub_agents, ensure_ascii=False)
 
-    return f'''#!/usr/bin/env python3
+    imports = "import os\nfrom fastapi import FastAPI, HTTPException\nfrom fastapi.middleware.cors import CORSMiddleware\nfrom pydantic import BaseModel\nimport uvicorn\nfrom langchain.chat_models import init_chat_model\nfrom deepagents import create_deep_agent"
+    if has_skills:
+        imports += "\nfrom deepagents.backends.filesystem import FilesystemBackend"
+    if has_mcp:
+        imports += mcp_init
+
+    header = f'''#!/usr/bin/env python3
 """
 Agent: {name}
 Description: {description}
 Generated by Agent Manager
 """
 
-import os
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import uvicorn
-from langchain.chat_models import init_chat_model
-from deepagents import create_deep_agent
-
+{imports}
 # ============================================================
 # Configuration
 # ============================================================
@@ -99,10 +187,11 @@ MODEL_NAME = "{model}"
 MODEL_ENDPOINT = "{endpoint}"
 API_KEY = os.environ.get("LLM_API_KEY", "{api_key}")
 SYSTEM_PROMPT = """{system_prompt}"""
-TOOLS = {tools_str}
+{tools_config}
 SUB_AGENTS = {sub_agents_str}
 ENABLE_MEMORY = {enable_memory}
 MAX_ITERATIONS = {max_iterations}
+{skills_config}
 
 # ============================================================
 # Initialize Model and Agent
@@ -112,13 +201,47 @@ model = init_chat_model(
     model_provider="openai",
     openai_api_key=API_KEY,
     openai_api_base=MODEL_ENDPOINT,
-)
+)'''
+
+    # Backend setup
+    body = ""
+    if has_skills:
+        body += '\n\nbackend = FilesystemBackend(root_dir="/skills")'
+
+    # Tools setup with MCP
+    if has_mcp:
+        body += f"""
+
+TOOLS = []
+
+import asyncio
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+mcp_tools = loop.run_until_complete(get_mcp_tools())
+all_tools = TOOLS + mcp_tools
+loop.close()
 
 agent = create_deep_agent(
     model=model,
     system_prompt=SYSTEM_PROMPT,
-)
+    tools=all_tools,
+    {"skills=SKILLS_SOURCES," if has_skills else ""}subagents=SUB_AGENTS if SUB_AGENTS else None,
+)"""
+    else:
+        body += f"""
 
+TOOLS = []
+all_tools = TOOLS
+
+agent = create_deep_agent(
+    model=model,
+    system_prompt=SYSTEM_PROMPT,
+    tools=all_tools if all_tools else None,
+    {"skills=SKILLS_SOURCES," if has_skills else ""}subagents=SUB_AGENTS if SUB_AGENTS else None,
+)"""
+
+    # FastAPI app
+    fastapi_code = f'''
 # ============================================================
 # FastAPI Application
 # ============================================================
@@ -152,6 +275,20 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 async def health_check():
     return {{"status": "healthy", "agent": "{name}"}}
+'''
+
+    if has_mcp:
+        fastapi_code += mcp_health
+
+    fastapi_code += f'''
+@app.get("/tools")
+async def list_tools():
+    return {{
+        "enabled_tools": ENABLED_TOOLS,
+        "excluded_tools": EXCLUDED_TOOLS,
+        "skills_enabled": SKILLS_ENABLED,
+        "mcp_enabled": {str(has_mcp).lower()},
+    }}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -185,6 +322,9 @@ async def root():
         "agent": "{name}",
         "description": "{description}",
         "model": MODEL_NAME,
+        "enabled_tools": ENABLED_TOOLS,
+        "skills": SKILLS_METADATA if SKILLS_ENABLED else [],
+        "mcp": {str(has_mcp).lower()},
         "endpoint": "/chat",
         "health": "/health",
     }}
@@ -194,8 +334,14 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 '''
 
+    return header + body + fastapi_code
 
-def _render_dockerfile(name: str) -> str:
+
+def _render_dockerfile(name: str, has_skills: bool = False) -> str:
+    skills_copy = ""
+    if has_skills:
+        skills_copy = "\nCOPY skills/ /skills/"
+
     return f'''FROM python:3.12-slim
 
 WORKDIR /app
@@ -208,6 +354,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py .
+{skills_copy}
 
 EXPOSE 8000
 
@@ -220,18 +367,20 @@ CMD ["python", "-u", "agent.py"]
 '''
 
 
-def _render_requirements() -> str:
-    return '''deepagents>=0.5.0
+def _render_requirements(has_mcp: bool = False) -> str:
+    deps = '''deepagents>=0.5.0
 langchain>=1.0.0
 langchain-openai>=1.0.0
 fastapi>=0.100.0
 uvicorn>=0.30.0
 pydantic>=2.0.0
 '''
+    if has_mcp:
+        deps += 'langchain-mcp-adapters>=0.1.0\n'
+    return deps
 
 
 def validate_config(config: dict) -> list[str]:
-    """Validate config against schema, return list of errors"""
     errors = []
     required = ["name", "description", "model", "system_prompt"]
     for field in required:
@@ -243,7 +392,6 @@ def validate_config(config: dict) -> list[str]:
 
 
 def main():
-    """CLI entry point"""
     if len(sys.argv) < 2:
         print("Usage: python generator.py <config.json> [output_dir]")
         print("   or: echo '{{...}}' | python generator.py --stdin [output_dir]")
@@ -268,10 +416,14 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
     for filename, content in result.items():
-        filepath = os.path.join(output_dir, filename)
-        with open(filepath, "w") as f:
-            f.write(content)
-        print(f"Generated: {filepath}")
+        if filename.endswith("/"):
+            skill_dir = os.path.join(output_dir, filename)
+            os.makedirs(skill_dir, exist_ok=True)
+        else:
+            filepath = os.path.join(output_dir, filename)
+            with open(filepath, "w") as f:
+                f.write(content)
+            print(f"Generated: {filepath}")
 
 
 if __name__ == "__main__":

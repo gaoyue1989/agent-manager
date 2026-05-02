@@ -37,7 +37,7 @@ func main() {
 
 	cgRunner := codegen.NewRunner(cfg.CodeGenScript, cfg.CodeGenPython, storage)
 
-	sandbox, err := k8s.NewSandboxClient()
+	sandbox, err := k8s.NewSandboxClientWithIngress(cfg.IngressHost, cfg.IngressEnabled)
 	if err != nil {
 		log.Printf("WARNING: failed to init k8s sandbox client: %v", err)
 	}
@@ -48,7 +48,7 @@ func main() {
 	}
 
 	agentSvc := service.NewAgentService(db, storage, cgRunner)
-	deploySvc := service.NewDeployService(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc)
+	deploySvc := service.NewDeployServiceWithIngress(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled)
 
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{

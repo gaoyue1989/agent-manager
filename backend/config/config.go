@@ -3,8 +3,8 @@ package config
 import "os"
 
 type Config struct {
-	ServerPort  string
-	MySQLDSN    string
+	ServerPort     string
+	MySQLDSN       string
 	MinIOEndpoint  string
 	MinIOAccessKey string
 	MinIOSecretKey string
@@ -16,6 +16,8 @@ type Config struct {
 	LLMModel       string
 	LLMEndpoint    string
 	LLMAPIKey      string
+	IngressHost    string
+	IngressEnabled bool
 }
 
 func Load() *Config {
@@ -28,11 +30,13 @@ func Load() *Config {
 		MinIOBucket:    getEnv("MINIO_BUCKET", "agent-manager"),
 		KubeConfig:     getEnv("KUBE_CONFIG", ""),
 		LocalRegistry:  getEnv("LOCAL_REGISTRY", "172.20.0.1:5001"),
-		CodeGenScript:  getEnv("CODEGEN_SCRIPT", "../codegen/generator.py"),
-		CodeGenPython:  getEnv("CODEGEN_PYTHON", "../codegen/venv/bin/python3"),
+		CodeGenScript:  getEnv("CODEGEN_SCRIPT", "./codegen/generator.py"),
+		CodeGenPython:  getEnv("CODEGEN_PYTHON", "./codegen/venv/bin/python3"),
 		LLMModel:       getEnv("LLM_MODEL", "qwen3.6-plus"),
 		LLMEndpoint:    getEnv("LLM_ENDPOINT", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-		LLMAPIKey:      getEnv("LLM_API_KEY", "sk-0440b76852944f019bb142a715bc2cab"),
+		LLMAPIKey:      getEnv("LLM_API_KEY", "sk-****"),
+		IngressHost:    getEnv("INGRESS_HOST", "localhost"),
+		IngressEnabled: getEnv("INGRESS_ENABLED", "true") == "true",
 	}
 }
 

@@ -1,9 +1,18 @@
-const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://100.66.1.5:8080/api/v1';
+const BASE = process.env.NEXT_PUBLIC_API_URL || '/api/v1';
 
 async function request(path: string, options?: RequestInit) {
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     ...options,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function uploadFile(path: string, formData: FormData) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    body: formData,
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -35,5 +44,15 @@ export const api = {
     podStatus: (id: number) => request(`/agents/${id}/pod-status`),
     chat: (id: number, data: { message: string; history?: { role: string; content: string }[] }) =>
       request(`/agents/${id}/chat`, { method: 'POST', body: JSON.stringify(data) }),
+  },
+  skills: {
+    upload: (agentId: number, file: File) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      return uploadFile(`/skills/upload?agent_id=${agentId}`, formData);
+    },
+    list: (agentId: number) => request(`/skills/${agentId}`),
+    delete: (agentId: number, skillName: string) =>
+      request(`/skills/${agentId}/${skillName}`, { method: 'DELETE' }),
   },
 };

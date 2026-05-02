@@ -329,7 +329,7 @@ published → 删除 Sandbox 资源 → 停止 Pod → unpublished (保留元数
 **LLM 集成 (阿里云 DashScope)：**
 - 在生成的 Agent 代码中配置 qwen3.6-plus
 - 端点：`https://dashscope.aliyuncs.com/compatible-mode/v1`
-- API Key：`sk-0440b76852944f019bb142a715bc2cab`
+- API Key：`sk-****` (通过环境变量 `LLM_API_KEY` 配置)
 - 兼容 OpenAI API 格式
 
 ---

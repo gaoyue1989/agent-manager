@@ -43,7 +43,7 @@ codegen/
   "description": "智能客服助手",
   "model": "qwen3.6-plus",
   "model_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "api_key": "sk-0440b76852944f019bb142a715bc2cab",
+  "api_key": "sk-****",
   "system_prompt": "你是一个友好的智能客服助手...",
   "tools": [],
   "sub_agents": [],
