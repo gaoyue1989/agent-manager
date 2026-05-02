@@ -116,8 +116,9 @@ typescript 5                  # 类型检查
 
 ### AgentList (`/agents`, app/agents/page.tsx)
 - 调用 `api.agents.list({ limit: 100 })` 获取列表
-- 表格列: 名称、状态 (彩色 badge)、版本、更新时间、操作 (详情/编辑)
+- 表格列: 名称、状态 (彩色 badge)、版本、更新时间、操作 (详情/编辑/删除)
 - 支持 `?status=` URL 参数筛选
+- **删除功能**: 点击"删除"链接 → 确认框 → `DELETE /agents/:id` → 刷新列表
 
 ### CreateAgent (`/agents/create`, app/agents/create/page.tsx)
 - 三种输入模式 Tab 切换: 表单 / JSON / YAML
@@ -128,9 +129,10 @@ typescript 5                  # 类型检查
 ### AgentDetail (`/agents/[id]`, app/agents/[id]/page.tsx)
 最复杂的页面，包含：
 - **基本信息卡片**: 描述、模型、系统提示词
-- **操作卡片**: 状态相关按钮 (生成代码 → 构建镜像 → 部署 → 发布/下线)
+- **操作卡片**: 状态相关按钮 (生成代码 → 构建镜像 → 部署 → 发布/下线/删除)
   - 每个按钮有加载态 (`actionLoading`)
   - `ActionBtn` 本地组件封装
+  - **删除按钮**: 红色按钮，点击确认后 `DELETE /agents/:id`，成功后跳转到列表页
 - **镜像信息卡片**: 条件渲染 (有 build 记录时显示)
 - **Pod 状态卡片**: published 状态显示 (名称/就绪/状态/重启/年龄/IP)
 - **聊天测试卡片**: published 状态显示

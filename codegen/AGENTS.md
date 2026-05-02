@@ -48,10 +48,14 @@ codegen/
 |------|------|------|
 | `generate_agent_code` | `(config: dict) -> dict` | 主入口，返回 `{"agent.py": str, "Dockerfile": str, "requirements.txt": str}` |
 | `_render_agent_py` | `(name, description, model, endpoint, api_key, system_prompt, tools, sub_agents, enable_memory, max_iterations) -> str` | 生成完整的 FastAPI + DeepAgents `agent.py` |
-| `_render_dockerfile` | `(name: str) -> str` | 生成基于 `python:3.12-slim` 的 Dockerfile |
+| `_render_dockerfile` | `(name: str, has_skills: bool = False, base_image: str = "") -> str` | 生成 Dockerfile，支持基础镜像参数 |
 | `_render_requirements` | `() -> str` | 返回固定的 6 个 pip 依赖 |
 | `validate_config` | `(config: dict) -> list[str]` | 校验必填字段 (`name`, `description`, `model`, `system_prompt`) |
 | `main` | `() -> None` | CLI 入口，支持文件模式 / stdin 模式 |
+
+**Dockerfile 生成逻辑：**
+- 若 `base_image` 为空：生成完整 Dockerfile（含 `pip install`）
+- 若 `base_image` 指定：生成精简 Dockerfile（FROM 基础镜像，仅 COPY agent.py）
 
 ---
 

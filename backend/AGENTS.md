@@ -98,6 +98,8 @@ minio-go/v7 v7.0.73            # MinIO SDK
 | `LLM_MODEL` | 默认模型 | `qwen3.6-plus` |
 | `LLM_ENDPOINT` | LLM API 端点 | DashScope 地址 |
 | `LLM_API_KEY` | LLM API Key | (DashScope key) |
+| `BASE_IMAGE_NAME` | 基础镜像名称 | `agent-base:latest` |
+| `BUILD_BASE_IMAGE` | 是否自动构建基础镜像 | `true` |
 
 ## 数据模型 (internal/model/models.go)
 
@@ -130,10 +132,25 @@ POST   /agents              # 创建 Agent
 GET    /agents              # Agent 列表 (?status=&offset=&limit=)
 GET    /agents/:id          # Agent 详情
 PUT    /agents/:id          # 更新 Agent 配置 (version++)
-DELETE /agents/:id          # 删除 Agent (级联删除)
+DELETE /agents/:id          # 删除 Agent (清理所有相关资源，返回清理结果)
 POST   /agents/:id/generate  # 触发代码生成
 GET    /agents/:id/code      # 获取生成的代码
 GET    /agents/:id/deployments # 部署历史
+```
+
+**DELETE /agents/:id 返回格式：**
+```json
+{
+  "message": "deleted",
+  "cleanup": {
+    "database": true,
+    "minio": true,
+    "docker_images": ["registry/agent-1:v1", "registry/agent-1:v2"],
+    "k8s_sandbox": true,
+    "k8s_service": true,
+    "k8s_ingress": false
+  }
+}
 ```
 
 **构建 & 部署 & 发布 (DeployHandler: handler/deploy.go):**
@@ -158,16 +175,26 @@ POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
 | `List(status, offset, limit)` | 分页列表，支持按 status 筛选 |
 | `Update(id, configJSON)` | 更新配置，version 自增 |
 | `Delete(id)` | 删除 Agent (级联删除子记录) |
+| `DeleteWithCleanup(id)` | 删除 Agent 并清理所有相关资源 (K8s/Docker/MinIO/MySQL) |
 | `GenerateCode(id)` | 调用 CodeGen Runner，生成代码存入 MinIO，写入 CodeGeneration 记录，状态 → `generated` |
+| `GenerateCodeWithBaseImage(id, baseImage)` | 生成代码时指定基础镜像 |
 | `GetCode(id)` | 从 MinIO 拉取已生成的代码内容 |
 | `GetDeployments(id)` | 查询该 Agent 的全部部署记录 |
 | `GetLatestDeployment(id)` | 查询最新部署记录 |
+
+**DeleteWithCleanup 清理逻辑：**
+1. 根据 Agent 状态决定清理策略
+2. `deployed/published` 状态：删除 K8s Ingress → Service → Sandbox
+3. `built` 及之后状态：删除 Docker 镜像（本地 + 远程）
+4. `generated` 及之后状态：删除 MinIO 文件
+5. 所有状态：删除数据库记录（CASCADE 自动删除子表）
 
 ### DeployService (service/deploy.go)
 
 | 方法 | 说明 |
 |------|------|
-| `BuildImage(id)` | 从 MinIO 下载代码 → Docker build → tag → push → 写入 ImageBuild，状态 → `built` |
+| `BuildImage(id)` | 使用基础镜像构建 Agent 镜像，跳过 pip install |
+| `GenerateAndBuild(id)` | 生成代码 + 构建镜像（一步完成） |
 | `Deploy(id)` | 通过 K8s SandboxClient 创建 Sandbox CRD，写入 Deployment，状态 → `deployed` |
 | `Publish(id)` | 调用 Deploy + 状态 → `published` |
 | `Unpublish(id)` | 删除 Sandbox，状态 → `unpublished` |
@@ -182,6 +209,13 @@ POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
 - CRD: `agents.x-k8s.io/v1alpha1` Sandbox 资源
 - `CreateSandbox(name, image)` — 创建 Sandbox CRD
 - `DeleteSandbox(name)` — 删除 Sandbox CRD
+- `SandboxExists(name)` — 检查 Sandbox 是否存在
+- `CreateService(name)` — 创建 Service
+- `DeleteService(name)` — 删除 Service
+- `ServiceExists(name)` — 检查 Service 是否存在
+- `CreateIngress(name, agentID)` — 创建 Ingress
+- `DeleteIngress(name)` — 删除 Ingress
+- `IngressExists(name)` — 检查 Ingress 是否存在
 - `GetPodStatus(sandboxName)` — 解析 `kubectl get pod` 输出
 - `GetPodStatusJSON(sandboxName)` — 返回 kubectl JSON 输出
 
@@ -189,12 +223,24 @@ POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
 - Shell 调用 `docker login` / `docker build` / `docker tag` / `docker push`
 - 从 MinIO 下载文件到临时目录 (`os.MkdirTemp`)，构建完成后清理
 - 构建成功后返回镜像完整标签 `registry/imageName:agentID-version`
+- `BuildBaseImage(registry, baseImageName)` — 构建基础镜像（包含所有 pip 依赖）
+- `BuildWithBaseImage(localTag, remoteTag, prefix, storage, registry)` — 使用基础镜像构建 Agent 镜像
+- `ImageExists(imageTag)` — 检查镜像是否存在
+- `RemoveImage(imageTag)` — 删除镜像
+
+**基础镜像优化：**
+- 基础镜像 `agent-base:latest` 预装所有依赖，构建时无需 `pip install`
+- Agent Dockerfile 替换 `FROM python:3.12-slim` 为 `FROM {registry}/agent-base:latest`
+- 构建时间从 ~60s 降至 ~5s（缓存命中时）
 
 ### MinIO (internal/minio/storage.go)
 - `PutFile(objectName, data)` / `GetFile(objectName)` 以字节流操作
+- `DeleteByPrefix(prefix)` — 按前缀递归删除所有文件
+- `PrefixExists(prefix)` — 检查前缀下是否有文件
 - 初始化时自动创建 bucket (若不存在)
 - 存储路径规则: `{prefix}/agent.py`, `{prefix}/Dockerfile`, `{prefix}/requirements.txt`
 
 ### CodeGen (internal/codegen/runner.go)
 - `Run(config)` — 将配置 JSON 通过 stdin 传入 Python 脚本，解析 stdout，返回 `map[string]string` (文件名 → 内容)
 - `RunAndStore(config, prefix)` — 生成后直接存入 MinIO
+- `RunAndStoreWithBaseImage(config, prefix, baseImage)` — 生成时指定基础镜像参数

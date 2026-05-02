@@ -134,6 +134,18 @@ export default function AgentDetail() {
             )}
             <button onClick={() => router.push(`/agents/${id}/edit`)}
               className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">编辑</button>
+            <button onClick={async () => {
+              if (!confirm('确定要删除此 Agent 吗？此操作不可撤销。')) return;
+              setActionLoading('delete');
+              try {
+                await api.agents.delete(Number(id));
+                router.push('/agents');
+              } catch (e: any) { alert(e.message); }
+              setActionLoading('');
+            }} disabled={actionLoading === 'delete'}
+              className="px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50">
+              {actionLoading === 'delete' ? '删除中...' : '删除'}
+            </button>
           </div>
         </div>
       </div>

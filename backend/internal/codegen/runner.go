@@ -26,6 +26,14 @@ func (r *Runner) Run(config map[string]interface{}) (map[string]string, error) {
 }
 
 func (r *Runner) RunAndStore(config map[string]interface{}, prefix string) (map[string]string, error) {
+	return r.RunAndStoreWithBaseImage(config, prefix, "")
+}
+
+func (r *Runner) RunAndStoreWithBaseImage(config map[string]interface{}, prefix string, baseImage string) (map[string]string, error) {
+	if baseImage != "" {
+		config["base_image"] = baseImage
+	}
+
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return nil, err

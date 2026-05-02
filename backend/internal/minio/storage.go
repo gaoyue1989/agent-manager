@@ -86,3 +86,32 @@ func (s *Storage) PutFileString(objectName string, content string) (string, erro
 func (s *Storage) DeleteFile(objectName string) error {
 	return s.client.RemoveObject(context.Background(), s.bucket, objectName, minio.RemoveObjectOptions{})
 }
+
+func (s *Storage) DeleteByPrefix(prefix string) error {
+	objectsCh := s.client.ListObjects(context.Background(), s.bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: true,
+	})
+	for obj := range objectsCh {
+		if obj.Err != nil {
+			return obj.Err
+		}
+		if err := s.client.RemoveObject(context.Background(), s.bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Storage) PrefixExists(prefix string) bool {
+	for obj := range s.client.ListObjects(context.Background(), s.bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: false,
+		MaxKeys:   1,
+	}) {
+		if obj.Err == nil {
+			return true
+		}
+	}
+	return false
+}

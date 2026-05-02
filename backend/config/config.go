@@ -18,6 +18,8 @@ type Config struct {
 	LLMAPIKey      string
 	IngressHost    string
 	IngressEnabled bool
+	BaseImageName  string
+	BuildBaseImage bool
 }
 
 func Load() *Config {
@@ -37,6 +39,8 @@ func Load() *Config {
 		LLMAPIKey:      getEnv("LLM_API_KEY", "sk-****"),
 		IngressHost:    getEnv("INGRESS_HOST", "localhost"),
 		IngressEnabled: getEnv("INGRESS_ENABLED", "true") == "true",
+		BaseImageName:  getEnv("BASE_IMAGE_NAME", "agent-base:latest"),
+		BuildBaseImage: getEnv("BUILD_BASE_IMAGE", "true") == "true",
 	}
 }
 

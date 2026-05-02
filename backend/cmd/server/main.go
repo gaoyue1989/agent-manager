@@ -47,8 +47,21 @@ func main() {
 		log.Printf("WARNING: failed to init docker builder: %v", err)
 	}
 
-	agentSvc := service.NewAgentService(db, storage, cgRunner)
-	deploySvc := service.NewDeployServiceWithIngress(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled)
+	if cfg.BuildBaseImage {
+		baseImageTag := fmt.Sprintf("%s/%s", cfg.LocalRegistry, cfg.BaseImageName)
+		if !builder.ImageExists(baseImageTag) {
+			log.Printf("Building base image: %s", baseImageTag)
+			if _, err := builder.BuildBaseImage(cfg.LocalRegistry, cfg.BaseImageName); err != nil {
+				log.Fatalf("failed to build base image: %v", err)
+			}
+			log.Printf("Base image built successfully: %s", baseImageTag)
+		} else {
+			log.Printf("Base image already exists: %s", baseImageTag)
+		}
+	}
+
+	agentSvc := service.NewAgentServiceWithDeps(db, storage, cgRunner, sandbox, builder, cfg.LocalRegistry)
+	deploySvc := service.NewDeployServiceWithBaseImage(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled, cfg.BaseImageName)
 
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{

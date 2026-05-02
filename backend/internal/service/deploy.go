@@ -17,21 +17,26 @@ import (
 )
 
 type DeployService struct {
-	db       *gorm.DB
-	storage  *minio.Storage
-	builder  *docker.Builder
-	sandbox  *k8s.SandboxClient
-	registry string
-	agentSvc *AgentService
+	db            *gorm.DB
+	storage       *minio.Storage
+	builder       *docker.Builder
+	sandbox       *k8s.SandboxClient
+	registry      string
+	agentSvc      *AgentService
 	ingressEnabled bool
+	baseImageName string
 }
 
 func NewDeployService(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService) *DeployService {
-	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: true}
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: true, baseImageName: "agent-base:latest"}
 }
 
 func NewDeployServiceWithIngress(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool) *DeployService {
-	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled}
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: "agent-base:latest"}
+}
+
+func NewDeployServiceWithBaseImage(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool, baseImageName string) *DeployService {
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: baseImageName}
 }
 
 func (s *DeployService) BuildImage(agentID uint) (*model.ImageBuild, error) {
@@ -51,7 +56,7 @@ func (s *DeployService) BuildImage(agentID uint) (*model.ImageBuild, error) {
 	localTag := fmt.Sprintf("agent-manager/agent-%d:v%d", agent.ID, agent.Version)
 
 	prefix := fmt.Sprintf("agents/%d/v%d", agent.ID, agent.Version)
-	buildLog, err := s.builder.Build(localTag, imageTag, prefix, s.storage)
+	buildLog, err := s.builder.BuildWithBaseImage(localTag, imageTag, prefix, s.storage, s.registry)
 	if err != nil {
 		build.Status = model.BuildFailed
 		build.BuildLog = buildLog + "\n" + err.Error()
@@ -70,6 +75,14 @@ func (s *DeployService) BuildImage(agentID uint) (*model.ImageBuild, error) {
 	return build, nil
 }
 
+func (s *DeployService) GenerateAndBuild(agentID uint) (*model.ImageBuild, error) {
+	baseImage := fmt.Sprintf("%s/%s", s.registry, s.baseImageName)
+	if _, err := s.agentSvc.GenerateCodeWithBaseImage(agentID, baseImage); err != nil {
+		return nil, err
+	}
+	return s.BuildImage(agentID)
+}
+
 func (s *DeployService) Deploy(agentID uint) (*model.Deployment, error) {
 	agent, err := s.agentSvc.GetByID(agentID)
 	if err != nil {
@@ -78,6 +91,8 @@ func (s *DeployService) Deploy(agentID uint) (*model.Deployment, error) {
 
 	sandboxName := fmt.Sprintf("agent-%d", agent.ID)
 	imageTag := fmt.Sprintf("%s/agent-%d:v%d", s.registry, agent.ID, agent.Version)
+
+	llmAPIKey, llmModel, llmEndpoint := parseLLMConfig(agent.Config)
 
 	dep := &model.Deployment{
 		AgentID:     agent.ID,
@@ -94,7 +109,7 @@ func (s *DeployService) Deploy(agentID uint) (*model.Deployment, error) {
 	}
 
 	now := time.Now()
-	if err := s.sandbox.CreateSandbox(sandboxName, imageTag); err != nil {
+	if err := s.sandbox.CreateSandbox(sandboxName, imageTag, llmAPIKey, llmModel, llmEndpoint); err != nil {
 		dep.Status = model.DeployFailed
 		s.db.Save(dep)
 		return dep, err

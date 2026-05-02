@@ -294,16 +294,31 @@ func (h *AgentHandler) Update(c *gin.Context) {
 
 func (h *AgentHandler) Delete(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
-	if err := h.svc.Delete(uint(id)); err != nil {
+	result, err := h.svc.DeleteWithCleanup(uint(id))
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+	c.JSON(http.StatusOK, gin.H{"message": "deleted", "cleanup": result})
 }
 
 func (h *AgentHandler) GenerateCode(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	gen, err := h.svc.GenerateCode(uint(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gen)
+}
+
+func (h *AgentHandler) GenerateCodeWithBaseImage(c *gin.Context) {
+	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+	var req struct {
+		BaseImage string `json:"base_image"`
+	}
+	c.ShouldBindJSON(&req)
+	gen, err := h.svc.GenerateCodeWithBaseImage(uint(id), req.BaseImage)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

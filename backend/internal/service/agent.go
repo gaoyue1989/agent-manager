@@ -8,18 +8,36 @@ import (
 	"agent-manager/backend/internal/model"
 	"agent-manager/backend/internal/minio"
 	"agent-manager/backend/internal/codegen"
+	"agent-manager/backend/internal/k8s"
+	"agent-manager/backend/internal/docker"
 
 	"gorm.io/gorm"
 )
+
+type DeleteResult struct {
+	Database     bool     `json:"database"`
+	MinIO        bool     `json:"minio"`
+	DockerImages []string `json:"docker_images"`
+	K8sSandbox   bool     `json:"k8s_sandbox"`
+	K8sService   bool     `json:"k8s_service"`
+	K8sIngress   bool     `json:"k8s_ingress"`
+}
 
 type AgentService struct {
 	db      *gorm.DB
 	storage *minio.Storage
 	codegen *codegen.Runner
+	sandbox *k8s.SandboxClient
+	builder *docker.Builder
+	registry string
 }
 
 func NewAgentService(db *gorm.DB, storage *minio.Storage, cg *codegen.Runner) *AgentService {
 	return &AgentService{db: db, storage: storage, codegen: cg}
+}
+
+func NewAgentServiceWithDeps(db *gorm.DB, storage *minio.Storage, cg *codegen.Runner, sandbox *k8s.SandboxClient, builder *docker.Builder, registry string) *AgentService {
+	return &AgentService{db: db, storage: storage, codegen: cg, sandbox: sandbox, builder: builder, registry: registry}
 }
 
 func (s *AgentService) Create(configJSON string, configType model.ConfigType) (*model.Agent, error) {
@@ -75,7 +93,72 @@ func (s *AgentService) Delete(id uint) error {
 	return s.db.Delete(&model.Agent{}, id).Error
 }
 
+func (s *AgentService) DeleteWithCleanup(id uint) (*DeleteResult, error) {
+	agent, err := s.GetByID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &DeleteResult{DockerImages: []string{}}
+	sandboxName := fmt.Sprintf("agent-%d", agent.ID)
+
+	if s.sandbox != nil && s.builder != nil {
+		if agent.Status == model.StatusDeployed || agent.Status == model.StatusPublished {
+			if s.sandbox.IngressExists(sandboxName) {
+				if err := s.sandbox.DeleteIngress(sandboxName); err == nil {
+					result.K8sIngress = true
+				}
+			}
+			if s.sandbox.ServiceExists(sandboxName) {
+				if err := s.sandbox.DeleteService(sandboxName); err == nil {
+					result.K8sService = true
+				}
+			}
+			if s.sandbox.SandboxExists(sandboxName) {
+				if err := s.sandbox.DeleteSandbox(sandboxName); err == nil {
+					result.K8sSandbox = true
+				}
+			}
+		}
+
+		if agent.Status != model.StatusDraft && agent.Status != model.StatusGenerated {
+			var builds []model.ImageBuild
+			s.db.Where("agent_id = ?", agent.ID).Find(&builds)
+			for _, b := range builds {
+				if b.ImageTag != "" && s.builder.ImageExists(b.ImageTag) {
+					if err := s.builder.RemoveImage(b.ImageTag); err == nil {
+						result.DockerImages = append(result.DockerImages, b.ImageTag)
+					}
+				}
+				localTag := fmt.Sprintf("agent-manager/agent-%d:v%d", agent.ID, b.Version)
+				if s.builder.ImageExists(localTag) {
+					s.builder.RemoveImage(localTag)
+				}
+			}
+		}
+	}
+
+	if agent.Status != model.StatusDraft {
+		prefix := fmt.Sprintf("agents/%d", agent.ID)
+		if s.storage != nil && s.storage.PrefixExists(prefix) {
+			if err := s.storage.DeleteByPrefix(prefix); err == nil {
+				result.MinIO = true
+			}
+		}
+	}
+
+	if err := s.db.Delete(&model.Agent{}, id).Error; err == nil {
+		result.Database = true
+	}
+
+	return result, nil
+}
+
 func (s *AgentService) GenerateCode(id uint) (*model.CodeGeneration, error) {
+	return s.GenerateCodeWithBaseImage(id, "")
+}
+
+func (s *AgentService) GenerateCodeWithBaseImage(id uint, baseImage string) (*model.CodeGeneration, error) {
 	agent, err := s.GetByID(id)
 	if err != nil {
 		return nil, err
@@ -97,7 +180,7 @@ func (s *AgentService) GenerateCode(id uint) (*model.CodeGeneration, error) {
 	}
 
 	prefix := fmt.Sprintf("agents/%d/v%d", agent.ID, agent.Version)
-	files, err := s.codegen.RunAndStore(cfg, prefix)
+	files, err := s.codegen.RunAndStoreWithBaseImage(cfg, prefix, baseImage)
 	if err != nil {
 		gen.Status = model.GenFailed
 		gen.ErrorMsg = err.Error()

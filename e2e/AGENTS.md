@@ -117,6 +117,34 @@ e2e/
 | E3-3 | Skill 元数据字段验证 | name 和 description 字段存在 |
 | E3-4 | Skill 列表查询 | GET API 返回已上传的 Skill 列表 |
 
+### E5: Agent 删除功能
+
+| 用例 | 初始状态 | 验证内容 |
+|------|---------|---------|
+| E5-1 | draft | 创建 Agent |
+| E5-2 | generated | 生成代码 |
+| E5-3 | built | 构建镜像 |
+| E5-4 | deployed | 部署 Agent |
+| E5-5 | deployed | 删除 Agent，返回清理结果 |
+| E5-6 | - | 验证 Agent 已删除 (404) |
+
+**E5 测试脚本:** `e2e/e5-delete-test.js`
+
+### E6: 基础镜像构建
+
+| 用例 | 验证内容 |
+|------|---------|
+| E6-1 | 基础镜像存在检查 |
+| E6-2 | 创建 Agent |
+| E6-3 | 生成代码 |
+| E6-4 | 构建镜像，验证构建时间 < 15s |
+| E6-5 | 检查镜像基于 agent-base |
+| E6-6 | 部署 Agent |
+| E6-7 | 聊天测试 |
+| E6-8 | 清理测试 Agent |
+
+**E6 测试脚本:** `e2e/e6-base-image-test.js`
+
 ### F1-F3: 已有 Agent 验证 (Agent 2)
 | 用例 | 验证内容 | 截图说明 |
 |------|---------|---------|

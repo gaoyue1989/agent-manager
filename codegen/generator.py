@@ -43,6 +43,7 @@ def generate_agent_code(config: dict) -> dict:
     skills = config.get("skills", [])
     has_skills = bool(skills)
     has_mcp = bool(mcp_config and mcp_config.get("url"))
+    base_image = config.get("base_image", "")
 
     agent_py = _render_agent_py(
         name=name,
@@ -65,6 +66,7 @@ def generate_agent_code(config: dict) -> dict:
     dockerfile = _render_dockerfile(
         name=name,
         has_skills=has_skills,
+        base_image=base_image,
     )
 
     requirements = _render_requirements(has_mcp=has_mcp)
@@ -337,12 +339,31 @@ if __name__ == "__main__":
     return header + body + fastapi_code
 
 
-def _render_dockerfile(name: str, has_skills: bool = False) -> str:
+def _render_dockerfile(name: str, has_skills: bool = False, base_image: str = "") -> str:
+    from_image = base_image if base_image else "python:3.12-slim"
     skills_copy = ""
     if has_skills:
         skills_copy = "\nCOPY skills/ /skills/"
 
-    return f'''FROM python:3.12-slim
+    if base_image:
+        return f'''FROM {from_image}
+
+WORKDIR /app
+
+COPY agent.py .
+{skills_copy}
+
+EXPOSE 8000
+
+ENV PYTHONUNBUFFERED=1
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \\
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["python", "-u", "agent.py"]
+'''
+
+    return f'''FROM {from_image}
 
 WORKDIR /app
 
