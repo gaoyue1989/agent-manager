@@ -160,6 +160,50 @@ draft → generated → built → deployed → published
 4. **部署**: 创建 K8s Sandbox CRD，Pod 自动调度运行
 5. **发布/下线**: 控制流量可达性
 
+## 流程展示
+
+### 1. 创建 Agent
+
+![创建 Agent](docs/flow-01-create-agent.png)
+
+通过表单配置 Agent 基本信息、工具和 MCP 配置。
+
+### 2. Agent 详情页
+
+![详情页展示](docs/flow-02-detail-page.png)
+
+查看 Agent 完整配置信息，包括工具标签和 MCP 配置。
+
+### 3. 代码生成
+
+![代码生成](docs/flow-03-codegen.png)
+
+Python codegen 自动生成 FastAPI + DeepAgents 微服务代码。
+
+### 4. Skill 上传
+
+![Skill 上传](docs/flow-04-skill-upload.png)
+
+上传 Skill 文件并自动解析元数据。
+
+### 5. 镜像信息
+
+![镜像信息](docs/flow-05-image-info.png)
+
+查看 Docker 镜像构建状态和详细信息。
+
+### 6. Pod 状态监控
+
+![Pod 状态](docs/flow-06-pod-status.png)
+
+实时监控 K8s Pod 运行状态。
+
+### 7. 聊天测试
+
+![聊天测试](docs/flow-07-chat-test.png)
+
+在详情页直接测试 Agent 对话功能。
+
 ## 注意事项
 
 - 不要修改/删除 Dify 相关的数据库和 Bucket (`dify`, `dify_*`)
