@@ -16,15 +16,15 @@ Agent 配置中 `model` 字段误填为 API Key，而非模型 ID：
 
 ```json
 {
-  "model": "209df1cb15124118a9c4583f4c5b7997",  // ❌ 这是 API Key
-  "api_key": "209df1cb15124118a9c4583f4c5b7997"
+  "model": "<api_key>",  // ❌ 这是 API Key
+  "api_key": "<api_key>"
 }
 ```
 
 生成的 `agent.py`:
 
 ```python
-MODEL_NAME = "209df1cb15124118a9c4583f4c5b7997"  # ❌ 错误
+MODEL_NAME = "<api_key>"  # ❌ 错误
 ```
 
 ## 解决方案
@@ -50,15 +50,15 @@ curl -X POST http://localhost:8080/api/v1/agents/22/deploy
 
 ```bash
 kubectl exec agent-22 -- env | grep LLM_MODEL
-# LLM_MODEL=5df2c9ff4ad347cb95ea42ad6e9e1729
+# LLM_MODEL=<model_id>
 ```
 
 ## 配置字段说明
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| `model` | 模型 ID | `5df2c9ff4ad347cb95ea42ad6e9e1729` (GLM-5) |
-| `api_key` | API Key | `209df1cb15124118a9c4583f4c5b7997` |
+| `model` | 模型 ID | `<model_id>` (如 GLM-5) |
+| `api_key` | API Key | `<api_key>` |
 | `model_endpoint` | API 端点 | `https://wishub-x6.ctyun.cn/v1` |
 
 ## 相关文件
