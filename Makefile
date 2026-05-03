@@ -3,7 +3,9 @@
 .PHONY: backend-start backend-stop backend-restart backend-status
 .PHONY: docker-build docker-build-backend docker-build-frontend
 .PHONY: docker-up docker-down docker-logs docker-restart
-.PHONY: test test-backend test-e2e
+.PHONY: ingress-deploy ingress-delete ingress-status
+.PHONY: kind-load kind-status
+.PHONY: test test-backend test-e2e test-ingress
 .PHONY: lint lint-backend lint-frontend
 .PHONY: clean
 
@@ -106,6 +108,52 @@ docker-restart:
 	docker compose -f docker/docker-compose.yml down
 	docker compose -f docker/docker-compose.yml up -d --build
 
+# === Kind 集群 ===
+kind-status:
+	@echo "=== Kind 集群状态 ==="
+	@kind get clusters
+	@echo ""
+	@echo "=== K8s 资源 ==="
+	@kubectl get nodes -o wide
+	@echo ""
+	@kubectl get pods -A
+
+kind-load:
+	@echo "=== 加载镜像到 Kind ==="
+	@kind load docker-image registry.cn-hangzhou.aliyuncs.com/google_containers/nginx-ingress-controller:v1.10.1 --name agent-manager
+	@kind load docker-image registry.cn-hangzhou.aliyuncs.com/google_containers/kube-webhook-certgen:v1.4.1 --name agent-manager
+
+# === Ingress Controller ===
+ingress-deploy:
+	@echo "=== 部署 Nginx Ingress Controller ==="
+	@kubectl apply -f sandbox/ingress-nginx-simple.yaml
+	@echo ""
+	@echo "等待 Controller 就绪..."
+	@sleep 10
+	@kubectl get pods -n ingress-nginx
+	@echo ""
+	@echo "Ingress Controller 已部署"
+	@echo "HTTP NodePort: 30080"
+	@echo "HTTPS NodePort: 30443"
+
+ingress-delete:
+	@echo "=== 删除 Nginx Ingress Controller ==="
+	@kubectl delete -f sandbox/ingress-nginx-simple.yaml --ignore-not-found=true
+	@kubectl delete clusterrole ingress-nginx --ignore-not-found=true
+	@kubectl delete clusterrolebinding ingress-nginx --ignore-not-found=true
+	@echo "Ingress Controller 已删除"
+
+ingress-status:
+	@echo "=== Ingress Controller 状态 ==="
+	@kubectl get pods -n ingress-nginx 2>/dev/null || echo "Namespace not found"
+	@echo ""
+	@kubectl get svc -n ingress-nginx 2>/dev/null || echo "Service not found"
+	@echo ""
+	@kubectl get ingressclass 2>/dev/null || echo "IngressClass not found"
+	@echo ""
+	@echo "=== Agent Ingress 资源 ==="
+	@kubectl get ingress -n default 2>/dev/null || echo "No agent ingress found"
+
 # === 测试 ===
 test: test-backend test-e2e
 
@@ -114,6 +162,9 @@ test-backend:
 
 test-e2e:
 	cd e2e && node e2e-test.js
+
+test-ingress:
+	cd e2e && node e7-ingress-test.js
 
 # === Lint ===
 lint: lint-backend lint-frontend

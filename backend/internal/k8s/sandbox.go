@@ -138,14 +138,14 @@ metadata:
   name: %s
   namespace: %s
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   rules:
   - http:
       paths:
-      - path: %s
+      - path: %s(/|$)(.*)
         pathType: Prefix
         backend:
           service:
