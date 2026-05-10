@@ -93,13 +93,16 @@ minio-go/v7 v7.0.73            # MinIO SDK
 | `MINIO_BUCKET` | MinIO Bucket | `agent-manager` |
 | `KUBECONFIG` | K8s 配置路径 | `~/.kube/config` |
 | `LOCAL_REGISTRY` | Docker 本地仓库 | `localhost:5000` |
-| `CODEGEN_SCRIPT` | 生成器脚本 | `../codegen/generator.py` |
+| `CODEGEN_SCRIPT` | 生成器脚本 | `../codegen/cli.py` |
 | `CODEGEN_PYTHON` | Python 解释器 | `python3` |
-| `LLM_MODEL` | 默认模型 | `qwen3.6-plus` |
-| `LLM_ENDPOINT` | LLM API 端点 | DashScope 地址 |
-| `LLM_API_KEY` | LLM API Key | (DashScope key) |
 | `BASE_IMAGE_NAME` | 基础镜像名称 | `agent-base:latest` |
 | `BUILD_BASE_IMAGE` | 是否自动构建基础镜像 | `true` |
+
+**注意**: LLM 配置（API Key、Model、Endpoint）通过环境变量在运行时注入，不再存储在 Agent 配置中：
+- `LLM_API_KEY` - LLM API 密钥
+- `LLM_MODEL_ID` - 模型 ID
+- `LLM_BASE_URL` - API 端点
+- `LLM_PROVIDER` - 提供商标识
 
 ## 数据模型 (internal/model/models.go)
 
@@ -118,9 +121,28 @@ draft → generated → built → deployed → published
                               └─ unpublished ←─┘
 ```
 
-- `Agent.Config` 字段以 JSON string 形式存储完整配置
-- `Agent.ConfigType` 枚举：`form` / `json` / `yaml`
+- `Agent.Config` 字段存储完整配置：
+  - `ConfigType = "oaf"`: OAF v0.8.0 AGENTS.md 格式（YAML frontmatter + Markdown body）
+  - `ConfigType = "json"`: 旧 JSON 格式（向后兼容）
+  - `ConfigType = "yaml"`: 旧 YAML 格式（向后兼容）
+  - `ConfigType = "form"`: 表单提交格式
+- `Agent.ConfigType` 枚举：`form` / `json` / `yaml` / `oaf`
 - 所有子表通过 `(AgentID, Version)` 复合索引加速查询
+
+### OAF 配置结构 (internal/model/oaf_config.go)
+
+OAF v0.8.0 配置包含以下字段：
+
+| 字段组 | 字段 | 类型 | 必需 |
+|--------|------|------|------|
+| **Identity** | name, vendorKey, agentKey, version, slug | string | ✓ |
+| **Metadata** | description, author, license, tags | string/[]string | ✓ |
+| **Skills** | skills[].name, source, version, required | []OAFSkill | |
+| **MCP Servers** | mcpServers[].vendor, server, version, configDir | []OAFMCPServer | |
+| **Sub-Agents** | agents[].vendor, agent, version, role | []OAFSubAgent | |
+| **Tools** | tools[] | []string | |
+| **Model** | model.provider, name, embedding | OAFModel | |
+| **Config** | config.temperature, max_tokens | OAFRuntimeConfig | |
 
 ## API 路由
 

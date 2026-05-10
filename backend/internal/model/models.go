@@ -20,6 +20,7 @@ const (
 	ConfigForm ConfigType = "form"
 	ConfigJSON ConfigType = "json"
 	ConfigYAML ConfigType = "yaml"
+	ConfigOAF  ConfigType = "oaf"
 )
 
 type Agent struct {
@@ -27,11 +28,18 @@ type Agent struct {
 	Name        string      `json:"name" gorm:"type:varchar(128);not null;index"`
 	Description string      `json:"description" gorm:"type:text"`
 	Config      string      `json:"config" gorm:"type:json;not null"`
-	ConfigType  ConfigType  `json:"config_type" gorm:"type:enum('form','json','yaml');default:'form'"`
+	ConfigType  ConfigType  `json:"config_type" gorm:"type:enum('form','json','yaml','oaf');default:'oaf'"`
 	Status      AgentStatus `json:"status" gorm:"type:enum('draft','generated','built','deployed','published','unpublished','error');default:'draft';index"`
 	Version     int         `json:"version" gorm:"default:1"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
+}
+
+func (a *Agent) ParseOAFConfig() (*OAFConfig, error) {
+	if a.ConfigType != ConfigOAF {
+		return nil, nil
+	}
+	return ParseOAF(a.Config)
 }
 
 type GenStatus string

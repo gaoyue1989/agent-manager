@@ -1,6 +1,7 @@
 .PHONY: dev dev-backend dev-frontend dev-nginx-setup
 .PHONY: build build-backend build-frontend
 .PHONY: backend-start backend-stop backend-restart backend-status
+.PHONY: frontend-start frontend-stop frontend-restart frontend-status
 .PHONY: docker-build docker-build-backend docker-build-frontend
 .PHONY: docker-up docker-down docker-logs docker-restart
 .PHONY: ingress-deploy ingress-delete ingress-status
@@ -82,6 +83,34 @@ backend-status:
 	else \
 		echo "Backend not running"; \
 	fi
+
+# === 前端管理 (PM2) ===
+FRONTEND_STANDALONE := frontend/.next/standalone/server.js
+
+frontend-start: build-frontend
+	@if [ ! -f frontend/.next/standalone/.next/static ]; then \
+		echo "Copying static files..."; \
+		cp -r frontend/.next/static frontend/.next/standalone/.next/; \
+	fi
+	@if [ ! -d frontend/.next/standalone/public ]; then \
+		echo "Copying public files..."; \
+		cp -r frontend/public frontend/.next/standalone/ 2>/dev/null || true; \
+	fi
+	@pm2 list | grep -q "frontend.*online" && echo "Frontend already running (PM2)" && exit 0 || true
+	@echo "Starting frontend with PM2..."
+	@cd frontend/.next/standalone && PORT=3000 HOSTNAME=0.0.0.0 pm2 start server.js --name "frontend"
+	@pm2 save
+	@echo "Frontend started (PM2, Port: 3000)"
+
+frontend-stop:
+	@pm2 delete frontend 2>/dev/null && echo "Frontend stopped" || echo "Frontend not running"
+	@pm2 save
+
+frontend-restart:
+	@pm2 restart frontend 2>/dev/null && echo "Frontend restarted" || (echo "Frontend not running, starting..."; $(MAKE) frontend-start)
+
+frontend-status:
+	@pm2 list
 
 # === Docker 镜像 ===
 docker-build-backend:

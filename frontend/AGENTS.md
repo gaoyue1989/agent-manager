@@ -121,10 +121,18 @@ typescript 5                  # 类型检查
 - **删除功能**: 点击"删除"链接 → 确认框 → `DELETE /agents/:id` → 刷新列表
 
 ### CreateAgent (`/agents/create`, app/agents/create/page.tsx)
-- 三种输入模式 Tab 切换: 表单 / JSON / YAML
-- 表单模式: 结构化字段 (name, description, model, endpoint, api_key, system_prompt)
-- JSON/YAML 模式: 深色背景 textarea
-- 提交 `POST /agents`，成功后 `router.push(`/agents/${id}`)`
+- 两种输入模式 Tab 切换: 表单 / YAML
+- **表单模式**：生成 OAF v0.8.0 AGENTS.md 格式
+  - Identity 区块: name, vendorKey, agentKey, version
+  - Metadata 区块: description, author, license, tags
+  - Skills 区块: 动态添加/删除技能 (name, source, version, required)
+  - MCP Servers 区块: 动态添加/删除 MCP 服务器
+  - Tools 区块: checkbox 选择工具
+  - Config 区块: temperature, max_tokens
+  - Instructions 区块: Markdown 系统指令
+- **YAML 模式**: 直接编辑 OAF AGENTS.md
+- 提交 `POST /agents` (config_type: 'oaf')，成功后 `router.push(`/agents/${id}`)`
+- **注意**: LLM 配置 (API Key/Model/Endpoint) 通过环境变量注入，不在表单中配置
 
 ### AgentDetail (`/agents/[id]`, app/agents/[id]/page.tsx)
 最复杂的页面，包含：

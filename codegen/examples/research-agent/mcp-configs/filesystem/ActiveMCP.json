@@ -1,0 +1,27 @@
+{
+  "vendor": "block",
+  "server": "filesystem",
+  "version": "1.0.0",
+  "selectedTools": [
+    {
+      "name": "read_file",
+      "enabled": true,
+      "description": "读取文件内容进行分析",
+      "required": true
+    },
+    {
+      "name": "write_file",
+      "enabled": true,
+      "description": "写入/保存文件",
+      "required": true
+    },
+    {
+      "name": "list_directory",
+      "enabled": true,
+      "description": "列出目录内容",
+      "required": false
+    }
+  ],
+  "excludedTools": ["delete_file", "chmod"],
+  "contextStrategy": "subset"
+}

@@ -171,24 +171,54 @@ func (s *AgentService) GenerateCodeWithBaseImage(id uint, baseImage string) (*mo
 	}
 	s.db.Create(gen)
 
-	var cfg map[string]interface{}
-	if err := json.Unmarshal([]byte(agent.Config), &cfg); err != nil {
-		gen.Status = model.GenFailed
-		gen.ErrorMsg = err.Error()
-		s.db.Save(gen)
-		return gen, err
-	}
-
 	prefix := fmt.Sprintf("agents/%d/v%d", agent.ID, agent.Version)
-	files, err := s.codegen.RunAndStoreWithBaseImage(cfg, prefix, baseImage)
-	if err != nil {
-		gen.Status = model.GenFailed
-		gen.ErrorMsg = err.Error()
-		s.db.Save(gen)
-		return gen, err
+
+	var files map[string]string
+
+	if agent.ConfigType == model.ConfigOAF {
+		oafConfig, err := model.ParseOAF(agent.Config)
+		if err != nil {
+			gen.Status = model.GenFailed
+			gen.ErrorMsg = err.Error()
+			s.db.Save(gen)
+			return gen, err
+		}
+
+		if err := oafConfig.Validate(); err != nil {
+			gen.Status = model.GenFailed
+			gen.ErrorMsg = err.Error()
+			s.db.Save(gen)
+			return gen, err
+		}
+
+		files, err = s.codegen.RunWithOAF(oafConfig, prefix)
+		if err != nil {
+			gen.Status = model.GenFailed
+			gen.ErrorMsg = err.Error()
+			s.db.Save(gen)
+			return gen, err
+		}
+	} else {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal([]byte(agent.Config), &cfg); err != nil {
+			gen.Status = model.GenFailed
+			gen.ErrorMsg = err.Error()
+			s.db.Save(gen)
+			return gen, err
+		}
+
+		files, err = s.codegen.RunAndStoreWithBaseImage(cfg, prefix, baseImage)
+		if err != nil {
+			gen.Status = model.GenFailed
+			gen.ErrorMsg = err.Error()
+			s.db.Save(gen)
+			return gen, err
+		}
 	}
 
-	if path, ok := files["agent.py"]; ok {
+	if path, ok := files["main.py"]; ok {
+		gen.CodePath = path
+	} else if path, ok := files["agent.py"]; ok {
 		gen.CodePath = path
 	}
 	if path, ok := files["Dockerfile"]; ok {
@@ -240,6 +270,13 @@ func (s *AgentService) CreateDeployment(dep *model.Deployment) error {
 }
 
 func extractName(configJSON string) string {
+	if strings.HasPrefix(strings.TrimSpace(configJSON), "---") {
+		oaf, err := model.ParseOAF(configJSON)
+		if err == nil {
+			return oaf.Name
+		}
+	}
+
 	var cfg map[string]interface{}
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		return "unknown"

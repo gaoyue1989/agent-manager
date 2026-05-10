@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""
+Research Assistant - A2A Server
+
+Generated from OAF: acme/research-assistant v1.0.0
+DeepAgents 原生加载 OAF 配置 + Skills + MCP
+"""
+
+import os
+import sys
+import yaml
+import json
+import uuid
+from pathlib import Path
+from typing import Optional
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+
+from codegen.frameworks.deepagents.agent_card_gen import AgentCardGenerator
+from codegen.frameworks.deepagents.a2ui_extension import A2UIExtension
+from codegen.frameworks.deepagents.a2a_client import SubAgentRegistry
+from codegen.frameworks.deepagents.llm_config import llm_config
+
+AGENT_DIR = Path(__file__).parent
+
+
+class OAFConfig:
+    def __init__(self, agent_dir: Path):
+        self.agent_dir = agent_dir
+        self.agents_md = agent_dir / "AGENTS.md"
+        self.config = self._load()
+
+    def _load(self) -> dict:
+        if not self.agents_md.exists():
+            return {}
+        content = self.agents_md.read_text(encoding="utf-8")
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                config = yaml.safe_load(parts[1].strip()) or {}
+                config["instructions"] = parts[2].strip()
+                return config
+        return {}
+
+    @property
+    def name(self) -> str:
+        return self.config.get("name", "Unknown Agent")
+
+    @property
+    def description(self) -> str:
+        return self.config.get("description", "")
+
+    @property
+    def instructions(self) -> str:
+        return self.config.get("instructions", "")
+
+    @property
+    def model_config(self) -> dict:
+        return self.config.get("model", {})
+
+    @property
+    def tools(self) -> list:
+        return self.config.get("tools", [])
+
+    @property
+    def skills(self) -> list:
+        return self.config.get("skills", [])
+
+    @property
+    def mcp_servers(self) -> list:
+        return self.config.get("mcpServers", [])
+
+    @property
+    def sub_agents(self) -> list:
+        return self.config.get("agents", [])
+
+
+class SkillLoader:
+    def __init__(self, agent_dir: Path):
+        self.skills_dir = agent_dir / "skills"
+
+    def load_skills(self) -> list:
+        loaded = []
+        if not self.skills_dir.exists():
+            return loaded
+        for skill_dir in self.skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            try:
+                module = self._load_skill_module(skill_dir)
+                loaded.append({"name": skill_dir.name, "path": str(skill_dir), "module": module})
+            except Exception as e:
+                print(f"Warning: Failed to load skill {skill_dir.name}: {e}")
+        return loaded
+
+    def _load_skill_module(self, skill_dir: Path):
+        import importlib.util
+        scripts_dir = skill_dir / "scripts"
+        if not scripts_dir.exists():
+            return None
+        for py_file in scripts_dir.glob("*.py"):
+            if py_file.name == "__init__.py":
+                continue
+            spec = importlib.util.spec_from_file_location(f"skill_{skill_dir.name}_{py_file.stem}", str(py_file))
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+        return None
+
+
+class MCPLoader:
+    def __init__(self, agent_dir: Path):
+        self.mcp_dir = agent_dir / "mcp-configs"
+
+    def load_configs(self) -> list[dict]:
+        configs = []
+        if not self.mcp_dir.exists():
+            return configs
+        for mcp_dir in self.mcp_dir.iterdir():
+            if not mcp_dir.is_dir():
+                continue
+            mcp_config = {}
+            active_mcp = mcp_dir / "ActiveMCP.json"
+            if active_mcp.exists():
+                mcp_config["tools"] = json.loads(active_mcp.read_text())
+            config_yaml = mcp_dir / "config.yaml"
+            if config_yaml.exists():
+                mcp_config["connection"] = yaml.safe_load(config_yaml.read_text())
+            if mcp_config:
+                configs.append(mcp_config)
+        return configs
+
+
+class DeepAgentsOAF:
+    def __init__(self, oaf_config: OAFConfig, skill_loader: SkillLoader, mcp_loader: MCPLoader):
+        self.oaf = oaf_config
+        self.name = oaf_config.name
+        self.description = oaf_config.description
+        self.instructions = oaf_config.instructions
+        self.model_config = oaf_config.model_config
+        self.tools = oaf_config.tools
+        self.skills = skill_loader.load_skills()
+        self.mcp_configs = mcp_loader.load_configs()
+        self.sub_agents_config = oaf_config.sub_agents
+
+    async def invoke(self, message: str, history: list = None) -> str:
+        import httpx
+
+        if not llm_config.is_valid():
+            return f"[Mock Agent:{self.name}] {message}"
+
+        skill_info = ""
+        for s in self.skills:
+            module = s.get("module")
+            doc = ""
+            if module and hasattr(module, "__doc__"):
+                doc = module.__doc__ or ""
+            skill_info += f"\n- {s['name']}: {doc.strip()[:200]}"
+
+        mcp_info = ""
+        for mcp in self.mcp_configs:
+            conn = mcp.get("connection", {})
+            mcp_name = conn.get("server", "unknown")
+            tools_list = mcp.get("tools", {}).get("selectedTools", [])
+            mcp_info += f"\n- MCP: {mcp_name} ({len(tools_list)} tools: {[t['name'] for t in tools_list]})"
+
+        full_instructions = self.instructions
+        if skill_info:
+            full_instructions += f"\n\n## Available Skills{skill_info}"
+        if mcp_info:
+            full_instructions += f"\n\n## Available MCP Servers{mcp_info}"
+
+        messages = [{"role": "system", "content": full_instructions}]
+        if history:
+            messages.extend({"role": h.get("role", "user"), "content": h.get("content", "")} for h in history)
+        messages.append({"role": "user", "content": message})
+
+        headers = {"Authorization": f"Bearer {llm_config.api_key}", "Content-Type": "application/json"}
+        payload = {"model": llm_config.model_id, "messages": messages, "max_tokens": llm_config.max_tokens, "temperature": llm_config.temperature}
+
+        async with httpx.AsyncClient(timeout=llm_config.timeout) as client:
+            resp = await client.post(f"{llm_config.base_url}/chat/completions", headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            msg = data["choices"][0]["message"]
+            return msg.get("content", "") or msg.get("reasoning_content", "")
+
+    async def invoke_skill(self, skill_name: str, input_data: str) -> str:
+        for skill in self.skills:
+            if skill["name"] == skill_name:
+                module = skill.get("module")
+                if module:
+                    result = module.main(input_data) if hasattr(module, "main") else str(module)
+                    return str(result)
+        return f"Skill '{skill_name}' not found"
+
+
+def load_oaf_agent(agent_dir: Path) -> DeepAgentsOAF:
+    return DeepAgentsOAF(OAFConfig(agent_dir), SkillLoader(agent_dir), MCPLoader(agent_dir))
+
+
+app = FastAPI(title="Research Assistant", description="智能研究助手", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+config_errors = llm_config.validate()
+if config_errors:
+    print("Warning: LLM config issues:", config_errors)
+
+print(f"Loading OAF from: {AGENT_DIR}")
+agent = load_oaf_agent(AGENT_DIR)
+print(f"Agent: {agent.name}")
+print(f"  Skills: {len(agent.skills)} - {[s['name'] for s in agent.skills]}")
+print(f"  MCP: {len(agent.mcp_configs)} - {[m.get('connection',{}).get('server','?') for m in agent.mcp_configs]}")
+print(f"  Sub Agents: {len(agent.sub_agents_config)}")
+print(f"  Tools: {agent.tools}")
+
+a2ui = A2UIExtension()
+sub_agents = SubAgentRegistry()
+
+for sa in agent.sub_agents_config:
+    ep = sa.get("endpoint", "")
+    if ep:
+        sub_agents.register(f"{sa.get('vendor','local')}/{sa.get('agent','unknown')}", ep)
+
+card_gen = AgentCardGenerator(
+    name=agent.name, description=agent.description, a2ui_enabled=True,
+    skills=[{"id": s.get("name", "unknown"), "name": s.get("name", "Unknown"),
+    "description": f"Skill: {s.get('name','unknown')}", "tags": [], "examples": [],
+    "inputModes": ["text"], "outputModes": ["text", "a2ui/v0.8"]} for s in agent.oaf.skills])
+
+tasks_store: dict = {}
+
+
+@app.get("/.well-known/agent-card.json")
+async def agent_card():
+    return card_gen.generate()
+
+@app.post("/")
+async def jsonrpc_handler(request: Request):
+    body = await request.json()
+    method = body.get("method"); params = body.get("params", {}); msg_id = body.get("id")
+    try:
+        if method == "message/send": result = await _handle_send_message(params)
+        elif method == "tasks/get": result = await _handle_get_task(params)
+        elif method == "tasks/list": result = await _handle_list_tasks(params)
+        elif method == "tasks/cancel": result = await _handle_cancel_task(params)
+        else: return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32601, "message": f"Method not found: {method}"}, "id": msg_id})
+        return JSONResponse({"jsonrpc": "2.0", "result": result, "id": msg_id})
+    except Exception as e:
+        return JSONResponse({"jsonrpc": "2.0", "error": {"code": -1, "message": str(e)}, "id": msg_id})
+
+@app.post("/tasks")
+async def rest_send_message(request: Request):
+    return JSONResponse(await _handle_send_message(await request.json()))
+
+@app.get("/tasks/{task_id}")
+async def rest_get_task(task_id: str):
+    return JSONResponse(await _handle_get_task({"id": task_id}))
+
+@app.get("/tasks")
+async def rest_list_tasks():
+    return JSONResponse(await _handle_list_tasks({}))
+
+@app.get("/skills")
+async def list_skills():
+    return [{"name": s["name"], "path": s["path"]} for s in agent.skills]
+
+@app.get("/mcp")
+async def list_mcp():
+    return agent.mcp_configs
+
+@app.post("/skill/{skill_name}")
+async def invoke_skill(skill_name: str, request: Request):
+    body = await request.json()
+    result = await agent.invoke_skill(skill_name, body.get("input", ""))
+    return {"skill": skill_name, "result": result}
+
+async def _handle_send_message(params: dict):
+    message = params.get("message", {})
+    parts = message.get("parts", [])
+    user_text = next((p["text"] for p in parts if "text" in p), "")
+    metadata = params.get("metadata", {})
+    a2ui_caps = metadata.get("a2uiClientCapabilities", {})
+    task_id = str(uuid.uuid4())
+    task = {"id": task_id, "status": {"state": "working"}, "artifacts": []}
+    tasks_store[task_id] = task
+    try:
+        response_text = await agent.invoke(user_text)
+        if a2ui_caps.get("supportedCatalogIds"):
+            task["artifacts"].append(a2ui.generate_artifact(task_id, response_text, a2ui_caps["supportedCatalogIds"][0]))
+        else:
+            task["artifacts"].append({"artifactId": str(uuid.uuid4()), "name": "response", "parts": [{"text": response_text}]})
+        task["status"]["state"] = "completed"
+    except Exception as e:
+        task["status"]["state"] = "failed"; task["status"]["message"] = str(e)
+    return task
+
+async def _handle_get_task(params: dict):
+    tid = params.get("id")
+    return tasks_store.get(tid, {"error": "Task not found"})
+
+async def _handle_list_tasks(params: dict):
+    return list(tasks_store.values())
+
+async def _handle_cancel_task(params: dict):
+    tid = params.get("id")
+    if tid in tasks_store: tasks_store[tid]["status"]["state"] = "canceled"
+    return tasks_store.get(tid, {"error": "Task not found"})
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "agent": agent.name, "skills": len(agent.skills), "mcp_servers": len(agent.mcp_configs)}
+
+@app.get("/")
+async def root():
+    return {"agent": agent.name, "description": agent.description, "oaf": {"tools": agent.tools, "skills": len(agent.skills), "mcp": len(agent.mcp_configs), "sub_agents": len(agent.sub_agents_config)}, "endpoints": {"agent_card": "/.well-known/agent-card.json", "skills": "/skills", "mcp": "/mcp", "tasks": "/tasks", "health": "/health"}}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

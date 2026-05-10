@@ -2,6 +2,8 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
+import { parseOAFYAML } from '@/lib/oaf-parser';
+import { OAFConfig } from '@/lib/oaf-types';
 
 const statusMap: Record<string, string> = {
   draft: '草稿', generated: '已生成', built: '已构建',
@@ -12,6 +14,7 @@ export default function AgentDetail() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [agent, setAgent] = useState<any>(null);
+  const [oafConfig, setOafConfig] = useState<OAFConfig | null>(null);
   const [code, setCode] = useState('');
   const [deployments, setDeployments] = useState<any[]>([]);
   const [imageInfo, setImageInfo] = useState<any>(null);
@@ -28,6 +31,16 @@ export default function AgentDetail() {
   const load = async () => {
     const a = await api.agents.get(Number(id));
     setAgent(a);
+    
+    if (a.config_type === 'oaf') {
+      try {
+        const parsed = parseOAFYAML(a.config);
+        setOafConfig(parsed);
+      } catch (e) {
+        console.error('Parse OAF failed:', e);
+      }
+    }
+    
     if (a.status !== 'draft') {
       try { const r = await api.agents.getCode(Number(id)); setCode(r.code); } catch {}
       try { const d = await api.agents.getDeployments(Number(id)); setDeployments(d.items || []); } catch {}
@@ -81,13 +94,14 @@ export default function AgentDetail() {
   if (loading) return <div className="text-center py-20 text-gray-400">加载中...</div>;
   if (!agent) return <div className="text-center py-20 text-gray-400">未找到 Agent</div>;
 
-  const cfg = JSON.parse(agent.config || '{}');
+  const isOAF = agent.config_type === 'oaf';
+  const cfg = isOAF ? {} : JSON.parse(agent.config || '{}');
   const isPublished = agent.status === 'published';
   const hasImage = agent.status === 'built' || agent.status === 'deployed' || isPublished || agent.status === 'unpublished';
 
-  const enabledTools: string[] = cfg.enabled_tools || [];
-  const excludedTools: string[] = cfg.excluded_tools || [];
-  const mcpConfig = cfg.mcp_config;
+  const enabledTools: string[] = isOAF ? (oafConfig?.tools || []) : (cfg.enabled_tools || []);
+  const excludedTools: string[] = isOAF ? [] : (cfg.excluded_tools || []);
+  const mcpConfig = isOAF ? (oafConfig?.mcpServers?.[0]) : cfg.mcp_config;
   const endpointURL = deployments.length > 0 ? (deployments[0].endpoint_url || '') : '';
 
   return (
@@ -101,9 +115,23 @@ export default function AgentDetail() {
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="font-semibold mb-3">基本信息</h2>
           <div className="space-y-2 text-sm">
-            <div><span className="text-gray-500">描述:</span> {agent.description || '-'}</div>
-            <div><span className="text-gray-500">模型:</span> {cfg.model}</div>
-            <div><span className="text-gray-500">提示词:</span> {cfg.system_prompt?.slice(0, 80)}...</div>
+            <div><span className="text-gray-500">描述:</span> {oafConfig?.description || agent.description || '-'}</div>
+            {isOAF && oafConfig && (
+              <>
+                <div><span className="text-gray-500">Slug:</span> <code className="bg-gray-100 px-1 rounded">{oafConfig.slug}</code></div>
+                <div><span className="text-gray-500">作者:</span> {oafConfig.author}</div>
+                <div><span className="text-gray-500">许可证:</span> {oafConfig.license}</div>
+                {oafConfig.tags && oafConfig.tags.length > 0 && (
+                  <div><span className="text-gray-500">标签:</span> {oafConfig.tags.join(', ')}</div>
+                )}
+              </>
+            )}
+            {!isOAF && (
+              <>
+                <div><span className="text-gray-500">模型:</span> {cfg.model}</div>
+                <div><span className="text-gray-500">提示词:</span> {cfg.system_prompt?.slice(0, 80)}...</div>
+              </>
+            )}
             {endpointURL && (
               <div><span className="text-gray-500">对外地址:</span> <code className="bg-green-50 text-green-700 px-2 py-0.5 rounded text-xs">{endpointURL}</code></div>
             )}
@@ -150,10 +178,22 @@ export default function AgentDetail() {
         </div>
       </div>
 
-      {(enabledTools.length > 0 || excludedTools.length > 0 || mcpConfig) && (
+      {(enabledTools.length > 0 || excludedTools.length > 0 || mcpConfig || (isOAF && oafConfig?.skills && oafConfig.skills.length > 0)) && (
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="font-semibold mb-3">Agent 配置详情</h2>
           <div className="space-y-3">
+            {isOAF && oafConfig?.skills && oafConfig.skills.length > 0 && (
+              <div>
+                <span className="text-xs font-medium text-gray-500">Skills ({oafConfig.skills.length}):</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {oafConfig.skills.map(s => (
+                    <span key={s.name} className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-mono">
+                      {s.name} {s.source === 'local' ? '(local)' : '(remote)'}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             {enabledTools.length > 0 && (
               <div>
                 <span className="text-xs font-medium text-gray-500">启用工具 ({enabledTools.length}):</span>
@@ -174,12 +214,20 @@ export default function AgentDetail() {
                 </div>
               </div>
             )}
-            {mcpConfig && mcpConfig.url && (
+            {mcpConfig && (
               <div>
                 <span className="text-xs font-medium text-gray-500">MCP 配置:</span>
                 <div className="text-xs mt-1">
-                  <code className="bg-gray-100 px-2 py-0.5 rounded">{mcpConfig.url}</code>
-                  <span className="text-gray-400 ml-2">({mcpConfig.transport})</span>
+                  {isOAF ? (
+                    <code className="bg-gray-100 px-2 py-0.5 rounded">
+                      {(mcpConfig as any).vendor}/{(mcpConfig as any).server}
+                    </code>
+                  ) : (
+                    <>
+                      <code className="bg-gray-100 px-2 py-0.5 rounded">{(mcpConfig as any).url}</code>
+                      <span className="text-gray-400 ml-2">({(mcpConfig as any).transport})</span>
+                    </>
+                  )}
                 </div>
               </div>
             )}
