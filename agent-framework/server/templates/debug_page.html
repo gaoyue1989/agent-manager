@@ -511,14 +511,22 @@ async function sendMessage(){
             if(data.token&&streamingDiv){fullText+=data.token;updateStreamContent(fullText);}
             else if(data.type==='tool_call'){
               const tcId=data.tool_call_id||'';
-              pendingToolCalls[tcId]={name:data.name,args:data.args};
-              if(streamingDiv){
-                const cursor=streamingDiv.querySelector('.cursor');
-                if(cursor)cursor.remove();
-                if(fullText) updateStreamContent(fullText);
+              // Existing block? Update args. Otherwise create new block.
+              const existing=document.querySelector('.tool-call-block[data-tcid="'+esc(tcId)+'"]');
+              if(existing){
+                pendingToolCalls[tcId]={name:data.name||(pendingToolCalls[tcId]&&pendingToolCalls[tcId].name),args:data.args};
+                const argsPre=existing.querySelector('.tc-args pre');
+                if(argsPre) argsPre.textContent=JSON.stringify(data.args,null,2);
+              }else{
+                pendingToolCalls[tcId]={name:data.name,args:data.args};
+                if(streamingDiv){
+                  const cursor=streamingDiv.querySelector('.cursor');
+                  if(cursor)cursor.remove();
+                  if(fullText) updateStreamContent(fullText);
+                }
+                addToolCallMessage(data.name,data.args,null,tcId,false);
+                streamingDiv=null;
               }
-              addToolCallMessage(data.name,data.args,null,tcId,false);
-              streamingDiv=null;
             }
             else if(data.type==='tool_result'){
               const tc=pendingToolCalls[data.tool_call_id]||{name:data.name,args:{}};

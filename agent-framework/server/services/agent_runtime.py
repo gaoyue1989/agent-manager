@@ -184,10 +184,9 @@ class AgentRuntime:
                         if tc_id and tc_name:
                             pending_tool_calls[tc_id] = {"name": tc_name, "args": tc_args}
                             yield {"type": "tool_call", "name": tc_name, "args": tc_args, "tool_call_id": tc_id}
-                        elif tc_id and tc_name is None and tc_name != "":
-                            pass
                         elif tc_args and tc_id in pending_tool_calls:
                             pending_tool_calls[tc_id]["args"] = tc_args
+                            yield {"type": "tool_call", "name": pending_tool_calls[tc_id]["name"], "args": tc_args, "tool_call_id": tc_id}
                 else:
                     content = self._get_message_content(chunk)
                     if content and len(content) > len(full_text):
