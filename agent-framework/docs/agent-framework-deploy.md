@@ -111,19 +111,56 @@ LLM_MODEL_ID=your_model_id
 LLM_BASE_URL=https://your-api-endpoint/v1
 ```
 
-### 3.3 构建并启动
+### 3.3 构建镜像
+
+```bash
+docker build -t agent-framework:latest .
+```
+
+镜像大小约 800 MB，首次构建耗时约 2-3 分钟。
+
+### 3.4 启动服务
 
 ```bash
 docker compose up -d
 ```
 
-### 3.4 停止
+启动后等待 healthy 状态：
+
+```bash
+$ docker ps --filter name=agent-framework
+CONTAINER ID   STATUS
+abc123def456   Up 10 seconds (healthy)
+```
+
+### 3.5 查看日志
+
+```bash
+docker logs agent-framework-agent-framework-1
+```
+
+预期输出：
+
+```
+Agent Framework v1.0.0
+Config dir: /config
+Server: http://0.0.0.0:8100
+Debug UI: http://0.0.0.0:8100/debug
+LLM: ctyun / <model-id>
+Loaded OAF: My Agent v1.0.0
+  Skills: 0 - []
+  MCP: 0 - []
+  Tools: ['Read', 'Bash', 'Edit', 'Grep']
+Uvicorn running on http://0.0.0.0:8100
+```
+
+### 3.6 停止
 
 ```bash
 docker compose down
 ```
 
-### 3.5 容器内文件布局
+### 3.7 容器内文件布局
 
 ```
 /app/
@@ -356,7 +393,100 @@ config/mcp-configs/<server-name>/
 
 ---
 
-## 8. A2A JSON-RPC 方法
+## 8. API 验证
+
+部署完成后，可通过以下命令验证各端点是否正常。
+
+### 8.1 健康检查
+
+```bash
+$ curl -s http://localhost:8100/health | python3 -m json.tool
+```
+```json
+{
+    "status": "healthy",
+    "agent": "Agent Framework Test",
+    "version": "1.0.0",
+    "skills": 0,
+    "mcp_servers": 0,
+    "llm_configured": true
+}
+```
+
+### 8.2 Agent Card 发现
+
+```bash
+$ curl -s http://localhost:8100/.well-known/agent-card.json | python3 -m json.tool
+```
+```json
+{
+    "name": "Agent Framework Test",
+    "url": "http://0.0.0.0:8100/",
+    "version": "1.0.0",
+    "capabilities": {
+        "streaming": true,
+        "stateTransitionHistory": true
+    },
+    "skills": [...],
+    "extensions": [
+        {
+            "uri": "https://a2ui.org/a2a-extension/a2ui/v0.8"
+        }
+    ]
+}
+```
+
+### 8.3 同步消息 (message/send)
+
+```bash
+$ curl -s -X POST http://localhost:8100/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"message/send","id":"1","params":{"message":{"role":"user","text":"say hello"}}}' | python3 -m json.tool
+```
+```json
+{
+    "jsonrpc": "2.0",
+    "result": {
+        "id": "<task-uuid>",
+        "status": { "state": "completed" },
+        "artifacts": [
+            {
+                "name": "response",
+                "parts": [{ "text": "Hello! ..." }]
+            }
+        ],
+        "history": [...]
+    },
+    "id": "1"
+}
+```
+
+### 8.4 流式消息 (message/stream, SSE)
+
+```bash
+$ curl -s -X POST http://localhost:8100/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"message/stream","id":"2","params":{"message":{"role":"user","text":"count from 1 to 3"}}}'
+```
+```
+event: task_update
+data: {"id": "<uuid>", "state": "working"}
+
+event: token
+data: {"token": "1", "task_id": "<uuid>"}
+
+event: token
+data: {"token": ",", "task_id": "<uuid>"}
+...
+```
+
+### 8.5 调试页面
+
+浏览器访问 `http://localhost:8100/debug`，可选择模式 (Send / Stream / A2UI) 发送消息并查看实时流式响应。
+
+---
+
+## 9. A2A JSON-RPC 方法
 
 | 方法 | 说明 |
 |------|------|
@@ -368,7 +498,7 @@ config/mcp-configs/<server-name>/
 
 ---
 
-## 9. 完整配置示例
+## 10. 完整配置示例
 
 下例展示了所有可用配置字段的完整 AGENTS.md：
 
@@ -476,7 +606,7 @@ You are a full-featured agent for demonstration.
 
 ---
 
-## 10. 常见问题
+## 11. 常见问题
 
 ### Q: 服务启动后 LLM 返回错误
 

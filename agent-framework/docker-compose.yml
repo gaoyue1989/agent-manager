@@ -16,6 +16,7 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
       - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - CHECKPOINT_MYSQL_DSN=${CHECKPOINT_MYSQL_DSN:-mysql+asyncmy://agent_manager:Agent%40Manager2026@host.docker.internal:3307/agent_manager_test}
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8100
     restart: unless-stopped

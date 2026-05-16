@@ -1,6 +1,5 @@
 import json
 import uuid
-import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -11,9 +10,10 @@ from server.services.a2ui_service import A2UIService
 
 
 class A2ARoutes:
-    """A2A v1.0.0 端点注册
+    """A2A v1.0.0 端点 — 全 Checkpoint 驱动
 
-    JSON-RPC 2.0 binding + HTTP REST binding + SSE streaming
+    JSON-RPC 2.0 + HTTP REST + SSE streaming
+    会话由 MySQL checkpoint 持久化，thread_id 贯穿所有请求
     """
 
     def __init__(
@@ -27,7 +27,6 @@ class A2ARoutes:
         self.config = config
         self.agent = agent_runtime
         self.a2ui = a2ui_service
-        self.tasks_store: dict[str, dict] = {}
 
         self._register_routes()
 
@@ -54,12 +53,20 @@ class A2ARoutes:
                             "X-Accel-Buffering": "no",
                         },
                     )
-                elif method == "tasks/get":
-                    result = await self._handle_get_task(params)
-                elif method == "tasks/list":
-                    result = await self._handle_list_tasks(params)
+                elif method == "threads/list":
+                    result = await self._handle_list_threads(params)
+                elif method == "threads/get":
+                    result = await self._handle_get_thread(params)
+                elif method == "threads/delete":
+                    result = await self._handle_delete_thread(params)
+                elif method == "threads/create":
+                    result = await self._handle_create_thread(params)
+                elif method in ("tasks/get", "threads/get"):
+                    result = await self._handle_get_thread(params)
+                elif method in ("tasks/list", "threads/list"):
+                    result = await self._handle_list_threads(params)
                 elif method == "tasks/cancel":
-                    result = await self._handle_cancel_task(params)
+                    result = await self._handle_delete_thread(params)
                 else:
                     return JSONResponse({
                         "jsonrpc": "2.0",
@@ -87,123 +94,127 @@ class A2ARoutes:
 
         @app.get("/tasks/{task_id}")
         async def rest_get_task(task_id: str):
-            result = await self._handle_get_task({"id": task_id})
+            result = await self._handle_get_thread({"thread_id": task_id})
             return JSONResponse(result)
 
         @app.get("/tasks")
         async def rest_list_tasks():
-            result = await self._handle_list_tasks({})
+            result = await self._handle_list_threads({})
             return JSONResponse(result)
 
     async def _handle_send_message(self, params: dict) -> dict:
         message = params.get("message", {})
         user_text = extract_user_text(message)
         metadata = params.get("metadata", {})
+        thread_id = metadata.get("thread_id") or str(uuid.uuid4())
         a2ui_caps = metadata.get("a2uiClientCapabilities", {})
 
-        task_id = str(uuid.uuid4())
-        history = params.get("history", [])
+        response_text, thread_id = await self.agent.invoke(user_text, thread_id)
 
-        task = {
-            "id": task_id,
-            "status": {"state": "working"},
-            "artifacts": [],
-            "history": history,
+        if a2ui_caps.get("supportedCatalogIds"):
+            catalog_id = a2ui_caps["supportedCatalogIds"][0]
+            artifact = self.a2ui.generate_artifact(
+                surface_id=thread_id,
+                response_text=response_text,
+                catalog_id=catalog_id,
+            )
+        else:
+            artifact = {
+                "artifactId": str(uuid.uuid4()),
+                "name": "response",
+                "parts": [{"text": response_text}],
+            }
+
+        return {
+            "id": thread_id,
+            "status": {"state": "completed"},
+            "artifacts": [artifact],
+            "metadata": {"thread_id": thread_id},
         }
-        self.tasks_store[task_id] = task
-
-        try:
-            response_text = await self.agent.invoke(user_text, history)
-
-            if a2ui_caps.get("supportedCatalogIds"):
-                catalog_id = a2ui_caps["supportedCatalogIds"][0]
-                artifact = self.a2ui.generate_artifact(
-                    surface_id=task_id,
-                    response_text=response_text,
-                    catalog_id=catalog_id,
-                )
-            else:
-                artifact = {
-                    "artifactId": str(uuid.uuid4()),
-                    "name": "response",
-                    "parts": [{"text": response_text}],
-                }
-
-            task["artifacts"].append(artifact)
-            task["history"].append({"role": "user", "content": user_text})
-            task["history"].append({"role": "assistant", "content": response_text})
-            task["status"]["state"] = "completed"
-
-        except Exception as e:
-            task["status"]["state"] = "failed"
-            task["status"]["message"] = str(e)
-
-        return task
 
     async def _handle_stream_message(self, params: dict):
         message = params.get("message", {})
         user_text = extract_user_text(message)
         metadata = params.get("metadata", {})
+        thread_id = metadata.get("thread_id") or str(uuid.uuid4())
         a2ui_caps = metadata.get("a2uiClientCapabilities", {})
-        history = params.get("history", [])
-        task_id = str(uuid.uuid4())
 
-        task = {
-            "id": task_id,
-            "status": {"state": "working"},
-            "artifacts": [],
-            "history": history,
-        }
-        self.tasks_store[task_id] = task
-
-        yield f"event: task_update\ndata: {json.dumps({'id': task_id, 'state': 'working'})}\n\n"
+        yield f"event: task_update\ndata: {json.dumps({'id': thread_id, 'state': 'working', 'metadata': {'thread_id': thread_id}})}\n\n"
 
         full_text = ""
+        tool_calls = []
 
         try:
-            async for token in self.agent.invoke_stream(user_text, history):
-                full_text += token
-                yield f"event: token\ndata: {json.dumps({'token': token, 'task_id': task_id})}\n\n"
+            async for event in self.agent.invoke_stream(user_text, thread_id):
+                evt_type = event.get("type", "")
 
-            if full_text:
-                if a2ui_caps.get("supportedCatalogIds"):
-                    catalog_id = a2ui_caps["supportedCatalogIds"][0]
-                    artifact = self.a2ui.generate_artifact(task_id, full_text, catalog_id)
-                else:
-                    artifact = {
-                        "artifactId": str(uuid.uuid4()),
-                        "name": "response",
-                        "parts": [{"text": full_text}],
+                if evt_type == "token":
+                    token = event.get("token", "")
+                    full_text += token
+                    yield f"event: token\ndata: {json.dumps({'token': token, 'task_id': thread_id})}\n\n"
+
+                elif evt_type == "tool_call":
+                    tc = {
+                        "type": "tool_call",
+                        "name": event.get("name", ""),
+                        "args": event.get("args", {}),
+                        "tool_call_id": event.get("tool_call_id", ""),
                     }
+                    tool_calls.append(tc)
+                    yield f"event: tool_call\ndata: {json.dumps({'task_id': thread_id, **tc})}\n\n"
 
-                task["artifacts"].append(artifact)
-                task["history"].append({"role": "user", "content": user_text})
-                task["history"].append({"role": "assistant", "content": full_text})
-                task["status"]["state"] = "completed"
+                elif evt_type == "tool_result":
+                    tr = {
+                        "type": "tool_result",
+                        "name": event.get("name", ""),
+                        "result": event.get("result", ""),
+                        "tool_call_id": event.get("tool_call_id", ""),
+                    }
+                    yield f"event: tool_result\ndata: {json.dumps({'task_id': thread_id, **tr})}\n\n"
 
-                yield f"event: task_update\ndata: {json.dumps({'id': task_id, 'state': 'completed', 'artifacts': task['artifacts']})}\n\n"
+                elif evt_type == "done":
+                    if full_text:
+                        if a2ui_caps.get("supportedCatalogIds"):
+                            catalog_id = a2ui_caps["supportedCatalogIds"][0]
+                            artifact = self.a2ui.generate_artifact(thread_id, full_text, catalog_id)
+                        else:
+                            artifact = {
+                                "artifactId": str(uuid.uuid4()),
+                                "name": "response",
+                                "parts": [{"text": full_text}],
+                            }
+
+                        yield f"event: task_update\ndata: {json.dumps({'id': thread_id, 'state': 'completed', 'artifacts': [artifact], 'metadata': {'thread_id': thread_id}})}\n\n"
+                    else:
+                        yield f"event: task_update\ndata: {json.dumps({'id': thread_id, 'state': 'completed', 'metadata': {'thread_id': thread_id}})}\n\n"
+                    return
 
         except Exception as e:
-            task["status"]["state"] = "failed"
-            task["status"]["message"] = str(e)
-            yield f"event: error\ndata: {json.dumps({'task_id': task_id, 'error': str(e)})}\n\n"
+            yield f"event: error\ndata: {json.dumps({'task_id': thread_id, 'error': str(e)})}\n\n"
 
         yield f"event: done\ndata: [DONE]\n\n"
 
-    async def _handle_get_task(self, params: dict) -> dict:
-        task_id = params.get("id")
-        if not task_id or task_id not in self.tasks_store:
-            return {"error": "Task not found"}
-        return self.tasks_store[task_id]
+    async def _handle_list_threads(self, params: dict) -> dict:
+        threads = await self.agent.list_threads()
+        return {"threads": threads}
 
-    async def _handle_list_tasks(self, params: dict) -> list:
-        return list(self.tasks_store.values())
+    async def _handle_get_thread(self, params: dict) -> dict:
+        thread_id = params.get("thread_id") or params.get("id") or ""
+        if not thread_id:
+            return {"error": "thread_id is required"}
+        state = await self.agent.get_thread_state(thread_id)
+        if state.get("error"):
+            return {"error": state["error"]}
+        return state
 
-    async def _handle_cancel_task(self, params: dict) -> dict:
-        task_id = params.get("id")
-        if not task_id or task_id not in self.tasks_store:
-            return {"error": "Task not found"}
-        task = self.tasks_store[task_id]
-        if task["status"]["state"] == "working":
-            task["status"]["state"] = "canceled"
-        return task
+    async def _handle_delete_thread(self, params: dict) -> dict:
+        thread_id = params.get("thread_id") or params.get("id") or ""
+        if not thread_id:
+            return {"error": "thread_id is required"}
+        deleted = await self.agent.delete_thread(thread_id)
+        return {"thread_id": thread_id, "deleted": deleted}
+
+    async def _handle_create_thread(self, params: dict) -> dict:
+        thread_id = str(uuid.uuid4())
+        metadata = params.get("metadata", {})
+        return {"thread_id": thread_id, "metadata": metadata}

@@ -3,105 +3,148 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent Debug Console - A2A/A2UI Streaming</title>
+<title>Agent Debug Console — A2A/A2UI + Checkpoint</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
-.header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;align-items:center;justify-content:space-between}
-.header h1{font-size:18px;color:#58a6ff}
-.header .status{font-size:12px;padding:4px 10px;border-radius:12px;background:#238636;color:#fff}
-.header .status.error{background:#da3633}
-.header .btn-group{display:flex;gap:8px}
-.header .btn-group button{padding:4px 12px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:12px}
+.header{background:#161b22;border-bottom:1px solid #30363d;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header h1{font-size:16px;color:#58a6ff}
+.header .status-row{display:flex;align-items:center;gap:12px}
+.header .status-dot{width:8px;height:8px;border-radius:50%;background:#238636}
+.header .status-dot.error{background:#da3633}
+.header .status-dot.warn{background:#d29922}
+.header .status-text{font-size:12px;color:#8b949e}
+.header .btn-group{display:flex;gap:6px}
+.header .btn-group button{padding:4px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:11px}
 .header .btn-group button:hover{background:#30363d}
-.main{flex:1;display:flex;overflow:hidden}
-.sidebar{width:260px;background:#161b22;border-right:1px solid #30363d;padding:12px;overflow-y:auto;flex-shrink:0}
-.sidebar h3{font-size:12px;color:#8b949e;margin:12px 0 6px;text-transform:uppercase;letter-spacing:0.5px}
-.sidebar .info-row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid #21262d}
+.header .btn-group button.danger{color:#da3633;border-color:#da363333}
+.header .btn-group button.danger:hover{background:#da363322}
+.main{flex:1;display:flex;overflow:hidden;min-height:0}
+.sidebar{width:280px;background:#161b22;border-right:1px solid #30363d;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-scroll{flex:1;overflow-y:auto;padding:10px}
+.sidebar h3{font-size:11px;color:#8b949e;margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.5px}
+.sidebar .info-row{display:flex;justify-content:space-between;padding:3px 0;font-size:11px;border-bottom:1px solid #21262d}
 .sidebar .info-row .label{color:#8b949e}
 .sidebar .info-row .value{color:#c9d1d9;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tool-tag{display:inline-block;padding:2px 6px;margin:2px;background:#1f6feb33;color:#58a6ff;border-radius:4px;font-size:11px}
+.sidebar .thread-item{padding:6px 8px;margin:2px 0;border-radius:6px;cursor:pointer;font-size:11px;display:flex;justify-content:space-between;align-items:center;border:1px solid transparent}
+.sidebar .thread-item:hover{background:#21262d}
+.sidebar .thread-item.active{background:#1f6feb22;border-color:#1f6feb44}
+.sidebar .thread-item .tid{color:#8b949e;font-family:monospace;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px}
+.sidebar .thread-item .meta{color:#58a6ff;font-size:10px;text-align:right}
+.sidebar .thread-item .del-btn{visibility:hidden;margin-left:4px;color:#da3633;background:none;border:none;cursor:pointer;font-size:14px;line-height:1}
+.sidebar .thread-item:hover .del-btn{visibility:visible}
+.sidebar .sidebar-actions{display:flex;gap:6px;padding:8px 10px;border-top:1px solid #30363d}
+.sidebar .sidebar-actions button{flex:1;padding:6px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:11px}
+.sidebar .sidebar-actions button:hover{background:#30363d}
+.tool-tag{display:inline-block;padding:2px 6px;margin:2px;background:#1f6feb33;color:#58a6ff;border-radius:4px;font-size:10px}
 .chat-area{flex:1;display:flex;flex-direction:column;min-width:0}
-.messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
-.msg{max-width:85%;padding:10px 14px;border-radius:8px;font-size:14px;line-height:1.6;word-break:break-word;white-space:pre-wrap}
+.chat-header{display:flex;align-items:center;padding:6px 16px;background:#161b22;border-bottom:1px solid #30363d;gap:10px;flex-shrink:0}
+.chat-header .thread-label{font-size:11px;color:#8b949e}
+.chat-header .thread-id{font-family:monospace;font-size:11px;color:#58a6ff;background:#1f6feb22;padding:2px 8px;border-radius:4px}
+.chat-header .thread-id.empty{color:#8b949e;background:transparent}
+.messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:85%;padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.6;word-break:break-word;white-space:pre-wrap}
 .msg.user{align-self:flex-end;background:#1f6feb;color:#fff;border-bottom-right-radius:2px}
-.msg.assistant{align-self:flex-start;background:#21262d;color:#c9d1d9;border-bottom-left-radius:2px;position:relative}
-.msg.assistant .cursor{display:inline-block;width:8px;height:16px;background:#58a6ff;margin-left:2px;vertical-align:middle;animation:blink 0.8s infinite}
+.msg.assistant{align-self:flex-start;background:#21262d;color:#c9d1d9;border-bottom-left-radius:2px}
+.msg.assistant .cursor{display:inline-block;width:7px;height:14px;background:#58a6ff;margin-left:2px;vertical-align:middle;animation:blink 0.8s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
-.msg.system{align-self:center;background:transparent;color:#8b949e;font-size:12px;font-style:italic}
-.msg .tool-call{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;margin:6px 0;font-size:12px}
-.msg .tool-call .tool-name{color:#58a6ff;font-weight:bold}
-.msg .tool-call .tool-result{color:#8b949e;margin-top:4px;white-space:pre-wrap;max-height:200px;overflow-y:auto}
-.msg pre{background:#0d1117;padding:10px;border-radius:6px;overflow-x:auto;margin:8px 0;font-size:12px}
-.msg code{font-family:'SF Mono',Monaco,'Cascadia Code',monospace;font-size:12px}
-.a2ui-container{border:1px solid #30363d;border-radius:8px;padding:12px;margin:8px 0;background:#0d1117}
-.a2ui-text{color:#c9d1d9;font-size:14px;line-height:1.6}
-.a2ui-button{display:inline-block;padding:6px 16px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin:4px}
-.a2ui-button:hover{background:#2ea043}
-.a2ui-textfield input{padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;width:100%;font-size:13px}
-.a2ui-card{border:1px solid #30363d;border-radius:8px;padding:12px;background:#161b22}
-.a2ui-row,.a2ui-column{display:flex;gap:8px}
-.a2ui-column{flex-direction:column}
-.a2ui-list{list-style:none;padding:0}
-.a2ui-list-item{padding:6px 0;border-bottom:1px solid #21262d}
-.a2ui-divider{border:none;border-top:1px solid #30363d;margin:8px 0}
-.input-area{padding:16px 20px;background:#161b22;border-top:1px solid #30363d;display:flex;gap:10px;align-items:flex-end}
-.input-area textarea{flex:1;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;font-size:14px;resize:none;min-height:44px;max-height:120px;font-family:inherit;outline:none;line-height:1.5}
+.msg.system{align-self:center;background:transparent;color:#8b949e;font-size:11px;font-style:italic}
+.msg pre{background:#0d1117;padding:8px;border-radius:6px;overflow-x:auto;margin:6px 0;font-size:11px}
+.msg code{font-family:'SF Mono',Monaco,'Cascadia Code',monospace;font-size:11px}
+.a2ui-container{border:1px solid #30363d;border-radius:8px;padding:10px;margin:6px 0;background:#0d1117}
+.a2ui-text{color:#c9d1d9;font-size:13px;line-height:1.6}
+.a2ui-button{display:inline-block;padding:5px 14px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;margin:3px}
+.a2ui-textfield input{padding:7px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;width:100%;font-size:12px}
+.input-area{padding:12px 16px;background:#161b22;border-top:1px solid #30363d;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
+.input-area textarea{flex:1;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;font-size:13px;resize:none;min-height:40px;max-height:100px;font-family:inherit;outline:none;line-height:1.5}
 .input-area textarea:focus{border-color:#58a6ff}
-.input-area .mode-select{display:flex;flex-direction:column;gap:4px;align-items:center}
-.input-area .mode-select label{font-size:11px;color:#8b949e}
-.input-area .mode-select select{padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12px;outline:none}
-.input-area button{padding:10px 24px;background:#238636;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;white-space:nowrap;align-self:stretch}
+.input-area .mode-select{display:flex;flex-direction:column;gap:3px;align-items:center}
+.input-area .mode-select label{font-size:10px;color:#8b949e}
+.input-area .mode-select select{padding:5px 8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:11px;outline:none}
+.input-area button{padding:8px 20px;background:#238636;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:13px;white-space:nowrap;align-self:stretch}
 .input-area button:hover{background:#2ea043}
 .input-area button:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
 .input-area .stop-btn{background:#da3633}
-.input-area .stop-btn:hover{background:#f85149}
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:none;justify-content:center;align-items:center;z-index:1000}
-.modal-overlay.active{display:flex}
-.modal{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto}
-.modal h2{color:#58a6ff;margin-bottom:12px}
-.modal pre{background:#0d1117;padding:12px;border-radius:6px;overflow-x:auto;font-size:11px}
-.close-btn{float:right;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer}
-.typing-indicator{display:inline-flex;gap:4px;padding:8px 0}
-.typing-indicator span{width:6px;height:6px;background:#58a6ff;border-radius:50%;animation:bounce 1.2s infinite}
+.typing-indicator{display:inline-flex;gap:4px;padding:6px 0}
+.typing-indicator span{width:5px;height:5px;background:#58a6ff;border-radius:50%;animation:bounce 1.2s infinite}
 .typing-indicator span:nth-child(2){animation-delay:0.2s}
 .typing-indicator span:nth-child(3){animation-delay:0.4s}
 @keyframes bounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
-.tool-log{font-size:11px;color:#8b949e;padding:2px 8px;margin-top:4px;border-left:2px solid #30363d;padding-left:8px}
+.tool-log{font-size:10px;color:#8b949e;padding:2px 6px;margin-top:3px;border-left:2px solid #30363d;padding-left:6px}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:none;justify-content:center;align-items:center;z-index:1000}
+.modal-overlay.active{display:flex}
+.modal{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto}
+.modal h2{color:#58a6ff;margin-bottom:10px;font-size:15px}
+.modal pre{background:#0d1117;padding:10px;border-radius:6px;overflow-x:auto;font-size:10px;max-height:60vh;overflow-y:auto}
+.modal .thread-msg{padding:4px 0;font-size:12px;border-bottom:1px solid #21262d}
+.modal .thread-msg .role{color:#58a6ff;font-weight:bold;margin-right:4px}
+.close-btn{float:right;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer}
+.tool-call-block{background:#0d1117;border:1px solid #30363d;border-radius:8px;margin:4px 0;overflow:hidden}
+.tool-call-header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#161b22;border-bottom:1px solid #30363d;cursor:pointer;user-select:none}
+.tool-call-header:hover{background:#1c2128}
+.tool-call-header .tc-icon{font-size:14px}
+.tool-call-header .tc-name{font-weight:bold;color:#58a6ff;font-size:12px}
+.tool-call-header .tc-toggle{margin-left:auto;color:#8b949e;font-size:16px;transition:transform 0.2s}
+.tool-call-header .tc-toggle.open{transform:rotate(180deg)}
+.tool-call-body{padding:10px 12px;font-size:11px;display:none}
+.tool-call-body.open{display:block}
+.tool-call-body .tc-args{color:#8b949e;margin-bottom:6px}
+.tool-call-body .tc-args pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:10px}
+.tool-call-body .tc-result{color:#c9d1d9;border-top:1px solid #30363d;padding-top:6px;margin-top:6px}
+.tool-call-body .tc-result pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:10px;max-height:200px;overflow-y:auto}
+.tool-call-body .tc-label{color:#58a6ff;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px}
+.msg .tool-call-inline{background:#1f6feb22;border:1px solid #1f6feb44;border-radius:6px;padding:6px 10px;margin:4px 0;font-size:12px;display:flex;align-items:center;gap:6px}
+.msg .tool-call-inline .tc-icon{font-size:14px}
+.msg .tool-call-inline .tc-name{color:#58a6ff;font-weight:bold}
+.msg .tool-call-inline .tc-args{color:#8b949e;font-size:11px}
+.msg .tool-result-inline{background:#23863622;border:1px solid #23863644;border-radius:6px;padding:6px 10px;margin:4px 0;font-size:12px}
+.msg .tool-result-inline .tr-label{color:#238636;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px}
+.msg .tool-result-inline pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:10px;max-height:150px;overflow-y:auto}
 @media(max-width:768px){.sidebar{display:none}.msg{max-width:95%}}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>Agent Debug Console</h1>
-  <div class="btn-group">
-    <button onclick="showAgentCard()" title="View Agent Card">Card</button>
-    <button onclick="clearChat()" title="Clear chat">Clear</button>
+  <div class="status-row">
+    <span id="agentDot" class="status-dot warn"></span>
+    <span id="agentStatus" class="status-text">connecting...</span>
+    <span id="checkpointStatus" class="status-text"></span>
   </div>
-  <span id="agentStatus" class="status">connecting...</span>
+  <div class="btn-group">
+    <button onclick="refreshThreads()" title="Refresh thread list">↻ Threads</button>
+    <button onclick="showAgentCard()" title="View Agent Card">Card</button>
+    <button onclick="clearChat()" title="Clear display">Clear</button>
+  </div>
 </div>
 <div class="main">
-  <div class="sidebar" id="sidebar">
-    <div class="section">
+  <div class="sidebar">
+    <div class="sidebar-scroll">
       <h3>Agent Info</h3>
       <div id="agentInfo"></div>
-    </div>
-    <div class="section">
       <h3>Tools</h3>
       <div id="toolsList"></div>
-    </div>
-    <div class="section">
       <h3>Skills</h3>
       <div id="skillsList"></div>
-    </div>
-    <div class="section">
       <h3>MCP Servers</h3>
       <div id="mcpList"></div>
+      <h3>Threads</h3>
+      <div id="threadList"><span style="color:#8b949e;font-size:11px">Loading...</span></div>
+    </div>
+    <div class="sidebar-actions">
+      <button onclick="newThread()" title="Start a new conversation thread">+ New</button>
+      <button onclick="refreshThreads()" title="Refresh">↻</button>
     </div>
   </div>
   <div class="chat-area">
+    <div class="chat-header">
+      <span class="thread-label">Thread:</span>
+      <span class="thread-id empty" id="threadBadge">no thread selected</span>
+      <span style="flex:1"></span>
+      <button style="background:none;border:1px solid #30363d;color:#8b949e;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px" onclick="showThreadHistory()" title="View full thread history">History</button>
+    </div>
     <div class="messages" id="messages">
-      <div class="msg system">Agent Debug Console - Ready. Select "Stream" for real-time output.</div>
+      <div class="msg system">Agent Debug Console v2.1 — Tool call visualization enabled.</div>
     </div>
     <div class="input-area">
       <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
@@ -117,8 +160,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     </div>
   </div>
 </div>
-<div class="modal-overlay" id="modalOverlay">
-  <div class="modal">
+<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modalBox" onclick="event.stopPropagation()">
     <button class="close-btn" onclick="closeModal()">&times;</button>
     <div id="modalContent"></div>
   </div>
@@ -127,46 +170,190 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 const BASE = window.location.origin;
 let isStreaming = false;
 let abortController = null;
-let currentStreamMsg = null;
 let streamingDiv = null;
+let currentThreadId = null;
+let threadListCache = [];
+let pendingToolCalls = {};
 
 async function init(){
   try{
     const resp=await fetch(BASE+'/health');
     const data=await resp.json();
     document.getElementById('agentStatus').textContent=data.status||'healthy';
-    document.getElementById('agentStatus').className='status';
+    const dot=document.getElementById('agentDot');
+    dot.className='status-dot'+(data.status==='healthy'?'':' error');
+    const cpEl=document.getElementById('checkpointStatus');
+    if(data.checkpoint===true){cpEl.textContent='💾 MySQL';cpEl.style.color='#238636';}
+    else if(data.checkpoint===false){cpEl.textContent='⚠ no CP';cpEl.style.color='#d29922';}
+    else{cpEl.textContent='';}
     document.getElementById('agentInfo').innerHTML=
       '<div class="info-row"><span class="label">Name</span><span class="value">'+esc(data.agent||'N/A')+'</span></div>'+
       '<div class="info-row"><span class="label">Skills</span><span class="value">'+(data.skills||0)+'</span></div>'+
       '<div class="info-row"><span class="label">MCP</span><span class="value">'+(data.mcp_servers||0)+'</span></div>';
   }catch(e){
     document.getElementById('agentStatus').textContent='disconnected';
-    document.getElementById('agentStatus').className='status error';
+    document.getElementById('agentDot').className='status-dot error';
   }
   try{
     const resp=await fetch(BASE+'/');
     const data=await resp.json();
     const tools=data.oaf?.tools||data.tools||[];
-    document.getElementById('toolsList').innerHTML=tools.map(t=>'<span class="tool-tag">'+esc(t)+'</span>').join('')||'<span style="color:#8b949e;font-size:12px">No tools</span>';
+    document.getElementById('toolsList').innerHTML=tools.map(t=>'<span class="tool-tag">'+esc(t)+'</span>').join('')||'<span style="color:#8b949e;font-size:11px">No tools</span>';
   }catch(e){}
   try{
     const resp=await fetch(BASE+'/skills');
     const skills=await resp.json();
-    document.getElementById('skillsList').innerHTML=skills.map(s=>'<div style="font-size:12px;padding:4px 0;border-bottom:1px solid #21262d"><strong>'+esc(s.name)+'</strong><br><span style="color:#8b949e">'+(esc(s.description||'')||'')+'</span></div>').join('')||'<span style="color:#8b949e;font-size:12px">No skills</span>';
+    document.getElementById('skillsList').innerHTML=skills.map(s=>'<div style="font-size:11px;padding:3px 0;border-bottom:1px solid #21262d"><strong>'+esc(s.name)+'</strong><br><span style="color:#8b949e">'+(esc(s.description||'')||'')+'</span></div>').join('')||'<span style="color:#8b949e;font-size:11px">No skills</span>';
   }catch(e){}
   try{
     const resp=await fetch(BASE+'/mcp');
     const mcps=await resp.json();
-    document.getElementById('mcpList').innerHTML=mcps.map(m=>'<div style="font-size:12px;padding:4px 0;border-bottom:1px solid #21262d"><strong>'+esc(m.server||'?')+'</strong><br><span style="color:#8b949e">'+(esc((m.connection||{}).url||'N/A'))+'</span></div>').join('')||'<span style="color:#8b949e;font-size:12px">No MCP</span>';
+    document.getElementById('mcpList').innerHTML=mcps.map(m=>'<div style="font-size:11px;padding:3px 0;border-bottom:1px solid #21262d"><strong>'+esc(m.server||'?')+'</strong><br><span style="color:#8b949e">'+(esc((m.connection||{}).url||'N/A'))+'</span></div>').join('')||'<span style="color:#8b949e;font-size:11px">No MCP</span>';
   }catch(e){}
+  await refreshThreads();
+  setInterval(refreshThreads, 30000);
 }
 init();
 
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
+async function refreshThreads(){
+  try{
+    const resp=await fetch(BASE+'/threads');
+    const threads=await resp.json();
+    threadListCache=threads;
+    renderThreadList(threads);
+  }catch(e){
+    document.getElementById('threadList').innerHTML='<span style="color:#da3633;font-size:11px">Failed to load</span>';
+  }
+}
+
+function renderThreadList(threads){
+  const el=document.getElementById('threadList');
+  if(!threads||threads.length===0){el.innerHTML='<span style="color:#8b949e;font-size:11px">No threads yet</span>';return;}
+  el.innerHTML=threads.map(t=>{
+    const active=t.thread_id===currentThreadId;
+    return '<div class="thread-item'+(active?' active':'')+'" onclick="selectThread(\''+esc(t.thread_id)+'\')">'+
+      '<span class="tid" title="'+esc(t.thread_id)+'">'+esc(t.thread_id.substring(0,12))+'...</span>'+
+      '<span class="meta">step:'+t.last_step+'</span>'+
+      '<button class="del-btn" onclick="event.stopPropagation();deleteThread(\''+esc(t.thread_id)+'\')" title="Delete">×</button>'+
+      '</div>';
+  }).join('');
+}
+
+function selectThread(tid){
+  currentThreadId=tid;
+  document.getElementById('threadBadge').textContent=tid;
+  document.getElementById('threadBadge').classList.remove('empty');
+  renderThreadList(threadListCache);
+  loadThreadHistory(tid);
+}
+
+function newThread(){
+  currentThreadId=null;
+  pendingToolCalls={};
+  document.getElementById('threadBadge').textContent='new thread (auto-generated)';
+  document.getElementById('threadBadge').classList.add('empty');
+  document.getElementById('messages').innerHTML='<div class="msg system">New thread started. Send a message to begin.</div>';
+  renderThreadList(threadListCache);
+}
+
+function renderToolCallBlock(tcName, tcArgs, tcResult, tcId, collapsed){
+  const argsStr=tcArgs?JSON.stringify(tcArgs,null,2):'';
+  const resultStr=tcResult||'';
+  const bodyClass=collapsed?'':'open';
+  const toggleClass=collapsed?'':'open';
+  const arrow=collapsed?'▼':'▲';
+  return '<div class="tool-call-block" data-tcid="'+esc(tcId||'')+'">'+
+    '<div class="tool-call-header" onclick="toggleToolCall(this)">'+
+      '<span class="tc-icon">🔧</span>'+
+      '<span class="tc-name">'+esc(tcName)+'</span>'+
+      '<span class="tc-toggle '+toggleClass+'">'+arrow+'</span>'+
+    '</div>'+
+    '<div class="tool-call-body '+bodyClass+'">'+
+      (argsStr?'<div class="tc-label">Arguments</div><pre>'+esc(argsStr)+'</pre>':'')+
+      (resultStr?'<div class="tc-label" style="margin-top:8px">Result</div><pre>'+esc(resultStr)+'</pre>':'')+
+    '</div>'+
+  '</div>';
+}
+
+function toggleToolCall(headerEl){
+  const body=headerEl.nextElementSibling;
+  const toggle=headerEl.querySelector('.tc-toggle');
+  body.classList.toggle('open');
+  toggle.classList.toggle('open');
+  toggle.textContent=body.classList.contains('open')?'▲':'▼';
+}
+
+async function loadThreadHistory(tid){
+  try{
+    const resp=await fetch(BASE+'/threads/'+encodeURIComponent(tid));
+    const data=await resp.json();
+    if(data.error){document.getElementById('messages').innerHTML='<div class="msg system">Thread not found or empty</div>';return;}
+    const msgs=data.messages||[];
+    const container=document.getElementById('messages');
+    container.innerHTML='';
+    pendingToolCalls={};
+    for(const m of msgs){
+      if(m.type==='tool_call'){
+        pendingToolCalls[m.tool_call_id]={name:m.tool_name,args:m.tool_args};
+        addToolCallMessage(m.tool_name,m.tool_args,m.content,m.tool_call_id,true);
+      }else if(m.type==='tool_result'){
+        const tc=pendingToolCalls[m.tool_call_id]||{name:m.tool_name,args:{}};
+        addToolResultMessage(tc.name,m.content,m.tool_call_id,true);
+      }else if(m.role==='user'){
+        addMessage('user',m.content||'');
+      }else if(m.role==='assistant'){
+        addMessage('assistant',m.content||'');
+      }else if(m.role==='system'){
+        addMessage('system',m.content||'');
+      }
+    }
+  }catch(e){
+    document.getElementById('messages').innerHTML='<div class="msg system">Failed to load history: '+esc(e.message)+'</div>';
+  }
+}
+
+function addToolCallMessage(name,args,content,tcId,collapsed){
+  const div=document.createElement('div');
+  div.className='msg assistant';
+  div.innerHTML=renderToolCallBlock(name,args,null,tcId,collapsed);
+  document.getElementById('messages').appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function addToolResultMessage(name,result,tcId,collapsed){
+  const block=document.querySelector('.tool-call-block[data-tcid="'+esc(tcId||'')+'"]');
+  if(block){
+    const body=block.querySelector('.tool-call-body');
+    if(body&&!body.querySelector('.tc-result')){
+      body.innerHTML+='<div class="tc-label" style="margin-top:8px">Result</div><pre>'+esc(result||'')+'</pre>';
+      body.classList.add('open');
+      const toggle=block.querySelector('.tc-toggle');
+      toggle.classList.add('open');
+      toggle.textContent='▲';
+    }
+  }else{
+    const div=document.createElement('div');
+    div.className='msg assistant';
+    div.innerHTML='<div class="tool-result-inline"><div class="tr-label">Tool Result: '+esc(name)+'</div><pre>'+esc(result||'')+'</pre></div>';
+    document.getElementById('messages').appendChild(div);
+  }
+  scrollBottom();
+}
+
+async function deleteThread(tid){
+  if(!confirm('Delete thread '+tid+'?'))return;
+  try{
+    await fetch(BASE+'/threads/'+encodeURIComponent(tid),{method:'DELETE'});
+    if(currentThreadId===tid) newThread();
+    await refreshThreads();
+  }catch(e){addSystemMsg('Delete failed: '+e.message);}
+}
+
 function clearChat(){
-  document.getElementById('messages').innerHTML='<div class="msg system">Chat cleared</div>';
+  document.getElementById('messages').innerHTML='<div class="msg system">Chat cleared (thread data preserved in checkpoint)</div>';
 }
 
 function onModeChange(){
@@ -174,19 +361,14 @@ function onModeChange(){
   const ta=document.getElementById('userInput');
   if(mode==='stream'){ta.placeholder='Streaming mode - real-time output';}
   else if(mode==='a2ui'){ta.placeholder='A2UI mode - with UI components';}
-  else{ta.placeholder='Send mode - wait for full response';}
+  else{ta.placeholder='Send mode - wait for response';}
 }
 
 function addMessage(role,content,opts){
   const div=document.createElement('div');
   div.className='msg '+role;
-  if(opts&&opts.isA2UI){
-    div.innerHTML='<div class="a2ui-container">'+renderA2UI(content)+'</div>';
-  }else if(opts&&opts.toolCall){
-    div.innerHTML='<div class="tool-call"><span class="tool-name">'+esc(opts.toolName||'Tool')+'</span><div class="tool-result">'+esc(content)+'</div></div>';
-  }else{
-    div.innerHTML=formatMarkdown(content);
-  }
+  if(opts&&opts.isA2UI){div.innerHTML='<div class="a2ui-container">'+renderA2UI(content)+'</div>';}
+  else{div.innerHTML=formatMarkdown(content);}
   document.getElementById('messages').appendChild(div);
   scrollBottom();
   return div;
@@ -200,7 +382,6 @@ function addSystemMsg(text){
   scrollBottom();
 }
 
-/* Streaming message element */
 function createStreamingMsg(){
   const div=document.createElement('div');
   div.className='msg assistant';
@@ -210,38 +391,38 @@ function createStreamingMsg(){
   return div;
 }
 
+function buildMetadata(){
+  const meta={};
+  if(currentThreadId) meta.thread_id=currentThreadId;
+  return meta;
+}
+
 async function sendMessage(){
-  if(isStreaming){
-    if(abortController){abortController.abort();}
-    return;
-  }
+  if(isStreaming){if(abortController){abortController.abort();}return;}
   const input=document.getElementById('userInput');
   const text=input.value.trim();
   if(!text)return;
   const mode=document.getElementById('modeSelect').value;
-  input.value='';
-  input.focus();
-
+  input.value='';input.focus();
   addMessage('user',text);
   const btn=document.getElementById('sendBtn');
+  const metadata=buildMetadata();
 
   if(mode==='send'){
-    btn.disabled=true;
-    isStreaming=true;
+    btn.disabled=true;isStreaming=true;
     const thinking=addSystemMsg('Thinking...');
     try{
-      const resp=await fetch(BASE+'/',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          jsonrpc:'2.0',method:'message/send',
-          params:{message:{role:'user',parts:[{text}]}},
-          id:'msg-'+Date.now()
-        })
-      });
+      const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0',method:'message/send',params:{message:{role:'user',parts:[{text}]},metadata},id:'msg-'+Date.now()})});
       const result=await resp.json();
       const task=result.result||result;
       document.querySelectorAll('.msg.system').forEach(e=>e.remove());
+      if(task.metadata&&task.metadata.thread_id&&!currentThreadId){
+        currentThreadId=task.metadata.thread_id;
+        document.getElementById('threadBadge').textContent=currentThreadId;
+        document.getElementById('threadBadge').classList.remove('empty');
+        await refreshThreads();
+      }
       if(task.artifacts&&task.artifacts.length>0){
         for(const art of task.artifacts){
           for(const part of art.parts||[]){
@@ -249,35 +430,29 @@ async function sendMessage(){
             else if(part.data?.a2ui_stream) addMessage('assistant',part.data.a2ui_stream,{isA2UI:true});
           }
         }
-      }else{
-        addMessage('assistant',JSON.stringify(task,null,2));
-      }
+      }else{addMessage('assistant',JSON.stringify(task,null,2));}
+      await refreshThreads();
     }catch(e){
       document.querySelectorAll('.msg.system').forEach(e=>e.remove());
       if(e.name!=='AbortError') addMessage('system','Error: '+e.message);
     }
-    isStreaming=false;
-    btn.disabled=false;
-    btn.className='';
+    isStreaming=false;btn.disabled=false;btn.className='';
   }else if(mode==='a2ui'){
-    btn.disabled=true;
-    isStreaming=true;
+    btn.disabled=true;isStreaming=true;
+    const a2uiMeta={...metadata,a2uiClientCapabilities:{supportedCatalogIds:['https://a2ui.org/specification/v0_8/standard_catalog_definition.json']}};
     const thinking=addSystemMsg('Generating A2UI...');
     try{
-      const resp=await fetch(BASE+'/',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          jsonrpc:'2.0',method:'message/send',
-          params:{message:{role:'user',parts:[{text}]},
-            metadata:{a2uiClientCapabilities:{supportedCatalogIds:['https://a2ui.org/specification/v0_8/standard_catalog_definition.json']}}
-          },
-          id:'msg-'+Date.now()
-        })
-      });
+      const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0',method:'message/send',params:{message:{role:'user',parts:[{text}]},metadata:a2uiMeta},id:'msg-'+Date.now()})});
       const result=await resp.json();
       const task=result.result||result;
       document.querySelectorAll('.msg.system').forEach(e=>e.remove());
+      if(task.metadata&&task.metadata.thread_id&&!currentThreadId){
+        currentThreadId=task.metadata.thread_id;
+        document.getElementById('threadBadge').textContent=currentThreadId;
+        document.getElementById('threadBadge').classList.remove('empty');
+        await refreshThreads();
+      }
       if(task.artifacts&&task.artifacts.length>0){
         for(const art of task.artifacts){
           for(const part of art.parts||[]){
@@ -286,35 +461,23 @@ async function sendMessage(){
           }
         }
       }
+      await refreshThreads();
     }catch(e){
       document.querySelectorAll('.msg.system').forEach(e=>e.remove());
       if(e.name!=='AbortError') addMessage('system','Error: '+e.message);
     }
-    isStreaming=false;
-    btn.disabled=false;
+    isStreaming=false;btn.disabled=false;
   }else{
-    // Stream mode
-    isStreaming=true;
-    btn.disabled=true;
-    btn.textContent='Stop';
-    btn.className='stop-btn';
+    isStreaming=true;btn.disabled=true;btn.textContent='Stop';btn.className='stop-btn';
     streamingDiv=createStreamingMsg();
     abortController=new AbortController();
     let fullText='';
-    let logLines=[];
+    pendingToolCalls={};
 
     try{
-      const resp=await fetch(BASE+'/',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-          jsonrpc:'2.0',method:'message/stream',
-          params:{message:{role:'user',parts:[{text}]}},
-          id:'stream-'+Date.now()
-        }),
-        signal:abortController.signal
-      });
-
+      const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0',method:'message/stream',params:{message:{role:'user',parts:[{text}]},metadata},id:'stream-'+Date.now()}),
+        signal:abortController.signal});
       const reader=resp.body.getReader();
       const decoder=new TextDecoder();
       let buffer='';
@@ -327,63 +490,60 @@ async function sendMessage(){
         buffer=lines.pop()||'';
 
         for(const line of lines){
-          if(line.startsWith('event: ')){
-            const evt=line.slice(7).trim();
-            if(evt==='error'){logLines.push('[ERROR]');}
-            continue;
-          }
+          if(line.startsWith('event: ')){continue;}
           if(!line.startsWith('data: '))continue;
           const dataStr=line.slice(6);
           if(dataStr==='[DONE]'){
             if(streamingDiv){
               const cursor=streamingDiv.querySelector('.cursor');
               if(cursor)cursor.remove();
-              updateStreamContent(fullText);
+              if(fullText) updateStreamContent(fullText);
             }
-            isStreaming=false;
-            btn.disabled=false;
-            btn.textContent='Send';
-            btn.className='';
-            streamingDiv=null;
-            abortController=null;
+            isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
+            streamingDiv=null;abortController=null;
+            await refreshThreads();
+            if(currentThreadId){document.getElementById('threadBadge').textContent=currentThreadId;document.getElementById('threadBadge').classList.remove('empty');}
             return;
           }
           try{
             const data=JSON.parse(dataStr);
-            if(data.state==='working'){
-              logLines.push('Working...');
-            }else if(data.state==='completed'){
-              logLines.push('Done');
-            }else if(data.token&&streamingDiv){
-              fullText+=data.token;
-              updateStreamContent(fullText);
-            }else if(data.error&&streamingDiv){
-              fullText+='\n[Error: '+esc(data.error)+']';
-              updateStreamContent(fullText);
+            if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
+            if(data.token&&streamingDiv){fullText+=data.token;updateStreamContent(fullText);}
+            else if(data.type==='tool_call'){
+              const tcId=data.tool_call_id||'';
+              pendingToolCalls[tcId]={name:data.name,args:data.args};
+              if(streamingDiv){
+                const cursor=streamingDiv.querySelector('.cursor');
+                if(cursor)cursor.remove();
+                if(fullText) updateStreamContent(fullText);
+              }
+              addToolCallMessage(data.name,data.args,null,tcId,false);
+              streamingDiv=null;
+            }
+            else if(data.type==='tool_result'){
+              const tc=pendingToolCalls[data.tool_call_id]||{name:data.name,args:{}};
+              addToolResultMessage(tc.name,data.result,data.tool_call_id,false);
+            }
+            else if(data.state==='completed'||data.state==='working'){
+              if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
+            }
+            else if(data.error){
+              if(streamingDiv){streamingDiv.innerHTML+='<span style="color:#da3633">Error: '+esc(data.error)+'</span>';}
             }
           }catch(e){}
         }
       }
-      updateStreamContent(fullText);
+      if(streamingDiv&&fullText){updateStreamContent(fullText);}
     }catch(e){
       if(e.name==='AbortError'){
-        if(streamingDiv){
-          const cursor=streamingDiv.querySelector('.cursor');
-          if(cursor)cursor.remove();
-          if(fullText) updateStreamContent(fullText);
-        }
+        if(streamingDiv){const cursor=streamingDiv.querySelector('.cursor');if(cursor)cursor.remove();if(fullText)updateStreamContent(fullText);}
       }else{
-        if(streamingDiv){
-          streamingDiv.innerHTML='<span style="color:#da3633">Error: '+esc(e.message)+'</span>';
-        }
+        if(streamingDiv){streamingDiv.innerHTML='<span style="color:#da3633">Error: '+esc(e.message)+'</span>';}
       }
     }
-    isStreaming=false;
-    btn.disabled=false;
-    btn.textContent='Send';
-    btn.className='';
-    streamingDiv=null;
-    abortController=null;
+    isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
+    streamingDiv=null;abortController=null;
+    await refreshThreads();
   }
 }
 
@@ -415,12 +575,9 @@ function renderA2UI(jsonl){
   for(const line of lines){
     try{
       const obj=JSON.parse(line);
-      if(obj.surfaceUpdate){
-        const comps=obj.surfaceUpdate.components||[];
-        for(const comp of comps){html+=renderComponent(comp.component,comp.id);}
-      }
-      if(obj.dataModelUpdate){html+='<div class="a2ui-text" style="color:#8b949e;font-size:11px">[Data: '+esc(obj.dataModelUpdate.path)+']</div>';}
-      if(obj.beginRendering){html+='<div class="a2ui-text" style="color:#8b949e;font-size:11px">[Rendering: '+esc(obj.beginRendering.root)+']</div>';}
+      if(obj.surfaceUpdate){const comps=obj.surfaceUpdate.components||[];for(const comp of comps){html+=renderComponent(comp.component,comp.id);}}
+      if(obj.dataModelUpdate){html+='<div class="a2ui-text" style="color:#8b949e;font-size:10px">[Data: '+esc(obj.dataModelUpdate.path)+']</div>';}
+      if(obj.beginRendering){html+='<div class="a2ui-text" style="color:#8b949e;font-size:10px">[Rendering: '+esc(obj.beginRendering.root)+']</div>';}
     }catch(e){}
   }
   return html;
@@ -428,8 +585,7 @@ function renderA2UI(jsonl){
 
 function renderComponent(comp,id){
   if(!comp)return'';
-  const type=Object.keys(comp)[0];
-  const props=comp[type];
+  const type=Object.keys(comp)[0];const props=comp[type];
   switch(type){
     case'Text':return'<div class="a2ui-text" data-id="'+esc(id)+'">'+esc(props.text?.literalString||props.text||'')+'</div>';
     case'Button':return'<button class="a2ui-button" data-id="'+esc(id)+'">'+esc(props.text?.literalString||'Button')+'</button>';
@@ -438,16 +594,12 @@ function renderComponent(comp,id){
     case'Row':{const ch=props.children?.explicitList||[];return'<div class="a2ui-row" data-id="'+esc(id)+'">'+ch.map(cid=>'<div data-id="'+esc(cid)+'"></div>').join('')+'</div>';}
     case'Card':return'<div class="a2ui-card" data-id="'+esc(id)+'">'+esc(props.title?.literalString||'')+'</div>';
     case'List':return'<ul class="a2ui-list" data-id="'+esc(id)+'"><li class="a2ui-list-item">List</li></ul>';
-    case'Image':return'<img class="a2ui-image" data-id="'+esc(id)+'" src="'+esc(props.url?.literalString||'')+'" alt="'+esc(props.alt?.literalString||'')+'">';
     case'Divider':return'<hr class="a2ui-divider" data-id="'+esc(id)+'">';
     default:return'<div class="a2ui-text" data-id="'+esc(id)+'">['+esc(type)+']</div>';
   }
 }
 
-function scrollBottom(){
-  const mc=document.getElementById('messages');
-  if(mc)mc.scrollTop=mc.scrollHeight;
-}
+function scrollBottom(){const mc=document.getElementById('messages');if(mc)mc.scrollTop=mc.scrollHeight;}
 
 async function showAgentCard(){
   try{
@@ -458,8 +610,28 @@ async function showAgentCard(){
   }catch(e){alert('Failed: '+e.message);}
 }
 
+async function showThreadHistory(){
+  if(!currentThreadId){addSystemMsg('No thread selected');return;}
+  try{
+    const resp=await fetch(BASE+'/threads/'+encodeURIComponent(currentThreadId));
+    const data=await resp.json();
+    const msgs=data.messages||[];
+    let html='<h2>Thread '+esc(currentThreadId.substring(0,16))+'...</h2><p style="color:#8b949e;font-size:12px">'+msgs.length+' messages</p>';
+    for(const m of msgs){
+      if(m.type==='tool_call'){
+        html+='<div class="thread-msg"><span class="role">🔧 '+esc(m.tool_name)+'</span> <code>'+esc(JSON.stringify(m.tool_args||{}))+'</code></div>';
+      }else if(m.type==='tool_result'){
+        html+='<div class="thread-msg"><span class="role" style="color:#238636">✓ '+esc(m.tool_name)+' result</span> <span style="color:#8b949e">'+esc((m.content||'').substring(0,100))+'</span></div>';
+      }else{
+        html+='<div class="thread-msg"><span class="role">'+esc(m.role)+'</span> '+esc((m.content||'').substring(0,200))+'</div>';
+      }
+    }
+    document.getElementById('modalContent').innerHTML=html;
+    document.getElementById('modalOverlay').classList.add('active');
+  }catch(e){addSystemMsg('Failed: '+e.message);}
+}
+
 function closeModal(){document.getElementById('modalOverlay').classList.remove('active');}
-document.getElementById('modalOverlay').addEventListener('click',function(e){if(e.target===this)closeModal();});
 </script>
 </body>
 </html>

@@ -53,12 +53,22 @@ class LLMConfig(BaseModel):
         return errors
 
 
+class MySQLCheckpointConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    dsn: str = Field(
+        default="mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test",
+        alias="CHECKPOINT_MYSQL_DSN",
+    )
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     config_dir: str = Field(default="/config", alias="AGENT_CONFIG_DIR")
     server: ServerConfig = ServerConfig()
     llm: LLMConfig = LLMConfig()
+    checkpoint: MySQLCheckpointConfig = MySQLCheckpointConfig()
 
     @property
     def config_path(self) -> Path:
@@ -74,7 +84,7 @@ class AppConfig(BaseModel):
 
     @property
     def mcp_configs_dir(self) -> Path:
-        return self.config_path / "mcp-configs"
+        return self.config_path
 
 
 def load_config() -> AppConfig:
@@ -93,5 +103,11 @@ def load_config() -> AppConfig:
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4096")),
             timeout=int(os.getenv("LLM_TIMEOUT", "120")),
+        ),
+        checkpoint=MySQLCheckpointConfig(
+            dsn=os.getenv(
+                "CHECKPOINT_MYSQL_DSN",
+                "mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test",
+            ),
         ),
     )

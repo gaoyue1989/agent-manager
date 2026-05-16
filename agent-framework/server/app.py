@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,8 +8,10 @@ from server.services.skill_manager import SkillManager
 from server.services.mcp_manager import MCPManager
 from server.services.a2ui_service import A2UIService
 from server.services.agent_runtime import AgentRuntime
+from server.services.checkpoint_manager import CheckpointManager
 from server.routes.agent_card import generate_agent_card
 from server.routes.a2a_routes import A2ARoutes
+from server.routes.thread_routes import ThreadRoutes
 from server.routes.debug_ui import register_debug_ui
 
 
@@ -17,9 +20,11 @@ def create_app(config: AppConfig = None) -> FastAPI:
         from server.config import load_config
         config = load_config()
 
+    checkpoint_manager = CheckpointManager(config.checkpoint.dsn)
+
     app = FastAPI(
         title="Agent Framework",
-        description="DeepAgents-based Agent Framework with OAF + A2A + A2UI",
+        description="DeepAgents-based Agent Framework with OAF + A2A + A2UI + MySQL checkpoint",
         version="1.0.0",
     )
 
@@ -56,9 +61,36 @@ def create_app(config: AppConfig = None) -> FastAPI:
     agent_runtime = AgentRuntime(
         oaf_config=oaf_config,
         llm_config=config.llm,
+        checkpointer=None,
+        mcp_client=None,
         loaded_skills=loaded_skills,
         mcp_configs=mcp_configs,
     )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        print(f"Connecting to MySQL checkpoint: {config.checkpoint.dsn}")
+        await checkpoint_manager.start()
+        agent_runtime._checkpointer = checkpoint_manager.saver
+        print("Checkpoint tables ready")
+
+        if mcp_configs:
+            try:
+                mcp_client = await mcp_manager.create_mcp_client(mcp_configs)
+                if mcp_client:
+                    agent_runtime.mcp_client = mcp_client
+                    print("MCP client connected")
+                else:
+                    print("MCP client not available")
+            except Exception as e:
+                print(f"MCP client connection failed: {e}")
+
+        yield
+
+        await checkpoint_manager.close()
+        print("Checkpoint connection closed")
+
+    app.router.lifespan_context = lifespan
 
     agent_card_data = generate_agent_card(
         oaf_config=oaf_config,
@@ -80,6 +112,7 @@ def create_app(config: AppConfig = None) -> FastAPI:
             "skills": len(loaded_skills),
             "mcp_servers": len(mcp_configs),
             "llm_configured": config.llm.is_valid(),
+            "checkpoint": checkpoint_manager.saver is not None,
         }
 
     @app.get("/")
@@ -98,11 +131,15 @@ def create_app(config: AppConfig = None) -> FastAPI:
             "endpoints": {
                 "agent_card": "/.well-known/agent-card.json",
                 "jsonrpc": "/",
+                "threads": "/threads",
                 "tasks": "/tasks",
                 "skills": "/skills",
                 "mcp": "/mcp",
                 "health": "/health",
                 "debug": "/debug",
+            },
+            "persistence": {
+                "checkpoint": checkpoint_manager.saver is not None,
             },
         }
 
@@ -120,6 +157,8 @@ def create_app(config: AppConfig = None) -> FastAPI:
         agent_runtime=agent_runtime,
         a2ui_service=a2ui_service,
     )
+
+    ThreadRoutes(app=app, agent_runtime=agent_runtime)
 
     register_debug_ui(app)
 

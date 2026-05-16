@@ -87,6 +87,8 @@ class TestServerIntegration:
         task = data["result"]
         assert "id" in task
         assert "status" in task
+        assert "metadata" in task
+        assert "thread_id" in task["metadata"]
 
     def test_rest_tasks(self, client):
         resp = client.post("/tasks", json={
@@ -95,9 +97,26 @@ class TestServerIntegration:
         assert resp.status_code == 200
         task = resp.json()
         assert "id" in task
+        assert "metadata" in task
+        assert "thread_id" in task["metadata"]
 
     def test_tasks_list(self, client):
         resp = client.get("/tasks")
         assert resp.status_code == 200
-        tasks = resp.json()
-        assert isinstance(tasks, list)
+        data = resp.json()
+        assert "threads" in data
+        assert isinstance(data["threads"], list)
+
+    def test_threads_list_rest(self, client):
+        resp = client.get("/threads")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+
+    def test_threads_get_not_found(self, client):
+        resp = client.get("/threads/nonexistent-id-12345")
+        assert resp.status_code == 404
+
+    def test_threads_delete_not_found(self, client):
+        resp = client.delete("/threads/nonexistent-id-12345")
+        assert resp.status_code == 404

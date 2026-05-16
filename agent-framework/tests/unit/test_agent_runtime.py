@@ -37,7 +37,7 @@ class TestAgentRuntime:
             llm_config=LLMConfig(),  # no valid LLM
         )
         import asyncio
-        result = asyncio.run(runtime.invoke("Hello"))
+        result, thread_id = asyncio.run(runtime.invoke("Hello"))
         assert "[Mock Agent:" in result
         assert "minimal" in result.lower()
 

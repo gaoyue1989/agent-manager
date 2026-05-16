@@ -50,7 +50,8 @@ class MCPManager:
         config_yaml = mcp_dir / "config.yaml"
         if config_yaml.exists():
             try:
-                config["connection"] = yaml.safe_load(config_yaml.read_text())
+                yaml_data = yaml.safe_load(config_yaml.read_text())
+                config["connection"] = yaml_data.get("connection", {})
             except yaml.YAMLError:
                 pass
 
@@ -79,8 +80,12 @@ class MCPManager:
         return list(excluded)
 
     async def create_mcp_client(self, mcp_configs: list[dict]) -> Optional[Any]:
-        """创建 MCP 客户端连接"""
-        clients = {}
+        """创建 MCP 客户端连接
+
+        使用 langchain-mcp-adapters 连接 MCP 服务器
+        返回 MultiServerMCPClient 实例
+        """
+        servers = {}
         for mc in mcp_configs:
             connection = mc.get("connection", {})
             if not connection:
@@ -92,23 +97,25 @@ class MCPManager:
                 continue
 
             server_key = mc.get("server", "mcp_server")
+            servers[server_key] = {
+                "url": url,
+                "transport": conn_type,
+                "headers": connection.get("headers", {}),
+            }
 
-            try:
-                from langchain_mcp_adapters.client import MultiServerMCPClient
-                client = MultiServerMCPClient({
-                    server_key: {
-                        "url": url,
-                        "transport": conn_type,
-                        "headers": connection.get("headers", {}),
-                    }
-                })
-                clients[server_key] = client
-            except ImportError:
-                pass
-            except Exception:
-                pass
+        if not servers:
+            return None
 
-        return clients if clients else None
+        try:
+            from langchain_mcp_adapters.client import MultiServerMCPClient
+            client = MultiServerMCPClient(servers)
+            return client
+        except ImportError:
+            print("langchain_mcp_adapters not installed")
+        except Exception as e:
+            print(f"MCP client creation failed: {e}")
+
+        return None
 
     def get_mcp_summaries(self, mcp_configs: list[dict]) -> list[dict]:
         summaries = []

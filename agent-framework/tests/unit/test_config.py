@@ -67,4 +67,4 @@ class TestConfig:
         assert str(config.config_path) == "/my/config"
         assert str(config.agents_md_path).endswith("AGENTS.md")
         assert str(config.skills_dir).endswith("skills")
-        assert str(config.mcp_configs_dir).endswith("mcp-configs")
+        assert str(config.mcp_configs_dir) == "/my/config"

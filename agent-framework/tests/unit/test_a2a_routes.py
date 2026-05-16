@@ -119,7 +119,9 @@ class TestA2ARoutes:
     def test_tasks_list(self, client):
         resp = client.get("/tasks")
         assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        data = resp.json()
+        assert "threads" in data
+        assert isinstance(data["threads"], list)
 
     def test_task_get_not_found(self, client):
         resp = client.get("/tasks/nonexistent-id")
