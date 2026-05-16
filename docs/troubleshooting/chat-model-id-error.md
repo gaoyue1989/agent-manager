@@ -34,7 +34,7 @@ MODEL_NAME = "<api_key>"  # ❌ 错误
 ```bash
 curl -X PUT http://localhost:8080/api/v1/agents/22 \
   -H "Content-Type: application/json" \
-  -d '{"config": "{\"model\": \"5df2c9ff4ad347cb95ea42ad6e9e1729\", ...}"}'
+  -d '{"config": "{\"model\": \"your_model_id_here\", ...}"}'
 ```
 
 然后重新生成代码、构建镜像、部署：

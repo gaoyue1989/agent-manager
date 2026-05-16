@@ -674,8 +674,8 @@ LLM 配置通过环境变量独立管理，不硬编码在配置文件中：
 ```bash
 # .env 文件 (不提交到 Git)
 # LLM 基础配置
-LLM_API_KEY=209df1cb15124118a9c4583f4c5b7997
-LLM_MODEL_ID=5df2c9ff4ad347cb95ea42ad6e9e1729
+LLM_API_KEY=your_api_key_here
+LLM_MODEL_ID=your_model_id_here
 LLM_BASE_URL=https://wishub-x6.ctyun.cn/v1
 LLM_PROVIDER=ctyun
 
@@ -689,8 +689,8 @@ LLM_TIMEOUT=60
 
 | 环境变量 | 必填 | 说明 | 示例 |
 |---------|------|------|------|
-| `LLM_API_KEY` | ✓ | LLM API 密钥 | `209df1cb15124118a9c4583f4c5b7997` |
-| `LLM_MODEL_ID` | ✓ | 模型 ID | `5df2c9ff4ad347cb95ea42ad6e9e1729` |
+| `LLM_API_KEY` | ✓ | LLM API 密钥 | `your_api_key_here` |
+| `LLM_MODEL_ID` | ✓ | 模型 ID | `your_model_id_here` |
 | `LLM_BASE_URL` | ✓ | API 端点 | `https://wishub-x6.ctyun.cn/v1` |
 | `LLM_PROVIDER` | ✓ | 提供商标识 | `ctyun`, `openai`, `anthropic` |
 | `LLM_TEMPERATURE` | | 温度参数 | `0.7` |
@@ -739,8 +739,8 @@ llm_config = LLMConfig()
 
 ```bash
 # tests/.env.test
-LLM_API_KEY=209df1cb15124118a9c4583f4c5b7997
-LLM_MODEL_ID=5df2c9ff4ad347cb95ea42ad6e9e1729
+LLM_API_KEY=your_api_key_here
+LLM_MODEL_ID=your_model_id_here
 LLM_BASE_URL=https://wishub-x6.ctyun.cn/v1
 LLM_PROVIDER=ctyun
 LLM_TEMPERATURE=0.7

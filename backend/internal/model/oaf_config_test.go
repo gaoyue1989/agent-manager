@@ -84,7 +84,7 @@ tools: ["Read", "Edit", "Bash", "Glob", "Grep"]
 
 model:
   provider: "ctyun"
-  name: "5df2c9ff4ad347cb95ea42ad6e9e1729"
+  name: "gpt-4-model-id-example"
 
 config:
   temperature: 0.7

@@ -341,8 +341,8 @@ config/                    # 挂载到 /config
 
 ```bash
 # .env.test
-LLM_API_KEY=209df1cb15124118a9c4583f4c5b7997
-LLM_MODEL_ID=5df2c9ff4ad347cb95ea42ad6e9e1729
+LLM_API_KEY=your_api_key_here
+LLM_MODEL_ID=your_model_id_here
 LLM_BASE_URL=https://wishub-x6.ctyun.cn/v1
 LLM_PROVIDER=ctyun
 LLM_TEMPERATURE=0.7

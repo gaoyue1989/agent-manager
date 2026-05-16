@@ -434,7 +434,7 @@ tools: ["Read", "Edit", "Bash", "Glob", "Grep"]
 
 model:
   provider: "ctyun"
-  name: "5df2c9ff4ad347cb95ea42ad6e9e1729"
+  name: "your_model_id_here"
 
 config:
   temperature: 0.7
