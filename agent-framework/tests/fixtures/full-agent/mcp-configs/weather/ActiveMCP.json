@@ -1,0 +1,21 @@
+{
+  "vendor": "weather",
+  "server": "weather",
+  "version": "1.0.0",
+  "selectedTools": [
+    {
+      "name": "get_weather",
+      "enabled": true,
+      "description": "查询指定城市的当前天气",
+      "required": true
+    },
+    {
+      "name": "get_forecast",
+      "enabled": true,
+      "description": "查询指定城市未来3天预报",
+      "required": false
+    }
+  ],
+  "excludedTools": [],
+  "contextStrategy": "subset"
+}

@@ -28,6 +28,7 @@ class AgentRuntime:
         self.loaded_skills = loaded_skills or []
         self.mcp_configs = mcp_configs or []
         self.mcp_client = mcp_client
+        self._mcp_tools = []  # pre-loaded during startup
         self._agent = None
         self._chat_model = None
 
@@ -533,15 +534,8 @@ class AgentRuntime:
 
             tools.append(grep_search)
 
-        if self.mcp_client:
-            try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if not loop.is_running():
-                    mcp_tools = loop.run_until_complete(self.mcp_client.get_tools())
-                    tools.extend(mcp_tools)
-            except Exception:
-                pass
+        if self._mcp_tools:
+            tools.extend(self._mcp_tools)
 
         return tools
 

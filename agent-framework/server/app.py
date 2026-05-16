@@ -79,6 +79,12 @@ def create_app(config: AppConfig = None) -> FastAPI:
                 mcp_client = await mcp_manager.create_mcp_client(mcp_configs)
                 if mcp_client:
                     agent_runtime.mcp_client = mcp_client
+                    # Pre-load MCP tools so agent can use them synchronously
+                    try:
+                        agent_runtime._mcp_tools = await mcp_client.get_tools()
+                        print(f"MCP tools loaded: {[t.name for t in agent_runtime._mcp_tools]}")
+                    except Exception as e:
+                        print(f"MCP tools load failed: {e}")
                     print("MCP client connected")
                 else:
                     print("MCP client not available")

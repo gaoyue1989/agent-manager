@@ -1,0 +1,8 @@
+vendor: "weather"
+server: "weather"
+version: "1.0.0"
+
+connection:
+  type: "sse"
+  url: "http://localhost:8812/sse"
+  timeout: 60

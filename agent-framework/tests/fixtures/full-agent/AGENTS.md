@@ -23,6 +23,11 @@ mcpServers:
     version: "1.0.0"
     configDir: "mcp-configs/filesystem"
     required: false
+  - vendor: "weather"
+    server: "weather"
+    version: "1.0.0"
+    configDir: "mcp-configs/weather"
+    required: false
 
 tools:
   - Read
