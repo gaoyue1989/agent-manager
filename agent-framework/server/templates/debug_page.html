@@ -271,8 +271,8 @@ function renderToolCallBlock(tcName, tcArgs, tcResult, tcId, collapsed){
       '<span class="tc-toggle '+toggleClass+'">'+arrow+'</span>'+
     '</div>'+
     '<div class="tool-call-body '+bodyClass+'">'+
-      (argsStr?'<div class="tc-label">Arguments</div><pre>'+esc(argsStr)+'</pre>':'')+
-      (resultStr?'<div class="tc-label" style="margin-top:8px">Result</div><pre>'+esc(resultStr)+'</pre>':'')+
+      (argsStr?'<div class="tc-args"><div class="tc-label">Arguments</div><pre>'+esc(argsStr)+'</pre></div>':'')+
+      (resultStr?'<div class="tc-result"><div class="tc-label" style="margin-top:8px">Result</div><pre>'+esc(resultStr)+'</pre></div>':'')+
     '</div>'+
   '</div>';
 }
