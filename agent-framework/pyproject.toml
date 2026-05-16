@@ -1,0 +1,15 @@
+[project]
+name = "agent-framework"
+version = "1.0.0"
+description = "DeepAgents-based Agent Framework with OAF config, A2A/A2UI protocols"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+markers = [
+    "unit: unit tests",
+    "integration: integration tests",
+    "e2e: end-to-end tests with real LLM",
+]

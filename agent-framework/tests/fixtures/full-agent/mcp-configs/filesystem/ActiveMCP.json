@@ -1,0 +1,27 @@
+{
+  "vendor": "block",
+  "server": "filesystem",
+  "version": "1.0.0",
+  "selectedTools": [
+    {
+      "name": "read_file",
+      "enabled": true,
+      "description": "Read contents of a file",
+      "required": true
+    },
+    {
+      "name": "list_directory",
+      "enabled": true,
+      "description": "List files in a directory",
+      "required": false
+    },
+    {
+      "name": "write_file",
+      "enabled": true,
+      "description": "Write content to a file",
+      "required": false
+    }
+  ],
+  "excludedTools": ["delete_file", "move_file", "chmod"],
+  "contextStrategy": "subset"
+}

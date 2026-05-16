@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Debug Console - A2A/A2UI Streaming</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
+.header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:18px;color:#58a6ff}
+.header .status{font-size:12px;padding:4px 10px;border-radius:12px;background:#238636;color:#fff}
+.header .status.error{background:#da3633}
+.header .btn-group{display:flex;gap:8px}
+.header .btn-group button{padding:4px 12px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:12px}
+.header .btn-group button:hover{background:#30363d}
+.main{flex:1;display:flex;overflow:hidden}
+.sidebar{width:260px;background:#161b22;border-right:1px solid #30363d;padding:12px;overflow-y:auto;flex-shrink:0}
+.sidebar h3{font-size:12px;color:#8b949e;margin:12px 0 6px;text-transform:uppercase;letter-spacing:0.5px}
+.sidebar .info-row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid #21262d}
+.sidebar .info-row .label{color:#8b949e}
+.sidebar .info-row .value{color:#c9d1d9;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-tag{display:inline-block;padding:2px 6px;margin:2px;background:#1f6feb33;color:#58a6ff;border-radius:4px;font-size:11px}
+.chat-area{flex:1;display:flex;flex-direction:column;min-width:0}
+.messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:85%;padding:10px 14px;border-radius:8px;font-size:14px;line-height:1.6;word-break:break-word;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:#1f6feb;color:#fff;border-bottom-right-radius:2px}
+.msg.assistant{align-self:flex-start;background:#21262d;color:#c9d1d9;border-bottom-left-radius:2px;position:relative}
+.msg.assistant .cursor{display:inline-block;width:8px;height:16px;background:#58a6ff;margin-left:2px;vertical-align:middle;animation:blink 0.8s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.msg.system{align-self:center;background:transparent;color:#8b949e;font-size:12px;font-style:italic}
+.msg .tool-call{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px;margin:6px 0;font-size:12px}
+.msg .tool-call .tool-name{color:#58a6ff;font-weight:bold}
+.msg .tool-call .tool-result{color:#8b949e;margin-top:4px;white-space:pre-wrap;max-height:200px;overflow-y:auto}
+.msg pre{background:#0d1117;padding:10px;border-radius:6px;overflow-x:auto;margin:8px 0;font-size:12px}
+.msg code{font-family:'SF Mono',Monaco,'Cascadia Code',monospace;font-size:12px}
+.a2ui-container{border:1px solid #30363d;border-radius:8px;padding:12px;margin:8px 0;background:#0d1117}
+.a2ui-text{color:#c9d1d9;font-size:14px;line-height:1.6}
+.a2ui-button{display:inline-block;padding:6px 16px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin:4px}
+.a2ui-button:hover{background:#2ea043}
+.a2ui-textfield input{padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;width:100%;font-size:13px}
+.a2ui-card{border:1px solid #30363d;border-radius:8px;padding:12px;background:#161b22}
+.a2ui-row,.a2ui-column{display:flex;gap:8px}
+.a2ui-column{flex-direction:column}
+.a2ui-list{list-style:none;padding:0}
+.a2ui-list-item{padding:6px 0;border-bottom:1px solid #21262d}
+.a2ui-divider{border:none;border-top:1px solid #30363d;margin:8px 0}
+.input-area{padding:16px 20px;background:#161b22;border-top:1px solid #30363d;display:flex;gap:10px;align-items:flex-end}
+.input-area textarea{flex:1;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;font-size:14px;resize:none;min-height:44px;max-height:120px;font-family:inherit;outline:none;line-height:1.5}
+.input-area textarea:focus{border-color:#58a6ff}
+.input-area .mode-select{display:flex;flex-direction:column;gap:4px;align-items:center}
+.input-area .mode-select label{font-size:11px;color:#8b949e}
+.input-area .mode-select select{padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12px;outline:none}
+.input-area button{padding:10px 24px;background:#238636;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;white-space:nowrap;align-self:stretch}
+.input-area button:hover{background:#2ea043}
+.input-area button:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+.input-area .stop-btn{background:#da3633}
+.input-area .stop-btn:hover{background:#f85149}
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:none;justify-content:center;align-items:center;z-index:1000}
+.modal-overlay.active{display:flex}
+.modal{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto}
+.modal h2{color:#58a6ff;margin-bottom:12px}
+.modal pre{background:#0d1117;padding:12px;border-radius:6px;overflow-x:auto;font-size:11px}
+.close-btn{float:right;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer}
+.typing-indicator{display:inline-flex;gap:4px;padding:8px 0}
+.typing-indicator span{width:6px;height:6px;background:#58a6ff;border-radius:50%;animation:bounce 1.2s infinite}
+.typing-indicator span:nth-child(2){animation-delay:0.2s}
+.typing-indicator span:nth-child(3){animation-delay:0.4s}
+@keyframes bounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
+.tool-log{font-size:11px;color:#8b949e;padding:2px 8px;margin-top:4px;border-left:2px solid #30363d;padding-left:8px}
+@media(max-width:768px){.sidebar{display:none}.msg{max-width:95%}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Agent Debug Console</h1>
+  <div class="btn-group">
+    <button onclick="showAgentCard()" title="View Agent Card">Card</button>
+    <button onclick="clearChat()" title="Clear chat">Clear</button>
+  </div>
+  <span id="agentStatus" class="status">connecting...</span>
+</div>
+<div class="main">
+  <div class="sidebar" id="sidebar">
+    <div class="section">
+      <h3>Agent Info</h3>
+      <div id="agentInfo"></div>
+    </div>
+    <div class="section">
+      <h3>Tools</h3>
+      <div id="toolsList"></div>
+    </div>
+    <div class="section">
+      <h3>Skills</h3>
+      <div id="skillsList"></div>
+    </div>
+    <div class="section">
+      <h3>MCP Servers</h3>
+      <div id="mcpList"></div>
+    </div>
+  </div>
+  <div class="chat-area">
+    <div class="messages" id="messages">
+      <div class="msg system">Agent Debug Console - Ready. Select "Stream" for real-time output.</div>
+    </div>
+    <div class="input-area">
+      <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+      <div class="mode-select">
+        <label>Mode</label>
+        <select id="modeSelect" onchange="onModeChange()">
+          <option value="stream">Stream</option>
+          <option value="send">Send</option>
+          <option value="a2ui">A2UI</option>
+        </select>
+      </div>
+      <button id="sendBtn" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <button class="close-btn" onclick="closeModal()">&times;</button>
+    <div id="modalContent"></div>
+  </div>
+</div>
+<script>
+const BASE = window.location.origin;
+let isStreaming = false;
+let abortController = null;
+let currentStreamMsg = null;
+let streamingDiv = null;
+
+async function init(){
+  try{
+    const resp=await fetch(BASE+'/health');
+    const data=await resp.json();
+    document.getElementById('agentStatus').textContent=data.status||'healthy';
+    document.getElementById('agentStatus').className='status';
+    document.getElementById('agentInfo').innerHTML=
+      '<div class="info-row"><span class="label">Name</span><span class="value">'+esc(data.agent||'N/A')+'</span></div>'+
+      '<div class="info-row"><span class="label">Skills</span><span class="value">'+(data.skills||0)+'</span></div>'+
+      '<div class="info-row"><span class="label">MCP</span><span class="value">'+(data.mcp_servers||0)+'</span></div>';
+  }catch(e){
+    document.getElementById('agentStatus').textContent='disconnected';
+    document.getElementById('agentStatus').className='status error';
+  }
+  try{
+    const resp=await fetch(BASE+'/');
+    const data=await resp.json();
+    const tools=data.oaf?.tools||data.tools||[];
+    document.getElementById('toolsList').innerHTML=tools.map(t=>'<span class="tool-tag">'+esc(t)+'</span>').join('')||'<span style="color:#8b949e;font-size:12px">No tools</span>';
+  }catch(e){}
+  try{
+    const resp=await fetch(BASE+'/skills');
+    const skills=await resp.json();
+    document.getElementById('skillsList').innerHTML=skills.map(s=>'<div style="font-size:12px;padding:4px 0;border-bottom:1px solid #21262d"><strong>'+esc(s.name)+'</strong><br><span style="color:#8b949e">'+(esc(s.description||'')||'')+'</span></div>').join('')||'<span style="color:#8b949e;font-size:12px">No skills</span>';
+  }catch(e){}
+  try{
+    const resp=await fetch(BASE+'/mcp');
+    const mcps=await resp.json();
+    document.getElementById('mcpList').innerHTML=mcps.map(m=>'<div style="font-size:12px;padding:4px 0;border-bottom:1px solid #21262d"><strong>'+esc(m.server||'?')+'</strong><br><span style="color:#8b949e">'+(esc((m.connection||{}).url||'N/A'))+'</span></div>').join('')||'<span style="color:#8b949e;font-size:12px">No MCP</span>';
+  }catch(e){}
+}
+init();
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+function clearChat(){
+  document.getElementById('messages').innerHTML='<div class="msg system">Chat cleared</div>';
+}
+
+function onModeChange(){
+  const mode=document.getElementById('modeSelect').value;
+  const ta=document.getElementById('userInput');
+  if(mode==='stream'){ta.placeholder='Streaming mode - real-time output';}
+  else if(mode==='a2ui'){ta.placeholder='A2UI mode - with UI components';}
+  else{ta.placeholder='Send mode - wait for full response';}
+}
+
+function addMessage(role,content,opts){
+  const div=document.createElement('div');
+  div.className='msg '+role;
+  if(opts&&opts.isA2UI){
+    div.innerHTML='<div class="a2ui-container">'+renderA2UI(content)+'</div>';
+  }else if(opts&&opts.toolCall){
+    div.innerHTML='<div class="tool-call"><span class="tool-name">'+esc(opts.toolName||'Tool')+'</span><div class="tool-result">'+esc(content)+'</div></div>';
+  }else{
+    div.innerHTML=formatMarkdown(content);
+  }
+  document.getElementById('messages').appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function addSystemMsg(text){
+  const div=document.createElement('div');
+  div.className='msg system';
+  div.textContent=text;
+  document.getElementById('messages').appendChild(div);
+  scrollBottom();
+}
+
+/* Streaming message element */
+function createStreamingMsg(){
+  const div=document.createElement('div');
+  div.className='msg assistant';
+  div.innerHTML='<div class="typing-indicator"><span></span><span></span><span></span></div>';
+  document.getElementById('messages').appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+async function sendMessage(){
+  if(isStreaming){
+    if(abortController){abortController.abort();}
+    return;
+  }
+  const input=document.getElementById('userInput');
+  const text=input.value.trim();
+  if(!text)return;
+  const mode=document.getElementById('modeSelect').value;
+  input.value='';
+  input.focus();
+
+  addMessage('user',text);
+  const btn=document.getElementById('sendBtn');
+
+  if(mode==='send'){
+    btn.disabled=true;
+    isStreaming=true;
+    const thinking=addSystemMsg('Thinking...');
+    try{
+      const resp=await fetch(BASE+'/',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          jsonrpc:'2.0',method:'message/send',
+          params:{message:{role:'user',parts:[{text}]}},
+          id:'msg-'+Date.now()
+        })
+      });
+      const result=await resp.json();
+      const task=result.result||result;
+      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
+      if(task.artifacts&&task.artifacts.length>0){
+        for(const art of task.artifacts){
+          for(const part of art.parts||[]){
+            if(part.text) addMessage('assistant',part.text);
+            else if(part.data?.a2ui_stream) addMessage('assistant',part.data.a2ui_stream,{isA2UI:true});
+          }
+        }
+      }else{
+        addMessage('assistant',JSON.stringify(task,null,2));
+      }
+    }catch(e){
+      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
+      if(e.name!=='AbortError') addMessage('system','Error: '+e.message);
+    }
+    isStreaming=false;
+    btn.disabled=false;
+    btn.className='';
+  }else if(mode==='a2ui'){
+    btn.disabled=true;
+    isStreaming=true;
+    const thinking=addSystemMsg('Generating A2UI...');
+    try{
+      const resp=await fetch(BASE+'/',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          jsonrpc:'2.0',method:'message/send',
+          params:{message:{role:'user',parts:[{text}]},
+            metadata:{a2uiClientCapabilities:{supportedCatalogIds:['https://a2ui.org/specification/v0_8/standard_catalog_definition.json']}}
+          },
+          id:'msg-'+Date.now()
+        })
+      });
+      const result=await resp.json();
+      const task=result.result||result;
+      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
+      if(task.artifacts&&task.artifacts.length>0){
+        for(const art of task.artifacts){
+          for(const part of art.parts||[]){
+            if(part.data?.a2ui_stream) addMessage('assistant',part.data.a2ui_stream,{isA2UI:true});
+            else if(part.text) addMessage('assistant',part.text);
+          }
+        }
+      }
+    }catch(e){
+      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
+      if(e.name!=='AbortError') addMessage('system','Error: '+e.message);
+    }
+    isStreaming=false;
+    btn.disabled=false;
+  }else{
+    // Stream mode
+    isStreaming=true;
+    btn.disabled=true;
+    btn.textContent='Stop';
+    btn.className='stop-btn';
+    streamingDiv=createStreamingMsg();
+    abortController=new AbortController();
+    let fullText='';
+    let logLines=[];
+
+    try{
+      const resp=await fetch(BASE+'/',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          jsonrpc:'2.0',method:'message/stream',
+          params:{message:{role:'user',parts:[{text}]}},
+          id:'stream-'+Date.now()
+        }),
+        signal:abortController.signal
+      });
+
+      const reader=resp.body.getReader();
+      const decoder=new TextDecoder();
+      let buffer='';
+
+      while(true){
+        const{done,value}=await reader.read();
+        if(done)break;
+        buffer+=decoder.decode(value,{stream:true});
+        const lines=buffer.split('\n');
+        buffer=lines.pop()||'';
+
+        for(const line of lines){
+          if(line.startsWith('event: ')){
+            const evt=line.slice(7).trim();
+            if(evt==='error'){logLines.push('[ERROR]');}
+            continue;
+          }
+          if(!line.startsWith('data: '))continue;
+          const dataStr=line.slice(6);
+          if(dataStr==='[DONE]'){
+            if(streamingDiv){
+              const cursor=streamingDiv.querySelector('.cursor');
+              if(cursor)cursor.remove();
+              updateStreamContent(fullText);
+            }
+            isStreaming=false;
+            btn.disabled=false;
+            btn.textContent='Send';
+            btn.className='';
+            streamingDiv=null;
+            abortController=null;
+            return;
+          }
+          try{
+            const data=JSON.parse(dataStr);
+            if(data.state==='working'){
+              logLines.push('Working...');
+            }else if(data.state==='completed'){
+              logLines.push('Done');
+            }else if(data.token&&streamingDiv){
+              fullText+=data.token;
+              updateStreamContent(fullText);
+            }else if(data.error&&streamingDiv){
+              fullText+='\n[Error: '+esc(data.error)+']';
+              updateStreamContent(fullText);
+            }
+          }catch(e){}
+        }
+      }
+      updateStreamContent(fullText);
+    }catch(e){
+      if(e.name==='AbortError'){
+        if(streamingDiv){
+          const cursor=streamingDiv.querySelector('.cursor');
+          if(cursor)cursor.remove();
+          if(fullText) updateStreamContent(fullText);
+        }
+      }else{
+        if(streamingDiv){
+          streamingDiv.innerHTML='<span style="color:#da3633">Error: '+esc(e.message)+'</span>';
+        }
+      }
+    }
+    isStreaming=false;
+    btn.disabled=false;
+    btn.textContent='Send';
+    btn.className='';
+    streamingDiv=null;
+    abortController=null;
+  }
+}
+
+function updateStreamContent(text){
+  if(!streamingDiv)return;
+  let html=formatMarkdown(text);
+  html+='<span class="cursor"></span>';
+  streamingDiv.innerHTML=html;
+  scrollBottom();
+}
+
+function formatMarkdown(text){
+  let html=esc(text);
+  html=html.replace(/```(\w*)\n([\s\S]*?)\n```/g,function(_,lang,code){return'<pre><code>'+esc(code)+'</code></pre>'});
+  html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
+  html=html.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  html=html.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+  html=html.replace(/^### (.+)$/gm,'<h4 style="margin:8px 0;color:#58a6ff">$1</h4>');
+  html=html.replace(/^## (.+)$/gm,'<h3 style="margin:10px 0;color:#58a6ff">$1</h3>');
+  html=html.replace(/^# (.+)$/gm,'<h2 style="margin:12px 0;color:#58a6ff">$1</h2>');
+  html=html.replace(/^- (.+)$/gm,'<li style="margin-left:16px">$1</li>');
+  html=html.replace(/^(\d+)\. (.+)$/gm,'<li style="margin-left:16px">$1. $2</li>');
+  return html;
+}
+
+function renderA2UI(jsonl){
+  const lines=jsonl.split('\n').filter(l=>l.trim());
+  let html='';
+  for(const line of lines){
+    try{
+      const obj=JSON.parse(line);
+      if(obj.surfaceUpdate){
+        const comps=obj.surfaceUpdate.components||[];
+        for(const comp of comps){html+=renderComponent(comp.component,comp.id);}
+      }
+      if(obj.dataModelUpdate){html+='<div class="a2ui-text" style="color:#8b949e;font-size:11px">[Data: '+esc(obj.dataModelUpdate.path)+']</div>';}
+      if(obj.beginRendering){html+='<div class="a2ui-text" style="color:#8b949e;font-size:11px">[Rendering: '+esc(obj.beginRendering.root)+']</div>';}
+    }catch(e){}
+  }
+  return html;
+}
+
+function renderComponent(comp,id){
+  if(!comp)return'';
+  const type=Object.keys(comp)[0];
+  const props=comp[type];
+  switch(type){
+    case'Text':return'<div class="a2ui-text" data-id="'+esc(id)+'">'+esc(props.text?.literalString||props.text||'')+'</div>';
+    case'Button':return'<button class="a2ui-button" data-id="'+esc(id)+'">'+esc(props.text?.literalString||'Button')+'</button>';
+    case'TextField':return'<div class="a2ui-textfield" data-id="'+esc(id)+'"><input placeholder="'+esc(props.label?.literalString||'')+'" value="'+esc(props.value?.literalString||'')+'"></div>';
+    case'Column':{const ch=props.children?.explicitList||[];return'<div class="a2ui-column" data-id="'+esc(id)+'">'+ch.map(cid=>'<div data-id="'+esc(cid)+'"></div>').join('')+'</div>';}
+    case'Row':{const ch=props.children?.explicitList||[];return'<div class="a2ui-row" data-id="'+esc(id)+'">'+ch.map(cid=>'<div data-id="'+esc(cid)+'"></div>').join('')+'</div>';}
+    case'Card':return'<div class="a2ui-card" data-id="'+esc(id)+'">'+esc(props.title?.literalString||'')+'</div>';
+    case'List':return'<ul class="a2ui-list" data-id="'+esc(id)+'"><li class="a2ui-list-item">List</li></ul>';
+    case'Image':return'<img class="a2ui-image" data-id="'+esc(id)+'" src="'+esc(props.url?.literalString||'')+'" alt="'+esc(props.alt?.literalString||'')+'">';
+    case'Divider':return'<hr class="a2ui-divider" data-id="'+esc(id)+'">';
+    default:return'<div class="a2ui-text" data-id="'+esc(id)+'">['+esc(type)+']</div>';
+  }
+}
+
+function scrollBottom(){
+  const mc=document.getElementById('messages');
+  if(mc)mc.scrollTop=mc.scrollHeight;
+}
+
+async function showAgentCard(){
+  try{
+    const resp=await fetch(BASE+'/.well-known/agent-card.json');
+    const card=await resp.json();
+    document.getElementById('modalContent').innerHTML='<h2>'+esc(card.name)+'</h2><pre>'+esc(JSON.stringify(card,null,2))+'</pre>';
+    document.getElementById('modalOverlay').classList.add('active');
+  }catch(e){alert('Failed: '+e.message);}
+}
+
+function closeModal(){document.getElementById('modalOverlay').classList.remove('active');}
+document.getElementById('modalOverlay').addEventListener('click',function(e){if(e.target===this)closeModal();});
+</script>
+</body>
+</html>

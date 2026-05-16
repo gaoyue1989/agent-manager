@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  agent-framework:
+    build: .
+    image: agent-framework:latest
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./config:/config
+    environment:
+      - AGENT_CONFIG_DIR=/config
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL_ID=${LLM_MODEL_ID:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8100
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
