@@ -1,6 +1,6 @@
 # Agent Framework — 部署文档
 
-**版本:** v1.0.0  
+**版本:** v1.1.0
 **日期:** 2026-05-16
 
 ---
@@ -10,6 +10,7 @@
 | 条件 | 说明 |
 |------|------|
 | Python | ≥ 3.11 |
+| MySQL | ≥ 8.0 (GreatSQL 3307), 用于 thread_id checkpoint 持久化 |
 | Docker | ≥ 24.0 (Docker 部署时需要) |
 | LLM API | OpenAI 兼容接口 |
 
@@ -66,39 +67,8 @@ LLM_API_KEY=your_api_key
 LLM_MODEL_ID=your_model_id
 LLM_BASE_URL=https://your-api-endpoint/v1
 AGENT_CONFIG_DIR=./config
+CHECKPOINT_MYSQL_DSN=mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test
 ```
-
-### 2.4 启动服务
-
-```bash
-python -m server.main
-```
-
-浏览器打开 `http://localhost:8100/debug` 进入调试页面。
-
-### 2.5 验证
-
-```bash
-curl http://localhost:8100/health
-```
-
----
-
-## 3. Docker 部署
-
-### 3.1 准备配置目录
-
-```bash
-mkdir -p config
-```
-
-目录结构:
-
-```
-config/
-├── AGENTS.md                  # (必需)
-├── skills/                    # (可选)
-└── mcp-configs/               # (可选)
 ```
 
 ### 3.2 配置环境变量
@@ -151,6 +121,8 @@ Loaded OAF: My Agent v1.0.0
   Skills: 0 - []
   MCP: 0 - []
   Tools: ['Read', 'Bash', 'Edit', 'Grep']
+Connecting to MySQL checkpoint: mysql+asyncmy://agent_manager:***@127.0.0.1:3307/agent_manager_test
+Checkpoint tables ready
 Uvicorn running on http://0.0.0.0:8100
 ```
 
@@ -190,6 +162,7 @@ docker compose down
 | `SERVER_HOST` | string | `0.0.0.0` | | 服务监听地址 |
 | `SERVER_PORT` | int | `8100` | | 服务端口 |
 | `SERVER_RELOAD` | bool | `false` | | 热重载 (开发用) |
+| `CHECKPOINT_MYSQL_DSN` | string | `mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test` | | MySQL checkpoint DSN (thread_id 持久化) |
 
 ### 4.2 AGENTS.md — 身份字段 (必填)
 
@@ -390,6 +363,9 @@ config/mcp-configs/<server-name>/
 | POST | `/tasks` | REST 消息 |
 | GET | `/tasks/{id}` | REST 任务查询 |
 | GET | `/tasks` | REST 任务列表 |
+| GET | `/threads` | Thread 列表 (checkpoint 持久化) |
+| GET | `/threads/{id}` | Thread 对话历史 (含 tool_call) |
+| DELETE | `/threads/{id}` | 删除 Thread 及持久化数据 |
 
 ---
 
@@ -409,7 +385,8 @@ $ curl -s http://localhost:8100/health | python3 -m json.tool
     "version": "1.0.0",
     "skills": 0,
     "mcp_servers": 0,
-    "llm_configured": true
+    "llm_configured": true,
+    "checkpoint": true
 }
 ```
 
@@ -484,6 +461,43 @@ data: {"token": ",", "task_id": "<uuid>"}
 
 浏览器访问 `http://localhost:8100/debug`，可选择模式 (Send / Stream / A2UI) 发送消息并查看实时流式响应。
 
+### 8.6 Thread 持久化 (MySQL checkpoint)
+
+```bash
+# 发送消息并指定 thread_id
+$ curl -s -X POST http://localhost:8100/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"text":"My name is Alice"}]},"metadata":{"thread_id":"my-thread"}},"id":"1"}' | python3 -m json.tool
+
+# 同一 thread_id 继续对话 — checkpoint 自动恢复上下文
+$ curl -s -X POST http://localhost:8100/ \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"text":"What is my name?"}]},"metadata":{"thread_id":"my-thread"}},"id":"2"}'
+
+# 查询完整对话历史
+$ curl -s http://localhost:8100/threads/my-thread | python3 -m json.tool
+```
+
+```json
+{
+    "thread_id": "my-thread",
+    "messages": [
+        {"role": "user", "content": "My name is Alice"},
+        {"role": "assistant", "content": "Got it, Alice."},
+        {"role": "user", "content": "What is my name?"},
+        {"role": "assistant", "content": "Your name is Alice."}
+    ]
+}
+```
+
+```bash
+# 列出所有 threads
+$ curl -s http://localhost:8100/threads | python3 -m json.tool
+
+# 删除 thread
+$ curl -s -X DELETE http://localhost:8100/threads/my-thread
+```
+
 ---
 
 ## 9. A2A JSON-RPC 方法
@@ -495,6 +509,10 @@ data: {"token": ",", "task_id": "<uuid>"}
 | `tasks/get` | 查询任务 |
 | `tasks/list` | 任务列表 |
 | `tasks/cancel` | 取消任务 |
+| `threads/list` | Thread 列表 (checkpoint) |
+| `threads/get` | Thread 对话历史 |
+| `threads/delete` | 删除 Thread |
+| `threads/create` | 创建新 Thread |
 
 ---
 
