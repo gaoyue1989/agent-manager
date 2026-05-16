@@ -173,12 +173,14 @@ class A2ARoutes:
                     yield f"event: tool_result\ndata: {json.dumps({'task_id': thread_id, **tr})}\n\n"
 
                 elif evt_type == "done":
-                    # 从 checkpoint 获取完整的 tool_call args（流式传输中 args 可能为空）
+                    # 从 checkpoint 获取完整的 tool_call args（流式传输中 args 可能为空值）
                     for tc in tool_calls:
                         tc_id = tc.get("tool_call_id", "")
                         tc_name = tc.get("name", "")
                         tc_args = tc.get("args", {})
-                        if not tc_args and tc_id:
+                        # args 为空 dict 或所有值均为空字符串时，从 checkpoint 补全
+                        args_empty = not tc_args or all(v == "" or v is None for v in tc_args.values())
+                        if args_empty and tc_id:
                             real_args = await self._get_tool_args_from_state(thread_id, tc_id, tc_name)
                             if real_args:
                                 yield f"event: tool_call\ndata: {json.dumps({'task_id': thread_id, 'type': 'tool_call', 'name': tc_name, 'args': real_args, 'tool_call_id': tc_id})}\n\n"
