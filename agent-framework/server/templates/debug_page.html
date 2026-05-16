@@ -530,7 +530,16 @@ async function sendMessage(){
             }
             else if(data.type==='tool_result'){
               const tc=pendingToolCalls[data.tool_call_id]||{name:data.name,args:{}};
-              addToolResultMessage(tc.name,data.result,data.tool_call_id,false);
+              // MCP tool_result 格式: [{type:"text", text:"..."}] → 提取 text
+              let resultText=data.result;
+              if(Array.isArray(resultText)){
+                resultText=resultText.map(r=>r.text||'').join('\n');
+              }else if(typeof resultText==='object'){
+                resultText=JSON.stringify(resultText,null,2);
+              }
+              addToolResultMessage(tc.name,resultText,data.tool_call_id,false);
+              // 创建新的 streaming div 以便后续 token 继续渲染
+              if(!streamingDiv){streamingDiv=createStreamingMsg();fullText='';}
             }
             else if(data.state==='completed'||data.state==='working'){
               if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
