@@ -20,4 +20,8 @@ VOLUME ["/config"]
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8100/health || exit 1
 
-CMD ["python", "-m", "server.main"]
+CMD exec gunicorn -w ${GUNICORN_WORKERS:-4} -k uvicorn.workers.UvicornWorker \
+    server.wsgi:app \
+    --bind ${SERVER_HOST:-0.0.0.0}:${SERVER_PORT:-8100} \
+    --max-requests ${GUNICORN_MAX_REQUESTS:-1000} \
+    --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER:-50}

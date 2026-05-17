@@ -1,7 +1,7 @@
 # Agent Framework — 部署文档
 
-**版本:** v1.1.0
-**日期:** 2026-05-16
+**版本:** v1.2.0
+**日期:** 2026-05-17
 
 ---
 
@@ -69,6 +69,31 @@ LLM_BASE_URL=https://your-api-endpoint/v1
 AGENT_CONFIG_DIR=./config
 CHECKPOINT_MYSQL_DSN=mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test
 ```
+
+### 2.4 本地启动 (开发模式)
+
+```bash
+AGENT_CONFIG_DIR=./config python -m uvicorn server.app:create_app --factory --host 0.0.0.0 --port 8100
+```
+
+---
+
+## 3. Docker 部署
+
+### 3.1 目录结构
+
+```
+agent-framework/
+├── Dockerfile         # gunicorn + uvicorn worker 生产启动
+├── docker-compose.yml # 服务编排
+├── server/
+│   ├── app.py         # FastAPI 应用工厂
+│   ├── wsgi.py        # gunicorn 入口 (调用 create_app)
+│   └── ...
+└── config/            # 挂载到容器 /config
+    ├── AGENTS.md
+    ├── skills/
+    └── mcp-configs/
 ```
 
 ### 3.2 配置环境变量
@@ -87,7 +112,7 @@ LLM_BASE_URL=https://your-api-endpoint/v1
 docker build -t agent-framework:latest .
 ```
 
-镜像大小约 800 MB，首次构建耗时约 2-3 分钟。
+镜像大小约 950 MB，首次构建耗时约 2-3 分钟。
 
 ### 3.4 启动服务
 
@@ -112,18 +137,14 @@ docker logs agent-framework-agent-framework-1
 预期输出：
 
 ```
-Agent Framework v1.0.0
-Config dir: /config
-Server: http://0.0.0.0:8100
-Debug UI: http://0.0.0.0:8100/debug
-LLM: ctyun / <model-id>
 Loaded OAF: My Agent v1.0.0
   Skills: 0 - []
   MCP: 0 - []
   Tools: ['Read', 'Bash', 'Edit', 'Grep']
 Connecting to MySQL checkpoint: mysql+asyncmy://agent_manager:***@127.0.0.1:3307/agent_manager_test
 Checkpoint tables ready
-Uvicorn running on http://0.0.0.0:8100
+[INFO] Started server process [7]
+[INFO] Application startup complete.
 ```
 
 ### 3.6 停止
@@ -137,6 +158,9 @@ docker compose down
 ```
 /app/
 ├── server/                    # Python 服务代码 (构建时复制)
+│   ├── app.py                 # FastAPI 应用工厂
+│   ├── wsgi.py                # gunicorn 入口
+│   └── ...
 └── /config/                   # 运行时挂载
     ├── AGENTS.md              # (必需)
     ├── skills/                # (可选)
@@ -163,6 +187,9 @@ docker compose down
 | `SERVER_PORT` | int | `8100` | | 服务端口 |
 | `SERVER_RELOAD` | bool | `false` | | 热重载 (开发用) |
 | `CHECKPOINT_MYSQL_DSN` | string | `mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test` | | MySQL checkpoint DSN (thread_id 持久化) |
+| `GUNICORN_WORKERS` | int | `4` | | gunicorn worker 进程数 |
+| `GUNICORN_MAX_REQUESTS` | int | `1000` | | worker 自动重启请求数 |
+| `GUNICORN_MAX_REQUESTS_JITTER` | int | `50` | | 重启请求数抖动 |
 
 ### 4.2 AGENTS.md — 身份字段 (必填)
 
@@ -358,7 +385,9 @@ config/mcp-configs/<server-name>/
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
 | GET | `/skills` | 技能列表 |
 | GET | `/mcp` | MCP 服务器列表 |
-| GET | `/debug` | 调试页面 |
+| POST | `/mcp/resources/read` | MCP Apps Host — 获取 UI 资源 (server + uri) |
+| POST | `/mcp/tools/list` | MCP 工具列表查询 |
+| GET | `/debug` | 调试页面 (MCP Apps Host 前端) |
 | POST | `/` | JSON-RPC 2.0 |
 | POST | `/tasks` | REST 消息 |
 | GET | `/tasks/{id}` | REST 任务查询 |
@@ -457,11 +486,30 @@ data: {"token": ",", "task_id": "<uuid>"}
 ...
 ```
 
-### 8.5 调试页面
+### 8.5 MCP Apps Host — 获取 UI 资源
 
-浏览器访问 `http://localhost:8100/debug`，可选择模式 (Send / Stream / A2UI) 发送消息并查看实时流式响应。
+```bash
+$ curl -s -X POST http://localhost:8100/mcp/resources/read \
+  -H "Content-Type: application/json" \
+  -d '{"server":"weather","uri":"ui://weather/weather-card"}' | python3 -m json.tool | head -10
+```
+```json
+{
+    "contents": [
+        {
+            "uri": "ui://weather/weather-card",
+            "mimeType": "text/html;profile=mcp-app",
+            "text": "<!DOCTYPE html>..."
+        }
+    ]
+}
+```
 
-### 8.6 Thread 持久化 (MySQL checkpoint)
+### 8.6 调试页面
+
+浏览器访问 `http://localhost:8100/debug`，支持 SSE 实时流式消息和 MCP Apps Host 渲染。
+
+### 8.7 Thread 持久化 (MySQL checkpoint)
 
 ```bash
 # 发送消息并指定 thread_id
@@ -649,3 +697,11 @@ WARNING: LLM_BASE_URL is not set
 ### Q: GLM-5 / 其他 reasoning 模型流式输出不工作
 
 框架已内置 `ChatOpenAIReasoning` 适配层，自动将 `reasoning_content` 转换为 `content`，无需额外配置。
+
+### Q: MCP 客户端连接失败
+
+确认 `langchain-mcp-adapters` 已安装 (`pip install langchain-mcp-adapters`)。Docker 镜像已内置此依赖。
+
+### Q: gunicorn 启动失败
+
+确认 `wsgi.py` 存在 (`server/wsgi.py`)，gunicorn 使用 `server.wsgi:app` 作为入口。本地开发测试建议用 uvicorn 直接启动。

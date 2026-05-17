@@ -1,7 +1,7 @@
 # Agent Framework — 测试文档
 
-**版本:** v1.1.0
-**日期:** 2026-05-16
+**版本:** v1.2.0
+**日期:** 2026-05-17
 
 ---
 
@@ -32,6 +32,7 @@ Agent Framework 包含三层测试体系:
 ```bash
 cd agent-framework
 pip install -r requirements.txt pytest pytest-asyncio pytest-cov python-dotenv httpx
+pip install langchain-mcp-adapters  # MCP 客户端依赖
 ```
 
 ### 2.2 MySQL Checkpoint 环境
@@ -67,6 +68,16 @@ FLUSH PRIVILEGES;
 ```
 
 > 集成测试启动时会自动创建 checkpoint 表 (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`)，无需手动建表。
+
+### 2.4 MCP Mock 服务器 (E2E 测试需要)
+
+```bash
+# 启动 MCP mock 服务器 (filesystem:8811 + weather:8812)
+cd tests/fixtures/full-agent/mcp-configs
+python3 mcp_servers.py both
+```
+
+MCP 服务器使用 SSE 协议，filesystem 提供文件读写，weather 提供天气查询和 MCP Apps UI 资源。
 
 ---
 
@@ -431,6 +442,10 @@ def main(input_data: str = None) -> str:
 ### 5.3 启动并测试
 
 ```bash
+# 启动 MCP mock 服务器 (如果需要测试 MCP 功能)
+python3 tests/fixtures/full-agent/mcp-configs/mcp_servers.py both &
+
+# 启动 Agent Framework (开发模式)
 AGENT_CONFIG_DIR=./config python -m uvicorn server.app:create_app --factory --host 0.0.0.0 --port 8100 &
 sleep 3
 
@@ -491,9 +506,13 @@ tests/fixtures/
     │       └── scripts/
     │           └── tool.py         # subprocess.run bash 执行器
     └── mcp-configs/
-        └── filesystem/
-            ├── ActiveMCP.json      # read_file + list_directory + write_file
-            └── config.yaml         # SSE 连接配置
+        ├── filesystem/
+        │   ├── ActiveMCP.json      # read_file + list_directory + write_file
+        │   └── config.yaml         # SSE 连接配置
+        ├── weather/
+        │   ├── ActiveMCP.json      # get_weather + get_forecast
+        │   └── config.yaml         # SSE 连接配置 (port 8812)
+        └── mcp_servers.py          # MCP SSE mock server 启动脚本
 ```
 
 ---

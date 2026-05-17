@@ -1,0 +1,18 @@
+services:
+  agent-framework:
+    build: .
+    image: agent-framework:test
+    network_mode: "host"
+    volumes:
+      - ./tests/fixtures/full-agent:/config
+    environment:
+      - AGENT_CONFIG_DIR=/config
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL_ID=${LLM_MODEL_ID}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_PROVIDER=${LLM_PROVIDER:-ctyun}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.7}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-4096}
+      - CHECKPOINT_MYSQL_DSN=mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test
+      - GUNICORN_WORKERS=2
+    restart: no
