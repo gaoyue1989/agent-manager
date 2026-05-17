@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent Debug Console — A2A/A2UI + Checkpoint</title>
+<title>Agent Debug Console — MCP Apps Host</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
@@ -17,8 +17,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .header .btn-group{display:flex;gap:6px}
 .header .btn-group button{padding:4px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:11px}
 .header .btn-group button:hover{background:#30363d}
-.header .btn-group button.danger{color:#da3633;border-color:#da363333}
-.header .btn-group button.danger:hover{background:#da363322}
 .main{flex:1;display:flex;overflow:hidden;min-height:0}
 .sidebar{width:280px;background:#161b22;border-right:1px solid #30363d;display:flex;flex-direction:column;flex-shrink:0}
 .sidebar-scroll{flex:1;overflow-y:auto;padding:10px}
@@ -51,10 +49,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg.system{align-self:center;background:transparent;color:#8b949e;font-size:11px;font-style:italic}
 .msg pre{background:#0d1117;padding:8px;border-radius:6px;overflow-x:auto;margin:6px 0;font-size:11px}
 .msg code{font-family:'SF Mono',Monaco,'Cascadia Code',monospace;font-size:11px}
-.a2ui-container{border:1px solid #30363d;border-radius:8px;padding:10px;margin:6px 0;background:#0d1117}
-.a2ui-text{color:#c9d1d9;font-size:13px;line-height:1.6}
-.a2ui-button{display:inline-block;padding:5px 14px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;margin:3px}
-.a2ui-textfield input{padding:7px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;width:100%;font-size:12px}
 .input-area{padding:12px 16px;background:#161b22;border-top:1px solid #30363d;display:flex;gap:8px;align-items:flex-end;flex-shrink:0}
 .input-area textarea{flex:1;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;font-size:13px;resize:none;min-height:40px;max-height:100px;font-family:inherit;outline:none;line-height:1.5}
 .input-area textarea:focus{border-color:#58a6ff}
@@ -70,7 +64,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .typing-indicator span:nth-child(2){animation-delay:0.2s}
 .typing-indicator span:nth-child(3){animation-delay:0.4s}
 @keyframes bounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
-.tool-log{font-size:10px;color:#8b949e;padding:2px 6px;margin-top:3px;border-left:2px solid #30363d;padding-left:6px}
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:none;justify-content:center;align-items:center;z-index:1000}
 .modal-overlay.active{display:flex}
 .modal{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto}
@@ -93,13 +86,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .tool-call-body .tc-result{color:#c9d1d9;border-top:1px solid #30363d;padding-top:6px;margin-top:6px}
 .tool-call-body .tc-result pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:10px;max-height:200px;overflow-y:auto}
 .tool-call-body .tc-label{color:#58a6ff;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px}
-.msg .tool-call-inline{background:#1f6feb22;border:1px solid #1f6feb44;border-radius:6px;padding:6px 10px;margin:4px 0;font-size:12px;display:flex;align-items:center;gap:6px}
-.msg .tool-call-inline .tc-icon{font-size:14px}
-.msg .tool-call-inline .tc-name{color:#58a6ff;font-weight:bold}
-.msg .tool-call-inline .tc-args{color:#8b949e;font-size:11px}
 .msg .tool-result-inline{background:#23863622;border:1px solid #23863644;border-radius:6px;padding:6px 10px;margin:4px 0;font-size:12px}
 .msg .tool-result-inline .tr-label{color:#238636;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px}
 .msg .tool-result-inline pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:10px;max-height:150px;overflow-y:auto}
+.mcp-apps-container{border:1px solid #30363d;border-radius:12px;margin:6px 0;overflow:hidden;background:#0d1117}
+.mcp-apps-header{display:flex;align-items:center;gap:6px;padding:6px 12px;background:#161b22;border-bottom:1px solid #30363d;font-size:11px;color:#8b949e}
+.mcp-apps-header .app-icon{font-size:14px}
+.mcp-apps-header .app-label{color:#58a6ff;font-weight:bold}
+.mcp-apps-header .app-uri{color:#8b949e;font-family:monospace;font-size:10px}
+.mcp-apps-iframe{width:100%;border:none;min-height:200px}
 @media(max-width:768px){.sidebar{display:none}.msg{max-width:95%}}
 </style>
 </head>
@@ -112,7 +107,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <span id="checkpointStatus" class="status-text"></span>
   </div>
   <div class="btn-group">
-    <button onclick="refreshThreads()" title="Refresh thread list">↻ Threads</button>
+    <button onclick="refreshThreads()" title="Refresh thread list">Refresh</button>
     <button onclick="showAgentCard()" title="View Agent Card">Card</button>
     <button onclick="clearChat()" title="Clear display">Clear</button>
   </div>
@@ -124,8 +119,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div id="agentInfo"></div>
       <h3>Tools</h3>
       <div id="toolsList"></div>
-      <h3>Skills</h3>
-      <div id="skillsList"></div>
       <h3>MCP Servers</h3>
       <div id="mcpList"></div>
       <h3>Threads</h3>
@@ -133,29 +126,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     </div>
     <div class="sidebar-actions">
       <button onclick="newThread()" title="Start a new conversation thread">+ New</button>
-      <button onclick="refreshThreads()" title="Refresh">↻</button>
+      <button onclick="refreshThreads()" title="Refresh">Refresh</button>
     </div>
   </div>
   <div class="chat-area">
     <div class="chat-header">
       <span class="thread-label">Thread:</span>
       <span class="thread-id empty" id="threadBadge">no thread selected</span>
-      <span style="flex:1"></span>
-      <button style="background:none;border:1px solid #30363d;color:#8b949e;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px" onclick="showThreadHistory()" title="View full thread history">History</button>
     </div>
     <div class="messages" id="messages">
-      <div class="msg system">Agent Debug Console v2.1 — Tool call visualization enabled.</div>
+      <div class="msg system">MCP Apps Host v1.0 - SEP-1865 compliant</div>
     </div>
     <div class="input-area">
       <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
-      <div class="mode-select">
-        <label>Mode</label>
-        <select id="modeSelect" onchange="onModeChange()">
-          <option value="stream">Stream</option>
-          <option value="send">Send</option>
-          <option value="a2ui">A2UI</option>
-        </select>
-      </div>
       <button id="sendBtn" onclick="sendMessage()">Send</button>
     </div>
   </div>
@@ -167,13 +150,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   </div>
 </div>
 <script>
-const BASE = window.location.origin;
-let isStreaming = false;
-let abortController = null;
-let streamingDiv = null;
-let currentThreadId = null;
-let threadListCache = [];
-let pendingToolCalls = {};
+const BASE=window.location.origin;
+let isStreaming=false,abortController=null,streamingDiv=null,currentThreadId=null,threadListCache=[],pendingToolCalls={},mcpAppsRegistry={},mcpAppsIframes={};
 
 async function init(){
   try{
@@ -183,13 +161,9 @@ async function init(){
     const dot=document.getElementById('agentDot');
     dot.className='status-dot'+(data.status==='healthy'?'':' error');
     const cpEl=document.getElementById('checkpointStatus');
-    if(data.checkpoint===true){cpEl.textContent='💾 MySQL';cpEl.style.color='#238636';}
-    else if(data.checkpoint===false){cpEl.textContent='⚠ no CP';cpEl.style.color='#d29922';}
-    else{cpEl.textContent='';}
-    document.getElementById('agentInfo').innerHTML=
-      '<div class="info-row"><span class="label">Name</span><span class="value">'+esc(data.agent||'N/A')+'</span></div>'+
-      '<div class="info-row"><span class="label">Skills</span><span class="value">'+(data.skills||0)+'</span></div>'+
-      '<div class="info-row"><span class="label">MCP</span><span class="value">'+(data.mcp_servers||0)+'</span></div>';
+    if(data.checkpoint===true){cpEl.textContent='MySQL';cpEl.style.color='#238636';}
+    else if(data.checkpoint===false){cpEl.textContent='no CP';cpEl.style.color='#d29922';}
+    document.getElementById('agentInfo').innerHTML='<div class="info-row"><span class="label">Name</span><span class="value">'+esc(data.agent||'N/A')+'</span></div><div class="info-row"><span class="label">MCP</span><span class="value">'+(data.mcp_servers||0)+'</span></div>';
   }catch(e){
     document.getElementById('agentStatus').textContent='disconnected';
     document.getElementById('agentDot').className='status-dot error';
@@ -201,17 +175,12 @@ async function init(){
     document.getElementById('toolsList').innerHTML=tools.map(t=>'<span class="tool-tag">'+esc(t)+'</span>').join('')||'<span style="color:#8b949e;font-size:11px">No tools</span>';
   }catch(e){}
   try{
-    const resp=await fetch(BASE+'/skills');
-    const skills=await resp.json();
-    document.getElementById('skillsList').innerHTML=skills.map(s=>'<div style="font-size:11px;padding:3px 0;border-bottom:1px solid #21262d"><strong>'+esc(s.name)+'</strong><br><span style="color:#8b949e">'+(esc(s.description||'')||'')+'</span></div>').join('')||'<span style="color:#8b949e;font-size:11px">No skills</span>';
-  }catch(e){}
-  try{
     const resp=await fetch(BASE+'/mcp');
     const mcps=await resp.json();
-    document.getElementById('mcpList').innerHTML=mcps.map(m=>'<div style="font-size:11px;padding:3px 0;border-bottom:1px solid #21262d"><strong>'+esc(m.server||'?')+'</strong><br><span style="color:#8b949e">'+(esc((m.connection||{}).url||'N/A'))+'</span></div>').join('')||'<span style="color:#8b949e;font-size:11px">No MCP</span>';
+    document.getElementById('mcpList').innerHTML=mcps.map(m=>'<div style="font-size:11px;padding:3px 0;border-bottom:1px solid #21262d"><strong>'+esc(m.server||'?')+'</strong></div>').join('')||'<span style="color:#8b949e;font-size:11px">No MCP</span>';
   }catch(e){}
   await refreshThreads();
-  setInterval(refreshThreads, 30000);
+  setInterval(refreshThreads,30000);
 }
 init();
 
@@ -233,11 +202,7 @@ function renderThreadList(threads){
   if(!threads||threads.length===0){el.innerHTML='<span style="color:#8b949e;font-size:11px">No threads yet</span>';return;}
   el.innerHTML=threads.map(t=>{
     const active=t.thread_id===currentThreadId;
-    return '<div class="thread-item'+(active?' active':'')+'" onclick="selectThread(\''+esc(t.thread_id)+'\')">'+
-      '<span class="tid" title="'+esc(t.thread_id)+'">'+esc(t.thread_id.substring(0,12))+'...</span>'+
-      '<span class="meta">step:'+t.last_step+'</span>'+
-      '<button class="del-btn" onclick="event.stopPropagation();deleteThread(\''+esc(t.thread_id)+'\')" title="Delete">×</button>'+
-      '</div>';
+    return '<div class="thread-item'+(active?' active':'')+'" onclick="selectThread(\''+esc(t.thread_id)+'\')"><span class="tid">'+esc(t.thread_id.substring(0,12))+'...</span><span class="meta">step:'+t.last_step+'</span></div>';
   }).join('');
 }
 
@@ -252,29 +217,22 @@ function selectThread(tid){
 function newThread(){
   currentThreadId=null;
   pendingToolCalls={};
-  document.getElementById('threadBadge').textContent='new thread (auto-generated)';
+  mcpAppsRegistry={};
+  mcpAppsIframes={};
+  document.getElementById('threadBadge').textContent='new thread';
   document.getElementById('threadBadge').classList.add('empty');
-  document.getElementById('messages').innerHTML='<div class="msg system">New thread started. Send a message to begin.</div>';
+  document.getElementById('messages').innerHTML='<div class="msg system">New thread started</div>';
   renderThreadList(threadListCache);
 }
 
-function renderToolCallBlock(tcName, tcArgs, tcResult, tcId, collapsed){
+function renderToolCallBlock(tcName,tcArgs,tcResult,tcId,collapsed,uiMeta){
   const argsStr=tcArgs?JSON.stringify(tcArgs,null,2):'';
   const resultStr=tcResult||'';
   const bodyClass=collapsed?'':'open';
   const toggleClass=collapsed?'':'open';
   const arrow=collapsed?'▼':'▲';
-  return '<div class="tool-call-block" data-tcid="'+esc(tcId||'')+'">'+
-    '<div class="tool-call-header" onclick="toggleToolCall(this)">'+
-      '<span class="tc-icon">🔧</span>'+
-      '<span class="tc-name">'+esc(tcName)+'</span>'+
-      '<span class="tc-toggle '+toggleClass+'">'+arrow+'</span>'+
-    '</div>'+
-    '<div class="tool-call-body '+bodyClass+'">'+
-      (argsStr?'<div class="tc-args"><div class="tc-label">Arguments</div><pre>'+esc(argsStr)+'</pre></div>':'')+
-      (resultStr?'<div class="tc-result"><div class="tc-label" style="margin-top:8px">Result</div><pre>'+esc(resultStr)+'</pre></div>':'')+
-    '</div>'+
-  '</div>';
+  const uiBadge=uiMeta?'<span style="margin-left:8px;padding:2px 6px;background:#23863622;color:#238636;border-radius:4px;font-size:10px">MCP App</span>':'';
+  return '<div class="tool-call-block" data-tcid="'+esc(tcId||'')+'"><div class="tool-call-header" onclick="toggleToolCall(this)"><span class="tc-icon">🔧</span><span class="tc-name">'+esc(tcName)+'</span>'+uiBadge+'<span class="tc-toggle '+toggleClass+'">'+arrow+'</span></div><div class="tool-call-body '+bodyClass+'">'+(argsStr?'<div class="tc-args"><div class="tc-label">Arguments</div><pre>'+esc(argsStr)+'</pre></div>':'')+(resultStr?'<div class="tc-result"><div class="tc-label" style="margin-top:8px">Result</div><pre>'+esc(resultStr)+'</pre></div>':'')+'</div></div>';
 }
 
 function toggleToolCall(headerEl){
@@ -289,7 +247,7 @@ async function loadThreadHistory(tid){
   try{
     const resp=await fetch(BASE+'/threads/'+encodeURIComponent(tid));
     const data=await resp.json();
-    if(data.error){document.getElementById('messages').innerHTML='<div class="msg system">Thread not found or empty</div>';return;}
+    if(data.error){document.getElementById('messages').innerHTML='<div class="msg system">Thread not found</div>';return;}
     const msgs=data.messages||[];
     const container=document.getElementById('messages');
     container.innerHTML='';
@@ -305,22 +263,56 @@ async function loadThreadHistory(tid){
         addMessage('user',m.content||'');
       }else if(m.role==='assistant'){
         addMessage('assistant',m.content||'');
-      }else if(m.role==='system'){
-        addMessage('system',m.content||'');
       }
     }
   }catch(e){
-    document.getElementById('messages').innerHTML='<div class="msg system">Failed to load history: '+esc(e.message)+'</div>';
+    document.getElementById('messages').innerHTML='<div class="msg system">Failed to load history</div>';
   }
 }
 
-function addToolCallMessage(name,args,content,tcId,collapsed){
+function addToolCallMessage(name,args,content,tcId,collapsed,uiMeta){
   const div=document.createElement('div');
   div.className='msg assistant';
-  div.innerHTML=renderToolCallBlock(name,args,null,tcId,collapsed);
+  div.innerHTML=renderToolCallBlock(name,args,null,tcId,collapsed,uiMeta);
   document.getElementById('messages').appendChild(div);
   scrollBottom();
   return div;
+}
+
+async function fetchMCPResource(server,uri){
+  try{
+    const resp=await fetch(BASE+'/mcp/resources/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({server,uri})});
+    const data=await resp.json();
+    if(data.contents&&data.contents[0])return data.contents[0];
+    return null;
+  }catch(e){console.error('MCP resource fetch failed:',e);return null;}
+}
+
+async function renderMCPAppFrame(uiUri,toolName,toolArgs,tcId){
+  const parts=uiUri.split('/');
+  const server=parts[2]||'weather';
+  console.log('DEBUG renderMCPAppFrame:', {uiUri, server, toolName, tcId, toolArgs});
+  const resource=await fetchMCPResource(server,uiUri);
+  console.log('DEBUG fetchMCPResource result:', resource? 'ok' : 'null');
+  if(!resource||!resource.text){
+    console.error('MCP resource fetch failed or empty');
+    return null;
+  }
+  const html=resource.text;
+  const containerId='mcp-app-'+tcId;
+  const container=document.createElement('div');
+  container.className='msg assistant';
+  container.innerHTML='<div class="mcp-apps-container"><div class="mcp-apps-header"><span class="app-icon">🎨</span><span class="app-label">'+esc(toolName)+'</span><span class="app-uri">'+esc(uiUri)+'</span></div><iframe id="'+containerId+'" class="mcp-apps-iframe" sandbox="allow-scripts"></iframe></div>';
+  document.getElementById('messages').appendChild(container);
+  scrollBottom();
+  const iframe=document.getElementById(containerId);
+  iframe.onload=()=>{
+    console.log('DEBUG iframe loaded, sending postMessage');
+    iframe.contentWindow.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-input',params:{arguments:toolArgs}},'*');
+  };
+  iframe.srcdoc=html;
+  mcpAppsIframes[tcId]=iframe;
+  return container;
 }
 
 function addToolResultMessage(name,result,tcId,collapsed){
@@ -343,32 +335,12 @@ function addToolResultMessage(name,result,tcId,collapsed){
   scrollBottom();
 }
 
-async function deleteThread(tid){
-  if(!confirm('Delete thread '+tid+'?'))return;
-  try{
-    await fetch(BASE+'/threads/'+encodeURIComponent(tid),{method:'DELETE'});
-    if(currentThreadId===tid) newThread();
-    await refreshThreads();
-  }catch(e){addSystemMsg('Delete failed: '+e.message);}
-}
+function clearChat(){document.getElementById('messages').innerHTML='<div class="msg system">Chat cleared</div>';}
 
-function clearChat(){
-  document.getElementById('messages').innerHTML='<div class="msg system">Chat cleared (thread data preserved in checkpoint)</div>';
-}
-
-function onModeChange(){
-  const mode=document.getElementById('modeSelect').value;
-  const ta=document.getElementById('userInput');
-  if(mode==='stream'){ta.placeholder='Streaming mode - real-time output';}
-  else if(mode==='a2ui'){ta.placeholder='A2UI mode - with UI components';}
-  else{ta.placeholder='Send mode - wait for response';}
-}
-
-function addMessage(role,content,opts){
+function addMessage(role,content){
   const div=document.createElement('div');
   div.className='msg '+role;
-  if(opts&&opts.isA2UI){div.innerHTML='<div class="a2ui-container">'+renderA2UI(content)+'</div>';}
-  else{div.innerHTML=formatMarkdown(content);}
+  div.innerHTML=formatMarkdown(content);
   document.getElementById('messages').appendChild(div);
   scrollBottom();
   return div;
@@ -393,7 +365,7 @@ function createStreamingMsg(){
 
 function buildMetadata(){
   const meta={};
-  if(currentThreadId) meta.thread_id=currentThreadId;
+  if(currentThreadId)meta.thread_id=currentThreadId;
   return meta;
 }
 
@@ -402,166 +374,116 @@ async function sendMessage(){
   const input=document.getElementById('userInput');
   const text=input.value.trim();
   if(!text)return;
-  const mode=document.getElementById('modeSelect').value;
   input.value='';input.focus();
   addMessage('user',text);
   const btn=document.getElementById('sendBtn');
   const metadata=buildMetadata();
-
-  if(mode==='send'){
-    btn.disabled=true;isStreaming=true;
-    const thinking=addSystemMsg('Thinking...');
-    try{
-      const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({jsonrpc:'2.0',method:'message/send',params:{message:{role:'user',parts:[{text}]},metadata},id:'msg-'+Date.now()})});
-      const result=await resp.json();
-      const task=result.result||result;
-      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
-      if(task.metadata&&task.metadata.thread_id&&!currentThreadId){
-        currentThreadId=task.metadata.thread_id;
-        document.getElementById('threadBadge').textContent=currentThreadId;
-        document.getElementById('threadBadge').classList.remove('empty');
-        await refreshThreads();
-      }
-      if(task.artifacts&&task.artifacts.length>0){
-        for(const art of task.artifacts){
-          for(const part of art.parts||[]){
-            if(part.text) addMessage('assistant',part.text);
-            else if(part.data?.a2ui_stream) addMessage('assistant',part.data.a2ui_stream,{isA2UI:true});
+  isStreaming=true;btn.disabled=true;btn.textContent='Stop';btn.className='stop-btn';
+  streamingDiv=createStreamingMsg();
+  abortController=new AbortController();
+  let fullText='';
+  pendingToolCalls={};
+  try{
+    const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',method:'message/stream',params:{message:{role:'user',parts:[{text}]},metadata},id:'stream-'+Date.now()}),signal:abortController.signal});
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const lines=buffer.split('\n');
+      buffer=lines.pop()||'';
+      for(const line of lines){
+        if(line.startsWith('event: ')){continue;}
+        if(!line.startsWith('data: '))continue;
+        const dataStr=line.slice(6);
+        if(dataStr==='[DONE]'){
+          if(streamingDiv){
+            const cursor=streamingDiv.querySelector('.cursor');
+            if(cursor)cursor.remove();
+            if(fullText)updateStreamContent(fullText);
           }
+          isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
+          streamingDiv=null;abortController=null;
+          await refreshThreads();
+          if(currentThreadId){document.getElementById('threadBadge').textContent=currentThreadId;document.getElementById('threadBadge').classList.remove('empty');}
+          return;
         }
-      }else{addMessage('assistant',JSON.stringify(task,null,2));}
-      await refreshThreads();
-    }catch(e){
-      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
-      if(e.name!=='AbortError') addMessage('system','Error: '+e.message);
-    }
-    isStreaming=false;btn.disabled=false;btn.className='';
-  }else if(mode==='a2ui'){
-    btn.disabled=true;isStreaming=true;
-    const a2uiMeta={...metadata,a2uiClientCapabilities:{supportedCatalogIds:['https://a2ui.org/specification/v0_8/standard_catalog_definition.json']}};
-    const thinking=addSystemMsg('Generating A2UI...');
-    try{
-      const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({jsonrpc:'2.0',method:'message/send',params:{message:{role:'user',parts:[{text}]},metadata:a2uiMeta},id:'msg-'+Date.now()})});
-      const result=await resp.json();
-      const task=result.result||result;
-      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
-      if(task.metadata&&task.metadata.thread_id&&!currentThreadId){
-        currentThreadId=task.metadata.thread_id;
-        document.getElementById('threadBadge').textContent=currentThreadId;
-        document.getElementById('threadBadge').classList.remove('empty');
-        await refreshThreads();
-      }
-      if(task.artifacts&&task.artifacts.length>0){
-        for(const art of task.artifacts){
-          for(const part of art.parts||[]){
-            if(part.data?.a2ui_stream) addMessage('assistant',part.data.a2ui_stream,{isA2UI:true});
-            else if(part.text) addMessage('assistant',part.text);
-          }
-        }
-      }
-      await refreshThreads();
-    }catch(e){
-      document.querySelectorAll('.msg.system').forEach(e=>e.remove());
-      if(e.name!=='AbortError') addMessage('system','Error: '+e.message);
-    }
-    isStreaming=false;btn.disabled=false;
-  }else{
-    isStreaming=true;btn.disabled=true;btn.textContent='Stop';btn.className='stop-btn';
-    streamingDiv=createStreamingMsg();
-    abortController=new AbortController();
-    let fullText='';
-    pendingToolCalls={};
-
-    try{
-      const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({jsonrpc:'2.0',method:'message/stream',params:{message:{role:'user',parts:[{text}]},metadata},id:'stream-'+Date.now()}),
-        signal:abortController.signal});
-      const reader=resp.body.getReader();
-      const decoder=new TextDecoder();
-      let buffer='';
-
-      while(true){
-        const{done,value}=await reader.read();
-        if(done)break;
-        buffer+=decoder.decode(value,{stream:true});
-        const lines=buffer.split('\n');
-        buffer=lines.pop()||'';
-
-        for(const line of lines){
-          if(line.startsWith('event: ')){continue;}
-          if(!line.startsWith('data: '))continue;
-          const dataStr=line.slice(6);
-          if(dataStr==='[DONE]'){
-            if(streamingDiv){
-              const cursor=streamingDiv.querySelector('.cursor');
-              if(cursor)cursor.remove();
-              if(fullText) updateStreamContent(fullText);
-            }
-            isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
-            streamingDiv=null;abortController=null;
-            await refreshThreads();
-            if(currentThreadId){document.getElementById('threadBadge').textContent=currentThreadId;document.getElementById('threadBadge').classList.remove('empty');}
-            return;
-          }
-          try{
-            const data=JSON.parse(dataStr);
-            if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
-            if(data.token&&streamingDiv){fullText+=data.token;updateStreamContent(fullText);}
-            else if(data.type==='tool_call'){
-              const tcId=data.tool_call_id||'';
-              // Existing block? Update args. Otherwise create new block.
-              const existing=document.querySelector('.tool-call-block[data-tcid="'+esc(tcId)+'"]');
-              if(existing){
-                pendingToolCalls[tcId]={name:data.name||(pendingToolCalls[tcId]&&pendingToolCalls[tcId].name),args:data.args};
-                const argsPre=existing.querySelector('.tc-args pre');
-                if(argsPre) argsPre.textContent=JSON.stringify(data.args,null,2);
+        try{
+          const data=JSON.parse(dataStr);
+          if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
+          if(data.token&&streamingDiv){fullText+=data.token;updateStreamContent(fullText);}
+          else if(data.type==='tool_call'){
+            const tcId=data.tool_call_id||'';
+            const uiMeta=data._meta?.ui||data.ui_meta||null;
+            console.log('DEBUG tool_call:', {tcId, name:data.name, _meta:data._meta, uiMeta});
+            const existing=document.querySelector('.tool-call-block[data-tcid="'+esc(tcId)+'"]');
+            if(existing){
+              pendingToolCalls[tcId]={name:data.name||(pendingToolCalls[tcId]&&pendingToolCalls[tcId].name),args:data.args,uiMeta:uiMeta};
+              const argsPre=existing.querySelector('.tc-args pre');
+              if(argsPre)argsPre.textContent=JSON.stringify(data.args,null,2);
+            }else{
+              pendingToolCalls[tcId]={name:data.name,args:data.args,uiMeta:uiMeta};
+              if(streamingDiv){
+                const cursor=streamingDiv.querySelector('.cursor');
+                if(cursor)cursor.remove();
+                if(fullText)updateStreamContent(fullText);
+              }
+              addToolCallMessage(data.name,data.args,null,tcId,false,uiMeta);
+              streamingDiv=null;
+              if(uiMeta&&uiMeta.resourceUri){
+                mcpAppsRegistry[tcId]={uri:uiMeta.resourceUri,name:data.name,args:data.args};
+                console.log('DEBUG registered in mcpAppsRegistry:', mcpAppsRegistry[tcId]);
               }else{
-                pendingToolCalls[tcId]={name:data.name,args:data.args};
-                if(streamingDiv){
-                  const cursor=streamingDiv.querySelector('.cursor');
-                  if(cursor)cursor.remove();
-                  if(fullText) updateStreamContent(fullText);
-                }
-                addToolCallMessage(data.name,data.args,null,tcId,false);
-                streamingDiv=null;
+                console.log('DEBUG NOT registering - no uiMeta or resourceUri', {uiMeta});
               }
             }
-            else if(data.type==='tool_result'){
-              const tc=pendingToolCalls[data.tool_call_id]||{name:data.name,args:{}};
-              // MCP tool_result 格式: [{type:"text", text:"..."}] → 提取 text
-              let resultText=data.result;
-              if(Array.isArray(resultText)){
-                resultText=resultText.map(r=>r.text||'').join('\n');
-              }else if(typeof resultText==='object'){
-                resultText=JSON.stringify(resultText,null,2);
+          }
+          else if(data.type==='tool_result'){
+            const tc=pendingToolCalls[data.tool_call_id]||{name:data.name,args:{},uiMeta:null};
+            let resultText=data.result;
+            if(Array.isArray(resultText)){
+              resultText=resultText.map(r=>r.text||'').join('\n');
+            }else if(typeof resultText==='object'){
+              resultText=JSON.stringify(resultText,null,2);
+            }
+            const appInfo=mcpAppsRegistry[data.tool_call_id];
+            console.log('DEBUG tool_result:', {tcId:data.tool_call_id, appInfo, hasUri:appInfo&&appInfo.uri});
+            if(appInfo&&appInfo.uri){
+              try{
+                const argsData=JSON.parse(resultText);
+                await renderMCPAppFrame(appInfo.uri,tc.name,argsData,data.tool_call_id);
+              }catch(e){
+                console.error('DEBUG renderMCPAppFrame failed:', e);
+                addToolResultMessage(tc.name,resultText,data.tool_call_id,false);
               }
+            }else{
+              console.log('DEBUG falling back to addToolResultMessage');
               addToolResultMessage(tc.name,resultText,data.tool_call_id,false);
-              // 创建新的 streaming div 以便后续 token 继续渲染
-              if(!streamingDiv){streamingDiv=createStreamingMsg();fullText='';}
             }
-            else if(data.state==='completed'||data.state==='working'){
-              if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
-            }
-            else if(data.error){
-              if(streamingDiv){streamingDiv.innerHTML+='<span style="color:#da3633">Error: '+esc(data.error)+'</span>';}
-            }
-          }catch(e){}
-        }
-      }
-      if(streamingDiv&&fullText){updateStreamContent(fullText);}
-    }catch(e){
-      if(e.name==='AbortError'){
-        if(streamingDiv){const cursor=streamingDiv.querySelector('.cursor');if(cursor)cursor.remove();if(fullText)updateStreamContent(fullText);}
-      }else{
-        if(streamingDiv){streamingDiv.innerHTML='<span style="color:#da3633">Error: '+esc(e.message)+'</span>';}
+            if(!streamingDiv){streamingDiv=createStreamingMsg();fullText='';}
+          }
+          else if(data.state==='completed'||data.state==='working'){
+            if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
+          }
+          else if(data.error){
+            if(streamingDiv){streamingDiv.innerHTML+='<span style="color:#da3633">Error: '+esc(data.error)+'</span>';}
+          }
+        }catch(e){}
       }
     }
-    isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
-    streamingDiv=null;abortController=null;
-    await refreshThreads();
+    if(streamingDiv&&fullText){updateStreamContent(fullText);}
+  }catch(e){
+    if(e.name==='AbortError'){
+      if(streamingDiv){const cursor=streamingDiv.querySelector('.cursor');if(cursor)cursor.remove();if(fullText)updateStreamContent(fullText);}
+    }else{
+      if(streamingDiv){streamingDiv.innerHTML='<span style="color:#da3633">Error: '+esc(e.message)+'</span>';}
+    }
   }
+  isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
+  streamingDiv=null;abortController=null;
+  await refreshThreads();
 }
 
 function updateStreamContent(text){
@@ -578,42 +500,7 @@ function formatMarkdown(text){
   html=html.replace(/`([^`]+)`/g,'<code>$1</code>');
   html=html.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
   html=html.replace(/\*([^*]+)\*/g,'<em>$1</em>');
-  html=html.replace(/^### (.+)$/gm,'<h4 style="margin:8px 0;color:#58a6ff">$1</h4>');
-  html=html.replace(/^## (.+)$/gm,'<h3 style="margin:10px 0;color:#58a6ff">$1</h3>');
-  html=html.replace(/^# (.+)$/gm,'<h2 style="margin:12px 0;color:#58a6ff">$1</h2>');
-  html=html.replace(/^- (.+)$/gm,'<li style="margin-left:16px">$1</li>');
-  html=html.replace(/^(\d+)\. (.+)$/gm,'<li style="margin-left:16px">$1. $2</li>');
   return html;
-}
-
-function renderA2UI(jsonl){
-  const lines=jsonl.split('\n').filter(l=>l.trim());
-  let html='';
-  for(const line of lines){
-    try{
-      const obj=JSON.parse(line);
-      if(obj.surfaceUpdate){const comps=obj.surfaceUpdate.components||[];for(const comp of comps){html+=renderComponent(comp.component,comp.id);}}
-      if(obj.dataModelUpdate){html+='<div class="a2ui-text" style="color:#8b949e;font-size:10px">[Data: '+esc(obj.dataModelUpdate.path)+']</div>';}
-      if(obj.beginRendering){html+='<div class="a2ui-text" style="color:#8b949e;font-size:10px">[Rendering: '+esc(obj.beginRendering.root)+']</div>';}
-    }catch(e){}
-  }
-  return html;
-}
-
-function renderComponent(comp,id){
-  if(!comp)return'';
-  const type=Object.keys(comp)[0];const props=comp[type];
-  switch(type){
-    case'Text':return'<div class="a2ui-text" data-id="'+esc(id)+'">'+esc(props.text?.literalString||props.text||'')+'</div>';
-    case'Button':return'<button class="a2ui-button" data-id="'+esc(id)+'">'+esc(props.text?.literalString||'Button')+'</button>';
-    case'TextField':return'<div class="a2ui-textfield" data-id="'+esc(id)+'"><input placeholder="'+esc(props.label?.literalString||'')+'" value="'+esc(props.value?.literalString||'')+'"></div>';
-    case'Column':{const ch=props.children?.explicitList||[];return'<div class="a2ui-column" data-id="'+esc(id)+'">'+ch.map(cid=>'<div data-id="'+esc(cid)+'"></div>').join('')+'</div>';}
-    case'Row':{const ch=props.children?.explicitList||[];return'<div class="a2ui-row" data-id="'+esc(id)+'">'+ch.map(cid=>'<div data-id="'+esc(cid)+'"></div>').join('')+'</div>';}
-    case'Card':return'<div class="a2ui-card" data-id="'+esc(id)+'">'+esc(props.title?.literalString||'')+'</div>';
-    case'List':return'<ul class="a2ui-list" data-id="'+esc(id)+'"><li class="a2ui-list-item">List</li></ul>';
-    case'Divider':return'<hr class="a2ui-divider" data-id="'+esc(id)+'">';
-    default:return'<div class="a2ui-text" data-id="'+esc(id)+'">['+esc(type)+']</div>';
-  }
 }
 
 function scrollBottom(){const mc=document.getElementById('messages');if(mc)mc.scrollTop=mc.scrollHeight;}
@@ -625,27 +512,6 @@ async function showAgentCard(){
     document.getElementById('modalContent').innerHTML='<h2>'+esc(card.name)+'</h2><pre>'+esc(JSON.stringify(card,null,2))+'</pre>';
     document.getElementById('modalOverlay').classList.add('active');
   }catch(e){alert('Failed: '+e.message);}
-}
-
-async function showThreadHistory(){
-  if(!currentThreadId){addSystemMsg('No thread selected');return;}
-  try{
-    const resp=await fetch(BASE+'/threads/'+encodeURIComponent(currentThreadId));
-    const data=await resp.json();
-    const msgs=data.messages||[];
-    let html='<h2>Thread '+esc(currentThreadId.substring(0,16))+'...</h2><p style="color:#8b949e;font-size:12px">'+msgs.length+' messages</p>';
-    for(const m of msgs){
-      if(m.type==='tool_call'){
-        html+='<div class="thread-msg"><span class="role">🔧 '+esc(m.tool_name)+'</span> <code>'+esc(JSON.stringify(m.tool_args||{}))+'</code></div>';
-      }else if(m.type==='tool_result'){
-        html+='<div class="thread-msg"><span class="role" style="color:#238636">✓ '+esc(m.tool_name)+' result</span> <span style="color:#8b949e">'+esc((m.content||'').substring(0,100))+'</span></div>';
-      }else{
-        html+='<div class="thread-msg"><span class="role">'+esc(m.role)+'</span> '+esc((m.content||'').substring(0,200))+'</div>';
-      }
-    }
-    document.getElementById('modalContent').innerHTML=html;
-    document.getElementById('modalOverlay').classList.add('active');
-  }catch(e){addSystemMsg('Failed: '+e.message);}
 }
 
 function closeModal(){document.getElementById('modalOverlay').classList.remove('active');}

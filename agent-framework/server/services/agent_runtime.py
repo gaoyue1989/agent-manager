@@ -29,6 +29,7 @@ class AgentRuntime:
         self.mcp_configs = mcp_configs or []
         self.mcp_client = mcp_client
         self._mcp_tools = []  # pre-loaded during startup
+        self._mcp_tool_meta = {}  # tool_name -> {_meta: {...}}
         self._agent = None
         self._chat_model = None
 
@@ -182,12 +183,19 @@ class AgentRuntime:
                         tc_id = tc.get("id", "")
                         tc_name = tc.get("name", "")
                         tc_args = tc.get("args", {})
+                        ui_meta = self._mcp_tool_meta.get(tc_name, {}).get("ui", None)
                         if tc_id and tc_name:
                             pending_tool_calls[tc_id] = {"name": tc_name, "args": tc_args}
-                            yield {"type": "tool_call", "name": tc_name, "args": tc_args, "tool_call_id": tc_id}
+                            event = {"type": "tool_call", "name": tc_name, "args": tc_args, "tool_call_id": tc_id}
+                            if ui_meta:
+                                event["_meta"] = {"ui": ui_meta}
+                            yield event
                         elif tc_args and tc_id in pending_tool_calls:
                             pending_tool_calls[tc_id]["args"] = tc_args
-                            yield {"type": "tool_call", "name": pending_tool_calls[tc_id]["name"], "args": tc_args, "tool_call_id": tc_id}
+                            event = {"type": "tool_call", "name": pending_tool_calls[tc_id]["name"], "args": tc_args, "tool_call_id": tc_id}
+                            if ui_meta:
+                                event["_meta"] = {"ui": ui_meta}
+                            yield event
                 else:
                     content = self._get_message_content(chunk)
                     if content and len(content) > len(full_text):
@@ -234,9 +242,6 @@ class AgentRuntime:
 
             messages = state.values.get("messages", [])
             if not messages:
-                # 没有消息说明 thread 不存在或已被删除
-                # 但为了区分真正不存在的 thread（无 checkpoint）,
-                # 检查 checkpoint 是否确实存在过
                 if self._checkpointer:
                     cpt = await self._checkpointer.aget_tuple(config)
                     if cpt is None:
@@ -314,7 +319,7 @@ class AgentRuntime:
                 tid = cfg.get("thread_id", "")
                 if not tid or tid in seen:
                     continue
-                step = cp.metadata.get("step", 0)
+                step = int(cp.metadata.get("step", 0))
                 source = cp.metadata.get("source", "")
                 seen[tid] = {
                     "thread_id": tid,
@@ -322,13 +327,12 @@ class AgentRuntime:
                     "last_step": step,
                     "last_source": source,
                 }
-            else:
-                # count checkpoints per thread
+            if seen:
                 async for cp in self._checkpointer.alist(None, limit=1000):
                     tid = cp.config.get("configurable", {}).get("thread_id", "")
                     if not tid or tid not in seen:
                         continue
-                    step = cp.metadata.get("step", 0)
+                    step = int(cp.metadata.get("step", 0))
                     source = cp.metadata.get("source", "")
                     seen[tid]["checkpoint_count"] += 1
                     if step > seen[tid]["last_step"]:
@@ -450,6 +454,29 @@ class AgentRuntime:
                                 pass
         except Exception:
             yield f"[Agent:{self.name}] LLM API unavailable — check configuration"
+
+    async def _fetch_mcp_tool_meta(self, server: str, url: str) -> dict:
+        import httpx
+        meta = {}
+        base_url = url.rstrip("/").replace("/sse", "")
+        session_id = "meta-fetch"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                resp = await client.post(
+                    f"{base_url}/message?sessionId={session_id}",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                    headers={"Content-Type": "application/json"},
+                )
+                data = resp.json()
+                tools = data.get("result", {}).get("tools", [])
+                for t in tools:
+                    name = t.get("name", "")
+                    tool_meta = t.get("_meta", {})
+                    if tool_meta:
+                        meta[name] = tool_meta
+            except Exception as e:
+                print(f"Failed to fetch tool meta from {server}: {e}")
+        return meta
 
     def _get_available_tools(self) -> list:
         tools = []

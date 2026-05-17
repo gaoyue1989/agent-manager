@@ -88,6 +88,9 @@ class AppConfig(BaseModel):
 
 
 def load_config() -> AppConfig:
+    from dotenv import load_dotenv
+    load_dotenv()
+
     return AppConfig(
         config_dir=os.getenv("AGENT_CONFIG_DIR", "/config"),
         server=ServerConfig(

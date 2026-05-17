@@ -160,6 +160,9 @@ class A2ARoutes:
                         "args": event.get("args", {}),
                         "tool_call_id": event.get("tool_call_id", ""),
                     }
+                    # 转发 MCP Apps UI 元数据
+                    if event.get("_meta"):
+                        tc["_meta"] = event["_meta"]
                     tool_calls.append(tc)
                     yield f"event: tool_call\ndata: {json.dumps({'task_id': thread_id, **tc})}\n\n"
 

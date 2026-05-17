@@ -12,6 +12,7 @@ from server.services.checkpoint_manager import CheckpointManager
 from server.routes.agent_card import generate_agent_card
 from server.routes.a2a_routes import A2ARoutes
 from server.routes.thread_routes import ThreadRoutes
+from server.routes.mcp_routes import MCPRoutes
 from server.routes.debug_ui import register_debug_ui
 
 
@@ -79,12 +80,24 @@ def create_app(config: AppConfig = None) -> FastAPI:
                 mcp_client = await mcp_manager.create_mcp_client(mcp_configs)
                 if mcp_client:
                     agent_runtime.mcp_client = mcp_client
-                    # Pre-load MCP tools so agent can use them synchronously
+                    app.state.mcp_client = mcp_client
                     try:
-                        agent_runtime._mcp_tools = await mcp_client.get_tools()
-                        print(f"MCP tools loaded: {[t.name for t in agent_runtime._mcp_tools]}")
+                        mcp_tools = await mcp_client.get_tools()
+                        agent_runtime._mcp_tools = mcp_tools
+                        print(f"MCP tools loaded: {[t.name for t in mcp_tools]}")
+                        for mc in mcp_configs:
+                            server = mc.get("server", "")
+                            conn = mc.get("connection", {})
+                            url = conn.get("url", "")
+                            if url:
+                                meta = await agent_runtime._fetch_mcp_tool_meta(server, url)
+                                agent_runtime._mcp_tool_meta.update(meta)
+                        if agent_runtime._mcp_tool_meta:
+                            print(f"MCP tool UI metadata: {list(agent_runtime._mcp_tool_meta.keys())}")
                     except Exception as e:
                         print(f"MCP tools load failed: {e}")
+                        import traceback
+                        traceback.print_exc()
                     print("MCP client connected")
                 else:
                     print("MCP client not available")
@@ -165,6 +178,8 @@ def create_app(config: AppConfig = None) -> FastAPI:
     )
 
     ThreadRoutes(app=app, agent_runtime=agent_runtime)
+
+    MCPRoutes(app=app, mcp_configs=mcp_configs)
 
     register_debug_ui(app)
 
