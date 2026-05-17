@@ -9,6 +9,7 @@ from server.services.mcp_manager import MCPManager
 from server.services.a2ui_service import A2UIService
 from server.services.agent_runtime import AgentRuntime
 from server.services.checkpoint_manager import CheckpointManager
+from server.services.custom_tool_manager import CustomToolManager
 from server.routes.agent_card import generate_agent_card
 from server.routes.a2a_routes import A2ARoutes
 from server.routes.thread_routes import ThreadRoutes
@@ -55,6 +56,13 @@ def create_app(config: AppConfig = None) -> FastAPI:
     mcp_manager = MCPManager(config.mcp_configs_dir)
     mcp_configs = mcp_manager.load_configs(oaf_config.mcp_servers)
 
+    custom_tool_manager = CustomToolManager(config.custom_tools_dir)
+    builtin_tool_names = ["bash", "read", "edit", "grep", "execute"]
+    custom_tool_names = [t for t in oaf_config.tools if t.lower() not in builtin_tool_names]
+    custom_tools = custom_tool_manager.load_tools(custom_tool_names)
+    if custom_tools:
+        print(f"Custom tools loaded: {[t.name for t in custom_tools]}")
+
     a2ui_service = A2UIService(
         catalog_id=oaf_config.get_catalog_id(),
     )
@@ -66,6 +74,7 @@ def create_app(config: AppConfig = None) -> FastAPI:
         mcp_client=None,
         loaded_skills=loaded_skills,
         mcp_configs=mcp_configs,
+        custom_tools=custom_tools,
     )
 
     @asynccontextmanager
@@ -169,6 +178,14 @@ def create_app(config: AppConfig = None) -> FastAPI:
     @app.get("/mcp")
     async def list_mcp():
         return mcp_manager.get_mcp_summaries(mcp_configs)
+
+    @app.get("/tools")
+    async def list_tools():
+        return {
+            "builtin": oaf_config.tools,
+            "custom": custom_tool_manager.get_tool_summaries(custom_tools),
+            "mcp": [t.name for t in agent_runtime._mcp_tools],
+        }
 
     A2ARoutes(
         app=app,

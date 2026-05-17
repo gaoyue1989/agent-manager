@@ -21,6 +21,7 @@ class AgentRuntime:
         loaded_skills: list[dict] = None,
         mcp_configs: list[dict] = None,
         mcp_client: Any = None,
+        custom_tools: list[Any] = None,
     ):
         self.oaf = oaf_config
         self.llm = llm_config
@@ -30,6 +31,7 @@ class AgentRuntime:
         self.mcp_client = mcp_client
         self._mcp_tools = []  # pre-loaded during startup
         self._mcp_tool_meta = {}  # tool_name -> {_meta: {...}}
+        self._custom_tools = custom_tools or []  # custom tools from custom-tools/
         self._agent = None
         self._chat_model = None
 
@@ -563,6 +565,9 @@ class AgentRuntime:
 
         if self._mcp_tools:
             tools.extend(self._mcp_tools)
+
+        if self._custom_tools:
+            tools.extend(self._custom_tools)
 
         return tools
 

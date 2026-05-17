@@ -11,10 +11,17 @@ Agent Framework 包含三层测试体系:
 
 | 层级 | 数量 | 说明 |
 |------|------|------|
-| 单元测试 | 81 | 函数/类级别, 无需外部依赖 |
+| 单元测试 | 96 | 函数/类级别, 无需外部依赖 |
 | 集成测试 | 20 | 服务器全流程 + MySQL checkpoint 持久化 |
-| E2E 测试 | 17 | 真实 LLM + 工具调用 + 流式传输 |
-| **总计** | **118** | |
+| E2E 测试 | 23 | 真实 LLM + 工具调用 + 流式传输 |
+| **总计** | **139** | |
+
+### 新增自定义工具测试
+
+| 测试文件 | 数量 | 说明 |
+|---------|------|------|
+| `tests/unit/test_custom_tool_manager.py` | 15 | 自定义工具管理器单元测试 |
+| `tests/e2e/test_custom_tool.py` | 6 | 真实 LLM 调用自定义工具 E2E 测试 |
 
 ### 新增 Checkpoint 持久化测试
 
@@ -228,6 +235,26 @@ pytest tests/unit/ tests/integration/ -v --cov=server --cov-report=term-missing
 | `test_empty_mcp_dir` | 空目录处理 |
 | `test_get_mcp_summaries` | MCP 摘要列表 |
 
+#### test_custom_tool_manager.py — 自定义工具管理 **[新增]**
+
+| 测试 | 说明 |
+|------|------|
+| `test_init_with_path` | 路径初始化 |
+| `test_init_with_pathlib` | Path 对象初始化 |
+| `test_load_tools_empty_dir` | 空目录处理 |
+| `test_load_tools_nonexistent_dir` | 不存在目录处理 |
+| `test_load_tools_single_tool` | 加载单个工具 |
+| `test_load_tools_multiple_tools` | 加载多个工具 |
+| `test_load_tools_file_with_multiple_tools` | 单文件多工具 |
+| `test_load_all_tools` | 加载所有工具 |
+| `test_load_tools_skip_underscore_files` | 跳过 `_` 开头文件 |
+| `test_load_tools_syntax_error` | 语法错误处理 |
+| `test_load_tools_non_tool_function` | 非工具函数跳过 |
+| `test_get_available_tool_names` | 获取可用工具名 |
+| `test_get_tool_summaries` | 工具摘要列表 |
+| `test_load_tools_cached` | 工具缓存 |
+| `test_load_tools_partial_success` | 部分加载成功 |
+
 #### test_a2ui_service.py — A2UI 服务
 
 | 测试 | 说明 |
@@ -341,6 +368,17 @@ pytest tests/unit/ tests/integration/ -v --cov=server --cov-report=term-missing
 | `test_sse_streaming_basic` | SSE 流式 token 接收 |
 | `test_sse_streaming_events` | SSE 事件格式 |
 | `test_sse_streaming_multiple_tokens` | 多 token 验证 |
+
+#### test_custom_tool.py — 自定义工具 **[新增]**
+
+| 测试 | 说明 |
+|------|------|
+| `test_health` | 服务健康 |
+| `test_tools_endpoint` | `/tools` 端点返回自定义工具 |
+| `test_root_endpoint_tools` | 根端点显示工具列表 |
+| `test_echo_tool_invoke` | LLM 主动调用 echo 工具（同步） |
+| `test_echo_tool_streaming` | LLM 主动调用 echo 工具（流式） |
+| `test_custom_tool_with_context` | 自定义工具在对话上下文中工作 |
 
 ---
 
@@ -499,12 +537,14 @@ tests/fixtures/
 ├── minimal-agent/
 │   └── AGENTS.md                  # 最小化配置
 └── full-agent/
-    ├── AGENTS.md                  # 完整配置 (skills + MCP + tools)
+    ├── AGENTS.md                  # 完整配置 (skills + MCP + tools + custom-tools)
     ├── skills/
     │   └── bash-tool/
     │       ├── SKILL.md
     │       └── scripts/
     │           └── tool.py         # subprocess.run bash 执行器
+    ├── custom-tools/
+    │   └── echo.py                 # @tool 装饰的自定义工具示例
     └── mcp-configs/
         ├── filesystem/
         │   ├── ActiveMCP.json      # read_file + list_directory + write_file

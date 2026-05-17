@@ -86,6 +86,10 @@ class AppConfig(BaseModel):
     def mcp_configs_dir(self) -> Path:
         return self.config_path
 
+    @property
+    def custom_tools_dir(self) -> Path:
+        return self.config_path / "custom-tools"
+
 
 def load_config() -> AppConfig:
     from dotenv import load_dotenv

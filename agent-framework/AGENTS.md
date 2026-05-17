@@ -61,7 +61,8 @@ agent-framework/
 │   │   ├── skill_manager.py        # Skill 动态加载 (importlib)
 │   │   ├── mcp_manager.py          # MCP 配置加载 + MultiServerMCPClient
 │   │   ├── a2ui_service.py         # A2UI JSONL 生成
-│   │   └── chat_model.py           # ChatOpenAIReasoning (GLM-5 适配)
+│   │   ├── chat_model.py           # ChatOpenAIReasoning (GLM-5 适配)
+│   │   └── custom_tool_manager.py  # 自定义工具动态加载 (importlib)
 │   ├── routes/                     # 路由
 │   │   ├── a2a_routes.py           # A2A 端点 (JSON-RPC + SSE + thread 方法)
 │   │   ├── thread_routes.py        # Thread REST (GET/DELETE /threads)
@@ -79,6 +80,8 @@ agent-framework/
 │       └── full-agent/             # 完整配置 (skills + MCP + tools)
 │           ├── AGENTS.md
 │           ├── skills/bash-tool/
+│           ├── custom-tools/       # 自定义工具脚本
+│           │   └── echo.py
 │           └── mcp-configs/
 │               ├── filesystem/     # MCP 文件系统
 │               ├── weather/        # MCP 天气查询
@@ -159,6 +162,19 @@ SSE 事件流: `task_update(working)` → `token*` → `tool_call*` → `tool_re
 | GET | `/threads/{id}` | 获取对话历史 |
 | DELETE | `/threads/{id}` | 删除 thread |
 
+### 6. custom_tool_manager.py — 自定义工具管理
+
+```python
+class CustomToolManager:
+    def __init__(self, custom_tools_dir)        # 初始化目录
+    def load_tools(tool_names)                  → list[StructuredTool]  # 按名称加载
+    def load_all_tools()                        → list[StructuredTool]  # 加载所有
+    def get_available_tool_names()              → list[str]             # 可用工具名
+    def get_tool_summaries(loaded_tools)        → list[dict]            # 工具摘要
+```
+
+工具脚本格式: `custom-tools/{name}.py`，使用 `@tool` 装饰器定义函数。
+
 ---
 
 ## 配置
@@ -212,6 +228,7 @@ tools:
   - Bash
   - Edit
   - Grep
+  - echo                    # 自定义工具 (custom-tools/echo.py)
 ---
 # System prompt Markdown body
 ```
@@ -227,6 +244,7 @@ tools:
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
 | GET | `/skills` | 技能列表 |
 | GET | `/mcp` | MCP 服务器列表 |
+| GET | `/tools` | 工具列表 (内建 + 自定义 + MCP) |
 | GET | `/debug` | 调试页面 |
 | POST | `/` | JSON-RPC 2.0 |
 | GET | `/threads` | Thread 列表 |
@@ -272,6 +290,38 @@ CHECKPOINT_MYSQL_DSN=mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1
 1. `test_sse_streaming_events` — SSE 流末尾缺少 `event: done`（DeepAgents `stream_mode="messages"` 行为变更）
 2. MCP SSE mock server 心跳 `: heartbeat` 触发 pydantic 解析警告（不影响功能）
 3. GLM-5 流式 tool_call 发送 args 值为空字符串，需从 checkpoint 补全
+
+---
+
+## 自定义工具
+
+在 `custom-tools/` 目录下放置 Python 脚本，使用 `@tool` 装饰器定义工具：
+
+```
+custom-tools/
+├── web_search.py
+└── calculator.py
+```
+
+```python
+# custom-tools/web_search.py
+from langchain_core.tools import tool
+
+@tool
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    # 实现逻辑
+    return result
+```
+
+在 `AGENTS.md` 的 `tools` 字段中声明工具名（不含 `.py` 后缀）：
+
+```yaml
+tools:
+  - Read
+  - Bash
+  - web_search    # 自定义工具
+```
 
 ---
 

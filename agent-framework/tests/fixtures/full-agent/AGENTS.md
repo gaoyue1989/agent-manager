@@ -34,6 +34,7 @@ tools:
   - Bash
   - Edit
   - Grep
+  - echo
 
 config:
   temperature: 0.7
