@@ -40,11 +40,82 @@ yg-demo-agent/
 
 ## 启动方式
 
-### 1. 启动 MCP SSE Server
+### 环境变量配置
+
+启动前需要配置以下环境变量：
+
+```bash
+# 必需 - LLM 配置
+export LLM_API_KEY="your-api-key"
+export LLM_MODEL_ID="your-model-id"
+export LLM_BASE_URL="https://your-llm-endpoint/v1"
+
+# 可选
+export LLM_PROVIDER="ctyun"
+export CHECKPOINT_MYSQL_DSN="mysql+asyncmy://user:pass@host:3307/database"
+```
+
+或创建 `.env` 文件：
+
+```bash
+# .env
+LLM_API_KEY=your-api-key
+LLM_MODEL_ID=your-model-id
+LLM_BASE_URL=https://your-llm-endpoint/v1
+LLM_PROVIDER=ctyun
+CHECKPOINT_MYSQL_DSN=mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test
+```
+
+### 方式一：Docker Compose 启动
+
+```bash
+cd agent-framework/tests/fixtures/yg-demo-agent
+
+# 设置环境变量
+export LLM_API_KEY="your-api-key"
+export LLM_MODEL_ID="your-model-id"
+export LLM_BASE_URL="https://your-llm-endpoint/v1"
+
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+```
+
+服务地址：
+- Agent API: http://localhost:8103
+- MCP Server: http://localhost:8820
+
+### 方式二：本地开发启动
+
+#### 1. 启动 MCP SSE Server
 
 ```bash
 cd agent-framework
-uvicorn tests.fixtures.yg-demo-agent.mcp-configs.yg_demo_tools.mcp_servers:app --host 0.0.0.0 --port 8820
+python tests/fixtures/yg-demo-agent/mcp-configs/yg_demo_tools/mcp_servers.py
+```
+
+#### 2. 启动 Agent 服务
+
+```bash
+cd agent-framework
+
+# 设置环境变量
+export LLM_API_KEY="your-api-key"
+export LLM_MODEL_ID="your-model-id"
+export LLM_BASE_URL="https://your-llm-endpoint/v1"
+export CHECKPOINT_MYSQL_DSN="mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test"
+
+# 启动服务
+AGENT_CONFIG_DIR=tests/fixtures/yg-demo-agent \
+  python -m uvicorn server.app:create_app --factory --host 0.0.0.0 --port 8103
+```
+
+#### 3. 访问调试页面
+
+```
+http://localhost:8103/debug
 ```
 
 或直接运行:
