@@ -11,6 +11,7 @@ class AgentRuntime:
     """DeepAgents 运行时封装
 
     生命周期内复用同一个 agent（带 checkpointer），thread_id 驱动会话隔离
+    支持多租户：通过 thread_id 前缀 (agent slug) 隔离不同 Agent 的 checkpoint 数据
     """
 
     def __init__(
@@ -22,18 +23,31 @@ class AgentRuntime:
         mcp_configs: list[dict] = None,
         mcp_client: Any = None,
         custom_tools: list[Any] = None,
+        checkpoint_manager: Any = None,
     ):
         self.oaf = oaf_config
         self.llm = llm_config
         self._checkpointer = checkpointer
+        self._checkpoint_manager = checkpoint_manager
+        self._tenant_prefix = oaf_config.slug
         self.loaded_skills = loaded_skills or []
         self.mcp_configs = mcp_configs or []
         self.mcp_client = mcp_client
-        self._mcp_tools = []  # pre-loaded during startup
-        self._mcp_tool_meta = {}  # tool_name -> {_meta: {...}}
-        self._custom_tools = custom_tools or []  # custom tools from custom-tools/
+        self._mcp_tools = []
+        self._mcp_tool_meta = {}
+        self._custom_tools = custom_tools or []
         self._agent = None
         self._chat_model = None
+
+    def _make_thread_id(self, thread_id: str) -> str:
+        """生成带租户前缀的 thread_id"""
+        return f"{self._tenant_prefix}:{thread_id}"
+
+    def _parse_thread_id(self, full_thread_id: str) -> str:
+        """从完整 thread_id 中提取原始 thread_id"""
+        if ":" in full_thread_id and full_thread_id.startswith(self._tenant_prefix):
+            return full_thread_id[len(self._tenant_prefix) + 1:]
+        return full_thread_id
 
     @property
     def name(self) -> str:
@@ -42,6 +56,10 @@ class AgentRuntime:
     @property
     def description(self) -> str:
         return self.oaf.description
+
+    @property
+    def tenant_prefix(self) -> str:
+        return self._tenant_prefix
 
     @property
     def system_prompt(self) -> str:
@@ -106,6 +124,8 @@ class AgentRuntime:
         if thread_id is None:
             thread_id = str(uuid.uuid4())
 
+        full_thread_id = self._make_thread_id(thread_id)
+
         if not self.llm.is_valid():
             return f"[Mock Agent:{self.name}] {message}", thread_id
 
@@ -113,7 +133,7 @@ class AgentRuntime:
         if agent is None:
             return f"[Agent:{self.name}] LLM not configured", thread_id
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": full_thread_id}}
 
         try:
             result = await agent.ainvoke(
@@ -147,6 +167,8 @@ class AgentRuntime:
         if thread_id is None:
             thread_id = str(uuid.uuid4())
 
+        full_thread_id = self._make_thread_id(thread_id)
+
         if not self.llm.is_valid():
             yield {"type": "token", "token": f"[Mock Agent:{self.name}] {message}"}
             yield {"type": "done"}
@@ -158,7 +180,7 @@ class AgentRuntime:
             yield {"type": "done"}
             return
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": full_thread_id}}
 
         try:
             full_text = ""
@@ -182,22 +204,25 @@ class AgentRuntime:
                     yield {"type": "tool_result", "name": tc.get("name", "tool"), "result": result, "tool_call_id": tool_call_id}
                 elif hasattr(chunk, "tool_calls") and chunk.tool_calls:
                     for tc in chunk.tool_calls:
-                        tc_id = tc.get("id", "")
+                        tc_id = tc.get("id")
                         tc_name = tc.get("name", "")
                         tc_args = tc.get("args", {})
-                        ui_meta = self._mcp_tool_meta.get(tc_name, {}).get("ui", None)
+                        
                         if tc_id and tc_name:
                             pending_tool_calls[tc_id] = {"name": tc_name, "args": tc_args}
-                            event = {"type": "tool_call", "name": tc_name, "args": tc_args, "tool_call_id": tc_id}
-                            if ui_meta:
-                                event["_meta"] = {"ui": ui_meta}
-                            yield event
-                        elif tc_args and tc_id in pending_tool_calls:
-                            pending_tool_calls[tc_id]["args"] = tc_args
-                            event = {"type": "tool_call", "name": pending_tool_calls[tc_id]["name"], "args": tc_args, "tool_call_id": tc_id}
-                            if ui_meta:
-                                event["_meta"] = {"ui": ui_meta}
-                            yield event
+                        elif tc_args:
+                            for existing_id, existing_tc in pending_tool_calls.items():
+                                if not existing_tc.get("args"):
+                                    existing_tc["args"] = tc_args
+                                    break
+                            for existing_id, existing_tc in list(pending_tool_calls.items()):
+                                if existing_tc.get("args") and existing_tc.get("name"):
+                                    ui_meta = self._mcp_tool_meta.get(existing_tc["name"], {}).get("ui", None)
+                                    event = {"type": "tool_call", "name": existing_tc["name"], "args": existing_tc["args"], "tool_call_id": existing_id}
+                                    if ui_meta:
+                                        event["_meta"] = {"ui": ui_meta}
+                                    yield event
+                                    existing_tc["yielded"] = True
                 else:
                     content = self._get_message_content(chunk)
                     if content and len(content) > len(full_text):
@@ -236,7 +261,8 @@ class AgentRuntime:
         if agent is None:
             return {"thread_id": thread_id, "messages": [], "error": "Agent not initialized"}
 
-        config = {"configurable": {"thread_id": thread_id}}
+        full_thread_id = self._make_thread_id(thread_id)
+        config = {"configurable": {"thread_id": full_thread_id}}
         try:
             state = await agent.aget_state(config)
             if state is None or state.values is None:
@@ -300,30 +326,39 @@ class AgentRuntime:
             return {"thread_id": thread_id, "messages": [], "error": str(e)}
 
     async def delete_thread(self, thread_id: str) -> bool:
-        """删除 thread 的所有 checkpoint 数据"""
+        """删除 thread 的所有 checkpoint 数据（多租户隔离）"""
+        full_thread_id = self._make_thread_id(thread_id)
+        if self._checkpoint_manager is not None:
+            return await self._checkpoint_manager.delete_thread_by_ns(
+                full_thread_id, ""
+            )
         if self._checkpointer is None:
             return False
         try:
-            await self._checkpointer.adelete_thread(thread_id)
+            await self._checkpointer.adelete_thread(full_thread_id)
             return True
         except Exception:
             return False
 
     async def list_threads(self) -> list[dict]:
-        """列出所有 thread（从 checkpoint 聚合）"""
+        """列出所有 thread（从 checkpoint 聚合，按租户前缀过滤）"""
         if self._checkpointer is None:
             return []
 
         try:
             seen = {}
+            prefix = f"{self._tenant_prefix}:"
             async for cp in self._checkpointer.alist(None, limit=1000):
                 cfg = cp.config.get("configurable", {})
-                tid = cfg.get("thread_id", "")
-                if not tid or tid in seen:
+                full_tid = cfg.get("thread_id", "")
+                if not full_tid or full_tid in seen:
                     continue
+                if not full_tid.startswith(prefix):
+                    continue
+                tid = self._parse_thread_id(full_tid)
                 step = int(cp.metadata.get("step", 0))
                 source = cp.metadata.get("source", "")
-                seen[tid] = {
+                seen[full_tid] = {
                     "thread_id": tid,
                     "checkpoint_count": 1,
                     "last_step": step,
@@ -331,15 +366,16 @@ class AgentRuntime:
                 }
             if seen:
                 async for cp in self._checkpointer.alist(None, limit=1000):
-                    tid = cp.config.get("configurable", {}).get("thread_id", "")
-                    if not tid or tid not in seen:
+                    cfg = cp.config.get("configurable", {})
+                    full_tid = cfg.get("thread_id", "")
+                    if not full_tid or full_tid not in seen:
                         continue
                     step = int(cp.metadata.get("step", 0))
                     source = cp.metadata.get("source", "")
-                    seen[tid]["checkpoint_count"] += 1
-                    if step > seen[tid]["last_step"]:
-                        seen[tid]["last_step"] = step
-                        seen[tid]["last_source"] = source
+                    seen[full_tid]["checkpoint_count"] += 1
+                    if step > seen[full_tid]["last_step"]:
+                        seen[full_tid]["last_step"] = step
+                        seen[full_tid]["last_source"] = source
 
             return sorted(seen.values(), key=lambda t: t["last_step"], reverse=True)
 

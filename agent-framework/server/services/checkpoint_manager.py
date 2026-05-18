@@ -7,6 +7,7 @@ class CheckpointManager:
     """MySQL checkpoint 生命周期管理
 
     管理 asyncmy 连接和 AsyncMySaver 实例的创建、初始化和关闭
+    支持多租户隔离：通过 checkpoint_ns 区分不同 Agent 的数据
     """
 
     def __init__(self, dsn: str):
@@ -30,6 +31,38 @@ class CheckpointManager:
     @property
     def saver(self) -> AsyncMySaver:
         return self._saver
+
+    async def delete_thread_by_ns(self, thread_id: str, checkpoint_ns: str) -> bool:
+        """按 thread_id + checkpoint_ns 删除 checkpoint 数据
+
+        用于多租户场景下删除指定 Agent 的 thread 数据
+
+        Args:
+            thread_id: 线程 ID
+            checkpoint_ns: checkpoint namespace (通常为 agent slug)
+
+        Returns:
+            bool: 是否删除成功
+        """
+        if not self._conn:
+            return False
+        try:
+            async with self._conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = %s AND checkpoint_ns = %s",
+                    (thread_id, checkpoint_ns),
+                )
+                await cur.execute(
+                    "DELETE FROM checkpoint_blobs WHERE thread_id = %s AND checkpoint_ns = %s",
+                    (thread_id, checkpoint_ns),
+                )
+                await cur.execute(
+                    "DELETE FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_ns = %s",
+                    (thread_id, checkpoint_ns),
+                )
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _parse_dsn(dsn: str) -> dict:

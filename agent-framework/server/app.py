@@ -75,6 +75,7 @@ def create_app(config: AppConfig = None) -> FastAPI:
         loaded_skills=loaded_skills,
         mcp_configs=mcp_configs,
         custom_tools=custom_tools,
+        checkpoint_manager=checkpoint_manager,
     )
 
     @asynccontextmanager
@@ -82,7 +83,7 @@ def create_app(config: AppConfig = None) -> FastAPI:
         print(f"Connecting to MySQL checkpoint: {config.checkpoint.dsn}")
         await checkpoint_manager.start()
         agent_runtime._checkpointer = checkpoint_manager.saver
-        print("Checkpoint tables ready")
+        print(f"Checkpoint tables ready (tenant: {agent_runtime.tenant_prefix})")
 
         if mcp_configs:
             try:
@@ -137,10 +138,12 @@ def create_app(config: AppConfig = None) -> FastAPI:
             "status": "healthy",
             "agent": oaf_config.name,
             "version": oaf_config.version,
+            "slug": oaf_config.slug,
             "skills": len(loaded_skills),
             "mcp_servers": len(mcp_configs),
             "llm_configured": config.llm.is_valid(),
             "checkpoint": checkpoint_manager.saver is not None,
+            "tenant_prefix": agent_runtime.tenant_prefix,
         }
 
     @app.get("/")

@@ -110,9 +110,12 @@ class CheckpointManager:
     async def start(self) -> AsyncMySaver      # 连接 + 建表
     async def close(self)                     # 关闭连接
     @property saver  → AsyncMySaver
+    async def delete_thread_by_ns(thread_id, checkpoint_ns)  # 多租户删除
 ```
 
 MySQL 表: `checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`
+
+**多租户支持**: 通过 `checkpoint_ns` 字段隔离不同 Agent 的数据，主键为 `(thread_id, checkpoint_ns, checkpoint_id)`。
 
 ### 2. agent_runtime.py — DeepAgents 运行时
 
@@ -129,9 +132,14 @@ class AgentRuntime:
     # 内部
     _ensure_agent()        → create_deep_agent(checkpointer=saver)  # 懒加载, 注入 checkpointer
     _get_available_tools() → 内建工具 (bash/read/edit/grep) + MCP 工具 (_mcp_tools 缓存)
+
+    # 多租户
+    @property checkpoint_ns → agent slug (vendorKey/agentKey)
 ```
 
 agent 创建时机: 首次 `invoke`/`invoke_stream` 调用 (`_ensure_agent` 懒加载)
+
+**多租户支持**: 所有 checkpoint 操作传递 `checkpoint_ns`，实现不同 Agent 数据隔离。
 
 ### 3. mcp_manager.py — MCP 管理
 
@@ -240,16 +248,16 @@ tools:
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 服务信息 + 协议声明 |
-| GET | `/health` | 健康检查 (含 checkpoint/mcp status) |
+| GET | `/health` | 健康检查 (含 checkpoint/mcp status + tenant_prefix) |
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
 | GET | `/skills` | 技能列表 |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 (内建 + 自定义 + MCP) |
 | GET | `/debug` | 调试页面 |
 | POST | `/` | JSON-RPC 2.0 |
-| GET | `/threads` | Thread 列表 |
+| GET | `/threads` | Thread 列表 (按 checkpoint_ns 过滤) |
 | GET | `/threads/{id}` | Thread 对话历史 |
-| DELETE | `/threads/{id}` | 删除 Thread |
+| DELETE | `/threads/{id}` | 删除 Thread (按 checkpoint_ns 隔离) |
 
 ---
 
@@ -281,6 +289,59 @@ pytest tests/e2e/ -v           # 17 E2E 测试 (需要 LLM)
 
 # MySQL checkpoint 需要
 CHECKPOINT_MYSQL_DSN=mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test
+```
+
+---
+
+## 多租户支持
+
+### 数据隔离机制
+
+使用 **thread_id 前缀** 实现多租户隔离：
+
+| 字段 | 用途 | 示例 |
+|------|------|------|
+| `thread_id` | 完整标识 (含租户前缀) | `tenant-a/agent-x:uuid-xxx` |
+| `checkpoint_ns` | LangGraph 内部使用 | `""` (空字符串) |
+
+**实际 thread_id 格式**: `{tenant_prefix}:{original_thread_id}`
+
+其中 `tenant_prefix = vendorKey/agentKey` (来自 OAF 配置的 slug)
+
+### 隔离效果
+
+两个 Agent 即使使用相同的 `thread_id`，数据也完全隔离：
+
+| Agent A | Agent B |
+|---------|---------|
+| `tenant_prefix = "tenant-a/agent-x"` | `tenant_prefix = "tenant-b/agent-y"` |
+| `original_thread_id = "thread-1"` | `original_thread_id = "thread-1"` |
+| **实际 thread_id**: `"tenant-a/agent-x:thread-1"` | **实际 thread_id**: `"tenant-b/agent-y:thread-1"` |
+| **完全隔离** | **完全隔离** |
+
+### 实现细节
+
+1. **AgentRuntime** 初始化时从 `oaf_config.slug` 获取 `tenant_prefix`
+2. `invoke`/`invoke_stream` 时将 `thread_id` 转换为 `{tenant_prefix}:{thread_id}`
+3. `get_thread_state` 时同样转换 `thread_id`
+4. `list_threads` 按前缀过滤，只返回当前 Agent 的 threads，并去除前缀返回原始 thread_id
+5. `delete_thread` 按完整 thread_id 删除
+
+### 为什么不使用 checkpoint_ns
+
+LangGraph 的 `checkpoint_ns` 用于 subgraph 命名空间，在 root graph 中会被覆盖为空字符串。
+因此采用 **thread_id 前缀** 方案实现多租户隔离，更简单可靠。
+
+### StoreBackend NamespaceFactory
+
+`StoreBackend.NamespaceFactory` 用于文件存储隔离（非 checkpoint 隔离）：
+
+```python
+# 基于用户身份隔离文件
+namespace=lambda rt: (rt.server_info.user.identity, "filesystem")
+
+# 基于 checkpoint_ns 隔离文件
+namespace=lambda rt: (rt.execution_info.checkpoint_ns, "files")
 ```
 
 ---
