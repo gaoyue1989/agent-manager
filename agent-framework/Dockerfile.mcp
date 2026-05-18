@@ -1,0 +1,25 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    fastapi>=0.100.0 \
+    uvicorn[standard]>=0.30.0 \
+    httpx>=0.25.0 \
+    sse-starlette>=2.0.0 \
+    pydantic>=2.0.0
+
+COPY tests/fixtures/yg-demo-agent/mcp-configs/yg_demo_tools/mcp_servers.py ./mcp_servers.py
+
+EXPOSE 8820
+
+ENV PYTHONUNBUFFERED=1
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8820/health || exit 1
+
+CMD ["python", "mcp_servers.py"]

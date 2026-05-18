@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  yg-demo-agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: agent-framework:yg-demo
+    container_name: yg-demo-agent
+    ports:
+      - "8103:8103"
+    volumes:
+      - ../tests/fixtures/yg-demo-agent:/config:ro
+    environment:
+      - AGENT_CONFIG_DIR=/config
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL_ID=${LLM_MODEL_ID}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_PROVIDER=${LLM_PROVIDER:-ctyun}
+      - LLM_TEMPERATURE=0.7
+      - LLM_MAX_TOKENS=4096
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8103
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  yg-demo-mcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile.mcp
+    image: yg-demo-mcp:latest
+    container_name: yg-demo-mcp
+    ports:
+      - "8820:8820"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8820/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s

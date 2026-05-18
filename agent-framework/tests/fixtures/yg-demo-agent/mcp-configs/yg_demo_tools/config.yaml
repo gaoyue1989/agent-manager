@@ -1,0 +1,33 @@
+vendor: "yg_demo"
+server: "yg_demo_tools"
+version: "1.0.0"
+
+connection:
+  type: "sse"
+  url: "http://yg-demo-mcp:8820/sse"
+  timeout: 60
+
+tools:
+  address_search:
+    description: "地址查询工具 - 根据关键词搜索地址"
+    http:
+      url: "https://m1.apifoxmock.com/m2/8091045-7847473-default/441764982"
+      method: "GET"
+  
+  cost_estimate:
+    description: "报价单查询工具 - 查询可用车型及报价"
+    http:
+      url: "https://m1.apifoxmock.com/m2/8091045-7847473-default/441776112"
+      method: "POST"
+  
+  save_order:
+    description: "保存预订单工具 - 保存打车预订单"
+    http:
+      url: "https://m1.apifoxmock.com/m2/8091045-7847473-default/441921276"
+      method: "POST"
+  
+  order_create:
+    description: "客服确认订单工具 - 发送订单确认"
+    http:
+      url: "https://m1.apifoxmock.com/m2/8091045-7847473-default/441816936"
+      method: "POST"

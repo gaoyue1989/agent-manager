@@ -1,0 +1,33 @@
+{
+  "vendor": "yg_demo",
+  "server": "yg_demo_tools",
+  "version": "1.0.0",
+  "selectedTools": [
+    {
+      "name": "address_search",
+      "enabled": true,
+      "description": "地址查询工具 - 根据关键词搜索地址，返回匹配的地址列表",
+      "required": true
+    },
+    {
+      "name": "cost_estimate",
+      "enabled": true,
+      "description": "报价单查询工具 - 根据出发地、目的地坐标查询可用车型及报价",
+      "required": true
+    },
+    {
+      "name": "save_order",
+      "enabled": true,
+      "description": "保存预订单工具 - 保存打车预订单信息",
+      "required": true
+    },
+    {
+      "name": "order_create",
+      "enabled": true,
+      "description": "客服确认订单工具 - 将预订单发送给客户确认",
+      "required": true
+    }
+  ],
+  "excludedTools": [],
+  "contextStrategy": "subset"
+}
