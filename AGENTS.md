@@ -71,13 +71,35 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 
 | 服务 | 端口 | 用途 |
 |------|------|------|
+| Nginx 反向代理 | 8911 | 统一入口 (前端/后端/K8s Ingress) |
 | Go 后端 | 8080 | REST API 服务 |
-| Next.js 前端 | 3000 | Web UI |
+| Next.js 前端 | 3000 | Web UI (PM2 standalone) |
 | GreatSQL (MySQL) | 3307 | 持久化 Agent 元数据 |
 | MinIO API | 9000 | 对象存储 |
 | MinIO Console | 9001 | 对象存储管理面板 |
-| Docker Registry | 5000 | 本地镜像仓库 |
+| Docker Registry | 5001 | 本地镜像仓库 (HTTP) |
+| K8s Ingress Controller | 30080/30443 | K8s 集群入口 |
 | Kind K8s | — | 本地 Kubernetes 集群 |
+
+### Nginx 反向代理架构
+
+```
+浏览器 :8911
+    │
+    ▼
+┌──────────┐
+│  Nginx   │  /etc/nginx/conf.d/agent-manager.conf
+│  :8911   │
+└──────────┘
+  │          │            │
+  │ /        │ /api/      │ /agent/
+  ▼ :3000    ▼ :8080      ▼ :30080
+Frontend    Backend       K8s Ingress
+(Next.js)   (Go/Gin)      Controller
+                           │
+                           ▼ agent-{id}-svc:8100
+                        Agent Pod (agent-framework)
+```
 
 ---
 
@@ -101,7 +123,7 @@ Agent 支持两种运行模式：
 **挂载模式部署流程：**
 1. 用户创建 Agent，选择挂载模式和镜像
 2. 配置存储到 MinIO (AGENTS.md + skills + mcp-configs)
-3. 部署时创建 ConfigMap 和 Secret
+3. 部署时创建 ConfigMap (配置) 和 Secret (LLM API Key)
 4. K8s Sandbox 挂载 ConfigMap 到 /config 目录
 5. agent-framework 从 /config 读取配置运行
 
@@ -109,8 +131,16 @@ Agent 支持两种运行模式：
 ```bash
 AVAILABLE_IMAGES=agent-framework:latest|Agent Framework v0.5.5,agent-framework:v0.5.5|Agent Framework v0.5.5 (stable)
 DEFAULT_IMAGE=agent-framework:latest
-DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@127.0.0.1:3307/agent_manager_checkpoint
+DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@172.20.0.1:3307/agent_manager_checkpoint
 ```
+
+**挂载模式关键实现细节：**
+- 镜像自动补全 Registry 前缀：短镜像名 (如 `agent-framework:latest`) 自动补充为 `{registry}/agent-framework:latest`
+- `Publish` 挂载模式始终调用 `DeployWithMount()`，非 `Deploy()` (修复重发布 ImagePullBackOff)
+- Checkpoint DSN 主机须用 `172.20.0.1` (Docker 网关)，因 K8s Pod 内 `127.0.0.1` 指向 Pod 自身
+- Agent 容器端口 **8100**，构建模式端口 8000
+- `INGRESS_HOST` 环境变量决定对外地址展示 (默认 `localhost`，须设为 nginx 入口地址)
+- LLM 配置通过后端环境变量注入：`LLM_API_KEY`/`LLM_MODEL`/`LLM_ENDPOINT` → Pod 内 `LLM_API_KEY`(Secret)/`LLM_MODEL_ID`/`LLM_BASE_URL`
 
 ### 2. Agent 删除功能
 
@@ -130,7 +160,27 @@ DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@127.0.0.1:3307/agent_ma
 - `deployed/published`: K8s + Docker + MinIO + 数据库
 - `error`: 尝试清理所有可能资源
 
-### 3. 基础镜像构建
+### 4. Agent 端点和外部访问
+
+已发布的 Agent 可通过 `/agent/{id}/` 路径直接访问容器内所有端点：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/agent/{id}/` | 服务信息 |
+| GET | `/agent/{id}/health` | 健康检查 |
+| GET | `/agent/{id}/debug` | Debug Console (MCP Apps Host) |
+| GET | `/agent/{id}/threads` | Thread 列表 |
+| GET | `/agent/{id}/skills` | Skills 列表 |
+| GET | `/agent/{id}/mcp` | MCP 服务器列表 |
+| GET | `/agent/{id}/tools` | 工具列表 |
+| POST | `/agent/{id}/` | JSON-RPC 2.0 (message/send, message/stream) |
+| DELETE | `/agent/{id}/threads/{tid}` | 删除 Thread |
+
+**Chat 代理调用**：前端 → `POST /api/v1/agents/{id}/chat` → 后端转换为 JSON-RPC `message/send` → Ingress → Agent Pod `:8100`。
+
+> **注意**：Debug 页面 `BASE` 路径已从 `window.location.origin` 修正为从 `pathname` 提取前缀，确保在 `/agent/{id}/debug` 路径下 API 请求正确路由。
+
+### 5. 基础镜像构建
 
 预构建基础镜像 `agent-base:latest`，包含所有 pip 依赖，加速 Agent 镜像构建：
 
