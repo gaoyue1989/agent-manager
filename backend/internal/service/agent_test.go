@@ -17,12 +17,12 @@ func setupAgentTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
-	db.Migrator().DropTable(&model.Deployment{}, &model.ImageBuild{}, &model.CodeGeneration{}, &model.Agent{})
+	db.Exec("DROP TABLE IF EXISTS deployments, image_builds, code_generations, agents")
 	if err := db.AutoMigrate(&model.Agent{}, &model.CodeGeneration{}, &model.ImageBuild{}, &model.Deployment{}); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 	t.Cleanup(func() {
-		db.Migrator().DropTable(&model.Deployment{}, &model.ImageBuild{}, &model.CodeGeneration{}, &model.Agent{})
+		db.Exec("DROP TABLE IF EXISTS deployments, image_builds, code_generations, agents")
 	})
 	return db
 }

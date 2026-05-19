@@ -89,6 +89,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .tool-result-inline{background:#23863622;border:1px solid #23863644;border-radius:6px;padding:6px 10px;margin:4px 0;font-size:12px}
 .msg .tool-result-inline .tr-label{color:#238636;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px}
 .msg .tool-result-inline pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;margin:4px 0;font-size:10px;max-height:150px;overflow-y:auto}
+.usage-stats{display:flex;gap:12px;padding:6px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;margin:6px 0;font-size:11px;align-items:center}
+.usage-stats .stat-item{display:flex;align-items:center;gap:4px}
+.usage-stats .stat-label{color:#8b949e}
+.usage-stats .stat-value{color:#58a6ff;font-weight:bold}
+.usage-stats .stat-value.time{color:#238636}
+.usage-stats .stat-value.tokens-in{color:#d29922}
+.usage-stats .stat-value.tokens-out{color:#58a6ff}
 .mcp-apps-container{border:1px solid #30363d;border-radius:12px;margin:6px 0;overflow:hidden;background:#0d1117}
 .mcp-apps-header{display:flex;align-items:center;gap:6px;padding:6px 12px;background:#161b22;border-bottom:1px solid #30363d;font-size:11px;color:#8b949e}
 .mcp-apps-header .app-icon{font-size:14px}
@@ -150,8 +157,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   </div>
 </div>
 <script>
-const BASE=window.location.origin;
-let isStreaming=false,abortController=null,streamingDiv=null,currentThreadId=null,threadListCache=[],pendingToolCalls={},mcpAppsRegistry={},mcpAppsIframes={};
+const BASE=window.location.pathname.replace(/\/debug$/,'')||'';
+let isStreaming=false,abortController=null,streamingDiv=null,currentThreadId=null,threadListCache=[],pendingToolCalls={},mcpAppsRegistry={},mcpAppsIframes={},currentUsage=null;
 
 async function init(){
   try{
@@ -464,6 +471,23 @@ async function sendMessage(){
             }
             if(!streamingDiv){streamingDiv=createStreamingMsg();fullText='';}
           }
+          else if(data.type==='done'){
+            currentUsage=data.usage||null;
+            const elapsed=data.elapsed_time||0;
+            if(streamingDiv){
+              const cursor=streamingDiv.querySelector('.cursor');
+              if(cursor)cursor.remove();
+              if(fullText)updateStreamContent(fullText);
+            }
+            if(currentUsage||elapsed){
+              addUsageStats(currentUsage,elapsed);
+            }
+            isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
+            streamingDiv=null;abortController=null;
+            await refreshThreads();
+            if(currentThreadId){document.getElementById('threadBadge').textContent=currentThreadId;document.getElementById('threadBadge').classList.remove('empty');}
+            return;
+          }
           else if(data.state==='completed'||data.state==='working'){
             if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
           }
@@ -515,6 +539,26 @@ async function showAgentCard(){
 }
 
 function closeModal(){document.getElementById('modalOverlay').classList.remove('active');}
+
+function addUsageStats(usage,elapsed){
+  const div=document.createElement('div');
+  div.className='usage-stats';
+  let html='';
+  if(usage){
+    const inputTokens=usage.input_tokens||0;
+    const outputTokens=usage.output_tokens||0;
+    const totalTokens=usage.total_tokens||(inputTokens+outputTokens);
+    html+='<div class="stat-item"><span class="stat-label">输入:</span><span class="stat-value tokens-in">'+inputTokens+'</span></div>';
+    html+='<div class="stat-item"><span class="stat-label">输出:</span><span class="stat-value tokens-out">'+outputTokens+'</span></div>';
+    html+='<div class="stat-item"><span class="stat-label">总计:</span><span class="stat-value">'+totalTokens+'</span></div>';
+  }
+  if(elapsed){
+    html+='<div class="stat-item"><span class="stat-label">耗时:</span><span class="stat-value time">'+elapsed+'s</span></div>';
+  }
+  div.innerHTML=html;
+  document.getElementById('messages').appendChild(div);
+  scrollBottom();
+}
 </script>
 </body>
 </html>

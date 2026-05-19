@@ -27,6 +27,10 @@ export interface OAFConfig {
   harnessConfig?: Record<string, unknown>;
 
   instructions?: string;
+
+  runtimeMode?: 'build' | 'mount';
+  image?: string;
+  checkpointDSN?: string;
 }
 
 export interface OAFSkill {
@@ -114,7 +118,15 @@ export const DEFAULT_OAF: OAFConfig = {
     max_tokens: 4096,
   },
   instructions: '',
+  runtimeMode: 'build',
+  image: '',
+  checkpointDSN: '',
 };
+
+export interface ImageInfo {
+  name: string;
+  description: string;
+}
 
 export const AVAILABLE_TOOLS = [
   { name: 'Read', desc: '读取文件内容' },

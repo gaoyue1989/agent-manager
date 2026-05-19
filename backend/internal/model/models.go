@@ -23,16 +23,26 @@ const (
 	ConfigOAF  ConfigType = "oaf"
 )
 
+type RuntimeMode string
+
+const (
+	RuntimeModeBuild RuntimeMode = "build"
+	RuntimeModeMount RuntimeMode = "mount"
+)
+
 type Agent struct {
-	ID          uint        `json:"id" gorm:"primaryKey;autoIncrement"`
-	Name        string      `json:"name" gorm:"type:varchar(128);not null;index"`
-	Description string      `json:"description" gorm:"type:text"`
-	Config      string      `json:"config" gorm:"type:json;not null"`
-	ConfigType  ConfigType  `json:"config_type" gorm:"type:enum('form','json','yaml','oaf');default:'oaf'"`
-	Status      AgentStatus `json:"status" gorm:"type:enum('draft','generated','built','deployed','published','unpublished','error');default:'draft';index"`
-	Version     int         `json:"version" gorm:"default:1"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	ID            uint        `json:"id" gorm:"primaryKey;autoIncrement"`
+	Name          string      `json:"name" gorm:"type:varchar(128);not null;index"`
+	Description   string      `json:"description" gorm:"type:text"`
+	Config        string      `json:"config" gorm:"type:json;not null"`
+	ConfigType    ConfigType  `json:"config_type" gorm:"type:enum('form','json','yaml','oaf');default:'oaf'"`
+	RuntimeMode   RuntimeMode `json:"runtime_mode" gorm:"type:enum('build','mount');default:'build'"`
+	Image         string      `json:"image" gorm:"type:varchar(256)"`
+	CheckpointDSN string      `json:"checkpoint_dsn" gorm:"type:varchar(512)"`
+	Status        AgentStatus `json:"status" gorm:"type:enum('draft','generated','built','deployed','published','unpublished','error');default:'draft';index"`
+	Version       int         `json:"version" gorm:"default:1"`
+	CreatedAt     time.Time   `json:"created_at"`
+	UpdatedAt     time.Time   `json:"updated_at"`
 }
 
 func (a *Agent) ParseOAFConfig() (*OAFConfig, error) {

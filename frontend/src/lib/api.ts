@@ -28,10 +28,22 @@ export const api = {
       return request(`/agents?${q}`);
     },
     get: (id: number) => request(`/agents/${id}`),
-    create: (config: string, configType: string) =>
-      request('/agents', { method: 'POST', body: JSON.stringify({ config, config_type: configType }) }),
-    update: (id: number, config: string) =>
-      request(`/agents/${id}`, { method: 'PUT', body: JSON.stringify({ config }) }),
+    create: (config: string, configType: string, options?: { runtimeMode?: string; image?: string; checkpointDSN?: string }) =>
+      request('/agents', { method: 'POST', body: JSON.stringify({ 
+        config, 
+        config_type: configType,
+        runtime_mode: options?.runtimeMode,
+        image: options?.image,
+        checkpoint_dsn: options?.checkpointDSN,
+      }) }),
+    update: (id: number, config: string, options?: { configType?: string; runtimeMode?: string; image?: string; checkpointDSN?: string }) =>
+      request(`/agents/${id}`, { method: 'PUT', body: JSON.stringify({ 
+        config,
+        config_type: options?.configType,
+        runtime_mode: options?.runtimeMode,
+        image: options?.image,
+        checkpoint_dsn: options?.checkpointDSN,
+      }) }),
     delete: (id: number) => request(`/agents/${id}`, { method: 'DELETE' }),
     generate: (id: number) => request(`/agents/${id}/generate`, { method: 'POST' }),
     getCode: (id: number) => request(`/agents/${id}/code`),
@@ -54,5 +66,8 @@ export const api = {
     list: (agentId: number) => request(`/skills/${agentId}`),
     delete: (agentId: number, skillName: string) =>
       request(`/skills/${agentId}/${skillName}`, { method: 'DELETE' }),
+  },
+  images: {
+    list: () => request('/images'),
   },
 };

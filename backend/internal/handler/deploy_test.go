@@ -24,10 +24,10 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open db: %v", err)
 	}
-	db.Migrator().DropTable(&model.Deployment{}, &model.ImageBuild{}, &model.CodeGeneration{}, &model.Agent{})
+	db.Exec("DROP TABLE IF EXISTS deployments, image_builds, code_generations, agents")
 	db.AutoMigrate(&model.Agent{}, &model.CodeGeneration{}, &model.ImageBuild{}, &model.Deployment{})
 	t.Cleanup(func() {
-		db.Migrator().DropTable(&model.Deployment{}, &model.ImageBuild{}, &model.CodeGeneration{}, &model.Agent{})
+		db.Exec("DROP TABLE IF EXISTS deployments, image_builds, code_generations, agents")
 	})
 	return db
 }
@@ -38,7 +38,7 @@ func TestAgentHandler_Create_Success(t *testing.T) {
 	r := gin.New()
 
 	svc := service.NewAgentService(db, nil, nil)
-	h := NewAgentHandler(svc)
+	h := NewAgentHandler(svc, "")
 	h.Register(r.Group("/api/v1"))
 
 	body := `{"config": "{\"name\": \"test\"}", "config_type": "json"}`
@@ -64,7 +64,7 @@ func TestAgentHandler_List_Empty(t *testing.T) {
 	r := gin.New()
 
 	svc := service.NewAgentService(db, nil, nil)
-	h := NewAgentHandler(svc)
+	h := NewAgentHandler(svc, "")
 	h.Register(r.Group("/api/v1"))
 
 	req := httptest.NewRequest("GET", "/api/v1/agents", nil)
@@ -82,7 +82,7 @@ func TestAgentHandler_Get_NotFound(t *testing.T) {
 	r := gin.New()
 
 	svc := service.NewAgentService(db, nil, nil)
-	h := NewAgentHandler(svc)
+	h := NewAgentHandler(svc, "")
 	h.Register(r.Group("/api/v1"))
 
 	req := httptest.NewRequest("GET", "/api/v1/agents/999", nil)
@@ -100,7 +100,7 @@ func TestAgentHandler_Delete_Success(t *testing.T) {
 	r := gin.New()
 
 	svc := service.NewAgentService(db, nil, nil)
-	h := NewAgentHandler(svc)
+	h := NewAgentHandler(svc, "")
 	h.Register(r.Group("/api/v1"))
 
 	agent := &model.Agent{Name: "delete-me", Config: `{}`, Status: model.StatusDraft, Version: 1}

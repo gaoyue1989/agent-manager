@@ -1,93 +1,144 @@
-# 镜像构建 & agent-sandbox 部署验证
+# 镜像构建 & agent-sandbox 部署
 
-**日期**: 2026-05-01
+**日期**: 2026-05-19
 **执行者**: opencode
 
 ## 1. 概述
 
-验证从生成的 DeepAgents 代码 → Docker 镜像构建 → agent-sandbox 部署的完整链路。
+验证从生成的 DeepAgents 代码 → Docker 镜像构建 → agent-sandbox 部署的完整链路。支持两种运行模式。
 
-## 2. Docker 镜像构建
+## 2. 运行模式
 
-### 2.1 配置
+### 2.1 构建模式 (Build Mode)
 
-- Docker Hub 账号: `gaoyue1989`
-- 宿主机代理: mihomo (端口 7890)，Docker 服务已配置代理
-- 本地 Registry: `localhost:5001` (供 K8s 拉取镜像)
+生成代码 → 构建自定义镜像 → K8s 部署。
 
-### 2.2 构建过程
-
-```bash
-# 拉取基础镜像（通过代理）
-docker pull python:3.12-slim
-
-# 构建 Agent 镜像
-docker build -t agent-manager/customer-service-agent:v1 codegen/test/output/
-
-# 推送到本地 Registry
-docker tag agent-manager/customer-service-agent:v1 localhost:5001/agent-customer-service-agent:v1
-docker push localhost:5001/agent-customer-service-agent:v1
-```
-
-### 2.3 镜像信息
+#### 镜像构建
 
 | 属性 | 值 |
 |------|-----|
-| 镜像名 | `agent-manager/customer-service-agent:v1` |
-| 基础镜像 | `python:3.12-slim` |
-| 镜像大小 | ~84 MB |
+| 镜像名 | `{registry}/agent-{id}:v{version}` |
+| 基础镜像 | `{registry}/agent-base:latest` (替代 `python:3.12-slim`) |
+| 构建加速 | 基础镜像预装所有 pip 依赖，Agent 镜像跳过 pip install |
+| 首次构建 | ~60s (含基础镜像构建) |
+| 后续构建 | ~5s (缓存命中) |
 
-## 3. agent-sandbox 部署
-
-### 3.1 Sandbox CRD
+#### Sandbox CRD (构建模式)
 
 ```yaml
 apiVersion: agents.x-k8s.io/v1alpha1
 kind: Sandbox
 metadata:
-  name: agent-customer-service
+  name: agent-{id}
 spec:
   podTemplate:
     spec:
       containers:
       - name: agent
-        image: 172.20.0.1:5001/agent-customer-service-agent:v1
+        image: 172.20.0.1:5001/agent-{id}:v{version}
         ports:
         - containerPort: 8000
         env:
         - name: LLM_API_KEY
-          value: "sk-****"
-        - name: HTTP_PROXY
-          value: "http://172.20.0.1:7890"
-        - name: HTTPS_PROXY
-          value: "http://172.20.0.1:7890"
+          value: "sk-..."
+        - name: LLM_MODEL
+          value: "qwen3.6-plus"
+        - name: LLM_ENDPOINT
+          value: "https://dashscope.aliyuncs.com/compatible-mode/v1"
 ```
 
-### 3.2 Pod 标签
+### 2.2 挂载模式 (Mount Mode)
 
-Sandbox Controller 自动为 Pod 设置标签 `agents.x-k8s.io/sandbox-name-hash`。Service selector 需使用此标签而非自定义标签。
+使用预构建 `agent-framework` 镜像，配置通过 ConfigMap 挂载。
 
-### 3.3 部署结果
+#### 优势
 
-| 资源 | 状态 |
-|------|------|
-| Sandbox CRD | ✅ Created |
-| Pod | ✅ Running (1/1) |
-| Service (Headless) | ✅ ClusterIP: None (自动创建) |
-| Service (NodePort) | ✅ 手动创建，selector 需修正 |
+- 无需构建镜像，部署速度更快
+- 使用统一 `agent-framework` 镜像，便于批量更新
+- 配置 (AGENTS.md + skills + mcp-configs) 通过 ConfigMap 挂载到 `/config`
+- LLM API Key 通过 K8s Secret 注入
+- 支持独立的 Checkpoint DSN
+
+#### Sandbox CRD (挂载模式)
+
+```yaml
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: agent-{id}
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: agent
+        image: 172.20.0.1:5001/agent-framework:latest
+        ports:
+        - containerPort: 8100
+        envFrom:
+        - secretRef:
+            name: agent-{id}-secret
+        env:
+        - name: LLM_MODEL_ID
+          value: "..."
+        - name: LLM_BASE_URL
+          value: "..."
+        - name: CHECKPOINT_MYSQL_DSN
+          value: "mysql+asyncmy://..."
+        volumeMounts:
+        - name: config
+          mountPath: /config
+      volumes:
+      - name: config
+        configMap:
+          name: agent-{id}-config
+```
+
+#### 镜像 Registry 自动补全
+
+挂载模式下，若镜像名不含 `/`，自动补全 registry 前缀：
+
+```go
+// deploy.go:210-212
+if agent.RuntimeMode == model.RuntimeModeMount && s.registry != "" && !strings.Contains(image, "/") {
+    image = fmt.Sprintf("%s/%s", s.registry, image)
+}
+```
+
+如 `agent-framework:latest` → `172.20.0.1:5001/agent-framework:latest`
+
+#### 重新发布注意事项
+
+挂载模式重新发布时必须走 `DeployWithMount` 而非 `Deploy`。`Publish` 方法已修复为挂载模式始终调用 `DeployWithMount`。
+
+## 3. 部署结果
+
+| 资源 | 构建模式 | 挂载模式 |
+|------|---------|---------|
+| Sandbox CRD | ✅ | ✅ |
+| ConfigMap | — | ✅ agent-{id}-config |
+| Secret | — | ✅ agent-{id}-secret |
+| Pod | ✅ Running (1/1) | ✅ Running (1/1) |
+| Service | ✅ NodePort 8000 | ✅ ClusterIP 8100 |
+| Ingress | ✅ /agent/{id}/ | ✅ /agent/{id}/ |
 
 ## 4. 遇到的问题与解决
 
 | 问题 | 原因 | 解决 |
 |------|------|------|
-| Docker build 无法拉取基础镜像 | 需要代理 | `docker pull` 先拉取缓存 |
-| Service 端点为空 | Label selector 不匹配 | 使用 `agents.x-k8s.io/sandbox-name-hash` |
-| Pod 内网络不通 | Kind 节点无代理 | 配置 `HTTP_PROXY` 环境变量到 `172.20.0.1:7890` |
-| Kubectl port-forward 超时 | 后台进程被杀 | 使用 `kubectl exec` 直接测试 |
+| Pod ImagePullBackOff | 镜像未推送到 K8s 可访问的 registry | 推送到 `172.20.0.1:5001`，配置 containerd `insecure_skip_verify` |
+| 挂载模式重发布用错镜像 | Publish 在 status≠draft 时走了 Deploy (构建模式) | 修改 Publish 逻辑：挂载模式始终走 DeployWithMount |
+| Debug 页面 API 404 | `BASE=window.location.origin` 未考虑 `/agent/{id}/` 前缀 | 改为从 pathname 提取路径前缀 |
+| Chat 调用 `/chat` 404 | agent-framework 无 `/chat` 端点 | 改用 JSON-RPC `message/send` 发到 `POST /` |
+| Pod CrashLoopBackOff | CHECKPOINT_MYSQL_DSN 为空或 `127.0.0.1` 不可达 | 设置 DSN 并使用 `172.20.0.1` 作为 MySQL 地址 |
+| 展示的 endpoint URL 错误 | `INGRESS_HOST` 默认 `localhost` | 设置为 `127.0.0.1:8911` |
 
-## 5. 关键发现
+## 5. 关键配置
 
-- **Sandbox Controller 的服务标签**: 自动生成的 headless service 使用 `agents.x-k8s.io/sandbox-name-hash` 作为 selector
-- **Kind 网络**: 节点内通过 `172.20.0.1` 访问宿主机（包括代理和本地 Registry）
-- **镜像流程**: `docker build` → `localhost:5001` → `172.20.0.1:5001` (K8s 内引用)
-- **代理配置**: K8s pod 需要显式设置 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量
+| 项 | 值 |
+|------|-----|
+| Docker Registry | `172.20.0.1:5001` (HTTP) |
+| Kind 网络 | `172.20.0.1` 访问宿主机服务 |
+| docker-proxy | `socat TCP-LISTEN:80 TCP:nginx:80` |
+| Host nginx | `:8911` → frontend:3000 / backend:8080 / ingress:30080 |
+| agent-framework 端口 | **8100** |
+| 构建模式端口 | 8000 |

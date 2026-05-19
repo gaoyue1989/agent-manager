@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import {
@@ -9,6 +9,7 @@ import {
   OAFSubAgent,
   DEFAULT_OAF,
   AVAILABLE_TOOLS,
+  ImageInfo,
 } from '@/lib/oaf-types';
 import { serializeOAFToYAML, validateOAF, generateSlug } from '@/lib/oaf-parser';
 
@@ -19,6 +20,11 @@ export default function CreateAgent() {
   const [yamlInput, setYamlInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [availableImages, setAvailableImages] = useState<ImageInfo[]>([]);
+
+  useEffect(() => {
+    api.images.list().then(data => setAvailableImages(data.items || [])).catch(() => {});
+  }, []);
 
   const updateField = <K extends keyof OAFConfig>(key: K, value: OAFConfig[K]) => {
     setConfig(prev => ({ ...prev, [key]: value }));
@@ -111,7 +117,11 @@ export default function CreateAgent() {
         oafContent = serializeOAFToYAML(finalConfig);
       }
 
-      const agent = await api.agents.create(oafContent, 'oaf');
+      const agent = await api.agents.create(oafContent, 'oaf', {
+        runtimeMode: config.runtimeMode,
+        image: config.image,
+        checkpointDSN: config.checkpointDSN,
+      });
       router.push(`/agents/${agent.id}`);
     } catch (e: any) {
       setErrors([e.message || '创建失败']);
@@ -149,6 +159,57 @@ export default function CreateAgent() {
 
       {mode === 'form' ? (
         <div className="space-y-6">
+          {/* Runtime Mode */}
+          <div className="bg-white rounded-lg shadow p-6 space-y-4">
+            <h2 className="font-semibold text-lg">运行模式</h2>
+            <div className="grid grid-cols-2 gap-4">
+              <label className={`border-2 rounded-lg p-4 cursor-pointer transition-all ${config.runtimeMode === 'build' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                <input type="radio" value="build" checked={config.runtimeMode === 'build'} onChange={() => updateField('runtimeMode', 'build')} className="hidden" />
+                <div className="font-medium text-gray-900">构建模式</div>
+                <div className="text-xs text-gray-500 mt-1">生成代码 → 构建镜像 → 部署</div>
+              </label>
+              <label className={`border-2 rounded-lg p-4 cursor-pointer transition-all ${config.runtimeMode === 'mount' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                <input type="radio" value="mount" checked={config.runtimeMode === 'mount'} onChange={() => updateField('runtimeMode', 'mount')} className="hidden" />
+                <div className="font-medium text-gray-900">挂载模式</div>
+                <div className="text-xs text-gray-500 mt-1">预构建镜像 + 配置挂载</div>
+              </label>
+            </div>
+            
+            {config.runtimeMode === 'mount' && (
+              <div className="mt-4 space-y-4 border-t pt-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1">选择镜像 *</label>
+                  <select 
+                    value={config.image || ''} 
+                    onChange={e => updateField('image', e.target.value)} 
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                  >
+                    <option value="">请选择镜像</option>
+                    {availableImages.map(img => (
+                      <option key={img.name} value={img.name}>
+                        {img.description || img.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium mb-1">Checkpoint DSN（可选）</label>
+                  <input
+                    type="text"
+                    value={config.checkpointDSN || ''}
+                    onChange={e => updateField('checkpointDSN', e.target.value)}
+                    className="w-full border rounded-lg px-3 py-2 text-sm font-mono"
+                    placeholder="留空则使用共用的 Checkpoint 数据库"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    格式：mysql+asyncmy://user:password@host:port/database
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Identity */}
           <div className="bg-white rounded-lg shadow p-6 space-y-4">
             <h2 className="font-semibold text-lg">身份标识 (Identity)</h2>

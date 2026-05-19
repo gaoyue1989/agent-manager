@@ -17,14 +17,18 @@ import (
 )
 
 type DeployService struct {
-	db            *gorm.DB
-	storage       *minio.Storage
-	builder       *docker.Builder
-	sandbox       *k8s.SandboxClient
-	registry      string
-	agentSvc      *AgentService
-	ingressEnabled bool
-	baseImageName string
+	db                   *gorm.DB
+	storage              *minio.Storage
+	builder              *docker.Builder
+	sandbox              *k8s.SandboxClient
+	registry             string
+	agentSvc             *AgentService
+	ingressEnabled       bool
+	baseImageName        string
+	llmAPIKey            string
+	llmModelID           string
+	llmBaseUrl           string
+	defaultCheckpointDSN string
 }
 
 func NewDeployService(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService) *DeployService {
@@ -37,6 +41,23 @@ func NewDeployServiceWithIngress(db *gorm.DB, storage *minio.Storage, builder *d
 
 func NewDeployServiceWithBaseImage(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool, baseImageName string) *DeployService {
 	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: baseImageName}
+}
+
+func NewDeployServiceWithLLM(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool, baseImageName, llmAPIKey, llmModelID, llmBaseUrl, defaultCheckpointDSN string) *DeployService {
+	return &DeployService{
+		db:                   db,
+		storage:              storage,
+		builder:              builder,
+		sandbox:              sandbox,
+		registry:             registry,
+		agentSvc:             agentSvc,
+		ingressEnabled:       ingressEnabled,
+		baseImageName:        baseImageName,
+		llmAPIKey:            llmAPIKey,
+		llmModelID:           llmModelID,
+		llmBaseUrl:           llmBaseUrl,
+		defaultCheckpointDSN: defaultCheckpointDSN,
+	}
 }
 
 func (s *DeployService) BuildImage(agentID uint) (*model.ImageBuild, error) {
@@ -125,18 +146,183 @@ func (s *DeployService) Deploy(agentID uint) (*model.Deployment, error) {
 	return dep, nil
 }
 
+func (s *DeployService) DeployWithMount(agentID uint) (*model.Deployment, error) {
+	agent, err := s.agentSvc.GetByID(agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	sandboxName := fmt.Sprintf("agent-%d", agent.ID)
+	configMapName := fmt.Sprintf("agent-%d-config", agent.ID)
+	secretName := fmt.Sprintf("agent-%d-secret", agent.ID)
+
+	dep := &model.Deployment{
+		AgentID:     agent.ID,
+		Version:     agent.Version,
+		SandboxName: sandboxName,
+		Status:      model.DeployDeploying,
+	}
+	s.db.Create(dep)
+
+	configFiles, err := s.loadConfigFilesFromMinIO(agent)
+	if err != nil {
+		dep.Status = model.DeployFailed
+		s.db.Save(dep)
+		return dep, fmt.Errorf("load config files: %w", err)
+	}
+
+	if err := s.sandbox.CreateConfigMap(configMapName, configFiles); err != nil {
+		dep.Status = model.DeployFailed
+		s.db.Save(dep)
+		return dep, fmt.Errorf("create configmap: %w", err)
+	}
+
+	secretData := map[string]string{
+		"LLM_API_KEY": s.llmAPIKey,
+	}
+	if err := s.sandbox.CreateSecret(secretName, secretData); err != nil {
+		s.sandbox.DeleteConfigMap(configMapName)
+		dep.Status = model.DeployFailed
+		s.db.Save(dep)
+		return dep, fmt.Errorf("create secret: %w", err)
+	}
+
+	checkpointDSN := agent.CheckpointDSN
+	if checkpointDSN == "" {
+		checkpointDSN = s.defaultCheckpointDSN
+	}
+
+	envVars := map[string]string{
+		"LLM_MODEL_ID": s.llmModelID,
+		"LLM_BASE_URL": s.llmBaseUrl,
+	}
+
+	if err := s.sandbox.CreateServiceWithPort(sandboxName, 8100); err != nil {
+		s.sandbox.DeleteConfigMap(configMapName)
+		s.sandbox.DeleteSecret(secretName)
+		dep.Status = model.DeployFailed
+		s.db.Save(dep)
+		return dep, fmt.Errorf("create service: %w", err)
+	}
+
+	// 挂载模式：自动补全镜像 registry 前缀，确保 K8s 可拉取
+	image := agent.Image
+	if agent.RuntimeMode == model.RuntimeModeMount && s.registry != "" && !strings.Contains(image, "/") {
+		image = fmt.Sprintf("%s/%s", s.registry, image)
+	}
+
+	now := time.Now()
+	if err := s.sandbox.CreateSandboxWithMounts(sandboxName, image, configMapName, secretName, envVars, checkpointDSN); err != nil {
+		s.sandbox.DeleteConfigMap(configMapName)
+		s.sandbox.DeleteSecret(secretName)
+		dep.Status = model.DeployFailed
+		s.db.Save(dep)
+		return dep, fmt.Errorf("create sandbox: %w", err)
+	}
+
+	dep.Status = model.DeployRunning
+	dep.DeployedAt = &now
+	s.db.Save(dep)
+
+	agent.Status = model.StatusDeployed
+	s.db.Save(agent)
+
+	return dep, nil
+}
+
+func (s *DeployService) loadConfigFilesFromMinIO(agent *model.Agent) (map[string]string, error) {
+	files := make(map[string]string)
+
+	var oafConfig *model.OAFConfig
+
+	if agent.ConfigType == model.ConfigOAF {
+		oaf, err := model.OAFFromJSON([]byte(agent.Config))
+		if err != nil {
+			return nil, fmt.Errorf("parse OAF JSON: %w", err)
+		}
+		oafConfig = oaf
+	} else {
+		oaf, err := model.ParseOAF(agent.Config)
+		if err != nil {
+			return nil, fmt.Errorf("parse OAF: %w", err)
+		}
+		oafConfig = oaf
+	}
+
+	oafYAML, err := oafConfig.ToYAML()
+	if err != nil {
+		return nil, fmt.Errorf("serialize OAF: %w", err)
+	}
+	files["AGENTS.md"] = oafYAML
+
+	prefix := fmt.Sprintf("agents/%d/skills", agent.ID)
+	if s.storage.PrefixExists(prefix) {
+		skillFiles, err := s.storage.ListFiles(prefix)
+		if err == nil {
+			for _, file := range skillFiles {
+				content, err := s.storage.GetFile(file)
+				if err != nil {
+					continue
+				}
+				relPath := strings.TrimPrefix(file, prefix+"/")
+				files[fmt.Sprintf("skills/%s", relPath)] = content
+			}
+		}
+	}
+
+	for _, mcp := range oafConfig.MCPServers {
+		if mcp.ConfigDir == "" {
+			continue
+		}
+		mcpPrefix := fmt.Sprintf("agents/%d/%s", agent.ID, mcp.ConfigDir)
+		if s.storage.PrefixExists(mcpPrefix) {
+			mcpFiles, err := s.storage.ListFiles(mcpPrefix)
+			if err == nil {
+				for _, file := range mcpFiles {
+					content, err := s.storage.GetFile(file)
+					if err != nil {
+						continue
+					}
+					relPath := strings.TrimPrefix(file, mcpPrefix+"/")
+					files[fmt.Sprintf("%s/%s", mcp.ConfigDir, relPath)] = content
+				}
+			}
+		}
+	}
+
+	return files, nil
+}
+
 func (s *DeployService) Publish(agentID uint) (*model.Deployment, error) {
-	dep, err := s.Deploy(agentID)
+	agent, err := s.agentSvc.GetByID(agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	var dep *model.Deployment
+
+	if agent.RuntimeMode == model.RuntimeModeMount {
+		dep, err = s.DeployWithMount(agentID)
+	} else {
+		if agent.Status == model.StatusDraft {
+			return nil, fmt.Errorf("please generate code and build image first")
+		}
+		dep, err = s.Deploy(agentID)
+	}
+
 	if err != nil {
 		return dep, err
 	}
 
-	agent, _ := s.agentSvc.GetByID(agentID)
 	sandboxName := fmt.Sprintf("agent-%d", agent.ID)
 
-	endpointURL := ""
+	var endpointURL string
 	if s.ingressEnabled {
-		endpointURL, err = s.sandbox.CreateIngress(sandboxName, agent.ID)
+		port := 8000
+		if agent.RuntimeMode == model.RuntimeModeMount {
+			port = 8100
+		}
+		endpointURL, err = s.sandbox.CreateIngressWithPort(sandboxName, agent.ID, port)
 		if err != nil {
 			log.Println("WARNING: failed to create Ingress:", err)
 		}
@@ -160,6 +346,8 @@ func (s *DeployService) Unpublish(agentID uint) (*model.Deployment, error) {
 
 	sandboxName := dep.SandboxName
 
+	agent, _ := s.agentSvc.GetByID(agentID)
+
 	if s.ingressEnabled {
 		if err := s.sandbox.DeleteIngress(sandboxName); err != nil {
 			log.Println("WARNING: failed to delete Ingress:", err)
@@ -174,13 +362,19 @@ func (s *DeployService) Unpublish(agentID uint) (*model.Deployment, error) {
 		return dep, err
 	}
 
+	if agent.RuntimeMode == model.RuntimeModeMount {
+		configMapName := fmt.Sprintf("agent-%d-config", agent.ID)
+		secretName := fmt.Sprintf("agent-%d-secret", agent.ID)
+		s.sandbox.DeleteConfigMap(configMapName)
+		s.sandbox.DeleteSecret(secretName)
+	}
+
 	now := time.Now()
 	dep.UnpublishedAt = &now
 	dep.Status = model.DeployStopped
 	dep.EndpointURL = ""
 	s.db.Save(dep)
 
-	agent, _ := s.agentSvc.GetByID(agentID)
 	agent.Status = model.StatusUnpublished
 	s.db.Save(agent)
 
@@ -256,8 +450,15 @@ func (s *DeployService) ChatWithAgent(agentID uint, message string, history []ma
 	}
 
 	reqBody := map[string]interface{}{
-		"message": message,
-		"history":  history,
+		"jsonrpc": "2.0",
+		"method":  "message/send",
+		"id":      "1",
+		"params": map[string]interface{}{
+			"message": map[string]interface{}{
+				"role":  "user",
+				"parts": []map[string]string{{"text": message}},
+			},
+		},
 	}
 	bodyJSON, _ := json.Marshal(reqBody)
 
@@ -272,7 +473,7 @@ func (s *DeployService) ChatWithAgent(agentID uint, message string, history []ma
 	}
 
 	cmd := exec.Command("kubectl", "exec", "-n", "default", dep.SandboxName, "--",
-		"curl", "-s", "-m", "120", "-X", "POST", "http://localhost:8000/chat",
+		"curl", "-s", "-m", "120", "-X", "POST", "http://localhost:8100/",
 		"-H", "Content-Type: application/json",
 		"-d", string(bodyJSON))
 	out, err := cmd.CombinedOutput()
@@ -281,27 +482,16 @@ func (s *DeployService) ChatWithAgent(agentID uint, message string, history []ma
 	if err != nil {
 		return map[string]interface{}{
 			"success":    false,
-			"error":      fmt.Sprintf("agent unreachable: %s, output: %s", err.Error(), string(out)),
+			"error":      fmt.Sprintf("agent unreachable: %v, output: %s", err, string(out)),
 			"latency_ms": latencyMs,
 		}, nil
 	}
 
-	var agentResp map[string]interface{}
-	if err2 := json.Unmarshal(out, &agentResp); err2 != nil {
-		return map[string]interface{}{
-			"success":    false,
-			"error":      fmt.Sprintf("parse agent response: %s, raw: %s", err2.Error(), string(out)),
-			"latency_ms": latencyMs,
-		}, nil
-	}
-
-	agentResp["latency_ms"] = latencyMs
-	return agentResp, nil
+	return parseChatResponse(out, latencyMs)
 }
 
 func chatViaHTTP(endpointURL string, bodyJSON []byte, startTime time.Time) (map[string]interface{}, error) {
-	chatURL := fmt.Sprintf("%s/chat", endpointURL)
-	cmd := exec.Command("curl", "-s", "-m", "120", "-X", "POST", chatURL,
+	cmd := exec.Command("curl", "-s", "-m", "120", "-X", "POST", endpointURL,
 		"-H", "Content-Type: application/json",
 		"-d", string(bodyJSON))
 	out, err := cmd.CombinedOutput()
@@ -311,12 +501,65 @@ func chatViaHTTP(endpointURL string, bodyJSON []byte, startTime time.Time) (map[
 		return nil, fmt.Errorf("ingress chat failed: %w", err)
 	}
 
-	var agentResp map[string]interface{}
-	if err := json.Unmarshal(out, &agentResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+	return parseChatResponse(out, latencyMs)
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func parseChatResponse(raw []byte, latencyMs int64) (map[string]interface{}, error) {
+	var rpcResp struct {
+		JSONRPC string                 `json:"jsonrpc"`
+		ID      string                 `json:"id"`
+		Error   *rpcError              `json:"error"`
+		Result  map[string]interface{} `json:"result"`
 	}
-	agentResp["latency_ms"] = latencyMs
-	return agentResp, nil
+
+	if err := json.Unmarshal(raw, &rpcResp); err != nil {
+		return map[string]interface{}{
+			"success":    false,
+			"error":      fmt.Sprintf("parse response: %v, raw: %s", err, string(raw)),
+			"latency_ms": latencyMs,
+		}, nil
+	}
+
+	if rpcResp.Error != nil {
+		return map[string]interface{}{
+			"success":    false,
+			"error":      fmt.Sprintf("agent error (code %d): %s", rpcResp.Error.Code, rpcResp.Error.Message),
+			"latency_ms": latencyMs,
+		}, nil
+	}
+
+	responseText := extractResponseText(rpcResp.Result)
+	return map[string]interface{}{
+		"success":    true,
+		"data":       map[string]interface{}{"response": responseText},
+		"latency_ms": latencyMs,
+	}, nil
+}
+
+func extractResponseText(result map[string]interface{}) string {
+	artifacts, ok := result["artifacts"].([]interface{})
+	if !ok || len(artifacts) == 0 {
+		return ""
+	}
+	artifact, ok := artifacts[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	parts, ok := artifact["parts"].([]interface{})
+	if !ok || len(parts) == 0 {
+		return ""
+	}
+	part, ok := parts[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	text, _ := part["text"].(string)
+	return text
 }
 
 func parseLLMConfig(configJSON string) (apiKey, model, endpoint string) {

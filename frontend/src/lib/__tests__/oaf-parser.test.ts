@@ -1,5 +1,5 @@
 import { parseOAFYAML, serializeOAFToYAML, validateOAF, generateSlug, parseModel } from '../oaf-parser';
-import { OAFConfig, DEFAULT_OAF } from '../oaf-types';
+import { OAFConfig, DEFAULT_OAF, ImageInfo } from '../oaf-types';
 
 describe('parseOAFYAML', () => {
   it('parses minimal OAF YAML', () => {
@@ -203,5 +203,56 @@ describe('parseModel', () => {
     expect(result.isAlias).toBe(false);
     expect(result.alias).toBeNull();
     expect(result.obj).toBeNull();
+  });
+});
+
+describe('runtimeMode in OAF', () => {
+  it('defaults to build mode', () => {
+    const config: OAFConfig = { ...DEFAULT_OAF };
+    expect(config.runtimeMode).toBe('build');
+    expect(config.image).toBe('');
+    expect(config.checkpointDSN).toBe('');
+  });
+
+  it('serializes mount mode with image', () => {
+    const config: OAFConfig = {
+      ...DEFAULT_OAF,
+      name: 'Mount Agent',
+      vendorKey: 'acme',
+      agentKey: 'mount-test',
+      version: '1.0.0',
+      description: 'Mount mode test',
+      author: '@acme',
+      license: 'MIT',
+      tags: [],
+      runtimeMode: 'mount',
+      image: 'agent-framework:latest',
+      checkpointDSN: 'mysql+asyncmy://user:pass@host:3307/db',
+    };
+
+    const yaml = serializeOAFToYAML(config);
+    expect(yaml).toContain('runtimeMode: "mount"');
+    expect(yaml).toContain('image: "agent-framework:latest"');
+    expect(yaml).toContain('checkpointDSN: "mysql+asyncmy://user:pass@host:3307/db"');
+  });
+
+  it('serializes build mode without extra fields', () => {
+    const config: OAFConfig = {
+      ...DEFAULT_OAF,
+      name: 'Build Agent',
+      vendorKey: 'acme',
+      agentKey: 'build-test',
+      version: '1.0.0',
+      description: 'Build mode test',
+      author: '@acme',
+      license: 'MIT',
+      tags: [],
+      runtimeMode: 'build',
+      image: '',
+      checkpointDSN: '',
+    };
+
+    const yaml = serializeOAFToYAML(config);
+    expect(yaml).toContain('runtimeMode: "build"');
   });
 });

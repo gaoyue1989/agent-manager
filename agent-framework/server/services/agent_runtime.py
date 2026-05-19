@@ -101,6 +101,7 @@ class AgentRuntime:
                 openai_api_base=self.llm.base_url,
                 temperature=self.llm.temperature,
                 max_tokens=self.llm.max_tokens,
+                stream_usage=True,
             )
         return self._chat_model
 
@@ -185,6 +186,11 @@ class AgentRuntime:
         try:
             full_text = ""
             pending_tool_calls = {}
+            usage_stats = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            start_time = None
+            import time
+            start_time = time.time()
+            last_chunk = None
 
             async for msg, metadata in agent.astream(
                 {"messages": [HumanMessage(content=message)]},
@@ -194,7 +200,8 @@ class AgentRuntime:
                 chunk = msg
                 if isinstance(msg, tuple):
                     chunk = msg[0]
-
+                
+                last_chunk = chunk
                 msg_type = getattr(chunk, "type", "")
 
                 if msg_type == "tool":
@@ -236,6 +243,19 @@ class AgentRuntime:
                             full_text += new_text
                             yield {"type": "token", "token": new_text}
 
+                chunk_usage = getattr(chunk, "usage_metadata", None)
+                if chunk_usage and chunk_usage.get("total_tokens", 0) > 0:
+                    input_tokens = chunk_usage.get("input_tokens", 0) or chunk_usage.get("prompt_tokens", 0)
+                    output_tokens = chunk_usage.get("output_tokens", 0) or chunk_usage.get("completion_tokens", 0)
+                    usage_stats["input_tokens"] += input_tokens
+                    usage_stats["output_tokens"] += output_tokens
+                    usage_stats["total_tokens"] += chunk_usage.get("total_tokens", 0)
+
+            if last_chunk and hasattr(last_chunk, "usage_metadata") and last_chunk.usage_metadata:
+                usage_stats["input_tokens"] = last_chunk.usage_metadata.get("input_tokens", 0)
+                usage_stats["output_tokens"] = last_chunk.usage_metadata.get("output_tokens", 0)
+                usage_stats["total_tokens"] = last_chunk.usage_metadata.get("total_tokens", 0)
+
             if not full_text and not pending_tool_calls:
                 result = await agent.ainvoke(
                     {"messages": [HumanMessage(content=message)]},
@@ -246,9 +266,31 @@ class AgentRuntime:
                         text = self._get_message_content(m)
                         if text:
                             yield {"type": "token", "token": text}
+                            if hasattr(m, "usage_metadata") and m.usage_metadata:
+                                usage_stats["input_tokens"] = m.usage_metadata.get("input_tokens", 0)
+                                usage_stats["output_tokens"] = m.usage_metadata.get("output_tokens", 0)
+                                usage_stats["total_tokens"] = m.usage_metadata.get("total_tokens", 0)
                             break
 
-            yield {"type": "done"}
+            if usage_stats["total_tokens"] == 0:
+                try:
+                    state = await agent.aget_state(config)
+                    messages = state.values.get("messages", [])
+                    for m in reversed(messages):
+                        if hasattr(m, "usage_metadata") and m.usage_metadata:
+                            usage_stats["input_tokens"] = m.usage_metadata.get("input_tokens", 0)
+                            usage_stats["output_tokens"] = m.usage_metadata.get("output_tokens", 0)
+                            usage_stats["total_tokens"] = m.usage_metadata.get("total_tokens", 0)
+                            break
+                except Exception:
+                    pass
+
+            elapsed_time = time.time() - start_time if start_time else 0
+            yield {
+                "type": "done",
+                "usage": usage_stats,
+                "elapsed_time": round(elapsed_time, 2)
+            }
 
         except Exception:
             async for token in self._invoke_direct_stream(message, None):

@@ -54,6 +54,23 @@ func (s *AgentService) Create(configJSON string, configType model.ConfigType) (*
 	return agent, nil
 }
 
+func (s *AgentService) CreateWithRuntimeMode(configJSON string, configType model.ConfigType, runtimeMode model.RuntimeMode, image, checkpointDSN string) (*model.Agent, error) {
+	agent := &model.Agent{
+		Name:          extractName(configJSON),
+		Config:        configJSON,
+		ConfigType:    configType,
+		RuntimeMode:   runtimeMode,
+		Image:         image,
+		CheckpointDSN: checkpointDSN,
+		Status:        model.StatusDraft,
+		Version:       1,
+	}
+	if err := s.db.Create(agent).Error; err != nil {
+		return nil, err
+	}
+	return agent, nil
+}
+
 func (s *AgentService) GetByID(id uint) (*model.Agent, error) {
 	var agent model.Agent
 	if err := s.db.First(&agent, id).Error; err != nil {
@@ -82,6 +99,22 @@ func (s *AgentService) Update(id uint, configJSON string) (*model.Agent, error) 
 		return nil, err
 	}
 	agent.Config = configJSON
+	agent.Version++
+	if err := s.db.Save(agent).Error; err != nil {
+		return nil, err
+	}
+	return agent, nil
+}
+
+func (s *AgentService) UpdateWithRuntimeMode(id uint, configJSON string, runtimeMode model.RuntimeMode, image, checkpointDSN string) (*model.Agent, error) {
+	agent, err := s.GetByID(id)
+	if err != nil {
+		return nil, err
+	}
+	agent.Config = configJSON
+	agent.RuntimeMode = runtimeMode
+	agent.Image = image
+	agent.CheckpointDSN = checkpointDSN
 	agent.Version++
 	if err := s.db.Save(agent).Error; err != nil {
 		return nil, err
@@ -119,6 +152,13 @@ func (s *AgentService) DeleteWithCleanup(id uint) (*DeleteResult, error) {
 					result.K8sSandbox = true
 				}
 			}
+		}
+
+		if agent.RuntimeMode == model.RuntimeModeMount {
+			configMapName := fmt.Sprintf("agent-%d-config", agent.ID)
+			secretName := fmt.Sprintf("agent-%d-secret", agent.ID)
+			s.sandbox.DeleteConfigMap(configMapName)
+			s.sandbox.DeleteSecret(secretName)
 		}
 
 		if agent.Status != model.StatusDraft && agent.Status != model.StatusGenerated {

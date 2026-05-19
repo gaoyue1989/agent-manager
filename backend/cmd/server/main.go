@@ -61,7 +61,7 @@ func main() {
 	}
 
 	agentSvc := service.NewAgentServiceWithDeps(db, storage, cgRunner, sandbox, builder, cfg.LocalRegistry)
-	deploySvc := service.NewDeployServiceWithBaseImage(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled, cfg.BaseImageName)
+	deploySvc := service.NewDeployServiceWithLLM(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled, cfg.BaseImageName, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMEndpoint, cfg.DefaultCheckpointDSN)
 
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
@@ -72,7 +72,7 @@ func main() {
 	}))
 
 	v1 := r.Group("/api/v1")
-	handler.NewAgentHandler(agentSvc).Register(v1)
+	handler.NewAgentHandler(agentSvc, cfg.AvailableImages).Register(v1)
 	handler.NewDeployHandler(deploySvc).Register(v1)
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)

@@ -11,6 +11,7 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 | 前端 | React 19 + Next.js 16 + TypeScript + Tailwind CSS 3 |
 | 后端 | Go 1.23 + Gin + GORM |
 | 代码生成 | Python (DeepAgents SDK + FastAPI) |
+| Agent 框架 | agent-framework (FastAPI + DeepAgents v0.6.1) |
 | 数据库 | GreatSQL 8.0 (MySQL 兼容，端口 3307) |
 | 对象存储 | MinIO (端口 9000/9001) |
 | 容器编排 | Kubernetes (Kind 本地集群) + agent-sandbox CRD |
@@ -21,7 +22,8 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 | 组件 | 版本 |
 |------|------|
 | agent-sandbox | kubernetes-sigs/agent-sandbox v0.4.3 |
-| DeepAgents | langchain-ai/deepagents v0.5.5 |
+| DeepAgents | langchain-ai/deepagents v0.6.1 |
+| agent-framework | FastAPI + DeepAgents + MySQL Checkpoint |
 
 ---
 
@@ -54,6 +56,7 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 ├── backend/                    # Go 后端 → backend/AGENTS.md
 ├── frontend/                   # Next.js 前端 → frontend/AGENTS.md
 ├── codegen/                    # Python 代码生成模块 → codegen/AGENTS.md
+├── agent-framework/            # Agent Framework 独立服务 → agent-framework/AGENTS.md
 ├── e2e/                        # 端到端测试 → e2e/AGENTS.md
 ├── sandbox/                    # agent-sandbox 部署文件
 ├── docs/                       # 文档
@@ -80,13 +83,42 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 
 ## 新增功能
 
-### 1. Agent 删除功能
+### 1. 运行模式
+
+Agent 支持两种运行模式：
+
+| 模式 | 说明 | 流程 |
+|------|------|------|
+| **构建模式** (build) | 传统模式，生成代码并构建镜像 | 配置 → 代码生成 → 镜像构建 → K8s 部署 |
+| **挂载模式** (mount) | 使用预构建镜像，配置挂载部署 | 配置 → 选择镜像 → MinIO 存储 → ConfigMap 挂载 → K8s 部署 |
+
+**挂载模式优势：**
+- 无需每次构建镜像，部署速度更快
+- 使用预构建的 agent-framework 镜像
+- 配置通过 ConfigMap 挂载到容器
+- 支持独立的 Checkpoint 数据库配置
+
+**挂载模式部署流程：**
+1. 用户创建 Agent，选择挂载模式和镜像
+2. 配置存储到 MinIO (AGENTS.md + skills + mcp-configs)
+3. 部署时创建 ConfigMap 和 Secret
+4. K8s Sandbox 挂载 ConfigMap 到 /config 目录
+5. agent-framework 从 /config 读取配置运行
+
+**新增环境变量：**
+```bash
+AVAILABLE_IMAGES=agent-framework:latest|Agent Framework v0.5.5,agent-framework:v0.5.5|Agent Framework v0.5.5 (stable)
+DEFAULT_IMAGE=agent-framework:latest
+DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@127.0.0.1:3307/agent_manager_checkpoint
+```
+
+### 2. Agent 删除功能
 
 删除 Agent 时自动清理所有相关资源：
 
 | 资源类型 | 清理逻辑 |
 |---------|---------|
-| K8s | Ingress → Service → Sandbox CRD |
+| K8s | Ingress → Service → Sandbox CRD + ConfigMap + Secret (挂载模式) |
 | Docker | 本地镜像 + 远程仓库镜像 |
 | MinIO | 代码文件 (agents/{id}/*) |
 | MySQL | Agent 记录 (CASCADE 删除子表) |
@@ -98,7 +130,7 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 - `deployed/published`: K8s + Docker + MinIO + 数据库
 - `error`: 尝试清理所有可能资源
 
-### 2. 基础镜像构建
+### 3. 基础镜像构建
 
 预构建基础镜像 `agent-base:latest`，包含所有 pip 依赖，加速 Agent 镜像构建：
 

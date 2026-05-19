@@ -138,104 +138,195 @@ export default function AgentDetail() {
           </div>
         </div>
         <div className="bg-white rounded-lg shadow p-6">
-          <h2 className="font-semibold mb-3">操作</h2>
-          <div className="flex flex-wrap gap-2">
-            {agent.status === 'draft' && (
-              <ActionBtn label="生成代码" action="generate" loading={actionLoading} onClick={() =>
-                doAction('generate', () => api.agents.generate(Number(id)))} />
+          <h2 className="font-semibold mb-3">运行配置</h2>
+          <div className="space-y-2 text-sm">
+            <div>
+              <span className="text-gray-500 w-28 inline-block">运行模式:</span>
+              <span className={`px-2 py-0.5 rounded text-xs ${agent.runtime_mode === 'mount' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                {agent.runtime_mode === 'mount' ? '挂载模式' : '构建模式'}
+              </span>
+            </div>
+            {agent.runtime_mode === 'mount' && (
+              <>
+                <div>
+                  <span className="text-gray-500 w-28 inline-block">镜像:</span>
+                  <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">{agent.image || '-'}</code>
+                </div>
+                <div>
+                  <span className="text-gray-500 w-28 inline-block">配置路径:</span>
+                  <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">/config</code>
+                </div>
+                {agent.checkpoint_dsn && (
+                  <div>
+                    <span className="text-gray-500 w-28 inline-block">Checkpoint:</span>
+                    <code className="bg-gray-100 px-2 py-0.5 rounded text-xs truncate max-w-xs inline-block">{agent.checkpoint_dsn}</code>
+                  </div>
+                )}
+                <div>
+                  <span className="text-gray-500 w-28 inline-block">调试页面:</span>
+                  <a href={`/agent/${id}/debug`} target="_blank" rel="noopener noreferrer"
+                    className="text-blue-600 hover:text-blue-800 underline text-xs">
+                    打开 Debug Console →
+                  </a>
+                </div>
+              </>
             )}
-            {(agent.status === 'generated' || agent.status === 'built') && (
-              <ActionBtn label="构建镜像" action="build" loading={actionLoading} onClick={() =>
-                doAction('build', () => api.agents.build(Number(id)))} />
+            {agent.runtime_mode === 'build' && hasImage && imageInfo?.image_tag && (
+              <div>
+                <span className="text-gray-500 w-28 inline-block">镜像地址:</span>
+                <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">{imageInfo.image_tag}</code>
+              </div>
             )}
-            {(agent.status === 'built' || agent.status === 'deployed') && (
-              <ActionBtn label="部署" action="deploy" loading={actionLoading} onClick={() =>
-                doAction('deploy', () => api.agents.deploy(Number(id)))} />
-            )}
-            {!isPublished && agent.status !== 'draft' && agent.status !== 'error' && (
-              <ActionBtn label="发布上线" action="publish" loading={actionLoading} onClick={() =>
-                doAction('publish', () => api.agents.publish(Number(id)))} color="bg-green-600 hover:bg-green-700" />
-            )}
-            {isPublished && (
-              <ActionBtn label="下线" action="unpublish" loading={actionLoading} onClick={() =>
-                doAction('unpublish', () => api.agents.unpublish(Number(id)))} color="bg-red-600 hover:bg-red-700" />
-            )}
-            <button onClick={() => router.push(`/agents/${id}/edit`)}
-              className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">编辑</button>
-            <button onClick={async () => {
-              if (!confirm('确定要删除此 Agent 吗？此操作不可撤销。')) return;
-              setActionLoading('delete');
-              try {
-                await api.agents.delete(Number(id));
-                router.push('/agents');
-              } catch (e: any) { alert(e.message); }
-              setActionLoading('');
-            }} disabled={actionLoading === 'delete'}
-              className="px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50">
-              {actionLoading === 'delete' ? '删除中...' : '删除'}
-            </button>
           </div>
         </div>
       </div>
 
-      {(enabledTools.length > 0 || excludedTools.length > 0 || mcpConfig || (isOAF && oafConfig?.skills && oafConfig.skills.length > 0)) && (
+      <div className="bg-white rounded-lg shadow p-6 mb-6">
+        <h2 className="font-semibold mb-3">操作</h2>
+        <div className="flex flex-wrap gap-2">
+          {agent.status === 'draft' && agent.runtime_mode === 'build' && (
+            <ActionBtn label="生成代码" action="generate" loading={actionLoading} onClick={() =>
+              doAction('generate', () => api.agents.generate(Number(id)))} />
+          )}
+          {agent.status === 'draft' && agent.runtime_mode === 'mount' && (
+            <>
+              <p className="text-xs text-gray-500 w-full mb-2">挂载模式：配置将存储到 MinIO，部署时自动挂载到容器</p>
+              <ActionBtn label="部署" action="deploy" loading={actionLoading} onClick={() =>
+                doAction('deploy', () => api.agents.publish(Number(id)))} color="bg-green-600 hover:bg-green-700" />
+            </>
+          )}
+          {(agent.status === 'generated' || agent.status === 'built') && agent.runtime_mode === 'build' && (
+            <ActionBtn label="构建镜像" action="build" loading={actionLoading} onClick={() =>
+              doAction('build', () => api.agents.build(Number(id)))} />
+          )}
+          {(agent.status === 'built' || agent.status === 'deployed') && agent.runtime_mode === 'build' && (
+            <ActionBtn label="部署" action="deploy" loading={actionLoading} onClick={() =>
+              doAction('deploy', () => api.agents.deploy(Number(id)))} />
+          )}
+          {!isPublished && agent.status !== 'draft' && agent.status !== 'error' && (
+            <ActionBtn label="发布上线" action="publish" loading={actionLoading} onClick={() =>
+              doAction('publish', () => api.agents.publish(Number(id)))} color="bg-green-600 hover:bg-green-700" />
+          )}
+          {isPublished && (
+            <ActionBtn label="下线" action="unpublish" loading={actionLoading} onClick={() =>
+              doAction('unpublish', () => api.agents.unpublish(Number(id)))} color="bg-red-600 hover:bg-red-700" />
+          )}
+          <button onClick={() => router.push(`/agents/${id}/edit`)}
+            className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">编辑</button>
+          <button onClick={async () => {
+            if (!confirm('确定要删除此 Agent 吗？此操作不可撤销。')) return;
+            setActionLoading('delete');
+            try {
+              await api.agents.delete(Number(id));
+              router.push('/agents');
+            } catch (e: any) { alert(e.message); }
+            setActionLoading('');
+          }} disabled={actionLoading === 'delete'}
+            className="px-4 py-2 rounded-lg text-sm bg-red-100 text-red-700 hover:bg-red-200 disabled:opacity-50">
+            {actionLoading === 'delete' ? '删除中...' : '删除'}
+          </button>
+        </div>
+      </div>
+
+      {oafConfig && (
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="font-semibold mb-3">Agent 配置详情</h2>
           <div className="space-y-3">
-            {isOAF && oafConfig?.skills && oafConfig.skills.length > 0 && (
-              <div>
-                <span className="text-xs font-medium text-gray-500">Skills ({oafConfig.skills.length}):</span>
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {oafConfig.skills.map(s => (
-                    <span key={s.name} className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-mono">
-                      {s.name} {s.source === 'local' ? '(local)' : '(remote)'}
-                    </span>
-                  ))}
-                </div>
+            {oafConfig.skills && oafConfig.skills.length > 0 && (
+              <ConfigSection label="Skills" items={oafConfig.skills.map(s => ({
+                text: s.name,
+                suffix: s.source === 'local' ? '(local)' : '(remote)',
+              }))} color="green" />
+            )}
+            {oafConfig.packs && oafConfig.packs.length > 0 && (
+              <ConfigSection label="Packs" items={oafConfig.packs.map(p => ({
+                text: `${p.vendor}/${p.pack}`,
+              }))} color="purple" />
+            )}
+            {oafConfig.weblets && oafConfig.weblets.length > 0 && (
+              <ConfigSection label="Weblets" items={oafConfig.weblets.map(w => ({
+                text: `${w.vendor}/${w.weblet}`,
+                suffix: w.launch,
+              }))} color="orange" />
+            )}
+            {oafConfig.mcpServers && oafConfig.mcpServers.length > 0 && (
+              <ConfigSection label="MCP Servers" items={oafConfig.mcpServers.map(m => ({
+                text: `${m.vendor}/${m.server}`,
+                suffix: m.configDir ? `(${m.configDir})` : '',
+              }))} color="blue" />
+            )}
+            {oafConfig.agents && oafConfig.agents.length > 0 && (
+              <ConfigSection label="Sub-Agents" items={oafConfig.agents.map(a => ({
+                text: `${a.vendor}/${a.agent}`,
+                suffix: a.role ? `(${a.role})` : '',
+              }))} color="indigo" />
+            )}
+            {oafConfig.tools && oafConfig.tools.length > 0 && (
+              <ConfigSection label="Tools" items={oafConfig.tools.map(t => ({ text: t }))} color="cyan" />
+            )}
+            {oafConfig.model && (
+              <div className="text-sm">
+                <span className="text-gray-500 font-medium">Model:</span>{' '}
+                <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">
+                  {typeof oafConfig.model === 'string' 
+                    ? oafConfig.model 
+                    : `${(oafConfig.model as any).provider || 'openai'}/${(oafConfig.model as any).name || 'default'}`}
+                </code>
               </div>
             )}
-            {enabledTools.length > 0 && (
-              <div>
-                <span className="text-xs font-medium text-gray-500">启用工具 ({enabledTools.length}):</span>
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {enabledTools.map(t => (
-                    <span key={t} className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-mono">{t}</span>
-                  ))}
-                </div>
+            {oafConfig.config && (
+              <div className="text-sm">
+                <span className="text-gray-500 font-medium">Runtime:</span>{' '}
+                <span className="text-xs">
+                  temperature={oafConfig.config.temperature ?? 0.7}, 
+                  max_tokens={oafConfig.config.max_tokens ?? 4096}
+                  {oafConfig.config.require_confirmation && ', require_confirmation=true'}
+                </span>
               </div>
             )}
-            {excludedTools.length > 0 && (
-              <div>
-                <span className="text-xs font-medium text-gray-500">排除工具:</span>
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {excludedTools.map(t => (
-                    <span key={t} className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs font-mono">{t}</span>
-                  ))}
-                </div>
+            {oafConfig.memory && (
+              <div className="text-sm">
+                <span className="text-gray-500 font-medium">Memory:</span>{' '}
+                <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">{oafConfig.memory.type}</code>
+                {oafConfig.memory.blocks && Object.keys(oafConfig.memory.blocks).length > 0 && (
+                  <span className="text-xs text-gray-500 ml-2">({Object.keys(oafConfig.memory.blocks).length} blocks)</span>
+                )}
               </div>
             )}
-            {mcpConfig && (
-              <div>
-                <span className="text-xs font-medium text-gray-500">MCP 配置:</span>
-                <div className="text-xs mt-1">
-                  {isOAF ? (
-                    <code className="bg-gray-100 px-2 py-0.5 rounded">
-                      {(mcpConfig as any).vendor}/{(mcpConfig as any).server}
-                    </code>
-                  ) : (
-                    <>
-                      <code className="bg-gray-100 px-2 py-0.5 rounded">{(mcpConfig as any).url}</code>
-                      <span className="text-gray-400 ml-2">({(mcpConfig as any).transport})</span>
-                    </>
-                  )}
-                </div>
+            {oafConfig.orchestration && (
+              <div className="text-sm">
+                <span className="text-gray-500 font-medium">Orchestration:</span>{' '}
+                <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">
+                  entrypoint={oafConfig.orchestration.entrypoint}
+                  {oafConfig.orchestration.fallback && `, fallback=${oafConfig.orchestration.fallback}`}
+                </code>
+              </div>
+            )}
+            {oafConfig.harnessConfig && Object.keys(oafConfig.harnessConfig).length > 0 && (
+              <div className="text-sm">
+                <span className="text-gray-500 font-medium">Harness Config:</span>{' '}
+                <details className="inline">
+                  <summary className="cursor-pointer text-blue-600 text-xs">展开</summary>
+                  <pre className="mt-2 bg-gray-100 p-2 rounded text-xs overflow-auto max-h-48">
+                    {JSON.stringify(oafConfig.harnessConfig, null, 2)}
+                  </pre>
+                </details>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {hasImage && imageInfo?.image_tag && (
+      {oafConfig?.instructions && (
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <h2 className="font-semibold mb-3">系统指令</h2>
+          <div className="bg-gray-50 p-4 rounded-lg">
+            <pre className="whitespace-pre-wrap text-sm">{oafConfig.instructions}</pre>
+          </div>
+        </div>
+      )}
+
+      {hasImage && imageInfo?.image_tag && agent.runtime_mode === 'build' && (
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="font-semibold mb-3">镜像信息</h2>
           <div className="space-y-2 text-sm">
@@ -353,5 +444,29 @@ function ActionBtn({ label, action, loading, onClick, color }: {
       className={`px-4 py-2 rounded-lg text-sm text-white disabled:opacity-50 ${color || 'bg-blue-600 hover:bg-blue-700'}`}>
       {loading === action ? '处理中...' : label}
     </button>
+  );
+}
+
+function ConfigSection({ label, items, color }: { label: string; items: { text: string; suffix?: string }[]; color: string }) {
+  const colorClasses: Record<string, string> = {
+    green: 'bg-green-100 text-green-700',
+    blue: 'bg-blue-100 text-blue-700',
+    purple: 'bg-purple-100 text-purple-700',
+    orange: 'bg-orange-100 text-orange-700',
+    indigo: 'bg-indigo-100 text-indigo-700',
+    cyan: 'bg-cyan-100 text-cyan-700',
+  };
+  return (
+    <div>
+      <span className="text-xs font-medium text-gray-500">{label} ({items.length}):</span>
+      <div className="flex flex-wrap gap-1 mt-1">
+        {items.map((item, i) => (
+          <span key={i} className={`px-2 py-0.5 rounded text-xs font-mono ${colorClasses[color] || 'bg-gray-100 text-gray-700'}`}>
+            {item.text}
+            {item.suffix && <span className="opacity-60 ml-1">{item.suffix}</span>}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }

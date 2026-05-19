@@ -385,6 +385,7 @@ config/mcp-configs/<server-name>/
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
 | GET | `/skills` | 技能列表 |
 | GET | `/mcp` | MCP 服务器列表 |
+| GET | `/tools` | 工具列表 (内建 + 自定义 + MCP) |
 | POST | `/mcp/resources/read` | MCP Apps Host — 获取 UI 资源 (server + uri) |
 | POST | `/mcp/tools/list` | MCP 工具列表查询 |
 | GET | `/debug` | 调试页面 (MCP Apps Host 前端) |
@@ -395,6 +396,17 @@ config/mcp-configs/<server-name>/
 | GET | `/threads` | Thread 列表 (checkpoint 持久化) |
 | GET | `/threads/{id}` | Thread 对话历史 (含 tool_call) |
 | DELETE | `/threads/{id}` | 删除 Thread 及持久化数据 |
+
+### 反向代理注意事项
+
+当 agent-framework 部署在反向代理（如 Nginx）的路径前缀后面时（例: `/agent/{id}/debug`），debug 页面需要从当前 URL 提取路径前缀来构造 API 请求的 BASE 路径：
+
+```javascript
+// debug_page.html
+const BASE = window.location.pathname.replace(/\/debug$/, '') || '';
+```
+
+而非使用 `window.location.origin`，否则 API 请求将绕过代理前缀直接发到根路径导致 404。
 
 ---
 

@@ -19,11 +19,12 @@ import (
 )
 
 type AgentHandler struct {
-	svc *service.AgentService
+	svc           *service.AgentService
+	availableImgs string
 }
 
-func NewAgentHandler(svc *service.AgentService) *AgentHandler {
-	return &AgentHandler{svc: svc}
+func NewAgentHandler(svc *service.AgentService, availableImages string) *AgentHandler {
+	return &AgentHandler{svc: svc, availableImgs: availableImages}
 }
 
 func (h *AgentHandler) Register(r *gin.RouterGroup) {
@@ -39,12 +40,17 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 	r.POST("/skills/upload", h.UploadSkills)
 	r.GET("/skills/:agent_id", h.ListSkills)
 	r.DELETE("/skills/:agent_id/:skill_name", h.DeleteSkill)
+
+	r.GET("/images", h.ListImages)
 }
 
 func (h *AgentHandler) Create(c *gin.Context) {
 	var req struct {
-		Config     string `json:"config" binding:"required"`
-		ConfigType string `json:"config_type"`
+		Config        string `json:"config" binding:"required"`
+		ConfigType    string `json:"config_type"`
+		RuntimeMode   string `json:"runtime_mode"`
+		Image         string `json:"image"`
+		CheckpointDSN string `json:"checkpoint_dsn"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -59,10 +65,35 @@ func (h *AgentHandler) Create(c *gin.Context) {
 			return
 		}
 		req.Config = configJSON
+	} else if req.ConfigType == "oaf" {
+		ct = model.ConfigOAF
+		oafConfig, err := model.ParseOAF(req.Config)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid OAF: " + err.Error()})
+			return
+		}
+		jsonBytes, err := oafConfig.ToJSON()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "OAF to JSON failed: " + err.Error()})
+			return
+		}
+		req.Config = string(jsonBytes)
 	} else if req.ConfigType == "form" {
 		ct = model.ConfigForm
 	}
-	agent, err := h.svc.Create(req.Config, ct)
+
+	rm := model.RuntimeModeBuild
+	if req.RuntimeMode == "mount" {
+		rm = model.RuntimeModeMount
+	}
+
+	var agent *model.Agent
+	var err error
+	if req.RuntimeMode != "" || req.Image != "" || req.CheckpointDSN != "" {
+		agent, err = h.svc.CreateWithRuntimeMode(req.Config, ct, rm, req.Image, req.CheckpointDSN)
+	} else {
+		agent, err = h.svc.Create(req.Config, ct)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -278,13 +309,49 @@ func (h *AgentHandler) Get(c *gin.Context) {
 func (h *AgentHandler) Update(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	var req struct {
-		Config string `json:"config" binding:"required"`
+		Config        string `json:"config" binding:"required"`
+		ConfigType    string `json:"config_type"`
+		RuntimeMode   string `json:"runtime_mode"`
+		Image         string `json:"image"`
+		CheckpointDSN string `json:"checkpoint_dsn"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	agent, err := h.svc.Update(uint(id), req.Config)
+
+	if req.ConfigType == "oaf" {
+		oafConfig, err := model.ParseOAF(req.Config)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid OAF: " + err.Error()})
+			return
+		}
+		jsonBytes, err := oafConfig.ToJSON()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "OAF to JSON failed: " + err.Error()})
+			return
+		}
+		req.Config = string(jsonBytes)
+	} else if req.ConfigType == "yaml" {
+		configJSON, err := yamlToJSON(req.Config)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid yaml: " + err.Error()})
+			return
+		}
+		req.Config = configJSON
+	}
+
+	var agent *model.Agent
+	var err error
+	if req.RuntimeMode != "" || req.Image != "" || req.CheckpointDSN != "" {
+		rm := model.RuntimeModeBuild
+		if req.RuntimeMode == "mount" {
+			rm = model.RuntimeModeMount
+		}
+		agent, err = h.svc.UpdateWithRuntimeMode(uint(id), req.Config, rm, req.Image, req.CheckpointDSN)
+	} else {
+		agent, err = h.svc.Update(uint(id), req.Config)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -344,4 +411,28 @@ func (h *AgentHandler) GetDeployments(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": deps})
+}
+
+type ImageInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+func (h *AgentHandler) ListImages(c *gin.Context) {
+	images := []ImageInfo{}
+	if h.availableImgs != "" {
+		for _, item := range strings.Split(h.availableImgs, ",") {
+			parts := strings.SplitN(strings.TrimSpace(item), "|", 2)
+			if len(parts) >= 1 && parts[0] != "" {
+				img := ImageInfo{Name: parts[0]}
+				if len(parts) >= 2 {
+					img.Description = parts[1]
+				} else {
+					img.Description = parts[0]
+				}
+				images = append(images, img)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": images})
 }
