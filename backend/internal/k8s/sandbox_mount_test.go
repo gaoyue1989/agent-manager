@@ -6,7 +6,7 @@ import (
 )
 
 func TestCreateSandboxWithMounts_YAMLContainsConfigMap(t *testing.T) {
-	s := &SandboxClient{namespace: "default"}
+	s, _ := NewSandboxClientWithConfig(NewKubectlClient("", "default"), "default", "localhost", false, "nginx")
 	name := "agent-42"
 	image := "agent-framework:latest"
 	configMapName := "agent-42-config"

@@ -15,21 +15,24 @@ import (
 )
 
 type DeleteResult struct {
-	Database     bool     `json:"database"`
-	MinIO        bool     `json:"minio"`
-	DockerImages []string `json:"docker_images"`
-	K8sSandbox   bool     `json:"k8s_sandbox"`
-	K8sService   bool     `json:"k8s_service"`
-	K8sIngress   bool     `json:"k8s_ingress"`
+	Database      bool     `json:"database"`
+	MinIO         bool     `json:"minio"`
+	DockerImages  []string `json:"docker_images"`
+	K8sSandbox    bool     `json:"k8s_sandbox"`
+	K8sDeployment bool     `json:"k8s_deployment"`
+	K8sService    bool     `json:"k8s_service"`
+	K8sIngress    bool     `json:"k8s_ingress"`
 }
 
 type AgentService struct {
-	db      *gorm.DB
-	storage *minio.Storage
-	codegen *codegen.Runner
-	sandbox *k8s.SandboxClient
-	builder *docker.Builder
-	registry string
+	db               *gorm.DB
+	storage          *minio.Storage
+	codegen          *codegen.Runner
+	sandbox          *k8s.SandboxClient
+	deploymentClient *k8s.DeploymentClient
+	builder          *docker.Builder
+	registry         string
+	deployMethod     string
 }
 
 func NewAgentService(db *gorm.DB, storage *minio.Storage, cg *codegen.Runner) *AgentService {
@@ -37,7 +40,11 @@ func NewAgentService(db *gorm.DB, storage *minio.Storage, cg *codegen.Runner) *A
 }
 
 func NewAgentServiceWithDeps(db *gorm.DB, storage *minio.Storage, cg *codegen.Runner, sandbox *k8s.SandboxClient, builder *docker.Builder, registry string) *AgentService {
-	return &AgentService{db: db, storage: storage, codegen: cg, sandbox: sandbox, builder: builder, registry: registry}
+	return &AgentService{db: db, storage: storage, codegen: cg, sandbox: sandbox, builder: builder, registry: registry, deployMethod: "sandbox"}
+}
+
+func NewAgentServiceWithDeployMethod(db *gorm.DB, storage *minio.Storage, cg *codegen.Runner, sandbox *k8s.SandboxClient, builder *docker.Builder, registry string, deployMethod string, deploymentClient *k8s.DeploymentClient) *AgentService {
+	return &AgentService{db: db, storage: storage, codegen: cg, sandbox: sandbox, builder: builder, registry: registry, deployMethod: deployMethod, deploymentClient: deploymentClient}
 }
 
 func (s *AgentService) Create(configJSON string, configType model.ConfigType) (*model.Agent, error) {
@@ -147,9 +154,18 @@ func (s *AgentService) DeleteWithCleanup(id uint) (*DeleteResult, error) {
 					result.K8sService = true
 				}
 			}
-			if s.sandbox.SandboxExists(sandboxName) {
-				if err := s.sandbox.DeleteSandbox(sandboxName); err == nil {
-					result.K8sSandbox = true
+			// 根据部署方式清理 Sandbox 或 Deployment
+			if s.deployMethod == "deployment" && s.deploymentClient != nil {
+				if s.deploymentClient.DeploymentExists(sandboxName) {
+					if err := s.deploymentClient.DeleteDeployment(sandboxName); err == nil {
+						result.K8sDeployment = true
+					}
+				}
+			} else {
+				if s.sandbox.SandboxExists(sandboxName) {
+					if err := s.sandbox.DeleteSandbox(sandboxName); err == nil {
+						result.K8sSandbox = true
+					}
 				}
 			}
 		}

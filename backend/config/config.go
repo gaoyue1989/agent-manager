@@ -10,6 +10,9 @@ type Config struct {
 	MinIOSecretKey        string
 	MinIOBucket           string
 	KubeConfig            string
+	KubeNamespace         string
+	KubeIngressClass      string
+	KubeClientMode        string
 	LocalRegistry         string
 	CodeGenScript         string
 	CodeGenPython         string
@@ -23,6 +26,8 @@ type Config struct {
 	AvailableImages       string
 	DefaultImage          string
 	DefaultCheckpointDSN  string
+	DeployMethod          string
+	DeployTemplateDir     string
 }
 
 func Load() *Config {
@@ -34,6 +39,9 @@ func Load() *Config {
 		MinIOSecretKey:       getEnv("MINIO_SECRET_KEY", "minioadmin"),
 		MinIOBucket:          getEnv("MINIO_BUCKET", "agent-manager"),
 		KubeConfig:           getEnv("KUBE_CONFIG", ""),
+		KubeNamespace:        getEnv("KUBE_NAMESPACE", "default"),
+		KubeIngressClass:     getEnv("KUBE_INGRESS_CLASS", "nginx"),
+		KubeClientMode:       getEnv("K8S_CLIENT_MODE", "kubectl"),
 		LocalRegistry:        getEnv("LOCAL_REGISTRY", "172.20.0.1:5001"),
 		CodeGenScript:        getEnv("CODEGEN_SCRIPT", "/root/agent-manager/codegen/generator.py"),
 		CodeGenPython:        getEnv("CODEGEN_PYTHON", "/root/agent-manager/codegen/venv/bin/python3"),
@@ -47,6 +55,8 @@ func Load() *Config {
 		AvailableImages:      getEnv("AVAILABLE_IMAGES", "agent-framework:latest|Agent Framework v0.5.5"),
 		DefaultImage:         getEnv("DEFAULT_IMAGE", "agent-framework:latest"),
 		DefaultCheckpointDSN: getEnv("DEFAULT_CHECKPOINT_DSN", ""),
+		DeployMethod:         getEnv("DEPLOY_METHOD", "sandbox"),
+		DeployTemplateDir:    getEnv("DEPLOY_TEMPLATE_DIR", ""),
 	}
 }
 

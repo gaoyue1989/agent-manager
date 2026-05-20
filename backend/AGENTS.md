@@ -33,20 +33,28 @@ backend/
 ├── cmd/server/main.go          # 入口，路由注册，依赖注入
 ├── config/config.go            # 环境变量配置加载
 ├── go.mod / go.sum             # Go 模块依赖
+│── migrations/
+│   └── add_runtime_mode.sql    # 数据库迁移脚本
 └── internal/
     ├── handler/                # HTTP 层 (Gin Handler)
     │   ├── agent.go            # Agent CRUD + 代码生成端点
-    │   ├── deploy.go           # 构建/部署/发布/下线端点
-    │   └── deploy_test.go      # 集成测试
+    │   ├── deploy.go           # 构建/部署/发布/下线/聊天端点
+    │   ├── deploy_test.go      # 集成测试
+    │   └── runtime_mode_test.go
     ├── service/                # 业务逻辑层
     │   ├── agent.go            # Agent 生命周期管理
+    │   ├── agent_test.go       # Agent 测试
+    │   ├── agent_runtime_mode_test.go
     │   ├── deploy.go           # 构建-部署-发布管线
-    │   └── deploy_test.go      # 单元测试
+    │   └── deploy_test.go      # 部署测试
     ├── model/
-    │   └── models.go           # GORM 数据模型 + 状态枚举
+    │   ├── models.go           # GORM 数据模型 + 状态枚举
+    │   ├── oaf_config.go       # OAF v0.8.0 配置结构
+    │   └── agent_runtime_mode_test.go
     ├── k8s/
     │   ├── sandbox.go          # kubectl 封装的 Sandbox CRD 客户端
-    │   └── sandbox_test.go     # 单元测试
+    │   ├── sandbox_test.go     # 单元测试
+    │   └── sandbox_mount_test.go
     ├── docker/
     │   └── builder.go          # Shell 调用 docker CLI 构建器
     ├── minio/
@@ -83,26 +91,35 @@ minio-go/v7 v7.0.73            # MinIO SDK
 
 所有配置通过环境变量注入，无配置文件依赖：
 
-| 环境变量 | 说明 | 默认值 |
-|---------|------|--------|
-| `SERVER_PORT` | 服务端口 | `8080` |
-| `MYSQL_DSN` | 数据库连接串 | `agent_manager:...@tcp(127.0.0.1:3307)/agent_manager?...` |
-| `MINIO_ENDPOINT` | MinIO 地址 | `127.0.0.1:9000` |
-| `MINIO_ACCESS_KEY` | MinIO 访问密钥 | `minioadmin` |
-| `MINIO_SECRET_KEY` | MinIO 密钥 | `minioadmin` |
-| `MINIO_BUCKET` | MinIO Bucket | `agent-manager` |
-| `KUBECONFIG` | K8s 配置路径 | `~/.kube/config` |
-| `LOCAL_REGISTRY` | Docker 本地仓库 | `localhost:5000` |
-| `CODEGEN_SCRIPT` | 生成器脚本 | `../codegen/cli.py` |
-| `CODEGEN_PYTHON` | Python 解释器 | `python3` |
-| `BASE_IMAGE_NAME` | 基础镜像名称 | `agent-base:latest` |
-| `BUILD_BASE_IMAGE` | 是否自动构建基础镜像 | `true` |
+| 环境变量 | 字段 | 默认值 | 说明 |
+|---------|------|--------|------|
+| `SERVER_PORT` | `ServerPort` | `8080` | 服务端口 |
+| `MYSQL_DSN` | `MySQLDSN` | `agent_manager:...@tcp(127.0.0.1:3307)/agent_manager?...` | 数据库连接串 |
+| `MINIO_ENDPOINT` | `MinIOEndpoint` | `127.0.0.1:9000` | MinIO 地址 |
+| `MINIO_ACCESS_KEY` | `MinIOAccessKey` | `minioadmin` | MinIO 访问密钥 |
+| `MINIO_SECRET_KEY` | `MinIOSecretKey` | `minioadmin` | MinIO 密钥 |
+| `MINIO_BUCKET` | `MinIOBucket` | `agent-manager` | MinIO Bucket |
+| `KUBE_CONFIG` | `KubeConfig` | `""` | K8s kubeconfig 路径（空=默认 `~/.kube/config`） |
+| `LOCAL_REGISTRY` | `LocalRegistry` | `172.20.0.1:5001` | Docker 本地仓库 |
+| `CODEGEN_SCRIPT` | `CodeGenScript` | `/root/agent-manager/codegen/generator.py` | 代码生成脚本 |
+| `CODEGEN_PYTHON` | `CodeGenPython` | `/root/agent-manager/codegen/venv/bin/python3` | Python 解释器 |
+| `BASE_IMAGE_NAME` | `BaseImageName` | `agent-base:latest` | 基础镜像名称 |
+| `BUILD_BASE_IMAGE` | `BuildBaseImage` | `true` | 是否自动构建基础镜像 |
+| `INGRESS_HOST` | `IngressHost` | `localhost` | Ingress 对外地址（须设为 nginx 入口如 `100.66.1.5:8911`） |
+| `INGRESS_ENABLED` | `IngressEnabled` | `true` | 是否启用 Ingress |
+| `AVAILABLE_IMAGES` | `AvailableImages` | `agent-framework:latest\|Agent Framework v0.5.5` | 可选镜像列表 |
+| `DEFAULT_IMAGE` | `DefaultImage` | `agent-framework:latest` | 默认镜像 |
+| `DEFAULT_CHECKPOINT_DSN` | `DefaultCheckpointDSN` | `""` | 默认 Checkpoint DSN（K8s Pod 内须用 `172.20.0.1`） |
 
-**注意**: LLM 配置（API Key、Model、Endpoint）通过环境变量在运行时注入，不再存储在 Agent 配置中：
-- `LLM_API_KEY` - LLM API 密钥
-- `LLM_MODEL_ID` - 模型 ID
-- `LLM_BASE_URL` - API 端点
-- `LLM_PROVIDER` - 提供商标识
+**LLM 配置**（通过环境变量注入，不再存储于 Agent 配置中）：
+
+| 环境变量 | 字段 | 默认值 | 注入到 Pod 的变量名 |
+|---------|------|--------|-------------------|
+| `LLM_API_KEY` | `LLMAPIKey` | `sk-****` | `LLM_API_KEY` (Secret) |
+| `LLM_MODEL` | `LLMModel` | `qwen3.6-plus` | `LLM_MODEL_ID` |
+| `LLM_ENDPOINT` | `LLMEndpoint` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `LLM_BASE_URL` |
+
+> **注意**: 后端环境变量 `LLM_MODEL` / `LLM_ENDPOINT` 注入到 Pod 后名称变为 `LLM_MODEL_ID` / `LLM_BASE_URL`，这是 agent-framework 期望的变量名。
 
 ## 数据模型 (internal/model/models.go)
 
@@ -217,27 +234,32 @@ POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
 |------|------|
 | `BuildImage(id)` | 使用基础镜像构建 Agent 镜像，跳过 pip install |
 | `GenerateAndBuild(id)` | 生成代码 + 构建镜像（一步完成） |
-| `Deploy(id)` | 通过 K8s SandboxClient 创建 Sandbox CRD，写入 Deployment，状态 → `deployed` |
-| `Publish(id)` | 调用 Deploy + 状态 → `published` |
-| `Unpublish(id)` | 删除 Sandbox，状态 → `unpublished` |
+| `Deploy(id)` | 构建模式：创建 Sandbox CRD + Service，写入 Deployment，状态 → `deployed` |
+| `DeployWithMount(id)` | 挂载模式：创建 ConfigMap + Secret + Service + Sandbox CRD（挂载卷），状态 → `deployed` |
+| `Publish(id)` | 根据运行模式调用 `Deploy` 或 `DeployWithMount`，创建 Ingress，状态 → `published` |
+| `Unpublish(id)` | 删除 Sandbox/ConfigMap/Secret/Ingress/Service，状态 → `unpublished` |
 | `GetImageInfo(id)` | 查询最新镜像标签、仓库地址、构建状态 |
 | `GetPodStatus(id)` | 查询 Pod 运行状态 (Ready/Status/IP/Restarts) |
-| `ChatWithAgent(id, message, history)` | 通过 `kubectl exec` 向 Pod 内发送 curl 请求 |
+| `ChatWithAgent(id, message, history)` | 先通过 Ingress (JSON-RPC `message/send`) 访问 Agent，失败则回退 `kubectl exec` Pod 内 curl |
 
 ## 基础设施客户端
 
 ### K8s (internal/k8s/sandbox.go)
 - 使用 `kubectl` CLI 而非 client-go SDK
 - CRD: `agents.x-k8s.io/v1alpha1` Sandbox 资源
-- `CreateSandbox(name, image)` — 创建 Sandbox CRD
+- `CreateSandbox(name, image, apiKey, model, endpoint)` — 创建 Sandbox CRD (构建模式)
+- `CreateSandboxWithMounts(name, image, configMapName, secretName, envVars, checkpointDSN)` — 创建 Sandbox CRD (挂载模式)
 - `DeleteSandbox(name)` — 删除 Sandbox CRD
-- `SandboxExists(name)` — 检查 Sandbox 是否存在
-- `CreateService(name)` — 创建 Service
-- `DeleteService(name)` — 删除 Service
-- `ServiceExists(name)` — 检查 Service 是否存在
+- `CreateService(name)` — 创建 ClusterIP Service
+- `CreateServiceWithPort(name, port)` — 创建指定端口的 Service
+- `DeleteService(name)` / `ServiceExists(name)` — 管理 Service
 - `CreateIngress(name, agentID)` — 创建 Ingress
-- `DeleteIngress(name)` — 删除 Ingress
-- `IngressExists(name)` — 检查 Ingress 是否存在
+- `CreateIngressWithPort(name, agentID, port)` — 创建指定端口的 Ingress
+- `DeleteIngress(name)` / `IngressExists(name)` — 管理 Ingress
+- `CreateConfigMap(name, data)` — 创建 ConfigMap
+- `DeleteConfigMap(name)` — 删除 ConfigMap
+- `CreateSecret(name, data)` — 创建 Opaque Secret
+- `DeleteSecret(name)` — 删除 Secret
 - `GetPodStatus(sandboxName)` — 解析 `kubectl get pod` 输出
 - `GetPodStatusJSON(sandboxName)` — 返回 kubectl JSON 输出
 

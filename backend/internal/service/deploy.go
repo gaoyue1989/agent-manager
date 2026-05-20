@@ -21,6 +21,7 @@ type DeployService struct {
 	storage              *minio.Storage
 	builder              *docker.Builder
 	sandbox              *k8s.SandboxClient
+	deploymentClient     *k8s.DeploymentClient
 	registry             string
 	agentSvc             *AgentService
 	ingressEnabled       bool
@@ -29,18 +30,19 @@ type DeployService struct {
 	llmModelID           string
 	llmBaseUrl           string
 	defaultCheckpointDSN string
+	deployMethod         string
 }
 
 func NewDeployService(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService) *DeployService {
-	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: true, baseImageName: "agent-base:latest"}
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: true, baseImageName: "agent-base:latest", deployMethod: "sandbox"}
 }
 
 func NewDeployServiceWithIngress(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool) *DeployService {
-	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: "agent-base:latest"}
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: "agent-base:latest", deployMethod: "sandbox"}
 }
 
 func NewDeployServiceWithBaseImage(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool, baseImageName string) *DeployService {
-	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: baseImageName}
+	return &DeployService{db: db, storage: storage, builder: builder, sandbox: sandbox, registry: registry, agentSvc: agentSvc, ingressEnabled: ingressEnabled, baseImageName: baseImageName, deployMethod: "sandbox"}
 }
 
 func NewDeployServiceWithLLM(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool, baseImageName, llmAPIKey, llmModelID, llmBaseUrl, defaultCheckpointDSN string) *DeployService {
@@ -57,6 +59,26 @@ func NewDeployServiceWithLLM(db *gorm.DB, storage *minio.Storage, builder *docke
 		llmModelID:           llmModelID,
 		llmBaseUrl:           llmBaseUrl,
 		defaultCheckpointDSN: defaultCheckpointDSN,
+		deployMethod:         "sandbox",
+	}
+}
+
+func NewDeployServiceWithDeployMethod(db *gorm.DB, storage *minio.Storage, builder *docker.Builder, sandbox *k8s.SandboxClient, registry string, agentSvc *AgentService, ingressEnabled bool, baseImageName, llmAPIKey, llmModelID, llmBaseUrl, defaultCheckpointDSN, deployMethod string, deploymentClient *k8s.DeploymentClient) *DeployService {
+	return &DeployService{
+		db:                   db,
+		storage:              storage,
+		builder:              builder,
+		sandbox:              sandbox,
+		deploymentClient:     deploymentClient,
+		registry:             registry,
+		agentSvc:             agentSvc,
+		ingressEnabled:       ingressEnabled,
+		baseImageName:        baseImageName,
+		llmAPIKey:            llmAPIKey,
+		llmModelID:           llmModelID,
+		llmBaseUrl:           llmBaseUrl,
+		defaultCheckpointDSN: defaultCheckpointDSN,
+		deployMethod:         deployMethod,
 	}
 }
 
@@ -130,10 +152,23 @@ func (s *DeployService) Deploy(agentID uint) (*model.Deployment, error) {
 	}
 
 	now := time.Now()
-	if err := s.sandbox.CreateSandbox(sandboxName, imageTag, llmAPIKey, llmModel, llmEndpoint); err != nil {
-		dep.Status = model.DeployFailed
-		s.db.Save(dep)
-		return dep, err
+	if s.deployMethod == "deployment" && s.deploymentClient != nil {
+		envVars := map[string]string{
+			"LLM_API_KEY":  llmAPIKey,
+			"LLM_MODEL":    llmModel,
+			"LLM_ENDPOINT": llmEndpoint,
+		}
+		if err := s.deploymentClient.CreateDeployment(sandboxName, imageTag, envVars); err != nil {
+			dep.Status = model.DeployFailed
+			s.db.Save(dep)
+			return dep, err
+		}
+	} else {
+		if err := s.sandbox.CreateSandbox(sandboxName, imageTag, llmAPIKey, llmModel, llmEndpoint); err != nil {
+			dep.Status = model.DeployFailed
+			s.db.Save(dep)
+			return dep, err
+		}
 	}
 
 	dep.Status = model.DeployRunning
@@ -205,19 +240,28 @@ func (s *DeployService) DeployWithMount(agentID uint) (*model.Deployment, error)
 		return dep, fmt.Errorf("create service: %w", err)
 	}
 
-	// 挂载模式：自动补全镜像 registry 前缀，确保 K8s 可拉取
 	image := agent.Image
 	if agent.RuntimeMode == model.RuntimeModeMount && s.registry != "" && !strings.Contains(image, "/") {
 		image = fmt.Sprintf("%s/%s", s.registry, image)
 	}
 
 	now := time.Now()
-	if err := s.sandbox.CreateSandboxWithMounts(sandboxName, image, configMapName, secretName, envVars, checkpointDSN); err != nil {
-		s.sandbox.DeleteConfigMap(configMapName)
-		s.sandbox.DeleteSecret(secretName)
-		dep.Status = model.DeployFailed
-		s.db.Save(dep)
-		return dep, fmt.Errorf("create sandbox: %w", err)
+	if s.deployMethod == "deployment" && s.deploymentClient != nil {
+		if err := s.deploymentClient.CreateDeploymentWithMounts(sandboxName, image, 8100, envVars, configMapName, secretName, checkpointDSN); err != nil {
+			s.sandbox.DeleteConfigMap(configMapName)
+			s.sandbox.DeleteSecret(secretName)
+			dep.Status = model.DeployFailed
+			s.db.Save(dep)
+			return dep, fmt.Errorf("create deployment: %w", err)
+		}
+	} else {
+		if err := s.sandbox.CreateSandboxWithMounts(sandboxName, image, configMapName, secretName, envVars, checkpointDSN); err != nil {
+			s.sandbox.DeleteConfigMap(configMapName)
+			s.sandbox.DeleteSecret(secretName)
+			dep.Status = model.DeployFailed
+			s.db.Save(dep)
+			return dep, fmt.Errorf("create sandbox: %w", err)
+		}
 	}
 
 	dep.Status = model.DeployRunning
@@ -358,8 +402,14 @@ func (s *DeployService) Unpublish(agentID uint) (*model.Deployment, error) {
 		log.Println("WARNING: failed to delete Service:", err)
 	}
 
-	if err := s.sandbox.DeleteSandbox(sandboxName); err != nil {
-		return dep, err
+	if s.deployMethod == "deployment" && s.deploymentClient != nil {
+		if err := s.deploymentClient.DeleteDeployment(sandboxName); err != nil {
+			return dep, err
+		}
+	} else {
+		if err := s.sandbox.DeleteSandbox(sandboxName); err != nil {
+			return dep, err
+		}
 	}
 
 	if agent.RuntimeMode == model.RuntimeModeMount {
@@ -472,11 +522,10 @@ func (s *DeployService) ChatWithAgent(agentID uint, message string, history []ma
 		log.Printf("Ingress chat failed, falling back to kubectl exec: %v", err)
 	}
 
-	cmd := exec.Command("kubectl", "exec", "-n", "default", dep.SandboxName, "--",
+	out, err := s.sandbox.ExecInPod(dep.SandboxName,
 		"curl", "-s", "-m", "120", "-X", "POST", "http://localhost:8100/",
 		"-H", "Content-Type: application/json",
 		"-d", string(bodyJSON))
-	out, err := cmd.CombinedOutput()
 	latencyMs := time.Since(startTime).Milliseconds()
 
 	if err != nil {

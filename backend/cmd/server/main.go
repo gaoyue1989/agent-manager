@@ -37,10 +37,26 @@ func main() {
 
 	cgRunner := codegen.NewRunner(cfg.CodeGenScript, cfg.CodeGenPython, storage)
 
-	sandbox, err := k8s.NewSandboxClientWithIngress(cfg.IngressHost, cfg.IngressEnabled)
+	// 初始化 K8s 客户端（kubectl 或 API）
+	kubeClient, err := k8s.NewK8sClient(cfg.KubeClientMode, cfg.KubeConfig, cfg.KubeNamespace)
+	if err != nil {
+		log.Fatalf("failed to init k8s client: %v", err)
+	}
+
+	// 初始化模板引擎
+	templateEngine, err := k8s.NewTemplateEngine(cfg.DeployTemplateDir)
+	if err != nil {
+		log.Fatalf("failed to init template engine: %v", err)
+	}
+
+	// 初始化 SandboxClient（使用 K8sClient）
+	sandbox, err := k8s.NewSandboxClientWithConfig(kubeClient, cfg.KubeNamespace, cfg.IngressHost, cfg.IngressEnabled, cfg.KubeIngressClass)
 	if err != nil {
 		log.Printf("WARNING: failed to init k8s sandbox client: %v", err)
 	}
+
+	// 初始化 DeploymentClient（模板驱动的 Deployment 管理）
+	deploymentClient := k8s.NewDeploymentClient(kubeClient, templateEngine, cfg.KubeNamespace)
 
 	builder, err := docker.NewBuilder("gaoyue1989", "gao19891104")
 	if err != nil {
@@ -60,8 +76,8 @@ func main() {
 		}
 	}
 
-	agentSvc := service.NewAgentServiceWithDeps(db, storage, cgRunner, sandbox, builder, cfg.LocalRegistry)
-	deploySvc := service.NewDeployServiceWithLLM(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled, cfg.BaseImageName, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMEndpoint, cfg.DefaultCheckpointDSN)
+	agentSvc := service.NewAgentServiceWithDeployMethod(db, storage, cgRunner, sandbox, builder, cfg.LocalRegistry, cfg.DeployMethod, deploymentClient)
+	deploySvc := service.NewDeployServiceWithDeployMethod(db, storage, builder, sandbox, cfg.LocalRegistry, agentSvc, cfg.IngressEnabled, cfg.BaseImageName, cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMEndpoint, cfg.DefaultCheckpointDSN, cfg.DeployMethod, deploymentClient)
 
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{

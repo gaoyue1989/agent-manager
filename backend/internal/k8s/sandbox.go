@@ -3,7 +3,6 @@ package k8s
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -18,24 +17,31 @@ type PodStatusInfo struct {
 }
 
 type SandboxClient struct {
-	namespace    string
-	ingressHost  string
+	client         K8sClient
+	namespace      string
+	ingressHost    string
 	ingressEnabled bool
+	ingressClass   string
 }
 
+// NewSandboxClient 创建 Sandbox 客户端（向后兼容）
 func NewSandboxClient() (*SandboxClient, error) {
-	return &SandboxClient{
-		namespace:      "default",
-		ingressHost:    "localhost",
-		ingressEnabled: true,
-	}, nil
+	return NewSandboxClientWithConfig(NewKubectlClient("", "default"), "default", "localhost", true, "nginx")
 }
 
+// NewSandboxClientWithIngress 带 Ingress 配置（向后兼容）
 func NewSandboxClientWithIngress(ingressHost string, ingressEnabled bool) (*SandboxClient, error) {
+	return NewSandboxClientWithConfig(NewKubectlClient("", "default"), "default", ingressHost, ingressEnabled, "nginx")
+}
+
+// NewSandboxClientWithConfig 完整配置构造函数
+func NewSandboxClientWithConfig(client K8sClient, namespace, ingressHost string, ingressEnabled bool, ingressClass string) (*SandboxClient, error) {
 	return &SandboxClient{
-		namespace:      "default",
+		client:         client,
+		namespace:      namespace,
 		ingressHost:    ingressHost,
 		ingressEnabled: ingressEnabled,
+		ingressClass:   ingressClass,
 	}, nil
 }
 
@@ -71,22 +77,11 @@ spec:
           value: "http://172.20.0.1:7890"
 `, name, s.namespace, name, name, image, llmAPIKey, llmModel, llmEndpoint)
 
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(yaml)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.ApplyYAML(yaml)
 }
 
 func (s *SandboxClient) DeleteSandbox(name string) error {
-	cmd := exec.Command("kubectl", "delete", "sandbox", name, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl delete: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.DeleteResource("sandbox", name)
 }
 
 func (s *SandboxClient) CreateService(name string) error {
@@ -107,23 +102,12 @@ spec:
     targetPort: %d
 `, name, s.namespace, name, port, port)
 
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(svcYaml)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply service: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.ApplyYAML(svcYaml)
 }
 
 func (s *SandboxClient) DeleteService(name string) error {
 	svcName := name + "-svc"
-	cmd := exec.Command("kubectl", "delete", "service", svcName, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl delete service: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.DeleteResource("service", svcName)
 }
 
 func (s *SandboxClient) CreateIngress(name string, agentID uint) (string, error) {
@@ -149,7 +133,7 @@ metadata:
     nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
-  ingressClassName: nginx
+  ingressClassName: %s
   rules:
   - http:
       paths:
@@ -160,13 +144,10 @@ spec:
             name: %s
             port:
               number: %d
-`, ingressName, s.namespace, path, svcName, port)
+`, ingressName, s.namespace, s.ingressClass, path, svcName, port)
 
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(ingressYaml)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("kubectl apply ingress: %s\n%s", err.Error(), string(out))
+	if err := s.client.ApplyYAML(ingressYaml); err != nil {
+		return "", fmt.Errorf("kubectl apply ingress: %w", err)
 	}
 	return endpointURL, nil
 }
@@ -175,145 +156,66 @@ func (s *SandboxClient) DeleteIngress(name string) error {
 	if !s.ingressEnabled {
 		return nil
 	}
-
 	ingressName := name + "-ingress"
-	cmd := exec.Command("kubectl", "delete", "ingress", ingressName, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl delete ingress: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.DeleteResource("ingress", ingressName)
 }
 
 func (s *SandboxClient) GetSandboxStatus(name string) (string, error) {
-	cmd := exec.Command("kubectl", "get", "sandbox", name, "-n", s.namespace, "-o", "jsonpath={.status.conditions[0].message}")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("kubectl get: %s\n%s", err.Error(), string(out))
-	}
-	return strings.TrimSpace(string(out)), nil
+	return s.client.GetResourceJSON("sandbox", name,
+		"jsonpath={.status.conditions[0].message}")
 }
 
 func (s *SandboxClient) GetPodStatus(sandboxName string) (*PodStatusInfo, error) {
-	jsonpath := `{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.containerStatuses[0].ready}{"|"}{.status.containerStatuses[0].restartCount}{"|"}{.metadata.creationTimestamp}{"|"}{.status.podIP}{"|"}{.spec.nodeName}{end}`
-	cmd := exec.Command("kubectl", "get", "pods", "-n", s.namespace, "-l", fmt.Sprintf("app=%s", sandboxName),
-		"-o", fmt.Sprintf("jsonpath=%s", jsonpath))
-	out, err := cmd.CombinedOutput()
+	raw, err := s.client.ListPodsJSON(fmt.Sprintf("app=%s", sandboxName))
 	if err != nil {
-		return nil, fmt.Errorf("kubectl get pods: %s\n%s", err.Error(), string(out))
+		return nil, err
 	}
-	output := strings.TrimSpace(string(out))
-	if output == "" {
-		return nil, fmt.Errorf("pod not found for sandbox %s", sandboxName)
+	return s.parsePodStatus(raw, sandboxName)
+}
+
+func (s *SandboxClient) parsePodStatus(raw string, sandboxName string) (*PodStatusInfo, error) {
+	jsonStr, err := parsePodStatusJSON(raw, sandboxName)
+	if err != nil {
+		return nil, err
 	}
 
-	parts := strings.SplitN(output, "|", 7)
-	if len(parts) < 6 {
-		return nil, fmt.Errorf("unexpected pod info format: %s", output)
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return nil, fmt.Errorf("parse pod status: %w", err)
 	}
 
 	return &PodStatusInfo{
-		PodName:  parts[0],
-		Status:   parts[1],
-		Ready:    parts[2],
-		Restarts: parts[3],
-		Age:      parts[4],
-		IP:       parts[5],
-		Node:     "",
+		PodName:  result["pod_name"].(string),
+		Status:   result["status"].(string),
+		Ready:    result["ready"].(string),
+		Restarts: fmt.Sprintf("%d", int(result["restarts"].(float64))),
 	}, nil
 }
 
 func (s *SandboxClient) GetPodStatusJSON(sandboxName string) (string, error) {
-	cmd := exec.Command("kubectl", "get", "pods", "-n", s.namespace, "-l",
-		fmt.Sprintf("app=%s", sandboxName), "-o", "json")
-	out, err := cmd.CombinedOutput()
+	raw, err := s.client.ListPodsJSON(fmt.Sprintf("app=%s", sandboxName))
 	if err != nil {
-		return "", fmt.Errorf("kubectl get pods json: %s\n%s", err.Error(), string(out))
+		return "", err
 	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return "", fmt.Errorf("parse pod json: %w", err)
-	}
-
-	items, ok := result["items"].([]interface{})
-	if !ok || len(items) == 0 {
-		return "", fmt.Errorf("no pods found for sandbox %s", sandboxName)
-	}
-
-	pod := items[0].(map[string]interface{})
-	podMeta := pod["metadata"].(map[string]interface{})
-	podName := podMeta["name"].(string)
-	podStatus := pod["status"].(map[string]interface{})
-
-	phase := podStatus["phase"].(string)
-	podIP := ""
-	if ip, ok := podStatus["podIP"].(string); ok {
-		podIP = ip
-	}
-
-	ready := "false"
-	restarts := float64(0)
-	containerStatuses, ok := podStatus["containerStatuses"].([]interface{})
-	if ok && len(containerStatuses) > 0 {
-		cs := containerStatuses[0].(map[string]interface{})
-		if r, ok := cs["ready"].(bool); ok && r {
-			ready = "true"
-		}
-		if rc, ok := cs["restartCount"].(float64); ok {
-			restarts = rc
-		}
-	}
-
-	resultJSON, _ := json.Marshal(map[string]interface{}{
-		"pod_name": podName,
-		"status":   phase,
-		"ready":    ready,
-		"restarts": int(restarts),
-		"pod_ip":   podIP,
-	})
-
-	return string(resultJSON), nil
+	return parsePodStatusJSON(raw, sandboxName)
 }
 
 func (s *SandboxClient) GetServiceEndpoint(name string) (string, error) {
-	svcName := name + "-svc"
-	cmd := exec.Command("kubectl", "get", "service", svcName, "-n", s.namespace,
-		"-o", "jsonpath={.spec.clusterIP}:{.spec.ports[0].port}")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("kubectl get service: %s\n%s", err.Error(), string(out))
-	}
-	return strings.TrimSpace(string(out)), nil
+	return s.client.GetServiceEndpoint(name + "-svc")
 }
 
 func (s *SandboxClient) SandboxExists(name string) bool {
-	cmd := exec.Command("kubectl", "get", "sandbox", name, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
+	return s.client.ResourceExists("sandbox", name)
 }
 
 func (s *SandboxClient) ServiceExists(name string) bool {
 	svcName := name + "-svc"
-	cmd := exec.Command("kubectl", "get", "service", svcName, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
+	return s.client.ResourceExists("service", svcName)
 }
 
 func (s *SandboxClient) IngressExists(name string) bool {
 	ingressName := name + "-ingress"
-	cmd := exec.Command("kubectl", "get", "ingress", ingressName, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
+	return s.client.ResourceExists("ingress", ingressName)
 }
 
 func (s *SandboxClient) CreateConfigMap(name string, data map[string]string) error {
@@ -333,31 +235,15 @@ data:
 		}
 	}
 
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(sb.String())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply configmap: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.ApplyYAML(sb.String())
 }
 
 func (s *SandboxClient) DeleteConfigMap(name string) error {
-	cmd := exec.Command("kubectl", "delete", "configmap", name, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl delete configmap: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.DeleteResource("configmap", name)
 }
 
 func (s *SandboxClient) ConfigMapExists(name string) bool {
-	cmd := exec.Command("kubectl", "get", "configmap", name, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
+	return s.client.ResourceExists("configmap", name)
 }
 
 func (s *SandboxClient) CreateSecret(name string, stringData map[string]string) error {
@@ -375,31 +261,19 @@ stringData:
 		sb.WriteString(fmt.Sprintf("  %s: %s\n", key, value))
 	}
 
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(sb.String())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply secret: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.ApplyYAML(sb.String())
 }
 
 func (s *SandboxClient) DeleteSecret(name string) error {
-	cmd := exec.Command("kubectl", "delete", "secret", name, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl delete secret: %s\n%s", err.Error(), string(out))
-	}
-	return nil
+	return s.client.DeleteResource("secret", name)
 }
 
 func (s *SandboxClient) SecretExists(name string) bool {
-	cmd := exec.Command("kubectl", "get", "secret", name, "-n", s.namespace, "--ignore-not-found")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
+	return s.client.ResourceExists("secret", name)
+}
+
+func (s *SandboxClient) ExecInPod(podName string, command ...string) ([]byte, error) {
+	return s.client.ExecCommand(podName, command...)
 }
 
 func (s *SandboxClient) CreateSandboxWithMounts(name, image, configMapName, secretName string, envVars map[string]string, checkpointDSN string) error {
@@ -408,7 +282,12 @@ func (s *SandboxClient) CreateSandboxWithMounts(name, image, configMapName, secr
 		if key == "LLM_MODEL_ID" || key == "LLM_BASE_URL" {
 			continue
 		}
-		envLines += fmt.Sprintf("        - name: %s\n          value: \"%s\"\n", key, escapeK8sValue(value))
+			envLines += fmt.Sprintf("        - name: %s\n          value: \"%s\"\n", key, escapeK8sValue(value))
+	}
+
+	checkpointEnv := ""
+	if checkpointDSN != "" {
+		checkpointEnv = fmt.Sprintf("        - name: CHECKPOINT_MYSQL_DSN\n          value: \"%s\"\n", escapeK8sValue(checkpointDSN))
 	}
 
 	yaml := fmt.Sprintf(`apiVersion: agents.x-k8s.io/v1alpha1
@@ -443,8 +322,7 @@ spec:
           value: "%s"
         - name: LLM_PROVIDER
           value: "openai"
-        - name: CHECKPOINT_MYSQL_DSN
-          value: "%s"
+%s
         - name: SERVER_HOST
           value: "0.0.0.0"
         - name: SERVER_PORT
@@ -458,18 +336,8 @@ spec:
         configMap:
           name: %s
 `, name, s.namespace, name, name, image, secretName,
-		envVars["LLM_MODEL_ID"], envVars["LLM_BASE_URL"], escapeK8sValue(checkpointDSN),
+		envVars["LLM_MODEL_ID"], envVars["LLM_BASE_URL"], checkpointEnv,
 		envLines, configMapName)
 
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(yaml)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply: %s\n%s", err.Error(), string(out))
-	}
-	return nil
-}
-
-func escapeK8sValue(value string) string {
-	return strings.ReplaceAll(value, "\"", "\\\"")
+	return s.client.ApplyYAML(yaml)
 }

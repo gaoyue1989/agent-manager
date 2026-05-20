@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.Name}}
+{{if .Namespace}}  namespace: {{.Namespace}}
+{{end}}  labels:
+    app: {{.Name}}
+spec:
+  replicas: {{.Replicas}}
+  selector:
+    matchLabels:
+      app: {{.Name}}
+  template:
+    metadata:
+      labels:
+        app: {{.Name}}
+    spec:
+      containers:
+      - name: agent
+        image: {{.Image}}
+        ports:
+        - containerPort: {{.Port}}
+{{- if .EnvYAML}}
+        env:
+{{.EnvYAML}}
+{{- end}}
+{{- if .Resources}}
+        resources:
+{{.Resources}}
+{{- end}}
+{{- if .LivenessProbe}}
+        livenessProbe:
+{{.LivenessProbe}}
+{{- end}}
+{{- if .ReadinessProbe}}
+        readinessProbe:
+{{.ReadinessProbe}}
+{{- end}}
+{{- if .VolumeMounts}}
+        volumeMounts:
+{{.VolumeMounts}}
+{{- end}}
+{{- if .Volumes}}
+      volumes:
+{{.Volumes}}
+{{- end}}

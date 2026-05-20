@@ -160,27 +160,7 @@ DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@172.20.0.1:3307/agent_m
 - `deployed/published`: K8s + Docker + MinIO + 数据库
 - `error`: 尝试清理所有可能资源
 
-### 4. Agent 端点和外部访问
-
-已发布的 Agent 可通过 `/agent/{id}/` 路径直接访问容器内所有端点：
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/agent/{id}/` | 服务信息 |
-| GET | `/agent/{id}/health` | 健康检查 |
-| GET | `/agent/{id}/debug` | Debug Console (MCP Apps Host) |
-| GET | `/agent/{id}/threads` | Thread 列表 |
-| GET | `/agent/{id}/skills` | Skills 列表 |
-| GET | `/agent/{id}/mcp` | MCP 服务器列表 |
-| GET | `/agent/{id}/tools` | 工具列表 |
-| POST | `/agent/{id}/` | JSON-RPC 2.0 (message/send, message/stream) |
-| DELETE | `/agent/{id}/threads/{tid}` | 删除 Thread |
-
-**Chat 代理调用**：前端 → `POST /api/v1/agents/{id}/chat` → 后端转换为 JSON-RPC `message/send` → Ingress → Agent Pod `:8100`。
-
-> **注意**：Debug 页面 `BASE` 路径已从 `window.location.origin` 修正为从 `pathname` 提取前缀，确保在 `/agent/{id}/debug` 路径下 API 请求正确路由。
-
-### 5. 基础镜像构建
+### 3. 基础镜像构建
 
 预构建基础镜像 `agent-base:latest`，包含所有 pip 依赖，加速 Agent 镜像构建：
 
