@@ -28,6 +28,8 @@ type Config struct {
 	DefaultCheckpointDSN  string
 	DeployMethod          string
 	DeployTemplateDir     string
+	DockerUsername         string
+	DockerPassword         string
 }
 
 func Load() *Config {
@@ -57,6 +59,8 @@ func Load() *Config {
 		DefaultCheckpointDSN: getEnv("DEFAULT_CHECKPOINT_DSN", ""),
 		DeployMethod:         getEnv("DEPLOY_METHOD", "sandbox"),
 		DeployTemplateDir:    getEnv("DEPLOY_TEMPLATE_DIR", ""),
+		DockerUsername:        getEnv("DOCKER_USERNAME", ""),
+		DockerPassword:        getEnv("DOCKER_PASSWORD", ""),
 	}
 }
 

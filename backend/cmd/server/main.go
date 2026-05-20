@@ -58,7 +58,7 @@ func main() {
 	// 初始化 DeploymentClient（模板驱动的 Deployment 管理）
 	deploymentClient := k8s.NewDeploymentClient(kubeClient, templateEngine, cfg.KubeNamespace)
 
-	builder, err := docker.NewBuilder("gaoyue1989", "gao19891104")
+	builder, err := docker.NewBuilder(cfg.DockerUsername, cfg.DockerPassword)
 	if err != nil {
 		log.Printf("WARNING: failed to init docker builder: %v", err)
 	}
