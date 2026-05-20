@@ -15,6 +15,7 @@ from server.routes.a2a_routes import A2ARoutes
 from server.routes.thread_routes import ThreadRoutes
 from server.routes.mcp_routes import MCPRoutes
 from server.routes.debug_ui import register_debug_ui
+from server.services.llm_logger import LLMLogger
 
 
 def create_app(config: AppConfig = None) -> FastAPI:
@@ -67,6 +68,8 @@ def create_app(config: AppConfig = None) -> FastAPI:
         catalog_id=oaf_config.get_catalog_id(),
     )
 
+    llm_logger = LLMLogger()
+
     agent_runtime = AgentRuntime(
         oaf_config=oaf_config,
         llm_config=config.llm,
@@ -76,6 +79,7 @@ def create_app(config: AppConfig = None) -> FastAPI:
         mcp_configs=mcp_configs,
         custom_tools=custom_tools,
         checkpoint_manager=checkpoint_manager,
+        llm_logger=llm_logger,
     )
 
     @asynccontextmanager
@@ -189,6 +193,18 @@ def create_app(config: AppConfig = None) -> FastAPI:
             "custom": custom_tool_manager.get_tool_summaries(custom_tools),
             "mcp": [t.name for t in agent_runtime._mcp_tools],
         }
+
+    @app.get("/system-prompt")
+    async def get_system_prompt():
+        return {
+            "system_prompt": agent_runtime.system_prompt,
+            "base_prompt": oaf_config.system_prompt,
+        }
+
+    @app.get("/threads/{thread_id}/llm-calls")
+    async def get_thread_llm_calls(thread_id: str):
+        calls = llm_logger.get_calls(thread_id)
+        return {"thread_id": thread_id, "calls": calls, "count": len(calls)}
 
     A2ARoutes(
         app=app,

@@ -62,7 +62,10 @@ agent-framework/
 │   │   ├── mcp_manager.py          # MCP 配置加载 + MultiServerMCPClient
 │   │   ├── a2ui_service.py         # A2UI JSONL 生成
 │   │   ├── chat_model.py           # ChatOpenAIReasoning (GLM-5 适配)
-│   │   └── custom_tool_manager.py  # 自定义工具动态加载 (importlib)
+│   │   ├── custom_tool_manager.py  # 自定义工具动态加载 (importlib)
+│   │   └── llm_logger.py           # LLM 请求/响应内存日志器 (按 thread_id 存储)
+│   ├── callbacks/                  # LangChain 回调
+│   │   └── llm_callback.py         # LLMLoggingCallback (on_chat_model_start / on_llm_end)
 │   ├── routes/                     # 路由
 │   │   ├── a2a_routes.py           # A2A 端点 (JSON-RPC + SSE + thread 方法)
 │   │   ├── thread_routes.py        # Thread REST (GET/DELETE /threads)
@@ -75,6 +78,7 @@ agent-framework/
 │   ├── unit/                       # 单元测试 (81 个)
 │   ├── integration/                # 集成测试 (20 个)
 │   ├── e2e/                        # E2E 测试 (17 个, 需要 LLM)
+│   │   └── e2e-screenshots.js       # Debug 页面截图测试 (Puppeteer)
 │   └── fixtures/                   # 测试 Agent 配置
 │       ├── minimal-agent/          # 最小化配置
 │       └── full-agent/             # 完整配置 (skills + MCP + tools)
@@ -132,6 +136,11 @@ class AgentRuntime:
     # 内部
     _ensure_agent()        → create_deep_agent(checkpointer=saver)  # 懒加载, 注入 checkpointer
     _get_available_tools() → 内建工具 (bash/read/edit/grep) + MCP 工具 (_mcp_tools 缓存)
+    _get_callbacks()       → LLMLoggingCallback 列表 (注入 config["callbacks"])
+
+    # LLM 日志
+    _llm_logger            → LLMLogger 实例 (注入 callback 记录每次 LLM 请求/响应)
+    _log_direct_call()     → 降级路径 (_invoke_direct) 手动记录 LLM 调用
 
     # 多租户
     @property checkpoint_ns → agent slug (vendorKey/agentKey)
@@ -182,6 +191,28 @@ class CustomToolManager:
 ```
 
 工具脚本格式: `custom-tools/{name}.py`，使用 `@tool` 装饰器定义函数。
+
+### 7. llm_logger.py — LLM 请求/响应日志
+
+```python
+class LLMLogger:
+    def __init__(self, max_calls_per_thread=50)    # 内存日志器
+    def log_call(thread_id, request_info, response_info)  → call_id
+    def get_calls(thread_id)                       → list[dict]  # 返回所有 LLM 调用记录
+    def clear_thread(thread_id)                    # 清除某线程的日志
+```
+
+每条记录包含 `request` (messages/model/params) 和 `response` (content/tool_calls/usage/elapsed)。
+
+### 8. callbacks/llm_callback.py — LangChain 回调
+
+```python
+class LLMLoggingCallback(BaseCallbackHandler):
+    def on_chat_model_start(serialized, messages, ...)  # 捕获发送给 LLM 的消息
+    def on_llm_end(response, ...)                       # 捕获 LLM 响应
+```
+
+通过 `config["callbacks"]` 注入到 DeepAgents 的 `ainvoke/astream` 调用中，自动拦截每次 LLM 调用。
 
 ---
 
@@ -258,6 +289,43 @@ tools:
 | GET | `/threads` | Thread 列表 (按 checkpoint_ns 过滤) |
 | GET | `/threads/{id}` | Thread 对话历史 |
 | DELETE | `/threads/{id}` | 删除 Thread (按 checkpoint_ns 隔离) |
+| GET | `/system-prompt` | 系统提示词 (含自动生成的 Skills/MCP 上下文) |
+| GET | `/threads/{id}/llm-calls` | 某 Thread 的所有 LLM 请求/响应日志 |
+
+---
+
+## 调试页面功能 ( `/debug` )
+
+| 功能 | 说明 |
+|------|------|
+| Agent 信息 | 名称、MCP 数量 |
+| Tools 列表 | 内建工具 + 自定义工具 + MCP 工具 |
+| Skills 列表 | 技能名称和描述 |
+| System Prompt 查看 | 区分 Base (AGENTS.md) 和 Auto-generated (Skills/MCP Context) |
+| MCP Servers | 已配置的 MCP 服务器列表 |
+| Thread 管理 | 创建/切换/查看对话历史 |
+| 流式对话 | SSE 实时 token + tool_call/tool_result 可视化 |
+| MCP Apps 渲染 | tool_call 含 `_meta.ui.resourceUri` 时渲染 iframe |
+| **LLM Calls** | 查看每轮对话的 LLM 请求/响应详情 |
+| Token 统计 | 显示每次对话的输入/输出/总计 token + 耗时 |
+
+## LLM 请求/响应日志
+
+`LLMLogger` 按 thread_id 存储每次 LLM 调用的完整信息：
+
+| 字段 | 说明 |
+|------|------|
+| `request.messages` | 发送给模型的消息列表 (System/Human/AI/Tool) |
+| `request.model` | 模型 ID |
+| `request.params` | temperature / max_tokens |
+| `response.content` | 模型回复文本 |
+| `response.tool_calls` | 工具调用列表 (id/name/args) |
+| `response.usage` | token 用量 (input/output/total) |
+| `response.elapsed` | 调用耗时 (秒) |
+
+**实现方式**：通过 `LLMLoggingCallback` (LangChain `BaseCallbackHandler`) 自动拦截 DeepAgents 的每次 LLM 调用，无需修改 agent 内部逻辑。降级路径 (`_invoke_direct`) 中手动记录。
+
+**容量控制**：每 thread 最多保留 50 条记录，防止内存膨胀。
 
 ---
 

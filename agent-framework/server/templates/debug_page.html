@@ -35,6 +35,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .sidebar .sidebar-actions button{flex:1;padding:6px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:11px}
 .sidebar .sidebar-actions button:hover{background:#30363d}
 .tool-tag{display:inline-block;padding:2px 6px;margin:2px;background:#1f6feb33;color:#58a6ff;border-radius:4px;font-size:10px}
+.skill-item{padding:4px 0;font-size:11px;border-bottom:1px solid #21262d}
+.skill-item .skill-name{color:#58a6ff;font-weight:bold}
+.skill-item .skill-desc{color:#8b949e;font-size:10px;margin-top:1px}
+.sidebar .sysprompt-btn{display:block;width:100%;padding:4px 8px;margin:4px 0;background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb44;border-radius:6px;cursor:pointer;font-size:11px;text-align:center}
+.sidebar .sysprompt-btn:hover{background:#1f6feb33}
+.llm-call-entry{background:#0d1117;border:1px solid #30363d;border-radius:8px;margin:8px 0;overflow:hidden}
+.llm-call-header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#161b22;cursor:pointer;user-select:none;border-bottom:1px solid transparent}
+.llm-call-entry.open .llm-call-header{border-bottom-color:#30363d}
+.llm-call-header:hover{background:#1c2128}
+.llm-call-header .lc-index{color:#58a6ff;font-weight:bold;font-size:12px}
+.llm-call-header .lc-model{color:#8b949e;font-size:10px}
+.llm-call-header .lc-usage{color:#d29922;font-size:10px;margin-left:auto}
+.llm-call-header .lc-toggle{color:#8b949e;font-size:14px;transition:transform 0.2s}
+.llm-call-entry.open .lc-toggle{transform:rotate(180deg)}
+.llm-call-body{display:none;padding:10px 12px;font-size:11px}
+.llm-call-entry.open .llm-call-body{display:block}
+.llm-call-body .lc-section{margin-bottom:8px}
+.llm-call-body .lc-label{color:#58a6ff;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px}
+.llm-call-body .lc-msg{padding:4px 8px;margin:2px 0;background:#161b22;border-radius:4px;font-size:10px}
+.llm-call-body .lc-msg .lc-role{color:#8b949e;font-weight:bold;margin-right:6px}
+.llm-call-body .lc-msg .lc-content{color:#c9d1d9;white-space:pre-wrap;word-break:break-word}
+.llm-call-body .lc-msg.system .lc-role{color:#d29922}
+.llm-call-body .lc-msg.user .lc-role{color:#58a6ff}
+.llm-call-body .lc-msg.assistant .lc-role{color:#238636}
+.llm-call-body .lc-msg.tool .lc-role{color:#8b949e}
+.llm-call-body .lc-pre{background:#0d1117;padding:6px;border-radius:4px;overflow-x:auto;max-height:200px;overflow-y:auto;font-size:10px;margin:2px 0}
 .chat-area{flex:1;display:flex;flex-direction:column;min-width:0}
 .chat-header{display:flex;align-items:center;padding:6px 16px;background:#161b22;border-bottom:1px solid #30363d;gap:10px;flex-shrink:0}
 .chat-header .thread-label{font-size:11px;color:#8b949e}
@@ -126,10 +152,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div id="agentInfo"></div>
       <h3>Tools</h3>
       <div id="toolsList"></div>
+      <h3>Skills</h3>
+      <div id="skillsList"><span style="color:#8b949e;font-size:11px">Loading...</span></div>
       <h3>MCP Servers</h3>
       <div id="mcpList"></div>
       <h3>Threads</h3>
       <div id="threadList"><span style="color:#8b949e;font-size:11px">Loading...</span></div>
+      <button class="sysprompt-btn" onclick="showSystemPrompt()">View System Prompt</button>
     </div>
     <div class="sidebar-actions">
       <button onclick="newThread()" title="Start a new conversation thread">+ New</button>
@@ -140,6 +169,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="chat-header">
       <span class="thread-label">Thread:</span>
       <span class="thread-id empty" id="threadBadge">no thread selected</span>
+      <button onclick="showLLMCalls()" style="margin-left:auto;padding:3px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:11px" id="llmBtn" disabled>LLM Calls</button>
     </div>
     <div class="messages" id="messages">
       <div class="msg system">MCP Apps Host v1.0 - SEP-1865 compliant</div>
@@ -186,6 +216,13 @@ async function init(){
     const mcps=await resp.json();
     document.getElementById('mcpList').innerHTML=mcps.map(m=>'<div style="font-size:11px;padding:3px 0;border-bottom:1px solid #21262d"><strong>'+esc(m.server||'?')+'</strong></div>').join('')||'<span style="color:#8b949e;font-size:11px">No MCP</span>';
   }catch(e){}
+  try{
+    const resp=await fetch(BASE+'/skills');
+    const skills=await resp.json();
+    const el=document.getElementById('skillsList');
+    if(!skills||skills.length===0){el.innerHTML='<span style="color:#8b949e;font-size:11px">No skills</span>';}
+    else{el.innerHTML=skills.map(s=>'<div class="skill-item"><span class="skill-name">'+esc(s.name||'?')+'</span><div class="skill-desc">'+esc((s.description||'').substring(0,80))+'</div></div>').join('');}
+  }catch(e){document.getElementById('skillsList').innerHTML='<span style="color:#da3633;font-size:11px">Failed</span>';}
   await refreshThreads();
   setInterval(refreshThreads,30000);
 }
@@ -217,6 +254,7 @@ function selectThread(tid){
   currentThreadId=tid;
   document.getElementById('threadBadge').textContent=tid;
   document.getElementById('threadBadge').classList.remove('empty');
+  document.getElementById('llmBtn').disabled=false;
   renderThreadList(threadListCache);
   loadThreadHistory(tid);
 }
@@ -228,6 +266,7 @@ function newThread(){
   mcpAppsIframes={};
   document.getElementById('threadBadge').textContent='new thread';
   document.getElementById('threadBadge').classList.add('empty');
+  document.getElementById('llmBtn').disabled=true;
   document.getElementById('messages').innerHTML='<div class="msg system">New thread started</div>';
   renderThreadList(threadListCache);
 }
@@ -489,7 +528,7 @@ async function sendMessage(){
             return;
           }
           else if(data.state==='completed'||data.state==='working'){
-            if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;}
+            if(data.metadata&&data.metadata.thread_id&&!currentThreadId){currentThreadId=data.metadata.thread_id;document.getElementById('llmBtn').disabled=false;}
           }
           else if(data.error){
             if(streamingDiv){streamingDiv.innerHTML+='<span style="color:#da3633">Error: '+esc(data.error)+'</span>';}
@@ -539,6 +578,76 @@ async function showAgentCard(){
 }
 
 function closeModal(){document.getElementById('modalOverlay').classList.remove('active');}
+
+async function showSystemPrompt(){
+  try{
+    const resp=await fetch(BASE+'/system-prompt');
+    const data=await resp.json();
+    const base=data.base_prompt||'';
+    const full=data.system_prompt||'';
+    const extra=full.substring(base.length);
+    let html='<h2>System Prompt</h2>';
+    if(extra){
+      html+='<div style="margin-bottom:10px"><div class="lc-label" style="margin-bottom:4px">Base (from AGENTS.md)</div><pre style="max-height:200px;overflow-y:auto">'+esc(base)+'</pre></div>';
+      html+='<div><div class="lc-label" style="margin-bottom:4px">Auto-generated (Skills & MCP Context)</div><pre style="max-height:200px;overflow-y:auto">'+esc(extra)+'</pre></div>';
+    }else{
+      html+='<pre style="max-height:60vh;overflow-y:auto">'+esc(full)+'</pre>';
+    }
+    document.getElementById('modalContent').innerHTML=html;
+    document.getElementById('modalOverlay').classList.add('active');
+  }catch(e){alert('Failed to load system prompt: '+e.message);}
+}
+
+async function showLLMCalls(){
+  if(!currentThreadId){return;}
+  try{
+    const resp=await fetch(BASE+'/threads/'+encodeURIComponent(currentThreadId)+'/llm-calls');
+    const data=await resp.json();
+    const calls=data.calls||[];
+    let html='<h2>LLM Calls — '+esc(currentThreadId)+'</h2>';
+    if(calls.length===0){html+='<p style="color:#8b949e;font-size:13px">No LLM calls recorded for this thread yet.</p>';}
+    else{html+='<p style="color:#8b949e;font-size:11px;margin-bottom:10px">'+calls.length+' call(s)</p>';}
+    for(let i=0;i<calls.length;i++){
+      const c=calls[i];
+      const req=c.request||{};
+      const res=c.response||{};
+      const msgs=req.messages||[];
+      const model=req.model||'unknown';
+      const usage=res.usage||{};
+      const content=res.content||'';
+      const toolCalls=res.tool_calls||[];
+      html+='<div class="llm-call-entry" id="llm-entry-'+i+'"><div class="llm-call-header" onclick="toggleLLMCall('+i+')"><span class="lc-index">#'+(i+1)+'</span><span class="lc-model">'+esc(model)+'</span>';
+      if(usage.total_tokens)html+='<span class="lc-usage">'+usage.total_tokens+' tokens</span>';
+      html+='<span class="lc-toggle">▼</span></div><div class="llm-call-body">';
+      html+='<div class="lc-section"><div class="lc-label">Request ('+msgs.length+' messages)</div>';
+      for(let j=0;j<msgs.length;j++){
+        const m=msgs[j];
+        const role=m.role||'unknown';
+        const c=m.content||'';
+        const display=c.length>500?c.substring(0,500)+'...':c;
+        html+='<div class="lc-msg '+esc(role)+'"><span class="lc-role">'+esc(role.toUpperCase())+'</span><span class="lc-content">'+esc(display)+'</span></div>';
+      }
+      html+='</div>';
+      if(content||toolCalls.length>0){
+        html+='<div class="lc-section"><div class="lc-label">Response</div>';
+        if(content)html+='<div class="lc-pre">'+esc(content)+'</div>';
+        for(let k=0;k<toolCalls.length;k++){
+          const tc=toolCalls[k];
+          html+='<div class="lc-pre">Tool: '+esc(tc.name||'')+'\nArgs: '+esc(JSON.stringify(tc.args||{},null,2))+'</div>';
+        }
+        html+='</div>';
+      }
+      html+='</div></div>';
+    }
+    document.getElementById('modalContent').innerHTML=html;
+    document.getElementById('modalOverlay').classList.add('active');
+  }catch(e){alert('Failed to load LLM calls: '+e.message);}
+}
+
+function toggleLLMCall(idx){
+  const entry=document.getElementById('llm-entry-'+idx);
+  if(entry)entry.classList.toggle('open');
+}
 
 function addUsageStats(usage,elapsed){
   const div=document.createElement('div');

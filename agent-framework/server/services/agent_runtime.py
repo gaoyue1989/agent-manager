@@ -1,10 +1,13 @@
 import uuid
+import logging
 from typing import Optional, AsyncGenerator, Any
 
 from langchain_core.messages import HumanMessage
 
 from server.config import LLMConfig
 from server.models.oaf_types import OAFConfig
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRuntime:
@@ -24,6 +27,7 @@ class AgentRuntime:
         mcp_client: Any = None,
         custom_tools: list[Any] = None,
         checkpoint_manager: Any = None,
+        llm_logger: Any = None,
     ):
         self.oaf = oaf_config
         self.llm = llm_config
@@ -38,6 +42,7 @@ class AgentRuntime:
         self._custom_tools = custom_tools or []
         self._agent = None
         self._chat_model = None
+        self._llm_logger = llm_logger
 
     def _make_thread_id(self, thread_id: str) -> str:
         """生成带租户前缀的 thread_id"""
@@ -120,6 +125,13 @@ class AgentRuntime:
             )
         return self._agent
 
+    def _get_callbacks(self, thread_id: str) -> list:
+        """获取 LLM 日志回调列表"""
+        if self._llm_logger is None:
+            return []
+        from server.callbacks.llm_callback import LLMLoggingCallback
+        return [LLMLoggingCallback(self._llm_logger, thread_id)]
+
     async def invoke(self, message: str, thread_id: str = None) -> tuple[str, str]:
         """同步风格（异步实现），返回 (response_text, thread_id)"""
         if thread_id is None:
@@ -135,6 +147,9 @@ class AgentRuntime:
             return f"[Agent:{self.name}] LLM not configured", thread_id
 
         config = {"configurable": {"thread_id": full_thread_id}}
+        callbacks = self._get_callbacks(thread_id)
+        if callbacks:
+            config["callbacks"] = callbacks
 
         try:
             result = await agent.ainvoke(
@@ -151,7 +166,8 @@ class AgentRuntime:
 
             return last_msg or str(result), thread_id
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"[invoke] DeepAgents ainvoke failed: {type(e).__name__}: {e}")
             return await self._invoke_direct(message, None), thread_id
 
     async def invoke_stream(
@@ -182,6 +198,9 @@ class AgentRuntime:
             return
 
         config = {"configurable": {"thread_id": full_thread_id}}
+        callbacks = self._get_callbacks(thread_id)
+        if callbacks:
+            config["callbacks"] = callbacks
 
         try:
             full_text = ""
@@ -292,7 +311,8 @@ class AgentRuntime:
                 "elapsed_time": round(elapsed_time, 2)
             }
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"[invoke_stream] DeepAgents astream failed: {type(e).__name__}: {e}")
             async for token in self._invoke_direct_stream(message, None):
                 yield {"type": "token", "token": token}
             yield {"type": "done"}
@@ -435,6 +455,13 @@ class AgentRuntime:
             return msg.reasoning_content
         return ""
 
+    def _log_direct_call(self, thread_id: str | None, request_info: dict, response_info: dict):
+        """在降级路径中手动记录 LLM 调用日志"""
+        if self._llm_logger is None:
+            return
+        tid = thread_id or "direct-fallback"
+        self._llm_logger.log_call(tid, request_info, response_info)
+
     async def _invoke_direct(self, message: str, history: list[dict] = None) -> str:
         import httpx
 
@@ -471,8 +498,20 @@ class AgentRuntime:
                 resp.raise_for_status()
                 data = resp.json()
                 msg = data["choices"][0]["message"]
-                return msg.get("content", "") or msg.get("reasoning_content", "")
-        except Exception:
+                content = msg.get("content", "") or msg.get("reasoning_content", "")
+                usage = data.get("usage", {})
+                self._log_direct_call(
+                    thread_id=None,
+                    request_info={"model": self.llm.model_id, "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+                                  "params": {"temperature": self.llm.temperature, "max_tokens": self.llm.max_tokens}},
+                    response_info={"content": content, "tool_calls": msg.get("tool_calls", []),
+                                   "usage": {"input_tokens": usage.get("prompt_tokens", 0),
+                                             "output_tokens": usage.get("completion_tokens", 0),
+                                             "total_tokens": usage.get("total_tokens", 0)}},
+                )
+                return content
+        except Exception as e:
+            logger.error(f"[_invoke_direct] LLM call failed: {type(e).__name__}: {e}")
             return f"[Agent:{self.name}] LLM API unavailable — check configuration"
 
     async def _invoke_direct_stream(
@@ -507,6 +546,7 @@ class AgentRuntime:
             "stream": True,
         }
 
+        full_content = ""
         try:
             async with httpx.AsyncClient(timeout=self.llm.timeout) as client:
                 async with client.stream(
@@ -529,10 +569,18 @@ class AgentRuntime:
                                 reasoning = delta.get("reasoning_content", "")
                                 text = content or reasoning
                                 if text:
+                                    full_content += text
                                     yield text
                             except Exception:
                                 pass
-        except Exception:
+            self._log_direct_call(
+                thread_id=None,
+                request_info={"model": self.llm.model_id, "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+                              "params": {"temperature": self.llm.temperature, "max_tokens": self.llm.max_tokens}},
+                response_info={"content": full_content, "tool_calls": [], "usage": {}},
+            )
+        except Exception as e:
+            logger.error(f"[_invoke_direct_stream] LLM stream failed: {type(e).__name__}: {e}")
             yield f"[Agent:{self.name}] LLM API unavailable — check configuration"
 
     async def _fetch_mcp_tool_meta(self, server: str, url: str) -> dict:

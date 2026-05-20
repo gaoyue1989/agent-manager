@@ -20,7 +20,8 @@ backend/vendor/
 backend/bin/
 backend/server
 
-# Node (E2E only)
+# Node
+node_modules/
 e2e/node_modules/
 
 # IDE
