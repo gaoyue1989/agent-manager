@@ -48,6 +48,7 @@
 | Kubernetes | v1.32.2 | Kind 容器 |
 | kubectl | v1.28.2 | 宿主机 |
 | agent-sandbox | v0.4.3 | K8s Deployment |
+| **Standard Deployment** | **—** | **K8s Deployment (替代 Sandbox CRD)** |
 | containerd | v2.0.2 | Kind 节点内 |
 | GreatSQL | 8.0.32-27 | 宿主机 systemd |
 | MinIO | 2025-04-08 | Docker 容器 |
@@ -81,6 +82,17 @@
 Pod CIDR: 10.244.0.0/16
 存储类:   standard (local-path)
 ```
+
+### 部署方式
+
+Agent 支持两种 K8s 部署方式：
+
+| 方式 | 配置 | 资源类型 |
+|------|------|---------|
+| **Sandbox CRD** | `DEPLOY_METHOD=sandbox` (默认) | Sandbox + Service + Ingress |
+| **标准 Deployment** | `DEPLOY_METHOD=deployment` | Deployment + Service + Ingress |
+
+详见 [标准 Deployment 部署文档](12-standard-deployment.md)。
 
 ### agent-sandbox 组件
 
@@ -131,6 +143,7 @@ curl -s http://localhost:5001/v2/_catalog
 | agent-sandbox 部署记录 | `docs/02-agent-sandbox-deployment.md` |
 | MySQL 准备记录 | `docs/03-mysql-setup.md` |
 | MinIO 准备记录 | `docs/04-minio-setup.md` |
+| **标准 Deployment 部署** | **`docs/12-standard-deployment.md`** |
 | 环境总文档 (本文) | `docs/deployment.md` |
 
 ## 九、注意事项

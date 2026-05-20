@@ -1,7 +1,10 @@
 # agent-sandbox 部署记录
 
-**日期**: 2026-05-01  
+**日期**: 2026-05-01
 **执行者**: opencode
+
+> **注意**: Agent Manager 现已支持两种部署方式。除本文档描述的 Sandbox CRD 方式外，
+> 还可使用标准 Kubernetes Deployment 部署，详见 [标准 Deployment 部署](12-standard-deployment.md)。
 
 ## 1. 概述
 

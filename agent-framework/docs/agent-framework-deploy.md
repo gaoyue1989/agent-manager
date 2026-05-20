@@ -186,7 +186,7 @@ docker compose down
 | `SERVER_HOST` | string | `0.0.0.0` | | 服务监听地址 |
 | `SERVER_PORT` | int | `8100` | | 服务端口 |
 | `SERVER_RELOAD` | bool | `false` | | 热重载 (开发用) |
-| `CHECKPOINT_MYSQL_DSN` | string | `mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test` | | MySQL checkpoint DSN (thread_id 持久化) |
+| `CHECKPOINT_MYSQL_DSN` | string | `mysql+asyncmy://agent_manager:Agent%40Manager2026@127.0.0.1:3307/agent_manager_test` | | MySQL checkpoint DSN (thread_id 持久化)。密码中 `@` 需编码为 `%40`。K8s Pod 内需使用 `172.20.0.1` 代替 `127.0.0.1` |
 | `GUNICORN_WORKERS` | int | `4` | | gunicorn worker 进程数 |
 | `GUNICORN_MAX_REQUESTS` | int | `1000` | | worker 自动重启请求数 |
 | `GUNICORN_MAX_REQUESTS_JITTER` | int | `50` | | 重启请求数抖动 |
@@ -717,3 +717,45 @@ WARNING: LLM_BASE_URL is not set
 ### Q: gunicorn 启动失败
 
 确认 `wsgi.py` 存在 (`server/wsgi.py`)，gunicorn 使用 `server.wsgi:app` 作为入口。本地开发测试建议用 uvicorn 直接启动。
+
+### Q: Pod 持续 CrashLoopBackOff — Invalid DSN
+
+**症状**: Pod 状态 `CrashLoopBackOff`，日志显示 `ValueError: Invalid DSN: xxx`
+
+**原因**: `CHECKPOINT_MYSQL_DSN` 环境变量值为空字符串或非法格式。agent-framework 的 checkpoint_manager 在启动时解析 DSN，空字符串和非法格式均会导致异常退出。
+
+**排查**:
+```bash
+# 查看 Pod 内环境变量
+kubectl exec <pod-name> -n <namespace> -- env | grep CHECKPOINT
+
+# 查看崩溃日志
+kubectl logs <pod-name> -n <namespace> --tail=20
+```
+
+**修复**:
+1. 检查 Agent 配置中的 `checkpoint_dsn` 字段是否为合法 MySQL DSN
+2. 合法格式: `mysql+asyncmy://{user}:{password}@[{host}]:{port}/{database}`
+3. 密码特殊字符 (`@`) 需 URL 编码为 `%40`
+4. K8s Pod 内不能使用 `127.0.0.1`，需使用 Docker 网关 `172.20.0.1`
+
+**示例**:
+```
+mysql+asyncmy://agent_manager:Agent%40Manager2026@172.20.0.1:3307/agent_manager_test
+```
+
+### Q: Pod CrashLoopBackOff — Access Denied to Database
+
+**症状**: 日志显示 `OperationalError: (1044, "Access denied for user 'agent_manager'@'%' to database 'xxx'")`
+
+**原因**: CHECKPOINT_MYSQL_DSN 指定的数据库不存在或用户无权访问。
+
+**修复**: 使用已存在的数据库名 (`agent_manager` 或 `agent_manager_test`)，或由管理员创建新数据库并授权。
+
+### Q: 空 CHECKPOINT_MYSQL_DSN 时 Pod 崩溃
+
+**症状**: 不设置 CHECKPOINT_MYSQL_DSN 时，agent-framework 使用默认 DSN (`127.0.0.1:3307`)，Pod 内无法连接。
+
+**修复**:
+1. 方式一: 设置有效的 `checkpoint_dsn` (推荐)
+2. 方式二: 后端代码 v2 已修复——当 DSN 为空时不再注入 `CHECKPOINT_MYSQL_DSN` 环境变量，agent-framework 将使用内置默认值
