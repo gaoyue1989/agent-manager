@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+type ConfigMapItem struct {
+	Key  string
+	Path string
+}
+
 type PodStatusInfo struct {
 	PodName  string `json:"pod_name"`
 	Status   string `json:"status"`
@@ -277,17 +282,32 @@ func (s *SandboxClient) ExecInPod(podName string, command ...string) ([]byte, er
 }
 
 func (s *SandboxClient) CreateSandboxWithMounts(name, image, configMapName, secretName string, envVars map[string]string, checkpointDSN string) error {
+	return s.CreateSandboxWithMountsAndItems(name, image, configMapName, secretName, envVars, checkpointDSN, nil)
+}
+
+func (s *SandboxClient) CreateSandboxWithMountsAndItems(name, image, configMapName, secretName string, envVars map[string]string, checkpointDSN string, configMapItems []ConfigMapItem) error {
 	envLines := ""
 	for key, value := range envVars {
 		if key == "LLM_MODEL_ID" || key == "LLM_BASE_URL" {
 			continue
 		}
-			envLines += fmt.Sprintf("        - name: %s\n          value: \"%s\"\n", key, escapeK8sValue(value))
+		envLines += fmt.Sprintf("        - name: %s\n          value: \"%s\"\n", key, escapeK8sValue(value))
 	}
 
 	checkpointEnv := ""
 	if checkpointDSN != "" {
 		checkpointEnv = fmt.Sprintf("        - name: CHECKPOINT_MYSQL_DSN\n          value: \"%s\"\n", escapeK8sValue(checkpointDSN))
+	}
+
+	itemsYAML := ""
+	if len(configMapItems) > 0 {
+		itemsYAML = "          items:\n"
+		for _, item := range configMapItems {
+			itemsYAML += fmt.Sprintf("          - key: %s\n            path: %s\n", item.Key, item.Path)
+		}
+		itemsYAML += fmt.Sprintf("          name: %s\n", configMapName)
+	} else {
+		itemsYAML = fmt.Sprintf("          name: %s\n", configMapName)
 	}
 
 	yaml := fmt.Sprintf(`apiVersion: agents.x-k8s.io/v1alpha1
@@ -334,10 +354,9 @@ spec:
       volumes:
       - name: config-volume
         configMap:
-          name: %s
-`, name, s.namespace, name, name, image, secretName,
+%s`, name, s.namespace, name, name, image, secretName,
 		envVars["LLM_MODEL_ID"], envVars["LLM_BASE_URL"], checkpointEnv,
-		envLines, configMapName)
+		envLines, itemsYAML)
 
 	return s.client.ApplyYAML(yaml)
 }

@@ -199,7 +199,7 @@ func (s *DeployService) DeployWithMount(agentID uint) (*model.Deployment, error)
 	}
 	s.db.Create(dep)
 
-	configFiles, err := s.loadConfigFilesFromMinIO(agent)
+	configFiles, configMapItems, err := s.loadConfigFilesFromMinIO(agent)
 	if err != nil {
 		dep.Status = model.DeployFailed
 		s.db.Save(dep)
@@ -255,7 +255,7 @@ func (s *DeployService) DeployWithMount(agentID uint) (*model.Deployment, error)
 			return dep, fmt.Errorf("create deployment: %w", err)
 		}
 	} else {
-		if err := s.sandbox.CreateSandboxWithMounts(sandboxName, image, configMapName, secretName, envVars, checkpointDSN); err != nil {
+		if err := s.sandbox.CreateSandboxWithMountsAndItems(sandboxName, image, configMapName, secretName, envVars, checkpointDSN, configMapItems); err != nil {
 			s.sandbox.DeleteConfigMap(configMapName)
 			s.sandbox.DeleteSecret(secretName)
 			dep.Status = model.DeployFailed
@@ -274,30 +274,36 @@ func (s *DeployService) DeployWithMount(agentID uint) (*model.Deployment, error)
 	return dep, nil
 }
 
-func (s *DeployService) loadConfigFilesFromMinIO(agent *model.Agent) (map[string]string, error) {
+func (s *DeployService) loadConfigFilesFromMinIO(agent *model.Agent) (map[string]string, []k8s.ConfigMapItem, error) {
 	files := make(map[string]string)
+	var configMapItems []k8s.ConfigMapItem
+
+	safeKey := func(path string) string {
+		return strings.ReplaceAll(path, "/", ".")
+	}
 
 	var oafConfig *model.OAFConfig
 
 	if agent.ConfigType == model.ConfigOAF {
 		oaf, err := model.OAFFromJSON([]byte(agent.Config))
 		if err != nil {
-			return nil, fmt.Errorf("parse OAF JSON: %w", err)
+			return nil, nil, fmt.Errorf("parse OAF JSON: %w", err)
 		}
 		oafConfig = oaf
 	} else {
 		oaf, err := model.ParseOAF(agent.Config)
 		if err != nil {
-			return nil, fmt.Errorf("parse OAF: %w", err)
+			return nil, nil, fmt.Errorf("parse OAF: %w", err)
 		}
 		oafConfig = oaf
 	}
 
 	oafYAML, err := oafConfig.ToYAML()
 	if err != nil {
-		return nil, fmt.Errorf("serialize OAF: %w", err)
+		return nil, nil, fmt.Errorf("serialize OAF: %w", err)
 	}
 	files["AGENTS.md"] = oafYAML
+	configMapItems = append(configMapItems, k8s.ConfigMapItem{Key: "AGENTS.md", Path: "AGENTS.md"})
 
 	prefix := fmt.Sprintf("agents/%d/skills", agent.ID)
 	if s.storage.PrefixExists(prefix) {
@@ -309,7 +315,9 @@ func (s *DeployService) loadConfigFilesFromMinIO(agent *model.Agent) (map[string
 					continue
 				}
 				relPath := strings.TrimPrefix(file, prefix+"/")
-				files[fmt.Sprintf("skills/%s", relPath)] = content
+				cfgPath := fmt.Sprintf("skills/%s", relPath)
+				files[safeKey(cfgPath)] = content
+				configMapItems = append(configMapItems, k8s.ConfigMapItem{Key: safeKey(cfgPath), Path: cfgPath})
 			}
 		}
 	}
@@ -328,13 +336,15 @@ func (s *DeployService) loadConfigFilesFromMinIO(agent *model.Agent) (map[string
 						continue
 					}
 					relPath := strings.TrimPrefix(file, mcpPrefix+"/")
-					files[fmt.Sprintf("%s/%s", mcp.ConfigDir, relPath)] = content
+					cfgPath := fmt.Sprintf("%s/%s", mcp.ConfigDir, relPath)
+					files[safeKey(cfgPath)] = content
+					configMapItems = append(configMapItems, k8s.ConfigMapItem{Key: safeKey(cfgPath), Path: cfgPath})
 				}
 			}
 		}
 	}
 
-	return files, nil
+	return files, configMapItems, nil
 }
 
 func (s *DeployService) Publish(agentID uint) (*model.Deployment, error) {
