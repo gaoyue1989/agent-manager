@@ -5,7 +5,31 @@ on:
     branches: [master]
 
 jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      framework: ${{ steps.filter.outputs.framework }}
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            framework:
+              - 'agent-framework/**'
+            backend:
+              - 'backend/**'
+              - 'codegen/**'
+            frontend:
+              - 'frontend/**'
+
   build-agent-framework:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.framework == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +56,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-backend:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.backend == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +84,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-frontend:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
