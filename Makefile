@@ -13,6 +13,14 @@
 BACKEND_BIN := backend/bin/server
 BACKEND_PID := /tmp/agent-manager-backend.pid
 
+# 从 .env.secrets 加载敏感配置 (LLM_API_KEY, LLM_MODEL, LLM_ENDPOINT, DEFAULT_CHECKPOINT_DSN)
+SECRETS_FILE := .env.secrets
+ifeq ($(wildcard $(SECRETS_FILE)),)
+$(error $(SECRETS_FILE) not found. Copy from .env.secrets.example and fill in values)
+endif
+include $(SECRETS_FILE)
+export LLM_API_KEY LLM_MODEL LLM_ENDPOINT DEFAULT_CHECKPOINT_DSN
+
 # === 开发 ===
 dev:
 	@echo "Starting backend and frontend..."
@@ -23,7 +31,7 @@ dev:
 	$(MAKE) -j2 dev-backend dev-frontend
 
 dev-backend:
-	cd backend && go run ./cmd/server
+	cd backend && DEFAULT_CHECKPOINT_DSN="$(DEFAULT_CHECKPOINT_DSN)" LLM_MODEL="$(LLM_MODEL)" LLM_ENDPOINT="$(LLM_ENDPOINT)" LLM_API_KEY="$(LLM_API_KEY)" go run ./cmd/server
 
 dev-frontend:
 	cd frontend && npm run dev
@@ -46,6 +54,13 @@ build-backend:
 
 build-frontend:
 	cd frontend && npm run build
+	@echo "Copying build output to standalone..."
+	@mkdir -p frontend/.next/standalone/.next
+	@cp frontend/.next/BUILD_ID frontend/.next/*.json frontend/.next/*.js frontend/.next/standalone/.next/ 2>/dev/null || true
+	@cp -r frontend/.next/static frontend/.next/standalone/.next/static
+	@cp -r frontend/.next/server frontend/.next/standalone/.next/server
+	@cp -r frontend/public frontend/.next/standalone/public 2>/dev/null || true
+	@echo "Standalone output ready: frontend/.next/standalone/"
 
 # === 后台运行 ===
 backend-start: build-backend
@@ -54,7 +69,7 @@ backend-start: build-backend
 		exit 1; \
 	fi
 	@echo "Starting backend in background..."
-	@cd backend && nohup ./bin/server > /tmp/agent-manager-backend.log 2>&1 & echo $$! > $(BACKEND_PID)
+	@cd backend && nohup env DEFAULT_CHECKPOINT_DSN="$(DEFAULT_CHECKPOINT_DSN)" LLM_MODEL="$(LLM_MODEL)" LLM_ENDPOINT="$(LLM_ENDPOINT)" LLM_API_KEY="$(LLM_API_KEY)" ./bin/server > /tmp/agent-manager-backend.log 2>&1 & echo $$! > $(BACKEND_PID)
 	@sleep 1
 	@if kill -0 $$(cat $(BACKEND_PID)) 2>/dev/null; then \
 		echo "Backend started (PID: $$(cat $(BACKEND_PID)), Port: 8080)"; \
@@ -88,14 +103,6 @@ backend-status:
 FRONTEND_STANDALONE := frontend/.next/standalone/server.js
 
 frontend-start: build-frontend
-	@if [ ! -f frontend/.next/standalone/.next/static ]; then \
-		echo "Copying static files..."; \
-		cp -r frontend/.next/static frontend/.next/standalone/.next/; \
-	fi
-	@if [ ! -d frontend/.next/standalone/public ]; then \
-		echo "Copying public files..."; \
-		cp -r frontend/public frontend/.next/standalone/ 2>/dev/null || true; \
-	fi
 	@pm2 list | grep -q "frontend.*online" && echo "Frontend already running (PM2)" && exit 0 || true
 	@echo "Starting frontend with PM2..."
 	@cd frontend/.next/standalone && PORT=3000 HOSTNAME=0.0.0.0 pm2 start server.js --name "frontend"
@@ -106,7 +113,7 @@ frontend-stop:
 	@pm2 delete frontend 2>/dev/null && echo "Frontend stopped" || echo "Frontend not running"
 	@pm2 save
 
-frontend-restart:
+frontend-restart: build-frontend
 	@pm2 restart frontend 2>/dev/null && echo "Frontend restarted" || (echo "Frontend not running, starting..."; $(MAKE) frontend-start)
 
 frontend-status:

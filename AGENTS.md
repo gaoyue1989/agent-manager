@@ -128,10 +128,21 @@ Agent 支持两种运行模式：
 5. agent-framework 从 /config 读取配置运行
 
 **新增环境变量：**
+
+敏感配置存放在 `.env.secrets`（已加入 .gitignore），具体变量如下：
+
+| 变量 | 说明 | 示例格式 |
+|------|------|---------|
+| `LLM_API_KEY` | LLM API 密钥 | 见 .env.secrets |
+| `LLM_MODEL` | LLM 模型 ID | 见 .env.secrets |
+| `LLM_ENDPOINT` | LLM API 端点 | 见 .env.secrets |
+| `DEFAULT_CHECKPOINT_DSN` | Checkpoint 数据库 DSN | 见 .env.secrets |
+| `AVAILABLE_IMAGES` | 可选镜像列表 | `agent-framework:latest\|Agent Framework v0.5.5` |
+| `DEFAULT_IMAGE` | 默认镜像 | `agent-framework:latest` |
+
 ```bash
-AVAILABLE_IMAGES=agent-framework:latest|Agent Framework v0.5.5,agent-framework:v0.5.5|Agent Framework v0.5.5 (stable)
-DEFAULT_IMAGE=agent-framework:latest
-DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@172.20.0.1:3307/agent_manager_checkpoint
+# 从 .env.secrets 加载敏感配置
+source .env.secrets
 ```
 
 **挂载模式关键实现细节：**
@@ -140,7 +151,7 @@ DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@172.20.0.1:3307/agent_m
 - Checkpoint DSN 主机须用 `172.20.0.1` (Docker 网关)，因 K8s Pod 内 `127.0.0.1` 指向 Pod 自身
 - Agent 容器端口 **8100**，构建模式端口 8000
 - `INGRESS_HOST` 环境变量决定对外地址展示 (默认 `localhost`，须设为 nginx 入口地址)
-- LLM 配置通过后端环境变量注入：`LLM_API_KEY`/`LLM_MODEL`/`LLM_ENDPOINT` → Pod 内 `LLM_API_KEY`(Secret)/`LLM_MODEL_ID`/`LLM_BASE_URL`
+- LLM 配置通过后端环境变量注入：`LLM_API_KEY`/`LLM_MODEL`/`LLM_ENDPOINT` → Pod 内 `LLM_API_KEY`(Secret)/`LLM_MODEL_ID`/`LLM_BASE_URL`/`LLM_PROVIDER`(hardcoded=ctyun)
 
 ### 2. Agent 删除功能
 
@@ -173,6 +184,29 @@ DEFAULT_CHECKPOINT_DSN=mysql+asyncmy://agent_manager:...@172.20.0.1:3307/agent_m
 1. 启动时检查基础镜像是否存在，不存在则自动构建
 2. 代码生成时 Dockerfile 替换 `FROM python:3.12-slim` 为 `FROM {registry}/agent-base:latest`
 3. 构建时跳过 `pip install`，仅复制 `agent.py`
+
+---
+
+## 启动服务
+
+后端通过 Makefile 启动，LLM/Checkpoint 等必要配置通过环境变量注入（`config.go` 无默认值，必须外部提供）：
+
+```bash
+# 后台运行
+make backend-start    # 构建 + 启动后端 :8080
+
+# 开发模式
+make dev-backend      # go run 热重载
+
+# 前端
+make frontend-start   # 构建 + PM2 启动 :3000
+make frontend-restart # 构建 + 重启
+
+# 重启
+make backend-restart make frontend-restart
+```
+
+实际环境变量值定义在 `Makefile` 的 `backend-start` 和 `dev-backend` 目标中。
 
 ---
 
