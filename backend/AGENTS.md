@@ -115,9 +115,10 @@ minio-go/v7 v7.0.73            # MinIO SDK
 
 | 环境变量 | 字段 | 默认值 | 注入到 Pod 的变量名 |
 |---------|------|--------|-------------------|
-| `LLM_API_KEY` | `LLMAPIKey` | `sk-****` | `LLM_API_KEY` (Secret) |
-| `LLM_MODEL` | `LLMModel` | `qwen3.6-plus` | `LLM_MODEL_ID` |
-| `LLM_ENDPOINT` | `LLMEndpoint` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `LLM_BASE_URL` |
+| `LLM_API_KEY` | `LLMAPIKey` | `""` (必填，通过环境变量注入) | `LLM_API_KEY` (Secret) |
+| `LLM_MODEL` | `LLMModel` | `""` (必填，通过环境变量注入) | `LLM_MODEL_ID` |
+| `LLM_ENDPOINT` | `LLMEndpoint` | `""` (必填，通过环境变量注入) | `LLM_BASE_URL` |
+| `LLM_PROVIDER` | — | `ctyun` | `LLM_PROVIDER` (硬编码在 sandbox 模板中) |
 
 > **注意**: 后端环境变量 `LLM_MODEL` / `LLM_ENDPOINT` 注入到 Pod 后名称变为 `LLM_MODEL_ID` / `LLM_BASE_URL`，这是 agent-framework 期望的变量名。
 
@@ -163,7 +164,7 @@ OAF v0.8.0 配置包含以下字段：
 
 ## API 路由
 
-全部挂载于 `/api/v1`，共 15 个端点：
+全部挂载于 `/api/v1`，共 17 个端点：
 
 **Agent CRUD & 代码生成 (AgentHandler: handler/agent.go):**
 ```
@@ -194,13 +195,15 @@ GET    /agents/:id/deployments # 部署历史
 
 **构建 & 部署 & 发布 (DeployHandler: handler/deploy.go):**
 ```
-POST   /agents/:id/build     # 构建 Docker 镜像
-POST   /agents/:id/deploy    # 部署到 K8s Sandbox
-POST   /agents/:id/publish   # 发布上线 (deploy + 状态置为 published)
-POST   /agents/:id/unpublish # 下线 (删除 Sandbox)
+POST   /agents/:id/build      # 构建 Docker 镜像
+POST   /agents/:id/deploy     # 部署到 K8s Sandbox
+POST   /agents/:id/publish    # 发布上线 (deploy + 状态置为 published)
+POST   /agents/:id/unpublish  # 下线 (删除 Sandbox)
 GET    /agents/:id/image-info # 镜像信息
 GET    /agents/:id/pod-status # Pod 运行状态
-POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
+POST   /agents/:id/chat       # 与 Agent 对话 (kubectl exec curl)
+GET    /agents/:id/pod-files  # 挂载模式：获取 ConfigMap 文件目录树
+GET    /agents/:id/pod-file   # 挂载模式：读取 ConfigMap 文件内容 (?key=xxx)
 ```
 
 ## 核心业务逻辑
@@ -241,6 +244,8 @@ POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
 | `GetImageInfo(id)` | 查询最新镜像标签、仓库地址、构建状态 |
 | `GetPodStatus(id)` | 查询 Pod 运行状态 (Ready/Status/IP/Restarts) |
 | `ChatWithAgent(id, message, history)` | 先通过 Ingress (JSON-RPC `message/send`) 访问 Agent，失败则回退 `kubectl exec` Pod 内 curl |
+| `GetPodFiles(id)` | 挂载模式：读取 ConfigMap 返回文件目录树 (`[]*PodFileNode`) |
+| `GetPodFileContent(id, key)` | 挂载模式：读取 ConfigMap 指定 key 的文件内容 |
 
 ## 基础设施客户端
 
@@ -262,6 +267,8 @@ POST   /agents/:id/chat      # 与 Agent 对话 (kubectl exec curl)
 - `DeleteSecret(name)` — 删除 Secret
 - `GetPodStatus(sandboxName)` — 解析 `kubectl get pod` 输出
 - `GetPodStatusJSON(sandboxName)` — 返回 kubectl JSON 输出
+- `GetConfigMapData(name)` — 读取 ConfigMap data 字段 (用于挂载模式文件列表/内容查询)
+- `ExecInPod(podName, command...)` — Pod 内执行命令
 
 ### Docker (internal/docker/builder.go)
 - Shell 调用 `docker login` / `docker build` / `docker tag` / `docker push`

@@ -22,6 +22,9 @@ export default function AgentDetail() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState('');
   const [podLoading, setPodLoading] = useState(false);
+  const [mountedFiles, setMountedFiles] = useState<any[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [viewingFile, setViewingFile] = useState<{ name: string; content: string } | null>(null);
 
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState<{ role: string; content: string }[]>([]);
@@ -63,6 +66,20 @@ export default function AgentDetail() {
     setPodLoading(true);
     try { setPodStatus(await api.agents.podStatus(Number(id))); } catch (e: any) { alert(e.message); }
     setPodLoading(false);
+  };
+
+  const refreshMountedFiles = async () => {
+    setFilesLoading(true);
+    try { setMountedFiles(await api.agents.podFiles(Number(id))); } catch (e: any) { alert(e.message); }
+    setFilesLoading(false);
+  };
+
+  const viewFileContent = async (key: string, name: string) => {
+    setViewingFile(null);
+    try {
+      const result = await api.agents.podFile(Number(id), key);
+      setViewingFile({ name, content: result.content });
+    } catch (e: any) { alert(e.message); }
   };
 
   const copyToClipboard = (text: string) => {
@@ -368,6 +385,25 @@ export default function AgentDetail() {
         </div>
       )}
 
+      {isPublished && agent.runtime_mode === 'mount' && (
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold">挂载文件</h2>
+            <button onClick={refreshMountedFiles} disabled={filesLoading}
+              className="px-3 py-1 rounded text-xs bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50">
+              {filesLoading ? '加载中...' : '刷新'}
+            </button>
+          </div>
+          {mountedFiles.length > 0 ? (
+            <FileTree nodes={mountedFiles} onFileClick={(key, name) => viewFileContent(key, name)} />
+          ) : podStatus ? (
+            <FileTreePlaceholder onClick={refreshMountedFiles} loading={filesLoading} />
+          ) : (
+            <p className="text-gray-400 text-sm">请先刷新 Pod 状态</p>
+          )}
+        </div>
+      )}
+
       {isPublished && (
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="font-semibold mb-3">Agent 聊天测试</h2>
@@ -431,6 +467,20 @@ export default function AgentDetail() {
           </table>
         </div>
       )}
+      {viewingFile && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setViewingFile(null)}>
+          <div className="bg-white rounded-lg shadow-xl w-[80vw] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b">
+              <h3 className="font-semibold text-sm truncate flex-1 mr-4">{viewingFile.name}</h3>
+              <button onClick={() => setViewingFile(null)}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
+            </div>
+            <div className="overflow-auto flex-1">
+              <pre className="bg-gray-900 text-green-400 p-6 text-xs overflow-auto whitespace-pre-wrap">{viewingFile.content}</pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -467,6 +517,65 @@ function ConfigSection({ label, items, color }: { label: string; items: { text: 
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+interface FileNode {
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  key?: string;
+  children?: FileNode[];
+}
+
+function FileTree({ nodes, onFileClick, depth }: { nodes: FileNode[]; onFileClick: (key: string, name: string) => void; depth?: number }) {
+  const d = depth || 0;
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+
+  return (
+    <div className="text-sm">
+      {nodes.map((node, i) => (
+        <div key={i}>
+          {node.type === 'dir' ? (
+            <div>
+              <div
+                className="flex items-center gap-1 py-1 cursor-pointer hover:bg-gray-50 rounded px-1 -ml-1"
+                style={{ paddingLeft: `${d * 16}px` }}
+                onClick={() => setCollapsed(prev => ({ ...prev, [node.path]: !prev[node.path] }))}
+              >
+                <span className="text-xs w-4">{collapsed[node.path] ? '\u25B6' : '\u25BC'}</span>
+                <span className="text-yellow-600">{'\uD83D\uDCC1'}</span>
+                <span className="font-medium text-gray-700">{node.name}/</span>
+              </div>
+              {!collapsed[node.path] && node.children && (
+                <FileTree nodes={node.children} onFileClick={onFileClick} depth={d + 1} />
+              )}
+            </div>
+          ) : (
+            <div
+              className="flex items-center gap-1 py-1 cursor-pointer hover:bg-purple-50 rounded px-1 -ml-1"
+              style={{ paddingLeft: `${d * 16}px` }}
+              onClick={() => node.key && onFileClick(node.key, node.path)}
+            >
+              <span className="text-xs w-4">&nbsp;</span>
+              <span className="text-blue-600">{'\uD83D\uDCC4'}</span>
+              <span className="text-blue-600 hover:underline">{node.name}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FileTreePlaceholder({ onClick, loading }: { onClick: () => void; loading: boolean }) {
+  return (
+    <div className="text-center py-4">
+      <button onClick={onClick} disabled={loading}
+        className="px-4 py-2 rounded-lg text-sm bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50">
+        {loading ? '加载中...' : '加载挂载文件'}
+      </button>
     </div>
   );
 }

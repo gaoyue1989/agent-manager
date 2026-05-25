@@ -36,7 +36,7 @@ React 19 + Next.js 16 前端应用，使用 App Router + Tailwind CSS 3，提供
 frontend/
 ├── package.json                # 依赖: next 16, react 19, tailwindcss 3
 ├── tsconfig.json               # TypeScript 配置
-├── next.config.ts              # Next.js 配置
+├── next.config.ts              # Next.js 配置 (output: 'standalone')
 ├── tailwind.config.mjs         # Tailwind CSS 配置
 ├── postcss.config.mjs          # PostCSS 配置
 ├── eslint.config.mjs           # ESLint 配置
@@ -54,6 +54,21 @@ frontend/
     └── lib/
         └── api.ts              # API 客户端 (fetch 封装)
 ```
+
+## Standalone 构建与部署
+
+Next.js 配置为 `output: 'standalone'`，PM2 运行 `frontend/.next/standalone/server.js`。
+
+`npm run build` 仅生成 `.next/` 输出，需额外将构建产物复制到 standalone 目录：
+
+```
+cp .next/BUILD_ID .next/*.json .next/*.js .next/standalone/.next/
+cp -r .next/static .next/standalone/.next/static
+cp -r .next/server .next/standalone/.next/server
+cp -r public .next/standalone/public
+```
+
+可通过 `make build-frontend` 一键构建+复制，或 `make frontend-restart` 构建+重启 PM2。
 
 ---
 
@@ -89,9 +104,31 @@ typescript 5                  # 类型检查
 
 - 基于原生 `fetch`，非 axios
 - 基础 URL: `NEXT_PUBLIC_API_URL` 环境变量，默认 `http://100.66.1.5:8080/api/v1`
-- `api.agents` 对象封装全部 15 个端点方法
+- `api.agents` 对象封装全部 17 个端点方法
 - 返回值类型均为 `any`，无请求/响应类型定义
 - 错误处理: 非 2xx 抛出异常，message 为响应 body
+
+### 完整端点列表
+
+| 方法 | 路由 | 说明 |
+|------|------|------|
+| `list(params)` | `GET /agents` | 列表查询 |
+| `get(id)` | `GET /agents/:id` | 详情 |
+| `create(config, configType, options)` | `POST /agents` | 创建 |
+| `update(id, config, options)` | `PUT /agents/:id` | 更新 |
+| `delete(id)` | `DELETE /agents/:id` | 删除 |
+| `generate(id)` | `POST /agents/:id/generate` | 代码生成 |
+| `getCode(id)` | `GET /agents/:id/code` | 获取代码 |
+| `getDeployments(id)` | `GET /agents/:id/deployments` | 部署历史 |
+| `build(id)` | `POST /agents/:id/build` | 构建镜像 |
+| `deploy(id)` | `POST /agents/:id/deploy` | 部署 |
+| `publish(id)` | `POST /agents/:id/publish` | 发布 |
+| `unpublish(id)` | `POST /agents/:id/unpublish` | 下线 |
+| `imageInfo(id)` | `GET /agents/:id/image-info` | 镜像信息 |
+| `podStatus(id)` | `GET /agents/:id/pod-status` | Pod 状态 |
+| `chat(id, data)` | `POST /agents/:id/chat` | 聊天测试 |
+| `podFiles(id)` | `GET /agents/:id/pod-files` | 挂载文件列表 |
+| `podFile(id, key)` | `GET /agents/:id/pod-file?key=` | 挂载文件内容 |
 
 ## 状态管理
 
@@ -143,6 +180,10 @@ typescript 5                  # 类型检查
   - **删除按钮**: 红色按钮，点击确认后 `DELETE /agents/:id`，成功后跳转到列表页
 - **镜像信息卡片**: 条件渲染 (有 build 记录时显示)
 - **Pod 状态卡片**: published 状态显示 (名称/就绪/状态/重启/年龄/IP)
+- **挂载文件卡片**: published + 挂载模式显示，通过 K8s ConfigMap API 读取
+  - `FileTree` 组件：可折叠/展开目录树，点击文件名弹窗查看文件内容
+  - `FileTreePlaceholder` 组件：未加载时的占位按钮
+  - `viewingFile` 状态：控制文件内容模态框
 - **聊天测试卡片**: published 状态显示
   - 聊天历史 (用户/助手气泡)
   - 延迟显示

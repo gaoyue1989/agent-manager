@@ -21,9 +21,14 @@ export default function CreateAgent() {
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [availableImages, setAvailableImages] = useState<ImageInfo[]>([]);
+  const [sharedSkills, setSharedSkills] = useState<any[]>([]);
+  const [selectedSkillNames, setSelectedSkillNames] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     api.images.list().then(data => setAvailableImages(data.items || [])).catch(() => {});
+    api.skills.shared.list().then(data => {
+      setSharedSkills(data.skills || []);
+    }).catch(() => {});
   }, []);
 
   const updateField = <K extends keyof OAFConfig>(key: K, value: OAFConfig[K]) => {
@@ -122,6 +127,11 @@ export default function CreateAgent() {
         image: config.image,
         checkpointDSN: config.checkpointDSN,
       });
+
+      if (selectedSkillNames.size > 0) {
+        await api.skills.copyToAgent(agent.id, Array.from(selectedSkillNames));
+      }
+
       router.push(`/agents/${agent.id}`);
     } catch (e: any) {
       setErrors([e.message || '创建失败']);
@@ -318,6 +328,39 @@ export default function CreateAgent() {
               <h2 className="font-semibold text-lg">技能 (Skills)</h2>
               <button onClick={addSkill} className="text-sm text-blue-600 hover:underline">+ 添加技能</button>
             </div>
+
+            {/* Shared skills selector */}
+            <div className="border border-dashed border-gray-300 rounded-lg p-4">
+              <div className="flex justify-between items-center mb-2">
+                <label className="text-sm font-medium">从技能库选择</label>
+                {sharedSkills.length === 0 && (
+                  <span className="text-xs text-gray-400">暂无共享技能，请先到技能库管理页面上传</span>
+                )}
+              </div>
+              {sharedSkills.length > 0 && (
+                <div className="space-y-1 max-h-48 overflow-y-auto">
+                  {sharedSkills.map((sk: any, i: number) => (
+                    <label key={i} className="flex items-center gap-2 px-2 py-1 hover:bg-gray-50 rounded cursor-pointer text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selectedSkillNames.has(sk.name)}
+                        onChange={e => {
+                          setSelectedSkillNames(prev => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(sk.name);
+                            else next.delete(sk.name);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span>{sk.name}</span>
+                      {sk.description && <span className="text-xs text-gray-400 truncate">— {sk.description}</span>}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {config.skills?.map((skill, i) => (
               <div key={i} className="border rounded-lg p-4 space-y-2">
                 <div className="flex justify-between">

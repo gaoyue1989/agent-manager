@@ -25,6 +25,8 @@ func (h *DeployHandler) Register(r *gin.RouterGroup) {
 	r.GET("/agents/:id/image-info", h.ImageInfo)
 	r.GET("/agents/:id/pod-status", h.PodStatus)
 	r.POST("/agents/:id/chat", h.Chat)
+	r.GET("/agents/:id/pod-files", h.PodFiles)
+	r.GET("/agents/:id/pod-file", h.PodFile)
 }
 
 func parseID(c *gin.Context) uint {
@@ -102,4 +104,27 @@ func (h *DeployHandler) Chat(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+func (h *DeployHandler) PodFiles(c *gin.Context) {
+	files, err := h.svc.GetPodFiles(parseID(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, files)
+}
+
+func (h *DeployHandler) PodFile(c *gin.Context) {
+	key := c.Query("key")
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key parameter is required"})
+		return
+	}
+	content, err := h.svc.GetPodFileContent(parseID(c), key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, content)
 }

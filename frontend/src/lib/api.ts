@@ -56,6 +56,8 @@ export const api = {
     podStatus: (id: number) => request(`/agents/${id}/pod-status`),
     chat: (id: number, data: { message: string; history?: { role: string; content: string }[] }) =>
       request(`/agents/${id}/chat`, { method: 'POST', body: JSON.stringify(data) }),
+    podFiles: (id: number) => request(`/agents/${id}/pod-files`),
+    podFile: (id: number, key: string) => request(`/agents/${id}/pod-file?key=${encodeURIComponent(key)}`),
   },
   skills: {
     upload: (agentId: number, file: File) => {
@@ -66,6 +68,17 @@ export const api = {
     list: (agentId: number) => request(`/skills/${agentId}`),
     delete: (agentId: number, skillName: string) =>
       request(`/skills/${agentId}/${skillName}`, { method: 'DELETE' }),
+    shared: {
+      upload: (file: File) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        return uploadFile('/skills/shared/upload', formData);
+      },
+      list: () => request('/skills/shared'),
+      delete: (name: string) => request(`/skills/shared/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    },
+    copyToAgent: (agentId: number, skillNames: string[]) =>
+      request(`/agents/${agentId}/skills/copy`, { method: 'POST', body: JSON.stringify({ skill_names: skillNames }) }),
   },
   images: {
     list: () => request('/images'),

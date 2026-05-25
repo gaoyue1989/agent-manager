@@ -499,6 +499,116 @@ func (s *DeployService) GetPodStatus(agentID uint) (map[string]interface{}, erro
 	return podData, nil
 }
 
+type PodFileNode struct {
+	Name     string         `json:"name"`
+	Path     string         `json:"path"`
+	Type     string         `json:"type"`
+	Key      string         `json:"key,omitempty"`
+	Children []*PodFileNode `json:"children,omitempty"`
+}
+
+func (s *DeployService) GetPodFiles(agentID uint) ([]*PodFileNode, error) {
+	agent, err := s.agentSvc.GetByID(agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if agent.RuntimeMode != model.RuntimeModeMount {
+		return nil, fmt.Errorf("only mount mode agents support file listing")
+	}
+
+	configMapName := fmt.Sprintf("agent-%d-config", agent.ID)
+	data, err := s.sandbox.GetConfigMapData(configMapName)
+	if err != nil {
+		return nil, fmt.Errorf("read configmap: %w", err)
+	}
+
+	filePaths := make(map[string]string)
+
+	if _, ok := data["AGENTS.md"]; ok {
+		filePaths["AGENTS.md"] = "AGENTS.md"
+	}
+
+	prefix := fmt.Sprintf("agents/%d/", agent.ID)
+	minioFiles, err := s.storage.ListFiles(prefix)
+	if err == nil {
+		for _, f := range minioFiles {
+			if strings.HasSuffix(f, "/") {
+				continue
+			}
+			relPath := strings.TrimPrefix(f, prefix)
+			if _, dup := filePaths[relPath]; !dup {
+				filePaths[relPath] = relPath
+			}
+		}
+	}
+
+	root := &PodFileNode{Name: "/config", Path: "/config", Type: "dir", Children: []*PodFileNode{}}
+	dirMap := make(map[string]*PodFileNode)
+
+	for _, filePath := range filePaths {
+		parts := strings.Split(filePath, "/")
+		current := root
+
+		for i, part := range parts {
+			isLast := i == len(parts)-1
+			fullPath := strings.Join(parts[:i+1], "/")
+
+			if isLast {
+				current.Children = append(current.Children, &PodFileNode{
+					Name: part, Path: fullPath, Type: "file", Key: filePath,
+				})
+			} else {
+				if existing, ok := dirMap[fullPath]; ok {
+					current = existing
+				} else {
+					dir := &PodFileNode{Name: part, Path: fullPath, Type: "dir", Children: []*PodFileNode{}}
+					dirMap[fullPath] = dir
+					current.Children = append(current.Children, dir)
+					current = dir
+				}
+			}
+		}
+	}
+
+	return root.Children, nil
+}
+
+func (s *DeployService) GetPodFileContent(agentID uint, key string) (map[string]interface{}, error) {
+	agent, err := s.agentSvc.GetByID(agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if agent.RuntimeMode != model.RuntimeModeMount {
+		return nil, fmt.Errorf("only mount mode agents support file reading")
+	}
+
+	if key == "AGENTS.md" {
+		configMapName := fmt.Sprintf("agent-%d-config", agent.ID)
+		data, err := s.sandbox.GetConfigMapData(configMapName)
+		if err != nil {
+			return nil, fmt.Errorf("read configmap: %w", err)
+		}
+		content, ok := data["AGENTS.md"]
+		if !ok {
+			return nil, fmt.Errorf("AGENTS.md not found in configmap")
+		}
+		return map[string]interface{}{"key": key, "content": content}, nil
+	}
+
+	objectName := fmt.Sprintf("agents/%d/%s", agent.ID, key)
+	content, err := s.storage.GetFile(objectName)
+	if err != nil {
+		return nil, fmt.Errorf("read file from storage: %w", err)
+	}
+
+	return map[string]interface{}{
+		"key":     key,
+		"content": content,
+	}, nil
+}
+
 func (s *DeployService) ChatWithAgent(agentID uint, message string, history []map[string]string) (map[string]interface{}, error) {
 	dep, err := s.agentSvc.GetLatestDeployment(agentID)
 	if err != nil {

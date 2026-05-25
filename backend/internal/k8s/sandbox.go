@@ -76,6 +76,8 @@ spec:
           value: "%s"
         - name: LLM_ENDPOINT
           value: "%s"
+        - name: LLM_PROVIDER
+          value: "ctyun"
         - name: HTTP_PROXY
           value: "http://172.20.0.1:7890"
         - name: HTTPS_PROXY
@@ -281,6 +283,10 @@ func (s *SandboxClient) ExecInPod(podName string, command ...string) ([]byte, er
 	return s.client.ExecCommand(podName, command...)
 }
 
+func (s *SandboxClient) GetConfigMapData(name string) (map[string]string, error) {
+	return s.client.GetConfigMap(name)
+}
+
 func (s *SandboxClient) CreateSandboxWithMounts(name, image, configMapName, secretName string, envVars map[string]string, checkpointDSN string) error {
 	return s.CreateSandboxWithMountsAndItems(name, image, configMapName, secretName, envVars, checkpointDSN, nil)
 }
@@ -341,7 +347,7 @@ spec:
         - name: LLM_BASE_URL
           value: "%s"
         - name: LLM_PROVIDER
-          value: "openai"
+          value: "ctyun"
 %s
         - name: SERVER_HOST
           value: "0.0.0.0"

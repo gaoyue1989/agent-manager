@@ -23,6 +23,8 @@ type K8sClient interface {
 	ExecCommand(podName string, command ...string) ([]byte, error)
 	// GetServiceEndpoint 查询 Service ClusterIP:Port
 	GetServiceEndpoint(name string) (string, error)
+	// GetConfigMap 获取 ConfigMap 的 data 字段
+	GetConfigMap(name string) (map[string]string, error)
 }
 
 // NewK8sClient 工厂函数，根据 clientMode 创建 kubectl 或 API 客户端
@@ -116,6 +118,32 @@ func (c *KubectlClient) ExecCommand(podName string, command ...string) ([]byte, 
 func (c *KubectlClient) GetServiceEndpoint(name string) (string, error) {
 	return c.GetResourceJSON("service", name,
 		"jsonpath={.spec.clusterIP}:{.spec.ports[0].port}")
+}
+
+func (c *KubectlClient) GetConfigMap(name string) (map[string]string, error) {
+	cmd := c.kubectl("get", "configmap", name, "-o", "json")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get configmap %s: %s\n%s", name, err.Error(), string(out))
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parse configmap json: %w", err)
+	}
+
+	data, ok := result["data"].(map[string]interface{})
+	if !ok {
+		return map[string]string{}, nil
+	}
+
+	resultMap := make(map[string]string)
+	for k, v := range data {
+		if strVal, ok := v.(string); ok {
+			resultMap[k] = strVal
+		}
+	}
+	return resultMap, nil
 }
 
 // parsePodStatusJSON 从 kubectl get pods -o json 输出解析 PodStatusInfo

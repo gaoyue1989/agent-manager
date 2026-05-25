@@ -14,6 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/" className="hover:text-gray-900">首页</Link>
               <Link href="/agents" className="hover:text-gray-900">Agent 列表</Link>
               <Link href="/agents/create" className="hover:text-gray-900">创建 Agent</Link>
+              <Link href="/skills" className="hover:text-gray-900">技能库</Link>
             </div>
           </div>
         </nav>

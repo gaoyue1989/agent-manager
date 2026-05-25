@@ -176,6 +176,22 @@ func (c *K8sAPIClient) GetServiceEndpoint(name string) (string, error) {
 	return fmt.Sprintf("%s:%d", svc.Spec.ClusterIP, svc.Spec.Ports[0].Port), nil
 }
 
+func (c *K8sAPIClient) GetConfigMap(name string) (map[string]string, error) {
+	ctx := context.Background()
+	cm, err := c.typedClient.CoreV1().ConfigMaps(c.namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string)
+	for k, v := range cm.Data {
+		result[k] = v
+	}
+	for k, v := range cm.BinaryData {
+		result[k] = string(v)
+	}
+	return result, nil
+}
+
 var knownGVRKinds = map[string]schema.GroupVersionResource{
 	"deployment":  {Group: "apps", Version: "v1", Resource: "deployments"},
 	"service":     {Group: "", Version: "v1", Resource: "services"},

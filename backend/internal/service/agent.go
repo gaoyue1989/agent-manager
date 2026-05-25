@@ -395,3 +395,202 @@ func (s *AgentService) DeleteSkill(agentID uint, skillName string) error {
 
 	return nil
 }
+
+const sharedSkillsPrefix = "shared-skills"
+
+func (s *AgentService) SaveSharedSkills(skillsMeta []map[string]interface{}, skillFiles map[string][]byte, skillDirs map[string]string) ([]map[string]interface{}, error) {
+	nameToDir := make(map[string]string)
+	for name, dir := range skillDirs {
+		nameToDir[name] = dir
+	}
+
+	for zipPath, data := range skillFiles {
+		cleanedPath := strings.TrimPrefix(zipPath, "./")
+		if cleanedPath == "" {
+			continue
+		}
+
+		skillName := ""
+		relativePath := cleanedPath
+		for name, dir := range nameToDir {
+			if dir == "" {
+				skillName = name
+				relativePath = cleanedPath
+				break
+			} else if strings.HasPrefix(cleanedPath, dir+"/") {
+				skillName = name
+				relativePath = strings.TrimPrefix(cleanedPath, dir+"/")
+				break
+			}
+		}
+		if skillName == "" {
+			if len(nameToDir) == 1 {
+				for name, _ := range nameToDir {
+					skillName = name
+					relativePath = cleanedPath
+					break
+				}
+			}
+		}
+
+		var objName string
+		if skillName != "" {
+			objName = fmt.Sprintf("%s/%s/%s", sharedSkillsPrefix, skillName, relativePath)
+		} else {
+			objName = fmt.Sprintf("%s/%s", sharedSkillsPrefix, cleanedPath)
+		}
+		if _, err := s.storage.PutFileString(objName, string(data)); err != nil {
+			return nil, fmt.Errorf("store shared skill file %s: %w", zipPath, err)
+		}
+	}
+
+	for i := range skillsMeta {
+		skillsMeta[i]["storage_prefix"] = sharedSkillsPrefix
+	}
+
+	metaKey := fmt.Sprintf("%s/.metadata.json", sharedSkillsPrefix)
+	existingData, err := s.storage.GetFile(metaKey)
+	var allSkills []map[string]interface{}
+	if err == nil && existingData != "" {
+		json.Unmarshal([]byte(existingData), &allSkills)
+	}
+
+	nameSet := make(map[string]bool)
+	for _, s := range skillsMeta {
+		if name, ok := s["name"].(string); ok {
+			nameSet[name] = true
+		}
+	}
+
+	filtered := make([]map[string]interface{}, 0)
+	for _, s := range allSkills {
+		if name, ok := s["name"].(string); ok && nameSet[name] {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	allSkills = append(filtered, skillsMeta...)
+
+	metaJSON, _ := json.Marshal(allSkills)
+	s.storage.PutFileString(metaKey, string(metaJSON))
+
+	return skillsMeta, nil
+}
+
+func (s *AgentService) ListSharedSkills() ([]map[string]interface{}, error) {
+	metaKey := fmt.Sprintf("%s/.metadata.json", sharedSkillsPrefix)
+	data, err := s.storage.GetFile(metaKey)
+	if err != nil {
+		return []map[string]interface{}{}, nil
+	}
+
+	var skills []map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &skills); err != nil {
+		return []map[string]interface{}{}, nil
+	}
+	return skills, nil
+}
+
+func (s *AgentService) DeleteSharedSkill(skillName string) error {
+	prefix := fmt.Sprintf("%s/%s", sharedSkillsPrefix, skillName)
+	if err := s.storage.DeleteByPrefix(prefix); err != nil {
+		return err
+	}
+
+	metaKey := fmt.Sprintf("%s/.metadata.json", sharedSkillsPrefix)
+	data, err := s.storage.GetFile(metaKey)
+	if err != nil {
+		return nil
+	}
+
+	var skills []map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &skills); err != nil {
+		return nil
+	}
+
+	filtered := make([]map[string]interface{}, 0)
+	for _, s := range skills {
+		if name, ok := s["name"].(string); ok && name == skillName {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+
+	metaJSON, _ := json.Marshal(filtered)
+	s.storage.PutFileString(metaKey, string(metaJSON))
+
+	return nil
+}
+
+func (s *AgentService) CopySkillsToAgent(agentID uint, skillNames []string) ([]map[string]interface{}, error) {
+	agentPrefix := fmt.Sprintf("agents/%d/skills", agentID)
+	var allAgentSkills []map[string]interface{}
+
+	// read existing agent skills metadata
+	existingMetaKey := fmt.Sprintf("%s/.metadata.json", agentPrefix)
+	existingData, err := s.storage.GetFile(existingMetaKey)
+	if err == nil && existingData != "" {
+		json.Unmarshal([]byte(existingData), &allAgentSkills)
+	}
+
+	sharedMetaKey := fmt.Sprintf("%s/.metadata.json", sharedSkillsPrefix)
+	sharedData, err := s.storage.GetFile(sharedMetaKey)
+	if err != nil {
+		return nil, fmt.Errorf("no shared skills available")
+	}
+
+	var sharedSkills []map[string]interface{}
+	if err := json.Unmarshal([]byte(sharedData), &sharedSkills); err != nil {
+		return nil, fmt.Errorf("invalid shared skills metadata")
+	}
+
+	sharedByName := make(map[string]map[string]interface{})
+	for _, sk := range sharedSkills {
+		if name, ok := sk["name"].(string); ok {
+			sharedByName[name] = sk
+		}
+	}
+
+	copied := make([]map[string]interface{}, 0)
+	for _, name := range skillNames {
+		skillMeta, ok := sharedByName[name]
+		if !ok {
+			continue
+		}
+
+		srcPrefix := fmt.Sprintf("%s/%s", sharedSkillsPrefix, name)
+		files, err := s.storage.ListFiles(srcPrefix)
+		if err != nil {
+			continue
+		}
+
+		for _, file := range files {
+			srcContent, err := s.storage.GetFile(file)
+			if err != nil {
+				continue
+			}
+			relPath := strings.TrimPrefix(file, srcPrefix+"/")
+			if relPath == file {
+				relPath = strings.TrimPrefix(file, srcPrefix)
+			}
+			dstPath := fmt.Sprintf("%s/%s/%s", agentPrefix, name, relPath)
+			if _, err := s.storage.PutFileString(dstPath, srcContent); err != nil {
+				return nil, fmt.Errorf("copy file %s: %w", file, err)
+			}
+		}
+
+		copyMeta := make(map[string]interface{})
+		for k, v := range skillMeta {
+			copyMeta[k] = v
+		}
+		copyMeta["storage_prefix"] = agentPrefix
+		copied = append(copied, copyMeta)
+	}
+
+	allAgentSkills = append(allAgentSkills, copied...)
+
+	metaJSON, _ := json.Marshal(allAgentSkills)
+	s.storage.PutFileString(existingMetaKey, string(metaJSON))
+
+	return copied, nil
+}

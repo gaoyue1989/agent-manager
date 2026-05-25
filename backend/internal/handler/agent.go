@@ -41,6 +41,12 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 	r.GET("/skills/:agent_id", h.ListSkills)
 	r.DELETE("/skills/:agent_id/:skill_name", h.DeleteSkill)
 
+	r.POST("/skills/shared/upload", h.UploadSharedSkill)
+	r.GET("/skills/shared", h.ListSharedSkills)
+	r.DELETE("/skills/shared/:name", h.DeleteSharedSkill)
+
+	r.POST("/agents/:id/skills/copy", h.CopySkillsToAgent)
+
 	r.GET("/images", h.ListImages)
 }
 
@@ -133,12 +139,12 @@ func convertYAMLMap(in interface{}) interface{} {
 }
 
 type skillMetadata struct {
-	Name          string            `yaml:"name" json:"name"`
-	Description   string            `yaml:"description" json:"description"`
-	License       string            `yaml:"license" json:"license,omitempty"`
-	Compatibility string            `yaml:"compatibility" json:"compatibility,omitempty"`
-	AllowedTools  string            `yaml:"allowed-tools" json:"allowed_tools"`
-	Metadata      map[string]string `yaml:"metadata" json:"metadata,omitempty"`
+	Name          string                 `yaml:"name" json:"name"`
+	Description   string                 `yaml:"description" json:"description"`
+	License       string                 `yaml:"license" json:"license,omitempty"`
+	Compatibility string                 `yaml:"compatibility" json:"compatibility,omitempty"`
+	AllowedTools  []string               `yaml:"allowed-tools" json:"allowed_tools"`
+	Metadata      map[string]interface{} `yaml:"metadata" json:"metadata,omitempty"`
 }
 
 func (h *AgentHandler) UploadSkills(c *gin.Context) {
@@ -242,15 +248,7 @@ func parseSkillMarkdown(data []byte, zipPath string) map[string]interface{} {
 		skillDir = meta.Name
 	}
 
-	tools := []string{}
-	if meta.AllowedTools != "" {
-		for _, t := range strings.Fields(meta.AllowedTools) {
-			t = strings.TrimSuffix(t, ",")
-			if t != "" {
-				tools = append(tools, t)
-			}
-		}
-	}
+	tools := meta.AllowedTools
 
 	return map[string]interface{}{
 		"name":          meta.Name,
@@ -435,4 +433,119 @@ func (h *AgentHandler) ListImages(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": images})
+}
+
+func (h *AgentHandler) UploadSharedSkill(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only .zip files are supported"})
+		return
+	}
+
+	zipData, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "read file failed"})
+		return
+	}
+
+	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid zip file: " + err.Error()})
+		return
+	}
+
+	skills := make([]map[string]interface{}, 0)
+	skillDirs := make(map[string]string)
+	skillFiles := make(map[string][]byte)
+
+	for _, f := range reader.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			continue
+		}
+
+		if strings.HasSuffix(strings.ToUpper(f.Name), "SKILL.MD") {
+			meta := parseSkillMarkdown(data, f.Name)
+			if meta != nil {
+				skills = append(skills, meta)
+				if name, ok := meta["name"].(string); ok {
+					skillDirs[name] = filepath.Dir(strings.TrimPrefix(f.Name, "./"))
+					if skillDirs[name] == "." {
+						skillDirs[name] = ""
+					}
+				}
+			}
+		}
+
+		skillFiles[f.Name] = data
+	}
+
+	if len(skills) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid SKILL.md found in zip"})
+		return
+	}
+
+	storedSkills, err := h.svc.SaveSharedSkills(skills, skillFiles, skillDirs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save shared skills failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"skills": storedSkills})
+}
+
+func (h *AgentHandler) ListSharedSkills(c *gin.Context) {
+	skills, err := h.svc.ListSharedSkills()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"skills": skills})
+}
+
+func (h *AgentHandler) DeleteSharedSkill(c *gin.Context) {
+	name := c.Param("name")
+	if err := h.svc.DeleteSharedSkill(name); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+}
+
+func (h *AgentHandler) CopySkillsToAgent(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent id"})
+		return
+	}
+
+	var req struct {
+		SkillNames []string `json:"skill_names" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	copied, err := h.svc.CopySkillsToAgent(uint(id), req.SkillNames)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"skills": copied})
 }
