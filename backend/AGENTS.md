@@ -295,3 +295,4 @@ GET    /agents/:id/pod-file   # 挂载模式：读取 ConfigMap 文件内容 (?k
 - `Run(config)` — 将配置 JSON 通过 stdin 传入 Python 脚本，解析 stdout，返回 `map[string]string` (文件名 → 内容)
 - `RunAndStore(config, prefix)` — 生成后直接存入 MinIO
 - `RunAndStoreWithBaseImage(config, prefix, baseImage)` — 生成时指定基础镜像参数
+

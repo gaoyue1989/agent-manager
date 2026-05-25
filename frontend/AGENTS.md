@@ -196,3 +196,4 @@ typescript 5                  # 类型检查
 - 深色背景全高 textarea 编辑
 - 保存 → `PUT /agents/:id` → 返回详情页
 - 取消 → `router.back()`
+
