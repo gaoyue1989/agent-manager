@@ -48,8 +48,7 @@ register("biz-travel-query-application-detail", "查询出差申请单列表",
 register("query_business_trip_application_progress", "查询申请单进度",
          "https://m1.apifoxmock.com/m1/8065247-7820759-default/business-trip/application/progress", "GET")
 
-register("update_business_trip_application", "更新申请单状态",
-         "https://tool.cenxt.cn/business-trip/application/info", "POST")
+# update_business_trip_application 已移除 — tool.cenxt.cn 端点不存在(404)
 
 register("preview_business_trip_application", "预校验出差申请单",
          "https://cs.creditcard.ecitic.com/citiccard/cshop-api-gateway/crypto/token", "GET")
@@ -89,7 +88,7 @@ register("query_business_trip_flight_list", "航班信息查询",
          "https://m1.apifoxmock.com/m1/8065247-7820759-default/business-trip/flight/list", "GET")
 
 register("biz-travel-query-carbin-list", "航班舱位查询。根据航班号和出发日期查询可用舱位。",
-         "http://47.107.143.202/biz-travel-supplier/api/v1/flight/carbin", "POST",
+         "https://m1.apifoxmock.com/m1/8065247-7820759-default/business-trip/cabin/list", "GET",
          {"type":"object","properties":{"flightNo":{"type":"string","description":"航班号，如：9C8792"},"departureDate":{"type":"string","description":"出发日期，格式：YYYY-MM-DD"}},"required":["flightNo","departureDate"]})
 
 register("query_business_trip_cabin_list", "舱位信息查询",

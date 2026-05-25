@@ -62,6 +62,30 @@ class AgentRuntime:
     def description(self) -> str:
         return self.oaf.description
 
+    async def _reconnect_mcp(self) -> bool:
+        """尝试重新连接 MCP 客户端（当 SSE transport 断开时调用）"""
+        if not self.mcp_client or not self.mcp_configs:
+            return False
+        try:
+            from server.services.mcp_manager import MCPManager
+            manager = MCPManager.__new__(MCPManager)
+            new_client = await manager.create_mcp_client(self.mcp_configs)
+            if new_client:
+                mcp_tools = await new_client.get_tools()
+                self._mcp_tools = mcp_tools
+                self.mcp_client = new_client
+                self._agent = None
+                logger.info(f"MCP reconnected, {len(mcp_tools)} tools loaded")
+                return True
+        except Exception as e:
+            logger.error(f"MCP reconnect failed: {e}")
+        return False
+
+    def _is_mcp_connection_closed(self, error: Exception) -> bool:
+        """检测是否为 MCP 连接断开的错误"""
+        msg = str(error).lower()
+        return "closed" in msg or "handler is closed" in msg
+
     @property
     def tenant_prefix(self) -> str:
         return self._tenant_prefix
@@ -167,6 +191,26 @@ class AgentRuntime:
             return last_msg or str(result), thread_id
 
         except Exception as e:
+            if self._is_mcp_connection_closed(e):
+                logger.warning(f"[invoke] MCP connection dropped, attempting reconnect: {e}")
+                reconnected = await self._reconnect_mcp()
+                if reconnected:
+                    try:
+                        agent = self._ensure_agent()
+                        if agent:
+                            result = await agent.ainvoke(
+                                {"messages": [HumanMessage(content=message)]},
+                                config=config,
+                            )
+                            last_msg = ""
+                            if "messages" in result:
+                                for m in reversed(result["messages"]):
+                                    if hasattr(m, "content") and m.content:
+                                        last_msg = m.content
+                                        break
+                            return last_msg or str(result), thread_id
+                    except Exception as e2:
+                        logger.error(f"[invoke] retry after reconnect failed: {type(e2).__name__}: {e2}")
             logger.error(f"[invoke] DeepAgents ainvoke failed: {type(e).__name__}: {e}")
             return await self._invoke_direct(message, None), thread_id
 
@@ -312,9 +356,17 @@ class AgentRuntime:
             }
 
         except Exception as e:
-            logger.error(f"[invoke_stream] DeepAgents astream failed: {type(e).__name__}: {e}")
-            async for token in self._invoke_direct_stream(message, None):
-                yield {"type": "token", "token": token}
+            if self._is_mcp_connection_closed(e):
+                logger.warning(f"[invoke_stream] MCP connection dropped, attempting reconnect: {e}")
+                reconnected = await self._reconnect_mcp()
+                if reconnected:
+                    yield {"type": "token", "token": "[MCP 连接已恢复，请重试您的请求]"}
+                else:
+                    yield {"type": "token", "token": "[MCP 连接断开且重连失败，请检查 MCP 服务状态]"}
+            else:
+                logger.error(f"[invoke_stream] DeepAgents astream failed: {type(e).__name__}: {e}")
+                async for token in self._invoke_direct_stream(message, None):
+                    yield {"type": "token", "token": token}
             yield {"type": "done"}
 
     async def get_thread_state(self, thread_id: str) -> dict:

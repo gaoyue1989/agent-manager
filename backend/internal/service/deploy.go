@@ -344,6 +344,23 @@ func (s *DeployService) loadConfigFilesFromMinIO(agent *model.Agent) (map[string
 		}
 	}
 
+	customToolsPrefix := fmt.Sprintf("agents/%d/custom-tools", agent.ID)
+	if s.storage.PrefixExists(customToolsPrefix) {
+		ctFiles, err := s.storage.ListFiles(customToolsPrefix)
+		if err == nil {
+			for _, file := range ctFiles {
+				content, err := s.storage.GetFile(file)
+				if err != nil {
+					continue
+				}
+				relPath := strings.TrimPrefix(file, customToolsPrefix+"/")
+				cfgPath := fmt.Sprintf("custom-tools/%s", relPath)
+				files[safeKey(cfgPath)] = content
+				configMapItems = append(configMapItems, k8s.ConfigMapItem{Key: safeKey(cfgPath), Path: cfgPath})
+			}
+		}
+	}
+
 	return files, configMapItems, nil
 }
 
