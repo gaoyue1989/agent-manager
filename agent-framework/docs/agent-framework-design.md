@@ -1,27 +1,25 @@
 # Agent Framework — 设计文档
 
-**版本:** v1.2.0
-**日期:** 2026-05-17
+**版本:** v2.0.0 (Java)
+**日期:** 2026-07-13
 
 ---
 
 ## 1. 概述
 
-Agent Framework 是一个基于 **DeepAgents** 的独立可运行 Agent 服务框架，支持 **OAF v0.8.0** 配置规范、**A2A v1.0.0** 通信协议和 **A2UI v0.8** 声明式 UI 扩展，通过挂载配置文件实现 Docker 化部署。
+Agent Framework 是一个基于 **AgentScope Java 2.0** 的独立可运行 Agent 服务框架，支持 **OAF v0.8.0** 配置规范、**A2A v1.0.0** 通信协议和 **A2UI v0.8** 声明式 UI 扩展。
 
 ### 核心特性
 
 | 特性 | 说明 |
 |------|------|
 | OAF 配置 | 通过 `AGENTS.md` + `skills/` + `mcp-configs/` 目录定义 Agent |
-| A2A 协议 | JSON-RPC 2.0 + HTTP REST + SSE 流式传输 |
-| A2UI 组件 | surfaceUpdate / beginRendering 声明式 UI 流 |
-| 多工具 | Bash / Read / Edit / Grep 内置工具 + 自定义工具 + MCP 扩展 |
-| Skills | 动态加载 Python 脚本技能模块 |
-| **自定义工具** | **在 custom-tools/ 目录下放置 @tool 装饰的 Python 脚本，LLM 可主动调用** |
-| 流式输出 | 真实的逐 token SSE 推送 + 内嵌调试页面 |
-| **Checkpoint 持久化** | **MySQL 存储 thread_id 会话, 支持多轮对话记忆和跨重启恢复** |
-| **MCP Apps Host** | **符合 SEP-1865 规范，支持 tool_call _meta.ui 元数据传递和 iframe 渲染** |
+| A2A 协议 | JSON-RPC 2.0 (message/send, message/stream) |
+| 多工具 | Bash / Read / Edit / Grep 内置工具 + MCP 扩展 |
+| Skills | 动态加载技能模块 (SKILL.md + tool.py) |
+| 流式输出 | 逐 token SSE 推送 + 内嵌调试页面 |
+| 状态持久化 | MySQL AgentStateStore 实现会话持久化 |
+| MCP Apps Host | 支持 tool_call _meta.ui 元数据传递和 iframe 渲染 |
 
 ---
 
@@ -34,23 +32,22 @@ Agent Framework 是一个基于 **DeepAgents** 的独立可运行 Agent 服务�
 │                      Agent Framework                          │
 │                                                              │
 │  ┌─────────────┐   ┌──────────────┐   ┌──────────────────┐  │
-│  │  OAF Loader  │   │ DeepAgents   │   │  A2A Server      │  │
-│  │  AGENTS.md   │──▶│ Runtime      │──▶│  + A2UI Ext      │  │
-│  │  + skills/   │   │ + Skills     │   │  + SSE Streaming │  │
-│  │  + mcp/      │   │ + MCP Tools  │   │  + Debug Page    │  │
-│  └─────────────┘   └──────────────┘   └──────────────────┘  │
-│                                                              │
-│  ┌─────────────────┐                                         │
-│  │  Checkpoint Mgr  │  MySQL (GreatSQL 3307)                │
-│  │  AsyncMySaver    │  checkpoints / blobs / writes          │
-│  │  thread_id 持久化 │  thread CRUD (REST + JSON-RPC)        │
-│  └─────────────────┘                                         │
+│  │  OAF Loader  │   │ AgentScope   │   │  A2A Controller  │  │
+│  │  AGENTS.md   │──▶│ ReActAgent   │──▶│  + SSE Streaming │  │
+│  │  + skills/   │   │ + Skills     │   │  + Debug Page    │  │
+│  │  + mcp/      │   │ + MCP Tools  │   └──────────────────┘  │
+│  └─────────────┘   └──────────────┘                          │
+│                    │         │                                │
+│                    ▼         ▼                                │
+│  ┌─────────────────────────────────────────────┐             │
+│  │  MySQL AgentStateStore (GreatSQL 3307)       │             │
+│  │  agent_state 表 · session 持久化              │             │
+│  └─────────────────────────────────────────────┘             │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              配置文件挂载 (/config)                       │ │
 │  │   /config/AGENTS.md (必需)                               │ │
 │  │   /config/skills/  (可选)                                │ │
-│  │   /config/custom-tools/ (可选)                           │ │
 │  │   /config/mcp-configs/ (可选)                            │ │
 │  └─────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
@@ -59,32 +56,30 @@ Agent Framework 是一个基于 **DeepAgents** 的独立可运行 Agent 服务�
 ### 2.2 模块分层
 
 ```
-server/
-├── config.py                   # 配置加载层
-│   └── AppConfig / ServerConfig / LLMConfig (Pydantic + env)
-├── models/                     # 数据模型层
-│   ├── oaf_types.py            # OAF v0.8.0 类型 (SkillConfig, MCPServerConfig, ...)
-│   └── a2a_types.py            # A2A 协议类型 (Task, Message, Part, Artifact)
-├── services/                   # 业务服务层
-│   ├── oaf_loader.py           # OAF 配置解析 (AGENTS.md frontmatter + body)
-│   ├── agent_runtime.py        # DeepAgents 运行时封装 (invoke/stream/tools)
-│   ├── skill_manager.py        # Skill 动态加载器 (importlib + SKILL.md)
-│   ├── mcp_manager.py          # MCP 连接管理 (ActiveMCP.json + config.yaml)
-│   ├── checkpoint_manager.py   # MySQL checkpoint 管理 (thread_id 持久化)
-│   ├── custom_tool_manager.py  # 自定义工具动态加载 (importlib + @tool)
-│   ├── a2ui_service.py         # A2UI JSONL 生成 (surfaceUpdate/beginRendering)
-│   └── chat_model.py           # ChatOpenAIReasoning (GLM-5 reasoning_content 兼容)
-├── routes/                     # 路由层
-│   ├── a2a_routes.py           # A2A 端点 (JSON-RPC + REST + SSE + thread 方法)
-│   ├── thread_routes.py        # Thread 管理 (GET/DELETE /threads, /threads/{id})
-│   ├── mcp_routes.py           # MCP 资源代理 (resources/read, tools/list)
-│   ├── agent_card.py           # Agent Card 发现
-│   └── debug_ui.py             # 内嵌调试页面
-├── templates/
-│   └── debug_page.html         # 前端调试页面 (单文件, SSE + A2UI + MCP Apps Host)
-├── wsgi.py                     # gunicorn 入口 (调用 create_app)
-├── main.py                     # uvicorn 启动入口
-└── app.py                      # 应用工厂 (create_app)
+src/main/java/io/agentmanager/framework/
+├── AgentFrameworkApplication.java   # Spring Boot 入口
+├── config/
+│   ├── AgentManagerProperties.java  # 环境变量 @ConfigurationProperties
+│   ├── OafConfigLoader.java         # AGENTS.md 解析 (SnakeYAML)
+│   ├── AgentScopeConfig.java        # Bean 装配 (ReActAgent, DataSource, RuntimeService)
+│   └── A2AServerConfig.java         # A2A Server Bean (AgentScopeA2aServer)
+├── model/
+│   └── OafConfig.java               # OAF 配置模型 (Java Record)
+├── service/
+│   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream/buildSystemPrompt)
+│   ├── SkillManager.java            # Skill 加载 (SKILL.md + tool.py)
+│   ├── McpManager.java              # MCP 配置加载
+│   ├── A2uiService.java             # A2UI JSONL 生成
+│   └── LLMLogger.java               # LLM 调用日志
+└── controller/
+    ├── InfoController.java          # GET /、/system-prompt
+    ├── HealthController.java        # GET /health
+    ├── ToolController.java          # GET /skills、/mcp、/tools
+    ├── AgentCardController.java     # GET /.well-known/agent-card.json
+    ├── DebugController.java         # GET /debug
+    ├── StreamController.java        # POST /chat/stream (SSE)
+    ├── ThreadController.java        # GET /threads
+    └── A2AController.java           # POST / (A2A JSON-RPC)
 ```
 
 ### 2.3 请求处理流程
@@ -93,145 +88,97 @@ server/
 Client Request (POST /)
   │
   ▼
-A2ARoutes.jsonrpc_handler()
+A2AController.handleA2A()
   │ 解析 JSON-RPC method
-  ├── message/send  ──▶ _handle_send_message()
-  │     └── agent.invoke() → DeepAgents agent.invoke() → LLM API
-  │     └── 返回 Task { id, status, artifacts }
+  ├── message/send ──▶ handleMessageSend()
+  │     └── agentRuntime.invoke() → ReActAgent.call() → LLM API
+  │     └── 返回 JSON-RPC 响应 { result: { id, status, result: { message } } }
   │
-  ├── message/stream ──▶ StreamingResponse(_handle_stream_message)
-  │     └── agent.invoke_stream() → agent.astream(stream_mode="messages")
-  │     └── SSE: event: task_update → event: token →
-  │           event: tool_call (含 _meta.ui 元数据) →
-  │           event: tool_result → event: done
-  │
-  ├── tasks/get ──▶ 从 tasks_store 返回 Task
-  └── tasks/list ──▶ 返回 tasks_store 全部 Task
-
-MCP Apps Host 流程 (调试页面):
-  │
-  ├── SSE tool_call 事件携带 _meta.ui.resourceUri
-  ├── 前端注册到 mcpAppsRegistry {tcId → {uri, name, args}}
-  ├── tool_result 到达 → fetchMCPResource(server, uri)
-  │     └── POST /mcp/resources/read → MCPRoutes
-  │           ├── 优先使用活动 SSE session (MultiServerMCPClient)
-  │           └── 降级到直接 HTTP POST
-  └── 资源 HTML 渲染到 sandbox iframe → postMessage 传递 tool_args
+  └── message/stream ──▶ handleStreaming()
+        └── agentRuntime.invokeStream() → ReActAgent.streamEvents()
+        └── SSE: data: {"type":"task_update","state":"working"}
+              → data: {"type":"token","token":"..."}
+              → data: {"type":"tool_call",...}
+              → data: {"type":"tool_result",...}
+              → data: {"type":"task_update","state":"completed"}
+              → data: {"type":"done"}
+              → data: [DONE]
 ```
 
 ### 2.4 工具调用流程
 
 ```
-Agent.invoke("用bash执行 uname -a")
+Agent.invoke("用 bash 执行 uname -a")
   │
   ▼
-DeepAgents agent.invoke(messages)
+AgentRuntimeService.invoke()
   │
-  ├── LLM 思考 → 决定调用 bash_execute 工具
-  ├── agent 调用 bash_execute(command="uname -a")
-  ├── subprocess.run("uname -a", shell=True, ...)
-  ├── 结果返回给 LLM
-  └── LLM 生成最终回答
+  ├── RuntimeContext(sessionId, userId) 创建
+  ├── UserMessage("user", message) 创建
+  ├── agent.call([userMsg], ctx) → ReActAgent 执行
+  │     ├── LLM 思考 → 决定调用 bash 工具
+  │     ├── AgentScope 调用 ShellTool.run("uname -a")
+  │     ├── 结果返回给 LLM
+  │     └── LLM 生成最终回答
+  └── 返回 { response: "...", thread_id: "..." }
 ```
 
 ---
 
 ## 3. 核心设计决策
 
-### 3.1 ChatOpenAIReasoning — GLM-5 兼容
+### 3.1 技术选型: AgentScope Java vs DeepAgents Python
 
-GLM-5 模型将流式 token 放在 `reasoning_content` 字段，标准 ChatOpenAI 只读取 `content`。
+| 对比项 | AgentScope Java | DeepAgents Python |
+|--------|-----------------|-------------------|
+| 运行时 | JVM 21 (Spring Boot 3.3) | Python 3.11+ (FastAPI) |
+| Agent 模型 | ReActAgent | create_deep_agent |
+| LLM 适配 | OpenAIChatModel | ChatOpenAI |
+| 状态存储 | MysqlAgentStateStore | AsyncMySaver (LangGraph) |
+| A2A 协议 | 自定义 Controller | a2a_routes.py |
+| 构建工具 | Maven | pip |
+| 部署 | JAR (Docker) | Python (Docker) |
 
-**解决**: 子类化 `ChatOpenAI`，重写 `_convert_chunk_to_generation_chunk`，将 `reasoning_content` 合并到 `content`：
+### 3.2 A2A Controller (替代 AgentScopeA2aServer)
 
-```python
-class ChatOpenAIReasoning(ChatOpenAI):
-    def _convert_chunk_to_generation_chunk(self, chunk, ...):
-        delta = chunk["choices"][0].get("delta", {})
-        if delta.get("reasoning_content") and not delta.get("content"):
-            delta = dict(delta)
-            delta["content"] = delta["reasoning_content"]
-            chunk["choices"][0]["delta"] = delta
-        return super()._convert_chunk_to_generation_chunk(chunk, ...)
+`agentscope-extensions-a2a-server` 依赖了 `agentscope-core` 中不存在的 `PartParserRouter` 类，因此使用自定义 A2A Controller 替代：
+
+- `message/send` → `AgentRuntimeService.invoke()` → JSON 响应
+- `message/stream` → `AgentRuntimeService.invokeStream()` → SSE 流
+
+### 3.3 Part 格式
+
+A2A 协议中 Part 的多态类型鉴别器是 `kind`（不是 `type`）：
+
+```json
+// ✅ 正确格式
+{"kind": "text", "text": "hello"}
+// ❌ 错误格式
+{"type": "text", "text": "hello"}
 ```
 
-### 3.2 流式传输实现
+控制器兼容两种格式：优先读取 `kind`，为 `null` 时默认视为 `text`。
 
-采用 LangGraph `stream_mode="messages"` 实现 token 级流式：
+### 3.4 流式传输实现
 
-```python
-async for msg, metadata in agent.astream(
-    {"messages": [...]},
-    stream_mode="messages",
-):
-    chunk = msg if not isinstance(msg, tuple) else msg[0]
-    content = getattr(chunk, "content", "")
-    yield content  # 逐 token SSE 推送
+采用 AgentScope 的 `streamEvents()` API 实现 token 级流式 SSE：
+
+```java
+agent.streamEvents(List.of(userMsg), ctx)
+    .doOnNext(event -> {
+        if (event instanceof TextBlockDeltaEvent) {
+            String delta = ((TextBlockDeltaEvent) event).getDelta();
+            sink.next(Map.of("type", "token", "token", delta));
+        }
+    })
 ```
 
-### 3.3 双路径回退
-
-| 方法 | 主路径 | 回退路径 |
-|------|--------|---------|
-| `invoke()` | DeepAgents `agent.invoke()` | `httpx.post()` 直连 LLM API |
-| `invoke_stream()` | DeepAgents `agent.astream(stream_mode="messages")` | `httpx.stream()` 直连 LLM SSE |
-
-回退路径确保在 DeepAgents 不可用或异常时仍然能返回响应。
-
-### 3.4 工具定义
-
-根据 OAF 配置中的 `tools` 字段动态创建 LangChain 工具：
-
-| tools 值 | 对应工具 | 实现 |
-|----------|---------|------|
-| `bash` / `execute` | `bash_execute` | `subprocess.run(shell=True)` |
-| `read` | `read_file` | `Path.read_text()` |
-| `edit` | `edit_file` | 字符串替换 → `Path.write_text()` |
-| `grep` | `grep_search` | `subprocess.run("grep -rn")` |
-
-### 3.5 自定义工具
-
-在 `custom-tools/` 目录下放置 Python 脚本，使用 `@tool` 装饰器定义工具，LLM 可在推理过程中主动调用：
-
-**目录结构：**
+SSE 格式：
 ```
-custom-tools/
-├── web_search.py
-└── calculator.py
+data: {"type":"task_update","state":"working",...}
+data: {"type":"token","token":"Hello",...}
+data: [DONE]
 ```
-
-**工具脚本示例：**
-```python
-# custom-tools/web_search.py
-from langchain_core.tools import tool
-
-@tool
-def web_search(query: str) -> str:
-    """Search the web for information. Use when you need current data."""
-    # 实现逻辑
-    return result
-```
-
-**配置声明：**
-```yaml
-# AGENTS.md
-tools:
-  - Read
-  - Bash
-  - web_search    # 自定义工具名（对应 custom-tools/web_search.py）
-```
-
-**加载流程：**
-1. `CustomToolManager` 扫描 `custom-tools/` 目录
-2. 使用 `importlib` 动态加载 Python 模块
-3. 提取所有 `@tool` 装饰的函数（`StructuredTool` 实例）
-4. 合并到 `AgentRuntime._get_available_tools()` 返回的工具列表
-5. DeepAgents 创建 agent 时注入工具，LLM 可主动调用
-
-**工具发现优先级：**
-1. 内建工具（bash/read/edit/grep）
-2. 自定义工具（custom-tools/）
-3. MCP 工具（mcp-configs/）
 
 ---
 
@@ -246,9 +193,7 @@ config/
 │   └── <skill-name>/
 │       ├── SKILL.md           # 技能清单
 │       └── scripts/
-│           └── tool.py        # Python 实现 (必须有 main() 函数)
-├── custom-tools/              # 可选：自定义工具
-│   └── <tool-name>.py         # @tool 装饰的 Python 脚本
+│           └── tool.py        # Python 实现 (main() 函数)
 └── mcp-configs/               # 可选：MCP 服务器
     └── <server-name>/
         ├── ActiveMCP.json     # 工具选择
@@ -259,103 +204,65 @@ config/
 
 ```yaml
 ---
-name: "Full Test Agent"
-vendorKey: "test"
-agentKey: "full-agent"
+name: "My Agent"
+vendorKey: "myorg"
+agentKey: "my-agent"
 version: "1.0.0"
-slug: "test/full-agent"
-description: "A full-featured test agent"
-author: "@test"
-license: "MIT"
+slug: "myorg/my-agent"
+description: "A custom agent"
 
 skills:
   - name: "bash-tool"
     source: "local"
     version: "1.0.0"
-    required: true
 
 mcpServers:
-  - vendor: "block"
-    server: "filesystem"
+  - vendor: "weather"
+    server: "weather-service"
     version: "1.0.0"
-    configDir: "mcp-configs/filesystem"
-    required: false
+    configDir: "mcp-configs/weather"
 
 tools:
   - Read
   - Bash
   - Edit
   - Grep
-  - web_search              # 自定义工具 (custom-tools/web_search.py)
-
-config:
-  temperature: 0.7
-  max_tokens: 4096
 ---
 
-# Agent Purpose
-You are a test agent for E2E testing.
+# System Prompt
 
-## Core Responsibilities
-- Execute bash commands
-- Read and edit files
+You are a helpful AI assistant.
 ```
 
 ### 4.3 环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `AGENT_CONFIG_DIR` | `/config` | OAF 配置目录 |
-| `LLM_API_KEY` | (空) | LLM API Key |
-| `LLM_MODEL_ID` | (空) | 模型 ID |
-| `LLM_BASE_URL` | (空) | LLM API 地址 |
-| `SERVER_HOST` | `0.0.0.0` | 服务监听地址 |
-| `SERVER_PORT` | `8100` | 服务端口 |
-| `GUNICORN_WORKERS` | `4` | gunicorn worker 进程数 (仅 Docker) |
-| `GUNICORN_MAX_REQUESTS` | `1000` | worker 自动重启请求数 |
-| `GUNICORN_MAX_REQUESTS_JITTER` | `50` | 重启请求数抖动 |
+| 变量 | 默认值 | 必填 | 说明 |
+|------|--------|------|------|
+| `LLM_API_KEY` | — | ✓ | LLM API 密钥 |
+| `LLM_MODEL_ID` | — | ✓ | 模型 ID |
+| `LLM_BASE_URL` | — | ✓ | LLM API 端点 URL |
+| `LLM_PROVIDER` | `openai` | | 提供商标识 |
+| `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
+| `LLM_MAX_TOKENS` | `4096` | | 最大输出 token |
+| `LLM_TIMEOUT` | `120` | | API 调用超时(秒) |
+| `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录 |
+| `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
+| `SERVER_PORT` | `8100` | | 服务端口 |
+| `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
+| `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
+| `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
 
 ---
 
-## 5. API 端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/` | 服务信息 |
-| GET | `/health` | 健康检查 |
-| GET | `/.well-known/agent-card.json` | Agent Card |
-| GET | `/skills` | 技能列表 |
-| GET | `/mcp` | MCP 列表 |
-| GET | `/tools` | 工具列表 (内建 + 自定义 + MCP) |
-| POST | `/mcp/resources/read` | MCP Apps Host — 获取 UI 资源 |
-| POST | `/mcp/tools/list` | MCP 工具列表 |
-| GET | `/debug` | 调试页面 (MCP Apps Host) |
-| POST | `/` | JSON-RPC 2.0 (message/send, message/stream, threads/*) |
-| POST | `/tasks` | REST 任务创建 |
-| GET | `/tasks/{id}` | REST 任务查询 |
-| GET | `/tasks` | REST 任务列表 |
-| GET | `/threads` | Thread 列表 (checkpoint) |
-| GET | `/threads/{id}` | Thread 对话历史 |
-| DELETE | `/threads/{id}` | 删除 Thread |
-
----
-
-## 6. 依赖清单
+## 5. 依赖
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| deepagents | >=0.5.0 | Agent 框架内核 |
-| langchain | >=1.0.0 | LLM 抽象层 |
-| langchain-openai | >=1.0.0 | OpenAI 兼容 API 客户端 |
-| langchain-mcp-adapters | >=0.2.0 | MCP 客户端 (SSE transport) |
-| langgraph | >=1.2.0 | Agent 工作流编排 + checkpoint |
-| langgraph-checkpoint-mysql | >=3.0.0 | MySQL checkpoint 存储 |
-| asyncmy | >=0.2.10 | 异步 MySQL 驱动 |
-| fastapi | >=0.100.0 | HTTP 服务 |
-| uvicorn | >=0.30.0 | ASGI 服务器 (开发模式) |
-| gunicorn | >=23.0.0 | WSGI 服务器 (生产模式) |
-| pydantic | >=2.0.0 | 数据验证 |
-| pyyaml | >=6.0.0 | YAML 解析 |
-| httpx | >=0.25.0 | HTTP 客户端 (LLM API 调用) |
-| python-dotenv | >=1.0.0 | 环境变量加载 |
-| sse-starlette | >=2.0.0 | SSE 支持 |
+| agentscope-harness | 2.0.0 | Agent 框架内核 |
+| agentscope-extensions-model-openai | 2.0.0 | OpenAI 兼容 LLM |
+| agentscope-extensions-mysql | 2.0.0 | MySQL 状态存储 |
+| agentscope-extensions-a2a-server | 2.0.0 | A2A 协议（仅 AgentCard） |
+| Spring Boot | 3.3.5 | HTTP 服务框架 |
+| SnakeYAML | 2.x | YAML frontmatter 解析 |
+| MySQL Connector/J | 8.x | MySQL JDBC 驱动 |
+| HikariCP | 5.x | 连接池 |

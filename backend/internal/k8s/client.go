@@ -28,9 +28,12 @@ type K8sClient interface {
 }
 
 // NewK8sClient 工厂函数，根据 clientMode 创建 kubectl 或 API 客户端
-// 当前默认使用 kubectl 客户端（无需额外依赖）
-// 若需启用 client-go SDK 模式，设置 K8S_CLIENT_MODE=api 并参见 api_client.go
+// clientMode="api" → 需 client-go SDK (构建: go build -tags api ./cmd/server)
+// clientMode="kubectl" 或其他 → 基于 kubectl CLI (默认，无需额外依赖)
 func NewK8sClient(clientMode, kubeconfig, namespace string) (K8sClient, error) {
+	if clientMode == "api" {
+		return newK8sAPIClient(kubeconfig, namespace)
+	}
 	return NewKubectlClient(kubeconfig, namespace), nil
 }
 

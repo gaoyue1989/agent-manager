@@ -2,9 +2,10 @@ version: '3.8'
 
 services:
   nginx:
-    image: nginx:alpine
+    image: ${NGINX_IMAGE:-nginx:alpine}
+    restart: ${RESTART_POLICY:-unless-stopped}
     ports:
-      - "8911:8911"
+      - "${NGINX_PORT:-8911}:8911"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
@@ -16,11 +17,12 @@ services:
       - "host.docker.internal:host-gateway"
 
   frontend:
+    restart: ${RESTART_POLICY:-unless-stopped}
     build:
       context: ../frontend
       dockerfile: Dockerfile
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=${NODE_ENV:-production}
       - NEXT_PUBLIC_API_URL=/api/v1
     depends_on:
       - backend
@@ -28,20 +30,48 @@ services:
       - agent-net
 
   backend:
+    restart: ${RESTART_POLICY:-unless-stopped}
     build:
-      context: ../backend
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: backend/Dockerfile.prod
     environment:
-      - SERVER_PORT=8080
-      - MYSQL_DSN=agent_manager:Agent@Manager2026@tcp(mysql:3306)/agent_manager?charset=utf8mb4&parseTime=True&loc=Local
-      - MINIO_ENDPOINT=minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
-      - MINIO_BUCKET=agent-manager
-      - INGRESS_HOST=localhost
-      - INGRESS_ENABLED=false
-      - CODEGEN_PYTHON=/opt/codegen-venv/bin/python3
-      - CODEGEN_SCRIPT=/opt/codegen/generator.py
+      # 服务
+      - SERVER_PORT=${SERVER_PORT:-8080}
+      # 数据库
+      - MYSQL_DSN=${MYSQL_DSN:-agent_manager:Agent@Manager2026@tcp(mysql:3306)/agent_manager?charset=utf8mb4&parseTime=True&loc=Local}
+      # MinIO
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_BUCKET=${MINIO_BUCKET:-agent-manager}
+      # Kubernetes
+      - KUBE_CONFIG=${KUBE_CONFIG:-}
+      - KUBE_NAMESPACE=${KUBE_NAMESPACE:-default}
+      - KUBE_INGRESS_CLASS=${KUBE_INGRESS_CLASS:-nginx}
+      - K8S_CLIENT_MODE=${K8S_CLIENT_MODE:-kubectl}
+      # Registry
+      - LOCAL_REGISTRY=${LOCAL_REGISTRY:-172.20.0.1:5001}
+      - DOCKER_USERNAME=${DOCKER_USERNAME:-}
+      - DOCKER_PASSWORD=${DOCKER_PASSWORD:-}
+      # 代码生成
+      - CODEGEN_PYTHON=${CODEGEN_PYTHON:-/opt/codegen-venv/bin/python3}
+      - CODEGEN_SCRIPT=${CODEGEN_SCRIPT:-/opt/codegen/generator.py}
+      # Agent 部署
+      - INGRESS_HOST=${INGRESS_HOST:-localhost}
+      - INGRESS_ENABLED=${INGRESS_ENABLED:-true}
+      - DEPLOY_METHOD=${DEPLOY_METHOD:-sandbox}
+      - DEPLOY_TEMPLATE_DIR=${DEPLOY_TEMPLATE_DIR:-}
+      # 基础镜像
+      - BASE_IMAGE_NAME=${BASE_IMAGE_NAME:-agent-base:latest}
+      - BUILD_BASE_IMAGE=${BUILD_BASE_IMAGE:-true}
+      # 挂载模式
+      - AVAILABLE_IMAGES=${AVAILABLE_IMAGES:-agent-framework:latest|Agent Framework v0.5.5}
+      - DEFAULT_IMAGE=${DEFAULT_IMAGE:-agent-framework:latest}
+      - DEFAULT_CHECKPOINT_DSN=${DEFAULT_CHECKPOINT_DSN:-}
+      # LLM
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_ENDPOINT=${LLM_ENDPOINT:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -51,19 +81,20 @@ services:
       - agent-net
 
   mysql:
-    image: greatsql/greatsql:8.0.32-25
+    image: ${MYSQL_IMAGE:-greatsql/greatsql:8.0.32-25}
+    restart: ${RESTART_POLICY:-unless-stopped}
     ports:
-      - "3307:3306"
+      - "${MYSQL_HOST_PORT:-3307}:3306"
     environment:
-      - MYSQL_ROOT_PASSWORD=root123
-      - MYSQL_DATABASE=agent_manager
-      - MYSQL_USER=agent_manager
-      - MYSQL_PASSWORD=Agent@Manager2026
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-root123}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-agent_manager}
+      - MYSQL_USER=${MYSQL_USER:-agent_manager}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-Agent@Manager2026}
     volumes:
       - mysql_data:/var/lib/mysql
       - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "agent_manager", "-pAgent@Manager2026"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER:-agent_manager}", "-p${MYSQL_PASSWORD:-Agent@Manager2026}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -71,13 +102,14 @@ services:
       - agent-net
 
   minio:
-    image: minio/minio:latest
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    restart: ${RESTART_POLICY:-unless-stopped}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data

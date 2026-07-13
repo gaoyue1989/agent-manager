@@ -1,12 +1,11 @@
-//go:build ignore
-// +build ignore
+//go:build api
 
 // api_client.go — 基于 client-go SDK 的 K8s API 客户端实现
 // 启用方式：
 //   1. 确保网络可访问 Go 代理
-//   2. 删除第一行 //go:build ignore
-//   3. 运行 go mod tidy 下载依赖
-//   4. 设置环境变量 K8S_CLIENT_MODE=api
+//   2. 运行: go get k8s.io/client-go@latest && go mod tidy
+//   3. 构建: go build -tags api ./cmd/server
+//   4. 设置环境变量: K8S_CLIENT_MODE=api
 
 package k8s
 
@@ -43,7 +42,7 @@ type K8sAPIClient struct {
 	mu              sync.RWMutex
 }
 
-func NewK8sAPIClient(kubeconfigPath, namespace string) (*K8sAPIClient, error) {
+func newK8sAPIClient(kubeconfigPath, namespace string) (K8sClient, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfigPath != "" {
 		loadingRules.ExplicitPath = kubeconfigPath

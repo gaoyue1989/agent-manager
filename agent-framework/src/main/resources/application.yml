@@ -1,0 +1,26 @@
+server:
+  port: ${SERVER_PORT:8100}
+
+spring:
+  application:
+    name: agent-framework
+  main:
+    banner-mode: off
+
+agent:
+  config-dir: ${AGENT_CONFIG_DIR:/config}
+  llm:
+    api-key: ${LLM_API_KEY:}
+    model-id: ${LLM_MODEL_ID:}
+    base-url: ${LLM_BASE_URL:}
+    provider: ${LLM_PROVIDER:openai}
+    temperature: ${LLM_TEMPERATURE:0.7}
+    max-tokens: ${LLM_MAX_TOKENS:4096}
+    timeout: ${LLM_TIMEOUT:120}
+  server:
+    host: ${SERVER_HOST:0.0.0.0}
+    port: ${SERVER_PORT:8100}
+  checkpoint:
+    jdbc-url: ${CHECKPOINT_JDBC_URL:jdbc:mysql://127.0.0.1:3307/agent_manager_test}
+    username: ${CHECKPOINT_USERNAME:agent_manager}
+    password: ${CHECKPOINT_PASSWORD:Agent@Manager2026}

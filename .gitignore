@@ -18,6 +18,15 @@ backend/vendor/
 *.so
 *.dylib
 backend/bin/
+
+# Java
+target/
+*.class
+*.jar
+*.war
+
+# Node
+node_modules/
 backend/server
 
 # Node

@@ -1,0 +1,45 @@
+# Dockerfile.offline-builder — 离线编译镜像
+# 构建方式:
+#   1. 在有网络的机器上: docker build -t golang-offline:1.23 -f Dockerfile.offline-builder .
+#   2. 导出镜像: docker save golang-offline:1.23 | gzip > golang-offline-1.23.tar.gz
+#   3. 在离线机器导入: docker load < golang-offline-1.23.tar.gz
+#
+# 离线编译使用:
+#   docker run --rm -v $(pwd):/app -w /app golang-offline:1.23 go build -o server ./cmd/server
+
+FROM golang:1.23-alpine
+
+# 设置 Go 环境变量（离线模式）
+# GOPROXY=file:///gomod-cache/cache/download 使用本地文件代理
+# GOSUMDB=off 禁用校验和验证（离线环境）
+ENV GOPROXY=file:///gomod-cache/cache/download,direct \
+    GOSUMDB=off \
+    GOCACHE=/go-cache \
+    GOMODCACHE=/gomod-cache
+
+# 复制宿主机的 Go 模块缓存（需在构建时挂载或 COPY）
+# 构建命令: docker build --build-arg GOMOD_CACHE=/root/go/pkg/mod -t golang-offline:1.23 .
+ARG GOMOD_CACHE=/root/go/pkg/mod
+
+# 预创建目录
+RUN mkdir -p /gomod-cache /go-cache
+
+# 复制模块缓存（从构建上下文）
+# 注意: 需要在构建前将宿主机缓存复制到构建上下文
+#   mkdir -p build-context/gomod-cache
+#   cp -r /root/go/pkg/mod/* build-context/gomod-cache/
+#   cd build-context && docker build -t golang-offline:1.23 -f ../Dockerfile.offline-builder .
+COPY gomod-cache/ /gomod-cache/
+
+# 预热：复制示例 go.mod/go.sum 并下载依赖（从本地缓存）
+# 这确保所有传递依赖都在缓存中
+COPY backend/go.mod backend/go.sum /tmp/warmup/
+RUN cd /tmp/warmup && \
+    go mod download || true && \
+    rm -rf /tmp/warmup
+
+# 设置工作目录
+WORKDIR /app
+
+# 默认命令
+CMD ["go", "version"]

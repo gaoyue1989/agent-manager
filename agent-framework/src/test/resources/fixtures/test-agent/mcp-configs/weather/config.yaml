@@ -1,0 +1,6 @@
+server: weather-service
+vendor: weather
+url: http://weather-api:8080
+tools:
+  - name: get_weather
+    description: Get weather for a city

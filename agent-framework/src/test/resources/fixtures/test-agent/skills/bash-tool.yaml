@@ -1,0 +1,5 @@
+name: bash-tool
+description: Execute bash commands
+tools:
+  - name: Bash
+    description: Run a bash command
