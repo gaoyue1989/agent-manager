@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:,">
+<title>Agent Debug Console</title>
+<link rel="stylesheet" href="/debug/css/base.css">
+<link rel="stylesheet" href="/debug/css/layout.css">
+<link rel="stylesheet" href="/debug/css/components.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="header-left">
+      <h1>Agent Debug Console</h1>
+      <span id="agentName" class="agent-name">...</span>
+    </div>
+    <div class="header-right">
+      <span id="statusDot" class="status-dot warn"></span>
+      <span id="statusText" class="status-text">connecting...</span>
+      <span id="checkpointStatus" class="status-text"></span>
+    </div>
+  </header>
+  <div class="main">
+    <nav class="sidebar" id="sidebar"></nav>
+    <main class="content" id="module-content">
+      <div class="module-loading">Loading module...</div>
+    </main>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <button class="close-btn" onclick="window.App.modal.close()">&times;</button>
+    <div id="modalContent"></div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script type="module" src="/debug/js/app.js"></script>
+</body>
+</html>

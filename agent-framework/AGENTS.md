@@ -60,8 +60,11 @@ agent-framework/
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC)
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
-│   │       └── templates/
-│   │           └── debug_page.html              # 调试页面 (A2A/Channel 双模式)
+│   │       └── static/debug/                    # 调试页面 (拆分架构)
+│   │           ├── index.html                   # 调试页入口
+│   │           ├── css/                         # 样式 (base/components/layout)
+│   │           ├── js/                          # 脚本 (api/app/router)
+│   │           └── modules/                     # 功能模块 (chat/tools/config 等)
 │   └── test/                                  # 68 个测试用例
 ├── docs/                                     # 改进方案文档 (13 份)
 ├── Dockerfile                                # 镜像构建
