@@ -1,16 +1,16 @@
 package io.agentmanager.framework.service;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.agentmanager.framework.model.OafConfig;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEventType;
+import io.agentscope.core.message.UserMessage;
 import reactor.core.publisher.Flux;
 
 public class AgentRuntimeService {
@@ -20,22 +20,18 @@ public class AgentRuntimeService {
     private final String tenantPrefix;
     private final LLMLogger llmLogger;
 
-    private io.agentscope.core.ReActAgent agent;
-    private final List<SkillManager.SkillInfo> loadedSkills;
+    private io.agentscope.harness.agent.HarnessAgent agent;
     private final List<Map<String, Object>> mcpConfigs;
-    private final List<Map<String, Object>> mcpToolMeta = new ArrayList<>();
 
     public AgentRuntimeService(
         OafConfig oafConfig,
-        io.agentscope.core.ReActAgent agent,
-        List<SkillManager.SkillInfo> loadedSkills,
+        io.agentscope.harness.agent.HarnessAgent agent,
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger
     ) {
         this.oafConfig = oafConfig;
         this.tenantPrefix = oafConfig.slug();
         this.agent = agent;
-        this.loadedSkills = loadedSkills;
         this.mcpConfigs = mcpConfigs;
         this.llmLogger = llmLogger;
     }
@@ -47,13 +43,6 @@ public class AgentRuntimeService {
 
     public String buildSystemPrompt() {
         var sb = new StringBuilder(oafConfig.systemPrompt());
-        if (!loadedSkills.isEmpty()) {
-            sb.append("\n\n## Available Skills\n");
-            for (var skill : loadedSkills) {
-                sb.append("- **").append(skill.name()).append("**: ")
-                  .append(skill.metadata().description()).append("\n");
-            }
-        }
         if (!mcpConfigs.isEmpty()) {
             sb.append("\n\n## Available MCP Servers\n");
             for (var mc : mcpConfigs) {
@@ -79,30 +68,38 @@ public class AgentRuntimeService {
     }
 
     private String makeThreadId(String threadId) {
-        return tenantPrefix + ":" + threadId;
+        // AgentStateStore ID 不允许包含路径分隔符，替换 slug 中的 "/"
+        return tenantPrefix.replace("/", "-") + ":" + threadId;
     }
 
-    private String parseThreadId(String fullThreadId) {
-        var prefix = tenantPrefix + ":";
-        if (fullThreadId.startsWith(prefix)) {
-            return fullThreadId.substring(prefix.length());
+    private String resolveUserId(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return oafConfig.vendorKey();
         }
-        return fullThreadId;
+        return userId;
     }
 
     public Map<String, Object> invoke(String message, String threadId) {
+        return invoke(message, threadId, oafConfig.vendorKey());
+    }
+
+    /**
+     * 同步调用，支持多租户：userId 由调用方显式传递。
+     */
+    public Map<String, Object> invoke(String message, String threadId, String userId) {
         if (threadId == null || threadId.isEmpty()) {
             threadId = UUID.randomUUID().toString();
         }
         var fullThreadId = makeThreadId(threadId);
+        var resolvedUserId = resolveUserId(userId);
 
         try {
-            var ctx = io.agentscope.core.agent.RuntimeContext.builder()
+            var ctx = RuntimeContext.builder()
                 .sessionId(fullThreadId)
-                .userId(oafConfig.vendorKey())
+                .userId(resolvedUserId)
                 .build();
 
-            var userMsg = new io.agentscope.core.message.UserMessage("user", message);
+            var userMsg = new UserMessage("user", message);
             var result = agent.call(List.of(userMsg), ctx).block();
 
             var responseText = result != null ? result.getTextContent() : "";
@@ -114,26 +111,31 @@ public class AgentRuntimeService {
     }
 
     public Flux<Map<String, Object>> invokeStream(String message, String threadId) {
+        return invokeStream(message, threadId, oafConfig.vendorKey());
+    }
+
+    /**
+     * 流式调用，支持多租户：userId 由调用方显式传递。
+     */
+    public Flux<Map<String, Object>> invokeStream(String message, String threadId, String userId) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
-        var ctx = io.agentscope.core.agent.RuntimeContext.builder()
+        var resolvedUserId = resolveUserId(userId);
+        var ctx = RuntimeContext.builder()
             .sessionId(fullThreadId)
-            .userId(oafConfig.vendorKey())
+            .userId(resolvedUserId)
             .build();
 
-        var userMsg = new io.agentscope.core.message.UserMessage("user", message);
+        var userMsg = new UserMessage("user", message);
 
         return Flux.create(sink -> {
             sink.next(Map.of("type", "task_update", "id", tid, "state", "working"));
-
-            var sb = new StringBuilder();
 
             agent.streamEvents(List.of(userMsg), ctx)
                 .doOnNext(event -> {
                     var type = event.getType();
                     if (type == AgentEventType.TEXT_BLOCK_DELTA) {
                         var delta = ((io.agentscope.core.event.TextBlockDeltaEvent) event).getDelta();
-                        sb.append(delta);
                         sink.next(Map.of("type", "token", "token", delta, "task_id", tid));
                     } else if (type == AgentEventType.TOOL_CALL_START) {
                         var tc = (io.agentscope.core.event.ToolCallStartEvent) event;
@@ -173,7 +175,7 @@ public class AgentRuntimeService {
         });
     }
 
-    public void setAgent(io.agentscope.core.ReActAgent agent) {
+    public void setAgent(io.agentscope.harness.agent.HarnessAgent agent) {
         this.agent = agent;
     }
 }

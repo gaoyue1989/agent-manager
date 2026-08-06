@@ -1,6 +1,6 @@
 # Agent Framework — API 文档
 
-**版本:** v2.0.0 (Java)
+**版本:** v2.1.0 (Java)
 
 ---
 
@@ -19,7 +19,7 @@ curl http://localhost:8100/
 ```json
 {
     "agent": "test-agent",
-    "description": "A test agent for OAF config loader tests",
+    "description": "A test agent",
     "version": "1.0.0",
     "protocols": {
         "a2a": "1.0.0",
@@ -37,7 +37,8 @@ curl http://localhost:8100/
         "jsonrpc": "/",
         "threads": "/threads",
         "health": "/health",
-        "debug": "/debug"
+        "debug": "/debug",
+        "chat_stream": "/chat/stream"
     },
     "engine": "AgentScope Java 2.0"
 }
@@ -82,8 +83,8 @@ curl http://localhost:8100/.well-known/agent-card.json
 ```json
 {
     "name": "test-agent",
-    "description": "A test agent for OAF config loader tests",
-    "url": "",
+    "description": "A test agent",
+    "url": "http://localhost:8100",
     "version": "1.0.0",
     "provider": { "organization": "acme" },
     "capabilities": {
@@ -91,11 +92,19 @@ curl http://localhost:8100/.well-known/agent-card.json
         "stateTransitionHistory": true,
         "pushNotifications": false
     },
-    "defaultInputModes": ["text", "text/plain"],
-    "defaultOutputModes": ["text", "text/plain", "a2ui/v0.8"],
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain", "a2ui/v0.8"],
+    "interfaces": [
+        { "protocol": "JSONRPC", "url": "/" }
+    ],
     "skills": [...],
-    "extensions": [...],
-    "securitySchemes": { "bearer": {...} }
+    "securitySchemes": {
+        "bearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+        }
+    }
 }
 ```
 
@@ -114,8 +123,8 @@ curl http://localhost:8100/skills
 ```json
 [
     {
-        "name": "bash-tool",
-        "description": "Execute bash commands",
+        "name": "code-review",
+        "description": "Code review skill",
         "version": "1.0.0"
     }
 ]
@@ -138,9 +147,9 @@ curl http://localhost:8100/mcp
     {
         "server": "weather-service",
         "vendor": "weather",
-        "connection_type": "N/A",
-        "url": "N/A",
-        "tool_count": 0
+        "connection_type": "sse",
+        "url": "http://localhost:8811/sse",
+        "tool_count": 3
     }
 ]
 ```
@@ -159,7 +168,7 @@ curl http://localhost:8100/tools
 
 ### GET /system-prompt
 
-系统提示词（含自动生成的 Skills/MCP 上下文）。
+系统提示词（含自动生成的 Skills/MCP/Memory 上下文）。
 
 ```bash
 curl http://localhost:8100/system-prompt
@@ -169,7 +178,7 @@ curl http://localhost:8100/system-prompt
 
 ```json
 {
-    "system_prompt": "# Test Agent\n\n...\n\n## Available Skills\n...\n\n## Available MCP Servers\n...",
+    "system_prompt": "# Test Agent\n...\n\n## Available Skills\n...\n\n## Memory Recall\n...",
     "base_prompt": "# Test Agent\n\nThis is a test agent..."
 }
 ```
@@ -196,28 +205,65 @@ curl http://localhost:8100/threads
 curl http://localhost:8100/debug
 ```
 
-**响应:** HTML 页面 (约 36KB)
+**响应:** HTML 页面
 
 ---
 
-### POST /chat/stream
+## Channel SSE API
 
-SSE 流式对话。
+### GET /chat/stream
+
+Channel 流式对话端点。
 
 ```bash
-curl -s -N -X POST http://localhost:8100/chat/stream \
-  -H "Content-Type: application/json" \
-  -d '{"message":"hello","metadata":{}}'
+curl -s -N "http://localhost:8100/chat/stream?message=hello&userId=alice"
 ```
+
+**参数:**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `message` | String | ✓ | 用户消息 |
+| `userId` | String | ✓ | 用户标识（自动创建独立 session） |
+| `sessionId` | String | | 可选，指定 session（同一用户多个对话） |
+| `subagentId` | String | | 可选，直接与子 Agent 对话 |
 
 **响应 (SSE):**
 
 ```
-data: {"type":"task_update","state":"working","id":"<uuid>"}
-data: {"type":"token","token":"Hello","task_id":"<uuid>"}
-data: {"type":"token","token":"! I","task_id":"<uuid>"}
+data: {"type":"TEXT_BLOCK_DELTA","id":"evt-1","delta":"Hello"}
+data: {"type":"TEXT_BLOCK_DELTA","id":"evt-2","delta":"! I"}
+data: {"type":"TEXT_BLOCK_DELTA","id":"evt-3","delta":"'m"}
 ...
-data: {"type":"done"}
+```
+
+**SSE 事件类型:**
+
+| type | 说明 |
+|------|------|
+| `TEXT_BLOCK_DELTA` | 文本 token（流式累加） |
+| `TOOL_CALL_START` | 工具调用开始 |
+| `TOOL_RESULT_END` | 工具返回结果 |
+| `AGENT_END` | Agent 执行完成 |
+
+**多轮对话示例:**
+
+```bash
+# 第一轮：指定 userId
+curl -s -N "http://localhost:8100/chat/stream?message=记住：我喜欢红色&userId=alice"
+
+# 第二轮：同一 userId，自动恢复会话
+curl -s -N "http://localhost:8100/chat/stream?message=我喜欢什么颜色？&userId=alice"
+```
+
+**子 Agent 对话示例:**
+
+```bash
+# 主 Agent 暴露子 Agent（通过 SubagentExposedEvent 获取 subagentId）
+curl -s -N "http://localhost:8100/chat/stream?message=帮我做研究&userId=alice"
+
+# 直接与子 Agent 对话
+curl -s -N "http://localhost:8100/chat/stream?message=重点调查AI趋势&userId=alice&subagentId=<subagent-id>"
 ```
 
 ---
@@ -278,7 +324,7 @@ data: {"type":"done"}
         "message": {
             "role": "user",
             "parts": [
-                { "kind": "text", "text": "say hi" }
+                { "kind": "text", "text": "请只回复 welcome" }
             ],
             "messageId": "msg-001",
             "kind": "message"
@@ -309,17 +355,16 @@ data: {"type":"done"}
     "id": "1",
     "result": {
         "id": "<task-uuid>",
-        "status": "completed",
-        "result": {
+        "status": {
+            "state": "TASK_STATE_COMPLETED",
+            "timestamp": "2026-08-06T00:00:00Z",
             "message": {
-                "kind": "message",
                 "role": "agent",
-                "messageId": "<msg-uuid>",
-                "parts": [
-                    { "kind": "text", "text": "Hi! I'm the test agent..." }
-                ]
+                "parts": [{"type": "text", "text": "welcome"}]
             }
-        }
+        },
+        "artifacts": [],
+        "metadata": {}
     }
 }
 ```
@@ -340,7 +385,7 @@ data: {"type":"done"}
         "message": {
             "role": "user",
             "parts": [
-                { "text": "hello" }
+                { "text": "请只回复 welcome" }
             ]
         }
     },
@@ -351,27 +396,82 @@ data: {"type":"done"}
 **响应 (SSE):**
 
 ```
-data: {"type":"task_update","state":"working","id":"<uuid>"}
-data: {"type":"token","token":"Hello","task_id":"<uuid>"}
-data: {"type":"token","token":"! I","task_id":"<uuid>"}
-data: {"type":"token","token":"'m","task_id":"<uuid>"}
-...
-data: {"type":"task_update","state":"completed","id":"<uuid>","metadata":{"thread_id":"<uuid>"}}
-data: {"type":"done"}
-data: {"type":"done"}
+data: {"jsonrpc":"2.0","method":"tasks/statusUpdate","params":{"id":"...","status":{"state":"TASK_STATE_WORKING"}}}
+data: {"jsonrpc":"2.0","method":"tasks/artifactUpdate","params":{"id":"...","artifact":{"parts":[{"type":"text","text":"welcome"}]}}}
+data: {"jsonrpc":"2.0","method":"tasks/statusUpdate","params":{"id":"...","status":{"state":"TASK_STATE_COMPLETED"}}}
 ```
 
 **SSE 事件类型:**
 
-| data.type | 说明 |
-|-----------|------|
-| `task_update` | 任务状态变更 (working/completed) |
-| `token` | 文本 token（流式累加） |
-| `tool_call` | 工具调用 |
-| `tool_result` | 工具返回结果 |
-| `error` | 错误信息 |
-| `done` | 完成信号 |
-| `{"type":"done"}` | SSE 流结束标记 |
+| method | 说明 |
+|--------|------|
+| `tasks/statusUpdate` | 任务状态变更 (WORKING/COMPLETED/FAILED/CANCELED) |
+| `tasks/artifactUpdate` | 任务产物更新（文本/文件/结构化数据） |
+
+---
+
+### tasks/get
+
+查询任务状态。
+
+**请求:**
+
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "tasks/get",
+    "params": { "id": "<task-id>" },
+    "id": "2"
+}
+```
+
+**响应:**
+
+```json
+{
+    "jsonrpc": "2.0",
+    "id": "2",
+    "result": {
+        "id": "<task-id>",
+        "status": { "state": "TASK_STATE_COMPLETED" },
+        "artifacts": [...]
+    }
+}
+```
+
+---
+
+### tasks/list
+
+列出任务。
+
+**请求:**
+
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "tasks/list",
+    "params": {},
+    "id": "3"
+}
+```
+
+---
+
+### tasks/cancel
+
+取消任务。
+
+**请求:**
+
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "tasks/cancel",
+    "params": { "id": "<task-id>" },
+    "id": "4"
+}
+```
 
 ---
 
@@ -393,8 +493,8 @@ data: {"type":"done"}
 | kind | 字段 | 说明 |
 |------|------|------|
 | `text` | `text`: string | 文本内容 |
-| `file` | 文件名 + 数据 | 文件 Part（预留） |
-| `data` | 结构化数据 | 数据 Part（预留） |
+| `file` | 文件名 + 数据 | 文件 Part |
+| `data` | 结构化数据 | 数据 Part |
 
 ### 向后兼容
 

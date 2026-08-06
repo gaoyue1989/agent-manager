@@ -76,6 +76,7 @@ public class A2AController {
         }
 
         var userMessage = extractUserText(message);
+        var userId = resolveUserId(params);
 
         response.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
         response.setHeader("Cache-Control", "no-cache");
@@ -84,7 +85,7 @@ public class A2AController {
 
         var os = response.getOutputStream();
         try {
-            agentRuntime.invokeStream(userMessage, null)
+            agentRuntime.invokeStream(userMessage, null, userId)
                 .doOnNext(data -> writeSSE(os, data))
                 .doOnComplete(() -> {
                     try {
@@ -138,9 +139,13 @@ public class A2AController {
         }
 
         var userMessage = extractUserText(message);
-        var taskId = message.getOrDefault("taskId", UUID.randomUUID().toString()).toString();
 
-        var result = agentRuntime.invoke(userMessage, taskId);
+        // thread_id 优先级: params.metadata.thread_id > message.taskId > 自动生成
+        var taskId = resolveThreadId(params, message);
+        // userId: params.metadata.userId (多租户隔离)
+        var userId = resolveUserId(params);
+
+        var result = agentRuntime.invoke(userMessage, taskId, userId);
         var responseText = (String) result.getOrDefault("response", "");
 
         var responseMessage = new LinkedHashMap<String, Object>();
@@ -160,6 +165,41 @@ public class A2AController {
         resp.put("id", id);
         resp.put("result", task);
         return ResponseEntity.ok().body(resp);
+    }
+
+    @SuppressWarnings("unchecked")
+    private String resolveUserId(Map<String, Object> params) {
+        var metadata = (Map<String, Object>) params.get("metadata");
+        if (metadata != null) {
+            var uid = metadata.get("userId");
+            if (uid != null && !uid.toString().isBlank()) {
+                return uid.toString();
+            }
+        }
+        return null; // 回退到默认 vendorKey
+    }
+
+    @SuppressWarnings("unchecked")
+    private String resolveThreadId(Map<String, Object> params, Map<String, Object> message) {
+        // 1. params.metadata.thread_id (A2A 标准上下文标识)
+        var metadata = (Map<String, Object>) params.get("metadata");
+        if (metadata != null) {
+            var tid = metadata.get("thread_id");
+            if (tid != null && !tid.toString().isBlank()) {
+                return tid.toString();
+            }
+            var ctxId = metadata.get("contextId");
+            if (ctxId != null && !ctxId.toString().isBlank()) {
+                return ctxId.toString();
+            }
+        }
+        // 2. message.taskId (兼容旧格式)
+        var taskId = message.get("taskId");
+        if (taskId != null && !taskId.toString().isBlank()) {
+            return taskId.toString();
+        }
+        // 3. 自动生成
+        return UUID.randomUUID().toString();
     }
 
     @SuppressWarnings("unchecked")

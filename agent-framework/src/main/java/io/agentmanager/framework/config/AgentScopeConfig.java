@@ -1,5 +1,7 @@
 package io.agentmanager.framework.config;
 
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -14,9 +16,15 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.*;
-import io.agentscope.core.ReActAgent;
-import io.agentscope.core.tool.Toolkit;
 import io.agentscope.extensions.mysql.state.MysqlAgentStateStore;
+import io.agentscope.extensions.mysql.store.JdbcStore;
+import io.agentscope.harness.agent.DistributedStore;
+import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.IsolationScope;
+import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
+import io.agentscope.harness.agent.memory.compaction.ToolResultEvictionConfig;
+import io.agentscope.harness.agent.filesystem.spec.RemoteFilesystemSpec;
+import io.agentscope.harness.agent.memory.MemoryConfig;
 
 @Configuration
 public class AgentScopeConfig {
@@ -35,23 +43,12 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public SkillManager skillManager(OafConfig oafConfig, AgentManagerProperties props) {
-        var configDir = java.nio.file.Path.of(props.configDir());
-        return new SkillManager(oafConfig, configDir);
-    }
-
-    @Bean
-    public List<SkillManager.SkillInfo> loadedSkills(SkillManager skillManager, OafConfig oafConfig) {
-        return skillManager.loadAll(oafConfig.localSkills());
-    }
-
-    @Bean
     public McpManager mcpManager(AgentManagerProperties props) {
-        return new McpManager(java.nio.file.Path.of(props.configDir()));
+        return new McpManager(Path.of(props.configDir()));
     }
 
     @Bean
-    public List<java.util.Map<String, Object>> mcpConfigs(McpManager mcpManager, OafConfig oafConfig) {
+    public List<Map<String, Object>> mcpConfigs(McpManager mcpManager, OafConfig oafConfig) {
         return mcpManager.loadConfigs(oafConfig.mcpServers());
     }
 
@@ -80,43 +77,102 @@ public class AgentScopeConfig {
         return ds;
     }
 
+    /**
+     * 分布式存储：agent_state 表 (AgentState) + agent_fs 表 (工作区文件)。
+     * 使用自定义库名/表名与现有基础设施保持一致。
+     */
     @Bean
-    public io.agentscope.core.state.AgentStateStore agentStateStore(DataSource dataSource) {
-        return new MysqlAgentStateStore(dataSource, "agent_manager_test", "agent_state", true);
+    public DistributedStore distributedStore(DataSource dataSource) {
+        var store = DistributedStore.builder()
+            .agentStateStore(new MysqlAgentStateStore(
+                dataSource, "agent_manager_test", "agent_state", true))
+            .baseStore(JdbcStore.builder(dataSource)
+                .tableName("agent_fs")
+                .initializeSchema(true)
+                .build())
+            .build();
+        log.info("DistributedStore initialized (agent_manager_test.agent_state + agent_fs)");
+        return store;
     }
 
     @Bean
-    public ReActAgent reactAgent(
+    public io.agentmanager.framework.tool.BusinessTools businessTools() {
+        return new io.agentmanager.framework.tool.BusinessTools();
+    }
+
+    /**
+     * 自定义工具集合：在此注册 @Tool 注解的工具类。
+     * HarnessAgent 创建时会注册到 Toolkit。
+     * 使用特定类型 List 避免收集全部 Bean 造成循环依赖。
+     */
+    @Bean
+    public List<io.agentmanager.framework.tool.BusinessTools> customTools(
+        io.agentmanager.framework.tool.BusinessTools businessTools
+    ) {
+        return List.of(businessTools);
+    }
+
+    @Bean
+    public HarnessAgent harnessAgent(
         AgentManagerProperties props,
-        io.agentscope.core.state.AgentStateStore stateStore,
-        OafConfig oafConfig
+        DistributedStore distributedStore,
+        OafConfig oafConfig,
+        WorkspaceInitializer workspaceInitializer,
+        McpToolRegistrar mcpToolRegistrar,
+        List<io.agentmanager.framework.tool.BusinessTools> customTools
     ) {
         var llm = props.llm();
 
         try {
+            var workspacePath = workspaceInitializer.initialize(
+                Path.of(props.configDir()), oafConfig);
+
             var model = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
                 .apiKey(llm.apiKey())
                 .modelName(llm.modelId())
                 .baseUrl(llm.baseUrl())
                 .build();
 
-            var builder = ReActAgent.builder()
+            // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
+            var toolkit = new io.agentscope.core.tool.Toolkit();
+            for (var tool : customTools) {
+                toolkit.registerTool(tool);
+                log.info("Custom tool registered: {}", tool.getClass().getSimpleName());
+            }
+            mcpToolRegistrar.registerAll(toolkit, oafConfig);
+
+            var agent = HarnessAgent.builder()
                 .name(oafConfig.name())
                 .sysPrompt(oafConfig.systemPrompt())
                 .model(model)
-                .toolkit(new Toolkit())
-                .stateStore(stateStore);
+                .toolkit(toolkit)
+                .workspace(workspacePath)
+                .distributedStore(distributedStore)
+                .filesystem(new RemoteFilesystemSpec()
+                    .isolationScope(IsolationScope.USER))
+                // 记忆管理
+                .memory(MemoryConfig.builder()
+                    .flushTrigger(MemoryConfig.FlushTrigger.throttled(Duration.ofMinutes(10)))
+                    .consolidationMaxTokens(8_000)
+                    .consolidationMinGap(Duration.ofHours(1))
+                    .build())
+                // 上下文压缩
+                .compaction(CompactionConfig.builder()
+                    .triggerMessages(30)
+                    .keepMessages(10)
+                    .flushBeforeCompact(true)
+                    .offloadBeforeCompact(true)
+                    .build())
+                // 大工具结果卸载
+                .toolResultEviction(ToolResultEvictionConfig.defaults())
+                // Plan Mode
+                .enablePlanMode()
+                // 技能自学习
+                .enableSkillManageTool(true)
+                .build();
 
-            if (!oafConfig.tools().isEmpty()) {
-                var tk = new Toolkit();
-                for (var toolName : oafConfig.tools()) {
-                    registerBuiltinTool(tk, toolName);
-                }
-                builder.toolkit(tk);
-            }
-
-            var agent = builder.build();
-            log.info("Agent created: {} (model: {})", oafConfig.name(), llm.modelId());
+            log.info("HarnessAgent created: {} (model: {}, workspace: {})",
+                oafConfig.name(), llm.modelId(), workspacePath);
             return agent;
         } catch (Exception e) {
             log.error("Failed to create AgentScope agent: {}", e.getMessage(), e);
@@ -124,24 +180,13 @@ public class AgentScopeConfig {
         }
     }
 
-    private void registerBuiltinTool(Toolkit tk, String toolName) {
-        switch (toolName.toLowerCase()) {
-            case "bash", "execute" -> {}
-            case "read" -> {}
-            case "edit" -> {}
-            case "grep" -> {}
-            default -> log.debug("Custom tool not yet implemented: {}", toolName);
-        }
-    }
-
     @Bean
     public AgentRuntimeService agentRuntimeService(
         OafConfig oafConfig,
-        ReActAgent reactAgent,
-        List<SkillManager.SkillInfo> loadedSkills,
-        List<java.util.Map<String, Object>> mcpConfigs,
+        HarnessAgent harnessAgent,
+        List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger
     ) {
-        return new AgentRuntimeService(oafConfig, reactAgent, loadedSkills, mcpConfigs, llmLogger);
+        return new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger);
     }
 }

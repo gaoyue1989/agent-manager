@@ -18,6 +18,7 @@ public record OafConfig(
     List<McpServerConfig> mcpServers,
     List<SubAgentConfig> subAgents,
     List<String> tools,
+    List<String> deniedTools,
     ModelConfig model,
     RuntimeConfig runtimeConfig,
     MemoryConfig memory,
@@ -34,6 +35,7 @@ public record OafConfig(
     public boolean hasSkills() { return !skills.isEmpty(); }
     public boolean hasMcp() { return !mcpServers.isEmpty(); }
     public boolean hasSubAgents() { return !subAgents.isEmpty(); }
+    public boolean hasDeniedTools() { return deniedTools != null && !deniedTools.isEmpty(); }
 
     public String getCatalogId() {
         var hc = rawFrontmatter != null ? rawFrontmatter.get("harnessConfig") : null;

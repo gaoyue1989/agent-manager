@@ -1,7 +1,7 @@
 # Agent Framework — 部署文档
 
-**版本:** v2.0.0 (Java)
-**日期:** 2026-07-13
+**版本:** v2.1.0 (Java)
+**日期:** 2026-08-06
 
 ---
 
@@ -55,17 +55,14 @@ LLM_MODEL_ID=your_model_id \
 LLM_BASE_URL=https://your-api-endpoint/v1 \
 AGENT_CONFIG_DIR=./config \
 SERVER_PORT=8100 \
-java -jar target/agent-framework-2.0.0.jar
+java -jar target/agent-framework-2.1.0.jar
 ```
 
 ### 2.4 验证
 
 ```bash
 curl http://localhost:8100/health
-# {"status":"healthy","llm_configured":true,...}
-
 curl http://localhost:8100/debug
-# HTML debug page
 ```
 
 ---
@@ -100,10 +97,9 @@ docker logs -f agent-framework
 预期输出：
 ```
 Loaded OAF: My Agent v1.0.0
-  Skills: 0 - []
-  MCP: 0 - []
-  Tools: ['Read', 'Bash', 'Edit', 'Grep']
-Agent created: My Agent (model: your_model_id)
+DistributedStore initialized (agent_manager_test.agent_state + agent_fs)
+Workspace initialized at: /config/.agentscope/workspace
+HarnessAgent created: My Agent (model: your_model_id, filesystem: MySQL)
 Tomcat started on port 8100
 ```
 
@@ -134,18 +130,62 @@ Tomcat started on port 8100
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `name` | string | ✓ | Agent 显示名称 |
-| `vendorKey` | string | ✓ | 发布者命名空间 (kebab-case) |
-| `agentKey` | string | ✓ | Agent 标识符 (kebab-case) |
+| `vendorKey` | string | ✓ | 发布者命名空间 |
+| `agentKey` | string | ✓ | Agent 标识符 |
 | `version` | string | ✓ | 语义版本号 |
 | `slug` | string | ✓ | 唯一标识: `vendorKey/agentKey` |
 | `description` | string | | 简要描述 |
-| `skills` | list[object] | | 技能列表 |
-| `mcpServers` | list[object] | | MCP 服务器列表 |
-| `tools` | list[string] | | 启用内置工具: `Read`, `Bash`, `Edit`, `Grep` |
+| `skills` | list | | 技能列表 |
+| `mcpServers` | list | | MCP 服务器列表 |
+| `tools` | list | | 启用内置工具 |
+| `deniedTools` | list | | 排除的工具 |
+| `model` | object/string | | 模型配置 |
+| `agents` | list | | 子 Agent 声明 |
 
 ---
 
-## 5. 服务端点
+## 5. MCP 配置
+
+### 5.1 config.yaml 格式
+
+```yaml
+server: weather-service
+vendor: weather
+version: "1.0.0"
+connection:
+  type: streamableHttp   # sse / streamableHttp / stdio
+  url: http://127.0.0.1:8811/mcp
+  timeout: 60
+auth:
+  type: bearer
+  token: ${MCP_TOKEN}    # 支持环境变量
+permissions:
+  read_only: true         # 强制工具只读，绕过 HITL 授权
+```
+
+### 5.2 permissions.read_only 说明
+
+AgentScope 的 `McpTool.checkPermissions()` 对非只读 MCP 工具返回 `PermissionDecision.ask()`（需 HITL 授权），导致工具调用挂起。两种方式让 MCP 工具自动放行：
+
+| 方式 | 来源 | 说明 |
+|------|------|------|
+| server annotations | `ToolAnnotations(readOnlyHint=True)` | MCP 协议标准，server 端标注 |
+| **config.yaml 配置** | `permissions.read_only: true` | 本框架支持，无需改 server |
+
+**优先级**: config.yaml `permissions.read_only` > server `annotations.readOnlyHint` > 默认 HITL ask
+
+### 5.3 MCP 工具执行流程
+
+```
+LLM 推理 → 选择工具 (如 get_weather)
+  → McpTool.callAsync → McpSyncClientWrapper.callTool
+  → streamable-http POST → MCP Server
+  → 返回 JSON → ToolResultBlock → LLM 组织最终回答
+```
+
+---
+
+## 6. 服务端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -155,15 +195,15 @@ Tomcat started on port 8100
 | GET | `/skills` | 技能列表 |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 |
-| GET | `/debug` | 调试页面 |
+| GET | `/debug` | 调试页面 (A2A/Channel 双模式) |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
-| POST | `/` | A2A JSON-RPC |
-| POST | `/chat/stream` | SSE 流式对话 |
+| GET | `/chat/stream` | Channel SSE 流式对话 |
+| POST | `/` | A2A JSON-RPC (message/send, message/stream) |
 
 ---
 
-## 6. A2A JSON-RPC 方法
+## 7. A2A JSON-RPC 方法
 
 | 方法 | 说明 |
 |------|------|
@@ -180,51 +220,71 @@ Tomcat started on port 8100
     "message": {
       "role": "user",
       "parts": [{"kind": "text", "text": "hello"}]
+    },
+    "metadata": {
+      "thread_id": "optional-thread-id",
+      "userId": "optional-user-id"
     }
   },
   "id": "1"
 }
 ```
 
-> 注意: Part 的 `kind` 字段为 `"text"`（不是 `"type"`）。
+---
+
+## 8. Channel SSE API
+
+```
+GET /chat/stream?message=<text>&userId=<id>[&sessionId=<id>]
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `message` | String | ✓ | 用户消息 |
+| `userId` | String | ✓ | 用户标识（自动创建独立 session） |
+| `sessionId` | String | | 指定 session（同一用户多个对话） |
+| `subagentId` | String | | 直接与子 Agent 对话 |
 
 ---
 
-## 7. 验证
+## 9. 验证
 
-### 7.1 健康检查
+### 9.1 健康检查
 
 ```bash
-curl -s http://localhost:8100/health | python3 -m json.tool
+curl -s http://localhost:8100/health
 ```
 
-### 7.2 同步消息
+### 9.2 同步消息
 
 ```bash
 curl -s -X POST http://localhost:8100/ \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hello"}]}},"id":"1"}'
+  -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"请只回复 welcome"}]}},"id":"1"}'
 ```
 
-### 7.3 流式消息
+### 9.3 Channel SSE
 
 ```bash
-curl -s -N -X POST http://localhost:8100/ \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"message/stream","params":{"message":{"role":"user","parts":[{"text":"hello"}]}},"id":"s1"}'
+curl -s -N "http://localhost:8100/chat/stream?message=请只回复welcome&userId=test-user"
 ```
 
-### 7.4 调试页面
+### 9.4 LLM 连通性
 
-浏览器访问 `http://localhost:8100/debug`
+```bash
+curl -s "https://api.longcat.chat/openai/v1/chat/completions" \
+  -H "Authorization: Bearer ${LLM_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"LongCat-2.0","messages":[{"role":"user","content":"请只回复 welcome"}],"max_tokens":50,"temperature":0.2}'
+```
 
 ---
 
-## 8. 常见问题
+## 10. 常见问题
 
 ### Q: 服务启动后 LLM 返回错误
 
-检查 LLM 环境变量是否设置:
+检查 LLM 环境变量：
 ```bash
 echo $LLM_API_KEY
 echo $LLM_MODEL_ID
@@ -233,7 +293,7 @@ echo $LLM_BASE_URL
 
 ### Q: A2A message/send 返回 "Invalid parameters"
 
-确认 Part 格式正确:
+确认 Part 格式正确：
 ```json
 // ✅ 正确
 {"parts": [{"kind": "text", "text": "hello"}]}
@@ -247,4 +307,24 @@ echo $LLM_BASE_URL
 
 ### Q: MySQL 连接失败
 
-确认 `CHECKPOINT_JDBC_URL` 中的主机地址在 K8s Pod 内需使用 Docker 网关 `172.20.0.1` 代替 `127.0.0.1`。
+K8s Pod 内需使用 Docker 网关 `172.20.0.1` 代替 `127.0.0.1`。
+
+### Q: agent_fs 表不存在
+
+`MysqlDistributedStore` 会在启动时自动创建。检查 MySQL 用户是否有 CREATE TABLE 权限。
+
+### Q: MCP 工具调用卡住（无响应）
+
+AgentScope 对非只读 MCP 工具返回 `PermissionDecision.ask()`（需 HITL 授权）。在 config.yaml 添加：
+```yaml
+permissions:
+  read_only: true
+```
+
+### Q: 工具过滤后内置工具丢失
+
+当前实现已移除 `allow` 白名单，改用 `deny` 排除模式。如仍有旧 `tools.json` 含 `allow`，删除 `.agentscope/workspace/tools.json` 重启。
+
+### Q: 多用户数据串扰
+
+确认 HarnessAgent 配置了 `IsolationScope.USER`，且 RuntimeContext 传入了正确的 `userId`。

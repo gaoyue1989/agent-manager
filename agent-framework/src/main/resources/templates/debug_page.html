@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent Debug Console — MCP Apps Host</title>
+<title>Agent Debug Console — AgentScope 2.0</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column}
@@ -172,10 +172,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <button onclick="showLLMCalls()" style="margin-left:auto;padding:3px 10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;cursor:pointer;font-size:11px" id="llmBtn" disabled>LLM Calls</button>
     </div>
     <div class="messages" id="messages">
-      <div class="msg system">MCP Apps Host v1.0 - SEP-1865 compliant</div>
+      <div class="msg system">Agent Debug Console v2.1 — AgentScope 2.0 HarnessAgent + Workspace</div>
     </div>
     <div class="input-area">
       <textarea id="userInput" placeholder="Type your message..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+      <div style="display:flex;gap:4px;align-items:center">
+        <button id="modeA2A" onclick="setStreamMode('a2a')" style="padding:3px 8px;background:#1f6feb;color:#fff;border:1px solid #30363d;border-radius:4px;cursor:pointer;font-size:10px">A2A</button>
+        <button id="modeChannel" onclick="setStreamMode('channel')" style="padding:3px 8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer;font-size:10px">Channel</button>
+      </div>
       <button id="sendBtn" onclick="sendMessage()">Send</button>
     </div>
   </div>
@@ -188,7 +192,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 <script>
 const BASE=window.location.pathname.replace(/\/debug$/,'')||'';
-let isStreaming=false,abortController=null,streamingDiv=null,currentThreadId=null,threadListCache=[],pendingToolCalls={},mcpAppsRegistry={},mcpAppsIframes={},currentUsage=null;
+let isStreaming=false,abortController=null,streamingDiv=null,currentThreadId=null,threadListCache=[],pendingToolCalls={},mcpAppsRegistry={},mcpAppsIframes={},currentUsage=null,streamMode='a2a';
 
 async function init(){
   try{
@@ -415,6 +419,14 @@ function buildMetadata(){
   return meta;
 }
 
+function setStreamMode(mode){
+  streamMode=mode;
+  const a2aBtn=document.getElementById('modeA2A');
+  const chBtn=document.getElementById('modeChannel');
+  if(a2aBtn){a2aBtn.style.background=mode==='a2a'?'#1f6feb':'#21262d';a2aBtn.style.color=mode==='a2a'?'#fff':'#c9d1d9';}
+  if(chBtn){chBtn.style.background=mode==='channel'?'#1f6feb':'#21262d';chBtn.style.color=mode==='channel'?'#fff':'#c9d1d9';}
+}
+
 async function sendMessage(){
   if(isStreaming){if(abortController){abortController.abort();}return;}
   const input=document.getElementById('userInput');
@@ -423,12 +435,55 @@ async function sendMessage(){
   input.value='';input.focus();
   addMessage('user',text);
   const btn=document.getElementById('sendBtn');
-  const metadata=buildMetadata();
   isStreaming=true;btn.disabled=true;btn.textContent='Stop';btn.className='stop-btn';
   streamingDiv=createStreamingMsg();
   abortController=new AbortController();
   let fullText='';
   pendingToolCalls={};
+  if(streamMode==='channel'){await sendChannelSSE(text,btn,fullText);}
+  else{await sendA2AStream(text,btn,fullText);}
+}
+
+async function sendChannelSSE(text,btn,fullText){
+  try{
+    const params=new URLSearchParams({message:text,userId:'debug-user'});
+    if(currentThreadId)params.set('sessionId',currentThreadId);
+    const resp=await fetch(BASE+'/chat/stream?'+params.toString(),{signal:abortController.signal});
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const lines=buffer.split('\n');
+      buffer=lines.pop()||'';
+      for(const line of lines){
+        if(!line.startsWith('data:'))continue;
+        const dataStr=line.slice(5).trim();
+        if(!dataStr)continue;
+        try{
+          const data=JSON.parse(dataStr);
+          if(data.type==='TEXT_BLOCK_DELTA'&&data.delta&&streamingDiv){
+            fullText+=data.delta;updateStreamContent(fullText);
+          }else if(data.type==='AGENT_END'||data.type==='MODEL_CALL_END'){
+            // 会话结束
+          }
+        }catch(e){}
+      }
+    }
+    if(streamingDiv&&fullText)updateStreamContent(fullText);
+  }catch(e){
+    if(e.name==='AbortError'){if(streamingDiv&&fullText)updateStreamContent(fullText);}
+    else{if(streamingDiv)streamingDiv.innerHTML='<span style="color:#da3633">Error: '+esc(e.message)+'</span>';}
+  }
+  isStreaming=false;btn.disabled=false;btn.textContent='Send';btn.className='';
+  streamingDiv=null;abortController=null;
+  await refreshThreads();
+}
+
+async function sendA2AStream(text,btn,fullText){
+  const metadata=buildMetadata();
   try{
     const resp=await fetch(BASE+'/',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',method:'message/stream',params:{message:{role:'user',parts:[{text}]},metadata},id:'stream-'+Date.now()}),signal:abortController.signal});
     const reader=resp.body.getReader();

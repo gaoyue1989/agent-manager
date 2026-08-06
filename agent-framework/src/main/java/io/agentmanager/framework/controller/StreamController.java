@@ -1,28 +1,75 @@
 package io.agentmanager.framework.controller;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import org.springframework.http.MediaType;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
-import io.agentmanager.framework.service.AgentRuntimeService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.TextBlockDeltaEvent;
+import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
+import io.agentscope.harness.agent.gateway.channel.chatui.SendOptions;
 import reactor.core.publisher.Flux;
 
 @RestController
 public class StreamController {
 
-    private final AgentRuntimeService agentRuntime;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    public StreamController(AgentRuntimeService agentRuntime) {
-        this.agentRuntime = agentRuntime;
+    private final ChatUiChannel chatChannel;
+
+    public StreamController(ChatUiChannel chatChannel) {
+        this.chatChannel = chatChannel;
     }
 
-    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<Map<String, Object>> chatStream(@RequestBody Map<String, Object> body) {
-        var message = body.getOrDefault("message", "").toString();
-        var metadata = body.getOrDefault("metadata", Map.of());
-        @SuppressWarnings("unchecked")
-        var threadId = (String) ((Map<String, Object>) metadata).getOrDefault("thread_id", null);
-        return agentRuntime.invokeStream(message, threadId);
+    @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> chatStream(
+            @RequestParam String message,
+            @RequestParam String userId,
+            @RequestParam(required = false) String sessionId,
+            @RequestParam(required = false) String subagentId
+    ) {
+        if (subagentId != null && !subagentId.isBlank()) {
+            return chatChannel.sendToSubagentStream(subagentId, message)
+                .map(this::toSSE);
+        }
+
+        SendOptions options = sessionId != null && !sessionId.isBlank()
+            ? SendOptions.of(userId, sessionId)
+            : SendOptions.userId(userId);
+
+        return chatChannel.sendStream(options, message)
+            .map(this::toSSE);
+    }
+
+    private ServerSentEvent<String> toSSE(AgentEvent event) {
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("type", event.getType().name());
+        payload.put("id", event.getId());
+
+        if (event instanceof TextBlockDeltaEvent delta) {
+            payload.put("delta", delta.getDelta());
+        } else if (event instanceof ToolCallStartEvent tc) {
+            payload.put("toolName", tc.getToolCallName());
+            payload.put("toolCallId", tc.getToolCallId());
+        } else if (event instanceof ToolResultEndEvent tr) {
+            payload.put("state", tr.getState().name());
+        }
+
+        try {
+            return ServerSentEvent.<String>builder()
+                .data(MAPPER.writeValueAsString(payload))
+                .build();
+        } catch (Exception e) {
+            return ServerSentEvent.<String>builder().data("{}").build();
+        }
     }
 }

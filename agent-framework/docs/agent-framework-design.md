@@ -1,25 +1,28 @@
 # Agent Framework — 设计文档
 
-**版本:** v2.0.0 (Java)
-**日期:** 2026-07-13
+**版本:** v2.1.0 (Java)
+**日期:** 2026-08-06
 
 ---
 
 ## 1. 概述
 
-Agent Framework 是一个基于 **AgentScope Java 2.0** 的独立可运行 Agent 服务框架，支持 **OAF v0.8.0** 配置规范、**A2A v1.0.0** 通信协议和 **A2UI v0.8** 声明式 UI 扩展。
+Agent Framework 是一个基于 **AgentScope Java 2.0 Harness** 的独立可运行 Agent 服务框架，支持 **OAF v0.8.0** 配置规范、**A2A v1.0.0** 通信协议和 **A2UI v0.8** 声明式 UI 扩展。
 
 ### 核心特性
 
 | 特性 | 说明 |
 |------|------|
 | OAF 配置 | 通过 `AGENTS.md` + `skills/` + `mcp-configs/` 目录定义 Agent |
-| A2A 协议 | JSON-RPC 2.0 (message/send, message/stream) |
-| 多工具 | Bash / Read / Edit / Grep 内置工具 + MCP 扩展 |
-| Skills | 动态加载技能模块 (SKILL.md + tool.py) |
-| 流式输出 | 逐 token SSE 推送 + 内嵌调试页面 |
-| 状态持久化 | MySQL AgentStateStore 实现会话持久化 |
-| MCP Apps Host | 支持 tool_call _meta.ui 元数据传递和 iframe 渲染 |
+| A2A 协议 | JSON-RPC 2.0 (message/send, message/stream, tasks/*) |
+| 工作区 | AgentScope Workspace 目录布局 (AGENTS.md, skills/, subagents/, knowledge/) |
+| 记忆管理 | MEMORY.md + memory/ 两层记忆，自动 flush/consolidation |
+| 上下文压缩 | 对话摘要、工具结果卸载、溢出兜底 |
+| Plan Mode | 只读规划态 + plans/PLAN.md 持久化 |
+| 技能自学习 | agent 自动沉淀成功模式为 SKILL.md |
+| Channel | agent.channel() + Gateway + SSE |
+| 多租户 | IsolationScope.USER 按 userId 自动隔离 |
+| 状态持久化 | MysqlDistributedStore (agent_state + agent_fs) |
 
 ---
 
@@ -28,29 +31,36 @@ Agent Framework 是一个基于 **AgentScope Java 2.0** 的独立可运行 Agent
 ### 2.1 总体架构
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      Agent Framework                          │
-│                                                              │
-│  ┌─────────────┐   ┌──────────────┐   ┌──────────────────┐  │
-│  │  OAF Loader  │   │ AgentScope   │   │  A2A Controller  │  │
-│  │  AGENTS.md   │──▶│ ReActAgent   │──▶│  + SSE Streaming │  │
-│  │  + skills/   │   │ + Skills     │   │  + Debug Page    │  │
-│  │  + mcp/      │   │ + MCP Tools  │   └──────────────────┘  │
-│  └─────────────┘   └──────────────┘                          │
-│                    │         │                                │
-│                    ▼         ▼                                │
-│  ┌─────────────────────────────────────────────┐             │
-│  │  MySQL AgentStateStore (GreatSQL 3307)       │             │
-│  │  agent_state 表 · session 持久化              │             │
-│  └─────────────────────────────────────────────┘             │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │              配置文件挂载 (/config)                       │ │
-│  │   /config/AGENTS.md (必需)                               │ │
-│  │   /config/skills/  (可选)                                │ │
-│  │   /config/mcp-configs/ (可选)                            │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      Agent Framework v2.1                         │
+│                                                                  │
+│  ┌─────────────┐   ┌──────────────────┐   ┌──────────────────┐  │
+│  │  OAF Loader  │   │  HarnessAgent    │   │  A2A Server      │  │
+│  │  AGENTS.md   │──▶│  + Workspace     │──▶│  (AgentScope)    │  │
+│  │  + skills/   │   │  + Memory        │   │  + SSE Streaming │  │
+│  │  + mcp/      │   │  + Compaction    │   │  + Agent Card    │  │
+│  │  + agents/   │   │  + Plan Mode     │   └──────────────────┘  │
+│  └─────────────┘   │  + Skills        │                          │
+│                    │  + Channel       │   ┌──────────────────┐  │
+│                    └──────────────────┘   │  ChatUiChannel   │  │
+│                            │              │  + Gateway       │  │
+│                            ▼              └──────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  MysqlDistributedStore (GreatSQL 3307)                   │    │
+│  │  ├── agent_state 表 · AgentState 持久化                  │    │
+│  │  └── agent_fs 表 · 工作区文件 KV 存储                     │    │
+│  │      ├── MEMORY.md · 长期记忆                             │    │
+│  │      ├── memory/ · 每日流水账                             │    │
+│  │      ├── skills/ · 技能文件                               │    │
+│  │      ├── subagents/ · 子 Agent 声明                       │    │
+│  │      └── agents/*/sessions/ · 会话日志                    │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  RemoteFilesystemSpec(IsolationScope.USER)               │    │
+│  │  自动按 userId 分桶 · 多租户隔离                          │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 模块分层
@@ -61,25 +71,28 @@ src/main/java/io/agentmanager/framework/
 ├── config/
 │   ├── AgentManagerProperties.java  # 环境变量 @ConfigurationProperties
 │   ├── OafConfigLoader.java         # AGENTS.md 解析 (SnakeYAML)
-│   ├── AgentScopeConfig.java        # Bean 装配 (ReActAgent, DataSource, RuntimeService)
-│   └── A2AServerConfig.java         # A2A Server Bean (AgentScopeA2aServer)
+│   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent, MysqlDistributedStore)
+│   ├── A2AServerConfig.java         # A2A Server Bean (AgentScopeA2aServer + HarnessAgentRunner)
+│   └── ChannelConfig.java           # ChatUiChannel Bean
 ├── model/
-│   └── OafConfig.java               # OAF 配置模型 (Java Record)
+│   └── OafConfig.java               # OAF 配置模型 (Java Record, 含 deniedTools)
 ├── service/
-│   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream/buildSystemPrompt)
-│   ├── SkillManager.java            # Skill 加载 (SKILL.md + tool.py)
+│   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream + userId)
+│   ├── WorkspaceInitializer.java    # OAF → Workspace 转换
+│   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder)
 │   ├── McpManager.java              # MCP 配置加载
+│   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   ├── A2uiService.java             # A2UI JSONL 生成
 │   └── LLMLogger.java               # LLM 调用日志
+├── tool/
+│   └── BusinessTools.java           # @Tool 自定义工具 (get_current_time, echo)
 └── controller/
     ├── InfoController.java          # GET /、/system-prompt
     ├── HealthController.java        # GET /health
     ├── ToolController.java          # GET /skills、/mcp、/tools
-    ├── AgentCardController.java     # GET /.well-known/agent-card.json
     ├── DebugController.java         # GET /debug
-    ├── StreamController.java        # POST /chat/stream (SSE)
-    ├── ThreadController.java        # GET /threads
-    └── A2AController.java           # POST / (A2A JSON-RPC)
+    ├── StreamController.java        # GET /chat/stream (Channel SSE)
+    └── ThreadController.java        # GET /threads
 ```
 
 ### 2.3 请求处理流程
@@ -88,65 +101,91 @@ src/main/java/io/agentmanager/framework/
 Client Request (POST /)
   │
   ▼
-A2AController.handleA2A()
+A2A Server (AgentScopeA2aServer)
   │ 解析 JSON-RPC method
-  ├── message/send ──▶ handleMessageSend()
-  │     └── agentRuntime.invoke() → ReActAgent.call() → LLM API
-  │     └── 返回 JSON-RPC 响应 { result: { id, status, result: { message } } }
+  ├── message/send ──▶ HarnessAgent.call() → LLM API
+  │     └── 返回 A2A Task { id, status: { state, message }, artifacts }
   │
-  └── message/stream ──▶ handleStreaming()
-        └── agentRuntime.invokeStream() → ReActAgent.streamEvents()
-        └── SSE: data: {"type":"task_update","state":"working"}
-              → data: {"type":"token","token":"..."}
-              → data: {"type":"tool_call",...}
-              → data: {"type":"tool_result",...}
-              → data: {"type":"task_update","state":"completed"}
-              → data: {"type":"done"}
-              → data: {"type":"done"}
-```
+  ├── message/stream ──▶ HarnessAgent.streamEvents()
+  │     └── SSE: TaskStatusUpdateEvent / TaskArtifactUpdateEvent
+  │
+  ├── tasks/get ──▶ 查询 Task 状态
+  ├── tasks/list ──▶ 列出 Tasks
+  └── tasks/cancel ──▶ 取消 Task
 
-### 2.4 工具调用流程
-
-```
-Agent.invoke("用 bash 执行 uname -a")
+Client Request (GET /chat/stream?message=...&userId=...)
   │
   ▼
-AgentRuntimeService.invoke()
+StreamController → ChatUiChannel.sendStream()
   │
-  ├── RuntimeContext(sessionId, userId) 创建
-  ├── UserMessage("user", message) 创建
-  ├── agent.call([userMsg], ctx) → ReActAgent 执行
-  │     ├── LLM 思考 → 决定调用 bash 工具
-  │     ├── AgentScope 调用 ShellTool.run("uname -a")
-  │     ├── 结果返回给 LLM
-  │     └── LLM 生成最终回答
-  └── 返回 { response: "...", thread_id: "..." }
+  ├── SendOptions.userId(userId) → 自动创建/恢复 session
+  ├── HarnessAgent.streamEvents() → LLM API
+  └── SSE: TextBlockDeltaEvent / ToolCallStartEvent / ...
+```
+
+### 2.4 记忆管理流程
+
+```
+call(msg, RuntimeContext(userId, sessionId))
+  │
+  ▼
+WorkspaceContextMiddleware 拼装 system prompt
+  │ ├── 读 AGENTS.md (两层读: 先 MySQL, 后本地模板)
+  │ ├── 读 MEMORY.md (受 maxContextTokens 预算约束)
+  │ └── 读 skills/ → DynamicSkillMiddleware → <available_skills>
+  │
+  ▼
+推理循环 (HarnessAgent)
+  │ ├── LLM 思考 → 工具调用 → 结果
+  │ ├── 超大工具结果 → ToolResultEvictionMiddleware → 落盘 + 占位符
+  │ └── 消息超长 → CompactionMiddleware → 结构化摘要
+  │
+  ▼
+call() 结束
+  │ ├── MemoryFlushMiddleware → 提取事实 → memory/YYYY-MM-DD.md
+  │ ├── AgentState 序列化 → agent_state 表
+  │ └── 工作区文件 → agent_fs 表
+  │
+  ▼
+后台任务 (节流 30 分钟)
+  └── MemoryConsolidator → 合并 memory/ → MEMORY.md
 ```
 
 ---
 
 ## 3. 核心设计决策
 
-### 3.1 技术选型: AgentScope Java vs DeepAgents Python
+### 3.1 为什么从 ReActAgent 升级到 HarnessAgent？
 
-| 对比项 | AgentScope Java | DeepAgents Python |
-|--------|-----------------|-------------------|
-| 运行时 | JVM 21 (Spring Boot 3.3) | Python 3.11+ (FastAPI) |
-| Agent 模型 | ReActAgent | create_deep_agent |
-| LLM 适配 | OpenAIChatModel | ChatOpenAI |
-| 状态存储 | MysqlAgentStateStore | AsyncMySaver (LangGraph) |
-| A2A 协议 | 自定义 Controller | a2a_routes.py |
-| 构建工具 | Maven | pip |
-| 部署 | JAR (Docker) | Python (Docker) |
+| 维度 | ReActAgent (v2.0) | HarnessAgent (v2.1) |
+|------|-------------------|---------------------|
+| 记忆管理 | ❌ | ✅ MEMORY.md + memory/ |
+| 上下文压缩 | ❌ | ✅ CompactionConfig |
+| Plan Mode | ❌ | ✅ enablePlanMode() |
+| 技能自学习 | ❌ | ✅ enableSkillManageTool() |
+| 工作区 | ❌ | ✅ Workspace 目录布局 |
+| 子 Agent | ❌ | ✅ subagents/*.md |
+| 多租户 | 手动 sessionId 前缀 | ✅ IsolationScope.USER |
+| Channel | ❌ | ✅ agent.channel() |
 
-### 3.2 A2A Controller (替代 AgentScopeA2aServer)
+### 3.2 为什么从 MysqlAgentStateStore 升级到 MysqlDistributedStore？
 
-`agentscope-extensions-a2a-server` 依赖了 `agentscope-core` 中不存在的 `PartParserRouter` 类，因此使用自定义 A2A Controller 替代：
+| 维度 | MysqlAgentStateStore | MysqlDistributedStore |
+|------|---------------------|----------------------|
+| AgentState 持久化 | ✅ | ✅ |
+| 工作区文件存储 | ❌ | ✅ (JdbcStore) |
+| 与 HarnessAgent 兼容 | 需手动配置 | ✅ 一键配置 |
+| 与 RemoteFilesystemSpec 兼容 | ❌ | ✅ |
+| 自动建表 | agent_state | agent_state + agent_fs |
 
-- `message/send` → `AgentRuntimeService.invoke()` → JSON 响应
-- `message/stream` → `AgentRuntimeService.invokeStream()` → SSE 流
+### 3.3 A2A 协议实现
 
-### 3.3 Part 格式
+使用 AgentScope 内置 `AgentScopeA2aServer` 扩展，支持完整的 A2A v1.0.0 方法：
+- `message/send`, `message/stream`
+- `tasks/get`, `tasks/list`, `tasks/cancel`
+- Agent Card 自动提供
+
+### 3.4 Part 格式
 
 A2A 协议中 Part 的多态类型鉴别器是 `kind`（不是 `type`）：
 
@@ -157,34 +196,47 @@ A2A 协议中 Part 的多态类型鉴别器是 `kind`（不是 `type`）：
 {"type": "text", "text": "hello"}
 ```
 
-控制器兼容两种格式：优先读取 `kind`，为 `null` 时默认视为 `text`。
+### 3.5 流式传输实现
 
-### 3.4 流式传输实现
-
-采用 AgentScope 的 `streamEvents()` API 实现 token 级流式 SSE：
+通过 AgentScope Channel 实现：
 
 ```java
-agent.streamEvents(List.of(userMsg), ctx)
+// ChatUiChannel
+chatChannel.sendStream(SendOptions.userId("alice"), "hello")
     .doOnNext(event -> {
-        if (event instanceof TextBlockDeltaEvent) {
-            String delta = ((TextBlockDeltaEvent) event).getDelta();
-            sink.next(Map.of("type", "token", "token", delta));
+        if (event instanceof TextBlockDeltaEvent delta) {
+            System.out.print(delta.getDelta());
         }
     })
 ```
 
-SSE 格式：
-```
-data: {"type":"task_update","state":"working",...}
-data: {"type":"token","token":"Hello",...}
-data: {"type":"done"}
-```
+---
+
+## 4. 多租户隔离
+
+### 4.1 IsolationScope
+
+| Scope | 命名空间键 | 典型场景 |
+|---|---|---|
+| `USER`（默认） | `agents/<agentId>/users/<userId>/...` | 同一用户跨会话共享记忆 |
+| `SESSION` | `agents/<agentId>/sessions/<sessionId>/...` | 每个会话完全隔离 |
+| `AGENT` | `agents/<agentId>/shared/...` | 共享知识库型 agent |
+
+### 4.2 隔离矩阵
+
+| 数据类型 | 隔离维度 | 存储位置 |
+|---|---|---|
+| AgentState | `(userId, sessionId)` | `agent_state` 表 |
+| MEMORY.md | `userId` | `agent_fs` 表 |
+| memory/ | `userId` | `agent_fs` 表 |
+| skills/ | 共享 + 用户覆盖 | `agent_fs` 表 |
+| sessions/ | `userId` | `agent_fs` 表 |
 
 ---
 
-## 4. 配置规范
+## 5. 配置规范
 
-### 4.1 OAF 目录结构
+### 5.1 OAF 目录结构
 
 ```
 config/
@@ -193,48 +245,30 @@ config/
 │   └── <skill-name>/
 │       ├── SKILL.md           # 技能清单
 │       └── scripts/
-│           └── tool.py        # Python 实现 (main() 函数)
+│           └── tool.py        # Python 实现
 └── mcp-configs/               # 可选：MCP 服务器
     └── <server-name>/
         ├── ActiveMCP.json     # 工具选择
         └── config.yaml        # 连接配置
 ```
 
-### 4.2 AGENTS.md 示例
+### 5.2 Workspace 目录布局（自动生成）
 
-```yaml
----
-name: "My Agent"
-vendorKey: "myorg"
-agentKey: "my-agent"
-version: "1.0.0"
-slug: "myorg/my-agent"
-description: "A custom agent"
-
-skills:
-  - name: "bash-tool"
-    source: "local"
-    version: "1.0.0"
-
-mcpServers:
-  - vendor: "weather"
-    server: "weather-service"
-    version: "1.0.0"
-    configDir: "mcp-configs/weather"
-
-tools:
-  - Read
-  - Bash
-  - Edit
-  - Grep
----
-
-# System Prompt
-
-You are a helpful AI assistant.
+```
+.agentscope/workspace/
+├── AGENTS.md                    ← OAF frontmatter + body 转换
+├── tools.json                   ← OAF mcpServers 转换
+├── skills/                      ← OAF skills (本地复制)
+├── subagents/                   ← OAF agents 转换
+├── knowledge/                   ← 知识库
+├── MEMORY.md                    ← 长期记忆 (自动生成)
+├── memory/                      ← 每日流水账 (自动生成)
+│   └── YYYY-MM-DD.md
+└── plans/                       ← Plan Mode 计划 (自动生成)
+    └── PLAN.md
 ```
 
-### 4.3 环境变量
+### 5.3 环境变量
 
 | 变量 | 默认值 | 必填 | 说明 |
 |------|--------|------|------|
@@ -254,15 +288,74 @@ You are a helpful AI assistant.
 
 ---
 
-## 5. 依赖
+## 6. 依赖
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| agentscope-harness | 2.0.0 | Agent 框架内核 |
+| agentscope-harness | 2.0.0 | HarnessAgent + Workspace + Memory + Compaction + Filesystem |
 | agentscope-extensions-model-openai | 2.0.0 | OpenAI 兼容 LLM |
-| agentscope-extensions-mysql | 2.0.0 | MySQL 状态存储 |
-| agentscope-extensions-a2a-server | 2.0.0 | A2A 协议（仅 AgentCard） |
+| agentscope-extensions-mysql | 2.0.0 | MysqlDistributedStore (agent_state + agent_fs) |
+| agentscope-extensions-a2a-server | 2.0.0 | A2A 协议 Server |
 | Spring Boot | 3.3.5 | HTTP 服务框架 |
 | SnakeYAML | 2.x | YAML frontmatter 解析 |
 | MySQL Connector/J | 8.x | MySQL JDBC 驱动 |
 | HikariCP | 5.x | 连接池 |
+
+---
+
+## 7. MCP 集成
+
+### 7.1 注册方式
+
+通过 `McpToolRegistrar` 从 `mcp-configs/{server}/config.yaml` 读取连接配置，使用 AgentScope 原生 `McpClientBuilder` 构建 MCP 客户端并注册到 Toolkit。
+
+支持三种传输：`sse` / `streamableHttp` / `stdio`。
+
+**config.yaml 格式**:
+```yaml
+server: weather-service
+vendor: weather
+version: "1.0.0"
+connection:
+  type: streamableHttp   # sse / streamableHttp / stdio
+  url: http://127.0.0.1:8811/mcp
+  timeout: 60
+auth:
+  type: bearer
+  token: ${MCP_TOKEN}    # 支持环境变量
+permissions:
+  read_only: true         # 强制工具只读，绕过 HITL 授权
+```
+
+### 7.2 permissions.read_only 权限控制
+
+AgentScope 的 `McpTool.checkPermissions()` 对非只读 MCP 工具返回 `PermissionDecision.ask()`（需 HITL 授权），导致工具调用挂起。三种方式让 MCP 工具只读放行：
+
+| 方式 | 来源 | 说明 |
+|------|------|------|
+| server annotations | `ToolAnnotations(readOnlyHint=True)` | MCP 协议标准，server 端标注 |
+| **config.yaml 配置** | `permissions.read_only: true` | **本框架支持**，无需改 server |
+| AgentScope 全局 bypass | `PermissionMode.BYPASS` | 不推荐，安全风险高 |
+
+**优先级**: config.yaml `permissions.read_only` > server `annotations.readOnlyHint` > 默认 HITL ask
+
+**实现**: `McpToolRegistrar.isReadOnlyConfigured()` 读取 `permissions.read_only`，为 `true` 时走 `registerReadOnly()` 路径，手动构造 `readOnly=true` 的 McpTool 注册。
+
+### 7.3 MCP 工具执行链路
+
+```
+LLM 推理 → 选择工具 (如 get_weather)
+  → McpTool.callAsync → McpSyncClientWrapper.callTool("get_weather", args)
+  → streamable-http POST → MCP Server
+  → 返回 JSON 天气数据 → ToolResultBlock
+  → LLM 组织最终回答 → 返回用户
+```
+
+### 7.4 注册流程
+
+```
+McpToolRegistrar.registerAll()
+  ├── isReadOnlyConfigured(mcp) → 读取 config.yaml permissions.read_only
+  ├── [true]  → registerReadOnly() → 遍历 MCP 工具，手动构造 readOnly=true 的 McpTool 注册
+  └── [false] → toolkit.registerMcpClient(wrapper).block() → 标准注册（依赖 server annotations）
+```

@@ -49,3 +49,6 @@ tests/.env.test
 # OS
 .DS_Store
 Thumbs.db
+
+# AgentScope workspace (runtime artifacts)
+.agentscope/

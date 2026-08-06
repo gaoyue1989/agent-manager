@@ -54,6 +54,8 @@ public class OafConfigLoader {
             var rawTags = (List<String>) fm.getOrDefault("tags", Collections.emptyList());
             @SuppressWarnings("unchecked")
             var rawTools = (List<String>) fm.getOrDefault("tools", Collections.emptyList());
+            @SuppressWarnings("unchecked")
+            var rawDeniedTools = (List<String>) fm.getOrDefault("deniedTools", Collections.emptyList());
 
             var skills = parseSkills(fm);
             var mcpServers = parseMcpServers(fm);
@@ -66,7 +68,7 @@ public class OafConfigLoader {
             return new OafConfig(
                 name, vendorKey, agentKey, version, slug, description,
                 author, license, rawTags, body, skills, mcpServers,
-                subAgents, rawTools, model, runtimeConfig, memory,
+                subAgents, rawTools, rawDeniedTools, model, runtimeConfig, memory,
                 fm
             );
         } catch (IOException e) {

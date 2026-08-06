@@ -11,9 +11,8 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import io.agentmanager.framework.model.OafConfig;
-import io.agentmanager.framework.service.*;
-import io.agentmanager.framework.service.SkillManager.SkillInfo;
-import io.agentmanager.framework.service.SkillManager.SkillMetadata;
+import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.McpManager;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -32,21 +31,17 @@ class ToolControllerTest {
     private AgentRuntimeService agentRuntime;
 
     @MockBean
-    private List<SkillInfo> loadedSkills;
-
-    @MockBean
-    private SkillManager skillManager;
-
-    @MockBean
     private List<Map<String, Object>> mcpConfigs;
 
     @MockBean
     private McpManager mcpManager;
 
     @Test
-    void listSkillsShouldReturnSummaries() throws Exception {
-        when(skillManager.getSkillSummaries(loadedSkills))
-            .thenReturn(List.of(Map.of("name", "bash-tool", "description", "Execute bash commands")));
+    void listSkillsShouldReturnOafSkills() throws Exception {
+        when(oafConfig.skills()).thenReturn(List.of(
+            new OafConfig.SkillConfig("bash-tool", "local", "1.0.0", false,
+                "Execute bash commands", List.of("bash", "python"))
+        ));
 
         mockMvc.perform(get("/skills"))
             .andExpect(status().isOk())

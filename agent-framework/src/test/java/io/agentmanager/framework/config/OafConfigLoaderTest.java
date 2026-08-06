@@ -1,15 +1,20 @@
 package io.agentmanager.framework.config;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class OafConfigLoaderTest {
 
     private OafConfigLoader loader;
+
+    @TempDir
+    Path tempDir;
 
     @BeforeEach
     void setUp() {
@@ -97,5 +102,76 @@ class OafConfigLoaderTest {
     void shouldParseMemoryConfig() {
         var config = loader.load();
         assertEquals("editable", config.memory().type());
+    }
+
+    @Test
+    void shouldParseDeniedTools() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: deny-test
+            vendorKey: acme
+            agentKey: deny-test
+            version: 1.0.0
+            deniedTools:
+              - write_file
+              - session_history
+            ---
+            # Deny Test
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertTrue(config.hasDeniedTools());
+        assertTrue(config.deniedTools().containsAll(java.util.List.of("write_file", "session_history")));
+        assertEquals(2, config.deniedTools().size());
+    }
+
+    @Test
+    void shouldDefaultDeniedToolsToEmpty() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: no-deny
+            vendorKey: acme
+            agentKey: no-deny
+            version: 1.0.0
+            ---
+            # No Deny
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertFalse(config.hasDeniedTools());
+        assertTrue(config.deniedTools().isEmpty());
+    }
+
+    @Test
+    void shouldPreserveToolsFieldWhenDeniedToolsAbsent() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: tools-test
+            vendorKey: acme
+            agentKey: tools-test
+            version: 1.0.0
+            tools:
+              - Read
+              - Bash
+            ---
+            # Tools Test
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertTrue(config.tools().containsAll(java.util.List.of("Read", "Bash")));
+        assertFalse(config.hasDeniedTools());
+    }
+
+    private AgentManagerProperties props(Path dir) {
+        return new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass"),
+            dir.toString()
+        );
+    }
+
+    private void writeAgentsMd(String content) throws Exception {
+        Files.writeString(tempDir.resolve("AGENTS.md"), content);
     }
 }

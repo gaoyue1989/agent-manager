@@ -1,21 +1,21 @@
 package io.agentmanager.framework.controller;
 
-import java.util.Map;
-
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
-import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
-import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentscope.core.event.TextBlockDeltaEvent;
+import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
+import io.agentscope.harness.agent.gateway.channel.chatui.SendOptions;
 import reactor.core.publisher.Flux;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @WebMvcTest(StreamController.class)
@@ -25,32 +25,28 @@ class StreamControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
-    private AgentRuntimeService agentRuntime;
+    private ChatUiChannel chatChannel;
 
     @Test
     void chatStreamShouldReturnSseEvents() throws Exception {
-        when(agentRuntime.invokeStream(any(), any()))
-            .thenReturn(Flux.just(
-                Map.of("type", "token", "token", "Hello "),
-                Map.of("type", "token", "token", "World!"),
-                Map.of("type", "done")
-            ));
+        var delta = new TextBlockDeltaEvent("reply-1", "block-1", "Hello ");
+        when(chatChannel.sendStream(any(SendOptions.class), anyString()))
+            .thenReturn(Flux.just(delta));
 
-        mockMvc.perform(post("/chat/stream")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"message\":\"hello\",\"metadata\":{}}"))
-            .andExpect(status().isOk())
-            .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM_VALUE));
+        mockMvc.perform(get("/chat/stream")
+                .param("message", "hello")
+                .param("userId", "alice"))
+            .andExpect(status().isOk());
     }
 
     @Test
     void chatStreamShouldHandleEmptyMessage() throws Exception {
-        when(agentRuntime.invokeStream(any(), any()))
-            .thenReturn(Flux.just(Map.of("type", "done")));
+        when(chatChannel.sendStream(any(SendOptions.class), anyString()))
+            .thenReturn(Flux.empty());
 
-        mockMvc.perform(post("/chat/stream")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"message\":\"\"}"))
+        mockMvc.perform(get("/chat/stream")
+                .param("message", "")
+                .param("userId", "alice"))
             .andExpect(status().isOk());
     }
 }
