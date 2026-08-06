@@ -444,7 +444,7 @@ async function sendMessage(){
         if(line.startsWith('event: ')){continue;}
         if(!line.startsWith('data: '))continue;
         const dataStr=line.slice(6);
-        if(dataStr==='[DONE]'){
+        if(dataStr==='[DONE]'||dataStr==='{"type":"done"}'){
           if(streamingDiv){
             const cursor=streamingDiv.querySelector('.cursor');
             if(cursor)cursor.remove();

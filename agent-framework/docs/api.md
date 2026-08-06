@@ -358,7 +358,7 @@ data: {"type":"token","token":"'m","task_id":"<uuid>"}
 ...
 data: {"type":"task_update","state":"completed","id":"<uuid>","metadata":{"thread_id":"<uuid>"}}
 data: {"type":"done"}
-data: [DONE]
+data: {"type":"done"}
 ```
 
 **SSE 事件类型:**
@@ -371,7 +371,7 @@ data: [DONE]
 | `tool_result` | 工具返回结果 |
 | `error` | 错误信息 |
 | `done` | 完成信号 |
-| `[DONE]` | SSE 流结束标记 |
+| `{"type":"done"}` | SSE 流结束标记 |
 
 ---
 

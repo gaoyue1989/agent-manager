@@ -131,7 +131,7 @@ data: {"type":"token","token":"Hello",...}
 data: {"type":"token","token":"! I",...}
 ...
 data: {"type":"done"}
-data: [DONE]
+data: {"type":"done"}
 ```
 
 ### 4.6 Skills / MCP / Tools

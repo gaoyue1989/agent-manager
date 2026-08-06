@@ -88,7 +88,7 @@ public class A2AController {
                 .doOnNext(data -> writeSSE(os, data))
                 .doOnComplete(() -> {
                     try {
-                        os.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+                        os.write("data: {\"type\":\"done\"}\n\n".getBytes(StandardCharsets.UTF_8));
                         os.flush();
                     } catch (Exception ignored) {}
                 })
@@ -96,7 +96,7 @@ public class A2AController {
                     try {
                         var err = MAPPER.writeValueAsString(Map.of("type", "error", "error", e.getMessage()));
                         os.write(("data: " + err + "\n\n").getBytes(StandardCharsets.UTF_8));
-                        os.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+                        os.write("data: {\"type\":\"done\"}\n\n".getBytes(StandardCharsets.UTF_8));
                         os.flush();
                     } catch (Exception ignored) {}
                 })
@@ -106,7 +106,7 @@ public class A2AController {
             try {
                 var err = MAPPER.writeValueAsString(Map.of("type", "error", "error", e.getMessage()));
                 os.write(("data: " + err + "\n\n").getBytes(StandardCharsets.UTF_8));
-                os.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
+                os.write("data: {\"type\":\"done\"}\n\n".getBytes(StandardCharsets.UTF_8));
                 os.flush();
             } catch (Exception ignored) {}
         }

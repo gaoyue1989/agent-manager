@@ -102,7 +102,7 @@ A2AController.handleA2A()
               → data: {"type":"tool_result",...}
               → data: {"type":"task_update","state":"completed"}
               → data: {"type":"done"}
-              → data: [DONE]
+              → data: {"type":"done"}
 ```
 
 ### 2.4 工具调用流程
@@ -177,7 +177,7 @@ SSE 格式：
 ```
 data: {"type":"task_update","state":"working",...}
 data: {"type":"token","token":"Hello",...}
-data: [DONE]
+data: {"type":"done"}
 ```
 
 ---
