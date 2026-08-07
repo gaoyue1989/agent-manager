@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Agent Framework 离线开发镜像默认 Maven 配置。
+
+  默认: 使用 Maven Central (需网络)。
+  内网 Nexus 接入: 取消注释并配置 mirror, 将 `<mirror>` 指向内网 Nexus 地址。
+  推荐做法: 将本文件复制为独立 settings.xml (如 ~/.m2/settings-nexus.xml),
+  使用 `mvn -s` 指定, 或在 `docker run` 时挂载覆盖:
+    -v /path/to/settings-nexus.xml:/root/.m2/settings.xml:ro
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              https://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <localRepository>/root/.m2/repository</localRepository>
+
+  <!-- 内网 Nexus 示例配置 (注释开启) -->
+  <mirrors>
+    <!--
+    <mirror>
+      <id>nexus</id>
+      <name>内网 Nexus 私有源</name>
+      <mirrorOf>*</mirrorOf>
+      <url>http://nexus.example.com:8081/repository/maven-public/</url>
+    </mirror>
+    -->
+  </mirrors>
+
+  <!-- Nexus 认证 (如需要) -->
+  <servers>
+    <!--
+    <server>
+      <id>nexus</id>
+      <username>admin</username>
+      <password>your-password</password>
+    </server>
+    -->
+  </servers>
+
+  <profiles>
+    <!-- 默认 profile: 使用 Maven Central -->
+    <profile>
+      <id>offline-default</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
+
+</settings>

@@ -66,9 +66,12 @@ agent-framework/
 │   │           ├── js/                          # 脚本 (api/app/router)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
 │   └── test/                                  # 68 个测试用例
-├── docs/                                     # 改进方案文档 (13 份)
-├── Dockerfile                                # 镜像构建
-├── Makefile                                  # Maven 封装
+├── docs/                                     # 改进方案文档 (14 份)
+├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
+├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
+├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
+├── docker/
+│   └── offline-settings.xml                  # Maven 默认配置模板 (支持 Nexus 镜像)
 └── .env.example                              # 环境变量模板
 ```
 
@@ -223,11 +226,33 @@ OAF `deniedTools` 字段控制排除列表。
 
 ```bash
 cd agent-framework
-mvn clean package -DskipTests
+mvn clean package -DskipTests            # Maven 直接构建
+make package                             # 或通过 Makefile
 LLM_API_KEY=... LLM_MODEL_ID=... LLM_BASE_URL=... \
   AGENT_CONFIG_DIR=/path/to/config \
   java -jar target/agent-framework-*.jar
 ```
+
+Docker 部署（多阶段构建，运行时非 root 用户，JAVA_OPTS 可覆盖 JVM 参数）：
+
+```bash
+make docker-build                         # 构建 docker.io/agent-framework:latest
+docker run -d --name agent-framework -p 8100:8100 \
+  -e LLM_API_KEY=... -e LLM_MODEL_ID=... -e LLM_BASE_URL=... \
+  -e AGENT_CONFIG_DIR=/config -v ./config:/config \
+  agent-framework:latest
+```
+
+内网离线开发镜像（JDK 21 + Maven + 全量依赖缓存）：
+
+```bash
+make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
+make docker-save       # 导出 tar.gz 传输到内网机器
+make offline           # 进入离线容器 (挂载当前工作目录)
+mvn -o test            # 容器内离线测试 (68 用例)
+```
+
+Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
 
 ---
 
@@ -235,4 +260,5 @@ LLM_API_KEY=... LLM_MODEL_ID=... LLM_BASE_URL=... \
 
 ```bash
 mvn test     # 68 个测试，全部通过
+mvn -o test  # 离线模式 (离线开发镜像内)
 ```

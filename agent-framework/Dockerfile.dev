@@ -1,0 +1,74 @@
+# =========================================================================
+# Dockerfile.dev — Agent Framework 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
+#
+# 用途:
+#   1. 内网离线环境下的 Java 开发/构建 (无需访问外网 Maven Central)
+#   2. 预下载当前 pom.xml 的全部依赖到 /root/.m2/repository
+#   3. 支持通过挂载 settings.xml 接入内网 Nexus 私有源
+#
+# 构建方式 (在有网络或已有缓存的机器上):
+#   docker build -t agent-framework:java-dev -f Dockerfile.dev .
+#
+# 离线导出/导入:
+#   docker save agent-framework:java-dev | gzip > agent-framework-java-dev.tar.gz
+#   传输到离线机器后: docker load < agent-framework-java-dev.tar.gz
+#
+# 使用方式 (内网离线开发):
+#   docker run --rm -it -v $(pwd):/workspace -w /workspace \
+#     agent-framework:java-dev bash
+#
+#   强制离线构建 (不访问网络, 仅用本地 .m2 缓存):
+#   mvn -o package
+#
+#   如历史库已包含全部依赖, 离线构建会自动成功。
+#   如需接入内网 Nexus, 见 docs/offline-dev-image.md 或挂载自定义 settings.xml:
+#     -v /path/to/settings.xml:/root/.m2/settings.xml:ro
+# =========================================================================
+
+FROM eclipse-temurin:21-jdk
+
+ARG MAVEN_VERSION=3.9.9
+ARG MAVEN_SHA512=""
+
+# ---------- 安装 Maven ----------
+# 从 Apache 官方镜像源下载, 拉取后可离线使用
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl ca-certificates git vim \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSLo /tmp/apache-maven.tar.gz \
+        "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+    && (test -z "${MAVEN_SHA512}" || \
+        echo "${MAVEN_SHA512}  /tmp/apache-maven.tar.gz" | sha512sum -c -) \
+    && tar -xzf /tmp/apache-maven.tar.gz -C /opt \
+    && mv /opt/apache-maven-${MAVEN_VERSION} /opt/maven \
+    && ln -s /opt/maven/bin/mvn /usr/local/bin/mvn \
+    && rm -f /tmp/apache-maven.tar.gz
+
+# ---------- 预下载项目依赖 ----------
+# 拷贝 pom.xml + src, 实际执行一次完整 clean install 以释放全部
+# 传递依赖 + 构建插件 (clean/surefire/install 等仅靠 go-offline 或 package 不会全部下载)
+# 利用 Docker 构建缓存: 依赖未变化时无需重复下载
+WORKDIR /opt/deps
+COPY pom.xml .
+COPY src ./src
+# 真实执行测试以预热 surefire-junit-platform 提供者 (仅 -DskipTests 不会下载它)
+RUN mvn -B -q clean install || true; \
+    rm -rf /opt/deps target
+
+# 清理构建缓存中无用的临时文件, 缩小镜像体积
+RUN rm -rf /root/.m2/repository/.cache /root/.m2/wrapper
+
+# ---------- 默认 Maven Central 配置 ----------
+# 提供默认 settings.xml; 如需 Nexus 私有源请挂载覆盖:
+#   -v /path/to/settings.xml:/root/.m2/settings.xml:ro
+COPY docker/offline-settings.xml /opt/maven/conf/settings.xml
+RUN cp /opt/maven/conf/settings.xml /usr/local/share/mvn-settings.default.xml
+
+# ---------- 工作区 ----------
+WORKDIR /workspace
+
+# 验证 maven 环境
+RUN mvn -version
+
+CMD ["bash"]

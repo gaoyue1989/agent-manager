@@ -55,7 +55,7 @@ LLM_MODEL_ID=your_model_id \
 LLM_BASE_URL=https://your-api-endpoint/v1 \
 AGENT_CONFIG_DIR=./config \
 SERVER_PORT=8100 \
-java -jar target/agent-framework-2.1.0.jar
+java -jar target/agent-framework-2.0.0.jar
 ```
 
 ### 2.4 验证
@@ -71,8 +71,12 @@ curl http://localhost:8100/debug
 
 ### 3.1 构建镜像
 
+多阶段构建（Stage 1: Maven 构建 → Stage 2: JRE 21 运行，非 root 用户）：
+
 ```bash
 docker build -t agent-framework:latest .
+# 或通过 Makefile
+make docker-build
 ```
 
 ### 3.2 启动容器
@@ -84,9 +88,15 @@ docker run -d --name agent-framework \
   -e LLM_MODEL_ID=your_model_id \
   -e LLM_BASE_URL=https://your-api-endpoint/v1 \
   -e AGENT_CONFIG_DIR=/config \
+  -e JAVA_OPTS="-Xmx2g" \
   -v ./config:/config \
   agent-framework:latest
 ```
+
+> 说明:
+> - 运行用户为非 root 的 `appuser`，`/config` 为挂载卷（内含 AGENTS.md/skills/mcp-configs）
+> - `JAVA_OPTS` 可覆盖 JVM 参数（默认 `-XX:MaxRAMPercentage=75`）
+> - 内置健康检查（`curl /health`，30s 间隔）
 
 ### 3.3 查看日志
 
@@ -280,7 +290,30 @@ curl -s "https://api.longcat.chat/openai/v1/chat/completions" \
 
 ---
 
-## 10. 常见问题
+## 11. 内网离线开发镜像
+
+预装 JDK 21 + Maven 3.9.9 + 全量依赖缓存，适用于无法访问外网的内网环境：
+
+```bash
+# 导出/导入
+docker save gaoyue1989/agent-framework:java-dev | gzip > agent-framework-java-dev.tar.gz
+docker load < agent-framework-java-dev.tar.gz
+
+# 进入离线容器（挂载当前目录，mvn -o 强制离线构建）
+docker run --rm -it -v $(pwd):/workspace -w /workspace \
+  gaoyue1989/agent-framework:java-dev bash
+
+# 接入内网 Nexus（挂载自定义 settings.xml 覆盖默认源）
+docker run --rm -it -v $(pwd):/workspace -w /workspace \
+  -v /path/to/settings.xml:/root/.m2/settings.xml:ro \
+  gaoyue1989/agent-framework:java-dev bash
+```
+
+完整说明（Nexus 配置、导出传输、常见问题）见 [offline-dev-image.md](offline-dev-image.md)。
+
+---
+
+## 10. 常见问题（原 §10 不变）
 
 ### Q: 服务启动后 LLM 返回错误
 
