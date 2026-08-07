@@ -318,6 +318,12 @@ async function sendChannelSSE(text) {
         if (!dataStr) continue;
         try {
           const data = JSON.parse(dataStr);
+          if (data.type === 'error') {
+            if (streamingDiv) {
+              streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(data.error || 'Unknown error') + '</span>';
+            }
+            return;
+          }
           if (data.type === 'TEXT_BLOCK_DELTA' && data.delta && streamingDiv) {
             fullText += data.delta;
             updateStreamContent(fullText);

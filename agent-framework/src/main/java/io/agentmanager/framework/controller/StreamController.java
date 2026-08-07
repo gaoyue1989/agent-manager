@@ -39,7 +39,8 @@ public class StreamController {
     ) {
         if (subagentId != null && !subagentId.isBlank()) {
             return chatChannel.sendToSubagentStream(subagentId, message)
-                .map(this::toSSE);
+                .map(this::toSSE)
+                .onErrorResume(e -> Flux.just(errorSSE(e)));
         }
 
         SendOptions options = sessionId != null && !sessionId.isBlank()
@@ -47,7 +48,22 @@ public class StreamController {
             : SendOptions.userId(userId);
 
         return chatChannel.sendStream(options, message)
-            .map(this::toSSE);
+            .map(this::toSSE)
+            .onErrorResume(e -> Flux.just(errorSSE(e)));
+    }
+
+    private ServerSentEvent<String> errorSSE(Throwable e) {
+        String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        String payload = "{\"type\":\"error\",\"error\":" + jsonEsc(msg) + "}";
+        return ServerSentEvent.<String>builder().data(payload).build();
+    }
+
+    private String jsonEsc(String s) {
+        try {
+            return MAPPER.writeValueAsString(s);
+        } catch (Exception e) {
+            return "\"error\"";
+        }
     }
 
     private ServerSentEvent<String> toSSE(AgentEvent event) {
