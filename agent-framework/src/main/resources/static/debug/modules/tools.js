@@ -1,4 +1,4 @@
-/* ===== Tools 模块：内置 / 自定义 / MCP 工具分类展示 ===== */
+/* ===== Tools 模块：MCP / 内置工具分类展示 ===== */
 
 let ctx = null;
 
@@ -19,41 +19,45 @@ async function loadTools() {
   const body = document.getElementById('toolsBody');
   let data;
   try {
-    data = await ctx.api.getTools();
+    data = await ctx.api.getTools(true);
   } catch (e) {
     body.innerHTML = '<div class="empty error-text">Failed to load tools: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
-  const builtin = data.builtin || [];
-  const custom = data.custom || [];
-  const mcp = data.mcp || [];
+  const tools = data.tools || [];
+  const mcpTools = tools.filter((t) => t.category === 'mcp');
+  const internalTools = tools.filter((t) => t.category === 'internal');
 
   document.getElementById('toolsSummary').textContent =
-    builtin.length + ' builtin / ' + custom.length + ' custom / ' + mcp.length + ' mcp';
+    tools.length + ' total (' + internalTools.length + ' internal / ' + mcpTools.length + ' mcp)';
 
   let html = '';
 
-  html += renderSection('Built-in Tools', builtin.length, builtin.map((t) => ({
-    name: t.name || t, badge: t.readOnly ? '<span class="badge green">readOnly</span>' : ''
-  })));
+  // MCP 工具（按 server 分组）
+  if (mcpTools.length > 0) {
+    const grouped = {};
+    mcpTools.forEach((t) => {
+      const server = t.server || 'unknown';
+      if (!grouped[server]) grouped[server] = [];
+      grouped[server].push(t);
+    });
 
-  html += renderSection('Custom Tools', custom.length, custom.map((t) => ({
-    name: t.name || t, badge: t.readOnly ? '<span class="badge green">readOnly</span>' : ''
-  })));
-
-  if (mcp.length > 0) {
-    html += '<div class="panel"><div class="panel-header"><span class="title">MCP Tools</span><span class="count">' + mcp.length + '</span></div><div class="panel-body">';
-    for (const server of mcp) {
-      const tools = server.tools || server || [];
-      html += '<div style="margin:6px 0"><strong style="color:var(--accent)">🔌 ' + ctx.utils.esc(server.server || 'unknown') + '</strong>' +
-        '<span class="badge dim" style="margin-left:6px">' + (tools.length || 0) + ' tools</span></div>';
-      if (tools.length) {
-        html += '<div style="padding-left:12px">' +
-          tools.map((t) => '<span class="badge">' + ctx.utils.esc(t.name || t) + '</span>').join('') +
-          '</div>';
-      }
+    html += '<div class="panel"><div class="panel-header"><span class="title">MCP Tools</span><span class="count">' + mcpTools.length + '</span></div><div class="panel-body">';
+    for (const [server, serverTools] of Object.entries(grouped)) {
+      html += '<div style="margin:6px 0"><strong style="color:var(--accent)">🔌 ' + ctx.utils.esc(server) + '</strong>' +
+        '<span class="badge dim" style="margin-left:6px">' + serverTools.length + ' tools</span></div>';
+      html += '<div style="padding-left:12px">' +
+        serverTools.map((t) => '<span class="badge" title="' + ctx.utils.esc(t.description || '') + '">' + ctx.utils.esc(t.name) + '</span>').join('') +
+        '</div>';
     }
     html += '</div></div>';
+  }
+
+  // 内置工具
+  if (internalTools.length > 0) {
+    html += renderSection('Built-in Tools', internalTools.length, internalTools.map((t) => ({
+      name: t.name, badge: ''
+    })));
   }
 
   body.innerHTML = html || '<div class="empty">No tools</div>';

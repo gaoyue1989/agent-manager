@@ -2,12 +2,16 @@ package io.agentmanager.framework.service;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentmanager.framework.model.OafConfig.McpServerConfig;
 
@@ -16,6 +20,7 @@ public class McpManager {
     private static final Logger log = LoggerFactory.getLogger(McpManager.class);
 
     private final Path mcpConfigsDir;
+    private final ObjectMapper mapper = new ObjectMapper();
 
     public McpManager(java.nio.file.Path configDir) {
         this.mcpConfigsDir = configDir;
@@ -42,19 +47,21 @@ public class McpManager {
             return null;
         }
 
-        var config = new java.util.LinkedHashMap<String, Object>();
+        var config = new LinkedHashMap<String, Object>();
         config.put("vendor", ms.vendor());
         config.put("server", ms.server());
         config.put("version", ms.version());
         config.put("required", ms.required());
 
+        // 修复: ActiveMCP.json 安全加载（JsonNode → Map 转换，避免 ClassCastException）
         var activeMcp = mcpDir.resolve("ActiveMCP.json");
         if (activeMcp.toFile().exists()) {
             try {
-                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                config.put("tools", mapper.readTree(activeMcp.toFile()));
+                var jsonNode = mapper.readTree(activeMcp.toFile());
+                config.put("tools", safeJsonNodeToMap(jsonNode));
             } catch (Exception e) {
                 log.warn("Failed to load ActiveMCP.json for {}: {}", ms.server(), e.getMessage());
+                config.put("tools", Map.of());
             }
         }
 
@@ -74,20 +81,87 @@ public class McpManager {
         return config;
     }
 
+    /**
+     * 安全地将 JsonNode 转换为 Map<String, Object>，避免类型强转异常。
+     */
+    private Map<String, Object> safeJsonNodeToMap(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return Map.of();
+        }
+        if (!node.isObject()) {
+            return Map.of("value", safeJsonNodeToValue(node));
+        }
+
+        var result = new LinkedHashMap<String, Object>();
+        node.fields().forEachRemaining(e -> result.put(e.getKey(), safeJsonNodeToValue(e.getValue())));
+        return result;
+    }
+
+    private Object safeJsonNodeToValue(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isTextual()) {
+            return node.asText();
+        }
+        if (node.isBoolean()) {
+            return node.asBoolean();
+        }
+        if (node.isNumber()) {
+            return node.isIntegralNumber() ? node.asLong() : node.asDouble();
+        }
+        if (node.isArray()) {
+            var list = new ArrayList<>();
+            for (var item : node) {
+                list.add(safeJsonNodeToValue(item));
+            }
+            return list;
+        }
+        if (node.isObject()) {
+            return safeJsonNodeToMap(node);
+        }
+        return node.toString();
+    }
+
     public List<Map<String, Object>> getMcpSummaries(List<Map<String, Object>> mcpConfigs) {
         var summaries = new ArrayList<Map<String, Object>>();
         for (var mc : mcpConfigs) {
-            @SuppressWarnings("unchecked")
-            var conn = (Map<String, Object>) mc.getOrDefault("connection", Map.of());
-            @SuppressWarnings("unchecked")
-            var tools = (Map<String, Object>) mc.getOrDefault("tools", Map.of());
-            summaries.add(Map.of(
-                "server", mc.getOrDefault("server", "unknown"),
-                "vendor", mc.getOrDefault("vendor", ""),
-                "connection_type", conn.getOrDefault("type", "N/A"),
-                "url", conn.getOrDefault("url", "N/A"),
-                "tool_count", ((List<?>) tools.getOrDefault("selectedTools", List.of())).size()
-            ));
+            try {
+                @SuppressWarnings("unchecked")
+                var conn = (Map<String, Object>) mc.getOrDefault("connection", Map.of());
+
+                // 修复: 安全获取 tool_count，兼容 Map 和 JsonNode 两种类型
+                int toolCount = 0;
+                var toolsObj = mc.get("tools");
+                if (toolsObj instanceof Map<?, ?> toolsMap) {
+                    var selected = toolsMap.get("selectedTools");
+                    if (selected instanceof List<?> list) {
+                        toolCount = list.size();
+                    }
+                } else if (toolsObj instanceof JsonNode jsonNode) {
+                    if (jsonNode.has("selectedTools")) {
+                        toolCount = jsonNode.get("selectedTools").size();
+                    }
+                }
+
+                summaries.add(Map.of(
+                    "server", mc.getOrDefault("server", "unknown"),
+                    "vendor", mc.getOrDefault("vendor", ""),
+                    "connection_type", conn.getOrDefault("type", "N/A"),
+                    "url", conn.getOrDefault("url", "N/A"),
+                    "tool_count", toolCount
+                ));
+            } catch (Exception e) {
+                log.warn("Failed to get summary for server: {}", mc.get("server"), e);
+                summaries.add(Map.of(
+                    "server", mc.getOrDefault("server", "unknown"),
+                    "vendor", mc.getOrDefault("vendor", ""),
+                    "connection_type", "N/A",
+                    "url", "N/A",
+                    "tool_count", 0,
+                    "error", e.getMessage()
+                ));
+            }
         }
         return summaries;
     }

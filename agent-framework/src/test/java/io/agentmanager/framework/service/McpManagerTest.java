@@ -71,8 +71,8 @@ class McpManagerTest {
         var result = manager.loadConfigs(List.of(server("weather-service", "mcp-configs/weather")));
 
         @SuppressWarnings("unchecked")
-        var tools = (com.fasterxml.jackson.databind.JsonNode) result.get(0).get("tools");
-        assertEquals(1, tools.get("selectedTools").size());
+        var tools = (Map<String, Object>) result.get(0).get("tools");
+        assertEquals(1, ((List<?>) tools.get("selectedTools")).size());
     }
 
     @Test
@@ -84,7 +84,9 @@ class McpManagerTest {
         var result = manager.loadConfigs(List.of(server("weather-service", "mcp-configs/weather")));
 
         assertEquals(1, result.size());
-        assertFalse(result.get(0).containsKey("tools"));
+        // 损坏 JSON 时 tools 为空 Map（安全默认值），不再抛异常
+        assertTrue(result.get(0).containsKey("tools"));
+        assertEquals(Map.of(), result.get(0).get("tools"));
     }
 
     @Test

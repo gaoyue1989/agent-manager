@@ -3,8 +3,11 @@ package io.agentmanager.framework.service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +30,9 @@ public class McpToolRegistrar {
 
     private final Path configDir;
 
+    /** 已注册工具缓存: serverName + ":" + toolName -> ToolInfo */
+    private final Map<String, ToolInfo> registeredTools = new ConcurrentHashMap<>();
+
     public McpToolRegistrar(io.agentmanager.framework.config.AgentManagerProperties props) {
         this.configDir = Path.of(props.configDir());
     }
@@ -47,9 +53,35 @@ public class McpToolRegistrar {
                     registerReadOnly(toolkit, wrapper, mcp.server());
                 } else {
                     toolkit.registerMcpClient(wrapper).block();
+                    // 标准注册：记录已注册工具信息
+                    recordRegisteredTools(wrapper, mcp.server());
                 }
                 log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             }
+        }
+    }
+
+    /**
+     * 记录标准注册（非强制只读）的 MCP 工具到缓存。
+     */
+    private void recordRegisteredTools(McpClientWrapper wrapper, String serverName) {
+        try {
+            var tools = wrapper.listTools().block();
+            if (tools == null) {
+                log.warn("MCP {} listTools returned null, tools not recorded", serverName);
+                return;
+            }
+            for (var tool : tools) {
+                var info = new ToolInfo(
+                    tool.name(),
+                    tool.description() != null ? tool.description() : "",
+                    serverName
+                );
+                registeredTools.put(serverName + ":" + tool.name(), info);
+            }
+            log.info("Recorded {} MCP tools for server {}", tools.size(), serverName);
+        } catch (Exception e) {
+            log.warn("Failed to record MCP tools for {}: {}", serverName, e.getMessage());
         }
     }
 
@@ -91,6 +123,8 @@ public class McpToolRegistrar {
                 true // readOnly=true 强制只读
             );
             toolkit.registerTool(agentTool);
+            registeredTools.put(serverName + ":" + tool.name(),
+                new ToolInfo(tool.name(), tool.description(), serverName));
             log.info("MCP tool '{}' registered read-only (config.yaml permissions.read_only)", tool.name());
         }
     }
@@ -194,4 +228,30 @@ public class McpToolRegistrar {
         }
         return value;
     }
+
+    /**
+     * 按 server 名称查询已注册的 MCP 工具。
+     */
+    public List<ToolInfo> getToolsByServer(String serverName) {
+        if (serverName == null || serverName.isBlank()) {
+            return List.of();
+        }
+        var prefix = serverName + ":";
+        return registeredTools.entrySet().stream()
+            .filter(e -> e.getKey().startsWith(prefix))
+            .map(Map.Entry::getValue)
+            .toList();
+    }
+
+    /**
+     * 获取所有已注册的 MCP 工具。
+     */
+    public List<ToolInfo> getAllRegisteredTools() {
+        return new ArrayList<>(registeredTools.values());
+    }
+
+    /**
+     * 已注册 MCP 工具信息。
+     */
+    public record ToolInfo(String name, String description, String serverName) {}
 }

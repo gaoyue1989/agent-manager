@@ -169,10 +169,18 @@ public class A2AController {
 
     @SuppressWarnings("unchecked")
     private String resolveUserId(Map<String, Object> params) {
+        // 1. 优先读取标准 A2A 顶层参数
+        Object topLevelUserId = params.get("userId");
+        if (topLevelUserId != null && !topLevelUserId.toString().isBlank()) {
+            return topLevelUserId.toString();
+        }
+        
+        // 2. 兼容旧格式 metadata.userId
         var metadata = (Map<String, Object>) params.get("metadata");
         if (metadata != null) {
             var uid = metadata.get("userId");
             if (uid != null && !uid.toString().isBlank()) {
+                log.warn("Deprecated: using metadata.userId, migrate to top-level userId");
                 return uid.toString();
             }
         }
@@ -181,11 +189,23 @@ public class A2AController {
 
     @SuppressWarnings("unchecked")
     private String resolveThreadId(Map<String, Object> params, Map<String, Object> message) {
-        // 1. params.metadata.thread_id (A2A 标准上下文标识)
+        // 1. 优先读取标准 A2A 顶层参数
+        Object sessionId = params.get("sessionId");
+        if (sessionId != null && !sessionId.toString().isBlank()) {
+            return sessionId.toString();
+        }
+        
+        Object conversationId = params.get("conversationId");
+        if (conversationId != null && !conversationId.toString().isBlank()) {
+            return conversationId.toString();
+        }
+        
+        // 2. 兼容旧格式 metadata
         var metadata = (Map<String, Object>) params.get("metadata");
         if (metadata != null) {
             var tid = metadata.get("thread_id");
             if (tid != null && !tid.toString().isBlank()) {
+                log.warn("Deprecated: using metadata.thread_id, migrate to top-level sessionId");
                 return tid.toString();
             }
             var ctxId = metadata.get("contextId");
@@ -193,12 +213,12 @@ public class A2AController {
                 return ctxId.toString();
             }
         }
-        // 2. message.taskId (兼容旧格式)
+        // 3. message.taskId (兼容旧格式)
         var taskId = message.get("taskId");
         if (taskId != null && !taskId.toString().isBlank()) {
             return taskId.toString();
         }
-        // 3. 自动生成
+        // 4. 自动生成
         return UUID.randomUUID().toString();
     }
 

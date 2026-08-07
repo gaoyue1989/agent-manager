@@ -104,9 +104,26 @@ public class OafConfigLoader {
             var version = (String) m.getOrDefault("version", "1.0.0");
             var required = (boolean) m.getOrDefault("required", false);
             var desc = loadSkillDescription(name);
-            skills.add(new SkillConfig(name, source, version, required, desc, List.of("bash", "python")));
+            // 支持自定义 runtimes（默认 ["bash", "python"]）
+            var runtimes = parseRuntimes(m);
+            skills.add(new SkillConfig(name, source, version, required, desc, runtimes));
         }
         return skills;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> parseRuntimes(Map<String, Object> skillConfig) {
+        var rawRuntimes = skillConfig.get("runtimes");
+        if (rawRuntimes instanceof List<?> list) {
+            var result = list.stream()
+                .filter(String.class::isInstance)
+                .map(String.class::cast)
+                .toList();
+            if (!result.isEmpty()) {
+                return result;
+            }
+        }
+        return List.of("bash", "python");
     }
 
     private String loadSkillDescription(String skillName) {
@@ -116,7 +133,12 @@ public class OafConfigLoader {
                 var content = Files.readString(skillMd);
                 var parsed = parseFrontmatter(content);
                 var text = parsed.body();
-                return text.length() > 500 ? text.substring(0, 500) : text;
+                // 不再硬截断 500 字符，仅对超长描述记录警告
+                if (text.length() > 2000) {
+                    System.out.println("[OafConfigLoader] Skill '" + skillName
+                        + "' description is long (" + text.length() + " chars)");
+                }
+                return text;
             } catch (IOException e) {
                 return "";
             }

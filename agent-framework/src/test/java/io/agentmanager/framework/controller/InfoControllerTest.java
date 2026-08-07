@@ -12,6 +12,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.McpManager;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -29,9 +30,16 @@ class InfoControllerTest {
     @MockBean
     private AgentRuntimeService agentRuntime;
 
+    @MockBean
+    private McpManager mcpManager;
+
+    @MockBean
+    private List<Map<String, Object>> mcpConfigs;
+
     @Test
     void rootShouldReturnServiceInfo() throws Exception {
         when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.slug()).thenReturn("acme/test-agent");
         when(oafConfig.description()).thenReturn("A test agent");
         when(oafConfig.version()).thenReturn("1.0.0");
         when(oafConfig.tools()).thenReturn(List.of("Read", "Bash"));
@@ -52,6 +60,28 @@ class InfoControllerTest {
             .andExpect(jsonPath("$.endpoints.jsonrpc").value("/"))
             .andExpect(jsonPath("$.endpoints.health").value("/health"))
             .andExpect(jsonPath("$.endpoints.debug").value("/debug"));
+    }
+
+    @Test
+    void metadataShouldReturnFullAgentInfo() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.slug()).thenReturn("acme/test-agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.skills()).thenReturn(List.of(
+            new OafConfig.SkillConfig("code-review", "local", "1.0.0", false,
+                "Code review skill", List.of("bash", "python"))
+        ));
+        when(mcpManager.getMcpSummaries(mcpConfigs))
+            .thenReturn(List.of(Map.of("server", "weather-service", "tool_count", 3)));
+
+        mockMvc.perform(get("/metadata"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("test-agent"))
+            .andExpect(jsonPath("$.slug").value("acme/test-agent"))
+            .andExpect(jsonPath("$.skills[0].name").value("code-review"))
+            .andExpect(jsonPath("$.skills[0].description").value("Code review skill"))
+            .andExpect(jsonPath("$.mcp[0].tool_count").value(3));
     }
 
     @Test
