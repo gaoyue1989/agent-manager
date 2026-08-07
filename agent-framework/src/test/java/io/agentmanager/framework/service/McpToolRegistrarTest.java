@@ -181,4 +181,69 @@ class McpToolRegistrarTest {
 
         assertFalse(registrar.isReadOnlyConfigured(mcp("explicit-rw", "explicit-rw")));
     }
+
+    private void writeActiveMcp(String server, String content) throws Exception {
+        var dir = tempDir.resolve(server);
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("ActiveMCP.json"), content);
+    }
+
+    @Test
+    void shouldLoadActiveMcpConfigWithEnabledFlags() throws Exception {
+        writeActiveMcp("finance", """
+            {
+              "selectedTools": [
+                {"name": "get_user_info", "enabled": true},
+                {"name": "query_db", "enabled": true},
+                {"name": "transfer_money", "enabled": false}
+              ]
+            }
+            """);
+
+        var config = registrar.loadActiveMcpConfig(mcp("finance", "finance"));
+
+        assertNotNull(config);
+        assertEquals(3, config.size());
+        assertTrue(config.get("get_user_info"));
+        assertTrue(config.get("query_db"));
+        assertFalse(config.get("transfer_money"));
+    }
+
+    @Test
+    void shouldReturnNullWhenActiveMcpMissing() throws Exception {
+        writeConfigYaml("plain", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        var config = registrar.loadActiveMcpConfig(mcp("plain", "plain"));
+        assertNull(config);
+    }
+
+    @Test
+    void shouldReturnNullWhenActiveMcpCorrupt() throws Exception {
+        writeActiveMcp("corrupt", "{invalid json!!");
+
+        var config = registrar.loadActiveMcpConfig(mcp("corrupt", "corrupt"));
+        assertNull(config);
+    }
+
+    @Test
+    void shouldDefaultEnabledTrueWhenFieldAbsent() throws Exception {
+        writeActiveMcp("implicit-enabled", """
+            {
+              "selectedTools": [
+                {"name": "get_weather"},
+                {"name": "query_db", "enabled": false}
+              ]
+            }
+            """);
+
+        var config = registrar.loadActiveMcpConfig(mcp("implicit-enabled", "implicit-enabled"));
+
+        assertNotNull(config);
+        assertTrue(config.get("get_weather"));   // 无 enabled 字段默认 true
+        assertFalse(config.get("query_db"));
+    }
 }

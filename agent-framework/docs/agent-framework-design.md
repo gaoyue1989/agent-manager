@@ -341,21 +341,51 @@ AgentScope 的 `McpTool.checkPermissions()` 对非只读 MCP 工具返回 `Permi
 
 **实现**: `McpToolRegistrar.isReadOnlyConfigured()` 读取 `permissions.read_only`，为 `true` 时走 `registerReadOnly()` 路径，手动构造 `readOnly=true` 的 McpTool 注册。
 
-### 7.3 MCP 工具执行链路
+### 7.3 ActiveMCP 工具子集
+
+通过 `mcp-configs/{server}/ActiveMCP.json` 声明工具子集，`enabled: false` 的工具**不注册**到 Toolkit（LLM 不可见、不可调用）：
+
+```json
+{
+  "selectedTools": [
+    {"name": "get_user_info", "enabled": true},
+    {"name": "query_db", "enabled": true},
+    {"name": "transfer_money", "enabled": false}
+  ]
+}
+```
+
+**行为细节：**
+- 存在 ActiveMCP.json 时，该 server 走手动注册路径（`registerReadOnly`），未声明的工具也注册（仅 `enabled: false` 被排除）
+- 不存在 ActiveMCP.json 时走标准注册，工具全量注册
+- 实现：`McpToolRegistrar.loadActiveMcpConfig()`
+
+### 7.4 工具命名规范
+
+MCP 工具注册名遵循 AgentScope 官方规范 `mcp__{server}__{tool}`，避免跨 server 同名工具冲突（如两个 server 都有 `get_info`）。
+
+- **LLM 侧**: 工具名为 `mcp__finance__get_user_info`
+- **API 侧**: `/tools`、`/mcp` 展示仍为原始名（`get_user_info`），注册缓存 key 用原始名
+- 实现：`registerReadOnly()` 内 `"mcp__" + serverName + "__" + tool.name()`
+
+### 7.5 MCP 工具执行链路
 
 ```
-LLM 推理 → 选择工具 (如 get_weather)
-  → McpTool.callAsync → McpSyncClientWrapper.callTool("get_weather", args)
+LLM 推理 → 选择工具 (如 mcp__finance__get_user_info)
+  → McpTool.callAsync → McpSyncClientWrapper.callTool("get_user_info", args)
   → streamable-http POST → MCP Server
   → 返回 JSON 天气数据 → ToolResultBlock
   → LLM 组织最终回答 → 返回用户
 ```
 
-### 7.4 注册流程
+### 7.6 注册流程
 
 ```
 McpToolRegistrar.registerAll()
+  ├── loadActiveMcpConfig(mcp) → 读取 ActiveMCP.json（无则 null）
   ├── isReadOnlyConfigured(mcp) → 读取 config.yaml permissions.read_only
-  ├── [true]  → registerReadOnly() → 遍历 MCP 工具，手动构造 readOnly=true 的 McpTool 注册
-  └── [false] → toolkit.registerMcpClient(wrapper).block() → 标准注册（依赖 server annotations）
+  ├── [true 或 ActiveMCP 存在] → registerReadOnly()
+  │     ├── 过滤 enabled=false 的工具
+  │     └── 手动构造 readOnly=true 的 McpTool（命名 mcp__{server}__{tool}）
+  └── [false 且无 ActiveMCP] → toolkit.registerMcpClient(wrapper).block() → 标准注册
 ```

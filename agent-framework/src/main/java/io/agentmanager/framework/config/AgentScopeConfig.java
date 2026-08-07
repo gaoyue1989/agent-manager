@@ -43,8 +43,8 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public McpManager mcpManager(AgentManagerProperties props) {
-        return new McpManager(Path.of(props.configDir()));
+    public McpManager mcpManager(AgentManagerProperties props, McpToolRegistrar mcpToolRegistrar) {
+        return new McpManager(Path.of(props.configDir()), mcpToolRegistrar);
     }
 
     @Bean

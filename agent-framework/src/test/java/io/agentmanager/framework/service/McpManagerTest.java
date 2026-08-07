@@ -19,10 +19,12 @@ class McpManagerTest {
     Path configDir;
 
     private McpManager manager;
+    private McpToolRegistrar mcpToolRegistrar;
 
     @BeforeEach
     void setUp() {
-        manager = new McpManager(configDir);
+        mcpToolRegistrar = org.mockito.Mockito.mock(McpToolRegistrar.class);
+        manager = new McpManager(configDir, mcpToolRegistrar);
     }
 
     private McpServerConfig server(String name, String configDir) {
@@ -121,6 +123,13 @@ class McpManagerTest {
             "connection", Map.of("type", "streamableHttp", "url", "http://localhost:8811/mcp"),
             "tools", Map.of("selectedTools", List.of(Map.of("name", "a"), Map.of("name", "b")))
         ));
+
+        // mock 注册缓存返回 2 个真实注册工具
+        org.mockito.Mockito.when(mcpToolRegistrar.getToolsByServer("weather-service"))
+            .thenReturn(List.of(
+                new McpToolRegistrar.ToolInfo("a", "", "weather-service"),
+                new McpToolRegistrar.ToolInfo("b", "", "weather-service")
+            ));
 
         var summaries = manager.getMcpSummaries(mcpConfigs);
 

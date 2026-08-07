@@ -98,11 +98,12 @@ class AgentFrameworkApplicationTests {
 - `GET /chat/stream` Channel SSE 流式事件
 - 空消息处理
 
-### 4.5 ToolControllerTest (3 个用例)
+### 4.5 ToolControllerTest (4 个用例)
 
 - `GET /skills` 返回 OAF skill 列表
 - `GET /mcp` 返回 MCP 配置
-- `GET /tools` 返回 builtin 列表
+- `GET /tools` 默认只返回 MCP 工具
+- `GET /tools?includeInternal=true` 追加内置工具
 
 ### 4.6 AgentRuntimeServiceTest (10 个用例)
 
@@ -126,7 +127,7 @@ class AgentFrameworkApplicationTests {
 - subagents 生成
 - 幂等不覆盖已有文件
 
-### 4.8 McpToolRegistrarTest (11 个用例)
+### 4.8 McpToolRegistrarTest (15 个用例)
 
 覆盖场景：
 - SSE / stdio / streamableHttp 三种传输构建
@@ -136,6 +137,9 @@ class AgentFrameworkApplicationTests {
 - `permissions.read_only: true` → `isReadOnlyConfigured()` 返回 true
 - 无 permissions 段 → 返回 false
 - `permissions.read_only: false` → 返回 false
+- ActiveMCP.json `selectedTools` enabled 标志解析（含缺省默认 true）
+- 无 ActiveMCP.json → `loadActiveMcpConfig()` 返回 null
+- ActiveMCP.json 损坏 → 返回 null 不抛异常
 
 ### 4.9 BusinessToolsTest (5 个用例)
 
@@ -221,13 +225,13 @@ src/test/resources/fixtures/test-agent/
 
 | 类别 | 数量 | 状态 |
 |------|------|------|
-| 单元测试 | 68 | ✅ 全部通过 |
+| 单元测试 | 157 | ✅ 全部通过 |
 | OafConfigLoaderTest | 12 | ✅ |
 | A2AControllerTest | 9 | ✅ |
 | AgentRuntimeServiceTest | 10 | ✅ |
 | WorkspaceInitializerTest | 8 | ✅ |
-| McpToolRegistrarTest | 11 | ✅ |
+| McpToolRegistrarTest | 15 | ✅ |
 | BusinessToolsTest | 5 | ✅ |
-| ToolControllerTest | 3 | ✅ |
+| ToolControllerTest | 4 | ✅ |
 | StreamControllerTest | 2 | ✅ |
 | 其他 Controller Tests | 8 | ✅ |

@@ -14,6 +14,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.yaml.snakeyaml.Yaml;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
@@ -23,14 +25,18 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
  * AgentScope 原生 MCP 工具注册。
  * 从 OAF mcp-configs/{server}/config.yaml 读取连接配置，
  * 使用 McpClientBuilder 构建并注册到 Toolkit。
+ *
+ * 工具命名遵循官方规范 mcp__{server}__{tool}，避免跨 server 同名冲突。
+ * 支持 ActiveMCP.json 的 selectedTools 子集过滤（enabled:false 的工具不注册）。
  */
 @Service
 public class McpToolRegistrar {
     private static final Logger log = LoggerFactory.getLogger(McpToolRegistrar.class);
 
     private final Path configDir;
+    private final ObjectMapper mapper = new ObjectMapper();
 
-    /** 已注册工具缓存: serverName + ":" + toolName -> ToolInfo */
+    /** 已注册工具缓存: serverName + ":" + toolName -> ToolInfo（key 用原始工具名） */
     private final Map<String, ToolInfo> registeredTools = new ConcurrentHashMap<>();
 
     public McpToolRegistrar(io.agentmanager.framework.config.AgentManagerProperties props) {
@@ -40,6 +46,7 @@ public class McpToolRegistrar {
     /**
      * 注册所有 MCP 服务器到 Toolkit。
      * 支持 config.yaml 的 permissions.read_only 强制只读（服务端未标注 readOnlyHint 时兜底）。
+     * 支持 ActiveMCP.json 的 selectedTools 子集过滤。
      *
      * @param toolkit    目标 Toolkit
      * @param oafConfig  OAF 配置
@@ -48,9 +55,12 @@ public class McpToolRegistrar {
         for (var mcp : oafConfig.mcpServers()) {
             var wrapper = buildClient(mcp);
             if (wrapper != null) {
+                // 加载 ActiveMCP.json 配置（enabled 子集过滤）
+                var activeMcpConfig = loadActiveMcpConfig(mcp);
                 boolean forceReadOnly = isReadOnlyConfigured(mcp);
-                if (forceReadOnly) {
-                    registerReadOnly(toolkit, wrapper, mcp.server());
+                if (forceReadOnly || activeMcpConfig != null) {
+                    // 有 ActiveMCP 配置或强制只读时，走手动注册路径（支持过滤）
+                    registerReadOnly(toolkit, wrapper, mcp.server(), activeMcpConfig);
                 } else {
                     toolkit.registerMcpClient(wrapper).block();
                     // 标准注册：记录已注册工具信息
@@ -59,6 +69,48 @@ public class McpToolRegistrar {
                 log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             }
         }
+    }
+
+    /**
+     * 加载 ActiveMCP.json 配置。
+     * package-private：便于单元测试。
+     *
+     * @return toolName -> enabled 的映射；无 ActiveMCP.json 或解析失败返回 null（不限制）
+     */
+    Map<String, Boolean> loadActiveMcpConfig(OafConfig.McpServerConfig mcp) {
+        var mcpDir = resolveMcpDir(mcp);
+        var activeMcp = mcpDir.resolve("ActiveMCP.json");
+        if (!activeMcp.toFile().exists()) {
+            return null; // 无配置，不限制
+        }
+        try {
+            var node = mapper.readTree(activeMcp.toFile());
+            var result = new LinkedHashMap<String, Boolean>();
+            if (node.has("selectedTools")) {
+                for (var toolNode : node.get("selectedTools")) {
+                    var name = toolNode.get("name").asText();
+                    var enabled = !toolNode.has("enabled") || toolNode.get("enabled").asBoolean(true);
+                    result.put(name, enabled);
+                }
+            }
+            log.info("Loaded ActiveMCP.json for {}: {} tools configured", mcp.server(), result.size());
+            return result;
+        } catch (Exception e) {
+            log.warn("Failed to load ActiveMCP.json for {}: {}", mcp.server(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 解析 MCP 配置目录：优先 configDir，回退 server 名。
+     */
+    private Path resolveMcpDir(OafConfig.McpServerConfig mcp) {
+        var mcpDir = configDir.resolve(
+            mcp.configDir() == null || mcp.configDir().isEmpty() ? mcp.server() : mcp.configDir());
+        if (!mcpDir.toFile().exists()) {
+            mcpDir = configDir.resolve(mcp.server());
+        }
+        return mcpDir;
     }
 
     /**
@@ -102,8 +154,13 @@ public class McpToolRegistrar {
     /**
      * 强制只读注册：服务端未标注 readOnlyHint 时，通过 config.yaml 兜底。
      * 遍历 MCP 工具，手动构造 readOnly=true 的 McpTool 注册到 Toolkit。
+     * 支持 ActiveMCP.json 子集过滤：enabled=false 的工具不注册。
+     * 工具命名遵循官方规范 mcp__{server}__{tool}。
+     *
+     * @param activeMcpConfig ActiveMCP.json 的 toolName -> enabled 映射；null 表示不限制
      */
-    private void registerReadOnly(Toolkit toolkit, McpClientWrapper wrapper, String serverName) {
+    private void registerReadOnly(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
+                                  Map<String, Boolean> activeMcpConfig) {
         wrapper.initialize().block();
         var tools = wrapper.listTools().block();
         if (tools == null) {
@@ -111,8 +168,17 @@ public class McpToolRegistrar {
             return;
         }
         for (var tool : tools) {
+            // ActiveMCP 过滤：enabled=false 的工具不注册
+            if (activeMcpConfig != null) {
+                if (activeMcpConfig.containsKey(tool.name()) && !activeMcpConfig.get(tool.name())) {
+                    log.info("MCP tool '{}' skipped (ActiveMCP enabled=false)", tool.name());
+                    continue;
+                }
+            }
+            // 官方命名规范 mcp__{server}__{tool}，避免跨 server 同名冲突
+            var toolName = "mcp__" + serverName + "__" + tool.name();
             var agentTool = new io.agentscope.core.tool.mcp.McpTool(
-                tool.name(),
+                toolName,
                 tool.description() != null ? tool.description() : "",
                 io.agentscope.core.tool.mcp.McpTool.convertMcpSchemaToParameters(
                     tool.inputSchema(), java.util.Collections.emptySet()),
@@ -123,9 +189,10 @@ public class McpToolRegistrar {
                 true // readOnly=true 强制只读
             );
             toolkit.registerTool(agentTool);
+            // 缓存 key 使用原始工具名，供 /tools、/mcp 展示友好名称
             registeredTools.put(serverName + ":" + tool.name(),
                 new ToolInfo(tool.name(), tool.description(), serverName));
-            log.info("MCP tool '{}' registered read-only (config.yaml permissions.read_only)", tool.name());
+            log.info("MCP tool '{}' registered as '{}' (read-only)", tool.name(), toolName);
         }
     }
 
@@ -134,11 +201,7 @@ public class McpToolRegistrar {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> loadConfigYaml(OafConfig.McpServerConfig mcp) {
-        var mcpDir = configDir.resolve(
-            mcp.configDir() == null || mcp.configDir().isEmpty() ? mcp.server() : mcp.configDir());
-        if (!mcpDir.toFile().exists()) {
-            mcpDir = configDir.resolve(mcp.server());
-        }
+        var mcpDir = resolveMcpDir(mcp);
         var configYaml = mcpDir.resolve("config.yaml");
         if (!configYaml.toFile().exists()) {
             return null;
@@ -159,11 +222,7 @@ public class McpToolRegistrar {
      */
     @SuppressWarnings("unchecked")
     McpClientWrapper buildClient(OafConfig.McpServerConfig mcp) {
-        var mcpDir = configDir.resolve(
-            mcp.configDir() == null || mcp.configDir().isEmpty() ? mcp.server() : mcp.configDir());
-        if (!mcpDir.toFile().exists()) {
-            mcpDir = configDir.resolve(mcp.server());
-        }
+        var mcpDir = resolveMcpDir(mcp);
         var configYaml = mcpDir.resolve("config.yaml");
         if (!configYaml.toFile().exists()) {
             log.warn("MCP config.yaml not found for {} at {}", mcp.server(), configYaml);

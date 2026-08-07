@@ -154,6 +154,16 @@ curl http://localhost:8100/mcp
 ]
 ```
 
+**字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `server` | MCP 服务器名 |
+| `vendor` | 供应商 |
+| `connection_type` | 传输类型（sse / streamableHttp / stdio） |
+| `url` | 连接地址 |
+| `tool_count` | **实际注册的工具数**（读 McpToolRegistrar 注册缓存；受 ActiveMCP.json `enabled: false` 过滤影响） |
+
 ---
 
 ### GET /tools

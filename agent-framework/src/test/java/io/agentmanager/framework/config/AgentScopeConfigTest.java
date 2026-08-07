@@ -27,8 +27,9 @@ class AgentScopeConfigTest {
     @Test
     void mcpManagerShouldUseConfigPath() {
         var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test");
+        var mcpRegistrar = mock(McpToolRegistrar.class);
 
-        assertNotNull(config.mcpManager(props));
+        assertNotNull(config.mcpManager(props, mcpRegistrar));
     }
 
     @Test

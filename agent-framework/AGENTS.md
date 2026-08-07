@@ -108,6 +108,8 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - 从 `mcp-configs/{server}/config.yaml` 读取 `connection` + `auth` + `permissions`
 - 支持 `sse` / `streamableHttp` / `stdio` 三种传输
 - **支持 `permissions.read_only: true`**: 非只读 MCP 工具被权限系统拦截时，强制注册为只读绕过 HITL
+- **支持 ActiveMCP.json 子集过滤**: `selectedTools` 中 `enabled: false` 的工具不注册到 Toolkit
+- **工具命名遵循官方规范** `mcp__{server}__{tool}`，避免跨 server 同名工具冲突
 
 ### 4. A2AController — A2A JSON-RPC
 
@@ -162,6 +164,8 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - 传输: `sse` / `streamableHttp` / `stdio`
 - 认证: `auth.token` 支持 `${ENV_VAR}` 语法
 - 权限: `permissions.read_only: true` 强制只读
+- 子集: `mcp-configs/{server}/ActiveMCP.json` 的 `selectedTools.enabled` 控制注册子集
+- 命名: LLM 侧工具名为 `mcp__{server}__{tool}`（API 展示仍为原始名）
 
 ### 工具过滤
 

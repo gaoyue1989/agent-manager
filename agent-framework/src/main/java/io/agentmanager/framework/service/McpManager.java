@@ -21,9 +21,11 @@ public class McpManager {
 
     private final Path mcpConfigsDir;
     private final ObjectMapper mapper = new ObjectMapper();
+    private final McpToolRegistrar mcpToolRegistrar;
 
-    public McpManager(java.nio.file.Path configDir) {
+    public McpManager(java.nio.file.Path configDir, McpToolRegistrar mcpToolRegistrar) {
         this.mcpConfigsDir = configDir;
+        this.mcpToolRegistrar = mcpToolRegistrar;
     }
 
     public List<Map<String, Object>> loadConfigs(List<McpServerConfig> mcpServers) {
@@ -130,22 +132,12 @@ public class McpManager {
                 @SuppressWarnings("unchecked")
                 var conn = (Map<String, Object>) mc.getOrDefault("connection", Map.of());
 
-                // 修复: 安全获取 tool_count，兼容 Map 和 JsonNode 两种类型
-                int toolCount = 0;
-                var toolsObj = mc.get("tools");
-                if (toolsObj instanceof Map<?, ?> toolsMap) {
-                    var selected = toolsMap.get("selectedTools");
-                    if (selected instanceof List<?> list) {
-                        toolCount = list.size();
-                    }
-                } else if (toolsObj instanceof JsonNode jsonNode) {
-                    if (jsonNode.has("selectedTools")) {
-                        toolCount = jsonNode.get("selectedTools").size();
-                    }
-                }
+                // 使用 McpToolRegistrar 注册缓存获取真实 tool_count
+                var serverName = (String) mc.getOrDefault("server", "unknown");
+                int toolCount = mcpToolRegistrar.getToolsByServer(serverName).size();
 
                 summaries.add(Map.of(
-                    "server", mc.getOrDefault("server", "unknown"),
+                    "server", serverName,
                     "vendor", mc.getOrDefault("vendor", ""),
                     "connection_type", conn.getOrDefault("type", "N/A"),
                     "url", conn.getOrDefault("url", "N/A"),
