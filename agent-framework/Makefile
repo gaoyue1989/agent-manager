@@ -4,7 +4,7 @@
 
 # 变量
 MVN        ?= mvn
-JAR        ?= target/agent-framework-2.0.0.jar
+JAR        ?= target/agent-framework-2.1.0.jar
 IMAGE      ?= agent-framework:latest
 DEV_IMAGE  ?= gaoyue1989/agent-framework:java-dev
 

@@ -55,7 +55,7 @@ LLM_MODEL_ID=your_model_id \
 LLM_BASE_URL=https://your-api-endpoint/v1 \
 AGENT_CONFIG_DIR=./config \
 SERVER_PORT=8100 \
-java -jar target/agent-framework-2.0.0.jar
+java -jar target/agent-framework-2.1.0.jar
 ```
 
 ### 2.4 验证

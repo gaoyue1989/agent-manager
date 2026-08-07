@@ -30,6 +30,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /usr/sbin/nologin appuser \
     && mkdir -p /config \
+    # K8s ConfigMap/Volume 挂载会覆盖目录属主为 root，故 chmod 777 保证非 root 用户可写
+    && chmod 777 /config \
     && chown -R appuser:appuser /config
 
 # 从 builder 阶段拷贝 fat jar
