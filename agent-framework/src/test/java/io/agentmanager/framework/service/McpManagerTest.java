@@ -127,8 +127,8 @@ class McpManagerTest {
         // mock 注册缓存返回 2 个真实注册工具
         org.mockito.Mockito.when(mcpToolRegistrar.getToolsByServer("weather-service"))
             .thenReturn(List.of(
-                new McpToolRegistrar.ToolInfo("a", "", "weather-service"),
-                new McpToolRegistrar.ToolInfo("b", "", "weather-service")
+                new McpToolRegistrar.ToolInfo("a", "mcp__weather-service__a", "", "weather-service"),
+                new McpToolRegistrar.ToolInfo("b", "mcp__weather-service__b", "", "weather-service")
             ));
 
         var summaries = manager.getMcpSummaries(mcpConfigs);

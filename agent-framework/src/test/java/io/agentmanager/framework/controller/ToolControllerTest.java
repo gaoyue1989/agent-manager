@@ -74,7 +74,7 @@ class ToolControllerTest {
     void listToolsShouldReturnMcpToolsByDefault() throws Exception {
         when(mcpToolRegistrar.getToolsByServer("weather-service"))
             .thenReturn(List.of(
-                new McpToolRegistrar.ToolInfo("get_weather", "Get weather", "weather-service")
+                new McpToolRegistrar.ToolInfo("get_weather", "mcp__weather-service__get_weather", "Get weather", "weather-service")
             ));
 
         // mcpConfigs 为 MockBean 注入的 mock List，返回空列表（无 MCP server 配置）

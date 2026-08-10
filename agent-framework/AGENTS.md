@@ -109,7 +109,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - 支持 `sse` / `streamableHttp` / `stdio` 三种传输
 - **支持 `permissions.read_only: true`**: 非只读 MCP 工具被权限系统拦截时，强制注册为只读绕过 HITL
 - **支持 ActiveMCP.json 子集过滤**: `selectedTools` 中 `enabled: false` 的工具不注册到 Toolkit
-- **工具命名遵循官方规范** `mcp__{server}__{tool}`，避免跨 server 同名工具冲突
+- **工具注册名**: 使用远端裸名（`tool.name()`），确保 `McpTool.callAsync` 正确执行；`mcp__{server}__{tool}` 前缀名仅用于 API 展示和注册缓存（因 `McpTool.getName()` 是 `final` 字段，无法分离 LLM 暴露名和执行名）
 
 ### 4. A2AController — A2A JSON-RPC
 
@@ -165,7 +165,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - 认证: `auth.token` 支持 `${ENV_VAR}` 语法
 - 权限: `permissions.read_only: true` 强制只读
 - 子集: `mcp-configs/{server}/ActiveMCP.json` 的 `selectedTools.enabled` 控制注册子集
-- 命名: LLM 侧工具名为 `mcp__{server}__{tool}`（API 展示仍为原始名）
+- 命名: Toolkit 注册用远端裸名；`/tools`、`/mcp` API 用 `mcp__{server}__{tool}` 展示名
 
 ### 工具过滤
 

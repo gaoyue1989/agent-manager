@@ -360,13 +360,16 @@ AgentScope 的 `McpTool.checkPermissions()` 对非只读 MCP 工具返回 `Permi
 - 不存在 ActiveMCP.json 时走标准注册，工具全量注册
 - 实现：`McpToolRegistrar.loadActiveMcpConfig()`
 
-### 7.4 工具命名规范
+### 7.4 工具命名策略
 
-MCP 工具注册名遵循 AgentScope 官方规范 `mcp__{server}__{tool}`，避免跨 server 同名工具冲突（如两个 server 都有 `get_info`）。
+MCP 工具命名涉及两个场景：
 
-- **LLM 侧**: 工具名为 `mcp__finance__get_user_info`
-- **API 侧**: `/tools`、`/mcp` 展示仍为原始名（`get_user_info`），注册缓存 key 用原始名
-- 实现：`registerReadOnly()` 内 `"mcp__" + serverName + "__" + tool.name()`
+| 场景 | 命名 | 说明 |
+|------|------|------|
+| **Toolkit 注册**（LLM 调用） | 远端裸名 `get_weather` | `McpTool.getName()` 是 `final` 字段，`callAsync` 用它转发给远端；必须用裸名 |
+| **API 展示**（`/tools`、`/mcp`） | `mcp__{server}__{tool}` | 通过 `ToolInfo.displayName` 展示，避免跨 server 同名混淆 |
+
+**限制**：`McpTool.getName()` 是 `private final`，`callAsync` 用 `this.getName()` 转发给 `clientWrapper.callTool()`，无法分离 LLM 暴露名和执行名。跨 server 同名工具（如两个 server 都有 `get_info`）在 Toolkit 中会冲突，通过 `serverName` 字段区分。
 
 ### 7.5 MCP 工具执行链路
 

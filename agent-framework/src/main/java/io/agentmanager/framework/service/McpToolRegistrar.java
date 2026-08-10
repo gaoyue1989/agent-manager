@@ -124,8 +124,10 @@ public class McpToolRegistrar {
                 return;
             }
             for (var tool : tools) {
+                var displayName = "mcp__" + serverName + "__" + tool.name();
                 var info = new ToolInfo(
                     tool.name(),
+                    displayName,
                     tool.description() != null ? tool.description() : "",
                     serverName
                 );
@@ -155,7 +157,12 @@ public class McpToolRegistrar {
      * 强制只读注册：服务端未标注 readOnlyHint 时，通过 config.yaml 兜底。
      * 遍历 MCP 工具，手动构造 readOnly=true 的 McpTool 注册到 Toolkit。
      * 支持 ActiveMCP.json 子集过滤：enabled=false 的工具不注册。
-     * 工具命名遵循官方规范 mcp__{server}__{tool}。
+     *
+     * 注册名使用远端裸名（tool.name()），确保 McpTool.callAsync 正确执行。
+     * mcp__{server}__{tool} 前缀名仅用于 registeredTools 缓存和 API 展示。
+     *
+     * 注：McpTool.getName() 是 final 字段，callAsync 用它转发给远端 MCP server，
+     * 无法分离 LLM 暴露名和执行名。跨 server 同名工具冲突通过 serverName 字段区分。
      *
      * @param activeMcpConfig ActiveMCP.json 的 toolName -> enabled 映射；null 表示不限制
      */
@@ -175,10 +182,9 @@ public class McpToolRegistrar {
                     continue;
                 }
             }
-            // 官方命名规范 mcp__{server}__{tool}，避免跨 server 同名冲突
-            var toolName = "mcp__" + serverName + "__" + tool.name();
+            // 使用远端裸名注册，确保 callAsync 正确执行
             var agentTool = new io.agentscope.core.tool.mcp.McpTool(
-                toolName,
+                tool.name(),
                 tool.description() != null ? tool.description() : "",
                 io.agentscope.core.tool.mcp.McpTool.convertMcpSchemaToParameters(
                     tool.inputSchema(), java.util.Collections.emptySet()),
@@ -189,10 +195,11 @@ public class McpToolRegistrar {
                 true // readOnly=true 强制只读
             );
             toolkit.registerTool(agentTool);
-            // 缓存 key 使用原始工具名，供 /tools、/mcp 展示友好名称
+            // 缓存 key 用原始工具名，API 展示用 mcp__ 前缀名（跨 server 区分）
+            var displayName = "mcp__" + serverName + "__" + tool.name();
             registeredTools.put(serverName + ":" + tool.name(),
-                new ToolInfo(tool.name(), tool.description(), serverName));
-            log.info("MCP tool '{}' registered as '{}' (read-only)", tool.name(), toolName);
+                new ToolInfo(tool.name(), displayName, tool.description(), serverName));
+            log.info("MCP tool '{}' registered (display: {}, read-only)", tool.name(), displayName);
         }
     }
 
@@ -311,6 +318,11 @@ public class McpToolRegistrar {
 
     /**
      * 已注册 MCP 工具信息。
+     *
+     * @param name        远端裸名（如 get_weather）
+     * @param displayName API 展示名（如 mcp__travel__get_weather）
+     * @param description 工具描述
+     * @param serverName  MCP 服务器名
      */
-    public record ToolInfo(String name, String description, String serverName) {}
+    public record ToolInfo(String name, String displayName, String description, String serverName) {}
 }
