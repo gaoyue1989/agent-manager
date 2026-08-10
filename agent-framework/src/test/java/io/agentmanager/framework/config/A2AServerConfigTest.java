@@ -3,6 +3,8 @@ package io.agentmanager.framework.config;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import javax.sql.DataSource;
+
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.harness.agent.HarnessAgent;
 
@@ -16,10 +18,11 @@ class A2AServerConfigTest {
     void a2aServerShouldBuildWithRunner() {
         var agent = mock(HarnessAgent.class);
         var oaf = mock(OafConfig.class);
+        var dataSource = mock(DataSource.class);
         when(oaf.name()).thenReturn("agent-a");
         when(oaf.description()).thenReturn("desc");
 
-        var server = config.a2aServer(agent, oaf);
+        var server = config.a2aServer(agent, oaf, dataSource);
         assertNotNull(server);
     }
 
@@ -27,10 +30,11 @@ class A2AServerConfigTest {
     void a2aServerShouldTolerateNullDescription() {
         var agent = mock(HarnessAgent.class);
         var oaf = mock(OafConfig.class);
+        var dataSource = mock(DataSource.class);
         when(oaf.name()).thenReturn("agent-b");
         when(oaf.description()).thenReturn(null);
 
-        var server = config.a2aServer(agent, oaf);
+        var server = config.a2aServer(agent, oaf, dataSource);
         assertNotNull(server);
     }
 }

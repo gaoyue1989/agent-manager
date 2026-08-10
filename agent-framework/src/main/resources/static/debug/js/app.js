@@ -49,6 +49,15 @@ window.App.toolToggle = (headerEl) => {
   toggle.textContent = body.classList.contains('open') ? '▲' : '▼';
 };
 
+// 思维链块折叠切换（供模块内联 onclick 使用）
+window.App.thinkingToggle = (headerEl) => {
+  const body = headerEl.nextElementSibling;
+  const toggle = headerEl.querySelector('.thinking-toggle');
+  body.classList.toggle('open');
+  toggle.classList.toggle('open');
+  toggle.textContent = body.classList.contains('open') ? '▲' : '▼';
+};
+
 // LLM Call 条目折叠切换（供模块内联 onclick 使用）
 window.App.toggleLlmCall = (idx) => {
   const entry = document.getElementById('llm-entry-' + idx);

@@ -1,5 +1,6 @@
 package io.agentmanager.framework.service;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -134,23 +135,180 @@ public class AgentRuntimeService {
             agent.streamEvents(List.of(userMsg), ctx)
                 .doOnNext(event -> {
                     var type = event.getType();
-                    if (type == AgentEventType.TEXT_BLOCK_DELTA) {
-                        var delta = ((io.agentscope.core.event.TextBlockDeltaEvent) event).getDelta();
-                        sink.next(Map.of("type", "token", "token", delta, "task_id", tid));
-                    } else if (type == AgentEventType.TOOL_CALL_START) {
+
+                    // ===== 生命周期事件 =====
+                    if (type == AgentEventType.AGENT_START) {
+                        var e = (io.agentscope.core.event.AgentStartEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "agent_start");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "reply_id", e.getReplyId());
+                        putIfNotNull(m, "session_id", e.getSessionId());
+                        putIfNotNull(m, "name", e.getName());
+                        putIfNotNull(m, "role", e.getRole());
+                        sink.next(m);
+                    }
+
+                    // ===== 文本流式事件 =====
+                    else if (type == AgentEventType.TEXT_BLOCK_START) {
+                        var e = (io.agentscope.core.event.TextBlockStartEvent) event;
+                        sink.next(blockEvent("text_block_start", tid, e.getReplyId(), e.getBlockId()));
+                    }
+                    else if (type == AgentEventType.TEXT_BLOCK_DELTA) {
+                        var e = (io.agentscope.core.event.TextBlockDeltaEvent) event;
+                        sink.next(Map.of("type", "token", "token", e.getDelta(), "task_id", tid));
+                    }
+                    else if (type == AgentEventType.TEXT_BLOCK_END) {
+                        var e = (io.agentscope.core.event.TextBlockEndEvent) event;
+                        sink.next(blockEvent("text_block_end", tid, e.getReplyId(), e.getBlockId()));
+                    }
+
+                    // ===== 思维链事件 =====
+                    else if (type == AgentEventType.THINKING_BLOCK_START) {
+                        var e = (io.agentscope.core.event.ThinkingBlockStartEvent) event;
+                        sink.next(blockEvent("thinking_block_start", tid, e.getReplyId(), e.getBlockId()));
+                    }
+                    else if (type == AgentEventType.THINKING_BLOCK_DELTA) {
+                        var e = (io.agentscope.core.event.ThinkingBlockDeltaEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "thinking_block_delta");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "delta", e.getDelta());
+                        putIfNotNull(m, "reply_id", e.getReplyId());
+                        putIfNotNull(m, "block_id", e.getBlockId());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.THINKING_BLOCK_END) {
+                        var e = (io.agentscope.core.event.ThinkingBlockEndEvent) event;
+                        sink.next(blockEvent("thinking_block_end", tid, e.getReplyId(), e.getBlockId()));
+                    }
+
+                    // ===== 多模态数据事件 =====
+                    else if (type == AgentEventType.DATA_BLOCK_START) {
+                        var e = (io.agentscope.core.event.DataBlockStartEvent) event;
+                        sink.next(blockEvent("data_block_start", tid, e.getReplyId(), e.getBlockId()));
+                    }
+                    else if (type == AgentEventType.DATA_BLOCK_DELTA) {
+                        var e = (io.agentscope.core.event.DataBlockDeltaEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "data_block_delta");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "delta", e.getDelta());
+                        putIfNotNull(m, "reply_id", e.getReplyId());
+                        putIfNotNull(m, "block_id", e.getBlockId());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.DATA_BLOCK_END) {
+                        var e = (io.agentscope.core.event.DataBlockEndEvent) event;
+                        sink.next(blockEvent("data_block_end", tid, e.getReplyId(), e.getBlockId()));
+                    }
+
+                    // ===== 工具调用流式事件 =====
+                    else if (type == AgentEventType.TOOL_CALL_START) {
                         var tc = (io.agentscope.core.event.ToolCallStartEvent) event;
-                        sink.next(Map.of(
-                            "type", "tool_call", "task_id", tid,
-                            "name", tc.getToolCallName(),
-                            "tool_call_id", tc.getToolCallId()
-                        ));
-                    } else if (type == AgentEventType.TOOL_RESULT_END) {
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_call");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "name", tc.getToolCallName());
+                        putIfNotNull(m, "tool_call_id", tc.getToolCallId());
+                        putIfNotNull(m, "reply_id", tc.getReplyId());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.TOOL_CALL_DELTA) {
+                        var e = (io.agentscope.core.event.ToolCallDeltaEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_call_delta");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "delta", e.getDelta());
+                        putIfNotNull(m, "tool_call_id", e.getToolCallId());
+                        putIfNotNull(m, "tool_call_name", e.getToolCallName());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.TOOL_CALL_END) {
+                        var e = (io.agentscope.core.event.ToolCallEndEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_call_end");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "tool_call_id", e.getToolCallId());
+                        putIfNotNull(m, "tool_call_name", e.getToolCallName());
+                        sink.next(m);
+                    }
+
+                    // ===== 工具结果流式事件 =====
+                    else if (type == AgentEventType.TOOL_RESULT_START) {
+                        var e = (io.agentscope.core.event.ToolResultStartEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_result_start");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "tool_call_id", e.getToolCallId());
+                        putIfNotNull(m, "tool_call_name", e.getToolCallName());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.TOOL_RESULT_TEXT_DELTA) {
+                        var e = (io.agentscope.core.event.ToolResultTextDeltaEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_result_text_delta");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "delta", e.getDelta());
+                        putIfNotNull(m, "tool_call_id", e.getToolCallId());
+                        putIfNotNull(m, "tool_call_name", e.getToolCallName());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.TOOL_RESULT_DATA_DELTA) {
+                        var e = (io.agentscope.core.event.ToolResultDataDeltaEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_result_data_delta");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "tool_call_id", e.getToolCallId());
+                        putIfNotNull(m, "tool_call_name", e.getToolCallName());
+                        // ContentBlock 可能是 DataBlock，提取 source (Base64Source / URLSource)
+                        if (e.getData() instanceof io.agentscope.core.message.DataBlock dataBlock) {
+                            var source = dataBlock.getSource();
+                            if (source instanceof io.agentscope.core.message.Base64Source base64) {
+                                putIfNotNull(m, "media_type", base64.getMediaType());
+                                putIfNotNull(m, "data", base64.getData());
+                            } else if (source instanceof io.agentscope.core.message.URLSource urlSource) {
+                                putIfNotNull(m, "media_type", urlSource.getMimeType());
+                                putIfNotNull(m, "url", urlSource.getUrl());
+                            }
+                        }
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.TOOL_RESULT_END) {
                         var tr = (io.agentscope.core.event.ToolResultEndEvent) event;
-                        sink.next(Map.of(
-                            "type", "tool_result", "task_id", tid,
-                            "state", tr.getState().name()
-                        ));
-                    } else if (type == AgentEventType.AGENT_END) {
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "tool_result");
+                        m.put("task_id", tid);
+                        m.put("state", tr.getState().name());
+                        putIfNotNull(m, "tool_call_id", tr.getToolCallId());
+                        putIfNotNull(m, "tool_call_name", tr.getToolCallName());
+                        sink.next(m);
+                    }
+
+                    // ===== 模型调用事件 =====
+                    else if (type == AgentEventType.MODEL_CALL_START) {
+                        var e = (io.agentscope.core.event.ModelCallStartEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "model_call_start");
+                        m.put("task_id", tid);
+                        putIfNotNull(m, "reply_id", e.getReplyId());
+                        sink.next(m);
+                    }
+                    else if (type == AgentEventType.MODEL_CALL_END) {
+                        var e = (io.agentscope.core.event.ModelCallEndEvent) event;
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("type", "model_call_end");
+                        m.put("task_id", tid);
+                        if (e.getUsage() != null) {
+                            m.put("input_tokens", e.getUsage().getInputTokens());
+                            m.put("output_tokens", e.getUsage().getOutputTokens());
+                            m.put("total_tokens", e.getUsage().getTotalTokens());
+                        }
+                        sink.next(m);
+                    }
+
+                    // ===== 结束事件 =====
+                    else if (type == AgentEventType.AGENT_END) {
                         sink.next(Map.of(
                             "type", "task_update", "id", tid,
                             "state", "completed",
@@ -177,5 +335,22 @@ public class AgentRuntimeService {
 
     public void setAgent(io.agentscope.harness.agent.HarnessAgent agent) {
         this.agent = agent;
+    }
+
+    /** 仅当 value 非 null 时写入 map，避免 Map.of 抛 NPE */
+    private static void putIfNotNull(Map<String, Object> m, String key, Object value) {
+        if (value != null) {
+            m.put(key, value);
+        }
+    }
+
+    /** 构造带 reply_id/block_id 的块级事件 Map */
+    private static Map<String, Object> blockEvent(String type, String tid, String replyId, String blockId) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("type", type);
+        m.put("task_id", tid);
+        putIfNotNull(m, "reply_id", replyId);
+        putIfNotNull(m, "block_id", blockId);
+        return m;
     }
 }

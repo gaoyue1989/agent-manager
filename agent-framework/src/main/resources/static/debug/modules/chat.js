@@ -11,6 +11,9 @@ let fullText = '';
 let pendingToolCalls = {};
 let mcpAppsRegistry = {};
 let refreshTimer = null;
+let thinkingDiv = null;
+let thinkingText = '';
+let toolResultBuffers = {};
 
 function render() {
   return `
@@ -258,6 +261,105 @@ function addUsageStats(usage, elapsed) {
   ctx.utils.scrollBottom(messagesEl);
 }
 
+// ---------- 思维链渲染 ----------
+
+function createThinkingBlock() {
+  const div = document.createElement('div');
+  div.className = 'msg thinking';
+  div.innerHTML = '<div class="thinking-header" onclick="window.App.thinkingToggle(this)">' +
+    '<span class="thinking-icon">🧠</span>' +
+    '<span class="thinking-label">Thinking...</span>' +
+    '<span class="thinking-toggle">▼</span></div>' +
+    '<div class="thinking-body open"><pre class="thinking-content"></pre></div>';
+  messagesEl.appendChild(div);
+  ctx.utils.scrollBottom(messagesEl);
+  return div;
+}
+
+function appendThinkingDelta(delta) {
+  if (!thinkingDiv) {
+    thinkingDiv = createThinkingBlock();
+    thinkingText = '';
+  }
+  thinkingText += delta;
+  const content = thinkingDiv.querySelector('.thinking-content');
+  if (content) content.textContent = thinkingText;
+  ctx.utils.scrollBottom(messagesEl);
+}
+
+function finishThinkingBlock() {
+  if (thinkingDiv) {
+    const label = thinkingDiv.querySelector('.thinking-label');
+    if (label) label.textContent = 'Thinking (' + thinkingText.length + ' chars)';
+    const body = thinkingDiv.querySelector('.thinking-body');
+    const toggle = thinkingDiv.querySelector('.thinking-toggle');
+    if (body) body.classList.remove('open');
+    if (toggle) { toggle.classList.remove('open'); toggle.textContent = '▼'; }
+  }
+  thinkingDiv = null;
+  thinkingText = '';
+}
+
+// ---------- 工具参数渐进渲染 ----------
+
+function handleToolCallDelta(toolCallId, delta) {
+  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
+  if (!block) return;
+  if (!pendingToolCalls[toolCallId]) pendingToolCalls[toolCallId] = { argsRaw: '' };
+  if (!pendingToolCalls[toolCallId].argsRaw) pendingToolCalls[toolCallId].argsRaw = '';
+  pendingToolCalls[toolCallId].argsRaw += delta;
+  const argsPre = block.querySelector('.tc-args pre');
+  if (argsPre) {
+    try {
+      const parsed = JSON.parse(pendingToolCalls[toolCallId].argsRaw);
+      argsPre.textContent = JSON.stringify(parsed, null, 2);
+    } catch {
+      argsPre.textContent = pendingToolCalls[toolCallId].argsRaw;
+    }
+  }
+}
+
+function handleToolCallEnd(toolCallId) {
+  const tc = pendingToolCalls[toolCallId];
+  if (tc && tc.argsRaw) {
+    try {
+      tc.args = JSON.parse(tc.argsRaw);
+    } catch { /* 保留原始文本 */ }
+  }
+}
+
+// ---------- 工具结果渐进渲染 ----------
+
+function handleToolResultStart(toolCallId, toolCallName) {
+  toolResultBuffers[toolCallId] = { name: toolCallName, text: '' };
+  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
+  if (block) {
+    const body = block.querySelector('.tool-call-body');
+    if (body && !body.querySelector('.tc-result')) {
+      body.innerHTML += '<div class="tc-result"><div class="tc-label" style="margin-top:8px">Result</div>' +
+        '<pre class="tc-result-content"></pre></div>';
+      body.classList.add('open');
+      const toggle = block.querySelector('.tc-toggle');
+      if (toggle) { toggle.classList.add('open'); toggle.textContent = '▲'; }
+    }
+  }
+}
+
+function handleToolResultTextDelta(toolCallId, delta) {
+  const buf = toolResultBuffers[toolCallId];
+  if (buf) buf.text += delta;
+  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
+  if (block) {
+    const resultPre = block.querySelector('.tc-result-content');
+    if (resultPre) resultPre.textContent = buf ? buf.text : delta;
+  }
+  ctx.utils.scrollBottom(messagesEl);
+}
+
+function cleanupToolResultBuffer(toolCallId) {
+  delete toolResultBuffers[toolCallId];
+}
+
 // ---------- 发送 ----------
 
 async function sendMessage() {
@@ -280,6 +382,9 @@ async function sendMessage() {
   abortController = new AbortController();
   fullText = '';
   pendingToolCalls = {};
+  thinkingDiv = null;
+  thinkingText = '';
+  toolResultBuffers = {};
 
   const mode = ctx.state.getState('ui.streamMode');
   try {
@@ -327,6 +432,36 @@ async function sendChannelSSE(text) {
           if (data.type === 'TEXT_BLOCK_DELTA' && data.delta && streamingDiv) {
             fullText += data.delta;
             updateStreamContent(fullText);
+          } else if (data.type === 'THINKING_BLOCK_DELTA' && data.delta) {
+            appendThinkingDelta(data.delta);
+          } else if (data.type === 'THINKING_BLOCK_END') {
+            finishThinkingBlock();
+          } else if (data.type === 'TOOL_CALL_START') {
+            handleToolCallEvent({
+              type: 'tool_call',
+              name: data.toolName,
+              tool_call_id: data.toolCallId
+            });
+          } else if (data.type === 'TOOL_CALL_DELTA' && data.delta) {
+            handleToolCallDelta(data.toolCallId, data.delta);
+          } else if (data.type === 'TOOL_CALL_END') {
+            handleToolCallEnd(data.toolCallId);
+          } else if (data.type === 'TOOL_RESULT_START') {
+            handleToolResultStart(data.toolCallId, data.toolCallName);
+          } else if (data.type === 'TOOL_RESULT_TEXT_DELTA' && data.delta) {
+            handleToolResultTextDelta(data.toolCallId, data.delta);
+          } else if (data.type === 'TOOL_RESULT_END') {
+            handleToolResultEvent({
+              type: 'tool_result',
+              tool_call_id: data.toolCallId,
+              state: data.state
+            });
+          } else if (data.type === 'MODEL_CALL_END') {
+            addUsageStats({
+              input_tokens: data.inputTokens,
+              output_tokens: data.outputTokens,
+              total_tokens: data.totalTokens
+            }, null);
           }
         } catch (e) { /* 忽略解析错误 */ }
       }
@@ -342,15 +477,15 @@ async function sendChannelSSE(text) {
 async function sendA2AStream(text) {
   const metadata = {};
   const sid = currentSessionId();
-  if (sid) metadata.thread_id = sid;
+  if (sid) metadata.sessionId = sid;
   try {
     const resp = await fetch(ctx.api.BASE + '/', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({
         jsonrpc: '2.0',
         method: 'message/stream',
-        params: { message: { role: 'user', parts: [{ text }] }, metadata },
+        params: { message: { role: 'user', parts: [{ text }], metadata } },
         id: 'stream-' + Date.now()
       }),
       signal: abortController.signal
@@ -359,6 +494,7 @@ async function sendA2AStream(text) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let lastArtifactText = '';   // 累积当前 artifact 的文本（append 语义）
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -369,46 +505,83 @@ async function sendA2AStream(text) {
         if (line.startsWith('event: ')) continue;
         if (!line.startsWith('data: ')) continue;
         const dataStr = line.slice(6);
-        if (dataStr === '[DONE]' || dataStr === '{"type":"done"}') {
-          if (streamingDiv) {
-            const cursor = streamingDiv.querySelector('.cursor');
-            if (cursor) cursor.remove();
-            if (fullText) updateStreamContent(fullText);
-          }
-          return;
-        }
+        if (!dataStr || dataStr === '[DONE]') continue;
         try {
-          const data = JSON.parse(dataStr);
-          if (data.metadata && data.metadata.thread_id && !currentSessionId()) {
-            ctx.state.setState('threads.current', data.metadata.thread_id);
-            document.getElementById('btnLlmCalls').disabled = false;
-          }
-          if (data.token && streamingDiv) {
-            fullText += data.token;
-            updateStreamContent(fullText);
-          } else if (data.type === 'tool_call') {
-            handleToolCallEvent(data);
-          } else if (data.type === 'tool_result') {
-            await handleToolResultEvent(data);
-          } else if (data.type === 'done') {
-            if (data.usage || data.elapsed_time) {
-              addUsageStats(data.usage || null, data.elapsed_time || 0);
+          const frame = JSON.parse(dataStr);
+          const result = frame.result;
+          if (!result) {
+            if (frame.error) {
+              if (streamingDiv) {
+                streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(frame.error.message || 'A2A error') + '</span>';
+              }
+              return;
             }
+            continue;
+          }
+          const kind = result.kind;
+
+          // artifact-update: 流式增量（thinking/text 块）
+          if (kind === 'artifact-update') {
+            const artifact = result.artifact || {};
+            const parts = artifact.parts || [];
+            for (const p of parts) {
+              if (p.kind !== 'text') continue;
+              const blockType = (p.metadata && p.metadata._agentscope_block_type) || 'text';
+              const text = p.text || '';
+              if (result.append === false) lastArtifactText = '';
+              lastArtifactText += text;
+              if (blockType === 'thinking') {
+                appendThinkingDelta(text);
+              } else if (streamingDiv) {
+                // 直接追加增量（append=true 时 text 是增量）
+                fullText += text;
+                updateStreamContent(fullText);
+              }
+            }
+          }
+          // status-update: 状态变化，final=true 表示完成
+          else if (kind === 'status-update') {
+            const state = result.state;
+            if (result.metadata && result.metadata.thread_id && !currentSessionId()) {
+              ctx.state.setState('threads.current', result.metadata.thread_id);
+              document.getElementById('btnLlmCalls').disabled = false;
+            }
+            if (result.final === true || state === 'completed') {
+              finishThinkingBlock();
+              if (streamingDiv) {
+                const cursor = streamingDiv.querySelector('.cursor');
+                if (cursor) cursor.remove();
+                if (fullText) updateStreamContent(fullText);
+              }
+              return;
+            }
+          }
+          // message: 最终完整消息（final 兜底）
+          else if (kind === 'message') {
+            const parts = result.parts || [];
+            const texts = parts
+              .filter((p) => p.kind === 'text' && !(p.metadata && p.metadata._agentscope_block_type === 'thinking'))
+              .map((p) => p.text || '');
+            if (texts.length) {
+              fullText = texts.join('');
+              if (streamingDiv) updateStreamContent(fullText);
+            }
+            if (result.metadata) {
+              const usage = result.metadata[Object.keys(result.metadata)[0]];
+              if (usage && usage._chat_usage) {
+                addUsageStats({
+                  input_tokens: usage._chat_usage.inputTokens,
+                  output_tokens: usage._chat_usage.outputTokens,
+                  total_tokens: usage._chat_usage.totalTokens
+                }, null);
+              }
+            }
+            finishThinkingBlock();
             if (streamingDiv) {
               const cursor = streamingDiv.querySelector('.cursor');
               if (cursor) cursor.remove();
-              if (fullText) updateStreamContent(fullText);
             }
             return;
-          } else if (data.state === 'completed' || data.state === 'working') {
-            if (data.metadata && data.metadata.thread_id && !currentSessionId()) {
-              ctx.state.setState('threads.current', data.metadata.thread_id);
-              document.getElementById('btnLlmCalls').disabled = false;
-            }
-          } else if (data.error) {
-            if (streamingDiv) {
-              streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(data.error) + '</span>';
-            }
           }
         } catch (e) { /* 忽略解析错误 */ }
       }
@@ -445,12 +618,15 @@ function handleToolCallEvent(data) {
 
 async function handleToolResultEvent(data) {
   const tc = pendingToolCalls[data.tool_call_id] || { name: data.name, args: {}, uiMeta: null };
-  let resultText = data.result;
+  // 优先使用流式累积的工具结果文本（tool_result_text_delta），无增量时回退 data.result
+  const buffered = toolResultBuffers[data.tool_call_id];
+  let resultText = (buffered && buffered.text) ? buffered.text : data.result;
   if (Array.isArray(resultText)) {
     resultText = resultText.map((r) => r.text || '').join('\n');
   } else if (resultText && typeof resultText === 'object') {
     resultText = JSON.stringify(resultText, null, 2);
   }
+  cleanupToolResultBuffer(data.tool_call_id);
   const appInfo = mcpAppsRegistry[data.tool_call_id];
   if (appInfo && appInfo.uri) {
     try {

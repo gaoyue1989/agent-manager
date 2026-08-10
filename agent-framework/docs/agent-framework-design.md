@@ -101,17 +101,19 @@ src/main/java/io/agentmanager/framework/
 Client Request (POST /)
   │
   ▼
-A2A Server (AgentScopeA2aServer)
-  │ 解析 JSON-RPC method
-  ├── message/send ──▶ HarnessAgent.call() → LLM API
-  │     └── 返回 A2A Task { id, status: { state, message }, artifacts }
+A2A Controller (全量透传 SDK，参考官方 A2aJsonRpcController)
   │
-  ├── message/stream ──▶ HarnessAgent.streamEvents()
-  │     └── SSE: TaskStatusUpdateEvent / TaskArtifactUpdateEvent
+  ▼ AgentScopeA2aServer (SDK JsonRpcTransportWrapper)
+  │ 解析 JSON-RPC method，统一分发
+  ├── message/send ──▶ HarnessAgentRunner.stream() → HarnessAgent
+  │     └── 返回标准 A2A Message (kind=message, blocking=true 同步)
   │
-  ├── tasks/get ──▶ 查询 Task 状态
-  ├── tasks/list ──▶ 列出 Tasks
-  └── tasks/cancel ──▶ 取消 Task
+  ├── message/stream ──▶ HarnessAgentRunner.stream() → SSE
+  │     └── SSE: task → status-update(working) → artifact-update×N → status-update(completed, final) → message
+  │
+  ├── tasks/get ──▶ MySqlTaskStore.get() → 读 agent_state 构造 Task
+  ├── tasks/cancel ──▶ SDK 处理
+  └── tasks/resubscribe ──▶ SDK 处理
 
 Client Request (GET /chat/stream?message=...&userId=...)
   │
@@ -182,7 +184,9 @@ call() 结束
 
 使用 AgentScope 内置 `AgentScopeA2aServer` 扩展，支持完整的 A2A v1.0.0 方法：
 - `message/send`, `message/stream`
-- `tasks/get`, `tasks/list`, `tasks/cancel`
+- `tasks/get`, `tasks/cancel`, `tasks/resubscribe`
+- `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表构造 Task（消息历史由 AgentScope 自动持久化）
+- A2AController 全量透传 SDK（官方 `A2aJsonRpcController` 实现），仅保留 message/send + message/stream 的兼容转换（kind/messageId/parts kind）
 - Agent Card 自动提供
 
 ### 3.4 Part 格式

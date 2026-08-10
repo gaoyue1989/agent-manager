@@ -55,6 +55,13 @@
             <artifactId>agentscope-extensions-a2a-server</artifactId>
             <version>${agentscope.version}</version>
         </dependency>
+        <!-- a2a-server 的 MessageConvertUtil 依赖 PartParserRouter（位于 a2a-client），
+             a2a-server pom 中该依赖为 provided+optional，必须显式声明，否则运行时 NoClassDefFoundError -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-a2a-client</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
 
         <!-- LLM Model: OpenAI compatible -->
         <dependency>

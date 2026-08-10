@@ -45,6 +45,8 @@ agent-framework/
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
+│   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
+│   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
 │   │   │   │   ├── A2uiService.java             # A2UI 协议
 │   │   │   │   └── LLMLogger.java               # LLM 调用日志
 │   │   │   ├── tool/
@@ -57,7 +59,7 @@ agent-framework/
 │   │   │       ├── DebugController.java         # GET /debug
 │   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE)
 │   │   │       ├── ThreadController.java        # GET /threads
-│   │   │       └── A2AController.java           # POST / (A2A JSON-RPC)
+│   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
 │   │       └── static/debug/                    # 调试页面 (拆分架构)
@@ -65,7 +67,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 68 个测试用例
+│   └── test/                                  # 186 个测试用例
 ├── docs/                                     # 改进方案文档 (14 份)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -111,11 +113,13 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - **支持 ActiveMCP.json 子集过滤**: `selectedTools` 中 `enabled: false` 的工具不注册到 Toolkit
 - **工具注册名**: 使用远端裸名（`tool.name()`），确保 `McpTool.callAsync` 正确执行；`mcp__{server}__{tool}` 前缀名仅用于 API 展示和注册缓存（因 `McpTool.getName()` 是 `final` 字段，无法分离 LLM 暴露名和执行名）
 
-### 4. A2AController — A2A JSON-RPC
+### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
-- `POST /` 处理 `message/send` + `message/stream`
-- 支持 `metadata.thread_id` / `metadata.contextId` / `metadata.userId`
-- 与 AgentScopeA2aServer 共存
+- `POST /` 全量透传给 AgentScopeA2aServer（SDK）处理：`message/send`、`message/stream`、`tasks/get`、`tasks/cancel`、`tasks/resubscribe` 等所有标准 A2A 方法
+- 实现参考官方 `agentscope-a2a-spring-boot-starter` 的 `A2aJsonRpcController`
+- 兼容转换：message/send 与 message/stream 自动补全 SDK 反序列化必需字段（`kind:"message"`、`messageId`、parts `kind:"text"`、`blocking:true`），顶层 `userId`/`sessionId` → `message.metadata`
+- `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表读取构造 A2A Task（save no-op，消息已由 AgentScope 自动持久化）
+- 多租户：SDK 从 `message.metadata.userId` / `message.metadata.sessionId` 读取（AgentScopeAgentExecutor）
 
 ---
 
@@ -222,7 +226,7 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
 | GET | `/chat/stream` | Channel SSE 流式对话 |
-| POST | `/` | A2A JSON-RPC (message/send, message/stream) |
+| POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 
 ---
 
@@ -253,7 +257,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (68 用例)
+mvn -o test            # 容器内离线测试 (186 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -263,6 +267,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 68 个测试，全部通过
+mvn test     # 186 个测试，全部通过
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

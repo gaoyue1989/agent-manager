@@ -12,9 +12,18 @@ import org.springframework.web.bind.annotation.RestController;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.DataBlockDeltaEvent;
+import io.agentscope.core.event.DataBlockStartEvent;
+import io.agentscope.core.event.ModelCallEndEvent;
+import io.agentscope.core.event.ModelCallStartEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
+import io.agentscope.core.event.ThinkingBlockDeltaEvent;
+import io.agentscope.core.event.ToolCallDeltaEvent;
+import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.event.ToolResultStartEvent;
+import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
 import io.agentscope.harness.agent.gateway.channel.chatui.SendOptions;
 import reactor.core.publisher.Flux;
@@ -73,11 +82,41 @@ public class StreamController {
 
         if (event instanceof TextBlockDeltaEvent delta) {
             payload.put("delta", delta.getDelta());
+        } else if (event instanceof ThinkingBlockDeltaEvent delta) {
+            payload.put("delta", delta.getDelta());
+        } else if (event instanceof DataBlockStartEvent) {
+            // v2.0.0 无 mediaType 字段，仅转发块标识
+        } else if (event instanceof DataBlockDeltaEvent delta) {
+            payload.put("delta", delta.getDelta());
         } else if (event instanceof ToolCallStartEvent tc) {
             payload.put("toolName", tc.getToolCallName());
             payload.put("toolCallId", tc.getToolCallId());
+        } else if (event instanceof ToolCallDeltaEvent delta) {
+            payload.put("delta", delta.getDelta());
+            payload.put("toolCallId", delta.getToolCallId());
+            payload.put("toolCallName", delta.getToolCallName());
+        } else if (event instanceof ToolCallEndEvent end) {
+            payload.put("toolCallId", end.getToolCallId());
+            payload.put("toolCallName", end.getToolCallName());
+        } else if (event instanceof ToolResultStartEvent tr) {
+            payload.put("toolCallId", tr.getToolCallId());
+            payload.put("toolCallName", tr.getToolCallName());
+        } else if (event instanceof ToolResultTextDeltaEvent tr) {
+            payload.put("delta", tr.getDelta());
+            payload.put("toolCallId", tr.getToolCallId());
+            payload.put("toolCallName", tr.getToolCallName());
         } else if (event instanceof ToolResultEndEvent tr) {
             payload.put("state", tr.getState().name());
+            payload.put("toolCallId", tr.getToolCallId());
+            payload.put("toolCallName", tr.getToolCallName());
+        } else if (event instanceof ModelCallStartEvent mcs) {
+            // v2.0.0 无 modelName 字段
+        } else if (event instanceof ModelCallEndEvent mce) {
+            if (mce.getUsage() != null) {
+                payload.put("inputTokens", mce.getUsage().getInputTokens());
+                payload.put("outputTokens", mce.getUsage().getOutputTokens());
+                payload.put("totalTokens", mce.getUsage().getTotalTokens());
+            }
         }
 
         try {

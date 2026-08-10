@@ -47,22 +47,37 @@ export const api = {
   // MCP 资源（UI 渲染）
   readMcpResource: (server, uri) => post('/mcp/resources/read', { server, uri }),
 
-  // A2A 同步调用（支持顶层参数 + 兼容旧格式 metadata）
-  sendA2A: (text, { userId, sessionId, metadata } = {}) => {
-    const params = {
-      message: { role: 'user', parts: [{ text }] }
-    };
-    // 优先使用标准 A2A 顶层参数
-    if (userId) params.userId = userId;
-    if (sessionId) params.sessionId = sessionId;
-    // 兼容旧格式 metadata
-    if (metadata) params.metadata = metadata;
+  // A2A 同步调用（转发 SDK，userId/sessionId 写入 message.metadata）
+  sendA2A: async (text, { userId, sessionId, metadata } = {}) => {
+    const msgMetadata = { ...(metadata || {}) };
+    if (userId) msgMetadata.userId = userId;
+    if (sessionId) msgMetadata.sessionId = sessionId;
 
-    return post('/', {
-      jsonrpc: '2.0',
-      method: 'message/send',
-      id: 'debug-' + Date.now(),
-      params
+    const resp = await fetch(BASE + '/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'message/send',
+        id: 'debug-' + Date.now(),
+        params: {
+          message: { role: 'user', parts: [{ text }], metadata: msgMetadata },
+          configuration: { blocking: true }
+        }
+      })
     });
+    const data = await resp.json();
+    // 兼容 SDK 返回: result 可能为 Task 或 Message
+    const result = data.result;
+    if (result && result.parts) {
+      // 标准 Message: {kind:"message", role:"agent", parts:[{kind:"text",text}]}
+      return result.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('');
+    }
+    // 兼容旧格式简化 Task: {id, status, result:{message:{parts}}}
+    const msg = result && result.result && result.result.message;
+    if (msg && msg.parts) {
+      return msg.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('');
+    }
+    throw new Error(data.error ? (data.error.message || 'A2A error') : 'Unexpected A2A response');
   }
 };

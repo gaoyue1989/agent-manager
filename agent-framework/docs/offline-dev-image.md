@@ -1,6 +1,6 @@
 # Agent Framework 离线开发镜像
 
-离线开发镜像 `gaoyue1989/agent-framework:java-dev` 预装 **JDK 21 + Maven 3.9.9**，并缓存当前 `pom.xml` 的**全部依赖**（含所有 Maven 插件，已验证 `mvn -o test` 68 个用例离线通过）。适用于内网（如 192.168.31.207）等无法访问外网的环境。
+离线开发镜像 `gaoyue1989/agent-framework:java-dev` 预装 **JDK 21 + Maven 3.9.9**，并缓存当前 `pom.xml` 的**全部依赖**（含所有 Maven 插件，已验证 `mvn -o test` 186 个用例离线通过）。适用于内网（如 192.168.31.207）等无法访问外网的环境。
 
 ## 镜像内容
 
@@ -36,7 +36,7 @@ docker run --rm -it \
 # 容器内：离线构建（-o = offline，仅用本地 .m2 缓存）
 mvn -o clean package -DskipTests
 
-# 离线测试（68 用例已验证通过）
+# 离线测试（186 用例已验证通过）
 mvn -o test
 ```
 

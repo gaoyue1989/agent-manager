@@ -143,6 +143,97 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
+    void invokeStreamShouldForwardThinkingBlockDelta() {
+        var start = new io.agentscope.core.event.ThinkingBlockStartEvent("reply-1", "think-1");
+        var delta = new io.agentscope.core.event.ThinkingBlockDeltaEvent("reply-1", "think-1", "思考中");
+        var end = new io.agentscope.core.event.ThinkingBlockEndEvent("reply-1", "think-1");
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(start, delta, end));
+
+        var events = service.invokeStream("hello", "t1", "alice").collectList().block();
+
+        assertNotNull(events);
+        assertTrue(events.stream().anyMatch(e -> "thinking_block_start".equals(e.get("type"))));
+        assertTrue(events.stream().anyMatch(e -> "thinking_block_delta".equals(e.get("type")) &&
+            "思考中".equals(e.get("delta")) && "think-1".equals(e.get("block_id"))));
+        assertTrue(events.stream().anyMatch(e -> "thinking_block_end".equals(e.get("type"))));
+    }
+
+    @Test
+    void invokeStreamShouldForwardToolCallDelta() {
+        var start = new io.agentscope.core.event.ToolCallStartEvent("reply-1", "tc-1", "read_file");
+        var delta = new io.agentscope.core.event.ToolCallDeltaEvent("reply-1", "tc-1", "read_file", "{\"path\":");
+        var end = new io.agentscope.core.event.ToolCallEndEvent("reply-1", "tc-1", "read_file");
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(start, delta, end));
+
+        var events = service.invokeStream("hello", "t1", "alice").collectList().block();
+
+        assertNotNull(events);
+        assertTrue(events.stream().anyMatch(e -> "tool_call".equals(e.get("type")) &&
+            "read_file".equals(e.get("name")) && "tc-1".equals(e.get("tool_call_id"))));
+        assertTrue(events.stream().anyMatch(e -> "tool_call_delta".equals(e.get("type")) &&
+            "{\"path\":".equals(e.get("delta")) && "tc-1".equals(e.get("tool_call_id"))));
+        assertTrue(events.stream().anyMatch(e -> "tool_call_end".equals(e.get("type")) &&
+            "tc-1".equals(e.get("tool_call_id"))));
+    }
+
+    @Test
+    void invokeStreamShouldForwardToolResultTextDelta() {
+        var start = new io.agentscope.core.event.ToolResultStartEvent("reply-1", "tc-1", "read_file");
+        var delta = new io.agentscope.core.event.ToolResultTextDeltaEvent("reply-1", "tc-1", "read_file", "file content");
+        var end = new io.agentscope.core.event.ToolResultEndEvent("reply-1", "tc-1", "read_file",
+            io.agentscope.core.message.ToolResultState.SUCCESS);
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(start, delta, end));
+
+        var events = service.invokeStream("hello", "t1", "alice").collectList().block();
+
+        assertNotNull(events);
+        assertTrue(events.stream().anyMatch(e -> "tool_result_start".equals(e.get("type")) &&
+            "tc-1".equals(e.get("tool_call_id"))));
+        assertTrue(events.stream().anyMatch(e -> "tool_result_text_delta".equals(e.get("type")) &&
+            "file content".equals(e.get("delta")) && "tc-1".equals(e.get("tool_call_id"))));
+        assertTrue(events.stream().anyMatch(e -> "tool_result".equals(e.get("type")) &&
+            "SUCCESS".equals(e.get("state")) && "tc-1".equals(e.get("tool_call_id"))));
+    }
+
+    @Test
+    void invokeStreamShouldForwardModelCallUsage() {
+        var usage = new io.agentscope.core.model.ChatUsage(100, 50, 150, 1.2);
+        var start = new io.agentscope.core.event.ModelCallStartEvent("reply-1");
+        var end = new io.agentscope.core.event.ModelCallEndEvent("reply-1", usage);
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(start, end));
+
+        var events = service.invokeStream("hello", "t1", "alice").collectList().block();
+
+        assertNotNull(events);
+        assertTrue(events.stream().anyMatch(e -> "model_call_start".equals(e.get("type"))));
+        assertTrue(events.stream().anyMatch(e -> "model_call_end".equals(e.get("type")) &&
+            Integer.valueOf(100).equals(e.get("input_tokens")) &&
+            Integer.valueOf(50).equals(e.get("output_tokens")) &&
+            Integer.valueOf(150).equals(e.get("total_tokens"))));
+    }
+
+    @Test
+    void invokeStreamShouldForwardToolResultDataDeltaFromBase64Source() {
+        var source = io.agentscope.core.message.Base64Source.builder()
+            .data("aGVsbG8=").mediaType("image/png").build();
+        var dataBlock = io.agentscope.core.message.DataBlock.builder().source(source).build();
+        var delta = new io.agentscope.core.event.ToolResultDataDeltaEvent("reply-1", "tc-1", "get_image", dataBlock);
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(delta));
+
+        var events = service.invokeStream("hello", "t1", "alice").collectList().block();
+
+        assertNotNull(events);
+        assertTrue(events.stream().anyMatch(e -> "tool_result_data_delta".equals(e.get("type")) &&
+            "image/png".equals(e.get("media_type")) &&
+            "aGVsbG8=".equals(e.get("data"))));
+    }
+
+    @Test
     void twoArgInvokeShouldDelegateWithVendorKey() {
         mockCallReturns("ok");
         service.invoke("hello", "t1");

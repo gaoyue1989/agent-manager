@@ -357,27 +357,29 @@ curl -s -N "http://localhost:8100/chat/stream?message=重点调查AI趋势&userI
 
 > **简写格式**: 支持 `{"text": "hello"}`（不带 `kind` 字段），自动视为 text part。
 
-**响应:**
+**响应**（SDK 标准 A2A Message，`blocking: true` 同步返回）:
 
 ```json
 {
     "jsonrpc": "2.0",
     "id": "1",
     "result": {
-        "id": "<task-uuid>",
-        "status": {
-            "state": "TASK_STATE_COMPLETED",
-            "timestamp": "2026-08-06T00:00:00Z",
-            "message": {
-                "role": "agent",
-                "parts": [{"type": "text", "text": "welcome"}]
-            }
-        },
-        "artifacts": [],
-        "metadata": {}
+        "role": "agent",
+        "parts": [
+            {"kind": "text", "text": "welcome",
+             "metadata": {"_agentscope_block_type": "text"}}
+        ],
+        "messageId": "041a0188-...",
+        "contextId": "6bf711b8-...",
+        "taskId": "c90c456b-...",
+        "kind": "message"
     }
 }
 ```
+
+> **说明**: message/send 由 AgentScopeA2aServer（SDK）处理，返回标准 A2A `Message`（kind=message）。
+> parts 可能包含 thinking 块（`metadata._agentscope_block_type = "thinking"`）与 text 块。
+> 会话历史自动持久化到 agent_state 表（session_id 格式 `{userId}:{sessionId}`），可用 `tasks/get` 查询。
 
 ---
 
@@ -403,20 +405,34 @@ curl -s -N "http://localhost:8100/chat/stream?message=重点调查AI趋势&userI
 }
 ```
 
-**响应 (SSE):**
+**响应 (SSE，SDK 标准 A2A streaming 事件):**
 
 ```
-data: {"jsonrpc":"2.0","method":"tasks/statusUpdate","params":{"id":"...","status":{"state":"TASK_STATE_WORKING"}}}
-data: {"jsonrpc":"2.0","method":"tasks/artifactUpdate","params":{"id":"...","artifact":{"parts":[{"type":"text","text":"welcome"}]}}}
-data: {"jsonrpc":"2.0","method":"tasks/statusUpdate","params":{"id":"...","status":{"state":"TASK_STATE_COMPLETED"}}}
+id: s1
+event: jsonrpc
+data: {"jsonrpc":"2.0","id":"s1","result":{"id":"...","status":{"state":"submitted"},"kind":"task"}}
+
+id: s1
+event: jsonrpc
+data: {"jsonrpc":"2.0","id":"s1","result":{"taskId":"...","status":{"state":"working"},"final":false,"kind":"status-update"}}
+
+id: s1
+event: jsonrpc
+data: {"jsonrpc":"2.0","id":"s1","result":{"taskId":"...","artifact":{"parts":[{"text":"wel","metadata":{"_agentscope_block_type":"text"},"kind":"text"}]},"append":true,"lastChunk":false,"kind":"artifact-update"}}
+
+id: s1
+event: jsonrpc
+data: {"jsonrpc":"2.0","id":"s1","result":{"taskId":"...","status":{"state":"completed"},"final":true,"kind":"status-update"}}
 ```
 
-**SSE 事件类型:**
+**SSE 事件类型（result.kind）:**
 
-| method | 说明 |
-|--------|------|
-| `tasks/statusUpdate` | 任务状态变更 (WORKING/COMPLETED/FAILED/CANCELED) |
-| `tasks/artifactUpdate` | 任务产物更新（文本/文件/结构化数据） |
+| kind | 说明 |
+|------|------|
+| `task` | 任务创建（state: submitted） |
+| `status-update` | 任务状态变更（working/completed/...，`final:true` 表示结束） |
+| `artifact-update` | 流式产物增量（parts 带 `_agentscope_block_type`: thinking/text） |
+| `message` | 最终完整消息（含 token 用量 metadata） |
 
 ---
 
@@ -435,36 +451,44 @@ data: {"jsonrpc":"2.0","method":"tasks/statusUpdate","params":{"id":"...","statu
 }
 ```
 
-**响应:**
+**响应**（SDK 标准 A2A Task，含 history 消息列表）:
 
 ```json
 {
     "jsonrpc": "2.0",
     "id": "2",
     "result": {
-        "id": "<task-id>",
-        "status": { "state": "TASK_STATE_COMPLETED" },
-        "artifacts": [...]
+        "id": "<session-id>",
+        "contextId": "<session-id>",
+        "status": { "state": "completed", "timestamp": "2026-08-10T10:13:44Z" },
+        "artifacts": [],
+        "history": [
+            {"role": "user", "parts": [{"text": "hello", "kind": "text"}],
+             "messageId": "...", "kind": "message"},
+            {"role": "agent", "parts": [{"text": "hi", "kind": "text"}],
+             "messageId": "...", "kind": "message"}
+        ],
+        "metadata": {},
+        "kind": "task"
     }
 }
 ```
+
+**参数说明:**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `params.id` | string | ✓ | session_id（agent_state 表 session_id，如 `debug-user:a2a-sdk-test-1`） |
+| `params.historyLength` | int | | 返回消息数上限（-1/缺省=全部，0=仅元信息，N=最后 N 条） |
+
+**错误:** 任务不存在时返回 `error.code = -32001 (Task not found)`。
 
 ---
 
 ### tasks/list
 
-列出任务。
-
-**请求:**
-
-```json
-{
-    "jsonrpc": "2.0",
-    "method": "tasks/list",
-    "params": {},
-    "id": "3"
-}
-```
+> **注**: A2A SDK (0.3.3) 不提供 `tasks/list` 方法，调用将返回 `-32601 Method not found`。
+> 会话列表可通过 `GET /debug/threads` 获取。
 
 ---
 

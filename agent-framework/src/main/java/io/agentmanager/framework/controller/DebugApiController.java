@@ -4,7 +4,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,7 +19,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -319,42 +317,15 @@ public class DebugApiController {
         return sessionId;
     }
 
-    /** BFS 查找 state_data JSON 中的 messages 数组，尽力提取 {role, content} */
+    /** BFS 查找 state_data JSON 中的 context/messages 数组，尽力提取 {role, content} */
     private List<Map<String, Object>> extractMessages(String stateData) {
-        if (stateData == null || stateData.isBlank()) {
-            return List.of();
-        }
         try {
-            var root = MAPPER.readTree(stateData);
-            var queue = new ArrayDeque<JsonNode>();
-            queue.add(root);
-            while (!queue.isEmpty()) {
-                var cur = queue.poll();
-                if (cur.isObject()) {
-                    var messages = cur.get("messages");
-                    if (messages != null && messages.isArray()) {
-                        var result = new ArrayList<Map<String, Object>>();
-                        for (var m : messages) {
-                            var role = m.path("role").asText("user");
-                            var content = m.path("content").asText("");
-                            if (content.isBlank() && m.has("parts")) {
-                                content = m.get("parts").toString();
-                            }
-                            if (!content.isBlank()) {
-                                result.add(Map.of("role", role, "content", content));
-                            }
-                        }
-                        return result;
-                    }
-                    cur.elements().forEachRemaining(queue::add);
-                } else if (cur.isArray()) {
-                    cur.elements().forEachRemaining(queue::add);
-                }
-            }
+            var messages = io.agentmanager.framework.service.StateDataParser.findMessagesArray(stateData);
+            return io.agentmanager.framework.service.StateDataParser.toRoleContentList(messages);
         } catch (Exception e) {
             log.warn("Extract messages failed: {}", e.getMessage());
+            return List.of();
         }
-        return List.of();
     }
 
     private List<Map<String, Object>> listWorkspaceFiles(Path root, Path current) {

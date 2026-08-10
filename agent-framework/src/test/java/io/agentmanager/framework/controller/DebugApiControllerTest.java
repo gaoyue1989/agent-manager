@@ -261,6 +261,47 @@ class DebugApiControllerTest {
     }
 
     @Test
+    void threadHistoryShouldParseAgentScopeContextField() throws Exception {
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getString("state_data")).thenReturn(
+            "{\"session_id\":\"s5\",\"summary\":\"\",\"context\":[" +
+            "{\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"metadata\":{}}," +
+            "{\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"reasoning\"}," +
+            "{\"type\":\"text\",\"text\":\"hi\"}],\"metadata\":{}}]}");
+
+        mockMvc.perform(get("/debug/threads/s5/history"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.messages[0].role").value("user"))
+            .andExpect(jsonPath("$.messages[0].content").value("hello"))
+            .andExpect(jsonPath("$.messages[1].role").value("assistant"))
+            .andExpect(jsonPath("$.messages[1].content").value("hi"));
+    }
+
+    @Test
+    void threadHistoryShouldSkipThinkingBlocks() throws Exception {
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getString("state_data")).thenReturn(
+            "{\"context\":[{\"role\":\"ASSISTANT\"," +
+            "\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal reasoning\"}]}]}");
+
+        mockMvc.perform(get("/debug/threads/s6/history"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.messages").isEmpty());
+    }
+
+    @Test
     void threadHistoryShouldReturnEmptyWhenNoRow() throws Exception {
         var conn = mock(Connection.class);
         var ps = mock(PreparedStatement.class);
