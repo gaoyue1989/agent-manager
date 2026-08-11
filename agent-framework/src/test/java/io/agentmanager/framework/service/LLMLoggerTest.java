@@ -59,4 +59,16 @@ class LLMLoggerTest {
         assertEquals(1, logger.getCalls("t1").size());
         assertEquals(1, logger.getCalls("t2").size());
     }
+
+    @Test
+    void getCallsShouldMatchPrefixedVariant() {
+        var logger = new LLMLogger();
+        logger.logCall("debug-user:llm-test-001", Map.of("n", 1), Map.of());
+
+        // agent_state 中带前缀变体（__anon__ 租户段）也应命中同一会话
+        assertEquals(1, logger.getCalls("__anon__:debug-user:llm-test-001").size());
+        assertEquals(1, logger.getCalls("__anon__:__anon__:debug-user:llm-test-001").size());
+        // 仅会话本体（末段）也应命中
+        assertEquals(1, logger.getCalls("llm-test-001").size());
+    }
 }

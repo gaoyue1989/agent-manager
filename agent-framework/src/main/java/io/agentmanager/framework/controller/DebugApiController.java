@@ -215,6 +215,7 @@ public class DebugApiController {
                     var file = new LinkedHashMap<String, Object>();
                     file.put("path", itemKey);
                     file.put("size", content != null ? content.length() : 0);
+                    file.put("content", content != null ? content : "");
                     file.put("updated_at", updated > 0
                         ? new java.sql.Timestamp(updated).toString() : "");
                     @SuppressWarnings("unchecked")

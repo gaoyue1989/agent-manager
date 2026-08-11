@@ -67,7 +67,7 @@ class DebugApiControllerTest {
         when(props.llm()).thenReturn(llmConfig("sk-0123456789abcdefghijkl"));
         when(props.server()).thenReturn(new AgentManagerProperties.ServerConfig("0.0.0.0", 8100));
         when(props.checkpoint()).thenReturn(new AgentManagerProperties.CheckpointConfig(
-            "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "agent_manager", "Agent@Manager2026"));
+            "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "agent_manager", "Agent@Manager2026", "agent_manager_test"));
         when(props.configDir()).thenReturn("/config");
 
         mockMvc.perform(get("/debug/config/env"))
@@ -81,7 +81,7 @@ class DebugApiControllerTest {
     @Test
     void envConfigShouldMaskShortOrBlankSecret() throws Exception {
         when(props.llm()).thenReturn(llmConfig(""));
-        var cp = new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost/db", "u", "short");
+        var cp = new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost/db", "u", "short", "db");
         when(props.server()).thenReturn(new AgentManagerProperties.ServerConfig("0.0.0.0", 8100));
         when(props.checkpoint()).thenReturn(cp);
         when(props.configDir()).thenReturn("/config");

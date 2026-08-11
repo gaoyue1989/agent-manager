@@ -11,6 +11,7 @@ import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.McpManager;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.WorkspaceInitializer;
+import io.agentmanager.framework.service.LLMLogger;
 import io.agentmanager.framework.tool.BusinessTools;
 import io.agentscope.harness.agent.DistributedStore;
 
@@ -61,12 +62,33 @@ class AgentScopeConfigTest {
         var props = new AgentManagerProperties(
             emptyLlm(), emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
-                "jdbc:mysql://localhost:3306/test", "u", "p"),
+                "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
             "/config");
 
         var ds = config.dataSource(props);
         assertInstanceOf(HikariDataSource.class, ds);
         assertEquals("jdbc:mysql://localhost:3306/test", ((HikariDataSource) ds).getJdbcUrl());
+    }
+
+    @Test
+    void resolvedDbNameShouldParseFromJdbcUrlWhenNotConfigured() {
+        var cp = new AgentManagerProperties.CheckpointConfig(
+            "jdbc:mysql://127.0.0.1:3307/agent_fw_test?useSSL=false", "u", "p", "");
+        assertEquals("agent_fw_test", cp.resolvedDbName());
+    }
+
+    @Test
+    void resolvedDbNameShouldPreferExplicitConfig() {
+        var cp = new AgentManagerProperties.CheckpointConfig(
+            "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "custom_db");
+        assertEquals("custom_db", cp.resolvedDbName());
+    }
+
+    @Test
+    void resolvedDbNameShouldFallbackWhenUrlHasNoDatabase() {
+        var cp = new AgentManagerProperties.CheckpointConfig(
+            "jdbc:mysql://127.0.0.1:3307", "u", "p", "");
+        assertEquals("agent_manager_test", cp.resolvedDbName());
     }
 
     @Test
@@ -88,7 +110,8 @@ class AgentScopeConfigTest {
         }
 
         assertThrows(RuntimeException.class,
-            () -> config.harnessAgent(props, store, oaf, ws, mcp, List.of(new BusinessTools())));
+            () -> config.harnessAgent(props, store, oaf, ws, mcp,
+                List.of(new BusinessTools()), new LLMLogger()));
     }
 
     private static AgentManagerProperties propsForLlm() {
@@ -97,7 +120,7 @@ class AgentScopeConfigTest {
                 "k", "m", "http://localhost", "openai", 0.7, 4096, 120),
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
-                "jdbc:mysql://localhost:3306/cp", "u", "p"),
+                "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config");
     }
 
@@ -111,7 +134,7 @@ class AgentScopeConfigTest {
 
     private static AgentManagerProperties.CheckpointConfig emptyCheckpoint() {
         return new AgentManagerProperties.CheckpointConfig(
-            "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p");
+            "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "agent_manager_test");
     }
 
     private HikariDataSource dataSourceForTest() {

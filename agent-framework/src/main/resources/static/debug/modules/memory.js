@@ -37,7 +37,6 @@ async function loadMemory() {
 
   body.innerHTML = entries.map(([ns, user]) => {
     const files = user.files || [];
-    const memoryMd = user.memory_md;
     let html = '<div class="panel">' +
       '<div class="panel-header"><span class="title">👤 ' + ctx.utils.esc(ns) + '</span>' +
       '<span class="count">' + files.length + ' file(s)</span></div>' +
@@ -65,8 +64,9 @@ async function loadMemory() {
       const ns = btn.dataset.ns;
       const path = btn.dataset.path;
       const user = users[ns] || {};
-      const text = path === 'MEMORY.md' && user.memory_md != null
-        ? user.memory_md
+      const file = (user.files || []).find((f) => f.path === path) || {};
+      const text = (file.content != null && file.content !== '')
+        ? file.content
         : '(content not loaded; path: ' + path + ')';
       ctx.utils.showTextModal('Memory: ' + ns + ' / ' + path, text);
     });

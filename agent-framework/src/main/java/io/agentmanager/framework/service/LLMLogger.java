@@ -34,7 +34,27 @@ public class LLMLogger {
     }
 
     public List<CallRecord> getCalls(String threadId) {
-        return storage.getOrDefault(threadId, List.of());
+        var exact = storage.get(threadId);
+        if (exact != null) {
+            return exact;
+        }
+        // 兼容 agent_state 中带租户前缀的会话变体（如 "__anon__:debug-user:xxx" 与 "debug-user:xxx" 视为同一会话）
+        var normalized = normalizeThreadId(threadId);
+        if (normalized != null) {
+            for (var entry : storage.entrySet()) {
+                if (normalized.equals(normalizeThreadId(entry.getKey()))) {
+                    return entry.getValue();
+                }
+            }
+        }
+        return List.of();
+    }
+
+    /** 剥离租户前缀段（冒号分隔），保留末尾会话本体 */
+    private static String normalizeThreadId(String threadId) {
+        if (threadId == null || threadId.isBlank()) return null;
+        var idx = threadId.lastIndexOf(':');
+        return idx >= 0 ? threadId.substring(idx + 1) : threadId;
     }
 
     public void clearThread(String threadId) {

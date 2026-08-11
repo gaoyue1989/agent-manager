@@ -24,3 +24,4 @@ agent:
     jdbc-url: ${CHECKPOINT_JDBC_URL:jdbc:mysql://127.0.0.1:3307/agent_manager_test}
     username: ${CHECKPOINT_USERNAME:agent_manager}
     password: ${CHECKPOINT_PASSWORD:Agent@Manager2026}
+    db-name: ${CHECKPOINT_DB_NAME:}

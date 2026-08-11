@@ -28,7 +28,7 @@ class WorkspaceInitializerTest {
         var props = new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
-            new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass"),
+            new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             tempDir.toString()
         );
         initializer = new WorkspaceInitializer(props);

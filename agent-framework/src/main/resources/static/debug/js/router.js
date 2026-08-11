@@ -49,7 +49,8 @@ export class Router {
       module.mount(this.container, {
         api: window.App.api,
         state: window.App.state,
-        utils: window.App.utils
+        utils: window.App.utils,
+        modal: window.App.modal
       });
       this.currentModule = module;
     } catch (e) {

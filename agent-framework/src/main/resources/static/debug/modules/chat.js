@@ -378,6 +378,13 @@ async function sendMessage() {
   sendBtn.textContent = 'Stop';
   sendBtn.classList.add('danger');
 
+  // 新会话（未选择历史）发送消息时自动生成 sessionId，使 LLM Calls 可通过 metadata.sessionId 关联
+  if (!currentSessionId()) {
+    const sid = 'debug-user:' + Date.now().toString(36);
+    ctx.state.setState('threads.current', sid);
+    document.getElementById('btnLlmCalls').disabled = false;
+  }
+
   streamingDiv = createStreamingMsg();
   abortController = new AbortController();
   fullText = '';
@@ -502,9 +509,9 @@ async function sendA2AStream(text) {
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
-        if (line.startsWith('event: ')) continue;
-        if (!line.startsWith('data: ')) continue;
-        const dataStr = line.slice(6);
+        if (line.startsWith('event:')) continue;
+        if (!line.startsWith('data:')) continue;
+        const dataStr = line.slice(5);
         if (!dataStr || dataStr === '[DONE]') continue;
         try {
           const frame = JSON.parse(dataStr);
@@ -683,6 +690,12 @@ async function renderMcpAppFrame(uiUri, toolName, toolArgs, tcId) {
 
 // ---------- 弹窗功能 ----------
 
+function formatDuration(ms) {
+  if (ms < 1000) return ms + 'ms';
+  const s = (ms / 1000).toFixed(2);
+  return s + 's';
+}
+
 async function showLlmCalls() {
   const sid = currentSessionId();
   if (!sid) return;
@@ -708,6 +721,9 @@ async function showLlmCalls() {
         '<div class="llm-call-header" onclick="window.App.toggleLlmCall(' + i + ')">' +
         '<span class="lc-index">#' + (i + 1) + '</span><span class="lc-model">' + ctx.utils.esc(model) + '</span>';
       if (usage.total_tokens) html += '<span class="lc-usage">' + usage.total_tokens + ' tokens</span>';
+      if (c.response && c.response.duration_ms != null) {
+        html += '<span class="lc-usage">⏱ ' + formatDuration(c.response.duration_ms) + '</span>';
+      }
       html += '<span class="lc-toggle">▼</span></div><div class="llm-call-body">';
       html += '<div class="lc-section"><div class="lc-label">Request (' + msgs.length + ' messages)</div>';
       for (const m of msgs) {

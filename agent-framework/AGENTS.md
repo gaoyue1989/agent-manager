@@ -207,6 +207,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
+| `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析，保证与 agent_fs 同库） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
 

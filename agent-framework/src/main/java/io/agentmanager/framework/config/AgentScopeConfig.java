@@ -82,16 +82,17 @@ public class AgentScopeConfig {
      * 使用自定义库名/表名与现有基础设施保持一致。
      */
     @Bean
-    public DistributedStore distributedStore(DataSource dataSource) {
+    public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props) {
+        var dbName = props.checkpoint().resolvedDbName();
         var store = DistributedStore.builder()
             .agentStateStore(new MysqlAgentStateStore(
-                dataSource, "agent_manager_test", "agent_state", true))
+                dataSource, dbName, "agent_state", true))
             .baseStore(JdbcStore.builder(dataSource)
                 .tableName("agent_fs")
                 .initializeSchema(true)
                 .build())
             .build();
-        log.info("DistributedStore initialized (agent_manager_test.agent_state + agent_fs)");
+        log.info("DistributedStore initialized ({} . agent_state + agent_fs)", dbName);
         return store;
     }
 
@@ -119,7 +120,8 @@ public class AgentScopeConfig {
         OafConfig oafConfig,
         WorkspaceInitializer workspaceInitializer,
         McpToolRegistrar mcpToolRegistrar,
-        List<io.agentmanager.framework.tool.BusinessTools> customTools
+        List<io.agentmanager.framework.tool.BusinessTools> customTools,
+        LLMLogger llmLogger
     ) {
         var llm = props.llm();
 
@@ -146,6 +148,8 @@ public class AgentScopeConfig {
                 .sysPrompt(oafConfig.systemPrompt())
                 .model(model)
                 .toolkit(toolkit)
+                // LLM 调用记录（debug 页面 LLM Calls）
+                .middleware(new LlmLoggingMiddleware(llmLogger))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore)
                 .filesystem(new RemoteFilesystemSpec()

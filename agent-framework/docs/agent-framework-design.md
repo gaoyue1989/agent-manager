@@ -82,17 +82,27 @@ src/main/java/io/agentmanager/framework/
 │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder)
 │   ├── McpManager.java              # MCP 配置加载
 │   ├── HarnessAgentRunner.java      # A2A Server 适配器
-│   ├── A2uiService.java             # A2UI JSONL 生成
-│   └── LLMLogger.java               # LLM 调用日志
+│   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
+│   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
+│   ├── SessionManager.java          # 会话管理
+│   ├── SessionCleanupService.java   # 会话清理
+│   ├── LlmLoggingMiddleware.java    # LLM 调用记录中间件 (ModelCallEndEvent → LLMLogger)
+│   ├── LLMLogger.java               # LLM 调用日志 (内存存储, /debug/threads/{id}/llm-calls)
+│   ├── LogCollector.java            # 日志收集 (内存 Appender)
+│   ├── InMemoryLogAppender.java     # 内存日志 Appender
+│   └── A2uiService.java             # A2UI JSONL 生成
 ├── tool/
 │   └── BusinessTools.java           # @Tool 自定义工具 (get_current_time, echo)
 └── controller/
     ├── InfoController.java          # GET /、/system-prompt
     ├── HealthController.java        # GET /health
     ├── ToolController.java          # GET /skills、/mcp、/tools
-    ├── DebugController.java         # GET /debug
+    ├── DebugController.java         # GET /debug (页面)
+    ├── DebugApiController.java      # GET /debug/* (页面数据 API)
+    ├── AgentCardController.java     # GET /.well-known/agent-card.json
     ├── StreamController.java        # GET /chat/stream (Channel SSE)
-    └── ThreadController.java        # GET /threads
+    ├── ThreadController.java        # GET /threads
+    └── A2AController.java           # POST / (A2A JSON-RPC 全量透传)
 ```
 
 ### 2.3 请求处理流程

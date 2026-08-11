@@ -28,6 +28,30 @@ public record AgentManagerProperties(
     public record CheckpointConfig(
         @DefaultValue("jdbc:mysql://127.0.0.1:3307/agent_manager_test") String jdbcUrl,
         @DefaultValue("agent_manager") String username,
-        @DefaultValue("Agent@Manager2026") String password
-    ) {}
+        @DefaultValue("Agent@Manager2026") String password,
+        @DefaultValue("") String dbName
+    ) {
+        /**
+         * 实际使用的数据库名：显式配置 CHECKPOINT_DB_NAME 时优先；
+         * 未配置则从 CHECKPOINT_JDBC_URL 自动解析（去 query 参数，取最后一个 '/' 之后），
+         * 保证 agent_state 与 agent_fs 始终落在同一数据库。
+         */
+        public String resolvedDbName() {
+            if (dbName != null && !dbName.isBlank()) {
+                return dbName;
+            }
+            var url = jdbcUrl;
+            int q = url.indexOf('?');
+            if (q != -1) {
+                url = url.substring(0, q);
+            }
+            int scheme = url.indexOf("://");
+            int slash = url.lastIndexOf('/');
+            // 仅当 '/' 出现在协议之后 (host:port/db 结构) 才视为库名
+            if (scheme != -1 && slash > scheme + 2 && slash < url.length() - 1) {
+                return url.substring(slash + 1);
+            }
+            return "agent_manager_test";
+        }
+    }
 }
