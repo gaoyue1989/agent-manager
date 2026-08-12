@@ -97,7 +97,8 @@ class WorkspaceInitializerTest {
         Files.createDirectories(skillDir);
         Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: bash-tool\n---\n# Bash Tool\n");
 
-        var skill = new OafConfig.SkillConfig("bash-tool", "local", "1.0.0", true, "Bash tool", List.of());
+        var skill = new OafConfig.SkillConfig("bash-tool", "local", "1.0.0", true, "Bash tool", List.of(),
+            "", "", java.util.Map.of());
         var ws = initializer.initialize(tempDir, config(List.of(), List.of(), List.of(skill), List.of(), List.of()));
 
         assertTrue(Files.exists(ws.resolve("skills/bash-tool/SKILL.md")));
@@ -107,7 +108,8 @@ class WorkspaceInitializerTest {
 
     @Test
     void shouldSkipRemoteSkillsCopy() throws Exception {
-        var skill = new OafConfig.SkillConfig("web-search", "https://example.com/skills/web-search", "1.0.0", true, "Web search", List.of());
+        var skill = new OafConfig.SkillConfig("web-search", "https://example.com/skills/web-search", "1.0.0", true, "Web search", List.of(),
+            "", "", java.util.Map.of());
         var ws = initializer.initialize(tempDir, config(List.of(), List.of(), List.of(skill), List.of(), List.of()));
 
         // 远程 skill 不复制，由 skillRepository 处理

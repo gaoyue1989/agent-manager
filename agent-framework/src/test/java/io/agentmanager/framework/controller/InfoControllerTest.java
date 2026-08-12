@@ -70,7 +70,8 @@ class InfoControllerTest {
         when(oafConfig.description()).thenReturn("A test agent");
         when(oafConfig.skills()).thenReturn(List.of(
             new OafConfig.SkillConfig("code-review", "local", "1.0.0", false,
-                "Code review skill", List.of("bash", "python"))
+                "Code review skill", List.of("bash", "python"),
+                "", "", java.util.Map.of())
         ));
         when(mcpManager.getMcpSummaries(mcpConfigs))
             .thenReturn(List.of(Map.of("server", "weather-service", "tool_count", 3)));

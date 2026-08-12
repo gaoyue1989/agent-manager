@@ -51,7 +51,8 @@ class ToolControllerTest {
     void listSkillsShouldReturnOafSkills() throws Exception {
         when(oafConfig.skills()).thenReturn(List.of(
             new OafConfig.SkillConfig("bash-tool", "local", "1.0.0", false,
-                "Execute bash commands", List.of("bash", "python"))
+                "Execute bash commands", List.of("bash", "python"),
+                "", "", java.util.Map.of())
         ));
 
         mockMvc.perform(get("/skills"))

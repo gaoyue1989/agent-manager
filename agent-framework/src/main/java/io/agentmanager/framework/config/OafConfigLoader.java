@@ -100,19 +100,81 @@ public class OafConfigLoader {
         var skills = new ArrayList<SkillConfig>();
         for (var m : raw) {
             var name = (String) m.getOrDefault("name", "");
+            // 降级验证：不符合规范时警告但继续加载
+            warnSkillName(name);
+
             var source = (String) m.getOrDefault("source", "local");
             var version = (String) m.getOrDefault("version", "1.0.0");
             var required = (boolean) m.getOrDefault("required", false);
             var desc = loadSkillDescription(name);
-            // 支持自定义 runtimes（默认 ["bash", "python"]）
-            var runtimes = parseRuntimes(m);
-            skills.add(new SkillConfig(name, source, version, required, desc, runtimes));
+            // 降级验证：description 不符合规范时警告但继续加载
+            warnSkillDescription(name, desc);
+
+            var allowedTools = parseAllowedTools(m);
+            var license = (String) m.getOrDefault("license", "");
+            var compatibility = (String) m.getOrDefault("compatibility", "");
+            var metadata = parseMetadata(m);
+
+            skills.add(new SkillConfig(name, source, version, required, desc, allowedTools,
+                license, compatibility, metadata));
         }
         return skills;
     }
 
+    /**
+     * 降级验证 skill name：不符合规范时记录警告但继续加载
+     * 规范：
+     * - 1-64 字符
+     * - 只能包含小写字母、数字、连字符
+     * - 不能以连字符开头/结尾
+     * - 不能有连续连字符
+     */
+    private void warnSkillName(String name) {
+        if (name == null || name.isEmpty()) {
+            System.out.println("[OafConfigLoader] WARNING: Skill name is empty, using fallback");
+            return;
+        }
+        if (name.length() > 64) {
+            System.out.println("[OafConfigLoader] WARNING: Skill name too long (max 64 chars): " + name);
+        }
+        if (!name.matches("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")) {
+            System.out.println("[OafConfigLoader] WARNING: Skill name contains invalid characters: " + name
+                + " (expected: lowercase letters, numbers, hyphens only)");
+        }
+        if (name.contains("--")) {
+            System.out.println("[OafConfigLoader] WARNING: Skill name contains consecutive hyphens: " + name);
+        }
+    }
+
+    /**
+     * 降级验证 skill description：不符合规范时记录警告但继续加载
+     * 规范：
+     * - 1-1024 字符
+     */
+    private void warnSkillDescription(String name, String description) {
+        if (description == null || description.isBlank()) {
+            System.out.println("[OafConfigLoader] WARNING: Skill '" + name
+                + "' has empty description, using default");
+            return;
+        }
+        if (description.length() > 1024) {
+            System.out.println("[OafConfigLoader] WARNING: Skill '" + name
+                + "' description exceeds 1024 chars (" + description.length() + ")");
+        }
+    }
+
+    /**
+     * 解析 allowed-tools 字段（官方规范：空格分隔的工具列表）
+     * 同时兼容旧的 runtimes 字段
+     */
     @SuppressWarnings("unchecked")
-    private List<String> parseRuntimes(Map<String, Object> skillConfig) {
+    private List<String> parseAllowedTools(Map<String, Object> skillConfig) {
+        // 优先读取官方规范的 allowed-tools 字段
+        var rawAllowedTools = skillConfig.get("allowed-tools");
+        if (rawAllowedTools instanceof String str && !str.isBlank()) {
+            return List.of(str.split("\\s+"));
+        }
+        // 兼容旧的 runtimes 字段（List格式）
         var rawRuntimes = skillConfig.get("runtimes");
         if (rawRuntimes instanceof List<?> list) {
             var result = list.stream()
@@ -123,7 +185,25 @@ public class OafConfigLoader {
                 return result;
             }
         }
-        return List.of("bash", "python");
+        return Collections.emptyList();
+    }
+
+    /**
+     * 解析 metadata 字段（官方规范：键值对映射）
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, String> parseMetadata(Map<String, Object> skillConfig) {
+        var raw = skillConfig.get("metadata");
+        if (raw instanceof Map<?, ?> map) {
+            var result = new java.util.HashMap<String, String>();
+            for (var entry : map.entrySet()) {
+                if (entry.getKey() instanceof String key && entry.getValue() != null) {
+                    result.put(key, entry.getValue().toString());
+                }
+            }
+            return Collections.unmodifiableMap(result);
+        }
+        return Collections.emptyMap();
     }
 
     private String loadSkillDescription(String skillName) {
@@ -132,8 +212,13 @@ public class OafConfigLoader {
             try {
                 var content = Files.readString(skillMd);
                 var parsed = parseFrontmatter(content);
+                // 优先读取 frontmatter 的 description 字段
+                var desc = (String) parsed.frontmatter().get("description");
+                if (desc != null && !desc.isBlank()) {
+                    return desc;
+                }
+                // fallback: 使用 body 内容
                 var text = parsed.body();
-                // 不再硬截断 500 字符，仅对超长描述记录警告
                 if (text.length() > 2000) {
                     System.out.println("[OafConfigLoader] Skill '" + skillName
                         + "' description is long (" + text.length() + " chars)");

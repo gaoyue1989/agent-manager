@@ -97,7 +97,8 @@ class DebugApiControllerTest {
     @Test
     void oafConfigShouldReturnAllFields() throws Exception {
         var skills = List.of(new OafConfig.SkillConfig(
-            "bash", "local", "1.0.0", true, "Bash skill", List.of("Bash")));
+            "bash", "local", "1.0.0", true, "Bash skill", List.of("Bash"),
+            "", "", java.util.Map.of()));
         var mcp = new OafConfig.McpServerConfig("weather", "weather-service", "1.0.0", "mcp-configs/weather", true);
         var sub = new OafConfig.SubAgentConfig("acme", "helper", "1.0.0", "helper role", List.of("task"), true, "");
         var model = new OafConfig.ModelConfig("openai", "gpt-4", "");

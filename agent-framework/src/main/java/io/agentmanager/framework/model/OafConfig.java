@@ -54,7 +54,8 @@ public record OafConfig(
 
     public record SkillConfig(
         String name, String source, String version,
-        boolean required, String description, List<String> allowedTools
+        boolean required, String description, List<String> allowedTools,
+        String license, String compatibility, Map<String, String> metadata
     ) {}
 
     public record McpServerConfig(
