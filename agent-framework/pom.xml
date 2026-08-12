@@ -77,6 +77,13 @@
             <version>${agentscope.version}</version>
         </dependency>
 
+        <!-- OpenSandbox Java SDK -->
+        <dependency>
+            <groupId>com.alibaba.opensandbox</groupId>
+            <artifactId>sandbox</artifactId>
+            <version>1.0.18</version>
+        </dependency>
+
         <!-- MySQL JDBC -->
         <dependency>
             <groupId>com.mysql</groupId>

@@ -23,6 +23,7 @@ Agent Framework 是一个基于 **AgentScope Java 2.0 Harness** 的独立可运�
 | Channel | agent.channel() + Gateway + SSE |
 | 多租户 | IsolationScope.USER 按 userId 自动隔离 |
 | 状态持久化 | MysqlDistributedStore (agent_state + agent_fs) |
+| **沙箱执行** | **OpenSandbox 集成（可选，SANDBOX_ENABLED=true）：文件操作/Shell 在隔离沙箱执行，USER 级复用，记忆每次请求回写 KV** |
 
 ---
 
@@ -56,10 +57,14 @@ Agent Framework 是一个基于 **AgentScope Java 2.0 Harness** 的独立可运�
 │  │      └── agents/*/sessions/ · 会话日志                    │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │  RemoteFilesystemSpec(IsolationScope.USER)               │    │
-│  │  自动按 userId 分桶 · 多租户隔离                          │    │
-│  └─────────────────────────────────────────────────────────┘    │
+ │  ┌─────────────────────────────────────────────────────────┐    │
+ │  │  Filesystem（条件装配，SANDBOX_ENABLED 决定）            │    │
+ │  │  ├── 沙箱模式: OpenSandboxFilesystemSpec (SandboxBacked) │    │
+ │  │  │   OpenSandbox Server → 沙箱容器 (/workspace)          │    │
+ │  │  │   + WorkspaceSyncService 每次请求后回写 KV            │    │
+ │  │  └── 默认模式: RemoteFilesystemSpec(IsolationScope.USER) │    │
+ │  │      自动按 userId 分桶 · 多租户隔离                     │    │
+ │  └─────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,20 +75,31 @@ src/main/java/io/agentmanager/framework/
 ├── AgentFrameworkApplication.java   # Spring Boot 入口
 ├── config/
 │   ├── AgentManagerProperties.java  # 环境变量 @ConfigurationProperties
+│   ├── SandboxConfig.java           # 沙箱配置 (SANDBOX_*/OPENSANDBOX_*)
 │   ├── OafConfigLoader.java         # AGENTS.md 解析 (SnakeYAML)
-│   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent, MysqlDistributedStore)
+│   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent, MysqlDistributedStore, 条件装配沙箱)
 │   ├── A2AServerConfig.java         # A2A Server Bean (AgentScopeA2aServer + HarnessAgentRunner)
 │   └── ChannelConfig.java           # ChatUiChannel Bean
 ├── model/
 │   └── OafConfig.java               # OAF 配置模型 (Java Record, 含 deniedTools)
+├── sandbox/opensandbox/
+│   ├── OpenSandboxFilesystemSpec.java   # 沙箱文件系统配置 (HarnessAgent.filesystem)
+│   ├── OpenSandboxClient.java           # SandboxClient 实现 (create/resume/delete/序列化)
+│   ├── OpenSandboxClientOptions.java    # 沙箱配置 (镜像/资源/超时)
+│   ├── OpenSandbox.java                 # AbstractBaseSandbox 实现 (exec/快照/延迟注入/stop 回写)
+│   ├── OpenSandboxState.java            # 沙箱状态 (sandboxId, Jackson 序列化)
+│   ├── WorkspaceSyncService.java        # 沙箱 → KV 回写 (read→edit 语义)
+│   ├── SandboxUserKeyMiddleware.java    # 请求级 userId 注入 (onAgent → ThreadLocal)
+│   └── SandboxAwareMysqlAgentStateStore.java  # 放宽 sessionId 校验 (沙箱 slot ID 含 "/")
 ├── service/
 │   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream + userId)
 │   ├── WorkspaceInitializer.java    # OAF → Workspace 转换
+│   ├── WorkspaceReader.java         # KV 运行时文件读写 (MEMORY.md/memory/ + 沙箱注入)
 │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder)
 │   ├── McpManager.java              # MCP 配置加载
 │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
-│   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
+│   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息 + tool_calls)
 │   ├── SessionManager.java          # 会话管理
 │   ├── SessionCleanupService.java   # 会话清理
 │   ├── LlmLoggingMiddleware.java    # LLM 调用记录中间件 (ModelCallEndEvent → LLMLogger)
@@ -98,7 +114,7 @@ src/main/java/io/agentmanager/framework/
     ├── HealthController.java        # GET /health
     ├── ToolController.java          # GET /skills、/mcp、/tools
     ├── DebugController.java         # GET /debug (页面)
-    ├── DebugApiController.java      # GET /debug/* (页面数据 API)
+    ├── DebugApiController.java      # GET /debug/* (页面数据 API, 含 /debug/sandbox)
     ├── AgentCardController.java     # GET /.well-known/agent-card.json
     ├── StreamController.java        # GET /chat/stream (Channel SSE)
     ├── ThreadController.java        # GET /threads
@@ -245,6 +261,48 @@ chatChannel.sendStream(SendOptions.userId("alice"), "hello")
 | memory/ | `userId` | `agent_fs` 表 |
 | skills/ | 共享 + 用户覆盖 | `agent_fs` 表 |
 | sessions/ | `userId` | `agent_fs` 表 |
+| 沙箱实例（沙箱模式） | `userId`（USER scope） | OpenSandbox Server；状态存 `agent_state`（slot `sandbox/user/{agentId}/{userId}`） |
+
+---
+
+## 4.5 沙箱模式（OpenSandbox）
+
+### 4.5.1 概述
+
+`SANDBOX_ENABLED=true` 时，filesystem 从 `RemoteFilesystemSpec` 切换为 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`）：agent 的文件操作与 Shell 命令在 OpenSandbox 沙箱容器内执行。完整设计见 [opensandbox-integration-plan.md](opensandbox-integration-plan.md)。
+
+### 4.5.2 关键机制
+
+| 机制 | 说明 |
+|------|------|
+| 沙箱创建/复用 | `OpenSandboxClient.create()` 创建；`connector().connect()` 恢复（**不能用 `resumer().resume()`**，Running 沙箱会 409）；resume 404 → 框架自动降级新建 |
+| USER 级复用 | `IsolationScope.USER`，同 userId 跨会话复用；userId 缺失时降级 SESSION |
+| 静态模板注入 | 框架 workspace projection（tar 流 hydrateWorkspace）：AGENTS.md/skills/subagents/knowledge |
+| KV 运行时文件注入 | 首次 exec 延迟注入（`SandboxClient.create()` 无 RuntimeContext 拿不到 userId） |
+| 记忆回写 | `OpenSandbox.stop()`（框架每次 call 结束调用）→ `WorkspaceSyncService` 拉取沙箱 MEMORY.md/memory/ → KV（read→edit 语义） |
+| userId 传递 | `SandboxUserKeyMiddleware.onAgent` 注入（框架内部 exec 的 RuntimeContext 为空，实测）→ ThreadLocal → 沙箱绑定 |
+| 并发控制 | 框架自动注入 `JdbcSandboxExecutionGuard`（MySQL GET_LOCK） |
+| 状态持久化 | `SandboxAwareMysqlAgentStateStore`（官方 MysqlAgentStateStore 拒绝含 "/" 的 slot ID） |
+
+### 4.5.3 沙箱模式数据流
+
+```
+请求 (userId=alice)
+  ├─ SandboxUserKeyMiddleware.onAgent → 注入 userId
+  ├─ SandboxManager.acquire → resume(connector) / create(降级)
+  │     ├─ 框架投影注入静态模板 (AGENTS.md 等)
+  │     └─ 首次 exec 时注入 KV 记忆 (MEMORY.md/memory/)
+  ├─ agent 执行：文件操作/Shell → 沙箱容器
+  │     └─ 记忆读写 → 沙箱内 /workspace/MEMORY.md
+  └─ 请求结束 stop() → WorkspaceSyncService 回写 KV (agent_fs)
+        ├─ MEMORY.md → namespace=[userId]
+        └─ memory/*.md → namespace=[userId]
+```
+
+### 4.5.4 已知限制（SDK 2.0.0）
+
+- **A2A 流不携带工具参数**：`agentscope-extensions-a2a-server` 输出的 `tool_use` data part 只有工具名 + call_id（`getInput()` 为空）；debug 页面从 agent_state（history API）按 tool_call_id 匹配补全参数
+- `RemoteFilesystem.write` 对已存在文件返回失败（防覆盖保护），回写需 read→edit 或 BaseStore 直写（已用 read→edit）
 
 ---
 
@@ -299,6 +357,13 @@ config/
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
+| `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时 filesystem 切换为 OpenSandbox） |
+| `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
+| `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（到期自动销毁，resume 404 自动降级重建） |
+| `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制 |
+| `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
+| `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
+| `OPENSANDBOX_API_KEY` | — | ✓(沙箱模式) | OpenSandbox API 密钥 |
 
 ---
 
@@ -310,6 +375,7 @@ config/
 | agentscope-extensions-model-openai | 2.0.0 | OpenAI 兼容 LLM |
 | agentscope-extensions-mysql | 2.0.0 | MysqlDistributedStore (agent_state + agent_fs) |
 | agentscope-extensions-a2a-server | 2.0.0 | A2A 协议 Server |
+| com.alibaba.opensandbox:sandbox | 1.0.18 | OpenSandbox Java SDK（沙箱模式） |
 | Spring Boot | 3.3.5 | HTTP 服务框架 |
 | SnakeYAML | 2.x | YAML frontmatter 解析 |
 | MySQL Connector/J | 8.x | MySQL JDBC 驱动 |

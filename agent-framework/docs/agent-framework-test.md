@@ -19,15 +19,15 @@ Agent Framework (Java) 的测试基于 **Spring Boot Test** + **JUnit 5**。
 
 ## 2. 测试 LLM 配置
 
-所有 E2E 测试使用以下 LLM 配置：
+所有 E2E 测试使用以下 LLM 配置（2026-08-12 更新为 sensenova，见 `.env.secrets`）：
 
 ```yaml
 # application-test.yml
 agent:
   llm:
-    api-key: ${LLM_API_KEY}
-    model-id: LongCat-2.0
-    base-url: https://api.longcat.chat/openai/v1
+    api-key: ${LLM_API_KEY}          # .env.secrets: sk-WBHF2xYYN61Kde4mXnYYjkxJxryw9KIB
+    model-id: ${LLM_MODEL}           # sensenova-6.7-flash-lite
+    base-url: ${LLM_ENDPOINT}        # https://token.sensenova.cn/v1
     provider: openai
     temperature: 0.2
     max-tokens: 50
@@ -182,10 +182,10 @@ curl -s -X POST http://localhost:8101/ \
 ### 5.5 LLM 连通性
 
 ```bash
-curl -s "https://api.longcat.chat/openai/v1/chat/completions" \
+curl -s "${LLM_ENDPOINT}/chat/completions" \
   -H "Authorization: Bearer ${LLM_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d '{"model":"LongCat-2.0","messages":[{"role":"user","content":"请只回复 welcome"}],"max_tokens":50,"temperature":0.2}'
+  -d '{"model":"${LLM_MODEL}","messages":[{"role":"user","content":"请只回复 welcome"}],"max_tokens":50,"temperature":0.2}'
 ```
 
 ---
@@ -217,15 +217,18 @@ src/test/resources/fixtures/test-agent/
 | MySQL | ≥ 8.0 | MysqlDistributedStore |
 | JUnit 5 | 内置 | 测试框架 |
 | Spring Boot Test | 3.3.5 | 集成测试支持 |
-| LLM API | LongCat-2.0 | E2E 测试 |
+| LLM API | sensenova-6.7-flash-lite | E2E 测试（见 .env.secrets） |
 
 ---
 
 ## 8. 测试统计
 
+> 2026-08-12 更新：**266 个用例全部通过**（沙箱 OpenSandbox 集成后新增约 80 个）。
+
 | 类别 | 数量 | 状态 |
 |------|------|------|
-| 单元测试 | 157 | ✅ 全部通过 |
+| 单元测试 | 262 | ✅ 全部通过 |
+| 集成测试（默认跳过） | 4 | ✅ 需 `SANDBOX_IT=1` 启用 |
 | OafConfigLoaderTest | 12 | ✅ |
 | A2AControllerTest | 9 | ✅ |
 | AgentRuntimeServiceTest | 10 | ✅ |
@@ -234,4 +237,21 @@ src/test/resources/fixtures/test-agent/
 | BusinessToolsTest | 5 | ✅ |
 | ToolControllerTest | 4 | ✅ |
 | StreamControllerTest | 2 | ✅ |
+| DebugApiControllerTest | 25 | ✅ |
+| StateDataParserTest | 11 | ✅ |
 | 其他 Controller Tests | 8 | ✅ |
+
+### 8.1 沙箱测试（OpenSandbox 集成，2026-08-12 新增）
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| OpenSandboxTest | 13 | doExec 映射/注入/回写/快照 tar/失败容错/sessionId 降级 |
+| OpenSandboxClientTest | 6 | create/resume(connector)/delete/序列化 |
+| OpenSandboxStateTest | 5 | Jackson 序列化 round-trip/type 鉴别器/workspaceSpec→manifest |
+| OpenSandboxFilesystemSpecTest | 4 | clientOptions/workspaceSpec/isolationScope |
+| OpenSandboxClientOptionsTest | 3 | 默认值/fluent 链 |
+| WorkspaceReaderTest | 5 | InMemoryStore KV 读写/用户隔离/注入 |
+| WorkspaceSyncServiceTest | 6 | 回写 write(新建)/edit(更新)/容错 |
+| SandboxAwareMysqlAgentStateStoreTest | 2 | slot ID 斜杠放行/空 ID 拒绝 |
+| SandboxConfigTest | 2 | 配置默认值/覆盖 |
+| OpenSandboxApiIntegrationTest | 4 | **真实 Server 全流程**（创建/命令/文件/契约，需 `SANDBOX_IT=1`） |

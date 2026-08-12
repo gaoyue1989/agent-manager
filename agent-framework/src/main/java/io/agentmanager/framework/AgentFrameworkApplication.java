@@ -6,9 +6,10 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
+import io.agentmanager.framework.config.SandboxConfig;
 
 @SpringBootApplication
-@EnableConfigurationProperties(AgentManagerProperties.class)
+@EnableConfigurationProperties({AgentManagerProperties.class, SandboxConfig.class})
 @EnableScheduling
 public class AgentFrameworkApplication {
 

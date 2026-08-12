@@ -75,6 +75,28 @@ class StateDataParserTest {
     }
 
     @Test
+    void toRoleContentListShouldExtractToolCalls() {
+        var stateData = """
+            {"context":[{"role":"assistant","content":[
+                {"type":"text","text":"let me run it"},
+                {"type":"tool_use","id":"call_abc","name":"execute",
+                 "input":{"command":"python3 -c \\"print(6*7)\\"","timeout":5}}
+            ]}]}
+            """;
+        var arr = StateDataParser.findMessagesArray(stateData);
+        var list = StateDataParser.toRoleContentList(arr);
+
+        assertEquals(1, list.size());
+        @SuppressWarnings("unchecked")
+        var calls = (java.util.List<Map<String, Object>>) list.get(0).get("tool_calls");
+        assertNotNull(calls);
+        assertEquals(1, calls.size());
+        assertEquals("call_abc", calls.get(0).get("id"));
+        assertEquals("execute", calls.get(0).get("name"));
+        assertTrue(calls.get(0).get("input").toString().contains("python3"));
+    }
+
+    @Test
     void toRoleContentListShouldHandleNull() {
         assertTrue(StateDataParser.toRoleContentList(null).isEmpty());
     }

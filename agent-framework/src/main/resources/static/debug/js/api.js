@@ -39,6 +39,7 @@ export const api = {
   getDatabaseStatus: () => get('/debug/database/status'),
   getMemory: () => get('/debug/memory'),
   getWorkspace: () => get('/debug/workspace'),
+  getSandbox: () => get('/debug/sandbox'),
   getLogs: (level = 'all', limit = 100) => get('/debug/logs?level=' + level + '&limit=' + limit),
   getThreads: () => get('/debug/threads'),
   getThreadHistory: (sessionId) => get('/debug/threads/' + encodeURIComponent(sessionId) + '/history'),

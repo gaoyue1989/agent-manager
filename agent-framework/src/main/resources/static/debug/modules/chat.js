@@ -485,6 +485,7 @@ async function sendA2AStream(text) {
   const metadata = {};
   const sid = currentSessionId();
   if (sid) metadata.sessionId = sid;
+  metadata.userId = 'debug-user';
   try {
     const resp = await fetch(ctx.api.BASE + '/', {
       method: 'POST',
@@ -527,15 +528,37 @@ async function sendA2AStream(text) {
           }
           const kind = result.kind;
 
-          // artifact-update: 流式增量（thinking/text 块）
+          // artifact-update: 流式增量（thinking/text 块 + 工具调用）
           if (kind === 'artifact-update') {
             const artifact = result.artifact || {};
             const parts = artifact.parts || [];
             for (const p of parts) {
-              if (p.kind !== 'text') continue;
               const blockType = (p.metadata && p.metadata._agentscope_block_type) || 'text';
+              // A2A data part：工具调用（metadata._agentscope_tool_name / _agentscope_tool_call_id）
+              if (p.kind === 'data') {
+                const toolName = (p.metadata && p.metadata._agentscope_tool_name) || '';
+                const tcId = (p.metadata && p.metadata._agentscope_tool_call_id) || '';
+                if (toolName && toolName !== '__fragment__' && tcId && !pendingToolCalls[tcId]) {
+                  pendingToolCalls[tcId] = { name: toolName, args: {}, uiMeta: null };
+                  if (streamingDiv) {
+                    const cursor = streamingDiv.querySelector('.cursor');
+                    if (cursor) cursor.remove();
+                    if (fullText) updateStreamContent(fullText);
+                  }
+                  addToolCallMessage(toolName, {}, null, tcId, false, null);
+                  streamingDiv = null;
+                  // A2A 流不携带工具参数（SDK 限制），从会话历史按 tool_call_id 匹配填充
+                  fillToolArgsFromHistory(tcId, sid);
+                }
+                continue;
+              }
+              if (p.kind !== 'text') continue;
               const text = p.text || '';
-              if (result.append === false) lastArtifactText = '';
+              // append=false = 新块开始（thinking 或 text），重置累积器
+              if (result.append === false) {
+                lastArtifactText = '';
+                fullText = '';
+              }
               lastArtifactText += text;
               if (blockType === 'thinking') {
                 appendThinkingDelta(text);
@@ -600,8 +623,36 @@ async function sendA2AStream(text) {
   }
 }
 
+/**
+ * A2A 流不携带工具参数（SDK 限制），从会话历史（agent_state）按 tool_call_id 匹配填充。
+ * agent_state 在 A2A 流结束后落库，因此延迟重试几次。
+ */
+async function fillToolArgsFromHistory(tcId, sessionId) {
+  if (!tcId || !sessionId) return;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const data = await ctx.api.getThreadHistory(sessionId);
+      const msgs = data.messages || [];
+      for (const m of msgs) {
+        const calls = m.tool_calls || [];
+        for (const c of calls) {
+          if (c.id === tcId) {
+            const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
+            if (existing) {
+              const argsPre = existing.querySelector('.tc-args pre');
+              if (argsPre) argsPre.textContent = JSON.stringify(c.input, null, 2);
+            }
+            if (pendingToolCalls[tcId]) pendingToolCalls[tcId].args = c.input;
+            return;
+          }
+        }
+      }
+    } catch (e) { /* 历史未就绪时忽略 */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
 function handleToolCallEvent(data) {
-  const tcId = data.tool_call_id || '';
   const uiMeta = data._meta?.ui || data.ui_meta || null;
   const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
   if (existing) {

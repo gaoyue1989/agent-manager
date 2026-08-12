@@ -25,3 +25,12 @@ agent:
     username: ${CHECKPOINT_USERNAME:agent_manager}
     password: ${CHECKPOINT_PASSWORD:Agent@Manager2026}
     db-name: ${CHECKPOINT_DB_NAME:}
+  sandbox:
+    enabled: ${SANDBOX_ENABLED:false}
+    image: ${SANDBOX_IMAGE:opensandbox/code-interpreter:v1.1.0}
+    timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:60}
+    memory-mb: ${SANDBOX_MEMORY_MB:1024}
+    cpu-count: ${SANDBOX_CPU_COUNT:1}
+    opensandbox:
+      server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
+      api-key: ${OPENSANDBOX_API_KEY:}

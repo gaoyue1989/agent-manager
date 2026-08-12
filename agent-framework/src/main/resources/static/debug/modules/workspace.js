@@ -18,6 +18,16 @@ export default {
   unmount() { ctx = null; }
 };
 
+function sandboxNotice() {
+  if (!wsData.sandbox_mode) return '';
+  return '<div class="panel"><div class="panel-header"><span class="title" style="color:var(--yellow)">Sandbox Mode</span></div>' +
+    '<div class="panel-body">' +
+    '<div class="info-row"><span class="label">说明</span><span class="value">本目录为<strong>静态模板层</strong>（投影源），非沙箱内实时文件</span></div>' +
+    '<div class="info-row"><span class="label">运行时文件</span><span class="value">MEMORY.md / memory/ 在 KV 中，用 <strong>Memory</strong> 页查看</span></div>' +
+    '<div class="info-row"><span class="label">沙箱状态</span><span class="value">经 OpenSandbox Server 管理（见 Sandbox 页）</span></div>' +
+    '</div></div>';
+}
+
 async function loadWorkspace() {
   const body = document.getElementById('wsBody');
   try {
@@ -28,7 +38,7 @@ async function loadWorkspace() {
   }
 
   if (!wsData.exists) {
-    body.innerHTML = '<div class="panel"><div class="panel-header"><span class="title">Workspace</span></div>' +
+    body.innerHTML = sandboxNotice() + '<div class="panel"><div class="panel-header"><span class="title">Workspace</span></div>' +
       '<div class="panel-body"><div class="info-row"><span class="label">Path</span>' +
       '<span class="value">' + ctx.utils.esc(wsData.path || '') + '</span></div>' +
       '<div class="info-row"><span class="label">Status</span><span class="value" style="color:var(--yellow)">Not initialized</span></div>' +
@@ -37,7 +47,7 @@ async function loadWorkspace() {
   }
 
   const files = wsData.files || [];
-  let html = '<div class="panel"><div class="panel-header"><span class="title">Workspace Files</span>' +
+  let html = sandboxNotice() + '<div class="panel"><div class="panel-header"><span class="title">Workspace Files</span>' +
     '<span class="count">' + files.length + ' file(s)</span></div><div class="panel-body">' +
     '<div class="info-row"><span class="label">Path</span><span class="value" style="white-space:normal">' + ctx.utils.esc(wsData.path) + '</span></div>';
 

@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
+import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.LLMLogger;
 import io.agentmanager.framework.service.LogCollector;
@@ -41,19 +42,22 @@ public class DebugApiController {
     private final DataSource dataSource;
     private final LLMLogger llmLogger;
     private final LogCollector logCollector;
+    private final SandboxConfig sandboxConfig;
 
     public DebugApiController(
         AgentManagerProperties props,
         OafConfig oafConfig,
         DataSource dataSource,
         LLMLogger llmLogger,
-        LogCollector logCollector
+        LogCollector logCollector,
+        SandboxConfig sandboxConfig
     ) {
         this.props = props;
         this.oafConfig = oafConfig;
         this.dataSource = dataSource;
         this.llmLogger = llmLogger;
         this.logCollector = logCollector;
+        this.sandboxConfig = sandboxConfig;
     }
 
     /** 环境变量配置（敏感信息脱敏） */
@@ -161,8 +165,11 @@ public class DebugApiController {
     public Map<String, Object> threadHistory(@PathVariable String sessionId) {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement(
-                 "SELECT state_data FROM agent_state WHERE session_id = ? ORDER BY item_index DESC LIMIT 1")) {
+                 "SELECT state_data FROM agent_state WHERE session_id = ? "
+                     + "OR session_id LIKE CONCAT('%:', ?) ORDER BY item_index DESC LIMIT 1")) {
             stmt.setString(1, sessionId);
+            // 兼容 agent_state 行 session_id 带 userId 前缀的格式（如 debug-user:debug-user:msq91wz3）
+            stmt.setString(2, sessionId);
             var rs = stmt.executeQuery();
             if (!rs.next()) {
                 return Map.of("session_id", sessionId, "messages", List.of());
@@ -192,10 +199,13 @@ public class DebugApiController {
         var users = new LinkedHashMap<String, Map<String, Object>>();
         try (var conn = dataSource.getConnection()) {
             // agent_fs 结构: namespace_path(0x1F 分段) + item_key(文件路径) + value_json({content,...})
+            // 兼容两种 key 格式：
+            //   框架 RemoteFilesystem 写入：item_key 带前导 "/"（如 /MEMORY.md），namespace 含 memory 段
+            //   沙箱回写（WorkspaceSyncService）：item_key 无前导 "/"（如 MEMORY.md），namespace 为顶层 userId
             try (var stmt = conn.prepareStatement(
                 "SELECT namespace_path, item_key, value_json, updated_at FROM agent_fs "
-                    + "WHERE item_key = '/MEMORY.md' "
-                    + "OR namespace_path LIKE CONCAT('%', CHAR(31), 'memory', CHAR(31), '%') "
+                    + "WHERE item_key = '/MEMORY.md' OR item_key = 'MEMORY.md' "
+                    + "OR item_key LIKE 'memory/%' OR item_key LIKE '/memory/%' "
                     + "ORDER BY namespace_path, item_key")) {
                 var rs = stmt.executeQuery();
                 while (rs.next()) {
@@ -233,7 +243,12 @@ public class DebugApiController {
         }
     }
 
-    /** 从 namespace_path 提取用户标识：segments 中 "users" 后的第一段 */
+    /**
+     * 从 namespace_path 提取用户标识：
+     * - 框架格式：segments 中 "users" 后的第一段（如 agents/Debug Test Agent/users/debug-user/root）
+     * - 沙箱回写格式：顶层 userId（namespace = List.of(userId)，JdbcStore 编码为 join + 尾随 0x1F，
+     *   如 "debug-user\u001F"）→ 取第一个非空段，避免 0x1F 控制字符泄漏到页面
+     */
     private String extractUserFromNamespace(String ns) {
         if (ns == null) return "unknown";
         var segments = ns.split("\u001F");
@@ -242,7 +257,12 @@ public class DebugApiController {
                 return segments[i + 1];
             }
         }
-        return ns;
+        for (var seg : segments) {
+            if (seg != null && !seg.isBlank()) {
+                return seg;
+            }
+        }
+        return "unknown";
     }
 
     /** 解析 value_json 中的 content 字段（可能为 null） */
@@ -255,14 +275,34 @@ public class DebugApiController {
         }
     }
 
-    /** 工作区文件列表（本地 .agentscope/workspace 目录） */
+    /** 沙箱配置（沙箱模式时展示，便于排查） */
+    @GetMapping("/sandbox")
+    public Map<String, Object> sandbox() {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("enabled", sandboxConfig.enabled());
+        m.put("image", sandboxConfig.image());
+        m.put("timeout_minutes", sandboxConfig.timeoutMinutes());
+        m.put("memory_mb", sandboxConfig.memoryMb());
+        m.put("cpu_count", sandboxConfig.cpuCount());
+        m.put("server_url", sandboxConfig.opensandbox().serverUrl());
+        m.put("api_key_configured", sandboxConfig.opensandbox().apiKey() != null
+            && !sandboxConfig.opensandbox().apiKey().isBlank());
+        return m;
+    }
+
+    /**
+     * 工作区文件列表（本地 .agentscope/workspace 目录）。
+     * 沙箱模式下该目录为静态模板层（投影源），运行时文件（MEMORY.md/memory/）在 KV 中。
+     */
     @GetMapping("/workspace")
     public Map<String, Object> workspace() {
         var base = Path.of(props.configDir()).resolve(".agentscope").resolve("workspace");
         if (!Files.exists(base)) {
-            return Map.of("exists", false, "path", base.toString(), "files", List.of());
+            return Map.of("exists", false, "path", base.toString(), "files", List.of(),
+                "sandbox_mode", sandboxConfig.enabled());
         }
-        return Map.of("exists", true, "path", base.toString(), "files", listWorkspaceFiles(base, base));
+        return Map.of("exists", true, "path", base.toString(), "files", listWorkspaceFiles(base, base),
+            "sandbox_mode", sandboxConfig.enabled());
     }
 
     /** 系统日志（内存 Appender，最近 500 条） */

@@ -111,7 +111,7 @@ class AgentScopeConfigTest {
 
         assertThrows(RuntimeException.class,
             () -> config.harnessAgent(props, store, oaf, ws, mcp,
-                List.of(new BusinessTools()), new LLMLogger()));
+                List.of(new BusinessTools()), new LLMLogger(), null));
     }
 
     private static AgentManagerProperties propsForLlm() {

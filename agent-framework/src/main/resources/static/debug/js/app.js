@@ -13,6 +13,7 @@ import configModule from '../modules/config.js';
 import memoryModule from '../modules/memory.js';
 import databaseModule from '../modules/database.js';
 import workspaceModule from '../modules/workspace.js';
+import sandboxModule from '../modules/sandbox.js';
 import logsModule from '../modules/logs.js';
 
 const routes = {
@@ -24,6 +25,7 @@ const routes = {
   '#/memory':    { title: 'Memory',    icon: '🧠', module: memoryModule },
   '#/database':  { title: 'Database',  icon: '🗄️', module: databaseModule },
   '#/workspace': { title: 'Workspace', icon: '📁', module: workspaceModule },
+  '#/sandbox':   { title: 'Sandbox',   icon: '📦', module: sandboxModule },
   '#/logs':      { title: 'Logs',      icon: '📋', module: logsModule }
 };
 

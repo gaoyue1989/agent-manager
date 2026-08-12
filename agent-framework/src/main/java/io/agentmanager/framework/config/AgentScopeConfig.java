@@ -9,12 +9,15 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import com.zaxxer.hikari.HikariDataSource;
 
 import io.agentmanager.framework.model.OafConfig;
+import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
+import io.agentmanager.framework.sandbox.opensandbox.WorkspaceSyncService;
 import io.agentmanager.framework.service.*;
 import io.agentscope.extensions.mysql.state.MysqlAgentStateStore;
 import io.agentscope.extensions.mysql.store.JdbcStore;
@@ -29,6 +32,46 @@ import io.agentscope.harness.agent.memory.MemoryConfig;
 @Configuration
 public class AgentScopeConfig {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeConfig.class);
+
+    /**
+     * 沙箱文件系统（SANDBOX_ENABLED=true 时装配）。
+     * 未启用时返回 null（@Bean 返回 null = 不注册），harnessAgent 走默认 RemoteFilesystemSpec。
+     * 注意：不用 @ConditionalOnProperty——环境变量 SANDBOX_ENABLED 绑定为 sandbox.enabled，
+     * 与 agent.sandbox.enabled 键不一致会导致条件误判，方法内判断 config.enabled() 更可靠。
+     */
+    @Bean
+    public OpenSandboxFilesystemSpec sandboxFilesystemSpec(
+        SandboxConfig config,
+        io.agentmanager.framework.service.WorkspaceReader workspaceReader,
+        WorkspaceSyncService workspaceSyncService
+    ) {
+        if (!config.enabled()) {
+            log.info("Sandbox disabled (agent.sandbox.enabled=false), using RemoteFilesystemSpec mode");
+            return null;
+        }
+        log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={})",
+            config.opensandbox().serverUrl(), config.image());
+        var spec = new OpenSandboxFilesystemSpec()
+            .serverUrl(config.opensandbox().serverUrl())
+            .apiKey(config.opensandbox().apiKey())
+            .image(config.image())
+            .timeout(Duration.ofMinutes(config.timeoutMinutes()))
+            .resource(Map.of(
+                "cpu", String.valueOf(config.cpuCount()),
+                "memory", config.memoryMb() + "Mi"
+            ))
+            .workspaceReader(workspaceReader)
+            .workspaceSyncService(workspaceSyncService)
+            .isolationScope(IsolationScope.USER);
+        // 请求级 userId 注入：middleware 与 acquire 同一订阅链，顺序执行
+        spec.setUserKeyMiddleware(new io.agentmanager.framework.sandbox.opensandbox.SandboxUserKeyMiddleware(spec));
+        return spec;
+    }
+
+    @Bean
+    public WorkspaceSyncService workspaceSyncService(DistributedStore distributedStore) {
+        return new WorkspaceSyncService(distributedStore.baseStore());
+    }
 
     @Bean
     public OafConfig oafConfig(OafConfigLoader loader) {
@@ -80,12 +123,15 @@ public class AgentScopeConfig {
     /**
      * 分布式存储：agent_state 表 (AgentState) + agent_fs 表 (工作区文件)。
      * 使用自定义库名/表名与现有基础设施保持一致。
+     * AgentStateStore 使用 SandboxAwareMysqlAgentStateStore：官方 MysqlAgentStateStore
+     * 拒绝含 "/" 的 ID，而沙箱 slot ID 形如 sandbox/user/{agentId}/{userId（框架固定格式），
+     * 需放宽校验以支持沙箱状态持久化。
      */
     @Bean
     public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props) {
         var dbName = props.checkpoint().resolvedDbName();
         var store = DistributedStore.builder()
-            .agentStateStore(new MysqlAgentStateStore(
+            .agentStateStore(new io.agentmanager.framework.sandbox.opensandbox.SandboxAwareMysqlAgentStateStore(
                 dataSource, dbName, "agent_state", true))
             .baseStore(JdbcStore.builder(dataSource)
                 .tableName("agent_fs")
@@ -121,7 +167,8 @@ public class AgentScopeConfig {
         WorkspaceInitializer workspaceInitializer,
         McpToolRegistrar mcpToolRegistrar,
         List<io.agentmanager.framework.tool.BusinessTools> customTools,
-        LLMLogger llmLogger
+        LLMLogger llmLogger,
+        @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         var llm = props.llm();
 
@@ -143,7 +190,7 @@ public class AgentScopeConfig {
             }
             mcpToolRegistrar.registerAll(toolkit, oafConfig);
 
-            var agent = HarnessAgent.builder()
+            var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
                 .sysPrompt(oafConfig.systemPrompt())
                 .model(model)
@@ -151,9 +198,23 @@ public class AgentScopeConfig {
                 // LLM 调用记录（debug 页面 LLM Calls）
                 .middleware(new LlmLoggingMiddleware(llmLogger))
                 .workspace(workspacePath)
-                .distributedStore(distributedStore)
-                .filesystem(new RemoteFilesystemSpec()
-                    .isolationScope(IsolationScope.USER))
+                .distributedStore(distributedStore);
+
+            // 沙箱模式：OpenSandboxFilesystemSpec（SANDBOX_ENABLED=true 时注入）
+            // 默认模式：RemoteFilesystemSpec（共享存储，不提供 Shell）
+            if (sandboxSpec != null) {
+                builder.filesystem(sandboxSpec);
+                // 请求级 userId 注入：框架内部 exec 不带 RuntimeContext（实测），
+                // middleware 在调用链上把 userId 注入沙箱供 stop() 回写
+                if (sandboxSpec.getUserKeyMiddleware() != null) {
+                    builder.middleware(sandboxSpec.getUserKeyMiddleware());
+                }
+            } else {
+                builder.filesystem(new RemoteFilesystemSpec()
+                    .isolationScope(IsolationScope.USER));
+            }
+
+            var agent = builder
                 // 记忆管理
                 .memory(MemoryConfig.builder()
                     .flushTrigger(MemoryConfig.FlushTrigger.throttled(Duration.ofMinutes(10)))

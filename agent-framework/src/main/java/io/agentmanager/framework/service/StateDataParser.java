@@ -103,7 +103,7 @@ public final class StateDataParser {
         return msg.path("role").asText("user").toLowerCase();
     }
 
-    /** 将消息数组转换为 {role, content} 列表（供 Debug API 前端展示） */
+    /** 将消息数组转换为 {role, content, tool_calls?} 列表（供 Debug API 前端展示） */
     public static List<Map<String, Object>> toRoleContentList(JsonNode messagesArray) {
         if (messagesArray == null || !messagesArray.isArray()) {
             return List.of();
@@ -111,8 +111,36 @@ public final class StateDataParser {
         var result = new ArrayList<Map<String, Object>>();
         for (var m : messagesArray) {
             var content = extractContentText(m);
-            if (!content.isBlank()) {
-                result.add(Map.of("role", extractRole(m), "content", content));
+            var tools = extractToolCalls(m);
+            // 仅保留有文本内容或工具调用的消息（跳过纯 tool_result 等）
+            if (content.isBlank() && tools.isEmpty()) {
+                continue;
+            }
+            var msg = new java.util.LinkedHashMap<String, Object>();
+            msg.put("role", extractRole(m));
+            msg.put("content", content);
+            if (!tools.isEmpty()) {
+                msg.put("tool_calls", tools);
+            }
+            result.add(msg);
+        }
+        return result;
+    }
+
+    /** 提取消息中的工具调用：{id, name, input} 列表（type=tool_use） */
+    private static List<Map<String, Object>> extractToolCalls(JsonNode msg) {
+        var result = new ArrayList<Map<String, Object>>();
+        var content = msg.path("content");
+        if (!content.isArray()) {
+            return result;
+        }
+        for (var c : content) {
+            if ("tool_use".equals(c.path("type").asText())) {
+                var call = new java.util.LinkedHashMap<String, Object>();
+                call.put("id", c.path("id").asText(""));
+                call.put("name", c.path("name").asText(""));
+                call.put("input", c.path("input"));
+                result.add(call);
             }
         }
         return result;
