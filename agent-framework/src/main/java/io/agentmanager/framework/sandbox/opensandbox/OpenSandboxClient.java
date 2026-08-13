@@ -52,6 +52,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .domain(options.getServerUrl())
             .apiKey(options.getApiKey())
             .protocol("http")
+            // 经 Server 代理转发 execd/endpoint 请求（客户端无需直连沙箱容器）
+            .useServerProxy(true)
             .build();
     }
 
