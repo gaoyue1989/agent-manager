@@ -2,6 +2,7 @@ package io.agentmanager.framework.sandbox.opensandbox;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import io.agentmanager.framework.service.WorkspaceReader;
@@ -22,6 +23,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private String apiKey;
     private String image = "opensandbox/code-interpreter:v1.1.0";
     private Duration timeout = Duration.ofMinutes(60);
+    private List<String> entrypoint = List.of("/opt/code-interpreter/code-interpreter.sh");
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
     private Map<String, String> environment = new HashMap<>();
     private String workspaceRoot = "/workspace";
@@ -34,7 +36,11 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
 
     @Override
     protected SandboxClient<?> createClient() {
-        return new OpenSandboxClient(clientOptions(), workspaceReader, workspaceSyncService, this);
+        // 包装 TracingSandboxClient：沙箱 create/resume/delete 操作创建 OTel span
+        // （sandbox 操作在 middleware 链外执行，OtelTracingMiddleware 无法覆盖）。
+        // OTEL_TRACES_EXPORTER=none 时 GlobalOpenTelemetry 返回 no-op tracer，零开销。
+        return new TracingSandboxClient(
+            new OpenSandboxClient(clientOptions(), workspaceReader, workspaceSyncService, this));
     }
 
     /** userId 注入 middleware（AgentScopeConfig 注册到 HarnessAgent.Builder.middleware） */
@@ -69,6 +75,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .apiKey(apiKey)
             .image(image)
             .timeout(timeout)
+            .entrypoint(entrypoint)
             .resource(resource)
             .environment(environment)
             .workspaceRoot(workspaceRoot);
@@ -97,6 +104,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public OpenSandboxFilesystemSpec apiKey(String apiKey) { this.apiKey = apiKey; return this; }
     public OpenSandboxFilesystemSpec image(String image) { this.image = image; return this; }
     public OpenSandboxFilesystemSpec timeout(Duration timeout) { this.timeout = timeout; return this; }
+    public OpenSandboxFilesystemSpec entrypoint(List<String> entrypoint) { this.entrypoint = entrypoint; return this; }
     public OpenSandboxFilesystemSpec resource(Map<String, String> resource) { this.resource = resource; return this; }
     public OpenSandboxFilesystemSpec environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxFilesystemSpec workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }

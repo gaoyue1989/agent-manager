@@ -59,13 +59,17 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
     public Sandbox create(WorkspaceSpec workspaceSpec, SandboxSnapshotSpec snapshotSpec,
                           OpenSandboxClientOptions options) {
         // 1. 通过 OpenSandbox SDK 创建沙箱
-        var osbSandbox = com.alibaba.opensandbox.sandbox.Sandbox.builder()
+        var builder = com.alibaba.opensandbox.sandbox.Sandbox.builder()
             .connectionConfig(connectionConfig)
             .image(options.getImage())
             .timeout(options.getTimeout())
             .resource(options.getResource())
-            .env(options.getEnvironment())
-            .build();
+            .env(options.getEnvironment());
+        // entrypoint 仅在配置非空时设置，避免覆盖镜像默认启动命令
+        if (options.getEntrypoint() != null && !options.getEntrypoint().isEmpty()) {
+            builder.entrypoint(options.getEntrypoint());
+        }
+        var osbSandbox = builder.build();
 
         // 2. 构建状态
         var info = osbSandbox.getInfo();

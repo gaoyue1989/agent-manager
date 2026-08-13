@@ -49,10 +49,11 @@ class OpenSandboxFilesystemSpecTest {
     }
 
     @Test
-    void createClientShouldBeOpenSandboxClient() {
+    void createClientShouldWrapOpenSandboxClientWithTracing() {
         var spec = new OpenSandboxFilesystemSpec()
             .serverUrl("s").apiKey("k");
-        assertInstanceOf(OpenSandboxClient.class, spec.createClient());
+        // 链路追踪改造后 createClient() 返回 TracingSandboxClient（内部委托 OpenSandboxClient）
+        assertInstanceOf(TracingSandboxClient.class, spec.createClient());
     }
 
     @Test
@@ -62,8 +63,7 @@ class OpenSandboxFilesystemSpecTest {
             .serverUrl("s").apiKey("k")
             .workspaceReader(reader);
 
-        var client = (OpenSandboxClient) spec.createClient();
-        // client 构造后通过反射校验 reader 传递（无 getter，验证构造不抛异常即可）
-        assertNotNull(client);
+        // TracingSandboxClient 构造（包装 OpenSandboxClient）不抛异常即证明 reader 传递链路无断裂
+        assertNotNull(spec.createClient());
     }
 }

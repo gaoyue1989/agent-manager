@@ -97,6 +97,7 @@ docker run -d --name agent-framework \
 > - 运行用户为非 root 的 `appuser`，`/config` 为挂载卷（内含 AGENTS.md/skills/mcp-configs）
 > - `JAVA_OPTS` 可覆盖 JVM 参数（默认 `-XX:MaxRAMPercentage=75`）
 > - 内置健康检查（`curl /health`，30s 间隔）
+> - 链路追踪（OTel Java Agent，详见 `tracing-design.md`）：镜像内置 agent jar，设 `OTEL_EXPORTER_OTLP_ENDPOINT` 即自动启用；**切勿**设 `OTEL_TRACES_EXPORTER=none`（会连 Agent 导出一起禁掉）
 
 ### 3.3 查看日志
 

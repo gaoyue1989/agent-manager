@@ -8,9 +8,11 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
+import io.opentelemetry.api.trace.Span;
 
 /**
  * 内存日志 Appender：环形缓冲保留最近日志，供调试页面 /debug/logs 读取。
+ * append 时从当前 OTel span 读取 trace_id/span_id 写入条目，打通日志 ↔ Jaeger 排障闭环。
  */
 public class InMemoryLogAppender extends AppenderBase<ILoggingEvent> {
     public static final int MAX_ENTRIES = 500;
@@ -20,11 +22,12 @@ public class InMemoryLogAppender extends AppenderBase<ILoggingEvent> {
 
     @Override
     protected void append(ILoggingEvent event) {
-        var line = "%s %-5s %s - %s".formatted(
+        var line = "%s %-5s %s - %s [%s]".formatted(
             Instant.ofEpochMilli(event.getTimeStamp()).toString(),
             event.getLevel().toString(),
             event.getLoggerName(),
-            event.getFormattedMessage());
+            event.getFormattedMessage(),
+            traceId());
         lock.lock();
         try {
             buffer.addLast(line);
@@ -34,6 +37,15 @@ public class InMemoryLogAppender extends AppenderBase<ILoggingEvent> {
         } finally {
             lock.unlock();
         }
+    }
+
+    /** 当前活跃 span 的 trace_id，无活跃 span 时返回 "-"（Span.current() 恒非 null） */
+    private String traceId() {
+        Span span = Span.current();
+        if (span != null && span.getSpanContext().isValid()) {
+            return span.getSpanContext().getTraceId();
+        }
+        return "-";
     }
 
     /** 按级别过滤快照；level=all 返回全部，limit 限制条数（最新在前） */

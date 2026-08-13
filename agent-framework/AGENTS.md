@@ -67,7 +67,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 186 个测试用例
+│   └── test/                                  # 300 个测试用例 (含新增 tracing 测试)
 ├── docs/                                     # 改进方案文档 (14 份)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -134,7 +134,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | Channel | ✅ | ChatUiChannel (GET /chat/stream) |
 | 工作区（Workspace） | ✅ | WorkspaceInitializer 生成 .agentscope/workspace/ |
 | 子 Agent | ✅ | subagents/*.md |
-| 沙箱 | ❌ | 未配置 |
+| 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆回写 KV） |
 | Agent 状态存储 | ✅ | MysqlDistributedStore (agent_state + agent_fs) |
 | 模型集成 | ✅ | OpenAI 兼容 API |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
@@ -210,6 +210,14 @@ OAF `deniedTools` 字段控制排除列表。
 | `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析，保证与 agent_fs 同库） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
+| `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件操作/Shell 在 OpenSandbox 隔离沙箱执行） |
+| `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
+| `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
+| `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制（MiB） |
+| `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
+| `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
+| `OPENSANDBOX_SERVER_URL` | — | | OpenSandbox Server 地址（如 `192.168.31.155:8090`） |
+| `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 
 ---
 
@@ -245,10 +253,20 @@ LLM_API_KEY=... LLM_MODEL_ID=... LLM_BASE_URL=... \
 Docker 部署（多阶段构建，运行时非 root 用户，JAVA_OPTS 可覆盖 JVM 参数）：
 
 ```bash
-make docker-build                         # 构建 docker.io/agent-framework:latest
+make docker-build                         # 构建 docker.io/agent-framework:latest (自动下载 OTel agent jar)
 docker run -d --name agent-framework -p 8100:8100 \
   -e LLM_API_KEY=... -e LLM_MODEL_ID=... -e LLM_BASE_URL=... \
   -e AGENT_CONFIG_DIR=/config -v ./config:/config \
+  agent-framework:latest
+```
+
+链路追踪（OTel Java Agent 方案，详见 [docs/tracing-design.md](docs/tracing-design.md)）：设 `OTEL_EXPORTER_OTLP_ENDPOINT` 即自动启用（ENTRYPOINT 注入 `-javaagent`），**不可**设 `OTEL_TRACES_EXPORTER=none`（会连 Agent 导出一起禁用）：
+
+```bash
+docker run -d --name agent-framework -p 8100:8100 \
+  -e LLM_API_KEY=... -e LLM_MODEL_ID=... -e LLM_BASE_URL=... \
+  -e AGENT_CONFIG_DIR=/config -v ./config:/config \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger-collector:4318 \
   agent-framework:latest
 ```
 
@@ -258,7 +276,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (186 用例)
+mvn -o test            # 容器内离线测试 (300 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -268,6 +286,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 186 个测试，全部通过
+mvn test     # 300 个测试，全部通过 (含新增 tracing 测试)
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

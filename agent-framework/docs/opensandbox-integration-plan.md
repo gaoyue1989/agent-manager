@@ -951,6 +951,7 @@ public class WorkspaceSyncService {
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | 沙箱超时时间 |
 | `SANDBOX_MEMORY_MB` | `1024` | 内存限制 (MiB) |
 | `SANDBOX_CPU_COUNT` | `1` | CPU 限制 |
+| `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | 覆盖镜像默认启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | API 密钥 |
 
@@ -964,6 +965,7 @@ agent:
     timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:60}
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
+    entrypoint: ${SANDBOX_ENTRYPOINT:/opt/code-interpreter/code-interpreter.sh}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY}

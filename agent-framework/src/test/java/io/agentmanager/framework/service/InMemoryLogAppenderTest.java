@@ -9,12 +9,17 @@ import org.slf4j.LoggerFactory;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 
+import io.agentmanager.framework.TracingTestBase;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 通过真实 logback Logger 驱动 InMemoryLogAppender，验证收集/过滤/环形缓冲。
+ *
+ * <p>继承 TracingTestBase 使 GlobalOpenTelemetry 注册真实 SDK，
+ * 保证 trace_id 用例中 span 有效。
  */
-class InMemoryLogAppenderTest {
+class InMemoryLogAppenderTest extends TracingTestBase {
 
     private InMemoryLogAppender appender;
     private Logger logger;
@@ -103,5 +108,30 @@ class InMemoryLogAppenderTest {
         assertEquals(InMemoryLogAppender.MAX_ENTRIES, logs.size());
         // 最旧的 50 条被丢弃, 最新在最前
         assertTrue(logs.get(0).contains("line " + (InMemoryLogAppender.MAX_ENTRIES + 49)));
+    }
+
+    @Test
+    void appendShouldIncludeTraceIdWhenSpanActive() {
+        var tracer = io.opentelemetry.api.GlobalOpenTelemetry.getTracer("test");
+        var span = tracer.spanBuilder("test-span").startSpan();
+        try (var scope = span.makeCurrent()) {
+            logger.info("traced line");
+        } finally {
+            span.end();
+        }
+
+        var logs = appender.snapshot("all", 10);
+        assertEquals(1, logs.size());
+        assertTrue(logs.get(0).contains(span.getSpanContext().getTraceId()));
+        assertTrue(logs.get(0).matches(".*\\[%s\\]".formatted(span.getSpanContext().getTraceId())));
+    }
+
+    @Test
+    void appendShouldUseDashWithoutActiveSpan() {
+        logger.info("untraced line");
+
+        var logs = appender.snapshot("all", 10);
+        assertEquals(1, logs.size());
+        assertTrue(logs.get(0).endsWith("[-]"));
     }
 }

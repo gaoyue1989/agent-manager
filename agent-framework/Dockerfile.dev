@@ -59,6 +59,13 @@ RUN mvn -B -q clean install || true; \
 # 清理构建缓存中无用的临时文件, 缩小镜像体积
 RUN rm -rf /root/.m2/repository/.cache /root/.m2/wrapper
 
+# ---------- OTel Java Agent (链路追踪, 见 docs/tracing-design.md) ----------
+# 预置 javaagent jar 到 /opt/otel/, 离线环境下开发/运行可直接引用:
+#   java -javaagent:/opt/otel/opentelemetry-javaagent.jar ...
+# 目录权限放开, 允许后续通过挂载更新/替换 jar
+COPY docker/otel/opentelemetry-javaagent.jar /opt/otel/opentelemetry-javaagent.jar
+RUN chmod 644 /opt/otel/opentelemetry-javaagent.jar
+
 # ---------- 默认 Maven Central 配置 ----------
 # 提供默认 settings.xml; 如需 Nexus 私有源请挂载覆盖:
 #   -v /path/to/settings.xml:/root/.m2/settings.xml:ro

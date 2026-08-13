@@ -56,6 +56,7 @@ public class AgentScopeConfig {
             .apiKey(config.opensandbox().apiKey())
             .image(config.image())
             .timeout(Duration.ofMinutes(config.timeoutMinutes()))
+            .entrypoint(config.entrypoint())
             .resource(Map.of(
                 "cpu", String.valueOf(config.cpuCount()),
                 "memory", config.memoryMb() + "Mi"
@@ -182,6 +183,11 @@ public class AgentScopeConfig {
                 .baseUrl(llm.baseUrl())
                 .build();
 
+            // P1: 包装 memory/compaction 内部 LLM 调用追踪
+            // 不设置 .model() 时 harness 回退使用主 model（无 trace），设置包装后行为不变且带 span
+            var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(model, "memory");
+            var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(model, "compaction");
+
             // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
             var toolkit = new io.agentscope.core.tool.Toolkit();
             for (var tool : customTools) {
@@ -195,7 +201,13 @@ public class AgentScopeConfig {
                 .sysPrompt(oafConfig.systemPrompt())
                 .model(model)
                 .toolkit(toolkit)
-                // LLM 调用记录（debug 页面 LLM Calls）
+                // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
+                .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
+                // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
+                .middleware(new io.agentmanager.framework.service.FrameworkTracingMiddleware(oafConfig.slug()))
+                // ReAct 推理轮次 span（order=0，覆盖 onReasoning）
+                .middleware(new io.agentmanager.framework.service.ReasoningTracingMiddleware())
+                // LLM 调用记录（debug 页面，order=1，默认值，保留）
                 .middleware(new LlmLoggingMiddleware(llmLogger))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
@@ -220,6 +232,7 @@ public class AgentScopeConfig {
                     .flushTrigger(MemoryConfig.FlushTrigger.throttled(Duration.ofMinutes(10)))
                     .consolidationMaxTokens(8_000)
                     .consolidationMinGap(Duration.ofHours(1))
+                    .model(memoryModel)            // ← 新增：包装后的 model（flush + consolidation LLM 调用 span）
                     .build())
                 // 上下文压缩
                 .compaction(CompactionConfig.builder()
@@ -227,6 +240,7 @@ public class AgentScopeConfig {
                     .keepMessages(10)
                     .flushBeforeCompact(true)
                     .offloadBeforeCompact(true)
+                    .model(compactionModel)        // ← 新增：包装后的 model（compaction LLM 调用 span）
                     .build())
                 // 大工具结果卸载
                 .toolResultEviction(ToolResultEvictionConfig.defaults())

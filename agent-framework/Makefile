@@ -9,7 +9,8 @@ IMAGE      ?= agent-framework:latest
 DEV_IMAGE  ?= gaoyue1989/agent-framework:java-dev
 
 .PHONY: help build package run dev test clean docker-build docker-build-dev \
-        docker-save docker-load docker-push offline-build offline-cache clean-image
+        docker-save docker-load docker-push offline-build offline-cache clean-image \
+        otel-agent
 
 help:
 	@echo "Agent Framework (Java) 可用目标:"
@@ -19,7 +20,8 @@ help:
 	@echo "  dev            开发热启动 (mvn spring-boot:run)"
 	@echo "  test           运行单元测试"
 	@echo "  clean          清理 target"
-	@echo "  docker-build   构建 Docker 运行镜像 (Dockerfile)"
+	@echo "  docker-build   构建 Docker 运行镜像 (Dockerfile, 自动下载 OTel agent)"
+	@echo "  otel-agent     下载 OTel Java Agent jar 到 docker/otel/"
 	@echo "  docker-build-dev 构建离线开发镜像 (Dockerfile.dev)"
 	@echo "  docker-save    导出离线开发镜像为 tar.gz"
 	@echo "  docker-push    推送离线开发镜像到 Harbor/Docker Hub"
@@ -46,7 +48,21 @@ clean:
 	$(MVN) clean
 
 # ---------- Docker ----------
-docker-build:
+# OTel Java Agent jar (链路追踪, 见 docs/tracing-design.md §4.7)
+# 预下载到 docker/otel/, Dockerfile 构建时直接 COPY (离线环境可预先放置)
+OTEL_JAVAAGENT_VERSION ?= 2.12.0
+OTEL_JAVAAGENT_JAR ?= docker/otel/opentelemetry-javaagent.jar
+
+otel-agent:
+	@if [ -f "$(OTEL_JAVAAGENT_JAR)" ]; then echo "已存在: $(OTEL_JAVAAGENT_JAR)"; \
+	else \
+		echo "下载 OTel Java Agent v$(OTEL_JAVAAGENT_VERSION) ..."; \
+		mkdir -p docker/otel; \
+		curl -fSLo $(OTEL_JAVAAGENT_JAR) \
+			"https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v$(OTEL_JAVAAGENT_VERSION)/opentelemetry-javaagent.jar"; \
+	fi
+
+docker-build: otel-agent
 	docker build -t $(IMAGE) -f Dockerfile .
 
 # 构建离线开发镜像 (有网络或已有 .m2 缓存的机器)

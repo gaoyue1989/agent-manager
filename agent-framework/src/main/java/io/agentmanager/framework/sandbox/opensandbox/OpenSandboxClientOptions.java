@@ -2,6 +2,7 @@ package io.agentmanager.framework.sandbox.opensandbox;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import io.agentscope.harness.agent.sandbox.SandboxClient;
@@ -17,6 +18,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private String apiKey;
     private String image = "opensandbox/code-interpreter:v1.1.0";
     private Duration timeout = Duration.ofMinutes(60);
+    private List<String> entrypoint = List.of("/opt/code-interpreter/code-interpreter.sh");
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
     private Map<String, String> environment = new HashMap<>();
     private String workspaceRoot = "/workspace";
@@ -41,6 +43,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public String getApiKey() { return apiKey; }
     public String getImage() { return image; }
     public Duration getTimeout() { return timeout; }
+    public List<String> getEntrypoint() { return entrypoint; }
     public Map<String, String> getResource() { return resource; }
     public Map<String, String> getEnvironment() { return environment; }
 
@@ -49,6 +52,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions apiKey(String apiKey) { this.apiKey = apiKey; return this; }
     public OpenSandboxClientOptions image(String image) { this.image = image; return this; }
     public OpenSandboxClientOptions timeout(Duration timeout) { this.timeout = timeout; return this; }
+    public OpenSandboxClientOptions entrypoint(List<String> entrypoint) { this.entrypoint = entrypoint; return this; }
     public OpenSandboxClientOptions resource(Map<String, String> resource) { this.resource = resource; return this; }
     public OpenSandboxClientOptions environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxClientOptions workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
