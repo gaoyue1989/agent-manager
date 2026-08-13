@@ -884,6 +884,19 @@ public class WorkspaceSyncService {
 > （agent_state 权威来源）按 tool_call_id 匹配补全参数；`StateDataParser.toRoleContentList`
 > 增加 `tool_calls`（{id, name, input}）提取，history 端点 SQL 支持 sessionId 后缀匹配。
 
+> **实施确认（2026-08-13）**：**MemoryFlush 消息卸载（offload）在 call 外失败**
+> （"No active sandbox — sandbox filesystem used outside of a call context"）：
+> 框架 `SandboxLifecycleMiddleware.releaseForCall` 会 `setSandbox(null)`（反编译确认），
+> 而 `MemoryFlushMiddleware.doFlush` 在 call 结束后**无条件**执行 `offloadMessages`
+> （写 sessions/ 消息日志）→ 沙箱文件系统无活动沙箱。**影响有限**：offload 仅是会话日志
+> 的冗余备份，`agent_state` 表全量保留消息（debug history 从 agent_state 读）；
+> `CompactionMiddleware` 对 offload 失败有 catch 容错（压缩仍工作）。框架行为，无法关闭，
+> 接受 warn 级日志。
+>
+> **userId 注入并发竞态**：`SandboxUserKeyMiddleware` 用 ThreadLocal 传递 userId，
+> reactor 线程切换时偶发读取失败（userKey=null → 回写跳过）。已在 `OpenSandbox.stop()`
+> 增加 pendingUserKey 兜底重读；单用户串行场景稳定（实测 create + resume×2 均绑定成功）。
+
 #### 4.4.1 触发时机
 
 | 调用方式 | 挂载点 | 说明 |

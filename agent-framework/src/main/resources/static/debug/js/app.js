@@ -45,10 +45,9 @@ window.App = { api, state, utils, modal };
 // 工具调用块折叠切换（供模块内联 onclick 使用）
 window.App.toolToggle = (headerEl) => {
   const body = headerEl.nextElementSibling;
-  const toggle = headerEl.querySelector('.tc-toggle');
+  const arrow = headerEl.querySelector('.tc-arrow');
   body.classList.toggle('open');
-  toggle.classList.toggle('open');
-  toggle.textContent = body.classList.contains('open') ? '▲' : '▼';
+  arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
 };
 
 // 思维链块折叠切换（供模块内联 onclick 使用）

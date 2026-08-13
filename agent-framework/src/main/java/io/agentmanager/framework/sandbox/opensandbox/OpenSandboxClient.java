@@ -85,7 +85,7 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         //    KV 运行时文件（MEMORY.md/memory/）由 OpenSandbox 首次 exec 时延迟注入
         //    （create() 无 RuntimeContext 参数拿不到 userId，见 OpenSandbox 注释）
         //    userId 由 SandboxUserKeyMiddleware 注入（filesystemSpec.pendingUserKey）
-        OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService);
+        OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService, filesystemSpec);
         bindUserKey(sandbox);
         try {
             sandbox.start();
@@ -121,7 +121,7 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .skipHealthCheck(true)
             .connect();
 
-        var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService);
+        var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService, filesystemSpec);
         bindUserKey(sandbox);
         return sandbox;
     }

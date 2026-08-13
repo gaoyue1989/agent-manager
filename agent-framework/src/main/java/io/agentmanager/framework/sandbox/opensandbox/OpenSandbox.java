@@ -39,18 +39,29 @@ public class OpenSandbox extends AbstractBaseSandbox {
     private final WorkspaceSyncService workspaceSyncService;
     private final AtomicBoolean runtimeInjected = new AtomicBoolean(false);
     private volatile String userKey;
+    private final OpenSandboxFilesystemSpec filesystemSpec;
 
     public OpenSandbox(OpenSandboxState state,
                        com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
                        OpenSandboxClientOptions options,
                        WorkspaceReader workspaceReader,
                        WorkspaceSyncService workspaceSyncService) {
+        this(state, osbSandbox, options, workspaceReader, workspaceSyncService, null);
+    }
+
+    public OpenSandbox(OpenSandboxState state,
+                       com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
+                       OpenSandboxClientOptions options,
+                       WorkspaceReader workspaceReader,
+                       WorkspaceSyncService workspaceSyncService,
+                       OpenSandboxFilesystemSpec filesystemSpec) {
         super(state);
         this.state = state;
         this.osbSandbox = osbSandbox;
         this.options = options;
         this.workspaceReader = workspaceReader;
         this.workspaceSyncService = workspaceSyncService;
+        this.filesystemSpec = filesystemSpec;
     }
 
     /** 绑定用户 key（SandboxUserKeyMiddleware 经 OpenSandboxClient 注入） */
@@ -62,6 +73,14 @@ public class OpenSandbox extends AbstractBaseSandbox {
     @Override
     public void stop() throws Exception {
         // 每次 call 结束回写 KV（不阻塞：失败仅告警，沙箱内数据保留）
+        // 并发场景 ThreadLocal 注入可能竞态失败（onAgent 与 acquire 线程切换），
+        // 兜底：从 filesystemSpec 的 pendingUserKey 再读一次
+        if (userKey == null && filesystemSpec != null) {
+            var pending = filesystemSpec.takePendingUserKey();
+            if (pending != null && !pending.isBlank()) {
+                userKey = pending;
+            }
+        }
         log.info("[sandbox-open] stop() called, userKey={}", userKey);
         if (workspaceSyncService != null && userKey != null) {
             try {

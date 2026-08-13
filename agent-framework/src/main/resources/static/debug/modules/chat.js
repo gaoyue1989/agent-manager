@@ -14,6 +14,7 @@ let refreshTimer = null;
 let thinkingDiv = null;
 let thinkingText = '';
 let toolResultBuffers = {};
+let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
 
 function render() {
   return `
@@ -171,7 +172,9 @@ function addSystemMsg(text) {
 function createStreamingMsg() {
   const div = document.createElement('div');
   div.className = 'msg assistant';
-  div.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+  // 官方模型：工具调用块在消息气泡内、正文文本上方
+  div.innerHTML = '<div class="msg-tools"></div>' +
+    '<div class="msg-text"><div class="typing-indicator"><span></span><span></span><span></span></div></div>';
   messagesEl.appendChild(div);
   ctx.utils.scrollBottom(messagesEl);
   return div;
@@ -179,44 +182,60 @@ function createStreamingMsg() {
 
 function updateStreamContent(text) {
   if (!streamingDiv) return;
+  const textEl = streamingDiv.querySelector('.msg-text');
+  if (!textEl) return;
   let html = ctx.utils.formatMarkdown(text);
   html += '<span class="cursor"></span>';
-  streamingDiv.innerHTML = html;
+  textEl.innerHTML = html;
   ctx.utils.scrollBottom(messagesEl);
 }
 
+/**
+ * 渲染工具调用卡片（对齐官方 ToolCallBlock 样式）：
+ * 折叠时仅显示头部（▶ Tool: 名称 + id 前 10 位），展开显示 Arguments / Result。
+ */
 function renderToolCallBlock(tcName, tcArgs, tcResult, tcId, collapsed, uiMeta) {
-  const argsStr = tcArgs ? JSON.stringify(tcArgs, null, 2) : '';
-  const resultStr = tcResult || '';
-  const bodyClass = collapsed ? '' : 'open';
-  const toggleClass = collapsed ? '' : 'open';
-  const arrow = collapsed ? '▼' : '▲';
+  const hasArgs = tcArgs && Object.keys(tcArgs).length > 0;
+  const argsStr = hasArgs ? JSON.stringify(tcArgs, null, 2) : '';
+  const shortId = (tcId || '').slice(0, 10);
   const uiBadge = uiMeta
     ? '<span class="badge green" style="margin-left:8px">MCP App</span>' : '';
+  let bodyInner = '';
+  if (argsStr) {
+    bodyInner += '<div class="tc-args"><div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(argsStr) + '</pre></div>';
+  }
+  if (tcResult) {
+    bodyInner += '<div class="tc-result"><div class="tc-label">Result</div><pre>' + ctx.utils.esc(tcResult) + '</pre></div>';
+  }
+  if (!bodyInner) {
+    bodyInner = '<span class="tc-running">Running…</span>';
+  }
   return '<div class="tool-call-block" data-tcid="' + ctx.utils.esc(tcId || '') + '">' +
     '<div class="tool-call-header" onclick="window.App.toolToggle(this)">' +
-    '<span class="tc-icon">🔧</span><span class="tc-name">' + ctx.utils.esc(tcName) + '</span>' +
+    '<span class="tc-arrow">▶</span><span class="tc-name">Tool: ' + ctx.utils.esc(tcName) + '</span>' +
     uiBadge +
-    '<span class="tc-toggle ' + toggleClass + '">' + arrow + '</span></div>' +
-    '<div class="tool-call-body ' + bodyClass + '">' +
-    (argsStr ? '<div class="tc-args"><div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(argsStr) + '</pre></div>' : '') +
-    (resultStr ? '<div class="tc-result"><div class="tc-label" style="margin-top:8px">Result</div><pre>' + ctx.utils.esc(resultStr) + '</pre></div>' : '') +
-    '</div></div>';
+    '<span class="tc-id">' + ctx.utils.esc(shortId) + '</span></div>' +
+    '<div class="tool-call-body"><div class="tc-inner">' + bodyInner + '</div></div>' +
+    '</div>';
 }
 
 function toggleToolCall(headerEl) {
   const body = headerEl.nextElementSibling;
-  const toggle = headerEl.querySelector('.tc-toggle');
+  const arrow = headerEl.querySelector('.tc-arrow');
   body.classList.toggle('open');
-  toggle.classList.toggle('open');
-  toggle.textContent = body.classList.contains('open') ? '▲' : '▼';
+  arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
 }
 
+/**
+ * 工具调用加入当前 assistant 消息气泡（官方模型：tools 在文本上方）。
+ * 默认折叠：先展示工具名称，点开才展示参数与详情。
+ */
 function addToolCallMessage(name, args, content, tcId, collapsed, uiMeta) {
+  if (!streamingDiv) streamingDiv = createStreamingMsg();
+  const toolsEl = streamingDiv.querySelector('.msg-tools');
   const div = document.createElement('div');
-  div.className = 'msg assistant';
-  div.innerHTML = renderToolCallBlock(name, args, null, tcId, collapsed, uiMeta);
-  messagesEl.appendChild(div);
+  div.innerHTML = renderToolCallBlock(name, args, content, tcId, true, uiMeta);
+  toolsEl.appendChild(div.firstChild);
   ctx.utils.scrollBottom(messagesEl);
   return div;
 }
@@ -224,41 +243,57 @@ function addToolCallMessage(name, args, content, tcId, collapsed, uiMeta) {
 function addToolResultMessage(name, result, tcId, collapsed) {
   const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId || '') + '"]');
   if (block) {
-    const body = block.querySelector('.tool-call-body');
-    if (body && !body.querySelector('.tc-result')) {
-      body.innerHTML += '<div class="tc-label" style="margin-top:8px">Result</div><pre>' + ctx.utils.esc(result || '') + '</pre>';
-      body.classList.add('open');
-      const toggle = block.querySelector('.tc-toggle');
-      toggle.classList.add('open');
-      toggle.textContent = '▲';
+    const inner = block.querySelector('.tc-inner');
+    if (inner) {
+      // 结果写入但保持折叠（点开才查看详情）
+      const existing = block.querySelector('.tc-result');
+      if (existing) {
+        existing.innerHTML = '<div class="tc-label">Result</div><pre>' + ctx.utils.esc(result || '') + '</pre>';
+      } else {
+        inner.insertAdjacentHTML('beforeend',
+          '<div class="tc-result"><div class="tc-label">Result</div><pre>' + ctx.utils.esc(result || '') + '</pre></div>');
+        // 移除 Running… 占位
+        const running = inner.querySelector('.tc-running');
+        if (running && inner.children.length > 1) running.remove();
+      }
     }
   } else {
     const div = document.createElement('div');
     div.className = 'msg assistant';
-    div.innerHTML = '<div class="tool-result-inline"><div class="tr-label">Tool Result: ' + ctx.utils.esc(name) + '</div><pre>' + ctx.utils.esc(result || '') + '</pre></div>';
+    div.innerHTML = '<div class="msg-tools"></div><div class="msg-text"></div>';
     messagesEl.appendChild(div);
+    const toolsEl = div.querySelector('.msg-tools');
+    const card = document.createElement('div');
+    card.innerHTML = renderToolCallBlock(name, {}, result, tcId, true, null);
+    toolsEl.appendChild(card.firstChild);
   }
   ctx.utils.scrollBottom(messagesEl);
 }
 
 function addUsageStats(usage, elapsed) {
+  if (usage) {
+    usageAccumulator.input_tokens += usage.input_tokens || 0;
+    usageAccumulator.output_tokens += usage.output_tokens || 0;
+    usageAccumulator.total_tokens += usage.total_tokens || ((usage.input_tokens || 0) + (usage.output_tokens || 0));
+    usageAccumulator.call_count++;
+  }
+}
+
+function flushUsageStats(elapsed) {
+  if (usageAccumulator.call_count === 0) return;
   const div = document.createElement('div');
   div.className = 'usage-stats';
-  let html = '';
-  if (usage) {
-    const inputTokens = usage.input_tokens || 0;
-    const outputTokens = usage.output_tokens || 0;
-    const totalTokens = usage.total_tokens || (inputTokens + outputTokens);
-    html += '<div class="stat-item"><span class="stat-label">输入:</span><span class="stat-value tokens-in">' + inputTokens + '</span></div>';
-    html += '<div class="stat-item"><span class="stat-label">输出:</span><span class="stat-value tokens-out">' + outputTokens + '</span></div>';
-    html += '<div class="stat-item"><span class="stat-label">总计:</span><span class="stat-value">' + totalTokens + '</span></div>';
-  }
+  let html = '<div class="stat-item"><span class="stat-label">LLM Calls:</span><span class="stat-value">' + usageAccumulator.call_count + '</span></div>';
+  html += '<div class="stat-item"><span class="stat-label">输入:</span><span class="stat-value tokens-in">' + usageAccumulator.input_tokens + '</span></div>';
+  html += '<div class="stat-item"><span class="stat-label">输出:</span><span class="stat-value tokens-out">' + usageAccumulator.output_tokens + '</span></div>';
+  html += '<div class="stat-item"><span class="stat-label">总计:</span><span class="stat-value">' + usageAccumulator.total_tokens + '</span></div>';
   if (elapsed) {
     html += '<div class="stat-item"><span class="stat-label">耗时:</span><span class="stat-value time">' + elapsed + 's</span></div>';
   }
   div.innerHTML = html;
   messagesEl.appendChild(div);
   ctx.utils.scrollBottom(messagesEl);
+  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
 }
 
 // ---------- 思维链渲染 ----------
@@ -334,13 +369,13 @@ function handleToolResultStart(toolCallId, toolCallName) {
   toolResultBuffers[toolCallId] = { name: toolCallName, text: '' };
   const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
   if (block) {
-    const body = block.querySelector('.tool-call-body');
-    if (body && !body.querySelector('.tc-result')) {
-      body.innerHTML += '<div class="tc-result"><div class="tc-label" style="margin-top:8px">Result</div>' +
-        '<pre class="tc-result-content"></pre></div>';
-      body.classList.add('open');
-      const toggle = block.querySelector('.tc-toggle');
-      if (toggle) { toggle.classList.add('open'); toggle.textContent = '▲'; }
+    const inner = block.querySelector('.tc-inner');
+    if (inner && !block.querySelector('.tc-result')) {
+      inner.insertAdjacentHTML('beforeend',
+        '<div class="tc-result"><div class="tc-label">Result</div><pre class="tc-result-content"></pre></div>');
+      // 移除 Running… 占位（保持折叠，点开查看）
+      const running = inner.querySelector('.tc-running');
+      if (running && inner.children.length > 1) running.remove();
     }
   }
 }
@@ -392,6 +427,7 @@ async function sendMessage() {
   thinkingDiv = null;
   thinkingText = '';
   toolResultBuffers = {};
+  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
 
   const mode = ctx.state.getState('ui.streamMode');
   try {
@@ -402,6 +438,13 @@ async function sendMessage() {
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
     sendBtn.classList.remove('danger');
+    if (streamingDiv && !fullText) {
+      const textEl = streamingDiv.querySelector('.msg-text');
+      const toolsEl = streamingDiv.querySelector('.msg-tools');
+      const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
+      const hasNoTools = toolsEl && toolsEl.children.length === 0;
+      if (hasOnlyTyping && hasNoTools) streamingDiv.remove();
+    }
     streamingDiv = null;
     abortController = null;
     loadThreads();
@@ -474,6 +517,11 @@ async function sendChannelSSE(text) {
       }
     }
     if (streamingDiv && fullText) updateStreamContent(fullText);
+    else if (!streamingDiv && fullText) {
+      streamingDiv = createStreamingMsg();
+      updateStreamContent(fullText);
+    }
+    flushUsageStats();
   } catch (e) {
     if (e.name !== 'AbortError' && streamingDiv) {
       streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(e.message) + '</span>';
@@ -540,12 +588,23 @@ async function sendA2AStream(text) {
                 const tcId = (p.metadata && p.metadata._agentscope_tool_call_id) || '';
                 if (toolName && toolName !== '__fragment__' && tcId && !pendingToolCalls[tcId]) {
                   pendingToolCalls[tcId] = { name: toolName, args: {}, uiMeta: null };
+                  // 清理空的 streamingDiv（仅含 typing indicator，无实际文本）
                   if (streamingDiv) {
-                    const cursor = streamingDiv.querySelector('.cursor');
-                    if (cursor) cursor.remove();
-                    if (fullText) updateStreamContent(fullText);
+                    const textEl = streamingDiv.querySelector('.msg-text');
+                    const toolsEl = streamingDiv.querySelector('.msg-tools');
+                    const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
+                    const hasNoTools = toolsEl && toolsEl.children.length === 0;
+                    if (hasOnlyTyping && hasNoTools) {
+                      streamingDiv.remove();
+                      streamingDiv = null;
+                    } else {
+                      const cursor = streamingDiv.querySelector('.cursor');
+                      if (cursor) cursor.remove();
+                      if (fullText) updateStreamContent(fullText);
+                    }
                   }
-                  addToolCallMessage(toolName, {}, null, tcId, false, null);
+                  // 默认折叠：先展示工具名称，点开才展示参数与详情
+                  addToolCallMessage(toolName, {}, null, tcId, true, null);
                   streamingDiv = null;
                   // A2A 流不携带工具参数（SDK 限制），从会话历史按 tool_call_id 匹配填充
                   fillToolArgsFromHistory(tcId, sid);
@@ -562,8 +621,9 @@ async function sendA2AStream(text) {
               lastArtifactText += text;
               if (blockType === 'thinking') {
                 appendThinkingDelta(text);
-              } else if (streamingDiv) {
+              } else {
                 // 直接追加增量（append=true 时 text 是增量）
+                if (!streamingDiv) streamingDiv = createStreamingMsg();
                 fullText += text;
                 updateStreamContent(fullText);
               }
@@ -579,10 +639,21 @@ async function sendA2AStream(text) {
             if (result.final === true || state === 'completed') {
               finishThinkingBlock();
               if (streamingDiv) {
-                const cursor = streamingDiv.querySelector('.cursor');
-                if (cursor) cursor.remove();
-                if (fullText) updateStreamContent(fullText);
+                const textEl = streamingDiv.querySelector('.msg-text');
+                const toolsEl = streamingDiv.querySelector('.msg-tools');
+                const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
+                const hasNoTools = toolsEl && toolsEl.children.length === 0;
+                if (hasOnlyTyping && hasNoTools) {
+                  streamingDiv.remove();
+                } else {
+                  const cursor = streamingDiv.querySelector('.cursor');
+                  if (cursor) cursor.remove();
+                  if (fullText) updateStreamContent(fullText);
+                }
               }
+              flushUsageStats();
+              // 流结束（agent_state 已落库）：补全未填充的工具参数
+              refreshPendingToolArgs(sid);
               return;
             }
           }
@@ -594,7 +665,8 @@ async function sendA2AStream(text) {
               .map((p) => p.text || '');
             if (texts.length) {
               fullText = texts.join('');
-              if (streamingDiv) updateStreamContent(fullText);
+              if (!streamingDiv) streamingDiv = createStreamingMsg();
+              updateStreamContent(fullText);
             }
             if (result.metadata) {
               const usage = result.metadata[Object.keys(result.metadata)[0]];
@@ -608,9 +680,20 @@ async function sendA2AStream(text) {
             }
             finishThinkingBlock();
             if (streamingDiv) {
-              const cursor = streamingDiv.querySelector('.cursor');
-              if (cursor) cursor.remove();
+              const textEl = streamingDiv.querySelector('.msg-text');
+              const toolsEl = streamingDiv.querySelector('.msg-tools');
+              const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
+              const hasNoTools = toolsEl && toolsEl.children.length === 0;
+              if (hasOnlyTyping && hasNoTools) {
+                streamingDiv.remove();
+              } else {
+                const cursor = streamingDiv.querySelector('.cursor');
+                if (cursor) cursor.remove();
+              }
             }
+            flushUsageStats();
+            // 流结束（agent_state 已落库）：补全未填充的工具参数
+            refreshPendingToolArgs(sid);
             return;
           }
         } catch (e) { /* 忽略解析错误 */ }
@@ -625,7 +708,7 @@ async function sendA2AStream(text) {
 
 /**
  * A2A 流不携带工具参数（SDK 限制），从会话历史（agent_state）按 tool_call_id 匹配填充。
- * agent_state 在 A2A 流结束后落库，因此延迟重试几次。
+ * agent_state 在 A2A 流结束后落库，因此延迟重试；流完成时由 refreshPendingToolArgs 兜底。
  */
 async function fillToolArgsFromHistory(tcId, sessionId) {
   if (!tcId || !sessionId) return;
@@ -637,12 +720,7 @@ async function fillToolArgsFromHistory(tcId, sessionId) {
         const calls = m.tool_calls || [];
         for (const c of calls) {
           if (c.id === tcId) {
-            const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
-            if (existing) {
-              const argsPre = existing.querySelector('.tc-args pre');
-              if (argsPre) argsPre.textContent = JSON.stringify(c.input, null, 2);
-            }
-            if (pendingToolCalls[tcId]) pendingToolCalls[tcId].args = c.input;
+            applyToolArgs(tcId, c.input);
             return;
           }
         }
@@ -652,7 +730,40 @@ async function fillToolArgsFromHistory(tcId, sessionId) {
   }
 }
 
+/** 将工具参数写入卡片（保持折叠态，不自动展开） */
+function applyToolArgs(tcId, args) {
+  const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
+  if (!existing) return;
+  const inner = existing.querySelector('.tc-inner');
+  if (!inner) return;
+  let argsPre = existing.querySelector('.tc-args pre');
+  if (!argsPre) {
+    // 卡片渲染时参数为空则无 args 区域，需创建（插入 tc-inner 顶部）
+    const argsDiv = document.createElement('div');
+    argsDiv.className = 'tc-args';
+    argsDiv.innerHTML = '<div class="tc-label">Arguments</div><pre></pre>';
+    argsPre = argsDiv.querySelector('pre');
+    inner.insertBefore(argsDiv, inner.firstChild);
+  }
+  argsPre.textContent = JSON.stringify(args, null, 2);
+  if (pendingToolCalls[tcId]) pendingToolCalls[tcId].args = args;
+}
+
+/** 流完成时补全所有尚未填充参数的工具调用（agent_state 此时已落库） */
+async function refreshPendingToolArgs(sessionId) {
+  if (!sessionId) return;
+  for (const tcId of Object.keys(pendingToolCalls)) {
+    const call = pendingToolCalls[tcId];
+    if (!call || !call.name) continue;
+    const hasArgs = call.args && Object.keys(call.args).length > 0;
+    const cardHasArgs = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"] .tc-args pre');
+    if (hasArgs && cardHasArgs) continue;
+    await fillToolArgsFromHistory(tcId, sessionId);
+  }
+}
+
 function handleToolCallEvent(data) {
+  const tcId = data.tool_call_id || '';
   const uiMeta = data._meta?.ui || data.ui_meta || null;
   const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
   if (existing) {
@@ -661,12 +772,23 @@ function handleToolCallEvent(data) {
     if (argsPre) argsPre.textContent = JSON.stringify(data.args, null, 2);
   } else {
     pendingToolCalls[tcId] = { name: data.name, args: data.args, uiMeta };
+    // 清理空的 streamingDiv（仅含 typing indicator，无实际文本）
     if (streamingDiv) {
-      const cursor = streamingDiv.querySelector('.cursor');
-      if (cursor) cursor.remove();
-      if (fullText) updateStreamContent(fullText);
+      const textEl = streamingDiv.querySelector('.msg-text');
+      const toolsEl = streamingDiv.querySelector('.msg-tools');
+      const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
+      const hasNoTools = toolsEl && toolsEl.children.length === 0;
+      if (hasOnlyTyping && hasNoTools) {
+        streamingDiv.remove();
+        streamingDiv = null;
+      } else {
+        const cursor = streamingDiv.querySelector('.cursor');
+        if (cursor) cursor.remove();
+        if (fullText) updateStreamContent(fullText);
+      }
     }
-    addToolCallMessage(data.name, data.args, null, tcId, false, uiMeta);
+    // 默认折叠：先展示工具名称，点开才展示参数与详情
+    addToolCallMessage(data.name, data.args, null, tcId, true, uiMeta);
     streamingDiv = null;
     if (uiMeta && uiMeta.resourceUri) {
       mcpAppsRegistry[tcId] = { uri: uiMeta.resourceUri, name: data.name, args: data.args };
@@ -695,6 +817,17 @@ async function handleToolResultEvent(data) {
     }
   } else {
     addToolResultMessage(tc.name, resultText, data.tool_call_id, false);
+  }
+  // 清理空的 streamingDiv（仅含 typing indicator 无文本内容）
+  if (streamingDiv) {
+    const textEl = streamingDiv.querySelector('.msg-text');
+    const toolsEl = streamingDiv.querySelector('.msg-tools');
+    const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
+    const hasNoTools = toolsEl && toolsEl.children.length === 0;
+    if (hasOnlyTyping && hasNoTools) {
+      streamingDiv.remove();
+      streamingDiv = null;
+    }
   }
   if (!streamingDiv) {
     streamingDiv = createStreamingMsg();
