@@ -61,6 +61,9 @@ public class AgentScopeConfig {
                 "cpu", String.valueOf(config.cpuCount()),
                 "memory", config.memoryMb() + "Mi"
             ))
+            .environment(Map.of(
+                "EXECD_API_GRACE_SHUTDOWN", config.execdGraceShutdown().toMillis() + "ms"
+            ))
             .workspaceReader(workspaceReader)
             .workspaceSyncService(workspaceSyncService)
             .isolationScope(IsolationScope.USER);

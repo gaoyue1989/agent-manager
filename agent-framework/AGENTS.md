@@ -216,6 +216,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制（MiB） |
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
+| `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x） |
 | `OPENSANDBOX_SERVER_URL` | — | | OpenSandbox Server 地址（如 `192.168.31.155:8090`） |
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 

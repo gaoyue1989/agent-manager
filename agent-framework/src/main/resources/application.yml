@@ -31,6 +31,7 @@ agent:
     timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:60}
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
+    execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}
