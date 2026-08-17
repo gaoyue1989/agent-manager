@@ -14,7 +14,9 @@ const state = {
   },
   ui: {
     streamMode: 'a2a', // a2a | channel
-    isStreaming: false
+    connModel: 'session', // session=长连接 SSE | single=单次流调试
+    isStreaming: false,
+    theme: null // 'light' | 'dark' | null(跟随系统)
   }
 };
 
@@ -92,4 +94,48 @@ function setHeaderStatus(text, cls) {
   const txt = document.getElementById('statusText');
   if (dot) dot.className = 'status-dot ' + (cls || '');
   if (txt) txt.textContent = text;
+}
+
+/* ---------- 主题切换（手动 > 系统自动） ---------- */
+
+export function initTheme() {
+  const btn = document.getElementById('themeToggle');
+  if (!btn) return;
+  syncThemeIcon();
+  btn.addEventListener('click', () => {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+  });
+}
+
+function currentTheme() {
+  const root = document.documentElement;
+  if (root.classList.contains('dark')) return 'dark';
+  if (root.classList.contains('light')) return 'light';
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+export function getTheme() {
+  return currentTheme();
+}
+
+function setTheme(theme) {
+  document.documentElement.classList.remove('light', 'dark');
+  if (theme === 'dark') document.documentElement.classList.add('dark');
+  else if (theme === 'light') document.documentElement.classList.add('light');
+  try { localStorage.setItem('debug-theme', theme); } catch (e) { /* ignore */ }
+  setState('ui.theme', theme);
+  syncThemeIcon();
+}
+
+function syncThemeIcon() {
+  const btn = document.getElementById('themeToggle');
+  if (!btn) return;
+  if (currentTheme() === 'dark') {
+    btn.textContent = '☀';
+    btn.title = '切换到浅色';
+  } else {
+    btn.textContent = '☾';
+    btn.title = '切换到深色';
+  }
 }

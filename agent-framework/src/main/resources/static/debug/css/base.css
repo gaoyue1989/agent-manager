@@ -1,34 +1,178 @@
-/* ===== 基础样式：变量 + 重置 ===== */
-:root {
-  --bg: #0d1117;
-  --bg-panel: #161b22;
-  --bg-hover: #21262d;
-  --bg-active: #1c2128;
-  --border: #30363d;
-  --border-subtle: #21262d;
-  --text: #c9d1d9;
-  --text-dim: #8b949e;
-  --accent: #58a6ff;
-  --green: #238636;
-  --green-bg: #23863622;
-  --green-border: #23863644;
-  --red: #da3633;
+/* ===== 基础样式：官方浅色 token（+ 深色覆写）+ 重置 ===== */
+
+/* 浅色主题（默认） */
+:root, html:not(.dark):not(.light) {
+  --bg: #f4f5f6;
+  --bg-panel: #ffffff;
+  --bg-hover: #f7f8f9;
+  --bg-active: #f0f1f3;
+  --border: #e4e5ea;
+  --border-subtle: #eceef1;
+  --text: #6b6f76;
+  --text-h: #18191c;
+  --text-dim: #8e939a;
+  --text-muted: #6b6f76;
+  --accent: #aa3bff;
+  --accent-bg: rgba(170, 59, 255, 0.08);
+  --accent-border: rgba(170, 59, 255, 0.35);
+  --primary: #18191c;
+  --primary-bg: #f1f2f4;
+  --secondary: #f7f8f9;
+  --muted: #f7f8f9;
+  --muted-foreground: #6b6f76;
+  --card: #ffffff;
+  --card-foreground: #18191c;
+  --green: #16a34a;
+  --green-bg: rgba(22, 163, 74, 0.08);
+  --green-border: rgba(22, 163, 74, 0.35);
+  --red: #dc2626;
+  --red-bg: rgba(220, 38, 38, 0.08);
+  --red-border: rgba(220, 38, 38, 0.35);
   --yellow: #d29922;
-  --blue-bg: #1f6feb22;
-  --blue-border: #1f6feb44;
-  --mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+  --yellow-bg: rgba(210, 153, 34, 0.1);
+  --yellow-border: rgba(210, 153, 34, 0.4);
+  --blue-bg: rgba(24, 25, 28, 0.05);
+  --blue-border: rgba(24, 25, 28, 0.15);
+  --purple: #aa3bff;
+  --mono: 'Geist Mono', 'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --radius: 1rem;
+  --shadow-panel: 0 1px 2px rgba(24,25,28,.05), 0 18px 40px -30px rgba(24,25,28,.28);
+  --shadow-tab: 0 1px 2px rgba(24,25,28,.07);
+  color-scheme: light;
 }
 
+/* 深色主题（跟随系统自动） */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --bg: #16171d;
+    --bg-panel: #1f2028;
+    --bg-hover: #262731;
+    --bg-active: #1b1c23;
+    --border: #2e303a;
+    --border-subtle: #24252d;
+    --text: #9ca3af;
+    --text-h: #f3f4f6;
+    --text-dim: #6b7280;
+    --text-muted: #9ca3af;
+    --accent: #c084fc;
+    --accent-bg: rgba(192, 132, 252, 0.15);
+    --accent-border: rgba(192, 132, 252, 0.5);
+    --primary: #f3f4f6;
+    --primary-bg: #262731;
+    --secondary: #262731;
+    --muted: #262731;
+    --muted-foreground: #9ca3af;
+    --card: #1f2028;
+    --card-foreground: #f3f4f6;
+    --green: #4ade80;
+    --green-bg: rgba(74, 222, 128, 0.12);
+    --green-border: rgba(74, 222, 128, 0.4);
+    --red: #f87171;
+    --red-bg: rgba(248, 113, 113, 0.12);
+    --red-border: rgba(248, 113, 113, 0.4);
+    --yellow: #fbbf24;
+    --yellow-bg: rgba(251, 191, 36, 0.12);
+    --yellow-border: rgba(251, 191, 36, 0.4);
+    --blue-bg: rgba(255, 255, 255, 0.06);
+    --blue-border: rgba(255, 255, 255, 0.18);
+    --purple: #c084fc;
+    --shadow-panel: 0 1px 2px rgba(0,0,0,.3), 0 18px 40px -30px rgba(0,0,0,.5);
+    --shadow-tab: 0 1px 2px rgba(0,0,0,.3);
+    color-scheme: dark;
+  }
+}
+
+/* 手动强制深色（html.dark，优先级高于系统自动） */
+html.dark {
+  --bg: #16171d;
+  --bg-panel: #1f2028;
+  --bg-hover: #262731;
+  --bg-active: #1b1c23;
+  --border: #2e303a;
+  --border-subtle: #24252d;
+  --text: #9ca3af;
+  --text-h: #f3f4f6;
+  --text-dim: #6b7280;
+  --text-muted: #9ca3af;
+  --accent: #c084fc;
+  --accent-bg: rgba(192, 132, 252, 0.15);
+  --accent-border: rgba(192, 132, 252, 0.5);
+  --primary: #f3f4f6;
+  --primary-bg: #262731;
+  --secondary: #262731;
+  --muted: #262731;
+  --muted-foreground: #9ca3af;
+  --card: #1f2028;
+  --card-foreground: #f3f4f6;
+  --green: #4ade80;
+  --green-bg: rgba(74, 222, 128, 0.12);
+  --green-border: rgba(74, 222, 128, 0.4);
+  --red: #f87171;
+  --red-bg: rgba(248, 113, 113, 0.12);
+  --red-border: rgba(248, 113, 113, 0.4);
+  --yellow: #fbbf24;
+  --yellow-bg: rgba(251, 191, 36, 0.12);
+  --yellow-border: rgba(251, 191, 36, 0.4);
+  --blue-bg: rgba(255, 255, 255, 0.06);
+  --blue-border: rgba(255, 255, 255, 0.18);
+  --purple: #c084fc;
+  --shadow-panel: 0 1px 2px rgba(0,0,0,.3), 0 18px 40px -30px rgba(0,0,0,.5);
+  --shadow-tab: 0 1px 2px rgba(0,0,0,.3);
+  color-scheme: dark;
+}
+
+/* 手动强制浅色 */
+html.light {
+  --bg: #f4f5f6;
+  --bg-panel: #ffffff;
+  --bg-hover: #f7f8f9;
+  --bg-active: #f0f1f3;
+  --border: #e4e5ea;
+  --border-subtle: #eceef1;
+  --text: #6b6f76;
+  --text-h: #18191c;
+  --text-dim: #8e939a;
+  --text-muted: #6b6f76;
+  --accent: #aa3bff;
+  --accent-bg: rgba(170, 59, 255, 0.08);
+  --accent-border: rgba(170, 59, 255, 0.35);
+  --primary: #18191c;
+  --primary-bg: #f1f2f4;
+  --secondary: #f7f8f9;
+  --muted: #f7f8f9;
+  --muted-foreground: #6b6f76;
+  --card: #ffffff;
+  --card-foreground: #18191c;
+  --green: #16a34a;
+  --green-bg: rgba(22, 163, 74, 0.08);
+  --green-border: rgba(22, 163, 74, 0.35);
+  --red: #dc2626;
+  --red-bg: rgba(220, 38, 38, 0.08);
+  --red-border: rgba(220, 38, 38, 0.35);
+  --yellow: #d29922;
+  --yellow-bg: rgba(210, 153, 34, 0.1);
+  --yellow-border: rgba(210, 153, 34, 0.4);
+  --blue-bg: rgba(24, 25, 28, 0.05);
+  --blue-border: rgba(24, 25, 28, 0.15);
+  --purple: #aa3bff;
+  --shadow-panel: 0 1px 2px rgba(24,25,28,.05), 0 18px 40px -30px rgba(24,25,28,.28);
+  --shadow-tab: 0 1px 2px rgba(24,25,28,.07);
+  color-scheme: light;
+}
+
+/* ===== 重置 ===== */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body { height: 100%; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--sans);
   background: var(--bg);
-  color: var(--text);
+  color: var(--text-h);
   font-size: 13px;
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
 a { color: var(--accent); text-decoration: none; }
@@ -44,5 +188,5 @@ pre {
 code { font-family: var(--mono); font-size: 11px; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

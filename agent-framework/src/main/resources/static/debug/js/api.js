@@ -45,6 +45,85 @@ export const api = {
   getThreadHistory: (sessionId) => get('/debug/threads/' + encodeURIComponent(sessionId) + '/history'),
   getLlmCalls: (sessionId) => get('/debug/threads/' + encodeURIComponent(sessionId) + '/llm-calls'),
 
+  // 长连接 SSE（F）：订阅会话事件总线
+  subscribeSession: (sessionId, { onEvent, onError } = {}) => {
+    const path = '/debug/threads/' + encodeURIComponent(sessionId) + '/events';
+    let aborted = false;
+    const controller = new AbortController();
+    let readyResolve;
+    const readyPromise = new Promise(r => { readyResolve = r; });
+
+    const connect = async () => {
+      let backoff = 1000;
+      const read = async () => {
+        if (aborted || controller.signal.aborted) return;
+        let resp;
+        try {
+          resp = await fetch(BASE + path, { signal: controller.signal });
+          // fetch 返回 = HTTP 响应头已收到 = SSE 连接已建立
+          readyResolve();
+        } catch (e) {
+          if (aborted || e.name === 'AbortError') return;
+          readyResolve(); // 即使出错也 resolve，避免死等
+          await retry();
+          return;
+        }
+        if (!resp.ok || !resp.body) { readyResolve(); await retry(); return; }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (aborted || controller.signal.aborted) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.startsWith('data:')) continue;
+              const dataStr = line.slice(5).trim();
+              if (!dataStr) continue;
+              try {
+                if (onEvent) onEvent(JSON.parse(dataStr));
+              } catch (e) { /* 忽略解析错误 */ }
+            }
+          }
+          if (!aborted && !controller.signal.aborted) await retry();
+        } catch (e) {
+          if (!aborted && e.name !== 'AbortError') await retry();
+        }
+      };
+
+      const retry = async () => {
+        if (aborted) return;
+        if (onError) onError(new Error('订阅断开，准备重连'));
+        await new Promise(r => setTimeout(r, backoff));
+        backoff = Math.min(backoff * 2, 15000);
+        read();
+      };
+
+      read();
+    };
+
+    connect();
+
+    return {
+      close() {
+        aborted = true;
+        controller.abort();
+      },
+      /** 等待 SSE 连接建立（fetch 返回 = 连接就绪） */
+      ready: readyPromise
+    };
+  },
+
+  // 长连接模型触发（fire-and-forget）
+  triggerSessionChat: (sessionId, message, userId) =>
+    post('/debug/threads/' + encodeURIComponent(sessionId) + '/chat', {
+      message, userId: userId || 'debug-user'
+    }),
+
   // MCP 资源（UI 渲染）
   readMcpResource: (server, uri) => post('/mcp/resources/read', { server, uri }),
 

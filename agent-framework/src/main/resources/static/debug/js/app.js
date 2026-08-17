@@ -42,12 +42,15 @@ const modal = {
 // 全局暴露（供内联 onclick 使用）
 window.App = { api, state, utils, modal };
 
-// 工具调用块折叠切换（供模块内联 onclick 使用）
-window.App.toolToggle = (headerEl) => {
-  const body = headerEl.nextElementSibling;
-  const arrow = headerEl.querySelector('.tc-arrow');
-  body.classList.toggle('open');
-  arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
+// 工具分组折叠切换（供模块内联 onclick 使用）
+window.App.toolGroupToggle = (el) => {
+  const group = el.closest('.tool-group');
+  if (group) group.classList.toggle('open');
+};
+
+// 工具行折叠展开（供模块内联 onclick 使用）
+window.App.toolRowToggle = (el) => {
+  el.classList.toggle('open');
 };
 
 // 思维链块折叠切换（供模块内联 onclick 使用）
@@ -55,7 +58,6 @@ window.App.thinkingToggle = (headerEl) => {
   const body = headerEl.nextElementSibling;
   const toggle = headerEl.querySelector('.thinking-toggle');
   body.classList.toggle('open');
-  toggle.classList.toggle('open');
   toggle.textContent = body.classList.contains('open') ? '▲' : '▼';
 };
 
@@ -70,7 +72,8 @@ document.getElementById('modalOverlay').addEventListener('click', (e) => {
   if (e.target === e.target.closest('.modal-overlay')) modal.close();
 });
 
-// 初始化：加载基础信息 + 启动路由
+// 初始化：主题 + 基础信息 + 启动路由
+state.initTheme();
 state.loadAgentInfo();
 const router = new Router(routes);
 router.resolve();

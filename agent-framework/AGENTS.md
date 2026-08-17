@@ -47,6 +47,7 @@ agent-framework/
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
+│   │   │   │   ├── SessionEventBus.java         # per-session 事件总线 (Sinks.Many 分桶广播)
 │   │   │   │   ├── A2uiService.java             # A2UI 协议
 │   │   │   │   └── LLMLogger.java               # LLM 调用日志
 │   │   │   ├── tool/
@@ -57,7 +58,10 @@ agent-framework/
 │   │   │       ├── ToolController.java          # GET /skills、/mcp、/tools
 │   │   │       ├── AgentCardController.java     # GET /.well-known/agent-card.json
 │   │   │       ├── DebugController.java         # GET /debug
-│   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE)
+│   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/threads 等
+│   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
+│   │   │       ├── SessionStreamController.java # GET /events + POST /chat (长连接 SSE, 新)
+│   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (StreamController + SessionStreamController)
 │   │   │       ├── ThreadController.java        # GET /threads
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
@@ -67,7 +71,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 300 个测试用例 (含新增 tracing 测试)
+│   └── test/                                  # 308 个测试用例 (含 SessionStreamControllerTest)
 ├── docs/                                     # 改进方案文档 (14 份)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -232,10 +236,12 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/skills` | 技能列表 |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 |
-| GET | `/debug` | 调试页面 |
+| GET | `/debug` | 调试页面（静态资源） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
-| GET | `/chat/stream` | Channel SSE 流式对话 |
+| GET | `/chat/stream` | Channel SSE 一次性流对话（旧） |
+| GET | `/debug/threads/{sid}/events` | 长连接 SSE 订阅（新，对齐官方 agentscope 模式） |
+| POST | `/debug/threads/{sid}/chat` | 长连接触发（fire-and-forget，事件经事件总线回流） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 
 ---

@@ -1,45 +1,74 @@
-/* ===== Chat 模块：A2A / Channel 双模式对话 ===== */
+/* ===== Chat 模块：官方对齐渲染 + 长连接 SSE / A2A / 单次流 三模式 ===== */
 
 let ctx = null;
-let messagesEl = null;
+let messagesEl = null;       // msg 容器（居中列）
 let inputEl = null;
 let sendBtn = null;
+let sidebarListEl = null;
+let connBadgeEl = null;
+
 let isStreaming = false;
-let abortController = null;
-let streamingDiv = null;
-let fullText = '';
-let pendingToolCalls = {};
-let mcpAppsRegistry = {};
+let subscription = null;     // 长连接订阅句柄
+let activeAbort = null;      // 单次流/A2A 的 abort 控制器
+
 let refreshTimer = null;
-let thinkingDiv = null;
-let thinkingText = '';
-let toolResultBuffers = {};
 let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+
+// 当前回复构建器（按 replyId 区分多 run）
+let currentReply = null;
+const replyMap = {};          // replyId -> builder
+let pendingToolCalls = {};    // tcId -> {name, argsRaw, args, resultRaw, state}
+let thinkingTimer = null;
+
+// 渲染器映射表（内置工具名 → 官方渲染样式）
+const RENDERERS = {
+  bash: 'bash', shell: 'bash', exec_command: 'bash',
+  read_file: 'read', read: 'read',
+  write_file: 'write', write: 'write',
+  edit_file: 'edit', edit: 'edit',
+  glob_files: 'glob', glob: 'glob',
+  grep_files: 'grep', grep: 'grep'
+};
 
 function render() {
   return `
   <div class="chat-module">
-    <div class="module-header">
-      <h2>Chat</h2>
-      <select id="threadSelect" class="input" style="max-width:320px">
-        <option value="">-- new thread --</option>
-      </select>
-      <button id="btnNewThread" class="btn small">+ New</button>
-      <button id="btnRefreshThreads" class="btn small">Refresh</button>
-      <div class="seg" style="margin-left:auto">
-        <button id="modeA2A" class="active">A2A</button>
-        <button id="modeChannel">Channel</button>
+    <div class="chat-sidebar">
+      <div class="chat-sidebar-header">
+        <span class="cs-title">Sessions</span>
+        <button id="btnNewThread" class="btn small" title="New thread">＋</button>
       </div>
-      <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
-      <button id="btnSysPrompt" class="btn small">System Prompt</button>
-      <button id="btnCard" class="btn small">Card</button>
+      <div class="chat-sidebar-list" id="threadList">
+        <div class="empty">Loading...</div>
+      </div>
     </div>
-    <div class="chat-messages" id="chatMessages">
-      <div class="msg system">Agent Debug Console — A2A / Channel</div>
-    </div>
-    <div class="chat-input">
-      <textarea id="chatInput" placeholder="Type your message... (Enter to send, Shift+Enter for newline)"></textarea>
-      <button id="sendBtn" class="btn primary">Send</button>
+    <div class="chat-main">
+      <div class="module-header">
+        <h2 id="chatTitle">Chat</h2>
+        <span class="sub" id="connBadge"></span>
+        <div style="margin-left:auto"></div>
+        <div class="seg">
+          <button id="modeA2A" class="active">A2A</button>
+          <button id="modeChannel">Channel</button>
+        </div>
+        <div class="seg" title="连接模型">
+          <button id="connSession" class="active">长连接</button>
+          <button id="connSingle" title="单次流调试（旧 /chat/stream）">单次流</button>
+        </div>
+        <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
+        <button id="btnSysPrompt" class="btn small">System Prompt</button>
+        <button id="btnCard" class="btn small">Card</button>
+      </div>
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-messages-inner" id="chatInner"></div>
+        <button id="scrollDown" class="scroll-down-btn" title="回到底部">↓</button>
+      </div>
+      <div class="chat-input">
+        <div class="chat-input-pill">
+          <textarea id="chatInput" rows="1" placeholder="Type your message... (Enter to send, Shift+Enter for newline)"></textarea>
+          <button id="sendBtn" class="btn primary">Send</button>
+        </div>
+      </div>
     </div>
   </div>`;
 }
@@ -48,51 +77,115 @@ export default {
   mount(container, c) {
     ctx = c;
     container.innerHTML = render();
-    messagesEl = document.getElementById('chatMessages');
+    messagesEl = document.getElementById('chatInner');
     inputEl = document.getElementById('chatInput');
     sendBtn = document.getElementById('sendBtn');
+    sidebarListEl = document.getElementById('threadList');
+    connBadgeEl = document.getElementById('connBadge');
+    updateConnBadge();
 
     bindEvents();
+    messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
     loadThreads();
     refreshTimer = setInterval(loadThreads, 30000);
+    subscribeScroll();
   },
 
   unmount() {
     if (refreshTimer) clearInterval(refreshTimer);
-    if (abortController) abortController.abort();
+    if (thinkingTimer) clearInterval(thinkingTimer);
+    if (activeAbort) activeAbort.abort();
+    closeSubscription();
     isStreaming = false;
   }
 };
 
 function bindEvents() {
-  document.getElementById('sendBtn').addEventListener('click', () => sendMessage());
-  document.getElementById('chatInput').addEventListener('keydown', (e) => {
+  sendBtn.addEventListener('click', () => sendMessage());
+  inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
+    autoGrow();
   });
+  inputEl.addEventListener('input', autoGrow);
   document.getElementById('btnNewThread').addEventListener('click', newThread);
-  document.getElementById('btnRefreshThreads').addEventListener('click', () => loadThreads(true));
-  document.getElementById('threadSelect').addEventListener('change', (e) => selectThread(e.target.value));
   document.getElementById('btnLlmCalls').addEventListener('click', showLlmCalls);
   document.getElementById('btnSysPrompt').addEventListener('click', showSystemPrompt);
   document.getElementById('btnCard').addEventListener('click', showAgentCard);
 
   document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
   document.getElementById('modeChannel').addEventListener('click', () => setStreamMode('channel'));
+  document.getElementById('connSession').addEventListener('click', () => setConnModel('session'));
+  document.getElementById('connSingle').addEventListener('click', () => setConnModel('single'));
+}
+
+function autoGrow() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
 }
 
 function setStreamMode(mode) {
   ctx.state.setState('ui.streamMode', mode);
-  const a2aBtn = document.getElementById('modeA2A');
-  const chBtn = document.getElementById('modeChannel');
-  a2aBtn.classList.toggle('active', mode === 'a2a');
-  chBtn.classList.toggle('active', mode === 'channel');
+  document.getElementById('modeA2A').classList.toggle('active', mode === 'a2a');
+  document.getElementById('modeChannel').classList.toggle('active', mode === 'channel');
+  // A2A/Channel 切换：重建会话订阅（Channel 链走长连接，A2A 走标准帧）
+  setupSessionWatch();
+  updateConnBadge();
+}
+
+function setConnModel(model) {
+  ctx.state.setState('ui.connModel', model);
+  document.getElementById('connSession').classList.toggle('active', model === 'session');
+  document.getElementById('connSingle').classList.toggle('active', model === 'single');
+  setupSessionWatch();
+  updateConnBadge();
+}
+
+function updateConnBadge() {
+  if (!connBadgeEl) return;
+  const mode = ctx.state.getState('ui.streamMode');
+  const conn = ctx.state.getState('ui.connModel');
+  const sid = currentSessionId();
+  const bits = [mode === 'a2a' ? 'A2A' : 'Channel'];
+  if (conn === 'session') bits.push('长连接' + (subscription ? '✓' : ''));
+  else bits.push('单次流');
+  if (sid) bits.push(sid.split(':').pop());
+  connBadgeEl.textContent = bits.join(' · ');
 }
 
 function currentSessionId() {
   return ctx.state.getState('threads.current');
+}
+
+function setConnecting(elId, on) {
+  const el = document.getElementById(elId);
+  if (el) el.classList.toggle('shimmer', on);
+}
+
+// ---------- 消息滚动 ----------
+
+function subscribeScroll() {
+  const scroller = document.getElementById('chatMessages');
+  const btn = document.getElementById('scrollDown');
+  if (!scroller || !btn) return;
+  scroller.addEventListener('scroll', () => {
+    const dist = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    btn.classList.toggle('visible', dist > 120);
+  });
+  btn.addEventListener('click', () => scrollToBottom(true));
+}
+
+function scrollToBottom(force) {
+  const scroller = document.getElementById('chatMessages');
+  if (!scroller) return;
+  if (force) {
+    ctx.utils.scrollBottom(scroller);
+    return;
+  }
+  const dist = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  if (dist < 200) ctx.utils.scrollBottom(scroller);
 }
 
 // ---------- Threads ----------
@@ -101,15 +194,25 @@ async function loadThreads(force) {
   try {
     const threads = await ctx.api.getThreads();
     ctx.state.setState('threads.list', threads);
-    const select = document.getElementById('threadSelect');
-    const current = currentSessionId();
-    select.innerHTML = '<option value="">-- new thread --</option>' +
-      threads.map((t) =>
-        '<option value="' + ctx.utils.esc(t.session_id) + '"' + (t.session_id === current ? ' selected' : '') + '>' +
-        ctx.utils.esc(t.thread_id) + (t.updated_at ? ' (' + t.updated_at.substring(0, 16) + ')' : '') +
-        '</option>').join('');
-    const btn = document.getElementById('btnLlmCalls');
-    if (btn) btn.disabled = !current;
+    const sorted = (threads || []).slice().sort((a, b) =>
+      String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    if (!sidebarListEl) return;
+    if (sorted.length === 0) {
+      sidebarListEl.innerHTML = '<div class="empty">No sessions yet</div>';
+    } else {
+      sidebarListEl.innerHTML = sorted.map((t) => {
+        const cur = currentSessionId();
+        const tid = t.session_id;
+        const title = t.thread_id || tid;
+        return '<div class="thread-item' + (tid === cur ? ' active' : '') + '" data-sid="' +
+          ctx.utils.esc(tid) + '"><span class="tid">' + ctx.utils.esc(title) +
+          '</span><span class="meta">' + ctx.utils.esc((t.updated_at || '').substring(5, 16).replace('T', ' ')) +
+          '</span></div>';
+      }).join('');
+    }
+    sidebarListEl.querySelectorAll('.thread-item').forEach((el) => {
+      el.addEventListener('click', () => selectThread(el.dataset.sid));
+    });
   } catch (e) {
     if (force) ctx.utils.toast('Failed to load threads: ' + e.message, 'error');
   }
@@ -120,343 +223,629 @@ function selectThread(sessionId) {
   ctx.state.setState('threads.current', sessionId);
   document.getElementById('btnLlmCalls').disabled = false;
   loadThreadHistory(sessionId);
+  setupSessionWatch();
+  updateConnBadge();
 }
 
 function newThread() {
   ctx.state.setState('threads.current', null);
+  closeSubscription();
   pendingToolCalls = {};
-  mcpAppsRegistry = {};
+  currentReply = null;
   messagesEl.innerHTML = '<div class="msg system">New thread started</div>';
-  document.getElementById('threadSelect').value = '';
   document.getElementById('btnLlmCalls').disabled = true;
+  updateConnBadge();
 }
 
+// ---------- 历史加载 ----------
+
 async function loadThreadHistory(sessionId) {
+  messagesEl.innerHTML = '<div class="msg system">Loading history...</div>';
+  pendingToolCalls = {};
   try {
     const data = await ctx.api.getThreadHistory(sessionId);
-    messagesEl.innerHTML = '';
-    pendingToolCalls = {};
     const msgs = data.messages || [];
+    messagesEl.innerHTML = '';
     if (msgs.length === 0) {
-      messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread (state format unknown)</div>';
+      messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
       return;
     }
     for (const m of msgs) {
       if (m.role === 'user') addMessage('user', m.content || '');
-      else if (m.role === 'assistant' || m.role === 'agent') addMessage('assistant', m.content || '');
+      else if (m.role === 'assistant' || m.role === 'agent') {
+        addAssistantHistory(m.content || '', m.tool_calls || []);
+      }
     }
   } catch (e) {
     messagesEl.innerHTML = '<div class="msg system">Failed to load history</div>';
   }
 }
 
-// ---------- 消息渲染 ----------
+// ---------- 消息渲染（官方对齐） ----------
 
 function addMessage(role, content) {
-  const div = document.createElement('div');
-  div.className = 'msg ' + role;
-  div.innerHTML = ctx.utils.formatMarkdown(content);
-  messagesEl.appendChild(div);
-  ctx.utils.scrollBottom(messagesEl);
-  return div;
+  const msg = document.createElement('div');
+  msg.className = 'msg ' + role;
+  msg.innerHTML = '<div class="msg-bubble">' + renderMarkdown(content) + '</div>';
+  messagesEl.appendChild(msg);
+  scrollToBottom(false);
+  return msg;
 }
 
-function addSystemMsg(text) {
-  const div = document.createElement('div');
-  div.className = 'msg system';
-  div.textContent = text;
-  messagesEl.appendChild(div);
-  ctx.utils.scrollBottom(messagesEl);
+function renderMarkdown(text) {
+  let html = ctx.utils.esc(text);
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+    '<pre>' + (lang ? '<code class="' + ctx.utils.esc(lang) + '">' : '') + ctx.utils.esc(code) + '</pre>');
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  return html;
 }
 
-function createStreamingMsg() {
-  const div = document.createElement('div');
-  div.className = 'msg assistant';
-  // 官方模型：工具调用块在消息气泡内、正文文本上方
-  div.innerHTML = '<div class="msg-tools"></div>' +
-    '<div class="msg-text"><div class="typing-indicator"><span></span><span></span><span></span></div></div>';
-  messagesEl.appendChild(div);
-  ctx.utils.scrollBottom(messagesEl);
-  return div;
-}
-
-function updateStreamContent(text) {
-  if (!streamingDiv) return;
-  const textEl = streamingDiv.querySelector('.msg-text');
-  if (!textEl) return;
-  let html = ctx.utils.formatMarkdown(text);
-  html += '<span class="cursor"></span>';
-  textEl.innerHTML = html;
-  ctx.utils.scrollBottom(messagesEl);
-}
-
-/**
- * 渲染工具调用卡片（对齐官方 ToolCallBlock 样式）：
- * 折叠时仅显示头部（▶ Tool: 名称 + id 前 10 位），展开显示 Arguments / Result。
- */
-function renderToolCallBlock(tcName, tcArgs, tcResult, tcId, collapsed, uiMeta) {
-  const hasArgs = tcArgs && Object.keys(tcArgs).length > 0;
-  const argsStr = hasArgs ? JSON.stringify(tcArgs, null, 2) : '';
-  const shortId = (tcId || '').slice(0, 10);
-  const uiBadge = uiMeta
-    ? '<span class="badge green" style="margin-left:8px">MCP App</span>' : '';
-  let bodyInner = '';
-  if (argsStr) {
-    bodyInner += '<div class="tc-args"><div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(argsStr) + '</pre></div>';
+/** 历史 assistant 消息：文本 + 工具调用（工具行，状态已完成✓，无 result 则不展示结果） */
+function addAssistantHistory(content, toolCalls) {
+  const msg = document.createElement('div');
+  msg.className = 'msg assistant';
+  let bubble = '';
+  if ((toolCalls || []).length > 0) {
+    bubble += renderToolGroupBlock(toolCalls.map((tc) => ({
+      type: 'tool_call',
+      name: tc.name,
+      argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
+      resultText: null,
+      state: 'success'
+    })));
   }
-  if (tcResult) {
-    bodyInner += '<div class="tc-result"><div class="tc-label">Result</div><pre>' + ctx.utils.esc(tcResult) + '</pre></div>';
+  if (content) {
+    bubble += '<div class="msg-bubble">' + renderMarkdown(content) + '</div>';
   }
-  if (!bodyInner) {
-    bodyInner = '<span class="tc-running">Running…</span>';
-  }
-  return '<div class="tool-call-block" data-tcid="' + ctx.utils.esc(tcId || '') + '">' +
-    '<div class="tool-call-header" onclick="window.App.toolToggle(this)">' +
-    '<span class="tc-arrow">▶</span><span class="tc-name">Tool: ' + ctx.utils.esc(tcName) + '</span>' +
-    uiBadge +
-    '<span class="tc-id">' + ctx.utils.esc(shortId) + '</span></div>' +
-    '<div class="tool-call-body"><div class="tc-inner">' + bodyInner + '</div></div>' +
+  msg.innerHTML = bubble;
+  messagesEl.appendChild(msg);
+  scrollToBottom(false);
+}
+
+/** 工具分组块（默认折叠） */
+function renderToolGroupBlock(calls) {
+  const summary = summarizeToolCalls(calls);
+  let rowsHtml = calls.map((c) => renderToolRow(c)).join('');
+  return '<div class="tool-group">' +
+    '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">' +
+    '<span class="tg-arrow">▶</span><span>' + ctx.utils.esc(summary.title) + '</span>' +
+    (summary.ins || summary.del ? '<span class="diff-stats"><span class="ins">+' + summary.ins + '</span><span class="del">-' + summary.del + '</span></span>' : '') +
+    '</div>' +
+    '<div class="tool-group-body">' + rowsHtml + '</div>' +
     '</div>';
 }
 
-function toggleToolCall(headerEl) {
-  const body = headerEl.nextElementSibling;
-  const arrow = headerEl.querySelector('.tc-arrow');
-  body.classList.toggle('open');
-  arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
+function summarizeToolCalls(calls) {
+  const cats = { bash: 0, read: 0, edit: 0, search: 0, todo: 0, mcp: 0 };
+  let ins = 0, del = 0;
+  for (const c of calls) {
+    const name = c.name || '';
+    if (/^(bash|sh|shell)/.test(name)) cats.bash++;
+    else if (/^(read|read_file)/.test(name)) cats.read++;
+    else if (/^(write|write_file|edit|edit_file)/.test(name)) cats.edit++;
+    else if (/^(grep|glob)/.test(name)) cats.search++;
+    else if (/^(task|plan)/.test(name)) cats.todo++;
+    else if (/^mcp__/.test(name)) cats.mcp++;
+  }
+  const parts = [];
+  if (cats.bash) parts.push(cats.bash + ' Bash');
+  if (cats.read) parts.push(cats.read + ' Read');
+  if (cats.edit) parts.push(cats.edit + ' Edit');
+  if (cats.search) parts.push(cats.search + ' Search');
+  if (cats.todo) parts.push(cats.todo + ' Todo');
+  if (cats.mcp) parts.push(cats.mcp + ' MCP');
+  const title = parts.length > 0 ? parts.join(' · ') : 'Call ' + calls.length + ' tools';
+  return { title, ins, del };
 }
 
-/**
- * 工具调用加入当前 assistant 消息气泡（官方模型：tools 在文本上方）。
- * 默认折叠：先展示工具名称，点开才展示参数与详情。
- */
-function addToolCallMessage(name, args, content, tcId, collapsed, uiMeta) {
-  if (!streamingDiv) streamingDiv = createStreamingMsg();
-  const toolsEl = streamingDiv.querySelector('.msg-tools');
-  const div = document.createElement('div');
-  div.innerHTML = renderToolCallBlock(name, args, content, tcId, true, uiMeta);
-  toolsEl.appendChild(div.firstChild);
-  ctx.utils.scrollBottom(messagesEl);
-  return div;
+/** 工具行（专用渲染器 + 状态图标 + chevron） */
+function renderToolRow(call) {
+  const r = RENDERERS[String(call.name || '').split('__').pop()] || 'default';
+  let headerLabel = call.name || 'tool';
+  let headerArg = '';
+  if (r === 'read' || r === 'write' || r === 'edit') {
+    headerArg = extractFilePath(call.argsText) || '';
+  } else if (r === 'bash') {
+    headerLabel = 'Bash';
+    headerArg = extractCommand(call.argsText) || '';
+  } else if (r === 'glob' || r === 'grep') {
+    headerLabel = r === 'glob' ? 'Glob' : 'Grep';
+    headerArg = extractPattern(call.argsText) || '';
+  }
+  const stateIcon = ctx.utils.toolStateIcon(call.state);
+  const body = renderToolBody(r, call);
+  return '<div class="tool-call-row" onclick="window.App.toolRowToggle(this)">' +
+    '<span class="tc-name">' + ctx.utils.esc(headerLabel) + '</span>' +
+    (headerArg ? '<span class="tc-arg">' + ctx.utils.esc(headerArg) + '</span>' : '') +
+    '<span class="tc-state">' + stateIcon + '</span>' +
+    (body ? '<span class="tc-toggle">▶</span>' : '') +
+    '</div>' +
+    (body ? '<div class="tool-call-body"><div class="tc-inner">' + body + '</div></div>' : '');
 }
 
-function addToolResultMessage(name, result, tcId, collapsed) {
-  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId || '') + '"]');
-  if (block) {
-    const inner = block.querySelector('.tc-inner');
-    if (inner) {
-      // 结果写入但保持折叠（点开才查看详情）
-      const existing = block.querySelector('.tc-result');
-      if (existing) {
-        existing.innerHTML = '<div class="tc-label">Result</div><pre>' + ctx.utils.esc(result || '') + '</pre>';
-      } else {
-        inner.insertAdjacentHTML('beforeend',
-          '<div class="tc-result"><div class="tc-label">Result</div><pre>' + ctx.utils.esc(result || '') + '</pre></div>');
-        // 移除 Running… 占位
-        const running = inner.querySelector('.tc-running');
-        if (running && inner.children.length > 1) running.remove();
+function extractFilePath(argsText) {
+  try {
+    const o = JSON.parse(argsText || '{}');
+    return o.file_path || o.path || o.file || '';
+  } catch { return ''; }
+}
+function extractCommand(argsText) {
+  try {
+    const o = JSON.parse(argsText || '{}');
+    return o.cmd || o.command || o.script || '';
+  } catch { return argsText || ''; }
+}
+function extractPattern(argsText) {
+  try {
+    const o = JSON.parse(argsText || '{}');
+    return o.pattern || o.patterns || o.glob || '';
+  } catch { return argsText || ''; }
+}
+
+function renderToolBody(kind, call) {
+  switch (kind) {
+    case 'bash':
+      if (call.resultText) return '<div class="tc-label">Output</div><div class="tc-bash-output">' + ctx.utils.esc(truncate(call.resultText, 4000)) + '</div>';
+      return call.resultText === null ? '<span class="tc-running">Running…</span>' : '';
+    case 'read': {
+      let html = '';
+      if (call.argsText) html += '<div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(call.argsText) + '</pre>';
+      if (call.resultText) html += '<div class="tc-label">Content</div><pre>' + ctx.utils.esc(truncate(call.resultText, 4000)) + '</pre>';
+      return html;
+    }
+    case 'edit':
+    case 'write':
+      if (call.argsText) {
+        let args = call.argsText;
+        const file = extractFilePath(args);
+        const content = (() => { try { return JSON.parse(args || '{}').content || ''; } catch { return ''; } })();
+        if (file || content) {
+          return '<div class="tc-label">' + (kind === 'edit' ? 'Edit' : 'Write') + '</div>' +
+            (file ? '<pre>' + ctx.utils.esc(file) + '</pre>' : '') +
+            (content ? '<pre class="diff-view"><span class="d-add">+' + ctx.utils.esc(content.split('\n')[0] || '') + '</span></pre>' : '') +
+            (call.resultText ? '<div class="tc-label">Result</div><pre>' + ctx.utils.esc(truncate(call.resultText, 2000)) + '</pre>' : '');
+        }
       }
-    }
-  } else {
-    const div = document.createElement('div');
-    div.className = 'msg assistant';
-    div.innerHTML = '<div class="msg-tools"></div><div class="msg-text"></div>';
-    messagesEl.appendChild(div);
-    const toolsEl = div.querySelector('.msg-tools');
-    const card = document.createElement('div');
-    card.innerHTML = renderToolCallBlock(name, {}, result, tcId, true, null);
-    toolsEl.appendChild(card.firstChild);
-  }
-  ctx.utils.scrollBottom(messagesEl);
-}
-
-function addUsageStats(usage, elapsed) {
-  if (usage) {
-    usageAccumulator.input_tokens += usage.input_tokens || 0;
-    usageAccumulator.output_tokens += usage.output_tokens || 0;
-    usageAccumulator.total_tokens += usage.total_tokens || ((usage.input_tokens || 0) + (usage.output_tokens || 0));
-    usageAccumulator.call_count++;
+      return defaultToolBody(call);
+    case 'glob':
+    case 'grep':
+      return defaultToolBody(call);
+    default:
+      return defaultToolBody(call);
   }
 }
 
-function flushUsageStats(elapsed) {
-  if (usageAccumulator.call_count === 0) return;
+function defaultToolBody(call) {
+  let html = '';
+  if (call.argsText) html += '<div class="tc-label">Arguments</div><pre>' + ctx.utils.esc(call.argsText) + '</pre>';
+  if (call.resultText) html += '<div class="tc-label">Result</div><pre>' + ctx.utils.esc(truncate(call.resultText, 4000)) + '</pre>';
+  if (!html && call.resultText === null) html = '<span class="tc-running">Running…</span>';
+  return html;
+}
+
+function truncate(s, n) {
+  return s.length > n ? s.substring(0, n) + '…' : s;
+}
+
+// ---------- 流式回复构建（当前回复） ----------
+
+function ensureReply(replyId) {
+  if (currentReply && currentReply.replyId === replyId) return currentReply;
+  if (replyMap[replyId]) { currentReply = replyMap[replyId]; return currentReply; }
+  // 清理旧回复的 footer 计时
   const div = document.createElement('div');
-  div.className = 'usage-stats';
-  let html = '<div class="stat-item"><span class="stat-label">LLM Calls:</span><span class="stat-value">' + usageAccumulator.call_count + '</span></div>';
-  html += '<div class="stat-item"><span class="stat-label">输入:</span><span class="stat-value tokens-in">' + usageAccumulator.input_tokens + '</span></div>';
-  html += '<div class="stat-item"><span class="stat-label">输出:</span><span class="stat-value tokens-out">' + usageAccumulator.output_tokens + '</span></div>';
-  html += '<div class="stat-item"><span class="stat-label">总计:</span><span class="stat-value">' + usageAccumulator.total_tokens + '</span></div>';
-  if (elapsed) {
-    html += '<div class="stat-item"><span class="stat-label">耗时:</span><span class="stat-value time">' + elapsed + 's</span></div>';
-  }
-  div.innerHTML = html;
+  div.className = 'msg assistant';
+  div.innerHTML = '<div class="msg-bubble-content"></div><div class="msg-footer"><span class="badge" data-footer></span></div>';
   messagesEl.appendChild(div);
-  ctx.utils.scrollBottom(messagesEl);
-  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+  const r = {
+    replyId,
+    text: '',
+    thinking: '',
+    thinkingActive: false,
+    toolCalls: {},     // tcId -> call
+    toolOrder: [],
+    elapsedStart: Date.now(),
+    usage: { input: 0, output: 0 },
+    modelCalls: 0,
+    activeThinkingEl: null,
+    footerBadge: div.querySelector('[data-footer]'),
+    contentEl: div.querySelector('.msg-bubble-content')
+  };
+  replyMap[replyId] = r;
+  currentReply = r;
+  startFooterTimer(r);
+  return r;
 }
 
-// ---------- 思维链渲染 ----------
-
-function createThinkingBlock() {
-  const div = document.createElement('div');
-  div.className = 'msg thinking';
-  div.innerHTML = '<div class="thinking-header" onclick="window.App.thinkingToggle(this)">' +
-    '<span class="thinking-icon">🧠</span>' +
-    '<span class="thinking-label">Thinking...</span>' +
-    '<span class="thinking-toggle">▼</span></div>' +
-    '<div class="thinking-body open"><pre class="thinking-content"></pre></div>';
-  messagesEl.appendChild(div);
-  ctx.utils.scrollBottom(messagesEl);
-  return div;
+function startFooterTimer(r) {
+  if (thinkingTimer) clearInterval(thinkingTimer);
+  thinkingTimer = setInterval(() => {
+    // 仅 tick 当前活跃回复
+    if (currentReply && currentReply.replyId === r.replyId) updateReplyFooter(r, true);
+  }, 1000);
 }
 
-function appendThinkingDelta(delta) {
-  if (!thinkingDiv) {
-    thinkingDiv = createThinkingBlock();
-    thinkingText = '';
+function updateReplyFooter(r, running) {
+  if (!r.footerBadge) return;
+  const secs = (Date.now() - r.elapsedStart) / 1000;
+  r.footerBadge.innerHTML =
+    ctx.utils.msgStateIcon(running) +
+    ' <span>' + ctx.utils.formatDuration(secs) + '</span>' +
+    (r.usage.input || r.usage.output
+      ? ' <span>↑' + r.usage.input + ' ↓' + r.usage.output + '</span>' : '') +
+    (r.modelCalls > 0 ? ' · ' + r.modelCalls + ' calls' : '');
+}
+
+function finishReply(replyId) {
+  const r = replyId ? (replyMap[replyId] || null) : currentReply;
+  if (r) {
+    r.thinkingActive = false;
+    updateReplyFooter(r, false);
   }
-  thinkingText += delta;
-  const content = thinkingDiv.querySelector('.thinking-content');
-  if (content) content.textContent = thinkingText;
-  ctx.utils.scrollBottom(messagesEl);
+  if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
 }
 
-function finishThinkingBlock() {
-  if (thinkingDiv) {
-    const label = thinkingDiv.querySelector('.thinking-label');
-    if (label) label.textContent = 'Thinking (' + thinkingText.length + ' chars)';
-    const body = thinkingDiv.querySelector('.thinking-body');
-    const toggle = thinkingDiv.querySelector('.thinking-toggle');
-    if (body) body.classList.remove('open');
-    if (toggle) { toggle.classList.remove('open'); toggle.textContent = '▼'; }
+// ---------- 思维链 ----------
+
+function ensureThinking(r) {
+  if (!r.activeThinkingEl) {
+    const el = document.createElement('div');
+    el.className = 'thinking-block';
+    el.innerHTML = '<div class="thinking-header shimmer" onclick="window.App.thinkingToggle(this)">' +
+      '<span class="thinking-label">thinking…</span><span class="thinking-toggle">▼</span></div>' +
+      '<div class="thinking-body"><pre class="thinking-content"></pre></div>';
+    r.contentEl.appendChild(el);
+    r.activeThinkingEl = el;
+    (function timer(div, start) {
+      const lbl = div.querySelector('.thinking-label');
+      const iv = setInterval(() => {
+        if (div.isConnected) lbl.textContent = 'thinking for ' + ctx.utils.formatDuration((Date.now() - start) / 1000);
+        else clearInterval(iv);
+      }, 1000);
+    })(el, Date.now());
   }
-  thinkingDiv = null;
-  thinkingText = '';
+  return r.activeThinkingEl;
 }
 
-// ---------- 工具参数渐进渲染 ----------
+function appendThinkingDelta(r, delta) {
+  r.thinking += delta;
+  ensureThinking(r);
+  const pre = r.activeThinkingEl.querySelector('.thinking-content');
+  if (pre) pre.textContent = r.thinking;
+  scrollToBottom(false);
+}
 
-function handleToolCallDelta(toolCallId, delta) {
-  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
-  if (!block) return;
-  if (!pendingToolCalls[toolCallId]) pendingToolCalls[toolCallId] = { argsRaw: '' };
-  if (!pendingToolCalls[toolCallId].argsRaw) pendingToolCalls[toolCallId].argsRaw = '';
-  pendingToolCalls[toolCallId].argsRaw += delta;
-  const argsPre = block.querySelector('.tc-args pre');
-  if (argsPre) {
-    try {
-      const parsed = JSON.parse(pendingToolCalls[toolCallId].argsRaw);
-      argsPre.textContent = JSON.stringify(parsed, null, 2);
-    } catch {
-      argsPre.textContent = pendingToolCalls[toolCallId].argsRaw;
+function endThinking(r) {
+  r.thinkingActive = false;
+  if (r.activeThinkingEl) {
+    const lbl = r.activeThinkingEl.querySelector('.thinking-label');
+    if (lbl) lbl.textContent = 'thinking (' + r.thinking.length + ' chars)';
+    r.activeThinkingEl.querySelector('.thinking-body').classList.remove('open');
+    r.activeThinkingEl = null;
+  }
+}
+
+// ---------- 工具流式渲染 ----------
+
+function ensureToolTextEl(r) {
+  if (!r.textEl) {
+    const el = document.createElement('div');
+    el.className = 'msg-bubble';
+    r.contentEl.parentNode.insertBefore(el, r.contentEl.nextSibling);
+    r.textEl = el;
+  }
+  return r.textEl;
+}
+
+function ensureToolGroupEl(r) {
+  if (!r.toolsGroupEl) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tool-group';
+    wrap.innerHTML = '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">' +
+      '<span class="tg-arrow">▶</span><span class="tg-title"></span></div>' +
+      '<div class="tool-group-body"></div>';
+    r.contentEl.appendChild(wrap);
+    r.toolsGroupEl = wrap;
+    r.toolsBodyEl = wrap.querySelector('.tool-group-body');
+    r.toolsTitleEl = wrap.querySelector('.tg-title');
+  }
+  return r.toolsGroupEl;
+}
+
+function onToolCallStart(r, tcId, name) {
+  if (!pendingToolCalls[tcId]) pendingToolCalls[tcId] = { name, argsRaw: '', argsText: '', resultRaw: null, state: null };
+  if (r.toolCalls[tcId]) return; // 已存在
+  r.toolCalls[tcId] = pendingToolCalls[tcId];
+  r.toolOrder.push(tcId);
+  const rowEl = document.createElement('div');
+  rowEl.className = 'tool-call-row shimmer';
+  rowEl.dataset.tcid = tcId;
+  rowEl.innerHTML = '<span class="tc-name">' + ctx.utils.esc(name) + '</span>' +
+    '<span class="tc-state">' + ctx.utils.toolStateIcon('running') + '</span>' +
+    '<span class="tc-toggle">▶</span>';
+  rowEl.addEventListener('click', () => window.App.toolRowToggle(rowEl));
+  ensureToolGroupEl(r);
+  r.toolsBodyEl.appendChild(rowEl);
+  updateToolGroupTitle(r);
+  scrollToBottom(false);
+}
+
+function onToolCallDelta(r, tcId, delta) {
+  const tc = pendingToolCalls[tcId];
+  if (!tc) return;
+  tc.argsRaw = (tc.argsRaw || '') + delta;
+  try { tc.argsText = JSON.stringify(JSON.parse(tc.argsRaw), null, 2); }
+  catch { tc.argsText = tc.argsRaw; }
+  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  if (rowEl) rowEl.classList.remove('shimmer');
+  updateToolGroupTitle(r);
+}
+
+function onToolCallEnd(r, tcId) {
+  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  if (rowEl) rowEl.classList.remove('shimmer');
+  updateToolGroupTitle(r);
+}
+
+function onToolResultStart(r, tcId) {
+  const tc = pendingToolCalls[tcId] || (pendingToolCalls[tcId] = { name: '', argsRaw: '', argsText: '', resultRaw: null, state: null });
+  tc.resultRaw = '';
+}
+
+function onToolResultDelta(r, tcId, delta) {
+  const tc = pendingToolCalls[tcId];
+  if (tc) tc.resultRaw = (tc.resultRaw || '') + delta;
+}
+
+function onToolResultEnd(r, tcId, state) {
+  const tc = pendingToolCalls[tcId];
+  if (tc) tc.state = state;
+  rebuildToolRows(r);
+  updateToolGroupTitle(r);
+}
+
+function rebuildToolRows(r) {
+  if (!r.toolsBodyEl) return;
+  r.toolsBodyEl.innerHTML = r.toolOrder.map((tcId) => {
+    const tc = r.toolCalls[tcId] || {};
+    return renderToolRow({
+      name: tc.name,
+      argsText: tc.argsText,
+      resultText: tc.resultRaw == null ? (tc.state == null ? null : '') : tc.resultRaw,
+      state: tc.state || 'running'
+    });
+  }).join('');
+  r.toolsBodyEl.querySelectorAll('.tool-call-row').forEach((el) => {
+    el.addEventListener('click', () => window.App.toolRowToggle(el));
+  });
+  scrollToBottom(false);
+}
+
+function updateToolGroupTitle(r) {
+  if (!r.toolsTitleEl) return;
+  const calls = r.toolOrder.map((id) => r.toolCalls[id] || {}).filter((c) => c.name);
+  if (calls.length === 0) return;
+  const summary = summarizeToolCalls(calls);
+  r.toolsTitleEl.textContent = summary.title;
+}
+
+// ---------- 事件处理（统一入口） ----------
+// SDK 语义：AGENT_START/END 是 agent 级 replyId，内部 block 事件（TEXT/THINKING/TOOL/MODEL）
+// 是 model 调用级 replyId（不同 id）。因此以 AGENT_START/END 为消息生命周期，
+// block 事件统一归入当前 agent 回复，不按 block replyId 另建气泡。
+
+function handleEvent(data) {
+  // agent 生命周期事件：切换/收尾当前回复
+  if (data.type === 'AGENT_START') {
+    const rr = ensureReply(data.replyId || 'reply-' + Date.now());
+    setConnecting('chatTitle', true);
+    isStreaming = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Stop';
+    sendBtn.classList.add('danger');
+    usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+    return;
+  }
+  if (data.type === 'AGENT_END') {
+    finishReply(currentReply ? currentReply.replyId : null);
+    currentReply = null;
+    isStreaming = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+    sendBtn.classList.remove('danger');
+    setConnecting('chatTitle', false);
+    scrollToBottom(true);
+    loadThreads();
+    return;
+  }
+
+  // block 事件：归入当前 agent 回复（无活跃回复时用自身 replyId 兜底占位）
+  const r = currentReply || (data.replyId ? ensureReply(data.replyId) : null);
+  if (!r) return;
+
+  switch (data.type) {
+    case 'TEXT_BLOCK_DELTA': {
+      if (r) {
+        r.text += (data.delta || '');
+        endThinking(r);
+        ensureToolTextEl(r).innerHTML = renderMarkdown(r.text) + '<span class="cursor"></span>';
+      }
+      scrollToBottom(false);
+      break;
     }
-  }
-}
-
-function handleToolCallEnd(toolCallId) {
-  const tc = pendingToolCalls[toolCallId];
-  if (tc && tc.argsRaw) {
-    try {
-      tc.args = JSON.parse(tc.argsRaw);
-    } catch { /* 保留原始文本 */ }
-  }
-}
-
-// ---------- 工具结果渐进渲染 ----------
-
-function handleToolResultStart(toolCallId, toolCallName) {
-  toolResultBuffers[toolCallId] = { name: toolCallName, text: '' };
-  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
-  if (block) {
-    const inner = block.querySelector('.tc-inner');
-    if (inner && !block.querySelector('.tc-result')) {
-      inner.insertAdjacentHTML('beforeend',
-        '<div class="tc-result"><div class="tc-label">Result</div><pre class="tc-result-content"></pre></div>');
-      // 移除 Running… 占位（保持折叠，点开查看）
-      const running = inner.querySelector('.tc-running');
-      if (running && inner.children.length > 1) running.remove();
+    case 'THINKING_BLOCK_DELTA': {
+      if (r) appendThinkingDelta(r, data.delta || '');
+      break;
     }
+    case 'THINKING_BLOCK_END': {
+      if (r) endThinking(r);
+      break;
+    }
+    case 'TOOL_CALL_START': {
+      if (r) onToolCallStart(r, data.toolCallId, data.toolName);
+      break;
+    }
+    case 'TOOL_CALL_DELTA': {
+      if (r) onToolCallDelta(r, data.toolCallId, data.delta);
+      break;
+    }
+    case 'TOOL_CALL_END': {
+      if (r) onToolCallEnd(r, data.toolCallId);
+      break;
+    }
+    case 'TOOL_RESULT_START': {
+      if (r) onToolResultStart(r, data.toolCallId);
+      break;
+    }
+    case 'TOOL_RESULT_TEXT_DELTA': {
+      if (r) onToolResultDelta(r, data.toolCallId, data.delta);
+      break;
+    }
+    case 'TOOL_RESULT_END': {
+      if (r) onToolResultEnd(r, data.toolCallId, data.state);
+      break;
+    }
+    case 'MODEL_CALL_START': {
+      if (r) r.modelCalls++;
+      break;
+    }
+    case 'MODEL_CALL_END': {
+      if (data.inputTokens != null || data.outputTokens != null) {
+        usageAccumulator.input_tokens += data.inputTokens || 0;
+        usageAccumulator.output_tokens += data.outputTokens || 0;
+        usageAccumulator.total_tokens += data.totalTokens || 0;
+        usageAccumulator.call_count++;
+        if (r) {
+          r.usage.input = usageAccumulator.input_tokens;
+          r.usage.output = usageAccumulator.output_tokens;
+        }
+      }
+      break;
+    }
+    case 'AGENT_END': {
+      // 已在函数顶部统一处理（agent 级生命周期）
+      break;
+    }
+    case 'error': {
+      isStreaming = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('danger');
+      if (r) {
+        const err = document.createElement('div');
+        err.className = 'msg system';
+        err.style.color = 'var(--red)';
+        err.textContent = 'Error: ' + (data.error || 'Unknown');
+        messagesEl.appendChild(err);
+      }
+      break;
+    }
+    default:
+      break;
   }
 }
 
-function handleToolResultTextDelta(toolCallId, delta) {
-  const buf = toolResultBuffers[toolCallId];
-  if (buf) buf.text += delta;
-  const block = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(toolCallId || '') + '"]');
-  if (block) {
-    const resultPre = block.querySelector('.tc-result-content');
-    if (resultPre) resultPre.textContent = buf ? buf.text : delta;
-  }
-  ctx.utils.scrollBottom(messagesEl);
+// ---------- 会话长连接订阅 ----------
+
+function setupSessionWatch() {
+  closeSubscription(false);
+  const sid = currentSessionId();
+  if (!sid) return;
+  const mode = ctx.state.getState('ui.streamMode');
+  const conn = ctx.state.getState('ui.connModel');
+  // 仅 Channel + 长连接 走会话事件总线；A2A / 单次流不订阅
+  if (mode !== 'channel' || conn !== 'session') return;
+  subscription = ctx.api.subscribeSession(sid, {
+    onEvent: handleEvent,
+    onError: () => {}
+  });
 }
 
-function cleanupToolResultBuffer(toolCallId) {
-  delete toolResultBuffers[toolCallId];
+function closeSubscription(update) {
+  if (subscription) {
+    try { subscription.close(); } catch (e) { /* ignore */ }
+    subscription = null;
+  }
 }
 
 // ---------- 发送 ----------
 
 async function sendMessage() {
-  if (isStreaming) {
-    if (abortController) abortController.abort();
-    return;
-  }
+  if (isStreaming) { stop(); return; }
   const text = inputEl.value.trim();
   if (!text) return;
+
+  let sid = currentSessionId();
+  if (!sid) {
+    sid = 'debug-user:' + Date.now().toString(36);
+    ctx.state.setState('threads.current', sid);
+    document.getElementById('btnLlmCalls').disabled = false;
+    updateConnBadge();
+  }
+
   inputEl.value = '';
+  inputEl.style.height = 'auto';
   inputEl.focus();
   addMessage('user', text);
 
+  const mode = ctx.state.getState('ui.streamMode');
+  const conn = ctx.state.getState('ui.connModel');
+
+  if (mode === 'channel') {
+    if (conn === 'session') {
+      // 长连接模式：确保订阅已开并就绪后再触发（避免事件丢失）
+      if (!subscription) setupSessionWatch();
+      if (subscription && subscription.ready) {
+        await subscription.ready;
+        // 等待 reader.read() 循环启动（fetch 返回 ≠ reader 就绪）
+        await new Promise(r => setTimeout(r, 100));
+      }
+      await sendChannelTrigger(text, sid);
+    } else {
+      await sendChannelSingleStream(text, sid);
+    }
+  } else {
+    await sendA2AStream(text, sid);
+  }
+}
+
+function stop() {
+  if (activeAbort) {
+    activeAbort.abort();
+    return;
+  }
+  // 长连接模式：事件总线模型无 abort 语义，提示
+  ctx.utils.toast('长连接模式不支持中断（后端无 cancel 语义）；可切「单次流」调试', 'info');
+}
+
+async function sendChannelTrigger(text, sid) {
+  isStreaming = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = '…';
+  try {
+    await ctx.api.triggerSessionChat(sid, text, 'debug-user');
+  } catch (e) {
+    ctx.utils.toast('Trigger failed: ' + e.message, 'error');
+    isStreaming = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+  }
+}
+
+async function sendChannelSingleStream(text, sid) {
+  // 单次流调试：走旧 /chat/stream
   isStreaming = true;
   sendBtn.disabled = true;
   sendBtn.textContent = 'Stop';
   sendBtn.classList.add('danger');
-
-  // 新会话（未选择历史）发送消息时自动生成 sessionId，使 LLM Calls 可通过 metadata.sessionId 关联
-  if (!currentSessionId()) {
-    const sid = 'debug-user:' + Date.now().toString(36);
-    ctx.state.setState('threads.current', sid);
-    document.getElementById('btnLlmCalls').disabled = false;
-  }
-
-  streamingDiv = createStreamingMsg();
-  abortController = new AbortController();
-  fullText = '';
-  pendingToolCalls = {};
-  thinkingDiv = null;
-  thinkingText = '';
-  toolResultBuffers = {};
-  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
-
-  const mode = ctx.state.getState('ui.streamMode');
+  const abortController = new AbortController();
+  activeAbort = abortController;
+  const params = new URLSearchParams({ message: text, userId: 'debug-user', sessionId: sid });
+  const eventBus = ctx.api;
+  const fakeSubscribe = { onEvent: handleEvent };
   try {
-    if (mode === 'channel') await sendChannelSSE(text);
-    else await sendA2AStream(text);
-  } finally {
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    sendBtn.classList.remove('danger');
-    if (streamingDiv && !fullText) {
-      const textEl = streamingDiv.querySelector('.msg-text');
-      const toolsEl = streamingDiv.querySelector('.msg-tools');
-      const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
-      const hasNoTools = toolsEl && toolsEl.children.length === 0;
-      if (hasOnlyTyping && hasNoTools) streamingDiv.remove();
-    }
-    streamingDiv = null;
-    abortController = null;
-    loadThreads();
-  }
-}
-
-async function sendChannelSSE(text) {
-  try {
-    const params = new URLSearchParams({ message: text, userId: 'debug-user' });
-    const sid = currentSessionId();
-    if (sid) params.set('sessionId', sid);
-    const resp = await fetch(ctx.api.BASE + '/chat/stream?' + params.toString(), { signal: abortController.signal });
+    const resp = await fetch(eventBus.BASE + '/chat/stream?' + params.toString(), { signal: abortController.signal });
     if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -472,68 +861,39 @@ async function sendChannelSSE(text) {
         const dataStr = line.slice(5).trim();
         if (!dataStr) continue;
         try {
-          const data = JSON.parse(dataStr);
-          if (data.type === 'error') {
-            if (streamingDiv) {
-              streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(data.error || 'Unknown error') + '</span>';
-            }
-            return;
-          }
-          if (data.type === 'TEXT_BLOCK_DELTA' && data.delta && streamingDiv) {
-            fullText += data.delta;
-            updateStreamContent(fullText);
-          } else if (data.type === 'THINKING_BLOCK_DELTA' && data.delta) {
-            appendThinkingDelta(data.delta);
-          } else if (data.type === 'THINKING_BLOCK_END') {
-            finishThinkingBlock();
-          } else if (data.type === 'TOOL_CALL_START') {
-            handleToolCallEvent({
-              type: 'tool_call',
-              name: data.toolName,
-              tool_call_id: data.toolCallId
-            });
-          } else if (data.type === 'TOOL_CALL_DELTA' && data.delta) {
-            handleToolCallDelta(data.toolCallId, data.delta);
-          } else if (data.type === 'TOOL_CALL_END') {
-            handleToolCallEnd(data.toolCallId);
-          } else if (data.type === 'TOOL_RESULT_START') {
-            handleToolResultStart(data.toolCallId, data.toolCallName);
-          } else if (data.type === 'TOOL_RESULT_TEXT_DELTA' && data.delta) {
-            handleToolResultTextDelta(data.toolCallId, data.delta);
-          } else if (data.type === 'TOOL_RESULT_END') {
-            handleToolResultEvent({
-              type: 'tool_result',
-              tool_call_id: data.toolCallId,
-              state: data.state
-            });
-          } else if (data.type === 'MODEL_CALL_END') {
-            addUsageStats({
-              input_tokens: data.inputTokens,
-              output_tokens: data.outputTokens,
-              total_tokens: data.totalTokens
-            }, null);
-          }
-        } catch (e) { /* 忽略解析错误 */ }
+          fakeSubscribe.onEvent(JSON.parse(dataStr));
+        } catch (e) { /* ignore */ }
       }
     }
-    if (streamingDiv && fullText) updateStreamContent(fullText);
-    else if (!streamingDiv && fullText) {
-      streamingDiv = createStreamingMsg();
-      updateStreamContent(fullText);
-    }
-    flushUsageStats();
   } catch (e) {
-    if (e.name !== 'AbortError' && streamingDiv) {
-      streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(e.message) + '</span>';
+    if (e.name !== 'AbortError') {
+      const r = currentReply || ensureReply('single');
+      handleEvent({ type: 'error', error: e.message, replyId: r.replyId });
     }
+  } finally {
+    isStreaming = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+    sendBtn.classList.remove('danger');
+    activeAbort = null;
+    loadThreads();
   }
 }
 
-async function sendA2AStream(text) {
-  const metadata = {};
-  const sid = currentSessionId();
-  if (sid) metadata.sessionId = sid;
-  metadata.userId = 'debug-user';
+// A2A message/stream（标准帧，工具仅工具名，无回填）
+async function sendA2AStream(text, sid) {
+  isStreaming = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Stop';
+  sendBtn.classList.add('danger');
+  const abortController = new AbortController();
+  activeAbort = abortController;
+
+  // 新建一条 A2A 回复（标准帧不携带 replyId，用占位 id）
+  const replyId = 'a2a-' + Date.now().toString(36);
+  const r = ensureReply(replyId);
+  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+
   try {
     const resp = await fetch(ctx.api.BASE + '/', {
       method: 'POST',
@@ -541,7 +901,7 @@ async function sendA2AStream(text) {
       body: JSON.stringify({
         jsonrpc: '2.0',
         method: 'message/stream',
-        params: { message: { role: 'user', parts: [{ text }], metadata } },
+        params: { message: { role: 'user', parts: [{ text }], metadata: { userId: 'debug-user', sessionId: sid } } },
         id: 'stream-' + Date.now()
       }),
       signal: abortController.signal
@@ -550,7 +910,6 @@ async function sendA2AStream(text) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let lastArtifactText = '';   // 累积当前 artifact 的文本（append 语义）
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -558,327 +917,86 @@ async function sendA2AStream(text) {
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
-        if (line.startsWith('event:')) continue;
         if (!line.startsWith('data:')) continue;
-        const dataStr = line.slice(5);
+        const dataStr = line.slice(5).trim();
         if (!dataStr || dataStr === '[DONE]') continue;
         try {
-          const frame = JSON.parse(dataStr);
-          const result = frame.result;
-          if (!result) {
-            if (frame.error) {
-              if (streamingDiv) {
-                streamingDiv.innerHTML += '<span style="color:var(--red)">Error: ' + ctx.utils.esc(frame.error.message || 'A2A error') + '</span>';
-              }
-              return;
-            }
-            continue;
-          }
-          const kind = result.kind;
-
-          // artifact-update: 流式增量（thinking/text 块 + 工具调用）
-          if (kind === 'artifact-update') {
-            const artifact = result.artifact || {};
-            const parts = artifact.parts || [];
-            for (const p of parts) {
-              const blockType = (p.metadata && p.metadata._agentscope_block_type) || 'text';
-              // A2A data part：工具调用（metadata._agentscope_tool_name / _agentscope_tool_call_id）
-              if (p.kind === 'data') {
-                const toolName = (p.metadata && p.metadata._agentscope_tool_name) || '';
-                const tcId = (p.metadata && p.metadata._agentscope_tool_call_id) || '';
-                if (toolName && toolName !== '__fragment__' && tcId && !pendingToolCalls[tcId]) {
-                  pendingToolCalls[tcId] = { name: toolName, args: {}, uiMeta: null };
-                  // 清理空的 streamingDiv（仅含 typing indicator，无实际文本）
-                  if (streamingDiv) {
-                    const textEl = streamingDiv.querySelector('.msg-text');
-                    const toolsEl = streamingDiv.querySelector('.msg-tools');
-                    const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
-                    const hasNoTools = toolsEl && toolsEl.children.length === 0;
-                    if (hasOnlyTyping && hasNoTools) {
-                      streamingDiv.remove();
-                      streamingDiv = null;
-                    } else {
-                      const cursor = streamingDiv.querySelector('.cursor');
-                      if (cursor) cursor.remove();
-                      if (fullText) updateStreamContent(fullText);
-                    }
-                  }
-                  // 默认折叠：先展示工具名称，点开才展示参数与详情
-                  addToolCallMessage(toolName, {}, null, tcId, true, null);
-                  streamingDiv = null;
-                  // A2A 流不携带工具参数（SDK 限制），从会话历史按 tool_call_id 匹配填充
-                  fillToolArgsFromHistory(tcId, sid);
-                }
-                continue;
-              }
-              if (p.kind !== 'text') continue;
-              const text = p.text || '';
-              // append=false = 新块开始（thinking 或 text），重置累积器
-              if (result.append === false) {
-                lastArtifactText = '';
-                fullText = '';
-              }
-              lastArtifactText += text;
-              if (blockType === 'thinking') {
-                appendThinkingDelta(text);
-              } else {
-                // 直接追加增量（append=true 时 text 是增量）
-                if (!streamingDiv) streamingDiv = createStreamingMsg();
-                fullText += text;
-                updateStreamContent(fullText);
-              }
-            }
-          }
-          // status-update: 状态变化，final=true 表示完成
-          else if (kind === 'status-update') {
-            const state = result.state;
-            if (result.metadata && result.metadata.thread_id && !currentSessionId()) {
-              ctx.state.setState('threads.current', result.metadata.thread_id);
-              document.getElementById('btnLlmCalls').disabled = false;
-            }
-            if (result.final === true || state === 'completed') {
-              finishThinkingBlock();
-              if (streamingDiv) {
-                const textEl = streamingDiv.querySelector('.msg-text');
-                const toolsEl = streamingDiv.querySelector('.msg-tools');
-                const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
-                const hasNoTools = toolsEl && toolsEl.children.length === 0;
-                if (hasOnlyTyping && hasNoTools) {
-                  streamingDiv.remove();
-                } else {
-                  const cursor = streamingDiv.querySelector('.cursor');
-                  if (cursor) cursor.remove();
-                  if (fullText) updateStreamContent(fullText);
-                }
-              }
-              flushUsageStats();
-              // 流结束（agent_state 已落库）：补全未填充的工具参数
-              refreshPendingToolArgs(sid);
-              return;
-            }
-          }
-          // message: 最终完整消息（final 兜底）
-          else if (kind === 'message') {
-            const parts = result.parts || [];
-            const texts = parts
-              .filter((p) => p.kind === 'text' && !(p.metadata && p.metadata._agentscope_block_type === 'thinking'))
-              .map((p) => p.text || '');
-            if (texts.length) {
-              fullText = texts.join('');
-              if (!streamingDiv) streamingDiv = createStreamingMsg();
-              updateStreamContent(fullText);
-            }
-            if (result.metadata) {
-              const usage = result.metadata[Object.keys(result.metadata)[0]];
-              if (usage && usage._chat_usage) {
-                addUsageStats({
-                  input_tokens: usage._chat_usage.inputTokens,
-                  output_tokens: usage._chat_usage.outputTokens,
-                  total_tokens: usage._chat_usage.totalTokens
-                }, null);
-              }
-            }
-            finishThinkingBlock();
-            if (streamingDiv) {
-              const textEl = streamingDiv.querySelector('.msg-text');
-              const toolsEl = streamingDiv.querySelector('.msg-tools');
-              const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
-              const hasNoTools = toolsEl && toolsEl.children.length === 0;
-              if (hasOnlyTyping && hasNoTools) {
-                streamingDiv.remove();
-              } else {
-                const cursor = streamingDiv.querySelector('.cursor');
-                if (cursor) cursor.remove();
-              }
-            }
-            flushUsageStats();
-            // 流结束（agent_state 已落库）：补全未填充的工具参数
-            refreshPendingToolArgs(sid);
-            return;
-          }
-        } catch (e) { /* 忽略解析错误 */ }
+          handleFrame(JSON.parse(dataStr), replyId);
+        } catch (e) { /* ignore */ }
       }
     }
   } catch (e) {
-    if (e.name !== 'AbortError' && streamingDiv) {
-      streamingDiv.innerHTML = '<span style="color:var(--red)">Error: ' + ctx.utils.esc(e.message) + '</span>';
+    if (e.name !== 'AbortError') {
+      handleEvent({ type: 'error', error: e.message, replyId });
     }
+  } finally {
+    isStreaming = false;
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+    sendBtn.classList.remove('danger');
+    activeAbort = null;
+    finishReply(replyId);
+    loadThreads();
   }
 }
 
-/**
- * A2A 流不携带工具参数（SDK 限制），从会话历史（agent_state）按 tool_call_id 匹配填充。
- * agent_state 在 A2A 流结束后落库，因此延迟重试；流完成时由 refreshPendingToolArgs 兜底。
- */
-async function fillToolArgsFromHistory(tcId, sessionId) {
-  if (!tcId || !sessionId) return;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const data = await ctx.api.getThreadHistory(sessionId);
-      const msgs = data.messages || [];
-      for (const m of msgs) {
-        const calls = m.tool_calls || [];
-        for (const c of calls) {
-          if (c.id === tcId) {
-            applyToolArgs(tcId, c.input);
-            return;
-          }
+/** A2A 帧 → 事件（标准帧忠实呈现：工具仅工具名 + 状态） */
+function handleFrame(frame, replyId) {
+  const result = frame.result;
+  if (!result) {
+    if (frame.error) handleEvent({ type: 'error', error: frame.error.message || 'A2A error', replyId });
+    return;
+  }
+  const kind = result.kind;
+  if (kind === 'artifact-update') {
+    const artifact = result.artifact || {};
+    const parts = artifact.parts || [];
+    for (const p of parts) {
+      const blockType = (p.metadata && p.metadata._agentscope_block_type) || 'text';
+      if (p.kind === 'data') {
+        const toolName = (p.metadata && p.metadata._agentscope_tool_name) || '';
+        const tcId = (p.metadata && p.metadata._agentscope_tool_call_id) || '';
+        if (toolName && toolName !== '__fragment__' && tcId) {
+          // 标准帧：仅工具名（无参数/结果）
+          handleEvent({ type: 'TOOL_CALL_START', toolCallId: tcId, toolName, replyId });
+          handleEvent({ type: 'TOOL_CALL_END', toolCallId: tcId, toolName, replyId });
+          handleEvent({ type: 'TOOL_RESULT_END', toolCallId: tcId, toolName: toolName, state: 'success', replyId });
         }
+        continue;
       }
-    } catch (e) { /* 历史未就绪时忽略 */ }
-    await new Promise(r => setTimeout(r, 1000));
-  }
-}
-
-/** 将工具参数写入卡片（保持折叠态，不自动展开） */
-function applyToolArgs(tcId, args) {
-  const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
-  if (!existing) return;
-  const inner = existing.querySelector('.tc-inner');
-  if (!inner) return;
-  let argsPre = existing.querySelector('.tc-args pre');
-  if (!argsPre) {
-    // 卡片渲染时参数为空则无 args 区域，需创建（插入 tc-inner 顶部）
-    const argsDiv = document.createElement('div');
-    argsDiv.className = 'tc-args';
-    argsDiv.innerHTML = '<div class="tc-label">Arguments</div><pre></pre>';
-    argsPre = argsDiv.querySelector('pre');
-    inner.insertBefore(argsDiv, inner.firstChild);
-  }
-  argsPre.textContent = JSON.stringify(args, null, 2);
-  if (pendingToolCalls[tcId]) pendingToolCalls[tcId].args = args;
-}
-
-/** 流完成时补全所有尚未填充参数的工具调用（agent_state 此时已落库） */
-async function refreshPendingToolArgs(sessionId) {
-  if (!sessionId) return;
-  for (const tcId of Object.keys(pendingToolCalls)) {
-    const call = pendingToolCalls[tcId];
-    if (!call || !call.name) continue;
-    const hasArgs = call.args && Object.keys(call.args).length > 0;
-    const cardHasArgs = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"] .tc-args pre');
-    if (hasArgs && cardHasArgs) continue;
-    await fillToolArgsFromHistory(tcId, sessionId);
-  }
-}
-
-function handleToolCallEvent(data) {
-  const tcId = data.tool_call_id || '';
-  const uiMeta = data._meta?.ui || data.ui_meta || null;
-  const existing = messagesEl.querySelector('.tool-call-block[data-tcid="' + ctx.utils.esc(tcId) + '"]');
-  if (existing) {
-    pendingToolCalls[tcId] = { name: data.name || (pendingToolCalls[tcId] && pendingToolCalls[tcId].name), args: data.args, uiMeta };
-    const argsPre = existing.querySelector('.tc-args pre');
-    if (argsPre) argsPre.textContent = JSON.stringify(data.args, null, 2);
-  } else {
-    pendingToolCalls[tcId] = { name: data.name, args: data.args, uiMeta };
-    // 清理空的 streamingDiv（仅含 typing indicator，无实际文本）
-    if (streamingDiv) {
-      const textEl = streamingDiv.querySelector('.msg-text');
-      const toolsEl = streamingDiv.querySelector('.msg-tools');
-      const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
-      const hasNoTools = toolsEl && toolsEl.children.length === 0;
-      if (hasOnlyTyping && hasNoTools) {
-        streamingDiv.remove();
-        streamingDiv = null;
+      if (p.kind !== 'text') continue;
+      const text = p.text || '';
+      if (blockType === 'thinking') {
+        handleEvent({ type: 'THINKING_BLOCK_DELTA', delta: text, replyId });
       } else {
-        const cursor = streamingDiv.querySelector('.cursor');
-        if (cursor) cursor.remove();
-        if (fullText) updateStreamContent(fullText);
+        handleEvent({ type: 'TEXT_BLOCK_DELTA', delta: text, replyId });
       }
     }
-    // 默认折叠：先展示工具名称，点开才展示参数与详情
-    addToolCallMessage(data.name, data.args, null, tcId, true, uiMeta);
-    streamingDiv = null;
-    if (uiMeta && uiMeta.resourceUri) {
-      mcpAppsRegistry[tcId] = { uri: uiMeta.resourceUri, name: data.name, args: data.args };
+  } else if (kind === 'status-update') {
+    if (result.final === true || result.state === 'completed') {
+      handleEvent({ type: 'AGENT_END', replyId });
     }
-  }
-}
-
-async function handleToolResultEvent(data) {
-  const tc = pendingToolCalls[data.tool_call_id] || { name: data.name, args: {}, uiMeta: null };
-  // 优先使用流式累积的工具结果文本（tool_result_text_delta），无增量时回退 data.result
-  const buffered = toolResultBuffers[data.tool_call_id];
-  let resultText = (buffered && buffered.text) ? buffered.text : data.result;
-  if (Array.isArray(resultText)) {
-    resultText = resultText.map((r) => r.text || '').join('\n');
-  } else if (resultText && typeof resultText === 'object') {
-    resultText = JSON.stringify(resultText, null, 2);
-  }
-  cleanupToolResultBuffer(data.tool_call_id);
-  const appInfo = mcpAppsRegistry[data.tool_call_id];
-  if (appInfo && appInfo.uri) {
-    try {
-      const argsData = JSON.parse(resultText);
-      await renderMcpAppFrame(appInfo.uri, tc.name, argsData, data.tool_call_id);
-    } catch (e) {
-      addToolResultMessage(tc.name, resultText, data.tool_call_id, false);
+  } else if (kind === 'message') {
+    const parts = result.parts || [];
+    const texts = parts.filter((p) => p.kind === 'text').map((p) => p.text || '');
+    handleEvent({ type: 'TEXT_BLOCK_DELTA', delta: texts.join(''), replyId });
+    if (result.metadata) {
+      const usage = result.metadata[Object.keys(result.metadata)[0]];
+      if (usage && usage._chat_usage) {
+        handleEvent({
+          type: 'MODEL_CALL_END',
+          inputTokens: usage._chat_usage.inputTokens,
+          outputTokens: usage._chat_usage.outputTokens,
+          totalTokens: usage._chat_usage.totalTokens,
+          replyId
+        });
+      }
     }
-  } else {
-    addToolResultMessage(tc.name, resultText, data.tool_call_id, false);
+    handleEvent({ type: 'AGENT_END', replyId });
   }
-  // 清理空的 streamingDiv（仅含 typing indicator 无文本内容）
-  if (streamingDiv) {
-    const textEl = streamingDiv.querySelector('.msg-text');
-    const toolsEl = streamingDiv.querySelector('.msg-tools');
-    const hasOnlyTyping = textEl && textEl.querySelector('.typing-indicator') && !textEl.textContent.trim();
-    const hasNoTools = toolsEl && toolsEl.children.length === 0;
-    if (hasOnlyTyping && hasNoTools) {
-      streamingDiv.remove();
-      streamingDiv = null;
-    }
-  }
-  if (!streamingDiv) {
-    streamingDiv = createStreamingMsg();
-    fullText = '';
-  }
-}
-
-// ---------- MCP App iframe 渲染 ----------
-
-async function fetchMcpResource(server, uri) {
-  try {
-    const data = await ctx.api.readMcpResource(server, uri);
-    if (data.contents && data.contents[0]) return data.contents[0];
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function renderMcpAppFrame(uiUri, toolName, toolArgs, tcId) {
-  const parts = uiUri.split('/');
-  const server = parts[2] || 'weather';
-  const resource = await fetchMcpResource(server, uiUri);
-  if (!resource || !resource.text) return null;
-  const html = resource.text;
-  const containerId = 'mcp-app-' + tcId;
-  const container = document.createElement('div');
-  container.className = 'msg assistant';
-  container.innerHTML = '<div class="mcp-apps-container"><div class="mcp-apps-header">' +
-    '<span class="app-icon">🎨</span><span class="app-label">' + ctx.utils.esc(toolName) + '</span>' +
-    '<span class="app-uri">' + ctx.utils.esc(uiUri) + '</span></div>' +
-    '<iframe id="' + containerId + '" class="mcp-apps-iframe" sandbox="allow-scripts"></iframe></div>';
-  messagesEl.appendChild(container);
-  ctx.utils.scrollBottom(messagesEl);
-  const iframe = document.getElementById(containerId);
-  iframe.onload = () => {
-    iframe.contentWindow.postMessage(
-      { jsonrpc: '2.0', method: 'ui/notifications/tool-input', params: { arguments: toolArgs } },
-      '*');
-  };
-  iframe.srcdoc = html;
-  return container;
 }
 
 // ---------- 弹窗功能 ----------
-
-function formatDuration(ms) {
-  if (ms < 1000) return ms + 'ms';
-  const s = (ms / 1000).toFixed(2);
-  return s + 's';
-}
 
 async function showLlmCalls() {
   const sid = currentSessionId();
@@ -906,7 +1024,7 @@ async function showLlmCalls() {
         '<span class="lc-index">#' + (i + 1) + '</span><span class="lc-model">' + ctx.utils.esc(model) + '</span>';
       if (usage.total_tokens) html += '<span class="lc-usage">' + usage.total_tokens + ' tokens</span>';
       if (c.response && c.response.duration_ms != null) {
-        html += '<span class="lc-usage">⏱ ' + formatDuration(c.response.duration_ms) + '</span>';
+        html += '<span class="lc-usage">⏱ ' + ctx.utils.formatDuration(c.response.duration_ms / 1000) + '</span>';
       }
       html += '<span class="lc-toggle">▼</span></div><div class="llm-call-body">';
       html += '<div class="lc-section"><div class="lc-label">Request (' + msgs.length + ' messages)</div>';

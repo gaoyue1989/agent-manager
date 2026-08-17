@@ -1,4 +1,4 @@
-/* ===== Hash 路由管理 ===== */
+/* ===== Hash 路由管理（窄图标侧栏 + tooltip） ===== */
 
 export class Router {
   constructor(routes) {
@@ -10,15 +10,13 @@ export class Router {
     window.addEventListener('hashchange', () => this.resolve());
   }
 
-  /** 渲染侧边栏导航 */
+  /** 渲染窄图标侧栏（图标 + tooltip，对齐官方 AppSidebar） */
   renderNav() {
-    let html = '<div class="nav-title">Modules</div>';
+    let html = '';
     for (const [hash, route] of Object.entries(this.routes)) {
       const active = this.currentHash() === hash;
-      html += '<div class="nav-item' + (active ? ' active' : '') + '" data-hash="' + hash + '">' +
-        '<span class="icon">' + route.icon + '</span>' +
-        '<span>' + route.title + '</span>' +
-        '</div>';
+      html += '<div class="nav-item' + (active ? ' active' : '') + '" data-hash="' + hash + '" data-title="' +
+        route.title + '"><span class="icon">' + route.icon + '</span></div>';
     }
     this.sidebar.innerHTML = html;
     this.sidebar.querySelectorAll('.nav-item').forEach((el) => {

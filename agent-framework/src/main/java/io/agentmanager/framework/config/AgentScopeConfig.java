@@ -263,6 +263,11 @@ public class AgentScopeConfig {
     }
 
     @Bean
+    public io.agentmanager.framework.service.SessionEventBus sessionEventBus() {
+        return new io.agentmanager.framework.service.SessionEventBus();
+    }
+
+    @Bean
     public AgentRuntimeService agentRuntimeService(
         OafConfig oafConfig,
         HarnessAgent harnessAgent,

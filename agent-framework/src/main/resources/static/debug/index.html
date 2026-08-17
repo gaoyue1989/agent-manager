@@ -8,6 +8,19 @@
 <link rel="stylesheet" href="/debug/css/base.css">
 <link rel="stylesheet" href="/debug/css/layout.css">
 <link rel="stylesheet" href="/debug/css/components.css">
+<script>
+  // 主题初始化（localStorage 手动覆盖 > 系统自动），避免闪烁
+  (function () {
+    var t = 'debug-theme';
+    var saved = null;
+    try { saved = localStorage.getItem(t); } catch (e) {}
+    if (saved === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else if (saved === 'light') {
+      document.documentElement.classList.add('light');
+    }
+  })();
+</script>
 </head>
 <body>
 <div class="app">
@@ -20,6 +33,7 @@
       <span id="statusDot" class="status-dot warn"></span>
       <span id="statusText" class="status-text">connecting...</span>
       <span id="checkpointStatus" class="status-text"></span>
+      <button id="themeToggle" class="theme-toggle" title="切换明暗主题">●</button>
     </div>
   </header>
   <div class="main">

@@ -209,13 +209,71 @@ curl http://localhost:8100/threads
 
 ### GET /debug
 
-调试页面 HTML。
+调试页面 HTML（对齐 agentscope 官方前端布局）。
 
 ```bash
 curl http://localhost:8100/debug
 ```
 
 **响应:** HTML 页面
+
+---
+
+## 长连接 SSE API（对齐官方 agentscope 模式）
+
+### GET /debug/threads/{sessionId}/events
+
+长连接 SSE 订阅端点。连接建立后立即推送 `connected` 初始帧，后续推送该 session 的实时事件。
+
+```bash
+curl -s -N "http://localhost:8100/debug/threads/debug-user:abc/events"
+```
+
+**响应 (SSE):**
+
+```
+event: connected
+data: {}
+
+data: {"type":"AGENT_START","id":"...","replyId":"..."}
+data: {"type":"TEXT_BLOCK_DELTA","id":"...","delta":"Hello","replyId":"...","blockId":"..."}
+data: {"type":"AGENT_END","id":"...","replyId":"..."}
+event: ping
+data: {}
+```
+
+**特性:**
+- `connected` 初始帧：确保 fetch() 立即返回（否则 Spring SSE 会等首个数据才发响应头）
+- 心跳 ping：每 15 秒，保活连接
+- 事件词表与 `/chat/stream` 完全一致（通过 AgentEventSseSerializer 共用）
+- 自动重连：客户端断开后可重新订阅
+
+---
+
+### POST /debug/threads/{sessionId}/chat
+
+长连接触发端点（fire-and-forget）。发送消息后立即返回 202，事件通过已建立的 SSE 订阅回流。
+
+```bash
+curl -s -X POST "http://localhost:8100/debug/threads/debug-user:abc/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"hello","userId":"alice"}'
+```
+
+**请求体:**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `message` | String | ✓ | 用户消息 |
+| `userId` | String | | 用户标识（默认 `debug-user`） |
+
+**响应 (202 Accepted):**
+
+```json
+{"accepted":true,"sessionId":"debug-user:abc"}
+```
+
+**时序约束（前端）：** 先建立 SSE 订阅（`GET .../events`），等待 `connected` 帧到达（`fetch()` 返回），再 POST 触发。保证事件不丢失。
 
 ---
 
