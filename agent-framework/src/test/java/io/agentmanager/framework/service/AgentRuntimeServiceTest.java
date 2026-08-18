@@ -32,11 +32,11 @@ class AgentRuntimeServiceTest {
             List.of("test"), "You are a test agent.",
             List.of(), List.of(), List.of(), List.of(), List.of(),
             new OafConfig.ModelConfig("openai", "gpt-4", ""),
-            new OafConfig.RuntimeConfig(0.7, 4096, false),
+            new OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
             new OafConfig.MemoryConfig("editable", Map.of()),
             Map.of()
         );
-        service = new AgentRuntimeService(config, agent, List.of(), new LLMLogger());
+        service = new AgentRuntimeService(config, agent, List.of(), new LLMLogger(), new SessionEventBus());
     }
 
     private void mockCallReturns(String text) {

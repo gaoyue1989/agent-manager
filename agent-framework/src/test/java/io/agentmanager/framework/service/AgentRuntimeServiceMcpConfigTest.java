@@ -41,11 +41,11 @@ class AgentRuntimeServiceMcpConfigTest {
             List.of("test"), "you are a helper.",
             List.of(), List.of(), List.of(), List.of("Read", "Bash"), List.of(),
             new OafConfig.ModelConfig("openai", "gpt-4", ""),
-            new OafConfig.RuntimeConfig(0.7, 4096, false),
+            new OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
             new OafConfig.MemoryConfig("editable", Map.of()),
             Map.of()
         );
-        return new AgentRuntimeService(config, newAgent(), mcpConfigs, new LLMLogger());
+        return new AgentRuntimeService(config, newAgent(), mcpConfigs, new LLMLogger(), new SessionEventBus());
     }
 
     private AgentRuntimeService newService(List<Map<String, Object>> mcpConfigs) {

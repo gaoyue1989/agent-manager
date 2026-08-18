@@ -892,4 +892,51 @@ class OafConfigLoaderTest {
     private void writeAgentsMd(String content) throws Exception {
         Files.writeString(tempDir.resolve("AGENTS.md"), content);
     }
+
+    @Test
+    void shouldParsePermissionMode() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: perm-test
+            config:
+              permission:
+                mode: dont_ask
+            ---
+            # Perm Test
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertEquals("dont_ask", config.runtimeConfig().permissionMode());
+    }
+
+    @Test
+    void shouldDefaultPermissionModeWhenAbsent() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: perm-default
+            ---
+            # Perm Default
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertEquals("default", config.runtimeConfig().permissionMode());
+    }
+
+    @Test
+    void shouldParseRequireConfirmationWithPermissionMode() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: perm-compat
+            config:
+              require_confirmation: true
+              permission:
+                mode: accept_edits
+            ---
+            # Perm Compat
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertTrue(config.runtimeConfig().requireConfirmation());
+        assertEquals("accept_edits", config.runtimeConfig().permissionMode());
+    }
 }

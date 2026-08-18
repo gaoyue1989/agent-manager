@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
@@ -33,12 +34,14 @@ class SessionStreamControllerTest {
     private SessionStreamController controller;
     private ChatUiChannel chatChannel;
     private SessionEventBus eventBus;
+    private AgentRuntimeService runtimeService;
 
     @BeforeEach
     void setUp() {
         chatChannel = mock(ChatUiChannel.class);
         eventBus = new SessionEventBus();
-        controller = new SessionStreamController(chatChannel, eventBus);
+        runtimeService = mock(AgentRuntimeService.class);
+        controller = new SessionStreamController(chatChannel, eventBus, runtimeService);
     }
 
     @Test

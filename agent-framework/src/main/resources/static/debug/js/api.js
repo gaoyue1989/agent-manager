@@ -124,6 +124,61 @@ export const api = {
       message, userId: userId || 'debug-user'
     }),
 
+  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）
+  confirmToolCall: (sessionId, results) =>
+    post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }),
+
+  // HITL 确认后事件流（SSE；长连接场景事件同时经 SessionEventBus 扇出到原订阅）
+  confirmStream: (sessionId, results, { onEvent, onError } = {}) => {
+    const path = '/threads/' + encodeURIComponent(sessionId) + '/confirm-stream';
+    const controller = new AbortController();
+    const connect = async () => {
+      let resp;
+      try {
+        resp = await fetch(BASE + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ results }),
+          signal: controller.signal
+        });
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        if (onError) onError(e);
+        return;
+      }
+      if (!resp.ok || !resp.body) { if (onError) onError(new Error('HTTP ' + resp.status)); return; }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (controller.signal.aborted) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const dataStr = line.slice(5).trim();
+            if (!dataStr) continue;
+            try {
+              if (onEvent) onEvent(JSON.parse(dataStr));
+            } catch (e) { /* 忽略解析错误 */ }
+          }
+        }
+      } catch (e) {
+        if (!controller.signal.aborted && onError) onError(e);
+      }
+    };
+    connect();
+    return {
+      close() { controller.abort(); },
+      /** 等待 HTTP 响应头（连接建立） */
+      ready: Promise.resolve()
+    };
+  },
+
   // MCP 资源（UI 渲染）
   readMcpResource: (server, uri) => post('/mcp/resources/read', { server, uri }),
 

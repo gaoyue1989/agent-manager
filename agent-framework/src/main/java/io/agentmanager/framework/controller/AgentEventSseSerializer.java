@@ -1,6 +1,7 @@
 package io.agentmanager.framework.controller;
 
 import java.util.LinkedHashMap;
+import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -71,6 +72,19 @@ public final class AgentEventSseSerializer {
                 payload.put("outputTokens", mce.getUsage().getOutputTokens());
                 payload.put("totalTokens", mce.getUsage().getTotalTokens());
             }
+        } else if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent confirm) {
+            // HITL 统一词条 permission_ask（snake_case，与 invokeStream 链路一致，见 hitl-permission-plan.md 6.4）
+            var calls = confirm.getToolCalls().stream().map(tc -> {
+                var c = new LinkedHashMap<String, Object>();
+                c.put("tool_call_id", tc.getId());
+                c.put("name", tc.getName());
+                c.put("input", tc.getInput());
+                // ToolUseBlock 无 getSuggestedRules()（javap 验证）——不输出 suggested_rules
+                return c;
+            }).toList();
+            payload.put("type", "permission_ask");
+            payload.put("tool_calls", calls);
+            payload.put("reply_id", confirm.getReplyId());
         }
 
         // replyId / blockId 通用附注（长连接订阅多 run 区分）
@@ -119,6 +133,15 @@ public final class AgentEventSseSerializer {
             return MAPPER.writeValueAsString(s);
         } catch (Exception e) {
             return "\"error\"";
+        }
+    }
+
+    /** 将已组装的 Map（如 invokeStream/resumeWithConfirmStream 的词表帧）序列化为 JSON 字符串 */
+    public static String payload(Map<String, Object> map) {
+        try {
+            return MAPPER.writeValueAsString(map);
+        } catch (Exception e) {
+            return "{}";
         }
     }
 }

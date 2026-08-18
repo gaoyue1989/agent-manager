@@ -2,8 +2,12 @@ package io.agentmanager.framework.config;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 import javax.sql.DataSource;
 
@@ -32,6 +36,35 @@ import io.agentscope.harness.agent.memory.MemoryConfig;
 @Configuration
 public class AgentScopeConfig {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeConfig.class);
+
+    /**
+     * Harness 内置工具注册名白名单（仅权限系统启用时生效，用于生成自带工具 ALLOW 规则）。
+     * 来源：agentscope-harness 2.0.0 jar（javap 提取 @Tool name / AgentTool 实现名），
+     * 与当前 builder 开关（enablePlanMode / enableSkillManageTool(true)）对齐。
+     * 注意：ShellExecuteTool 的 @Tool 注解无显式 name，注册名取方法名 "execute"
+     * （AGENTS.md 记载的 shell_execute 已失效）。
+     * 构建后会与实际 getToolNames() 差集校验（verifyToolCoverage），SDK 升级漂移时打 ERROR 日志。
+     */
+    private static final Set<String> BUILT_IN_TOOL_NAMES = Set.of(
+        // 文件系统 (FilesystemTool)
+        "read_file", "write_file", "edit_file", "list_files", "glob_files", "grep_files",
+        // 记忆 (MemorySearchTool / MemoryGetTool / MemorySaveTool)
+        "memory_search", "memory_get", "memory_save",
+        // 会话 (SessionSearchTool)
+        "session_search", "session_list", "session_history",
+        // Shell (ShellExecuteTool，方法名 execute)
+        "execute",
+        // Plan Mode (PlanModeTools)
+        "plan_enter", "plan_write", "plan_exit",
+        // 技能 (SkillManageTool / ProposeSkillTool)
+        "skill_manage", "propose_skill",
+        // 子 Agent (AgentSpawnTool)
+        "agent_spawn", "agent_send", "agent_list",
+        // 异步任务 (TaskTool / WaitAsyncResultsTool)
+        "task_list", "task_output", "task_cancel", "wait_async_results",
+        // 动态子 Agent 生成（未启用时不注册，白名单冗余无害）
+        "agent_generate"
+    );
 
     /**
      * 沙箱文件系统（SANDBOX_ENABLED=true 时装配）。
@@ -184,6 +217,16 @@ public class AgentScopeConfig {
                 .apiKey(llm.apiKey())
                 .modelName(llm.modelId())
                 .baseUrl(llm.baseUrl())
+                .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
+                    .client(java.net.http.HttpClient.newBuilder()
+                        .connectTimeout(java.time.Duration.ofSeconds(30))
+                        .build())
+                    .config(io.agentscope.core.model.transport.HttpTransportConfig.builder()
+                        .connectTimeout(java.time.Duration.ofSeconds(30))
+                        .readTimeout(java.time.Duration.ofSeconds(180))
+                        .writeTimeout(java.time.Duration.ofSeconds(30))
+                        .build())
+                    .build())
                 .build();
 
             // P1: 包装 memory/compaction 内部 LLM 调用追踪
@@ -193,11 +236,24 @@ public class AgentScopeConfig {
 
             // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
             var toolkit = new io.agentscope.core.tool.Toolkit();
+            // 可见性控制（5.2）：deniedTools 命中的自定义工具不注册（类粒度，任一 @Tool 命中即整体跳过）
+            var customToolNames = new HashSet<String>();
             for (var tool : customTools) {
+                var names = toolToolNames(tool);
+                if (oafConfig.hasDeniedTools()
+                        && names.stream().anyMatch(oafConfig.deniedTools()::contains)) {
+                    log.info("Custom tool(s) {} excluded by deniedTools", names);
+                    continue;
+                }
                 toolkit.registerTool(tool);
-                log.info("Custom tool registered: {}", tool.getClass().getSimpleName());
+                customToolNames.addAll(names);
+                log.info("Custom tool registered: {}", names);
             }
             mcpToolRegistrar.registerAll(toolkit, oafConfig);
+
+            // HITL 权限上下文装配（MCP-only）：仅 MCP tools 规则或 require_confirmation 存在时启用
+            var permCfg = mcpToolRegistrar.collectPermissionRules(oafConfig);
+            var permissionContext = buildPermissionContext(oafConfig, permCfg, customToolNames);
 
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
@@ -229,6 +285,11 @@ public class AgentScopeConfig {
                     .isolationScope(IsolationScope.USER));
             }
 
+            // HITL 权限上下文（MCP-only，未启用时跳过装配保持零侵入）
+            if (permissionContext != null) {
+                builder.permissionContext(permissionContext);
+            }
+
             var agent = builder
                 // 记忆管理
                 .memory(MemoryConfig.builder()
@@ -253,6 +314,11 @@ public class AgentScopeConfig {
                 .enableSkillManageTool(true)
                 .build();
 
+            // 权限覆盖校验（仅启用权限系统时）：内置白名单 vs 实际注册集，SDK 升级漂移时 ERROR 提示
+            if (permissionContext != null) {
+                verifyToolCoverage(agent, oafConfig, customToolNames, permCfg.mcpNames());
+            }
+
             log.info("HarnessAgent created: {} (model: {}, workspace: {})",
                 oafConfig.name(), llm.modelId(), workspacePath);
             return agent;
@@ -272,8 +338,106 @@ public class AgentScopeConfig {
         OafConfig oafConfig,
         HarnessAgent harnessAgent,
         List<Map<String, Object>> mcpConfigs,
-        LLMLogger llmLogger
+        LLMLogger llmLogger,
+        io.agentmanager.framework.service.SessionEventBus eventBus
     ) {
-        return new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger);
+        return new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, eventBus);
+    }
+
+    /**
+     * 装配 HITL 权限上下文（仅 MCP 工具生效，见 docs/hitl-permission-plan.md 6.1）：
+     * 1. 仅当存在 MCP tools 显式规则或 require_confirmation=true 时启用（未配置返回 null，零侵入）
+     * 2. 内置 + 自定义工具全量 ALLOW（覆盖 DEFAULT mode 兜底 ASK，保证自带工具不参与确认）
+     * 3. MCP 工具：显式规则 + 未声明兜底（require_confirmation → ask，否则 allow）
+     *
+     * 规则匹配为精确工具名映射（PermissionEngine.rulesFor = map.get(name)，无通配符）。
+     * 内置工具名单无法在 build 前运行时枚举（内置工具注册发生在 Builder.build() 内部），
+     * 使用 BUILT_IN_TOOL_NAMES 静态白名单（javap 从 jar 提取验证）+ verifyToolCoverage 构建后校验。
+     */
+    private io.agentscope.core.permission.PermissionContextState buildPermissionContext(
+            OafConfig oafConfig,
+            McpToolRegistrar.PermissionRuleResult permCfg,
+            Set<String> customToolNames) {
+        var requireAll = oafConfig.runtimeConfig().requireConfirmation();
+        if (permCfg.tools().isEmpty() && !requireAll) {
+            return null;
+        }
+
+        var pb = io.agentscope.core.permission.PermissionContextState.builder()
+            .mode(permCfg.mode());
+
+        // ① 自带工具（内置白名单 + 本次注册的自定义 @Tool）自动放行
+        var builtinNames = new HashSet<String>();
+        builtinNames.addAll(BUILT_IN_TOOL_NAMES);
+        builtinNames.addAll(customToolNames);
+        for (var toolName : builtinNames) {
+            if (permCfg.mcpNames().contains(toolName)) {
+                continue; // 与 MCP 重名时以 MCP 规则为准
+            }
+            pb.addAllowRule(toolName,
+                new io.agentscope.core.permission.PermissionRule(
+                    toolName, null,
+                    io.agentscope.core.permission.PermissionBehavior.ALLOW, "builtinAutoAllow"));
+        }
+
+        // ② MCP 工具：显式规则 + 兜底（未声明：require_confirmation=true → ask，否则 allow）
+        for (var name : permCfg.mcpNames()) {
+            var behavior = permCfg.tools().getOrDefault(name, requireAll ? "ask" : "allow");
+            var rule = new io.agentscope.core.permission.PermissionRule(
+                name, null,
+                io.agentscope.core.permission.PermissionBehavior.valueOf(behavior.toUpperCase()),
+                "projectSettings");
+            switch (behavior) {
+                case "allow" -> pb.addAllowRule(name, rule);
+                case "ask" -> pb.addAskRule(name, rule);
+                case "deny" -> pb.addDenyRule(name, rule);
+            }
+        }
+        log.info("Permission system enabled (MCP only): mode={}, tools={}, mcpTools={}",
+            permCfg.mode(), permCfg.tools().size(), permCfg.mcpNames().size());
+        return pb.build();
+    }
+
+    /** 反射提取 @Tool 注册名集合（注解无 name 时取方法名，与 Toolkit.registerTool 派生规则一致） */
+    private static Set<String> toolToolNames(Object tool) {
+        var names = new LinkedHashSet<String>();
+        for (var method : tool.getClass().getMethods()) {
+            var ann = method.getAnnotation(io.agentscope.core.tool.Tool.class);
+            if (ann != null) {
+                names.add(ann.name().isBlank() ? method.getName() : ann.name());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 构建后校验权限覆盖：实际注册工具集 vs 白名单（内置 + 自定义 + MCP）。
+     * 未覆盖工具在 DEFAULT mode 下会触发 ASK（自带工具应放行）——SDK 升级、
+     * builder 开关变化导致内置名漂移时打 ERROR 日志提示更新 BUILT_IN_TOOL_NAMES。
+     * deniedTools 由 Harness tools.json 侧隐藏，不计入风险。
+     */
+    private void verifyToolCoverage(HarnessAgent agent, OafConfig oafConfig,
+                                    Set<String> customToolNames, Set<String> mcpNames) {
+        var covered = new HashSet<String>();
+        covered.addAll(BUILT_IN_TOOL_NAMES);
+        covered.addAll(customToolNames);
+        covered.addAll(mcpNames);
+
+        var actual = new TreeSet<>(agent.getToolkit().getToolNames());
+        var uncovered = new TreeSet<>(actual);
+        uncovered.removeAll(covered);
+        if (oafConfig.deniedTools() != null) {
+            uncovered.removeAll(oafConfig.deniedTools());
+        }
+        if (!uncovered.isEmpty()) {
+            log.error("Permission coverage gap: tools {} are NOT covered by ALLOW/ASK/DENY rules "
+                    + "and will trigger ASK in DEFAULT mode. Harness built-in tool names changed after "
+                    + "SDK upgrade? Update AgentScopeConfig.BUILT_IN_TOOL_NAMES or declare "
+                    + "permissions.tools in mcp-configs/{server}/config.yaml. Actual tools: {}",
+                uncovered, actual);
+        } else {
+            log.info("Permission coverage verified: {} actual tools, {} with rules",
+                actual.size(), covered.size());
+        }
     }
 }

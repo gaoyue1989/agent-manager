@@ -5,8 +5,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
@@ -32,6 +34,9 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
 @Service
 public class McpToolRegistrar {
     private static final Logger log = LoggerFactory.getLogger(McpToolRegistrar.class);
+
+    /** 支持的权限行为值（permissions.tools 声明） */
+    private static final Set<String> PERMISSION_BEHAVIORS = Set.of("allow", "ask", "deny");
 
     private final Path configDir;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -115,8 +120,9 @@ public class McpToolRegistrar {
 
     /**
      * 记录标准注册（非强制只读）的 MCP 工具到缓存。
+     * package-private：供 collectPermissionRules 聚合规则；也可用于单元测试预置注册结果。
      */
-    private void recordRegisteredTools(McpClientWrapper wrapper, String serverName) {
+    void recordRegisteredTools(McpClientWrapper wrapper, String serverName) {
         try {
             var tools = wrapper.listTools().block();
             if (tools == null) {
@@ -152,6 +158,96 @@ public class McpToolRegistrar {
         var perms = (Map<String, Object>) data.get("permissions");
         return perms != null && Boolean.TRUE.equals(perms.get("read_only"));
     }
+
+    /**
+     * 读取 config.yaml 的 permissions.tools 工具级三态权限（裸名 → allow|ask|deny）。
+     * package-private：不触发连接，便于单元测试。
+     *
+     * @return 裸名 → 行为的映射；无 permissions.tools 或加载失败返回空 Map
+     */
+    @SuppressWarnings("unchecked")
+    Map<String, String> loadToolPermissions(OafConfig.McpServerConfig mcp) {
+        var data = loadConfigYaml(mcp);
+        if (data == null) {
+            return Collections.emptyMap();
+        }
+        var perms = (Map<String, Object>) data.get("permissions");
+        if (perms == null) {
+            return Collections.emptyMap();
+        }
+        var rawTools = perms.get("tools");
+        if (!(rawTools instanceof Map<?, ?> toolsMap)) {
+            return Collections.emptyMap();
+        }
+        var result = new LinkedHashMap<String, String>();
+        for (var entry : toolsMap.entrySet()) {
+            if (!(entry.getKey() instanceof String name) || !(entry.getValue() instanceof String behavior)) {
+                log.warn("MCP {}: invalid permissions.tools entry ignored: {}={}",
+                    mcp.server(), entry.getKey(), entry.getValue());
+                continue;
+            }
+            if (!PERMISSION_BEHAVIORS.contains(behavior)) {
+                log.warn("MCP {}: unknown permission behavior '{}' for tool '{}' (expected allow|ask|deny), ignored",
+                    mcp.server(), behavior, name);
+                continue;
+            }
+            result.put(name, behavior);
+        }
+        return result;
+    }
+
+    /**
+     * 聚合全部 MCP server 的工具权限规则 + 已注册 MCP 工具名集合（ALLOW 兜底用）。
+     * 权限装配数据源（AgentScopeConfig 阶段一调用）：
+     * - mode：来自 frontmatter config.permission.mode（OafConfig.runtimeConfig().permissionMode()），
+     *   非法值回退 DEFAULT 并告警
+     * - tools：各 server permissions.tools 显式声明（仅保留已注册工具；未注册声明告警忽略）
+     * - mcpNames：本次实际注册的 MCP 工具裸名集合（含 ActiveMCP 子集过滤后的结果）
+     *
+     * @return {mode, tools, mcpNames}
+     */
+    public PermissionRuleResult collectPermissionRules(OafConfig oafConfig) {
+        var mode = resolvePermissionMode(oafConfig);
+        var tools = new LinkedHashMap<String, String>();
+        for (var mcp : oafConfig.mcpServers()) {
+            for (var entry : loadToolPermissions(mcp).entrySet()) {
+                var name = entry.getKey();
+                if (!registeredTools.containsKey(mcp.server() + ":" + name)) {
+                    log.warn("MCP {}: permission declared for '{}' but tool not registered (ActiveMCP filtered or server offline), ignored",
+                        mcp.server(), name);
+                    continue;
+                }
+                var prev = tools.put(name, entry.getValue());
+                if (prev != null && !prev.equals(entry.getValue())) {
+                    log.warn("MCP tool '{}' declared with conflicting behaviors across servers ({} vs {}), using '{}'",
+                        name, prev, entry.getValue(), entry.getValue());
+                }
+            }
+        }
+        var mcpNames = new LinkedHashSet<String>();
+        for (var info : registeredTools.values()) {
+            mcpNames.add(info.name());
+        }
+        return new PermissionRuleResult(mode, tools, mcpNames);
+    }
+
+    /** 解析 frontmatter config.permission.mode → PermissionMode；非法值回退 DEFAULT 并告警 */
+    private io.agentscope.core.permission.PermissionMode resolvePermissionMode(OafConfig oafConfig) {
+        var raw = oafConfig.runtimeConfig().permissionMode();
+        try {
+            return io.agentscope.core.permission.PermissionMode.valueOf(raw.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            log.warn("Unknown permission.mode '{}' (expected default|accept_edits|explore|bypass|dont_ask), falling back to DEFAULT", raw);
+            return io.agentscope.core.permission.PermissionMode.DEFAULT;
+        }
+    }
+
+    /** 工具权限聚合结果。 */
+    public record PermissionRuleResult(
+        io.agentscope.core.permission.PermissionMode mode,
+        Map<String, String> tools,
+        Set<String> mcpNames
+    ) {}
 
     /**
      * 强制只读注册：服务端未标注 readOnlyHint 时，通过 config.yaml 兜底。

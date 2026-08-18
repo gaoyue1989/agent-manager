@@ -289,13 +289,23 @@ public class OafConfigLoader {
         var raw = fm.get("config");
         if (raw instanceof Map) {
             var m = (Map<String, Object>) raw;
+            // config.permission.mode：全局权限模式（缺省 default）
+            var permissionMode = "default";
+            var perm = m.get("permission");
+            if (perm instanceof Map<?, ?> permMap) {
+                var mode = permMap.get("mode");
+                if (mode instanceof String s && !s.isBlank()) {
+                    permissionMode = s.trim().toLowerCase();
+                }
+            }
             return new RuntimeConfig(
                 ((Number) m.getOrDefault("temperature", 0.7)).doubleValue(),
                 ((Number) m.getOrDefault("max_tokens", 4096)).intValue(),
-                (boolean) m.getOrDefault("require_confirmation", false)
+                (boolean) m.getOrDefault("require_confirmation", false),
+                permissionMode
             );
         }
-        return new RuntimeConfig(0.7, 4096, false);
+        return new RuntimeConfig(0.7, 4096, false, "default");
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

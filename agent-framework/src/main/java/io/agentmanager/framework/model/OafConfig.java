@@ -70,7 +70,12 @@ public record OafConfig(
 
     public record ModelConfig(String provider, String name, String embedding) {}
 
-    public record RuntimeConfig(double temperature, int maxTokens, boolean requireConfirmation) {}
+    /**
+     * @param permissionMode 权限模式（frontmatter config.permission.mode），缺省 "default"
+     *                       （default | accept_edits | explore | bypass | dont_ask）
+     */
+    public record RuntimeConfig(double temperature, int maxTokens, boolean requireConfirmation,
+                                String permissionMode) {}
 
     public record MemoryConfig(String type, Map<String, String> blocks) {}
 }

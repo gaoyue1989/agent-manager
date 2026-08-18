@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
@@ -42,10 +43,12 @@ public class SessionStreamController {
 
     private final ChatUiChannel chatChannel;
     private final SessionEventBus eventBus;
+    private final AgentRuntimeService runtimeService;
 
-    public SessionStreamController(ChatUiChannel chatChannel, SessionEventBus eventBus) {
+    public SessionStreamController(ChatUiChannel chatChannel, SessionEventBus eventBus, AgentRuntimeService runtimeService) {
         this.chatChannel = chatChannel;
         this.eventBus = eventBus;
+        this.runtimeService = runtimeService;
     }
 
     @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -79,7 +82,10 @@ public class SessionStreamController {
 
         // fire-and-forget：订阅触发，事件经事件总线扇出；AGENT_END 为终态标记，前端据此收尾
         chatChannel.sendStream(options, message)
-            .doOnNext(event -> eventBus.emit(sessionId, event))
+            .doOnNext(event -> {
+                eventBus.emit(sessionId, event);
+                runtimeService.storeConfirmContext(sessionId, event);  // Channel 流程存储确认上下文
+            })
             .doOnError(e -> log.warn("session chat stream error (sid={}): {}", sessionId, e.getMessage()))
             .subscribe();
 

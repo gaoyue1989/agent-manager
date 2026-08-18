@@ -102,7 +102,7 @@ class DebugApiControllerTest {
         var mcp = new OafConfig.McpServerConfig("weather", "weather-service", "1.0.0", "mcp-configs/weather", true);
         var sub = new OafConfig.SubAgentConfig("acme", "helper", "1.0.0", "helper role", List.of("task"), true, "");
         var model = new OafConfig.ModelConfig("openai", "gpt-4", "");
-        var runtime = new OafConfig.RuntimeConfig(0.3, 2048, true);
+        var runtime = new OafConfig.RuntimeConfig(0.3, 2048, true, "default");
 
         when(oafConfig.name()).thenReturn("Test");
         when(oafConfig.vendorKey()).thenReturn("acme");

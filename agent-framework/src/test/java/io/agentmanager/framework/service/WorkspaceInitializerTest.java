@@ -44,7 +44,7 @@ class WorkspaceInitializerTest {
             List.of("test"), "You are a test agent.",
             skills, mcps, subAgents, tools, deniedTools,
             new OafConfig.ModelConfig("openai", "gpt-4", ""),
-            new OafConfig.RuntimeConfig(0.7, 4096, false),
+            new OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
             new OafConfig.MemoryConfig("editable", Map.of()),
             Map.of()
         );

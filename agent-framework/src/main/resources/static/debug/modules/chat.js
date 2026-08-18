@@ -20,6 +20,9 @@ const replyMap = {};          // replyId -> builder
 let pendingToolCalls = {};    // tcId -> {name, argsRaw, args, resultRaw, state}
 let thinkingTimer = null;
 
+// HITL 待确认状态：permission_ask 事件 → 渲染确认卡片，等待批量决策
+let pendingConfirm = null;    // {replyId, calls: [{tool_call_id, name, input}], cardEl}
+
 // 渲染器映射表（内置工具名 → 官方渲染样式）
 const RENDERERS = {
   bash: 'bash', shell: 'bash', exec_command: 'bash',
@@ -96,6 +99,7 @@ export default {
     if (thinkingTimer) clearInterval(thinkingTimer);
     if (activeAbort) activeAbort.abort();
     closeSubscription();
+    pendingConfirm = null;
     isStreaming = false;
   }
 };
@@ -231,6 +235,7 @@ function newThread() {
   ctx.state.setState('threads.current', null);
   closeSubscription();
   pendingToolCalls = {};
+  pendingConfirm = null;
   currentReply = null;
   messagesEl.innerHTML = '<div class="msg system">New thread started</div>';
   document.getElementById('btnLlmCalls').disabled = true;
@@ -630,6 +635,132 @@ function updateToolGroupTitle(r) {
   r.toolsTitleEl.textContent = summary.title;
 }
 
+// ---------- HITL 确认卡片 ----------
+
+/** 渲染权限确认卡片：批量展示待确认工具（名称 + 参数），Approve 全部 / Reject 全部 */
+function renderConfirmCard(r, data) {
+  if (pendingConfirm) dismissConfirmCard(); // 新 ASK 覆盖旧卡片（同 session 新 ASK 场景）
+  const calls = data.tool_calls || [];
+  if (calls.length === 0) return;
+
+  const card = document.createElement('div');
+  card.className = 'confirm-card';
+  const rows = calls.map((c) => {
+    let inputHtml = '';
+    const input = c.input;
+    if (input && typeof input === 'object') {
+      inputHtml = '<pre>' + ctx.utils.esc(JSON.stringify(input, null, 2)) + '</pre>';
+    } else if (input) {
+      inputHtml = '<pre>' + ctx.utils.esc(String(input)) + '</pre>';
+    }
+    return '<div class="confirm-tool">' +
+      '<div class="confirm-tool-name">' + ctx.utils.esc(c.name || 'tool') + '</div>' +
+      '<div class="confirm-tool-id">' + ctx.utils.esc(c.tool_call_id || '') + '</div>' +
+      (inputHtml ? '<div class="confirm-tool-input">' + inputHtml + '</div>' : '') +
+      '</div>';
+  }).join('');
+
+  card.innerHTML =
+    '<div class="confirm-card-header">' +
+      '<span class="confirm-title">⚠ 等待确认</span>' +
+      '<span class="confirm-sub">工具调用需人工批准</span>' +
+    '</div>' +
+    '<div class="confirm-tools">' + rows + '</div>' +
+    '<div class="confirm-actions">' +
+      '<button class="btn danger small" data-act="reject">Reject all</button>' +
+      '<button class="btn primary small" data-act="approve">Approve all</button>' +
+    '</div>';
+
+  card.querySelector('[data-act="approve"]').addEventListener('click', () =>
+    submitConfirm(calls, true));
+  card.querySelector('[data-act="reject"]').addEventListener('click', () =>
+    submitConfirm(calls, false));
+
+  // 卡片插到回复气泡之后（等同工具组位置）
+  const anchor = r.textEl || r.contentEl;
+  anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  pendingConfirm = { replyId: r.replyId, calls, cardEl: card };
+  scrollToBottom(true);
+}
+
+/** 移除当前确认卡片（确认已提交 / 新 ASK 覆盖） */
+function dismissConfirmCard() {
+  if (pendingConfirm && pendingConfirm.cardEl && pendingConfirm.cardEl.isConnected) {
+    pendingConfirm.cardEl.remove();
+  }
+  pendingConfirm = null;
+}
+
+/** 批量提交确认决策：results = [{tool_call_id, confirmed, accept_rule:false}] */
+async function submitConfirm(calls, approved) {
+  if (!pendingConfirm) return;
+  const results = calls.map((c) => ({
+    tool_call_id: c.tool_call_id,
+    confirmed: approved,
+    accept_rule: false
+  }));
+  const sid = currentSessionId();
+  if (!sid) {
+    ctx.utils.toast('No active session, cannot confirm', 'error');
+    return;
+  }
+
+  // 标记卡片为处理中（防重复点击）
+  pendingConfirm.cardEl.classList.add('processing');
+  pendingConfirm.cardEl.querySelectorAll('button').forEach((b) => (b.disabled = true));
+  pendingConfirm.cardEl.querySelector('.confirm-title').textContent = '处理中…';
+
+  const mode = ctx.state.getState('ui.streamMode');
+  const conn = ctx.state.getState('ui.connModel');
+
+  try {
+    if (mode === 'channel' && conn === 'session') {
+      // 长连接：confirm-stream 仅触发恢复，恢复事件经 SessionEventBus 扇出到原订阅，直接消费忽略
+      await consumeConfirmStream(sid, results, false);
+    } else {
+      // 单次流：原流已无后续事件（恢复是新调用），关闭原连接改走 confirm-stream 渲染
+      if (activeAbort) { try { activeAbort.abort(); } catch (e) { /* ignore */ } }
+      isStreaming = true;
+      await consumeConfirmStream(sid, results, true);
+      isStreaming = false;
+      loadThreads();
+    }
+  } catch (e) {
+    ctx.utils.toast('Confirm failed: ' + e.message, 'error');
+    pendingConfirm.cardEl.querySelectorAll('button').forEach((b) => (b.disabled = false));
+    pendingConfirm.cardEl.querySelector('.confirm-title').textContent = '⚠ 等待确认';
+  } finally {
+    // 长连接模式：卡片最终状态由 AGENT_END（经总线到达）收尾；此处保留处理中标记
+    if (mode === 'channel' && conn === 'session') {
+      pendingConfirm.cardEl.querySelector('.confirm-title').textContent = approved ? '已批准，继续执行…' : '已拒绝，继续执行…';
+    } else {
+      dismissConfirmCard();
+    }
+  }
+}
+
+/** 消费确认后事件流（render=true 时事件直接渲染；false 时仅触发恢复，事件经总线回流） */
+function consumeConfirmStream(sid, results, render) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err); else resolve();
+    };
+    ctx.api.confirmStream(sid, results, {
+      onEvent: (data) => {
+        if (render) handleEvent(data);
+        if (data.type === 'error') finish(new Error(data.error || 'confirm-stream error'));
+        if (data.type === 'done') finish();
+      },
+      onError: (e) => finish(e)
+    });
+    // 兜底超时（正常流以 done 帧收尾）
+    setTimeout(() => finish(), 30000);
+  });
+}
+
 // ---------- 事件处理（统一入口） ----------
 // SDK 语义：AGENT_START/END 是 agent 级 replyId，内部 block 事件（TEXT/THINKING/TOOL/MODEL）
 // 是 model 调用级 replyId（不同 id）。因此以 AGENT_START/END 为消息生命周期，
@@ -725,6 +856,17 @@ function handleEvent(data) {
     }
     case 'AGENT_END': {
       // 已在函数顶部统一处理（agent 级生命周期）
+      break;
+    }
+    case 'permission_ask': {
+      // HITL：工具调用被 ASK 拦截，渲染确认卡片（批量决策，见 hitl-permission-plan.md 8.3）
+      // permission_ask 通常跟随 AGENT_START 同 replyId；异常时并入当前回复兜底
+      const rr = r || ensureReply(data.replyId || 'perm-' + Date.now());
+      renderConfirmCard(rr, data);
+      break;
+    }
+    case 'user_confirm_result': {
+      // P2：恢复事件标记卡片已处理（当前确认后由提交逻辑直接移除卡片）
       break;
     }
     case 'error': {

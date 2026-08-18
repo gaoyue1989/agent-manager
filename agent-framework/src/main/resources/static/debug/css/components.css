@@ -212,6 +212,57 @@
 .diff-view pre { border: none; border-radius: 0; background: transparent; white-space: pre; overflow: visible; }
 .diff-view .d-add { background: var(--green-bg); color: var(--green); }
 .diff-view .d-del { background: var(--red-bg); color: var(--red); }
+
+/* ---------- HITL 确认卡片（permission_ask，见 hitl-permission-plan.md 8.3） ---------- */
+.confirm-card {
+  width: 100%;
+  margin: 8px 0;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.confirm-card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--accent-bg, var(--card));
+  border-bottom: 1px solid var(--border-subtle);
+}
+.confirm-card-header .confirm-title { color: var(--accent); font-weight: 600; font-size: 13px; }
+.confirm-card-header .confirm-sub { color: var(--text-dim); font-size: 11px; }
+.confirm-tools { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; max-height: 280px; overflow-y: auto; }
+.confirm-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+}
+.confirm-tool-name { color: var(--text-h); font-weight: 600; font-size: 12px; font-family: var(--mono); }
+.confirm-tool-id { color: var(--text-dim); font-size: 10px; font-family: var(--mono); }
+.confirm-tool-input pre {
+  margin: 0;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--mono);
+  color: var(--text-muted);
+  max-height: 160px;
+  overflow-y: auto;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.confirm-card.processing { opacity: 0.6; }
+.confirm-card.processing .confirm-actions button:disabled { cursor: default; }
 .diff-view .d-head { color: var(--text-dim); }
 
 /* --- MCP Apps iframe --- */

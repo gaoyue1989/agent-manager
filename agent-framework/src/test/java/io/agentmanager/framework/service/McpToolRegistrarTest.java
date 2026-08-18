@@ -3,17 +3,25 @@ package io.agentmanager.framework.service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import reactor.core.publisher.Mono;
+
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.model.OafConfig;
+import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
+import io.modelcontextprotocol.spec.McpSchema;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class McpToolRegistrarTest {
 
@@ -245,5 +253,113 @@ class McpToolRegistrarTest {
         assertNotNull(config);
         assertTrue(config.get("get_weather"));   // 无 enabled 字段默认 true
         assertFalse(config.get("query_db"));
+    }
+
+    @Test
+    void shouldLoadToolPermissions() throws Exception {
+        writeConfigYaml("perm-server", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            permissions:
+              read_only: false
+              tools:
+                list_directory: allow
+                write_file: ask
+                delete_file: deny
+            """);
+
+        var perms = registrar.loadToolPermissions(mcp("perm-server", "perm-server"));
+
+        assertEquals(3, perms.size());
+        assertEquals("allow", perms.get("list_directory"));
+        assertEquals("ask", perms.get("write_file"));
+        assertEquals("deny", perms.get("delete_file"));
+    }
+
+    @Test
+    void shouldReturnEmptyWhenPermissionsAbsent() throws Exception {
+        writeConfigYaml("no-perm", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        assertTrue(registrar.loadToolPermissions(mcp("no-perm", "no-perm")).isEmpty());
+    }
+
+    @Test
+    void shouldIgnoreUnknownBehavior() throws Exception {
+        writeConfigYaml("bad-perm", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            permissions:
+              tools:
+                read_file: allow
+                write_file: ban
+            """);
+
+        var perms = registrar.loadToolPermissions(mcp("bad-perm", "bad-perm"));
+
+        assertEquals(1, perms.size());
+        assertEquals("allow", perms.get("read_file"));
+        assertFalse(perms.containsKey("write_file"));
+    }
+
+    @Test
+    void shouldCollectPermissionRulesFromRegisteredTools() throws Exception {
+        // weather: get_weather=ask, update_weather=allow, delete_weather=deny（delete 未注册 → 忽略）
+        writeConfigYaml("weather", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            permissions:
+              tools:
+                get_weather: ask
+                update_weather: allow
+                delete_weather: deny
+            """);
+        writeConfigYaml("finance", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        seedRegisteredTools("weather", "get_weather", "update_weather");
+        seedRegisteredTools("finance", "query_db");
+
+        var oaf = mock(OafConfig.class);
+        when(oaf.runtimeConfig())
+            .thenReturn(new OafConfig.RuntimeConfig(0.7, 4096, false, "dont_ask"));
+        when(oaf.mcpServers())
+            .thenReturn(List.of(mcp("weather", "weather"), mcp("finance", "finance")));
+
+        var result = registrar.collectPermissionRules(oaf);
+
+        assertEquals(PermissionMode.DONT_ASK, result.mode());
+        // delete_weather 未注册被忽略；finance 无声明不产生规则
+        assertEquals(Map.of("get_weather", "ask", "update_weather", "allow"), result.tools());
+        assertEquals(Set.of("get_weather", "update_weather", "query_db"), result.mcpNames());
+    }
+
+    @Test
+    void shouldFallbackToDefaultModeWhenInvalid() throws Exception {
+        var oaf = mock(OafConfig.class);
+        when(oaf.runtimeConfig())
+            .thenReturn(new OafConfig.RuntimeConfig(0.7, 4096, false, "banana"));
+        when(oaf.mcpServers()).thenReturn(List.of());
+
+        assertEquals(PermissionMode.DEFAULT, registrar.collectPermissionRules(oaf).mode());
+    }
+
+    /** 预置已注册工具缓存（模拟 registerAll 后的注册结果） */
+    private void seedRegisteredTools(String server, String... names) {
+        var wrapper = mock(McpClientWrapper.class);
+        var tools = java.util.Arrays.stream(names)
+            .map(n -> new McpSchema.Tool(n, "", "desc", null, null, null, null))
+            .toList();
+        when(wrapper.listTools()).thenReturn(Mono.just(tools));
+        registrar.recordRegisteredTools(wrapper, server);
     }
 }
