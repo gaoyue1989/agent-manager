@@ -205,6 +205,7 @@ public class AgentScopeConfig {
         McpToolRegistrar mcpToolRegistrar,
         List<io.agentmanager.framework.tool.BusinessTools> customTools,
         LLMLogger llmLogger,
+        UiContextStore uiContextStore,
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         var llm = props.llm();
@@ -268,6 +269,8 @@ public class AgentScopeConfig {
                 .middleware(new io.agentmanager.framework.service.ReasoningTracingMiddleware())
                 // LLM 调用记录（debug 页面，order=1，默认值，保留）
                 .middleware(new LlmLoggingMiddleware(llmLogger))
+                // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
+                .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
 

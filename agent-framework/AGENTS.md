@@ -42,8 +42,11 @@ agent-framework/
 │   │   │   ├── service/
 │   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream)
 │   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换
-│   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder)
+│   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
+│   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
+│   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
+│   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
@@ -62,6 +65,8 @@ agent-framework/
 │   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
 │   │   │       ├── SessionStreamController.java # GET /events + POST /chat (长连接 SSE, 新)
 │   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (StreamController + SessionStreamController)
+│   │   │       ├── McpProxyController.java      # MCP Apps: GET /mcp/{server}/resources/ui 等 (前端资源代理)
+│   │   │       ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7 静默更新)
 │   │   │       ├── ThreadController.java        # GET /threads
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
@@ -69,10 +74,10 @@ agent-framework/
 │   │       └── static/debug/                    # 调试页面 (拆分架构)
 │   │           ├── index.html                   # 调试页入口
 │   │           ├── css/                         # 样式 (base/components/layout)
-│   │           ├── js/                          # 脚本 (api/app/router)
+│   │           ├── js/                          # 脚本 (api/app/router), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 308 个测试用例 (含 SessionStreamControllerTest)
-├── docs/                                     # 改进方案文档 (14 份)
+│   └── test/                                  # 382 个测试用例
+├── docs/                                     # 改进方案文档 (16 份, 含 mcp-apps-extension-plan.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
@@ -116,6 +121,13 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - **支持 `permissions.read_only: true`**: 非只读 MCP 工具被权限系统拦截时，强制注册为只读绕过 HITL
 - **支持 ActiveMCP.json 子集过滤**: `selectedTools` 中 `enabled: false` 的工具不注册到 Toolkit
 - **工具注册名**: 使用远端裸名（`tool.name()`），确保 `McpTool.callAsync` 正确执行；`mcp__{server}__{tool}` 前缀名仅用于 API 展示和注册缓存（因 `McpTool.getName()` 是 `final` 字段，无法分离 LLM 暴露名和执行名）
+- **MCP Apps (阶段一/二)**: config.yaml 支持 `ui.tools.{tool}.resource_uri`（`ui://xxx` 静态声明）与 `ui.app_only: true`（仅卡片展示、不入 LLM 工具集）；`resolveUiRef(toolName)` 供 SSE 序列化携带 `ui` 元数据；`/tools`、`/mcp` 接口输出 `uiResourceUri`/`appOnly`/`has_ui`；Manifest 动态发现（`tool.meta()` 的 `_meta`）用于 resourceUri 预检
+
+### 3.5 MCP Apps 运行链路（Debug 页卡片 + 4.7 静默更新）
+
+- **卡片渲染**: TOOL_CALL_START 事件带 `toolName` → `registrar.resolveUiRef` 解析 `ui://` 资源 → SSE payload 携带 `ui` 字段 → 前端 `mcp-app-host.js` 经 `McpResourceProxy` 拉取 HtmlResource（注入 CSP meta）→ 沙箱 iframe（srcdoc, sandbox=allow-scripts, opaque origin）→ JSON-RPC over postMessage（`ui/initialize` handshake → `tools/call` 转发 `McpProxyController` → `ui/update-model-context`）
+- **卡片锚点（重要）**: 卡片必须挂 `r.contentEl`，不可挂 textEl —— `TEXT_BLOCK_DELTA` 会对 textEl `innerHTML` 整体重写，工具调用发生在文本输出之后时卡片会被误清
+- **4.7 ui_context**: `POST /mcp/ui-context` 写 `ui_context` 表（sessionId 维度覆盖写）→ 前端在用户消息 `metadata` 写入会话 key（`UiContextStore.METADATA_SESSION_KEY`）→ `UiContextInjectionHook` 在 PreCallEvent 阶段按会话查库 `appendSystemContent` 注入（HarnessAgent 拒绝 inputMessages 中 SYSTEM 消息，只能经 setSystemMessage/appendSystemContent）
 
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
@@ -242,6 +254,10 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/chat/stream` | Channel SSE 一次性流对话（旧） |
 | GET | `/debug/threads/{sid}/events` | 长连接 SSE 订阅（新，对齐官方 agentscope 模式） |
 | POST | `/debug/threads/{sid}/chat` | 长连接触发（fire-and-forget，事件经事件总线回流） |
+| GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |
+| GET | `/mcp/{server}/resources` | MCP Apps: 列出服务器资源 |
+| POST | `/mcp/{server}/tools/{tool}` | MCP Apps: 卡片工具调用代理（ask 工具 403 + needsConfirm 走确认流） |
+| POST | `/mcp/ui-context` | MCP Apps (4.7): 静默更新模型上下文（ui_context 表持久化，Hook 下次调用注入） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 
 ---
@@ -283,7 +299,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (300 用例)
+mvn -o test            # 容器内离线测试 (382 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -293,6 +309,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 300 个测试，全部通过 (含新增 tracing 测试)
+mvn test     # 382 个测试，全部通过 (含 MCP Apps 阶段一/二测试)
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

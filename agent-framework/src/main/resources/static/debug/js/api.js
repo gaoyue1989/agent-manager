@@ -179,8 +179,15 @@ export const api = {
     };
   },
 
-  // MCP 资源（UI 渲染）
-  readMcpResource: (server, uri) => post('/mcp/resources/read', { server, uri }),
+  // MCP Apps（阶段一/二端点，见 mcp-apps-extension-plan.md 4.4）
+  readMcpUiResource: (server, uri) =>
+    get('/mcp/' + encodeURIComponent(server) + '/resources/ui?uri=' + encodeURIComponent(uri)),
+  listMcpUiResources: (server) => get('/mcp/' + encodeURIComponent(server) + '/resources'),
+  callMcpTool: (server, tool, args, confirmed) =>
+    post('/mcp/' + encodeURIComponent(server) + '/tools/' + encodeURIComponent(tool),
+      { arguments: args || {}, confirmed: !!confirmed }),
+  updateUiContext: (sessionId, content, structuredContent) =>
+    post('/mcp/ui-context', { sessionId, content, structuredContent }),
 
   // A2A 同步调用（转发 SDK，userId/sessionId 写入 message.metadata）
   sendA2A: async (text, { userId, sessionId, metadata } = {}) => {

@@ -135,13 +135,17 @@ public class McpManager {
                 // 使用 McpToolRegistrar 注册缓存获取真实 tool_count
                 var serverName = (String) mc.getOrDefault("server", "unknown");
                 int toolCount = mcpToolRegistrar.getToolsByServer(serverName).size();
+                // MCP Apps：server 级 has_ui 标记（该 server 有带 UI 的工具，供前端预检）
+                boolean hasUi = mcpToolRegistrar.getToolsByServer(serverName).stream()
+                    .anyMatch(t -> t.uiResourceUri() != null);
 
                 summaries.add(Map.of(
                     "server", serverName,
                     "vendor", mc.getOrDefault("vendor", ""),
                     "connection_type", conn.getOrDefault("type", "N/A"),
                     "url", conn.getOrDefault("url", "N/A"),
-                    "tool_count", toolCount
+                    "tool_count", toolCount,
+                    "has_ui", hasUi
                 ));
             } catch (Exception e) {
                 log.warn("Failed to get summary for server: {}", mc.get("server"), e);
@@ -151,6 +155,7 @@ public class McpManager {
                     "connection_type", "N/A",
                     "url", "N/A",
                     "tool_count", 0,
+                    "has_ui", false,
                     "error", e.getMessage()
                 ));
             }

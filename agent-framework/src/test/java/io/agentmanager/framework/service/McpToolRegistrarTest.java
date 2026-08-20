@@ -129,6 +129,67 @@ class McpToolRegistrarTest {
         assertNull(wrapper);
     }
 
+    // ===== MCP Apps: McpResourceProxy 独立同步 client 构建 =====
+
+    @Test
+    void shouldBuildSyncClientForStreamableHttp() throws Exception {
+        writeConfigYaml("sync-http", """
+            connection:
+              type: streamableHttp
+              url: http://localhost:8811/mcp
+            """);
+
+        var client = registrar.buildSyncClient(mcp("sync-http", "sync-http"));
+        assertNotNull(client);
+        assertFalse(client.isInitialized()); // 构建不连接（懒连接由代理控制）
+    }
+
+    @Test
+    void shouldBuildSyncClientForSse() throws Exception {
+        writeConfigYaml("sync-sse", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        var client = registrar.buildSyncClient(mcp("sync-sse", "sync-sse"));
+        assertNotNull(client);
+        assertFalse(client.isInitialized());
+    }
+
+    @Test
+    void shouldBuildSyncClientForStdio() throws Exception {
+        writeConfigYaml("sync-stdio", """
+            connection:
+              type: stdio
+              command: python
+              args: ["mcp_server.py"]
+            """);
+
+        var client = registrar.buildSyncClient(mcp("sync-stdio", "sync-stdio"));
+        assertNotNull(client);
+    }
+
+    @Test
+    void shouldBuildSyncClientWithAuthToken() throws Exception {
+        writeConfigYaml("sync-auth", """
+            connection:
+              type: streamableHttp
+              url: http://localhost:8811/mcp
+            auth:
+              type: bearer
+              token: ${TEST_MCP_TOKEN}
+            """);
+
+        var client = registrar.buildSyncClient(mcp("sync-auth", "sync-auth"));
+        assertNotNull(client);
+    }
+
+    @Test
+    void shouldReturnNullSyncClientWhenConfigMissing() {
+        assertNull(registrar.buildSyncClient(mcp("sync-missing", "sync-missing")));
+    }
+
     @Test
     void shouldReturnNullWhenConnectionSectionMissing() throws Exception {
         writeConfigYaml("no-conn", """
@@ -351,6 +412,269 @@ class McpToolRegistrarTest {
         when(oaf.mcpServers()).thenReturn(List.of());
 
         assertEquals(PermissionMode.DEFAULT, registrar.collectPermissionRules(oaf).mode());
+    }
+
+    // ===== MCP Apps: ui 静态声明解析 =====
+
+    @Test
+    void shouldLoadUiMappingWithToolsAppOnlyAndCsp() throws Exception {
+        writeConfigYaml("weather", """
+            connection:
+              type: streamableHttp
+              url: http://localhost:8811/mcp
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+                get_forecast: "ui://weather/forecast.html"
+              app_only:
+                refresh_dashboard: "ui://weather/mcp-app.html"
+              csp:
+                connect_domains: ["https://api.weather.com"]
+                resource_domains: ["https://cdn.jsdelivr.net"]
+            """);
+
+        var mapping = registrar.loadUiMapping(mcp("weather", "weather"));
+
+        assertEquals(2, mapping.tools().size());
+        assertEquals("ui://weather/mcp-app.html", mapping.tools().get("get_weather"));
+        assertEquals("ui://weather/forecast.html", mapping.tools().get("get_forecast"));
+        assertEquals(1, mapping.appOnly().size());
+        assertEquals("ui://weather/mcp-app.html", mapping.appOnly().get("refresh_dashboard"));
+        assertEquals(List.of("https://api.weather.com"), mapping.csp().connectDomains());
+        assertEquals(List.of("https://cdn.jsdelivr.net"), mapping.csp().resourceDomains());
+    }
+
+    @Test
+    void shouldReturnEmptyUiMappingWhenUiSectionAbsent() throws Exception {
+        writeConfigYaml("plain", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        var mapping = registrar.loadUiMapping(mcp("plain", "plain"));
+
+        assertTrue(mapping.tools().isEmpty());
+        assertTrue(mapping.appOnly().isEmpty());
+        assertEquals(List.of(), mapping.csp().connectDomains());
+    }
+
+    @Test
+    void shouldIgnoreNonUiSchemeEntries() throws Exception {
+        writeConfigYaml("bad-uri", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+                bad_tool: "http://evil.example.com/x.html"
+            """);
+
+        var mapping = registrar.loadUiMapping(mcp("bad-uri", "bad-uri"));
+
+        assertEquals(1, mapping.tools().size());
+        assertEquals("ui://weather/mcp-app.html", mapping.tools().get("get_weather"));
+        assertFalse(mapping.tools().containsKey("bad_tool"));
+    }
+
+    // ===== MCP Apps: 自动发现兜底 =====
+
+    @Test
+    void shouldDiscoverUiFromToolMetaWhenNotDeclared() throws Exception {
+        writeConfigYaml("auto-srv", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        var wrapper = mock(McpClientWrapper.class);
+        var metaTool = new McpSchema.Tool("get_time", "", "desc", null, null, null,
+            Map.of("ui", Map.of("resourceUri", "ui://get-time/mcp-app.html")));
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(metaTool)));
+
+        registrar.recordRegisteredTools(wrapper, "auto-srv");
+
+        var info = registrar.getToolsByServer("auto-srv").get(0);
+        assertEquals("ui://get-time/mcp-app.html", info.uiResourceUri());
+        assertEquals("auto", info.uiSource());
+    }
+
+    @Test
+    void shouldPreferConfigDeclarationOverAutoDiscovery() throws Exception {
+        writeConfigYaml("prefer-config", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_time: "ui://custom/time.html"
+            """);
+
+        var wrapper = mock(McpClientWrapper.class);
+        var metaTool = new McpSchema.Tool("get_time", "", "desc", null, null, null,
+            Map.of("ui", Map.of("resourceUri", "ui://get-time/mcp-app.html")));
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(metaTool)));
+
+        var mapping = registrar.loadUiMapping(mcp("prefer-config", "prefer-config"));
+        registrar.recordRegisteredTools(wrapper, "prefer-config", mapping);
+
+        var info = registrar.getToolsByServer("prefer-config").get(0);
+        assertEquals("ui://custom/time.html", info.uiResourceUri());
+        assertEquals("config", info.uiSource());
+    }
+
+    @Test
+    void shouldNotDiscoverWhenMetaHasNoUi() throws Exception {
+        writeConfigYaml("no-ui", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            """);
+
+        var wrapper = mock(McpClientWrapper.class);
+        var plainTool = new McpSchema.Tool("echo", "", "desc", null, null, null, null);
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(plainTool)));
+
+        registrar.recordRegisteredTools(wrapper, "no-ui");
+
+        var info = registrar.getToolsByServer("no-ui").get(0);
+        assertNull(info.uiResourceUri());
+    }
+
+    // ===== MCP Apps: app_only 工具 =====
+
+    @Test
+    void shouldHandleAppOnlyToolsWithUiMapping() throws Exception {
+        writeConfigYaml("app-only-srv", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            permissions:
+              read_only: true
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+              app_only:
+                refresh_dashboard: "ui://weather/mcp-app.html"
+            """);
+
+        var wrapper = mock(McpClientWrapper.class);
+        var tools = List.of(
+            new McpSchema.Tool("get_weather", "", "desc", null, null, null, null),
+            new McpSchema.Tool("refresh_dashboard", "", "desc", null, null, null, null),
+            new McpSchema.Tool("delete_weather", "", "desc", null, null,
+                new McpSchema.ToolAnnotations(null, null, true, null, null, null), null)
+        );
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.just(tools));
+
+        var toolkit = mock(Toolkit.class);
+        var mapping = registrar.loadUiMapping(mcp("app-only-srv", "app-only-srv"));
+        registrar.registerReadOnlyForTest(toolkit, wrapper, "app-only-srv", null, mapping);
+
+        // app_only 工具不注册 Toolkit，但记录 ToolInfo（含 uiResourceUri + appOnly 标记）
+        var registered = registrar.getToolsByServer("app-only-srv");
+        assertEquals(3, registered.size());
+        assertTrue(registrar.isAppOnly("app-only-srv", "refresh_dashboard"));
+        assertEquals("ui://weather/mcp-app.html",
+            registered.stream().filter(t -> t.name().equals("refresh_dashboard")).findFirst().get().uiResourceUri());
+        // read_only server + destructive 工具 → proxy 应拒绝
+        assertTrue(registrar.isServerReadOnly("app-only-srv"));
+        assertTrue(registrar.isDestructiveHint("app-only-srv", "delete_weather"));
+        // 仅 get_weather 与 delete_weather 注册进 Toolkit，app_only 的 refresh_dashboard 不注册
+        var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.tool.AgentTool.class);
+        org.mockito.Mockito.verify(toolkit, org.mockito.Mockito.times(2))
+            .registerTool(captor.capture());
+        var registeredNames = captor.getAllValues().stream()
+            .map(io.agentscope.core.tool.AgentTool::getName).toList();
+        assertTrue(registeredNames.contains("get_weather"));
+        assertTrue(registeredNames.contains("delete_weather"));
+        assertFalse(registeredNames.contains("refresh_dashboard"));
+    }
+
+    // ===== MCP Apps: resolveUiRef 裸名歧义 =====
+
+    @Test
+    void shouldResolveUiRefWhenUniqueUriAcrossServers() throws Exception {
+        writeConfigYaml("srv-a", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+            """);
+        writeConfigYaml("srv-b", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+            """);
+
+        seedRegisteredToolsWithUi("srv-a", "get_weather", "ui://weather/mcp-app.html");
+        seedRegisteredToolsWithUi("srv-b", "get_weather", "ui://weather/mcp-app.html");
+
+        var ref = registrar.resolveUiRef("get_weather");
+
+        assertNotNull(ref);
+        assertEquals("ui://weather/mcp-app.html", ref.resourceUri());
+    }
+
+    @Test
+    void shouldReturnNullOnConflictingUiUris() throws Exception {
+        writeConfigYaml("srv-c", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+            """);
+        writeConfigYaml("srv-d", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_weather: "ui://stocks/mcp-app.html"
+            """);
+
+        seedRegisteredToolsWithUi("srv-c", "get_weather", "ui://weather/mcp-app.html");
+        seedRegisteredToolsWithUi("srv-d", "get_weather", "ui://stocks/mcp-app.html");
+
+        assertNull(registrar.resolveUiRef("get_weather"));
+    }
+
+    // ===== MCP Apps: /tools 与 proxy 用到的查询 =====
+
+    @Test
+    void shouldReturnDeclaredUiResourceUris() throws Exception {
+        writeConfigYaml("weather", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            ui:
+              tools:
+                get_weather: "ui://weather/mcp-app.html"
+            """);
+
+        seedRegisteredToolsWithUi("weather", "get_weather", "ui://weather/mcp-app.html");
+
+        var uris = registrar.getUiResourceUris("weather");
+
+        assertEquals(Set.of("ui://weather/mcp-app.html"), uris);
+    }
+
+    /** 预置带 ui 元数据的工具缓存 */
+    private void seedRegisteredToolsWithUi(String server, String name, String uri) {
+        var wrapper = mock(McpClientWrapper.class);
+        when(wrapper.listTools()).thenReturn(Mono.just(List.of(
+            new McpSchema.Tool(name, "", "desc", null, null, null, null))));
+        var mapping = new McpToolRegistrar.UiMapping(Map.of(name, uri), Map.of(), McpToolRegistrar.UiCsp.empty());
+        registrar.recordRegisteredTools(wrapper, server, mapping);
     }
 
     /** 预置已注册工具缓存（模拟 registerAll 后的注册结果） */

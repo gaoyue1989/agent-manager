@@ -85,12 +85,21 @@ public class ToolController {
         for (var config : mcpConfigs) {
             String serverName = (String) config.getOrDefault("server", "unknown");
             mcpToolRegistrar.getToolsByServer(serverName).stream()
-                .map(tool -> Map.<String, Object>of(
-                    "name", tool.name(),
-                    "server", serverName,
-                    "category", "mcp",
-                    "description", tool.description() != null ? tool.description() : ""
-                ))
+                .map(tool -> {
+                    var item = new java.util.LinkedHashMap<String, Object>();
+                    item.put("name", tool.name());
+                    item.put("server", serverName);
+                    item.put("category", "mcp");
+                    item.put("description", tool.description() != null ? tool.description() : "");
+                    // MCP Apps：UI 元数据 + app_only 标记（前端据此区分展示）
+                    if (tool.uiResourceUri() != null) {
+                        item.put("uiResourceUri", tool.uiResourceUri());
+                    }
+                    if (tool.appOnly()) {
+                        item.put("appOnly", true);
+                    }
+                    return item;
+                })
                 .forEach(result::add);
         }
         return result;

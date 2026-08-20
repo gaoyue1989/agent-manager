@@ -1,5 +1,7 @@
 /* ===== Chat 模块：官方对齐渲染 + 长连接 SSE / A2A / 单次流 三模式 ===== */
 
+import { McpAppHost, buildToolResult } from '../js/mcp-app-host.js';
+
 let ctx = null;
 let messagesEl = null;       // msg 容器（居中列）
 let inputEl = null;
@@ -22,6 +24,9 @@ let thinkingTimer = null;
 
 // HITL 待确认状态：permission_ask 事件 → 渲染确认卡片，等待批量决策
 let pendingConfirm = null;    // {replyId, calls: [{tool_call_id, name, input}], cardEl}
+
+// MCP Apps 卡片宿主单例：tcId -> McpAppHost（AGENT_END 时 teardown，iframe 保留静态渲染）
+const appHosts = {};          // tcId -> McpAppHost
 
 // 渲染器映射表（内置工具名 → 官方渲染样式）
 const RENDERERS = {
@@ -99,6 +104,7 @@ export default {
     if (thinkingTimer) clearInterval(thinkingTimer);
     if (activeAbort) activeAbort.abort();
     closeSubscription();
+    teardownAllAppHosts();
     pendingConfirm = null;
     isStreaming = false;
   }
@@ -234,6 +240,7 @@ function selectThread(sessionId) {
 function newThread() {
   ctx.state.setState('threads.current', null);
   closeSubscription();
+  teardownAllAppHosts();
   pendingToolCalls = {};
   pendingConfirm = null;
   currentReply = null;
@@ -246,6 +253,7 @@ function newThread() {
 
 async function loadThreadHistory(sessionId) {
   messagesEl.innerHTML = '<div class="msg system">Loading history...</div>';
+  teardownAllAppHosts();
   pendingToolCalls = {};
   try {
     const data = await ctx.api.getThreadHistory(sessionId);
@@ -761,6 +769,115 @@ function consumeConfirmStream(sid, results, render) {
   });
 }
 
+// ---------- MCP Apps 卡片（阶段二，见 mcp-apps-extension-plan.md §5.1） ----------
+
+/** 渲染 MCP App 交互式卡片：占位卡片 → 异步拉资源 → 沙箱 iframe 挂载 */
+function renderMcpAppCard(r, data) {
+  const tcId = data.toolCallId;
+  const toolName = data.toolName || 'mcp-app';
+  const ui = data.ui || {};   // {resourceUri, server}
+  if (!pendingToolCalls[tcId]) {
+    pendingToolCalls[tcId] = { name: toolName, argsRaw: '', argsText: '', resultRaw: null, state: null };
+  }
+
+  const card = document.createElement('div');
+  card.className = 'mcp-apps-container open';
+  card.innerHTML =
+    '<div class="mcp-apps-header">' +
+      '<span class="app-label">MCP App</span>' +
+      '<span class="app-name">' + ctx.utils.esc(toolName) + '</span>' +
+      '<span class="app-uri">' + ctx.utils.esc(ui.resourceUri || '') + '</span>' +
+      '<span class="tc-toggle">▶</span>' +
+    '</div>' +
+    '<div class="mcp-apps-body"><div class="mcp-apps-loading">加载中…</div></div>';
+  card.querySelector('.mcp-apps-header').addEventListener('click', () => card.classList.toggle('open'));
+  // 挂载到回复内容容器（textEl 会被 TEXT_BLOCK_DELTA 的 innerHTML 整体重写，
+  // 若工具调用发生在文本输出之后，卡片会被误清，故固定挂 contentEl，与工具行一致）
+  const anchor = r.contentEl;
+  anchor.appendChild(card);
+  const bodyEl = card.querySelector('.mcp-apps-body');
+
+  const host = new McpAppHost({
+    tcId,
+    server: ui.server,
+    resourceUri: ui.resourceUri,
+    toolName,
+    callbacks: {
+      // 卡片 tools/call 触发 ask 工具：403 needsConfirm → 卡片外确认卡片，Approve 后重试（5.1.3）
+      needsConfirm: (call) => renderAppConfirmCard(call),
+      log: (level, msg) => console.log('[mcp-app:' + tcId + '] ' + level + ':', msg)
+    }
+  });
+  appHosts[tcId] = host;
+  mountAppCard(host, bodyEl);
+  scrollToBottom(false);
+}
+
+/** 异步挂载：拉取资源 → 沙箱 iframe；失败显示错误 + 重试 */
+async function mountAppCard(host, bodyEl) {
+  try {
+    await host.mount(bodyEl);
+  } catch (e) {
+    bodyEl.innerHTML =
+      '<div class="mcp-apps-error">' + ctx.utils.esc(e.message || '资源加载失败') + '</div>' +
+      '<div><button class="btn small" data-retry>重试</button></div>';
+    const retry = bodyEl.querySelector('[data-retry]');
+    if (retry) retry.addEventListener('click', () => {
+      bodyEl.innerHTML = '<div class="mcp-apps-loading">加载中…</div>';
+      mountAppCard(host, bodyEl);
+    });
+  }
+  scrollToBottom(false);
+}
+
+/** 卡片 tools/call 确认流：Approve/Reject 单工具决策（复用 .confirm-card 样式，上传确认重试下载） */
+function renderAppConfirmCard(call) {
+  return new Promise((resolve) => {
+    const card = document.createElement('div');
+    card.className = 'confirm-card';
+    card.innerHTML =
+      '<div class="confirm-card-header">' +
+        '<span class="confirm-title">⚠ 等待确认</span>' +
+        '<span class="confirm-sub">MCP App 工具调用需人工批准</span>' +
+      '</div>' +
+      '<div class="confirm-tools"><div class="confirm-tool">' +
+        '<div class="confirm-tool-name">' + ctx.utils.esc(call.name || 'tool') + '</div>' +
+        '<div class="confirm-tool-input"><pre>' + ctx.utils.esc(JSON.stringify(call.arguments || {}, null, 2)) + '</pre></div>' +
+      '</div></div>' +
+      '<div class="confirm-actions">' +
+        '<button class="btn danger small" data-act="reject">Reject</button>' +
+        '<button class="btn primary small" data-act="approve">Approve</button>' +
+      '</div>';
+    const settle = (ok) => {
+      try { card.remove(); } catch (e) { /* ignore */ }
+      resolve(ok);
+    };
+    card.querySelector('[data-act="approve"]').addEventListener('click', () => settle(true));
+    card.querySelector('[data-act="reject"]').addEventListener('click', () => settle(false));
+    const anchor = currentReply ? (currentReply.textEl || currentReply.contentEl) : messagesEl;
+    if (anchor && anchor.parentNode) {
+      anchor.parentNode.insertBefore(card, anchor.nextSibling);
+    } else if (anchor) {
+      anchor.appendChild(card);
+    }
+    scrollToBottom(true);
+  });
+}
+
+/** 回复结束 / 线程切换：通知各卡片 teardown（iframe 保留静态渲染），清理单例 */
+function teardownAllAppHosts() {
+  for (const key of Object.keys(appHosts)) {
+    try { appHosts[key].teardown('reply-completed'); } catch (e) { /* ignore */ }
+    delete appHosts[key];
+  }
+}
+
+/** 工具参数解析：SSE 增量拼接的原始 JSON → 对象（供 tool-input 下发） */
+function parseToolArgs(argsRaw) {
+  if (!argsRaw) return {};
+  try { return JSON.parse(argsRaw); } catch (e) { return {}; }
+}
+
 // ---------- 事件处理（统一入口） ----------
 // SDK 语义：AGENT_START/END 是 agent 级 replyId，内部 block 事件（TEXT/THINKING/TOOL/MODEL）
 // 是 model 调用级 replyId（不同 id）。因此以 AGENT_START/END 为消息生命周期，
@@ -786,6 +903,8 @@ function handleEvent(data) {
     sendBtn.textContent = 'Send';
     sendBtn.classList.remove('danger');
     setConnecting('chatTitle', false);
+    // MCP Apps：回复结束 → 通知各卡片 teardown（iframe 保留静态渲染）
+    teardownAllAppHosts();
     scrollToBottom(true);
     loadThreads();
     return;
@@ -814,7 +933,14 @@ function handleEvent(data) {
       break;
     }
     case 'TOOL_CALL_START': {
-      if (r) onToolCallStart(r, data.toolCallId, data.toolName);
+      if (r) {
+        // MCP Apps：工具带 ui 元数据 → 渲染交互式卡片（不走普通工具行）
+        if (data.ui && data.ui.resourceUri) {
+          renderMcpAppCard(r, data);
+        } else {
+          onToolCallStart(r, data.toolCallId, data.toolName);
+        }
+      }
       break;
     }
     case 'TOOL_CALL_DELTA': {
@@ -834,7 +960,17 @@ function handleEvent(data) {
       break;
     }
     case 'TOOL_RESULT_END': {
-      if (r) onToolResultEnd(r, data.toolCallId, data.state);
+      if (r) {
+        // MCP Apps：结果到达 → 通知卡片（tool-input 完整参数 → tool-result），按规范顺序下发
+        const host = appHosts[data.toolCallId];
+        if (host) {
+          const tc = pendingToolCalls[data.toolCallId] || {};
+          host.sendToolInput(parseToolArgs(tc.argsRaw));
+          host.sendToolResult(buildToolResult(tc.resultRaw, data.state));
+        } else {
+          onToolResultEnd(r, data.toolCallId, data.state);
+        }
+      }
       break;
     }
     case 'MODEL_CALL_START': {

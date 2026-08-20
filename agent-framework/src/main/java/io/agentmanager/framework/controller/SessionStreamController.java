@@ -1,6 +1,7 @@
 package io.agentmanager.framework.controller;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Map;
 
 import org.slf4j.Logger;
@@ -17,10 +18,15 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventBus;
+import io.agentmanager.framework.service.UiContextStore;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.MsgRole;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
-import io.agentscope.harness.agent.gateway.channel.chatui.SendOptions;
+import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
 
 /**
@@ -44,11 +50,14 @@ public class SessionStreamController {
     private final ChatUiChannel chatChannel;
     private final SessionEventBus eventBus;
     private final AgentRuntimeService runtimeService;
+    private final McpToolRegistrar mcpToolRegistrar;
 
-    public SessionStreamController(ChatUiChannel chatChannel, SessionEventBus eventBus, AgentRuntimeService runtimeService) {
+    public SessionStreamController(ChatUiChannel chatChannel, SessionEventBus eventBus,
+                                   AgentRuntimeService runtimeService, McpToolRegistrar mcpToolRegistrar) {
         this.chatChannel = chatChannel;
         this.eventBus = eventBus;
         this.runtimeService = runtimeService;
+        this.mcpToolRegistrar = mcpToolRegistrar;
     }
 
     @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -59,7 +68,7 @@ public class SessionStreamController {
             .event("connected").data("{}").build();
         return Flux.concat(
                 Flux.just(connected),
-                sink.asFlux().map(SessionStreamController::toSSE))
+                sink.asFlux().map(e -> toSSE(e, mcpToolRegistrar)))
             .mergeWith(tick(sessionId))
             .doFinally(sig -> eventBus.onUnsubscribe(sessionId));
     }
@@ -78,10 +87,19 @@ public class SessionStreamController {
         if (message == null || message.isBlank()) {
             return Map.of("accepted", false, "error", "message is required");
         }
-        var options = SendOptions.of(body.userId() != null ? body.userId() : "debug-user", sessionId);
+        var userId = body.userId() != null ? body.userId() : "debug-user";
+
+        // 消息列表：UI 交互上下文（4.7）经 UiContextInjectionHook 注入——
+        // HarnessAgent 拒绝 inputMessages 中 SYSTEM 消息，这里仅把会话 key 写入
+        // 用户消息 metadata，Hook 在 PreCallEvent 阶段按会话查库 appendSystemContent
+        var messages = new ArrayList<Msg>();
+        messages.add(Msg.builder().role(MsgRole.USER).name(userId)
+            .metadata(Map.of(UiContextStore.METADATA_SESSION_KEY, sessionId))
+            .textContent(message).build());
 
         // fire-and-forget：订阅触发，事件经事件总线扇出；AGENT_END 为终态标记，前端据此收尾
-        chatChannel.sendStream(options, message)
+        // ChatUiRequest.withPeer 的 peerId 即会话 key（= SendOptions.of(u,s).effectiveSessionKey()）
+        chatChannel.sendStream(ChatUiRequest.withPeer(sessionId, messages))
             .doOnNext(event -> {
                 eventBus.emit(sessionId, event);
                 runtimeService.storeConfirmContext(sessionId, event);  // Channel 流程存储确认上下文
@@ -93,9 +111,19 @@ public class SessionStreamController {
         return Map.of("accepted", true, "sessionId", sessionId);
     }
 
-    private static ServerSentEvent<String> toSSE(AgentEvent event) {
+    private static ServerSentEvent<String> toSSE(AgentEvent event, McpToolRegistrar registrar) {
+        String data;
+        if (event instanceof ToolCallStartEvent tc) {
+            // MCP Apps：工具带 ui 元数据时 payload 携带 ui 字段（裸名冲突时 resolveUiRef 返回 null 降级）
+            var uiRef = registrar.resolveUiRef(tc.getToolCallName());
+            data = uiRef != null
+                ? AgentEventSseSerializer.payload(event, uiRef.resourceUri(), uiRef.serverName())
+                : AgentEventSseSerializer.payload(event);
+        } else {
+            data = AgentEventSseSerializer.payload(event);
+        }
         return ServerSentEvent.<String>builder()
-            .data(AgentEventSseSerializer.payload(event))
+            .data(data)
             .build();
     }
 
