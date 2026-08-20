@@ -19,15 +19,15 @@ Agent Framework (Java) 的测试基于 **Spring Boot Test** + **JUnit 5**。
 
 ## 2. 测试 LLM 配置
 
-所有 E2E 测试使用以下 LLM 配置（2026-08-12 更新为 sensenova，见 `.env.secrets`）：
+所有 E2E 测试使用以下 LLM 配置（2026-08-20 更新为 OpenRouter nemotron，见 `.env.secrets`）：
 
 ```yaml
 # application-test.yml
 agent:
   llm:
-    api-key: ${LLM_API_KEY}          # .env.secrets: sk-WBHF2xYYN61Kde4mXnYYjkxJxryw9KIB
-    model-id: ${LLM_MODEL}           # sensenova-6.7-flash-lite
-    base-url: ${LLM_ENDPOINT}        # https://token.sensenova.cn/v1
+    api-key: ${LLM_API_KEY}          # .env.secrets: sk-or-v1-a8a907a...
+    model-id: ${LLM_MODEL}           # nemotron-3-nano-30b-a3b:free
+    base-url: ${LLM_ENDPOINT}        # https://openrouter.ai/api/v1
     provider: openai
     temperature: 0.2
     max-tokens: 50
@@ -127,7 +127,7 @@ class AgentFrameworkApplicationTests {
 - subagents 生成
 - 幂等不覆盖已有文件
 
-### 4.8 McpToolRegistrarTest (15 个用例)
+### 4.8 McpToolRegistrarTest (35 个用例)
 
 覆盖场景：
 - SSE / stdio / streamableHttp 三种传输构建
@@ -145,6 +145,17 @@ class AgentFrameworkApplicationTests {
 
 - `echo` 前缀 / 空值 / 空白保留
 - `get_current_time` ISO 格式（含纳秒）、UTC、非法时区抛异常
+
+### 4.10 MCP Apps 测试（阶段一/二，2026-08-19 新增）
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| UiContextStoreTest | 9 | upsert 覆盖写 / 查询 / 删除 / 会话 key 聚合、sessionId 格式校验 |
+| UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
+| UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
+| McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
+| SessionStreamControllerTest | 13 | metadata 携带会话 key 注入 / ui 元数据 SSE / 长连接订阅 |
+| StreamControllerTest | 8 | ui 元数据序列化 / 无 UI 工具降级原词表 |
 
 ---
 
@@ -223,23 +234,21 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-08-12 更新：**266 个用例全部通过**（沙箱 OpenSandbox 集成后新增约 80 个）。
+> 2026-08-20 更新：**383 个用例**（默认跳过 4 个沙箱集成测试，实际运行 379 个全部通过）。
 
 | 类别 | 数量 | 状态 |
 |------|------|------|
-| 单元测试 | 262 | ✅ 全部通过 |
-| 集成测试（默认跳过） | 4 | ✅ 需 `SANDBOX_IT=1` 启用 |
-| OafConfigLoaderTest | 12 | ✅ |
-| A2AControllerTest | 9 | ✅ |
-| AgentRuntimeServiceTest | 10 | ✅ |
-| WorkspaceInitializerTest | 8 | ✅ |
-| McpToolRegistrarTest | 15 | ✅ |
-| BusinessToolsTest | 5 | ✅ |
-| ToolControllerTest | 4 | ✅ |
-| StreamControllerTest | 2 | ✅ |
+| 单元测试 | 375 | ✅ 全部通过 |
+| 集成测试（默认跳过，需 `SANDBOX_IT=1`） | 4 | ✅ 需环境 |
+| OafConfigLoaderTest | 37 | ✅ |
+| AgentScopeConfigTest (+ 配置类) | 14 | ✅ |
+| SessionStreamControllerTest / StreamControllerTest | 21 | ✅ |
+| McpToolRegistrarTest | 35 | ✅ |
+| UiContextStoreTest / UiContextControllerTest / UiContextInjectionHookTest | 18 | ✅ |
+| McpResourceProxyTest | 10 | ✅ |
+| AgentRuntimeService 系列 | 40 | ✅ |
 | DebugApiControllerTest | 25 | ✅ |
-| StateDataParserTest | 11 | ✅ |
-| 其他 Controller Tests | 8 | ✅ |
+| 其余（tool/config/service/controller） | 175 | ✅ |
 
 ### 8.1 沙箱测试（OpenSandbox 集成，2026-08-12 新增）
 

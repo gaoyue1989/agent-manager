@@ -95,8 +95,11 @@ src/main/java/io/agentmanager/framework/
 │   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream + userId)
 │   ├── WorkspaceInitializer.java    # OAF → Workspace 转换
 │   ├── WorkspaceReader.java         # KV 运行时文件读写 (MEMORY.md/memory/ + 沙箱注入)
-│   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder)
+│   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
 │   ├── McpManager.java              # MCP 配置加载
+│   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (4.7 静默更新模型上下文)
+│   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent 阶段 appendSystemContent 注入 UI 上下文
+│   ├── McpResourceProxy.java        # MCP Apps: 资源拉取与工具调用代理 (ui:// HtmlResource + CSP)
 │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息 + tool_calls)
@@ -117,6 +120,8 @@ src/main/java/io/agentmanager/framework/
     ├── DebugApiController.java      # GET /debug/* (页面数据 API, 含 /debug/sandbox)
     ├── AgentCardController.java     # GET /.well-known/agent-card.json
     ├── StreamController.java        # GET /chat/stream (Channel SSE)
+    ├── McpProxyController.java      # MCP Apps: /mcp/{server}/resources/ui、/tools/{tool} 代理
+    ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7)
     ├── ThreadController.java        # GET /threads
     └── A2AController.java           # POST / (A2A JSON-RPC 全量透传)
 ```
@@ -406,6 +411,20 @@ auth:
 permissions:
   read_only: true         # 强制工具只读，绕过 HITL 授权
 ```
+
+**MCP Apps UI 元数据（阶段一/二）**：同一 config.yaml 可声明工具 UI 资源与展示范围：
+
+```yaml
+ui:
+  app_only: true                # 可选：该 server 下声明 ui 的工具仅作卡片展示、不入 LLM 工具集
+  tools:
+    get_time:
+      resource_uri: ui://get-time/mcp-app.html   # 卡片渲染源（经 /mcp/{server}/resources/ui 拉取）
+```
+
+- `resource_uri` 静态声明优先；无声明时回退工具 `meta()` 的 `_meta` 动态发现（渲染前预检）
+- TOOL_CALL_START 事件经 `resolveUiRef` 解析，SSE payload 携带 `ui.resourceUri/ui.server` → 前端渲染卡片
+- `app_only` 工具不注册到 Toolkit（LLM 不可见），仅 `/tools` 接口展示（供 Debug 页预检）
 
 ### 7.2 permissions.read_only 权限控制
 

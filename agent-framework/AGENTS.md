@@ -76,7 +76,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 382 个测试用例
+│   └── test/                                  # 383 个用例（含 4 个默认跳过的沙箱集成测试）
 ├── docs/                                     # 改进方案文档 (16 份, 含 mcp-apps-extension-plan.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -299,7 +299,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (382 用例)
+mvn -o test            # 容器内离线测试 (383 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -309,6 +309,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 382 个测试，全部通过 (含 MCP Apps 阶段一/二测试)
+mvn test     # 383 个用例（默认跳过 4 个沙箱集成测试，实际运行 379 个全部通过）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

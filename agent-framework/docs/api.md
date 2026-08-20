@@ -149,7 +149,8 @@ curl http://localhost:8100/mcp
         "vendor": "weather",
         "connection_type": "sse",
         "url": "http://localhost:8811/sse",
-        "tool_count": 3
+        "tool_count": 3,
+        "has_ui": true
     }
 ]
 ```
@@ -163,6 +164,7 @@ curl http://localhost:8100/mcp
 | `connection_type` | 传输类型（sse / streamableHttp / stdio） |
 | `url` | 连接地址 |
 | `tool_count` | **实际注册的工具数**（读 McpToolRegistrar 注册缓存；受 ActiveMCP.json `enabled: false` 过滤影响） |
+| `has_ui` | **MCP Apps**：该 server 是否存在带 UI 元数据（`ui.tools.*.resource_uri`）的工具（供前端预检） |
 
 ---
 
@@ -173,6 +175,164 @@ curl http://localhost:8100/mcp
 ```bash
 curl http://localhost:8100/tools
 ```
+
+**响应:**
+
+```json
+[
+    {
+        "name": "get_current_time",
+        "server": "builtin",
+        "category": "builtin",
+        "description": "返回指定时区当前时间"
+    },
+    {
+        "name": "get_time",
+        "server": "devmcp",
+        "category": "mcp",
+        "description": "获取指定时区当前时间",
+        "uiResourceUri": "ui://get-time/mcp-app.html",
+        "appOnly": true
+    }
+]
+```
+
+**字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `name` | 工具名（MCP 工具为远端裸名） |
+| `server` | 工具来源（builtin / mcp server 名） |
+| `category` | `builtin` / `mcp` |
+| `description` | 工具描述 |
+| `uiResourceUri` | **MCP Apps**（可选）：工具绑定的 `ui://` 资源 URI，由 config.yaml `ui.tools.*.resource_uri` 静态声明或 Manifest `_meta` 动态发现 |
+| `appOnly` | **MCP Apps**（可选，默认 false）：`ui.app_only: true` 的工具仅作为卡片展示、不进入 LLM 工具集 |
+
+---
+
+### GET /mcp/{server}/resources/ui
+
+**MCP Apps**：读取工具 UI 资源 HTML（经 CSP 元数据注入返回，供前端沙箱 iframe 使用）。
+
+```bash
+curl "http://localhost:8100/mcp/devmcp/resources/ui?uri=ui://get-time/mcp-app.html"
+```
+
+**响应:**
+
+```json
+{
+    "html": "<!DOCTYPE html>...",
+    "mimeType": "text/html",
+    "csp": {
+        "default": "default-src 'none'; script-src 'self' 'unsafe-inline'"
+    }
+}
+```
+
+**字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `html` | 资源 HTML 内容 |
+| `mimeType` | MIME 类型 |
+| `csp` | Content-Security-Policy（前端注入 `<meta http-equiv="Content-Security-Policy">`，srcdoc 下响应头 CSP 不生效） |
+
+---
+
+### GET /mcp/{server}/resources
+
+**MCP Apps**：列出该 server 全部已声明/发现的 `ui://` 资源（供前端预拉取）。
+
+```bash
+curl http://localhost:8100/mcp/devmcp/resources
+```
+
+**响应:**
+
+```json
+{
+    "server": "devmcp",
+    "resources": ["ui://get-time/mcp-app.html"]
+}
+```
+
+---
+
+### POST /mcp/{server}/tools/{tool}
+
+**MCP Apps**：UI 卡片代发工具调用（host → 后端 → MCP 工具）。
+
+```bash
+curl -X POST http://localhost:8100/mcp/devmcp/tools/get_time \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"timezone": "Asia/Shanghai"}}'
+```
+
+**响应（成功）:**
+
+```json
+{
+    "content": [{"type": "text", "text": "2026-08-20 15:38:00 CST"}],
+    "isError": false,
+    "structuredContent": {}
+}
+```
+
+**响应（ask 工具未确认，403）:**
+
+```json
+{
+    "needsConfirm": true,
+    "toolCalls": [
+        {"tool_call_id": "uuid", "name": "get_time", "input": {"timezone": "Asia/Shanghai"}}
+    ]
+}
+```
+
+前端弹 HITL 确认卡片，Approve 后带 `confirmed: true` 重试：
+
+```bash
+curl -X POST http://localhost:8100/mcp/devmcp/tools/get_time \
+  -H "Content-Type: application/json" \
+  -d '{"arguments": {"timezone": "Asia/Shanghai"}, "confirmed": true}'
+```
+
+**字段说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `arguments` | 工具参数对象（必填） |
+| `confirmed` | ask 确认流：false/缺省首次调用，403 + needsConfirm；true 为确认后重试 |
+
+---
+
+### POST /mcp/ui-context
+
+**MCP Apps (4.7)**：静默更新模型上下文（对应 App 的 `ui/update-model-context` 请求）。持久化到 `ui_context` 表，下次 agent 调用时经 UiContextInjectionHook 注入为 system context；**不触发新回复、不影响当前流**。
+
+```bash
+curl -X POST http://localhost:8100/mcp/ui-context \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId": "acme-test-agent:thread-1", "content": "user toggled 24h clock format"}'
+```
+
+**响应:**
+
+```json
+{
+    "updated": true,
+    "sessionId": "acme-test-agent:thread-1"
+}
+```
+
+**请求体说明：**
+
+| 字段 | 说明 |
+|------|------|
+| `sessionId` | 会话 key（`tenant:thread` 格式，必填，校验防跨租户） |
+| `content` | 文本上下文（与 structuredContent 至少一个） |
+| `structuredContent` | 结构化上下文（可选） |
 
 ---
 
