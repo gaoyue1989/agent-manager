@@ -1,0 +1,28 @@
+# 审批 Demo MCP 配置
+# 注意：不要添加 ActiveMCP.json 或 permissions.read_only / ui.app_only 配置——
+# 这些会触发 McpToolRegistrar.registerReadOnly 路径（readOnly=true 会短路 HITL ask 权限，
+# 使 submit_application 的"人工确认提交"失效）。保持标准注册路径。
+
+vendor: "local"
+server: "approval"
+version: "1.0.0"
+
+connection:
+  type: "streamableHttp"
+  url: "http://127.0.0.1:8813"
+  timeout: 60
+
+permissions:
+  tools:
+    create_application: allow
+    get_application: allow
+    show_application_form: allow
+    confirm_application: allow
+    submit_application: ask
+
+ui:
+  tools:
+    show_application_form: "ui://approval/application-form.html"
+  csp:
+    connect_domains: []
+    resource_domains: []

@@ -415,11 +415,6 @@ config/
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | ✓(沙箱模式) | OpenSandbox API 密钥 |
-| `CONFIRM_TTL_MINUTES` | `30` | | HITL 确认上下文 TTL (分钟) |
-| `TURN_LEASE_TTL_SECONDS` | `60` | | Turn 租约 TTL (秒) |
-| `TURN_LEASE_RENEW_SECONDS` | `20` | | Turn 租约续期间隔 (秒) |
-| `AUDIT_RETENTION_DAYS` | `30` | | 工具审计日志保留天数 |
-| `SESSION_RETENTION_DAYS` | `30` | | 会话数据保留天数 |
 
 ---
 

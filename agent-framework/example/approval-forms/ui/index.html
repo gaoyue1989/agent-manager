@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>审批 Demo · Agent Framework</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">审批 Demo</div>
+  <div class="badge" id="connBadge">连接中…</div>
+  <div class="spacer"></div>
+  <button id="btnSysPrompt" class="btn small">System Prompt</button>
+  <button id="btnTools" class="btn small">工具列表</button>
+</header>
+<main class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span>会话</span>
+      <button id="btnNewThread" class="btn small" title="新建会话">＋</button>
+    </div>
+    <div class="sidebar-list" id="threadList"><div class="empty">加载中…</div></div>
+  </aside>
+  <section class="chat">
+    <div class="chat-header">
+      <span id="chatTitle">会话中</span>
+      <span class="sub" id="chatHint">Channel + 长连接</span>
+    </div>
+    <div class="messages" id="chatMessages">
+      <div class="inner" id="chatInner">
+        <div class="greeting">申请模型服务的流程：<br>1. 告诉我申请内容（标题/申请文本/文件链接）<br>2. 在表单卡片上确认<br>3. 发送「提交申请」，人工确认后提交成功</div>
+      </div>
+      <button id="scrollDown" class="scroll-down" title="回到底部">↓</button>
+    </div>
+    <div class="input-bar">
+      <textarea id="chatInput" rows="1" placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button id="sendBtn" class="btn primary">发送</button>
+    </div>
+  </section>
+</main>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

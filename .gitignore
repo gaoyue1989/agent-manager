@@ -32,6 +32,7 @@ backend/server
 # Node
 node_modules/
 e2e/node_modules/
+**/node_modules/
 
 # IDE
 .idea/
@@ -75,3 +76,14 @@ e2e/screenshots/
 
 # E2E test scripts
 e2e/screenshot.js
+e2e/hitl-card-test.js
+e2e/screenshot-hitl.js
+e2e/screenshot-ui.js
+e2e/screenshot-verify.js
+e2e/send_email.py
+
+# Approval Demo: 构建产物 / 依赖 / 截图（不纳入仓库）
+*.tar.gz
+agent-framework/example/approval-forms/e2e/node_modules/
+agent-framework/example/approval-forms/e2e/screenshots/
+agent-framework/example/approval-forms/e2e/screenshots-full/

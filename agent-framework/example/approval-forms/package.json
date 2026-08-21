@@ -1,0 +1,12 @@
+{
+  "name": "approval-forms-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "审批 Demo E2E：对话收集申请 → MCP App 表单卡片确认 → HITL 人工审批提交",
+  "scripts": {
+    "e2e": "node e2e/approval-e2e.js"
+  },
+  "devDependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}
