@@ -332,8 +332,31 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public io.agentmanager.framework.service.SessionEventBus sessionEventBus() {
-        return new io.agentmanager.framework.service.SessionEventBus();
+    public io.agentmanager.framework.service.ConfirmContextStore confirmContextStore(DataSource dataSource,
+            AgentManagerProperties props) {
+        var cleanup = props.cleanup();
+        var ttl = cleanup != null ? cleanup.confirmTtlMinutes() : 30;
+        return new io.agentmanager.framework.service.ConfirmContextStore(dataSource,
+            java.time.Duration.ofMinutes(ttl));
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore(DataSource dataSource,
+            AgentManagerProperties props) {
+        var cleanup = props.cleanup();
+        var ttl = cleanup != null ? cleanup.turnLeaseTtlSeconds() : 60;
+        var renew = cleanup != null ? cleanup.turnLeaseRenewSeconds() : 20;
+        return new io.agentmanager.framework.service.TurnLeaseStore(dataSource,
+            java.time.Duration.ofSeconds(ttl),
+            java.time.Duration.ofSeconds(renew));
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.ToolAuditStore toolAuditStore(DataSource dataSource,
+            AgentManagerProperties props) {
+        var cleanup = props.cleanup();
+        var retention = cleanup != null ? cleanup.auditRetentionDays() : 30;
+        return new io.agentmanager.framework.service.ToolAuditStore(dataSource, retention);
     }
 
     @Bean
@@ -342,9 +365,9 @@ public class AgentScopeConfig {
         HarnessAgent harnessAgent,
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger,
-        io.agentmanager.framework.service.SessionEventBus eventBus
+        io.agentmanager.framework.service.ConfirmContextStore confirmContextStore
     ) {
-        return new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, eventBus);
+        return new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore);
     }
 
     /**

@@ -1,4 +1,4 @@
-/* ===== Chat 模块：官方对齐渲染 + 长连接 SSE / A2A / 单次流 三模式 ===== */
+/* ===== Chat 模块：官方对齐渲染 + 单次流 SSE / A2A 双模式 ===== */
 
 import { McpAppHost, buildToolResult } from '../js/mcp-app-host.js';
 
@@ -10,7 +10,6 @@ let sidebarListEl = null;
 let connBadgeEl = null;
 
 let isStreaming = false;
-let subscription = null;     // 长连接订阅句柄
 let activeAbort = null;      // 单次流/A2A 的 abort 控制器
 
 let refreshTimer = null;
@@ -59,10 +58,6 @@ function render() {
           <button id="modeA2A" class="active">A2A</button>
           <button id="modeChannel">Channel</button>
         </div>
-        <div class="seg" title="连接模型">
-          <button id="connSession" class="active">长连接</button>
-          <button id="connSingle" title="单次流调试（旧 /chat/stream）">单次流</button>
-        </div>
         <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
         <button id="btnSysPrompt" class="btn small">System Prompt</button>
         <button id="btnCard" class="btn small">Card</button>
@@ -103,7 +98,6 @@ export default {
     if (refreshTimer) clearInterval(refreshTimer);
     if (thinkingTimer) clearInterval(thinkingTimer);
     if (activeAbort) activeAbort.abort();
-    closeSubscription();
     teardownAllAppHosts();
     pendingConfirm = null;
     isStreaming = false;
@@ -127,8 +121,6 @@ function bindEvents() {
 
   document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
   document.getElementById('modeChannel').addEventListener('click', () => setStreamMode('channel'));
-  document.getElementById('connSession').addEventListener('click', () => setConnModel('session'));
-  document.getElementById('connSingle').addEventListener('click', () => setConnModel('single'));
 }
 
 function autoGrow() {
@@ -140,27 +132,15 @@ function setStreamMode(mode) {
   ctx.state.setState('ui.streamMode', mode);
   document.getElementById('modeA2A').classList.toggle('active', mode === 'a2a');
   document.getElementById('modeChannel').classList.toggle('active', mode === 'channel');
-  // A2A/Channel 切换：重建会话订阅（Channel 链走长连接，A2A 走标准帧）
-  setupSessionWatch();
-  updateConnBadge();
-}
-
-function setConnModel(model) {
-  ctx.state.setState('ui.connModel', model);
-  document.getElementById('connSession').classList.toggle('active', model === 'session');
-  document.getElementById('connSingle').classList.toggle('active', model === 'single');
-  setupSessionWatch();
   updateConnBadge();
 }
 
 function updateConnBadge() {
   if (!connBadgeEl) return;
   const mode = ctx.state.getState('ui.streamMode');
-  const conn = ctx.state.getState('ui.connModel');
   const sid = currentSessionId();
   const bits = [mode === 'a2a' ? 'A2A' : 'Channel'];
-  if (conn === 'session') bits.push('长连接' + (subscription ? '✓' : ''));
-  else bits.push('单次流');
+  bits.push('单次流');
   if (sid) bits.push(sid.split(':').pop());
   connBadgeEl.textContent = bits.join(' · ');
 }
@@ -233,13 +213,11 @@ function selectThread(sessionId) {
   ctx.state.setState('threads.current', sessionId);
   document.getElementById('btnLlmCalls').disabled = false;
   loadThreadHistory(sessionId);
-  setupSessionWatch();
   updateConnBadge();
 }
 
 function newThread() {
   ctx.state.setState('threads.current', null);
-  closeSubscription();
   teardownAllAppHosts();
   pendingToolCalls = {};
   pendingConfirm = null;
@@ -718,30 +696,26 @@ async function submitConfirm(calls, approved) {
   pendingConfirm.cardEl.querySelectorAll('button').forEach((b) => (b.disabled = true));
   pendingConfirm.cardEl.querySelector('.confirm-title').textContent = '处理中…';
 
-  const mode = ctx.state.getState('ui.streamMode');
-  const conn = ctx.state.getState('ui.connModel');
+  // 保存当前卡片引用：confirm-stream 可能返回新 permission_ask 创建新卡片，
+  // finally 只应移除本次确认的卡片，不误清新卡片
+  const myCard = pendingConfirm.cardEl;
 
   try {
-    if (mode === 'channel' && conn === 'session') {
-      // 长连接：confirm-stream 仅触发恢复，恢复事件经 SessionEventBus 扇出到原订阅，直接消费忽略
-      await consumeConfirmStream(sid, results, false);
-    } else {
-      // 单次流：原流已无后续事件（恢复是新调用），关闭原连接改走 confirm-stream 渲染
-      if (activeAbort) { try { activeAbort.abort(); } catch (e) { /* ignore */ } }
-      isStreaming = true;
-      await consumeConfirmStream(sid, results, true);
-      isStreaming = false;
-      loadThreads();
-    }
+    // 单次流：原流已无后续事件（恢复是新调用），关闭原连接改走 confirm-stream 渲染
+    if (activeAbort) { try { activeAbort.abort(); } catch (e) { /* ignore */ } }
+    isStreaming = true;
+    await consumeConfirmStream(sid, results, true);
+    isStreaming = false;
+    loadThreads();
   } catch (e) {
     ctx.utils.toast('Confirm failed: ' + e.message, 'error');
-    pendingConfirm.cardEl.querySelectorAll('button').forEach((b) => (b.disabled = false));
-    pendingConfirm.cardEl.querySelector('.confirm-title').textContent = '⚠ 等待确认';
+    if (pendingConfirm && pendingConfirm.cardEl === myCard) {
+      myCard.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      myCard.querySelector('.confirm-title').textContent = '⚠ 等待确认';
+    }
   } finally {
-    // 长连接模式：卡片最终状态由 AGENT_END（经总线到达）收尾；此处保留处理中标记
-    if (mode === 'channel' && conn === 'session') {
-      pendingConfirm.cardEl.querySelector('.confirm-title').textContent = approved ? '已批准，继续执行…' : '已拒绝，继续执行…';
-    } else {
+    // 只移除本次确认的卡片（confirm-stream 返回新 permission_ask 时已创建新卡片）
+    if (pendingConfirm && pendingConfirm.cardEl === myCard) {
       dismissConfirmCard();
     }
   }
@@ -756,6 +730,16 @@ function consumeConfirmStream(sid, results, render) {
       settled = true;
       if (err) reject(err); else resolve();
     };
+
+    // 确保有回复上下文：confirm-stream 事件可能没有 replyId，
+    // 需要预先创建回复容器以接收 TEXT_BLOCK_DELTA 等事件
+    if (render) {
+      // 始终创建新回复：confirm-stream 是新的执行段，不应追加到旧回复
+      const replyId = 'confirm-' + Date.now();
+      currentReply = null; // 清除旧引用，确保 ensureReply 创建新回复
+      ensureReply(replyId);
+    }
+
     ctx.api.confirmStream(sid, results, {
       onEvent: (data) => {
         if (render) handleEvent(data);
@@ -893,6 +877,8 @@ function handleEvent(data) {
     sendBtn.textContent = 'Stop';
     sendBtn.classList.add('danger');
     usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+    // MCP Apps：新回合开始 → 清理上一回合卡片（保留当前回合可交互）
+    teardownAllAppHosts();
     return;
   }
   if (data.type === 'AGENT_END') {
@@ -903,8 +889,6 @@ function handleEvent(data) {
     sendBtn.textContent = 'Send';
     sendBtn.classList.remove('danger');
     setConnecting('chatTitle', false);
-    // MCP Apps：回复结束 → 通知各卡片 teardown（iframe 保留静态渲染）
-    teardownAllAppHosts();
     scrollToBottom(true);
     loadThreads();
     return;
@@ -1024,29 +1008,6 @@ function handleEvent(data) {
   }
 }
 
-// ---------- 会话长连接订阅 ----------
-
-function setupSessionWatch() {
-  closeSubscription(false);
-  const sid = currentSessionId();
-  if (!sid) return;
-  const mode = ctx.state.getState('ui.streamMode');
-  const conn = ctx.state.getState('ui.connModel');
-  // 仅 Channel + 长连接 走会话事件总线；A2A / 单次流不订阅
-  if (mode !== 'channel' || conn !== 'session') return;
-  subscription = ctx.api.subscribeSession(sid, {
-    onEvent: handleEvent,
-    onError: () => {}
-  });
-}
-
-function closeSubscription(update) {
-  if (subscription) {
-    try { subscription.close(); } catch (e) { /* ignore */ }
-    subscription = null;
-  }
-}
-
 // ---------- 发送 ----------
 
 async function sendMessage() {
@@ -1068,21 +1029,9 @@ async function sendMessage() {
   addMessage('user', text);
 
   const mode = ctx.state.getState('ui.streamMode');
-  const conn = ctx.state.getState('ui.connModel');
 
   if (mode === 'channel') {
-    if (conn === 'session') {
-      // 长连接模式：确保订阅已开并就绪后再触发（避免事件丢失）
-      if (!subscription) setupSessionWatch();
-      if (subscription && subscription.ready) {
-        await subscription.ready;
-        // 等待 reader.read() 循环启动（fetch 返回 ≠ reader 就绪）
-        await new Promise(r => setTimeout(r, 100));
-      }
-      await sendChannelTrigger(text, sid);
-    } else {
-      await sendChannelSingleStream(text, sid);
-    }
+    await sendChannelSingleStream(text, sid);
   } else {
     await sendA2AStream(text, sid);
   }
@@ -1093,71 +1042,55 @@ function stop() {
     activeAbort.abort();
     return;
   }
-  // 长连接模式：事件总线模型无 abort 语义，提示
-  ctx.utils.toast('长连接模式不支持中断（后端无 cancel 语义）；可切「单次流」调试', 'info');
-}
-
-async function sendChannelTrigger(text, sid) {
-  isStreaming = true;
-  sendBtn.disabled = true;
-  sendBtn.textContent = '…';
-  try {
-    await ctx.api.triggerSessionChat(sid, text, 'debug-user');
-  } catch (e) {
-    ctx.utils.toast('Trigger failed: ' + e.message, 'error');
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-  }
 }
 
 async function sendChannelSingleStream(text, sid) {
-  // 单次流调试：走旧 /chat/stream
+  // 单次流（无状态架构）：POST /threads/{sid}/chat 事件直吐，执行完即关闭
   isStreaming = true;
   sendBtn.disabled = true;
   sendBtn.textContent = 'Stop';
   sendBtn.classList.add('danger');
   const abortController = new AbortController();
   activeAbort = abortController;
-  const params = new URLSearchParams({ message: text, userId: 'debug-user', sessionId: sid });
-  const eventBus = ctx.api;
-  const fakeSubscribe = { onEvent: handleEvent };
-  try {
-    const resp = await fetch(eventBus.BASE + '/chat/stream?' + params.toString(), { signal: abortController.signal });
-    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        const dataStr = line.slice(5).trim();
-        if (!dataStr) continue;
-        try {
-          fakeSubscribe.onEvent(JSON.parse(dataStr));
-        } catch (e) { /* ignore */ }
-      }
+
+  let waitingSince = null;
+  let waitingEl = null;
+  const showWaiting = () => {
+    if (!waitingEl) {
+      waitingEl = document.createElement('div');
+      waitingEl.className = 'msg system';
+      waitingEl.style.color = 'var(--yellow)';
+      messagesEl.appendChild(waitingEl);
+      scrollToBottom(false);
     }
-  } catch (e) {
-    if (e.name !== 'AbortError') {
+    const secs = Math.round((Date.now() - waitingSince) / 1000);
+    waitingEl.textContent = '排队等待中... (已等待 ' + secs + 's，其他任务执行完毕后将自动开始)';
+  };
+  const hideWaiting = () => { if (waitingEl) { waitingEl.remove(); waitingEl = null; } };
+
+  ctx.api.sendChat(sid, text, 'debug-user', {
+    onWaiting: () => {
+      if (!waitingSince) waitingSince = Date.now();
+      showWaiting();
+    },
+    onEvent: (evt) => {
+      hideWaiting();
+      handleEvent(evt);
+    },
+    onError: (e) => {
+      hideWaiting();
       const r = currentReply || ensureReply('single');
       handleEvent({ type: 'error', error: e.message, replyId: r.replyId });
+    },
+    onEnd: () => {
+      hideWaiting();
+      loadThreads();
     }
-  } finally {
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    sendBtn.classList.remove('danger');
-    activeAbort = null;
-    loadThreads();
-  }
-}
+  });
 
+  try { await new Promise((resolve) => setTimeout(resolve, 0)); }
+  catch (e) { /* ignore */ }
+}
 // A2A message/stream（标准帧，工具仅工具名，无回填）
 async function sendA2AStream(text, sid) {
   isStreaming = true;

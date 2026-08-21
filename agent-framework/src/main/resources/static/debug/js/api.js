@@ -41,94 +41,74 @@ export const api = {
   getWorkspace: () => get('/debug/workspace'),
   getSandbox: () => get('/debug/sandbox'),
   getLogs: (level = 'all', limit = 100) => get('/debug/logs?level=' + level + '&limit=' + limit),
-  getThreads: () => get('/debug/threads'),
-  getThreadHistory: (sessionId) => get('/debug/threads/' + encodeURIComponent(sessionId) + '/history'),
-  getLlmCalls: (sessionId) => get('/debug/threads/' + encodeURIComponent(sessionId) + '/llm-calls'),
+  getThreads: () => get('/threads'),
+  getThreadHistory: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/history'),
+  getLlmCalls: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls'),
 
-  // 长连接 SSE（F）：订阅会话事件总线
-  subscribeSession: (sessionId, { onEvent, onError } = {}) => {
-    const path = '/debug/threads/' + encodeURIComponent(sessionId) + '/events';
-    let aborted = false;
+  // 单次流对话（无状态架构：POST /threads/{sid}/chat 事件直吐，执行完即关闭）
+  // 排队等待期间后端发 waiting 帧；结束发 done 帧；异常发 error 帧
+  sendChat: (sessionId, message, userId, { onEvent, onWaiting, onError, onEnd } = {}) => {
+    const path = '/threads/' + encodeURIComponent(sessionId) + '/chat';
     const controller = new AbortController();
-    let readyResolve;
-    const readyPromise = new Promise(r => { readyResolve = r; });
-
     const connect = async () => {
-      let backoff = 1000;
-      const read = async () => {
-        if (aborted || controller.signal.aborted) return;
-        let resp;
-        try {
-          resp = await fetch(BASE + path, { signal: controller.signal });
-          // fetch 返回 = HTTP 响应头已收到 = SSE 连接已建立
-          readyResolve();
-        } catch (e) {
-          if (aborted || e.name === 'AbortError') return;
-          readyResolve(); // 即使出错也 resolve，避免死等
-          await retry();
-          return;
-        }
-        if (!resp.ok || !resp.body) { readyResolve(); await retry(); return; }
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (aborted || controller.signal.aborted) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            for (const line of lines) {
-              if (!line.startsWith('data:')) continue;
-              const dataStr = line.slice(5).trim();
-              if (!dataStr) continue;
-              try {
-                if (onEvent) onEvent(JSON.parse(dataStr));
-              } catch (e) { /* 忽略解析错误 */ }
-            }
+      let resp;
+      try {
+        resp = await fetch(BASE + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, userId: userId || 'debug-user' }),
+          signal: controller.signal
+        });
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        if (onError) onError(e);
+        return;
+      }
+      if (!resp.ok || !resp.body) {
+        let msg = 'HTTP ' + resp.status;
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (e) {}
+        if (onError) onError(new Error(msg));
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let active = true;
+      try {
+        while (active) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (controller.signal.aborted) { active = false; break; }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const dataStr = line.slice(5).trim();
+            if (!dataStr) continue;
+            let evt;
+            try { evt = JSON.parse(dataStr); } catch (e) { continue; }
+            if (evt.type === 'done') { if (onEnd) onEnd(evt); continue; }
+            if (evt.type === 'error') { if (onError) onError(new Error(evt.error)); continue; }
+            if (evt.type === 'waiting') { if (onWaiting) onWaiting(evt); continue; }
+            if (onEvent) onEvent(evt);
           }
-          if (!aborted && !controller.signal.aborted) await retry();
-        } catch (e) {
-          if (!aborted && e.name !== 'AbortError') await retry();
         }
-      };
-
-      const retry = async () => {
-        if (aborted) return;
-        if (onError) onError(new Error('订阅断开，准备重连'));
-        await new Promise(r => setTimeout(r, backoff));
-        backoff = Math.min(backoff * 2, 15000);
-        read();
-      };
-
-      read();
+      } catch (e) {
+        if (!controller.signal.aborted && onError) onError(e);
+      } finally {
+        if (active && onEnd) onEnd();
+      }
     };
-
     connect();
-
-    return {
-      close() {
-        aborted = true;
-        controller.abort();
-      },
-      /** 等待 SSE 连接建立（fetch 返回 = 连接就绪） */
-      ready: readyPromise
-    };
+    return { close: () => controller.abort() };
   },
 
-  // 长连接模型触发（fire-and-forget）
-  triggerSessionChat: (sessionId, message, userId) =>
-    post('/debug/threads/' + encodeURIComponent(sessionId) + '/chat', {
-      message, userId: userId || 'debug-user'
-    }),
-
-  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）
+  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）
   confirmToolCall: (sessionId, results) =>
     post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }),
 
-  // HITL 确认后事件流（SSE；长连接场景事件同时经 SessionEventBus 扇出到原订阅）
+  // HITL 确认后事件流（SSE；恢复为新执行段，后端先 acquire turn 租约，排队/冲突以 error 帧返回）
   confirmStream: (sessionId, results, { onEvent, onError } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/confirm-stream';
     const controller = new AbortController();

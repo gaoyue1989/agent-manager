@@ -135,6 +135,11 @@ Tomcat started on port 8100
 | `CHECKPOINT_JDBC_URL` | string | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
 | `CHECKPOINT_USERNAME` | string | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | string | `Agent@Manager2026` | | MySQL 密码 |
+| `CONFIRM_TTL_MINUTES` | int | `30` | | HITL 确认上下文 TTL (分钟) |
+| `TURN_LEASE_TTL_SECONDS` | int | `60` | | Turn 租约 TTL (秒) |
+| `TURN_LEASE_RENEW_SECONDS` | int | `20` | | Turn 租约续期间隔 (秒) |
+| `AUDIT_RETENTION_DAYS` | int | `30` | | 工具审计日志保留天数 |
+| `SESSION_RETENTION_DAYS` | int | `30` | | 会话数据保留天数 |
 
 ### 4.2 AGENTS.md 配置字段
 
@@ -152,6 +157,43 @@ Tomcat started on port 8100
 | `deniedTools` | list | | 排除的工具 |
 | `model` | object/string | | 模型配置 |
 | `agents` | list | | 子 Agent 声明 |
+
+### 4.3 数据表 DDL (stateless-single-stream 新增)
+
+以下三张表在启动时自动创建（若不存在），或由 `SessionCleanupService` 联动清理：
+
+```sql
+-- HITL 确认上下文（跨副本共享）
+CREATE TABLE IF NOT EXISTS confirm_context (
+  session_id      VARCHAR(255) PRIMARY KEY,   -- fullThreadId（makeThreadId 补全 tenant 前缀）
+  tool_calls_json MEDIUMTEXT NOT NULL,        -- [{id, name, input}]（ToolUseBlock 字段重建来源）
+  reply_id        VARCHAR(64),
+  created_at      DATETIME(3) NOT NULL,
+  consumed        TINYINT(1) NOT NULL DEFAULT 0,
+  KEY idx_created_at (created_at)
+);
+
+-- Turn 租约（执行权互斥，token + TTL 60s + 20s 续租）
+CREATE TABLE IF NOT EXISTS turn_lease (
+  session_id VARCHAR(255) PRIMARY KEY,
+  token      CHAR(36) NOT NULL,             -- 本 turn 租约凭证（UUID）
+  expires_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL
+);
+
+-- 工具调用轻量审计（仅元信息，不含参数/文本 delta）
+CREATE TABLE IF NOT EXISTS tool_audit_log (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  session_id  VARCHAR(255) NOT NULL,
+  tool_name   VARCHAR(255) NOT NULL,
+  tool_call_id VARCHAR(64),
+  state       VARCHAR(32),                  -- TOOL_CALL_START / TOOL_CALL_END / TOOL_RESULT_START / TOOL_RESULT_END
+  payload_json MEDIUMTEXT,                  -- SSE 词表一致（含 MCP ui 元数据）
+  created_at  DATETIME(3) NOT NULL,
+  KEY idx_session (session_id, id),
+  KEY idx_created_at (created_at)
+);
+```
 
 ---
 
@@ -209,7 +251,12 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/debug` | 调试页面 (A2A/Channel 双模式) |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
-| GET | `/chat/stream` | Channel SSE 流式对话 |
+| GET | `/chat/stream` | Channel SSE 一次性流对话 (旧) |
+| POST | `/threads/{sid}/chat` | SSE 单次流直吐 (单次流模式, 含 Turn 租约排队) |
+| POST | `/threads/{sid}/confirm-stream` | HITL 确认恢复流 (恢复执行需重新获取执行权) |
+| POST | `/threads/{sid}/confirm` | HITL 同步确认 |
+| GET | `/threads/{sid}/history` | 会话历史 (含 pendingConfirm) |
+| GET | `/threads/{sid}/llm-calls` | LLM 调用日志 |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream) |
 
 ---
@@ -245,6 +292,8 @@ LLM 推理 → 选择工具 (如 get_weather)
 
 ## 8. Channel SSE API
 
+### 8.1 旧一次性流 (GET /chat/stream)
+
 ```
 GET /chat/stream?message=<text>&userId=<id>[&sessionId=<id>]
 ```
@@ -255,6 +304,27 @@ GET /chat/stream?message=<text>&userId=<id>[&sessionId=<id>]
 | `userId` | String | ✓ | 用户标识（自动创建独立 session） |
 | `sessionId` | String | | 指定 session（同一用户多个对话） |
 | `subagentId` | String | | 直接与子 Agent 对话 |
+
+### 8.2 单次流模式 (POST /threads/{sid}/chat)
+
+```
+POST /threads/{sid}/chat
+Content-Type: application/json
+
+{"message": "用户消息", "userId": "用户标识"}
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `message` | String | ✓ | 用户消息 |
+| `userId` | String | ✓ | 用户标识 |
+
+**行为**：
+- 返回 SSE 流，执行完即关闭（无长连接状态）
+- 同 session 并发请求排队等待（等待期间 SSE 每 15s 发 `{type:"waiting"}` 帧）
+- 排队超时 120s → HTTP 409 `turn_in_progress`
+- permission_ask 时锁让出，挂起期间新消息可自由执行
+- AGENT_END / error 后释放锁、关闭流
 
 ---
 

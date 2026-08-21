@@ -1,5 +1,8 @@
 # Debug 页面重构计划（对齐 AgentScope 官方前端）
 
+> **⚠️ 此文档描述的长连接 SSE 架构已被 stateless-single-stream-plan.md 取代**
+> 新架构改为 POST /threads/{sid}/chat 单次流（SSE 直吐，执行完即关闭），删除了 GET /threads/{sid}/events 长连接订阅端点和 SessionEventBus。请参考 [stateless-single-stream-plan.md](stateless-single-stream-plan.md)。
+
 > **状态: ✅ 已完成 (2026-08-17)**
 > 参考 agentscope 官方前端重构调试页面，已完成主题/布局/会话页/长连接 SSE 全部改造，308 用例全绿。
 

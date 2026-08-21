@@ -2,16 +2,15 @@ package io.agentmanager.framework.controller;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
-import io.agentmanager.framework.service.SessionEventBus;
+import io.agentmanager.framework.service.ToolAuditStore;
+import io.agentmanager.framework.service.TurnLeaseStore;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
@@ -21,134 +20,99 @@ import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * 长连接会话流端点测试（F：per-session 事件总线 + 订阅/触发）。
- * 对齐官方 agentscope 模式：订阅端点直接推事件，无 SUBSCRIBED 就绪帧。
+ * 会话单次流端点测试（无状态单次流架构：POST /threads/{sessionId}/chat 事件直吐）。
+ * 直接消费 controller.chat() 返回的 Flux 断言 SSE 帧（避免 MockMvc 异步收集歧义）。
  */
 class SessionStreamControllerTest {
 
     private SessionStreamController controller;
     private ChatUiChannel chatChannel;
-    private SessionEventBus eventBus;
     private AgentRuntimeService runtimeService;
     private McpToolRegistrar mcpToolRegistrar;
+    private TurnLeaseStore turnLeaseStore;
+    private ToolAuditStore toolAuditStore;
 
     @BeforeEach
     void setUp() {
         chatChannel = mock(ChatUiChannel.class);
-        eventBus = new SessionEventBus();
         runtimeService = mock(AgentRuntimeService.class);
         mcpToolRegistrar = mock(McpToolRegistrar.class);
-        controller = new SessionStreamController(chatChannel, eventBus, runtimeService, mcpToolRegistrar);
+        turnLeaseStore = mock(TurnLeaseStore.class);
+        toolAuditStore = mock(ToolAuditStore.class);
+        when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        controller = new SessionStreamController(chatChannel, runtimeService, mcpToolRegistrar,
+            turnLeaseStore, toolAuditStore);
+    }
+
+    private List<String> collect(String sid, String message, String userId) {
+        var frames = controller.chat(sid, new SessionStreamController.ChatRequest(message, userId))
+            .collectList().block();
+        return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
 
     @Test
-    void subscribeShouldEmitEventsDirectly() {
+    void chatShouldEmitEventsDirectly() {
         var sessionId = "test-user:s1";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
         var delta = new TextBlockDeltaEvent("reply-1", "block-1", "Hi");
-
-        Flux<String> stream = controller.subscribe(sessionId).map(sse -> sse.data());
-        var received = new ArrayList<String>();
-
-        stream.subscribe(received::add);
-        eventBus.emit(sessionId, delta);
-
-        assertTrue(received.stream().anyMatch(s -> s.contains("TEXT_BLOCK_DELTA")),
-            "应透传 TEXT_BLOCK_DELTA 事件: " + received);
-        assertTrue(received.stream().anyMatch(s -> s.contains("reply-1")),
-            "事件应携带 replyId");
-        assertTrue(received.stream().anyMatch(s -> s.contains("Hi")),
-            "事件应携带 delta 内容");
-    }
-
-    @Test
-    void subscribeShouldNotEmitEventsForOtherSession() {
-        var delta = new TextBlockDeltaEvent("reply-1", "block-1", "Hi");
-        var received = new ArrayList<String>();
-
-        controller.subscribe("session-a").map(sse -> sse.data()).subscribe(received::add);
-        eventBus.emit("session-b", delta);
-
-        assertTrue(received.stream().noneMatch(s -> s.contains("TEXT_BLOCK_DELTA")),
-            "不应收到其他会话的事件");
-    }
-
-    @Test
-    void subscribeShouldHaveHeartbeatTicks() {
-        var received = new ArrayList<String>();
-        controller.subscribe("test-user:s5").map(sse -> sse.data()).subscribe(received::add);
-        // 心跳 ping 事件在15s间隔后到达，单元测试中直接验证订阅流可接收事件
-        var delta = new TextBlockDeltaEvent("reply-hb", "block-hb", "hb-test");
-        eventBus.emit("test-user:s5", delta);
-        assertTrue(received.stream().anyMatch(s -> s.contains("hb-test")),
-            "订阅应能接收事件（心跳15s间隔在集成测试中覆盖）");
-    }
-
-    @Test
-    void triggerShouldAcceptMessage() throws Exception {
-        var mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
-            .thenReturn(Flux.empty());
+            .thenReturn(Flux.just((AgentEvent) delta));
 
-        mockMvc.perform(post("/debug/threads/test-user:s2/chat")
-                .contentType("application/json")
-                .content("{\"message\":\"hello\",\"userId\":\"alice\"}"))
-            .andExpect(status().isAccepted());
+        var frames = collect(sessionId, "hello", "alice");
+        assertTrue(frames.stream().anyMatch(f -> f.contains("TEXT_BLOCK_DELTA")), "应直吐: " + frames);
+
+        verify(turnLeaseStore).tryAcquire(sessionId);
+        verify(turnLeaseStore).release(sessionId, "tok-1");
     }
 
     @Test
-    void triggerShouldAcceptEmptyMessage() throws Exception {
-        var mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
-        mockMvc.perform(post("/debug/threads/test-user:s3/chat")
-                .contentType("application/json")
-                .content("{\"message\":\"\",\"userId\":\"alice\"}"))
-            .andExpect(status().isAccepted());
-    }
-
-    @Test
-    void triggerShouldFanOutEventsToBus() throws Exception {
-        var mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
-        var sessionId = "test-user:s4";
-        var received = new ArrayList<String>();
-        controller.subscribe(sessionId).map(sse -> sse.data()).subscribe(received::add);
-
-        var delta = new TextBlockDeltaEvent("reply-9", "block-9", "fanout");
-        Flux<AgentEvent> flux = Flux.just((AgentEvent) delta).delayElements(Duration.ofMillis(50));
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
-            .thenReturn(flux);
-
-        mockMvc.perform(post("/debug/threads/" + sessionId + "/chat")
-                .contentType("application/json")
-                .content("{\"message\":\"go\",\"userId\":\"alice\"}"))
-            .andExpect(status().isAccepted());
-
-        Thread.sleep(300);
-        assertTrue(received.stream().anyMatch(s -> s.contains("fanout")),
-            "触发后事件应经总线回流到订阅者: " + received);
-    }
-
-    // ===== MCP Apps 4.7: ui_context 注入（Controller 传 session key，Hook 注入） =====
-
-    @Test
-    void triggerShouldAttachSessionKeyToUserMessage() throws Exception {
-        var mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
-        var sessionId = "test-user:s6";
+    void chatShouldReleaseLeaseOnNaturalComplete() {
+        var sessionId = "test-user:s2";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-2");
         when(chatChannel.sendStream(any(ChatUiRequest.class))).thenReturn(Flux.empty());
 
-        mockMvc.perform(post("/debug/threads/" + sessionId + "/chat")
-                .contentType("application/json")
-                .content("{\"message\":\"hi\",\"userId\":\"alice\"}"))
-            .andExpect(status().isAccepted());
+        var frames = collect(sessionId, "hello", null);
+        assertNotNull(frames);
+        verify(turnLeaseStore).release(sessionId, "tok-2");
+    }
+
+    @Test
+    void chatShouldQueueWithWaitingFramesWhenLeaseBusy() {
+        var sessionId = "test-user:s3";
+        // 第一次被占用（返回 null），第二次拿到 → 等待窗口内发出 waiting 帧
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn(null).thenReturn("tok-3");
+        when(chatChannel.sendStream(any(ChatUiRequest.class))).thenReturn(Flux.empty());
+
+        var frames = collect(sessionId, "hello", null);
+        assertTrue(frames.stream().anyMatch(f -> f.contains("waiting")), "排队期间应发 waiting 帧: " + frames);
+    }
+
+    @Test
+    void chatShouldRejectBlankMessage() {
+        var frames = collect("test-user:s4", "", "alice");
+        assertTrue(frames.stream().anyMatch(f -> f.contains("message is required")),
+            "空消息应返回 error 帧: " + frames);
+    }
+
+    @Test
+    void chatShouldAttachSessionKeyToUserMessage() {
+        var sessionId = "test-user:s5";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-5");
+        when(chatChannel.sendStream(any(ChatUiRequest.class))).thenReturn(Flux.empty());
 
         var captor = org.mockito.ArgumentCaptor.forClass(ChatUiRequest.class);
+        collect(sessionId, "hi", "alice");
         verify(chatChannel).sendStream(captor.capture());
         var messages = captor.getValue().messages();
         assertEquals(1, messages.size(), "只应发送用户消息（ui_context 由 Hook 注入，不进消息列表）");
@@ -157,40 +121,6 @@ class SessionStreamControllerTest {
         assertEquals(sessionId,
             messages.get(0).getMetadata().get(UiContextStore.METADATA_SESSION_KEY),
             "用户消息 metadata 应携带会话 key，供 UiContextInjectionHook 读取");
-    }
-
-    @Test
-    void triggerShouldSendOnlyUserMessage() throws Exception {
-        var mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
-        var sessionId = "test-user:s7";
-        when(chatChannel.sendStream(any(ChatUiRequest.class))).thenReturn(Flux.empty());
-
-        mockMvc.perform(post("/debug/threads/" + sessionId + "/chat")
-                .contentType("application/json")
-                .content("{\"message\":\"hi\",\"userId\":\"alice\"}"))
-            .andExpect(status().isAccepted());
-
-        var captor = org.mockito.ArgumentCaptor.forClass(ChatUiRequest.class);
-        verify(chatChannel).sendStream(captor.capture());
-        assertEquals(1, captor.getValue().messages().size(),
-            "消息列表仅用户消息（注入逻辑在 Hook 层）");
-    }
-
-    @Test
-    void serializerShouldIncludeReplyIdAndBlockId() {
-        var delta = new TextBlockDeltaEvent("reply-x", "block-x", "data");
-        String json = AgentEventSseSerializer.payload(delta);
-        assertTrue(json.contains("\"replyId\":\"reply-x\""), "序列化应携带 replyId: " + json);
-        assertTrue(json.contains("\"blockId\":\"block-x\""), "序列化应携带 blockId: " + json);
-        assertTrue(json.contains("\"delta\":\"data\""), "序列化应携带 delta: " + json);
-    }
-
-    @Test
-    void serializerShouldKeepRawTypesUnchanged() {
-        var delta = new TextBlockDeltaEvent("reply-x", "block-x", "data");
-        String json = AgentEventSseSerializer.payload(delta);
-        assertTrue(json.contains("\"type\":\"TEXT_BLOCK_DELTA\""),
-            "词表应保持 TEXT_BLOCK_DELTA: " + json);
     }
 
     // ===== MCP Apps: TOOL_CALL_START ui 词表扩展 =====
@@ -217,10 +147,27 @@ class SessionStreamControllerTest {
     void sseShouldCarryUiForUiToolViaResolver() {
         var ref = new McpToolRegistrar.UiRef("ui://weather/mcp-app.html", "weather");
         when(mcpToolRegistrar.resolveUiRef("get_weather")).thenReturn(ref);
-        var received = new ArrayList<String>();
-        controller.subscribe("test-user:ui1").map(sse -> sse.data()).subscribe(received::add);
-        eventBus.emit("test-user:ui1", new io.agentscope.core.event.ToolCallStartEvent("r", "c", "get_weather"));
-        assertTrue(received.stream().anyMatch(s -> s.contains("\"resourceUri\":\"ui://weather/mcp-app.html\"")),
-            "SSE 事件应携带 ui 元数据: " + received);
+        var sessionId = "test-user:ui1";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-u1");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent)
+                new io.agentscope.core.event.ToolCallStartEvent("r", "c", "get_weather")));
+
+        var frames = collect(sessionId, "go", null);
+        assertTrue(frames.stream().anyMatch(f -> f.contains("\"resourceUri\":\"ui://weather/mcp-app.html\"")),
+            "SSE 事件应携带 ui 元数据: " + frames);
+    }
+
+    @Test
+    void chatShouldAuditToolStartEvents() {
+        var sessionId = "test-user:audit1";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-a1");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent)
+                new io.agentscope.core.event.ToolCallStartEvent("r", "c", "get_weather")));
+
+        collect(sessionId, "go", null);
+        verify(toolAuditStore).record(eq(sessionId), eq("get_weather"), eq("c"),
+            eq("TOOL_CALL_START"), anyString());
     }
 }

@@ -22,7 +22,8 @@ class OafConfigLoaderTest {
             new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
-            "src/test/resources/fixtures/test-agent"
+            "src/test/resources/fixtures/test-agent",
+            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7)
         );
         loader = new OafConfigLoader(props);
     }
@@ -167,7 +168,8 @@ class OafConfigLoaderTest {
             new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
-            dir.toString()
+            dir.toString(),
+            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7)
         );
     }
 

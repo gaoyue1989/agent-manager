@@ -1,10 +1,12 @@
 # Debug 页面事件系统升级方案
 
-> **状态: ✅ 已完成 (2026-08-10)**
+> **状态: ✅ 已完成 (2026-08-10)，事件交付已演进为单次流 SSE**
 > 基于 [AgentScope 2.0 Message & Event 文档](https://java.agentscope.io/v2/zh/docs/building-blocks/message-and-event.html)，
 > 对 Debug 页面和后端接口进行升级，补齐缺失的事件类型支持。
 > 实施时发现实际 JAR (agentscope-core 2.0.0) 与文档 API 存在 4 处差异（见 1.4 节），已按实际 API 适配。
 > 新增/更新测试 8 个，全部 166 个测试通过。
+> **后续演进**：长连接 SSE（SessionEventBus + GET /events 订阅）已被 stateless-single-stream-plan.md 取代，
+> 改为 POST /threads/{sid}/chat 单次流 SSE（SSE 直吐，执行完即关闭），详见新架构文档。
 
 ---
 
@@ -108,6 +110,8 @@ AgentStartEvent
 
 ## 二、改造方案
 
+> **注意：本文档的事件转发逻辑（AgentRuntimeService/StreamController）已全量实施，但事件交付机制已从长连接 SSE 改为单次流 SSE。详见 [stateless-single-stream-plan.md](stateless-single-stream-plan.md)。**
+
 ### 2.1 整体架构
 
 ```
@@ -121,11 +125,14 @@ Flux<Map<String, Object>>
     │
     ├──→ A2A 模式: HarnessAgentRunner.stream() → A2AController → SSE
     │
-    └──→ Channel 模式: ChatUiChannel.sendStream() → StreamController.toSSE() → SSE
-                                                          │
-                                                          ▼
-                                                    前端 chat.js
-                                                    统一事件处理渲染
+    ├──→ 单次流模式: ChatUiChannel.sendStream() → SessionStreamController → SSE (单次流直吐)
+    │     POST /threads/{sid}/chat → 执行完即关闭，Turn 租约排队
+    │
+    └──→ 旧一次性流: ChatUiChannel.sendStream() → StreamController.toSSE() → SSE
+          GET /chat/stream (保留兼容)
+                                                          
+                                              前端 chat.js
+                                              统一事件处理渲染
 ```
 
 ### 2.2 后端改造

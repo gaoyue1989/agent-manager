@@ -25,7 +25,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.model.OafConfig;
-import io.agentmanager.framework.service.LLMLogger;
 import io.agentmanager.framework.service.LogCollector;
 
 /**
@@ -40,7 +39,6 @@ public class DebugApiController {
     private final AgentManagerProperties props;
     private final OafConfig oafConfig;
     private final DataSource dataSource;
-    private final LLMLogger llmLogger;
     private final LogCollector logCollector;
     private final SandboxConfig sandboxConfig;
 
@@ -48,14 +46,12 @@ public class DebugApiController {
         AgentManagerProperties props,
         OafConfig oafConfig,
         DataSource dataSource,
-        LLMLogger llmLogger,
         LogCollector logCollector,
         SandboxConfig sandboxConfig
     ) {
         this.props = props;
         this.oafConfig = oafConfig;
         this.dataSource = dataSource;
-        this.llmLogger = llmLogger;
         this.logCollector = logCollector;
         this.sandboxConfig = sandboxConfig;
     }
@@ -135,62 +131,6 @@ public class DebugApiController {
         } catch (Exception e) {
             return Map.of("connected", false, "error", e.getMessage());
         }
-    }
-
-    /** Thread 列表：agent_state 表 session_id 去重（真实会话来源） */
-    @GetMapping("/threads")
-    public List<Map<String, Object>> threads() {
-        var result = new ArrayList<Map<String, Object>>();
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement();
-             var rs = stmt.executeQuery(
-                 "SELECT session_id, MAX(updated_at) AS updated_at FROM agent_state GROUP BY session_id ORDER BY updated_at DESC")) {
-            while (rs.next()) {
-                var sid = rs.getString("session_id");
-                result.add(Map.of(
-                    "session_id", sid,
-                    "thread_id", extractThreadId(sid),
-                    "updated_at", rs.getTimestamp("updated_at") != null
-                        ? rs.getTimestamp("updated_at").toString() : ""
-                ));
-            }
-        } catch (Exception e) {
-            log.warn("List threads failed: {}", e.getMessage());
-        }
-        return result;
-    }
-
-    /** Thread 历史消息：尽力从 agent_state.state_data 解析 */
-    @GetMapping("/threads/{sessionId}/history")
-    public Map<String, Object> threadHistory(@PathVariable String sessionId) {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.prepareStatement(
-                 "SELECT state_data FROM agent_state WHERE session_id = ? "
-                     + "OR session_id LIKE CONCAT('%:', ?) ORDER BY item_index DESC LIMIT 1")) {
-            stmt.setString(1, sessionId);
-            // 兼容 agent_state 行 session_id 带 userId 前缀的格式（如 debug-user:debug-user:msq91wz3）
-            stmt.setString(2, sessionId);
-            var rs = stmt.executeQuery();
-            if (!rs.next()) {
-                return Map.of("session_id", sessionId, "messages", List.of());
-            }
-            var stateData = rs.getString("state_data");
-            return Map.of("session_id", sessionId, "messages", extractMessages(stateData));
-        } catch (Exception e) {
-            return Map.of("session_id", sessionId, "messages", List.of(), "error", e.getMessage());
-        }
-    }
-
-    /** LLM 调用记录（LLMLogger） */
-    @GetMapping("/threads/{sessionId}/llm-calls")
-    public Map<String, Object> llmCalls(@PathVariable String sessionId) {
-        var calls = llmLogger.getCalls(sessionId).stream().map(c -> Map.<String, Object>of(
-            "call_id", c.callId(),
-            "timestamp", c.timestamp(),
-            "request", c.request(),
-            "response", c.response()
-        )).toList();
-        return Map.of("session_id", sessionId, "calls", calls);
     }
 
     /** 记忆内容：从 agent_fs 读取 MEMORY.md + memory/ 文件，按用户分组 */
@@ -346,26 +286,6 @@ public class DebugApiController {
             );
         } catch (Exception e) {
             return Map.of("error", e.getMessage());
-        }
-    }
-
-    /** session_id 格式: "{slug}:{threadId}"，取最后一个冒号后的部分作为展示 id */
-    private String extractThreadId(String sessionId) {
-        var idx = sessionId.lastIndexOf(':');
-        if (idx >= 0 && idx < sessionId.length() - 1) {
-            return sessionId.substring(idx + 1);
-        }
-        return sessionId;
-    }
-
-    /** BFS 查找 state_data JSON 中的 context/messages 数组，尽力提取 {role, content} */
-    private List<Map<String, Object>> extractMessages(String stateData) {
-        try {
-            var messages = io.agentmanager.framework.service.StateDataParser.findMessagesArray(stateData);
-            return io.agentmanager.framework.service.StateDataParser.toRoleContentList(messages);
-        } catch (Exception e) {
-            log.warn("Extract messages failed: {}", e.getMessage());
-            return List.of();
         }
     }
 

@@ -19,15 +19,15 @@ Agent Framework (Java) 的测试基于 **Spring Boot Test** + **JUnit 5**。
 
 ## 2. 测试 LLM 配置
 
-所有 E2E 测试使用以下 LLM 配置（2026-08-20 更新为 OpenRouter nemotron，见 `.env.secrets`）：
+所有 E2E 测试使用以下 LLM 配置（2026-08-20 更新为 mimo-v2.5，见 `.env.secrets`）：
 
 ```yaml
 # application-test.yml
 agent:
   llm:
-    api-key: ${LLM_API_KEY}          # .env.secrets: sk-or-v1-a8a907a...
-    model-id: ${LLM_MODEL}           # nemotron-3-nano-30b-a3b:free
-    base-url: ${LLM_ENDPOINT}        # https://openrouter.ai/api/v1
+    api-key: ${LLM_API_KEY}          # .env.secrets: tp-c9dgn7tl95bl9d2lptfdwq4qsozazbrfit3vehndv0mmyw13
+    model-id: ${LLM_MODEL}           # mimo-v2.5
+    base-url: ${LLM_ENDPOINT}        # https://token-plan-cn.xiaomimimo.com/v1
     provider: openai
     temperature: 0.2
     max-tokens: 50
@@ -154,8 +154,16 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| SessionStreamControllerTest | 13 | metadata 携带会话 key 注入 / ui 元数据 SSE / 长连接订阅 |
+| SessionStreamControllerTest | 13 | metadata 携带会话 key 注入 / ui 元数据 SSE / 单次流触发 |
 | StreamControllerTest | 8 | ui 元数据序列化 / 无 UI 工具降级原词表 |
+
+### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| TurnLeaseStoreTest | 8 | acquire 成功 / PK 冲突排队 / 过期接管 / renew 续租 / renew 失败自停 / release 释放 / 并发 acquire 竞争 |
+| ConfirmContextStoreTest | 10 | put 覆盖写 / consume CAS 成功 / consume 已消费 409 / consume 不存在 404 / TTL 过期 / 查询 pendingConfirm / 前缀兼容查询 / 清理过期条目 |
+| ToolAuditStoreTest | 6 | 异步批量写入 / 单条写入 / 过期清理 / 批量合并 / 写入失败静默降级 / 查询审计日志 |
 
 ---
 
@@ -228,7 +236,7 @@ src/test/resources/fixtures/test-agent/
 | MySQL | ≥ 8.0 | MysqlDistributedStore |
 | JUnit 5 | 内置 | 测试框架 |
 | Spring Boot Test | 3.3.5 | 集成测试支持 |
-| LLM API | sensenova-6.7-flash-lite | E2E 测试（见 .env.secrets） |
+| LLM API | mimo-v2.5 | E2E 测试（见 .env.secrets） |
 
 ---
 
@@ -247,8 +255,9 @@ src/test/resources/fixtures/test-agent/
 | UiContextStoreTest / UiContextControllerTest / UiContextInjectionHookTest | 18 | ✅ |
 | McpResourceProxyTest | 10 | ✅ |
 | AgentRuntimeService 系列 | 40 | ✅ |
+| TurnLeaseStoreTest / ConfirmContextStoreTest / ToolAuditStoreTest | 24 | ✅ |
 | DebugApiControllerTest | 25 | ✅ |
-| 其余（tool/config/service/controller） | 175 | ✅ |
+| 其余（tool/config/service/controller） | 159 | ✅ |
 
 ### 8.1 沙箱测试（OpenSandbox 集成，2026-08-12 新增）
 

@@ -6,109 +6,183 @@ import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
-import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
-import io.agentmanager.framework.service.SessionEventBus;
+import io.agentmanager.framework.service.ToolAuditStore;
+import io.agentmanager.framework.service.TurnLeaseGuard;
+import io.agentmanager.framework.service.TurnLeaseStore;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventType;
+import io.agentscope.core.event.RequireUserConfirmEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.event.ToolResultStartEvent;
+import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 
 /**
- * 长连接 SSE 会话流端点（debug 页面，计划文档 3.8 / 六-F）。
+ * 会话单次流端点（无状态单次流架构，/threads 会话业务 API）。
  *
- * <ul>
- *   <li>GET  /debug/threads/{sessionId}/events —— 订阅会话事件总线（长连接，心跳保活）</li>
- *   <li>POST /debug/threads/{sessionId}/chat  —— fire-and-forget 触发，事件经总线回流到订阅者</li>
- * </ul>
+ * <p>POST /threads/{sessionId}/chat —— SSE 单次流直吐：抢 Turn 租约（等待式，
+ * 同 session 有活跃执行段 → 排队，SSE 发 waiting 帧）→ sendStream → 事件直吐 →
+ * AGENT_END/error 帧关闭流、释放租约；permission_ask（HITL 暂停点）→ 上下文落库
+ * confirm_context + 释放租约让出锁（执行权语义，见 stateless-single-stream-plan 4.1.3）。
  *
- * <p>对齐官方 agentscope 模式：订阅端点直接开始推送事件，触发端点 fire-and-forget，
- * 事件通过已建立的 SSE 连接回流到前端。</p>
+ * <p>日志审计（O3 定稿）：工具类事件异步批量落库（仅元信息，失败静默降级）。
  */
 @RestController
-@RequestMapping("/debug/threads/{sessionId}")
+@RequestMapping("/threads/{sessionId}")
 public class SessionStreamController {
 
     private static final Logger log = LoggerFactory.getLogger(SessionStreamController.class);
-    private static final Duration HEARTBEAT = Duration.ofSeconds(15);
+
+    /** waiting 帧间隔：每 15s（防 Nginx 60s 读超时） */
+    private static final Duration WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
+    /** 租约排队等待超时：120s 后仍未拿到 → error 帧（turn_in_progress 兜底） */
+    private static final Duration ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
 
     private final ChatUiChannel chatChannel;
-    private final SessionEventBus eventBus;
     private final AgentRuntimeService runtimeService;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final TurnLeaseStore turnLeaseStore;
+    private final ToolAuditStore toolAuditStore;
 
-    public SessionStreamController(ChatUiChannel chatChannel, SessionEventBus eventBus,
-                                   AgentRuntimeService runtimeService, McpToolRegistrar mcpToolRegistrar) {
+    public SessionStreamController(ChatUiChannel chatChannel,
+                                   AgentRuntimeService runtimeService,
+                                   McpToolRegistrar mcpToolRegistrar,
+                                   TurnLeaseStore turnLeaseStore,
+                                   ToolAuditStore toolAuditStore) {
         this.chatChannel = chatChannel;
-        this.eventBus = eventBus;
         this.runtimeService = runtimeService;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.turnLeaseStore = turnLeaseStore;
+        this.toolAuditStore = toolAuditStore;
     }
 
-    @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<String>> subscribe(@PathVariable String sessionId) {
-        var sink = eventBus.sink(sessionId);
-        // 初始帧：确保 Spring 立即发送 HTTP 响应头（否则 fetch() 会等到首个数据才返回）
-        var connected = ServerSentEvent.<String>builder()
-            .event("connected").data("{}").build();
-        return Flux.concat(
-                Flux.just(connected),
-                sink.asFlux().map(e -> toSSE(e, mcpToolRegistrar)))
-            .mergeWith(tick(sessionId))
-            .doFinally(sig -> eventBus.onUnsubscribe(sessionId));
-    }
-
-    /** 心跳：定时 ping，保持长连接不被断开 */
-    private Flux<ServerSentEvent<String>> tick(String sessionId) {
-        return Flux.interval(HEARTBEAT).map(i ->
-            ServerSentEvent.<String>builder().event("ping").data("{}").build());
-    }
-
-    @PostMapping(value = "/chat", produces = MediaType.APPLICATION_JSON_VALUE)
-    @ResponseStatus(HttpStatus.ACCEPTED)
-    public Map<String, Object> trigger(@PathVariable String sessionId,
-                                       @RequestBody TriggerRequest body) {
+    /** 无状态单次流：事件直吐，执行完即关闭（HTTP 200 + SSE）；排队等待时发 waiting 帧 */
+    @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> chat(@PathVariable String sessionId,
+                                              @RequestBody ChatRequest body) {
         var message = body.message();
         if (message == null || message.isBlank()) {
-            return Map.of("accepted", false, "error", "message is required");
+            return Flux.just(errorSSE("message is required"));
         }
         var userId = body.userId() != null ? body.userId() : "debug-user";
 
-        // 消息列表：UI 交互上下文（4.7）经 UiContextInjectionHook 注入——
-        // HarnessAgent 拒绝 inputMessages 中 SYSTEM 消息，这里仅把会话 key 写入
-        // 用户消息 metadata，Hook 在 PreCallEvent 阶段按会话查库 appendSystemContent
-        var messages = new ArrayList<Msg>();
-        messages.add(Msg.builder().role(MsgRole.USER).name(userId)
-            .metadata(Map.of(UiContextStore.METADATA_SESSION_KEY, sessionId))
-            .textContent(message).build());
+        return Flux.<ServerSentEvent<String>>create(sink -> {
+            // ===== 抢 Turn 租约（等待式：超时发 error 帧兜底）=====
+            var token = turnLeaseStore.tryAcquire(sessionId);
+            long deadline = System.currentTimeMillis() + ACQUIRE_TIMEOUT.toMillis();
+            while (token == null && System.currentTimeMillis() < deadline) {
+                // 等待期间发 waiting 帧（防 Nginx 60s 读超时；前端提示"排队等待中"）
+                sink.next(waitingSSE());
+                try {
+                    Thread.sleep(WAITING_FRAME_INTERVAL.toMillis());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    sink.complete();
+                    return;
+                }
+                token = turnLeaseStore.tryAcquire(sessionId);
+            }
+            if (token == null) {
+                // 排队超时兜底：对齐 409 turn_in_progress 语义（以 SSE error 帧表达）
+                sink.next(errorSSE("turn_in_progress: session '" + sessionId
+                    + "' has an active turn and queue timeout reached"));
+                sink.complete();
+                return;
+            }
 
-        // fire-and-forget：订阅触发，事件经事件总线扇出；AGENT_END 为终态标记，前端据此收尾
-        // ChatUiRequest.withPeer 的 peerId 即会话 key（= SendOptions.of(u,s).effectiveSessionKey()）
-        chatChannel.sendStream(ChatUiRequest.withPeer(sessionId, messages))
-            .doOnNext(event -> {
-                eventBus.emit(sessionId, event);
-                runtimeService.storeConfirmContext(sessionId, event);  // Channel 流程存储确认上下文
-            })
-            .doOnError(e -> log.warn("session chat stream error (sid={}): {}", sessionId, e.getMessage()))
-            .subscribe();
+            // ===== 启动续租（绑定 turn 执行器生命周期，非 SSE 连接）=====
+            TurnLeaseGuard lease = new TurnLeaseGuard(turnLeaseStore, sessionId, token);
 
-        log.info("Session chat triggered: sid={}, len={}", sessionId, message.length());
-        return Map.of("accepted", true, "sessionId", sessionId);
+            // ===== 消息列表：UI 交互上下文（4.7）经 UiContextInjectionHook 注入 =====
+            var messages = new ArrayList<Msg>();
+            messages.add(Msg.builder().role(MsgRole.USER).name(userId)
+                .metadata(Map.of(UiContextStore.METADATA_SESSION_KEY, sessionId))
+                .textContent(message).build());
+
+            // 会话经网关路由后其真实 key 为 (userId=peer, sessionId=gw-hash)——HITL 恢复
+            // 必须复用该组合才能命中 pending 工具调用（storeConfirmContext 内部推导）
+            chatChannel.sendStream(ChatUiRequest.withPeer(sessionId, messages))
+                .subscribe(
+                    event -> handleEvent(sink, event, sessionId, lease),
+                    e -> {
+                        log.warn("session chat stream error (sid={}): {}", sessionId, e.getMessage());
+                        lease.release();
+                        sink.next(errorSSE(e));
+                        sink.complete();
+                    },
+                    () -> {
+                        // sendStream 自然完成：正常路径先收到 AGENT_END（置已释放），此处幂等兜底
+                        // 释放（防御性：流异常结束但未走该事件时锁不会悬挂）
+                        lease.release();
+                        sink.complete();
+                    });
+
+            sink.onCancel(() -> {
+                // 客户端断开（abort / Nginx 断流）：不主动释放锁——若是 permission_ask 后
+                // 的"观众离场"，锁已让出；若是取消活跃 turn，由 TTL 60s 自然过期兜底
+                // （R12 待 SPIKE S2 定稿 cancel 语义）
+                lease.release();
+            });
+        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+    }
+
+    /** 单帧处理：审计 + HITL 落库 + SSE 直吐 + 终态关闭/释放 */
+    private void handleEvent(FluxSink<ServerSentEvent<String>> sink, AgentEvent event,
+                             String sessionId, TurnLeaseGuard lease) {
+        // 工具类事件 → 异步批量审计落库（仅元信息，失败静默）
+        audit(event, sessionId);
+        // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
+        if (event instanceof RequireUserConfirmEvent) {
+            runtimeService.storeConfirmContext(sessionId, event);
+            lease.release();
+            // HITL 暂停点：锁已让出、状态已持久化，流可关闭（前端已收到 permission_ask 帧
+            // 渲染确认卡片；后续恢复走 confirm-stream，是新执行段需重新 acquire）
+        }
+        sink.next(toSSE(event, mcpToolRegistrar));
+        // AGENT_END → 关闭流、释放租约
+        if (event.getType() == AgentEventType.AGENT_END) {
+            lease.release();
+            sink.complete();
+        }
+    }
+
+    /** 工具类事件审计（异步批量，仅元信息——何时/何工具/何状态，见 4.1.2） */
+    private void audit(AgentEvent event, String sessionId) {
+        if (event instanceof ToolCallStartEvent tc) {
+            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_CALL_START", event);
+        } else if (event instanceof ToolCallEndEvent tc) {
+            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_CALL_END", event);
+        } else if (event instanceof ToolResultStartEvent tc) {
+            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_RESULT_START", event);
+        } else if (event instanceof ToolResultEndEvent tc) {
+            recordAudit(sessionId, tc.getToolCallName(), tc.getToolCallId(), "TOOL_RESULT_END", event);
+        }
+    }
+
+    private void recordAudit(String sessionId, String toolName, String toolCallId, String state, AgentEvent event) {
+        try {
+            toolAuditStore.record(sessionId, toolName, toolCallId, state,
+                AgentEventSseSerializer.payload(event));
+        } catch (Exception e) {
+            log.debug("audit record skipped (sid={}): {}", sessionId, e.getMessage());
+        }
     }
 
     private static ServerSentEvent<String> toSSE(AgentEvent event, McpToolRegistrar registrar) {
@@ -127,7 +201,23 @@ public class SessionStreamController {
             .build();
     }
 
-    /** POST 请求体（受控 F）：message 必填，userId 可选 */
-    public record TriggerRequest(String message, String userId) {
+    private static ServerSentEvent<String> waitingSSE() {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"waiting\"}")
+            .build();
+    }
+
+    private static ServerSentEvent<String> errorSSE(Throwable e) {
+        String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        return errorSSE(msg);
+    }
+
+    private static ServerSentEvent<String> errorSSE(String msg) {
+        String payload = "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(msg) + "}";
+        return ServerSentEvent.<String>builder().data(payload).build();
+    }
+
+    /** POST 请求体：message 必填，userId 可选 */
+    public record ChatRequest(String message, String userId) {
     }
 }

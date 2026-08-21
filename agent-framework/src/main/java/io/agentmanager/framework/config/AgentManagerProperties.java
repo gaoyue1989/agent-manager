@@ -8,7 +8,8 @@ public record AgentManagerProperties(
     LLMConfig llm,
     ServerConfig server,
     CheckpointConfig checkpoint,
-    @DefaultValue("/config") String configDir
+    @DefaultValue("/config") String configDir,
+    CleanupConfig cleanup
 ) {
     public record LLMConfig(
         @DefaultValue("") String apiKey,
@@ -54,4 +55,21 @@ public record AgentManagerProperties(
             return "agent_manager_test";
         }
     }
+
+    /**
+     * 清理与租约配置（无状态单次流架构，见 stateless-single-stream-plan O2/O3）。
+     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）
+     */
+    public record CleanupConfig(
+        /** confirm_context 有效时长（分钟），默认 30 */
+        @DefaultValue("30") int confirmTtlMinutes,
+        /** turn_lease 租约 TTL（秒），默认 60 */
+        @DefaultValue("60") int turnLeaseTtlSeconds,
+        /** turn 续租间隔（秒），默认 20 */
+        @DefaultValue("20") int turnLeaseRenewSeconds,
+        /** 工具审计日志保留天数，默认 30 */
+        @DefaultValue("30") int auditRetentionDays,
+        /** agent_state/agent_fs 会话记录保留天数，默认 7 */
+        @DefaultValue("7") int sessionRetentionDays
+    ) {}
 }

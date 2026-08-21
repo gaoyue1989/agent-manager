@@ -45,11 +45,27 @@ Agent Framework 是一个基于 **AgentScope Java 2.0 Harness** 的独立可运�
 │                    │  + Channel       │   ┌──────────────────┐  │
 │                    └──────────────────┘   │  ChatUiChannel   │  │
 │                            │              │  + Gateway       │  │
+│                            │              └──────────────────┘  │
+│                            │              ┌──────────────────┐  │
+│                            │              │SessionStream-    │  │
+│                            │              │Controller        │  │
+│                            │              │POST /threads/    │  │
+│                            │              │ {sid}/chat (SSE)  │  │
+│                            │              └──────────────────┘  │
+│                            │              ┌──────────────────┐  │
+│                            │              │ ThreadController  │  │
+│                            │              │ GET /threads      │  │
+│                            │              └──────────────────┘  │
+│                            │              ┌──────────────────┐  │
+│                            │              │ConfirmController │  │
 │                            ▼              └──────────────────┘  │
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │  MysqlDistributedStore (GreatSQL 3307)                   │    │
 │  │  ├── agent_state 表 · AgentState 持久化                  │    │
-│  │  └── agent_fs 表 · 工作区文件 KV 存储                     │    │
+│  │  ├── agent_fs 表 · 工作区文件 KV 存储                     │    │
+│  │  ├── confirm_context 表 · HITL 确认上下文（跨副本共享）    │    │
+│  │  ├── turn_lease 表 · Turn 租约（执行权互斥）               │    │
+│  │  └── tool_audit_log 表 · 工具调用轻量审计                  │    │
 │  │      ├── MEMORY.md · 长期记忆                             │    │
 │  │      ├── memory/ · 每日流水账                             │    │
 │  │      ├── skills/ · 技能文件                               │    │
@@ -104,9 +120,12 @@ src/main/java/io/agentmanager/framework/
 │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息 + tool_calls)
 │   ├── SessionManager.java          # 会话管理
-│   ├── SessionCleanupService.java   # 会话清理
+│   ├── SessionCleanupService.java   # 会话清理 (联动清理 confirm_context/tool_audit_log/turn_lease)
+│   ├── TurnLeaseStore.java          # turn_lease 表 acquire/renew/release (执行权互斥)
+│   ├── ConfirmContextStore.java     # confirm_context 表 CRUD (跨副本共享 HITL 确认上下文)
+│   ├── ToolAuditStore.java          # tool_audit_log 异步批量写 (工具调用轻量审计)
 │   ├── LlmLoggingMiddleware.java    # LLM 调用记录中间件 (ModelCallEndEvent → LLMLogger)
-│   ├── LLMLogger.java               # LLM 调用日志 (内存存储, /debug/threads/{id}/llm-calls)
+│   ├── LLMLogger.java               # LLM 调用日志 (内存存储, /threads/{id}/llm-calls)
 │   ├── LogCollector.java            # 日志收集 (内存 Appender)
 │   ├── InMemoryLogAppender.java     # 内存日志 Appender
 │   └── A2uiService.java             # A2UI JSONL 生成
@@ -119,7 +138,9 @@ src/main/java/io/agentmanager/framework/
     ├── DebugController.java         # GET /debug (页面)
     ├── DebugApiController.java      # GET /debug/* (页面数据 API, 含 /debug/sandbox)
     ├── AgentCardController.java     # GET /.well-known/agent-card.json
-    ├── StreamController.java        # GET /chat/stream (Channel SSE)
+    ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
+    ├── SessionStreamController.java # POST /threads/{sid}/chat (SSE 单次流, 单次流模式)
+    ├── ConfirmController.java       # POST /threads/{sid}/confirm, /confirm-stream (HITL 确认)
     ├── McpProxyController.java      # MCP Apps: /mcp/{server}/resources/ui、/tools/{tool} 代理
     ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7)
     ├── ThreadController.java        # GET /threads
@@ -154,6 +175,31 @@ StreamController → ChatUiChannel.sendStream()
   ├── SendOptions.userId(userId) → 自动创建/恢复 session
   ├── HarnessAgent.streamEvents() → LLM API
   └── SSE: TextBlockDeltaEvent / ToolCallStartEvent / ...
+
+Client Request (POST /threads/{sid}/chat, body: {message, userId})
+  │
+  ▼
+SessionStreamController → TurnLeaseStore.acquire() → 等待式获取执行权
+  │  等待期间 SSE 每 15s 发 {type:"waiting"} 帧
+  │  超时(120s) → 409 turn_in_progress
+  │
+  ├── 启动续租任务 (20s 间隔, TTL 60s)
+  ├── ChatUiChannel.sendStream() → 事件直吐 (SSE 单次流)
+  │   ├── 工具类事件 → ToolAuditStore 异步批量写
+  │   └── permission_ask → ConfirmContextStore 落库 + release 锁
+  ├── AGENT_END / error → 关闭 SSE 流 + release 锁 + 停续租
+  └── 完成
+
+Client Request (POST /threads/{sid}/confirm-stream, body: {confirmed, toolCallIds})
+  │
+  ▼
+ConfirmController → ConfirmContextStore.consume() → CAS 防重复
+  │  miss → 404 / consumed → 409
+  │
+  ├── TurnLeaseStore.acquire() → 恢复执行需重新获取执行权
+  ├── 反序列化 tool_calls → resumeMsg
+  ├── HarnessAgent.streamEvents(resumeMsg, ctx) → SSE 单次流
+  └── AGENT_END → release 锁 + 关闭流
 ```
 
 ### 2.4 记忆管理流程
@@ -369,6 +415,11 @@ config/
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | ✓(沙箱模式) | OpenSandbox API 密钥 |
+| `CONFIRM_TTL_MINUTES` | `30` | | HITL 确认上下文 TTL (分钟) |
+| `TURN_LEASE_TTL_SECONDS` | `60` | | Turn 租约 TTL (秒) |
+| `TURN_LEASE_RENEW_SECONDS` | `20` | | Turn 租约续期间隔 (秒) |
+| `AUDIT_RETENTION_DAYS` | `30` | | 工具审计日志保留天数 |
+| `SESSION_RETENTION_DAYS` | `30` | | 会话数据保留天数 |
 
 ---
 

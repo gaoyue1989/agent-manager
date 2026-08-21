@@ -3,6 +3,8 @@ package io.agentmanager.framework.controller;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
@@ -13,6 +15,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.TurnLeaseGuard;
+import io.agentmanager.framework.service.TurnLeaseStore;
 import reactor.core.publisher.Flux;
 
 /**
@@ -25,18 +29,25 @@ import reactor.core.publisher.Flux;
  *
  * <p>错误码（12.5）：缓存 miss → 404 {@code confirm_context_not_found}；重复确认（CAS 防护）→ 409
  * {@code confirm_already_consumed}；confirm-stream 预检失败以 error SSE 帧返回。
+ *
+ * <p>执行权语义：confirm 恢复 = 新执行段，confirm-stream 需先 acquire turn 租约；permission_ask
+ * 暂停点锁已让出，此处通常可直接抢到；抢不到（并发确认/新消息正在执行）→ error 帧 turn_in_progress。
  */
 @RestController
 @RequestMapping("/threads/{sessionId}")
 public class ConfirmController {
 
-    private final AgentRuntimeService runtimeService;
+    private static final Logger log = LoggerFactory.getLogger(ConfirmController.class);
 
-    public ConfirmController(AgentRuntimeService runtimeService) {
+    private final AgentRuntimeService runtimeService;
+    private final TurnLeaseStore turnLeaseStore;
+
+    public ConfirmController(AgentRuntimeService runtimeService, TurnLeaseStore turnLeaseStore) {
         this.runtimeService = runtimeService;
+        this.turnLeaseStore = turnLeaseStore;
     }
 
-    /** 同步版：恢复 agent 执行，返回最终回复（长连接场景事件同时经 SessionEventBus 扇出到原订阅） */
+    /** 同步版：恢复 agent 执行，返回最终回复（无状态架构：无事件扇出，调用方直接消费结果） */
     @PostMapping(value = "/confirm", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> confirm(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
@@ -54,21 +65,36 @@ public class ConfirmController {
         }
     }
 
-    /** 流式版：确认后事件流（供单次流/长连接调用方实时消费恢复过程） */
+    /** 流式版：确认后事件流（新执行段，先 acquire turn 租约再恢复） */
     @PostMapping(value = "/confirm-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> confirmStream(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
-        try {
-            runtimeService.checkConfirmAvailable(sessionId);
-        } catch (Exception e) {
-            return Flux.just(ServerSentEvent.<String>builder()
-                .data(AgentEventSseSerializer.payload(Map.of("type", "error", "error", e.getMessage())))
-                .build());
-        }
-        return runtimeService.resumeWithConfirmStream(sessionId, null, body.results())
-            .map(m -> ServerSentEvent.<String>builder()
-                .data(AgentEventSseSerializer.payload(m))
-                .build());
+        return Flux.defer(() -> {
+            try {
+                runtimeService.checkConfirmAvailable(sessionId);
+            } catch (Exception e) {
+                return Flux.just(errorSSE(e.getMessage() != null ? e.getMessage()
+                    : e.getClass().getSimpleName()));
+            }
+            var token = turnLeaseStore.tryAcquire(sessionId);
+            if (token == null) {
+                // 已有活跃执行段（并发确认 / 新消息正在执行）→ 409 turn_in_progress，以 SSE error 帧表达
+                return Flux.just(errorSSE("turn_in_progress: session '" + sessionId
+                    + "' has an active turn"));
+            }
+            var lease = new TurnLeaseGuard(turnLeaseStore, sessionId, token);
+            return runtimeService.resumeWithConfirmStream(sessionId, null, body.results())
+                .map(m -> ServerSentEvent.<String>builder()
+                    .data(AgentEventSseSerializer.payload(m))
+                    .build())
+                .doFinally(signal -> lease.release());
+        });
+    }
+
+    private static ServerSentEvent<String> errorSSE(String msg) {
+        return ServerSentEvent.<String>builder()
+            .data(AgentEventSseSerializer.payload(Map.of("type", "error", "error", msg)))
+            .build();
     }
 
     public record ConfirmRequest(List<Map<String, Object>> results) {

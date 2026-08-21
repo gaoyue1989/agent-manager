@@ -45,7 +45,8 @@ class AgentRuntimeServiceMcpConfigTest {
             new OafConfig.MemoryConfig("editable", Map.of()),
             Map.of()
         );
-        return new AgentRuntimeService(config, newAgent(), mcpConfigs, new LLMLogger(), new SessionEventBus());
+        return new AgentRuntimeService(config, newAgent(), mcpConfigs, new LLMLogger(),
+            mock(io.agentmanager.framework.service.ConfirmContextStore.class));
     }
 
     private AgentRuntimeService newService(List<Map<String, Object>> mcpConfigs) {

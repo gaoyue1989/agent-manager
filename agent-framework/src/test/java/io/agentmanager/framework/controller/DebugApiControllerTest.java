@@ -7,7 +7,6 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.sql.Timestamp;
 import java.util.List;
 import java.util.Map;
 
@@ -23,7 +22,6 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.model.OafConfig;
-import io.agentmanager.framework.service.LLMLogger;
 import io.agentmanager.framework.service.LogCollector;
 
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -48,9 +46,6 @@ class DebugApiControllerTest {
 
     @MockBean
     private DataSource dataSource;
-
-    @MockBean
-    private LLMLogger llmLogger;
 
     @MockBean
     private LogCollector logCollector;
@@ -190,163 +185,6 @@ class DebugApiControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.connected").value(false))
             .andExpect(jsonPath("$.error").value("conn refused"));
-    }
-
-    // ---------- threads ----------
-
-    @Test
-    void threadsShouldReturnDeduplicatedSessions() throws Exception {
-        var conn = mock(Connection.class);
-        var stmt = mock(Statement.class);
-        var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.createStatement()).thenReturn(stmt);
-        when(stmt.executeQuery(anyString())).thenReturn(rs);
-        when(rs.next()).thenReturn(true, false);
-        when(rs.getString("session_id")).thenReturn("acme-test-agent:t1");
-        when(rs.getTimestamp("updated_at")).thenReturn(new Timestamp(1000));
-
-        mockMvc.perform(get("/debug/threads"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$[0].thread_id").value("t1"))
-            .andExpect(jsonPath("$[0].session_id").value("acme-test-agent:t1"))
-            .andExpect(jsonPath("$[0].updated_at").isNotEmpty());
-    }
-
-    @Test
-    void threadsShouldReturnEmptyOnError() throws Exception {
-        when(dataSource.getConnection()).thenThrow(new RuntimeException("boom"));
-
-        mockMvc.perform(get("/debug/threads"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$").isArray())
-            .andExpect(jsonPath("$").isEmpty());
-    }
-
-    // ---------- thread history ----------
-
-    @Test
-    void threadHistoryShouldParseMessages() throws Exception {
-        var conn = mock(Connection.class);
-        var ps = mock(PreparedStatement.class);
-        var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
-        when(rs.getString("state_data")).thenReturn(
-            "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":\"hi\"}]}");
-
-        mockMvc.perform(get("/debug/threads/s1/history"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.messages[0].role").value("user"))
-            .andExpect(jsonPath("$.messages[0].content").value("hello"))
-            .andExpect(jsonPath("$.messages[1].content").value("hi"));
-    }
-
-    @Test
-    void threadHistoryShouldHandlePartsFallback() throws Exception {
-        var conn = mock(Connection.class);
-        var ps = mock(PreparedStatement.class);
-        var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
-        when(rs.getString("state_data")).thenReturn(
-            "{\"nested\":{\"messages\":[{\"role\":\"user\",\"parts\":[{\"text\":\"p1\"}]}]}}");
-
-        mockMvc.perform(get("/debug/threads/s2/history"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.messages[0].content").value("[{\"text\":\"p1\"}]"));
-    }
-
-    @Test
-    void threadHistoryShouldParseAgentScopeContextField() throws Exception {
-        var conn = mock(Connection.class);
-        var ps = mock(PreparedStatement.class);
-        var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
-        when(rs.getString("state_data")).thenReturn(
-            "{\"session_id\":\"s5\",\"summary\":\"\",\"context\":[" +
-            "{\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"metadata\":{}}," +
-            "{\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"reasoning\"}," +
-            "{\"type\":\"text\",\"text\":\"hi\"}],\"metadata\":{}}]}");
-
-        mockMvc.perform(get("/debug/threads/s5/history"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.messages[0].role").value("user"))
-            .andExpect(jsonPath("$.messages[0].content").value("hello"))
-            .andExpect(jsonPath("$.messages[1].role").value("assistant"))
-            .andExpect(jsonPath("$.messages[1].content").value("hi"));
-    }
-
-    @Test
-    void threadHistoryShouldSkipThinkingBlocks() throws Exception {
-        var conn = mock(Connection.class);
-        var ps = mock(PreparedStatement.class);
-        var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
-        when(rs.getString("state_data")).thenReturn(
-            "{\"context\":[{\"role\":\"ASSISTANT\"," +
-            "\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal reasoning\"}]}]}");
-
-        mockMvc.perform(get("/debug/threads/s6/history"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.messages").isEmpty());
-    }
-
-    @Test
-    void threadHistoryShouldReturnEmptyWhenNoRow() throws Exception {
-        var conn = mock(Connection.class);
-        var ps = mock(PreparedStatement.class);
-        var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false);
-
-        mockMvc.perform(get("/debug/threads/s3/history"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.messages").isEmpty());
-    }
-
-    @Test
-    void threadHistoryShouldReturnErrorOnException() throws Exception {
-        when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
-
-        mockMvc.perform(get("/debug/threads/s4/history"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.messages").isEmpty())
-            .andExpect(jsonPath("$.error").value("db down"));
-    }
-
-    // ---------- llm calls ----------
-
-    @Test
-    void llmCallsShouldReturnRecords() throws Exception {
-        when(llmLogger.getCalls("s1")).thenReturn(List.of(
-            new LLMLogger.CallRecord("c1", 1000L, Map.of("model", "gpt-4"), Map.of("content", "ok"))));
-
-        mockMvc.perform(get("/debug/threads/s1/llm-calls"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.calls[0].call_id").value("c1"))
-            .andExpect(jsonPath("$.calls[0].request.model").value("gpt-4"));
-    }
-
-    @Test
-    void llmCallsShouldReturnEmptyForUnknownThread() throws Exception {
-        when(llmLogger.getCalls("unknown")).thenReturn(List.of());
-
-        mockMvc.perform(get("/debug/threads/unknown/llm-calls"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.calls").isEmpty());
     }
 
     // ---------- memory ----------

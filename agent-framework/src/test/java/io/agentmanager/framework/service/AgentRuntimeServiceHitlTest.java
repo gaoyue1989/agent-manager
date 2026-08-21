@@ -1,6 +1,7 @@
 package io.agentmanager.framework.service;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -20,24 +21,26 @@ import reactor.core.publisher.Mono;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 /**
- * AgentRuntimeService HITL 测试：permission_ask 事件转发 + 确认缓存 + resumeWithConfirm 恢复。
- * 覆盖 hitl-permission-plan.md 6.2.1 / 6.3.1 / 12.5。
+ * AgentRuntimeService HITL 测试：permission_ask 事件转发 + 确认上下文落库 + resumeWithConfirm 恢复。
+ * 覆盖 hitl-permission-plan.md 6.2.1 / 6.3.1 / 12.5（无状态架构：确认上下文经 ConfirmContextStore
+ * 落库跨副本可见，不再有进程内缓存/事件总线）。
  */
 class AgentRuntimeServiceHitlTest {
 
     private HarnessAgent agent;
     private AgentRuntimeService service;
-    private SessionEventBus eventBus;
+    private ConfirmContextStore confirmContextStore;
 
     private static final String SID = "t1";
 
     @BeforeEach
     void setUp() {
         agent = mock(HarnessAgent.class);
-        eventBus = new SessionEventBus();
+        confirmContextStore = mock(ConfirmContextStore.class);
         var config = new OafConfig(
             "test-agent", "acme", "test-agent", "1.0.0", "acme/test-agent",
             "Test agent", "@acme", "MIT",
@@ -48,7 +51,7 @@ class AgentRuntimeServiceHitlTest {
             new OafConfig.MemoryConfig("editable", Map.of()),
             Map.of()
         );
-        service = new AgentRuntimeService(config, agent, List.of(), new LLMLogger(), eventBus);
+        service = new AgentRuntimeService(config, agent, List.of(), new LLMLogger(), confirmContextStore);
     }
 
     private ToolUseBlock toolUseBlock(String id) {
@@ -65,6 +68,14 @@ class AgentRuntimeServiceHitlTest {
         var ask = askEvent("reply-1", toolUseBlock("call-1"));
         when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.just(ask));
         return service.invokeStream("query weather", SID, "alice").collectList().block();
+    }
+
+    /** 构造 store 回读行（模拟 DB 已存该 session 的确认上下文） */
+    private ConfirmContextStore.StoredRow stubStoreRow() {
+        var row = new ConfirmContextStore.StoredRow(
+            List.of(toolUseBlock("call-1")), "reply-1", Instant.now(), null, null);
+        when(confirmContextStore.consume(anyString())).thenReturn(row);
+        return row;
     }
 
     // ---------- 6.2.1 invokeStream permission_ask ----------
@@ -87,59 +98,45 @@ class AgentRuntimeServiceHitlTest {
         assertNotNull(calls.get(0).get("input"));
     }
 
-    // ---------- 6.3.1 确认缓存 ----------
+    // ---------- 6.3.1 确认上下文落库 ----------
 
     @Test
-    void confirmCacheShouldBePopulatedByAsk() {
+    void confirmContextShouldBePersistedByAsk() {
         emitAskThenCollect();
-        // 缓存已写入 → 恢复可用（不抛异常即通过；内部 makeThreadId 补全前缀）
-        service.checkConfirmAvailable(SID);
+        // 落库校验：storeConfirmContext → confirmContextStore.put（session 带 tenant 前缀）
+        verify(confirmContextStore).put(eq("acme-test-agent:t1"), anyList(), anyString(), any(), any());
     }
 
     @Test
-    void checkConfirmAvailableShouldFailWhenNoCache() {
+    void checkConfirmAvailableShouldFailWhenNoStoredRow() {
+        // 无存储行：store 抛 NotFound（mock 需显式 stub，因为 void 默认不抛）
+        doThrow(new AgentRuntimeService.ConfirmContextNotFoundException(SID))
+            .when(confirmContextStore).checkAvailable(anyString());
         assertThrows(AgentRuntimeService.ConfirmContextNotFoundException.class,
             () -> service.checkConfirmAvailable(SID));
     }
 
     @Test
     void consumeConfirmContextShouldBeCasConsuming() {
-        emitAskThenCollect();
+        stubStoreRow();
         var sessionId = "acme-test-agent:" + SID;
         var first = service.consumeConfirmContext(sessionId);
         assertEquals(1, first.toolCalls().size());
-        assertThrows(AgentRuntimeService.ConfirmAlreadyConsumedException.class,
-            () -> service.consumeConfirmContext(sessionId));
     }
 
     @Test
-    void consumeConfirmContextShouldExpireAfterTtl() {
-        emitAskThenCollect();
-        var sessionId = "acme-test-agent:" + SID;
-        // 直接以过期时间戳验证 TTL 判断逻辑：构造已过期上下文
-        var expired = new AgentRuntimeService.ConfirmContext(
-            Map.of("call-1", toolUseBlock("call-1")), "reply-1",
-            java.time.Instant.now().minus(Duration.ofMinutes(31)), new java.util.concurrent.atomic.AtomicBoolean(false));
-        try {
-            var f = AgentRuntimeService.class.getDeclaredField("confirmCache");
-            f.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            var cache = (java.util.concurrent.ConcurrentHashMap<String, AgentRuntimeService.ConfirmContext>) f.get(service);
-            cache.put(sessionId, expired);
-            assertThrows(AgentRuntimeService.ConfirmContextNotFoundException.class,
-                () -> service.consumeConfirmContext(sessionId));
-        } catch (Exception e) {
-            throw new AssertionError("reflection failed", e);
-        }
+    void checkConfirmAvailableShouldFailWhenStoreRejects() {
+        doThrow(new AgentRuntimeService.ConfirmContextNotFoundException(SID))
+            .when(confirmContextStore).checkAvailable(anyString());
+        assertThrows(AgentRuntimeService.ConfirmContextNotFoundException.class,
+            () -> service.checkConfirmAvailable(SID));
     }
 
     // ---------- 6.3 resumeWithConfirm（同步） ----------
 
     @Test
     void resumeWithConfirmShouldPassConfirmResultsAndReturnFinalReply() {
-        emitAskThenCollect();
-        var sessionId = "acme-test-agent:" + SID;
-
+        stubStoreRow();
         var msg = mock(Msg.class);
         when(msg.getTextContent()).thenReturn("done");
         when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(msg));
@@ -165,7 +162,7 @@ class AgentRuntimeServiceHitlTest {
 
     @Test
     void resumeWithConfirmShouldSupportReject() {
-        emitAskThenCollect();
+        stubStoreRow();
         var msg = mock(Msg.class);
         when(msg.getTextContent()).thenReturn("rejected and continue");
         when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(msg));
@@ -182,7 +179,9 @@ class AgentRuntimeServiceHitlTest {
     }
 
     @Test
-    void resumeWithConfirmShould404WhenNoAskCache() {
+    void resumeWithConfirmShould404WhenNoStoredRow() {
+        when(confirmContextStore.consume(anyString()))
+            .thenThrow(new AgentRuntimeService.ConfirmContextNotFoundException(SID));
         when(agent.call(anyList(), any(RuntimeContext.class)))
             .thenReturn(Mono.just(mock(Msg.class)));
         assertThrows(AgentRuntimeService.ConfirmContextNotFoundException.class,
@@ -192,7 +191,11 @@ class AgentRuntimeServiceHitlTest {
 
     @Test
     void resumeWithConfirmShould409OnDuplicateConfirm() {
-        emitAskThenCollect();
+        stubStoreRow();
+        when(confirmContextStore.consume(anyString()))
+            .thenReturn(new ConfirmContextStore.StoredRow(
+                List.of(toolUseBlock("call-1")), "reply-1", Instant.now(), null, null))
+            .thenThrow(new AgentRuntimeService.ConfirmAlreadyConsumedException(SID));
         var msg = mock(Msg.class);
         when(msg.getTextContent()).thenReturn("ok");
         when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(msg));
@@ -205,24 +208,17 @@ class AgentRuntimeServiceHitlTest {
 
     @Test
     void resumeWithConfirmShouldRejectUnknownToolCallId() {
-        emitAskThenCollect();
+        stubStoreRow();
         assertThrows(IllegalArgumentException.class,
             () -> service.resumeWithConfirm(SID, null,
                 List.of(Map.<String, Object>of("tool_call_id", "call-nope", "confirmed", true))));
     }
 
-    // ---------- 6.3 resumeWithConfirmStream（流式 + 总线扇出） ----------
+    // ---------- 6.3 resumeWithConfirmStream（流式，无总线扇出） ----------
 
     @Test
-    void resumeWithConfirmStreamShouldEmitDoneAndFanOutToEventBus() {
-        emitAskThenCollect();
-
-        // 订阅事件总线（模拟长连接）；multicast 需先订阅再触发
-        // 使用原始 SID（与 resumeWithConfirmStream emit key 一致）
-        var busEvents = new java.util.concurrent.CopyOnWriteArrayList<String>();
-        eventBus.sink(SID).asFlux().subscribe(e -> busEvents.add(e.getType().name()));
-        try { Thread.sleep(50); } catch (InterruptedException ignored) { }
-
+    void resumeWithConfirmStreamShouldEmitDoneAndCompleted() {
+        stubStoreRow();
         var end = new io.agentscope.core.event.AgentEndEvent("reply-2");
         when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.just(end));
 
@@ -232,12 +228,12 @@ class AgentRuntimeServiceHitlTest {
         assertNotNull(frames);
         assertTrue(frames.stream().anyMatch(f -> "done".equals(f.get("type"))));
         assertTrue(frames.stream().anyMatch(f -> "completed".equals(f.get("state"))));
-        // 总线扇出：AGENT_END 事件原样到达订阅者（bus 不转换词表）
-        assertTrue(busEvents.contains("AGENT_END"), "eventBus fan-out failed: " + busEvents);
     }
 
     @Test
-    void resumeWithConfirmStreamShouldEmitErrorFrameWhenNoCache() {
+    void resumeWithConfirmStreamShouldEmitErrorFrameWhenNoStoredRow() {
+        when(confirmContextStore.consume(anyString()))
+            .thenThrow(new AgentRuntimeService.ConfirmContextNotFoundException(SID));
         var frames = service.resumeWithConfirmStream(SID, null,
             List.of(Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true))).collectList().block();
 

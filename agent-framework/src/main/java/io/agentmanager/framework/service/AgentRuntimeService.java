@@ -1,17 +1,15 @@
 package io.agentmanager.framework.service;
 
-import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,24 +29,10 @@ import reactor.core.publisher.FluxSink;
 public class AgentRuntimeService {
     private static final Logger log = LoggerFactory.getLogger(AgentRuntimeService.class);
 
-    /** 确认上下文缓存 TTL（12.2 设计：超时未确认自动失效） */
-    private static final Duration CONFIRM_TTL = Duration.ofMinutes(30);
-    /** 过期确认上下文清理周期 */
-    private static final long CONFIRM_SWEEP_INTERVAL_MIN = 5;
-
     private final OafConfig oafConfig;
     private final String tenantPrefix;
     private final LLMLogger llmLogger;
-    private final SessionEventBus eventBus;
-
-    /** 确认上下文缓存：sessionId(fullThreadId) → 待确认工具（6.3.1；ConfirmResult 需原始 ToolUseBlock 实例） */
-    private final ConcurrentHashMap<String, ConfirmContext> confirmCache = new ConcurrentHashMap<>();
-    /** 过期条目定时清理（30min TTL） */
-    private final ScheduledExecutorService confirmSweeper = Executors.newSingleThreadScheduledExecutor(r -> {
-        var t = new Thread(r, "confirm-sweeper");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ConfirmContextStore confirmContextStore;
 
     private io.agentscope.harness.agent.HarnessAgent agent;
     private final List<Map<String, Object>> mcpConfigs;
@@ -58,16 +42,14 @@ public class AgentRuntimeService {
         io.agentscope.harness.agent.HarnessAgent agent,
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger,
-        SessionEventBus eventBus
+        ConfirmContextStore confirmContextStore
     ) {
         this.oafConfig = oafConfig;
         this.tenantPrefix = oafConfig.slug();
         this.agent = agent;
         this.mcpConfigs = mcpConfigs;
         this.llmLogger = llmLogger;
-        this.eventBus = eventBus;
-        confirmSweeper.scheduleWithFixedDelay(this::sweepExpiredConfirms,
-            CONFIRM_SWEEP_INTERVAL_MIN, CONFIRM_SWEEP_INTERVAL_MIN, TimeUnit.MINUTES);
+        this.confirmContextStore = confirmContextStore;
     }
 
     public String tenantPrefix() { return tenantPrefix; }
@@ -304,6 +286,9 @@ public class AgentRuntimeService {
         }
         else if (type == AgentEventType.TOOL_RESULT_TEXT_DELTA) {
             var e = (io.agentscope.core.event.ToolResultTextDeltaEvent) event;
+            log.info("[DEBUG-RESUME] TOOL_RESULT_TEXT_DELTA tool={} delta={}",
+                e.getToolCallName(), String.valueOf(e.getDelta()).length() > 200
+                    ? String.valueOf(e.getDelta()).substring(0, 200) : e.getDelta());
             var m = new LinkedHashMap<String, Object>();
             m.put("type", "tool_result_text_delta");
             m.put("task_id", tid);
@@ -410,10 +395,9 @@ public class AgentRuntimeService {
             String threadId, String userId, List<Map<String, Object>> results) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
-        var ctx = RuntimeContext.builder().sessionId(fullThreadId)
-            .userId(resolveUserId(userId)).build();
-
-        var resumeMsg = buildResumeMsg(fullThreadId, results);   // CAS 消费，防重复确认
+        var confirmCtx = consumeConfirmContext(fullThreadId);   // CAS 消费，防重复确认
+        var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
+        var resumeMsg = buildResumeMsg(confirmCtx, results);
 
         var result = agent.call(List.of(resumeMsg), ctx).block();
         var responseText = result != null ? result.getTextContent() : "";
@@ -421,27 +405,23 @@ public class AgentRuntimeService {
     }
 
     /**
-     * ② 流式版：同上，但以事件流返回（供确认后事件流接口/长连接场景）。
+     * ② 流式版：同上，但以事件流返回（供确认后事件流接口/单次流场景）。
      * 复用 forwardEvent 的事件转发（token/tool_call/tool_result/…/done）。
      *
-     * 长连接场景：confirm-stream 的事件同时通过 eventBus 扇出到 SessionEventBus，
-     * 原长连接 SSE 订阅方在同一连接上实时收到恢复事件（无需重连）。
+     * 无状态架构：不再经 SessionEventBus 扇出（长连接已移除），事件仅经 SSE 直吐。
      */
     public Flux<Map<String, Object>> resumeWithConfirmStream(
             String threadId, String userId, List<Map<String, Object>> results) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
-        var ctx = RuntimeContext.builder().sessionId(fullThreadId)
-            .userId(resolveUserId(userId)).build();
 
         return Flux.create(sink -> {
             try {
-                var resumeMsg = buildResumeMsg(fullThreadId, results);   // CAS 消费，防重复确认
+                var confirmCtx = consumeConfirmContext(fullThreadId);   // DB CAS 消费，防重复确认
+                var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
+                var resumeMsg = buildResumeMsg(confirmCtx, results);
                 agent.streamEvents(List.of(resumeMsg), ctx)
-                    .doOnNext(event -> {
-                        forwardEvent(sink, event, tid, fullThreadId);    // 含 AGENT_END→done
-                        eventBus.emit(tid, event);                       // 扇出到 SessionEventBus（用 raw sessionId 匹配前端 SSE 订阅）
-                    })
+                    .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
                     .doOnError(e -> {
                         log.error("resume stream error: {}", e.getMessage(), e);
                         sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
@@ -455,7 +435,7 @@ public class AgentRuntimeService {
                     })
                     .subscribe();
             } catch (ConfirmContextNotFoundException | ConfirmAlreadyConsumedException e) {
-                // 缓存 miss / 已消费：以 error 事件帧返回（与 confirm-stream 预检一致）
+                // DB miss / 已消费：以 error 事件帧返回（与 confirm-stream 预检一致）
                 sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
                 sink.next(Map.of("type", "done"));
                 sink.complete();
@@ -463,10 +443,10 @@ public class AgentRuntimeService {
         });
     }
 
-    /** 构造携带 confirm_results metadata 的恢复消息（公共方法，缓存 CAS 消费） */
-    private io.agentscope.core.message.Msg buildResumeMsg(String fullThreadId, List<Map<String, Object>> results) {
-        var ctx = consumeConfirmContext(fullThreadId);   // CAS 取出并标记已消费（6.3.1）
+    /** 构造携带 confirm_results metadata 的恢复消息（调用方已消费确认上下文） */
+    private io.agentscope.core.message.Msg buildResumeMsg(ConfirmContext ctx, List<Map<String, Object>> results) {
         var confirmResults = new java.util.ArrayList<io.agentscope.core.event.ConfirmResult>();
+        var allConfirmed = true;
         for (var r : results) {
             var toolCallId = (String) r.get("tool_call_id");
             var toolCall = ctx.toolCalls().get(toolCallId);   // 从缓存取原始 ToolUseBlock 实例
@@ -475,6 +455,7 @@ public class AgentRuntimeService {
             }
             var confirmedObj = r.get("confirmed");
             var confirmed = !(confirmedObj instanceof Boolean b) || b;   // 缺省视为批准
+            if (!confirmed) allConfirmed = false;
             var acceptRule = Boolean.TRUE.equals(r.getOrDefault("accept_rule", false));
             // ConfirmResult(boolean, ToolUseBlock) — ✅ javap 确认；accept_rule 时用 3-arg 版本
             //（建议规则当前 P2：suggestedRules 在 PermissionDecision 上，先传空规则列表）
@@ -484,78 +465,135 @@ public class AgentRuntimeService {
         }
         var meta = new java.util.HashMap<String, Object>();
         meta.put(io.agentscope.core.message.Msg.METADATA_CONFIRM_RESULTS, confirmResults);  // ✅ javap 确认常量
+        // 恢复消息文本需给出强终止信号：该工具调用已被人工批准并将立即执行，
+        // 模型不得在工具真正返回后又重复调用（否则 HITL 每次批准都触发重试循环）。
+        var text = allConfirmed
+            ? "人工已批准上述工具调用，工具将立即执行。如果工具执行成功，请直接向用户汇报结果并结束流程，不得再次调用同一工具。"
+            : "人工拒绝了上述工具调用，请不要执行，直接向用户说明。";
         return io.agentscope.core.message.Msg.builder()
             .name("user").role(io.agentscope.core.message.MsgRole.USER)
-            .textContent("user confirmed")
+            .textContent(text)
             .metadata(meta)
             .build();
     }
 
-    // ===== 确认上下文缓存（6.3.1）=====
+    /**
+     * 构建恢复执行的 RuntimeContext。
+     *
+     * Channel 流程（SessionStreamController）的会话经 ChatUiChannel 网关路由，
+     * 网关按 peer 派生真实会话 key：userId=peer（如 debug-user:xxx），
+     * sessionId=网关恒定 gw-hash（storeConfirmContext 按 canonicalKey 确定性推导，
+     * 恒为 gw-3f20f08c5499，不能依赖 AgentStartEvent.getSessionId()——该字段为 null）。
+     * 恢复必须复用同一 (userId, sessionId) 才能命中网关会话中的 pending 工具调用，
+     * 否则 SDK 在 (makeThreadId, vendorKey) 下加载不到上下文 → 全新推理丢失状态。
+     *
+     * A2A/invoke 流程（forwardEvent 直接 putConfirmContext，无网关路由）无此信息，
+     * 回落 makeThreadId + 显式 userId（与触发侧一致）。
+     */
+    private RuntimeContext buildResumeContext(ConfirmContext confirmCtx, String fullThreadId, String userId) {
+        if (confirmCtx.runtimeSessionId() != null && confirmCtx.runtimeUserId() != null) {
+            return RuntimeContext.builder()
+                .sessionId(confirmCtx.runtimeSessionId())
+                .userId(confirmCtx.runtimeUserId())
+                .build();
+        }
+        return RuntimeContext.builder().sessionId(fullThreadId)
+            .userId(resolveUserId(userId)).build();
+    }
 
-    /** 确认上下文：一个 session 可能同时有多个待确认工具（12.1 批量 ASK） */
+    // ===== 确认上下文（6.3.1；落库 ConfirmContextStore，跨副本可见）=====
+
+    /** 确认上下文：一个 session 可能同时有多个待确认工具（12.1 批量 ASK）
+     *  runtimeSessionId/runtimeUserId：Channel 流程经网关路由后的真实会话 key
+     *  （sessionId=gw-hash、userId=peer）；A2A/普通流程为 null，回落 makeThreadId+vendorKey。 */
     record ConfirmContext(
         Map<String, ToolUseBlock> toolCalls,   // tool_call_id → ToolUseBlock
         String replyId,
         Instant createdAt,
-        AtomicBoolean consumed                 // CAS 防重复确认
+        AtomicBoolean consumed,                 // CAS 防重复确认（DB 版：到达时已消费，恒为 true）
+        String runtimeSessionId,                // Channel 网关真实 sessionId（gw-hash），非 Channel 为 null
+        String runtimeUserId                    // Channel 网关 peer（userId），非 Channel 为 null
     ) {}
+
+    /** 序列化 tool_calls → [{id, name, input}] JSON（confirm_context 表存储形态，SPIKE S1） */
+    private static List<Map<String, Object>> toolCallsJson(List<ToolUseBlock> calls) {
+        return calls.stream().map(tc -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", tc.getId());
+            m.put("name", tc.getName());
+            m.put("input", tc.getInput());
+            return m;
+        }).toList();
+    }
 
     /**
      * Channel 流程存储确认上下文（SessionStreamController 调用；rawSessionId 经 makeThreadId 补全前缀）。
-     * 同 session 新 ASK 覆盖旧条目。
+     * Channel 会话经 ChatUiChannel 网关路由，真实会话 key 为 (userId=peer, sessionId=gw-hash)：
+     *  - sessionId 由网关按 canonicalKey 确定性推导（恒为 gw-3f20f08c5499，同进程所有 peer 共享）
+     *  - userId 即 peer（= rawSessionId，如 debug-user:mt1xxx）
+     * HITL 恢复必须复用该组合才能命中 pending 工具调用（见 buildResumeContext）。
      */
     public void storeConfirmContext(String rawSessionId, io.agentscope.core.event.AgentEvent event) {
         if (event instanceof RequireUserConfirmEvent e) {
             var fullThreadId = makeThreadId(rawSessionId);
-            log.info("[HITL] storeConfirmContext: rawSessionId={}, fullThreadId={}, replyId={}, tools={}",
-                rawSessionId, fullThreadId, e.getReplyId(),
+            var gwSessionId = channelGatewaySessionId();
+            log.info("[HITL] storeConfirmContext: rawSessionId={}, fullThreadId={}, gatewaySessionId={}, replyId={}, tools={}",
+                rawSessionId, fullThreadId, gwSessionId, e.getReplyId(),
                 e.getToolCalls().stream().map(tc -> tc.getName()).toList());
-            putConfirmContext(fullThreadId, e);
+            putConfirmContext(fullThreadId, e, gwSessionId, rawSessionId);
         }
     }
 
-    /** 缓存待确认上下文（forwardEvent 收到 RequireUserConfirmEvent 时调用；同 session 新 ASK 覆盖旧条目） */
-    void putConfirmContext(String sessionId, RequireUserConfirmEvent event) {
-        var toolCalls = event.getToolCalls().stream()
-            .collect(Collectors.toMap(tc -> tc.getId(), tc -> tc));
-        confirmCache.put(sessionId,
-            new ConfirmContext(toolCalls, event.getReplyId(), Instant.now(), new AtomicBoolean(false)));
+    /**
+     * 复刻 HarnessGateway 的网关会话 id 派生：
+     * sessionId = "gw-" + SHA-256(canonicalKey) 前 6 字节 hex 形式（12 字符）。
+     * 框架 Channel 通道走 ChatUiChannel 默认配置（DmScope.MAIN、globalDefaultAgentId=main），
+     * MsgContext.canonicalKey() = "chatui" + "|x:agentId=main"（extra 按 key 排序）。
+     * 同进程所有 peer 共享同一会话 id，peer 仅体现在 userId——与 DB 实测一致。
+     */
+    private String channelGatewaySessionId() {
+        var canonicalKey = "chatui" + "|x:agentId=main";
+        try {
+            var digest = MessageDigest.getInstance("SHA-256")
+                .digest(canonicalKey.getBytes(StandardCharsets.UTF_8));
+            return "gw-" + HexFormat.of().formatHex(digest, 0, 6);
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 unavailable", ex);
+        }
     }
 
-    /** 预检确认可用性（confirm-stream 端点先查后流）：缓存存在、未过期、未消费 */
+    /** 缓存待确认上下文（forwardEvent 收到 RequireUserConfirmEvent 时调用；A2A/普通流程，无网关路由信息） */
+    void putConfirmContext(String sessionId, RequireUserConfirmEvent event) {
+        putConfirmContext(sessionId, event, null, null);
+    }
+
+    /** 落库待确认上下文（可携带 Channel 网关真实会话 key；同 session 新 ASK 覆盖旧条目） */
+    void putConfirmContext(String sessionId, RequireUserConfirmEvent event,
+                           String runtimeSessionId, String runtimeUserId) {
+        confirmContextStore.put(sessionId,
+            toolCallsJson(event.getToolCalls()), event.getReplyId(), runtimeSessionId, runtimeUserId);
+    }
+
+    /** 预检确认可用性（confirm-stream 端点先查后流）：DB 行存在、未过期、未消费 */
     public void checkConfirmAvailable(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);   // 补全 tenant 前缀，与 putConfirmContext 存储 key 一致
-        var ctx = confirmCache.get(fullThreadId);
-        if (ctx == null || ctx.createdAt().plus(CONFIRM_TTL).isBefore(Instant.now())) {
-            throw new ConfirmContextNotFoundException(sessionId);
-        }
-        if (ctx.consumed().get()) {
-            throw new ConfirmAlreadyConsumedException(sessionId);
-        }
+        confirmContextStore.checkAvailable(fullThreadId);
     }
 
-    /** CAS 取出并标记已消费（防重复确认 → 409） */
+    /** DB CAS 取出并标记已消费（防重复确认 → 409） */
     ConfirmContext consumeConfirmContext(String sessionId) {
-        var ctx = confirmCache.get(sessionId);
-        if (ctx == null || ctx.createdAt().plus(CONFIRM_TTL).isBefore(Instant.now())) {
-            throw new ConfirmContextNotFoundException(sessionId);
+        var row = confirmContextStore.consume(sessionId);
+        var toolCalls = new LinkedHashMap<String, ToolUseBlock>();
+        for (var tc : row.toolCalls()) {
+            toolCalls.put(tc.getId(), tc);
         }
-        if (!ctx.consumed().compareAndSet(false, true)) {
-            throw new ConfirmAlreadyConsumedException(sessionId);
-        }
-        return ctx;
+        return new ConfirmContext(toolCalls, row.replyId(), Instant.now(),
+            new AtomicBoolean(true), row.runtimeSessionId(), row.runtimeUserId());
     }
 
     /** 清理确认上下文（供测试/运维使用；恢复完成后不主动清理——保留 consumed 条目以正确返回 409，且同 session 新 ASK 会覆盖） */
     void removeConfirmContext(String sessionId) {
-        confirmCache.remove(sessionId);
-    }
-
-    /** 定时清理过期确认上下文（30min TTL） */
-    private void sweepExpiredConfirms() {
-        var now = Instant.now();
-        confirmCache.entrySet().removeIf(e -> e.getValue().createdAt().plus(CONFIRM_TTL).isBefore(now));
+        confirmContextStore.delete(makeThreadId(sessionId));
     }
 
     /** 确认上下文不存在或已过期（404 → confirm_context_not_found，12.5） */
@@ -566,7 +604,7 @@ public class AgentRuntimeService {
         }
     }
 
-    /** 确认已被处理（409 → confirm_already_consumed，CAS 防重复，12.5） */
+    /** 确认已被处理（409 → confirm_already_consumed，DB CAS 防重复，12.5） */
     public static class ConfirmAlreadyConsumedException extends RuntimeException {
         public ConfirmAlreadyConsumedException(String sessionId) {
             super("confirm_already_consumed: session '" + sessionId + "' already processed");

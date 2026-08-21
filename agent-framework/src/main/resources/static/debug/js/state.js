@@ -10,11 +10,10 @@ const state = {
   },
   threads: {
     list: [],
-    current: null // 当前选中的 session_id
+    current: (() => { try { return localStorage.getItem('debug-sid'); } catch (e) { return null; } })()
   },
   ui: {
     streamMode: 'a2a', // a2a | channel
-    connModel: 'session', // session=长连接 SSE | single=单次流调试
     isStreaming: false,
     theme: null // 'light' | 'dark' | null(跟随系统)
   }
@@ -34,6 +33,10 @@ export function setState(path, value) {
     return obj[key];
   }, state);
   target[last] = value;
+  // 会话 ID 持久化到 localStorage（刷新后恢复当前 session）
+  if (path === 'threads.current') {
+    try { value ? localStorage.setItem('debug-sid', value) : localStorage.removeItem('debug-sid'); } catch (e) { /* ignore */ }
+  }
   notify(path, value);
 }
 
