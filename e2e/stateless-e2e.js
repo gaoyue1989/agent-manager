@@ -42,7 +42,7 @@ async function s4(){
   const jar=path.join(__dirname,'../agent-framework/target/agent-framework-2.1.0.jar');
   if(!fs.existsSync(jar)){log('S4','SKIP','');return;}
   try{
-    inst2=spawn('java',['-jar',jar,'--server.port=8101'],{env:{...process.env,AGENT_CONFIG_DIR:'/tmp/opencode/agentcfg',CHECKPOINT_JDBC_URL:'jdbc:mysql://172.20.0.1:3307/agent_manager_test?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai',CHECKPOINT_USERNAME:'agent_manager',CHECKPOINT_PASSWORD:'Agent@Manager2026',LLM_BASE_URL:'https://token-plan-cn.xiaomimimo.com/v1',LLM_MODEL_ID:'mimo-v2.5',LLM_API_KEY:'tp-c9dgn7tl95bl9d2lptfdwq4qsozazbrfit3vehndv0mmyw13'},stdio:'pipe'});
+inst2=spawn('java',['-jar',jar,'--server.port=8101'],{env:{...process.env,AGENT_CONFIG_DIR:'/tmp/opencode/agentcfg',CHECKPOINT_JDBC_URL:'jdbc:mysql://172.20.0.1:3307/agent_manager_test?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai',CHECKPOINT_USERNAME:'agent_manager',CHECKPOINT_PASSWORD:process.env.CHECKPOINT_PASSWORD||'changeme',LLM_BASE_URL:process.env.LLM_BASE_URL||'https://api.example.com/v1',LLM_MODEL_ID:process.env.LLM_MODEL_ID||'gpt-4',LLM_API_KEY:process.env.LLM_API_KEY||'sk-placeholder'},stdio:'pipe'});
     inst2.stderr.pipe(process.stderr);
     for(let i=0;i<30;i++){await sleep(2000);try{const h=await GET(`${BASE2}/health`);if(h.s===200)break;}catch(e){}}
     const h=await GET(`${BASE2}/health`);
@@ -70,7 +70,7 @@ async function s5(){
   log('S5a-重启前','PASS',`${m1}条`);
   inst2.kill('SIGKILL');inst2=null;await sleep(3000);
   const jar=path.join(__dirname,'../agent-framework/target/agent-framework-2.1.0.jar');
-  inst2=spawn('java',['-jar',jar,'--server.port=8101'],{env:{...process.env,AGENT_CONFIG_DIR:'/tmp/opencode/agentcfg',CHECKPOINT_JDBC_URL:'jdbc:mysql://172.20.0.1:3307/agent_manager_test?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai',CHECKPOINT_USERNAME:'agent_manager',CHECKPOINT_PASSWORD:'Agent@Manager2026',LLM_BASE_URL:'https://token-plan-cn.xiaomimimo.com/v1',LLM_MODEL_ID:'mimo-v2.5',LLM_API_KEY:'tp-c9dgn7tl95bl9d2lptfdwq4qsozazbrfit3vehndv0mmyw13'},stdio:'pipe'});
+  inst2=spawn('java',['-jar',jar,'--server.port=8101'],{env:{...process.env,AGENT_CONFIG_DIR:'/tmp/opencode/agentcfg',CHECKPOINT_JDBC_URL:'jdbc:mysql://172.20.0.1:3307/agent_manager_test?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai',CHECKPOINT_USERNAME:'agent_manager',CHECKPOINT_PASSWORD:process.env.CHECKPOINT_PASSWORD||'changeme',LLM_BASE_URL:process.env.LLM_BASE_URL||'https://api.example.com/v1',LLM_MODEL_ID:process.env.LLM_MODEL_ID||'gpt-4',LLM_API_KEY:process.env.LLM_API_KEY||'sk-placeholder'},stdio:'pipe'});
   inst2.stderr.pipe(process.stderr);
   for(let i=0;i<30;i++){await sleep(2000);try{const h=await GET(`${BASE2}/health`);if(h.s===200)break;}catch(e){}}
   const h2=await GET(`${BASE2}/threads/${encodeURIComponent(sid)}/history`);

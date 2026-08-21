@@ -25,7 +25,7 @@ Agent Framework (Java) 的测试基于 **Spring Boot Test** + **JUnit 5**。
 # application-test.yml
 agent:
   llm:
-    api-key: ${LLM_API_KEY}          # .env.secrets: tp-c9dgn7tl95bl9d2lptfdwq4qsozazbrfit3vehndv0mmyw13
+    api-key: ${LLM_API_KEY}          # .env.secrets 配置
     model-id: ${LLM_MODEL}           # mimo-v2.5
     base-url: ${LLM_ENDPOINT}        # https://token-plan-cn.xiaomimimo.com/v1
     provider: openai
