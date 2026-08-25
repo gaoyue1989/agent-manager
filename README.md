@@ -78,6 +78,26 @@ agent-manager/
 └── REDESIGN.md         # 重构设计文档（权威）
 ```
 
+## 界面展示
+
+### 服务列表（状态轮询 / 生命周期操作）
+
+![服务列表](docs/screenshots/01-service-list.png)
+
+### 发布向导（上传 OAF 包 → 选镜像 → 编辑环境变量）
+
+![发布向导](docs/screenshots/02-publish-wizard.png)
+
+### 服务详情（实时 Pod / A2A Agent Card / env 滚动重启 / 事件时间线）
+
+![服务详情](docs/screenshots/03-service-detail.png)
+
+### 发布助手对话（自然语言驱动发布全流程，支持 HITL 确认卡片）
+
+![发布助手](docs/screenshots/04-assistant-chat.png)
+
+> 截图为真实运行界面，可通过 `cd e2e && node screenshot-v2.js` 重新生成。
+
 ## 测试与回归
 
 ```bash
