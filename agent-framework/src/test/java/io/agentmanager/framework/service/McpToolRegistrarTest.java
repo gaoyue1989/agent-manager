@@ -37,13 +37,28 @@ class McpToolRegistrarTest {
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             tempDir.toString(),
-            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7)
+            "",
+            new AgentManagerProperties.            CleanupConfig(30, 60, 20, 30, 7)
         );
         registrar = new McpToolRegistrar(props);
     }
 
     private OafConfig.McpServerConfig mcp(String server, String configDir) {
         return new OafConfig.McpServerConfig("vendor", server, "1.0.0", configDir, true);
+    }
+
+    /** 构造仅含指定 MCP server 的 OAF 配置（registerAll 容错测试用） */
+    private OafConfig oafWithServer(String server) {
+        return new OafConfig(
+            "test-agent", "acme", "test-agent", "1.0.0", "acme/test-agent",
+            "Test agent", "@acme", "MIT",
+            List.of(), "helper",
+            List.of(), List.of(mcp(server, server)), List.of(), List.of(), List.of(),
+            null,
+            new OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
+            null,
+            Map.of()
+        );
     }
 
     private void writeConfigYaml(String server, String content) throws Exception {
@@ -686,5 +701,35 @@ class McpToolRegistrarTest {
             .toList();
         when(wrapper.listTools()).thenReturn(Mono.just(tools));
         registrar.recordRegisteredTools(wrapper, server);
+    }
+
+    @Test
+    void shouldSkipUnreachableServerByDefault() throws Exception {
+        // fail-soft：MCP 不可达时 registerAll 不抛异常，agent 可正常启动
+        writeConfigYaml("down-svc", """
+            connection:
+              type: streamableHttp
+              url: http://127.0.0.1:1/mcp
+              timeout: 1
+            """);
+        var toolkit = new io.agentscope.core.tool.Toolkit();
+        assertDoesNotThrow(() -> registrar.registerAll(toolkit, oafWithServer("down-svc")));
+        assertNull(toolkit.getTool("any_tool_from_down_svc"));
+    }
+
+    @Test
+    void shouldFailFastWhenStartupRequired() throws Exception {
+        writeConfigYaml("strict-svc", """
+            connection:
+              type: streamableHttp
+              url: http://127.0.0.1:1/mcp
+              timeout: 1
+
+            startup:
+              required: true
+            """);
+        var toolkit = new io.agentscope.core.tool.Toolkit();
+        assertThrows(IllegalStateException.class,
+            () -> registrar.registerAll(toolkit, oafWithServer("strict-svc")));
     }
 }

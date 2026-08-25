@@ -27,7 +27,7 @@ class AgentScopeConfigTest {
 
     @Test
     void mcpManagerShouldUseConfigPath() {
-        var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test",
+        var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test", "",
             cleanupConfig());
         var mcpRegistrar = mock(McpToolRegistrar.class);
 
@@ -64,7 +64,7 @@ class AgentScopeConfigTest {
             emptyLlm(), emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
-            "/config", cleanupConfig());
+            "/config", "", cleanupConfig());
 
         var ds = config.dataSource(props);
         assertInstanceOf(HikariDataSource.class, ds);
@@ -122,7 +122,7 @@ class AgentScopeConfigTest {
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
-            "/config", cleanupConfig());
+            "/config", "", cleanupConfig());
     }
 
     private static AgentManagerProperties.CleanupConfig cleanupConfig() {

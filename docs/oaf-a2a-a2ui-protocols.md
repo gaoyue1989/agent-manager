@@ -1,3 +1,7 @@
+> ⚠️ **历史文档（v1 时期）**：协议概念（OAF/A2A/A2UI）仍然有效，
+> 但文中「组件映射/集成链路」描述的是 v1 架构（codegen/sandbox 等），已被 REDESIGN.md v2 取代。
+> 当前平台实现以 [REDESIGN.md](../REDESIGN.md) 与各模块 AGENTS.md 为准。
+
 # OAF / A2A / A2UI 协议架构
 
 ## 协议关系总览

@@ -18,7 +18,25 @@ import java.nio.charset.StandardCharsets;
 @RequestMapping("/debug")
 public class DebugController {
 
-    @GetMapping(value = {"", "/"}, produces = MediaType.TEXT_HTML_VALUE)
+    /**
+     * 无尾斜杠访问（如 /agent/{name}/debug）时 302 到相对的 debug/：
+     * 相对资源（css/js）才能基于 .../debug/ 目录正确解析，兼容任意子路径部署。
+     */
+    @GetMapping
+    public void redirectToSlash(jakarta.servlet.http.HttpServletRequest req,
+                                jakarta.servlet.http.HttpServletResponse resp) throws java.io.IOException {
+        // 经 ingress rewrite 后后端只见 /debug，外部前缀由 x-forwarded-prefix 注解透传
+        var prefix = req.getHeader("X-Forwarded-Prefix");
+        if (prefix != null && !prefix.isBlank()) {
+            resp.setHeader("Location", prefix + "/debug/");
+            resp.setStatus(302);
+        } else {
+            // 直连部署（无前缀）：相对跳转 /debug → /debug/
+            resp.sendRedirect("debug/");
+        }
+    }
+
+    @GetMapping(value = {"/"}, produces = MediaType.TEXT_HTML_VALUE)
     public ResponseEntity<String> debugPage() {
         try {
             var resource = new ClassPathResource("static/debug/index.html");

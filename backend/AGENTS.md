@@ -1,298 +1,43 @@
 # Backend — AGENTS.md
 
-## 二级模块概述
+## 模块概述
 
-Go 后端服务，基于 Gin + GORM，提供 REST API，管理 Agent 全生命周期：配置创建 → 代码生成 → 镜像构建 → K8s 部署 → 发布/下线。
+OAF 服务发布平台管理后端（Go + Gin + GORM + client-go）。同一 HTTP 进程暴露 REST(`/api/v1`) 与 MCP(streamableHttp `/mcp`) 两个协议门面，业务逻辑在 `internal/service.Core`（协议无关）。
 
-## 基础规则
-
-严格按用户需求执行，不擅自加功能、不脑补逻辑、不画蛇添足；只输出可直接运行的完整代码，拒绝伪代码。需求模糊主动提问，输出无多余闲聊，全程对齐项目现有代码风格、目录结构、命名规范。
-
-## 开发流程
-
-先看项目目录和现有关联代码，理清逻辑再编码；只修改指定文件与逻辑，不改动无关代码、不整文件重写。
-
-## 代码规范
-
-命名语义化，禁止硬编码密钥、魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获；优先复用现有工具，不私自升级框架、乱加依赖；复杂逻辑加中文注释。
-
-## 输出格式
-
-代码块标语言、改文件标路径；保留配置原有缩进，不搞多余排版；完工自动清理调试日志、临时测试代码。
-
-## 安全约束
-
-不随意改 Git、Docker 及系统配置；禁用高危删除命令，敏感信息用占位符；不做删核心文件、清依赖等破坏性操作，环境报错先给排查方案。
-
----
+核心链路：上传 OAF zip 包 → 校验解包落共享 PVC → 发布（Deployment+Service+Ingress，envFrom ConfigMap，包 subPath 只读挂 /config + 独立可写工作区卷 /workspace）→ 就绪后拉 `/.well-known/agent-card.json` 注册入库 → 列表/状态/重新发布/下线/删除。
 
 ## 目录结构
 
 ```
 backend/
-├── cmd/server/main.go          # 入口，路由注册，依赖注入
-├── config/config.go            # 环境变量配置加载
-├── go.mod / go.sum             # Go 模块依赖
-│── migrations/
-│   └── add_runtime_mode.sql    # 数据库迁移脚本
-└── internal/
-    ├── handler/                # HTTP 层 (Gin Handler)
-    │   ├── agent.go            # Agent CRUD + 代码生成端点
-    │   ├── deploy.go           # 构建/部署/发布/下线/聊天端点
-    │   ├── deploy_test.go      # 集成测试
-    │   └── runtime_mode_test.go
-    ├── service/                # 业务逻辑层
-    │   ├── agent.go            # Agent 生命周期管理
-    │   ├── agent_test.go       # Agent 测试
-    │   ├── agent_runtime_mode_test.go
-    │   ├── deploy.go           # 构建-部署-发布管线
-    │   └── deploy_test.go      # 部署测试
-    ├── model/
-    │   ├── models.go           # GORM 数据模型 + 状态枚举
-    │   ├── oaf_config.go       # OAF v0.8.0 配置结构
-    │   └── agent_runtime_mode_test.go
-    ├── k8s/
-    │   ├── sandbox.go          # kubectl 封装的 Sandbox CRD 客户端
-    │   ├── sandbox_test.go     # 单元测试
-    │   └── sandbox_mount_test.go
-    ├── docker/
-    │   └── builder.go          # Shell 调用 docker CLI 构建器
-    ├── minio/
-    │   └── storage.go          # MinIO 对象存储客户端
-    └── codegen/
-        └── runner.go           # Python 代码生成子进程调用器
+├── cmd/server/main.go          # 入口：装配 REST + MCP + K8s + DB
+├── config/config.go            # 环境变量（MYSQL_DSN 必填无默认）
+├── Dockerfile                  # golang:1.26 多阶段构建
+├── internal/
+│   ├── handler/                # Gin 薄层（respond/middleware/router）
+│   ├── mcpsrv/server.go        # MCP 工具门面（go-sdk v1.3.1 streamableHttp）
+│   ├── service/                # 业务层：package/publish/register/status/env
+│   ├── k8s/                    # client-go typed 封装 + 对象构造（纯函数可测）
+│   │   └── k8sfake/            # 测试用 fake Client 实现
+│   ├── store/                  # GORM 模型（oaf_packages/services/service_events）+ PVC 文件操作
+│   └── oaf/oaf.go              # OAG v0.8.0 frontmatter 解析校验（宽松模式 warnings）
 ```
 
----
+## 启动
 
-## 入口与启动流程
-
-`cmd/server/main.go` 执行以下启动流程：
-1. `config.Load()` 从环境变量加载所有配置
-2. 连接 MySQL (GORM)，执行 `AutoMigrate` 自动建表
-3. 初始化 MinIO Storage (自动创建 bucket)
-4. 初始化 CodeGen Runner (Python 子进程调用)
-5. 初始化 K8s SandboxClient (kubectl 封装)
-6. 初始化 Docker Builder (Shell 调用 docker CLI)
-7. 创建 AgentService / DeployService 并注入依赖
-8. 注册 Gin 路由 (CORS 全开)，启动 HTTP 服务
-
-## 依赖 (go.mod)
-
-```
-gin-gonic/gin v1.10.0          # HTTP 框架
-gin-contrib/cors v1.7.2        # CORS 中间件
-gorm.io/gorm v1.30.0           # ORM
-gorm.io/driver/mysql v1.5.7    # MySQL 驱动
-minio-go/v7 v7.0.73            # MinIO SDK
+```bash
+make test    # go vet + go test ./...
+make image && make kind-load
+kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifests/frontend.yaml
 ```
 
-## 配置 (config/config.go)
+本地开发：`KUBECONFIG=~/.kube/config DATA_ROOT=/tmp/oaf-data MYSQL_DSN=... go run ./cmd/server`
 
-所有配置通过环境变量注入，无配置文件依赖：
+## 关键约定
 
-| 环境变量 | 字段 | 默认值 | 说明 |
-|---------|------|--------|------|
-| `SERVER_PORT` | `ServerPort` | `8080` | 服务端口 |
-| `MYSQL_DSN` | `MySQLDSN` | `agent_manager:...@tcp(127.0.0.1:3307)/agent_manager?...` | 数据库连接串 |
-| `MINIO_ENDPOINT` | `MinIOEndpoint` | `127.0.0.1:9000` | MinIO 地址 |
-| `MINIO_ACCESS_KEY` | `MinIOAccessKey` | `minioadmin` | MinIO 访问密钥 |
-| `MINIO_SECRET_KEY` | `MinIOSecretKey` | `minioadmin` | MinIO 密钥 |
-| `MINIO_BUCKET` | `MinIOBucket` | `agent-manager` | MinIO Bucket |
-| `KUBE_CONFIG` | `KubeConfig` | `""` | K8s kubeconfig 路径（空=默认 `~/.kube/config`） |
-| `LOCAL_REGISTRY` | `LocalRegistry` | `172.20.0.1:5001` | Docker 本地仓库 |
-| `CODEGEN_SCRIPT` | `CodeGenScript` | `/root/agent-manager/codegen/generator.py` | 代码生成脚本 |
-| `CODEGEN_PYTHON` | `CodeGenPython` | `/root/agent-manager/codegen/venv/bin/python3` | Python 解释器 |
-| `BASE_IMAGE_NAME` | `BaseImageName` | `agent-base:latest` | 基础镜像名称 |
-| `BUILD_BASE_IMAGE` | `BuildBaseImage` | `true` | 是否自动构建基础镜像 |
-| `INGRESS_HOST` | `IngressHost` | `localhost` | Ingress 对外地址（须设为 nginx 入口如 `100.66.1.5:8911`） |
-| `INGRESS_ENABLED` | `IngressEnabled` | `true` | 是否启用 Ingress |
-| `AVAILABLE_IMAGES` | `AvailableImages` | `agent-framework:latest\|Agent Framework v0.5.5` | 可选镜像列表 |
-| `DEFAULT_IMAGE` | `DefaultImage` | `agent-framework:latest` | 默认镜像 |
-| `DEFAULT_CHECKPOINT_DSN` | `DefaultCheckpointDSN` | `""` | 默认 Checkpoint DSN（K8s Pod 内须用 `172.20.0.1`） |
-
-**LLM 配置**（通过环境变量注入，不再存储于 Agent 配置中）：
-
-| 环境变量 | 字段 | 默认值 | 注入到 Pod 的变量名 |
-|---------|------|--------|-------------------|
-| `LLM_API_KEY` | `LLMAPIKey` | `""` (必填，通过环境变量注入) | `LLM_API_KEY` (Secret) |
-| `LLM_MODEL` | `LLMModel` | `""` (必填，通过环境变量注入) | `LLM_MODEL_ID` |
-| `LLM_ENDPOINT` | `LLMEndpoint` | `""` (必填，通过环境变量注入) | `LLM_BASE_URL` |
-| `LLM_PROVIDER` | — | `ctyun` | `LLM_PROVIDER` (硬编码在 sandbox 模板中) |
-
-> **注意**: 后端环境变量 `LLM_MODEL` / `LLM_ENDPOINT` 注入到 Pod 后名称变为 `LLM_MODEL_ID` / `LLM_BASE_URL`，这是 agent-framework 期望的变量名。
-
-## 数据模型 (internal/model/models.go)
-
-四张表，Agent 为根实体，其余三张通过 `AgentID` 外键关联，`ON DELETE CASCADE`：
-
-```
-Agent (1) ──┬── (N) CodeGeneration   # 代码生成记录
-            ├── (N) ImageBuild        # 镜像构建记录
-            └── (N) Deployment         # 部署记录
-```
-
-**Agent 状态机：**
-```
-draft → generated → built → deployed → published
-                              ↑         ↓
-                              └─ unpublished ←─┘
-```
-
-- `Agent.Config` 字段存储完整配置：
-  - `ConfigType = "oaf"`: OAF v0.8.0 AGENTS.md 格式（YAML frontmatter + Markdown body）
-  - `ConfigType = "json"`: 旧 JSON 格式（向后兼容）
-  - `ConfigType = "yaml"`: 旧 YAML 格式（向后兼容）
-  - `ConfigType = "form"`: 表单提交格式
-- `Agent.ConfigType` 枚举：`form` / `json` / `yaml` / `oaf`
-- 所有子表通过 `(AgentID, Version)` 复合索引加速查询
-
-### OAF 配置结构 (internal/model/oaf_config.go)
-
-OAF v0.8.0 配置包含以下字段：
-
-| 字段组 | 字段 | 类型 | 必需 |
-|--------|------|------|------|
-| **Identity** | name, vendorKey, agentKey, version, slug | string | ✓ |
-| **Metadata** | description, author, license, tags | string/[]string | ✓ |
-| **Skills** | skills[].name, source, version, required | []OAFSkill | |
-| **MCP Servers** | mcpServers[].vendor, server, version, configDir | []OAFMCPServer | |
-| **Sub-Agents** | agents[].vendor, agent, version, role | []OAFSubAgent | |
-| **Tools** | tools[] | []string | |
-| **Model** | model.provider, name, embedding | OAFModel | |
-| **Config** | config.temperature, max_tokens | OAFRuntimeConfig | |
-
-## API 路由
-
-全部挂载于 `/api/v1`，共 17 个端点：
-
-**Agent CRUD & 代码生成 (AgentHandler: handler/agent.go):**
-```
-POST   /agents              # 创建 Agent
-GET    /agents              # Agent 列表 (?status=&offset=&limit=)
-GET    /agents/:id          # Agent 详情
-PUT    /agents/:id          # 更新 Agent 配置 (version++)
-DELETE /agents/:id          # 删除 Agent (清理所有相关资源，返回清理结果)
-POST   /agents/:id/generate  # 触发代码生成
-GET    /agents/:id/code      # 获取生成的代码
-GET    /agents/:id/deployments # 部署历史
-```
-
-**DELETE /agents/:id 返回格式：**
-```json
-{
-  "message": "deleted",
-  "cleanup": {
-    "database": true,
-    "minio": true,
-    "docker_images": ["registry/agent-1:v1", "registry/agent-1:v2"],
-    "k8s_sandbox": true,
-    "k8s_service": true,
-    "k8s_ingress": false
-  }
-}
-```
-
-**构建 & 部署 & 发布 (DeployHandler: handler/deploy.go):**
-```
-POST   /agents/:id/build      # 构建 Docker 镜像
-POST   /agents/:id/deploy     # 部署到 K8s Sandbox
-POST   /agents/:id/publish    # 发布上线 (deploy + 状态置为 published)
-POST   /agents/:id/unpublish  # 下线 (删除 Sandbox)
-GET    /agents/:id/image-info # 镜像信息
-GET    /agents/:id/pod-status # Pod 运行状态
-POST   /agents/:id/chat       # 与 Agent 对话 (kubectl exec curl)
-GET    /agents/:id/pod-files  # 挂载模式：获取 ConfigMap 文件目录树
-GET    /agents/:id/pod-file   # 挂载模式：读取 ConfigMap 文件内容 (?key=xxx)
-```
-
-## 核心业务逻辑
-
-### AgentService (service/agent.go)
-
-| 方法 | 说明 |
-|------|------|
-| `Create(configJSON, configType)` | 创建 Agent 并保存到 MySQL |
-| `GetByID(id)` | 按 ID 查询单个 Agent |
-| `List(status, offset, limit)` | 分页列表，支持按 status 筛选 |
-| `Update(id, configJSON)` | 更新配置，version 自增 |
-| `Delete(id)` | 删除 Agent (级联删除子记录) |
-| `DeleteWithCleanup(id)` | 删除 Agent 并清理所有相关资源 (K8s/Docker/MinIO/MySQL) |
-| `GenerateCode(id)` | 调用 CodeGen Runner，生成代码存入 MinIO，写入 CodeGeneration 记录，状态 → `generated` |
-| `GenerateCodeWithBaseImage(id, baseImage)` | 生成代码时指定基础镜像 |
-| `GetCode(id)` | 从 MinIO 拉取已生成的代码内容 |
-| `GetDeployments(id)` | 查询该 Agent 的全部部署记录 |
-| `GetLatestDeployment(id)` | 查询最新部署记录 |
-
-**DeleteWithCleanup 清理逻辑：**
-1. 根据 Agent 状态决定清理策略
-2. `deployed/published` 状态：删除 K8s Ingress → Service → Sandbox
-3. `built` 及之后状态：删除 Docker 镜像（本地 + 远程）
-4. `generated` 及之后状态：删除 MinIO 文件
-5. 所有状态：删除数据库记录（CASCADE 自动删除子表）
-
-### DeployService (service/deploy.go)
-
-| 方法 | 说明 |
-|------|------|
-| `BuildImage(id)` | 使用基础镜像构建 Agent 镜像，跳过 pip install |
-| `GenerateAndBuild(id)` | 生成代码 + 构建镜像（一步完成） |
-| `Deploy(id)` | 构建模式：创建 Sandbox CRD + Service，写入 Deployment，状态 → `deployed` |
-| `DeployWithMount(id)` | 挂载模式：创建 ConfigMap + Secret + Service + Sandbox CRD（挂载卷），状态 → `deployed` |
-| `Publish(id)` | 根据运行模式调用 `Deploy` 或 `DeployWithMount`，创建 Ingress，状态 → `published` |
-| `Unpublish(id)` | 删除 Sandbox/ConfigMap/Secret/Ingress/Service，状态 → `unpublished` |
-| `GetImageInfo(id)` | 查询最新镜像标签、仓库地址、构建状态 |
-| `GetPodStatus(id)` | 查询 Pod 运行状态 (Ready/Status/IP/Restarts) |
-| `ChatWithAgent(id, message, history)` | 先通过 Ingress (JSON-RPC `message/send`) 访问 Agent，失败则回退 `kubectl exec` Pod 内 curl |
-| `GetPodFiles(id)` | 挂载模式：读取 ConfigMap 返回文件目录树 (`[]*PodFileNode`) |
-| `GetPodFileContent(id, key)` | 挂载模式：读取 ConfigMap 指定 key 的文件内容 |
-
-## 基础设施客户端
-
-### K8s (internal/k8s/sandbox.go)
-- 使用 `kubectl` CLI 而非 client-go SDK
-- CRD: `agents.x-k8s.io/v1alpha1` Sandbox 资源
-- `CreateSandbox(name, image, apiKey, model, endpoint)` — 创建 Sandbox CRD (构建模式)
-- `CreateSandboxWithMounts(name, image, configMapName, secretName, envVars, checkpointDSN)` — 创建 Sandbox CRD (挂载模式)
-- `DeleteSandbox(name)` — 删除 Sandbox CRD
-- `CreateService(name)` — 创建 ClusterIP Service
-- `CreateServiceWithPort(name, port)` — 创建指定端口的 Service
-- `DeleteService(name)` / `ServiceExists(name)` — 管理 Service
-- `CreateIngress(name, agentID)` — 创建 Ingress
-- `CreateIngressWithPort(name, agentID, port)` — 创建指定端口的 Ingress
-- `DeleteIngress(name)` / `IngressExists(name)` — 管理 Ingress
-- `CreateConfigMap(name, data)` — 创建 ConfigMap
-- `DeleteConfigMap(name)` — 删除 ConfigMap
-- `CreateSecret(name, data)` — 创建 Opaque Secret
-- `DeleteSecret(name)` — 删除 Secret
-- `GetPodStatus(sandboxName)` — 解析 `kubectl get pod` 输出
-- `GetPodStatusJSON(sandboxName)` — 返回 kubectl JSON 输出
-- `GetConfigMapData(name)` — 读取 ConfigMap data 字段 (用于挂载模式文件列表/内容查询)
-- `ExecInPod(podName, command...)` — Pod 内执行命令
-
-### Docker (internal/docker/builder.go)
-- Shell 调用 `docker login` / `docker build` / `docker tag` / `docker push`
-- 从 MinIO 下载文件到临时目录 (`os.MkdirTemp`)，构建完成后清理
-- 构建成功后返回镜像完整标签 `registry/imageName:agentID-version`
-- `BuildBaseImage(registry, baseImageName)` — 构建基础镜像（包含所有 pip 依赖）
-- `BuildWithBaseImage(localTag, remoteTag, prefix, storage, registry)` — 使用基础镜像构建 Agent 镜像
-- `ImageExists(imageTag)` — 检查镜像是否存在
-- `RemoveImage(imageTag)` — 删除镜像
-
-**基础镜像优化：**
-- 基础镜像 `agent-base:latest` 预装所有依赖，构建时无需 `pip install`
-- Agent Dockerfile 替换 `FROM python:3.12-slim` 为 `FROM {registry}/agent-base:latest`
-- 构建时间从 ~60s 降至 ~5s（缓存命中时）
-
-### MinIO (internal/minio/storage.go)
-- `PutFile(objectName, data)` / `GetFile(objectName)` 以字节流操作
-- `DeleteByPrefix(prefix)` — 按前缀递归删除所有文件
-- `PrefixExists(prefix)` — 检查前缀下是否有文件
-- 初始化时自动创建 bucket (若不存在)
-- 存储路径规则: `{prefix}/agent.py`, `{prefix}/Dockerfile`, `{prefix}/requirements.txt`
-
-### CodeGen (internal/codegen/runner.go)
-- `Run(config)` — 将配置 JSON 通过 stdin 传入 Python 脚本，解析 stdout，返回 `map[string]string` (文件名 → 内容)
-- `RunAndStore(config, prefix)` — 生成后直接存入 MinIO
-- `RunAndStoreWithBaseImage(config, prefix, baseImage)` — 生成时指定基础镜像参数
-
+- 平台保留键：AGENT_CONFIG_DIR / AGENT_WORKSPACE_DIR / SERVER_HOST / SERVER_PORT（用户 env 出现即 400）
+- env 全量覆盖语义（PATCH /services/:id/env），上限 64 键 × 32KB
+- 服务状态机：created→deploying→running|register_failed|deploy_failed；stopped/error 可再 publish
+- WaitReady 要求完整滚动更新完成（generation 对齐 + updatedReplicas 达标 + unavailable=0），防止注册打到旧 Pod
+- 业务 Ingress 注入 proxy-read/send-timeout=3600（A2A blocking 长对话必需）
+- zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）

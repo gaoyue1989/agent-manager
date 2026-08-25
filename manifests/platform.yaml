@@ -1,0 +1,202 @@
+# OAF 平台自举清单：namespace / 元数据库(MySQL8) / 共享 PVC / RBAC / platform-backend
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-platform
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oaf-mysql-secret
+  namespace: agent-platform
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: "OafPlatform2026"
+  MYSQL_PASSWORD: "OafPlatform2026"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oaf-mysql-init
+  namespace: agent-platform
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS oaf_platform DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    CREATE DATABASE IF NOT EXISTS oaf_checkpoint DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    GRANT ALL ON oaf_platform.* TO 'oaf'@'%';
+    GRANT ALL ON oaf_checkpoint.* TO 'oaf'@'%';
+    FLUSH PRIVILEGES;
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oaf-mysql-data
+  namespace: agent-platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oaf-mysql
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oaf-mysql }
+  template:
+    metadata:
+      labels: { app: oaf-mysql }
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports: [{ containerPort: 3306 }]
+          env:
+            - { name: MYSQL_ROOT_PASSWORD, valueFrom: { secretKeyRef: { name: oaf-mysql-secret, key: MYSQL_ROOT_PASSWORD } } }
+            - { name: MYSQL_DATABASE, value: oaf_platform }
+            - { name: MYSQL_USER, value: oaf }
+            - { name: MYSQL_PASSWORD, valueFrom: { secretKeyRef: { name: oaf-mysql-secret, key: MYSQL_PASSWORD } } }
+          args: ["--max_connections=200", "--innodb_buffer_pool_size=256M"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mysql }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d }
+          readinessProbe:
+            exec: { command: ["mysqladmin","ping","-h","127.0.0.1","-uoaf","-pOafPlatform2026"] }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          resources:
+            requests: { memory: 512Mi, cpu: 250m }
+            limits:   { memory: 1Gi, cpu: "1" }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: oaf-mysql-data }
+        - name: init
+          configMap: { name: oaf-mysql-init }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oaf-mysql
+  namespace: agent-platform
+spec:
+  selector: { app: oaf-mysql }
+  ports: [{ port: 3306, targetPort: 3306 }]
+---
+# 共享 PVC：OAF 配置包落盘
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: platform-data
+  namespace: agent-platform
+spec:
+  accessModes: ["ReadWriteOnce"]   # 单节点 Kind：多 Pod 挂同一 RWO 卷合法
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: platform-backend
+  namespace: agent-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: platform-backend
+  namespace: agent-platform
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  - apiGroups: [""]
+    resources: ["services","configmaps","persistentvolumeclaims","pods","pods/log"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-backend
+  namespace: agent-platform
+subjects:
+  - kind: ServiceAccount
+    name: platform-backend
+    namespace: agent-platform
+roleRef:
+  kind: Role
+  name: platform-backend
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-backend
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: platform-backend }
+  template:
+    metadata:
+      labels: { app: platform-backend }
+    spec:
+      serviceAccountName: platform-backend
+      containers:
+        - name: backend
+          image: platform-backend:v1
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8080 }]
+          env:
+            - name: MYSQL_DSN
+              value: "oaf:OafPlatform2026@tcp(oaf-mysql.agent-platform.svc.cluster.local:3306)/oaf_platform?charset=utf8mb4&parseTime=True&loc=Local"
+            - { name: NAMESPACE, value: agent-platform }
+            - { name: DATA_ROOT, value: /data }
+            - { name: AVAILABLE_IMAGES, value: "agent-framework:latest|Agent Framework latest" }
+            - { name: DEFAULT_IMAGE, value: "agent-framework:latest" }
+            - { name: INGRESS_CLASS, value: nginx }
+            - { name: INGRESS_HOST, value: "172.20.0.3" }
+            - { name: INGRESS_PORT, value: "30080" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: { memory: 128Mi, cpu: 100m }
+            limits:   { memory: 512Mi, cpu: 500m }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: platform-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-backend
+  namespace: agent-platform
+spec:
+  selector: { app: platform-backend }
+  ports: [{ name: http, port: 8080, targetPort: 8080 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-backend-nodeport
+  namespace: agent-platform
+spec:
+  type: NodePort
+  selector: { app: platform-backend }
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30880

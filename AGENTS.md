@@ -1,29 +1,19 @@
-# Agent Manager — AGENTS.md
+# OAF 服务发布平台 — AGENTS.md
 
 ## Project Overview
 
-Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML 配置 Agent，自动生成 DeepAgents 代码，打包为 Docker 镜像，部署到 Kubernetes 的 agent-sandbox 隔离环境中运行，并管理 Agent 的发布/下线生命周期。
+OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K8s 原生 Deployment+Service+Ingress 拉起服务（包 PVC subPath 只读挂载、环境变量 ConfigMap envFrom），就绪后自动调用 A2A `/.well-known/agent-card.json` 注册服务信息；提供列表/状态/重新发布/下线/删除。核心能力同进程暴露为 MCP 服务，智能发布助手（release-agent）通过 MCP 对话式驱动全流程。
 
 ### 技术栈
 
-| 层级 | 技术选型 |
-|------|---------|
-| 前端 | React 19 + Next.js 16 + TypeScript + Tailwind CSS 3 |
-| 后端 | Go 1.23 + Gin + GORM |
-| 代码生成 | Python (DeepAgents SDK + FastAPI) |
-| Agent 框架 | agent-framework (FastAPI + DeepAgents v0.6.1) |
-| 数据库 | GreatSQL 8.0 (MySQL 兼容，端口 3307) |
-| 对象存储 | MinIO (端口 9000/9001) |
-| 容器编排 | Kubernetes (Kind 本地集群) + agent-sandbox CRD |
-| 镜像构建 | Docker SDK (Shell 调用) |
-
-### 核心组件版本
-
-| 组件 | 版本 |
-|------|------|
-| agent-sandbox | kubernetes-sigs/agent-sandbox v0.4.3 |
-| DeepAgents | langchain-ai/deepagents v0.6.1 |
-| agent-framework | FastAPI + DeepAgents + MySQL Checkpoint |
+| 层 | 选型 |
+|----|------|
+| 管理后端 | Go 1.23 + Gin + GORM + client-go（typed，InClusterConfig） |
+| MCP | modelcontextprotocol/go-sdk v1.3.1（streamableHttp /mcp，与 REST 同进程） |
+| 前端 | Next.js 16 + React 19 + Tailwind（容器化 standalone） |
+| 业务运行时 | agent-framework（Java/Spring Boot :8100，AgentScope Harness） |
+| 元数据 | 集群内 MySQL 8.0（oaf_platform / oaf_checkpoint） |
+| 编排 | Kind 单节点 K8s 1.32 + ingress-nginx；共享 PVC platform-data |
 
 ---
 
@@ -53,166 +43,55 @@ Agent Manager 是一个 **Agent 管理平台**，支持通过页面/JSON/YAML �
 
 ```
 /root/agent-manager/
-├── backend/                    # Go 后端 → backend/AGENTS.md
-├── frontend/                   # Next.js 前端 → frontend/AGENTS.md
-├── codegen/                    # Python 代码生成模块 → codegen/AGENTS.md
-├── agent-framework/            # Agent Framework 独立服务 → agent-framework/AGENTS.md
-├── e2e/                        # 端到端测试 → e2e/AGENTS.md
-├── sandbox/                    # agent-sandbox 部署文件
-├── docs/                       # 文档
-│   └── troubleshooting/        # 问题排查文档
-├── PLAND.md                    # 完整项目计划
-└── package.json                # 顶层 (puppeteer 截图工具)
+├── backend/            # Go 管理后端（REST /api/v1 + MCP /mcp 同进程）→ backend/AGENTS.md
+├── frontend/           # Next.js 前端（服务列表/发布向导/详情/发布助手对话）
+├── agent-framework/    # 业务 Agent 运行时（Java）→ agent-framework/AGENTS.md
+├── release-agent/      # 智能发布助手 OAF 包源文件
+├── manifests/          # 平台自举清单（platform/platform-ingress/frontend.yaml）
+├── e2e/                # 全流程回归脚本 → e2e 内 package.json
+├── docs/               # 部署指南(deployment.md) + 规范参考(oaf-specification.md) + 排障(troubleshooting/)
+└── REDESIGN.md         # 重构设计文档（权威，含实施记录附录 B）
 ```
 
 ---
 
 ## 基础设施
 
-| 服务 | 端口 | 用途 |
+| 组件 | 地址 | 用途 |
 |------|------|------|
-| Nginx 反向代理 | 8911 | 统一入口 (前端/后端/K8s Ingress) |
-| Go 后端 | 8080 | REST API 服务 |
-| Next.js 前端 | 3000 | Web UI (PM2 standalone) |
-| GreatSQL (MySQL) | 3307 | 持久化 Agent 元数据 |
-| MinIO API | 9000 | 对象存储 |
-| MinIO Console | 9001 | 对象存储管理面板 |
-| Docker Registry | 5001 | 本地镜像仓库 (HTTP) |
-| K8s Ingress Controller | 30080/30443 | K8s 集群入口 |
-| Kind K8s | — | 本地 Kubernetes 集群 |
+| 宿主机 nginx | :8911 | 统一入口（前端/API/MCP/业务 Agent） |
+| platform-backend | svc:8080 / NodePort 30880 | REST + MCP |
+| platform-frontend | NodePort 30881 | Web UI |
+| ingress-nginx | NodePort 30080 | 业务 Agent（/agent/{name}） |
+| oaf-mysql | svc:3306 | 平台元数据 + checkpoint |
+| 共享 PVC | platform-data (10Gi) | OAF 包存储：`packages/{id}` subPath 只读挂 /config |
+| namespace | agent-platform | 全部平台与业务资源 |
 
-### Nginx 反向代理架构
-
-```
-浏览器 :8911
-    │
-    ▼
-┌──────────┐
-│  Nginx   │  /etc/nginx/conf.d/agent-manager.conf
-│  :8911   │
-└──────────┘
-  │          │            │
-  │ /        │ /api/      │ /agent/
-  ▼ :3000    ▼ :8080      ▼ :30080
-Frontend    Backend       K8s Ingress
-(Next.js)   (Go/Gin)      Controller
-                           │
-                           ▼ agent-{id}-svc:8100
-                        Agent Pod (agent-framework)
-```
-
----
-
-## 新增功能
-
-### 1. 运行模式
-
-Agent 支持两种运行模式：
-
-| 模式 | 说明 | 流程 |
-|------|------|------|
-| **构建模式** (build) | 传统模式，生成代码并构建镜像 | 配置 → 代码生成 → 镜像构建 → K8s 部署 |
-| **挂载模式** (mount) | 使用预构建镜像，配置挂载部署 | 配置 → 选择镜像 → MinIO 存储 → ConfigMap 挂载 → K8s 部署 |
-
-**挂载模式优势：**
-- 无需每次构建镜像，部署速度更快
-- 使用预构建的 agent-framework 镜像
-- 配置通过 ConfigMap 挂载到容器
-- 支持独立的 Checkpoint 数据库配置
-
-**挂载模式部署流程：**
-1. 用户创建 Agent，选择挂载模式和镜像
-2. 配置存储到 MinIO (AGENTS.md + skills + mcp-configs)
-3. 部署时创建 ConfigMap (配置) 和 Secret (LLM API Key)
-4. K8s Sandbox 挂载 ConfigMap 到 /config 目录
-5. agent-framework 从 /config 读取配置运行
-
-**新增环境变量：**
-
-敏感配置存放在 `.env.secrets`（已加入 .gitignore），具体变量如下：
-
-| 变量 | 说明 | 示例格式 |
-|------|------|---------|
-| `LLM_API_KEY` | LLM API 密钥 | 见 .env.secrets |
-| `LLM_MODEL` | LLM 模型 ID | 见 .env.secrets |
-| `LLM_ENDPOINT` | LLM API 端点 | 见 .env.secrets |
-| `DEFAULT_CHECKPOINT_DSN` | Checkpoint 数据库 DSN | 见 .env.secrets |
-| `AVAILABLE_IMAGES` | 可选镜像列表 | `agent-framework:latest\|Agent Framework v0.5.5` |
-| `DEFAULT_IMAGE` | 默认镜像 | `agent-framework:latest` |
-
-```bash
-# 从 .env.secrets 加载敏感配置
-source .env.secrets
-```
-
-**挂载模式关键实现细节：**
-- 镜像自动补全 Registry 前缀：短镜像名 (如 `agent-framework:latest`) 自动补充为 `{registry}/agent-framework:latest`
-- `Publish` 挂载模式始终调用 `DeployWithMount()`，非 `Deploy()` (修复重发布 ImagePullBackOff)
-- Checkpoint DSN 主机须用 `172.20.0.1` (Docker 网关)，因 K8s Pod 内 `127.0.0.1` 指向 Pod 自身
-- Agent 容器端口 **8100**，构建模式端口 8000
-- `INGRESS_HOST` 环境变量决定对外地址展示 (默认 `localhost`，须设为 nginx 入口地址)
-- LLM 配置通过后端环境变量注入：`LLM_API_KEY`/`LLM_MODEL`/`LLM_ENDPOINT` → Pod 内 `LLM_API_KEY`(Secret)/`LLM_MODEL_ID`/`LLM_BASE_URL`/`LLM_PROVIDER`(hardcoded=ctyun)
-
-### 2. Agent 删除功能
-
-删除 Agent 时自动清理所有相关资源：
-
-| 资源类型 | 清理逻辑 |
-|---------|---------|
-| K8s | Ingress → Service → Sandbox CRD + ConfigMap + Secret (挂载模式) |
-| Docker | 本地镜像 + 远程仓库镜像 |
-| MinIO | 代码文件 (agents/{id}/*) |
-| MySQL | Agent 记录 (CASCADE 删除子表) |
-
-**删除策略（按状态）：**
-- `draft`: 仅删除数据库
-- `generated`: MinIO + 数据库
-- `built`: Docker + MinIO + 数据库
-- `deployed/published`: K8s + Docker + MinIO + 数据库
-- `error`: 尝试清理所有可能资源
-
-### 3. 基础镜像构建
-
-预构建基础镜像 `agent-base:latest`，包含所有 pip 依赖，加速 Agent 镜像构建：
-
-| 场景 | 构建时间 |
-|------|---------|
-| 首次构建（构建基础镜像） | ~60s |
-| 后续构建（使用缓存） | ~5s |
-
-**实现方式：**
-1. 启动时检查基础镜像是否存在，不存在则自动构建
-2. 代码生成时 Dockerfile 替换 `FROM python:3.12-slim` 为 `FROM {registry}/agent-base:latest`
-3. 构建时跳过 `pip install`，仅复制 `agent.py`
+关键约定：
+- 业务 Pod 固定注入 `AGENT_CONFIG_DIR=/config`、`AGENT_WORKSPACE_DIR=/workspace`、`SERVER_HOST/SERVER_PORT`（均为保留键，用户 env 冲突即 400）
+- env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB
+- 业务 Ingress 注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix
+- 敏感配置在 `.env.secrets`（gitignored）
 
 ---
 
 ## 启动服务
 
-后端通过 Makefile 启动，LLM/Checkpoint 等必要配置通过环境变量注入（`config.go` 无默认值，必须外部提供）：
-
 ```bash
-# 后台运行
-make backend-start    # 构建 + 启动后端 :8080
+# 单测 / 本地后端 / 前端热更
+cd backend && make test && make run-dev
+cd frontend && npm run dev
 
-# 开发模式
-make dev-backend      # go run 热重载
+# 镜像构建 → 导入集群 → 部署（全流程见 docs/deployment.md）
+cd backend && make image && make kind-load && kubectl apply -f ../manifests/*.yaml
 
-# 前端
-make frontend-start   # 构建 + PM2 启动 :3000
-make frontend-restart # 构建 + 重启
-
-# 重启
-make backend-restart make frontend-restart
+# 更新镜像后的固定动作：rollout restart 对应 deployment
+kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingress 注解由它下发
 ```
-
-实际环境变量值定义在 `Makefile` 的 `backend-start` 和 `dev-backend` 目标中。
 
 ---
 
 ## 子模块 AGENTS.md 索引
 
-- [backend/AGENTS.md](backend/AGENTS.md) — Go 后端: 启动流程、配置、数据模型、API 路由、业务逻辑、基础设施客户端
-- [codegen/AGENTS.md](codegen/AGENTS.md) — Python 代码生成模块: 核心函数、调用模式、生成产物、JSON Schema、已知问题
-- [frontend/AGENTS.md](frontend/AGENTS.md) — Next.js 前端: 页面路由、API 客户端、状态管理、组件架构、页面详情
-- [e2e/AGENTS.md](e2e/AGENTS.md) — 端到端测试: Puppeteer 脚本、测试报告、截图管理
+- [backend/AGENTS.md](backend/AGENTS.md) — Go 后端：目录结构、REST/MCP 契约、状态机、K8s 对象构造、安全限制
+- [agent-framework/AGENTS.md](agent-framework/AGENTS.md) — Java 运行时：A2A/单次流端点、MCP 注册（fail-soft/read_only/HITL）、环境变量、Debug Console

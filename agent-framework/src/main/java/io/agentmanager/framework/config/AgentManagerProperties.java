@@ -9,8 +9,18 @@ public record AgentManagerProperties(
     ServerConfig server,
     CheckpointConfig checkpoint,
     @DefaultValue("/config") String configDir,
+    @DefaultValue("") String workspaceDir,
     CleanupConfig cleanup
 ) {
+
+    /**
+     * 工作区基目录：AGENT_WORKSPACE_DIR 优先；未配置时回落到 configDir。
+     * 平台部署场景下 configDir 为只读的 OAF 包挂载点，工作区须落在独立可写卷。
+     */
+    public String resolvedWorkspaceBaseDir() {
+        return (workspaceDir == null || workspaceDir.isBlank()) ? configDir : workspaceDir;
+    }
+
     public record LLMConfig(
         @DefaultValue("") String apiKey,
         @DefaultValue("") String modelId,

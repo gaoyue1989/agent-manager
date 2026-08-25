@@ -23,6 +23,7 @@ class OafConfigLoaderTest {
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             "src/test/resources/fixtures/test-agent",
+            "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7)
         );
         loader = new OafConfigLoader(props);
@@ -169,6 +170,7 @@ class OafConfigLoaderTest {
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             dir.toString(),
+            "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7)
         );
     }

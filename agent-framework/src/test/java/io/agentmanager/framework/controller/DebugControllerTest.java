@@ -17,9 +17,23 @@ class DebugControllerTest {
 
     @Test
     void debugPageShouldReturnHtml() throws Exception {
-        mockMvc.perform(get("/debug"))
+        mockMvc.perform(get("/debug/"))
             .andExpect(status().isOk())
             .andExpect(content().contentTypeCompatibleWith("text/html"))
             .andExpect(content().string(org.hamcrest.Matchers.containsString("Agent Debug Console")));
+    }
+
+    @Test
+    void noTrailingSlashShouldRedirectRelative() throws Exception {
+        mockMvc.perform(get("/debug"))
+            .andExpect(status().isFound())
+            .andExpect(redirectedUrl("debug/"));
+    }
+
+    @Test
+    void forwardedPrefixShouldBePreservedInRedirect() throws Exception {
+        mockMvc.perform(get("/debug").header("X-Forwarded-Prefix", "/agent/approval-demo"))
+            .andExpect(status().isFound())
+            .andExpect(header().string("Location", "/agent/approval-demo/debug/"));
     }
 }

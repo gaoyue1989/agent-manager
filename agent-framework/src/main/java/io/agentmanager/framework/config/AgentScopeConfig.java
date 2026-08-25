@@ -212,7 +212,7 @@ public class AgentScopeConfig {
 
         try {
             var workspacePath = workspaceInitializer.initialize(
-                Path.of(props.configDir()), oafConfig);
+                Path.of(props.resolvedWorkspaceBaseDir()), oafConfig);
 
             var model = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
                 .apiKey(llm.apiKey())

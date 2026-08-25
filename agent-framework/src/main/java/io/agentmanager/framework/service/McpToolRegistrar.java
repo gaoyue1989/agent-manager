@@ -69,6 +69,8 @@ public class McpToolRegistrar {
 
     /** 只读 server 缓存: serverName -> read_only（registerAll 时装载） */
     private final Map<String, Boolean> readOnlyServers = new ConcurrentHashMap<>();
+    /** 启动严格模式缓存: serverName -> required（config.yaml startup.required，默认 false=容错跳过） */
+    private final Map<String, Boolean> startupRequired = new ConcurrentHashMap<>();
 
     /** destructiveHint 缓存: serverName:toolName -> destructiveHint（buildToolInfo 时记录） */
     private final Map<String, Boolean> destructiveHints = new ConcurrentHashMap<>();
@@ -92,8 +94,14 @@ public class McpToolRegistrar {
             uiMappings.put(mcp.server(), uiMapping);
             toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
             readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
+            startupRequired.put(mcp.server(), isStartupRequired(mcp));
             var wrapper = buildClient(mcp);
-            if (wrapper != null) {
+            if (wrapper == null) {
+                continue;
+            }
+            // MCP 是外部依赖：默认 fail-soft（连接失败仅告警并跳过该 server 的工具，
+            // 不阻断 agent 启动）；config.yaml 声明 startup.required=true 时才严格失败
+            try {
                 // 加载 ActiveMCP.json 配置（enabled 子集过滤）
                 var activeMcpConfig = loadActiveMcpConfig(mcp);
                 boolean forceReadOnly = Boolean.TRUE.equals(readOnlyServers.get(mcp.server()));
@@ -107,7 +115,34 @@ public class McpToolRegistrar {
                     recordRegisteredTools(wrapper, mcp.server(), uiMapping);
                 }
                 log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
+            } catch (Exception e) {
+                closeQuietly(wrapper);
+                if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
+                    throw new IllegalStateException(
+                        "MCP server '" + mcp.server() + "' declared startup.required=true but registration failed",
+                        e);
+                }
+                log.warn("MCP server '{}' unreachable at startup, skipped (agent starts without its tools): {}",
+                    mcp.server(), e.getMessage());
             }
+        }
+    }
+
+    /** 解析 config.yaml 的 startup.required（缺省 false=容错） */
+    boolean isStartupRequired(OafConfig.McpServerConfig mcp) {
+        var data = loadConfigYaml(mcp);
+        if (data == null) {
+            return false;
+        }
+        var startup = data.get("startup");
+        return startup instanceof Map<?, ?> sm && Boolean.TRUE.equals(sm.get("required"));
+    }
+
+    private static void closeQuietly(io.agentscope.core.tool.mcp.McpClientWrapper wrapper) {
+        try {
+            wrapper.close();
+        } catch (Exception ignore) {
+            // 尽力而为
         }
     }
 

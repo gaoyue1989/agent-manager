@@ -87,3 +87,4 @@ e2e/send_email.py
 agent-framework/example/approval-forms/e2e/node_modules/
 agent-framework/example/approval-forms/e2e/screenshots/
 agent-framework/example/approval-forms/e2e/screenshots-full/
+e2e/mcpclient/mcpclient

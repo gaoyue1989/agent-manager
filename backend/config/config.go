@@ -1,72 +1,131 @@
+// Package config 加载平台运行配置（全部来自环境变量，敏感项无默认值）。
 package config
 
-import "os"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ImageOption 可选镜像项。
+type ImageOption struct {
+	Image string `json:"image"`
+	Label string `json:"label"`
+}
 
 type Config struct {
-	ServerPort            string
-	MySQLDSN              string
-	MinIOEndpoint         string
-	MinIOAccessKey        string
-	MinIOSecretKey        string
-	MinIOBucket           string
-	KubeConfig            string
-	KubeNamespace         string
-	KubeIngressClass      string
-	KubeClientMode        string
-	LocalRegistry         string
-	CodeGenScript         string
-	CodeGenPython         string
-	LLMModel              string
-	LLMEndpoint           string
-	LLMAPIKey             string
-	IngressHost           string
-	IngressEnabled        bool
-	BaseImageName         string
-	BuildBaseImage        bool
-	AvailableImages       string
-	DefaultImage          string
-	DefaultCheckpointDSN  string
-	DeployMethod          string
-	DeployTemplateDir     string
-	DockerUsername         string
-	DockerPassword         string
+	ServerPort int
+	Namespace  string
+	DataRoot   string // 共享 PVC 挂载点
+
+	MySQLDSN string // 必填，无默认值
+
+	AvailableImages []ImageOption
+	DefaultImage    string
+
+	IngressClass string
+	IngressHost  string // 对外展示地址，如 172.20.0.2:30080
+	IngressPort  int    // ingress http NodePort，仅用于拼接展示 URL
+
+	ResourceRequestsCPU string
+	ResourceRequestsMem string
+	ResourceLimitsCPU   string
+	ResourceLimitsMem   string
+
+	RegisterTimeout time.Duration // 等待 Deployment Ready 超时
+	RegisterRetry   int           // agent-card 拉取重试次数
+
+	AuthToken string // 非空时启用 Bearer 校验
 }
 
-func Load() *Config {
-	return &Config{
-		ServerPort:           getEnv("SERVER_PORT", "8080"),
-		MySQLDSN:             getEnv("MYSQL_DSN", "agent_manager:Agent@Manager2026@tcp(127.0.0.1:3307)/agent_manager?charset=utf8mb4&parseTime=True&loc=Local"),
-		MinIOEndpoint:        getEnv("MINIO_ENDPOINT", "127.0.0.1:9000"),
-		MinIOAccessKey:       getEnv("MINIO_ACCESS_KEY", "minioadmin"),
-		MinIOSecretKey:       getEnv("MINIO_SECRET_KEY", "minioadmin"),
-		MinIOBucket:          getEnv("MINIO_BUCKET", "agent-manager"),
-		KubeConfig:           getEnv("KUBE_CONFIG", ""),
-		KubeNamespace:        getEnv("KUBE_NAMESPACE", "default"),
-		KubeIngressClass:     getEnv("KUBE_INGRESS_CLASS", "nginx"),
-		KubeClientMode:       getEnv("K8S_CLIENT_MODE", "kubectl"),
-		LocalRegistry:        getEnv("LOCAL_REGISTRY", "172.20.0.1:5001"),
-		CodeGenScript:        getEnv("CODEGEN_SCRIPT", "/root/agent-manager/codegen/generator.py"),
-		CodeGenPython:        getEnv("CODEGEN_PYTHON", "/root/agent-manager/codegen/venv/bin/python3"),
-		LLMModel:             getEnv("LLM_MODEL", ""),
-		LLMEndpoint:          getEnv("LLM_ENDPOINT", ""),
-		LLMAPIKey:            getEnv("LLM_API_KEY", ""),
-		IngressHost:          getEnv("INGRESS_HOST", "localhost"),
-		IngressEnabled:       getEnv("INGRESS_ENABLED", "true") == "true",
-		BaseImageName:        getEnv("BASE_IMAGE_NAME", "agent-base:latest"),
-		BuildBaseImage:       getEnv("BUILD_BASE_IMAGE", "true") == "true",
-		AvailableImages:      getEnv("AVAILABLE_IMAGES", "agent-framework:latest|Agent Framework v0.5.5"),
-		DefaultImage:         getEnv("DEFAULT_IMAGE", "agent-framework:latest"),
-		DefaultCheckpointDSN: getEnv("DEFAULT_CHECKPOINT_DSN", ""),
-		DeployMethod:         getEnv("DEPLOY_METHOD", "sandbox"),
-		DeployTemplateDir:    getEnv("DEPLOY_TEMPLATE_DIR", ""),
-		DockerUsername:        getEnv("DOCKER_USERNAME", ""),
-		DockerPassword:        getEnv("DOCKER_PASSWORD", ""),
+func Load() (*Config, error) {
+	c := &Config{
+		ServerPort:          envInt("SERVER_PORT", 8080),
+		Namespace:           envStr("NAMESPACE", "agent-platform"),
+		DataRoot:            envStr("DATA_ROOT", "/data"),
+		MySQLDSN:            envStr("MYSQL_DSN", ""),
+		IngressClass:        envStr("INGRESS_CLASS", "nginx"),
+		IngressHost:         envStr("INGRESS_HOST", "localhost"),
+		IngressPort:         envInt("INGRESS_PORT", 30080),
+		ResourceRequestsCPU: envStr("RESOURCE_REQUESTS_CPU", "250m"),
+		ResourceRequestsMem: envStr("RESOURCE_REQUESTS_MEM", "256Mi"),
+		ResourceLimitsCPU:   envStr("RESOURCE_LIMITS_CPU", "1"),
+		ResourceLimitsMem:   envStr("RESOURCE_LIMITS_MEM", "1Gi"),
+		RegisterTimeout:     time.Duration(envInt("REGISTER_TIMEOUT_SEC", 120)) * time.Second,
+		RegisterRetry:       envInt("REGISTER_RETRY", 5),
+		AuthToken:           envStr("AUTH_TOKEN", ""),
 	}
+	if c.MySQLDSN == "" {
+		return nil, errors.New("MYSQL_DSN is required")
+	}
+	images, def, err := parseImages(envStr("AVAILABLE_IMAGES", ""), envStr("DEFAULT_IMAGE", ""))
+	if err != nil {
+		return nil, err
+	}
+	if len(images) == 0 {
+		return nil, errors.New("AVAILABLE_IMAGES is required (e.g. 'agent-framework:latest|Agent Framework latest')")
+	}
+	if def == "" {
+		def = images[0].Image
+	}
+	c.AvailableImages = images
+	c.DefaultImage = def
+	return c, nil
 }
 
-func getEnv(key, defaultVal string) string {
-	if v := os.Getenv(key); v != "" {
+// parseImages 解析 "img1|Label1,img2|Label2" 格式；DEFAULT_IMAGE 为空取第一项。
+func parseImages(raw, def string) ([]ImageOption, string, error) {
+	var out []ImageOption
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		img, label := part, ""
+		if i := strings.Index(part, "|"); i >= 0 {
+			img, label = strings.TrimSpace(part[:i]), strings.TrimSpace(part[i+1:])
+		}
+		if img == "" {
+			return nil, "", fmt.Errorf("invalid AVAILABLE_IMAGES entry: %q", part)
+		}
+		out = append(out, ImageOption{Image: img, Label: label})
+	}
+	for _, o := range out {
+		if o.Image == def {
+			return out, def, nil
+		}
+	}
+	if len(out) > 0 && def == "" {
+		return out, out[0].Image, nil
+	}
+	return out, def, nil
+}
+
+func envStr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
 		return v
 	}
-	return defaultVal
+	return d
+}
+
+func envInt(k string, d int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return d
+}
+
+// IsAllowedImage 校验镜像是否在可选列表内。
+func (c *Config) IsAllowedImage(img string) bool {
+	for _, o := range c.AvailableImages {
+		if o.Image == img {
+			return true
+		}
+	}
+	return false
 }

@@ -38,7 +38,8 @@ class McpResourceProxyTest {
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             tempDir.toString(),
-            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7)
+            "",
+            new AgentManagerProperties.            CleanupConfig(30, 60, 20, 30, 7)
         );
         registrar = new McpToolRegistrar(props);
         oafConfig = mock(OafConfig.class);

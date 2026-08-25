@@ -1,212 +1,97 @@
-# Agent Manager
+# OAF 服务发布平台（Agent Manager v2）
 
-Agent 管理平台 — 通过页面/JSON/YAML 配置 Agent，自动生成 DeepAgents 代码，打包为 Docker 镜像，部署到 Kubernetes 的 agent-sandbox 隔离环境中运行，并管理 Agent 的发布/下线生命周期。
+上传符合规范的 **OAF 配置包** → K8s 原生 Deployment/Service/Ingress 拉起服务 → 自动经 A2A 接口注册服务信息 → 列表/状态管理/重新发布。核心能力同时以 **MCP 服务**暴露，并由基于 agent-framework 的 **智能发布助手**（对话式操作）自举运行于集群内。
 
----
+> 设计文档：[REDESIGN.md](REDESIGN.md)（含 v1→v2 重构决策与实施记录）
+> 历史版本：git tag `v1-archive`
 
-## 系统架构
+## 架构
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│              开发机 (Ubuntu 24.04 / 4C8G)                     │
-│                                                               │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │  Dify    │  │ GreatSQL │  │  MinIO   │  │ K8s (Kind)   │ │
-│  │ (Docker) │  │ (3307)   │  │ (9000)   │  │              │ │
-│  │          │  │          │  │          │  │ agent-       │ │
-│  │ nginx:80 │  │ agent_   │  │ agent-   │  │ sandbox      │ │
-│  │          │  │ manager  │  │ manager  │  │ Controller   │ │
-│  │          │  │  DB      │  │  Bucket  │  │ Sandbox CRD  │ │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────────┘ │
-│                                                               │
-│  ┌──────────────────────────────────────────────────────────┐│
-│  │             Agent Manager 应用                             ││
-│  │  ┌─────────────┐    ┌───────────────────────────────────┐ ││
-│  │  │ Go 后端:8080│────│ Next.js 前端:3000                  │ ││
-│  │  │ Gin + GORM  │    │ React 19 + Tailwind CSS           │ ││
-│  │  └──────┬──────┘    └───────────────────────────────────┘ ││
-│  │         │                                                  ││
-│  │  ┌──────▼──────────────────────────────────────────────┐  ││
-│  │  │ Python CodeGen → FastAPI + DeepAgents 微服务          │  ││
-│  │  │ Docker Build  → K8s Sandbox 部署 → Agent API 暴露     │  ││
-│  │  └─────────────────────────────────────────────────────┘  ││
-│  └──────────────────────────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────┘
+                浏览器 :8911（宿主机 nginx 统一入口）
+                  /                    \
+           前端 UI                   /api/*、/mcp
+     platform-frontend          platform-backend (Go)
+     (Next.js, :30881)          REST + MCP 同进程
+                                     │ client-go
+        ┌────────────────────────────┼─────────────────────────┐
+        ▼                            ▼                         ▼
+  Deployment oaf-*            Service oaf-*-svc          Ingress oaf-*
+  包: PVC subPath → /config   ClusterIP :8100            path /agent/{name}
+  env: ConfigMap envFrom                                 (x-forwarded-prefix)
+        │
+        ▼
+  业务 Pod（agent-framework 等兼容镜像，AGENT_CONFIG_DIR=/config）
+        └── 就绪后由平台拉取 /.well-known/agent-card.json 注册入库
+
+  release-agent：平台自举发布的第一个服务，经 MCP 驱动整个发布流程
 ```
 
 ## 技术栈
 
-| 层级 | 技术选型 | 版本 |
-|------|---------|------|
-| 前端 | React + Next.js + TypeScript + Tailwind CSS | React 19 / Next 16 |
-| 后端 | Go + Gin + GORM | Go 1.23 |
-| 代码生成 | Python (DeepAgents SDK + FastAPI) | DeepAgents 0.5.5 |
-| 数据库 | GreatSQL 8.0 (MySQL 兼容) | 8.0.32 |
-| 对象存储 | MinIO | 2025-04-08 |
-| 容器编排 | Kubernetes via Kind + agent-sandbox CRD | K8s 1.32 / Sandbox 0.4.3 |
-| 镜像构建 | Docker CLI (Shell 调用) | — |
+| 层 | 选型 |
+|----|------|
+| 管理后端 | Go 1.23 + Gin + GORM + client-go（REST `/api/v1` 与 MCP streamableHttp `/mcp` 同进程） |
+| MCP SDK | modelcontextprotocol/go-sdk v1.3.1 |
+| 前端 | Next.js 16 + React 19 + Tailwind（3 页面 + 发布助手对话） |
+| 业务运行时 | agent-framework（Java/Spring Boot :8100，AgentScope Harness 2.x） |
+| 元数据库 | 集群内 MySQL 8.0（`oaf_platform` / `oaf_checkpoint` 两库） |
+| 存储 | 共享 PVC `platform-data`（包只读挂 /config + 可写工作区 /workspace） |
+| 集群 | Kind 单节点 + ingress-nginx |
 
-## 基础设施端口
+## 入口
 
-| 服务 | 端口 | 用途 |
-|------|------|------|
-| Go 后端 | `8080` | REST API 服务 |
-| Next.js 前端 | `3000` | Web UI |
-| GreatSQL | `3307` | Agent 元数据持久化 |
-| MinIO API | `9000` | 对象存储 |
-| MinIO Console | `9001` | 存储管理面板 |
-| Docker Registry | `5000` | 本地镜像仓库 |
+| 入口 | 地址 |
+|------|------|
+| 统一入口 | http://100.66.1.5:8911 |
+| 前端直连 | http://172.20.0.3:30881 |
+| REST API | http://localhost:30080/api/v1 |
+| MCP | http://localhost:30080/mcp |
+| 发布助手对话页 | http://100.66.1.5:8911/assistant |
 
 ## 快速开始
 
-### 前置条件
-
-- Go 1.23+, Node.js 20+, Python 3.11+
-- Kind 集群已部署 (`kubectl cluster-info`)
-- GreatSQL 已启动 (端口 3307)
-- MinIO 可用 (端口 9000)
-- agent-sandbox operator 已安装
-
-### 启动后端
-
 ```bash
-cd backend
-go mod tidy
-go run cmd/server/main.go
-# 默认监听 :8080
+# 构建 + 导入镜像 + 部署全流程
+see docs/deployment.md
 ```
 
-### 启动前端
+开发态：
 
 ```bash
-cd frontend
-npm install
-npm run dev
-# 默认监听 :3000
-```
-
-### 环境变量
-
-后端全量配置详见 [backend/AGENTS.md](backend/AGENTS.md)，核心变量：
-
-```bash
-export SERVER_PORT=8080
-export MYSQL_DSN="agent_manager:Agent@Manager2026@tcp(127.0.0.1:3307)/agent_manager?charset=utf8mb4&parseTime=True&loc=Local"
-export MINIO_ENDPOINT=127.0.0.1:9000
-export MINIO_ACCESS_KEY=minioadmin
-export MINIO_SECRET_KEY=minioadmin
-export KUBECONFIG=~/.kube/config
-export LOCAL_REGISTRY=localhost:5000
-```
-
-前端需设置：
-
-```bash
-export NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1
-```
-
-### 代码生成独立验证
-
-```bash
-cd codegen
-source venv/bin/activate
-python generator.py test/test-config.json test/output/
+cd backend && make test          # go vet + 单测
+cd backend && make run-dev       # 宿主机直跑后端（KUBECONFIG 回退）
+cd frontend && npm run dev       # 前端热更
 ```
 
 ## 项目结构
 
 ```
 agent-manager/
-├── backend/                     # Go 后端
-│   ├── cmd/server/main.go       # 入口
-│   ├── config/config.go         # 配置
-│   └── internal/                # handler / service / model / k8s / docker / minio / codegen
-├── frontend/                    # Next.js 前端
-│   └── src/
-│       ├── app/                 # App Router 页面
-│       └── lib/api.ts           # API 客户端
-├── codegen/                     # Python 代码生成
-│   ├── generator.py             # 核心生成器
-│   └── schema/                  # JSON Schema
-├── sandbox/                     # agent-sandbox 部署 manifest
-├── docs/                        # 环境部署 & 验证文档
-├── PLAN.md                      # 完整项目计划
-├── AGENTS.md                    # AI 开发指引 (含子模块索引)
-└── package.json                 # 顶层 (截图工具)
+├── backend/            # Go 管理后端（REST+MCP+K8s+DB）
+├── frontend/           # Next.js 前端（列表/发布向导/详情/助手对话）
+├── agent-framework/    # 业务 Agent 运行时（Java，A2A/单次流/Debug Console）
+├── release-agent/      # 智能发布助手的 OAF 包（mcp-configs → 平台 MCP）
+├── manifests/          # 平台自举清单（ns/PVC/RBAC/MySQL/backend/frontend/ingress）
+├── e2e/                # 全流程回归脚本（A~E 场景 + chat/debug-console）
+├── docs/               # 部署指南与规范参考
+└── REDESIGN.md         # 重构设计文档（权威）
 ```
 
-## 文档索引
+## 测试与回归
 
-| 文档 | 说明 |
-|------|------|
-| [AGENTS.md](AGENTS.md) | AI 开发指引与子模块索引 |
-| [PLAN.md](PLAN.md) | 完整项目执行计划 |
-| [docs/deployment.md](docs/deployment.md) | 环境部署总文档 |
-| [backend/AGENTS.md](backend/AGENTS.md) | Go 后端开发指南 |
-| [frontend/AGENTS.md](frontend/AGENTS.md) | 前端开发指南 |
-| [codegen/AGENTS.md](codegen/AGENTS.md) | 代码生成模块开发指南 |
-
-## Agent 生命周期
-
+```bash
+cd backend && go test ./...              # 单元测试
+cd e2e && ./platform-e2e.sh             # A/B：REST 主链路 + 动作矩阵
+cd e2e/mcpclient && go run . -zip ../fixtures/demo-agent-v1.zip   # C：MCP 全链路
+cd e2e && node ui-e2e.js                # D：UI 流程
+cd e2e && ./agent-e2e.sh                # E：发布助手自然语言驱动
+node debug-console-e2e.js / chat-ui-e2e.js   # Debug 页 / 对话页
 ```
-draft → generated → built → deployed → published
-                            ↑         ↓
-                            └─ unpublished ←─┘
-```
-
-1. **创建**: 通过表单/JSON/YAML 配置 Agent
-2. **生成代码**: Python codegen 生成 FastAPI + DeepAgents 微服务
-3. **构建镜像**: Docker build → push 到本地 Registry
-4. **部署**: 创建 K8s Sandbox CRD，Pod 自动调度运行
-5. **发布/下线**: 控制流量可达性
-
-## 流程展示
-
-### 1. 创建 Agent
-
-![创建 Agent](docs/flow-01-create-agent.png)
-
-通过表单配置 Agent 基本信息、工具和 MCP 配置。
-
-### 2. Agent 详情页
-
-![详情页展示](docs/flow-02-detail-page.png)
-
-查看 Agent 完整配置信息，包括工具标签和 MCP 配置。
-
-### 3. 代码生成
-
-![代码生成](docs/flow-03-codegen.png)
-
-Python codegen 自动生成 FastAPI + DeepAgents 微服务代码。
-
-### 4. Skill 上传
-
-![Skill 上传](docs/flow-04-skill-upload.png)
-
-上传 Skill 文件并自动解析元数据。
-
-### 5. 镜像信息
-
-![镜像信息](docs/flow-05-image-info.png)
-
-查看 Docker 镜像构建状态和详细信息。
-
-### 6. Pod 状态监控
-
-![Pod 状态](docs/flow-06-pod-status.png)
-
-实时监控 K8s Pod 运行状态。
-
-### 7. 聊天测试
-
-![聊天测试](docs/flow-07-chat-test.png)
-
-在详情页直接测试 Agent 对话功能。
 
 ## 注意事项
 
-- 不要修改/删除 Dify 相关的数据库和 Bucket (`dify`, `dify_*`)
-- API Key 等敏感信息通过环境变量注入，勿硬编码
-- Kind 集群数据非持久化，重启后 Sandbox 资源需重建
-- Docker Registry 对外使用 `172.20.0.1:5000` 供 K8s 拉取，宿主机用 `localhost:5000`
+- OAF 包要求：根级 `AGENTS.md`（frontmatter 必填校验为宽松模式，引用缺失仅 warnings）
+- 平台保留键（用户 env 不可覆盖）：`AGENT_CONFIG_DIR`、`AGENT_WORKSPACE_DIR`、`SERVER_HOST`、`SERVER_PORT`
+- MCP server 不可达默认不阻断业务启动；必需依赖在包内声明 `startup.required: true`
+- 敏感配置在 `.env.secrets`（gitignored）；MySQL 凭据见 `manifests/platform.yaml`

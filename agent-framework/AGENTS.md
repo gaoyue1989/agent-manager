@@ -154,6 +154,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | Agent 状态存储 | ✅ | MysqlDistributedStore (agent_state + agent_fs) |
 | 模型集成 | ✅ | OpenAI 兼容 API |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
+| MCP 启动容错 | ✅ | 默认 fail-soft：server 不可达仅告警跳过不阻断启动；config.yaml `startup.required: true` 可声明严格失败 |
 | A2A 协议 | ✅ | AgentScopeA2aServer + HarnessAgentRunner |
 | 多租户 | ✅ | IsolationScope.USER (按 userId 隔离) |
 
