@@ -73,6 +73,7 @@ temp/
 # Screenshots
 e2e/screenshots/
 *.png
+!docs/screenshots/
 
 # E2E test scripts
 e2e/screenshot.js
