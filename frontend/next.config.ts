@@ -5,6 +5,9 @@ const RELEASE_AGENT = process.env.AGENT_INTERNAL_URL || "http://oaf-release-agen
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Next.js 16 默认阻止非 localhost 来源访问 dev 资源（HMR / RSC payload 等）。
+  // 开发环境允许通过 100.66.1.5 访问；生产构建 standalone 不影响（仅 dev 模式生效）。
+  allowedDevOrigins: ["100.66.1.5", "localhost", "127.0.0.1", "192.168.31.155"],
   async rewrites() {
     return [
       // 前端同源反代后端 REST，浏览器无需直连

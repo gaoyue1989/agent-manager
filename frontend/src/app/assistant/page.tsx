@@ -3,7 +3,14 @@
 // HITL：permission_ask 渲染确认卡片 → /threads/{sessionId}/confirm-stream 恢复
 // 文件：附件上传（/files/upload）→ chat 携带 fileIds；file_ready 事件渲染下载卡片
 // 历史：GET /threads 列表 + GET /threads/{sid}/history 回放；点击切换恢复上下文继续对话
-import { useCallback, useEffect, useRef, useState } from "react";
+// Markdown：react-markdown + remark-gfm（表格/任务列表/删除线）+ rehype-sanitize（净化）
+//          代码块走 Prism oneLight 高亮；光标 span 作为 Markdown 外层兄弟节点，不进解析器
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
+import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism";
+import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 const AGENT_BASE = "/agent/release-agent";
 type ChatMsg = {
@@ -196,13 +203,29 @@ export default function AssistantPage() {
     let buf = "";
     let asked = false;
 
+    // 文本增量节流：60ms 窗口内累积 delta 后批量 setState，避免每 token 触发整段 markdown 解析
+    let pendingDelta = "";
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushDelta = () => {
+      flushTimer = null;
+      if (!pendingDelta) return;
+      const d = pendingDelta;
+      pendingDelta = "";
+      updateLastAssistant((m) => ({ ...m, content: m.content + d }));
+    };
+    const scheduleFlush = () => {
+      if (flushTimer) return;
+      flushTimer = setTimeout(flushDelta, 60);
+    };
+
     const handlePayload = (line: string) => {
       if (!line.trim()) return;
       let ev: any;
       try { ev = JSON.parse(line); } catch { return; }
       switch (ev.type) {
         case "TEXT_BLOCK_DELTA":
-          updateLastAssistant((m) => ({ ...m, content: m.content + (ev.delta ?? "") }));
+          pendingDelta += ev.delta ?? "";
+          scheduleFlush();
           break;
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
@@ -261,6 +284,8 @@ export default function AssistantPage() {
         }
       }
     }
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    flushDelta();
     return asked;
   }, [updateLast]);
 
@@ -392,6 +417,45 @@ export default function AssistantPage() {
   );
 }
 
+// Assistant 文本按 GFM Markdown 渲染：表格/任务列表/删除线/链接自动识别；围栏代码块走 Prism oneLight
+// rehype-sanitize 默认白名单已禁 <script>/event handler；ADD_ATTR 仅扩展 class/target/rel 以保留代码块主题与外链安全属性
+const Markdown = memo(function Markdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      rehypePlugins={[rehypeSanitize]}
+      components={{
+        code({ className, children, ...rest }) {
+          const match = /language-(\w+)/.exec(className || "");
+          const code = String(children).replace(/\n$/, "");
+          if (match) {
+            return (
+              <SyntaxHighlighter language={match[1]} style={oneLight} PreTag="div" customStyle={{ margin: "6px 0", borderRadius: 6, fontSize: 12 }}>
+                {code}
+              </SyntaxHighlighter>
+            );
+          }
+          return <code className="bg-gray-200 px-1 rounded text-xs" {...rest}>{children}</code>;
+        },
+        a: (props) => <a {...props} target="_blank" rel="noreferrer" className="text-blue-600 underline" />,
+        h1: (props) => <h1 {...props} className="text-base font-semibold mt-2 mb-1" />,
+        h2: (props) => <h2 {...props} className="text-base font-semibold mt-2 mb-1" />,
+        h3: (props) => <h3 {...props} className="text-sm font-semibold mt-2 mb-1" />,
+        ul: (props) => <ul {...props} className="list-disc ml-5 my-1" />,
+        ol: (props) => <ol {...props} className="list-decimal ml-5 my-1" />,
+        li: (props) => <li {...props} className="my-0.5" />,
+        blockquote: (props) => <blockquote {...props} className="border-l-2 border-gray-300 pl-2 text-gray-600 my-1" />,
+        table: (props) => <table {...props} className="border-collapse text-xs my-1" />,
+        th: (props) => <th {...props} className="border border-gray-300 px-2 py-0.5 bg-gray-50" />,
+        td: (props) => <td {...props} className="border border-gray-300 px-2 py-0.5" />,
+        hr: (props) => <hr {...props} className="my-2 border-gray-200" />,
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 function Bubble({ msg, onConfirm }: { msg: ChatMsg; onConfirm: (ok: boolean) => void }) {
   if (msg.role === "tool") {
     return (
@@ -408,8 +472,8 @@ function Bubble({ msg, onConfirm }: { msg: ChatMsg; onConfirm: (ok: boolean) => 
   }
   return (
     <div className="space-y-2">
-      <div className={`text-sm bg-gray-100 rounded-lg px-3 py-2 max-w-[90%] whitespace-pre-wrap ${msg.pending && !msg.content ? "animate-pulse text-gray-400" : ""}`} data-testid="assistant-msg">
-        {msg.content || (msg.pending ? "思考中…" : "")}
+      <div className={`text-sm bg-gray-100 rounded-lg px-3 py-2 max-w-[90%] ${msg.pending && !msg.content ? "animate-pulse text-gray-400" : ""}`} data-testid="assistant-msg">
+        {msg.content ? <Markdown text={msg.content} /> : (msg.pending ? "思考中…" : "")}
         {msg.pending && msg.content ? <span className="animate-pulse">▍</span> : null}
       </div>
       {msg.files && msg.files.length > 0 && (
