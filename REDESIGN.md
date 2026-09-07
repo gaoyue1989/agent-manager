@@ -715,5 +715,7 @@ spec:
   修复：新镜像 `ctr images rm` 旧 tag 后 `docker save | ctr images import` 覆盖；发布链路 E2E S-S9
   （LLM 生成+上传 → REST 发布 running → 删除清理）29/29 全绿。**更新 agent-framework 镜像后必须同步
   更新节点的 docker.io/library/agent-framework:latest tag**，否则新发布服务全部 CrashLoop
+- **S3 存储档已实测（2026-09-07，七牛云）**：S3FileStorageIT 3/3 + e2e/s3-file-e2e.sh 全链路落 S3 全 PASS；
+  踩坑：application.yml 嵌套 `storage:` 层与 FileConfig record 字段名不匹配 → binder 静默回退默认值
+  （详见 file-upload-download-plan.md §19.2），已修复并加 S3EnvBindingTest 回归锁
 - 平台 upload_package 仅收 base64（zip 大时 LLM 复述有 token 压力），可评估增加 file_id 引用上传
-- S3 存储档 E2E 未实测；非沙箱档 S-S8 已确认 21/21 全绿（2026-09-06）

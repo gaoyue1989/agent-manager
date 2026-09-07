@@ -22,7 +22,7 @@ import io.minio.errors.ErrorResponseException;
  * NoSuchKey —— 统一转为"不存在"语义（exists=false / delete 幂等）。
  */
 @Service
-@ConditionalOnProperty(prefix = "agent.file.storage", name = "type", havingValue = "s3")
+@ConditionalOnProperty(prefix = "agent.file", name = "storage-type", havingValue = "s3")
 public class S3FileStorage implements FileStorage {
 
     private static final Logger log = LoggerFactory.getLogger(S3FileStorage.class);

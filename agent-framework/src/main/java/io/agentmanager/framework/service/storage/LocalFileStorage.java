@@ -23,7 +23,7 @@ import org.springframework.stereotype.Service;
  * </ul>
  */
 @Service
-@ConditionalOnProperty(prefix = "agent.file.storage", name = "type",
+@ConditionalOnProperty(prefix = "agent.file", name = "storage-type",
     havingValue = "local", matchIfMissing = true)
 public class LocalFileStorage implements FileStorage {
 

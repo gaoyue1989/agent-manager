@@ -49,13 +49,15 @@ agent:
     present-max-mb: ${FILE_PRESENT_MAX_MB:50}
     download-enabled: ${FILE_DOWNLOAD_ENABLED:true}
     retention-days: ${FILE_RETENTION_DAYS:7}
-    storage:
-      type: ${FILE_STORAGE_TYPE:local}
-      local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
-      s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}
-      s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
-      s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
-      s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
+    # 存储后端：注意键名平铺（storage-type 等）与 FileConfig record 字段
+    # storageType/storageS3Endpoint 等一一对应——不能嵌套 storage: 层，
+    # 否则 binder 匹配不到字段、全部回退默认值（S3 必空导致启动失败）
+    storage-type: ${FILE_STORAGE_TYPE:local}
+    storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
+    storage-s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}
+    storage-s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
+    storage-s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
+    storage-s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
 
 # OTel 链路追踪（默认关闭，设置 OTEL_TRACES_EXPORTER=otlp 启用）
 otel:

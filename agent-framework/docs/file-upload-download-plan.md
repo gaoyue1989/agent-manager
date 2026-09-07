@@ -902,6 +902,49 @@ node chat-ui-file-e2e.js
 - A2A 文档 FilePart 转换（§11）——A2A 客户端上传文档场景
 - 下载 Range/ETag（§9 P2）
 - 孤儿存储对象清扫任务（§4.3-5）
+- ~~S3 存储档 E2E 未实测~~ **2026-09-07 已实测**（见 §19）
+
+---
+
+## 19. S3 存储档实测（2026-09-07，七牛云 S3 网关）
+
+### 19.1 验证结果
+
+| 验证项 | 结果 |
+|--------|------|
+| S3FileStorageIT 集成测试（真实七牛云） | 3/3 全绿：write→exists→read 哨兵一致→delete→exists=false→重复 delete 幂等；不存在 key exists=false / read 抛 getObject IOException；bucketExists 启动 fail-fast |
+| E2E S3 档（e2e/s3-file-e2e.sh，非沙箱档全链路落 S3） | 上传（S1）/下载一致（S3-2/S4-2）/present_file 产出（S3/S4）/生成包 S-S8（zip 落 S3 + 平台校验）全 PASS；S-S9a/b 为 LLM 偶发（与存储无关，local 档已覆盖） |
+| MinIO SDK 兼容性 | 七牛 S3 网关 path-style 正常，无需显式 region（SDK 默认探测可用） |
+
+### 19.2 实测发现：yml 嵌套绑定坑（重要）
+
+**现象**：切 FILE_STORAGE_TYPE=s3 后 CrashLoop，`endpoint must be a non-empty string`，
+但 envFrom 注入经 debug pod 验证完全正常，且 FILE_STORAGE_TYPE 本身生效（S3 bean 被创建）。
+
+**根因**：application.yml 曾写成嵌套 `agent.file.storage.s3-endpoint`，与 record 字段
+`storageS3Endpoint` 的 canonical 绑定名 `agent.file.storage-s3-endpoint` **不匹配**——
+binder 静默回退 record 默认值（S3 字段默认空 → 构造失败）。而
+`@ConditionalOnProperty(prefix="agent.file.storage", name="type")` 走 Environment 层
+（不走 binder）恰好取到 s3，造成"type 生效、S3 参数全空"的错位。local 档一直"正常"
+纯因默认值恰好等于期望值（local//data/files/agent-files）。
+
+**修复**：yml 平铺键名（storage-type/storage-local-dir/storage-s3-endpoint/...）与字段一一对应；
+@ConditionalOnProperty 改为 `prefix="agent.file", name="storage-type"`。
+新增回归测试 `S3EnvBindingTest`（2 用例：s3 env 绑定断言 / env 缺失 local 回落）锁住该结构。
+
+### 19.3 运行方式
+
+```bash
+# 存储层集成测试（无 env 自动 skip）
+S3_IT=1 S3_IT_ENDPOINT=... S3_IT_ACCESS_KEY=... S3_IT_SECRET_KEY=... S3_IT_BUCKET=... \
+  mvn test -Dtest=S3FileStorageIT
+
+# E2E S3 档（切 release-agent → 跑全链路 → 自动恢复 local；凭据在 .env.secrets）
+./e2e/s3-file-e2e.sh
+```
+
+注意：kubelet 对新写入 ConfigMap key 的传播有延迟——切换后首次 restart 可能仍读到旧 CM
+（S3FileStorage 不出现即未生效），脚本内置最多 3 次 restart 检测重试。
 
 ---
 
