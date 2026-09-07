@@ -120,26 +120,103 @@ Tomcat started on port 8100
 
 ### 4.1 环境变量完整列表
 
+> 来源：`src/main/resources/application.yml` + `config/AgentManagerProperties.java` + `config/SandboxConfig.java`。
+> Spring 绑定键前缀：`agent.*`（见 `application.yml`）；`OTEL_*` 与 `server.port` 直接由 Spring Boot / OTel 读取。
+
+#### 4.1.1 LLM
+
 | 变量 | 类型 | 默认值 | 必填 | 说明 |
 |------|------|--------|------|------|
-| `LLM_API_KEY` | string | — | ✓ | LLM API 密钥 |
-| `LLM_MODEL_ID` | string | — | ✓ | 模型 ID |
-| `LLM_BASE_URL` | string | — | ✓ | LLM API 端点 |
-| `LLM_PROVIDER` | string | `openai` | | 提供商标识 |
-| `LLM_TEMPERATURE` | float | `0.7` | | 生成温度 |
-| `LLM_MAX_TOKENS` | int | `4096` | | 最大输出 token |
-| `LLM_TIMEOUT` | int | `120` | | API 超时(秒) |
-| `AGENT_CONFIG_DIR` | path | `/config` | | 配置目录 |
-| `SERVER_HOST` | string | `0.0.0.0` | | 监听地址 |
-| `SERVER_PORT` | int | `8100` | | 服务端口 |
-| `CHECKPOINT_JDBC_URL` | string | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
-| `CHECKPOINT_DB_NAME` | string | — | | agent_state 所在库名（可选，未设时从 JDBC URL 解析） |
-| `CHECKPOINT_USERNAME` | string | `agent_manager` | | MySQL 用户名 |
-| `CHECKPOINT_PASSWORD` | string | `Agent@Manager2026` | | MySQL 密码 |
-| `SANDBOX_*` / `OPENSANDBOX_*` | — | 见设计文档 §5.3 | | 沙箱模式（SANDBOX_ENABLED=true 启用） |
-| `FILE_*` | — | 见 file-upload-download-plan.md | | 文件上传/下载/存储后端（FILE_STORAGE_TYPE=local/s3） |
-| `AGENT_CLEANUP_*` | — | 见 api.md 清理配置 | | confirm TTL / turn 租约 / 审计与会话保留期 |
-| `OTEL_*` | — | 见 tracing-design.md | | 链路追踪（OTEL_EXPORTER_OTLP_ENDPOINT 设置即启用） |
+| `LLM_API_KEY` | string | — | ✓ | LLM API 密钥（绑 `agent.llm.api-key`） |
+| `LLM_MODEL_ID` | string | — | ✓ | 模型 ID（绑 `agent.llm.model-id`） |
+| `LLM_BASE_URL` | string | — | ✓ | LLM API 端点，OpenAI 兼容（绑 `agent.llm.base-url`） |
+| `LLM_PROVIDER` | string | `openai` | | 提供商标识（绑 `agent.llm.provider`） |
+| `LLM_TEMPERATURE` | float | `0.7` | | 生成温度（绑 `agent.llm.temperature`） |
+| `LLM_MAX_TOKENS` | int | `4096` | | 最大输出 token（绑 `agent.llm.max-tokens`） |
+| `LLM_TIMEOUT` | int | `120` | | API 调用超时（秒，绑 `agent.llm.timeout`） |
+
+#### 4.1.2 服务 / Spring
+
+| 变量 | 类型 | 默认值 | 必填 | 说明 |
+|------|------|--------|------|------|
+| `SERVER_HOST` | string | `0.0.0.0` | | 监听地址（绑 `agent.server.host`） |
+| `SERVER_PORT` | int | `8100` | | 服务端口（绑 `agent.server.port` 与 Spring `server.port`） |
+| `AGENT_CONFIG_DIR` | path | `/config` | | OAF 配置目录（绑 `agent.config-dir`） |
+| `FILE_UPLOAD_MAX_MB` | int | `20` | | Spring multipart 单文件/请求上限（绑 `spring.servlet.multipart.max-file-size` / `max-request-size`） |
+
+#### 4.1.3 数据库 / Checkpoint（MysqlDistributedStore）
+
+| 变量 | 类型 | 默认值 | 必填 | 说明 |
+|------|------|--------|------|------|
+| `CHECKPOINT_JDBC_URL` | string | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL（绑 `agent.checkpoint.jdbc-url`） |
+| `CHECKPOINT_DB_NAME` | string | — | | agent_state 所在库名；**未设时自动从 JDBC URL 解析**，保证与 agent_fs 同库（绑 `agent.checkpoint.db-name`） |
+| `CHECKPOINT_USERNAME` | string | `agent_manager` | | MySQL 用户名（绑 `agent.checkpoint.username`） |
+| `CHECKPOINT_PASSWORD` | string | `Agent@Manager2026` | | MySQL 密码（绑 `agent.checkpoint.password`） |
+
+K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 `127.0.0.1`。
+
+#### 4.1.4 沙箱 / OpenSandbox（`SANDBOX_ENABLED=true` 启用）
+
+| 变量 | 类型 | 默认值 | 必填 | 说明 |
+|------|------|--------|------|------|
+| `SANDBOX_ENABLED` | bool | `false` | | 沙箱模式开关（绑 `agent.sandbox.enabled`） |
+| `SANDBOX_IMAGE` | string | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像（绑 `agent.sandbox.image`） |
+| `SANDBOX_TIMEOUT_MINUTES` | int | `60` | | 沙箱超时（分钟，到期自动销毁；resume 404 自动降级重建，绑 `agent.sandbox.timeout-minutes`） |
+| `SANDBOX_MEMORY_MB` | int | `1024` | | 沙箱内存限制 MiB（绑 `agent.sandbox.memory-mb`） |
+| `SANDBOX_CPU_COUNT` | int | `1` | | 沙箱 CPU 限制（绑 `agent.sandbox.cpu-count`） |
+| `SANDBOX_ENTRYPOINT` | string (csv) | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；绑 `agent.sandbox.entrypoint`） |
+| `SANDBOX_EXECD_GRACE_SHUTDOWN` | duration | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x；绑 `agent.sandbox.execd-grace-shutdown`） |
+| `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
+| `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |
+
+#### 4.1.5 文件上传下载 / 存储后端
+
+> 详见 [file-upload-download-plan.md](file-upload-download-plan.md)；键名在 `application.yml` 中**平铺**于 `agent.file.*`（不可嵌套到 `storage:` 子层，否则 binder 回退默认值导致 S3 启动失败）。
+
+| 变量 | 类型 | 默认值 | 必填 | 说明 |
+|------|------|--------|------|------|
+| `FILE_UPLOAD_ENABLED` | bool | `true` | | 上传开关（绑 `agent.file.upload-enabled`） |
+| `FILE_UPLOAD_MAX_MB` | int | `20` | | 单文件大小上限（绑 `agent.file.upload-max-mb`） |
+| `FILE_UPLOAD_MAX_PENDING` | int | `20` | | 用户维度待注入文件数软上限（绑 `agent.file.upload-max-pending`） |
+| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；绑 `agent.file.upload-allowed-mime`） |
+| `FILE_IMAGE_MAX_MB` | int | `5` | | 图片大小上限（绑 `agent.file.image-max-mb`） |
+| `FILE_IMAGE_INLINE_TOTAL_MB` | int | `15` | | 单次请求图片内联总大小上限（绑 `agent.file.image-inline-total-mb`） |
+| `FILE_PRESENT_MAX_MB` | int | `50` | | `present_file` 工具产物大小上限（绑 `agent.file.present-max-mb`） |
+| `FILE_DOWNLOAD_ENABLED` | bool | `true` | | 下载/预览开关（绑 `agent.file.download-enabled`） |
+| `FILE_RETENTION_DAYS` | int | `7` | | 文件保留天数（过期由 `SessionCleanupService` 清理；绑 `agent.file.retention-days`） |
+| `FILE_STORAGE_TYPE` | enum | `local` | | 存储后端：`local` / `s3`（绑 `agent.file.storage-type`） |
+| `FILE_STORAGE_LOCAL_DIR` | path | `/data/files` | | local 后端存储目录（绑 `agent.file.storage-local-dir`） |
+| `FILE_STORAGE_S3_ENDPOINT` | string | — | ✓(s3) | S3 兼容 endpoint（如七牛云；绑 `agent.file.storage-s3-endpoint`） |
+| `FILE_STORAGE_S3_ACCESS_KEY` | string | — | ✓(s3) | S3 AccessKey（绑 `agent.file.storage-s3-access-key`） |
+| `FILE_STORAGE_S3_SECRET_KEY` | string | — | ✓(s3) | S3 SecretKey（绑 `agent.file.storage-s3-secret-key`） |
+| `FILE_STORAGE_S3_BUCKET` | string | `agent-files` | | S3 Bucket（绑 `agent.file.storage-s3-bucket`） |
+
+#### 4.1.6 会话清理（`AGENT_CLEANUP_*`，见 [api.md](api.md) §清理配置）
+
+> 由 `SessionCleanupService` 定时清理过期数据；键为 `agent.cleanup.*`（默认值见 `application.yml` / `AgentManagerProperties`）。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_CLEANUP_CONFIRM_TTL_MINUTES` | int | `30` | `confirm_context` 有效时长（分钟，读时懒判断 + 定时清理） |
+| `AGENT_CLEANUP_TURN_LEASE_TTL_SECONDS` | int | `60` | `turn_lease` 租约 TTL（秒） |
+| `AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS` | int | `20` | turn 续租间隔（秒） |
+| `AGENT_CLEANUP_AUDIT_RETENTION_DAYS` | int | `30` | `tool_audit_log` 保留天数 |
+| `AGENT_CLEANUP_SESSION_RETENTION_DAYS` | int | `7` | `agent_state` / `agent_fs` 保留天数 |
+
+#### 4.1.7 链路追踪（OTel，详见 [tracing-design.md](tracing-design.md)）
+
+> 镜像内置 `opentelemetry-javaagent.jar`（`make otel-agent` 预下载到 `docker/otel/`）。Dockerfile ENTRYPOINT 检测到 `OTEL_EXPORTER_OTLP_ENDPOINT` 即自动注入 `-javaagent`，否则零开销。**切勿**设置 `OTEL_TRACES_EXPORTER`（会连 Agent 导出一起禁掉）。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | string | `http://localhost:4318` | **设置即启用** OTel Java Agent；Agent + 自研 OtelConfig 双链路 |
+| `OTEL_EXPORTER_OTLP_HEADERS` | string | — | OTLP Header（如 `Authorization=...`） |
+| `OTEL_TRACES_SAMPLER` | string | `always_on` | OTel 采样器（设即启用） |
+| `OTEL_METRICS_EXPORTER` | string | `none` | 镜像默认 `none`（统一关闭避免对 collector 的 404 噪音） |
+| `OTEL_LOGS_EXPORTER` | string | `none` | 镜像默认 `none` |
+| `OTEL_SERVICE_NAME` | string | `agent-framework` | 链路服务名 |
+| `OTEL_TRACES_EXPORTER` | string | — | **保持 unset**；设为 `none` 会关闭 Agent 的 trace 导出 |
+
 
 ### 4.2 AGENTS.md 配置字段
 
