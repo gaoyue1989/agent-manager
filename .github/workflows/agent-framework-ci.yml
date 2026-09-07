@@ -1,0 +1,59 @@
+name: agent-framework-ci
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    name: 单测 (mvn test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Run agent-framework tests
+        working-directory: agent-framework
+        run: mvn -B test
+
+  build-push:
+    name: 构建镜像并推送
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: 计算镜像 tag（agentscope-{maven 版本}-v{日期}）
+        id: meta
+        working-directory: agent-framework
+        run: |
+          VERSION=$(mvn -q -B -DforceStdout -Dexpression=project.version help:evaluate)
+          DATE=$(date -u +%Y%m%d)
+          echo "tag=agentscope-${VERSION}-v${DATE}" >> "$GITHUB_OUTPUT"
+          echo "镜像 tag: agentscope-${VERSION}-v${DATE} (commit ${GITHUB_SHA::7})"
+      - name: 下载 OTel Java Agent（Dockerfile COPY 依赖，jar 不入库）
+        working-directory: agent-framework
+        run: |
+          mkdir -p docker/otel
+          curl -fSLo docker/otel/opentelemetry-javaagent.jar \
+            "https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.12.0/opentelemetry-javaagent.jar"
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: agent-framework
+          push: true
+          tags: |
+            gaoyue1989/agent-framework:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=agent-framework
+          cache-to: type=gha,mode=max,scope=agent-framework

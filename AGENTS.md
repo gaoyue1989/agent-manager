@@ -91,6 +91,23 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 
 ---
 
+## CI（GitHub Actions，推送到 master 触发）
+
+推送 master 后 3 个工作流并行：**先单测，通过后构建镜像推送 Docker Hub**（凭据 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`，GitHub 仓库 Secrets）。
+
+| 工作流 | 单测 | 镜像推送 |
+|--------|------|---------|
+| backend-ci | `go vet ./...` + `go test ./...` | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
+| frontend-ci | `npm run lint` + `npm run build` | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
+| agent-framework-ci | `mvn test`（455 用例，Maven Central 依赖） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+
+细节：
+- 镜像构建用 buildx + gha 缓存；agent-framework 构建前自动下载 OTel Java Agent（jar 不入库，版本取 Makefile `OTEL_JAVAAGENT_VERSION`）
+- agent-framework 镜像 tag 由 pom `project.version` 动态派生（`mvn help:evaluate`），日期取 UTC
+- 业务镜像更新到 kind 集群仍是手动流程（`docker save | ctr import` → rollout），CI 只负责测试与镜像分发
+
+---
+
 ## 子模块 AGENTS.md 索引
 
 - [backend/AGENTS.md](backend/AGENTS.md) — Go 后端：目录结构、REST/MCP 契约、状态机、K8s 对象构造、安全限制
