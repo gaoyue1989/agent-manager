@@ -10,6 +10,8 @@
 | agent-e2e.sh | E | release-agent 自举 + 自然语言驱动第三方发布 + 确认式删除 6 断言 |
 | debug-console-e2e.js | 附 | Debug Console 子路径渲染（经 :30080） |
 | chat-ui-e2e.js | 附 | /assistant 对话真实 LLM 流式回复（经 :8911） |
+| file-support-e2e.sh | 附 | 文件上传下载：S1 上传文档/S2 上传图片(视觉)/S3 输出文档/S4 输出图片/X 异常/S8 生成 OAF 部署包（非沙箱 21 断言）；SANDBOX=1 启用沙箱专项 S-S1~S-S7（22 断言）+ S-S8/S-S9 生成包与发布全链路（合计 29 断言） |
+| file-support-ui-e2e.js | 附 | /assistant 文件对话 UI 12 用例：附件上传/读文件/present_file 卡片/下载（U1~U10）+ 生成 OAF 包对话（U11~U13，卡片/zip 魔数/平台校验） |
 
 ## 运行前置
 
@@ -22,6 +24,9 @@
 cd mcpclient && go run . -base http://localhost:30080/mcp -zip ../fixtures/demo-agent-v1.zip
 FRONTEND=http://172.20.0.3:30881 node ui-e2e.js
 node chat-ui-e2e.js                      # 默认 http://100.66.1.5:8911
+./file-support-e2e.sh                    # 非沙箱档（release-agent 默认部署）
+SANDBOX=1 ./file-support-e2e.sh          # 沙箱档（release-agent env 含 SANDBOX_ENABLED=true，跑完恢复）
+FRONTEND=http://100.66.1.5:8911 node file-support-ui-e2e.js   # UI 档（随 release-agent 当前模式）
 ```
 
 ## 断言原则

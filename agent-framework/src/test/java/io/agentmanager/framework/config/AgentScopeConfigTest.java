@@ -28,7 +28,7 @@ class AgentScopeConfigTest {
     @Test
     void mcpManagerShouldUseConfigPath() {
         var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test", "",
-            cleanupConfig());
+            cleanupConfig(), emptyFileConfig());
         var mcpRegistrar = mock(McpToolRegistrar.class);
 
         assertNotNull(config.mcpManager(props, mcpRegistrar));
@@ -55,7 +55,47 @@ class AgentScopeConfigTest {
     @Test
     void businessToolsAndCustomToolsShouldWork() {
         var tool = config.businessTools();
-        assertEquals(List.of(tool), config.customTools(tool));
+        var fileTools = config.fileTools(mock(io.agentmanager.framework.service.FileAssetStore.class),
+            mock(io.agentmanager.framework.service.storage.FileStorage.class), propsForLlm(),
+            mock(io.agentmanager.framework.config.SandboxConfig.class),
+            mock(io.agentmanager.framework.service.WorkspaceReader.class),
+            new org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec>() {
+                @Override
+                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getIfAvailable()
+                        throws org.springframework.beans.BeansException {
+                    return null;
+                }
+
+                @Override
+                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getObject() {
+                    return null;
+                }
+
+                @Override
+                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getObject(Object... args) {
+                    return null;
+                }
+
+                @Override
+                public void ifAvailable(java.util.function.Consumer<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec> consumer) {
+                }
+
+                @Override
+                public java.util.stream.Stream<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec> stream() {
+                    return java.util.stream.Stream.empty();
+                }
+
+                @Override
+                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getIfUnique() {
+                    return null;
+                }
+            });
+        var oafTools = config.oafPackageTools(
+            mock(io.agentmanager.framework.service.FileAssetStore.class),
+            mock(io.agentmanager.framework.service.storage.FileStorage.class),
+            propsForLlm());
+        assertEquals(java.util.Arrays.asList(tool, fileTools, oafTools),
+            config.customTools(tool, fileTools, oafTools));
     }
 
     @Test
@@ -64,7 +104,7 @@ class AgentScopeConfigTest {
             emptyLlm(), emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
-            "/config", "", cleanupConfig());
+            "/config", "", cleanupConfig(), emptyFileConfig());
 
         var ds = config.dataSource(props);
         assertInstanceOf(HikariDataSource.class, ds);
@@ -122,11 +162,17 @@ class AgentScopeConfigTest {
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
-            "/config", "", cleanupConfig());
+            "/config", "", cleanupConfig(), emptyFileConfig());
     }
 
     private static AgentManagerProperties.CleanupConfig cleanupConfig() {
         return new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7);
+    }
+
+    private static AgentManagerProperties.FileConfig emptyFileConfig() {
+        return new AgentManagerProperties.FileConfig(true, 20, 20,
+            "image/*,text/plain,text/markdown,text/csv,application/pdf",
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files");
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {

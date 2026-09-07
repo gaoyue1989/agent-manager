@@ -70,6 +70,28 @@ public class WorkspaceReader {
     }
 
     /**
+     * 读取某用户 KV 工作区的任意文件（present_file 等工具用）。
+     * 返回完整字节（≤ 单文件上限，调用方自行限制）；不存在/失败返回 null。
+     */
+    public byte[] readWorkspaceFile(String userKey, String relPath) {
+        if (userKey == null || userKey.isBlank() || relPath == null || relPath.isBlank()) {
+            return null;
+        }
+        try {
+            var ctx = RuntimeContext.builder().userId(userKey).build();
+            var fs = new RemoteFilesystem(baseStore, List.of(userKey));
+            var res = fs.read(ctx, relPath, 0, -1);
+            if (res.isSuccess() && res.fileData() != null && res.fileData().content() != null) {
+                return res.fileData().content().getBytes(StandardCharsets.UTF_8);
+            }
+            return null;
+        } catch (Exception e) {
+            log.warn("Failed to read workspace file {} for user {}: {}", relPath, userKey, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 将运行时文件注入沙箱 /workspace（SDK 文件 API）。
      * 静态模板（AGENTS.md/skills/ 等）由框架投影注入，不在此处理。
      */

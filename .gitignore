@@ -85,7 +85,11 @@ e2e/send_email.py
 
 # Approval Demo: 构建产物 / 依赖 / 截图（不纳入仓库）
 *.tar.gz
-agent-framework/example/approval-forms/e2e/node_modules/
+agent-framework/example/approval-forms/e2e/node_modules
 agent-framework/example/approval-forms/e2e/screenshots/
 agent-framework/example/approval-forms/e2e/screenshots-full/
 e2e/mcpclient/mcpclient
+
+# 文件 E2E 运行时生成的临时 fixture（脚本自建，带运行级随机后缀）
+e2e/fixtures/demo-e2e-*.csv
+e2e/fixtures/e2e-frontend-test.csv

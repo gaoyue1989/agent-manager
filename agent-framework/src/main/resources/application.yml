@@ -6,6 +6,10 @@ spring:
     name: agent-framework
   main:
     banner-mode: off
+  servlet:
+    multipart:
+      max-file-size: ${FILE_UPLOAD_MAX_MB:20}MB
+      max-request-size: ${FILE_UPLOAD_MAX_MB:20}MB
 
 agent:
   config-dir: ${AGENT_CONFIG_DIR:/config}
@@ -35,6 +39,23 @@ agent:
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}
+  file:
+    upload-enabled: ${FILE_UPLOAD_ENABLED:true}
+    upload-max-mb: ${FILE_UPLOAD_MAX_MB:20}
+    upload-max-pending: ${FILE_UPLOAD_MAX_PENDING:20}
+    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*}
+    image-max-mb: ${FILE_IMAGE_MAX_MB:5}
+    image-inline-total-mb: ${FILE_IMAGE_INLINE_TOTAL_MB:15}
+    present-max-mb: ${FILE_PRESENT_MAX_MB:50}
+    download-enabled: ${FILE_DOWNLOAD_ENABLED:true}
+    retention-days: ${FILE_RETENTION_DAYS:7}
+    storage:
+      type: ${FILE_STORAGE_TYPE:local}
+      local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
+      s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}
+      s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
+      s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
+      s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
 
 # OTel 链路追踪（默认关闭，设置 OTEL_TRACES_EXPORTER=otlp 启用）
 otel:

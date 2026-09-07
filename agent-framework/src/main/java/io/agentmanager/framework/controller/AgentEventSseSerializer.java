@@ -15,6 +15,7 @@ import io.agentscope.core.event.ThinkingBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
+import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
@@ -76,6 +77,23 @@ public final class AgentEventSseSerializer {
             payload.put("delta", tr.getDelta());
             payload.put("toolCallId", tr.getToolCallId());
             payload.put("toolCallName", tr.getToolCallName());
+        } else if (event instanceof ToolResultDataDeltaEvent trd) {
+            // SDK 原生二进制工具结果（file-upload-download-plan §10）：DataBlock →
+            // Base64Source（data 内联）/ URLSource（url 引用），图片类前端可直接渲染。
+            // 词表与 AgentRuntimeService.forwardEvent 的 tool_result_data_delta 对齐（snake_case）。
+            payload.put("tool_call_id", trd.getToolCallId());
+            payload.put("tool_call_name", trd.getToolCallName());
+            var content = trd.getData();
+            if (content instanceof io.agentscope.core.message.DataBlock dataBlock) {
+                var source = dataBlock.getSource();
+                if (source instanceof io.agentscope.core.message.Base64Source base64) {
+                    payload.put("media_type", base64.getMediaType());
+                    payload.put("data", base64.getData());
+                } else if (source instanceof io.agentscope.core.message.URLSource urlSource) {
+                    payload.put("media_type", urlSource.getMimeType());
+                    payload.put("url", urlSource.getUrl());
+                }
+            }
         } else if (event instanceof ToolResultEndEvent tr) {
             payload.put("state", tr.getState().name());
             payload.put("toolCallId", tr.getToolCallId());

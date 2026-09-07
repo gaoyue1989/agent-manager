@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 
 import javax.sql.DataSource;
 
@@ -32,17 +33,23 @@ public class SessionCleanupService {
     private final TurnLeaseStore turnLeaseStore;
     private final ConfirmContextStore confirmContextStore;
     private final ToolAuditStore toolAuditStore;
+    private final io.agentmanager.framework.config.AgentManagerProperties props;
+    private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
 
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
                                  TurnLeaseStore turnLeaseStore,
                                  ConfirmContextStore confirmContextStore,
-                                 ToolAuditStore toolAuditStore) {
+                                 ToolAuditStore toolAuditStore,
+                                 io.agentmanager.framework.config.AgentManagerProperties props,
+                                 io.agentmanager.framework.service.storage.FileStorage fileStorage) {
         this.dataSource = dataSource;
         this.sessionManager = sessionManager;
         this.turnLeaseStore = turnLeaseStore;
         this.confirmContextStore = confirmContextStore;
         this.toolAuditStore = toolAuditStore;
+        this.props = props;
+        this.fileStorage = fileStorage;
     }
 
     /**
@@ -65,8 +72,55 @@ public class SessionCleanupService {
         int stateCleaned = deleteBefore("agent_state", cutoff);
         int fsCleaned = deleteBefore("agent_fs", cutoff);
 
+        // 4. 清理过期上传文件（file-upload-download-plan §15-7）：
+        //    超保留期（默认 7 天）且非 pending 状态的 upload 行 → 删行 + 删存储对象
+        cleanupExpiredUploads();
+
         log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}",
             memCleaned, stateCleaned, fsCleaned);
+    }
+
+    /** 过期上传文件清理：删 DB 行 + 删存储对象（先删行后删对象，对象删除失败仅告警可重试） */
+    private void cleanupExpiredUploads() {
+        try {
+            var cutoff = java.time.LocalDateTime.now().minusDays(props.file().retentionDays());
+            List<String> keys = new java.util.ArrayList<>();
+            try (var conn = dataSource.getConnection();
+                 var ps = conn.prepareStatement(
+                     "SELECT id, storage_key FROM file_asset WHERE origin = 'upload' "
+                         + "AND status != 'pending' AND created_at < ?")) {
+                ps.setTimestamp(1, java.sql.Timestamp.valueOf(cutoff));
+                try (var rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        keys.add(rs.getString("id") + "|" + rs.getString("storage_key"));
+                    }
+                }
+            }
+            for (var entry : keys) {
+                var parts = entry.split("\\|", 2);
+                var id = parts[0];
+                var storageKey = parts.length > 1 ? parts[1] : null;
+                // 先删行
+                try (var conn = dataSource.getConnection();
+                     var ps = conn.prepareStatement("DELETE FROM file_asset WHERE id = ?")) {
+                    ps.setString(1, id);
+                    ps.executeUpdate();
+                }
+                // 后删对象（失败仅告警，下次清扫重试；孤儿清扫任务 P2 兜底）
+                if (storageKey != null && !storageKey.isBlank()) {
+                    try {
+                        fileStorage.delete(storageKey);
+                    } catch (Exception e) {
+                        log.warn("cleanup: storage object delete failed ({}): {}", storageKey, e.getMessage());
+                    }
+                }
+            }
+            if (!keys.isEmpty()) {
+                log.info("cleanup: removed {} expired upload file(s)", keys.size());
+            }
+        } catch (Exception e) {
+            log.warn("cleanup: expired upload cleanup failed: {}", e.getMessage());
+        }
     }
 
     /** 会话记录保留天数（默认 7 天，保持与配置对齐的语义默认值） */

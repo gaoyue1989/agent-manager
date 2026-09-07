@@ -10,7 +10,8 @@ public record AgentManagerProperties(
     CheckpointConfig checkpoint,
     @DefaultValue("/config") String configDir,
     @DefaultValue("") String workspaceDir,
-    CleanupConfig cleanup
+    CleanupConfig cleanup,
+    FileConfig file
 ) {
 
     /**
@@ -81,5 +82,43 @@ public record AgentManagerProperties(
         @DefaultValue("30") int auditRetentionDays,
         /** agent_state/agent_fs 会话记录保留天数，默认 7 */
         @DefaultValue("7") int sessionRetentionDays
+    ) {}
+
+    /**
+     * 文件上传/下载配置（file-upload-download-plan 设计文档）。
+     * 环境变量：FILE_* / FILE_STORAGE_*（见 application.yml 绑定）。
+     */
+    public record FileConfig(
+        /** 上传端点开关（false 时 403） */
+        @DefaultValue("true") boolean uploadEnabled,
+        /** 单文件大小上限（MB） */
+        @DefaultValue("20") int uploadMaxMb,
+        /** 每 user_key pending 未消费文件数上限（软限制） */
+        @DefaultValue("20") int uploadMaxPending,
+        /** MIME 白名单（逗号分隔，支持 * 通配） */
+        @DefaultValue("image/*,text/plain,text/markdown,text/csv,application/pdf,"
+            + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*") String uploadAllowedMime,
+        /** 图片内联单文件大小上限（MB），超限降级路径提示 */
+        @DefaultValue("5") int imageMaxMb,
+        /** 图片内联总字节预算（MB），多图叠加超限降级路径提示 */
+        @DefaultValue("15") int imageInlineTotalMb,
+        /** present_file 工具产出文件大小上限（MB） */
+        @DefaultValue("50") int presentMaxMb,
+        /** 下载端点开关（false 时 403） */
+        @DefaultValue("true") boolean downloadEnabled,
+        /** upload 文件保留天数（P2 清理） */
+        @DefaultValue("7") int retentionDays,
+        /** 存储后端类型：local / s3 */
+        @DefaultValue("local") String storageType,
+        /** local 后端根目录（K8s 下挂 platform-data PVC subPath files/） */
+        @DefaultValue("/data/files") String storageLocalDir,
+        /** s3 后端 endpoint（MinIO/Ceph RGW/OSS S3 网关） */
+        @DefaultValue("") String storageS3Endpoint,
+        /** s3 后端 accessKey（敏感，.env.secrets） */
+        @DefaultValue("") String storageS3AccessKey,
+        /** s3 后端 secretKey（敏感，.env.secrets） */
+        @DefaultValue("") String storageS3SecretKey,
+        /** s3 后端 bucket */
+        @DefaultValue("agent-files") String storageS3Bucket
     ) {}
 }

@@ -7,11 +7,13 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.ToolAuditStore;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import io.agentmanager.framework.service.UiContextStore;
+import io.agentmanager.framework.service.UploadWorkspaceInjector;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.message.MsgRole;
@@ -42,6 +44,8 @@ class SessionStreamControllerTest {
     private McpToolRegistrar mcpToolRegistrar;
     private TurnLeaseStore turnLeaseStore;
     private ToolAuditStore toolAuditStore;
+    private UploadWorkspaceInjector workspaceInjector;
+    private SandboxConfig sandboxConfig;
 
     @BeforeEach
     void setUp() {
@@ -50,13 +54,31 @@ class SessionStreamControllerTest {
         mcpToolRegistrar = mock(McpToolRegistrar.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
         toolAuditStore = mock(ToolAuditStore.class);
+        workspaceInjector = mock(UploadWorkspaceInjector.class);
+        sandboxConfig = mock(SandboxConfig.class);
         when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        when(sandboxConfig.enabled()).thenReturn(false);
+        // stub 消息构造（测试不关心文件链路细节）：message → TextBlock
+        when(workspaceInjector.buildContentBlocks(any(), any(), any())).thenAnswer(inv -> {
+            var msg = (String) inv.getArgument(1);
+            var blocks = new ArrayList<io.agentscope.core.message.ContentBlock>();
+            if (msg != null && !msg.isBlank()) {
+                blocks.add(io.agentscope.core.message.TextBlock.builder().text(msg).build());
+            }
+            return blocks;
+        });
         controller = new SessionStreamController(chatChannel, runtimeService, mcpToolRegistrar,
-            turnLeaseStore, toolAuditStore);
+            turnLeaseStore, toolAuditStore, workspaceInjector, sandboxConfig);
     }
 
     private List<String> collect(String sid, String message, String userId) {
-        var frames = controller.chat(sid, new SessionStreamController.ChatRequest(message, userId))
+        var frames = controller.chat(sid, new SessionStreamController.ChatRequest(message, userId, null))
+            .collectList().block();
+        return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
+    }
+
+    private List<String> collect(String sid, String message, String userId, List<String> fileIds) {
+        var frames = controller.chat(sid, new SessionStreamController.ChatRequest(message, userId, fileIds))
             .collectList().block();
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -91,7 +113,12 @@ class SessionStreamControllerTest {
     void chatShouldQueueWithWaitingFramesWhenLeaseBusy() {
         var sessionId = "test-user:s3";
         // 第一次被占用（返回 null），第二次拿到 → 等待窗口内发出 waiting 帧
-        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn(null).thenReturn("tok-3");
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        when(turnLeaseStore.tryAcquire(sessionId)).thenAnswer(inv -> {
+            var n = calls.incrementAndGet();
+            System.out.println("[DEBUG] tryAcquire call #" + n);
+            return n == 1 ? null : "tok-3";
+        });
         when(chatChannel.sendStream(any(ChatUiRequest.class))).thenReturn(Flux.empty());
 
         var frames = collect(sessionId, "hello", null);
@@ -101,7 +128,7 @@ class SessionStreamControllerTest {
     @Test
     void chatShouldRejectBlankMessage() {
         var frames = collect("test-user:s4", "", "alice");
-        assertTrue(frames.stream().anyMatch(f -> f.contains("message is required")),
+        assertTrue(frames.stream().anyMatch(f -> f.contains("message or fileIds is required")),
             "空消息应返回 error 帧: " + frames);
     }
 
@@ -169,5 +196,41 @@ class SessionStreamControllerTest {
         collect(sessionId, "go", null);
         verify(toolAuditStore).record(eq(sessionId), eq("get_weather"), eq("c"),
             eq("TOOL_CALL_START"), anyString());
+    }
+
+    @Test
+    void presentFileShouldEmitFileReadyFrame() {
+        var sessionId = "test-user:file1";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-f1");
+        // present_file 工具结果：TextDelta 累积 + ToolResultEnd → file_ready 合成帧
+        var delta = new io.agentscope.core.event.ToolResultTextDeltaEvent(
+            "reply-f", "call-f", "present_file", "{\"file_id\":\"id-9\",\"file_name\":\"r.txt\",\"mime_type\":\"text/plain\",\"size\":42}");
+        var end = new io.agentscope.core.event.ToolResultEndEvent("reply-f", "call-f", "present_file",
+            io.agentscope.core.message.ToolResultState.SUCCESS);
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) delta, (AgentEvent) end));
+
+        var frames = collect(sessionId, "生成文件", null);
+        var ready = frames.stream().filter(f -> f.contains("\"file_ready\"")).findFirst();
+        assertTrue(ready.isPresent(), "应合成 file_ready 帧: " + frames);
+        assertTrue(ready.get().contains("\"file_id\":\"id-9\""), "含 file_id: " + ready.get());
+        assertTrue(ready.get().contains("\"download_url\":\"/agent/release-agent/files/id-9\""),
+            "含下载 URL: " + ready.get());
+    }
+
+    @Test
+    void presentFileMalformedJsonShouldNotEmitFrame() {
+        var sessionId = "test-user:file2";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-f2");
+        var delta = new io.agentscope.core.event.ToolResultTextDeltaEvent(
+            "reply-f", "call-bad", "present_file", "not-json{{{");
+        var end = new io.agentscope.core.event.ToolResultEndEvent("reply-f", "call-bad", "present_file",
+            io.agentscope.core.message.ToolResultState.SUCCESS);
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) delta, (AgentEvent) end));
+
+        var frames = collect(sessionId, "x", null);
+        assertTrue(frames.stream().noneMatch(f -> f.contains("\"file_ready\"")),
+            "畸形 JSON 不应合成帧: " + frames);
     }
 }

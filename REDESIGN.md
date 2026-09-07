@@ -679,3 +679,40 @@ spec:
 
 - 敏感 env 升级 Secret 方案（当前 ConfigMap 明文，内网信任模型）。
 - 对话 UI E2E：e2e/chat-ui-e2e.js（4 用例，经 :8911 主入口真实对话验证）。
+
+### B.6 文件上传下载 + OAF 部署包自动生成（2026-09-06 完工）
+
+文件上传下载（图片/文档上传 → 沙箱注入/工作区直读 → present_file 回传 → SSE file_ready → 前端下载卡片）
+与"按描述自动生成 OAF 部署 zip 包"两条链路已完工并全量验证（设计详见
+`agent-framework/docs/file-upload-download-plan.md` §1~§18）。
+
+**测试基线**：单测 439 全绿（+56 新用例）；backend go test 全绿；E2E 非沙箱 21/21、
+沙箱 29/29（含 S-S8 生成包、S-S9 发布全链路）、UI 沙箱/非沙箱各 12/12（U11~U13 生成包对话）。
+
+**关键机制（复用价值高）**：
+1. 文件存储双后端（local/S3）按 Dify UploadFile 模式：DB 只存元数据（file_asset 表），内容存 FileStorage；
+   OAF 包 zip 与产物文件统一走 origin=generated 登记 → SSE file_ready 合成帧 → 前端下载卡片。
+2. 沙箱注入三兜底：create/resume 后注入 + SandboxUserKeyMiddleware.onAgent 兜底 + doExec 兜底；
+   reset 按 session 双维度 + spec 记录 userKey→sandboxId 防多实例循环注入。
+3. 沙箱生成包**绕开沙箱**：`create_oaf_zip` 工具 JVM 侧组装 zip（LLM 传 AGENTS.md 文本即可），
+   前置 `check_oaf_package` 强制校验（与平台 backend/internal/oaf 规则对齐）；实测 LLM 用沙箱
+   write_file/edit_file 写文件易失败且浪费迭代。
+4. `present_file` 沙箱模式支持 file_path 直读（OpenSandbox 经 execd files API readByteArray；
+   userKey 不匹配拒绝防串沙箱），LLM 无需复述大段 base64。
+5. `HarnessAgent.maxIters(20)`：SDK 默认 10 轮不足支撑生成包长流程（10 轮实测 EXCEED_MAX_ITERS）。
+6. **No active sandbox 尾部收尾错误（SDK 缺陷）**：agent 调用结束后 SDK 收尾路径偶发访问已释放沙箱
+   文件系统 → 流以 error 终止导致前端误判失败；`SessionStreamController.isTrailingSandboxTeardownError`
+   识别（异常链消息含 "No active sandbox"）→ 忽略、正常 complete。根因在 SDK 未消除，属应用层缓解。
+
+**遗留待办（详见文档 §17.3 与 §18）**：
+- **沙箱复用已确认正常**（2026-09-06 深查）：同 userId 连续 chat 走 `Priority 3: resuming from persisted
+  state` 复用容器（2 次 chat 仅 1 个容器）；旧观察"每 turn create"源于当时 chat 失败周期
+  （release 阶段异常中断 → persistState 未执行 → 下次无 state 降级 create）。容器增长主要来自
+  多 userId 会话（每个新用户 create）+ 失败会话重建 + Server 侧 3600s TTL 回收，长会话需定期清理
+- **默认镜像陈旧坑（已修）**：发布服务默认 `agent-framework:latest` 解析到 kind 节点
+  docker.io/library 标签的旧镜像（2026-08 版，LocalFileStorage 无默认构造器 → CrashLoop → deploy_failed）。
+  修复：新镜像 `ctr images rm` 旧 tag 后 `docker save | ctr images import` 覆盖；发布链路 E2E S-S9
+  （LLM 生成+上传 → REST 发布 running → 删除清理）29/29 全绿。**更新 agent-framework 镜像后必须同步
+  更新节点的 docker.io/library/agent-framework:latest tag**，否则新发布服务全部 CrashLoop
+- 平台 upload_package 仅收 base64（zip 大时 LLM 复述有 token 压力），可评估增加 file_id 引用上传
+- S3 存储档 E2E 未实测；非沙箱档 S-S8 已确认 21/21 全绿（2026-09-06）

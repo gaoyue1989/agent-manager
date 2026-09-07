@@ -76,7 +76,9 @@ public class AgentScopeConfig {
     public OpenSandboxFilesystemSpec sandboxFilesystemSpec(
         SandboxConfig config,
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
-        WorkspaceSyncService workspaceSyncService
+        WorkspaceSyncService workspaceSyncService,
+        io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+        io.agentmanager.framework.service.storage.FileStorage fileStorage
     ) {
         if (!config.enabled()) {
             log.info("Sandbox disabled (agent.sandbox.enabled=false), using RemoteFilesystemSpec mode");
@@ -99,6 +101,8 @@ public class AgentScopeConfig {
             ))
             .workspaceReader(workspaceReader)
             .workspaceSyncService(workspaceSyncService)
+            .fileAssetStore(fileAssetStore)
+            .fileStorage(fileStorage)
             .isolationScope(IsolationScope.USER);
         // 请求级 userId 注入：middleware 与 acquire 同一订阅链，顺序执行
         spec.setUserKeyMiddleware(new io.agentmanager.framework.sandbox.opensandbox.SandboxUserKeyMiddleware(spec));
@@ -184,16 +188,44 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.tool.BusinessTools();
     }
 
+    @Bean
+    public io.agentmanager.framework.tool.OafPackageTools oafPackageTools(
+        io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+        io.agentmanager.framework.service.storage.FileStorage fileStorage,
+        io.agentmanager.framework.config.AgentManagerProperties props
+    ) {
+        return new io.agentmanager.framework.tool.OafPackageTools(fileAssetStore, fileStorage, props);
+    }
+
+    @Bean
+    public io.agentmanager.framework.tool.FileTools fileTools(
+        io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+        io.agentmanager.framework.service.storage.FileStorage fileStorage,
+        io.agentmanager.framework.config.AgentManagerProperties props,
+        io.agentmanager.framework.config.SandboxConfig sandboxConfig,
+        io.agentmanager.framework.service.WorkspaceReader workspaceReader,
+        org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
+    ) {
+        return new io.agentmanager.framework.tool.FileTools(fileAssetStore, fileStorage, props,
+            sandboxConfig, workspaceReader, sandboxSpecProvider.getIfAvailable());
+    }
+
     /**
      * 自定义工具集合：在此注册 @Tool 注解的工具类。
      * HarnessAgent 创建时会注册到 Toolkit。
-     * 使用特定类型 List 避免收集全部 Bean 造成循环依赖。
+     * 使用特定 List<BusinessTools> 类型避免收集全部 Bean 造成循环依赖；
+     * FileTools 与 BusinessTools 无继承关系，故这里用 Object 泛型显式聚合
+     * （Spring 对 List<Object> 参数仍按参数类型注入，不自动收集——只有无参
+     * 或按 Object 类型自动装配时才会收集全部 Bean，此处显式声明参数安全）。
      */
     @Bean
-    public List<io.agentmanager.framework.tool.BusinessTools> customTools(
-        io.agentmanager.framework.tool.BusinessTools businessTools
+    @SuppressWarnings("rawtypes")
+    public List<Object> customTools(
+        io.agentmanager.framework.tool.BusinessTools businessTools,
+        io.agentmanager.framework.tool.FileTools fileTools,
+        io.agentmanager.framework.tool.OafPackageTools oafPackageTools
     ) {
-        return List.of(businessTools);
+        return java.util.Arrays.asList(businessTools, fileTools, oafPackageTools);
     }
 
     @Bean
@@ -203,7 +235,7 @@ public class AgentScopeConfig {
         OafConfig oafConfig,
         WorkspaceInitializer workspaceInitializer,
         McpToolRegistrar mcpToolRegistrar,
-        List<io.agentmanager.framework.tool.BusinessTools> customTools,
+        @SuppressWarnings("rawtypes") List customTools,
         LLMLogger llmLogger,
         UiContextStore uiContextStore,
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
@@ -261,6 +293,9 @@ public class AgentScopeConfig {
                 .sysPrompt(oafConfig.systemPrompt())
                 .model(model)
                 .toolkit(toolkit)
+                // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
+                // 长流程（撰写→校验→修正→打包→登记→汇报），放宽至 20 轮
+                .maxIters(20)
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）

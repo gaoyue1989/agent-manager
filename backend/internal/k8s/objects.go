@@ -30,6 +30,11 @@ const (
 	ManagedByLabel      = "app.kubernetes.io/managed-by"
 	ManagedByValue      = "oaf-platform"
 	PVCName             = "platform-data"
+	// 文件存储可写挂载（file-upload-download-plan §13 P1 跨模块）：
+	// platform-data PVC subPath "files/" 挂 /data/files，业务 agent 文件上传/产出落此处。
+	FilesVolumeName   = "agent-files"
+	FilesSubPath      = "files"
+	FilesMountPath    = "/data/files"
 )
 
 // SanitizeK8sName 任意输入转 DNS-1123 label：小写字母数字 '-'，≤63 字符。
@@ -119,11 +124,14 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 						Ports:           []corev1.ContainerPort{{ContainerPort: AgentPort}},
 						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}}},
 						Env:             fixedEnv,
-						VolumeMounts: []corev1.VolumeMount{
-							// OAF 包只读挂载到 /config；工作区为独立可写空目录（经 AGENT_WORKSPACE_DIR 告知框架）
-							{Name: DataVolumeName, MountPath: "/config", SubPath: p.SubPath, ReadOnly: true},
-							{Name: WorkspaceVolumeName, MountPath: "/workspace"},
-						},
+VolumeMounts: []corev1.VolumeMount{
+						// OAF 包只读挂载到 /config（同一可写卷的只读 subPath）；工作区为独立可写空目录
+						{Name: FilesVolumeName, MountPath: "/config", SubPath: p.SubPath, ReadOnly: true},
+						{Name: WorkspaceVolumeName, MountPath: "/workspace"},
+						// 文件存储可写挂载：platform-data subPath files/ → /data/files（FILE_STORAGE_LOCAL_DIR）
+						// 与 /config 共用同一卷（agent-files）——避免同 PVC 双 volume 引用
+						{Name: FilesVolumeName, MountPath: FilesMountPath, SubPath: FilesSubPath},
+					},
 						ReadinessProbe: withDelay(probe, 15, 5),
 						LivenessProbe:  withDelay(probe, 60, 15),
 						Resources: corev1.ResourceRequirements{
@@ -139,9 +147,12 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 					}},
 					Volumes: []corev1.Volume{
 						{
-							Name: DataVolumeName,
+							// 单一可写卷（agent-files）：/config 与 /data/files 均挂载其上
+							// （/config 为只读 subPath，/data/files 为可写 subPath）。
+							// 不设 ForceReadOnly——同一 PVC 不可同时以 ro/rw 双 volume 引用
+							Name: FilesVolumeName,
 							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: PVCName, ReadOnly: true},
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: PVCName},
 							},
 						},
 						{Name: WorkspaceVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},

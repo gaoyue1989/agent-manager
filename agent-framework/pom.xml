@@ -159,6 +159,13 @@
             <version>1.0.18</version>
         </dependency>
 
+        <!-- MinIO SDK（S3 兼容存储后端，file-support：local/s3 双后端） -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>8.5.17</version>
+        </dependency>
+
         <!-- MySQL JDBC -->
         <dependency>
             <groupId>com.mysql</groupId>

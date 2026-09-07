@@ -91,13 +91,39 @@ func TestDeploymentConstruction(t *testing.T) {
 	if !foundWs {
 		t.Fatal("workspace volume mount missing")
 	}
-	// PVC subPath 只读挂载 /config
-	vm := cs.VolumeMounts[0]
-	if vm.MountPath != "/config" || vm.SubPath != "packages/42" || !vm.ReadOnly {
-		t.Fatalf("volumeMount: %+v", vm)
+	// PVC subPath 只读挂载 /config（挂载于可写卷 agent-files 之上，mount 级 readOnly）
+	foundConfig := false
+	for _, v := range cs.VolumeMounts {
+		if v.MountPath == "/config" && v.SubPath == "packages/42" && v.ReadOnly {
+			foundConfig = true
+		}
 	}
-	if d.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != PVCName {
-		t.Fatal("PVC name wrong")
+	if !foundConfig {
+		t.Fatal("config volumeMount missing")
+	}
+	// 文件存储可写挂载 /data/files ← platform-data subPath files/
+	foundFiles := false
+	for _, v := range cs.VolumeMounts {
+		if v.MountPath == FilesMountPath && v.SubPath == FilesSubPath && !v.ReadOnly {
+			foundFiles = true
+		}
+	}
+	if !foundFiles {
+		t.Fatal("files volume mount missing or not writable")
+	}
+	// 单卷承载（可写 PVC，无 ForceReadOnly；/config 只读由 mount 级 readOnly 表达）
+	foundFilesVol := false
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.Name == FilesVolumeName && v.PersistentVolumeClaim != nil &&
+			v.PersistentVolumeClaim.ClaimName == PVCName && !v.PersistentVolumeClaim.ReadOnly {
+			foundFilesVol = true
+		}
+	}
+	if !foundFilesVol {
+		t.Fatal("files volume (writable PVC) missing")
+	}
+	if len(d.Spec.Template.Spec.Volumes) != 2 {
+		t.Fatalf("expected 2 volumes (files+workspace), got %d", len(d.Spec.Template.Spec.Volumes))
 	}
 	// 探针指向 /health:8100
 	if cs.ReadinessProbe.HTTPGet.Path != "/health" || cs.ReadinessProbe.HTTPGet.Port.IntValue() != AgentPort {

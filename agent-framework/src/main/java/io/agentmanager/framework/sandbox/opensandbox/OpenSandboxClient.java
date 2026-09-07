@@ -24,29 +24,41 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
     private final WorkspaceReader workspaceReader;
     private final WorkspaceSyncService workspaceSyncService;
     private final OpenSandboxFilesystemSpec filesystemSpec;
+    private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
+    private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
     private final com.alibaba.opensandbox.sandbox.config.ConnectionConfig connectionConfig;
     private final ObjectMapper objectMapper;
 
     public OpenSandboxClient(OpenSandboxClientOptions options) {
-        this(options, null, null, null);
+        this(options, null, null, null, null, null);
     }
 
     public OpenSandboxClient(OpenSandboxClientOptions options, WorkspaceReader workspaceReader) {
-        this(options, workspaceReader, null, null);
+        this(options, workspaceReader, null, null, null, null);
     }
 
     public OpenSandboxClient(OpenSandboxClientOptions options, WorkspaceReader workspaceReader,
                              WorkspaceSyncService workspaceSyncService) {
-        this(options, workspaceReader, workspaceSyncService, null);
+        this(options, workspaceReader, workspaceSyncService, null, null, null);
     }
 
     public OpenSandboxClient(OpenSandboxClientOptions options, WorkspaceReader workspaceReader,
                              WorkspaceSyncService workspaceSyncService,
                              OpenSandboxFilesystemSpec filesystemSpec) {
+        this(options, workspaceReader, workspaceSyncService, filesystemSpec, null, null);
+    }
+
+    public OpenSandboxClient(OpenSandboxClientOptions options, WorkspaceReader workspaceReader,
+                             WorkspaceSyncService workspaceSyncService,
+                             OpenSandboxFilesystemSpec filesystemSpec,
+                             io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+                             io.agentmanager.framework.service.storage.FileStorage fileStorage) {
         this.options = options;
         this.workspaceReader = workspaceReader;
         this.workspaceSyncService = workspaceSyncService;
         this.filesystemSpec = filesystemSpec;
+        this.fileAssetStore = fileAssetStore;
+        this.fileStorage = fileStorage;
         this.objectMapper = new ObjectMapper();
         this.connectionConfig = com.alibaba.opensandbox.sandbox.config.ConnectionConfig.builder()
             .domain(options.getServerUrl())
@@ -91,8 +103,19 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         //    KV 运行时文件（MEMORY.md/memory/）由 OpenSandbox 首次 exec 时延迟注入
         //    （create() 无 RuntimeContext 参数拿不到 userId，见 OpenSandbox 注释）
         //    userId 由 SandboxUserKeyMiddleware 注入（filesystemSpec.pendingUserKey）
-        OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService, filesystemSpec);
+        OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
+        if (filesystemSpec != null) {
+            filesystemSpec.registerSandbox(sandbox);
+        }
+        // 被动兜底（§6.2.4 双保险）：新容器启动时，该用户 injected 上传文件回滚 pending
+        // → 本 turn 注入。防 delete 崩溃导致状态 stuck 在新容器漏注入。
+        if (sandbox.getUserKey() != null && fileAssetStore != null) {
+            fileAssetStore.resetInjectedToPending(sandbox.getUserKey());
+        }
+        // 上传文件注入：沙箱就绪后立即执行（沙箱文件操作走 execd 原生 API，不保证经 doExec）
+        sandbox.injectPendingUploads();
         try {
             sandbox.start();
         } catch (Exception e) {
@@ -127,14 +150,31 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .skipHealthCheck(true)
             .connect();
 
-        var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService, filesystemSpec);
+        var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
+        if (filesystemSpec != null) {
+            filesystemSpec.registerSandbox(sandbox);
+        }
+        // 上传文件注入：恢复会话后立即执行（同 create）
+        sandbox.injectPendingUploads();
         return sandbox;
     }
 
     @Override
     public void delete(Sandbox sandbox) {
         OpenSandbox osb = (OpenSandbox) sandbox;
+        // 主动回滚（§6.2.4 双保险 ①）：容器销毁前将该用户 injected 上传文件回滚 pending，
+        // 新容器首 exec 重新注入（防容器 GC 后文件丢失）。
+        // userKey 兜底：delete 可能在 acquire/middleware 时序外调用，
+        // 实例 userKey 可能为 null（acquire 先于 middleware）→ 从 spec ThreadLocal 补充。
+        String key = osb.getUserKey();
+        if ((key == null || key.isBlank()) && filesystemSpec != null) {
+            key = filesystemSpec.peekPendingUserKey();
+        }
+        if (key != null && !key.isBlank() && fileAssetStore != null) {
+            fileAssetStore.resetInjectedToPending(key, key);
+        }
         try {
             osb.getOsbSandbox().kill();
             osb.getOsbSandbox().close();
