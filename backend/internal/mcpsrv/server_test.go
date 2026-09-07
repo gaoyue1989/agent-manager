@@ -102,11 +102,12 @@ func TestMCPListImages(t *testing.T) {
 	if isErr {
 		t.Fatalf("list_images: %v", out)
 	}
-	imgs, ok := out["images"].([]service.ImageOption)
+	imgs, ok := out["images"].([]any)
 	if !ok || len(imgs) == 0 {
-		t.Fatalf("images should be non-empty slice, got %T %v", out["images"], out["images"])
+		t.Fatalf("images should be non-empty list, got %T %v", out["images"], out["images"])
 	}
-	if imgs[0].Image != "agent-framework:latest" {
+	first, ok := imgs[0].(map[string]any)
+	if !ok || first["image"] != "agent-framework:latest" {
 		t.Fatalf("images[0]=%v want test fixture image", imgs[0])
 	}
 	if out["defaultImage"] != "agent-framework:latest" {
