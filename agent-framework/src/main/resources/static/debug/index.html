@@ -8,6 +8,20 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/layout.css">
 <link rel="stylesheet" href="css/components.css">
+<!-- Markdown 渲染依赖（内联 vendor，避免 CDN 外网依赖）：hljs 主体→9 种语言→marked→DOMPurify -->
+<link rel="stylesheet" href="vendor/highlight.min.css">
+<script src="vendor/highlight.min.js"></script>
+<script src="vendor/lang/java.min.js"></script>
+<script src="vendor/lang/python.min.js"></script>
+<script src="vendor/lang/javascript.min.js"></script>
+<script src="vendor/lang/bash.min.js"></script>
+<script src="vendor/lang/json.min.js"></script>
+<script src="vendor/lang/yaml.min.js"></script>
+<script src="vendor/lang/xml.min.js"></script>
+<script src="vendor/lang/sql.min.js"></script>
+<script src="vendor/lang/markdown.min.js"></script>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
 <script>
   // 主题初始化（localStorage 手动覆盖 > 系统自动），避免闪烁
   (function () {

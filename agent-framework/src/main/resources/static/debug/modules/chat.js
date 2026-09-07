@@ -257,28 +257,39 @@ async function loadThreadHistory(sessionId) {
 function addMessage(role, content) {
   const msg = document.createElement('div');
   msg.className = 'msg ' + role;
-  msg.innerHTML = '<div class="msg-bubble">' + renderMarkdown(content) + '</div>';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  writeMarkdown(bubble, renderMarkdown(content));
+  msg.appendChild(bubble);
   messagesEl.appendChild(msg);
   scrollToBottom(false);
   return msg;
 }
 
+// Markdown 渲染：marked 解析 GFM（表格/任务列表/删除线/链接识别），DOMPurify 净化（禁 <script>/event handler）
+// 围栏代码块 ```lang…``` 输出 <pre><code class="language-lang hljs"> 由 hljs 高亮
 function renderMarkdown(text) {
-  let html = ctx.utils.esc(text);
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    '<pre>' + (lang ? '<code class="' + ctx.utils.esc(lang) + '">' : '') + ctx.utils.esc(code) + '</pre>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  return html;
+  if (text == null) return '';
+  const raw = window.marked.parse(String(text), { gfm: true, breaks: true });
+  return window.DOMPurify.sanitize(raw, { ADD_ATTR: ['class', 'target', 'rel'] });
 }
 
-/** 历史 assistant 消息：文本 + 工具调用（工具行，状态已完成✓，无 result 则不展示结果） */
+/** 流式时把 markdown HTML 写入 el，并对每个 <pre><code> 块增量跑一次 hljs（自动跳过未闭合块） */
+function writeMarkdown(el, html) {
+  el.innerHTML = html;
+  if (window.hljs) {
+    el.querySelectorAll('pre code').forEach((c) => {
+      try { window.hljs.highlightElement(c); } catch (e) { /* 语言不支持时忽略 */ }
+    });
+  }
+}
+
+/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染） */
 function addAssistantHistory(content, toolCalls) {
   const msg = document.createElement('div');
   msg.className = 'msg assistant';
-  let bubble = '';
   if ((toolCalls || []).length > 0) {
-    bubble += renderToolGroupBlock(toolCalls.map((tc) => ({
+    msg.innerHTML = renderToolGroupBlock(toolCalls.map((tc) => ({
       type: 'tool_call',
       name: tc.name,
       argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
@@ -287,9 +298,11 @@ function addAssistantHistory(content, toolCalls) {
     })));
   }
   if (content) {
-    bubble += '<div class="msg-bubble">' + renderMarkdown(content) + '</div>';
+    const bubbleEl = document.createElement('div');
+    bubbleEl.className = 'msg-bubble';
+    writeMarkdown(bubbleEl, renderMarkdown(content));
+    msg.appendChild(bubbleEl);
   }
-  msg.innerHTML = bubble;
   messagesEl.appendChild(msg);
   scrollToBottom(false);
 }
@@ -903,7 +916,12 @@ function handleEvent(data) {
       if (r) {
         r.text += (data.delta || '');
         endThinking(r);
-        ensureToolTextEl(r).innerHTML = renderMarkdown(r.text) + '<span class="cursor"></span>';
+        // Markdown 写入后追加光标节点：cursor span 在 sanitize 之外，不参与解析，避免被吞
+        const el = ensureToolTextEl(r);
+        writeMarkdown(el, renderMarkdown(r.text));
+        const cur = document.createElement('span');
+        cur.className = 'cursor';
+        el.appendChild(cur);
       }
       scrollToBottom(false);
       break;
