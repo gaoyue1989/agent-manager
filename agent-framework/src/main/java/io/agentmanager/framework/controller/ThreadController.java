@@ -75,6 +75,9 @@ public class ThreadController {
         var result = new LinkedHashMap<String, Object>();
         result.put("session_id", sessionId);
         result.put("pendingConfirm", pendingConfirmPayload(sessionId));
+        // 产出文件卡片（present_file/create_oaf_zip 登记时 session_id = gw-hash）：
+        // 历史回放与 SSE file_ready 渲染保持一致
+        result.put("files", generatedFiles(sessionId));
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement(
                  "SELECT state_data FROM agent_state WHERE session_id = ? "
@@ -134,5 +137,41 @@ public class ThreadController {
             return sessionId.substring(idx + 1);
         }
         return sessionId;
+    }
+
+    /**
+     * 会话产出文件（origin=generated）：present_file/create_oaf_zip 登记时
+     * user_key = RuntimeContext 的 userId（Channel 流程 = peer，每会话唯一）。
+     * 注意不能用 session_id（gw-hash 对全部 ChatUiChannel 会话为常量，会跨会话串文件）。
+     * 传入 sessionId 兼容 fullKey（"peer:gw-hash"）与裸 peer 两种形态。
+     */
+    private List<Map<String, Object>> generatedFiles(String sessionId) {
+        var peer = sessionId;
+        var idx = sessionId.indexOf(':');
+        if (idx > 0) {
+            peer = sessionId.substring(0, idx);
+        }
+        if (peer.isBlank()) {
+            return List.of();
+        }
+        var files = new ArrayList<Map<String, Object>>();
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT id, file_name, mime_type, size FROM file_asset "
+                     + "WHERE user_key = ? AND origin = 'generated' ORDER BY created_at")) {
+            ps.setString(1, peer);
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    files.add(Map.of(
+                        "file_id", rs.getString("id"),
+                        "file_name", rs.getString("file_name"),
+                        "mime_type", rs.getString("mime_type"),
+                        "size", rs.getLong("size")));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("generated files lookup failed for {}: {}", sessionId, e.getMessage());
+        }
+        return files;
     }
 }

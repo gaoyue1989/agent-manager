@@ -72,7 +72,7 @@ export default function AssistantPage() {
     } catch { /* 列表加载失败静默（面板显示空态） */ }
   }, []);
 
-  /** 历史消息回放：GET /threads/{fullKey}/history → ChatMsg[]（含未消费 HITL 确认卡片重建） */
+  /** 历史消息回放：GET /threads/{fullKey}/history → ChatMsg[]（含未消费 HITL 卡片重建 + 产出文件卡片） */
   const loadHistory = useCallback(async (fullKey: string) => {
     const msgs: ChatMsg[] = [];
     try {
@@ -83,11 +83,24 @@ export default function AssistantPage() {
           if (m.role === "user") {
             msgs.push({ role: "user", content: m.content ?? "" });
           } else if (m.role === "assistant") {
-            // assistant 消息可能携带工具调用 → 渲染为已完成的工具行
-            for (const tc of (m.tool_calls ?? [])) {
-              msgs.push({ role: "tool", content: `🔧 ${tc.name}`, pending: false });
-            }
             if (m.content) msgs.push({ role: "assistant", content: m.content });
+            // 工具调用行渲染在 assistant 文本之后（与 SSE 最终形态一致：🔧 name ✓）
+            for (const tc of (m.tool_calls ?? [])) {
+              msgs.push({ role: "tool", content: `🔧 ${tc.name} ✓`, pending: false });
+            }
+          }
+        }
+        // 产出文件卡片：挂到最后一条 assistant 气泡（与 SSE file_ready 渲染一致）
+        const files: FileCard[] = (data.files ?? []).map((f: any) => ({
+          file_id: f.file_id, file_name: f.file_name, mime_type: f.mime_type,
+          size: f.size ?? 0, download_url: `${AGENT_BASE}/files/${f.file_id}`,
+        }));
+        if (files.length > 0) {
+          const last = msgs.map((m) => m.role).lastIndexOf("assistant");
+          if (last >= 0) {
+            msgs[last] = { ...msgs[last], files: [...(msgs[last].files ?? []), ...files] };
+          } else {
+            msgs.push({ role: "assistant", content: "", files });
           }
         }
         // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）

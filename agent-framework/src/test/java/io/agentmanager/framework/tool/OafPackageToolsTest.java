@@ -83,7 +83,7 @@ class OafPackageToolsTest {
         var storage = org.mockito.Mockito.mock(FileStorage.class);
         var wired = new OafPackageTools(store, storage,
             io.agentmanager.framework.controller.FileControllerTest.testProps());
-        var result = wired.createOafZip("bad.zip", "---\nname: x\n---\nbody", null);
+        var result = wired.createOafZip(null, "bad.zip", "---\nname: x\n---\nbody", null);
         assertTrue(result.contains("校验未通过"), "缺字段应拒绝打包: " + result);
     }
 
@@ -93,7 +93,7 @@ class OafPackageToolsTest {
         var storage = org.mockito.Mockito.mock(FileStorage.class);
         var wired = new OafPackageTools(store, storage,
             io.agentmanager.framework.controller.FileControllerTest.testProps());
-        var result = wired.createOafZip("weather-agent.zip",
+        var result = wired.createOafZip(null, "weather-agent.zip",
             "---\nname: weather-agent\nvendorKey: acme\nagentKey: weather-agent\nversion: 1.0.0\n"
                 + "description: 天气助手\nauthor: @acme\nlicense: MIT\n---\n正文",
             "[{\"path\":\"skills/help.md\",\"content\":\"# Help\"}]");

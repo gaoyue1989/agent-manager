@@ -117,6 +117,7 @@ public class OafPackageTools {
             + "to publish. extra_files is an optional JSON array [{\"path\":\"skills/x.md\",\"content\":\"...\"}].",
         concurrencySafe = true)
     public String createOafZip(
+            io.agentscope.core.agent.RuntimeContext ctx,
             @ToolParam(name = "package_name", description = "Zip file name, e.g. weather-agent.zip") String packageName,
             @ToolParam(name = "agents_md", description = "Full AGENTS.md content (frontmatter + body)") String agentsMd,
             @ToolParam(name = "extra_files", description = "Optional JSON array of extra files to include",
@@ -160,8 +161,14 @@ public class OafPackageTools {
             return err("storage write failed: " + e.getMessage());
         }
         try {
+            // 关联真实会话（present_file 同规则：userKey=peer、sessionId=gw-hash），
+            // 供历史会话回放按 session_id 回查产出卡片
+            var userKey = ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()
+                ? ctx.getUserId() : "oaf-gen";
+            var sid = ctx != null && ctx.getSessionId() != null && !ctx.getSessionId().isBlank()
+                ? ctx.getSessionId() : null;
             fileAssetStore.insert(new FileAssetStore.FileAsset(
-                id, "oaf-gen", null, name, name, "application/zip", zipBytes.length,
+                id, userKey, sid, name, name, "application/zip", zipBytes.length,
                 props.file().storageType(), storageKey, "generated", "injected", LocalDateTime.now()));
         } catch (Exception e) {
             try {

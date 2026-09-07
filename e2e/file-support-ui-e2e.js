@@ -240,7 +240,10 @@ const shot = async (page, name) => { try { await page.screenshot({ path: path.jo
         switched = true;
         firstUserMsg = userMsgs[0];
       }
-      check("U15 历史会话切换并回放消息", switched, switched ? `首条用户消息: ${firstUserMsg.slice(0, 60)}` : "无回放消息");
+      // 回放一致性：产出文件卡片随历史恢复（与 SSE file_ready 渲染一致）
+      const replayCards = await page.$$eval('[data-testid="file-card"]', els => els.length);
+      check("U15 历史会话切换并回放消息", switched && replayCards > 0,
+        switched ? `首条用户消息: ${firstUserMsg.slice(0, 50)} 卡片=${replayCards}` : "无回放消息");
     } else {
       check("U15 历史会话切换并回放消息", false, `历史会话不足（items=${historyCount}）`);
     }
