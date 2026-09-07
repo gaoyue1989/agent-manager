@@ -309,6 +309,19 @@ public class AgentScopeConfig {
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
 
+            // OAF 包内技能目录注册为市场层（skill 四层优先级 L2）：
+            // HarnessSkillMiddleware 每轮推理重扫目录（mtime+size 短路），PVC 上
+            // /config/skills 原位变化无需重启即可在下轮生效（动态加载）。
+            // writeable=false 只读分发：skill_manage/skill 目录写回被仓库层拒绝（PVC 只读）。
+            var oafSkillsDir = Path.of(props.configDir()).resolve("skills");
+            if (java.nio.file.Files.isDirectory(oafSkillsDir)) {
+                builder.skillRepository(new io.agentscope.core.skill.repository.FileSystemSkillRepository(
+                    oafSkillsDir, false, "oaf-package"));
+                log.info("OAF skill repository registered (dynamic L2): {}", oafSkillsDir);
+            } else {
+                log.info("OAF skills dir not found, dynamic skill repository skipped: {}", oafSkillsDir);
+            }
+
             // 沙箱模式：OpenSandboxFilesystemSpec（SANDBOX_ENABLED=true 时注入）
             // 默认模式：RemoteFilesystemSpec（共享存储，不提供 Shell）
             if (sandboxSpec != null) {

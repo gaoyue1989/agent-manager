@@ -94,8 +94,9 @@ class WorkspaceInitializerTest {
     }
 
     @Test
-    void shouldCopyLocalSkillsToWorkspace() throws Exception {
-        // 准备源 skill
+    void shouldNotCopySkillsToWorkspace() throws Exception {
+        // skills 动态加载改造后：OAF 包内技能不再复制到 workspace，
+        // 由 AgentScopeConfig 注册 FileSystemSkillRepository（L2 市场层）动态扫描
         var skillDir = tempDir.resolve("skills").resolve("bash-tool");
         Files.createDirectories(skillDir);
         Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: bash-tool\n---\n# Bash Tool\n");
@@ -104,19 +105,8 @@ class WorkspaceInitializerTest {
             "", "", java.util.Map.of());
         var ws = initializer.initialize(tempDir, config(List.of(), List.of(), List.of(skill), List.of(), List.of()));
 
-        assertTrue(Files.exists(ws.resolve("skills/bash-tool/SKILL.md")));
-        var content = Files.readString(ws.resolve("skills/bash-tool/SKILL.md"));
-        assertTrue(content.contains("Bash Tool"));
-    }
-
-    @Test
-    void shouldSkipRemoteSkillsCopy() throws Exception {
-        var skill = new OafConfig.SkillConfig("web-search", "https://example.com/skills/web-search", "1.0.0", true, "Web search", List.of(),
-            "", "", java.util.Map.of());
-        var ws = initializer.initialize(tempDir, config(List.of(), List.of(), List.of(skill), List.of(), List.of()));
-
-        // 远程 skill 不复制，由 skillRepository 处理
-        assertFalse(Files.exists(ws.resolve("skills/web-search")));
+        // workspace 不再产出 skills 目录（L3 由框架按目录存在性自动跳过）
+        assertFalse(Files.exists(ws.resolve("skills")));
     }
 
     @Test

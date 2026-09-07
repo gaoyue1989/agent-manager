@@ -109,6 +109,11 @@ public class OafConfigLoader {
             var desc = loadSkillDescription(name);
             // 降级验证：description 不符合规范时警告但继续加载
             warnSkillDescription(name, desc);
+            // required 语义对齐：声明必须存在但目录缺失时告警（动态加载下技能可运行中出现，
+            // 目录是事实来源，声明仅为意图，不阻断启动）
+            if (required) {
+                warnRequiredSkillMissing(name);
+            }
 
             var allowedTools = parseAllowedTools(m);
             var license = (String) m.getOrDefault("license", "");
@@ -160,6 +165,19 @@ public class OafConfigLoader {
         if (description.length() > 1024) {
             System.out.println("[OafConfigLoader] WARNING: Skill '" + name
                 + "' description exceeds 1024 chars (" + description.length() + ")");
+        }
+    }
+
+    /**
+     * required 技能目录缺失告警：OAF 规范 required=true 表示技能必须可用。
+     * 动态加载模型下目录是事实来源，此处仅告警不阻断（技能可运行中补入后即时生效）。
+     */
+    private void warnRequiredSkillMissing(String name) {
+        var skillDir = configDir.resolve("skills").resolve(name);
+        if (!Files.isDirectory(skillDir) || !Files.exists(skillDir.resolve("SKILL.md"))) {
+            System.out.println("[OafConfigLoader] WARNING: Required skill '" + name
+                + "' not found at " + skillDir + " (declared required=true, "
+                + "will take effect once added at runtime)");
         }
     }
 

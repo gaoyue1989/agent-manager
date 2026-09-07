@@ -23,6 +23,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.LogCollector;
+import io.agentmanager.framework.service.SkillCatalogService;
 
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -49,6 +50,9 @@ class DebugApiControllerTest {
 
     @MockBean
     private LogCollector logCollector;
+
+    @MockBean
+    private SkillCatalogService skillCatalog;
 
     private AgentManagerProperties.LLMConfig llmConfig(String key) {
         return new AgentManagerProperties.LLMConfig(
@@ -91,9 +95,6 @@ class DebugApiControllerTest {
 
     @Test
     void oafConfigShouldReturnAllFields() throws Exception {
-        var skills = List.of(new OafConfig.SkillConfig(
-            "bash", "local", "1.0.0", true, "Bash skill", List.of("Bash"),
-            "", "", java.util.Map.of()));
         var mcp = new OafConfig.McpServerConfig("weather", "weather-service", "1.0.0", "mcp-configs/weather", true);
         var sub = new OafConfig.SubAgentConfig("acme", "helper", "1.0.0", "helper role", List.of("task"), true, "");
         var model = new OafConfig.ModelConfig("openai", "gpt-4", "");
@@ -110,7 +111,10 @@ class DebugApiControllerTest {
         when(oafConfig.tags()).thenReturn(List.of("a", "b"));
         when(oafConfig.tools()).thenReturn(List.of("Read"));
         when(oafConfig.deniedTools()).thenReturn(List.of("Write"));
-        when(oafConfig.skills()).thenReturn(skills);
+        when(skillCatalog.list()).thenReturn(List.of(Map.<String, Object>of(
+            "name", "bash", "description", "Bash skill", "version", "1.0.0",
+            "source", "local", "required", true, "dynamic", true,
+            "declaredButMissing", false)));
         when(oafConfig.mcpServers()).thenReturn(List.of(sub == null ? null : mcp));
         when(oafConfig.subAgents()).thenReturn(List.of(sub));
         when(oafConfig.model()).thenReturn(model);
@@ -120,6 +124,7 @@ class DebugApiControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.name").value("Test"))
             .andExpect(jsonPath("$.skills[0].name").value("bash"))
+            .andExpect(jsonPath("$.skills[0].dynamic").value(true))
             .andExpect(jsonPath("$.mcpServers[0].server").value("weather-service"))
             .andExpect(jsonPath("$.subAgents[0].agent").value("helper"))
             .andExpect(jsonPath("$.model.provider").value("openai"))
@@ -139,7 +144,7 @@ class DebugApiControllerTest {
         when(oafConfig.tags()).thenReturn(List.of());
         when(oafConfig.tools()).thenReturn(List.of());
         when(oafConfig.deniedTools()).thenReturn(List.of());
-        when(oafConfig.skills()).thenReturn(List.of());
+        when(skillCatalog.list()).thenReturn(List.of());
         when(oafConfig.mcpServers()).thenReturn(List.of());
         when(oafConfig.subAgents()).thenReturn(List.of());
         when(oafConfig.model()).thenReturn(null);

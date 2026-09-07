@@ -321,19 +321,35 @@ func (c *Core) Delete(id uint) error {
 	_ = c.K8s.DeleteDeployment(ns, svc.K8sName)
 	_ = c.K8s.DeleteConfigMap(ns, svc.K8sName+"-env")
 
-	return c.DB.Transaction(func(tx *gorm.DB) error {
-		var pkg store.OafPackage
-		if err := tx.First(&pkg, svc.PackageID).Error; err == nil {
-			tx.Model(&pkg).UpdateColumn("ref_count", pkg.RefCount-1)
-			if pkg.RefCount-1 <= 0 {
-				_ = c.FS.RemovePackage(pkg.DirPath) // 最后一个引用释放后清理 PVC 目录
-			}
+	// 引用计数原子递减（CASE WHEN 防负数，MySQL 8 / SQLite 兼容）。
+	// 旧实现为"事务内 First 读出 refCount 再应用侧减 1 判断归零"，
+	// 并发发布/删除时存在读-改-写竞态：误判归零触发 RemovePackage，
+	// 清掉仍被其他服务引用的包目录（业务 Pod /config 变空 → AGENTS.md not found CrashLoop）。
+	err = c.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&store.OafPackage{}).Where("id = ?", svc.PackageID).
+			UpdateColumn("ref_count", gorm.Expr("CASE WHEN ref_count > 0 THEN ref_count - 1 ELSE 0 END")).Error; err != nil {
+			return err
 		}
 		if err := tx.Where("service_id = ?", svc.ID).Delete(&store.ServiceEvent{}).Error; err != nil {
 			return err
 		}
 		return tx.Delete(svc).Error
 	})
+	if err != nil {
+		return err
+	}
+
+	// 目录清理移出事务：按事务提交后的最终引用计数判定，
+	// 与并发发布（ref_count+1）天然互斥，只有真正归零才清理 PVC 目录。
+	var pkg store.OafPackage
+	if err := c.DB.First(&pkg, svc.PackageID).Error; err == nil && pkg.RefCount <= 0 {
+		if rmErr := c.FS.RemovePackage(pkg.DirPath); rmErr != nil {
+			log.Printf("[delete] remove package dir %s failed: %v", pkg.DirPath, rmErr)
+		} else {
+			log.Printf("[delete] package %d dir %s removed (ref_count=0)", pkg.ID, pkg.DirPath)
+		}
+	}
+	return nil
 }
 
 // ---- 内部工具 ----

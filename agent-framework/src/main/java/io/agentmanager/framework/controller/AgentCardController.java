@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RestController;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.SkillCatalogService;
 
 @RestController
 public class AgentCardController {
@@ -16,20 +17,24 @@ public class AgentCardController {
     private final OafConfig oafConfig;
     private final A2uiService a2uiService;
     private final AgentRuntimeService agentRuntime;
+    private final SkillCatalogService skillCatalog;
 
-    public AgentCardController(OafConfig oafConfig, A2uiService a2uiService, AgentRuntimeService agentRuntime) {
+    public AgentCardController(OafConfig oafConfig, A2uiService a2uiService,
+                               AgentRuntimeService agentRuntime, SkillCatalogService skillCatalog) {
         this.oafConfig = oafConfig;
         this.a2uiService = a2uiService;
         this.agentRuntime = agentRuntime;
+        this.skillCatalog = skillCatalog;
     }
 
     @GetMapping("/.well-known/agent-card.json")
     public Map<String, Object> agentCard() {
-        var skills = oafConfig.skills().stream()
+        // 动态技能目录：运行中新增/删除的技能即时反映到 A2A 卡片
+        var skills = skillCatalog.list().stream()
             .map(s -> Map.of(
-                "id", s.name(),
-                "name", s.name(),
-                "description", s.description(),
+                "id", s.get("name"),
+                "name", s.get("name"),
+                "description", s.get("description"),
                 "inputModes", List.of("text"),
                 "outputModes", List.of("text", "text/plain")
             ))

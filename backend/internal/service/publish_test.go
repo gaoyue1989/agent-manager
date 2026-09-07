@@ -21,6 +21,54 @@ func publishToRegisterFailed(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgI
 	return &got
 }
 
+// 回归锁：多服务引用同一包时，删除其中一个不得清掉仍被引用的包目录。
+// 旧实现的读-改-写竞态会误判归零触发 RemovePackage，业务 Pod /config 变空
+// （AGENTS.md not found CrashLoop）。修复后 refCount 原子递减 + 事务外按最终值判定。
+func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svcA := publishToRegisterFailed(t, core, fk, pkg.ID, "alpha")
+	svcB := publishToRegisterFailed(t, core, fk, pkg.ID, "beta")
+
+	if got, _ := core.Packages.Get(pkg.ID); got.RefCount != 2 {
+		t.Fatalf("refCount=%d want 2 after two publishes", got.RefCount)
+	}
+
+	if err := core.Delete(svcA.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := core.Packages.Get(pkg.ID)
+	if err != nil {
+		t.Fatal("package row should still exist")
+	}
+	if got.RefCount != 1 {
+		t.Fatalf("refCount=%d want 1 after one delete", got.RefCount)
+	}
+	// 包目录必须完好：AGENTS.md 仍可读（svcB 的 /config 依赖它）
+	if _, err := core.FS.Tree(got.DirPath); err != nil {
+		t.Fatalf("package dir must survive while refCount>0: %v", err)
+	}
+	if _, err := core.Get(svcB.ID); err != nil {
+		t.Fatalf("svcB should remain: %v", err)
+	}
+
+	// 最后一个引用释放：refCount=0 → 目录清理
+	if err := core.Delete(svcB.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = core.Packages.Get(pkg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RefCount != 0 {
+		t.Fatalf("refCount=%d want 0", got.RefCount)
+	}
+	if _, err := core.FS.Tree(got.DirPath); err == nil {
+		t.Fatal("package dir should be removed after last ref released")
+	}
+}
+
 func TestPublishHappyPath(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()

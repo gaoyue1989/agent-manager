@@ -12,6 +12,7 @@ import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpManager;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.SkillCatalogService;
 
 @RestController
 public class ToolController {
@@ -21,31 +22,31 @@ public class ToolController {
     private final List<Map<String, Object>> mcpConfigs;
     private final McpManager mcpManager;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final SkillCatalogService skillCatalog;
 
     public ToolController(
         OafConfig oafConfig,
         AgentRuntimeService agentRuntime,
         List<Map<String, Object>> mcpConfigs,
         McpManager mcpManager,
-        McpToolRegistrar mcpToolRegistrar
+        McpToolRegistrar mcpToolRegistrar,
+        SkillCatalogService skillCatalog
     ) {
         this.oafConfig = oafConfig;
         this.agentRuntime = agentRuntime;
         this.mcpConfigs = mcpConfigs;
         this.mcpManager = mcpManager;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.skillCatalog = skillCatalog;
     }
 
+    /**
+     * 技能列表：动态数据源（frontmatter 声明 ∪ /config/skills 目录实际内容，
+     * 冲突以目录为准），技能目录运行中变化即时可见。
+     */
     @GetMapping("/skills")
     public List<Map<String, Object>> listSkills() {
-        return oafConfig.skills().stream()
-            .map(s -> Map.<String, Object>of(
-                "name", s.name(),
-                "description", s.description() != null ? s.description() : "",
-                "version", s.version(),
-                "source", s.source()
-            ))
-            .toList();
+        return skillCatalog.list();
     }
 
     @GetMapping("/mcp")

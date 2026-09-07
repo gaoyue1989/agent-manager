@@ -13,6 +13,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.SkillCatalogService;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -33,13 +34,16 @@ class AgentCardControllerTest {
     @MockBean
     private AgentRuntimeService agentRuntime;
 
+    @MockBean
+    private SkillCatalogService skillCatalog;
+
     @Test
     void agentCardShouldReturnCard() throws Exception {
         when(oafConfig.name()).thenReturn("test-agent");
         when(oafConfig.description()).thenReturn("A test agent");
         when(oafConfig.version()).thenReturn("1.0.0");
         when(oafConfig.vendorKey()).thenReturn("acme");
-        when(oafConfig.skills()).thenReturn(List.of());
+        when(skillCatalog.list()).thenReturn(List.of());
         when(oafConfig.tags()).thenReturn(List.of("test"));
         when(a2uiService.getExtensionDeclaration())
             .thenReturn(Map.of("uri", "https://a2ui.org/a2a-extension/a2ui/v0.8", "params", Map.of()));

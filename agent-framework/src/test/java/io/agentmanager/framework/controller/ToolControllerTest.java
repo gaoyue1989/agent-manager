@@ -15,6 +15,7 @@ import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpManager;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.SkillCatalogService;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -41,6 +42,9 @@ class ToolControllerTest {
     @MockBean
     private McpToolRegistrar mcpToolRegistrar;
 
+    @MockBean
+    private SkillCatalogService skillCatalog;
+
     @BeforeEach
     void setUp() {
         // mcpConfigs 是 mock List，stub iterator 返回空迭代器，模拟无 MCP 配置
@@ -49,10 +53,10 @@ class ToolControllerTest {
 
     @Test
     void listSkillsShouldReturnOafSkills() throws Exception {
-        when(oafConfig.skills()).thenReturn(List.of(
-            new OafConfig.SkillConfig("bash-tool", "local", "1.0.0", false,
-                "Execute bash commands", List.of("bash", "python"),
-                "", "", java.util.Map.of())
+        when(skillCatalog.list()).thenReturn(List.of(
+            Map.of("name", "bash-tool", "description", "Execute bash commands",
+                "version", "1.0.0", "source", "local", "required", false,
+                "dynamic", true, "declaredButMissing", false)
         ));
 
         mockMvc.perform(get("/skills"))

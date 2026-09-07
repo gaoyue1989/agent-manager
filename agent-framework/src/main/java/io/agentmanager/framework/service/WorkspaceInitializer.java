@@ -15,16 +15,17 @@ import io.agentmanager.framework.model.OafConfig;
 /**
  * 将 OAF 配置转换为 AgentScope Workspace 目录结构。
  * 返回 Workspace 根路径，可直接传给 HarnessAgent.builder().workspace(path)。
+ *
+ * <p>skills 不在此复制：OAF 包内 skills 目录由 AgentScopeConfig 注册为市场层
+ * 仓库（FileSystemSkillRepository 动态重扫），运行中目录变化无需重启即可生效。
  */
 @Service
 public class WorkspaceInitializer {
     private static final Logger log = LoggerFactory.getLogger(WorkspaceInitializer.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final Path configDir;
-
+    /** 将 OAF 配置转换为 AgentScope Workspace 目录结构。 */
     public WorkspaceInitializer(io.agentmanager.framework.config.AgentManagerProperties props) {
-        this.configDir = Path.of(props.configDir());
     }
 
     /**
@@ -36,7 +37,6 @@ public class WorkspaceInitializer {
 
         writeAgentsMd(workspace, oafConfig);
         writeToolsJson(workspace, oafConfig);
-        copySkills(workspace, oafConfig);
         writeSubagents(workspace, oafConfig);
 
         log.info("Workspace initialized at: {}", workspace);
@@ -103,25 +103,6 @@ public class WorkspaceInitializer {
     }
 
     /**
-     * 复制 skills：OAF skills/{name}/SKILL.md 复制到 Workspace。
-     */
-    private void copySkills(Path workspace, OafConfig oafConfig) throws IOException {
-        var skillsDir = workspace.resolve("skills");
-        Files.createDirectories(skillsDir);
-
-        for (var skill : oafConfig.skills()) {
-            if ("local".equals(skill.source())) {
-                var sourceDir = configDir.resolve("skills").resolve(skill.name());
-                var targetDir = skillsDir.resolve(skill.name());
-                if (Files.exists(sourceDir) && !Files.exists(targetDir)) {
-                    copyDirectory(sourceDir, targetDir);
-                    log.info("Copied skill: {}", skill.name());
-                }
-            }
-        }
-    }
-
-    /**
      * 生成 subagents：OAF agents 转换为 AgentScope subagents/*.md 格式。
      */
     private void writeSubagents(Path workspace, OafConfig oafConfig) throws IOException {
@@ -148,24 +129,6 @@ public class WorkspaceInitializer {
 
             Files.writeString(agentFile, sb.toString());
             log.info("Generated subagent: {}", agent.agent());
-        }
-    }
-
-    private void copyDirectory(Path source, Path target) throws IOException {
-        try (var stream = Files.walk(source)) {
-            stream.forEach(src -> {
-                try {
-                    var dest = target.resolve(source.relativize(src));
-                    if (Files.isDirectory(src)) {
-                        Files.createDirectories(dest);
-                    } else {
-                        Files.createDirectories(dest.getParent());
-                        Files.copy(src, dest);
-                    }
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
         }
     }
 }

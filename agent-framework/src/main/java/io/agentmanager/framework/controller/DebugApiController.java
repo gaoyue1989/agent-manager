@@ -26,6 +26,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.LogCollector;
+import io.agentmanager.framework.service.SkillCatalogService;
 
 /**
  * 调试数据端点：为 /debug 调试页面提供配置、数据库、Thread、记忆、工作区、日志等信息。
@@ -41,19 +42,22 @@ public class DebugApiController {
     private final DataSource dataSource;
     private final LogCollector logCollector;
     private final SandboxConfig sandboxConfig;
+    private final SkillCatalogService skillCatalog;
 
     public DebugApiController(
         AgentManagerProperties props,
         OafConfig oafConfig,
         DataSource dataSource,
         LogCollector logCollector,
-        SandboxConfig sandboxConfig
+        SandboxConfig sandboxConfig,
+        SkillCatalogService skillCatalog
     ) {
         this.props = props;
         this.oafConfig = oafConfig;
         this.dataSource = dataSource;
         this.logCollector = logCollector;
         this.sandboxConfig = sandboxConfig;
+        this.skillCatalog = skillCatalog;
     }
 
     /** 环境变量配置（敏感信息脱敏） */
@@ -97,10 +101,8 @@ public class DebugApiController {
         result.put("tags", oafConfig.tags());
         result.put("tools", oafConfig.tools());
         result.put("deniedTools", oafConfig.deniedTools());
-        result.put("skills", oafConfig.skills().stream().map(s -> Map.<String, Object>of(
-            "name", s.name(), "source", s.source(), "version", s.version(),
-            "required", s.required(),
-            "description", s.description() != null ? s.description() : "")).toList());
+        // 动态技能目录（frontmatter 声明 ∪ 目录实际内容，冲突以目录为准）
+        result.put("skills", skillCatalog.list());
         result.put("mcpServers", oafConfig.mcpServers().stream().map(m -> Map.<String, Object>of(
             "vendor", m.vendor(), "server", m.server(), "version", m.version(),
             "required", m.required())).toList());

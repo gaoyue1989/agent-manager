@@ -41,7 +41,8 @@ agent-framework/
 │   │   │   │   └── OafConfig.java               # OAF 配置模型 (含 deniedTools)
 │   │   │   ├── service/
 │   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream)
-│   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换
+│   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换（skills 由 L2 仓库动态加载，不再复制）
+│   │   │   │   ├── SkillCatalogService.java     # 动态技能目录（frontmatter 声明 ∪ /config/skills 目录事实，/skills、A2A 卡片数据源）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
@@ -76,7 +77,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 383 个用例（含 4 个默认跳过的沙箱集成测试）
+│   └── test/                                  # 455 个用例（含 4 个默认跳过的沙箱集成测试）
 ├── docs/                                     # 改进方案文档 (16 份, 含 mcp-apps-extension-plan.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -101,6 +102,7 @@ agent-framework/
 - **Plan Mode / Skill 自学习**: 启用
 - **Toolkit**: 自定义工具 (BusinessTools) + MCP 工具 (McpToolRegistrar)
 - **WorkspaceInitializer**: OAF → Workspace 转换
+- **Skill L2 市场仓库**: `/config/skills` 注册为 `FileSystemSkillRepository(writeable=false, source="oaf-package")`——HarnessSkillMiddleware 每轮推理重扫，PVC 上技能目录运行中原位变化（新增/修改/删除）无需重启即在下轮生效；目录缺失时跳过（包未携带 skills）
 
 ### 2. AgentRuntimeService — 运行时封装
 
@@ -143,7 +145,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 技能（Skill） | ✅ | 自定义 SkillManager，未用 Workspace skills/ |
+| 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user） |
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟 |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
 | Plan Mode | ✅ | enablePlanMode() |
@@ -246,7 +248,7 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/` | 服务信息 + 协议声明 |
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
-| GET | `/skills` | 技能列表 |
+| GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记） |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 |
 | GET | `/debug` | 调试页面（静态资源） |
@@ -300,7 +302,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (383 用例)
+mvn -o test            # 容器内离线测试 (455 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -310,6 +312,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 383 个用例（默认跳过 4 个沙箱集成测试，实际运行 379 个全部通过）
+mvn test     # 455 个用例（默认跳过 4 个沙箱集成测试，实际运行 451 个全部通过）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```
