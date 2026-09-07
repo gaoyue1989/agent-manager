@@ -3,8 +3,15 @@
 > **⚠️ 此文档描述的长连接 SSE 架构已被 stateless-single-stream-plan.md 取代**
 > 新架构改为 POST /threads/{sid}/chat 单次流（SSE 直吐，执行完即关闭），删除了 GET /threads/{sid}/events 长连接订阅端点和 SessionEventBus。请参考 [stateless-single-stream-plan.md](stateless-single-stream-plan.md)。
 
-> **状态: ✅ 已完成 (2026-08-17)**
-> 参考 agentscope 官方前端重构调试页面，已完成主题/布局/会话页/长连接 SSE 全部改造，308 用例全绿。
+> **状态: ✅ 已完成 (2026-08-17，历史快照)**
+> 参考 agentscope 官方前端重构调试页面，已完成主题/布局/会话页/长连接 SSE 全部改造（当时 308 用例全绿；现为 61 个测试类 / 456 个 @Test）。
+>
+> **现状核对（2026-09-07）**，除头部声明外，以下内容已随单次流架构作废/变更：
+> - **长连接机制全部作废**：§3.8、第六节 F 项、决策表中「流式传输模型 / A2A 长连接 / 事件总线扇出 (F-A) / 先订阅后发送 / 总线生命周期」各行——现为 POST /threads/{sid}/chat 单次流 + Turn 租约排队（waiting 帧），无 GET /events、无 SessionEventBus、非 fire-and-forget（响应即本次执行流）。
+> - **文件/类名**：`SessionEventBus.java` 未创建且已无必要；`js/api.js` 现为 `sendChat(sessionId, message, userId, {onEvent,onWaiting,onError,onEnd})` 单次流；调试页已不调用 `GET /chat/stream`（端点保留兼容）。`SessionStreamControllerTest` 现为 11 个用例（单次流/waiting/租约/ui 元数据/file_ready/审计）。
+> - **端点路径**：会话历史/触发为 `/threads/{sid}/history`、`/threads/{sid}/chat`（无 `/debug` 前缀）。
+> - chat.js 当年 ~966 行，现 1294 行。
+> - 验证环境中的 LLM key 已作掩码处理（`sk-WBHF2x…`，勿在文档存明文密钥）。
 
 ---
 
@@ -31,7 +38,7 @@
 | **后端改动（F）** | **已确认**：3.8 长连接 SSE 订阅/触发端点 + 保留旧端点（本轮唯一后端改动） |
 | **事件时序（迟到订阅）** | **先订阅后发送**：前端保证建立订阅后才发 `POST .../chat`，总线不做缓冲补发（简单，切换会话瞬间的消息可接受丢失） |
 | **总线生命周期** | 惰性创建（`Map<sessionId, Sinks.Many>`）、无订阅超时清理、心跳 ~15s、切换会话前端主动 `AbortController` 关闭（默认方案） |
-| **验证环境** | 本地 `mvn -o test`（300 用例 + F 新增）；手工验收起后端时注入 LLM 环境变量（sensenova 实测可用 key）：`LLM_API_KEY=sk-WBHF2xYYN61Kde4mXnYYjkxJxryw9KIB`、`LLM_MODEL_ID=sensenova-6.7-flash-lite`、`LLM_BASE_URL=https://token.sensenova.cn/v1` |
+| **验证环境** | 本地 `mvn -o test`（当时 300 用例 + F 新增）；手工验收起后端时注入 LLM 环境变量（key 已掩码：`LLM_API_KEY=sk-WBHF2x…`）、`LLM_MODEL_ID=sensenova-6.7-flash-lite`、`LLM_BASE_URL=https://token.sensenova.cn/v1` |
 
 ---
 

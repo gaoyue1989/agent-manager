@@ -40,7 +40,7 @@ agent-framework/
 │   │   │   ├── model/
 │   │   │   │   └── OafConfig.java               # OAF 配置模型 (含 deniedTools)
 │   │   │   ├── service/
-│   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream)
+│   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream + HITL 恢复)
 │   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换（skills 由 L2 仓库动态加载，不再复制）
 │   │   │   │   ├── SkillCatalogService.java     # 动态技能目录（frontmatter 声明 ∪ /config/skills 目录事实，/skills、A2A 卡片数据源）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
@@ -51,34 +51,46 @@ agent-framework/
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
-│   │   │   │   ├── SessionEventBus.java         # per-session 事件总线 (Sinks.Many 分桶广播)
+│   │   │   │   ├── TurnLeaseStore.java          # turn_lease 表 (单次流执行权互斥)
+│   │   │   │   ├── TurnLeaseGuard.java          # turn 续租句柄 (close 幂等释放)
+│   │   │   │   ├── ConfirmContextStore.java     # confirm_context 表 (HITL 确认上下文, CAS 防重复)
+│   │   │   │   ├── ToolAuditStore.java          # tool_audit_log 异步批量审计写
+│   │   │   │   ├── FileAssetStore.java          # file_asset 表 (上传/交付文件元数据)
+│   │   │   │   ├── UploadWorkspaceInjector.java # 上传文件注入会话工作区 + 消息内容块构造
+│   │   │   │   ├── SessionCleanupService.java   # 过期会话/附件联动清理
+│   │   │   │   ├── storage/                     # 文件存储后端 (FileStorage: LocalFileStorage / S3FileStorage)
 │   │   │   │   ├── A2uiService.java             # A2UI 协议
 │   │   │   │   └── LLMLogger.java               # LLM 调用日志
+│   │   │   ├── sandbox/opensandbox/             # OpenSandbox 沙箱集成 (OpenSandbox/Client/FilesystemSpec/SyncService 等)
 │   │   │   ├── tool/
-│   │   │   │   └── BusinessTools.java           # @Tool 注解自定义工具 (get_current_time, echo)
+│   │   │   │   ├── BusinessTools.java           # @Tool 注解自定义工具 (get_current_time, echo)
+│   │   │   │   ├── FileTools.java               # present_file 工具 (工作区产物注册交付)
+│   │   │   │   └── OafPackageTools.java         # check_oaf_package / create_oaf_zip (OAF 部署包校验与生成)
 │   │   │   └── controller/
-│   │   │       ├── InfoController.java          # GET /、/system-prompt
+│   │   │       ├── InfoController.java          # GET /、/metadata、/system-prompt
 │   │   │       ├── HealthController.java        # GET /health
 │   │   │       ├── ToolController.java          # GET /skills、/mcp、/tools
 │   │   │       ├── AgentCardController.java     # GET /.well-known/agent-card.json
 │   │   │       ├── DebugController.java         # GET /debug
 │   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/threads 等
+│   │   │       ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
+│   │   │       ├── SessionStreamController.java # POST /threads/{sid}/chat (SSE 单次流, 主对话入口)
+│   │   │       ├── ConfirmController.java       # POST /threads/{sid}/confirm、/confirm-stream (HITL)
+│   │   │       ├── FileController.java          # POST /files/upload、GET /files/{fileId}
 │   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
-│   │   │       ├── SessionStreamController.java # GET /events + POST /chat (长连接 SSE, 新)
 │   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (StreamController + SessionStreamController)
 │   │   │       ├── McpProxyController.java      # MCP Apps: GET /mcp/{server}/resources/ui 等 (前端资源代理)
 │   │   │       ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7 静默更新)
-│   │   │       ├── ThreadController.java        # GET /threads
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
 │   │       └── static/debug/                    # 调试页面 (拆分架构)
 │   │           ├── index.html                   # 调试页入口
 │   │           ├── css/                         # 样式 (base/components/layout)
-│   │           ├── js/                          # 脚本 (api/app/router), mcp-app-host.js (MCP App 卡片宿主)
-│   │           └── modules/                     # 功能模块 (chat/tools/config 等)
-│   └── test/                                  # 455 个用例（含 4 个默认跳过的沙箱集成测试）
-├── docs/                                     # 改进方案文档 (16 份, 含 mcp-apps-extension-plan.md)
+│   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
+│   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
+│   └── test/                                  # 61 个测试类 / 456 个 @Test（含默认跳过的沙箱集成测试）
+├── docs/                                     # 设计与改进方案文档 (26 份, 含 mcp-apps-extension-plan.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
@@ -180,6 +192,9 @@ invokeStream(message, threadId, userId) → Flux<Map>
 |------|------|
 | `get_current_time(timezone)` | 返回指定时区当前时间 |
 | `echo(text)` | 回显输入 |
+| `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 file_ready 帧） |
+| `check_oaf_package(agents_md)` | OAF 包 AGENTS.md frontmatter 预校验（打包/交付前） |
+| `create_oaf_zip(package_name, agents_md, extra_files?)` | 生成 OAF 部署包 zip 并注册下载 |
 
 ### MCP 工具
 
@@ -236,8 +251,10 @@ OAF `deniedTools` 字段控制排除列表。
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x） |
-| `OPENSANDBOX_SERVER_URL` | — | | OpenSandbox Server 地址（如 `192.168.31.155:8090`） |
+| `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
+| `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
+| `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
 
 ---
 
@@ -246,6 +263,7 @@ OAF `deniedTools` 字段控制排除列表。
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 服务信息 + 协议声明 |
+| GET | `/metadata` | 完整 Agent 元数据（skills 对象数组，?includeDetails=true 含 tools/subAgents/model） |
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
 | GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记） |
@@ -254,9 +272,14 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/debug` | 调试页面（静态资源） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
+| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
+| GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
+| POST | `/threads/{sid}/chat` | 无状态单次流 SSE 对话（主对话入口，{message?, userId?, fileIds?}，Turn 租约排队 waiting 帧） |
+| POST | `/threads/{sid}/confirm` | HITL 同步确认 |
+| POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
+| POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
+| GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
 | GET | `/chat/stream` | Channel SSE 一次性流对话（旧） |
-| GET | `/debug/threads/{sid}/events` | 长连接 SSE 订阅（新，对齐官方 agentscope 模式） |
-| POST | `/debug/threads/{sid}/chat` | 长连接触发（fire-and-forget，事件经事件总线回流） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |
 | GET | `/mcp/{server}/resources` | MCP Apps: 列出服务器资源 |
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps: 卡片工具调用代理（ask 工具 403 + needsConfirm 走确认流） |
@@ -312,6 +335,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 455 个用例（默认跳过 4 个沙箱集成测试，实际运行 451 个全部通过）
+mvn test     # 61 个测试类 / 456 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

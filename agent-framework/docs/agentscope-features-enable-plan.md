@@ -1,5 +1,8 @@
 # AgentScope 2.0 功能启用方案
 
+>
+> **现状核对（2026-09-07）**：本文列出的 5 个核心 Harness 功能**均已启用**（详见 `AgentScopeConfig.java` + `agent-framework/AGENTS.md` 「AgentScope 2.0 功能使用状态」表）：记忆管理 MEMORY.md + memory/（flush 节流 10 分钟）、上下文压缩 CompactionConfig（30 触发保留 10）、Plan Mode `enablePlanMode()`、技能自学习 `enableSkillManageTool()`、工作区 `WorkspaceInitializer`。Channel 走 `ChatUiChannel`，**主对话入口**为 `POST /threads/{sid}/chat` 单次流（SSE 直吐，Turn 租约排队）。多租户默认 `IsolationScope.USER`，状态/记忆/会话/技能/沙箱按 userId 隔离。技能**运行时动态加载**（`FileSystemSkillRepository` 只读，PVC 上 /config/skills 每轮重扫，详见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)）。
+
 ## 1. 概述
 
 当前 agent-framework 仅使用 AgentScope 底层 `ReActAgent` + `AgentStateStore`，未使用 Harness 层功能。本文档描述如何启用以下 5 个核心功能：

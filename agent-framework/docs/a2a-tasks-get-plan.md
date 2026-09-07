@@ -1,9 +1,11 @@
 # A2A `tasks/get` + `message/send` 复用 SDK 方案
 
-> **状态: ✅ 已完成 (2026-08-10)**
+> **状态: ✅ 已完成 (2026-08-10，历史快照)**
 > 目标：复用 AgentScopeA2aServer（SDK）实现标准 A2A 协议能力：
 > - `tasks/get` — 通过标准 A2A 协议查询任务历史消息（替代内部 `/debug/threads/{id}/history`）
 > - `message/send` / `message/stream` — 复用 SDK 完整链路（标准返回 + Task 持久化）
+>
+> **现状核对（2026-09-07）**：会话 API 路径已统一迁到 `/threads/*`（无 `/debug` 前缀），实际为 `GET /threads`、`/threads/{sid}/history`、`/threads/{sid}/llm-calls`（`ThreadController.java:32,73,109`）。`A2AController` 全量透传 SDK；`/chat/stream` 端点保留兼容，但调试页已不调用。
 > **实施结果**：
 > 1. `PartParserRouter` 缺失已通过 pom.xml 添加 `agentscope-extensions-a2a-client` 依赖修复
 > 2. 新增 `MySqlTaskStore`（读 agent_state）+ `StateDataParser`（公共解析类）
@@ -89,7 +91,7 @@ message/send → AgentScopeAgentExecutor.execute()
 
 | 途径 | 路径 | 适用场景 |
 |---|---|---|
-| Debug API | `GET /debug/threads/{sessionId}/history` | 仅内部调试，非标准协议 |
+| 内部 API | `GET /threads/{sessionId}/history` | 仅内部调试，非标准协议 |
 | A2A `tasks/get` | `POST /` `{"method":"tasks/get",...}` | **当前不可用** |
 
 ### 1.3 A2A SDK 已有支持（经反编译确认）
@@ -650,9 +652,9 @@ mvn -o package # 应成功（含 a2a-client 依赖）
 
 | Debug 页面功能 | 当前数据源 | tasks/get 影响 | 是否需更新 |
 |---|---|---|---|
-| Thread 列表 | `GET /debug/threads`（agent_state 去重） | 不变 | ❌ |
-| Thread 历史加载 | `GET /debug/threads/{id}/history`（chat.js `loadThreadHistory`） | 不变（仍走 Debug API） | ❌ |
-| LLM Calls 弹窗 | `GET /debug/threads/{id}/llm-calls` | 不变 | ❌ |
+| Thread 列表 | `GET /threads`（agent_state 去重） | 不变 | ❌ |
+| Thread 历史加载 | `GET /threads/{id}/history`（chat.js `loadThreadHistory`） | 不变（仍走内部 API） | ❌ |
+| LLM Calls 弹窗 | `GET /threads/{id}/llm-calls` | 不变 | ❌ |
 | A2A 同步发送 `sendA2A` | `message/send`（自实现） | 不变 | ❌ |
 | A2A 流式 `sendA2AStream` | `message/stream`（自实现） | 不变 | ❌ |
 | Channel 模式 | `/chat/stream` | 不变 | ❌ |

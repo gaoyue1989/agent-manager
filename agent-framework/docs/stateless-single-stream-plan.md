@@ -4,6 +4,12 @@
 > 范围：agent-framework（AgentScope Java 2.0.0 + Spring Boot 3.3，端口 8100）
 > 目标部署形态：单 Agent 多副本（无状态水平扩展）
 
+> **现状核对（2026-09-07）**：
+> - **已实施并落地**：单次流 SSE `POST /threads/{sessionId}/chat`（`SessionStreamController.java:52,92`），Turn 租约 `turn_lease` 表互斥 + waiting 帧（120s 排队超时 → error 帧）、HITL 跨副本 `confirm_context` 表（CAS 防重复）、`tool_audit_log` 异步批量审计、`SessionEventBus` 已删除；原长连接订阅端点 `GET /debug/threads/{sid}/events` 不复存在。
+> - **配套端点**：`POST /threads/{sid}/confirm`、`/confirm-stream`（ConfirmController）；`GET /threads`、`/threads/{sid}/history`、`/threads/{sid}/llm-calls`（无 `/debug` 前缀，ThreadController.java:32,73,109）。
+> - **测试**：原 §5 列 ~383 用例，现 61 个测试类 / 456 个 @Test。
+> - 文中「`POST /threads/{sid}/chat`（fire-and-forget 触发）」是单次流**取代前**的旧描述，新架构下该端点本身既是触发也是 SSE 响应流，不再 fire-and-forget。
+
 ---
 
 ## 1. 背景与目标

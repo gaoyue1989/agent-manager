@@ -46,8 +46,10 @@ agent:
 
 ```bash
 cd agent-framework
-mvn test -Dspring.profiles.active=test
+mvn test
 ```
+
+> 集成测试默认跳过：沙箱集成需 OpenSandbox Server 可达，S3FileStorageIT 需真实对象存储环境变量。
 
 ### 3.2 指定测试类
 
@@ -79,7 +81,7 @@ class AgentFrameworkApplicationTests {
 }
 ```
 
-### 4.2 OafConfigLoaderTest (12 个用例)
+### 4.2 OafConfigLoaderTest (37 个用例)
 
 覆盖字段解析：name、vendorKey、agentKey、version、slug、description、author、license、tags、skills、mcpServers、tools、systemPrompt、model、runtimeConfig、memory、deniedTools（空默认值、显式值）。
 
@@ -116,18 +118,18 @@ class AgentFrameworkApplicationTests {
 - 2 参 invoke 委托到 3 参
 - tenantPrefix = slug
 
-### 4.7 WorkspaceInitializerTest (8 个用例)
+### 4.7 WorkspaceInitializerTest (7 个用例)
 
 覆盖场景：
 - workspace 结构创建（AGENTS.md + tools.json）
 - AGENTS.md frontmatter 生成（name/model/temperature）
 - 空 tools.json（无 deny 时为空对象）
 - deny 列表生成
-- 本地 skill 复制 / 远程 skill 跳过
+- **skills 不再本地复制**（/config/skills 由 L2 仓库动态加载，初始化不触碰）
 - subagents 生成
 - 幂等不覆盖已有文件
 
-### 4.8 McpToolRegistrarTest (35 个用例)
+### 4.8 McpToolRegistrarTest (37 个用例)
 
 覆盖场景：
 - SSE / stdio / streamableHttp 三种传输构建
@@ -154,7 +156,7 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| SessionStreamControllerTest | 13 | metadata 携带会话 key 注入 / ui 元数据 SSE / 单次流触发 |
+| SessionStreamControllerTest | 11 | metadata 携带会话 key 注入 / ui 元数据 SSE / 单次流触发 / fileIds 注入 |
 | StreamControllerTest | 8 | ui 元数据序列化 / 无 UI 工具降级原词表 |
 
 ### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）
@@ -164,6 +166,39 @@ class AgentFrameworkApplicationTests {
 | TurnLeaseStoreTest | 8 | acquire 成功 / PK 冲突排队 / 过期接管 / renew 续租 / renew 失败自停 / release 释放 / 并发 acquire 竞争 |
 | ConfirmContextStoreTest | 10 | put 覆盖写 / consume CAS 成功 / consume 已消费 409 / consume 不存在 404 / TTL 过期 / 查询 pendingConfirm / 前缀兼容查询 / 清理过期条目 |
 | ToolAuditStoreTest | 6 | 异步批量写入 / 单条写入 / 过期清理 / 批量合并 / 写入失败静默降级 / 查询审计日志 |
+| ConfirmControllerTest | 5 | 同步确认 / confirm-stream / 404 与 409 语义 |
+
+### 4.12 文件上传下载测试（file-upload-download，2026-09-07 新增）
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| FileControllerTest | 12 | 上传校验链（MIME 白名单/大小/文件名 sanitize/pending 上限）/ 下载 inline / 存储缺失 502 |
+| FileToolsTest | 11 | present_file 路径越界拦截 / 沙箱与非沙箱模式 / 大小上限 |
+| OafPackageToolsTest | 8 | check_oaf_package 校验规则 / create_oaf_zip 打包与注册 |
+| FileAssetStoreTest | 8 | file_asset CRUD / pending 计数 / TTL 清理 |
+| UploadWorkspaceInjectorTest | 6 | 工作区注入幂等 / 图片内联 ImageBlock / 文档路径提示 |
+| LocalFileStorageTest | 6 | 本地存储 write/read/exists/delete |
+| S3EnvBindingTest | 2 | yml 平铺键绑定（防嵌套回退默认值） |
+| S3FileStorageIT | 集成 | 七牛云实测（默认跳过，需真实 S3 环境变量） |
+
+### 4.13 技能动态加载测试（oaf-skills-dynamic-loading，2026-09-07 新增）
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| SkillCatalogServiceTest | 7 | frontmatter 声明 ∪ 目录事实合并 / 冲突以目录为准 / dynamic、declaredButMissing 标记 |
+| OafSkillRepositoryTest | 5 | L2 仓库注册 / 只读 / 目录缺失跳过 |
+
+### 4.14 追踪测试（tracing-design 配套）
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| TracingSandboxClientTest | 6 | 沙箱客户端 span 装饰 |
+| TracingModelWrapperTest | 6 | LLM 调用 span |
+| FrameworkTracingMiddlewareTest | 5 | 框架事件 span |
+| ReasoningTracingMiddlewareTest | 5 | 推理轮次 span |
+| OtelConfigTest | 5 | 条件装配 / 配置绑定 |
+| HttpTracingFilterTest | 3 | HTTP 入口 span |
+| TraceIdConverterTest | 2 | traceId → MDC |
 
 ---
 
@@ -242,22 +277,21 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-08-20 更新：**383 个用例**（默认跳过 4 个沙箱集成测试，实际运行 379 个全部通过）。
+> 2026-09-07 更新：**456 个 @Test 用例、61 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
 
 | 类别 | 数量 | 状态 |
 |------|------|------|
-| 单元测试 | 375 | ✅ 全部通过 |
-| 集成测试（默认跳过，需 `SANDBOX_IT=1`） | 4 | ✅ 需环境 |
 | OafConfigLoaderTest | 37 | ✅ |
-| AgentScopeConfigTest (+ 配置类) | 14 | ✅ |
-| SessionStreamControllerTest / StreamControllerTest | 21 | ✅ |
-| McpToolRegistrarTest | 35 | ✅ |
-| UiContextStoreTest / UiContextControllerTest / UiContextInjectionHookTest | 18 | ✅ |
-| McpResourceProxyTest | 10 | ✅ |
-| AgentRuntimeService 系列 | 40 | ✅ |
+| McpToolRegistrarTest | 37 | ✅ |
+| AgentRuntimeService 系列（Service/McpConfig/Hitl） | 40 | ✅ |
+| DebugApiControllerTest | 15 | ✅ |
+| ThreadControllerTest（含 history 文件下载卡片） | 12 | ✅ |
+| FileControllerTest / FileToolsTest / FileAssetStoreTest | 31 | ✅ |
+| SessionStreamControllerTest / StreamControllerTest | 19 | ✅ |
 | TurnLeaseStoreTest / ConfirmContextStoreTest / ToolAuditStoreTest | 24 | ✅ |
-| DebugApiControllerTest | 25 | ✅ |
-| 其余（tool/config/service/controller） | 159 | ✅ |
+| OpenSandbox 单测（SandboxConfig/State/Client/Reader 等） | 44 | ✅ |
+| 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 32 | ✅ |
+| 其余（tool/config/service/controller/storage） | 约 195 | ✅ |
 
 ### 8.1 沙箱测试（OpenSandbox 集成，2026-08-12 新增）
 
@@ -265,11 +299,12 @@ src/test/resources/fixtures/test-agent/
 |--------|--------|--------|
 | OpenSandboxTest | 13 | doExec 映射/注入/回写/快照 tar/失败容错/sessionId 降级 |
 | OpenSandboxClientTest | 6 | create/resume(connector)/delete/序列化 |
-| OpenSandboxStateTest | 5 | Jackson 序列化 round-trip/type 鉴别器/workspaceSpec→manifest |
+| OpenSandboxStateTest | 6 | Jackson 序列化 round-trip/type 鉴别器/workspaceSpec→manifest |
 | OpenSandboxFilesystemSpecTest | 4 | clientOptions/workspaceSpec/isolationScope |
 | OpenSandboxClientOptionsTest | 3 | 默认值/fluent 链 |
 | WorkspaceReaderTest | 5 | InMemoryStore KV 读写/用户隔离/注入 |
 | WorkspaceSyncServiceTest | 6 | 回写 write(新建)/edit(更新)/容错 |
 | SandboxAwareMysqlAgentStateStoreTest | 2 | slot ID 斜杠放行/空 ID 拒绝 |
 | SandboxConfigTest | 2 | 配置默认值/覆盖 |
-| OpenSandboxApiIntegrationTest | 4 | **真实 Server 全流程**（创建/命令/文件/契约，需 `SANDBOX_IT=1`） |
+| TracingSandboxClientTest | 6 | 沙箱客户端 Tracing 装饰 |
+| OpenSandboxApiIntegrationTest | 4 | **真实 Server 全流程**（创建/命令/文件/契约，默认跳过，需沙箱 Server 可达） |

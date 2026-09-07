@@ -7,6 +7,9 @@
 
 ---
 
+>
+> **现状核对（2026-09-07）**：本文为设计稿（未实施）。当前自定义工具仍以 `@Tool` 注解 + Spring Bean 形式硬编码于 `tool/` 包（`BusinessTools` / `FileTools` / `OafPackageTools`），按 `AgentScopeConfig.customTools` 列表注入 Toolkit。如需热插拔可重新评估本文方案。
+
 ## 一、背景与目标
 
 ### 1.1 需求

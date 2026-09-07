@@ -1,5 +1,8 @@
 # MySQL 会话持久化改进方案（基于 AgentScope Context 文档）
 
+>
+> **现状核对（2026-09-07）**：本文为 v2.0 → v2.1 升级期间的设计稿。**当前 `MysqlDistributedStore` 已落地**（`agent_state` + `agent_fs` 表，启动时自动建表，schema 见 [checkpoint-design.md](checkpoint-design.md)），与之配套的还有 `confirm_context` / `turn_lease` / `tool_audit_log` / `ui_context` / `file_asset` 等表（无状态单次流架构 + MCP Apps 4.7 + 文件上传下载）。端点为 `POST /threads/{sid}/chat` 单次流、`POST /threads/{sid}/confirm|confirm-stream`、`GET /threads|/{sid}/history|llm-calls`（无 `/debug` 前缀）。
+
 ## 1. 现状分析
 
 ### 1.1 当前实现

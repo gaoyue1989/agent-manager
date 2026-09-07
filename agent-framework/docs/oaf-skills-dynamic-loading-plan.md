@@ -11,6 +11,9 @@
 
 ---
 
+>
+> **现状核对（2026-09-07）**：M1/M2 已完成（agent-framework 主体 2026-09-07，集群 E2E 同日验证通过，依赖 agentscope-harness 2.0.0 与 pom 实际版本一致）。M3（远程技能扩展）未开始。测试：新增 `SkillCatalogServiceTest` 7 用例、`OafSkillRepositoryTest` 5 用例。
+
 ## 一、结论先行（官方已有，缺的是接线）
 
 对 [agentscope-java](https://github.com/agentscope-ai/agentscope-java)（main 分支 + 本地 2.0.0 jar 字节码双重验证）的调研结论：

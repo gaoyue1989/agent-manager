@@ -128,8 +128,11 @@ src/main/java/io/agentmanager/framework/
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | MySQL JDBC URL |
+| `CHECKPOINT_DB_NAME` | — | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析，保证与 agent_fs 同库） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | MySQL 密码 |
+
+除 `agent_state`/`agent_fs` 外，无状态单次流与文件能力还引入 `confirm_context`/`turn_lease`/`tool_audit_log`/`ui_context`/`file_asset` 等表（服务启动自动建表，结构见 [api.md](api.md)）。
 
 K8s Pod 内连接需使用 Docker 网关 IP `172.20.0.1` 代替 `127.0.0.1`。
 
@@ -246,8 +249,8 @@ CREATE TABLE IF NOT EXISTS agent_fs (
 agent:
   llm:
     api-key: ${LLM_API_KEY}
-    model-id: LongCat-2.0
-    base-url: https://api.longcat.chat/openai/v1
+    model-id: ${LLM_MODEL}        # mimo-v2.5（见 .env.secrets）
+    base-url: ${LLM_ENDPOINT}
     provider: openai
     temperature: 0.2
     max-tokens: 50
@@ -263,7 +266,7 @@ agent:
 | TC-CP-04 | AgentState 读写 | agent.call() → 查 agent_state |
 | TC-CP-05 | 工作区文件读写 | agent.call() → 查 agent_fs |
 | TC-CP-06 | 跨节点恢复 | 新 HarnessAgent 实例 + 相同 MysqlDistributedStore |
-| TC-CP-07 | LLM 连通性 | LongCat-2.0 API 调用 |
+| TC-CP-07 | LLM 连通性 | 测试 LLM API 调用（见 .env.secrets） |
 | TC-CP-08 | HikariCP 连接池 | 验证 pool 参数 |
 
 ---

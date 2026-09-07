@@ -6,6 +6,9 @@
 
 ---
 
+>
+> **现状核对（2026-09-07）**：v2.0 → v2.1 的整体升级（ReActAgent → HarnessAgent + MysqlDistributedStore + Harness 全部功能）已落地（`pom.xml:2.1.0`、`AgentScopeConfig` 装配 HarnessAgent）。**v2.1 内部已陆续叠加**：无状态单次流架构（stateless-single-stream）、HITL 跨副本确认（hitl-permission）、MCP Apps 阶段一/二（mcp-apps-extension）、文件上传下载 + OAF 部署包自动生成（file-upload-download）、OAF skills 动态加载（oaf-skills-dynamic-loading）、OpenSandbox 沙箱集成（opensandbox-integration）、OTel 链路追踪（tracing-design）。本文档保留作为整体升级参考路线图。
+
 ## 1. 变更全景
 
 ### 1.1 涉及文档

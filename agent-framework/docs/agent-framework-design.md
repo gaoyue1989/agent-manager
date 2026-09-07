@@ -90,26 +90,30 @@ Agent Framework 是一个基于 **AgentScope Java 2.0 Harness** 的独立可运�
 src/main/java/io/agentmanager/framework/
 ├── AgentFrameworkApplication.java   # Spring Boot 入口
 ├── config/
-│   ├── AgentManagerProperties.java  # 环境变量 @ConfigurationProperties
+│   ├── AgentManagerProperties.java  # 环境变量 @ConfigurationProperties (LLM/checkpoint/file)
 │   ├── SandboxConfig.java           # 沙箱配置 (SANDBOX_*/OPENSANDBOX_*)
 │   ├── OafConfigLoader.java         # AGENTS.md 解析 (SnakeYAML)
-│   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent, MysqlDistributedStore, 条件装配沙箱)
+│   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent, MysqlDistributedStore, 条件装配沙箱, Skill L2 仓库)
 │   ├── A2AServerConfig.java         # A2A Server Bean (AgentScopeA2aServer + HarnessAgentRunner)
-│   └── ChannelConfig.java           # ChatUiChannel Bean
+│   ├── ChannelConfig.java           # ChatUiChannel Bean
+│   ├── DatabaseHealthChecker.java   # 数据库连接健康检查 (/debug/database/status)
+│   └── OtelConfig.java              # 自研 OTel fallback (OTEL_TRACES_EXPORTER=otlp 时装配)
 ├── model/
 │   └── OafConfig.java               # OAF 配置模型 (Java Record, 含 deniedTools)
 ├── sandbox/opensandbox/
 │   ├── OpenSandboxFilesystemSpec.java   # 沙箱文件系统配置 (HarnessAgent.filesystem)
 │   ├── OpenSandboxClient.java           # SandboxClient 实现 (create/resume/delete/序列化)
-│   ├── OpenSandboxClientOptions.java    # 沙箱配置 (镜像/资源/超时)
+│   ├── OpenSandboxClientOptions.java    # 沙箱配置 (镜像/资源/超时/entrypoint)
 │   ├── OpenSandbox.java                 # AbstractBaseSandbox 实现 (exec/快照/延迟注入/stop 回写)
 │   ├── OpenSandboxState.java            # 沙箱状态 (sandboxId, Jackson 序列化)
 │   ├── WorkspaceSyncService.java        # 沙箱 → KV 回写 (read→edit 语义)
 │   ├── SandboxUserKeyMiddleware.java    # 请求级 userId 注入 (onAgent → ThreadLocal)
-│   └── SandboxAwareMysqlAgentStateStore.java  # 放宽 sessionId 校验 (沙箱 slot ID 含 "/")
+│   ├── SandboxAwareMysqlAgentStateStore.java  # 放宽 sessionId 校验 (沙箱 slot ID 含 "/")
+│   └── TracingSandboxClient.java        # 沙箱客户端 Tracing 装饰器
 ├── service/
-│   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream + userId)
-│   ├── WorkspaceInitializer.java    # OAF → Workspace 转换
+│   ├── AgentRuntimeService.java     # Agent 运行时 (invoke/invokeStream + userId + HITL 恢复)
+│   ├── WorkspaceInitializer.java    # OAF → Workspace 转换 (skills 不复制, 由 L2 仓库动态加载)
+│   ├── SkillCatalogService.java     # 技能目录 (frontmatter 声明 ∪ /config/skills 目录事实)
 │   ├── WorkspaceReader.java         # KV 运行时文件读写 (MEMORY.md/memory/ + 沙箱注入)
 │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
 │   ├── McpManager.java              # MCP 配置加载
@@ -120,19 +124,32 @@ src/main/java/io/agentmanager/framework/
 │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息 + tool_calls)
 │   ├── SessionManager.java          # 会话管理
-│   ├── SessionCleanupService.java   # 会话清理 (联动清理 confirm_context/tool_audit_log/turn_lease)
+│   ├── SessionCleanupService.java   # 会话清理 (联动清理 confirm_context/tool_audit_log/turn_lease/file_asset)
 │   ├── TurnLeaseStore.java          # turn_lease 表 acquire/renew/release (执行权互斥)
+│   ├── TurnLeaseGuard.java          # turn 续租句柄 (绑定执行器生命周期, close 幂等释放)
 │   ├── ConfirmContextStore.java     # confirm_context 表 CRUD (跨副本共享 HITL 确认上下文)
 │   ├── ToolAuditStore.java          # tool_audit_log 异步批量写 (工具调用轻量审计)
+│   ├── FileAssetStore.java          # file_asset 表 CRUD (上传/交付文件元数据 + pending 计数)
+│   ├── UploadWorkspaceInjector.java # 上传文件注入会话工作区 + 消息内容块构造 (图片内联)
+│   ├── storage/                     # 文件存储后端 (FileStorage 接口)
+│   │   ├── LocalFileStorage.java    # 本地磁盘 (FILE_STORAGE_TYPE=local)
+│   │   └── S3FileStorage.java       # S3 兼容对象存储 (FILE_STORAGE_TYPE=s3, 七牛云等)
 │   ├── LlmLoggingMiddleware.java    # LLM 调用记录中间件 (ModelCallEndEvent → LLMLogger)
 │   ├── LLMLogger.java               # LLM 调用日志 (内存存储, /threads/{id}/llm-calls)
 │   ├── LogCollector.java            # 日志收集 (内存 Appender)
 │   ├── InMemoryLogAppender.java     # 内存日志 Appender
+│   ├── HttpTracingFilter.java       # HTTP 入口 span (自研 fallback)
+│   ├── FrameworkTracingMiddleware.java   # 框架事件 span (中间件)
+│   ├── ReasoningTracingMiddleware.java  # 推理轮次 span
+│   ├── TracingModelWrapper.java     # LLM 调用 span (Model 装饰器)
+│   ├── TraceIdConverter.java        # traceId → MDC (日志关联)
 │   └── A2uiService.java             # A2UI JSONL 生成
 ├── tool/
-│   └── BusinessTools.java           # @Tool 自定义工具 (get_current_time, echo)
+│   ├── BusinessTools.java           # @Tool 自定义工具 (get_current_time, echo)
+│   ├── FileTools.java               # present_file 工具 (工作区产物注册交付, 触发 file_ready)
+│   └── OafPackageTools.java         # check_oaf_package / create_oaf_zip (OAF 部署包校验与生成)
 └── controller/
-    ├── InfoController.java          # GET /、/system-prompt
+    ├── InfoController.java          # GET /、/metadata、/system-prompt
     ├── HealthController.java        # GET /health
     ├── ToolController.java          # GET /skills、/mcp、/tools
     ├── DebugController.java         # GET /debug (页面)
@@ -141,9 +158,10 @@ src/main/java/io/agentmanager/framework/
     ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
     ├── SessionStreamController.java # POST /threads/{sid}/chat (SSE 单次流, 单次流模式)
     ├── ConfirmController.java       # POST /threads/{sid}/confirm, /confirm-stream (HITL 确认)
+    ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
+    ├── FileController.java          # POST /files/upload、GET /files/{fileId}
     ├── McpProxyController.java      # MCP Apps: /mcp/{server}/resources/ui、/tools/{tool} 代理
     ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7)
-    ├── ThreadController.java        # GET /threads
     └── A2AController.java           # POST / (A2A JSON-RPC 全量透传)
 ```
 
@@ -190,7 +208,7 @@ SessionStreamController → TurnLeaseStore.acquire() → 等待式获取执行�
   ├── AGENT_END / error → 关闭 SSE 流 + release 锁 + 停续租
   └── 完成
 
-Client Request (POST /threads/{sid}/confirm-stream, body: {confirmed, toolCallIds})
+Client Request (POST /threads/{sid}/confirm-stream, body: {results:[{tool_call_id, confirmed, accept_rule}]})
   │
   ▼
 ConfirmController → ConfirmContextStore.consume() → CAS 防重复
@@ -381,13 +399,14 @@ config/
 .agentscope/workspace/
 ├── AGENTS.md                    ← OAF frontmatter + body 转换
 ├── tools.json                   ← OAF mcpServers 转换
-├── skills/                      ← OAF skills (本地复制)
+├── skills/                      ← 不再本地复制：/config/skills 注册为 L2 市场仓库
+│                                   (FileSystemSkillRepository 只读, 每轮重扫动态生效)
 ├── subagents/                   ← OAF agents 转换
-├── knowledge/                   ← 知识库
-├── MEMORY.md                    ← 长期记忆 (自动生成)
-├── memory/                      ← 每日流水账 (自动生成)
+├── knowledge/                   # 知识库
+├── MEMORY.md                    # 长期记忆 (自动生成)
+├── memory/                      # 每日流水账 (自动生成)
 │   └── YYYY-MM-DD.md
-└── plans/                       ← Plan Mode 计划 (自动生成)
+└── plans/                       # Plan Mode 计划 (自动生成)
     └── PLAN.md
 ```
 
@@ -406,6 +425,7 @@ config/
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
+| `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时 filesystem 切换为 OpenSandbox） |
@@ -413,8 +433,12 @@ config/
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（到期自动销毁，resume 404 自动降级重建） |
 | `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制 |
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
+| `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔） |
+| `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | | execd 命令 SSE 尾窗保持（注入容器 `EXECD_API_GRACE_SHUTDOWN`） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | ✓(沙箱模式) | OpenSandbox API 密钥 |
+| `FILE_*` | 见 [file-upload-download-plan.md](file-upload-download-plan.md) | | 文件上传/下载/存储后端（FILE_STORAGE_TYPE=local/s3 等 15 项） |
+| `AGENT_CLEANUP_*` | 见 [api.md](api.md#清理配置) | | confirm TTL / turn 租约 / 审计与会话保留期 |
 
 ---
 

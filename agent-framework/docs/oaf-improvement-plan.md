@@ -1,5 +1,8 @@
 # OAF 规范补全 + OAF → AgentScope Workspace 转换方案
 
+>
+> **现状核对（2026-09-07）**：本文 v0.8.0 字段解析与 `OAF → Workspace` 转换已落地（`OafConfigLoader` + `WorkspaceInitializer`）。**skills 不再本地复制**进 workspace：改为由 `AgentScopeConfig` 把 `/config/skills` 注册为 L2 `FileSystemSkillRepository`（只读、source=`oaf-package`），HarnessSkillMiddleware 每轮重扫，PVC 上目录原位变化运行中即生效（详见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)）。`/skills` 端点的数据源现为 `SkillCatalogService`：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准，字段含 `dynamic` / `declaredButMissing`。
+
 ## 1. 现状分析
 
 ### 1.1 字段解析覆盖度

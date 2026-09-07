@@ -1,5 +1,8 @@
 # MySQL 文件系统实现方案
 
+>
+> **现状核对（2026-09-07）**：`MysqlDistributedStore`（含 `JdbcStore`）已为默认实现，**仅在 `SANDBOX_ENABLED=true` 时切到 `OpenSandboxFilesystemSpec`**。工作区文件路由（`MEMORY.md`/`memory/`/`skills/`/`subagents/`/`knowledge`/`sessions`/`tasks`）通过 `RemoteFilesystemSpec(IsolationScope.USER)` 自动分桶到 `agent_fs` 表。`agent_fs` 表结构见 [checkpoint-design.md](checkpoint-design.md)。
+
 ## 1. 现状分析
 
 ### 1.1 当前 MySQL 持久化

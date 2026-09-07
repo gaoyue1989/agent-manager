@@ -1,5 +1,8 @@
 # 文件上传下载支持设计方案（存储双后端 local/S3 + DB 元数据 + 沙箱注入 + 事件回传）
 
+>
+> **现状核对（2026-09-07）**：本文方案已落地。**端点**：`POST /files/upload`（multipart）、`GET /files/{fileId}`（下载/预览，?inline=1）。**存储**：双后端（`FILE_STORAGE_TYPE=local`/`s3`），实现见 `service/storage/LocalFileStorage.java` / `S3FileStorage.java`，七牛云已实测（`S3FileStorageIT` 集成测试）。**元数据表**：`file_asset`（uuid + storage_key + 状态 pending/injected/archived + user_id/session_id 维度）。**沙箱注入**：非沙箱直写本地工作区（幂等 `uniqueWorkspacePath`）；沙箱模式 pending 挂账，OpenSandbox `create/resume` + `SandboxUserKeyMiddleware` 首次 exec 注入。**事件回传**：`POST /threads/{sid}/chat` SSE 流在 `present_file` 工具结果结束时合成 `file_ready` 帧（`SessionStreamController.emitFileReady`，下载 URL 前缀 `/agent/release-agent/files/{fileId}`）。**历史回放**：`GET /threads/{sid}/history` 补齐文件下载卡片（`ThreadControllerTest` 12 用例覆盖）。
+
 ## 1. 背景与目标
 
 ### 1.1 背景

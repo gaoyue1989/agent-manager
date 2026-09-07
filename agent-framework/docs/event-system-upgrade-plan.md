@@ -1,10 +1,18 @@
 # Debug 页面事件系统升级方案
 
-> **状态: ✅ 已完成 (2026-08-10)，事件交付已演进为单次流 SSE**
+> **状态: ✅ 已完成 (2026-08-10，历史快照)，事件交付已演进为单次流 SSE**
 > 基于 [AgentScope 2.0 Message & Event 文档](https://java.agentscope.io/v2/zh/docs/building-blocks/message-and-event.html)，
 > 对 Debug 页面和后端接口进行升级，补齐缺失的事件类型支持。
 > 实施时发现实际 JAR (agentscope-core 2.0.0) 与文档 API 存在 4 处差异（见 1.4 节），已按实际 API 适配。
-> 新增/更新测试 8 个，全部 166 个测试通过。
+> 新增/更新测试 8 个；当时 166 个测试通过（现 61 测试类 / 456 个 @Test）。
+>
+> **现状核对（2026-09-07）**：
+> - §2.2.2「`StreamController.toSSE` 扩展」整节过时：SSE 字段提取已抽为共用类 `AgentEventSseSerializer`（`AgentEventSseSerializer.java:47-139`），StreamController/SessionStreamController 共用；`StreamController.toSSE` 为薄代理。
+> - §1.4 表格 `data_block_start` 输出 `media_type`、`data_block_delta` 字段名 `data`、`model_call_start` 含 `model_name` —— 实际键分别为 `delta` / 无 `media_type` / 无 `model_name`（`AgentRuntimeService.java:227-369`）。
+> - §2.4 映射表缺失：`tool_call_*` 携带 `tool_call_name`（`AgentRuntimeService.java:264,273,284,297,306`）、`model_call_end` 含 `total_tokens`（:369）、`agent_start` 含 `role`（:188）、HITL `permission_ask`（:332-350）、`ToolResultDataDelta` 含 `url`（AgentEventSseSerializer.java:92-95）、TOOL_CALL_START 含 MCP Apps `ui` 字段（:63-65）；单次流另发合成帧 `waiting`（SessionStreamController.java:307-311）与 `file_ready`（:232-267, present_file 工具结果 JSON 解析）。
+> - §1.2 「HITL 事件 ❌ 丢弃」已不成立：HITL 现以 `permission_ask` 帧交付（chat.js:981 渲染确认卡片）。
+> - §2.3.1 chat.js：Channel 模式为 `sendChannelSingleStream`（chat.js:1047-1093）走 `POST /threads/{sid}/chat`，A2A 模式为 `sendA2AStream`（:1095-1152）经 `handleFrame` 归一化大写事件后统一交给 `handleEvent`（:870）。
+> - §2.3.3 工具/思维链处理器函数名按代码实际更新：`onToolCallStart/Delta/End`、`onToolResultStart/Delta/End`、`ensureThinking/endThinking`、`appendThinkingDelta`（chat.js:482-602）。
 > **后续演进**：长连接 SSE（SessionEventBus + GET /events 订阅）已被 stateless-single-stream-plan.md 取代，
 > 改为 POST /threads/{sid}/chat 单次流 SSE（SSE 直吐，执行完即关闭），详见新架构文档。
 

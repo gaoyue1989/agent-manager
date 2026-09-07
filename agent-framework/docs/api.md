@@ -38,10 +38,20 @@ curl http://localhost:8100/
         "threads": "/threads",
         "health": "/health",
         "debug": "/debug",
-        "chat_stream": "/chat/stream"
+        "metadata": "/metadata"
     },
     "engine": "AgentScope Java 2.0"
 }
+```
+
+---
+
+### GET /metadata
+
+完整 Agent 元数据（skills 返回对象数组而非数量；`?includeDetails=true` 追加 tools/subAgents/model/endpoints）。
+
+```bash
+curl http://localhost:8100/metadata
 ```
 
 ---
@@ -241,8 +251,9 @@ curl -s -N -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/chat"
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `message` | String | ✓ | 用户消息 |
+| `message` | String | ✓* | 用户消息（*与 `fileIds` 至少一项） |
 | `userId` | String | | 用户标识（默认 `debug-user`） |
+| `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
 
 **响应 (SSE):**
 
@@ -261,6 +272,7 @@ data: {"type":"AGENT_END","replyId":"..."}
 | `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据） |
 | `TOOL_RESULT_END` | 工具返回结果 |
 | `permission_ask` | HITL 暂停点（需人工确认） |
+| `file_ready` | `present_file` 工具产物就绪（含 `file_id`/`file_name`/`mime_type`/`size`/`download_url`，前端渲染下载卡片） |
 | `AGENT_END` | Agent 执行完成（流关闭） |
 | `done` | 流完成 |
 | `error` | 错误（如 `turn_in_progress` 排队超时） |
@@ -310,6 +322,37 @@ data: {"type":"error","error":"turn_in_progress: session '...' has an active tur
 
 ---
 
+## 文件 API（file-upload-download-plan）
+
+### POST /files/upload
+
+multipart 单文件上传。校验（文件名 sanitize / MIME 白名单 / 大小上限 / pending 数量上限）→ 先写存储后端 → 落 `file_asset` 元数据（落库失败回滚存储对象）。非沙箱模式直接 `injected`；沙箱模式 `pending` 挂账，首次 exec 时注入沙箱。
+
+```bash
+curl -X POST "http://localhost:8100/files/upload" \
+  -F "file=@report.pdf" -F "userId=alice" -F "sessionId=acme-test-agent:thread-1"
+```
+
+| 表单字段 | 必填 | 说明 |
+|----------|------|------|
+| `file` | ✓ | 单文件（v1） |
+| `userId` | | 默认 `debug-user`（沙箱注入命名空间） |
+| `sessionId` | | 上传时绑定会话 |
+
+**响应:**
+
+```json
+{"file_id": "uuid", "file_name": "report.pdf", "mime_type": "application/pdf", "size": 10240}
+```
+
+**错误码:** 403 `upload_disabled`、400 `no_file_uploaded`/`invalid_file_name`、415 `unsupported_file_type`、413 `file_too_large`、429 `too_many_pending_files`、500 `storage_write_failed`/`metadata_write_failed`。
+
+### GET /files/{fileId}
+
+下载/预览（`?inline=1` 时仅 image/*、text/* 内联展示；平台无认证，UUID 不可枚举即授权）。
+
+---
+
 ## Channel SSE API
 
 ### GET /chat/stream
@@ -341,6 +384,25 @@ curl -s -N "http://localhost:8100/chat/stream?message=hello&userId=alice"
 ### tasks/cancel
 
 取消任务。
+
+### tasks/resubscribe
+
+重新订阅任务事件流（SDK 透传）。
+
+---
+
+## 调试 API（/debug）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/debug` | 调试页面（静态资源） |
+| GET | `/debug/config/env` | 生效环境变量（脱敏） |
+| GET | `/debug/config/oaf` | OAF 配置 + 技能合并视图（dynamic/declaredButMissing 标记） |
+| GET | `/debug/database/status` | 数据库连接健康状态 |
+| GET | `/debug/memory` | MEMORY.md / memory/ 内容查看 |
+| GET | `/debug/sandbox` | 沙箱状态（沙箱模式） |
+| GET | `/debug/workspace` | 工作区文件浏览 |
+| GET | `/debug/logs` | 运行日志（内存 Appender） |
 
 ---
 

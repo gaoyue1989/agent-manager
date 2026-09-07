@@ -1,5 +1,8 @@
 # OpenSandbox 集成设计方案
 
+>
+> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。USER 级复用（`IsolationScope.USER`） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由 SDK 注入 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
+
 ## 1. 背景与目标
 
 ### 1.1 背景

@@ -133,8 +133,13 @@ Tomcat started on port 8100
 | `SERVER_HOST` | string | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | int | `8100` | | 服务端口 |
 | `CHECKPOINT_JDBC_URL` | string | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
+| `CHECKPOINT_DB_NAME` | string | — | | agent_state 所在库名（可选，未设时从 JDBC URL 解析） |
 | `CHECKPOINT_USERNAME` | string | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | string | `Agent@Manager2026` | | MySQL 密码 |
+| `SANDBOX_*` / `OPENSANDBOX_*` | — | 见设计文档 §5.3 | | 沙箱模式（SANDBOX_ENABLED=true 启用） |
+| `FILE_*` | — | 见 file-upload-download-plan.md | | 文件上传/下载/存储后端（FILE_STORAGE_TYPE=local/s3） |
+| `AGENT_CLEANUP_*` | — | 见 api.md 清理配置 | | confirm TTL / turn 租约 / 审计与会话保留期 |
+| `OTEL_*` | — | 见 tracing-design.md | | 链路追踪（OTEL_EXPORTER_OTLP_ENDPOINT 设置即启用） |
 
 ### 4.2 AGENTS.md 配置字段
 
@@ -201,16 +206,25 @@ LLM 推理 → 选择工具 (如 get_weather)
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 服务信息 + 协议声明 |
+| GET | `/metadata` | 完整 Agent 元数据（`?includeDetails=true` 含 tools/subAgents/model） |
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
-| GET | `/skills` | 技能列表 |
+| GET | `/skills` | 技能列表（声明 ∪ /config/skills 目录事实合并） |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 |
-| GET | `/debug` | 调试页面 (A2A/Channel 双模式) |
+| GET | `/debug` | 调试页面（302 → `/debug/`） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
-| GET | `/chat/stream` | Channel SSE 流式对话 |
-| POST | `/` | A2A JSON-RPC (message/send, message/stream) |
+| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm |
+| GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
+| POST | `/threads/{sid}/chat` | 单次流 SSE 对话（主对话入口，支持 fileIds） |
+| POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步/流式） |
+| POST | `/files/upload` | 文件上传 |
+| GET | `/files/{fileId}` | 文件下载/预览 |
+| GET | `/chat/stream` | Channel SSE 一次性流（旧，保留兼容） |
+| POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
+
+完整参数与 SSE 帧格式见 [api.md](api.md)。
 
 ---
 
@@ -220,6 +234,9 @@ LLM 推理 → 选择工具 (如 get_weather)
 |------|------|
 | `message/send` | 同步消息 (JSON 响应) |
 | `message/stream` | 流式消息 (SSE 响应) |
+| `tasks/get` | 查询任务状态（从 agent_state 构造 Task） |
+| `tasks/cancel` | 取消任务 |
+| `tasks/resubscribe` | 重新订阅任务事件流 |
 
 ### 请求格式
 
@@ -243,7 +260,17 @@ LLM 推理 → 选择工具 (如 get_weather)
 
 ---
 
-## 8. Channel SSE API
+## 8. 对话 API
+
+单次流（主对话入口）与确认流：
+
+```
+POST /threads/{sessionId}/chat        # 单次流 SSE：{message?, userId?, fileIds?}
+POST /threads/{sessionId}/confirm     # HITL 同步确认：{results:[{tool_call_id, confirmed, accept_rule}]}
+POST /threads/{sessionId}/confirm-stream  # HITL 流式确认（同请求体）
+```
+
+Channel SSE（旧，保留兼容）：
 
 ```
 GET /chat/stream?message=<text>&userId=<id>[&sessionId=<id>]
@@ -274,13 +301,21 @@ curl -s -X POST http://localhost:8100/ \
   -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"请只回复 welcome"}]}},"id":"1"}'
 ```
 
-### 9.3 Channel SSE
+### 9.3 单次流 SSE（主对话入口）
+
+```bash
+curl -s -N -X POST "http://localhost:8100/threads/debug:thread-1/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"请只回复welcome","userId":"test-user"}'
+```
+
+### 9.4 Channel SSE（旧）
 
 ```bash
 curl -s -N "http://localhost:8100/chat/stream?message=请只回复welcome&userId=test-user"
 ```
 
-### 9.4 LLM 连通性
+### 9.5 LLM 连通性
 
 ```bash
 curl -s "https://api.longcat.chat/openai/v1/chat/completions" \
@@ -291,7 +326,7 @@ curl -s "https://api.longcat.chat/openai/v1/chat/completions" \
 
 ---
 
-## 11. 内网离线开发镜像
+## 10. 内网离线开发镜像
 
 预装 JDK 21 + Maven 3.9.9 + 全量依赖缓存，适用于无法访问外网的内网环境：
 
@@ -314,7 +349,7 @@ docker run --rm -it -v $(pwd):/workspace -w /workspace \
 
 ---
 
-## 10. 常见问题（原 §10 不变）
+## 11. 常见问题
 
 ### Q: 服务启动后 LLM 返回错误
 

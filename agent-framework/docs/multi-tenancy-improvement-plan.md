@@ -1,5 +1,8 @@
 # 多租户隔离方案
 
+>
+> **现状核对（2026-09-07）**：本文方案已落地。多租户默认 `IsolationScope.USER`（`RemoteFilesystemSpec`），数据维度隔离如下：`AgentState` 按 `(userId, sessionId)` 存 `agent_state` 表；`MEMORY.md` / `memory/` / `sessions/` 按 userId 存 `agent_fs` 表；`skills/` 共享底座 + 用户覆盖（OAF 包 skills 在 L2 仓库只读，用户自学习在 L4 覆盖于 `agent_fs`，详见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)）。沙箱模式按 userId USER 级复用。RuntimeContext 透传：A2A `metadata.userId` / Channel `SendOptions.userId()` / 单次流 `userId` 字段，默认回退 `vendorKey`。
+
 ## 1. 现状分析
 
 ### 1.1 已实现的隔离能力

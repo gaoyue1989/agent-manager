@@ -2,7 +2,7 @@
 
 > **状态: 🚧 已实施 + 单元测试全绿 + Jaeger E2E 验证通过（2026-08-13）**
 >
-> - 步骤 1–13 完成：300 用例 0 失败；第十节 10 项验证全部通过
+> - 步骤 1–13 完成：当时 300 用例 0 失败（现 61 测试类 / 456 个 @Test）；第十节 10 项验证全部通过
 > - **最终选型：OTel Java Agent v2.12.0**（4.7 方案 A）——自研 HTTP Filter 方案实测 MVC 异步断链（验证 #5 失败），Agent 方案单一 trace_id 达成。生产部署走 Agent；`OtelConfig`/`HttpTracingFilter` 保留为无 Agent 环境的 fallback（第七节验证结果、第八节风险状态）
 > - 步骤 14 完成：Dockerfile 内置 agent jar + 自动注入 + Makefile `otel-agent` 目标（2026-08-13 验证 ✅，见 4.7 与第十节）
 > - 步骤 15 完成：Dockerfile.dev 预置 javaagent jar + OTel 1.61.0 依赖缓存，已导出离线镜像（2026-08-13）
@@ -1295,7 +1295,7 @@ docker run -d --name jaeger \
 |------|------|------|---------|
 | 单元测试 | JUnit 5 + Mockito + InMemorySpanExporter | 无外部服务 | 各 tracing 组件的 span 创建/属性/状态/委托 |
 | 集成验证 | 手动 E2E（第七节）+ Jaeger | 本地 Jaeger + MySQL + LLM key | 全链路 span 层级、trace 唯一性、沙箱模式 |
-| 回归保障 | 全量 `mvn test`（300 用例） | 无 | 确保 tracing 接入不破坏既有功能 |
+| 回归保障 | 全量 `mvn test`（当时 300 用例，现 456） | 无 | 确保 tracing 接入不破坏既有功能 |
 
 ### 13.2 测试基础设施 `TracingTestBase`
 
@@ -1462,7 +1462,7 @@ void shouldPassThroughWhenNoSdkRegistered() {
 2. **no-op 场景必须测**：`OTEL_TRACES_EXPORTER=none`（默认）时所有组件应透传且零开销——示例 3 覆盖。
 3. **Reactor 异步性**：span 结束发生在 `doOnComplete/doOnError`，断言前必须 `blockLast()` 或 `StepVerifier` 同步化；`Flux.defer` 保证惰性创建 span（订阅时才创建）。
 4. **不 mock OTel 全局对象**：用 `InMemorySpanExporter` 走真实链路，避免 `mock(Span.class)` 掩盖上下文传播问题。
-5. **全量回归**：`mvn test` 300 用例全量通过为验收底线；`LlmLoggingMiddlewareTest`、`InMemoryLogAppenderTest` 等既有测试不得因中间件链改动而失败。
+5. **全量回归**：`mvn test` 全量用例通过为验收底线（当前 61 测试类 / 456 个 @Test）；`LlmLoggingMiddlewareTest`、`InMemoryLogAppenderTest` 等既有测试不得因中间件链改动而失败。
 6. **离线环境**：`opentelemetry-sdk-testing` 为新增 test 依赖，离线开发镜像（Dockerfile.dev）需同步缓存（见 4.1 注意）。
 7. **随机 traceId 生成**（2026-08-13 实施时发现）：比例采样测试**不能用 UUID**——UUID v4 低位含变体位（`10`），导致 `longFromBase16String(traceId, 16)` 解析出的 64 位恒 ≥ 2^62，ratio:0.5 永远不可能采样（实测 1000/1000 不采样）。用 `String.format("%016x%016x", random.nextLong(), random.nextLong())` 生成均匀随机 traceId。
 8. **`Span.current()` 捕获时机**（2026-08-13）：`runWithContext` 的 makeCurrent 在信号投递时生效（`ContextPropagationOperator` 的 hook 包装 subscriber），`Flux.defer` 的 supplier 在订阅期执行，此时上下文尚未激活。断言"下游 Span.current() == reasoning span"必须在 `doOnNext`/`doOnComplete` 类信号回调中捕获。

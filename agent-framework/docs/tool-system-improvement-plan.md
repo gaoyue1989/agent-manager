@@ -1,5 +1,8 @@
 # Agent Framework 工具体系现状分析与改进方案
 
+>
+> **现状核对（2026-09-07）**：工具能力已大幅扩展。**自定义工具**除 `get_current_time` / `echo` 外，新增 `present_file`（FileTools, 产物注册交付 → file_ready 帧）、`check_oaf_package` / `create_oaf_zip`（OafPackageTools, OAF 包校验与生成）。**MCP 工具**：`McpToolRegistrar` 已支持 `permissions.read_only: true` 强制只读绕过 HITL、`ActiveMCP.json.selectedTools.enabled` 子集过滤、`ui.tools.{tool}.resource_uri` 静态声明 + `tool.meta()` 动态发现、`ui.app_only: true` 仅卡片不入 LLM 工具集。**MCP Apps**（阶段一/二）已落地：UI 卡片渲染（沙箱 iframe + postMessage）+ 4.7 静默更新（`POST /mcp/ui-context`）。详细见 [mcp-apps-extension-plan.md](mcp-apps-extension-plan.md) 与 [agent-framework-design.md](agent-framework-design.md) §3、§7。
+
 ## 1. 现状分析
 
 ### 1.1 当前工具架构
