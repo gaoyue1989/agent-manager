@@ -852,7 +852,7 @@ node chat-ui-file-e2e.js
 | backend go test | 全绿（internal/k8s 挂载断言更新） |
 | E2E 非沙箱档 | 18/18 全绿（S1~S4 + X） |
 | E2E 沙箱档（SANDBOX=1） | **26/26 全绿**（S-S2 SKIP 说明；S-S6 纯 stdlib 解析 docx；**新增 S-S8 按描述生成 OAF 部署包**：zip 含 AGENTS.md → frontmatter 必填字段 → 平台上传校验通过） |
-| UI E2E（file-support-ui-e2e.js） | 沙箱档 **12/12**、非沙箱档 **12/12** 全绿（U1~U13，含 U4-U6/U7-U8 失败重试；**U11~U13 生成包对话场景**：file_ready 卡片 → zip PK 魔数 → 平台校验 code=0） |
+| UI E2E（file-support-ui-e2e.js） | 沙箱档 **15/15** 全绿（U1~U13 文件/生成包 + **U14~U16 历史会话**：列表展示/切换回放/继续对话上下文恢复；U4-U6/U7-U8/U11 失败自动重试） |
 | 手动验证 | 生成 weather-agent → 平台校验通过（packageId=64）；生成 echo-agent → upload_package 上传成功（packageId=66） |
 | 前端 build | 通过（附件上传/file_ready 卡片/图片内联） |
 

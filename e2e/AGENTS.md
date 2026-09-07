@@ -11,7 +11,7 @@
 | debug-console-e2e.js | 附 | Debug Console 子路径渲染（经 :30080） |
 | chat-ui-e2e.js | 附 | /assistant 对话真实 LLM 流式回复（经 :8911） |
 | file-support-e2e.sh | 附 | 文件上传下载：S1 上传文档/S2 上传图片(视觉)/S3 输出文档/S4 输出图片/X 异常/S8 生成 OAF 部署包（非沙箱 21 断言）；SANDBOX=1 启用沙箱专项 S-S1~S-S7（22 断言）+ S-S8/S-S9 生成包与发布全链路（合计 29 断言） |
-| file-support-ui-e2e.js | 附 | /assistant 文件对话 UI 12 用例：附件上传/读文件/present_file 卡片/下载（U1~U10）+ 生成 OAF 包对话（U11~U13，卡片/zip 魔数/平台校验） |
+| file-support-ui-e2e.js | 附 | /assistant 对话 UI 15 用例：附件上传/读文件/present_file 卡片/下载（U1~U10）+ 生成 OAF 包对话（U11~U13）+ 历史会话展示/切换回放/继续对话（U14~U16） |
 
 ## 运行前置
 

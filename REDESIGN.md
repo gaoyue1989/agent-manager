@@ -674,6 +674,7 @@ spec:
   - HITL 恢复走 `POST /threads/{sessionId}/confirm-stream`（results=[{tool_call_id,confirmed}]）
   - Next rewrites 将 `/agent/release-agent/*` 反代到 release-agent Service，任意入口同源可用
   - sessionId 存 localStorage（会话跨刷新延续）；HTTP 非安全上下文无 crypto.randomUUID，用时间戳+随机串兜底
+  - **历史会话（2026-09-06）**：复用 GET /threads + GET /threads/{sid}/history，前端历史面板展示最近 20 个 ChatUiChannel 会话（过滤 `*:gw-{hash}` key），点击切换 → 回放历史消息（含工具行与未消费 HITL 卡片重建）→ 继续对话由后端 checkpoint 自动恢复上下文；会话记录保留 7 天（SessionCleanupService）
 
 ### B.5 遗留待办
 

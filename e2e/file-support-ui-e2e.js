@@ -210,6 +210,78 @@ const shot = async (page, name) => { try { await page.screenshot({ path: path.jo
     check("U13 生成包通过平台校验", genValidOk, genValidOk ? "平台 code=0" : "平台校验失败或下载失败");
     await shot(page, "13-gen-package-valid");
 
+    // U14-U16: 历史会话展示 + 切换恢复 + 继续对话（上下文由后端 checkpoint 恢复）
+    // U14: 历史面板出现且含会话（本运行已产生主会话 + 生成包会话 ≥2 个）
+    await page.waitForFunction(() => {
+      const btn = document.querySelector('[data-testid="chat-send"]');
+      return btn && !btn.disabled;
+    }, { timeout: 30000 }).catch(() => {});
+    await page.click('[data-testid="history-btn"]');
+    await page.waitForSelector('[data-testid="history-panel"]', { timeout: 10000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 2000));
+    let historyCount = await page.$$eval('[data-testid="history-item"]', els => els.length);
+    check("U14 历史会话列表展示", historyCount >= 1, `items=${historyCount}`);
+    await shot(page, "14-history-panel");
+
+    // U15: 切换到另一个历史会话 → 消息回放（历史 user 消息可见）
+    let switched = false;
+    let firstUserMsg = "";
+    if (historyCount >= 2) {
+      // 点第二个历史项（非当前会话，通常为生成包会话或主会话）
+      const items = await page.$$('[data-testid="history-item"]');
+      await items[1].click();
+      await new Promise(r => setTimeout(r, 4000)); // 等待回放渲染
+      const userMsgs = await page.evaluate(() => {
+        // 用户消息是右对齐蓝色气泡（role=user），取文本
+        return Array.from(document.querySelectorAll('[data-testid="assistant-page"] .justify-end > div'))
+          .map(el => el.textContent.trim());
+      });
+      if (userMsgs.length > 0) {
+        switched = true;
+        firstUserMsg = userMsgs[0];
+      }
+      check("U15 历史会话切换并回放消息", switched, switched ? `首条用户消息: ${firstUserMsg.slice(0, 60)}` : "无回放消息");
+    } else {
+      check("U15 历史会话切换并回放消息", false, `历史会话不足（items=${historyCount}）`);
+    }
+    await shot(page, "15-history-replay");
+
+    // U16: 继续对话——LLM 上下文恢复（问首个话题，回复应与该会话首条消息关联）
+    if (switched) {
+      await page.waitForFunction(() => {
+        const btn = document.querySelector('[data-testid="chat-send"]');
+        return btn && !btn.disabled;
+      }, { timeout: 30000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 2000));
+      await page.$eval('[data-testid="chat-input"]', (el) => { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
+      await page.type('[data-testid="chat-input"]', "我们这个会话里第一个话题是什么？用一句话概括");
+      await page.click('[data-testid="chat-send"]');
+      let ctxReply = "";
+      for (let i = 0; i < 24; i++) {
+        await new Promise(r => setTimeout(r, 5000));
+        ctxReply = await page.evaluate(() => {
+          const msgs = document.querySelectorAll('[data-testid="assistant-msg"]');
+          return msgs.length ? msgs[msgs.length - 1].textContent.trim() : "";
+        });
+        const busy = await page.evaluate(() => {
+          const btn = document.querySelector('[data-testid="chat-send"]');
+          return btn ? btn.disabled : false;
+        });
+        if (ctxReply && !ctxReply.includes("思考中") && !busy) break;
+      }
+      // 上下文恢复验证：从首条用户消息提取特征 token（文件名/包名等英数字 ≥4 字符），
+      // 回复关联任一 token 即证明 LLM 记得该会话上下文
+      const tokens = (firstUserMsg.match(/[a-z0-9][a-z0-9._-]{3,}/gi) || [])
+        .filter(t => !/^(chat|send|http)/i.test(t));
+      const ctxOk = ctxReply.length > 20 && !ctxReply.includes("思考中")
+        && tokens.some(t => ctxReply.toLowerCase().includes(t.toLowerCase()));
+      check("U16 历史会话继续对话（上下文恢复）", ctxOk,
+        ctxOk ? `回复关联 token: ${tokens.find(t => ctxReply.toLowerCase().includes(t.toLowerCase()))}` : `tokens=${tokens.join(",")} 回复: ${ctxReply.slice(0, 100)}`);
+    } else {
+      check("U16 历史会话继续对话（上下文恢复）", false, "U15 未切换成功");
+    }
+    await shot(page, "16-history-continue");
+
     // 最终截图
     await shot(page, "final-state");
     console.log(`\n截图目录: ${screenshots}/`);

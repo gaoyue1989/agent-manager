@@ -2,6 +2,7 @@
 // 发布助手对话：无状态单次流（POST /threads/{sessionId}/chat，SSE 增量渲染）
 // HITL：permission_ask 渲染确认卡片 → /threads/{sessionId}/confirm-stream 恢复
 // 文件：附件上传（/files/upload）→ chat 携带 fileIds；file_ready 事件渲染下载卡片
+// 历史：GET /threads 列表 + GET /threads/{sid}/history 回放；点击切换恢复上下文继续对话
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const AGENT_BASE = "/agent/release-agent";
@@ -15,6 +16,7 @@ type ChatMsg = {
 type FileCard = { file_id: string; file_name: string; mime_type: string; size: number; download_url: string };
 type AttachItem = { fileId: string; name: string; mime: string; size: number };
 type ConfirmCard = { toolCalls: { tool_call_id: string; name: string; input: unknown }[] };
+type ThreadItem = { peer: string; fullKey: string; updatedAt: string };
 
 // HTTP 环境非安全上下文无 crypto.randomUUID，用时间戳+随机串兜底
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -29,6 +31,15 @@ function getSessionId(): string {
   return sid;
 }
 
+// agent_state 会话 key 为 "{peer}:gw-{hash}"（ChatUiChannel 固定 gw-hash）；
+// chat 端点以 peer（冒号前部分）为 sessionId，peer 相同即恢复同一会话上下文。
+// A2A 来源会话（后缀为 vendorKey 非 gw-）不展示。
+function parseChatThread(sessionId: string): ThreadItem | null {
+  const idx = sessionId.indexOf(":gw-");
+  if (idx <= 0) return null;
+  return { peer: sessionId.slice(0, idx), fullKey: sessionId, updatedAt: "" };
+}
+
 export default function AssistantPage() {
   const [messages, setMessages] = useState<ChatMsg[]>([
     { role: "system", content: "我是 OAF 平台的智能发布助手。可以让我发布配置包、查询服务状态、更新环境变量、重新发布或下线服务。" },
@@ -40,6 +51,69 @@ export default function AssistantPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const sessionId = useRef<string>("");
+
+  // 历史会话：GET /threads 列表（ChatUiChannel 来源，最近 20 条）；showHistory 控制侧栏显隐
+  const [threads, setThreads] = useState<ThreadItem[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const loadThreads = useCallback(async () => {
+    try {
+      const resp = await fetch(`${AGENT_BASE}/threads`);
+      if (!resp.ok) return;
+      const list: any[] = await resp.json();
+      const items = list
+        .map((t) => {
+          const p = parseChatThread(t.session_id ?? "");
+          return p ? { ...p, updatedAt: (t.updated_at ?? "").replace("T", " ").slice(0, 19) } : null;
+        })
+        .filter(Boolean) as ThreadItem[];
+      setThreads(items.slice(0, 20));
+    } catch { /* 列表加载失败静默（面板显示空态） */ }
+  }, []);
+
+  /** 历史消息回放：GET /threads/{fullKey}/history → ChatMsg[]（含未消费 HITL 确认卡片重建） */
+  const loadHistory = useCallback(async (fullKey: string) => {
+    const msgs: ChatMsg[] = [];
+    try {
+      const resp = await fetch(`${AGENT_BASE}/threads/${encodeURIComponent(fullKey)}/history`);
+      if (resp.ok) {
+        const data = await resp.json();
+        for (const m of (data.messages ?? [])) {
+          if (m.role === "user") {
+            msgs.push({ role: "user", content: m.content ?? "" });
+          } else if (m.role === "assistant") {
+            // assistant 消息可能携带工具调用 → 渲染为已完成的工具行
+            for (const tc of (m.tool_calls ?? [])) {
+              msgs.push({ role: "tool", content: `🔧 ${tc.name}`, pending: false });
+            }
+            if (m.content) msgs.push({ role: "assistant", content: m.content });
+          }
+        }
+        // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）
+        if (data.pendingConfirm?.tools?.length) {
+          try {
+            msgs.push({ role: "assistant", content: "", confirm: { toolCalls: data.pendingConfirm.tools } });
+          } catch { /* 工具格式异常忽略 */ }
+        }
+      }
+    } catch { /* 回放失败按空会话处理（上下文仍在后端，不影响继续对话） */ }
+    return msgs;
+  }, []);
+
+  /** 切换到历史会话：更新本地会话 id → 回放历史消息（上下文由后端 checkpoint 自动恢复） */
+  const selectSession = useCallback(async (item: ThreadItem) => {
+    if (busy) return;
+    window.localStorage.setItem("oaf-assistant-sid", item.peer);
+    sessionId.current = item.peer;
+    setHistoryLoading(true);
+    setShowHistory(false);
+    const msgs = await loadHistory(item.fullKey);
+    setMessages(msgs.length > 0
+      ? msgs
+      : [{ role: "system", content: "该会话暂无可展示的历史消息，可直接继续对话。" }]);
+    setHistoryLoading(false);
+  }, [busy, loadHistory]);
 
   useEffect(() => {
     sessionId.current = getSessionId();
@@ -231,12 +305,42 @@ export default function AssistantPage() {
     <div data-testid="assistant-page" className="flex flex-col h-[calc(100vh-8rem)]">
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-xl font-semibold">发布助手</h1>
-        <button onClick={resetSession} data-testid="new-session"
-          className="text-xs px-2 py-1 border rounded hover:bg-gray-100">新会话</button>
+        <div className="flex gap-2">
+          <button onClick={async () => { setShowHistory((v) => !v); if (!showHistory) await loadThreads(); }}
+            data-testid="history-btn"
+            className="text-xs px-2 py-1 border rounded hover:bg-gray-100">历史会话</button>
+          <button onClick={resetSession} data-testid="new-session"
+            className="text-xs px-2 py-1 border rounded hover:bg-gray-100">新会话</button>
+        </div>
       </div>
 
+      {showHistory && (
+        <div data-testid="history-panel" className="mb-2 border rounded bg-white p-2 max-h-64 overflow-y-auto">
+          {threads.length === 0 ? (
+            <p className="text-xs text-gray-400 p-2">暂无历史会话（发送消息后自动记录，保留 7 天）</p>
+          ) : (
+            <ul className="space-y-1">
+              {threads.map((t) => (
+                <li key={t.fullKey}>
+                  <button onClick={() => selectSession(t)} disabled={busy}
+                    data-testid="history-item"
+                    className={`w-full text-left text-xs px-2 py-1.5 rounded hover:bg-blue-50 disabled:opacity-50 ${sessionId.current === t.peer ? "bg-blue-100 font-medium" : ""}`}>
+                    <span className="font-mono">{t.peer}</span>
+                    <span className="float-right text-gray-400">{t.updatedAt}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       <div ref={listRef} className="flex-1 overflow-y-auto bg-white border rounded p-4 space-y-3">
-        {messages.map((m, i) => <Bubble key={i} msg={m} onConfirm={(ok) => m.confirm && sendConfirm(m.confirm, ok)} />)}
+        {historyLoading ? (
+          <p className="text-xs text-gray-400">加载历史会话…</p>
+        ) : (
+          messages.map((m, i) => <Bubble key={i} msg={m} onConfirm={(ok) => m.confirm && sendConfirm(m.confirm, ok)} />)
+        )}
       </div>
 
       <div className="mt-3">
