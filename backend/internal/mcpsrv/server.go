@@ -28,6 +28,18 @@ func New(core *service.Core) http.Handler {
 
 // registerTools 注册全部工具（与 REST /api/v1 一一对应）。
 func registerTools(s *mcp.Server, core *service.Core) {
+	// ---- 环境/镜像 ----
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "list_images",
+		Description: "列出平台当前环境可用的镜像列表与默认镜像。" +
+			"发布前应调用它确定 image 参数——镜像名（registry 前缀、tag）随环境变化，不要凭记忆写死。",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, JSONOut, error) {
+		return okResult(map[string]any{
+			"images":       core.Cfg.ImageOptions,
+			"defaultImage": core.Cfg.DefaultImage,
+		})
+	})
+
 	// ---- 配置包 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "upload_package",

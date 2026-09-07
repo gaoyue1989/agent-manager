@@ -48,6 +48,7 @@ func newMCPClient(t *testing.T) (*mcp.ClientSession, *service.Core, func()) {
 	core := service.NewCore(db, &store.FS{Root: dir}, k8sfake.New(), service.ConfigView{
 		Namespace: "test", IngressClass: "nginx", IngressHost: "1.2.3.4", IngressPort: 30080,
 		DefaultImage:  "agent-framework:latest",
+		ImageOptions:  []service.ImageOption{{Image: "agent-framework:latest", Label: "Agent Framework"}},
 		ImageAllowed:  func(img string) bool { return img == "agent-framework:latest" },
 		RegisterRetry: 0,
 	})
@@ -90,6 +91,27 @@ func call(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any)
 		m = map[string]any{"items": list}
 	}
 	return false, m, text
+}
+
+// TestMCPListImages：镜像列表按环境注入（AVAILABLE_IMAGES），不写死。
+func TestMCPListImages(t *testing.T) {
+	cs, _, done := newMCPClient(t)
+	defer done()
+
+	isErr, out, _ := call(t, cs, "list_images", map[string]any{})
+	if isErr {
+		t.Fatalf("list_images: %v", out)
+	}
+	imgs, ok := out["images"].([]service.ImageOption)
+	if !ok || len(imgs) == 0 {
+		t.Fatalf("images should be non-empty slice, got %T %v", out["images"], out["images"])
+	}
+	if imgs[0].Image != "agent-framework:latest" {
+		t.Fatalf("images[0]=%v want test fixture image", imgs[0])
+	}
+	if out["defaultImage"] != "agent-framework:latest" {
+		t.Fatalf("defaultImage=%v", out["defaultImage"])
+	}
 }
 
 func TestMCPUploadAndListPackages(t *testing.T) {

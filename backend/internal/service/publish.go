@@ -25,12 +25,19 @@ type Core struct {
 }
 
 // ConfigView 发布所需的最小配置集（避免直接依赖 config.Config，便于测试）。
+// ImageOption 可选镜像项（MCP list_images 对外暴露；镜像名按环境而异，不写死）。
+type ImageOption struct {
+	Image string `json:"image"`
+	Label string `json:"label,omitempty"`
+}
+
 type ConfigView struct {
 	Namespace                      string
 	IngressClass                   string
 	IngressHost                    string
 	IngressPort                    int
 	DefaultImage                   string
+	ImageOptions                   []ImageOption
 	ImageAllowed                   func(string) bool
 	ResCPU, ResMem, LimCPU, LimMem string
 	RegisterTimeout                time.Duration

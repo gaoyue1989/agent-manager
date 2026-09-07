@@ -39,6 +39,7 @@ func main() {
 		IngressHost:     cfg.IngressHost,
 		IngressPort:     cfg.IngressPort,
 		DefaultImage:    cfg.DefaultImage,
+		ImageOptions:    toServiceImages(cfg.AvailableImages),
 		ImageAllowed:    cfg.IsAllowedImage,
 		ResCPU:          cfg.ResourceRequestsCPU,
 		ResMem:          cfg.ResourceRequestsMem,
@@ -68,6 +69,14 @@ func toHandlerImages(opts []config.ImageOption) []struct{ Image, Label string } 
 	out := make([]struct{ Image, Label string }, 0, len(opts))
 	for _, o := range opts {
 		out = append(out, struct{ Image, Label string }{o.Image, o.Label})
+	}
+	return out
+}
+
+func toServiceImages(opts []config.ImageOption) []service.ImageOption {
+	out := make([]service.ImageOption, 0, len(opts))
+	for _, o := range opts {
+		out = append(out, service.ImageOption{Image: o.Image, Label: o.Label})
 	}
 	return out
 }
