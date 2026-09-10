@@ -249,6 +249,11 @@ public class OafPackageTools {
         }
         var fm = new LinkedHashMap<String, String>();
         for (int i = 1; i < end; i++) {
+            // 只取顶层键：跳过嵌套缩进行（如 model.name），否则嵌套键会覆盖顶层同名键，
+            // 导致 name 被覆盖成 model.name（含 "."）而永远报 kebab-case 校验失败
+            if (!lines[i].isBlank() && (lines[i].charAt(0) == ' ' || lines[i].charAt(0) == '\t')) {
+                continue;
+            }
             var line = lines[i].trim();
             if (line.isBlank() || line.startsWith("#")) {
                 continue;

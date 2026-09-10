@@ -82,4 +82,26 @@ class LlmLoggingMiddlewareTest {
 
         assertEquals(1, logger.getCalls("user-9").size());
     }
+
+    /** 回归锁：max-iterations 总结等裸模型调用 tools=null，曾 NPE 导致 "Error generating summary" */
+    @Test
+    void shouldTolerateNullTools() {
+        var logger = new LLMLogger();
+        var middleware = new LlmLoggingMiddleware(logger);
+        var agent = mock(Agent.class);
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("acme-test-agent:thread-1");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), null, null, model);
+
+        middleware.onModelCall(agent, ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 1, 2, 0.1))))
+            .blockLast();
+
+        var calls = logger.getCalls("acme-test-agent:thread-1");
+        assertEquals(1, calls.size());
+        assertEquals(0, ((List<?>) calls.get(0).request().get("tools")).size());
+    }
 }

@@ -39,9 +39,12 @@ public class LlmLoggingMiddleware implements MiddlewareBase {
                     "messages", input.messages().stream()
                         .map(this::toSimpleMessage)
                         .toList(),
-                    "tools", input.tools().stream()
-                        .map(ToolSchema::getName)
-                        .toList());
+                    // max-iterations 总结等裸模型调用不带 tools（null），需判空防 NPE
+                    "tools", input.tools() == null
+                        ? java.util.List.of()
+                        : input.tools().stream()
+                            .map(ToolSchema::getName)
+                            .toList());
                 var usage = end.getUsage();
                 var response = Map.<String, Object>of(
                     "duration_ms", (System.nanoTime() - startNanos) / 1_000_000,

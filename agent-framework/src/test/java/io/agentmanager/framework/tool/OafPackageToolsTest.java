@@ -77,6 +77,47 @@ class OafPackageToolsTest {
         assertFalse(result.contains("\"valid\":true"), "空内容应不通过: " + result);
     }
 
+    /** 回归锁：嵌套 model.name 曾平铺覆盖顶层 name（校验器看到 mimo-v2.5）导致 kebab-case 永远失败、20 轮跑满 */
+    @Test
+    void nestedModelNameDoesNotOverrideTopLevelName() {
+        var md = """
+            ---
+            name: image-recognition-agent
+            description: 多模态图片识别agent
+            version: 1.0.0
+            vendorKey: oaf-platform
+            agentKey: image-recognition
+            author: OAF Platform
+            license: MIT
+            model:
+              provider: openai
+              name: mimo-v2.5
+            config:
+              temperature: 0.3
+              max_tokens: 4096
+            ---
+            # 多模态图片识别Agent
+            正文
+            """;
+        var result = tools.checkOafPackage(md);
+        assertTrue(result.contains("\"valid\":true"), "嵌套 model.name 不应覆盖顶层 name: " + result);
+    }
+
+    /** 回归锁：线上实际失败路径——带 model 段的 frontmatter 打包曾被 name 误判拒绝 */
+    @Test
+    void createOafZipAcceptsFrontmatterWithModelSection() {
+        var store = org.mockito.Mockito.mock(FileAssetStore.class);
+        var storage = org.mockito.Mockito.mock(FileStorage.class);
+        var wired = new OafPackageTools(store, storage,
+            io.agentmanager.framework.controller.FileControllerTest.testProps());
+        var result = wired.createOafZip(null, "image-recognition-agent.zip",
+            "---\nname: image-recognition-agent\ndescription: 多模态图片识别agent\nversion: 1.0.0\n"
+                + "vendorKey: oaf-platform\nagentKey: image-recognition\nauthor: OAF Platform\nlicense: MIT\n"
+                + "model:\n  provider: openai\n  name: mimo-v2.5\n---\n正文",
+            null);
+        assertTrue(result.contains("\"file_id\""), "带 model 段应打包成功: " + result);
+    }
+
     @Test
     void createOafZipRejectsInvalidFrontmatter() {
         var store = org.mockito.Mockito.mock(FileAssetStore.class);
