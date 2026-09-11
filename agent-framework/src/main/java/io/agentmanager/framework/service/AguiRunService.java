@@ -47,6 +47,7 @@ public class AguiRunService {
     private final UploadWorkspaceInjector workspaceInjector;
     private final AguiInterruptStore interruptStore;
     private final AguiProperties props;
+    private final io.agentmanager.framework.model.OafConfig oafConfig;
 
     public AguiRunService(io.agentscope.harness.agent.HarnessAgent agent,
                           AguiAgentAdapter adapter,
@@ -55,7 +56,8 @@ public class AguiRunService {
                           ToolAuditStore toolAuditStore,
                           UploadWorkspaceInjector workspaceInjector,
                           AguiInterruptStore interruptStore,
-                          AguiProperties props) {
+                          AguiProperties props,
+                          io.agentmanager.framework.model.OafConfig oafConfig) {
         this.agent = agent;
         this.adapter = adapter;
         this.encoder = encoder;
@@ -64,6 +66,16 @@ public class AguiRunService {
         this.workspaceInjector = workspaceInjector;
         this.interruptStore = interruptStore;
         this.props = props;
+        this.oafConfig = oafConfig;
+    }
+
+    /**
+     * 运行时 agent 标识：优先 OAF 包 agentKey（镜像共用，/info 与路由校验一致），
+     * 缺失回落 agui.agent-id 配置。
+     */
+    private String runtimeAgentId() {
+        var key = oafConfig != null ? oafConfig.agentKey() : null;
+        return key == null || key.isBlank() ? props.agentId() : key;
     }
 
     /**
@@ -71,9 +83,10 @@ public class AguiRunService {
      * 输入校验 → D7/要点 2 裁剪 → resume 闭环（load/覆盖率/CAS）→ RuntimeContext 组装。
      */
     public PreparedRun prepare(RunAgentInput input, String agentId) {
-        if (agentId != null && !props.agentId().equals(agentId)) {
+        var expected = runtimeAgentId();
+        if (agentId != null && !expected.equals(agentId)) {
             throw new AguiRequestException(404,
-                "unknown agent '" + agentId + "', expected '" + props.agentId() + "'");
+                "unknown agent '" + agentId + "', expected '" + expected + "'");
         }
         if (input.getThreadId() == null || input.getThreadId().isBlank()) {
             throw new AguiRequestException(400, "threadId is required");

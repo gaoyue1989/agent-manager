@@ -39,6 +39,10 @@ class AguiRunServiceTest {
     private AguiInterruptStore interruptStore;
 
     private AguiRunService newService() {
+        return newService("release-agent");
+    }
+
+    private AguiRunService newService(String oafAgentKey) {
         agent = mock(io.agentscope.harness.agent.HarnessAgent.class);
         adapter = mock(AguiAgentAdapter.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
@@ -46,9 +50,17 @@ class AguiRunServiceTest {
         toolAuditStore = mock(ToolAuditStore.class);
         workspaceInjector = mock(UploadWorkspaceInjector.class);
         interruptStore = mock(AguiInterruptStore.class);
+        var oafConfig = new io.agentmanager.framework.model.OafConfig(
+            oafAgentKey, "agentmanager", oafAgentKey, "1.0.0", "agentmanager/" + oafAgentKey,
+            "test agent", "@acme", "MIT", List.of(), "You are a test agent.",
+            List.of(), List.of(), List.of(), List.of(), List.of(),
+            new io.agentmanager.framework.model.OafConfig.ModelConfig("openai", "gpt-4", ""),
+            new io.agentmanager.framework.model.OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
+            new io.agentmanager.framework.model.OafConfig.MemoryConfig("editable", Map.of()),
+            Map.of());
         return new AguiRunService(agent, adapter, ENCODER, turnLeaseStore,
             toolAuditStore, workspaceInjector, interruptStore,
-            new AguiProperties("release-agent", 30));
+            new AguiProperties("release-agent", 30), oafConfig);
     }
 
     private RunAgentInput input(String threadId, List<AguiMessage> messages) {
@@ -97,6 +109,17 @@ class AguiRunServiceTest {
         var e = assertThrows(AguiRunService.AguiRequestException.class,
             () -> svc.prepare(input("t", List.of()), "other-agent"));
         assertEquals(404, e.status());
+    }
+
+    @Test
+    void prepareShouldResolveAgentIdFromOafConfig() {
+        // OAF 包 agentKey 优先于 agui.agent-id 默认值（业务 agent 镜像共用场景）
+        var svc = newService("hitl-test");
+        assertDoesNotThrow(() -> svc.prepare(input("t", List.of(AguiMessage.userMessage("m1", "hi"))), "hitl-test"));
+        var e = assertThrows(AguiRunService.AguiRequestException.class,
+            () -> svc.prepare(input("t", List.of()), "release-agent"));
+        assertEquals(404, e.status());
+        assertTrue(e.getMessage().contains("expected 'hitl-test'"));
     }
 
     @Test

@@ -40,34 +40,44 @@ public class AguiThreadsController {
     private final AguiInterruptStore interruptStore;
     private final ConfirmContextStore confirmContextStore;
     private final TurnLeaseStore turnLeaseStore;
+    private final io.agentmanager.framework.model.OafConfig oafConfig;
 
     public AguiThreadsController(DataSource dataSource,
                                  AguiProperties props,
                                  AguiInterruptStore interruptStore,
                                  ConfirmContextStore confirmContextStore,
-                                 TurnLeaseStore turnLeaseStore) {
+                                 TurnLeaseStore turnLeaseStore,
+                                 io.agentmanager.framework.model.OafConfig oafConfig) {
         this.dataSource = dataSource;
         this.props = props;
         this.interruptStore = interruptStore;
         this.confirmContextStore = confirmContextStore;
         this.turnLeaseStore = turnLeaseStore;
+        this.oafConfig = oafConfig;
     }
 
     /**
      * agents 列表 + capabilities + transport（R7 spike 定稿）。
      * 响应结构按 CopilotKit 1.65 客户端实测契约：agents 为 <b>以 agentId 为键的对象 map</b>
      * （runtimeInfo.agents Object.entries 注册），非数组；capabilities 可选。
+     * agent 标识/描述取 OAF 包元数据（镜像共用，避免业务 agent 错报为 release-agent）。
      */
     @GetMapping("/info")
     public Map<String, Object> info() {
+        var key = oafConfig.agentKey();
+        var agentId = key == null || key.isBlank() ? props.agentId() : key;
+        var description = oafConfig.description();
+        if (description == null || description.isBlank()) {
+            description = "OAF Agent";
+        }
         var capabilities = new LinkedHashMap<String, Object>();
         capabilities.put("threads", true);
         capabilities.put("hitl", true);
         var agent = new LinkedHashMap<String, Object>();
-        agent.put("description", "OAF 平台智能发布助手");
+        agent.put("description", description);
         agent.put("capabilities", capabilities);
         var agents = new LinkedHashMap<String, Object>();
-        agents.put(props.agentId(), agent);
+        agents.put(agentId, agent);
         var result = new LinkedHashMap<String, Object>();
         result.put("agents", agents);
         result.put("version", "1.0.0");

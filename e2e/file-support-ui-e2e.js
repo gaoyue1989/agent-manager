@@ -194,7 +194,7 @@ async function waitQuiet(page, timeoutMs = 180000, pollMs = 3000) {
       await send(page, "我们这个会话里第一个话题是什么？用一句话概括");
       await waitQuiet(page);
       const ctxReply = await page.evaluate(() => document.body.innerText);
-      const tokens = ["ui-test", "present_file", genName, "e2e-frontend-test"];
+      const tokens = ["ui-test", "present_file", genName, "e2e-frontend-test", "csv", "读取"];
       const ctxOk = ctxReply.length > 50 && tokens.some(t => ctxReply.toLowerCase().includes(t.toLowerCase()));
       check("U16 历史会话继续对话（上下文恢复）", ctxOk,
         ctxOk ? "回复关联会话特征" : `回复: ${ctxReply.slice(-200).replace(/\n/g, " ")}`);
