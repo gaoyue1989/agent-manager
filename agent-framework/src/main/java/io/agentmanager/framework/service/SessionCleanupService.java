@@ -35,6 +35,7 @@ public class SessionCleanupService {
     private final ToolAuditStore toolAuditStore;
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
+    private final AguiInterruptStore aguiInterruptStore;
 
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
@@ -42,7 +43,8 @@ public class SessionCleanupService {
                                  ConfirmContextStore confirmContextStore,
                                  ToolAuditStore toolAuditStore,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
-                                 io.agentmanager.framework.service.storage.FileStorage fileStorage) {
+                                 io.agentmanager.framework.service.storage.FileStorage fileStorage,
+                                 AguiInterruptStore aguiInterruptStore) {
         this.dataSource = dataSource;
         this.sessionManager = sessionManager;
         this.turnLeaseStore = turnLeaseStore;
@@ -50,6 +52,7 @@ public class SessionCleanupService {
         this.toolAuditStore = toolAuditStore;
         this.props = props;
         this.fileStorage = fileStorage;
+        this.aguiInterruptStore = aguiInterruptStore;
     }
 
     /**
@@ -62,10 +65,11 @@ public class SessionCleanupService {
         // 1. 清理内存中的过期会话
         int memCleaned = sessionManager.cleanupExpired();
 
-        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log
+        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log / agui_interrupt
         turnLeaseStore.cleanupExpired();
         confirmContextStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
+        int aguiCleaned = aguiInterruptStore.deleteExpired();
 
         // 3. 清理会话记录（agent_state / agent_fs）
         Instant cutoff = Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS);
@@ -76,8 +80,8 @@ public class SessionCleanupService {
         //    超保留期（默认 7 天）且非 pending 状态的 upload 行 → 删行 + 删存储对象
         cleanupExpiredUploads();
 
-        log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}",
-            memCleaned, stateCleaned, fsCleaned);
+        log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}, agui_interrupt={}",
+            memCleaned, stateCleaned, fsCleaned, aguiCleaned);
     }
 
     /** 过期上传文件清理：删 DB 行 + 删存储对象（先删行后删对象，对象删除失败仅告警可重试） */

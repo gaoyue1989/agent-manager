@@ -304,6 +304,10 @@ public class AgentScopeConfig {
                 .middleware(new io.agentmanager.framework.service.ReasoningTracingMiddleware())
                 // LLM 调用记录（debug 页面，order=1，默认值，保留）
                 .middleware(new LlmLoggingMiddleware(llmLogger))
+                // AG-UI 路径 system prompt 注入（agui-migration-plan 要点 6）：UiContext 会话
+                // 上下文 + resume 防循环指引，经 RuntimeContext key 触发，无 key 时 no-op
+                // （共享 bean 旧链路不受影响；与 UiContextInjectionHook 注入条件互斥无双重注入）
+                .middleware(new io.agentmanager.framework.agui.OafAguiMiddleware(uiContextStore))
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)

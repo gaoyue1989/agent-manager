@@ -33,6 +33,7 @@ agent:
     enabled: ${SANDBOX_ENABLED:false}
     image: ${SANDBOX_IMAGE:opensandbox/code-interpreter:v1.1.0}
     timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:60}
+
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
     execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
@@ -70,3 +71,11 @@ otel:
       headers: ${OTEL_EXPORTER_OTLP_HEADERS:}
   service:
     name: ${OTEL_SERVICE_NAME:agent-framework}
+
+# AG-UI 端点（agui-migration-plan Phase 1）
+agui:
+  # 单 agent 标识（路由校验用；agentId 固定校验 release-agent）
+  agent-id: ${AGUI_AGENT_ID:release-agent}
+  # adapter run 级超时（分钟）：现链路无此限制，发布/长工具场景可能长跑；
+  # 0 或负数 = 禁用；默认 30 不低于 ingress 3600s 侧行为（要点 8）
+  run-timeout-minutes: ${AGUI_RUN_TIMEOUT_MINUTES:30}
