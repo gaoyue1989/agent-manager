@@ -108,6 +108,65 @@ export const api = {
   confirmToolCall: (sessionId, results) =>
     post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }),
 
+  // ===== AG-UI 端点（agui-migration-plan Phase 2.7：Debug Console AG-UI 模式）=====
+  // threads 列表（CopilotKit 契约：{threads:[{id,updatedAt,metadata}],nextCursor}）
+  aguiThreads: () => get('/agui/run/threads?agentId=release-agent&limit=30'),
+  // 线程消息（平台自有扩展：R11 刷新恢复的 pendingInterrupts 数据源）
+  aguiMessages: (threadId) => get('/agui/run/threads/' + encodeURIComponent(threadId) + '/messages'),
+  // 主端点：RunAgentInput → SSE（data: {AguiEvent JSON}）；body 直接 POST
+  sendAgui: (body, { onEvent, onError, onEnd } = {}) => {
+    const controller = new AbortController();
+    const connect = async () => {
+      let resp;
+      try {
+        resp = await fetch(BASE + '/agui/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        if (onError) onError(e);
+        return;
+      }
+      if (!resp.ok || !resp.body) {
+        // 预检失败（400/409/500）：JSON 错误体 {detail}
+        let msg = 'HTTP ' + resp.status;
+        try { const j = await resp.json(); if (j && j.detail) msg = j.detail; } catch (e) {}
+        if (onError) onError(new Error(msg));
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (controller.signal.aborted) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() || '';
+          for (const frame of frames) {
+            for (const line of frame.split('\n')) {
+              if (!line.startsWith('data:')) continue;
+              const dataStr = line.slice(5).trim();
+              if (!dataStr) continue;
+              try {
+                if (onEvent) onEvent(JSON.parse(dataStr));
+              } catch (e) { /* 忽略解析错误 */ }
+            }
+          }
+        }
+      } catch (e) {
+        if (!controller.signal.aborted && onError) onError(e);
+      }
+    };
+    connect();
+    return { close: () => controller.abort() };
+  },
+
   // HITL 确认后事件流（SSE；恢复为新执行段，后端先 acquire turn 租约，排队/冲突以 error 帧返回）
   confirmStream: (sessionId, results, { onEvent, onError } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/confirm-stream';

@@ -13,7 +13,7 @@ const state = {
     current: (() => { try { return localStorage.getItem('debug-sid'); } catch (e) { return null; } })()
   },
   ui: {
-    streamMode: 'a2a', // a2a | channel
+    streamMode: 'agui', // agui（AG-UI 标准协议，主模式）| a2a | channel（Phase 3 下线）
     isStreaming: false,
     theme: null // 'light' | 'dark' | null(跟随系统)
   }

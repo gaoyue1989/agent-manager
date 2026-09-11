@@ -23,6 +23,8 @@ let thinkingTimer = null;
 
 // HITL 待确认状态：permission_ask 事件 → 渲染确认卡片，等待批量决策
 let pendingConfirm = null;    // {replyId, calls: [{tool_call_id, name, input}], cardEl}
+// AG-UI HITL：RUN_FINISHED.outcome.interrupts → 挂起待 resume（interruptId 维度）
+let pendingAguiInterrupts = null;  // {replyId, interrupts: [Interrupt], cardEl}
 
 // MCP Apps 卡片宿主单例：tcId -> McpAppHost（AGENT_END 时 teardown，iframe 保留静态渲染）
 const appHosts = {};          // tcId -> McpAppHost
@@ -55,8 +57,9 @@ function render() {
         <span class="sub" id="connBadge"></span>
         <div style="margin-left:auto"></div>
         <div class="seg">
-          <button id="modeA2A" class="active">A2A</button>
+          <button id="modeA2A">A2A</button>
           <button id="modeChannel">Channel</button>
+          <button id="modeAgui" class="active">AG-UI</button>
         </div>
         <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
         <button id="btnSysPrompt" class="btn small">System Prompt</button>
@@ -100,6 +103,7 @@ export default {
     if (activeAbort) activeAbort.abort();
     teardownAllAppHosts();
     pendingConfirm = null;
+    pendingAguiInterrupts = null;
     isStreaming = false;
   }
 };
@@ -121,6 +125,7 @@ function bindEvents() {
 
   document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
   document.getElementById('modeChannel').addEventListener('click', () => setStreamMode('channel'));
+  document.getElementById('modeAgui').addEventListener('click', () => setStreamMode('agui'));
 }
 
 function autoGrow() {
@@ -132,14 +137,17 @@ function setStreamMode(mode) {
   ctx.state.setState('ui.streamMode', mode);
   document.getElementById('modeA2A').classList.toggle('active', mode === 'a2a');
   document.getElementById('modeChannel').classList.toggle('active', mode === 'channel');
-  updateConnBadge();
+  document.getElementById('modeAgui').classList.toggle('active', mode === 'agui');
+  // 切模式清空视图（不同模式的会话 key 语义不同，避免混淆）
+  newThread();
+  loadThreads();
 }
 
 function updateConnBadge() {
   if (!connBadgeEl) return;
   const mode = ctx.state.getState('ui.streamMode');
   const sid = currentSessionId();
-  const bits = [mode === 'a2a' ? 'A2A' : 'Channel'];
+  const bits = [mode === 'a2a' ? 'A2A' : mode === 'agui' ? 'AG-UI' : 'Channel'];
   bits.push('单次流');
   if (sid) bits.push(sid.split(':').pop());
   connBadgeEl.textContent = bits.join(' · ');
@@ -182,7 +190,20 @@ function scrollToBottom(force) {
 
 async function loadThreads(force) {
   try {
-    const threads = await ctx.api.getThreads();
+    const mode = ctx.state.getState('ui.streamMode');
+    let threads;
+    if (mode === 'agui') {
+      // AG-UI 契约（R7 spike 定稿）：{threads:[{id,updatedAt,metadata:{userId,archived}}]}
+      const data = await ctx.api.aguiThreads();
+      threads = (data.threads || []).map((t) => ({
+        session_id: t.id,
+        thread_id: t.id,
+        updated_at: String(t.updatedAt || '').replace('T', ' ').slice(0, 19),
+        archived: !!(t.metadata && t.metadata.archived)
+      }));
+    } else {
+      threads = await ctx.api.getThreads();
+    }
     ctx.state.setState('threads.list', threads);
     const sorted = (threads || []).slice().sort((a, b) =>
       String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
@@ -211,6 +232,7 @@ async function loadThreads(force) {
 function selectThread(sessionId) {
   if (!sessionId) return;
   ctx.state.setState('threads.current', sessionId);
+  dismissConfirmCard();
   document.getElementById('btnLlmCalls').disabled = false;
   loadThreadHistory(sessionId);
   updateConnBadge();
@@ -221,6 +243,7 @@ function newThread() {
   teardownAllAppHosts();
   pendingToolCalls = {};
   pendingConfirm = null;
+  pendingAguiInterrupts = null;
   currentReply = null;
   messagesEl.innerHTML = '<div class="msg system">New thread started</div>';
   document.getElementById('btnLlmCalls').disabled = true;
@@ -233,6 +256,29 @@ async function loadThreadHistory(sessionId) {
   messagesEl.innerHTML = '<div class="msg system">Loading history...</div>';
   teardownAllAppHosts();
   pendingToolCalls = {};
+  const mode = ctx.state.getState('ui.streamMode');
+  if (mode === 'agui') {
+    try {
+      const data = await ctx.api.aguiMessages(sessionId);
+      const msgs = data.messages || [];
+      messagesEl.innerHTML = '';
+      if (msgs.length === 0) {
+        messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
+      }
+      for (const m of msgs) {
+        if (m.role === 'user') addMessage('user', m.content || '');
+        else if (m.role === 'assistant' && m.content) addAssistantHistory(m.content, []);
+      }
+      // R11：挂起 interrupt → 自渲染确认卡片（resume[] 手工闭环，与 assistant 页同源方案）
+      if (Array.isArray(data.pendingInterrupts) && data.pendingInterrupts.length > 0) {
+        const rr = ensureReply('history-' + Date.now());
+        renderAguiConfirmCard(rr, data.pendingInterrupts);
+      }
+    } catch (e) {
+      messagesEl.innerHTML = '<div class="msg system">Failed to load history</div>';
+    }
+    return;
+  }
   try {
     const data = await ctx.api.getThreadHistory(sessionId);
     const msgs = data.messages || [];
@@ -1026,6 +1072,306 @@ function handleEvent(data) {
   }
 }
 
+
+// ---------- AG-UI 模式（agui-migration-plan Phase 2.7：词表 RUN_*/TEXT_MESSAGE_*/TOOL_CALL_*/CUSTOM） ----------
+
+/** AG-UI 主流：POST /agui/run（threadId 直接作会话 key，D5）→ 事件映射到既有渲染器 */
+async function sendAguiStream(text, threadId) {
+  isStreaming = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Stop';
+  sendBtn.classList.add('danger');
+  const abortController = new AbortController();
+  activeAbort = abortController;
+
+  ctx.api.sendAgui({
+    threadId,
+    runId: 'run-' + Date.now().toString(36),
+    messages: [{ id: 'm-' + Date.now().toString(36), role: 'user', content: text }],
+    forwardedProps: { userId: 'debug-user' }
+  }, {
+    onEvent: (ev) => handleAguiEvent(ev, threadId),
+    onError: (e) => {
+      handleAguiError(threadId, e.message);
+    },
+    onEnd: () => {
+      // 流关闭兜底收尾（RUN_FINISHED 已复位；此处幂等处理异常断流场景）
+      if (isStreaming) {
+        isStreaming = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send';
+        sendBtn.classList.remove('danger');
+        setConnecting('chatTitle', false);
+        finishReply(currentReply ? currentReply.replyId : null);
+        currentReply = null;
+        loadThreads();
+      }
+    }
+  });
+
+  // 消费由 sendAgui 内部异步驱动；stop 经 activeAbort.abort() + stop 端点
+  try { await new Promise((resolve) => setTimeout(resolve, 0)); } catch (e) { /* ignore */ }
+}
+
+/** resume run：挂起 interrupts 批量决策后重开执行段（服务端覆盖率校验 + CAS） */
+async function sendAguiResume(threadId, interrupts, approved) {
+  isStreaming = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Stop';
+  sendBtn.classList.add('danger');
+  const abortController = new AbortController();
+  activeAbort = abortController;
+
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(); } };
+    ctx.api.sendAgui({
+      threadId,
+      runId: 'resume-' + Date.now().toString(36),
+      messages: [],
+      resume: interrupts.map((i) => ({
+        interruptId: i.id,
+        status: approved ? 'resolved' : 'cancelled',
+        payload: { approved }
+      }))
+    }, {
+      onEvent: (ev) => handleAguiEvent(ev, threadId),
+      onError: (e) => { ctx.utils.toast('Resume failed: ' + e.message, 'error'); finish(); },
+      onEnd: () => finish()
+    });
+    // 兜底：SSE 异常悬挂时超时收尾
+    setTimeout(finish, 120000);
+  });
+  isStreaming = false;
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+  sendBtn.classList.remove('danger');
+  activeAbort = null;
+  loadThreads();
+}
+
+/** AG-UI 事件处理：映射到既有渲染函数（工具行/思维链/usage/MCP Apps 卡片） */
+function handleAguiEvent(ev, threadId) {
+  switch (ev.type) {
+    case 'RUN_STARTED': {
+      const rr = ensureReply(ev.runId || 'agui-' + Date.now());
+      setConnecting('chatTitle', true);
+      isStreaming = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Stop';
+      sendBtn.classList.add('danger');
+      usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+      teardownAllAppHosts();
+      return;
+    }
+    case 'RUN_FINISHED': {
+      // HITL：outcome.type=interrupt → 挂起卡片（resume[] 闭环）；否则正常收尾
+      if (ev.outcome && ev.outcome.type === 'interrupt' && (ev.outcome.interrupts || []).length > 0) {
+        const rr = currentReply || ensureReply(ev.runId || 'agui-int');
+        // 执行段结束：状态复位（恢复是新 run，需重新抢租约）
+        isStreaming = false;
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send';
+        sendBtn.classList.remove('danger');
+        setConnecting('chatTitle', false);
+        finishReply(rr.replyId);
+        renderAguiConfirmCard(rr, ev.outcome.interrupts);
+        return;
+      }
+      finishReply(currentReply ? currentReply.replyId : null);
+      currentReply = null;
+      isStreaming = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('danger');
+      setConnecting('chatTitle', false);
+      scrollToBottom(true);
+      loadThreads();
+      return;
+    }
+    case 'RUN_ERROR': {
+      handleAguiError(ev.threadId || threadId, ev.message || 'Run error');
+      return;
+    }
+  }
+
+  // block 事件归入当前回复
+  const r = currentReply || (ev.runId ? ensureReply(ev.runId) : null);
+  if (!r) return;
+
+  switch (ev.type) {
+    case 'TEXT_MESSAGE_CONTENT':
+      r.text += (ev.delta || '');
+      endThinking(r);
+      writeMarkdown(ensureToolTextEl(r), renderMarkdown(r.text));
+      scrollToBottom(false);
+      break;
+    case 'REASONING_MESSAGE_CONTENT':
+      appendThinkingDelta(r, ev.delta || '');
+      break;
+    case 'REASONING_MESSAGE_END':
+      endThinking(r);
+      break;
+    case 'TOOL_CALL_START':
+      onToolCallStart(r, ev.toolCallId, ev.toolCallName);
+      break;
+    case 'TOOL_CALL_ARGS':
+      onToolCallDelta(r, ev.toolCallId, ev.delta);
+      break;
+    case 'TOOL_CALL_END':
+      onToolCallEnd(r, ev.toolCallId);
+      break;
+    case 'TOOL_CALL_RESULT': {
+      // 一次性全量结果：MCP Apps 卡片优先（tool-input/result 按规范下发），否则工具行收尾
+      const host = appHosts[ev.toolCallId];
+      if (host) {
+        const tc = pendingToolCalls[ev.toolCallId] || {};
+        host.sendToolInput(parseToolArgs(tc.argsRaw));
+        host.sendToolResult(buildToolResult(ev.content, 'success'));
+      } else {
+        onToolResultStart(r, ev.toolCallId);
+        onToolResultDelta(r, ev.toolCallId, ev.content || '');
+        onToolResultEnd(r, ev.toolCallId, 'success');
+      }
+      break;
+    }
+    case 'CUSTOM': {
+      if (ev.name === 'token_usage' && ev.value && ev.value.cumulative) {
+        // token 统计：cumulative 累计口径（inputTokens/outputTokens/totalTokens）
+        usageAccumulator.input_tokens = ev.value.cumulative.inputTokens || 0;
+        usageAccumulator.output_tokens = ev.value.cumulative.outputTokens || 0;
+        usageAccumulator.total_tokens = ev.value.cumulative.totalTokens || 0;
+        usageAccumulator.call_count++;
+        r.usage.input = usageAccumulator.input_tokens;
+        r.usage.output = usageAccumulator.output_tokens;
+      } else if (ev.name === 'oaf.mcp_ui' && ev.value) {
+        // MCP Apps：卡片锚点（toolCallId + ui 元数据）
+        renderMcpAppCard(r, {
+          toolCallId: ev.value.toolCallId,
+          toolName: (pendingToolCalls[ev.value.toolCallId] || {}).name || 'mcp-app',
+          ui: { resourceUri: ev.value.resourceUri, server: ev.value.server }
+        });
+      } else if (ev.name === 'oaf.file_ready' && ev.value) {
+        renderFileCard(r, ev.value);
+      } else if (ev.name === 'oaf.tool_image' && ev.value) {
+        renderFileCard(r, {
+          file_name: 'tool-image',
+          mime_type: ev.value.media_type || 'image/png',
+          data: ev.value.data,
+          url: ev.value.url
+        });
+      }
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function handleAguiError(threadId, message) {
+  isStreaming = false;
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+  sendBtn.classList.remove('danger');
+  setConnecting('chatTitle', false);
+  const r = currentReply || ensureReply('agui-err-' + Date.now());
+  const err = document.createElement('div');
+  err.className = 'msg system';
+  err.style.color = 'var(--red)';
+  err.textContent = 'Error: ' + (message || 'Unknown');
+  messagesEl.appendChild(err);
+  scrollToBottom(false);
+  finishReply(r.replyId);
+}
+
+/** 产出文件卡片（oaf.file_ready / oaf.tool_image） */
+function renderFileCard(r, v) {
+  const isImage = (v.mime_type || v.media_type || '').startsWith('image/');
+  const src = v.data ? 'data:' + (v.media_type || 'image/png') + ';base64,' + v.data : null;
+  const href = src || v.download_url || v.url;
+  const card = document.createElement('div');
+  card.className = 'file-ready-card';
+  card.innerHTML =
+    '<span class="fr-icon">' + (isImage ? '🖼️' : '📄') + '</span>' +
+    '<div class="fr-body"><div class="fr-name">' + ctx.utils.esc(v.file_name || 'file') + '</div>' +
+    '<div class="fr-meta">' + ctx.utils.esc(v.mime_type || v.media_type || '') +
+    (v.size ? ' · ' + (v.size / 1024).toFixed(1) + ' KB' : '') + '</div></div>' +
+    (href ? '<a class="fr-download" href="' + ctx.utils.esc(href) + '" download="' + ctx.utils.esc(v.file_name || 'file') + '">下载</a>' : '');
+  const anchor = r.textEl || r.contentEl;
+  anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  scrollToBottom(false);
+}
+
+/** AG-UI HITL 确认卡片：interrupts（interruptId:toolCallId 维度）→ Approve/Reject all → resume[] 新 run */
+function renderAguiConfirmCard(r, interrupts) {
+  if (pendingAguiInterrupts) dismissAguiConfirmCard();
+  if (!interrupts || interrupts.length === 0) return;
+
+  const card = document.createElement('div');
+  card.className = 'confirm-card';
+  const rows = interrupts.map((i) => {
+    const meta = i.metadata || {};
+    let inputHtml = '';
+    const input = meta.toolInput;
+    if (input && typeof input === 'object') {
+      inputHtml = '<pre>' + ctx.utils.esc(JSON.stringify(input, null, 2)) + '</pre>';
+    } else if (input) {
+      inputHtml = '<pre>' + ctx.utils.esc(String(input)) + '</pre>';
+    } else if (meta.toolContent) {
+      try { inputHtml = '<pre>' + ctx.utils.esc(JSON.stringify(JSON.parse(meta.toolContent), null, 2)) + '</pre>'; }
+      catch (e) { inputHtml = '<pre>' + ctx.utils.esc(String(meta.toolContent)) + '</pre>'; }
+    }
+    return '<div class="confirm-tool">' +
+      '<div class="confirm-tool-name">' + ctx.utils.esc(meta.toolName || 'tool') + '</div>' +
+      '<div class="confirm-tool-id">' + ctx.utils.esc(i.toolCallId || i.id) + '</div>' +
+      (inputHtml ? '<div class="confirm-tool-input">' + inputHtml + '</div>' : '') +
+      '</div>';
+  }).join('');
+
+  card.innerHTML =
+    '<div class="confirm-card-header">' +
+      '<span class="confirm-title">⚠ 等待确认</span>' +
+      '<span class="confirm-sub">工具调用需人工批准（AG-UI interrupts）</span>' +
+    '</div>' +
+    '<div class="confirm-tools">' + rows + '</div>' +
+    '<div class="confirm-actions">' +
+      '<button class="btn danger small" data-act="reject">Reject all</button>' +
+      '<button class="btn primary small" data-act="approve">Approve all</button>' +
+    '</div>';
+
+  const threadId = currentSessionId();
+  card.querySelector('[data-act="approve"]').addEventListener('click', () => decide(true));
+  card.querySelector('[data-act="reject"]').addEventListener('click', () => decide(false));
+  async function decide(approved) {
+    if (!threadId) {
+      ctx.utils.toast('No active thread, cannot confirm', 'error');
+      return;
+    }
+    card.classList.add('processing');
+    card.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    card.querySelector('.confirm-title').textContent = '处理中…';
+    dismissAguiConfirmCard();
+    try {
+      await sendAguiResume(threadId, interrupts, approved);
+    } catch (e) {
+      ctx.utils.toast('Confirm failed: ' + e.message, 'error');
+    }
+  }
+
+  const anchor = r.textEl || r.contentEl;
+  anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  pendingAguiInterrupts = { replyId: r.replyId, interrupts, cardEl: card };
+  scrollToBottom(true);
+}
+
+/** 移除 AG-UI 确认卡片 */
+function dismissAguiConfirmCard() {
+  if (pendingAguiInterrupts && pendingAguiInterrupts.cardEl && pendingAguiInterrupts.cardEl.isConnected) {
+    pendingAguiInterrupts.cardEl.remove();
+  }
+  pendingAguiInterrupts = null;
+}
+
 // ---------- 发送 ----------
 
 async function sendMessage() {
@@ -1050,6 +1396,8 @@ async function sendMessage() {
 
   if (mode === 'channel') {
     await sendChannelSingleStream(text, sid);
+  } else if (mode === 'agui') {
+    await sendAguiStream(text, sid);
   } else {
     await sendA2AStream(text, sid);
   }
@@ -1057,9 +1405,26 @@ async function sendMessage() {
 
 function stop() {
   if (activeAbort) {
+    // AG-UI 模式：先断流再调 stop 端点中断 agent 执行段（断连 onCancel 亦会 interrupt，双保险幂等）
+    const mode = ctx.state.getState('ui.streamMode');
+    const sid = currentSessionId();
     activeAbort.abort();
+    if (mode === 'agui' && sid) {
+      postJson('/agui/run/agent/release-agent/stop/' + encodeURIComponent(sid), {})
+        .catch(() => {});
+    }
     return;
   }
+}
+
+/** 非 JSON 容错的 POST（stop 端点，204/JSON 均可） */
+async function postJson(path, body) {
+  const resp = await fetch(ctx.api.BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  return resp.ok ? (resp.status === 204 ? null : resp.json()) : null;
 }
 
 async function sendChannelSingleStream(text, sid) {

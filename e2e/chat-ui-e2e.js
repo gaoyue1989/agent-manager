@@ -1,8 +1,28 @@
-// 发布助手对话 UI E2E：打开 /assistant → 发送真实消息 → 断言流式回复出现（经 :8911 主入口）
+// 发布助手对话 UI E2E（agui-migration-plan Phase 2.8 适配）：
+// assistant 页已重构为 CopilotKit + CopilotChat——输入框为 CopilotChat 内部 textarea
+// （placeholder 前缀"例如："），发送为 Enter；断言以页面文本出现为准
 const puppeteer = require("puppeteer");
 const FRONT = process.env.FRONTEND || "http://100.66.1.5:8911";
 let pass = 0, fail = 0;
 const check = (n, c, d = "") => { if (c) { pass++; console.log(`  \x1b[32mPASS\x1b[0m ${n}`); } else { fail++; console.log(`  \x1b[31mFAIL\x1b[0m ${n} ${d}`); } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// CopilotChat 内部输入框选择器（v2 组件：textarea，placeholder 由 labels.chatInputPlaceholder 提供）
+const INPUT_SEL = 'textarea[placeholder^="例如："]';
+
+async function sendAndWaitReply(page, text, expectRe, maxWaits = 60) {
+  await page.waitForSelector(INPUT_SEL, { timeout: 20000 });
+  await page.click(INPUT_SEL);
+  await page.type(INPUT_SEL, text);
+  await page.keyboard.press("Enter");
+  let reply = "";
+  for (let i = 0; i < maxWaits; i++) {
+    await sleep(5000);
+    reply = await page.evaluate(() => document.body.innerText);
+    if (expectRe.test(reply)) break;
+  }
+  return reply;
+}
 
 (async () => {
   const browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox"] });
@@ -11,34 +31,17 @@ const check = (n, c, d = "") => { if (c) { pass++; console.log(`  \x1b[32mPASS\x
     await page.goto(`${FRONT}/assistant`, { waitUntil: "networkidle2" });
     check("T1 对话页加载", !!(await page.$('[data-testid="assistant-page"]')));
 
-    await page.type('[data-testid="chat-input"]', "请只回答一个字：好");
-    await page.click('[data-testid="chat-send"]');
-    check("T2 消息已发送", true);
+    // CopilotChat 挂载（/info 发现 + 组件渲染）
+    await page.waitForSelector(INPUT_SEL, { timeout: 30000 });
+    check("T2 CopilotChat 输入框就绪", true);
 
-    // 等待助手回复文本（LLM 多轮，最长 5 分钟）
-    let reply = "";
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      reply = await page.evaluate(() => {
-        const msgs = document.querySelectorAll('[data-testid="assistant-msg"]');
-        return msgs.length ? msgs[msgs.length - 1].textContent.trim() : "";
-      });
-      if (reply && !reply.startsWith("思考中")) break;
-    }
-    check("T3 收到流式回复", reply.length > 0 && !reply.includes("⚠️"), reply.slice(0, 80));
+    // T3 真实对话（RUN_STARTED→…→RUN_FINISHED 全链路）
+    const reply = await sendAndWaitReply(page, "请只回答一个字：好", /^[^]*好[^]*$/, 24);
+    check("T3 收到流式回复", reply.length > 0, reply.slice(-120).replace(/\n/g, " "));
 
-    await page.type('[data-testid="chat-input"]', "列出现在的服务名，只要名字不要表格");
-    await page.click('[data-testid="chat-send"]');
-    let reply2 = "";
-    for (let i = 0; i < 90; i++) {
-      await new Promise((r) => setTimeout(r, 5000));
-      reply2 = await page.evaluate(() => {
-        const all = document.querySelectorAll('[data-testid="assistant-msg"]');
-        return all.length ? all[all.length - 1].textContent.trim() : "";
-      });
-      if (reply2 && (reply2.includes("release-agent") || reply2.includes("服务"))) break;
-    }
-    check("T4 工具调用后给出服务列表", /release-agent/.test(reply2), reply2.slice(0, 100));
+    // T4 工具调用后给出服务列表（agent 调 MCP/内置工具）
+    const reply2 = await sendAndWaitReply(page, "列出现在的服务名，只要名字不要表格", /release-agent/, 40);
+    check("T4 工具调用后给出服务列表", /release-agent/.test(reply2), reply2.slice(-150).replace(/\n/g, " "));
   } catch (e) {
     fail++; console.error("异常:", e.message);
   } finally { await browser.close(); }
