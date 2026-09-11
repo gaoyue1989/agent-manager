@@ -33,7 +33,7 @@ class HarnessAgentRunnerTest {
 
     @Test
     void streamShouldUseSessionIdAndUserIdFromOptions() {
-        when(agent.stream(anyList(), any(RuntimeContext.class))).thenReturn(Flux.empty());
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.empty());
 
         var options = new AgentRequestOptions();
         options.setTaskId("task-1");
@@ -41,43 +41,43 @@ class HarnessAgentRunnerTest {
         options.setUserId("u1");
         var msg = mock(Msg.class);
 
-        var flux = runner.stream(List.of(msg), options);
+        var flux = runner.streamEvents(List.of(msg), options);
         assertNotNull(flux);
         flux.subscribe();
 
         var captor = org.mockito.ArgumentCaptor.forClass(RuntimeContext.class);
-        verify(agent).stream(eq(List.of(msg)), captor.capture());
+        verify(agent).streamEvents(eq(List.of(msg)), captor.capture());
         assertEquals("session-1", captor.getValue().getSessionId());
         assertEquals("u1", captor.getValue().getUserId());
     }
 
     @Test
     void streamShouldFallbackToAnonymousUser() {
-        when(agent.stream(anyList(), any(RuntimeContext.class))).thenReturn(Flux.empty());
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.empty());
 
         var options = new AgentRequestOptions();
         options.setTaskId("task-2");
         options.setSessionId("session-2");
         var msg = mock(Msg.class);
 
-        runner.stream(List.of(msg), options).blockLast();
+        runner.streamEvents(List.of(msg), options).blockLast();
 
         var captor = org.mockito.ArgumentCaptor.forClass(RuntimeContext.class);
-        verify(agent).stream(eq(List.of(msg)), captor.capture());
+        verify(agent).streamEvents(eq(List.of(msg)), captor.capture());
         assertEquals("session-2", captor.getValue().getSessionId());
         assertEquals("anonymous", captor.getValue().getUserId());
     }
 
     @Test
     void streamShouldCleanupTaskMapOnTerminal() {
-        when(agent.stream(anyList(), any(RuntimeContext.class)))
-            .thenReturn(Flux.just(mock(io.agentscope.core.agent.Event.class)));
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(mock(io.agentscope.core.event.AgentEvent.class)));
 
         var options = new AgentRequestOptions();
         options.setTaskId("task-3");
         options.setSessionId("session-3");
 
-        assertNotNull(runner.stream(List.of(mock(Msg.class)), options).blockFirst());
+        assertNotNull(runner.streamEvents(List.of(mock(Msg.class)), options).blockFirst());
 
         // doFinally 已触发：再次 stop 不应 interrupt（task map 已清空）
         runner.stop("task-3");
@@ -86,13 +86,13 @@ class HarnessAgentRunnerTest {
 
     @Test
     void stopShouldInterruptWhenSessionKnown() {
-        when(agent.stream(anyList(), any(RuntimeContext.class))).thenReturn(Flux.never());
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.never());
 
         var options = new AgentRequestOptions();
         options.setTaskId("task-4");
         options.setSessionId("session-4");
 
-        runner.stream(List.of(mock(Msg.class)), options).subscribe();
+        runner.streamEvents(List.of(mock(Msg.class)), options).subscribe();
         runner.stop("task-4");
         verify(agent).interrupt();
     }

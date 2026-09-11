@@ -19,12 +19,12 @@
 
     <properties>
         <java.version>21</java.version>
-        <agentscope.version>2.0.0</agentscope.version>
+        <agentscope.version>2.0.3</agentscope.version>
         <opentelemetry.version>1.61.0</opentelemetry.version>
-        <!-- agentscope-core 2.0.0 传递依赖的是 opentelemetry 1.37.0（SDK 内置
-             OtelTracingMiddleware 仅含 API）；必须用 dependencyManagement 统一
-             提升到 1.61.0，否则 sdk(1.61) 与 sdk-trace/common(1.37) 混用，
-             启动时 NoClassDefFoundError: StandardComponentId$ExporterType -->
+        <!-- 统一提升 OTel 到 1.61.0：2.0.0 时代 agentscope-core 传递 1.37.0（sdk-trace/common）
+             与 SDK 内置 OtelTracingMiddleware(1.61 API) 混用会 NoClassDefFoundError；
+             2.0.3 起上游已自带对齐（core → otel-reactor-3.1:2.27.0-alpha → api-incubator:1.61.0-alpha），
+             pin 保留作防线 -->
     </properties>
 
     <dependencyManagement>
@@ -149,6 +149,13 @@
         <dependency>
             <groupId>io.agentscope</groupId>
             <artifactId>agentscope-extensions-mysql</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+
+        <!-- AG-UI Protocol（AgentEvent → AG-UI 标准事件流，绕开 spring-boot-starter，见 agui-migration-plan.md D2） -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-agui</artifactId>
             <version>${agentscope.version}</version>
         </dependency>
 

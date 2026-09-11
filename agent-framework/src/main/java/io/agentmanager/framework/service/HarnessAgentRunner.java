@@ -1,8 +1,8 @@
 package io.agentmanager.framework.service;
 
-import io.agentscope.core.agent.Event;
 import io.agentscope.core.a2a.server.executor.runner.AgentRequestOptions;
 import io.agentscope.core.a2a.server.executor.runner.AgentRunner;
+import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.util.List;
@@ -34,7 +34,7 @@ public class HarnessAgentRunner implements AgentRunner {
     }
 
     @Override
-    public Flux<Event> stream(List<Msg> requestMessages, AgentRequestOptions options) {
+    public Flux<AgentEvent> streamEvents(List<Msg> requestMessages, AgentRequestOptions options) {
         var ctx = io.agentscope.core.agent.RuntimeContext.builder()
             .sessionId(options.getSessionId() != null
                     ? options.getSessionId() : options.getTaskId())
@@ -43,7 +43,7 @@ public class HarnessAgentRunner implements AgentRunner {
 
         taskSessionMap.put(options.getTaskId(), options.getSessionId());
 
-        return agent.stream(requestMessages, ctx)
+        return agent.streamEvents(requestMessages, ctx)
             .doFinally(signal -> taskSessionMap.remove(options.getTaskId()));
     }
 
