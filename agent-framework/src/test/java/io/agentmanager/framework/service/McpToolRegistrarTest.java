@@ -38,7 +38,7 @@ class McpToolRegistrarTest {
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             tempDir.toString(),
             "",
-            new AgentManagerProperties.            CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.            CleanupConfig(60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files")
         );
         registrar = new McpToolRegistrar(props);

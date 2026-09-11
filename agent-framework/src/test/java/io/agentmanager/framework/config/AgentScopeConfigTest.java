@@ -166,7 +166,7 @@ class AgentScopeConfigTest {
     }
 
     private static AgentManagerProperties.CleanupConfig cleanupConfig() {
-        return new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7);
+        return new AgentManagerProperties.CleanupConfig(60, 20, 30, 7);
     }
 
     private static AgentManagerProperties.FileConfig emptyFileConfig() {

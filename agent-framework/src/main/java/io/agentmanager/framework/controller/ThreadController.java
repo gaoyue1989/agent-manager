@@ -14,7 +14,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.LLMLogger;
 
 /**
@@ -36,14 +35,10 @@ public class ThreadController {
 
     private final DataSource dataSource;
     private final LLMLogger llmLogger;
-    private final ConfirmContextStore confirmContextStore;
-
     public ThreadController(DataSource dataSource,
-                            LLMLogger llmLogger,
-                            ConfirmContextStore confirmContextStore) {
+                            LLMLogger llmLogger) {
         this.dataSource = dataSource;
         this.llmLogger = llmLogger;
-        this.confirmContextStore = confirmContextStore;
     }
 
     /** Thread 列表：agent_state 表 session_id 去重（真实会话来源） */
@@ -74,7 +69,6 @@ public class ThreadController {
     public Map<String, Object> threadHistory(@PathVariable String sessionId) {
         var result = new LinkedHashMap<String, Object>();
         result.put("session_id", sessionId);
-        result.put("pendingConfirm", pendingConfirmPayload(sessionId));
         // 产出文件卡片（present_file/create_oaf_zip 登记时 session_id = gw-hash）：
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
@@ -117,18 +111,6 @@ public class ThreadController {
         return Map.of("session_id", sessionId, "calls", calls);
     }
 
-    /** 未消费待确认上下文 → 前端 pendingConfirm 词表；无则 null */
-    private Map<String, Object> pendingConfirmPayload(String sessionId) {
-        return confirmContextStore.findPending(sessionId)
-            .map(p -> {
-                var m = new LinkedHashMap<String, Object>();
-                m.put("reply_id", p.replyId());
-                m.put("tools", p.toolsJson());
-                m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
-                return m;
-            })
-            .orElse(null);
-    }
 
     /** session_id 格式: "{slug}:{threadId}"，取最后一个冒号后的部分作为展示 id */
     private String extractThreadId(String sessionId) {

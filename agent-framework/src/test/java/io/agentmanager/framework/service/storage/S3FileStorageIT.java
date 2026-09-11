@@ -46,7 +46,7 @@ class S3FileStorageIT {
             requireEnv("S3_IT_SECRET_KEY"), requireEnv("S3_IT_BUCKET"));
         var props = new AgentManagerProperties(
             emptyLlm(), emptyServer(), emptyCheckpoint(), "/tmp/s3it", "",
-            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7), file);
+            new AgentManagerProperties.CleanupConfig(60, 20, 30, 7), file);
         storage = new S3FileStorage(props);
     }
 

@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.LLMLogger;
 import io.agentscope.core.message.ToolUseBlock;
 
@@ -28,22 +27,20 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Thread 会话 API 测试（O7：会话接口迁 /threads）：列表 + 历史（附 pendingConfirm）+ LLM 调用记录。
- * 无状态架构：history 附带未消费 confirm_context，供刷新后重建确认卡片。
+ * Thread 会话 API 测试（O7：会话接口迁 /threads）：列表 + 历史 + LLM 调用记录。
+ * （confirm_context 随旧链路退役，pendingConfirm 展示已删——agui-migration-plan Phase 3）
  */
 class ThreadControllerTest {
 
     private DataSource dataSource;
     private LLMLogger llmLogger;
-    private ConfirmContextStore store;
     private ThreadController controller;
 
     @BeforeEach
     void setUp() {
         dataSource = mock(DataSource.class);
         llmLogger = new LLMLogger();
-        store = mock(ConfirmContextStore.class);
-        controller = new ThreadController(dataSource, llmLogger, store);
+        controller = new ThreadController(dataSource, llmLogger);
     }
 
     // ---------- list ----------
@@ -179,26 +176,6 @@ class ThreadControllerTest {
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
         assertEquals("db down", result.get("error"));
-    }
-
-    @Test
-    void threadHistoryShouldAttachPendingConfirm() {
-        var pending = new ConfirmContextStore.PendingConfirm("reply-9", List.of(
-            ToolUseBlock.builder().id("call-9").name("get_weather")
-                .input(java.util.Map.of("city", "beijing")).build()),
-            java.time.Instant.now());
-        when(store.findPending(anyString())).thenReturn(Optional.of(pending));
-
-        var result = controller.threadHistory("acme:mt1");
-        assertNotNull(result.get("pendingConfirm"), "history 应附带 pendingConfirm 供刷新重建");
-        assertTrue(result.get("pendingConfirm").toString().contains("call-9"));
-    }
-
-    @Test
-    void threadHistoryShouldReturnNullPendingConfirmWhenNone() {
-        when(store.findPending(anyString())).thenReturn(Optional.empty());
-        var result = controller.threadHistory("acme:mt2");
-        assertNull(result.get("pendingConfirm"), "无待确认上下文时 pendingConfirm 为 null");
     }
 
     // ---------- llm calls ----------

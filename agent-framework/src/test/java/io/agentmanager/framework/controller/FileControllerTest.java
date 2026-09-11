@@ -49,7 +49,7 @@ public class FileControllerTest {
             new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
-            "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            "/config", "", new AgentManagerProperties.CleanupConfig(60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20,
                 "image/*,text/plain,text/markdown,text/csv,application/pdf,"
                     + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",

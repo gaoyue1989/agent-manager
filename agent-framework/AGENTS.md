@@ -2,7 +2,7 @@
 
 ## 二级模块概述
 
-Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运行 Agent 服务框架。支持 **OAF v0.8.0** 配置规范 (`AGENTS.md` frontmatter)、**A2A v1.0.0** 通信协议 (JSON-RPC + SSE) 和 **A2UI v0.8** 声明式 UI 扩展。通过 MysqlDistributedStore 实现 AgentState + 工作区文件统一持久化，支持 MCP 工具原生集成、记忆管理、上下文压缩、技能自学习、Plan Mode、Channel SSE。
+Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运行 Agent 服务框架。支持 **OAF v0.8.0** 配置规范 (`AGENTS.md` frontmatter)、**A2A v1.0.0** 通信协议 (JSON-RPC + SSE) 和 **A2UI v0.8** 声明式 UI 扩展。通过 MysqlDistributedStore 实现 AgentState + 工作区文件统一持久化，支持 MCP 工具原生集成、记忆管理、上下文压缩、技能自学习、Plan Mode、AG-UI 对话协议。
 
 ## 技术栈
 
@@ -36,24 +36,21 @@ agent-framework/
 │   │   │   │   ├── OafConfigLoader.java         # AGENTS.md 解析
 │   │   │   │   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent + MysqlDistributedStore)
 │   │   │   │   ├── A2AServerConfig.java         # A2A Server 配置 (HarnessAgentRunner)
-│   │   │   │   └── ChannelConfig.java           # ChatUiChannel Bean
 │   │   │   ├── model/
 │   │   │   │   └── OafConfig.java               # OAF 配置模型 (含 deniedTools)
 │   │   │   ├── service/
-│   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream + HITL 恢复)
+│   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream，A2A/信息端点用)
 │   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换（skills 由 L2 仓库动态加载，不再复制）
 │   │   │   │   ├── SkillCatalogService.java     # 动态技能目录（frontmatter 声明 ∪ /config/skills 目录事实，/skills、A2A 卡片数据源）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
-│   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
 │   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
 │   │   │   │   ├── TurnLeaseStore.java          # turn_lease 表 (单次流执行权互斥)
 │   │   │   │   ├── TurnLeaseGuard.java          # turn 续租句柄 (close 幂等释放)
-│   │   │   │   ├── ConfirmContextStore.java     # confirm_context 表 (HITL 确认上下文, CAS 防重复)
 │   │   │   │   ├── ToolAuditStore.java          # tool_audit_log 异步批量审计写
 │   │   │   │   ├── FileAssetStore.java          # file_asset 表 (上传/交付文件元数据)
 │   │   │   │   ├── UploadWorkspaceInjector.java # 上传文件注入会话工作区 + 消息内容块构造
@@ -74,11 +71,7 @@ agent-framework/
 │   │   │       ├── DebugController.java         # GET /debug
 │   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/threads 等
 │   │   │       ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
-│   │   │       ├── SessionStreamController.java # POST /threads/{sid}/chat (SSE 单次流, 主对话入口)
-│   │   │       ├── ConfirmController.java       # POST /threads/{sid}/confirm、/confirm-stream (HITL)
 │   │   │       ├── FileController.java          # POST /files/upload、GET /files/{fileId}
-│   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
-│   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (StreamController + SessionStreamController)
 │   │   │       ├── McpProxyController.java      # MCP Apps: GET /mcp/{server}/resources/ui 等 (前端资源代理)
 │   │   │       ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7 静默更新)
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
@@ -89,7 +82,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
-│   └── test/                                  # 61 个测试类 / 456 个 @Test（含默认跳过的沙箱集成测试）
+│   └── test/                                  # 54 个测试类 / 455 个 @Test（含默认跳过的沙箱集成测试）
 ├── docs/                                     # 设计与改进方案文档 (26 份, 含 mcp-apps-extension-plan.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -125,7 +118,7 @@ invokeStream(message, threadId)      → Flux<Map>  // 流式
 invokeStream(message, threadId, userId) → Flux<Map>
 ```
 
-- `userId` 来源：A2A `metadata.userId` / Channel `SendOptions.userId()` / 默认回退 `vendorKey`
+- `userId` 来源：A2A `metadata.userId` / AG-UI `forwardedProps.userId` / 默认回退 `vendorKey`
 - `sessionId` 生成：`tenantPrefix.replace("/","-") + ":" + threadId`
 
 ### 3. McpToolRegistrar — MCP 原生注册
@@ -141,7 +134,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 - **卡片渲染**: TOOL_CALL_START 事件带 `toolName` → `registrar.resolveUiRef` 解析 `ui://` 资源 → SSE payload 携带 `ui` 字段 → 前端 `mcp-app-host.js` 经 `McpResourceProxy` 拉取 HtmlResource（注入 CSP meta）→ 沙箱 iframe（srcdoc, sandbox=allow-scripts, opaque origin）→ JSON-RPC over postMessage（`ui/initialize` handshake → `tools/call` 转发 `McpProxyController` → `ui/update-model-context`）
 - **卡片锚点（重要）**: 卡片必须挂 `r.contentEl`，不可挂 textEl —— `TEXT_BLOCK_DELTA` 会对 textEl `innerHTML` 整体重写，工具调用发生在文本输出之后时卡片会被误清
-- **4.7 ui_context**: `POST /mcp/ui-context` 写 `ui_context` 表（sessionId 维度覆盖写）→ 前端在用户消息 `metadata` 写入会话 key（`UiContextStore.METADATA_SESSION_KEY`）→ `UiContextInjectionHook` 在 PreCallEvent 阶段按会话查库 `appendSystemContent` 注入（HarnessAgent 拒绝 inputMessages 中 SYSTEM 消息，只能经 setSystemMessage/appendSystemContent）
+- **4.7 ui_context**: `POST /mcp/ui-context` 写 `ui_context` 表（sessionId 维度覆盖写）→ 前端在用户消息 `metadata` 写入会话 key（`UiContextStore.METADATA_SESSION_KEY`）→ `OafAguiMiddleware.onSystemPrompt` 按会话查库向 system prompt 追加注入（AG-UI 路径；原 UiContextInjectionHook 随旧链路退役）
 
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
@@ -161,7 +154,6 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟 |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
 | Plan Mode | ✅ | enablePlanMode() |
-| Channel | ✅ | ChatUiChannel (GET /chat/stream) |
 | 工作区（Workspace） | ✅ | WorkspaceInitializer 生成 .agentscope/workspace/ |
 | 子 Agent | ✅ | subagents/*.md |
 | 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆回写 KV） |
@@ -254,7 +246,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
-| `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
+| `AGENT_CLEANUP_*` | 见 api.md | | turn 租约 TTL / 审计与会话保留期 |
 
 ---
 
@@ -274,12 +266,8 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/threads` | Thread 列表 |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/{sid}/chat` | 无状态单次流 SSE 对话（主对话入口，{message?, userId?, fileIds?}，Turn 租约排队 waiting 帧） |
-| POST | `/threads/{sid}/confirm` | HITL 同步确认 |
-| POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
-| GET | `/chat/stream` | Channel SSE 一次性流对话（旧） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |
 | GET | `/mcp/{server}/resources` | MCP Apps: 列出服务器资源 |
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps: 卡片工具调用代理（ask 工具 403 + needsConfirm 走确认流） |
@@ -335,6 +323,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 61 个测试类 / 456 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
+mvn test     # 54 个测试类 / 455 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

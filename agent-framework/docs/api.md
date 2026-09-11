@@ -235,92 +235,24 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/llm-calls
 
 ---
 
-## 无状态单次流 SSE API
+## AG-UI 对话 API（agui-migration-plan，主对话入口）
 
-### POST /threads/{sessionId}/chat
+### POST /agui/run（及 /agui/run/agent/{agentId}/run 双路由）
 
-单次流 SSE 对话端点。每次请求抢 Turn 租约（排队语义）→ Agent 执行 → 事件直吐 → AGENT_END/error 帧关闭流、释放租约。**无长连接、无 SessionEventBus**。
+AG-UI 标准协议单次流 SSE：`RunAgentInput`（JSON body）→ `RUN_STARTED`…`RUN_FINISHED` 事件帧。
+输入裁剪（D7/要点 2）→ Turn 租约排队（`oaf.waiting` CUSTOM 心跳）→ adapter 执行 → 终态释放。
+HITL：工具调用被 ASK 拦截时 `RUN_FINISHED` outcome=`interrupt`，上下文落 `agui_interrupt` 表；
+恢复 = 新 run 携带顶层 `resume[]`（`[{interruptId, status, payload:{approved}}]`，必须覆盖全部挂起 interrupts）。
 
-```bash
-curl -s -N -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/chat" \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"hello","userId":"alice"}'
-```
+配套 REST（CopilotKit 契约，R7 spike 定稿）：
 
-**请求体:**
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `message` | String | ✓* | 用户消息（*与 `fileIds` 至少一项） |
-| `userId` | String | | 用户标识（默认 `debug-user`） |
-| `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
-
-**响应 (SSE):**
-
-```
-data: {"type":"waiting"}                    ← 排队等待时每 15s 一帧（防 Nginx 读超时）
-data: {"type":"TEXT_BLOCK_DELTA","delta":"Hello","replyId":"...","blockId":"..."}
-data: {"type":"AGENT_END","replyId":"..."}
-```
-
-**SSE 事件类型:**
-
-| type | 说明 |
-|------|------|
-| `waiting` | 排队等待（同 session 有活跃 turn 时） |
-| `TEXT_BLOCK_DELTA` | 文本 token（流式累加） |
-| `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据） |
-| `TOOL_RESULT_END` | 工具返回结果 |
-| `permission_ask` | HITL 暂停点（需人工确认） |
-| `file_ready` | `present_file` 工具产物就绪（含 `file_id`/`file_name`/`mime_type`/`size`/`download_url`，前端渲染下载卡片） |
-| `AGENT_END` | Agent 执行完成（流关闭） |
-| `done` | 流完成 |
-| `error` | 错误（如 `turn_in_progress` 排队超时） |
-
-**时序约束：**
-- 单次 POST 即发起完整执行段，无需先建立 SSE 订阅
-- 同 session 并发请求自动排队（Turn 租约），排队超时 120s 返回 error 帧
-- HITL 暂停点：上下文落库 `confirm_context`，释放 Turn 租约，流关闭；恢复走 `confirm-stream`
-
----
-
-### POST /threads/{sessionId}/confirm
-
-HITL 确认同步端点。携带确认决策恢复 agent 执行，同步返回最终回复。
-
-```bash
-curl -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/confirm" \
-  -H 'Content-Type: application/json' \
-  -d '{"results":[{"tool_call_id":"uuid","confirmed":true,"accept_rule":false}]}'
-```
-
-**错误码:**
-
-| 状态码 | error | 说明 |
-|--------|-------|------|
-| 404 | `confirm_context_not_found` | 会话不存在或确认上下文已过期 |
-| 409 | `confirm_already_consumed` | 重复确认（CAS 防护） |
-
----
-
-### POST /threads/{sessionId}/confirm-stream
-
-HITL 确认流式端点。确认后恢复执行，事件通过 SSE 流式下发（新执行段，需重新 acquire Turn 租约）。
-
-```bash
-curl -s -N -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/confirm-stream" \
-  -H 'Content-Type: application/json' \
-  -d '{"results":[{"tool_call_id":"uuid","confirmed":true,"accept_rule":false}]}'
-```
-
-**错误帧（预检/租约失败时）:**
-
-```
-data: {"type":"error","error":"confirm_context_not_found: ..."}
-data: {"type":"error","error":"turn_in_progress: session '...' has an active turn"}
-```
-
----
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/agui/run/info` | agents 对象 map + capabilities（agent 标识取 OAF 包 agentKey） |
+| GET | `/agui/run/threads?agentId=&limit=` | 会话列表（archived=旧复合 key 只读会话，D5） |
+| GET | `/agui/run/threads/{id}/messages` | 消息 + pendingInterrupts（R11 刷新兜底数据源） |
+| POST | `/agui/run/agent/{agentId}/connect` | 客户端探测，恒 204 |
+| POST | `/agui/run/agent/{agentId}/stop/{threadId}` | 中断在跑执行段 |
 
 ## 文件 API（file-upload-download-plan）
 
@@ -350,18 +282,6 @@ curl -X POST "http://localhost:8100/files/upload" \
 ### GET /files/{fileId}
 
 下载/预览（`?inline=1` 时仅 image/*、text/* 内联展示；平台无认证，UUID 不可枚举即授权）。
-
----
-
-## Channel SSE API
-
-### GET /chat/stream
-
-Channel 流式对话端点（传统 Channel 模式，与单次流 API 并存）。
-
-```bash
-curl -s -N "http://localhost:8100/chat/stream?message=hello&userId=alice"
-```
 
 ---
 
@@ -408,23 +328,7 @@ curl -s -N "http://localhost:8100/chat/stream?message=hello&userId=alice"
 
 ## 数据库表（无状态单次流架构）
 
-无状态单次流架构引入三张新表，服务启动时自动建表（幂等）。
-
-### confirm_context
-
-HITL 确认上下文（人工确认场景跨副本持久化）。Session 粒度覆盖写，CAS 防重复确认。
-
-| 列 | 类型 | 说明 |
-|----|------|------|
-| `session_id` | VARCHAR(255) PK | 会话 key |
-| `tool_calls_json` | MEDIUMTEXT | 待确认工具调用列表（`[{id, name, input}]`） |
-| `reply_id` | VARCHAR(64) | 触发确认的 reply 标识 |
-| `runtime_session_id` | VARCHAR(255) | Channel 流程网关推导的真实 sessionId |
-| `runtime_user_id` | VARCHAR(255) | Channel 流程网关推导的真实 userId |
-| `created_at` | DATETIME(3) | 创建时间（TTL 懒判断依据） |
-| `consumed` | TINYINT(1) | 0=待确认，1=已消费（CAS 0→1 防重复） |
-
-**TTL:** 默认 30 分钟（`confirmTtlMinutes`），读时懒判断 + 定时清理兜底。
+无状态单次流架构引入的表，服务启动时自动建表（幂等）；confirm_context 随旧 HITL 链路退役（agui-migration-plan Phase 3，HITL 由 agui_interrupt 承接）。
 
 ### turn_lease
 
@@ -439,7 +343,7 @@ Turn 租约（同一 session 执行段串行化）。Token + 短 TTL + 续租，
 
 **TTL:** 默认 60 秒（`turnLeaseTtlSeconds`），续租间隔默认 20 秒（`turnLeaseRenewSeconds`）。
 
-**租约语义：** 只覆盖活跃执行段。permission_ask（HITL 暂停点）即让出锁；confirm-stream 恢复 = 新执行段需重新 acquire。
+**租约语义：** 只覆盖活跃执行段。AG-UI RUN_FINISHED(interrupt)（HITL 暂停点）即让出锁；resume[] 恢复 = 新执行段需重新 acquire。
 
 ### tool_audit_log
 
@@ -459,13 +363,26 @@ Turn 租约（同一 session 执行段串行化）。Token + 短 TTL + 续租，
 
 ---
 
+### agui_interrupt
+
+AG-UI HITL 挂起中断上下文（跨进程/跨副本 resume）。Thread 粒度覆盖写，CAS 防重复消费。
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `thread_id` | VARCHAR(255) PK | 会话 key（AG-UI 纯 threadId，D5） |
+| `interrupts_json` | MEDIUMTEXT | 挂起 `AguiEvent.Interrupt[]`（含 metadata toolName/toolContent/interruptKind） |
+| `run_id` | VARCHAR(128) | 触发挂起的 runId |
+| `consumed` | TINYINT(1) | 0=挂起，1=已消费（CAS 0→1） |
+| `created_at` / `updated_at` | DATETIME | TTL 判断依据 |
+
+**TTL:** 默认 30 分钟，读时懒判断 + SessionCleanupService 定时清理兜底。
+
 ## 清理配置
 
 无状态单次流架构清理参数通过 `CleanupConfig`（环境变量前缀 `AGENT_CLEANUP_*`）配置：
 
 | 环境变量 | 默认值 | 说明 |
 |---------|--------|------|
-| `AGENT_CLEANUP_CONFIRM_TTL_MINUTES` | `30` | confirm_context 有效时长（分钟） |
 | `AGENT_CLEANUP_TURN_LEASE_TTL_SECONDS` | `60` | turn_lease 租约 TTL（秒） |
 | `AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS` | `20` | turn 续租间隔（秒） |
 | `AGENT_CLEANUP_AUDIT_RETENTION_DAYS` | `30` | tool_audit_log 保留天数 |

@@ -36,8 +36,7 @@ class AgentRuntimeServiceTest {
             new OafConfig.MemoryConfig("editable", Map.of()),
             Map.of()
         );
-        service = new AgentRuntimeService(config, agent, List.of(), new LLMLogger(),
-            mock(ConfirmContextStore.class));
+        service = new AgentRuntimeService(config, agent, List.of(), new LLMLogger());
     }
 
     private void mockCallReturns(String text) {

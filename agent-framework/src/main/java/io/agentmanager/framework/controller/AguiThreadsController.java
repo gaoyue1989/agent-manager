@@ -3,7 +3,6 @@ package io.agentmanager.framework.controller;
 import io.agentscope.core.agui.event.AguiEvent;
 import io.agentmanager.framework.config.AguiProperties;
 import io.agentmanager.framework.service.AguiInterruptStore;
-import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.StateDataParser;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import java.sql.Timestamp;
@@ -38,20 +37,17 @@ public class AguiThreadsController {
     private final DataSource dataSource;
     private final AguiProperties props;
     private final AguiInterruptStore interruptStore;
-    private final ConfirmContextStore confirmContextStore;
     private final TurnLeaseStore turnLeaseStore;
     private final io.agentmanager.framework.model.OafConfig oafConfig;
 
     public AguiThreadsController(DataSource dataSource,
                                  AguiProperties props,
                                  AguiInterruptStore interruptStore,
-                                 ConfirmContextStore confirmContextStore,
                                  TurnLeaseStore turnLeaseStore,
                                  io.agentmanager.framework.model.OafConfig oafConfig) {
         this.dataSource = dataSource;
         this.props = props;
         this.interruptStore = interruptStore;
-        this.confirmContextStore = confirmContextStore;
         this.turnLeaseStore = turnLeaseStore;
         this.oafConfig = oafConfig;
     }
@@ -172,19 +168,6 @@ public class AguiThreadsController {
             // 元数据损坏（R10）不影响消息列表读取，仅记空
             log.warn("pendingInterrupts load failed (threadId={}): {}", threadId, e.getMessage());
             result.put("pendingInterrupts", List.of());
-        }
-        // 旧链路挂起确认（旧会话只读展示用，D5/D8）
-        try {
-            result.put("pendingConfirm", confirmContextStore.findPending(threadId)
-                .map(p -> {
-                    var m = new LinkedHashMap<String, Object>();
-                    m.put("reply_id", p.replyId());
-                    m.put("tools", p.toolsJson());
-                    m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
-                    return m;
-                }).orElse(null));
-        } catch (Exception e) {
-            result.put("pendingConfirm", null);
         }
         return result;
     }

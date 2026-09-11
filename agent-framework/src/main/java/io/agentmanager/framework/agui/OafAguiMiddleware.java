@@ -27,7 +27,7 @@ import reactor.core.publisher.Mono;
  * </ol>
  *
  * <p>无相应 RuntimeContext key 时 no-op——本 middleware 注册在共享 HarnessAgent bean 上，
- * 旧链路（SessionStream/A2A）不受影响；且与 UiContextInjectionHook 注入条件互斥
+ * （原 UiContextInjectionHook 经 PreCallEvent 注入，随旧链路退役，本 middleware 为唯一通路）
  * （hook 依赖消息 metadata、本类依赖 RuntimeContext key），共存期无双重注入。
  */
 public class OafAguiMiddleware implements MiddlewareBase {

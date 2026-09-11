@@ -1,4 +1,4 @@
-/* ===== Chat 模块：官方对齐渲染 + 单次流 SSE / A2A 双模式 ===== */
+/* ===== Chat 模块：AG-UI 单次流（agui-migration-plan Phase 2.7/3）===== */
 
 import { McpAppHost, buildToolResult } from '../js/mcp-app-host.js';
 
@@ -10,7 +10,7 @@ let sidebarListEl = null;
 let connBadgeEl = null;
 
 let isStreaming = false;
-let activeAbort = null;      // 单次流/A2A 的 abort 控制器
+let activeAbort = null;      // AG-UI 单次流的 abort 控制器
 
 let refreshTimer = null;
 let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
@@ -22,7 +22,6 @@ let pendingToolCalls = {};    // tcId -> {name, argsRaw, args, resultRaw, state}
 let thinkingTimer = null;
 
 // HITL 待确认状态：permission_ask 事件 → 渲染确认卡片，等待批量决策
-let pendingConfirm = null;    // {replyId, calls: [{tool_call_id, name, input}], cardEl}
 // AG-UI HITL：RUN_FINISHED.outcome.interrupts → 挂起待 resume（interruptId 维度）
 let pendingAguiInterrupts = null;  // {replyId, interrupts: [Interrupt], cardEl}
 
@@ -57,8 +56,6 @@ function render() {
         <span class="sub" id="connBadge"></span>
         <div style="margin-left:auto"></div>
         <div class="seg">
-          <button id="modeA2A">A2A</button>
-          <button id="modeChannel">Channel</button>
           <button id="modeAgui" class="active">AG-UI</button>
         </div>
         <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
@@ -79,34 +76,6 @@ function render() {
   </div>`;
 }
 
-export default {
-  mount(container, c) {
-    ctx = c;
-    container.innerHTML = render();
-    messagesEl = document.getElementById('chatInner');
-    inputEl = document.getElementById('chatInput');
-    sendBtn = document.getElementById('sendBtn');
-    sidebarListEl = document.getElementById('threadList');
-    connBadgeEl = document.getElementById('connBadge');
-    updateConnBadge();
-
-    bindEvents();
-    messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
-    loadThreads();
-    refreshTimer = setInterval(loadThreads, 30000);
-    subscribeScroll();
-  },
-
-  unmount() {
-    if (refreshTimer) clearInterval(refreshTimer);
-    if (thinkingTimer) clearInterval(thinkingTimer);
-    if (activeAbort) activeAbort.abort();
-    teardownAllAppHosts();
-    pendingConfirm = null;
-    pendingAguiInterrupts = null;
-    isStreaming = false;
-  }
-};
 
 function bindEvents() {
   sendBtn.addEventListener('click', () => sendMessage());
@@ -123,9 +92,6 @@ function bindEvents() {
   document.getElementById('btnSysPrompt').addEventListener('click', showSystemPrompt);
   document.getElementById('btnCard').addEventListener('click', showAgentCard);
 
-  document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
-  document.getElementById('modeChannel').addEventListener('click', () => setStreamMode('channel'));
-  document.getElementById('modeAgui').addEventListener('click', () => setStreamMode('agui'));
 }
 
 function autoGrow() {
@@ -135,8 +101,6 @@ function autoGrow() {
 
 function setStreamMode(mode) {
   ctx.state.setState('ui.streamMode', mode);
-  document.getElementById('modeA2A').classList.toggle('active', mode === 'a2a');
-  document.getElementById('modeChannel').classList.toggle('active', mode === 'channel');
   document.getElementById('modeAgui').classList.toggle('active', mode === 'agui');
   // 切模式清空视图（不同模式的会话 key 语义不同，避免混淆）
   newThread();
@@ -147,7 +111,7 @@ function updateConnBadge() {
   if (!connBadgeEl) return;
   const mode = ctx.state.getState('ui.streamMode');
   const sid = currentSessionId();
-  const bits = [mode === 'a2a' ? 'A2A' : mode === 'agui' ? 'AG-UI' : 'Channel'];
+  const bits = ['AG-UI'];
   bits.push('单次流');
   if (sid) bits.push(sid.split(':').pop());
   connBadgeEl.textContent = bits.join(' · ');
@@ -190,20 +154,14 @@ function scrollToBottom(force) {
 
 async function loadThreads(force) {
   try {
-    const mode = ctx.state.getState('ui.streamMode');
-    let threads;
-    if (mode === 'agui') {
-      // AG-UI 契约（R7 spike 定稿）：{threads:[{id,updatedAt,metadata:{userId,archived}}]}
-      const data = await ctx.api.aguiThreads();
-      threads = (data.threads || []).map((t) => ({
-        session_id: t.id,
-        thread_id: t.id,
-        updated_at: String(t.updatedAt || '').replace('T', ' ').slice(0, 19),
-        archived: !!(t.metadata && t.metadata.archived)
-      }));
-    } else {
-      threads = await ctx.api.getThreads();
-    }
+    // AG-UI 契约（R7 spike 定稿）：{threads:[{id,updatedAt,metadata:{userId,archived}}]}
+    const data = await ctx.api.aguiThreads();
+    const threads = (data.threads || []).map((t) => ({
+      session_id: t.id,
+      thread_id: t.id,
+      updated_at: String(t.updatedAt || '').replace('T', ' ').slice(0, 19),
+      archived: !!(t.metadata && t.metadata.archived)
+    }));
     ctx.state.setState('threads.list', threads);
     const sorted = (threads || []).slice().sort((a, b) =>
       String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
@@ -232,7 +190,6 @@ async function loadThreads(force) {
 function selectThread(sessionId) {
   if (!sessionId) return;
   ctx.state.setState('threads.current', sessionId);
-  dismissConfirmCard();
   document.getElementById('btnLlmCalls').disabled = false;
   loadThreadHistory(sessionId);
   updateConnBadge();
@@ -242,7 +199,6 @@ function newThread() {
   ctx.state.setState('threads.current', null);
   teardownAllAppHosts();
   pendingToolCalls = {};
-  pendingConfirm = null;
   pendingAguiInterrupts = null;
   currentReply = null;
   messagesEl.innerHTML = '<div class="msg system">New thread started</div>';
@@ -256,42 +212,22 @@ async function loadThreadHistory(sessionId) {
   messagesEl.innerHTML = '<div class="msg system">Loading history...</div>';
   teardownAllAppHosts();
   pendingToolCalls = {};
-  const mode = ctx.state.getState('ui.streamMode');
-  if (mode === 'agui') {
-    try {
-      const data = await ctx.api.aguiMessages(sessionId);
-      const msgs = data.messages || [];
-      messagesEl.innerHTML = '';
-      if (msgs.length === 0) {
-        messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
-      }
-      for (const m of msgs) {
-        if (m.role === 'user') addMessage('user', m.content || '');
-        else if (m.role === 'assistant' && m.content) addAssistantHistory(m.content, []);
-      }
-      // R11：挂起 interrupt → 自渲染确认卡片（resume[] 手工闭环，与 assistant 页同源方案）
-      if (Array.isArray(data.pendingInterrupts) && data.pendingInterrupts.length > 0) {
-        const rr = ensureReply('history-' + Date.now());
-        renderAguiConfirmCard(rr, data.pendingInterrupts);
-      }
-    } catch (e) {
-      messagesEl.innerHTML = '<div class="msg system">Failed to load history</div>';
-    }
-    return;
-  }
   try {
-    const data = await ctx.api.getThreadHistory(sessionId);
+    // AG-UI 契约（R7 spike 定稿）：messages + pendingInterrupts（R11 刷新兜底）
+    const data = await ctx.api.aguiMessages(sessionId);
     const msgs = data.messages || [];
     messagesEl.innerHTML = '';
     if (msgs.length === 0) {
       messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
-      return;
     }
     for (const m of msgs) {
       if (m.role === 'user') addMessage('user', m.content || '');
-      else if (m.role === 'assistant' || m.role === 'agent') {
-        addAssistantHistory(m.content || '', m.tool_calls || []);
-      }
+      else if (m.role === 'assistant' && m.content) addAssistantHistory(m.content, []);
+    }
+    // R11：挂起 interrupt → 自渲染确认卡片（resume[] 手工闭环，与 assistant 页同源方案）
+    if (Array.isArray(data.pendingInterrupts) && data.pendingInterrupts.length > 0) {
+      const rr = ensureReply('history-' + Date.now());
+      renderAguiConfirmCard(rr, data.pendingInterrupts);
     }
   } catch (e) {
     messagesEl.innerHTML = '<div class="msg system">Failed to load history</div>';
@@ -683,134 +619,10 @@ function updateToolGroupTitle(r) {
 // ---------- HITL 确认卡片 ----------
 
 /** 渲染权限确认卡片：批量展示待确认工具（名称 + 参数），Approve 全部 / Reject 全部 */
-function renderConfirmCard(r, data) {
-  if (pendingConfirm) dismissConfirmCard(); // 新 ASK 覆盖旧卡片（同 session 新 ASK 场景）
-  const calls = data.tool_calls || [];
-  if (calls.length === 0) return;
-
-  const card = document.createElement('div');
-  card.className = 'confirm-card';
-  const rows = calls.map((c) => {
-    let inputHtml = '';
-    const input = c.input;
-    if (input && typeof input === 'object') {
-      inputHtml = '<pre>' + ctx.utils.esc(JSON.stringify(input, null, 2)) + '</pre>';
-    } else if (input) {
-      inputHtml = '<pre>' + ctx.utils.esc(String(input)) + '</pre>';
-    }
-    return '<div class="confirm-tool">' +
-      '<div class="confirm-tool-name">' + ctx.utils.esc(c.name || 'tool') + '</div>' +
-      '<div class="confirm-tool-id">' + ctx.utils.esc(c.tool_call_id || '') + '</div>' +
-      (inputHtml ? '<div class="confirm-tool-input">' + inputHtml + '</div>' : '') +
-      '</div>';
-  }).join('');
-
-  card.innerHTML =
-    '<div class="confirm-card-header">' +
-      '<span class="confirm-title">⚠ 等待确认</span>' +
-      '<span class="confirm-sub">工具调用需人工批准</span>' +
-    '</div>' +
-    '<div class="confirm-tools">' + rows + '</div>' +
-    '<div class="confirm-actions">' +
-      '<button class="btn danger small" data-act="reject">Reject all</button>' +
-      '<button class="btn primary small" data-act="approve">Approve all</button>' +
-    '</div>';
-
-  card.querySelector('[data-act="approve"]').addEventListener('click', () =>
-    submitConfirm(calls, true));
-  card.querySelector('[data-act="reject"]').addEventListener('click', () =>
-    submitConfirm(calls, false));
-
-  // 卡片插到回复气泡之后（等同工具组位置）
-  const anchor = r.textEl || r.contentEl;
-  anchor.parentNode.insertBefore(card, anchor.nextSibling);
-  pendingConfirm = { replyId: r.replyId, calls, cardEl: card };
-  scrollToBottom(true);
-}
 
 /** 移除当前确认卡片（确认已提交 / 新 ASK 覆盖） */
-function dismissConfirmCard() {
-  if (pendingConfirm && pendingConfirm.cardEl && pendingConfirm.cardEl.isConnected) {
-    pendingConfirm.cardEl.remove();
-  }
-  pendingConfirm = null;
-}
 
-/** 批量提交确认决策：results = [{tool_call_id, confirmed, accept_rule:false}] */
-async function submitConfirm(calls, approved) {
-  if (!pendingConfirm) return;
-  const results = calls.map((c) => ({
-    tool_call_id: c.tool_call_id,
-    confirmed: approved,
-    accept_rule: false
-  }));
-  const sid = currentSessionId();
-  if (!sid) {
-    ctx.utils.toast('No active session, cannot confirm', 'error');
-    return;
-  }
 
-  // 标记卡片为处理中（防重复点击）
-  pendingConfirm.cardEl.classList.add('processing');
-  pendingConfirm.cardEl.querySelectorAll('button').forEach((b) => (b.disabled = true));
-  pendingConfirm.cardEl.querySelector('.confirm-title').textContent = '处理中…';
-
-  // 保存当前卡片引用：confirm-stream 可能返回新 permission_ask 创建新卡片，
-  // finally 只应移除本次确认的卡片，不误清新卡片
-  const myCard = pendingConfirm.cardEl;
-
-  try {
-    // 单次流：原流已无后续事件（恢复是新调用），关闭原连接改走 confirm-stream 渲染
-    if (activeAbort) { try { activeAbort.abort(); } catch (e) { /* ignore */ } }
-    isStreaming = true;
-    await consumeConfirmStream(sid, results, true);
-    isStreaming = false;
-    loadThreads();
-  } catch (e) {
-    ctx.utils.toast('Confirm failed: ' + e.message, 'error');
-    if (pendingConfirm && pendingConfirm.cardEl === myCard) {
-      myCard.querySelectorAll('button').forEach((b) => (b.disabled = false));
-      myCard.querySelector('.confirm-title').textContent = '⚠ 等待确认';
-    }
-  } finally {
-    // 只移除本次确认的卡片（confirm-stream 返回新 permission_ask 时已创建新卡片）
-    if (pendingConfirm && pendingConfirm.cardEl === myCard) {
-      dismissConfirmCard();
-    }
-  }
-}
-
-/** 消费确认后事件流（render=true 时事件直接渲染；false 时仅触发恢复，事件经总线回流） */
-function consumeConfirmStream(sid, results, render) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (err) => {
-      if (settled) return;
-      settled = true;
-      if (err) reject(err); else resolve();
-    };
-
-    // 确保有回复上下文：confirm-stream 事件可能没有 replyId，
-    // 需要预先创建回复容器以接收 TEXT_BLOCK_DELTA 等事件
-    if (render) {
-      // 始终创建新回复：confirm-stream 是新的执行段，不应追加到旧回复
-      const replyId = 'confirm-' + Date.now();
-      currentReply = null; // 清除旧引用，确保 ensureReply 创建新回复
-      ensureReply(replyId);
-    }
-
-    ctx.api.confirmStream(sid, results, {
-      onEvent: (data) => {
-        if (render) handleEvent(data);
-        if (data.type === 'error') finish(new Error(data.error || 'confirm-stream error'));
-        if (data.type === 'done') finish();
-      },
-      onError: (e) => finish(e)
-    });
-    // 兜底超时（正常流以 done 帧收尾）
-    setTimeout(() => finish(), 30000);
-  });
-}
 
 // ---------- MCP Apps 卡片（阶段二，见 mcp-apps-extension-plan.md §5.1） ----------
 
@@ -926,151 +738,6 @@ function parseToolArgs(argsRaw) {
 // 是 model 调用级 replyId（不同 id）。因此以 AGENT_START/END 为消息生命周期，
 // block 事件统一归入当前 agent 回复，不按 block replyId 另建气泡。
 
-function handleEvent(data) {
-  // agent 生命周期事件：切换/收尾当前回复
-  if (data.type === 'AGENT_START') {
-    const rr = ensureReply(data.replyId || 'reply-' + Date.now());
-    setConnecting('chatTitle', true);
-    isStreaming = true;
-    sendBtn.disabled = true;
-    sendBtn.textContent = 'Stop';
-    sendBtn.classList.add('danger');
-    usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
-    // MCP Apps：新回合开始 → 清理上一回合卡片（保留当前回合可交互）
-    teardownAllAppHosts();
-    return;
-  }
-  if (data.type === 'AGENT_END') {
-    finishReply(currentReply ? currentReply.replyId : null);
-    currentReply = null;
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    sendBtn.classList.remove('danger');
-    setConnecting('chatTitle', false);
-    scrollToBottom(true);
-    loadThreads();
-    return;
-  }
-
-  // block 事件：归入当前 agent 回复（无活跃回复时用自身 replyId 兜底占位）
-  const r = currentReply || (data.replyId ? ensureReply(data.replyId) : null);
-  if (!r) return;
-
-  switch (data.type) {
-    case 'TEXT_BLOCK_DELTA': {
-      if (r) {
-        r.text += (data.delta || '');
-        endThinking(r);
-        // Markdown 写入后追加光标节点：cursor span 在 sanitize 之外，不参与解析，避免被吞
-        const el = ensureToolTextEl(r);
-        writeMarkdown(el, renderMarkdown(r.text));
-        const cur = document.createElement('span');
-        cur.className = 'cursor';
-        el.appendChild(cur);
-      }
-      scrollToBottom(false);
-      break;
-    }
-    case 'THINKING_BLOCK_DELTA': {
-      if (r) appendThinkingDelta(r, data.delta || '');
-      break;
-    }
-    case 'THINKING_BLOCK_END': {
-      if (r) endThinking(r);
-      break;
-    }
-    case 'TOOL_CALL_START': {
-      if (r) {
-        // MCP Apps：工具带 ui 元数据 → 渲染交互式卡片（不走普通工具行）
-        if (data.ui && data.ui.resourceUri) {
-          renderMcpAppCard(r, data);
-        } else {
-          onToolCallStart(r, data.toolCallId, data.toolName);
-        }
-      }
-      break;
-    }
-    case 'TOOL_CALL_DELTA': {
-      if (r) onToolCallDelta(r, data.toolCallId, data.delta);
-      break;
-    }
-    case 'TOOL_CALL_END': {
-      if (r) onToolCallEnd(r, data.toolCallId);
-      break;
-    }
-    case 'TOOL_RESULT_START': {
-      if (r) onToolResultStart(r, data.toolCallId);
-      break;
-    }
-    case 'TOOL_RESULT_TEXT_DELTA': {
-      if (r) onToolResultDelta(r, data.toolCallId, data.delta);
-      break;
-    }
-    case 'TOOL_RESULT_END': {
-      if (r) {
-        // MCP Apps：结果到达 → 通知卡片（tool-input 完整参数 → tool-result），按规范顺序下发
-        const host = appHosts[data.toolCallId];
-        if (host) {
-          const tc = pendingToolCalls[data.toolCallId] || {};
-          host.sendToolInput(parseToolArgs(tc.argsRaw));
-          host.sendToolResult(buildToolResult(tc.resultRaw, data.state));
-        } else {
-          onToolResultEnd(r, data.toolCallId, data.state);
-        }
-      }
-      break;
-    }
-    case 'MODEL_CALL_START': {
-      if (r) r.modelCalls++;
-      break;
-    }
-    case 'MODEL_CALL_END': {
-      if (data.inputTokens != null || data.outputTokens != null) {
-        usageAccumulator.input_tokens += data.inputTokens || 0;
-        usageAccumulator.output_tokens += data.outputTokens || 0;
-        usageAccumulator.total_tokens += data.totalTokens || 0;
-        usageAccumulator.call_count++;
-        if (r) {
-          r.usage.input = usageAccumulator.input_tokens;
-          r.usage.output = usageAccumulator.output_tokens;
-        }
-      }
-      break;
-    }
-    case 'AGENT_END': {
-      // 已在函数顶部统一处理（agent 级生命周期）
-      break;
-    }
-    case 'permission_ask': {
-      // HITL：工具调用被 ASK 拦截，渲染确认卡片（批量决策，见 hitl-permission-plan.md 8.3）
-      // permission_ask 通常跟随 AGENT_START 同 replyId；异常时并入当前回复兜底
-      const rr = r || ensureReply(data.replyId || 'perm-' + Date.now());
-      renderConfirmCard(rr, data);
-      break;
-    }
-    case 'user_confirm_result': {
-      // P2：恢复事件标记卡片已处理（当前确认后由提交逻辑直接移除卡片）
-      break;
-    }
-    case 'error': {
-      isStreaming = false;
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Send';
-      sendBtn.classList.remove('danger');
-      if (r) {
-        const err = document.createElement('div');
-        err.className = 'msg system';
-        err.style.color = 'var(--red)';
-        err.textContent = 'Error: ' + (data.error || 'Unknown');
-        messagesEl.appendChild(err);
-      }
-      break;
-    }
-    default:
-      break;
-  }
-}
 
 
 // ---------- AG-UI 模式（agui-migration-plan Phase 2.7：词表 RUN_*/TEXT_MESSAGE_*/TOOL_CALL_*/CUSTOM） ----------
@@ -1392,24 +1059,15 @@ async function sendMessage() {
   inputEl.focus();
   addMessage('user', text);
 
-  const mode = ctx.state.getState('ui.streamMode');
-
-  if (mode === 'channel') {
-    await sendChannelSingleStream(text, sid);
-  } else if (mode === 'agui') {
-    await sendAguiStream(text, sid);
-  } else {
-    await sendA2AStream(text, sid);
-  }
+  await sendAguiStream(text, sid);
 }
 
 function stop() {
   if (activeAbort) {
     // AG-UI 模式：先断流再调 stop 端点中断 agent 执行段（断连 onCancel 亦会 interrupt，双保险幂等）
-    const mode = ctx.state.getState('ui.streamMode');
     const sid = currentSessionId();
     activeAbort.abort();
-    if (mode === 'agui' && sid) {
+    if (sid) {
       postJson('/agui/run/agent/release-agent/stop/' + encodeURIComponent(sid), {})
         .catch(() => {});
     }
@@ -1427,168 +1085,6 @@ async function postJson(path, body) {
   return resp.ok ? (resp.status === 204 ? null : resp.json()) : null;
 }
 
-async function sendChannelSingleStream(text, sid) {
-  // 单次流（无状态架构）：POST /threads/{sid}/chat 事件直吐，执行完即关闭
-  isStreaming = true;
-  sendBtn.disabled = true;
-  sendBtn.textContent = 'Stop';
-  sendBtn.classList.add('danger');
-  const abortController = new AbortController();
-  activeAbort = abortController;
-
-  let waitingSince = null;
-  let waitingEl = null;
-  const showWaiting = () => {
-    if (!waitingEl) {
-      waitingEl = document.createElement('div');
-      waitingEl.className = 'msg system';
-      waitingEl.style.color = 'var(--yellow)';
-      messagesEl.appendChild(waitingEl);
-      scrollToBottom(false);
-    }
-    const secs = Math.round((Date.now() - waitingSince) / 1000);
-    waitingEl.textContent = '排队等待中... (已等待 ' + secs + 's，其他任务执行完毕后将自动开始)';
-  };
-  const hideWaiting = () => { if (waitingEl) { waitingEl.remove(); waitingEl = null; } };
-
-  ctx.api.sendChat(sid, text, 'debug-user', {
-    onWaiting: () => {
-      if (!waitingSince) waitingSince = Date.now();
-      showWaiting();
-    },
-    onEvent: (evt) => {
-      hideWaiting();
-      handleEvent(evt);
-    },
-    onError: (e) => {
-      hideWaiting();
-      const r = currentReply || ensureReply('single');
-      handleEvent({ type: 'error', error: e.message, replyId: r.replyId });
-    },
-    onEnd: () => {
-      hideWaiting();
-      loadThreads();
-    }
-  });
-
-  try { await new Promise((resolve) => setTimeout(resolve, 0)); }
-  catch (e) { /* ignore */ }
-}
-// A2A message/stream（标准帧，工具仅工具名，无回填）
-async function sendA2AStream(text, sid) {
-  isStreaming = true;
-  sendBtn.disabled = true;
-  sendBtn.textContent = 'Stop';
-  sendBtn.classList.add('danger');
-  const abortController = new AbortController();
-  activeAbort = abortController;
-
-  // 新建一条 A2A 回复（标准帧不携带 replyId，用占位 id）
-  const replyId = 'a2a-' + Date.now().toString(36);
-  const r = ensureReply(replyId);
-  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
-
-  try {
-    const resp = await fetch(ctx.api.BASE + '/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'message/stream',
-        params: { message: { role: 'user', parts: [{ text }], metadata: { userId: 'debug-user', sessionId: sid } } },
-        id: 'stream-' + Date.now()
-      }),
-      signal: abortController.signal
-    });
-    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        const dataStr = line.slice(5).trim();
-        if (!dataStr || dataStr === '[DONE]') continue;
-        try {
-          handleFrame(JSON.parse(dataStr), replyId);
-        } catch (e) { /* ignore */ }
-      }
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') {
-      handleEvent({ type: 'error', error: e.message, replyId });
-    }
-  } finally {
-    isStreaming = false;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-    sendBtn.classList.remove('danger');
-    activeAbort = null;
-    finishReply(replyId);
-    loadThreads();
-  }
-}
-
-/** A2A 帧 → 事件（标准帧忠实呈现：工具仅工具名 + 状态） */
-function handleFrame(frame, replyId) {
-  const result = frame.result;
-  if (!result) {
-    if (frame.error) handleEvent({ type: 'error', error: frame.error.message || 'A2A error', replyId });
-    return;
-  }
-  const kind = result.kind;
-  if (kind === 'artifact-update') {
-    const artifact = result.artifact || {};
-    const parts = artifact.parts || [];
-    for (const p of parts) {
-      const blockType = (p.metadata && p.metadata._agentscope_block_type) || 'text';
-      if (p.kind === 'data') {
-        const toolName = (p.metadata && p.metadata._agentscope_tool_name) || '';
-        const tcId = (p.metadata && p.metadata._agentscope_tool_call_id) || '';
-        if (toolName && toolName !== '__fragment__' && tcId) {
-          // 标准帧：仅工具名（无参数/结果）
-          handleEvent({ type: 'TOOL_CALL_START', toolCallId: tcId, toolName, replyId });
-          handleEvent({ type: 'TOOL_CALL_END', toolCallId: tcId, toolName, replyId });
-          handleEvent({ type: 'TOOL_RESULT_END', toolCallId: tcId, toolName: toolName, state: 'success', replyId });
-        }
-        continue;
-      }
-      if (p.kind !== 'text') continue;
-      const text = p.text || '';
-      if (blockType === 'thinking') {
-        handleEvent({ type: 'THINKING_BLOCK_DELTA', delta: text, replyId });
-      } else {
-        handleEvent({ type: 'TEXT_BLOCK_DELTA', delta: text, replyId });
-      }
-    }
-  } else if (kind === 'status-update') {
-    if (result.final === true || result.state === 'completed') {
-      handleEvent({ type: 'AGENT_END', replyId });
-    }
-  } else if (kind === 'message') {
-    const parts = result.parts || [];
-    const texts = parts.filter((p) => p.kind === 'text').map((p) => p.text || '');
-    handleEvent({ type: 'TEXT_BLOCK_DELTA', delta: texts.join(''), replyId });
-    if (result.metadata) {
-      const usage = result.metadata[Object.keys(result.metadata)[0]];
-      if (usage && usage._chat_usage) {
-        handleEvent({
-          type: 'MODEL_CALL_END',
-          inputTokens: usage._chat_usage.inputTokens,
-          outputTokens: usage._chat_usage.outputTokens,
-          totalTokens: usage._chat_usage.totalTokens,
-          replyId
-        });
-      }
-    }
-    handleEvent({ type: 'AGENT_END', replyId });
-  }
-}
 
 // ---------- 弹窗功能 ----------
 
@@ -1676,3 +1172,31 @@ async function showAgentCard() {
     ctx.utils.toast('Failed: ' + e.message, 'error');
   }
 }
+
+export default {
+  mount(container, c) {
+    ctx = c;
+    container.innerHTML = render();
+    messagesEl = document.getElementById('chatInner');
+    inputEl = document.getElementById('chatInput');
+    sendBtn = document.getElementById('sendBtn');
+    sidebarListEl = document.getElementById('threadList');
+    connBadgeEl = document.getElementById('connBadge');
+    updateConnBadge();
+
+    bindEvents();
+    messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
+    loadThreads();
+    refreshTimer = setInterval(loadThreads, 30000);
+    subscribeScroll();
+  },
+
+  unmount() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    if (thinkingTimer) clearInterval(thinkingTimer);
+    if (activeAbort) activeAbort.abort();
+    teardownAllAppHosts();
+    pendingAguiInterrupts = null;
+    isStreaming = false;
+  }
+};

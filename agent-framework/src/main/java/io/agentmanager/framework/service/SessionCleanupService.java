@@ -19,7 +19,6 @@ import org.springframework.stereotype.Service;
  * <p>清理范围（三表联动）：
  * <ul>
  *   <li>turn_lease：已过期租约（崩溃兜底；正常路径由 release + TTL 覆盖）→ TurnLeaseStore.cleanupExpired</li>
- *   <li>confirm_context：TTL 过期未消费 → ConfirmContextStore.deleteExpired</li>
  *   <li>tool_audit_log：超过保留天数（默认 30 天）→ ToolAuditStore.deleteBefore（O3 审计仅保留元信息）</li>
  *   <li>agent_state / agent_fs：会话记录超期（默认 7 天）→ 既有 deleteBefore</li>
  * </ul>
@@ -31,7 +30,6 @@ public class SessionCleanupService {
     private final DataSource dataSource;
     private final SessionManager sessionManager;
     private final TurnLeaseStore turnLeaseStore;
-    private final ConfirmContextStore confirmContextStore;
     private final ToolAuditStore toolAuditStore;
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
@@ -40,7 +38,6 @@ public class SessionCleanupService {
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
                                  TurnLeaseStore turnLeaseStore,
-                                 ConfirmContextStore confirmContextStore,
                                  ToolAuditStore toolAuditStore,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
                                  io.agentmanager.framework.service.storage.FileStorage fileStorage,
@@ -48,7 +45,6 @@ public class SessionCleanupService {
         this.dataSource = dataSource;
         this.sessionManager = sessionManager;
         this.turnLeaseStore = turnLeaseStore;
-        this.confirmContextStore = confirmContextStore;
         this.toolAuditStore = toolAuditStore;
         this.props = props;
         this.fileStorage = fileStorage;
@@ -65,9 +61,8 @@ public class SessionCleanupService {
         // 1. 清理内存中的过期会话
         int memCleaned = sessionManager.cleanupExpired();
 
-        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log / agui_interrupt
+        // 2. 清理数据库层：turn_lease / tool_audit_log / agui_interrupt
         turnLeaseStore.cleanupExpired();
-        confirmContextStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
         int aguiCleaned = aguiInterruptStore.deleteExpired();
 

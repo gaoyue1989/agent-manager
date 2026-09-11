@@ -69,11 +69,9 @@ public record AgentManagerProperties(
 
     /**
      * 清理与租约配置（无状态单次流架构，见 stateless-single-stream-plan O2/O3）。
-     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）
+     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_TURN_LEASE_TTL_SECONDS）
      */
     public record CleanupConfig(
-        /** confirm_context 有效时长（分钟），默认 30 */
-        @DefaultValue("30") int confirmTtlMinutes,
         /** turn_lease 租约 TTL（秒），默认 60 */
         @DefaultValue("60") int turnLeaseTtlSeconds,
         /** turn 续租间隔（秒），默认 20 */
