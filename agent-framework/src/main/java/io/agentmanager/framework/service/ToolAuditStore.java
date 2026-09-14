@@ -69,7 +69,7 @@ public class ToolAuditStore {
                   created_at  DATETIME(3) NOT NULL,
                   KEY idx_session (session_id, id),
                   KEY idx_created_at (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
             log.info("ToolAuditStore: tool_audit_log table ready");
         } catch (Exception e) {

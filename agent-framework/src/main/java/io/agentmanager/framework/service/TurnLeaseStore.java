@@ -61,7 +61,7 @@ public class TurnLeaseStore {
                   expires_at DATETIME(3) NOT NULL,
                   created_at DATETIME(3) NOT NULL,
                   KEY idx_expires_at (expires_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
             log.info("TurnLeaseStore: turn_lease table ready");
         } catch (Exception e) {
@@ -185,6 +185,20 @@ public class TurnLeaseStore {
             stmt.executeUpdate();
         } catch (Exception e) {
             log.warn("TurnLeaseStore: release failed for {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 检查 session 当前是否有活跃租约（status 端点使用） */
+    public boolean isHeld(String sessionId) {
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "SELECT 1 FROM turn_lease WHERE session_id = ? AND expires_at > NOW(3)")) {
+            stmt.setString(1, sessionId);
+            var rs = stmt.executeQuery();
+            return rs.next();
+        } catch (Exception e) {
+            log.warn("TurnLeaseStore: isHeld check failed for {}: {}", sessionId, e.getMessage());
+            return false;
         }
     }
 

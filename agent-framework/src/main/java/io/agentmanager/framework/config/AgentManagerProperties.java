@@ -8,10 +8,11 @@ public record AgentManagerProperties(
     LLMConfig llm,
     ServerConfig server,
     CheckpointConfig checkpoint,
-    @DefaultValue("/config") String configDir,
+    @DefaultValue("") String configDir,
     @DefaultValue("") String workspaceDir,
     CleanupConfig cleanup,
-    FileConfig file
+    FileConfig file,
+    SseConfig sse
 ) {
 
     /**
@@ -19,7 +20,30 @@ public record AgentManagerProperties(
      * 平台部署场景下 configDir 为只读的 OAF 包挂载点，工作区须落在独立可写卷。
      */
     public String resolvedWorkspaceBaseDir() {
-        return (workspaceDir == null || workspaceDir.isBlank()) ? configDir : workspaceDir;
+        if (workspaceDir != null && !workspaceDir.isBlank()) {
+            return workspaceDir;
+        }
+        return resolvedConfigDir();
+    }
+
+    /** 解析后的配置目录：显式配置优先；未配置则按 OS 选默认值（Linux /config；Windows %LOCALAPPDATA%/agent-framework/config） */
+    public String resolvedConfigDir() {
+        if (configDir != null && !configDir.isBlank()) {
+            return configDir;
+        }
+        // 未配置时按 OS 选默认路径
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            var localAppData = System.getenv("LOCALAPPDATA");
+            if (localAppData != null && !localAppData.isBlank()) {
+                return localAppData + "\\agent-framework\\config";
+            }
+            var userProfile = System.getenv("USERPROFILE");
+            if (userProfile != null && !userProfile.isBlank()) {
+                return userProfile + "\\AppData\\Local\\agent-framework\\config";
+            }
+            return "C:\\agent-framework\\config";
+        }
+        return "/config";
     }
 
     public record LLMConfig(
@@ -29,7 +53,8 @@ public record AgentManagerProperties(
         @DefaultValue("openai") String provider,
         @DefaultValue("0.7") double temperature,
         @DefaultValue("4096") int maxTokens,
-        @DefaultValue("120") int timeout
+        @DefaultValue("120") int timeout,
+        @DefaultValue("0") int thinkingBudget
     ) {}
 
     public record ServerConfig(
@@ -110,8 +135,8 @@ public record AgentManagerProperties(
         @DefaultValue("7") int retentionDays,
         /** 存储后端类型：local / s3 */
         @DefaultValue("local") String storageType,
-        /** local 后端根目录（K8s 下挂 platform-data PVC subPath files/） */
-        @DefaultValue("/data/files") String storageLocalDir,
+        /** local 后端根目录（默认：Linux /data/files；Windows %LOCALAPPDATA%/agent-framework/files） */
+        @DefaultValue("") String storageLocalDir,
         /** s3 后端 endpoint（MinIO/Ceph RGW/OSS S3 网关） */
         @DefaultValue("") String storageS3Endpoint,
         /** s3 后端 accessKey（敏感，.env.secrets） */
@@ -120,5 +145,38 @@ public record AgentManagerProperties(
         @DefaultValue("") String storageS3SecretKey,
         /** s3 后端 bucket */
         @DefaultValue("agent-files") String storageS3Bucket
+    ) {
+        /** 解析后的存储目录：显式配置优先；未配置则按 OS 选默认值 */
+        public String resolvedStorageLocalDir() {
+            if (storageLocalDir != null && !storageLocalDir.isBlank()) {
+                return storageLocalDir;
+            }
+            // 跨平台默认值
+            if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+                var localAppData = System.getenv("LOCALAPPDATA");
+                if (localAppData != null && !localAppData.isBlank()) {
+                    return localAppData + "\\agent-framework\\files";
+                }
+                var userProfile = System.getenv("USERPROFILE");
+                if (userProfile != null && !userProfile.isBlank()) {
+                    return userProfile + "\\AppData\\Local\\agent-framework\\files";
+                }
+                return "C:\\agent-framework\\files";
+            }
+            return "/data/files";
+        }
+    }
+
+    /**
+     * SSE 可靠传输配置（durable-sse-plan §3.3）。
+     * 环境变量前缀：AGENT_SSE_*（如 AGENT_SSE_HEARTBEAT_SECONDS）
+     */
+    public record SseConfig(
+        /** 心跳间隔（秒），默认 20。防止 Nginx/CDN 60s 读超时 */
+        @DefaultValue("20") int heartbeatSeconds,
+        /** EventBus Sinks 过期清理延迟（分钟），默认 5 */
+        @DefaultValue("5") int sinksEvictionMinutes,
+        /** EventBus Sinks 缓冲区大小，默认 256 */
+        @DefaultValue("256") int sinksBufferSize
     ) {}
 }

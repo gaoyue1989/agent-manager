@@ -76,7 +76,7 @@ public class McpToolRegistrar {
     private final Map<String, Boolean> destructiveHints = new ConcurrentHashMap<>();
 
     public McpToolRegistrar(io.agentmanager.framework.config.AgentManagerProperties props) {
-        this.configDir = Path.of(props.configDir());
+        this.configDir = Path.of(props.resolvedConfigDir());
     }
 
     /**

@@ -69,9 +69,9 @@ public class McpManager {
 
         var configYaml = mcpDir.resolve("config.yaml");
         if (configYaml.toFile().exists()) {
-            try {
+            try (var is = configYaml.toFile().toURI().toURL().openStream()) {
                 var yaml = new org.yaml.snakeyaml.Yaml();
-                var yamlData = (Map<String, Object>) yaml.load(configYaml.toFile().toURI().toURL().openStream());
+                var yamlData = (Map<String, Object>) yaml.load(is);
                 if (yamlData != null && yamlData.containsKey("connection")) {
                     config.put("connection", yamlData.get("connection"));
                 }

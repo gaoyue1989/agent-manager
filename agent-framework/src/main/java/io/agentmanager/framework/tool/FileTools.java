@@ -202,6 +202,7 @@ public class FileTools {
     }
 
     private static String err(String msg) {
-        return "{\"error\":\"" + msg.replace("\"", "'") + "\"}";
+        var safe = msg.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+        return "{\"error\":\"" + safe + "\"}";
     }
 }

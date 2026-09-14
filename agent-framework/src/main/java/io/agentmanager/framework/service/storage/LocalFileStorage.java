@@ -33,7 +33,7 @@ public class LocalFileStorage implements FileStorage {
 
     @org.springframework.beans.factory.annotation.Autowired
     public LocalFileStorage(io.agentmanager.framework.config.AgentManagerProperties props) {
-        this(Path.of(props.file().storageLocalDir()));
+        this(Path.of(props.file().resolvedStorageLocalDir()));
     }
 
     /** 直接指定根目录（测试用） */
@@ -60,7 +60,9 @@ public class LocalFileStorage implements FileStorage {
         try {
             Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (java.nio.file.AtomicMoveNotSupportedException e) {
-            // 跨设备/文件系统不支持原子移动时降级为普通 move（语义等价，仅非原子）
+            // 跨设备/文件系统（含 Windows 跨盘符）不支持原子移动时降级为普通 move
+            log.info("ATOMIC_MOVE not supported ({} → {}), falling back to REPLACE_EXISTING: {}",
+                tmp, target, e.getMessage());
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
@@ -83,8 +85,15 @@ public class LocalFileStorage implements FileStorage {
     public void delete(String key) throws IOException {
         var target = resolve(key);
         Files.deleteIfExists(target);
-        // 顺带清理残留的 .tmp（上次原子写中断）
-        Files.deleteIfExists(target.resolveSibling(target.getFileName() + ".tmp"));
+        // 顺带清理残留的 .tmp（上次原子写中断）；tmp 名为 {fileName}.{uuid8}.tmp，需 glob 匹配
+        try (var stream = Files.newDirectoryStream(target.getParent(),
+            target.getFileName() + ".*.tmp")) {
+            for (var tmp : stream) {
+                Files.deleteIfExists(tmp);
+            }
+        } catch (java.nio.file.NoSuchFileException e) {
+            // 父目录不存在 → 无残留，忽略
+        }
     }
 
     /** 规范化 key 并校验仍在根目录内（防 ../ 穿越） */
@@ -93,10 +102,23 @@ public class LocalFileStorage implements FileStorage {
             throw new IOException("storage key is empty");
         }
         var p = root.resolve(key).toAbsolutePath().normalize();
-        if (!p.startsWith(root)) {
+        if (!pathStartsWith(p, root)) {
             throw new IOException("storage key escapes root: " + key);
         }
         return p;
+    }
+
+    /** 路径前缀校验：Windows 下不区分大小写 */
+    private static boolean pathStartsWith(Path path, Path prefix) {
+        if (path.startsWith(prefix)) {
+            return true;
+        }
+        // Windows 文件系统不区分大小写，回退到字符串比较
+        if (java.io.File.separatorChar == '\\') {
+            return path.toString().toLowerCase(java.util.Locale.ROOT)
+                .startsWith(prefix.toString().toLowerCase(java.util.Locale.ROOT));
+        }
+        return false;
     }
 
     /** 暴露根目录（测试断言用） */

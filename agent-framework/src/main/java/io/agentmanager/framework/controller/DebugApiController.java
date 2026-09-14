@@ -36,6 +36,8 @@ import io.agentmanager.framework.service.SkillCatalogService;
 public class DebugApiController {
     private static final Logger log = LoggerFactory.getLogger(DebugApiController.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** 允许 tableStats 查询的表名白名单（防 SQL 注入） */
+    private static final java.util.Set<String> STATS_TABLES = java.util.Set.of("agent_state", "agent_fs", "file_asset");
 
     private final AgentManagerProperties props;
     private final OafConfig oafConfig;
@@ -82,7 +84,8 @@ public class DebugApiController {
                 "username", cp.username(),
                 "password", maskSecret(cp.password())
             ),
-            "config_dir", props.configDir()
+            "config_dir", props.resolvedConfigDir(),
+            "storage_dir", props.file().resolvedStorageLocalDir()
         );
     }
 
@@ -238,7 +241,7 @@ public class DebugApiController {
      */
     @GetMapping("/workspace")
     public Map<String, Object> workspace() {
-        var base = Path.of(props.configDir()).resolve(".agentscope").resolve("workspace");
+        var base = Path.of(props.resolvedConfigDir()).resolve(".agentscope").resolve("workspace");
         if (!Files.exists(base)) {
             return Map.of("exists", false, "path", base.toString(), "files", List.of(),
                 "sandbox_mode", sandboxConfig.enabled());
@@ -262,7 +265,10 @@ public class DebugApiController {
 
     private Map<String, Object> tableStats(Connection conn) {
         var result = new LinkedHashMap<String, Object>();
-        for (var table : List.of("agent_state", "agent_fs")) {
+        for (var table : List.of("agent_state", "agent_fs", "file_asset")) {
+            if (!STATS_TABLES.contains(table)) {
+                throw new IllegalArgumentException("Table not in stats whitelist: " + table);
+            }
             try (var stmt = conn.createStatement();
                  var rs = stmt.executeQuery("SELECT COUNT(*) FROM " + table)) {
                 rs.next();
@@ -301,7 +307,9 @@ public class DebugApiController {
                         "size", Files.size(p),
                         "modified", Files.getLastModifiedTime(p).toString()
                     ));
-                } catch (IOException ignored) {}
+                } catch (IOException e) {
+                    log.debug("Skipping file during workspace scan: {}", e.getMessage());
+                }
             }
         } catch (IOException e) {
             log.warn("Workspace scan failed: {}", e.getMessage());

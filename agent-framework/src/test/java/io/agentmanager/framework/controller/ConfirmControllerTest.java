@@ -1,7 +1,6 @@
 package io.agentmanager.framework.controller;
 
 import java.time.Duration;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -17,6 +17,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.ConfirmContextStore;
+import io.agentmanager.framework.service.SessionEventBus;
+import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ToolUseBlock;
@@ -26,6 +29,7 @@ import reactor.core.publisher.Mono;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
@@ -37,9 +41,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * HITL 确认端点测试（hitl-permission-plan.md 6.3 / 12.5）：
- * /threads/{sid}/confirm 同步恢复 + 404/409 错误码；confirm-stream 预处理 + 租约。
+ * /threads/{sid}/confirm 同步恢复 + 404/409 错误码；confirm-stream DURABLE_SSE + 租约。
  *
- * <p>无状态架构：确认上下文落库 ConfirmContextStore（mock 验证委托），确认恢复为新执行段需 acquire 租约。
+ * <p>DURABLE_SSE 架构：confirm-stream 事件经 EventBus 持久化 + 广播，断连后可重连续传。
  */
 class ConfirmControllerTest {
 
@@ -50,6 +54,8 @@ class ConfirmControllerTest {
     private AgentRuntimeService runtimeService;
     private ConfirmContextStore confirmContextStore;
     private TurnLeaseStore turnLeaseStore;
+    private SessionEventBus eventBus;
+    private SessionUserStore sessionUserStore;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -57,6 +63,16 @@ class ConfirmControllerTest {
         confirmContextStore = mock(ConfirmContextStore.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
         when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+
+        // SessionEventBus 依赖 SessionEventStore（mock）
+        SessionEventStore eventStore = mock(SessionEventStore.class);
+        when(eventStore.queryAfter(anyString(), any(), anyInt())).thenReturn(reactor.core.publisher.Flux.empty());
+        when(eventStore.findLatest(anyString())).thenReturn(null);
+        when(eventStore.findMaxSeq(anyString())).thenReturn(0);
+        eventBus = new SessionEventBus(eventStore);
+
+        sessionUserStore = mock(SessionUserStore.class);
+
         runtimeService = new AgentRuntimeService(
             new io.agentmanager.framework.model.OafConfig(
                 "test-agent", "acme", "test-agent", "1.0.0", "acme/test-agent",
@@ -68,7 +84,7 @@ class ConfirmControllerTest {
                 new io.agentmanager.framework.model.OafConfig.MemoryConfig("editable", Map.of()),
                 Map.of()),
             agent, List.of(), new io.agentmanager.framework.service.LLMLogger(), confirmContextStore);
-        mvc = MockMvcBuilders.standaloneSetup(new ConfirmController(runtimeService, turnLeaseStore)).build();
+        mvc = MockMvcBuilders.standaloneSetup(new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore)).build();
 
         // 先注入确认上下文：模拟前端收到 permission_ask（invokeStream 链路 storeConfirmContext 落库）
         var ask = new io.agentscope.core.event.RequireUserConfirmEvent(
@@ -142,7 +158,7 @@ class ConfirmControllerTest {
     void confirmStreamShouldReturnErrorSseFrameWhenContextMissing() {
         doThrow(new AgentRuntimeService.ConfirmContextNotFoundException("nope"))
             .when(confirmContextStore).checkAvailable(anyString());
-        var controller = new ConfirmController(runtimeService, turnLeaseStore);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore);
         var frame = controller.confirmStream("nope", new ConfirmController.ConfirmRequest(List.of()))
             .blockFirst();
         assertNotNull(frame, "should emit error SSE frame");
@@ -157,7 +173,7 @@ class ConfirmControllerTest {
             .thenReturn(reactor.core.publisher.Flux.just(
                 (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-2")));
         when(turnLeaseStore.tryAcquire("t1")).thenReturn("tok-c1");
-        var controller = new ConfirmController(runtimeService, turnLeaseStore);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore);
         var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
         assertNotNull(frame, "should emit SSE frame");

@@ -46,7 +46,8 @@ class S3FileStorageIT {
             requireEnv("S3_IT_SECRET_KEY"), requireEnv("S3_IT_BUCKET"));
         var props = new AgentManagerProperties(
             emptyLlm(), emptyServer(), emptyCheckpoint(), "/tmp/s3it", "",
-            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7), file);
+            new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7), file,
+            new AgentManagerProperties.SseConfig(20, 5, 256));
         storage = new S3FileStorage(props);
     }
 
@@ -64,7 +65,7 @@ class S3FileStorageIT {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120,0);
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

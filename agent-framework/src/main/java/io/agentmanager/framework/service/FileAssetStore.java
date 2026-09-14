@@ -70,7 +70,7 @@ KEY idx_user_status (user_key, status),
               KEY idx_session (session_id, created_at),
               KEY idx_origin_status (origin, status, created_at),
               UNIQUE KEY uk_storage (storage_type, storage_key)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
             log.info("FileAssetStore: file_asset table ready");
         } catch (Exception e) {

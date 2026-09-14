@@ -77,7 +77,7 @@ public class SessionManager {
 
     private SessionState createSession(String userId, String sessionId) {
         String uid = userId != null && !userId.isBlank() ? userId : "anonymous";
-        String sessionKey = uid + ":" + sessionId;
+        String sessionKey = uid + "__" + sessionId;
 
         SessionState newSession = new SessionState(
             sessionKey, userId, sessionId,
@@ -91,7 +91,7 @@ public class SessionManager {
 
     private String buildSessionKey(String userId, String sessionId) {
         String uid = userId != null && !userId.isBlank() ? userId : "anonymous";
-        return uid + ":" + sessionId;
+        return uid + "__" + sessionId;
     }
 
     /**

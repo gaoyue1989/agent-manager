@@ -24,11 +24,12 @@ public class A2AServerConfig {
     @Bean
     @DependsOn("harnessAgent")
     public AgentScopeA2aServer a2aServer(HarnessAgent harnessAgent, OafConfig oafConfig,
-                                         DataSource dataSource) {
+                                         DataSource dataSource,
+                                         @org.springframework.beans.factory.annotation.Value("${server.port:${SERVER_PORT:8100}}") int serverPort) {
         var card = new ConfigurableAgentCard.Builder()
             .name(oafConfig.name())
             .description(oafConfig.description() != null ? oafConfig.description() : "")
-            .url("http://localhost:8100")
+            .url("http://localhost:" + serverPort)
             .build();
 
         var transportProps = TransportProperties.builder("JSONRPC")

@@ -31,7 +31,7 @@ class S3EnvBindingTest {
         // 模拟 application.yml（平铺键名，与主配置一致）
         Map<String, Object> yml = new HashMap<>();
         yml.put("agent.file.storage-type", "${FILE_STORAGE_TYPE:local}");
-        yml.put("agent.file.storage-local-dir", "${FILE_STORAGE_LOCAL_DIR:/data/files}");
+        yml.put("agent.file.storage-local-dir", "${FILE_STORAGE_LOCAL_DIR:}");
         yml.put("agent.file.storage-s3-endpoint", "${FILE_STORAGE_S3_ENDPOINT:}");
         yml.put("agent.file.storage-s3-access-key", "${FILE_STORAGE_S3_ACCESS_KEY:}");
         yml.put("agent.file.storage-s3-secret-key", "${FILE_STORAGE_S3_SECRET_KEY:}");
@@ -66,7 +66,7 @@ class S3EnvBindingTest {
     void localFallbackWhenEnvAbsent() {
         var file = bind(new HashMap<>());
         assertEquals("local", file.storageType());
-        assertEquals("/data/files", file.storageLocalDir());
+        assertEquals("", file.storageLocalDir());
         assertEquals("agent-files", file.storageS3Bucket());
     }
 }

@@ -65,7 +65,7 @@ public class ConfirmContextStore {
                   created_at      DATETIME(3) NOT NULL,
                   consumed        TINYINT(1) NOT NULL DEFAULT 0,
                   KEY idx_created_at (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
             log.info("ConfirmContextStore: confirm_context table ready");
         } catch (Exception e) {

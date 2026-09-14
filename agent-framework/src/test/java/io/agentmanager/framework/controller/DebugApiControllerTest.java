@@ -56,7 +56,7 @@ class DebugApiControllerTest {
 
     private AgentManagerProperties.LLMConfig llmConfig(String key) {
         return new AgentManagerProperties.LLMConfig(
-            key, "gpt-4", "http://localhost/v1", "openai", 0.7, 4096, 120);
+            key, "gpt-4", "http://localhost/v1", "openai", 0.7, 4096, 120,0);
     }
 
     // ---------- env config ----------
@@ -67,14 +67,19 @@ class DebugApiControllerTest {
         when(props.server()).thenReturn(new AgentManagerProperties.ServerConfig("0.0.0.0", 8100));
         when(props.checkpoint()).thenReturn(new AgentManagerProperties.CheckpointConfig(
             "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "agent_manager", "Agent@Manager2026", "agent_manager_test"));
-        when(props.configDir()).thenReturn("/config");
+        when(props.resolvedConfigDir()).thenReturn("/config");
+        when(props.file()).thenReturn(new AgentManagerProperties.FileConfig(
+            true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf,"
+            + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"));
 
         mockMvc.perform(get("/debug/config/env"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.llm.api_key").value("sk-0****ijkl"))
             .andExpect(jsonPath("$.llm.model_id").value("gpt-4"))
             .andExpect(jsonPath("$.checkpoint.password").value("Agen****2026"))
-            .andExpect(jsonPath("$.config_dir").value("/config"));
+            .andExpect(jsonPath("$.config_dir").value("/config"))
+            .andExpect(jsonPath("$.storage_dir").value("/data/files"));
     }
 
     @Test
@@ -83,7 +88,11 @@ class DebugApiControllerTest {
         var cp = new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost/db", "u", "short", "db");
         when(props.server()).thenReturn(new AgentManagerProperties.ServerConfig("0.0.0.0", 8100));
         when(props.checkpoint()).thenReturn(cp);
-        when(props.configDir()).thenReturn("/config");
+        when(props.resolvedConfigDir()).thenReturn("/config");
+        when(props.file()).thenReturn(new AgentManagerProperties.FileConfig(
+            true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf,"
+            + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"));
 
         mockMvc.perform(get("/debug/config/env"))
             .andExpect(status().isOk())
@@ -261,7 +270,7 @@ class DebugApiControllerTest {
 
     @Test
     void workspaceShouldReportMissing() throws Exception {
-        when(props.configDir()).thenReturn("/nonexistent/config");
+        when(props.resolvedConfigDir()).thenReturn("/nonexistent/config");
 
         mockMvc.perform(get("/debug/workspace"))
             .andExpect(status().isOk())
@@ -270,7 +279,7 @@ class DebugApiControllerTest {
 
     @Test
     void workspaceShouldListFiles(@TempDir Path configDir) throws Exception {
-        when(props.configDir()).thenReturn(configDir.toAbsolutePath().toString());
+        when(props.resolvedConfigDir()).thenReturn(configDir.toAbsolutePath().toString());
         var ws = configDir.resolve(".agentscope/workspace");
         java.nio.file.Files.createDirectories(ws);
         java.nio.file.Files.writeString(ws.resolve("AGENTS.md"), "hi");

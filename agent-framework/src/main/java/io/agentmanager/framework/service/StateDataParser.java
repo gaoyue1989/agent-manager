@@ -27,6 +27,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public final class StateDataParser {
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private StateDataParser() {
     }
 
@@ -41,7 +43,7 @@ public final class StateDataParser {
             return null;
         }
         try {
-            var root = new ObjectMapper().readTree(stateData);
+            var root = MAPPER.readTree(stateData);
             var queue = new ArrayDeque<JsonNode>();
             queue.add(root);
             while (!queue.isEmpty()) {

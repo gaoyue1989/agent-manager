@@ -7,6 +7,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
@@ -28,17 +29,20 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+@SuppressWarnings("deprecation") // StreamController is deprecated, tests retained for backward compat
 class StreamControllerTest {
 
     private StreamController controller;
     private ChatUiChannel chatChannel;
     private McpToolRegistrar mcpToolRegistrar;
+    private SessionUserStore sessionUserStore;
 
     @BeforeEach
     void setUp() {
         chatChannel = mock(ChatUiChannel.class);
         mcpToolRegistrar = mock(McpToolRegistrar.class);
-        controller = new StreamController(chatChannel, mcpToolRegistrar);
+        sessionUserStore = mock(SessionUserStore.class);
+        controller = new StreamController(chatChannel, mcpToolRegistrar, sessionUserStore);
     }
 
     @Test
@@ -72,7 +76,7 @@ class StreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just(delta));
 
-        var body = controller.chatStream("hello", "alice", null, null)
+        var body = controller.chatStream("hello", "alice", null, null, null)
             .blockLast().data();
 
         assertTrue(body.contains("THINKING_BLOCK_DELTA"));
@@ -85,7 +89,7 @@ class StreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just(delta));
 
-        var body = controller.chatStream("hello", "alice", null, null)
+        var body = controller.chatStream("hello", "alice", null, null, null)
             .blockLast().data();
 
         assertTrue(body.contains("TOOL_CALL_DELTA"));
@@ -99,7 +103,7 @@ class StreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just(delta));
 
-        var body = controller.chatStream("hello", "alice", null, null)
+        var body = controller.chatStream("hello", "alice", null, null, null)
             .blockLast().data();
 
         assertTrue(body.contains("TOOL_RESULT_TEXT_DELTA"));
@@ -114,7 +118,7 @@ class StreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just(end));
 
-        var body = controller.chatStream("hello", "alice", null, null)
+        var body = controller.chatStream("hello", "alice", null, null, null)
             .blockLast().data();
 
         assertTrue(body.contains("MODEL_CALL_END"));
@@ -129,17 +133,17 @@ class StreamControllerTest {
         var delta = new TextBlockDeltaEvent("reply-1", "block-1", "ok");
         when(chatChannel.sendStream(any(ChatUiRequest.class))).thenReturn(Flux.just(delta));
 
-        controller.chatStream("hello", "alice", "test-user:s1", null).blockLast();
+        controller.chatStream("hello", "alice", "test-user:s1", null, null).blockLast();
 
         var captor = org.mockito.ArgumentCaptor.forClass(ChatUiRequest.class);
         verify(chatChannel).sendStream(captor.capture());
         var messages = captor.getValue().messages();
         assertEquals(1, messages.size(), "消息列表仅用户消息（注入逻辑在 Hook 层）");
         assertEquals(MsgRole.USER, messages.get(0).getRole());
-        assertEquals("test-user:s1",
+        assertEquals("test-user_s1",
             messages.get(0).getMetadata().get(UiContextStore.METADATA_SESSION_KEY),
-            "用户消息 metadata 应携带会话 key，供 UiContextInjectionHook 读取");
-        assertEquals("test-user:s1", captor.getValue().peerId());
+            "用户消息 metadata 应携带会话 key（PathSafe sanitize 后），供 UiContextInjectionHook 读取");
+        assertEquals("test-user_s1", captor.getValue().peerId());
     }
 
     @Test
@@ -147,7 +151,7 @@ class StreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just(new TextBlockDeltaEvent("r", "b", "ok")));
 
-        controller.chatStream("hello", "alice", null, null).blockLast();
+        controller.chatStream("hello", "alice", null, null, null).blockLast();
 
         var captor = org.mockito.ArgumentCaptor.forClass(ChatUiRequest.class);
         verify(chatChannel).sendStream(captor.capture());

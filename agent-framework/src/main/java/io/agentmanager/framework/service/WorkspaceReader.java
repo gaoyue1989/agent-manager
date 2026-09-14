@@ -40,9 +40,10 @@ public class WorkspaceReader {
      */
     public Map<String, byte[]> readRuntimeFiles(String userId) {
         Map<String, byte[]> files = new LinkedHashMap<>();
-        var ctx = RuntimeContext.builder().userId(userId).build();
+        var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+        var ctx = RuntimeContext.builder().userId(safeUserId).build();
         try {
-            var fs = new RemoteFilesystem(baseStore, List.of(userId));
+            var fs = new RemoteFilesystem(baseStore, List.of(safeUserId));
 
             // 直接 read 判断存在（exists() 对相对路径返回 false，不可靠）
             var memoryRead = fs.read(ctx, MEMORY_FILE, 0, -1);
@@ -78,8 +79,9 @@ public class WorkspaceReader {
             return null;
         }
         try {
-            var ctx = RuntimeContext.builder().userId(userKey).build();
-            var fs = new RemoteFilesystem(baseStore, List.of(userKey));
+            var safeUserKey = io.agentmanager.framework.util.PathSafe.sanitize(userKey);
+            var ctx = RuntimeContext.builder().userId(safeUserKey).build();
+            var fs = new RemoteFilesystem(baseStore, List.of(safeUserKey));
             var res = fs.read(ctx, relPath, 0, -1);
             if (res.isSuccess() && res.fileData() != null && res.fileData().content() != null) {
                 return res.fileData().content().getBytes(StandardCharsets.UTF_8);
@@ -88,6 +90,52 @@ public class WorkspaceReader {
         } catch (Exception e) {
             log.warn("Failed to read workspace file {} for user {}: {}", relPath, userKey, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 将文件内容写入某用户 KV 工作区（供 write_file 同步回 KV 等场景使用）。
+     *
+     * <p>写入语义与 {@link RemoteFilesystem#write} 一致：文件不存在则创建，已存在则全量覆盖。
+     *
+     * @return true 写入成功；false 参数非法或写入失败
+     */
+    public boolean writeWorkspaceFile(String userKey, String relPath, String content) {
+        if (userKey == null || userKey.isBlank() || relPath == null || relPath.isBlank() || content == null) {
+            return false;
+        }
+        try {
+            var safeUserKey = io.agentmanager.framework.util.PathSafe.sanitize(userKey);
+            var ctx = RuntimeContext.builder().userId(safeUserKey).build();
+            var fs = new RemoteFilesystem(baseStore, List.of(safeUserKey));
+
+            // write 是创建语义（已有则报错），需先判断是否存在：
+            //   不存在 → write
+            //   已存在 → edit 全量替换（old 取 read 返回内容）
+            var read = fs.read(ctx, relPath, 0, -1);
+            boolean success;
+            if (read.isSuccess() && read.fileData() != null && read.fileData().content() != null) {
+                // 文件已存在 → edit 全量替换
+                var editRes = fs.edit(ctx, relPath, read.fileData().content(), content, false);
+                success = editRes.isSuccess();
+                if (!success) {
+                    log.warn("write_workspace_file: KV edit failed for {} user {}: {}", relPath, safeUserKey, editRes.error());
+                }
+            } else {
+                // 文件不存在 → write 创建
+                var writeRes = fs.write(ctx, relPath, content);
+                success = writeRes.isSuccess();
+                if (!success) {
+                    log.warn("write_workspace_file: KV write failed for {} user {}: {}", relPath, safeUserKey, writeRes.error());
+                }
+            }
+            if (success) {
+                log.info("write_workspace_file: synced {} ({} chars) to KV for user {}", relPath, content.length(), safeUserKey);
+            }
+            return success;
+        } catch (Exception e) {
+            log.warn("write_workspace_file: KV write failed for {} user {}: {}", relPath, userKey, e.getMessage());
+            return false;
         }
     }
 

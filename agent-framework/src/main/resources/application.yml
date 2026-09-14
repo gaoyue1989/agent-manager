@@ -12,7 +12,8 @@ spring:
       max-request-size: ${FILE_UPLOAD_MAX_MB:20}MB
 
 agent:
-  config-dir: ${AGENT_CONFIG_DIR:/config}
+  config-dir: ${AGENT_CONFIG_DIR:}
+  workspace-dir: ${AGENT_WORKSPACE_DIR:}
   llm:
     api-key: ${LLM_API_KEY:}
     model-id: ${LLM_MODEL_ID:}
@@ -21,6 +22,7 @@ agent:
     temperature: ${LLM_TEMPERATURE:0.7}
     max-tokens: ${LLM_MAX_TOKENS:4096}
     timeout: ${LLM_TIMEOUT:120}
+    thinking-budget: ${LLM_THINKING_BUDGET:0}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
@@ -53,11 +55,16 @@ agent:
     # storageType/storageS3Endpoint 等一一对应——不能嵌套 storage: 层，
     # 否则 binder 匹配不到字段、全部回退默认值（S3 必空导致启动失败）
     storage-type: ${FILE_STORAGE_TYPE:local}
-    storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
+    storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:}
     storage-s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}
     storage-s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
     storage-s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
     storage-s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
+  # durable-sse-plan §3.3：SSE 可靠传输配置
+  sse:
+    heartbeat-seconds: ${AGENT_SSE_HEARTBEAT_SECONDS:20}
+    sinks-eviction-minutes: ${AGENT_SSE_SINKS_EVICTION_MINUTES:5}
+    sinks-buffer-size: ${AGENT_SSE_SINKS_BUFFER_SIZE:256}
 
 # OTel 链路追踪（默认关闭，设置 OTEL_TRACES_EXPORTER=otlp 启用）
 otel:

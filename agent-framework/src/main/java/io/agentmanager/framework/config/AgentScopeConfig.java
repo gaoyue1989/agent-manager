@@ -128,7 +128,7 @@ public class AgentScopeConfig {
 
     @Bean
     public McpManager mcpManager(AgentManagerProperties props, McpToolRegistrar mcpToolRegistrar) {
-        return new McpManager(Path.of(props.configDir()), mcpToolRegistrar);
+        return new McpManager(Path.of(props.resolvedConfigDir()), mcpToolRegistrar);
     }
 
     @Bean
@@ -250,6 +250,11 @@ public class AgentScopeConfig {
                 .apiKey(llm.apiKey())
                 .modelName(llm.modelId())
                 .baseUrl(llm.baseUrl())
+                .generateOptions(io.agentscope.core.model.GenerateOptions.builder()
+                    .temperature(llm.temperature())
+                    .maxTokens(llm.maxTokens())
+                    .thinkingBudget(llm.thinkingBudget())
+                    .build())
                 .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
                     .client(java.net.http.HttpClient.newBuilder()
                         .connectTimeout(java.time.Duration.ofSeconds(30))
@@ -295,7 +300,7 @@ public class AgentScopeConfig {
                 .toolkit(toolkit)
                 // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
                 // 长流程（撰写→校验→修正→打包→登记→汇报），放宽至 20 轮
-                .maxIters(20)
+                .maxIters(40)
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
@@ -313,7 +318,7 @@ public class AgentScopeConfig {
             // HarnessSkillMiddleware 每轮推理重扫目录（mtime+size 短路），PVC 上
             // /config/skills 原位变化无需重启即可在下轮生效（动态加载）。
             // writeable=false 只读分发：skill_manage/skill 目录写回被仓库层拒绝（PVC 只读）。
-            var oafSkillsDir = Path.of(props.configDir()).resolve("skills");
+            var oafSkillsDir = Path.of(props.resolvedConfigDir()).resolve("skills");
             if (java.nio.file.Files.isDirectory(oafSkillsDir)) {
                 builder.skillRepository(new io.agentscope.core.skill.repository.FileSystemSkillRepository(
                     oafSkillsDir, false, "oaf-package"));
@@ -370,8 +375,8 @@ public class AgentScopeConfig {
                 verifyToolCoverage(agent, oafConfig, customToolNames, permCfg.mcpNames());
             }
 
-            log.info("HarnessAgent created: {} (model: {}, workspace: {})",
-                oafConfig.name(), llm.modelId(), workspacePath);
+            log.info("HarnessAgent created: {} (model: {}, thinkingBudget: {}, workspace: {})",
+                oafConfig.name(), llm.modelId(), llm.thinkingBudget(), workspacePath);
             return agent;
         } catch (Exception e) {
             log.error("Failed to create AgentScope agent: {}", e.getMessage(), e);
@@ -405,6 +410,25 @@ public class AgentScopeConfig {
         var cleanup = props.cleanup();
         var retention = cleanup != null ? cleanup.auditRetentionDays() : 30;
         return new io.agentmanager.framework.service.ToolAuditStore(dataSource, retention);
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.SessionEventStore sessionEventStore(DataSource dataSource,
+            AgentManagerProperties props) {
+        var cleanup = props.cleanup();
+        var retention = cleanup != null ? cleanup.sessionRetentionDays() : 7;
+        return new io.agentmanager.framework.service.SessionEventStore(dataSource, retention);
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.SessionEventBus sessionEventBus(
+            io.agentmanager.framework.service.SessionEventStore sessionEventStore,
+            AgentManagerProperties props) {
+        var sse = props.sse();
+        var heartbeat = sse != null ? java.time.Duration.ofSeconds(sse.heartbeatSeconds()) : java.time.Duration.ofSeconds(20);
+        var eviction = sse != null ? java.time.Duration.ofMinutes(sse.sinksEvictionMinutes()) : java.time.Duration.ofMinutes(5);
+        var bufSize = sse != null ? sse.sinksBufferSize() : 256;
+        return new io.agentmanager.framework.service.SessionEventBus(sessionEventStore, heartbeat, eviction, bufSize);
     }
 
     @Bean

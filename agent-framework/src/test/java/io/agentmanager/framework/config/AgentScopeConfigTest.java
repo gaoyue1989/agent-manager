@@ -28,7 +28,7 @@ class AgentScopeConfigTest {
     @Test
     void mcpManagerShouldUseConfigPath() {
         var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test", "",
-            cleanupConfig(), emptyFileConfig());
+            cleanupConfig(), emptyFileConfig(), new AgentManagerProperties.SseConfig(20, 5, 256));
         var mcpRegistrar = mock(McpToolRegistrar.class);
 
         assertNotNull(config.mcpManager(props, mcpRegistrar));
@@ -104,7 +104,8 @@ class AgentScopeConfigTest {
             emptyLlm(), emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
-            "/config", "", cleanupConfig(), emptyFileConfig());
+            "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256));
 
         var ds = config.dataSource(props);
         assertInstanceOf(HikariDataSource.class, ds);
@@ -158,11 +159,12 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties propsForLlm() {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
-                "k", "m", "http://localhost", "openai", 0.7, 4096, 120),
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120,0),
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
-            "/config", "", cleanupConfig(), emptyFileConfig());
+            "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256));
     }
 
     private static AgentManagerProperties.CleanupConfig cleanupConfig() {
@@ -176,7 +178,7 @@ class AgentScopeConfigTest {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120,0);
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

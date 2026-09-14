@@ -22,7 +22,7 @@ class A2AServerConfigTest {
         when(oaf.name()).thenReturn("agent-a");
         when(oaf.description()).thenReturn("desc");
 
-        var server = config.a2aServer(agent, oaf, dataSource);
+        var server = config.a2aServer(agent, oaf, dataSource, 8100);
         assertNotNull(server);
     }
 
@@ -34,7 +34,7 @@ class A2AServerConfigTest {
         when(oaf.name()).thenReturn("agent-b");
         when(oaf.description()).thenReturn(null);
 
-        var server = config.a2aServer(agent, oaf, dataSource);
+        var server = config.a2aServer(agent, oaf, dataSource, 8100);
         assertNotNull(server);
     }
 }

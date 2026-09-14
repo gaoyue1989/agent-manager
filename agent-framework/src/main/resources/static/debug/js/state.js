@@ -15,7 +15,8 @@ const state = {
   ui: {
     streamMode: 'a2a', // a2a | channel
     isStreaming: false,
-    theme: null // 'light' | 'dark' | null(跟随系统)
+    theme: null, // 'light' | 'dark' | null(跟随系统)
+    userId: (() => { try { return localStorage.getItem('debug-uid') || 'debug-user'; } catch (e) { return 'debug-user'; } })()
   }
 };
 
@@ -36,6 +37,10 @@ export function setState(path, value) {
   // 会话 ID 持久化到 localStorage（刷新后恢复当前 session）
   if (path === 'threads.current') {
     try { value ? localStorage.setItem('debug-sid', value) : localStorage.removeItem('debug-sid'); } catch (e) { /* ignore */ }
+  }
+  // userId 持久化到 localStorage
+  if (path === 'ui.userId') {
+    try { value ? localStorage.setItem('debug-uid', value) : localStorage.removeItem('debug-uid'); } catch (e) { /* ignore */ }
   }
   notify(path, value);
 }

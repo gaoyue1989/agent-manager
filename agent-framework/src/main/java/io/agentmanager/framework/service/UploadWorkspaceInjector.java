@@ -81,8 +81,10 @@ public class UploadWorkspaceInjector {
     /** SDK 会话文件系统根：{workspace}/.agentscope/workspace/{sessionId} */
     java.nio.file.Path workspaceRoot(String workspaceKey) {
         var base = Path.of(props.resolvedWorkspaceBaseDir(), ".agentscope", "workspace");
-        return base.resolve(workspaceKey).toAbsolutePath().normalize();
+        return base.resolve(io.agentmanager.framework.util.PathSafe.sanitize(workspaceKey)).toAbsolutePath().normalize();
     }
+
+
 
     /**
      * 唯一化工作区文件名：同名文件追加 _1/_2（DeerFlow claim_unique_filename 同款）。
@@ -102,12 +104,15 @@ public class UploadWorkspaceInjector {
             int dot = fileName.lastIndexOf('.');
             var stem = dot > 0 ? fileName.substring(0, dot) : fileName;
             var ext = dot > 0 ? fileName.substring(dot) : "";
-            for (int i = 1; ; i++) {
+            for (int i = 1; i <= 1000; i++) {
                 var candidate = "uploads/" + stem + "_" + i + ext;
                 if (!existing.contains(candidate)) {
                     return candidate;
                 }
             }
+            // 上界兜底：1000 个同名文件已存在，用 UUID 避免无限循环
+            log.warn("inject: too many conflicting names for {}, using UUID fallback", fileName);
+            return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
         } catch (IOException e) {
             log.warn("inject: unique name probe failed, fallback {}", base);
             return base;

@@ -104,7 +104,7 @@ class AgentRuntimeServiceHitlTest {
     void confirmContextShouldBePersistedByAsk() {
         emitAskThenCollect();
         // 落库校验：storeConfirmContext → confirmContextStore.put（session 带 tenant 前缀）
-        verify(confirmContextStore).put(eq("acme-test-agent:t1"), anyList(), anyString(), any(), any());
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), anyString(), any(), any());
     }
 
     @Test
@@ -119,7 +119,7 @@ class AgentRuntimeServiceHitlTest {
     @Test
     void consumeConfirmContextShouldBeCasConsuming() {
         stubStoreRow();
-        var sessionId = "acme-test-agent:" + SID;
+        var sessionId = "acme-test-agent__" + SID;
         var first = service.consumeConfirmContext(sessionId);
         assertEquals(1, first.toolCalls().size());
     }
