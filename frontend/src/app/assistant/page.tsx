@@ -22,6 +22,9 @@ import { CopilotKit, CopilotChat, useAgent, useInterrupt } from "@copilotkit/rea
 const AGENT_BASE = "/agent/release-agent";
 const AGUI_BASE = `${AGENT_BASE}/agui/run`;
 const AGENT_ID = "release-agent";
+// CopilotKit v2 在显式 threadId 下不渲染内置欢迎屏（ChatView 要求 !hasExplicitThreadId），
+// 欢迎语由页面自绘（ChatWelcome），文案以此常量为准
+const WELCOME_TEXT = "我是 OAF 平台的智能发布助手。可以让我发布配置包、查询服务状态、更新环境变量、重新发布或下线服务。";
 
 type FileCard = {
   file_id: string; file_name: string; mime_type: string; size: number;
@@ -40,6 +43,19 @@ const uid = () =>
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
+// 上传文件到服务端文件接口（fileId 由服务端在 run 时注入 agent 工作区）
+async function uploadToServer(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("userId", "webui");
+  const resp = await fetch(`${AGENT_BASE}/files/upload`, { method: "POST", body: fd });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.message ?? `上传失败 HTTP ${resp.status}`);
+  }
+  return (await resp.json()) as { file_id: string; file_name: string; mime_type: string; size: number };
+}
+
 export default function AssistantPage() {
   const [threadId, setThreadId] = useState(() => uid());
   const [attachments, setAttachments] = useState<AttachItem[]>([]);
@@ -50,6 +66,10 @@ export default function AssistantPage() {
   const [notice, setNotice] = useState("");
   const [pendingManual, setPendingManual] = useState<PendingInterrupt[]>([]);
   const [manualBusy, setManualBusy] = useState(false);
+  // 当前线程是否为新建会话（历史会话恢复不显示欢迎屏，避免 connect 加载间隙闪现）
+  const [isNewThread, setIsNewThread] = useState(true);
+  // 聊天内 ＋ 附件（CopilotKit 队列展示）的 fileId，与 📎 附件同走 properties.fileIds 注入工作区
+  const [chatFileIds, setChatFileIds] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ===== 历史会话列表 =====
@@ -78,6 +98,8 @@ export default function AssistantPage() {
     setFileCards([]);
     setPendingManual([]);
     setNotice("");
+    setIsNewThread(true);
+    setChatFileIds([]);
     setThreadId(uid());
   }, []);
 
@@ -96,6 +118,8 @@ export default function AssistantPage() {
     setAttachments([]);
     setFileCards([]);
     setShowHistory(false);
+    setIsNewThread(false);
+    setChatFileIds([]);
     setThreadId(t.id);
   }, []);
 
@@ -119,19 +143,11 @@ export default function AssistantPage() {
     return () => { cancelled = true; };
   }, [threadId]);
 
-  // ===== 附件上传（fileIds 走 forwardedProps 注入工作区）=====
+  // ===== 附件上传（📎：fileIds 走 forwardedProps 注入工作区）=====
   const uploadFile = useCallback(async (file: File) => {
     setUploading(true);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("userId", "webui");
-      const resp = await fetch(`${AGENT_BASE}/files/upload`, { method: "POST", body: fd });
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.message ?? `上传失败 HTTP ${resp.status}`);
-      }
-      const data = await resp.json();
+      const data = await uploadToServer(file);
       setAttachments((prev) => [...prev, {
         fileId: data.file_id, name: data.file_name, mime: data.mime_type, size: data.size,
       }]);
@@ -145,8 +161,8 @@ export default function AssistantPage() {
 
   const properties = useMemo(() => ({
     userId: "webui",
-    fileIds: attachments.map((a) => a.fileId),
-  }), [attachments]);
+    fileIds: [...attachments.map((a) => a.fileId), ...chatFileIds],
+  }), [attachments, chatFileIds]);
 
   return (
     <div data-testid="assistant-page" className="flex flex-col h-[calc(100vh-8rem)]">
@@ -219,16 +235,27 @@ export default function AssistantPage() {
         useSingleEndpoint={false}
         properties={properties}
       >
-        <div className="flex-1 min-h-0 border rounded overflow-hidden bg-white">
+        <div className="flex-1 min-h-0 border border-gray-300 rounded shadow-sm overflow-hidden bg-white relative">
           <CopilotChat
             agentId={AGENT_ID}
             threadId={threadId}
             labels={{
               chatInputPlaceholder: "例如：现在有哪些服务？/ 把 packageId=3 发布一下",
-              welcomeMessageText: "我是 OAF 平台的智能发布助手。可以让我发布配置包、查询服务状态、更新环境变量、重新发布或下线服务。",
+              welcomeMessageText: WELCOME_TEXT,
               modalHeaderTitle: "发布助手",
             }}
+            attachments={{
+              enabled: true,
+              onUpload: async (file: File) => {
+                const data = await uploadToServer(file);
+                setChatFileIds((prev) => (prev.includes(data.file_id) ? prev : [...prev, data.file_id]));
+                // value 仅作占位（fileId）：真实内容由服务端按 forwardedProps.fileIds 注入工作区
+                return { type: "data" as const, value: data.file_id, mimeType: data.mime_type };
+              },
+              onUploadFailed: ({ message }: { message: string }) => setNotice(`⚠️ ${message}`),
+            }}
           />
+          <ChatWelcome agentId={AGENT_ID} visible={isNewThread} />
         </div>
         <HitlCard agentId={AGENT_ID} />
         <OafEventListener agentId={AGENT_ID} onFileCard={(c) => setFileCards((prev) => [...prev, c])} />
@@ -259,6 +286,31 @@ export default function AssistantPage() {
             附件随下一条消息注入工作区；在 CopilotChat 输入框输入并发送
           </span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** 空会话欢迎屏：覆盖在对话区中央（pointer-events-none 不挡输入框），
+    agent 产出首条消息后自动隐藏；历史会话恢复（visible=false）不渲染 */
+function ChatWelcome({ agentId, visible }: { agentId: string; visible: boolean }) {
+  const { agent } = useAgent({ agentId });
+  const [hasMessages, setHasMessages] = useState(false);
+  useEffect(() => {
+    if (!agent?.subscribe) return;
+    const sync = () => setHasMessages((agent.messages ?? []).length > 0);
+    sync();
+    const subscription = agent.subscribe({ onMessagesChanged: sync });
+    return () => subscription.unsubscribe();
+  }, [agent]);
+  if (!visible || hasMessages) return null;
+  return (
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none px-8">
+      <div className="flex flex-col items-center text-center max-w-lg">
+        <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center text-2xl mb-4">
+          🤖
+        </div>
+        <p className="text-base text-gray-600 leading-relaxed">{WELCOME_TEXT}</p>
       </div>
     </div>
   );

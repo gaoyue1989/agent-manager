@@ -198,6 +198,8 @@ public class OpenSandbox extends AbstractBaseSandbox {
                 var injectedIds = new java.util.ArrayList<String>();
                 for (var f : pending) {
                     var wsPath = "uploads/" + f.fileName();
+                    // 单文件 fail-soft：个别坏行（如存储对象已清理而 file_asset 未退役）不得
+                    // 中断整批注入，否则同批新上传文件在本 turn 不可见且每轮复现失败
                     try (var in = fileStorage.read(f.storageKey())) {
                         osbSandbox.files().write(List.of(
                             com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
@@ -207,12 +209,18 @@ public class OpenSandbox extends AbstractBaseSandbox {
                                 .data(Base64.getEncoder().encodeToString(in.readAllBytes()))
                                 .mode(644)
                                 .build()));
+                    } catch (Exception e) {
+                        log.warn("[sandbox-open] skip pending upload {} ({}): {}",
+                            f.id(), f.fileName(), e.getMessage());
+                        continue;
                     }
                     // 注入成功后才回写 workspace_path（保证路径与沙箱内实际一致）
                     fileAssetStore.updateWorkspacePath(f.id(), wsPath);
                     injectedIds.add(f.id());
                 }
-                fileAssetStore.markInjected(injectedIds);
+                if (!injectedIds.isEmpty()) {
+                    fileAssetStore.markInjected(injectedIds);
+                }
                 uploadsInjected.set(true);
                 log.info("[sandbox-open] injected {} pending upload(s) for user {}", injectedIds.size(), userId);
             } catch (Exception e) {

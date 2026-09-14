@@ -1,3 +1,12 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* 发布助手：CopilotChat 输入药丸默认无边框，在白色对话区内无法分辨 */
+.copilotKitInput {
+  border: 1px solid #d1d5db;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+.copilotKitInput:focus-within {
+  border-color: #3b82f6;
+}

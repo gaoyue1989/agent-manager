@@ -8,6 +8,7 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentmanager.framework.config.AguiProperties;
 import io.agentmanager.framework.model.AguiRunProps;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -290,9 +291,9 @@ public class AguiRunService {
             }
         }
         if (lastAssistantIdx < 0) {
-            // 无 assistant 轮（新会话首轮）：全量即 follow-up，原样传（converter 转换后 agent
+            // 无 assistant 轮（新会话首轮）：全量即 follow-up（converter 转换后 agent
             // 记忆以服务端为准，多条 user 输入场景由前端保证最后一条为新输入；对齐上游 return input）
-            return input;
+            return rebuild(input, messages);
         }
         List<io.agentscope.core.agui.model.AguiMessage> after =
             lastAssistantIdx < messages.size() - 1
@@ -312,19 +313,73 @@ public class AguiRunService {
         return rebuild(input, after);
     }
 
-    /** 以原 input 的非 messages 字段重建 RunAgentInput */
+    /** 以原 input 的非 messages 字段重建 RunAgentInput（messages 统一做 document part 降级） */
     private RunAgentInput rebuild(RunAgentInput input,
                                   List<io.agentscope.core.agui.model.AguiMessage> messages) {
         return RunAgentInput.builder()
             .threadId(input.getThreadId())
             .runId(input.getRunId())
-            .messages(messages)
+            .messages(sanitizeDocumentParts(messages))
             .tools(input.getTools())
             .context(input.getContext())
             .state(input.getState())
             .forwardedProps(input.getForwardedProps())
             .resume(input.getResume())
             .build();
+    }
+
+    /**
+     * document part 降级（CopilotChat 内置 ＋ 附件兼容）：上游 AguiMessageConverter 尚无
+     * Document 映射（DocumentInputContent → 抛 IllegalStateException，整轮 run 失败），而附件
+     * 真实内容已经由 forwardedProps.fileIds 注入工作区，故把 document part 替换为文本提示；
+     * image/audio/video part 走上游原生映射，不在此处理。
+     */
+    private List<io.agentscope.core.agui.model.AguiMessage> sanitizeDocumentParts(
+            List<io.agentscope.core.agui.model.AguiMessage> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return messages;
+        }
+        List<io.agentscope.core.agui.model.AguiMessage> result = null;
+        for (int i = 0; i < messages.size(); i++) {
+            var message = messages.get(i);
+            if (!(message.getContent()
+                    instanceof io.agentscope.core.agui.model.MessageContent.Blocks blocks)) {
+                continue;
+            }
+            boolean hasDocument = blocks.parts().stream()
+                .anyMatch(p -> p instanceof io.agentscope.core.agui.model.DocumentInputContent);
+            if (!hasDocument) {
+                continue;
+            }
+            var replaced = new ArrayList<io.agentscope.core.agui.model.InputContent>(blocks.parts().size());
+            for (var part : blocks.parts()) {
+                if (part instanceof io.agentscope.core.agui.model.DocumentInputContent doc) {
+                    replaced.add(new io.agentscope.core.agui.model.TextInputContent(
+                        "[附件 " + documentFileName(doc) + " 已上传至工作区]"));
+                } else {
+                    replaced.add(part);
+                }
+            }
+            if (result == null) {
+                result = new ArrayList<>(messages);
+            }
+            result.set(i, new io.agentscope.core.agui.model.AguiMessage(
+                message.getId(), message.getRole(),
+                new io.agentscope.core.agui.model.MessageContent.Blocks(replaced),
+                message.getToolCalls(), message.getToolCallId()));
+        }
+        return result != null ? result : messages;
+    }
+
+    /** 附件文件名：CopilotKit 发送时把 filename 合并进 part metadata */
+    private static String documentFileName(io.agentscope.core.agui.model.DocumentInputContent doc) {
+        if (doc.metadata() != null) {
+            var name = doc.metadata().get("filename");
+            if (name instanceof String s && !s.isBlank()) {
+                return s;
+            }
+        }
+        return "未命名文件";
     }
 
     // ===== 帧构造 =====
