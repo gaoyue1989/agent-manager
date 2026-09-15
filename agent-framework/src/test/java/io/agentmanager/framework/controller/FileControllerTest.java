@@ -51,8 +51,7 @@ public class FileControllerTest {
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20,
-                "image/*,text/plain,text/markdown,text/csv,application/pdf,"
-                    + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
+                AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME,
                 5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"));
     }
 
@@ -183,5 +182,13 @@ public class FileControllerTest {
             "application/vnd.openxmlformats-officedocument.*"));
         // 白名单为空 → 全部拒绝
         assertTrue(!FileController.mimeAllowed("image/png", ""));
+    }
+
+    @Test
+    void defaultUploadMimeShouldAllowOafZip() {
+        // OAF 配置包为 zip：默认白名单须放行（含 Windows 浏览器的 x-zip-compressed 变体）
+        var def = AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME;
+        assertTrue(FileController.mimeAllowed("application/zip", def));
+        assertTrue(FileController.mimeAllowed("application/x-zip-compressed", def));
     }
 }

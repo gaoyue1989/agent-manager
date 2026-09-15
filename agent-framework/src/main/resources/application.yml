@@ -43,7 +43,7 @@ agent:
     upload-enabled: ${FILE_UPLOAD_ENABLED:true}
     upload-max-mb: ${FILE_UPLOAD_MAX_MB:20}
     upload-max-pending: ${FILE_UPLOAD_MAX_PENDING:20}
-    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*}
+    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed}
     image-max-mb: ${FILE_IMAGE_MAX_MB:5}
     image-inline-total-mb: ${FILE_IMAGE_INLINE_TOTAL_MB:15}
     present-max-mb: ${FILE_PRESENT_MAX_MB:50}

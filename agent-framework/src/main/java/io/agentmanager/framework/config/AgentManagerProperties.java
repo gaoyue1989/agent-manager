@@ -96,8 +96,7 @@ public record AgentManagerProperties(
         /** 每 user_key pending 未消费文件数上限（软限制） */
         @DefaultValue("20") int uploadMaxPending,
         /** MIME 白名单（逗号分隔，支持 * 通配） */
-        @DefaultValue("image/*,text/plain,text/markdown,text/csv,application/pdf,"
-            + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*") String uploadAllowedMime,
+        @DefaultValue(FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME) String uploadAllowedMime,
         /** 图片内联单文件大小上限（MB），超限降级路径提示 */
         @DefaultValue("5") int imageMaxMb,
         /** 图片内联总字节预算（MB），多图叠加超限降级路径提示 */
@@ -120,5 +119,15 @@ public record AgentManagerProperties(
         @DefaultValue("") String storageS3SecretKey,
         /** s3 后端 bucket */
         @DefaultValue("agent-files") String storageS3Bucket
-    ) {}
+    ) {
+        /**
+         * 默认 MIME 白名单：图片/文本/PDF/Office 之外放行 zip（OAF 配置包经 📎 上传后注入
+         * 工作区，助手凭路径调 upload_package 发布）；x-zip-compressed 兼容 Windows 浏览器。
+         * 与 application.yml 的 FILE_UPLOAD_ALLOWED_MIME env 默认值保持同步。
+         */
+        public static final String DEFAULT_UPLOAD_ALLOWED_MIME =
+            "image/*,text/plain,text/markdown,text/csv,application/pdf,"
+                + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
+                + "application/zip,application/x-zip-compressed";
+    }
 }
