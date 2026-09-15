@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  测试专用日志配置：mvn test 时 classpath 上优先于 logback-spring.xml 加载。
+  仅控制台输出——避免测试环境（如 CI 非 root 用户）因无法创建 /applog
+  导致 Spring Boot 日志初始化 fail-fast、上下文加载失败。
+-->
+<configuration>
+    <conversionRule conversionWord="traceId"
+        converterClass="io.agentmanager.framework.service.TraceIdConverter"/>
+
+    <property name="LOG_PATTERN"
+        value="%d{yyyy-MM-dd HH:mm:ss.SSS} [${HOST_NAME:-localhost}] [${APP_NAME:-agent-framework}] [%-5level] [%t] [%traceId] %logger{0} - %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
