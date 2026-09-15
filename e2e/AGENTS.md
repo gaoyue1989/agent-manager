@@ -4,8 +4,8 @@
 
 | 脚本 | 场景 | 内容 |
 |------|------|------|
-| platform-e2e.sh | A+B | REST 主链路 42 断言：上传→发布→A2A 注册→env 更新→republish→上下线→异常路径→零残留清理（保护 release-agent） |
-| mcpclient/ (go run .) | C | MCP client 经 streamableHttp 走完整发布链路 20 断言 |
+| platform-e2e.sh | A+B | REST 主链路 50 断言：上传→发布→A2A 注册→env 更新（含全量覆盖清除旧键）→republish→上下线→异常路径（deploying/stopped 改 env 拒绝、被引用包删除 400）→零残留清理（增量对齐基线，保护 release-agent）；镜像经 GET /images 动态选取不写死 |
+| mcpclient/ (go run .) | C | MCP client 经 streamableHttp 走完整发布链路 27 断言（含 list_images/list_packages/get_package_detail/register_service 与两步确认删除） |
 | ui-e2e.js | D | Puppeteer UI 流程 10 断言（发布向导三步/详情轮询/重发布/删除） |
 | agent-e2e.sh | E | release-agent 自举 + 自然语言驱动第三方发布 + 确认式删除 6 断言 |
 | debug-console-e2e.js | 附 | Debug Console 子路径渲染（经 :30080） |

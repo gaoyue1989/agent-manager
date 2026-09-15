@@ -160,4 +160,64 @@ class OafPackageToolsTest {
             assertTrue(names.contains("skills/help.md"), "zip 应含附加文件: " + names);
         }
     }
+
+    /** CRLF 行尾（Windows 编辑器产出）必须正常解析：trim 吃掉 \r */
+    @Test
+    void crlfLineEndingsParsed() {
+        var md = VALID_MD.replace("\n", "\r\n");
+        var result = tools.checkOafPackage(md);
+        assertTrue(result.contains("\"valid\":true"), "CRLF 应通过: " + result);
+    }
+
+    /** 单引号值同样要去引号参与 kebab-case 校验 */
+    @Test
+    void singleQuotedValuesStripped() {
+        var md = """
+            ---
+            name: 'weather-agent'
+            vendorKey: 'acme'
+            agentKey: 'weather-agent'
+            version: '1.0.0'
+            description: '天气查询助手'
+            author: '@acme'
+            license: 'MIT'
+            ---
+            body
+            """;
+        var result = tools.checkOafPackage(md);
+        assertTrue(result.contains("\"valid\":true"), "单引号值应通过: " + result);
+    }
+
+    /** 注释行与顶层/嵌套列表项不得混入键集合：仅按 key: value 顶层行取键 */
+    @Test
+    void commentsAndListLinesIgnored() {
+        var md = """
+            ---
+            # 生成备注：此处是注释
+            name: weather-agent
+            tools:
+              - echo
+            - top-level-list-item
+            vendorKey: acme
+            agentKey: weather-agent
+            version: 1.0.0
+            description: 天气查询助手
+            author: "@acme"
+            license: MIT
+            ---
+            body
+            """;
+        var result = tools.checkOafPackage(md);
+        assertTrue(result.contains("\"valid\":true"), "注释/列表行不应破坏解析: " + result);
+        assertFalse(result.contains("# 生成备注"), "注释不应成为键: " + result);
+        assertFalse(result.contains("top-level-list-item"), "列表项不应成为键: " + result);
+    }
+
+    /** frontmatter 未闭合（无结束 ---）与缺字段一致地拒绝 */
+    @Test
+    void unclosedFrontmatterRejected() {
+        var result = tools.checkOafPackage("---\nname: weather-agent\n正文没有结束标记");
+        assertFalse(result.contains("\"valid\":true"), "未闭合 frontmatter 应不通过: " + result);
+        assertTrue(result.contains("frontmatter"), "应提示 frontmatter 缺失: " + result);
+    }
 }

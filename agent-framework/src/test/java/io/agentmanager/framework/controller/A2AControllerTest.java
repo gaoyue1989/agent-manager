@@ -214,4 +214,59 @@ class A2AControllerTest {
                      "params":{"id":"s1"}}
                     """)));
     }
+
+    @Test
+    void tasksCancelShouldForwardToSdk() throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(
+            java.util.Map.of("jsonrpc", "2.0", "id", "9",
+                "result", java.util.Map.of("kind", "task", "id", "s9", "state", "canceled")));
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"9","method":"tasks/cancel",
+                     "params":{"id":"s9"}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.result.state").value("canceled"));
+
+        org.mockito.ArgumentCaptor<String> bodyCap =
+            org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(wrapper).handleRequest(bodyCap.capture(), anyMap(), anyMap());
+        org.junit.jupiter.api.Assertions.assertTrue(
+            bodyCap.getValue().contains("\"method\":\"tasks/cancel\""),
+            "tasks/cancel 必须原样透传: " + bodyCap.getValue());
+    }
+
+    @Test
+    void tasksResubscribeShouldForwardToSdk() throws Exception {
+        mockWrapper();
+        // resubscribe 返回 Flux（流式），controller 应转 SSE；
+        // JSONRPCResponse 为密封类，用许可子类构造真实实例
+        var task = new io.a2a.spec.Task("s10", "ctx-10",
+            new io.a2a.spec.TaskStatus(io.a2a.spec.TaskState.SUBMITTED),
+            java.util.List.of(), java.util.List.of(), java.util.Map.of());
+        when(wrapper.handleRequest(anyString(), anyMap(), any()))
+            .thenReturn(reactor.core.publisher.Flux.just(
+                new io.a2a.spec.CancelTaskResponse("2.0", "10", task, null)));
+
+        mockMvc.perform(post("/")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                    {"jsonrpc":"2.0","id":"10","method":"tasks/resubscribe",
+                     "params":{"id":"s10"}}
+                    """))
+            .andExpect(status().isOk())
+            .andExpect(content().contentTypeCompatibleWith(
+                org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE));
+
+        org.mockito.ArgumentCaptor<String> bodyCap =
+            org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(wrapper).handleRequest(bodyCap.capture(), anyMap(), anyMap());
+        org.junit.jupiter.api.Assertions.assertTrue(
+            bodyCap.getValue().contains("tasks/resubscribe"),
+            "tasks/resubscribe 必须原样透传: " + bodyCap.getValue());
+    }
+
 }

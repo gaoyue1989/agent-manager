@@ -104,4 +104,51 @@ class LlmLoggingMiddlewareTest {
         assertEquals(1, calls.size());
         assertEquals(0, ((List<?>) calls.get(0).request().get("tools")).size());
     }
+
+    /** 回归锁：usage 缺失（部分推理端点不回报）时 token 记 0，不得 NPE */
+    @Test
+    void shouldTolerateNullUsage() {
+        var logger = new LLMLogger();
+        var middleware = new LlmLoggingMiddleware(logger);
+        var agent = mock(Agent.class);
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("acme-test-agent:thread-1");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), List.of(), null, model);
+
+        middleware.onModelCall(agent, ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", null)))
+            .blockLast();
+
+        var calls = logger.getCalls("acme-test-agent:thread-1");
+        assertEquals(1, calls.size());
+        @SuppressWarnings("unchecked")
+        var usage = (Map<String, Object>) calls.get(0).response().get("usage");
+        assertEquals(0, usage.get("input_tokens"));
+        assertEquals(0, usage.get("output_tokens"));
+        assertEquals(0, usage.get("total_tokens"));
+    }
+
+    /** sessionId 与 userId 均缺失时回退 "global" 汇聚键 */
+    @Test
+    void shouldFallbackToGlobalWhenSessionAndUserMissing() {
+        var logger = new LLMLogger();
+        var middleware = new LlmLoggingMiddleware(logger);
+        var agent = mock(Agent.class);
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("");
+        when(ctx.getUserId()).thenReturn("");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), List.of(), null, model);
+
+        middleware.onModelCall(agent, ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 1, 2, 0.1))))
+            .blockLast();
+
+        assertEquals(1, logger.getCalls("global").size());
+    }
 }

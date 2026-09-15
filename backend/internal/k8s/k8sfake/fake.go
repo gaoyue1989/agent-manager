@@ -4,6 +4,7 @@ package k8sfake
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -21,6 +22,10 @@ type FakeK8s struct {
 	cs       *fake.Clientset
 	ns       string
 	restarts []string // 记录 RestartDeployment 调用
+
+	failEnsures  int32 // 剩余待注入失败的 Ensure* 次数
+	failErr      error // 注入的错误（FailNextEnsure 时设置，无并发写）
+	failRestarts int32 // 剩余待注入失败的 RestartDeployment 次数
 }
 
 func New() *FakeK8s { return &FakeK8s{cs: fake.NewSimpleClientset(), ns: "test"} }
@@ -28,6 +33,34 @@ func New() *FakeK8s { return &FakeK8s{cs: fake.NewSimpleClientset(), ns: "test"}
 func (f *FakeK8s) CS() *fake.Clientset { return f.cs }
 func (f *FakeK8s) Namespace() string   { return f.ns }
 func (f *FakeK8s) Restarts() []string  { return f.restarts }
+
+// FailNextEnsure 注入后续 n 次 Ensure* 调用失败（测试 apply 失败路径）。
+func (f *FakeK8s) FailNextEnsure(n int, err error) {
+	atomic.StoreInt32(&f.failEnsures, int32(n))
+	f.failErr = err
+}
+
+// FailNextRestart 注入后续 n 次 RestartDeployment 调用失败。
+func (f *FakeK8s) FailNextRestart(n int, err error) {
+	atomic.StoreInt32(&f.failRestarts, int32(n))
+	f.failErr = err
+}
+
+func (f *FakeK8s) ensureErr() error {
+	if atomic.AddInt32(&f.failEnsures, -1) >= 0 {
+		return f.failErr
+	}
+	atomic.StoreInt32(&f.failEnsures, 0)
+	return nil
+}
+
+func (f *FakeK8s) restartErr() error {
+	if atomic.AddInt32(&f.failRestarts, -1) >= 0 {
+		return f.failErr
+	}
+	atomic.StoreInt32(&f.failRestarts, 0)
+	return nil
+}
 
 func ignoreNF(err error) error {
 	if apierrors.IsNotFound(err) {
@@ -37,6 +70,9 @@ func ignoreNF(err error) error {
 }
 
 func (f *FakeK8s) EnsureConfigMap(cm *corev1.ConfigMap) error {
+	if err := f.ensureErr(); err != nil {
+		return err
+	}
 	old, err := f.cs.CoreV1().ConfigMaps(cm.Namespace).Get(context.TODO(), cm.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = f.cs.CoreV1().ConfigMaps(cm.Namespace).Create(context.TODO(), cm, metav1.CreateOptions{})
@@ -52,6 +88,9 @@ func (f *FakeK8s) EnsureConfigMap(cm *corev1.ConfigMap) error {
 }
 
 func (f *FakeK8s) EnsureDeployment(d *appsv1.Deployment) error {
+	if err := f.ensureErr(); err != nil {
+		return err
+	}
 	old, err := f.cs.AppsV1().Deployments(d.Namespace).Get(context.TODO(), d.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = f.cs.AppsV1().Deployments(d.Namespace).Create(context.TODO(), d, metav1.CreateOptions{})
@@ -67,11 +106,17 @@ func (f *FakeK8s) EnsureDeployment(d *appsv1.Deployment) error {
 }
 
 func (f *FakeK8s) RestartDeployment(_ context.Context, ns, name string) error {
+	if err := f.restartErr(); err != nil {
+		return err
+	}
 	f.restarts = append(f.restarts, ns+"/"+name)
 	return nil
 }
 
 func (f *FakeK8s) EnsureService(svc *corev1.Service) error {
+	if err := f.ensureErr(); err != nil {
+		return err
+	}
 	_, err := f.cs.CoreV1().Services(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = f.cs.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
@@ -81,6 +126,9 @@ func (f *FakeK8s) EnsureService(svc *corev1.Service) error {
 }
 
 func (f *FakeK8s) EnsureIngress(ing *networkingv1.Ingress) error {
+	if err := f.ensureErr(); err != nil {
+		return err
+	}
 	_, err := f.cs.NetworkingV1().Ingresses(ing.Namespace).Get(context.TODO(), ing.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = f.cs.NetworkingV1().Ingresses(ing.Namespace).Create(context.TODO(), ing, metav1.CreateOptions{})

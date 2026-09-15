@@ -1,6 +1,9 @@
 package service
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"agent-manager/backend/internal/k8s/k8sfake"
@@ -179,6 +182,161 @@ func TestUpdateEnvFlow(t *testing.T) {
 	}
 	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
 	_ = updated
+}
+
+// env 为全量覆盖语义：新集合必须整体替换 CM 内容，旧键不得残留
+// （若实现退化为 merge，旧环境变量会继续注入业务 Pod）。
+func TestUpdateEnvFullOverwriteSemantics(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_A": "1", "KEY_B": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed) // 回到稳态再改第二次
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_C": "3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm, _ := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
+	if len(cm.Data) != 1 || cm.Data["KEY_C"] != "3" {
+		t.Fatalf("cm should only contain KEY_C, got %+v", cm.Data)
+	}
+	if updated.EnvJSON != `{"KEY_C":"3"}` {
+		t.Fatalf("env_json should be fully replaced, got %s", updated.EnvJSON)
+	}
+}
+
+// deploying 状态禁止改 env（滚动进行中重启会互相踩踏）。
+func TestUpdateEnvDeployingRejected(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Publish 同步落库为 deploying，异步注册在 RegisterTimeout 后才推进
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); !errors.Is(err, ErrBadState) {
+		t.Fatalf("expect ErrBadState while deploying, got %v", err)
+	}
+}
+
+// 重启失败时 env 变更不得落库（CM 与 DB 保持一致语义由重试保证）。
+func TestUpdateEnvRestartFailure(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	fk.FailNextRestart(1, errors.New("patch conflict"))
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); err == nil {
+		t.Fatal("restart failure must propagate")
+	}
+	got, _ := core.Get(svc.ID)
+	if got.EnvJSON != svc.EnvJSON {
+		t.Fatalf("env_json must stay unchanged on restart failure: %s", got.EnvJSON)
+	}
+	if got.Status != store.StatusRegisterFailed {
+		t.Fatalf("status must be untouched, got %s", got.Status)
+	}
+}
+
+// apply 失败 → 服务落 error 状态并记录事件，而不是停留在 deploying。
+func TestPublishApplyFailureMarksError(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	fk.FailNextEnsure(1, errors.New("cm quota exceeded"))
+
+	// apply 失败时 Publish 返回 nil 记录，状态从库中断言
+	if _, err := core.Publish(PublishRequest{PackageID: pkg.ID}); err == nil {
+		t.Fatal("publish must fail on apply error")
+	}
+	var got store.ServiceEntity
+	if err := core.DB.First(&got).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusError {
+		t.Fatalf("db status=%s want error", got.Status)
+	}
+	events, _ := core.Events(got.ID)
+	if len(events) == 0 || !strings.Contains(events[0].Reason, "apply failed") {
+		t.Fatalf("apply failure event missing: %+v", events)
+	}
+
+	// error 状态允许 StartAgain 恢复
+	fk.FailNextEnsure(0, nil)
+	if _, err := core.StartAgain(got.ID); err != nil {
+		t.Fatalf("start again from error: %v", err)
+	}
+	_ = fk.SetReady("test", got.K8sName, 1)
+	waitForStatus(t, core, got.ID, store.StatusRegisterFailed)
+}
+
+// republish apply 失败同样落 error（引用计数已在事务内迁移，状态必须可见）。
+func TestRepublishApplyFailureMarksError(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	fk.FailNextEnsure(1, errors.New("ingress api error"))
+	if _, err := core.Republish(svc.ID, RepublishOptions{}); err == nil {
+		t.Fatal("republish must fail on apply error")
+	}
+	got, _ := core.Get(svc.ID)
+	if got.Status != store.StatusError {
+		t.Fatalf("status=%s want error", got.Status)
+	}
+}
+
+// deploying 状态禁止 StartAgain（与 stopped/error/deploy_failed/register_failed 白名单互补）。
+func TestStartAgainFromDeployingRejected(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.StartAgain(svc.ID); !errors.Is(err, ErrBadState) {
+		t.Fatalf("expect ErrBadState while deploying, got %v", err)
+	}
+}
+
+// uniqName 冲突后缀耗尽（>20 次）必须报错，不得无限循环。
+func TestUniqNameCollisionLimit(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	base := "oaf-acme-demo"
+	names := []string{base}
+	for i := 2; i <= 20; i++ {
+		names = append(names, fmt.Sprintf("%s-%d", base, i))
+	}
+	for _, n := range names {
+		if err := core.DB.Create(&store.ServiceEntity{K8sName: n}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := core.uniqName(base); err == nil || !strings.Contains(err.Error(), "too many name collisions") {
+		t.Fatalf("expect collision limit error, got %v", err)
+	}
+}
+
+// 冲突后缀导致名字超过 63 字符时必须报错（K8s 名长度硬限制）。
+func TestUniqNameTooLong(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	long := "oaf-" + strings.Repeat("a", 59) // 恰好 63 字符
+	if err := core.DB.Create(&store.ServiceEntity{K8sName: long}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.uniqName(long); err == nil || !strings.Contains(err.Error(), "63") {
+		t.Fatalf("expect 63-char limit error, got %v", err)
+	}
 }
 
 func TestUpdateEnvStoppedRejected(t *testing.T) {
