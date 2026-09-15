@@ -13,7 +13,7 @@
     <property name="log-path" value="/applog/${HOST_NAME:-localhost}"/>
 
     <!--
-      规范日志格式（中信银行《容器日志收集方案-v2》，[主机名] 取环境变量 HOST_NAME）
+      规范日志格式（《容器日志收集方案-v2》，[主机名] 取环境变量 HOST_NAME）
       时间 [主机名] [应用名] [级别] [线程] [traceId] 类简名 - 内容
       %logger{0} 为 Log4j2 %c{1}（仅类名）的 logback 等价写法（%c{1} 在 logback 下输出 i.a.f.Xxx 缩写形式，不满足规范）
       %msg{nolookups} 为 Log4j2 防 lookup 攻击的兼容写法（logback 下为无副作用占位，按规范保留）

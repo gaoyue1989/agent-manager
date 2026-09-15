@@ -1,6 +1,6 @@
 # Agent-Framework 日志规范化改造设计文档
 
-> 依据：中信银行《Agent-Framework 服务日志规范》（源自《容器日志收集方案-v2》，Confluence pageId=59269854）
+> 依据：《Agent-Framework 服务日志规范》（源自《容器日志收集方案-v2》）
 > 目标：服务日志按规范打印到 `/applog/${HOST_NAME}/trace.log`，满足容器云日志采集与 Kibana 检索要求
 
 ---
@@ -247,7 +247,7 @@ fixedEnv := []corev1.EnvVar{
 |----|------|------|
 | `HOST_NAME` 取值 | `fieldRef: metadata.name`（downward API，用户已确认） | Pod Name 全局唯一，对应规范"容器平台自动传入"；无 RBAC 要求 |
 | `APP_NAME` | 平台不注入、不设保留键，环境变量可选 | 已确认：按规范"部署配置中手动指定"，用户 env 指定即用，缺省回退 `agent-framework`（logback `${APP_NAME:-agent-framework}`） |
-| 卷类型 | emptyDir | 采集器在本项目（kind）仅按容器内路径采集即可验证；生产灵雀云环境由运维按规范改挂 hostPath `/var/log/mounts/${namespace}/${app-name}`（平台不动此语义）。`/workspace` 已是 emptyDir 且非 root 可写，有集群实证 |
+| 卷类型 | emptyDir | 采集器在本项目（kind）仅按容器内路径采集即可验证；生产容器云环境由运维按规范改挂 hostPath `/var/log/mounts/${namespace}/${app-name}`（平台不动此语义）。`/workspace` 已是 emptyDir 且非 root 可写，有集群实证 |
 | 生效范围 | 全部业务 Pod（release-agent、mcdonalds-* 等） | 同一框架镜像，统一注入即统一合规 |
 
 > `SPRING_PROFILES_ACTIVE` 平台不注入：容器缺省 profile 落 `!dev` 分支，文件输出天然开启。
