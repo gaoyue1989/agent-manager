@@ -58,6 +58,29 @@ agent:
     storage-s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
     storage-s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
     storage-s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
+  # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
+  harness:
+    # ReAct 推理
+    max-iters: ${AGENT_REACT_MAX_ITERS:20}
+    # LLM API HTTP 超时（秒）
+    http-connect-timeout-seconds: ${AGENT_HTTP_CONNECT_TIMEOUT_SECONDS:30}
+    http-read-timeout-seconds: ${AGENT_HTTP_READ_TIMEOUT_SECONDS:180}
+    http-write-timeout-seconds: ${AGENT_HTTP_WRITE_TIMEOUT_SECONDS:30}
+    # Memory
+    memory-flush-throttle-minutes: ${AGENT_MEMORY_FLUSH_THROTTLE_MINUTES:10}
+    memory-consolidation-max-tokens: ${AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS:8000}
+    memory-consolidation-min-gap-minutes: ${AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES:60}
+    # Compaction
+    compaction-trigger-messages: ${AGENT_COMPACTION_TRIGGER_MESSAGES:30}
+    compaction-keep-messages: ${AGENT_COMPACTION_KEEP_MESSAGES:10}
+    compaction-flush-before-compact: ${AGENT_COMPACTION_FLUSH_BEFORE_COMPACT:true}
+    compaction-offload-before-compact: ${AGENT_COMPACTION_OFFLOAD_BEFORE_COMPACT:true}
+    # HikariCP（毫秒）
+    db-pool-max-size: ${AGENT_DB_POOL_MAX_SIZE:10}
+    db-pool-min-idle: ${AGENT_DB_POOL_MIN_IDLE:2}
+    db-pool-connection-timeout-ms: ${AGENT_DB_POOL_CONNECTION_TIMEOUT_MS:30000}
+    db-pool-idle-timeout-ms: ${AGENT_DB_POOL_IDLE_TIMEOUT_MS:600000}
+    db-pool-max-lifetime-ms: ${AGENT_DB_POOL_MAX_LIFETIME_MS:1800000}
 
 # OTel 链路追踪（默认关闭，设置 OTEL_TRACES_EXPORTER=otlp 启用）
 otel:

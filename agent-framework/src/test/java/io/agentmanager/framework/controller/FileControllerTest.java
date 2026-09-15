@@ -52,7 +52,8 @@ public class FileControllerTest {
             "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20,
                 AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME,
-                5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"));
+                5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
+            AgentManagerProperties.HarnessConfig.defaults());
     }
 
     @Test
@@ -112,7 +113,8 @@ public class FileControllerTest {
         var disabled = new AgentManagerProperties(
             props.llm(), props.server(), props.checkpoint(), "/config", "",
             props.cleanup(), new AgentManagerProperties.FileConfig(false, 20, 20,
-                "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"));
+                "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
+            AgentManagerProperties.HarnessConfig.defaults());
         var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxConfig.class));
         var file = new MockMultipartFile("file", "a.png", "image/png", new byte[]{1});
         assertEquals(HttpStatus.FORBIDDEN, c.upload(file, null, null).getStatusCode());

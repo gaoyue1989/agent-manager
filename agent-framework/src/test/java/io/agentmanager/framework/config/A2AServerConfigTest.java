@@ -14,6 +14,12 @@ class A2AServerConfigTest {
 
     private final A2AServerConfig config = new A2AServerConfig();
 
+    private static AgentManagerProperties propsForTest() {
+        var props = mock(AgentManagerProperties.class);
+        when(props.server()).thenReturn(new AgentManagerProperties.ServerConfig("0.0.0.0", 8100));
+        return props;
+    }
+
     @Test
     void a2aServerShouldBuildWithRunner() {
         var agent = mock(HarnessAgent.class);
@@ -22,7 +28,7 @@ class A2AServerConfigTest {
         when(oaf.name()).thenReturn("agent-a");
         when(oaf.description()).thenReturn("desc");
 
-        var server = config.a2aServer(agent, oaf, dataSource);
+        var server = config.a2aServer(agent, oaf, dataSource, propsForTest());
         assertNotNull(server);
     }
 
@@ -34,7 +40,7 @@ class A2AServerConfigTest {
         when(oaf.name()).thenReturn("agent-b");
         when(oaf.description()).thenReturn(null);
 
-        var server = config.a2aServer(agent, oaf, dataSource);
+        var server = config.a2aServer(agent, oaf, dataSource, propsForTest());
         assertNotNull(server);
     }
 }

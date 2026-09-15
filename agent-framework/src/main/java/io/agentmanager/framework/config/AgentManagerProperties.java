@@ -11,7 +11,8 @@ public record AgentManagerProperties(
     @DefaultValue("/config") String configDir,
     @DefaultValue("") String workspaceDir,
     CleanupConfig cleanup,
-    FileConfig file
+    FileConfig file,
+    HarnessConfig harness
 ) {
 
     /**
@@ -129,5 +130,56 @@ public record AgentManagerProperties(
             "image/*,text/plain,text/markdown,text/csv,application/pdf,"
                 + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
                 + "application/zip,application/x-zip-compressed";
+    }
+
+    /**
+     * Harness 运行时配置：ReAct 推理、LLM HTTP 超时、Memory、Compaction、HikariCP 连接池。
+     * 环境变量前缀：AGENT_*（如 AGENT_REACT_MAX_ITERS），绑定见 application.yml agent.harness.* 节。
+     * 默认值与参数化前的硬编码值一致，仅暴露可调性、不改变现有行为。
+     */
+    public record HarnessConfig(
+        // ReAct 推理
+        /** ReAct 推理最大轮次（SDK 默认 10，长流程需放宽） */
+        @DefaultValue("20") int maxIters,
+        // LLM API HTTP 超时（秒）
+        /** LLM API 连接超时（秒） */
+        @DefaultValue("30") int httpConnectTimeoutSeconds,
+        /** LLM API 读超时（秒，长推理场景需更长） */
+        @DefaultValue("180") int httpReadTimeoutSeconds,
+        /** LLM API 写超时（秒） */
+        @DefaultValue("30") int httpWriteTimeoutSeconds,
+        // Memory
+        /** 记忆刷写节流间隔（分钟） */
+        @DefaultValue("10") int memoryFlushThrottleMinutes,
+        /** 记忆整合最大 token 数 */
+        @DefaultValue("8000") int memoryConsolidationMaxTokens,
+        /** 记忆整合最小间隔（分钟） */
+        @DefaultValue("60") int memoryConsolidationMinGapMinutes,
+        // Compaction
+        /** 触发压缩的消息数阈值 */
+        @DefaultValue("30") int compactionTriggerMessages,
+        /** 压缩后保留的消息数 */
+        @DefaultValue("10") int compactionKeepMessages,
+        /** 压缩前先刷写记忆 */
+        @DefaultValue("true") boolean compactionFlushBeforeCompact,
+        /** 压缩前先卸载大工具结果 */
+        @DefaultValue("true") boolean compactionOffloadBeforeCompact,
+        // HikariCP
+        /** DB 连接池最大连接数 */
+        @DefaultValue("10") int dbPoolMaxSize,
+        /** DB 连接池最小空闲连接 */
+        @DefaultValue("2") int dbPoolMinIdle,
+        /** DB 连接超时（毫秒） */
+        @DefaultValue("30000") long dbPoolConnectionTimeoutMs,
+        /** DB 空闲超时（毫秒） */
+        @DefaultValue("600000") long dbPoolIdleTimeoutMs,
+        /** DB 连接最大生命周期（毫秒） */
+        @DefaultValue("1800000") long dbPoolMaxLifetimeMs
+    ) {
+        /** 代码默认值兜底：配置节缺失（如测试直接构造 props）时使用 */
+        public static HarnessConfig defaults() {
+            return new HarnessConfig(20, 30, 180, 30, 10, 8000, 60,
+                30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+        }
     }
 }

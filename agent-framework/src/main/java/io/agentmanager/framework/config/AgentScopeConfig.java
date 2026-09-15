@@ -149,15 +149,16 @@ public class AgentScopeConfig {
     @Bean
     public DataSource dataSource(AgentManagerProperties props) {
         var cp = props.checkpoint();
+        var pool = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
         var ds = new HikariDataSource();
         ds.setJdbcUrl(cp.jdbcUrl());
         ds.setUsername(cp.username());
         ds.setPassword(cp.password());
-        ds.setMaximumPoolSize(10);
-        ds.setMinimumIdle(2);
-        ds.setConnectionTimeout(30000);
-        ds.setIdleTimeout(600000);
-        ds.setMaxLifetime(1800000);
+        ds.setMaximumPoolSize(pool.dbPoolMaxSize());
+        ds.setMinimumIdle(pool.dbPoolMinIdle());
+        ds.setConnectionTimeout(pool.dbPoolConnectionTimeoutMs());
+        ds.setIdleTimeout(pool.dbPoolIdleTimeoutMs());
+        ds.setMaxLifetime(pool.dbPoolMaxLifetimeMs());
         return ds;
     }
 
@@ -241,23 +242,32 @@ public class AgentScopeConfig {
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         var llm = props.llm();
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
 
         try {
             var workspacePath = workspaceInitializer.initialize(
                 Path.of(props.resolvedWorkspaceBaseDir()), oafConfig);
 
+            // Bug 修复：temperature/maxTokens 此前未传给模型构建器，所有 LLM 调用实际使用
+            // OpenAI SDK 内部默认值（temperature=1.0）。此处传入 OAF frontmatter config 的
+            // 生效值（OafConfigLoader 缺省 0.7/4096，与平台默认对齐）
+            var runtime = oafConfig.runtimeConfig();
             var model = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
                 .apiKey(llm.apiKey())
                 .modelName(llm.modelId())
                 .baseUrl(llm.baseUrl())
+                .generateOptions(io.agentscope.core.model.GenerateOptions.builder()
+                    .temperature(runtime.temperature())
+                    .maxTokens(runtime.maxTokens())
+                    .build())
                 .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
                     .client(java.net.http.HttpClient.newBuilder()
-                        .connectTimeout(java.time.Duration.ofSeconds(30))
+                        .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
                         .build())
                     .config(io.agentscope.core.model.transport.HttpTransportConfig.builder()
-                        .connectTimeout(java.time.Duration.ofSeconds(30))
-                        .readTimeout(java.time.Duration.ofSeconds(180))
-                        .writeTimeout(java.time.Duration.ofSeconds(30))
+                        .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
+                        .readTimeout(Duration.ofSeconds(harness.httpReadTimeoutSeconds()))
+                        .writeTimeout(Duration.ofSeconds(harness.httpWriteTimeoutSeconds()))
                         .build())
                     .build())
                 .build();
@@ -294,8 +304,8 @@ public class AgentScopeConfig {
                 .model(model)
                 .toolkit(toolkit)
                 // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
-                // 长流程（撰写→校验→修正→打包→登记→汇报），放宽至 20 轮
-                .maxIters(20)
+                // 长流程（撰写→校验→修正→打包→登记→汇报），默认放宽至 20 轮（AGENT_REACT_MAX_ITERS 可调）
+                .maxIters(harness.maxIters())
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
@@ -342,19 +352,20 @@ public class AgentScopeConfig {
             }
 
             var agent = builder
-                // 记忆管理
+                // 记忆管理（AGENT_MEMORY_* 可调）
                 .memory(MemoryConfig.builder()
-                    .flushTrigger(MemoryConfig.FlushTrigger.throttled(Duration.ofMinutes(10)))
-                    .consolidationMaxTokens(8_000)
-                    .consolidationMinGap(Duration.ofHours(1))
+                    .flushTrigger(MemoryConfig.FlushTrigger.throttled(
+                        Duration.ofMinutes(harness.memoryFlushThrottleMinutes())))
+                    .consolidationMaxTokens(harness.memoryConsolidationMaxTokens())
+                    .consolidationMinGap(Duration.ofMinutes(harness.memoryConsolidationMinGapMinutes()))
                     .model(memoryModel)            // ← 新增：包装后的 model（flush + consolidation LLM 调用 span）
                     .build())
-                // 上下文压缩
+                // 上下文压缩（AGENT_COMPACTION_* 可调）
                 .compaction(CompactionConfig.builder()
-                    .triggerMessages(30)
-                    .keepMessages(10)
-                    .flushBeforeCompact(true)
-                    .offloadBeforeCompact(true)
+                    .triggerMessages(harness.compactionTriggerMessages())
+                    .keepMessages(harness.compactionKeepMessages())
+                    .flushBeforeCompact(harness.compactionFlushBeforeCompact())
+                    .offloadBeforeCompact(harness.compactionOffloadBeforeCompact())
                     .model(compactionModel)        // ← 新增：包装后的 model（compaction LLM 调用 span）
                     .build())
                 // 大工具结果卸载
