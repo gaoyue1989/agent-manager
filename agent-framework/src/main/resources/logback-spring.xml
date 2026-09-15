@@ -1,11 +1,68 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
+    <!-- 自定义转换器：从 OTel Context 取 traceId（无活跃 span 输出 "-"） -->
     <conversionRule conversionWord="traceId"
         converterClass="io.agentmanager.framework.service.TraceIdConverter"/>
+
+    <!--
+      属性定义（logback 查找顺序：本地属性 → system properties → OS 环境变量）
+      app-name: 应用名，环境变量 APP_NAME 可选指定，未设置时回退默认 agent-framework
+      log-path: 日志目录，HOST_NAME 由 K8s downward API 注入（fieldRef metadata.name），本地缺省 localhost
+    -->
+    <property name="app-name" value="${APP_NAME:-agent-framework}"/>
+    <property name="log-path" value="/applog/${HOST_NAME:-localhost}"/>
+
+    <!--
+      规范日志格式（中信银行《容器日志收集方案-v2》，[主机名] 取环境变量 HOST_NAME）
+      时间 [主机名] [应用名] [级别] [线程] [traceId] 类简名 - 内容
+      %logger{0} 为 Log4j2 %c{1}（仅类名）的 logback 等价写法（%c{1} 在 logback 下输出 i.a.f.Xxx 缩写形式，不满足规范）
+      %msg{nolookups} 为 Log4j2 防 lookup 攻击的兼容写法（logback 下为无副作用占位，按规范保留）
+    -->
+    <property name="LOG_PATTERN"
+        value="%d{yyyy-MM-dd HH:mm:ss.SSS} [${HOST_NAME:-localhost}] [${app-name}] [%-5level] [%t] [%traceId] %logger{0} - %msg{nolookups}%n"/>
+
+    <!-- 控制台输出（本地开发/调试用；容器云不采集控制台日志） -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%traceId] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
         </encoder>
     </appender>
-    <root level="INFO"><appender-ref ref="CONSOLE"/></root>
+
+    <!--
+      文件输出（容器云日志采集唯一来源：/applog/${hostName}/trace.log，文件名固定不可改）
+      滚动策略与规范 Log4j2 示例等价（SizeBasedTriggeringPolicy 200MB + DefaultRolloverStrategy max=2）：
+      FixedWindowRollingPolicy(1..2) → 归档 trace.log1 / trace.log2，
+      活动文件 + 2 归档共 3 个文件，上限 600MB
+    -->
+    <appender name="COLLECTING_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${log-path}/trace.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <fileNamePattern>${log-path}/trace.log%i</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>2</maxIndex>
+        </rollingPolicy>
+        <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+            <maxFileSize>200MB</maxFileSize>
+        </triggeringPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 本地开发（dev profile）：仅控制台，不写 /applog -->
+    <springProfile name="dev">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <!-- 容器及其他环境（含未指定 profile 的 default）：控制台 + 规范文件输出 -->
+    <springProfile name="!dev">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="COLLECTING_FILE"/>
+        </root>
+    </springProfile>
 </configuration>

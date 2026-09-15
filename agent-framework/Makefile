@@ -42,7 +42,8 @@ compile:
 	$(MVN) compile
 
 dev:
-	$(MVN) spring-boot:run
+	# 本地开发固定 dev profile：仅控制台输出，不写 /applog（见 docs/logging-standardization-plan.md §4.4）
+	SPRING_PROFILES_ACTIVE=dev $(MVN) spring-boot:run
 
 clean:
 	$(MVN) clean

@@ -17,6 +17,8 @@ import (
 // 平台保留键：用户 env 出现同名键则拒绝（见 REDESIGN §5.2）。
 var ReservedEnvKeys = map[string]bool{
 	"AGENT_CONFIG_DIR": true, "AGENT_WORKSPACE_DIR": true, "SERVER_HOST": true, "SERVER_PORT": true,
+	// 日志规范注入键（logging-standardization-plan §4.3）：HOST_NAME=Pod Name，日志路径/内容依赖
+	"HOST_NAME": true,
 }
 
 var dnsNameRe = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -35,6 +37,10 @@ const (
 	FilesVolumeName   = "agent-files"
 	FilesSubPath      = "files"
 	FilesMountPath    = "/data/files"
+	// 日志规范挂载（logging-standardization-plan §4.3）：/applog/${HOST_NAME}/trace.log 为
+	// 容器云日志采集唯一来源，logback 写入该目录
+	ApplogVolumeName = "applog"
+	ApplogMountPath  = "/applog"
 )
 
 // SanitizeK8sName 任意输入转 DNS-1123 label：小写字母数字 '-'，≤63 字符。
@@ -103,6 +109,9 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 		{Name: "AGENT_WORKSPACE_DIR", Value: "/workspace"},
 		{Name: "SERVER_HOST", Value: "0.0.0.0"},
 		{Name: "SERVER_PORT", Value: fmt.Sprintf("%d", AgentPort)},
+		// 日志规范：HOST_NAME=Pod Name（downward API），logback 据此拼日志路径 /applog/${HOST_NAME}
+		// 与日志内容 [HOST_NAME] 字段；APP_NAME 不注入，由业务 env 可选指定，缺省 agent-framework
+		{Name: "HOST_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 	}
 	probe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
@@ -131,6 +140,8 @@ VolumeMounts: []corev1.VolumeMount{
 						// 文件存储可写挂载：platform-data subPath files/ → /data/files（FILE_STORAGE_LOCAL_DIR）
 						// 与 /config 共用同一卷（agent-files）——避免同 PVC 双 volume 引用
 						{Name: FilesVolumeName, MountPath: FilesMountPath, SubPath: FilesSubPath},
+						// 日志规范：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源
+						{Name: ApplogVolumeName, MountPath: ApplogMountPath},
 					},
 						ReadinessProbe: withDelay(probe, 15, 5),
 						LivenessProbe:  withDelay(probe, 60, 15),
@@ -156,6 +167,8 @@ VolumeMounts: []corev1.VolumeMount{
 							},
 						},
 						{Name: WorkspaceVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						// 日志目录卷（emptyDir，同 workspace 模式，非 root appuser 可写）
+						{Name: ApplogVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
 				},
 			},

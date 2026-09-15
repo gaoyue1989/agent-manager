@@ -34,10 +34,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /usr/sbin/nologin appuser \
-    && mkdir -p /config \
+    && mkdir -p /config /applog \
     # K8s ConfigMap/Volume 挂载会覆盖目录属主为 root，故 chmod 777 保证非 root 用户可写
-    && chmod 777 /config \
-    && chown -R appuser:appuser /config
+    # /applog: 规范日志目录（见 docs/logging-standardization-plan.md），未挂卷时的兜底
+    && chmod 777 /config /applog \
+    && chown -R appuser:appuser /config /applog
 
 # 从 builder 阶段拷贝 fat jar
 COPY --from=builder /app/target/agent-framework-*.jar /app/agent-framework.jar
@@ -69,4 +70,5 @@ USER appuser
 # 设 OTEL_EXPORTER_OTLP_ENDPOINT 时自动启用 Java Agent (链路追踪, 见 docs/tracing-design.md §4.7)
 # 不设则零开销: Agent 不启动, 自研 OtelConfig 亦因条件注解 (havingValue=otlp) 不装配
 # 注意: OTEL_TRACES_EXPORTER 保持 unset, Agent 默认导出 traces 到上述 endpoint
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS $( [ -n \"${OTEL_EXPORTER_OTLP_ENDPOINT:-}\" ] && echo -javaagent:/app/opentelemetry-javaagent.jar ) -jar /app/agent-framework.jar"]
+# -Dfile.encoding=UTF-8: 日志规范要求, 硬编码在 JAVA_OPTS 之前 (JAVA_OPTS 可被部署方覆盖, 不能承载该参数)
+ENTRYPOINT ["sh", "-c", "exec java -Dfile.encoding=UTF-8 $JAVA_OPTS $( [ -n \"${OTEL_EXPORTER_OTLP_ENDPOINT:-}\" ] && echo -javaagent:/app/opentelemetry-javaagent.jar ) -jar /app/agent-framework.jar"]
