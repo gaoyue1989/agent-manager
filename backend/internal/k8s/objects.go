@@ -17,7 +17,7 @@ import (
 // 平台保留键：用户 env 出现同名键则拒绝（见 REDESIGN §5.2）。
 var ReservedEnvKeys = map[string]bool{
 	"AGENT_CONFIG_DIR": true, "AGENT_WORKSPACE_DIR": true, "SERVER_HOST": true, "SERVER_PORT": true,
-	// 日志规范注入键（logging-standardization-plan §4.3）：HOST_NAME=Pod Name，日志路径/内容依赖
+	// 日志规范注入键：HOST_NAME=Pod Name，日志路径/内容依赖
 	"HOST_NAME": true,
 }
 
@@ -37,8 +37,7 @@ const (
 	FilesVolumeName   = "agent-files"
 	FilesSubPath      = "files"
 	FilesMountPath    = "/data/files"
-	// 日志规范挂载（logging-standardization-plan §4.3）：/applog/${HOST_NAME}/trace.log 为
-	// 容器云日志采集唯一来源，logback 写入该目录
+	// 日志规范挂载：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源，logback 写入该目录
 	ApplogVolumeName = "applog"
 	ApplogMountPath  = "/applog"
 )

@@ -77,7 +77,7 @@ func TestDeploymentConstruction(t *testing.T) {
 	hostNameFromField := false
 	for _, e := range cs.Env {
 		fixed[e.Name] = e.Value
-		// HOST_NAME 经 downward API 注入 Pod Name（logging-standardization-plan §4.3）
+		// HOST_NAME 经 downward API 注入 Pod Name
 		if e.Name == "HOST_NAME" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
 			e.ValueFrom.FieldRef.FieldPath == "metadata.name" {
 			hostNameFromField = true
@@ -120,7 +120,7 @@ func TestDeploymentConstruction(t *testing.T) {
 	if !foundFiles {
 		t.Fatal("files volume mount missing or not writable")
 	}
-	// 日志规范挂载 /applog（logging-standardization-plan §4.3）
+	// 日志规范挂载 /applog
 	foundApplog := false
 	for _, v := range cs.VolumeMounts {
 		if v.Name == ApplogVolumeName && v.MountPath == ApplogMountPath && !v.ReadOnly {

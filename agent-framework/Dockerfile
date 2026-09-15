@@ -36,7 +36,7 @@ RUN apt-get update \
     && useradd --create-home --shell /usr/sbin/nologin appuser \
     && mkdir -p /config /applog \
     # K8s ConfigMap/Volume 挂载会覆盖目录属主为 root，故 chmod 777 保证非 root 用户可写
-    # /applog: 规范日志目录（见 docs/logging-standardization-plan.md），未挂卷时的兜底
+    # /applog: 规范日志目录（容器云日志采集唯一来源），未挂卷时的兜底
     && chmod 777 /config /applog \
     && chown -R appuser:appuser /config /applog
 
