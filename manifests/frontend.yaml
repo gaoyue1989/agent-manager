@@ -14,8 +14,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: platform-frontend:v2
-          imagePullPolicy: IfNotPresent
+          image: 172.20.0.1:5001/platform-frontend:v2
+          imagePullPolicy: Always
           ports: [{ containerPort: 3000 }]
           env:
             - { name: BACKEND_INTERNAL_URL, value: "http://platform-backend.agent-platform.svc.cluster.local:8080" }
