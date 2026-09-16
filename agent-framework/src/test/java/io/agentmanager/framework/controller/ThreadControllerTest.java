@@ -122,7 +122,8 @@ class ThreadControllerTest {
         assertEquals(2, result.size());
         assertEquals("alice", result.get(0).get("user_id"));
         assertEquals("chat1", result.get(0).get("title"));
-        assertEquals("1970-01-01 08:00:02.0", result.get(0).get("updated_at"));
+        // Timestamp.toString() 按 JVM 默认时区格式化，期望值同步计算，避免 CI（UTC）与本地（+08）断言漂移
+        assertEquals(new Timestamp(2000).toString(), result.get(0).get("updated_at"));
         // agent_state no record -> updated_at should be empty string
         assertEquals("", result.get(1).get("updated_at"));
     }
@@ -199,7 +200,7 @@ class ThreadControllerTest {
         var result = controller.getThread("acme__s1");
         assertEquals("acme__s1", result.get("session_id"));
         assertEquals("alice", result.get("user_id"));
-        assertEquals("1970-01-01 08:00:03.0", result.get("updated_at"));
+        assertEquals(new Timestamp(3000).toString(), result.get("updated_at"));
         assertNotNull(result.get("messages"));
     }
 
