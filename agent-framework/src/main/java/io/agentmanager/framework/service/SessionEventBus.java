@@ -220,8 +220,12 @@ public class SessionEventBus {
             var entry = it.next();
             var lastActive = lastActiveAt.get(entry.getKey());
             if (lastActive != null && lastActive.plus(sinksEvictionDelay).isBefore(now)) {
-                // 检查是否仍有订阅者
-                // Sinks.Many 无直接方式检查订阅者数量，用 tryEmitComplete 尝试关闭
+                // 补齐上面 javadoc 里的「无订阅者」条件：静默 ≠ 死掉。长工具调用期间
+                // 可以有数分钟没有任何事件，此时执行方自己的订阅仍在；sink 一旦被清掉，
+                // owner 的 SSE 会在 turn 中途无声结束（后续事件照常落库，但本 Pod 不再广播）。
+                if (entry.getValue().currentSubscriberCount() > 0) {
+                    continue;
+                }
                 it.remove();
                 lastActiveAt.remove(entry.getKey());
                 entry.getValue().tryEmitComplete();

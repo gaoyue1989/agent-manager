@@ -50,6 +50,23 @@ class SessionEventBusTest {
     }
 
     @Test
+    void evictStaleSinksKeepsLiveSinksAndEvictsAbandonedOnes() {
+        // 清理条件必须包含「无订阅者」，否则一次长静默（长工具调用，可达数分钟）就会
+        // 把执行方自己的 sink 清掉 —— owner 的 SSE 会在 turn 中途无声结束。
+        var bus = new SessionEventBus(eventStore,
+            Duration.ofMillis(100),
+            Duration.ZERO,   // eviction 立即到期，只留订阅者这一个判据
+            64);
+
+        var live = bus.subscribe("sid-live", 0, null).subscribe();
+        var abandoned = bus.subscribe("sid-dead", 0, null).subscribe();
+        abandoned.dispose();   // 客户端断开：该 sink 不再有订阅者
+
+        assertEquals(1, bus.evictStaleSinks(), "只应清掉已无订阅者的 sink");
+        live.dispose();
+    }
+
+    @Test
     void emitBroadcastsToSubscribers() {
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
 
