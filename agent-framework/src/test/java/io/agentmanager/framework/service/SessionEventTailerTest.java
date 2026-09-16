@@ -2,6 +2,8 @@ package io.agentmanager.framework.service;
 
 import java.time.Duration;
 
+import io.lettuce.core.RedisConnectionException;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -134,6 +136,21 @@ class SessionEventTailerTest {
                 && sse.data().contains("\"replyId\":\"rid\""))
             .expectNextMatches(sse -> sse.data() != null && sse.data().contains("done"))
             .verifyComplete();
+    }
+
+    @Test
+    void tailFailsVisiblyWhenReplayReadFailsInsteadOfCompletingEmpty() {
+        // 回放读**失败**、但紧随其后的追赶读**成功**（Redis 抖一下又恢复）——这是最危险的一种：
+        // 若把回放错误抹平成空流，调用方会收到一个干净 complete 的 done 帧，前端据此认为 turn
+        // 已正常结束，而实际上**一条事件都没回放出来**，历史静默缺失且无人知晓。
+        // 故回放错误必须原样上抛。任何 onErrorResume(e -> Flux.empty()) 都会被本用例拦下。
+        when(eventStore.queryAfter("sid-down", null, 0))
+            .thenReturn(Flux.error(new RedisConnectionException("redis down")))  // 回放：读失败
+            .thenReturn(Flux.empty());                                           // 追赶：读成功、无新事件
+
+        StepVerifier.create(tailer.tail("sid-down", null, 0))
+            .expectError(RedisConnectionException.class)
+            .verify(Duration.ofSeconds(5));
     }
 
     @Test
