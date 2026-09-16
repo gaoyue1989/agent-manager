@@ -90,7 +90,7 @@ function main() {
   lines.push('');
   lines.push(`- 时间：${new Date().toISOString()}`);
   lines.push(`- 被测：docker bench-agent-fw（1C/1G 硬限，agent-framework:latest）`);
-  lines.push(`- 口径：请求=POST /threads/{sid}/chat → AGENT_END；SLO：错误率<1% 且 P95≤10s；稳态 180s`);
+  lines.push(`- 口径：请求=POST /threads/chat → AGENT_END；SLO：错误率<1% 且 P95≤10s；稳态 180s`);
   lines.push('');
 
   for (const sc of Object.keys(byScenario).sort()) {

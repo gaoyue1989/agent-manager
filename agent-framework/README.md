@@ -129,7 +129,7 @@ config/                                  # AGENT_CONFIG_DIR（默认 /config）
 
 ## 服务端点
 
-主对话入口为 **`POST /threads/{sessionId}/chat`**（无状态单次流 SSE）。完整参数与 SSE 帧格式见 [docs/api.md](docs/api.md)。
+主对话入口为 **`POST /threads/chat`**（无状态单次流 SSE，sessionId 在请求体中、可选）。完整参数与 SSE 帧格式见 [docs/api.md](docs/api.md)。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -145,12 +145,11 @@ config/                                  # AGENT_CONFIG_DIR（默认 /config）
 | GET | `/threads` | Thread 列表 |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/{sid}/chat` | **主对话入口** 单次流 SSE（`{message?, userId?, fileIds?}`，Turn 租约排队 waiting 帧） |
+| POST | `/threads/chat` | **主对话入口** 单次流 SSE（`{message?, userId?, sessionId?, fileIds?}`；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
 | POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（`?inline=1` 内联） |
-| GET | `/chat/stream` | Channel SSE 一次性流对话（旧，保留兼容） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps：拉取工具 UI 资源（HtmlResource，CSP 注入） |
 | GET | `/mcp/{server}/resources` | MCP Apps：列出服务器资源 |
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps：卡片工具调用代理（ask 工具 403 → 走确认流） |
@@ -178,7 +177,7 @@ config/                                  # AGENT_CONFIG_DIR（默认 /config）
 ## 核心架构（高层）
 
 ```
-请求 (POST /threads/{sid}/chat 或 A2A POST /)
+请求 (POST /threads/chat 或 A2A POST /)
   │
   ▼ ChatUiChannel / AgentScopeA2aServer
 TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超时）

@@ -294,11 +294,10 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/threads` | Thread 列表 |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/{sid}/chat` | 单次流 SSE 对话（主对话入口，支持 fileIds） |
+| POST | `/threads/chat` | 单次流 SSE 对话（唯一对话入口，sessionId 在 body，支持 fileIds） |
 | POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步/流式） |
 | POST | `/files/upload` | 文件上传 |
 | GET | `/files/{fileId}` | 文件下载/预览 |
-| GET | `/chat/stream` | Channel SSE 一次性流（旧，保留兼容） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 
 完整参数与 SSE 帧格式见 [api.md](api.md)。
@@ -342,23 +341,10 @@ LLM 推理 → 选择工具 (如 get_weather)
 单次流（主对话入口）与确认流：
 
 ```
-POST /threads/{sessionId}/chat        # 单次流 SSE：{message?, userId?, fileIds?}
+POST /threads/chat                    # 单次流 SSE：{message?, userId?, sessionId?, fileIds?}
 POST /threads/{sessionId}/confirm     # HITL 同步确认：{results:[{tool_call_id, confirmed, accept_rule}]}
 POST /threads/{sessionId}/confirm-stream  # HITL 流式确认（同请求体）
 ```
-
-Channel SSE（旧，保留兼容）：
-
-```
-GET /chat/stream?message=<text>&userId=<id>[&sessionId=<id>]
-```
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `message` | String | ✓ | 用户消息 |
-| `userId` | String | ✓ | 用户标识（自动创建独立 session） |
-| `sessionId` | String | | 指定 session（同一用户多个对话） |
-| `subagentId` | String | | 直接与子 Agent 对话 |
 
 ---
 
@@ -381,18 +367,12 @@ curl -s -X POST http://localhost:8100/ \
 ### 9.3 单次流 SSE（主对话入口）
 
 ```bash
-curl -s -N -X POST "http://localhost:8100/threads/debug:thread-1/chat" \
+curl -s -N -X POST "http://localhost:8100/threads/chat" \
   -H "Content-Type: application/json" \
-  -d '{"message":"请只回复welcome","userId":"test-user"}'
+  -d '{"message":"请只回复welcome","userId":"test-user","sessionId":"debug:thread-1"}'
 ```
 
-### 9.4 Channel SSE（旧）
-
-```bash
-curl -s -N "http://localhost:8100/chat/stream?message=请只回复welcome&userId=test-user"
-```
-
-### 9.5 LLM 连通性
+### 9.4 LLM 连通性
 
 ```bash
 curl -s "https://api.longcat.chat/openai/v1/chat/completions" \

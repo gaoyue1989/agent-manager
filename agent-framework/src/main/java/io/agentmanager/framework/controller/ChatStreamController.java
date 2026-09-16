@@ -48,16 +48,16 @@ import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
 
 /**
- * 无路径变量的会话流端点 &mdash; sessionId 在请求体中，可选。
+ * 对话入口端点 &mdash; sessionId 在请求体中，可选。
  *
- * <p>与 {@link SessionStreamController}（{@code POST /threads/{sessionId}/chat}）互补：
+ * <p>本工程唯一对话入口：
  * <ul>
  *   <li>{@code POST /threads/chat} &mdash; sessionId 在请求体中，可选</li>
  *   <li>不传 sessionId 时自动生成 UUID，首个 SSE 事件为 {@code session_created}</li>
  *   <li>传了 sessionId 则续接已有会话</li>
  * </ul>
  *
- * <p>前端推荐使用此端点，首次调用无需预知 sessionId：
+ * <p>首次调用无需预知 sessionId：
  * <pre>{@code
  * // 第一次：不传 sessionId
  * POST /threads/chat  { "message": "你好" }
@@ -69,8 +69,8 @@ import reactor.core.publisher.Flux;
  * POST /threads/chat  { "message": "继续", "sessionId": "abc-123" }
  * }</pre>
  *
- * <p>其余端点（subscribe / status / confirm / history）仍需 sessionId 在路径中，
- * 因为它们是面向已知会话的操作。
+ * <p>其余端点（subscribe / status / confirm / history）仍需 sessionId 在路径中
+ * （见 {@link SessionStreamController}），因为它们是面向已知会话的操作。
  */
 @RestController
 @RequestMapping("/threads")
@@ -367,9 +367,10 @@ public class ChatStreamController {
             payload.put("download_url", "/files/" + fileId);
             eventBus.emitSynthetic(sessionId, replyId, "file_ready",
                 AgentEventSseSerializer.payload(payload));
-            // 回写 reply_id 到 file_asset，供历史回放按消息维度分发卡片
+            // 回写 reply_id 和 session_id 到 file_asset，供历史回放按消息/会话维度分发卡片
             fileAssetStore.updateReplyId(fileId, replyId);
-            log.info("file_ready emitted for {}", node.get("file_name").asText());
+            fileAssetStore.updateSessionId(fileId, sessionId);
+            log.info("file_ready emitted for {} (sid={})", node.get("file_name").asText(), sessionId);
         } catch (Exception e) {
             log.warn("file_ready synthesis failed: {}", e.getMessage());
         }

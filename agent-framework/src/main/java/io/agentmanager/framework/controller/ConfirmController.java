@@ -62,7 +62,7 @@ public class ConfirmController {
     @PostMapping(value = "/confirm", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> confirm(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
-        // ★ Windows 路径安全化：与 SessionStreamController 保持一致
+        // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
 
         // 恢复确认时刷新会话-用户映射（确认恢复可能是新的入口，确保映射存在）
@@ -88,7 +88,7 @@ public class ConfirmController {
     /**
      * 流式版：确认后事件流（DURABLE_SSE 架构）。
      *
-     * <p>与 SessionStreamController.chat 相同的模式：
+     * <p>与 ChatStreamController.chat 相同的模式：
      * <ol>
      *   <li>acquire turn 租约</li>
      *   <li>ensureSink — 确保 EventBus 有输出通道</li>
@@ -100,7 +100,7 @@ public class ConfirmController {
     @PostMapping(value = "/confirm-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> confirmStream(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
-        // ★ Windows 路径安全化：与 SessionStreamController 保持一致
+        // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         String finalSessionId = sessionId;
 

@@ -1,8 +1,10 @@
 # Agent Framework 并发压测（bench）
 
-对应设计方案：[../docs/concurrency-benchmark-plan.md](../docs/concurrency-benchmark-plan.md)（**执行结论见其 §13**，含两项 harness 缺陷的根因与证据）。被测为 **docker 容器 1C/1G 硬限** 的 agent-framework（SANDBOX_ENABLED 可切换），LLM/MCP 均 mock，闭环并发打 `POST /threads/{sid}/chat`（SSE）。
+对应设计方案：[../docs/concurrency-benchmark-plan.md](../docs/concurrency-benchmark-plan.md)（**执行结论见其 §13**，含两项 harness 缺陷的根因与证据）。被测为 **docker 容器 1C/1G 硬限** 的 agent-framework（SANDBOX_ENABLED 可切换），LLM/MCP 均 mock，闭环并发打 `POST /threads/chat`（SSE，sessionId 在 body）。
 
 > 2026-09-16 首轮结论：非沙箱最大并发 4（峰值 637 req/min，C=8 触发 SDK 死锁）；沙箱模式并发上限 1（harness stop() 竞态）。复测请先阅读 §13.4 实施偏差（会话池模型、256Mi 沙箱、500ms 会话间隔、专用压测 MySQL）。
+>
+> ⚠️ **2026-09-16 端点收敛**：对话入口由 `POST /threads/{sid}/chat` 收敛为 `POST /threads/chat`（sessionId 移入请求体），runner.js 已同步。§13 结论基于收敛前的路径，执行链未变故结论仍有效，但**重跑前请确认路径口径**。
 
 ## 目录
 

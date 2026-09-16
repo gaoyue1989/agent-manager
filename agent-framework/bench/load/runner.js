@@ -8,7 +8,7 @@
  *                  --ramp-seconds 15 --stage-seconds 180 --session-pool 8 ...
  *
  * 口径：
- *   请求 = POST /threads/{sid}/chat → SSE 收到 AGENT_END；error / permission_ask /
+ *   请求 = POST /threads/chat → SSE 收到 AGENT_END；error / permission_ask /
  *   无终帧断连 / 5xx / 超时(120s) 均为失败。
  *   计时窗口：ramp（线性拉起）+ 稳态固定窗口；仅稳态窗口内**发起**的请求计入指标。
  *   停止条件（终止当前档）：错误率 >5%（≥20 样本）/ P95 >30s（≥20 样本）/ 服务失联。
@@ -95,11 +95,12 @@ function chatOnce(sid, userId) {
     const body = JSON.stringify({
       message: `bench load test ${MARKER} session=${sid}`,
       userId,
+      sessionId: sid,
     });
     const req = http.request({
       hostname: base.hostname,
       port: base.port,
-      path: `/threads/${sid}/chat`,
+      path: '/threads/chat',
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     }, (res) => {

@@ -112,7 +112,7 @@ docker run -d --name approval-proxy --network host \
 ## 4. agent-framework API 使用说明（Demo 相关）
 
 > 路径规范（O7）：会话业务接口统一在 `/threads` 下，页面数据端点保留 `/debug`。
-> 单次流架构：`POST /threads/{sid}/chat` 直接返回 SSE，事件实时直吐；已删除长连接订阅端点。
+> 单次流架构：`POST /threads/chat` 直接返回 SSE，事件实时直吐（sessionId 在请求体中，省略则自动生成）；已删除长连接订阅端点。
 
 ### 4.1 会话与对话
 
@@ -121,7 +121,7 @@ docker run -d --name approval-proxy --network host \
 | `GET` | `/health` | 健康检查（含 `slug`/`llm_configured`） | 启动自检 |
 | `GET` | `/threads` | 会话列表（按更新时间倒序） | 侧栏会话列表 |
 | `GET` | `/threads/{sid}/history` | 会话历史（块级消息含 tool_calls；附 `pendingConfirm`） | 刷新/回显历史 |
-| `POST` | `/threads/{sid}/chat` | **单次流对话**：body `{message, userId}`，SSE 直吐 Agent 事件词表 | 发送消息送 `api.triggerSessionChat` |
+| `POST` | `/threads/chat` | **单次流对话**：body `{message, userId, sessionId}`，SSE 直吐 Agent 事件词表 | 发送消息送 `api.triggerSessionChat` |
 | `POST` | `/threads/{sid}/confirm-stream` | HITL 确认流：body `{results:[{tool_call_id, confirmed, accept_rule}]}`，SSE 恢复执行事件；404=上下文不存在、409=已消费 | 批准/拒绝后恢复提交 |
 
 SSE 事件词表（`handleEvent` 直接消费）：

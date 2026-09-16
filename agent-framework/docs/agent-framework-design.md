@@ -155,8 +155,8 @@ src/main/java/io/agentmanager/framework/
     ├── DebugController.java         # GET /debug (页面)
     ├── DebugApiController.java      # GET /debug/* (页面数据 API, 含 /debug/sandbox)
     ├── AgentCardController.java     # GET /.well-known/agent-card.json
-    ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
-    ├── SessionStreamController.java # POST /threads/{sid}/chat (SSE 单次流, 单次流模式)
+    ├── ChatStreamController.java    # POST /threads/chat (SSE 单次流, 唯一对话入口)
+    ├── SessionStreamController.java # GET /threads/{sid}/subscribe、/{sid}/status
     ├── ConfirmController.java       # POST /threads/{sid}/confirm, /confirm-stream (HITL 确认)
     ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
     ├── FileController.java          # POST /files/upload、GET /files/{fileId}
@@ -185,19 +185,10 @@ A2A Controller (全量透传 SDK，参考官方 A2aJsonRpcController)
   ├── tasks/cancel ──▶ SDK 处理
   └── tasks/resubscribe ──▶ SDK 处理
 
-Client Request (GET /chat/stream?message=...&userId=...)
+Client Request (POST /threads/chat, body: {message, userId, sessionId?})
   │
   ▼
-StreamController → ChatUiChannel.sendStream()
-  │
-  ├── SendOptions.userId(userId) → 自动创建/恢复 session
-  ├── HarnessAgent.streamEvents() → LLM API
-  └── SSE: TextBlockDeltaEvent / ToolCallStartEvent / ...
-
-Client Request (POST /threads/{sid}/chat, body: {message, userId})
-  │
-  ▼
-SessionStreamController → TurnLeaseStore.acquire() → 等待式获取执行权
+ChatStreamController → TurnLeaseStore.acquire() → 等待式获取执行权
   │  等待期间 SSE 每 15s 发 {type:"waiting"} 帧
   │  超时(120s) → 409 turn_in_progress
   │

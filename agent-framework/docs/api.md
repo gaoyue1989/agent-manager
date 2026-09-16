@@ -237,14 +237,14 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/llm-calls
 
 ## 无状态单次流 SSE API
 
-### POST /threads/{sessionId}/chat
+### POST /threads/chat
 
-单次流 SSE 对话端点。每次请求抢 Turn 租约（排队语义）→ Agent 执行 → 事件直吐 → AGENT_END/error 帧关闭流、释放租约。**无长连接、无 SessionEventBus**。
+单次流 SSE 对话端点（**唯一对话入口**）。sessionId 在请求体中、可选：不传则自动生成 UUID（首个 SSE 事件为 `session_created`），传了则续接已有会话。每次请求抢 Turn 租约（排队语义）→ Agent 执行 → 事件经 SessionEventBus 持久化 + 广播 → AGENT_END/error 帧关闭流、释放租约。
 
 ```bash
-curl -s -N -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/chat" \
+curl -s -N -X POST "http://localhost:8100/threads/chat" \
   -H 'Content-Type: application/json' \
-  -d '{"message":"hello","userId":"alice"}'
+  -d '{"message":"hello","userId":"alice","sessionId":"acme-test-agent:thread-1"}'
 ```
 
 **请求体:**
@@ -252,12 +252,14 @@ curl -s -N -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/chat"
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `message` | String | ✓* | 用户消息（*与 `fileIds` 至少一项） |
-| `userId` | String | | 用户标识（默认 `debug-user`） |
+| `userId` | String | | 用户标识（默认 `debug-user`；`X-User-Id` Header 优先） |
+| `sessionId` | String | | 会话 ID；**省略时自动生成 UUID** |
 | `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
 
 **响应 (SSE):**
 
 ```
+data: {"type":"session_created","session_id":"..."}   ← 仅当请求未传 sessionId
 data: {"type":"waiting"}                    ← 排队等待时每 15s 一帧（防 Nginx 读超时）
 data: {"type":"TEXT_BLOCK_DELTA","delta":"Hello","replyId":"...","blockId":"..."}
 data: {"type":"AGENT_END","replyId":"..."}
@@ -267,6 +269,7 @@ data: {"type":"AGENT_END","replyId":"..."}
 
 | type | 说明 |
 |------|------|
+| `session_created` | 新会话创建（仅当请求未传 `sessionId`，作为首个事件下发） |
 | `waiting` | 排队等待（同 session 有活跃 turn 时） |
 | `TEXT_BLOCK_DELTA` | 文本 token（流式累加） |
 | `TOOL_CALL_START` | 工具调用开始（MCP Apps 工具携带 `ui` 元数据） |
@@ -350,18 +353,6 @@ curl -X POST "http://localhost:8100/files/upload" \
 ### GET /files/{fileId}
 
 下载/预览（`?inline=1` 时仅 image/*、text/* 内联展示；平台无认证，UUID 不可枚举即授权）。
-
----
-
-## Channel SSE API
-
-### GET /chat/stream
-
-Channel 流式对话端点（传统 Channel 模式，与单次流 API 并存）。
-
-```bash
-curl -s -N "http://localhost:8100/chat/stream?message=hello&userId=alice"
-```
 
 ---
 

@@ -95,10 +95,12 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 StreamControllerTest (2 个用例)
+### 4.4 ChatStreamControllerTest (16 个用例)
 
-- `GET /chat/stream` Channel SSE 流式事件
-- 空消息处理
+- `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
+- sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
+- write_file → KV 同步（沙箱开关、路径规范化、userId 作 key、缺 path 跳过）
+- 工具事件审计、MCP Apps ui 元数据序列化
 
 ### 4.5 ToolControllerTest (4 个用例)
 
@@ -156,8 +158,8 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| SessionStreamControllerTest | 11 | metadata 携带会话 key 注入 / ui 元数据 SSE / 单次流触发 / fileIds 注入 |
-| StreamControllerTest | 8 | ui 元数据序列化 / 无 UI 工具降级原词表 |
+| ChatStreamControllerTest | 16 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 |
+| SessionStreamControllerTest | 7 | subscribe 回放+done / status 四态 / ui 元数据序列化 |
 
 ### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）
 
@@ -219,10 +221,12 @@ curl -s -X POST http://localhost:8101/ \
   | python3 -m json.tool
 ```
 
-### 5.3 Channel SSE
+### 5.3 对话单次流
 
 ```bash
-curl -s -N "http://localhost:8101/chat/stream?message=请只回复welcome&userId=test-user"
+curl -s -N -X POST "http://localhost:8101/threads/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"请只回复welcome","userId":"test-user"}'
 ```
 
 ### 5.4 MCP 工具调用
@@ -287,7 +291,7 @@ src/test/resources/fixtures/test-agent/
 | DebugApiControllerTest | 15 | ✅ |
 | ThreadControllerTest（含 history 文件下载卡片） | 12 | ✅ |
 | FileControllerTest / FileToolsTest / FileAssetStoreTest | 31 | ✅ |
-| SessionStreamControllerTest / StreamControllerTest | 19 | ✅ |
+| ChatStreamControllerTest / SessionStreamControllerTest | 23 | ✅ |
 | TurnLeaseStoreTest / ConfirmContextStoreTest / ToolAuditStoreTest | 24 | ✅ |
 | OpenSandbox 单测（SandboxConfig/State/Client/Reader 等） | 44 | ✅ |
 | 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 32 | ✅ |

@@ -6,7 +6,7 @@
 
 | 方法 | 路径 | 说明 | Content-Type |
 |------|------|------|-------------|
-| POST | `/threads/{sessionId}/chat` | 发送对话消息（SSE 流式响应） | `text/event-stream` |
+| POST | `/threads/chat` | 发送对话消息（SSE 流式响应，sessionId 在请求体） | `text/event-stream` |
 | POST | `/threads/{sessionId}/confirm-stream` | HITL 确认恢复（SSE 流式响应） | `text/event-stream` |
 | POST | `/threads/{sessionId}/confirm` | HITL 确认恢复（同步 JSON 响应） | `application/json` |
 | GET | `/threads/{sessionId}/subscribe` | SSE 断连续传 | `text/event-stream` |
@@ -51,7 +51,7 @@ X-User-Id: user-123
 
 ## 三、接口详情
 
-### 3.1 POST /threads/{sessionId}/chat — 发送消息
+### 3.1 POST /threads/chat — 发送消息
 
 **请求体：**
 
@@ -59,6 +59,7 @@ X-User-Id: user-123
 {
   "message": "帮我分析一下销售数据",     // 必填（或 fileIds 至少一项）
   "userId": "user-123",                 // 可选，X-User-Id 优先
+  "sessionId": "my-session-1",          // 可选，省略则自动生成 UUID 并首发 session_created
   "fileIds": ["file-abc", "file-def"]   // 可选，上传文件 ID
 }
 ```

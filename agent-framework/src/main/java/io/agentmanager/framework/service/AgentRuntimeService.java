@@ -521,7 +521,7 @@ public class AgentRuntimeService {
     /**
      * 构建恢复执行的 RuntimeContext。
      *
-     * Channel 流程（SessionStreamController）的会话经 ChatUiChannel 网关路由，
+     * Channel 流程（ChatStreamController）的会话经 ChatUiChannel 网关路由，
      * 网关按 peer 派生真实会话 key：userId=peer（如 debug-user_xxx），
      * sessionId=网关恒定 gw-hash（storeConfirmContext 按 canonicalKey 确定性推导，
      * 恒为 gw-3f20f08c5499，不能依赖 AgentStartEvent.getSessionId()——该字段为 null）。
@@ -568,7 +568,7 @@ public class AgentRuntimeService {
     }
 
     /**
-     * Channel 流程存储确认上下文（SessionStreamController 调用；rawSessionId 经 makeThreadId 补全前缀）。
+     * Channel 流程存储确认上下文（ChatStreamController 调用；rawSessionId 经 makeThreadId 补全前缀）。
      * Channel 会话经 ChatUiChannel 网关路由，真实会话 key 为 (userId=peer, sessionId=gw-hash)：
      *  - sessionId 由网关按 canonicalKey 确定性推导（恒为 gw-3f20f08c5499，同进程所有 peer 共享）
      *  - userId 即 peer（= rawSessionId，如 debug-user_mt1xxx）

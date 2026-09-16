@@ -92,7 +92,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     /** 从路径变量提取 sessionId（/threads/{sessionId}/...） */
     private static String extractSessionId(HttpServletRequest request) {
         var uri = request.getRequestURI();
-        // /threads/{sessionId}/chat /subscribe /status /confirm-stream
+        // /threads/{sessionId}/subscribe /status /confirm-stream
         if (uri.startsWith(SSE_PATH_PREFIX)) {
             var rest = uri.substring(SSE_PATH_PREFIX.length());
             var slashIdx = rest.indexOf('/');
@@ -105,7 +105,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     /** 判断是否为 SSE 流端点（避免逐帧日志刷屏） */
     private static boolean isSseEndpoint(HttpServletRequest request) {
         var uri = request.getRequestURI();
-        // /threads/chat、/threads/{sid}/chat、/threads/{sid}/confirm-stream、/threads/{sid}/subscribe
+        // /threads/chat、/threads/{sid}/confirm-stream、/threads/{sid}/subscribe
         return (uri.startsWith(SSE_PATH_PREFIX) && uri.endsWith(SSE_CHAT_SUFFIX))
             || uri.startsWith(SSE_PATH_PREFIX) && uri.endsWith("/confirm-stream")
             || uri.startsWith(SSE_PATH_PREFIX) && uri.endsWith("/subscribe")

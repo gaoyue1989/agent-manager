@@ -13,11 +13,9 @@
 
 1. [概述与核心概念](#1-概述与核心概念)
 2. [SSE 对话接口](#2-sse-对话接口)
-   - [POST /threads/{sessionId}/chat](#21-post-threadssessionidchat)
-   - [POST /threads/chat](#22-post-threadschat)
-   - [GET /threads/{sessionId}/subscribe](#23-get-threadssessionidsubscribe)
-   - [GET /threads/{sessionId}/status](#24-get-threadssessionidstatus)
-   - [~~GET /chat/stream~~（已废弃）](#25-get-chatstream已废弃)
+   - [POST /threads/chat](#21-post-threadschat)
+   - [GET /threads/{sessionId}/subscribe](#22-get-threadssessionidsubscribe)
+   - [GET /threads/{sessionId}/status](#23-get-threadssessionidstatus)
 3. [HITL 人工确认接口](#3-hitl-人工确认接口)
    - [POST /threads/{sessionId}/confirm](#31-post-threadssessionidconfirm)
    - [POST /threads/{sessionId}/confirm-stream](#32-post-threadssessionidconfirm-stream)
@@ -48,7 +46,7 @@
 所有对话走 **POST 请求 + SSE 单次流**，事件经 EventBus 持久化 + 广播，SSE 断连不影响 Agent 执行：
 
 ```
-前端 ──POST /threads/{sid}/chat (SSE)──▶ 服务端
+前端 ──POST /threads/chat (SSE)──▶ 服务端
        ├─ 抢 Turn 租约（排队时发 waiting 帧）
        ├─ Agent 执行 → 事件写入 EventBus → 持久化 + 广播 → SSE 订阅吐出
        └─ AGENT_END / error 帧关闭流
@@ -83,94 +81,9 @@ data: {"type":"TEXT_BLOCK_DELTA","delta":"Hello","replyId":"xxx","blockId":"yyy"
 
 ## 2. SSE 对话接口
 
-### 2.1 POST /threads/{sessionId}/chat
+### 2.1 POST /threads/chat
 
-**核心对话接口**——单次流 SSE，消息发送后事件实时直吐，执行完即关闭。
-
-```
-POST /threads/{sessionId}/chat
-Content-Type: application/json
-Accept: text/event-stream
-```
-
-**路径参数：**
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `sessionId` | String | 会话 ID，推荐格式 `{tenant}:{threadId}`（也可使用 UUID 等任意安全字符串） |
-
-**请求体：**
-
-```json
-{
-  "message": "帮我分析这份报表",
-  "userId": "alice",
-  "fileIds": ["a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
-}
-```
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `message` | String | ⚠️ | 用户消息内容（`message` 与 `fileIds` 至少填一项） |
-| `userId` | String | ❌ | 用户标识，默认 `debug-user`（`X-User-Id` Header 优先） |
-| `sessionId` | String | ❌ | 会话 ID（允许覆盖路径参数，路径参数兜底） |
-| `fileIds` | Array\<String\> | ⚠️ | 上传文件 ID 列表（`message` 与 `fileIds` 至少填一项） |
-
-> **文件上传交互流程：** 先调用 `POST /files/upload` 获取 `file_id`，再将 `file_id` 放入 `fileIds` 数组发送对话请求。图片文件（默认 ≤5MB 单文件、≤15MB 总量，可通过 `file.image-max-mb` / `file.image-inline-total-mb` 配置）会自动内联到消息中；其他类型文件以路径提示文本注入，Agent 通过 `read_file` 等工具处理。
-
-**响应（SSE 事件流）：**
-
-```
-data: {"type":"AGENT_START","replyId":"reply-001","sessionId":"acme-test-agent:thread-1","id":"evt-001"}
-
-data: {"type":"MODEL_CALL_START","replyId":"reply-001","id":"evt-002"}
-
-data: {"type":"THINKING_BLOCK_START","replyId":"reply-001","blockId":"blk-001","id":"evt-003"}
-data: {"type":"THINKING_BLOCK_DELTA","delta":"让我想想","replyId":"reply-001","blockId":"blk-001","id":"evt-004"}
-data: {"type":"THINKING_BLOCK_END","replyId":"reply-001","blockId":"blk-001","id":"evt-005"}
-
-data: {"type":"TEXT_BLOCK_START","replyId":"reply-001","blockId":"blk-002","id":"evt-006"}
-data: {"type":"TEXT_BLOCK_DELTA","delta":"好的","replyId":"reply-001","blockId":"blk-002","id":"evt-007"}
-data: {"type":"TEXT_BLOCK_DELTA","delta":"，这是","replyId":"reply-001","blockId":"blk-002","id":"evt-008"}
-data: {"type":"TEXT_BLOCK_END","replyId":"reply-001","blockId":"blk-002","id":"evt-009"}
-
-data: {"type":"MODEL_CALL_END","replyId":"reply-001","inputTokens":150,"outputTokens":200,"totalTokens":350,"id":"evt-010"}
-
-data: {"type":"AGENT_END","replyId":"reply-001","id":"evt-011"}
-```
-
-**排队场景（同 session 已有活跃执行）：**
-
-```
-data: {"type":"waiting"}
-data: {"type":"waiting"}
-...（每 15s 一帧，防 Nginx 读超时）
-data: {"type":"AGENT_START","replyId":"reply-002",...}
-...（正常事件流）
-```
-
-**HITL 暂停场景：**
-
-```
-data: {"type":"AGENT_START","replyId":"reply-001",...,"id":"evt-001"}
-data: {"type":"TOOL_CALL_START","toolName":"write_file","toolCallId":"call-abc","replyId":"reply-001",...,"id":"evt-002"}
-data: {"type":"permission_ask","tool_calls":[{"tool_call_id":"call-abc","name":"write_file","input":{"path":"/tmp/test.txt","content":"hello"}}],"reply_id":"reply-001","id":"evt-003"}
-（流关闭，前端弹确认卡片）
-```
-
-**cURL 示例：**
-
-```bash
-curl -s -N -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/chat" \
-  -H 'Content-Type: application/json' \
-  -d '{"message":"hello","userId":"alice"}'
-```
-
----
-
-### 2.2 POST /threads/chat
-
-**无路径变量的对话端点**——sessionId 在请求体中，可选。与 `POST /threads/{sessionId}/chat` 互补：
+**唯一对话端点**——sessionId 在请求体中，可选：
 
 - 不传 `sessionId` 时自动生成 UUID，首个 SSE 事件为 `session_created`
 - 传了 `sessionId` 则续接已有会话
@@ -235,7 +148,7 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 
 ---
 
-### 2.3 GET /threads/{sessionId}/subscribe
+### 2.2 GET /threads/{sessionId}/subscribe
 
 **SSE 重连续传端点**——前端 SSE 断连后调用此接口，从 `afterSeq` 之后回放历史 + 订阅实时事件。
 
@@ -272,7 +185,7 @@ data: {"type":"done"}
 
 ---
 
-### 2.4 GET /threads/{sessionId}/status
+### 2.3 GET /threads/{sessionId}/status
 
 **查询当前 Turn 状态**——前端刷新恢复时先调用此接口判断执行状态。
 
@@ -307,36 +220,6 @@ GET /threads/{sessionId}/status
 3. completed → GET /subscribe?afterSeq=N 回放（收到 done 帧后关闭）
 4. idle → 显示空白输入状态
 ```
-
----
-
-### 2.5 ~~GET /chat/stream~~（已废弃）
-
-> ⚠️ **已废弃** — 代码已标注 `@Deprecated`，仅保留向后兼容。此端点不支持 Durable SSE（无事件持久化、无心跳、无断连续传、无 Turn 租约排队）。**新项目请使用 [`POST /threads/{sessionId}/chat`](#21-post-threadssessionidchat) 或 [`POST /threads/chat`](#22-post-threadschat)。**
-
-传统 Channel 模式流式对话。
-
-```
-GET /chat/stream?message=hello&userId=alice
-Accept: text/event-stream
-```
-
-**查询参数：**
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `message` | String | ✅ | 用户消息 |
-| `userId` | String | ✅ | 用户标识 |
-| `sessionId` | String | ❌ | 会话 ID（优先于 userId 作为 peerId） |
-| `subagentId` | String | ❌ | 子 Agent ID（指定时发送到子 Agent） |
-
-**请求头：**
-
-| Header | 说明 |
-|--------|------|
-| `X-User-Id` | 网关注入的用户标识，优先于查询参数 `userId` |
-
-**响应：** SSE 事件流，词表与 `/threads/{sessionId}/chat` 一致。
 
 ---
 

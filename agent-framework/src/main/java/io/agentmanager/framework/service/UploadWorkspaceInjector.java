@@ -124,7 +124,7 @@ public class UploadWorkspaceInjector {
      * 图片（≤FILE_IMAGE_MAX_MB 且总预算内）→ ImageBlock(Base64Source) 内联；
      * 其余 → 路径提示文本。
      *
-     * @return 追加块 + 路径提示块（供 SessionStreamController 拼装 Msg）
+     * @return 追加块 + 路径提示块（供 ChatStreamController 拼装 Msg）
      */
     public List<io.agentscope.core.message.ContentBlock> buildContentBlocks(
             List<String> fileIds, String message, String userKey) {
