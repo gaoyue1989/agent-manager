@@ -469,6 +469,15 @@ async function tryResumeSSE(sessionId) {
         renderConfirmCard(r, status.pending_confirm);
       }
 
+      // 中断态必须先落地一个回复气泡：服务端补发的 interrupted 帧不携带 replyId
+      // （见 SessionEventTailer.interruptedSSE），而 handleEvent 在 currentReply 为空时
+      // 会直接丢弃该帧——刷新后 currentReply 必然是空的（loadThreadHistory 不设置它），
+      // 于是提示渲染不出来，用户只看到"有部分输出、然后什么都没有"。
+      // 与上面 waiting_confirm 分支同一手法。
+      if (status.state === 'interrupted') {
+        ensureReply(currentReplyId || 'interrupted-' + Date.now());
+      }
+
       // 订阅续传
       activeSubHandle = ctx.api.subscribe(sessionId, {
         afterSeq: lastEventId,
