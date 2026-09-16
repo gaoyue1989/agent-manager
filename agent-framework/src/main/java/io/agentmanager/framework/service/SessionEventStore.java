@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
@@ -32,8 +33,20 @@ public class SessionEventStore {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventStore.class);
 
+    /** delta 类事件：进缓冲攒批，不逐条落库 */
+    private static final Set<String> DELTA_EVENT_TYPES =
+        Set.of("TEXT_BLOCK_DELTA", "THINKING_BLOCK_DELTA");
+
+    /** 默认批量大小（行数） */
+    private static final int DEFAULT_BATCH_SIZE = 200;
+
+    /** 默认攒批时间窗（毫秒）：超过则把缓冲刷出，限制重连回放的滞后 */
+    private static final int DEFAULT_FLUSH_INTERVAL_MS = 1000;
+
     private final DataSource dataSource;
     private final int retentionDays;
+    private final int batchSize;
+    private final int flushIntervalMs;
 
     /**
      * session_id → 下一个待分配的 seq。
@@ -47,14 +60,30 @@ public class SessionEventStore {
      */
     private final ConcurrentHashMap<String, AtomicInteger> seqCounters = new ConcurrentHashMap<>();
 
-    public SessionEventStore(DataSource dataSource, int retentionDays) {
-        this.dataSource = dataSource;
-        this.retentionDays = retentionDays;
-        initSchema();
-    }
+    /** 待落库的行（delta 缓冲）；访问一律持 pending 监视器 */
+    private final List<PendingRow> pending = new ArrayList<>();
+
+    private long lastFlushAt = System.currentTimeMillis();
+
+    /** 攒批缓冲中的一行（尚未落库） */
+    private record PendingRow(String sessionId, int seq, String replyId,
+                              String eventType, String payload) {}
 
     public SessionEventStore(DataSource dataSource) {
-        this(dataSource, 7);
+        this(dataSource, 7, DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_MS);
+    }
+
+    public SessionEventStore(DataSource dataSource, int retentionDays) {
+        this(dataSource, retentionDays, DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_MS);
+    }
+
+    public SessionEventStore(DataSource dataSource, int retentionDays,
+                             int batchSize, int flushIntervalMs) {
+        this.dataSource = dataSource;
+        this.retentionDays = retentionDays;
+        this.batchSize = batchSize > 0 ? batchSize : DEFAULT_BATCH_SIZE;
+        this.flushIntervalMs = flushIntervalMs >= 0 ? flushIntervalMs : DEFAULT_FLUSH_INTERVAL_MS;
+        initSchema();
     }
 
     /** 建表（幂等），失败 fail-fast */
@@ -112,30 +141,89 @@ public class SessionEventStore {
     /**
      * 追加一条事件记录，返回分配的 seq。
      *
-     * <p>同 session 的 turn 由 turn_lease 串行化，seq 分配无需额外锁。
-     * 不同 turn（HITL 恢复）的 reply_id 不同，不会冲突。
+     * <p>delta 类事件（TEXT_BLOCK_DELTA / THINKING_BLOCK_DELTA）进缓冲攒批；里程碑事件
+     * 触发一次 flush，把缓冲与自身放在**同一条多值 INSERT** 中落库。
      *
-     * @return 分配的 seq（从 1 开始递增）
+     * <p>这保证了不变量 I1：DB 中的 seq 始终是连续前缀——整批成功则前缀连续，
+     * 整批失败则前缀未被破坏（不会出现"里程碑已落库但中间的 delta 缺失"）。
+     *
+     * <p>注意：本方法不在持有连接的情况下调用 {@link #nextSeq(String)}，未播种路径
+     * 上的 {@link #findMaxSeq(String)} 会各自借用连接，不会同时占用两条连接。
+     *
+     * @return 分配的 seq（从 1 开始递增）；-1 表示落库失败
      */
     public int append(String sessionId, String replyId, String eventType, String payload) {
-        try (var conn = dataSource.getConnection()) {
-            int nextSeq = nextSeq(sessionId);
+        int seq = nextSeq(sessionId);
+        var row = new PendingRow(sessionId, seq, replyId, eventType, payload);
 
-            try (var ps = conn.prepareStatement("""
-                INSERT INTO session_event
-                  (session_id, seq, event_type, payload, reply_id, created_at)
-                VALUES (?, ?, ?, ?, ?, NOW(3))
-                """)) {
-                ps.setString(1, sessionId);
-                ps.setInt(2, nextSeq);
-                ps.setString(3, eventType);
-                ps.setString(4, payload);
-                ps.setString(5, replyId);
-                ps.executeUpdate();
+        List<PendingRow> toFlush = null;
+        synchronized (pending) {
+            pending.add(row);
+            long now = System.currentTimeMillis();
+            boolean milestone = !DELTA_EVENT_TYPES.contains(eventType);
+            boolean full = pending.size() >= batchSize;
+            boolean timedOut = now - lastFlushAt >= flushIntervalMs;
+            if (milestone || full || timedOut) {
+                toFlush = new ArrayList<>(pending);
+                pending.clear();
+                lastFlushAt = now;
             }
-            return nextSeq;
+        }
+
+        if (toFlush != null && insertBatch(toFlush) < 0) {
+            return -1;
+        }
+        return seq;
+    }
+
+    /**
+     * turn 结束：把缓冲刷出并释放 seq 计数器。
+     * 必须由 turn 的终态路径调用，否则尾部 delta 会一直留在内存中直到下一个 turn。
+     */
+    public void finishTurn(String sessionId) {
+        flushPending();
+        releaseSeq(sessionId);
+    }
+
+    /** 刷出缓冲中所有待落库的行 */
+    public void flushPending() {
+        List<PendingRow> toFlush;
+        synchronized (pending) {
+            if (pending.isEmpty()) return;
+            toFlush = new ArrayList<>(pending);
+            pending.clear();
+            lastFlushAt = System.currentTimeMillis();
+        }
+        insertBatch(toFlush);
+    }
+
+    /**
+     * 一条多值 INSERT 写入多行。
+     *
+     * @return 受影响行数；&lt; 0 表示失败
+     */
+    private int insertBatch(List<PendingRow> rows) {
+        if (rows.isEmpty()) return 0;
+        var sql = new StringBuilder(
+            "INSERT INTO session_event (session_id, seq, event_type, payload, reply_id, created_at) VALUES ");
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) sql.append(',');
+            sql.append("(?,?,?,?,?,NOW(3))");
+        }
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            for (var r : rows) {
+                ps.setString(idx++, r.sessionId());
+                ps.setInt(idx++, r.seq());
+                ps.setString(idx++, r.eventType());
+                ps.setString(idx++, r.payload());
+                ps.setString(idx++, r.replyId());
+            }
+            return ps.executeUpdate();
         } catch (Exception e) {
-            log.error("SessionEventStore: append failed for {}: {}", sessionId, e.getMessage());
+            log.error("SessionEventStore: batch insert failed ({} rows, first session={}): {}",
+                rows.size(), rows.get(0).sessionId(), e.getMessage());
             // 持久化失败不应阻塞主链路——EventBus 仍可广播实时事件
             return -1;
         }
