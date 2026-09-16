@@ -133,7 +133,27 @@ public class ConfirmController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
-            eventBus.beginTurn(finalSessionId);
+
+            // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
+            // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
+            // 此时租约已到手，不回滚就会被 TurnLeaseGuard 的续租线程永久持有
+            // （token 匹配即持续续期）→ 该 session 再也无法执行，观察者也永不终止。
+            Flux<io.agentscope.core.event.AgentEvent> resumeFlux;
+            try {
+                eventBus.beginTurn(finalSessionId);
+                // 冷流：此处只做上下文消费与消息构建，尚未开始执行
+                resumeFlux = runtimeService.resumeWithConfirmEvents(
+                    finalSessionId, null, body.results());
+            } catch (Exception e) {
+                log.warn("confirm-stream setup failed, rolling back (sid={}): {}",
+                    finalSessionId, e.getMessage());
+                sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
+                    : e.getClass().getSimpleName()));
+                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
+                lease.release();
+                sink.complete();
+                return;
+            }
 
             // ===== 4. 先订阅 EventBus → SSE =====
             eventBus.subscribe(finalSessionId, 0, replyId)
@@ -147,7 +167,7 @@ public class ConfirmController {
                     () -> sink.complete());
 
             // ===== 5. 启动 agent 恢复执行 → 事件写入 EventBus =====
-            runtimeService.resumeWithConfirmEvents(finalSessionId, null, body.results())
+            resumeFlux
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease),
                     e -> {

@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -152,6 +153,24 @@ class ChatStreamControllerTest {
         var frames = collect(sessionId, "hello", null);
         assertNotNull(frames);
         verify(turnLeaseStore).release(sessionId, "tok-2");
+    }
+
+    @Test
+    void chatShouldReleaseLeaseWhenTurnSetupFails() {
+        // 构造消息阶段抛异常（如 fileId 失效导致工作区注入失败）时，租约**已经**到手。
+        // 续租线程不看本段是否还活着，漏放租约 = 该 session 被永久锁死。
+        var sessionId = "test-user-s4";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-4");
+        when(workspaceInjector.injectToWorkspace(anyString(), anyString()))
+            .thenThrow(new IllegalStateException("file not found"));
+
+        var frames = collect(sessionId, "hello", null, List.of("f-missing"));
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
+            "准备失败应回错误帧: " + frames);
+        verify(turnLeaseStore).release(sessionId, "tok-4");
+        verify(eventStore).finishTurn(sessionId);
+        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
     }
 
     @Test

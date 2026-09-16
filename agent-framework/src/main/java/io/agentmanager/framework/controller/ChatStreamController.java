@@ -221,33 +221,51 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
-            eventBus.beginTurn(finalSessionId);
 
-            // ===== 4. 构造消息 =====
-            // 注入 @Skill 引用
-            var processedMessage = skillInjectionService.injectSkillReferences(message);
+            // 准备阶段的异常必须回滚已获取的 turn_lease。TurnLeaseGuard 的后台续租线程
+            // 不看本段是否还活着——只要 token 仍匹配就持续续期，因此漏放租约意味着该
+            // session 被**永久**锁死：后续每个请求都拿不到租约，观察者也会一直 probe
+            // 到 RUNNING。构造消息这一步会因用户输入抛异常（fileId 失效 → 工作区注入
+            // 失败），所以这不是理论路径。
+            List<Msg> messages;
+            try {
+                eventBus.beginTurn(finalSessionId);
 
-            if (body.fileIds() != null && !(sandboxConfig != null && sandboxConfig.enabled())) {
-                for (var fileId : body.fileIds()) {
-                    workspaceInjector.injectToWorkspace(fileId, finalSessionId);
+                // ===== 4. 构造消息 =====
+                // 注入 @Skill 引用
+                var processedMessage = skillInjectionService.injectSkillReferences(message);
+
+                if (body.fileIds() != null && !(sandboxConfig != null && sandboxConfig.enabled())) {
+                    for (var fileId : body.fileIds()) {
+                        workspaceInjector.injectToWorkspace(fileId, finalSessionId);
+                    }
                 }
-            }
-            var blocks = workspaceInjector.buildContentBlocks(body.fileIds(), processedMessage, finalUserId);
-            var msg = Msg.builder().role(MsgRole.USER).name(finalUserId)
-                .metadata(Map.of(UiContextStore.METADATA_SESSION_KEY, finalSessionId))
-                .content(blocks).build();
-            var messages = new ArrayList<Msg>();
-            messages.add(msg);
+                var blocks = workspaceInjector.buildContentBlocks(body.fileIds(), processedMessage, finalUserId);
+                var msg = Msg.builder().role(MsgRole.USER).name(finalUserId)
+                    .metadata(Map.of(UiContextStore.METADATA_SESSION_KEY, finalSessionId))
+                    .content(blocks).build();
+                messages = new ArrayList<>();
+                messages.add(msg);
 
-            // ===== 5. 先订阅 EventBus =====
-            eventBus.subscribe(finalSessionId, 0, replyId)
-                .subscribe(
-                    sse -> sink.next(sse),
-                    e -> {
-                        log.warn("EventBus subscription error (sid={}): {}", finalSessionId, e.getMessage());
-                        sink.error(e);
-                    },
-                    () -> sink.complete());
+                // ===== 5. 先订阅 EventBus =====
+                eventBus.subscribe(finalSessionId, 0, replyId)
+                    .subscribe(
+                        sse -> sink.next(sse),
+                        e -> {
+                            log.warn("EventBus subscription error (sid={}): {}", finalSessionId, e.getMessage());
+                            sink.error(e);
+                        },
+                        () -> sink.complete());
+            } catch (Exception e) {
+                log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
+                    finalSessionId, e.getMessage());
+                sink.next(errorSSE("turn_setup_failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
+                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
+                lease.release();
+                sink.complete();
+                return;
+            }
 
             // ===== 6. 启动 agent 执行 =====
             chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
