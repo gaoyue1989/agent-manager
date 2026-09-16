@@ -303,7 +303,10 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-09-16 更新：**643 个 @Test 用例、84 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
+> 2026-09-16 更新（`session_event` 迁 Redis Streams 后复测）：**`mvn test` 654 个用例、0 失败、4 例跳过**，
+> 覆盖 80 个含 `@Test` 的源文件（计数方式：surefire 汇总行 + `grep -rl '@Test' src/test/java`）。
+> 默认跳过的是沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例；真实 S3 集成 `S3FileStorageIT`
+> 需环境变量启用；需要真 Redis 的两支 `*IT` 见 §8.2。
 
 | 类别 | 数量 | 状态 |
 |------|------|------|
@@ -334,3 +337,25 @@ src/test/resources/fixtures/test-agent/
 | SandboxConfigTest | 2 | 配置默认值/覆盖 |
 | TracingSandboxClientTest | 6 | 沙箱客户端 Tracing 装饰 |
 | OpenSandboxApiIntegrationTest | 4 | **真实 Server 全流程**（创建/命令/文件/契约，默认跳过，需沙箱 Server 可达） |
+
+### 8.2 真 Redis 集成测试（`session_event` 迁 Redis Streams 后新增，2026-09-16）
+
+两支 `*IT` 都需要**真 Redis**，由环境变量门控；**surefire 默认 include 是
+`*Test`/`Test*`/`*Tests`/`*TestCase`，不匹配 `*IT`**，所以 `mvn test` 不会捡到它们，必须显式 `-Dtest=`：
+
+```bash
+REDIS_IT=1 REDIS_IT_URL=redis://127.0.0.1:6399 \
+  mvn -o test -Dtest='RedisEventLogIT,SessionEventStoreCrossReplicaIT'
+```
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| RedisEventLogIT | 10 | `appendBatch` 字段往返（空 replyId 归一为 null）/ `XRANGE` 边界 / `tailSeq` 随流顶端 / reply 索引保留首个 seq 并按序 / `DEL` 两 key 且幂等 / TTL 落到两 key / XADD ID 非递增返回 -1 并记为 writer 冲突 / `maxLenPerStream` 真的裁剪 / 大 payload 字节级往返 / 启动自检日志与服务器实际配置一致 |
+| SessionEventStoreCrossReplicaIT | 6 | **两个 store 共享同一 Redis**：pod B 回放 pod A 的完整 turn 含终止帧 / pod B 从中途游标续传只看到剩余部分 / pod A 未刷出的缓冲对 pod B 不可见 / 跨 pod seq 交接不冲突 / pod B 经 tailer 看到 pod A 的终止帧 / pod A 删除后 pod B 读到的 key 一并消失 |
+
+> 两支 IT 都**不会** `FLUSHALL`/`FLUSHDB`，sessionId 全部 UUID 化，只动自己的 key，因此可以指向
+> 共享实例。`REDIS_IT_URL` 不设时默认 `redis://127.0.0.1:6379` —— 若那是你在用的实例，建议显式
+> 指到一个临时实例（例如 `redis-server --port 6399 --dir /tmp/x`）。
+
+> 另有 4 例「配置反向验证」不在这两支 IT 里，靠**手动**跑：把服务端设成 `appendonly no` 或
+> `maxmemory-policy allkeys-lru` 后启动应用，确认启动自检如实 ERROR（不 abort 启动）。

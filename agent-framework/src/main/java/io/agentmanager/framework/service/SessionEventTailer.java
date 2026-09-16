@@ -18,8 +18,8 @@ import reactor.core.scheduler.Schedulers;
  * 会话事件追赶器（durable-sse-multinode-plan §2.4 / §3.4）。
  *
  * <p>承担**观察者路径**：被订阅的 session 的执行可能发生在另一个 Pod 上，因此这里
- * 不读任何进程内状态，只读 Pod 间共享的 DB——{@code session_event}（事件流）
- * 与 {@code turn_lease} / {@code confirm_context}（turn 状态）。
+ * 不读任何进程内状态，只读 Pod 间共享的存储——{@code session_event}（事件流，在 Redis）
+ * 与 {@code turn_lease} / {@code confirm_context}（turn 状态，在 MySQL）。
  *
  * <p>与之相对，{@link SessionEventBus} 只服务"拥有执行的那个请求自己的 SSE"，
  * 保证首 token 延迟不受影响。这条分工即设计文档的不变量 I4。
@@ -122,7 +122,7 @@ public class SessionEventTailer {
     /**
      * 观察者流：从 afterSeq 回放，然后按游标轮询追赶，直到 turn 终止。
      *
-     * <p>全程只读 DB，不使用任何进程内状态——这正是跨副本正确性的来源：被订阅的
+     * <p>全程只读共享存储，不使用任何进程内状态——这正是跨副本正确性的来源：被订阅的
      * session 的执行可能发生在另一个 Pod 上，它的 sink 在本 Pod 不可达。
      *
      * <p>完成判定见 {@link #probe(String)}：正常结束补 done 帧；

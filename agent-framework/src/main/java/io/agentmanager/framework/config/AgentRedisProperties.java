@@ -4,7 +4,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
- * Redis 配置（session_event 事件流存储，见 docs/durable-sse-multinode-impl-plan.md）。
+ * Redis 配置（session_event 事件流存储，见 docs/api-frontend-sse.md §12）。
  * 环境变量前缀：AGENT_REDIS_*（如 AGENT_REDIS_URL）。
  *
  * <p><b>为什么是独立类而不是 {@link AgentManagerProperties} 的嵌套 record：</b>{@code AgentManagerProperties}

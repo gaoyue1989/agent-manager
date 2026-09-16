@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 /**
- * 事件持久化存储（Redis Streams，见 docs/durable-sse-multinode-impl-plan.md）。
+ * 事件持久化存储（Redis Streams，见 docs/api-frontend-sse.md §12）。
  *
  * <p>将 agent 执行过程中的 SSE 事件持久化，供前端断连后通过
  * {@code GET /threads/{sid}/subscribe?afterSeq=N} 回放增量事件并续传。

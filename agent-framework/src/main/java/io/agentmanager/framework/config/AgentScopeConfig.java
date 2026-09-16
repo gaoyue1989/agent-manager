@@ -169,7 +169,7 @@ public class AgentScopeConfig {
     }
 
     /**
-     * Redis 客户端（session_event 事件流存储，见 docs/durable-sse-multinode-impl-plan.md）。
+     * Redis 客户端（session_event 事件流存储，见 docs/api-frontend-sse.md §12）。
      *
      * <p><b>这里只建客户端，不建连接。</b>Lettuce 是懒连接的，所以 Redis 不可达**不会**让启动失败；
      * 真正的连接（以及随之而来的启动自检）发生在 {@code RedisEventLog} 首次使用时。这是刻意的：
@@ -504,7 +504,7 @@ public class AgentScopeConfig {
 
     /**
      * 会话事件追赶器（durable-sse-multinode-plan §2.4）：观察者路径的实现，
-     * 只读 Pod 间共享的 DB（session_event / turn_lease / confirm_context），
+     * 只读 Pod 间共享的存储（session_event 在 Redis；turn_lease / confirm_context 仍在 MySQL），
      * 用于被订阅的 session 执行在另一副本上的场景。轮询间隔由
      * AGENT_SSE_TAIL_POLL_MS 控制（默认 300ms）。
      */

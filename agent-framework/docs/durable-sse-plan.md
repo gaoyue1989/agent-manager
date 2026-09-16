@@ -95,20 +95,13 @@ agent AGENT_END → EventBus 关闭该 session 的 Sinks → 所有 SSE 订阅�
 
 ### 3.1 数据表：session_event（事件持久化，回放用）
 
-```sql
-CREATE TABLE IF NOT EXISTS session_event (
-  id          BIGINT AUTO_INCREMENT PRIMARY KEY,  -- 单调递增，用于游标回放
-  session_id  VARCHAR(255) NOT NULL,
-  seq         INT NOT NULL,                       -- 单 turn 内递增序号
-  event_type  VARCHAR(64) NOT NULL,               -- AGENT_END / TEXT_BLOCK_DELTA / ...
-  payload     MEDIUMTEXT NOT NULL,                -- AgentEventSseSerializer.payload() 输出
-  reply_id    VARCHAR(64),                        -- 区分多 run（HITL 恢复等）
-  created_at  DATETIME(3) NOT NULL,
-  UNIQUE KEY uk_session_seq (session_id, seq),    -- 唯一：同 session 的 seq 不允许重复（2026-09-16 由普通索引改为唯一键，见 durable-sse-multinode-impl-plan §遗留事项）
-  KEY idx_session_reply (session_id, reply_id, seq),
-  KEY idx_created_at (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-```
+> **已迁移（2026-09-16）：这张 MySQL 表已迁到 Redis Streams。**
+>
+> - 存储形态：`sess:{sid}:events`（Stream，ID = `<seq>-0`，字段 `t`/`r`/`p`）+ `sess:{sid}:replies`（ZSET，member = replyId，score = 该 reply 首个 seq，供 replyId 过滤）
+> - MySQL 侧：表**保留在原地但不再写入**，不做历史数据回填。原表结构（迁移前）为 `id` / `session_id` / `seq` / `event_type` / `payload` / `reply_id` / `created_at` + `uk_session_seq`（唯一性兜底改由 Redis 原子拒绝非单调 `XADD` ID 承担）
+> - 留存：从「按 `created_at` 删除 7 天前的行」改为 **key TTL**（7 天，写入续期；语义 = 该 session **最后一次写入**起 7 天），`SessionCleanupService` 里的 `DELETE FROM session_event WHERE created_at < ?` 已随之下线
+>
+> 存储模型与配置见 api-frontend-sse.md §12；本设计当初对 Redis 的否决如何被推翻，见 durable-sse-multinode-plan.md §2.1。本文其余涉及 `session_event` 表结构 / `INSERT` / 删除清理的描述，均为**迁移前**的历史记录。
 
 **设计决策**：
 
@@ -118,7 +111,7 @@ CREATE TABLE IF NOT EXISTS session_event (
 | seq vs id | `seq` 是 turn 内业务序号，`id` 是全局自增主键 | 回放用 `(session_id, seq)` 游标，`id` 用于物理分页清理 |
 | payload 大小 | TEXT_BLOCK_DELTA 约百字节/帧，单 turn 数千帧 → 单 turn 约 100KB~1MB | MEDIUMTEXT(16MB) 足够 |
 | reply_id | 区分同一 session 不同 turn（HITL 恢复产生新 turn） | 重连续传时可指定只回放特定 turn |
-| 保留期 | 默认 7 天（与 agent_state 对齐），SessionCleanupService 联动清理 | 避免无限膨胀 |
+| 保留期 | 默认 7 天（与 agent_state 对齐），SessionCleanupService 联动清理 —— **已迁移（2026-09-16）：改由 Redis key TTL 承担（7 天，写入续期），SessionCleanupService 不再涉及该表** | 避免无限膨胀 |
 
 ### 3.2 核心组件：SessionEventBus
 

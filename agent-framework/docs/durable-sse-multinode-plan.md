@@ -63,7 +63,7 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 
 ### 1.5 非目标
 
-- 不做 Redis / 粘性路由（否决理由见 §2，重新评估触发条件见 §2.3）
+- 不做 Redis / 粘性路由（否决理由见 §2，重新评估触发条件见 §2.3；**其中 §2.1 D1 已于 2026-09-16 被推翻**——`session_event` 存储已迁到 Redis Streams，pub/sub 广播仍未采纳，见该节标注）
 - 不做 agent 执行的跨 Pod 恢复（`agent_state` 持久化已具备基础，但需先解决工具调用幂等性/副作用重放，另立课题）
 - 不做 A2A 路径改造（自带 `tasks/resubscribe`）
 - 不改 SSE 词表与前端现有渲染逻辑
@@ -73,6 +73,40 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 ## 2. 架构决策
 
 ### 2.1 D1：不采用 Redis Pub/Sub
+
+> **⚠️ 已被推翻（2026-09-16；命中 §2.3 触发条件 #1）**
+>
+> 被推翻的是**本条对 Redis 的否决**，不是「不用 pub/sub 做广播」这个取向：原否决针对的是
+> **用 Redis Pub/Sub 做跨副本实时广播**，而实际采纳的是另一种形态——**Redis Streams 作为
+> `session_event` 的存储（store of record）**：`sess:{sid}:events`（Stream，ID = `<seq>-0`，
+> 字段 `t`/`r`/`p`）+ `sess:{sid}:replies`（ZSET，member = replyId，score = 该 reply 首个 seq）。
+>
+> 四条理由为何不再支撑否决：
+> - **理由一/二的前提变了**：原文说「状态已有归属（`session_event` + `turn_lease`），Redis 只解决扇出」。
+>   现在这份存储的归属**就是 Redis**，Redis 不再是「纯增量成本、零增量正确性」的旁路。
+> - **跨副本正确性不需要广播**：§3.4.1 的游标追赶原样保留（`SessionEventTailer` 轮询），只是被轮询的
+>   对象从 MySQL 换成了 Redis Stream。**任何副本读同一份存储即天然跨副本正确**，无需知道执行在哪个
+>   Pod——§2.4 D3「写入方本地 sink、观察者读共享存储」的分工一字未改。
+> - **理由三只对 Pub/Sub 成立**：at-most-once、无 ack、消费不过来被断开即静默丢消息，这些是 pub/sub
+>   的语义；Stream 是带 ID、可 `XRANGE` 重读的持久日志，没有这条失败模式，故不适用于实际采纳的形态。
+> - **理由四已被现实作废**：Redis 已进入运维栈（`manifests/platform.yaml` 的 `oaf-redis`
+>   Deployment/Service/PVC；应用侧有 Lettuce 客户端与 `RedisEventLog` 存储层），边际成本不再是零。
+>
+> **仍未采纳的部分**：跨副本**实时扇出**（`RedisSessionEventBus`）本轮未做，观察者仍走 300ms 游标
+> 追赶（§2.4）——即「不引入 pub/sub 广播」这条设计取向保留。
+>
+> **验证状态**（均已实跑，不是「已写好」）：语义层（攒批 / seq 分配 / 游标分页 / replyId 过滤）
+> 由单元测试覆盖，全量 `mvn test` **654 用例全绿**；需要真 Redis 的两支集成测试
+> （`REDIS_IT=1 REDIS_IT_URL=…` 门控）**`RedisEventLogIT` 10/10、跨副本
+> `SessionEventStoreCrossReplicaIT` 6/6**。端到端真链路探针跑通：真实 turn 落 Redis →
+> `/subscribe` 回放 → `/status`（Redis 停时 **503**、恢复后 200）→ 级联删除三个 key →
+> history 的 reply_id 回填；配置反向验证两个方向都验过（`appendonly=no` / `allkeys-lru` 时
+> 如实 ERROR，合规时「持久性自检通过」）。旧表已确认停止写入（行数与 `MAX(created_at)` 均冻结）。
+>
+> §5.3 用例现状：#8 由跨副本 IT 覆盖；#11 由 `SessionEventBusTest` 的 HITL 时序契约覆盖；
+> **#9（HITL 后另一副本 subscribe）与 #10（kill 执行副本）目前只有判定语义的单测覆盖**
+> （`SessionEventTailerTest` 的 `finishedWhenHitlPendingConfirm` / `tailEmitsInterruptedWhenExecutorCrashed`），
+> **真进程联调尚未做** —— 这是本计划收尾时的已知缺口，不代表语义未定。
 
 **理由一：它解决的是扇出，不是状态归属。** 本文问题的本质是"重连的 Pod 如何知道发生了什么、以及什么时候结束"，这是状态归属问题；状态已有归属（`session_event` + `turn_lease`）。Redis 回答的是"如何通知 N 个进程"，而本场景并不需要跨 Pod 通知 N 个进程——`POST /chat` 天然同 Pod。
 
@@ -105,6 +139,10 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 命中任意一条应重新评估：
 
 1. Redis 已进入运维栈（此时本功能边际成本趋近于零，性价比反转）
+   —— **已命中（2026-09-16）**：Redis 已随 `oaf-redis`（`manifests/platform.yaml` 的
+   Deployment/Service/PVC）进入运维栈，应用侧接入了 Lettuce 客户端与 Redis Streams 存储层
+   （`RedisEventLog` + `SessionEventStore`）。重新评估的结论见 §2.1 顶部标注：采纳的是
+   **Streams 做事件存储**，**不是**改用 pub/sub 做广播。
 2. 需要多个协作者同时低延迟观察同一 session
 3. 需要跨 Pod 下发 cancel/interrupt（可先走 `turn_lease` 标志位——执行侧 `TurnLeaseGuard` 已有 20s 续约循环，天然是命令轮询点，`TurnLeaseGuard.java:62`）
 
@@ -126,8 +164,12 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 | SSE `id` / seq 语义 | 一个 batch 共用一个 seq | 不变（每 token 一个 seq） |
 | 重连游标语义 | 需改为 inclusive + 前端重建消息 | 不变 |
 | 前端线协议 | 不变 | 不变 |
-| DB 语句数（单 turn） | ~11 | ~11 |
+| DB 语句数（单 turn） | ~11 | ~11（**前提：全部 delta 都进缓冲**，见下） |
 | DB 行数（单 turn） | ~11 | ~2100（未省） |
+
+**前提修正（2026-09-16）**：上表「~11 语句」的前提是**所有 delta 类事件都进缓冲**。实现落地时该前提一度不成立——判定 delta 的名单被硬编码，只列了 `TEXT_BLOCK_DELTA` / `THINKING_BLOCK_DELTA` 两种，而事件词表（`AgentEventType`）里的 `*_DELTA` 共 **6** 种：另外 4 种（`DATA_BLOCK_DELTA` / `TOOL_CALL_DELTA` / `TOOL_RESULT_TEXT_DELTA` / `TOOL_RESULT_DATA_DELTA`）落进里程碑分支、**每一条都触发一次刷出**。实测 88,445 条 `TOOL_CALL_DELTA` = 88,445 条 INSERT，写放大 26 倍；这是**词表漂移**造成的静默退化，不是选型错误——**多值 INSERT 攒批本身的结论不变**。
+
+修复已落地（2026-09-16）：改为按 **`*_DELTA` 后缀**判定，词表再增长也不会退化；误判的代价不对称（把里程碑当 delta 只影响回放可见延迟，把 delta 当里程碑则是每 token 一条写），所以宁可放宽。
 
 打字机效果的量化依据：前端本身每 60ms `setState` 一次（`frontend/src/app/assistant/page.tsx:210-218`），**当前观感已是 ~16 次/秒**，由前端制造而非服务端 per-token 事件制造。服务端再加 300ms 攒批会降到 ~3.3 次/秒。
 
@@ -163,6 +205,8 @@ delta 事件（TEXT_BLOCK_DELTA / THINKING_BLOCK_DELTA）→ 进缓冲
 里程碑事件（AGENT_END / permission_ask / TOOL_* / file_ready / error）→ 先 flushPending() 再立即落库
 flush 触发：缓冲 size 达上限 / 距上次 flush 达 T / turn 结束 / 出错
 ```
+
+> **更新（2026-09-16）**：上面的 delta 名单是**示例而非全集**——按此名单硬编码实现后，4 种 `*_DELTA`（`DATA_BLOCK_DELTA` / `TOOL_CALL_DELTA` / `TOOL_RESULT_TEXT_DELTA` / `TOOL_RESULT_DATA_DELTA`）因命中下面里程碑列表里的 `TOOL_*` 而被当成里程碑逐条落库（详见 §2.5 的前提修正）。现实现改为按 **`*_DELTA` 后缀**判定，两侧重叠不再有歧义。
 
 - 多值 INSERT 语法：`INSERT INTO session_event (...) VALUES (...),(...),...`，每行仍持有各自的 `seq` / `event_type` / `payload` / `reply_id`，`created_at` 逐行 `NOW(3)`
 - **批量上限**：按 payload 估算控制（200 行 × ~100B ≈ 20KB，远低于 MySQL `max_allowed_packet` 默认值），上限可配置并需有兜底

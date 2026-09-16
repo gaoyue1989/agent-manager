@@ -54,7 +54,7 @@
 ```
 
 **核心特性：**
-- **事件持久化**：所有 Agent 事件写入 `session_event` 表，SSE 断连后可通过 `GET /subscribe?afterSeq=N` 回放+续传
+- **事件持久化**：所有 Agent 事件写入 `session_event`（session 事件流，已迁到 Redis Streams，见 §12），SSE 断连后可通过 `GET /subscribe?afterSeq=N` 回放+续传
 - **Turn 租约串行化**：同 session 并发请求自动排队（waiting 帧），超时 120s 返回 error
 - **HITL 暂停**：`permission_ask` 时上下文落库、释放租约，确认后走 `confirm-stream` 恢复
 - **心跳防超时**：EventBus 心跳流（默认 20s 间隔），防止 Nginx/CDN 读超时
@@ -172,7 +172,7 @@ Accept: text/event-stream
 
 **响应行为：**
 
-- **Turn 进行中**：先回放 `afterSeq` 之后的历史事件（从 `session_event` 表），再订阅实时 EventBus 流
+- **Turn 进行中**：先回放 `afterSeq` 之后的历史事件（从 `session_event` 事件流读取，见 §12），再对同一存储做游标追赶（`SessionEventTailer` 轮询）——观察者路径**不使用**本 Pod 的 EventBus
 - **Turn 已完成**：回放历史事件后追加 `done` 帧并关闭（不订阅实时流）
 
 **`done` 帧示例（仅已完成 turn 出现）：**
@@ -1429,17 +1429,30 @@ Turn 租约，同一 session 执行段串行化。
 
 SSE 事件持久化，支持断连续传回放。
 
-| 列 | 类型 | 说明 |
-|----|------|------|
-| `id` | BIGINT PK AUTO_INCREMENT | 自增 ID |
-| `session_id` | VARCHAR(255) | 会话 key |
-| `seq` | INT | 事件序号（同一 session 单调递增） |
-| `reply_id` | VARCHAR(64) | 回复 ID |
-| `type` | VARCHAR(64) | 事件类型 |
-| `payload` | MEDIUMTEXT | 完整事件 JSON |
-| `created_at` | DATETIME(3) | 创建时间 |
+> **已迁移（2026-09-16）：存储从 MySQL 表改为 Redis Streams。** 不再是 `session_event` 表——MySQL 侧的表保留在原地但**不再写入**（不做历史数据回填）。`seq` 仍是对外契约（前端游标），**Redis Stream 的 ID 不出现在线协议里**。
 
-**索引:** `UNIQUE KEY uk_session_seq (session_id, seq)`（同前缀的唯一键，覆盖原 `idx_session_seq` 的全部查询用途；唯一性是 I2「单 writer」的 DB 层兜底，见 durable-sse-multinode-impl-plan §遗留事项），**保留期:** 与 agent_state 对齐（默认 7 天）
+| Key | 类型 | 说明 |
+|-----|------|------|
+| `sess:{sid}:events` | Stream | 一个事件一条记录，ID = `<seq>-0`（**ID 就是 seq**） |
+| `sess:{sid}:replies` | ZSET | member = `replyId`，score = 该 reply 的**首个 seq**（`ZADD NX`），供 `replyId` 过滤 |
+
+Stream 字段：
+
+| 字段 | 说明 |
+|------|------|
+| `t` | 事件类型（`AGENT_END` / `TEXT_BLOCK_DELTA` / ...），对应原 MySQL 列 **`event_type`** |
+| `r` | 回复 ID（原 `reply_id`）；无 reply 时为空串占位 |
+| `p` | 完整事件 JSON（`AgentEventSseSerializer.payload()` 输出），对应原列 `payload` |
+
+**没有 `sess:{sid}:seq` 这个 key**：seq 计数器是**进程内内存**的（按 session 分区），在 turn 开始时从**流顶端**播种（`XREVRANGE ... COUNT 1`），不落 Redis——流本身是唯一事实来源。
+
+**索引:** `replyId` 过滤走 `sess:{sid}:replies`（一次有界 `ZRANGE`）；索引里查不到该 replyId 且游标已前进时，退化为全流扫描并打 WARN（**不静默返回空**）。原 `uk_session_seq` 的唯一性兜底改由 Redis **原子拒绝非单调 `XADD` ID** 承担（更强：同时保证唯一与单调）
+
+**保留期:** **7 天**，由 **key TTL** 承担（每次写入续期），即「该 session **最后一次写入**之后 7 天」——与原「按 `created_at` 删除 7 天前的行」**语义不同**：唯一差异是**持续活跃超过 7 天的 session 会保留住 7 天前的事件**。另有每 session 条数上限 `agent.redis.max-len-per-stream`（默认 **25 万**，`XADD ... MAXLEN ~`），即实际留存 = `min(7 天不活跃, 25 万条)`
+
+**持久性:** Redis 侧要求 `appendonly yes` + `appendfsync everysec` + `maxmemory-policy noeviction`（见 `manifests/platform.yaml` 的 `oaf-redis`）；存储层在首次连接成功后做一次自检，不合规只打 ERROR 日志、**不阻断启动**
+
+**级联删除:** `DELETE /threads/{sessionId}` 对该 session 的两把 key 做一次 `DEL`；每日清理（`SessionCleanupService`）**不再涉及** session_event，留存完全交给 TTL
 
 ### tool_audit_log
 

@@ -25,7 +25,7 @@ import reactor.core.publisher.Flux;
  *
  * <p>承载「面向已知会话」的查询操作 &mdash; sessionId 在路径中：
  * <ul>
- *   <li>{@code GET /threads/{sid}/subscribe} &mdash; 重连续传（回放 + 游标追赶，只读 DB），解耦 SSE 连接与 agent 执行生命周期</li>
+ *   <li>{@code GET /threads/{sid}/subscribe} &mdash; 重连续传（回放 + 游标追赶，只读共享存储），解耦 SSE 连接与 agent 执行生命周期</li>
  *   <li>{@code GET /threads/{sid}/status} &mdash; 查询 turn 状态（刷新恢复用）</li>
  * </ul>
  *
@@ -57,7 +57,7 @@ public class SessionStreamController {
     /**
      * 订阅 session 的事件流（回放 + 游标追赶）。
      *
-     * <p>跨副本安全：全程只读 DB，不依赖本 Pod 是否执行过该 session。
+     * <p>跨副本安全：全程只读共享存储，不依赖本 Pod 是否执行过该 session。
      *
      * <ul>
      *   <li>{@code afterSeq}：回放游标，从 lastEventId 之后开始回放</li>

@@ -27,7 +27,7 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.Limit;
 
 /**
- * session_event 的 Redis Streams 存储（见 docs/durable-sse-multinode-impl-plan.md）。
+ * session_event 的 Redis Streams 存储（见 docs/api-frontend-sse.md §12）。
  *
  * <p>这一层只做「真的要和 Redis 说话」的事：XADD 管道刷出、XRANGE 读、ZADD NX 维护
  * reply 索引、EXPIRE/TTL、DEL。攒批、seq 分配、游标分页、replyId 过滤的**语义**全在
