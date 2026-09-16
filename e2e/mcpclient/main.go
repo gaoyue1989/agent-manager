@@ -40,7 +40,13 @@ func (t tool) call(name string, args map[string]any) (bool, map[string]any, stri
 	}
 	text := res.Content[0].(*mcp.TextContent).Text
 	var m map[string]any
-	_ = json.Unmarshal([]byte(text), &m)
+	if err := json.Unmarshal([]byte(text), &m); err != nil {
+		// 数组输出场景（如 list_packages）：包装为 {"items": [...]}
+		var list []map[string]any
+		if err2 := json.Unmarshal([]byte(text), &list); err2 == nil {
+			m = map[string]any{"items": list}
+		}
+	}
 	return res.IsError, m, text
 }
 
@@ -90,10 +96,15 @@ func main() {
 	for _, tl := range listRes.Tools {
 		names[tl.Name] = true
 	}
-	for _, want := range []string{"upload_package", "publish_service", "get_service_status",
-		"update_service_env", "republish_service", "unpublish_service", "delete_service"} {
+	for _, want := range []string{"upload_package", "list_packages", "get_package_detail",
+		"publish_service", "get_service_status", "update_service_env", "republish_service",
+		"unpublish_service", "register_service", "delete_service"} {
 		check("C1 工具存在 "+want, names[want], "")
 	}
+	// C1.9 list_images：镜像列表按环境注入，发布前可探测
+	isErrImg, imgsOut, rawImg := t.call("list_images", map[string]any{})
+	imgs, _ := imgsOut["images"].([]any)
+	check("C1.9 list_images 非空", !isErrImg && len(imgs) > 0, rawImg)
 
 	// C2 上传包
 	zipBytes, err := os.ReadFile(*zipPath)
@@ -108,6 +119,20 @@ func main() {
 	if isErr {
 		os.Exit(1)
 	}
+	// C2.1/C2.2 包查询工具与上传记录一致
+	isErr, out, raw = t.call("list_packages", map[string]any{"keyword": "e2e"})
+	found := false
+	if items, _ := out["items"].([]map[string]any); !isErr {
+		for _, it := range items {
+			if it["packageId"].(float64) == pkgID {
+				found = true
+			}
+		}
+	}
+	check("C2.1 list_packages 含新包", found, raw)
+	isErr, out, raw = t.call("get_package_detail", map[string]any{"packageId": pkgID})
+	agentsMd, _ := out["agentsMd"].(string)
+	check("C2.2 get_package_detail 返回 AGENTS.md", !isErr && strings.Contains(agentsMd, "E2E"), raw)
 
 	// C3 发布（注入运行时 env，从环境读取 LLM 配置）
 	env := map[string]any{}
@@ -123,8 +148,27 @@ func main() {
 	env["CHECKPOINT_USERNAME"] = "oaf"
 	env["CHECKPOINT_PASSWORD"] = "OafPlatform2026"
 
+	// 镜像不写死：list_images 动态选取（优先节点内 registry 名义）
+	isErr, out, raw = t.call("list_images", map[string]any{})
+	image := ""
+	if items, _ := out["images"].([]any); !isErr {
+		for _, it := range items {
+			name, _ := it.(map[string]any)["image"].(string)
+			if strings.Contains(name, ":5001") {
+				image = name
+				break
+			}
+			if image == "" {
+				image = name
+			}
+		}
+	}
+	if image == "" {
+		image = "agent-framework:latest"
+	}
+
 	isErr, out, raw = t.call("publish_service", map[string]any{
-		"packageId": pkgID, "image": "agent-framework:latest", "env": env})
+		"packageId": pkgID, "image": image, "env": env})
 	svcID, _ := out["serviceId"].(float64)
 	status, _ := out["status"].(string)
 	check("C3 publish_service 立即返回 deploying", !isErr && svcID > 0 && status == "deploying", raw)
@@ -150,6 +194,10 @@ func main() {
 	st, ok = t.waitForStatus(svcID, "running", 6*time.Minute)
 	check("C9 republish 后 running", ok && st == "running", st)
 
+	// C9.1 手动重注册（running 状态下重拉 agent-card）
+	isErr, out, raw = t.call("register_service", map[string]any{"serviceId": svcID})
+	check("C9.1 register_service 保持 running", !isErr && out["status"] == "running", raw)
+
 	// C10 下线/上线/删除
 	isErr, _, raw = t.call("unpublish_service", map[string]any{"serviceId": svcID})
 	check("C10 unpublish", !isErr, raw)
@@ -167,8 +215,7 @@ func main() {
 	isErr, _, raw = t.call("get_service_status", map[string]any{"serviceId": svcID})
 	check("C13 删除后查询报错", isErr, strings.TrimSpace(raw))
 
-	// 清理包
-	t.call("delete_package_placeholder", nil) // 无此工具，忽略
+	// 包删除仅 REST 提供（DELETE /packages/:id），由场景 A/B 的清理段兜底回收
 	fmt.Printf("\nPASS: %d  FAIL: %d\n", pass, fail)
 	if fail > 0 {
 		os.Exit(1)

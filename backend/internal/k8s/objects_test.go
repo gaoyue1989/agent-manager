@@ -74,12 +74,21 @@ func TestDeploymentConstruction(t *testing.T) {
 	}
 	// 固定注入保留键
 	fixed := map[string]string{}
+	hostNameFromField := false
 	for _, e := range cs.Env {
 		fixed[e.Name] = e.Value
+		// HOST_NAME 经 downward API 注入 Pod Name
+		if e.Name == "HOST_NAME" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil &&
+			e.ValueFrom.FieldRef.FieldPath == "metadata.name" {
+			hostNameFromField = true
+		}
 	}
 	if fixed["AGENT_CONFIG_DIR"] != "/config" || fixed["SERVER_PORT"] != "8100" ||
 		fixed["SERVER_HOST"] != "0.0.0.0" || fixed["AGENT_WORKSPACE_DIR"] != "/workspace" {
 		t.Fatalf("fixed env missing: %+v", fixed)
+	}
+	if !hostNameFromField {
+		t.Fatal("HOST_NAME env (fieldRef metadata.name) missing")
 	}
 	// 工作区独立可写卷
 	foundWs := false
@@ -111,6 +120,16 @@ func TestDeploymentConstruction(t *testing.T) {
 	if !foundFiles {
 		t.Fatal("files volume mount missing or not writable")
 	}
+	// 日志规范挂载 /applog
+	foundApplog := false
+	for _, v := range cs.VolumeMounts {
+		if v.Name == ApplogVolumeName && v.MountPath == ApplogMountPath && !v.ReadOnly {
+			foundApplog = true
+		}
+	}
+	if !foundApplog {
+		t.Fatal("applog volume mount missing")
+	}
 	// 单卷承载（可写 PVC，无 ForceReadOnly；/config 只读由 mount 级 readOnly 表达）
 	foundFilesVol := false
 	for _, v := range d.Spec.Template.Spec.Volumes {
@@ -122,8 +141,18 @@ func TestDeploymentConstruction(t *testing.T) {
 	if !foundFilesVol {
 		t.Fatal("files volume (writable PVC) missing")
 	}
-	if len(d.Spec.Template.Spec.Volumes) != 2 {
-		t.Fatalf("expected 2 volumes (files+workspace), got %d", len(d.Spec.Template.Spec.Volumes))
+	// 日志目录卷（emptyDir，同 workspace 模式）
+	foundApplogVol := false
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.Name == ApplogVolumeName && v.EmptyDir != nil {
+			foundApplogVol = true
+		}
+	}
+	if !foundApplogVol {
+		t.Fatal("applog volume (emptyDir) missing")
+	}
+	if len(d.Spec.Template.Spec.Volumes) != 3 {
+		t.Fatalf("expected 3 volumes (files+workspace+applog), got %d", len(d.Spec.Template.Spec.Volumes))
 	}
 	// 探针指向 /health:8100
 	if cs.ReadinessProbe.HTTPGet.Path != "/health" || cs.ReadinessProbe.HTTPGet.Port.IntValue() != AgentPort {
@@ -168,7 +197,7 @@ func TestServiceAndIngress(t *testing.T) {
 }
 
 func TestReservedKeys(t *testing.T) {
-	for _, k := range []string{"AGENT_CONFIG_DIR", "SERVER_HOST", "SERVER_PORT"} {
+	for _, k := range []string{"AGENT_CONFIG_DIR", "SERVER_HOST", "SERVER_PORT", "AGENT_WORKSPACE_DIR", "HOST_NAME"} {
 		if !ReservedEnvKeys[k] {
 			t.Errorf("%s should be reserved", k)
 		}

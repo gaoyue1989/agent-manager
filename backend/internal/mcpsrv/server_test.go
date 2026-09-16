@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -251,4 +253,54 @@ func buildTestZip(files map[string]string) []byte {
 	}
 	zw.Close()
 	return buf.Bytes()
+}
+
+// upload_package 非法 base64 → IsError 文本，不得落库。
+func TestMCPUploadPackageInvalidBase64(t *testing.T) {
+	cs, _, done := newMCPClient(t)
+	defer done()
+
+	isErr, _, raw := call(t, cs, "upload_package", map[string]any{
+		"filename": "demo.zip", "content_base64": "!!!not-base64!!!"})
+	if !isErr || !strings.Contains(raw, "not valid base64") {
+		t.Fatalf("invalid base64 should be tool error: %v %s", isErr, raw)
+	}
+	isErr, out, _ := call(t, cs, "list_packages", map[string]any{})
+	if isErr || len(out["items"].([]map[string]any)) != 0 {
+		t.Fatalf("failed upload must not persist: %v", out)
+	}
+}
+
+// get_service_status 缺选择器报错已覆盖；此处补 register_service 全链路（可达 agent-card）。
+func TestMCPRegisterService(t *testing.T) {
+	cs, core, done := newMCPClient(t)
+	defer done()
+	pkgID := uploadViaMCP(t, cs)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"Demo","version":"1.0.0"}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	isErr, out, _ := call(t, cs, "publish_service", map[string]any{"packageId": pkgID})
+	if isErr || out["serviceId"] == nil {
+		t.Fatalf("publish: %v", out)
+	}
+	svcID := uint(out["serviceId"].(float64))
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svcID).Update("cluster_url", srv.URL)
+
+	isErr, out, raw := call(t, cs, "register_service", map[string]any{"serviceId": svcID})
+	if isErr || out["status"] != "running" {
+		t.Fatalf("register_service: isErr=%v out=%v raw=%s", isErr, out, raw)
+	}
+	// 缺 serviceId → schema 校验在协议层拒绝（非业务 IsError）
+	if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "register_service", Arguments: map[string]any{}}); err == nil {
+		t.Fatal("missing serviceId should be rejected by schema validation")
+	}
 }

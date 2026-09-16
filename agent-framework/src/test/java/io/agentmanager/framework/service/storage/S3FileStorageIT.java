@@ -48,6 +48,7 @@ class S3FileStorageIT {
             emptyLlm(), emptyServer(), emptyCheckpoint(), "/tmp/s3it", "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7), file,
             new AgentManagerProperties.SseConfig(20, 5, 256));
+            AgentManagerProperties.HarnessConfig.defaults());
         storage = new S3FileStorage(props);
     }
 

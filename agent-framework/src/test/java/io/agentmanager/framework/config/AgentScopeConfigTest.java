@@ -29,6 +29,7 @@ class AgentScopeConfigTest {
     void mcpManagerShouldUseConfigPath() {
         var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test", "",
             cleanupConfig(), emptyFileConfig(), new AgentManagerProperties.SseConfig(20, 5, 256));
+            cleanupConfig(), emptyFileConfig(), harnessConfig());
         var mcpRegistrar = mock(McpToolRegistrar.class);
 
         assertNotNull(config.mcpManager(props, mcpRegistrar));
@@ -104,12 +105,30 @@ class AgentScopeConfigTest {
             emptyLlm(), emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
+            "/config", "", cleanupConfig(), emptyFileConfig(), harnessConfig());
             "/config", "", cleanupConfig(), emptyFileConfig(),
             new AgentManagerProperties.SseConfig(20, 5, 256));
 
         var ds = config.dataSource(props);
         assertInstanceOf(HikariDataSource.class, ds);
         assertEquals("jdbc:mysql://localhost:3306/test", ((HikariDataSource) ds).getJdbcUrl());
+    }
+
+    @Test
+    void dataSourceShouldApplyHarnessPoolSettings() {
+        var props = new AgentManagerProperties(
+            emptyLlm(), emptyServer(),
+            new AgentManagerProperties.CheckpointConfig(
+                "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
+            "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.HarnessConfig(
+                20, 30, 180, 30, 10, 8000, 60,
+                30, 10, true, true, 7, 1, 5000L, 60000L, 900000L));
+
+        var ds = config.dataSource(props);
+        assertEquals(7, ((HikariDataSource) ds).getMaximumPoolSize());
+        assertEquals(1, ((HikariDataSource) ds).getMinimumIdle());
+        assertEquals(5000L, ((HikariDataSource) ds).getConnectionTimeout());
     }
 
     @Test
@@ -165,6 +184,11 @@ class AgentScopeConfigTest {
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config", "", cleanupConfig(), emptyFileConfig(),
             new AgentManagerProperties.SseConfig(20, 5, 256));
+            "/config", "", cleanupConfig(), emptyFileConfig(), harnessConfig());
+    }
+
+    private static AgentManagerProperties.HarnessConfig harnessConfig() {
+        return AgentManagerProperties.HarnessConfig.defaults();
     }
 
     private static AgentManagerProperties.CleanupConfig cleanupConfig() {

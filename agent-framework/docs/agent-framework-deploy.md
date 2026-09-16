@@ -178,7 +178,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_UPLOAD_ENABLED` | bool | `true` | | 上传开关（绑 `agent.file.upload-enabled`） |
 | `FILE_UPLOAD_MAX_MB` | int | `20` | | 单文件大小上限（绑 `agent.file.upload-max-mb`） |
 | `FILE_UPLOAD_MAX_PENDING` | int | `20` | | 用户维度待注入文件数软上限（绑 `agent.file.upload-max-pending`） |
-| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；绑 `agent.file.upload-allowed-mime`） |
+| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
 | `FILE_IMAGE_MAX_MB` | int | `5` | | 图片大小上限（绑 `agent.file.image-max-mb`） |
 | `FILE_IMAGE_INLINE_TOTAL_MB` | int | `15` | | 单次请求图片内联总大小上限（绑 `agent.file.image-inline-total-mb`） |
 | `FILE_PRESENT_MAX_MB` | int | `50` | | `present_file` 工具产物大小上限（绑 `agent.file.present-max-mb`） |

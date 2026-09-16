@@ -1,106 +1,68 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <!-- ========== 自定义转换器 ========== -->
+    <!-- 自定义转换器：从 OTel Context 取 traceId（无活跃 span 输出 "-"） -->
     <conversionRule conversionWord="traceId"
         converterClass="io.agentmanager.framework.service.TraceIdConverter"/>
 
-    <!-- ========== 属性定义 ========== -->
-    <property name="LOG_PATH" value="${LOG_PATH:-${user.home}/logs/agent-framework}"/>
-    <property name="APP_NAME" value="agent-framework"/>
-    <property name="MAX_FILE_SIZE" value="100MB"/>
-    <property name="MAX_HISTORY" value="30"/>
-    <property name="TOTAL_SIZE_CAP" value="5GB"/>
+    <!--
+      属性定义（logback 查找顺序：本地属性 → system properties → OS 环境变量）
+      app-name: 应用名，环境变量 APP_NAME 可选指定，未设置时回退默认 agent-framework
+      log-path: 日志目录，HOST_NAME 由 K8s downward API 注入（fieldRef metadata.name），本地缺省 localhost
+    -->
+    <property name="app-name" value="${APP_NAME:-agent-framework}"/>
+    <property name="log-path" value="/applog/${HOST_NAME:-localhost}"/>
 
-    <!-- ========== 日志格式 ========== -->
-    <!-- 控制台：彩色 + 关键上下文 -->
-    <property name="CONSOLE_PATTERN"
-        value="%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%cyan(%traceId)] [%thread] %logger{36} - %msg%n"/>
-    <!-- 文件：纯文本 + 完整上下文（含 MDC） -->
-    <property name="FILE_PATTERN"
-        value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%traceId] [%X{requestId:-}] [%X{sessionId:-}] [%X{userId:-}] [%thread] %logger{50} - %msg%n"/>
+    <!--
+      规范日志格式（《容器日志收集方案-v2》，[主机名] 取环境变量 HOST_NAME）
+      时间 [主机名] [应用名] [级别] [线程] [traceId] 类简名 - 内容
+      %logger{0} 为 Log4j2 %c{1}（仅类名）的 logback 等价写法（%c{1} 在 logback 下输出 i.a.f.Xxx 缩写形式，不满足规范）
+      %msg{nolookups} 为 Log4j2 防 lookup 攻击的兼容写法（logback 下为无副作用占位，按规范保留）
+    -->
+    <property name="LOG_PATTERN"
+        value="%d{yyyy-MM-dd HH:mm:ss.SSS} [${HOST_NAME:-localhost}] [${app-name}] [%-5level] [%t] [%traceId] %logger{0} - %msg{nolookups}%n"/>
 
-    <!-- ========== 控制台 Appender ========== -->
+    <!-- 控制台输出（本地开发/调试用；容器云不采集控制台日志） -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>${CONSOLE_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
             <charset>UTF-8</charset>
         </encoder>
     </appender>
 
-    <!-- ========== 全量日志文件 Appender ========== -->
-    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${LOG_PATH}/${APP_NAME}.log</file>
-        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_PATH}/archive/${APP_NAME}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
-            <maxHistory>${MAX_HISTORY}</maxHistory>
-            <totalSizeCap>${TOTAL_SIZE_CAP}</totalSizeCap>
+    <!--
+      文件输出（容器云日志采集唯一来源：/applog/${hostName}/trace.log，文件名固定不可改）
+      滚动策略与规范 Log4j2 示例等价（SizeBasedTriggeringPolicy 200MB + DefaultRolloverStrategy max=2）：
+      FixedWindowRollingPolicy(1..2) → 归档 trace.log1 / trace.log2，
+      活动文件 + 2 归档共 3 个文件，上限 600MB
+    -->
+    <appender name="COLLECTING_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${log-path}/trace.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <fileNamePattern>${log-path}/trace.log%i</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>2</maxIndex>
         </rollingPolicy>
+        <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+            <maxFileSize>200MB</maxFileSize>
+        </triggeringPolicy>
         <encoder>
-            <pattern>${FILE_PATTERN}</pattern>
+            <pattern>${LOG_PATTERN}</pattern>
             <charset>UTF-8</charset>
         </encoder>
     </appender>
 
-    <!-- ========== ERROR 级别独立日志文件 ========== -->
-    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${LOG_PATH}/${APP_NAME}-error.log</file>
-        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
-            <level>ERROR</level>
-        </filter>
-        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_PATH}/archive/${APP_NAME}-error.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>${MAX_FILE_SIZE}</maxFileSize>
-            <maxHistory>${MAX_HISTORY}</maxHistory>
-            <totalSizeCap>1GB</totalSizeCap>
-        </rollingPolicy>
-        <encoder>
-            <pattern>${FILE_PATTERN}</pattern>
-            <charset>UTF-8</charset>
-        </encoder>
-    </appender>
-
-    <!-- ========== Spring Profile 配置 ========== -->
-
-    <!-- 开发环境：控制台为主，DEBUG 级别 -->
-    <springProfile name="dev | default">
-        <logger name="io.agentmanager.framework" level="DEBUG"/>
+    <!-- 本地开发（dev profile）：仅控制台，不写 /applog -->
+    <springProfile name="dev">
         <root level="INFO">
             <appender-ref ref="CONSOLE"/>
-            <appender-ref ref="FILE"/>
-            <appender-ref ref="ERROR_FILE"/>
         </root>
     </springProfile>
 
-    <!-- 测试环境：控制台 + 文件 -->
-    <springProfile name="test">
-        <logger name="io.agentmanager.framework" level="DEBUG"/>
+    <!-- 容器及其他环境（含未指定 profile 的 default）：控制台 + 规范文件输出 -->
+    <springProfile name="!dev">
         <root level="INFO">
             <appender-ref ref="CONSOLE"/>
-            <appender-ref ref="FILE"/>
-            <appender-ref ref="ERROR_FILE"/>
+            <appender-ref ref="COLLECTING_FILE"/>
         </root>
     </springProfile>
-
-    <!-- 生产环境：仅文件，INFO 级别 -->
-    <springProfile name="prod">
-        <logger name="io.agentmanager.framework" level="INFO"/>
-        <root level="WARN">
-            <appender-ref ref="FILE"/>
-            <appender-ref ref="ERROR_FILE"/>
-        </root>
-    </springProfile>
-
-    <!-- ========== 第三方框架日志降噪 ========== -->
-    <logger name="org.springframework" level="WARN"/>
-    <logger name="org.springframework.web" level="INFO"/>
-    <logger name="io.agentscope" level="INFO"/>
-    <!-- 临时：排查 400 unexpected content after document 时打印请求体 JSON，问题定位后恢复 INFO -->
-    <logger name="io.agentscope.extensions.model.openai.OpenAIClient" level="DEBUG"/>
-    <logger name="io.modelcontextprotocol" level="WARN"/>
-    <logger name="io.opentelemetry" level="WARN"/>
-    <logger name="org.apache.http" level="WARN"/>
-    <logger name="com.zaxxer.hikari" level="WARN"/>
-    <logger name="io.netty" level="WARN"/>
-    <logger name="reactor.netty" level="WARN"/>
 </configuration>

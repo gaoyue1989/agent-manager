@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -52,6 +54,8 @@ func newTestServer(t *testing.T) (*gin.Engine, *service.Core, *k8sclient.FakeK8s
 		DefaultImage: "agent-framework:latest",
 		ImageAllowed: func(img string) bool { return img == "agent-framework:latest" },
 		ResCPU:       "250m", ResMem: "256Mi", LimCPU: "1", LimMem: "1Gi",
+		RegisterTimeout: 400 * time.Millisecond,
+		RegisterRetry:   0,
 	})
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -195,5 +199,185 @@ func TestAuthMiddleware(t *testing.T) {
 	r.ServeHTTP(w2, req)
 	if w2.Code != http.StatusOK {
 		t.Fatal("valid token must pass")
+	}
+}
+
+// waitForSvcStatus 轮询等待服务状态推进（handler 测试内联版，等异步注册 goroutine）。
+func waitForSvcStatus(t *testing.T, core *service.Core, id uint, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		svc, err := core.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if svc.Status == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status not %q in time, got %q", want, svc.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// PATCH /services/:id/env 全链路：deploying 拒绝 → 稳态生效 → 保留键拒绝 → stopped 拒绝。
+func TestServicePatchEnvEndpoint(t *testing.T) {
+	r, core, fk, done := newTestServer(t)
+	defer done()
+	rec := uploadZip(t, r)
+	pkgID := uint(rec["id"].(float64))
+	w, out := doJSON(t, r, http.MethodPost, "/api/v1/services",
+		map[string]interface{}{"packageId": pkgID, "image": "agent-framework:latest"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+	}
+	data := out["data"].(map[string]interface{})
+	svcID := uint(data["id"].(float64))
+	k8sName := data["k8sName"].(string)
+
+	// deploying 状态 → 400 ErrBadState
+	w, _ = doJSON(t, r, http.MethodPatch, "/api/v1/services/1/env",
+		map[string]interface{}{"env": map[string]string{"A": "1"}})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("patch while deploying: %d %s", w.Code, w.Body.String())
+	}
+
+	_ = fk.SetReady("test", k8sName, 1)
+	waitForSvcStatus(t, core, svcID, store.StatusRegisterFailed)
+	w, _ = doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/v1/services/%d/env", svcID),
+		map[string]interface{}{"env": map[string]string{"LOG_LEVEL": "warn"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch env: %d %s", w.Code, w.Body.String())
+	}
+
+	// 保留键 → 400
+	w, _ = doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/v1/services/%d/env", svcID),
+		map[string]interface{}{"env": map[string]string{"AGENT_CONFIG_DIR": "/hack"}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "reserved") {
+		t.Fatalf("reserved key: %d %s", w.Code, w.Body.String())
+	}
+
+	// 等待 env 更新触发的异步注册收敛，避免 goroutine 事后覆盖状态
+	_ = fk.SetReady("test", k8sName, 1)
+	waitForSvcStatus(t, core, svcID, store.StatusRegisterFailed)
+
+	// stopped 状态 → 400
+	if _, err := core.Unpublish(svcID); err != nil {
+		t.Fatal(err)
+	}
+	w, _ = doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/v1/services/%d/env", svcID),
+		map[string]interface{}{"env": map[string]string{"A": "1"}})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("patch while stopped: %d %s", w.Code, w.Body.String())
+	}
+	if len(fk.Restarts()) == 0 {
+		t.Fatal("successful patch should trigger restart")
+	}
+}
+
+// POST /services/:id/register 手动重注册：agent-card 可达时恢复 running。
+func TestServiceRegisterActionEndpoint(t *testing.T) {
+	r, core, fk, done := newTestServer(t)
+	defer done()
+	rec := uploadZip(t, r)
+	pkgID := uint(rec["id"].(float64))
+	w, out := doJSON(t, r, http.MethodPost, "/api/v1/services",
+		map[string]interface{}{"packageId": pkgID, "image": "agent-framework:latest"})
+	svcID := uint(out["data"].(map[string]interface{})["id"].(float64))
+	_ = fk.SetReady("test", out["data"].(map[string]interface{})["k8sName"].(string), 1)
+	waitForSvcStatus(t, core, svcID, store.StatusRegisterFailed)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"name":"Demo","version":"1.0.0"}`))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svcID).Update("cluster_url", srv.URL)
+
+	w, _ = doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/v1/services/%d/register", svcID), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("register action: %d %s", w.Code, w.Body.String())
+	}
+	waitForSvcStatus(t, core, svcID, store.StatusRunning)
+}
+
+// 包详情组装（记录+文件树+AGENTS.md 原文）与删除守卫（被引用 400）。
+func TestPackageDetailAndDeleteEndpoints(t *testing.T) {
+	r, core, _, done := newTestServer(t)
+	defer done()
+	rec := uploadZip(t, r)
+	pkgID := uint(rec["id"].(float64))
+
+	w, out := doJSON(t, r, http.MethodGet, fmt.Sprintf("/api/v1/packages/%d", pkgID), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
+	}
+	data := out["data"].(map[string]interface{})
+	if data["package"] == nil || data["tree"] == nil ||
+		!strings.Contains(data["agentsMd"].(string), "slug: acme/demo") {
+		t.Fatalf("detail payload wrong: %v", data)
+	}
+
+	w, _ = doJSON(t, r, http.MethodGet, "/api/v1/packages/999", nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("missing package: %d", w.Code)
+	}
+
+	// 被服务引用 → 400
+	w, out = doJSON(t, r, http.MethodPost, "/api/v1/services",
+		map[string]interface{}{"packageId": pkgID, "image": "agent-framework:latest"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+	}
+	svcID := uint(out["data"].(map[string]interface{})["id"].(float64))
+	w, _ = doJSON(t, r, http.MethodDelete, fmt.Sprintf("/api/v1/packages/%d", pkgID), nil)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "referenced") {
+		t.Fatalf("delete in-use package: %d %s", w.Code, w.Body.String())
+	}
+
+	// 引用释放 → 200
+	if err := core.Delete(svcID); err != nil {
+		t.Fatal(err)
+	}
+	w, _ = doJSON(t, r, http.MethodDelete, fmt.Sprintf("/api/v1/packages/%d", pkgID), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete released package: %d %s", w.Code, w.Body.String())
+	}
+	w, _ = doJSON(t, r, http.MethodGet, fmt.Sprintf("/api/v1/packages/%d", pkgID), nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("deleted package detail: %d", w.Code)
+	}
+}
+
+func TestHealthzEndpoint(t *testing.T) {
+	r, _, _, done := newTestServer(t)
+	defer done()
+	w, out := doJSON(t, r, http.MethodGet, "/healthz", nil)
+	if w.Code != http.StatusOK || out["data"].(map[string]interface{})["status"] != "up" {
+		t.Fatalf("healthz: %d %v", w.Code, out)
+	}
+}
+
+// CORS 预检：OPTIONS 短路 204 并带全开放头。
+func TestCORSPreflight(t *testing.T) {
+	r, _, _, done := newTestServer(t)
+	defer done()
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/services", nil)
+	req.Header.Set("Origin", "http://localhost:3000")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("preflight: %d", w.Code)
+	}
+	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatal("missing CORS allow-origin header")
+	}
+	if w.Header().Get("Access-Control-Allow-Headers") == "" {
+		t.Fatal("missing CORS allow-headers header")
 	}
 }

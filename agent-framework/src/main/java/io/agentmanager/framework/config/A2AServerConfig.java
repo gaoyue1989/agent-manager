@@ -24,12 +24,15 @@ public class A2AServerConfig {
     @Bean
     @DependsOn("harnessAgent")
     public AgentScopeA2aServer a2aServer(HarnessAgent harnessAgent, OafConfig oafConfig,
-                                         DataSource dataSource,
-                                         @org.springframework.beans.factory.annotation.Value("${server.port:${SERVER_PORT:8100}}") int serverPort) {
+                                         DataSource dataSource, AgentManagerProperties props) {
+        var serverCfg = props.server();
+        // 0.0.0.0 是监听通配地址，不能作为对外注册地址；多实例/非标准端口场景
+        // 经 SERVER_HOST/SERVER_PORT 注入实际可达地址
+        var host = "0.0.0.0".equals(serverCfg.host()) ? "127.0.0.1" : serverCfg.host();
         var card = new ConfigurableAgentCard.Builder()
             .name(oafConfig.name())
             .description(oafConfig.description() != null ? oafConfig.description() : "")
-            .url("http://localhost:" + serverPort)
+            .url(String.format("http://%s:%d", host, serverCfg.port()))
             .build();
 
         var transportProps = TransportProperties.builder("JSONRPC")

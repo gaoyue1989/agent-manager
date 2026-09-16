@@ -3,6 +3,7 @@ package service
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"agent-manager/backend/internal/store"
@@ -96,5 +97,63 @@ func TestReregisterRecoversToRunning(t *testing.T) {
 	}
 	if got.Status != store.StatusRunning {
 		t.Fatalf("status after re-register: %s", got.Status)
+	}
+}
+
+// /health 检查失败同样视为未就绪（agent-card 200 但 health 500）。
+func TestFetchCardHealthFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(cardJSON))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := fetchCard(srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "health http 503") {
+		t.Fatalf("expect health http 503 error, got %v", err)
+	}
+}
+
+// agent-card 返回非法 JSON → 解析失败（而非把空卡片入库）。
+func TestFetchCardBadJSON(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("{not-json"))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := fetchCard(srv.URL)
+	if err == nil || !strings.Contains(err.Error(), "parse agent-card") {
+		t.Fatalf("expect parse error, got %v", err)
+	}
+}
+
+// 手动重注册失败：状态维持 register_failed 并返回错误（不得误跳 running）。
+func TestReregisterFailureKeepsRegisterFailed(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	// cluster_url 指向不可达地址 → 重试耗尽
+	got, err := core.Reregister(svc.ID)
+	if err == nil {
+		t.Fatal("reregister against unreachable cluster url must fail")
+	}
+	if got.Status != store.StatusRegisterFailed {
+		t.Fatalf("status=%s want register_failed", got.Status)
+	}
+	// 数据库中的状态也未被推进
+	fresh, _ := core.Get(svc.ID)
+	if fresh.Status != store.StatusRegisterFailed {
+		t.Fatalf("db status=%s want register_failed", fresh.Status)
 	}
 }

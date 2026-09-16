@@ -8,11 +8,12 @@ public record AgentManagerProperties(
     LLMConfig llm,
     ServerConfig server,
     CheckpointConfig checkpoint,
-    @DefaultValue("") String configDir,
+    @DefaultValue("/config") String configDir,
     @DefaultValue("") String workspaceDir,
     CleanupConfig cleanup,
     FileConfig file,
-    SseConfig sse
+    SseConfig sse,
+    HarnessConfig harness
 ) {
 
     /**
@@ -121,8 +122,7 @@ public record AgentManagerProperties(
         /** 每 user_key pending 未消费文件数上限（软限制） */
         @DefaultValue("20") int uploadMaxPending,
         /** MIME 白名单（逗号分隔，支持 * 通配） */
-        @DefaultValue("image/*,text/plain,text/markdown,text/csv,application/pdf,"
-            + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*") String uploadAllowedMime,
+        @DefaultValue(FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME) String uploadAllowedMime,
         /** 图片内联单文件大小上限（MB），超限降级路径提示 */
         @DefaultValue("5") int imageMaxMb,
         /** 图片内联总字节预算（MB），多图叠加超限降级路径提示 */
@@ -135,8 +135,8 @@ public record AgentManagerProperties(
         @DefaultValue("7") int retentionDays,
         /** 存储后端类型：local / s3 */
         @DefaultValue("local") String storageType,
-        /** local 后端根目录（默认：Linux /data/files；Windows %LOCALAPPDATA%/agent-framework/files） */
-        @DefaultValue("") String storageLocalDir,
+        /** local 后端根目录（K8s 下挂 platform-data PVC subPath files/） */
+        @DefaultValue("/data/files") String storageLocalDir,
         /** s3 后端 endpoint（MinIO/Ceph RGW/OSS S3 网关） */
         @DefaultValue("") String storageS3Endpoint,
         /** s3 后端 accessKey（敏感，.env.secrets） */
@@ -146,24 +146,65 @@ public record AgentManagerProperties(
         /** s3 后端 bucket */
         @DefaultValue("agent-files") String storageS3Bucket
     ) {
-        /** 解析后的存储目录：显式配置优先；未配置则按 OS 选默认值 */
-        public String resolvedStorageLocalDir() {
-            if (storageLocalDir != null && !storageLocalDir.isBlank()) {
-                return storageLocalDir;
-            }
-            // 跨平台默认值
-            if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
-                var localAppData = System.getenv("LOCALAPPDATA");
-                if (localAppData != null && !localAppData.isBlank()) {
-                    return localAppData + "\\agent-framework\\files";
-                }
-                var userProfile = System.getenv("USERPROFILE");
-                if (userProfile != null && !userProfile.isBlank()) {
-                    return userProfile + "\\AppData\\Local\\agent-framework\\files";
-                }
-                return "C:\\agent-framework\\files";
-            }
-            return "/data/files";
+        /**
+         * 默认 MIME 白名单：图片/文本/PDF/Office 之外放行 zip（OAF 配置包经 📎 上传后注入
+         * 工作区，助手凭路径调 upload_package 发布）；x-zip-compressed 兼容 Windows 浏览器。
+         * 与 application.yml 的 FILE_UPLOAD_ALLOWED_MIME env 默认值保持同步。
+         */
+        public static final String DEFAULT_UPLOAD_ALLOWED_MIME =
+            "image/*,text/plain,text/markdown,text/csv,application/pdf,"
+                + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
+                + "application/zip,application/x-zip-compressed";
+    }
+
+    /**
+     * Harness 运行时配置：ReAct 推理、LLM HTTP 超时、Memory、Compaction、HikariCP 连接池。
+     * 环境变量前缀：AGENT_*（如 AGENT_REACT_MAX_ITERS），绑定见 application.yml agent.harness.* 节。
+     * 默认值与参数化前的硬编码值一致，仅暴露可调性、不改变现有行为。
+     */
+    public record HarnessConfig(
+        // ReAct 推理
+        /** ReAct 推理最大轮次（SDK 默认 10，长流程需放宽） */
+        @DefaultValue("20") int maxIters,
+        // LLM API HTTP 超时（秒）
+        /** LLM API 连接超时（秒） */
+        @DefaultValue("30") int httpConnectTimeoutSeconds,
+        /** LLM API 读超时（秒，长推理场景需更长） */
+        @DefaultValue("180") int httpReadTimeoutSeconds,
+        /** LLM API 写超时（秒） */
+        @DefaultValue("30") int httpWriteTimeoutSeconds,
+        // Memory
+        /** 记忆刷写节流间隔（分钟） */
+        @DefaultValue("10") int memoryFlushThrottleMinutes,
+        /** 记忆整合最大 token 数 */
+        @DefaultValue("8000") int memoryConsolidationMaxTokens,
+        /** 记忆整合最小间隔（分钟） */
+        @DefaultValue("60") int memoryConsolidationMinGapMinutes,
+        // Compaction
+        /** 触发压缩的消息数阈值 */
+        @DefaultValue("30") int compactionTriggerMessages,
+        /** 压缩后保留的消息数 */
+        @DefaultValue("10") int compactionKeepMessages,
+        /** 压缩前先刷写记忆 */
+        @DefaultValue("true") boolean compactionFlushBeforeCompact,
+        /** 压缩前先卸载大工具结果 */
+        @DefaultValue("true") boolean compactionOffloadBeforeCompact,
+        // HikariCP
+        /** DB 连接池最大连接数 */
+        @DefaultValue("10") int dbPoolMaxSize,
+        /** DB 连接池最小空闲连接 */
+        @DefaultValue("2") int dbPoolMinIdle,
+        /** DB 连接超时（毫秒） */
+        @DefaultValue("30000") long dbPoolConnectionTimeoutMs,
+        /** DB 空闲超时（毫秒） */
+        @DefaultValue("600000") long dbPoolIdleTimeoutMs,
+        /** DB 连接最大生命周期（毫秒） */
+        @DefaultValue("1800000") long dbPoolMaxLifetimeMs
+    ) {
+        /** 代码默认值兜底：配置节缺失（如测试直接构造 props）时使用 */
+        public static HarnessConfig defaults() {
+            return new HarnessConfig(20, 30, 180, 30, 10, 8000, 60,
+                30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
         }
     }
 
@@ -172,11 +213,11 @@ public record AgentManagerProperties(
      * 环境变量前缀：AGENT_SSE_*（如 AGENT_SSE_HEARTBEAT_SECONDS）
      */
     public record SseConfig(
-        /** 心跳间隔（秒），默认 20。防止 Nginx/CDN 60s 读超时 */
-        @DefaultValue("20") int heartbeatSeconds,
-        /** EventBus Sinks 过期清理延迟（分钟），默认 5 */
-        @DefaultValue("5") int sinksEvictionMinutes,
-        /** EventBus Sinks 缓冲区大小，默认 256 */
-        @DefaultValue("256") int sinksBufferSize
+            /** 心跳间隔（秒），默认 20。防止 Nginx/CDN 60s 读超时 */
+            @DefaultValue("20") int heartbeatSeconds,
+            /** EventBus Sinks 过期清理延迟（分钟），默认 5 */
+            @DefaultValue("5") int sinksEvictionMinutes,
+            /** EventBus Sinks 缓冲区大小，默认 256 */
+            @DefaultValue("256") int sinksBufferSize
     ) {}
 }

@@ -221,7 +221,7 @@ Content-Type: multipart/form-data
 | 校验 | 规则 | 失败返回 |
 |------|------|---------|
 | 文件名 sanitize | basename 截断、去 `\`、UTF-8 ≤255 字节（DeerFlow `normalize_filename` 同款） | 400 invalid_file_name |
-| MIME 白名单 | `FILE_UPLOAD_ALLOWED_MIME`（默认：`image/*`、`text/plain`、`text/markdown`、`text/csv`、`application/pdf`、`application/vnd.openxmlformats-officedocument.*`、`application/vnd.ms-*`）——逐项列出，不用宽泛 `text/*`（防 `text/plain` 伪装 `.exe`） | 415 unsupported_file_type |
+| MIME 白名单 | `FILE_UPLOAD_ALLOWED_MIME`（默认：`image/*`、`text/plain`、`text/markdown`、`text/csv`、`application/pdf`、`application/vnd.openxmlformats-officedocument.*`、`application/vnd.ms-*`、`application/zip`、`application/x-zip-compressed`）——逐项列出，不用宽泛 `text/*`（防 `text/plain` 伪装 `.exe`）；zip 供 📎 上传 OAF 配置包 | 415 unsupported_file_type |
 | 扩展名匹配 | 扩展名与 MIME 一致性抽查（非强制） | 415 |
 | 大小上限 | `FILE_UPLOAD_MAX_MB`（默认 20） | 413 file_too_large |
 | 数量上限 | 每 user_key pending 未消费文件 ≤ `FILE_UPLOAD_MAX_PENDING`（默认 20）——**软限制**：并发上传可能少量超发（最多 +并发数-1），定期任务清理超限文件 | 429 |
@@ -572,7 +572,7 @@ P2 扩展（`A2AController` 预处理，对齐既有"兼容转换"模式）：�
 | `FILE_UPLOAD_ENABLED` | `true` | 上传端点开关（false 时 403） |
 | `FILE_UPLOAD_MAX_MB` | `20` | 单文件大小上限 |
 | `FILE_UPLOAD_MAX_PENDING` | `20` | 每 user_key pending 文件数上限 |
-| `FILE_UPLOAD_ALLOWED_MIME` | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*` | MIME 白名单（逗号分隔，支持 * 通配；逐项列出，不用宽泛 `text/*`） |
+| `FILE_UPLOAD_ALLOWED_MIME` | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed` | MIME 白名单（逗号分隔，支持 * 通配；逐项列出，不用宽泛 `text/*`） |
 | `FILE_IMAGE_MAX_MB` | `5` | 图片内联单文件大小上限（超限图片降级为路径提示，不内联） |
 | `FILE_IMAGE_INLINE_TOTAL_MB` | `15` | 图片内联总字节预算（多图叠加超限后续图片降级路径提示，防上下文溢出） |
 | `FILE_PRESENT_MAX_MB` | `50` | present_file 工具产出文件大小上限（超出工具返回错误） |

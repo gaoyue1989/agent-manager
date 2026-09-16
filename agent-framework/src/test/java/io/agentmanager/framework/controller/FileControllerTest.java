@@ -55,6 +55,9 @@ public class FileControllerTest {
                     + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
                 5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
             new AgentManagerProperties.SseConfig(20, 5, 256));
+                AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME,
+                5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
+            AgentManagerProperties.HarnessConfig.defaults());
     }
 
     @Test
@@ -114,6 +117,8 @@ public class FileControllerTest {
         var disabled = new AgentManagerProperties(
             props.llm(), props.server(), props.checkpoint(), "/config", "",
             props.cleanup(), new AgentManagerProperties.FileConfig(false, 20, 20,
+                "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
+            AgentManagerProperties.HarnessConfig.defaults());
                 "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
             new AgentManagerProperties.SseConfig(20, 5, 256));
         var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxConfig.class));
@@ -218,5 +223,13 @@ public class FileControllerTest {
         var resp = controller.upload(file, "alice", null, null);
         assertEquals(HttpStatus.BAD_REQUEST, resp.getStatusCode());
         assertEquals("extension_mime_mismatch", resp.getBody().get("error"));
+    }
+
+    @Test
+    void defaultUploadMimeShouldAllowOafZip() {
+        // OAF 配置包为 zip：默认白名单须放行（含 Windows 浏览器的 x-zip-compressed 变体）
+        var def = AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME;
+        assertTrue(FileController.mimeAllowed("application/zip", def));
+        assertTrue(FileController.mimeAllowed("application/x-zip-compressed", def));
     }
 }

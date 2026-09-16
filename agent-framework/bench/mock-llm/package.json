@@ -1,0 +1,10 @@
+{
+  "name": "bench-mock-llm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "并发压测 mock LLM（OpenAI 兼容，零三方依赖）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

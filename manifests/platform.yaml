@@ -160,8 +160,8 @@ spec:
               value: "oaf:OafPlatform2026@tcp(oaf-mysql.agent-platform.svc.cluster.local:3306)/oaf_platform?charset=utf8mb4&parseTime=True&loc=Local"
             - { name: NAMESPACE, value: agent-platform }
             - { name: DATA_ROOT, value: /data }
-            - { name: AVAILABLE_IMAGES, value: "agent-framework:latest|Agent Framework latest" }
-            - { name: DEFAULT_IMAGE, value: "agent-framework:latest" }
+            - { name: AVAILABLE_IMAGES, value: "172.20.0.1:5001/agent-framework:latest|Agent Framework (registry)" }
+            - { name: DEFAULT_IMAGE, value: "172.20.0.1:5001/agent-framework:latest" }
             - { name: INGRESS_CLASS, value: nginx }
             - { name: INGRESS_HOST, value: "172.20.0.3" }
             - { name: INGRESS_PORT, value: "30080" }

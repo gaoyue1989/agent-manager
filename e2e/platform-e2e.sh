@@ -57,6 +57,19 @@ cleanup_all() {
 ###############################################################################
 cleanup_all
 
+# 零残留基线：历史遗留（如其他脚本的 root 属主文件）不参与本轮一致性判定，
+# D6 改比增量（本次运行 PVC 目录增量 == 库内包增量）
+BASE_LEFT=$(kubectl -n $NS exec deployment/platform-backend -- sh -c 'ls /data/packages 2>/dev/null | wc -l' | tr -d '\r')
+BASE_PKGS=$(api GET /packages | jq -r '.data | length')
+
+# 镜像不写死：从平台 GET /images 动态选取（优先节点内 registry 名义，避免 docker.io 漂移）
+# 注意：REST /images 由无 json tag 的匿名结构体输出，键为 Go 字段名 Image/Label
+PICK_IMG() {
+  local pick
+  pick=$(api GET /images | jq -r '[.data[].Image | select(. != null and contains(":5001"))][0] // .data[0].Image // empty')
+  echo "${pick:-agent-framework:latest}"
+}
+
 say "场景 A：REST 发布主链路"
 UP=$(upload_zip "$FIXDIR/demo-agent-v1.zip")
 PKG_ID=$(echo "$UP" | jq -r '.data.id')
@@ -68,11 +81,16 @@ assert_eq "A2 包详情 slug"   "$(echo "$DET" | jq -r '.data.package.slug')" "e
 assert_eq "A3 包详情 version" "$(echo "$DET" | jq -r '.data.package.version')" "1.0.0"
 assert_contains "A4 详情含 AGENTS.md 正文" "$(echo "$DET" | jq -r '.data.agentsMd')" "# E2E Demo"
 
-PUB=$(api POST /services "{\"packageId\":$PKG_ID,\"image\":\"agent-framework:latest\",\"env\":$(python3 -c "import json,os;d=json.loads(os.environ['RUNTIME_ENV']);d['LOG_LEVEL']='info';print(json.dumps(d))")}")
+PUB=$(api POST /services "{\"packageId\":$PKG_ID,\"image\":\"$(PICK_IMG)\",\"env\":$(python3 -c "import json,os;d=json.loads(os.environ['RUNTIME_ENV']);d['LOG_LEVEL']='info';print(json.dumps(d))")}")
 SVC_ID=$(echo "$PUB" | jq -r '.data.id')
 K8S_NAME=$(echo "$PUB" | jq -r '.data.k8sName')
 assert_eq "A5 发布受理 deploying" "$(echo "$PUB" | jq -r '.data.status')" "deploying"
 assert_eq "A6 K8s 名规范" "$K8S_NAME" "oaf-e2e-demo"
+
+# deploying 状态禁止改 env（滚动进行中，需等终态）
+W=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/services/$SVC_ID/env" \
+  -H 'Content-Type: application/json' -d '{"env":{"TMP_KEY":"1"}}')
+assert_eq "A6.1 deploying 状态 PATCH env → 400" "$W" "400"
 
 if wait_status "$SVC_ID" running 300; then ok "A7 状态到达 running"; else bad "A7 未到 running"; fi
 DETAIL=$(api GET "/services/$SVC_ID")
@@ -101,6 +119,19 @@ CM_VAL=$(kubectl -n $NS get cm oaf-e2e-demo-env -o jsonpath='{.data.LOG_LEVEL}')
 assert_eq "B2 ConfigMap 已更新" "$CM_VAL" "warn"
 if wait_status "$SVC_ID" running 300; then ok "B3 env 更新后回到 running"; else bad "B3 未回 running"; fi
 
+# env 全量覆盖语义：新集合不含 NEW_KEY → ConfigMap 中必须消失（而非 merge 残留）
+STRIP_ENV=$(RUNTIME_ENV="$RUNTIME_ENV" python3 -c "
+import json,os
+d=json.loads(os.environ['RUNTIME_ENV'])
+d['LOG_LEVEL']='info'
+print(json.dumps({'env':d}))")
+ENV_STRIP=$(api PATCH "/services/$SVC_ID/env" "$STRIP_ENV")
+assert_eq "B3.1 二次 env 更新受理" "$(echo "$ENV_STRIP" | jq -r '.data.status')" "deploying"
+sleep 3
+CM_HAS=$(kubectl -n $NS get cm oaf-e2e-demo-env -o jsonpath='{.data.NEW_KEY}')
+assert_eq "B3.2 旧键 NEW_KEY 已被覆盖清除" "$CM_HAS" ""
+if wait_status "$SVC_ID" running 300; then ok "B3.3 全量覆盖更新后回 running"; else bad "B3.3 未回 running"; fi
+
 UP2=$(upload_zip "$FIXDIR/demo-agent-v2.zip")
 PKG2_ID=$(echo "$UP2" | jq -r '.data.id')
 RE=$(api POST "/services/$SVC_ID/republish" "{\"packageId\":$PKG2_ID}")
@@ -114,11 +145,18 @@ if wait_status "$SVC_ID" running 300; then ok "B7 republish 后 running（注册
 VER=$(api GET "/services/$SVC_ID" | jq -r '.data.registeredVersion')
 assert_eq "B8 注册版本为 v1.1.0" "$VER" "1.1.0"
 
+# 被服务引用的包禁止删除
+W=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/packages/$PKG2_ID")
+assert_eq "B8.1 被引用包 DELETE → 400" "$W" "400"
+
 UN=$(api POST "/services/$SVC_ID/unpublish")
 assert_eq "B9 unpublish → stopped" "$(echo "$UN" | jq -r '.data.status')" "stopped"
 k8s_res deploy $K8S_NAME  && bad "B10 下线后 Deployment 应删除" || ok "B10 Deployment 已删"
 k8s_res ingress $K8S_NAME && bad "B11 下线后 Ingress 应删除"    || ok "B11 Ingress 已删"
 k8s_res cm $K8S_NAME-env  && ok "B12 下线保留 ConfigMap"         || bad "B12 ConfigMap 不应删除"
+W=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/services/$SVC_ID/env" \
+  -H 'Content-Type: application/json' -d '{"env":{"TMP_KEY":"1"}}')
+assert_eq "B12.1 stopped 状态 PATCH env → 400" "$W" "400"
 RG=$(api POST "/services/$SVC_ID/publish")
 assert_eq "B13 重新上线受理" "$(echo "$RG" | jq -r '.data.status')" "deploying"
 if wait_status "$SVC_ID" running 300; then ok "B14 再次上线 running"; else bad "B14 未回 running"; fi
@@ -141,6 +179,11 @@ assert_eq "E4 保留键 env → 400" "$W" "400"
 W=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/services" -H 'Content-Type: application/json' \
   -d '{"packageId":99999}')
 assert_eq "E5 包不存在 → 404" "$W" "404"
+W=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/packages/99999")
+assert_eq "E6 包详情不存在 → 404" "$W" "404"
+# curl 默认归一化 /api/v1/../../healthz → /healthz
+HZ=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/../../healthz")
+assert_eq "H1 healthz 健康检查 → 200" "$HZ" "200"
 
 say "删除与零残留验证"
 api DELETE "/services/$SVC_ID" >/dev/null
@@ -155,10 +198,10 @@ assert_eq "D5 服务记录已删(404)" "$W" "404"
 api DELETE "/packages/$PKG_ID"  >/dev/null
 api DELETE "/packages/$PKG2_ID" >/dev/null
 sleep 1
-# 三方一致性：PVC 内目录数应等于库内剩余包数（含受保护的 release-agent 包）
+# 三方一致性：本次运行零残留——PVC 目录增量应等于库内包增量
 LEFT=$(kubectl -n $NS exec deployment/platform-backend -- sh -c 'ls /data/packages 2>/dev/null | wc -l' | tr -d '\r')
 DBPKGS=$(api GET /packages | jq -r '.data | length')
-assert_eq "D6 PVC 目录与库内包数一致" "$LEFT" "$DBPKGS"
+assert_eq "D6 本次运行零残留(PVC增量=库内增量)" "$((LEFT-BASE_LEFT))" "$((DBPKGS-BASE_PKGS))"
 
 say "结果汇总"
 echo "----------------------------------------"

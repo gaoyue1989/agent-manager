@@ -35,7 +35,7 @@ agent:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
   checkpoint:
-    jdbc-url: ${CHECKPOINT_JDBC_URL:jdbc:mysql://28.106.125.216:3316/agent_manager_test}
+    jdbc-url: ${CHECKPOINT_JDBC_URL:jdbc:mysql://127.0.0.1:3307/agent_manager_test}
     username: ${CHECKPOINT_USERNAME:agent_manager}
     password: ${CHECKPOINT_PASSWORD:Agent@Manager2026}
     db-name: ${CHECKPOINT_DB_NAME:}
@@ -47,13 +47,13 @@ agent:
     cpu-count: ${SANDBOX_CPU_COUNT:1}
     execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
     opensandbox:
-      server-url: ${OPENSANDBOX_SERVER_URL:localhost:8081}
+      server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}
   file:
     upload-enabled: ${FILE_UPLOAD_ENABLED:true}
     upload-max-mb: ${FILE_UPLOAD_MAX_MB:20}
     upload-max-pending: ${FILE_UPLOAD_MAX_PENDING:20}
-    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*}
+    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed}
     image-max-mb: ${FILE_IMAGE_MAX_MB:5}
     image-inline-total-mb: ${FILE_IMAGE_INLINE_TOTAL_MB:15}
     present-max-mb: ${FILE_PRESENT_MAX_MB:50}
@@ -63,7 +63,7 @@ agent:
     # storageType/storageS3Endpoint 等一一对应——不能嵌套 storage: 层，
     # 否则 binder 匹配不到字段、全部回退默认值（S3 必空导致启动失败）
     storage-type: ${FILE_STORAGE_TYPE:local}
-    storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:}
+    storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
     storage-s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}
     storage-s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
     storage-s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
@@ -73,6 +73,29 @@ agent:
     heartbeat-seconds: ${AGENT_SSE_HEARTBEAT_SECONDS:20}
     sinks-eviction-minutes: ${AGENT_SSE_SINKS_EVICTION_MINUTES:5}
     sinks-buffer-size: ${AGENT_SSE_SINKS_BUFFER_SIZE:256}
+  # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
+  harness:
+    # ReAct 推理
+    max-iters: ${AGENT_REACT_MAX_ITERS:20}
+    # LLM API HTTP 超时（秒）
+    http-connect-timeout-seconds: ${AGENT_HTTP_CONNECT_TIMEOUT_SECONDS:30}
+    http-read-timeout-seconds: ${AGENT_HTTP_READ_TIMEOUT_SECONDS:180}
+    http-write-timeout-seconds: ${AGENT_HTTP_WRITE_TIMEOUT_SECONDS:30}
+    # Memory
+    memory-flush-throttle-minutes: ${AGENT_MEMORY_FLUSH_THROTTLE_MINUTES:10}
+    memory-consolidation-max-tokens: ${AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS:8000}
+    memory-consolidation-min-gap-minutes: ${AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES:60}
+    # Compaction
+    compaction-trigger-messages: ${AGENT_COMPACTION_TRIGGER_MESSAGES:30}
+    compaction-keep-messages: ${AGENT_COMPACTION_KEEP_MESSAGES:10}
+    compaction-flush-before-compact: ${AGENT_COMPACTION_FLUSH_BEFORE_COMPACT:true}
+    compaction-offload-before-compact: ${AGENT_COMPACTION_OFFLOAD_BEFORE_COMPACT:true}
+    # HikariCP（毫秒）
+    db-pool-max-size: ${AGENT_DB_POOL_MAX_SIZE:10}
+    db-pool-min-idle: ${AGENT_DB_POOL_MIN_IDLE:2}
+    db-pool-connection-timeout-ms: ${AGENT_DB_POOL_CONNECTION_TIMEOUT_MS:30000}
+    db-pool-idle-timeout-ms: ${AGENT_DB_POOL_IDLE_TIMEOUT_MS:600000}
+    db-pool-max-lifetime-ms: ${AGENT_DB_POOL_MAX_LIFETIME_MS:1800000}
 
 # OTel 链路追踪（默认关闭，设置 OTEL_TRACES_EXPORTER=otlp 启用）
 otel:

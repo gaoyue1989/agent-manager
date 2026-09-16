@@ -50,6 +50,31 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 浏览器打开前端 → 上传 `release-agent/` 打包的 zip（或直接调 API）→ 发布：
 镜像 `agent-framework:latest`，env 填 LLM_* 与 CHECKPOINT_JDBC_URL（见下）。
 
+## 五、业务日志规范（agent-framework）
+
+业务 Agent（framework 镜像）日志按《容器日志收集方案-v2》规范输出：容器云日志收集器**仅采集** `/applog/${HOST_NAME}/trace.log`，控制台日志与其他文件均不采集。
+
+| 项 | 值 | 说明 |
+|----|-----|------|
+| 日志路径 | `/applog/${HOST_NAME}/trace.log` | `HOST_NAME` = Pod Name，文件名固定不可改 |
+| 日志格式 | `时间 [HOST_NAME] [APP_NAME] [级别] [线程] [traceId] 类简名 - 内容` | 毫秒级时间；traceId 取自 OTel Span（无活跃 span 输出 `-`），与 Jaeger 链路打通；类简名仅类名不含包路径 |
+| 滚动策略 | 单文件 200MB，归档 `trace.log1` / `trace.log2`，合计上限 600MB | 滚动由 logback `FixedWindowRollingPolicy(1..2)` 承载 |
+| 编码 | UTF-8 | 镜像 ENTRYPOINT 已硬编码 `-Dfile.encoding=UTF-8`（先于可覆盖的 `JAVA_OPTS`） |
+
+日志相关环境变量：
+
+| 变量 | 来源 | 说明 |
+|------|------|------|
+| `HOST_NAME` | platform-backend 构造 Deployment 时固定注入（保留键，用户 env 撞名即 400） | 决定日志目录 `/applog/${HOST_NAME}/` 与日志内容 `[主机名]` 字段 |
+| `APP_NAME` | 业务 env 可选指定（非保留键） | 日志内容 `[应用名]` 字段，用于 Kibana 按应用检索；缺省 `agent-framework` |
+| `SPRING_PROFILES_ACTIVE` | 平台不注入，缺省即启用控制台 + 文件双输出 | 本地 `make dev` 固定 `dev` profile，仅控制台、不写 `/applog` |
+
+注意事项：
+
+1. `HOST_NAME` 注入与 `/applog` 卷（emptyDir）由 platform-backend 构造业务 Deployment 时下发，**已上线服务需重新发布（republish）后才生效**。
+2. 生产容器云接入日志采集时，由运维将 `/applog` 改挂 hostPath `/var/log/mounts/${namespace}/${app-name}` 并配置 Kibana 索引模板（hostName / app-name 字段映射，按 `app-name` 检索）；平台构造逻辑不变。
+3. 内容约束：单条日志 ≤ 4KB（超长会被日志云截断）、避免大量特殊字符、禁止输出密码/密钥等敏感信息；非应用日志（GC 等）不要以 `.log` 结尾（建议 `.txt`），避免与应用日志混淆。
+
 ## 关键端点
 
 | 入口 | 地址 |
@@ -75,5 +100,5 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
 ## 运维备忘
 
 1. **更新任一镜像后**：重新 save/import 后必须 `kubectl -n agent-platform rollout restart deployment/<name>`——同名 tag 不会自动触发滚动，且 Ingress 注解由 platform-backend 下发，改注解逻辑后必须重启它再 republish。
-2. 业务 Pod 的 OAF 包挂载在 `/config`（只读）+ 工作区 `/workspace`（可写）。
+2. 业务 Pod 的 OAF 包挂载在 `/config`（只读）+ 工作区 `/workspace`（可写）+ 日志目录 `/applog`（可写，规范日志输出，见「五、业务日志规范」）。
 3. MCP server 不可达默认不阻断启动（fail-soft）；必需依赖在包内写 `startup.required: true`。
