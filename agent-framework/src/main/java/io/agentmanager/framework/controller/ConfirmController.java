@@ -169,21 +169,20 @@ public class ConfirmController {
             // ===== 5. 启动 agent 恢复执行 → 事件写入 EventBus =====
             resumeFlux
                 .subscribe(
-                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease),
+                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
-                        eventBus.emitSynthetic(finalSessionId, replyId, "error",
-                            "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
-                                e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
-                        lease.release();
-                        eventBus.closeSession(finalSessionId);
+                        if (!lease.isLost()) {
+                            // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
+                            eventBus.emitSynthetic(finalSessionId, replyId, "error",
+                                "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
+                                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
+                        }
+                        endTurn(lease, finalSessionId);
                     },
-                    () -> {
-                        // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中释放租约 + 关闭 session）
-                        lease.release();
-                        eventBus.closeSession(finalSessionId);
-                    });
+                    // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
+                    () -> endTurn(lease, finalSessionId));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -198,7 +197,12 @@ public class ConfirmController {
 
     /** 单帧处理：HITL 落库 + 事件写入 EventBus + 终态关闭 */
     private void handleEventAndEmit(io.agentscope.core.event.AgentEvent event,
-                                    String sessionId, String replyId, TurnLeaseGuard lease) {
+                                    String sessionId, String replyId, TurnLeaseGuard lease,
+                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink) {
+        if (stopIfLeaseLost(lease, sessionId, sink)) {
+            return;
+        }
+
         // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
             runtimeService.storeConfirmContext(sessionId, event);
@@ -216,9 +220,58 @@ public class ConfirmController {
 
         // AGENT_END → 关闭 EventBus
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {
+            endTurn(lease, sessionId);
+        }
+    }
+
+    /**
+     * 租约已失去：本副本不再拥有该 session 的写入权。继续 append 会与新 owner 的 seq
+     * 区间重叠，所以立刻停手、丢弃缓冲、发终态帧。
+     *
+     * <p>终态帧只给本连接的客户端、**不落库**——此刻任何 append 都会占用可能与新 owner
+     * 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
+     *
+     * @return true = 本事件已被丢弃，调用方必须直接返回
+     */
+    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
+                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink) {
+        if (!lease.isLost()) {
+            return false;
+        }
+        if (lease.tryMarkLostNotified()) {
+            log.error("[confirm] turn lease lost, stopping writer (sid={})", sessionId);
+            sink.next(interruptedSSE("lease_lost"));
+            eventBus.abandonSession(sessionId);
             lease.release();
+        }
+        return true;
+    }
+
+    /**
+     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
+     *
+     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
+     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
+     * ——正是 C1 要防的重叠。
+     *
+     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
+     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
+     */
+    private void endTurn(TurnLeaseGuard lease, String sessionId) {
+        boolean lost = lease.isLost();
+        if (lost) {
+            eventBus.abandonSession(sessionId);
+        } else {
             eventBus.closeSession(sessionId);
         }
+        lease.release();
+    }
+
+    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
+    private static ServerSentEvent<String> interruptedSSE(String reason) {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
+            .build();
     }
 
     private static ServerSentEvent<String> errorSSE(String msg) {

@@ -167,6 +167,39 @@ class TurnLeaseGuardTest {
     }
 
     @Test
+    void confirmedLossIsNotUndoneByALaterSuccessfulRenew() throws Exception {
+        // 时间判据判丢锁（续租线程卡住）之后，若续租线程又恢复并成功续上一拍，
+        // lastHeldNanos 会被刷新、时间判据重新成立——不把 lost 钉死的话 turn 会「复活」，
+        // 后续事件重新走上落库路径，就又回到与新 owner 抢 seq 的老问题。
+        // 判据 = max(1s, 4s-1s) = 3s：第一拍在 1s 处卡住，时间判据在 3s 触发丢锁；
+        // 放行后那笔续租成功返回、lastHeldNanos 被刷到 3.05s，如果没有钉死 lost，
+        // isLost() 要等到 6.05s 才会被时间判据重新点亮——所以在 3.65s 处取样才分辨得出。
+        var unblock = new CountDownLatch(1);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        stubIntervals(Duration.ofSeconds(1), Duration.ofSeconds(4));
+        when(store.renew("sid", "tok")).thenAnswer(inv -> {
+            if (calls.incrementAndGet() == 1) {
+                try {
+                    unblock.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return TurnLeaseStore.RenewOutcome.HELD;   // 随后「恢复正常」
+        });
+
+        guard = new TurnLeaseGuard(store, "sid", "tok");
+        assertTrue(awaitTrue(guard::isLost, 8000), "续租卡住超过判据应判丢锁");
+        assertTrue(guard.tryMarkLostNotified());
+
+        unblock.countDown();
+        sleep(600);   // 落在「刷新后、时间判据重新点亮前」的窗口内
+
+        assertTrue(guard.isLost(),
+            "已确认丢锁（并已通知调用方停写）之后，续租侥幸成功也不得翻回「未丢锁」");
+    }
+
+    @Test
     void releaseDoesNotTouchLeaseAfterLoss() {
         stubIntervals(Duration.ofMillis(20), Duration.ofSeconds(30));
         when(store.renew("sid", "tok")).thenReturn(TurnLeaseStore.RenewOutcome.LOST);

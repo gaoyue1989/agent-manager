@@ -200,6 +200,40 @@ public class SessionEventStore {
         releaseSeq(sessionId);
     }
 
+    /**
+     * turn 因**租约丢失**而终止：丢弃该 session 的待落库行（不落库）并释放 seq 计数器。
+     *
+     * <p>与 {@link #finishTurn} 的唯一差别就是不 flush——缓冲里那些行的 seq 是本副本
+     * 「以为自己还持锁」时分配的，而此刻新 owner 可能已在同一区间分配过 seq。把它们
+     * 写下去正是丢租约要防的事：有唯一键则是一次响亮的批失败，没有则静默写重复行。
+     *
+     * <p>这是**有损**的：客户端看到的事件流会少一段尾巴。但那段尾巴本来就不该属于本次
+     * turn 的序号空间——被接管的副本会把完整内容重新产出。
+     */
+    public void abandonTurn(String sessionId) {
+        int dropped = discardPending(sessionId);
+        releaseSeq(sessionId);
+        if (dropped > 0) {
+            log.warn("SessionEventStore: turn abandoned (lease lost, sid={}) — "
+                + "dropped {} buffered row(s) without writing", sessionId, dropped);
+        }
+    }
+
+    /** 丢弃某 session 的待落库行，返回丢弃行数（**不**落库） */
+    private int discardPending(String sessionId) {
+        int dropped = 0;
+        synchronized (pending) {
+            var it = pending.iterator();
+            while (it.hasNext()) {
+                if (sessionId.equals(it.next().sessionId())) {
+                    it.remove();
+                    dropped++;
+                }
+            }
+        }
+        return dropped;
+    }
+
     /** 刷出缓冲中所有待落库的行 */
     public void flushPending() {
         List<PendingRow> toFlush;

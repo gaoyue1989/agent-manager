@@ -166,6 +166,21 @@ class SessionEventBusTest {
     }
 
     @Test
+    void abandonSessionDiscardsBufferInsteadOfFlushing() {
+        // 丢租约的收尾走 abandonTurn（丢弃缓冲），**不是** finishTurn（刷缓冲）：
+        // 缓冲里那些 seq 是本副本以为自己还持锁时分配的，写下去就是与新 owner 重叠。
+        var flux = eventBus.subscribe("sid-abandon", 0, null)
+            .timeout(Duration.ofSeconds(3));
+        eventBus.ensureSink("sid-abandon");
+
+        eventBus.abandonSession("sid-abandon");
+
+        verify(eventStore).abandonTurn("sid-abandon");
+        verify(eventStore, never()).finishTurn("sid-abandon");
+        StepVerifier.create(flux).verifyComplete();   // 订阅者照样收到 onComplete
+    }
+
+    @Test
     void beginTurnSeedsSeqAndCreatesSink() {
         var sink = eventBus.beginTurn("sid-begin");
         assertNotNull(sink);

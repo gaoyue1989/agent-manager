@@ -45,6 +45,7 @@ import io.agentscope.core.message.MsgRole;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 
 /**
  * 对话入口端点 &mdash; sessionId 在请求体中，可选。
@@ -270,23 +271,20 @@ public class ChatStreamController {
             // ===== 6. 启动 agent 执行 =====
             chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                 .subscribe(
-                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId),
+                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink),
                     e -> {
                         log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                         if (isTrailingSandboxTeardownError(e)) {
                             log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
-                        } else {
+                        } else if (!lease.isLost()) {
+                            // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
                             eventBus.emitSynthetic(finalSessionId, replyId, "error",
                                 "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                     e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                         }
-                        lease.release();
-                        eventBus.closeSession(finalSessionId);
+                        endTurn(lease, finalSessionId);
                     },
-                    () -> {
-                        lease.release();
-                        eventBus.closeSession(finalSessionId);
-                    });
+                    () -> endTurn(lease, finalSessionId));
 
             // ===== 7. onCancel =====
             sink.onCancel(() -> {
@@ -300,7 +298,12 @@ public class ChatStreamController {
     // ===== 事件处理 =====
 
     private void handleEventAndEmit(AgentEvent event, String sessionId,
-                                    String replyId, TurnLeaseGuard lease, String userId) {
+                                    String replyId, TurnLeaseGuard lease, String userId,
+                                    FluxSink<ServerSentEvent<String>> sink) {
+        if (stopIfLeaseLost(lease, sessionId, sink)) {
+            return;
+        }
+
         audit(event, sessionId);
 
         // write_file 输入参数截获
@@ -345,9 +348,59 @@ public class ChatStreamController {
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
+            endTurn(lease, sessionId);
+        }
+    }
+
+    /**
+     * 租约已失去：本副本不再拥有该 session 的写入权。
+     *
+     * <p>继续 append 会与新 owner 的 seq 区间重叠——这正是 C1 要防的事——所以立刻停手、
+     * 丢弃缓冲、把控制权交还客户端。终态帧**只发本连接的客户端、不落库**：此刻任何
+     * append 都会占用可能与新 owner 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
+     *
+     * @return true = 本事件已被丢弃，调用方必须直接返回
+     */
+    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
+                                    FluxSink<ServerSentEvent<String>> sink) {
+        if (!lease.isLost()) {
+            return false;
+        }
+        if (lease.tryMarkLostNotified()) {
+            log.error("[chat] turn lease lost, stopping writer (sid={})", sessionId);
+            sink.next(interruptedSSE("lease_lost"));
+            eventBus.abandonSession(sessionId);
             lease.release();
+        }
+        return true;
+    }
+
+    /**
+     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
+     *
+     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
+     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
+     * ——正是 C1 要防的重叠。代价是流结束与租约释放之间有一个极短窗口（客户端已看到
+     * 结束、锁还在我们手上），抢锁方按 ACQUIRE_TIMEOUT 排队等一拍即可。
+     *
+     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
+     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
+     */
+    private void endTurn(TurnLeaseGuard lease, String sessionId) {
+        boolean lost = lease.isLost();
+        if (lost) {
+            eventBus.abandonSession(sessionId);
+        } else {
             eventBus.closeSession(sessionId);
         }
+        lease.release();
+    }
+
+    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
+    private static ServerSentEvent<String> interruptedSSE(String reason) {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
+            .build();
     }
 
     // ===== present_file 累积 & 合成 =====

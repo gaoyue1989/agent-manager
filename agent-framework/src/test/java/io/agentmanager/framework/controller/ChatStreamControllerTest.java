@@ -3,6 +3,9 @@ package io.agentmanager.framework.controller;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -27,17 +30,22 @@ import io.agentscope.core.message.MsgRole;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -89,7 +97,8 @@ class ChatStreamControllerTest {
         eventBus = new SessionEventBus(eventStore,
             Duration.ofMillis(100), Duration.ofMinutes(5), 64);
 
-        when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        // 默认间隔；个别用例会重新打桩成亚秒值来逼出丢锁，故 lenient
+        lenient().when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
         // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
         lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
         when(sandboxConfig.enabled()).thenReturn(false);
@@ -117,6 +126,28 @@ class ChatStreamControllerTest {
             mock(io.agentmanager.framework.service.FileAssetStore.class));
     }
 
+    /** 等续租线程跑过头一拍（存根返回 LOST → guard 随即置位丢锁） */
+    private void awaitRenewCalled() {
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline) {
+            boolean called = mockingDetails(turnLeaseStore).getInvocations().stream()
+                .anyMatch(i -> "renew".equals(i.getMethod().getName()));
+            if (called) {
+                return;
+            }
+            sleep(5);
+        }
+        fail("续租线程未在 3s 内被调用");
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private List<String> collect(String sessionId, String message, String userId) {
         return collect(sessionId, message, userId, null);
     }
@@ -142,7 +173,55 @@ class ChatStreamControllerTest {
             "应通过 EventBus 输出: " + frames);
 
         verify(turnLeaseStore).tryAcquire(sessionId);
-        verify(turnLeaseStore).release(sessionId, "tok-1");
+        // endTurn 先 closeSession 再放锁：流一结束 collect() 就返回了，而 release 还在 boundedElastic 线程上，必须等待
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-1");
+    }
+
+    @Test
+    void chatShouldStopWritingAfterLeaseLost() throws Exception {
+        // 本副本丢了该 session 的执行权之后，继续 append 会与新 owner 的 seq 区间重叠
+        // ——这正是 C1 要防的事。所以后续事件必须被丢弃，且收尾走 abandonTurn（丢弃缓冲）
+        // 而不是 finishTurn（刷缓冲）。
+        var sessionId = "test-user-lost";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-lost");
+        // 亚秒配置把「丢锁」逼到 20ms 内出现
+        when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofMillis(20));
+        when(turnLeaseStore.ttl()).thenReturn(Duration.ofMillis(60));
+        lenient().when(turnLeaseStore.renew(anyString(), anyString()))
+            .thenReturn(TurnLeaseStore.RenewOutcome.LOST);
+
+        // 事件由测试显式编排，而不是让源流按自己的节奏跑：丢锁后 abandonSession 会**提前**
+        // 关掉请求流，collect() 随即返回 —— 若源流还在后面慢慢发，断言就变成了空断言
+        // （MUT-J/MUT-L 实测正是如此）。multicast sink 是同步投递的，tryEmitNext 返回即处理完。
+        var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
+        var subscribed = new CountDownLatch(1);
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+        var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
+        assertTrue(subscribed.await(3, TimeUnit.SECONDS), "controller 未订阅 agent 事件流");
+        // 必须等到续租那一拍真的跑过（LOST → 置位）再发事件，否则第一个事件走的是正常路径
+        awaitRenewCalled();
+        sleep(50);   // 越过「调用被记录」与 markLost 置位之间的窗口
+
+        events.tryEmitNext(new TextBlockDeltaEvent("reply-l", "block-l", "hi"));
+        events.tryEmitNext(new AgentEndEvent("reply-l"));
+        events.tryEmitComplete();   // 源流结束 → endTurn
+
+        var frames = framesFuture.get(5, TimeUnit.SECONDS);
+
+        assertEquals(1, frames.stream().filter(f -> f != null && f.contains("interrupted")).count(),
+            "客户端只应看到一帧 interrupted（后续事件虽仍会进来，但流已关）: " + frames);
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("lease_lost")), frames.toString());
+        // 用 any() 而非 anyString()：后者不匹配 null，而 emitSynthetic 传 null replyId 时
+        // 会把"终态帧被落库"这条漏检
+        verify(eventStore, never()).append(any(), any(), any(), any());
+        // 两次调用是设计使然：stopIfLeaseLost 先拆一次让客户端立刻收流，
+        // 源流跑完后 endTurn 再来一次（幂等空转）
+        verify(eventStore, atLeastOnce()).abandonTurn(sessionId);
+        verify(eventStore, never()).finishTurn(sessionId);
+        // 租约已属于接管者，不得再 DELETE（token 校验虽不会误删，但也不该谎称是自己释放的）
+        verify(turnLeaseStore, never()).release(sessionId, "tok-lost");
     }
 
     @Test
@@ -155,7 +234,8 @@ class ChatStreamControllerTest {
 
         var frames = collect(sessionId, "hello", null);
         assertNotNull(frames);
-        verify(turnLeaseStore).release(sessionId, "tok-2");
+        // endTurn 先 closeSession 再放锁：流一结束 collect() 就返回了，而 release 还在 boundedElastic 线程上，必须等待
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-2");
     }
 
     @Test

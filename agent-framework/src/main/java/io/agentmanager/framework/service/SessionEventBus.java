@@ -202,6 +202,27 @@ public class SessionEventBus {
         }
     }
 
+    /**
+     * 租约丢失时的会话收尾：**丢弃**未落库的缓冲 + 释放 seq 计数器 + 收流。
+     *
+     * <p>不能复用 {@link #closeSession}：后者走 {@code finishTurn → flushPending}，会把缓冲里
+     * 那些按「本副本仍持锁」分配的 seq 写下去——那正是丢租约要防的事。
+     *
+     * <p>sink 关掉是为了让连着的订阅者正常收到 onComplete 结束这次流。turn 本身在被接管的
+     * 副本上继续，用户重连后由观察者路径接手新 owner 的输出。
+     */
+    public void abandonSession(String sessionId) {
+        eventStore.abandonTurn(sessionId);
+        var sink = sinks.remove(sessionId);
+        lastActiveAt.remove(sessionId);
+        if (sink != null) {
+            sink.tryEmitComplete();
+            // 只在真的拆掉了 sink 时打日志：丢锁后 stopIfLeaseLost 先拆一次，
+            // 源流随后跑完时 endTurn 还会再来一次（幂等空转），不该重复刷 WARN
+            log.warn("[EventBus] session abandoned after lease loss (sid={})", sessionId);
+        }
+    }
+
     // ===== 过期清理 =====
 
     /**

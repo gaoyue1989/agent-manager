@@ -61,6 +61,35 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void abandonTurnDiscardsBufferedRowsWithoutFlushing() throws Exception {
+        // 丢租约的收尾**不能**刷缓冲：缓冲里那些行的 seq 是本副本「以为自己还持锁」时
+        // 分配的，此刻新 owner 可能已在同一区间分配过 seq —— 写下去正是 C1 要防的静默重复行。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(0);
+        when(conn.prepareStatement(contains("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        store.append("sid-ab", "rid-1", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
+        // 另一个 session 的行也在缓冲里：A 的收尾**不得**把它顺带刷出去
+        // （这正是「abandonTurn 不是 finishTurn」的可观测差别）
+        store.append("sid-other", "rid-2", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
+        store.append("sid-ab", "rid-1", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
+
+        store.abandonTurn("sid-ab");
+
+        verify(insertPs, never()).executeUpdate();
+        assertEquals(1, store.append("sid-ab", "rid-1", "AGENT_END", "{}"),
+            "计数器已释放 → 下一次 append 重新播种（DB 最大值 0 + 1）");
+    }
+
+    @Test
     void appendReturnsSeqOnSuccess() throws Exception {
         // 用里程碑事件（非 delta）——delta 现在只进缓冲、不落库，见 deltasAreBufferedUntilMilestone
         // Mock: SELECT MAX → 5, INSERT ok

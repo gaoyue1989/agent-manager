@@ -26,15 +26,19 @@ import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.harness.agent.HarnessAgent;
 import reactor.core.publisher.Mono;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -56,6 +60,7 @@ class ConfirmControllerTest {
     private ConfirmContextStore confirmContextStore;
     private TurnLeaseStore turnLeaseStore;
     private SessionEventBus eventBus;
+    private SessionEventStore eventStore;
     private SessionUserStore sessionUserStore;
 
     @BeforeEach
@@ -63,12 +68,13 @@ class ConfirmControllerTest {
         agent = mock(HarnessAgent.class);
         confirmContextStore = mock(ConfirmContextStore.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
-        when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        // 默认间隔；个别用例会重新打桩成亚秒值来逼出丢锁，故 lenient
+        lenient().when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
         // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
         lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
 
         // SessionEventBus 依赖 SessionEventStore（mock）
-        SessionEventStore eventStore = mock(SessionEventStore.class);
+        eventStore = mock(SessionEventStore.class);
         when(eventStore.queryAfter(anyString(), any(), anyInt())).thenReturn(reactor.core.publisher.Flux.empty());
         when(eventStore.findLatest(anyString())).thenReturn(null);
         when(eventStore.findMaxSeq(anyString())).thenReturn(0);
@@ -97,6 +103,28 @@ class ConfirmControllerTest {
         when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
             .thenReturn(reactor.core.publisher.Flux.just(ask));
         runtimeService.invokeStream("query weather", "t1", "alice").collectList().block();
+    }
+
+    /** 等续租线程跑过头一拍（存根返回 LOST → guard 随即置位丢锁） */
+    private void awaitRenewCalled() {
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline) {
+            boolean called = org.mockito.Mockito.mockingDetails(turnLeaseStore).getInvocations().stream()
+                .anyMatch(i -> "renew".equals(i.getMethod().getName()));
+            if (called) {
+                return;
+            }
+            sleep(5);
+        }
+        throw new AssertionError("续租线程未在 3s 内被调用");
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void stubPendingStoreRow() {
@@ -167,6 +195,50 @@ class ConfirmControllerTest {
         assertNotNull(frame, "should emit error SSE frame");
         assertTrue(frame.data().contains("confirm_context_not_found"),
             "expected error SSE frame, got: " + frame.data());
+    }
+
+    @Test
+    void confirmStreamShouldStopWritingAfterLeaseLost() throws Exception {
+        stubPendingStoreRow();
+        when(turnLeaseStore.tryAcquire("t1")).thenReturn("tok-lost");
+        // 亚秒配置把「丢锁」逼到 20ms 内出现，早于下面 50ms 才到达的事件
+        when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofMillis(20));
+        when(turnLeaseStore.ttl()).thenReturn(Duration.ofMillis(60));
+        lenient().when(turnLeaseStore.renew(anyString(), anyString()))
+            .thenReturn(TurnLeaseStore.RenewOutcome.LOST);
+        // 事件由测试显式编排：丢锁后 abandonSession 会**提前**关掉请求流，block() 随即返回，
+        // 若源流还在后面慢慢发，断言就变成空断言。multicast sink 同步投递，tryEmitNext 返回即处理完。
+        var events = reactor.core.publisher.Sinks.many().multicast()
+            .<io.agentscope.core.event.AgentEvent>onBackpressureBuffer();
+        var subscribed = new java.util.concurrent.CountDownLatch(1);
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore);
+        var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+            controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+                    Map.of("tool_call_id", "call-1", "confirmed", true))))
+                .collectList().block(Duration.ofSeconds(10)));
+        assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS), "未订阅 agent 事件流");
+        awaitRenewCalled();   // 等丢锁真的置位，否则第一个事件走正常路径
+        sleep(50);
+
+        events.tryEmitNext(new io.agentscope.core.event.TextBlockDeltaEvent("reply-2", "block-2", "hi"));
+        events.tryEmitNext(new io.agentscope.core.event.AgentEndEvent("reply-2"));
+        events.tryEmitComplete();
+
+        var frames = framesFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertNotNull(frames);
+        assertEquals(1, frames.stream().filter(f -> f.data() != null && f.data().contains("interrupted")).count(),
+            "终态帧只应发一帧: " + frames);
+        assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("lease_lost")),
+            frames.toString());
+        // 用 any() 而非 anyString()：后者不匹配 null，会漏检「终态帧被落库」
+        verify(eventStore, never()).append(any(), any(), any(), any());
+        // 两次调用是设计使然（先拆流、后幂等空转）
+        verify(eventStore, atLeastOnce()).abandonTurn("t1");
+        verify(eventStore, never()).finishTurn("t1");
     }
 
     @Test
