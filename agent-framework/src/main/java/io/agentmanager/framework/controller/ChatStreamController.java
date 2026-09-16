@@ -93,6 +93,7 @@ public class ChatStreamController {
     private final WorkspaceReader workspaceReader;
     private final AgentManagerProperties props;
     private final SkillInjectionService skillInjectionService;
+    private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
 
     /** present_file 工具结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
@@ -118,7 +119,8 @@ public class ChatStreamController {
                                 SessionUserStore sessionUserStore,
                                 WorkspaceReader workspaceReader,
                                 AgentManagerProperties props,
-                                SkillInjectionService skillInjectionService) {
+                                SkillInjectionService skillInjectionService,
+                                io.agentmanager.framework.service.FileAssetStore fileAssetStore) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
@@ -131,6 +133,7 @@ public class ChatStreamController {
         this.workspaceReader = workspaceReader;
         this.props = props;
         this.skillInjectionService = skillInjectionService;
+        this.fileAssetStore = fileAssetStore;
     }
 
     /**
@@ -171,6 +174,11 @@ public class ChatStreamController {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         userId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
 
+        log.info("[chat] start: sessionId={}, userId={}, isNew={}, messageLen={}, fileCount={}",
+            sessionId, userId, isNewSession,
+            message != null ? message.length() : 0,
+            body.fileIds() != null ? body.fileIds().size() : 0);
+
         String finalSessionId = sessionId;
         String finalUserId = userId;
         boolean emitSessionCreated = isNewSession;
@@ -202,6 +210,7 @@ public class ChatStreamController {
                 token = turnLeaseStore.tryAcquire(finalSessionId);
             }
             if (token == null) {
+                log.warn("[chat] turn_in_progress: sessionId={}, waiting timeout", finalSessionId);
                 sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
                     + "' has an active turn and queue timeout reached"));
                 sink.complete();
@@ -264,7 +273,7 @@ public class ChatStreamController {
 
             // ===== 7. onCancel =====
             sink.onCancel(() -> {
-                log.info("SSE disconnected, agent execution continues (sid={}, rid={})",
+                log.info("[chat] SSE disconnected, agent execution continues (sid={}, rid={})",
                     finalSessionId, replyId);
             });
 
@@ -296,6 +305,9 @@ public class ChatStreamController {
 
         // HITL
         if (event instanceof RequireUserConfirmEvent) {
+            log.info("[chat] HITL permission_ask: sessionId={}, tools={}", sessionId,
+                ((RequireUserConfirmEvent) event).getToolCalls().stream()
+                    .map(tc -> tc.getName()).toList());
             runtimeService.storeConfirmContext(sessionId, event);
             lease.release();
         }
@@ -309,6 +321,7 @@ public class ChatStreamController {
 
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
+            log.info("[chat] agent completed: sessionId={}", sessionId);
             lease.release();
             eventBus.closeSession(sessionId);
         }
@@ -344,15 +357,18 @@ public class ChatStreamController {
                 log.warn("present_file result missing file_id/file_name, skip file_ready");
                 return;
             }
+            var fileId = node.get("file_id").asText();
             var payload = new LinkedHashMap<String, Object>();
             payload.put("type", "file_ready");
-            payload.put("file_id", node.get("file_id").asText());
+            payload.put("file_id", fileId);
             payload.put("file_name", node.get("file_name").asText());
             payload.put("mime_type", node.has("mime_type") ? node.get("mime_type").asText() : null);
             payload.put("size", node.has("size") ? node.get("size").asLong() : 0);
-            payload.put("download_url", "/files/" + node.get("file_id").asText());
+            payload.put("download_url", "/files/" + fileId);
             eventBus.emitSynthetic(sessionId, replyId, "file_ready",
                 AgentEventSseSerializer.payload(payload));
+            // 回写 reply_id 到 file_asset，供历史回放按消息维度分发卡片
+            fileAssetStore.updateReplyId(fileId, replyId);
             log.info("file_ready emitted for {}", node.get("file_name").asText());
         } catch (Exception e) {
             log.warn("file_ready synthesis failed: {}", e.getMessage());

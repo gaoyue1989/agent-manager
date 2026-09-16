@@ -1,6 +1,14 @@
 server:
   port: ${SERVER_PORT:8100}
 
+# 日志配置
+logging:
+  file:
+    path: ${LOG_PATH:${user.home}/logs/agent-framework}
+  level:
+    root: INFO
+    io.agentmanager.framework: ${APP_LOG_LEVEL:INFO}
+
 spring:
   application:
     name: agent-framework
@@ -19,15 +27,15 @@ agent:
     model-id: ${LLM_MODEL_ID:}
     base-url: ${LLM_BASE_URL:}
     provider: ${LLM_PROVIDER:openai}
-    temperature: ${LLM_TEMPERATURE:0.7}
-    max-tokens: ${LLM_MAX_TOKENS:4096}
+    temperature: ${LLM_TEMPERATURE:0.3}
+    max-tokens: ${LLM_MAX_TOKENS:16384}
     timeout: ${LLM_TIMEOUT:120}
-    thinking-budget: ${LLM_THINKING_BUDGET:0}
+    enable-thinking: ${LLM_ENABLE_THINKING:false}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
   checkpoint:
-    jdbc-url: ${CHECKPOINT_JDBC_URL:jdbc:mysql://127.0.0.1:3307/agent_manager_test}
+    jdbc-url: ${CHECKPOINT_JDBC_URL:jdbc:mysql://28.106.125.216:3316/agent_manager_test}
     username: ${CHECKPOINT_USERNAME:agent_manager}
     password: ${CHECKPOINT_PASSWORD:Agent@Manager2026}
     db-name: ${CHECKPOINT_DB_NAME:}
@@ -39,7 +47,7 @@ agent:
     cpu-count: ${SANDBOX_CPU_COUNT:1}
     execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
     opensandbox:
-      server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
+      server-url: ${OPENSANDBOX_SERVER_URL:localhost:8081}
       api-key: ${OPENSANDBOX_API_KEY:}
   file:
     upload-enabled: ${FILE_UPLOAD_ENABLED:true}

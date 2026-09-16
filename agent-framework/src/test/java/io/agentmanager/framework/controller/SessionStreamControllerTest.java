@@ -109,7 +109,8 @@ class SessionStreamControllerTest {
         when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
         controller = new SessionStreamController(chatChannel, runtimeService, mcpToolRegistrar,
             turnLeaseStore, toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
-            sessionUserStore, workspaceReader, props, skillInjectionService);
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class));
     }
 
     private List<String> collect(String sid, String message, String userId) {

@@ -17,6 +17,7 @@ import io.agentscope.core.agent.RuntimeContext;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -56,7 +57,11 @@ class FileToolsTest {
         assertTrue(result.contains("report.txt"), "返回文件名: " + result);
         assertTrue(result.contains("text/plain"), "mime 推断: " + result);
         verify(fileStorage).write(anyString(), any(), any(Long.class), anyString());
-        verify(fileAssetStore).insert(any(FileAssetStore.FileAsset.class));
+        // 验证 insert 时 sessionId 传 null（工具层不写 sessionId，由控制器层回写）
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertTrue(captor.getValue().sessionId() == null,
+            "工具层 sessionId 应为 null，实际: " + captor.getValue().sessionId());
     }
 
     @Test

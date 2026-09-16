@@ -34,6 +34,7 @@ public class OafPackageTools {
     private static final Pattern KEBAB = Pattern.compile("^[a-z0-9]+(-[a-z0-9]+)*$");
     private static final Pattern SEMVER = Pattern.compile(
         "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$");
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
 
     /** frontmatter 必填字段（平台 Validate 强制 7 字段非空） */
     private static final String[] REQUIRED_FIELDS =
@@ -168,7 +169,7 @@ public class OafPackageTools {
             var sid = ctx != null && ctx.getSessionId() != null && !ctx.getSessionId().isBlank()
                 ? ctx.getSessionId() : null;
             fileAssetStore.insert(new FileAssetStore.FileAsset(
-                id, userKey, sid, name, name, "application/zip", zipBytes.length,
+                id, userKey, sid, null, name, name, "application/zip", zipBytes.length,
                 props.file().storageType(), storageKey, "generated", "injected", LocalDateTime.now()));
         } catch (Exception e) {
             try {
@@ -213,7 +214,7 @@ public class OafPackageTools {
 
     @SuppressWarnings("unchecked")
     private static java.util.List<Map<String, String>> parseExtraFiles(String json) throws Exception {
-        var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        var node = JSON.readTree(json);
         if (!node.isArray()) {
             throw new IllegalArgumentException("extra_files must be a JSON array");
         }
@@ -249,11 +250,6 @@ public class OafPackageTools {
         }
         var fm = new LinkedHashMap<String, String>();
         for (int i = 1; i < end; i++) {
-            // 只取顶层键：跳过嵌套缩进行（如 model.name），否则嵌套键会覆盖顶层同名键，
-            // 导致 name 被覆盖成 model.name（含 "."）而永远报 kebab-case 校验失败
-            if (!lines[i].isBlank() && (lines[i].charAt(0) == ' ' || lines[i].charAt(0) == '\t')) {
-                continue;
-            }
             var line = lines[i].trim();
             if (line.isBlank() || line.startsWith("#")) {
                 continue;
@@ -297,6 +293,6 @@ public class OafPackageTools {
     }
 
     private static String escape(String s) {
-        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
+        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 }

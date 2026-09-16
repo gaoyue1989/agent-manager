@@ -110,11 +110,13 @@ class ThreadControllerTest {
         when(rs.getTimestamp("updated_at")).thenReturn(new Timestamp(2000), null);
 
         var result = controller.listThreads("alice", null);
-        // verify SQL uses LEFT JOIN + WHERE su.user_id = ?
+        // verify SQL uses LEFT JOIN with LIKE matching (agent_state.session_id = slotId format)
         verify(conn).prepareStatement("SELECT su.session_id, su.remark, MAX(a.updated_at) AS updated_at "
-            + "FROM session_user su LEFT JOIN agent_state a ON su.session_id = a.session_id "
+            + "FROM session_user su LEFT JOIN agent_state a "
+            + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
             + "WHERE su.user_id = ? "
-            + "GROUP BY su.session_id, su.remark ORDER BY updated_at DESC");
+            + "GROUP BY su.session_id, su.remark "
+            + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC");
         verify(ps).setString(1, "alice");
 
         assertEquals(2, result.size());
@@ -181,13 +183,17 @@ class ThreadControllerTest {
     void getThreadShouldReturnSessionMetaAndMessages() throws Exception {
         when(sessionUserStore.findUserIdBySession("acme__s1")).thenReturn("alice");
 
+        // getThread: meta (agent_state) + generatedFiles (throw) + loadMessages (throw)
         var conn = mock(Connection.class);
+        when(dataSource.getConnection()).thenReturn(conn)
+            .thenThrow(new RuntimeException("skip gf"))
+            .thenThrow(new RuntimeException("skip lm"));
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true, false); // 1st: meta, 2nd: messages(empty)
+        when(rs.next()).thenReturn(true, false);
         when(rs.getTimestamp("updated_at")).thenReturn(new Timestamp(3000));
 
         var result = controller.getThread("acme__s1");
@@ -202,12 +208,15 @@ class ThreadControllerTest {
         when(sessionUserStore.findUserIdBySession("acme__s2")).thenReturn(null);
 
         var conn = mock(Connection.class);
+        when(dataSource.getConnection()).thenReturn(conn)
+            .thenThrow(new RuntimeException("skip gf"))
+            .thenThrow(new RuntimeException("skip lm"));
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false, false);
+        when(rs.next()).thenReturn(false);
 
         var result = controller.getThread("acme__s2");
         assertEquals("", result.get("updated_at"));
@@ -222,6 +231,7 @@ class ThreadControllerTest {
         when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeUpdate()).thenReturn(1);
+        when(ps.executeQuery()).thenReturn(mock(ResultSet.class));
 
         var response = controller.deleteThread("acme__s1");
         assertEquals(200, response.getStatusCode().value());
@@ -282,12 +292,16 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldParseMessages() throws Exception {
         var conn = mock(Connection.class);
+        // generatedFiles throws (caught), loadMessages succeeds
+        when(dataSource.getConnection())
+            .thenThrow(new RuntimeException("skip generatedFiles"))
+            .thenReturn(conn);
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
+        when(rs.next()).thenReturn(true, false);
         when(rs.getString("state_data")).thenReturn(
             "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":\"hi\"}]}");
 
@@ -302,12 +316,15 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldHandlePartsFallback() throws Exception {
         var conn = mock(Connection.class);
+        when(dataSource.getConnection())
+            .thenThrow(new RuntimeException("skip generatedFiles"))
+            .thenReturn(conn);
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
+        when(rs.next()).thenReturn(true, false);
         when(rs.getString("state_data")).thenReturn(
             "{\"nested\":{\"messages\":[{\"role\":\"user\",\"parts\":[{\"text\":\"p1\"}]}]}}");
 
@@ -320,12 +337,15 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldParseAgentScopeContextField() throws Exception {
         var conn = mock(Connection.class);
+        when(dataSource.getConnection())
+            .thenThrow(new RuntimeException("skip generatedFiles"))
+            .thenReturn(conn);
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
+        when(rs.next()).thenReturn(true, false);
         when(rs.getString("state_data")).thenReturn(
             "{\"session_id\":\"s5\",\"summary\":\"\",\"context\":[" +
             "{\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"metadata\":{}}," +
@@ -344,12 +364,15 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldSkipThinkingBlocks() throws Exception {
         var conn = mock(Connection.class);
+        when(dataSource.getConnection())
+            .thenThrow(new RuntimeException("skip generatedFiles"))
+            .thenReturn(conn);
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
+        when(rs.next()).thenReturn(true, false);
         when(rs.getString("state_data")).thenReturn(
             "{\"context\":[{\"role\":\"ASSISTANT\"," +
             "\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal reasoning\"}]}]}");
@@ -363,12 +386,15 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldReturnEmptyWhenNoRow() throws Exception {
         var conn = mock(Connection.class);
+        when(dataSource.getConnection())
+            .thenThrow(new RuntimeException("skip generatedFiles"))
+            .thenReturn(conn);
+
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        when(dataSource.getConnection()).thenReturn(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false);
+        when(rs.next()).thenReturn(false); // no messages
 
         var result = controller.threadHistory("acme:t3");
         @SuppressWarnings("unchecked")
@@ -377,22 +403,25 @@ class ThreadControllerTest {
     }
 
     @Test
-    void threadHistoryShouldReturnErrorOnException() throws Exception {
+    void threadHistoryShouldReturnEmptyOnException() throws Exception {
+        // generatedFiles throws, loadMessages also throws -> empty messages
         when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
         var result = controller.threadHistory("acme:t4");
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
-        assertEquals("db down", result.get("error"));
     }
 
     @Test
-    void threadHistoryShouldAttachPendingConfirm() {
+    void threadHistoryShouldAttachPendingConfirm() throws Exception {
         var pending = new ConfirmContextStore.PendingConfirm("reply-9", List.of(
             ToolUseBlock.builder().id("call-9").name("get_weather")
                 .input(java.util.Map.of("city", "beijing")).build()),
             java.time.Instant.now());
         when(confirmContextStore.findPending(anyString())).thenReturn(Optional.of(pending));
+
+        // Skip generatedFiles and loadMessages by throwing
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
         var result = controller.threadHistory("acme:mt1");
         assertNotNull(result.get("pendingConfirm"));
@@ -400,8 +429,10 @@ class ThreadControllerTest {
     }
 
     @Test
-    void threadHistoryShouldReturnNullPendingConfirmWhenNone() {
+    void threadHistoryShouldReturnNullPendingConfirmWhenNone() throws Exception {
         when(confirmContextStore.findPending(anyString())).thenReturn(Optional.empty());
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
+
         var result = controller.threadHistory("acme:mt2");
         assertNull(result.get("pendingConfirm"));
     }

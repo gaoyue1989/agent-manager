@@ -92,6 +92,7 @@ public class SessionStreamController {
     private final WorkspaceReader workspaceReader;
     private final AgentManagerProperties props;
     private final SkillInjectionService skillInjectionService;
+    private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
 
     /** present_file 工具结果文本累积（toolCallId → 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
@@ -118,7 +119,8 @@ public class SessionStreamController {
                                    SessionUserStore sessionUserStore,
                                    WorkspaceReader workspaceReader,
                                    AgentManagerProperties props,
-                                   SkillInjectionService skillInjectionService) {
+                                   SkillInjectionService skillInjectionService,
+                                   io.agentmanager.framework.service.FileAssetStore fileAssetStore) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
         this.mcpToolRegistrar = mcpToolRegistrar;
@@ -132,6 +134,7 @@ public class SessionStreamController {
         this.workspaceReader = workspaceReader;
         this.props = props;
         this.skillInjectionService = skillInjectionService;
+        this.fileAssetStore = fileAssetStore;
     }
 
     // ===== POST /chat：发起对话（SSE 单次流） =====
@@ -159,6 +162,11 @@ public class SessionStreamController {
         String finalSessionId = sessionId;
         String finalUserId = userId;
 
+        log.info("[session-chat] start: sessionId={}, userId={}, messageLen={}, fileCount={}",
+            finalSessionId, finalUserId,
+            message != null ? message.length() : 0,
+            body.fileIds() != null ? body.fileIds().size() : 0);
+
         // 记录会话-用户映射，供 GET /threads?userId=xxx 过滤
         sessionUserStore.upsert(finalSessionId, finalUserId);
 
@@ -178,6 +186,7 @@ public class SessionStreamController {
                 token = turnLeaseStore.tryAcquire(finalSessionId);
             }
             if (token == null) {
+                log.warn("[session-chat] turn_in_progress: sessionId={}, waiting timeout", finalSessionId);
                 sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
                     + "' has an active turn and queue timeout reached"));
                 sink.complete();
@@ -242,7 +251,7 @@ public class SessionStreamController {
 
             // ===== 7. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
-                log.info("SSE disconnected, agent execution continues (sid={}, rid={})",
+                log.info("[session-chat] SSE disconnected, agent execution continues (sid={}, rid={})",
                     finalSessionId, replyId);
                 // 不调用 agentSubscription.dispose()
                 // 不调用 lease.release() —— turn 仍在执行
@@ -369,6 +378,9 @@ public class SessionStreamController {
 
         // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
         if (event instanceof RequireUserConfirmEvent) {
+            log.info("[session-chat] HITL permission_ask: sessionId={}, tools={}", sessionId,
+                ((RequireUserConfirmEvent) event).getToolCalls().stream()
+                    .map(tc -> tc.getName()).toList());
             runtimeService.storeConfirmContext(sessionId, event);
             lease.release();
             // HITL 暂停点：锁已让出、状态已持久化
@@ -385,6 +397,7 @@ public class SessionStreamController {
 
         // AGENT_END → 释放租约 + 关闭 EventBus
         if (event.getType() == AgentEventType.AGENT_END) {
+            log.info("[session-chat] agent completed: sessionId={}", sessionId);
             lease.release();
             eventBus.closeSession(sessionId);
         }
@@ -429,16 +442,20 @@ public class SessionStreamController {
                 log.warn("present_file result missing file_id/file_name, skip file_ready");
                 return;
             }
+            var fileId = node.get("file_id").asText();
             var payload = new LinkedHashMap<String, Object>();
             payload.put("type", "file_ready");
-            payload.put("file_id", node.get("file_id").asText());
+            payload.put("file_id", fileId);
             payload.put("file_name", node.get("file_name").asText());
             payload.put("mime_type", node.has("mime_type") ? node.get("mime_type").asText() : null);
             payload.put("size", node.has("size") ? node.get("size").asLong() : 0);
-            payload.put("download_url", "/files/" + node.get("file_id").asText());
+            payload.put("download_url", "/files/" + fileId);
             eventBus.emitSynthetic(sessionId, replyId, "file_ready",
                 AgentEventSseSerializer.payload(payload));
-            log.info("file_ready emitted for {}", node.get("file_name").asText());
+            // 回写 reply_id 和 session_id 到 file_asset，供历史回放按消息维度分发卡片
+            fileAssetStore.updateReplyId(fileId, replyId);
+            fileAssetStore.updateSessionId(fileId, sessionId);
+            log.info("file_ready emitted for {} (sid={})", node.get("file_name").asText(), sessionId);
         } catch (Exception e) {
             log.warn("file_ready synthesis failed: {}", e.getMessage());
         }

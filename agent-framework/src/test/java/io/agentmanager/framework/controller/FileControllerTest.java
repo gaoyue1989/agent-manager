@@ -46,7 +46,7 @@ public class FileControllerTest {
 
     public static AgentManagerProperties testProps() {
         return new AgentManagerProperties(
-            new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120,0),
+            new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
@@ -129,7 +129,7 @@ public class FileControllerTest {
 
     @Test
     void downloadShouldReturnAttachmentStream() throws Exception {
-        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440001", "alice", "s1", "report.pdf",
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440001", "alice", "s1", null, "report.pdf",
             "outputs/report.pdf", "application/pdf", 100, "local", "generated/k/id.pdf",
             "generated", "injected", java.time.LocalDateTime.now());
         when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440001")).thenReturn(java.util.Optional.of(asset));
@@ -147,7 +147,7 @@ public class FileControllerTest {
 
     @Test
     void downloadInlineForImage() throws Exception {
-        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440002", "alice", null, "pic.png",
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440002", "alice", null, null, "pic.png",
             null, "image/png", 10, "local", "upload/k/pic.png", "upload", "injected",
             java.time.LocalDateTime.now());
         when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440002")).thenReturn(java.util.Optional.of(asset));
@@ -160,7 +160,7 @@ public class FileControllerTest {
 
     @Test
     void downloadStorageMissingShouldReturn502() throws Exception {
-        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440003", "alice", null, "a.txt",
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440003", "alice", null, null, "a.txt",
             null, "text/plain", 10, "local", "upload/k/a.txt", "upload", "injected",
             java.time.LocalDateTime.now());
         when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440003")).thenReturn(java.util.Optional.of(asset));

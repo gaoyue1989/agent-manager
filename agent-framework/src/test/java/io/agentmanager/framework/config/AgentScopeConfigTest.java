@@ -159,7 +159,7 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties propsForLlm() {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
-                "k", "m", "http://localhost", "openai", 0.7, 4096, 120,0),
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true),
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
@@ -178,7 +178,7 @@ class AgentScopeConfigTest {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120,0);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true);
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

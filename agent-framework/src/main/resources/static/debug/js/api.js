@@ -86,7 +86,7 @@ export const api = {
   getWorkspace: () => get('/debug/workspace'),
   getSandbox: () => get('/debug/sandbox'),
   getLogs: (level = 'all', limit = 100) => get('/debug/logs?level=' + level + '&limit=' + limit),
-  getThreads: () => get('/threads'),
+  getThreads: (userId) => get('/threads' + (userId ? '?userId=' + encodeURIComponent(userId) : '')),
   getThreadHistory: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/history'),
   getLlmCalls: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls'),
 

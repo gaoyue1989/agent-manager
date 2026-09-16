@@ -84,6 +84,10 @@ public class SessionEventBus {
         String type = event.getType().name();
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
+        if (log.isDebugEnabled()) {
+            log.debug("[EventBus] emit: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
+        }
+
         var sink = sinks.get(sessionId);
         if (sink != null) {
             var enveloped = new SessionEventStore.EnvelopedEvent(
@@ -105,6 +109,8 @@ public class SessionEventBus {
      */
     public int emitSynthetic(String sessionId, String replyId, String type, String payload) {
         int seq = eventStore.append(sessionId, replyId, type, payload);
+
+        log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
 
         var sink = sinks.get(sessionId);
         if (sink != null) {
@@ -177,7 +183,7 @@ public class SessionEventBus {
         lastActiveAt.remove(sessionId);
         if (sink != null) {
             sink.tryEmitComplete();
-            log.info("SessionEventBus: session closed (sid={})", sessionId);
+            log.info("[EventBus] session closed (sid={})", sessionId);
         }
     }
 

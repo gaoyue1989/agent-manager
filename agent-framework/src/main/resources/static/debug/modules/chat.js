@@ -407,15 +407,11 @@ function scrollToBottom(force) {
 
 async function loadThreads(force) {
   try {
-    const threads = await ctx.api.getThreads();
-    ctx.state.setState('threads.list', threads);
     const uid = ctx.state.getState('ui.userId') || 'debug-user';
-    // 按当前 userId 过滤：session_id 以 "{userId}_" 或 "{userId}__" 开头
-    const filtered = (threads || []).filter((t) => {
-      const sid = t.session_id || '';
-      return sid.startsWith(uid + '_') || sid.startsWith(uid + '__') || sid === uid;
-    });
-    const sorted = filtered.slice().sort((a, b) =>
+    // ★ 优先使用服务端 userId 过滤（session_user 表），不再依赖 session_id 前缀匹配
+    const threads = await ctx.api.getThreads(uid);
+    ctx.state.setState('threads.list', threads);
+    const sorted = (threads || []).slice().sort((a, b) =>
       String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
     if (!sidebarListEl) return;
     if (sorted.length === 0) {
@@ -532,10 +528,48 @@ async function loadThreadHistory(sessionId) {
       messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
       return;
     }
+    // Track reply_id → contentEl mapping for file card distribution
+    const replyToContent = new Map();
+    let lastAssistantEl = null;
+    let lastAssistantContentEl = null;
     for (const m of msgs) {
       if (m.role === 'user') addMessage('user', m.content || '');
       else if (m.role === 'assistant' || m.role === 'agent') {
-        addAssistantHistory(m.content || '', m.tool_calls || []);
+        const refs = addAssistantHistory(m.content || '', m.tool_calls || []);
+        lastAssistantEl = refs.msgEl;
+        lastAssistantContentEl = refs.contentEl;
+        if (m.reply_id) {
+          replyToContent.set(m.reply_id, refs.contentEl);
+        }
+      }
+    }
+    // Restore file download cards from history — distribute by reply_id
+    const files = data.files || [];
+    if (files.length > 0) {
+      for (const f of files) {
+        let targetContentEl = null;
+        if (f.reply_id && replyToContent.has(f.reply_id)) {
+          targetContentEl = replyToContent.get(f.reply_id);
+        } else {
+          // Fallback: attach to last assistant message
+          targetContentEl = lastAssistantContentEl;
+        }
+        if (targetContentEl) {
+          renderFileReadyCard({ contentEl: targetContentEl }, f);
+        }
+      }
+    }
+    // Restore pending HITL confirm card
+    const pc = data.pendingConfirm;
+    if (pc && lastAssistantEl) {
+      const toolCalls = pc.tool_calls || pc.tools || [];
+      if (toolCalls.length > 0) {
+        const fakeReply = {
+          replyId: pc.reply_id,
+          contentEl: lastAssistantContentEl,
+          textEl: lastAssistantContentEl
+        };
+        renderConfirmCard(fakeReply, { tool_calls: toolCalls });
       }
     }
   } catch (e) {
@@ -584,10 +618,12 @@ function writeMarkdown(el, html) {
   }
 }
 
-/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染） */
+/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染）
+ *  @returns {{ msgEl: HTMLElement, contentEl: HTMLElement }} 元素引用，供历史回放时追加卡片 */
 function addAssistantHistory(content, toolCalls) {
   const msg = document.createElement('div');
   msg.className = 'msg assistant';
+  let contentEl = null;
   if ((toolCalls || []).length > 0) {
     msg.innerHTML = renderToolGroupBlock(toolCalls.map((tc) => ({
       type: 'tool_call',
@@ -602,9 +638,13 @@ function addAssistantHistory(content, toolCalls) {
     bubbleEl.className = 'msg-bubble';
     writeMarkdown(bubbleEl, renderMarkdown(content));
     msg.appendChild(bubbleEl);
+    contentEl = bubbleEl;
   }
+  // 无文本内容时，用 msg 本身作为容器（文件卡片可直接追加到 msg）
+  if (!contentEl) contentEl = msg;
   messagesEl.appendChild(msg);
   scrollToBottom(false);
+  return { msgEl: msg, contentEl: contentEl };
 }
 
 /** 工具分组块（默认折叠） */

@@ -39,7 +39,7 @@ class FileAssetStoreTest {
     }
 
     private FileAssetStore.FileAsset asset(String id, String userKey, String status) {
-        return new FileAssetStore.FileAsset(id, userKey, "s1", "a.csv",
+        return new FileAssetStore.FileAsset(id, userKey, "s1", null, "a.csv",
             null, "text/csv", 10, "local", "upload/k/" + id + ".csv", "upload", status,
             LocalDateTime.now());
     }

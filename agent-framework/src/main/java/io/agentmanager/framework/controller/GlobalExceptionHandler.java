@@ -31,7 +31,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<Map<String, Object>> handleMaxUploadSizeExceeded(MaxUploadSizeExceededException e) {
-        log.warn("File upload exceeded size limit: {}", e.getMessage());
+        log.warn("[ExceptionHandler] file_too_large: {}", e.getMessage());
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "file_too_large");
         body.put("message", "File size exceeds the configured upload limit");
@@ -40,7 +40,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleIllegalArgument(IllegalArgumentException e) {
-        log.warn("Bad request: {}", e.getMessage());
+        log.warn("[ExceptionHandler] bad_request: {}", e.getMessage());
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "bad_request");
         body.put("message", e.getMessage() != null ? e.getMessage() : "Invalid request");
@@ -49,10 +49,19 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<Map<String, Object>> handleIllegalState(IllegalStateException e) {
-        log.warn("Conflict: {}", e.getMessage());
+        log.warn("[ExceptionHandler] conflict: {}", e.getMessage());
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "conflict");
         body.put("message", e.getMessage() != null ? e.getMessage() : "State conflict");
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Map<String, Object>> handleUnhandledException(Exception e) {
+        log.error("[ExceptionHandler] unhandled exception: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e);
+        var body = new LinkedHashMap<String, Object>();
+        body.put("error", "internal_error");
+        body.put("message", "An unexpected error occurred");
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
     }
 }

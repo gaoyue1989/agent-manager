@@ -110,6 +110,7 @@ public class AgentRuntimeService {
         var fullThreadId = makeThreadId(threadId);
         var resolvedUserId = io.agentmanager.framework.util.PathSafe.sanitize(resolveUserId(userId));
 
+        log.info("[invoke] start: threadId={}, userId={}, messageLen={}", fullThreadId, resolvedUserId, message.length());
         try {
             var ctx = RuntimeContext.builder()
                 .sessionId(fullThreadId)
@@ -120,9 +121,10 @@ public class AgentRuntimeService {
             var result = agent.call(List.of(userMsg), ctx).block();
 
             var responseText = result != null ? result.getTextContent() : "";
+            log.info("[invoke] done: threadId={}, responseLen={}", fullThreadId, responseText.length());
             return Map.of("response", responseText, "thread_id", threadId);
         } catch (Exception e) {
-            log.error("invoke failed: {}", e.getMessage(), e);
+            log.error("[invoke] failed: threadId={}, userId={}, error={}", fullThreadId, resolvedUserId, e.getMessage(), e);
             return Map.of("response", "[Agent:" + name() + "] Error: " + e.getMessage(), "thread_id", threadId);
         }
     }
@@ -143,6 +145,8 @@ public class AgentRuntimeService {
             .userId(resolvedUserId)
             .build();
 
+        log.info("[invokeStream] start: threadId={}, userId={}, messageLen={}", fullThreadId, resolvedUserId, message.length());
+
         var userMsg = new UserMessage("user", message);
 
         return Flux.create(sink -> {
@@ -151,12 +155,13 @@ public class AgentRuntimeService {
             agent.streamEvents(List.of(userMsg), ctx)
                 .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
                 .doOnError(e -> {
-                    log.error("stream error: {}", e.getMessage(), e);
+                    log.error("[invokeStream] stream error: threadId={}, error={}", fullThreadId, e.getMessage(), e);
                     sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
                     sink.next(Map.of("type", "done"));
                     sink.complete();
                 })
                 .doOnComplete(() -> {
+                    log.info("[invokeStream] done: threadId={}", fullThreadId);
                     if (!sink.isCancelled()) {
                         sink.complete();
                     }
@@ -396,12 +401,14 @@ public class AgentRuntimeService {
             String threadId, String userId, List<Map<String, Object>> results) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
+        log.info("[resume-confirm] start: threadId={}, userId={}, results={}", fullThreadId, userId, results.size());
         var confirmCtx = consumeConfirmContext(fullThreadId);   // CAS 消费，防重复确认
         var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
 
         var result = agent.call(List.of(resumeMsg), ctx).block();
         var responseText = result != null ? result.getTextContent() : "";
+        log.info("[resume-confirm] done: threadId={}, responseLen={}", fullThreadId, responseText.length());
         return Map.of("response", responseText, "thread_id", tid);
     }
 
@@ -417,6 +424,8 @@ public class AgentRuntimeService {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
 
+        log.info("[resume-confirm-stream] start: threadId={}, userId={}, results={}", fullThreadId, userId, results.size());
+
         return Flux.create(sink -> {
             try {
                 var confirmCtx = consumeConfirmContext(fullThreadId);   // DB CAS 消费，防重复确认
@@ -425,18 +434,20 @@ public class AgentRuntimeService {
                 agent.streamEvents(List.of(resumeMsg), ctx)
                     .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
                     .doOnError(e -> {
-                        log.error("resume stream error: {}", e.getMessage(), e);
+                        log.error("[resume-confirm-stream] error: threadId={}, error={}", fullThreadId, e.getMessage(), e);
                         sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
                         sink.next(Map.of("type", "done"));
                         sink.complete();
                     })
                     .doOnComplete(() -> {
+                        log.info("[resume-confirm-stream] done: threadId={}", fullThreadId);
                         if (!sink.isCancelled()) {
                             sink.complete();
                         }
                     })
                     .subscribe();
             } catch (ConfirmContextNotFoundException | ConfirmAlreadyConsumedException e) {
+                log.warn("[resume-confirm-stream] rejected: threadId={}, error={}", fullThreadId, e.getMessage());
                 // DB miss / 已消费：以 error 事件帧返回（与 confirm-stream 预检一致）
                 sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
                 sink.next(Map.of("type", "done"));
@@ -463,6 +474,8 @@ public class AgentRuntimeService {
             String threadId, String userId, List<Map<String, Object>> results) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
+
+        log.info("[resume-confirm-events] start: threadId={}, userId={}, results={}", fullThreadId, userId, results.size());
 
         // 先消费确认上下文（CAS 防重复），再构建恢复消息
         var confirmCtx = consumeConfirmContext(fullThreadId);
@@ -605,11 +618,13 @@ public class AgentRuntimeService {
     /** 预检确认可用性（confirm-stream 端点先查后流）：DB 行存在、未过期、未消费 */
     public void checkConfirmAvailable(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);   // 补全 tenant 前缀，与 putConfirmContext 存储 key 一致
+        log.debug("[HITL] checkConfirmAvailable: sessionId={}, fullThreadId={}", sessionId, fullThreadId);
         confirmContextStore.checkAvailable(fullThreadId);
     }
 
     /** DB CAS 取出并标记已消费（防重复确认 → 409） */
     ConfirmContext consumeConfirmContext(String sessionId) {
+        log.debug("[HITL] consumeConfirmContext: sessionId={}", sessionId);
         var row = confirmContextStore.consume(sessionId);
         var toolCalls = new LinkedHashMap<String, ToolUseBlock>();
         for (var tc : row.toolCalls()) {

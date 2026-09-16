@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.a2a.spec.JSONRPCResponse;
 import io.a2a.spec.TransportProtocol;
 import io.a2a.util.Utils;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentscope.core.a2a.server.AgentScopeA2aServer;
 import io.agentscope.core.a2a.server.transport.jsonrpc.JsonRpcTransportWrapper;
 import reactor.core.publisher.Flux;
@@ -41,11 +42,14 @@ public class A2AController {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final AgentScopeA2aServer agentScopeA2aServer;
+    private final SessionUserStore sessionUserStore;
 
     private JsonRpcTransportWrapper jsonRpcHandler;
 
-    public A2AController(AgentScopeA2aServer agentScopeA2aServer) {
+    public A2AController(AgentScopeA2aServer agentScopeA2aServer,
+                         SessionUserStore sessionUserStore) {
         this.agentScopeA2aServer = agentScopeA2aServer;
+        this.sessionUserStore = sessionUserStore;
     }
 
     @PostMapping(value = "",
@@ -56,6 +60,10 @@ public class A2AController {
             @RequestHeader Map<String, String> header) {
         // message/send 兼容转换：SDK 反序列化要求 kind/messageId/parts.kind，旧客户端缺失时补全
         var converted = normalizeMessageSendBody(body);
+
+        // ★ 记录会话-用户映射，供 GET /threads?userId=xxx 过滤
+        recordSessionUser(converted);
+
         Object result = getJsonRpcHandler().handleRequest(converted, header, Map.of());
         if (result instanceof Flux<?> fluxResult) {
             // 流式: SDK 返回 JSONRPCResponse 流 → 转 SSE
@@ -177,6 +185,47 @@ public class A2AController {
                 .data("{\"error\":\"Internal conversion error\"}")
                 .event("error")
                 .build();
+        }
+    }
+
+    /**
+     * 从 A2A 请求体提取 userId / sessionId 并写入 session_user 表，
+     * 使 GET /threads?userId=xxx 能正确过滤 A2A 发起的会话。
+     * 提取顺序与 normalizeMessageSendBody 对齐：message.metadata → params 顶层。
+     */
+    @SuppressWarnings("unchecked")
+    private void recordSessionUser(String body) {
+        try {
+            var req = MAPPER.readValue(body, Map.class);
+            var method = (String) req.get("method");
+            if (!"message/send".equals(method) && !"message/stream".equals(method)) {
+                return;
+            }
+            var params = (Map<String, Object>) req.get("params");
+            if (params == null) return;
+            var message = (Map<String, Object>) params.get("message");
+            if (message == null) return;
+
+            // 从 message.metadata 中提取（normalizeMessageSendBody 已将顶层参数挪入 metadata）
+            String userId = null;
+            String sessionId = null;
+            var meta = (Map<String, Object>) message.get("metadata");
+            if (meta != null) {
+                if (meta.get("userId") instanceof String uid && !uid.isBlank()) userId = uid;
+                if (meta.get("sessionId") instanceof String sid && !sid.isBlank()) sessionId = sid;
+            }
+            // 兜底：顶层参数（兼容未经 normalize 的请求）
+            if (userId == null && params.get("userId") instanceof String uid && !uid.isBlank()) userId = uid;
+            if (sessionId == null && params.get("sessionId") instanceof String sid && !sid.isBlank()) sessionId = sid;
+
+            if (sessionId != null && userId != null) {
+                sessionUserStore.upsert(
+                    io.agentmanager.framework.util.PathSafe.sanitize(sessionId),
+                    io.agentmanager.framework.util.PathSafe.sanitize(userId));
+                log.debug("[A2A] session_user upsert: sid={}, uid={}", sessionId, userId);
+            }
+        } catch (Exception e) {
+            log.debug("[A2A] recordSessionUser skipped: {}", e.getMessage());
         }
     }
 }

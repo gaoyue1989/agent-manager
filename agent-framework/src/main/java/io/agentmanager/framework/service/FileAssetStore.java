@@ -37,6 +37,7 @@ public class FileAssetStore {
         String id,
         String userKey,
         String sessionId,
+        String replyId,
         String fileName,
         String workspacePath,
         String mimeType,
@@ -57,6 +58,7 @@ public class FileAssetStore {
                   id             VARCHAR(36)  PRIMARY KEY,
                   user_key       VARCHAR(255) NOT NULL,
                   session_id     VARCHAR(255),
+                  reply_id       VARCHAR(64),
                   file_name      VARCHAR(255) NOT NULL,
                   workspace_path VARCHAR(512),
                   mime_type      VARCHAR(128) NOT NULL,
@@ -69,9 +71,18 @@ public class FileAssetStore {
 KEY idx_user_status (user_key, status),
               KEY idx_session (session_id, created_at),
               KEY idx_origin_status (origin, status, created_at),
+              KEY idx_reply (reply_id),
               UNIQUE KEY uk_storage (storage_type, storage_key)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
+            // 幂等加列：reply_id（已有表时 ALTER）
+            try {
+                stmt.executeUpdate("ALTER TABLE file_asset ADD COLUMN reply_id VARCHAR(64) DEFAULT NULL AFTER session_id");
+                stmt.executeUpdate("ALTER TABLE file_asset ADD KEY idx_reply (reply_id)");
+                log.info("FileAssetStore: added reply_id column to file_asset");
+            } catch (Exception alterEx) {
+                // 列已存在则忽略
+            }
             log.info("FileAssetStore: file_asset table ready");
         } catch (Exception e) {
             throw new IllegalStateException("Failed to init file_asset table: " + e.getMessage(), e);
@@ -83,21 +94,22 @@ KEY idx_user_status (user_key, status),
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  INSERT INTO file_asset
-                   (id, user_key, session_id, file_name, workspace_path, mime_type, size,
+                   (id, user_key, session_id, reply_id, file_name, workspace_path, mime_type, size,
                     storage_type, storage_key, origin, status, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
                  """)) {
             stmt.setString(1, asset.id());
             stmt.setString(2, asset.userKey());
             stmt.setString(3, asset.sessionId());
-            stmt.setString(4, asset.fileName());
-            stmt.setString(5, asset.workspacePath());
-            stmt.setString(6, asset.mimeType());
-            stmt.setLong(7, asset.size());
-            stmt.setString(8, asset.storageType());
-            stmt.setString(9, asset.storageKey());
-            stmt.setString(10, asset.origin());
-            stmt.setString(11, asset.status());
+            stmt.setString(4, asset.replyId());
+            stmt.setString(5, asset.fileName());
+            stmt.setString(6, asset.workspacePath());
+            stmt.setString(7, asset.mimeType());
+            stmt.setLong(8, asset.size());
+            stmt.setString(9, asset.storageType());
+            stmt.setString(10, asset.storageKey());
+            stmt.setString(11, asset.origin());
+            stmt.setString(12, asset.status());
             stmt.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to insert file_asset: " + e.getMessage(), e);
@@ -213,11 +225,38 @@ KEY idx_user_status (user_key, status),
         }
     }
 
+    /** 控制器层合成 file_ready 后回写 reply_id（按主键更新，幂等） */
+    public void updateReplyId(String id, String replyId) {
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "UPDATE file_asset SET reply_id = ? WHERE id = ?")) {
+            stmt.setString(1, replyId);
+            stmt.setString(2, id);
+            stmt.executeUpdate();
+        } catch (Exception e) {
+            log.warn("FileAssetStore: updateReplyId {} failed: {}", id, e.getMessage());
+        }
+    }
+
+    /** 控制器层合成 file_ready 后回写业务 sessionId（peer），与 replyId 回写时机一致 */
+    public void updateSessionId(String id, String sessionId) {
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "UPDATE file_asset SET session_id = ? WHERE id = ?")) {
+            stmt.setString(1, sessionId);
+            stmt.setString(2, id);
+            stmt.executeUpdate();
+        } catch (Exception e) {
+            log.warn("FileAssetStore: updateSessionId {} failed: {}", id, e.getMessage());
+        }
+    }
+
     private static FileAsset map(ResultSet rs) throws SQLException {
         return new FileAsset(
             rs.getString("id"),
             rs.getString("user_key"),
             rs.getString("session_id"),
+            rs.getString("reply_id"),
             rs.getString("file_name"),
             rs.getString("workspace_path"),
             rs.getString("mime_type"),

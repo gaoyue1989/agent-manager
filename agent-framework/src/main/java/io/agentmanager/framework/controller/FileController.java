@@ -128,7 +128,7 @@ public class FileController {
         var status = isSandboxMode() ? "pending" : "injected";
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
-                id, key, sessionId, fileName, null, mime, file.getSize(),
+                id, key, sessionId, null, fileName, null, mime, file.getSize(),
                 props.file().storageType(), storageKey, "upload", status,
                 java.time.LocalDateTime.now()));
         } catch (Exception e) {

@@ -246,15 +246,21 @@ public class AgentScopeConfig {
             var workspacePath = workspaceInitializer.initialize(
                 Path.of(props.resolvedWorkspaceBaseDir()), oafConfig);
 
+            var optionsBuilder = io.agentscope.core.model.GenerateOptions.builder()
+                .temperature(llm.temperature())
+                .maxTokens(llm.maxTokens());
+            // Qwen3 / vLLM: enableThinking=false → chat_template_kwargs.enable_thinking=false
+            // 关闭深度思考模式，避免响应中包含 <think>...</think> 冗余内容
+            if (!llm.enableThinking()) {
+                optionsBuilder.additionalBodyParam("chat_template_kwargs",
+                    java.util.Map.of("enable_thinking", false));
+                log.info("Deep thinking disabled: chat_template_kwargs.enable_thinking=false");
+            }
             var model = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
                 .apiKey(llm.apiKey())
                 .modelName(llm.modelId())
                 .baseUrl(llm.baseUrl())
-                .generateOptions(io.agentscope.core.model.GenerateOptions.builder()
-                    .temperature(llm.temperature())
-                    .maxTokens(llm.maxTokens())
-                    .thinkingBudget(llm.thinkingBudget())
-                    .build())
+                .generateOptions(optionsBuilder.build())
                 .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
                     .client(java.net.http.HttpClient.newBuilder()
                         .connectTimeout(java.time.Duration.ofSeconds(30))
@@ -267,10 +273,13 @@ public class AgentScopeConfig {
                     .build())
                 .build();
 
+            // P0: 包装主 model，400 错误时打印请求体 JSON 诊断（排查 Higress 网关注入问题）
+            var loggingModel = new io.agentmanager.framework.service.RequestBodyLoggingModelWrapper(model);
+
             // P1: 包装 memory/compaction 内部 LLM 调用追踪
             // 不设置 .model() 时 harness 回退使用主 model（无 trace），设置包装后行为不变且带 span
-            var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(model, "memory");
-            var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(model, "compaction");
+            var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "memory");
+            var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "compaction");
 
             // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
             var toolkit = new io.agentscope.core.tool.Toolkit();
@@ -296,7 +305,7 @@ public class AgentScopeConfig {
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
                 .sysPrompt(oafConfig.systemPrompt())
-                .model(model)
+                .model(loggingModel)
                 .toolkit(toolkit)
                 // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
                 // 长流程（撰写→校验→修正→打包→登记→汇报），放宽至 20 轮
@@ -309,6 +318,10 @@ public class AgentScopeConfig {
                 .middleware(new io.agentmanager.framework.service.ReasoningTracingMiddleware())
                 // LLM 调用记录（debug 页面，order=1，默认值，保留）
                 .middleware(new LlmLoggingMiddleware(llmLogger))
+                // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
+                .middleware(new ToolCallValidationMiddleware())
+                // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
+                .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
@@ -375,8 +388,8 @@ public class AgentScopeConfig {
                 verifyToolCoverage(agent, oafConfig, customToolNames, permCfg.mcpNames());
             }
 
-            log.info("HarnessAgent created: {} (model: {}, thinkingBudget: {}, workspace: {})",
-                oafConfig.name(), llm.modelId(), llm.thinkingBudget(), workspacePath);
+            log.info("HarnessAgent created: {} (model: {}, workspace: {})",
+                oafConfig.name(), llm.modelId(), workspacePath);
             return agent;
         } catch (Exception e) {
             log.error("Failed to create AgentScope agent: {}", e.getMessage(), e);

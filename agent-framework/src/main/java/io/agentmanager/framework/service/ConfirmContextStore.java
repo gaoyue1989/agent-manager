@@ -76,6 +76,8 @@ public class ConfirmContextStore {
     /** 覆盖式写入确认上下文（同 session 新 ASK 覆盖旧条目；consumed 重置为 0） */
     public void put(String sessionId, List<Map<String, Object>> toolCalls,
                     String replyId, String runtimeSessionId, String runtimeUserId) {
+        log.debug("[HITL-DB] put: sessionId={}, replyId={}, toolCount={}, runtimeSid={}, runtimeUid={}",
+            sessionId, replyId, toolCalls.size(), runtimeSessionId, runtimeUserId);
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  INSERT INTO confirm_context

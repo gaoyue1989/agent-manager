@@ -45,17 +45,22 @@ public class SessionManager {
     public SessionState getOrCreateSession(String userId, String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
             // 无 sessionId 时创建一次性会话
-            return createSession(userId, UUID.randomUUID().toString());
+            var oneShot = createSession(userId, UUID.randomUUID().toString());
+            log.info("[SessionManager] created one-shot session: key={}", oneShot.sessionKey());
+            return oneShot;
         }
 
         String sessionKey = buildSessionKey(userId, sessionId);
         SessionState existing = sessions.get(sessionKey);
         if (existing != null && !existing.isExpired()) {
-            log.debug("Resuming session: {}", sessionKey);
+            log.debug("[SessionManager] resuming session: key={}, createdAt={}", sessionKey, existing.createdAt());
             return existing;
         }
 
-        return createSession(userId, sessionId);
+        var created = createSession(userId, sessionId);
+        log.info("[SessionManager] created session: key={}, userId={}, ttlDays={}",
+            created.sessionKey(), created.userId(), DEFAULT_TTL.toDays());
+        return created;
     }
 
     /**
@@ -85,7 +90,6 @@ public class SessionManager {
         );
 
         sessions.put(sessionKey, newSession);
-        log.info("Created session: {} (TTL {} days)", sessionKey, DEFAULT_TTL.toDays());
         return newSession;
     }
 
@@ -112,7 +116,7 @@ public class SessionManager {
         }
 
         if (count > 0) {
-            log.info("Cleaned {} expired sessions", count);
+            log.info("[SessionManager] cleaned {} expired sessions, active={}", count, getActiveCount());
         }
         return count;
     }

@@ -89,7 +89,9 @@ public class McpToolRegistrar {
      * @param oafConfig  OAF 配置
      */
     public void registerAll(Toolkit toolkit, OafConfig oafConfig) {
-        for (var mcp : oafConfig.mcpServers()) {
+        var servers = oafConfig.mcpServers();
+        log.info("[MCP] starting registration: {} servers configured", servers.size());
+        for (var mcp : servers) {
             var uiMapping = loadUiMapping(mcp);
             uiMappings.put(mcp.server(), uiMapping);
             toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
@@ -97,6 +99,7 @@ public class McpToolRegistrar {
             startupRequired.put(mcp.server(), isStartupRequired(mcp));
             var wrapper = buildClient(mcp);
             if (wrapper == null) {
+                log.warn("[MCP] skipped server '{}': client build failed", mcp.server());
                 continue;
             }
             // MCP 是外部依赖：默认 fail-soft（连接失败仅告警并跳过该 server 的工具，
@@ -118,11 +121,12 @@ public class McpToolRegistrar {
             } catch (Exception e) {
                 closeQuietly(wrapper);
                 if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
+                    log.error("[MCP] server '{}' declared startup.required=true but registration failed", mcp.server(), e);
                     throw new IllegalStateException(
                         "MCP server '" + mcp.server() + "' declared startup.required=true but registration failed",
                         e);
                 }
-                log.warn("MCP server '{}' unreachable at startup, skipped (agent starts without its tools): {}",
+                log.warn("[MCP] server '{}' unreachable at startup, skipped (agent starts without its tools): {}",
                     mcp.server(), e.getMessage());
             }
         }

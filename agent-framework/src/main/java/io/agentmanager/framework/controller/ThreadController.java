@@ -75,12 +75,16 @@ public class ThreadController {
         try (var conn = dataSource.getConnection()) {
             // 如果指定了 userId，优先从 session_user 表过滤
             if (userId != null && !userId.isBlank()) {
-                // 直接用 LEFT JOIN 查 session_user + agent_state，已覆盖"agent_state 已清理"的场景
+                // LEFT JOIN 使用 LIKE 匹配：agent_state.session_id 格式为
+                // slotId(userId, canonicalKey) = "{normalizeUser(userId)}:{canonicalKey}"，
+                // 而 session_user.session_id = 前端 peerId。两者不一致，需用 LIKE 前缀匹配。
                 try (var ps = conn.prepareStatement(
                         "SELECT su.session_id, su.remark, MAX(a.updated_at) AS updated_at "
-                            + "FROM session_user su LEFT JOIN agent_state a ON su.session_id = a.session_id "
+                            + "FROM session_user su LEFT JOIN agent_state a "
+                            + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
                             + "WHERE su.user_id = ? "
-                            + "GROUP BY su.session_id, su.remark ORDER BY updated_at DESC")) {
+                            + "GROUP BY su.session_id, su.remark "
+                            + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
                     ps.setString(1, userId);
                     var rs = ps.executeQuery();
                     while (rs.next()) {
@@ -98,11 +102,14 @@ public class ThreadController {
                 }
             } else {
                 // 无 userId 过滤：返回全部会话，附带 user_id + title（从 session_user 表查）
+                // LEFT JOIN 使用 LIKE 匹配（同上，agent_state.session_id 格式与 session_user 不一致）
                 try (var stmt = conn.createStatement();
                      var rs = stmt.executeQuery(
                          "SELECT su.session_id, su.user_id, su.remark, MAX(a.updated_at) AS updated_at "
-                             + "FROM session_user su LEFT JOIN agent_state a ON su.session_id = a.session_id "
-                             + "GROUP BY su.session_id, su.user_id, su.remark ORDER BY updated_at DESC")) {
+                             + "FROM session_user su LEFT JOIN agent_state a "
+                             + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
+                             + "GROUP BY su.session_id, su.user_id, su.remark "
+                             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
                     while (rs.next()) {
                         var sid = rs.getString("session_id");
                         var remark = rs.getString("remark");
@@ -132,35 +139,8 @@ public class ThreadController {
         // 产出文件卡片（present_file/create_oaf_zip 登记时 session_id = gw-hash）：
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.prepareStatement(
-                 "SELECT state_data FROM agent_state WHERE session_id = ? "
-                     + "OR session_id LIKE CONCAT(?, '__%') "
-                     + "OR session_id LIKE CONCAT('%__', ?) "
-                     + "OR session_id LIKE CONCAT(?, ':%') "
-                     + "OR session_id LIKE CONCAT('%:', ?) "
-                     + "ORDER BY item_index DESC LIMIT 1")) {
-            stmt.setString(1, sessionId);
-            stmt.setString(2, sessionId);
-            stmt.setString(3, sessionId);
-            stmt.setString(4, sessionId);
-            stmt.setString(5, sessionId);
-            var rs = stmt.executeQuery();
-            if (!rs.next()) {
-                result.put("messages", List.of());
-                return result;
-            }
-            var stateData = rs.getString("state_data");
-            result.put("messages", io.agentmanager.framework.service.StateDataParser
-                .toRoleContentList(io.agentmanager.framework.service.StateDataParser
-                    .findMessagesArray(stateData)));
-            return result;
-        } catch (Exception e) {
-            log.warn("thread history read failed for {}: {}", sessionId, e.getMessage());
-            result.put("messages", List.of());
-            result.put("error", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
-            return result;
-        }
+        result.put("messages", loadMessages(sessionId));
+        return result;
     }
 
     /** Thread 详情：返回会话元信息 + 历史消息 + pendingConfirm + 产出文件 */
@@ -171,11 +151,13 @@ public class ThreadController {
         result.put("session_id", sessionId);
         result.put("user_id", sessionUserStore.findUserIdBySession(sessionId));
 
-        // 元信息：从 agent_state 取最新 updated_at
+        // 元信息：从 agent_state 取最新 updated_at（使用 LIKE 匹配前缀，与 loadMessages 一致）
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(
-                 "SELECT MAX(updated_at) AS updated_at FROM agent_state WHERE session_id = ?")) {
+                 "SELECT MAX(updated_at) AS updated_at FROM agent_state "
+                     + "WHERE session_id = ? OR session_id LIKE CONCAT(?, ':%')")) {
             ps.setString(1, sessionId);
+            ps.setString(2, sessionId);
             var rs = ps.executeQuery();
             if (rs.next()) {
                 result.put("updated_at", rs.getTimestamp("updated_at") != null
@@ -218,7 +200,7 @@ public class ThreadController {
         // 5. turn_lease（活跃租约）
         totalDeleted += deleteBySessionId("turn_lease", sessionId);
 
-        // 6. file_asset（产出文件：按 peer 即 user_key 过滤）
+        // 6. file_asset（产出文件：按 session_id 精确过滤）
         totalDeleted += deleteGeneratedFiles(sessionId);
 
         log.info("Thread deleted: {} (total rows affected: {})", sessionId, totalDeleted);
@@ -286,36 +268,28 @@ public class ThreadController {
 
     /**
      * 会话产出文件（origin=generated）：present_file/create_oaf_zip 登记时
-     * user_key = RuntimeContext 的 userId（Channel 流程 = peer，每会话唯一）。
-     * 注意不能用 session_id（gw-hash 对全部 ChatUiChannel 会话为常量，会跨会话串文件）。
-     * 传入 sessionId 兼容 fullKey（"peer__gw-hash" 或旧格式 "peer:gw-hash"）与裸 peer 两种形态。
+     * session_id = ctx.getSessionId()（即前端 peer / sessionId），按此精确过滤。
+     * 同时兼容旧数据（session_id 为 null 时按 user_key 回退）。
      */
     private List<Map<String, Object>> generatedFiles(String sessionId) {
-        var peer = sessionId;
-        // 兼容 "__"（新格式）和 ":"（旧格式/网关格式）
-        var idx = sessionId.indexOf('_');
-        if (idx < 0) {
-            idx = sessionId.indexOf(':');
-        }
-        if (idx > 0) {
-            peer = sessionId.substring(0, idx);
-        }
-        if (peer.isBlank()) {
-            return List.of();
-        }
         var files = new ArrayList<Map<String, Object>>();
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(
-                 "SELECT id, file_name, mime_type, size FROM file_asset "
-                     + "WHERE user_key = ? AND origin = 'generated' ORDER BY created_at")) {
-            ps.setString(1, peer);
+                 "SELECT id, file_name, mime_type, size, reply_id FROM file_asset "
+                     + "WHERE session_id = ? AND origin = 'generated' ORDER BY created_at")) {
+            ps.setString(1, sessionId);
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    files.add(Map.of(
-                        "file_id", rs.getString("id"),
-                        "file_name", rs.getString("file_name"),
-                        "mime_type", rs.getString("mime_type"),
-                        "size", rs.getLong("size")));
+                    var m = new LinkedHashMap<String, Object>();
+                    m.put("file_id", rs.getString("id"));
+                    m.put("file_name", rs.getString("file_name"));
+                    m.put("mime_type", rs.getString("mime_type"));
+                    m.put("size", rs.getLong("size"));
+                    var replyId = rs.getString("reply_id");
+                    if (replyId != null && !replyId.isBlank()) {
+                        m.put("reply_id", replyId);
+                    }
+                    files.add(m);
                 }
             }
         } catch (Exception e) {
@@ -326,17 +300,26 @@ public class ThreadController {
 
     // ===== 删除会话辅助方法 =====
 
-    /** 按 session_id 删除指定表中的记录（防 SQL 注入：表名白名单校验） */
+    /** 按 session_id 删除指定表中的记录（防 SQL 注入：表名白名单校验）。
+     *  agent_state / agent_fs 表的 session_id 格式为 slotId(userId, canonicalKey)，
+     *  即 "{peerId}:{canonicalKey}"，与 session_user.session_id（前端 peerId）不一致，
+     *  因此对这两张表额外使用 LIKE 前缀匹配删除变体记录。 */
     private int deleteBySessionId(String table, String sessionId) {
         var allowed = java.util.Set.of("agent_state", "agent_fs", "session_event",
             "session_user", "turn_lease");
         if (!allowed.contains(table)) {
             throw new IllegalArgumentException("Table not in delete whitelist: " + table);
         }
+        var needsLike = java.util.Set.of("agent_state", "agent_fs");
+        var sql = needsLike.contains(table)
+            ? "DELETE FROM " + table + " WHERE session_id = ? OR session_id LIKE CONCAT(?, ':%')"
+            : "DELETE FROM " + table + " WHERE session_id = ?";
         try (var conn = dataSource.getConnection();
-             var ps = conn.prepareStatement(
-                 "DELETE FROM " + table + " WHERE session_id = ?")) {
+             var ps = conn.prepareStatement(sql)) {
             ps.setString(1, sessionId);
+            if (needsLike.contains(table)) {
+                ps.setString(2, sessionId);
+            }
             return ps.executeUpdate();
         } catch (Exception e) {
             log.warn("deleteBySessionId failed for table={}, sid={}: {}", table, sessionId, e.getMessage());
@@ -346,15 +329,11 @@ public class ThreadController {
 
     /** 删除会话产出的 generated 文件（DB 行 + 存储对象） */
     private int deleteGeneratedFiles(String sessionId) {
-        var peer = extractPeer(sessionId);
-        if (peer.isBlank()) {
-            return 0;
-        }
         int count = 0;
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(
-                 "SELECT id, storage_key FROM file_asset WHERE user_key = ? AND origin = 'generated'")) {
-            ps.setString(1, peer);
+                 "SELECT id, storage_key FROM file_asset WHERE session_id = ? AND origin = 'generated'")) {
+            ps.setString(1, sessionId);
             var rs = ps.executeQuery();
             var toDelete = new ArrayList<String[]>();
             while (rs.next()) {
@@ -381,42 +360,80 @@ public class ThreadController {
         return count;
     }
 
-    /** 从 sessionId 提取 peer（与 generatedFiles 逻辑一致） */
-    private String extractPeer(String sessionId) {
-        var peer = sessionId;
-        var idx = sessionId.indexOf('_');
-        if (idx < 0) {
-            idx = sessionId.indexOf(':');
-        }
-        if (idx > 0) {
-            peer = sessionId.substring(0, idx);
-        }
-        return peer.isBlank() ? "" : peer;
-    }
-
-    /** 从 agent_state 加载历史消息 */
+    /** 从 agent_state 加载历史消息。
+     *  AgentScope SDK 内部 session_id 格式为 slotId(userId, canonicalKey)，
+     *  即 "{normalizeUser(userId)}:{canonicalKey}"（如 "debug-user_s1:chatui|x:agentId=main"），
+     *  与 session_user.session_id（前端 peerId）不一致。
+     *  因此查询使用 LIKE 匹配前缀 "peerId:%" 以覆盖 SDK 内部的 session_id 格式，
+     *  同时保留精确匹配和后缀匹配以兼容旧格式。
+     *  state_key 过滤 "agent_state"：确保只取消息状态，避免取到 sandbox_state 等无消息数据的记录。
+     */
     private List<Map<String, Object>> loadMessages(String sessionId) {
         try (var conn = dataSource.getConnection();
+             // 优先匹配精确 session_id，再匹配带分隔符前缀/后缀的变体
              var stmt = conn.prepareStatement(
-                 "SELECT state_data FROM agent_state WHERE session_id = ? "
-                     + "OR session_id LIKE CONCAT(?, '__%') "
-                     + "OR session_id LIKE CONCAT('%__', ?) "
-                     + "OR session_id LIKE CONCAT(?, ':%') "
-                     + "OR session_id LIKE CONCAT('%:', ?) "
-                     + "ORDER BY item_index DESC LIMIT 1")) {
+                 "SELECT state_data FROM agent_state "
+                     + "WHERE (session_id = ? "
+                     +   "OR session_id LIKE CONCAT(?, ':%') "
+                     +   "OR session_id LIKE CONCAT(?, '__%') "
+                     +   "OR session_id LIKE CONCAT('%:', ?) "
+                     +   "OR session_id LIKE CONCAT('%__', ?)) "
+                     + "AND state_key = 'agent_state' "
+                     + "ORDER BY item_index")) {
             stmt.setString(1, sessionId);
             stmt.setString(2, sessionId);
             stmt.setString(3, sessionId);
             stmt.setString(4, sessionId);
             stmt.setString(5, sessionId);
             var rs = stmt.executeQuery();
-            if (!rs.next()) {
+            // agent_state 存储方式：单条 state（item_index=0 包含完整 AgentState JSON）
+            // 或列表（每条消息一个 item_index）。两种方式都需要拼合后交给 StateDataParser。
+            var fragments = new ArrayList<String>();
+            while (rs.next()) {
+                fragments.add(rs.getString("state_data"));
+            }
+            if (fragments.isEmpty()) {
                 return List.of();
             }
-            var stateData = rs.getString("state_data");
-            return io.agentmanager.framework.service.StateDataParser
+            // 如果只有一条记录，直接解析；如果是多条消息，先合成为 JSON 数组
+            var stateData = fragments.size() == 1
+                ? fragments.get(0)
+                : "[" + String.join(",", fragments) + "]";
+            var msgs = io.agentmanager.framework.service.StateDataParser
                 .toRoleContentList(io.agentmanager.framework.service.StateDataParser
                     .findMessagesArray(stateData));
+
+            // 回填 reply_id：从 session_event 查询 AGENT_START 事件的 reply_id，
+            // 按时间序分配给 assistant 消息
+            var assistantCount = msgs.stream()
+                .filter(m -> "assistant".equals(m.get("role")))
+                .count();
+            if (assistantCount == 0) {
+                return msgs;
+            }
+            var replyIds = new ArrayList<String>();
+            try (var ps = conn.prepareStatement(
+                    "SELECT reply_id FROM session_event "
+                        + "WHERE session_id = ? AND event_type = 'AGENT_START' "
+                        + "AND reply_id IS NOT NULL AND reply_id != '' "
+                        + "GROUP BY reply_id ORDER BY MIN(seq) ASC")) {
+                ps.setString(1, sessionId);
+                var rs2 = ps.executeQuery();
+                while (rs2.next()) {
+                    replyIds.add(rs2.getString("reply_id"));
+                }
+            } catch (Exception e) {
+                log.debug("reply_id lookup skipped for {}: {}", sessionId, e.getMessage());
+            }
+            // 按 AGENT_START 出现顺序，依次分配 reply_id 给 assistant 消息
+            int idx = 0;
+            for (var m : msgs) {
+                if ("assistant".equals(m.get("role")) && idx < replyIds.size()) {
+                    m.put("reply_id", replyIds.get(idx));
+                    idx++;
+                }
+            }
+            return msgs;
         } catch (Exception e) {
             log.warn("loadMessages failed for {}: {}", sessionId, e.getMessage());
             return List.of();
