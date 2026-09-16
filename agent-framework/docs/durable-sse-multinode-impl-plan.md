@@ -203,7 +203,7 @@ Expected: 编译失败 —— `cannot find symbol: method seedSeq(java.lang.Stri
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `mvn test -Dtest=SessionEventStoreTest`
-Expected: PASS（全部 9 个用例，含新增 3 个）
+Expected: PASS（全部 11 个用例：原有 8 个 + 新增 3 个）
 
 - [ ] **Step 5: 提交**
 
@@ -468,7 +468,7 @@ Expected: 编译失败 —— `cannot find symbol: method finishTurn(java.lang.S
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `mvn test -Dtest=SessionEventStoreTest`
-Expected: PASS（全部 12 个用例）
+Expected: PASS（全部 14 个用例：Task 1 后为 11 个 + 本次新增 3 个）
 
 - [ ] **Step 5: 提交**
 
