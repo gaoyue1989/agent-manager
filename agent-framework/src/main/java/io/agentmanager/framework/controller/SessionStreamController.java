@@ -11,8 +11,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
-import io.agentmanager.framework.service.SessionEventBus;
-import io.agentmanager.framework.service.SessionEventBus.TurnStatus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionEventTailer;
 import io.agentmanager.framework.service.TurnLeaseStore;
@@ -23,7 +21,7 @@ import reactor.core.publisher.Flux;
  *
  * <p>承载「面向已知会话」的查询操作 &mdash; sessionId 在路径中：
  * <ul>
- *   <li>{@code GET /threads/{sid}/subscribe} &mdash; 重连续传（回放 + 实时），解耦 SSE 连接与 agent 执行生命周期</li>
+ *   <li>{@code GET /threads/{sid}/subscribe} &mdash; 重连续传（回放 + 游标追赶，只读 DB），解耦 SSE 连接与 agent 执行生命周期</li>
  *   <li>{@code GET /threads/{sid}/status} &mdash; 查询 turn 状态（刷新恢复用）</li>
  * </ul>
  *
@@ -35,18 +33,15 @@ public class SessionStreamController {
 
     private final TurnLeaseStore turnLeaseStore;
     private final AgentRuntimeService runtimeService;
-    private final SessionEventBus eventBus;
     private final SessionEventStore eventStore;
     private final SessionEventTailer tailer;
 
     public SessionStreamController(AgentRuntimeService runtimeService,
                                    TurnLeaseStore turnLeaseStore,
-                                   SessionEventBus eventBus,
                                    SessionEventStore eventStore,
                                    SessionEventTailer tailer) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
-        this.eventBus = eventBus;
         this.eventStore = eventStore;
         this.tailer = tailer;
     }
@@ -54,9 +49,10 @@ public class SessionStreamController {
     // ===== GET /subscribe：重连续传 =====
 
     /**
-     * 订阅 session 的实时事件流（含回放）。
+     * 订阅 session 的事件流（回放 + 游标追赶）。
      *
-     * <p>前端刷新后调用此端点续传：
+     * <p>跨副本安全：全程只读 DB，不依赖本 Pod 是否执行过该 session。
+     *
      * <ul>
      *   <li>{@code afterSeq}：回放游标，从 lastEventId 之后开始回放</li>
      *   <li>{@code replyId}：turn 标识，仅回放/订阅指定 turn 的事件</li>
@@ -69,26 +65,7 @@ public class SessionStreamController {
             @RequestParam(required = false) String replyId) {
 
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
-        String finalSessionId = sessionId;
-
-        // 如果 turn 已完成，回放历史 + done 帧后关闭
-        var status = eventBus.turnStatus(finalSessionId);
-        if (status == TurnStatus.COMPLETED) {
-            return replayAndClose(finalSessionId, replyId, afterSeq);
-        }
-
-        // turn 进行中或 idle（可能有历史事件需回放）：回放 + 实时订阅
-        return eventBus.subscribe(finalSessionId,
-            afterSeq != null ? afterSeq : 0,
-            replyId);
-    }
-
-    /** 回放后追加 done 帧并关闭（仅从 eventStore 读取，不订阅实时流） */
-    private Flux<ServerSentEvent<String>> replayAndClose(String sessionId, String replyId, Integer afterSeq) {
-        return eventBus.replayOnly(sessionId, replyId, afterSeq != null ? afterSeq : 0)
-            .concatWith(Flux.just(ServerSentEvent.<String>builder()
-                .data("{\"type\":\"done\"}")
-                .build()));
+        return tailer.tail(sessionId, replyId, afterSeq != null ? afterSeq : 0);
     }
 
     // ===== GET /status：查询 turn 状态 =====

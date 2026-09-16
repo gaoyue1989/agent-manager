@@ -10,7 +10,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
-import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionEventTailer;
 import io.agentmanager.framework.service.TurnLeaseStore;
@@ -23,7 +22,6 @@ class SessionStreamControllerStatusTest {
 
     @Mock private TurnLeaseStore turnLeaseStore;
     @Mock private AgentRuntimeService runtimeService;
-    @Mock private SessionEventBus eventBus;
     @Mock private SessionEventStore eventStore;
 
     private SessionEventTailer tailer;
@@ -33,7 +31,7 @@ class SessionStreamControllerStatusTest {
     void setUp() {
         tailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
             Duration.ofMillis(300));
-        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventBus, eventStore, tailer);
+        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer);
     }
 
     @Test
@@ -56,9 +54,8 @@ class SessionStreamControllerStatusTest {
         when(runtimeService.findPendingConfirm("sid-2")).thenReturn(null);
 
         Map<String, Object> body = controller.status("sid-2");
-        assertEquals("working", body.get("state"));
         // 跨副本关键点：本 Pod 没有 sink，也必须报 working
-        verify(eventBus, never()).turnStatus(anyString());
+        assertEquals("working", body.get("state"));
     }
 
     @Test

@@ -28,7 +28,6 @@ import static org.mockito.Mockito.lenient;
  *   <li>subscribe 回放历史 + 实时流</li>
  *   <li>closeSession 关闭后订阅者收到 onComplete</li>
  *   <li>心跳帧包含 comment "hb"</li>
- *   <li>turnStatus 正确反映 session 状态</li>
  * </ul>
  */
 @ExtendWith(MockitoExtension.class)
@@ -115,28 +114,6 @@ class SessionEventBusTest {
 
         StepVerifier.create(flux)
             .verifyComplete();
-    }
-
-    @Test
-    void turnStatusWorkingWhenSinkExists() {
-        eventBus.ensureSink("sid-5");
-
-        assertEquals(SessionEventBus.TurnStatus.WORKING, eventBus.turnStatus("sid-5"));
-
-        eventBus.closeSession("sid-5");
-    }
-
-    @Test
-    void turnStatusIdleWhenNoSinkOrEvents() {
-        when(eventStore.findLatest("sid-6")).thenReturn(null);
-        assertEquals(SessionEventBus.TurnStatus.IDLE, eventBus.turnStatus("sid-6"));
-    }
-
-    @Test
-    void turnStatusCompletedWhenLatestIsAgentEnd() {
-        var latest = new SessionEventStore.EnvelopedEvent(10, "AGENT_END", "{}", "rid-7");
-        when(eventStore.findLatest("sid-7")).thenReturn(latest);
-        assertEquals(SessionEventBus.TurnStatus.COMPLETED, eventBus.turnStatus("sid-7"));
     }
 
     @Test

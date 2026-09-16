@@ -6,7 +6,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
-import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionEventTailer;
 import io.agentmanager.framework.service.TurnLeaseStore;
@@ -35,7 +34,6 @@ class SessionStreamControllerTest {
     private SessionStreamController controller;
     private AgentRuntimeService runtimeService;
     private TurnLeaseStore turnLeaseStore;
-    private SessionEventBus eventBus;
     private SessionEventStore eventStore;
 
     @BeforeEach
@@ -43,8 +41,6 @@ class SessionStreamControllerTest {
         runtimeService = mock(AgentRuntimeService.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
         eventStore = mock(SessionEventStore.class);
-        eventBus = new SessionEventBus(eventStore,
-            Duration.ofMillis(100), Duration.ofMinutes(5), 64);
 
         when(runtimeService.findPendingConfirm(anyString())).thenReturn(null);
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
@@ -55,8 +51,7 @@ class SessionStreamControllerTest {
 
         var tailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
             Duration.ofMillis(300));
-        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventBus, eventStore,
-            tailer);
+        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer);
     }
 
     // ===== GET /subscribe 测试 =====

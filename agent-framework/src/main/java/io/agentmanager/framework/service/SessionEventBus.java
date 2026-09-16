@@ -202,57 +202,6 @@ public class SessionEventBus {
         }
     }
 
-    /**
-     * 查询 session 当前的 turn 状态（status 端点使用）。
-     */
-    public TurnStatus turnStatus(String sessionId) {
-        // 检查是否有活跃的 EventBus sink
-        boolean hasSink = sinks.containsKey(sessionId);
-
-        // 检查最新事件
-        var latest = eventStore.findLatest(sessionId);
-
-        if (hasSink) {
-            // EventBus 有 sink，说明 agent 正在执行
-            return TurnStatus.WORKING;
-        }
-
-        if (latest != null) {
-            if ("AGENT_END".equals(latest.type())) {
-                return TurnStatus.COMPLETED;
-            }
-            // 有事件但无 sink：可能是 agent 执行中间断连
-            // 需结合 turn_lease 判断
-        }
-
-        return TurnStatus.IDLE;
-    }
-
-    /** 获取指定 session 当前的 replyId（subscribe 时用于过滤） */
-    public String currentReplyId(String sessionId) {
-        var latest = eventStore.findLatest(sessionId);
-        return latest != null ? latest.replyId() : null;
-    }
-
-    /** 获取底层 EventStore（控制器 status 端点用） */
-    public SessionEventStore getEventStore() {
-        return eventStore;
-    }
-
-    /**
-     * 仅回放历史事件，不订阅实时流（用于已完成 turn 的 subscribe 请求）。
-     *
-     * @param sessionId 会话 ID
-     * @param replyId   turn 标识（可选）
-     * @param afterSeq  回放起点（0 = 从头回放，-1 = 不回放）
-     * @return Flux<ServerSentEvent<String>>
-     */
-    public Flux<ServerSentEvent<String>> replayOnly(String sessionId, String replyId, int afterSeq) {
-        if (afterSeq < 0) return Flux.empty();
-        return eventStore.queryAfter(sessionId, replyId, afterSeq)
-            .map(this::toSSE);
-    }
-
     // ===== 过期清理 =====
 
     /**
@@ -309,12 +258,5 @@ public class SessionEventBus {
             .data(data)
             .id(String.valueOf(e.seq()))
             .build();
-    }
-
-    /** turn 状态枚举 */
-    public enum TurnStatus {
-        WORKING,    // agent 正在执行
-        COMPLETED,  // turn 已完成
-        IDLE        // 无活跃 turn
     }
 }
