@@ -1857,20 +1857,24 @@ git commit -m "test(agent-framework): 补跨副本追赶与 seq 连续前缀的�
 ## 完成后的验收清单
 
 - [ ] `mvn test` 全绿
-- [ ] `git log --oneline` 可见 9 个任务对应的提交
+- [ ] `git log --oneline` 可见 9 个任务对应的提交（另有计划外补充的 Task 10：Debug 客户端 `interrupted` 支持）
 - [ ] 单 turn 落库语句数验证：跑一次真实对话，确认 `session_event` 的 INSERT 次数从 ~2100 降到 ~10 量级（可用 `DebugApiController` 的数据库状态端点或 MySQL general log）
 - [ ] 跨副本手工验证（需双副本环境）：Pod A `POST /chat` 执行中，向 Pod B 发 `GET /threads/{sid}/subscribe?afterSeq=0`，确认 (a) 实时事件陆续到达，(b) turn 结束时收到 `done` 帧并关流
-- [ ] 崩溃验证：执行中 kill 掉 Pod A，确认 60s 后 `/status` 返回 `interrupted`，且 subscribe 流以 `interrupted` 帧关闭
+- [ ] 崩溃验证：执行中 kill 掉 Pod A，确认 60s 后 `/status` 返回 `interrupted`，且 subscribe 流以 `interrupted` 帧关闭。**此项依赖 Task 10**——Debug 客户端在此之前会静默吞掉 `interrupted`（`handleEvent` 的 `switch` 以 `default: break` 收尾），页面上的观感仍是「无回复无报错」，演示不出来
 - [ ] **确认无误后**才可将 replicas 调至 >1
 
 ---
 
 ## 遗留事项（本计划不做，已记录）
 
+> **修正（执行期发现）：** 下表第一行原写「服务端能力目前无消费方」是错的。该结论只 grep 了 `frontend/src/`，漏掉了**服务端自带的 Debug 页面客户端** `src/main/resources/static/debug/modules/chat.js` —— 它完整消费 `GET /subscribe`、`/status`、`lastEventId`、以及 payload 里的 `replyId`（`:474`/`:475`）。这直接影响两件事：新增的 `interrupted` 契约需要它配合（见 Task 10，计划外补充）；以及它证明了 payload 形态是有真实消费方的，所以 Task 7 必须给观察者路径补上 `replyId` 注入。
+
 | 项 | 原因 |
 |---|------|
-| 前端重连（设计文档阶段 4） | `frontend/src/` 全量 grep `subscribe`/`EventSource`/`afterSeq`/`lastEventId`/`/status` 零命中，服务端能力目前无消费方。需另立排期，顺序在本次之后 |
+| 前端重连（设计文档阶段 4） | `frontend/src/`（Next.js 应用）全量 grep `subscribe`/`EventSource`/`afterSeq`/`lastEventId`/`/status` 零命中，**该**应用目前不消费这些能力。需另立排期，顺序在本次之后。（注意：服务端 static 下的 Debug 页面是另一个消费方，不在此列——见上方修正） |
+| **观察者轮询的线程占用（已知，需跟进）** | `SessionEventTailer.tail` 用 `Thread.sleep` 阻塞轮询，跑在 `Schedulers.boundedElastic()` 上。`boundedElastic` 线程上限默认为 `10 × CPU 核数`，**每个活跃 observer 占满一个线程**。8 核 Pod 上约 80 个并发 `/subscribe` 即打满，第 81 个订阅者的回放甚至排不上队。改前 `subscribe` 走 `sink.asFlux()` + `Flux.interval`，不占专用线程，所以这是一处**用线程换正确性**的回归。修复方向：改 `Flux.interval(pollInterval)` + `concatMap(Mono.fromCallable(查询).subscribeOn(boundedElastic))`，使线程只在真正的 JDBC 查询期间（~ms 级）被占用，而非整个订阅生命周期。**触发条件：前端阶段 4 落地（届时每个打开的标签页都是一个常驻 observer）或并发 `/subscribe` 接近 50 即须先做此项。** |
 | 攒批参数 YAML 化 | 本计划用构造参数携带默认值（`batchSize=200`、`flushIntervalMs=1000`）。默认值由测算得出，先观察线上实际语句数再决定是否需要暴露为配置 |
 | 合并文本攒批（设计文档 §3.5） | 仅当 `session_event` 行数或回放体积成为瓶颈时再做；需改游标语义为 inclusive + 前端重建消息 |
 | Redis / 粘性路由 | 已否决，重新评估触发条件见设计文档 §2.3 |
 | agent 执行的跨 Pod 恢复 | `agent_state` 持久化已具备基础，但需先解决工具调用幂等性/副作用重放 |
+| **`seqCounters` 与 `pending` 缓冲的无界增长（已知，需跟进）** | `evictStaleSinks`（现每 60s）只清 `SessionEventBus.sinks`，不释放 `SessionEventStore.seqCounters` 条目、也不刷出 `pending` 缓冲。因此**若某条路径跑了 `beginTurn` 却没跑到 `finishTurn`**，该 session 的计数器条目永久驻留（每条约百字节），且其尾部 delta 滞留内存直到被别的 `append` 顺带刷出。Task 8 已堵掉已知的那条漏网路径（HITL），实际触发窗口很窄，故本次不做。**不能**简单把 `finishTurn` 挂到 `evictStaleSinks` 上：后者的判据是 `lastActiveAt` 超时而非「turn 结束」（它甚至不检查订阅者数，见其方法内注释），一次 5 分钟无输出的慢 LLM 调用会在 turn 中途触发，语义错配。正确做法是另写一个以 `turn_lease` 归属为判据的清扫：无租约且无待确认的 session，才释放其计数器并刷出缓冲。 |
