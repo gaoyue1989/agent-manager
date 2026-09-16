@@ -462,8 +462,11 @@ public class AgentScopeConfig {
         var sse = props.sse();
         var poll = sse != null ? java.time.Duration.ofMillis(sse.tailPollMs())
                                : java.time.Duration.ofMillis(300);
+        // 与 EventBus 共用 heartbeatSeconds：两条路径面对的入口代理超时是同一个
+        var heartbeat = sse != null ? java.time.Duration.ofSeconds(sse.heartbeatSeconds())
+                                    : java.time.Duration.ofSeconds(20);
         return new io.agentmanager.framework.service.SessionEventTailer(
-            sessionEventStore, turnLeaseStore, agentRuntimeService, poll);
+            sessionEventStore, turnLeaseStore, agentRuntimeService, poll, heartbeat);
     }
 
     @Bean

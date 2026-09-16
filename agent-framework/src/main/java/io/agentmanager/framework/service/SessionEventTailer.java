@@ -11,6 +11,7 @@ import org.springframework.http.codec.ServerSentEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 import reactor.core.scheduler.Schedulers;
 
 /**
@@ -42,14 +43,32 @@ public class SessionEventTailer {
     /** 轮询间隔：无新事件时的查询节奏 */
     private final Duration pollInterval;
 
+    /**
+     * 心跳间隔：长时间无业务事件时补发 SSE comment 帧。
+     *
+     * <p>与 {@link SessionEventBus#subscribe} 的心跳同源——入口代理（Nginx/CDN）对长时间
+     * 静默的连接有读超时（默认 60s）。而观察者路径恰恰以长静默为常态（执行发生在另一个
+     * 副本上、期间可能是一个长工具调用），没有心跳就会被中途切断。
+     */
+    private final Duration heartbeatInterval;
+
     public SessionEventTailer(SessionEventStore eventStore,
                               TurnLeaseStore turnLeaseStore,
                               AgentRuntimeService runtimeService,
                               Duration pollInterval) {
+        this(eventStore, turnLeaseStore, runtimeService, pollInterval, Duration.ofSeconds(20));
+    }
+
+    public SessionEventTailer(SessionEventStore eventStore,
+                              TurnLeaseStore turnLeaseStore,
+                              AgentRuntimeService runtimeService,
+                              Duration pollInterval,
+                              Duration heartbeatInterval) {
         this.eventStore = eventStore;
         this.turnLeaseStore = turnLeaseStore;
         this.runtimeService = runtimeService;
         this.pollInterval = pollInterval;
+        this.heartbeatInterval = heartbeatInterval;
     }
 
     /** turn 状态探测结果 */
@@ -121,6 +140,7 @@ public class SessionEventTailer {
 
         Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>>create(sink -> {
             long lastProbeAt = 0;   // 0 → 首轮立即探测，避免对已结束的 turn 空等一轮
+            long lastFrameAt = System.currentTimeMillis();
             while (!sink.isCancelled()) {
                 var page = eventStore.queryAfter(sessionId, replyId, cursor.get())
                     .collectList().block();
@@ -133,6 +153,7 @@ public class SessionEventTailer {
                     cursor.set(e.seq());
                     if (TERMINAL_TYPES.contains(e.type())) sawTerminal = true;
                 }
+                if (!page.isEmpty()) lastFrameAt = System.currentTimeMillis();
 
                 if (sawTerminal) {
                     sink.next(doneSSE());
@@ -151,10 +172,21 @@ public class SessionEventTailer {
                         return;
                     }
                     if (probe.finished()) {
+                        // 竞态兜底：终止行可能恰好落在上面那次 queryAfter 与本次 probe 之间。
+                        // 那时 page 为空、probe 却已判定结束——若不补一次追赶查询，终止事件
+                        // 自身（尤其是 error）会被静默丢弃，客户端只会看到一个"正常完成"。
+                        emitRemaining(sink, sessionId, replyId, cursor);
                         sink.next(doneSSE());
                         sink.complete();
                         return;
                     }
+                }
+
+                // 心跳：两次 probe 之间可能有任意长的静默，comment 帧不触发前端 onmessage，
+                // 只用于重置入口代理的读超时计时器（否则长静默的观察者流会被中途切断）。
+                if (now - lastFrameAt >= heartbeatInterval.toMillis()) {
+                    sink.next(heartbeatSSE());
+                    lastFrameAt = now;
                 }
 
                 try {
@@ -168,6 +200,26 @@ public class SessionEventTailer {
         }).subscribeOn(Schedulers.boundedElastic());
 
         return replay.concatWith(live);
+    }
+
+    /**
+     * 补发一次追赶查询的结果：用于 probe 判定 turn 已结束后的最后一跳。
+     *
+     * <p>不做循环——终止行至多带来一批尾部事件，取一次即可；取不到就正常补 done 帧。
+     */
+    private void emitRemaining(FluxSink<ServerSentEvent<String>> sink, String sessionId,
+                               String replyId, AtomicInteger cursor) {
+        var page = eventStore.queryAfter(sessionId, replyId, cursor.get()).collectList().block();
+        if (page == null) return;
+        for (var e : page) {
+            if (sink.isCancelled()) return;
+            sink.next(toSSE(e));
+            cursor.set(e.seq());
+        }
+    }
+
+    private static ServerSentEvent<String> heartbeatSSE() {
+        return ServerSentEvent.<String>builder().comment("hb").build();
     }
 
     private ServerSentEvent<String> toSSE(SessionEventStore.EnvelopedEvent e) {

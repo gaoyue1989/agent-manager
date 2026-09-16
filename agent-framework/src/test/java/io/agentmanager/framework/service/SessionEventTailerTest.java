@@ -216,6 +216,49 @@ class SessionEventTailerTest {
     }
 
     @Test
+    void tailEmitsHeartbeatWhileTurnStaysQuiet() {
+        // 观察者路径以长静默为常态（执行在另一个副本上跑长工具调用）。没有 comment 帧，
+        // 入口代理会在读超时处切断连接——这是被删掉的 SessionEventBus.subscribe 原本提供过的保障。
+        when(turnLeaseStore.isHeld("sid-hb")).thenReturn(true);
+        when(eventStore.queryAfter(eq("sid-hb"), isNull(), anyInt())).thenReturn(Flux.empty());
+
+        var hbTailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
+            Duration.ofMillis(20), Duration.ofMillis(50));
+
+        var frames = hbTailer.tail("sid-hb", null, -1)
+            .take(2)
+            .collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(frames);
+        assertEquals(2, frames.size());
+        assertTrue(frames.stream().allMatch(f -> "hb".equals(f.comment())),
+            "静默期间应补 comment 心跳帧: " + frames);
+    }
+
+    @Test
+    void tailDeliversTerminalEventThatLandsBetweenQueryAndProbe() {
+        // 竞态：终止行恰好落在循环内的 queryAfter 与随后的 probe 之间——page 为空，
+        // probe 却已判定 finished。若不补一次追赶查询，终止事件自身（这里是 error）
+        // 会被静默丢弃，客户端只收到 done，把一次失败当成正常完成。
+        var errRow = new SessionEventStore.EnvelopedEvent(
+            5, "error", "{\"type\":\"error\",\"error\":\"boom\"}", "rid-race");
+        // 第 1 次查询（循环内）终止行尚未落库；第 2 次（补发）拿到了
+        when(eventStore.queryAfter("sid-race", null, -1))
+            .thenReturn(Flux.empty(), Flux.just(errRow));
+        when(turnLeaseStore.isHeld("sid-race")).thenReturn(false);
+        // 最新事件已是终态 → probe 短路为 finished，不会再查 pendingConfirm
+        when(eventStore.findLatest("sid-race")).thenReturn(errRow);
+
+        var frames = tailer.tail("sid-race", null, -1).collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(frames);
+        var data = frames.stream().map(f -> f.data()).toList();
+        assertTrue(data.stream().anyMatch(d -> d != null && d.contains("boom")),
+            "终止事件必须送达，不能被 done 帧掩盖: " + data);
+        assertTrue(data.get(data.size() - 1).contains("done"), "末帧仍应是 done: " + data);
+    }
+
+    @Test
     void concurrentViewersEachGetTheirOwnTail() {
         // 多标签页：第二个订阅者不再受 multicast 语义影响——
         // 每个订阅者独立读 DB，各自持有游标。
