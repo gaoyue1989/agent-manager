@@ -41,10 +41,10 @@ upload() { # 按扩展名带 MIME（curl -F 对未知扩展默认 octet-stream �
   curl -s -X POST "$AGENT_URL/files/upload" -F "file=@$f;type=$mime" -F "userId=$UID_SFX" -F "sessionId=$SID"
 }
 chat() { # chat <message> [fileIds-json]
-  local body="{\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\""
+  local body="{\"sessionId\":\"$SID\",\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\""
   [ $# -ge 2 ] && body="$body,\"fileIds\":$2"
   body="$body}"
-  curl -s --max-time 300 -X POST "$AGENT_URL/threads/$SID/chat" -H 'Content-Type: application/json' -d "$body"
+  curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' -d "$body"
 }
 
 ###############################################################################
@@ -78,14 +78,14 @@ S1_5_OK=0
 S1_5_REPLY=""
 S1_5_SID="$SID"
 for attempt in 1 2 3; do
-  S1_5_REPLY=$(curl -s --max-time 300 -X POST "$AGENT_URL/threads/$S1_5_SID/chat" -H 'Content-Type: application/json' \
-    -d "{\"message\":\"请读取我上传的 csv 文件，告诉我最后一行的第一个字段，直接输出该值\",\"userId\":\"$UID_SFX\",\"fileIds\":[\"$FID1\"]}")
+  S1_5_REPLY=$(curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+    -d "{\"sessionId\":\"$S1_5_SID\",\"message\":\"请读取我上传的 csv 文件，告诉我最后一行的第一个字段，直接输出该值\",\"userId\":\"$UID_SFX\",\"fileIds\":[\"$FID1\"]}")
   if case "$S1_5_REPLY" in *"$SENTINEL"*) true;; *) false;; esac; then S1_5_OK=1; break; fi
   echo "  [retry] S1-5 第 $attempt 次失败，换新会话重试"
   S1_5_SID="file-e2e-r$RANDOM-$RANDOM"
   # 预热新会话（触发沙箱创建，避免首次 chat 沙箱未就绪）
-  curl -s --max-time 120 -X POST "$AGENT_URL/threads/$S1_5_SID/chat" -H 'Content-Type: application/json' \
-    -d "{\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
+  curl -s --max-time 120 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+    -d "{\"sessionId\":\"$S1_5_SID\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
   sleep 5
 done
 assert_contains "S1-5 LLM 读到哨兵值（注入闭环）" "$S1_5_REPLY" "$SENTINEL"
@@ -94,11 +94,11 @@ assert_contains "S1-5 LLM 读到哨兵值（注入闭环）" "$S1_5_REPLY" "$SEN
 VIS_OK=0
 VIS_SID="file-e2e-vis-$RANDOM-$RANDOM"
 # 预热：先发一条简单消息触发沙箱创建（避免首次 chat 时沙箱未就绪 → No active sandbox）
-curl -s --max-time 300 -X POST "$AGENT_URL/threads/$VIS_SID/chat" -H 'Content-Type: application/json' \
-  -d "{\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
+curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+  -d "{\"sessionId\":\"$VIS_SID\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
 sleep 5
-vis_chat() { curl -s --max-time 300 -X POST "$AGENT_URL/threads/$VIS_SID/chat" -H 'Content-Type: application/json' \
-  -d "{\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\",\"fileIds\":[\"$FID2\"]}"; }
+vis_chat() { curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+  -d "{\"sessionId\":\"$VIS_SID\",\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\",\"fileIds\":[\"$FID2\"]}"; }
 for attempt in 1 2 3; do
   VIS=$(vis_chat "这张图片是什么颜色？只回答颜色名称一个词")
   if case "$VIS" in *"红"*) true;; *) false;; esac; then VIS_OK=1; break; fi
@@ -148,6 +148,10 @@ else
 fi
 
 say "场景 S4：输出图片（present_file base64 回传）"
+# 长跑后主会话沙箱可能已过期（No active sandbox）→ 先预热再走 present_file
+curl -s --max-time 120 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+  -d "{\"sessionId\":\"$SID\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
+sleep 5
 PNG_B64=$(base64 -w0 "$PNG")
 READY2=$(chat "调用 present_file 工具：file_path='outputs/red.png'，file_content_base64='$PNG_B64'（1x1 红色 PNG）")
 assert_contains "S4-1 图片回传 file_ready" "$READY2" "file_ready"
@@ -177,12 +181,12 @@ S8_SID="file-e2e-s8-$RANDOM-$RANDOM"
 for attempt in 1 2 3; do
   if [ "$attempt" -gt 1 ]; then
     S8_SID="file-e2e-s8-$RANDOM-$RANDOM"
-    curl -s --max-time 120 -X POST "$AGENT_URL/threads/$S8_SID/chat" -H 'Content-Type: application/json' \
-      -d "{\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
+    curl -s --max-time 120 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+      -d "{\"sessionId\":\"$S8_SID\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
     sleep 5
   fi
-  S8=$(curl -s --max-time 420 -X POST "$AGENT_URL/threads/$S8_SID/chat" -H 'Content-Type: application/json' \
-    -d "{\"message\":\"帮我生成一个名称为 echo-agent 的 OAF 部署包：一个把用户输入原样返回的 agent。走完整流程并交付下载，不要发布。\",\"userId\":\"$UID_SFX\"}")
+  S8=$(curl -s --max-time 420 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+    -d "{\"sessionId\":\"$S8_SID\",\"message\":\"帮我生成一个名称为 echo-agent 的 OAF 部署包：一个把用户输入原样返回的 agent。走完整流程并交付下载，不要发布。\",\"userId\":\"$UID_SFX\"}")
   if case "$S8" in *"file_ready"*) true;; *) false;; esac; then S8_OK=1; break; fi
   echo "  [retry] S-S8 第 $attempt 次失败，换新会话重试"
   sleep 3
@@ -224,16 +228,16 @@ S9_SID="file-e2e-s9-$RANDOM-$RANDOM"
 for attempt in 1 2; do
   if [ "$attempt" -gt 1 ]; then
     S9_SID="file-e2e-s9-$RANDOM-$RANDOM"
-    curl -s --max-time 120 -X POST "$AGENT_URL/threads/$S9_SID/chat" -H 'Content-Type: application/json' \
-      -d "{\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
+    curl -s --max-time 120 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+      -d "{\"sessionId\":\"$S9_SID\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
     sleep 5
   fi
   S9_MSG="生成一个名为 $S9_NAME 的 OAF 部署包并上传到平台。必须完成：
 1. create_oaf_zip(package_name=\"$S9_NAME.zip\", agents_md=<AGENTS.md 全文，name 与 agentKey 均为 $S9_NAME，含全部必填字段>)。打包前可先 check_oaf_package 校验
 2. upload_package(filename=\"$S9_NAME.zip\", content_base64=<上一步返回的 content_base64>)
 完成后回复 packageId。不要做其他事情，不要发布。"
-  curl -s --max-time 420 -X POST "$AGENT_URL/threads/$S9_SID/chat" -H 'Content-Type: application/json' \
-    -d "$(python3 -c "import json,sys;print(json.dumps({'message':sys.argv[1],'userId':'$UID_SFX'}))" "$S9_MSG")" > /dev/null 2>&1
+  curl -s --max-time 420 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+    -d "$(python3 -c "import json,sys;print(json.dumps({'sessionId':'$S9_SID','message':sys.argv[1],'userId':'$UID_SFX'}))" "$S9_MSG")" > /dev/null 2>&1
   # 客观验证：平台包列表出现 name=S9_NAME 的包
   S9_PKG=$(curl -s "http://100.66.1.5:8911/api/v1/packages" | jq -r --arg n "$S9_NAME" '[.data[] | select(.name==$n) | .id] | max' 2>/dev/null)
   if [ "${S9_PKG:-null}" != "null" ] && [ -n "$S9_PKG" ]; then S9_UPLOAD_OK=1; break; fi
@@ -290,15 +294,19 @@ if [ "${SANDBOX:-0}" == "1" ]; then
   if [ -f "$FIXDIR/demo.docx" ]; then
     FIDD=$(upload "$FIXDIR/demo.docx" | jq -r '.file_id // empty')
     # 固定 python 命令（LLM 只需原样执行，不依赖其编写脚本）
-    DOC=$(chat "执行命令：python3 -c \"import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('/workspace/uploads/demo.docx'); root=ET.fromstring(z.read('word/document.xml')); print(''.join(t.text or '' for t in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')))\" 并原样输出命令输出" "[\"$FIDD\"]")
+    DOC=$(chat "执行命令：python3 -c \"import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('uploads/demo.docx'); root=ET.fromstring(z.read('word/document.xml')); print(''.join(t.text or '' for t in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')))\" 并原样输出命令输出" "[\"$FIDD\"]")
     case "$DOC" in *"DOCX-SENTINEL"*) ok "S-S6 纯 stdlib 解析 docx";; *)
       # 长对话后 LLM 可能改写命令导致语法错误 → 原会话重试并强制原样执行
-      DOC2=$(chat "再次执行以下命令（原样执行不要修改）：python3 -c \"import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('/workspace/uploads/demo.docx'); root=ET.fromstring(z.read('word/document.xml')); print(''.join(t.text or '' for t in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')))\" 并原样输出命令输出" "[\"$FIDD\"]")
+      DOC2=$(chat "再次执行以下命令（原样执行不要修改）：python3 -c \"import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('uploads/demo.docx'); root=ET.fromstring(z.read('word/document.xml')); print(''.join(t.text or '' for t in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')))\" 并原样输出命令输出" "[\"$FIDD\"]")
       case "$DOC2" in *"DOCX-SENTINEL"*) ok "S-S6 纯 stdlib 解析 docx（重试）";; *)
-        # 仍失败 → 新会话重试（避免长上下文干扰）
-        SID_DOC="file-e2e-s6-$RANDOM-$RANDOM"
-        DOC3=$(curl -s --max-time 300 -X POST "$AGENT_URL/threads/$SID_DOC/chat" -H 'Content-Type: application/json' \
-          -d "{\"message\":\"执行命令并原样输出命令输出：python3 -c \\\"import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('/workspace/uploads/demo.docx'); root=ET.fromstring(z.read('word/document.xml')); print(''.join(t.text or '' for t in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')))\\\"\",\"userId\":\"$UID_SFX\",\"fileIds\":[\"$FIDD\"]}")
+      # 仍失败 → 新会话重试（避免长上下文干扰）；先预热触发沙箱创建，
+      # 否则首次 chat 撞上 "No active sandbox"（与本文件 S1-5/VIS 段的预热同理）
+      SID_DOC="file-e2e-s6-$RANDOM-$RANDOM"
+      curl -s --max-time 120 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+        -d "{\"sessionId\":\"$SID_DOC\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
+      sleep 5
+      DOC3=$(curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+        -d "{\"sessionId\":\"$SID_DOC\",\"message\":\"执行命令并原样输出命令输出：python3 -c \\\"import zipfile,xml.etree.ElementTree as ET; z=zipfile.ZipFile('uploads/demo.docx'); root=ET.fromstring(z.read('word/document.xml')); print(''.join(t.text or '' for t in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')))\\\"\",\"userId\":\"$UID_SFX\",\"fileIds\":[\"$FIDD\"]}")
         case "$DOC3" in *"DOCX-SENTINEL"*) ok "S-S6 纯 stdlib 解析 docx（新会话重试）";; *) bad "S-S6 纯 stdlib 解析 docx (body missing: DOCX-SENTINEL)";; esac
       ;; esac
     ;; esac
@@ -311,8 +319,8 @@ if [ "${SANDBOX:-0}" == "1" ]; then
   case "$READY" in *file_ready*) ok "S-S7 产出文件回传 file_ready";; *)
     # 长对话后 LLM 可能误判工具集（"工具集不包含 present_file"）→ 新会话重试
     SID_NEW="file-e2e-s7-$RANDOM-$RANDOM"
-    chat_new() { curl -s --max-time 300 -X POST "$AGENT_URL/threads/$SID_NEW/chat" -H 'Content-Type: application/json' \
-      -d "{\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\"}"; }
+    chat_new() { curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
+      -d "{\"sessionId\":\"$SID_NEW\",\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\"}"; }
     READY=$(chat_new "请立即调用 present_file 工具登记文件：file_path='/workspace/outputs/result.txt'，file_content_base64='$SENT_B64'，不要做其他事情")
     case "$READY" in *file_ready*) ok "S-S7 产出文件回传 file_ready（新会话重试）";; *) bad "S-S7 产出文件回传 file_ready (body missing: file_ready)";; esac
   ;; esac

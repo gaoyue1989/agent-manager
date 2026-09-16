@@ -38,10 +38,14 @@ function getSessionId(): string {
   return sid;
 }
 
-// agent_state 会话 key 为 "{peer}:gw-{hash}"（ChatUiChannel 固定 gw-hash）；
-// chat 端点以 peer（冒号前部分）为 sessionId，peer 相同即恢复同一会话上下文。
-// A2A 来源会话（后缀为 vendorKey 非 gw-）不展示。
+// agent_state 会话 key 有两种形态：
+// - 新（POST /threads/chat 直存）：裸 sessionId，UI 侧固定 "webui-" 前缀；
+// - 旧（ChatUiChannel）："{peer}:gw-{hash}"，chat 端点以 peer（冒号前部分）为 sessionId。
+// A2A 来源会话（带其他 vendorKey 后缀或非 webui 前缀）不展示。
 function parseChatThread(sessionId: string): ThreadItem | null {
+  if (sessionId.startsWith("webui-")) {
+    return { peer: sessionId, fullKey: sessionId, updatedAt: "" };
+  }
   const idx = sessionId.indexOf(":gw-");
   if (idx <= 0) return null;
   return { peer: sessionId.slice(0, idx), fullKey: sessionId, updatedAt: "" };
@@ -489,7 +493,7 @@ function Bubble({ msg, onConfirm }: { msg: ChatMsg; onConfirm: (ok: boolean) => 
               {f.download_url.startsWith("data:") ? (
                 <img src={f.download_url} alt={f.file_name} className="max-h-24 rounded border" />
               ) : (
-                <a href={f.download_url} download={f.file_name}
+                <a href={f.download_url.startsWith("/files") ? `${AGENT_BASE}${f.download_url}` : f.download_url} download={f.file_name}
                   className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded"
                   data-testid="file-download">
                   下载

@@ -403,6 +403,48 @@ class ChatStreamControllerTest {
     // ===== 原有 MCP / present_file 测试保留 =====
 
     @Test
+    void chatShouldEmitFileReadyWithAgentRelativeDownloadUrl() {
+        // 契约（docs/api-frontend-sse.md）：file_ready.download_url 固定为相对路径
+        // "/files/{id}"，由前端拼 AGENT_BASE（/agent/release-agent）成完整下载地址。
+        // 前端曾因直接渲染该相对路径导致全入口 404，此用例把契约钉死在后端侧。
+        var sessionId = "test-user-fr1";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class));
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fr1");
+        var replyId = "r-fr1";
+        var callId = "c-fr1";
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
+            "present_file",
+            "{\"file_id\":\"fid-fr1\",\"file_name\":\"red.png\",\"mime_type\":\"image/png\",\"size\":69}");
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
+            "present_file", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        // replyId 由 chat 流程生成（UUID），与事件自带值无关，这里只锁 session/type/payload
+        verify(spyBus).emitSynthetic(eq(sessionId), anyString(), eq("file_ready"), payloadCap.capture());
+        var payload = payloadCap.getValue();
+        assertTrue(payload.contains("\"type\":\"file_ready\""), "type 应为 file_ready: " + payload);
+        assertTrue(payload.contains("\"file_id\":\"fid-fr1\""), "应携带 file_id: " + payload);
+        assertTrue(payload.contains("\"download_url\":\"/files/fid-fr1\""),
+            "download_url 必须是 /files/{id} 相对路径（前端拼 AGENT_BASE）: " + payload);
+        assertTrue(!payload.contains("download_url\":\"/agent/"),
+            "download_url 不得带 agent 前缀（前端负责拼接）: " + payload);
+    }
+
+    @Test
     void serializerShouldIncludeUiMetadataOnToolCallStart() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "get_weather");
         String json = AgentEventSseSerializer.payload(tc, "ui://weather/mcp-app.html", "weather");

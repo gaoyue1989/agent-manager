@@ -213,7 +213,9 @@ UP=$(upload_zip "$ZIPFILE")
 PKG_ID=$(echo "$UP" | jq -r '.data.id')
 [ -n "$PKG_ID" ] && [ "$PKG_ID" != "null" ] && ok "P1 上传带 skills 的包 (packageId=$PKG_ID)" || { bad "P1 上传失败"; exit 1; }
 
-PUB=$(api POST /services "{\"packageId\":$PKG_ID,\"image\":\"agent-framework:latest\",\"env\":$(runtime_env false)}")
+# 镜像不写死：从平台 GET /images 动态选取（与 platform-e2e 同款，后端 AVAILABLE_IMAGES 校验全名）
+RUNTIME_IMAGE=$(api GET /images | jq -r '[.data[].Image | select(. != null and contains(":5001"))][0] // .data[0].Image // empty')
+PUB=$(api POST /services "{\"packageId\":$PKG_ID,\"image\":\"$RUNTIME_IMAGE\",\"env\":$(runtime_env false)}")
 SVC_ID=$(echo "$PUB" | jq -r '.data.id')
 [ -n "$SVC_ID" ] && [ "$SVC_ID" != "null" ] && ok "P2 发布受理 (svcId=$SVC_ID)" || { bad "P2 发布失败"; exit 1; }
 if wait_status "$SVC_ID" running 300; then ok "P3 服务 running"; else bad "P3 未达 running"; exit 1; fi
@@ -290,7 +292,8 @@ a2a_assert_marker "3.4 对话读到 demo-a 原位更新内容" "$SVC_NAME" "e2e-
 if [ "${SANDBOX:-0}" == "1" ]; then
   say "E-SKILL-4：沙箱档（.skills-cache 物化 + 投影 + 脚本执行）"
   # 显式 name：k8sName/ingress 路径由 name 派生，避免与非沙箱服务（同 slug）派生名冲突
-  PUB2=$(api POST /services "{\"packageId\":$PKG_ID,\"name\":\"$SVC_SANDBOX_NAME\",\"image\":\"agent-framework:latest\",\"env\":$(runtime_env true)}")
+  RUNTIME_IMAGE2=$(api GET /images | jq -r '[.data[].Image | select(. != null and contains(":5001"))][0] // .data[0].Image // empty')
+  PUB2=$(api POST /services "{\"packageId\":$PKG_ID,\"name\":\"$SVC_SANDBOX_NAME\",\"image\":\"$RUNTIME_IMAGE2\",\"env\":$(runtime_env true)}")
   SVC2_ID=$(echo "$PUB2" | jq -r '.data.id')
   if [ -n "$SVC2_ID" ] && [ "$SVC2_ID" != "null" ] && wait_status "$SVC2_ID" running 300; then
     ok "4.1 沙箱服务 running"
