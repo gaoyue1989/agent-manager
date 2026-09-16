@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
 
 import org.slf4j.Logger;
@@ -32,6 +34,18 @@ public class SessionEventStore {
 
     private final DataSource dataSource;
     private final int retentionDays;
+
+    /**
+     * session_id → 下一个待分配的 seq。
+     *
+     * <p>seq 是 session 维度递增的，而 turn 会跨副本交接（HITL 恢复产生新 turn、
+     * 新 replyId，可能在另一个 Pod 上执行）。因此计数器必须在**每个 turn 开始时**
+     * 从 DB 当前最大值续起，不能只在 Pod 启动时初始化一次。
+     *
+     * <p>安全性依赖：同一 session 的 turn 由 turn_lease 全局串行化，任一时刻只有一个
+     * Pod 在写该 session。若该前提被放松，本计数器会产生 seq 冲突。
+     */
+    private final ConcurrentHashMap<String, AtomicInteger> seqCounters = new ConcurrentHashMap<>();
 
     public SessionEventStore(DataSource dataSource, int retentionDays) {
         this.dataSource = dataSource;
@@ -68,6 +82,34 @@ public class SessionEventStore {
     }
 
     /**
+     * 播种 seq 计数器（turn 开始时调用，必须在本 Pod 获得 turn_lease 之后）。
+     *
+     * <p>幂等：计数器已存在时不做任何事，避免把已推进的计数器重置回 DB 的最大值
+     * （缓冲区中尚未落库的行会因此被覆盖）。
+     */
+    public void seedSeq(String sessionId) {
+        seqCounters.computeIfAbsent(sessionId, sid -> {
+            int max = findMaxSeq(sid);
+            log.debug("SessionEventStore: seeded seq counter for {} at {}", sid, max);
+            return new AtomicInteger(max);
+        });
+    }
+
+    /** 释放 seq 计数器（turn 结束时调用，防止 map 无界增长） */
+    public void releaseSeq(String sessionId) {
+        seqCounters.remove(sessionId);
+    }
+
+    /** 取下一个 seq：已播种走内存计数器，未播种退回 DB 查询 */
+    private int nextSeq(String sessionId) {
+        var counter = seqCounters.get(sessionId);
+        if (counter != null) {
+            return counter.incrementAndGet();
+        }
+        return findMaxSeq(sessionId) + 1;
+    }
+
+    /**
      * 追加一条事件记录，返回分配的 seq。
      *
      * <p>同 session 的 turn 由 turn_lease 串行化，seq 分配无需额外锁。
@@ -77,16 +119,7 @@ public class SessionEventStore {
      */
     public int append(String sessionId, String replyId, String eventType, String payload) {
         try (var conn = dataSource.getConnection()) {
-            // 获取当前 session 的最大 seq，+1 作为新 seq
-            // 同 session 由 turn_lease 串行化，无并发竞争
-            int nextSeq;
-            try (var ps = conn.prepareStatement(
-                    "SELECT COALESCE(MAX(seq), 0) FROM session_event WHERE session_id = ?")) {
-                ps.setString(1, sessionId);
-                var rs = ps.executeQuery();
-                rs.next();
-                nextSeq = rs.getInt(1) + 1;
-            }
+            int nextSeq = nextSeq(sessionId);
 
             try (var ps = conn.prepareStatement("""
                 INSERT INTO session_event

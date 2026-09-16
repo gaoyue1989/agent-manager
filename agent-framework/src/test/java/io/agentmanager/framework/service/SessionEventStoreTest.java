@@ -89,6 +89,71 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void seedSeqThenAppendDoesNotQueryMaxAgain() throws Exception {
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(5);
+        when(conn.prepareStatement(contains("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        store.seedSeq("sid-counter");
+        assertEquals(6, store.append("sid-counter", "rid-1", "TOOL_CALL_START", "{}"));
+        assertEquals(7, store.append("sid-counter", "rid-1", "TOOL_CALL_START", "{}"));
+
+        // SELECT MAX 只应在 seedSeq 时执行一次
+        verify(conn, times(1)).prepareStatement(contains("SELECT COALESCE(MAX"));
+    }
+
+    @Test
+    void seedSeqIsIdempotent() throws Exception {
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(5);
+        when(conn.prepareStatement(contains("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        store.seedSeq("sid-idem");
+        store.append("sid-idem", "rid-1", "TOOL_CALL_START", "{}");   // seq=6
+        store.seedSeq("sid-idem");                                     // 重复播种不得回退
+        assertEquals(7, store.append("sid-idem", "rid-1", "TOOL_CALL_START", "{}"));
+
+        verify(conn, times(1)).prepareStatement(contains("SELECT COALESCE(MAX"));
+    }
+
+    @Test
+    void appendFallsBackToDbWhenNotSeeded() throws Exception {
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(41);
+        when(conn.prepareStatement(contains("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        // 未播种：退回 DB 查询，保持既有语义
+        assertEquals(42, store.append("sid-unseeded", "rid-1", "TOOL_CALL_START", "{}"));
+    }
+
+    @Test
     void queryAfterReturnsFlux() throws Exception {
         var conn = mock(java.sql.Connection.class);
         var ps = mock(java.sql.PreparedStatement.class);
