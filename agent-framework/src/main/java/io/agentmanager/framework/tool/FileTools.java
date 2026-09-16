@@ -131,7 +131,8 @@ public class FileTools {
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
                 id, userKey,
-                ctx != null ? ctx.getSessionId() : null,
+                null,  // sessionId: 工具层不写，由控制器层 emitFileReadyViaEventBus 回写业务 peer
+                null,  // replyId: 工具层无此信息，由控制器层 file_ready 合成时回写
                 basename(norm), norm, mime, bytes.length,
                 props.file().storageType(), storageKey, "generated", "injected",
                 java.time.LocalDateTime.now()));
@@ -202,6 +203,7 @@ public class FileTools {
     }
 
     private static String err(String msg) {
-        return "{\"error\":\"" + msg.replace("\"", "'") + "\"}";
+        var safe = msg.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+        return "{\"error\":\"" + safe + "\"}";
     }
 }

@@ -9,20 +9,28 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.LLMLogger;
+import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionUserStore;
 
 /**
  * 会话 API（O7 定稿：会话接口统一迁至 /threads，页面数据端点保留 /debug）。
  *
  * <p>无状态单次流架构下 Thread 列表/历史为只读重建视角：
  * <ul>
- *   <li>GET /threads —— agent_state 表 session_id 去重（真实会话来源）</li>
+ *   <li>GET /threads?userId=xxx —— agent_state 表 session_id 去重，可按 userId 过滤</li>
  *   <li>GET /threads/{sessionId}/history —— state_data 尽力解析 + 附 pendingConfirm
  *       （confirm_context 未消费待确认，供刷新后重建确认卡片）</li>
  *   <li>GET /threads/{sessionId}/llm-calls —— LLM 调用记录</li>
@@ -37,31 +45,84 @@ public class ThreadController {
     private final DataSource dataSource;
     private final LLMLogger llmLogger;
     private final ConfirmContextStore confirmContextStore;
+    private final SessionUserStore sessionUserStore;
+    private final SessionEventStore sessionEventStore;
 
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
-                            ConfirmContextStore confirmContextStore) {
+                            ConfirmContextStore confirmContextStore,
+                            SessionUserStore sessionUserStore,
+                            SessionEventStore sessionEventStore) {
         this.dataSource = dataSource;
         this.llmLogger = llmLogger;
         this.confirmContextStore = confirmContextStore;
+        this.sessionUserStore = sessionUserStore;
+        this.sessionEventStore = sessionEventStore;
     }
 
-    /** Thread 列表：agent_state 表 session_id 去重（真实会话来源） */
+    /** Thread 列表：agent_state 表 session_id 去重（真实会话来源）；可按 userId 过滤 */
     @GetMapping
-    public List<Map<String, Object>> listThreads() {
+    public List<Map<String, Object>> listThreads(
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        // 确保 remark 列存在（listThreads 的 SQL 引用了 su.remark）
+        ensureRemarkColumn();
+        // 网关 Header 优先 > 请求参数
+        if (headerUserId != null && !headerUserId.isBlank()) {
+            userId = headerUserId;
+        }
         var result = new ArrayList<Map<String, Object>>();
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement();
-             var rs = stmt.executeQuery(
-                 "SELECT session_id, MAX(updated_at) AS updated_at FROM agent_state GROUP BY session_id ORDER BY updated_at DESC")) {
-            while (rs.next()) {
-                var sid = rs.getString("session_id");
-                result.add(Map.of(
-                    "session_id", sid,
-                    "thread_id", extractThreadId(sid),
-                    "updated_at", rs.getTimestamp("updated_at") != null
-                        ? rs.getTimestamp("updated_at").toString() : ""
-                ));
+        try (var conn = dataSource.getConnection()) {
+            // 如果指定了 userId，优先从 session_user 表过滤
+            if (userId != null && !userId.isBlank()) {
+                // LEFT JOIN 使用 LIKE 匹配：agent_state.session_id 格式为
+                // slotId(userId, canonicalKey) = "{normalizeUser(userId)}:{canonicalKey}"，
+                // 而 session_user.session_id = 前端 peerId。两者不一致，需用 LIKE 前缀匹配。
+                try (var ps = conn.prepareStatement(
+                        "SELECT su.session_id, su.remark, MAX(a.updated_at) AS updated_at "
+                            + "FROM session_user su LEFT JOIN agent_state a "
+                            + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
+                            + "WHERE su.user_id = ? "
+                            + "GROUP BY su.session_id, su.remark "
+                            + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
+                    ps.setString(1, userId);
+                    var rs = ps.executeQuery();
+                    while (rs.next()) {
+                        var sid = rs.getString("session_id");
+                        var remark = rs.getString("remark");
+                        var updatedAt = rs.getTimestamp("updated_at");
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("session_id", sid);
+                        m.put("thread_id", extractThreadId(sid));
+                        m.put("user_id", userId);
+                        m.put("title", remark != null ? remark : "");
+                        m.put("updated_at", updatedAt != null ? updatedAt.toString() : "");
+                        result.add(m);
+                    }
+                }
+            } else {
+                // 无 userId 过滤：返回全部会话，附带 user_id + title（从 session_user 表查）
+                // LEFT JOIN 使用 LIKE 匹配（同上，agent_state.session_id 格式与 session_user 不一致）
+                try (var stmt = conn.createStatement();
+                     var rs = stmt.executeQuery(
+                         "SELECT su.session_id, su.user_id, su.remark, MAX(a.updated_at) AS updated_at "
+                             + "FROM session_user su LEFT JOIN agent_state a "
+                             + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
+                             + "GROUP BY su.session_id, su.user_id, su.remark "
+                             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
+                    while (rs.next()) {
+                        var sid = rs.getString("session_id");
+                        var remark = rs.getString("remark");
+                        var updatedAt = rs.getTimestamp("updated_at");
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("session_id", sid);
+                        m.put("thread_id", extractThreadId(sid));
+                        m.put("user_id", rs.getString("user_id"));
+                        m.put("title", remark != null ? remark : "");
+                        m.put("updated_at", updatedAt != null ? updatedAt.toString() : "");
+                        result.add(m);
+                    }
+                }
             }
         } catch (Exception e) {
             log.warn("List threads failed: {}", e.getMessage());
@@ -78,32 +139,102 @@ public class ThreadController {
         // 产出文件卡片（present_file/create_oaf_zip 登记时 session_id = gw-hash）：
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.prepareStatement(
-                 "SELECT state_data FROM agent_state WHERE session_id = ? "
-                     + "OR session_id LIKE CONCAT(?, ':%') "
-                     + "OR session_id LIKE CONCAT('%:', ?) "
-                     + "ORDER BY item_index DESC LIMIT 1")) {
-            stmt.setString(1, sessionId);
-            stmt.setString(2, sessionId);
-            stmt.setString(3, sessionId);
-            var rs = stmt.executeQuery();
-            if (!rs.next()) {
-                result.put("messages", List.of());
-                return result;
-            }
-            var stateData = rs.getString("state_data");
-            result.put("messages", io.agentmanager.framework.service.StateDataParser
-                .toRoleContentList(io.agentmanager.framework.service.StateDataParser
-                    .findMessagesArray(stateData)));
-            return result;
-        } catch (Exception e) {
-            log.warn("thread history read failed for {}: {}", sessionId, e.getMessage());
-            result.put("messages", List.of());
-            result.put("error", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
-            return result;
-        }
+        result.put("messages", loadMessages(sessionId));
+        return result;
     }
+
+    /** Thread 详情：返回会话元信息 + 历史消息 + pendingConfirm + 产出文件 */
+    @GetMapping("/{sessionId}")
+    public Map<String, Object> getThread(@PathVariable String sessionId) {
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("session_id", sessionId);
+        result.put("user_id", sessionUserStore.findUserIdBySession(sessionId));
+
+        // 元信息：从 agent_state 取最新 updated_at（使用 LIKE 匹配前缀，与 loadMessages 一致）
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT MAX(updated_at) AS updated_at FROM agent_state "
+                     + "WHERE session_id = ? OR session_id LIKE CONCAT(?, ':%')")) {
+            ps.setString(1, sessionId);
+            ps.setString(2, sessionId);
+            var rs = ps.executeQuery();
+            if (rs.next()) {
+                result.put("updated_at", rs.getTimestamp("updated_at") != null
+                    ? rs.getTimestamp("updated_at").toString() : "");
+            } else {
+                result.put("updated_at", "");
+            }
+        } catch (Exception e) {
+            log.warn("getThread meta failed for {}: {}", sessionId, e.getMessage());
+            result.put("updated_at", "");
+        }
+
+        // 消息历史
+        result.put("pendingConfirm", pendingConfirmPayload(sessionId));
+        result.put("files", generatedFiles(sessionId));
+        result.put("messages", loadMessages(sessionId));
+        return result;
+    }
+
+    /** 删除会话：级联清理所有关联数据 */
+    @DeleteMapping("/{sessionId}")
+    public ResponseEntity<Map<String, Object>> deleteThread(@PathVariable String sessionId) {
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        int totalDeleted = 0;
+
+        // 1. agent_state + agent_fs（会话状态与工作区文件）
+        totalDeleted += deleteBySessionId("agent_state", sessionId);
+        totalDeleted += deleteBySessionId("agent_fs", sessionId);
+
+        // 2. session_event（SSE 事件历史）——已迁 Redis，走 store 删两个 key，
+        //    不能再走 deleteBySessionId（那张表还在但已不再写入）
+        var eventKeys = sessionEventStore.deleteSession(sessionId);
+        if (eventKeys >= 0) {
+            totalDeleted += eventKeys;
+        }
+
+        // 3. session_user（会话-用户映射）
+        totalDeleted += deleteBySessionId("session_user", sessionId);
+
+        // 4. confirm_context（待确认上下文）
+        confirmContextStore.delete(sessionId);
+        totalDeleted++; // 近似计数
+
+        // 5. turn_lease（活跃租约）
+        totalDeleted += deleteBySessionId("turn_lease", sessionId);
+
+        // 6. file_asset（产出文件：按 session_id 精确过滤）
+        totalDeleted += deleteGeneratedFiles(sessionId);
+
+        log.info("Thread deleted: {} (total rows affected: {})", sessionId, totalDeleted);
+        return ResponseEntity.ok(Map.of(
+            "session_id", sessionId,
+            "deleted", true,
+            "rows_affected", totalDeleted
+        ));
+    }
+
+    /** 更新会话：目前仅支持重命名（title 字段，存入 session_user.remark） */
+    @PatchMapping("/{sessionId}")
+    public ResponseEntity<Map<String, Object>> patchThread(
+            @PathVariable String sessionId,
+            @RequestBody PatchRequest body) {
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+
+        if (body.title() != null && !body.title().isBlank()) {
+            // 将 title 写入 session_user 表的 remark 字段
+            upsertRemark(sessionId, body.title());
+        }
+
+        return ResponseEntity.ok(Map.of(
+            "session_id", sessionId,
+            "title", body.title() != null ? body.title() : ""
+        ));
+    }
+
+    /** PATCH 请求体 */
+    public record PatchRequest(String title) {}
 
     /** LLM 调用记录（LLMLogger） */
     @GetMapping("/{sessionId}/llm-calls")
@@ -130,48 +261,227 @@ public class ThreadController {
             .orElse(null);
     }
 
-    /** session_id 格式: "{slug}:{threadId}"，取最后一个冒号后的部分作为展示 id */
+    /** session_id 格式: "{slug}__{threadId}"，取最后一个 "__" 后的部分作为展示 id */
     private String extractThreadId(String sessionId) {
-        var idx = sessionId.lastIndexOf(':');
-        if (idx >= 0 && idx < sessionId.length() - 1) {
-            return sessionId.substring(idx + 1);
+        var idx = sessionId.lastIndexOf("__");
+        if (idx >= 0 && idx < sessionId.length() - 2) {
+            return sessionId.substring(idx + 2);
         }
         return sessionId;
     }
 
     /**
      * 会话产出文件（origin=generated）：present_file/create_oaf_zip 登记时
-     * user_key = RuntimeContext 的 userId（Channel 流程 = peer，每会话唯一）。
-     * 注意不能用 session_id（gw-hash 对全部 ChatUiChannel 会话为常量，会跨会话串文件）。
-     * 传入 sessionId 兼容 fullKey（"peer:gw-hash"）与裸 peer 两种形态。
+     * session_id = ctx.getSessionId()（即前端 peer / sessionId），按此精确过滤。
+     * 同时兼容旧数据（session_id 为 null 时按 user_key 回退）。
      */
     private List<Map<String, Object>> generatedFiles(String sessionId) {
-        var peer = sessionId;
-        var idx = sessionId.indexOf(':');
-        if (idx > 0) {
-            peer = sessionId.substring(0, idx);
-        }
-        if (peer.isBlank()) {
-            return List.of();
-        }
         var files = new ArrayList<Map<String, Object>>();
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(
-                 "SELECT id, file_name, mime_type, size FROM file_asset "
-                     + "WHERE user_key = ? AND origin = 'generated' ORDER BY created_at")) {
-            ps.setString(1, peer);
+                 "SELECT id, file_name, mime_type, size, reply_id FROM file_asset "
+                     + "WHERE session_id = ? AND origin = 'generated' ORDER BY created_at")) {
+            ps.setString(1, sessionId);
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    files.add(Map.of(
-                        "file_id", rs.getString("id"),
-                        "file_name", rs.getString("file_name"),
-                        "mime_type", rs.getString("mime_type"),
-                        "size", rs.getLong("size")));
+                    var m = new LinkedHashMap<String, Object>();
+                    m.put("file_id", rs.getString("id"));
+                    m.put("file_name", rs.getString("file_name"));
+                    m.put("mime_type", rs.getString("mime_type"));
+                    m.put("size", rs.getLong("size"));
+                    var replyId = rs.getString("reply_id");
+                    if (replyId != null && !replyId.isBlank()) {
+                        m.put("reply_id", replyId);
+                    }
+                    files.add(m);
                 }
             }
         } catch (Exception e) {
             log.warn("generated files lookup failed for {}: {}", sessionId, e.getMessage());
         }
         return files;
+    }
+
+    // ===== 删除会话辅助方法 =====
+
+    /** 按 session_id 删除指定表中的记录（防 SQL 注入：表名白名单校验）。
+     *  agent_state / agent_fs 表的 session_id 格式为 slotId(userId, canonicalKey)，
+     *  即 "{peerId}:{canonicalKey}"，与 session_user.session_id（前端 peerId）不一致，
+     *  因此对这两张表额外使用 LIKE 前缀匹配删除变体记录。 */
+    private int deleteBySessionId(String table, String sessionId) {
+        // session_event 已不在白名单：它迁到 Redis 后由 sessionEventStore.deleteSession 处理，
+        // 留着会让人以为还能从这张表删数据（表还在，但已不再写入）
+        var allowed = java.util.Set.of("agent_state", "agent_fs",
+            "session_user", "turn_lease");
+        if (!allowed.contains(table)) {
+            throw new IllegalArgumentException("Table not in delete whitelist: " + table);
+        }
+        var needsLike = java.util.Set.of("agent_state", "agent_fs");
+        var sql = needsLike.contains(table)
+            ? "DELETE FROM " + table + " WHERE session_id = ? OR session_id LIKE CONCAT(?, ':%')"
+            : "DELETE FROM " + table + " WHERE session_id = ?";
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(sql)) {
+            ps.setString(1, sessionId);
+            if (needsLike.contains(table)) {
+                ps.setString(2, sessionId);
+            }
+            return ps.executeUpdate();
+        } catch (Exception e) {
+            log.warn("deleteBySessionId failed for table={}, sid={}: {}", table, sessionId, e.getMessage());
+            return 0;
+        }
+    }
+
+    /** 删除会话产出的 generated 文件（DB 行 + 存储对象） */
+    private int deleteGeneratedFiles(String sessionId) {
+        int count = 0;
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT id, storage_key FROM file_asset WHERE session_id = ? AND origin = 'generated'")) {
+            ps.setString(1, sessionId);
+            var rs = ps.executeQuery();
+            var toDelete = new ArrayList<String[]>();
+            while (rs.next()) {
+                toDelete.add(new String[]{rs.getString("id"), rs.getString("storage_key")});
+            }
+            for (var entry : toDelete) {
+                try (var del = conn.prepareStatement("DELETE FROM file_asset WHERE id = ?")) {
+                    del.setString(1, entry[0]);
+                    del.executeUpdate();
+                }
+                count++;
+                // 存储对象删除：失败仅告警，不影响整体结果
+                if (entry[1] != null && !entry[1].isBlank()) {
+                    try {
+                        // 需要注入 FileStorage，暂不删除存储对象，留给定时清理兜底
+                    } catch (Exception e) {
+                        log.warn("storage object delete failed for {}: {}", entry[1], e.getMessage());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("deleteGeneratedFiles failed for {}: {}", sessionId, e.getMessage());
+        }
+        return count;
+    }
+
+    /** 从 agent_state 加载历史消息。
+     *  AgentScope SDK 内部 session_id 格式为 slotId(userId, canonicalKey)，
+     *  即 "{normalizeUser(userId)}:{canonicalKey}"（如 "debug-user_s1:chatui|x:agentId=main"），
+     *  与 session_user.session_id（前端 peerId）不一致。
+     *  因此查询使用 LIKE 匹配前缀 "peerId:%" 以覆盖 SDK 内部的 session_id 格式，
+     *  同时保留精确匹配和后缀匹配以兼容旧格式。
+     *  state_key 过滤 "agent_state"：确保只取消息状态，避免取到 sandbox_state 等无消息数据的记录。
+     */
+    private List<Map<String, Object>> loadMessages(String sessionId) {
+        try (var conn = dataSource.getConnection();
+             // 优先匹配精确 session_id，再匹配带分隔符前缀/后缀的变体
+             var stmt = conn.prepareStatement(
+                 "SELECT state_data FROM agent_state "
+                     + "WHERE (session_id = ? "
+                     +   "OR session_id LIKE CONCAT(?, ':%') "
+                     +   "OR session_id LIKE CONCAT(?, '__%') "
+                     +   "OR session_id LIKE CONCAT('%:', ?) "
+                     +   "OR session_id LIKE CONCAT('%__', ?)) "
+                     + "AND state_key = 'agent_state' "
+                     + "ORDER BY item_index")) {
+            stmt.setString(1, sessionId);
+            stmt.setString(2, sessionId);
+            stmt.setString(3, sessionId);
+            stmt.setString(4, sessionId);
+            stmt.setString(5, sessionId);
+            var rs = stmt.executeQuery();
+            // agent_state 存储方式：单条 state（item_index=0 包含完整 AgentState JSON）
+            // 或列表（每条消息一个 item_index）。两种方式都需要拼合后交给 StateDataParser。
+            var fragments = new ArrayList<String>();
+            while (rs.next()) {
+                fragments.add(rs.getString("state_data"));
+            }
+            if (fragments.isEmpty()) {
+                return List.of();
+            }
+            // 如果只有一条记录，直接解析；如果是多条消息，先合成为 JSON 数组
+            var stateData = fragments.size() == 1
+                ? fragments.get(0)
+                : "[" + String.join(",", fragments) + "]";
+            var msgs = io.agentmanager.framework.service.StateDataParser
+                .toRoleContentList(io.agentmanager.framework.service.StateDataParser
+                    .findMessagesArray(stateData));
+
+            // 回填 reply_id：取该 session 出现过的 reply_id，按**首个事件的 seq** 升序分配给
+            // assistant 消息。数据源是 Redis 的 reply 索引（ZSET，score = 首个 seq），
+            // 与原 SQL 的 GROUP BY reply_id ORDER BY MIN(seq) 等价。
+            //
+            // 与原查询有两处刻意的差异：
+            //  - 原查询只认 event_type = 'AGENT_START'；索引覆盖带该 replyId 的**任意**事件。
+            //    AGENT_START 是一个 turn 的首个事件，所以顺序一致；差别只在「AGENT_START 丢了
+            //    的 turn」现在也会出现——那更正确，不是缺陷。
+            //  - 失败时**返回 null 而不是空列表**：空列表会被下游当成「这个会话没有 reply」，
+            //    而实际是「读不到」。两者对历史的呈现不同，不能在类型上混为一谈。
+            var assistantCount = msgs.stream()
+                .filter(m -> "assistant".equals(m.get("role")))
+                .count();
+            if (assistantCount == 0) {
+                return msgs;
+            }
+            List<String> replyIds = null;
+            try {
+                replyIds = sessionEventStore.findReplyIds(sessionId);
+            } catch (Exception e) {
+                // 从 debug 提到 warn：静默缺 reply_id 会让前端的历史消息失去与 turn 的关联，
+                // 这是**内容层面的错误**，不该按调试信息处理
+                log.warn("reply_id lookup failed for {} — 历史消息将缺少 reply_id: {}",
+                    sessionId, e.toString());
+            }
+            if (replyIds == null) {
+                return msgs;
+            }
+            // 按 AGENT_START 出现顺序，依次分配 reply_id 给 assistant 消息
+            int idx = 0;
+            for (var m : msgs) {
+                if ("assistant".equals(m.get("role")) && idx < replyIds.size()) {
+                    m.put("reply_id", replyIds.get(idx));
+                    idx++;
+                }
+            }
+            return msgs;
+        } catch (Exception e) {
+            log.warn("loadMessages failed for {}: {}", sessionId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 将 title 写入 session_user.remark（字段不存在则 ALTER TABLE 添加） */
+    private void upsertRemark(String sessionId, String title) {
+        ensureRemarkColumn();
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement("""
+                 INSERT INTO session_user (session_id, user_id, remark, created_at, updated_at)
+                 VALUES (?, COALESCE((SELECT user_id FROM session_user WHERE session_id = ? LIMIT 1), 'unknown'), ?, NOW(3), NOW(3))
+                 ON DUPLICATE KEY UPDATE remark = VALUES(remark), updated_at = NOW(3)
+                 """)) {
+            ps.setString(1, sessionId);
+            ps.setString(2, sessionId);
+            ps.setString(3, title);
+            ps.executeUpdate();
+        } catch (Exception e) {
+            log.warn("upsertRemark failed for {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 幂等确保 remark 列存在 */
+    private void ensureRemarkColumn() {
+        try (var conn = dataSource.getConnection();
+             var rs = conn.getMetaData().getColumns(null, null, "session_user", "remark")) {
+            if (!rs.next()) {
+                try (var stmt = conn.createStatement()) {
+                    stmt.executeUpdate("ALTER TABLE session_user ADD COLUMN remark VARCHAR(512) DEFAULT '' AFTER user_id");
+                    log.info("Added 'remark' column to session_user table");
+                }
+            }
+        } catch (Exception e) {
+            log.debug("ensureRemarkColumn check skipped: {}", e.getMessage());
+        }
     }
 }

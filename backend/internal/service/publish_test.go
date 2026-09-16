@@ -19,6 +19,9 @@ func publishToRegisterFailed(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgI
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
+	// 注册地址改写为 127.0.0.1:1（连接拒绝即时失败）：默认的 *.svc.cluster.local 在
+	// macOS 上因 .local 后缀走 mDNS 解析需数秒，会超出 waitForStatus 的 3s 窗口
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("cluster_url", "http://127.0.0.1:1")
 	_ = fk.SetReady("test", svc.K8sName, 1)
 	got := waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
 	return &got
@@ -108,6 +111,8 @@ func TestPublishHappyPath(t *testing.T) {
 		t.Fatalf("subPath mount wrong: %+v", cs.VolumeMounts[0])
 	}
 
+	// 同 publishToRegisterFailed：改写注册地址避免 macOS mDNS 解析拖慢失败路径
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).Update("cluster_url", "http://127.0.0.1:1")
 	_ = fk.SetReady("test", "oaf-acme-demo", 1)
 	final := waitForStatus(t, core, svc.ID, store.StatusRegisterFailed)
 	events, _ := core.Events(svc.ID)
@@ -272,6 +277,8 @@ func TestPublishApplyFailureMarksError(t *testing.T) {
 	if _, err := core.StartAgain(got.ID); err != nil {
 		t.Fatalf("start again from error: %v", err)
 	}
+	// 同 publishToRegisterFailed：改写注册地址避免 macOS mDNS 解析拖慢失败路径
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", got.ID).Update("cluster_url", "http://127.0.0.1:1")
 	_ = fk.SetReady("test", got.K8sName, 1)
 	waitForStatus(t, core, got.ID, store.StatusRegisterFailed)
 }

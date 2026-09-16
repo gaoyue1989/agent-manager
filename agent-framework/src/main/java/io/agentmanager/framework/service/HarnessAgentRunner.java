@@ -35,10 +35,13 @@ public class HarnessAgentRunner implements AgentRunner {
 
     @Override
     public Flux<Event> stream(List<Msg> requestMessages, AgentRequestOptions options) {
+        // ★ Windows 路径安全化：SDK 把 sessionId/userId 当目录名用
+        var rawSid = options.getSessionId() != null
+                ? options.getSessionId() : options.getTaskId();
         var ctx = io.agentscope.core.agent.RuntimeContext.builder()
-            .sessionId(options.getSessionId() != null
-                    ? options.getSessionId() : options.getTaskId())
-            .userId(options.getUserId() != null ? options.getUserId() : "anonymous")
+            .sessionId(io.agentmanager.framework.util.PathSafe.sanitize(rawSid))
+            .userId(io.agentmanager.framework.util.PathSafe.sanitize(
+                options.getUserId() != null ? options.getUserId() : "anonymous"))
             .build();
 
         taskSessionMap.put(options.getTaskId(), options.getSessionId());

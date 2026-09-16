@@ -38,7 +38,7 @@ public class LLMLogger {
         if (exact != null) {
             return exact;
         }
-        // 兼容 agent_state 中带租户前缀的会话变体（如 "__anon__:debug-user:xxx" 与 "debug-user:xxx" 视为同一会话）
+        // 兼容 agent_state 中带租户前缀的会话变体（如 "__anon__:debug-user:xxx" 与 "debug-user:xxx" / "debug-user_xxx" 视为同一会话）
         var normalized = normalizeThreadId(threadId);
         if (normalized != null) {
             for (var entry : storage.entrySet()) {
@@ -50,10 +50,12 @@ public class LLMLogger {
         return List.of();
     }
 
-    /** 剥离租户前缀段（冒号分隔），保留末尾会话本体 */
+    /** 剥离租户前缀段（冒号或下划线分隔），保留末尾会话本体 */
     private static String normalizeThreadId(String threadId) {
         if (threadId == null || threadId.isBlank()) return null;
+        // 优先冒号（SDK 原生格式），回退下划线（Windows 兼容格式）
         var idx = threadId.lastIndexOf(':');
+        if (idx < 0) idx = threadId.lastIndexOf('_');
         return idx >= 0 ? threadId.substring(idx + 1) : threadId;
     }
 

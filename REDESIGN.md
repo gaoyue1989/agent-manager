@@ -670,7 +670,7 @@ spec:
 
 - **宿主机 nginx :8911 已切换**：上游指向集群（前端→NodePort 30881、API→30880、/agent/→ingress 30080、/mcp 同后端），A2A/SSE 路径均注入 proxy-read/send-timeout=3600。原 v1 配置备份于 /tmp/opencode/agent-manager.conf.bak。
 - **前端集成发布助手对话**（页面 /assistant，无状态单次流方案）：
-  - `POST {agent}/threads/{sessionId}/chat` SSE 增量渲染（TEXT_BLOCK_DELTA 拼接、TOOL_CALL 状态行、permission_ask 确认卡片）
+  - `POST {agent}/threads/chat`（sessionId 在请求体）SSE 增量渲染（TEXT_BLOCK_DELTA 拼接、TOOL_CALL 状态行、permission_ask 确认卡片）
   - HITL 恢复走 `POST /threads/{sessionId}/confirm-stream`（results=[{tool_call_id,confirmed}]）
   - Next rewrites 将 `/agent/release-agent/*` 反代到 release-agent Service，任意入口同源可用
   - sessionId 存 localStorage（会话跨刷新延续）；HTTP 非安全上下文无 crypto.randomUUID，用时间戳+随机串兜底
@@ -702,7 +702,7 @@ spec:
    userKey 不匹配拒绝防串沙箱），LLM 无需复述大段 base64。
 5. `HarnessAgent.maxIters(20)`：SDK 默认 10 轮不足支撑生成包长流程（10 轮实测 EXCEED_MAX_ITERS）。
 6. **No active sandbox 尾部收尾错误（SDK 缺陷）**：agent 调用结束后 SDK 收尾路径偶发访问已释放沙箱
-   文件系统 → 流以 error 终止导致前端误判失败；`SessionStreamController.isTrailingSandboxTeardownError`
+   文件系统 → 流以 error 终止导致前端误判失败；`ChatStreamController.isTrailingSandboxTeardownError`
    识别（异常链消息含 "No active sandbox"）→ 忽略、正常 complete。根因在 SDK 未消除，属应用层缓解。
 
 **遗留待办（详见文档 §17.3 与 §18）**：

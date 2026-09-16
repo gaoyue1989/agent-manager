@@ -1,6 +1,14 @@
 server:
   port: ${SERVER_PORT:8100}
 
+# 日志配置
+logging:
+  file:
+    path: ${LOG_PATH:${user.home}/logs/agent-framework}
+  level:
+    root: INFO
+    io.agentmanager.framework: ${APP_LOG_LEVEL:INFO}
+
 spring:
   application:
     name: agent-framework
@@ -12,15 +20,17 @@ spring:
       max-request-size: ${FILE_UPLOAD_MAX_MB:20}MB
 
 agent:
-  config-dir: ${AGENT_CONFIG_DIR:/config}
+  config-dir: ${AGENT_CONFIG_DIR:}
+  workspace-dir: ${AGENT_WORKSPACE_DIR:}
   llm:
     api-key: ${LLM_API_KEY:}
     model-id: ${LLM_MODEL_ID:}
     base-url: ${LLM_BASE_URL:}
     provider: ${LLM_PROVIDER:openai}
-    temperature: ${LLM_TEMPERATURE:0.7}
-    max-tokens: ${LLM_MAX_TOKENS:4096}
+    temperature: ${LLM_TEMPERATURE:0.3}
+    max-tokens: ${LLM_MAX_TOKENS:16384}
     timeout: ${LLM_TIMEOUT:120}
+    enable-thinking: ${LLM_ENABLE_THINKING:false}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
@@ -58,6 +68,23 @@ agent:
     storage-s3-access-key: ${FILE_STORAGE_S3_ACCESS_KEY:}
     storage-s3-secret-key: ${FILE_STORAGE_S3_SECRET_KEY:}
     storage-s3-bucket: ${FILE_STORAGE_S3_BUCKET:agent-files}
+  # durable-sse-plan §3.3：SSE 可靠传输配置
+  sse:
+    heartbeat-seconds: ${AGENT_SSE_HEARTBEAT_SECONDS:20}
+    sinks-eviction-minutes: ${AGENT_SSE_SINKS_EVICTION_MINUTES:5}
+    sinks-buffer-size: ${AGENT_SSE_SINKS_BUFFER_SIZE:256}
+  # session_event 事件流存储（Redis Streams，见 AgentRedisProperties record）
+  # 键名与 AgentRedisProperties 字段一一对应；每个叶子在代码里都有 @DefaultValue，
+  # 所以本段缺失也能起来 —— 但**别**依赖那些默认值：它们指向 127.0.0.1:6379。
+  # 集群里必须用 AGENT_REDIS_URL 覆盖成 redis://oaf-redis.agent-platform.svc…:6379，
+  # 否则 Pod 去连自己的 localhost，事件不落地、回放全挂（详见 oaf-redis Service 注释）。
+  redis:
+    url: ${AGENT_REDIS_URL:redis://127.0.0.1:6379}
+    # 命令超时：Lettuce 默认**关闭**命令超时，不设则一条命令可无限期占住 Tomcat 线程
+    command-timeout-ms: ${AGENT_REDIS_COMMAND_TIMEOUT_MS:2000}
+    connect-timeout-ms: ${AGENT_REDIS_CONNECT_TIMEOUT_MS:2000}
+    # 单 session 事件条数上限（内存兜底，非可选优化）
+    max-len-per-stream: ${AGENT_REDIS_MAX_LEN_PER_STREAM:250000}
   # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
   harness:
     # ReAct 推理

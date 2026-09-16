@@ -165,7 +165,7 @@ var text = allConfirmed
 | MCP 服务器列表 | `curl -s localhost:8100/mcp` |
 | 工具列表 | `curl -s localhost:8100/tools` |
 | MCP 单发调用 | `curl -s -X POST localhost:8813/mcp -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{...}}'` |
-| 手动对话（单次流） | `curl -N -X POST localhost:8100/threads/{sid}/chat -H 'Content-Type: application/json' -d '{"message":"...","userId":"debug-user"}'` |
+| 手动对话（单次流） | `curl -N -X POST localhost:8100/threads/chat -H 'Content-Type: application/json' -d '{"message":"...","userId":"debug-user","sessionId":"<sid>"}'` |
 | 恢复执行结果原文 | framework 日志临时加 `TOOL_RESULT_TEXT_DELTA` 调试日志（完成后删除） |
 | 确认上下文 | `mysql -h127.0.0.1 -P3307 agent_manager_test -e "SELECT * FROM confirm_context ORDER BY created_at DESC LIMIT 5"` |
 | agent_state 双行检查 | 同库 `agent_state`（`userId:sessionId` 拼接主键，比对频道行与恢复行） |

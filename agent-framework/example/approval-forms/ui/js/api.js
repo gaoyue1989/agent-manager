@@ -43,7 +43,7 @@ export const api = {
 
   // POST /chat 单次流（SSE 直吐，替代旧 fire-and-forget + 长连接订阅）
   triggerSessionChat: (sessionId, message, userId, { onEvent, onError } = {}) => {
-    const path = '/threads/' + encodeURIComponent(sessionId) + '/chat';
+    const path = '/threads/chat';
     const controller = new AbortController();
     const connect = async () => {
       let resp;
@@ -51,7 +51,7 @@ export const api = {
         resp = await fetch(BASE + path, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, userId: userId || 'debug-user' }),
+          body: JSON.stringify({ message, userId: userId || 'debug-user', sessionId }),
           signal: controller.signal
         });
       } catch (e) {

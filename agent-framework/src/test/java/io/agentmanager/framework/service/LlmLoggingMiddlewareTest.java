@@ -32,7 +32,7 @@ class LlmLoggingMiddlewareTest {
         var middleware = new LlmLoggingMiddleware(logger);
         var agent = mock(Agent.class);
         var ctx = mock(RuntimeContext.class);
-        when(ctx.getSessionId()).thenReturn("acme-test-agent:thread-1");
+        when(ctx.getSessionId()).thenReturn("acme-test-agent__thread-1");
 
         var model = mock(Model.class);
         when(model.getModelName()).thenReturn("openrouter/free");
@@ -51,7 +51,7 @@ class LlmLoggingMiddlewareTest {
 
         middleware.onModelCall(agent, ctx, input, next).blockLast();
 
-        var calls = logger.getCalls("acme-test-agent:thread-1");
+        var calls = logger.getCalls("acme-test-agent__thread-1");
         assertEquals(1, calls.size());
         var call = calls.get(0);
         assertNotNull(call.request());

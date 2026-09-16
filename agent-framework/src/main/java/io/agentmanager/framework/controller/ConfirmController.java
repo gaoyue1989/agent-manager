@@ -2,6 +2,7 @@ package io.agentmanager.framework.controller;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +16,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.SessionEventBus;
+import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.TurnLeaseGuard;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import reactor.core.publisher.Flux;
@@ -24,7 +27,8 @@ import reactor.core.publisher.Flux;
  *
  * <ul>
  *   <li>POST /threads/{sessionId}/confirm —— 携带确认决策恢复 agent，同步返回恢复执行后的最终回复</li>
- *   <li>POST /threads/{sessionId}/confirm-stream —— 恢复执行的事件流式下发（词表与普通流一致）</li>
+ *   <li>POST /threads/{sessionId}/confirm-stream —— 恢复执行的事件流式下发（DURABLE_SSE：事件经 EventBus
+ *       持久化 + 广播，SSE 断连后可通过 GET /subscribe 重连续传）</li>
  * </ul>
  *
  * <p>错误码（12.5）：缓存 miss → 404 {@code confirm_context_not_found}；重复确认（CAS 防护）→ 409
@@ -41,16 +45,32 @@ public class ConfirmController {
 
     private final AgentRuntimeService runtimeService;
     private final TurnLeaseStore turnLeaseStore;
+    private final SessionEventBus eventBus;
+    private final SessionUserStore sessionUserStore;
 
-    public ConfirmController(AgentRuntimeService runtimeService, TurnLeaseStore turnLeaseStore) {
+    public ConfirmController(AgentRuntimeService runtimeService,
+                             TurnLeaseStore turnLeaseStore,
+                             SessionEventBus eventBus,
+                             SessionUserStore sessionUserStore) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
+        this.eventBus = eventBus;
+        this.sessionUserStore = sessionUserStore;
     }
 
     /** 同步版：恢复 agent 执行，返回最终回复（无状态架构：无事件扇出，调用方直接消费结果） */
     @PostMapping(value = "/confirm", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> confirm(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
+        // ★ Windows 路径安全化：与 ChatStreamController 保持一致
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+
+        // 恢复确认时刷新会话-用户映射（确认恢复可能是新的入口，确保映射存在）
+        var userId = sessionUserStore.findUserIdBySession(sessionId);
+        if (userId != null) {
+            sessionUserStore.upsert(sessionId, userId);
+        }
+
         try {
             var result = runtimeService.resumeWithConfirm(sessionId, null, body.results());
             return ResponseEntity.ok(result);
@@ -65,30 +85,193 @@ public class ConfirmController {
         }
     }
 
-    /** 流式版：确认后事件流（新执行段，先 acquire turn 租约再恢复） */
+    /**
+     * 流式版：确认后事件流（DURABLE_SSE 架构）。
+     *
+     * <p>与 ChatStreamController.chat 相同的模式：
+     * <ol>
+     *   <li>acquire turn 租约</li>
+     *   <li>beginTurn — 播种 seq 计数器并确保 EventBus 有输出通道</li>
+     *   <li>先订阅 EventBus → SSE（避免与 agent 执行的竞态）</li>
+     *   <li>启动 agent 恢复执行 → 事件写入 EventBus</li>
+     *   <li>onCancel 仅取消 SSE 订阅，不 dispose agent 管道</li>
+     * </ol>
+     */
     @PostMapping(value = "/confirm-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> confirmStream(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
-        return Flux.defer(() -> {
+        // ★ Windows 路径安全化：与 ChatStreamController 保持一致
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        String finalSessionId = sessionId;
+
+        // 恢复确认时刷新会话-用户映射
+        var confirmUserId = sessionUserStore.findUserIdBySession(finalSessionId);
+        if (confirmUserId != null) {
+            sessionUserStore.upsert(finalSessionId, confirmUserId);
+        }
+
+        return Flux.<ServerSentEvent<String>>create(sink -> {
+            // ===== 1. 预检查确认可用性 =====
             try {
-                runtimeService.checkConfirmAvailable(sessionId);
+                runtimeService.checkConfirmAvailable(finalSessionId);
             } catch (Exception e) {
-                return Flux.just(errorSSE(e.getMessage() != null ? e.getMessage()
+                sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
                     : e.getClass().getSimpleName()));
+                sink.complete();
+                return;
             }
-            var token = turnLeaseStore.tryAcquire(sessionId);
+
+            // ===== 2. 抢 Turn 租约 =====
+            var token = turnLeaseStore.tryAcquire(finalSessionId);
             if (token == null) {
-                // 已有活跃执行段（并发确认 / 新消息正在执行）→ 409 turn_in_progress，以 SSE error 帧表达
-                return Flux.just(errorSSE("turn_in_progress: session '" + sessionId
+                sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
                     + "' has an active turn"));
+                sink.complete();
+                return;
             }
-            var lease = new TurnLeaseGuard(turnLeaseStore, sessionId, token);
-            return runtimeService.resumeWithConfirmStream(sessionId, null, body.results())
-                .map(m -> ServerSentEvent.<String>builder()
-                    .data(AgentEventSseSerializer.payload(m))
-                    .build())
-                .doFinally(signal -> lease.release());
-        });
+            TurnLeaseGuard lease = new TurnLeaseGuard(turnLeaseStore, finalSessionId, token);
+
+            // ===== 3. 准备 EventBus Sinks =====
+            String replyId = UUID.randomUUID().toString();
+
+            // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
+            // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
+            // 此时租约已到手，不回滚就会被 TurnLeaseGuard 的续租线程永久持有
+            // （token 匹配即持续续期）→ 该 session 再也无法执行，观察者也永不终止。
+            Flux<io.agentscope.core.event.AgentEvent> resumeFlux;
+            try {
+                eventBus.beginTurn(finalSessionId);
+                // 冷流：此处只做上下文消费与消息构建，尚未开始执行
+                resumeFlux = runtimeService.resumeWithConfirmEvents(
+                    finalSessionId, null, body.results());
+            } catch (Exception e) {
+                log.warn("confirm-stream setup failed, rolling back (sid={}): {}",
+                    finalSessionId, e.getMessage());
+                sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
+                    : e.getClass().getSimpleName()));
+                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
+                lease.release();
+                sink.complete();
+                return;
+            }
+
+            // ===== 4. 先订阅 EventBus → SSE =====
+            eventBus.subscribe(finalSessionId, 0, replyId)
+                .subscribe(
+                    sse -> sink.next(sse),
+                    e -> {
+                        log.warn("EventBus subscription error on confirm-stream (sid={}): {}",
+                            finalSessionId, e.getMessage());
+                        sink.error(e);
+                    },
+                    () -> sink.complete());
+
+            // ===== 5. 启动 agent 恢复执行 → 事件写入 EventBus =====
+            resumeFlux
+                .subscribe(
+                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink),
+                    e -> {
+                        log.warn("confirm-stream agent error (sid={}): {}",
+                            finalSessionId, e.getMessage());
+                        if (!lease.isLost()) {
+                            // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
+                            eventBus.emitSynthetic(finalSessionId, replyId, "error",
+                                "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
+                                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
+                        }
+                        endTurn(lease, finalSessionId);
+                    },
+                    // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
+                    () -> endTurn(lease, finalSessionId));
+
+            // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
+            sink.onCancel(() -> {
+                log.info("SSE disconnected, agent execution continues on confirm-stream (sid={}, rid={})",
+                    finalSessionId, replyId);
+            });
+
+        }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+    }
+
+    // ===== 事件处理（写入 EventBus） =====
+
+    /** 单帧处理：HITL 落库 + 事件写入 EventBus + 终态关闭 */
+    private void handleEventAndEmit(io.agentscope.core.event.AgentEvent event,
+                                    String sessionId, String replyId, TurnLeaseGuard lease,
+                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink) {
+        if (stopIfLeaseLost(lease, sessionId, sink)) {
+            return;
+        }
+
+        // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
+        if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
+            runtimeService.storeConfirmContext(sessionId, event);
+            lease.release();
+            // HITL 暂停点：锁已让出、状态已持久化
+        }
+
+        // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）
+        eventBus.emit(sessionId, event, replyId);
+
+        // HITL 是 turn 边界：permission_ask 已广播，关闭 sink（同上）
+        if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
+            eventBus.closeSession(sessionId);
+        }
+
+        // AGENT_END → 关闭 EventBus
+        if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {
+            endTurn(lease, sessionId);
+        }
+    }
+
+    /**
+     * 租约已失去：本副本不再拥有该 session 的写入权。继续 append 会与新 owner 的 seq
+     * 区间重叠，所以立刻停手、丢弃缓冲、发终态帧。
+     *
+     * <p>终态帧只给本连接的客户端、**不落库**——此刻任何 append 都会占用可能与新 owner
+     * 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
+     *
+     * @return true = 本事件已被丢弃，调用方必须直接返回
+     */
+    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
+                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink) {
+        if (!lease.isLost()) {
+            return false;
+        }
+        if (lease.tryMarkLostNotified()) {
+            log.error("[confirm] turn lease lost, stopping writer (sid={})", sessionId);
+            sink.next(interruptedSSE("lease_lost"));
+            eventBus.abandonSession(sessionId);
+            lease.release();
+        }
+        return true;
+    }
+
+    /**
+     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
+     *
+     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
+     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
+     * ——正是 C1 要防的重叠。
+     *
+     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
+     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
+     */
+    private void endTurn(TurnLeaseGuard lease, String sessionId) {
+        boolean lost = lease.isLost();
+        if (lost) {
+            eventBus.abandonSession(sessionId);
+        } else {
+            eventBus.closeSession(sessionId);
+        }
+        lease.release();
+    }
+
+    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
+    private static ServerSentEvent<String> interruptedSSE(String reason) {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
+            .build();
     }
 
     private static ServerSentEvent<String> errorSSE(String msg) {

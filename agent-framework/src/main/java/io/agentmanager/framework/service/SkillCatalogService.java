@@ -26,6 +26,9 @@ import io.agentscope.core.skill.repository.FileSystemSkillRepository;
  *
  * <p>扫描复用官方 {@link FileSystemSkillRepository}（每次调用重扫目录，SKILL.md
  * mtime+size 快照缓存，内容不变零开销），不自研缓存与 watcher。
+ *
+ * <p>启停过滤：被 SkillManageService 禁用的 skill 不会出现在 list() 结果中，
+ * 也不会注入到 HarnessSkillMiddleware 的 prompt（因为 list() 是唯一数据源）。
  */
 @Service
 public class SkillCatalogService {
@@ -36,10 +39,13 @@ public class SkillCatalogService {
 
     private final OafConfig oafConfig;
     private final FileSystemSkillRepository repository;
+    private final SkillManageService manageService;
 
-    public SkillCatalogService(OafConfig oafConfig, AgentManagerProperties props) {
+    public SkillCatalogService(OafConfig oafConfig, AgentManagerProperties props,
+                               SkillManageService manageService) {
         this.oafConfig = oafConfig;
-        var skillsDir = Path.of(props.configDir()).resolve("skills");
+        this.manageService = manageService;
+        var skillsDir = Path.of(props.resolvedConfigDir()).resolve("skills");
         // 目录不存在（包未携带 skills）时不构造：官方构造器要求目录必须存在
         this.repository = Files.isDirectory(skillsDir)
             ? new FileSystemSkillRepository(skillsDir, false, "oaf-package")
@@ -49,12 +55,60 @@ public class SkillCatalogService {
     }
 
     /**
+     * 管理视图：返回所有 skill（含被禁用的），每个条目带 enabled 字段。
+     * 用于管理页面展示启停状态。
+     */
+    public List<Map<String, Object>> listAll() {
+        var disabled = manageService.getDisabledSet();
+        var byName = new LinkedHashMap<String, Map<String, Object>>();
+
+        // ① 目录事实
+        if (repository != null) {
+            for (var skill : repository.getAllSkills()) {
+                var name = skill.getName();
+                byName.put(name, entry(
+                    name,
+                    orEmpty(skill.getDescription()),
+                    versionOf(skill),
+                    DYNAMIC_SOURCE,
+                    false, true, false));
+            }
+        }
+
+        // ② frontmatter 声明
+        for (var declared : oafConfig.skills()) {
+            var existing = byName.get(declared.name());
+            if (existing == null) {
+                byName.put(declared.name(), entry(
+                    declared.name(),
+                    orEmpty(declared.description()),
+                    declared.version() != null ? declared.version() : "",
+                    declared.source() != null ? declared.source() : "local",
+                    declared.required(), false, true));
+            } else {
+                existing.put("source", declared.source() != null ? declared.source() : "local");
+                existing.put("required", declared.required());
+            }
+        }
+
+        // ③ 标记启停状态
+        for (var entry : byName.values()) {
+            var name = (String) entry.get("name");
+            entry.put("enabled", !disabled.contains(name));
+        }
+
+        return new ArrayList<>(byName.values());
+    }
+
+    /**
      * 合并视图（每次调用实时扫描，技能目录变化即时可见）：
      * - 同名技能：description/version 以目录 SKILL.md 为准；source/required 保留声明侧语义
      * - 目录独有：source=local-dynamic，dynamic=true
      * - 声明独有：declaredButMissing=true（required 校验交给 OafConfigLoader 启动期告警）
+     * - 被禁用的 skill 不出现在结果中
      */
     public List<Map<String, Object>> list() {
+        var disabled = manageService.getDisabledSet();
         var byName = new LinkedHashMap<String, Map<String, Object>>();
 
         // ① 目录事实（动态）：优先放入，同名声明不覆盖其 description/version
@@ -85,6 +139,11 @@ public class SkillCatalogService {
             }
         }
 
+        // ③ 过滤掉被禁用的 skill
+        if (!disabled.isEmpty()) {
+            byName.keySet().removeAll(disabled);
+        }
+
         return new ArrayList<>(byName.values());
     }
 
@@ -98,6 +157,21 @@ public class SkillCatalogService {
         return repository.getAllSkills().stream().map(AgentSkill::getName).toList();
     }
 
+    /**
+     * 可用 Skill 摘要列表（供前端 @Skill 提示使用）。
+     * 仅返回已启用的 skill 的 name + description。
+     * 等价于 list() 的精简视图，去掉 version/source/required 等管理字段。
+     */
+    public List<Map<String, String>> availableSkills() {
+        return list().stream()
+            .map(m -> Map.<String, String>of(
+                "name", (String) m.getOrDefault("name", ""),
+                "description", (String) m.getOrDefault("description", "")
+            ))
+            .filter(m -> !m.get("name").isBlank())
+            .toList();
+    }
+
     private static Map<String, Object> entry(
         String name, String description, String version, String source,
         boolean required, boolean dynamic, boolean declaredButMissing) {
@@ -109,6 +183,7 @@ public class SkillCatalogService {
         m.put("required", required);
         m.put("dynamic", dynamic);
         m.put("declaredButMissing", declaredButMissing);
+        m.put("enabled", true);
         return m;
     }
 

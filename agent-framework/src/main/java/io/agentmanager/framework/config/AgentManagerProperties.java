@@ -12,6 +12,7 @@ public record AgentManagerProperties(
     @DefaultValue("") String workspaceDir,
     CleanupConfig cleanup,
     FileConfig file,
+    SseConfig sse,
     HarnessConfig harness
 ) {
 
@@ -20,7 +21,30 @@ public record AgentManagerProperties(
      * 平台部署场景下 configDir 为只读的 OAF 包挂载点，工作区须落在独立可写卷。
      */
     public String resolvedWorkspaceBaseDir() {
-        return (workspaceDir == null || workspaceDir.isBlank()) ? configDir : workspaceDir;
+        if (workspaceDir != null && !workspaceDir.isBlank()) {
+            return workspaceDir;
+        }
+        return resolvedConfigDir();
+    }
+
+    /** 解析后的配置目录：显式配置优先；未配置则按 OS 选默认值（Linux /config；Windows %LOCALAPPDATA%/agent-framework/config） */
+    public String resolvedConfigDir() {
+        if (configDir != null && !configDir.isBlank()) {
+            return configDir;
+        }
+        // 未配置时按 OS 选默认路径
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            var localAppData = System.getenv("LOCALAPPDATA");
+            if (localAppData != null && !localAppData.isBlank()) {
+                return localAppData + "\\agent-framework\\config";
+            }
+            var userProfile = System.getenv("USERPROFILE");
+            if (userProfile != null && !userProfile.isBlank()) {
+                return userProfile + "\\AppData\\Local\\agent-framework\\config";
+            }
+            return "C:\\agent-framework\\config";
+        }
+        return "/config";
     }
 
     public record LLMConfig(
@@ -30,7 +54,8 @@ public record AgentManagerProperties(
         @DefaultValue("openai") String provider,
         @DefaultValue("0.7") double temperature,
         @DefaultValue("4096") int maxTokens,
-        @DefaultValue("120") int timeout
+        @DefaultValue("120") int timeout,
+        @DefaultValue("true") boolean enableThinking
     ) {}
 
     public record ServerConfig(
@@ -130,6 +155,26 @@ public record AgentManagerProperties(
             "image/*,text/plain,text/markdown,text/csv,application/pdf,"
                 + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
                 + "application/zip,application/x-zip-compressed";
+
+        /** 解析后的存储目录：显式配置优先；未配置则按 OS 选默认值 */
+        public String resolvedStorageLocalDir() {
+            if (storageLocalDir != null && !storageLocalDir.isBlank()) {
+                return storageLocalDir;
+            }
+            // 跨平台默认值
+            if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+                var localAppData = System.getenv("LOCALAPPDATA");
+                if (localAppData != null && !localAppData.isBlank()) {
+                    return localAppData + "\\agent-framework\\files";
+                }
+                var userProfile = System.getenv("USERPROFILE");
+                if (userProfile != null && !userProfile.isBlank()) {
+                    return userProfile + "\\AppData\\Local\\agent-framework\\files";
+                }
+                return "C:\\agent-framework\\files";
+            }
+            return "/data/files";
+        }
     }
 
     /**
@@ -182,4 +227,19 @@ public record AgentManagerProperties(
                 30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
         }
     }
+
+    /**
+     * SSE 可靠传输配置（durable-sse-plan §3.3）。
+     * 环境变量前缀：AGENT_SSE_*（如 AGENT_SSE_HEARTBEAT_SECONDS）
+     */
+    public record SseConfig(
+            /** 心跳间隔（秒），默认 20。防止 Nginx/CDN 60s 读超时 */
+            @DefaultValue("20") int heartbeatSeconds,
+            /** EventBus Sinks 过期清理延迟（分钟），默认 5 */
+            @DefaultValue("5") int sinksEvictionMinutes,
+            /** EventBus Sinks 缓冲区大小，默认 256 */
+            @DefaultValue("256") int sinksBufferSize,
+            /** 观察者游标轮询间隔（毫秒），默认 300 */
+            @DefaultValue("300") int tailPollMs
+    ) {}
 }

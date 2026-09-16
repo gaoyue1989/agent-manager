@@ -43,7 +43,7 @@ class UploadWorkspaceInjectorTest {
     }
 
     private FileAssetStore.FileAsset asset(String id, String mime, long size, String wsPath) {
-        return new FileAssetStore.FileAsset(id, "alice", "s1", "a" + id + ".png",
+        return new FileAssetStore.FileAsset(id, "alice", "s1", null, "a" + id + ".png",
             wsPath, mime, size, "local", "upload/k/" + id, "upload", "injected", LocalDateTime.now());
     }
 
@@ -75,7 +75,7 @@ class UploadWorkspaceInjectorTest {
     @Test
     void buildContentShouldDegradeDocumentToPathHint() {
         when(fileAssetStore.get("doc-1")).thenReturn(Optional.of(
-            new FileAssetStore.FileAsset("doc-1", "alice", "s1", "report.docx", "uploads/report_1.docx",
+            new FileAssetStore.FileAsset("doc-1", "alice", "s1", null, "report.docx", "uploads/report_1.docx",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 2048,
                 "local", "upload/k/doc-1", "upload", "injected", LocalDateTime.now())));
         var blocks = injector.buildContentBlocks(List.of("doc-1"), "go", "alice");

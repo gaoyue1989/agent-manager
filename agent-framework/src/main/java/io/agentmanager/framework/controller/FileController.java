@@ -17,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -45,6 +46,10 @@ public class FileController {
 
     /** 存储 key 前缀时间格式：upload/202509/{uuid}-{sanitizedFileName} */
     private static final DateTimeFormatter KEY_MONTH = DateTimeFormatter.ofPattern("yyyyMM");
+    /** fileId 格式：UUID（用于 download 端点入参校验） */
+    private static final java.util.regex.Pattern FILE_ID_PATTERN =
+        java.util.regex.Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
 
     private final FileStorage fileStorage;
     private final FileAssetStore fileAssetStore;
@@ -70,7 +75,8 @@ public class FileController {
     public ResponseEntity<Map<String, Object>> upload(
             @RequestParam("file") MultipartFile file,
             @RequestParam(value = "userId", required = false) String userId,
-            @RequestParam(value = "sessionId", required = false) String sessionId) {
+            @RequestParam(value = "sessionId", required = false) String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         var cfg = props.file();
         if (!cfg.uploadEnabled()) {
             return err(HttpStatus.FORBIDDEN, "upload_disabled", "file upload is disabled");
@@ -89,13 +95,18 @@ public class FileController {
         if (mime == null || mime.isBlank() || !mimeAllowed(mime, cfg.uploadAllowedMime())) {
             return err(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "unsupported_file_type", "unsupported mime: " + mime);
         }
+        // 扩展名与 MIME 交叉校验：防止攻击者伪造 Content-Type 绕过白名单
+        if (!extensionConsistentWithMime(fileName, mime)) {
+            return err(HttpStatus.BAD_REQUEST, "extension_mime_mismatch",
+                "file extension does not match declared mime type: " + fileName + " vs " + mime);
+        }
         // 大小上限
         long maxBytes = cfg.uploadMaxMb() * 1024L * 1024L;
         if (file.getSize() > maxBytes) {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "file_too_large",
                 "file exceeds " + cfg.uploadMaxMb() + "MB limit");
         }
-        var key = resolveUserKey(userId);
+        var key = resolveUserKey(userId, headerUserId);
 
         // 数量上限（软限制：并发上传可能少量超发）
         int pending = fileAssetStore.countPending(key);
@@ -117,7 +128,7 @@ public class FileController {
         var status = isSandboxMode() ? "pending" : "injected";
         try {
             fileAssetStore.insert(new FileAssetStore.FileAsset(
-                id, key, sessionId, fileName, null, mime, file.getSize(),
+                id, key, sessionId, null, fileName, null, mime, file.getSize(),
                 props.file().storageType(), storageKey, "upload", status,
                 java.time.LocalDateTime.now()));
         } catch (Exception e) {
@@ -146,6 +157,10 @@ public class FileController {
         var cfg = props.file();
         if (!cfg.downloadEnabled()) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        // fileId 格式校验：应为 UUID（防路径注入/遍历）
+        if (!FILE_ID_PATTERN.matcher(fileId).matches()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
         }
         var meta = fileAssetStore.get(fileId);
         if (meta.isEmpty()) {
@@ -187,8 +202,11 @@ public class FileController {
         return sandboxConfig != null && sandboxConfig.enabled();
     }
 
-    /** userId 规范化：空值降级 "debug-user"（与 chat 一致） */
-    private static String resolveUserKey(String userId) {
+    /** userId 规范化：网关 Header 优先，空值降级 "debug-user"（与 chat 一致） */
+    private static String resolveUserKey(String userId, String headerUserId) {
+        if (headerUserId != null && !headerUserId.isBlank()) {
+            return headerUserId;
+        }
         return (userId == null || userId.isBlank()) ? "debug-user" : userId;
     }
 
@@ -216,6 +234,69 @@ public class FileController {
         }
         return base;
     }
+
+    /**
+     * 扩展名与 MIME 一致性校验（防伪造 Content-Type 绕过白名单）。
+     * 原则：扩展名必须在 MIME 类型对应的扩展名集合内，否则拒绝。
+     * 对于无法映射的扩展名，仅允许 application/octet-stream（通用二进制）。
+     */
+    static boolean extensionConsistentWithMime(String fileName, String mime) {
+        var dot = fileName.lastIndexOf('.');
+        if (dot < 0 || dot == fileName.length() - 1) {
+            // 无扩展名：仅允许 application/octet-stream 等通用类型
+            return "application/octet-stream".equals(mime);
+        }
+        var ext = fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
+        var expected = MIME_TO_EXTENSIONS.get(mime.toLowerCase(Locale.ROOT));
+        if (expected != null) {
+            return expected.contains(ext);
+        }
+        // 未知 MIME 类型但扩展名可识别 → 拒绝（白名单已筛选，此处兜底）
+        // 已知扩展名但 MIME 不在映射中 → 也拒绝（如 .exe 声明为 image/png）
+        return KNOWN_DANGEROUS_EXTENSIONS.contains(ext) ? false : true;
+    }
+
+    /** MIME → 允许的扩展名集合（与白名单对齐） */
+    private static final java.util.Map<String, java.util.Set<String>> MIME_TO_EXTENSIONS = java.util.Map.ofEntries(
+        // image/*
+        java.util.Map.entry("image/png", java.util.Set.of("png", "apng")),
+        java.util.Map.entry("image/jpeg", java.util.Set.of("jpg", "jpeg", "jfif")),
+        java.util.Map.entry("image/gif", java.util.Set.of("gif")),
+        java.util.Map.entry("image/webp", java.util.Set.of("webp")),
+        java.util.Map.entry("image/svg+xml", java.util.Set.of("svg")),
+        java.util.Map.entry("image/bmp", java.util.Set.of("bmp")),
+        java.util.Map.entry("image/x-icon", java.util.Set.of("ico")),
+        java.util.Map.entry("image/tiff", java.util.Set.of("tif", "tiff")),
+        // text/*
+        java.util.Map.entry("text/plain", java.util.Set.of("txt", "md", "log", "csv", "tsv")),
+        java.util.Map.entry("text/markdown", java.util.Set.of("md", "markdown")),
+        java.util.Map.entry("text/csv", java.util.Set.of("csv", "tsv")),
+        java.util.Map.entry("text/html", java.util.Set.of("html", "htm")),
+        java.util.Map.entry("text/css", java.util.Set.of("css")),
+        // application/*
+        java.util.Map.entry("application/pdf", java.util.Set.of("pdf")),
+        java.util.Map.entry("application/json", java.util.Set.of("json")),
+        java.util.Map.entry("application/zip", java.util.Set.of("zip")),
+        java.util.Map.entry("application/gzip", java.util.Set.of("gz", "gzip", "tgz")),
+        java.util.Map.entry("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            java.util.Set.of("docx")),
+        java.util.Map.entry("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            java.util.Set.of("xlsx")),
+        java.util.Map.entry("application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            java.util.Set.of("pptx")),
+        java.util.Map.entry("application/vnd.ms-excel", java.util.Set.of("xls")),
+        java.util.Map.entry("application/vnd.ms-powerpoint", java.util.Set.of("ppt")),
+        java.util.Map.entry("application/vnd.ms-word", java.util.Set.of("doc")),
+        java.util.Map.entry("application/xml", java.util.Set.of("xml")),
+        java.util.Map.entry("application/javascript", java.util.Set.of("js", "mjs")),
+        java.util.Map.entry("application/octet-stream", java.util.Set.of("bin", "dat", "pkg", "dmg"))
+    );
+
+    /** 已知危险扩展名：即使 MIME 声明为安全类型也不允许 */
+    private static final java.util.Set<String> KNOWN_DANGEROUS_EXTENSIONS = java.util.Set.of(
+        "exe", "bat", "cmd", "ps1", "vbs", "js", "wsf", "msi", "scr", "com",
+        "dll", "sys", "reg", "inf", "hta", "cpl", "msp", "mst"
+    );
 
     /** MIME 白名单匹配：逗号分隔，支持 * 通配（如 image/*、application/vnd.openxmlformats-officedocument.*） */
     static boolean mimeAllowed(String mime, String allowedList) {

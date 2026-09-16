@@ -21,7 +21,7 @@ import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
 
 /**
- * AgentEvent → SSE JSON 序列化工具（/chat/stream 与长连接订阅端点共用，保证词表一致）。
+ * AgentEvent → SSE JSON 序列化工具（对话单次流与订阅端点共用，保证词表一致）。
  */
 public final class AgentEventSseSerializer {
 
@@ -30,7 +30,7 @@ public final class AgentEventSseSerializer {
     private AgentEventSseSerializer() {
     }
 
-    /** 将 AgentEvent 序列化为 SSE data 的 JSON 字符串（词表与原 /chat/stream 完全一致） */
+    /** 将 AgentEvent 序列化为 SSE data 的 JSON 字符串（词表前后端一致） */
     public static String payload(AgentEvent event) {
         return payload(event, null, null);
     }
@@ -38,7 +38,7 @@ public final class AgentEventSseSerializer {
     /**
      * 将 AgentEvent 序列化为 SSE data 的 JSON 字符串。
      * MCP Apps 扩展：TOOL_CALL_START 可携带 ui 元数据（{resourceUri, server}），
-     * 由事件发源地（SessionStreamController/StreamController）查询 McpToolRegistrar 后传入；
+     * 由事件发源地查询 McpToolRegistrar 后传入（当前对话单次流路径未接入）；
      * 无 UI 的工具传 null 保持原词表（向后兼容）。
      *
      * @param uiResourceUri ui:// 资源 URI；null 表示不带 UI 元数据

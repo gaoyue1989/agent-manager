@@ -192,7 +192,8 @@ public class OpenSandbox extends AbstractBaseSandbox {
                 // userKey 绑定的即会话隔离键（Channel peer = sessionId）：同值查 user_key 与 session_id 双维度
                 var pending = fileAssetStore.listPending(userId, userId);
                 if (pending.isEmpty()) {
-                    uploadsInjected.set(true);
+                    // 不设 uploadsInjected=true：上传可能尚未完成，下 turn 重试
+                    log.debug("[sandbox-open] no pending uploads yet for user {}", userId);
                     return;
                 }
                 var injectedIds = new java.util.ArrayList<String>();

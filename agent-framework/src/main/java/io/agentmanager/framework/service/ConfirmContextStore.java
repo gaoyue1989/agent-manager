@@ -65,7 +65,7 @@ public class ConfirmContextStore {
                   created_at      DATETIME(3) NOT NULL,
                   consumed        TINYINT(1) NOT NULL DEFAULT 0,
                   KEY idx_created_at (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
             log.info("ConfirmContextStore: confirm_context table ready");
         } catch (Exception e) {
@@ -76,6 +76,8 @@ public class ConfirmContextStore {
     /** 覆盖式写入确认上下文（同 session 新 ASK 覆盖旧条目；consumed 重置为 0） */
     public void put(String sessionId, List<Map<String, Object>> toolCalls,
                     String replyId, String runtimeSessionId, String runtimeUserId) {
+        log.debug("[HITL-DB] put: sessionId={}, replyId={}, toolCount={}, runtimeSid={}, runtimeUid={}",
+            sessionId, replyId, toolCalls.size(), runtimeSessionId, runtimeUserId);
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  INSERT INTO confirm_context

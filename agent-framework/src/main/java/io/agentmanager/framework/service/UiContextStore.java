@@ -26,7 +26,7 @@ public class UiContextStore {
     private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
         new com.fasterxml.jackson.databind.ObjectMapper();
 
-    /** sessionId 合法格式：tenant:thread（channel 链路 session key 形如 debug-user:xxx） */
+    /** sessionId 合法格式：tenant:thread 或 tenant_thread（兼容 Windows 路径安全格式） */
     private static final String SESSION_SEPARATOR = ":";
 
     /**
@@ -55,7 +55,7 @@ public class UiContextStore {
                     structured_context JSON          NULL,
                     updated_at         DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
                     PRIMARY KEY (session_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
             log.info("UiContextStore: ui_context table ready");
         } catch (Exception e) {
@@ -64,7 +64,7 @@ public class UiContextStore {
     }
 
     /**
-     * 校验 sessionId 格式（tenant:thread，两端非空；沿用 Channel 链路 session key 形状）。
+     * 校验 sessionId 格式（tenant:thread 或 tenant_thread，两端非空；兼容 Windows 路径安全格式）。
      *
      * @throws IllegalArgumentException 格式非法（400）
      */
@@ -73,8 +73,12 @@ public class UiContextStore {
             throw new IllegalArgumentException("sessionId is required");
         }
         var sep = sessionId.indexOf(SESSION_SEPARATOR);
+        // 同时接受下划线分隔（Windows 兼容格式：debug-user_xxx）
+        if (sep < 0) {
+            sep = sessionId.indexOf('_');
+        }
         if (sep <= 0 || sep == sessionId.length() - 1) {
-            throw new IllegalArgumentException("invalid sessionId format, expected 'tenant:thread': " + sessionId);
+            throw new IllegalArgumentException("invalid sessionId format, expected 'tenant:thread' or 'tenant_thread': " + sessionId);
         }
         return sessionId;
     }

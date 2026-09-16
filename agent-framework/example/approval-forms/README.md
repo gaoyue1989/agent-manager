@@ -78,7 +78,7 @@ node approval-e2e.js # 截图输出到 e2e/screenshots/
 
 | 路径 | 说明 |
 |------|------|
-| `POST /threads/{sid}/chat` | 单次流对话（SSE 直吐 Agent 事件词表；body `{message, userId}`） |
+| `POST /threads/chat` | 单次流对话（SSE 直吐 Agent 事件词表；body `{message, userId, sessionId}`） |
 | `POST /threads/{sid}/confirm-stream` | HITL 确认流（body `{results:[{tool_call_id, confirmed, accept_rule}]}`；恢复执行事件） |
 | `GET /threads` | 会话列表 |
 | `GET /threads/{sid}/history` | 会话历史（附 `pendingConfirm`） |

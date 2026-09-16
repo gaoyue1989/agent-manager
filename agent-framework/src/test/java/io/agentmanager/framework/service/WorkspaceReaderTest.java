@@ -106,4 +106,70 @@ class WorkspaceReaderTest {
 
         org.mockito.Mockito.verify(osb, org.mockito.Mockito.never()).files();
     }
+
+    // ===== writeWorkspaceFile 测试 =====
+
+    @Test
+    void writeWorkspaceFileShouldPersistAndBeReadable() {
+        var store = store();
+        var reader = new WorkspaceReader(distributedStore(store));
+
+        boolean ok = reader.writeWorkspaceFile(USER, "outputs/report.txt", "hello world");
+        assertTrue(ok, "写入 KV 应成功");
+
+        // 用 readWorkspaceFile 读回验证
+        var bytes = reader.readWorkspaceFile(USER, "outputs/report.txt");
+        assertNotNull(bytes, "读回应非 null");
+        assertEquals("hello world", new String(bytes, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void writeWorkspaceFileShouldOverwriteExisting() {
+        var store = store();
+        var reader = new WorkspaceReader(distributedStore(store));
+
+        reader.writeWorkspaceFile(USER, "memo.txt", "v1");
+        reader.writeWorkspaceFile(USER, "memo.txt", "v2-overwrite");
+
+        var bytes = reader.readWorkspaceFile(USER, "memo.txt");
+        assertNotNull(bytes);
+        assertEquals("v2-overwrite", new String(bytes, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void writeWorkspaceFileShouldRejectNullOrBlank() {
+        var reader = new WorkspaceReader(distributedStore(store()));
+
+        assertFalse(reader.writeWorkspaceFile(null, "a.txt", "c"));
+        assertFalse(reader.writeWorkspaceFile(USER, null, "c"));
+        assertFalse(reader.writeWorkspaceFile(USER, "a.txt", null));
+        assertFalse(reader.writeWorkspaceFile("  ", "a.txt", "c"));
+        assertFalse(reader.writeWorkspaceFile(USER, "  ", "c"));
+    }
+
+    @Test
+    void writeWorkspaceFileShouldIsolateByUser() {
+        var store = store();
+        var reader = new WorkspaceReader(distributedStore(store));
+
+        reader.writeWorkspaceFile(USER, "secret.txt", "alice-data");
+
+        var bobBytes = reader.readWorkspaceFile("user-bob", "secret.txt");
+        assertNull(bobBytes, "Bob 不应能读到 Alice 的数据");
+    }
+
+    @Test
+    void writeWorkspaceFileThenPresentFileCanRead() {
+        // 模拟完整链路：write_file → KV 同步 → present_file 从 KV 读
+        var store = store();
+        var reader = new WorkspaceReader(distributedStore(store));
+
+        // 1. write_file 同步写 KV
+        reader.writeWorkspaceFile(USER, "outputs/result.md", "# AI Report\nContent here");
+
+        // 2. present_file 通过 readWorkspaceFile 从 KV 读
+        var bytes = reader.readWorkspaceFile(USER, "outputs/result.md");
+        assertNotNull(bytes, "present_file 应从 KV 读到 write_file 写入的内容");
+        assertTrue(new String(bytes, StandardCharsets.UTF_8).contains("AI Report"));
+    }
 }

@@ -19,6 +19,12 @@ import org.springframework.context.annotation.Configuration;
 
 import com.zaxxer.hikari.HikariDataSource;
 
+import io.lettuce.core.ClientOptions;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.SocketOptions;
+import io.lettuce.core.TimeoutOptions;
+
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
 import io.agentmanager.framework.sandbox.opensandbox.WorkspaceSyncService;
@@ -163,6 +169,43 @@ public class AgentScopeConfig {
     }
 
     /**
+     * Redis 客户端（session_event 事件流存储，见 docs/api-frontend-sse.md §12）。
+     *
+     * <p><b>这里只建客户端，不建连接。</b>Lettuce 是懒连接的，所以 Redis 不可达**不会**让启动失败；
+     * 真正的连接（以及随之而来的启动自检）发生在 {@code RedisEventLog} 首次使用时。这是刻意的：
+     * Redis 的一次滚动重启不能变成整个 agent 集群的崩溃循环。
+     *
+     * <p>与「不可达」相对的是「配置错」：URL 非法时 {@code RedisURI.create} 抛
+     * {@link IllegalArgumentException}，bean 创建失败 → 启动失败。那属于打包/发布错误，
+     * 早失败早发现，两者必须区别对待。
+     */
+    @Bean(destroyMethod = "shutdown")
+    public RedisClient redisClient(AgentRedisProperties redis) {
+        var options = ClientOptions.builder()
+            .socketOptions(SocketOptions.builder()
+                .connectTimeout(Duration.ofMillis(redis.connectTimeoutMs()))
+                .build())
+            // 必须显式开命令超时：Lettuce 的 TimeoutOptions.DEFAULT_TIMEOUT_COMMANDS 是 false
+            // （命令超时默认关闭），而 RedisURI.DEFAULT_TIMEOUT 是 60 秒（javap 核对 6.3.2）。
+            // 本应用是 servlet/Tomcat，线程池有限——不钳住就是一条命令占住一个请求线程 60 秒。
+            .timeoutOptions(TimeoutOptions.enabled(Duration.ofMillis(redis.commandTimeoutMs())))
+            .autoReconnect(true)
+            // 断线期间**拒绝**命令而不是缓冲：agent 线程要立刻拿到失败（append 返回 -1、回放报错），
+            // 而不是阻塞到重连成功。缓冲还会在重连后一次性灌出一批陈旧写入。
+            .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
+            .build();
+        var uri = RedisURI.create(redis.url());
+        var client = RedisClient.create(uri);
+        // 必须在首次 connect 之前设置
+        client.setOptions(options);
+        // 只打 host/port/db，**不打原始 URL**——URL 里可能带密码
+        log.info("RedisClient configured (host={}:{}, db={}, commandTimeout={}ms, connectTimeout={}ms, maxLenPerStream={})",
+            uri.getHost(), uri.getPort(), uri.getDatabase(),
+            redis.commandTimeoutMs(), redis.connectTimeoutMs(), redis.maxLenPerStream());
+        return client;
+    }
+
+    /**
      * 分布式存储：agent_state 表 (AgentState) + agent_fs 表 (工作区文件)。
      * 使用自定义库名/表名与现有基础设施保持一致。
      * AgentStateStore 使用 SandboxAwareMysqlAgentStateStore：官方 MysqlAgentStateStore
@@ -248,18 +291,21 @@ public class AgentScopeConfig {
             var workspacePath = workspaceInitializer.initialize(
                 Path.of(props.resolvedWorkspaceBaseDir()), oafConfig);
 
-            // Bug 修复：temperature/maxTokens 此前未传给模型构建器，所有 LLM 调用实际使用
-            // OpenAI SDK 内部默认值（temperature=1.0）。此处传入 OAF frontmatter config 的
-            // 生效值（OafConfigLoader 缺省 0.7/4096，与平台默认对齐）
-            var runtime = oafConfig.runtimeConfig();
+            var optionsBuilder = io.agentscope.core.model.GenerateOptions.builder()
+                .temperature(llm.temperature())
+                .maxTokens(llm.maxTokens());
+            // Qwen3 / vLLM: enableThinking=false → chat_template_kwargs.enable_thinking=false
+            // 关闭深度思考模式，避免响应中包含 <think>...</think> 冗余内容
+            if (!llm.enableThinking()) {
+                optionsBuilder.additionalBodyParam("chat_template_kwargs",
+                    java.util.Map.of("enable_thinking", false));
+                log.info("Deep thinking disabled: chat_template_kwargs.enable_thinking=false");
+            }
             var model = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
                 .apiKey(llm.apiKey())
                 .modelName(llm.modelId())
                 .baseUrl(llm.baseUrl())
-                .generateOptions(io.agentscope.core.model.GenerateOptions.builder()
-                    .temperature(runtime.temperature())
-                    .maxTokens(runtime.maxTokens())
-                    .build())
+                .generateOptions(optionsBuilder.build())
                 .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
                     .client(java.net.http.HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
@@ -272,10 +318,13 @@ public class AgentScopeConfig {
                     .build())
                 .build();
 
+            // P0: 包装主 model，400 错误时打印请求体 JSON 诊断（排查 Higress 网关注入问题）
+            var loggingModel = new io.agentmanager.framework.service.RequestBodyLoggingModelWrapper(model);
+
             // P1: 包装 memory/compaction 内部 LLM 调用追踪
             // 不设置 .model() 时 harness 回退使用主 model（无 trace），设置包装后行为不变且带 span
-            var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(model, "memory");
-            var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(model, "compaction");
+            var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "memory");
+            var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "compaction");
 
             // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
             var toolkit = new io.agentscope.core.tool.Toolkit();
@@ -301,7 +350,7 @@ public class AgentScopeConfig {
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
                 .sysPrompt(oafConfig.systemPrompt())
-                .model(model)
+                .model(loggingModel)
                 .toolkit(toolkit)
                 // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
                 // 长流程（撰写→校验→修正→打包→登记→汇报），默认放宽至 20 轮（AGENT_REACT_MAX_ITERS 可调）
@@ -314,6 +363,10 @@ public class AgentScopeConfig {
                 .middleware(new io.agentmanager.framework.service.ReasoningTracingMiddleware())
                 // LLM 调用记录（debug 页面，order=1，默认值，保留）
                 .middleware(new LlmLoggingMiddleware(llmLogger))
+                // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
+                .middleware(new ToolCallValidationMiddleware())
+                // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
+                .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
@@ -416,6 +469,59 @@ public class AgentScopeConfig {
         var cleanup = props.cleanup();
         var retention = cleanup != null ? cleanup.auditRetentionDays() : 30;
         return new io.agentmanager.framework.service.ToolAuditStore(dataSource, retention);
+    }
+
+    /**
+     * session_event 的 Redis Streams 存储层（只有它需要真 Redis）。
+     * 惰性连接：这里不建连，所以 Redis 不可达不会影响启动。
+     */
+    @Bean
+    public io.agentmanager.framework.service.RedisEventLog redisEventLog(
+            RedisClient redisClient, AgentRedisProperties redis) {
+        return new io.agentmanager.framework.service.RedisEventLog(redisClient, redis);
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.SessionEventStore sessionEventStore(
+            io.agentmanager.framework.service.RedisEventLog redisEventLog,
+            AgentManagerProperties props) {
+        var cleanup = props.cleanup();
+        // 同一份 7 天：这里算 TTL，不再有第二个来源（旧的 deleteBefore 已随 TTL 一并下线）
+        var retention = cleanup != null ? cleanup.sessionRetentionDays() : 7;
+        return new io.agentmanager.framework.service.SessionEventStore(redisEventLog, retention);
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.SessionEventBus sessionEventBus(
+            io.agentmanager.framework.service.SessionEventStore sessionEventStore,
+            AgentManagerProperties props) {
+        var sse = props.sse();
+        var heartbeat = sse != null ? java.time.Duration.ofSeconds(sse.heartbeatSeconds()) : java.time.Duration.ofSeconds(20);
+        var eviction = sse != null ? java.time.Duration.ofMinutes(sse.sinksEvictionMinutes()) : java.time.Duration.ofMinutes(5);
+        var bufSize = sse != null ? sse.sinksBufferSize() : 256;
+        return new io.agentmanager.framework.service.SessionEventBus(sessionEventStore, heartbeat, eviction, bufSize);
+    }
+
+    /**
+     * 会话事件追赶器（durable-sse-multinode-plan §2.4）：观察者路径的实现，
+     * 只读 Pod 间共享的存储（session_event 在 Redis；turn_lease / confirm_context 仍在 MySQL），
+     * 用于被订阅的 session 执行在另一副本上的场景。轮询间隔由
+     * AGENT_SSE_TAIL_POLL_MS 控制（默认 300ms）。
+     */
+    @Bean
+    public io.agentmanager.framework.service.SessionEventTailer sessionEventTailer(
+            io.agentmanager.framework.service.SessionEventStore sessionEventStore,
+            io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore,
+            io.agentmanager.framework.service.AgentRuntimeService agentRuntimeService,
+            AgentManagerProperties props) {
+        var sse = props.sse();
+        var poll = sse != null ? java.time.Duration.ofMillis(sse.tailPollMs())
+                               : java.time.Duration.ofMillis(300);
+        // 与 EventBus 共用 heartbeatSeconds：两条路径面对的入口代理超时是同一个
+        var heartbeat = sse != null ? java.time.Duration.ofSeconds(sse.heartbeatSeconds())
+                                    : java.time.Duration.ofSeconds(20);
+        return new io.agentmanager.framework.service.SessionEventTailer(
+            sessionEventStore, turnLeaseStore, agentRuntimeService, poll, heartbeat);
     }
 
     @Bean

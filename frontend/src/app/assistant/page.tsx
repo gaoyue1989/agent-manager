@@ -1,5 +1,5 @@
 "use client";
-// 发布助手对话：无状态单次流（POST /threads/{sessionId}/chat，SSE 增量渲染）
+// 发布助手对话：无状态单次流（POST /threads/chat，sessionId 在 body，SSE 增量渲染）
 // HITL：permission_ask 渲染确认卡片 → /threads/{sessionId}/confirm-stream 恢复
 // 文件：附件上传（/files/upload）→ chat 携带 fileIds；file_ready 事件渲染下载卡片
 // 历史：GET /threads 列表 + GET /threads/{sid}/history 回放；点击切换恢复上下文继续对话
@@ -320,8 +320,8 @@ export default function AssistantPage() {
     ]);
     setAttachments([]);
     try {
-      await consumeStream(`${AGENT_BASE}/threads/${sessionId.current}/chat`,
-        { message: text, userId: "webui", fileIds }, (card) => {
+      await consumeStream(`${AGENT_BASE}/threads/chat`,
+        { message: text, userId: "webui", sessionId: sessionId.current, fileIds }, (card) => {
           updateLast((m) => ({ ...m, confirm: card }));
         });
     } catch (e: any) {

@@ -2,6 +2,7 @@ package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -37,14 +38,15 @@ class SkillCatalogServiceTest {
 
     private AgentManagerProperties props() {
         return new AgentManagerProperties(
-            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120),
+            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120, true),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             tempDir.toString(),
             "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"),
-            AgentManagerProperties.HarnessConfig.defaults()
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+                AgentManagerProperties.HarnessConfig.defaults()
         );
     }
 
@@ -78,6 +80,10 @@ class SkillCatalogServiceTest {
         Files.writeString(dir.resolve("SKILL.md"), fm.toString());
     }
 
+    private SkillManageService manageService() {
+        return new SkillManageService(props());
+    }
+
     private Map<String, Object> byName(SkillCatalogService service, String name) {
         return service.list().stream()
             .filter(m -> name.equals(m.get("name")))
@@ -87,9 +93,10 @@ class SkillCatalogServiceTest {
     @Test
     void directoryOnlySkillShouldBeLocalDynamic() throws IOException {
         writeSkill("extra-skill", "Dynamic skill", "2.0.0");
-        var service = new SkillCatalogService(oafConfig(List.of()), props());
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService());
 
         var entry = byName(service, "extra-skill");
+        assertNotNull(entry, "extra-skill should be in list()");
         assertEquals(SkillCatalogService.DYNAMIC_SOURCE, entry.get("source"));
         assertEquals("Dynamic skill", entry.get("description"));
         assertEquals("2.0.0", entry.get("version"));
@@ -100,7 +107,7 @@ class SkillCatalogServiceTest {
     @Test
     void declaredOnlySkillShouldBeMarkedMissing() {
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("ghost-skill", "Only declared", true))), props());
+            oafConfig(List.of(declared("ghost-skill", "Only declared", true))), props(), manageService());
 
         var entry = byName(service, "ghost-skill");
         assertEquals("Only declared", entry.get("description"));
@@ -115,7 +122,7 @@ class SkillCatalogServiceTest {
         // 声明 description="Declared desc"，目录 SKILL.md description="Disk desc" → 以目录为准
         writeSkill("demo", "Disk desc", "1.2.0");
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("demo", "Declared desc", true))), props());
+            oafConfig(List.of(declared("demo", "Declared desc", true))), props(), manageService());
 
         var entry = byName(service, "demo");
         assertEquals("Disk desc", entry.get("description"));
@@ -131,7 +138,7 @@ class SkillCatalogServiceTest {
     void runtimeDirectoryChangeShouldBeVisibleImmediately() throws IOException {
         writeSkill("a", "Skill A", "1.0.0");
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("b", "Skill B", false))), props());
+            oafConfig(List.of(declared("b", "Skill B", false))), props(), manageService());
 
         assertEquals(2, service.list().size());
 
@@ -150,7 +157,7 @@ class SkillCatalogServiceTest {
     @Test
     void modifiedSkillMdShouldBeReRead() throws IOException {
         writeSkill("a", "Old desc", "1.0.0");
-        var service = new SkillCatalogService(oafConfig(List.of()), props());
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService());
         assertEquals("Old desc", byName(service, "a").get("description"));
 
         // 修改 SKILL.md（强制 mtime 变化，模拟 PVC 原位更新）
@@ -163,7 +170,7 @@ class SkillCatalogServiceTest {
 
     @Test
     void emptyDirectoryAndNoDeclarationsShouldReturnEmptyList() {
-        var service = new SkillCatalogService(oafConfig(List.of()), props());
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService());
         assertTrue(service.list().isEmpty());
     }
 
@@ -171,17 +178,19 @@ class SkillCatalogServiceTest {
     void missingSkillsDirShouldFallBackToDeclarations() {
         // 目录不存在（包未携带 skills）→ repository 关闭，仅声明侧可见
         var emptyProps = new AgentManagerProperties(
-            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120),
+            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120, true),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             tempDir.resolve("nonexistent").toString(),
             "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"),
-            AgentManagerProperties.HarnessConfig.defaults()
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+                AgentManagerProperties.HarnessConfig.defaults()
+
         );
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("ghost", "Only declared", false))), emptyProps);
+            oafConfig(List.of(declared("ghost", "Only declared", false))), emptyProps, new SkillManageService(emptyProps));
 
         assertTrue(service.dynamicSkillNames().isEmpty());
         assertEquals(1, service.list().size());

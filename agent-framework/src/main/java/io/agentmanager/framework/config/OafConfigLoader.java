@@ -20,7 +20,7 @@ public class OafConfigLoader {
     private final Path configDir;
 
     public OafConfigLoader(AgentManagerProperties props) {
-        this.configDir = Path.of(props.configDir());
+        this.configDir = Path.of(props.resolvedConfigDir());
     }
 
     public OafConfig load() {

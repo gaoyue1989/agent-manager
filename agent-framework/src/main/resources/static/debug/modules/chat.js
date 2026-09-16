@@ -8,9 +8,33 @@ let inputEl = null;
 let sendBtn = null;
 let sidebarListEl = null;
 let connBadgeEl = null;
+let uploadBtn = null;
+let fileInput = null;
+let uploadPreview = null;
+let uploadFiles = null;
+let uidInput = null;
+
+// @Skill 提及状态
+let mentionDropdown = null;
+let mentionSkills = [];       // 缓存的可用 Skill 列表
+let mentionActiveIdx = -1;    // 当前高亮索引
+let mentionTriggerPos = -1;   // @ 符号在 textarea 中的位置
+let mentionVisible = false;
+
+// 文件上传状态
+let pendingFiles = [];       // 待上传的文件列表 [{file, fileId, status}]
 
 let isStreaming = false;
 let activeAbort = null;      // 单次流/A2A 的 abort 控制器
+let activeChatHandle = null; // sendChat 返回的 handle（含 close/lastEventId）
+let activeSubHandle = null;  // subscribe 返回的 handle（重连时使用）
+
+// ★ durable-sse-plan：SSE 断连自动重连
+let lastEventId = 0;         // 当前 session 最新收到的 seq（用于 afterSeq 游标）
+let currentReplyId = null;   // 当前 turn 的 replyId（subscribe 过滤用）
+let reconnectAttempts = 0;   // 重连尝试次数（指数退避）
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_DELAY = 1000; // 1s
 
 let refreshTimer = null;
 let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
@@ -54,6 +78,7 @@ function render() {
         <h2 id="chatTitle">Chat</h2>
         <span class="sub" id="connBadge"></span>
         <div style="margin-left:auto"></div>
+        <label class="uid-label" title="用户标识，同 userId 共享 workspace 和 memory">User&nbsp;<input id="uidInput" class="input uid-input" type="text" spellcheck="false"></label>
         <div class="seg">
           <button id="modeA2A" class="active">A2A</button>
           <button id="modeChannel">Channel</button>
@@ -67,9 +92,15 @@ function render() {
         <button id="scrollDown" class="scroll-down-btn" title="回到底部">↓</button>
       </div>
       <div class="chat-input">
-        <div class="chat-input-pill">
-          <textarea id="chatInput" rows="1" placeholder="Type your message... (Enter to send, Shift+Enter for newline)"></textarea>
+        <div class="chat-input-pill" style="position:relative">
+          <button id="uploadBtn" class="btn upload-btn" title="上传文件">📎</button>
+          <input type="file" id="fileInput" multiple accept="image/*,text/plain,text/markdown,text/csv,application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt" style="display: none">
+          <textarea id="chatInput" rows="1" placeholder="Type your message... (@ 提及 Skill，Enter 发送，Shift+Enter 换行)"></textarea>
           <button id="sendBtn" class="btn primary">Send</button>
+          <div id="skillMentionDropdown" class="skill-mention-dropdown"></div>
+        </div>
+        <div id="uploadPreview" class="upload-preview" style="display: none;">
+          <div class="upload-files" id="uploadFiles"></div>
         </div>
       </div>
     </div>
@@ -85,7 +116,17 @@ export default {
     sendBtn = document.getElementById('sendBtn');
     sidebarListEl = document.getElementById('threadList');
     connBadgeEl = document.getElementById('connBadge');
+    uploadBtn = document.getElementById('uploadBtn');
+    fileInput = document.getElementById('fileInput');
+    uploadPreview = document.getElementById('uploadPreview');
+    uploadFiles = document.getElementById('uploadFiles');
+    uidInput = document.getElementById('uidInput');
+    uidInput.value = ctx.state.getState('ui.userId') || 'debug-user';
     updateConnBadge();
+
+    // @Skill 提及
+    mentionDropdown = document.getElementById('skillMentionDropdown');
+    loadAvailableSkills();
 
     bindEvents();
     messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
@@ -100,6 +141,7 @@ export default {
     if (activeAbort) activeAbort.abort();
     teardownAllAppHosts();
     pendingConfirm = null;
+    pendingFiles = [];
     isStreaming = false;
   }
 };
@@ -107,13 +149,49 @@ export default {
 function bindEvents() {
   sendBtn.addEventListener('click', () => sendMessage());
   inputEl.addEventListener('keydown', (e) => {
+    // @Skill 提及：键盘导航
+    if (mentionVisible) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        mentionActiveIdx = Math.min(mentionActiveIdx + 1, mentionSkills.length - 1);
+        renderMentionDropdown();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        mentionActiveIdx = Math.max(mentionActiveIdx - 1, 0);
+        renderMentionDropdown();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        if (mentionActiveIdx >= 0 && mentionActiveIdx < mentionSkills.length) {
+          selectMentionSkill(mentionSkills[mentionActiveIdx]);
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        hideMentionDropdown();
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
     autoGrow();
   });
-  inputEl.addEventListener('input', autoGrow);
+  inputEl.addEventListener('input', () => {
+    autoGrow();
+    handleMentionInput();
+  });
+  // 点击外部关闭下拉
+  document.addEventListener('click', (e) => {
+    if (mentionVisible && !inputEl.contains(e.target) && !mentionDropdown.contains(e.target)) {
+      hideMentionDropdown();
+    }
+  });
   document.getElementById('btnNewThread').addEventListener('click', newThread);
   document.getElementById('btnLlmCalls').addEventListener('click', showLlmCalls);
   document.getElementById('btnSysPrompt').addEventListener('click', showSystemPrompt);
@@ -121,11 +199,156 @@ function bindEvents() {
 
   document.getElementById('modeA2A').addEventListener('click', () => setStreamMode('a2a'));
   document.getElementById('modeChannel').addEventListener('click', () => setStreamMode('channel'));
+
+  // 文件上传事件
+  uploadBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', handleFileSelect);
+
+  // userId 输入事件：实时保存到 state + localStorage，刷新 session 列表
+  uidInput.addEventListener('input', () => {
+    const v = uidInput.value.trim() || 'debug-user';
+    ctx.state.setState('ui.userId', v);
+    updateConnBadge();
+    loadThreads();
+  });
+  uidInput.addEventListener('blur', () => {
+    // 失焦时确保非空
+    if (!uidInput.value.trim()) uidInput.value = 'debug-user';
+  });
 }
 
 function autoGrow() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+}
+
+// ---------- @Skill 提及 ----------
+
+async function loadAvailableSkills() {
+  try {
+    mentionSkills = (await ctx.api.getAvailableSkills()) || [];
+  } catch (e) {
+    mentionSkills = [];
+  }
+}
+
+function handleMentionInput() {
+  const val = inputEl.value;
+  const cursorPos = inputEl.selectionStart;
+
+  // 查找光标前最近的 @ 符号（同一行内）
+  const textBeforeCursor = val.substring(0, cursorPos);
+  const lastAtIdx = textBeforeCursor.lastIndexOf('@');
+  if (lastAtIdx < 0) { hideMentionDropdown(); return; }
+
+  // @ 前面必须是行首或空白（避免匹配 email 等）
+  if (lastAtIdx > 0 && !/[\s\u00A0]/.test(val[lastAtIdx - 1])) {
+    hideMentionDropdown();
+    return;
+  }
+
+  // 提取 @ 后的查询文本
+  const afterAt = textBeforeCursor.substring(lastAtIdx + 1);
+  // 查询到空格或换行为止
+  const spaceMatch = afterAt.match(/[\s\u00A0]/);
+  const query = spaceMatch ? afterAt.substring(0, spaceMatch.index) : afterAt;
+
+  // 如果已经输入了空格，则关闭下拉（用户已完成输入）
+  if (spaceMatch && spaceMatch.index === 0) { hideMentionDropdown(); return; }
+
+  mentionTriggerPos = lastAtIdx;
+
+  // 过滤匹配的 Skill
+  const lowerQuery = query.toLowerCase();
+  const filtered = mentionSkills.filter(s => {
+    const name = (s.name || '').toLowerCase();
+    const desc = (s.description || '').toLowerCase();
+    return name.includes(lowerQuery) || desc.includes(lowerQuery);
+  });
+
+  if (filtered.length === 0 && query.length > 0) {
+    hideMentionDropdown();
+    return;
+  }
+
+  mentionSkills = filtered.length > 0 ? filtered : mentionSkills;
+  mentionActiveIdx = 0;
+  renderMentionDropdown(query);
+}
+
+function renderMentionDropdown(query) {
+  if (!mentionDropdown) return;
+  if (mentionSkills.length === 0) {
+    mentionDropdown.innerHTML = '<div class="skill-mention-empty">没有可用的 Skill</div>';
+    mentionDropdown.classList.add('visible');
+    mentionVisible = true;
+    return;
+  }
+
+  mentionDropdown.innerHTML = mentionSkills.map((s, idx) => {
+    const name = s.name || '?';
+    const desc = s.description || '';
+    const isActive = idx === mentionActiveIdx;
+    return '<div class="skill-mention-item' + (isActive ? ' active' : '') + '" data-idx="' + idx + '">' +
+      '<span class="sm-icon">📚</span>' +
+      '<span class="sm-name"><span class="sm-at">@</span>' + ctx.utils.esc(name) + '</span>' +
+      '<span class="sm-desc">' + ctx.utils.esc(desc.substring(0, 60)) + '</span>' +
+      '</div>';
+  }).join('');
+
+  mentionDropdown.querySelectorAll('.skill-mention-item').forEach(el => {
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // 阻止失焦
+      const idx = parseInt(el.dataset.idx, 10);
+      if (idx >= 0 && idx < mentionSkills.length) {
+        selectMentionSkill(mentionSkills[idx]);
+      }
+    });
+    el.addEventListener('mouseenter', () => {
+      mentionActiveIdx = parseInt(el.dataset.idx, 10);
+      el.parentElement.querySelectorAll('.skill-mention-item').forEach((c, i) => {
+        c.classList.toggle('active', i === mentionActiveIdx);
+      });
+    });
+  });
+
+  mentionDropdown.classList.add('visible');
+  mentionVisible = true;
+}
+
+function selectMentionSkill(skill) {
+  const name = skill.name || '';
+  if (!name) return;
+
+  const val = inputEl.value;
+  const cursorPos = inputEl.selectionStart;
+
+  // 找到触发 @ 的位置
+  const textBeforeCursor = val.substring(0, cursorPos);
+  const atPos = textBeforeCursor.lastIndexOf('@');
+
+  // 替换 @query 为 @SkillName + 空格
+  const before = val.substring(0, atPos);
+  const after = val.substring(cursorPos);
+  const insertion = '@' + name + ' ';
+  inputEl.value = before + insertion + after;
+
+  // 设置光标到插入文本之后
+  const newCursorPos = atPos + insertion.length;
+  inputEl.setSelectionRange(newCursorPos, newCursorPos);
+  inputEl.focus();
+
+  hideMentionDropdown();
+  autoGrow();
+}
+
+function hideMentionDropdown() {
+  if (mentionDropdown) {
+    mentionDropdown.classList.remove('visible');
+  }
+  mentionVisible = false;
+  mentionActiveIdx = -1;
+  mentionTriggerPos = -1;
 }
 
 function setStreamMode(mode) {
@@ -139,9 +362,11 @@ function updateConnBadge() {
   if (!connBadgeEl) return;
   const mode = ctx.state.getState('ui.streamMode');
   const sid = currentSessionId();
+  const uid = ctx.state.getState('ui.userId') || 'debug-user';
   const bits = [mode === 'a2a' ? 'A2A' : 'Channel'];
   bits.push('单次流');
-  if (sid) bits.push(sid.split(':').pop());
+  if (uid !== 'debug-user') bits.push(uid);
+  if (sid) bits.push(sid.split('_').pop());
   connBadgeEl.textContent = bits.join(' · ');
 }
 
@@ -182,7 +407,9 @@ function scrollToBottom(force) {
 
 async function loadThreads(force) {
   try {
-    const threads = await ctx.api.getThreads();
+    const uid = ctx.state.getState('ui.userId') || 'debug-user';
+    // ★ 优先使用服务端 userId 过滤（session_user 表），不再依赖 session_id 前缀匹配
+    const threads = await ctx.api.getThreads(uid);
     ctx.state.setState('threads.list', threads);
     const sorted = (threads || []).slice().sort((a, b) =>
       String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
@@ -208,12 +435,85 @@ async function loadThreads(force) {
   }
 }
 
-function selectThread(sessionId) {
+async function selectThread(sessionId) {
   if (!sessionId) return;
   ctx.state.setState('threads.current', sessionId);
   document.getElementById('btnLlmCalls').disabled = false;
   loadThreadHistory(sessionId);
   updateConnBadge();
+  // ★ durable-sse-plan：刷新恢复——检测 turn 状态，若仍在执行则自动 subscribe 续传
+  tryResumeSSE(sessionId);
+}
+
+/** ★ durable-sse-plan §4.3：页面刷新后检测 turn 状态，自动续传 */
+async function tryResumeSSE(sessionId) {
+  try {
+    const status = await ctx.api.getStatus(sessionId);
+    // ★ interrupted 也走订阅（与 startReconnect 的分支保持一致）：观察者路径会先回放已落库的
+    // 部分输出，再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
+    // 若落入不订阅的分支，刷新/切换线程后既看不到中断提示，服务端的 interrupted 帧
+    // 也永远到不了前端——Task 10 的提示文案「可刷新页面查看最新状态」就成了空头承诺。
+    if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
+      console.log('[durable-sse] resuming SSE for working session:', sessionId);
+      isStreaming = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Stop';
+      sendBtn.classList.add('danger');
+      currentReplyId = status.reply_id || null;
+      lastEventId = status.latest_event_seq || 0;
+      reconnectAttempts = 0;
+
+      // 如果正在等待确认，渲染 HITL 卡片
+      if (status.state === 'waiting_confirm' && status.pending_confirm) {
+        const r = currentReply || ensureReply(currentReplyId || 'resume-' + Date.now());
+        renderConfirmCard(r, status.pending_confirm);
+      }
+
+      // 中断态必须先落地一个回复气泡：服务端补发的 interrupted 帧不携带 replyId
+      // （见 SessionEventTailer.interruptedSSE），而 handleEvent 在 currentReply 为空时
+      // 会直接丢弃该帧——刷新后 currentReply 必然是空的（loadThreadHistory 不设置它），
+      // 于是提示渲染不出来，用户只看到"有部分输出、然后什么都没有"。
+      // 与上面 waiting_confirm 分支同一手法。
+      if (status.state === 'interrupted') {
+        ensureReply(currentReplyId || 'interrupted-' + Date.now());
+      }
+
+      // 订阅续传
+      activeSubHandle = ctx.api.subscribe(sessionId, {
+        afterSeq: lastEventId,
+        replyId: currentReplyId,
+        onEvent: (evt) => {
+          reconnectAttempts = 0;
+          if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
+          if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
+          handleEvent(evt);
+        },
+        onError: (e) => {
+          console.warn('[durable-sse] resume subscribe error:', e.message);
+          if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), 30000);
+            reconnectAttempts++;
+            setTimeout(() => tryResumeSSE(sessionId), delay);
+          }
+        },
+        onEnd: () => {
+          clearInterval(resumeSyncId);
+          resetStreamingState();
+          loadThreads();
+        }
+      });
+
+      // 定期同步 lastEventId
+      const resumeSyncId = setInterval(() => {
+        if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
+          lastEventId = activeSubHandle.lastEventId;
+        }
+        if (!isStreaming) clearInterval(resumeSyncId);
+      }, 500);
+    }
+  } catch (e) {
+    console.warn('[durable-sse] status check failed, skipping resume:', e.message);
+  }
 }
 
 function newThread() {
@@ -241,10 +541,48 @@ async function loadThreadHistory(sessionId) {
       messagesEl.innerHTML = '<div class="msg system">No messages recovered for this thread</div>';
       return;
     }
+    // Track reply_id → contentEl mapping for file card distribution
+    const replyToContent = new Map();
+    let lastAssistantEl = null;
+    let lastAssistantContentEl = null;
     for (const m of msgs) {
       if (m.role === 'user') addMessage('user', m.content || '');
       else if (m.role === 'assistant' || m.role === 'agent') {
-        addAssistantHistory(m.content || '', m.tool_calls || []);
+        const refs = addAssistantHistory(m.content || '', m.tool_calls || []);
+        lastAssistantEl = refs.msgEl;
+        lastAssistantContentEl = refs.contentEl;
+        if (m.reply_id) {
+          replyToContent.set(m.reply_id, refs.contentEl);
+        }
+      }
+    }
+    // Restore file download cards from history — distribute by reply_id
+    const files = data.files || [];
+    if (files.length > 0) {
+      for (const f of files) {
+        let targetContentEl = null;
+        if (f.reply_id && replyToContent.has(f.reply_id)) {
+          targetContentEl = replyToContent.get(f.reply_id);
+        } else {
+          // Fallback: attach to last assistant message
+          targetContentEl = lastAssistantContentEl;
+        }
+        if (targetContentEl) {
+          renderFileReadyCard({ contentEl: targetContentEl }, f);
+        }
+      }
+    }
+    // Restore pending HITL confirm card
+    const pc = data.pendingConfirm;
+    if (pc && lastAssistantEl) {
+      const toolCalls = pc.tool_calls || pc.tools || [];
+      if (toolCalls.length > 0) {
+        const fakeReply = {
+          replyId: pc.reply_id,
+          contentEl: lastAssistantContentEl,
+          textEl: lastAssistantContentEl
+        };
+        renderConfirmCard(fakeReply, { tool_calls: toolCalls });
       }
     }
   } catch (e) {
@@ -259,7 +597,16 @@ function addMessage(role, content) {
   msg.className = 'msg ' + role;
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
-  writeMarkdown(bubble, renderMarkdown(content));
+
+  // 用户消息：高亮 @Skill 引用
+  if (role === 'user') {
+    var displayContent = ctx.utils.esc(content);
+    displayContent = displayContent.replace(/@(\S+)/g, '<span class="skill-mention-tag">@$1</span>');
+    bubble.innerHTML = displayContent;
+  } else {
+    writeMarkdown(bubble, renderMarkdown(content));
+  }
+
   msg.appendChild(bubble);
   messagesEl.appendChild(msg);
   scrollToBottom(false);
@@ -284,10 +631,12 @@ function writeMarkdown(el, html) {
   }
 }
 
-/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染） */
+/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染）
+ *  @returns {{ msgEl: HTMLElement, contentEl: HTMLElement }} 元素引用，供历史回放时追加卡片 */
 function addAssistantHistory(content, toolCalls) {
   const msg = document.createElement('div');
   msg.className = 'msg assistant';
+  let contentEl = null;
   if ((toolCalls || []).length > 0) {
     msg.innerHTML = renderToolGroupBlock(toolCalls.map((tc) => ({
       type: 'tool_call',
@@ -302,9 +651,13 @@ function addAssistantHistory(content, toolCalls) {
     bubbleEl.className = 'msg-bubble';
     writeMarkdown(bubbleEl, renderMarkdown(content));
     msg.appendChild(bubbleEl);
+    contentEl = bubbleEl;
   }
+  // 无文本内容时，用 msg 本身作为容器（文件卡片可直接追加到 msg）
+  if (!contentEl) contentEl = msg;
   messagesEl.appendChild(msg);
   scrollToBottom(false);
+  return { msgEl: msg, contentEl: contentEl };
 }
 
 /** 工具分组块（默认折叠） */
@@ -632,6 +985,44 @@ function updateToolGroupTitle(r) {
   if (calls.length === 0) return;
   const summary = summarizeToolCalls(calls);
   r.toolsTitleEl.textContent = summary.title;
+}
+
+// ---------- 文件下载卡片（file_ready） ----------
+
+/** 渲染 Agent 产出文件下载卡片（file-upload-download-plan §8.3） */
+function renderFileReadyCard(r, data) {
+  const fileId = data.file_id;
+  const fileName = data.file_name || 'file';
+  const mimeType = data.mime_type || 'application/octet-stream';
+  const size = data.size || 0;
+  const downloadUrl = ctx.api.BASE + (data.download_url || ('/files/' + fileId));
+
+  // 根据文件类型选图标
+  const icon = mimeType.startsWith('image/') ? '🖼️'
+    : mimeType.startsWith('text/') ? '📄'
+    : mimeType === 'application/pdf' ? '📕'
+    : mimeType.startsWith('application/vnd.openxmlformats-officedocument.spreadsheetml') ? '📊'
+    : mimeType.startsWith('application/vnd.openxmlformats-officedocument') ? '📝'
+    : mimeType === 'application/zip' ? '📦'
+    : '📎';
+
+  const card = document.createElement('div');
+  card.className = 'file-ready-card';
+  card.innerHTML =
+    '<div class="file-ready-info">' +
+      '<span class="file-ready-icon">' + icon + '</span>' +
+      '<div class="file-ready-meta">' +
+        '<span class="file-ready-name">' + ctx.utils.esc(fileName) + '</span>' +
+        '<span class="file-ready-size">' + formatFileSize(size) + '</span>' +
+      '</div>' +
+    '</div>' +
+    '<a class="btn small file-ready-download" href="' + ctx.utils.esc(downloadUrl) +
+      '" download="' + ctx.utils.esc(fileName) + '" target="_blank" rel="noopener">⬇ 下载</a>';
+
+  // 挂载到回复气泡内部末尾（contentEl 内），与工具组同级，保证多个文件卡片按顺序排列
+  const container = r.contentEl;
+  container.appendChild(card);
+  scrollToBottom(true);
 }
 
 // ---------- HITL 确认卡片 ----------
@@ -1003,6 +1394,13 @@ function handleEvent(data) {
       renderConfirmCard(rr, data);
       break;
     }
+    case 'file_ready': {
+      // Agent 产出文件：渲染下载卡片（file-upload-download-plan §8.3）
+      // 兜底：AGENT_END 后到达或 currentReply 为 null 时，用 replyId 或占位 id 确保卡片仍渲染
+      const fr = r || ensureReply(data.replyId || 'file-' + Date.now());
+      renderFileReadyCard(fr, data);
+      break;
+    }
     case 'user_confirm_result': {
       // P2：恢复事件标记卡片已处理（当前确认后由提交逻辑直接移除卡片）
       break;
@@ -1021,6 +1419,21 @@ function handleEvent(data) {
       }
       break;
     }
+    case 'interrupted': {
+      // 执行副本崩溃/被抢占：服务端回放完已落库事件后补发的终止帧（不携带 replyId）
+      isStreaming = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('danger');
+      if (r) {
+        const itr = document.createElement('div');
+        itr.className = 'msg system';
+        itr.style.color = 'var(--red)';
+        itr.textContent = '执行已中断：执行该任务的副本失去响应，本次回复可能不完整。可刷新页面查看最新状态，或重新发送消息。';
+        messagesEl.appendChild(itr);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -1028,48 +1441,161 @@ function handleEvent(data) {
 
 // ---------- 发送 ----------
 
+// ---------- 文件上传 ----------
+
+function handleFileSelect(e) {
+  const files = Array.from(e.target.files);
+  if (files.length === 0) return;
+
+  for (const file of files) {
+    pendingFiles.push({ file, fileId: null, status: 'pending' });
+  }
+  renderUploadPreview();
+  fileInput.value = ''; // 重置 input 以便再次选择同一文件
+}
+
+function renderUploadPreview() {
+  if (pendingFiles.length === 0) {
+    uploadPreview.style.display = 'none';
+    return;
+  }
+
+  uploadPreview.style.display = 'block';
+  uploadFiles.innerHTML = pendingFiles.map((item, index) => {
+    const file = item.file;
+    const statusIcon = item.status === 'uploading' ? '⏳' : 
+                      item.status === 'uploaded' ? '✅' : 
+                      item.status === 'error' ? '❌' : '📎';
+    return `<div class="upload-file-item" data-index="${index}">
+      <span class="file-icon">${statusIcon}</span>
+      <span class="file-name" title="${file.name}">${file.name}</span>
+      <span class="file-size">(${formatFileSize(file.size)})</span>
+      <button class="btn small remove-file" data-index="${index}" title="移除">✕</button>
+    </div>`;
+  }).join('');
+
+  // 绑定移除按钮事件
+  uploadFiles.querySelectorAll('.remove-file').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const index = parseInt(e.target.dataset.index);
+      pendingFiles.splice(index, 1);
+      renderUploadPreview();
+    });
+  });
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+async function uploadPendingFiles() {
+  const filesToUpload = pendingFiles.filter(item => item.status === 'pending');
+  if (filesToUpload.length === 0) return [];
+
+  const uploadedIds = [];
+  for (const item of filesToUpload) {
+    item.status = 'uploading';
+    renderUploadPreview();
+    try {
+      const uid = ctx.state.getState('ui.userId') || 'debug-user';
+      const result = await ctx.api.uploadFile(item.file, uid, currentSessionId());
+      item.fileId = result.file_id;
+      item.status = 'uploaded';
+      uploadedIds.push(result.file_id);
+    } catch (e) {
+      item.status = 'error';
+      // 不自动重试，标记为失败并提示用户可手动移除
+      ctx.utils.toast('文件上传失败（已跳过）: ' + item.file.name + ' — ' + e.message, 'error');
+    }
+    renderUploadPreview();
+  }
+
+  // 清除已上传和失败的文件（失败文件不自动重试，发送后清除）
+  pendingFiles = pendingFiles.filter(item => item.status === 'pending');
+  renderUploadPreview();
+
+  return uploadedIds;
+}
+
+// ---------- 发送消息 ----------
+
 async function sendMessage() {
   if (isStreaming) { stop(); return; }
   const text = inputEl.value.trim();
-  if (!text) return;
+  if (!text && pendingFiles.length === 0) return;
 
   let sid = currentSessionId();
   if (!sid) {
-    sid = 'debug-user:' + Date.now().toString(36);
+    const uid = ctx.state.getState('ui.userId') || 'debug-user';
+    sid = uid + '_' + Date.now().toString(36);
     ctx.state.setState('threads.current', sid);
     document.getElementById('btnLlmCalls').disabled = false;
     updateConnBadge();
   }
 
+  // 上传文件
+  const fileIds = await uploadPendingFiles();
+
   inputEl.value = '';
   inputEl.style.height = 'auto';
   inputEl.focus();
+  hideMentionDropdown();
   addMessage('user', text);
+
+  // 异步刷新可用 Skill 列表（下次 @ 触发时使用最新数据）
+  loadAvailableSkills();
 
   const mode = ctx.state.getState('ui.streamMode');
 
   if (mode === 'channel') {
-    await sendChannelSingleStream(text, sid);
+    await sendChannelSingleStream(text, sid, fileIds);
   } else {
-    await sendA2AStream(text, sid);
+    // A2A 模式不支持文件上传，提示用户切换到 Channel 模式
+    if (fileIds && fileIds.length > 0) {
+      ctx.utils.toast('A2A 模式不支持文件上传，已自动切换到 Channel 模式', 'warn');
+      setStreamMode('channel');
+      await sendChannelSingleStream(text, sid, fileIds);
+    } else {
+      await sendA2AStream(text, sid);
+    }
   }
 }
 
 function stop() {
+  // ★ durable-sse-plan：stop 关闭所有连接
+  if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) { /* ignore */ } }
+  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } }
   if (activeAbort) {
     activeAbort.abort();
     return;
   }
+  isStreaming = false;
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+  sendBtn.classList.remove('danger');
 }
 
-async function sendChannelSingleStream(text, sid) {
-  // 单次流（无状态架构）：POST /threads/{sid}/chat 事件直吐，执行完即关闭
+// ★ durable-sse-plan：重置流式状态
+function resetStreamingState() {
+  isStreaming = false;
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+  sendBtn.classList.remove('danger');
+  activeChatHandle = null;
+  activeSubHandle = null;
+}
+
+async function sendChannelSingleStream(text, sid, fileIds) {
+  // durable-sse-plan 改造版：
+  // 1. POST /chat → 事件经 EventBus 广播，SSE 断连不影响 agent 执行
+  // 2. SSE 断连后自动通过 GET /subscribe 重连续传
+  // 3. 全程心跳（EventBus），防 Nginx/CDN 超时
   isStreaming = true;
   sendBtn.disabled = true;
   sendBtn.textContent = 'Stop';
   sendBtn.classList.add('danger');
-  const abortController = new AbortController();
-  activeAbort = abortController;
 
   let waitingSince = null;
   let waitingEl = null;
@@ -1086,25 +1612,132 @@ async function sendChannelSingleStream(text, sid) {
   };
   const hideWaiting = () => { if (waitingEl) { waitingEl.remove(); waitingEl = null; } };
 
-  ctx.api.sendChat(sid, text, 'debug-user', {
+  // ★ 重连逻辑：SSE 断连后通过 subscribe 续传
+  const startReconnect = () => {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      handleEvent({ type: 'error', error: '连接断开，重连失败已达上限，请刷新页面' });
+      return;
+    }
+    const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts), 30000);
+    reconnectAttempts++;
+    console.log(`[durable-sse] reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}), afterSeq=${lastEventId}`);
+    setTimeout(() => {
+      // 先查状态，确认 turn 是否仍在执行
+      ctx.api.getStatus(sid).then(status => {
+        // ★ interrupted 也走订阅：观察者路径会先回放已落库的部分输出（用户能看到确实产出的内容），
+        // 再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
+        // 若落入下面的 else 分支，用户只会看到一个没有任何内容的 AGENT_END，无从得知执行已中断。
+        if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
+          currentReplyId = status.reply_id || currentReplyId;
+          subscribeWithReconnect(sid, lastEventId, currentReplyId);
+        } else if (status.state === 'completed') {
+          // turn 已完成，回放剩余事件后结束
+          replayAndClose(sid, lastEventId, currentReplyId);
+        } else {
+          // idle 或异常，直接结束
+          handleEvent({ type: 'AGENT_END', replyId: currentReplyId });
+          finishStream();
+        }
+      }).catch(() => {
+        // status 查询失败也尝试重连
+        subscribeWithReconnect(sid, lastEventId, currentReplyId);
+      });
+    }, delay);
+  };
+
+  // ★ 通过 GET /subscribe 重连续传
+  const subscribeWithReconnect = (sessionId, afterSeq, replyId) => {
+    if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } }
+    activeSubHandle = ctx.api.subscribe(sessionId, {
+      afterSeq,
+      replyId,
+      onEvent: (evt) => {
+        reconnectAttempts = 0; // 收到事件说明连接正常，重置计数
+        hideWaiting();
+        handleEvent(evt);
+      },
+      onError: (e) => {
+        console.warn('[durable-sse] subscribe error:', e.message);
+        startReconnect();
+      },
+      onEnd: (evt) => {
+        // 流正常结束（done 帧或 AGENT_END 后 EventBus close）
+        finishStream();
+      }
+    });
+  };
+
+  // ★ 回放历史 + done 帧后关闭（turn 已完成场景）
+  const replayAndClose = (sessionId, afterSeq, replyId) => {
+    activeSubHandle = ctx.api.subscribe(sessionId, {
+      afterSeq,
+      replyId,
+      onEvent: (evt) => {
+        hideWaiting();
+        handleEvent(evt);
+      },
+      onError: () => { /* 回放失败也结束 */ },
+      onEnd: () => {
+        finishStream();
+      }
+    });
+  };
+
+  // ★ 发起 POST /chat
+  reconnectAttempts = 0;
+  const uid = ctx.state.getState('ui.userId') || 'debug-user';
+  activeChatHandle = ctx.api.sendChat(sid, text, uid, fileIds, {
     onWaiting: () => {
       if (!waitingSince) waitingSince = Date.now();
       showWaiting();
     },
     onEvent: (evt) => {
+      reconnectAttempts = 0;
       hideWaiting();
+      // 追踪 replyId（从 AGENT_START 或 permission_ask 中获取）
+      if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
+      if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
       handleEvent(evt);
     },
     onError: (e) => {
       hideWaiting();
-      const r = currentReply || ensureReply('single');
-      handleEvent({ type: 'error', error: e.message, replyId: r.replyId });
+      // ★ 核心变化：SSE 断连不代表 agent 失败，尝试重连
+      if (isStreaming) {
+        console.warn('[durable-sse] chat SSE disconnected, will try reconnect:', e.message);
+        startReconnect();
+      } else {
+        const r = currentReply || ensureReply('single');
+        handleEvent({ type: 'error', error: e.message, replyId: r.replyId });
+      }
     },
     onEnd: () => {
-      hideWaiting();
-      loadThreads();
+      // ★ 需要判断是自然结束还是断连
+      // 自然结束：AGENT_END 事件已触发，isStreaming=false
+      // 断连：isStreaming 仍为 true，需要重连
+      if (isStreaming && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        console.log('[durable-sse] stream ended unexpectedly, attempting reconnect');
+        startReconnect();
+      } else {
+        hideWaiting();
+        loadThreads();
+      }
     }
   });
+
+  // 同步 lastEventId
+  const syncId = setInterval(() => {
+    if (activeChatHandle) lastEventId = activeChatHandle.lastEventId;
+    if (activeSubHandle && activeSubHandle.lastEventId > lastEventId) {
+      lastEventId = activeSubHandle.lastEventId;
+    }
+  }, 500);
+
+  // 当流真正结束时的清理（替代覆写全局函数的方式）
+  const finishStream = () => {
+    clearInterval(syncId);
+    resetStreamingState();
+    loadThreads();
+  };
 
   try { await new Promise((resolve) => setTimeout(resolve, 0)); }
   catch (e) { /* ignore */ }
@@ -1130,7 +1763,7 @@ async function sendA2AStream(text, sid) {
       body: JSON.stringify({
         jsonrpc: '2.0',
         method: 'message/stream',
-        params: { message: { role: 'user', parts: [{ text }], metadata: { userId: 'debug-user', sessionId: sid } } },
+        params: { message: { role: 'user', parts: [{ text }], metadata: { userId: ctx.state.getState('ui.userId') || 'debug-user', sessionId: sid } } },
         id: 'stream-' + Date.now()
       }),
       signal: abortController.signal

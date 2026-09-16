@@ -28,7 +28,7 @@ class AgentScopeConfigTest {
     @Test
     void mcpManagerShouldUseConfigPath() {
         var props = new AgentManagerProperties(emptyLlm(), emptyServer(), emptyCheckpoint(), "/test", "",
-            cleanupConfig(), emptyFileConfig(), harnessConfig());
+            cleanupConfig(), emptyFileConfig(), new AgentManagerProperties.SseConfig(20, 5, 256, 300),harnessConfig());
         var mcpRegistrar = mock(McpToolRegistrar.class);
 
         assertNotNull(config.mcpManager(props, mcpRegistrar));
@@ -104,7 +104,7 @@ class AgentScopeConfigTest {
             emptyLlm(), emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
-            "/config", "", cleanupConfig(), emptyFileConfig(), harnessConfig());
+            "/config", "", cleanupConfig(), emptyFileConfig(),new AgentManagerProperties.SseConfig(20, 5, 256, 300), harnessConfig());
 
         var ds = config.dataSource(props);
         assertInstanceOf(HikariDataSource.class, ds);
@@ -118,6 +118,7 @@ class AgentScopeConfigTest {
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/test", "u", "p", "test"),
             "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             new AgentManagerProperties.HarnessConfig(
                 20, 30, 180, 30, 10, 8000, 60,
                 30, 10, true, true, 7, 1, 5000L, 60000L, 900000L));
@@ -175,11 +176,12 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties propsForLlm() {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
-                "k", "m", "http://localhost", "openai", 0.7, 4096, 120),
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true),
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
-            "/config", "", cleanupConfig(), emptyFileConfig(), harnessConfig());
+            "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300), harnessConfig());
     }
 
     private static AgentManagerProperties.HarnessConfig harnessConfig() {
@@ -197,7 +199,7 @@ class AgentScopeConfigTest {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true);
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

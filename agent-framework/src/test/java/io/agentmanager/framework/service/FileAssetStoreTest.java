@@ -39,7 +39,7 @@ class FileAssetStoreTest {
     }
 
     private FileAssetStore.FileAsset asset(String id, String userKey, String status) {
-        return new FileAssetStore.FileAsset(id, userKey, "s1", "a.csv",
+        return new FileAssetStore.FileAsset(id, userKey, "s1", null, "a.csv",
             null, "text/csv", 10, "local", "upload/k/" + id + ".csv", "upload", status,
             LocalDateTime.now());
     }
@@ -66,12 +66,14 @@ class FileAssetStoreTest {
 
         verify(ps).setString(1, "id-1");
         verify(ps).setString(2, "alice");
-        verify(ps).setString(4, "a.csv");
-        verify(ps).setLong(7, 10);
-        verify(ps).setString(8, "local");
-        verify(ps).setString(9, "upload/k/id-1.csv");
-        verify(ps).setString(10, "upload");
-        verify(ps).setString(11, "pending");
+        verify(ps).setString(3, "s1");
+        verify(ps).setString(5, "a.csv");
+        verify(ps).setString(7, "text/csv");
+        verify(ps).setLong(8, 10);
+        verify(ps).setString(9, "local");
+        verify(ps).setString(10, "upload/k/id-1.csv");
+        verify(ps).setString(11, "upload");
+        verify(ps).setString(12, "pending");
         verify(ps).executeUpdate();
     }
 

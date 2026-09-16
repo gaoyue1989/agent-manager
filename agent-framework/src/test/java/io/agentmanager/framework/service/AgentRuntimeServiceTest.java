@@ -89,9 +89,9 @@ class AgentRuntimeServiceTest {
         mockCallReturns("ok");
         service.invoke("hello", "t1", "alice");
 
-        // sessionId = "acme-test-agent:t1" (slug 中的 / 替换为 -)
+        // sessionId = "acme-test-agent__t1" (slug 中的 / 替换为 -，分隔符用 __ 替代 : 以兼容 Windows)
         verify(agent).call(anyList(), argThat((RuntimeContext ctx) ->
-            ctx.getSessionId().equals("acme-test-agent:t1")));
+            ctx.getSessionId().equals("acme-test-agent__t1")));
     }
 
     @Test

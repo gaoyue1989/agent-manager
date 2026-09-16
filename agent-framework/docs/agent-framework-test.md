@@ -95,10 +95,12 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 StreamControllerTest (2 个用例)
+### 4.4 ChatStreamControllerTest (20 个用例)
 
-- `GET /chat/stream` Channel SSE 流式事件
-- 空消息处理
+- `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
+- sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
+- write_file → KV 同步（沙箱开关、路径规范化、userId 作 key、缺 path 跳过）
+- 工具事件审计、MCP Apps ui 元数据序列化
 
 ### 4.5 ToolControllerTest (4 个用例)
 
@@ -156,17 +158,23 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| SessionStreamControllerTest | 11 | metadata 携带会话 key 注入 / ui 元数据 SSE / 单次流触发 / fileIds 注入 |
-| StreamControllerTest | 8 | ui 元数据序列化 / 无 UI 工具降级原词表 |
+| ChatStreamControllerTest | 20 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 / 丢租约即停写 / 准备段与租约启动失败的回滚 |
+| SessionStreamControllerTest | 7 | subscribe 回放+done / status 四态 / ui 元数据序列化 |
 
 ### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）
 
 | 测试类 | 用例数 | 覆盖点 |
 |--------|--------|--------|
-| TurnLeaseStoreTest | 8 | acquire 成功 / PK 冲突排队 / 过期接管 / renew 续租 / renew 失败自停 / release 释放 / 并发 acquire 竞争 |
-| ConfirmContextStoreTest | 10 | put 覆盖写 / consume CAS 成功 / consume 已消费 409 / consume 不存在 404 / TTL 过期 / 查询 pendingConfirm / 前缀兼容查询 / 清理过期条目 |
-| ToolAuditStoreTest | 6 | 异步批量写入 / 单条写入 / 过期清理 / 批量合并 / 写入失败静默降级 / 查询审计日志 |
-| ConfirmControllerTest | 5 | 同步确认 / confirm-stream / 404 与 409 语义 |
+| TurnLeaseStoreTest | 5 | renew 三态（更新到 1 行 → HELD / 0 行 → LOST / SQLException → ERROR） / ttl() 暴露给 guard 做「到必须停手」的判据 |
+| TurnLeaseGuardTest | 11 | 瞬时故障继续重试而不停续租 / 故障持续超过判据才判丢锁 / 续租线程卡死时写入侧仍能按时间判丢锁 / 在接管可能之前就停手（判据是 ttl−interval 而非 ttl） / 主动 release 不算丢锁 / 丢锁通知闸门只开一次 / 已确认丢锁不被后续成功续租翻回 / 丢锁后不再碰租约 |
+| ConfirmControllerTest | 6 | 同步确认 / confirm-stream / 404 与 409 语义 / 丢租约即停写 |
+
+> **修正（2026-09-16）：** 上表原先还列了 `ConfirmContextStoreTest`（10 用例）与
+> `ToolAuditStoreTest`（6 用例）——**这两个类都从未存在过**，用例数也是凭空写的；
+> `TurnLeaseStoreTest` 原写 8 个用例，实际为 5 个（该类的其余行为由 `TurnLeaseGuardTest`
+> 从消费侧覆盖）。`ConfirmContextStore` 与 `ToolAuditStore` 目前**没有独立测试类**，
+> 只经由 `ConfirmControllerTest` / `AgentRuntimeServiceHitlTest` 间接覆盖。补类时请同时
+> 更新本表——本表此前正是因为「先写文档、后没建类」而失真。
 
 ### 4.12 文件上传下载测试（file-upload-download，2026-09-07 新增）
 
@@ -200,6 +208,22 @@ class AgentFrameworkApplicationTests {
 | HttpTracingFilterTest | 3 | HTTP 入口 span |
 | TraceIdConverterTest | 2 | traceId → MDC |
 
+### 4.15 seq 分配回归测试（2026-09-16，线上事故回填）
+
+来自一次真实的线上报错：`唯一键冲突——session debug-user_mu3ydga6 本批 200 行（seq 5153..5153）已整批丢弃`。
+**首尾 seq 相同**说明不是「第二个 writer」，而是同一个副本把整批算成了同一个 seq。
+
+| 测试 | 钉住的性质 |
+|------|-----------|
+| `SessionEventStoreTest#unseededAppendsMustStillAdvanceSeq` | 没有 seq 计数器时（`beginTurn` 未跑）逐行 append 必须递增，不能全撞同一个 seq |
+| `SessionEventStoreTest#appendsAfterReleaseSeqAlsoAdvance` | 计数器释放后的尾部事件要接得上已落库的 seq，不能撞回去 |
+| `SessionEventStoreTest#stragglerAppendDuringFinalFlushIsNotRenumbered` | `finishTurn` 的 INSERT 往返期间到达的尾部事件，seq 不得被下一次播种重新发号 |
+| `SessionEventStoreTest#duplicateKeyCollisionIsReportedAsSecondWriter` | 真冲突仍要记为「第二个 writer」（日志同时打出判据：批内不同 seq 数） |
+
+> 写这类测试时的一个教训：**`SELECT MAX` 的桩必须跟着 INSERT 走**（写进去的行要能被下一次
+> `MAX` 读到）。用固定值的桩会造出一个「MAX 永远停在旧值」的假世界——第一版
+> `appendsAfterReleaseSeqAlsoAdvance` 正是因此测出了与实际语义无关的失败。
+
 ---
 
 ## 5. 手动验证
@@ -219,10 +243,12 @@ curl -s -X POST http://localhost:8101/ \
   | python3 -m json.tool
 ```
 
-### 5.3 Channel SSE
+### 5.3 对话单次流
 
 ```bash
-curl -s -N "http://localhost:8101/chat/stream?message=请只回复welcome&userId=test-user"
+curl -s -N -X POST "http://localhost:8101/threads/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"请只回复welcome","userId":"test-user"}'
 ```
 
 ### 5.4 MCP 工具调用
@@ -277,7 +303,10 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-09-07 更新：**456 个 @Test 用例、61 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
+> 2026-09-16 更新（`session_event` 迁 Redis Streams 后复测）：**`mvn test` 654 个用例、0 失败、4 例跳过**，
+> 覆盖 80 个含 `@Test` 的源文件（计数方式：surefire 汇总行 + `grep -rl '@Test' src/test/java`）。
+> 默认跳过的是沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例；真实 S3 集成 `S3FileStorageIT`
+> 需环境变量启用；需要真 Redis 的两支 `*IT` 见 §8.2。
 
 | 类别 | 数量 | 状态 |
 |------|------|------|
@@ -287,8 +316,8 @@ src/test/resources/fixtures/test-agent/
 | DebugApiControllerTest | 15 | ✅ |
 | ThreadControllerTest（含 history 文件下载卡片） | 12 | ✅ |
 | FileControllerTest / FileToolsTest / FileAssetStoreTest | 31 | ✅ |
-| SessionStreamControllerTest / StreamControllerTest | 19 | ✅ |
-| TurnLeaseStoreTest / ConfirmContextStoreTest / ToolAuditStoreTest | 24 | ✅ |
+| ChatStreamControllerTest / SessionStreamControllerTest | 27 | ✅ |
+| TurnLeaseStoreTest / TurnLeaseGuardTest | 16 | ✅ |
 | OpenSandbox 单测（SandboxConfig/State/Client/Reader 等） | 44 | ✅ |
 | 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 32 | ✅ |
 | 其余（tool/config/service/controller/storage） | 约 195 | ✅ |
@@ -308,3 +337,25 @@ src/test/resources/fixtures/test-agent/
 | SandboxConfigTest | 2 | 配置默认值/覆盖 |
 | TracingSandboxClientTest | 6 | 沙箱客户端 Tracing 装饰 |
 | OpenSandboxApiIntegrationTest | 4 | **真实 Server 全流程**（创建/命令/文件/契约，默认跳过，需沙箱 Server 可达） |
+
+### 8.2 真 Redis 集成测试（`session_event` 迁 Redis Streams 后新增，2026-09-16）
+
+两支 `*IT` 都需要**真 Redis**，由环境变量门控；**surefire 默认 include 是
+`*Test`/`Test*`/`*Tests`/`*TestCase`，不匹配 `*IT`**，所以 `mvn test` 不会捡到它们，必须显式 `-Dtest=`：
+
+```bash
+REDIS_IT=1 REDIS_IT_URL=redis://127.0.0.1:6399 \
+  mvn -o test -Dtest='RedisEventLogIT,SessionEventStoreCrossReplicaIT'
+```
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| RedisEventLogIT | 10 | `appendBatch` 字段往返（空 replyId 归一为 null）/ `XRANGE` 边界 / `tailSeq` 随流顶端 / reply 索引保留首个 seq 并按序 / `DEL` 两 key 且幂等 / TTL 落到两 key / XADD ID 非递增返回 -1 并记为 writer 冲突 / `maxLenPerStream` 真的裁剪 / 大 payload 字节级往返 / 启动自检日志与服务器实际配置一致 |
+| SessionEventStoreCrossReplicaIT | 6 | **两个 store 共享同一 Redis**：pod B 回放 pod A 的完整 turn 含终止帧 / pod B 从中途游标续传只看到剩余部分 / pod A 未刷出的缓冲对 pod B 不可见 / 跨 pod seq 交接不冲突 / pod B 经 tailer 看到 pod A 的终止帧 / pod A 删除后 pod B 读到的 key 一并消失 |
+
+> 两支 IT 都**不会** `FLUSHALL`/`FLUSHDB`，sessionId 全部 UUID 化，只动自己的 key，因此可以指向
+> 共享实例。`REDIS_IT_URL` 不设时默认 `redis://127.0.0.1:6379` —— 若那是你在用的实例，建议显式
+> 指到一个临时实例（例如 `redis-server --port 6399 --dir /tmp/x`）。
+
+> 另有 4 例「配置反向验证」不在这两支 IT 里，靠**手动**跑：把服务端设成 `appendonly no` 或
+> `maxmemory-policy allkeys-lru` 后启动应用，确认启动自检如实 ERROR（不 abort 启动）。

@@ -74,11 +74,11 @@ agent-framework/
 │   │   │       ├── DebugController.java         # GET /debug
 │   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/threads 等
 │   │   │       ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
-│   │   │       ├── SessionStreamController.java # POST /threads/{sid}/chat (SSE 单次流, 主对话入口)
+│   │   │       ├── ChatStreamController.java    # POST /threads/chat (SSE 单次流, 唯一对话入口)
+│   │   │       ├── SessionStreamController.java # GET /threads/{sid}/subscribe、/{sid}/status
 │   │   │       ├── ConfirmController.java       # POST /threads/{sid}/confirm、/confirm-stream (HITL)
 │   │   │       ├── FileController.java          # POST /files/upload、GET /files/{fileId}
-│   │   │       ├── StreamController.java        # GET /chat/stream (Channel SSE, 旧一次性流)
-│   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (StreamController + SessionStreamController)
+│   │   │       ├── AgentEventSseSerializer.java # SSE 序列化共用工具 (ChatStreamController + SessionEventBus)
 │   │   │       ├── McpProxyController.java      # MCP Apps: GET /mcp/{server}/resources/ui 等 (前端资源代理)
 │   │   │       ├── UiContextController.java     # MCP Apps: POST /mcp/ui-context (4.7 静默更新)
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
@@ -161,7 +161,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟 |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
 | Plan Mode | ✅ | enablePlanMode() |
-| Channel | ✅ | ChatUiChannel (GET /chat/stream) |
+| Channel | ✅ | ChatUiChannel (POST /threads/chat) |
 | 工作区（Workspace） | ✅ | WorkspaceInitializer 生成 .agentscope/workspace/ |
 | 子 Agent | ✅ | subagents/*.md |
 | 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆回写 KV） |
@@ -274,12 +274,11 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/threads` | Thread 列表 |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/{sid}/chat` | 无状态单次流 SSE 对话（主对话入口，{message?, userId?, fileIds?}，Turn 租约排队 waiting 帧） |
+| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
 | POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
-| GET | `/chat/stream` | Channel SSE 一次性流对话（旧） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |
 | GET | `/mcp/{server}/resources` | MCP Apps: 列出服务器资源 |
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps: 卡片工具调用代理（ask 工具 403 + needsConfirm 走确认流） |

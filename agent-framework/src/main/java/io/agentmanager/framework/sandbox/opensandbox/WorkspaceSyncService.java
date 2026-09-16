@@ -37,8 +37,9 @@ public class WorkspaceSyncService {
         }
         try {
             var root = "/workspace/";
-            var ctx = RuntimeContext.builder().userId(userId).build();
-            var fs = new RemoteFilesystem(baseStore, List.of(userId));
+            var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+            var ctx = RuntimeContext.builder().userId(safeUserId).build();
+            var fs = new RemoteFilesystem(baseStore, List.of(safeUserId));
 
             // 1. MEMORY.md
             try {

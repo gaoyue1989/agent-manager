@@ -1,0 +1,256 @@
+package io.agentmanager.framework.service;
+
+import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.codec.ServerSentEvent;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
+import reactor.core.scheduler.Schedulers;
+
+/**
+ * 会话事件追赶器（durable-sse-multinode-plan §2.4 / §3.4）。
+ *
+ * <p>承担**观察者路径**：被订阅的 session 的执行可能发生在另一个 Pod 上，因此这里
+ * 不读任何进程内状态，只读 Pod 间共享的存储——{@code session_event}（事件流，在 Redis）
+ * 与 {@code turn_lease} / {@code confirm_context}（turn 状态，在 MySQL）。
+ *
+ * <p>与之相对，{@link SessionEventBus} 只服务"拥有执行的那个请求自己的 SSE"，
+ * 保证首 token 延迟不受影响。这条分工即设计文档的不变量 I4。
+ */
+public class SessionEventTailer {
+
+    private static final Logger log = LoggerFactory.getLogger(SessionEventTailer.class);
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** 终态事件类型：出现即代表 turn 不会再产出新事件 */
+    private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error");
+
+    /** 终止探测的降频间隔：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm */
+    private static final long PROBE_INTERVAL_MS = 2000;
+
+    private final SessionEventStore eventStore;
+    private final TurnLeaseStore turnLeaseStore;
+    private final AgentRuntimeService runtimeService;
+
+    /** 轮询间隔：无新事件时的查询节奏 */
+    private final Duration pollInterval;
+
+    /**
+     * 心跳间隔：长时间无业务事件时补发 SSE comment 帧。
+     *
+     * <p>与 {@link SessionEventBus#subscribe} 的心跳同源——入口代理（Nginx/CDN）对长时间
+     * 静默的连接有读超时（默认 60s）。而观察者路径恰恰以长静默为常态（执行发生在另一个
+     * 副本上、期间可能是一个长工具调用），没有心跳就会被中途切断。
+     */
+    private final Duration heartbeatInterval;
+
+    public SessionEventTailer(SessionEventStore eventStore,
+                              TurnLeaseStore turnLeaseStore,
+                              AgentRuntimeService runtimeService,
+                              Duration pollInterval) {
+        this(eventStore, turnLeaseStore, runtimeService, pollInterval, Duration.ofSeconds(20));
+    }
+
+    public SessionEventTailer(SessionEventStore eventStore,
+                              TurnLeaseStore turnLeaseStore,
+                              AgentRuntimeService runtimeService,
+                              Duration pollInterval,
+                              Duration heartbeatInterval) {
+        this.eventStore = eventStore;
+        this.turnLeaseStore = turnLeaseStore;
+        this.runtimeService = runtimeService;
+        this.pollInterval = pollInterval;
+        this.heartbeatInterval = heartbeatInterval;
+    }
+
+    /** turn 状态探测结果 */
+    public record TurnProbe(boolean running, boolean finished, boolean interrupted) {
+        public static final TurnProbe RUNNING = new TurnProbe(true, false, false);
+        public static final TurnProbe FINISHED = new TurnProbe(false, true, false);
+        public static final TurnProbe INTERRUPTED = new TurnProbe(false, false, true);
+    }
+
+    /**
+     * 完整探测：自行取数。
+     *
+     * <p>顺序刻意如此——lease 被持有时即可短路，不查事件与确认上下文。
+     */
+    public TurnProbe probe(String sessionId) {
+        if (turnLeaseStore.isHeld(sessionId)) {
+            return TurnProbe.RUNNING;
+        }
+        var latest = eventStore.findLatest(sessionId);
+        if (latest == null || TERMINAL_TYPES.contains(latest.type())) {
+            return TurnProbe.FINISHED;
+        }
+        // HITL 暂停点：lease 已让出但 turn 未结束。permission_ask 是 turn 边界，
+        // 因此对观察者而言同样是"可以正常关流"（设计文档 §3.4.4 的决策）。
+        if (runtimeService.findPendingConfirm(sessionId) != null) {
+            return TurnProbe.FINISHED;
+        }
+        // 有事件、非终态、无租约、无待确认：执行副本已崩溃或被抢占
+        log.debug("SessionEventTailer: turn interrupted (sid={}, latestSeq={})",
+            sessionId, latest.seq());
+        return TurnProbe.INTERRUPTED;
+    }
+
+    /** 用已取好的数据探测，避免重复查询（/status 端点用） */
+    public TurnProbe probe(String sessionId, SessionEventStore.EnvelopedEvent latest,
+                           boolean hasPendingConfirm) {
+        if (turnLeaseStore.isHeld(sessionId)) {
+            return TurnProbe.RUNNING;
+        }
+        if (latest == null || TERMINAL_TYPES.contains(latest.type())) {
+            return TurnProbe.FINISHED;
+        }
+        if (hasPendingConfirm) {
+            return TurnProbe.FINISHED;
+        }
+        return TurnProbe.INTERRUPTED;
+    }
+
+    // ===== 观察者事件流 =====
+
+    /**
+     * 观察者流：从 afterSeq 回放，然后按游标轮询追赶，直到 turn 终止。
+     *
+     * <p>全程只读共享存储，不使用任何进程内状态——这正是跨副本正确性的来源：被订阅的
+     * session 的执行可能发生在另一个 Pod 上，它的 sink 在本 Pod 不可达。
+     *
+     * <p>完成判定见 {@link #probe(String)}：正常结束补 done 帧；
+     * 执行副本崩溃/被抢占补 interrupted 帧。
+     */
+    public Flux<ServerSentEvent<String>> tail(String sessionId, String replyId, int afterSeq) {
+        var cursor = new AtomicInteger(Math.max(afterSeq, -1));
+
+        // afterSeq < 0 表示不回放（与 SessionEventBus.subscribe 的既有语义一致）
+        Flux<ServerSentEvent<String>> replay = afterSeq < 0
+            ? Flux.empty()
+            : eventStore.queryAfter(sessionId, replyId, afterSeq)
+                .doOnNext(e -> cursor.set(e.seq()))
+                .map(this::toSSE);
+
+        Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>>create(sink -> {
+            long lastProbeAt = 0;   // 0 → 首轮立即探测，避免对已结束的 turn 空等一轮
+            long lastFrameAt = System.currentTimeMillis();
+            while (!sink.isCancelled()) {
+                var page = eventStore.queryAfter(sessionId, replyId, cursor.get())
+                    .collectList().block();
+                if (page == null) page = java.util.List.of();
+
+                boolean sawTerminal = false;
+                for (var e : page) {
+                    if (sink.isCancelled()) return;
+                    sink.next(toSSE(e));
+                    cursor.set(e.seq());
+                    if (TERMINAL_TYPES.contains(e.type())) sawTerminal = true;
+                }
+                if (!page.isEmpty()) lastFrameAt = System.currentTimeMillis();
+
+                if (sawTerminal) {
+                    sink.next(doneSSE());
+                    sink.complete();
+                    return;
+                }
+
+                // 终止探测降频：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm
+                long now = System.currentTimeMillis();
+                if (page.isEmpty() && now - lastProbeAt >= PROBE_INTERVAL_MS) {
+                    lastProbeAt = now;
+                    var probe = probe(sessionId);
+                    if (probe.interrupted()) {
+                        sink.next(interruptedSSE());
+                        sink.complete();
+                        return;
+                    }
+                    if (probe.finished()) {
+                        // 竞态兜底：终止行可能恰好落在上面那次 queryAfter 与本次 probe 之间。
+                        // 那时 page 为空、probe 却已判定结束——若不补一次追赶查询，终止事件
+                        // 自身（尤其是 error）会被静默丢弃，客户端只会看到一个"正常完成"。
+                        emitRemaining(sink, sessionId, replyId, cursor);
+                        sink.next(doneSSE());
+                        sink.complete();
+                        return;
+                    }
+                }
+
+                // 心跳：两次 probe 之间可能有任意长的静默，comment 帧不触发前端 onmessage，
+                // 只用于重置入口代理的读超时计时器（否则长静默的观察者流会被中途切断）。
+                if (now - lastFrameAt >= heartbeatInterval.toMillis()) {
+                    sink.next(heartbeatSSE());
+                    lastFrameAt = now;
+                }
+
+                try {
+                    Thread.sleep(pollInterval.toMillis());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    sink.complete();
+                    return;
+                }
+            }
+        }).subscribeOn(Schedulers.boundedElastic());
+
+        return replay.concatWith(live);
+    }
+
+    /**
+     * 补发一次追赶查询的结果：用于 probe 判定 turn 已结束后的最后一跳。
+     *
+     * <p>不做循环——终止行至多带来一批尾部事件，取一次即可；取不到就正常补 done 帧。
+     */
+    private void emitRemaining(FluxSink<ServerSentEvent<String>> sink, String sessionId,
+                               String replyId, AtomicInteger cursor) {
+        var page = eventStore.queryAfter(sessionId, replyId, cursor.get()).collectList().block();
+        if (page == null) return;
+        for (var e : page) {
+            if (sink.isCancelled()) return;
+            sink.next(toSSE(e));
+            cursor.set(e.seq());
+        }
+    }
+
+    private static ServerSentEvent<String> heartbeatSSE() {
+        return ServerSentEvent.<String>builder().comment("hb").build();
+    }
+
+    private ServerSentEvent<String> toSSE(SessionEventStore.EnvelopedEvent e) {
+        // 与 SessionEventBus.toSSE 保持一致的 payload 形态：把 replyId 注入 payload JSON，
+        // 使同一事件无论走执行副本的本地 sink 还是观察者的 DB 追赶，前端拿到的字节一致。
+        String data = e.payload();
+        if (e.replyId() != null && !e.replyId().isBlank()) {
+            try {
+                var node = MAPPER.readTree(data);
+                if (node != null && node.isObject() && !node.has("replyId")) {
+                    ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", e.replyId());
+                    data = MAPPER.writeValueAsString(node);
+                }
+            } catch (Exception ex) {
+                // 注入失败不阻塞主链路，使用原始 payload
+            }
+        }
+        // id（seq）语义与 SessionEventBus.toSSE 一致，前端可据此记录回放游标
+        return ServerSentEvent.<String>builder()
+            .data(data)
+            .id(String.valueOf(e.seq()))
+            .build();
+    }
+
+    private static ServerSentEvent<String> doneSSE() {
+        return ServerSentEvent.<String>builder().data("{\"type\":\"done\"}").build();
+    }
+
+    private static ServerSentEvent<String> interruptedSSE() {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"interrupted\",\"reason\":\"turn_interrupted\"}")
+            .build();
+    }
+}
