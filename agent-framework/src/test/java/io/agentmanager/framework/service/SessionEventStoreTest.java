@@ -121,6 +121,175 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void unseededAppendsMustStillAdvanceSeq() throws Exception {
+        // 计数器不在时（`beginTurn` 未跑，或已被 `releaseSeq` 释放而流仍在产出事件）会退回
+        // `findMaxSeq(sid) + 1`——而**缓冲里尚未落库的行，MAX 是看不见的**。于是同一条流里
+        // 后续每一行都拿到同一个 seq，攒够一批就在多值 INSERT 里自我冲突：
+        //   Duplicate entry ... for key 'uk_session_seq'
+        // 生产上表现为「本批 200 行（seq 5153..5153）已整批丢弃」。
+        //
+        // 批量落库之前这不成问题：每次 append 立即 INSERT，MAX 看得见上一行，退回路径恒等于
+        // 「上一个 +1」。引入缓冲之后，退回路径只对**第一行**成立。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(5152);
+        when(conn.prepareStatement(startsWith("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        var written = new ArrayList<String>();
+        var sidByIndex = new HashMap<Integer, String>();
+        doAnswer(inv -> {
+            sidByIndex.put(inv.getArgument(0), inv.getArgument(1));
+            return null;
+        }).when(insertPs).setString(anyInt(), any());
+        doAnswer(inv -> {
+            int seqIdx = inv.getArgument(0);
+            written.add(sidByIndex.get(seqIdx - 1) + ":" + inv.getArgument(1));
+            return null;
+        }).when(insertPs).setInt(anyInt(), anyInt());
+
+        store.append("sid-u", "r", "TEXT_BLOCK_DELTA", "{}");
+        store.append("sid-u", "r", "TEXT_BLOCK_DELTA", "{}");
+        store.finishTurn("sid-u");
+
+        assertEquals(List.of("sid-u:5153", "sid-u:5154"), written,
+            "每一行都必须拿到递增的 seq：退回路径不能对同一批的所有行返回同一个值");
+    }
+
+    @Test
+    void appendsAfterReleaseSeqAlsoAdvance() throws Exception {
+        // 同一个坑的另一半：计数器被释放之后流还在产出事件（HITL 暂停点 closeSession 之后、
+        // 或 AGENT_END 之后的尾部事件）。`emit` 是先 append 再试 sink，所以尾部事件照样进
+        // store——此时惰性播种会从 MAX 重新发号，必须接得上前一批。
+        //
+        // 这条 mock 的关键是 **MAX 必须跟着 INSERT 走**：写进去的行要能被下一次 SELECT MAX
+        // 读到。用固定值的桩会造出一个「MAX 永远停在旧值」的假世界，测出来的东西与真实语义无关。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+
+        var written = new ArrayList<String>();           // 「库里的行」
+        var batch = new ArrayList<String>();             // 本条 INSERT 正在攒的行
+        var sidByIndex = new HashMap<Integer, String>();
+        // 库中已有 9 行历史数据；之后 MAX 随落库的行使劲涨
+        when(rs.getInt(1)).thenAnswer(inv -> written.stream()
+            .mapToInt(w -> Integer.parseInt(w.substring(w.indexOf(':') + 1)))
+            .max().orElse(9));
+        when(conn.prepareStatement(startsWith("INSERT INTO session_event"))).thenReturn(insertPs);
+        doAnswer(inv -> {
+            sidByIndex.put(inv.getArgument(0), inv.getArgument(1));
+            return null;
+        }).when(insertPs).setString(anyInt(), any());
+        doAnswer(inv -> {
+            int seqIdx = inv.getArgument(0);
+            batch.add(sidByIndex.get(seqIdx - 1) + ":" + inv.getArgument(1));
+            return null;
+        }).when(insertPs).setInt(anyInt(), anyInt());
+        doAnswer(inv -> {                                 // 成功才落库，模拟 MySQL 的真实可见性
+            written.addAll(batch);
+            batch.clear();
+            return 1;
+        }).when(insertPs).executeUpdate();
+
+        store.seedSeq("sid-r");
+        store.append("sid-r", "r", "THINKING_BLOCK_START", "{}");    // 10，里程碑 → 落库
+        store.releaseSeq("sid-r");                                    // 计数器没了
+        store.append("sid-r", "r", "TEXT_BLOCK_DELTA", "{}");         // 尾部事件：惰性重新播种
+        store.append("sid-r", "r", "TEXT_BLOCK_DELTA", "{}");
+        store.finishTurn("sid-r");
+
+        assertEquals(List.of("sid-r:10", "sid-r:11", "sid-r:12"), written,
+            "计数器释放后的尾部事件同样必须递增，不能撞回已经落库的 seq");
+    }
+
+    @Test
+    void stragglerAppendDuringFinalFlushIsNotRenumbered() throws Exception {
+        // 与上面两条不同的另一条通向「同一 session 内重号」的路，不需要第二个 writer：
+        //
+        //   finishTurn:  synchronized { 摘除缓冲 }  →  insertBatch(...)  →  releaseSeq(...)
+        //                                               ↑ INSERT 往返期间到达的尾部事件
+        //
+        // 临界区只包住摘除，INSERT 与 releaseSeq 都在锁外。于是尾部事件从**尚未释放**的计数器
+        // 拿到 seq（正确，且大于正在落库的那批），落进一个新缓冲；紧接着 releaseSeq 删掉计数器，
+        // 下一次 append 惰性播种改从 SELECT MAX 发号——而 MAX 看不见那个刚缓冲、尚未落库的行
+        // → 重号 → 下次刷出时整批撞 uk_session_seq。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+
+        var written = java.util.Collections.synchronizedList(new ArrayList<String>());
+        var batch = new ArrayList<String>();
+        var sidByIndex = new HashMap<Integer, String>();
+        when(rs.getInt(1)).thenAnswer(inv -> {
+            synchronized (written) {                       // MAX 只能看到**已落库**的行
+                return written.stream()
+                    .mapToInt(w -> Integer.parseInt(w.substring(w.indexOf(':') + 1)))
+                    .max().orElse(9);
+            }
+        });
+        when(conn.prepareStatement(startsWith("INSERT INTO session_event"))).thenReturn(insertPs);
+        doAnswer(inv -> {
+            sidByIndex.put(inv.getArgument(0), inv.getArgument(1));
+            return null;
+        }).when(insertPs).setString(anyInt(), any());
+        doAnswer(inv -> {
+            int seqIdx = inv.getArgument(0);
+            batch.add(sidByIndex.get(seqIdx - 1) + ":" + inv.getArgument(1));
+            return null;
+        }).when(insertPs).setInt(anyInt(), anyInt());
+
+        var firstInsert = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var insertStarted = new java.util.concurrent.CountDownLatch(1);
+        var unblockInsert = new java.util.concurrent.CountDownLatch(1);
+        doAnswer(inv -> {
+            if (firstInsert.compareAndSet(true, false)) {
+                insertStarted.countDown();                 // 把 INSERT 卡在「已开始、未提交」
+                unblockInsert.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            synchronized (written) {
+                written.addAll(batch);
+            }
+            batch.clear();
+            return 1;
+        }).when(insertPs).executeUpdate();
+
+        store.seedSeq("sid-s");
+        store.append("sid-s", "r", "TEXT_BLOCK_DELTA", "{}");          // 10，进缓冲
+
+        var finisher = new Thread(() -> store.finishTurn("sid-s"));
+        finisher.start();
+        assertTrue(insertStarted.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            "测试自身的同步失败：finishTurn 没走到 INSERT");
+
+        store.append("sid-s", "r", "TEXT_BLOCK_DELTA", "{}");          // 11：INSERT 期间的尾部事件
+        unblockInsert.countDown();
+        finisher.join(5000);
+        assertFalse(finisher.isAlive(), "测试自身的同步失败：finishTurn 未结束");
+
+        store.append("sid-s", "r", "TEXT_BLOCK_DELTA", "{}");          // 必须接在 11 之后
+        store.finishTurn("sid-s");
+
+        assertEquals(List.of("sid-s:10", "sid-s:11", "sid-s:12"), written,
+            "尾部事件的 seq 不能被重新发号：它在缓冲里，而 MAX 看不见缓冲");
+    }
+
+    @Test
     void appendReturnsSeqOnSuccess() throws Exception {
         // 用里程碑事件（非 delta）——delta 现在只进缓冲、不落库，见 deltasAreBufferedUntilMilestone
         // Mock: SELECT MAX → 5, INSERT ok

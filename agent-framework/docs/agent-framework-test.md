@@ -208,6 +208,22 @@ class AgentFrameworkApplicationTests {
 | HttpTracingFilterTest | 3 | HTTP 入口 span |
 | TraceIdConverterTest | 2 | traceId → MDC |
 
+### 4.15 seq 分配回归测试（2026-09-16，线上事故回填）
+
+来自一次真实的线上报错：`唯一键冲突——session debug-user_mu3ydga6 本批 200 行（seq 5153..5153）已整批丢弃`。
+**首尾 seq 相同**说明不是「第二个 writer」，而是同一个副本把整批算成了同一个 seq。
+
+| 测试 | 钉住的性质 |
+|------|-----------|
+| `SessionEventStoreTest#unseededAppendsMustStillAdvanceSeq` | 没有 seq 计数器时（`beginTurn` 未跑）逐行 append 必须递增，不能全撞同一个 seq |
+| `SessionEventStoreTest#appendsAfterReleaseSeqAlsoAdvance` | 计数器释放后的尾部事件要接得上已落库的 seq，不能撞回去 |
+| `SessionEventStoreTest#stragglerAppendDuringFinalFlushIsNotRenumbered` | `finishTurn` 的 INSERT 往返期间到达的尾部事件，seq 不得被下一次播种重新发号 |
+| `SessionEventStoreTest#duplicateKeyCollisionIsReportedAsSecondWriter` | 真冲突仍要记为「第二个 writer」（日志同时打出判据：批内不同 seq 数） |
+
+> 写这类测试时的一个教训：**`SELECT MAX` 的桩必须跟着 INSERT 走**（写进去的行要能被下一次
+> `MAX` 读到）。用固定值的桩会造出一个「MAX 永远停在旧值」的假世界——第一版
+> `appendsAfterReleaseSeqAlsoAdvance` 正是因此测出了与实际语义无关的失败。
+
 ---
 
 ## 5. 手动验证
@@ -287,7 +303,7 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-09-16 更新：**640 个 @Test 用例、84 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
+> 2026-09-16 更新：**643 个 @Test 用例、84 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
 
 | 类别 | 数量 | 状态 |
 |------|------|------|

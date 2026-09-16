@@ -173,6 +173,26 @@ Expected: 编译失败 —— `cannot find symbol: method seedSeq(java.lang.Stri
     }
 ```
 
+> **修正（2026-09-16）：上面这个版本**不要照抄**——它与攒批（本文件 Task 2）合在一起是错的。**
+> 缓冲里尚未落库的行对 `MAX(seq)` 不可见，于是**没有计数器的 session 的每一行都拿到同一个
+> seq**，攒够一批就在多值 INSERT 里自我冲突：线上实测 `本批 200 行（seq 5153..5153）已整批
+> 丢弃`。批量落库之前这条退回路径恰好只对第一行成立（每次 append 立即 INSERT，MAX 看得见
+> 上一行），所以它是 Task 2 引入、Task 5 的唯一键把它从静默重复行变成响亮失败的。
+> 实际实现改为**惰性播种**——计数器不存在就从 `MAX` 播种一次，之后仍走内存计数器：
+>
+> ```java
+> private int nextSeq(String sessionId) {
+>     return counterFor(sessionId).incrementAndGet();   // counterFor = computeIfAbsent(种 MAX)
+> }
+> ```
+>
+> 配套地，`finishTurn` / `abandonTurn` 收尾时改调 `releaseSeqIfIdle`：**该 session 还有缓冲就
+> 不释放计数器**。否则 flush 的 INSERT 往返期间到达的尾部事件（它从尚未释放的计数器拿到 seq，
+> 落进新缓冲）会被下一次从 `MAX` 起的重新发号撞上；重号还有第二种代价——起点可能低于客户端
+> 已消费的游标，那些事件在 `seq > cursor` 的回放里被永久跳过。
+> 回归测试见 `SessionEventStoreTest#unseededAppendsMustStillAdvanceSeq`、
+> `#appendsAfterReleaseSeqAlsoAdvance`、`#stragglerAppendDuringFinalFlushIsNotRenumbered`。
+
 将 `append` 方法体中的 seq 分配段替换：
 
 ```java

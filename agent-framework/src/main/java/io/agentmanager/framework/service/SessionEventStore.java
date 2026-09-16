@@ -239,25 +239,66 @@ public class SessionEventStore {
      * （缓冲区中尚未落库的行会因此被覆盖）。
      */
     public void seedSeq(String sessionId) {
-        seqCounters.computeIfAbsent(sessionId, sid -> {
+        counterFor(sessionId);
+    }
+
+    /**
+     * 释放 seq 计数器（底层原语，仅供 {@link #releaseSeqIfIdle} 与测试使用）。
+     *
+     * <p><b>收尾不要直接调它</b>：无条件释放会让缓冲里尚未落库的行所占的 seq 被下一次惰性
+     * 播种重新发出去（见 {@link #releaseSeqIfIdle} 的 javadoc）。保留 public 是为了让测试
+     * 能直接构造「计数器已释放」这一状态。
+     */
+    public void releaseSeq(String sessionId) {
+        seqCounters.remove(sessionId);
+    }
+
+    /**
+     * 收尾时释放 seq 计数器——**仅当该 session 没有待落库的行**。
+     *
+     * <p>释放必须**晚于** flush，否则惰性播种读到的 {@code MAX} 还差着刚落库的那批；但 flush
+     * 是一次 INSERT 往返，而它不在 {@code pending} 临界区内：这段时间里到达的尾部事件会从
+     * **尚未释放**的计数器拿到 seq（正确，且大于正在落库的那批），并落进一个新缓冲。此时若
+     * 无条件释放，下一次 append 就改从 {@code MAX} 重新发号，而 {@code MAX} 看不见那行——于是
+     * 同一个 seq 被发两次，整批撞 {@code uk_session_seq}。
+     *
+     * <p>重号还有第二种代价，更隐蔽：重新发号的起点可能**低于客户端已消费的游标**，
+     * 那些事件在 {@code seq > cursor} 的回放里会被永久跳过。所以宁可让计数器多活一会儿
+     * （由清扫兜底，见遗留 #12），也不要重号。
+     */
+    private void releaseSeqIfIdle(String sessionId) {
+        synchronized (pending) {
+            if (pending.containsKey(sessionId)) {
+                log.debug("SessionEventStore: seq counter kept for {} — 仍有待落库的行", sessionId);
+                return;
+            }
+            releaseSeq(sessionId);
+        }
+    }
+
+    /** 取该 session 的计数器，不存在则**惰性播种**自 DB 的最大 seq。幂等。 */
+    private AtomicInteger counterFor(String sessionId) {
+        return seqCounters.computeIfAbsent(sessionId, sid -> {
             int max = findMaxSeq(sid);
             log.debug("SessionEventStore: seeded seq counter for {} at {}", sid, max);
             return new AtomicInteger(max);
         });
     }
 
-    /** 释放 seq 计数器（turn 结束时调用，防止 map 无界增长） */
-    public void releaseSeq(String sessionId) {
-        seqCounters.remove(sessionId);
-    }
-
-    /** 取下一个 seq：已播种走内存计数器，未播种退回 DB 查询 */
+    /**
+     * 取下一个 seq：**一律**走内存计数器，计数器不存在时在其上惰性播种。
+     *
+     * <p>这里不能退化成「每次 append 查一次 {@code MAX(seq) + 1}」：缓冲区里尚未落库的行对
+     * {@code MAX} 是**不可见**的，于是同一个未播种 session 的后续每一行都会拿到同一个 seq，
+     * 攒够一批就在多值 INSERT 里自我冲突——
+     * {@code Duplicate entry ... for key 'uk_session_seq'}，整批被丢弃。
+     *
+     * <p>攒批落库之前这条退回路径恰好只对**第一行**成立（每次 append 立即 INSERT，MAX 看得见
+     * 上一行），所以引入缓冲之后它就从「略慢」变成了「整批失败」。触发条件不是租约丢失，
+     * 而是**计数器缺失**：{@code beginTurn} 未跑，或 {@code releaseSeq} 之后流仍在产出尾部事件。
+     */
     private int nextSeq(String sessionId) {
-        var counter = seqCounters.get(sessionId);
-        if (counter != null) {
-            return counter.incrementAndGet();
-        }
-        return findMaxSeq(sessionId) + 1;
+        return counterFor(sessionId).incrementAndGet();
     }
 
     /**
@@ -275,8 +316,8 @@ public class SessionEventStore {
      * 计数器，回退会直接造成 seq 冲突。空洞不影响续传——回放按 {@code seq > cursor}
      * 读取，不依赖连续性。分区的价值在于：这次丢弃**只波及本 session**。
      *
-     * <p>注意：本方法不在持有连接的情况下调用 {@link #nextSeq(String)}，未播种路径
-     * 上的 {@link #findMaxSeq(String)} 会各自借用连接，不会同时占用两条连接。
+     * <p>注意：本方法不在持有连接的情况下调用 {@link #nextSeq(String)}，其惰性播种路径上的
+     * {@link #findMaxSeq(String)} 会自行借用连接，不会同时占用两条连接。
      *
      * @return 分配的 seq（从 1 开始递增）；-1 表示落库失败
      */
@@ -323,7 +364,7 @@ public class SessionEventStore {
             }
         }
         insertBatch(toFlush);
-        releaseSeq(sessionId);
+        releaseSeqIfIdle(sessionId);
     }
 
     /**
@@ -344,7 +385,9 @@ public class SessionEventStore {
                 dropped = buf.rows.size();
             }
         }
-        releaseSeq(sessionId);
+        // 丢弃窗口内到达的尾部事件同样要按「有缓冲就不放号」处理：丢弃让计数器停在了
+        // MAX 之上，重新发号会从 MAX 起重来，可能低于客户端已消费的游标
+        releaseSeqIfIdle(sessionId);
         if (dropped > 0) {
             log.warn("SessionEventStore: turn abandoned (lease lost, sid={}) — "
                 + "dropped {} buffered row(s) without writing", sessionId, dropped);
@@ -376,14 +419,21 @@ public class SessionEventStore {
             }
             return ps.executeUpdate();
         } catch (java.sql.SQLIntegrityConstraintViolationException e) {
-            // 撞 uk_session_seq：同一 session 上出现了第二个 writer——I2 被打破。
-            // 这是**最该响亮**的一种失败：租约没能串行化写入，seq 区间已经重叠。
-            // 单独一条日志是为了让它区别于「DB 抖动」那种可自愈的失败。
-            log.error("SessionEventStore: 唯一键冲突——session {} 上存在第二个 writer（I2 被违反）。"
-                + "本批 {} 行（seq {}..{}）已整批丢弃，未落库。"
-                + "这通常意味着某副本丢失 turn_lease 后仍继续写入；请核对 turn 租约与副本时钟。",
+            // 撞 uk_session_seq：本批的 (session_id, seq) 与库中已落库的行冲突。这是**最该响亮**
+            // 的一种失败，单独一条日志是为了区别于「DB 抖动」那种可自愈的失败。
+            //
+            // 日志把判据（批内不同 seq 数）一并打出来，而不是只给一个结论：曾经这里无条件宣告
+            // 「第二个 writer」，而实际撞上的是「批内 seq 全同」——那是本 Pod 计数器缺失导致的
+            // 自我冲突，与租约无关，按前者去查租约只会把排查带偏。先给证据，再给假设。
+            long distinct = rows.stream().mapToInt(PendingRow::seq).distinct().count();
+            log.error("SessionEventStore: 唯一键冲突——session {} 本批 {} 行（seq {}..{}，批内不同 seq 数 {}）"
+                + "已整批丢弃，未落库。seq 区间与库中已落库的行重叠，通常意味着某副本丢失 turn_lease "
+                + "后仍继续写入（I2 被违反）；请核对 turn 租约与副本时钟。"
+                + "若「批内不同 seq 数」为 1 且行数 > 1，则不是第二个 writer——是本 Pod 的 seq 计数器与"
+                + "缓冲不同步（beginTurn/seedSeq 未在该 session 上执行，或收尾与尾部事件并发），"
+                + "整批撞在了同一个 seq 上。",
                 rows.get(0).sessionId(), rows.size(),
-                rows.get(0).seq(), rows.get(rows.size() - 1).seq(), e);
+                rows.get(0).seq(), rows.get(rows.size() - 1).seq(), distinct, e);
             return -1;
         } catch (Exception e) {
             log.error("SessionEventStore: batch insert failed ({} rows, first session={}): {}",
