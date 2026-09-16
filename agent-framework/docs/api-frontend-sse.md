@@ -1439,7 +1439,7 @@ SSE 事件持久化，支持断连续传回放。
 | `payload` | MEDIUMTEXT | 完整事件 JSON |
 | `created_at` | DATETIME(3) | 创建时间 |
 
-**索引:** `idx_session_seq (session_id, seq)`，**保留期:** 与 agent_state 对齐（默认 7 天）
+**索引:** `UNIQUE KEY uk_session_seq (session_id, seq)`（同前缀的唯一键，覆盖原 `idx_session_seq` 的全部查询用途；唯一性是 I2「单 writer」的 DB 层兜底，见 durable-sse-multinode-impl-plan §遗留事项），**保留期:** 与 agent_state 对齐（默认 7 天）
 
 ### tool_audit_log
 

@@ -169,6 +169,13 @@ UPDATE turn_lease SET expires_at = NOW(3)+60s WHERE session_id=? AND token=?
 → affected=0 说明租约已被接管/释放 → 停止续租（优雅退出信号）
 ```
 
+> **修正（2026-09-16）：** 只有 `affected=0`（确已被接管/释放）才该停续租。**瞬时故障**
+> （`catch (Exception)`，如连接池抖动）必须区分开并继续重试——早期实现把两者都当成接管、
+> 每次失败都 `shutdownNow()`，于是**一次 DB 抖动就永久停掉本 turn 的续租**，TTL 过后另一个
+> 副本接管，而本副本仍在执行、仍在写，两侧 seq 区间重叠。现在 `renew` 返回三态
+> `HELD/LOST/ERROR`，判丢锁另由 `TurnLeaseGuard.isLost()` 按时间求值。详见
+> durable-sse-multinode-impl-plan §遗留事项（C1 加固）。
+
 **释放 release(sessionId, token)**（token 校验防误删他人锁）
 ```
 DELETE FROM turn_lease WHERE session_id=? AND token=?

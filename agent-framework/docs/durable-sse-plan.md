@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS session_event (
   payload     MEDIUMTEXT NOT NULL,                -- AgentEventSseSerializer.payload() 输出
   reply_id    VARCHAR(64),                        -- 区分多 run（HITL 恢复等）
   created_at  DATETIME(3) NOT NULL,
-  KEY idx_session_seq (session_id, seq),
+  UNIQUE KEY uk_session_seq (session_id, seq),    -- 唯一：同 session 的 seq 不允许重复（2026-09-16 由普通索引改为唯一键，见 durable-sse-multinode-impl-plan §遗留事项）
   KEY idx_session_reply (session_id, reply_id, seq),
   KEY idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4

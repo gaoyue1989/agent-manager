@@ -95,7 +95,7 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 ChatStreamControllerTest (16 个用例)
+### 4.4 ChatStreamControllerTest (20 个用例)
 
 - `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
 - sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
@@ -158,17 +158,23 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| ChatStreamControllerTest | 16 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 |
+| ChatStreamControllerTest | 20 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 / 丢租约即停写 / 准备段与租约启动失败的回滚 |
 | SessionStreamControllerTest | 7 | subscribe 回放+done / status 四态 / ui 元数据序列化 |
 
 ### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）
 
 | 测试类 | 用例数 | 覆盖点 |
 |--------|--------|--------|
-| TurnLeaseStoreTest | 8 | acquire 成功 / PK 冲突排队 / 过期接管 / renew 续租 / renew 失败自停 / release 释放 / 并发 acquire 竞争 |
-| ConfirmContextStoreTest | 10 | put 覆盖写 / consume CAS 成功 / consume 已消费 409 / consume 不存在 404 / TTL 过期 / 查询 pendingConfirm / 前缀兼容查询 / 清理过期条目 |
-| ToolAuditStoreTest | 6 | 异步批量写入 / 单条写入 / 过期清理 / 批量合并 / 写入失败静默降级 / 查询审计日志 |
-| ConfirmControllerTest | 5 | 同步确认 / confirm-stream / 404 与 409 语义 |
+| TurnLeaseStoreTest | 5 | renew 三态（更新到 1 行 → HELD / 0 行 → LOST / SQLException → ERROR） / ttl() 暴露给 guard 做「到必须停手」的判据 |
+| TurnLeaseGuardTest | 11 | 瞬时故障继续重试而不停续租 / 故障持续超过判据才判丢锁 / 续租线程卡死时写入侧仍能按时间判丢锁 / 在接管可能之前就停手（判据是 ttl−interval 而非 ttl） / 主动 release 不算丢锁 / 丢锁通知闸门只开一次 / 已确认丢锁不被后续成功续租翻回 / 丢锁后不再碰租约 |
+| ConfirmControllerTest | 6 | 同步确认 / confirm-stream / 404 与 409 语义 / 丢租约即停写 |
+
+> **修正（2026-09-16）：** 上表原先还列了 `ConfirmContextStoreTest`（10 用例）与
+> `ToolAuditStoreTest`（6 用例）——**这两个类都从未存在过**，用例数也是凭空写的；
+> `TurnLeaseStoreTest` 原写 8 个用例，实际为 5 个（该类的其余行为由 `TurnLeaseGuardTest`
+> 从消费侧覆盖）。`ConfirmContextStore` 与 `ToolAuditStore` 目前**没有独立测试类**，
+> 只经由 `ConfirmControllerTest` / `AgentRuntimeServiceHitlTest` 间接覆盖。补类时请同时
+> 更新本表——本表此前正是因为「先写文档、后没建类」而失真。
 
 ### 4.12 文件上传下载测试（file-upload-download，2026-09-07 新增）
 
@@ -281,7 +287,7 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-09-07 更新：**456 个 @Test 用例、61 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
+> 2026-09-16 更新：**640 个 @Test 用例、84 个测试类**（默认跳过沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例与真实 S3 集成 `S3FileStorageIT`，需对应环境变量启用）。
 
 | 类别 | 数量 | 状态 |
 |------|------|------|
@@ -291,8 +297,8 @@ src/test/resources/fixtures/test-agent/
 | DebugApiControllerTest | 15 | ✅ |
 | ThreadControllerTest（含 history 文件下载卡片） | 12 | ✅ |
 | FileControllerTest / FileToolsTest / FileAssetStoreTest | 31 | ✅ |
-| ChatStreamControllerTest / SessionStreamControllerTest | 23 | ✅ |
-| TurnLeaseStoreTest / ConfirmContextStoreTest / ToolAuditStoreTest | 24 | ✅ |
+| ChatStreamControllerTest / SessionStreamControllerTest | 27 | ✅ |
+| TurnLeaseStoreTest / TurnLeaseGuardTest | 16 | ✅ |
 | OpenSandbox 单测（SandboxConfig/State/Client/Reader 等） | 44 | ✅ |
 | 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 32 | ✅ |
 | 其余（tool/config/service/controller/storage） | 约 195 | ✅ |

@@ -323,7 +323,7 @@ Pod 死亡后 lease 停止续约（TTL 60s，`TurnLeaseStore.java:34`），60s �
 | R3 | 多值 INSERT 受 `max_allowed_packet` 限制 | 低 | 落库失败 | 批量上限按 payload 估算并留足余量；上限可配置；失败时降级为逐条 |
 | R4 | **阶段 3 完成前开启 replicas>1** | 高 | F1/F2 直接触发（悬挂至凌晨 3 点） | **阶段 1+2 完成不代表可开多副本**；必须等阶段 3；发布流程中显式注明 |
 | R5 | 阶段 3 上线后前端未实现重连 | 高 | 改动无消费方，收益不可见 | 阶段 3 与前端排期对齐；服务端可先用集成测试验证 |
-| R6 | 游标轮询增加 DB 读负载 | 低 | — | 仅重连路径触发；~3.8 qps/观察者（参照 §附录）；稳态查询返回 0 行、走 `idx_session_seq` 亚毫秒 |
+| R6 | 游标轮询增加 DB 读负载 | 低 | — | 仅重连路径触发；~3.8 qps/观察者（参照 §附录）；稳态查询返回 0 行、走 `uk_session_seq` 亚毫秒 |
 | R7 | `interrupted` 判据误伤合法长 turn | 中 | 正常任务被标记中断 | 判据含 `findPendingConfirm` 分支；lease TTL 60s + 续约 20s 留有充足余量 |
 
 ---
@@ -391,7 +391,7 @@ Pod 死亡后 lease 停止续约（TTL 60s，`TurnLeaseStore.java:34`），60s �
 
 ### A.2 读侧（本文新增）
 
-每个重连观察者：事件查询 300ms → 3.3 qps；空闲时 lease 检查 ~2s → 0.5 qps；合计 **~3.8 qps**。查询走 `idx_session_seq (session_id, seq)`（前缀匹配 + seq 范围，索引序天然满足 `ORDER BY seq`），稳态返回 0 行，亚毫秒。
+每个重连观察者：事件查询 300ms → 3.3 qps；空闲时 lease 检查 ~2s → 0.5 qps；合计 **~3.8 qps**。查询走 `uk_session_seq (session_id, seq)`（2026-09-16 由普通索引改为唯一键，前缀相同故访问路径不变；前缀匹配 + seq 范围，索引序天然满足 `ORDER BY seq`），稳态返回 0 行，亚毫秒。
 
 100 个并发重连观察者 ≈ 380 qps，对比同规模写侧（100 活跃会话 ≈ 5000 语句/秒）为 **~8%**。
 
