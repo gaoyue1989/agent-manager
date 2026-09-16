@@ -205,8 +205,8 @@ public class SessionEventBus {
     /**
      * 租约丢失时的会话收尾：**丢弃**未落库的缓冲 + 释放 seq 计数器 + 收流。
      *
-     * <p>不能复用 {@link #closeSession}：后者走 {@code finishTurn → flushPending}，会把缓冲里
-     * 那些按「本副本仍持锁」分配的 seq 写下去——那正是丢租约要防的事。
+     * <p>不能复用 {@link #closeSession}：后者走 {@code finishTurn}（刷出该 session 的缓冲），
+     * 会把缓冲里那些按「本副本仍持锁」分配的 seq 写下去——那正是丢租约要防的事。
      *
      * <p>sink 关掉是为了让连着的订阅者正常收到 onComplete 结束这次流。turn 本身在被接管的
      * 副本上继续，用户重连后由观察者路径接手新 owner 的输出。

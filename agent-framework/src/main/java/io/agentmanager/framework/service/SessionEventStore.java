@@ -69,10 +69,23 @@ public class SessionEventStore {
      */
     private final ConcurrentHashMap<String, AtomicInteger> seqCounters = new ConcurrentHashMap<>();
 
-    /** 待落库的行（delta 缓冲）；访问一律持 pending 监视器 */
-    private final List<PendingRow> pending = new ArrayList<>();
+    /** 一个 session 的待落库缓冲 */
+    private static final class Buffer {
+        final List<PendingRow> rows = new ArrayList<>();
+        long lastFlushAt = System.currentTimeMillis();
+    }
 
-    private long lastFlushAt = System.currentTimeMillis();
+    /**
+     * session_id → 待落库缓冲；访问一律持 {@code pending} 监视器。
+     *
+     * <p><b>按 session 分区</b>，而不是一条全局 FIFO。原因是 InnoDB 按**语句**回滚：
+     * 只有「一条 INSERT 只装一个 session 的行」，seq 冲突（uk_session_seq）的影响面才
+     * 止于肇事 session。全局缓冲下一批混着多个 session，一条冲突会连带丢掉邻居的行
+     * ——那是把「静默重复」换成「静默丢失 + 殃及邻居」，更糟。
+     *
+     * <p>分区同时让 {@code finishTurn(A)} 只刷 A 的行，不再顺带刷出（或丢掉）其他 session 的行。
+     */
+    private final Map<String, Buffer> pending = new LinkedHashMap<>();
 
     /** 攒批缓冲中的一行（尚未落库） */
     private record PendingRow(String sessionId, int seq, String replyId,
@@ -158,9 +171,9 @@ public class SessionEventStore {
      *
      * <p>已知偏差：某批 INSERT 失败时该批的行被整体丢弃，且 seq 计数器**不回退**，
      * 随后成功的批次会从更高的 seq 继续，DB 中因此留下空洞（1,2,3 成功 → 4,5 失败 →
-     * 下一批 6,7，落库序列 [1,2,3,6,7]）。不回退是有意的：同一批里还混着其他 session
-     * 的行，且可能有并发 append 已推进计数器，回退会直接造成 seq 冲突。空洞不影响续传
-     * ——回放按 {@code seq > cursor} 读取，不依赖连续性。
+     * 下一批 6,7，落库序列 [1,2,3,6,7]）。不回退是有意的：可能有并发 append 已推进
+     * 计数器，回退会直接造成 seq 冲突。空洞不影响续传——回放按 {@code seq > cursor}
+     * 读取，不依赖连续性。分区的价值在于：这次丢弃**只波及本 session**。
      *
      * <p>注意：本方法不在持有连接的情况下调用 {@link #nextSeq(String)}，未播种路径
      * 上的 {@link #findMaxSeq(String)} 会各自借用连接，不会同时占用两条连接。
@@ -173,15 +186,18 @@ public class SessionEventStore {
 
         List<PendingRow> toFlush = null;
         synchronized (pending) {
-            pending.add(row);
+            var buf = pending.computeIfAbsent(sessionId, k -> new Buffer());
+            buf.rows.add(row);
             long now = System.currentTimeMillis();
             boolean milestone = !DELTA_EVENT_TYPES.contains(eventType);
-            boolean full = pending.size() >= batchSize;
-            boolean timedOut = now - lastFlushAt >= flushIntervalMs;
+            // 三个条件都只按**本 session** 的行数/时间窗评估：别的 session 攒了多少与
+            // 本 session 的回放滞后无关，不该由它触发刷出
+            boolean full = buf.rows.size() >= batchSize;
+            boolean timedOut = now - buf.lastFlushAt >= flushIntervalMs;
             if (milestone || full || timedOut) {
-                toFlush = new ArrayList<>(pending);
-                pending.clear();
-                lastFlushAt = now;
+                toFlush = new ArrayList<>(buf.rows);
+                buf.rows.clear();
+                buf.lastFlushAt = now;
             }
         }
 
@@ -192,11 +208,21 @@ public class SessionEventStore {
     }
 
     /**
-     * turn 结束：把缓冲刷出并释放 seq 计数器。
+     * turn 结束：把**本 session** 的缓冲刷出并释放 seq 计数器。
      * 必须由 turn 的终态路径调用，否则尾部 delta 会一直留在内存中直到下一个 turn。
+     *
+     * <p>只刷本 session：其他 session 的缓冲要么属于别的 turn（由它自己的终态路径收），
+     * 要么属于尚未开始的 turn——都不该被这里的 flush 捎带改变落库时机。
      */
     public void finishTurn(String sessionId) {
-        flushPending();
+        List<PendingRow> toFlush = List.of();
+        synchronized (pending) {
+            var buf = pending.remove(sessionId);
+            if (buf != null && !buf.rows.isEmpty()) {
+                toFlush = new ArrayList<>(buf.rows);
+            }
+        }
+        insertBatch(toFlush);
         releaseSeq(sessionId);
     }
 
@@ -211,39 +237,18 @@ public class SessionEventStore {
      * turn 的序号空间——被接管的副本会把完整内容重新产出。
      */
     public void abandonTurn(String sessionId) {
-        int dropped = discardPending(sessionId);
+        int dropped = 0;
+        synchronized (pending) {
+            var buf = pending.remove(sessionId);
+            if (buf != null) {
+                dropped = buf.rows.size();
+            }
+        }
         releaseSeq(sessionId);
         if (dropped > 0) {
             log.warn("SessionEventStore: turn abandoned (lease lost, sid={}) — "
                 + "dropped {} buffered row(s) without writing", sessionId, dropped);
         }
-    }
-
-    /** 丢弃某 session 的待落库行，返回丢弃行数（**不**落库） */
-    private int discardPending(String sessionId) {
-        int dropped = 0;
-        synchronized (pending) {
-            var it = pending.iterator();
-            while (it.hasNext()) {
-                if (sessionId.equals(it.next().sessionId())) {
-                    it.remove();
-                    dropped++;
-                }
-            }
-        }
-        return dropped;
-    }
-
-    /** 刷出缓冲中所有待落库的行 */
-    public void flushPending() {
-        List<PendingRow> toFlush;
-        synchronized (pending) {
-            if (pending.isEmpty()) return;
-            toFlush = new ArrayList<>(pending);
-            pending.clear();
-            lastFlushAt = System.currentTimeMillis();
-        }
-        insertBatch(toFlush);
     }
 
     /**

@@ -2,6 +2,8 @@ package io.agentmanager.framework.service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -64,6 +66,10 @@ class SessionEventStoreTest {
     void abandonTurnDiscardsBufferedRowsWithoutFlushing() throws Exception {
         // 丢租约的收尾**不能**刷缓冲：缓冲里那些行的 seq 是本副本「以为自己还持锁」时
         // 分配的，此刻新 owner 可能已在同一区间分配过 seq —— 写下去正是 C1 要防的静默重复行。
+        //
+        // 光验证「abandonTurn 自己不 flush」是不够的：源流不会因为我们放手就停下，被丢弃的
+        // 行若只是从缓冲里"标记"掉而没删掉，下一个事件触发的 flush 会把它们一起写出去，
+        // 丢弃就成了摆设。所以这里一直观察到下一次 flush 真正落库的内容。
         var conn = mock(java.sql.Connection.class);
         var selectPs = mock(java.sql.PreparedStatement.class);
         var insertPs = mock(java.sql.PreparedStatement.class);
@@ -76,17 +82,42 @@ class SessionEventStoreTest {
         when(conn.prepareStatement(contains("INSERT INTO session_event"))).thenReturn(insertPs);
         when(insertPs.executeUpdate()).thenReturn(1);
 
+        // 记录真正落到 INSERT 语句上的 (sid, seq)
+        var written = new ArrayList<String>();
+        var sidByIndex = new HashMap<Integer, String>();
+        doAnswer(inv -> {
+            sidByIndex.put(inv.getArgument(0), inv.getArgument(1));
+            return null;
+        }).when(insertPs).setString(anyInt(), any());
+        doAnswer(inv -> {
+            int seqIdx = inv.getArgument(0);
+            written.add(sidByIndex.get(seqIdx - 1) + ":" + inv.getArgument(1));
+            return null;
+        }).when(insertPs).setInt(anyInt(), anyInt());
+
+        store.seedSeq("sid-ab");
+        store.seedSeq("sid-other");
+        store.append("sid-ab", "rid-1", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
         store.append("sid-ab", "rid-1", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
         // 另一个 session 的行也在缓冲里：A 的收尾**不得**把它顺带刷出去
         // （这正是「abandonTurn 不是 finishTurn」的可观测差别）
         store.append("sid-other", "rid-2", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
-        store.append("sid-ab", "rid-1", "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}");
 
         store.abandonTurn("sid-ab");
 
         verify(insertPs, never()).executeUpdate();
+
+        // 丢弃之后本 session 又来了一个里程碑事件（源流不会因为我们放手就停下）→ 触发 flush
         assertEquals(1, store.append("sid-ab", "rid-1", "AGENT_END", "{}"),
             "计数器已释放 → 下一次 append 重新播种（DB 最大值 0 + 1）");
+        assertEquals(List.of("sid-ab:1"), written,
+            "只有丢弃后新增的那一行该落库；被丢弃的两行不得在后续 flush 里复活，"
+                + "邻居 sid-other 的行也不得被顺带刷出");
+
+        // 邻居的缓冲未受影响，仍由它自己的收尾正常刷出
+        store.finishTurn("sid-other");
+        assertEquals(List.of("sid-ab:1", "sid-other:1"), written,
+            "sid-other 的行一直留在自己的缓冲里，未被丢弃、也未提前落库");
     }
 
     @Test
