@@ -87,13 +87,20 @@ spec:
   selector: { app: oaf-mysql }
   ports: [{ port: 3306, targetPort: 3306 }]
 ---
-# Redis：session_event 事件流存储（Streams，见 durable-sse-multinode-impl-plan.md）
+# Redis：session_event 事件流存储（Streams，见 docs/api-frontend-sse.md §12）
 #
 # 内存规格怎么来的（**待真实流量复核，勿直接照搬到生产规模**）：
-#   每事件 ≈ 332 B（实测载荷均值 170 B + stream ID/字段名/listpack 开销）
+#   每事件实测 ≈ 257 B。测法：按应用真实写入格式（字段 t/r/p、MAXLEN ~）灌 20,000 条
+#   载荷 170 B 的条目，取 used_memory 增量 ÷ 条数；环境 redis 8.6.2、listpack 编码。
+#   但规划仍按 ≈ 332 B 计，多留 28% 余量，理由是三条都指向「低估更危险」：
+#     ① 实测在 8.6.2 上，而本清单固定的是 7.2-alpine，编码开销未必一致；
+#     ② 生产 payload 分布不一定等同测试负载；
+#     ③ noeviction 下估小的代价不是多占内存，而是**写入直接报错、回放缺段**。
 #          × 1.15 安全系数 ≈ 0.38 KB
 #   limit ≈ min(TTL 窗口内事件数, maxLenPerStream × 活跃 session 数) × 0.38 KB + 32 MB 基线
-#   实测锚点：4 个测试 session / 5 小时 = 265,014 条 ≈ 101 MB；最重一小时 223,885 条 ≈ 85 MB
+#   锚点事件数（实测）：4 个测试 session / 5 小时 = 265,014 条；最重一小时 223,885 条。
+#   按 0.38 KB/条外推 ≈ 101 MB / ≈ 85 MB —— 那是**估算值**；若按实测的 257 B/条则是
+#   ≈ 65 MiB / ≈ 55 MiB，两者之差就是上面那 28% 余量，属预期。
 # 注意实测样本是**测试负载**，不是生产流量：先按 1gb 跑、盯 INFO memory，并发上来后重算。
 #   limits 给到 maxmemory 的 1.5 倍，是因为 AOF rewrite 会 fork，写时复制可能瞬时接近 2 倍；
 #   卡在 1gb 会让 Pod 被 cgroup OOM-kill（硬杀）而不是让 Redis 优雅报错。
