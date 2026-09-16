@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionEventTailer;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import reactor.core.publisher.Flux;
 
@@ -52,7 +53,10 @@ class SessionStreamControllerTest {
         when(eventStore.queryAfter(anyString(), anyString(), anyInt())).thenReturn(Flux.empty());
         when(turnLeaseStore.isHeld(anyString())).thenReturn(false);
 
-        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventBus, eventStore);
+        var tailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
+            Duration.ofMillis(300));
+        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventBus, eventStore,
+            tailer);
     }
 
     // ===== GET /subscribe 测试 =====

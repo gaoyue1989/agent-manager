@@ -53,7 +53,7 @@ public class FileControllerTest {
             new AgentManagerProperties.FileConfig(true, 20, 20,
                 AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME,
                 5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
-            new AgentManagerProperties.SseConfig(20, 5, 256),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults());
     }
 
@@ -115,7 +115,7 @@ public class FileControllerTest {
             props.llm(), props.server(), props.checkpoint(), "/config", "",
             props.cleanup(), new AgentManagerProperties.FileConfig(false, 20, 20,
                 "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
-            new AgentManagerProperties.SseConfig(20, 5, 256),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults());
         var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxConfig.class));
         var file = new MockMultipartFile("file", "a.png", "image/png", new byte[]{1});

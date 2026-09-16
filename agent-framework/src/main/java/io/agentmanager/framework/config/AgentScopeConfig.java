@@ -447,6 +447,25 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.service.SessionEventBus(sessionEventStore, heartbeat, eviction, bufSize);
     }
 
+    /**
+     * 会话事件追赶器（durable-sse-multinode-plan §2.4）：观察者路径的实现，
+     * 只读 Pod 间共享的 DB（session_event / turn_lease / confirm_context），
+     * 用于被订阅的 session 执行在另一副本上的场景。轮询间隔由
+     * AGENT_SSE_TAIL_POLL_MS 控制（默认 300ms）。
+     */
+    @Bean
+    public io.agentmanager.framework.service.SessionEventTailer sessionEventTailer(
+            io.agentmanager.framework.service.SessionEventStore sessionEventStore,
+            io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore,
+            io.agentmanager.framework.service.AgentRuntimeService agentRuntimeService,
+            AgentManagerProperties props) {
+        var sse = props.sse();
+        var poll = sse != null ? java.time.Duration.ofMillis(sse.tailPollMs())
+                               : java.time.Duration.ofMillis(300);
+        return new io.agentmanager.framework.service.SessionEventTailer(
+            sessionEventStore, turnLeaseStore, agentRuntimeService, poll);
+    }
+
     @Bean
     public AgentRuntimeService agentRuntimeService(
         OafConfig oafConfig,

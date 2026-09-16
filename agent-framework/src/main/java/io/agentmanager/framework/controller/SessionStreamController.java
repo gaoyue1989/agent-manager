@@ -14,6 +14,7 @@ import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventBus.TurnStatus;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionEventTailer;
 import io.agentmanager.framework.service.TurnLeaseStore;
 import reactor.core.publisher.Flux;
 
@@ -36,15 +37,18 @@ public class SessionStreamController {
     private final AgentRuntimeService runtimeService;
     private final SessionEventBus eventBus;
     private final SessionEventStore eventStore;
+    private final SessionEventTailer tailer;
 
     public SessionStreamController(AgentRuntimeService runtimeService,
                                    TurnLeaseStore turnLeaseStore,
                                    SessionEventBus eventBus,
-                                   SessionEventStore eventStore) {
+                                   SessionEventStore eventStore,
+                                   SessionEventTailer tailer) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.eventBus = eventBus;
         this.eventStore = eventStore;
+        this.tailer = tailer;
     }
 
     // ===== GET /subscribe：重连续传 =====
@@ -92,11 +96,15 @@ public class SessionStreamController {
     /**
      * 查询 session 当前 turn 状态（前端刷新恢复用）。
      *
+     * <p>状态判定全部基于 Pod 间共享的 DB 状态（turn_lease / confirm_context /
+     * session_event），不使用任何进程内状态——跨副本部署下本 Pod 可能从未执行过该
+     * session，也可能残留过期的本地 sink。
+     *
      * <p>响应示例：
      * <pre>{@code
      * {
      *   "session_id": "...",
-     *   "state": "working",          // working / completed / waiting_confirm / idle
+     *   "state": "working",          // working / completed / waiting_confirm / interrupted / idle
      *   "latest_event_seq": 42,
      *   "reply_id": "...",
      *   "pending_confirm": null      // 或 HITL 确认上下文
@@ -106,31 +114,30 @@ public class SessionStreamController {
     @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> status(@PathVariable String sessionId) {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
-        var leaseHeld = turnLeaseStore.isHeld(sessionId);
-        var busStatus = eventBus.turnStatus(sessionId);
-        var latestEvent = eventStore.findLatest(sessionId);
         var pendingConfirm = runtimeService.findPendingConfirm(sessionId);
+        var latestEvent = eventStore.findLatest(sessionId);
+        var probe = tailer.probe(sessionId, latestEvent, pendingConfirm != null);
 
         String state;
         if (pendingConfirm != null) {
             state = "waiting_confirm";
-        } else if (leaseHeld || busStatus == TurnStatus.WORKING) {
+        } else if (probe.running()) {
             state = "working";
         } else if (latestEvent != null && "AGENT_END".equals(latestEvent.type())) {
             state = "completed";
+        } else if (probe.interrupted()) {
+            // 有事件、非终态、无租约、无待确认：执行副本崩溃或被抢占
+            state = "interrupted";
         } else {
             state = "idle";
         }
 
-        var maxSeq = eventStore.findMaxSeq(sessionId);
-
         return Map.of(
             "session_id", sessionId,
             "state", state,
-            "latest_event_seq", maxSeq,
+            "latest_event_seq", latestEvent != null ? latestEvent.seq() : 0,
             "reply_id", latestEvent != null && latestEvent.replyId() != null
-                ? latestEvent.replyId() : eventBus.currentReplyId(sessionId) != null
-                ? eventBus.currentReplyId(sessionId) : "",
+                ? latestEvent.replyId() : "",
             "pending_confirm", pendingConfirm != null ? pendingConfirm : ""
         );
     }

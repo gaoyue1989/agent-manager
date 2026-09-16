@@ -238,6 +238,8 @@ public record AgentManagerProperties(
             /** EventBus Sinks 过期清理延迟（分钟），默认 5 */
             @DefaultValue("5") int sinksEvictionMinutes,
             /** EventBus Sinks 缓冲区大小，默认 256 */
-            @DefaultValue("256") int sinksBufferSize
+            @DefaultValue("256") int sinksBufferSize,
+            /** 观察者游标轮询间隔（毫秒），默认 300 */
+            @DefaultValue("300") int tailPollMs
     ) {}
 }
