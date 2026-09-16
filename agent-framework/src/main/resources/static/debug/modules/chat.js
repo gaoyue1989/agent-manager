@@ -449,7 +449,11 @@ async function selectThread(sessionId) {
 async function tryResumeSSE(sessionId) {
   try {
     const status = await ctx.api.getStatus(sessionId);
-    if (status.state === 'working' || status.state === 'waiting_confirm') {
+    // ★ interrupted 也走订阅（与 startReconnect 的分支保持一致）：观察者路径会先回放已落库的
+    // 部分输出，再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
+    // 若落入不订阅的分支，刷新/切换线程后既看不到中断提示，服务端的 interrupted 帧
+    // 也永远到不了前端——Task 10 的提示文案「可刷新页面查看最新状态」就成了空头承诺。
+    if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
       console.log('[durable-sse] resuming SSE for working session:', sessionId);
       isStreaming = true;
       sendBtn.disabled = true;

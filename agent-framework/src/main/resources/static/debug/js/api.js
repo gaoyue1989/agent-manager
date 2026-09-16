@@ -190,10 +190,12 @@ export const api = {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let terminated = false;      // 已由 done/error 帧显式终结，避免重复回调
+      let closedByServer = false;  // 服务端主动关流（未发 done 帧，如 interrupted 之后）
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) { closedByServer = true; break; }
           if (controller.signal.aborted) break;
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
@@ -210,13 +212,17 @@ export const api = {
             let evt;
             try { evt = JSON.parse(dataStr); } catch (e) { continue; }
             console.log('[SSE/subscribe]', JSON.stringify(evt, null, 2));
-            if (evt.type === 'done') { if (onEnd) onEnd(evt); return; }
-            if (evt.type === 'error') { if (onError) onError(new Error(evt.error)); return; }
+            if (evt.type === 'done') { terminated = true; if (onEnd) onEnd(evt); return; }
+            if (evt.type === 'error') { terminated = true; if (onError) onError(new Error(evt.error)); return; }
             if (onEvent) onEvent(evt);
           }
         }
       } catch (e) {
         if (!controller.signal.aborted && onError) onError(e);
+      } finally {
+        // 服务端主动关流不会走 done 分支（interrupted 帧之后即如此）；
+        // 若不在 finally 补发 onEnd，订阅者永远等不到结束回调——sendChat 本就有此保证。
+        if (closedByServer && !terminated && onEnd) onEnd();
       }
     };
     connect();
