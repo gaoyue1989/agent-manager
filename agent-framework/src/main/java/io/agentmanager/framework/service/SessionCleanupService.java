@@ -35,7 +35,6 @@ public class SessionCleanupService {
     private final ConfirmContextStore confirmContextStore;
     private final ToolAuditStore toolAuditStore;
     private final SessionEventStore sessionEventStore;
-    private final SessionEventBus sessionEventBus;
     private final SessionUserStore sessionUserStore;
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
@@ -46,7 +45,6 @@ public class SessionCleanupService {
                                  ConfirmContextStore confirmContextStore,
                                  ToolAuditStore toolAuditStore,
                                  SessionEventStore sessionEventStore,
-                                 SessionEventBus sessionEventBus,
                                  SessionUserStore sessionUserStore,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
                                  io.agentmanager.framework.service.storage.FileStorage fileStorage) {
@@ -56,7 +54,6 @@ public class SessionCleanupService {
         this.confirmContextStore = confirmContextStore;
         this.toolAuditStore = toolAuditStore;
         this.sessionEventStore = sessionEventStore;
-        this.sessionEventBus = sessionEventBus;
         this.sessionUserStore = sessionUserStore;
         this.props = props;
         this.fileStorage = fileStorage;
@@ -78,16 +75,13 @@ public class SessionCleanupService {
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
         sessionEventStore.deleteBefore(Instant.now().minus(sessionEventStore.retentionDays(), ChronoUnit.DAYS));
 
-        // 3. 清理 EventBus 中过期的 Sinks（无订阅者且超时未活跃）
-        sessionEventBus.evictStaleSinks();
-
-        // 4. 清理会话记录（agent_state / agent_fs / session_user）
+        // 3. 清理会话记录（agent_state / agent_fs / session_user）
         Instant cutoff = Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS);
         int stateCleaned = deleteBefore("agent_state", cutoff);
         int fsCleaned = deleteBefore("agent_fs", cutoff);
         int userMappingCleaned = sessionUserStore.deleteBefore(cutoff);
 
-        // 5. 清理过期上传文件（file-upload-download-plan §15-7）：
+        // 4. 清理过期上传文件（file-upload-download-plan §15-7）：
         //    超保留期（默认 7 天）且非 pending 状态的 upload 行 → 删行 + 删存储对象
         cleanupExpiredUploads();
 

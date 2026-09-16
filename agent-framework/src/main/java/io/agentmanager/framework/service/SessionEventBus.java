@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -175,10 +176,24 @@ public class SessionEventBus {
     }
 
     /**
+     * 开始一个 turn：播种 seq 计数器 + 确保 sink 存在。
+     *
+     * <p>必须在**获得 turn_lease 之后**调用——seq 计数器要从 DB 当前最大值续起
+     * （见 SessionEventStore.seedSeq）。两个动作合在一起是因为它们同属
+     * "为本 turn 准备输出通道与序号空间"这一件事。
+     */
+    public Sinks.Many<SessionEventStore.EnvelopedEvent> beginTurn(String sessionId) {
+        eventStore.seedSeq(sessionId);
+        return ensureSink(sessionId);
+    }
+
+    /**
      * turn 结束时关闭 session 的 Sinks。
      * 所有 SSE 订阅者收到 onComplete → 流关闭 → 前端显示完成。
+     * 同时刷出待落库行并释放 seq 计数器。
      */
     public void closeSession(String sessionId) {
+        eventStore.finishTurn(sessionId);
         var sink = sinks.remove(sessionId);
         lastActiveAt.remove(sessionId);
         if (sink != null) {
@@ -242,8 +257,12 @@ public class SessionEventBus {
 
     /**
      * 清理过期的 Sinks（无订阅者且超过 evictionDelay 未活跃）。
-     * 由定时任务调用。
+     *
+     * <p>独立调度（60s 一次）——此前仅挂在 SessionCleanupService 的每日 03:00 cron 上，
+     * 导致任何漏掉 closeSession 的 sink 会存活近 24 小时，跨副本 subscribe 也会
+     * 因此悬挂同样长的时间。见 durable-sse-multinode-plan §3.2.3。
      */
+    @Scheduled(fixedDelay = 60_000)
     public int evictStaleSinks() {
         var now = Instant.now();
         int count = 0;

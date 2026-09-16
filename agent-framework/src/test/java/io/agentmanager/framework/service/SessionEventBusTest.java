@@ -164,6 +164,21 @@ class SessionEventBusTest {
         assertTrue(evicted >= 1);
     }
 
+    @Test
+    void closeSessionFinishesTurnOnStore() {
+        eventBus.ensureSink("sid-finish");
+        eventBus.closeSession("sid-finish");
+        verify(eventStore).finishTurn("sid-finish");
+    }
+
+    @Test
+    void beginTurnSeedsSeqAndCreatesSink() {
+        var sink = eventBus.beginTurn("sid-begin");
+        assertNotNull(sink);
+        verify(eventStore).seedSeq("sid-begin");
+        assertSame(sink, eventBus.ensureSink("sid-begin"));
+    }
+
     // ===== 辅助方法 =====
 
     private static AgentEvent mockAgentEvent(String delta) {
