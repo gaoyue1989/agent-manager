@@ -87,6 +87,97 @@ spec:
   selector: { app: oaf-mysql }
   ports: [{ port: 3306, targetPort: 3306 }]
 ---
+# Redis：session_event 事件流存储（Streams，见 durable-sse-multinode-impl-plan.md）
+#
+# 内存规格怎么来的（**待真实流量复核，勿直接照搬到生产规模**）：
+#   每事件 ≈ 332 B（实测载荷均值 170 B + stream ID/字段名/listpack 开销）
+#          × 1.15 安全系数 ≈ 0.38 KB
+#   limit ≈ min(TTL 窗口内事件数, maxLenPerStream × 活跃 session 数) × 0.38 KB + 32 MB 基线
+#   实测锚点：4 个测试 session / 5 小时 = 265,014 条 ≈ 101 MB；最重一小时 223,885 条 ≈ 85 MB
+# 注意实测样本是**测试负载**，不是生产流量：先按 1gb 跑、盯 INFO memory，并发上来后重算。
+#   limits 给到 maxmemory 的 1.5 倍，是因为 AOF rewrite 会 fork，写时复制可能瞬时接近 2 倍；
+#   卡在 1gb 会让 Pod 被 cgroup OOM-kill（硬杀）而不是让 Redis 优雅报错。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oaf-redis-data
+  namespace: agent-platform
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oaf-redis
+  namespace: agent-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oaf-redis }
+  template:
+    metadata:
+      labels: { app: oaf-redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          ports: [{ containerPort: 6379 }]
+          # 每一条都是**必需的**，不是调优：
+          #   appendonly yes + everysec  —— 崩溃最多丢 1 秒已刷出的事件；关掉则「持久回放」的承诺失效
+          #   maxmemory-policy noeviction —— 用 LRU 淘汰 session 事件 = 静默丢回放数据，比任何故障模式都糟；
+          #                                 到上限时写入必须响亮失败（append 返回 -1、回放报错）
+          #   到顶时的行为已用真实 redis 实测（maxmemory 压到 8mb 灌满后逐条验证）：
+          #     写入 XADD/ZADD/SET  -> OOM command not allowed（若用 allkeys-lru 则会静默淘汰事件）
+          #     读取 XRANGE/XREVRANGE/ZRANGE/XLEN/TTL -> 正常返回（回放与 /status 活着）
+          #     管理 EXPIRE(已有 key)/DEL/XTRIM -> 正常返回（不是 deny-oom）
+          #   => 到顶不会卡死：TTL 仍能续期、键仍会过期，内存释放后实例自行恢复。
+          #   save ""                    —— 持久性由 AOF 承担，去掉 RDB 即去掉周期性 fork 抖动
+          #                                 （AOF 被截断时 aof-load-truncated 默认为 yes，仍能启动）
+          #   auto-aof-rewrite-*         —— 不重整则 AOF 会无限增长，把 PVC 撑爆
+          args: ["--appendonly", "yes",
+                 "--appendfsync", "everysec",
+                 "--maxmemory", "1gb",
+                 "--maxmemory-policy", "noeviction",
+                 "--save", "",
+                 "--auto-aof-rewrite-percentage", "100",
+                 "--auto-aof-rewrite-min-size", "256mb"]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          # startupProbe 而非只靠 liveness：AOF 大时加载要几十秒，liveness 过早触发会把
+          # Redis 反复杀掉→重载，形成一个看起来像「Redis 起不来」的死循环。
+          # 预算 30 × 5s = 150s，之后才把存活判断交给 liveness。
+          startupProbe:
+            exec: { command: ["redis-cli","ping"] }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec: { command: ["redis-cli","ping"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["redis-cli","ping"] }
+            periodSeconds: 10
+          resources:
+            requests: { memory: 256Mi, cpu: 100m }
+            limits:   { memory: 1536Mi, cpu: "1" }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: oaf-redis-data }
+---
+# 仅 ClusterIP，**无密码**：agent Pod 的环境变量来自 ConfigMap（oaf-release-agent-env），
+# 在那里面放密码等于明文存放。与 MySQL 同级的信任模型（同 namespace 内可达）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: oaf-redis
+  namespace: agent-platform
+spec:
+  selector: { app: oaf-redis }
+  ports: [{ port: 6379, targetPort: 6379 }]
+---
 # 共享 PVC：OAF 配置包落盘
 apiVersion: v1
 kind: PersistentVolumeClaim
