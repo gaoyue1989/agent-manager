@@ -187,8 +187,12 @@ public class ThreadController {
         totalDeleted += deleteBySessionId("agent_state", sessionId);
         totalDeleted += deleteBySessionId("agent_fs", sessionId);
 
-        // 2. session_event（SSE 事件历史）
-        totalDeleted += deleteBySessionId("session_event", sessionId);
+        // 2. session_event（SSE 事件历史）——已迁 Redis，走 store 删两个 key，
+        //    不能再走 deleteBySessionId（那张表还在但已不再写入）
+        var eventKeys = sessionEventStore.deleteSession(sessionId);
+        if (eventKeys >= 0) {
+            totalDeleted += eventKeys;
+        }
 
         // 3. session_user（会话-用户映射）
         totalDeleted += deleteBySessionId("session_user", sessionId);
@@ -305,7 +309,9 @@ public class ThreadController {
      *  即 "{peerId}:{canonicalKey}"，与 session_user.session_id（前端 peerId）不一致，
      *  因此对这两张表额外使用 LIKE 前缀匹配删除变体记录。 */
     private int deleteBySessionId(String table, String sessionId) {
-        var allowed = java.util.Set.of("agent_state", "agent_fs", "session_event",
+        // session_event 已不在白名单：它迁到 Redis 后由 sessionEventStore.deleteSession 处理，
+        // 留着会让人以为还能从这张表删数据（表还在，但已不再写入）
+        var allowed = java.util.Set.of("agent_state", "agent_fs",
             "session_user", "turn_lease");
         if (!allowed.contains(table)) {
             throw new IllegalArgumentException("Table not in delete whitelist: " + table);
@@ -403,27 +409,33 @@ public class ThreadController {
                 .toRoleContentList(io.agentmanager.framework.service.StateDataParser
                     .findMessagesArray(stateData));
 
-            // 回填 reply_id：从 session_event 查询 AGENT_START 事件的 reply_id，
-            // 按时间序分配给 assistant 消息
+            // 回填 reply_id：取该 session 出现过的 reply_id，按**首个事件的 seq** 升序分配给
+            // assistant 消息。数据源是 Redis 的 reply 索引（ZSET，score = 首个 seq），
+            // 与原 SQL 的 GROUP BY reply_id ORDER BY MIN(seq) 等价。
+            //
+            // 与原查询有两处刻意的差异：
+            //  - 原查询只认 event_type = 'AGENT_START'；索引覆盖带该 replyId 的**任意**事件。
+            //    AGENT_START 是一个 turn 的首个事件，所以顺序一致；差别只在「AGENT_START 丢了
+            //    的 turn」现在也会出现——那更正确，不是缺陷。
+            //  - 失败时**返回 null 而不是空列表**：空列表会被下游当成「这个会话没有 reply」，
+            //    而实际是「读不到」。两者对历史的呈现不同，不能在类型上混为一谈。
             var assistantCount = msgs.stream()
                 .filter(m -> "assistant".equals(m.get("role")))
                 .count();
             if (assistantCount == 0) {
                 return msgs;
             }
-            var replyIds = new ArrayList<String>();
-            try (var ps = conn.prepareStatement(
-                    "SELECT reply_id FROM session_event "
-                        + "WHERE session_id = ? AND event_type = 'AGENT_START' "
-                        + "AND reply_id IS NOT NULL AND reply_id != '' "
-                        + "GROUP BY reply_id ORDER BY MIN(seq) ASC")) {
-                ps.setString(1, sessionId);
-                var rs2 = ps.executeQuery();
-                while (rs2.next()) {
-                    replyIds.add(rs2.getString("reply_id"));
-                }
+            List<String> replyIds = null;
+            try {
+                replyIds = sessionEventStore.findReplyIds(sessionId);
             } catch (Exception e) {
-                log.debug("reply_id lookup skipped for {}: {}", sessionId, e.getMessage());
+                // 从 debug 提到 warn：静默缺 reply_id 会让前端的历史消息失去与 turn 的关联，
+                // 这是**内容层面的错误**，不该按调试信息处理
+                log.warn("reply_id lookup failed for {} — 历史消息将缺少 reply_id: {}",
+                    sessionId, e.toString());
+            }
+            if (replyIds == null) {
+                return msgs;
             }
             // 按 AGENT_START 出现顺序，依次分配 reply_id 给 assistant 消息
             int idx = 0;

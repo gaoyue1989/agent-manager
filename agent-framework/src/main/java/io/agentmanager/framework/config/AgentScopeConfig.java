@@ -471,12 +471,24 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.service.ToolAuditStore(dataSource, retention);
     }
 
+    /**
+     * session_event 的 Redis Streams 存储层（只有它需要真 Redis）。
+     * 惰性连接：这里不建连，所以 Redis 不可达不会影响启动。
+     */
     @Bean
-    public io.agentmanager.framework.service.SessionEventStore sessionEventStore(DataSource dataSource,
+    public io.agentmanager.framework.service.RedisEventLog redisEventLog(
+            RedisClient redisClient, AgentRedisProperties redis) {
+        return new io.agentmanager.framework.service.RedisEventLog(redisClient, redis);
+    }
+
+    @Bean
+    public io.agentmanager.framework.service.SessionEventStore sessionEventStore(
+            io.agentmanager.framework.service.RedisEventLog redisEventLog,
             AgentManagerProperties props) {
         var cleanup = props.cleanup();
+        // 同一份 7 天：这里算 TTL，不再有第二个来源（旧的 deleteBefore 已随 TTL 一并下线）
         var retention = cleanup != null ? cleanup.sessionRetentionDays() : 7;
-        return new io.agentmanager.framework.service.SessionEventStore(dataSource, retention);
+        return new io.agentmanager.framework.service.SessionEventStore(redisEventLog, retention);
     }
 
     @Bean

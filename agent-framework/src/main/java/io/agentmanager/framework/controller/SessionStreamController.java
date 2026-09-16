@@ -2,7 +2,11 @@ package io.agentmanager.framework.controller;
 
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -30,6 +34,8 @@ import reactor.core.publisher.Flux;
 @RestController
 @RequestMapping("/threads/{sessionId}")
 public class SessionStreamController {
+
+    private static final Logger log = LoggerFactory.getLogger(SessionStreamController.class);
 
     private final TurnLeaseStore turnLeaseStore;
     private final AgentRuntimeService runtimeService;
@@ -73,9 +79,13 @@ public class SessionStreamController {
     /**
      * 查询 session 当前 turn 状态（前端刷新恢复用）。
      *
-     * <p>状态判定全部基于 Pod 间共享的 DB 状态（turn_lease / confirm_context /
-     * session_event），不使用任何进程内状态——跨副本部署下本 Pod 可能从未执行过该
+     * <p>状态判定全部基于 Pod 间共享的存储（MySQL 的 turn_lease / confirm_context，
+     * Redis 的 session_event），不使用任何进程内状态——跨副本部署下本 Pod 可能从未执行过该
      * session，也可能残留过期的本地 sink。
+     *
+     * <p><b>503</b>：session_event 存储不可用时返回 503，而不是一个
+     * {@code latest_event_seq: 0} 的成功响应——后者会让前端把游标重置为 0 并重放整场会话。
+     * 详见 {@link SessionEventStore#findLatestStrict}。
      *
      * <p>响应示例：
      * <pre>{@code
@@ -89,10 +99,26 @@ public class SessionStreamController {
      * }</pre>
      */
     @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
-    public Map<String, Object> status(@PathVariable String sessionId) {
+    public ResponseEntity<Map<String, Object>> status(@PathVariable String sessionId) {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         var pendingConfirm = runtimeService.findPendingConfirm(sessionId);
-        var latestEvent = eventStore.findLatest(sessionId);
+
+        // 必须用 strict 版：宽容的 findLatest 在**读不到**时返回 null，于是下面会算出
+        // "state": "idle" + "latest_event_seq": 0 的**成功**响应，而前端 chat.js:463 拿它
+        // 把游标重置为 0 —— Redis 一恢复就是整场会话重放。存储不可用是可重试的依赖故障，
+        // 503 才诚实；前端 tryResumeSSE 的 catch（chat.js:514）会保留游标、跳过本次恢复，
+        // 因为 debug/js/api.js 的 get() 对非 2xx 抛错。
+        final SessionEventStore.EnvelopedEvent latestEvent;
+        try {
+            latestEvent = eventStore.findLatestStrict(sessionId);
+        } catch (Exception e) {
+            log.warn("status: session_event store unavailable for {}: {}", sessionId, e.toString());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Map.of(
+                    "error", "event_store_unavailable",
+                    "message", "Session event store is temporarily unavailable"));
+        }
+
         var probe = tailer.probe(sessionId, latestEvent, pendingConfirm != null);
 
         String state;
@@ -109,13 +135,13 @@ public class SessionStreamController {
             state = "idle";
         }
 
-        return Map.of(
+        return ResponseEntity.ok(Map.of(
             "session_id", sessionId,
             "state", state,
             "latest_event_seq", latestEvent != null ? latestEvent.seq() : 0,
             "reply_id", latestEvent != null && latestEvent.replyId() != null
                 ? latestEvent.replyId() : "",
             "pending_confirm", pendingConfirm != null ? pendingConfirm : ""
-        );
+        ));
     }
 }

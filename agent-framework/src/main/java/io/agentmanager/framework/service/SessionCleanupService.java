@@ -24,6 +24,10 @@ import org.springframework.stereotype.Service;
  *   <li>agent_state / agent_fs：会话记录超期（默认 7 天）→ 既有 deleteBefore</li>
  *   <li>session_user：会话-用户映射超期（默认 7 天，与 agent_state 对齐）→ SessionUserStore.deleteBefore</li>
  * </ul>
+ *
+ * <p><b>session_event 不在这里清理。</b>它已迁到 Redis Streams，留存由 key TTL 承担
+ * （写入时续期），本服务不再需要它——原先那条
+ * {@code DELETE FROM session_event WHERE created_at < ?} 与 sessionEventStore 依赖一并下线。
  */
 @Service
 public class SessionCleanupService {
@@ -34,7 +38,6 @@ public class SessionCleanupService {
     private final TurnLeaseStore turnLeaseStore;
     private final ConfirmContextStore confirmContextStore;
     private final ToolAuditStore toolAuditStore;
-    private final SessionEventStore sessionEventStore;
     private final SessionUserStore sessionUserStore;
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
@@ -44,7 +47,6 @@ public class SessionCleanupService {
                                  TurnLeaseStore turnLeaseStore,
                                  ConfirmContextStore confirmContextStore,
                                  ToolAuditStore toolAuditStore,
-                                 SessionEventStore sessionEventStore,
                                  SessionUserStore sessionUserStore,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
                                  io.agentmanager.framework.service.storage.FileStorage fileStorage) {
@@ -53,7 +55,6 @@ public class SessionCleanupService {
         this.turnLeaseStore = turnLeaseStore;
         this.confirmContextStore = confirmContextStore;
         this.toolAuditStore = toolAuditStore;
-        this.sessionEventStore = sessionEventStore;
         this.sessionUserStore = sessionUserStore;
         this.props = props;
         this.fileStorage = fileStorage;
@@ -69,11 +70,11 @@ public class SessionCleanupService {
         // 1. 清理内存中的过期会话
         int memCleaned = sessionManager.cleanupExpired();
 
-        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log / session_event
+        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log
+        //    （session_event 已迁 Redis，留存由 key TTL 承担，不在这里清）
         turnLeaseStore.cleanupExpired();
         confirmContextStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
-        sessionEventStore.deleteBefore(Instant.now().minus(sessionEventStore.retentionDays(), ChronoUnit.DAYS));
 
         // 3. 清理会话记录（agent_state / agent_fs / session_user）
         Instant cutoff = Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS);

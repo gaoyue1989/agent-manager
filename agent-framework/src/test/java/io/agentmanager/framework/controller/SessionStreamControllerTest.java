@@ -45,7 +45,7 @@ class SessionStreamControllerTest {
         when(runtimeService.findPendingConfirm(anyString())).thenReturn(null);
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
         when(eventStore.findMaxSeq(anyString())).thenReturn(0);
-        when(eventStore.findLatest(anyString())).thenReturn(null);
+        when(eventStore.findLatestStrict(anyString())).thenReturn(null);
         when(eventStore.queryAfter(anyString(), anyString(), anyInt())).thenReturn(Flux.empty());
         when(turnLeaseStore.isHeld(anyString())).thenReturn(false);
 
@@ -60,7 +60,7 @@ class SessionStreamControllerTest {
     void subscribeShouldReplayHistoryAndCloseForCompletedSession() {
         var sessionId = "test-user-sub1";
         // 模拟一个已完成的 session：有 AGENT_END 事件
-        when(eventStore.findLatest(sessionId)).thenReturn(
+        when(eventStore.findLatestStrict(sessionId)).thenReturn(
             new SessionEventStore.EnvelopedEvent(5, "AGENT_END", "{}", "rid-sub"));
         when(eventStore.queryAfter(eq(sessionId), anyString(), anyInt()))
             .thenReturn(Flux.just(
@@ -86,10 +86,10 @@ class SessionStreamControllerTest {
         var sessionId = "test-user-st1";
         when(turnLeaseStore.isHeld(sessionId)).thenReturn(true);
         when(eventStore.findMaxSeq(sessionId)).thenReturn(10);
-        when(eventStore.findLatest(sessionId)).thenReturn(
+        when(eventStore.findLatestStrict(sessionId)).thenReturn(
             new SessionEventStore.EnvelopedEvent(10, "TEXT_BLOCK_DELTA", "{}", "rid-st1"));
 
-        var result = controller.status(sessionId);
+        var result = controller.status(sessionId).getBody();
         assertEquals("working", result.get("state"));
         assertEquals(10, result.get("latest_event_seq"));
     }
@@ -99,11 +99,11 @@ class SessionStreamControllerTest {
         var sessionId = "test-user-st2";
         when(turnLeaseStore.isHeld(sessionId)).thenReturn(false);
         when(eventStore.findMaxSeq(sessionId)).thenReturn(20);
-        when(eventStore.findLatest(sessionId)).thenReturn(
+        when(eventStore.findLatestStrict(sessionId)).thenReturn(
             new SessionEventStore.EnvelopedEvent(20, "AGENT_END", "{}", "rid-st2"));
         when(runtimeService.findPendingConfirm(sessionId)).thenReturn(null);
 
-        var result = controller.status(sessionId);
+        var result = controller.status(sessionId).getBody();
         assertEquals("completed", result.get("state"));
     }
 
@@ -114,7 +114,7 @@ class SessionStreamControllerTest {
         when(eventStore.findMaxSeq(sessionId)).thenReturn(0);
         when(runtimeService.findPendingConfirm(sessionId)).thenReturn(null);
 
-        var result = controller.status(sessionId);
+        var result = controller.status(sessionId).getBody();
         assertEquals("idle", result.get("state"));
     }
 
@@ -123,12 +123,12 @@ class SessionStreamControllerTest {
         var sessionId = "test-user-st4";
         when(turnLeaseStore.isHeld(sessionId)).thenReturn(false);
         when(eventStore.findMaxSeq(sessionId)).thenReturn(15);
-        when(eventStore.findLatest(sessionId)).thenReturn(
+        when(eventStore.findLatestStrict(sessionId)).thenReturn(
             new SessionEventStore.EnvelopedEvent(15, "permission_ask", "{}", "rid-st4"));
         when(runtimeService.findPendingConfirm(sessionId)).thenReturn(
             java.util.Map.of("reply_id", "rid-st4", "tools", "[]"));
 
-        var result = controller.status(sessionId);
+        var result = controller.status(sessionId).getBody();
         assertEquals("waiting_confirm", result.get("state"));
     }
 
