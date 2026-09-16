@@ -1,0 +1,10 @@
+{
+  "name": "bench-mock-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "并发压测 mock MCP server（streamableHttp，零三方依赖）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

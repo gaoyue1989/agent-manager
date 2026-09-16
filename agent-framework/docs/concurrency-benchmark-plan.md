@@ -338,3 +338,51 @@ agent-framework/bench/
 | 5 | mock 工具名与 SDK 响应编码 | 实施第 3 步冒烟时以实际 `/system-prompt` 与联调为准修正 | ⏳ 实施确认 |
 | 6 | 1C/1G 是否为目标生产规格 | 已按用户要求定稿为压测基准规格；如后续有生产规格再按同方法复测 | ✅ 已定稿 |
 | 7 | 并发用户池上限 | **10**（用户定稿）：C ≤ 10 档为服务并发能力区间，C > 10 档为池受限区间，报告分区间给结论 | ✅ 已定稿 |
+
+---
+
+## 13. 压测结论（2026-09-16 执行回填）
+
+> 环境：宿主 8C/8G（kind 常驻 + 共享 OpenSandbox），被测 docker 1C/1G 硬限（agent-framework:latest，含 Harness 配置化变更）；mock LLM/MCP；闭环并发；稳态 180s；核心子集 B0/B1/B3/B5。原始数据 `bench/results/`，自动报告 `bench/results/report-2026-09-16T01-26-38.969Z.md`，完整执行日志 `bench/results/full-run.log`。
+
+### 13.1 数据总表（成功请求 / 错误率 / req/min / P50 / P95）
+
+| 场景 | C=1 | C=2 | C=4 | C=8 | C≥10 |
+|------|-----|-----|-----|-----|------|
+| B0 非沙箱 | 802 / 0% / 267 / 131ms / 379ms | 1318 / 0% / 439 / 192ms / 1165ms | **1910 / 0% / 637 / 287ms / 1263ms** | 楔死中止 | 未执行（跳过） |
+| B1 沙箱纯文本 | 86 / 0% / 29 / 1222ms / 2045ms | 47.6% 错误 → 中止 | — | — | — |
+| B3 沙箱+Shell | 72 / 0% / 24 / 2294ms / 2363ms | 50% 错误 → 中止 | — | — | — |
+| B5 同会话并发 | 73 / 0% / 24 / 1207ms / 2042ms | 42.9% 错误 → 中止 | — | — | — |
+
+### 13.2 四行总结论（对应 §10 验收）
+
+| # | 项 | 结论 |
+|---|----|------|
+| 1 | 最大并发 | **B0（非沙箱）= 4**（C=8 触发死锁性停摆）；**沙箱模式（B1/B3/B5）= 1**（C=2 起 ~50% turn 被跨 turn 停止()竞态杀死） |
+| 2 | 峰值吞吐 | **637 req/min**（B0 C=4，1C 硬限）；沙箱单会话 24~29 req/min（500ms 会话间隔节流 + 每 turn 1.2~2.3s） |
+| 3 | 瓶颈归因 | B0 C=8：**SDK 内存维护与 turn 闸门死锁**（见 13.3-①，线程转储证据）；沙箱 C≥2：**前 turn POST_CALL stop() 与后 turn 复用同一沙箱实例竞态**（见 13.3-②）；容器 CPU 峰值 77%（C=4）未饱和，1C CPU 不是首要瓶颈 |
+| 4 | 调优建议 | ① 升级/修复 harness 的 SessionTurnGate × MemoryMaintenanceMiddleware 死锁（Mono.block 阻塞公共调度线程）；② 修复沙箱 stop() 与下一 turn acquire 的竞态（当前版本沙箱模式并发上限实际为 1）；③ 压测手段已验证：AGENT_DB_POOL_MAX_SIZE 等新配置项可直接用于池调优对照档 |
+
+### 13.3 缺陷发现（均有复现与证据）
+
+| # | 缺陷 | 触发条件 | 证据 |
+|---|------|---------|------|
+| ① | **C=8 全服务死锁**：`MemoryMaintenanceMiddleware.consolidateMemory`（harness 2.0.0）在 `Mono.block()` 上永久阻塞，持有 `SessionTurnGate`（公平信号量）许可；其余全部 boundedElastic 工作线程阻塞在 `SessionTurnGate.acquire` 等许可 → 无限排队。观测：容器 CPU 0.3%、DB 活跃连接 1、无任何请求完成 | B0 稳态 C=8（60s 内零完成触发中止条件）；C≤4 稳定 180s | 线程转储 `bench/results/c8-deadlock-threaddump.txt`（boundedElastic-9 阻塞于 consolidateMemory，1/3/4/5/6/7 阻塞于 SessionTurnGate.acquire） |
+| ② | **沙箱 stop() 竞态**：前 turn POST_CALL 的 `stop()`（工作区/记忆回写）会停掉正在被下一 turn 使用的同一沙箱实例，后续文件操作抛 "No active sandbox" 且被 SessionStreamController 误判为"尾部收尾错误"静默吞掉（无 error 帧，流无声死亡）。同会话背靠背（0 间隔）失败率 ~50% 且呈交替规律；**跨会话并发 turn（C≥2）同样 ~50% 失败**，说明实例状态（latestSandbox/ThreadLocal userKey）存在跨请求污染 | 沙箱模式任意并发 turn 重叠；同会话间隔 ≥500ms 可规避同会话场景 | `results/B1/2.jsonl`（no_agent_end 占比 10/21）；bench 容器日志 `stop() called` 与 `No active sandbox` 时序对齐 |
+| ③ | **沙箱请求可无限挂起**：沙箱异常时 turn 可挂 ~350s 才由服务端超时（SSE waiting 帧不断重置socket 不活动计时器，客户端无绝对截止时间则永久等待） | 沙箱 wedge 后新请求 | `results/archive-*/B5/warmup.jsonl`（latencyMs=350045） |
+
+### 13.4 对方案假设的修正（实施偏差记录）
+
+| 方案原设计 | 实际落地 | 原因 |
+|-----------|---------|------|
+| sessionId 每请求全局唯一、userId 池 U=min(C,10)（§6.1） | **会话池模型**：S=min(C,10) 个会话复用（预热建沙箱、稳态 resume）；B5=单会话并发 | 实测沙箱隔离键=**sessionId**（`ChatUiRequest.withPeer(sessionId,…)`，peer 即网关 userId）；唯一 sid 会导致每请求新建沙箱（数量=请求数，宿主必被打爆） |
+| userId 前缀 `bench-user-` 过滤清理沙箱（§11） | 从 bench 库 `agent_state`（OpenSandboxState.sandboxId）反查精确删除 | OpenSandbox `/v1/sandboxes` 列表不含 metadata，无法按 userId 过滤 |
+| SANDBOX_MEMORY_MB=512（§5） | **256Mi** | 宿主 8G 与常驻 kind 平台共存时 10×512Mi 触发 swap 抖动/OOM（实测沙箱工作集约 100Mi） |
+| 复用本地 MySQL :3307 独立库（§3） | **专用 mysql:8.0 容器**（:3308，`flush_log_at_trx_commit=2 --sync-binlog=0` 压测语义） | 宿主 3307（GreatSQL）无 root 建库权限；专用实例隔离性更强 |
+| — | 同会话最小 turn 间隔 500ms（仅沙箱场景）；runner 增加绝对请求截止（120s）与"60s 零完成判无响应"中止 | 缓解缺陷②/③对读数的污染；B0 保持 0 间隔测纯容量 |
+
+### 13.5 结论有效性说明
+
+- B0 曲线（C=1→4 线性 267→637 req/min、P95<1.3s、0 错误）在默认 Hikari 池（10）+ 1C 下成立；C=8 死锁为 harness 缺陷而非资源瓶颈（CPU 峰值 77% 未饱和），修复①后 C≥8 档需重测。
+- 沙箱模式并发结论（上限=1）受缺陷②支配，修复后曲线形状预期改变，需复测；单会话 24~29 req/min 的稳态读数（0 错误）在 500ms 会话间隔约束下有效。
+- 压测期间发现并临时处置的宿主问题：磁盘满（186G→清出 56G）曾导致 MySQL 提交冻结假象，已在最终轮排除（磁盘余量全程 >30G）。

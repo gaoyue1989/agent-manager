@@ -1,0 +1,483 @@
+[34m== 前置检查 ==[0m
+[34m== 初始化压测库 agent_manager_bench ==[0m
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[34m== 启动 mock-llm / mock-mcp ==[0m
+  mock-llm  :18081 (pid 2466119)
+  mock-mcp  :18082 (pid 2466120)
+  历史结果已归档至 results/archive-085903
+[34m== 场景 B0 ==[0m
+[34m== 拉起被测容器（SANDBOX_ENABLED=false，1C/1G） ==[0m
+  等待服务就绪（首次启动建表 + MCP 注册）...
+  就绪：http://127.0.0.1:8101
+[34m== 场景 B0 预热（sessions=10） ==[0m
+[warmup] sessions=10 scenario=B0
+  [warmup] bench-B0-sess-0: ok (672ms)
+  [warmup] bench-B0-sess-1: ok (89ms)
+  [warmup] bench-B0-sess-2: ok (43ms)
+  [warmup] bench-B0-sess-3: ok (39ms)
+  [warmup] bench-B0-sess-4: ok (45ms)
+  [warmup] bench-B0-sess-5: ok (44ms)
+  [warmup] bench-B0-sess-6: ok (48ms)
+  [warmup] bench-B0-sess-7: ok (35ms)
+  [warmup] bench-B0-sess-8: ok (37ms)
+  [warmup] bench-B0-sess-9: ok (43ms)
+[warmup] 全部就绪
+[34m== 场景 B0 档 C=1（U=1） ==[0m
+[run] B0 C=1 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B0 C=1: ok=802 err=0 req/min=267.3 p50=131 p95=379
+[34m== 场景 B0 档 C=2（U=2） ==[0m
+[run] B0 C=2 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B0 C=2: ok=1318 err=0 req/min=439.3 p50=192 p95=1165
+[34m== 场景 B0 档 C=4（U=4） ==[0m
+[run] B0 C=4 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B0 C=4: ok=1910 err=0 req/min=636.7 p50=287 p95=1263
+[34m== 场景 B0 档 C=8（U=8） ==[0m
+[run] B0 C=8 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B0 C=8: ok=0 err=0 req/min=0 p50=0 p95=0 [中止: service unresponsive: no completion within 60s of steady window]
+  档 C=8 触发停止条件，场景 B0 剩余档跳过
+[34m== 场景 B1 ==[0m
+[34m== 拉起被测容器（SANDBOX_ENABLED=true，1C/1G） ==[0m
+  等待服务就绪（首次启动建表 + MCP 注册）...
+  就绪：http://127.0.0.1:8101
+[34m== 场景 B1 预热（sessions=10） ==[0m
+[warmup] sessions=10 scenario=B1
+  [warmup] bench-B1-sess-0: ok (4359ms)
+  [warmup] bench-B1-sess-1: ok (4086ms)
+  [warmup] bench-B1-sess-2: ok (4327ms)
+  [warmup] bench-B1-sess-3: ok (3662ms)
+  [warmup] bench-B1-sess-4: ok (3547ms)
+  [warmup] bench-B1-sess-5: ok (3634ms)
+  [warmup] bench-B1-sess-6: ok (3411ms)
+  [warmup] bench-B1-sess-7: ok (4307ms)
+  [warmup] bench-B1-sess-8: ok (3268ms)
+  [warmup] bench-B1-sess-9: ok (3570ms)
+[warmup] 全部就绪
+[34m== 场景 B1 档 C=1（U=1） ==[0m
+[run] B1 C=1 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B1 C=1: ok=86 err=0 req/min=28.7 p50=1222 p95=2045
+[34m== 场景 B1 档 C=2（U=2） ==[0m
+[run] B1 C=2 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B1 C=2: ok=11 err=10 req/min=3.7 p50=1215 p95=2089 [中止: error_rate 50.0% > 5%]
+  档 C=2 触发停止条件，场景 B1 剩余档跳过
+[34m== 场景 B3 ==[0m
+[34m== 场景 B3 预热（sessions=10） ==[0m
+[warmup] sessions=10 scenario=B3
+  [warmup] bench-B3-sess-0: ok (4611ms)
+  [warmup] bench-B3-sess-1: ok (4547ms)
+  [warmup] bench-B3-sess-2: ok (4228ms)
+  [warmup] bench-B3-sess-3: ok (4493ms)
+  [warmup] bench-B3-sess-4: ok (4308ms)
+  [warmup] bench-B3-sess-5: ok (4453ms)
+  [warmup] bench-B3-sess-6: ok (4296ms)
+  [warmup] bench-B3-sess-7: ok (4582ms)
+  [warmup] bench-B3-sess-8: ok (4668ms)
+  [warmup] bench-B3-sess-9: ok (4750ms)
+[warmup] 全部就绪
+[34m== 场景 B3 档 C=1（U=1） ==[0m
+[run] B3 C=1 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B3 C=1: ok=72 err=0 req/min=24 p50=2294 p95=2363
+[34m== 场景 B3 档 C=2（U=2） ==[0m
+[run] B3 C=2 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B3 C=2: ok=10 err=10 req/min=3.3 p50=2266 p95=2339 [中止: error_rate 50.0% > 5%]
+  档 C=2 触发停止条件，场景 B3 剩余档跳过
+[34m== 场景 B5 ==[0m
+[34m== 场景 B5 预热（sessions=1） ==[0m
+[warmup] sessions=1 scenario=B5
+  [warmup] bench-B5-sess-0: ok (3549ms)
+[warmup] 全部就绪
+[34m== 场景 B5 档 C=1（U=1） ==[0m
+[run] B5 C=1 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B5 C=1: ok=73 err=0 req/min=24.3 p50=1207 p95=2042
+[34m== 场景 B5 档 C=2（U=1） ==[0m
+[run] B5 C=2 S=10 ramp=15s steady=180s
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[done] B5 C=2: ok=12 err=9 req/min=4 p50=2596 p95=24953 [中止: error_rate 42.9% > 5%]
+  档 C=2 触发停止条件，场景 B5 剩余档跳过
+[34m== 生成报告 ==[0m
+[report] 写入 /root/agent-manager/agent-framework/bench/results/report-2026-09-16T01-26-38.md
+# Agent Framework 并发压测报告
+
+- 时间：2026-09-16T01:26:38.969Z
+- 被测：docker bench-agent-fw（1C/1G 硬限，agent-framework:latest）
+- 口径：请求=POST /threads/{sid}/chat → AGENT_END；SLO：错误率<1% 且 P95≤10s；稳态 180s
+
+## B0 非沙箱纯文本（基线）
+
+| C | 成功 | 错误率 | req/min | RPS | P50(ms) | P95(ms) | P99(ms) | TTFT P50(ms) | waiting 均值 | 中止 | 容器CPU max% | 堆峰值MB | MySQL连接 max | 沙箱数 max |
+|---|------|--------|---------|-----|---------|---------|---------|--------------|--------------|------|--------------|----------|---------------|------------|
+| 1 | 802 | 0.0% | 267.3 | 4.46 | 131 | 379 | 1340 | 99 | 0 | 否 | 58.84 | - | 1 | 0 |
+| 2 | 1318 | 0.0% | 439.3 | 7.32 | 192 | 1165 | 1357 | 166 | 0 | 否 | 68.68 | - | 1 | 0 |
+| 4 | 1910 | 0.0% | 636.7 | 10.61 | 287 | 1263 | 1428 | 260 | 0 | 否 | 77.51 | - | 1 | 0 |
+| 8 | 0 | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 是(service unresponsive: no completion within 60s of steady window) | 50.93 | - | 1 | 0 |
+
+- LLM 调用对账（末档 C=8）：期望 0 次
+
+```
+并发-吞吐（req/min，1 字符 ≈ 16 req/min）
+C= 1 | ################# 267.3
+C= 2 | ########################### 439.3
+C= 4 | ######################################## 636.7
+C= 8 |  0
+```
+
+**结论**：最大支持并发 = 4，峰值 636.7 req/min，瓶颈初判 = 未观测到明显饱和点（详见各档观测数据）
+
+## B1 沙箱纯文本（固定开销）
+
+| C | 成功 | 错误率 | req/min | RPS | P50(ms) | P95(ms) | P99(ms) | TTFT P50(ms) | waiting 均值 | 中止 | 容器CPU max% | 堆峰值MB | MySQL连接 max | 沙箱数 max |
+|---|------|--------|---------|-----|---------|---------|---------|--------------|--------------|------|--------------|----------|---------------|------------|
+| 1 | 86 | 0.0% | 28.7 | 0.48 | 1222 | 2045 | 2794 | 136 | 0 | 否 | 13.56 | - | 1 | 10 |
+| 2 | 11 | 47.6% | 3.7 | 0.06 | 1215 | 2089 | 2089 | 148 | 0 | 是(error_rate 50.0% > 5%) | 18.73 | - | 1 | 10 |
+
+- LLM 调用对账（末档 C=2）：期望 11 次
+
+```
+并发-吞吐（req/min，1 字符 ≈ 1 req/min）
+C= 1 | ############################# 28.7
+C= 2 | #### 3.7
+```
+
+**结论**：最大支持并发 = 1，峰值 28.7 req/min，瓶颈初判 = 未观测到明显饱和点（详见各档观测数据）
+
+## B3 沙箱+Shell
+
+| C | 成功 | 错误率 | req/min | RPS | P50(ms) | P95(ms) | P99(ms) | TTFT P50(ms) | waiting 均值 | 中止 | 容器CPU max% | 堆峰值MB | MySQL连接 max | 沙箱数 max |
+|---|------|--------|---------|-----|---------|---------|---------|--------------|--------------|------|--------------|----------|---------------|------------|
+| 1 | 72 | 0.0% | 24 | 0.4 | 2294 | 2363 | 2391 | 132 | 0 | 否 | 9.89 | - | 1 | 20 |
+| 2 | 10 | 50.0% | 3.3 | 0.06 | 2266 | 2339 | 2339 | 1608 | 0 | 是(error_rate 50.0% > 5%) | 9.53 | - | 1 | 20 |
+
+- LLM 调用对账（末档 C=2）：期望 20 次
+
+```
+并发-吞吐（req/min，1 字符 ≈ 1 req/min）
+C= 1 | ######################## 24
+C= 2 | ### 3.3
+```
+
+**结论**：最大支持并发 = 1，峰值 24 req/min，瓶颈初判 = 未观测到明显饱和点（详见各档观测数据）
+
+## B5 同用户并发（U=1 串行化上界）
+
+| C | 成功 | 错误率 | req/min | RPS | P50(ms) | P95(ms) | P99(ms) | TTFT P50(ms) | waiting 均值 | 中止 | 容器CPU max% | 堆峰值MB | MySQL连接 max | 沙箱数 max |
+|---|------|--------|---------|-----|---------|---------|---------|--------------|--------------|------|--------------|----------|---------------|------------|
+| 1 | 73 | 0.0% | 24.3 | 0.41 | 1207 | 2042 | 4171 | 131 | 0 | 否 | 9.29 | - | 1 | 20 |
+| 2 | 12 | 42.9% | 4 | 0.07 | 2596 | 24953 | 24953 | 1890 | 0 | 是(error_rate 42.9% > 5%) | 15.33 | - | 1 | 20 |
+
+- LLM 调用对账（末档 C=2）：期望 12 次
+
+```
+并发-吞吐（req/min，1 字符 ≈ 1 req/min）
+C= 1 | ######################## 24.3
+C= 2 | #### 4
+```
+
+**结论**：最大支持并发 = 1，峰值 24.3 req/min，瓶颈初判 = 未观测到明显饱和点（详见各档观测数据）
+
+[34m== 完成（容器、mock 进程与 bench 沙箱经 trap 清理；库 agent_manager_bench 保留供复跑） ==[0m
+[34m== 清理 ==[0m
+  [sandbox] 删除 131de1fd-211e-42d1-ab7f-c51f38315cf2
+  [sandbox] 删除 1d631e1b-342a-42ec-9358-ccddfddb14aa
+  [sandbox] 删除 2ac811a7-6d0c-4bfc-ad17-1e4b8d7317dc
+  [sandbox] 删除 35cb9986-fa85-431a-aba0-46e5ab0ac311
+  [sandbox] 删除 3ea77779-86cb-4c47-84d5-62a981116aeb
+  [sandbox] 删除 3ed42735-6dc9-49ec-9ced-75ef2c9edb49
+  [sandbox] 删除 661372ee-223a-4730-9be6-4b6c60b38f52
+  [sandbox] 删除 6aef1ad2-459f-4354-9989-9854a9b19f1f
+  [sandbox] 删除 6b1fc3e4-3641-4316-ab75-d1e6418d9491
+  [sandbox] 删除 72b9cc6a-b710-45bd-b76f-0969524cc5c9
+  [sandbox] 删除 7eb085bf-47c9-441a-8aeb-98ee0f3130a2
+  [sandbox] 删除 89580510-e3b0-4099-a2e9-1e40a066be3b
+  [sandbox] 删除 8a4712d1-f557-4f42-804d-fb2d971dd089
+  [sandbox] 删除 8be07276-c10e-4449-8b8e-70a9fa1af444
+  [sandbox] 删除 c4cd064b-a269-4d2d-b024-c78d2f9bf88b
+  [sandbox] 删除 e55a1aa7-e536-4328-a9c9-c0af27ab7e10
+  [sandbox] 删除 ecc9cdae-fd27-4cb1-8520-0d8c58c30ad6
+  [sandbox] 删除 f48ec2c9-97d1-4957-ae9e-d304446b0860
+  [sandbox] 删除 feaaaa9d-374e-4fff-b07a-e51d74928cbc
