@@ -179,6 +179,77 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void queryAfterReleasesConnectionBeforeEmitting() throws Exception {
+        // 用独立连接 mock——setUp 里的 conn 已被 initSchema 关闭过一次，
+        // 复用会让 verify(conn).close() 的计数失真
+        var queryConn = mock(java.sql.Connection.class);
+        var ps = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(queryConn);
+        when(queryConn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getInt("seq")).thenReturn(3);
+        when(rs.getString("event_type")).thenReturn("TEXT_BLOCK_DELTA");
+        when(rs.getString("payload")).thenReturn("{}");
+        when(rs.getString("reply_id")).thenReturn("rid-1");
+
+        var flux = store.queryAfter("sid-conn", "rid-1", 2);
+        StepVerifier.create(flux)
+            .expectNextMatches(e -> e.seq() == 3)
+            .verifyComplete();
+
+        // 关键：ResultSet / Statement / Connection 在事件被消费前就已关闭
+        verify(rs).close();
+        verify(ps).close();
+        verify(queryConn).close();
+    }
+
+    @Test
+    void queryAfterPagesThroughMultipleBatches() throws Exception {
+        var queryConn = mock(java.sql.Connection.class);
+        var ps = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(queryConn);
+        when(queryConn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+
+        int pageSize = SessionEventStore.queryPageSize();
+        // 第 1 页返回满页（pageSize 行）→ 触发第 2 次查询；第 2 页返回 0 行 → 结束
+        var remaining = new java.util.concurrent.atomic.AtomicInteger(pageSize);
+        when(rs.next()).thenAnswer(inv -> remaining.getAndDecrement() > 0);
+        var seqs = new java.util.ArrayDeque<Integer>();
+        for (int i = 1; i <= pageSize; i++) seqs.add(i);
+        when(rs.getInt("seq")).thenAnswer(inv -> seqs.isEmpty() ? 1 : seqs.poll());
+        when(rs.getString("event_type")).thenReturn("TEXT_BLOCK_DELTA");
+        when(rs.getString("payload")).thenReturn("{}");
+        when(rs.getString("reply_id")).thenReturn("rid-1");
+
+        StepVerifier.create(store.queryAfter("sid-page", "rid-1", 0))
+            .expectNextCount(pageSize)
+            .verifyComplete();
+
+        // 满页后应再发起一次查询（共 2 次）
+        verify(queryConn, times(2)).prepareStatement(anyString());
+    }
+
+    @Test
+    void queryAfterErrorsWhenPageQueryFails() throws Exception {
+        var queryConn = mock(java.sql.Connection.class);
+        when(dataSource.getConnection()).thenReturn(queryConn);
+        when(queryConn.prepareStatement(anyString()))
+            .thenThrow(new java.sql.SQLException("db down"));
+
+        // 回放中途查询失败必须是 error，不能静默 complete——
+        // 否则重连的客户端会拿到被截断的回放却以为自己已追平
+        StepVerifier.create(store.queryAfter("sid-err", "rid-1", 0))
+            .expectError(java.sql.SQLException.class)
+            .verify();
+    }
+
+    @Test
     void findLatestReturnsNullWhenEmpty() throws Exception {
         var conn = mock(java.sql.Connection.class);
         var ps = mock(java.sql.PreparedStatement.class);

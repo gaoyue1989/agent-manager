@@ -1,5 +1,6 @@
 package io.agentmanager.framework.service;
 
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -42,6 +43,14 @@ public class SessionEventStore {
 
     /** 默认攒批时间窗（毫秒）：超过则把缓冲刷出，限制重连回放的滞后 */
     private static final int DEFAULT_FLUSH_INTERVAL_MS = 1000;
+
+    /** 回放分页大小：限制单次查询 materialize 的行数 */
+    private static final int QUERY_PAGE_SIZE = 500;
+
+    /** 回放分页大小（测试可见） */
+    static int queryPageSize() {
+        return QUERY_PAGE_SIZE;
+    }
 
     private final DataSource dataSource;
     private final int retentionDays;
@@ -232,44 +241,63 @@ public class SessionEventStore {
     /**
      * 查询 afterSeq 之后的事件（回放用）。
      *
-     * @param afterSeq 游标：返回 seq > afterSeq 的记录；0 表示不回放
+     * <p>分页读取：每页在**独立连接内 materialize 成 List 后立即释放连接**，再从内存中
+     * 向外发。避免慢客户端反压时把数据库连接钉在整个推送期间（连接池默认仅 10）。
+     *
+     * @param afterSeq 游标：返回 seq > afterSeq 的记录
      * @param replyId  turn 标识（可选）；null 表示不限 turn
      */
     public Flux<EnvelopedEvent> queryAfter(String sessionId, String replyId, int afterSeq) {
-        String sql;
-        if (replyId != null && !replyId.isBlank()) {
-            sql = "SELECT seq, event_type, payload, reply_id FROM session_event "
-                + "WHERE session_id = ? AND reply_id = ? AND seq > ? ORDER BY seq ASC";
-        } else {
-            sql = "SELECT seq, event_type, payload, reply_id FROM session_event "
-                + "WHERE session_id = ? AND seq > ? ORDER BY seq ASC";
-        }
-
         return Flux.create(sink -> {
-            try (var conn = dataSource.getConnection();
-                 var ps = conn.prepareStatement(sql)) {
-                if (replyId != null && !replyId.isBlank()) {
-                    ps.setString(1, sessionId);
-                    ps.setString(2, replyId);
-                    ps.setInt(3, afterSeq);
-                } else {
-                    ps.setString(1, sessionId);
-                    ps.setInt(2, afterSeq);
+            int cursor = afterSeq;
+            try {
+                while (!sink.isCancelled()) {
+                    var page = queryPage(sessionId, replyId, cursor, QUERY_PAGE_SIZE);
+                    if (page.isEmpty()) break;
+                    for (var e : page) {
+                        if (sink.isCancelled()) return;
+                        sink.next(e);
+                        cursor = e.seq();
+                    }
+                    if (page.size() < QUERY_PAGE_SIZE) break;
                 }
-                var rs = ps.executeQuery();
-                while (rs.next() && !sink.isCancelled()) {
-                    sink.next(new EnvelopedEvent(
-                        rs.getInt("seq"),
-                        rs.getString("event_type"),
-                        rs.getString("payload"),
-                        rs.getString("reply_id")));
-                }
-                sink.complete();
+                if (!sink.isCancelled()) sink.complete();
             } catch (Exception e) {
                 log.warn("SessionEventStore: queryAfter failed for {}: {}", sessionId, e.getMessage());
                 sink.error(e);
             }
         });
+    }
+
+    /** 读取一页事件并 materialize 成 List（连接在方法返回前关闭） */
+    private List<EnvelopedEvent> queryPage(String sessionId, String replyId, int afterSeq, int limit)
+            throws SQLException {
+        boolean byReply = replyId != null && !replyId.isBlank();
+        String sql = byReply
+            ? "SELECT seq, event_type, payload, reply_id FROM session_event "
+                + "WHERE session_id = ? AND reply_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?"
+            : "SELECT seq, event_type, payload, reply_id FROM session_event "
+                + "WHERE session_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?";
+
+        var out = new ArrayList<EnvelopedEvent>();
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(sql)) {
+            int i = 1;
+            ps.setString(i++, sessionId);
+            if (byReply) ps.setString(i++, replyId);
+            ps.setInt(i++, afterSeq);
+            ps.setInt(i, limit);
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new EnvelopedEvent(
+                        rs.getInt("seq"),
+                        rs.getString("event_type"),
+                        rs.getString("payload"),
+                        rs.getString("reply_id")));
+                }
+            }
+        }
+        return out;
     }
 
     /**
