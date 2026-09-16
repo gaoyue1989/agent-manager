@@ -218,7 +218,21 @@ public class ChatStreamController {
             }
 
             // ===== 2. 启动续租 =====
-            TurnLeaseGuard lease = new TurnLeaseGuard(turnLeaseStore, finalSessionId, token);
+            // 构造失败必须显式释放：guard 的构造里若在起线程之前就抛了（判据计算、线程池创建），
+            // 没有任何人持有 token，而下面那段的 catch 也覆盖不到它。没有续租线程时租约会在
+            // TTL 后自然过期，不会永久锁死，但那是「靠超时自愈」，不该作为正常回滚手段。
+            TurnLeaseGuard lease;
+            try {
+                lease = new TurnLeaseGuard(turnLeaseStore, finalSessionId, token);
+            } catch (Exception e) {
+                log.error("[chat] failed to start lease renewer, releasing lease (sid={}): {}",
+                    finalSessionId, e.getMessage());
+                turnLeaseStore.release(finalSessionId, token);
+                sink.next(errorSSE("turn_setup_failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
+                sink.complete();
+                return;
+            }
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
@@ -257,6 +271,27 @@ public class ChatStreamController {
                             sink.error(e);
                         },
                         () -> sink.complete());
+
+                // ===== 6. 启动 agent 执行 =====
+                // sendStream 的**同步**异常也必须落在这个 try 里：它抛之前租约已经到手，
+                // 而续租线程不看本段是否还活着——漏放租约就是该 session 被永久锁死
+                // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
+                chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
+                    .subscribe(
+                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink),
+                        e -> {
+                            log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
+                            if (isTrailingSandboxTeardownError(e)) {
+                                log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
+                            } else if (!lease.isLost()) {
+                                // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
+                                eventBus.emitSynthetic(finalSessionId, replyId, "error",
+                                    "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
+                                        e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
+                            }
+                            endTurn(lease, finalSessionId);
+                        },
+                        () -> endTurn(lease, finalSessionId));
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
@@ -267,24 +302,6 @@ public class ChatStreamController {
                 sink.complete();
                 return;
             }
-
-            // ===== 6. 启动 agent 执行 =====
-            chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
-                .subscribe(
-                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink),
-                    e -> {
-                        log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
-                        if (isTrailingSandboxTeardownError(e)) {
-                            log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
-                        } else if (!lease.isLost()) {
-                            // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
-                            eventBus.emitSynthetic(finalSessionId, replyId, "error",
-                                "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
-                                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
-                        }
-                        endTurn(lease, finalSessionId);
-                    },
-                    () -> endTurn(lease, finalSessionId));
 
             // ===== 7. onCancel =====
             sink.onCancel(() -> {

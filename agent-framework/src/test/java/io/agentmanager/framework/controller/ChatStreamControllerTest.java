@@ -257,6 +257,55 @@ class ChatStreamControllerTest {
     }
 
     @Test
+    void chatShouldReleaseLeaseWhenSendStreamThrowsSynchronously() {
+        // sendStream 同步抛异常（如 channel 未就绪）时租约同样已经到手。这一刻执行流还
+        // **没有**走到 .subscribe(...)，所以没有任何终态回调会来收尾——不在准备段的 try
+        // 里兜住，续租线程就会带着这个 token 一直续期，该 session 再也无法执行。
+        var sessionId = "test-user-s5";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-5");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenThrow(new IllegalStateException("channel not ready"));
+
+        // 同步异常若逃到订阅者，说明准备段的 try 没兜住它 —— 显式转成断言失败，
+        // 否则这里只会抛出一个看不出跟租约有关的 IllegalStateException
+        var frames = new ArrayList<String>();
+        try {
+            frames.addAll(collect(sessionId, "hello", null));
+        } catch (Exception e) {
+            fail("sendStream 的同步异常不该逃逸给订阅者，应由准备段捕获并回滚: " + e);
+        }
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
+            "sendStream 同步失败应回错误帧: " + frames);
+        verify(turnLeaseStore).release(sessionId, "tok-5");
+        verify(eventStore, never()).append(any(), any(), any(), any());
+    }
+
+    @Test
+    void chatShouldReleaseLeaseWhenGuardConstructionFails() {
+        // 续租线程还没起、token 却已经在手上：没有别的地方会释放它。
+        // token 不释放则该 session 在 TTL 内拿不到租约（观察者也会一直 probe 到 RUNNING）。
+        var sessionId = "test-user-s6";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-6");
+        when(turnLeaseStore.renewInterval()).thenThrow(new IllegalStateException("bad config"));
+
+        var frames = new ArrayList<String>();
+        try {
+            frames.addAll(collect(sessionId, "hello", null));
+        } catch (Exception e) {
+            fail("租约启动失败应被回滚并回错误帧，而不是把异常抛给订阅者: " + e);
+        }
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
+            "租约启动失败应回错误帧: " + frames);
+        verify(turnLeaseStore).release(sessionId, "tok-6");
+        // 连 turn 都没开始，不该动到 EventBus 的会话状态
+        verify(eventStore, never()).finishTurn(any());
+        verify(eventStore, never()).abandonTurn(any());
+        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+    }
+
+    @Test
     void chatShouldQueueWithWaitingFramesWhenLeaseBusy() {
         // 缩短等待间隔，避免 15s 等待导致测试超时
         ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofMillis(50);
