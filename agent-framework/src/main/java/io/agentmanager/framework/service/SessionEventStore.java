@@ -47,6 +47,11 @@ public class SessionEventStore {
     /** 回放分页大小：限制单次查询 materialize 的行数 */
     private static final int QUERY_PAGE_SIZE = 500;
 
+    /** 预检发现重复行时打印的排查 SQL（人工去重用；本类**不**自动删数据） */
+    private static final String REMEDIATION_SQL =
+        "SELECT session_id, seq, COUNT(*) AS c, GROUP_CONCAT(id ORDER BY id) AS ids "
+            + "FROM session_event GROUP BY session_id, seq HAVING c > 1;";
+
     /** 回放分页大小（测试可见） */
     static int queryPageSize() {
         return QUERY_PAGE_SIZE;
@@ -110,27 +115,122 @@ public class SessionEventStore {
 
     /** 建表（幂等），失败 fail-fast */
     private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS session_event (
-                  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-                  session_id  VARCHAR(255) NOT NULL,
-                  seq         INT NOT NULL,
-                  event_type  VARCHAR(64) NOT NULL,
-                  payload     MEDIUMTEXT NOT NULL,
-                  reply_id    VARCHAR(64),
-                  created_at  DATETIME(3) NOT NULL,
-                  KEY idx_session_seq (session_id, seq),
-                  KEY idx_session_reply (session_id, reply_id, seq),
-                  KEY idx_created_at (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            log.info("SessionEventStore: session_event table ready");
+        try (var conn = dataSource.getConnection()) {
+            try (var stmt = conn.createStatement()) {
+                stmt.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS session_event (
+                      id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+                      session_id  VARCHAR(255) NOT NULL,
+                      seq         INT NOT NULL,
+                      event_type  VARCHAR(64) NOT NULL,
+                      payload     MEDIUMTEXT NOT NULL,
+                      reply_id    VARCHAR(64),
+                      created_at  DATETIME(3) NOT NULL,
+                      UNIQUE KEY uk_session_seq (session_id, seq),
+                      KEY idx_session_reply (session_id, reply_id, seq),
+                      KEY idx_created_at (created_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """);
+                log.info("SessionEventStore: session_event table ready");
+            }
+            // 既有库补键。放在 CREATE 之后、且自己吞掉全部异常：建表失败该 fail-fast，
+            // 补键失败不该（见 ensureUniqueSeqKey 的 javadoc）
+            ensureUniqueSeqKey(conn);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to init session_event table: " + e.getMessage(), e);
         }
     }
+
+    /**
+     * 幂等补 {@code uk_session_seq}（既有库用）；新库的 DDL 已带该键，此处直接返回。
+     *
+     * <p>这是 I2（turn_lease 保证单 writer）的**唯一兜底**：租约丢失到被察觉之间有一个续租
+     * 周期（默认 20s）的窗口，期间的写入会与新 owner 的 seq 区间重叠。没有这个键，重叠表现为
+     * 静默插入重复行（回放时前端看到重复事件）；有了它，表现为一次响亮失败的 INSERT。
+     *
+     * <p><b>本方法永不抛异常</b>：补索引失败只该少一层兜底，不该让服务起不来。
+     */
+    private void ensureUniqueSeqKey(java.sql.Connection conn) {
+        try {
+            if (hasIndex(conn, "uk_session_seq")) {
+                return;
+            }
+
+            // 预检：有重复则 ALTER 必然失败（已在真实库的 scratch 表上验证过 1062）。
+            // 按既定策略「响亮跳过」——不自动删数据、不 abort 启动，交人工处置。
+            var dups = findDuplicateSeqGroups(conn, 20);
+            if (!dups.isEmpty()) {
+                log.error("SessionEventStore: 检测到 {} 组重复的 (session_id, seq)，"
+                    + "本次**不创建**唯一键 uk_session_seq。重复行会让断线回放出现重复事件，"
+                    + "请人工核对后去重再重启（服务已在无兜底状态下运行）。排查：{}",
+                    dups.size(), REMEDIATION_SQL);
+                for (var d : dups) {
+                    log.error("  SessionEventStore: 重复组 session_id={}, seq={}, 行数={}",
+                        d.sessionId(), d.seq(), d.count());
+                }
+                return;
+            }
+
+            // 两条 ALTER 各自独立守卫，而不是合成一条原子 DDL。合成的版本看着漂亮，但
+            // 「ADD 成功 + DROP 因索引不存在而报错」会让整条语句回滚——兜底键就悄悄没了。
+            // 拆开后，加键与删冗余索引互不牵连，各自失败各自 WARN。
+            try (var stmt = conn.createStatement()) {
+                stmt.executeUpdate("ALTER TABLE session_event "
+                    + "ADD UNIQUE KEY uk_session_seq (session_id, seq)");
+                log.info("SessionEventStore: 已为 session_event 加上 UNIQUE KEY uk_session_seq");
+            } catch (Exception e) {
+                // 与 FileAssetStore 的既有 ALTER 同一取向：补索引失败不该拖垮启动
+                log.warn("SessionEventStore: 添加唯一键失败（服务继续运行，仅少了这层兜底）: {}",
+                    e.getMessage());
+            }
+            try (var stmt = conn.createStatement()) {
+                // 唯一键前缀与普通索引完全相同，后者纯属写放大——这张表是全服务最热的写入点
+                stmt.executeUpdate("ALTER TABLE session_event DROP INDEX idx_session_seq");
+                log.info("SessionEventStore: 已删除被唯一键完全覆盖的 idx_session_seq");
+            } catch (Exception e) {
+                log.warn("SessionEventStore: 删除冗余索引 idx_session_seq 失败（无害，仅多一份写放大）: {}",
+                    e.getMessage());
+            }
+        } catch (Exception e) {
+            // mock 的 Connection 上 getMetaData() 返回 null（NPE）也落在这里；
+            // 三个 store 单测都是 mock，这条路走不通就该安静跳过，而不是炸掉启动
+            log.warn("SessionEventStore: 唯一键检查跳过（{}）", e.toString());
+        }
+    }
+
+    /** 索引是否已存在（用 DatabaseMetaData，与 ThreadController.ensureRemarkColumn 同一手法） */
+    private static boolean hasIndex(java.sql.Connection conn, String indexName) throws SQLException {
+        try (var rs = conn.getMetaData()
+                .getIndexInfo(null, null, "session_event", false, false)) {
+            while (rs.next()) {
+                if (indexName.equalsIgnoreCase(rs.getString("INDEX_NAME"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 找出重复的 (session_id, seq) 组，按重复行数降序（用于「响亮跳过」时的诊断输出） */
+    private static List<DuplicateSeqGroup> findDuplicateSeqGroups(java.sql.Connection conn, int limit)
+            throws SQLException {
+        var out = new ArrayList<DuplicateSeqGroup>();
+        try (var ps = conn.prepareStatement(
+                "SELECT session_id, seq, COUNT(*) AS c FROM session_event "
+                    + "GROUP BY session_id, seq HAVING c > 1 ORDER BY c DESC, session_id LIMIT ?")) {
+            ps.setInt(1, limit);
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new DuplicateSeqGroup(
+                        rs.getString("session_id"), rs.getInt("seq"), rs.getInt("c")));
+                }
+            }
+        }
+        return out;
+    }
+
+    /** 一组重复的 (session_id, seq) */
+    private record DuplicateSeqGroup(String sessionId, int seq, int count) {}
 
     /**
      * 播种 seq 计数器（turn 开始时调用，必须在本 Pod 获得 turn_lease 之后）。
@@ -275,6 +375,16 @@ public class SessionEventStore {
                 ps.setString(idx++, r.replyId());
             }
             return ps.executeUpdate();
+        } catch (java.sql.SQLIntegrityConstraintViolationException e) {
+            // 撞 uk_session_seq：同一 session 上出现了第二个 writer——I2 被打破。
+            // 这是**最该响亮**的一种失败：租约没能串行化写入，seq 区间已经重叠。
+            // 单独一条日志是为了让它区别于「DB 抖动」那种可自愈的失败。
+            log.error("SessionEventStore: 唯一键冲突——session {} 上存在第二个 writer（I2 被违反）。"
+                + "本批 {} 行（seq {}..{}）已整批丢弃，未落库。"
+                + "这通常意味着某副本丢失 turn_lease 后仍继续写入；请核对 turn 租约与副本时钟。",
+                rows.get(0).sessionId(), rows.size(),
+                rows.get(0).seq(), rows.get(rows.size() - 1).seq(), e);
+            return -1;
         } catch (Exception e) {
             log.error("SessionEventStore: batch insert failed ({} rows, first session={}): {}",
                 rows.size(), rows.get(0).sessionId(), e.getMessage());

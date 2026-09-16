@@ -441,4 +441,150 @@ class SessionEventStoreTest {
         store.append("sid-fin", "r", "TEXT_BLOCK_DELTA", "{\"delta\":\"later\"}");
         verify(conn, times(2)).prepareStatement(contains("SELECT COALESCE(MAX"));
     }
+
+    // ===== uk_session_seq 的幂等迁移（既有库补唯一键）=====
+
+    /** 建表 + 补键路径所需的连接桩（只桩公共部分，各用例按需补） */
+    private MigrationProbe migrationProbe() throws Exception {
+        var probe = new MigrationProbe();
+        when(dataSource.getConnection()).thenReturn(probe.conn);
+        when(probe.conn.createStatement()).thenReturn(probe.stmt);
+        when(probe.conn.getMetaData()).thenReturn(probe.meta);
+        when(probe.meta.getIndexInfo(null, null, "session_event", false, false))
+            .thenReturn(probe.indexRs);
+        return probe;
+    }
+
+    private static final class MigrationProbe {
+        final java.sql.Connection conn = mock(java.sql.Connection.class);
+        final java.sql.Statement stmt = mock(java.sql.Statement.class);
+        final java.sql.DatabaseMetaData meta = mock(java.sql.DatabaseMetaData.class);
+        final java.sql.ResultSet indexRs = mock(java.sql.ResultSet.class);
+        final java.sql.PreparedStatement dupPs = mock(java.sql.PreparedStatement.class);
+        final java.sql.ResultSet dupRs = mock(java.sql.ResultSet.class);
+    }
+
+    @Test
+    void addsUniqueKeyOnCleanExistingTable() throws Exception {
+        var probe = migrationProbe();
+        when(probe.indexRs.next()).thenReturn(false);   // 无任何索引 → uk_session_seq 不存在
+        when(probe.conn.prepareStatement(contains("HAVING c > 1"))).thenReturn(probe.dupPs);
+        when(probe.dupPs.executeQuery()).thenReturn(probe.dupRs);
+        when(probe.dupRs.next()).thenReturn(false);     // 无重复行 → 可以干净加键
+
+        new SessionEventStore(dataSource, 7);
+
+        // 加键与删冗余索引必须是**两条独立语句**：合成一条原子 DDL 看着漂亮，但
+        // 「ADD 成功 + DROP 因索引不存在而报错」会让整条语句回滚——兜底键就悄悄没了。
+        // 故断言各自成句，而不是只断言两个片段都出现过。
+        verify(probe.stmt).executeUpdate(argThat(
+            (String s) -> s.contains("ADD UNIQUE KEY uk_session_seq (session_id, seq)")
+                && !s.contains("DROP INDEX")));
+        verify(probe.stmt).executeUpdate(argThat(
+            (String s) -> s.contains("DROP INDEX idx_session_seq") && !s.contains("ADD UNIQUE KEY")));
+    }
+
+    @Test
+    void skipsMigrationWhenUniqueKeyAlreadyPresent() throws Exception {
+        // 幂等：键已在就什么都不做。这是重启路径最常走的一条，也是安全的一条。
+        var probe = migrationProbe();
+        // 结果集里恰好一行。**必须**给有限的行数（而不是 thenReturn(true)）：
+        // 后者在「名字匹配」失效时会变成不终止的循环，把变异验证拖成 OOM 而不是一次失败。
+        when(probe.indexRs.next()).thenReturn(true, false);
+        when(probe.indexRs.getString("INDEX_NAME")).thenReturn("uk_session_seq");
+        // 预检桩设成 lenient：正确实现根本不会走到它，但「键已存在」的判断一旦失效，
+        // 代码就会跑到这里并发出 ALTER —— 那时本用例要靠 never(ALTER) 响亮地失败
+        lenient().when(probe.conn.prepareStatement(contains("HAVING c > 1"))).thenReturn(probe.dupPs);
+        lenient().when(probe.dupPs.executeQuery()).thenReturn(probe.dupRs);
+        lenient().when(probe.dupRs.next()).thenReturn(false);
+
+        new SessionEventStore(dataSource, 7);
+
+        verify(probe.stmt, never()).executeUpdate(contains("ALTER TABLE session_event"));
+        // 键已在，连重复预检都不必跑（预检是给 ALTER 兜底的）
+        verify(probe.conn, never()).prepareStatement(contains("HAVING c > 1"));
+    }
+
+    @Test
+    void loudlySkipsMigrationWhenDuplicatesExist() throws Exception {
+        // 既定策略「响亮跳过」：不自动删数据、不 abort 启动，只把涉事 session 列出来交人工。
+        // 已实测：有重复行时 ADD UNIQUE KEY 必然报 1062，所以这条路必须走在 ALTER 前面。
+        var probe = migrationProbe();
+        when(probe.indexRs.next()).thenReturn(false);
+        when(probe.conn.prepareStatement(contains("HAVING c > 1"))).thenReturn(probe.dupPs);
+        when(probe.dupPs.executeQuery()).thenReturn(probe.dupRs);
+        when(probe.dupRs.next()).thenReturn(true, false);   // 恰好一组重复
+        when(probe.dupRs.getString("session_id")).thenReturn("dup-sid");
+        when(probe.dupRs.getInt("seq")).thenReturn(7);
+        when(probe.dupRs.getInt("c")).thenReturn(2);
+
+        try (var logs = new LogCapture()) {
+            new SessionEventStore(dataSource, 7);
+
+            verify(probe.stmt, never()).executeUpdate(contains("ALTER TABLE session_event"));
+            assertTrue(logs.messages().stream()
+                    .anyMatch(m -> m.contains("不创建") && m.contains("HAVING c > 1")),
+                "应 ERROR 记下「本次不建键」并附排查 SQL，实际日志: " + logs.messages());
+            assertTrue(logs.messages().stream().anyMatch(m ->
+                    m.contains("dup-sid") && m.contains("seq=7") && m.contains("行数=2")),
+                "应逐条列出涉事 session，实际日志: " + logs.messages());
+        }
+    }
+
+    @Test
+    void duplicateKeyCollisionIsReportedAsSecondWriter() throws Exception {
+        // uk_session_seq 撞上 = 同一 session 出现了第二个 writer（I2 被违反）。
+        // 它与「DB 抖动」的处置相同（整批丢弃、返回 -1），差别全在日志——但那条日志
+        // 正是这个兜底存在的意义，所以要钉住它确实被记下来了。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(3);
+        when(conn.prepareStatement(startsWith("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenThrow(
+            new java.sql.SQLIntegrityConstraintViolationException(
+                "Duplicate entry 'sid-dup-4' for key 'session_event.uk_session_seq'"));
+
+        int seq;
+        List<String> logs;
+        try (var captured = new LogCapture()) {
+            seq = store.append("sid-dup", "r", "TOOL_CALL_START", "{}");
+            logs = captured.messages();
+        }
+
+        assertEquals(-1, seq, "整批丢弃，降级语义不变");
+        assertTrue(logs.stream().anyMatch(m -> m.contains("第二个 writer") && m.contains("sid-dup")),
+            "唯一键冲突必须被记为「第二个 writer」，而不是含糊的 batch insert failed，实际日志: "
+                + logs);
+    }
+
+    /** 把 SessionEventStore 的日志挂到 ListAppender 上（用完 close 摘除） */
+    private static final class LogCapture implements AutoCloseable {
+        private final ch.qos.logback.classic.Logger logger;
+        private final ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+            appender = new ch.qos.logback.core.read.ListAppender<>();
+
+        LogCapture() {
+            logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(SessionEventStore.class);
+            appender.start();
+            logger.addAppender(appender);
+        }
+
+        List<String> messages() {
+            return appender.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList();
+        }
+
+        @Override
+        public void close() {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
 }
