@@ -10,6 +10,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import io.agentscope.core.a2a.server.AgentScopeA2aServer;
 import io.agentscope.core.a2a.server.transport.jsonrpc.JsonRpcTransportWrapper;
+import io.agentmanager.framework.service.SessionUserStore;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -27,6 +28,9 @@ class A2AControllerTest {
 
     @MockBean
     private AgentScopeA2aServer a2aServer;
+
+    @MockBean
+    private SessionUserStore sessionUserStore;
 
     @MockBean
     private JsonRpcTransportWrapper wrapper;
@@ -205,14 +209,15 @@ class A2AControllerTest {
         when(wrapper.handleRequest(anyString(), anyMap(), any()))
             .thenThrow(new RuntimeException("sdk down"));
 
-        // SDK 异常向上抛出（官方实现不捕获，由容器处理）
-        org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () ->
-            mockMvc.perform(post("/")
+        // SDK 异常由 GlobalExceptionHandler 兜底，返回 500 JSON
+        mockMvc.perform(post("/")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                     {"jsonrpc":"2.0","id":"8","method":"tasks/get",
                      "params":{"id":"s1"}}
-                    """)));
+                    """))
+            .andExpect(status().isInternalServerError())
+            .andExpect(jsonPath("$.error").value("internal_error"));
     }
 
     @Test

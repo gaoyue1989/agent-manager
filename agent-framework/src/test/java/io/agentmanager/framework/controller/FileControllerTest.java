@@ -51,12 +51,9 @@ public class FileControllerTest {
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20,
-                "image/*,text/plain,text/markdown,text/csv,application/pdf,"
-                    + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
-                5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
-            new AgentManagerProperties.SseConfig(20, 5, 256));
                 AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME,
                 5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
+            new AgentManagerProperties.SseConfig(20, 5, 256),
             AgentManagerProperties.HarnessConfig.defaults());
     }
 
@@ -118,9 +115,8 @@ public class FileControllerTest {
             props.llm(), props.server(), props.checkpoint(), "/config", "",
             props.cleanup(), new AgentManagerProperties.FileConfig(false, 20, 20,
                 "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
+            new AgentManagerProperties.SseConfig(20, 5, 256),
             AgentManagerProperties.HarnessConfig.defaults());
-                "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
-            new AgentManagerProperties.SseConfig(20, 5, 256));
         var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxConfig.class));
         var file = new MockMultipartFile("file", "a.png", "image/png", new byte[]{1});
         assertEquals(HttpStatus.FORBIDDEN, c.upload(file, null, null, null).getStatusCode());

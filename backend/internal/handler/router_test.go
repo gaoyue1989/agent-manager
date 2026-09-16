@@ -243,6 +243,8 @@ func TestServicePatchEnvEndpoint(t *testing.T) {
 		t.Fatalf("patch while deploying: %d %s", w.Code, w.Body.String())
 	}
 
+	// 同 publishToRegisterFailed：改写注册地址避免 macOS mDNS 解析拖慢失败路径
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svcID).Update("cluster_url", "http://127.0.0.1:1")
 	_ = fk.SetReady("test", k8sName, 1)
 	waitForSvcStatus(t, core, svcID, store.StatusRegisterFailed)
 	w, _ = doJSON(t, r, http.MethodPatch, fmt.Sprintf("/api/v1/services/%d/env", svcID),
@@ -285,6 +287,8 @@ func TestServiceRegisterActionEndpoint(t *testing.T) {
 	w, out := doJSON(t, r, http.MethodPost, "/api/v1/services",
 		map[string]interface{}{"packageId": pkgID, "image": "agent-framework:latest"})
 	svcID := uint(out["data"].(map[string]interface{})["id"].(float64))
+	// 同 publishToRegisterFailed：改写注册地址避免 macOS mDNS 解析拖慢失败路径
+	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svcID).Update("cluster_url", "http://127.0.0.1:1")
 	_ = fk.SetReady("test", out["data"].(map[string]interface{})["k8sName"].(string), 1)
 	waitForSvcStatus(t, core, svcID, store.StatusRegisterFailed)
 

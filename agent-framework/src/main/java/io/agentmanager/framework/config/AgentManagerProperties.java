@@ -155,6 +155,26 @@ public record AgentManagerProperties(
             "image/*,text/plain,text/markdown,text/csv,application/pdf,"
                 + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
                 + "application/zip,application/x-zip-compressed";
+
+        /** 解析后的存储目录：显式配置优先；未配置则按 OS 选默认值 */
+        public String resolvedStorageLocalDir() {
+            if (storageLocalDir != null && !storageLocalDir.isBlank()) {
+                return storageLocalDir;
+            }
+            // 跨平台默认值
+            if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+                var localAppData = System.getenv("LOCALAPPDATA");
+                if (localAppData != null && !localAppData.isBlank()) {
+                    return localAppData + "\\agent-framework\\files";
+                }
+                var userProfile = System.getenv("USERPROFILE");
+                if (userProfile != null && !userProfile.isBlank()) {
+                    return userProfile + "\\AppData\\Local\\agent-framework\\files";
+                }
+                return "C:\\agent-framework\\files";
+            }
+            return "/data/files";
+        }
     }
 
     /**

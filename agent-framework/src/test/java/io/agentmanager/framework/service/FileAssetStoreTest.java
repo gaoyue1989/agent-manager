@@ -66,12 +66,14 @@ class FileAssetStoreTest {
 
         verify(ps).setString(1, "id-1");
         verify(ps).setString(2, "alice");
-        verify(ps).setString(4, "a.csv");
-        verify(ps).setLong(7, 10);
-        verify(ps).setString(8, "local");
-        verify(ps).setString(9, "upload/k/id-1.csv");
-        verify(ps).setString(10, "upload");
-        verify(ps).setString(11, "pending");
+        verify(ps).setString(3, "s1");
+        verify(ps).setString(5, "a.csv");
+        verify(ps).setString(7, "text/csv");
+        verify(ps).setLong(8, 10);
+        verify(ps).setString(9, "local");
+        verify(ps).setString(10, "upload/k/id-1.csv");
+        verify(ps).setString(11, "upload");
+        verify(ps).setString(12, "pending");
         verify(ps).executeUpdate();
     }
 
