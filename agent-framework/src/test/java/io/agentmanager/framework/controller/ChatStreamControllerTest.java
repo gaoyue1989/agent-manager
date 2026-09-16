@@ -332,14 +332,14 @@ class ChatStreamControllerTest {
 
     @Test
     void chatShouldRejectBlankMessage() {
-        var frames = collect("test-user-s4", "", "alice");
+        var frames = collect("test-user-s8", "", "alice");
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("message or fileIds is required")),
             "空消息应返回 error 帧: " + frames);
     }
 
     @Test
     void chatShouldAttachSessionKeyToUserMessage() {
-        var sessionId = "test-user-s5";
+        var sessionId = "test-user-s7"; // 不与 chatShouldReleaseLeaseWhenSendStreamThrowsSynchronously 复用：JUnit 方法顺序在 JDK 间有差异，复用会话 ID 会让前者的收尾与后者的租约验证交错
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-5");
         var end = new AgentEndEvent("reply-5");
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
@@ -387,7 +387,7 @@ class ChatStreamControllerTest {
 
     @Test
     void chatShouldNotEmitSessionCreatedWhenSessionIdProvided() {
-        var sessionId = "test-user-s6";
+        var sessionId = "test-user-s9"; // 不与 chatShouldReleaseLeaseWhenGuardConstructionFails 复用（同上）
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-6");
         var end = new AgentEndEvent("reply-6");
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
