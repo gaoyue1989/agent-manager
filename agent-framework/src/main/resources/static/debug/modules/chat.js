@@ -1406,6 +1406,21 @@ function handleEvent(data) {
       }
       break;
     }
+    case 'interrupted': {
+      // 执行副本崩溃/被抢占：服务端回放完已落库事件后补发的终止帧（不携带 replyId）
+      isStreaming = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('danger');
+      if (r) {
+        const itr = document.createElement('div');
+        itr.className = 'msg system';
+        itr.style.color = 'var(--red)';
+        itr.textContent = '执行已中断：执行该任务的副本失去响应，本次回复可能不完整。可刷新页面查看最新状态，或重新发送消息。';
+        messagesEl.appendChild(itr);
+      }
+      break;
+    }
     default:
       break;
   }
@@ -1596,7 +1611,10 @@ async function sendChannelSingleStream(text, sid, fileIds) {
     setTimeout(() => {
       // 先查状态，确认 turn 是否仍在执行
       ctx.api.getStatus(sid).then(status => {
-        if (status.state === 'working' || status.state === 'waiting_confirm') {
+        // ★ interrupted 也走订阅：观察者路径会先回放已落库的部分输出（用户能看到确实产出的内容），
+        // 再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
+        // 若落入下面的 else 分支，用户只会看到一个没有任何内容的 AGENT_END，无从得知执行已中断。
+        if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
           currentReplyId = status.reply_id || currentReplyId;
           subscribeWithReconnect(sid, lastEventId, currentReplyId);
         } else if (status.state === 'completed') {
