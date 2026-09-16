@@ -35,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -89,6 +90,8 @@ class ChatStreamControllerTest {
             Duration.ofMillis(100), Duration.ofMinutes(5), 64);
 
         when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
+        lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
         when(sandboxConfig.enabled()).thenReturn(false);
         when(props.file()).thenReturn(FileControllerTest.testProps().file());
         when(runtimeService.findPendingConfirm(anyString())).thenReturn(null);

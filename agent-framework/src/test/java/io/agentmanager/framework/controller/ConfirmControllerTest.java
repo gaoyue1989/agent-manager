@@ -33,6 +33,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -63,6 +64,8 @@ class ConfirmControllerTest {
         confirmContextStore = mock(ConfirmContextStore.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
         when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
+        lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
 
         // SessionEventBus 依赖 SessionEventStore（mock）
         SessionEventStore eventStore = mock(SessionEventStore.class);
