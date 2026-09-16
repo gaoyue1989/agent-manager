@@ -191,4 +191,54 @@ class SessionEventTailerTest {
             "观察者路径的 payload 未注入 replyId: " + observed.data());
         assertEquals("3", observed.id());
     }
+
+    @Test
+    void tailFollowsEventsWrittenByAnotherReplica() {
+        // 场景：执行发生在 Pod A，观察者在 Pod B。
+        // Pod B 没有该 session 的 sink，只能读 DB。
+        when(eventStore.queryAfter("sid-x", "rid-x", 0))
+            .thenReturn(Flux.empty())                                   // 回放：Pod A 尚未产出
+            .thenReturn(Flux.empty())                                   // 追赶第 1 轮：仍为空
+            .thenReturn(Flux.just(new SessionEventStore.EnvelopedEvent(1, "TEXT_BLOCK_DELTA",
+                "{\"type\":\"TEXT_BLOCK_DELTA\",\"delta\":\"from-A\"}", "rid-x")));
+        when(eventStore.queryAfter("sid-x", "rid-x", 1))
+            .thenReturn(Flux.just(new SessionEventStore.EnvelopedEvent(2, "AGENT_END", "{}", "rid-x")));
+        // 追赶第 1 轮为空时会立即探测一次：Pod A 仍在执行 → RUNNING → 继续轮询
+        when(turnLeaseStore.isHeld("sid-x")).thenReturn(true);
+
+        // 帧序与 tailReplaysThenEmitsDoneWhenTurnFinished 一致：
+        // Pod A 写入的终态事件本身先发，随后才是本地补的 done 帧
+        StepVerifier.create(tailer.tail("sid-x", "rid-x", 0))
+            .expectNextMatches(sse -> sse.data().contains("from-A"))
+            .expectNextMatches(sse -> "2".equals(sse.id()))
+            .expectNextMatches(sse -> sse.data().contains("done"))
+            .verifyComplete();
+    }
+
+    @Test
+    void concurrentViewersEachGetTheirOwnTail() {
+        // 多标签页：第二个订阅者不再受 multicast 语义影响——
+        // 每个订阅者独立读 DB，各自持有游标。
+        when(eventStore.queryAfter(eq("sid-m"), isNull(), anyInt())).thenAnswer(inv -> {
+            int cursor = inv.getArgument(2);
+            if (cursor < 1) {
+                return Flux.just(new SessionEventStore.EnvelopedEvent(1, "TEXT_BLOCK_DELTA",
+                    "{\"type\":\"TEXT_BLOCK_DELTA\",\"delta\":\"shared\"}", null));
+            }
+            if (cursor < 2) {
+                return Flux.just(new SessionEventStore.EnvelopedEvent(2, "AGENT_END", "{}", null));
+            }
+            return Flux.empty();
+        });
+
+        var a = tailer.tail("sid-m", null, 0).collectList().block(Duration.ofSeconds(5));
+        var b = tailer.tail("sid-m", null, 0).collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(a);
+        assertNotNull(b);
+        assertEquals(3, a.size(), "订阅者 A 应收到 delta + 终态事件 + done");
+        assertEquals(3, b.size(), "订阅者 B 应收到 delta + 终态事件 + done");
+        assertTrue(a.get(0).data().contains("shared"), "A 收到的首个事件应是 delta");
+        assertTrue(b.get(0).data().contains("shared"), "B 收到的首个事件应是 delta");
+    }
 }
