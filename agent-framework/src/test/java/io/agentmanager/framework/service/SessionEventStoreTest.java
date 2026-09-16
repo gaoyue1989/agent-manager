@@ -555,6 +555,62 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void allDeltaSuffixTypesAreBuffered() throws Exception {
+        // 事件词表由外部依赖 io.agentscope.core.event.AgentEventType 拥有，`*_DELTA` 共 6 种。
+        // 原先硬编码白名单只列了 2 种（TEXT/THINKING_BLOCK_DELTA），另外 4 种落进里程碑分支、
+        // 每条都立刻刷一次批：线上实测 88,445 条 TOOL_CALL_DELTA 就是 88,445 条 INSERT。
+        // 这条用例把 6 种全覆盖，挡住「再退回白名单式判定」这个方向。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(0);
+        lenient().when(conn.prepareStatement(startsWith("INSERT INTO session_event"))).thenReturn(insertPs);
+
+        store.seedSeq("sid-delta6");
+        for (String type : List.of("TEXT_BLOCK_DELTA", "THINKING_BLOCK_DELTA", "DATA_BLOCK_DELTA",
+                                   "TOOL_CALL_DELTA", "TOOL_RESULT_TEXT_DELTA",
+                                   "TOOL_RESULT_DATA_DELTA")) {
+            store.append("sid-delta6", "r", type, "{}");
+        }
+
+        verify(conn, never()).prepareStatement(startsWith("INSERT INTO session_event"));
+        verify(insertPs, never()).executeUpdate();
+    }
+
+    @Test
+    void milestoneTypesStillFlushImmediately() throws Exception {
+        // 后缀判定的另一侧：非 `*_DELTA` 一律里程碑，必须立即刷出——回放的骨架
+        // （turn 起止、块边界、工具调用边界）不能压在缓冲里等攒批。
+        var conn = mock(java.sql.Connection.class);
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(contains("SELECT COALESCE(MAX"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        when(rs.getInt(1)).thenReturn(0);
+        when(conn.prepareStatement(startsWith("INSERT INTO session_event"))).thenReturn(insertPs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        store.seedSeq("sid-mile");
+        for (String type : List.of("AGENT_START", "TEXT_BLOCK_START", "TOOL_CALL_START",
+                                   "TOOL_CALL_END", "TEXT_BLOCK_END", "AGENT_END")) {
+            store.append("sid-mile", "r", type, "{}");
+        }
+
+        // 每个里程碑各自一批（到达时缓冲为空）→ 6 次刷出，而不是全压在最后一起写
+        verify(insertPs, times(6)).executeUpdate();
+    }
+
+    @Test
     void milestoneFlushesBufferedDeltasInSameStatement() throws Exception {
         var conn = mock(java.sql.Connection.class);
         var selectPs = mock(java.sql.PreparedStatement.class);

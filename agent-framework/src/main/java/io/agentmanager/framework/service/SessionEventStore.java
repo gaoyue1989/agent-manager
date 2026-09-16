@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.DataSource;
@@ -34,9 +33,25 @@ public class SessionEventStore {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventStore.class);
 
-    /** delta 类事件：进缓冲攒批，不逐条落库 */
-    private static final Set<String> DELTA_EVENT_TYPES =
-        Set.of("TEXT_BLOCK_DELTA", "THINKING_BLOCK_DELTA");
+    /** delta 类事件的后缀：进缓冲攒批，不逐条落库 */
+    private static final String DELTA_SUFFIX = "_DELTA";
+
+    /**
+     * 是否是流式增量事件（进缓冲攒批）。
+     *
+     * <p><b>按后缀判定，不维护白名单。</b>事件词表由外部依赖 `io.agentscope.core.event.AgentEventType`
+     * 拥有，且它会长：`*_DELTA` 共 6 种（TEXT/THINKING/DATA_BLOCK、TOOL_CALL、TOOL_RESULT_TEXT/DATA）。
+     * 原先硬编码只列了 2 种，于是另外 4 种落进「里程碑」分支、**每一条都立刻刷一次批**——实测
+     * 88,445 条 `TOOL_CALL_DELTA` 就是 88,445 条 INSERT，写放大 26 倍，而这是**词表漂移**造成的
+     * 静默退化，不是有人做了错误决定。按后缀判定后，依赖再加 delta 类型也不会退化。
+     *
+     * <p>误判的代价是不对称的：把里程碑当 delta 只会让回放的可见延迟 ≤ 一个刷出窗口
+     * （实时流不受影响——`emit` 是先 append 再推 sink）；把 delta 当里程碑则是每 token 一条写。
+     * 所以这里宁可放宽。
+     */
+    private static boolean isDelta(String eventType) {
+        return eventType != null && eventType.endsWith(DELTA_SUFFIX);
+    }
 
     /** 默认批量大小（行数） */
     private static final int DEFAULT_BATCH_SIZE = 200;
@@ -330,7 +345,7 @@ public class SessionEventStore {
             var buf = pending.computeIfAbsent(sessionId, k -> new Buffer());
             buf.rows.add(row);
             long now = System.currentTimeMillis();
-            boolean milestone = !DELTA_EVENT_TYPES.contains(eventType);
+            boolean milestone = !isDelta(eventType);
             // 三个条件都只按**本 session** 的行数/时间窗评估：别的 session 攒了多少与
             // 本 session 的回放滞后无关，不该由它触发刷出
             boolean full = buf.rows.size() >= batchSize;
