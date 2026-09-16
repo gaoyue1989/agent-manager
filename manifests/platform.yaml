@@ -176,6 +176,14 @@ spec:
 ---
 # 仅 ClusterIP，**无密码**：agent Pod 的环境变量来自 ConfigMap（oaf-release-agent-env），
 # 在那里面放密码等于明文存放。与 MySQL 同级的信任模型（同 namespace 内可达）。
+#
+# ⚠️ 部署必做（不做则回放全挂，且是静默的配置错位）：
+#   在 oaf-release-agent-env 里补一条
+#     AGENT_REDIS_URL = redis://oaf-redis.agent-platform.svc.cluster.local:6379
+#   否则 AgentRedisProperties 取默认值 redis://127.0.0.1:6379 —— 那指向 agent Pod **自己**的
+#   localhost，容器里并没有 Redis。后果：XADD 连接失败（append 返回 -1、事件不落地）、
+#   回放读不到、/status 直接 503。该默认值是为本地开发（application.yml 不入版本控制）设的，
+#   进了集群必须显式覆盖。
 apiVersion: v1
 kind: Service
 metadata:
