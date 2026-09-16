@@ -177,6 +177,16 @@
             <artifactId>HikariCP</artifactId>
         </dependency>
 
+        <!-- Redis 客户端（session_event 存储，见 docs/durable-sse-multinode-impl-plan.md）
+             只引 lettuce-core，**不用** spring-boot-starter-data-redis：仓库惯例是手搓基础设施
+             bean（DataSource 就是手工建的 Hikari，不引 starter-jdbc），且能避免
+             spring.data.redis.* 与 agent.redis.* 两套配置命名空间打架。
+             版本由 spring-boot-dependencies 管（Boot 3.3.5 → lettuce 6.3.2.RELEASE）。 -->
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+        </dependency>
+
         <!-- YAML parsing for AGENTS.md -->
         <dependency>
             <groupId>org.yaml</groupId>

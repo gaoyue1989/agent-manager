@@ -19,6 +19,12 @@ import org.springframework.context.annotation.Configuration;
 
 import com.zaxxer.hikari.HikariDataSource;
 
+import io.lettuce.core.ClientOptions;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.SocketOptions;
+import io.lettuce.core.TimeoutOptions;
+
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
 import io.agentmanager.framework.sandbox.opensandbox.WorkspaceSyncService;
@@ -160,6 +166,43 @@ public class AgentScopeConfig {
         ds.setIdleTimeout(pool.dbPoolIdleTimeoutMs());
         ds.setMaxLifetime(pool.dbPoolMaxLifetimeMs());
         return ds;
+    }
+
+    /**
+     * Redis 客户端（session_event 事件流存储，见 docs/durable-sse-multinode-impl-plan.md）。
+     *
+     * <p><b>这里只建客户端，不建连接。</b>Lettuce 是懒连接的，所以 Redis 不可达**不会**让启动失败；
+     * 真正的连接（以及随之而来的启动自检）发生在 {@code RedisEventLog} 首次使用时。这是刻意的：
+     * Redis 的一次滚动重启不能变成整个 agent 集群的崩溃循环。
+     *
+     * <p>与「不可达」相对的是「配置错」：URL 非法时 {@code RedisURI.create} 抛
+     * {@link IllegalArgumentException}，bean 创建失败 → 启动失败。那属于打包/发布错误，
+     * 早失败早发现，两者必须区别对待。
+     */
+    @Bean(destroyMethod = "shutdown")
+    public RedisClient redisClient(AgentRedisProperties redis) {
+        var options = ClientOptions.builder()
+            .socketOptions(SocketOptions.builder()
+                .connectTimeout(Duration.ofMillis(redis.connectTimeoutMs()))
+                .build())
+            // 必须显式开命令超时：Lettuce 的 TimeoutOptions.DEFAULT_TIMEOUT_COMMANDS 是 false
+            // （命令超时默认关闭），而 RedisURI.DEFAULT_TIMEOUT 是 60 秒（javap 核对 6.3.2）。
+            // 本应用是 servlet/Tomcat，线程池有限——不钳住就是一条命令占住一个请求线程 60 秒。
+            .timeoutOptions(TimeoutOptions.enabled(Duration.ofMillis(redis.commandTimeoutMs())))
+            .autoReconnect(true)
+            // 断线期间**拒绝**命令而不是缓冲：agent 线程要立刻拿到失败（append 返回 -1、回放报错），
+            // 而不是阻塞到重连成功。缓冲还会在重连后一次性灌出一批陈旧写入。
+            .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
+            .build();
+        var uri = RedisURI.create(redis.url());
+        var client = RedisClient.create(uri);
+        // 必须在首次 connect 之前设置
+        client.setOptions(options);
+        // 只打 host/port/db，**不打原始 URL**——URL 里可能带密码
+        log.info("RedisClient configured (host={}:{}, db={}, commandTimeout={}ms, connectTimeout={}ms, maxLenPerStream={})",
+            uri.getHost(), uri.getPort(), uri.getDatabase(),
+            redis.commandTimeoutMs(), redis.connectTimeoutMs(), redis.maxLenPerStream());
+        return client;
     }
 
     /**
