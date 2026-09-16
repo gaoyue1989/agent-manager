@@ -156,6 +156,27 @@ class SessionEventBusTest {
         assertSame(sink, eventBus.ensureSink("sid-begin"));
     }
 
+    @Test
+    void closeSessionAfterEmitStillDeliversEventToSubscriber() {
+        // HITL 时序契约：先 emit(permission_ask) 再 closeSession，
+        // 订阅者必须收到该事件，然后才收到 onComplete。
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+
+        var flux = eventBus.subscribe("sid-hitl", 0, "rid-h")
+            .filter(sse -> sse.data() != null)
+            .take(1)
+            .timeout(Duration.ofSeconds(3));
+
+        StepVerifier.create(flux)
+            .then(() -> {
+                eventBus.emitSynthetic("sid-hitl", "rid-h", "permission_ask",
+                    "{\"type\":\"permission_ask\"}");
+                eventBus.closeSession("sid-hitl");
+            })
+            .expectNextMatches(sse -> sse.data().contains("permission_ask"))
+            .verifyComplete();
+    }
+
     // ===== 辅助方法 =====
 
     private static AgentEvent mockAgentEvent(String delta) {

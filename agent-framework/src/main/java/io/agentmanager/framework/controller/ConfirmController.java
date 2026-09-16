@@ -91,7 +91,7 @@ public class ConfirmController {
      * <p>与 ChatStreamController.chat 相同的模式：
      * <ol>
      *   <li>acquire turn 租约</li>
-     *   <li>ensureSink — 确保 EventBus 有输出通道</li>
+     *   <li>beginTurn — 播种 seq 计数器并确保 EventBus 有输出通道</li>
      *   <li>先订阅 EventBus → SSE（避免与 agent 执行的竞态）</li>
      *   <li>启动 agent 恢复执行 → 事件写入 EventBus</li>
      *   <li>onCancel 仅取消 SSE 订阅，不 dispose agent 管道</li>
@@ -133,7 +133,7 @@ public class ConfirmController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
-            eventBus.ensureSink(finalSessionId);
+            eventBus.beginTurn(finalSessionId);
 
             // ===== 4. 先订阅 EventBus → SSE =====
             eventBus.subscribe(finalSessionId, 0, replyId)
@@ -188,6 +188,11 @@ public class ConfirmController {
 
         // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）
         eventBus.emit(sessionId, event, replyId);
+
+        // HITL 是 turn 边界：permission_ask 已广播，关闭 sink（同上）
+        if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
+            eventBus.closeSession(sessionId);
+        }
 
         // AGENT_END → 关闭 EventBus
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {

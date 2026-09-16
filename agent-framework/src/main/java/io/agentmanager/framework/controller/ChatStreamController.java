@@ -221,7 +221,7 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
-            eventBus.ensureSink(finalSessionId);
+            eventBus.beginTurn(finalSessionId);
 
             // ===== 4. 构造消息 =====
             // 注入 @Skill 引用
@@ -312,6 +312,12 @@ public class ChatStreamController {
         }
 
         eventBus.emit(sessionId, event, replyId);
+
+        // HITL 是 turn 边界：permission_ask 已广播，关闭 sink 让订阅者正常结束。
+        // 必须在 emit 之后——否则订阅者收不到 permission_ask（durable-sse-multinode-plan §3.4.4）。
+        if (event instanceof RequireUserConfirmEvent) {
+            eventBus.closeSession(sessionId);
+        }
 
         // present_file 完成合成 file_ready
         if (event instanceof ToolResultEndEvent tre && "present_file".equals(tre.getToolCallName())) {
