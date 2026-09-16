@@ -50,6 +50,11 @@ public class TurnLeaseStore {
         return renewInterval;
     }
 
+    /** 租约 TTL（TurnLeaseGuard 用于判断「续租故障已持续超过一个租约周期」） */
+    public Duration ttl() {
+        return ttl;
+    }
+
     /** 建表（幂等），失败 fail-fast（DB 不可用本就不该继续） */
     private void initSchema() {
         try (var conn = dataSource.getConnection();
@@ -155,11 +160,29 @@ public class TurnLeaseStore {
     }
 
     /**
+     * 续租结果。
+     *
+     * <p>三态而非 boolean 的原因：调用方对这两种「没续上」的处置**必须不同**——
+     * 「真丢锁」要立刻停手，而「瞬时故障」应当重试。合并成一个 false 会退化成
+     * 「一次连接池抖动 = 永久停掉本 turn 的续租」，TTL 过后被别的副本接管，
+     * 而本副本仍在执行、仍在写，两侧 seq 区间重叠（静默写重复行）。
+     */
+    public enum RenewOutcome {
+        /** 续租成功，租约仍是自己的 */
+        HELD,
+        /** UPDATE 影响 0 行：租约已被接管或已释放——真的失去了执行权 */
+        LOST,
+        /** DB 瞬时故障（连接池耗尽、连接重置等）：租约状态未知，应当重试 */
+        ERROR
+    }
+
+    /**
      * 续租：延长租约 TTL。
      *
-     * @return true 续租成功；false 租约已被接管/释放（停止续租的优雅退出信号）
+     * @return {@link RenewOutcome#HELD} 续租成功；{@link RenewOutcome#LOST} 已被接管/释放；
+     *         {@link RenewOutcome#ERROR} 瞬时故障，调用方应重试
      */
-    public boolean renew(String sessionId, String token) {
+    public RenewOutcome renew(String sessionId, String token) {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  UPDATE turn_lease SET expires_at = DATE_ADD(NOW(3), INTERVAL ? SECOND)
@@ -168,10 +191,10 @@ public class TurnLeaseStore {
             stmt.setInt(1, (int) ttl.toSeconds());
             stmt.setString(2, sessionId);
             stmt.setString(3, token);
-            return stmt.executeUpdate() == 1;
+            return stmt.executeUpdate() == 1 ? RenewOutcome.HELD : RenewOutcome.LOST;
         } catch (Exception e) {
-            log.warn("TurnLeaseStore: renew failed for {}: {}", sessionId, e.getMessage());
-            return false;
+            log.warn("TurnLeaseStore: renew errored for {}: {}", sessionId, e.getMessage());
+            return RenewOutcome.ERROR;
         }
     }
 
