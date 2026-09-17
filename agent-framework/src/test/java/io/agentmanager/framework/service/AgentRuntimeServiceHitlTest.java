@@ -179,6 +179,29 @@ class AgentRuntimeServiceHitlTest {
     }
 
     @Test
+    void resumeWithConfirmShouldApproveOnlyExplicitBooleanTrue() {
+        stubStoreRow();
+        var reply = mock(Msg.class);
+        when(reply.getTextContent()).thenReturn("done");
+        when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(reply));
+        var decisions = new Object[] { null, "true", "false", 1, false, true };
+        for (var decision : decisions) {
+            var result = new java.util.HashMap<String, Object>();
+            result.put("tool_call_id", "call-1");
+            if (decision != null) result.put("confirmed", decision);
+            service.resumeWithConfirm(SID, null, List.of(result));
+        }
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass((Class<List<Msg>>) (Class<?>) List.class);
+        verify(agent, times(decisions.length)).call(captor.capture(), any(RuntimeContext.class));
+        for (int i = 0; i < decisions.length; i++) {
+            var raw = (List<?>) captor.getAllValues().get(i).get(0).getMetadata().get(Msg.METADATA_CONFIRM_RESULTS);
+            var result = (ConfirmResult) raw.get(0);
+            assertEquals(Boolean.TRUE.equals(decisions[i]), result.isConfirmed(), "confirmed=" + decisions[i]);
+        }
+    }
+
+    @Test
     void resumeWithConfirmShould404WhenNoStoredRow() {
         when(confirmContextStore.consume(anyString()))
             .thenThrow(new AgentRuntimeService.ConfirmContextNotFoundException(SID));

@@ -7,11 +7,21 @@ connection:
   url: http://platform-backend.agent-platform.svc.cluster.local:8080/mcp
   timeout: 300
 
-# 平台发布助手需要完整读写能力：
-# read_only=true 使 McpToolRegistrar 将全部工具以 readOnly 语义注册，
-# 从而绕过 SDK 对非只读 MCP 写工具的内置 HITL 拦截（发布助手为可信内部组件）
+# 人工确认核心：五个变更类工具必须经 permission_ask 由人核对参数后执行；
+# 查询类、上传与注册重试为 allow 直接执行（平台可信内网，无独立身份体系）。
+# 禁止再配置 read_only: true / permission.mode: bypass —— 二者会短路 ask 确认流
+# （read_only 强制 readOnly 注册，bypass 全放行，见 McpToolRegistrar）。
 permissions:
-  read_only: true
   tools:
-    # 显式声明至少一条以激活 HITL 权限上下文；配合 frontmatter permission.mode=bypass 全放行
-    publish_service: allow
+    list_images: allow
+    list_packages: allow
+    get_package_detail: allow
+    list_services: allow
+    get_service_status: allow
+    upload_package: allow
+    register_service: allow
+    publish_service: ask
+    update_service_env: ask
+    republish_service: ask
+    unpublish_service: ask
+    delete_service: ask

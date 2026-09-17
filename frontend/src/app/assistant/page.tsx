@@ -6,6 +6,8 @@
 // Markdown：react-markdown + remark-gfm（表格/任务列表/删除线）+ rehype-sanitize（净化）
 //          代码块走 Prism oneLight 高亮；光标 span 作为 Markdown 外层兄弟节点，不进解析器
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { completeToolCall } from "@/lib/assistant-events";
+import PermissionCard, { createConfirmCard, type ConfirmCard, type ConfirmResult } from "./components/PermissionCard";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
@@ -17,12 +19,12 @@ type ChatMsg = {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
   pending?: boolean;   // 工具行执行中
+  toolCallId?: string;
   confirm?: ConfirmCard;
   files?: FileCard[];  // file_ready 渲染的下载卡片
 };
 type FileCard = { file_id: string; file_name: string; mime_type: string; size: number; download_url: string };
 type AttachItem = { fileId: string; name: string; mime: string; size: number };
-type ConfirmCard = { toolCalls: { tool_call_id: string; name: string; input: unknown }[] };
 type ThreadItem = { peer: string; fullKey: string; updatedAt: string };
 
 // HTTP 环境非安全上下文无 crypto.randomUUID，用时间戳+随机串兜底
@@ -57,6 +59,7 @@ export default function AssistantPage() {
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const confirmInFlight = useRef(false);
   const [attachments, setAttachments] = useState<AttachItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -66,7 +69,11 @@ export default function AssistantPage() {
   // 历史会话：GET /threads 列表（ChatUiChannel 来源，最近 20 条）；showHistory 控制侧栏显隐
   const [threads, setThreads] = useState<ThreadItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const sessionLoading = useRef(true);
+  // 存在未处理（pending/unknown）确认卡时锁定发送，避免新请求覆盖运行时未消费的确认上下文
+  const awaitingConfirm = messages.some((m) => m.confirm && (m.confirm.status === "pending" || m.confirm.status === "unknown"));
+  const sessionLocked = busy || historyLoading || uploading;
 
   const loadThreads = useCallback(async () => {
     try {
@@ -117,7 +124,7 @@ export default function AssistantPage() {
         // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）
         if (data.pendingConfirm?.tools?.length) {
           try {
-            msgs.push({ role: "assistant", content: "", confirm: { toolCalls: data.pendingConfirm.tools } });
+            msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools) });
           } catch { /* 工具格式异常忽略 */ }
         }
       }
@@ -127,7 +134,10 @@ export default function AssistantPage() {
 
   /** 切换到历史会话：更新本地会话 id → 回放历史消息（上下文由后端 checkpoint 自动恢复） */
   const selectSession = useCallback(async (item: ThreadItem) => {
-    if (busy) return;
+    if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
+    sessionLoading.current = true;
+    setAttachments([]);
+    setInput("");
     window.localStorage.setItem("oaf-assistant-sid", item.peer);
     sessionId.current = item.peer;
     setHistoryLoading(true);
@@ -136,23 +146,29 @@ export default function AssistantPage() {
     setMessages(msgs.length > 0
       ? msgs
       : [{ role: "system", content: "该会话暂无可展示的历史消息，可直接继续对话。" }]);
+    sessionLoading.current = false;
     setHistoryLoading(false);
-  }, [busy, loadHistory]);
+  }, [sessionLocked, loadHistory]);
 
   useEffect(() => {
-    sessionId.current = getSessionId();
-  }, []);
+    const sid = getSessionId();
+    sessionId.current = sid;
+    let cancelled = false;
+    setHistoryLoading(true);
+    loadHistory(sid).then((msgs) => {
+      if (!cancelled && msgs.length) setMessages(msgs);
+    }).finally(() => {
+      if (!cancelled) {
+        sessionLoading.current = false;
+        setHistoryLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [loadHistory]);
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages]);
 
-  const updateLast = useCallback((fn: (m: ChatMsg) => ChatMsg) => {
-    setMessages((prev) => {
-      const next = [...prev];
-      next[next.length - 1] = fn(next[next.length - 1]);
-      return next;
-    });
-  }, []);
   // 文本增量必须落到「最后一条 assistant 气泡」——工具状态行会插在其后
   const updateLastAssistant = useCallback((fn: (m: ChatMsg) => ChatMsg) => {
     setMessages((prev) => {
@@ -234,17 +250,18 @@ export default function AssistantPage() {
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
         case "TOOL_CALL_START":
-          setMessages((prev) => [...prev, { role: "tool", content: `🔧 ${ev.toolName}`, pending: true }]);
+          setMessages((prev) => [...prev, { role: "tool", content: `🔧 ${ev.toolName}`, toolCallId: ev.toolCallId, pending: true }]);
           break;
         case "TOOL_RESULT_END": {
-          setMessages((prev) => prev.map((m) =>
-            m.role === "tool" && m.pending && m.content.includes(ev.toolName)
-              ? { ...m, content: `${m.content} ✓`, pending: false } : m));
+          setMessages((prev) => completeToolCall(prev, ev));
           break;
         }
         case "permission_ask":
+          if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+          flushDelta();
+          updateLastAssistant((m) => ({ ...m, pending: false }));
           asked = true;
-          onAsk({ toolCalls: ev.tool_calls ?? [] });
+          onAsk(createConfirmCard(ev.tool_calls));
           break;
         case "file_ready":
           // Agent 产出文件 → 渲染下载卡片（挂到最后一条 assistant 气泡）
@@ -270,50 +287,64 @@ export default function AssistantPage() {
           }
           break;
         case "error":
-          setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${ev.error}` }]);
-          break;
+          throw new Error(ev.error || "执行流返回错误");
+        case "interrupted":
+          throw new Error(ev.reason || "执行流已中断");
         // AGENT_END 等其余事件忽略（流关闭即终态）
       }
     };
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const frames = buf.split("\n\n");
-      buf = frames.pop() ?? "";
-      for (const frame of frames) {
-        for (const line of frame.split("\n")) {
-          if (line.startsWith("data:")) handlePayload(line.slice(5));
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const frames = buf.split(/\r?\n\r?\n/);
+        buf = frames.pop() ?? "";
+        for (const frame of frames) {
+          for (const line of frame.split(/\r?\n/)) {
+            if (line.startsWith("data:")) handlePayload(line.slice(5));
+          }
         }
       }
+      return asked;
+    } finally {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      flushDelta();
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
-    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-    flushDelta();
-    return asked;
-  }, [updateLast]);
+  }, [updateLastAssistant]);
 
   /** 确认/拒绝后恢复执行（新执行段续流） */
-  const sendConfirm = useCallback(async (card: ConfirmCard, confirmed: boolean) => {
+  const sendConfirm = useCallback(async (card: ConfirmCard, results: ConfirmResult[]) => {
+    if (sessionLocked || sessionLoading.current || confirmInFlight.current || card.status !== "pending") return;
+    confirmInFlight.current = true;
     setBusy(true);
+    const mark = (status: ConfirmCard["status"]) => setMessages((prev) => prev.map((m) =>
+      m.confirm?.id === card.id ? { ...m, confirm: { ...m.confirm, status, results } } : m));
+    mark("submitting");
     try {
-      const results = card.toolCalls.map((tc) => ({ tool_call_id: tc.tool_call_id, confirmed }));
-      setMessages((prev) => [...prev,
-        { role: "user", content: confirmed ? "（已批准工具执行）" : "（已拒绝工具执行）" },
-        { role: "assistant", content: "", pending: true }]);
-      await consumeStream(`${AGENT_BASE}/threads/${sessionId.current}/confirm-stream`, { results }, () => {});
+      setMessages((prev) => [...prev, { role: "assistant", content: "", pending: true }]);
+      await consumeStream(`${AGENT_BASE}/threads/${encodeURIComponent(sessionId.current)}/confirm-stream`, { results }, (nextCard) => {
+        setMessages((prev) => [...prev, { role: "assistant", content: "", confirm: nextCard }]);
+      });
+      mark("resolved");
     } catch (e: any) {
+      // 流中断时确认上下文可能已被消费/工具可能已执行，禁重试，置 unknown 交由历史核实
+      mark("unknown");
       setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${e.message}` }]);
     } finally {
-      updateLast((m) => ({ ...m, pending: false }));
+      updateLastAssistant((m) => ({ ...m, pending: false }));
+      confirmInFlight.current = false;
       setBusy(false);
     }
-  }, [consumeStream, updateLast]);
+  }, [sessionLocked, consumeStream, updateLastAssistant]);
 
   const send = useCallback(async () => {
     const text = input.trim();
     const fileIds = attachments.map((a) => a.fileId);
-    if ((!text && fileIds.length === 0) || busy) return;
+    if ((!text && fileIds.length === 0) || sessionLocked || awaitingConfirm || sessionLoading.current || confirmInFlight.current) return;
     setInput("");
     setBusy(true);
     const attachNames = attachments.map((a) => a.name);
@@ -326,17 +357,20 @@ export default function AssistantPage() {
     try {
       await consumeStream(`${AGENT_BASE}/threads/chat`,
         { message: text, userId: "webui", sessionId: sessionId.current, fileIds }, (card) => {
-          updateLast((m) => ({ ...m, confirm: card }));
+          setMessages((prev) => [...prev, { role: "assistant", content: "", confirm: card }]);
         });
     } catch (e: any) {
       setMessages((prev) => [...prev, { role: "system", content: `⚠️ 连接中断: ${e.message}` }]);
     } finally {
-      updateLast((m) => ({ ...m, pending: false }));
+      updateLastAssistant((m) => ({ ...m, pending: false }));
       setBusy(false);
     }
-  }, [busy, consumeStream, input, attachments, updateLast]);
+  }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant]);
 
   const resetSession = () => {
+    if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
+    setAttachments([]);
+    setInput("");
     const sid = `webui-${uid()}`;
     window.localStorage.setItem("oaf-assistant-sid", sid);
     sessionId.current = sid;
@@ -351,7 +385,7 @@ export default function AssistantPage() {
           <button onClick={async () => { setShowHistory((v) => !v); if (!showHistory) await loadThreads(); }}
             data-testid="history-btn"
             className="text-xs px-2 py-1 border rounded hover:bg-gray-100">历史会话</button>
-          <button onClick={resetSession} data-testid="new-session"
+          <button onClick={resetSession} disabled={sessionLocked} data-testid="new-session"
             className="text-xs px-2 py-1 border rounded hover:bg-gray-100">新会话</button>
         </div>
       </div>
@@ -364,7 +398,7 @@ export default function AssistantPage() {
             <ul className="space-y-1">
               {threads.map((t) => (
                 <li key={t.fullKey}>
-                  <button onClick={() => selectSession(t)} disabled={busy}
+                  <button onClick={() => selectSession(t)} disabled={sessionLocked}
                     data-testid="history-item"
                     className={`w-full text-left text-xs px-2 py-1.5 rounded hover:bg-blue-50 disabled:opacity-50 ${sessionId.current === t.peer ? "bg-blue-100 font-medium" : ""}`}>
                     <span className="font-mono">{t.peer}</span>
@@ -381,7 +415,12 @@ export default function AssistantPage() {
         {historyLoading ? (
           <p className="text-xs text-gray-400">加载历史会话…</p>
         ) : (
-          messages.map((m, i) => <Bubble key={i} msg={m} onConfirm={(ok) => m.confirm && sendConfirm(m.confirm, ok)} />)
+          messages.map((m, i) => (
+            <div key={i}>
+              <Bubble msg={m} />
+              {m.confirm && <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />}
+            </div>
+          ))
         )}
       </div>
 
@@ -401,7 +440,7 @@ export default function AssistantPage() {
           <input ref={fileInputRef} type="file" className="hidden"
             data-testid="attach-input"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); }} />
-          <button onClick={() => fileInputRef.current?.click()} disabled={busy || uploading}
+          <button onClick={() => fileInputRef.current?.click()} disabled={sessionLocked || awaitingConfirm}
             data-testid="attach-btn"
             className="border rounded px-3 text-sm hover:bg-gray-100 disabled:opacity-50">
             {uploading ? "上传中…" : "📎"}
@@ -409,9 +448,9 @@ export default function AssistantPage() {
           <textarea value={input} onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             rows={2} placeholder="例如：现在有哪些服务？/ 把 packageId=3 发布一下 / 上传文件请先点 📎"
-            data-testid="chat-input" disabled={busy}
+            data-testid="chat-input" disabled={sessionLocked}
             className="flex-1 border rounded p-2 text-sm resize-none disabled:opacity-50" />
-          <button onClick={send} disabled={busy || (!input.trim() && attachments.length === 0)} data-testid="chat-send"
+          <button onClick={send} disabled={sessionLocked || awaitingConfirm || (!input.trim() && attachments.length === 0)} data-testid="chat-send"
             className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded px-5">
             {busy ? "…" : "发送"}
           </button>
@@ -460,7 +499,7 @@ const Markdown = memo(function Markdown({ text }: { text: string }) {
   );
 });
 
-function Bubble({ msg, onConfirm }: { msg: ChatMsg; onConfirm: (ok: boolean) => void }) {
+function Bubble({ msg }: { msg: ChatMsg }) {
   if (msg.role === "tool") {
     return (
       <div className={`text-xs font-mono ${msg.pending ? "text-gray-400 animate-pulse" : "text-emerald-600"}`}>
@@ -501,18 +540,6 @@ function Bubble({ msg, onConfirm }: { msg: ChatMsg; onConfirm: (ok: boolean) => 
               )}
             </div>
           ))}
-        </div>
-      )}
-      {msg.confirm && (
-        <div className="border border-yellow-300 bg-yellow-50 rounded p-3 text-sm space-y-2" data-testid="confirm-card">
-          <p className="font-medium">⚠️ 需要你确认以下工具调用：</p>
-          {msg.confirm.toolCalls.map((tc) => (
-            <pre key={tc.tool_call_id} className="text-xs bg-white border rounded p-2 overflow-auto">{tc.name}\n{JSON.stringify(tc.input, null, 2)}</pre>
-          ))}
-          <div className="space-x-2">
-            <button onClick={() => onConfirm(true)} className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded">批准</button>
-            <button onClick={() => onConfirm(false)} className="px-3 py-1 border rounded text-red-600 text-xs hover:bg-red-50">拒绝</button>
-          </div>
         </div>
       )}
     </div>

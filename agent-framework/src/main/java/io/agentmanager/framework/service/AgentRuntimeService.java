@@ -495,7 +495,7 @@ public class AgentRuntimeService {
                 throw new IllegalArgumentException("Unknown tool_call_id: " + toolCallId);
             }
             var confirmedObj = r.get("confirmed");
-            var confirmed = !(confirmedObj instanceof Boolean b) || b;   // 缺省视为批准
+            var confirmed = Boolean.TRUE.equals(confirmedObj);
             if (!confirmed) allConfirmed = false;
             var acceptRule = Boolean.TRUE.equals(r.getOrDefault("accept_rule", false));
             // ConfirmResult(boolean, ToolUseBlock) — ✅ javap 确认；accept_rule 时用 3-arg 版本

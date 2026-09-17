@@ -93,3 +93,7 @@ e2e/mcpclient/mcpclient
 # 文件 E2E 运行时生成的临时 fixture（脚本自建，带运行级随机后缀）
 e2e/fixtures/demo-e2e-*.csv
 e2e/fixtures/e2e-frontend-test.csv
+.zcode/
+
+# Playwright MCP 测试运行产物（页面快照/控制台日志）
+.playwright-mcp/

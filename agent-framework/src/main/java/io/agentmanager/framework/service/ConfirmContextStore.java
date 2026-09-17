@@ -187,14 +187,19 @@ public class ConfirmContextStore {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT tool_calls_json, reply_id, created_at FROM confirm_context
-                 WHERE (session_id = ? OR session_id LIKE CONCAT('%:', ?))
+                 WHERE (session_id = ?
+                        OR RIGHT(session_id, CHAR_LENGTH(?) + 1) = CONCAT(':', ?)
+                        OR RIGHT(session_id, CHAR_LENGTH(?) + 2) = CONCAT('__', ?))
                    AND consumed = 0
                    AND created_at > DATE_SUB(NOW(3), INTERVAL ? SECOND)
                  ORDER BY created_at DESC LIMIT 1
                  """)) {
             stmt.setString(1, sessionId);
             stmt.setString(2, sessionId);
-            stmt.setInt(3, (int) ttl.toSeconds());
+            stmt.setString(3, sessionId);
+            stmt.setString(4, sessionId);
+            stmt.setString(5, sessionId);
+            stmt.setInt(6, (int) ttl.toSeconds());
             var rs = stmt.executeQuery();
             if (!rs.next()) {
                 return Optional.empty();
