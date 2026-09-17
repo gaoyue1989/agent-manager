@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/gin-gonic/gin"
@@ -57,12 +58,16 @@ func main() {
 
 	// M3：MCP streamableHttp /mcp 与 REST 同端口挂载
 	// MCP 门面：streamableHttp /mcp 与 REST 同端口
-	r.Any("/mcp", gin.WrapH(mcpsrv.New(core)))
+	registerMCP(r, mcpsrv.New(core), cfg.AuthToken)
 
 	log.Printf("platform-backend listening on :%d (ns=%s)", cfg.ServerPort, cfg.Namespace)
 	if err := r.Run(fmt.Sprintf(":%d", cfg.ServerPort)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func registerMCP(r *gin.Engine, mcpHandler http.Handler, authToken string) {
+	r.Any("/mcp", handler.Auth(authToken), gin.WrapH(mcpHandler))
 }
 
 func toHandlerImages(opts []config.ImageOption) []struct{ Image, Label string } {
