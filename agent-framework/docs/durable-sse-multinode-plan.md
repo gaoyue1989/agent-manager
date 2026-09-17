@@ -96,7 +96,8 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 > 追赶（§2.4）——即「不引入 pub/sub 广播」这条设计取向保留。
 >
 > **验证状态**（均已实跑，不是「已写好」）：语义层（攒批 / seq 分配 / 游标分页 / replyId 过滤）
-> 由单元测试覆盖，全量 `mvn test` **654 用例全绿**；需要真 Redis 的两支集成测试
+> 由单元测试覆盖，全量 `mvn test` **655 用例全绿**（2026-09-17 复测 = 654 + file_ready 契约用例 1 例）；
+> 需要真 Redis 的两支集成测试
 > （`REDIS_IT=1 REDIS_IT_URL=…` 门控）**`RedisEventLogIT` 10/10、跨副本
 > `SessionEventStoreCrossReplicaIT` 6/6**。端到端真链路探针跑通：真实 turn 落 Redis →
 > `/subscribe` 回放 → `/status`（Redis 停时 **503**、恢复后 200）→ 级联删除三个 key →
@@ -104,9 +105,11 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 > 如实 ERROR，合规时「持久性自检通过」）。旧表已确认停止写入（行数与 `MAX(created_at)` 均冻结）。
 >
 > §5.3 用例现状：#8 由跨副本 IT 覆盖；#11 由 `SessionEventBusTest` 的 HITL 时序契约覆盖；
-> **#9（HITL 后另一副本 subscribe）与 #10（kill 执行副本）目前只有判定语义的单测覆盖**
-> （`SessionEventTailerTest` 的 `finishedWhenHitlPendingConfirm` / `tailEmitsInterruptedWhenExecutorCrashed`），
-> **真进程联调尚未做** —— 这是本计划收尾时的已知缺口，不代表语义未定。
+> #9（HITL 后另一副本 subscribe）与 #10（kill 执行副本）此前只有判定语义的单测覆盖
+> （`SessionEventTailerTest` 的 `finishedWhenHitlPendingConfirm` / `tailEmitsInterruptedWhenExecutorCrashed`）；
+> **真进程联调已于 2026-09-17 由 e2e 多副本专项补齐**：跨副本 subscribe 全量事件
+> （802/802）到达 + done 帧正常关流、kill 执行副本 60s 后 `/status` 返回 `interrupted`——
+> #8-#11 至此全部闭环，无已知缺口。
 
 **理由一：它解决的是扇出，不是状态归属。** 本文问题的本质是"重连的 Pod 如何知道发生了什么、以及什么时候结束"，这是状态归属问题；状态已有归属（`session_event` + `turn_lease`）。Redis 回答的是"如何通知 N 个进程"，而本场景并不需要跨 Pod 通知 N 个进程——`POST /chat` 天然同 Pod。
 

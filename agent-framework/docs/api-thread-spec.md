@@ -228,7 +228,7 @@ GET /threads?userId=user-123
 
 ### 3.7 DELETE /threads/{sessionId} — 删除会话
 
-级联清理所有关联数据（agent_state、agent_fs、session_event、session_user、confirm_context、turn_lease、file_asset）。
+级联清理所有关联数据（agent_state、agent_fs、session_user、confirm_context、turn_lease、file_asset；session_event 已迁 Redis，对 `sess:{sid}:events` / `sess:{sid}:replies` 两把 key 做一次 `DEL`，删得的 key 数计入 rows_affected）。
 
 **响应：**
 
@@ -382,7 +382,7 @@ GET /threads?userId=user-123
 
 4. **上下文压缩** — 超过 30 条消息自动压缩，保留语义但不保留原文。重要信息建议用户主动保存。
 
-5. **会话保留期** — 默认 7 天（`agent_state` + `session_event`），过期后定时清理。`session_user` 映射同步清理。
+5. **会话保留期** — `agent_state` 默认 7 天，过期后由每日定时清理；`session_event`（Redis）留存 = 每次**写入续期**的 7 天 TTL 与单 session 25 万条上限取小，即「最后一次写入后 7 天」，不参与每日清理。`session_user` 映射同步清理。
 
 6. **文件上传** — 先调 `POST /files/upload` 获取 `fileId`，再在 `/chat` 的 `fileIds` 中引用。
 

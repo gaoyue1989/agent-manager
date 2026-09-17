@@ -12,8 +12,13 @@
 | JDK | ≥ 21 |
 | Maven | ≥ 3.9 |
 | MySQL | ≥ 8.0 (GreatSQL 3307) |
+| Redis | ≥ 5.0（Stream；集群内置 oaf-redis = `redis:7.2-alpine`，见 `manifests/platform.yaml`） |
 | Docker | ≥ 24.0 (Docker 部署时需要) |
 | LLM API | OpenAI 兼容接口 |
+
+> **Redis 是 `session_event`（SSE 事件流）的 store of record**（2026-09-16 起，原 MySQL 表已停写）：
+> 没有它对话仍可发起，但事件不落库 → 断线回放、跨副本订阅、history 的 reply 关联全部失效。
+> 部署时**必须**配置 `AGENT_REDIS_URL`（见 §4.1.8）。
 
 ---
 
@@ -58,6 +63,9 @@ SERVER_PORT=8100 \
 java -jar target/agent-framework-2.1.0.jar
 ```
 
+> 事件存储默认连 `redis://127.0.0.1:6379`——本地先起 `redis-server`，或用 `AGENT_REDIS_URL`
+> 指向其他实例；该默认值**只适合本地**，见 §4.1.8 的部署必做项。
+
 ### 2.4 验证
 
 ```bash
@@ -88,6 +96,7 @@ docker run -d --name agent-framework \
   -e LLM_MODEL_ID=your_model_id \
   -e LLM_BASE_URL=https://your-api-endpoint/v1 \
   -e AGENT_CONFIG_DIR=/config \
+  -e AGENT_REDIS_URL=redis://<redis-host>:6379 \
   -e JAVA_OPTS="-Xmx2g" \
   -v ./config:/config \
   agent-framework:latest
@@ -95,6 +104,7 @@ docker run -d --name agent-framework \
 
 > 说明:
 > - 运行用户为非 root 的 `appuser`，`/config` 为挂载卷（内含 AGENTS.md/skills/mcp-configs）
+> - `AGENT_REDIS_URL` 指向事件流存储 Redis（`session_event`），容器内默认值指向 localhost 必然失联，**务必显式传入**（见 §4.1.8）
 > - `JAVA_OPTS` 可覆盖 JVM 参数（默认 `-XX:MaxRAMPercentage=75`）
 > - 内置健康检查（`curl /health`，30s 间隔）
 > - 链路追踪（OTel Java Agent，详见 `tracing-design.md`）：镜像内置 agent jar，设 `OTEL_EXPORTER_OTLP_ENDPOINT` 即自动启用；**切勿**设 `OTEL_TRACES_EXPORTER=none`（会连 Agent 导出一起禁掉）
@@ -120,7 +130,7 @@ Tomcat started on port 8100
 
 ### 4.1 环境变量完整列表
 
-> 来源：`src/main/resources/application.yml` + `config/AgentManagerProperties.java` + `config/SandboxConfig.java`。
+> 来源：`src/main/resources/application.yml` + `config/AgentManagerProperties.java` + `config/SandboxConfig.java` + `config/AgentRedisProperties.java`。
 > Spring 绑定键前缀：`agent.*`（见 `application.yml`）；`OTEL_*` 与 `server.port` 直接由 Spring Boot / OTel 读取。
 
 #### 4.1.1 LLM
@@ -216,6 +226,29 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `OTEL_LOGS_EXPORTER` | string | `none` | 镜像默认 `none` |
 | `OTEL_SERVICE_NAME` | string | `agent-framework` | 链路服务名 |
 | `OTEL_TRACES_EXPORTER` | string | — | **保持 unset**；设为 `none` 会关闭 Agent 的 trace 导出 |
+
+#### 4.1.8 事件流存储 / Redis（`agent.redis.*`，绑 `AgentRedisProperties`）
+
+> `session_event` 自 2026-09-16 起存 **Redis Streams**（数据模型见
+> [api-frontend-sse.md](api-frontend-sse.md) §12；实现为 `service/RedisEventLog.java`）。
+> 配置段 `agent.redis` 已随 `application.yml` 入库，键与 `AgentRedisProperties` 字段一一对应。
+
+| 变量 | 类型 | 默认值 | 必填 | 说明 |
+|------|------|--------|------|------|
+| `AGENT_REDIS_URL` | string | `redis://127.0.0.1:6379` | ✓(集群) | Redis 连接地址（绑 `agent.redis.url`）。**集群部署必做**：覆盖为 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`（`manifests/platform.yaml` 已注入）——不覆盖时 Pod 静默连自己的 localhost，事件不落地、回放全挂 |
+| `AGENT_REDIS_COMMAND_TIMEOUT_MS` | int | `2000` | | 单条命令超时毫秒（绑 `agent.redis.command-timeout-ms`）。Lettuce 默认**关闭**命令超时，不设则一条命令可无限期占住 Tomcat 线程 |
+| `AGENT_REDIS_CONNECT_TIMEOUT_MS` | int | `2000` | | 建连超时毫秒（绑 `agent.redis.connect-timeout-ms`） |
+| `AGENT_REDIS_MAX_LEN_PER_STREAM` | int | `250000` | | 单 session 事件条数上限（绑 `agent.redis.max-len-per-stream`；`XADD … MAXLEN ~`，内存兜底而非可选优化） |
+
+部署注意事项：
+
+- **服务端要求**：开启 AOF（`appendonly yes`）；`maxmemory-policy` 不得为 `allkeys-*`
+  （如用 `noeviction`）。首次使用时自检这两项，不合规只打 ERROR 日志**不阻断启动**——
+  别被「服务起来了」骗过去，日志里没有「持久性自检通过」就要查配置。
+- 连接为**惰性建立**（首次使用时才建连并自检），启动日志不会出现 Redis 相关行。
+- 事件留存 = TTL（每次写入续期 7 天，即「最后一次写入后 7 天」）与条数上限二者取小；
+  每日定时清理（`SessionCleanupService`）**不再涉及** session_event，删除会话走
+  `DELETE /threads/{sid}` 对两把 key（`sess:{sid}:events` / `sess:{sid}:replies`）的一次 `DEL`。
 
 
 ### 4.2 AGENTS.md 配置字段

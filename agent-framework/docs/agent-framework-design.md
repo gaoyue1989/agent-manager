@@ -125,6 +125,9 @@ src/main/java/io/agentmanager/framework/
 │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息 + tool_calls)
 │   ├── SessionManager.java          # 会话管理
 │   ├── SessionCleanupService.java   # 会话清理 (联动清理 confirm_context/tool_audit_log/turn_lease/file_asset)
+│   ├── SessionEventStore.java       # session_event 事件流攒批写/游标读/终止判定 probe (底层 RedisEventLog)
+│   ├── RedisEventLog.java           # session_event 的 Redis Streams 存储层 (sess:{sid}:events + replies 两把 key)
+│   ├── SessionEventTailer.java      # 跨副本订阅的游标追赶轮询 (终态: done / interrupted)
 │   ├── TurnLeaseStore.java          # turn_lease 表 acquire/renew/release (执行权互斥)
 │   ├── TurnLeaseGuard.java          # turn 续租句柄 (绑定执行器生命周期, close 幂等释放)
 │   ├── ConfirmContextStore.java     # confirm_context 表 CRUD (跨副本共享 HITL 确认上下文)
@@ -194,6 +197,8 @@ ChatStreamController → TurnLeaseStore.acquire() → 等待式获取执行权
   │
   ├── 启动续租任务 (20s 间隔, TTL 60s)
   ├── ChatUiChannel.sendStream() → 事件直吐 (SSE 单次流)
+  │   ├── 事件攒批落 Redis Streams (SessionEventStore → RedisEventLog；
+  │   │   断线回放 /subscribe、跨副本订阅、history reply 关联都读这里)
   │   ├── 工具类事件 → ToolAuditStore 异步批量写
   │   └── permission_ask → ConfirmContextStore 落库 + release 锁
   ├── AGENT_END / error → 关闭 SSE 流 + release 锁 + 停续租
@@ -419,6 +424,7 @@ config/
 | `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
+| `AGENT_REDIS_*` | 见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1.8 | ✓(集群) | session_event 事件流存储（Redis Streams）共 4 项；`AGENT_REDIS_URL` 集群必填（默认 127.0.0.1 仅限本地） |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时 filesystem 切换为 OpenSandbox） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（到期自动销毁，resume 404 自动降级重建） |

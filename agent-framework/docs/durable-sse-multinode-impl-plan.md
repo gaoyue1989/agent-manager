@@ -1876,6 +1876,14 @@ git commit -m "test(agent-framework): 补跨副本追赶与 seq 连续前缀的�
 
 ## 完成后的验收清单
 
+> **状态回填（2026-09-17）：** 前四项已完成——`mvn test` 全绿（655/0，见
+> [agent-framework-test.md](agent-framework-test.md) §8）；跨副本手工验证与崩溃验证由
+> **e2e 多副本专项**覆盖（跨副本 subscribe 全量事件 + done 帧关流；kill 执行副本 60s 后
+> `interrupted`），即设计文档 §5.3 #8-#11 全部闭环（验证状态汇总见
+> [durable-sse-multinode-plan.md](durable-sse-multinode-plan.md) §2.1）。
+> 「单 turn 落库语句数」一项随存储迁移**作废**：`session_event` 已迁 Redis Streams
+> （攒批仍在，只是不再有 SQL 语句数一说）。replicas 调 >1 的验证前提已满足，实际扩副本属运维动作，不在本文档记录范围。
+
 - [ ] `mvn test` 全绿
 - [ ] `git log --oneline` 可见 9 个任务对应的提交（另有计划外补充的 Task 10：Debug 客户端 `interrupted` 支持）
 - [ ] 单 turn 落库语句数验证：跑一次真实对话，确认 `session_event` 的 INSERT 次数从 ~2100 降到 ~10 量级（可用 `DebugApiController` 的数据库状态端点或 MySQL general log）
@@ -1895,7 +1903,7 @@ git commit -m "test(agent-framework): 补跨副本追赶与 seq 连续前缀的�
 | **观察者轮询的线程占用（已知，需跟进）** | `SessionEventTailer.tail` 用 `Thread.sleep` 阻塞轮询，跑在 `Schedulers.boundedElastic()` 上。`boundedElastic` 线程上限默认为 `10 × CPU 核数`，**每个活跃 observer 占满一个线程**。8 核 Pod 上约 80 个并发 `/subscribe` 即打满，第 81 个订阅者的回放甚至排不上队。改前 `subscribe` 走 `sink.asFlux()` + `Flux.interval`，不占专用线程，所以这是一处**用线程换正确性**的回归。修复方向：改 `Flux.interval(pollInterval)` + `concatMap(Mono.fromCallable(查询).subscribeOn(boundedElastic))`，使线程只在真正的 JDBC 查询期间（~ms 级）被占用，而非整个订阅生命周期。**触发条件：前端阶段 4 落地（届时每个打开的标签页都是一个常驻 observer）或并发 `/subscribe` 接近 50 即须先做此项。** |
 | 攒批参数 YAML 化 | 本计划用构造参数携带默认值（`batchSize=200`、`flushIntervalMs=1000`）。默认值由测算得出，先观察线上实际语句数再决定是否需要暴露为配置 |
 | 合并文本攒批（设计文档 §3.5） | 仅当 `session_event` 行数或回放体积成为瓶颈时再做；需改游标语义为 inclusive + 前端重建消息 |
-| Redis / 粘性路由 | 已否决，重新评估触发条件见设计文档 §2.3 |
+| Redis / 粘性路由 | **Redis 存储**部分已被推翻并落地（2026-09-16：`session_event` 迁 Redis Streams，见 multinode-plan §2.1 标注）；本行遗留的仅是 **pub/sub 实时扇出**（观察者仍走 300ms 游标追赶）与粘性路由，重新评估触发条件见 multinode-plan §2.3 |
 | agent 执行的跨 Pod 恢复 | `agent_state` 持久化已具备基础，但需先解决工具调用幂等性/副作用重放 |
 | **租约丢失期间的 seq 冲突（C1 已加固，2026-09-16）** | `seedSeq` 从 DB 最大 seq 续起并 `incrementAndGet()`，其安全性依赖「同一 session 任一时刻只有一个 Pod 在写」这一前提。原实现有三个缺口叠加，现按四层修复：① `TurnLeaseStore.renew` 由裸 `boolean` 改为三态 `HELD/LOST/ERROR`——原实现把每个 `false`（含 `catch (Exception)`）都当接管处理并 `renewer.shutdownNow()`，于是**一次 DB 抖动就永久停掉本 turn 的续租**，TTL 过后另一个副本接管而旧副本仍在执行、仍在写；② `TurnLeaseGuard.isLost()` 改由**写入侧**按 `max(续租间隔, TTL−续租间隔)` 求值（基于 `nanoTime`），续租线程自身不再转动（连接挂死 / 长 GC）也能停手，且停手时点早于「接管可能发生」，而不是等到 TTL 到期；③ 丢租约即停止写入：`SessionEventBus.abandonSession` **丢弃**该 session 的待落库缓冲（**不能**复用 `closeSession`——它走 `finishTurn` 的 flush，而那些行的 seq 正是按「自己还持锁」分配的），并给客户端发一帧不落库的 `interrupted{reason:lease_lost}`；④ 兜底：`idx_session_seq` 改为 `UNIQUE KEY uk_session_seq`，把残余窗口内的重叠从**静默写重复行**变成一次响亮的 `insertBatch` 失败（`append` 返回 −1，实时广播不受影响）。配套：缓冲区按 session 分区（一条 INSERT 只装一个 session 的行），使唯一键冲突的影响面止于肇事 session —— InnoDB 按语句回滚，全局缓冲会让邻居的行一并被丢掉。**迁移**：新库 DDL 直接带唯一键；既有库由 `ensureUniqueSeqKey` 幂等补键，预检发现重复则**响亮跳过**（ERROR 列出涉事 session + 排查 SQL，本次不建键、服务照常启动、不自动删数据）；加键与删冗余索引是两条独立 ALTER，避免合成 DDL 时 DROP 报错连带回滚掉刚加上的键。**已实测**：`agent_manager_test` 41129 行 / 重复组 0，唯一键已加、冗余 `idx_session_seq` 已删除；先在 scratch 表演练确认有重复行时 `ADD UNIQUE KEY` 必报 1062。**残余（未解决）**：检测延迟上限为一个续租周期（默认 20s），这期间的写入只能靠唯一键兜底；且 agent 执行**无法被外部取消**（`.subscribe(...)` 返回的 `Disposable` 在所有调用点被丢弃），丢租约的副本能停写，但那个 agent 仍会跑完并烧 token。 |
 | **`seqCounters` 与 `pending` 缓冲的无界增长（已知，需跟进）** | `evictStaleSinks`（现每 60s）只清 `SessionEventBus.sinks`，不释放 `SessionEventStore.seqCounters` 条目、也不刷出 `pending` 缓冲。因此**若某条路径跑了 `beginTurn` 却没跑到 `finishTurn`**，该 session 的计数器条目永久驻留（每条约百字节），且其尾部 delta 滞留内存直到被别的 `append` 顺带刷出。Task 8 已堵掉已知的那条漏网路径（HITL），实际触发窗口很窄，故本次不做。**不能**简单把 `finishTurn` 挂到 `evictStaleSinks` 上：后者的判据是 `lastActiveAt` 超时而非「turn 结束」（它甚至不检查订阅者数，见其方法内注释），一次 5 分钟无输出的慢 LLM 调用会在 turn 中途触发，语义错配。正确做法是另写一个以 `turn_lease` 归属为判据的清扫：无租约且无待确认的 session，才释放其计数器并刷出缓冲。 |

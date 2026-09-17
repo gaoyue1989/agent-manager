@@ -1168,6 +1168,10 @@ GET /skills/manage
 
 **前端处理：** 收到 `file_ready` 后渲染文件下载卡片，`download_url` 可直接拼接 Base URL 用于下载或预览。
 
+> **契约（`ChatStreamControllerTest` 契约用例钉死，2026-09-17）：** 服务端永远发**相对路径**
+> `/files/{file_id}`，由前端拼 AGENT_BASE——且历史回放（`/history` 的下载卡片）与实时流两处
+> 入口必须用**同一拼法**：assistant 页曾因回放路径拼了、实时路径没拼而在前端入口 404。
+
 ### 9.8 HITL 确认事件
 
 | type | 触发时机 | 关键字段 |
@@ -1242,9 +1246,11 @@ data: {"type":"error","error":"turn_in_progress: session 'xxx' has an active tur
 async function sendChat(sessionId, message, userId, fileIds) {
   const body = { message };
   if (userId) body.userId = userId;
+  if (sessionId) body.sessionId = sessionId; // 省略则服务端生成并发 session_created
   if (fileIds && fileIds.length > 0) body.fileIds = fileIds;
 
-  const response = await fetch(`/threads/${sessionId}/chat`, {
+  // 会话触发已收敛到 POST /threads/chat（sessionId 入 body，无 /threads/{sid}/chat）
+  const response = await fetch(`/threads/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
