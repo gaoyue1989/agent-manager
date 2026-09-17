@@ -24,6 +24,7 @@
 |------|---------|--------|---------|
 | LLM | `LLM_API_KEY`, `LLM_MODEL_ID`, `LLM_BASE_URL`, `LLM_PROVIDER` | - | `AgentManagerProperties.LLMConfig` |
 | LLM | `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT` | 0.7, 4096, 120 | `AgentManagerProperties.LLMConfig` |
+| LLM | `LLM_CONTEXT_LENGTH` | 0（≤0 不传给模型） | `AgentManagerProperties.LLMConfig`；>0 时传入 `OpenAIChatModel.contextWindowSize()`（见 AgentScopeConfig.buildChatModel） |
 | 服务 | `SERVER_PORT`, `SERVER_HOST` | 8100, 0.0.0.0 | `AgentManagerProperties.ServerConfig` |
 | 数据库 | `CHECKPOINT_JDBC_URL`, `CHECKPOINT_USERNAME`, `CHECKPOINT_PASSWORD`, `CHECKPOINT_DB_NAME` | - | `AgentManagerProperties.CheckpointConfig` |
 | 沙箱 | `SANDBOX_ENABLED`, `SANDBOX_IMAGE`, `SANDBOX_TIMEOUT_MINUTES` 等 | - | `SandboxConfig` |

@@ -359,7 +359,7 @@ agent-framework 参考契约（仅作向导预填模板；其他镜像可完全�
 | 分类 | 变量 | 说明 |
 |------|------|------|
 | 通常必填 | `LLM_API_KEY`、`LLM_MODEL_ID`、`LLM_BASE_URL` | LLM 接入三要素 |
-| 可选 | `LLM_PROVIDER`、`LLM_TEMPERATURE`、`LLM_MAX_TOKENS` | 提供商与生成参数 |
+| 可选 | `LLM_PROVIDER`、`LLM_TEMPERATURE`、`LLM_MAX_TOKENS`、`LLM_CONTEXT_LENGTH` | 提供商、生成参数与模型上下文窗口长度（tokens） |
 | 可选 | `CHECKPOINT_MYSQL_DSN` | 会话持久化；主机须用集群可达地址（如 `172.20.0.1:3307`），不能写 127.0.0.1 |
 | 可选 | `JAVA_OPTS` | JVM 参数（镜像内置默认 `-XX:MaxRAMPercentage=75`） |
 | 进阶 | `SANDBOX_*` 系列、`OTEL_EXPORTER_OTLP_ENDPOINT` 等 | 不在表单展示，用户可经 env 编辑器自行添加 |

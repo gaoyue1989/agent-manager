@@ -417,6 +417,7 @@ config/
 | `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
 | `LLM_MAX_TOKENS` | `4096` | | 最大输出 token |
 | `LLM_TIMEOUT` | `120` | | API 调用超时(秒) |
+| `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置） |
 | `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录 |
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | `8100` | | 服务端口 |

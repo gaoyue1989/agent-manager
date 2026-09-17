@@ -176,7 +176,7 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties propsForLlm() {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
-                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true),
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0),
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
@@ -199,7 +199,27 @@ class AgentScopeConfigTest {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0);
+    }
+
+    @Test
+    void chatModelShouldApplyContextLengthWhenConfigured() {
+        var llm = new AgentManagerProperties.LLMConfig(
+            "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 131072);
+
+        var model = config.buildChatModel(llm, harnessConfig());
+
+        assertEquals(131072, model.getContextWindowSize());
+    }
+
+    @Test
+    void chatModelShouldIgnoreContextLengthWhenNotConfigured() {
+        var llm = new AgentManagerProperties.LLMConfig(
+            "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0);
+
+        var model = config.buildChatModel(llm, harnessConfig());
+
+        assertEquals(0, model.getContextWindowSize());
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

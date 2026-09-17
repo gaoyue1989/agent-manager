@@ -46,7 +46,7 @@ public class FileControllerTest {
 
     public static AgentManagerProperties testProps() {
         return new AgentManagerProperties(
-            new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true),
+            new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),

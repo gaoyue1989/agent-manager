@@ -35,7 +35,7 @@ class HealthControllerTest {
 
     @Test
     void healthShouldReturnOk() throws Exception {
-        var llm = new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120, true);
+        var llm = new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120, true, 0);
         when(props.llm()).thenReturn(llm);
         when(oafConfig.name()).thenReturn("test-agent");
         when(oafConfig.version()).thenReturn("1.0.0");
@@ -55,7 +55,7 @@ class HealthControllerTest {
 
     @Test
     void healthShouldShowLlmNotConfigured() throws Exception {
-        var llm = new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true);
+        var llm = new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0);
         when(props.llm()).thenReturn(llm);
         when(oafConfig.name()).thenReturn("test");
         when(oafConfig.version()).thenReturn("1.0.0");

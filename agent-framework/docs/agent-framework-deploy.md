@@ -144,6 +144,7 @@ Tomcat started on port 8100
 | `LLM_TEMPERATURE` | float | `0.7` | | 生成温度（绑 `agent.llm.temperature`） |
 | `LLM_MAX_TOKENS` | int | `4096` | | 最大输出 token（绑 `agent.llm.max-tokens`） |
 | `LLM_TIMEOUT` | int | `120` | | API 调用超时（秒，绑 `agent.llm.timeout`） |
+| `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
 
 #### 4.1.2 服务 / Spring
 

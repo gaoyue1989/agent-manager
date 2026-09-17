@@ -66,7 +66,7 @@ class S3FileStorageIT {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0);
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

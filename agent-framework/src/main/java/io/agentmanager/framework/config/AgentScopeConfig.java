@@ -272,6 +272,42 @@ public class AgentScopeConfig {
         return java.util.Arrays.asList(businessTools, fileTools, oafPackageTools);
     }
 
+    io.agentscope.extensions.model.openai.OpenAIChatModel buildChatModel(
+        AgentManagerProperties.LLMConfig llm,
+        AgentManagerProperties.HarnessConfig harness) {
+        var optionsBuilder = io.agentscope.core.model.GenerateOptions.builder()
+            .temperature(llm.temperature())
+            .maxTokens(llm.maxTokens());
+        // Qwen3 / vLLM: enableThinking=false → chat_template_kwargs.enable_thinking=false
+        // 关闭深度思考模式，避免响应中包含 <think>...</think> 冗余内容
+        if (!llm.enableThinking()) {
+            optionsBuilder.additionalBodyParam("chat_template_kwargs",
+                java.util.Map.of("enable_thinking", false));
+            log.info("Deep thinking disabled: chat_template_kwargs.enable_thinking=false");
+        }
+        var modelBuilder = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
+            .apiKey(llm.apiKey())
+            .modelName(llm.modelId())
+            .baseUrl(llm.baseUrl());
+        // 模型上下文窗口（LLM_CONTEXT_LENGTH）：> 0 才传入，未配置保持框架默认行为
+        if (llm.contextLength() > 0) {
+            modelBuilder.contextWindowSize(llm.contextLength());
+        }
+        return modelBuilder
+            .generateOptions(optionsBuilder.build())
+            .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
+                .client(java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
+                    .build())
+                .config(io.agentscope.core.model.transport.HttpTransportConfig.builder()
+                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
+                    .readTimeout(Duration.ofSeconds(harness.httpReadTimeoutSeconds()))
+                    .writeTimeout(Duration.ofSeconds(harness.httpWriteTimeoutSeconds()))
+                    .build())
+                .build())
+            .build();
+    }
+
     @Bean
     public HarnessAgent harnessAgent(
         AgentManagerProperties props,
@@ -291,32 +327,7 @@ public class AgentScopeConfig {
             var workspacePath = workspaceInitializer.initialize(
                 Path.of(props.resolvedWorkspaceBaseDir()), oafConfig);
 
-            var optionsBuilder = io.agentscope.core.model.GenerateOptions.builder()
-                .temperature(llm.temperature())
-                .maxTokens(llm.maxTokens());
-            // Qwen3 / vLLM: enableThinking=false → chat_template_kwargs.enable_thinking=false
-            // 关闭深度思考模式，避免响应中包含 <think>...</think> 冗余内容
-            if (!llm.enableThinking()) {
-                optionsBuilder.additionalBodyParam("chat_template_kwargs",
-                    java.util.Map.of("enable_thinking", false));
-                log.info("Deep thinking disabled: chat_template_kwargs.enable_thinking=false");
-            }
-            var model = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
-                .apiKey(llm.apiKey())
-                .modelName(llm.modelId())
-                .baseUrl(llm.baseUrl())
-                .generateOptions(optionsBuilder.build())
-                .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
-                    .client(java.net.http.HttpClient.newBuilder()
-                        .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                        .build())
-                    .config(io.agentscope.core.model.transport.HttpTransportConfig.builder()
-                        .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                        .readTimeout(Duration.ofSeconds(harness.httpReadTimeoutSeconds()))
-                        .writeTimeout(Duration.ofSeconds(harness.httpWriteTimeoutSeconds()))
-                        .build())
-                    .build())
-                .build();
+            var model = buildChatModel(llm, harness);
 
             // P0: 包装主 model，400 错误时打印请求体 JSON 诊断（排查 Higress 网关注入问题）
             var loggingModel = new io.agentmanager.framework.service.RequestBodyLoggingModelWrapper(model);

@@ -216,6 +216,7 @@ TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超
 | `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
 | `LLM_MAX_TOKENS` | `4096` | | 最大输出 token |
 | `LLM_TIMEOUT` | `120` | | API 超时（秒） |
+| `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置，不传给模型） |
 | `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |

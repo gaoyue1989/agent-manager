@@ -55,7 +55,8 @@ public record AgentManagerProperties(
         @DefaultValue("0.7") double temperature,
         @DefaultValue("4096") int maxTokens,
         @DefaultValue("120") int timeout,
-        @DefaultValue("true") boolean enableThinking
+        @DefaultValue("true") boolean enableThinking,
+        @DefaultValue("0") int contextLength
     ) {}
 
     public record ServerConfig(

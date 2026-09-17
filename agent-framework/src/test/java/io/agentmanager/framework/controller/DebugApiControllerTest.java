@@ -56,7 +56,7 @@ class DebugApiControllerTest {
 
     private AgentManagerProperties.LLMConfig llmConfig(String key) {
         return new AgentManagerProperties.LLMConfig(
-            key, "gpt-4", "http://localhost/v1", "openai", 0.7, 4096, 120, true);
+            key, "gpt-4", "http://localhost/v1", "openai", 0.7, 4096, 120, true, 0);
     }
 
     // ---------- env config ----------

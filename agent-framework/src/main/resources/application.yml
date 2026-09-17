@@ -31,6 +31,7 @@ agent:
     max-tokens: ${LLM_MAX_TOKENS:16384}
     timeout: ${LLM_TIMEOUT:120}
     enable-thinking: ${LLM_ENABLE_THINKING:false}
+    context-length: ${LLM_CONTEXT_LENGTH:0}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
