@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionUserStore;
@@ -33,6 +34,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -46,6 +48,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -81,6 +84,7 @@ class ChatStreamControllerTest {
     private SessionUserStore sessionUserStore;
     private WorkspaceReader workspaceReader;
     private AgentManagerProperties props;
+    private McpToolRegistrar mcpToolRegistrar;
 
     @BeforeEach
     void setUp() {
@@ -94,6 +98,7 @@ class ChatStreamControllerTest {
         workspaceReader = mock(WorkspaceReader.class);
         props = mock(AgentManagerProperties.class);
         sessionUserStore = mock(SessionUserStore.class);
+        mcpToolRegistrar = mock(McpToolRegistrar.class);
         eventBus = new SessionEventBus(eventStore,
             Duration.ofMillis(100), Duration.ofMinutes(5), 64);
 
@@ -123,7 +128,7 @@ class ChatStreamControllerTest {
         controller = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class));
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
     }
 
     /** 等续租线程跑过头一拍（存根返回 LOST → guard 随即置位丢锁） */
@@ -414,7 +419,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class));
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fr1");
         var replyId = "r-fr1";
@@ -459,6 +464,70 @@ class ChatStreamControllerTest {
         String json = AgentEventSseSerializer.payload(tc, null, null);
         assertTrue(!json.contains("\"ui\""), "无 UI 工具不应携带 ui 字段: " + json);
         assertTrue(json.contains("\"toolName\":\"echo\""), "原词表字段保持: " + json);
+    }
+
+    @Test
+    void chatShouldAttachUiMetadataForUiDeclaredTool() {
+        // 接线契约（mcp-apps-extension-plan §4）：命中 ui 映射的工具，对话流里的
+        // TOOL_CALL_START 必须携带 ui{resourceUri,server}——前端据此渲染 MCP App 卡片。
+        // 此前只测了序列化器本身、控制器从未查 registrar，运行时卡片永不挂载
+        // （approval-forms e2e 2026-09-17 发现）。
+        var sessionId = "test-user-ui1";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var registrar = mock(McpToolRegistrar.class);
+        when(registrar.resolveUiRef("show_form"))
+            .thenReturn(new McpToolRegistrar.UiRef("ui://approval/form.html", "approval"));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), registrar);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui1");
+        var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui1", "c-ui1", "show_form");
+        var agentEnd = new AgentEndEvent("r-ui1");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus, times(2)).emit(eq(sessionId), any(AgentEvent.class), anyString(), payloadCap.capture());
+        var payloads = payloadCap.getAllValues();
+        assertTrue(payloads.get(0) != null && payloads.get(0).contains("\"ui\"")
+                && payloads.get(0).contains("\"resourceUri\":\"ui://approval/form.html\"")
+                && payloads.get(0).contains("\"server\":\"approval\""),
+            "TOOL_CALL_START 应携带 ui 元数据: " + payloads.get(0));
+        assertNull(payloads.get(1), "AGENT_END 非 ui 事件不应覆写 payload");
+    }
+
+    @Test
+    void chatShouldNotAttachUiMetadataForPlainTool() {
+        // 未声明 ui 映射的工具（含内置工具）：payload 覆写必须为 null，词表保持原样
+        var sessionId = "test-user-ui2";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui2");
+        var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui2", "c-ui2", "echo");
+        var agentEnd = new AgentEndEvent("r-ui2");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus, times(2)).emit(eq(sessionId), any(AgentEvent.class), anyString(), payloadCap.capture());
+        payloadCap.getAllValues().forEach(p ->
+            assertNull(p, "无 ui 映射的工具不应覆写 payload"));
     }
 
     @Test

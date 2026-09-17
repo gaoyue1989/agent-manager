@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.TurnLeaseGuard;
@@ -47,15 +48,32 @@ public class ConfirmController {
     private final TurnLeaseStore turnLeaseStore;
     private final SessionEventBus eventBus;
     private final SessionUserStore sessionUserStore;
+    private final McpToolRegistrar mcpToolRegistrar;
 
     public ConfirmController(AgentRuntimeService runtimeService,
                              TurnLeaseStore turnLeaseStore,
                              SessionEventBus eventBus,
-                             SessionUserStore sessionUserStore) {
+                             SessionUserStore sessionUserStore,
+                             McpToolRegistrar mcpToolRegistrar) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.eventBus = eventBus;
         this.sessionUserStore = sessionUserStore;
+        this.mcpToolRegistrar = mcpToolRegistrar;
+    }
+
+    /**
+     * TOOL_CALL_START 命中 MCP App ui 映射时，序列化携带 ui 元数据（同 ChatStreamController）。
+     * 非 ui 工具返回 null，payload 保持原词表。
+     */
+    private String payloadForEvent(io.agentscope.core.event.AgentEvent event) {
+        if (event instanceof io.agentscope.core.event.ToolCallStartEvent tc) {
+            var uiRef = mcpToolRegistrar.resolveUiRef(tc.getToolCallName());
+            if (uiRef != null) {
+                return AgentEventSseSerializer.payload(event, uiRef.resourceUri(), uiRef.serverName());
+            }
+        }
+        return null;
     }
 
     /** 同步版：恢复 agent 执行，返回最终回复（无状态架构：无事件扇出，调用方直接消费结果） */
@@ -133,6 +151,9 @@ public class ConfirmController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
+            // 本 turn 的收尾只做一次（同 ChatStreamController）：AGENT_END 处理与源 flux 的
+            // complete/error 回调可能各自触发一次，晚到的那次不得重复 closeSession/release
+            var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
             // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
@@ -169,7 +190,7 @@ public class ConfirmController {
             // ===== 5. 启动 agent 恢复执行 → 事件写入 EventBus =====
             resumeFlux
                 .subscribe(
-                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink),
+                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink, turnEnded),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -179,10 +200,10 @@ public class ConfirmController {
                                 "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                     e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                         }
-                        endTurn(lease, finalSessionId);
+                        endTurn(lease, finalSessionId, turnEnded);
                     },
                     // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
-                    () -> endTurn(lease, finalSessionId));
+                    () -> endTurn(lease, finalSessionId, turnEnded));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -198,7 +219,8 @@ public class ConfirmController {
     /** 单帧处理：HITL 落库 + 事件写入 EventBus + 终态关闭 */
     private void handleEventAndEmit(io.agentscope.core.event.AgentEvent event,
                                     String sessionId, String replyId, TurnLeaseGuard lease,
-                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink) {
+                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink,
+                                    java.util.concurrent.atomic.AtomicBoolean turnEnded) {
         if (stopIfLeaseLost(lease, sessionId, sink)) {
             return;
         }
@@ -210,8 +232,10 @@ public class ConfirmController {
             // HITL 暂停点：锁已让出、状态已持久化
         }
 
-        // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）
-        eventBus.emit(sessionId, event, replyId);
+        // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）；
+        // TOOL_CALL_START 命中 MCP App ui 映射时携带 ui 元数据（与 ChatStreamController 同一契约，
+        // 恢复执行流里再调 UI 工具时卡片才能照常渲染）
+        eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
 
         // HITL 是 turn 边界：permission_ask 已广播，关闭 sink（同上）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
@@ -220,8 +244,17 @@ public class ConfirmController {
 
         // AGENT_END → 关闭 EventBus
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {
-            endTurn(lease, sessionId);
+            endTurn(lease, sessionId, turnEnded);
         }
+    }
+
+    /** 带「只收尾一次」保护的 turn 收尾：晚到的 complete/error 回调不得重复执行 */
+    private void endTurn(TurnLeaseGuard lease, String sessionId,
+                         java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+        if (!turnEnded.compareAndSet(false, true)) {
+            return;
+        }
+        endTurn(lease, sessionId);
     }
 
     /**

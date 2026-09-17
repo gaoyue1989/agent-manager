@@ -62,6 +62,8 @@ class ConfirmControllerTest {
     private SessionEventBus eventBus;
     private SessionEventStore eventStore;
     private SessionUserStore sessionUserStore;
+    private final io.agentmanager.framework.service.McpToolRegistrar mcpToolRegistrar =
+        org.mockito.Mockito.mock(io.agentmanager.framework.service.McpToolRegistrar.class);
 
     @BeforeEach
     void setUp() throws Exception {
@@ -93,7 +95,7 @@ class ConfirmControllerTest {
                 new io.agentmanager.framework.model.OafConfig.MemoryConfig("editable", Map.of()),
                 Map.of()),
             agent, List.of(), new io.agentmanager.framework.service.LLMLogger(), confirmContextStore);
-        mvc = MockMvcBuilders.standaloneSetup(new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore)).build();
+        mvc = MockMvcBuilders.standaloneSetup(new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar)).build();
 
         // 先注入确认上下文：模拟前端收到 permission_ask（invokeStream 链路 storeConfirmContext 落库）
         var ask = new io.agentscope.core.event.RequireUserConfirmEvent(
@@ -189,7 +191,7 @@ class ConfirmControllerTest {
     void confirmStreamShouldReturnErrorSseFrameWhenContextMissing() {
         doThrow(new AgentRuntimeService.ConfirmContextNotFoundException("nope"))
             .when(confirmContextStore).checkAvailable(anyString());
-        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
         var frame = controller.confirmStream("nope", new ConfirmController.ConfirmRequest(List.of()))
             .blockFirst();
         assertNotNull(frame, "should emit error SSE frame");
@@ -214,7 +216,7 @@ class ConfirmControllerTest {
         when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
-        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
         var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
             controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
                     Map.of("tool_call_id", "call-1", "confirmed", true))))
@@ -248,7 +250,7 @@ class ConfirmControllerTest {
             .thenReturn(reactor.core.publisher.Flux.just(
                 (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-2")));
         when(turnLeaseStore.tryAcquire("t1")).thenReturn("tok-c1");
-        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
         var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
         assertNotNull(frame, "should emit SSE frame");

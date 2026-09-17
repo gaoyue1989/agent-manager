@@ -95,7 +95,7 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 ChatStreamControllerTest (21 个用例)
+### 4.4 ChatStreamControllerTest (23 个用例)
 
 - `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
 - sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
@@ -104,6 +104,10 @@ class AgentFrameworkApplicationTests {
 - `file_ready` 契约用例：钉死 `download_url` 为 `/files/{id}` 相对路径形态——前端统一拼
   AGENT_BASE（历史回放与实时流两处入口），若服务端再改拼接头此用例即红（2026-09-17 新增，
   防 e2e 中曾出现的「前端入口 404」回归）
+- MCP Apps ui 注入**接线**契约（2026-09-17 新增）：命中 ui 映射的工具，对话流里
+  TOOL_CALL_START 必须带 `ui{resourceUri,server}`，无映射工具 payload 不得覆写——
+  此前只测了序列化器本身、控制器从未查 registrar，运行时 MCP App 卡片永不挂载
+  （approval-forms e2e 发现）
 
 ### 4.5 ToolControllerTest (4 个用例)
 
@@ -161,7 +165,7 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| ChatStreamControllerTest | 21 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 / 丢租约即停写 / 准备段与租约启动失败的回滚 / file_ready 契约（download_url 相对路径） |
+| ChatStreamControllerTest | 23 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 / 丢租约即停写 / 准备段与租约启动失败的回滚 / file_ready 契约（download_url 相对路径）/ MCP Apps ui 注入接线契约 |
 | SessionStreamControllerTest | 7 | subscribe 回放+done / status 四态 / ui 元数据序列化 |
 
 ### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）
@@ -306,7 +310,7 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> 2026-09-17 更新（`session_event` 迁 Redis Streams 后复测 + file_ready 契约用例）：**`mvn test` 655 个用例、0 失败、4 例跳过**，
+> 2026-09-17 更新（`session_event` 迁 Redis Streams 后复测 + file_ready 契约用例 + MCP Apps ui 注入接线契约用例 2 例）：**`mvn test` 657 个用例、0 失败、4 例跳过**，
 > 覆盖 80 个含 `@Test` 的源文件（计数方式：surefire 汇总行 + `grep -rl '@Test' src/test/java`；
 > 下表类别行按 `@Test` 注解逐类清点对齐到当日代码）。
 > 默认跳过的是沙箱集成测试 `OpenSandboxApiIntegrationTest` 4 例；真实 S3 集成 `S3FileStorageIT`
@@ -320,11 +324,11 @@ src/test/resources/fixtures/test-agent/
 | DebugApiControllerTest | 15 | ✅ |
 | ThreadControllerTest（含 history 文件下载卡片） | 25 | ✅ |
 | FileControllerTest / FileToolsTest / FileAssetStoreTest | 36 | ✅ |
-| ChatStreamControllerTest / SessionStreamControllerTest | 28 | ✅ |
+| ChatStreamControllerTest / SessionStreamControllerTest | 30 | ✅ |
 | TurnLeaseStoreTest / TurnLeaseGuardTest | 16 | ✅ |
 | OpenSandbox 单测（SandboxConfig/State/Client/Reader 等） | 44 | ✅ |
 | 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 32 | ✅ |
-| 其余（tool/config/service/controller/storage） | 约 345 | ✅ |
+| 其余（tool/config/service/controller/storage） | 约 347 | ✅ |
 
 ### 8.1 沙箱测试（OpenSandbox 集成，2026-08-12 新增）
 

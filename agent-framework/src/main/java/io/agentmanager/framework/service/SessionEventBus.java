@@ -81,7 +81,16 @@ public class SessionEventBus {
      * @return 分配的 seq；-1 表示持久化失败（但实时广播仍会尝试）
      */
     public int emit(String sessionId, AgentEvent event, String replyId) {
-        String payload = AgentEventSseSerializer.payload(event);
+        return emit(sessionId, event, replyId, null);
+    }
+
+    /**
+     * 同上，但允许事件发源地覆写序列化结果——MCP Apps 的 TOOL_CALL_START 由此携带
+     * ui 元数据（mcp-apps-extension-plan §4：发源地查 McpToolRegistrar 后传入）。
+     * payloadOverride 为 null 时按原词表序列化，行为与 3 参版本完全一致。
+     */
+    public int emit(String sessionId, AgentEvent event, String replyId, String payloadOverride) {
+        String payload = payloadOverride != null ? payloadOverride : AgentEventSseSerializer.payload(event);
         String type = event.getType().name();
         int seq = eventStore.append(sessionId, replyId, type, payload);
 

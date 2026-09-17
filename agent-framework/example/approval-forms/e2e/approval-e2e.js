@@ -22,6 +22,16 @@ async function typeAndSend(page, text) {
   if (!textarea) throw new Error('#chatInput not found');
   await textarea.click({ clickCount: 3 });
   await textarea.type(text);
+  // 上一轮的 AGENT_END 可能晚于可见输出数秒才把前端 isStreaming 复位（sendBtn 从「…」
+  // 恢复为「发送」）；流未结束时的点击会被 sendMessage 的 isStreaming 守卫静默吞掉，
+  // 表现为「消息没发出去」。这里显式等按钮恢复可点。
+  await page.waitForFunction(
+    () => {
+      const b = document.getElementById('sendBtn');
+      return b && !b.disabled && b.textContent.trim() === '发送';
+    },
+    { timeout: LLM_TIMEOUT }
+  );
   await page.evaluate(() => document.getElementById('sendBtn')?.click());
 }
 

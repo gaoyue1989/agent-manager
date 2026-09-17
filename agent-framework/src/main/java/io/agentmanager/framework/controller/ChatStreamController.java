@@ -94,6 +94,7 @@ public class ChatStreamController {
     private final AgentManagerProperties props;
     private final SkillInjectionService skillInjectionService;
     private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
+    private final McpToolRegistrar mcpToolRegistrar;
 
     /** present_file 工具结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
@@ -120,7 +121,8 @@ public class ChatStreamController {
                                 WorkspaceReader workspaceReader,
                                 AgentManagerProperties props,
                                 SkillInjectionService skillInjectionService,
-                                io.agentmanager.framework.service.FileAssetStore fileAssetStore) {
+                                io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+                                McpToolRegistrar mcpToolRegistrar) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
@@ -134,6 +136,7 @@ public class ChatStreamController {
         this.props = props;
         this.skillInjectionService = skillInjectionService;
         this.fileAssetStore = fileAssetStore;
+        this.mcpToolRegistrar = mcpToolRegistrar;
     }
 
     /**
@@ -236,6 +239,12 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
+            // 本 turn 的收尾只做一次。AGENT_END 处理与源 flux 的 complete/error 回调可能各自
+            // 触发一次收尾，且 harness 的 flux 可能在 AGENT_END 事件之后**数秒**才 complete——
+            // 迟到的那次若再走 closeSession，会把**下一个** turn 刚建好的 sink 拆掉
+            // （实测：0.4s 内前后脚的两轮对话，第二轮的 permission_ask 被迟到关闭吞掉，
+            // 前端收不到 HITL 确认卡；approval-forms e2e 2026-09-17 复现）。
+            var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // 准备阶段的异常必须回滚已获取的 turn_lease。TurnLeaseGuard 的后台续租线程
             // 不看本段是否还活着——只要 token 仍匹配就持续续期，因此漏放租约意味着该
@@ -278,7 +287,7 @@ public class ChatStreamController {
                 // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
                 chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
-                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink),
+                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink, turnEnded),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             if (isTrailingSandboxTeardownError(e)) {
@@ -289,9 +298,9 @@ public class ChatStreamController {
                                     "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                         e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                             }
-                            endTurn(lease, finalSessionId);
+                            endTurn(lease, finalSessionId, turnEnded);
                         },
-                        () -> endTurn(lease, finalSessionId));
+                        () -> endTurn(lease, finalSessionId, turnEnded));
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
@@ -314,9 +323,26 @@ public class ChatStreamController {
 
     // ===== 事件处理 =====
 
+    /**
+     * TOOL_CALL_START 命中 MCP App ui 映射时，序列化携带 ui 元数据
+     * （mcp-apps-extension-plan §4：发源地查 {@link McpToolRegistrar} 后传入；
+     * 前端 chat.js 据此把工具行渲染为 iframe 内嵌的 MCP App 卡片）。
+     * 非 ui 工具（含内置工具）返回 null，payload 保持原词表。
+     */
+    private String payloadForEvent(AgentEvent event) {
+        if (event instanceof ToolCallStartEvent tc) {
+            var uiRef = mcpToolRegistrar.resolveUiRef(tc.getToolCallName());
+            if (uiRef != null) {
+                return AgentEventSseSerializer.payload(event, uiRef.resourceUri(), uiRef.serverName());
+            }
+        }
+        return null;
+    }
+
     private void handleEventAndEmit(AgentEvent event, String sessionId,
                                     String replyId, TurnLeaseGuard lease, String userId,
-                                    FluxSink<ServerSentEvent<String>> sink) {
+                                    FluxSink<ServerSentEvent<String>> sink,
+                                    java.util.concurrent.atomic.AtomicBoolean turnEnded) {
         if (stopIfLeaseLost(lease, sessionId, sink)) {
             return;
         }
@@ -349,7 +375,7 @@ public class ChatStreamController {
             lease.release();
         }
 
-        eventBus.emit(sessionId, event, replyId);
+        eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
 
         // HITL 是 turn 边界：permission_ask 已广播，关闭 sink 让订阅者正常结束。
         // 必须在 emit 之后——否则订阅者收不到 permission_ask（durable-sse-multinode-plan §3.4.4）。
@@ -365,7 +391,7 @@ public class ChatStreamController {
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            endTurn(lease, sessionId);
+            endTurn(lease, sessionId, turnEnded);
         }
     }
 
@@ -390,6 +416,15 @@ public class ChatStreamController {
             lease.release();
         }
         return true;
+    }
+
+    /** 带「只收尾一次」保护的 turn 收尾：晚到的 complete/error 回调不得重复执行 */
+    private void endTurn(TurnLeaseGuard lease, String sessionId,
+                         java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+        if (!turnEnded.compareAndSet(false, true)) {
+            return;
+        }
+        endTurn(lease, sessionId);
     }
 
     /**

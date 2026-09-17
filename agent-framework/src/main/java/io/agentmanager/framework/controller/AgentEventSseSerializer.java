@@ -38,7 +38,8 @@ public final class AgentEventSseSerializer {
     /**
      * 将 AgentEvent 序列化为 SSE data 的 JSON 字符串。
      * MCP Apps 扩展：TOOL_CALL_START 可携带 ui 元数据（{resourceUri, server}），
-     * 由事件发源地查询 McpToolRegistrar 后传入（当前对话单次流路径未接入）；
+     * 由事件发源地（ChatStream/Confirm 控制器）查 McpToolRegistrar.resolveUiRef 后传入
+     * （见 ChatStreamController.payloadForEvent，2026-09-17 经 approval-forms e2e 钉住）；
      * 无 UI 的工具传 null 保持原词表（向后兼容）。
      *
      * @param uiResourceUri ui:// 资源 URI；null 表示不带 UI 元数据
