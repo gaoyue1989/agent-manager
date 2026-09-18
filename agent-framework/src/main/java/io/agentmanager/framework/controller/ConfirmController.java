@@ -76,7 +76,16 @@ public class ConfirmController {
         return null;
     }
 
-    /** 同步版：恢复 agent 执行，返回最终回复（无状态架构：无事件扇出，调用方直接消费结果） */
+    /**
+     * 同步版：恢复 agent 执行，返回最终回复（无状态架构：无事件扇出，调用方直接消费结果）。
+     *
+     * <p><b>Turn 租约</b>：与 {@code confirm-stream} 一致先抢租约再恢复——多副本部署下
+     * 同一会话的并发确认/对话必须互斥。此前本端点无租约保护（confirm-stream 有），
+     * 并发确认会真的执行两次工具；租约在 DB（跨 Pod 生效）。
+     *
+     * <p>抢不到租约返回 409 {@code turn_in_progress}：语义为"该会话有执行段在进行中"，
+     * 调用方可稍后重试（与流式版返回 error 帧的处置差异：HTTP 端点用状态码表达）。
+     */
     @PostMapping(value = "/confirm", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> confirm(
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
@@ -89,6 +98,18 @@ public class ConfirmController {
             sessionUserStore.upsert(sessionId, userId);
         }
 
+        // 抢 Turn 租约：与 confirm-stream / chat 同一把锁（turn_lease 表，跨副本互斥）。
+        // 未抢到说明该会话正有执行段在跑（另一副本的对话/确认，或本会话上一段未释放），
+        // 此时不得恢复执行——否则两个执行段会同时写同一份 AgentState。
+        var token = turnLeaseStore.tryAcquire(sessionId);
+        if (token == null) {
+            log.info("[confirm] turn_in_progress, rejected (sid={})", sessionId);
+            return ResponseEntity.status(409).body(Map.of(
+                "error", "turn_in_progress",
+                "message", "Session '" + sessionId + "' has an active turn"));
+        }
+        var lease = new TurnLeaseGuard(turnLeaseStore, sessionId, token);
+
         try {
             var result = runtimeService.resumeWithConfirm(sessionId, null, body.results());
             return ResponseEntity.ok(result);
@@ -100,6 +121,10 @@ public class ConfirmController {
             return ResponseEntity.status(409).body(Map.of(
                 "error", "confirm_already_consumed",
                 "message", "This confirm has already been processed"));
+        } finally {
+            // 租约必须释放：resumeWithConfirm 是阻塞调用（agent.call().block()），
+            // 本轮执行段到此结束；不释放会让该会话被锁至 TTL 过期（默认 60s）
+            lease.close();
         }
     }
 

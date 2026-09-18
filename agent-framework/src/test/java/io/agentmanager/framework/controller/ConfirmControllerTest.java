@@ -33,6 +33,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -74,6 +75,9 @@ class ConfirmControllerTest {
         lenient().when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
         // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
         lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
+        // 同步 confirm 现在也抢租约（与 confirm-stream 对齐）：默认允许抢到，
+        // 个别用例可重新打桩返回 null 以验证 409 turn_in_progress
+        lenient().when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-1");
 
         // SessionEventBus 依赖 SessionEventStore（mock）
         eventStore = mock(SessionEventStore.class);
@@ -185,6 +189,52 @@ class ConfirmControllerTest {
         mvc.perform(post("/threads/t1/confirm").contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isConflict())
             .andExpect(jsonPath("$.error").value("confirm_already_consumed"));
+    }
+
+    @Test
+    void confirmShouldReturn409WhenTurnLeaseUnavailable() throws Exception {
+        // 多副本/并发：该会话有执行段在进行中，同步 confirm 必须拒绝恢复执行
+        // （否则两个执行段会同时写同一份 AgentState）
+        when(turnLeaseStore.tryAcquire(anyString())).thenReturn(null);
+        stubPendingStoreRow();
+        when(confirmContextStore.consume(anyString()))
+            .thenReturn(new ConfirmContextStore.StoredRow(
+                List.of(ToolUseBlock.builder().id("call-1").name("get_weather")
+                    .input(Map.of("city", "beijing")).build()),
+                "reply-1", Instant.now(), null, null));
+
+        mvc.perform(post("/threads/t1/confirm")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(MAPPER.writeValueAsString(Map.of("results", List.of(
+                    Map.of("tool_call_id", "call-1", "confirmed", true))))))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("turn_in_progress"));
+
+        // 未抢到租约就不得恢复执行
+        verify(agent, never()).call(anyList(), any(io.agentscope.core.agent.RuntimeContext.class));
+    }
+
+    @Test
+    void confirmShouldReleaseTurnLeaseAfterExecution() throws Exception {
+        // 执行段结束必须释放租约，否则该会话被锁到 TTL 过期（默认 60s）
+        stubPendingStoreRow();
+        when(confirmContextStore.consume(anyString()))
+            .thenReturn(new ConfirmContextStore.StoredRow(
+                List.of(ToolUseBlock.builder().id("call-1").name("get_weather")
+                    .input(Map.of("city", "beijing")).build()),
+                "reply-1", Instant.now(), null, null));
+        var msg = mock(Msg.class);
+        when(msg.getTextContent()).thenReturn("weather done");
+        when(agent.call(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(Mono.just(msg));
+
+        mvc.perform(post("/threads/t1/confirm")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(MAPPER.writeValueAsString(Map.of("results", List.of(
+                    Map.of("tool_call_id", "call-1", "confirmed", true))))))
+            .andExpect(status().isOk());
+
+        verify(turnLeaseStore).release(eq("t1"), eq("tok-1"));
     }
 
     @Test
