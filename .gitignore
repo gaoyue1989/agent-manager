@@ -97,3 +97,6 @@ e2e/fixtures/e2e-frontend-test.csv
 
 # Playwright MCP 测试运行产物（页面快照/控制台日志）
 .playwright-mcp/
+
+# Go 覆盖率产物（make cover）
+backend/cover.out
