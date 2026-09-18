@@ -146,6 +146,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 ### 4. A2AController — A2A JSON-RPC（全量透传 SDK）
 
 - `POST /` 全量透传给 AgentScopeA2aServer（SDK）处理：`message/send`、`message/stream`、`tasks/get`、`tasks/cancel`、`tasks/resubscribe` 等所有标准 A2A 方法
+- **HITL 限制（2026-09-18 声明）**：A2A 通道**不支持** permission `ask` 工具（publish/update_env/republish/unpublish/delete）——挂起态只存 harness checkpoint、不落平台 confirm_context，A2A 客户端无法批准，且同会话后续请求会持续 `IllegalStateException`。该限制已写入注册卡 description（`AgentCardNotes.A2A_CHANNEL_LIMITATION`）；变更类操作必须走 `/threads/chat` + `/threads/{sid}/confirm-stream`
 - 实现参考官方 `agentscope-a2a-spring-boot-starter` 的 `A2aJsonRpcController`
 - 兼容转换：message/send 与 message/stream 自动补全 SDK 反序列化必需字段（`kind:"message"`、`messageId`、parts `kind:"text"`、`blocking:true`），顶层 `userId`/`sessionId` → `message.metadata`
 - `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表读取构造 A2A Task（save no-op，消息已由 AgentScope 自动持久化）

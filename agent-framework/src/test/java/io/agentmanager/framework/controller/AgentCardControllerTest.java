@@ -10,6 +10,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import io.agentmanager.framework.model.AgentCardNotes;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.AgentRuntimeService;
@@ -51,7 +52,9 @@ class AgentCardControllerTest {
         mockMvc.perform(get("/.well-known/agent-card.json"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.name").value("test-agent"))
-            .andExpect(jsonPath("$.description").value("A test agent"))
+            // description = 包描述 + A2A 通道 HITL 限制声明（ask 工具无法经 A2A 批准）
+            .andExpect(jsonPath("$.description").value(
+                "A test agent " + AgentCardNotes.A2A_CHANNEL_LIMITATION))
             .andExpect(jsonPath("$.version").value("1.0.0"))
             .andExpect(jsonPath("$.provider.organization").value("acme"))
             .andExpect(jsonPath("$.capabilities.streaming").value(true))

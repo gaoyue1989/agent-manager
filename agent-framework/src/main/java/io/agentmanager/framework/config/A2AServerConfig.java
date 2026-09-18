@@ -12,6 +12,7 @@ import io.agentscope.core.a2a.server.AgentScopeA2aServer;
 import io.agentscope.core.a2a.server.card.ConfigurableAgentCard;
 import io.agentscope.core.a2a.server.transport.TransportProperties;
 
+import io.agentmanager.framework.model.AgentCardNotes;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.HarnessAgentRunner;
 import io.agentmanager.framework.service.MySqlTaskStore;
@@ -31,7 +32,8 @@ public class A2AServerConfig {
         var host = "0.0.0.0".equals(serverCfg.host()) ? "127.0.0.1" : serverCfg.host();
         var card = new ConfigurableAgentCard.Builder()
             .name(oafConfig.name())
-            .description(oafConfig.description() != null ? oafConfig.description() : "")
+            // A2A 通道 HITL 限制声明（ask 工具挂起无法经 A2A 批准，见 AgentCardNotes）
+            .description(AgentCardNotes.withA2aLimitation(oafConfig.description()))
             .url(String.format("http://%s:%d", host, serverCfg.port()))
             .build();
 

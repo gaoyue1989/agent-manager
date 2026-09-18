@@ -118,6 +118,8 @@ data: {"type":"permission_ask","id":"evt-8","reply_id":"rid-xxx","tool_calls":[{
 
 此时前端弹出确认卡片，用户点击批准/拒绝后调用 `confirm-stream`。
 
+> **通道限制**：以上 HITL 确认流仅覆盖本 HTTP threads 链路。A2A（`message/send`）通道不支持 ask 工具——挂起态不落平台 confirm_context，无法经 A2A 批准，同会话后续请求会持续 `IllegalStateException`。变更类操作请使用本链路（该限制已声明在 `/.well-known/agent-card.json` 的 description）。
+
 #### 排队等待
 
 如果当前有其他 turn 在执行，SSE 会持续发 waiting 帧保持连接：

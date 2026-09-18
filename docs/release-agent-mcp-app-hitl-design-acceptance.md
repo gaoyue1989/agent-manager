@@ -669,3 +669,8 @@ C01–C19 均需 E2E 证据，不能以单测通过或“顺带覆盖”代替�
 | 结论 | 通过 / 不通过 / 未验收 |
 
 **当前结论：仅完成设计文档编制；功能未实施，所有验收未执行，未进行提交、推送或部署。**
+
+## 18. 已知通道限制（2026-09-18 补录，实测复现）
+
+- **A2A（message/send）通道不支持 ask 工具**：五个变更工具的挂起态只存于 harness checkpoint（`HarnessAgentRunner` 直调 `agent.stream()`，不经过 `AgentRuntimeService.forwardEvent` 的 `putConfirmContext`），平台 confirm_context 无记录，`confirm-stream` 无法恢复；且 A2A 会话共享 `{userId}:unknown` 键（SDK 未传 sessionId/taskId），挂起后同会话后续请求持续 `IllegalStateException`（会话锁死）。该限制已声明于注册卡 description（`AgentCardNotes.A2A_CHANNEL_LIMITATION`，覆盖 `/.well-known/agent-card.json` 与 A2A Server 卡片）及 agent-framework AGENTS.md §4；变更类操作必须走 `/threads/chat` + `/threads/{sid}/confirm-stream`。本设计未覆盖 A2A 对话通道，A2A 接入确认流另立设计。
+- **confirm-stream 恢复 turn 的沙箱竞态（沙箱开启时）**：挂起 turn 的 harness flux 在 AGENT_END 之后才真正 complete，其收尾 `OpenSandbox.stop()` 会关闭恢复 turn 刚连接的沙箱。日志链（release-agent 18:12:08-09）：`permission_ask`（08.695）→ 恢复启动（08.752）→ 恢复连接沙箱成功（08.874）→ 旧 turn flux 完成 `POST_CALL ended on a tool-call turn`（09.072）→ `stop() called`（09.073）→ 恢复 turn 文件系统 404（09.100）→ `SandboxConfigurationException: No active sandbox — sandbox filesystem used outside of a call context`（09.121）。恢复失败后 ASKING 态残留，同会话后续请求报 `IllegalStateException ... supplied no confirmation`（会话锁死）。与 8e9f61b 修复的"迟到收尾关掉下一轮 sink"同族，但位于 harness 沙箱生命周期层，控制器层 `turnEnded` 保护不可达。沙箱关闭（`SANDBOX_ENABLED=false`，应用默认）的部署不受影响。

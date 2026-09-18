@@ -6,6 +6,7 @@ import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.agentmanager.framework.model.AgentCardNotes;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.AgentRuntimeService;
@@ -42,7 +43,8 @@ public class AgentCardController {
 
         var card = new java.util.LinkedHashMap<String, Object>();
         card.put("name", oafConfig.name());
-        card.put("description", oafConfig.description());
+        // A2A 通道 HITL 限制声明（ask 工具挂起无法经 A2A 批准，见 AgentCardNotes）
+        card.put("description", AgentCardNotes.withA2aLimitation(oafConfig.description()));
         card.put("url", "");
         card.put("version", oafConfig.version());
         card.put("provider", Map.of("organization", oafConfig.vendorKey()));
