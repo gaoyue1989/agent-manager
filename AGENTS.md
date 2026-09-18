@@ -99,7 +99,7 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|---------|
 | backend-ci | `go vet ./...` + `go test ./...` | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run build` | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（455 用例，Maven Central 依赖） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| agent-framework-ci | `mvn test`（676 用例，Maven Central 依赖） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
 
 细节：
 - 镜像构建用 buildx + gha 缓存；agent-framework 构建前自动下载 OTel Java Agent（jar 不入库，版本取 Makefile `OTEL_JAVAAGENT_VERSION`）

@@ -50,7 +50,8 @@ agent-framework/
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
 │   │   │   │   ├── HarnessAgentRunner.java      # A2A Server 适配器
 │   │   │   │   ├── MySqlTaskStore.java          # A2A TaskStore 实现 (读 agent_state, save no-op)
-│   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息)
+│   │   │   │   ├── StateDataParser.java         # state_data JSON 公共解析 (context[] → 消息, 含工具状态/结果与敏感值遮掩)
+│   │   │   │   ├── AgentStateReader.java        # AgentState 读取 (history 权威源 + HITL 挂起快照)
 │   │   │   │   ├── TurnLeaseStore.java          # turn_lease 表 (单次流执行权互斥)
 │   │   │   │   ├── TurnLeaseGuard.java          # turn 续租句柄 (close 幂等释放)
 │   │   │   │   ├── ConfirmContextStore.java     # confirm_context 表 (HITL 确认上下文, CAS 防重复)
@@ -89,8 +90,8 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
-│   └── test/                                  # 61 个测试类 / 456 个 @Test（含默认跳过的沙箱集成测试）
-├── docs/                                     # 设计与改进方案文档 (26 份, 含 mcp-apps-extension-plan.md)
+│   └── test/                                  # 61 个测试类 / 676 个 @Test（含默认跳过的沙箱集成测试）
+├── docs/                                     # 设计与改进方案文档 (27 份, 含 history-agentstate-design.md / mcp-apps-extension-plan.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
@@ -257,6 +258,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
+| `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 
 ---
 
@@ -326,7 +328,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (455 用例)
+mvn -o test            # 容器内离线测试 (676 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -336,6 +338,6 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 61 个测试类 / 456 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
+mvn test     # 61 个测试类 / 676 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```

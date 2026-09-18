@@ -198,7 +198,15 @@ curl http://localhost:8100/threads
 
 ### GET /threads/{sessionId}/history
 
-Thread 历史消息 + pendingConfirm（state_data 尽力解析，供刷新重建确认卡片）。
+Thread 历史消息 + pendingConfirm。
+
+**数据源**：`agent_state`（官方 SDK 自动持久化的 AgentState）是消息级事实的权威来源——
+工具调用带 `state`（ToolCallState：pending/asking/allowed/submitted/finished），
+工具结果带 `state`（ToolResultState：success/error/denied/interrupted）与 `output`，
+覆盖 HITL 批准后的恢复段，不受 Redis 事件流 TTL 限制。
+`pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
+的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。
+详见 [history-agentstate-design.md](history-agentstate-design.md)。
 
 ```bash
 curl http://localhost:8100/threads/acme-test-agent:thread-1/history
@@ -211,17 +219,34 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
     "session_id": "acme-test-agent:thread-1",
     "pendingConfirm": {
         "reply_id": "reply-001",
+        "source": "agent_state",
         "tools": [
             {"tool_call_id": "uuid", "name": "submit_application", "input": {"action": "submit"}}
-        ],
-        "created_at": "2026-08-21T10:05:00Z"
+        ]
     },
     "messages": [
         {"role": "user", "content": "提交申请"},
-        {"role": "agent", "content": "请确认是否提交？", "tool_calls": [...]}
+        {"role": "assistant", "content": "请确认是否提交？",
+         "tool_calls": [
+            {"id": "call_1", "name": "list_images", "input": {},
+             "state": "success", "output": "images: [...]"},
+            {"id": "call_2", "name": "publish_service", "input": {"packageId": 3},
+             "state": "asking"}
+         ]}
     ]
 }
 ```
+
+**工具结果字段**（`tool_calls[]`）：
+
+| 字段 | 说明 |
+|------|------|
+| `state` | 结果状态（`success`/`error`/`denied`/`interrupted`）优先；无结果时回落 ToolCallState（如 `asking`） |
+| `output` | 工具结果文本；**敏感值已遮掩**（密钥键值对 / `tp-` token / Bearer），且已按上限截断 |
+| `output_truncated` | 可选：`true` 表示因超限被截断 |
+| `output_full_length` | 可选：截断前的完整字符数 |
+
+截断上限由 `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` 控制（默认 8000，`<=0` 关闭）。
 
 ---
 
@@ -417,6 +442,12 @@ HITL 确认上下文（人工确认场景跨副本持久化）。Session 粒度�
 
 **TTL:** 默认 30 分钟（`confirmTtlMinutes`），读时懒判断 + 定时清理兜底。
 
+**定位（2026-09 起）：兼容兜底，不再是 HITL 恢复的权威来源。**
+挂起态的权威来源是 `agent_state` 里 SDK 持久化的 ASKING 工具（无 TTL，
+见 [history-agentstate-design.md](history-agentstate-design.md)）；
+本表用于老会话回落与状态查询。state 路径恢复成功时会把残留行顺手消费，
+避免二次提交走到陈旧上下文。
+
 ### turn_lease
 
 Turn 租约（同一 session 执行段串行化）。Token + 短 TTL + 续租，崩溃由 TTL 过期兜底。
@@ -431,6 +462,10 @@ Turn 租约（同一 session 执行段串行化）。Token + 短 TTL + 续租，
 **TTL:** 默认 60 秒（`turnLeaseTtlSeconds`），续租间隔默认 20 秒（`turnLeaseRenewSeconds`）。
 
 **租约语义：** 只覆盖活跃执行段。permission_ask（HITL 暂停点）即让出锁；confirm-stream 恢复 = 新执行段需重新 acquire。
+
+**保护范围：** `/threads/chat`、`/threads/{sid}/confirm-stream`、`/threads/{sid}/confirm`
+（同步版于 2026-09-18 补齐，此前无租约——多副本下并发确认会重复执行；抢不到返回
+409 `turn_in_progress`）。
 
 ### tool_audit_log
 
