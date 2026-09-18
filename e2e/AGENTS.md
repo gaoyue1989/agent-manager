@@ -7,7 +7,7 @@
 | platform-e2e.sh | A+B | REST 主链路 50 断言：上传→发布→A2A 注册→env 更新（含全量覆盖清除旧键）→republish→上下线→异常路径（deploying/stopped 改 env 拒绝、被引用包删除 400）→零残留清理（增量对齐基线，保护 release-agent）；镜像经 GET /images 动态选取不写死 |
 | mcpclient/ (go run .) | C | MCP client 经 streamableHttp 走完整发布链路 27 断言（含 list_images/list_packages/get_package_detail/register_service 与两步确认删除） |
 | ui-e2e.js | D | Puppeteer UI 流程 10 断言（发布向导三步/详情轮询/重发布/删除） |
-| agent-e2e.sh | E | release-agent 自举 + 自然语言驱动第三方发布 + 确认式删除 6 断言 |
+| agent-e2e.sh | E | release-agent 自然语言驱动第三方发布+删除全链路 8 断言；变更类走 /threads/chat + confirm-stream HITL 确认流（需 release-agent ≥ HITL 20260917 部署）；A2A 通道仅查询探针（HITL 后 A2A ask 挂起不落 confirm_context，变更无法批准——待运行时修复） |
 | debug-console-e2e.js | 附 | Debug Console 子路径渲染（经 :30080） |
 | chat-ui-e2e.js | 附 | /assistant 对话真实 LLM 流式回复（经 :8911） |
 | file-support-e2e.sh | 附 | 文件上传下载：S1 上传文档/S2 上传图片(视觉)/S3 输出文档/S4 输出图片/X 异常/S8 生成 OAF 部署包（非沙箱 21 断言）；SANDBOX=1 启用沙箱专项 S-S1~S-S7（22 断言）+ S-S8/S-S9 生成包与发布全链路（合计 29 断言） |
