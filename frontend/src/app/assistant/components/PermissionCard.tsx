@@ -1,52 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { hasEnv, maskInput, parseInput, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 
-export type ConfirmResult = { tool_call_id: string; confirmed: boolean };
-export type ConfirmCard = {
-  id: string;
-  toolCalls: { tool_call_id: string; name: string; input: unknown }[];
-  status: "pending" | "submitting" | "resolved" | "unknown";
-  results?: ConfirmResult[];
-};
-
-export function createConfirmCard(tools: unknown): ConfirmCard {
-  const toolCalls = Array.isArray(tools) ? tools.map((tool) => ({
-    tool_call_id: typeof tool?.tool_call_id === "string" ? tool.tool_call_id : "",
-    name: typeof tool?.name === "string" ? tool.name : "未知工具",
-    input: tool?.input,
-  })) : [];
-  const valid = toolCalls.length > 0 && toolCalls.every((tool) => tool.tool_call_id && tool.name !== "未知工具")
-    && new Set(toolCalls.map((tool) => tool.tool_call_id)).size === toolCalls.length;
-  return {
-    id: JSON.stringify(toolCalls.map((tool) => tool.tool_call_id).sort()),
-    toolCalls,
-    status: valid ? "pending" : "unknown",
-  };
-}
-
-function parseInput(input: unknown): unknown {
-  if (typeof input !== "string") return input;
-  try { return JSON.parse(input); } catch { return input; }
-}
-
-const sensitiveKey = /password|passwd|pwd|secret|token|credential|authorization|cookie|private.?key|api.?key|access.?key|密钥|密码/i;
-
-// env 全量值默认遮掩，避免自定义变量名漏判；其他敏感字段递归遮掩，展开只影响展示。
-function maskInput(value: unknown, hide = false): unknown {
-  if (Array.isArray(value)) return value.map((item) => maskInput(item, hide));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-      key, maskInput(item, hide || key.toLowerCase() === "env" || sensitiveKey.test(key)),
-    ]));
-  }
-  return hide ? "••••••（已遮掩）" : value;
-}
-
-function hasEnv(value: unknown): boolean {
-  return !!value && typeof value === "object" && Object.entries(value).some(([key, item]) =>
-    key.toLowerCase() === "env" || hasEnv(item));
-}
+export type { ConfirmCard, ConfirmResult } from "@/lib/confirm-card";
 
 function display(value: unknown): string {
   return value === undefined ? "（未提供）" : JSON.stringify(value, null, 2);

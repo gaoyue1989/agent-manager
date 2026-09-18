@@ -7,7 +7,8 @@
 //          代码块走 Prism oneLight 高亮；光标 span 作为 Markdown 外层兄弟节点，不进解析器
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { completeToolCall } from "@/lib/assistant-events";
-import PermissionCard, { createConfirmCard, type ConfirmCard, type ConfirmResult } from "./components/PermissionCard";
+import { createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+import PermissionCard from "./components/PermissionCard";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
