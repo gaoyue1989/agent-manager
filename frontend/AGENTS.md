@@ -13,7 +13,7 @@ OAF 发布平台前端（React 19 + Next.js 16 + Tailwind 3，容器化 standalo
 | `/` | src/app/page.tsx | 服务列表：状态轮询(5s)、行操作（下线/上线/重发布/删除） |
 | `/publish` | src/app/publish/page.tsx | 发布向导：上传 zip/选包 → 选镜像 → env 键值对编辑器（增删行）→ 提交 |
 | `/services/[id]` | src/app/services/[id]/page.tsx | 详情：状态/Pod 轮询、Agent Card、env 编辑保存（全量覆盖=滚动重启）、事件时间线 |
-| `/assistant` | src/app/assistant/page.tsx | 发布助手对话：无状态单次流 SSE + HITL 确认卡片 |
+| `/assistant` | src/app/assistant/page.tsx | 发布助手对话：无状态单次流 SSE + HITL 确认卡片；渲染层拆分至 `assistant/components/*`（MessageItem 事件渲染/Markdown/PermissionCard/icons/types，deer-flow 风格工具时间线步骤+欢迎态，e2e data-testid 契约保持不变） |
 
 ## API 客户端（src/lib/api.ts）
 
@@ -24,7 +24,7 @@ OAF 发布平台前端（React 19 + Next.js 16 + Tailwind 3，容器化 standalo
 - **同源反代**（next.config.ts rewrites）：
   - `/api/v1/*` → platform-backend svc:8080
   - `/agent/release-agent/*` → release-agent svc:8100（对话单次流/confirm-stream）
-- **对话单次流解析**（assistant/page.tsx consumeStream）：fetch ReadableStream 手解 SSE `data:` 帧；TEXT_BLOCK_DELTA 增量必须落到「最后一条 assistant 气泡」（工具状态行会插在其后）；permission_ask 渲染确认卡片 → POST confirm-stream
+- **对话单次流解析**（assistant/page.tsx consumeStream）：fetch ReadableStream 手解 SSE `data:` 帧；TEXT_BLOCK_DELTA 增量必须落到「最后一条 assistant 气泡」（工具状态行固定插在其前：步骤在上、答案在下）；permission_ask 渲染确认卡片 → POST confirm-stream
 - **HTTP 非安全上下文无 crypto.randomUUID**——sessionId 用时间戳+随机串兜底（localStorage 持久化）
 - 列表/详情均 5s 轮询实时状态；操作后手动 load() 全刷
 

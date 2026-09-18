@@ -1,3 +1,67 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ===== 发布助手动效（deer-flow 风格：极光标题/流光文字/打字点/入场），纯 CSS 不引依赖 ===== */
+
+/* 极光渐变标题：背景位移扫色 */
+@keyframes aurora-drift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+.aurora-text {
+  background-image: linear-gradient(120deg, #2563eb, #6366f1, #06b6d4, #2563eb);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: aurora-drift 8s linear infinite;
+}
+
+/* 流光文字：高光扫过（思考中/执行中工具名） */
+@keyframes shimmer-sweep {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.shimmer-text {
+  background: linear-gradient(90deg, #9ca3af 35%, #1f2937 50%, #9ca3af 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 1.6s linear infinite;
+}
+
+/* 打字点：错峰弹跳（delay 由内联 style 指定） */
+@keyframes typing-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-3px); opacity: 1; }
+}
+.typing-dot { animation: typing-bounce 1.2s ease-in-out infinite; }
+
+/* 入场：上浮淡入（delay 由内联 style 指定）/ 纯淡入 */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up { animation: fade-in-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-fade-in { animation: fade-in 0.3s ease-out both; }
+
+/* 消息区细滚动条 */
+.chat-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.chat-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+.chat-scroll::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+.chat-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 减弱动态：尊重系统"减少动态效果"偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .aurora-text, .shimmer-text, .typing-dot, .animate-fade-in-up, .animate-fade-in {
+    animation: none;
+  }
+  .shimmer-text { background: none; color: #6b7280; -webkit-text-fill-color: #6b7280; }
+}

@@ -3,9 +3,16 @@ export type ConfirmResult = { tool_call_id: string; confirmed: boolean };
 export type ConfirmCard = {
   id: string;
   toolCalls: { tool_call_id: string; name: string; input: unknown }[];
-  status: "pending" | "submitting" | "resolved" | "unknown";
+  // expired：后端确认上下文不存在/已过期（confirm-stream 预检 404）——HITL 未批准故工具未执行，可安全重新发起
+  status: "pending" | "submitting" | "resolved" | "unknown" | "expired";
   results?: ConfirmResult[];
 };
+
+// 确认流失败归类：仅 404 confirm_context_not_found 可断定「未执行」（上下文过期，工具从未获批准）；
+// 其余（含 409 confirm_already_consumed、网络中断）一律 unknown，无法排除已执行，禁重试。
+export function classifyConfirmFailure(message: unknown): "expired" | "unknown" {
+  return typeof message === "string" && message.includes("confirm_context_not_found") ? "expired" : "unknown";
+}
 
 // 工具调用缺失 tool_call_id/名称或重复 id 时不构成可确认卡片 → unknown（禁提交防误批）
 export function createConfirmCard(tools: unknown): ConfirmCard {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createConfirmCard, hasEnv, maskInput, parseInput } from "./confirm-card.ts";
+import { classifyConfirmFailure, createConfirmCard, hasEnv, maskInput, parseInput } from "./confirm-card.ts";
 
 test("valid tool calls produce a pending card with sorted-id identity", () => {
   const card = createConfirmCard([
@@ -61,4 +61,19 @@ test("parseInput decodes stringified JSON tool input, keeps raw on failure", () 
   assert.deepEqual(parseInput('{"a":1}'), { a: 1 });
   assert.equal(parseInput("not-json"), "not-json");
   assert.deepEqual(parseInput({ a: 1 }), { a: 1 });
+});
+
+test("confirm failure classification: only 404 expired is provably unexecuted", () => {
+  // 后端 404：上下文过期，HITL 未批准 → 工具未执行，可安全重新发起
+  assert.equal(classifyConfirmFailure(
+    "confirm_context_not_found: session 'agentmanager-release-agent__webui-x' not found or confirm context expired"),
+    "expired");
+  // 409 已消费：可能已执行，不得断言未执行
+  assert.equal(classifyConfirmFailure(
+    "confirm_already_consumed: session 'webui-x' already processed"), "unknown");
+  // 网络/流中断、未知错误、非字符串 → 无法排除已执行
+  assert.equal(classifyConfirmFailure("HTTP 500"), "unknown");
+  assert.equal(classifyConfirmFailure("turn_in_progress: session 'x' has an active turn"), "unknown");
+  assert.equal(classifyConfirmFailure(undefined), "unknown");
+  assert.equal(classifyConfirmFailure({ message: "confirm_context_not_found" }), "unknown");
 });

@@ -2,31 +2,22 @@
 // 发布助手对话：无状态单次流（POST /threads/chat，sessionId 在 body，SSE 增量渲染）
 // HITL：permission_ask 渲染确认卡片 → /threads/{sessionId}/confirm-stream 恢复
 // 文件：附件上传（/files/upload）→ chat 携带 fileIds；file_ready 事件渲染下载卡片
-// 历史：GET /threads 列表 + GET /threads/{sid}/history 回放；点击切换恢复上下文继续对话
-// Markdown：react-markdown + remark-gfm（表格/任务列表/删除线）+ rehype-sanitize（净化）
-//          代码块走 Prism oneLight 高亮；光标 span 作为 Markdown 外层兄弟节点，不进解析器
-import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { completeToolCall } from "@/lib/assistant-events";
-import { createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+// 历史：GET /threads 列表（侧边栏常驻展示，进入页面即加载 + 发送后刷新）+ GET /threads/{sid}/history 回放；点击切换恢复上下文继续对话
+// UI：deer-flow 风格——工具事件渲染为时间线状态步骤、历史回放同构展示、欢迎态 Hero + 错峰建议；
+//     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
+import { useCallback, useEffect, useRef, useState } from "react";
+import { completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
+import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+import MessageItem from "./components/MessageItem";
 import PermissionCard from "./components/PermissionCard";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeSanitize from "rehype-sanitize";
-import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism";
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import type { AttachItem, ChatMsg, FileCard, ThreadItem } from "./components/types";
+import { IconArrowUp, IconHistory, IconLoader, IconPaperclip, IconPlus, IconSparkles, IconX } from "./components/icons";
 
 const AGENT_BASE = "/agent/release-agent";
-type ChatMsg = {
-  role: "user" | "assistant" | "tool" | "system";
-  content: string;
-  pending?: boolean;   // 工具行执行中
-  toolCallId?: string;
-  confirm?: ConfirmCard;
-  files?: FileCard[];  // file_ready 渲染的下载卡片
-};
-type FileCard = { file_id: string; file_name: string; mime_type: string; size: number; download_url: string };
-type AttachItem = { fileId: string; name: string; mime: string; size: number };
-type ThreadItem = { peer: string; fullKey: string; updatedAt: string };
+// 初始问候语：欢迎态 Hero 直接以此作副标题，不在消息流里重复渲染
+const GREETING = "我是 OAF 平台的智能发布助手。可以让我发布配置包、查询服务状态、更新环境变量、重新发布或下线服务。";
+// 欢迎态快捷建议：点击直接发送
+const SUGGESTIONS = ["现在有哪些服务？", "把 packageId=3 发布一下", "更新服务环境变量", "下线一个服务"];
 
 // HTTP 环境非安全上下文无 crypto.randomUUID，用时间戳+随机串兜底
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -55,26 +46,27 @@ function parseChatThread(sessionId: string): ThreadItem | null {
 }
 
 export default function AssistantPage() {
-  const [messages, setMessages] = useState<ChatMsg[]>([
-    { role: "system", content: "我是 OAF 平台的智能发布助手。可以让我发布配置包、查询服务状态、更新环境变量、重新发布或下线服务。" },
-  ]);
+  const [messages, setMessages] = useState<ChatMsg[]>([{ role: "system", content: GREETING }]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const confirmInFlight = useRef(false);
   const [attachments, setAttachments] = useState<AttachItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const sessionId = useRef<string>("");
 
-  // 历史会话：GET /threads 列表（ChatUiChannel 来源，最近 20 条）；showHistory 控制侧栏显隐
+  // 历史会话：GET /threads 列表（ChatUiChannel 来源，最近 20 条），侧边栏常驻展示；refreshing 控制刷新按钮转动
   const [threads, setThreads] = useState<ThreadItem[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const sessionLoading = useRef(true);
   // 存在未处理（pending/unknown）确认卡时锁定发送，避免新请求覆盖运行时未消费的确认上下文
   const awaitingConfirm = messages.some((m) => m.confirm && (m.confirm.status === "pending" || m.confirm.status === "unknown"));
   const sessionLocked = busy || historyLoading || uploading;
+  // 欢迎态：只有系统提示、没有实际对话内容时展示 Hero + 快捷建议
+  const welcome = !historyLoading && messages.every((m) => m.role === "system");
 
   const loadThreads = useCallback(async () => {
     try {
@@ -91,7 +83,10 @@ export default function AssistantPage() {
     } catch { /* 列表加载失败静默（面板显示空态） */ }
   }, []);
 
-  /** 历史消息回放：GET /threads/{fullKey}/history → ChatMsg[]（含未消费 HITL 卡片重建 + 产出文件卡片） */
+  // 侧边栏会话列表：进入页面即加载
+  useEffect(() => { loadThreads(); }, [loadThreads]);
+
+  /** 历史消息回放：GET /threads/{fullKey}/history → ChatMsg[]（含未消费 HITL 卡片重建 + 产出文件卡片），渲染与实时流同构 */
   const loadHistory = useCallback(async (fullKey: string) => {
     const msgs: ChatMsg[] = [];
     try {
@@ -102,11 +97,21 @@ export default function AssistantPage() {
           if (m.role === "user") {
             msgs.push({ role: "user", content: m.content ?? "" });
           } else if (m.role === "assistant") {
-            if (m.content) msgs.push({ role: "assistant", content: m.content });
-            // 工具调用行渲染在 assistant 文本之后（与 SSE 最终形态一致：🔧 name ✓）
+            // 工具调用步骤渲染在 assistant 文本之前（与实时流一致：步骤在上、答案在下）。
+            // state 与 output 来自 AgentState（DB 权威来源，官方 SDK 自动持久化）：
+            // 含 HITL 批准后的恢复段；无 state 的调用（未批准）渲染中性态，不臆造成败
             for (const tc of (m.tool_calls ?? [])) {
-              msgs.push({ role: "tool", content: `🔧 ${tc.name} ✓`, pending: false });
+              msgs.push({
+                role: "tool", content: `${tc.name}`, pending: false,
+                ...(tc.state ? { state: String(tc.state) } : {}),
+                ...(tc.output ? { output: String(tc.output) } : {}),
+                ...(tc.output_truncated ? {
+                  output_truncated: true,
+                  output_full_length: Number(tc.output_full_length) || 0,
+                } : {}),
+              });
             }
+            if (m.content) msgs.push({ role: "assistant", content: m.content });
           }
         }
         // 产出文件卡片：挂到最后一条 assistant 气泡（与 SSE file_ready 渲染一致）
@@ -142,14 +147,14 @@ export default function AssistantPage() {
     window.localStorage.setItem("oaf-assistant-sid", item.peer);
     sessionId.current = item.peer;
     setHistoryLoading(true);
-    setShowHistory(false);
     const msgs = await loadHistory(item.fullKey);
     setMessages(msgs.length > 0
       ? msgs
       : [{ role: "system", content: "该会话暂无可展示的历史消息，可直接继续对话。" }]);
     sessionLoading.current = false;
     setHistoryLoading(false);
-  }, [sessionLocked, loadHistory]);
+    loadThreads(); // 切换后刷新列表（时间戳排序变化 + 当前会话高亮）
+  }, [sessionLocked, loadHistory, loadThreads]);
 
   useEffect(() => {
     const sid = getSessionId();
@@ -169,8 +174,15 @@ export default function AssistantPage() {
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages]);
+  // 输入框随内容自动增高（上限 160px）
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
 
-  // 文本增量必须落到「最后一条 assistant 气泡」——工具状态行会插在其后
+  // 文本增量必须落到「最后一条 assistant 气泡」——工具状态行固定插在其前（步骤在上、答案在下）
   const updateLastAssistant = useCallback((fn: (m: ChatMsg) => ChatMsg) => {
     setMessages((prev) => {
       const next = [...prev];
@@ -251,7 +263,25 @@ export default function AssistantPage() {
         case "THINKING_BLOCK_DELTA":
           break; // 思考过程不上屏
         case "TOOL_CALL_START":
-          setMessages((prev) => [...prev, { role: "tool", content: `🔧 ${ev.toolName}`, toolCallId: ev.toolCallId, pending: true }]);
+          // 工具步骤插到最后一条 assistant 气泡之前（步骤在上、答案在下），同一轮的多个步骤按时间顺序堆叠。
+          // 幂等：同一 toolCallId 已存在（重连续传/恢复流重放）时只更新 pending，不重复插入
+          setMessages((prev) => {
+            const dup = prev.findIndex((m) => m.role === "tool" && m.toolCallId === ev.toolCallId);
+            if (dup >= 0) {
+              // 已有终态的步骤不被重放事件复活（只有确无结果时才回到执行中）
+              if (prev[dup].state) return prev;
+              const next = [...prev];
+              next[dup] = { ...next[dup], pending: true };
+              return next;
+            }
+            const next = [...prev];
+            let idx = next.length;
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i].role === "assistant") { idx = i; break; }
+            }
+            next.splice(idx, 0, { role: "tool", content: `${ev.toolName}`, toolCallId: ev.toolCallId, pending: true });
+            return next;
+          });
           break;
         case "TOOL_RESULT_END": {
           setMessages((prev) => completeToolCall(prev, ev));
@@ -261,6 +291,9 @@ export default function AssistantPage() {
           if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
           flushDelta();
           updateLastAssistant((m) => ({ ...m, pending: false }));
+          // 该批工具进入等待人工确认：不再是「执行中」（没在执行，在等人）
+          setMessages((prev) => markAwaitingConfirm(prev,
+            (Array.isArray(ev.tool_calls) ? ev.tool_calls : []).map((tc: any) => tc?.tool_call_id).filter(Boolean)));
           asked = true;
           onAsk(createConfirmCard(ev.tool_calls));
           break;
@@ -312,6 +345,8 @@ export default function AssistantPage() {
     } finally {
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       flushDelta();
+      // 执行段结束兜底：仍在转圈的步骤收尾（用户拒绝/流中断/异常均无 TOOL_RESULT_END）
+      setMessages((prev) => settlePendingToolCalls(prev));
       await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
@@ -325,6 +360,11 @@ export default function AssistantPage() {
     const mark = (status: ConfirmCard["status"]) => setMessages((prev) => prev.map((m) =>
       m.confirm?.id === card.id ? { ...m, confirm: { ...m.confirm, status, results } } : m));
     mark("submitting");
+    // 被拒绝的工具不会有 TOOL_RESULT_END：先按用户选择收尾，避免步骤永久停在「待确认」
+    const rejectedIds = results.filter((r) => !r.confirmed).map((r) => r.tool_call_id);
+    if (rejectedIds.length > 0) {
+      setMessages((prev) => markDeniedWithoutResult(prev, rejectedIds));
+    }
     try {
       setMessages((prev) => [...prev, { role: "assistant", content: "", pending: true }]);
       await consumeStream(`${AGENT_BASE}/threads/${encodeURIComponent(sessionId.current)}/confirm-stream`, { results }, (nextCard) => {
@@ -332,8 +372,9 @@ export default function AssistantPage() {
       });
       mark("resolved");
     } catch (e: any) {
-      // 流中断时确认上下文可能已被消费/工具可能已执行，禁重试，置 unknown 交由历史核实
-      mark("unknown");
+      // 404 confirm_context_not_found = 上下文已过期/不存在，工具从未获批准 → 未执行，可安全重新发起；
+      // 其余（409 已消费、网络中断）无法排除已执行 → unknown，禁重试，交由历史核实
+      mark(classifyConfirmFailure(e.message));
       setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${e.message}` }]);
     } finally {
       updateLastAssistant((m) => ({ ...m, pending: false }));
@@ -342,15 +383,17 @@ export default function AssistantPage() {
     }
   }, [sessionLocked, consumeStream, updateLastAssistant]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
+  const send = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     const fileIds = attachments.map((a) => a.fileId);
     if ((!text && fileIds.length === 0) || sessionLocked || awaitingConfirm || sessionLoading.current || confirmInFlight.current) return;
     setInput("");
     setBusy(true);
     const attachNames = attachments.map((a) => a.name);
+    // 保留历史轮次的工具步骤（含 state/output，历史权威来源）；
+    // 仅对流式残留的 pending 行兜底收尾（正常路径由 consumeStream 的 finally settle 覆盖）
     setMessages((prev) => [
-      ...prev.filter((m) => !(m.role === "tool")),
+      ...settlePendingToolCalls(prev),
       { role: "user", content: text + (attachNames.length ? `\n[附件: ${attachNames.join(", ")}]` : "") },
       { role: "assistant", content: "", pending: true },
     ]);
@@ -365,8 +408,9 @@ export default function AssistantPage() {
     } finally {
       updateLastAssistant((m) => ({ ...m, pending: false }));
       setBusy(false);
+      loadThreads(); // 新会话首轮对话后进入历史列表
     }
-  }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant]);
+  }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant, loadThreads]);
 
   const resetSession = () => {
     if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
@@ -378,171 +422,170 @@ export default function AssistantPage() {
     setMessages([{ role: "system", content: "已开启新会话。" }]);
   };
 
-  return (
-    <div data-testid="assistant-page" className="flex flex-col h-[calc(100vh-8rem)]">
-      <div className="flex items-center justify-between mb-2">
-        <h1 className="text-xl font-semibold">发布助手</h1>
-        <div className="flex gap-2">
-          <button onClick={async () => { setShowHistory((v) => !v); if (!showHistory) await loadThreads(); }}
-            data-testid="history-btn"
-            className="text-xs px-2 py-1 border rounded hover:bg-gray-100">历史会话</button>
-          <button onClick={resetSession} disabled={sessionLocked} data-testid="new-session"
-            className="text-xs px-2 py-1 border rounded hover:bg-gray-100">新会话</button>
-        </div>
-      </div>
+  // 欢迎态下除问候语外的系统提示（新会话/上传失败等）仍需展示，避免信息丢失
+  const welcomeNotices = messages.filter((m) => m.role === "system" && m.content !== GREETING);
 
-      {showHistory && (
-        <div data-testid="history-panel" className="mb-2 border rounded bg-white p-2 max-h-64 overflow-y-auto">
+  // 底部输入卡：毛玻璃圆角卡 + 左附件/右发送（发送键随状态变形：箭头 ⇄ 转圈）
+  const inputCard = (
+    <div className="rounded-2xl border border-gray-200 bg-white/90 shadow-sm shadow-gray-200/60 backdrop-blur transition-all focus-within:border-blue-300 focus-within:shadow-md focus-within:shadow-blue-100/80">
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-3 pt-3">
+          {attachments.map((a) => (
+            <span key={a.fileId} data-testid="attach-chip"
+              className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700">
+              <span className="max-w-[160px] truncate">{a.name}</span>
+              <button onClick={() => removeAttachment(a.fileId)} aria-label="移除附件" className="text-blue-400 transition hover:text-red-500">
+                <IconX className="size-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} rows={1}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+        placeholder={awaitingConfirm
+          ? "请先在上方确认卡片完成批准/拒绝，再继续对话"
+          : "例如：现在有哪些服务？/ 把 packageId=3 发布一下 / 附件点左下角 📎"}
+        data-testid="chat-input" disabled={sessionLocked}
+        className="max-h-40 w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-sm text-gray-800 outline-none placeholder:text-gray-400 disabled:opacity-50" />
+      <div className="flex items-center gap-1 px-2 pb-2">
+        <input ref={fileInputRef} type="file" className="hidden"
+          data-testid="attach-input"
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); }} />
+        <button onClick={() => fileInputRef.current?.click()} disabled={sessionLocked || awaitingConfirm}
+          data-testid="attach-btn" title="上传附件"
+          className="flex size-9 items-center justify-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50">
+          {uploading ? <IconLoader className="size-4 animate-spin" /> : <IconPaperclip className="size-4" />}
+        </button>
+        <span className="ml-1 hidden select-none text-[11px] text-gray-300 sm:block">Enter 发送 · Shift+Enter 换行 · 附件点 📎</span>
+        <button onClick={() => send()} disabled={sessionLocked || awaitingConfirm || (!input.trim() && attachments.length === 0)}
+          data-testid="chat-send" aria-label="发送"
+          className="ml-auto flex size-9 items-center justify-center rounded-full bg-gradient-to-b from-blue-500 to-blue-600 text-white shadow-md shadow-blue-500/30 transition hover:from-blue-400 hover:to-blue-500 disabled:from-gray-200 disabled:to-gray-300 disabled:shadow-none">
+          {busy ? <IconLoader className="size-4 animate-spin" /> : <IconArrowUp className="size-4" />}
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div data-testid="assistant-page" className="flex h-[calc(100vh-8rem)] overflow-hidden rounded-2xl border border-gray-200/70 bg-white/40 shadow-sm">
+      {/* 左侧边栏：品牌 / 新会话 / 历史会话（deer-flow 工作区布局，会话列表常驻） */}
+      <aside className="flex w-60 shrink-0 flex-col border-r border-gray-200/70 bg-white/70 backdrop-blur">
+        <div className="flex items-center gap-2.5 px-4 pb-1 pt-4">
+          <span className="flex size-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/25">
+            <IconSparkles className="size-[18px]" />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-sm font-semibold tracking-tight text-gray-900">发布助手</h1>
+            <p className="truncate text-[11px] text-gray-400">对话式驱动发布全流程</p>
+          </div>
+        </div>
+        <div className="px-3 pt-3">
+          <button onClick={resetSession} disabled={sessionLocked} data-testid="new-session"
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 shadow-sm transition hover:border-blue-200 hover:text-blue-700 disabled:opacity-50">
+            <IconPlus className="size-3.5" />新会话
+          </button>
+        </div>
+        <div className="mt-5 flex items-center justify-between px-4">
+          <span className="text-xs font-medium tracking-wide text-gray-400">历史会话</span>
+          <button onClick={async () => { setRefreshing(true); await loadThreads(); setRefreshing(false); }}
+            data-testid="history-btn" title="刷新历史会话"
+            className="rounded-md p-1 text-gray-400 transition hover:bg-gray-100 hover:text-blue-600">
+            <IconHistory className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          </button>
+        </div>
+        <div data-testid="history-panel" className="chat-scroll mt-1 flex-1 space-y-0.5 overflow-y-auto px-2 pb-3">
           {threads.length === 0 ? (
-            <p className="text-xs text-gray-400 p-2">暂无历史会话（发送消息后自动记录，保留 7 天）</p>
+            <p className="px-2 py-6 text-center text-[11px] leading-relaxed text-gray-400">暂无历史会话（发送消息后自动记录，保留 7 天）</p>
           ) : (
-            <ul className="space-y-1">
+            <ul className="space-y-0.5">
               {threads.map((t) => (
                 <li key={t.fullKey}>
                   <button onClick={() => selectSession(t)} disabled={sessionLocked}
                     data-testid="history-item"
-                    className={`w-full text-left text-xs px-2 py-1.5 rounded hover:bg-blue-50 disabled:opacity-50 ${sessionId.current === t.peer ? "bg-blue-100 font-medium" : ""}`}>
-                    <span className="font-mono">{t.peer}</span>
-                    <span className="float-right text-gray-400">{t.updatedAt}</span>
+                    className={`w-full rounded-lg px-2.5 py-2 text-left transition disabled:opacity-50 ${
+                      sessionId.current === t.peer ? "bg-blue-50 ring-1 ring-blue-100" : "hover:bg-gray-100/70"}`}>
+                    <span className={`block truncate font-mono text-xs ${sessionId.current === t.peer ? "font-medium text-blue-700" : "text-gray-600"}`}>{t.peer}</span>
+                    <span className="mt-0.5 block text-[11px] text-gray-400">{t.updatedAt || "—"}</span>
                   </button>
                 </li>
               ))}
             </ul>
           )}
         </div>
-      )}
+      </aside>
 
-      <div ref={listRef} className="flex-1 overflow-y-auto bg-white border rounded p-4 space-y-3">
-        {historyLoading ? (
-          <p className="text-xs text-gray-400">加载历史会话…</p>
-        ) : (
-          messages.map((m, i) => (
-            <div key={i}>
-              <Bubble msg={m} />
-              {m.confirm && <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />}
-            </div>
-          ))
-        )}
-      </div>
+      {/* 主区：细头部（当前会话）→ 消息流 / 欢迎态 → 输入区 */}
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        {/* 背景光斑（纯装饰，置于内容层之下） */}
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-80 overflow-hidden">
+          <div className="absolute -top-20 left-[15%] h-56 w-56 rounded-full bg-blue-200/30 blur-3xl" />
+          <div className="absolute -top-8 right-[10%] h-48 w-48 rounded-full bg-indigo-200/25 blur-3xl" />
+        </div>
 
-      <div className="mt-3">
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2">
-            {attachments.map((a) => (
-              <span key={a.fileId} data-testid="attach-chip"
-                className="inline-flex items-center gap-1 text-xs bg-blue-50 border border-blue-200 rounded px-2 py-1">
-                {a.name}
-                <button onClick={() => removeAttachment(a.fileId)} className="text-red-500 hover:text-red-700">✕</button>
-              </span>
-            ))}
+        {!historyLoading && !welcome && (
+          <div className="relative flex items-center gap-2 border-b border-gray-100/80 px-5 py-2.5">
+            <span className="size-1.5 shrink-0 rounded-full bg-emerald-400" />
+            <span className="truncate font-mono text-xs text-gray-400">{sessionId.current}</span>
+            {busy && <span className="ml-auto shrink-0 text-[11px] text-blue-500">处理中…</span>}
           </div>
         )}
-        <div className="flex gap-2">
-          <input ref={fileInputRef} type="file" className="hidden"
-            data-testid="attach-input"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); }} />
-          <button onClick={() => fileInputRef.current?.click()} disabled={sessionLocked || awaitingConfirm}
-            data-testid="attach-btn"
-            className="border rounded px-3 text-sm hover:bg-gray-100 disabled:opacity-50">
-            {uploading ? "上传中…" : "📎"}
-          </button>
-          <textarea value={input} onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            rows={2} placeholder="例如：现在有哪些服务？/ 把 packageId=3 发布一下 / 上传文件请先点 📎"
-            data-testid="chat-input" disabled={sessionLocked}
-            className="flex-1 border rounded p-2 text-sm resize-none disabled:opacity-50" />
-          <button onClick={send} disabled={sessionLocked || awaitingConfirm || (!input.trim() && attachments.length === 0)} data-testid="chat-send"
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded px-5">
-            {busy ? "…" : "发送"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
-// Assistant 文本按 GFM Markdown 渲染：表格/任务列表/删除线/链接自动识别；围栏代码块走 Prism oneLight
-// rehype-sanitize 默认白名单已禁 <script>/event handler；ADD_ATTR 仅扩展 class/target/rel 以保留代码块主题与外链安全属性
-const Markdown = memo(function Markdown({ text }: { text: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeSanitize]}
-      components={{
-        code({ className, children, ...rest }) {
-          const match = /language-(\w+)/.exec(className || "");
-          const code = String(children).replace(/\n$/, "");
-          if (match) {
-            return (
-              <SyntaxHighlighter language={match[1]} style={oneLight} PreTag="div" customStyle={{ margin: "6px 0", borderRadius: 6, fontSize: 12 }}>
-                {code}
-              </SyntaxHighlighter>
-            );
-          }
-          return <code className="bg-gray-200 px-1 rounded text-xs" {...rest}>{children}</code>;
-        },
-        a: (props) => <a {...props} target="_blank" rel="noreferrer" className="text-blue-600 underline" />,
-        h1: (props) => <h1 {...props} className="text-base font-semibold mt-2 mb-1" />,
-        h2: (props) => <h2 {...props} className="text-base font-semibold mt-2 mb-1" />,
-        h3: (props) => <h3 {...props} className="text-sm font-semibold mt-2 mb-1" />,
-        ul: (props) => <ul {...props} className="list-disc ml-5 my-1" />,
-        ol: (props) => <ol {...props} className="list-decimal ml-5 my-1" />,
-        li: (props) => <li {...props} className="my-0.5" />,
-        blockquote: (props) => <blockquote {...props} className="border-l-2 border-gray-300 pl-2 text-gray-600 my-1" />,
-        table: (props) => <table {...props} className="border-collapse text-xs my-1" />,
-        th: (props) => <th {...props} className="border border-gray-300 px-2 py-0.5 bg-gray-50" />,
-        td: (props) => <td {...props} className="border border-gray-300 px-2 py-0.5" />,
-        hr: (props) => <hr {...props} className="my-2 border-gray-200" />,
-      }}
-    >
-      {text}
-    </ReactMarkdown>
-  );
-});
-
-function Bubble({ msg }: { msg: ChatMsg }) {
-  if (msg.role === "tool") {
-    return (
-      <div className={`text-xs font-mono ${msg.pending ? "text-gray-400 animate-pulse" : "text-emerald-600"}`}>
-        {msg.content}{msg.pending ? " …" : ""}
-      </div>
-    );
-  }
-  if (msg.role === "system") {
-    return <div className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded p-2">{msg.content}</div>;
-  }
-  if (msg.role === "user") {
-    return <div className="flex justify-end"><div className="bg-blue-600 text-white text-sm rounded-lg px-3 py-2 max-w-[80%] whitespace-pre-wrap">{msg.content}</div></div>;
-  }
-  return (
-    <div className="space-y-2">
-      <div className={`text-sm bg-gray-100 rounded-lg px-3 py-2 max-w-[90%] ${msg.pending && !msg.content ? "animate-pulse text-gray-400" : ""}`} data-testid="assistant-msg">
-        {msg.content ? <Markdown text={msg.content} /> : (msg.pending ? "思考中…" : "")}
-        {msg.pending && msg.content ? <span className="animate-pulse">▍</span> : null}
-      </div>
-      {msg.files && msg.files.length > 0 && (
-        <div className="space-y-2">
-          {msg.files.map((f, i) => (
-            <div key={i} data-testid="file-card"
-              className="flex items-center gap-3 border border-blue-200 bg-blue-50 rounded-lg p-2 text-sm max-w-[90%]">
-              <span className="text-lg">{f.mime_type?.startsWith("image/") ? "🖼️" : "📄"}</span>
-              <div className="flex-1 min-w-0">
-                <p className="font-medium truncate">{f.file_name}</p>
-                <p className="text-xs text-gray-500">{f.size > 0 ? `${(f.size / 1024).toFixed(1)} KB` : ""} {f.mime_type}</p>
-              </div>
-              {f.download_url.startsWith("data:") ? (
-                <img src={f.download_url} alt={f.file_name} className="max-h-24 rounded border" />
-              ) : (
-                <a href={f.download_url.startsWith("/files") ? `${AGENT_BASE}${f.download_url}` : f.download_url} download={f.file_name}
-                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded"
-                  data-testid="file-download">
-                  下载
-                </a>
-              )}
+        {historyLoading ? (
+          <div className="flex flex-1 items-center justify-center">
+            <IconLoader className="size-5 animate-spin text-gray-300" />
+          </div>
+        ) : welcome ? (
+          /* 欢迎态：Hero + 错峰入场建议 + 输入卡（deer-flow 欢迎模式） */
+          <div className="relative flex flex-1 flex-col items-center justify-center px-4 py-6">
+            <span className="animate-fade-in-up flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-xl shadow-blue-500/30">
+              <IconSparkles className="size-7" />
+            </span>
+            <h2 className="animate-fade-in-up mt-5 text-3xl font-bold tracking-tight" style={{ animationDelay: "60ms" }}>
+              <span className="aurora-text">发布助手</span>
+            </h2>
+            <p className="animate-fade-in-up mt-3 max-w-md text-center text-sm leading-relaxed text-gray-500" style={{ animationDelay: "120ms" }}>
+              {GREETING}
+            </p>
+            <div className="mt-8 flex max-w-2xl flex-wrap justify-center gap-2">
+              {SUGGESTIONS.map((s, i) => (
+                <button key={s} onClick={() => send(s)} disabled={sessionLocked || awaitingConfirm}
+                  style={{ animationDelay: `${180 + i * 70}ms` }}
+                  className="animate-fade-in-up rounded-full border border-gray-200 bg-white/80 px-4 py-2 text-xs text-gray-600 shadow-sm backdrop-blur transition hover:-translate-y-0.5 hover:border-blue-300 hover:text-blue-700 hover:shadow-md disabled:opacity-50 disabled:hover:translate-y-0">
+                  {s}
+                </button>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+            {welcomeNotices.length > 0 && (
+              <div className="mt-6 w-full max-w-md space-y-2">
+                {welcomeNotices.map((m, i) => <MessageItem key={i} msg={m} />)}
+              </div>
+            )}
+            <div className="mt-8 w-full max-w-2xl">{inputCard}</div>
+          </div>
+        ) : (
+          /* 对话态：消息流 + 底部输入卡 */
+          <>
+            <div ref={listRef} className="chat-scroll relative mt-1 flex-1 overflow-y-auto">
+              <div className="mx-auto max-w-3xl space-y-4 px-3 pb-4 pt-3">
+                {messages.map((m, i) => (
+                  <div key={i} className="animate-fade-in space-y-2">
+                    <MessageItem msg={m} />
+                    {m.confirm && (
+                      <div className="pl-10">
+                        <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="relative shrink-0 px-3 pb-3">
+              <div className="mx-auto max-w-3xl">{inputCard}</div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
