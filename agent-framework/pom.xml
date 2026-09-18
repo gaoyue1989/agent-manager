@@ -19,9 +19,12 @@
 
     <properties>
         <java.version>21</java.version>
-        <agentscope.version>2.0.0</agentscope.version>
+        <!-- agentscope 2.0.3：HITL 挂起态可由 SDK 自行持久化并在下一轮从 AgentState 恢复
+             （2.0.3 起 persistPendingRequestReplyId 把 replyId 写入最后一条 assistant 消息的
+             metadata，askingToolCalls() 据此在无外部表时也能恢复；2.0.0 缺该能力） -->
+        <agentscope.version>2.0.3</agentscope.version>
         <opentelemetry.version>1.61.0</opentelemetry.version>
-        <!-- agentscope-core 2.0.0 传递依赖的是 opentelemetry 1.37.0（SDK 内置
+        <!-- agentscope-core 传递依赖的是 opentelemetry 1.37.0（SDK 内置
              OtelTracingMiddleware 仅含 API）；必须用 dependencyManagement 统一
              提升到 1.61.0，否则 sdk(1.61) 与 sdk-trace/common(1.37) 混用，
              启动时 NoClassDefFoundError: StandardComponentId$ExporterType -->

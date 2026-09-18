@@ -541,9 +541,13 @@ public class AgentScopeConfig {
         HarnessAgent harnessAgent,
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger,
-        io.agentmanager.framework.service.ConfirmContextStore confirmContextStore
+        io.agentmanager.framework.service.ConfirmContextStore confirmContextStore,
+        io.agentmanager.framework.service.AgentStateReader agentStateReader
     ) {
-        return new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore);
+        var service = new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore);
+        // HITL 恢复优先走 AgentState（无 TTL）：官方 SDK 把 ASKING 工具连同 replyId 持久化在 state 里
+        service.setAgentStateReader(agentStateReader);
+        return service;
     }
 
     /**

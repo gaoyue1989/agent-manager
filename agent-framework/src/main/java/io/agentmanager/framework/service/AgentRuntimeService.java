@@ -33,6 +33,11 @@ public class AgentRuntimeService {
     private final String tenantPrefix;
     private final LLMLogger llmLogger;
     private final ConfirmContextStore confirmContextStore;
+    /**
+     * AgentState 读取器：HITL 恢复时从 state 重建 ASKING 的 ToolUseBlock。
+     * 可为 null（部分测试按 5 参构造），此时回落 confirm_context 表。
+     */
+    private AgentStateReader agentStateReader;
 
     private io.agentscope.harness.agent.HarnessAgent agent;
     private final List<Map<String, Object>> mcpConfigs;
@@ -50,6 +55,11 @@ public class AgentRuntimeService {
         this.mcpConfigs = mcpConfigs;
         this.llmLogger = llmLogger;
         this.confirmContextStore = confirmContextStore;
+    }
+
+    /** 注入 AgentState 读取器（Bean 装配时调用；测试可不注入，回落 confirm_context） */
+    public void setAgentStateReader(AgentStateReader agentStateReader) {
+        this.agentStateReader = agentStateReader;
     }
 
     public String tenantPrefix() { return tenantPrefix; }
@@ -402,7 +412,7 @@ public class AgentRuntimeService {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
         log.info("[resume-confirm] start: threadId={}, userId={}, results={}", fullThreadId, userId, results.size());
-        var confirmCtx = consumeConfirmContext(fullThreadId);   // CAS 消费，防重复确认
+        var confirmCtx = resolveConfirmContext(fullThreadId);   // 优先 state（无 TTL），回落 confirm_context
         var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
 
@@ -428,7 +438,7 @@ public class AgentRuntimeService {
 
         return Flux.create(sink -> {
             try {
-                var confirmCtx = consumeConfirmContext(fullThreadId);   // DB CAS 消费，防重复确认
+                var confirmCtx = resolveConfirmContext(fullThreadId);   // 优先 state（无 TTL），回落 confirm_context
                 var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
                 var resumeMsg = buildResumeMsg(confirmCtx, results);
                 agent.streamEvents(List.of(resumeMsg), ctx)
@@ -478,7 +488,7 @@ public class AgentRuntimeService {
         log.info("[resume-confirm-events] start: threadId={}, userId={}, results={}", fullThreadId, userId, results.size());
 
         // 先消费确认上下文（CAS 防重复），再构建恢复消息
-        var confirmCtx = consumeConfirmContext(fullThreadId);
+        var confirmCtx = resolveConfirmContext(fullThreadId);
         var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
         return agent.streamEvents(List.of(resumeMsg), ctx);
@@ -615,10 +625,24 @@ public class AgentRuntimeService {
             toolCallsJson(event.getToolCalls()), event.getReplyId(), runtimeSessionId, runtimeUserId);
     }
 
-    /** 预检确认可用性（confirm-stream 端点先查后流）：DB 行存在、未过期、未消费 */
+    /**
+     * 预检确认可用性（confirm-stream 端点先查后流）。
+     *
+     * <p>两条来源任一可用即通过：
+     * <ol>
+     *   <li><b>AgentState</b>（首选）：存在 ASKING 工具即表示该轮仍挂起，与会话同寿命，
+     *       不受 confirm_context 的 30 分钟 TTL 限制——修复了"确认卡放置超时后必然 404"的问题</li>
+     *   <li><b>confirm_context</b>（兜底）：老会话或 state 尚未写入时的既有路径</li>
+     * </ol>
+     * 两者皆无 → 404 {@code confirm_context_not_found}（语义保持：确实没有可确认的挂起工具）。
+     */
     public void checkConfirmAvailable(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);   // 补全 tenant 前缀，与 putConfirmContext 存储 key 一致
         log.debug("[HITL] checkConfirmAvailable: sessionId={}, fullThreadId={}", sessionId, fullThreadId);
+        if (agentStateReader != null && loadConfirmContextFromState(fullThreadId) != null) {
+            log.debug("[HITL] checkConfirmAvailable: satisfied by agent_state for {}", fullThreadId);
+            return;
+        }
         confirmContextStore.checkAvailable(fullThreadId);
     }
 
@@ -632,6 +656,74 @@ public class AgentRuntimeService {
         }
         return new ConfirmContext(toolCalls, row.replyId(), Instant.now(),
             new AtomicBoolean(true), row.runtimeSessionId(), row.runtimeUserId());
+    }
+
+    /**
+     * 从 AgentState 重建确认上下文（HITL 恢复的首选路径）。
+     *
+     * <p>官方 SDK 2.0.3 把 ASKING 的 ToolUseBlock 与其 replyId 持久化在 state 里，
+     * 因此即使 confirm_context 行已被 TTL 清理，仍可恢复执行——这是"确认卡长期可操作"的基础。
+     *
+     * <p>实现要点（对齐 docs/history-agentstate-design.md §8-1/8-2 的修复）：
+     * <ul>
+     *   <li><b>state 只读一份</b>：agent_state 的 session_id 是 {@code peer:canonicalKey} 形态，
+     *       fullThreadId（{@code tenant__peer}）恒不命中——按候选顺序 (fullThreadId, peer)
+     *       一次读取，asking/identity/replyId 全部从同一份快照派生，不再逐项重查</li>
+     *   <li><b>replyId 同源取出</b>：此前按 fullThreadId 重查恒为空串，SDK 只能兜底生成，
+     *       与升级 2.0.3 的目标相悖</li>
+     * </ul>
+     *
+     * @return 重建的确认上下文；state 中无 ASKING 工具时返回 null（调用方回落 confirm_context）
+     */
+    private ConfirmContext loadConfirmContextFromState(String fullThreadId) {
+        if (agentStateReader == null) {
+            return null;
+        }
+        var snapshot = agentStateReader.loadAskingSnapshot(fullThreadId, stripTenantPrefix(fullThreadId));
+        if (snapshot.isEmpty()) {
+            return null;
+        }
+        log.info("[HITL] loadConfirmContextFromState: threadId={}, tools={}, replyId={}, gwSession={}, peer={}",
+            fullThreadId, snapshot.toolUseBlocks().keySet(), snapshot.replyId(),
+            snapshot.identity().get("session_id"), snapshot.identity().get("user_id"));
+        return new ConfirmContext(
+            snapshot.toolUseBlocks(),
+            snapshot.replyId(),
+            Instant.now(),
+            new AtomicBoolean(true),
+            snapshot.identity().get("session_id"),
+            snapshot.identity().get("user_id"));
+    }
+
+    /** 去掉 tenant 前缀（{@code slug__threadId} → {@code threadId}） */
+    private String stripTenantPrefix(String fullThreadId) {
+        var prefix = tenantPrefix.replace("/", "-") + "__";
+        return fullThreadId.startsWith(prefix) ? fullThreadId.substring(prefix.length()) : fullThreadId;
+    }
+
+    /**
+     * 取得恢复所需的确认上下文：优先 AgentState（无 TTL），回落 confirm_context（兼容老会话）。
+     *
+     * <p>state 路径命中时顺手把表里可能残留的**未消费行**标记为已消费：否则 30 分钟内
+     * 的二次提交会"表行新鲜 → 预检通过 → state 已无 ASKING → 回落拿到陈旧 toolCalls →
+     * SDK 抛 references non-ASKING"绕远路。消费后二次提交得到 409 already processed，
+     * 语义准确（确实处理过）。行不存在/已消费时忽略。
+     *
+     * @throws ConfirmContextNotFoundException 两处都找不到挂起的 ASKING 工具
+     */
+    private ConfirmContext resolveConfirmContext(String fullThreadId) {
+        var fromState = loadConfirmContextFromState(fullThreadId);
+        if (fromState != null) {
+            try {
+                confirmContextStore.consume(fullThreadId);
+            } catch (Exception e) {
+                log.debug("[HITL] stale confirm_context consume skipped for {}: {}",
+                    fullThreadId, e.getMessage());
+            }
+            return fromState;
+        }
+        log.debug("[HITL] no ASKING tools in state for {}, falling back to confirm_context", fullThreadId);
+        return consumeConfirmContext(fullThreadId);
     }
 
     /** 清理确认上下文（供测试/运维使用；恢复完成后不主动清理——保留 consumed 条目以正确返回 409，且同 session 新 ASK 会覆盖） */

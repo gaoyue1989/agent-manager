@@ -1,8 +1,8 @@
 package io.agentmanager.framework.service;
 
-import io.agentscope.core.agent.Event;
 import io.agentscope.core.a2a.server.executor.runner.AgentRequestOptions;
 import io.agentscope.core.a2a.server.executor.runner.AgentRunner;
+import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.util.List;
@@ -33,8 +33,13 @@ public class HarnessAgentRunner implements AgentRunner {
         return agent.getDescription();
     }
 
+    /**
+     * 2.0.3 起 {@code AgentRunner} 的抽象方法由 {@code stream()} 改为 {@code streamEvents()}，
+     * 事件类型从粗粒度 {@code Event} 换成细粒度 {@link AgentEvent}（与 /threads/chat 链路同源）。
+     * 这里直接透传 HarnessAgent 的事件流，保持 A2A 与平台链路的事件词表一致。
+     */
     @Override
-    public Flux<Event> stream(List<Msg> requestMessages, AgentRequestOptions options) {
+    public Flux<AgentEvent> streamEvents(List<Msg> requestMessages, AgentRequestOptions options) {
         // ★ Windows 路径安全化：SDK 把 sessionId/userId 当目录名用
         var rawSid = options.getSessionId() != null
                 ? options.getSessionId() : options.getTaskId();
@@ -46,7 +51,7 @@ public class HarnessAgentRunner implements AgentRunner {
 
         taskSessionMap.put(options.getTaskId(), options.getSessionId());
 
-        return agent.stream(requestMessages, ctx)
+        return agent.streamEvents(requestMessages, ctx)
             .doFinally(signal -> taskSessionMap.remove(options.getTaskId()));
     }
 

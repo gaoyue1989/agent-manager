@@ -293,10 +293,11 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldParseMessages() throws Exception {
         var conn = mock(Connection.class);
-        // generatedFiles throws (caught), loadMessages succeeds
+        // threadHistory 先读一次 state（AgentStateReader），其后再轮到 generatedFiles
         when(dataSource.getConnection())
-            .thenThrow(new RuntimeException("skip generatedFiles"))
-            .thenReturn(conn);
+            .thenReturn(conn)                                        // state 读取
+            .thenThrow(new RuntimeException("skip generatedFiles"))  // 产出文件查询（被 catch）
+            .thenReturn(conn);                                       // 兜底
 
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
@@ -317,9 +318,11 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldHandlePartsFallback() throws Exception {
         var conn = mock(Connection.class);
+        // threadHistory 先读一次 state（AgentStateReader），其后再轮到 generatedFiles/loadMessages
         when(dataSource.getConnection())
-            .thenThrow(new RuntimeException("skip generatedFiles"))
-            .thenReturn(conn);
+            .thenReturn(conn)                                                    // state 读取
+            .thenThrow(new RuntimeException("skip generatedFiles"))              // 产出文件查询（被 catch）
+            .thenReturn(conn);                                                   // 兜底
 
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
@@ -338,9 +341,11 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldParseAgentScopeContextField() throws Exception {
         var conn = mock(Connection.class);
+        // threadHistory 先读一次 state（AgentStateReader），其后再轮到 generatedFiles/loadMessages
         when(dataSource.getConnection())
-            .thenThrow(new RuntimeException("skip generatedFiles"))
-            .thenReturn(conn);
+            .thenReturn(conn)                                                    // state 读取
+            .thenThrow(new RuntimeException("skip generatedFiles"))              // 产出文件查询（被 catch）
+            .thenReturn(conn);                                                   // 兜底
 
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
@@ -365,9 +370,11 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldSkipThinkingBlocks() throws Exception {
         var conn = mock(Connection.class);
+        // threadHistory 先读一次 state（AgentStateReader），其后再轮到 generatedFiles/loadMessages
         when(dataSource.getConnection())
-            .thenThrow(new RuntimeException("skip generatedFiles"))
-            .thenReturn(conn);
+            .thenReturn(conn)                                                    // state 读取
+            .thenThrow(new RuntimeException("skip generatedFiles"))              // 产出文件查询（被 catch）
+            .thenReturn(conn);                                                   // 兜底
 
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
@@ -387,9 +394,11 @@ class ThreadControllerTest {
     @Test
     void threadHistoryShouldReturnEmptyWhenNoRow() throws Exception {
         var conn = mock(Connection.class);
+        // threadHistory 先读一次 state（AgentStateReader），其后再轮到 generatedFiles/loadMessages
         when(dataSource.getConnection())
-            .thenThrow(new RuntimeException("skip generatedFiles"))
-            .thenReturn(conn);
+            .thenReturn(conn)                                                    // state 读取
+            .thenThrow(new RuntimeException("skip generatedFiles"))              // 产出文件查询（被 catch）
+            .thenReturn(conn);                                                   // 兜底
 
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);

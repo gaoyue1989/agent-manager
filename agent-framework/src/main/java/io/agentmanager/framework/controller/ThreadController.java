@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.agentmanager.framework.service.AgentStateReader;
 import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.LLMLogger;
 import io.agentmanager.framework.service.SessionEventStore;
@@ -47,17 +48,50 @@ public class ThreadController {
     private final ConfirmContextStore confirmContextStore;
     private final SessionUserStore sessionUserStore;
     private final SessionEventStore sessionEventStore;
+    private final AgentStateReader agentStateReader;
+    private final int toolOutputMaxChars;
 
+    /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限） */
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
                             ConfirmContextStore confirmContextStore,
                             SessionUserStore sessionUserStore,
                             SessionEventStore sessionEventStore) {
+        this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
+            new AgentStateReader(dataSource),
+            io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
+    }
+
+    /** Spring 装配入口：截断上限取 AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS（默认 8000） */
+    @org.springframework.beans.factory.annotation.Autowired
+    public ThreadController(DataSource dataSource,
+                            LLMLogger llmLogger,
+                            ConfirmContextStore confirmContextStore,
+                            SessionUserStore sessionUserStore,
+                            SessionEventStore sessionEventStore,
+                            AgentStateReader agentStateReader,
+                            io.agentmanager.framework.config.HistoryConfig historyConfig) {
+        this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
+            agentStateReader,
+            historyConfig != null ? historyConfig.toolOutputMaxChars()
+                : io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
+    }
+
+    /** 全参构造（测试可直接指定截断上限） */
+    public ThreadController(DataSource dataSource,
+                            LLMLogger llmLogger,
+                            ConfirmContextStore confirmContextStore,
+                            SessionUserStore sessionUserStore,
+                            SessionEventStore sessionEventStore,
+                            AgentStateReader agentStateReader,
+                            int toolOutputMaxChars) {
         this.dataSource = dataSource;
         this.llmLogger = llmLogger;
         this.confirmContextStore = confirmContextStore;
         this.sessionUserStore = sessionUserStore;
         this.sessionEventStore = sessionEventStore;
+        this.agentStateReader = agentStateReader;
+        this.toolOutputMaxChars = toolOutputMaxChars;
     }
 
     /** Thread 列表：agent_state 表 session_id 去重（真实会话来源）；可按 userId 过滤 */
@@ -130,16 +164,18 @@ public class ThreadController {
         return result;
     }
 
-    /** Thread 历史消息：尽力从 agent_state.state_data 解析；附未消费 pendingConfirm 供刷新重建 */
+    /** Thread 历史消息：从 AgentState 解析（含工具状态与结果）；附待确认卡片与产出文件 */
     @GetMapping("/{sessionId}/history")
     public Map<String, Object> threadHistory(@PathVariable String sessionId) {
+        // state 只读一次：消息解析与确认卡重建共用同一份快照（避免同请求内重复查库）
+        var stateData = agentStateReader.loadStateData(sessionId);
         var result = new LinkedHashMap<String, Object>();
         result.put("session_id", sessionId);
-        result.put("pendingConfirm", pendingConfirmPayload(sessionId));
+        result.put("pendingConfirm", pendingConfirmPayload(sessionId, stateData));
         // 产出文件卡片（present_file/create_oaf_zip 登记时 session_id = gw-hash）：
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
-        result.put("messages", loadMessages(sessionId));
+        result.put("messages", loadMessages(sessionId, stateData));
         return result;
     }
 
@@ -171,9 +207,10 @@ public class ThreadController {
         }
 
         // 消息历史
-        result.put("pendingConfirm", pendingConfirmPayload(sessionId));
+        var stateData = agentStateReader.loadStateData(sessionId);
+        result.put("pendingConfirm", pendingConfirmPayload(sessionId, stateData));
         result.put("files", generatedFiles(sessionId));
-        result.put("messages", loadMessages(sessionId));
+        result.put("messages", loadMessages(sessionId, stateData));
         return result;
     }
 
@@ -248,14 +285,34 @@ public class ThreadController {
         return Map.of("session_id", sessionId, "calls", calls);
     }
 
-    /** 未消费待确认上下文 → 前端 pendingConfirm 词表；无则 null */
-    private Map<String, Object> pendingConfirmPayload(String sessionId) {
+    /**
+     * 待确认上下文 → 前端 pendingConfirm 词表；无则 null。
+     *
+     * <p><b>权威来源是 AgentState</b>：官方 SDK 把挂起的 ASKING 工具连同 replyId 一起
+     * 持久化在最后一条 assistant 消息里（2.0.3 起），与会话同寿命——因此确认卡片在
+     * confirm_context 的 30 分钟 TTL 之后依然能重建。
+     * confirm_context 仅作兜底（老会话、SDK 未写入 metadata 的场景）。
+     */
+    private Map<String, Object> pendingConfirmPayload(String sessionId, String stateData) {
+        var asking = stateData != null
+            ? io.agentmanager.framework.service.StateDataParser.extractAskingToolCalls(
+                io.agentmanager.framework.service.StateDataParser.findMessagesArray(stateData))
+            : List.<Map<String, Object>>of();
+        if (!asking.isEmpty()) {
+            var m = new LinkedHashMap<String, Object>();
+            // reply_id 取自 state 里最后一条 assistant 消息的 metadata（无则空串，恢复时由 SDK 兜底生成）
+            m.put("reply_id", asking.get(0).getOrDefault("reply_id", ""));
+            m.put("tools", asking);
+            m.put("source", "agent_state");
+            return m;
+        }
         return confirmContextStore.findPending(sessionId)
             .map(p -> {
                 var m = new LinkedHashMap<String, Object>();
                 m.put("reply_id", p.replyId());
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
+                m.put("source", "confirm_context");
                 return m;
             })
             .orElse(null);
@@ -366,48 +423,22 @@ public class ThreadController {
         return count;
     }
 
-    /** 从 agent_state 加载历史消息。
-     *  AgentScope SDK 内部 session_id 格式为 slotId(userId, canonicalKey)，
-     *  即 "{normalizeUser(userId)}:{canonicalKey}"（如 "debug-user_s1:chatui|x:agentId=main"），
-     *  与 session_user.session_id（前端 peerId）不一致。
-     *  因此查询使用 LIKE 匹配前缀 "peerId:%" 以覆盖 SDK 内部的 session_id 格式，
-     *  同时保留精确匹配和后缀匹配以兼容旧格式。
-     *  state_key 过滤 "agent_state"：确保只取消息状态，避免取到 sandbox_state 等无消息数据的记录。
+    /** 从 agent_state 加载历史消息（状态 JSON 读取与解析口径见 {@link AgentStateReader}）。
+     *
+     *  <p>工具调用与结果的执行状态直接来自 AgentState（官方 SDK 自动持久化）：
+     *  tool_use 块带 ToolCallState（pending/asking/allowed/submitted/finished），
+     *  tool_result 块带 ToolResultState（success/error/denied/interrupted）与 output。
+     *  DB 是消息级事实的权威来源，覆盖含 HITL 批准后的恢复段，不受 Redis 事件流 TTL 限制。
+     *  <p>调用方传入已读好的 stateData（同一请求内消息解析与确认卡重建共用一份快照）。
      */
-    private List<Map<String, Object>> loadMessages(String sessionId) {
-        try (var conn = dataSource.getConnection();
-             // 优先匹配精确 session_id，再匹配带分隔符前缀/后缀的变体
-             var stmt = conn.prepareStatement(
-                 "SELECT state_data FROM agent_state "
-                     + "WHERE (session_id = ? "
-                     +   "OR session_id LIKE CONCAT(?, ':%') "
-                     +   "OR session_id LIKE CONCAT(?, '__%') "
-                     +   "OR session_id LIKE CONCAT('%:', ?) "
-                     +   "OR session_id LIKE CONCAT('%__', ?)) "
-                     + "AND state_key = 'agent_state' "
-                     + "ORDER BY item_index")) {
-            stmt.setString(1, sessionId);
-            stmt.setString(2, sessionId);
-            stmt.setString(3, sessionId);
-            stmt.setString(4, sessionId);
-            stmt.setString(5, sessionId);
-            var rs = stmt.executeQuery();
-            // agent_state 存储方式：单条 state（item_index=0 包含完整 AgentState JSON）
-            // 或列表（每条消息一个 item_index）。两种方式都需要拼合后交给 StateDataParser。
-            var fragments = new ArrayList<String>();
-            while (rs.next()) {
-                fragments.add(rs.getString("state_data"));
-            }
-            if (fragments.isEmpty()) {
+    private List<Map<String, Object>> loadMessages(String sessionId, String stateData) {
+        try {
+            if (stateData == null) {
                 return List.of();
             }
-            // 如果只有一条记录，直接解析；如果是多条消息，先合成为 JSON 数组
-            var stateData = fragments.size() == 1
-                ? fragments.get(0)
-                : "[" + String.join(",", fragments) + "]";
             var msgs = io.agentmanager.framework.service.StateDataParser
                 .toRoleContentList(io.agentmanager.framework.service.StateDataParser
-                    .findMessagesArray(stateData));
+                    .findMessagesArray(stateData), toolOutputMaxChars);
 
             // 回填 reply_id：取该 session 出现过的 reply_id，按**首个事件的 seq** 升序分配给
             // assistant 消息。数据源是 Redis 的 reply 索引（ZSET，score = 首个 seq），
@@ -451,7 +482,6 @@ public class ThreadController {
             return List.of();
         }
     }
-
     /** 将 title 写入 session_user.remark（字段不存在则 ALTER TABLE 添加） */
     private void upsertRemark(String sessionId, String title) {
         ensureRemarkColumn();
