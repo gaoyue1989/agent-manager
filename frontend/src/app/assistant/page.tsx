@@ -3,6 +3,8 @@
 // HITL：permission_ask 渲染确认卡片 → /threads/{sessionId}/confirm-stream 恢复
 // 文件：附件上传（/files/upload）→ chat 携带 fileIds；file_ready 事件渲染下载卡片
 // 历史：GET /threads 列表（侧边栏常驻展示，进入页面即加载 + 发送后刷新）+ GET /threads/{sid}/history 回放；点击切换恢复上下文继续对话
+// 刷新恢复：GET /threads/{sid}/status 检测 turn 状态，仍在执行/中断时 GET /subscribe 从
+//     latest_event_seq 游标增量续传（durable SSE：事件服务端持久化，agent 执行与连接解耦，刷新不丢）
 // UI：deer-flow 风格——工具事件渲染为时间线状态步骤、历史回放同构展示、欢迎态 Hero + 错峰建议；
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -50,6 +52,8 @@ export default function AssistantPage() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const confirmInFlight = useRef(false);
+  // 刷新续传的订阅句柄（AbortController）：卸载时中断订阅
+  const resumeRef = useRef<AbortController | null>(null);
   const [attachments, setAttachments] = useState<AttachItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -103,6 +107,8 @@ export default function AssistantPage() {
             for (const tc of (m.tool_calls ?? [])) {
               msgs.push({
                 role: "tool", content: `${tc.name}`, pending: false,
+                // 工具调用 id：刷新续传时实时 TOOL_RESULT_END 据此认领对应步骤写入终态
+                ...(tc.id ? { toolCallId: String(tc.id) } : {}),
                 ...(tc.state ? { state: String(tc.state) } : {}),
                 ...(tc.output ? { output: String(tc.output) } : {}),
                 ...(tc.output_truncated ? {
@@ -138,50 +144,6 @@ export default function AssistantPage() {
     return msgs;
   }, []);
 
-  /** 切换到历史会话：更新本地会话 id → 回放历史消息（上下文由后端 checkpoint 自动恢复） */
-  const selectSession = useCallback(async (item: ThreadItem) => {
-    if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
-    sessionLoading.current = true;
-    setAttachments([]);
-    setInput("");
-    window.localStorage.setItem("oaf-assistant-sid", item.peer);
-    sessionId.current = item.peer;
-    setHistoryLoading(true);
-    const msgs = await loadHistory(item.fullKey);
-    setMessages(msgs.length > 0
-      ? msgs
-      : [{ role: "system", content: "该会话暂无可展示的历史消息，可直接继续对话。" }]);
-    sessionLoading.current = false;
-    setHistoryLoading(false);
-    loadThreads(); // 切换后刷新列表（时间戳排序变化 + 当前会话高亮）
-  }, [sessionLocked, loadHistory, loadThreads]);
-
-  useEffect(() => {
-    const sid = getSessionId();
-    sessionId.current = sid;
-    let cancelled = false;
-    setHistoryLoading(true);
-    loadHistory(sid).then((msgs) => {
-      if (!cancelled && msgs.length) setMessages(msgs);
-    }).finally(() => {
-      if (!cancelled) {
-        sessionLoading.current = false;
-        setHistoryLoading(false);
-      }
-    });
-    return () => { cancelled = true; };
-  }, [loadHistory]);
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [messages]);
-  // 输入框随内容自动增高（上限 160px）
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
-  }, [input]);
-
   // 文本增量必须落到「最后一条 assistant 气泡」——工具状态行固定插在其前（步骤在上、答案在下）
   const updateLastAssistant = useCallback((fn: (m: ChatMsg) => ChatMsg) => {
     setMessages((prev) => {
@@ -193,49 +155,8 @@ export default function AssistantPage() {
     });
   }, []);
 
-  /** 附件上传：POST /files/upload（multipart）→ 追加到附件列表 */
-  const uploadFile = useCallback(async (file: File) => {
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("userId", "webui");
-      fd.append("sessionId", sessionId.current);
-      const resp = await fetch(`${AGENT_BASE}/files/upload`, { method: "POST", body: fd });
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.message ?? `上传失败 HTTP ${resp.status}`);
-      }
-      const data = await resp.json();
-      setAttachments((prev) => [...prev, {
-        fileId: data.file_id, name: data.file_name, mime: data.mime_type, size: data.size,
-      }]);
-    } catch (e: any) {
-      setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${e.message}` }]);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }, []);
-
-  const removeAttachment = (fileId: string) =>
-    setAttachments((prev) => prev.filter((a) => a.fileId !== fileId));
-
-  /** 消费一次 SSE 单次流；返回是否出现 permission_ask */
-  const consumeStream = useCallback(async (url: string, body: object, onAsk: (card: ConfirmCard) => void) => {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok || !resp.body) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    let asked = false;
-
+  /** SSE 事件处理器：文本增量节流 + 事件分发 + 收尾（对话流与刷新续传统一语义） */
+  const createStreamProcessor = useCallback((onAsk: (card: ConfirmCard) => void) => {
     // 文本增量节流：60ms 窗口内累积 delta 后批量 setState，避免每 token 触发整段 markdown 解析
     let pendingDelta = "";
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -264,7 +185,7 @@ export default function AssistantPage() {
           break; // 思考过程不上屏
         case "TOOL_CALL_START":
           // 工具步骤插到最后一条 assistant 气泡之前（步骤在上、答案在下），同一轮的多个步骤按时间顺序堆叠。
-          // 幂等：同一 toolCallId 已存在（重连续传/恢复流重放）时只更新 pending，不重复插入
+          // 幂等：同一 toolCallId 已存在（刷新续传/恢复流重放）时只更新 pending，不重复插入
           setMessages((prev) => {
             const dup = prev.findIndex((m) => m.role === "tool" && m.toolCallId === ev.toolCallId);
             if (dup >= 0) {
@@ -294,7 +215,6 @@ export default function AssistantPage() {
           // 该批工具进入等待人工确认：不再是「执行中」（没在执行，在等人）
           setMessages((prev) => markAwaitingConfirm(prev,
             (Array.isArray(ev.tool_calls) ? ev.tool_calls : []).map((tc: any) => tc?.tool_call_id).filter(Boolean)));
-          asked = true;
           onAsk(createConfirmCard(ev.tool_calls));
           break;
         case "file_ready":
@@ -324,10 +244,26 @@ export default function AssistantPage() {
           throw new Error(ev.error || "执行流返回错误");
         case "interrupted":
           throw new Error(ev.reason || "执行流已中断");
-        // AGENT_END 等其余事件忽略（流关闭即终态）
+        // AGENT_END / done 等其余事件忽略（流关闭即终态）
       }
     };
 
+    /** 流段收尾：刷出节流增量 + 仍在转圈的步骤兜底收尾（用户拒绝/流中断/异常均无 TOOL_RESULT_END） */
+    const finish = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      flushDelta();
+      setMessages((prev) => settlePendingToolCalls(prev));
+    };
+
+    return { handlePayload, finish };
+  }, [updateLastAssistant]);
+
+  /** 读取 SSE 响应体并逐帧分发（POST /threads/chat 与 GET /subscribe 续传共用） */
+  const readSseResponse = useCallback(async (resp: Response, handlePayload: (line: string) => void) => {
+    if (!resp.body) throw new Error("空响应体");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -341,16 +277,152 @@ export default function AssistantPage() {
           }
         }
       }
-      return asked;
     } finally {
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      flushDelta();
-      // 执行段结束兜底：仍在转圈的步骤收尾（用户拒绝/流中断/异常均无 TOOL_RESULT_END）
-      setMessages((prev) => settlePendingToolCalls(prev));
       await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
-  }, [updateLastAssistant]);
+  }, []);
+
+  /** 消费一次 SSE 单次流（对话主入口，POST） */
+  const consumeStream = useCallback(async (url: string, body: object, onAsk: (card: ConfirmCard) => void) => {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`HTTP ${resp.status}`);
+    }
+    const processor = createStreamProcessor(onAsk);
+    try {
+      await readSseResponse(resp, processor.handlePayload);
+    } finally {
+      processor.finish();
+    }
+  }, [createStreamProcessor, readSseResponse]);
+
+  /**
+   * 刷新/切换会话恢复：turn 仍在执行时订阅 GET /subscribe 续传（durable SSE）。
+   * afterSeq 取 /status 的 latest_event_seq——seq 单调递增，之后产生的事件必然 > 该值，
+   * 状态查询与订阅建立之间的空窗不会漏事件；replyId 过滤本轮 turn，避免误吞并发新 turn 的事件。
+   */
+  const resumeTurn = useCallback(async (sid: string) => {
+    if (resumeRef.current) return;
+    let status: any;
+    try {
+      const resp = await fetch(`${AGENT_BASE}/threads/${encodeURIComponent(sid)}/status`);
+      if (!resp.ok) return; // 状态查询失败（如事件存储暂不可用 503）：跳过恢复，不重置任何状态
+      status = await resp.json();
+    } catch { return; }
+    // interrupted 也订阅：服务端回放已落库事件后补发 interrupted 帧收流，由下方渲染为中断提示
+    if (!status || (status.state !== "working" && status.state !== "interrupted")) return;
+
+    setBusy(true);
+    // 落一个流式气泡承接续传增量（历史回放不含未完成消息；也让欢迎态切回对话态）
+    setMessages((prev) => [...prev, { role: "assistant", content: "", pending: true }]);
+    const controller = new AbortController();
+    resumeRef.current = controller;
+    const processor = createStreamProcessor((card) => {
+      setMessages((prev) => [...prev, { role: "assistant", content: "", confirm: card }]);
+    });
+    try {
+      const afterSeq = Number(status.latest_event_seq) || 0;
+      const reply = status.reply_id ? `&replyId=${encodeURIComponent(status.reply_id)}` : "";
+      const resp = await fetch(
+        `${AGENT_BASE}/threads/${encodeURIComponent(sid)}/subscribe?afterSeq=${afterSeq}${reply}`,
+        { headers: { Accept: "text/event-stream" }, signal: controller.signal });
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+      await readSseResponse(resp, processor.handlePayload);
+    } catch (e: any) {
+      if (!controller.signal.aborted) { // 会话切换/页面卸载的中断不提示
+        const msg = String(e?.message ?? e);
+        setMessages((prev) => [...prev, { role: "system", content: /interrupt/i.test(msg)
+          ? "⚠️ 上次执行已中断，可重新发送消息继续。"
+          : `⚠️ 任务续传连接中断: ${msg}` }]);
+      }
+    } finally {
+      processor.finish();
+      resumeRef.current = null;
+      updateLastAssistant((m) => ({ ...m, pending: false }));
+      setBusy(false);
+      loadThreads();
+    }
+  }, [createStreamProcessor, readSseResponse, updateLastAssistant, loadThreads]);
+
+  /** 切换到历史会话：更新本地会话 id → 回放历史消息（上下文由后端 checkpoint 自动恢复） */
+  const selectSession = useCallback(async (item: ThreadItem) => {
+    if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
+    sessionLoading.current = true;
+    setAttachments([]);
+    setInput("");
+    window.localStorage.setItem("oaf-assistant-sid", item.peer);
+    sessionId.current = item.peer;
+    setHistoryLoading(true);
+    const msgs = await loadHistory(item.fullKey);
+    setMessages(msgs.length > 0
+      ? msgs
+      : [{ role: "system", content: "该会话暂无可展示的历史消息，可直接继续对话。" }]);
+    sessionLoading.current = false;
+    setHistoryLoading(false);
+    loadThreads(); // 切换后刷新列表（时间戳排序变化 + 当前会话高亮）
+    resumeTurn(item.peer); // 目标会话若仍在执行，与刷新恢复同一链路续传
+  }, [sessionLocked, loadHistory, loadThreads, resumeTurn]);
+
+  useEffect(() => {
+    const sid = getSessionId();
+    sessionId.current = sid;
+    let cancelled = false;
+    setHistoryLoading(true);
+    loadHistory(sid).then((msgs) => {
+      if (!cancelled && msgs.length) setMessages(msgs);
+    }).finally(() => {
+      if (!cancelled) {
+        sessionLoading.current = false;
+        setHistoryLoading(false);
+        // 历史先落地再续传：loadHistory 的返回会整体 setMessages，先续传会被覆盖
+        resumeTurn(sid);
+      }
+    });
+    return () => { cancelled = true; resumeRef.current?.abort(); };
+  }, [loadHistory, resumeTurn]);
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [messages]);
+  // 输入框随内容自动增高（上限 160px）
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [input]);
+
+  /** 附件上传：POST /files/upload（multipart）→ 追加到附件列表 */
+  const uploadFile = useCallback(async (file: File) => {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("userId", "webui");
+      fd.append("sessionId", sessionId.current);
+      const resp = await fetch(`${AGENT_BASE}/files/upload`, { method: "POST", body: fd });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body.message ?? `上传失败 HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      setAttachments((prev) => [...prev, {
+        fileId: data.file_id, name: data.file_name, mime: data.mime_type, size: data.size,
+      }]);
+    } catch (e: any) {
+      setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${e.message}` }]);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, []);
+
+  const removeAttachment = (fileId: string) =>
+    setAttachments((prev) => prev.filter((a) => a.fileId !== fileId));
 
   /** 确认/拒绝后恢复执行（新执行段续流） */
   const sendConfirm = useCallback(async (card: ConfirmCard, results: ConfirmResult[]) => {
