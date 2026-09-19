@@ -564,28 +564,35 @@ public class AgentScopeConfig {
     }
 
     /**
-     * 装配 HITL 权限上下文（仅 MCP 工具生效，见 docs/hitl-permission-plan.md 6.1）：
-     * 1. 仅当存在 MCP tools 显式规则或 require_confirmation=true 时启用（未配置返回 null，零侵入）
-     * 2. 内置 + 自定义工具全量 ALLOW（覆盖 DEFAULT mode 兜底 ASK，保证自带工具不参与确认）
-     * 3. MCP 工具：显式规则 + 未声明兜底（require_confirmation → ask，否则 allow）
+     * 装配 HITL 权限上下文（MCP + 自定义/内置工具，见 docs/hitl-permission-plan.md 6.1）：
+     * 1. 仅当存在 MCP tools 显式规则、require_confirmation=true 或 frontmatter
+     *    config.permission.tools 声明时启用（未配置返回 null，零侵入）
+     * 2. 自定义/内置工具：frontmatter 显式声明走对应 allow/ask/deny 规则；
+     *    未声明默认 ALLOW（覆盖 DEFAULT mode 兜底 ASK，保持既有行为）
+     * 3. MCP 工具：显式规则 + 未声明兜底（require_confirmation → ask，否则 allow）；
+     *    与 MCP 裸名冲突时以 MCP 规则为准
      *
      * 规则匹配为精确工具名映射（PermissionEngine.rulesFor = map.get(name)，无通配符）。
      * 内置工具名单无法在 build 前运行时枚举（内置工具注册发生在 Builder.build() 内部），
      * 使用 BUILT_IN_TOOL_NAMES 静态白名单（javap 从 jar 提取验证）+ verifyToolCoverage 构建后校验。
+     *
+     * <p>package-private：便于单元测试断言规则装配结果。
      */
-    private io.agentscope.core.permission.PermissionContextState buildPermissionContext(
+    io.agentscope.core.permission.PermissionContextState buildPermissionContext(
             OafConfig oafConfig,
             McpToolRegistrar.PermissionRuleResult permCfg,
             Set<String> customToolNames) {
         var requireAll = oafConfig.runtimeConfig().requireConfirmation();
-        if (permCfg.tools().isEmpty() && !requireAll) {
+        var customRules = oafConfig.runtimeConfig().permissionTools();
+        var hasCustomRules = customRules != null && !customRules.isEmpty();
+        if (permCfg.tools().isEmpty() && !requireAll && !hasCustomRules) {
             return null;
         }
 
         var pb = io.agentscope.core.permission.PermissionContextState.builder()
             .mode(permCfg.mode());
 
-        // ① 自带工具（内置白名单 + 本次注册的自定义 @Tool）自动放行
+        // ① 自带工具（内置白名单 + 本次注册的自定义 @Tool）：显式声明优先，未声明自动放行
         var builtinNames = new HashSet<String>();
         builtinNames.addAll(BUILT_IN_TOOL_NAMES);
         builtinNames.addAll(customToolNames);
@@ -593,10 +600,23 @@ public class AgentScopeConfig {
             if (permCfg.mcpNames().contains(toolName)) {
                 continue; // 与 MCP 重名时以 MCP 规则为准
             }
-            pb.addAllowRule(toolName,
-                new io.agentscope.core.permission.PermissionRule(
-                    toolName, null,
-                    io.agentscope.core.permission.PermissionBehavior.ALLOW, "builtinAutoAllow"));
+            var declared = hasCustomRules ? customRules.get(toolName) : null;
+            if (declared == null) {
+                pb.addAllowRule(toolName,
+                    new io.agentscope.core.permission.PermissionRule(
+                        toolName, null,
+                        io.agentscope.core.permission.PermissionBehavior.ALLOW, "builtinAutoAllow"));
+                continue;
+            }
+            var rule = new io.agentscope.core.permission.PermissionRule(
+                toolName, null,
+                io.agentscope.core.permission.PermissionBehavior.valueOf(declared.toUpperCase()),
+                "frontmatter");
+            switch (declared) {
+                case "allow" -> pb.addAllowRule(toolName, rule);
+                case "ask" -> pb.addAskRule(toolName, rule);
+                case "deny" -> pb.addDenyRule(toolName, rule);
+            }
         }
 
         // ② MCP 工具：显式规则 + 兜底（未声明：require_confirmation=true → ask，否则 allow）
@@ -612,8 +632,22 @@ public class AgentScopeConfig {
                 case "deny" -> pb.addDenyRule(name, rule);
             }
         }
-        log.info("Permission system enabled (MCP only): mode={}, tools={}, mcpTools={}",
-            permCfg.mode(), permCfg.tools().size(), permCfg.mcpNames().size());
+
+        // ③ 声明了未注册工具（deniedTools 排除/名字写错）→ 告警忽略，规则不生效
+        if (hasCustomRules) {
+            var known = new HashSet<String>();
+            known.addAll(builtinNames);
+            known.addAll(permCfg.mcpNames());
+            for (var name : customRules.keySet()) {
+                if (!known.contains(name)) {
+                    log.warn("config.permission.tools declares '{}' but no such tool is registered "
+                        + "(deniedTools filtered or typo), rule ignored", name);
+                }
+            }
+        }
+
+        log.info("Permission system enabled (MCP + custom): mode={}, mcpRules={}, customRules={}",
+            permCfg.mode(), permCfg.tools().size(), hasCustomRules ? customRules.size() : 0);
         return pb.build();
     }
 
