@@ -622,7 +622,21 @@ CI run 35433743261 五个 job 全绿（单测 / E2E 核心 / E2E 多副本 / E2E
 6. **双流 `id:` 语义不同**：chat 流为事件哈希，subscribe 流为数字 seq（R 组断言用后者）。
 7. **delta 走 1s 攒批窗口**（`SessionEventStore.DEFAULT_FLUSH_INTERVAL_MS`，`_DELTA` 后缀攒批、里程碑立即刷）——对时序敏感的断言必须容忍该窗口。
 
-### 11.3 框架语义缺陷（逐条实测复核，定位到代码/数据）
+### 11.3 框架语义缺陷（逐条实测复核 → 已修复）
+
+> **状态更新（2026-09-19）**：D1/D3/D6 三条已修复并通过 e2e 验证（转正 H2/H5/F5/X9/U11）；
+> D4 属 SDK 设计约束（非本框架缺陷），H6 按真实行为断言。修复提交 `79dd546`。
+
+| 缺陷 | 修复方式 | 验证 |
+|------|---------|------|
+| **D1** HITL 批准后参数丢失 | `resolveConfirmContext` 改为 **confirm_context 表优先**（该表来自 `RequireUserConfirmEvent`，携带完整参数），state 仅在表行缺失时回落；两路都命中时表内参数为权威，仅反向异常才用 state 补齐 | e2e：批准后 `state=success`、`input={"application_id":...}`（修复前 `state=error` + 空参数）；H2/H5 从 fixme 转正 |
+| **D3** write_file→present_file 断裂 | 三处：① 工具名判定改用 `ToolCallStartEvent` 登记表（delta 帧的 `getToolCallName()` 恒为占位符 `__fragment__`）；② `WorkspaceReader` 命名空间对齐框架 `RemoteFilesystemSpec(USER)`（`agents/{agentName}/users/{userId}`）；③ 新增 `kv_sync_key` 表登记 (relPath→userKey)，读取端反查写入侧键（Channel 链路 ctx.userId 是网关 peer） | e2e：`file_ready 帧存在 = true`（修复前恒 false）；F5/X9/U11 从 fixme 转正 |
+| **D6** app_only 短路 ask | `registerAll` 拆分 `readOnlyHint`：只有 `permissions.read_only` 才强制只读，`ui.app_only` 与 ActiveMCP 子集过滤不再影响权限评估 | 单测 `filteredRegistrationShouldNotForceReadOnlyWhenHintFalse` |
+| **D4** ASKING 态拒绝新 turn | 非本框架引入（AgentScope SDK 会话级守卫）；H6 按真实行为断言，`api-thread-spec` 描述待更新 | H6 断言 error 帧含 "ASKING" |
+
+#### 11.3.0 原始实测记录（修复前）
+
+
 
 | # | 缺陷 | 实测证据 | 根因位置 | 影响面 |
 |---|------|---------|---------|--------|
