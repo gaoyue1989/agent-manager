@@ -195,9 +195,18 @@ test('F4 同名重复上传唯一化（冒烟）', async () => {
   }
 });
 
-// F5（present_file 交付与 file_ready）与 F10（history 文件卡片）依赖沙箱模式下的
-// write_file→present_file 一致性——非沙箱模式存在 KV/本地镜像断裂（已立 issue），
-// 移入 api-sandbox X9 验证。
+test('F5 present_file 交付与下载（file_ready 帧 + 下载内容）', async () => {
+  const sid = sessionIdFor(`f5-${uniq()}`);
+  const stream = chat({ message: `[E2E:file:deliver](report.md)`, userId: U, sessionId: sid });
+  await waitTerminal(stream);
+  const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
+  expect(ready, '缺少 file_ready 帧（D3 修复后应产出）').toBeTruthy();
+  expect(ready!.file_name).toBe('report.md');
+  const dl = await download(BASE, String(ready!.download_url ?? ready!.file_id));
+  expect(dl.status).toBe(200);
+  expect(dl.bytes!.length).toBeGreaterThan(0);
+  expect(dl.disposition).toContain('attachment');
+});
 
 test('F6 inline 预览规则', async ({ request }) => {
   const uid = ids(`f6-${uniq()}`);
@@ -276,15 +285,13 @@ test('H1 ask 挂起与状态', async ({ request }) => {
   expect(pc.source).toBe('agent_state');
 });
 
-// 框架缺陷（本轮 e2e 发现）：channel 路径 approve 恢复执行时工具参数丢失——
-// 挂起时 pendingConfirm.input 正确，恢复执行却收到空参数（content:null 校验错误）。
-// 沙箱模式一致性验证见 X9；缺陷修复后移除 fixme。
-test.fixme('H2 批准（confirm-stream）', async () => {
+test('H2 批准（confirm-stream）', async () => {
   const app = await createConfirmedApp();
   const sid = sessionIdFor(`h2-${uniq()}`);
   const ask1 = chat({ message: `[E2E:hitl:submit](${app})`, userId: U, sessionId: sid });
   await waitTerminal(ask1);
   const tcid = ((ask1.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
+  await new Promise(r => setTimeout(r, 800)); // 等 ASK 段租约释放落定（confirm 抢锁竞态）
   const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: true }]);
   await waitTerminal(rec);
   expect(rec.terminal?.type).toBe('done');
@@ -322,13 +329,14 @@ test('H4 重复确认 409', async () => {
   expect([409, 404]).toContain(again.status); // confirm_already_consumed / confirm_context_not_found
 });
 
-test.fixme('H5 同步 confirm 批准', async () => {
+test('H5 同步 confirm 批准', async () => {
   const app = await createConfirmedApp();
   const sid = sessionIdFor(`h5-${uniq()}`);
   const ask1 = chat({ message: `[E2E:hitl:submit](${app})`, userId: U, sessionId: sid });
   await waitTerminal(ask1);
   const tcid = ((ask1.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
-  const r = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }]);
+    await new Promise(r => setTimeout(r, 800)); // 等 ASK 段租约释放落定（confirm 抢锁竞态）
+const r = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }]);
   expect(r.status).toBe(200);
   await pollUntil(async () => history(sid), (h) => {
     const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);

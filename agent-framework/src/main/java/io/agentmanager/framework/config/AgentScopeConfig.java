@@ -120,6 +120,19 @@ public class AgentScopeConfig {
         return new WorkspaceSyncService(distributedStore.baseStore());
     }
 
+    /**
+     * 工作区读写器：注入 agentName 以对齐框架 RemoteFilesystemSpec(USER) 的 KV 命名空间
+     * （{@code agents/{agentName}/users/{userId}/...}）——否则本类写入与框架读取落在不同命名空间，
+     * 导致 present_file 读不到 write_file 的结果（e2e-ci-plan §11.3 D3 第二处断裂）。
+     *
+     * <p>显式建 Bean（而非 @Service 组件扫描），以保证 agentName 一定来自 OAF 配置。
+     */
+    @Bean
+    public io.agentmanager.framework.service.WorkspaceReader workspaceReader(
+            DistributedStore distributedStore, OafConfig oafConfig) {
+        return new io.agentmanager.framework.service.WorkspaceReader(distributedStore, oafConfig.name());
+    }
+
     @Bean
     public OafConfig oafConfig(OafConfigLoader loader) {
         var config = loader.load();

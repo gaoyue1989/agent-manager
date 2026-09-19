@@ -52,6 +52,19 @@ public class FileAssetStore {
     /** 建表（幂等），失败 fail-fast */
     private void initSchema() {
         try (var conn = dataSource.getConnection();
+             var stmt0 = conn.createStatement()) {
+            stmt0.execute("""
+                CREATE TABLE IF NOT EXISTS kv_sync_key (
+                  rel_path VARCHAR(512) NOT NULL,
+                  user_key VARCHAR(255) NOT NULL,
+                  updated_at DATETIME NOT NULL,
+                  PRIMARY KEY (rel_path)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        } catch (Exception e) {
+            log.warn("FileAssetStore: kv_sync_key init skipped: {}", e.getMessage());
+        }
+        try (var conn = dataSource.getConnection();
              var stmt = conn.createStatement()) {
             stmt.executeUpdate("""
                 CREATE TABLE IF NOT EXISTS file_asset (
@@ -127,6 +140,82 @@ KEY idx_user_status (user_key, status),
         } catch (Exception e) {
             log.warn("FileAssetStore: get {} failed: {}", id, e.getMessage());
             return Optional.empty();
+        }
+    }
+
+    /**
+     * 按文件名 + 会话候选反查资产所属 userKey（present_file 定位写入侧命名空间用）。
+     *
+     * <p>KV 工作区命名空间由写入时的 userKey 决定；工具侧 RuntimeContext 在 Channel 链路下
+     * 被网关改写为 peer，拿不到请求体 userId。此查询从落库记录取回原始 userKey（D3 修复）。
+     */
+    public java.util.Optional<String> findUserKeyByFileName(String fileName, String... sessionCandidates) {
+        if (fileName == null || fileName.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        var placeholders = sessionCandidates.length == 0
+            ? "NULL"
+            : String.join(",", java.util.Collections.nCopies(sessionCandidates.length, "?"));
+        var sql = "SELECT user_key FROM file_asset WHERE file_name = ?"
+            + " AND (session_id IS NULL OR session_id IN (" + placeholders + "))"
+            + " ORDER BY created_at DESC LIMIT 1";
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(sql)) {
+            int i = 1;
+            stmt.setString(i++, fileName);
+            for (var s : sessionCandidates) {
+                stmt.setString(i++, s);
+            }
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() ? java.util.Optional.ofNullable(rs.getString("user_key"))
+                    : java.util.Optional.empty();
+            }
+        } catch (Exception e) {
+            log.warn("FileAssetStore: findUserKeyByFileName {} failed: {}", fileName, e.getMessage());
+            return java.util.Optional.empty();
+        }
+    }
+
+    /**
+     * 登记 write_file→KV 同步的 (相对路径 → userKey) 映射（跨副本可查）。
+     *
+     * <p>present_file 读 KV 时需要写入侧命名空间 key，而工具侧 RuntimeContext 在 Channel
+     * 链路下 userId 被网关改写为 peer——此表把写入键持久化，读取端按路径反查（D3 修复）。
+     * 幂等：同一路径覆盖更新。
+     */
+    public void upsertKvSyncKey(String relPath, String userKey) {
+        if (relPath == null || relPath.isBlank() || userKey == null || userKey.isBlank()) {
+            return;
+        }
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement("""
+                 INSERT INTO kv_sync_key (rel_path, user_key, updated_at) VALUES (?, ?, NOW())
+                 ON DUPLICATE KEY UPDATE user_key = VALUES(user_key), updated_at = NOW()
+                 """)) {
+            stmt.setString(1, relPath);
+            stmt.setString(2, userKey);
+            stmt.executeUpdate();
+        } catch (Exception e) {
+            log.warn("FileAssetStore: upsertKvSyncKey {} failed: {}", relPath, e.getMessage());
+        }
+    }
+
+    /** 按相对路径反查 KV 同步 userKey（无记录返回 empty） */
+    public java.util.Optional<String> findKvSyncKey(String relPath) {
+        if (relPath == null || relPath.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "SELECT user_key FROM kv_sync_key WHERE rel_path = ?")) {
+            stmt.setString(1, relPath);
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() ? java.util.Optional.ofNullable(rs.getString("user_key"))
+                    : java.util.Optional.empty();
+            }
+        } catch (Exception e) {
+            log.warn("FileAssetStore: findKvSyncKey {} failed: {}", relPath, e.getMessage());
+            return java.util.Optional.empty();
         }
     }
 

@@ -130,9 +130,7 @@ test('X8 pending 上限与用户隔离（沙箱挂账态专属）', async ({ req
   expect(res.status).toBe(200);
 });
 
-// 与 F5 同类：回放的 write_file 与 KV/工作区持久化状态冲突（already exists），
-// present_file 需要的文件语义在回放世界不稳定——待框架侧明确 write/present 幂等语义后启用
-test.fixme('X9 文件交付全链路（write→present→file_ready→下载）', async () => {
+test('X9 文件交付全链路（write→present→file_ready→下载）', async () => {
   const uid = U();
   const sid = sessionIdFor(`x9-${uniq()}`);
   const stream = chat({ message: `[E2E:file:deliver](report.md)`, userId: uid, sessionId: sid });

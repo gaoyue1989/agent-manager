@@ -2,6 +2,7 @@ package io.agentmanager.framework.service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -265,5 +266,78 @@ class AgentRuntimeServiceHitlTest {
             "error".equals(f.get("type"))
                 && String.valueOf(f.get("error")).contains("confirm_context_not_found")));
         assertTrue(frames.stream().anyMatch(f -> "done".equals(f.get("type"))));
+    }
+
+    // ---------- D1 修复回归：表内完整参数优先于 state 重建 ----------
+
+    /**
+     * 回归（D1）：SDK 落 agent_state 的 asking tool_use.input 恒为空 {}，
+     * 若恢复时优先用 state 重建，工具会收到空参数而失败。
+     * 本用例让 agentStateReader 返回一个"参数为空"的 state 快照 + 表内提供完整参数，
+     * 断言恢复消息 metadata 里的 ConfirmResult 携带的是**表内完整参数**。
+     */
+    @Test
+    void resumeConfirmShouldPreferTableParamsOverEmptyStateInput() {
+        var fullParams = new LinkedHashMap<String, Object>();
+        fullParams.put("application_id", "APP-0001");
+        var tableBlock = new ToolUseBlock("call-1", "submit_application", fullParams, null, null,
+            io.agentscope.core.message.ToolCallState.ASKING);
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now())));
+
+        // state 侧：同名工具但参数为空（实测 SDK 行为）
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        var emptyBlock = new ToolUseBlock("call-1", "submit_application",
+            Map.of(), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        // asking 列表非空是快照"命中"的判据（isEmpty 只看该列表）
+        var askingEntry = new LinkedHashMap<String, Object>();
+        askingEntry.put("tool_call_id", "call-1");
+        askingEntry.put("name", "submit_application");
+        askingEntry.put("input", Map.of());
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(askingEntry), Map.of("call-1", emptyBlock), "reply-1",
+                Map.of("session_id", "gw-1", "user_id", "alice")));
+
+        // 复用同一 OafConfig 形状的实例（tenantPrefix 用 acme/test-agent → acme-test-agent__）
+        var oaf = new OafConfig(
+            "test-agent", "acme", "test-agent", "1.0.0", "acme/test-agent",
+            "Test agent", "@acme", "MIT",
+            List.of("test"), "you are a helper.",
+            List.of(), List.of(), List.of(), List.of(), List.of(),
+            new OafConfig.ModelConfig("openai", "gpt-4", ""),
+            new OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
+            new OafConfig.MemoryConfig("editable", Map.of()),
+            Map.of()
+        );
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(oaf, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass((Class<List<Msg>>) (Class<?>) List.class);
+        verify(agent2).call(captor.capture(), any(RuntimeContext.class));
+        var raw = (List<?>) captor.getValue().get(0).getMetadata().get(Msg.METADATA_CONFIRM_RESULTS);
+        var confirmResult = (ConfirmResult) raw.get(0);
+        assertEquals(Map.of("application_id", "APP-0001"), confirmResult.getToolCall().getInput(),
+            "恢复执行必须携带表内完整参数，而非 state 的空 input");
+    }
+
+    /** state 无挂起 + 表无行 → 404（语义不回归） */
+    @Test
+    void resumeConfirmShouldStill404WhenBothSourcesEmpty() {
+        when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
+        when(confirmContextStore.consume(anyString()))
+            .thenThrow(new AgentRuntimeService.ConfirmContextNotFoundException(SID));
+        assertThrows(AgentRuntimeService.ConfirmContextNotFoundException.class,
+            () -> service.resumeWithConfirm(SID, null,
+                List.of(Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true))));
     }
 }

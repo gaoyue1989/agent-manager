@@ -578,6 +578,40 @@ class ChatStreamControllerTest {
         verify(workspaceReader).writeWorkspaceFile(eq("alice"), eq("outputs/report.md"), eq("# Hello\nWorld"));
     }
 
+    /**
+     * 回归（D3）：SDK 的 ToolCallDeltaEvent.getToolCallName() 实测恒为占位符 "__fragment__"，
+     * 工具名只在 ToolCallStartEvent 上。此前直接用 delta 的名字判定 → 恒 false → KV 同步从不执行。
+     * 本用例刻意用 "__fragment__" 构造 delta，验证仍能按 ToolCallStart 登记的名字正确同步。
+     */
+    @Test
+    void chatShouldSyncWriteFileToKvWhenDeltaCarriesFragmentPlaceholderName() {
+        var sessionId = "test-user-wf3";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-wf3");
+        when(sandboxConfig.enabled()).thenReturn(false);
+
+        var replyId = "r-wf3";
+        var callId = "c-wf3";
+        var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, callId, "write_file");
+        // 真实 SDK 行为：delta 帧的 name 是 "__fragment__"（参数分片），不是工具名
+        var tcDelta = new io.agentscope.core.event.ToolCallDeltaEvent(
+            replyId, callId, "__fragment__", "{\"path\":\"frag/out.md\",\"content\":\"frag-body\"}");
+        var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "__fragment__");
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just(
+                (AgentEvent) tcStart,
+                (AgentEvent) tcDelta,
+                (AgentEvent) tcEnd,
+                (AgentEvent) agentEnd));
+        when(workspaceReader.writeWorkspaceFile(anyString(), eq("frag/out.md"), eq("frag-body")))
+            .thenReturn(true);
+
+        collect(sessionId, "write with fragment deltas", "alice");
+
+        verify(workspaceReader).writeWorkspaceFile(eq("alice"), eq("frag/out.md"), eq("frag-body"));
+    }
+
     @Test
     void chatShouldNotSyncWriteFileToKvWhenSandboxEnabled() {
         var sessionId = "test-user-wf2";

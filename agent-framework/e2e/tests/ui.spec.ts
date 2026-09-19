@@ -133,8 +133,7 @@ test('U10 附件上传对话（UI 面）', async ({ page }) => {
   await expect(page.locator(SEL.chatInner)).toContainText(/./);
 });
 
-// U11 依赖 present_file 的 file_ready 帧——非沙箱模式存在 KV/本地镜像断裂（见 X9 说明），沙箱档 UI 待沙箱 UI job 后补
-test.fixme('U11 文件交付下载卡片与历史回放', async ({ page }) => {
+test('U11 文件交付下载卡片与历史回放', async ({ page }) => {
   await send(page, '[E2E:file:deliver](report.md)');
   await expect(page.locator(SEL.chatInner)).toContainText('report.md', { timeout: 180_000 });
   // 下载链接存在（file_ready 卡片）

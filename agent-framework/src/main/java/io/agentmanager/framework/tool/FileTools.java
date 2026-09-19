@@ -168,14 +168,45 @@ public class FileTools {
         return p;
     }
 
-    /** 非沙箱模式：从本地工作区读文件（实测文件在 {workspace}/.agentscope/workspace/{sessionId}/，非 KV） */
+    /**
+     * 非沙箱模式：从 KV 工作区读文件。
+     *
+     * <p><b>候选键顺序</b>（e2e-ciplan §11.3 D3 的第三处断裂）：控制器的 write_file→KV 同步
+     * 用的是**请求体 userId**，而工具侧 RuntimeContext 在 Channel 链路下 userId 被网关改写为
+     * peer（=sessionId）。两者不一致时读不到刚写入的文件。这里按 (userId, sessionId) 依次尝试，
+     * 命中任一即返回——两条链路（直接 userId / 网关 peer）都能读到。
+     */
     private byte[] readFromWorkspace(RuntimeContext ctx, String relPath) {
-        var userKey = ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()
-            ? ctx.getUserId() : (ctx != null && ctx.getSessionId() != null ? ctx.getSessionId() : null);
-        if (userKey == null) {
+        if (ctx == null) {
             return null;
         }
-        return workspaceReader.readWorkspaceFile(userKey, relPath);
+        var candidates = new java.util.LinkedHashSet<String>();
+        // ① RuntimeContext.userId（直接调用/普通链路即请求体 userId）
+        if (ctx.getUserId() != null && !ctx.getUserId().isBlank()) {
+            candidates.add(ctx.getUserId());
+        }
+        // ② sessionId（网关 peer 即 rawSessionId）
+        if (ctx.getSessionId() != null && !ctx.getSessionId().isBlank()) {
+            candidates.add(ctx.getSessionId());
+        }
+        // ③ kv_sync_key 反查：write_file→KV 同步登记的写入侧 userKey
+        //    （Channel 链路下 ctx.userId 是网关 peer，拿不到请求体 userId——D3 修复）
+        try {
+            fileAssetStore.findKvSyncKey(relPath).ifPresent(candidates::add);
+            // ④ 上传文件：按文件名 + 会话候选反查 file_asset
+            var name = relPath.contains("/") ? relPath.substring(relPath.lastIndexOf('/') + 1) : relPath;
+            fileAssetStore.findUserKeyByFileName(name, candidates.toArray(String[]::new))
+                .ifPresent(candidates::add);
+        } catch (Exception e) {
+            log.debug("present_file: userKey lookup failed for {}: {}", relPath, e.getMessage());
+        }
+        for (var key : candidates) {
+            var bytes = workspaceReader.readWorkspaceFile(key, relPath);
+            if (bytes != null) {
+                return bytes;
+            }
+        }
+        return null;
     }
 
     /** 扩展名 → MIME 推断（兜底 application/octet-stream） */

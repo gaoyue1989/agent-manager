@@ -7,7 +7,6 @@ import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
 
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.harness.agent.DistributedStore;
@@ -20,7 +19,6 @@ import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
  * KV 命名空间与 RemoteFilesystemSpec(IsolationScope.USER) 一致：
  * 直接复用框架 RemoteFilesystem(baseStore, List.of(userId))，避免手工拼接 key。
  */
-@Service
 public class WorkspaceReader {
     private static final Logger log = LoggerFactory.getLogger(WorkspaceReader.class);
 
@@ -30,8 +28,29 @@ public class WorkspaceReader {
 
     private final BaseStore baseStore;
 
+    /**
+     * agent 名称：框架 {@code RemoteFilesystemSpec(IsolationScope.USER)} 的 KV 命名空间首段
+     * （实测结构 {@code agents/{agentName}/users/{userId}/...}）。Agent 侧读写必须与其一致，
+     * 否则写进裸 userId 命名空间、读时却查不到（e2e-ci-plan §11.3 D3 的第二处断裂）。
+     * 未配置（单测/无 OAF 场景）时回落裸 userId 命名空间，保持旧行为可用。
+     */
+    private final String agentName;
+
     public WorkspaceReader(DistributedStore distributedStore) {
+        this(distributedStore, null);
+    }
+
+    public WorkspaceReader(DistributedStore distributedStore, String agentName) {
         this.baseStore = distributedStore.baseStore();
+        this.agentName = agentName;
+    }
+
+    /** KV 命名空间段：有 agentName 时与框架一致（agents/{agentName}/users/{userId}），否则裸 userId */
+    private List<String> namespaceFor(String safeUserKey) {
+        if (agentName == null || agentName.isBlank()) {
+            return List.of(safeUserKey);
+        }
+        return List.of("agents", agentName, "users", safeUserKey);
     }
 
     /**
@@ -43,7 +62,7 @@ public class WorkspaceReader {
         var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
         var ctx = RuntimeContext.builder().userId(safeUserId).build();
         try {
-            var fs = new RemoteFilesystem(baseStore, List.of(safeUserId));
+            var fs = new RemoteFilesystem(baseStore, namespaceFor(safeUserId));
 
             // 直接 read 判断存在（exists() 对相对路径返回 false，不可靠）
             var memoryRead = fs.read(ctx, MEMORY_FILE, 0, -1);
@@ -81,11 +100,15 @@ public class WorkspaceReader {
         try {
             var safeUserKey = io.agentmanager.framework.util.PathSafe.sanitize(userKey);
             var ctx = RuntimeContext.builder().userId(safeUserKey).build();
-            var fs = new RemoteFilesystem(baseStore, List.of(safeUserKey));
+            var fs = new RemoteFilesystem(baseStore, namespaceFor(safeUserKey));
             var res = fs.read(ctx, relPath, 0, -1);
             if (res.isSuccess() && res.fileData() != null && res.fileData().content() != null) {
                 return res.fileData().content().getBytes(StandardCharsets.UTF_8);
             }
+            // 读失败时打出实际命名空间，便于定位写读 key 不一致（D3 排查沉淀）
+            log.info("read_workspace_file: miss {} in namespace {} (success={}, err={})",
+                relPath, namespaceFor(safeUserKey), res.isSuccess(),
+                res.isSuccess() ? "-" : String.valueOf(res.error()));
             return null;
         } catch (Exception e) {
             log.warn("Failed to read workspace file {} for user {}: {}", relPath, userKey, e.getMessage());
@@ -107,7 +130,7 @@ public class WorkspaceReader {
         try {
             var safeUserKey = io.agentmanager.framework.util.PathSafe.sanitize(userKey);
             var ctx = RuntimeContext.builder().userId(safeUserKey).build();
-            var fs = new RemoteFilesystem(baseStore, List.of(safeUserKey));
+            var fs = new RemoteFilesystem(baseStore, namespaceFor(safeUserKey));
 
             // write 是创建语义（已有则报错），需先判断是否存在：
             //   不存在 → write

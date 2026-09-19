@@ -110,8 +110,9 @@ public class McpToolRegistrar {
                 boolean forceReadOnly = Boolean.TRUE.equals(readOnlyServers.get(mcp.server()));
                 boolean hasAppOnly = !uiMapping.appOnly().isEmpty();
                 if (forceReadOnly || activeMcpConfig != null || hasAppOnly) {
-                    // 有 ActiveMCP 配置、强制只读或 app_only 声明时，走手动注册路径（支持过滤/跳过）
-                    registerReadOnly(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping);
+                    // 手动注册路径（支持 app_only/子集过滤）。readOnlyHint 只跟随 permissions.read_only，
+                    // 否则会短路 ask 权限（D6）。
+                    registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping, forceReadOnly);
                 } else {
                     toolkit.registerMcpClient(wrapper).block();
                     // 标准注册：记录已注册工具信息
@@ -568,6 +569,21 @@ public class McpToolRegistrar {
      */
     private void registerReadOnly(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                   Map<String, Boolean> activeMcpConfig, UiMapping uiMapping) {
+        registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, true);
+    }
+
+    /**
+     * 手动注册路径（支持 app_only 过滤 + ActiveMCP 子集过滤）。
+     *
+     * <p><b>readOnly 语义必须与触发原因一致</b>（2026-09-19 修复，e2e-ci-plan §11.3 D6）：
+     * 此前 app_only / ActiveMCP 声明也会走本路径并强制 {@code readOnly=true}，而只读工具在
+     * SDK 侧绕过权限系统（HITL ask 被短路，confirm 卡不再出现）。现由调用方显式传入
+     * {@code readOnlyHint}：只有 config.yaml 的 {@code permissions.read_only} 才是真只读，
+     * app_only 与子集过滤只是"从 LLM 工具集里摘掉某些工具"，不影响其余工具的权限评估。
+     */
+    private void registerFiltered(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
+                                  Map<String, Boolean> activeMcpConfig, UiMapping uiMapping,
+                                  boolean readOnlyHint) {
         wrapper.initialize().block();
         var tools = wrapper.listTools().block();
         if (tools == null) {
@@ -597,12 +613,13 @@ public class McpToolRegistrar {
                 wrapper,
                 null,
                 serverName,
-                true // readOnly=true 强制只读
+                readOnlyHint
             );
             toolkit.registerTool(agentTool);
             // 缓存 key 用原始工具名，API 展示用 mcp__ 前缀名（跨 server 区分）
             registeredTools.put(serverName + ":" + tool.name(), buildToolInfo(serverName, tool, uiMapping));
-            log.info("MCP tool '{}' registered (display: {}, read-only)", tool.name(), "mcp__" + serverName + "__" + tool.name());
+            log.info("MCP tool '{}' registered (display: {}, {})", tool.name(),
+                "mcp__" + serverName + "__" + tool.name(), readOnlyHint ? "read-only" : "permission-evaluated");
         }
         // app_only 工具记录 ToolInfo（供代理校验 + /tools 标记）
         recordAppOnlyTools(serverName, uiMapping, tools);
@@ -612,6 +629,13 @@ public class McpToolRegistrar {
     void registerReadOnlyForTest(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                  Map<String, Boolean> activeMcpConfig, UiMapping uiMapping) {
         registerReadOnly(toolkit, wrapper, serverName, activeMcpConfig, uiMapping);
+    }
+
+    /** 测试桥接：按显式 readOnlyHint 走手动注册路径（验证 D6：app_only 不应强制只读） */
+    void registerFilteredForTest(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
+                                 Map<String, Boolean> activeMcpConfig, UiMapping uiMapping,
+                                 boolean readOnlyHint) {
+        registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, readOnlyHint);
     }
 
     /** 测试桥接：预置工具权限行为缓存（模拟 registerAll 装载） */

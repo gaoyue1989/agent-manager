@@ -612,6 +612,38 @@ class McpToolRegistrarTest {
         assertFalse(registeredNames.contains("refresh_dashboard"));
     }
 
+    // ===== D6 回归：app_only / 子集过滤不应强制只读 =====
+
+    /**
+     * 回归（D6）：app_only 与 ActiveMCP 子集过滤此前与 permissions.read_only 共用一条
+     * 强制只读的注册路径，只读语义会短路权限系统（HITL ask 被跳过）。
+     * 本用例断言：readOnlyHint=false 时，工具注册路径不再把工具标记为只读。
+     */
+    @Test
+    void filteredRegistrationShouldNotForceReadOnlyWhenHintFalse() {
+        var wrapper = org.mockito.Mockito.mock(McpClientWrapper.class);
+        var tools = List.of(
+            new McpSchema.Tool("submit_application", "", "desc", null, null, null, null),
+            new McpSchema.Tool("hidden_card_tool", "", "desc", null, null, null, null)
+        );
+        when(wrapper.initialize()).thenReturn(Mono.empty());
+        when(wrapper.listTools()).thenReturn(Mono.just(tools));
+
+        var mapping = new McpToolRegistrar.UiMapping(
+            Map.of(), Map.of("hidden_card_tool", "ui://x/card.html"),
+            new McpToolRegistrar.UiCsp(List.of(), List.of()));
+        var toolkit = org.mockito.Mockito.mock(Toolkit.class);
+        registrar.registerFilteredForTest(toolkit, wrapper, "cards-srv", null, mapping, false);
+
+        // app_only 工具仍不注册（隐藏于 LLM），但其余工具以"受权限评估"方式注册
+        var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.tool.AgentTool.class);
+        org.mockito.Mockito.verify(toolkit, org.mockito.Mockito.times(1)).registerTool(captor.capture());
+        assertEquals("submit_application", captor.getValue().getName());
+        // 非只读注册：checkPermissions 不因 readOnly 短路（返回的 Mono 需要权限评估上下文）
+        assertFalse(registrar.isAppOnly("cards-srv", "submit_application"));
+        assertTrue(registrar.isAppOnly("cards-srv", "hidden_card_tool"));
+    }
+
     // ===== MCP Apps: resolveUiRef 裸名歧义 =====
 
     @Test

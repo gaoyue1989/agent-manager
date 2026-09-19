@@ -104,6 +104,17 @@ public class ChatStreamController {
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> writeFileInputBuffers =
         new java.util.concurrent.ConcurrentHashMap<>();
 
+    /**
+     * toolCallId &rarr; 真实工具名（turn 内有效）。
+     *
+     * <p>SDK 只在 {@link ToolCallStartEvent} 上携带真实工具名——后续的
+     * {@code ToolCallDeltaEvent} 虽然也有 getToolCallName()，实测恒为占位符
+     * {@code "__fragment__"}（参数分片帧，见 e2e-ci-plan §11.3 D3）。
+     * 因此凡需按工具名分派的逻辑，必须先在此登记、后续查表，不能直接读 delta 的名字。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> toolCallNames =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
     private static final int PRESENT_FILE_BUFFER_MAX = 64 * 1024;
 
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
@@ -349,20 +360,27 @@ public class ChatStreamController {
 
         audit(event, sessionId);
 
-        // write_file 输入参数截获
+        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）
+        if (event instanceof ToolCallStartEvent start
+                && start.getToolCallId() != null && start.getToolCallName() != null) {
+            toolCallNames.put(start.getToolCallId(), start.getToolCallName());
+        }
+
+        // write_file 输入参数截获（按登记的真实工具名判定，不能读 delta.getToolCallName()）
         if (!sandboxConfig.enabled()) {
             if (event instanceof ToolCallDeltaEvent delta
-                    && "write_file".equals(delta.getToolCallName())) {
+                    && isTool(delta.getToolCallId(), "write_file")) {
                 accumulateWriteFileInput(delta.getToolCallId(), String.valueOf(delta.getDelta()));
             }
-            if (event instanceof ToolCallEndEvent end && "write_file".equals(end.getToolCallName())) {
+            if (event instanceof ToolCallEndEvent end && isTool(end.getToolCallId(), "write_file")) {
                 syncWriteFileToKv(end.getToolCallId(), userId);
+                toolCallNames.remove(end.getToolCallId());
             }
         }
 
-        // present_file 结果累积
+        // present_file 结果累积（同样按登记名判定）
         if (event instanceof ToolResultTextDeltaEvent trd
-                && "present_file".equals(trd.getToolCallName())) {
+                && isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
 
@@ -457,6 +475,22 @@ public class ChatStreamController {
 
     // ===== present_file 累积 & 合成 =====
 
+    /**
+     * 该 toolCallId 是否属于指定工具：优先查登记表（ToolCallStart 登记的权威名字），
+     * 表未命中时回落到事件自带的工具名——覆盖 ToolResult* 等本就携带真实名的事件类型。
+     */
+    private boolean isTool(String toolCallId, String expected, String eventToolName) {
+        if (toolCallId == null) {
+            return false;
+        }
+        String registered = toolCallNames.get(toolCallId);
+        return expected.equals(registered != null ? registered : eventToolName);
+    }
+
+    private boolean isTool(String toolCallId, String expected) {
+        return isTool(toolCallId, expected, null);
+    }
+
     private void accumulatePresentFile(String toolCallId, String delta) {
         if (toolCallId == null) return;
         var buf = presentFileBuffers.computeIfAbsent(toolCallId, k -> new StringBuilder());
@@ -549,6 +583,9 @@ public class ChatStreamController {
             }
             boolean ok = workspaceReader.writeWorkspaceFile(userKey, relPath, content);
             if (ok) {
+                // 落库登记 (相对路径 → userKey)：present_file 读 KV 需要写入侧命名空间键，
+                // 而工具侧 ctx.userId 在 Channel 链路下是网关 peer（D3）。落库以支持跨副本。
+                fileAssetStore.upsertKvSyncKey(relPath, userKey);
                 log.info("write_file → KV sync: {} ({} chars) for user {}", relPath, content.length(), userKey);
             }
         } catch (Exception e) {

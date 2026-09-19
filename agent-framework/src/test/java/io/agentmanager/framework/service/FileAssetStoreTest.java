@@ -46,7 +46,8 @@ class FileAssetStoreTest {
 
     @Test
     void ddlShouldRunAtConstruction() throws Exception {
-        verify(dataSource.getConnection()).createStatement();
+        // 构造期执行 DDL：file_asset 与 kv_sync_key 两张表（各自一次连接）
+        verify(dataSource.getConnection(), org.mockito.Mockito.atLeastOnce()).createStatement();
         // 幂等：再次构造（新 mock）不抛错
         var ds2 = mock(DataSource.class);
         when(ds2.getConnection()).thenReturn(mock(Connection.class));

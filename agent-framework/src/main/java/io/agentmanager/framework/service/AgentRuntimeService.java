@@ -702,28 +702,77 @@ public class AgentRuntimeService {
     }
 
     /**
-     * 取得恢复所需的确认上下文：优先 AgentState（无 TTL），回落 confirm_context（兼容老会话）。
+     * 取得恢复所需的确认上下文。**参数完整性优先**：
      *
-     * <p>state 路径命中时顺手把表里可能残留的**未消费行**标记为已消费：否则 30 分钟内
-     * 的二次提交会"表行新鲜 → 预检通过 → state 已无 ASKING → 回落拿到陈旧 toolCalls →
-     * SDK 抛 references non-ASKING"绕远路。消费后二次提交得到 409 already processed，
-     * 语义准确（确实处理过）。行不存在/已消费时忽略。
+     * <ol>
+     *   <li>先读 confirm_context 表（非破坏性 {@code findPending}）：该表的 toolCalls 来自
+     *       {@code RequireUserConfirmEvent}，**携带完整工具参数**；</li>
+     *   <li>表无行（已 TTL 清理 / 老会话）时回落 AgentState 重建。</li>
+     * </ol>
+     *
+     * <p><b>为什么不能反过来</b>（2026-09-19 修复，e2e-ci-plan §11.3 D1）：SDK 持久化到
+     * agent_state 的 assistant {@code tool_use.input} 在 ASKING 态**恒为空对象**，
+     * 而 state 路径此前被优先使用——用它重建出的 ToolUseBlock 参数为空，导致恢复执行时
+     * 工具收到空参数（如 {@code argument "content" is null}）而失败。实测：挂起时
+     * permission_ask 与 confirm_context 的参数都完好，唯独 state 里是 {@code {}}。
+     *
+     * <p>两路都命中时：表内参数为权威；仅当表中某 toolCallId 参数为空而 state 有值
+     * （反向异常）才以 state 补齐。取用后把表行标记已消费，保证二次提交得到 409。
      *
      * @throws ConfirmContextNotFoundException 两处都找不到挂起的 ASKING 工具
      */
     private ConfirmContext resolveConfirmContext(String fullThreadId) {
         var fromState = loadConfirmContextFromState(fullThreadId);
-        if (fromState != null) {
-            try {
-                confirmContextStore.consume(fullThreadId);
-            } catch (Exception e) {
-                log.debug("[HITL] stale confirm_context consume skipped for {}: {}",
-                    fullThreadId, e.getMessage());
+        var fromTable = confirmContextStore.findPending(fullThreadId).orElse(null);
+
+        if (fromTable != null) {
+            var tools = new LinkedHashMap<String, io.agentscope.core.message.ToolUseBlock>();
+            for (var tc : fromTable.toolCalls()) {
+                tools.put(tc.getId(), enrichWithStateInput(tc, fromState));
             }
+            // state 有额外挂起工具（表行覆盖不全）时并入，避免漏确认项
+            if (fromState != null) {
+                fromState.toolCalls().forEach(tools::putIfAbsent);
+            }
+            try {
+                confirmContextStore.consume(fullThreadId);   // 二次提交 → 409 already processed
+            } catch (Exception e) {
+                log.debug("[HITL] confirm_context consume skipped for {}: {}", fullThreadId, e.getMessage());
+            }
+            String replyId = fromTable.replyId() != null && !fromTable.replyId().isBlank()
+                ? fromTable.replyId()
+                : (fromState != null ? fromState.replyId() : "");
+            log.info("[HITL] resolveConfirmContext: table hit (complete params) for {}, tools={}, replyId={}",
+                fullThreadId, tools.keySet(), replyId);
+            return new ConfirmContext(tools, replyId, Instant.now(), new AtomicBoolean(true),
+                fromState != null ? fromState.runtimeSessionId() : null,
+                fromState != null ? fromState.runtimeUserId() : null);
+        }
+
+        if (fromState != null) {
+            log.info("[HITL] resolveConfirmContext: state fallback for {} (table empty — params may be incomplete)",
+                fullThreadId);
             return fromState;
         }
         log.debug("[HITL] no ASKING tools in state for {}, falling back to confirm_context", fullThreadId);
         return consumeConfirmContext(fullThreadId);
+    }
+
+    /** 表内参数为空时用 state 的同 id 参数补齐（防御性：state 参数通常为空，仅在反向异常时生效） */
+    private io.agentscope.core.message.ToolUseBlock enrichWithStateInput(
+            io.agentscope.core.message.ToolUseBlock fromTable, ConfirmContext fromState) {
+        if (fromState == null || fromTable.getInput() == null || !fromTable.getInput().isEmpty()) {
+            return fromTable;
+        }
+        var stateTool = fromState.toolCalls().get(fromTable.getId());
+        if (stateTool == null || stateTool.getInput() == null || stateTool.getInput().isEmpty()) {
+            return fromTable;
+        }
+        log.info("[HITL] enriching tool {} input from agent_state ({} keys)",
+            fromTable.getId(), stateTool.getInput().size());
+        return new io.agentscope.core.message.ToolUseBlock(
+            fromTable.getId(), fromTable.getName(), stateTool.getInput(),
+            fromTable.getContent(), fromTable.getMetadata(), fromTable.getState());
     }
 
     /** 清理确认上下文（供测试/运维使用；恢复完成后不主动清理——保留 consumed 条目以正确返回 409，且同 session 新 ASK 会覆盖） */
