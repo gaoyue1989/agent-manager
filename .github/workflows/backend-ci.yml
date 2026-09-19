@@ -8,8 +8,28 @@ on:
     branches: [master]
 
 jobs:
+  # 目录变更检测：决定本次该跑哪些 job（不相关 job 会 Skipped，门禁视为通过）
+  changes:
+    name: 变更目录检测
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            workflows:
+              - '.github/workflows/backend-ci.yml'
+
   test:
     name: 单测 (go vet + go test)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,8 +45,9 @@ jobs:
 
   build-push:
     name: 构建镜像并推送
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [changes, test]
+    if: (needs.changes.outputs.backend == 'true' || needs.changes.outputs.workflows == 'true')
+        && github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
