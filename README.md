@@ -115,3 +115,4 @@ node debug-console-e2e.js / chat-ui-e2e.js   # Debug 页 / 对话页
 - 平台保留键（用户 env 不可覆盖）：`AGENT_CONFIG_DIR`、`AGENT_WORKSPACE_DIR`、`SERVER_HOST`、`SERVER_PORT`
 - MCP server 不可达默认不阻断业务启动；必需依赖在包内声明 `startup.required: true`
 - 敏感配置在 `.env.secrets`（gitignored）；MySQL 凭据见 `manifests/platform.yaml`
+# PR 门禁验证 1789831278
