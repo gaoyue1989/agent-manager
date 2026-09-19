@@ -28,6 +28,12 @@ mkdir -p "$LOGS" "$RUNTIME/files" "$RUNTIME/sandboxes"
 JAR=$(ls -t "$ROOT"/../target/agent-framework-*.jar 2>/dev/null | head -1)
 [ -n "${JAR:-}" ] || { echo "未找到 jar（先 mvn -DskipTests package）"; exit 1; }
 
+# ---------- -1. 数据重置：清空上一轮 E2E 遗留数据（防脏数据污染 ASK/租约语义） ----------
+# 用 node 直连（无 mysql/redis-cli 依赖）；表由实例启动时 initSchema 重建
+if [ "${E2E_RESET_DATA:-true}" = "true" ]; then
+  node "$ROOT/scripts/reset-data.mjs" "$MYSQL_URL" "$MYSQL_USER" "$MYSQL_PASS" "$REDIS_URL" || true
+fi
+
 # ---------- 0. 清场：杀掉上一轮残留的同端口进程（陈旧 mock/实例会让新进程绑定失败且难以察觉） ----------
 for PORT_CLEAN in "$LLM_MOCK_PORT" "$BENCH_MCP_PORT" "$APPROVAL_MCP_PORT" "$SANDBOX_MOCK_PORT" "$E2E_BASE_PORT" "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 2))"; do
   PIDS=$(ss -ltnp 2>/dev/null | grep ":${PORT_CLEAN} " | grep -oP 'pid=\K[0-9]+' | sort -u || true)

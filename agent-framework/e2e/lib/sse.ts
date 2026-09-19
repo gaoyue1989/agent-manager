@@ -14,7 +14,7 @@ export interface Collected {
 
 const TERMINAL_TYPES = new Set(['done', 'error', 'permission_ask']);
 
-export function collectStream(p: Promise<Response>, timeoutMs = 150_000): Collected {
+export function collectStream(p: Promise<Response>, timeoutMs = 45_000): Collected {
   const frames: Frame[] = [];
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);

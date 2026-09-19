@@ -15,6 +15,7 @@ const uniq = () => `${Date.now().toString(36)}${(uniqueSeq++).toString(36)}`;
 /** 等发送钮可用（非流式守卫期）再点击——example approval e2e 验证过的手法 */
 async function send(page: Page, text: string) {
   await page.goto('/debug/');
+
   // 默认 A2A 模式不支持 HITL/file_ready 等通道语义——统一走 Channel 模式
   const modeChannel = page.locator(SEL.modeChannel);
   if (await modeChannel.count()) await modeChannel.click();

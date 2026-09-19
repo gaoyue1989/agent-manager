@@ -138,8 +138,19 @@ public class WorkspaceReader {
             var read = fs.read(ctx, relPath, 0, -1);
             boolean success;
             if (read.isSuccess() && read.fileData() != null && read.fileData().content() != null) {
-                // 文件已存在 → edit 全量替换
-                var editRes = fs.edit(ctx, relPath, read.fileData().content(), content, false);
+                var current = read.fileData().content();
+                // 内容相同 → 无需替换（直接成功）。
+                // 关键：SDK 的 edit 实现会对 old 做 countOccurrences 扫描，
+                // 而 countOccurrences 在 needle 为空串时**死循环**（indexOf("", i) 恒返回 i，
+                // 游标不前进 → CPU 100% 挂死，2026-09-09 e2e 实测 F5 用例即此路径）。
+                // 同时空 old 也必然触发该分支，故这里同时挡住"内容相同"与"空内容"两种输入。
+                if (current.isEmpty() || current.equals(content)) {
+                    log.info("write_workspace_file: skip edit ({} , {} chars) for user {}",
+                        current.isEmpty() ? "KV file empty" : "content unchanged", content.length(), safeUserKey);
+                    return true;
+                }
+                // 文件已存在且内容不同 → edit 全量替换
+                var editRes = fs.edit(ctx, relPath, current, content, false);
                 success = editRes.isSuccess();
                 if (!success) {
                     log.warn("write_workspace_file: KV edit failed for {} user {}: {}", relPath, safeUserKey, editRes.error());

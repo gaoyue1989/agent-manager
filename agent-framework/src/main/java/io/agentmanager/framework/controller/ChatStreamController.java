@@ -96,6 +96,15 @@ public class ChatStreamController {
     private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private final McpToolRegistrar mcpToolRegistrar;
 
+    /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
+    private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
+
+    /** 关闭时释放看护线程池 */
+    @jakarta.annotation.PreDestroy
+    void shutdownWatchdog() {
+        orphanTurnWatchdog.shutdown();
+    }
+
     /** present_file 工具结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -324,9 +333,24 @@ public class ChatStreamController {
             }
 
             // ===== 7. onCancel =====
+            // 断连不杀任务（durable-sse 不变量）：agent 继续跑、租约保留、事件照常落库，
+            // 客户端可用 /subscribe 续传；turn 终态由源 flux 的 complete/error 回调收尾。
+            //
+            // 注意（2026-09-19 教训）：此处**绝不能做阻塞操作**——onCancel 跑在 Reactor 的
+            // 取消回调线程（boundedElastic）上，任何 sleep/同步等待都会占死该线程并连带
+            // 卡住 SDK 会话闸门（LocalSessionTurnGate）的释放路径，导致后续所有 turn 全堵。
+            // 需要兜底看护时只能用独立调度线程，见 OrphanTurnWatchdog。
             sink.onCancel(() -> {
                 log.info("[chat] SSE disconnected, agent execution continues (sid={}, rid={})",
                     finalSessionId, replyId);
+                orphanTurnWatchdog.schedule(() -> {
+                    if (!turnEnded.get()) {
+                        log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
+                            + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
+                            OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
+                        endTurn(lease, finalSessionId, turnEnded);
+                    }
+                }, finalSessionId, replyId);
             });
 
         }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());

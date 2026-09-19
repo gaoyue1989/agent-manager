@@ -16,10 +16,10 @@ export function chat(opts: ChatOpts): Collected {
   const p = fetch(`${base}/threads/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    signal: AbortSignal.timeout(opts.timeoutMs ?? 150_000),
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 45_000),
     body: JSON.stringify({ message: opts.message, sessionId: opts.sessionId, userId: opts.userId, fileIds: opts.fileIds }),
   });
-  return collectStream(p, (opts.timeoutMs ?? 150_000));
+  return collectStream(p, (opts.timeoutMs ?? 45_000));
 }
 
 export async function status(sessionId: string, base = BASE): Promise<Record<string, unknown>> {

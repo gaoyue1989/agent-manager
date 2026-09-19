@@ -49,6 +49,24 @@ public final class TurnLeaseGuard implements AutoCloseable {
     /** 最近一次确认持有租约的**单调**时刻 */
     private volatile long lastHeldNanos;
 
+    /**
+     * 本 guard 的创建时刻（单调）：与 {@link #MAX_LIFETIME_NANOS} 一起构成**硬寿命上限**。
+     *
+     * <p><b>为什么需要</b>（e2e 实测，D7 线程泄漏）：SSE 订阅取消后若 SDK 侧不再推进
+     * turn（既不产事件也不报错），`endTurn` 永不触发 → `release()` 永不被调用 →
+     * 续租线程常驻。实测一次完整 e2e 套件后堆积 28 个 `turn-renew` 线程，SDK 执行线程池
+     * 被占满后**所有新 turn 都无法推进**（`/health` 仍正常，故就绪探针无法发现）。
+     * 硬上限保证任何 turn 的守护线程最终必然退出，与客户端行为解耦。
+     */
+    private final long bornNanos = System.nanoTime();
+
+    /**
+     * guard 硬寿命：到期即自行停续租并释放租约。取值远大于任何正常 turn
+     * （LLM 长推理 + 多轮工具通常 <10 分钟），仅用于兜住泄漏路径。
+     */
+    static final long MAX_LIFETIME_NANOS = java.time.Duration.ofMinutes(
+        Long.getLong("agent.cleanup.turn-lease-max-lifetime-minutes", 10L)).toNanos();
+
     /** 丢锁终态帧的一次性闸门（见 {@link #tryMarkLostNotified()}） */
     private final AtomicBoolean lostNotified = new AtomicBoolean(false);
 
@@ -138,6 +156,14 @@ public final class TurnLeaseGuard implements AutoCloseable {
         if (released.get()) {
             return;
         }
+        // 硬寿命兜底：turn 卡死（订阅取消后 SDK 不再推进）时强制收尾，防续租线程常驻（D7）
+        if (System.nanoTime() - bornNanos > MAX_LIFETIME_NANOS) {
+            log.error("Turn lease guard exceeded max lifetime ({}min), force releasing (sid={}) —— "
+                + "turn 可能卡死（客户端断连后无终态），本兜底防续租线程泄漏",
+                MAX_LIFETIME_NANOS / 60_000_000_000L, sessionId);
+            release();
+            return;
+        }
         switch (store.renew(sessionId, token)) {
             case HELD -> lastHeldNanos = System.nanoTime();
             case LOST -> markLost("takeover detected (renew matched 0 rows)");
@@ -158,7 +184,8 @@ public final class TurnLeaseGuard implements AutoCloseable {
             log.error("Turn lease LOST (sid={}): {} —— 执行副本必须立即停止写入该 session 的事件",
                 sessionId, reason);
         }
-        // shutdown 而非 shutdownNow：本方法可能正跑在续租线程上，shutdownNow 会自我中断
+        // shutdown 而非 shutdownNow：本方法可能正跑在续租线程上，shutdownNow 会自我中断。
+        // 注意：本方法执行后 release() 仍可能被调用（收尾路径），届时 released 闸门会跳过 store.release
         renewer.shutdown();
     }
 
