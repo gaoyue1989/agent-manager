@@ -43,6 +43,16 @@ for f in "$AGENT_CFG"/mcp-configs/*/config.yaml; do
   sed -i "s|http://127.0.0.1:8813|http://127.0.0.1:${APPROVAL_MCP_PORT}|g; s|http://172.17.0.1:18082/mcp|http://127.0.0.1:${BENCH_MCP_PORT}/mcp|g; s|http://127.0.0.1:18082/mcp|http://127.0.0.1:${BENCH_MCP_PORT}/mcp|g" "$f"
 done
 
+# ---------- 1.5 最小 logback 配置（仅控制台）：应用自带配置强写 /applog，CI 非 root 不可写 ----------
+cat > "$AGENT_CFG/logback-e2e.xml" <<'XML'
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder><pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern></encoder>
+  </appender>
+  <root level="INFO"><appender-ref ref="CONSOLE"/></root>
+</configuration>
+XML
+
 # ---------- 2. mock 进程 ----------
 MOCK_LLM_PORT="$LLM_MOCK_PORT" node "$ROOT/mock/llm-server.mjs" > "$LOGS/mock-llm.log" 2>&1 &
 echo $! > "$RUNTIME/mock-llm.pid"
@@ -104,7 +114,7 @@ start_jar() { # $1=端口 $2=名字
   FILE_STORAGE_TYPE=local FILE_STORAGE_LOCAL_DIR="$RUNTIME/files" \
   AGENT_CLEANUP_TURN_LEASE_TTL_SECONDS=15 AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS=5 \
   SANDBOX_ENABLED="$SANDBOX_ENABLED" OPENSANDBOX_SERVER_URL="127.0.0.1:${SANDBOX_MOCK_PORT}" OPENSANDBOX_API_KEY="e2e-placeholder" \
-  nohup java -Xms256m -Xmx768m -jar "$JAR" > "$LOGS/agent-$NAME.log" 2>&1 &
+  LOGGING_CONFIG="file:$AGENT_CFG/logback-e2e.xml" nohup java -Xms256m -Xmx768m -jar "$JAR" > "$LOGS/agent-$NAME.log" 2>&1 &
   echo $! > "$RUNTIME/agent-$NAME.pid"
   "$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${PORT}/health" 90 "agent-$NAME" || {
     echo "[env-up] agent-$NAME 启动失败，日志尾部：" >&2
