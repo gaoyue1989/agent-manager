@@ -1,7 +1,10 @@
 name: backend-ci
 
+# 触发：任意分支 push + 指向 master 的 PR（PR 门禁）
 on:
   push:
+    branches-ignore: []
+  pull_request:
     branches: [master]
 
 jobs:
@@ -23,6 +26,7 @@ jobs:
   build-push:
     name: 构建镜像并推送
     needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,7 +1,12 @@
 name: agent-framework-ci
 
+# 触发：任意分支 push + 指向 master 的 PR（PR 门禁）
+# 去重：同分支上 push 会同时产生 PR 同步事件——PR 事件与 push 事件都触发时，
+#       依靠 concurrency 按	ref 分组取消旧队列，避免双倍跑
 on:
   push:
+    branches-ignore: []        # 所有分支
+  pull_request:
     branches: [master]
 
 concurrency:
@@ -201,6 +206,7 @@ jobs:
   build-push:
     name: 构建镜像并推送
     needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
