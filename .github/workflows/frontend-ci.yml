@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [master]
 
+concurrency:
+  # 按分支名分组 + 取消进行中的旧 run：同分支的 push 与 PR 双事件只保留最新一次
+  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   # 目录变更检测：决定本次该跑哪些 job（不相关 job 会 Skipped，门禁视为通过）
   changes:
