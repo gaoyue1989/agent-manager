@@ -2,8 +2,9 @@ name: backend-ci
 
 # 触发：任意分支 push + 指向 master 的 PR（PR 门禁）
 on:
+  # push 仅 master（跑测试 + 发布镜像）；其余分支只在 PR 时触发（门禁检查）
   push:
-    branches-ignore: []
+    branches: [master]
   pull_request:
     branches: [master]
 
