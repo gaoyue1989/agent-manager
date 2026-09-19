@@ -10,7 +10,7 @@ export E2E_LLM_MOCK="${E2E_LLM_MOCK:-http://127.0.0.1:${LLM_MOCK_PORT:-18081}}"
 export E2E_RUN_ID="${E2E_RUN_ID:-ci-$GROUP-$(date +%s)-$RANDOM}"
 
 FAILED=0
-./scripts/check-fixtures.mjs || FAILED=1
+node scripts/check-fixtures.mjs || FAILED=1
 if [ "$FAILED" -eq 0 ]; then
   ./scripts/env-up.sh || FAILED=1
 fi

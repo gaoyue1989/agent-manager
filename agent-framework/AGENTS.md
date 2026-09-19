@@ -341,3 +341,17 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 mvn test     # 61 个测试类 / 676 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```
+
+### E2E（GitHub Actions 实测 + 本地可复现）
+
+`e2e/` 目录承载 CI 级黑盒 E2E（设计文档 [docs/e2e-ci-plan.md](docs/e2e-ci-plan.md)），随 agent-framework-ci 推送 master 触发，三个 job 并行：
+
+| job | 内容 |
+|-----|------|
+| e2e-core | S 基础 / F 文件上传下载 / H HITL / M MCP Apps / A A2A + U Debug 页 UI |
+| e2e-multi | R 组多副本（双实例 + nginx 轮询：断连续传/kill 接管/并发 confirm 互斥/事件对账）+ U9 |
+| e2e-sandbox | X 组沙箱（mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流） |
+
+- **mock 架构 = 真实服务录制回放**：LLM 响应来自真实 LLM 录制件（`e2e/mock/fixtures/llm/`），沙箱协议来自本机真实 OpenSandbox Server 录制件（`e2e/mock/fixtures/sandbox/`）；场景标记 `[E2E:*]` 只做路由。录制脚本 `scripts/record-*.mjs` 仅开发机使用（密钥走 .env.secrets），CI 纯回放零密钥
+- 环境编排 `scripts/env-up.sh / env-down.sh / run.sh`，CI 与本地同路径；`npm run check:fixtures` 校验录制件覆盖与脱敏
+- 已知框架语义缺陷（e2e 发现，详见 e2e-ci-plan.md §11）：① channel 路径 HITL approve 恢复执行时工具参数丢失；② 客户端断连后剩余 TEXT delta 不再持久化到事件流；③ 非沙箱模式 write_file→present_file 的 KV/本地工作区镜像断裂；④ ASKING 态下新 turn 被拒（与 api-thread-spec 描述相反）。相关用例以 test.fixme 标记或按真实行为断言
