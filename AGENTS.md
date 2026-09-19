@@ -95,14 +95,15 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 
 ### 触发规则（按目录过滤，加速无关变更）
 
-- **任意分支 push / PR** 都会启动三个工作流，但 **job 按改动目录过滤**：
+- **push 仅 master**（跑测试 + 发布镜像）；**其余分支只在 PR 时触发**（避免双事件重复跑，门禁只认 PR run）
+- **PR / master push** 都会启动三个工作流，但 **job 按改动目录过滤**：
   - `backend/**` → backend-ci 的单测
   - `frontend/**` → frontend-ci 的单测
   - `agent-framework/**` → agent-framework-ci 的单测 + 三个 E2E
   - 根目录工作流/脚本变更（`.github/**`）→ 三个工作流全跑
-  - **不相关目录的 job 显示 Skipped，门禁视为通过**——这是刻意设计：工作流必须照常触发，否则必需检查会 pending 卡死 PR；不能在工作流层面用 `paths` 过滤
+  - **不相关目录的 job 显示 Skipped，门禁视为通过**——这是刻意设计：PR 上工作流必须照常触发，否则必需检查会 pending 卡死 PR；不能在工作流层面用 `paths` 过滤
 - 触发映射：`.github/workflows/<name>.yml` 自身变更也会触发对应工作流（保证 CI 配置改动被验证）
-- **master push** → 测试之外，额外执行镜像构建推送 Docker Hub（凭据 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`）
+- master push 的测试 job 同样按目录过滤（无关目录 Skipped），镜像推送仅在相关目录有变更时执行
 - 跨目录改动（如前后端联动）→ 多个工作流并行各自执行，互不干扰
 
 | 工作流 | 单测 | E2E | 镜像推送（仅 master push） |

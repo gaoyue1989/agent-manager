@@ -4,16 +4,15 @@ name: agent-framework-ci
 # 去重：同分支上 push 会同时产生 PR 同步事件——PR 事件与 push 事件都触发时，
 #       依靠 concurrency 按	ref 分组取消旧队列，避免双倍跑
 on:
+  # push 仅 master（跑测试 + 发布镜像）；其余分支只在 PR 时触发（门禁检查）
   push:
-    branches-ignore: []        # 所有分支
+    branches: [master]
   pull_request:
     branches: [master]
 
 concurrency:
-  # 按分支名分组 + 取消进行中的旧 run：同分支的 push 与 PR 双事件只保留最新一次
-  # （两者产生同 head sha 的同名检查，任一失败都会卡住 PR 门禁）
-  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # 目录变更检测：决定本次该跑哪些 job（不相关 job 会 Skipped，门禁视为通过）
@@ -54,6 +53,7 @@ jobs:
 
   e2e-core:
     name: E2E 核心（API+UI）
+    needs: test
     needs: [changes, test]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
@@ -115,6 +115,7 @@ jobs:
 
   e2e-multi:
     name: E2E 多副本（R 组 + U9）
+    needs: test
     needs: [changes, test]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
@@ -175,6 +176,7 @@ jobs:
 
   e2e-sandbox:
     name: E2E 沙箱（mock OpenSandbox）
+    needs: test
     needs: [changes, test]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
