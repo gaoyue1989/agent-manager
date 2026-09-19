@@ -6,7 +6,7 @@
 
 **Architecture:** 确立并落实一条规则——**拥有执行的请求消费本地 sink（保证首 token 延迟），其他所有观察者走 DB 游标**。新增 `SessionEventTailer` 承担观察者路径（回放 + 轮询追赶 + 终止判定），`SessionEventBus` 退回为纯进程内扇出。写入侧用内存 seq 计数器省掉 `SELECT MAX(seq)`，用多值 INSERT 攒批省掉逐条往返，并保证"DB 中 seq 始终是连续前缀"这一不变量。
 
-**Tech Stack:** Java 17、Spring Boot 3.3.5、Reactor（Flux/Sinks）、MySQL（`session_event` / `turn_lease`）、JUnit 5 + Mockito + StepVerifier、Maven。
+**Tech Stack:** Java 21、Spring Boot 3.3.5、Reactor（Flux/Sinks）、MySQL（`session_event` / `turn_lease`）、JUnit 5 + Mockito + StepVerifier、Maven。
 
 **设计依据：** `docs/durable-sse-multinode-plan.md`（已评审通过）。任务编号与设计文档 §7 实施步骤的对应关系在每节标注。
 

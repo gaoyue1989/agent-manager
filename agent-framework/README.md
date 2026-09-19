@@ -5,7 +5,7 @@
 
 - 版本：v2.1.0（Spring Boot 3.3.5 / JDK 21 / Maven 3.9+）
 - 默认端口：`8100`
-- 测试：61 个测试类 / 456 个 `@Test`（含 4 个沙箱集成测试默认跳过）
+- 测试：76 个测试类 / 679 个 `@Test`（含 4 个沙箱集成测试默认跳过）
 - 部署形态：单 Agent 多副本无状态水平扩展
 
 ---
@@ -33,9 +33,9 @@ agent-framework/
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
 │   │       └── static/debug/                    # 调试页面（拆分架构：index.html + css/js/modules）
-│   └── test/                                    # 61 个测试类
+│   └── test/                                    # 76 个测试类
 ├── example/                                     # 示例包（审批 Demo：HITL + MCP App 卡片）
-├── docs/                                        # 设计与改进方案（26 份，详见 docs 内 README/索引）
+├── docs/                                        # 设计与改进方案（36 份，索引见 docs/README.md）
 └── README.md                                    # 本文件
 ```
 
@@ -238,7 +238,7 @@ TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超
 ## 测试
 
 ```bash
-mvn test                                  # 61 个测试类 / 456 个 @Test（默认跳过 4 个沙箱集成测试）
+mvn test                                  # 76 个测试类 / 679 个 @Test（默认跳过 4 个沙箱集成测试）
 mvn -o test                               # 离线模式（离线开发镜像内）
 ```
 
@@ -282,7 +282,7 @@ curl http://localhost:8100/debug/workspace
 
 ## 维护约定
 
-- 任何对端点、控制器、表结构、测试数（61/456）、环境变量默认值、`/config/skills` L2 仓库行为等已落地事项的修改，需同步更新：
+- 任何对端点、控制器、表结构、测试数（76/679）、环境变量默认值、`/config/skills` L2 仓库行为等已落地事项的修改，需同步更新：
   1. 涉及的具体方案文档（[docs/](docs/)）
   2. [docs/api.md](docs/api.md) / [docs/agent-framework-design.md](docs/agent-framework-design.md) / [docs/agent-framework-deploy.md](docs/agent-framework-deploy.md) / [docs/agent-framework-test.md](docs/agent-framework-test.md) / [docs/checkpoint-design.md](docs/checkpoint-design.md) 对应章节
   3. [AGENTS.md](AGENTS.md) 目录树、端点表、AgentScope 功能表、环境变量表、测试统计

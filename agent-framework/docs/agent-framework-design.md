@@ -1,5 +1,7 @@
 # Agent Framework — 设计文档
 
+> 注：本篇为 v2.1 时点快照。目录树/类清单的最新权威是 [../AGENTS.md](../AGENTS.md)；其后新增的 SessionEventBus、SkillManage*、HistoryConfig 等类见彼处与 docs/README.md 索引。
+
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
 
