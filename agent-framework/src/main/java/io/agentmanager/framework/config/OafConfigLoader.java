@@ -302,6 +302,9 @@ public class OafConfigLoader {
         return new ModelConfig("openai", "", "");
     }
 
+    /** 工具级权限合法行为值（与 MCP permissions.tools 三态一致） */
+    private static final java.util.Set<String> PERMISSION_BEHAVIORS = java.util.Set.of("allow", "ask", "deny");
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     private RuntimeConfig parseRuntimeConfig(Map<String, Object> fm) {
         var raw = fm.get("config");
@@ -309,21 +312,50 @@ public class OafConfigLoader {
             var m = (Map<String, Object>) raw;
             // config.permission.mode：全局权限模式（缺省 default）
             var permissionMode = "default";
+            Map<String, String> permissionTools = null;
             var perm = m.get("permission");
             if (perm instanceof Map<?, ?> permMap) {
                 var mode = permMap.get("mode");
                 if (mode instanceof String s && !s.isBlank()) {
                     permissionMode = s.trim().toLowerCase();
                 }
+                permissionTools = parsePermissionTools(permMap.get("tools"));
             }
             return new RuntimeConfig(
                 ((Number) m.getOrDefault("temperature", 0.7)).doubleValue(),
                 ((Number) m.getOrDefault("max_tokens", 4096)).intValue(),
                 (boolean) m.getOrDefault("require_confirmation", false),
-                permissionMode
+                permissionMode,
+                permissionTools == null ? java.util.Map.of() : permissionTools
             );
         }
         return new RuntimeConfig(0.7, 4096, false, "default");
+    }
+
+    /**
+     * 解析 frontmatter config.permission.tools（自定义/内置工具级三态权限）。
+     * 降级验证：非法条目告警跳过，不阻断启动（与 MCP permissions.tools 解析语义一致）。
+     */
+    private Map<String, String> parsePermissionTools(Object raw) {
+        if (!(raw instanceof Map<?, ?> toolsMap) || toolsMap.isEmpty()) {
+            return null;
+        }
+        var result = new java.util.LinkedHashMap<String, String>();
+        for (var entry : toolsMap.entrySet()) {
+            if (!(entry.getKey() instanceof String name) || !(entry.getValue() instanceof String behavior)) {
+                System.out.println("[OafConfigLoader] WARNING: Invalid config.permission.tools entry ignored "
+                    + "(expect string -> string): " + entry.getKey() + "=" + entry.getValue());
+                continue;
+            }
+            var normalized = behavior.trim().toLowerCase();
+            if (!PERMISSION_BEHAVIORS.contains(normalized)) {
+                System.out.println("[OafConfigLoader] WARNING: Unknown config.permission.tools behavior '"
+                    + behavior + "' for tool '" + name + "' (expected allow|ask|deny), ignored");
+                continue;
+            }
+            result.put(name, normalized);
+        }
+        return result;
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

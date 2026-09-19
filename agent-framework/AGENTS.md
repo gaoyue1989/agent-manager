@@ -214,6 +214,20 @@ invokeStream(message, threadId, userId) → Flux<Map>
 `tools.json` 只写 `deny`，不写 `allow`（保留全部内置工具）。
 OAF `deniedTools` 字段控制排除列表。
 
+### 工具权限（HITL 三态）
+
+规则来源与作用域（均按 Toolkit 注册名精确匹配，评估顺序 Deny → Ask → Allow → mode 兜底）：
+
+| 来源 | 作用域 | 声明位置 |
+|---|---|---|
+| MCP 工具 | 各 server 的 MCP 工具 | `mcp-configs/{server}/config.yaml` 的 `permissions.tools`（allow/ask/deny） |
+| 自定义/内置工具 | @Tool 注解工具 + Harness 内置工具 | AGENTS.md frontmatter `config.permission.tools`（2026-09-20 新增） |
+
+- 自定义/内置工具**未声明默认 ALLOW**（不参与确认，零侵入）；声明 `ask` 即接入 HITL 确认卡链路（`permission_ask` → `confirm_context` → `/threads/{sid}/confirm-stream`，与 MCP 工具共用）
+- 优先级：MCP 显式规则 > frontmatter 声明 > 自动放行；与 MCP 裸名冲突的 frontmatter 声明忽略并告警
+- `config.permission.mode` 为全局模式（default/accept_edits/explore/bypass/dont_ask）；`require_confirmation: true` 仅兜底 MCP 工具 ASK，**不**扩展到自定义工具
+- 装配：`AgentScopeConfig.buildPermissionContext`（存在任一规则来源即启用权限系统）；声明了未注册工具名告警忽略
+
 ---
 
 ## 多租户隔离
