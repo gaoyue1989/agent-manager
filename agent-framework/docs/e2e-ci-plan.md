@@ -645,6 +645,16 @@ CI run 35433743261 五个 job 全绿（单测 / E2E 核心 / E2E 多副本 / E2E
 | **D6** | **`ui.app_only` 与 `permissions.tools.ask` 不能同 server 共存**（确认） | 同 config.yaml 同时声明二者时，ask 工具被注册为 read-only，HITL 被短路（无 permission_ask 帧、直接执行） | `McpToolRegistrar.registerAll`：`hasAppOnly` 与 `forceReadOnly` 一起走 `registerReadOnly` 手动注册路径（只读语义绕过权限系统） | 夹具设计约束（e2e 用 approval/bench/denied/cards 四个逻辑 server 规避）；使用方需知 |
 | **D4** | **ASKING 态下新 turn 被拒绝** | 挂起后发 `[E2E:plain]` → `AGENT_START,error`，error 文本 "Agent is paused for human-in-the-loop confirmation: ... need your approval before the agent can continue" | AgentScope SDK 的会话级守卫（非本框架引入）；租约已让出但 SDK 拒绝推进同一会话 | H6 已按真实行为断言；`api-thread-spec` 中"挂起期间可发新消息"的描述与实现不符，应更新 |
 
+#### 11.3.0b 第二轮修复新增（2026-09-19 晚）
+
+| # | 缺陷 | 实测证据 | 处置 |
+|---|------|---------|------|
+| **D7** | 续租线程泄漏 + Reactor 回调阻塞 | 一次全量套件后 `turn-renew` 线程堆积 28 个，SDK 执行池占满后**所有新 turn 卡死**（`/health` 仍 200，探针无法发现）；且 onCancel 回调内 Thread.sleep 会占死 boundedElastic 线程 | `TurnLeaseGuard` 加硬寿命上限（默认 10min，env 可调，到期自动 release）；新增 `OrphanTurnWatchdog`（独立调度线程）承载看护逻辑 |
+| **D8** | SDK `FilesystemUtils.countOccurrences` 空串死循环 | `indexOf("", i)` 恒返回 i、游标不前进 → 单线程 CPU 100% 挂死；触发路径：`LocalFilesystem.edit` 对空/相同内容做替换（F5 夹具的 edit_file 调用），并连带卡死 `HarnessGateway` 会话闸门释放，实例级不可恢复 | 框架侧规避：`WorkspaceReader.writeWorkspaceFile` 对"内容相同/KV 文件为空"短路返回；edit_file 工具路径属 SDK 缺陷（已立档，F5/U11 保持 fixme 待 SDK 修复）；另在 env-up 增加数据重置（ASKING 挂起态跨轮残留会让整组用例"流未收敛"） |
+| **D9** | Debug 页 `window.App` 初始化时序 | 模块顶层/异步回调引用 `ctx.utils` 时 `window.App` 尚未挂载 → "Cannot read properties of null"（U1 偶发） | 尝试修复引入更严重回归（UI 8 失败），已回滚；保持现状（偶发且不影响功能），记录待查 |
+
+**最终 e2e 状态**：core 30 用例（含 fixme）/ sandbox 8 / ui 10 / multi+kill 8——除 F5、U11、X3（D8 同链路）、U8（D9 前端时序）外全部转正；单测 680 全绿。
+
 #### 11.3.1 复核后撤销的两条（原判断为 e2e 自身假设错误）
 
 | # | 原判断 | 复核结论 | 证据 |
