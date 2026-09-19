@@ -14,8 +14,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 目录变更检测：决定本次该跑哪些 job（不相关 job 会 Skipped，门禁视为通过）
+  changes:
+    name: 变更目录检测
+    runs-on: ubuntu-latest
+    outputs:
+      framework: ${{ steps.filter.outputs.framework }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # push 事件的路径比较需要完整历史
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            framework:
+              - 'agent-framework/**'
+            workflows:
+              - '.github/workflows/agent-framework-ci.yml'
+
   test:
     name: 单测 (mvn test)
+    needs: changes
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +53,8 @@ jobs:
   e2e-core:
     name: E2E 核心（API+UI）
     needs: test
+    needs: [changes, test]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -91,6 +115,8 @@ jobs:
   e2e-multi:
     name: E2E 多副本（R 组 + U9）
     needs: test
+    needs: [changes, test]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -150,6 +176,8 @@ jobs:
   e2e-sandbox:
     name: E2E 沙箱（mock OpenSandbox）
     needs: test
+    needs: [changes, test]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -205,8 +233,9 @@ jobs:
 
   build-push:
     name: 构建镜像并推送
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [changes, test]
+    if: (needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true')
+        && github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
