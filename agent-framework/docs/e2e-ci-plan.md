@@ -595,3 +595,55 @@ agent-framework/e2e/
 | `bench/` | **只读复用** mock-mcp 与编排手法；mock-llm fork 后 bench 原件不动 |
 | `example/approval-forms` | **只读复用** approval_mcp.py 与 e2e 选择器先例 |
 | 仓库根 `e2e/`（平台级） | 互不重叠：那边测"平台编排 agent-framework"，这边测"agent-framework 本体"；两者共同覆盖发布链路（根 e2e 的 file-support-ui / S 档场景矩阵是 F 组/U10-U11 的取材来源） |
+
+---
+
+## 11. 实施记录与框架缺陷复核（2026-09-19）
+
+### 11.1 实施结果
+
+| 组 | 用例数 | CI 结果 |
+|----|--------|--------|
+| api-core（S/F/H/M/A） | 27 | ✅ |
+| api-sandbox（X） | 6 + 2 fixme | ✅ |
+| ui（U） | 9 + 2 fixme | ✅ |
+| api-multi + ui-multi + api-multi-kill（R/U9） | 7 | ✅ |
+| 单测（mvn test） | 676 | ✅ |
+
+CI run 35433743261 五个 job 全绿（单测 / E2E 核心 / E2E 多副本 / E2E 沙箱 / 构建推送）。
+
+### 11.2 录制回放架构的关键实现语义
+
+1. **调用索引按请求形状推导**：请求以 user 结尾 → `calls[0]`；以 tool 结尾 → tool 消息条数即索引；拒绝恢复（末条 tool 含 "Permission denied"）→ `variants.denied`。
+2. **录制期策展**（`record-llm.mjs` flush）：过滤后台记忆提取调用（system 含 "memory extraction assistant"）+ 前导裁剪（首个真实 tool_call/非空 content 之前的噪声调用，如 mimo 的 NO_REPLY）+ 剥除模型顽固附传的 `, "content": null` + `{{appId}}` 占位符改写。
+3. **回放期参数覆盖**（`ARGS_OVERRIDE`）：录制件中 app id 被切分进多个 delta 片段、字符串替换不可行——`hitl-submit`/`mcpapp-form` 的 tool_call arguments 在回放期整体重写为 `{"application_id":"<标记参数>"}`。
+4. **后台调用识别**：无 system 消息的请求（标题生成/记忆提取变体）一律合成良性响应，防止偷走主对话的调用序。
+5. **`/threads/chat` 正常结束无显式 `done` 帧**（AGENT_END 后关流）；`done` 由 `/subscribe` 的 Tailer 补发。
+6. **双流 `id:` 语义不同**：chat 流为事件哈希，subscribe 流为数字 seq（R 组断言用后者）。
+7. **delta 走 1s 攒批窗口**（`SessionEventStore.DEFAULT_FLUSH_INTERVAL_MS`，`_DELTA` 后缀攒批、里程碑立即刷）——对时序敏感的断言必须容忍该窗口。
+
+### 11.3 框架语义缺陷（逐条实测复核，定位到代码/数据）
+
+| # | 缺陷 | 实测证据 | 根因位置 | 影响面 |
+|---|------|---------|---------|--------|
+| **D1** | **HITL 批准后恢复执行时工具参数丢失**（确认，最严重） | 挂起时 `permission_ask.tool_calls[0].input` = `{"application_id":"APP-0001"}`，`confirm_context.tool_calls_json` 同样完整；批准后 `TOOL_RESULT_END.state=ERROR`（`argument "content" is null`），history 终态 `input={}` | `agent_state.state_data` 中 SDK 持久化的 assistant `tool_use.input` **本身为 `{}`**（asking 时 SDK 不落参数）；而 `AgentRuntimeService.resolveConfirmContext` **优先** `loadConfirmContextFromState`（经 `AgentStateReader.loadAskingSnapshot` 从 state 重建 ToolUseBlock），用空 input 覆盖了表里的完好参数 | HITL 批准路径全断（H2/H5/R5）；凡 ask 工具带必填参数必失败 |
+| **D3** | **非沙箱模式 write_file→present_file 断裂**（确认） | `write_file` 报 SUCCESS（"Written to report.md"），`present_file` 返回 `{"error":"file not readable in workspace: report.md"}`，无 `file_ready` 帧 | `ChatStreamController` 的 KV 同步判定 `if (event instanceof ToolCallDeltaEvent delta && "write_file".equals(delta.getToolCallName()))` **恒为 false**——实测 `ToolCallDeltaEvent.getToolCallName()` 返回占位符 **`"__fragment__"`**（工具名只在 `ToolCallStartEvent` 上）；于是 `accumulateWriteFileInput` 从不累积、`syncWriteFileToKv` 永不执行，present_file 从 KV 读不到 write_file 写在 SDK 本地会话目录的文件 | F5/F10/U11/X9；非沙箱模式下"生成文件并交付"类功能失效 |
+| **D6** | **`ui.app_only` 与 `permissions.tools.ask` 不能同 server 共存**（确认） | 同 config.yaml 同时声明二者时，ask 工具被注册为 read-only，HITL 被短路（无 permission_ask 帧、直接执行） | `McpToolRegistrar.registerAll`：`hasAppOnly` 与 `forceReadOnly` 一起走 `registerReadOnly` 手动注册路径（只读语义绕过权限系统） | 夹具设计约束（e2e 用 approval/bench/denied/cards 四个逻辑 server 规避）；使用方需知 |
+| **D4** | **ASKING 态下新 turn 被拒绝** | 挂起后发 `[E2E:plain]` → `AGENT_START,error`，error 文本 "Agent is paused for human-in-the-loop confirmation: ... need your approval before the agent can continue" | AgentScope SDK 的会话级守卫（非本框架引入）；租约已让出但 SDK 拒绝推进同一会话 | H6 已按真实行为断言；`api-thread-spec` 中"挂起期间可发新消息"的描述与实现不符，应更新 |
+
+#### 11.3.1 复核后撤销的两条（原判断为 e2e 自身假设错误）
+
+| # | 原判断 | 复核结论 | 证据 |
+|---|--------|---------|------|
+| D2 | 客户端断连后剩余 TEXT delta 不再持久化 | **不成立**——断连后事件继续落库（XLEN 3→11）；`subscribe?afterSeq=cutSeq` 拿到剩余 3 个 delta；`afterSeq=0` 全量回放 4 个 delta，文本完整 `"端到端链路畅通，测试正常。"` | 原 R2 失败是**时序竞态**：断连后立即订阅时 delta 仍在 1s 攒批窗口内未落 Redis（§11.2-7）。R6 的 `AGENT_START` 缺失同源（tailer 追赶起点落在窗口内） |
+| D5 | hang 型停顿在模型流停滞前不产事件 | **不成立**——hang turn 在 2s 内即落库 `AGENT_START, MODEL_CALL_START, TEXT_BLOCK_START`（XLEN=3），`/status` 稳定报 `working`，kill 后按租约 TTL 转 `interrupted` | 原 R4 失败是探针查询的 Redis 与实例配置不一致（多实例/历史会话 key 混淆）。R4 可改回 hang 场景 |
+
+> **教训**：D2/D5 的"缺陷"实为 e2e 自身的时序与环境假设错误。凡断言"数据丢失"前，必须先排除攒批窗口与多实例观测面混淆——这是 R2/R4 两轮返工的根因。
+
+### 11.4 运维要点
+
+- 录制器与 jar 必须**成对重启**（半开连接池会让录制流中断/丢 chunk）；录制器已内置 per-request 记录、空流丢弃、mtime 夹具缓存失效。
+- mock LLM 缺夹具即 500（严格模式）；`MOCK_LLM_ALLOW_SYNTH=1` 仅限本地排障。
+- mock 沙箱命令白名单：`echo/ls/cat/mkdir/tar/base64/rm/printf/test/wc/stat/find/sort/head/tail/grep/sed/sh/true/false`；白名单外拒绝并记 `/stats`。
+- 应用自带 logback 强写 `/applog`，CI 非 root 不可写——`env-up.sh` 已注入仅控制台的 `logback-e2e.xml`（`LOGGING_CONFIG`）。
+- `agent-framework/.gitignore` 的 `lib/` 已根锚定（`/lib/`），避免再次误伤 `e2e/lib/`。

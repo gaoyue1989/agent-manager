@@ -354,4 +354,9 @@ mvn -o test  # 离线模式 (离线开发镜像内)
 
 - **mock 架构 = 真实服务录制回放**：LLM 响应来自真实 LLM 录制件（`e2e/mock/fixtures/llm/`），沙箱协议来自本机真实 OpenSandbox Server 录制件（`e2e/mock/fixtures/sandbox/`）；场景标记 `[E2E:*]` 只做路由。录制脚本 `scripts/record-*.mjs` 仅开发机使用（密钥走 .env.secrets），CI 纯回放零密钥
 - 环境编排 `scripts/env-up.sh / env-down.sh / run.sh`，CI 与本地同路径；`npm run check:fixtures` 校验录制件覆盖与脱敏
-- 已知框架语义缺陷（e2e 发现，详见 e2e-ci-plan.md §11）：① channel 路径 HITL approve 恢复执行时工具参数丢失；② 客户端断连后剩余 TEXT delta 不再持久化到事件流；③ 非沙箱模式 write_file→present_file 的 KV/本地工作区镜像断裂；④ ASKING 态下新 turn 被拒（与 api-thread-spec 描述相反）。相关用例以 test.fixme 标记或按真实行为断言
+- 已知框架语义缺陷（e2e 实测定位，详见 e2e-ci-plan.md §11.3）：
+  ① **HITL 批准后恢复执行时工具参数丢失**——`agent_state` 里 SDK 持久化的 `tool_use.input` 为空 `{}`，而恢复路径优先从 state 重建（覆盖了 `confirm_context` 表里完好的参数）；
+  ② **非沙箱模式 write_file→present_file 断裂**——KV 同步判定用 `ToolCallDeltaEvent.getToolCallName()`，而该字段实测返回占位符 `"__fragment__"`（工具名只在 `ToolCallStartEvent` 上），故同步永不执行、present_file 读不到文件；
+  ③ **`ui.app_only` 与 `permissions.tools.ask` 不能同 server 共存**——app_only 触发 registerReadOnly 路径，只读语义短路 HITL；
+  ④ **ASKING 态下新 turn 被 SDK 拒绝**（与 api-thread-spec 描述不符）。
+  相关用例以 test.fixme 标记或按真实行为断言
