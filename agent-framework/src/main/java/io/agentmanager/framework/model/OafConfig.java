@@ -71,11 +71,24 @@ public record OafConfig(
     public record ModelConfig(String provider, String name, String embedding) {}
 
     /**
-     * @param permissionMode 权限模式（frontmatter config.permission.mode），缺省 "default"
-     *                       （default | accept_edits | explore | bypass | dont_ask）
+     * @param permissionMode  权限模式（frontmatter config.permission.mode），缺省 "default"
+     *                        （default | accept_edits | explore | bypass | dont_ask）
+     * @param permissionTools 自定义/内置工具级三态权限（frontmatter config.permission.tools，
+     *                        注册名 → allow|ask|deny）；仅 MCP 规则走 mcp-configs 的
+     *                        permissions.tools，此处不承载 MCP 工具
      */
     public record RuntimeConfig(double temperature, int maxTokens, boolean requireConfirmation,
-                                String permissionMode) {}
+                                String permissionMode, Map<String, String> permissionTools) {
+        /** 兼容构造：未声明工具级权限时视为空 Map */
+        public RuntimeConfig(double temperature, int maxTokens, boolean requireConfirmation,
+                             String permissionMode) {
+            this(temperature, maxTokens, requireConfirmation, permissionMode, Map.of());
+        }
+
+        public boolean hasPermissionTools() {
+            return permissionTools != null && !permissionTools.isEmpty();
+        }
+    }
 
     public record MemoryConfig(String type, Map<String, String> blocks) {}
 }

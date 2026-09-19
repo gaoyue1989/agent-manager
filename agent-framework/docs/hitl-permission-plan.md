@@ -187,13 +187,26 @@ permissions:
     delete_file: deny       #   一律拒绝（不可绕过，优先级最高）
 ```
 
+**自定义/内置工具三态权限（2026-09-20 扩展，见 15）**：frontmatter `config.permission.tools`，
+按 Toolkit 注册名匹配，未声明默认 ALLOW：
+
+```yaml
+# AGENTS.md frontmatter
+config:
+  permission:
+    mode: default
+    tools:                  # ← 自定义/内置工具级三态（非 MCP 工具）
+      create_oaf_zip: ask   #   调用前弹确认卡（HITL）
+      echo: deny            #   一律拒绝
+```
+
 **全局 mode（可选，frontmatter `config.permission.mode`）**：`PermissionContextState` 是 agent 级单例，
 mode 为全局属性，不适合放各 server 的 config.yaml。仅在需要时配置（缺省 `default`）：
 
 ```yaml
 # AGENTS.md frontmatter
 config:
-  require_confirmation: true   # 兼容字段：true → 全部 MCP 工具 ASK（等价于 tools 全 ask）
+  require_confirmation: true   # 兼容字段：true → 全部 MCP 工具 ASK（等价于 tools 全 ask）；不扩展到自定义工具
   permission:
     mode: default              # default | accept_edits | explore | bypass | dont_ask
 ```
@@ -900,6 +913,64 @@ cd /root/agent-manager/agent-framework && mvn test    # 用例全绿
 | [AgentScope Middleware](https://java.agentscope.io/v2/zh/docs/building-blocks/middleware.html) | 全部拒绝停止的 middleware 方案 |
 | [事件系统升级方案](event-system-upgrade-plan.md) | 现有 SSE 事件链路（本文基础） |
 | [Agent Framework AGENTS.md](../AGENTS.md) | 项目总览 |
+
+---
+
+## 十五、自定义/内置工具接入 HITL（2026-09-20 扩展，已实施）
+
+### 15.1 背景与根因
+
+原方案将权限系统限定为 MCP-only：自定义 @Tool 工具（BusinessTools/FileTools/OafPackageTools）与
+Harness 内置工具被 `buildPermissionContext` 无条件加 `builtinAutoAllow` ALLOW 规则，永不触发 ASK。
+
+SDK 机制（agentscope-core 2.0.3 反编译验证）：自定义 @Tool 经 `Toolkit.registerTool(Object)` 注册为
+`ReflectiveFunctionTool extends ToolBase`，**与 MCP 工具走同一条 `PermissionEngine.checkPermission`
+评估路径**（`ReActAgent$CallExecution.evaluateOne`），规则按 Toolkit 注册名精确匹配
+（`PermissionEngine.rulesFor = map.get(name)`）。评估顺序
+`Deny → Ask → 工具自检 → Allow → mode 兜底`（DEFAULT 模式无规则命中 → ASK）。
+因此自定义工具接入 HITL 只是**配置来源 + 装配逻辑**缺口，事件链路/确认端点/前端确认卡全部复用，零改动。
+
+### 15.2 配置：frontmatter `config.permission.tools`
+
+自定义工具无 server 归属，落点选 AGENTS.md frontmatter（与 `config.permission.mode` 同级，
+命名对齐 MCP 的 `permissions.tools`）：
+
+```yaml
+config:
+  permission:
+    mode: default
+    tools:                  # 自定义/内置工具级三态（Toolkit 注册名精确匹配）
+      create_oaf_zip: ask   # 调用前弹确认卡
+      echo: deny            # 一律拒绝
+      # 未声明 → 自动 ALLOW（保持既有行为，零侵入）
+```
+
+### 15.3 装配规则（`AgentScopeConfig.buildPermissionContext`）
+
+1. **开关扩展**：`MCP 规则非空 || require_confirmation || config.permission.tools 非空` 任一成立即装配。
+2. **优先级**：`MCP 显式规则 > frontmatter 声明 > 自动放行`；与 MCP 裸名冲突的声明忽略
+   （`builtinNames` 循环遇 `permCfg.mcpNames()` 命中即 continue，既有逻辑）。
+3. 声明了未注册工具（deniedTools 排除/名字写错）→ WARN 忽略（对齐 MCP 侧"未注册声明告警"惯例）。
+4. `require_confirmation` 语义**保持 MCP-only**（产品决策 2026-09-20）：true 时仅 MCP 未声明者 ASK，
+   自定义工具不随之全量 ASK，须显式逐个声明。
+5. 非法行为值/键类型（非 allow|ask|deny / 非 string）→ 解析期 WARN 跳过（`OafConfigLoader.parsePermissionTools`）。
+6. `verifyToolCoverage` 覆盖校验不变。
+
+### 15.4 复用不变部分
+
+`permission_ask` SSE 词表、`ConfirmContextStore` 落库/CAS、`/threads/{sid}/confirm` + `/confirm-stream`
+恢复端点、Debug 页与平台前端确认卡——全部工具无关，直接复用。A2A 通道不支持 HITL 的既有限制（6.7）同样适用。
+
+### 15.5 改动清单与测试
+
+| 文件 | 变更 |
+|---|---|
+| `model/OafConfig.java` | `RuntimeConfig` 增加 `permissionTools` 组件 + 4 参兼容构造 + `hasPermissionTools()` |
+| `config/OafConfigLoader.java` | `parseRuntimeConfig` 解析 `config.permission.tools`（`parsePermissionTools` 三态校验） |
+| `config/AgentScopeConfig.java` | `buildPermissionContext`：开关扩展 + 声明优先 + 未注册告警；改为 package-private 便于测试 |
+
+测试：`OafConfigLoaderTest`（解析三态/缺省空/非法条目跳过）、`AgentScopeConfigTest`
+（仅自定义声明即启用/ask 替换自动放行/deny/MCP 名冲突优先/require_confirmation 不波及自定义工具/全空返回 null）。
 
 ---
 
