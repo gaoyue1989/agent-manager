@@ -92,6 +92,8 @@ test('R6 跨副本事件完整性对账', async () => {
   const observer = subscribe(sid, 0, REPLICA_B);
   const direct = chat({ message: `[E2E:slow](z,60,40)`, userId: U, sessionId: sid, base: REPLICA_A });
   await waitTerminal(direct);
+  // 先钉终态：error 时把错误文本带出来，避免只剩 AGENT_END=0 的哑失败
+  expect(direct.terminal?.type, `direct turn 终态异常: ${JSON.stringify(direct.terminal)}`).toBe('done');
   await observer.closed;
   expect(observer.frames[observer.frames.length - 1].type).toBe('done');
   seqMonotonic(observer.frames);
