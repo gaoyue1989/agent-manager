@@ -2,6 +2,7 @@ package io.agentmanager.framework.config;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -949,5 +950,67 @@ class OafConfigLoaderTest {
         var config = new OafConfigLoader(props(tempDir)).load();
         assertTrue(config.runtimeConfig().requireConfirmation());
         assertEquals("accept_edits", config.runtimeConfig().permissionMode());
+    }
+
+    @Test
+    void shouldParsePermissionTools() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: perm-tools
+            config:
+              permission:
+                mode: default
+                tools:
+                  create_oaf_zip: ask
+                  echo: deny
+                  get_current_time: allow
+            ---
+            # Perm Tools
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertEquals(Map.of(
+            "create_oaf_zip", "ask",
+            "echo", "deny",
+            "get_current_time", "allow"), config.runtimeConfig().permissionTools());
+        assertTrue(config.runtimeConfig().hasPermissionTools());
+    }
+
+    @Test
+    void shouldDefaultEmptyPermissionToolsWhenAbsent() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: perm-tools-absent
+            config:
+              permission:
+                mode: default
+            ---
+            # Perm Tools Absent
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        assertNotNull(config.runtimeConfig().permissionTools());
+        assertTrue(config.runtimeConfig().permissionTools().isEmpty());
+        assertFalse(config.runtimeConfig().hasPermissionTools());
+    }
+
+    @Test
+    void shouldSkipInvalidPermissionToolsEntries() throws Exception {
+        writeAgentsMd("""
+            ---
+            name: perm-tools-invalid
+            config:
+              permission:
+                tools:
+                  create_oaf_zip: confirm
+                  echo: deny
+                  42: ask
+            ---
+            # Perm Tools Invalid
+            """);
+
+        var config = new OafConfigLoader(props(tempDir)).load();
+        // 非法行为值/非法键告警跳过，合法条目保留
+        assertEquals(Map.of("echo", "deny"), config.runtimeConfig().permissionTools());
     }
 }

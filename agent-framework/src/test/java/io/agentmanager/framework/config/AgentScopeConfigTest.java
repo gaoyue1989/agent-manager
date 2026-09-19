@@ -173,6 +173,103 @@ class AgentScopeConfigTest {
                 List.of(new BusinessTools()), new LLMLogger(), null, null));
     }
 
+    // ---------- buildPermissionContext：自定义工具 HITL 装配（hitl-permission-plan 6.1） ----------
+
+    private OafConfig oafForPermission(boolean requireConfirmation, java.util.Map<String, String> permissionTools) {
+        var oaf = mock(OafConfig.class);
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, requireConfirmation, "default", permissionTools));
+        return oaf;
+    }
+
+    private McpToolRegistrar.PermissionRuleResult permCfg(java.util.Map<String, String> mcpTools,
+                                                          java.util.Set<String> mcpNames) {
+        return new McpToolRegistrar.PermissionRuleResult(
+            io.agentscope.core.permission.PermissionMode.DEFAULT, mcpTools, mcpNames);
+    }
+
+    @Test
+    void permissionContextShouldBeNullWhenNothingDeclared() {
+        assertNull(config.buildPermissionContext(
+            oafForPermission(false, java.util.Map.of()), permCfg(java.util.Map.of(), java.util.Set.of()),
+            java.util.Set.of("create_oaf_zip")));
+    }
+
+    @Test
+    void customToolAskDeclarationShouldEnablePermissionSystem() {
+        var ctx = config.buildPermissionContext(
+            oafForPermission(false, java.util.Map.of("create_oaf_zip", "ask")),
+            permCfg(java.util.Map.of(), java.util.Set.of()),
+            java.util.Set.of("create_oaf_zip", "echo"));
+
+        assertNotNull(ctx, "custom tool declaration alone should enable permission system");
+        assertTrue(ctx.getAskRules().containsKey("create_oaf_zip"));
+        assertFalse(ctx.getAllowRules().containsKey("create_oaf_zip"), "ask must replace auto-allow");
+        // 未声明的自定义工具与内置工具保持自动放行
+        assertTrue(ctx.getAllowRules().containsKey("echo"));
+        assertTrue(ctx.getAllowRules().containsKey("write_file"));
+    }
+
+    @Test
+    void customToolDenyDeclarationShouldProduceDenyRule() {
+        var ctx = config.buildPermissionContext(
+            oafForPermission(false, java.util.Map.of("echo", "deny")),
+            permCfg(java.util.Map.of(), java.util.Set.of()),
+            java.util.Set.of("echo"));
+
+        assertTrue(ctx.getDenyRules().containsKey("echo"));
+        assertFalse(ctx.getAllowRules().containsKey("echo"));
+    }
+
+    @Test
+    void mcpNameCollisionShouldWinOverCustomDeclaration() {
+        var ctx = config.buildPermissionContext(
+            oafForPermission(false, java.util.Map.of("write_file", "ask")),
+            permCfg(java.util.Map.of(), java.util.Set.of("write_file")),
+            java.util.Set.of());
+
+        // 与 MCP 裸名冲突时以 MCP 规则为准：MCP 未显式声明 → 兜底 allow（require_confirmation=false）
+        assertFalse(ctx.getAskRules().containsKey("write_file"));
+        assertTrue(ctx.getAllowRules().containsKey("write_file"));
+    }
+
+    @Test
+    void requireConfirmationShouldStayMcpOnly() {
+        var ctx = config.buildPermissionContext(
+            oafForPermission(true, java.util.Map.of()),
+            permCfg(java.util.Map.of(), java.util.Set.of("mcp_publish")),
+            java.util.Set.of("create_oaf_zip"));
+
+        // require_confirmation=true 仅兜底 MCP 工具；自定义工具未声明仍自动放行
+        assertTrue(ctx.getAskRules().containsKey("mcp_publish"));
+        assertTrue(ctx.getAllowRules().containsKey("create_oaf_zip"));
+        assertFalse(ctx.getAskRules().containsKey("create_oaf_zip"));
+    }
+
+    /**
+     * 真实 SDK 评估链路验证：自定义 @Tool 注册为 ReflectiveFunctionTool(ToolBase) 后，
+     * PermissionEngine 按注册名命中 ask/deny/allow 规则（hitl-permission-plan 15.1）。
+     */
+    @Test
+    void permissionEngineShouldEvaluateCustomToolRules() {
+        var ctx = config.buildPermissionContext(
+            oafForPermission(false, java.util.Map.of("get_current_time", "ask", "echo", "deny")),
+            permCfg(java.util.Map.of(), java.util.Set.of()),
+            java.util.Set.of("get_current_time", "echo"));
+
+        var toolkit = new io.agentscope.core.tool.Toolkit();
+        toolkit.registerTool(new BusinessTools());
+        var engine = new io.agentscope.core.permission.PermissionEngine(ctx);
+
+        var askTool = (io.agentscope.core.tool.ToolBase) toolkit.getTool("get_current_time");
+        assertEquals(io.agentscope.core.permission.PermissionBehavior.ASK,
+            engine.checkPermission(askTool, java.util.Map.of()).block().getBehavior());
+
+        var denyTool = (io.agentscope.core.tool.ToolBase) toolkit.getTool("echo");
+        assertEquals(io.agentscope.core.permission.PermissionBehavior.DENY,
+            engine.checkPermission(denyTool, java.util.Map.of()).block().getBehavior());
+    }
+
     private static AgentManagerProperties propsForLlm() {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
