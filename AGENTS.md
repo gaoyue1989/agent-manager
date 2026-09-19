@@ -91,19 +91,57 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 
 ---
 
-## CI（GitHub Actions，推送到 master 触发）
+## CI（GitHub Actions）与日常提交流程
 
-推送 master 后 3 个工作流并行：**先单测，通过后构建镜像推送 Docker Hub**（凭据 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`，GitHub 仓库 Secrets）。
+### 触发规则（按目录过滤，加速无关变更）
 
-| 工作流 | 单测 | 镜像推送 |
-|--------|------|---------|
-| backend-ci | `go vet ./...` + `go test ./...` | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
-| frontend-ci | `npm run lint` + `npm run build` | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（676 用例，Maven Central 依赖） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+- **任意分支 push / PR** 都会启动三个工作流，但 **job 按改动目录过滤**：
+  - `backend/**` → backend-ci 的单测
+  - `frontend/**` → frontend-ci 的单测
+  - `agent-framework/**` → agent-framework-ci 的单测 + 三个 E2E
+  - 根目录工作流/脚本变更（`.github/**`）→ 三个工作流全跑
+  - **不相关目录的 job 显示 Skipped，门禁视为通过**——这是刻意设计：工作流必须照常触发，否则必需检查会 pending 卡死 PR；不能在工作流层面用 `paths` 过滤
+- 触发映射：`.github/workflows/<name>.yml` 自身变更也会触发对应工作流（保证 CI 配置改动被验证）
+- **master push** → 测试之外，额外执行镜像构建推送 Docker Hub（凭据 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`）
+- 跨目录改动（如前后端联动）→ 多个工作流并行各自执行，互不干扰
+
+| 工作流 | 单测 | E2E | 镜像推送（仅 master push） |
+|--------|------|-----|--------------------------|
+| backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
+| frontend-ci | `npm run lint` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
+| agent-framework-ci | `mvn test`（680 用例） | 核心/多副本/沙箱三 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+
+### 日常提交流程（必须走 PR 门禁）
+
+```bash
+# 1. 从最新 master 切 feature 分支
+git checkout master && git pull
+git checkout -b feat/xxx        # 命名：feat/ | fix/ | chore/ | docs/
+
+# 2. 开发提交（推分支即触发 CI 验证，尽早暴露问题）
+git push origin feat/xxx
+
+# 3. 开 PR 到 master（GitHub 网页或 gh pr create）
+#    → 六项必需检查自动执行：
+#      单测 (mvn test) / 单测 (go vet + go test) / 单测 (lint + build)
+#      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）
+
+# 4. 全绿后合并（网页 Merge 按钮）
+#    红了就修：提交会自动重跑检查
+```
+
+### 分支保护（master，强制）
+
+- **六项必需状态检查**：上表三个单测 + agent-framework 三个 E2E job；未全绿合并请求被拒（`blocked`）
+- **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
+- **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR
+- **禁止 force push / 删除分支**
+- 临时提交不慎直接落在本地 master：切到新分支提 PR（`git checkout -b chore/xxx && git push`），不要绕过门禁
 
 细节：
 - 镜像构建用 buildx + gha 缓存；agent-framework 构建前自动下载 OTel Java Agent（jar 不入库，版本取 Makefile `OTEL_JAVAAGENT_VERSION`）
 - agent-framework 镜像 tag 由 pom `project.version` 动态派生（`mvn help:evaluate`），日期取 UTC
+- PR 与 feature 分支的 CI 只做测试验证，不推镜像（`build-push` 有 `if: master push` 门控）
 - 业务镜像更新到 kind 集群仍是手动流程（`docker save | ctr import` → rollout），CI 只负责测试与镜像分发
 
 ---
