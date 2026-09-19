@@ -51,7 +51,6 @@ jobs:
 
   e2e-core:
     name: E2E 核心（API+UI）
-    needs: test
     needs: [changes, test]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
@@ -113,7 +112,6 @@ jobs:
 
   e2e-multi:
     name: E2E 多副本（R 组 + U9）
-    needs: test
     needs: [changes, test]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
@@ -174,7 +172,6 @@ jobs:
 
   e2e-sandbox:
     name: E2E 沙箱（mock OpenSandbox）
-    needs: test
     needs: [changes, test]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
