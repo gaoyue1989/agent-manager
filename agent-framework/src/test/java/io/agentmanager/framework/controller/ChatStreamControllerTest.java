@@ -256,7 +256,7 @@ class ChatStreamControllerTest {
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
             "准备失败应回错误帧: " + frames);
-        verify(turnLeaseStore).release(sessionId, "tok-4");
+        verify(turnLeaseStore, org.mockito.Mockito.timeout(2_000)).release(sessionId, "tok-4");
         verify(eventStore).finishTurn(sessionId);
         verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
     }
@@ -282,7 +282,7 @@ class ChatStreamControllerTest {
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
             "sendStream 同步失败应回错误帧: " + frames);
-        verify(turnLeaseStore).release(sessionId, "tok-5");
+        verify(turnLeaseStore, org.mockito.Mockito.timeout(2_000)).release(sessionId, "tok-5");
         verify(eventStore, never()).append(any(), any(), any(), any());
     }
 
@@ -303,7 +303,7 @@ class ChatStreamControllerTest {
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
             "租约启动失败应回错误帧: " + frames);
-        verify(turnLeaseStore).release(sessionId, "tok-6");
+        verify(turnLeaseStore, org.mockito.Mockito.timeout(2_000)).release(sessionId, "tok-6");
         // 连 turn 都没开始，不该动到 EventBus 的会话状态
         verify(eventStore, never()).finishTurn(any());
         verify(eventStore, never()).abandonTurn(any());
