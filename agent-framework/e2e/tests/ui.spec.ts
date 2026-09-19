@@ -111,8 +111,10 @@ test('U8 刷新恢复（waiting_confirm 确认卡重建）', async ({ page }) =>
   await page.reload();
   // 页面刷新后不自动恢复会话——真实路径：从会话列表点选最新会话 → history 重建确认卡
   await page.locator(`${SEL.threadList} .thread-item`).first().click();
+  // 确认点选的是含 HITL 标记的会话（history 已加载），再等卡片重建
+  await expect(page.locator(SEL.chatInner)).toContainText('[E2E:hitl:submit]', { timeout: 60_000 });
   const card8 = page.locator(SEL.confirmCard);
-  await expect(card8).toBeVisible({ timeout: 60_000 }); // pendingConfirm 重建
+  await expect(card8).toBeVisible({ timeout: 90_000 }); // pendingConfirm 重建
   await card8.locator(SEL.confirmApprove).click();
   await expect(card8).toBeHidden({ timeout: 120_000 });
 });

@@ -109,6 +109,9 @@ jobs:
     env:
       E2E_GROUP: multi
       E2E_BASE_PORT: "8100"
+      E2E_REPLICA_A: http://127.0.0.1:8101
+      E2E_REPLICA_B: http://127.0.0.1:8102
+      E2E_RUNTIME_DIR: /home/runner/work/agent-manager/agent-manager/agent-framework/e2e/.runtime
       MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
       MYSQL_USER: e2e
       MYSQL_PASS: e2e-pass
