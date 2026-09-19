@@ -109,7 +109,8 @@ test('U8 刷新恢复（waiting_confirm 确认卡重建）', async ({ page }) =>
   await send(page, `[E2E:hitl:submit](${app})`);
   await expect(page.locator(SEL.confirmCard)).toBeVisible({ timeout: 120_000 });
   await page.reload();
-  // 页面刷新后不自动恢复会话——真实路径：从会话列表点选最新会话 → history 重建确认卡
+  // 页面刷新后不自动恢复会话——真实路径：等列表加载完成 → 点选最新会话 → history 重建确认卡
+  await page.locator(`${SEL.threadList} .thread-item`).first().waitFor({ state: 'visible', timeout: 30_000 });
   await page.locator(`${SEL.threadList} .thread-item`).first().click();
   // 确认点选的是含 HITL 标记的会话（history 已加载），再等卡片重建
   await expect(page.locator(SEL.chatInner)).toContainText('[E2E:hitl:submit]', { timeout: 60_000 });
