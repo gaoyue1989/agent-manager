@@ -1,0 +1,15 @@
+{
+  "name": "agent-framework-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:fixtures": "node scripts/check-fixtures.mjs",
+    "record:llm": "node scripts/record-drive.mjs",
+    "test:core": "npx playwright test --project=api-core --project=ui",
+    "test:multi": "npx playwright test --project=api-multi --project=ui-multi",
+    "test:sandbox": "npx playwright test --project=api-sandbox"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

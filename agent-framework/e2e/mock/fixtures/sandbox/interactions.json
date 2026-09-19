@@ -1,0 +1,3598 @@
+[
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "memory": "1024Mi",
+    "cpu": "1"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 263,
+   "success": false,
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "memory": "1024Mi",
+    "cpu": "1"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 7,
+   "success": false,
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "memory": "1024Mi",
+    "cpu": "1"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 6,
+   "success": false,
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "memory": "1024Mi",
+    "cpu": "1"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 401,
+  "contentType": "application/json",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 5,
+   "success": false,
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": {
+   "code": "INVALID_API_KEY",
+   "message": "Authentication credentials are invalid. Check your API key and try again."
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "1a1af176-4e33-4e1e-ba17-4d126cfea7c2",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:00:08.409658Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:00:08.409658Z",
+   "createdAt": "2026-09-18T17:00:08.409658Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/1a1af176-4e33-4e1e-ba17-4d126cfea7c2/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/1a1af176-4e33-4e1e-ba17-4d126cfea7c2/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/1a1af176-4e33-4e1e-ba17-4d126cfea7c2/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/1a1af176-4e33-4e1e-ba17-4d126cfea7c2/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 1226,
+   "success": true,
+   "sandboxId": "1a1af176-4e33-4e1e-ba17-4d126cfea7c2",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/1a1af176-4e33-4e1e-ba17-4d126cfea7c2",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "1a1af176-4e33-4e1e-ba17-4d126cfea7c2",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:00:08.510219Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:00:08.409658Z",
+   "createdAt": "2026-09-18T17:00:08.510219Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "597c6121-9bb7-42a1-817c-37ee963b6ad0",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:00:20.834688Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:00:20.834688Z",
+   "createdAt": "2026-09-18T17:00:20.834688Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/597c6121-9bb7-42a1-817c-37ee963b6ad0/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/597c6121-9bb7-42a1-817c-37ee963b6ad0/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/597c6121-9bb7-42a1-817c-37ee963b6ad0/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/597c6121-9bb7-42a1-817c-37ee963b6ad0/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 520,
+   "success": true,
+   "sandboxId": "597c6121-9bb7-42a1-817c-37ee963b6ad0",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/597c6121-9bb7-42a1-817c-37ee963b6ad0",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "597c6121-9bb7-42a1-817c-37ee963b6ad0",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:00:20.914373Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:00:20.834688Z",
+   "createdAt": "2026-09-18T17:00:20.914373Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "b86256f0-d69c-4f40-8849-9593ec32540b",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:00:31.921322Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:00:31.921322Z",
+   "createdAt": "2026-09-18T17:00:31.921322Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/b86256f0-d69c-4f40-8849-9593ec32540b/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/b86256f0-d69c-4f40-8849-9593ec32540b/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/b86256f0-d69c-4f40-8849-9593ec32540b/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/b86256f0-d69c-4f40-8849-9593ec32540b/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 574,
+   "success": true,
+   "sandboxId": "b86256f0-d69c-4f40-8849-9593ec32540b",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/b86256f0-d69c-4f40-8849-9593ec32540b",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "b86256f0-d69c-4f40-8849-9593ec32540b",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:00:32.031899Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:00:31.921322Z",
+   "createdAt": "2026-09-18T17:00:32.031899Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:00:43.976686Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:00:43.976686Z",
+   "createdAt": "2026-09-18T17:00:43.976686Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 608,
+   "success": true,
+   "sandboxId": "18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "18bc6fa5-4ee9-48d2-9acf-e0fe54f963e0",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:00:44.071506Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:00:43.976686Z",
+   "createdAt": "2026-09-18T17:00:44.071506Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:01:21.247655Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:01:21.247655Z",
+   "createdAt": "2026-09-18T17:01:21.247655Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 1061,
+   "success": true,
+   "sandboxId": "6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "6ba73c8b-55bc-4225-a68f-8d3cb3dffa8f",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:01:21.323155Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:01:21.247655Z",
+   "createdAt": "2026-09-18T17:01:21.323155Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "436e78a6-ca65-49a0-8f92-4fe0145e7213",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:02:06.651889Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:02:06.651889Z",
+   "createdAt": "2026-09-18T17:02:06.651889Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/436e78a6-ca65-49a0-8f92-4fe0145e7213/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/436e78a6-ca65-49a0-8f92-4fe0145e7213/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/436e78a6-ca65-49a0-8f92-4fe0145e7213/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/436e78a6-ca65-49a0-8f92-4fe0145e7213/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 560,
+   "success": true,
+   "sandboxId": "436e78a6-ca65-49a0-8f92-4fe0145e7213",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/436e78a6-ca65-49a0-8f92-4fe0145e7213",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "436e78a6-ca65-49a0-8f92-4fe0145e7213",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:02:06.742979Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:02:06.651889Z",
+   "createdAt": "2026-09-18T17:02:06.742979Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "aee6765d-09bb-4da2-afc1-f7753934fef2",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:02:19.513430Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:02:19.513430Z",
+   "createdAt": "2026-09-18T17:02:19.513430Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/aee6765d-09bb-4da2-afc1-f7753934fef2/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/aee6765d-09bb-4da2-afc1-f7753934fef2/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/aee6765d-09bb-4da2-afc1-f7753934fef2/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/aee6765d-09bb-4da2-afc1-f7753934fef2/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 563,
+   "success": true,
+   "sandboxId": "aee6765d-09bb-4da2-afc1-f7753934fef2",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/aee6765d-09bb-4da2-afc1-f7753934fef2",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "aee6765d-09bb-4da2-afc1-f7753934fef2",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:02:19.616965Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:02:19.513430Z",
+   "createdAt": "2026-09-18T17:02:19.616965Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "56d51315-b67d-47b9-9eef-2991725059f7",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:03:39.736323Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:03:39.736323Z",
+   "createdAt": "2026-09-18T17:03:39.736323Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/56d51315-b67d-47b9-9eef-2991725059f7/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/56d51315-b67d-47b9-9eef-2991725059f7/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/56d51315-b67d-47b9-9eef-2991725059f7/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/56d51315-b67d-47b9-9eef-2991725059f7/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 1088,
+   "success": true,
+   "sandboxId": "56d51315-b67d-47b9-9eef-2991725059f7",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/56d51315-b67d-47b9-9eef-2991725059f7",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "56d51315-b67d-47b9-9eef-2991725059f7",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:03:39.810871Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:03:39.736323Z",
+   "createdAt": "2026-09-18T17:03:39.810871Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:04:01.159615Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:04:01.159615Z",
+   "createdAt": "2026-09-18T17:04:01.159615Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93/proxy/44772"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8090/v1/sandboxes/8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93/proxy/18080"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 542,
+   "success": true,
+   "sandboxId": "8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "8095b5f2-e5d3-4345-8ee1-b6c6ae2d7a93",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:04:01.254084Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:04:01.159615Z",
+   "createdAt": "2026-09-18T17:04:01.254084Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "62785abb-d23c-4bcb-b95a-de7c00e88c69",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:06:53.566436Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:06:53.566436Z",
+   "createdAt": "2026-09-18T17:06:53.566436Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/18080"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/18080"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/ping",
+  "status": 200,
+  "contentType": "",
+  "req": null,
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 494,
+   "success": true,
+   "sandboxId": "62785abb-d23c-4bcb-b95a-de7c00e88c69",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "62785abb-d23c-4bcb-b95a-de7c00e88c69",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:06:53.647584Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:06:53.566436Z",
+   "createdAt": "2026-09-18T17:06:53.647584Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--fe880993-1d7a-46c6-ae50-e648af8106fb\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--fe880993-1d7a-46c6-ae50-e648af8106fb\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nQUdFTlRTLm1kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAxMjQ3IDE1MjUzMjY3NjU2IDAxMTEzNQAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtLS0KbmFtZTogRTJFIFRlc3QgQWdlbnQKZGVzY3JpcHRpb246IEUyRSDmtYvor5UgYWdlbnTvvIjphY3lkIggbW9jayBMTE0vTUNQL+aymeeuse+8jGUyZS1jaS1wbGFuIMKnNC4z77yJCm1vZGVsOgogIHByb3ZpZGVyOiBvcGVuYWkKICBuYW1lOiAKY29uZmlnOgogIHRlbXBlcmF0dXJlOiAwLjcKICBtYXhfdG9rZW5zOiA0MDk2Ci0tLQoKIyBFMkUg5rWL6K+V5Yqp5omLCgrkvaDmmK/nq6/liLDnq6/mtYvor5XkuJPnlKggYWdlbnTjgILmlLbliLDmmI7noa7mjIfku6Tml7bnm7TmjqXosIPnlKjlr7nlupTlt6XlhbflrozmiJDmk43kvZzlubbnroDmtIHlm57lpI3vvIzkuI3opoHov73pl67jgIHkuI3opoHlsZXlvIDop6Pph4rjgIIKCuinhOWIme+8mgotIOeUqOaIt+imgeaxguiwg+eUqOafkOS4quW3peWFt+aXtu+8jOW/hemhu+S9v+eUqOivpeW3peWFt++8jOW5tuS4peagvOaMieeUqOaIt+e7meWumueahOWPguaVsOWQjeWSjOWPguaVsOWAvOS8oOWPgu+8jOS4jeW+l+iHquihjOaUueWKqOOAggotIOaWh+S7tuaTjeS9nOS9v+eUqOW3peS9nOWMuuebuOWvuei3r+W+hO+8iOWmgiB1cGxvYWRzL25vdGUudHh044CBZGF0YS9vdXQudHh077yJ44CCCi0g5a6M5oiQ5ZCO55So5LiA5Y+l6K+d5oql5ZGK57uT5p6c77yb5bel5YW35omn6KGM5aSx6LSl5pe25aaC5a6e5oql5ZGK6ZSZ6K+v44CCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--af7b0bc3-4f88-4f57-8800-5005a56d55d0\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--af7b0bc3-4f88-4f57-8800-5005a56d55d0\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nZGVmYXVsdC9FMkUgVGVzdCBBZ2VudC9ndy0zZjIwZjA4YzU0OTkvZXZlbnRzLzAtMy0zMWNiN2VjYi5qc29ubAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAyMzMzIDE1MjUzMjY3NjY1IDAyMjAwNwAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiJhZThhNjQ4Ni0yMmRhLTQ5OTAtYWQxMS0zYTA1YmRhMTcxYmEiLCJ0aW1lc3RhbXAiOjE3ODk3NTEyMjEuNjMzODkwMzMwLCJyb2xlIjoiVVNFUiIsImNvbnRlbnQiOiLor7flnKjmspnnrrHkuK3miafooYzlkb3ku6TvvJplY2hvIGhlbGxvLWUyYe+8jOW5tuWRiuivieaIkeWujOaVtOi+k+WHuuOAgiJ9CnsidHlwZSI6InRvb2xfdXNlIiwiaWQiOiI5MmQzZTNjMy1mMTFhLTRhZDQtOGNmNS1jZmRhM2Q4OWVjNWRfNTk3ZjAxYjMxNTdkNGRmNWE0YTBmZTdkMDNiNTcyYTA6dXNlOmNhbGxfOTEyN2ZhMjUzZGZiNGMzNmEzNDMyOGIxIiwicGFyZW50SWQiOiJhZThhNjQ4Ni0yMmRhLTQ5OTAtYWQxMS0zYTA1YmRhMTcxYmEiLCJ0aW1lc3RhbXAiOjE3ODk3NTEyMjEuNjM0MTQ0MTE1LCJ0b29sQ2FsbElkIjoiY2FsbF85MTI3ZmEyNTNkZmI0YzM2YTM0MzI4YjEiLCJuYW1lIjoiZXhlY3V0ZSIsImlucHV0Ijp7ImNvbW1hbmQiOiJlY2hvIGhlbGxvLWUyYSJ9LCJ0cnVuY2F0ZWQiOmZhbHNlfQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsImlkIjoiZjM1MTRkNGMtYmFjNC00YjkyLTgxNDEtNzAwZTk3Nzc1YzU3OnJlc3VsdDpjYWxsXzkxMjdmYTI1M2RmYjRjMzZhMzQzMjhiMSIsInBhcmVudElkIjoiOTJkM2UzYzMtZjExYS00YWQ0LThjZjUtY2ZkYTNkODllYzVkXzU5N2YwMWIzMTU3ZDRkZjVhNGEwZmU3ZDAzYjU3MmEwOnVzZTpjYWxsXzkxMjdmYT",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--369c2757-dca6-4c9f-a3e8-4da81b612944\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--369c2757-dca6-4c9f-a3e8-4da81b612944\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYWdlbnRzL0UyRSBUZXN0IEFnZW50L3Nlc3Npb25zL3Nlc3Npb25zLmpzb24AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAwMjYyIDE1MjUzMjY3NjY1IDAyMDAxMAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7CiAgInNlc3Npb25zIiA6IHsKICAgICJndy0zZjIwZjA4YzU0OTkiIDogewogICAgICAic3VtbWFyeSIgOiAidHJhbnNjcmlwdCB1cGRhdGVkICg0IGVudHJpZXMpIiwKICAgICAgInVwZGF0ZWRBdCIgOiAiMjAyNi0wOS0xOFQxNzowNzowMS43NjExMzQwNDhaIgogICAgfQogIH0sCiAgInZlcnNpb24iIDogMQp9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--fa9f5a53-cb1d-4e33-83be-a114d25792bb\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--fa9f5a53-cb1d-4e33-83be-a114d25792bb\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYWdlbnRzL0UyRSBUZXN0IEFnZW50L3Nlc3Npb25zL2d3LTNmMjBmMDhjNTQ5OS5qc29ubAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAyMzMzIDE1MjUzMjY3NjY1IDAyMDQyMAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiJhZThhNjQ4Ni0yMmRhLTQ5OTAtYWQxMS0zYTA1YmRhMTcxYmEiLCJ0aW1lc3RhbXAiOjE3ODk3NTEyMjEuNjMzODkwMzMwLCJyb2xlIjoiVVNFUiIsImNvbnRlbnQiOiLor7flnKjmspnnrrHkuK3miafooYzlkb3ku6TvvJplY2hvIGhlbGxvLWUyYe+8jOW5tuWRiuivieaIkeWujOaVtOi+k+WHuuOAgiJ9CnsidHlwZSI6InRvb2xfdXNlIiwiaWQiOiI5MmQzZTNjMy1mMTFhLTRhZDQtOGNmNS1jZmRhM2Q4OWVjNWRfNTk3ZjAxYjMxNTdkNGRmNWE0YTBmZTdkMDNiNTcyYTA6dXNlOmNhbGxfOTEyN2ZhMjUzZGZiNGMzNmEzNDMyOGIxIiwicGFyZW50SWQiOiJhZThhNjQ4Ni0yMmRhLTQ5OTAtYWQxMS0zYTA1YmRhMTcxYmEiLCJ0aW1lc3RhbXAiOjE3ODk3NTEyMjEuNjM0MTQ0MTE1LCJ0b29sQ2FsbElkIjoiY2FsbF85MTI3ZmEyNTNkZmI0YzM2YTM0MzI4YjEiLCJuYW1lIjoiZXhlY3V0ZSIsImlucHV0Ijp7ImNvbW1hbmQiOiJlY2hvIGhlbGxvLWUyYSJ9LCJ0cnVuY2F0ZWQiOmZhbHNlfQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsImlkIjoiZjM1MTRkNGMtYmFjNC00YjkyLTgxNDEtNzAwZTk3Nzc1YzU3OnJlc3VsdDpjYWxsXzkxMjdmYTI1M2RmYjRjMzZhMzQzMjhiMSIsInBhcmVudElkIjoiOTJkM2UzYzMtZjExYS00YWQ0LThjZjUtY2ZkYTNkODllYzVkXzU5N2YwMWIzMTU3ZDRkZjVhNGEwZmU3ZDAzYjU3MmEwOnVzZTpjYWxsXzkxMjdmYT",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--a5313d4b-0073-4c3e-a351-74a95eecd1df\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--a5313d4b-0073-4c3e-a351-74a95eecd1df\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYWdlbnRzL0UyRSBUZXN0IEFnZW50L3Nlc3Npb25zL2d3LTNmMjBmMDhjNTQ5OS5sb2cuanNvbmwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAyMzMzIDE1MjUzMjY3NjY1IDAyMTIwMAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiJhZThhNjQ4Ni0yMmRhLTQ5OTAtYWQxMS0zYTA1YmRhMTcxYmEiLCJ0aW1lc3RhbXAiOjE3ODk3NTEyMjEuNjMzODkwMzMwLCJyb2xlIjoiVVNFUiIsImNvbnRlbnQiOiLor7flnKjmspnnrrHkuK3miafooYzlkb3ku6TvvJplY2hvIGhlbGxvLWUyYe+8jOW5tuWRiuivieaIkeWujOaVtOi+k+WHuuOAgiJ9CnsidHlwZSI6InRvb2xfdXNlIiwiaWQiOiI5MmQzZTNjMy1mMTFhLTRhZDQtOGNmNS1jZmRhM2Q4OWVjNWRfNTk3ZjAxYjMxNTdkNGRmNWE0YTBmZTdkMDNiNTcyYTA6dXNlOmNhbGxfOTEyN2ZhMjUzZGZiNGMzNmEzNDMyOGIxIiwicGFyZW50SWQiOiJhZThhNjQ4Ni0yMmRhLTQ5OTAtYWQxMS0zYTA1YmRhMTcxYmEiLCJ0aW1lc3RhbXAiOjE3ODk3NTEyMjEuNjM0MTQ0MTE1LCJ0b29sQ2FsbElkIjoiY2FsbF85MTI3ZmEyNTNkZmI0YzM2YTM0MzI4YjEiLCJuYW1lIjoiZXhlY3V0ZSIsImlucHV0Ijp7ImNvbW1hbmQiOiJlY2hvIGhlbGxvLWUyYSJ9LCJ0cnVuY2F0ZWQiOmZhbHNlfQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsImlkIjoiZjM1MTRkNGMtYmFjNC00YjkyLTgxNDEtNzAwZTk3Nzc1YzU3OnJlc3VsdDpjYWxsXzkxMjdmYTI1M2RmYjRjMzZhMzQzMjhiMSIsInBhcmVudElkIjoiOTJkM2UzYzMtZjExYS00YWQ0LThjZjUtY2ZkYTNkODllYzVkXzU5N2YwMWIzMTU3ZDRkZjVhNGEwZmU3ZDAzYjU3MmEwOnVzZTpjYWxsXzkxMjdmYT",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/files/download?path=%2Fworkspace%2FMEMORY.md",
+  "status": 404,
+  "contentType": "application/json; charset=utf-8",
+  "req": null,
+  "resp": {
+   "code": "FILE_NOT_FOUND",
+   "message": "file not found. open /workspace/MEMORY.md: no such file or directory"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/directories/list?path=%2Fworkspace%2Fmemory",
+  "status": 404,
+  "contentType": "application/json; charset=utf-8",
+  "req": null,
+  "resp": {
+   "code": "FILE_NOT_FOUND",
+   "message": "file not found. lstat /workspace/memory: no such file or directory"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/62785abb-d23c-4bcb-b95a-de7c00e88c69/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "47fe238c-2736-4810-ac72-d04ead95d155",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:07:01.933266Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:07:01.933266Z",
+   "createdAt": "2026-09-18T17:07:01.933266Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/18080"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/18080"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/ping",
+  "status": 200,
+  "contentType": "",
+  "req": null,
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 495,
+   "success": true,
+   "sandboxId": "47fe238c-2736-4810-ac72-d04ead95d155",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "47fe238c-2736-4810-ac72-d04ead95d155",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:07:02.011341Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:07:01.933266Z",
+   "createdAt": "2026-09-18T17:07:02.011341Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--983b91c6-c5ac-43a3-adf5-9a4517d34e99\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--983b91c6-c5ac-43a3-adf5-9a4517d34e99\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nQUdFTlRTLm1kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAxMjQ3IDE1MjUzMjY3NjY2IDAxMTEzNgAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtLS0KbmFtZTogRTJFIFRlc3QgQWdlbnQKZGVzY3JpcHRpb246IEUyRSDmtYvor5UgYWdlbnTvvIjphY3lkIggbW9jayBMTE0vTUNQL+aymeeuse+8jGUyZS1jaS1wbGFuIMKnNC4z77yJCm1vZGVsOgogIHByb3ZpZGVyOiBvcGVuYWkKICBuYW1lOiAKY29uZmlnOgogIHRlbXBlcmF0dXJlOiAwLjcKICBtYXhfdG9rZW5zOiA0MDk2Ci0tLQoKIyBFMkUg5rWL6K+V5Yqp5omLCgrkvaDmmK/nq6/liLDnq6/mtYvor5XkuJPnlKggYWdlbnTjgILmlLbliLDmmI7noa7mjIfku6Tml7bnm7TmjqXosIPnlKjlr7nlupTlt6XlhbflrozmiJDmk43kvZzlubbnroDmtIHlm57lpI3vvIzkuI3opoHov73pl67jgIHkuI3opoHlsZXlvIDop6Pph4rjgIIKCuinhOWIme+8mgotIOeUqOaIt+imgeaxguiwg+eUqOafkOS4quW3peWFt+aXtu+8jOW/hemhu+S9v+eUqOivpeW3peWFt++8jOW5tuS4peagvOaMieeUqOaIt+e7meWumueahOWPguaVsOWQjeWSjOWPguaVsOWAvOS8oOWPgu+8jOS4jeW+l+iHquihjOaUueWKqOOAggotIOaWh+S7tuaTjeS9nOS9v+eUqOW3peS9nOWMuuebuOWvuei3r+W+hO+8iOWmgiB1cGxvYWRzL25vdGUudHh044CBZGF0YS9vdXQudHh077yJ44CCCi0g5a6M5oiQ5ZCO55So5LiA5Y+l6K+d5oql5ZGK57uT5p6c77yb5bel5YW35omn6KGM5aSx6LSl5pe25aaC5a6e5oql5ZGK6ZSZ6K+v44CCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--00bae5b3-c4da-45e6-82ea-e99a0bd40342\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--00bae5b3-c4da-45e6-82ea-e99a0bd40342\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nZGF0YS9vdXQudHh0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAwMDI1IDE1MjUzMjY3Njc0IDAxMjEwNAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADmspnnrrHokL3nm5jpqozor4HjgIIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/47fe238c-2736-4810-ac72-d04ead95d155/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": null,
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "d0429595-f3ba-40fa-a0b2-1cc64dda181e",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:09:44.760277Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:09:44.760277Z",
+   "createdAt": "2026-09-18T17:09:44.760277Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/18080"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/18080"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/ping",
+  "status": 200,
+  "contentType": "",
+  "req": null,
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 491,
+   "success": true,
+   "sandboxId": "d0429595-f3ba-40fa-a0b2-1cc64dda181e",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "d0429595-f3ba-40fa-a0b2-1cc64dda181e",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:09:44.831973Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:09:44.760277Z",
+   "createdAt": "2026-09-18T17:09:44.831973Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "mkdir -p /workspace",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--42500977-6b9d-4fd1-9476-e55b183a4e02\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--42500977-6b9d-4fd1-9476-e55b183a4e02\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nQUdFTlRTLm1kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAxMjQ3IDE1MjUzMjcwMTMxIDAxMTExMwAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtLS0KbmFtZTogRTJFIFRlc3QgQWdlbnQKZGVzY3JpcHRpb246IEUyRSDmtYvor5UgYWdlbnTvvIjphY3lkIggbW9jayBMTE0vTUNQL+aymeeuse+8jGUyZS1jaS1wbGFuIMKnNC4z77yJCm1vZGVsOgogIHByb3ZpZGVyOiBvcGVuYWkKICBuYW1lOiAKY29uZmlnOgogIHRlbXBlcmF0dXJlOiAwLjcKICBtYXhfdG9rZW5zOiA0MDk2Ci0tLQoKIyBFMkUg5rWL6K+V5Yqp5omLCgrkvaDmmK/nq6/liLDnq6/mtYvor5XkuJPnlKggYWdlbnTjgILmlLbliLDmmI7noa7mjIfku6Tml7bnm7TmjqXosIPnlKjlr7nlupTlt6XlhbflrozmiJDmk43kvZzlubbnroDmtIHlm57lpI3vvIzkuI3opoHov73pl67jgIHkuI3opoHlsZXlvIDop6Pph4rjgIIKCuinhOWIme+8mgotIOeUqOaIt+imgeaxguiwg+eUqOafkOS4quW3peWFt+aXtu+8jOW/hemhu+S9v+eUqOivpeW3peWFt++8jOW5tuS4peagvOaMieeUqOaIt+e7meWumueahOWPguaVsOWQjeWSjOWPguaVsOWAvOS8oOWPgu+8jOS4jeW+l+iHquihjOaUueWKqOOAggotIOaWh+S7tuaTjeS9nOS9v+eUqOW3peS9nOWMuuebuOWvuei3r+W+hO+8iOWmgiB1cGxvYWRzL25vdGUudHh044CBZGF0YS9vdXQudHh077yJ44CCCi0g5a6M5oiQ5ZCO55So5LiA5Y+l6K+d5oql5ZGK57uT5p6c77yb5bel5YW35omn6KGM5aSx6LSl5pe25aaC5a6e5oql5ZGK6ZSZ6K+v44CCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -d /workspace",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'AGENTS.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'AGENTS.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'AGENTS.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'MEMORY.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'MEMORY.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'MEMORY.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'knowledge/KNOWLEDGE.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'knowledge/KNOWLEDGE.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'knowledge/KNOWLEDGE.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'knowledge' -type f -name '*' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'skills' -type f -name 'SKILL.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/queues/agentscope_inbox_gw-3f20f08c5499_2793f5c3' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/async-tools/gw-3f20f08c5499' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'subagents' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "echo hello-e2a",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/queues/agentscope_inbox_gw-3f20f08c5499_2793f5c3' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/async-tools/gw-3f20f08c5499' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/d0429595-f3ba-40fa-a0b2-1cc64dda181e/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'subagents' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": []
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "c02aeb82-e444-4350-89c7-e8a4437ee162",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:10:52.403655Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:10:52.403655Z",
+   "createdAt": "2026-09-18T17:10:52.403655Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/18080"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/18080"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/ping",
+  "status": 200,
+  "contentType": "",
+  "req": null,
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 474,
+   "success": true,
+   "sandboxId": "c02aeb82-e444-4350-89c7-e8a4437ee162",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "c02aeb82-e444-4350-89c7-e8a4437ee162",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:10:52.475540Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:10:52.403655Z",
+   "createdAt": "2026-09-18T17:10:52.475540Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "mkdir -p /workspace",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"b07f16a230b14c54b814159a6aec113a\",\"timestamp\":1789751452937}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751452937}",
+   "{\"type\":\"execution_complete\",\"execution_time\":5,\"timestamp\":1789751452942}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--181cd737-514f-48c4-b6d5-7d450cd0ab33\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--181cd737-514f-48c4-b6d5-7d450cd0ab33\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nQUdFTlRTLm1kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAxMjQ3IDE1MjUzMjcwMjM1IDAxMTEyMAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtLS0KbmFtZTogRTJFIFRlc3QgQWdlbnQKZGVzY3JpcHRpb246IEUyRSDmtYvor5UgYWdlbnTvvIjphY3lkIggbW9jayBMTE0vTUNQL+aymeeuse+8jGUyZS1jaS1wbGFuIMKnNC4z77yJCm1vZGVsOgogIHByb3ZpZGVyOiBvcGVuYWkKICBuYW1lOiAKY29uZmlnOgogIHRlbXBlcmF0dXJlOiAwLjcKICBtYXhfdG9rZW5zOiA0MDk2Ci0tLQoKIyBFMkUg5rWL6K+V5Yqp5omLCgrkvaDmmK/nq6/liLDnq6/mtYvor5XkuJPnlKggYWdlbnTjgILmlLbliLDmmI7noa7mjIfku6Tml7bnm7TmjqXosIPnlKjlr7nlupTlt6XlhbflrozmiJDmk43kvZzlubbnroDmtIHlm57lpI3vvIzkuI3opoHov73pl67jgIHkuI3opoHlsZXlvIDop6Pph4rjgIIKCuinhOWIme+8mgotIOeUqOaIt+imgeaxguiwg+eUqOafkOS4quW3peWFt+aXtu+8jOW/hemhu+S9v+eUqOivpeW3peWFt++8jOW5tuS4peagvOaMieeUqOaIt+e7meWumueahOWPguaVsOWQjeWSjOWPguaVsOWAvOS8oOWPgu+8jOS4jeW+l+iHquihjOaUueWKqOOAggotIOaWh+S7tuaTjeS9nOS9v+eUqOW3peS9nOWMuuebuOWvuei3r+W+hO+8iOWmgiB1cGxvYWRzL25vdGUudHh044CBZGF0YS9vdXQudHh077yJ44CCCi0g5a6M5oiQ5ZCO55So5LiA5Y+l6K+d5oql5ZGK57uT5p6c77yb5bel5YW35omn6KGM5aSx6LSl5pe25aaC5a6e5oql5ZGK6ZSZ6K+v44CCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"22c4ef0f3f3f4ce68661411e47072b4c\",\"timestamp\":1789751453137}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751453138}",
+   "{\"type\":\"execution_complete\",\"execution_time\":97,\"timestamp\":1789751453233}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -d /workspace",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"50515ebc50cd4377bb318e49b8140249\",\"timestamp\":1789751453347}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751453348}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751453349}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'AGENTS.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'AGENTS.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'AGENTS.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"8a26dfa27ef24e638956f948cbd8fa09\",\"timestamp\":1789751453534}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751453534}",
+   "{\"type\":\"stdout\",\"text\":\"---\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"name: E2E Test Agent\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"description: E2E 测试 agent（配合 mock LLM/MCP/沙箱，e2e-ci-plan §4.3）\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"model:\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"  provider: openai\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"  name: \",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"config:\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"  temperature: 0.7\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"  max_tokens: 4096\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"---\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"\\n\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"# E2E 测试助手\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"\\n\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"你是端到端测试专用 agent。收到明确指令时直接调用对应工具完成操作并简洁回复，不要追问、不要展开解释。\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"\\n\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"规则：\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"- 用户要求调用某个工具时，必须使用该工具，并严格按用户给定的参数名和参数值传参，不得自行改动。\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"- 文件操作使用工作区相对路径（如 uploads/note.txt、data/out.txt）。\",\"timestamp\":1789751453542}",
+   "{\"type\":\"stdout\",\"text\":\"- 完成后用一句话报告结果；工具执行失败时如实报告错误。\",\"timestamp\":1789751453542}",
+   "{\"type\":\"execution_complete\",\"execution_time\":9,\"timestamp\":1789751453542}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'MEMORY.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'MEMORY.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'MEMORY.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"7434f5a0201b4c32ae5dc7a97fc291f2\",\"timestamp\":1789751453735}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751453737}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751453742}",
+   "{\"type\":\"execution_complete\",\"execution_time\":87,\"timestamp\":1789751453743}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'knowledge/KNOWLEDGE.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'knowledge/KNOWLEDGE.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'knowledge/KNOWLEDGE.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"aaff83fa4deb43de94142548195d13cc\",\"timestamp\":1789751453936}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751453937}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751453940}",
+   "{\"type\":\"execution_complete\",\"execution_time\":4,\"timestamp\":1789751453940}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'knowledge' -type f -name '*' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"2a87f4e28b1445018613791032e61938\",\"timestamp\":1789751454052}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751454132}",
+   "{\"type\":\"execution_complete\",\"execution_time\":92,\"timestamp\":1789751454143}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'skills' -type f -name 'SKILL.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"1bd7f34558b24d7c9bfddd1348b9e2e6\",\"timestamp\":1789751454335}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751454339}",
+   "{\"type\":\"execution_complete\",\"execution_time\":83,\"timestamp\":1789751454344}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/queues/agentscope_inbox_gw-3f20f08c5499_2793f5c3' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"e47359bfeb7f4ca6bc05566ed67c57bb\",\"timestamp\":1789751454532}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751454532}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751454537}",
+   "{\"type\":\"execution_complete\",\"execution_time\":78,\"timestamp\":1789751454537}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/async-tools/gw-3f20f08c5499' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"5682dd9ef1a445579789321350baf3d3\",\"timestamp\":1789751454651}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751454732}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751454738}",
+   "{\"type\":\"execution_complete\",\"execution_time\":87,\"timestamp\":1789751454738}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'subagents' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"9233e95b830144db912d1ffadf15945d\",\"timestamp\":1789751454938}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751454940}",
+   "{\"type\":\"execution_complete\",\"execution_time\":183,\"timestamp\":1789751455033}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "ls /nonexistent-e2a-dir",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"3180833d09684c5d86750f0d3ac81ad7\",\"timestamp\":1789751457232}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751457235}",
+   "{\"type\":\"stderr\",\"text\":\"ls: cannot access '/nonexistent-e2a-dir': No such file or directory\",\"timestamp\":1789751457237}",
+   "{\"type\":\"error\",\"timestamp\":1789751457238,\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"2\",\"traceback\":[\"exit status 2\"]}}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/queues/agentscope_inbox_gw-3f20f08c5499_2793f5c3' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"c308f78f59d2481ea94c1b7de4b52ef6\",\"timestamp\":1789751457351}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751457351}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751457354}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751457354}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/async-tools/gw-3f20f08c5499' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"619937da520542d79995c980dfdc01fd\",\"timestamp\":1789751457465}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751457465}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751457532}",
+   "{\"type\":\"execution_complete\",\"execution_time\":72,\"timestamp\":1789751457536}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'subagents' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"5cb6c14cfafd4646b09e782c4a6f8f72\",\"timestamp\":1789751457650}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751457650}",
+   "{\"type\":\"execution_complete\",\"execution_time\":6,\"timestamp\":1789751457656}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'agents/E2E Test Agent/sessions/gw-3f20f08c5499.jsonl' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'agents/E2E Test Agent/sessions/gw-3f20f08c5499.jsonl' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'agents/E2E Test Agent/sessions/gw-3f20f08c5499.jsonl'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"58d0ff43a02c42fb93b13b2e82a2947d\",\"timestamp\":1789751460744}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460744}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751460748}",
+   "{\"type\":\"execution_complete\",\"execution_time\":4,\"timestamp\":1789751460748}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'MEMORY.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'MEMORY.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'MEMORY.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"89311ce854b5484085bcd787a209ff74\",\"timestamp\":1789751460747}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460748}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751460750}",
+   "{\"type\":\"execution_complete\",\"execution_time\":5,\"timestamp\":1789751460751}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'memory' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"e737a39bf034491da79ec8750658c2e4\",\"timestamp\":1789751460746}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460748}",
+   "{\"type\":\"execution_complete\",\"execution_time\":7,\"timestamp\":1789751460753}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'default/E2E Test Agent/gw-3f20f08c5499/events' -type f -name '*.jsonl' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"270cc925228f48bdbdb106cb215b3ad5\",\"timestamp\":1789751460860}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460860}",
+   "{\"type\":\"execution_complete\",\"execution_time\":7,\"timestamp\":1789751460867}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'MEMORY.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'MEMORY.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'MEMORY.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"fd79c72fb2a64d08aef01e9192e1c93c\",\"timestamp\":1789751460873}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460873}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751460876}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751460876}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'memory/2026-09-19.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'memory/2026-09-19.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'memory/2026-09-19.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"64f3d9ebaccb4acdb9ce1c925e711fe6\",\"timestamp\":1789751460873}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460873}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751460876}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751460876}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--46669baf-d436-465d-becb-2339729218d8\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--46669baf-d436-465d-becb-2339729218d8\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nZGVmYXVsdC9FMkUgVGVzdCBBZ2VudC9ndy0zZjIwZjA4YzU0OTkvZXZlbnRzLzAtMy01NzQyNGVjYy5qc29ubAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAyNjE2IDE1MjUzMjcwMjQ0IDAyMTY0NQAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiI1MWJlNGM5OC02M2IzLTRlYmQtYWM2ZS03YTQzZGQ2OTg5ODkiLCJ0aW1lc3RhbXAiOjE3ODk3NTE0NjAuOTcxMzExNjI1LCJyb2xlIjoiVVNFUiIsImNvbnRlbnQiOiLor7flnKjmspnnrrHkuK3miafooYzlkb3ku6TvvJpscyAvbm9uZXhpc3RlbnQtZTJhLWRpcu+8jOW5tuWRiuivieaIkeaJp+ihjOe7k+aenO+8iOWksei0peS5n+imgeWRiuivieaIke+8ieOAgiJ9CnsidHlwZSI6InRvb2xfdXNlIiwiaWQiOiJiMDZiNDY4MS1kZmZkLTRlMDMtOTE4Ny04ODEyNTI3N2U0NWZfN2NiYTRlY2E2N2QxNDA4NWI5MDY2NzUwN2UzZTI0OTI6dXNlOmNhbGxfZGE3MDFkMzMwYTYyNGNkYzkxOWU4NjU1IiwicGFyZW50SWQiOiI1MWJlNGM5OC02M2IzLTRlYmQtYWM2ZS03YTQzZGQ2OTg5ODkiLCJ0aW1lc3RhbXAiOjE3ODk3NTE0NjAuOTcxMzg5MzExLCJ0b29sQ2FsbElkIjoiY2FsbF9kYTcwMWQzMzBhNjI0Y2RjOTE5ZTg2NTUiLCJuYW1lIjoiZXhlY3V0ZSIsImlucHV0Ijp7ImNvbW1hbmQiOiJscyAvbm9uZXhpc3RlbnQtZTJhLWRpciJ9LCJ0cnVuY2F0ZWQiOmZhbHNlfQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsImlkIjoiODM3YWIwYTctZDkwZi00YmIwLWEyNTItNGI3MjlhNWQ5MTRiOnJlc3VsdDpjYWxsX2RhNzAxZDMzMGE2MjRjZGM5MTllODY1NSIsInBhcmVudElkIjoiYjA2YjQ2ODEtZGZmZC00ZTAzLTkxODctODgxMjUyNzdlNDVmXzdjYm",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'agents/E2E Test Agent/sessions/sessions.json' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'agents/E2E Test Agent/sessions/sessions.json' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'agents/E2E Test Agent/sessions/sessions.json'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"3988d6e5ed6b45458d92622034714f72\",\"timestamp\":1789751460991}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751460991}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751460994}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751460994}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--bb245f6c-36d5-47bc-926c-98e08e51b846\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--bb245f6c-36d5-47bc-926c-98e08e51b846\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYWdlbnRzL0UyRSBUZXN0IEFnZW50L3Nlc3Npb25zL3Nlc3Npb25zLmpzb24AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAwMjYyIDE1MjUzMjcwMjQ1IDAxNzc3NAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7CiAgInNlc3Npb25zIiA6IHsKICAgICJndy0zZjIwZjA4YzU0OTkiIDogewogICAgICAic3VtbWFyeSIgOiAidHJhbnNjcmlwdCB1cGRhdGVkICg0IGVudHJpZXMpIiwKICAgICAgInVwZGF0ZWRBdCIgOiAiMjAyNi0wOS0xOFQxNzoxMTowMS4wOTc0NTE0MTlaIgogICAgfQogIH0sCiAgInZlcnNpb24iIDogMQp9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'memory' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"01d811bd15224b4fb6871fd535b54261\",\"timestamp\":1789751461002}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751461002}",
+   "{\"type\":\"execution_complete\",\"execution_time\":7,\"timestamp\":1789751461009}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"734373cbe4ce4925903042488b330629\",\"timestamp\":1789751461009}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751461010}",
+   "{\"type\":\"execution_complete\",\"execution_time\":12,\"timestamp\":1789751461021}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--1a4fadd1-0156-44a3-999a-3c9a644f077a\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--1a4fadd1-0156-44a3-999a-3c9a644f077a\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYWdlbnRzL0UyRSBUZXN0IEFnZW50L3Nlc3Npb25zL2d3LTNmMjBmMDhjNTQ5OS5qc29ubAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAyNjE2IDE1MjUzMjcwMjQ1IDAyMDQxMAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiI1MWJlNGM5OC02M2IzLTRlYmQtYWM2ZS03YTQzZGQ2OTg5ODkiLCJ0aW1lc3RhbXAiOjE3ODk3NTE0NjAuOTcxMzExNjI1LCJyb2xlIjoiVVNFUiIsImNvbnRlbnQiOiLor7flnKjmspnnrrHkuK3miafooYzlkb3ku6TvvJpscyAvbm9uZXhpc3RlbnQtZTJhLWRpcu+8jOW5tuWRiuivieaIkeaJp+ihjOe7k+aenO+8iOWksei0peS5n+imgeWRiuivieaIke+8ieOAgiJ9CnsidHlwZSI6InRvb2xfdXNlIiwiaWQiOiJiMDZiNDY4MS1kZmZkLTRlMDMtOTE4Ny04ODEyNTI3N2U0NWZfN2NiYTRlY2E2N2QxNDA4NWI5MDY2NzUwN2UzZTI0OTI6dXNlOmNhbGxfZGE3MDFkMzMwYTYyNGNkYzkxOWU4NjU1IiwicGFyZW50SWQiOiI1MWJlNGM5OC02M2IzLTRlYmQtYWM2ZS03YTQzZGQ2OTg5ODkiLCJ0aW1lc3RhbXAiOjE3ODk3NTE0NjAuOTcxMzg5MzExLCJ0b29sQ2FsbElkIjoiY2FsbF9kYTcwMWQzMzBhNjI0Y2RjOTE5ZTg2NTUiLCJuYW1lIjoiZXhlY3V0ZSIsImlucHV0Ijp7ImNvbW1hbmQiOiJscyAvbm9uZXhpc3RlbnQtZTJhLWRpciJ9LCJ0cnVuY2F0ZWQiOmZhbHNlfQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsImlkIjoiODM3YWIwYTctZDkwZi00YmIwLWEyNTItNGI3MjlhNWQ5MTRiOnJlc3VsdDpjYWxsX2RhNzAxZDMzMGE2MjRjZGM5MTllODY1NSIsInBhcmVudElkIjoiYjA2YjQ2ODEtZGZmZC00ZTAzLTkxODctODgxMjUyNzdlNDVmXzdjYm",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"c07fe795e2bf40bbb215727092985e72\",\"timestamp\":1789751461110}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751461111}",
+   "{\"type\":\"execution_complete\",\"execution_time\":8,\"timestamp\":1789751461119}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'agents' -type f -name '*.log.jsonl' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"66816dd036bc4a50b1d8547521a799e9\",\"timestamp\":1789751461123}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751461123}",
+   "{\"type\":\"execution_complete\",\"execution_time\":7,\"timestamp\":1789751461130}"
+  ]
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/files/download?path=%2Fworkspace%2FMEMORY.md",
+  "status": 404,
+  "contentType": "application/json; charset=utf-8",
+  "req": null,
+  "resp": {
+   "code": "FILE_NOT_FOUND",
+   "message": "file not found. open /workspace/MEMORY.md: no such file or directory"
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/directories/list?path=%2Fworkspace%2Fmemory",
+  "status": 404,
+  "contentType": "application/json; charset=utf-8",
+  "req": null,
+  "resp": {
+   "code": "FILE_NOT_FOUND",
+   "message": "file not found. lstat /workspace/memory: no such file or directory"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"ce8c5fcc75e942db8028b338d03852c7\",\"timestamp\":1789751461140}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751461141}",
+   "{\"type\":\"execution_complete\",\"execution_time\":8,\"timestamp\":1789751461148}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--ed510994-8bbd-4363-a5bb-2067a468f1be\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--ed510994-8bbd-4363-a5bb-2067a468f1be\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYWdlbnRzL0UyRSBUZXN0IEFnZW50L3Nlc3Npb25zL2d3LTNmMjBmMDhjNTQ5OS5sb2cuanNvbmwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAyNjE2IDE1MjUzMjcwMjQ1IDAyMTE3MAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB7InR5cGUiOiJtZXNzYWdlIiwiaWQiOiI1MWJlNGM5OC02M2IzLTRlYmQtYWM2ZS03YTQzZGQ2OTg5ODkiLCJ0aW1lc3RhbXAiOjE3ODk3NTE0NjAuOTcxMzExNjI1LCJyb2xlIjoiVVNFUiIsImNvbnRlbnQiOiLor7flnKjmspnnrrHkuK3miafooYzlkb3ku6TvvJpscyAvbm9uZXhpc3RlbnQtZTJhLWRpcu+8jOW5tuWRiuivieaIkeaJp+ihjOe7k+aenO+8iOWksei0peS5n+imgeWRiuivieaIke+8ieOAgiJ9CnsidHlwZSI6InRvb2xfdXNlIiwiaWQiOiJiMDZiNDY4MS1kZmZkLTRlMDMtOTE4Ny04ODEyNTI3N2U0NWZfN2NiYTRlY2E2N2QxNDA4NWI5MDY2NzUwN2UzZTI0OTI6dXNlOmNhbGxfZGE3MDFkMzMwYTYyNGNkYzkxOWU4NjU1IiwicGFyZW50SWQiOiI1MWJlNGM5OC02M2IzLTRlYmQtYWM2ZS03YTQzZGQ2OTg5ODkiLCJ0aW1lc3RhbXAiOjE3ODk3NTE0NjAuOTcxMzg5MzExLCJ0b29sQ2FsbElkIjoiY2FsbF9kYTcwMWQzMzBhNjI0Y2RjOTE5ZTg2NTUiLCJuYW1lIjoiZXhlY3V0ZSIsImlucHV0Ijp7ImNvbW1hbmQiOiJscyAvbm9uZXhpc3RlbnQtZTJhLWRpciJ9LCJ0cnVuY2F0ZWQiOmZhbHNlfQp7InR5cGUiOiJ0b29sX3Jlc3VsdCIsImlkIjoiODM3YWIwYTctZDkwZi00YmIwLWEyNTItNGI3MjlhNWQ5MTRiOnJlc3VsdDpjYWxsX2RhNzAxZDMzMGE2MjRjZGM5MTllODY1NSIsInBhcmVudElkIjoiYjA2YjQ2ODEtZGZmZC00ZTAzLTkxODctODgxMjUyNzdlNDVmXzdjYm",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/c02aeb82-e444-4350-89c7-e8a4437ee162/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"49bb97fc18ed43bbb60873a9d5c3fe8d\",\"timestamp\":1789751461268}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751461268}",
+   "{\"type\":\"execution_complete\",\"execution_time\":10,\"timestamp\":1789751461275}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes",
+  "status": 202,
+  "contentType": "application/json",
+  "req": {
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0",
+    "auth": null
+   },
+   "snapshotId": null,
+   "platform": null,
+   "timeout": 3600,
+   "resourceLimits": {
+    "cpu": "1",
+    "memory": "1024Mi"
+   },
+   "resourceRequests": null,
+   "env": {
+    "EXECD_API_GRACE_SHUTDOWN": "100ms"
+   },
+   "metadata": {},
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "networkPolicy": null,
+   "credentialProxy": null,
+   "secureAccess": false,
+   "volumes": null,
+   "extensions": {}
+  },
+  "resp": {
+   "id": "754dc82b-5b95-4d42-9b10-eb620972c426",
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container started successfully.",
+    "lastTransitionAt": "2026-09-18T17:11:49.449372Z"
+   },
+   "metadata": {},
+   "expiresAt": "2026-09-18T18:11:49.449372Z",
+   "createdAt": "2026-09-18T17:11:49.449372Z",
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ]
+  },
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/endpoints/44772?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/endpoints/18080?use_server_proxy=true",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "endpoint": "127.0.0.1:8091/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/18080"
+  },
+  "sse": null,
+  "_endpointRewrittenTo": "127.0.0.1:8091/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/18080"
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/ping",
+  "status": 200,
+  "contentType": "",
+  "req": null,
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/metrics/events",
+  "status": 204,
+  "contentType": "",
+  "req": {
+   "eventType": "sandbox.create",
+   "createDurationMs": 479,
+   "success": true,
+   "sandboxId": "754dc82b-5b95-4d42-9b10-eb620972c426",
+   "image": "opensandbox/code-interpreter:v1.1.0"
+  },
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "GET",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426",
+  "status": 200,
+  "contentType": "application/json",
+  "req": null,
+  "resp": {
+   "id": "754dc82b-5b95-4d42-9b10-eb620972c426",
+   "image": {
+    "uri": "opensandbox/code-interpreter:v1.1.0"
+   },
+   "status": {
+    "state": "Running",
+    "reason": "CONTAINER_RUNNING",
+    "message": "Sandbox container is running.",
+    "lastTransitionAt": "2026-09-18T17:11:49.522781Z"
+   },
+   "entrypoint": [
+    "/opt/code-interpreter/code-interpreter.sh"
+   ],
+   "expiresAt": "2026-09-18T18:11:49.449372Z",
+   "createdAt": "2026-09-18T17:11:49.522781Z"
+  },
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "mkdir -p /workspace",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"614191fadde14204a998e74aa8352061\",\"timestamp\":1789751509988}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751509989}",
+   "{\"type\":\"execution_complete\",\"execution_time\":5,\"timestamp\":1789751509993}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/files/upload",
+  "status": 200,
+  "contentType": "",
+  "req": "--6ea7b16b-7279-45a7-aca1-473e69e54df5\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata\"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"path\":\"/tmp/workspace.tar.b64\",\"owner\":null,\"group\":null,\"mode\":644}\r\n--6ea7b16b-7279-45a7-aca1-473e69e54df5\r\nContent-Disposition: form-data; name=\"file\"; filename=\"/tmp/workspace.tar.b64\"\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nQUdFTlRTLm1kAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAxMDA2NDQgMDAwMDAwMCAwMDAwMDAwIDAwMDAwMDAxMjQ3IDE1MjUzMjcwMzI2IDAxMTEyMQAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwMDAwMDAwIDAwMDAwMDAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtLS0KbmFtZTogRTJFIFRlc3QgQWdlbnQKZGVzY3JpcHRpb246IEUyRSDmtYvor5UgYWdlbnTvvIjphY3lkIggbW9jayBMTE0vTUNQL+aymeeuse+8jGUyZS1jaS1wbGFuIMKnNC4z77yJCm1vZGVsOgogIHByb3ZpZGVyOiBvcGVuYWkKICBuYW1lOiAKY29uZmlnOgogIHRlbXBlcmF0dXJlOiAwLjcKICBtYXhfdG9rZW5zOiA0MDk2Ci0tLQoKIyBFMkUg5rWL6K+V5Yqp5omLCgrkvaDmmK/nq6/liLDnq6/mtYvor5XkuJPnlKggYWdlbnTjgILmlLbliLDmmI7noa7mjIfku6Tml7bnm7TmjqXosIPnlKjlr7nlupTlt6XlhbflrozmiJDmk43kvZzlubbnroDmtIHlm57lpI3vvIzkuI3opoHov73pl67jgIHkuI3opoHlsZXlvIDop6Pph4rjgIIKCuinhOWIme+8mgotIOeUqOaIt+imgeaxguiwg+eUqOafkOS4quW3peWFt+aXtu+8jOW/hemhu+S9v+eUqOivpeW3peWFt++8jOW5tuS4peagvOaMieeUqOaIt+e7meWumueahOWPguaVsOWQjeWSjOWPguaVsOWAvOS8oOWPgu+8jOS4jeW+l+iHquihjOaUueWKqOOAggotIOaWh+S7tuaTjeS9nOS9v+eUqOW3peS9nOWMuuebuOWvuei3r+W+hO+8iOWmgiB1cGxvYWRzL25vdGUudHh044CBZGF0YS9vdXQudHh077yJ44CCCi0g5a6M5oiQ5ZCO55So5LiA5Y+l6K+d5oql5ZGK57uT5p6c77yb5bel5YW35omn6KGM5aSx6LSl5pe25aaC5a6e5oql5ZGK6ZSZ6K+v44CCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "resp": "",
+  "sse": null
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace && rm /tmp/workspace.tar.b64",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"58594797e103433693399745e77fcb6e\",\"timestamp\":1789751510237}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751510237}",
+   "{\"type\":\"execution_complete\",\"execution_time\":101,\"timestamp\":1789751510338}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -d /workspace",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"1a62f72c97324d0c8c433dd48723b4c1\",\"timestamp\":1789751510451}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751510452}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751510454}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'AGENTS.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'AGENTS.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'AGENTS.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"a40723fc088c463db3dee7ad4e25535a\",\"timestamp\":1789751510637}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751510638}",
+   "{\"type\":\"stdout\",\"text\":\"---\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"name: E2E Test Agent\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"description: E2E 测试 agent（配合 mock LLM/MCP/沙箱，e2e-ci-plan §4.3）\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"model:\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"  provider: openai\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"  name: \",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"config:\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"  temperature: 0.7\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"  max_tokens: 4096\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"---\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"\\n\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"# E2E 测试助手\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"\\n\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"你是端到端测试专用 agent。收到明确指令时直接调用对应工具完成操作并简洁回复，不要追问、不要展开解释。\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"\\n\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"规则：\",\"timestamp\":1789751510647}",
+   "{\"type\":\"stdout\",\"text\":\"- 用户要求调用某个工具时，必须使用该工具，并严格按用户给定的参数名和参数值传参，不得自行改动。\",\"timestamp\":1789751510648}",
+   "{\"type\":\"stdout\",\"text\":\"- 文件操作使用工作区相对路径（如 uploads/note.txt、data/out.txt）。\",\"timestamp\":1789751510648}",
+   "{\"type\":\"stdout\",\"text\":\"- 完成后用一句话报告结果；工具执行失败时如实报告错误。\",\"timestamp\":1789751510648}",
+   "{\"type\":\"execution_complete\",\"execution_time\":11,\"timestamp\":1789751510648}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'MEMORY.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'MEMORY.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'MEMORY.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"975702740a4247f9abac3c7b19ab9dee\",\"timestamp\":1789751510836}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751510836}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751510846}",
+   "{\"type\":\"execution_complete\",\"execution_time\":85,\"timestamp\":1789751510846}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "if [ ! -f 'knowledge/KNOWLEDGE.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'knowledge/KNOWLEDGE.md' ]; then echo '__EMPTY__'; else sed -n '1,2147483647p' 'knowledge/KNOWLEDGE.md'; fi",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"3b657ae4e952409b993dec351004cfb8\",\"timestamp\":1789751511038}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751511039}",
+   "{\"type\":\"stdout\",\"text\":\"__NOT_FOUND__\",\"timestamp\":1789751511045}",
+   "{\"type\":\"execution_complete\",\"execution_time\":88,\"timestamp\":1789751511045}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'knowledge' -type f -name '*' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"bbf9845066754813afda7f886a2d8bfe\",\"timestamp\":1789751511237}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751511238}",
+   "{\"type\":\"execution_complete\",\"execution_time\":101,\"timestamp\":1789751511338}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'skills' -type f -name 'SKILL.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"95d1d13b7fe44386b6fc60e0e9147ba7\",\"timestamp\":1789751511453}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751511453}",
+   "{\"type\":\"execution_complete\",\"execution_time\":98,\"timestamp\":1789751511551}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/queues/agentscope_inbox_gw-3f20f08c5499_2793f5c3' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"498ef92a18d746a38966ff09e83c6d9f\",\"timestamp\":1789751511737}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751511738}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751511745}",
+   "{\"type\":\"execution_complete\",\"execution_time\":82,\"timestamp\":1789751511745}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/async-tools/gw-3f20f08c5499' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"fb120936d1924173b9316f527200c764\",\"timestamp\":1789751511943}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751511943}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751511946}",
+   "{\"type\":\"execution_complete\",\"execution_time\":7,\"timestamp\":1789751511946}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'subagents' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"f3e70e77ed2e465bb9ca8d0b05f3ea69\",\"timestamp\":1789751512139}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751512142}",
+   "{\"type\":\"execution_complete\",\"execution_time\":92,\"timestamp\":1789751512150}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "echo hello-e2a",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"d88179e446554837ab9712329c9928ce\",\"timestamp\":1789751516639}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751516639}",
+   "{\"type\":\"stdout\",\"text\":\"hello-e2a\",\"timestamp\":1789751516643}",
+   "{\"type\":\"execution_complete\",\"execution_time\":4,\"timestamp\":1789751516643}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/queues/agentscope_inbox_gw-3f20f08c5499_2793f5c3' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"c48f692204194cec9308db87dd4e21dc\",\"timestamp\":1789751516757}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751516757}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751516760}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751516760}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "test -e '.agentscope/bus/async-tools/gw-3f20f08c5499' && echo yes || echo no",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"7a0835db11ab4a84a02a1e3e609899df\",\"timestamp\":1789751516871}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751516873}",
+   "{\"type\":\"stdout\",\"text\":\"no\",\"timestamp\":1789751516874}",
+   "{\"type\":\"execution_complete\",\"execution_time\":3,\"timestamp\":1789751516874}"
+  ]
+ },
+ {
+  "method": "POST",
+  "path": "/v1/sandboxes/754dc82b-5b95-4d42-9b10-eb620972c426/proxy/44772/command",
+  "status": 200,
+  "contentType": "text/event-stream",
+  "req": {
+   "command": "find 'subagents' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do   size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);   mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);   printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done",
+   "cwd": null,
+   "background": false,
+   "timeout": null,
+   "uid": null,
+   "gid": null,
+   "envs": {}
+  },
+  "resp": null,
+  "sse": [
+   "{\"type\":\"init\",\"text\":\"7bdc18a3ebf441bab8bdf10343682976\",\"timestamp\":1789751516988}",
+   "{\"type\":\"ping\",\"text\":\"pong\",\"timestamp\":1789751516988}",
+   "{\"type\":\"execution_complete\",\"execution_time\":12,\"timestamp\":1789751516999}"
+  ]
+ }
+]

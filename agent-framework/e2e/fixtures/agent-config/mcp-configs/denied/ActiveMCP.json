@@ -1,0 +1,9 @@
+{
+  "selectedTools": [
+    { "name": "get_application", "enabled": true },
+    { "name": "create_application", "enabled": false },
+    { "name": "show_application_form", "enabled": false },
+    { "name": "confirm_application", "enabled": false },
+    { "name": "submit_application", "enabled": false }
+  ]
+}

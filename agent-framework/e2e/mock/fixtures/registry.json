@@ -1,0 +1,20 @@
+{
+  "llm": {
+    "plain":          { "marker": "[E2E:plain]",           "calls": 1 },
+    "remember":       { "marker": "[E2E:remember]",        "calls": 1 },
+    "recall":         { "marker": "[E2E:recall]",          "calls": 1 },
+    "tool-echo":      { "marker": "[E2E:tool:echo]",       "calls": 2 },
+    "tool-time":      { "marker": "[E2E:tool:time]",       "calls": 2 },
+    "tool-write":     { "marker": "[E2E:tool:write]",      "calls": 2 },
+    "tool-read":      { "marker": "[E2E:tool:read]",       "calls": 2 },
+    "file-deliver":   { "marker": "[E2E:file:deliver]",    "calls": 3 },
+    "tool-mcp-echo":  { "marker": "[E2E:tool:mcp_echo]",   "calls": 2 },
+    "mcpapp-form":    { "marker": "[E2E:mcpapp:form]",     "calls": 2 },
+    "hitl-submit":    { "marker": "[E2E:hitl:submit]",     "calls": 2, "variants": ["denied"] },
+    "execute":        { "marker": "[E2E:execute]",         "calls": 2 },
+    "execute-fail":   { "marker": "[E2E:execute:fail]",    "calls": 2 },
+    "sandbox-write":  { "marker": "[E2E:tool:write:sb]",   "calls": 2 },
+    "sandbox-read":   { "marker": "[E2E:tool:read:sb]",    "calls": 2 }
+  },
+  "sandbox": ["interactions.json"]
+}

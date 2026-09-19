@@ -1,0 +1,14 @@
+# deny 语义注册：同一 :8813 物理服务的第二逻辑注册（e2e-ci-plan §4.3）
+# get_application 被 deny：不触发 ask，工具结果直接 denied（H7 场景）
+server: denied
+vendor: denied
+version: "1.0.0"
+
+connection:
+  type: streamableHttp
+  url: http://127.0.0.1:8813
+  timeout: 60
+
+permissions:
+  tools:
+    get_application: deny

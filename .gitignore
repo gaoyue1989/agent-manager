@@ -100,3 +100,9 @@ e2e/fixtures/e2e-frontend-test.csv
 
 # Go 覆盖率产物（make cover）
 backend/cover.out
+
+# agent-framework E2E 运行产物（e2e-ci-plan §6.2）
+agent-framework/e2e/.runtime/
+agent-framework/e2e/playwright-report/
+agent-framework/e2e/test-results/
+agent-framework/e2e/node_modules/

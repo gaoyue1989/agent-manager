@@ -1,0 +1,15 @@
+# MCP Apps app_only 语义注册：同一 :8813 物理服务的第三逻辑注册（e2e-ci-plan §4.3）
+# confirm_application 声明为 app_only（仅卡片经代理调用，对 LLM 隐藏）——M6 场景
+# 注意：app_only 走 registerReadOnly 手动注册路径，故 ask 类工具绝不能放在本注册（会短路 HITL）
+server: cards
+vendor: cards
+version: "1.0.0"
+
+connection:
+  type: streamableHttp
+  url: http://127.0.0.1:8813
+  timeout: 60
+
+ui:
+  app_only:
+    confirm_application: "ui://approval/application-form.html"
