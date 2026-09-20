@@ -165,9 +165,17 @@ public class AgentStateReader {
                 var input = call.get("input") instanceof java.util.Map<?, ?> raw
                     ? (java.util.Map<String, Object>) raw
                     : java.util.Map.<String, Object>of();
+                // content 回填：ToolValidator.validateInput 用块上的 content（String）做 schema 校验，
+                // content=null 时 networknt readTree 抛 'argument "content" is null'，恢复执行必然失败
+                //（ConfirmContextStore.toToolCalls 已有同款修复，此处对齐 state 路径）。
+                // 优先用 SDK 持久化在块上的原始 content；缺失时（老数据）用 input 序列化补齐
+                //（空 Map 序列化为 "{}"，与表路径 toContentJson 一致）——恒不落 null：
+                // "{}" 在 schema 校验时给出正常缺参报错，模型可自愈重试
+                var rawContent = call.get("content") instanceof String s && !s.isBlank() ? s : null;
+                var content = rawContent != null ? rawContent : StateDataParser.toJsonString(input);
                 blocks.put(id, new io.agentscope.core.message.ToolUseBlock(
                     id, (String) call.getOrDefault("name", ""), input,
-                    null, null, io.agentscope.core.message.ToolCallState.ASKING));
+                    content, null, io.agentscope.core.message.ToolCallState.ASKING));
             }
             var replyId = asking.stream()
                 .map(c -> (String) c.getOrDefault("reply_id", ""))

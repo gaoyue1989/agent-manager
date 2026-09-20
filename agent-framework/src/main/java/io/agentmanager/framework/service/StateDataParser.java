@@ -144,7 +144,25 @@ public final class StateDataParser {
             var call = new java.util.LinkedHashMap<String, Object>();
             call.put("tool_call_id", c.path("id").asText(""));
             call.put("name", c.path("name").asText(""));
-            call.put("input", c.path("input"));
+            // input 转 Map：JsonNode 会破坏 AgentStateReader 重建 ToolUseBlock 的 instanceof Map 判断
+            //（重建时 input 恒为空 Map，恢复执行参数丢失）；转成普通 Map 供下游直接使用
+            var inputNode = c.path("input");
+            if (inputNode.isObject()) {
+                try {
+                    call.put("input", MAPPER.convertValue(inputNode,
+                        new com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, Object>>() {}));
+                } catch (Exception e) {
+                    call.put("input", new java.util.LinkedHashMap<String, Object>());
+                }
+            } else {
+                call.put("input", new java.util.LinkedHashMap<String, Object>());
+            }
+            // 透传块上的 content 字符串（SDK 挂起时落 state 的原始参数 JSON），
+            // 供重建 ToolUseBlock 时回填——content=null 会导致 ToolValidator 抛
+            // 'Schema validation error: argument "content" is null'（HITL 恢复失败根因）
+            if (c.hasNonNull("content") && c.path("content").isTextual()) {
+                call.put("content", c.path("content").asText());
+            }
             call.put("reply_id", replyId);
             result.add(call);
         }
@@ -153,6 +171,18 @@ public final class StateDataParser {
 
     /** 官方 SDK 的 HITL 关联 replyId 元数据键（与 Msg.METADATA_CONFIRM_REQUEST_REPLY_ID 一致） */
     private static final String METADATA_CONFIRM_REQUEST_REPLY_ID = "agentscope_confirm_request_reply_id";
+
+    /** 把 Map 序列化为 JSON 字符串（ToolUseBlock.content 回填用）；失败返回 null（fail-soft） */
+    public static String toJsonString(Map<String, Object> map) {
+        if (map == null) {
+            return null;
+        }
+        try {
+            return MAPPER.writeValueAsString(map);
+        } catch (Exception e) {
+            return null;
+        }
+    }
 
     /**
      * 提取 state_data 根对象上的运行时身份（{@code session_id} / {@code user_id}）。

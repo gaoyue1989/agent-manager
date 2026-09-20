@@ -252,6 +252,64 @@ class StateDataParserTest {
         assertEquals("webui-s1", identity.get("user_id"), "userId 即 peer，恢复 RuntimeContext 需要它");
     }
 
+    // ========== HITL 恢复 content 回填（fix: argument "content" is null） ==========
+
+    /**
+     * 提取出的 asking 条目必须是普通 Map（而非 JsonNode）：AgentStateReader 重建
+     * ToolUseBlock 时用 instanceof Map 判断，JsonNode 会被丢成空 Map——恢复执行参数丢失。
+     * 同时透传块上的 content 字符串，供重建块回填（ToolValidator 校验用）。
+     */
+    @Test
+    void extractAskingToolCallsShouldReturnMapInputAndCarryContent() {
+        var stateData = """
+            {"context":[
+               {"role":"ASSISTANT","content":[{"type":"tool_use","id":"c1","name":"publish_service",
+                 "input":{"packageId":166,"name":"demo"},"content":"{\\"packageId\\":166,\\"name\\":\\"demo\\"}",
+                 "state":"asking"}],
+                "metadata":{"agentscope_confirm_request_reply_id":"reply-1"}}
+             ]}
+            """;
+        var asking = StateDataParser.extractAskingToolCalls(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, asking.size());
+        var call = asking.get(0);
+        assertTrue(call.get("input") instanceof Map<?, ?>, "input 必须是 Map 而非 JsonNode");
+        @SuppressWarnings("unchecked")
+        var input = (Map<String, Object>) call.get("input");
+        assertEquals(166, input.get("packageId"), "重建块需要完好参数");
+        assertEquals("demo", input.get("name"));
+        assertEquals("{\"packageId\":166,\"name\":\"demo\"}", call.get("content"),
+            "块上的 content 必须透传，供重建 ToolUseBlock 回填");
+        assertEquals("reply-1", call.get("reply_id"));
+    }
+
+    /** content 缺失/null（老数据形态）时不含 content 键，重建侧回落 input 序列化 */
+    @Test
+    void extractAskingToolCallsShouldOmitContentWhenAbsent() {
+        var stateData = """
+            {"context":[
+               {"role":"ASSISTANT","content":[{"type":"tool_use","id":"c1","name":"publish_service",
+                 "input":{"packageId":166},"state":"asking"}]}
+             ]}
+            """;
+        var asking = StateDataParser.extractAskingToolCalls(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, asking.size());
+        assertFalse(asking.get(0).containsKey("content"));
+        assertTrue(asking.get(0).get("input") instanceof Map<?, ?>);
+        assertEquals(166, ((Map<?, ?>) asking.get(0).get("input")).get("packageId"));
+    }
+
+    /** toJsonString：Map → JSON 字符串；null → null（fail-soft 契约） */
+    @Test
+    void toJsonStringShouldSerializeMapOrNull() {
+        assertEquals("{\"packageId\":166}",
+            StateDataParser.toJsonString(Map.of("packageId", 166)));
+        assertNull(StateDataParser.toJsonString(null));
+    }
+
     @Test
     void extractRuntimeIdentityShouldBeEmptyForBlankInput() {
         assertEquals("", StateDataParser.extractRuntimeIdentity(null).get("session_id"));

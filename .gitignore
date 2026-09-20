@@ -106,3 +106,5 @@ agent-framework/e2e/.runtime/
 agent-framework/e2e/playwright-report/
 agent-framework/e2e/test-results/
 agent-framework/e2e/node_modules/
+# 工作流真机探测脚本与运行日志（一次性验证产物）
+out/
