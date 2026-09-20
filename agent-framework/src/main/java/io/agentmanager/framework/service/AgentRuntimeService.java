@@ -770,9 +770,12 @@ public class AgentRuntimeService {
         }
         log.info("[HITL] enriching tool {} input from agent_state ({} keys)",
             fromTable.getId(), stateTool.getInput().size());
+        // content 同步取 state 侧完整参数 JSON：content 只用于 ToolValidator 校验，
+        // 若保留表侧空参数的 "{}" 会误报 'Parameter validation failed ... missing'
         return new io.agentscope.core.message.ToolUseBlock(
             fromTable.getId(), fromTable.getName(), stateTool.getInput(),
-            fromTable.getContent(), fromTable.getMetadata(), fromTable.getState());
+            stateTool.getContent() != null ? stateTool.getContent() : fromTable.getContent(),
+            fromTable.getMetadata(), fromTable.getState());
     }
 
     /** 清理确认上下文（供测试/运维使用；恢复完成后不主动清理——保留 consumed 条目以正确返回 409，且同 session 新 ASK 会覆盖） */

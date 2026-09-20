@@ -228,9 +228,12 @@ public class AgentScopeConfig {
     @Bean
     public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props) {
         var dbName = props.checkpoint().resolvedDbName();
+        // AskingContentBackfillStateStore：持久化前把 ASKING tool_use 块 content 回填为 input 的
+        // JSON 字符串——修复 HITL 恢复时 ToolValidator 抛 'argument "content" is null'（写侧治本）
         var store = DistributedStore.builder()
-            .agentStateStore(new io.agentmanager.framework.sandbox.opensandbox.SandboxAwareMysqlAgentStateStore(
-                dataSource, dbName, "agent_state", true))
+            .agentStateStore(new io.agentmanager.framework.sandbox.opensandbox.AskingContentBackfillStateStore(
+                new io.agentmanager.framework.sandbox.opensandbox.SandboxAwareMysqlAgentStateStore(
+                    dataSource, dbName, "agent_state", true)))
             .baseStore(JdbcStore.builder(dataSource)
                 .tableName("agent_fs")
                 .initializeSchema(true)
