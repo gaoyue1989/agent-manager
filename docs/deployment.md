@@ -1,11 +1,11 @@
 # OAF 服务发布平台 — 部署指南（v2）
 
-> 设计文档：[REDESIGN.md](../REDESIGN.md) ｜ 模块指引：各目录 AGENTS.md
+> 历史设计归档：[design/](design/)（v2 重构设计见 [design/REDESIGN.md](design/REDESIGN.md)） ｜ 模块指引：各目录 AGENTS.md
 
 ## 前置条件
 
 - Kind 单节点集群（`docs/kind-config.yaml`），ingress-nginx 已装（NodePort 30080）
-- 宿主机已装 Docker、kubectl、Go 1.23+（`/usr/local/go1.23/bin/go`）、Maven+JDK21
+- 宿主机已装 Docker、kubectl、Go 1.26+（与 backend/go.mod 一致）、Maven+JDK21
 - GOPROXY 走 `https://goproxy.cn,direct`
 
 ## 一、构建镜像
@@ -19,7 +19,7 @@ docker build -t agent-framework:latest .
 cd ../backend && docker build -t platform-backend:v1 .
 
 # 3) platform-frontend（Next.js standalone）
-cd ../frontend && docker build -t platform-frontend:v2 .
+cd ../frontend && docker build -t platform-frontend:v3 .
 ```
 
 ## 二、导入镜像到 Kind 节点
@@ -27,7 +27,7 @@ cd ../frontend && docker build -t platform-frontend:v2 .
 > 注意：必须用 `--platform linux/amd64` 导出（官方镜像含 arm64/attestation 条目会导致 ctr 导入失败）
 
 ```bash
-for img in agent-framework:latest platform-backend:v1 platform-frontend:v2; do
+for img in agent-framework:latest platform-backend:v1 platform-frontend:v3; do
   f=/tmp/opencode/$(echo $img | tr ':/' '__').tar
   docker save --platform linux/amd64 -o $f $img
   docker cp $f agent-manager-control-plane:/var/tmp/img.tar
@@ -48,7 +48,10 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 ## 四、自举发布助手
 
 浏览器打开前端 → 上传 `release-agent/` 打包的 zip（或直接调 API）→ 发布：
-镜像 `agent-framework:latest`，env 填 LLM_* 与 CHECKPOINT_JDBC_URL（见下）。
+镜像 `agent-framework:latest`，env 填 LLM_*、CHECKPOINT_JDBC_URL 与 AGENT_REDIS_URL（见下）。
+
+> `AGENT_REDIS_URL=redis://oaf-redis.agent-platform.svc.cluster.local:6379`（oaf-redis 已随 platform.yaml 部署）。
+> 缺省值指向 `127.0.0.1`（Pod 自身），session_event 事件不落 Redis、SSE 断线回放/续传全挂——部署必配。
 
 ## 五、业务日志规范（agent-framework）
 

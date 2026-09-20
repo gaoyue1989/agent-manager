@@ -92,7 +92,7 @@
 ### 0.5 已知缺陷与风险
 
 > 更新（2026-09-18）：第 2、3 条已随 history 权威化改造修复，详见
-> [history-agentstate-design.md](../agent-framework/docs/history-agentstate-design.md) §8。
+> [history-agentstate-design.md](../../agent-framework/docs/history-agentstate-design.md) §8。
 
 1. **单点操作风险**：确认卡只展示参数，没有后端差异计算，也没有删除名称输入，人工核对完全依赖肉眼；误批的安全网只有后端 `confirm_k8s_name` 与工具自身校验。
 2. ~~**工具行状态误导**~~ **已修复**：历史回放改为读 `agent_state` 的真实 `ToolCallState`/`ToolResultState`，并按状态渲染（成功/失败/被拒/中断/待确认/无执行状态），不再对一切 `tool_calls` 显示 `✓`。遗留：运行时把业务错误（如 `not found`）以 `state=SUCCESS` 返回的**语义**问题仍在（工具层约定，非展示层），业务成败仍需看结果文本与实际资源。
@@ -155,14 +155,14 @@
 
 ### 2.3 参考实现
 
-- [发布助手配置与提示](../release-agent/AGENTS.md)
-- [发布助手 MCP 配置](../release-agent/mcp-configs/platform/config.yaml)
-- [平台 MCP 工具](../backend/internal/mcpsrv/server.go)
-- [平台服务实现](../backend/internal/service/publish.go)
-- [发布助手前端](../frontend/src/app/assistant/page.tsx)
-- [审批示例说明](../agent-framework/example/approval-forms/README.md)
-- [运行时 MCP 注册](../agent-framework/src/main/java/io/agentmanager/framework/service/McpToolRegistrar.java)
-- [平台总体设计](../REDESIGN.md)
+- [发布助手配置与提示](../../release-agent/AGENTS.md)
+- [发布助手 MCP 配置](../../release-agent/mcp-configs/platform/config.yaml)
+- [平台 MCP 工具](../../backend/internal/mcpsrv/server.go)
+- [平台服务实现](../../backend/internal/service/publish.go)
+- [发布助手前端](../../frontend/src/app/assistant/page.tsx)
+- [审批示例说明](../../agent-framework/example/approval-forms/README.md)
+- [运行时 MCP 注册](../../agent-framework/src/main/java/io/agentmanager/framework/service/McpToolRegistrar.java)
+- [平台总体设计](./REDESIGN.md)
 
 示例用于复用协议和验证经验，不原样复制其提示词约束、DOM 操作或确认接口作为生产安全边界。实际 SDK 权限优先级必须通过项目依赖版本的测试验证，不能只凭配置字段名称判断。
 

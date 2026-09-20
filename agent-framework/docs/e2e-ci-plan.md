@@ -1,6 +1,6 @@
 # agent-framework GitHub Actions E2E 验证体系设计（e2e-ci-plan）
 
-> 状态：**设计稿 v2**，待评审
+> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci 三个 e2e job 运行；实施记录与缺陷清单见 §11）
 > 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 3 个 e2e job）
 > 前置：无 —— 不依赖 Kind 集群、platform-backend、前端、真实 LLM API Key、任何 GitHub Secrets
 > 复用：`bench/mock-llm`、`bench/mock-mcp`、`example/approval-forms`（mock MCP + 选择器先例）、`docs/api-thread-spec.md`（协议权威）

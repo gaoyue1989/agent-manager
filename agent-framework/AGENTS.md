@@ -24,6 +24,8 @@ Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运�
 
 ## 目录结构
 
+> 注：以下为节选；SessionEventBus/SessionEventStore/SessionEventTailer/RedisEventLog（durable SSE）、SessionManager/SessionUserStore、SkillManageService/SkillManageController、storage/ 与 Tracing 中间件等后增类未逐一列出，完整清单以 src/main/java 实际为准。
+
 ```
 agent-framework/
 ├── pom.xml                              # Maven 构建配置
@@ -90,8 +92,8 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
-│   └── test/                                  # 61 个测试类 / 676 个 @Test（含默认跳过的沙箱集成测试）
-├── docs/                                     # 设计与改进方案文档 (27 份, 含 history-agentstate-design.md / mcp-apps-extension-plan.md)
+│   └── test/                                  # 76 个测试类 / 679 个 @Test（含默认跳过的沙箱集成测试）
+├── docs/                                     # 设计与改进方案文档 (36 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
@@ -261,6 +263,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析，保证与 agent_fs 同库） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
+| `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | | session_event 事件流存储（Redis Streams）；集群内必配 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`，缺省指向 Pod 自身 localhost 导致事件不落地（见 docs/api-frontend-sse.md §12） |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件操作/Shell 在 OpenSandbox 隔离沙箱执行） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
@@ -342,7 +345,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (676 用例)
+mvn -o test            # 容器内离线测试 (679 用例)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -352,7 +355,7 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 61 个测试类 / 676 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
+mvn test     # 76 个测试类 / 679 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```
 

@@ -8,7 +8,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 | 层 | 选型 |
 |----|------|
-| 管理后端 | Go 1.23 + Gin + GORM + client-go（typed，InClusterConfig） |
+| 管理后端 | Go 1.26 + Gin + GORM + client-go（typed，InClusterConfig） |
 | MCP | modelcontextprotocol/go-sdk v1.3.1（streamableHttp /mcp，与 REST 同进程） |
 | 前端 | Next.js 16 + React 19 + Tailwind（容器化 standalone） |
 | 业务运行时 | agent-framework（Java/Spring Boot :8100，AgentScope Harness） |
@@ -49,8 +49,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 ├── release-agent/      # 智能发布助手 OAF 包源文件
 ├── manifests/          # 平台自举清单（platform/platform-ingress/frontend.yaml）
 ├── e2e/                # 全流程回归脚本 → e2e 内 package.json
-├── docs/               # 部署指南(deployment.md) + 规范参考(oaf-specification.md) + 排障(troubleshooting/)
-└── REDESIGN.md         # 重构设计文档（权威，含实施记录附录 B）
+└── docs/               # 部署指南(deployment.md) + 规范参考(oaf-specification.md) + 设计归档(design/，索引见 design/README.md)
 ```
 
 ---
@@ -64,6 +63,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 | platform-frontend | NodePort 30881 | Web UI |
 | ingress-nginx | NodePort 30080 | 业务 Agent（/agent/{name}） |
 | oaf-mysql | svc:3306 | 平台元数据 + checkpoint |
+| oaf-redis | svc:6379 | session_event 事件流存储（Redis Streams，支撑 durable SSE 多副本续传） |
 | 共享 PVC | platform-data (10Gi) | OAF 包存储：`packages/{id}` subPath 只读挂 /config |
 | namespace | agent-platform | 全部平台与业务资源 |
 
@@ -110,7 +110,7 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（680 用例） | 核心/多副本/沙箱三 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| agent-framework-ci | `mvn test`（76 类 / 679 用例） | 核心/多副本/沙箱三 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
 
 ### 日常提交流程（必须走 PR 门禁）
 

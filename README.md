@@ -2,7 +2,7 @@
 
 上传符合规范的 **OAF 配置包** → K8s 原生 Deployment/Service/Ingress 拉起服务 → 自动经 A2A 接口注册服务信息 → 列表/状态管理/重新发布。核心能力同时以 **MCP 服务**暴露，并由基于 agent-framework 的 **智能发布助手**（对话式操作）自举运行于集群内。
 
-> 设计文档：[REDESIGN.md](REDESIGN.md)（含 v1→v2 重构决策与实施记录）
+> 历史设计文档归档：[docs/design/](docs/design/)（v1→v2 重构决策与实施记录见 [REDESIGN.md](docs/design/REDESIGN.md)）
 > 历史版本：git tag `v1-archive`
 
 ## 架构
@@ -31,7 +31,7 @@
 
 | 层 | 选型 |
 |----|------|
-| 管理后端 | Go 1.23 + Gin + GORM + client-go（REST `/api/v1` 与 MCP streamableHttp `/mcp` 同进程） |
+| 管理后端 | Go 1.26 + Gin + GORM + client-go（REST `/api/v1` 与 MCP streamableHttp `/mcp` 同进程） |
 | MCP SDK | modelcontextprotocol/go-sdk v1.3.1 |
 | 前端 | Next.js 16 + React 19 + Tailwind（3 页面 + 发布助手对话） |
 | 业务运行时 | agent-framework（Java/Spring Boot :8100，AgentScope Harness 2.x） |
@@ -74,8 +74,7 @@ agent-manager/
 ├── release-agent/      # 智能发布助手的 OAF 包（mcp-configs → 平台 MCP）
 ├── manifests/          # 平台自举清单（ns/PVC/RBAC/MySQL/backend/frontend/ingress）
 ├── e2e/                # 全流程回归脚本（A~E 场景 + chat/debug-console）
-├── docs/               # 部署指南与规范参考
-└── REDESIGN.md         # 重构设计文档（权威）
+└── docs/               # 部署指南与规范参考 + 历史设计归档（docs/design/）
 ```
 
 ## 界面展示

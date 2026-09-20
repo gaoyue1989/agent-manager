@@ -85,7 +85,7 @@ class AgentFrameworkApplicationTests {
 
 覆盖字段解析：name、vendorKey、agentKey、version、slug、description、author、license、tags、skills、mcpServers、tools、systemPrompt、model、runtimeConfig、memory、deniedTools（空默认值、显式值）。
 
-### 4.3 A2AControllerTest (9 个用例)
+### 4.3 A2AControllerTest (10 个用例)
 
 覆盖场景：
 - `message/send` 正常返回
@@ -95,7 +95,7 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 ChatStreamControllerTest (23 个用例)
+### 4.4 ChatStreamControllerTest (24 个用例)
 
 - `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
 - sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
@@ -165,7 +165,7 @@ class AgentFrameworkApplicationTests {
 | UiContextControllerTest | 5 | 正常更新 / 缺 sessionId 400 / 缺 content+structured 400 / 非法 sessionId 400 |
 | UiContextInjectionHookTest | 4 | 命中注入 / 无记录跳过 / 无 metadata key 跳过 / store 异常不阻断 |
 | McpResourceProxyTest | 10 | ui:// 资源读取 / CSP 注入 / 列表 / 工具代发 / 403 needsConfirm / 异常透传 |
-| ChatStreamControllerTest | 23 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 / 丢租约即停写 / 准备段与租约启动失败的回滚 / file_ready 契约（download_url 相对路径）/ MCP Apps ui 注入接线契约 |
+| ChatStreamControllerTest | 24 | 单次流触发 / sessionId 自动生成 / fileIds 注入 / write_file KV 同步 / 审计 / 丢租约即停写 / 准备段与租约启动失败的回滚 / file_ready 契约（download_url 相对路径）/ MCP Apps ui 注入接线契约 |
 | SessionStreamControllerTest | 7 | subscribe 回放+done / status 四态 / ui 元数据序列化 |
 
 ### 4.11 Stateless Single-Stream 测试（stateless-single-stream 新增）

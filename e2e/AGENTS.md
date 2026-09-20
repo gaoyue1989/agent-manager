@@ -1,6 +1,6 @@
 # E2E Testing — OAF 发布平台
 
-## 场景矩阵（对应 REDESIGN §10）
+## 场景矩阵（对应 docs/design/REDESIGN.md §10）
 
 | 脚本 | 场景 | 内容 |
 |------|------|------|

@@ -84,7 +84,7 @@ say "E-阶段1：自然语言指令 → 发布服务（HITL：publish_service as
 # 预热（workaround）：首回合触发沙箱创建并绑定到会话，避免恢复 turn 撞
 # "No active sandbox — sandbox filesystem used outside of a call context"
 # （恢复 turn 崩溃会让 checkpoint 里 ASKING 态残留，会话被锁死）
-# 对应 harness 沙箱生命周期竞态（docs/release-agent-mcp-app-hitl-design-acceptance.md §18），
+# 对应 harness 沙箱生命周期竞态（docs/design/release-agent-mcp-app-hitl-design-acceptance.md §18），
 # 运行时修复落地后应移除；SANDBOX_ENABLED=false（应用默认）部署不受影响
 chat "你好，请直接回复 ready。" > /dev/null
 sleep 5
