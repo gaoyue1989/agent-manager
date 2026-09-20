@@ -340,4 +340,198 @@ class AgentRuntimeServiceHitlTest {
             () -> service.resumeWithConfirm(SID, null,
                 List.of(Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true))));
     }
+
+    // ========== content=null 回归修复（fix: Schema validation error: argument "content" is null） ==========
+
+    private static final OafConfig OAF = new OafConfig(
+        "test-agent", "acme", "test-agent", "1.0.0", "acme/test-agent",
+        "Test agent", "@acme", "MIT",
+        List.of("test"), "you are a helper.",
+        List.of(), List.of(), List.of(), List.of(), List.of(),
+        new OafConfig.ModelConfig("openai", "gpt-4", ""),
+        new OafConfig.RuntimeConfig(0.7, 4096, false, "default"),
+        new OafConfig.MemoryConfig("editable", Map.of()),
+        Map.of()
+    );
+
+    /**
+     * state 路径回归（线上故障场景：confirm_context 行被 TTL 清理，恢复回落 agent_state）：
+     * 快照重建的 ToolUseBlock 必须 content 非空（ToolValidator 用 content 做 schema 校验，
+     * null 即抛 'argument "content" is null'）且 input 完好（工具实参来源）。
+     * 构造真实 AgentStateReader + 线上实测形态的 state_data（asking 块 input={}、content="{}"），
+     * 通过 ConfirmResult 携带的块断言两路参数。
+     */
+    @Test
+    void stateFallbackShouldRebuildBlocksWithNonNullContentAndCompleteInput() throws Exception {
+        // 线上 DB 实测形态：SDK 挂起落 state 的 asking 块 input 为空对象、content 为 "{}"
+        //（参数只存在于 confirm_context / permission_ask，TTL 清理后仅剩 state）
+        var stateData = """
+            {"session_id":"gw-3f20f08c5499","user_id":"webui-u1","context":[
+               {"role":"USER","content":[{"type":"text","text":"发布服务"}]},
+               {"role":"ASSISTANT",
+                "content":[{"type":"tool_use","id":"call-1","name":"publish_service",
+                  "input":{},"content":"{}","state":"asking"}],
+                "metadata":{"agentscope_confirm_request_reply_id":"reply-1"}}
+             ]}
+            """;
+        var dataSource = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        var reader = new AgentStateReader(dataSource) {
+            @Override
+            public String loadStateData(String sessionId) {
+                return stateData;   // 免去真实 DB：注入实测形态的 state JSON
+            }
+        };
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        svc.setAgentStateReader(reader);
+
+        // 表无行（TTL 清理）→ 走 state fallback
+        when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass((Class<List<Msg>>) (Class<?>) List.class);
+        verify(agent2).call(captor.capture(), any(RuntimeContext.class));
+        var raw = (List<?>) captor.getValue().get(0).getMetadata().get(Msg.METADATA_CONFIRM_RESULTS);
+        var confirmResult = (ConfirmResult) raw.get(0);
+        var block = confirmResult.getToolCall();
+
+        // 修复点①：到达 SDK ToolValidator 的 content 必须非 null（原本恒 null → 校验崩溃）
+        assertNotNull(block.getContent(), "重建块 content 必须非空，否则 ToolValidator 抛 content is null");
+        assertEquals("{}", block.getContent(), "state 块携带原始 content 时原样回填");
+        // 修复点②：input 是普通 Map（JsonNode 形态会被 instanceof 判断丢成空 Map）
+        assertNotNull(block.getInput());
+        assertEquals(java.util.Map.of(), block.getInput(), "input 保持 SDK 落盘形态（空对象）");
+    }
+
+    /**
+     * state 路径回归（老数据形态：asking 块无 content 字段）：
+     * 重建块 content 必须回填为 input 的 JSON 字符串（恒不落 null）。
+     */
+    @Test
+    void stateFallbackShouldBackfillContentFromInputWhenBlockHasNoContent() throws Exception {
+        var stateData = """
+            {"session_id":"gw-3f20f08c5499","user_id":"webui-u1","context":[
+               {"role":"ASSISTANT",
+                "content":[{"type":"tool_use","id":"call-1","name":"publish_service",
+                  "input":{"packageId":166},"state":"asking"}],
+                "metadata":{"agentscope_confirm_request_reply_id":"reply-1"}}
+             ]}
+            """;
+        var dataSource = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+        var reader = new AgentStateReader(dataSource) {
+            @Override
+            public String loadStateData(String sessionId) {
+                return stateData;
+            }
+        };
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        svc.setAgentStateReader(reader);
+        when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass((Class<List<Msg>>) (Class<?>) List.class);
+        verify(agent2).call(captor.capture(), any(RuntimeContext.class));
+        var raw = (List<?>) captor.getValue().get(0).getMetadata().get(Msg.METADATA_CONFIRM_RESULTS);
+        var block = ((ConfirmResult) raw.get(0)).getToolCall();
+
+        assertEquals("{\"packageId\":166}", block.getContent(),
+            "块无 content 时必须回填 input 的 JSON 字符串（ToolValidator 校验不落 null）");
+        assertEquals(Map.of("packageId", 166), block.getInput(), "input 完好传递（工具实参来源）");
+    }
+
+    /**
+     * table 路径回归：ConfirmContextStore.toToolCalls 已做 content 回填（9f3fff5），
+     * 表行恢复的 ConfirmResult 块 content 必须非空、input 完好——防回归守门。
+     */
+    @Test
+    void tablePathShouldCarryNonNullContentAndCompleteInput() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now())));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        // state 侧无挂起（空快照），走表路径
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(), java.util.Map.of(), "",
+                java.util.Map.of("session_id", "", "user_id", "")));
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass((Class<List<Msg>>) (Class<?>) List.class);
+        verify(agent2).call(captor.capture(), any(RuntimeContext.class));
+        var raw = (List<?>) captor.getValue().get(0).getMetadata().get(Msg.METADATA_CONFIRM_RESULTS);
+        var confirmResult = (ConfirmResult) raw.get(0);
+        assertEquals(Map.of("packageId", 166), confirmResult.getToolCall().getInput(),
+            "表路径携带完整参数（D1 语义不回归）");
+    }
+
+    /**
+     * 表块 input 为空（反向异常）且 state 同 id 参数完好：enrich 后 content 同步取 state 侧
+     * 完整参数 JSON——若保留表侧 "{}" 会误报缺参（参数校验失败），修复见 enrichWithStateInput。
+     */
+    @Test
+    void enrichFromStateShouldSyncContentWithStateParams() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of(), "{}", null, io.agentscope.core.message.ToolCallState.ASKING);
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now())));
+
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        var stateBlock = new ToolUseBlock("call-1", "publish_service",
+            new LinkedHashMap<>(Map.of("packageId", 166)), "{\"packageId\":166}", null,
+            io.agentscope.core.message.ToolCallState.ASKING);
+        var askingEntry = new LinkedHashMap<String, Object>();
+        askingEntry.put("tool_call_id", "call-1");
+        askingEntry.put("name", "publish_service");
+        askingEntry.put("input", new LinkedHashMap<>(Map.of("packageId", 166)));
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(askingEntry), Map.of("call-1", stateBlock), "reply-1",
+                Map.of("session_id", "gw-1", "user_id", "alice")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        @SuppressWarnings("unchecked")
+        var captor = org.mockito.ArgumentCaptor.forClass((Class<List<Msg>>) (Class<?>) List.class);
+        verify(agent2).call(captor.capture(), any(RuntimeContext.class));
+        var raw = (List<?>) captor.getValue().get(0).getMetadata().get(Msg.METADATA_CONFIRM_RESULTS);
+        var block = ((ConfirmResult) raw.get(0)).getToolCall();
+        assertEquals(Map.of("packageId", 166), block.getInput(), "input 取 state 侧完好参数");
+        assertEquals("{\"packageId\":166}", block.getContent(), "content 与 state 侧参数保持一致");
+    }
 }
