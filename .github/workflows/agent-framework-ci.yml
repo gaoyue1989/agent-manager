@@ -51,7 +51,8 @@ jobs:
 
   e2e-core:
     name: E2E 核心（API+UI）
-    needs: [changes, test]
+    # 与 test 并行（黑盒门禁相互独立）：单测仅 ~1min，串行等待占整链 wall ~1/4
+    needs: [changes]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -112,7 +113,7 @@ jobs:
 
   e2e-multi:
     name: E2E 多副本（R 组 + U9）
-    needs: [changes, test]
+    needs: [changes]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -172,7 +173,7 @@ jobs:
 
   e2e-sandbox:
     name: E2E 沙箱（mock OpenSandbox）
-    needs: [changes, test]
+    needs: [changes]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -209,11 +210,9 @@ jobs:
         with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
       - working-directory: agent-framework
         run: mvn -B -q -DskipTests package
-      - name: 安装 Playwright chromium（X1 页面冒烟用）
+      - name: 安装 Playwright 依赖（sandbox 组无 UI 用例，不装浏览器）
         working-directory: agent-framework/e2e
-        run: |
-          npm ci --no-audit --no-fund
-          npx playwright install --with-deps chromium
+        run: npm ci --no-audit --no-fund
       - working-directory: agent-framework/e2e
         run: node scripts/check-fixtures.mjs
       - working-directory: agent-framework/e2e

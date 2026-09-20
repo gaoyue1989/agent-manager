@@ -100,12 +100,12 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | job | 副本 | 内容 | 依赖 | 预算 |
 |-----|------|------|------|------|
 | `test`（已有） | — | mvn test | — | ~6min |
-| `e2e-core` | 1 | S/F/H/M/A 组 API + U 组 UI（§5.1-5.5、§5.7-5.8） | needs: test | ~12-15min |
-| `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: test | ~10-15min |
-| `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: test | ~8-12min |
-| `build-push`（已有） | — | 镜像推送 | needs: test | 不变 |
+| `e2e-core` | 1 | S/F/H/M/A 组 API + U 组 UI（§5.1-5.5、§5.7-5.8） | needs: changes（与单测并行） | ~12-15min |
+| `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
+| `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
+| `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
-三个 e2e job 与 `build-push` 并行；单测红则全部不跑。用 `concurrency.group = e2e-${{ github.ref }}` + `cancel-in-progress` 抑制同分支重复跑。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，三个 job 同级硬门禁。
+三个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用 `concurrency.group = e2e-${{ github.ref }}` + `cancel-in-progress` 抑制同分支重复跑。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，三个 job 同级硬门禁。
 
 ---
 
