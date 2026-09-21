@@ -10,7 +10,7 @@ on:
 
 concurrency:
   # 按分支名分组 + 取消进行中的旧 run：同分支的 push 与 PR 双事件只保留最新一次
-  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
