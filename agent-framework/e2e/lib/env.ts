@@ -4,6 +4,9 @@ export const BASE = process.env.E2E_BASE ?? 'http://127.0.0.1:8100';
 export const REPLICA_A = process.env.E2E_REPLICA_A ?? '';
 export const REPLICA_B = process.env.E2E_REPLICA_B ?? '';
 
+/** bench mock MCP（端口随 env-up.sh BENCH_MCP_PORT；用于观测 tools/call 的 header/_meta） */
+export const BENCH_MCP = process.env.E2E_BENCH_MCP ?? 'http://127.0.0.1:18082';
+
 const RUN_ID = process.env.E2E_RUN_ID
   ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 

@@ -8,7 +8,7 @@
  *
  * 响应编码：默认 application/json 单响应；客户端 Accept 含 text/event-stream
  * 时以 SSE 单事件包裹同一结果（两种模式同一 handler，联调取可用者）。
- * 端点：POST /mcp / GET /stats / POST /reset
+ * 端点：POST /mcp / GET /stats / POST /reset / GET /last-call / GET /health
  */
 'use strict';
 
@@ -20,11 +20,15 @@ const PROTOCOL_VERSION = '2025-03-26';
 
 const stats = { initialize: 0, toolsList: 0, toolsCall: 0, latencyMs: [] };
 
+/** 最近一次 tools/call 的观测面（e2e 断言 userHeaders / _meta 注入） */
+let lastCall = null;
+
 function reset() {
   stats.initialize = 0;
   stats.toolsList = 0;
   stats.toolsCall = 0;
   stats.latencyMs = [];
+  lastCall = null;
 }
 
 function percentile(arr, p) {
@@ -91,6 +95,15 @@ function writeRpc(req, res, sessionId, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
+  // e2e 观测：记录本次 tools/call 收到的用户级 header 与 _meta（协议字段）
+  if (payload.method === 'tools/call') {
+    lastCall = {
+      at: Date.now(),
+      xUserId: req.headers['x-user-id'] ?? null,
+      meta: payload.params ? payload.params._meta ?? null : null,
+    };
+  }
+
   // 通知（无 id）：202 无响应体
   if (payload.id === undefined || payload.id === null) {
     handleRpc(payload);
@@ -137,6 +150,11 @@ const server = http.createServer((req, res) => {
     reset();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/last-call') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(lastCall ?? {}));
     return;
   }
   if (req.method === 'GET' && req.url === '/health') {

@@ -334,6 +334,7 @@ public class AgentScopeConfig {
         @SuppressWarnings("rawtypes") List customTools,
         LLMLogger llmLogger,
         UiContextStore uiContextStore,
+        SessionUserStore sessionUserStore,
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         var llm = props.llm();
@@ -392,6 +393,9 @@ public class AgentScopeConfig {
                 .middleware(new LlmLoggingMiddleware(llmLogger))
                 // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
                 .middleware(new ToolCallValidationMiddleware())
+                // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
+                // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
+                .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
                 // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
                 .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）

@@ -19,6 +19,9 @@ import org.yaml.snakeyaml.Yaml;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.agentmanager.framework.mcp.McpUserHeaderCustomizer;
+import io.agentmanager.framework.mcp.UserHeaderRule;
+import io.agentmanager.framework.mcp.UserScopedMcpClientWrapper;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
@@ -724,11 +727,84 @@ public class McpToolRegistrar {
                 }
             }
 
-            return builder.buildSync();
+            // 用户级 header 注入（userHeaders 节）：per-call 按调用方 McpMeta 映射覆盖
+            UserHeaderRule userHeaderRule = null;
+            if ("stdio".equals(type)) {
+                if (data.containsKey("userHeaders")) {
+                    log.warn("MCP {} declares userHeaders but uses 'stdio' transport; "
+                        + "user-scoped headers only apply to HTTP transports - ignored", mcp.server());
+                }
+            } else {
+                userHeaderRule = parseUserHeaders(data, mcp.server());
+                if (userHeaderRule != null) {
+                    builder.httpRequestCustomizer(McpUserHeaderCustomizer.userHeader());
+                }
+            }
+
+            // buildAsync：per-call header 依赖 Reactor Context 传播（sync 客户端 block() 桥接会断链）
+            var wrapper = builder.buildAsync().block();
+            if (wrapper == null) {
+                log.warn("MCP client build returned empty for {}", mcp.server());
+                return null;
+            }
+            if (userHeaderRule == null) {
+                return wrapper;
+            }
+            log.info("MCP {} user-scoped headers enabled: {} header(s), on-missing={}",
+                mcp.server(), userHeaderRule.headers().size(),
+                userHeaderRule.denyOnMissing() ? "deny" : "passthrough");
+            return new UserScopedMcpClientWrapper(wrapper, userHeaderRule);
         } catch (Exception e) {
             log.error("Failed to build MCP client for {}: {}", mcp.server(), e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 解析 config.yaml 的 userHeaders 节。
+     *
+     * 格式：
+     * userHeaders:
+     *   headers: { X-User-Id: userId, ... }   # header 名 → McpMeta entries key
+     *   on-missing: deny | passthrough        # 缺省 deny（fail-closed）
+     *
+     * package-private：不发起连接，便于单元测试。
+     *
+     * @return 解析结果；无 userHeaders 节 / headers 为空 / 全部条目非法时返回 null
+     */
+    @SuppressWarnings("unchecked")
+    UserHeaderRule parseUserHeaders(Map<String, Object> data, String serverName) {
+        if (!(data.get("userHeaders") instanceof Map<?, ?> uh)) {
+            return null;
+        }
+        if (!(uh.get("headers") instanceof Map<?, ?> rawHeaders)) {
+            log.warn("MCP {}: userHeaders.headers missing or not a map, ignored", serverName);
+            return null;
+        }
+        var headers = new LinkedHashMap<String, String>();
+        for (var entry : rawHeaders.entrySet()) {
+            if (entry.getKey() instanceof String header && !header.isBlank()
+                && entry.getValue() instanceof String metaKey && !metaKey.isBlank()) {
+                headers.put(header, metaKey);
+            } else {
+                log.warn("MCP {}: invalid userHeaders.headers entry ignored: {}={}",
+                    serverName, entry.getKey(), entry.getValue());
+            }
+        }
+        if (headers.isEmpty()) {
+            return null;
+        }
+        var onMissing = uh.get("on-missing");
+        boolean denyOnMissing = true; // 缺省 deny（fail-closed）
+        if (onMissing instanceof String s) {
+            denyOnMissing = !"passthrough".equals(s);
+            if (denyOnMissing && !"deny".equals(s)) {
+                log.warn("MCP {}: unknown userHeaders.on-missing '{}', fallback to deny", serverName, s);
+            }
+        } else if (onMissing != null) {
+            log.warn("MCP {}: invalid userHeaders.on-missing '{}', fallback to deny", serverName, onMissing);
+        }
+        return new UserHeaderRule(Map.copyOf(headers), denyOnMissing);
     }
 
     /** 支持 ${ENV_VAR} 语法。 */

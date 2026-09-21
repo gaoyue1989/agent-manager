@@ -3,7 +3,7 @@
  * 协议权威：docs/api-thread-spec.md v1.0。
  */
 import { test, expect } from '@playwright/test';
-import { BASE, ids, sessionIdFor } from '../lib/env.js';
+import { BASE, BENCH_MCP, ids, sessionIdFor } from '../lib/env.js';
 import { chat, status, subscribe, history, threads, deleteThread, patchThread, a2a, llmStats, llmReset, createApprovalApp, confirmStream, confirmSync } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic } from '../lib/sse.js';
@@ -88,7 +88,7 @@ test('S4 内置工具调用', async () => {
   expect(tcs.some(t => t.name === 'echo' && t.state === 'success')).toBe(true);
 });
 
-test('S5 MCP 只读工具 bench_echo', async () => {
+test('S5 MCP 只读工具 bench_echo + 用户级 header/_meta 注入', async () => {
   const sid = sessionIdFor(`s5-${uniq()}`);
   const arg = `mcp-${uniq()}`;
   const stream = chat({ message: `[E2E:tool:mcp_echo](${arg})`, userId: U, sessionId: sid });
@@ -97,6 +97,17 @@ test('S5 MCP 只读工具 bench_echo', async () => {
   expect(stream.terminal?.type).toBe('done');
   const results = toolResults(stream.frames);
   expect(String((results[0] as Record<string, unknown>).state ?? '')).toBe('SUCCESS');
+
+  // 用户级注入：config.yaml userHeaders 映射 X-User-Id ← userId（缺值 deny fail-closed）；
+  // 校验 mock 侧实收：HTTP header 为真实 userId（Channel 链路经 session_user 反查），
+  // 协议 _meta 携带同一 userId（McpMeta 双通道）
+  type LastCall = { xUserId?: string | null; meta?: Record<string, unknown> | null };
+  const last = await pollUntil<LastCall>(
+    async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
+    v => v.xUserId === U,
+  );
+  expect(last.xUserId).toBe(U);
+  expect(last.meta?.userId).toBe(U);
 });
 
 test('S6 参数校验负例', async ({ request }) => {
