@@ -38,6 +38,8 @@ type Config struct {
 	RegisterTimeout time.Duration // 等待 Deployment Ready 超时
 	RegisterRetry   int           // agent-card 拉取重试次数
 
+	DeploymentTemplate string // 业务 Deployment overlay 文件路径（Strategic Merge Patch），空=纯内置构造
+
 	AuthToken string // 非空时启用 Bearer 校验
 }
 
@@ -56,6 +58,7 @@ func Load() (*Config, error) {
 		ResourceLimitsMem:   envStr("RESOURCE_LIMITS_MEM", "1Gi"),
 		RegisterTimeout:     time.Duration(envInt("REGISTER_TIMEOUT_SEC", 120)) * time.Second,
 		RegisterRetry:       envInt("REGISTER_RETRY", 5),
+		DeploymentTemplate:  envStr("DEPLOYMENT_TEMPLATE", ""),
 		AuthToken:           envStr("AUTH_TOKEN", ""),
 	}
 	if c.MySQLDSN == "" {
