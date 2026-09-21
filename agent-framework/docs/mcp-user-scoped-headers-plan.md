@@ -283,7 +283,11 @@ confirm 是新的 HTTP 请求,网关会再次注入同用户的 `X-User-Token`�
 **后续候选**:user_auth 式"平台保管 userId→token 映射"(方案 2)、token 启用时
 A2A params 的透传字段形态(Q3 遗留;Q2 已决议不做 `_meta` 排除,不再候选)。
 
-## 9. 实施拆分(评审决议已齐,待排期执行)
+## 9. 实施拆分(已实施,2026-09-21;T1/T2/T3/T5/T7/T8 完成,T4 随 Q1 延后,T6 按 Q6 撤销)
+
+> 实施记录:单测 4 类 25 用例 + 全量 728 全绿;e2e core 37 / sandbox 7 / multi 7 全绿
+> (S5 断言 mock 实收 `X-User-Id`=真实 userId 且 `params._meta.userId` 一致);kind 部署
+> 验证通过。T8 落地为 bench mock `/last-call` 观测面 + e2e S5 扩展断言。
 
 | # | 任务 | 验证 |
 |---|------|------|

@@ -96,6 +96,7 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 ### 触发规则（按目录过滤，加速无关变更）
 
 - **push 仅 master**（跑测试 + 发布镜像）；**其余分支只在 PR 时触发**（避免双事件重复跑，门禁只认 PR run）
+- **concurrency 组含 workflow 维度**（`ci-${{ github.workflow }}-<分支名>`，PR #10）：同工作流内同分支新旧 run 互斥（双事件仍只保留最新一次），**跨工作流互不取消**——修复前共享组名导致 master push 三工作流互相取消（无关 job 显示 cancelled 而非 skipped、镜像推送可能被静默取消丢失）
 - **PR / master push** 都会启动三个工作流，但 **job 按改动目录过滤**：
   - `backend/**` → backend-ci 的单测
   - `frontend/**` → frontend-ci 的单测
@@ -110,7 +111,7 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（76 类 / 679 用例） | 核心/多副本/沙箱三 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| agent-framework-ci | `mvn test`（81 类 / 728 用例） | 核心/多副本/沙箱三 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
 
 ### 日常提交流程（必须走 PR 门禁）
 

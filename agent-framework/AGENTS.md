@@ -45,8 +45,9 @@ agent-framework/
 │   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream + HITL 恢复)
 │   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换（skills 由 L2 仓库动态加载，不再复制）
 │   │   │   │   ├── SkillCatalogService.java     # 动态技能目录（frontmatter 声明 ∪ /config/skills 目录事实，/skills、A2A 卡片数据源）
-│   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据)
+│   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据 + userHeaders 解析/装饰)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
+│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: UserScopedMcpClientWrapper (per-call header 注入) / McpUserContextMiddleware (userId→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
@@ -133,12 +134,14 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 ### 3. McpToolRegistrar — MCP 原生注册
 
-- 从 `mcp-configs/{server}/config.yaml` 读取 `connection` + `auth` + `permissions`
+- 从 `mcp-configs/{server}/config.yaml` 读取 `connection` + `auth` + `permissions` + `userHeaders`
 - 支持 `sse` / `streamableHttp` / `stdio` 三种传输
+- **client 统一 `buildAsync()` 构建**（`McpClientWrapper` 返回 `McpAsyncClientWrapper`）：per-call 用户 header 依赖 Reactor Context 传播，sync 客户端 `block()` 桥接会断链（资源代理 `buildSyncClient` 独立链路不受影响）
 - **支持 `permissions.read_only: true`**: 非只读 MCP 工具被权限系统拦截时，强制注册为只读绕过 HITL
 - **支持 ActiveMCP.json 子集过滤**: `selectedTools` 中 `enabled: false` 的工具不注册到 Toolkit
 - **工具注册名**: 使用远端裸名（`tool.name()`），确保 `McpTool.callAsync` 正确执行；`mcp__{server}__{tool}` 前缀名仅用于 API 展示和注册缓存（因 `McpTool.getName()` 是 `final` 字段，无法分离 LLM 暴露名和执行名）
 - **MCP Apps (阶段一/二)**: config.yaml 支持 `ui.tools.{tool}.resource_uri`（`ui://xxx` 静态声明）与 `ui.app_only: true`（仅卡片展示、不入 LLM 工具集）；`resolveUiRef(toolName)` 供 SSE 序列化携带 `ui` 元数据；`/tools`、`/mcp` 接口输出 `uiResourceUri`/`appOnly`/`has_ui`；Manifest 动态发现（`tool.meta()` 的 `_meta`）用于 resourceUri 预检
+- **多租户按用户调用（userHeaders + `_meta` 双通道，PR #9）**: config.yaml `userHeaders.headers` 声明 `header 名 ← McpMeta key`（如 `X-User-Id: userId`）+ `on-missing`（缺省 deny，fail-closed）；`McpUserContextMiddleware`（唯一注入点，覆盖 Channel/invoke/A2A/confirm 全链路）把生效 userId 写入 `McpMeta` —— Channel 链路 `RuntimeContext.userId` 为网关 peer（=会话 id），按 `session_user` 表反查真实用户；业务调用经 `UserScopedMcpClientWrapper` 注入下游 HTTP header（静态 `auth.token` 仅用于连接初始化与 tools/list 发现），meta 同时随 `CallToolRequest._meta` 下传；stdio 传输告警忽略；设计详见 [docs/mcp-user-scoped-headers-plan.md](docs/mcp-user-scoped-headers-plan.md)
 
 ### 3.5 MCP Apps 运行链路（Debug 页卡片 + 4.7 静默更新）
 
@@ -204,7 +207,8 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 通过 `McpToolRegistrar` 从 `mcp-configs/{server}/config.yaml` 注册。
 - 传输: `sse` / `streamableHttp` / `stdio`
-- 认证: `auth.token` 支持 `${ENV_VAR}` 语法
+- 认证: `auth.token` 支持 `${ENV_VAR}` 语法（静态凭据，仅用于连接初始化与 tools/list 发现）
+- 多租户: `userHeaders.headers`（header 名 ← McpMeta key）+ `on-missing: deny|passthrough`（缺省 deny）；userId 经 `McpUserContextMiddleware` 写入 McpMeta，双通道生效（HTTP header + `_meta`）
 - 权限: `permissions.read_only: true` 强制只读
 - 子集: `mcp-configs/{server}/ActiveMCP.json` 的 `selectedTools.enabled` 控制注册子集
 - 命名: Toolkit 注册用远端裸名；`/tools`、`/mcp` API 用 `mcp__{server}__{tool}` 展示名
