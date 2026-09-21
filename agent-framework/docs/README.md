@@ -43,6 +43,7 @@
 | [mysql-filesystem-plan.md](mysql-filesystem-plan.md) | MySQL 文件系统（agent_fs），已完成 |
 | [multi-tenancy-improvement-plan.md](multi-tenancy-improvement-plan.md) | 多租户隔离（IsolationScope.USER），已落地 |
 | [tool-system-improvement-plan.md](tool-system-improvement-plan.md) | 工具体系改进（McpToolRegistrar 原生化），已改进 |
+| [mcp-user-scoped-headers-plan.md](mcp-user-scoped-headers-plan.md) | MCP 多租户按用户调用（userHeaders 声明式配置 + `_meta` 双通道、middleware 单点注入、X-User-Token 延后），**已实施**（PR #9，2026-09-21；含 Q1–Q6 评审决议与 Q4 实施期结论：Channel 链路经 session_user 反查真实 userId） |
 | [agentscope-features-enable-plan.md](agentscope-features-enable-plan.md) | AgentScope 2.0 五大 Harness 功能启用，已完成 |
 | [debug-page-refactor-plan.md](debug-page-refactor-plan.md) | Debug 页拆分架构重构，已完成 |
 | [event-system-upgrade-plan.md](event-system-upgrade-plan.md) | 事件体系升级（含逐条作废声明），历史快照 |
@@ -55,7 +56,6 @@
 | [file-support-plan.md](file-support-plan.md) | 文档解析（POI/Tika/PDFBox）+ 图片多模态识别提案，未实施 |
 | [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | Java SPI + plugins/ 热插拔自定义工具提案，未实施 |
 | [pvc-to-s3-migration-plan.md](pvc-to-s3-migration-plan.md) | PVC 使用盘点 + 双集群（共用 MySQL）下文件/OAF 包迁 S3 影响评估（2026-09-20 评估稿，**未实施**；含 §6.4b 沙箱模式影响：OpenSandbox 自身 HA，部署形态决定会话能否跨集群续） |
-| [mcp-user-scoped-headers-plan.md](mcp-user-scoped-headers-plan.md) | MCP 多租户按用户调用设计（userHeaders 声明式配置 + `_meta` 双通道，middleware 单点注入覆盖 Channel/A2A 全链路；X-User-Id 身份头先行，X-User-Token 延后；2026-09-21 评审决议已齐，**未实施**；前置条件 buildSync→buildAsync 迁移） |
 
 ## ④ 已被取代（结论失效，仅供考古）
 
