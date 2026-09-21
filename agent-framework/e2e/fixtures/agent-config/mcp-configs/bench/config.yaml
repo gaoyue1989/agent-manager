@@ -12,3 +12,9 @@ permissions:
   read_only: true
   tools:
     bench_echo: allow
+
+# 用户级 header 注入（e2e 断言入口）：工具调用按调用方 userId 注入 X-User-Id，
+# mock /last-call 回读校验（缺值默认 deny，fail-closed）
+userHeaders:
+  headers:
+    X-User-Id: userId
