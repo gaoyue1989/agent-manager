@@ -42,6 +42,17 @@ type ConfigView struct {
 	ResCPU, ResMem, LimCPU, LimMem string
 	RegisterTimeout                time.Duration
 	RegisterRetry                  int
+	// DeployBuilder 业务 Deployment 构造门面（内置构造 + 可选环境 overlay）；
+	// nil 视为纯内置构造，模式同 ImageAllowed 函数字段便于测试注入。
+	DeployBuilder *k8s.DeploymentBuilder
+}
+
+// deployBuilder 兜底取 builder：未注入时退回纯内置构造（历史行为）。
+func (c *Core) deployBuilder() *k8s.DeploymentBuilder {
+	if c.Cfg.DeployBuilder != nil {
+		return c.Cfg.DeployBuilder
+	}
+	return &k8s.DeploymentBuilder{}
 }
 
 var (
@@ -99,9 +110,9 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		Status:        store.StatusCreated,
 		AgentCardJSON: "{}",
 		SkillsJSON:    "[]",
-		Endpoint:    fmt.Sprintf("http://%s:%d/agent/%s/", c.Cfg.IngressHost, c.Cfg.IngressPort, k8s.ShortName(k8sName)),
-		ClusterURL:  fmt.Sprintf("http://%s-svc.%s.svc.cluster.local:%d", k8sName, c.Cfg.Namespace, k8s.AgentPort),
-		ShortName:   k8s.ShortName(k8sName),
+		Endpoint:      fmt.Sprintf("http://%s:%d/agent/%s/", c.Cfg.IngressHost, c.Cfg.IngressPort, k8s.ShortName(k8sName)),
+		ClusterURL:    fmt.Sprintf("http://%s-svc.%s.svc.cluster.local:%d", k8sName, c.Cfg.Namespace, k8s.AgentPort),
+		ShortName:     k8s.ShortName(k8sName),
 	}
 
 	svc.Status = store.StatusDeploying // 落库即为 deploying（事件保留 created→deploying 审计）
@@ -128,7 +139,14 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 }
 
 // applyAll 幂等创建/更新 CM+Deployment+Service+Ingress。
+// Deployment 经 DeployBuilder（内置构造 + 可选环境 overlay 合并 + 不变量校验），
+// overlay 违规视为 apply 失败，服务转 error 状态。Build 纯函数零成本前置：
+// 非法 overlay 时 CM/Service/Ingress 不落半套资源。
 func (c *Core) applyAll(p k8s.ObjectParams) error {
+	dep, err := c.deployBuilder().Build(p)
+	if err != nil {
+		return fmt.Errorf("deployment: %w", err)
+	}
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
 	}
@@ -138,7 +156,7 @@ func (c *Core) applyAll(p k8s.ObjectParams) error {
 	if err := c.K8s.EnsureIngress(k8s.Ingress(p)); err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
-	if err := c.K8s.EnsureDeployment(k8s.Deployment(p)); err != nil {
+	if err := c.K8s.EnsureDeployment(dep); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
 	return nil

@@ -29,14 +29,15 @@ const (
 	LabelKey            = "app.kubernetes.io/name"
 	DataVolumeName      = "oaf-config"
 	WorkspaceVolumeName = "agent-workspace"
+	WorkspaceMountPath  = "/workspace"
 	ManagedByLabel      = "app.kubernetes.io/managed-by"
 	ManagedByValue      = "oaf-platform"
 	PVCName             = "platform-data"
 	// 文件存储可写挂载（file-upload-download-plan §13 P1 跨模块）：
 	// platform-data PVC subPath "files/" 挂 /data/files，业务 agent 文件上传/产出落此处。
-	FilesVolumeName   = "agent-files"
-	FilesSubPath      = "files"
-	FilesMountPath    = "/data/files"
+	FilesVolumeName = "agent-files"
+	FilesSubPath    = "files"
+	FilesMountPath  = "/data/files"
 	// 日志规范挂载：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源，logback 写入该目录
 	ApplogVolumeName = "applog"
 	ApplogMountPath  = "/applog"
@@ -132,16 +133,16 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 						Ports:           []corev1.ContainerPort{{ContainerPort: AgentPort}},
 						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}}},
 						Env:             fixedEnv,
-VolumeMounts: []corev1.VolumeMount{
-						// OAF 包只读挂载到 /config（同一可写卷的只读 subPath）；工作区为独立可写空目录
-						{Name: FilesVolumeName, MountPath: "/config", SubPath: p.SubPath, ReadOnly: true},
-						{Name: WorkspaceVolumeName, MountPath: "/workspace"},
-						// 文件存储可写挂载：platform-data subPath files/ → /data/files（FILE_STORAGE_LOCAL_DIR）
-						// 与 /config 共用同一卷（agent-files）——避免同 PVC 双 volume 引用
-						{Name: FilesVolumeName, MountPath: FilesMountPath, SubPath: FilesSubPath},
-						// 日志规范：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源
-						{Name: ApplogVolumeName, MountPath: ApplogMountPath},
-					},
+						VolumeMounts: []corev1.VolumeMount{
+							// OAF 包只读挂载到 /config（同一可写卷的只读 subPath）；工作区为独立可写空目录
+							{Name: FilesVolumeName, MountPath: "/config", SubPath: p.SubPath, ReadOnly: true},
+							{Name: WorkspaceVolumeName, MountPath: WorkspaceMountPath},
+							// 文件存储可写挂载：platform-data subPath files/ → /data/files（FILE_STORAGE_LOCAL_DIR）
+							// 与 /config 共用同一卷（agent-files）——避免同 PVC 双 volume 引用
+							{Name: FilesVolumeName, MountPath: FilesMountPath, SubPath: FilesSubPath},
+							// 日志规范：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源
+							{Name: ApplogVolumeName, MountPath: ApplogMountPath},
+						},
 						ReadinessProbe: withDelay(probe, 15, 5),
 						LivenessProbe:  withDelay(probe, 60, 15),
 						Resources: corev1.ResourceRequirements{
@@ -209,12 +210,12 @@ func Ingress(p ObjectParams) *networkingv1.Ingress {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
 			Annotations: map[string]string{
-				"nginx.ingress.kubernetes.io/rewrite-target":    "/$2",
-				"nginx.ingress.kubernetes.io/use-regex":         "true",
-				"nginx.ingress.kubernetes.io/ssl-redirect":      "false",
+				"nginx.ingress.kubernetes.io/rewrite-target": "/$2",
+				"nginx.ingress.kubernetes.io/use-regex":      "true",
+				"nginx.ingress.kubernetes.io/ssl-redirect":   "false",
 				// A2A blocking 请求与 SSE 流式场景需要长超时
-				"nginx.ingress.kubernetes.io/proxy-read-timeout":  "3600",
-				"nginx.ingress.kubernetes.io/proxy-send-timeout":  "3600",
+				"nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
+				"nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
 				// 向后端透传外部前缀（Debug Console 尾斜杠重定向等场景）
 				"nginx.ingress.kubernetes.io/x-forwarded-prefix": fmt.Sprintf("/agent/%s", short),
 			},

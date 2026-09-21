@@ -1,0 +1,63 @@
+# 业务 Deployment overlay 示例（Strategic Merge Patch 语义）
+#
+# 用法：
+#   1. 按需裁剪本文件内容（只保留要改的字段），存为 ConfigMap 或宿主文件
+#   2. 给 platform-backend 设置环境变量 DEPLOYMENT_TEMPLATE 指向该文件路径
+#   3. kubectl rollout restart deployment/platform-backend
+#
+# 合并规则（K8s Strategic Merge Patch）：
+#   - containers/volumes 按 name 子合并：只写要覆盖的字段（如 volumes 只写 claimName），
+#     其余内置字段保留；容器列表追加新条目 = 新增 sidecar
+#   - volumeMounts 按 mountPath 子合并
+#   - env/envFrom/imagePullSecrets 为原子列表：写 null 清空内置值、写新列表整体替换
+#   - $patch: delete 指令可精确删除单条（如删除某个 volumeMount）
+#
+# 校验（违规即启动失败/发布失败，错误信息指明违例项）：
+#   - 禁改：metadata.name/namespace、spec.replicas、spec.selector（含 matchExpressions）
+#   - 必须保留：agent 主容器、envFrom {name}-env、/config 只读 subPath 挂载、
+#     /workspace、/data/files、/applog 可写挂载、保留键 env
+#     （AGENT_CONFIG_DIR/AGENT_WORKSPACE_DIR/SERVER_HOST/SERVER_PORT/HOST_NAME）
+#   - 所有 volumeMount 引用的 volume 必须存在
+spec:
+  template:
+    spec:
+      # ---- 常用项示例（按需取消注释） ----
+
+      # 私有仓库拉取密钥
+      # imagePullSecrets:
+      #   - name: regcred
+
+      # 调度约束
+      # nodeSelector:
+      #   pool: agents
+      # tolerations:
+      #   - key: dedicated
+      #     operator: Equal
+      #     value: agents
+      #     effect: NoSchedule
+      # affinity:
+      #   podAntiAffinity:
+      #     preferredDuringSchedulingIgnoredDuringExecution:
+      #       - weight: 100
+      #         podAffinityTerm:
+      #           topologyKey: kubernetes.io/hostname
+      #           labelSelector:
+      #             matchLabels:
+      #               app.kubernetes.io/managed-by: oaf-platform
+
+      # ---- 换 PVC 名（本功能最初的诉求）----
+      # 与内置卷同名 agent-files → 按 name 合并，仅覆盖 claimName；
+      # /config 与 /data/files 继续共用这一卷（平台约定：单卷双 subPath）
+      volumes:
+        - name: agent-files
+          persistentVolumeClaim:
+            claimName: platform-data
+
+      # ---- sidecar 示例 ----
+      # containers:
+      #   - name: log-shipper
+      #     image: busybox:1.36
+      #     command: ["sh", "-c", "tail -F /applog/*/trace.log"]
+      #     volumeMounts:
+      #       - name: applog
+      #         mountPath: /applog

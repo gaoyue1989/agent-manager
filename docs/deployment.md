@@ -105,3 +105,31 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
 1. **更新任一镜像后**：重新 save/import 后必须 `kubectl -n agent-platform rollout restart deployment/<name>`——同名 tag 不会自动触发滚动，且 Ingress 注解由 platform-backend 下发，改注解逻辑后必须重启它再 republish。
 2. 业务 Pod 的 OAF 包挂载在 `/config`（只读）+ 工作区 `/workspace`（可写）+ 日志目录 `/applog`（可写，规范日志输出，见「五、业务日志规范」）。
 3. MCP server 不可达默认不阻断启动（fail-soft）；必需依赖在包内写 `startup.required: true`。
+
+## 六、业务 Deployment 环境模板（DEPLOYMENT_TEMPLATE，可选）
+
+业务 Agent 的 Deployment 由 platform-backend 内置逻辑构造；部署形态（PVC 名、调度约束、镜像拉取密钥、sidecar 等）可通过可选的 **YAML overlay** 调整，不改 Go 代码。
+
+```bash
+# 1) 从示例裁剪出环境的 overlay（只保留要改的字段）
+#    完整合并规则/校验不变量/可改项见 backend/templates/deployment-overlay.example.yaml 注释
+kubectl -n agent-platform create configmap deployment-template \
+  --from-file=overlay.yaml=backend/templates/deployment-overlay.example.yaml
+
+# 2) 挂载给 platform-backend 并设置环境变量
+kubectl -n agent-platform patch deploy platform-backend --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"deploy-tpl","mountPath":"/etc/oaf/deployment-template","readOnly":true}},
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"deploy-tpl","configMap":{"name":"deployment-template"}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"DEPLOYMENT_TEMPLATE","value":"/etc/oaf/deployment-template/overlay.yaml"}}]'
+
+# 3) 生效与回滚
+kubectl -n agent-platform rollout restart deployment/platform-backend   # 新发布/republish 即带 overlay 形态
+kubectl -n agent-platform set env deploy/platform-backend DEPLOYMENT_TEMPLATE-  # 回滚=去掉环境变量
+```
+
+行为要点：
+
+- **不设置 `DEPLOYMENT_TEMPLATE` = 纯内置构造**，行为与未上此功能前完全一致。
+- overlay 按 K8s Strategic Merge Patch 语义合并：`volumes`/`containers` 按 name 子合并（换 PVC 名只写 `claimName` 一个字段），其余内置字段保留；追加容器即新增 sidecar。
+- 非法 overlay **启动即失败**（backend CrashLoop，日志指明违例项）；发布期二次校验兜底，违规发布被拒、服务转 error。
+- overlay 变更只影响之后 apply 的服务；**存量服务需 republish 或 rollout restart 才滚动到新形态**。

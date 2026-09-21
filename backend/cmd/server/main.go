@@ -34,6 +34,13 @@ func main() {
 	}
 	kc.WithNamespace(cfg.Namespace)
 
+	// 业务 Deployment 构造门面：DEPLOYMENT_TEMPLATE 指向 overlay 文件（可空）。
+	// 非法 overlay 启动即失败（fail-fast），避免带病受理发布请求。
+	depBuilder, err := k8sclient.NewDeploymentBuilder(cfg.DeploymentTemplate)
+	if err != nil {
+		log.Fatalf("deployment template: %v", err)
+	}
+
 	core := service.NewCore(db, fs, kc, service.ConfigView{
 		Namespace:       cfg.Namespace,
 		IngressClass:    cfg.IngressClass,
@@ -48,6 +55,7 @@ func main() {
 		LimMem:          cfg.ResourceLimitsMem,
 		RegisterTimeout: cfg.RegisterTimeout,
 		RegisterRetry:   cfg.RegisterRetry,
+		DeployBuilder:   depBuilder,
 	})
 
 	gin.SetMode(gin.ReleaseMode)
