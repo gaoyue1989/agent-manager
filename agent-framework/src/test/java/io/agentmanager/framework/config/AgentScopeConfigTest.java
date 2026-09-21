@@ -170,7 +170,7 @@ class AgentScopeConfigTest {
 
         assertThrows(RuntimeException.class,
             () -> config.harnessAgent(props, store, oaf, ws, mcp,
-                List.of(new BusinessTools()), new LLMLogger(), null, null));
+                List.of(new BusinessTools()), new LLMLogger(), null, null, null));
     }
 
     // ---------- buildPermissionContext：自定义工具 HITL 装配（hitl-permission-plan 6.1） ----------
