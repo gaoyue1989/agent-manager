@@ -2,11 +2,13 @@ package store
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,9 +214,163 @@ func (f *FS) Tree(rel string) ([]FileEntry, error) {
 
 // ReadFile 读包内单个文件（仅允许相对包根的路径）。
 func (f *FS) ReadFile(rel, sub string) ([]byte, error) {
-	clean := strings.TrimPrefix(filepath.Clean("/"+sub), "/")
-	if clean == "" || strings.Contains(sub, "..") || strings.Contains(sub, "\\") {
-		return nil, errors.New("illegal file path")
+	clean, err := CleanSubPath(sub)
+	if err != nil {
+		return nil, err
 	}
 	return os.ReadFile(filepath.Join(f.PackageDir(rel), clean))
+}
+// MaxPreviewSize 在线预览的文本文件大小上限（超出走下载）。
+const MaxPreviewSize = 512 << 10
+
+// textExts 视为文本可预览的扩展名白名单（之外靠内容嗅探兜底）。
+var textExts = map[string]bool{
+	".md": true, ".markdown": true, ".txt": true, ".yaml": true, ".yml": true,
+	".json": true, ".xml": true, ".html": true, ".css": true, ".csv": true,
+	".js": true, ".mjs": true, ".ts": true, ".tsx": true, ".jsx": true,
+	".go": true, ".py": true, ".sh": true, ".bash": true, ".sql": true,
+	".toml": true, ".ini": true, ".conf": true, ".properties": true,
+	".java": true, ".gradle": true, ".dockerfile": true, ".env": true,
+	".gitignore": true, ".license": true,
+}
+
+// IsTextContent 判定文件是否可作为文本预览：扩展名白名单 + 内容嗅探（含 NUL 即二进制）双保险。
+// 二进制或超过 MaxPreviewSize 的文件返回 false，由调用方引导走下载。
+func IsTextContent(name string, data []byte) bool {
+	if len(data) > MaxPreviewSize {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == "" && (strings.EqualFold(filepath.Base(name), "dockerfile") || strings.HasPrefix(filepath.Base(name), ".")) {
+		// 无扩展名的 Dockerfile / dotfile（.gitignore 等）按文本处理
+		return !bytes.ContainsRune(data, 0)
+	}
+	if !textExts[ext] {
+		return false
+	}
+	// 嗅探前 8KB，出现 NUL 字节视为二进制
+	sniff := data
+	if len(sniff) > 8192 {
+		sniff = sniff[:8192]
+	}
+	return !bytes.ContainsRune(sniff, 0)
+}
+
+// CleanSubPath 包内相对路径合法性校验：拒绝空、绝对路径、..、反斜杠、超长路径。
+// 返回清理后的相对路径（不含前导 /），供 ReadFile/WriteZipTo 等复用。
+// 非法路径统一包装 ErrZipSlip（与 zip 条目校验同一哨兵，mapError 映射 400）。
+func CleanSubPath(sub string) (string, error) {
+	if sub == "" {
+		return "", fmt.Errorf("%w: empty", ErrZipSlip)
+	}
+	if len(sub) > 512 || strings.Contains(sub, "\\") || strings.Contains(sub, "..") {
+		return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+	}
+	clean := strings.TrimPrefix(filepath.Clean("/"+sub), "/")
+	if clean == "" || clean == "." {
+		return "", fmt.Errorf("%w: %q", ErrZipSlip, sub)
+	}
+	return clean, nil
+}
+
+// ZipPackage 将包目录打包为 zip 字节流（用于整包在线下载）。
+func (f *FS) ZipPackage(rel string) ([]byte, error) {
+	base := f.PackageDir(rel)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	err := filepath.WalkDir(base, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		sub, err := filepath.Rel(base, p)
+		if err != nil {
+			return err
+		}
+		if sub == "." {
+			return nil
+		}
+		if d.IsDir() {
+			_, err = zw.Create(sub + "/")
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		hdr := &zip.FileHeader{Name: sub, Method: zip.Deflate, Modified: info.ModTime()}
+		hdr.SetMode(d.Type().Perm())
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		_, err = io.Copy(w, src)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// WriteZipTo 将已通过安全校验的 zip 字节流解包到 root/rel（目录必须为空或不存在）。
+// 权限与路径规则同 ExtractZipTo（最低 0644，可执行位升 0755）。
+func (f *FS) WriteZipTo(rel string, zipData []byte) (int, int64, error) {
+	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid zip: %w", err)
+	}
+	if len(zr.File) > MaxEntries {
+		return 0, 0, ErrTooManyFiles
+	}
+	dest := f.PackageDir(rel)
+	var count int
+	var total int64
+	for _, zf := range zr.File {
+		if err := validateEntry(zf); err != nil {
+			return 0, 0, err
+		}
+		target := filepath.Join(dest, filepath.Clean(zf.Name))
+		if !strings.HasPrefix(target, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return 0, 0, ErrZipSlip
+		}
+		if zf.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return 0, 0, err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return 0, 0, err
+		}
+		perm := os.FileMode(0o644)
+		if zf.Mode().Perm()&0o111 != 0 {
+			perm = 0o755
+		}
+		src, err := zf.Open()
+		if err != nil {
+			return 0, 0, err
+		}
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+		if err != nil {
+			src.Close()
+			return 0, 0, err
+		}
+		n, err := io.Copy(out, src)
+		src.Close()
+		out.Close()
+		if err != nil {
+			return 0, 0, err
+		}
+		count++
+		total += n
+	}
+	return count, total, nil
 }

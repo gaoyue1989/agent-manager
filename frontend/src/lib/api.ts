@@ -17,8 +17,12 @@ async function upload<T = any>(path: string, file: File): Promise<T> {
   return body?.data as T;
 }
 
-export interface PackageRec { id: number; name: string; slug: string; version: string; description: string; refCount: number; fileCount: number; createdAt: string; }
+export interface PackageRec { id: number; name: string; slug: string; version: string; description: string; refCount: number; fileCount: number; totalSize?: number; sourcePackageId?: number; checksum?: string; createdAt: string; }
 export interface PackageDetail { package: PackageRec; tree: any[]; agentsMd: string; }
+export interface FileEntry { name: string; path: string; isDir: boolean; size?: number; children?: FileEntry[]; }
+export interface PackageFileContent { path: string; size: number; binary: boolean; content?: string; }
+export interface VersionUpsert { path: string; content: string; encoding?: string; }
+export interface CreateVersionResult { package: PackageRec; warnings: string[]; }
 export interface ServiceRec {
   id: number; k8sName: string; displayName: string; packageId: number; image: string;
   envJson: string; replicas: number; status: string; endpoint: string; clusterUrl: string;
@@ -32,15 +36,23 @@ export interface ImageOption { Image: string; Label: string }
 
 export const api = {
   // 包
-  listPackages: (keyword = "") => request<PackageRec[]>(`/packages?keyword=${encodeURIComponent(keyword)}`),
+  listPackages: (keyword = "", slug = "") =>
+    request<PackageRec[]>(`/packages?keyword=${encodeURIComponent(keyword)}&slug=${encodeURIComponent(slug)}`),
   getPackage: (id: number) => request<PackageDetail>(`/packages/${id}`),
   deletePackage: (id: number) => request(`/packages/${id}`, { method: "DELETE" }),
   uploadPackage: (file: File) => upload<PackageRec>(`/packages`, file),
+  getPackageFile: (id: number, path: string) =>
+    request<PackageFileContent>(`/packages/${id}/files?path=${encodeURIComponent(path)}`),
+  downloadPackageFile: (id: number, path: string) =>
+    `${BASE}/packages/${id}/files/download?path=${encodeURIComponent(path)}`,
+  downloadPackage: (id: number) => `${BASE}/packages/${id}/download`,
+  createPackageVersion: (id: number, body: { upserts?: VersionUpsert[]; deletes?: string[]; expectedBaseChecksum?: string }) =>
+    request<CreateVersionResult>(`/packages/${id}/versions`, { method: "POST", body: JSON.stringify(body) }),
   // 镜像
   listImages: () => request<ImageOption[]>(`/images`),
   // 服务
-  listServices: (status = "", keyword = "") =>
-    request<(ServiceRec & { pods?: PodInfo[] })[]>(`/services?status=${status}&keyword=${encodeURIComponent(keyword)}`),
+  listServices: (status = "", keyword = "", packageId = 0) =>
+    request<(ServiceRec & { pods?: PodInfo[] })[]>(`/services?status=${status}&keyword=${encodeURIComponent(keyword)}&packageId=${packageId}`),
   getService: (id: number) => request<ServiceDetail>(`/services/${id}`),
   publish: (body: { packageId: number; name?: string; image?: string; env?: Record<string, string>; replicas?: number }) =>
     request<ServiceRec>(`/services`, { method: "POST", body: JSON.stringify(body) }),

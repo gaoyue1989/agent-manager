@@ -49,10 +49,16 @@ export default function ServicesPage() {
     <div data-testid="services-page">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold">服务列表</h1>
-        <Link href="/publish" data-testid="publish-entry"
-          className="bg-blue-600 hover:bg-blue-700 text-white text-sm rounded px-4 py-2">
-          发布新服务
-        </Link>
+        <div className="space-x-2">
+          <Link href="/packages" data-testid="packages-entry"
+            className="border border-blue-600 text-blue-600 hover:bg-blue-50 text-sm rounded px-4 py-2 inline-block">
+            配置包
+          </Link>
+          <Link href="/publish" data-testid="publish-entry"
+            className="bg-blue-600 hover:bg-blue-700 text-white text-sm rounded px-4 py-2 inline-block">
+            发布新服务
+          </Link>
+        </div>
       </div>
       {msg && <div className="mb-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">{msg}</div>}
       {loading ? (

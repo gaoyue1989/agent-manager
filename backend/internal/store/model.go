@@ -17,7 +17,8 @@ type OafPackage struct {
 	DirPath      string    `gorm:"size:256" json:"dirPath"`       // PVC 内相对路径 packages/{id}
 	FileCount    int       `json:"fileCount"`
 	TotalSize    int64     `json:"totalSize"`
-	Checksum     string    `gorm:"size:64" json:"checksum"` // zip sha256
+	Checksum     string    `gorm:"size:64" json:"checksum"`        // zip sha256
+	SourcePackageID uint   `gorm:"index" json:"sourcePackageId"`   // 0=上传原始包；>0=由该包编辑派生
 	RefCount     int       `json:"refCount"`
 	CreatedAt    time.Time `json:"createdAt"`
 }

@@ -48,6 +48,7 @@ func (s *PackageService) Upload(filename string, r io.Reader) (*store.OafPackage
 		Description:  cfg.Description,
 		ManifestJSON: string(manifest), WarningsJSON: string(warnJSON),
 		Checksum: zi.Checksum,
+		FileCount: zi.FileCount, TotalSize: zi.TotalSize,
 	}
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(rec).Error; err != nil {
@@ -66,10 +67,13 @@ func (s *PackageService) Upload(filename string, r io.Reader) (*store.OafPackage
 	return rec, nil
 }
 
-func (s *PackageService) List(keyword string) ([]store.OafPackage, error) {
+func (s *PackageService) List(keyword, slug string) ([]store.OafPackage, error) {
 	q := s.DB.Model(&store.OafPackage{}).Order("id DESC")
 	if keyword != "" {
 		q = q.Where("name LIKE ? OR slug LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	if slug != "" {
+		q = q.Where("slug = ?", slug)
 	}
 	var out []store.OafPackage
 	return out, q.Find(&out).Error

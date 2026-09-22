@@ -14,15 +14,15 @@ func TestListKeywordFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	byK8s, err := core.List("", "oaf-billing")
+	byK8s, err := core.List("", "oaf-billing", 0)
 	if err != nil || len(byK8s) != 1 {
 		t.Fatalf("filter by k8s_name: %v n=%d", err, len(byK8s))
 	}
-	byDisplay, err := core.List("", "billing-bot")
+	byDisplay, err := core.List("", "billing-bot", 0)
 	if err != nil || len(byDisplay) != 1 {
 		t.Fatalf("filter by display_name: %v n=%d", err, len(byDisplay))
 	}
-	none, err := core.List("", "no-such")
+	none, err := core.List("", "no-such", 0)
 	if err != nil || len(none) != 0 {
 		t.Fatalf("filter miss: %v n=%d", err, len(none))
 	}

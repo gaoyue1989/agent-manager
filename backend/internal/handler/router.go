@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -39,7 +42,7 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			OK(c, rec)
 		})
 		pk.GET("", func(c *gin.Context) {
-			list, err := core.Packages.List(c.Query("keyword"))
+			list, err := core.Packages.List(c.Query("keyword"), c.Query("slug"))
 			if err != nil {
 				mapError(c, err)
 				return
@@ -59,6 +62,82 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			}
 			agentsMD, _ := core.Packages.ReadFile(rec, "AGENTS.md")
 			OK(c, gin.H{"package": rec, "tree": tree, "agentsMd": string(agentsMD)})
+		})
+		pk.GET("/:id/files", func(c *gin.Context) {
+			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+			rec, err := core.Packages.Get(uint(id))
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			sub := c.Query("path")
+			if sub == "" {
+				Fail(c, http.StatusBadRequest, "query param 'path' is required")
+				return
+			}
+			fc, err := core.Packages.FileContent(rec, sub)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, fc)
+		})
+		pk.GET("/:id/files/download", func(c *gin.Context) {
+			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+			rec, err := core.Packages.Get(uint(id))
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			sub := c.Query("path")
+			if sub == "" {
+				Fail(c, http.StatusBadRequest, "query param 'path' is required")
+				return
+			}
+			data, err := core.Packages.ReadFile(rec, sub)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			c.DataFromReader(http.StatusOK, int64(len(data)), "application/octet-stream",
+				bytes.NewReader(data), nil)
+			c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(sub)))
+		})
+		pk.GET("/:id/download", func(c *gin.Context) {
+			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+			rec, err := core.Packages.Get(uint(id))
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			data, err := core.Packages.Zip(rec)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			c.DataFromReader(http.StatusOK, int64(len(data)), "application/zip",
+				bytes.NewReader(data), nil)
+			c.Header("Content-Disposition",
+				fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s-%s.zip", rec.Slug, rec.Version)))
+		})
+		pk.POST("/:id/versions", func(c *gin.Context) {
+			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+			base, err := core.Packages.Get(uint(id))
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			var req service.VersionRequest
+			if err := c.ShouldBindJSON(&req); err != nil {
+				Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			rec, warnings, err := core.Packages.CreateVersion(base, req)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, gin.H{"package": rec, "warnings": warnings})
 		})
 		pk.DELETE("/:id", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -86,7 +165,8 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			OK(c, svc)
 		})
 		sv.GET("", func(c *gin.Context) {
-			list, err := core.List(c.Query("status"), c.Query("keyword"))
+			pid, _ := strconv.ParseUint(c.Query("packageId"), 10, 64)
+			list, err := core.List(c.Query("status"), c.Query("keyword"), uint(pid))
 			if err != nil {
 				mapError(c, err)
 				return

@@ -1,13 +1,24 @@
 "use client";
 // 发布向导：上传/选择 OAF 包 → 选镜像 → 编辑环境变量 → 提交发布
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+// 支持 ?packageId= 深链预选包（从包详情/列表"去发布"跳入）
+import { useCallback, useEffect, useRef, useState, Suspense } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { api, ImageOption, PackageRec } from "@/lib/api";
 
 type EnvRow = { key: string; value: string };
 
 export default function PublishPage() {
+  return (
+    <Suspense fallback={<p className="text-gray-500">加载中…</p>}>
+      <PublishForm />
+    </Suspense>
+  );
+}
+
+function PublishForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const fileRef = useRef<HTMLInputElement>(null);
   const [packages, setPackages] = useState<PackageRec[]>([]);
   const [images, setImages] = useState<ImageOption[]>([]);
@@ -30,14 +41,25 @@ export default function PublishPage() {
 
   const load = useCallback(async () => {
     try {
-      setPackages(await api.listPackages());
+      const pkgs = await api.listPackages();
+      setPackages(pkgs);
       const imgs = await api.listImages();
       setImages(imgs);
       if (imgs.length > 0) setImage((cur) => cur || imgs[0].Image);
+      // 深链预选：?packageId=（包详情/列表"去发布"入口）
+      const deep = Number(searchParams.get("packageId"));
+      if (deep && !selectedPkg) {
+        const hit = pkgs.find((p) => p.id === deep);
+        if (hit) {
+          setSelectedPkg(hit.id);
+          setPkgSummary(`${hit.slug}@${hit.version}（${hit.fileCount} 个文件）`);
+          setName(hit.name);
+        }
+      }
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
-  }, []);
+  }, [searchParams, selectedPkg]);
   useEffect(() => { load(); }, [load]);
 
   const onUpload = async (file: File) => {
@@ -110,6 +132,13 @@ export default function PublishPage() {
           ))}
         </select>
         {pkgSummary && <p className="mt-2 text-xs text-gray-500" data-testid="pkg-summary">{pkgSummary}</p>}
+        {selectedPkg && (
+          <p className="mt-1 text-xs">
+            <Link href={`/packages/${selectedPkg}`} target="_blank" className="text-blue-600 hover:underline">
+              查看包详情 / 在线预览 ↗
+            </Link>
+          </p>
+        )}
       </section>
 
       {/* 步骤 2：镜像与实例 */}
