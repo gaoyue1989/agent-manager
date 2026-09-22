@@ -331,7 +331,7 @@ type VersionUpsertIn struct {
 	Encoding string `json:"encoding,omitempty" jsonschema:"utf8(默认) 或 base64"`
 }
 type CreateVersionIn struct {
-	PackageID            uint             `json:"packageId" jsonschema:"基础包 ID"`
+	PackageID            uint              `json:"packageId" jsonschema:"基础包 ID"`
 	Upserts              []VersionUpsertIn `json:"upserts,omitempty" jsonschema:"新增/覆盖的文件列表"`
 	Deletes              []string          `json:"deletes,omitempty" jsonschema:"删除的文件路径列表（根级 AGENTS.md 不可删）"`
 	ExpectedBaseChecksum string            `json:"expected_base_checksum,omitempty" jsonschema:"可选乐观锁：基础包当前 checksum，不符即拒绝"`

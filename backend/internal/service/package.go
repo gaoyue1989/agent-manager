@@ -47,7 +47,7 @@ func (s *PackageService) Upload(filename string, r io.Reader) (*store.OafPackage
 		Name: cfg.Name, Slug: cfg.Slug, Version: cfg.Version,
 		Description:  cfg.Description,
 		ManifestJSON: string(manifest), WarningsJSON: string(warnJSON),
-		Checksum: zi.Checksum,
+		Checksum:  zi.Checksum,
 		FileCount: zi.FileCount, TotalSize: zi.TotalSize,
 	}
 	err = s.DB.Transaction(func(tx *gorm.DB) error {

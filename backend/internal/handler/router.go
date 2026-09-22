@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"path"
 	"strconv"
@@ -96,12 +98,15 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			}
 			data, err := core.Packages.ReadFile(rec, sub)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					err = service.ErrNotFound
+				}
 				mapError(c, err)
 				return
 			}
+			c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(sub)))
 			c.DataFromReader(http.StatusOK, int64(len(data)), "application/octet-stream",
 				bytes.NewReader(data), nil)
-			c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(sub)))
 		})
 		pk.GET("/:id/download", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -115,10 +120,10 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 				mapError(c, err)
 				return
 			}
-			c.DataFromReader(http.StatusOK, int64(len(data)), "application/zip",
-				bytes.NewReader(data), nil)
 			c.Header("Content-Disposition",
 				fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s-%s.zip", rec.Slug, rec.Version)))
+			c.DataFromReader(http.StatusOK, int64(len(data)), "application/zip",
+				bytes.NewReader(data), nil)
 		})
 		pk.POST("/:id/versions", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)

@@ -5,6 +5,7 @@
 | 脚本 | 场景 | 内容 |
 |------|------|------|
 | platform-e2e.sh | A+B | REST 主链路 50 断言：上传→发布→A2A 注册→env 更新（含全量覆盖清除旧键）→republish→上下线→异常路径（deploying/stopped 改 env 拒绝、被引用包删除 400）→零残留清理（增量对齐基线，保护 release-agent）；镜像经 GET /images 动态选取不写死 |
+| package-edit-e2e.sh | A+ | 包在线预览/编辑 34 断言：单文件预览（文本/路径穿越/不存在）/整包与单文件下载→在线编辑生成新版本（派生溯源 sourcePackageId、基础包零修改、增删改生效、同 slug 过滤）→异常路径（无变更 400、删 AGENTS.md 400、乐观锁 409、非法 frontmatter 400）→发布→republish 换版（subPath 切换、引用计数 0→1、注册版本 1.0.0→1.1.0）→按包过滤服务→零残留清理 |
 | mcpclient/ (go run .) | C | MCP client 经 streamableHttp 走完整发布链路 27 断言（含 list_images/list_packages/get_package_detail/register_service 与两步确认删除） |
 | ui-e2e.js | D | Puppeteer UI 流程 10 断言（发布向导三步/详情轮询/重发布/删除） |
 | agent-e2e.sh | E | release-agent 自然语言驱动第三方发布+删除全链路 8 断言；变更类走 /threads/chat + confirm-stream HITL 确认流（需 release-agent ≥ HITL 20260917 部署）；A2A 通道仅查询探针（HITL 后 A2A ask 挂起不落 confirm_context，变更无法批准——待运行时修复） |
@@ -24,6 +25,7 @@
 
 ```bash
 ./platform-e2e.sh                       # BASE 默认 http://localhost:30080/api/v1
+./package-edit-e2e.sh                   # 包在线预览/编辑/换版发布 34 断言
 cd mcpclient && go run . -base http://localhost:30080/mcp -zip ../fixtures/demo-agent-v1.zip
 FRONTEND=http://172.20.0.3:30881 node ui-e2e.js
 node chat-ui-e2e.js                      # 默认 http://100.66.1.5:8911

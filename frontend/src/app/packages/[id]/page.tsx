@@ -24,16 +24,18 @@ export default function PackageDetailPage() {
 
   // 版本历史（同 slug）
   const [versions, setVersions] = useState<PackageRec[]>([]);
+  const [versionsErr, setVersionsErr] = useState(false);
   // 引用该包的服务
   const [services, setServices] = useState<ServiceRec[]>([]);
+  const [servicesErr, setServicesErr] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const d = await api.getPackage(id);
       setDetail(d);
-      // 版本历史与引用服务并行加载（失败不阻塞主视图）
-      api.listPackages("", d.package.slug).then(setVersions).catch(() => {});
-      api.listServices("", "", id).then(setServices).catch(() => {});
+      // 版本历史与引用服务并行加载（失败不阻塞主视图，但给出提示）
+      api.listPackages("", d.package.slug).then(setVersions).catch(() => setVersionsErr(true));
+      api.listServices("", "", id).then(setServices).catch(() => setServicesErr(true));
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
@@ -64,7 +66,7 @@ export default function PackageDetailPage() {
     try {
       await api.republish(svc.id, { packageId: pkg.id });
       setMsg(`服务 ${svc.displayName} 已开始切换，滚动完成后回到 running`);
-      await api.listServices("", "", id).then(setServices).catch(() => {});
+      api.listServices("", "", id).then(setServices).catch(() => setServicesErr(true));
     } catch (e: any) {
       setMsg(`更新失败: ${e.message}`);
     }
@@ -94,10 +96,10 @@ export default function PackageDetailPage() {
       <section className="bg-white border rounded p-4 text-sm space-y-1">
         <div>名称：{pkg.name}</div>
         <div className="text-gray-600">{pkg.description}</div>
-        <div className="text-xs text-gray-400">共 {pkg.fileCount} 个文件 · checksum: {pkg.checksum?.slice(0, 16)}…</div>
+        <div className="text-xs text-gray-400">共 {pkg.fileCount} 个文件 · checksum: {pkg.checksum ? `${pkg.checksum.slice(0, 16)}…` : "—"}</div>
       </section>
 
-      {/* 文件树 + 预览器 */}
+        {/* 文件树 + 预览器（.md/.markdown 渲染，与后端 IsTextContent 白名单一致） */}
       <section className="grid grid-cols-[260px_1fr] gap-4">
         <div className="bg-white border rounded p-3 max-h-[480px] overflow-auto">
           <h2 className="font-medium mb-2 text-sm">文件</h2>
@@ -117,7 +119,7 @@ export default function PackageDetailPage() {
             <p className="text-gray-400 text-sm">选择左侧文件预览</p>
           ) : file.binary ? (
             <p className="text-gray-400 text-sm">二进制或超过 512KB 的文件不支持在线预览，请下载查看。</p>
-          ) : ext === "md" ? (
+          ) : ext === "md" || ext === "markdown" ? (
             <div data-testid="file-md-view" className="text-sm max-w-3xl">
               <Markdown text={file.content || ""} />
             </div>
@@ -130,7 +132,9 @@ export default function PackageDetailPage() {
       {/* 版本历史 */}
       <section className="bg-white border rounded p-4">
         <h2 className="font-medium mb-2">版本历史（slug: {pkg.slug}）</h2>
-        {versions.length <= 1 ? (
+        {versionsErr ? (
+          <p className="text-xs text-amber-600">版本历史加载失败，请刷新重试。</p>
+        ) : versions.length <= 1 ? (
           <p className="text-xs text-gray-400">仅此版本。通过「在线编辑」可生成新版本。</p>
         ) : (
           <ul className="text-sm space-y-1" data-testid="version-list">
@@ -152,7 +156,9 @@ export default function PackageDetailPage() {
       {/* 引用服务 */}
       <section className="bg-white border rounded p-4">
         <h2 className="font-medium mb-2">引用该包的服务</h2>
-        {services.length === 0 ? (
+        {servicesErr ? (
+          <p className="text-xs text-amber-600">服务列表加载失败，请刷新重试。</p>
+        ) : services.length === 0 ? (
           <p className="text-xs text-gray-400">暂无服务引用此包。</p>
         ) : (
           <ul className="text-sm space-y-1" data-testid="pkg-services">

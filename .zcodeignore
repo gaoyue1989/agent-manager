@@ -1,0 +1,139 @@
+# Agent Manager .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+codegen/venv/
+codegen/test/output/
+
+# Go
+backend/vendor/
+*.exe
+*.dll
+*.so
+*.dylib
+backend/bin/
+
+# Java
+target/
+*.class
+*.jar
+*.war
+
+# Node
+node_modules/
+backend/server
+
+# Node
+node_modules/
+e2e/node_modules/
+**/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.test
+.env.secrets
+
+# Logs
+*.log
+
+# Kind / K8s
+sandbox/manifest.yaml
+sandbox/extensions.yaml
+docs/kind-config.yaml
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# Secrets (keep API keys out of repo)
+!codegen/schema/agent_config.json
+
+# Screenshots
+e2e/screenshots/
+*.png
+!docs/screenshots/
+
+# E2E test scripts
+e2e/screenshot.js
+e2e/hitl-card-test.js
+e2e/screenshot-hitl.js
+e2e/screenshot-ui.js
+e2e/screenshot-verify.js
+e2e/send_email.py
+
+# Approval Demo: 构建产物 / 依赖 / 截图（不纳入仓库）
+*.tar.gz
+agent-framework/example/approval-forms/e2e/node_modules
+agent-framework/example/approval-forms/e2e/screenshots/
+agent-framework/example/approval-forms/e2e/screenshots-full/
+e2e/mcpclient/mcpclient
+
+# 文件 E2E 运行时生成的临时 fixture（脚本自建，带运行级随机后缀）
+e2e/fixtures/demo-e2e-*.csv
+e2e/fixtures/e2e-frontend-test.csv
+.zcode/
+
+# Playwright MCP 测试运行产物（页面快照/控制台日志）
+.playwright-mcp/
+
+# Go 覆盖率产物（make cover）
+backend/cover.out
+
+# agent-framework E2E 运行产物（e2e-ci-plan §6.2）
+agent-framework/e2e/.runtime/
+agent-framework/e2e/playwright-report/
+agent-framework/e2e/test-results/
+agent-framework/e2e/node_modules/
+# 工作流真机探测脚本与运行日志（一次性验证产物）
+out/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+bower_components/
+jspm_packages/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

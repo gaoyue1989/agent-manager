@@ -24,6 +24,7 @@ export default function ServiceDetailPage() {
   const [savingEnv, setSavingEnv] = useState(false);
   const [pkg, setPkg] = useState<PackageRec | null>(null);
   const [versions, setVersions] = useState<PackageRec[]>([]);
+  const [versionsLoaded, setVersionsLoaded] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -34,15 +35,19 @@ export default function ServiceDetailPage() {
         try { env = JSON.parse(d.envJson || "{}"); } catch {}
         setEnvRows(Object.entries(env).map(([key, value]) => ({ key, value })));
       }
-      // 配置包信息 + 同 slug 版本列表（升级用）；失败不阻塞主视图
-      api.getPackage(d.packageId).then((pd) => {
-        setPkg(pd.package);
-        api.listPackages("", pd.package.slug).then(setVersions).catch(() => {});
-      }).catch(() => {});
+      // 配置包信息 + 同 slug 版本列表（升级用）；失败不阻塞主视图。
+      // 版本列表只拉一次（versionsLoaded 守卫）：5s 轮询重拉会重置升级下拉选择
+      if (!versionsLoaded) {
+        api.getPackage(d.packageId).then((pd) => {
+          setPkg(pd.package);
+          api.listPackages("", pd.package.slug).then((vs) => { setVersions(vs); setVersionsLoaded(true); })
+            .catch(() => setVersionsLoaded(true));
+        }).catch(() => {});
+      }
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
-  }, [id, envDirty]);
+  }, [id, envDirty, versionsLoaded]);
 
   useEffect(() => {
     load();

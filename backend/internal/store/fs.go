@@ -220,6 +220,7 @@ func (f *FS) ReadFile(rel, sub string) ([]byte, error) {
 	}
 	return os.ReadFile(filepath.Join(f.PackageDir(rel), clean))
 }
+
 // MaxPreviewSize 在线预览的文本文件大小上限（超出走下载）。
 const MaxPreviewSize = 512 << 10
 

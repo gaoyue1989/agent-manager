@@ -1,7 +1,7 @@
 "use client";
 // OAF 包在线编辑：左树右编辑器 + 变更集跟踪 + 生成新版本（copy-on-write，不写原包）
 // 编辑结果一次性以 upserts/deletes 提交 POST /packages/:id/versions，成功后跳新包详情
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import CodeMirror from "@uiw/react-codemirror";
@@ -35,15 +35,24 @@ export default function PackageEditPage() {
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [baseChecksum, setBaseChecksum] = useState("");
+  const loadIdRef = useRef(0); // 竞态防护：最新一次 load 的编号
 
   const load = useCallback(async () => {
+    // 竞态防护：切换 id / 快速导航后，旧请求返回不得覆盖新页 state。
+    // loadId 单调递增，只有最新一次 load 的返回才允许 setState。
+    loadIdRef.current += 1;
+    const myLoad = loadIdRef.current;
     try {
       const d = await api.getPackage(id);
+      if (loadIdRef.current !== myLoad) return;
       setDetail(d);
+      setBaseChecksum(d.package.checksum || "");
       // 拉取全部文本文件内容构造编辑态（二进制文件不进入编辑器，标记只读下载）
       const entries: Record<string, EditFile> = {};
       const walk = async (list: FileEntry[]) => {
         for (const e of list) {
+          if (loadIdRef.current !== myLoad) return;
           if (e.isDir) { await walk(e.children || []); continue; }
           try {
             const f = await api.getPackageFile(id, e.path);
@@ -60,12 +69,13 @@ export default function PackageEditPage() {
         }
       };
       await walk(d.tree || []);
+      if (loadIdRef.current !== myLoad) return;
       if (entries[DELETABLE_ROOT] === undefined && d.agentsMd) {
         entries[DELETABLE_ROOT] = { path: DELETABLE_ROOT, original: d.agentsMd, current: d.agentsMd, isNew: false };
       }
       setFiles(entries);
     } catch (e: any) {
-      setMsg(`加载失败: ${e.message}`);
+      if (loadIdRef.current === myLoad) setMsg(`加载失败: ${e.message}`);
     }
   }, [id]);
 
@@ -120,10 +130,19 @@ export default function PackageEditPage() {
     setSaving(true);
     setMsg("");
     try {
-      const res = await api.createPackageVersion(id, { upserts, deletes });
+      // 乐观锁：并发编辑同一基础包时，后端 checksum 不符返回 409 拒绝，避免静默丢失他人变更
+      const res = await api.createPackageVersion(id, {
+        upserts, deletes, expectedBaseChecksum: baseChecksum,
+      });
       router.push(`/packages/${res.package.id}`);
     } catch (e: any) {
-      setMsg(`生成新版本失败: ${e.message}`);
+      if (e.message.includes("no effective changes")) {
+        setMsg("没有检测到有效变更（与当前包内容一致），无需生成新版本。");
+      } else if (e.message.includes("checksum mismatch")) {
+        setMsg("该包已被他人更新（乐观锁冲突），请刷新页面后重新编辑保存。");
+      } else {
+        setMsg(`生成新版本失败: ${e.message}`);
+      }
       setSaving(false);
     }
   };
@@ -193,6 +212,7 @@ export default function PackageEditPage() {
               <a href={api.downloadPackageFile(id, active)} className="ml-1 text-blue-600 underline">下载</a></p>
           ) : (
             <CodeMirror
+              key={active} /* 按文件重挂载：规避包装库 typing latch 在切换文件时把 A 的内容 dispatch 进 B */
               value={activeFile.current}
               height="520px"
               extensions={langExt(active)}

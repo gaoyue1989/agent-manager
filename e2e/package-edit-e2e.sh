@@ -41,6 +41,9 @@ PICK_IMG() {
   echo "${pick:-agent-framework:latest}"
 }
 
+# 本轮隔离基线：脚本开始前已存在的 e2e/demo 包数（V4.5 断言用增量）
+BASE_DEMO=$(api GET "/packages?slug=e2e/demo" | jq -r '.data | length')
+
 cleanup_ids=()
 cleanup() {
   say "清理本轮资源"
@@ -50,6 +53,7 @@ cleanup() {
   for pid in $PKG1_ID $PKG2_ID; do
     [ -n "${pid:-}" ] && api DELETE "/packages/$pid" >/dev/null
   done
+  return 0
 }
 trap cleanup EXIT
 
@@ -101,7 +105,7 @@ assert_eq "V3.3 派生自基础包" "$SRC_ID" "$PKG1_ID"
 assert_eq "V3.4 基础包未被修改" "$(api GET "/packages/$PKG1_ID/files?path=AGENTS.md" | jq -r '.data.content' | grep -c 'version: "1.1.0"')" "0"
 assert_eq "V3.5 新增文件可读" "$(api GET "/packages/$PKG2_ID/files?path=skills/echo/SKILL.md" | jq -r '.data.content' | grep -c 'echo skill v1.1')" "1"
 assert_eq "V3.6 删除文件生效" "$(api GET "/packages/$PKG2_ID/files?path=README.md" | jq -r '.code')" "404"
-assert_eq "V3.7 基础包 README 仍在" "$(api GET "/packages/$PKG1_ID/files?path=README.md" | jq -r '.code')" "200"
+assert_eq "V3.7 基础包 README 仍在" "$(api GET "/packages/$PKG1_ID/files?path=README.md" | jq -r '.data.binary')" "false"
 
 say "V4 异常路径"
 # 无有效变更
@@ -116,12 +120,12 @@ assert_eq "V4.3 checksum 不符 → 409" "$(echo "$LOCK" | jq -r '.code')" "409"
 # 非法 frontmatter
 BADMD=$(api POST "/packages/$PKG1_ID/versions" '{"upserts":[{"path":"AGENTS.md","content":"no frontmatter"}]}')
 assert_eq "V4.4 非法 frontmatter → 400" "$(echo "$BADMD" | jq -r '.code')" "400"
-# slug 过滤
+# slug 过滤：基础 1 + 新版本 1（加上运行前基线）
 SLUGF=$(api GET "/packages?slug=e2e/demo")
-assert_eq "V4.5 slug 过滤含两版本" "$(echo "$SLUGF" | jq -r '.data | length')" "2"
+assert_eq "V4.5 slug 过滤含两版本" "$(echo "$SLUGF" | jq -r '.data | length')" "$((BASE_DEMO + 2))"
 
 say "V5 发布服务 → 切换新版本包（republish）"
-PUB=$(api POST /services "{\"packageId\":$PKG1_ID,\"image\":\"$(PICK_IMG)\",\"env\":$(python3 -c "import json,os;print(json.dumps(os.environ['RUNTIME_ENV']))")}")
+PUB=$(api POST /services "{\"packageId\":$PKG1_ID,\"image\":\"$(PICK_IMG)\",\"env\":$(python3 -c "import json,os;print(json.dumps(json.loads(os.environ['RUNTIME_ENV'])))")}")
 SVC_ID=$(echo "$PUB" | jq -r '.data.id')
 K8S_NAME=$(echo "$PUB" | jq -r '.data.k8sName')
 assert_eq "V5.1 发布受理" "$(echo "$PUB" | jq -r '.data.status')" "deploying"
@@ -156,7 +160,7 @@ sleep 1
 W1=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/packages/$PKG1_ID")
 W2=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/packages/$PKG2_ID")
 assert_eq "V7.2 两版本包均删除" "${W1}/${W2}" "404/404"
-LEFT=$(kubectl -n $NS exec deployment/platform-backend -- sh -c 'ls /data/packages 2>/dev/null | grep -c "^$PKG1_ID$\|^$PKG2_ID$"')
+LEFT=$(kubectl -n $NS exec deployment/platform-backend -- sh -c "ls /data/packages 2>/dev/null | grep -c '^$PKG1_ID$\|^$PKG2_ID$'")
 assert_eq "V7.3 PVC 目录已清理" "$LEFT" "0"
 
 say "结果汇总"

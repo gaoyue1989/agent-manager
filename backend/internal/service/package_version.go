@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"strings"
 
@@ -21,8 +22,8 @@ import (
 )
 
 var (
-	ErrNoEffectiveChanges = errors.New("no effective changes against base package")
-	ErrChecksumMismatch   = errors.New("base package changed concurrently (checksum mismatch)")
+	ErrNoEffectiveChanges  = errors.New("no effective changes against base package")
+	ErrChecksumMismatch    = errors.New("base package changed concurrently (checksum mismatch)")
 	ErrAgentsMDUndeletable = errors.New("AGENTS.md at package root cannot be deleted")
 )
 
@@ -38,10 +39,14 @@ type FileContent struct {
 func (s *PackageService) FileContent(pkg *store.OafPackage, sub string) (*FileContent, error) {
 	data, err := s.FS.ReadFile(pkg.DirPath, sub)
 	if err != nil {
-		if errors.Is(err, store.ErrZipSlip) {
+		switch {
+		case errors.Is(err, store.ErrZipSlip):
 			return nil, err
+		case errors.Is(err, fs.ErrNotExist):
+			return nil, ErrNotFound
+		default:
+			return nil, fmt.Errorf("read file: %w", err)
 		}
-		return nil, fmt.Errorf("read file: %w", err)
 	}
 	if !store.IsTextContent(sub, data) {
 		return &FileContent{Path: sub, Size: int64(len(data)), Binary: true}, nil
@@ -72,6 +77,12 @@ type VersionRequest struct {
 // maxUpsertFileBytes 单文件内容上限（utf8 字节数 / base64 解码后字节数）。
 const maxUpsertFileBytes = 256 << 10
 
+// maxUpsertTotalBytes 单次请求 upserts 内容总量上限（防多文件聚合放大内存）。
+const maxUpsertTotalBytes = 4 << 20
+
+// base64LenLimit 由目标字节数反推 base64 编码串长度上限（4 字符编 3 字节）。
+func base64LenLimit(n int) int { return (n*4 + 2) / 3 }
+
 // CreateVersion 基于基础包 + 变更集合生成新版本包（copy-on-write，不改基础包任何字节）。
 // 实现上在内存合成完整 zip，再走与 Upload 完全相同的校验落盘管线（InspectZip →
 // ParseOAF/Validate → 事务入库 → ExtractZipTo），zip 安全上限与 warnings 计算自动复用。
@@ -89,6 +100,7 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 		content []byte
 	}
 	ups := make([]pending, 0, len(req.Upserts))
+	sumUpsertBytes := 0
 	for _, u := range req.Upserts {
 		clean, err := store.CleanSubPath(u.Path)
 		if err != nil {
@@ -99,6 +111,10 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 		case "", "utf8", "utf-8":
 			content = []byte(u.Content)
 		case "base64":
+			// 先按 base64 长度预判（解码后 ≈ 3/4 长度），避免超大串先解码再拒的内存放大
+			if len(u.Content) > base64LenLimit(maxUpsertFileBytes) {
+				return nil, nil, fmt.Errorf("upsert %q: content exceeds %d bytes", u.Path, maxUpsertFileBytes)
+			}
 			content, err = base64.StdEncoding.DecodeString(u.Content)
 			if err != nil {
 				return nil, nil, fmt.Errorf("upsert %q: invalid base64: %w", u.Path, err)
@@ -108,6 +124,10 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 		}
 		if len(content) > maxUpsertFileBytes {
 			return nil, nil, fmt.Errorf("upsert %q: content exceeds %d bytes", u.Path, maxUpsertFileBytes)
+		}
+		sumUpsertBytes += len(content)
+		if sumUpsertBytes > maxUpsertTotalBytes {
+			return nil, nil, fmt.Errorf("upserts total size exceeds %d bytes", maxUpsertTotalBytes)
 		}
 		ups = append(ups, pending{path: clean, content: content})
 	}
@@ -130,7 +150,7 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 	}
 
 	// 读取基础包全部文件，应用变更集，合成新 zip
-	files, err := s.collectBaseFiles(base, dels)
+	files, err := s.collectBaseFiles(base, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -141,9 +161,11 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 		}
 		files[u.path] = u.content
 	}
+	// 删除检测必须基于未剔除的原始文件集（剔除后查不到 = 无变更判断恒假）
 	for d := range dels {
 		if _, ok := files[d]; ok {
 			changed = true
+			delete(files, d)
 		}
 	}
 	if !changed {
@@ -187,10 +209,10 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 	warnJSON, _ := json.Marshal(warnings)
 	rec := &store.OafPackage{
 		Name: cfg.Name, Slug: cfg.Slug, Version: cfg.Version,
-		Description:     cfg.Description,
-		ManifestJSON:    string(manifest), WarningsJSON: string(warnJSON),
-		Checksum:        zi.Checksum,
-		FileCount:       zi.FileCount, TotalSize: zi.TotalSize,
+		Description:  cfg.Description,
+		ManifestJSON: string(manifest), WarningsJSON: string(warnJSON),
+		Checksum:  zi.Checksum,
+		FileCount: zi.FileCount, TotalSize: zi.TotalSize,
 		SourcePackageID: base.ID,
 	}
 	err = s.DB.Transaction(func(tx *gorm.DB) error {
@@ -210,8 +232,9 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 	return rec, warnings, nil
 }
 
-// collectBaseFiles 读取基础包全部文件内容为 path→content 映射（剔除删除集）。
-// 空目录不入映射（zip 只需文件条目即可还原目录）。
+// collectBaseFiles 读取基础包全部文件内容为 path→content 映射。
+// dels 非空时剔除删除集（当前调用恒传 nil：删除统一在 CreateVersion 主流程
+// 基于完整文件集判定 changed 后再剔除，避免纯删除误判为无变更）。
 func (s *PackageService) collectBaseFiles(base *store.OafPackage, dels map[string]bool) (map[string][]byte, error) {
 	tree, err := s.FS.Tree(base.DirPath)
 	if err != nil {
@@ -248,6 +271,8 @@ func (s *PackageService) collectBaseFiles(base *store.OafPackage, dels map[strin
 }
 
 // buildZipBytes 将 path→content 映射合成为 zip 字节流（Deflate，路径统一 / 分隔）。
+// 权限保持与 ExtractZipTo 相反方向的一致性：普通文件 0644（可执行位丢失不可接受，
+// 基础包内 +x 脚本经在线编辑后必须保持可执行）。
 func buildZipBytes(files map[string][]byte) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -260,7 +285,9 @@ func buildZipBytes(files map[string][]byte) ([]byte, error) {
 		if strings.HasPrefix(p, "../") || p == ".." {
 			return nil, store.ErrZipSlip
 		}
-		w, err := zw.Create(p)
+		hdr := &zip.FileHeader{Name: p, Method: zip.Deflate}
+		hdr.SetMode(0o755)
+		w, err := zw.CreateHeader(hdr)
 		if err != nil {
 			return nil, err
 		}

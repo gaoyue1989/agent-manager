@@ -40,7 +40,7 @@ func TestIsTextContent(t *testing.T) {
 		{".gitignore", []byte("node_modules\n"), true},
 		{"logo.png", []byte{0x89, 'P', 'N', 'G', 0x00, 0x0a}, false},
 		{"data.bin", []byte{0x00, 0x01, 0x02}, false},
-		{"unknown.xyz", []byte("plain text"), false}, // 白名单外扩展名
+		{"unknown.xyz", []byte("plain text"), false},                   // 白名单外扩展名
 		{"big.md", bytes.Repeat([]byte("a"), MaxPreviewSize+1), false}, // 超预览上限
 	}
 	for _, c := range cases {
@@ -67,7 +67,7 @@ func TestZipPackageRoundTrip(t *testing.T) {
 	f, done := newTestFS(t)
 	defer done()
 	files := map[string]string{
-		"AGENTS.md":         "---\nname: x\n---\nbody",
+		"AGENTS.md":             "---\nname: x\n---\nbody",
 		"skills/greet/SKILL.md": "# greet",
 	}
 	writePkgFiles(t, f, "packages/9", files)
@@ -95,7 +95,7 @@ func TestWriteZipTo(t *testing.T) {
 	f, done := newTestFS(t)
 	defer done()
 	zipData := buildZip(t, map[string]string{
-		"AGENTS.md": "---\nname: y\n---\nbody",
+		"AGENTS.md":           "---\nname: y\n---\nbody",
 		"nested/dir/file.txt": "hello",
 	})
 	count, total, err := f.WriteZipTo("packages/10", zipData)

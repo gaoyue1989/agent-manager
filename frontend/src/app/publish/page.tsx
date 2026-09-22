@@ -41,26 +41,29 @@ function PublishForm() {
 
   const load = useCallback(async () => {
     try {
-      const pkgs = await api.listPackages();
-      setPackages(pkgs);
+      setPackages(await api.listPackages());
       const imgs = await api.listImages();
       setImages(imgs);
       if (imgs.length > 0) setImage((cur) => cur || imgs[0].Image);
-      // 深链预选：?packageId=（包详情/列表"去发布"入口）
-      const deep = Number(searchParams.get("packageId"));
-      if (deep && !selectedPkg) {
-        const hit = pkgs.find((p) => p.id === deep);
-        if (hit) {
-          setSelectedPkg(hit.id);
-          setPkgSummary(`${hit.slug}@${hit.version}（${hit.fileCount} 个文件）`);
-          setName(hit.name);
-        }
-      }
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
-  }, [searchParams, selectedPkg]);
+  }, []);
   useEffect(() => { load(); }, [load]);
+
+  // 深链预选：?packageId=（包详情/列表"去发布"入口）。
+  // 独立 effect 只依赖 packages 就绪 + 深链值，避免 load 依赖 selectedPkg 造成全量重拉
+  useEffect(() => {
+    if (packages.length === 0 || selectedPkg !== null) return;
+    const deep = Number(searchParams.get("packageId"));
+    if (!deep) return;
+    const hit = packages.find((p) => p.id === deep);
+    if (hit) {
+      setSelectedPkg(hit.id);
+      setPkgSummary(`${hit.slug}@${hit.version}（${hit.fileCount} 个文件）`);
+      setName(hit.name);
+    }
+  }, [packages, searchParams, selectedPkg]);
 
   const onUpload = async (file: File) => {
     setUploading(true);

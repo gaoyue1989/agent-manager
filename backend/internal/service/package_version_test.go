@@ -112,6 +112,29 @@ func TestCreateVersionRejectsIllegalInput(t *testing.T) {
 	}
 }
 
+// TestCreateVersionPureDelete 纯删除（只删不改）生成新版本 —— 回归：早期实现把
+// 删除集提前剔除后判 changed，导致纯删除恒误报 ErrNoEffectiveChanges。
+func TestCreateVersionPureDelete(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	base := uploadTestPkg(t, c, "")
+	rec, warnings, err := c.Packages.CreateVersion(base, VersionRequest{
+		Deletes: []string{"mcp-configs/fs/config.yaml"},
+	})
+	if err != nil {
+		t.Fatalf("pure delete should succeed: %v", err)
+	}
+	if warnings == nil {
+		t.Log("no warnings")
+	}
+	if _, err := c.Packages.ReadFile(rec, "mcp-configs/fs/config.yaml"); err == nil {
+		t.Fatal("deleted file still in new package")
+	}
+	if _, err := c.Packages.ReadFile(base, "mcp-configs/fs/config.yaml"); err != nil {
+		t.Fatal("base file was removed")
+	}
+}
+
 // TestCreateVersionInvalidYAML 校验错误原样回传（前端回显依赖错误消息可读）。
 func TestCreateVersionInvalidYAML(t *testing.T) {
 	c, _, done := newTestCore(t)
