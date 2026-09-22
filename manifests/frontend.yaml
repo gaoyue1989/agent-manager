@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: 172.20.0.1:5001/platform-frontend:v3
+          image: 172.20.0.1:5001/platform-frontend:v4
           imagePullPolicy: Always
           ports: [{ containerPort: 3000 }]
           env:
