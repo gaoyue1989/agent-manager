@@ -40,6 +40,7 @@ func mapError(c *gin.Context, err error) {
 		errors.Is(err, service.ErrBadState),
 		errors.Is(err, service.ErrNoEffectiveChanges),
 		errors.Is(err, service.ErrAgentsMDUndeletable),
+		errors.Is(err, service.ErrUpsertInvalid),
 		errors.Is(err, store.ErrNoAgentsMD),
 		errors.Is(err, store.ErrZipTooLarge),
 		errors.Is(err, store.ErrTooManyFiles),

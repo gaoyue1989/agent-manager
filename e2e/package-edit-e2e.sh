@@ -50,8 +50,9 @@ cleanup() {
   for sid in "${cleanup_ids[@]:-}"; do
     [ -n "$sid" ] && api DELETE "/services/$sid" >/dev/null
   done
-  for pid in $PKG1_ID $PKG2_ID; do
-    [ -n "${pid:-}" ] && api DELETE "/packages/$pid" >/dev/null
+  # set -u 下未赋值变量需 :- 防御，否则提前失败时 cleanup 自身报 unbound 中止、残留资源
+  for pid in ${PKG1_ID:-} ${PKG2_ID:-}; do
+    [ -n "$pid" ] && api DELETE "/packages/$pid" >/dev/null
   done
   return 0
 }

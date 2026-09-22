@@ -322,7 +322,7 @@ func (f *FS) ZipPackage(rel string) ([]byte, error) {
 }
 
 // WriteZipTo 将已通过安全校验的 zip 字节流解包到 root/rel（目录必须为空或不存在）。
-// 权限与路径规则同 ExtractZipTo（最低 0644，可执行位升 0755）。
+// 供测试与后续批量写入场景复用；权限与路径规则同 ExtractZipTo（最低 0644，可执行位升 0755）。
 func (f *FS) WriteZipTo(rel string, zipData []byte) (int, int64, error) {
 	zr, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 	if err != nil {

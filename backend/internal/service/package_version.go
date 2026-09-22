@@ -25,6 +25,8 @@ var (
 	ErrNoEffectiveChanges  = errors.New("no effective changes against base package")
 	ErrChecksumMismatch    = errors.New("base package changed concurrently (checksum mismatch)")
 	ErrAgentsMDUndeletable = errors.New("AGENTS.md at package root cannot be deleted")
+	// ErrUpsertInvalid 版本请求的客户端输入类错误（超限/编码非法），统一映射 400
+	ErrUpsertInvalid = errors.New("invalid version request")
 )
 
 // FileContent 单文件预览载荷：binary=true 时 content 为空，前端引导走下载端点。
@@ -101,6 +103,9 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 	}
 	ups := make([]pending, 0, len(req.Upserts))
 	sumUpsertBytes := 0
+	invalid := func(format string, args ...any) error {
+		return fmt.Errorf("%w: "+format, append([]any{ErrUpsertInvalid}, args...)...)
+	}
 	for _, u := range req.Upserts {
 		clean, err := store.CleanSubPath(u.Path)
 		if err != nil {
@@ -113,21 +118,21 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 		case "base64":
 			// 先按 base64 长度预判（解码后 ≈ 3/4 长度），避免超大串先解码再拒的内存放大
 			if len(u.Content) > base64LenLimit(maxUpsertFileBytes) {
-				return nil, nil, fmt.Errorf("upsert %q: content exceeds %d bytes", u.Path, maxUpsertFileBytes)
+				return nil, nil, invalid("upsert %q: content exceeds %d bytes", u.Path, maxUpsertFileBytes)
 			}
 			content, err = base64.StdEncoding.DecodeString(u.Content)
 			if err != nil {
-				return nil, nil, fmt.Errorf("upsert %q: invalid base64: %w", u.Path, err)
+				return nil, nil, invalid("upsert %q: invalid base64: %v", u.Path, err)
 			}
 		default:
-			return nil, nil, fmt.Errorf("upsert %q: unsupported encoding %q", u.Path, u.Encoding)
+			return nil, nil, invalid("upsert %q: unsupported encoding %q", u.Path, u.Encoding)
 		}
 		if len(content) > maxUpsertFileBytes {
-			return nil, nil, fmt.Errorf("upsert %q: content exceeds %d bytes", u.Path, maxUpsertFileBytes)
+			return nil, nil, invalid("upsert %q: content exceeds %d bytes", u.Path, maxUpsertFileBytes)
 		}
 		sumUpsertBytes += len(content)
 		if sumUpsertBytes > maxUpsertTotalBytes {
-			return nil, nil, fmt.Errorf("upserts total size exceeds %d bytes", maxUpsertTotalBytes)
+			return nil, nil, invalid("upserts total size exceeds %d bytes", maxUpsertTotalBytes)
 		}
 		ups = append(ups, pending{path: clean, content: content})
 	}
@@ -271,8 +276,8 @@ func (s *PackageService) collectBaseFiles(base *store.OafPackage, dels map[strin
 }
 
 // buildZipBytes 将 path→content 映射合成为 zip 字节流（Deflate，路径统一 / 分隔）。
-// 权限保持与 ExtractZipTo 相反方向的一致性：普通文件 0644（可执行位丢失不可接受，
-// 基础包内 +x 脚本经在线编辑后必须保持可执行）。
+// 文件统一按 0755 落 zip：后续 ExtractZipTo 会按「有 x 位升 0755，否则 0644」归一，
+// 此处统一给 x 位可保证基础包内 +x 脚本经在线编辑后不丢失可执行权限。
 func buildZipBytes(files map[string][]byte) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
