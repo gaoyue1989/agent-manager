@@ -32,9 +32,15 @@ func mapError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrNotFound), errors.Is(err, gorm.ErrRecordNotFound):
 		Fail(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, service.ErrChecksumMismatch):
+		// 乐观锁冲突：基础包已被并发修改
+		Fail(c, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrImageNotAllowed),
 		errors.Is(err, service.ErrPackageInUse),
 		errors.Is(err, service.ErrBadState),
+		errors.Is(err, service.ErrNoEffectiveChanges),
+		errors.Is(err, service.ErrAgentsMDUndeletable),
+		errors.Is(err, service.ErrUpsertInvalid),
 		errors.Is(err, store.ErrNoAgentsMD),
 		errors.Is(err, store.ErrZipTooLarge),
 		errors.Is(err, store.ErrTooManyFiles),

@@ -66,9 +66,9 @@ func registerTools(s *mcp.Server, core *service.Core) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_packages",
-		Description: "列出已上传的 OAF 配置包（可按关键字过滤），含被服务引用计数。",
+		Description: "列出已上传的 OAF 配置包（可按关键字或 slug 过滤），含被服务引用计数。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ListPackagesIn) (*mcp.CallToolResult, JSONOut, error) {
-		list, err := core.Packages.List(in.Keyword)
+		list, err := core.Packages.List(in.Keyword, in.Slug)
 		if err != nil {
 			return errResult(err.Error())
 		}
@@ -101,6 +101,57 @@ func registerTools(s *mcp.Server, core *service.Core) {
 		})
 	})
 
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_package_file",
+		Description: "读取配置包内单个文本文件内容（二进制文件返回 binary=true，需走 REST 下载端点）。path 为相对包根的路径，如 AGENTS.md、skills/greet/SKILL.md。",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in PackageFileIn) (*mcp.CallToolResult, JSONOut, error) {
+		if in.Path == "" {
+			return errResult("path is required")
+		}
+		pkg, err := core.Packages.Get(in.PackageID)
+		if err != nil {
+			return errResult("package not found: " + strconv.FormatUint(uint64(in.PackageID), 10))
+		}
+		fc, err := core.Packages.FileContent(pkg, in.Path)
+		if err != nil {
+			return errResult(err.Error())
+		}
+		return okResult(map[string]any{
+			"packageId": pkg.ID, "path": fc.Path, "size": fc.Size,
+			"binary": fc.Binary, "content": fc.Content,
+		})
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "create_package_version",
+		Description: "基于已有配置包在线编辑生成新版本包（copy-on-write：不修改原包，生成新 packageId）。" +
+			"upserts 为新增/覆盖文件（content 原文，encoding 可选 base64）；deletes 为删除路径（根级 AGENTS.md 不可删）。" +
+			"后端会重新校验新包 AGENTS.md frontmatter；返回新 packageId 与 warnings。可配合 republish_service 的 packageId 切换服务到新版本。",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in CreateVersionIn) (*mcp.CallToolResult, JSONOut, error) {
+		if len(in.Upserts) == 0 && len(in.Deletes) == 0 {
+			return errResult("upserts or deletes is required")
+		}
+		pkg, err := core.Packages.Get(in.PackageID)
+		if err != nil {
+			return errResult("package not found: " + strconv.FormatUint(uint64(in.PackageID), 10))
+		}
+		vreq := service.VersionRequest{ExpectedBaseChecksum: in.ExpectedBaseChecksum}
+		for _, u := range in.Upserts {
+			vreq.Upserts = append(vreq.Upserts, service.VersionUpsert{Path: u.Path, Content: u.Content, Encoding: u.Encoding})
+		}
+		vreq.Deletes = in.Deletes
+		rec, warnings, err := core.Packages.CreateVersion(pkg, vreq)
+		if err != nil {
+			return errResult(err.Error())
+		}
+		return okResult(map[string]any{
+			"packageId": rec.ID, "name": rec.Name, "slug": rec.Slug, "version": rec.Version,
+			"sourcePackageId": rec.SourcePackageID, "fileCount": rec.FileCount,
+			"warnings": warnings,
+			"hint":     "use republish_service with the new packageId to roll services onto this version",
+		})
+	})
+
 	// ---- 服务发布与管理 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "publish_service",
@@ -124,7 +175,7 @@ func registerTools(s *mcp.Server, core *service.Core) {
 		Name:        "list_services",
 		Description: "列出已发布服务及实时状态（可按 status/keyword 过滤）。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ListServicesIn) (*mcp.CallToolResult, JSONOut, error) {
-		list, err := core.List(in.Status, in.Keyword)
+		list, err := core.List(in.Status, in.Keyword, 0)
 		if err != nil {
 			return errResult(err.Error())
 		}
@@ -268,6 +319,22 @@ type UploadPackageIn struct {
 }
 type ListPackagesIn struct {
 	Keyword string `json:"keyword,omitempty"`
+	Slug    string `json:"slug,omitempty" jsonschema:"按 slug 精确过滤（版本历史场景）"`
+}
+type PackageFileIn struct {
+	PackageID uint   `json:"packageId"`
+	Path      string `json:"path" jsonschema:"相对包根的文件路径，如 AGENTS.md"`
+}
+type VersionUpsertIn struct {
+	Path     string `json:"path" jsonschema:"相对包根的文件路径"`
+	Content  string `json:"content" jsonschema:"文件内容原文"`
+	Encoding string `json:"encoding,omitempty" jsonschema:"utf8(默认) 或 base64"`
+}
+type CreateVersionIn struct {
+	PackageID            uint              `json:"packageId" jsonschema:"基础包 ID"`
+	Upserts              []VersionUpsertIn `json:"upserts,omitempty" jsonschema:"新增/覆盖的文件列表"`
+	Deletes              []string          `json:"deletes,omitempty" jsonschema:"删除的文件路径列表（根级 AGENTS.md 不可删）"`
+	ExpectedBaseChecksum string            `json:"expected_base_checksum,omitempty" jsonschema:"可选乐观锁：基础包当前 checksum，不符即拒绝"`
 }
 type ByIDIn struct {
 	PackageID uint `json:"packageId"`

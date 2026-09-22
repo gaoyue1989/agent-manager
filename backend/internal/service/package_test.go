@@ -34,16 +34,16 @@ func TestPackageListKeywordFilter(t *testing.T) {
 	uploadTestPkg(t, core, "")
 	uploadTestPkg(t, core, "2")
 
-	all, err := core.Packages.List("")
+	all, err := core.Packages.List("", "")
 	if err != nil || len(all) != 2 {
 		t.Fatalf("list all: %v n=%d", err, len(all))
 	}
 	// slug 后缀 2 的包 slug=acme/demo2，按关键字过滤应命中 1 条
-	hit, err := core.Packages.List("demo2")
+	hit, err := core.Packages.List("demo2", "")
 	if err != nil || len(hit) != 1 {
 		t.Fatalf("filter acme2: %v n=%d", err, len(hit))
 	}
-	miss, err := core.Packages.List("no-such-keyword")
+	miss, err := core.Packages.List("no-such-keyword", "")
 	if err != nil || len(miss) != 0 {
 		t.Fatalf("filter miss: %v n=%d", err, len(miss))
 	}

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { api, ServiceDetail } from "@/lib/api";
+import { api, PackageRec, ServiceDetail } from "@/lib/api";
 
 const STATUS_STYLE: Record<string, string> = {
   running: "bg-green-100 text-green-800",
@@ -22,6 +22,9 @@ export default function ServiceDetailPage() {
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [envDirty, setEnvDirty] = useState(false);
   const [savingEnv, setSavingEnv] = useState(false);
+  const [pkg, setPkg] = useState<PackageRec | null>(null);
+  const [versions, setVersions] = useState<PackageRec[]>([]);
+  const [versionsLoaded, setVersionsLoaded] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -32,10 +35,19 @@ export default function ServiceDetailPage() {
         try { env = JSON.parse(d.envJson || "{}"); } catch {}
         setEnvRows(Object.entries(env).map(([key, value]) => ({ key, value })));
       }
+      // 配置包信息 + 同 slug 版本列表（升级用）；失败不阻塞主视图。
+      // 版本列表只拉一次（versionsLoaded 守卫）：5s 轮询重拉会重置升级下拉选择
+      if (!versionsLoaded) {
+        api.getPackage(d.packageId).then((pd) => {
+          setPkg(pd.package);
+          api.listPackages("", pd.package.slug).then((vs) => { setVersions(vs); setVersionsLoaded(true); })
+            .catch(() => setVersionsLoaded(true));
+        }).catch(() => {});
+      }
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
-  }, [id, envDirty]);
+  }, [id, envDirty, versionsLoaded]);
 
   useEffect(() => {
     load();
@@ -63,6 +75,13 @@ export default function ServiceDetailPage() {
     setSavingEnv(false);
   };
 
+  const upgradePackage = async (target: PackageRec) => {
+    if (!svc) return;
+    if (target.id === svc.packageId) return;
+    if (!confirm(`将配置包从 ${pkg?.slug}@${pkg?.version} 升级到 ${target.slug}@${target.version}？将触发滚动重启并重新注册。`)) return;
+    await act(() => api.republish(id, { packageId: target.id }), "配置包升级中，滚动完成后回到 running");
+  };
+
   if (!svc) return <p className="text-gray-500">{msg || "加载中…"}</p>;
   let card: any = null;
   try { card = JSON.parse(svc.agentCardJson || "null"); } catch {}
@@ -84,6 +103,28 @@ export default function ServiceDetailPage() {
         <div>镜像：<code className="text-xs">{svc.image}</code></div>
         <div>Endpoint：<a href={svc.endpoint} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline break-all" data-testid="endpoint-link">{svc.endpoint}</a></div>
         <div>副本数:{svc.replicas}</div>
+        <div>
+          配置包：
+          {pkg ? (
+            <>
+              <Link href={`/packages/${svc.packageId}`} data-testid="svc-package-link" className="text-blue-600 hover:underline">
+                {pkg.slug}@{pkg.version}
+              </Link>
+              {versions.length > 1 && (
+                <select data-testid="upgrade-pkg-select" defaultValue=""
+                  onChange={(e) => { const v = versions.find((x) => x.id === Number(e.target.value)); if (v) upgradePackage(v); }}
+                  className="ml-2 border rounded p-0.5 text-xs">
+                  <option value="">升级到…</option>
+                  {versions.filter((v) => v.id !== svc.packageId).map((v) => (
+                    <option key={v.id} value={v.id}>v{v.version}</option>
+                  ))}
+                </select>
+              )}
+            </>
+          ) : (
+            <span className="text-gray-400">#{svc.packageId}</span>
+          )}
+        </div>
         <div>A2A 注册：{svc.registeredName ? `${svc.registeredName}@${svc.registeredVersion}` : "未注册"}</div>
         <div>注册时间:{svc.registeredAt ? new Date(svc.registeredAt).toLocaleString() : "—"}</div>
       </section>

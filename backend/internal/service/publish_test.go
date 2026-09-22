@@ -465,14 +465,14 @@ func TestListMergesPodStatus(t *testing.T) {
 	_ = svcPublished
 	fk.MarkPodRunning("test", "pod-1", "oaf-acme-demo")
 
-	list, err := core.List("", "")
+	list, err := core.List("", "", 0)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v n=%d", err, len(list))
 	}
 	if len(list[0].Pods) != 1 || !list[0].Pods[0].Ready {
 		t.Fatalf("pods merge failed: %+v", list[0].Pods)
 	}
-	filtered, _ := core.List(store.StatusRunning, "")
+	filtered, _ := core.List(store.StatusRunning, "", 0)
 	if len(filtered) != 0 {
 		t.Fatal("status filter should exclude deploying svc")
 	}

@@ -29,14 +29,17 @@ type ListService struct {
 	Pods []k8s.PodInfo `json:"pods,omitempty"`
 }
 
-// List 列表（可按状态/关键字过滤），合并实时 Pod 状态。
-func (c *Core) List(status, keyword string) ([]ListService, error) {
+// List 列表（可按状态/关键字/包过滤），合并实时 Pod 状态。
+func (c *Core) List(status, keyword string, packageID uint) ([]ListService, error) {
 	q := c.DB.Model(&store.ServiceEntity{}).Order("id DESC")
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}
 	if keyword != "" {
 		q = q.Where("display_name LIKE ? OR k8s_name LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	if packageID > 0 {
+		q = q.Where("package_id = ?", packageID)
 	}
 	var rows []store.ServiceEntity
 	if err := q.Find(&rows).Error; err != nil {

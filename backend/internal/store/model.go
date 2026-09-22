@@ -7,19 +7,20 @@ import (
 
 // OafPackage 上传的 OAF 配置包。
 type OafPackage struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	Name         string    `gorm:"size:128" json:"name"`
-	Slug         string    `gorm:"size:200;index" json:"slug"`
-	Version      string    `gorm:"size:32" json:"version"`
-	Description  string    `gorm:"type:text" json:"description"`
-	ManifestJSON string    `gorm:"type:json" json:"manifestJson"` // frontmatter 原文
-	WarningsJSON string    `gorm:"type:json" json:"warningsJson"` // 宽松模式 warnings
-	DirPath      string    `gorm:"size:256" json:"dirPath"`       // PVC 内相对路径 packages/{id}
-	FileCount    int       `json:"fileCount"`
-	TotalSize    int64     `json:"totalSize"`
-	Checksum     string    `gorm:"size:64" json:"checksum"` // zip sha256
-	RefCount     int       `json:"refCount"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID              uint      `gorm:"primaryKey" json:"id"`
+	Name            string    `gorm:"size:128" json:"name"`
+	Slug            string    `gorm:"size:200;index" json:"slug"`
+	Version         string    `gorm:"size:32" json:"version"`
+	Description     string    `gorm:"type:text" json:"description"`
+	ManifestJSON    string    `gorm:"type:json" json:"manifestJson"` // frontmatter 原文
+	WarningsJSON    string    `gorm:"type:json" json:"warningsJson"` // 宽松模式 warnings
+	DirPath         string    `gorm:"size:256" json:"dirPath"`       // PVC 内相对路径 packages/{id}
+	FileCount       int       `json:"fileCount"`
+	TotalSize       int64     `json:"totalSize"`
+	Checksum        string    `gorm:"size:64" json:"checksum"`      // zip sha256
+	SourcePackageID uint      `gorm:"index" json:"sourcePackageId"` // 0=上传原始包；>0=由该包编辑派生
+	RefCount        int       `json:"refCount"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 // 服务状态常量（状态机见 REDESIGN §3.9）。
