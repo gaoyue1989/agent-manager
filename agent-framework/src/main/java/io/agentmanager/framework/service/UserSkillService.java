@@ -578,6 +578,9 @@ public class UserSkillService {
         }
         log.info("sync_from_package: skill {} ({} files, {} skipped) → user {}",
             name, orderedFiles.size(), skipped.size(), userId);
+        // 与 files() 同样按字典序返回：跳过清单源自 Files.walk 的枚举顺序，
+        // 不同文件系统不一致（CI runner 上即出现顺序差异），会给出不确定的对外结果
+        java.util.Collections.sort(skipped);
         return Optional.of(new SyncOutcome(new ArrayList<>(orderedFiles.keySet()), skipped));
     }
 
