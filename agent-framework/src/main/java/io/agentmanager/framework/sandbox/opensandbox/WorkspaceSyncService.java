@@ -68,7 +68,11 @@ public class WorkspaceSyncService {
         }
         var root = "/workspace/";
         try {
-            syncRuntimeFiles(userId, osbSandbox, root);
+            // 记忆总开关关闭（AGENT_MEMORY_ENABLED=false）：跳过 MEMORY.md + memory/ 回写，
+            // 技能回写（syncUserSkills）不受影响、保持原样
+            if (workspaceReader.isMemoryEnabled()) {
+                syncRuntimeFiles(userId, osbSandbox, root);
+            }
             syncUserSkills(userId, osbSandbox, root);
             log.info("Workspace sync back completed for user {}", userId);
         } catch (Exception e) {

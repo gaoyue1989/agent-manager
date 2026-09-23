@@ -95,12 +95,15 @@ agent:
     http-read-timeout-seconds: ${AGENT_HTTP_READ_TIMEOUT_SECONDS:180}
     http-write-timeout-seconds: ${AGENT_HTTP_WRITE_TIMEOUT_SECONDS:30}
     # Memory
+    # 记忆总开关：false = 完全关闭（不注册 memory_* 工具 + 不执行 flush/整合；沙箱不再注入/回写记忆文件）
+    memory-enabled: ${AGENT_MEMORY_ENABLED:true}
     memory-flush-throttle-minutes: ${AGENT_MEMORY_FLUSH_THROTTLE_MINUTES:10}
     memory-consolidation-max-tokens: ${AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS:8000}
     memory-consolidation-min-gap-minutes: ${AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES:60}
     # Compaction
     compaction-trigger-messages: ${AGENT_COMPACTION_TRIGGER_MESSAGES:30}
     compaction-keep-messages: ${AGENT_COMPACTION_KEEP_MESSAGES:10}
+    # 压缩前先刷写记忆（记忆 hooks 关闭时此项失效）
     compaction-flush-before-compact: ${AGENT_COMPACTION_FLUSH_BEFORE_COMPACT:true}
     compaction-offload-before-compact: ${AGENT_COMPACTION_OFFLOAD_BEFORE_COMPACT:true}
     # HikariCP（毫秒）
