@@ -259,18 +259,12 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
-            // 本 turn 的收尾只做一次。AGENT_END 处理与源 flux 的 complete/error 回调可能各自
-            // 触发一次收尾，且 harness 的 flux 可能在 AGENT_END 事件之后**数秒**才 complete——
-            // 迟到的那次若再走 closeSession，会把**下一个** turn 刚建好的 sink 拆掉
-            // （实测：0.4s 内前后脚的两轮对话，第二轮的 permission_ask 被迟到关闭吞掉，
-            // 前端收不到 HITL 确认卡；approval-forms e2e 2026-09-17 复现）。
+            // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
+            // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-            // 准备阶段的异常必须回滚已获取的 turn_lease。TurnLeaseGuard 的后台续租线程
-            // 不看本段是否还活着——只要 token 仍匹配就持续续期，因此漏放租约意味着该
-            // session 被**永久**锁死：后续每个请求都拿不到租约，观察者也会一直 probe
-            // 到 RUNNING。构造消息这一步会因用户输入抛异常（fileId 失效 → 工作区注入
-            // 失败），所以这不是理论路径。
+            // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
+            // 见 TurnFinalizer#abortSetup 的教训注释
             List<Msg> messages;
             try {
                 eventBus.beginTurn(finalSessionId);
@@ -318,17 +312,15 @@ public class ChatStreamController {
                                     "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                         e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                             }
-                            endTurn(lease, finalSessionId, turnEnded);
+                            TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
                         },
-                        () -> endTurn(lease, finalSessionId, turnEnded));
+                        () -> TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded));
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
-                sink.next(errorSSE("turn_setup_failed: "
-                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
-                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
-                lease.release();
-                sink.complete();
+                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
+                    errorSSE("turn_setup_failed: "
+                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
                 return;
             }
 
@@ -348,7 +340,7 @@ public class ChatStreamController {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
                             + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
                             OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
-                        endTurn(lease, finalSessionId, turnEnded);
+                        TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
                     }
                 }, finalSessionId, replyId);
             });
@@ -378,7 +370,8 @@ public class ChatStreamController {
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded) {
-        if (stopIfLeaseLost(lease, sessionId, sink)) {
+        // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
+        if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             return;
         }
 
@@ -433,68 +426,8 @@ public class ChatStreamController {
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            endTurn(lease, sessionId, turnEnded);
+            TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
         }
-    }
-
-    /**
-     * 租约已失去：本副本不再拥有该 session 的写入权。
-     *
-     * <p>继续 append 会与新 owner 的 seq 区间重叠——这正是 C1 要防的事——所以立刻停手、
-     * 丢弃缓冲、把控制权交还客户端。终态帧**只发本连接的客户端、不落库**：此刻任何
-     * append 都会占用可能与新 owner 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
-     *
-     * @return true = 本事件已被丢弃，调用方必须直接返回
-     */
-    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
-                                    FluxSink<ServerSentEvent<String>> sink) {
-        if (!lease.isLost()) {
-            return false;
-        }
-        if (lease.tryMarkLostNotified()) {
-            log.error("[chat] turn lease lost, stopping writer (sid={})", sessionId);
-            sink.next(interruptedSSE("lease_lost"));
-            eventBus.abandonSession(sessionId);
-            lease.release();
-        }
-        return true;
-    }
-
-    /** 带「只收尾一次」保护的 turn 收尾：晚到的 complete/error 回调不得重复执行 */
-    private void endTurn(TurnLeaseGuard lease, String sessionId,
-                         java.util.concurrent.atomic.AtomicBoolean turnEnded) {
-        if (!turnEnded.compareAndSet(false, true)) {
-            return;
-        }
-        endTurn(lease, sessionId);
-    }
-
-    /**
-     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
-     *
-     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
-     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
-     * ——正是 C1 要防的重叠。代价是流结束与租约释放之间有一个极短窗口（客户端已看到
-     * 结束、锁还在我们手上），抢锁方按 ACQUIRE_TIMEOUT 排队等一拍即可。
-     *
-     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
-     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
-     */
-    private void endTurn(TurnLeaseGuard lease, String sessionId) {
-        boolean lost = lease.isLost();
-        if (lost) {
-            eventBus.abandonSession(sessionId);
-        } else {
-            eventBus.closeSession(sessionId);
-        }
-        lease.release();
-    }
-
-    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
-    private static ServerSentEvent<String> interruptedSSE(String reason) {
-        return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
-            .build();
     }
 
     // ===== present_file 累积 & 合成 =====
