@@ -301,4 +301,79 @@ class SessionEventTailerTest {
         assertTrue(a.get(0).data().contains("shared"), "A 收到的首个事件应是 delta");
         assertTrue(b.get(0).data().contains("shared"), "B 收到的首个事件应是 delta");
     }
+
+    // ===== A2：空闲退避 =====
+
+    @Test
+    void pollSleepMsBacksOffToProbeIntervalCap() {
+        // base=300（生产默认 tailPollMs）：600 → 1200 → 2000(封顶) → 2000 …
+        assertEquals(300, SessionEventTailer.pollSleepMs(300, 0), "streak=0 应保持基频");
+        assertEquals(600, SessionEventTailer.pollSleepMs(300, 1));
+        assertEquals(1200, SessionEventTailer.pollSleepMs(300, 2));
+        assertEquals(2000, SessionEventTailer.pollSleepMs(300, 3));
+        assertEquals(2000, SessionEventTailer.pollSleepMs(300, 5));
+        // base=50（既有测试的注入值）：完整退避序列
+        long[] expected = {100, 200, 400, 800, 1600, 2000, 2000};
+        for (int i = 0; i < expected.length; i++) {
+            assertEquals(expected[i], SessionEventTailer.pollSleepMs(50, i + 1),
+                "base=50, streak=" + (i + 1));
+        }
+        // base=5000（超过封顶的极端配置）：先 min 再 max 钳制，退避不得「反而提速」倒挂
+        for (int s = 1; s <= 5; s++) {
+            assertEquals(5000, SessionEventTailer.pollSleepMs(5000, s), "base=5000, streak=" + s);
+        }
+        // 属性：结果永不低于 base、不超过 max(PROBE_INTERVAL_MS, base)——缺任一层
+        // 钳制都会与 tailPollMs 配置语义矛盾
+        for (long base : new long[] {20, 50, 300, 5000}) {
+            for (int s = 0; s <= 12; s++) {
+                long v = SessionEventTailer.pollSleepMs(base, s);
+                assertTrue(v >= base, "不得低于 base: base=" + base + " streak=" + s + " got=" + v);
+                assertTrue(v <= Math.max(base, SessionEventTailer.PROBE_INTERVAL_MS),
+                    "不得超过 max(PROBE, base): base=" + base + " streak=" + s + " got=" + v);
+            }
+        }
+    }
+
+    @Test
+    void tailRecoversAndDeliversTerminalEventAfterIdleStreak() {
+        // 退避-恢复：连续 3 次空页（sleep 100/200/400 逐级放宽）后出现 AGENT_END——
+        // 事件一旦到达，非空页把 streak 归零，终态帧与 done 帧照常按序送达；
+        // 终态帧 id=5 同时证明游标在空页期间保持、事件到达后推进
+        when(turnLeaseStore.isHeld("sid-bk")).thenReturn(true);
+        var terminal = new SessionEventStore.EnvelopedEvent(5, "AGENT_END",
+            "{\"type\":\"AGENT_END\"}", "rid");
+        when(eventStore.queryAfter("sid-bk", "rid", 0))
+            .thenReturn(Flux.empty())
+            .thenReturn(Flux.empty())
+            .thenReturn(Flux.empty())
+            .thenReturn(Flux.just(terminal));
+
+        StepVerifier.create(tailer.tail("sid-bk", "rid", 0))
+            .expectNextMatches(sse -> "5".equals(sse.id()) && sse.data().contains("AGENT_END"))
+            .expectNextMatches(sse -> sse.data() != null && sse.data().contains("done"))
+            .verifyComplete();
+    }
+
+    @Test
+    void probeCadenceStaysGatedUnderBackoff() {
+        // 探测节奏回归（按观测窗口约定，不做「次数必然相等」断言）：4.5s 窗口内
+        // 应有首轮立即探测 + 过渡期推迟后（~3.1s）至少一次门控探测；且探测次数
+        // 必须远小于轮询次数——退避改变的是 sleep 节奏，2s 探测门控原样保留
+        when(turnLeaseStore.isHeld("sid-cad")).thenReturn(true);
+        when(eventStore.queryAfter(eq("sid-cad"), isNull(), anyInt())).thenReturn(Flux.empty());
+
+        tailer.tail("sid-cad", null, -1)
+            .take(Duration.ofMillis(4500))
+            .collectList()
+            .block(Duration.ofSeconds(10));
+
+        int probes = (int) mockingDetails(turnLeaseStore).getInvocations().stream()
+            .filter(i -> "isHeld".equals(i.getMethod().getName())).count();
+        int polls = (int) mockingDetails(eventStore).getInvocations().stream()
+            .filter(i -> "queryAfter".equals(i.getMethod().getName())).count();
+
+        assertTrue(probes >= 2, "4.5s 窗口内至少 2 次探测（首轮立即 + 一次门控），实际 " + probes);
+        assertTrue(polls > probes + 1,
+            "探测必须保持降频门控（轮询次数明显多于探测次数）: polls=" + polls + " probes=" + probes);
+    }
 }
