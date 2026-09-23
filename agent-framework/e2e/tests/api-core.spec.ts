@@ -171,8 +171,11 @@ test('F1 文档上传→工作区注入→读文件', async () => {
   expect(toolNames(stream.frames)).toContain('read_file');
   expect(textOf(stream.frames)).toContain(content); // read_file 读回上传内容（注入生效）
   const stats = await llmStats();
-  const call = stats.calls[stats.calls.length - 1];
-  expect(JSON.stringify(call.roles)).toContain('assistant');
+  // 按 scenario 取本测试自己的调用：mock 的后台合成调用（scenario=background-synth）
+  // 与本测试共用 stats 通道，盲取最后一条会偶发取到后台帧（S3 同款过滤模式）
+  const call = stats.calls.filter(c => c.scenario === 'tool-read').pop();
+  expect(call).toBeTruthy();
+  expect(JSON.stringify(call!.roles)).toContain('assistant');
 });
 
 test('F2 图片上传→视觉内联', async () => {
@@ -184,8 +187,11 @@ test('F2 图片上传→视觉内联', async () => {
   const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid, fileIds: [fileId] });
   await waitTerminal(stream);
   const stats = await llmStats();
-  const call = stats.calls[stats.calls.length - 1];
-  expect(call.hasImageBlock).toBe(true); // ImageBlock → OpenAI image_url 内联
+  // 按 scenario 取本测试自己的调用（本窗口内唯一带 plain 标记的调用）：
+  // 后台合成调用共用 stats 通道且可能落在主调用之后，盲取最后一条会偶发翻车
+  const call = stats.calls.filter(c => c.scenario === 'plain').pop();
+  expect(call).toBeTruthy();
+  expect(call!.hasImageBlock).toBe(true); // ImageBlock → OpenAI image_url 内联
 });
 
 test('F4 同名重复上传唯一化（冒烟）', async () => {
@@ -433,8 +439,10 @@ test('M5 ui_context 静默注入系统提示', async () => {
   const stream = chat({ message: `[E2E:mcpapp:form](${app})`, userId: U, sessionId: sid });
   await waitTerminal(stream);
   const stats = await llmStats();
-  const call = stats.calls[stats.calls.length - 1];
-  expect(String(call.systemContent)).toContain(mark); // UiContextInjectionHook 注入直证
+  // 按 scenario 取本测试自己的调用（同 F1/F2：后台合成调用共用 stats 通道）
+  const call = stats.calls.filter(c => c.scenario === 'mcpapp-form').pop();
+  expect(call).toBeTruthy();
+  expect(String(call!.systemContent)).toContain(mark); // UiContextInjectionHook 注入直证
 });
 
 test('M6 cards server appOnly 标记', async ({ request }) => {
