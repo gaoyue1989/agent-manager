@@ -19,6 +19,8 @@ MYSQL_USER="${MYSQL_USER:-e2e}"
 MYSQL_PASS="${MYSQL_PASS:-e2e-pass}"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
+# start-agent.sh（R4 retry 重建副本）复用同组变量，export 透传子进程保持覆盖语义一致
+export LLM_MOCK_PORT MYSQL_URL MYSQL_USER MYSQL_PASS REDIS_URL SANDBOX_ENABLED SANDBOX_MOCK_PORT
 [ "$E2E_GROUP" = "sandbox" ] && SANDBOX_ENABLED=true
 
 RUNTIME="$ROOT/.runtime"
@@ -109,24 +111,8 @@ if [ "$SANDBOX_ENABLED" = "true" ]; then
 fi
 
 # ---------- 3. 被测实例 ----------
-start_jar() { # $1=端口 $2=名字
-  local PORT="$1" NAME="$2"
-  LLM_BASE_URL="http://127.0.0.1:${LLM_MOCK_PORT}/v1" \
-  LLM_API_KEY="e2e-dummy" LLM_MODEL_ID="e2e-mock-model" \
-  CHECKPOINT_JDBC_URL="$MYSQL_URL" CHECKPOINT_USERNAME="$MYSQL_USER" CHECKPOINT_PASSWORD="$MYSQL_PASS" \
-  AGENT_REDIS_URL="$REDIS_URL" \
-  AGENT_CONFIG_DIR="$AGENT_CFG" \
-  SERVER_PORT="$PORT" SERVER_HOST="127.0.0.1" \
-  FILE_STORAGE_TYPE=local FILE_STORAGE_LOCAL_DIR="$RUNTIME/files" \
-  AGENT_CLEANUP_TURN_LEASE_TTL_SECONDS=15 AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS=5 \
-  SANDBOX_ENABLED="$SANDBOX_ENABLED" OPENSANDBOX_SERVER_URL="127.0.0.1:${SANDBOX_MOCK_PORT}" OPENSANDBOX_API_KEY="e2e-placeholder" \
-  LOGGING_CONFIG="file:$AGENT_CFG/logback-e2e.xml" nohup java -Xms256m -Xmx768m -jar "$JAR" > "$LOGS/agent-$NAME.log" 2>&1 &
-  echo $! > "$RUNTIME/agent-$NAME.pid"
-  "$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${PORT}/health" 90 "agent-$NAME" || {
-    echo "[env-up] agent-$NAME 启动失败，日志尾部：" >&2
-    tail -30 "$LOGS/agent-$NAME.log" >&2
-    exit 1
-  }
+start_jar() { # $1=端口 $2=名字（启动逻辑独立为 scripts/start-agent.sh，R4 retry 重建副本复用同一语义）
+  "$ROOT/scripts/start-agent.sh" "$2" "$1"
 }
 
 case "$E2E_GROUP" in

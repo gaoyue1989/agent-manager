@@ -20,13 +20,18 @@ export const toolNames = (frames: Array<Record<string, unknown> & { type: string
 export const toolResults = (frames: Array<Record<string, unknown> & { type: string }>) =>
   frames.filter(f => f.type === 'TOOL_RESULT_END');
 
-/** 轮询直至条件成立（status/interrupted 接管类场景） */
+/** 轮询直至条件成立（status/interrupted 接管类场景）；超时错误携带最后观测值——
+ *  "超时"本身不是可行动的信息，观测到的状态才是定位问题的证据 */
 export async function pollUntil<T>(fn: () => Promise<T>, pred: (v: T) => boolean, timeoutMs = 30_000, intervalMs = 1000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const v = await fn();
     if (pred(v)) return v;
-    if (Date.now() > deadline) throw new Error(`pollUntil 超时（${timeoutMs}ms）`);
+    if (Date.now() > deadline) {
+      let observed: string;
+      try { observed = JSON.stringify(v) ?? String(v); } catch { observed = String(v); }
+      throw new Error(`pollUntil 超时（${timeoutMs}ms）：最后观测=${observed.slice(0, 500)}`);
+    }
     await new Promise(r => setTimeout(r, intervalMs));
   }
 }
