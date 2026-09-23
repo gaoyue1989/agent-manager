@@ -321,4 +321,59 @@ class SessionEventBusTest {
             return payload;
         }
     }
+
+    // ===== A3：持久化失败（append 返回 -1）不广播 =====
+
+    @Test
+    void emitDoesNotBroadcastWhenPersistFails() {
+        // append -1 = 事件永不落库；广播它会产生一条回放（断连续传、重放）永远
+        // 补不出来的实时帧。心跳间隔放大到 60s，让 expectNoEvent 只盯业务帧
+        var quietBus = new SessionEventBus(eventStore,
+            Duration.ofSeconds(60), Duration.ofMinutes(5), 64);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+
+        var flux = quietBus.subscribe("sid-f1", 0, "rid-f1")
+            .filter(sse -> sse.data() != null);
+
+        StepVerifier.create(flux)
+            .then(() -> eventBus.emit("sid-f1", mockAgentEvent("lost"), "rid-f1"))
+            .expectNoEvent(Duration.ofMillis(600))
+            .thenCancel()
+            .verify();
+    }
+
+    @Test
+    void emitSyntheticDoesNotBroadcastWhenPersistFails() {
+        var quietBus = new SessionEventBus(eventStore,
+            Duration.ofSeconds(60), Duration.ofMinutes(5), 64);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+
+        var flux = quietBus.subscribe("sid-f2", 0, "rid-f2")
+            .filter(sse -> sse.data() != null);
+
+        StepVerifier.create(flux)
+            .then(() -> eventBus.emitSynthetic("sid-f2", "rid-f2", "file_ready", "{\"type\":\"file_ready\"}"))
+            .expectNoEvent(Duration.ofMillis(600))
+            .thenCancel()
+            .verify();
+    }
+
+    @Test
+    void emitStillReturnsMinusOneAndTouchesActiveWhenPersistFails() {
+        // 返回值 -1 与 touchActive 语义不变：调用方均不消费返回值、收尾路径照常；
+        // touch 经 evictStaleSinks 间接断言——没 touch 过的 session 不会被清理
+        var bus = new SessionEventBus(eventStore,
+            Duration.ofSeconds(60), Duration.ZERO, 64);   // eviction 立即到期
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+
+        var sub = bus.subscribe("sid-touch", 0, "rid-touch").subscribe();
+        int rc = bus.emit("sid-touch", mockAgentEvent("lost"), "rid-touch");
+        assertEquals(-1, rc, "emit 返回值仍为 -1（持久化失败）");
+        sub.dispose();
+
+        try { Thread.sleep(100); } catch (InterruptedException ignored) { }
+
+        assertEquals(1, bus.evictStaleSinks(),
+            "emit 失败路径仍应 touchActive（否则该 sink 不会进入过期清理）");
+    }
 }

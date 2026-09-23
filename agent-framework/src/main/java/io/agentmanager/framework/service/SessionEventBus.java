@@ -72,9 +72,11 @@ public class SessionEventBus {
     /**
      * 发射一个 agent 事件。
      * 1. 持久化到 session_event 表
-     * 2. 包装为 EnvelopedEvent 广播给所有 SSE 订阅者
+     * 2. 包装为 EnvelopedEvent 广播给所有 SSE 订阅者（持久化失败时**不广播**，见下）
      *
-     * @return 分配的 seq；-1 表示持久化失败（但实时广播仍会尝试）
+     * @return 分配的 seq；-1 表示持久化失败——该事件永不落库，广播它会产生一条
+     *         回放（断连续传、/subscribe 重放）永远补不出来的实时帧，因此跳过广播
+     *         （失败细节由 RedisEventLog.fail 的分级日志承担）
      */
     public int emit(String sessionId, AgentEvent event, String replyId) {
         return emit(sessionId, event, replyId, null);
@@ -97,15 +99,22 @@ public class SessionEventBus {
             log.debug("[EventBus] emit: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
         }
 
-        var sink = sinks.get(sessionId);
-        if (sink != null) {
-            var enveloped = new SessionEventStore.EnvelopedEvent(
-                seq > 0 ? seq : 0, type, payload, replyId);
-            var result = sink.tryEmitNext(enveloped);
-            if (result.isFailure()) {
-                log.debug("SessionEventBus: emit to sink failed (sid={}, result={})",
-                    sessionId, result);
+        if (seq >= 1) {
+            var sink = sinks.get(sessionId);
+            if (sink != null) {
+                var enveloped = new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId);
+                var result = sink.tryEmitNext(enveloped);
+                if (result.isFailure()) {
+                    log.debug("SessionEventBus: emit to sink failed (sid={}, result={})",
+                        sessionId, result);
+                }
             }
+        } else {
+            // 持久化失败（seq=-1）：不广播。实时渲染一条回放永远补不出来的帧，只会让
+            // 实时与回放两份视图分叉；这里只 debug 记一笔，失败细节已由 RedisEventLog.fail
+            // 按 ERROR/WARN 分级打过，避免 Redis 故障期每事件一条的重复噪音（A3）
+            log.debug("[EventBus] emit skipped broadcast (persist failed): sid={}, type={}, replyId={}",
+                sessionId, type, replyId);
         }
 
         touchActive(sessionId);
@@ -123,11 +132,16 @@ public class SessionEventBus {
 
         log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
 
-        var sink = sinks.get(sessionId);
-        if (sink != null) {
-            var enveloped = new SessionEventStore.EnvelopedEvent(
-                seq > 0 ? seq : 0, type, payload, replyId);
-            sink.tryEmitNext(enveloped);
+        if (seq >= 1) {
+            var sink = sinks.get(sessionId);
+            if (sink != null) {
+                var enveloped = new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId);
+                sink.tryEmitNext(enveloped);
+            }
+        } else {
+            // 同 emit（A3）：持久化失败不广播，不留一条回放永远补不出来的实时帧
+            log.debug("[EventBus] emitSynthetic skipped broadcast (persist failed): sid={}, type={}, replyId={}",
+                sessionId, type, replyId);
         }
 
         touchActive(sessionId);
