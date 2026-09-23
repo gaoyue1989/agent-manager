@@ -149,3 +149,210 @@ test.fixme('U11 文件交付下载卡片与历史回放', async ({ page }) => {
   await back.click();
   await expect(page.locator(`${SEL.chatInner} a[href*="/files/"]`).first()).toBeVisible({ timeout: 60_000 });
 });
+
+// ---------- 用户技能（L4）面板：stub 化交互守卫 ----------
+// 面板逻辑见 static/debug/modules/skills.js（renderUserSkillsPanel/loadUserSkills/…）。
+// 这里用 page.route 桩化管理面响应，把「行 → 用户」错位、错误吞并（GET 5xx 被当成“不存在”）
+// 与提示文案分档纳入门禁；真实链路场景见仓库根 e2e/user-skill-admin-e2e.sh（手工脚本）。
+
+type SkCall = { method: string; path: string; body: string };
+
+/** 桩化 Skills 模块依赖：/skills/manage、/debug/user-skills、/debug/sandbox、/skills/users/** */
+async function stubUserSkillPanel(page: Page, opts: {
+  sandboxEnabled?: boolean;
+  /** 明细 GET 的行为：返回状态码（非 200 时 body 为 {error,message}） */
+  detailStatus?: number;
+  /** userId → 列表响应延迟毫秒（并发错位用例用） */
+  listDelay?: Record<string, number>;
+  /** 索引触顶截断（后端 truncated=true，下拉只含前 N 个用户） */
+  userIndexTruncated?: boolean;
+  /** 索引接口状态码（非 200 时 body 为 {error,message}） */
+  userIndexStatus?: number;
+  /** 已删除但仍保留删除标记（tombstone）的技能名 */
+  tombstones?: string[];
+} = {}) {
+  const calls: SkCall[] = [];
+  const users = [
+    { userId: 'alice', skillCount: 1, updatedAt: '2026-09-23 10:00:00' },
+    { userId: 'bob', skillCount: 1, updatedAt: '2026-09-23 10:00:00' },
+  ];
+  await page.route('**/skills/manage', r => r.fulfill({ json: [] }));
+  await page.route('**/debug/sandbox', r => r.fulfill({ json: { enabled: !!opts.sandboxEnabled } }));
+  if (opts.userIndexStatus && opts.userIndexStatus !== 200) {
+    await page.route('**/debug/user-skills', r => r.fulfill({
+      status: opts.userIndexStatus!, json: { error: 'index_failed', message: 'stub 索引读取失败' } }));
+  } else {
+    await page.route('**/debug/user-skills', r => r.fulfill({
+      json: { count: users.length, users, ...(opts.userIndexTruncated ? { truncated: true } : {}) } }));
+  }
+  await page.route('**/skills/users**', async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const parts = decodeURIComponent(url.pathname).split('/').filter(Boolean); // [skills, users, uid?, name?]
+    calls.push({ method: req.method(), path: url.pathname, body: req.postData() || '' });
+    const uid = parts[2];
+    const name = parts[3];
+    const detail = parts.length === 4 && !url.pathname.endsWith('sync-from-package');
+    if (req.method() === 'GET' && !uid) return route.fulfill({ json: { count: users.length, users } });
+    if (req.method() === 'GET' && !detail) {
+      const delay = (opts.listDelay || {})[uid] || 0;
+      if (delay) await new Promise(r => setTimeout(r, delay));
+      return route.fulfill({
+        json: {
+          userId: uid,
+          skills: [{
+            name: `demo-${uid}`, files: ['SKILL.md'], bytes: 3, version: 1,
+            hasPackageBaseline: true, adminOverride: true,
+          }],
+          tombstones: (opts.tombstones || []).map(n => ({ name: n, deletedAt: '2026-09-23 12:00:00' })),
+        },
+      });
+    }
+    if (req.method() === 'GET') {
+      const status = opts.detailStatus ?? 200;
+      if (status !== 200) {
+        return route.fulfill({ status, json: { error: 'internal_error', message: 'stub 明细读取失败' } });
+      }
+      return route.fulfill({
+        json: {
+          userId: uid, name, file: 'SKILL.md', content: `EXISTING-${uid}-${name}`,
+          source: 'user', hasUserOverride: true, userOverrideExists: true, version: 2, files: ['SKILL.md'],
+        },
+      });
+    }
+    if (req.method() === 'PUT') return route.fulfill({ json: { action: 'updated', version: 3, message: 'stub 已保存' } });
+    if (req.method() === 'DELETE') {
+      return route.fulfill({ json: { deletedFiles: 1, hasPackageBaseline: true, message: 'stub 已删除' } });
+    }
+    if (req.method() === 'POST') {
+      return route.fulfill({ json: { files: ['SKILL.md', 'scripts/hello.sh'], skipped: [], message: 'stub 已下发' } });
+    }
+    return route.fulfill({ status: 404, json: { error: 'not_found', message: 'stub 未匹配' } });
+  });
+  return calls;
+}
+
+/** 打开 Skills 模块并加载指定 userId 的个人技能列表 */
+async function openUserSkillPanel(page: Page, userId: string) {
+  await page.goto('/debug/#/skills');
+  await expect(page.locator('#userSkillLoadBtn')).toBeVisible();
+  await page.locator('#userSkillUserInput').fill(userId);
+  await page.locator('#userSkillLoadBtn').click();
+}
+
+test('U-SK1 用户技能面板提示文案分档（非沙箱 / 沙箱）', async ({ page }) => {
+  await stubUserSkillPanel(page, { sandboxEnabled: false });
+  await page.goto('/debug/#/skills');
+  await expect(page.locator('#userSkillHint')).toContainText('下一轮会话生效');
+  await expect(page.locator('#userSkillHint')).not.toContainText('SANDBOX_ENABLED=true');
+
+  await page.unroute('**/debug/sandbox');
+  await page.route('**/debug/sandbox', r => r.fulfill({ json: { enabled: true } }));
+  await page.reload();
+  await expect(page.locator('#userSkillHint')).toContainText('SANDBOX_ENABLED=true');
+  await expect(page.locator('#userSkillHint')).toContainText('不会注入会话容器');
+});
+
+test('U-SK2 加载用户 → 编辑保存 → 删除 → 从包内下发', async ({ page }) => {
+  const calls = await stubUserSkillPanel(page);
+  page.on('dialog', d => d.accept());
+  await openUserSkillPanel(page, 'alice');
+
+  // 表格渲染：该用户的技能行 + 删除后回落标记
+  await expect(page.locator('#userSkillList tbody tr')).toHaveCount(1);
+  await expect(page.locator('#userSkillList')).toContainText('demo-alice');
+
+  // 编辑：回填个人覆盖内容 → 保存走 PUT（同一 userId/name）
+  await page.locator('.us-edit-btn').first().click();
+  await expect(page.locator('#skillEditArea')).toHaveValue('EXISTING-alice-demo-alice');
+  await page.locator('#skillEditArea').fill('NEW-CONTENT');
+  await page.locator('#userSkillEditSave').click();
+  await expect(page.locator('#toastContainer')).toContainText('stub 已保存');
+  const put = calls.find(c => c.method === 'PUT');
+  expect(put?.path).toBe('/skills/users/alice/demo-alice');
+  expect(put?.body).toContain('NEW-CONTENT');
+
+  // 删除：confirm 后走 DELETE
+  await page.locator('.us-del-btn').first().click();
+  await expect(page.locator('#toastContainer')).toContainText('stub 已删除');
+  expect(calls.filter(c => c.method === 'DELETE').map(c => c.path)).toEqual(['/skills/users/alice/demo-alice']);
+
+  // 从包内下发：填技能名 → POST sync-from-package
+  await page.locator('#userSkillNameInput').fill('demo-alice');
+  await page.locator('#userSkillSyncBtn').click();
+  await expect(page.locator('#toastContainer')).toContainText('stub 已下发');
+  expect(calls.filter(c => c.method === 'POST').map(c => c.path))
+    .toEqual(['/skills/users/alice/demo-alice/sync-from-package']);
+
+  // 刷新按钮：重新拉取列表与索引（不抛 pageerror 即通过，交互链路复用上面断言）
+  await page.locator('#skillRefreshBtn').click();
+  await expect(page.locator('#userSkillUserList option')).toHaveCount(2);
+});
+
+test('U-SK3 并发加载不错位：行操作永远作用于该行对应的用户', async ({ page }) => {
+  const calls = await stubUserSkillPanel(page, { listDelay: { alice: 800 } });
+  page.on('dialog', d => d.accept());
+  await page.goto('/debug/#/skills');
+  await expect(page.locator('#userSkillLoadBtn')).toBeVisible();
+
+  // 先发 alice（慢），紧接着改输入框为 bob 再加载（快） → 先发的 alice 后返回必须被丢弃
+  await page.locator('#userSkillUserInput').fill('alice');
+  await page.locator('#userSkillLoadBtn').click();
+  await page.locator('#userSkillUserInput').fill('bob');
+  await page.locator('#userSkillLoadBtn').click();
+  await expect(page.locator('#userSkillList')).toContainText('demo-bob');
+
+  // 等 alice 的慢响应返回后再断言：表格仍是 bob 的行（过期响应不得覆盖）
+  await page.waitForTimeout(1200);
+  await expect(page.locator('#userSkillList')).toContainText('demo-bob');
+  await expect(page.locator('#userSkillList')).not.toContainText('demo-alice');
+
+  // 行操作必须落到 bob（改前 userSkillState.userId 已被置为 bob 但表格是 alice 的行 → 错位）
+  await page.locator('.us-del-btn').first().click();
+  await expect(page.locator('#toastContainer')).toContainText('stub 已删除');
+  expect(calls.filter(c => c.method === 'DELETE').map(c => c.path)).toEqual(['/skills/users/bob/demo-bob']);
+});
+
+test('U-SK4 明细读取 5xx 不得当成“技能不存在”回落空内容新建', async ({ page }) => {
+  await stubUserSkillPanel(page, { detailStatus: 500 });
+  await page.goto('/debug/#/skills');
+  await expect(page.locator('#userSkillWriteBtn')).toBeVisible();
+  await page.locator('#userSkillUserInput').fill('alice');
+  await page.locator('#userSkillNameInput').fill('demo-alice');
+
+  await page.locator('#userSkillWriteBtn').click();
+
+  // 必须 toast 失败并中止，不得弹出空白编辑框（空白起编保存会整份覆盖已有个人覆盖）
+  await expect(page.locator('#toastContainer')).toContainText('stub 明细读取失败');
+  await expect(page.locator('#modalOverlay')).not.toHaveClass(/active/);
+});
+
+test('U-SK5 索引触顶截断必须显式提示（不得把子集当全集）', async ({ page }) => {
+  await stubUserSkillPanel(page, { userIndexTruncated: true });
+  await page.goto('/debug/#/skills');
+
+  // 后端 truncated=true → 面板必须提示截断并给出补齐手段，否则下拉列表不全无从察觉
+  await expect(page.locator('#userSkillSummary')).toContainText('索引触顶截断');
+  await expect(page.locator('#userSkillSummary')).toContainText('手工输入 userId');
+  await expect(page.locator('#userSkillUserList')).toHaveAttribute('title', /截断/);
+});
+
+test('U-SK6 索引接口失败必须醒目提示（不得静默显示 0 user(s)）', async ({ page }) => {
+  await stubUserSkillPanel(page, { userIndexStatus: 500 });
+  await page.goto('/debug/#/skills');
+
+  await expect(page.locator('#userSkillSummary')).toContainText('user index unavailable');
+  await expect(page.locator('#userSkillSummary')).toContainText('stub 索引读取失败');
+});
+
+test('U-SK7 删除标记（tombstone）与写入栅栏必须显式提示', async ({ page }) => {
+  await stubUserSkillPanel(page, { tombstones: ['demo-gone'] });
+  await openUserSkillPanel(page, 'alice');
+
+  // 管理面写入栅栏：回写会跳过该技能（容器内 skill_manage 的修改在清除前不落库）
+  await expect(page.locator('#userSkillList')).toContainText('管理面栅栏');
+  // 删除标记：后果与清除方式必须写清，否则「重建了却不落库」无从解释
+  await expect(page.locator('#userSkillList')).toContainText('tombstone');
+  await expect(page.locator('#userSkillList')).toContainText('demo-gone');
+  await expect(page.locator('#userSkillList')).toContainText('不会被回写落库');
+});
