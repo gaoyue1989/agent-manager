@@ -76,6 +76,19 @@ class WorkspaceReaderTest {
     }
 
     @Test
+    void readRuntimeFilesShouldReturnEmptyWhenMemoryDisabled() {
+        // AGENT_MEMORY_ENABLED=false：短路返回空集——KV 里即使已有记忆也不注入沙箱
+        var store = store();
+        seedMemory(store, USER, "# MEMORY\n- must not leak");
+        var reader = new WorkspaceReader(distributedStore(store), null, false);
+
+        var files = reader.readRuntimeFiles(USER);
+
+        assertTrue(files.isEmpty(), "记忆关闭时运行时文件必须短路返回空集（不注入沙箱）");
+        assertFalse(reader.isMemoryEnabled());
+    }
+
+    @Test
     void injectToSandboxShouldWriteAllFiles() {
         var files = Map.of(
             "MEMORY.md", "m1".getBytes(StandardCharsets.UTF_8),

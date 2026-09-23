@@ -188,6 +188,42 @@ class WorkspaceSyncServiceTest {
         service(store, null).syncBack(USER, osb);
     }
 
+    /** AGENT_MEMORY_ENABLED=false：syncBack 跳过 MEMORY.md/memory/ 回写，技能回写（syncUserSkills）不受影响 */
+    @Test
+    void syncBackShouldSkipMemoryButKeepSkillSyncWhenMemoryDisabled() throws Exception {
+        var store = new InMemoryStore();
+        var skillMd = "---\nname: sbx-off\n---\n\nSBX-OFF-PROBE\n";
+        var files = mock(Filesystem.class);
+        // 记忆内容桩真实值：若门控失效（syncRuntimeFiles 被执行），KV 会落盘记忆，下方断言即失败
+        when(files.readByteArray("/workspace/MEMORY.md"))
+            .thenReturn("# MEMORY\n- must not sync".getBytes(StandardCharsets.UTF_8));
+        // 目录/文件条目先构造好再 stub（Mockito 禁止在 when(...) 参数里创建并 stub 另一个 mock）
+        var skillDir = dirEntry("/workspace/skills/sbx-off");
+        var skillMdEntry = fileEntry("/workspace/skills/sbx-off/SKILL.md");
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(skillDir));
+        when(files.listDirectory("/workspace/skills/sbx-off")).thenReturn(List.of(skillMdEntry));
+        when(files.readFile("/workspace/skills/sbx-off/SKILL.md")).thenReturn(skillMd);
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+
+        // 三参构造：memoryEnabled=false
+        new WorkspaceSyncService(new WorkspaceReader(distributedStore(store), AGENT, false))
+            .syncBack(USER, osb);
+
+        // 记忆侧：syncRuntimeFiles 被整体跳过（未发起任何 MEMORY.md 读取），KV 无记忆
+        verify(files, never()).readByteArray("/workspace/MEMORY.md");
+        var fs = new RemoteFilesystem(store, List.of(USER));
+        var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
+        assertFalse(fs.read(ctx, WorkspaceReader.MEMORY_FILE, 0, -1).isSuccess(),
+            "记忆关闭时 MEMORY.md 不应回写 KV");
+
+        // 技能侧：syncUserSkills 照常执行，技能落 L4 KV
+        var l4 = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
+        var main = l4.read(ctx, "/sbx-off/SKILL.md", 0, -1);
+        assertTrue(main.isSuccess(), "记忆关闭时技能回写应照常执行");
+        assertEquals(skillMd, main.fileData().content());
+    }
+
     // ==================== 沙箱 L4 技能回写（skill_manage 写容器 → KV） ====================
 
     /** 沙箱内 skill_manage 产出的技能目录应落到 agents/{agent}/users/{uid}/skills */

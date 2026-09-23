@@ -138,7 +138,7 @@ public class AgentScopeConfig {
             DistributedStore distributedStore, OafConfig oafConfig, AgentManagerProperties props) {
         var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
         // 记忆总开关传入 WorkspaceReader：false 时运行时文件读取返回空集，
-        // 沙箱注入链路（ensureRuntimeFilesInjected）拿空文件集后天然 no-op
+        // 沙箱注入链路（OpenSandbox.injectRuntimeFilesIfNeeded）拿空文件集后天然 no-op
         return new io.agentmanager.framework.service.WorkspaceReader(distributedStore, oafConfig.name(),
             harness.memoryEnabled());
     }
@@ -470,7 +470,11 @@ public class AgentScopeConfig {
                 .compaction(CompactionConfig.builder()
                     .triggerMessages(harness.compactionTriggerMessages())
                     .keepMessages(harness.compactionKeepMessages())
-                    .flushBeforeCompact(harness.compactionFlushBeforeCompact())
+                    // 记忆总开关关闭时强制不刷写：SDK 2.0.3 的压缩前 flush 走 CompactionMiddleware
+                    // 内部自建的 MemoryFlushManager（仅判 CompactionConfig.isFlushBeforeCompact()），
+                    // 不经 disableMemoryHooks —— 不在此处置 false，压缩阈值触发仍会发起记忆抽取
+                    // LLM 调用并写 MEMORY.md/memory/，违反"完全关闭"
+                    .flushBeforeCompact(harness.memoryEnabled() && harness.compactionFlushBeforeCompact())
                     .offloadBeforeCompact(harness.compactionOffloadBeforeCompact())
                     .model(compactionModel)        // ← 新增：包装后的 model（compaction LLM 调用 span）
                     .build())

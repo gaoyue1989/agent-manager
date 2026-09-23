@@ -132,7 +132,7 @@ public class WorkspaceReader {
      * 返回相对路径 → 内容字节。
      */
     public Map<String, byte[]> readRuntimeFiles(String userId) {
-        // 记忆总开关关闭：直接返回空文件集（调用方 OpenSandbox.ensureRuntimeFilesInjected
+        // 记忆总开关关闭：直接返回空文件集（调用方 OpenSandbox.injectRuntimeFilesIfNeeded
         // 拿空集后天然 no-op，无需改动注入侧）
         if (!memoryEnabled) {
             log.debug("Memory disabled (AGENT_MEMORY_ENABLED=false), skip reading runtime files for user {}", userId);
