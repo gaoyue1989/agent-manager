@@ -188,8 +188,8 @@ class SessionEventTailerTest {
     @Test
     void observePathPayloadMatchesBusPayload() {
         // 同一事件：执行副本走本地 sink、观察者走 DB 追赶，前端必须拿到同样的 payload。
-        // 两条路径各自独立实现 toSSE（观察者路径刻意不依赖 SessionEventBus），
-        // 因此这里逐字节比对，用来捕捉两者漂移。
+        // A1 后两条路径共用 AgentEventSseSerializer.toSseFrame 唯一实现；
+        // 本用例逐字节比对，继续钉住帧构造不再漂移。
         var event = new SessionEventStore.EnvelopedEvent(
             3, "AGENT_END", "{\"type\":\"AGENT_END\"}", "rid-x");
         when(eventStore.queryAfter("sid-x", "rid-x", 0)).thenReturn(Flux.just(event));

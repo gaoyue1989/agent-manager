@@ -11,8 +11,6 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import io.agentmanager.framework.controller.AgentEventSseSerializer;
 import io.agentscope.core.event.AgentEvent;
 import reactor.core.publisher.Flux;
@@ -36,8 +34,6 @@ import reactor.core.publisher.Sinks;
 public class SessionEventBus {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventBus.class);
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** session_id → Sinks.Many<EnvelopedEvent> */
     private final ConcurrentHashMap<String, Sinks.Many<SessionEventStore.EnvelopedEvent>> sinks =
@@ -91,6 +87,9 @@ public class SessionEventBus {
      */
     public int emit(String sessionId, AgentEvent event, String replyId, String payloadOverride) {
         String payload = payloadOverride != null ? payloadOverride : AgentEventSseSerializer.payload(event);
+        // replyId 注入前移到写路径（A1）：落库 p 字段与广播 data 从此同源（同一份字符串），
+        // 读端对存量行（p 内无 replyId）兜底注入即可，不再逐帧重序列化
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId);
         String type = event.getType().name();
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
@@ -118,6 +117,8 @@ public class SessionEventBus {
      * 同上流程，但不来自 AgentEvent。
      */
     public int emitSynthetic(String sessionId, String replyId, String type, String payload) {
+        // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId);
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
         log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
@@ -150,13 +151,13 @@ public class SessionEventBus {
         Flux<ServerSentEvent<String>> replay = Flux.defer(() -> {
             if (afterSeq < 0) return Flux.empty();
             return eventStore.queryAfter(sessionId, replyId, afterSeq)
-                .map(this::toSSE);
+                .map(AgentEventSseSerializer::toSseFrame);
         });
 
         // 2. 实时事件流（过滤 replyId）
         Flux<ServerSentEvent<String>> live = sink.asFlux()
             .filter(e -> replyId == null || replyId.isBlank() || replyId.equals(e.replyId()))
-            .map(this::toSSE);
+            .map(AgentEventSseSerializer::toSseFrame);
 
         // 3. 心跳流：SSE comment 帧，不触发前端 onmessage，但重置 Nginx 超时计时器
         Flux<ServerSentEvent<String>> heartbeat = Flux.interval(heartbeatInterval)
@@ -272,25 +273,5 @@ public class SessionEventBus {
 
     private void touchActive(String sessionId) {
         lastActiveAt.put(sessionId, Instant.now());
-    }
-
-    private ServerSentEvent<String> toSSE(SessionEventStore.EnvelopedEvent e) {
-        String data = e.payload();
-        // 将 replyId 注入 payload JSON，使前端合成事件（file_ready/waiting/error）也能获得 replyId
-        if (e.replyId() != null && !e.replyId().isBlank()) {
-            try {
-                var node = MAPPER.readTree(data);
-                if (node != null && node.isObject() && !node.has("replyId")) {
-                    ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", e.replyId());
-                    data = MAPPER.writeValueAsString(node);
-                }
-            } catch (Exception ex) {
-                // 注入失败不阻塞主链路，使用原始 payload
-            }
-        }
-        return ServerSentEvent.<String>builder()
-            .data(data)
-            .id(String.valueOf(e.seq()))
-            .build();
     }
 }

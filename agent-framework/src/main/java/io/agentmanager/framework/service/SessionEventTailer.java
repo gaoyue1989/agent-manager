@@ -8,7 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.codec.ServerSentEvent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentmanager.framework.controller.AgentEventSseSerializer;
 
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
@@ -27,8 +27,6 @@ import reactor.core.scheduler.Schedulers;
 public class SessionEventTailer {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventTailer.class);
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** 终态事件类型：出现即代表 turn 不会再产出新事件 */
     private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error");
@@ -136,7 +134,7 @@ public class SessionEventTailer {
             ? Flux.empty()
             : eventStore.queryAfter(sessionId, replyId, afterSeq)
                 .doOnNext(e -> cursor.set(e.seq()))
-                .map(this::toSSE);
+                .map(AgentEventSseSerializer::toSseFrame);
 
         Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>>create(sink -> {
             long lastProbeAt = 0;   // 0 → 首轮立即探测，避免对已结束的 turn 空等一轮
@@ -149,7 +147,7 @@ public class SessionEventTailer {
                 boolean sawTerminal = false;
                 for (var e : page) {
                     if (sink.isCancelled()) return;
-                    sink.next(toSSE(e));
+                    sink.next(AgentEventSseSerializer.toSseFrame(e));
                     cursor.set(e.seq());
                     if (TERMINAL_TYPES.contains(e.type())) sawTerminal = true;
                 }
@@ -213,35 +211,13 @@ public class SessionEventTailer {
         if (page == null) return;
         for (var e : page) {
             if (sink.isCancelled()) return;
-            sink.next(toSSE(e));
+            sink.next(AgentEventSseSerializer.toSseFrame(e));
             cursor.set(e.seq());
         }
     }
 
     private static ServerSentEvent<String> heartbeatSSE() {
         return ServerSentEvent.<String>builder().comment("hb").build();
-    }
-
-    private ServerSentEvent<String> toSSE(SessionEventStore.EnvelopedEvent e) {
-        // 与 SessionEventBus.toSSE 保持一致的 payload 形态：把 replyId 注入 payload JSON，
-        // 使同一事件无论走执行副本的本地 sink 还是观察者的 DB 追赶，前端拿到的字节一致。
-        String data = e.payload();
-        if (e.replyId() != null && !e.replyId().isBlank()) {
-            try {
-                var node = MAPPER.readTree(data);
-                if (node != null && node.isObject() && !node.has("replyId")) {
-                    ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", e.replyId());
-                    data = MAPPER.writeValueAsString(node);
-                }
-            } catch (Exception ex) {
-                // 注入失败不阻塞主链路，使用原始 payload
-            }
-        }
-        // id（seq）语义与 SessionEventBus.toSSE 一致，前端可据此记录回放游标
-        return ServerSentEvent.<String>builder()
-            .data(data)
-            .id(String.valueOf(e.seq()))
-            .build();
     }
 
     private static ServerSentEvent<String> doneSSE() {

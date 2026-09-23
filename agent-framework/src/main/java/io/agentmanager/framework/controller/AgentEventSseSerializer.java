@@ -3,8 +3,11 @@ package io.agentmanager.framework.controller;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.springframework.http.codec.ServerSentEvent;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.agentmanager.framework.service.SessionEventStore;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.DataBlockDeltaEvent;
 import io.agentscope.core.event.DataBlockStartEvent;
@@ -178,5 +181,58 @@ public final class AgentEventSseSerializer {
         } catch (Exception e) {
             return "{}";
         }
+    }
+
+    /**
+     * 将 replyId 注入 payload JSON 顶层（A1 收口后的唯一实现，此前 SessionEventBus 与
+     * SessionEventTailer 各持有一份相同拷贝）。
+     *
+     * <p>注入算法与收口前的读端逐行相同：readTree &rarr; isObject &rarr; {@code !has("replyId")}
+     * &rarr; put（追加在 JSON 末尾）&rarr; writeValueAsString；任何异常吞掉、replyId 为
+     * null/blank 时一律原串返回。
+     *
+     * <p>刻意<b>保留</b> {@code !node.has("replyId")} 顶层键判定、不做 {@code contains("replyId")}
+     * 之类的子串捷径：delta/tool 入参里可能出现字面量 {@code "replyId"}，子串判定与顶层键
+     * 判定在存量数据上不等价，会破坏帧字节一致性。写路径（emit/emitSynthetic）已先行注入，
+     * 这里主要服务于<b>存量行</b>（升级前落库、p 内无 replyId）的读端兜底；随 Redis TTL
+     * （retentionDays）耗尽存量后，兜底块成为死代码，届时可整体删除（后续独立小 commit）。
+     *
+     * <p>新数据自带 replyId 时走 {@code has("replyId")} 短路、原引用返回（零重序列化）——
+     * 这是读端「零 JSON 重写」的实现基础。
+     *
+     * @param payload SSE data 的 JSON 字符串（可能不含 replyId）
+     * @param replyId turn 标识；null/blank 不注入
+     * @return 注入后的字符串；无法注入时返回原串
+     */
+    public static String withReplyId(String payload, String replyId) {
+        if (payload == null || replyId == null || replyId.isBlank()) {
+            return payload;
+        }
+        try {
+            var node = MAPPER.readTree(payload);
+            if (node != null && node.isObject() && !node.has("replyId")) {
+                ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", replyId);
+                return MAPPER.writeValueAsString(node);
+            }
+            return payload;
+        } catch (Exception e) {
+            // 注入失败不阻塞主链路，使用原始 payload
+            return payload;
+        }
+    }
+
+    /**
+     * EnvelopedEvent &rarr; SSE 帧（A1：SessionEventBus 与 SessionEventTailer 的私有 toSSE
+     * 收口于此，两条路径必然同构，杜绝双份拷贝漂移）。
+     *
+     * <p>data 不是直通透传：新数据（写路径已注入 replyId）经 {@link #withReplyId} 短路原串
+     * 返回；存量行（p 内无 replyId）由同一实现兜底注入——与收口前读端输出逐字节一致。
+     * id 仍为回放游标 seq。
+     */
+    public static ServerSentEvent<String> toSseFrame(SessionEventStore.EnvelopedEvent e) {
+        return ServerSentEvent.<String>builder()
+            .data(withReplyId(e.payload(), e.replyId()))
+            .id(String.valueOf(e.seq()))
+            .build();
     }
 }
