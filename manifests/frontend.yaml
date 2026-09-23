@@ -14,10 +14,11 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: 172.20.0.1:5001/platform-frontend:v4
+          image: 172.20.0.1:5001/platform-frontend:v5
           imagePullPolicy: Always
           ports: [{ containerPort: 3000 }]
           env:
+            # 同源反代目标(src/proxy.ts 请求期读取),按部署环境修改即可,无需重建镜像
             - { name: BACKEND_INTERNAL_URL, value: "http://platform-backend.agent-platform.svc.cluster.local:8080" }
             - { name: AGENT_INTERNAL_URL, value: "http://oaf-release-agent-svc.agent-platform.svc.cluster.local:8100" }
           readinessProbe:
