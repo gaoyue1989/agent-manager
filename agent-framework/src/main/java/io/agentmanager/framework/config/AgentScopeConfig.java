@@ -115,9 +115,15 @@ public class AgentScopeConfig {
         return spec;
     }
 
+    /**
+     * 沙箱回写服务：依赖 WorkspaceReader（而非裸 BaseStore），保证回写命名空间与读取侧一致
+     * ——{@code agents/{agent}/users/{uid}}（运行时文件）与
+     * {@code agents/{agent}/users/{uid}/skills}（用户技能 L4，key={@code /{技能名}/{路径}}）。
+     */
     @Bean
-    public WorkspaceSyncService workspaceSyncService(DistributedStore distributedStore) {
-        return new WorkspaceSyncService(distributedStore.baseStore());
+    public WorkspaceSyncService workspaceSyncService(
+            io.agentmanager.framework.service.WorkspaceReader workspaceReader) {
+        return new WorkspaceSyncService(workspaceReader);
     }
 
     /**

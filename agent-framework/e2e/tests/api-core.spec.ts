@@ -481,3 +481,33 @@ test('A3/A4 tasks/get 路由与 A2A 限制声明', async () => {
   expect(r.status).toBe(200);
   expect(r.json.error === undefined || r.json.error?.code !== -32601).toBe(true); // 方法已路由（非 Method not found）
 });
+
+// ---------- SK 组：用户技能（L4）管理面探针 ----------
+// 说明：完整管理面场景（PUT/GET/DELETE/sync-from-package + A2A 生效性）见仓库根 e2e/user-skill-admin-e2e.sh
+//（手工脚本，需平台已发布带 skills 的自建服务）；此处只钉住端点路由与响应契约，防路由写错静默合入。
+
+test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
+  // 调试页数据源：与 /skills/users 同源，字段为 count/users
+  const debugIdx = await request.get('/debug/user-skills');
+  expect(debugIdx.status()).toBe(200);
+  const idx = await debugIdx.json();
+  expect(idx).toHaveProperty('count');
+  expect(Array.isArray(idx.users)).toBe(true);
+  expect(idx.count).toBe(idx.users.length);
+
+  // REST 侧入口（同源）：/skills/users 不是 /skills/{name}/content 的歧义牺牲品
+  const usersRes = await request.get('/skills/users');
+  expect(usersRes.status()).toBe(200);
+  const usersBody = await usersRes.json();
+  expect(usersBody).toHaveProperty('users');
+
+  // 明细：L4 无覆盖 + 包内无同名技能 → 404 not_found（而不是 500/200 空体）
+  const ghost = await request.get(`/skills/users/${U}/ghost-skill-${uniq()}`);
+  expect(ghost.status()).toBe(404);
+  expect((await ghost.json()).error).toBe('not_found');
+
+  // 参数校验：非法 userId → 400
+  const bad = await request.get('/skills/users/.hidden/ghost');
+  expect(bad.status()).toBe(400);
+  expect((await bad.json()).error).toBe('invalid_user_id');
+});

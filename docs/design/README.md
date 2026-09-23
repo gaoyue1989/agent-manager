@@ -18,5 +18,6 @@
 | [llm-context-length-config-design.md](llm-context-length-config-design.md) | 已实施（2026-09-18） | `LLM_CONTEXT_LENGTH` 环境变量配置设计（模型上下文窗口大小） |
 | [release-agent-mcp-app-hitl-design-acceptance.md](release-agent-mcp-app-hitl-design-acceptance.md) | 部分实施（原生确认卡已上线；草稿工具/MCP App iframe 等原始设计未实现） | 发布助手变更确认（HITL）设计、实施与验收记录（2026-09-17/18 两轮真实集群 E2E 证据） |
 | [package-online-edit-design.md](package-online-edit-design.md) | 已实施（2026-09-22 合并，E2E 34 断言全绿） | OAF 包在线预览/在线编辑生成新版本（copy-on-write）/republish 发布更新的设计与实施记录 |
+| [user-skill-admin-design.md](user-skill-admin-design.md) | 已实施（2026-09-23 终审补丁后全量单测 825 用例实跑 0 失败） | 用户技能（L4）管理面 `/skills/users/*` + 调试页「用户技能」区块；L4 存储形态、删除回落/下发语义、生效范围分档；沙箱档 `skill_manage` 写 L4 不落库的根因与 `WorkspaceSyncService` 回写修复；回写仲裁两个 KV 标记（`.deleted`/`.admin-override`）与标记/截断可见性、索引失败 500、E2E（E8/E9）与 UI 断言口径 |
 
 > 约定：新增归档时在本表补一行「文档 | 状态 | 说明」；被新设计取代的方案不删除、移入本目录并标注状态。

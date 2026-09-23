@@ -45,6 +45,7 @@ agent-framework/
 │   │   │   │   ├── AgentRuntimeService.java     # Agent 运行时封装 (invoke/invokeStream + HITL 恢复)
 │   │   │   │   ├── WorkspaceInitializer.java    # OAF → Workspace 目录转换（skills 由 L2 仓库动态加载，不再复制）
 │   │   │   │   ├── SkillCatalogService.java     # 动态技能目录（frontmatter 声明 ∪ /config/skills 目录事实，/skills、A2A 卡片数据源）
+│   │   │   │   ├── UserSkillService.java        # 用户技能 L4 管理（agent_fs 读写/删除/从包内下发 + 用户索引）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据 + userHeaders 解析/装饰)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
 │   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: UserScopedMcpClientWrapper (per-call header 注入) / McpUserContextMiddleware (userId→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule
@@ -65,7 +66,7 @@ agent-framework/
 │   │   │   │   ├── storage/                     # 文件存储后端 (FileStorage: LocalFileStorage / S3FileStorage)
 │   │   │   │   ├── A2uiService.java             # A2UI 协议
 │   │   │   │   └── LLMLogger.java               # LLM 调用日志
-│   │   │   ├── sandbox/opensandbox/             # OpenSandbox 沙箱集成 (OpenSandbox/Client/FilesystemSpec/SyncService 等)
+│   │   │   ├── sandbox/opensandbox/             # OpenSandbox 沙箱集成 (OpenSandbox/Client/FilesystemSpec/WorkspaceSyncService：MEMORY.md+memory/ 与 skills/ 回写 KV)
 │   │   │   ├── tool/
 │   │   │   │   ├── BusinessTools.java           # @Tool 注解自定义工具 (get_current_time, echo)
 │   │   │   │   ├── FileTools.java               # present_file 工具 (工作区产物注册交付)
@@ -75,6 +76,7 @@ agent-framework/
 │   │   │       ├── HealthController.java        # GET /health
 │   │   │       ├── ToolController.java          # GET /skills、/mcp、/tools
 │   │   │       ├── AgentCardController.java     # GET /.well-known/agent-card.json
+│   │   │       ├── UserSkillController.java     # /skills/users 系列（列出用户/读取/写入/删除/从包内下发用户技能）
 │   │   │       ├── DebugController.java         # GET /debug
 │   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/threads 等
 │   │   │       ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
@@ -93,7 +95,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
-│   └── test/                                  # 76 个测试类 / 679 个 @Test（含默认跳过的沙箱集成测试）
+│   └── test/                                  # 83 个测试类 / 848 个 @Test（含默认跳过的沙箱集成测试）
 ├── docs/                                     # 设计与改进方案文档 (36 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -164,14 +166,14 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user） |
+| 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user）；用户技能管理面 `/skills/users/*`（列出/读取/写入/删除/从包内下发，调试页 Skills 模块「用户技能」区块；删除 = 回落包内基线 + 写删除标记防沙箱回写复活）。**沙箱档 L4 写入落库（本次修复）**：沙箱会话内 skill_manage 把 L4 写进容器 `/workspace/skills`，由 `WorkspaceSyncService.syncBack` 在每次 call 结束回写 agent_fs（`WorkspaceSyncService.java:132` 起 `syncUserSkills`，命名空间/key 一律经 `WorkspaceReader.writeUserSkillFile`，`WorkspaceReader.java:414`）——修复前只回写 MEMORY.md/memory/，L4 技能随容器 TTL 到期丢失。**回写仲裁（两个 KV 元数据键，命中即跳过同名技能）**：删除写 `/{name}/.deleted`（防删除被容器内副本复活）、管理面写入（PUT/下发）写 `/{name}/.admin-override`（防管理面写入被同代容器内旧副本在下次 call 结束时改回）；代价是标记生效期间该技能在容器内的 skill_manage 修改不落库，状态与清除方式经列表 `tombstones`/`adminOverride` 字段与删除/PUT 响应下发（调试页醒目标注）。**生效范围分档**：非沙箱档管理面 L4 下轮会话生效；沙箱档会话读容器内 `/workspace/skills` 副本，管理面写入需「会话开始物化 L4」能力（尚未实现）才对会话生效，概览见下表端点说明与 `e2e/user-skill-admin-e2e.sh` 档位说明；设计/根因/验证见 [../docs/design/user-skill-admin-design.md](../docs/design/user-skill-admin-design.md) |
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟 |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
 | Plan Mode | ✅ | enablePlanMode() |
 | Channel | ✅ | ChatUiChannel (POST /threads/chat) |
 | 工作区（Workspace） | ✅ | WorkspaceInitializer 生成 .agentscope/workspace/ |
 | 子 Agent | ✅ | subagents/*.md |
-| 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆回写 KV） |
+| 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆/用户技能回写 KV） |
 | Agent 状态存储 | ✅ | MysqlDistributedStore (agent_state + agent_fs) |
 | 模型集成 | ✅ | OpenAI 兼容 API |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
@@ -243,7 +245,7 @@ OAF `deniedTools` 字段控制排除列表。
 | AgentState | (userId, sessionId) | agent_state 表 |
 | MEMORY.md | userId | agent_fs 表 |
 | memory/ | userId | agent_fs 表 |
-| skills/ | 共享 + 用户覆盖 | agent_fs 表 |
+| skills/ | 包内 L2 共享 + 用户 L4 覆盖 | agent_fs 表（L4：`agents/{agent}/users/{uid}/skills`，key `/{技能名}/{相对路径}`；沙箱档由 syncBack 回写该命名空间，回写仲裁靠 `/{技能名}/.deleted` 与 `/{技能名}/.admin-override` 两个元数据键） |
 | sessions/ | userId | agent_fs 表 |
 
 ---
@@ -292,6 +294,13 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
 | GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记） |
+| GET | `/skills/users` | 存在个人技能覆盖（L4，agent_fs `agents/{agent}/users/{uid}/skills`）的用户索引（触顶截断时带 `truncated=true`；**索引查询失败 500**，不降级成 200 + 空列表） |
+| GET | `/skills/users/{userId}` | 某用户的个人技能列表（`hasPackageBaseline`=删除后回落该包内技能，`adminOverride`=带管理面写入栅栏；`tombstones` 列出已删除但标记仍在的技能；枚举/标记读取失败 500，不降级为空） |
+| GET | `/skills/users/{userId}/{name}` | 技能文件内容（?file= 相对路径，默认 SKILL.md；L4 优先，无覆盖回落包内基线，source=user/package；`files`/`version`/`hasUserOverride` 与 source 同源，`userOverrideExists` 表示该用户另有个人覆盖） |
+| PUT | `/skills/users/{userId}/{name}` | 新建/覆盖该用户 SKILL.md（个人覆盖；≤100KB）。**生效范围分档（务必看）**：非沙箱档（SANDBOX_ENABLED=false）下轮会话生效；沙箱档只写 agent_fs KV，会话读的是容器内 `/workspace/skills` 副本，**不会回注容器**，需容器换代或「会话开始物化 L4」能力（尚未实现）才对该用户会话生效。写入同时置写侧栅栏 `/{name}/.admin-override`：同代容器内旧副本在下次 call 结束时**不会**把该 KV 写入改回容器版本；代价是该技能在容器内用 skill_manage 的后续修改也不再回写落库（删除该技能可清除栅栏） |
+| DELETE | `/skills/users/{userId}/{name}` | 删除该用户个人覆盖（全部文件，写 KV 删除标记 `/{name}/.deleted` 防回写复活，并清除写侧栅栏；响应带 `tombstone`=标记名+清除方式）→ 有包内同名技能则回落基线，否则该技能消失。**标记无 TTL**：该用户此后在同代（及后续）容器内用 skill_manage 重建同名技能不会被回写落库，需管理面重新写入或从包内下发才清除标记。沙箱档下删除同样只作用于 KV：容器内副本在容器换代前仍对该用户会话可见（管理面无「KV → 容器」物化路径） |
+| POST | `/skills/users/{userId}/{name}/sync-from-package` | 把包内同名技能以包内清单为准**全量替换**为该用户个人版本（含 scripts/ 等资源；差集清理多余旧文件、失败回滚）；非 UTF-8/二进制文件显式跳过并列入响应 `skipped`；同样置写侧栅栏 `/{name}/.admin-override` |
+| GET | `/debug/user-skills` | 个人技能用户索引（调试页 Skills 模块「用户技能」区块数据源，与 `/skills/users` 同源；同上带 `truncated`；索引查询失败 500） |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 |
 | GET | `/debug` | 调试页面（静态资源） |
@@ -349,7 +358,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (679 用例)
+mvn -o test            # 容器内离线测试 (825 用例 / 跳过 4)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -359,7 +368,8 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 76 个测试类 / 679 个 @Test（默认跳过 4 个沙箱集成测试；S3FileStorageIT 按命名不参与 surefire）
+mvn test     # 83 个测试类 / 848 个 @Test（实测 find src/test -name '*Test.java' 与 grep -rh '@Test' src/test；
+             # 实跑 825 用例、0 失败，其中跳过 4 个沙箱集成测试；S3FileStorageIT 等 *IT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```
 
