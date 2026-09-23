@@ -262,9 +262,14 @@ public class ChatStreamController {
             // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 本 turn 触及过的桶 key（toolCallId）；turn 收尾时统一清桶，防异常路径残留。
+            // 按 turn 粒度隔离：清理只删本 turn 登记过的 key，toolCallId 跨 session 不可能
+            // 撞 key，并行 turn 的桶不受影响（A4）
+            var turnBucketKeys = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
 
             // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
-            // 见 TurnFinalizer#abortSetup 的教训注释
+            // 见 TurnFinalizer#abortSetup 的教训注释。
+            // 该路径 replyId 尚未产出任何事件、无本 turn 桶可清，turnBucketKeys 必为空
             List<Msg> messages;
             try {
                 eventBus.beginTurn(finalSessionId);
@@ -301,7 +306,8 @@ public class ChatStreamController {
                 // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
                 chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
-                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink, turnEnded),
+                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
+                            finalUserId, sink, turnEnded, turnBucketKeys),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             if (isTrailingSandboxTeardownError(e)) {
@@ -312,9 +318,9 @@ public class ChatStreamController {
                                     "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                         e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                             }
-                            TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                         },
-                        () -> TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded));
+                        () -> endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys));
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
@@ -340,7 +346,7 @@ public class ChatStreamController {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
                             + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
                             OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
-                        TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
+                        endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                     }
                 }, finalSessionId, replyId);
             });
@@ -369,7 +375,8 @@ public class ChatStreamController {
     private void handleEventAndEmit(AgentEvent event, String sessionId,
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
-                                    java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+                                    java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.Set<String> turnBucketKeys) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             return;
@@ -377,9 +384,12 @@ public class ChatStreamController {
 
         audit(event, sessionId);
 
-        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）
+        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）。
+        // 同点登记 turnBucketKeys（A4）：新增桶 put 点时必须在此同步登记，否则该类残留
+        // 回到「异常路径跨 turn 累积」的现状
         if (event instanceof ToolCallStartEvent start
                 && start.getToolCallId() != null && start.getToolCallName() != null) {
+            turnBucketKeys.add(start.getToolCallId());
             toolCallNames.put(start.getToolCallId(), start.getToolCallName());
         }
 
@@ -387,6 +397,7 @@ public class ChatStreamController {
         if (!sandboxConfig.enabled()) {
             if (event instanceof ToolCallDeltaEvent delta
                     && isTool(delta.getToolCallId(), "write_file")) {
+                turnBucketKeys.add(delta.getToolCallId());
                 accumulateWriteFileInput(delta.getToolCallId(), String.valueOf(delta.getDelta()));
             }
             if (event instanceof ToolCallEndEvent end && isTool(end.getToolCallId(), "write_file")) {
@@ -398,6 +409,7 @@ public class ChatStreamController {
         // present_file 结果累积（同样按登记名判定）
         if (event instanceof ToolResultTextDeltaEvent trd
                 && isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
+            turnBucketKeys.add(trd.getToolCallId());
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
 
@@ -426,7 +438,35 @@ public class ChatStreamController {
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
+            endTurnAndCleanupBuckets(lease, sessionId, turnEnded, turnBucketKeys);
+        }
+    }
+
+    /**
+     * turn 收尾 + 本 turn 桶清理（A4）：只有抢到收尾权（{@link TurnFinalizer#endTurn}
+     * 3 参的 CAS 首胜返回 true）才清桶，且只清本 turn 在 {@code turnBucketKeys}
+     * 里登记过的 key——并行 turn（其他 session）的桶条目不可达于本清理循环；
+     * {@code remove} 天然幂等，与正常路径（End/合成时）的 remove 双删无冲突。
+     *
+     * <p>清桶发生在终态动作（closeSession/abandonSession）之后：桶纯内存、不产生
+     * 任何 SSE 字节，先后不影响行为。
+     *
+     * <p>覆盖的终态：AGENT_END、源流 error/complete 回调、onCancel 看护强收（均走本方法）。
+     * <b>HITL 是部分覆盖</b>：permission_ask 路径先 release 租约再直接 closeSession、不经
+     * 3 参 endTurn，本 turn 的桶清理推迟到源 flux complete/error 回调的 endTurn——正常必达；
+     * flux 永不 complete 且连接无 onCancel 时与现状一样不清（无恶化）。终态后理论上仍可能
+     * 有极晚事件回调 re-put（与现状相同的既有边界，桶上限 64KB/2MB 兜底）。
+     */
+    private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId,
+                                          java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                          java.util.Set<String> turnBucketKeys) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
+            return;
+        }
+        for (String toolCallId : turnBucketKeys) {
+            toolCallNames.remove(toolCallId);
+            presentFileBuffers.remove(toolCallId);
+            writeFileInputBuffers.remove(toolCallId);
         }
     }
 
@@ -446,6 +486,18 @@ public class ChatStreamController {
 
     private boolean isTool(String toolCallId, String expected) {
         return isTool(toolCallId, expected, null);
+    }
+
+    // ===== 私有可测性观察点（A4）：仅供测试断言，不进公有 API =====
+
+    /** 三个工具桶条目数之和（toolCallNames/presentFileBuffers/writeFileInputBuffers） */
+    int bucketEntryCount() {
+        return toolCallNames.size() + presentFileBuffers.size() + writeFileInputBuffers.size();
+    }
+
+    /** 定向查看登记表中某 toolCallId 的工具名（测试断言「并行 turn 防误删」用） */
+    String registeredToolName(String toolCallId) {
+        return toolCallNames.get(toolCallId);
     }
 
     private void accumulatePresentFile(String toolCallId, String delta) {
