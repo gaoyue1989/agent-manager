@@ -120,7 +120,7 @@ class AgentScopeConfigTest {
             "/config", "", cleanupConfig(), emptyFileConfig(),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             new AgentManagerProperties.HarnessConfig(
-                20, 30, 180, 30, 10, 8000, 60,
+                20, 30, 180, 30, true, 10, 8000, 60,
                 30, 10, true, true, 7, 1, 5000L, 60000L, 900000L));
 
         var ds = config.dataSource(props);
@@ -317,6 +317,72 @@ class AgentScopeConfigTest {
         var model = config.buildChatModel(llm, harnessConfig());
 
         assertEquals(0, model.getContextWindowSize());
+    }
+
+    // ---------- AGENT_MEMORY_ENABLED：记忆总开关（完全关闭 = hooks + tools + 沙箱门控） ----------
+
+    @Test
+    void defaultsShouldEnableMemory() {
+        assertTrue(AgentManagerProperties.HarnessConfig.defaults().memoryEnabled(),
+            "AGENT_MEMORY_ENABLED 缺省必须为 true（行为与历史版本一致）");
+    }
+
+    /**
+     * 全量构建 harnessAgent 并返回 toolkit 注册的工具名集合。
+     * 依赖项与现有用例同口径打桩：真实 InMemoryStore 兜底 DistributedStore（框架构建期会触碰），
+     * 权限规则为空集（buildPermissionContext 返回 null，零侵入路径）。
+     */
+    private java.util.Set<String> buildAgentToolNames(AgentManagerProperties.HarnessConfig harness) throws Exception {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("memory-switch-test"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf)).thenReturn(permCfg(java.util.Map.of(), java.util.Set.of()));
+
+        var store = org.mockito.Mockito.mock(DistributedStore.class);
+        when(store.baseStore()).thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        // SDK build() 校验 RemoteFilesystemSpec 必须搭配分布式 state store（拒绝 JsonFile/InMemory
+        // 两种本地实现），mock 一即可通过校验（isLocalSession 仅 instanceof 这两个类）
+        when(store.agentStateStore())
+            .thenReturn(org.mockito.Mockito.mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0),
+            emptyServer(), emptyCheckpoint(), "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300), harness);
+
+        var agent = config.harnessAgent(props, store, oaf, ws, mcp,
+            List.of(new BusinessTools()), new LLMLogger(), null, null, null);
+        return new java.util.TreeSet<>(agent.getToolkit().getToolNames());
+    }
+
+    @Test
+    void agentWithMemoryDisabledShouldExcludeMemoryTools() throws Exception {
+        // memoryEnabled=false：完全关闭 = 不注册 memory_search / memory_get / memory_save
+        var harness = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, false, 10, 8000, 60,
+            30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+        var names = buildAgentToolNames(harness);
+
+        assertFalse(names.contains("memory_search"), "memory 关闭时不应注册 memory_search");
+        assertFalse(names.contains("memory_get"), "memory 关闭时不应注册 memory_get");
+        assertFalse(names.contains("memory_save"), "memory 关闭时不应注册 memory_save");
+    }
+
+    @Test
+    void agentWithDefaultMemoryShouldIncludeMemoryTools() throws Exception {
+        // 默认（memoryEnabled=true）：三个 memory_* 工具照常注册
+        var names = buildAgentToolNames(harnessConfig());
+
+        assertTrue(names.contains("memory_search"), "memory 默认开启时应注册 memory_search");
+        assertTrue(names.contains("memory_get"), "memory 默认开启时应注册 memory_get");
+        assertTrue(names.contains("memory_save"), "memory 默认开启时应注册 memory_save");
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {

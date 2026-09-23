@@ -53,13 +53,30 @@ public class WorkspaceReader {
      */
     private final String agentName;
 
+    /**
+     * 记忆总开关（AGENT_MEMORY_ENABLED，构造传入）：false 时 {@link #readRuntimeFiles} 返回空集
+     * ——沙箱注入链路拿不到记忆文件即天然 no-op，配合回写侧门控实现"沙箱不注入/回写记忆文件"。
+     */
+    private final boolean memoryEnabled;
+
     public WorkspaceReader(DistributedStore distributedStore) {
         this(distributedStore, null);
     }
 
+    /** 兼容构造：未显式传记忆开关时默认开启（既有测试/调用点沿用，行为不变） */
     public WorkspaceReader(DistributedStore distributedStore, String agentName) {
+        this(distributedStore, agentName, true);
+    }
+
+    public WorkspaceReader(DistributedStore distributedStore, String agentName, boolean memoryEnabled) {
         this.baseStore = distributedStore.baseStore();
         this.agentName = agentName;
+        this.memoryEnabled = memoryEnabled;
+    }
+
+    /** 记忆总开关：false 时运行时记忆文件不注入、不回写 */
+    public boolean isMemoryEnabled() {
+        return memoryEnabled;
     }
 
     /** KV 命名空间段：有 agentName 时与框架一致（agents/{agentName}/users/{userId}），否则裸 userId */
@@ -115,6 +132,12 @@ public class WorkspaceReader {
      * 返回相对路径 → 内容字节。
      */
     public Map<String, byte[]> readRuntimeFiles(String userId) {
+        // 记忆总开关关闭：直接返回空文件集（调用方 OpenSandbox.ensureRuntimeFilesInjected
+        // 拿空集后天然 no-op，无需改动注入侧）
+        if (!memoryEnabled) {
+            log.debug("Memory disabled (AGENT_MEMORY_ENABLED=false), skip reading runtime files for user {}", userId);
+            return Map.of();
+        }
         Map<String, byte[]> files = new LinkedHashMap<>();
         var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
         var ctx = RuntimeContext.builder().userId(safeUserId).build();

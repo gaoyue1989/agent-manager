@@ -195,6 +195,8 @@ public record AgentManagerProperties(
         /** LLM API 写超时（秒） */
         @DefaultValue("30") int httpWriteTimeoutSeconds,
         // Memory
+        /** 记忆总开关（AGENT_MEMORY_ENABLED）：false 时完全不装配记忆（hooks + 工具 + 沙箱门控） */
+        @DefaultValue("true") boolean memoryEnabled,
         /** 记忆刷写节流间隔（分钟） */
         @DefaultValue("10") int memoryFlushThrottleMinutes,
         /** 记忆整合最大 token 数 */
@@ -224,7 +226,7 @@ public record AgentManagerProperties(
     ) {
         /** 代码默认值兜底：配置节缺失（如测试直接构造 props）时使用 */
         public static HarnessConfig defaults() {
-            return new HarnessConfig(20, 30, 180, 30, 10, 8000, 60,
+            return new HarnessConfig(20, 30, 180, 30, true, 10, 8000, 60,
                 30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
         }
     }
