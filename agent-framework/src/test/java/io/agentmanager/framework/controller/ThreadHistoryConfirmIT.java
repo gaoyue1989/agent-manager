@@ -27,7 +27,7 @@ class ThreadHistoryConfirmIT {
         dataSource.setPassword(System.getenv("CHECKPOINT_PASSWORD"));
         var store = new ConfirmContextStore(dataSource);
         var controller = new ThreadController(dataSource, new LLMLogger(), store,
-            mock(SessionUserStore.class), mock(SessionEventStore.class));
+            mock(SessionUserStore.class), mock(SessionEventStore.class), mock(io.agentmanager.framework.service.ModelCatalog.class));
         var mvc = MockMvcBuilders.standaloneSetup(controller).build();
         var sid = "hitl-it_" + UUID.randomUUID();
         var keys = List.of("test-tenant__" + sid, "test-tenant:" + sid, sid);

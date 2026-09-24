@@ -287,6 +287,11 @@ OAF `deniedTools` 字段控制排除列表。
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关：`false` = 完全关闭记忆——不注册 `memory_*` 工具 + 不执行 flush/整合（`disableMemoryHooks` + `disableMemoryTools`）；沙箱不再注入/回写记忆文件（技能回写不受影响） |
 
+> **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24）**：`LLM_*` 是**系统模型**——未显式选择模型的会话的对话模型，
+> 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
+> 托管模型存 `model_config` 表（`/models` REST CRUD，debug 页「Models」模块可管理），会话经 `model` 字段按会话选择，
+> 仅影响该会话的对话调用；详见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md)。
+
 ---
 
 ## 服务端点
@@ -309,10 +314,17 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/tools` | 工具列表 |
 | GET | `/debug` | 调试页面（静态资源） |
 | GET | `/system-prompt` | 系统提示词 |
-| GET | `/threads` | Thread 列表 |
+| GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧） |
+| PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
+| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
+| GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复） |
+| GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
+| POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；重复 name 400） |
+| PATCH | `/models/{id}` | 更新托管模型（字段缺省=不变；`apiKey=""`=清空回落系统密钥） |
+| DELETE | `/models/{id}` | 删除托管模型（引用会话自动回落默认模型） |
+| POST | `/models/{id}/test` | 模型连接测试（真实发一次最小 completion，返回 ok/latency_ms/reply） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
 | POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |

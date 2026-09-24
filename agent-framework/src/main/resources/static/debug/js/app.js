@@ -9,6 +9,7 @@ import chatModule from '../modules/chat.js';
 import toolsModule from '../modules/tools.js';
 import skillsModule from '../modules/skills.js';
 import mcpModule from '../modules/mcp.js';
+import modelsModule from '../modules/models.js';
 import configModule from '../modules/config.js';
 import memoryModule from '../modules/memory.js';
 import databaseModule from '../modules/database.js';
@@ -21,6 +22,7 @@ const routes = {
   '#/tools':     { title: 'Tools',     icon: '🔧', module: toolsModule },
   '#/skills':    { title: 'Skills',    icon: '📚', module: skillsModule },
   '#/mcp':       { title: 'MCP',       icon: '🔌', module: mcpModule },
+  '#/models':    { title: 'Models',    icon: '🤖', module: modelsModule },
   '#/config':    { title: 'Config',    icon: '⚙️', module: configModule },
   '#/memory':    { title: 'Memory',    icon: '🧠', module: memoryModule },
   '#/database':  { title: 'Database',  icon: '🗄️', module: databaseModule },

@@ -49,6 +49,7 @@ public class ThreadController {
     private final SessionUserStore sessionUserStore;
     private final SessionEventStore sessionEventStore;
     private final AgentStateReader agentStateReader;
+    private final io.agentmanager.framework.service.ModelCatalog modelCatalog;
     private final int toolOutputMaxChars;
 
     /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限） */
@@ -56,9 +57,10 @@ public class ThreadController {
                             LLMLogger llmLogger,
                             ConfirmContextStore confirmContextStore,
                             SessionUserStore sessionUserStore,
-                            SessionEventStore sessionEventStore) {
+                            SessionEventStore sessionEventStore,
+                            io.agentmanager.framework.service.ModelCatalog modelCatalog) {
         this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
-            new AgentStateReader(dataSource),
+            new AgentStateReader(dataSource), modelCatalog,
             io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
     }
 
@@ -70,9 +72,10 @@ public class ThreadController {
                             SessionUserStore sessionUserStore,
                             SessionEventStore sessionEventStore,
                             AgentStateReader agentStateReader,
+                            io.agentmanager.framework.service.ModelCatalog modelCatalog,
                             io.agentmanager.framework.config.HistoryConfig historyConfig) {
         this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
-            agentStateReader,
+            agentStateReader, modelCatalog,
             historyConfig != null ? historyConfig.toolOutputMaxChars()
                 : io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
     }
@@ -84,6 +87,7 @@ public class ThreadController {
                             SessionUserStore sessionUserStore,
                             SessionEventStore sessionEventStore,
                             AgentStateReader agentStateReader,
+                            io.agentmanager.framework.service.ModelCatalog modelCatalog,
                             int toolOutputMaxChars) {
         this.dataSource = dataSource;
         this.llmLogger = llmLogger;
@@ -91,6 +95,7 @@ public class ThreadController {
         this.sessionUserStore = sessionUserStore;
         this.sessionEventStore = sessionEventStore;
         this.agentStateReader = agentStateReader;
+        this.modelCatalog = modelCatalog;
         this.toolOutputMaxChars = toolOutputMaxChars;
     }
 
@@ -113,23 +118,25 @@ public class ThreadController {
                 // slotId(userId, canonicalKey) = "{normalizeUser(userId)}:{canonicalKey}"，
                 // 而 session_user.session_id = 前端 peerId。两者不一致，需用 LIKE 前缀匹配。
                 try (var ps = conn.prepareStatement(
-                        "SELECT su.session_id, su.remark, MAX(a.updated_at) AS updated_at "
+                        "SELECT su.session_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
                             + "FROM session_user su LEFT JOIN agent_state a "
                             + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
                             + "WHERE su.user_id = ? "
-                            + "GROUP BY su.session_id, su.remark "
+                            + "GROUP BY su.session_id, su.remark, su.model "
                             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
                     ps.setString(1, userId);
                     var rs = ps.executeQuery();
                     while (rs.next()) {
                         var sid = rs.getString("session_id");
                         var remark = rs.getString("remark");
+                        var model = rs.getString("model");
                         var updatedAt = rs.getTimestamp("updated_at");
                         var m = new LinkedHashMap<String, Object>();
                         m.put("session_id", sid);
                         m.put("thread_id", extractThreadId(sid));
                         m.put("user_id", userId);
                         m.put("title", remark != null ? remark : "");
+                        m.put("model", model != null ? model : "");
                         m.put("updated_at", updatedAt != null ? updatedAt.toString() : "");
                         result.add(m);
                     }
@@ -139,20 +146,22 @@ public class ThreadController {
                 // LEFT JOIN 使用 LIKE 匹配（同上，agent_state.session_id 格式与 session_user 不一致）
                 try (var stmt = conn.createStatement();
                      var rs = stmt.executeQuery(
-                         "SELECT su.session_id, su.user_id, su.remark, MAX(a.updated_at) AS updated_at "
+                         "SELECT su.session_id, su.user_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
                              + "FROM session_user su LEFT JOIN agent_state a "
                              + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
-                             + "GROUP BY su.session_id, su.user_id, su.remark "
+                             + "GROUP BY su.session_id, su.user_id, su.remark, su.model "
                              + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
                     while (rs.next()) {
                         var sid = rs.getString("session_id");
                         var remark = rs.getString("remark");
+                        var model = rs.getString("model");
                         var updatedAt = rs.getTimestamp("updated_at");
                         var m = new LinkedHashMap<String, Object>();
                         m.put("session_id", sid);
                         m.put("thread_id", extractThreadId(sid));
                         m.put("user_id", rs.getString("user_id"));
                         m.put("title", remark != null ? remark : "");
+                        m.put("model", model != null ? model : "");
                         m.put("updated_at", updatedAt != null ? updatedAt.toString() : "");
                         result.add(m);
                     }
@@ -186,6 +195,8 @@ public class ThreadController {
         var result = new LinkedHashMap<String, Object>();
         result.put("session_id", sessionId);
         result.put("user_id", sessionUserStore.findUserIdBySession(sessionId));
+        var sessionModel = sessionUserStore.findModelBySession(sessionId);
+        result.put("model", sessionModel != null ? sessionModel : "");
 
         // 元信息：从 agent_state 取最新 updated_at（使用 LIKE 匹配前缀，与 loadMessages 一致）
         try (var conn = dataSource.getConnection();
@@ -252,7 +263,10 @@ public class ThreadController {
         ));
     }
 
-    /** 更新会话：目前仅支持重命名（title 字段，存入 session_user.remark） */
+    /**
+     * 更新会话：title（重命名，存 session_user.remark）与 model（会话模型切换）均支持。
+     * model 语义：字段缺省 = 不改变；""/system = 清除覆盖回默认模型；其他 = 校验后绑定。
+     */
     @PatchMapping("/{sessionId}")
     public ResponseEntity<Map<String, Object>> patchThread(
             @PathVariable String sessionId,
@@ -264,14 +278,33 @@ public class ThreadController {
             upsertRemark(sessionId, body.title());
         }
 
+        String appliedModel = null;
+        if (body.model() != null) {
+            var modelId = body.model().trim();
+            if (!io.agentmanager.framework.service.ModelCatalog.isSystemSelection(modelId)) {
+                var reject = modelCatalog != null ? modelCatalog.validateSelectable(modelId) : null;
+                if (reject != null) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                        "error", reject,
+                        "message", reject + ": " + modelId));
+                }
+            }
+            appliedModel = io.agentmanager.framework.service.ModelCatalog.isSystemSelection(modelId)
+                ? "" : modelId;
+            sessionUserStore.upsertModel(sessionId, appliedModel);
+        } else {
+            appliedModel = sessionUserStore.findModelBySession(sessionId);
+        }
+
         return ResponseEntity.ok(Map.of(
             "session_id", sessionId,
-            "title", body.title() != null ? body.title() : ""
+            "title", body.title() != null ? body.title() : "",
+            "model", appliedModel != null ? appliedModel : ""
         ));
     }
 
-    /** PATCH 请求体 */
-    public record PatchRequest(String title) {}
+    /** PATCH 请求体：title / model 均可选，至少传一个才有实际效果 */
+    public record PatchRequest(String title, String model) {}
 
     /** LLM 调用记录（LLMLogger） */
     @GetMapping("/{sessionId}/llm-calls")
@@ -482,7 +515,7 @@ public class ThreadController {
             return List.of();
         }
     }
-    /** 将 title 写入 session_user.remark（统一走 SessionUserStore，避免重复 SQL/MySQL 1093） */
+    /** 将 title 写入 session_user.remark（统一走 SessionUserStore，规避 MySQL 1093；SQL 单一来源） */
     private void upsertRemark(String sessionId, String title) {
         ensureRemarkColumn();
         sessionUserStore.updateRemark(sessionId, title);

@@ -22,6 +22,7 @@ import org.springframework.http.ResponseEntity;
 
 import io.agentmanager.framework.service.ConfirmContextStore;
 import io.agentmanager.framework.service.LLMLogger;
+import io.agentmanager.framework.service.ModelCatalog;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentscope.core.message.ToolUseBlock;
@@ -29,6 +30,7 @@ import io.agentscope.core.message.ToolUseBlock;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +44,7 @@ class ThreadControllerTest {
     private ConfirmContextStore confirmContextStore;
     private SessionUserStore sessionUserStore;
     private SessionEventStore sessionEventStore;
+    private ModelCatalog modelCatalog;
     private ThreadController controller;
 
     @BeforeEach
@@ -51,7 +54,8 @@ class ThreadControllerTest {
         confirmContextStore = mock(ConfirmContextStore.class);
         sessionUserStore = mock(SessionUserStore.class);
         sessionEventStore = mock(SessionEventStore.class);
-        controller = new ThreadController(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore);
+        modelCatalog = mock(ModelCatalog.class);
+        controller = new ThreadController(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore, modelCatalog);
     }
 
     /** 让 dataSource.getConnection() 第一次调用抛异常（被 ensureRemarkColumn catch 住），
@@ -111,17 +115,19 @@ class ThreadControllerTest {
 
         var result = controller.listThreads("alice", null);
         // verify SQL uses LEFT JOIN with LIKE matching (agent_state.session_id = slotId format)
-        verify(conn).prepareStatement("SELECT su.session_id, su.remark, MAX(a.updated_at) AS updated_at "
+        // 并回显会话模型列 su.model（会话模型切换，见 docs/session-model-switch-design.md）
+        verify(conn).prepareStatement("SELECT su.session_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
             + "FROM session_user su LEFT JOIN agent_state a "
             + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
             + "WHERE su.user_id = ? "
-            + "GROUP BY su.session_id, su.remark "
+            + "GROUP BY su.session_id, su.remark, su.model "
             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC");
         verify(ps).setString(1, "alice");
 
         assertEquals(2, result.size());
         assertEquals("alice", result.get(0).get("user_id"));
         assertEquals("chat1", result.get(0).get("title"));
+        assertEquals("", result.get(0).get("model"));
         // Timestamp.toString() 按 JVM 默认时区格式化，期望值同步计算，避免 CI（UTC）与本地（+08）断言漂移
         assertEquals(new Timestamp(2000).toString(), result.get(0).get("updated_at"));
         // agent_state no record -> updated_at should be empty string
@@ -266,7 +272,7 @@ class ThreadControllerTest {
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeUpdate()).thenReturn(1);
 
-        var body = new ThreadController.PatchRequest("New Title");
+        var body = new ThreadController.PatchRequest("New Title", null);
         var response = controller.patchThread("acme__s1", body);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("New Title", response.getBody().get("title"));
@@ -274,7 +280,7 @@ class ThreadControllerTest {
 
     @Test
     void patchThreadWithBlankTitleShouldNotUpdate() throws Exception {
-        var body = new ThreadController.PatchRequest("");
+        var body = new ThreadController.PatchRequest("", null);
         var response = controller.patchThread("acme__s1", body);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("", response.getBody().get("title"));
@@ -282,10 +288,55 @@ class ThreadControllerTest {
 
     @Test
     void patchThreadWithNullTitleShouldNotUpdate() throws Exception {
-        var body = new ThreadController.PatchRequest(null);
+        var body = new ThreadController.PatchRequest(null, null);
         var response = controller.patchThread("acme__s1", body);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("", response.getBody().get("title"));
+    }
+
+    // ========== patchThread (model 会话切换，docs/session-model-switch-design.md §4.2) ==========
+
+    @Test
+    void patchShouldBindModelWhenValid() {
+        when(modelCatalog.validateSelectable("m2")).thenReturn(null);
+
+        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, "m2"));
+
+        assertEquals(200, response.getStatusCode().value());
+        assertEquals("m2", response.getBody().get("model"));
+        verify(sessionUserStore).upsertModel("acme__s1", "m2");
+    }
+
+    @Test
+    void patchShouldRejectUnknownModel() {
+        when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
+
+        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, "nope"));
+
+        assertEquals(400, response.getStatusCode().value());
+        assertEquals("unknown_model", response.getBody().get("error"));
+        verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
+    }
+
+    @Test
+    void patchShouldClearModelOnSystemSelection() {
+        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, "system"));
+
+        assertEquals(200, response.getStatusCode().value());
+        assertEquals("", response.getBody().get("model"));
+        // "system" = 清除覆盖，不做有效性校验
+        verify(sessionUserStore).upsertModel("acme__s1", "");
+        verify(modelCatalog, never()).validateSelectable(anyString());
+    }
+
+    @Test
+    void patchWithoutModelShouldEchoCurrentBinding() {
+        when(sessionUserStore.findModelBySession("acme__s1")).thenReturn("m1");
+
+        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, null));
+
+        assertEquals("m1", response.getBody().get("model"));
+        verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
     }
 
     // ========== threadHistory ==========

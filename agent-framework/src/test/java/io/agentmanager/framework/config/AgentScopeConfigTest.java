@@ -168,7 +168,7 @@ class AgentScopeConfigTest {
 
         assertThrows(RuntimeException.class,
             () -> config.harnessAgent(props, store, oaf, ws, mcp,
-                List.of(new BusinessTools()), new LLMLogger(), null, null, null));
+                List.of(new BusinessTools()), new LLMLogger(), null, null, mock(io.agentmanager.framework.service.ModelCatalog.class), null));
     }
 
     // ---------- buildPermissionContext：自定义工具 HITL 装配（hitl-permission-plan 6.1） ----------
@@ -356,7 +356,7 @@ class AgentScopeConfigTest {
             new AgentManagerProperties.SseConfig(20, 5, 256, 300), harness);
 
         var agent = config.harnessAgent(props, store, oaf, ws, mcp,
-            List.of(new BusinessTools()), new LLMLogger(), null, null, null);
+            List.of(new BusinessTools()), new LLMLogger(), null, null, mock(io.agentmanager.framework.service.ModelCatalog.class), null);
         return new java.util.TreeSet<>(agent.getToolkit().getToolNames());
     }
 
