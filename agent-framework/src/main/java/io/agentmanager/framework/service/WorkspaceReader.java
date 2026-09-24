@@ -29,6 +29,11 @@ public class WorkspaceReader {
     public static final String MEMORY_FILE = "MEMORY.md";
     public static final String MEMORY_DIR = "memory";
 
+    /** 沙箱物化：单技能文件数上限（与 UserSkillService.syncFromPackage 同口径） */
+    private static final int MATERIALIZE_MAX_FILES = UserSkillService.MAX_SYNC_FILES;
+    /** 沙箱物化：单文件字节上限（与技能 API 同口径，超限跳过不阻塞） */
+    private static final int MATERIALIZE_MAX_FILE_BYTES = UserSkillService.MAX_CONTENT_BYTES;
+
     /** 用户技能（L4）KV 布局：技能名目录 + 技能主文件（与 SDK workspace-writable 仓库一致） */
     public static final String SKILLS_DIR = "skills";
     public static final String SKILL_FILE = "SKILL.md";
@@ -285,7 +290,7 @@ public class WorkspaceReader {
     //   key       = /{技能名}/SKILL.md（前导斜杠；资源文件同规则，如 /{技能名}/scripts/a.sh）
     // 非沙箱档推理时框架合并 L2（包内 /config/skills）与 L4，同名 L4 覆盖 L2；沙箱档
     // （SANDBOX_ENABLED=true）会话读的是容器内 /workspace/skills 副本，管理面写进这里的 L4
-    // 需“会话开始物化 L4”能力（尚未实现）才对会话生效——本层只保证 KV 读写本身正确。
+    // 由 materializeUserSkills 在“会话开始”（每次 acquire 后）投影进容器生效——本层保证 KV 读写正确。
     // 两个元数据键（均以 . 开头，不算技能文件）承载回写仲裁：.deleted（管理面删除）与
     // .admin-override（管理面写入），sandbox 回写侧命中任一即跳过同名技能。
 
@@ -694,6 +699,89 @@ public class WorkspaceReader {
      * 将运行时文件注入沙箱 /workspace（SDK 文件 API）。
      * 静态模板（AGENTS.md/skills/ 等）由框架投影注入，不在此处理。
      */
+    /**
+     * 沙箱档「会话开始物化 L4」：把该用户的 L4 技能（含资源文件）写入容器
+     * {@code /workspace/skills/{name}/{相对路径}}，使<b>管理面写入/从包内下发</b>在会话内可见。
+     *
+     * <p>背景：沙箱档会话读的是容器内副本，管理面只写 agent_fs KV（不回注容器）。本方法在每次
+     * acquire（create/resume）后、agent 执行前调用，把 KV 的 L4 以<b>覆盖写</b>方式投影进容器。
+     *
+     * <p>KV 为权威：带 {@code .admin-override} 栅栏的技能照写（栅栏语义即“管理面内容优先”），
+     * 带 {@code .deleted} 栅栏（管理面已删除）的技能跳过。只写不删——容器内 L2 投影或历史文件
+     * 不动（避免误删包内基线；删除语义仍归管理面 + 容器换代）。
+     *
+     * @return 实际物化的技能数
+     */
+    public int materializeUserSkills(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox, String userId) {
+        if (osbSandbox == null || userId == null || userId.isBlank()) {
+            return 0;
+        }
+        Map<String, List<String>> skills;
+        try {
+            skills = listUserSkills(userId);
+        } catch (Exception e) {
+            // 列举失败不阻塞会话：容器内保留上一代副本或 L2 基线
+            log.warn("materialize_user_skills: list failed for user {}: {}", userId, e.getMessage());
+            return 0;
+        }
+        if (skills.isEmpty()) {
+            return 0;
+        }
+        int materialized = 0;
+        for (var skill : skills.entrySet()) {
+            var name = skill.getKey();
+            var relFiles = skill.getValue();
+            if (name == null || relFiles == null || relFiles.isEmpty()) {
+                continue;
+            }
+            if (!UserSkillService.isValidSkillName(name)) {
+                continue;
+            }
+            if (isUserSkillDeleted(userId, name)) {
+                // 管理面已删除：不物化（容器内旧副本的清除留给容器换代，见设计文档 §6.2.4）
+                log.debug("materialize_user_skills: {} has tombstone, skip", name);
+                continue;
+            }
+            if (relFiles.size() > MATERIALIZE_MAX_FILES) {
+                log.warn("materialize_user_skills: {} 文件数 {} 超过上限 {}，跳过", name,
+                    relFiles.size(), MATERIALIZE_MAX_FILES);
+                continue;
+            }
+            var entries = new ArrayList<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>();
+            for (var relPath : relFiles) {
+                if (relPath == null || relPath.isBlank()) {
+                    continue;
+                }
+                var content = readUserSkillFile(userId, name, relPath);
+                if (content == null) {
+                    continue;
+                }
+                if (content.getBytes(StandardCharsets.UTF_8).length > MATERIALIZE_MAX_FILE_BYTES) {
+                    log.warn("materialize_user_skills: {}/{} 超过 {} 字节上限，跳过", name, relPath,
+                        MATERIALIZE_MAX_FILE_BYTES);
+                    continue;
+                }
+                entries.add(com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
+                    .path("/workspace/" + SKILLS_DIR + "/" + name + "/" + relPath)
+                    .data(content)
+                    .mode(644)
+                    .build());
+            }
+            if (entries.isEmpty()) {
+                continue;
+            }
+            try {
+                osbSandbox.files().write(entries);
+                materialized++;
+                log.info("materialize_user_skills: {} ({} files) materialized for user {}",
+                    name, entries.size(), userId);
+            } catch (Exception e) {
+                log.warn("materialize_user_skills: write {}/{} failed: {}", userId, name, e.getMessage());
+            }
+        }
+        return materialized;
+    }
+
     public void injectToSandbox(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
                                 Map<String, byte[]> files) {
         if (files.isEmpty()) {

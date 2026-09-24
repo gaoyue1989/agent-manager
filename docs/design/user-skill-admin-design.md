@@ -156,3 +156,24 @@ select replace(namespace_path, 0x1F, '|'), item_key, version
 - 输入全部走名称/路径校验（`isValidUserId`/`isValidSkillName`/`isValidSkillFilePath`/`isValidSkillIdentity`，`UserSkillService.java:149-196`），禁路径穿越、控制字符、超长组合；
 - 读取失败显式 500（不把「存储不可用」降级成 404 或空集）；**用户索引（SQL 聚合）查询失败同样 500**——降级成 200 + 空列表会让 DB 抖动看起来像「没有任何用户有个人技能」（调试页此前会静默显示 0 user(s)）；索引触顶带 `truncated=true` 不静默返回子集，调试页据此提示；
 - 单文件 100KB（413）、下发文件数 200、索引扫描 5000 用户 / 100000 行——四处上限均为防单点写入或枚举把内存/表打爆；沙箱回写侧另设技能目录深度 ≤5 与单技能文件数 ≤200（与下发同口径，`WorkspaceSyncService.java:42-46`）。
+
+## 10. 后续补齐（2026-09-24）：会话开始物化 L4 + 按用户合并 L4
+
+§6.4 表中「沙箱档管理面写入需『会话开始物化 L4』能力（尚未实现）」与「按 session userId 合并 L4」已实施。
+
+### 10.1 会话开始物化 L4（沙箱档生效）
+
+- `WorkspaceReader.materializeUserSkills(osbSandbox, userId)`：枚举 L4（复用 `listUserSkills`）→ 逐文件经 `osbSandbox.files().write(WriteEntry)` 写容器 `/workspace/skills/{name}/{相对路径}`；`/{name}/.deleted` 跳过、`/{name}/.admin-override` 照写（栅栏语义即管理面内容优先）、**只写不删**；单技能文件数 ≤200、单文件 ≤100KB。
+- `OpenSandbox.materializeUserSkills()`（每实例幂等，失败 fail-soft）；调用点：`SandboxUserKeyMiddleware.onAgent`（acquire 之后、agent 执行前，主路径）与 `OpenSandbox.doExec`（兜底）。
+- 效果：管理面 PUT / 从包内下发在该用户**下一个 turn** 投影进容器生效；DELETE 写 tombstone 后下一次物化不再写回（容器内旧副本仍需容器换代清除，见 §6.2.4）。
+
+### 10.2 /skills/available 与 @Skill 注入按 session userId 合并 L4
+
+- `SkillCatalogService.availableSkills(userId)`：全局目录（已启用）∪ 该用户 L4（同名 L4 描述覆盖）。
+- `SkillInjectionService.injectSkillReferences(message, userId)` / `parseSkillReferences(message, userId)`：启停集合并入 L4；内容读取 L4 优先、无覆盖回落包内基线。
+- `SkillManageController` 的 `/skills/available`、`/skills/parse-refs` 读网关注入的 `X-User-Id`（次选 `?userId=`）；`ChatStreamController.chat` 以会话 userId 调用注入；debug 页 `loadAvailableSkills` 带当前 userId。
+
+### 10.3 验证与边界
+
+- 新增单测：`WorkspaceReaderTest`（materialize 2 例）、`SkillCatalogServiceTest`（L4 合并 1 例）、`SkillInjectionServiceTest`（L4 注入 1 例）；全量 `mvn -o test` 908 通过 / 0 失败（跳过 4）。
+- 边界：物化使用沙箱会话的 userKey（`SandboxUserKeyMiddleware` 取 `ctx.userId`，缺省 `sessionId`）；Channel 链路框架 `RuntimeContext.userId` 为网关 peer（=会话 id），需网关保证 peer 与 `X-User-Id` 一致，管理面 L4 才会与沙箱物化 key 对齐。
