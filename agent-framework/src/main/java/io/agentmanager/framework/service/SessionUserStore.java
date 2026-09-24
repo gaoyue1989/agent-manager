@@ -91,6 +91,65 @@ public class SessionUserStore {
     }
 
     /**
+     * 查询指定会话的标题（session_user.remark）。
+     *
+     * @param sessionId 会话 ID
+     * @return 标题，不存在或为空时返回空串
+     */
+    public String findRemark(String sessionId) {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT remark FROM session_user WHERE session_id = ?")) {
+            ps.setString(1, sessionId);
+            var rs = ps.executeQuery();
+            if (rs.next()) {
+                var remark = rs.getString("remark");
+                return remark != null ? remark : "";
+            }
+        } catch (Exception e) {
+            log.warn("SessionUserStore: findRemark failed for sid={}: {}", sessionId, e.getMessage());
+        }
+        return "";
+    }
+
+    /**
+     * 更新会话标题（session_user.remark）；记录不存在时补建（user_id 回退已有值或 unknown）。
+     *
+     * @param sessionId 会话 ID
+     * @param remark    标题
+     * @return 是否写入成功
+     */
+    public boolean updateRemark(String sessionId, String remark) {
+        // 先 UPDATE：行在会话发起时已由 upsert 写入。此处不能写
+        // INSERT ... (SELECT ... FROM session_user) —— MySQL 1093 禁止在写目标表的同时读它。
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "UPDATE session_user SET remark = ?, updated_at = NOW(3) WHERE session_id = ?")) {
+            ps.setString(1, remark);
+            ps.setString(2, sessionId);
+            if (ps.executeUpdate() > 0) {
+                return true;
+            }
+        } catch (Exception e) {
+            log.warn("SessionUserStore: updateRemark failed for sid={}: {}", sessionId, e.getMessage());
+            return false;
+        }
+        // 行不存在（异常会话）时补建，user_id 回退 unknown
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "INSERT INTO session_user (session_id, user_id, remark, created_at, updated_at) "
+                     + "VALUES (?, 'unknown', ?, NOW(3), NOW(3))")) {
+            ps.setString(1, sessionId);
+            ps.setString(2, remark);
+            ps.executeUpdate();
+            return true;
+        } catch (Exception e) {
+            log.warn("SessionUserStore: updateRemark insert failed for sid={}: {}", sessionId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * 查询指定会话的用户 ID。
      *
      * @param sessionId 会话 ID

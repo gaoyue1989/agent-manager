@@ -23,11 +23,13 @@ import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionTitleService;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.SkillInjectionService;
 import io.agentmanager.framework.service.ToolAuditStore;
 import io.agentmanager.framework.service.TurnLeaseGuard;
 import io.agentmanager.framework.service.TurnLeaseStore;
+import io.agentmanager.framework.service.TurnToolSummaryTracker;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentmanager.framework.service.UploadWorkspaceInjector;
 import io.agentmanager.framework.service.WorkspaceReader;
@@ -95,6 +97,7 @@ public class ChatStreamController {
     private final SkillInjectionService skillInjectionService;
     private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final SessionTitleService sessionTitleService;
 
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
@@ -142,7 +145,8 @@ public class ChatStreamController {
                                 AgentManagerProperties props,
                                 SkillInjectionService skillInjectionService,
                                 io.agentmanager.framework.service.FileAssetStore fileAssetStore,
-                                McpToolRegistrar mcpToolRegistrar) {
+                                McpToolRegistrar mcpToolRegistrar,
+                                SessionTitleService sessionTitleService) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
@@ -157,6 +161,7 @@ public class ChatStreamController {
         this.skillInjectionService = skillInjectionService;
         this.fileAssetStore = fileAssetStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.sessionTitleService = sessionTitleService;
     }
 
     /**
@@ -208,6 +213,9 @@ public class ChatStreamController {
 
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
+
+        // 会话标题：首条用户消息后异步生成（已有标题/消息为空时内部跳过），不阻塞本次对话流
+        sessionTitleService.generateAsync(finalSessionId, message, finalUserId);
 
         return Flux.<ServerSentEvent<String>>create(sink -> {
             // ===== 0. 新会话：首个 SSE 事件通知前端 session_id =====
@@ -267,6 +275,11 @@ public class ChatStreamController {
             // 撞 key，并行 turn 的桶不受影响（A4）
             var turnBucketKeys = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
 
+            // 工具摘要累积器（turn 级）：累积 delta 参数/结果，在 END 事件合成人可读摘要帧。
+            // 与 turn 同生命周期——放在订阅回调之外创建，避免被 Reactor 的取消回调连带清理。
+            var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
+
             // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
             // 见 TurnFinalizer#abortSetup 的教训注释。
             // 该路径 replyId 尚未产出任何事件、无本 turn 桶可清，turnBucketKeys 必为空
@@ -307,7 +320,7 @@ public class ChatStreamController {
                 chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
-                            finalUserId, sink, turnEnded, turnBucketKeys),
+                            finalUserId, sink, turnEnded, turnBucketKeys, toolSummary),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             if (isTrailingSandboxTeardownError(e)) {
@@ -376,7 +389,8 @@ public class ChatStreamController {
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
-                                    java.util.Set<String> turnBucketKeys) {
+                                    java.util.Set<String> turnBucketKeys,
+                                    TurnToolSummaryTracker toolSummary) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             return;
@@ -414,6 +428,17 @@ public class ChatStreamController {
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
 
+        // 工具摘要累积（tool_call_summary/tool_result_preview 帧的数据源）。
+        // ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧名字恒为 __fragment__），
+        // 故先登记再按 id 累积，到 END 事件时才能合成出「创建 x.js 2行」这样的摘要。
+        if (event instanceof ToolCallStartEvent start) {
+            toolSummary.onToolCallStart(start);
+        } else if (event instanceof ToolCallDeltaEvent delta) {
+            toolSummary.onToolCallDelta(delta);
+        } else if (event instanceof ToolResultTextDeltaEvent trd) {
+            toolSummary.onToolResultDelta(trd);
+        }
+
         // HITL
         if (event instanceof RequireUserConfirmEvent) {
             log.info("[chat] HITL permission_ask: sessionId={}, tools={}", sessionId,
@@ -424,6 +449,11 @@ public class ChatStreamController {
         }
 
         eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
+
+        // ★ 工具摘要帧（可观测性）：参数/结果到齐后追加人可读摘要，让轻量客户端无需
+        // 自己拼 delta、解析工具参数即可展示「创建 create-ai-ppt.js 408行」。
+        // 必须在原事件之后发射——前端按 toolCallId 认领工具行，先到的是原始事件。
+        emitToolSummary(toolSummary, event);
 
         // HITL 是 turn 边界：permission_ask 已广播，关闭 sink 让订阅者正常结束。
         // 必须在 emit 之后——否则订阅者收不到 permission_ask（durable-sse-multinode-plan §3.4.4）。
@@ -502,6 +532,24 @@ public class ChatStreamController {
     /** 定向查看登记表中某 toolCallId 的工具名（测试断言「并行 turn 防误删」用） */
     String registeredToolName(String toolCallId) {
         return toolCallNames.get(toolCallId);
+    }
+
+    /**
+     * 参数/结果到齐事件 → 追加合成 {@code tool_call_summary} / {@code tool_result_preview} 帧。
+     *
+     * <p>摘要由 {@link TurnToolSummaryTracker} 累积 delta 后生成，经 EventBus 落库广播，
+     * 因此**多副本续传与刷新回放同样能拿到**（与 file_ready 同一路径）。
+     */
+    private void emitToolSummary(TurnToolSummaryTracker toolSummary, AgentEvent event) {
+        try {
+            if (event instanceof ToolCallEndEvent e) {
+                toolSummary.onToolCallEnd(e);
+            } else if (event instanceof ToolResultEndEvent e) {
+                toolSummary.onToolResultEnd(e);
+            }
+        } catch (Exception e) {
+            log.debug("tool summary synthesis failed: {}", e.getMessage());
+        }
     }
 
     private void accumulatePresentFile(String toolCallId, String delta) {

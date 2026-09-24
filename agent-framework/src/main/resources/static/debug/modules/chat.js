@@ -131,6 +131,12 @@ export default {
     bindEvents();
     messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
     loadThreads();
+    // 刷新恢复：localStorage 中若有当前会话，自动选中并加载历史；
+    // 若该 turn 仍在执行，selectThread → tryResumeSSE 会自动续传实时输出。
+    const restoredSid = currentSessionId();
+    if (restoredSid) {
+      selectThread(restoredSid);
+    }
     refreshTimer = setInterval(loadThreads, 30000);
     subscribeScroll();
   },
@@ -366,8 +372,21 @@ function updateConnBadge() {
   const bits = [mode === 'a2a' ? 'A2A' : 'Channel'];
   bits.push('单次流');
   if (uid !== 'debug-user') bits.push(uid);
-  if (sid) bits.push(sid.split('_').pop());
+  if (sid) bits.push(currentThreadTitle() || sid.split('_').pop());
   connBadgeEl.textContent = bits.join(' · ');
+  // 标题同步到主区头部（无标题时回落 Chat）
+  const titleEl = document.getElementById('chatTitle');
+  if (titleEl) titleEl.textContent = (sid && currentThreadTitle()) || 'Chat';
+}
+
+/** 当前会话的展示名：title（后端生成/重命名）优先，回退 thread_id / session_id */
+function currentThreadTitle() {
+  const sid = currentSessionId();
+  if (!sid) return '';
+  const list = ctx.state.getState('threads.list') || [];
+  const t = list.find((x) => x && x.session_id === sid);
+  if (!t) return '';
+  return (t.title || '').trim() || t.thread_id || sid;
 }
 
 function currentSessionId() {
@@ -420,7 +439,8 @@ async function loadThreads(force) {
       sidebarListEl.innerHTML = sorted.map((t) => {
         const cur = currentSessionId();
         const tid = t.session_id;
-        const title = t.thread_id || tid;
+        const generated = (t.title || '').trim();
+        const title = generated || t.thread_id || tid;
         return '<div class="thread-item' + (tid === cur ? ' active' : '') + '" data-sid="' +
           ctx.utils.esc(tid) + '"><span class="tid">' + ctx.utils.esc(title) +
           '</span><span class="meta">' + ctx.utils.esc((t.updated_at || '').substring(5, 16).replace('T', ' ')) +
@@ -430,6 +450,8 @@ async function loadThreads(force) {
     sidebarListEl.querySelectorAll('.thread-item').forEach((el) => {
       el.addEventListener('click', () => selectThread(el.dataset.sid));
     });
+    // 列表加载后同步顶栏标题（后端异步生成的标题会随本轮 loadThreads 出现）
+    updateConnBadge();
   } catch (e) {
     if (force) ctx.utils.toast('Failed to load threads: ' + e.message, 'error');
   }
@@ -437,10 +459,18 @@ async function loadThreads(force) {
 
 async function selectThread(sessionId) {
   if (!sessionId) return;
+  // 切换会话：关闭上一会话的续传订阅，避免其事件串进当前视图
+  if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } activeSubHandle = null; }
   ctx.state.setState('threads.current', sessionId);
   document.getElementById('btnLlmCalls').disabled = false;
-  loadThreadHistory(sessionId);
   updateConnBadge();
+  // 重置回放游标与当前回复：新会话从 0 开始（不回放旧会话事件），也避免沿用旧气泡
+  lastEventId = 0;
+  currentReplyId = null;
+  reconnectAttempts = 0;
+  // 先渲染 agent_state 历史（已完成 turn），再检测 turn 是否在跑并续传——
+  // 两者此前并发会互相覆盖：历史渲染的 innerHTML='' 会清掉已到达的流式事件
+  await loadThreadHistory(sessionId);
   // ★ durable-sse-plan：刷新恢复——检测 turn 状态，若仍在执行则自动 subscribe 续传
   tryResumeSSE(sessionId);
 }
@@ -460,7 +490,12 @@ async function tryResumeSSE(sessionId) {
       sendBtn.textContent = 'Stop';
       sendBtn.classList.add('danger');
       currentReplyId = status.reply_id || null;
-      lastEventId = status.latest_event_seq || 0;
+      // 刻意**不**把游标重置为 latest_event_seq：刷新后客户端从 0 开始，
+      // 应从头回放当前 turn 的全部事件（replyId 过滤保证只回放本 turn，不重复历史）；
+      // 若跳到最新 seq，则会丢掉本 turn 已产出的前半段输出，只剩后续事件流。
+      // 断线重连时 lastEventId 已由 resumeSyncId 推进，这里保持不变即续传。
+      // 例外：拿不到 replyId 时无法按 turn 过滤，只能退化为从最新 seq 续传，避免整场会话重放。
+      if (!currentReplyId) lastEventId = status.latest_event_seq || 0;
       reconnectAttempts = 0;
 
       // 如果正在等待确认，渲染 HITL 卡片
@@ -698,10 +733,14 @@ function summarizeToolCalls(calls) {
 
 /** 工具行（专用渲染器 + 状态图标 + chevron） */
 function renderToolRow(call) {
+  // 渲染器选择始终依据原始工具名（summary 可能是中文，无法用于选择专用 body）
   const r = RENDERERS[String(call.name || '').split('__').pop()] || 'default';
   let headerLabel = call.name || 'tool';
   let headerArg = '';
-  if (r === 'read' || r === 'write' || r === 'edit') {
+  if (call.summary) {
+    // 后端已给出人可读摘要（含关键参数），优先展示，避免再拼一遍参数
+    headerLabel = call.summary;
+  } else if (r === 'read' || r === 'write' || r === 'edit') {
     headerArg = extractFilePath(call.argsText) || '';
   } else if (r === 'bash') {
     headerLabel = 'Bash';
@@ -945,6 +984,22 @@ function onToolCallEnd(r, tcId) {
   updateToolGroupTitle(r);
 }
 
+function onToolCallSummary(r, tcId, summary) {
+  if (!tcId || !summary) return;
+  const tc = pendingToolCalls[tcId];
+  if (tc) tc.summary = summary;
+  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  const nameEl = rowEl ? rowEl.querySelector('.tc-name') : null;
+  if (nameEl) nameEl.textContent = summary;
+}
+
+function onToolResultPreview(r, tcId, preview) {
+  if (!tcId || !preview) return;
+  const tc = pendingToolCalls[tcId];
+  // 已有完整结果文本时保留原文，预览只作兜底（展开查看仍以真实结果为准）
+  if (tc && tc.resultRaw == null) tc.resultRaw = preview;
+}
+
 function onToolResultStart(r, tcId) {
   const tc = pendingToolCalls[tcId] || (pendingToolCalls[tcId] = { name: '', argsRaw: '', argsText: '', resultRaw: null, state: null });
   tc.resultRaw = '';
@@ -968,6 +1023,7 @@ function rebuildToolRows(r) {
     const tc = r.toolCalls[tcId] || {};
     return renderToolRow({
       name: tc.name,
+      summary: tc.summary,
       argsText: tc.argsText,
       resultText: tc.resultRaw == null ? (tc.state == null ? null : '') : tc.resultRaw,
       state: tc.state || 'running'
@@ -1295,6 +1351,8 @@ function handleEvent(data) {
     setConnecting('chatTitle', false);
     scrollToBottom(true);
     loadThreads();
+    // 标题由后端异步生成（可能晚于 AGENT_END），稍后再刷一次列表以显示生成的标题
+    setTimeout(() => { if (currentSessionId()) loadThreads(); }, 4000);
     return;
   }
 
@@ -1364,6 +1422,16 @@ function handleEvent(data) {
           onToolResultEnd(r, data.toolCallId, data.state);
         }
       }
+      break;
+    }
+    case 'tool_call_summary': {
+      // 后端已拼好 delta 参数并解析出关键字段：直接把工具行标题换成「创建 x.js 408行」
+      if (r) onToolCallSummary(r, data.toolCallId, data.summary);
+      break;
+    }
+    case 'tool_result_preview': {
+      // 「输出 …」：结果首行（失败时为终态文案）
+      if (r) onToolResultPreview(r, data.toolCallId, data.preview);
       break;
     }
     case 'MODEL_CALL_START': {

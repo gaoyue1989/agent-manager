@@ -200,10 +200,30 @@ export default function AssistantPage() {
             for (let i = next.length - 1; i >= 0; i--) {
               if (next[i].role === "assistant") { idx = i; break; }
             }
+            // 工具名兜底：摘要帧（tool_call_summary）通常晚一帧到达，用它把「write_file」换成
+            // 「创建 output/create-ai-ppt.js 408行」这类具体在干嘛的描述
             next.splice(idx, 0, { role: "tool", content: `${ev.toolName}`, toolCallId: ev.toolCallId, pending: true });
             return next;
           });
           break;
+        case "tool_call_summary": {
+          // 后端已把 delta 参数拼好并解析出关键字段，前端直接展示即可（无需自己解析 JSON）
+          const sid = ev.toolCallId;
+          const label = typeof ev.summary === "string" && ev.summary ? ev.summary : null;
+          if (!sid || !label) break;
+          setMessages((prev) => prev.map((m) =>
+            m.role === "tool" && m.toolCallId === sid ? { ...m, content: label } : m));
+          break;
+        }
+        case "tool_result_preview": {
+          // 「输出 …」：结果首行（失败时为终态文案），挂到对应工具步骤上可展开查看
+          const pid = ev.toolCallId;
+          const preview = typeof ev.preview === "string" && ev.preview ? ev.preview : null;
+          if (!pid || !preview) break;
+          setMessages((prev) => prev.map((m) =>
+            m.role === "tool" && m.toolCallId === pid && !m.output ? { ...m, output: preview } : m));
+          break;
+        }
         case "TOOL_RESULT_END": {
           setMessages((prev) => completeToolCall(prev, ev));
           break;
