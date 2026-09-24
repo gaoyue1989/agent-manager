@@ -450,6 +450,92 @@ class ChatStreamControllerTest {
     }
 
     @Test
+    void chatShouldEmitFileReadyForCreateOafZip() {
+        // create_oaf_zip 与 present_file 返回同构 JSON（file_id/file_name/mime_type/size），
+        // 必须走同一条 file_ready 合成链路——此前控制器只认 present_file，打包工具在
+        // 实时对话里永远没有下载卡片（2026-09-24 发布助手无法下载 test-agent.zip）。
+        var sessionId = "test-user-zip1";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var fileAssetStore = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            fileAssetStore, mcpToolRegistrar);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip1");
+        var replyId = "r-zip1";
+        var callId = "c-zip1";
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
+            "create_oaf_zip",
+            "{\"file_id\":\"a795e832-8364-42fd-9a28-2c40697f1851\",\"file_name\":\"test-agent.zip\","
+                + "\"mime_type\":\"application/zip\",\"size\":704,\"content_base64\":\"UEsDBA==\"}");
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
+            "create_oaf_zip", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus).emitSynthetic(eq(sessionId), anyString(), eq("file_ready"), payloadCap.capture());
+        var payload = payloadCap.getValue();
+        assertTrue(payload.contains("\"type\":\"file_ready\""), "type 应为 file_ready: " + payload);
+        assertTrue(payload.contains("\"file_id\":\"a795e832-8364-42fd-9a28-2c40697f1851\""),
+            "应携带 file_id: " + payload);
+        assertTrue(payload.contains("\"download_url\":\"/files/a795e832-8364-42fd-9a28-2c40697f1851\""),
+            "download_url 必须是 /files/{id} 相对路径: " + payload);
+        // 回写业务会话与 reply，历史回放才能按会话/消息挂卡片（session_id 不得是网关 gw-hash）
+        verify(fileAssetStore).updateReplyId(eq("a795e832-8364-42fd-9a28-2c40697f1851"), anyString());
+        verify(fileAssetStore).updateSessionId(eq("a795e832-8364-42fd-9a28-2c40697f1851"), eq(sessionId));
+    }
+
+    @Test
+    void chatShouldEmitFileReadyForCreateOafZipWhenResultTruncated() {
+        // create_oaf_zip 返回体尾部是 content_base64（zip 全量 base64），超出 64KB 结果桶被
+        // 截尾后全文 JSON 解析必失败——file_id 等头部字段仍在，正则兜底应救回下载卡片。
+        var sessionId = "test-user-zip2";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip2");
+        var replyId = "r-zip2";
+        var callId = "c-zip2";
+        var head = "{\"file_id\":\"12344321-8364-42fd-9a28-2c40697f1851\",\"file_name\":\"big-package.zip\","
+            + "\"mime_type\":\"application/zip\",\"size\":90000,\"content_base64\":\""
+            + "UEsDBAoAAAAA".repeat(9000); // 远超 64KB，且无闭合引号/花括号（模拟截尾）
+        assertTrue(head.length() > 64 * 1024, "用例前提：结果超 64KB 桶上限");
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
+            "create_oaf_zip", head);
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
+            "create_oaf_zip", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus).emitSynthetic(eq(sessionId), anyString(), eq("file_ready"), payloadCap.capture());
+        var payload = payloadCap.getValue();
+        assertTrue(payload.contains("\"file_id\":\"12344321-8364-42fd-9a28-2c40697f1851\""),
+            "截尾结果也应提取到 file_id: " + payload);
+        assertTrue(payload.contains("\"file_name\":\"big-package.zip\""), "应提取到 file_name: " + payload);
+        assertTrue(payload.contains("\"size\":90000"), "应提取到 size: " + payload);
+    }
+
+    @Test
     void serializerShouldIncludeUiMetadataOnToolCallStart() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "get_weather");
         String json = AgentEventSseSerializer.payload(tc, "ui://weather/mcp-app.html", "weather");

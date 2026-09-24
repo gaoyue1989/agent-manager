@@ -162,14 +162,13 @@ public class OafPackageTools {
             return err("storage write failed: " + e.getMessage());
         }
         try {
-            // 关联真实会话（present_file 同规则：userKey=peer、sessionId=gw-hash），
-            // 供历史会话回放按 session_id 回查产出卡片
+            // userKey=peer（Channel 链路下 ctx.getUserId() 即业务 peer）；session_id 不写——
+            // ctx.getSessionId() 是网关恒定 gw-hash，落库会导致历史回放按业务会话查不到卡片，
+            // 由控制器层 emitFileReadyViaEventBus 统一回写真实会话（present_file 同规则）
             var userKey = ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()
                 ? ctx.getUserId() : "oaf-gen";
-            var sid = ctx != null && ctx.getSessionId() != null && !ctx.getSessionId().isBlank()
-                ? ctx.getSessionId() : null;
             fileAssetStore.insert(new FileAssetStore.FileAsset(
-                id, userKey, sid, null, name, name, "application/zip", zipBytes.length,
+                id, userKey, null, null, name, name, "application/zip", zipBytes.length,
                 props.file().storageType(), storageKey, "generated", "injected", LocalDateTime.now()));
         } catch (Exception e) {
             try {
