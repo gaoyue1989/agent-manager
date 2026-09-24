@@ -49,6 +49,16 @@ async function put(path, body) {
   return resp.json();
 }
 
+async function patch(path, body) {
+  const resp = await fetch(BASE + path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) throw await httpError(resp, path);
+  return resp.json();
+}
+
 export const api = {
   BASE,
 
@@ -80,6 +90,14 @@ export const api = {
   updateSkillContent: (name, content) => put('/skills/' + encodeURIComponent(name) + '/content', { content }),
   getMcpServers: () => get('/mcp'),
   getMetadata: (includeDetails = false) => get('/metadata?includeDetails=' + includeDetails),
+
+  // 模型（会话可切换：系统模型只读 + 托管模型 CRUD，见 docs/session-model-switch-design.md）
+  getModels: (all = false) => get('/models' + (all ? '?all=true' : '')),
+  getModel: (id) => get('/models/' + encodeURIComponent(id)),
+  createModel: (body) => post('/models', body),
+  updateModel: (id, body) => patch('/models/' + encodeURIComponent(id), body),
+  deleteModel: (id) => del('/models/' + encodeURIComponent(id)),
+  testModel: (id) => post('/models/' + encodeURIComponent(id) + '/test', {}),
 
   // 用户技能（L4 个人覆盖，agent_fs KV：agents/{agent}/users/{userId}/skills）
   // 索引：/debug/user-skills（调试面）；明细读写：/skills/users/{userId}/{name}

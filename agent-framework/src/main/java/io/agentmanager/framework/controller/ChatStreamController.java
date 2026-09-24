@@ -21,8 +21,10 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.ModelCatalog;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionTitleService;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.SkillInjectionService;
 import io.agentmanager.framework.service.ToolAuditStore;
@@ -95,6 +97,8 @@ public class ChatStreamController {
     private final SkillInjectionService skillInjectionService;
     private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final ModelCatalog modelCatalog;
+    private final SessionTitleService sessionTitleService;
 
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
@@ -142,7 +146,9 @@ public class ChatStreamController {
                                 AgentManagerProperties props,
                                 SkillInjectionService skillInjectionService,
                                 io.agentmanager.framework.service.FileAssetStore fileAssetStore,
-                                McpToolRegistrar mcpToolRegistrar) {
+                                McpToolRegistrar mcpToolRegistrar,
+                                ModelCatalog modelCatalog,
+                                SessionTitleService sessionTitleService) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
@@ -157,6 +163,8 @@ public class ChatStreamController {
         this.skillInjectionService = skillInjectionService;
         this.fileAssetStore = fileAssetStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.modelCatalog = modelCatalog;
+        this.sessionTitleService = sessionTitleService;
     }
 
     /**
@@ -168,7 +176,8 @@ public class ChatStreamController {
      *   "message": "你好",
      *   "userId": "user-123",          // 可选
      *   "sessionId": "my-session-1",   // 可选，不传则自动生成
-     *   "fileIds": []                  // 可选
+     *   "fileIds": [],                 // 可选
+     *   "model": "01J8XK..."           // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
      * }
      * }</pre>
      *
@@ -206,8 +215,32 @@ public class ChatStreamController {
         String finalUserId = userId;
         boolean emitSessionCreated = isNewSession;
 
+        // 会话模型切换（model 可选）：字段缺省 = 不改变会话绑定；传值即绑定到本会话（本 turn 生效）；
+        // 空串/system = 清除覆盖回默认模型；未知/禁用 → 拒绝（不改变会话既有绑定）
+        var modelProvided = body.model() != null;
+        var requestedModel = modelProvided ? body.model().trim() : "";
+        if (modelProvided && !ModelCatalog.isSystemSelection(requestedModel)) {
+            var reject = modelCatalog != null ? modelCatalog.validateSelectable(requestedModel) : null;
+            if (reject != null) {
+                log.info("[chat] reject model selection: sessionId={}, model={}, reason={}",
+                    finalSessionId, requestedModel, reject);
+                return Flux.just(errorSSE(reject + ": " + requestedModel));
+            }
+        }
+
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
+
+        // 会话模型绑定（在用户映射之后写：新会话不产生 user_id=unknown 的过渡行）
+        if (modelProvided) {
+            sessionUserStore.upsertModel(finalSessionId,
+                ModelCatalog.isSystemSelection(requestedModel) ? "" : requestedModel);
+        }
+
+        // 新会话首条消息：异步生成标题（系统模型；失败不阻断，已有标题不覆盖）
+        if (isNewSession && sessionTitleService != null) {
+            sessionTitleService.generateAsync(finalSessionId, message);
+        }
 
         return Flux.<ServerSentEvent<String>>create(sink -> {
             // ===== 0. 新会话：首个 SSE 事件通知前端 session_id =====
@@ -695,7 +728,8 @@ public class ChatStreamController {
         return false;
     }
 
-    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId 可选 */
-    public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds) {
+    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model 可选 */
+    public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds,
+                              String model) {
     }
 }

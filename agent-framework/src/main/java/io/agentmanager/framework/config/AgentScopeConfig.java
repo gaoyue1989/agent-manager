@@ -288,40 +288,11 @@ public class AgentScopeConfig {
         return java.util.Arrays.asList(businessTools, fileTools);
     }
 
+    /** 按 LLM 配置构建 ChatModel（装配逻辑见 {@link ChatModelFactory}，托管/系统模型共用同一口径） */
     io.agentscope.extensions.model.openai.OpenAIChatModel buildChatModel(
         AgentManagerProperties.LLMConfig llm,
         AgentManagerProperties.HarnessConfig harness) {
-        var optionsBuilder = io.agentscope.core.model.GenerateOptions.builder()
-            .temperature(llm.temperature())
-            .maxTokens(llm.maxTokens());
-        // Qwen3 / vLLM: enableThinking=false → chat_template_kwargs.enable_thinking=false
-        // 关闭深度思考模式，避免响应中包含 <think>...</think> 冗余内容
-        if (!llm.enableThinking()) {
-            optionsBuilder.additionalBodyParam("chat_template_kwargs",
-                java.util.Map.of("enable_thinking", false));
-            log.info("Deep thinking disabled: chat_template_kwargs.enable_thinking=false");
-        }
-        var modelBuilder = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
-            .apiKey(llm.apiKey())
-            .modelName(llm.modelId())
-            .baseUrl(llm.baseUrl());
-        // 模型上下文窗口（LLM_CONTEXT_LENGTH）：> 0 才传入，未配置保持框架默认行为
-        if (llm.contextLength() > 0) {
-            modelBuilder.contextWindowSize(llm.contextLength());
-        }
-        return modelBuilder
-            .generateOptions(optionsBuilder.build())
-            .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
-                .client(java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                    .build())
-                .config(io.agentscope.core.model.transport.HttpTransportConfig.builder()
-                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                    .readTimeout(Duration.ofSeconds(harness.httpReadTimeoutSeconds()))
-                    .writeTimeout(Duration.ofSeconds(harness.httpWriteTimeoutSeconds()))
-                    .build())
-                .build())
-            .build();
+        return ChatModelFactory.build(llm, harness);
     }
 
     @Bean
@@ -335,6 +306,7 @@ public class AgentScopeConfig {
         LLMLogger llmLogger,
         UiContextStore uiContextStore,
         SessionUserStore sessionUserStore,
+        io.agentmanager.framework.service.ModelCatalog modelCatalog,
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         var llm = props.llm();
@@ -352,6 +324,8 @@ public class AgentScopeConfig {
             // P1: 包装 compaction 内部 LLM 调用追踪
             // 不设置 .model() 时 harness 回退使用主 model（无 trace），设置包装后行为不变且带 span
             // （memoryModel 的构造移入下方 memoryEnabled 分支：记忆关闭时不构造）
+            // 语义：compaction/memory 固定使用**系统模型**（LLM_* 环境变量），
+            // 不受会话级模型切换影响（下游直调 model.stream()，不经 onModelCall 链）
             var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "compaction");
 
             // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
@@ -384,6 +358,10 @@ public class AgentScopeConfig {
                 // 长流程（撰写→校验→修正→打包→登记→汇报），默认放宽至 20 轮（AGENT_REACT_MAX_ITERS 可调）
                 .maxIters(harness.maxIters())
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
+                // 注意：会话模型路由必须最先注册（最外层）——先替换 model 再进链，
+                // 下游 LLM 记录/span/实际调用看到的都是会话生效模型
+                .middleware(new io.agentmanager.framework.service.SessionModelMiddleware(
+                    sessionUserStore, modelCatalog))
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
                 .middleware(new io.agentmanager.framework.service.FrameworkTracingMiddleware(oafConfig.slug()))
@@ -488,6 +466,19 @@ public class AgentScopeConfig {
             log.error("Failed to create AgentScope agent: {}", e.getMessage(), e);
             throw new RuntimeException("Agent creation failed", e);
         }
+    }
+
+    /**
+     * 会话标题生成服务：系统模型（LLM_* 环境变量）+ OTel span（title）。
+     * 会话首条用户消息异步生成标题写 session_user.remark；失败仅告警，不影响对话。
+     */
+    @Bean
+    public io.agentmanager.framework.service.SessionTitleService sessionTitleService(
+            io.agentmanager.framework.service.ModelCatalog modelCatalog,
+            SessionUserStore sessionUserStore) {
+        var titleModel = new io.agentmanager.framework.service.TracingModelWrapper(
+            modelCatalog.systemModel(), "title");
+        return new io.agentmanager.framework.service.SessionTitleService(titleModel, sessionUserStore);
     }
 
     @Bean

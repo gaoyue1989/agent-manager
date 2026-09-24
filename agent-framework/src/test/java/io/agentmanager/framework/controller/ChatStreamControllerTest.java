@@ -15,8 +15,10 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.ModelCatalog;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionTitleService;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.SkillInjectionService;
 import io.agentmanager.framework.service.ToolAuditStore;
@@ -85,6 +87,8 @@ class ChatStreamControllerTest {
     private WorkspaceReader workspaceReader;
     private AgentManagerProperties props;
     private McpToolRegistrar mcpToolRegistrar;
+    private ModelCatalog modelCatalog;
+    private SessionTitleService sessionTitleService;
 
     @BeforeEach
     void setUp() {
@@ -99,6 +103,8 @@ class ChatStreamControllerTest {
         props = mock(AgentManagerProperties.class);
         sessionUserStore = mock(SessionUserStore.class);
         mcpToolRegistrar = mock(McpToolRegistrar.class);
+        modelCatalog = mock(ModelCatalog.class);
+        sessionTitleService = mock(SessionTitleService.class);
         eventBus = new SessionEventBus(eventStore,
             Duration.ofMillis(100), Duration.ofMinutes(5), 64);
 
@@ -128,7 +134,8 @@ class ChatStreamControllerTest {
         controller = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
     }
 
     /** 等续租线程跑过头一拍（存根返回 LOST → guard 随即置位丢锁） */
@@ -159,7 +166,7 @@ class ChatStreamControllerTest {
 
     private List<String> collect(String sessionId, String message, String userId, List<String> fileIds) {
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds), null)
+                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null), null)
             .collectList().block(Duration.ofSeconds(10));
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -419,7 +426,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fr1");
         var replyId = "r-fr1";
@@ -434,7 +441,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null), null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -462,7 +469,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            fileAssetStore, mcpToolRegistrar);
+            fileAssetStore, mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip1");
         var replyId = "r-zip1";
@@ -478,7 +485,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null), null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -505,7 +512,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip2");
         var replyId = "r-zip2";
@@ -523,7 +530,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null), null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -568,7 +575,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), registrar);
+            mock(io.agentmanager.framework.service.FileAssetStore.class), registrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui1");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui1", "c-ui1", "show_form");
@@ -576,7 +583,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null), null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -599,7 +606,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui2");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui2", "c-ui2", "echo");
@@ -607,7 +614,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null), null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -986,5 +993,70 @@ class ChatStreamControllerTest {
         while (System.currentTimeMillis() < deadline && controller.bucketEntryCount() != expected) {
             sleep(10);
         }
+    }
+
+    // ===== 会话模型切换（docs/session-model-switch-design.md §4.2） =====
+
+    @Test
+    void chatShouldRejectUnknownModelBeforeStartingTurn() {
+        when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
+
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope"), null)
+            .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("unknown_model: nope")),
+            "应返回 unknown_model error 帧: " + frames);
+        // 校验失败不得启动 turn、不得改变会话绑定
+        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+        verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
+    }
+
+    @Test
+    void chatShouldPersistSelectedModelAndGenerateTitleForNewSession() {
+        when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-m2");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m2")));
+
+        // sessionId 缺省（新会话）+ model 显式指定
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2"), null)
+            .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
+
+        assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
+        verify(modelCatalog).validateSelectable("m2");
+        // 落库先于 turn 启动（本 turn 生效）：模型绑定 + 首条消息触发标题生成（系统模型）
+        verify(sessionUserStore).upsertModel(anyString(), eq("m2"));
+        verify(sessionTitleService).generateAsync(anyString(), eq("hello"));
+    }
+
+    @Test
+    void chatShouldClearModelBindingOnSystemSelection() {
+        when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-m3");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m3")));
+
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system"), null)
+            .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
+
+        assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
+        // "system"/"" = 清除覆盖：落库空串，且不做有效性校验
+        verify(sessionUserStore).upsertModel(anyString(), eq(""));
+        verify(modelCatalog, never()).validateSelectable(anyString());
+    }
+
+    @Test
+    void chatShouldNotTouchModelBindingWhenFieldAbsent() {
+        var sessionId = "test-user-m4";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-m4");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m4")));
+
+        collect(sessionId, "hello", "alice"); // ChatRequest.model = null
+
+        // 缺省 = 不改变绑定；非新会话不触发标题生成
+        verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
+        verify(sessionTitleService, never()).generateAsync(anyString(), anyString());
     }
 }
