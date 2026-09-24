@@ -23,9 +23,12 @@ async function loadConfig() {
   try {
     [env, oaf] = await Promise.all([ctx.api.getEnvConfig(), ctx.api.getOafConfig()]);
   } catch (e) {
+    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
     body.innerHTML = '<div class="empty error-text">Failed to load config: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
+
+  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
 
   let html = '';
 

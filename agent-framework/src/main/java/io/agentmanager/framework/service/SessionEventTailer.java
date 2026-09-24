@@ -8,7 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.codec.ServerSentEvent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.agentmanager.framework.controller.AgentEventSseSerializer;
 
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
@@ -28,13 +28,32 @@ public class SessionEventTailer {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventTailer.class);
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
     /** 终态事件类型：出现即代表 turn 不会再产出新事件 */
     private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error");
 
-    /** 终止探测的降频间隔：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm */
-    private static final long PROBE_INTERVAL_MS = 2000;
+    /** 终止探测的降频间隔：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm（包私有：测试可见） */
+    static final long PROBE_INTERVAL_MS = 2000;
+
+    /**
+     * 连续 emptyStreak 次空页后，本轮循环应 sleep 的毫秒数（A2 空闲退避）。
+     *
+     * <p>退避序列（base=300）：600 → 1200 → 2000(封顶=PROBE_INTERVAL_MS) → 2000 …
+     * 空闲连接的 XRANGE 查询从 ~3.3 QPS 降到 ~0.5 QPS；非空页把 streak 归零，
+     * 下一轮即回基频——事件一旦开始流式产出，300ms 节奏不受退避影响。
+     *
+     * <p>结果永不低于 baseMs：tailPollMs 可配（AGENT_SSE_TAIL_POLL_MS，AgentManagerProperties），
+     * 若配置超过封顶值（如 5000），先 min 再 max 的钳制保证退避不会「反而提速」
+     * （否则序列 5000→2000→2000 倒挂）。
+     *
+     * @package-private 静态纯函数，便于表驱动测试
+     */
+    static long pollSleepMs(long baseMs, int emptyStreak) {
+        if (emptyStreak <= 0) {
+            return baseMs;
+        }
+        long backoff = baseMs << Math.min(emptyStreak, 10);   // 2^10 封顶防溢出
+        return Math.max(baseMs, Math.min(backoff, PROBE_INTERVAL_MS));
+    }
 
     private final SessionEventStore eventStore;
     private final TurnLeaseStore turnLeaseStore;
@@ -136,20 +155,22 @@ public class SessionEventTailer {
             ? Flux.empty()
             : eventStore.queryAfter(sessionId, replyId, afterSeq)
                 .doOnNext(e -> cursor.set(e.seq()))
-                .map(this::toSSE);
+                .map(AgentEventSseSerializer::toSseFrame);
 
         Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>>create(sink -> {
             long lastProbeAt = 0;   // 0 → 首轮立即探测，避免对已结束的 turn 空等一轮
             long lastFrameAt = System.currentTimeMillis();
+            int emptyStreak = 0;    // 连续空页计数（A2 空闲退避）：空页 +1，非空页归零
             while (!sink.isCancelled()) {
                 var page = eventStore.queryAfter(sessionId, replyId, cursor.get())
                     .collectList().block();
                 if (page == null) page = java.util.List.of();
+                emptyStreak = page.isEmpty() ? emptyStreak + 1 : 0;
 
                 boolean sawTerminal = false;
                 for (var e : page) {
                     if (sink.isCancelled()) return;
-                    sink.next(toSSE(e));
+                    sink.next(AgentEventSseSerializer.toSseFrame(e));
                     cursor.set(e.seq());
                     if (TERMINAL_TYPES.contains(e.type())) sawTerminal = true;
                 }
@@ -190,7 +211,11 @@ public class SessionEventTailer {
                 }
 
                 try {
-                    Thread.sleep(pollInterval.toMillis());
+                    // 空闲退避（A2）：连续空页后逐步放宽到 2s（= PROBE_INTERVAL_MS）封顶，
+                    // 有新事件（非空页）streak 已归零、下一轮即回基频。终态判定节奏：
+                    // 探测门控原样保留，稳态下空页轮询周期 == 探测周期，与现状一致；
+                    // 过渡期第二次探测一次性推迟 ~1.7s（首拍 600/1200ms 均不满足 2s 门控）。
+                    Thread.sleep(pollSleepMs(pollInterval.toMillis(), emptyStreak));
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     sink.complete();
@@ -213,35 +238,13 @@ public class SessionEventTailer {
         if (page == null) return;
         for (var e : page) {
             if (sink.isCancelled()) return;
-            sink.next(toSSE(e));
+            sink.next(AgentEventSseSerializer.toSseFrame(e));
             cursor.set(e.seq());
         }
     }
 
     private static ServerSentEvent<String> heartbeatSSE() {
         return ServerSentEvent.<String>builder().comment("hb").build();
-    }
-
-    private ServerSentEvent<String> toSSE(SessionEventStore.EnvelopedEvent e) {
-        // 与 SessionEventBus.toSSE 保持一致的 payload 形态：把 replyId 注入 payload JSON，
-        // 使同一事件无论走执行副本的本地 sink 还是观察者的 DB 追赶，前端拿到的字节一致。
-        String data = e.payload();
-        if (e.replyId() != null && !e.replyId().isBlank()) {
-            try {
-                var node = MAPPER.readTree(data);
-                if (node != null && node.isObject() && !node.has("replyId")) {
-                    ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", e.replyId());
-                    data = MAPPER.writeValueAsString(node);
-                }
-            } catch (Exception ex) {
-                // 注入失败不阻塞主链路，使用原始 payload
-            }
-        }
-        // id（seq）语义与 SessionEventBus.toSSE 一致，前端可据此记录回放游标
-        return ServerSentEvent.<String>builder()
-            .data(data)
-            .id(String.valueOf(e.seq()))
-            .build();
     }
 
     private static ServerSentEvent<String> doneSSE() {

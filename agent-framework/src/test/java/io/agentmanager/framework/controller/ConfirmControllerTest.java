@@ -300,6 +300,9 @@ class ConfirmControllerTest {
             .thenReturn(reactor.core.publisher.Flux.just(
                 (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-2")));
         when(turnLeaseStore.tryAcquire("t1")).thenReturn("tok-c1");
+        // 持久化成功返回合法 seq（append 真实语义从 1 起；mock 默认 0 在 A3 后不广播——
+        // 那正是本应被消除的「永不落库却实时可见」瑕疵帧）
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
         var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();

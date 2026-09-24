@@ -8,6 +8,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import io.agentmanager.framework.controller.AgentEventSseSerializer;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import reactor.core.publisher.Flux;
@@ -213,5 +214,166 @@ class SessionEventBusTest {
 
     private static AgentEvent mockAgentEvent(String delta) {
         return new TextBlockDeltaEvent("bid-1", delta, "rid-1");
+    }
+
+    // ===== A1：replyId 注入前移写路径，落库与广播同源 =====
+
+    @Test
+    void emitPersistsAndBroadcastsTheSamePayloadString() {
+        // 落库 payload == 广播 EnvelopedEvent.payload == withReplyId 产物（同一份字符串）。
+        // TextBlockDeltaEvent 的 payload 自带 replyId（extractReplyId 覆盖）→ 注入短路，
+        // 期望值 = serializer 原样输出
+        var appended = new java.util.ArrayList<String>();
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString()))
+            .thenAnswer(inv -> {
+                appended.add(inv.getArgument(3));
+                return 7;
+            });
+
+        var flux = eventBus.subscribe("sid-a1", 0, "rid-a1")
+            .filter(sse -> sse.data() != null)
+            .take(1)
+            .timeout(Duration.ofSeconds(3));
+
+        var event = mockAgentEvent("hi");
+        String expected = AgentEventSseSerializer.withReplyId(
+            AgentEventSseSerializer.payload(event), "rid-a1");
+        StepVerifier.create(flux)
+            .then(() -> eventBus.emit("sid-a1", event, "rid-a1"))
+            .expectNextMatches(sse ->
+                expected.equals(sse.data())
+                    && expected.equals(appended.get(0))   // 落库的就是广播的
+                    && "7".equals(sse.id()))
+            .verifyComplete();
+    }
+
+    @Test
+    void emitSyntheticPersistsAndBroadcastsInjectedPayload() {
+        // 合成帧（file_ready 等 extractReplyId 未覆盖的类型）收口前落库无 replyId、读端现场注入；
+        // A1 后注入发生在写路径：落库 p 与广播 data 均为注入后形态，replyId 在 JSON 末尾
+        var appended = new java.util.ArrayList<String>();
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString()))
+            .thenAnswer(inv -> {
+                appended.add(inv.getArgument(3));
+                return 3;
+            });
+
+        var flux = eventBus.subscribe("sid-a2", 0, "rid-a2")
+            .filter(sse -> sse.data() != null)
+            .take(1)
+            .timeout(Duration.ofSeconds(3));
+
+        var raw = "{\"type\":\"file_ready\",\"file_name\":\"a.pdf\"}";
+        StepVerifier.create(flux)
+            .then(() -> eventBus.emitSynthetic("sid-a2", "rid-a2", "file_ready", raw))
+            .expectNextMatches(sse -> {
+                String expected = AgentEventSseSerializer.withReplyId(raw, "rid-a2");
+                return sse.data().equals(appended.get(0))
+                    && sse.data().equals(expected)
+                    && sse.data().endsWith("\"replyId\":\"rid-a2\"}");
+            })
+            .verifyComplete();
+    }
+
+    @Test
+    void subscribeServesLegacyAndNewRowsWithIdenticalBytes() {
+        // 升级前落库的行（p 内无 replyId）与升级后的行（p 已含 replyId）可能混在同一个
+        // Stream 里（同一 session 跨升级回放）：读端按「有无 replyId」各自走对应分支，
+        // 输出都必须与收口前读端算法一致
+        var legacyRow = new SessionEventStore.EnvelopedEvent(1, "permission_ask",
+            "{\"type\":\"permission_ask\",\"reply_id\":\"rid-mix\"}", "rid-mix");
+        var newRow = new SessionEventStore.EnvelopedEvent(2, "AGENT_END",
+            "{\"type\":\"AGENT_END\",\"replyId\":\"rid-mix\"}", "rid-mix");
+        when(eventStore.queryAfter("sid-mix", "rid-mix", 0))
+            .thenReturn(Flux.just(legacyRow, newRow));
+
+        var frames = eventBus.subscribe("sid-mix", 0, "rid-mix")
+            .filter(sse -> sse.data() != null)
+            .take(2)
+            .collectList()
+            .block(Duration.ofSeconds(3));
+
+        assertEquals(2, frames.size());
+        assertEquals(legacyInject(legacyRow.payload(), legacyRow.replyId()), frames.get(0).data(),
+            "存量行：读端兜底注入，输出与收口前读端算法逐字节一致");
+        assertEquals(legacyInject(newRow.payload(), newRow.replyId()), frames.get(1).data(),
+            "新形态行：has(replyId) 短路透传");
+        assertEquals("1", frames.get(0).id());
+        assertEquals("2", frames.get(1).id());
+    }
+
+    /**
+     * 参照实现：收口前 SessionEventBus 私有 toSSE 的注入算法原样拷贝（oracle）。
+     */
+    private static String legacyInject(String payload, String replyId) {
+        if (replyId == null || replyId.isBlank()) {
+            return payload;
+        }
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        try {
+            var node = mapper.readTree(payload);
+            if (node != null && node.isObject() && !node.has("replyId")) {
+                ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", replyId);
+                return mapper.writeValueAsString(node);
+            }
+            return payload;
+        } catch (Exception e) {
+            return payload;
+        }
+    }
+
+    // ===== A3：持久化失败（append 返回 -1）不广播 =====
+
+    @Test
+    void emitDoesNotBroadcastWhenPersistFails() {
+        // append -1 = 事件永不落库；广播它会产生一条回放（断连续传、重放）永远
+        // 补不出来的实时帧。心跳间隔放大到 60s，让 expectNoEvent 只盯业务帧
+        var quietBus = new SessionEventBus(eventStore,
+            Duration.ofSeconds(60), Duration.ofMinutes(5), 64);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+
+        var flux = quietBus.subscribe("sid-f1", 0, "rid-f1")
+            .filter(sse -> sse.data() != null);
+
+        StepVerifier.create(flux)
+            .then(() -> eventBus.emit("sid-f1", mockAgentEvent("lost"), "rid-f1"))
+            .expectNoEvent(Duration.ofMillis(600))
+            .thenCancel()
+            .verify();
+    }
+
+    @Test
+    void emitSyntheticDoesNotBroadcastWhenPersistFails() {
+        var quietBus = new SessionEventBus(eventStore,
+            Duration.ofSeconds(60), Duration.ofMinutes(5), 64);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+
+        var flux = quietBus.subscribe("sid-f2", 0, "rid-f2")
+            .filter(sse -> sse.data() != null);
+
+        StepVerifier.create(flux)
+            .then(() -> eventBus.emitSynthetic("sid-f2", "rid-f2", "file_ready", "{\"type\":\"file_ready\"}"))
+            .expectNoEvent(Duration.ofMillis(600))
+            .thenCancel()
+            .verify();
+    }
+
+    @Test
+    void emitStillReturnsMinusOneAndTouchesActiveWhenPersistFails() {
+        // 返回值 -1 与 touchActive 语义不变：调用方均不消费返回值、收尾路径照常；
+        // touch 经 evictStaleSinks 间接断言——没 touch 过的 session 不会被清理
+        var bus = new SessionEventBus(eventStore,
+            Duration.ofSeconds(60), Duration.ZERO, 64);   // eviction 立即到期
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+
+        var sub = bus.subscribe("sid-touch", 0, "rid-touch").subscribe();
+        int rc = bus.emit("sid-touch", mockAgentEvent("lost"), "rid-touch");
+        assertEquals(-1, rc, "emit 返回值仍为 -1（持久化失败）");
+        sub.dispose();
+
+        try { Thread.sleep(100); } catch (InterruptedException ignored) { }
+
+        assertEquals(1, bus.evictStaleSinks(),
+            "emit 失败路径仍应 touchActive（否则该 sink 不会进入过期清理）");
     }
 }

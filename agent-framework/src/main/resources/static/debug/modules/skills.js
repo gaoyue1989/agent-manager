@@ -61,9 +61,11 @@ async function loadSkills() {
   try {
     skillData = (await ctx.api.getSkillsManage()) || [];
   } catch (e) {
+    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
     body.innerHTML = '<div class="empty error-text">Failed to load skills: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
+  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
 
   var enabled = skillData.filter(function(s) { return s.enabled !== false; }).length;
   summary.textContent = skillData.length + ' skill(s), ' + enabled + ' enabled';
@@ -299,6 +301,7 @@ async function loadUserSkillUsers() {
   var summary = document.getElementById('userSkillSummary');
   try {
     var data = await ctx.api.getUserSkillUsers();
+    if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
     var users = (data && data.users) || [];
     userIndexTruncated = !!(data && data.truncated);
     list.innerHTML = users.map(function(u) {
@@ -352,11 +355,11 @@ async function loadUserSkills() {
     // 已删除但标记仍在的技能（不在 L4 列表里，必须单独提示，否则“重建了却不落库”无从解释）
     tombstones = (data && data.tombstones) || [];
   } catch (e) {
-    if (seq !== userSkillSeq) return;
+    if (seq !== userSkillSeq || !ctx) return; // 过期响应或已切走（unmount 置空 ctx）：丢弃
     body.innerHTML = '<div class="empty error-text">加载失败: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
-  if (seq !== userSkillSeq) return; // 过期响应：丢弃，不覆盖更新的加载结果
+  if (seq !== userSkillSeq || !ctx) return; // 过期响应：丢弃，不覆盖更新的加载结果；已切走时同样不再渲染
   userSkillState = { userId: userId, skills: skills };
   if (summary) {
     summary.textContent = userId + ' · ' + skills.length + ' 个人技能'

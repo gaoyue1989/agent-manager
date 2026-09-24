@@ -259,18 +259,17 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
-            // 本 turn 的收尾只做一次。AGENT_END 处理与源 flux 的 complete/error 回调可能各自
-            // 触发一次收尾，且 harness 的 flux 可能在 AGENT_END 事件之后**数秒**才 complete——
-            // 迟到的那次若再走 closeSession，会把**下一个** turn 刚建好的 sink 拆掉
-            // （实测：0.4s 内前后脚的两轮对话，第二轮的 permission_ask 被迟到关闭吞掉，
-            // 前端收不到 HITL 确认卡；approval-forms e2e 2026-09-17 复现）。
+            // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
+            // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 本 turn 触及过的桶 key（toolCallId）；turn 收尾时统一清桶，防异常路径残留。
+            // 按 turn 粒度隔离：清理只删本 turn 登记过的 key，toolCallId 跨 session 不可能
+            // 撞 key，并行 turn 的桶不受影响（A4）
+            var turnBucketKeys = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
 
-            // 准备阶段的异常必须回滚已获取的 turn_lease。TurnLeaseGuard 的后台续租线程
-            // 不看本段是否还活着——只要 token 仍匹配就持续续期，因此漏放租约意味着该
-            // session 被**永久**锁死：后续每个请求都拿不到租约，观察者也会一直 probe
-            // 到 RUNNING。构造消息这一步会因用户输入抛异常（fileId 失效 → 工作区注入
-            // 失败），所以这不是理论路径。
+            // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
+            // 见 TurnFinalizer#abortSetup 的教训注释。
+            // 该路径 replyId 尚未产出任何事件、无本 turn 桶可清，turnBucketKeys 必为空
             List<Msg> messages;
             try {
                 eventBus.beginTurn(finalSessionId);
@@ -307,7 +306,8 @@ public class ChatStreamController {
                 // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
                 chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
-                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink, turnEnded),
+                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
+                            finalUserId, sink, turnEnded, turnBucketKeys),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             if (isTrailingSandboxTeardownError(e)) {
@@ -318,17 +318,15 @@ public class ChatStreamController {
                                     "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                         e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                             }
-                            endTurn(lease, finalSessionId, turnEnded);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                         },
-                        () -> endTurn(lease, finalSessionId, turnEnded));
+                        () -> endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys));
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
-                sink.next(errorSSE("turn_setup_failed: "
-                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
-                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
-                lease.release();
-                sink.complete();
+                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
+                    errorSSE("turn_setup_failed: "
+                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
                 return;
             }
 
@@ -348,7 +346,7 @@ public class ChatStreamController {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
                             + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
                             OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
-                        endTurn(lease, finalSessionId, turnEnded);
+                        endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                     }
                 }, finalSessionId, replyId);
             });
@@ -377,16 +375,21 @@ public class ChatStreamController {
     private void handleEventAndEmit(AgentEvent event, String sessionId,
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
-                                    java.util.concurrent.atomic.AtomicBoolean turnEnded) {
-        if (stopIfLeaseLost(lease, sessionId, sink)) {
+                                    java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.Set<String> turnBucketKeys) {
+        // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
+        if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             return;
         }
 
         audit(event, sessionId);
 
-        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）
+        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）。
+        // 同点登记 turnBucketKeys（A4）：新增桶 put 点时必须在此同步登记，否则该类残留
+        // 回到「异常路径跨 turn 累积」的现状
         if (event instanceof ToolCallStartEvent start
                 && start.getToolCallId() != null && start.getToolCallName() != null) {
+            turnBucketKeys.add(start.getToolCallId());
             toolCallNames.put(start.getToolCallId(), start.getToolCallName());
         }
 
@@ -394,6 +397,7 @@ public class ChatStreamController {
         if (!sandboxConfig.enabled()) {
             if (event instanceof ToolCallDeltaEvent delta
                     && isTool(delta.getToolCallId(), "write_file")) {
+                turnBucketKeys.add(delta.getToolCallId());
                 accumulateWriteFileInput(delta.getToolCallId(), String.valueOf(delta.getDelta()));
             }
             if (event instanceof ToolCallEndEvent end && isTool(end.getToolCallId(), "write_file")) {
@@ -405,6 +409,7 @@ public class ChatStreamController {
         // present_file 结果累积（同样按登记名判定）
         if (event instanceof ToolResultTextDeltaEvent trd
                 && isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
+            turnBucketKeys.add(trd.getToolCallId());
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
 
@@ -433,68 +438,36 @@ public class ChatStreamController {
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            endTurn(lease, sessionId, turnEnded);
+            endTurnAndCleanupBuckets(lease, sessionId, turnEnded, turnBucketKeys);
         }
     }
 
     /**
-     * 租约已失去：本副本不再拥有该 session 的写入权。
+     * turn 收尾 + 本 turn 桶清理（A4）：只有抢到收尾权（{@link TurnFinalizer#endTurn}
+     * 3 参的 CAS 首胜返回 true）才清桶，且只清本 turn 在 {@code turnBucketKeys}
+     * 里登记过的 key——并行 turn（其他 session）的桶条目不可达于本清理循环；
+     * {@code remove} 天然幂等，与正常路径（End/合成时）的 remove 双删无冲突。
      *
-     * <p>继续 append 会与新 owner 的 seq 区间重叠——这正是 C1 要防的事——所以立刻停手、
-     * 丢弃缓冲、把控制权交还客户端。终态帧**只发本连接的客户端、不落库**：此刻任何
-     * append 都会占用可能与新 owner 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
+     * <p>清桶发生在终态动作（closeSession/abandonSession）之后：桶纯内存、不产生
+     * 任何 SSE 字节，先后不影响行为。
      *
-     * @return true = 本事件已被丢弃，调用方必须直接返回
+     * <p>覆盖的终态：AGENT_END、源流 error/complete 回调、onCancel 看护强收（均走本方法）。
+     * <b>HITL 是部分覆盖</b>：permission_ask 路径先 release 租约再直接 closeSession、不经
+     * 3 参 endTurn，本 turn 的桶清理推迟到源 flux complete/error 回调的 endTurn——正常必达；
+     * flux 永不 complete 且连接无 onCancel 时与现状一样不清（无恶化）。终态后理论上仍可能
+     * 有极晚事件回调 re-put（与现状相同的既有边界，桶上限 64KB/2MB 兜底）。
      */
-    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
-                                    FluxSink<ServerSentEvent<String>> sink) {
-        if (!lease.isLost()) {
-            return false;
-        }
-        if (lease.tryMarkLostNotified()) {
-            log.error("[chat] turn lease lost, stopping writer (sid={})", sessionId);
-            sink.next(interruptedSSE("lease_lost"));
-            eventBus.abandonSession(sessionId);
-            lease.release();
-        }
-        return true;
-    }
-
-    /** 带「只收尾一次」保护的 turn 收尾：晚到的 complete/error 回调不得重复执行 */
-    private void endTurn(TurnLeaseGuard lease, String sessionId,
-                         java.util.concurrent.atomic.AtomicBoolean turnEnded) {
-        if (!turnEnded.compareAndSet(false, true)) {
+    private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId,
+                                          java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                          java.util.Set<String> turnBucketKeys) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
-        endTurn(lease, sessionId);
-    }
-
-    /**
-     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
-     *
-     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
-     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
-     * ——正是 C1 要防的重叠。代价是流结束与租约释放之间有一个极短窗口（客户端已看到
-     * 结束、锁还在我们手上），抢锁方按 ACQUIRE_TIMEOUT 排队等一拍即可。
-     *
-     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
-     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
-     */
-    private void endTurn(TurnLeaseGuard lease, String sessionId) {
-        boolean lost = lease.isLost();
-        if (lost) {
-            eventBus.abandonSession(sessionId);
-        } else {
-            eventBus.closeSession(sessionId);
+        for (String toolCallId : turnBucketKeys) {
+            toolCallNames.remove(toolCallId);
+            presentFileBuffers.remove(toolCallId);
+            writeFileInputBuffers.remove(toolCallId);
         }
-        lease.release();
-    }
-
-    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
-    private static ServerSentEvent<String> interruptedSSE(String reason) {
-        return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
-            .build();
     }
 
     // ===== present_file 累积 & 合成 =====
@@ -513,6 +486,18 @@ public class ChatStreamController {
 
     private boolean isTool(String toolCallId, String expected) {
         return isTool(toolCallId, expected, null);
+    }
+
+    // ===== 私有可测性观察点（A4）：仅供测试断言，不进公有 API =====
+
+    /** 三个工具桶条目数之和（toolCallNames/presentFileBuffers/writeFileInputBuffers） */
+    int bucketEntryCount() {
+        return toolCallNames.size() + presentFileBuffers.size() + writeFileInputBuffers.size();
+    }
+
+    /** 定向查看登记表中某 toolCallId 的工具名（测试断言「并行 turn 防误删」用） */
+    String registeredToolName(String toolCallId) {
+        return toolCallNames.get(toolCallId);
     }
 
     private void accumulatePresentFile(String toolCallId, String delta) {

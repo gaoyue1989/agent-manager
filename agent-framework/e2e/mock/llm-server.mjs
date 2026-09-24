@@ -133,10 +133,14 @@ const server = http.createServer((req, res) => {
       try { reqBody = JSON.parse(Buffer.concat(cs).toString()); } catch { /* 保持空 */ }
       const { messages, marker, arg, deniedResume, systemContent } = route(reqBody);
       const name = MARKER_MAP[marker];
-      // jar 后台调用（记忆提取/会话标题等）：无 system 消息（主对话必带 agent 系统提示）。
-      // 这类调用若带场景标记会偷走主对话的 fixture 调用序——一律合成良性响应。
-      const isBackground = !messages.some(m => m.role === 'system');
-      const isMemoryFlush = isBackground && String(systemContent).includes('memory extraction assistant');
+      // jar 后台调用（记忆提取/会话标题等）：无 system 消息，或 system 提示为
+      // 记忆提取（MemoryFlushMiddleware，判据与 record-llm.mjs/normalize-fixtures.mjs
+      // 一致：system 含 "memory extraction assistant"——该调用必带 system 消息，
+      // 只按"无 system"识别会漏判成 500 → SDK 退避重试，重试帧迟到落进 stats
+      // 尾部，污染"最后一条调用"型断言）。这类调用若回放 fixture 会偷走主对话
+      // 的调用序——一律合成良性响应。
+      const isBackground = !messages.some(m => m.role === 'system')
+        || String(systemContent).includes('memory extraction assistant');
       stats.count += 1;
       stats.calls.push({
         scenario: isBackground ? 'background-synth' : (name ?? marker), arg,
