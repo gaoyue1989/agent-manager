@@ -21,6 +21,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.ModelCatalog;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentmanager.framework.service.SessionTitleService;
@@ -97,6 +98,7 @@ public class ChatStreamController {
     private final SkillInjectionService skillInjectionService;
     private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final ModelCatalog modelCatalog;
     private final SessionTitleService sessionTitleService;
 
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
@@ -146,6 +148,7 @@ public class ChatStreamController {
                                 SkillInjectionService skillInjectionService,
                                 io.agentmanager.framework.service.FileAssetStore fileAssetStore,
                                 McpToolRegistrar mcpToolRegistrar,
+                                ModelCatalog modelCatalog,
                                 SessionTitleService sessionTitleService) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
@@ -161,6 +164,7 @@ public class ChatStreamController {
         this.skillInjectionService = skillInjectionService;
         this.fileAssetStore = fileAssetStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.modelCatalog = modelCatalog;
         this.sessionTitleService = sessionTitleService;
     }
 
@@ -173,7 +177,8 @@ public class ChatStreamController {
      *   "message": "你好",
      *   "userId": "user-123",          // 可选
      *   "sessionId": "my-session-1",   // 可选，不传则自动生成
-     *   "fileIds": []                  // 可选
+     *   "fileIds": [],                 // 可选
+     *   "model": "01J8XK..."           // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
      * }
      * }</pre>
      *
@@ -211,10 +216,30 @@ public class ChatStreamController {
         String finalUserId = userId;
         boolean emitSessionCreated = isNewSession;
 
+        // 会话模型切换（model 可选）：字段缺省 = 不改变会话绑定；传值即绑定到本会话（本 turn 生效）；
+        // 空串/system = 清除覆盖回默认模型；未知/禁用 → 拒绝（不改变会话既有绑定）
+        var modelProvided = body.model() != null;
+        var requestedModel = modelProvided ? body.model().trim() : "";
+        if (modelProvided && !ModelCatalog.isSystemSelection(requestedModel)) {
+            var reject = modelCatalog != null ? modelCatalog.validateSelectable(requestedModel) : null;
+            if (reject != null) {
+                log.info("[chat] reject model selection: sessionId={}, model={}, reason={}",
+                    finalSessionId, requestedModel, reject);
+                return Flux.just(errorSSE(reject + ": " + requestedModel));
+            }
+        }
+
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
 
-        // 会话标题：首条用户消息后异步生成（已有标题/消息为空时内部跳过），不阻塞本次对话流
+        // 会话模型绑定（在用户映射之后写：新会话不产生 user_id=unknown 的过渡行）
+        if (modelProvided) {
+            sessionUserStore.upsertModel(finalSessionId,
+                ModelCatalog.isSystemSelection(requestedModel) ? "" : requestedModel);
+        }
+
+        // 会话标题：首条用户消息后异步生成（master 版实现：已有标题/空消息/生成中时内部跳过，
+        // 空结果回退首条消息截断），不阻塞本次对话流
         sessionTitleService.generateAsync(finalSessionId, message, finalUserId);
 
         return Flux.<ServerSentEvent<String>>create(sink -> {
@@ -743,7 +768,8 @@ public class ChatStreamController {
         return false;
     }
 
-    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId 可选 */
-    public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds) {
+    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model 可选 */
+    public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds,
+                              String model) {
     }
 }

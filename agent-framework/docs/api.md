@@ -189,10 +189,16 @@ curl http://localhost:8100/threads
     {
         "session_id": "acme-test-agent:thread-1",
         "thread_id": "thread-1",
+        "user_id": "alice",
+        "title": "销售数据分析",
+        "model": "",
         "updated_at": "2026-08-21T10:00:00Z"
     }
 ]
 ```
+
+> `title` 来源：手动重命名（PATCH）或**系统模型自动生成**（新会话首条消息后异步生成，已有标题不覆盖）；
+> `model` 为会话绑定模型（`model_config.id`，空串 = 默认/系统模型），见 [模型 API](#模型-api会话可切换)。
 
 ---
 
@@ -280,6 +286,7 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `userId` | String | | 用户标识（默认 `debug-user`；`X-User-Id` Header 优先） |
 | `sessionId` | String | | 会话 ID；**省略时自动生成 UUID** |
 | `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
+| `model` | String | | 会话模型（`GET /models` 的 id；**缺省=不改变绑定**，传值即绑定本会话并本 turn 生效，`""`/`system`=回到默认模型；未知/禁用返回 error 帧 `unknown_model: xxx`） |
 
 **响应 (SSE):**
 
@@ -407,6 +414,69 @@ curl -X POST "http://localhost:8100/files/upload" \
 
 ---
 
+## 模型 API（会话可切换）
+
+系统模型（`LLM_*` 环境变量，只读，即默认模型）+ 托管模型（`model_config` 表，CRUD）统一暴露；
+会话模型切换的完整设计见 [session-model-switch-design.md](session-model-switch-design.md)。
+debug 页「🤖 Models」模块为管理界面。
+
+### GET /models
+
+可选模型列表（前端 picker / 管理页数据源；`?all=true` 含禁用的托管模型）。
+
+```bash
+curl "http://localhost:8100/models"
+```
+
+**响应:**
+
+```json
+{
+  "default_model": "system",
+  "models": [
+    {"id": "system", "name": "qwen3-32b（系统）", "provider": "openai", "model_id": "qwen3-32b",
+     "is_default": true, "source": "system", "enabled": true},
+    {"id": "3f1c...", "name": "DeepSeek-V3", "provider": "openai", "model_id": "deepseek-v3",
+     "is_default": false, "source": "managed", "enabled": true}
+  ]
+}
+```
+
+### GET /models/{id}
+
+模型详情（托管模型含 `api_key_masked` 掩码，不返回明文；系统模型 `read_only=true`）。404 `model_not_found`。
+
+### POST /models
+
+新增托管模型。`name`/`modelId`/`baseUrl` 必填；`apiKey` 留空/null = 复用系统 `LLM_API_KEY`。
+
+```bash
+curl -X POST http://localhost:8100/models -H 'Content-Type: application/json' -d '{
+  "name": "DeepSeek-V3", "modelId": "deepseek-v3", "baseUrl": "https://api.example.com/v1",
+  "apiKey": "<占位符>", "temperature": 0.3, "maxTokens": 16384, "enabled": true
+}'
+```
+
+**响应:** 托管模型详情（含 `id`，掩码 key）。错误：`400 invalid_config` / `400 duplicate_name`。
+
+### PATCH /models/{id}
+
+局部更新：字段缺省=不变；`apiKey=""`=清空回落系统密钥；系统模型 → `400 system_model_readonly`。
+
+### DELETE /models/{id}
+
+删除托管模型。引用它的会话在下次模型调用时**回落默认模型**（上下文/历史不受影响），后续新请求可切换到其他模型。
+系统模型 → 400；不存在 → 404。
+
+### POST /models/{id}/test
+
+连接测试：真实发起一次最小 completion（max_tokens=16）。
+
+**响应（成功）:** `{"id": "...", "ok": true, "latency_ms": 812, "reply": "pong"}`
+**响应（失败）:** `502` + `{"id": "...", "ok": false, "latency_ms": 120, "error": "model_test_failed", "message": "<上游错误摘要>"}`
+
+---
+
 ## 调试 API（/debug）
 
 | 方法 | 路径 | 说明 |
@@ -466,6 +536,31 @@ Turn 租约（同一 session 执行段串行化）。Token + 短 TTL + 续租，
 **保护范围：** `/threads/chat`、`/threads/{sid}/confirm-stream`、`/threads/{sid}/confirm`
 （同步版于 2026-09-18 补齐，此前无租约——多副本下并发确认会重复执行；抢不到返回
 409 `turn_in_progress`）。
+
+### model_config
+
+托管模型配置（会话可切换模型的配置来源，见 [session-model-switch-design.md](session-model-switch-design.md)）。
+服务启动时自动建表（幂等）；`api_key` 为**明文列**（内网库，读接口一律掩码返回）。
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `id` | VARCHAR(64) PK | UUID；会话按此 id 引用（改名不断链） |
+| `name` | VARCHAR(128) 唯一 | 展示名 |
+| `provider` | VARCHAR(32) | 目前仅 `openai` 兼容端点 |
+| `model_id` | VARCHAR(128) | 发给推理端点的模型名 |
+| `base_url` | VARCHAR(512) | OpenAI 兼容端点 |
+| `api_key` | VARCHAR(512) NULL | NULL = 回落系统 `LLM_API_KEY` |
+| `temperature` / `max_tokens` / `timeout_seconds` | DOUBLE / INT / INT | 采样与超时（默认 0.3 / 16384 / 120） |
+| `enable_thinking` | TINYINT(1) | false 时注入 `chat_template_kwargs.enable_thinking=false` |
+| `context_length` | INT | >0 才传给模型 |
+| `enabled` | TINYINT(1) | 会话可选开关 |
+| `created_at` / `updated_at` | DATETIME(3) | — |
+
+### session_user（会话模型列）
+
+`session_user` 除 `remark`（标题）外新增 `model VARCHAR(128) DEFAULT ''`（启动时幂等 ALTER）：
+空串 = 默认（系统）模型；非空 = 绑定 `model_config.id`。`SessionModelMiddleware` 每次模型调用实时读该列，
+多副本下 PATCH/chat 落库即生效（无进程内缓存）。
 
 ### tool_audit_log
 
