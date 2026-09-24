@@ -67,3 +67,16 @@ func TestCheckAgentsMDJavaParity(t *testing.T) {
 		t.Fatalf("quoted scalar should parse: %+v", r)
 	}
 }
+
+// 字段类型异常（结构合法但标量位出现序列）不得 panic，须返回 invalid（迁移自查发现的 nil 解回归）
+func TestCheckAgentsMDTypeMismatchNoPanic(t *testing.T) {
+	r := CheckAgentsMD("---\nname: x\nversion: [1, 2]\nvendorKey: v\nagentKey: a\n---\nbody")
+	if r.Valid {
+		t.Fatalf("type mismatch must be invalid: %+v", r)
+	}
+	joined := strings.Join(r.Invalid, ",")
+	if !strings.Contains(joined, "类型异常") {
+		t.Fatalf("invalid should mention type error: %+v", r)
+	}
+	// MCP 工具层 create_oaf_zip 同样依赖该前置校验，非法类型走同一短路
+}

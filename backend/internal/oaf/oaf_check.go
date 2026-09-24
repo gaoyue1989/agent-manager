@@ -57,14 +57,16 @@ func CheckAgentsMD(content string) CheckResult {
 	}
 	res.Present = keys
 
+	if perr != nil {
+		// frontmatter 结构合法但字段类型异常（如 name 写成数组）：ParseOAF 返回 nil cfg，
+		// 必须在此短路，不得再解引用字段
+		res.Invalid = append(res.Invalid, fmt.Sprintf("frontmatter 字段类型异常: %v", perr))
+		return finish()
+	}
 	fields := map[string]string{
 		"name": cfg.Name, "vendorKey": cfg.VendorKey, "agentKey": cfg.AgentKey,
 		"version": cfg.Version, "description": cfg.Description,
 		"author": cfg.Author, "license": cfg.License,
-	}
-	if perr != nil {
-		// frontmatter 结构合法但字段类型异常（如 name 写成数字）：按必填缺失处理并提示
-		res.Invalid = append(res.Invalid, fmt.Sprintf("frontmatter 字段类型异常: %v", perr))
 	}
 	for _, f := range CheckAgentsMDRequired {
 		if strings.TrimSpace(fields[f]) == "" {
