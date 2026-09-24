@@ -24,6 +24,9 @@ import com.zaxxer.hikari.HikariDataSource;
 class AgentScopeConfigTest {
 
     private final AgentScopeConfig config = new AgentScopeConfig();
+    private final io.agentmanager.framework.service.HarnessAgentFactory factory =
+        new io.agentmanager.framework.service.HarnessAgentFactory(
+            propsForLlm(), null, null, java.util.List.of());
 
     @Test
     void mcpManagerShouldUseConfigPath() {
@@ -166,9 +169,10 @@ class AgentScopeConfigTest {
             fail(e);
         }
 
+        var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
+            props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()));
         assertThrows(RuntimeException.class,
-            () -> config.harnessAgent(props, store, oaf, ws, mcp,
-                List.of(new BusinessTools()), new LLMLogger(), null, null, null));
+            () -> factory.build(oaf, store, new LLMLogger(), null, null, null));
     }
 
     // ---------- buildPermissionContext：自定义工具 HITL 装配（hitl-permission-plan 6.1） ----------
@@ -188,14 +192,14 @@ class AgentScopeConfigTest {
 
     @Test
     void permissionContextShouldBeNullWhenNothingDeclared() {
-        assertNull(config.buildPermissionContext(
+        assertNull(factory.buildPermissionContext(
             oafForPermission(false, java.util.Map.of()), permCfg(java.util.Map.of(), java.util.Set.of()),
             java.util.Set.of("present_url")));
     }
 
     @Test
     void customToolAskDeclarationShouldEnablePermissionSystem() {
-        var ctx = config.buildPermissionContext(
+        var ctx = factory.buildPermissionContext(
             oafForPermission(false, java.util.Map.of("present_url", "ask")),
             permCfg(java.util.Map.of(), java.util.Set.of()),
             java.util.Set.of("present_url", "echo"));
@@ -210,7 +214,7 @@ class AgentScopeConfigTest {
 
     @Test
     void customToolDenyDeclarationShouldProduceDenyRule() {
-        var ctx = config.buildPermissionContext(
+        var ctx = factory.buildPermissionContext(
             oafForPermission(false, java.util.Map.of("echo", "deny")),
             permCfg(java.util.Map.of(), java.util.Set.of()),
             java.util.Set.of("echo"));
@@ -221,7 +225,7 @@ class AgentScopeConfigTest {
 
     @Test
     void mcpNameCollisionShouldWinOverCustomDeclaration() {
-        var ctx = config.buildPermissionContext(
+        var ctx = factory.buildPermissionContext(
             oafForPermission(false, java.util.Map.of("write_file", "ask")),
             permCfg(java.util.Map.of(), java.util.Set.of("write_file")),
             java.util.Set.of());
@@ -233,7 +237,7 @@ class AgentScopeConfigTest {
 
     @Test
     void requireConfirmationShouldStayMcpOnly() {
-        var ctx = config.buildPermissionContext(
+        var ctx = factory.buildPermissionContext(
             oafForPermission(true, java.util.Map.of()),
             permCfg(java.util.Map.of(), java.util.Set.of("mcp_publish")),
             java.util.Set.of("present_url"));
@@ -250,7 +254,7 @@ class AgentScopeConfigTest {
      */
     @Test
     void permissionEngineShouldEvaluateCustomToolRules() {
-        var ctx = config.buildPermissionContext(
+        var ctx = factory.buildPermissionContext(
             oafForPermission(false, java.util.Map.of("get_current_time", "ask", "echo", "deny")),
             permCfg(java.util.Map.of(), java.util.Set.of()),
             java.util.Set.of("get_current_time", "echo"));
@@ -302,7 +306,7 @@ class AgentScopeConfigTest {
         var llm = new AgentManagerProperties.LLMConfig(
             "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 131072);
 
-        var model = config.buildChatModel(llm, harnessConfig());
+        var model = factory.buildChatModel(llm, harnessConfig());
 
         assertEquals(131072, model.getContextWindowSize());
     }
@@ -312,7 +316,7 @@ class AgentScopeConfigTest {
         var llm = new AgentManagerProperties.LLMConfig(
             "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0);
 
-        var model = config.buildChatModel(llm, harnessConfig());
+        var model = factory.buildChatModel(llm, harnessConfig());
 
         assertEquals(0, model.getContextWindowSize());
     }
@@ -355,8 +359,9 @@ class AgentScopeConfigTest {
             emptyServer(), emptyCheckpoint(), "/config", "", cleanupConfig(), emptyFileConfig(),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300), harness);
 
-        var agent = config.harnessAgent(props, store, oaf, ws, mcp,
-            List.of(new BusinessTools()), new LLMLogger(), null, null, null);
+        var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
+            props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()));
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null, null);
         return new java.util.TreeSet<>(agent.getToolkit().getToolNames());
     }
 

@@ -39,7 +39,7 @@ public class AgentRuntimeService {
      */
     private AgentStateReader agentStateReader;
 
-    private io.agentscope.harness.agent.HarnessAgent agent;
+    private volatile io.agentscope.harness.agent.HarnessAgent agent;
     private final List<Map<String, Object>> mcpConfigs;
 
     public AgentRuntimeService(
@@ -182,6 +182,21 @@ public class AgentRuntimeService {
 
     public void setAgent(io.agentscope.harness.agent.HarnessAgent agent) {
         this.agent = agent;
+    }
+
+    /** 当前 agent（volatile，reload 切换后立即可见）。 */
+    public io.agentscope.harness.agent.HarnessAgent getAgent() {
+        return this.agent;
+    }
+
+    /**
+     * OAF reload 原子切换：替换 agent 引用并返回旧实例（调用方负责旧 agent 的 MCP 收尾）。
+     * 下一轮对话生效；进行中 turn 已捕获旧引用，继续在旧 agent 上完成。
+     */
+    public io.agentscope.harness.agent.HarnessAgent swapAgent(io.agentscope.harness.agent.HarnessAgent next) {
+        var old = this.agent;
+        this.agent = next;
+        return old;
     }
 
     /**

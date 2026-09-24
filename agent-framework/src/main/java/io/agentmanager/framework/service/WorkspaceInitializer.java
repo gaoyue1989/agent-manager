@@ -3,6 +3,8 @@ package io.agentmanager.framework.service;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,20 +37,39 @@ public class WorkspaceInitializer {
         var workspace = baseDir.resolve(".agentscope").resolve("workspace");
         Files.createDirectories(workspace);
 
-        writeAgentsMd(workspace, oafConfig);
-        writeToolsJson(workspace, oafConfig);
-        writeSubagents(workspace, oafConfig);
+        writeAgentsMd(workspace, oafConfig, false);
+        writeToolsJson(workspace, oafConfig, false);
+        writeSubagents(workspace, oafConfig, false);
 
         log.info("Workspace initialized at: {}", workspace);
         return workspace;
     }
 
     /**
-     * 生成 AGENTS.md：OAF frontmatter + body 写入 Workspace。
+     * reload 场景的强制重写：与 {@link #initialize} 相同的目标文件，但一律覆盖——
+     * "存在即跳过"会让新配置被旧 workspace 文件挡住。只覆盖三个生成文件，
+     * 不触碰用户运行时文件与 per-user 技能（L4）。
      */
-    private void writeAgentsMd(Path workspace, OafConfig oafConfig) throws IOException {
+    public Path reinitialize(Path baseDir, OafConfig oafConfig) throws IOException {
+        var workspace = baseDir.resolve(".agentscope").resolve("workspace");
+        Files.createDirectories(workspace);
+
+        writeAgentsMd(workspace, oafConfig, true);
+        writeToolsJson(workspace, oafConfig, true);
+        writeSubagents(workspace, oafConfig, true);
+
+        log.info("Workspace reinitialized (force overwrite) at: {}", workspace);
+        return workspace;
+    }
+
+    /**
+     * 生成 AGENTS.md：OAF frontmatter + body 写入 Workspace。
+     *
+     * @param force true=覆盖已有文件（reload）；false=存在即跳过（启动期容忍手改）
+     */
+    private void writeAgentsMd(Path workspace, OafConfig oafConfig, boolean force) throws IOException {
         var agentsMd = workspace.resolve("AGENTS.md");
-        if (Files.exists(agentsMd)) {
+        if (!force && Files.exists(agentsMd)) {
             log.info("AGENTS.md already exists, skipping generation");
             return;
         }
@@ -80,9 +101,9 @@ public class WorkspaceInitializer {
      * 不写 allow → 保留所有 Harness 内置工具。
      * MCP 服务器由 McpClientBuilder 原生注册（见 AgentScopeConfig），不再写入 tools.json。
      */
-    private void writeToolsJson(Path workspace, OafConfig oafConfig) throws IOException {
+    private void writeToolsJson(Path workspace, OafConfig oafConfig, boolean force) throws IOException {
         var toolsJson = workspace.resolve("tools.json");
-        if (Files.exists(toolsJson)) {
+        if (!force && Files.exists(toolsJson)) {
             log.info("tools.json already exists, skipping generation");
             return;
         }
@@ -104,14 +125,19 @@ public class WorkspaceInitializer {
 
     /**
      * 生成 subagents：OAF agents 转换为 AgentScope subagents/*.md 格式。
+     *
+     * <p>force=false 时与旧行为一致（存在即跳过）；force=true（reload）时按当前
+     * 声明全量重写，并删除目录中已不在新声明里的陈旧 subagent 文件。
      */
-    private void writeSubagents(Path workspace, OafConfig oafConfig) throws IOException {
+    private void writeSubagents(Path workspace, OafConfig oafConfig, boolean force) throws IOException {
         var subagentsDir = workspace.resolve("subagents");
         Files.createDirectories(subagentsDir);
 
+        var declared = new ArrayList<String>();
         for (var agent : oafConfig.subAgents()) {
             var agentFile = subagentsDir.resolve(agent.agent() + ".md");
-            if (Files.exists(agentFile)) {
+            declared.add(agentFile.getFileName().toString());
+            if (!force && Files.exists(agentFile)) {
                 continue;
             }
 
@@ -129,6 +155,18 @@ public class WorkspaceInitializer {
 
             Files.writeString(agentFile, sb.toString());
             log.info("Generated subagent: {}", agent.agent());
+        }
+
+        // force：清理新声明中不存在的陈旧 subagent 文件
+        if (force) {
+            try (var files = Files.list(subagentsDir)) {
+                for (var file : files.filter(p -> p.toString().endsWith(".md")).toList()) {
+                    if (!declared.contains(file.getFileName().toString())) {
+                        Files.deleteIfExists(file);
+                        log.info("Removed stale subagent: {}", file.getFileName());
+                    }
+                }
+            }
         }
     }
 }
