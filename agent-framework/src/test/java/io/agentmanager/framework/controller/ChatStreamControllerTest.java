@@ -1047,15 +1047,31 @@ class ChatStreamControllerTest {
     }
 
     @Test
+    void chatShouldGenerateTitleOnFirstTurnWithClientProvidedSessionId() {
+        // 前端首条消息自带 sessionId（webui-xxx）：不能用 sessionId 是否为空判定"新会话"，
+        // 以 session_user 是否存在该行为准（回归：早期实现导致前端场景标题永不生成）
+        var sessionId = "webui-m5";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-m5");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m5")));
+        when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn(null); // 首次出现
+
+        collect(sessionId, "hello", "webui");
+
+        verify(sessionTitleService).generateAsync(sessionId, "hello");
+    }
+
+    @Test
     void chatShouldNotTouchModelBindingWhenFieldAbsent() {
         var sessionId = "test-user-m4";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-m4");
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m4")));
+        when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice"); // 老会话
 
         collect(sessionId, "hello", "alice"); // ChatRequest.model = null
 
-        // 缺省 = 不改变绑定；非新会话不触发标题生成
+        // 缺省 = 不改变绑定；非首次对话（会话已存在）不触发标题生成
         verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
         verify(sessionTitleService, never()).generateAsync(anyString(), anyString());
     }

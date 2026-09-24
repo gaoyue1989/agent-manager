@@ -228,6 +228,10 @@ public class ChatStreamController {
             }
         }
 
+        // 是否本会话在 session_user 的首行 = "会话首次对话"（前端首条消息自带 sessionId，
+        // 不能用 body.sessionId 是否为空判定；A2A 已登记的会话在 recordSessionUser 时已建行，不触发）
+        var firstEverTurn = sessionUserStore.findUserIdBySession(finalSessionId) == null;
+
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
 
@@ -237,8 +241,8 @@ public class ChatStreamController {
                 ModelCatalog.isSystemSelection(requestedModel) ? "" : requestedModel);
         }
 
-        // 新会话首条消息：异步生成标题（系统模型；失败不阻断，已有标题不覆盖）
-        if (isNewSession && sessionTitleService != null) {
+        // 会话首次对话：异步生成标题（系统模型；失败不阻断，已有标题不覆盖）
+        if (firstEverTurn && sessionTitleService != null) {
             sessionTitleService.generateAsync(finalSessionId, message);
         }
 

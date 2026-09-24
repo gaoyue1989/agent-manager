@@ -45,13 +45,16 @@ public class ModelCatalog {
     private static final String SOURCE_SYSTEM = "system";
     private static final String SOURCE_MANAGED = "managed";
 
-    /** 可选模型项（GET /models 返回；不暴露 apiKey 等连接细节） */
+    /**
+     * 可选模型项（GET /models 返回；不暴露 apiKey 等连接细节）。
+     * 字段名显式转 snake_case：响应体风格与本工程其余接口一致（会话/文件接口均为 snake_case）。
+     */
     public record ModelOption(
         String id,
         String name,
         String provider,
-        String modelId,
-        boolean isDefault,
+        @com.fasterxml.jackson.annotation.JsonProperty("model_id") String modelId,
+        @com.fasterxml.jackson.annotation.JsonProperty("is_default") boolean isDefault,
         String source,
         boolean enabled
     ) {}
@@ -68,6 +71,11 @@ public class ModelCatalog {
 
     private record CachedModel(Model model, long loadedAtMillis) {}
 
+    /**
+     * Spring 装配入口（必须显式 @Autowired：本类另有测试用包级构造，
+     * 多构造器且无标注时 Spring 会回落到无参构造并抛 NoSuchMethodException）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired
     public ModelCatalog(ModelConfigStore store, AgentManagerProperties props) {
         this(store, props, DEFAULT_CACHE_TTL_MILLIS);
     }

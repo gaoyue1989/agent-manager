@@ -182,6 +182,23 @@ class ModelCatalogTest {
         assertTrue(catalog.modelForTest("gone").isEmpty());
     }
 
+    /**
+     * 回归（2026-09-24 E2E 启动失败教训）：Spring 装配要求唯一 public 构造器——
+     * 多构造器且无 @Autowired 时 Spring 回落无参构造，抛 NoSuchMethodException 导致应用起不来。
+     */
+    @Test
+    void shouldExposeSingleAutowirablePublicConstructor() {
+        var publicCtors = java.util.Arrays.stream(ModelCatalog.class.getConstructors())
+            .filter(c -> c.getParameterCount() > 0)
+            .toList();
+
+        assertEquals(1, publicCtors.size(),
+            "Spring 装配依赖唯一 public 构造器（测试用构造器须保持包级可见）");
+        assertNotNull(publicCtors.get(0).getAnnotation(
+            org.springframework.beans.factory.annotation.Autowired.class),
+            "该构造器必须显式 @Autowired（多构造器场景）");
+    }
+
     // ===== helpers =====
 
     private static ModelConfigStore.ModelConfig cfg(String id, String name, boolean enabled) {

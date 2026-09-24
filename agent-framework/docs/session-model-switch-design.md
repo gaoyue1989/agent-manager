@@ -294,3 +294,22 @@ CREATE TABLE IF NOT EXISTS model_config (
   `static/debug/js/app.js` + `static/debug/js/api.js`（路由与 API 客户端）、
   `frontend/src/app/assistant/page.tsx` + `components/types.ts`（picker、随消息携带 model、会话回显、侧栏标题）。
 - **后续可选项**（未做，需要时另开）：A2A 链路经 `message.metadata.model` 切换会话模型；会话模型变更的审计事件。
+
+### 13.1 本地实机冒烟发现的缺陷（已一并修复）
+
+PR 提交前用本地 MySQL(3307)/Redis(16379) + e2e mock LLM 起真实实例走查，暴露三处问题：
+
+1. **`ModelCatalog` 多构造器无 `@Autowired` → 应用起不来**（三个 E2E 作业全挂的根因）：
+   测试用包级构造器使 Spring 回落无参构造并抛 `NoSuchMethodException`。修复：public 构造器显式 `@Autowired`，
+   并加回归断言（`ModelCatalogTest#shouldExposeSingleAutowirablePublicConstructor`）。
+2. **MySQL ERROR 1093（既有静默缺陷）**：`INSERT ... VALUES (?, COALESCE((SELECT user_id FROM session_user ...), 'unknown'), ...)`
+   在 MySQL 8 被直接拒绝（"You can't specify target table for update in FROM clause"）——该模式是
+   `ThreadController.upsertRemark` 的**原始写法**，意味着**标题重命名此前一直静默失败**（异常被 catch 成 warn），
+   单测用 mock DataSource 覆盖不到。修复：`SessionUserStore.upsertColumn` 改 UPDATE 优先、0 行回落 INSERT
+   （remark/model 共用，列名白名单防注入）；新增真实 MySQL IT `SessionUserStoreMySqlIT`（`HITL_MYSQL_IT=1` 开关）作回归守卫。
+3. **标题触发条件与前端流程不符**：前端首条消息自带 `sessionId`（`webui-xxx`），`isNewSession` 恒为 false →
+   标题永不生成。修复：以"`session_user` 中是否已有该会话行"（`firstEverTurn`）判定会话首轮，A2A 已登记会话不触发。
+
+冒烟结论（全部通过）：`GET/POST/PATCH/DELETE /models` 契约与掩码、非法校验词表、模型绑定落库与列表/详情回显、
+**路由决定性验证**（绑定指向无效端口的模型 → chat 失败 = 确认切换生效）、PATCH 中途切回 system → chat 成功、
+删除被引用模型 → 会话回落默认模型（warn 一次）且继续保持可用、新会话标题写入 `remark`。
