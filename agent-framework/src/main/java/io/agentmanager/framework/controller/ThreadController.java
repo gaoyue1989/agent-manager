@@ -482,22 +482,10 @@ public class ThreadController {
             return List.of();
         }
     }
-    /** 将 title 写入 session_user.remark（字段不存在则 ALTER TABLE 添加） */
+    /** 将 title 写入 session_user.remark（统一走 SessionUserStore，避免重复 SQL/MySQL 1093） */
     private void upsertRemark(String sessionId, String title) {
         ensureRemarkColumn();
-        try (var conn = dataSource.getConnection();
-             var ps = conn.prepareStatement("""
-                 INSERT INTO session_user (session_id, user_id, remark, created_at, updated_at)
-                 VALUES (?, COALESCE((SELECT user_id FROM session_user WHERE session_id = ? LIMIT 1), 'unknown'), ?, NOW(3), NOW(3))
-                 ON DUPLICATE KEY UPDATE remark = VALUES(remark), updated_at = NOW(3)
-                 """)) {
-            ps.setString(1, sessionId);
-            ps.setString(2, sessionId);
-            ps.setString(3, title);
-            ps.executeUpdate();
-        } catch (Exception e) {
-            log.warn("upsertRemark failed for {}: {}", sessionId, e.getMessage());
-        }
+        sessionUserStore.updateRemark(sessionId, title);
     }
 
     /** 幂等确保 remark 列存在 */

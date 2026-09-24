@@ -324,6 +324,18 @@ public class AgentScopeConfig {
             .build();
     }
 
+    /**
+     * 会话标题生成专用模型：与主对话模型同配置的独立实例，
+     * 供 {@link io.agentmanager.framework.service.SessionTitleService} 在会话首条消息后异步生成标题。
+     * 不参与 HarnessAgent 装配（独立实例，避免影响主链路追踪/日志包装）。
+     */
+    @Bean
+    public io.agentscope.core.model.Model titleGenerationModel(AgentManagerProperties props) {
+        var llm = props.llm();
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
+        return buildChatModel(llm, harness);
+    }
+
     @Bean
     public HarnessAgent harnessAgent(
         AgentManagerProperties props,

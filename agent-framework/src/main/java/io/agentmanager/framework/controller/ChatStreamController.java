@@ -23,11 +23,13 @@ import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentmanager.framework.service.SessionTitleService;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.SkillInjectionService;
 import io.agentmanager.framework.service.ToolAuditStore;
 import io.agentmanager.framework.service.TurnLeaseGuard;
 import io.agentmanager.framework.service.TurnLeaseStore;
+import io.agentmanager.framework.service.TurnToolSummaryTracker;
 import io.agentmanager.framework.service.UiContextStore;
 import io.agentmanager.framework.service.UploadWorkspaceInjector;
 import io.agentmanager.framework.service.WorkspaceReader;
@@ -95,6 +97,7 @@ public class ChatStreamController {
     private final SkillInjectionService skillInjectionService;
     private final io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final SessionTitleService sessionTitleService;
 
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
@@ -107,21 +110,6 @@ public class ChatStreamController {
 
     /** present_file 工具结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
-        new java.util.concurrent.ConcurrentHashMap<>();
-
-    /** write_file 工具输入参数累积（toolCallId &rarr; JSON 片段桶），用于截获 path+content 后同步 KV */
-    private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> writeFileInputBuffers =
-        new java.util.concurrent.ConcurrentHashMap<>();
-
-    /**
-     * toolCallId &rarr; 真实工具名（turn 内有效）。
-     *
-     * <p>SDK 只在 {@link ToolCallStartEvent} 上携带真实工具名——后续的
-     * {@code ToolCallDeltaEvent} 虽然也有 getToolCallName()，实测恒为占位符
-     * {@code "__fragment__"}（参数分片帧，见 e2e-ci-plan §11.3 D3）。
-     * 因此凡需按工具名分派的逻辑，必须先在此登记、后续查表，不能直接读 delta 的名字。
-     */
-    private final java.util.concurrent.ConcurrentHashMap<String, String> toolCallNames =
         new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final int PRESENT_FILE_BUFFER_MAX = 64 * 1024;
@@ -142,7 +130,8 @@ public class ChatStreamController {
                                 AgentManagerProperties props,
                                 SkillInjectionService skillInjectionService,
                                 io.agentmanager.framework.service.FileAssetStore fileAssetStore,
-                                McpToolRegistrar mcpToolRegistrar) {
+                                McpToolRegistrar mcpToolRegistrar,
+                                SessionTitleService sessionTitleService) {
         this.chatChannel = chatChannel;
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
@@ -157,6 +146,7 @@ public class ChatStreamController {
         this.skillInjectionService = skillInjectionService;
         this.fileAssetStore = fileAssetStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.sessionTitleService = sessionTitleService;
     }
 
     /**
@@ -209,6 +199,9 @@ public class ChatStreamController {
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
 
+        // 会话标题：首条用户消息后异步生成（已有标题/消息为空时内部跳过），不阻塞本次对话流
+        sessionTitleService.generateAsync(finalSessionId, message, finalUserId);
+
         return Flux.<ServerSentEvent<String>>create(sink -> {
             // ===== 0. 新会话：首个 SSE 事件通知前端 session_id =====
             if (emitSessionCreated) {
@@ -259,6 +252,11 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
+
+            // 工具摘要累积器（turn 级）：累积 delta 参数/结果，在 END 事件合成人可读摘要帧。
+            // 与 turn 同生命周期——放在订阅回调之外创建，避免被 Reactor 的取消回调连带清理。
+            var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
             // 本 turn 的收尾只做一次。AGENT_END 处理与源 flux 的 complete/error 回调可能各自
             // 触发一次收尾，且 harness 的 flux 可能在 AGENT_END 事件之后**数秒**才 complete——
             // 迟到的那次若再走 closeSession，会把**下一个** turn 刚建好的 sink 拆掉
@@ -307,7 +305,8 @@ public class ChatStreamController {
                 // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
                 chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
-                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease, finalUserId, sink, turnEnded),
+                        event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
+                            finalUserId, sink, turnEnded, toolSummary),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             if (isTrailingSandboxTeardownError(e)) {
@@ -377,34 +376,35 @@ public class ChatStreamController {
     private void handleEventAndEmit(AgentEvent event, String sessionId,
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
-                                    java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+                                    java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    TurnToolSummaryTracker toolSummary) {
         if (stopIfLeaseLost(lease, sessionId, sink)) {
             return;
         }
 
         audit(event, sessionId);
 
-        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）
-        if (event instanceof ToolCallStartEvent start
-                && start.getToolCallId() != null && start.getToolCallName() != null) {
-            toolCallNames.put(start.getToolCallId(), start.getToolCallName());
+        // 工具名登记 + 参数/结果累积。
+        // ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧名字恒为 __fragment__），
+        // 故先登记再按 id 累积，到 END 事件时才能合成出「创建 x.js 2行」这样的摘要。
+        if (event instanceof ToolCallStartEvent start) {
+            toolSummary.onToolCallStart(start);
+        } else if (event instanceof ToolCallDeltaEvent delta) {
+            toolSummary.onToolCallDelta(delta);
+        } else if (event instanceof ToolResultTextDeltaEvent trd) {
+            toolSummary.onToolResultDelta(trd);
         }
 
-        // write_file 输入参数截获（按登记的真实工具名判定，不能读 delta.getToolCallName()）
-        if (!sandboxConfig.enabled()) {
-            if (event instanceof ToolCallDeltaEvent delta
-                    && isTool(delta.getToolCallId(), "write_file")) {
-                accumulateWriteFileInput(delta.getToolCallId(), String.valueOf(delta.getDelta()));
-            }
-            if (event instanceof ToolCallEndEvent end && isTool(end.getToolCallId(), "write_file")) {
-                syncWriteFileToKv(end.getToolCallId(), userId);
-                toolCallNames.remove(end.getToolCallId());
-            }
+        // write_file 输入参数截获：必须在摘要合成之前 peek —— tracker 在 TOOL_CALL_END 时
+        // 会取走并清空参数缓冲（合成摘要需要完整参数）
+        if (!sandboxConfig.enabled() && event instanceof ToolCallEndEvent end
+                && toolSummary.isTool(end.getToolCallId(), "write_file", null)) {
+            syncWriteFileToKv(toolSummary.peekArgs(end.getToolCallId()), userId);
         }
 
         // present_file 结果累积（同样按登记名判定）
         if (event instanceof ToolResultTextDeltaEvent trd
-                && isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
+                && toolSummary.isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
 
@@ -418,6 +418,11 @@ public class ChatStreamController {
         }
 
         eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
+
+        // ★ 工具摘要帧（可观测性）：参数/结果到齐后追加人可读摘要，让轻量客户端无需
+        // 自己拼 delta、解析工具参数即可展示「创建 create-ai-ppt.js 408行」。
+        // 必须在原事件之后发射——前端按 toolCallId 认领工具行，先到的是原始事件。
+        emitToolSummary(toolSummary, event);
 
         // HITL 是 turn 边界：permission_ask 已广播，关闭 sink 让订阅者正常结束。
         // 必须在 emit 之后——否则订阅者收不到 permission_ask（durable-sse-multinode-plan §3.4.4）。
@@ -497,23 +502,27 @@ public class ChatStreamController {
             .build();
     }
 
-    // ===== present_file 累积 & 合成 =====
+    // ===== 工具摘要帧 =====
 
     /**
-     * 该 toolCallId 是否属于指定工具：优先查登记表（ToolCallStart 登记的权威名字），
-     * 表未命中时回落到事件自带的工具名——覆盖 ToolResult* 等本就携带真实名的事件类型。
+     * 参数/结果到齐事件 → 追加合成 {@code tool_call_summary} / {@code tool_result_preview} 帧。
+     *
+     * <p>摘要由 {@link TurnToolSummaryTracker} 累积 delta 后生成，经 EventBus 落库广播，
+     * 因此**多副本续传与刷新回放同样能拿到**（与 file_ready 同一路径）。
      */
-    private boolean isTool(String toolCallId, String expected, String eventToolName) {
-        if (toolCallId == null) {
-            return false;
+    private void emitToolSummary(TurnToolSummaryTracker toolSummary, AgentEvent event) {
+        try {
+            if (event instanceof ToolCallEndEvent e) {
+                toolSummary.onToolCallEnd(e);
+            } else if (event instanceof ToolResultEndEvent e) {
+                toolSummary.onToolResultEnd(e);
+            }
+        } catch (Exception e) {
+            log.debug("tool summary synthesis failed: {}", e.getMessage());
         }
-        String registered = toolCallNames.get(toolCallId);
-        return expected.equals(registered != null ? registered : eventToolName);
     }
 
-    private boolean isTool(String toolCallId, String expected) {
-        return isTool(toolCallId, expected, null);
-    }
+    // ===== present_file 累积 & 合成 =====
 
     private void accumulatePresentFile(String toolCallId, String delta) {
         if (toolCallId == null) return;
@@ -564,23 +573,13 @@ public class ChatStreamController {
 
     // ===== write_file 输入截获 → KV =====
 
-    private void accumulateWriteFileInput(String toolCallId, String delta) {
-        if (toolCallId == null) return;
-        var buf = writeFileInputBuffers.computeIfAbsent(toolCallId, k -> new StringBuilder());
-        synchronized (buf) {
-            if (buf.length() + delta.length() > 2 * 1024 * 1024) {
-                log.warn("write_file input buffer overflow for toolCallId {}, dropping tail", toolCallId);
-                return;
-            }
-            buf.append(delta);
-        }
-    }
-
-    private void syncWriteFileToKv(String toolCallId, String userKey) {
-        var buf = writeFileInputBuffers.remove(toolCallId);
-        if (buf == null || userKey == null || userKey.isBlank()) return;
-        String json;
-        synchronized (buf) { json = buf.toString(); }
+    /**
+     * write_file → KV 同步（非沙箱模式下 present_file 依赖它读到文件）。
+     *
+     * @param json 已拼接完整的 write_file 参数 JSON（由 {@link TurnToolSummaryTracker} 累积）
+     */
+    private void syncWriteFileToKv(String json, String userKey) {
+        if (json == null || json.isBlank() || userKey == null || userKey.isBlank()) return;
         try {
             var node = JSON.readTree(json);
             if (node == null) return;
@@ -588,7 +587,7 @@ public class ChatStreamController {
                 : node.has("file_path") ? node.get("file_path") : null;
             var contentNode = node.has("content") ? node.get("content") : null;
             if (pathNode == null || contentNode == null) {
-                log.debug("write_file input missing path/content, skip KV sync (toolCallId={})", toolCallId);
+                log.debug("write_file input missing path/content, skip KV sync");
                 return;
             }
             var relPath = pathNode.asText();
@@ -613,7 +612,7 @@ public class ChatStreamController {
                 log.info("write_file → KV sync: {} ({} chars) for user {}", relPath, content.length(), userKey);
             }
         } catch (Exception e) {
-            log.debug("write_file KV sync parse failed (toolCallId={}): {}", toolCallId, e.getMessage());
+            log.debug("write_file KV sync parse failed: {}", e.getMessage());
         }
     }
 

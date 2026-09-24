@@ -1127,6 +1127,33 @@ GET /skills/manage
 | `TOOL_RESULT_START` | 工具结果开始 | `toolCallId`, `toolCallName` |
 | `TOOL_RESULT_TEXT_DELTA` | 工具结果文本增量 | `delta`, `toolCallId`, `toolCallName` |
 | `TOOL_RESULT_END` | 工具结果结束 | `state`, `toolCallId`, `toolCallName` |
+| `tool_call_summary` | 紧随 `TOOL_CALL_END`，工具参数到齐 | `summary`, `toolCallId`, `toolName` |
+| `tool_result_preview` | 紧随 `TOOL_RESULT_END`，工具结果到齐 | `preview`, `toolCallId`, `toolName` |
+
+#### `tool_call_summary` / `tool_result_preview`（人可读摘要，2026-09-23 新增）
+
+上述原生事件只发**结构化原始数据**：参数被切成 `TOOL_CALL_DELTA` 的 JSON 碎片、结果被切成
+`TOOL_RESULT_TEXT_DELTA` 的文本碎片。轻量客户端（发布助手、CLI、钉钉/企微 Channel）不去拼 delta、
+按工具名解析字段，于是只能显示「🔧 write_file 完成」——信息量近乎为零。
+
+服务端把「拼 buffer → 按工具名提关键参数 → 截摘要」收敛在后端，由 `TurnToolSummaryTracker`
+（`ToolSummaryGenerator` 负责文案）在参数到齐（`TOOL_CALL_END`）与结果到齐（`TOOL_RESULT_END`）时
+追加合成这两个帧。客户端**零解析成本**即可得到：
+
+```json
+{"type":"tool_call_summary","toolCallId":"call-abc","toolName":"write_file","summary":"创建 output/create-ai-ppt.js 408行","replyId":"r1"}
+{"type":"tool_result_preview","toolCallId":"call-abc","toolName":"write_file","preview":"文件写入成功","replyId":"r1"}
+```
+
+渲染约定：
+- `tool_call_summary.summary` —— **替换**工具行的标题（原为工具名），如「执行 cd... && node output/create-ai-ppt.js」
+- `tool_result_preview.preview` —— 作为「输出 …」展示；非 SUCCESS 时为终态文案（`❌ 执行失败` / `❌ 已被拒绝` / `❌ 已中断`）
+
+> **顺序保证：** 摘要帧经 `SessionEventBus.emitSynthetic` 落库广播，因此**多副本续传与 `/subscribe` 回放
+> 同样能拿到**（与 `file_ready` 同一路径）。总是在对应原生事件**之后**到达，前端按 `toolCallId` 认领即可。
+>
+> **工具名取自登记表而非事件自带名：** `ToolCallDeltaEvent.getToolCallName()` 实测恒为占位符
+> `__fragment__`（真实名只在 `ToolCallStartEvent` 上，见 e2e-ci-plan §11.3 D3），故 tracker 先登记再查表。
 
 **`TOOL_CALL_START` 的 `ui` 字段（MCP Apps 扩展）：**
 

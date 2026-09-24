@@ -21,6 +21,7 @@ import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.TurnLeaseGuard;
 import io.agentmanager.framework.service.TurnLeaseStore;
+import io.agentmanager.framework.service.TurnToolSummaryTracker;
 import reactor.core.publisher.Flux;
 
 /**
@@ -176,6 +177,10 @@ public class ConfirmController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
+            // 工具摘要累积器（turn 级）：HITL 批准后的恢复执行段同样要输出「执行 …」人可读摘要，
+            // 否则用户批准后看到的又是「🔧 execute 完成」
+            var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
             // 本 turn 的收尾只做一次（同 ChatStreamController）：AGENT_END 处理与源 flux 的
             // complete/error 回调可能各自触发一次，晚到的那次不得重复 closeSession/release
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -215,7 +220,8 @@ public class ConfirmController {
             // ===== 5. 启动 agent 恢复执行 → 事件写入 EventBus =====
             resumeFlux
                 .subscribe(
-                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink, turnEnded),
+                    event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
+                        turnEnded, toolSummary),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -245,9 +251,19 @@ public class ConfirmController {
     private void handleEventAndEmit(io.agentscope.core.event.AgentEvent event,
                                     String sessionId, String replyId, TurnLeaseGuard lease,
                                     reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink,
-                                    java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+                                    java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    TurnToolSummaryTracker toolSummary) {
         if (stopIfLeaseLost(lease, sessionId, sink)) {
             return;
+        }
+
+        // 工具名登记 + 参数/结果累积（ToolCallStartEvent 是唯一携带真实工具名的事件）
+        if (event instanceof io.agentscope.core.event.ToolCallStartEvent start) {
+            toolSummary.onToolCallStart(start);
+        } else if (event instanceof io.agentscope.core.event.ToolCallDeltaEvent d) {
+            toolSummary.onToolCallDelta(d);
+        } else if (event instanceof io.agentscope.core.event.ToolResultTextDeltaEvent r) {
+            toolSummary.onToolResultDelta(r);
         }
 
         // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
@@ -261,6 +277,18 @@ public class ConfirmController {
         // TOOL_CALL_START 命中 MCP App ui 映射时携带 ui 元数据（与 ChatStreamController 同一契约，
         // 恢复执行流里再调 UI 工具时卡片才能照常渲染）
         eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
+
+        // ★ 工具摘要帧（与 ChatStreamController 同一契约）：HITL 恢复段的工具调用同样要
+        // 展示「执行 …」而非「🔧 execute 完成」
+        try {
+            if (event instanceof io.agentscope.core.event.ToolCallEndEvent e) {
+                toolSummary.onToolCallEnd(e);
+            } else if (event instanceof io.agentscope.core.event.ToolResultEndEvent e) {
+                toolSummary.onToolResultEnd(e);
+            }
+        } catch (Exception e) {
+            log.debug("tool summary synthesis failed (sid={}): {}", sessionId, e.getMessage());
+        }
 
         // HITL 是 turn 边界：permission_ask 已广播，关闭 sink（同上）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
