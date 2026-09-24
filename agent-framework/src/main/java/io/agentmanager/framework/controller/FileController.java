@@ -167,6 +167,11 @@ public class FileController {
             return ResponseEntity.notFound().build();
         }
         var asset = meta.get();
+        // 外部交付物（storage_type=external）：服务端代理拉取——实时 file_ready 与历史回放
+        // 统一走 /files/{id} 单一 URL，前端无需感知外部地址；白名单收敛防 SSRF
+        if ("external".equals(asset.storageType())) {
+            return proxyExternal(asset, inline);
+        }
         try {
             if (!fileStorage.exists(asset.storageKey())) {
                 log.warn("download: storage object missing for file {}", fileId);
@@ -195,6 +200,68 @@ public class FileController {
             }
         };
         return ResponseEntity.ok().headers(headers).body(body);
+    }
+
+    /** 外部交付物代理下载客户端（连接池共享；超时收敛防慢端点拖死容器线程） */
+    private static final java.net.http.HttpClient EXTERNAL_CLIENT = java.net.http.HttpClient.newBuilder()
+        .connectTimeout(java.time.Duration.ofSeconds(5))
+        .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+        .build();
+
+    /**
+     * 外部交付物代理：GET storage_key 指向的 http(s) URL 并流式转发。
+     * URL 来源为 present_url 工具登记（LLM 可控），必须经 FILE_EXTERNAL_URL_PREFIXES
+     * 前缀白名单校验后才发起请求（SSRF 收敛）；上游非 2xx 返回 502。
+     */
+    private ResponseEntity<StreamingResponseBody> proxyExternal(FileAssetStore.FileAsset asset, int inline) {
+        var url = asset.storageKey();
+        var prefixes = props.file().externalUrlPrefixList();
+        boolean allowed = prefixes.stream().anyMatch(p -> url.equals(p) || url.startsWith(p + "/"));
+        if (!allowed) {
+            log.warn("download: external url not allowlisted for file {}: {}", asset.id(), url);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        java.net.http.HttpResponse<InputStream> upstream;
+        try {
+            var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
+                .timeout(java.time.Duration.ofSeconds(60))
+                .GET()
+                .build();
+            upstream = EXTERNAL_CLIENT.send(request, java.net.http.HttpResponse.BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            log.warn("download: external fetch failed for file {}: {}", asset.id(), e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+        }
+        if (upstream.statusCode() / 100 != 2) {
+            try {
+                upstream.body().close();
+            } catch (IOException ignored) {
+                // 关闭失败无需处理
+            }
+            log.warn("download: external upstream {} for file {}", upstream.statusCode(), asset.id());
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).build();
+        }
+        var headers = new HttpHeaders();
+        var contentType = upstream.headers().firstValue("Content-Type").orElse(asset.mimeType());
+        try {
+            headers.setContentType(MediaType.parseMediaType(contentType));
+        } catch (Exception e) {
+            headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
+        }
+        upstream.headers().firstValue("Content-Length").map(Long::parseLong)
+            .ifPresent(headers::setContentLength);
+        boolean forceInline = inline == 1
+            && (contentType.startsWith("image/") || contentType.startsWith("text/"));
+        headers.set(HttpHeaders.CONTENT_DISPOSITION, (forceInline ? "inline" : "attachment")
+            + "; filename*=UTF-8''" + urlEncode(asset.fileName()));
+        headers.set("X-Content-Type-Options", "nosniff");
+        var body = upstream.body();
+        StreamingResponseBody stream = out -> {
+            try (InputStream in = body) {
+                in.transferTo(out);
+            }
+        };
+        return ResponseEntity.ok().headers(headers).body(stream);
     }
 
     /** 沙箱模式判断（agent.sandbox.enabled）：上传文件 pending 挂账待沙箱注入 */

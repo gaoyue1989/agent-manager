@@ -26,7 +26,7 @@ class OafConfigLoaderTest {
             "src/test/resources/fixtures/test-agent",
             "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
-            new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"),
+            new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
                 AgentManagerProperties.HarnessConfig.defaults()
         );
@@ -176,7 +176,7 @@ class OafConfigLoaderTest {
             dir.toString(),
             "",
             new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
-            new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"),
+            new AgentManagerProperties.FileConfig(true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf", 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
                 AgentManagerProperties.HarnessConfig.defaults()
 
@@ -961,7 +961,7 @@ class OafConfigLoaderTest {
               permission:
                 mode: default
                 tools:
-                  create_oaf_zip: ask
+                  present_url: ask
                   echo: deny
                   get_current_time: allow
             ---
@@ -970,7 +970,7 @@ class OafConfigLoaderTest {
 
         var config = new OafConfigLoader(props(tempDir)).load();
         assertEquals(Map.of(
-            "create_oaf_zip", "ask",
+            "present_url", "ask",
             "echo", "deny",
             "get_current_time", "allow"), config.runtimeConfig().permissionTools());
         assertTrue(config.runtimeConfig().hasPermissionTools());
@@ -1002,7 +1002,7 @@ class OafConfigLoaderTest {
             config:
               permission:
                 tools:
-                  create_oaf_zip: confirm
+                  present_url: confirm
                   echo: deny
                   42: ask
             ---

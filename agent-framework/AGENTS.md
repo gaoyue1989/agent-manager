@@ -69,8 +69,7 @@ agent-framework/
 │   │   │   ├── sandbox/opensandbox/             # OpenSandbox 沙箱集成 (OpenSandbox/Client/FilesystemSpec/WorkspaceSyncService：MEMORY.md+memory/ 与 skills/ 回写 KV)
 │   │   │   ├── tool/
 │   │   │   │   ├── BusinessTools.java           # @Tool 注解自定义工具 (get_current_time, echo)
-│   │   │   │   ├── FileTools.java               # present_file 工具 (工作区产物注册交付)
-│   │   │   │   └── OafPackageTools.java         # check_oaf_package / create_oaf_zip (OAF 部署包校验与生成)
+│   │   │   │   └── FileTools.java               # present_file / present_url 工具 (工作区产物与外部交付物注册)
 │   │   │   └── controller/
 │   │   │       ├── InfoController.java          # GET /、/metadata、/system-prompt
 │   │   │       ├── HealthController.java        # GET /health
@@ -95,7 +94,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
-│   └── test/                                  # 83 个测试类 / 848 个 @Test（含默认跳过的沙箱集成测试）
+│   └── test/                                  # 83 个测试类 / 883 个 @Test（含默认跳过的沙箱集成测试）
 ├── docs/                                     # 设计与改进方案文档 (36 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -202,8 +201,11 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | `get_current_time(timezone)` | 返回指定时区当前时间 |
 | `echo(text)` | 回显输入 |
 | `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 file_ready 帧） |
-| `check_oaf_package(agents_md)` | OAF 包 AGENTS.md frontmatter 预校验（打包/交付前） |
-| `create_oaf_zip(package_name, agents_md, extra_files?)` | 生成 OAF 部署包 zip 并注册下载 |
+| `present_url(file_name, url, mime_type?, size?)` | 外部系统产物（http(s) URL）登记为下载卡片；`/files/{id}` 服务端代理回源（前缀白名单，SSRF 收敛） |
+
+> OAF 打包工具（`check_oaf_package` / `create_oaf_zip`）2026-09 迁至平台 backend 的 platform-publisher MCP
+> （直建包返回 packageId/download_url，零 base64 经 LLM），发布助手经 `present_url` 交付；
+> 分层原则：业务领域工具走 MCP，框架通用能力走 @Tool。设计见 [../docs/design/oaf-tools-extraction-design.md](../docs/design/oaf-tools-extraction-design.md)
 
 ### MCP 工具
 
@@ -280,6 +282,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
+| `FILE_EXTERNAL_URL_PREFIXES` | 空(禁用) | | present_url 外部交付物与 /files/{id} 代理下载共用的 URL 前缀白名单（逗号分隔）；发布助手集群内必配 `http://platform-backend.agent-platform.svc.cluster.local:8080` |
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关：`false` = 完全关闭记忆——不注册 `memory_*` 工具 + 不执行 flush/整合（`disableMemoryHooks` + `disableMemoryTools`）；沙箱不再注入/回写记忆文件（技能回写不受影响） |
@@ -369,8 +372,8 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 83 个测试类 / 848 个 @Test（实测 find src/test -name '*Test.java' 与 grep -rh '@Test' src/test；
-             # 实跑 825 用例、0 失败，其中跳过 4 个沙箱集成测试；S3FileStorageIT 等 *IT 按命名不参与 surefire）
+mvn test     # 83 个测试类 / 883 个 @Test（实测 find src/test -name '*Test.java' 与 grep -rh '@Test' src/test；
+             # 实跑 860 用例、0 失败，其中跳过 4 个沙箱集成测试；S3FileStorageIT 等 *IT 按命名不参与 surefire）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```
 

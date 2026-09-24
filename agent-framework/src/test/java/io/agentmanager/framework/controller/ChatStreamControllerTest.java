@@ -450,10 +450,10 @@ class ChatStreamControllerTest {
     }
 
     @Test
-    void chatShouldEmitFileReadyForCreateOafZip() {
-        // create_oaf_zip 与 present_file 返回同构 JSON（file_id/file_name/mime_type/size），
-        // 必须走同一条 file_ready 合成链路——此前控制器只认 present_file，打包工具在
-        // 实时对话里永远没有下载卡片（2026-09-24 发布助手无法下载 test-agent.zip）。
+    void chatShouldEmitFileReadyForPresentUrl() {
+        // present_url 与 present_file 返回同构 JSON（file_id/file_name/mime_type/size），
+        // 必须走同一条 file_ready 合成链路——外部交付物（如平台 create_oaf_zip 的包
+        // download_url）经 /files/{id} 代理下载，前端实时收到下载卡片。
         var sessionId = "test-user-zip1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
@@ -468,11 +468,11 @@ class ChatStreamControllerTest {
         var replyId = "r-zip1";
         var callId = "c-zip1";
         var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
-            "create_oaf_zip",
+            "present_url",
             "{\"file_id\":\"a795e832-8364-42fd-9a28-2c40697f1851\",\"file_name\":\"test-agent.zip\","
-                + "\"mime_type\":\"application/zip\",\"size\":704,\"content_base64\":\"UEsDBA==\"}");
+                + "\"mime_type\":\"application/zip\",\"size\":704}");
         var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
-            "create_oaf_zip", io.agentscope.core.message.ToolResultState.SUCCESS);
+            "present_url", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
@@ -495,9 +495,9 @@ class ChatStreamControllerTest {
     }
 
     @Test
-    void chatShouldEmitFileReadyForCreateOafZipWhenResultTruncated() {
-        // create_oaf_zip 返回体尾部是 content_base64（zip 全量 base64），超出 64KB 结果桶被
-        // 截尾后全文 JSON 解析必失败——file_id 等头部字段仍在，正则兜底应救回下载卡片。
+    void chatShouldEmitFileReadyForPresentUrlWhenResultTruncated() {
+        // 结果体超出 64KB 结果桶被截尾后全文 JSON 解析必失败（大结果卸载/超长字段的
+        // 通用场景）——file_id 等头部字段仍在，正则兜底应救回下载卡片。
         var sessionId = "test-user-zip2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
@@ -515,9 +515,9 @@ class ChatStreamControllerTest {
             + "UEsDBAoAAAAA".repeat(9000); // 远超 64KB，且无闭合引号/花括号（模拟截尾）
         assertTrue(head.length() > 64 * 1024, "用例前提：结果超 64KB 桶上限");
         var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
-            "create_oaf_zip", head);
+            "present_url", head);
         var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
-            "create_oaf_zip", io.agentscope.core.message.ToolResultState.SUCCESS);
+            "present_url", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
         when(chatChannel.sendStream(any(ChatUiRequest.class)))

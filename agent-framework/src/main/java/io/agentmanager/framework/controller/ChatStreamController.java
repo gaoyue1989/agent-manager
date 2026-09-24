@@ -105,7 +105,7 @@ public class ChatStreamController {
         orphanTurnWatchdog.shutdown();
     }
 
-    /** 产出文件工具（present_file/create_oaf_zip）结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
+    /** 产出文件工具（present_file/present_url）结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
         new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -406,10 +406,10 @@ public class ChatStreamController {
             }
         }
 
-        // 产出文件工具（present_file/create_oaf_zip）结果累积（同样按登记名判定）
+        // 产出文件工具（present_file/present_url）结果累积（同样按登记名判定）
         if (event instanceof ToolResultTextDeltaEvent trd
                 && (isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())
-                    || isTool(trd.getToolCallId(), "create_oaf_zip", trd.getToolCallName()))) {
+                    || isTool(trd.getToolCallId(), "present_url", trd.getToolCallName()))) {
             turnBucketKeys.add(trd.getToolCallId());
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
@@ -431,11 +431,11 @@ public class ChatStreamController {
             eventBus.closeSession(sessionId);
         }
 
-        // 产出文件工具完成合成 file_ready（create_oaf_zip 与 present_file 返回同构 JSON，
-        // 复用同一条下载卡片链路——此前只覆盖 present_file，打包工具始终无卡片）
+        // 产出文件工具完成合成 file_ready（present_url 与 present_file 返回同构 JSON，
+        // 复用同一条下载卡片链路；外部交付物经 /files/{id} 代理下载）
         if (event instanceof ToolResultEndEvent tre
                 && ("present_file".equals(tre.getToolCallName())
-                    || "create_oaf_zip".equals(tre.getToolCallName()))) {
+                    || "present_url".equals(tre.getToolCallName()))) {
             emitFileReadyViaEventBus(sessionId, replyId, tre.getToolCallId());
         }
 
@@ -474,7 +474,7 @@ public class ChatStreamController {
         }
     }
 
-    // ===== 产出文件工具（present_file/create_oaf_zip）累积 & file_ready 合成 =====
+    // ===== 产出文件工具（present_file/present_url）累积 & file_ready 合成 =====
 
     /**
      * 该 toolCallId 是否属于指定工具：优先查登记表（ToolCallStart 登记的权威名字），
@@ -560,9 +560,9 @@ public class ChatStreamController {
     /**
      * 产出文件工具结果文本 → JSON 节点。
      *
-     * <p>全文解析失败时正则兜底：create_oaf_zip 返回体尾部带 content_base64（zip 全量 base64），
-     * 超出 {@link #PRESENT_FILE_BUFFER_MAX} 被截尾后 readTree 必失败；而 file_id/file_name/
-     * mime_type/size 固定位于 JSON 前部，从残存头部提取即可救回下载卡片。
+     * <p>全文解析失败时正则兜底：结果体可能超出 {@link #PRESENT_FILE_BUFFER_MAX} 被截尾
+     * （大结果卸载/流式分片场景），而 file_id/file_name/mime_type/size 固定位于 JSON 前部，
+     * 从残存头部提取即可救回下载卡片。
      */
     private com.fasterxml.jackson.databind.JsonNode parseFileResult(String json) {
         try {

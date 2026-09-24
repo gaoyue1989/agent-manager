@@ -340,6 +340,22 @@ KEY idx_user_status (user_key, status),
         }
     }
 
+    /** 按存储对象查询（uk_storage 唯一键；present_url 同 URL 重复交付时幂等复用 file_id） */
+    public Optional<FileAsset> findByStorage(String storageType, String storageKey) {
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "SELECT * FROM file_asset WHERE storage_type = ? AND storage_key = ? LIMIT 1")) {
+            stmt.setString(1, storageType);
+            stmt.setString(2, storageKey);
+            try (var rs = stmt.executeQuery()) {
+                return rs.next() ? Optional.of(map(rs)) : Optional.empty();
+            }
+        } catch (Exception e) {
+            log.warn("FileAssetStore: findByStorage {}:{} failed: {}", storageType, storageKey, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     private static FileAsset map(ResultSet rs) throws SQLException {
         return new FileAsset(
             rs.getString("id"),

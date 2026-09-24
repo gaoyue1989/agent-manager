@@ -229,15 +229,17 @@ test.fixme('F5 present_file 交付与下载（file_ready 帧 + 下载内容）',
   expect(dl.disposition).toContain('attachment');
 });
 
-// F12（2026-09-24 发布助手无法下载 OAF 包回归门禁）：create_oaf_zip 必须与 present_file
-// 同链路合成 file_ready，且 file_asset.session_id 落业务会话（不得是网关恒定 gw-hash，
-// 否则历史回放查不到卡片）。此前该工具完全不在控制器拦截范围，门禁零覆盖一个月。
-test('F12 create_oaf_zip 打包交付（file_ready 帧 + zip 下载 + 历史回放会话绑定）', async () => {
+// F12（2026-09-24 发布助手无法下载 OAF 包回归门禁）：OAF 打包工具迁移至平台 MCP 后链路为
+// MCP create_oaf_zip（平台 mock 返回 packageId/download_url）→ present_url 登记交付
+// （外部交付物，下载经 /files/{id} 服务端代理回源）。不变式保持门禁：file_ready 帧合成、
+// file_asset.session_id 落业务会话（不得是网关恒定 gw-hash，否则历史回放查不到卡片）。
+test('F12 OAF 打包交付（MCP create_oaf_zip + present_url + 代理下载 + 历史回放会话绑定）', async () => {
   const sid = sessionIdFor(`f9-${uniq()}`);
   const stream = chat({ message: `[E2E:oaf:package]`, userId: U, sessionId: sid });
   await waitTerminal(stream);
   expect(stream.terminal?.type).toBe('done');
   expect(toolNames(stream.frames)).toContain('create_oaf_zip');
+  expect(toolNames(stream.frames)).toContain('present_url');
   // 实时 file_ready 帧：download_url 固定 /files/{id} 相对路径（前端拼 AGENT_BASE）
   const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
   expect(ready, '缺少 file_ready 帧（create_oaf_zip 应与 present_file 同链路合成）').toBeTruthy();

@@ -259,15 +259,6 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public io.agentmanager.framework.tool.OafPackageTools oafPackageTools(
-        io.agentmanager.framework.service.FileAssetStore fileAssetStore,
-        io.agentmanager.framework.service.storage.FileStorage fileStorage,
-        io.agentmanager.framework.config.AgentManagerProperties props
-    ) {
-        return new io.agentmanager.framework.tool.OafPackageTools(fileAssetStore, fileStorage, props);
-    }
-
-    @Bean
     public io.agentmanager.framework.tool.FileTools fileTools(
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
@@ -292,10 +283,9 @@ public class AgentScopeConfig {
     @SuppressWarnings("rawtypes")
     public List<Object> customTools(
         io.agentmanager.framework.tool.BusinessTools businessTools,
-        io.agentmanager.framework.tool.FileTools fileTools,
-        io.agentmanager.framework.tool.OafPackageTools oafPackageTools
+        io.agentmanager.framework.tool.FileTools fileTools
     ) {
-        return java.util.Arrays.asList(businessTools, fileTools, oafPackageTools);
+        return java.util.Arrays.asList(businessTools, fileTools);
     }
 
     io.agentscope.extensions.model.openai.OpenAIChatModel buildChatModel(

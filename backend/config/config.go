@@ -41,6 +41,8 @@ type Config struct {
 	DeploymentTemplate string // 业务 Deployment overlay 文件路径（Strategic Merge Patch），空=纯内置构造
 
 	AuthToken string // 非空时启用 Bearer 校验
+
+	PackageDownloadBase string // create_oaf_zip 返回 download_url 的基地址（集群内可达即可，代理方为业务 Agent Pod）
 }
 
 func Load() (*Config, error) {
@@ -60,6 +62,7 @@ func Load() (*Config, error) {
 		RegisterRetry:       envInt("REGISTER_RETRY", 5),
 		DeploymentTemplate:  envStr("DEPLOYMENT_TEMPLATE", ""),
 		AuthToken:           envStr("AUTH_TOKEN", ""),
+		PackageDownloadBase: envStr("PACKAGE_DOWNLOAD_BASE", "http://platform-backend.agent-platform.svc.cluster.local:8080"),
 	}
 	if c.MySQLDSN == "" {
 		return nil, errors.New("MYSQL_DSN is required")

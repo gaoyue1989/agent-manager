@@ -90,12 +90,10 @@ class AgentScopeConfigTest {
                     return null;
                 }
             });
-        var oafTools = config.oafPackageTools(
-            mock(io.agentmanager.framework.service.FileAssetStore.class),
-            mock(io.agentmanager.framework.service.storage.FileStorage.class),
-            propsForLlm());
-        assertEquals(java.util.Arrays.asList(tool, fileTools, oafTools),
-            config.customTools(tool, fileTools, oafTools));
+        // OafPackageTools 已迁移至 backend MCP（check_oaf_package/create_oaf_zip），
+        // 自定义工具只剩框架通用能力（BusinessTools + FileTools）
+        assertEquals(java.util.Arrays.asList(tool, fileTools),
+            config.customTools(tool, fileTools));
     }
 
     @Test
@@ -192,19 +190,19 @@ class AgentScopeConfigTest {
     void permissionContextShouldBeNullWhenNothingDeclared() {
         assertNull(config.buildPermissionContext(
             oafForPermission(false, java.util.Map.of()), permCfg(java.util.Map.of(), java.util.Set.of()),
-            java.util.Set.of("create_oaf_zip")));
+            java.util.Set.of("present_url")));
     }
 
     @Test
     void customToolAskDeclarationShouldEnablePermissionSystem() {
         var ctx = config.buildPermissionContext(
-            oafForPermission(false, java.util.Map.of("create_oaf_zip", "ask")),
+            oafForPermission(false, java.util.Map.of("present_url", "ask")),
             permCfg(java.util.Map.of(), java.util.Set.of()),
-            java.util.Set.of("create_oaf_zip", "echo"));
+            java.util.Set.of("present_url", "echo"));
 
         assertNotNull(ctx, "custom tool declaration alone should enable permission system");
-        assertTrue(ctx.getAskRules().containsKey("create_oaf_zip"));
-        assertFalse(ctx.getAllowRules().containsKey("create_oaf_zip"), "ask must replace auto-allow");
+        assertTrue(ctx.getAskRules().containsKey("present_url"));
+        assertFalse(ctx.getAllowRules().containsKey("present_url"), "ask must replace auto-allow");
         // 未声明的自定义工具与内置工具保持自动放行
         assertTrue(ctx.getAllowRules().containsKey("echo"));
         assertTrue(ctx.getAllowRules().containsKey("write_file"));
@@ -238,12 +236,12 @@ class AgentScopeConfigTest {
         var ctx = config.buildPermissionContext(
             oafForPermission(true, java.util.Map.of()),
             permCfg(java.util.Map.of(), java.util.Set.of("mcp_publish")),
-            java.util.Set.of("create_oaf_zip"));
+            java.util.Set.of("present_url"));
 
         // require_confirmation=true 仅兜底 MCP 工具；自定义工具未声明仍自动放行
         assertTrue(ctx.getAskRules().containsKey("mcp_publish"));
-        assertTrue(ctx.getAllowRules().containsKey("create_oaf_zip"));
-        assertFalse(ctx.getAskRules().containsKey("create_oaf_zip"));
+        assertTrue(ctx.getAllowRules().containsKey("present_url"));
+        assertFalse(ctx.getAskRules().containsKey("present_url"));
     }
 
     /**
@@ -292,7 +290,7 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties.FileConfig emptyFileConfig() {
         return new AgentManagerProperties.FileConfig(true, 20, 20,
             "image/*,text/plain,text/markdown,text/csv,application/pdf",
-            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files");
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", "");
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {

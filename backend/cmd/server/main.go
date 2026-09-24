@@ -56,6 +56,7 @@ func main() {
 		RegisterTimeout: cfg.RegisterTimeout,
 		RegisterRetry:   cfg.RegisterRetry,
 		DeployBuilder:   depBuilder,
+		PackageDownloadBase: cfg.PackageDownloadBase,
 	})
 
 	gin.SetMode(gin.ReleaseMode)

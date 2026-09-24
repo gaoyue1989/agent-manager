@@ -63,6 +63,8 @@ agent:
     # 存储后端：注意键名平铺（storage-type 等）与 FileConfig record 字段
     # storageType/storageS3Endpoint 等一一对应——不能嵌套 storage: 层，
     # 否则 binder 匹配不到字段、全部回退默认值（S3 必空导致启动失败）
+    # present_url 外部交付物代理下载的前缀白名单（逗号分隔；空=禁用外部交付，防 SSRF）
+    external-url-prefixes: ${FILE_EXTERNAL_URL_PREFIXES:}
     storage-type: ${FILE_STORAGE_TYPE:local}
     storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
     storage-s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}

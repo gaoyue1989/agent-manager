@@ -54,7 +54,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - `OafPackage.SourcePackageID` 记录派生溯源（0=上传原始包）；fileCount/totalSize 上传/派生时统计
 - 错误映射：fs.ErrNotExist → 404（文件不存在），ErrZipSlip/ErrNoEffectiveChanges 等 → 400
 - 列表过滤：`GET /packages?slug=`（版本历史）、`GET /services?packageId=`（引用服务）
-- MCP 工具：`get_package_file`、`create_package_version`（与 REST 同语义，配合 `republish_service` 完成对话式改包→换版发布闭环）
+- MCP 工具：`get_package_file`、`create_package_version`（与 REST 同语义，配合 `republish_service` 完成对话式改包→换版发布闭环）；`check_oaf_package` / `create_oaf_zip`（OAF 打包工具，2026-09 自 agent-framework 迁入：校验复用 `internal/oaf.CheckAgentsMD`（聚合契约），组包经 Upload 管线直建平台包并返回 packageId/download_url，供发布助手 `present_url` 交付，见 [../docs/design/oaf-tools-extraction-design.md](../docs/design/oaf-tools-extraction-design.md)）
 
 ## 业务 Deployment 模板（DEPLOYMENT_TEMPLATE）
 
