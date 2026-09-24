@@ -229,6 +229,33 @@ test.fixme('F5 present_file 交付与下载（file_ready 帧 + 下载内容）',
   expect(dl.disposition).toContain('attachment');
 });
 
+// F12（2026-09-24 发布助手无法下载 OAF 包回归门禁）：create_oaf_zip 必须与 present_file
+// 同链路合成 file_ready，且 file_asset.session_id 落业务会话（不得是网关恒定 gw-hash，
+// 否则历史回放查不到卡片）。此前该工具完全不在控制器拦截范围，门禁零覆盖一个月。
+test('F12 create_oaf_zip 打包交付（file_ready 帧 + zip 下载 + 历史回放会话绑定）', async () => {
+  const sid = sessionIdFor(`f9-${uniq()}`);
+  const stream = chat({ message: `[E2E:oaf:package]`, userId: U, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  expect(toolNames(stream.frames)).toContain('create_oaf_zip');
+  // 实时 file_ready 帧：download_url 固定 /files/{id} 相对路径（前端拼 AGENT_BASE）
+  const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
+  expect(ready, '缺少 file_ready 帧（create_oaf_zip 应与 present_file 同链路合成）').toBeTruthy();
+  expect(ready!.file_name).toBe('e2e-oaf-agent.zip');
+  expect(String(ready!.download_url)).toMatch(/^\/files\/[0-9a-f-]{36}$/);
+  // 下载内容为合法 zip（PK 魔数）
+  const dl = await download(BASE, String(ready!.file_id));
+  expect(dl.status).toBe(200);
+  expect(dl.bytes!.length).toBeGreaterThan(0);
+  expect(dl.bytes!.subarray(0, 2).toString('latin1')).toBe('PK');
+  // 历史回放按业务会话可查（session_id 绑定断裂即在此红）
+  const h = await history(sid);
+  const files = (h.files ?? []) as Array<Record<string, unknown>>;
+  const hit = files.find(f => f.file_id === ready!.file_id);
+  expect(hit, '历史回放未按会话返回产出文件（file_asset.session_id 绑定断裂）').toBeTruthy();
+  expect(hit!.file_name).toBe('e2e-oaf-agent.zip');
+});
+
 test('F6 inline 预览规则', async ({ request }) => {
   const uid = ids(`f6-${uniq()}`);
   const png = await upload(BASE, pngBytes(1), `pic-${uniq()}.png`, 'image/png', { userId: uid });

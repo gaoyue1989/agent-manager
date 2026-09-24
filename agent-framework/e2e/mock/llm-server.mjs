@@ -27,7 +27,7 @@ const ALLOW_SYNTH = process.env.MOCK_LLM_ALLOW_SYNTH === '1';
 const MARKER_MAP = {
   'plain': 'plain', 'remember': 'remember', 'recall': 'recall',
   'tool:echo': 'tool-echo', 'tool:time': 'tool-time', 'tool:write': 'tool-write', 'tool:read': 'tool-read',
-  'file:deliver': 'file-deliver', 'tool:mcp_echo': 'tool-mcp-echo',
+  'file:deliver': 'file-deliver', 'oaf:package': 'oaf-package', 'tool:mcp_echo': 'tool-mcp-echo',
   'hitl:submit': 'hitl-submit', 'mcpapp:form': 'mcpapp-form',
   'execute': 'execute', 'execute:fail': 'execute-fail',
   'tool:write:sb': 'sandbox-write', 'tool:read:sb': 'sandbox-read',

@@ -150,6 +150,30 @@ test.fixme('U11 文件交付下载卡片与历史回放', async ({ page }) => {
   await expect(page.locator(`${SEL.chatInner} a[href*="/files/"]`).first()).toBeVisible({ timeout: 60_000 });
 });
 
+// U13（2026-09-24 发布助手无法下载 OAF 包回归门禁）：oaf-package 夹具不含 edit_file，
+// 不受 D8 影响——create_oaf_zip 的下载卡片实时渲染 + 回放仍在，替 U11 把文件卡片 UI
+// 链路留在门禁内（F9 锁 API 契约，本用例锁渲染与回放）。
+// 回放路径按 active 项的 data-sid 精确点选：各会话记忆提取后台调用会随时刷新
+// updated_at，列表首位不可靠（不能点 nth=0）。
+test('U13 create_oaf_zip 打包下载卡片（实时渲染 + 历史回放）', async ({ page }) => {
+  await send(page, '[E2E:oaf:package]');
+  // 实时 file_ready 卡片（LLM 单 turn，含工具执行）
+  const dl = page.locator(`${SEL.chatInner} a[href*="/files/"]`).first();
+  await expect(dl).toBeVisible({ timeout: 180_000 });
+  await expect(page.locator(SEL.chatInner)).toContainText('e2e-oaf-agent.zip', { timeout: 30_000 });
+  // 刷新后按 sid 点选原会话回放：卡片仍在（history files 按 session_id 回查；gw-hash 绑定断裂即在此红）
+  const sid = await page.locator(`${SEL.threadList} .thread-item.active`)
+    .getAttribute('data-sid', { timeout: 30_000 });
+  expect(sid, '会话列表应已渲染出当前会话').toBeTruthy();
+  await page.reload();
+  const item = page.locator(`${SEL.threadList} .thread-item[data-sid="${sid}"]`);
+  await item.waitFor({ state: 'visible', timeout: 30_000 });
+  await item.click();
+  // 确认回放的是 oaf 会话（history 重建出用户消息）再等卡片
+  await expect(page.locator(SEL.chatInner)).toContainText('[E2E:oaf:package]', { timeout: 60_000 });
+  await expect(page.locator(`${SEL.chatInner} a[href*="/files/"]`).first()).toBeVisible({ timeout: 60_000 });
+});
+
 // ---------- 用户技能（L4）面板：stub 化交互守卫 ----------
 // 面板逻辑见 static/debug/modules/skills.js（renderUserSkillsPanel/loadUserSkills/…）。
 // 这里用 page.route 桩化管理面响应，把「行 → 用户」错位、错误吞并（GET 5xx 被当成“不存在”）
