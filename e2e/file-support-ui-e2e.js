@@ -164,16 +164,18 @@ const shot = async (page, name) => { try { await page.screenshot({ path: path.jo
       await page.type('[data-testid="chat-input"]', genMsg);
       await page.click('[data-testid="chat-send"]');
 
+      // 记录发送前已存在的卡片 href：新会话切换是异步的，旧会话卡片可能残留渲染，
+      // 只认「新增」卡片，防止把上一场景的产出卡（如 decoded-CSV）误当本次生成包
+      const knownHrefs = new Set(await page.$$eval('[data-testid="file-download"]',
+        els => els.map(el => el.getAttribute("href") || "")).catch(() => []));
       // 等待生成包 file_ready 卡片出现（LLM 长流程，最多 300s）
       for (let i = 0; i < 60; i++) {
         await new Promise(r => setTimeout(r, 5000));
-        // 只统计本次生成包会话后的卡片（新会话后页面卡片从 0 开始）
         genCardCount = await page.$$eval('[data-testid="file-card"]', els => els.length);
-        if (genCardCount > 0) {
-          // 确认卡片是本次生成的 zip（href 指向 /files/）
-          genCardHref = await page.$eval('[data-testid="file-download"]', el => el.getAttribute("href") || "").catch(() => "");
-          if (genCardHref.includes("/files/")) break;
-        }
+        const hrefs = await page.$$eval('[data-testid="file-download"]',
+          els => els.map(el => el.getAttribute("href") || "")).catch(() => []);
+        const fresh = hrefs.filter(h => h.includes("/files/") && !knownHrefs.has(h));
+        if (fresh.length > 0) { genCardHref = fresh[fresh.length - 1]; break; }
       }
       if (genCardHref.includes("/files/")) break;
       console.log(`  [retry] U11 第 ${attempt} 次失败（cards=${genCardCount}），新会话重试`);
