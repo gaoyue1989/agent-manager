@@ -165,10 +165,11 @@ config/                                  # AGENT_CONFIG_DIR（默认 /config）
 | `get_current_time(timezone)` | 返回指定 IANA 时区当前时间 |
 | `echo(text)` | 回显输入 |
 | `present_file(file_path, file_content_base64?)` | 工作区产物注册到平台供用户下载（结果由 SSE 层合成 `file_ready` 帧） |
-| `check_oaf_package(agents_md)` | OAF 包 AGENTS.md frontmatter 预校验 |
-| `create_oaf_zip(package_name, agents_md, extra_files?)` | 生成 OAF 部署包 zip 并注册下载 |
+| `present_url(file_name, url, mime_type?, size?)` | 外部系统产物（http(s) URL，如平台 `create_oaf_zip` 的 download_url）登记为下载卡片；`/files/{id}` 服务端代理回源（前缀白名单 `FILE_EXTERNAL_URL_PREFIXES`） |
 
 注册方式：实现类声明为 Spring Bean，框架自动收集 `tool/` 包下所有 `@Tool` 方法并通过 `AgentScopeConfig.customTools` 注入 Toolkit。
+
+OAF 打包工具（`check_oaf_package` / `create_oaf_zip`）已迁至平台 backend 的 platform-publisher MCP（直建包 + 返回 packageId/download_url，发布助手经 `present_url` 交付），见 [../docs/design/oaf-tools-extraction-design.md](../docs/design/oaf-tools-extraction-design.md)。
 
 **MCP 工具**通过 `McpToolRegistrar` 从 `mcp-configs/{server}/config.yaml` 注册，三种传输 `sse` / `streamableHttp` / `stdio`，`auth.token` 支持 `${ENV_VAR}` 语法。详见 [AGENTS.md](AGENTS.md) §工具体系。
 

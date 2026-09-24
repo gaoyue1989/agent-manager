@@ -187,9 +187,8 @@ class AgentFrameworkApplicationTests {
 
 | 测试类 | 用例数 | 覆盖点 |
 |--------|--------|--------|
-| FileControllerTest | 12 | 上传校验链（MIME 白名单/大小/文件名 sanitize/pending 上限）/ 下载 inline / 存储缺失 502 |
-| FileToolsTest | 11 | present_file 路径越界拦截 / 沙箱与非沙箱模式 / 大小上限 |
-| OafPackageToolsTest | 8 | check_oaf_package 校验规则 / create_oaf_zip 打包与注册 |
+| FileControllerTest | 15 | 上传校验链（MIME 白名单/大小/文件名 sanitize/pending 上限）/ 下载 inline / 存储缺失 502 / external 代理下载（白名单放行/拒绝/上游 502） |
+| FileToolsTest | 17 | present_file 路径越界拦截 / 沙箱与非沙箱模式 / 大小上限 / present_url 外部交付（白名单/前缀伪装/幂等复用/文件名 sanitize） |
 | FileAssetStoreTest | 8 | file_asset CRUD / pending 计数 / TTL 清理 |
 | UploadWorkspaceInjectorTest | 6 | 工作区注入幂等 / 图片内联 ImageBlock / 文档路径提示 |
 | LocalFileStorageTest | 6 | 本地存储 write/read/exists/delete |

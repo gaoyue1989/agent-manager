@@ -171,8 +171,11 @@ test('F1 文档上传→工作区注入→读文件', async () => {
   expect(toolNames(stream.frames)).toContain('read_file');
   expect(textOf(stream.frames)).toContain(content); // read_file 读回上传内容（注入生效）
   const stats = await llmStats();
-  const call = stats.calls[stats.calls.length - 1];
-  expect(JSON.stringify(call.roles)).toContain('assistant');
+  // 按 scenario 取本测试自己的调用：mock 的后台合成调用（scenario=background-synth）
+  // 与本测试共用 stats 通道，盲取最后一条会偶发取到后台帧（S3 同款过滤模式）
+  const call = stats.calls.filter(c => c.scenario === 'tool-read').pop();
+  expect(call).toBeTruthy();
+  expect(JSON.stringify(call!.roles)).toContain('assistant');
 });
 
 test('F2 图片上传→视觉内联', async () => {
@@ -184,8 +187,11 @@ test('F2 图片上传→视觉内联', async () => {
   const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid, fileIds: [fileId] });
   await waitTerminal(stream);
   const stats = await llmStats();
-  const call = stats.calls[stats.calls.length - 1];
-  expect(call.hasImageBlock).toBe(true); // ImageBlock → OpenAI image_url 内联
+  // 按 scenario 取本测试自己的调用（本窗口内唯一带 plain 标记的调用）：
+  // 后台合成调用共用 stats 通道且可能落在主调用之后，盲取最后一条会偶发翻车
+  const call = stats.calls.filter(c => c.scenario === 'plain').pop();
+  expect(call).toBeTruthy();
+  expect(call!.hasImageBlock).toBe(true); // ImageBlock → OpenAI image_url 内联
 });
 
 test('F4 同名重复上传唯一化（冒烟）', async () => {
@@ -221,6 +227,35 @@ test.fixme('F5 present_file 交付与下载（file_ready 帧 + 下载内容）',
   expect(dl.status).toBe(200);
   expect(dl.bytes!.length).toBeGreaterThan(0);
   expect(dl.disposition).toContain('attachment');
+});
+
+// F12（2026-09-24 发布助手无法下载 OAF 包回归门禁）：OAF 打包工具迁移至平台 MCP 后链路为
+// MCP create_oaf_zip（平台 mock 返回 packageId/download_url）→ present_url 登记交付
+// （外部交付物，下载经 /files/{id} 服务端代理回源）。不变式保持门禁：file_ready 帧合成、
+// file_asset.session_id 落业务会话（不得是网关恒定 gw-hash，否则历史回放查不到卡片）。
+test('F12 OAF 打包交付（MCP create_oaf_zip + present_url + 代理下载 + 历史回放会话绑定）', async () => {
+  const sid = sessionIdFor(`f9-${uniq()}`);
+  const stream = chat({ message: `[E2E:oaf:package]`, userId: U, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  expect(toolNames(stream.frames)).toContain('create_oaf_zip');
+  expect(toolNames(stream.frames)).toContain('present_url');
+  // 实时 file_ready 帧：download_url 固定 /files/{id} 相对路径（前端拼 AGENT_BASE）
+  const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
+  expect(ready, '缺少 file_ready 帧（create_oaf_zip 应与 present_file 同链路合成）').toBeTruthy();
+  expect(ready!.file_name).toBe('e2e-oaf-agent.zip');
+  expect(String(ready!.download_url)).toMatch(/^\/files\/[0-9a-f-]{36}$/);
+  // 下载内容为合法 zip（PK 魔数）
+  const dl = await download(BASE, String(ready!.file_id));
+  expect(dl.status).toBe(200);
+  expect(dl.bytes!.length).toBeGreaterThan(0);
+  expect(dl.bytes!.subarray(0, 2).toString('latin1')).toBe('PK');
+  // 历史回放按业务会话可查（session_id 绑定断裂即在此红）
+  const h = await history(sid);
+  const files = (h.files ?? []) as Array<Record<string, unknown>>;
+  const hit = files.find(f => f.file_id === ready!.file_id);
+  expect(hit, '历史回放未按会话返回产出文件（file_asset.session_id 绑定断裂）').toBeTruthy();
+  expect(hit!.file_name).toBe('e2e-oaf-agent.zip');
 });
 
 test('F6 inline 预览规则', async ({ request }) => {
@@ -433,8 +468,10 @@ test('M5 ui_context 静默注入系统提示', async () => {
   const stream = chat({ message: `[E2E:mcpapp:form](${app})`, userId: U, sessionId: sid });
   await waitTerminal(stream);
   const stats = await llmStats();
-  const call = stats.calls[stats.calls.length - 1];
-  expect(String(call.systemContent)).toContain(mark); // UiContextInjectionHook 注入直证
+  // 按 scenario 取本测试自己的调用（同 F1/F2：后台合成调用共用 stats 通道）
+  const call = stats.calls.filter(c => c.scenario === 'mcpapp-form').pop();
+  expect(call).toBeTruthy();
+  expect(String(call!.systemContent)).toContain(mark); // UiContextInjectionHook 注入直证
 });
 
 test('M6 cards server appOnly 标记', async ({ request }) => {
@@ -480,4 +517,34 @@ test('A3/A4 tasks/get 路由与 A2A 限制声明', async () => {
   const r = await a2a('tasks/get', { id: 'nonexistent-task' });
   expect(r.status).toBe(200);
   expect(r.json.error === undefined || r.json.error?.code !== -32601).toBe(true); // 方法已路由（非 Method not found）
+});
+
+// ---------- SK 组：用户技能（L4）管理面探针 ----------
+// 说明：完整管理面场景（PUT/GET/DELETE/sync-from-package + A2A 生效性）见仓库根 e2e/user-skill-admin-e2e.sh
+//（手工脚本，需平台已发布带 skills 的自建服务）；此处只钉住端点路由与响应契约，防路由写错静默合入。
+
+test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
+  // 调试页数据源：与 /skills/users 同源，字段为 count/users
+  const debugIdx = await request.get('/debug/user-skills');
+  expect(debugIdx.status()).toBe(200);
+  const idx = await debugIdx.json();
+  expect(idx).toHaveProperty('count');
+  expect(Array.isArray(idx.users)).toBe(true);
+  expect(idx.count).toBe(idx.users.length);
+
+  // REST 侧入口（同源）：/skills/users 不是 /skills/{name}/content 的歧义牺牲品
+  const usersRes = await request.get('/skills/users');
+  expect(usersRes.status()).toBe(200);
+  const usersBody = await usersRes.json();
+  expect(usersBody).toHaveProperty('users');
+
+  // 明细：L4 无覆盖 + 包内无同名技能 → 404 not_found（而不是 500/200 空体）
+  const ghost = await request.get(`/skills/users/${U}/ghost-skill-${uniq()}`);
+  expect(ghost.status()).toBe(404);
+  expect((await ghost.json()).error).toBe('not_found');
+
+  // 参数校验：非法 userId → 400
+  const bad = await request.get('/skills/users/.hidden/ghost');
+  expect(bad.status()).toBe(400);
+  expect((await bad.json()).error).toBe('invalid_user_id');
 });

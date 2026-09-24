@@ -172,7 +172,7 @@ public class ThreadController {
         var result = new LinkedHashMap<String, Object>();
         result.put("session_id", sessionId);
         result.put("pendingConfirm", pendingConfirmPayload(sessionId, stateData));
-        // 产出文件卡片（present_file/create_oaf_zip 登记时 session_id = gw-hash）：
+        // 产出文件卡片（present_file/present_url 登记时 session_id = gw-hash）：
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
         result.put("messages", loadMessages(sessionId, stateData));
@@ -328,7 +328,7 @@ public class ThreadController {
     }
 
     /**
-     * 会话产出文件（origin=generated）：present_file/create_oaf_zip 登记时
+     * 会话产出文件（origin=generated）：present_file/present_url 登记时
      * session_id = ctx.getSessionId()（即前端 peer / sessionId），按此精确过滤。
      * 同时兼容旧数据（session_id 为 null 时按 user_key 回退）。
      */

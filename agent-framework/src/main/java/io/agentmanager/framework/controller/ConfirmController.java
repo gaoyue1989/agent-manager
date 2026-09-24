@@ -181,14 +181,13 @@ public class ConfirmController {
             // 否则用户批准后看到的又是「🔧 execute 完成」
             var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
                 (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
-            // 本 turn 的收尾只做一次（同 ChatStreamController）：AGENT_END 处理与源 flux 的
-            // complete/error 回调可能各自触发一次，晚到的那次不得重复 closeSession/release
+            // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
+            // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
             // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
-            // 此时租约已到手，不回滚就会被 TurnLeaseGuard 的续租线程永久持有
-            // （token 匹配即持续续期）→ 该 session 再也无法执行，观察者也永不终止。
+            // 回滚为何必须做（续租线程会令 session 永久锁死）：见 TurnFinalizer#abortSetup
             Flux<io.agentscope.core.event.AgentEvent> resumeFlux;
             try {
                 eventBus.beginTurn(finalSessionId);
@@ -198,11 +197,9 @@ public class ConfirmController {
             } catch (Exception e) {
                 log.warn("confirm-stream setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
-                sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
-                    : e.getClass().getSimpleName()));
-                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
-                lease.release();
-                sink.complete();
+                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
+                    errorSSE(e.getMessage() != null ? e.getMessage()
+                        : e.getClass().getSimpleName()));
                 return;
             }
 
@@ -231,10 +228,10 @@ public class ConfirmController {
                                 "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                     e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                         }
-                        endTurn(lease, finalSessionId, turnEnded);
+                        TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
                     },
                     // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
-                    () -> endTurn(lease, finalSessionId, turnEnded));
+                    () -> TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -253,7 +250,8 @@ public class ConfirmController {
                                     reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
                                     TurnToolSummaryTracker toolSummary) {
-        if (stopIfLeaseLost(lease, sessionId, sink)) {
+        // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
+        if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
         }
 
@@ -297,69 +295,12 @@ public class ConfirmController {
 
         // AGENT_END → 关闭 EventBus
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {
-            endTurn(lease, sessionId, turnEnded);
+            TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
         }
     }
 
-    /** 带「只收尾一次」保护的 turn 收尾：晚到的 complete/error 回调不得重复执行 */
-    private void endTurn(TurnLeaseGuard lease, String sessionId,
-                         java.util.concurrent.atomic.AtomicBoolean turnEnded) {
-        if (!turnEnded.compareAndSet(false, true)) {
-            return;
-        }
-        endTurn(lease, sessionId);
-    }
-
-    /**
-     * 租约已失去：本副本不再拥有该 session 的写入权。继续 append 会与新 owner 的 seq
-     * 区间重叠，所以立刻停手、丢弃缓冲、发终态帧。
-     *
-     * <p>终态帧只给本连接的客户端、**不落库**——此刻任何 append 都会占用可能与新 owner
-     * 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
-     *
-     * @return true = 本事件已被丢弃，调用方必须直接返回
-     */
-    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
-                                    reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink) {
-        if (!lease.isLost()) {
-            return false;
-        }
-        if (lease.tryMarkLostNotified()) {
-            log.error("[confirm] turn lease lost, stopping writer (sid={})", sessionId);
-            sink.next(interruptedSSE("lease_lost"));
-            eventBus.abandonSession(sessionId);
-            lease.release();
-        }
-        return true;
-    }
-
-    /**
-     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
-     *
-     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
-     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
-     * ——正是 C1 要防的重叠。
-     *
-     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
-     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
-     */
-    private void endTurn(TurnLeaseGuard lease, String sessionId) {
-        boolean lost = lease.isLost();
-        if (lost) {
-            eventBus.abandonSession(sessionId);
-        } else {
-            eventBus.closeSession(sessionId);
-        }
-        lease.release();
-    }
-
-    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
-    private static ServerSentEvent<String> interruptedSSE(String reason) {
-        return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
-            .build();
-    }
-
+    /** 错误帧：走 payload(Map.of(...))，键序受 JDK SALT 影响非确定——帧构造留在本控制器、
+     *  不收口进 TurnFinalizer（两侧工厂字节不等价，见 TurnFinalizer#abortSetup javadoc） */
     private static ServerSentEvent<String> errorSSE(String msg) {
         return ServerSentEvent.<String>builder()
             .data(AgentEventSseSerializer.payload(Map.of("type", "error", "error", msg)))

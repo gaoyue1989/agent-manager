@@ -21,9 +21,11 @@ async function loadMcp() {
   try {
     mcpData = (await ctx.api.getMcpServers()) || [];
   } catch (e) {
+    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
     body.innerHTML = '<div class="empty error-text">Failed to load MCP servers: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
+  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
   document.getElementById('mcpSummary').textContent = mcpData.length + ' server(s)';
 
   if (mcpData.length === 0) {

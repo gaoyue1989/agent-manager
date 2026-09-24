@@ -36,6 +36,7 @@ async function loadLogs() {
   const level = document.getElementById('logLevel').value;
   try {
     const data = await ctx.api.getLogs(level, 200);
+    if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
     const logs = data.logs || [];
     if (logs.length === 0) {
       body.innerHTML = '<div class="empty">No logs</div>';
@@ -48,6 +49,7 @@ async function loadLogs() {
     }).join('');
     body.scrollTop = body.scrollHeight;
   } catch (e) {
+    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
     body.innerHTML = '<div class="empty error-text">Failed to load logs: ' + ctx.utils.esc(e.message) + '</div>';
   }
 }

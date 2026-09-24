@@ -108,8 +108,23 @@ public class ChatStreamController {
         orphanTurnWatchdog.shutdown();
     }
 
-    /** present_file 工具结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
+    /** 产出文件工具（present_file/present_url）结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** write_file 工具输入参数累积（toolCallId &rarr; JSON 片段桶），用于截获 path+content 后同步 KV */
+    private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> writeFileInputBuffers =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * toolCallId &rarr; 真实工具名（turn 内有效）。
+     *
+     * <p>SDK 只在 {@link ToolCallStartEvent} 上携带真实工具名——后续的
+     * {@code ToolCallDeltaEvent} 虽然也有 getToolCallName()，实测恒为占位符
+     * {@code "__fragment__"}（参数分片帧，见 e2e-ci-plan §11.3 D3）。
+     * 因此凡需按工具名分派的逻辑，必须先在此登记、后续查表，不能直接读 delta 的名字。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> toolCallNames =
         new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final int PRESENT_FILE_BUFFER_MAX = 64 * 1024;
@@ -252,23 +267,22 @@ public class ChatStreamController {
 
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
+            // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
+            // 见 TurnFinalizer#endTurn 的教训注释
+            var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 本 turn 触及过的桶 key（toolCallId）；turn 收尾时统一清桶，防异常路径残留。
+            // 按 turn 粒度隔离：清理只删本 turn 登记过的 key，toolCallId 跨 session 不可能
+            // 撞 key，并行 turn 的桶不受影响（A4）
+            var turnBucketKeys = java.util.concurrent.ConcurrentHashMap.<String>newKeySet();
 
             // 工具摘要累积器（turn 级）：累积 delta 参数/结果，在 END 事件合成人可读摘要帧。
             // 与 turn 同生命周期——放在订阅回调之外创建，避免被 Reactor 的取消回调连带清理。
             var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
                 (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
-            // 本 turn 的收尾只做一次。AGENT_END 处理与源 flux 的 complete/error 回调可能各自
-            // 触发一次收尾，且 harness 的 flux 可能在 AGENT_END 事件之后**数秒**才 complete——
-            // 迟到的那次若再走 closeSession，会把**下一个** turn 刚建好的 sink 拆掉
-            // （实测：0.4s 内前后脚的两轮对话，第二轮的 permission_ask 被迟到关闭吞掉，
-            // 前端收不到 HITL 确认卡；approval-forms e2e 2026-09-17 复现）。
-            var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
 
-            // 准备阶段的异常必须回滚已获取的 turn_lease。TurnLeaseGuard 的后台续租线程
-            // 不看本段是否还活着——只要 token 仍匹配就持续续期，因此漏放租约意味着该
-            // session 被**永久**锁死：后续每个请求都拿不到租约，观察者也会一直 probe
-            // 到 RUNNING。构造消息这一步会因用户输入抛异常（fileId 失效 → 工作区注入
-            // 失败），所以这不是理论路径。
+            // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
+            // 见 TurnFinalizer#abortSetup 的教训注释。
+            // 该路径 replyId 尚未产出任何事件、无本 turn 桶可清，turnBucketKeys 必为空
             List<Msg> messages;
             try {
                 eventBus.beginTurn(finalSessionId);
@@ -306,7 +320,7 @@ public class ChatStreamController {
                 chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
-                            finalUserId, sink, turnEnded, toolSummary),
+                            finalUserId, sink, turnEnded, turnBucketKeys, toolSummary),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             if (isTrailingSandboxTeardownError(e)) {
@@ -317,17 +331,15 @@ public class ChatStreamController {
                                     "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
                                         e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
                             }
-                            endTurn(lease, finalSessionId, turnEnded);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                         },
-                        () -> endTurn(lease, finalSessionId, turnEnded));
+                        () -> endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys));
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
-                sink.next(errorSSE("turn_setup_failed: "
-                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
-                eventBus.closeSession(finalSessionId);   // 刷缓冲 + 释放 seq 计数器 + 关 sink
-                lease.release();
-                sink.complete();
+                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
+                    errorSSE("turn_setup_failed: "
+                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
                 return;
             }
 
@@ -347,7 +359,7 @@ public class ChatStreamController {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
                             + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
                             OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
-                        endTurn(lease, finalSessionId, turnEnded);
+                        endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                     }
                 }, finalSessionId, replyId);
             });
@@ -377,14 +389,46 @@ public class ChatStreamController {
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.Set<String> turnBucketKeys,
                                     TurnToolSummaryTracker toolSummary) {
-        if (stopIfLeaseLost(lease, sessionId, sink)) {
+        // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
+        if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             return;
         }
 
         audit(event, sessionId);
 
-        // 工具名登记 + 参数/结果累积。
+        // 工具名登记：ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧的名字是占位符）。
+        // 同点登记 turnBucketKeys（A4）：新增桶 put 点时必须在此同步登记，否则该类残留
+        // 回到「异常路径跨 turn 累积」的现状
+        if (event instanceof ToolCallStartEvent start
+                && start.getToolCallId() != null && start.getToolCallName() != null) {
+            turnBucketKeys.add(start.getToolCallId());
+            toolCallNames.put(start.getToolCallId(), start.getToolCallName());
+        }
+
+        // write_file 输入参数截获（按登记的真实工具名判定，不能读 delta.getToolCallName()）
+        if (!sandboxConfig.enabled()) {
+            if (event instanceof ToolCallDeltaEvent delta
+                    && isTool(delta.getToolCallId(), "write_file")) {
+                turnBucketKeys.add(delta.getToolCallId());
+                accumulateWriteFileInput(delta.getToolCallId(), String.valueOf(delta.getDelta()));
+            }
+            if (event instanceof ToolCallEndEvent end && isTool(end.getToolCallId(), "write_file")) {
+                syncWriteFileToKv(end.getToolCallId(), userId);
+                toolCallNames.remove(end.getToolCallId());
+            }
+        }
+
+        // 产出文件工具（present_file/present_url）结果累积（同样按登记名判定）
+        if (event instanceof ToolResultTextDeltaEvent trd
+                && (isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())
+                    || isTool(trd.getToolCallId(), "present_url", trd.getToolCallName()))) {
+            turnBucketKeys.add(trd.getToolCallId());
+            accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
+        }
+
+        // 工具摘要累积（tool_call_summary/tool_result_preview 帧的数据源）。
         // ToolCallStartEvent 是唯一携带真实工具名的事件（delta 帧名字恒为 __fragment__），
         // 故先登记再按 id 累积，到 END 事件时才能合成出「创建 x.js 2行」这样的摘要。
         if (event instanceof ToolCallStartEvent start) {
@@ -393,19 +437,6 @@ public class ChatStreamController {
             toolSummary.onToolCallDelta(delta);
         } else if (event instanceof ToolResultTextDeltaEvent trd) {
             toolSummary.onToolResultDelta(trd);
-        }
-
-        // write_file 输入参数截获：必须在摘要合成之前 peek —— tracker 在 TOOL_CALL_END 时
-        // 会取走并清空参数缓冲（合成摘要需要完整参数）
-        if (!sandboxConfig.enabled() && event instanceof ToolCallEndEvent end
-                && toolSummary.isTool(end.getToolCallId(), "write_file", null)) {
-            syncWriteFileToKv(toolSummary.peekArgs(end.getToolCallId()), userId);
-        }
-
-        // present_file 结果累积（同样按登记名判定）
-        if (event instanceof ToolResultTextDeltaEvent trd
-                && toolSummary.isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
-            accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
 
         // HITL
@@ -430,79 +461,78 @@ public class ChatStreamController {
             eventBus.closeSession(sessionId);
         }
 
-        // present_file 完成合成 file_ready
-        if (event instanceof ToolResultEndEvent tre && "present_file".equals(tre.getToolCallName())) {
+        // 产出文件工具完成合成 file_ready（present_url 与 present_file 返回同构 JSON，
+        // 复用同一条下载卡片链路；外部交付物经 /files/{id} 代理下载）
+        if (event instanceof ToolResultEndEvent tre
+                && ("present_file".equals(tre.getToolCallName())
+                    || "present_url".equals(tre.getToolCallName()))) {
             emitFileReadyViaEventBus(sessionId, replyId, tre.getToolCallId());
         }
 
         // AGENT_END
         if (event.getType() == AgentEventType.AGENT_END) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            endTurn(lease, sessionId, turnEnded);
+            endTurnAndCleanupBuckets(lease, sessionId, turnEnded, turnBucketKeys);
         }
     }
 
     /**
-     * 租约已失去：本副本不再拥有该 session 的写入权。
+     * turn 收尾 + 本 turn 桶清理（A4）：只有抢到收尾权（{@link TurnFinalizer#endTurn}
+     * 3 参的 CAS 首胜返回 true）才清桶，且只清本 turn 在 {@code turnBucketKeys}
+     * 里登记过的 key——并行 turn（其他 session）的桶条目不可达于本清理循环；
+     * {@code remove} 天然幂等，与正常路径（End/合成时）的 remove 双删无冲突。
      *
-     * <p>继续 append 会与新 owner 的 seq 区间重叠——这正是 C1 要防的事——所以立刻停手、
-     * 丢弃缓冲、把控制权交还客户端。终态帧**只发本连接的客户端、不落库**：此刻任何
-     * append 都会占用可能与新 owner 重叠的 seq（这也是不能用 emitSynthetic 的原因）。
+     * <p>清桶发生在终态动作（closeSession/abandonSession）之后：桶纯内存、不产生
+     * 任何 SSE 字节，先后不影响行为。
      *
-     * @return true = 本事件已被丢弃，调用方必须直接返回
+     * <p>覆盖的终态：AGENT_END、源流 error/complete 回调、onCancel 看护强收（均走本方法）。
+     * <b>HITL 是部分覆盖</b>：permission_ask 路径先 release 租约再直接 closeSession、不经
+     * 3 参 endTurn，本 turn 的桶清理推迟到源 flux complete/error 回调的 endTurn——正常必达；
+     * flux 永不 complete 且连接无 onCancel 时与现状一样不清（无恶化）。终态后理论上仍可能
+     * 有极晚事件回调 re-put（与现状相同的既有边界，桶上限 64KB/2MB 兜底）。
      */
-    private boolean stopIfLeaseLost(TurnLeaseGuard lease, String sessionId,
-                                    FluxSink<ServerSentEvent<String>> sink) {
-        if (!lease.isLost()) {
-            return false;
-        }
-        if (lease.tryMarkLostNotified()) {
-            log.error("[chat] turn lease lost, stopping writer (sid={})", sessionId);
-            sink.next(interruptedSSE("lease_lost"));
-            eventBus.abandonSession(sessionId);
-            lease.release();
-        }
-        return true;
-    }
-
-    /** 带「只收尾一次」保护的 turn 收尾：晚到的 complete/error 回调不得重复执行 */
-    private void endTurn(TurnLeaseGuard lease, String sessionId,
-                         java.util.concurrent.atomic.AtomicBoolean turnEnded) {
-        if (!turnEnded.compareAndSet(false, true)) {
+    private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId,
+                                          java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                          java.util.Set<String> turnBucketKeys) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
-        endTurn(lease, sessionId);
+        for (String toolCallId : turnBucketKeys) {
+            toolCallNames.remove(toolCallId);
+            presentFileBuffers.remove(toolCallId);
+            writeFileInputBuffers.remove(toolCallId);
+        }
     }
+
+    // ===== 产出文件工具（present_file/present_url）累积 & file_ready 合成 =====
 
     /**
-     * turn 收尾：丢锁走 abandon（**丢弃**缓冲），正常走 closeSession（刷缓冲）。
-     *
-     * <p>顺序上先收尾再放锁：刷缓冲必须在仍持有租约时做完，否则另一个副本可能已经
-     * 接管并按新的 MAX(seq) 播种、开始写，而我们这时才把按旧区间分配的缓冲行写下去
-     * ——正是 C1 要防的重叠。代价是流结束与租约释放之间有一个极短窗口（客户端已看到
-     * 结束、锁还在我们手上），抢锁方按 ACQUIRE_TIMEOUT 排队等一拍即可。
-     *
-     * <p>{@code isLost()} 必须在 {@code release()} **之前**求值：release 之后
-     * {@code released} 参与判断，时间判据会被短路成 false，丢锁的 turn 就误走刷缓冲了。
+     * 该 toolCallId 是否属于指定工具：优先查登记表（ToolCallStart 登记的权威名字），
+     * 表未命中时回落到事件自带的工具名——覆盖 ToolResult* 等本就携带真实名的事件类型。
      */
-    private void endTurn(TurnLeaseGuard lease, String sessionId) {
-        boolean lost = lease.isLost();
-        if (lost) {
-            eventBus.abandonSession(sessionId);
-        } else {
-            eventBus.closeSession(sessionId);
+    private boolean isTool(String toolCallId, String expected, String eventToolName) {
+        if (toolCallId == null) {
+            return false;
         }
-        lease.release();
+        String registered = toolCallNames.get(toolCallId);
+        return expected.equals(registered != null ? registered : eventToolName);
     }
 
-    /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端 */
-    private static ServerSentEvent<String> interruptedSSE(String reason) {
-        return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"interrupted\",\"reason\":\"" + reason + "\"}")
-            .build();
+    private boolean isTool(String toolCallId, String expected) {
+        return isTool(toolCallId, expected, null);
     }
 
-    // ===== 工具摘要帧 =====
+    // ===== 私有可测性观察点（A4）：仅供测试断言，不进公有 API =====
+
+    /** 三个工具桶条目数之和（toolCallNames/presentFileBuffers/writeFileInputBuffers） */
+    int bucketEntryCount() {
+        return toolCallNames.size() + presentFileBuffers.size() + writeFileInputBuffers.size();
+    }
+
+    /** 定向查看登记表中某 toolCallId 的工具名（测试断言「并行 turn 防误删」用） */
+    String registeredToolName(String toolCallId) {
+        return toolCallNames.get(toolCallId);
+    }
 
     /**
      * 参数/结果到齐事件 → 追加合成 {@code tool_call_summary} / {@code tool_result_preview} 帧。
@@ -522,15 +552,20 @@ public class ChatStreamController {
         }
     }
 
-    // ===== present_file 累积 & 合成 =====
-
     private void accumulatePresentFile(String toolCallId, String delta) {
         if (toolCallId == null) return;
         var buf = presentFileBuffers.computeIfAbsent(toolCallId, k -> new StringBuilder());
         synchronized (buf) {
-            if (buf.length() + delta.length() > PRESENT_FILE_BUFFER_MAX) {
+            int room = PRESENT_FILE_BUFFER_MAX - buf.length();
+            if (room <= 0) {
                 log.warn("present_file result buffer overflow for toolCallId {}, dropping tail", toolCallId);
                 return;
+            }
+            // 溢出保留头部、截去尾部（原实现单个 delta 超限会整段丢弃，桶里空无一字）：
+            // file_id/file_name 等元数据固定在 JSON 前部，头部留存即可被 parseFileResult 正则救回
+            if (delta.length() > room) {
+                log.warn("present_file result buffer overflow for toolCallId {}, dropping tail", toolCallId);
+                delta = delta.substring(0, room);
             }
             buf.append(delta);
         }
@@ -542,14 +577,13 @@ public class ChatStreamController {
         String json;
         synchronized (buf) { json = buf.toString(); }
         try {
-            var node = JSON.readTree(json);
-            if (node != null && node.isTextual()) node = JSON.readTree(node.asText());
+            var node = parseFileResult(json);
             if (node != null && node.has("error")) {
-                log.debug("present_file returned error: {}, skip file_ready", node.get("error").asText());
+                log.debug("file tool returned error: {}, skip file_ready", node.get("error").asText());
                 return;
             }
-            if (node == null || !node.has("file_id") || !node.has("file_name")) {
-                log.warn("present_file result missing file_id/file_name, skip file_ready");
+            if (node == null || !node.has("file_id")) {
+                log.warn("file tool result missing file_id, skip file_ready (sid={})", sessionId);
                 return;
             }
             var fileId = node.get("file_id").asText();
@@ -571,15 +605,64 @@ public class ChatStreamController {
         }
     }
 
+    /**
+     * 产出文件工具结果文本 → JSON 节点。
+     *
+     * <p>全文解析失败时正则兜底：结果体可能超出 {@link #PRESENT_FILE_BUFFER_MAX} 被截尾
+     * （大结果卸载/流式分片场景），而 file_id/file_name/mime_type/size 固定位于 JSON 前部，
+     * 从残存头部提取即可救回下载卡片。
+     */
+    private com.fasterxml.jackson.databind.JsonNode parseFileResult(String json) {
+        try {
+            var node = JSON.readTree(json);
+            if (node != null && node.isTextual()) {
+                node = JSON.readTree(node.asText());
+            }
+            if (node != null && node.isObject()) {
+                return node;
+            }
+        } catch (Exception ignored) {
+            // 落到正则兜底
+        }
+        var node = JSON.createObjectNode();
+        var id = java.util.regex.Pattern
+            .compile("\"file_id\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"").matcher(json);
+        if (!id.find()) {
+            return null;
+        }
+        node.put("file_id", id.group(1));
+        var name = java.util.regex.Pattern
+            .compile("\"file_name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(json);
+        node.put("file_name", name.find() ? name.group(1) : "file");
+        var mime = java.util.regex.Pattern
+            .compile("\"mime_type\"\\s*:\\s*\"([^\"]+)\"").matcher(json);
+        if (mime.find()) {
+            node.put("mime_type", mime.group(1));
+        }
+        var size = java.util.regex.Pattern.compile("\"size\"\\s*:\\s*(\\d+)").matcher(json);
+        node.put("size", size.find() ? Long.parseLong(size.group(1)) : 0L);
+        return node;
+    }
+
     // ===== write_file 输入截获 → KV =====
 
-    /**
-     * write_file → KV 同步（非沙箱模式下 present_file 依赖它读到文件）。
-     *
-     * @param json 已拼接完整的 write_file 参数 JSON（由 {@link TurnToolSummaryTracker} 累积）
-     */
-    private void syncWriteFileToKv(String json, String userKey) {
-        if (json == null || json.isBlank() || userKey == null || userKey.isBlank()) return;
+    private void accumulateWriteFileInput(String toolCallId, String delta) {
+        if (toolCallId == null) return;
+        var buf = writeFileInputBuffers.computeIfAbsent(toolCallId, k -> new StringBuilder());
+        synchronized (buf) {
+            if (buf.length() + delta.length() > 2 * 1024 * 1024) {
+                log.warn("write_file input buffer overflow for toolCallId {}, dropping tail", toolCallId);
+                return;
+            }
+            buf.append(delta);
+        }
+    }
+
+    private void syncWriteFileToKv(String toolCallId, String userKey) {
+        var buf = writeFileInputBuffers.remove(toolCallId);
+        if (buf == null || userKey == null || userKey.isBlank()) return;
+        String json;
+        synchronized (buf) { json = buf.toString(); }
         try {
             var node = JSON.readTree(json);
             if (node == null) return;
@@ -587,7 +670,7 @@ public class ChatStreamController {
                 : node.has("file_path") ? node.get("file_path") : null;
             var contentNode = node.has("content") ? node.get("content") : null;
             if (pathNode == null || contentNode == null) {
-                log.debug("write_file input missing path/content, skip KV sync");
+                log.debug("write_file input missing path/content, skip KV sync (toolCallId={})", toolCallId);
                 return;
             }
             var relPath = pathNode.asText();
@@ -612,7 +695,7 @@ public class ChatStreamController {
                 log.info("write_file → KV sync: {} ({} chars) for user {}", relPath, content.length(), userKey);
             }
         } catch (Exception e) {
-            log.debug("write_file KV sync parse failed: {}", e.getMessage());
+            log.debug("write_file KV sync parse failed (toolCallId={}): {}", toolCallId, e.getMessage());
         }
     }
 

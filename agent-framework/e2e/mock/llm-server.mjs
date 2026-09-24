@@ -27,7 +27,7 @@ const ALLOW_SYNTH = process.env.MOCK_LLM_ALLOW_SYNTH === '1';
 const MARKER_MAP = {
   'plain': 'plain', 'remember': 'remember', 'recall': 'recall',
   'tool:echo': 'tool-echo', 'tool:time': 'tool-time', 'tool:write': 'tool-write', 'tool:read': 'tool-read',
-  'file:deliver': 'file-deliver', 'tool:mcp_echo': 'tool-mcp-echo',
+  'file:deliver': 'file-deliver', 'oaf:package': 'oaf-package', 'tool:mcp_echo': 'tool-mcp-echo',
   'hitl:submit': 'hitl-submit', 'mcpapp:form': 'mcpapp-form',
   'execute': 'execute', 'execute:fail': 'execute-fail',
   'tool:write:sb': 'sandbox-write', 'tool:read:sb': 'sandbox-read',
@@ -68,6 +68,9 @@ function callIndex(messages) {
   const n = messages.filter(m => m.role === 'tool').length;
   return Math.max(1, n);
 }
+
+/** bench mock MCP 基地址（oaf-package 夹具 {{BENCH_MCP_BASE}} 占位符替换用） */
+const BENCH_MCP_BASE = process.env.BENCH_MCP_BASE || `http://127.0.0.1:${process.env.BENCH_MCP_PORT || '18082'}`;
 
 function route(reqBody) {
   const messages = reqBody.messages ?? [];
@@ -133,10 +136,14 @@ const server = http.createServer((req, res) => {
       try { reqBody = JSON.parse(Buffer.concat(cs).toString()); } catch { /* 保持空 */ }
       const { messages, marker, arg, deniedResume, systemContent } = route(reqBody);
       const name = MARKER_MAP[marker];
-      // jar 后台调用（记忆提取/会话标题等）：无 system 消息（主对话必带 agent 系统提示）。
-      // 这类调用若带场景标记会偷走主对话的 fixture 调用序——一律合成良性响应。
-      const isBackground = !messages.some(m => m.role === 'system');
-      const isMemoryFlush = isBackground && String(systemContent).includes('memory extraction assistant');
+      // jar 后台调用（记忆提取/会话标题等）：无 system 消息，或 system 提示为
+      // 记忆提取（MemoryFlushMiddleware，判据与 record-llm.mjs/normalize-fixtures.mjs
+      // 一致：system 含 "memory extraction assistant"——该调用必带 system 消息，
+      // 只按"无 system"识别会漏判成 500 → SDK 退避重试，重试帧迟到落进 stats
+      // 尾部，污染"最后一条调用"型断言）。这类调用若回放 fixture 会偷走主对话
+      // 的调用序——一律合成良性响应。
+      const isBackground = !messages.some(m => m.role === 'system')
+        || String(systemContent).includes('memory extraction assistant');
       stats.count += 1;
       stats.calls.push({
         scenario: isBackground ? 'background-synth' : (name ?? marker), arg,
@@ -211,7 +218,9 @@ const server = http.createServer((req, res) => {
       const placeholders = fx.rewrites ?? [];
       const argValue = arg ?? '';
       let chunks = call.chunks ?? [];
-      chunks = chunks.map(c => (placeholders.length ? substitute(c, placeholders, argValue) : c));
+      chunks = chunks
+        .map(c => (placeholders.length ? substitute(c, placeholders, argValue) : c))
+        .map(c => c.split('{{BENCH_MCP_BASE}}').join(BENCH_MCP_BASE));
       const overrideJson = ARGS_OVERRIDE[name];
       if (overrideJson) chunks = applyArgsOverride(chunks, overrideJson.replace('{{appId}}', argValue));
       if (reqBody.stream === false) {

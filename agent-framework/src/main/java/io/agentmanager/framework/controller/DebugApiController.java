@@ -13,6 +13,8 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -27,6 +29,7 @@ import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.LogCollector;
 import io.agentmanager.framework.service.SkillCatalogService;
+import io.agentmanager.framework.service.UserSkillService;
 
 /**
  * 调试数据端点：为 /debug 调试页面提供配置、数据库、Thread、记忆、工作区、日志等信息。
@@ -45,6 +48,7 @@ public class DebugApiController {
     private final LogCollector logCollector;
     private final SandboxConfig sandboxConfig;
     private final SkillCatalogService skillCatalog;
+    private final UserSkillService userSkillService;
 
     public DebugApiController(
         AgentManagerProperties props,
@@ -52,7 +56,8 @@ public class DebugApiController {
         DataSource dataSource,
         LogCollector logCollector,
         SandboxConfig sandboxConfig,
-        SkillCatalogService skillCatalog
+        SkillCatalogService skillCatalog,
+        UserSkillService userSkillService
     ) {
         this.props = props;
         this.oafConfig = oafConfig;
@@ -60,6 +65,7 @@ public class DebugApiController {
         this.logCollector = logCollector;
         this.sandboxConfig = sandboxConfig;
         this.skillCatalog = skillCatalog;
+        this.userSkillService = userSkillService;
     }
 
     /** 环境变量配置（敏感信息脱敏） */
@@ -186,6 +192,36 @@ public class DebugApiController {
             log.warn("Read memory failed: {}", e.getMessage());
             return Map.of("users", users, "error", e.getMessage());
         }
+    }
+
+    /**
+     * 存在个人技能覆盖（L4，{@code agents/{agent}/users/{uid}/skills}）的用户索引，
+     * 供调试页“用户技能”面板下拉/清单使用。明细读写见 {@code /skills/users/{userId}}。
+     *
+     * <p>索引触顶截断时带 {@code truncated=true}（不静默返回子集）；
+     * 查询失败（DB/SQL 不可用）→ 500：不把「索引查不到」降级成 200 + 空列表，
+     * 否则调试页会在 DB 抖动时静默显示「0 user(s)」（与 {@code /debug/memory} 的
+     * {@code error} 字段口径不同：那里返回的是单次读取结果，这里是“有没有用户”的存在性判定）。
+     */
+    @GetMapping("/user-skills")
+    public ResponseEntity<Map<String, Object>> userSkills() {
+        UserSkillService.UserSkillIndex index;
+        try {
+            index = userSkillService.listUsers();
+        } catch (Exception e) {
+            log.warn("Debug user skill index failed: {}", e.getMessage());
+            var error = new LinkedHashMap<String, Object>();
+            error.put("error", "index_failed");
+            error.put("message", "用户技能索引读取失败: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
+        }
+        var body = new LinkedHashMap<String, Object>();
+        body.put("count", index.users().size());
+        body.put("users", index.users());
+        if (index.truncated()) {
+            body.put("truncated", true);
+        }
+        return ResponseEntity.ok(body);
     }
 
     /**

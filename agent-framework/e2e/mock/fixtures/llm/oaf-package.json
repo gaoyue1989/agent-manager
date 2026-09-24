@@ -1,0 +1,50 @@
+{
+  "scenario": "oaf-package",
+  "model": "e2e-mock-model",
+  "recordedAt": "2026-09-24T00:00:00Z",
+  "note": "手工合成（非录制）：[E2E:oaf:package] → MCP create_oaf_zip（平台 mock：返回 packageId/download_url，URL 经 {{BENCH_MCP_BASE}} 占位符随实际端口替换）→ present_url 登记交付 → 收尾文本。覆盖 OAF 工具迁移后的发布助手打包链路：file_ready 帧 / 代理下载 zip / 历史回放会话绑定（gw-hash 回归门禁）。",
+  "calls": [
+    {
+      "request": {
+        "stream": true,
+        "note": "末条 user → 调 MCP create_oaf_zip"
+      },
+      "chunks": [
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": \"call_e2eoaf0001\", \"function\": {\"arguments\": \"\", \"name\": \"create_oaf_zip\"}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \"{\\\"package_name\\\": \\\"e2e-oaf-agent.zip\\\", \\\"agents_md\\\": \\\"---\\\\nname: \\\\\\\"e2e-oaf-agent\\\\\\\"\\\\nvendorKey: \\\\\\\"e2e\\\\\\\"\\\\nagentKey: \\\\\\\"e2e-oaf-agent\\\\\\\"\\\\nversion: \\\\\\\"1.0.0\\\\\\\"\\\\ndescription: \\\\\\\"E2E 下载卡片门禁验证包\\\\\\\"\\\\nauthor: \\\\\\\"@e2e\\\\\\\"\\\\nlicense: \\\\\\\"MIT\\\\\\\"\\\\n---\\\\n# E2E OAF Agent\\\\n\\\\n下载卡片门禁验证用包。\\\\n\\\"}\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": \"tool_calls\", \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"usage\": {\"completion_tokens\": 64, \"prompt_tokens\": 100, \"total_tokens\": 164}}",
+        "[DONE]"
+      ]
+    },
+    {
+      "request": {
+        "stream": true,
+        "note": "1 条 tool → 调 present_url 交付下载"
+      },
+      "chunks": [
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": \"call_e2eoaf0002\", \"function\": {\"arguments\": \"\", \"name\": \"present_url\"}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \"{\\\"file_name\\\": \\\"e2e-oaf-agent.zip\\\", \\\"url\\\": \\\"{{BENCH_MCP_BASE}}/packages/7/download\\\", \\\"mime_type\\\": \\\"application/zip\\\", \\\"size\\\": 380}\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": \"tool_calls\", \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"usage\": {\"completion_tokens\": 64, \"prompt_tokens\": 100, \"total_tokens\": 164}}",
+        "[DONE]"
+      ]
+    },
+    {
+      "request": {
+        "stream": true,
+        "note": "2 条 tool → 收尾文本"
+      },
+      "chunks": [
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": \"部署包 \", \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": \"e2e-oaf-agent.zip 已生成并交付下载。\", \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": \"stop\", \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-oaf-package-fixture\", \"choices\": [], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"usage\": {\"completion_tokens\": 64, \"prompt_tokens\": 100, \"total_tokens\": 164}}",
+        "[DONE]"
+      ]
+    }
+  ]
+}

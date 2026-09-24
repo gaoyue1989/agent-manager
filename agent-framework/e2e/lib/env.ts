@@ -1,8 +1,30 @@
 /** 运行环境与用例隔离 ID（e2e-ci-plan §6.3） */
+import fs from 'node:fs';
+import path from 'node:path';
+
 export const BASE = process.env.E2E_BASE ?? 'http://127.0.0.1:8100';
-/** 多副本：精确副本寻址（LB 与副本并存时使用） */
-export const REPLICA_A = process.env.E2E_REPLICA_A ?? '';
-export const REPLICA_B = process.env.E2E_REPLICA_B ?? '';
+
+/**
+ * 多副本：精确副本寻址（LB 与副本并存时使用）。
+ * 优先 CI 注入的 E2E_REPLICA_A/B；本地 `run.sh multi` 未注入时回落 env-up 产物
+ * env.json（env-up 先于 playwright 执行，导入时必然存在）。回落失败保持空串
+ * （单副本组不读这两个值；多副本用例会以可读的 fetch 错误暴露，而非静默错路由）。
+ * 回落缺失曾致空串地址进 fetch：R2 报"最后观测=[]"（collectStream 吞掉连接异常）、
+ * R4 报 "Failed to parse URL from /threads/..."（2026-09-24 本地 multi 轮实录）。
+ */
+function replicaUrl(envKey: 'E2E_REPLICA_A' | 'E2E_REPLICA_B', runtimeKey: 'replicaA' | 'replicaB'): string {
+  const injected = process.env[envKey];
+  if (injected) return injected;
+  try {
+    const dir = process.env.E2E_RUNTIME_DIR ?? '.runtime';
+    const envJson = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8')) as Record<string, string>;
+    return String(envJson[runtimeKey] ?? '');
+  } catch {
+    return '';
+  }
+}
+export const REPLICA_A = replicaUrl('E2E_REPLICA_A', 'replicaA');
+export const REPLICA_B = replicaUrl('E2E_REPLICA_B', 'replicaB');
 
 /** bench mock MCP（端口随 env-up.sh BENCH_MCP_PORT；用于观测 tools/call 的 header/_meta） */
 export const BENCH_MCP = process.env.E2E_BENCH_MCP ?? 'http://127.0.0.1:18082';

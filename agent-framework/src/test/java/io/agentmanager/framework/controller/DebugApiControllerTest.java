@@ -24,6 +24,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.LogCollector;
 import io.agentmanager.framework.service.SkillCatalogService;
+import io.agentmanager.framework.service.UserSkillService;
 
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -54,6 +55,9 @@ class DebugApiControllerTest {
     @MockBean
     private SkillCatalogService skillCatalog;
 
+    @MockBean
+    private UserSkillService userSkillService;
+
     private AgentManagerProperties.LLMConfig llmConfig(String key) {
         return new AgentManagerProperties.LLMConfig(
             key, "gpt-4", "http://localhost/v1", "openai", 0.7, 4096, 120, true, 0);
@@ -71,7 +75,7 @@ class DebugApiControllerTest {
         when(props.file()).thenReturn(new AgentManagerProperties.FileConfig(
             true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf,"
             + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
-            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"));
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""));
 
         mockMvc.perform(get("/debug/config/env"))
             .andExpect(status().isOk())
@@ -92,7 +96,7 @@ class DebugApiControllerTest {
         when(props.file()).thenReturn(new AgentManagerProperties.FileConfig(
             true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf,"
             + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
-            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"));
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""));
 
         mockMvc.perform(get("/debug/config/env"))
             .andExpect(status().isOk())
@@ -264,6 +268,56 @@ class DebugApiControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.users").isMap())
             .andExpect(jsonPath("$.error").value("store down"));
+    }
+
+    // ---------- user skills（L4 个人覆盖索引） ----------
+
+    @Test
+    void userSkillsShouldReturnUserIndex() throws Exception {
+        when(userSkillService.listUsers()).thenReturn(new UserSkillService.UserSkillIndex(
+            List.of(new UserSkillService.UserSkillUser("alice", 2, "2026-09-23 10:00:00")), false));
+
+        mockMvc.perform(get("/debug/user-skills"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.count").value(1))
+            .andExpect(jsonPath("$.users[0].userId").value("alice"))
+            .andExpect(jsonPath("$.users[0].skillCount").value(2))
+            .andExpect(jsonPath("$.truncated").doesNotExist());
+    }
+
+    /** 空索引（无用户）也必须返回 200 + count=0，避免前端拿 null 崩掉 */
+    @Test
+    void userSkillsShouldReturnEmptyIndex() throws Exception {
+        when(userSkillService.listUsers()).thenReturn(new UserSkillService.UserSkillIndex(List.of(), false));
+
+        mockMvc.perform(get("/debug/user-skills"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.count").value(0))
+            .andExpect(jsonPath("$.users").isEmpty());
+    }
+
+    /** 索引触顶截断必须显式暴露 truncated */
+    @Test
+    void userSkillsShouldExposeTruncatedFlag() throws Exception {
+        when(userSkillService.listUsers()).thenReturn(new UserSkillService.UserSkillIndex(List.of(), true));
+
+        mockMvc.perform(get("/debug/user-skills"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.truncated").value(true));
+    }
+
+    /**
+     * 索引查询失败 → 500：不得返回 200 + 空列表——DB 抖动时调试页会把「查不到」静默显示成 0 user(s)，
+     * 看起来像「没有任何用户有个人技能」。
+     */
+    @Test
+    void userSkillsShouldReturn500WhenIndexQueryFails() throws Exception {
+        when(userSkillService.listUsers())
+            .thenThrow(new IllegalStateException("用户技能索引查询失败: db down"));
+
+        mockMvc.perform(get("/debug/user-skills"))
+            .andExpect(status().isInternalServerError())
+            .andExpect(jsonPath("$.error").value("index_failed"));
     }
 
     // ---------- workspace ----------

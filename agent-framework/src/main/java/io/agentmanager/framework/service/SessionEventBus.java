@@ -11,8 +11,6 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import io.agentmanager.framework.controller.AgentEventSseSerializer;
 import io.agentscope.core.event.AgentEvent;
 import reactor.core.publisher.Flux;
@@ -36,8 +34,6 @@ import reactor.core.publisher.Sinks;
 public class SessionEventBus {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventBus.class);
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** session_id → Sinks.Many<EnvelopedEvent> */
     private final ConcurrentHashMap<String, Sinks.Many<SessionEventStore.EnvelopedEvent>> sinks =
@@ -76,9 +72,11 @@ public class SessionEventBus {
     /**
      * 发射一个 agent 事件。
      * 1. 持久化到 session_event 表
-     * 2. 包装为 EnvelopedEvent 广播给所有 SSE 订阅者
+     * 2. 包装为 EnvelopedEvent 广播给所有 SSE 订阅者（持久化失败时**不广播**，见下）
      *
-     * @return 分配的 seq；-1 表示持久化失败（但实时广播仍会尝试）
+     * @return 分配的 seq；-1 表示持久化失败——该事件永不落库，广播它会产生一条
+     *         回放（断连续传、/subscribe 重放）永远补不出来的实时帧，因此跳过广播
+     *         （失败细节由 RedisEventLog.fail 的分级日志承担）
      */
     public int emit(String sessionId, AgentEvent event, String replyId) {
         return emit(sessionId, event, replyId, null);
@@ -91,6 +89,9 @@ public class SessionEventBus {
      */
     public int emit(String sessionId, AgentEvent event, String replyId, String payloadOverride) {
         String payload = payloadOverride != null ? payloadOverride : AgentEventSseSerializer.payload(event);
+        // replyId 注入前移到写路径（A1）：落库 p 字段与广播 data 从此同源（同一份字符串），
+        // 读端对存量行（p 内无 replyId）兜底注入即可，不再逐帧重序列化
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId);
         String type = event.getType().name();
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
@@ -98,15 +99,22 @@ public class SessionEventBus {
             log.debug("[EventBus] emit: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
         }
 
-        var sink = sinks.get(sessionId);
-        if (sink != null) {
-            var enveloped = new SessionEventStore.EnvelopedEvent(
-                seq > 0 ? seq : 0, type, payload, replyId);
-            var result = sink.tryEmitNext(enveloped);
-            if (result.isFailure()) {
-                log.debug("SessionEventBus: emit to sink failed (sid={}, result={})",
-                    sessionId, result);
+        if (seq >= 1) {
+            var sink = sinks.get(sessionId);
+            if (sink != null) {
+                var enveloped = new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId);
+                var result = sink.tryEmitNext(enveloped);
+                if (result.isFailure()) {
+                    log.debug("SessionEventBus: emit to sink failed (sid={}, result={})",
+                        sessionId, result);
+                }
             }
+        } else {
+            // 持久化失败（seq=-1）：不广播。实时渲染一条回放永远补不出来的帧，只会让
+            // 实时与回放两份视图分叉；这里只 debug 记一笔，失败细节已由 RedisEventLog.fail
+            // 按 ERROR/WARN 分级打过，避免 Redis 故障期每事件一条的重复噪音（A3）
+            log.debug("[EventBus] emit skipped broadcast (persist failed): sid={}, type={}, replyId={}",
+                sessionId, type, replyId);
         }
 
         touchActive(sessionId);
@@ -118,15 +126,22 @@ public class SessionEventBus {
      * 同上流程，但不来自 AgentEvent。
      */
     public int emitSynthetic(String sessionId, String replyId, String type, String payload) {
+        // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId);
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
         log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
 
-        var sink = sinks.get(sessionId);
-        if (sink != null) {
-            var enveloped = new SessionEventStore.EnvelopedEvent(
-                seq > 0 ? seq : 0, type, payload, replyId);
-            sink.tryEmitNext(enveloped);
+        if (seq >= 1) {
+            var sink = sinks.get(sessionId);
+            if (sink != null) {
+                var enveloped = new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId);
+                sink.tryEmitNext(enveloped);
+            }
+        } else {
+            // 同 emit（A3）：持久化失败不广播，不留一条回放永远补不出来的实时帧
+            log.debug("[EventBus] emitSynthetic skipped broadcast (persist failed): sid={}, type={}, replyId={}",
+                sessionId, type, replyId);
         }
 
         touchActive(sessionId);
@@ -150,13 +165,13 @@ public class SessionEventBus {
         Flux<ServerSentEvent<String>> replay = Flux.defer(() -> {
             if (afterSeq < 0) return Flux.empty();
             return eventStore.queryAfter(sessionId, replyId, afterSeq)
-                .map(this::toSSE);
+                .map(AgentEventSseSerializer::toSseFrame);
         });
 
         // 2. 实时事件流（过滤 replyId）
         Flux<ServerSentEvent<String>> live = sink.asFlux()
             .filter(e -> replyId == null || replyId.isBlank() || replyId.equals(e.replyId()))
-            .map(this::toSSE);
+            .map(AgentEventSseSerializer::toSseFrame);
 
         // 3. 心跳流：SSE comment 帧，不触发前端 onmessage，但重置 Nginx 超时计时器
         Flux<ServerSentEvent<String>> heartbeat = Flux.interval(heartbeatInterval)
@@ -272,25 +287,5 @@ public class SessionEventBus {
 
     private void touchActive(String sessionId) {
         lastActiveAt.put(sessionId, Instant.now());
-    }
-
-    private ServerSentEvent<String> toSSE(SessionEventStore.EnvelopedEvent e) {
-        String data = e.payload();
-        // 将 replyId 注入 payload JSON，使前端合成事件（file_ready/waiting/error）也能获得 replyId
-        if (e.replyId() != null && !e.replyId().isBlank()) {
-            try {
-                var node = MAPPER.readTree(data);
-                if (node != null && node.isObject() && !node.has("replyId")) {
-                    ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", e.replyId());
-                    data = MAPPER.writeValueAsString(node);
-                }
-            } catch (Exception ex) {
-                // 注入失败不阻塞主链路，使用原始 payload
-            }
-        }
-        return ServerSentEvent.<String>builder()
-            .data(data)
-            .id(String.valueOf(e.seq()))
-            .build();
     }
 }

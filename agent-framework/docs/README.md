@@ -48,6 +48,7 @@
 | [debug-page-refactor-plan.md](debug-page-refactor-plan.md) | Debug 页拆分架构重构，已完成 |
 | [event-system-upgrade-plan.md](event-system-upgrade-plan.md) | 事件体系升级（含逐条作废声明），历史快照 |
 | [a2a-tasks-get-plan.md](a2a-tasks-get-plan.md) | A2A tasks/get + SDK 全量透传，已完成 |
+| [sse-optimization-a1-a5-design.md](sse-optimization-a1-a5-design.md) | SSE 链路优化五项（A1 toSSE 收口 / A2 Tailer 空闲退避 / A3 emit 失败不广播 / A4 控制器桶清理 / A5 TurnFinalizer 抽取），已实施 |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
 

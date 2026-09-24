@@ -63,6 +63,8 @@ agent:
     # 存储后端：注意键名平铺（storage-type 等）与 FileConfig record 字段
     # storageType/storageS3Endpoint 等一一对应——不能嵌套 storage: 层，
     # 否则 binder 匹配不到字段、全部回退默认值（S3 必空导致启动失败）
+    # present_url 外部交付物代理下载的前缀白名单（逗号分隔；空=禁用外部交付，防 SSRF）
+    external-url-prefixes: ${FILE_EXTERNAL_URL_PREFIXES:}
     storage-type: ${FILE_STORAGE_TYPE:local}
     storage-local-dir: ${FILE_STORAGE_LOCAL_DIR:/data/files}
     storage-s3-endpoint: ${FILE_STORAGE_S3_ENDPOINT:}
@@ -95,12 +97,15 @@ agent:
     http-read-timeout-seconds: ${AGENT_HTTP_READ_TIMEOUT_SECONDS:180}
     http-write-timeout-seconds: ${AGENT_HTTP_WRITE_TIMEOUT_SECONDS:30}
     # Memory
+    # 记忆总开关：false = 完全关闭（不注册 memory_* 工具 + 不执行 flush/整合；沙箱不再注入/回写记忆文件）
+    memory-enabled: ${AGENT_MEMORY_ENABLED:true}
     memory-flush-throttle-minutes: ${AGENT_MEMORY_FLUSH_THROTTLE_MINUTES:10}
     memory-consolidation-max-tokens: ${AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS:8000}
     memory-consolidation-min-gap-minutes: ${AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES:60}
     # Compaction
     compaction-trigger-messages: ${AGENT_COMPACTION_TRIGGER_MESSAGES:30}
     compaction-keep-messages: ${AGENT_COMPACTION_KEEP_MESSAGES:10}
+    # 压缩前先刷写记忆（记忆 hooks 关闭时此项失效）
     compaction-flush-before-compact: ${AGENT_COMPACTION_FLUSH_BEFORE_COMPACT:true}
     compaction-offload-before-compact: ${AGENT_COMPACTION_OFFLOAD_BEFORE_COMPACT:true}
     # HikariCP（毫秒）

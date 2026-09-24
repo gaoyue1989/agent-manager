@@ -23,9 +23,12 @@ async function loadDb() {
   try {
     data = await ctx.api.getDatabaseStatus();
   } catch (e) {
+    if (!ctx) return; // 已切走（unmount 置空 ctx）：丢弃过期渲染，避免读 null 的 utils
     body.innerHTML = '<div class="empty error-text">Failed to load database status: ' + ctx.utils.esc(e.message) + '</div>';
     return;
   }
+
+  if (!ctx) return; // await 期间可能已 unmount，过期响应不再渲染
 
   if (!data.connected) {
     body.innerHTML = '<div class="panel"><div class="panel-header"><span class="title">Connection</span></div>' +

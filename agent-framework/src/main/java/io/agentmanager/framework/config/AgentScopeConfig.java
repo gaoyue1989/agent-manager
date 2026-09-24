@@ -115,9 +115,15 @@ public class AgentScopeConfig {
         return spec;
     }
 
+    /**
+     * 沙箱回写服务：依赖 WorkspaceReader（而非裸 BaseStore），保证回写命名空间与读取侧一致
+     * ——{@code agents/{agent}/users/{uid}}（运行时文件）与
+     * {@code agents/{agent}/users/{uid}/skills}（用户技能 L4，key={@code /{技能名}/{路径}}）。
+     */
     @Bean
-    public WorkspaceSyncService workspaceSyncService(DistributedStore distributedStore) {
-        return new WorkspaceSyncService(distributedStore.baseStore());
+    public WorkspaceSyncService workspaceSyncService(
+            io.agentmanager.framework.service.WorkspaceReader workspaceReader) {
+        return new WorkspaceSyncService(workspaceReader);
     }
 
     /**
@@ -129,8 +135,12 @@ public class AgentScopeConfig {
      */
     @Bean
     public io.agentmanager.framework.service.WorkspaceReader workspaceReader(
-            DistributedStore distributedStore, OafConfig oafConfig) {
-        return new io.agentmanager.framework.service.WorkspaceReader(distributedStore, oafConfig.name());
+            DistributedStore distributedStore, OafConfig oafConfig, AgentManagerProperties props) {
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
+        // 记忆总开关传入 WorkspaceReader：false 时运行时文件读取返回空集，
+        // 沙箱注入链路（OpenSandbox.injectRuntimeFilesIfNeeded）拿空文件集后天然 no-op
+        return new io.agentmanager.framework.service.WorkspaceReader(distributedStore, oafConfig.name(),
+            harness.memoryEnabled());
     }
 
     @Bean
@@ -249,15 +259,6 @@ public class AgentScopeConfig {
     }
 
     @Bean
-    public io.agentmanager.framework.tool.OafPackageTools oafPackageTools(
-        io.agentmanager.framework.service.FileAssetStore fileAssetStore,
-        io.agentmanager.framework.service.storage.FileStorage fileStorage,
-        io.agentmanager.framework.config.AgentManagerProperties props
-    ) {
-        return new io.agentmanager.framework.tool.OafPackageTools(fileAssetStore, fileStorage, props);
-    }
-
-    @Bean
     public io.agentmanager.framework.tool.FileTools fileTools(
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
@@ -282,10 +283,9 @@ public class AgentScopeConfig {
     @SuppressWarnings("rawtypes")
     public List<Object> customTools(
         io.agentmanager.framework.tool.BusinessTools businessTools,
-        io.agentmanager.framework.tool.FileTools fileTools,
-        io.agentmanager.framework.tool.OafPackageTools oafPackageTools
+        io.agentmanager.framework.tool.FileTools fileTools
     ) {
-        return java.util.Arrays.asList(businessTools, fileTools, oafPackageTools);
+        return java.util.Arrays.asList(businessTools, fileTools);
     }
 
     io.agentscope.extensions.model.openai.OpenAIChatModel buildChatModel(
@@ -361,9 +361,9 @@ public class AgentScopeConfig {
             // P0: 包装主 model，400 错误时打印请求体 JSON 诊断（排查 Higress 网关注入问题）
             var loggingModel = new io.agentmanager.framework.service.RequestBodyLoggingModelWrapper(model);
 
-            // P1: 包装 memory/compaction 内部 LLM 调用追踪
+            // P1: 包装 compaction 内部 LLM 调用追踪
             // 不设置 .model() 时 harness 回退使用主 model（无 trace），设置包装后行为不变且带 span
-            var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "memory");
+            // （memoryModel 的构造移入下方 memoryEnabled 分支：记忆关闭时不构造）
             var compactionModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "compaction");
 
             // 自定义 Toolkit：注册自定义工具 + MCP 工具（Harness 工具由框架自动注册）
@@ -447,20 +447,36 @@ public class AgentScopeConfig {
                 builder.permissionContext(permissionContext);
             }
 
+            // 记忆装配分支（AGENT_MEMORY_ENABLED 可调）：false 时不仅要跳过 .memory(...)，
+            // 还须显式关闭记忆 hooks 与 memory_* 工具——只去掉 .memory(...) 不算"完全关闭"，
+            // SDK 仍会以内置默认装配记忆钩子/工具（disableMemoryHooks + disableMemoryTools 双关）
+            if (harness.memoryEnabled()) {
+                // P1: 包装 memory 内部 LLM 调用追踪（flush + consolidation LLM 调用 span）
+                var memoryModel = new io.agentmanager.framework.service.TracingModelWrapper(loggingModel, "memory");
+                builder
+                    // 记忆管理（AGENT_MEMORY_* 可调）
+                    .memory(MemoryConfig.builder()
+                        .flushTrigger(MemoryConfig.FlushTrigger.throttled(
+                            Duration.ofMinutes(harness.memoryFlushThrottleMinutes())))
+                        .consolidationMaxTokens(harness.memoryConsolidationMaxTokens())
+                        .consolidationMinGap(Duration.ofMinutes(harness.memoryConsolidationMinGapMinutes()))
+                        .model(memoryModel)            // ← 包装后的 model（flush + consolidation LLM 调用 span）
+                        .build());
+            } else {
+                builder.disableMemoryHooks().disableMemoryTools();
+                log.info("Memory fully disabled (agent.harness.memory-enabled=false)");
+            }
+
             var agent = builder
-                // 记忆管理（AGENT_MEMORY_* 可调）
-                .memory(MemoryConfig.builder()
-                    .flushTrigger(MemoryConfig.FlushTrigger.throttled(
-                        Duration.ofMinutes(harness.memoryFlushThrottleMinutes())))
-                    .consolidationMaxTokens(harness.memoryConsolidationMaxTokens())
-                    .consolidationMinGap(Duration.ofMinutes(harness.memoryConsolidationMinGapMinutes()))
-                    .model(memoryModel)            // ← 新增：包装后的 model（flush + consolidation LLM 调用 span）
-                    .build())
                 // 上下文压缩（AGENT_COMPACTION_* 可调）
                 .compaction(CompactionConfig.builder()
                     .triggerMessages(harness.compactionTriggerMessages())
                     .keepMessages(harness.compactionKeepMessages())
-                    .flushBeforeCompact(harness.compactionFlushBeforeCompact())
+                    // 记忆总开关关闭时强制不刷写：SDK 2.0.3 的压缩前 flush 走 CompactionMiddleware
+                    // 内部自建的 MemoryFlushManager（仅判 CompactionConfig.isFlushBeforeCompact()），
+                    // 不经 disableMemoryHooks —— 不在此处置 false，压缩阈值触发仍会发起记忆抽取
+                    // LLM 调用并写 MEMORY.md/memory/，违反"完全关闭"
+                    .flushBeforeCompact(harness.memoryEnabled() && harness.compactionFlushBeforeCompact())
                     .offloadBeforeCompact(harness.compactionOffloadBeforeCompact())
                     .model(compactionModel)        // ← 新增：包装后的 model（compaction LLM 调用 span）
                     .build())

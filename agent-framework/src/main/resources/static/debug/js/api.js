@@ -2,9 +2,24 @@
 
 const BASE = window.location.pathname.replace(/\/debug\/?.*$/, '') || '';
 
+/**
+ * 统一构造 HTTP 错误：优先透出后端 body.message（not_found / invalid_user_id / 中文原因等），
+ * 并把 HTTP 状态挂到 err.status 上——调用方需要按状态分流（如只有 404 才回落到“新建”）。
+ */
+async function httpError(resp, path) {
+  let msg = 'HTTP ' + resp.status + ' ' + path;
+  try {
+    const j = await resp.json();
+    if (j && j.message) msg = j.message;
+  } catch (e) { /* 非 JSON 响应：保留 HTTP 状态文案 */ }
+  const err = new Error(msg);
+  err.status = resp.status;
+  return err;
+}
+
 async function get(path) {
   const resp = await fetch(BASE + path);
-  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + path);
+  if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
@@ -14,17 +29,13 @@ async function post(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + path);
+  if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
 async function del(path) {
   const resp = await fetch(BASE + path, { method: 'DELETE' });
-  if (!resp.ok) {
-    let msg = 'HTTP ' + resp.status;
-    try { const j = await resp.json(); if (j && j.message) msg = j.message; } catch (e) {}
-    throw new Error(msg);
-  }
+  if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
@@ -34,11 +45,7 @@ async function put(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  if (!resp.ok) {
-    let msg = 'HTTP ' + resp.status;
-    try { const j = await resp.json(); if (j && j.message) msg = j.message; } catch (e) {}
-    throw new Error(msg);
-  }
+  if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
@@ -64,11 +71,7 @@ export const api = {
       method: 'POST',
       body: formData
     });
-    if (!resp.ok) {
-      let msg = 'HTTP ' + resp.status;
-      try { const j = await resp.json(); if (j && j.message) msg = j.message; } catch (e) {}
-      throw new Error(msg);
-    }
+    if (!resp.ok) throw await httpError(resp, '/skills/upload');
     return resp.json();
   },
   deleteSkill: (name) => del('/skills/' + encodeURIComponent(name)),
@@ -77,6 +80,20 @@ export const api = {
   updateSkillContent: (name, content) => put('/skills/' + encodeURIComponent(name) + '/content', { content }),
   getMcpServers: () => get('/mcp'),
   getMetadata: (includeDetails = false) => get('/metadata?includeDetails=' + includeDetails),
+
+  // 用户技能（L4 个人覆盖，agent_fs KV：agents/{agent}/users/{userId}/skills）
+  // 索引：/debug/user-skills（调试面）；明细读写：/skills/users/{userId}/{name}
+  getUserSkillUsers: () => get('/debug/user-skills'),
+  getUserSkills: (userId) => get('/skills/users/' + encodeURIComponent(userId)),
+  getUserSkill: (userId, name, file) =>
+    get('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name) +
+      (file ? '?file=' + encodeURIComponent(file) : '')),
+  putUserSkill: (userId, name, content) =>
+    put('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name), { content }),
+  deleteUserSkill: (userId, name) =>
+    del('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name)),
+  syncUserSkillFromPackage: (userId, name) =>
+    post('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name) + '/sync-from-package', {}),
 
   // 调试数据
   getEnvConfig: () => get('/debug/config/env'),
@@ -314,11 +331,7 @@ export const api = {
       method: 'POST',
       body: formData
     });
-    if (!resp.ok) {
-      let msg = 'HTTP ' + resp.status;
-      try { const j = await resp.json(); if (j && j.message) msg = j.message; } catch (e) {}
-      throw new Error(msg);
-    }
+    if (!resp.ok) throw await httpError(resp, '/files/upload');
     return resp.json();
   },
 

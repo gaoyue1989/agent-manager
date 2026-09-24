@@ -152,6 +152,9 @@ func registerTools(s *mcp.Server, core *service.Core) {
 		})
 	})
 
+	// ---- OAF 包生成（发布助手对话式打包，语义自 agent-framework 迁入） ----
+	registerOafTools(s, core)
+
 	// ---- 服务发布与管理 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "publish_service",

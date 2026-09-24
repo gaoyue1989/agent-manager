@@ -52,7 +52,7 @@ public class FileControllerTest {
             "/config", "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
             new AgentManagerProperties.FileConfig(true, 20, 20,
                 AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME,
-                5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files"),
+                5, 15, 50, true, 7, "local", "/tmp/test-files", "", "", "", "agent-files", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults());
     }
@@ -114,7 +114,7 @@ public class FileControllerTest {
         var disabled = new AgentManagerProperties(
             props.llm(), props.server(), props.checkpoint(), "/config", "",
             props.cleanup(), new AgentManagerProperties.FileConfig(false, 20, 20,
-                "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b"),
+                "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults());
         var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxConfig.class));
@@ -227,5 +227,86 @@ public class FileControllerTest {
         var def = AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME;
         assertTrue(FileController.mimeAllowed("application/zip", def));
         assertTrue(FileController.mimeAllowed("application/x-zip-compressed", def));
+    }
+
+    // ===== 外部交付物代理下载（storage_type=external，present_url 登记行）=====
+
+    private AgentManagerProperties propsWithExternalPrefix(String prefixes) {
+        var f = props.file();
+        return new AgentManagerProperties(props.llm(), props.server(), props.checkpoint(),
+            "/config", "", props.cleanup(), new AgentManagerProperties.FileConfig(f.uploadEnabled(),
+                f.uploadMaxMb(), f.uploadMaxPending(), f.uploadAllowedMime(), f.imageMaxMb(),
+                f.imageInlineTotalMb(), f.presentMaxMb(), f.downloadEnabled(), f.retentionDays(),
+                f.storageType(), f.storageLocalDir(), f.storageS3Endpoint(), f.storageS3AccessKey(),
+                f.storageS3SecretKey(), f.storageS3Bucket(), prefixes),
+            props.sse(), props.harness());
+    }
+
+    private FileAssetStore.FileAsset externalAsset(String id, String url, String fileName) {
+        return new FileAssetStore.FileAsset(id, "alice", null, null, fileName, fileName,
+            "application/zip", 19, "external", url, "generated", "injected", java.time.LocalDateTime.now());
+    }
+
+    @Test
+    void downloadExternalShouldProxyAllowlistedUrl() throws Exception {
+        var bytes = "ZIP-BYTES-SENTINEL".getBytes(StandardCharsets.UTF_8);
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/pkg/1/download", exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "application/zip");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (var os = exchange.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+        server.start();
+        try {
+            var port = server.getAddress().getPort();
+            var url = "http://127.0.0.1:" + port + "/pkg/1/download";
+            var id = "550e8400-e29b-41d4-a716-446655440010";
+            var c = new FileController(fileStorage, fileAssetStore,
+                propsWithExternalPrefix("http://127.0.0.1:" + port), mock(SandboxConfig.class));
+            when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id, url, "weather-agent.zip")));
+
+            var resp = c.download(id, 0);
+            assertEquals(HttpStatus.OK, resp.getStatusCode());
+            assertEquals("application/zip", resp.getHeaders().getContentType().toString());
+            var cd = resp.getHeaders().getFirst("Content-Disposition");
+            assertTrue(cd != null && cd.contains("weather-agent.zip"), "attachment 含文件名: " + cd);
+            var out = new java.io.ByteArrayOutputStream();
+            resp.getBody().writeTo(out);
+            org.junit.jupiter.api.Assertions.assertArrayEquals(bytes, out.toByteArray(), "代理转发上游字节");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void downloadExternalShouldRejectNonAllowlistedUrl() {
+        var id = "550e8400-e29b-41d4-a716-446655440011";
+        // 白名单为空（未配置 FILE_EXTERNAL_URL_PREFIXES）→ 已登记的 external 行也拒绝代理
+        when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(
+            externalAsset(id, "http://evil.example/pkg.zip", "a.zip")));
+        assertEquals(HttpStatus.FORBIDDEN, controller.download(id, 0).getStatusCode());
+    }
+
+    @Test
+    void downloadExternalShouldReturn502OnUpstreamError() throws Exception {
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/pkg/2/download", exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var port = server.getAddress().getPort();
+            var id = "550e8400-e29b-41d4-a716-446655440012";
+            var c = new FileController(fileStorage, fileAssetStore,
+                propsWithExternalPrefix("http://127.0.0.1:" + port), mock(SandboxConfig.class));
+            when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id,
+                "http://127.0.0.1:" + port + "/pkg/2/download", "a.zip")));
+            assertEquals(HttpStatus.BAD_GATEWAY, c.download(id, 0).getStatusCode());
+        } finally {
+            server.stop(0);
+        }
     }
 }

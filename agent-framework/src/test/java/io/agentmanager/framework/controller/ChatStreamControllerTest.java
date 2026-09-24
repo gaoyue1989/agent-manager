@@ -544,6 +544,92 @@ class ChatStreamControllerTest {
     }
 
     @Test
+    void chatShouldEmitFileReadyForPresentUrl() {
+        // present_url 与 present_file 返回同构 JSON（file_id/file_name/mime_type/size），
+        // 必须走同一条 file_ready 合成链路——外部交付物（如平台 create_oaf_zip 的包
+        // download_url）经 /files/{id} 代理下载，前端实时收到下载卡片。
+        var sessionId = "test-user-zip1";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var fileAssetStore = mock(io.agentmanager.framework.service.FileAssetStore.class);
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            fileAssetStore, mcpToolRegistrar);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip1");
+        var replyId = "r-zip1";
+        var callId = "c-zip1";
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
+            "present_url",
+            "{\"file_id\":\"a795e832-8364-42fd-9a28-2c40697f1851\",\"file_name\":\"test-agent.zip\","
+                + "\"mime_type\":\"application/zip\",\"size\":704}");
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
+            "present_url", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus).emitSynthetic(eq(sessionId), anyString(), eq("file_ready"), payloadCap.capture());
+        var payload = payloadCap.getValue();
+        assertTrue(payload.contains("\"type\":\"file_ready\""), "type 应为 file_ready: " + payload);
+        assertTrue(payload.contains("\"file_id\":\"a795e832-8364-42fd-9a28-2c40697f1851\""),
+            "应携带 file_id: " + payload);
+        assertTrue(payload.contains("\"download_url\":\"/files/a795e832-8364-42fd-9a28-2c40697f1851\""),
+            "download_url 必须是 /files/{id} 相对路径: " + payload);
+        // 回写业务会话与 reply，历史回放才能按会话/消息挂卡片（session_id 不得是网关 gw-hash）
+        verify(fileAssetStore).updateReplyId(eq("a795e832-8364-42fd-9a28-2c40697f1851"), anyString());
+        verify(fileAssetStore).updateSessionId(eq("a795e832-8364-42fd-9a28-2c40697f1851"), eq(sessionId));
+    }
+
+    @Test
+    void chatShouldEmitFileReadyForPresentUrlWhenResultTruncated() {
+        // 结果体超出 64KB 结果桶被截尾后全文 JSON 解析必失败（大结果卸载/超长字段的
+        // 通用场景）——file_id 等头部字段仍在，正则兜底应救回下载卡片。
+        var sessionId = "test-user-zip2";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip2");
+        var replyId = "r-zip2";
+        var callId = "c-zip2";
+        var head = "{\"file_id\":\"12344321-8364-42fd-9a28-2c40697f1851\",\"file_name\":\"big-package.zip\","
+            + "\"mime_type\":\"application/zip\",\"size\":90000,\"content_base64\":\""
+            + "UEsDBAoAAAAA".repeat(9000); // 远超 64KB，且无闭合引号/花括号（模拟截尾）
+        assertTrue(head.length() > 64 * 1024, "用例前提：结果超 64KB 桶上限");
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
+            "present_url", head);
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
+            "present_url", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus).emitSynthetic(eq(sessionId), anyString(), eq("file_ready"), payloadCap.capture());
+        var payload = payloadCap.getValue();
+        assertTrue(payload.contains("\"file_id\":\"12344321-8364-42fd-9a28-2c40697f1851\""),
+            "截尾结果也应提取到 file_id: " + payload);
+        assertTrue(payload.contains("\"file_name\":\"big-package.zip\""), "应提取到 file_name: " + payload);
+        assertTrue(payload.contains("\"size\":90000"), "应提取到 size: " + payload);
+    }
+
+    @Test
     void serializerShouldIncludeUiMetadataOnToolCallStart() {
         var tc = new io.agentscope.core.event.ToolCallStartEvent("reply-u", "call-u", "get_weather");
         String json = AgentEventSseSerializer.payload(tc, "ui://weather/mcp-app.html", "weather");
@@ -856,5 +942,145 @@ class ChatStreamControllerTest {
         collect(sessionId, "write note", null);
 
         verify(workspaceReader).writeWorkspaceFile(eq("debug-user"), eq("note.txt"), eq("hi"));
+    }
+
+    // ===== A4：工具桶按 turn 粒度登记、收尾清理 =====
+
+    @Test
+    void bucketsAreEmptyAfterFullWriteFileAndPresentFileFlows() {
+        // 快乐路径不回归：write_file / present_file 完整流程后三个桶计数为 0
+        // （End/合成路径本就 remove，收尾清桶的 remove 幂等，不双删报错）
+        var sessionId = "test-user-bk1";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-bk1");
+        when(sandboxConfig.enabled()).thenReturn(false);
+
+        var replyId = "r-bk1";
+        var wfCall = "c-bk1-wf";
+        var pfCall = "c-bk1-pf";
+        var tcStart = new io.agentscope.core.event.ToolCallStartEvent(replyId, wfCall, "write_file");
+        var tcDelta = new io.agentscope.core.event.ToolCallDeltaEvent(
+            replyId, wfCall, "write_file", "{\"path\":\"bk.txt\",\"content\":\"x\"}");
+        var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, wfCall, "write_file");
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, pfCall,
+            "present_file", "{\"file_id\":\"f-bk1\",\"file_name\":\"a.png\"}");
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, pfCall,
+            "present_file", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just(
+                (AgentEvent) tcStart, (AgentEvent) tcDelta, (AgentEvent) tcEnd,
+                (AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+        when(workspaceReader.writeWorkspaceFile(anyString(), eq("bk.txt"), eq("x"))).thenReturn(true);
+
+        collect(sessionId, "buckets happy path", "alice");
+
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-bk1");
+        awaitBucketCount(0, 3000);
+        assertEquals(0, controller.bucketEntryCount(), "完整流程后三个桶应全部清空");
+    }
+
+    @Test
+    void bucketsClearedWhenSourceStreamErrorsMidToolCall() {
+        // 异常路径：ToolCallStart/Delta 登记（建桶）后源流直接 error——End 事件永远不来，
+        // 收尾清桶兜底，条目不得跨 turn 存活
+        var sessionId = "test-user-bk2";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-bk2");
+        when(sandboxConfig.enabled()).thenReturn(false);
+
+        var callA = "call-bk2";
+        var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-bk2", callA, "write_file");
+        var tcDelta = new io.agentscope.core.event.ToolCallDeltaEvent(
+            "r-bk2", callA, "write_file", "{\"path\":\"a.txt\",\"content\":\"a\"}");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) tcDelta)
+                .concatWith(Flux.error(new IllegalStateException("boom"))));
+
+        collect(sessionId, "error mid tool", "alice");
+
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-bk2");
+        awaitBucketCount(0, 3000);
+        assertEquals(0, controller.bucketEntryCount(), "源流 error 收尾后本 turn 登记的桶应清空");
+        assertNull(controller.registeredToolName(callA), "登记表条目应一并清除");
+    }
+
+    @Test
+    void cleanupRemovesOnlyOwnTurnKeysAcrossSequentialTurns()
+            throws Exception {
+        // 并行 turn 防误删（顺序两 turn 共用同一 session）：turn A 异常收尾只清 A 的 key；
+        // turn B 进行中 B 的在用 key 必须仍在、A 的 key 不得复活；B 收尾后同样清空
+        var sessionId = "test-user-bk3";
+        when(sandboxConfig.enabled()).thenReturn(false);
+        var tokens = new java.util.concurrent.atomic.AtomicInteger();
+        when(turnLeaseStore.tryAcquire(sessionId)).thenAnswer(inv ->
+            "tok-bk3-" + tokens.incrementAndGet());
+
+        // ---- turn A：ToolCallStart/Delta 后源流 error ----
+        var callA = "call-bk3-A";
+        var tcStartA = new io.agentscope.core.event.ToolCallStartEvent("r-A", callA, "write_file");
+        var tcDeltaA = new io.agentscope.core.event.ToolCallDeltaEvent(
+            "r-A", callA, "write_file", "{\"path\":\"a.txt\",\"content\":\"a\"}");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) tcStartA, (AgentEvent) tcDeltaA)
+                .concatWith(Flux.error(new IllegalStateException("boom"))));
+
+        collect(sessionId, "turn A", "alice");
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-bk3-1");
+        awaitBucketCount(0, 3000);
+        assertNull(controller.registeredToolName(callA), "A 的 key 应随异常收尾清空");
+
+        // ---- turn B：手动 sink 编排，观察「B 进行中」的桶状态 ----
+        var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
+        var subscribed = new CountDownLatch(1);
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+        var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "turn B", "alice"));
+        assertTrue(subscribed.await(3, TimeUnit.SECONDS), "controller 未订阅 agent 事件流");
+
+        var callB = "call-bk3-B";
+        events.tryEmitNext(new io.agentscope.core.event.ToolCallStartEvent("r-B", callB, "write_file"));
+        events.tryEmitNext(new io.agentscope.core.event.ToolCallDeltaEvent(
+            "r-B", callB, "write_file", "{\"path\":\"b.txt\",\"content\":\"b\"}"));
+
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline && controller.registeredToolName(callB) == null) {
+            sleep(10);
+        }
+        assertEquals("write_file", controller.registeredToolName(callB), "B 的在用 key 必须仍在");
+        assertNull(controller.registeredToolName(callA), "A 的 key 不得在 B 的 turn 中复活");
+        assertEquals(2, controller.bucketEntryCount(),
+            "B 进行中应恰好 2 条（toolCallNames + writeFileInputBuffers 各一）");
+
+        events.tryEmitNext(new AgentEndEvent("r-B"));
+        events.tryEmitComplete();
+
+        framesFuture.get(5, TimeUnit.SECONDS);
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-bk3-2");
+        awaitBucketCount(0, 3000);
+        assertEquals(0, controller.bucketEntryCount(), "turn B 收尾后桶应清空");
+    }
+
+    @Test
+    void pureTextTurnLeavesNoBucketEntries() {
+        // 纯文本对话：turnBucketKeys 为空，收尾清桶零操作、无异常
+        var sessionId = "test-user-bk5";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-bk5");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-bk5")));
+
+        collect(sessionId, "hello", null);
+
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-bk5");
+        awaitBucketCount(0, 3000);
+        assertEquals(0, controller.bucketEntryCount(), "纯文本 turn 无桶可清");
+    }
+
+    /** 轮询等待桶计数落到目标值（清桶在 boundedElastic 线程上异步执行） */
+    private void awaitBucketCount(int expected, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline && controller.bucketEntryCount() != expected) {
+            sleep(10);
+        }
     }
 }

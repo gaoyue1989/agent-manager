@@ -21,9 +21,9 @@ OAF 发布平台前端（React 19 + Next.js 16 + Tailwind 3，容器化 standalo
 
 ## 关键实现约定
 
-- **同源反代**（next.config.ts rewrites）：
-  - `/api/v1/*` → platform-backend svc:8080
-  - `/agent/release-agent/*` → release-agent svc:8100（对话单次流/confirm-stream）
+- **同源反代**（src/proxy.ts，Next 16 proxy 约定，请求期读取 `process.env`，按部署环境用 Deployment env 配置即可，无需重建镜像；未设置时回退集群内默认地址。不可用 next.config.ts rewrites——rewrites() 在构建期求值并烘焙进 standalone server.js 的 `_originalRewrites`，运行时环境变量无法覆盖）：
+  - `/api/v1/*` → `$BACKEND_INTERNAL_URL/api/v1/*`（默认 platform-backend svc:8080）
+  - `/agent/release-agent/*` → `$AGENT_INTERNAL_URL/*` 去前缀转发（默认 release-agent svc:8100；对话单次流/confirm-stream）
 - **对话单次流解析**（assistant/page.tsx consumeStream）：fetch ReadableStream 手解 SSE `data:` 帧；TEXT_BLOCK_DELTA 增量必须落到「最后一条 assistant 气泡」（工具状态行固定插在其前：步骤在上、答案在下）；permission_ask 渲染确认卡片 → POST confirm-stream
 - **HTTP 非安全上下文无 crypto.randomUUID**——sessionId 用时间戳+随机串兜底（localStorage 持久化）
 - 列表/详情均 5s 轮询实时状态；操作后手动 load() 全刷

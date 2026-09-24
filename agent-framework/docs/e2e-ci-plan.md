@@ -228,6 +228,7 @@ e2e/scripts/run.sh <group> # env-up → npx playwright test --project=<group> �
 | `[E2E:tool:read](<path>)` | 返回 tool_calls `read_file` | F1（读上传文件）、X3 |
 | `[E2E:tool:present](<file>)` | 返回 tool_calls `present_file` | F5 |
 | `[E2E:file:deliver](<file>,<content>)` | 两段式：先 `write_file`，tool 结果回流后再 `present_file` | F5/F6/F10（输出文档交付） |
+| `[E2E:oaf:package]` | 返回 tool_calls `create_oaf_zip`（手工合成夹具，frontmatter 校验必过），tool 结果回流后收尾文本 | F12/U13（OAF 打包交付） |
 | `[E2E:tool:mcp_echo](<text>)` | 返回 tool_calls `bench_echo`（MCP） | S5 |
 | `[E2E:hitl:submit](<app>)` | 返回 tool_calls `submit_application`（ask 工具） | H1-H6、U4/U5 |
 | `[E2E:mcpapp:form](<app>)` | 返回 tool_calls `show_application_form`（ui:// 工具） | M1、U6 |
@@ -347,6 +348,7 @@ agent-config/
 | F9 | 用户键解析与 pending 隔离 | body `userId` 与 header `X-User-Id` 分别上传；user A 灌满 pending 后 user B 上传 | header 优先于 body（`FileController.java:206-211`）：同 fileId 归属与 pending 计数按 header 键走（经 F1 读文件行为区分）；A 429 时 B 仍 200（userKey 维度隔离） |
 | F10 | history 文件卡片补齐 | F5 完成后 GET `/threads/{sid}/history` | 消息中文件交付项含下载卡片信息（file_id/download_url 补齐，ThreadController 卡片补齐语义）；刷新/换端恢复后卡片可再下载 |
 | F11 | 会话删除级联文件语义 | F1 会话 DELETE `/threads/{sid}` 后 | file_asset 行级联清理（`SessionCleanupService` 联动语义，经下载 404 或保留策略按当前实现固化——行为记录型断言，实施时锁定） |
+| F12 | create_oaf_zip 打包交付（2026-09-24 发布助手无法下载 OAF 包回归门禁） | `[E2E:oaf:package]` 单 turn：create_oaf_zip 打包登记 | SSE 在 create_oaf_zip 的 `TOOL_RESULT_END` 后出现 `file_ready{file_id,file_name=e2e-oaf-agent.zip,download_url=/files/{uuid}}`；`GET download_url` 200 且字节为 zip（PK 魔数）；`GET /threads/{sid}/history` 的 `files` 按业务会话含该 file_id（file_asset.session_id 绑定断裂——落网关 gw-hash——即在此红） |
 
 ### 5.3 R 组 — 刷新续传与多副本（e2e-multi；R1 亦入 core）
 
@@ -412,6 +414,7 @@ agent-config/
 | U9 | 多副本 UI 冒烟（multi job） | U2/U7 在 LB 入口重跑 | 页面行为对随机路由无感知（多副本对前端透明） |
 | U10 | 文件上传对话（UI） | 附件按钮上传 note.txt → 发送 `[E2E:tool:read](uploads/note.txt)` | 上传出现附件预览条；回复含 read_file 工具行 + 文件内容摘录；图片上传呈缩略预览（image 内联路径的 UI 面） |
 | U11 | 文件交付下载卡片（UI） | `[E2E:file:deliver]` → 消息内下载卡片 → 点击下载 → 切走会话再切回 | `file_ready` 卡片渲染（文件名/大小）；下载触发浏览器下载且内容正确；历史回放（U3 切换/刷新）后卡片仍在且可下载（F10 的 UI 面） |
+| U13 | create_oaf_zip 打包下载卡片（UI，2026-09-24 回归门禁；oaf-package 夹具不含 edit_file 不受 D8 影响，替 fixme 的 U11 把文件卡片链路留在门禁内） | `[E2E:oaf:package]` → 实时下载卡片 → 刷新后按 data-sid 点选原会话回放 | `file_ready` 卡片实时渲染（含 e2e-oaf-agent.zip 文件名）；历史回放（按 active 项 data-sid 精确点选，列表首位因记忆提取后台刷新 updated_at 不可靠）后卡片仍在（F12 的 UI 面） |
 
 ### 5.8 A 组 — A2A（e2e-core）
 

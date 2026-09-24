@@ -90,12 +90,10 @@ class AgentScopeConfigTest {
                     return null;
                 }
             });
-        var oafTools = config.oafPackageTools(
-            mock(io.agentmanager.framework.service.FileAssetStore.class),
-            mock(io.agentmanager.framework.service.storage.FileStorage.class),
-            propsForLlm());
-        assertEquals(java.util.Arrays.asList(tool, fileTools, oafTools),
-            config.customTools(tool, fileTools, oafTools));
+        // OafPackageTools 已迁移至 backend MCP（check_oaf_package/create_oaf_zip），
+        // 自定义工具只剩框架通用能力（BusinessTools + FileTools）
+        assertEquals(java.util.Arrays.asList(tool, fileTools),
+            config.customTools(tool, fileTools));
     }
 
     @Test
@@ -120,7 +118,7 @@ class AgentScopeConfigTest {
             "/config", "", cleanupConfig(), emptyFileConfig(),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             new AgentManagerProperties.HarnessConfig(
-                20, 30, 180, 30, 10, 8000, 60,
+                20, 30, 180, 30, true, 10, 8000, 60,
                 30, 10, true, true, 7, 1, 5000L, 60000L, 900000L));
 
         var ds = config.dataSource(props);
@@ -192,19 +190,19 @@ class AgentScopeConfigTest {
     void permissionContextShouldBeNullWhenNothingDeclared() {
         assertNull(config.buildPermissionContext(
             oafForPermission(false, java.util.Map.of()), permCfg(java.util.Map.of(), java.util.Set.of()),
-            java.util.Set.of("create_oaf_zip")));
+            java.util.Set.of("present_url")));
     }
 
     @Test
     void customToolAskDeclarationShouldEnablePermissionSystem() {
         var ctx = config.buildPermissionContext(
-            oafForPermission(false, java.util.Map.of("create_oaf_zip", "ask")),
+            oafForPermission(false, java.util.Map.of("present_url", "ask")),
             permCfg(java.util.Map.of(), java.util.Set.of()),
-            java.util.Set.of("create_oaf_zip", "echo"));
+            java.util.Set.of("present_url", "echo"));
 
         assertNotNull(ctx, "custom tool declaration alone should enable permission system");
-        assertTrue(ctx.getAskRules().containsKey("create_oaf_zip"));
-        assertFalse(ctx.getAllowRules().containsKey("create_oaf_zip"), "ask must replace auto-allow");
+        assertTrue(ctx.getAskRules().containsKey("present_url"));
+        assertFalse(ctx.getAllowRules().containsKey("present_url"), "ask must replace auto-allow");
         // 未声明的自定义工具与内置工具保持自动放行
         assertTrue(ctx.getAllowRules().containsKey("echo"));
         assertTrue(ctx.getAllowRules().containsKey("write_file"));
@@ -238,12 +236,12 @@ class AgentScopeConfigTest {
         var ctx = config.buildPermissionContext(
             oafForPermission(true, java.util.Map.of()),
             permCfg(java.util.Map.of(), java.util.Set.of("mcp_publish")),
-            java.util.Set.of("create_oaf_zip"));
+            java.util.Set.of("present_url"));
 
         // require_confirmation=true 仅兜底 MCP 工具；自定义工具未声明仍自动放行
         assertTrue(ctx.getAskRules().containsKey("mcp_publish"));
-        assertTrue(ctx.getAllowRules().containsKey("create_oaf_zip"));
-        assertFalse(ctx.getAskRules().containsKey("create_oaf_zip"));
+        assertTrue(ctx.getAllowRules().containsKey("present_url"));
+        assertFalse(ctx.getAskRules().containsKey("present_url"));
     }
 
     /**
@@ -292,7 +290,7 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties.FileConfig emptyFileConfig() {
         return new AgentManagerProperties.FileConfig(true, 20, 20,
             "image/*,text/plain,text/markdown,text/csv,application/pdf",
-            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files");
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", "");
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
@@ -317,6 +315,72 @@ class AgentScopeConfigTest {
         var model = config.buildChatModel(llm, harnessConfig());
 
         assertEquals(0, model.getContextWindowSize());
+    }
+
+    // ---------- AGENT_MEMORY_ENABLED：记忆总开关（完全关闭 = hooks + tools + 沙箱门控） ----------
+
+    @Test
+    void defaultsShouldEnableMemory() {
+        assertTrue(AgentManagerProperties.HarnessConfig.defaults().memoryEnabled(),
+            "AGENT_MEMORY_ENABLED 缺省必须为 true（行为与历史版本一致）");
+    }
+
+    /**
+     * 全量构建 harnessAgent 并返回 toolkit 注册的工具名集合。
+     * 依赖项与现有用例同口径打桩：真实 InMemoryStore 兜底 DistributedStore（框架构建期会触碰），
+     * 权限规则为空集（buildPermissionContext 返回 null，零侵入路径）。
+     */
+    private java.util.Set<String> buildAgentToolNames(AgentManagerProperties.HarnessConfig harness) throws Exception {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("memory-switch-test"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf)).thenReturn(permCfg(java.util.Map.of(), java.util.Set.of()));
+
+        var store = org.mockito.Mockito.mock(DistributedStore.class);
+        when(store.baseStore()).thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        // SDK build() 校验 RemoteFilesystemSpec 必须搭配分布式 state store（拒绝 JsonFile/InMemory
+        // 两种本地实现），mock 一即可通过校验（isLocalSession 仅 instanceof 这两个类）
+        when(store.agentStateStore())
+            .thenReturn(org.mockito.Mockito.mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0),
+            emptyServer(), emptyCheckpoint(), "/config", "", cleanupConfig(), emptyFileConfig(),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300), harness);
+
+        var agent = config.harnessAgent(props, store, oaf, ws, mcp,
+            List.of(new BusinessTools()), new LLMLogger(), null, null, null);
+        return new java.util.TreeSet<>(agent.getToolkit().getToolNames());
+    }
+
+    @Test
+    void agentWithMemoryDisabledShouldExcludeMemoryTools() throws Exception {
+        // memoryEnabled=false：完全关闭 = 不注册 memory_search / memory_get / memory_save
+        var harness = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, false, 10, 8000, 60,
+            30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+        var names = buildAgentToolNames(harness);
+
+        assertFalse(names.contains("memory_search"), "memory 关闭时不应注册 memory_search");
+        assertFalse(names.contains("memory_get"), "memory 关闭时不应注册 memory_get");
+        assertFalse(names.contains("memory_save"), "memory 关闭时不应注册 memory_save");
+    }
+
+    @Test
+    void agentWithDefaultMemoryShouldIncludeMemoryTools() throws Exception {
+        // 默认（memoryEnabled=true）：三个 memory_* 工具照常注册
+        var names = buildAgentToolNames(harnessConfig());
+
+        assertTrue(names.contains("memory_search"), "memory 默认开启时应注册 memory_search");
+        assertTrue(names.contains("memory_get"), "memory 默认开启时应注册 memory_get");
+        assertTrue(names.contains("memory_save"), "memory 默认开启时应注册 memory_save");
     }
 
     private static AgentManagerProperties.ServerConfig emptyServer() {
