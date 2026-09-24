@@ -23,7 +23,7 @@ import io.agentmanager.framework.service.OafReloadService;
  *   <li>agent：整包重建 HarnessAgent（含 MCP 全量注册）；</li>
  * </ul>
  *
- * <p>触发方保证"PVC 写完再触发"；失败时旧配置继续服务，返回 502 + 结构化错误。
+ * <p>触发方保证"PVC 写完再触发"；失败时旧配置继续服务，返回 500 + 结构化错误。
  * 鉴权：与 /debug/* 同级（集群内网入口后），未启用独立 token（开放问题 2）。
  */
 @RestController

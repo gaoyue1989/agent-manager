@@ -181,7 +181,13 @@ public class OafReloadService {
      * A 路径单 server 版（显式指定 server 的运维场景）。
      */
     public synchronized ReloadResult reloadMcpServer(String serverName) {
-        var oafConfig = oafConfigHolder.get();
+        OafConfig oafConfig;
+        try {
+            oafConfig = oafConfigLoader.load();
+        } catch (Exception e) {
+            return new ReloadResult("mcp", false, false, List.of(),
+                "frontmatter re-parse failed: " + e.getMessage());
+        }
         var mcpOpt = oafConfig.mcpServers().stream()
             .filter(m -> m.server().equals(serverName))
             .findFirst();
@@ -201,6 +207,10 @@ public class OafReloadService {
         var wrapper = mcpToolRegistrar.getRegisteredWrapper(serverName);
         entry.put("tool_count", ok && wrapper != null ? safeToolCount(wrapper) : 0);
         detail.add(entry);
+        if (ok) {
+            oafConfigHolder.update(oafConfig);
+            fingerprint.set(scanFingerprint());
+        }
         return new ReloadResult("mcp", true, false, detail, null);
     }
 
