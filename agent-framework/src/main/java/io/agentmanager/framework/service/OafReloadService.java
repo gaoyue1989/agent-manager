@@ -66,6 +66,9 @@ public class OafReloadService {
     /** reload 进行中标记（并发防抖） */
     private final AtomicBoolean reloading = new AtomicBoolean(false);
 
+    /** reload 路径对 MCP 网络 IO 的单步阻塞上限（秒），防 server 挂起永久占住 synchronized 监视器 */
+    private static final long RELOAD_BLOCK_TIMEOUT_SECONDS = 10;
+
     public OafReloadService(
         OafConfigLoader oafConfigLoader,
         OafConfigHolder oafConfigHolder,
@@ -155,17 +158,16 @@ public class OafReloadService {
             }
         }
 
-        // ② 声明中的 server：先摘后建（重连+重列工具即一次完整 reload）
+        // ② 声明中的 server：swap-on-success——先按新配置建好连接，成功才摘旧注册，
+        // required server 不可达时旧注册原样保留（reload 永不比启动更严格）
         for (var mcp : freshConfig.mcpServers()) {
             var entry = new LinkedHashMap<String, Object>();
             entry.put("server", mcp.server());
-            mcpToolRegistrar.clearServer(currentToolkitOrNull(), mcp.server());
-            mcpResourceProxy.evictClient(mcp.server());
-            String registered = registerSafely(mcp);
-            entry.put("action", registered != null ? "reloaded" : "skipped");
-            entry.put("ok", registered != null);
+            boolean ok = reloadServerSwapOnSuccess(mcp);
+            entry.put("action", ok ? "reloaded" : "skipped");
+            entry.put("ok", ok);
             var wrapper = mcpToolRegistrar.getRegisteredWrapper(mcp.server());
-            entry.put("tool_count", wrapper != null ? safeToolCount(wrapper) : 0);
+            entry.put("tool_count", ok && wrapper != null ? safeToolCount(wrapper) : 0);
             detail.add(entry);
         }
 
@@ -193,13 +195,11 @@ public class OafReloadService {
             return new ReloadResult("mcp", true, false, detail,
                 "server '" + serverName + "' not declared in frontmatter mcpServers");
         }
-        mcpToolRegistrar.clearServer(currentToolkitOrNull(), serverName);
-        mcpResourceProxy.evictClient(serverName);
-        String registered = registerSafely(mcpOpt.get());
-        entry.put("action", registered != null ? "reloaded" : "skipped");
-        entry.put("ok", registered != null);
+        boolean ok = reloadServerSwapOnSuccess(mcpOpt.get());
+        entry.put("action", ok ? "reloaded" : "skipped");
+        entry.put("ok", ok);
         var wrapper = mcpToolRegistrar.getRegisteredWrapper(serverName);
-        entry.put("tool_count", wrapper != null ? safeToolCount(wrapper) : 0);
+        entry.put("tool_count", ok && wrapper != null ? safeToolCount(wrapper) : 0);
         detail.add(entry);
         return new ReloadResult("mcp", true, false, detail, null);
     }
@@ -219,7 +219,9 @@ public class OafReloadService {
             Path.of(props.resolvedWorkspaceBaseDir()), newConfig);
         log.info("[Reload] workspace reinitialized at {}", workspacePath);
 
-        // 3. 构建全新 agent（内含新 Toolkit + MCP 全量注册，fail-soft/required 语义与启动一致）
+        // 3. 构建全新 agent（内含新 Toolkit + MCP 全量注册，fail-soft/required 语义与启动一致）。
+        //    必须在 build 前捕获旧注册的 server 名：build 会覆写 registrar 的注册跟踪。
+        var oldServerNames = List.copyOf(mcpToolRegistrar.getRegisteredServerNames());
         HarnessAgent newAgent;
         try {
             newAgent = harnessAgentFactory.build(newConfig, distributedStore, llmLogger,
@@ -234,16 +236,19 @@ public class OafReloadService {
         a2aAgentRefHolder.update(newAgent);
         oafConfigHolder.update(newConfig);
 
-        // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients，逐 server remove）
+        // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients，按 build 前捕获的
+        //    旧 server 名逐个 removeMcpClient + closeQuietly；删除型变更的 server 也被覆盖）
         if (oldAgent != null) {
             try {
                 var oldToolkit = oldAgent.getToolkit();
-                for (var serverName : mcpToolRegistrar.getRegisteredServerNames()) {
+                for (var serverName : oldServerNames) {
                     try {
-                        oldToolkit.removeMcpClient(serverName).block();
+                        oldToolkit.removeMcpClient(serverName)
+                            .block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
                     } catch (Exception ignore) {
                         // 旧 server 可能本就未注册（fail-soft），尽力而为
                     }
+                    mcpToolRegistrar.closeWrapperQuietlyByName(serverName);
                 }
             } catch (Exception e) {
                 log.warn("[Reload] old agent MCP cleanup incomplete: {}", e.getMessage());
@@ -320,23 +325,38 @@ public class OafReloadService {
         return agent != null ? agent.getToolkit() : null;
     }
 
-    /** fail-soft 注册：失败返回 null 不中断其余 server（required 语义在 registerOne 内部抛出） */
-    private String registerSafely(OafConfig.McpServerConfig mcp) {
+    /**
+     * 单 server 原地 reload（swap-on-success）：先 build 新客户端（不触碰旧注册），
+     * build 成功才摘旧注册并登记新连接。required server build/注册失败时抛出异常
+     * （由调用方决定回滚语义），fail-soft 失败返回 false 保留旧注册。
+     */
+    private boolean reloadServerSwapOnSuccess(OafConfig.McpServerConfig mcp) {
+        var toolkit = currentToolkitOrNull();
+        if (toolkit == null) {
+            return false;
+        }
+        var newWrapper = mcpToolRegistrar.buildClientForReload(mcp);
+        if (newWrapper == null) {
+            log.warn("[Reload] server '{}' client build failed, keeping old registration", mcp.server());
+            return false;
+        }
+        mcpToolRegistrar.clearServer(toolkit, mcp.server());
+        mcpResourceProxy.evictClient(mcp.server());
         try {
-            var toolkit = currentToolkitOrNull();
-            if (toolkit == null) {
-                return null;
-            }
-            return mcpToolRegistrar.registerOne(toolkit, mcp);
+            mcpToolRegistrar.registerBuiltClient(toolkit, newWrapper, mcp);
+            return true;
         } catch (Exception e) {
-            log.warn("[Reload] server '{}' registration failed: {}", mcp.server(), e.getMessage());
-            return null;
+            // 已 build 成功但注册失败：关闭新连接，避免泄漏
+            mcpToolRegistrar.closeWrapperQuietly(newWrapper);
+            log.warn("[Reload] server '{}' registration failed after build: {}", mcp.server(), e.getMessage());
+            return false;
         }
     }
 
     private int safeToolCount(io.agentscope.core.tool.mcp.McpClientWrapper wrapper) {
         try {
-            var tools = wrapper.listTools().block();
+            var tools = wrapper.listTools()
+                .block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
             return tools != null ? tools.size() : 0;
         } catch (Exception e) {
             return 0;

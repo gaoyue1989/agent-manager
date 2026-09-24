@@ -55,6 +55,9 @@ public class McpToolRegistrar {
     /** 支持的权限行为值（permissions.tools 声明） */
     private static final Set<String> PERMISSION_BEHAVIORS = Set.of("allow", "ask", "deny");
 
+    /** reload 路径对 MCP 网络 IO（listTools/关闭连接）的单步阻塞上限（秒），防 server 挂起占住 reload 监视器 */
+    static final long RELOAD_BLOCK_TIMEOUT_SECONDS = 10;
+
     /** ui:// 资源 scheme 前缀 */
     public static final String UI_SCHEME = "ui://";
 
@@ -109,6 +112,64 @@ public class McpToolRegistrar {
      *
      * @return 本次注册的 server 名（构建失败返回 null）
      */
+    /**
+     * reload 两阶段阶段一：仅构建客户端（不触碰任何注册状态，供 swap-on-success 先建后摘）。
+     * 构建失败返回 null（config.yaml 缺失/格式错误）。
+     */
+    public McpClientWrapper buildClientForReload(OafConfig.McpServerConfig mcp) {
+        return buildClient(mcp);
+    }
+
+    /**
+     * reload 两阶段阶段二：登记已构建的客户端（配置装载 + 双路径注册 + 跟踪）。
+     * 与 {@link #registerOne} 共享注册语义（含 startup.required 严格失败）。
+     *
+     * @return server 名
+     */
+    public String registerBuiltClient(Toolkit toolkit, McpClientWrapper wrapper, OafConfig.McpServerConfig mcp) {
+        var uiMapping = loadUiMapping(mcp);
+        uiMappings.put(mcp.server(), uiMapping);
+        toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
+        readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
+        startupRequired.put(mcp.server(), isStartupRequired(mcp));
+        try {
+            var activeMcpConfig = loadActiveMcpConfig(mcp);
+            boolean forceReadOnly = Boolean.TRUE.equals(readOnlyServers.get(mcp.server()));
+            boolean hasAppOnly = !uiMapping.appOnly().isEmpty();
+            if (forceReadOnly || activeMcpConfig != null || hasAppOnly) {
+                registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping, forceReadOnly);
+            } else {
+                toolkit.registerMcpClient(wrapper).block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
+                recordRegisteredTools(wrapper, mcp.server(), uiMapping);
+            }
+            registeredWrappers.put(mcp.server(), wrapper);
+            log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
+            return mcp.server();
+        } catch (Exception e) {
+            closeQuietly(wrapper);
+            if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
+                throw new IllegalStateException(
+                    "MCP server '" + mcp.server() + "' declared startup.required=true but registration failed",
+                    e);
+            }
+            log.warn("[MCP] server '{}' registration failed, skipped: {}", mcp.server(), e.getMessage());
+            return null;
+        }
+    }
+
+    /** reload 兜底：显式关闭已跟踪的 wrapper（clearServer 已 remove 跟踪，按引用直接关）。 */
+    public void closeWrapperQuietly(McpClientWrapper wrapper) {
+        closeQuietly(wrapper);
+    }
+
+    /** reload 兜底：按 server 名关闭并移除跟踪的 wrapper（旧 agent 收尾用，未跟踪时 no-op）。 */
+    public void closeWrapperQuietlyByName(String serverName) {
+        var w = registeredWrappers.remove(serverName);
+        if (w != null) {
+            closeQuietly(w);
+        }
+    }
+
     public String registerOne(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         var uiMapping = loadUiMapping(mcp);
         uiMappings.put(mcp.server(), uiMapping);
@@ -159,8 +220,12 @@ public class McpToolRegistrar {
 
     /**
      * 从 Toolkit 与全部 server 级缓存中摘除指定 server（reload 前置步骤）。
-     * toolkit.removeMcpClient 会关闭连接并移除该 server 注册的全部工具；
-     * 本方法同步清理 ui/权限/只读/工具信息等缓存与独立连接跟踪。
+     *
+     * <p>SDK 2.0.3 语义（字节码核对）：toolkit.removeMcpClient 只覆盖标准路径注册的连接
+     * （McpClientManager.mcpClients 命中才摘工具+close）；registerFiltered 手动路径注册的
+     * 裸名 McpTool 不在其登记里，且 registerAgentTool 的 mcpClientName=null 永不匹配其过滤条件。
+     * 因此本方法对两条路径统一兜底：按 registeredTools 中该 server 的裸名逐个
+     * toolkit.removeTool（幂等），并显式关闭被跟踪的旧 wrapper（防连接/stdio 子进程泄漏）。
      *
      * @return true 表示该 server 此前已注册
      */
@@ -168,13 +233,33 @@ public class McpToolRegistrar {
         if (serverName == null || serverName.isBlank()) {
             return false;
         }
-        var had = registeredWrappers.remove(serverName) != null;
-        if (had) {
+        var oldWrapper = registeredWrappers.remove(serverName);
+        var had = oldWrapper != null;
+        // ① 手动路径兜底：按裸名逐个摘除（标准路径的工具也是裸名，removeTool 幂等）
+        var bareNames = registeredTools.entrySet().stream()
+            .filter(e -> e.getKey().startsWith(serverName + ":"))
+            .map(e -> e.getValue().name())
+            .toList();
+        if (toolkit != null) {
+            for (var bareName : bareNames) {
+                try {
+                    toolkit.removeTool(bareName);
+                } catch (Exception e) {
+                    log.warn("[MCP] removeTool '{}' failed (continuing cleanup): {}", bareName, e.getMessage());
+                }
+            }
+        }
+        // ② 标准路径：SDK 摘工具并关闭其登记的连接（手动路径未登记，无效果但不报错）
+        if (toolkit != null) {
             try {
-                toolkit.removeMcpClient(serverName).block();
+                toolkit.removeMcpClient(serverName).block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
             } catch (Exception e) {
                 log.warn("[MCP] removeMcpClient '{}' failed (continuing cleanup): {}", serverName, e.getMessage());
             }
+        }
+        // ③ 显式关闭被跟踪的旧 wrapper（两条路径统一，兜 SDK 未覆盖的手动路径连接）
+        if (oldWrapper != null) {
+            closeQuietly(oldWrapper);
         }
         registeredTools.keySet().removeIf(key -> key.startsWith(serverName + ":"));
         destructiveHints.keySet().removeIf(key -> key.startsWith(serverName + ":"));
