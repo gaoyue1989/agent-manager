@@ -556,7 +556,8 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            fileAssetStore, mcpToolRegistrar);
+            fileAssetStore, mcpToolRegistrar,
+            mock(io.agentmanager.framework.service.SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip1");
         var replyId = "r-zip1";
@@ -599,7 +600,8 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar);
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            mock(io.agentmanager.framework.service.SessionTitleService.class));
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip2");
         var replyId = "r-zip2";
