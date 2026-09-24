@@ -8,6 +8,7 @@
     "tool-write":     { "marker": "[E2E:tool:write]",      "calls": 2 },
     "tool-read":      { "marker": "[E2E:tool:read]",       "calls": 2 },
     "file-deliver":   { "marker": "[E2E:file:deliver]",    "calls": 3 },
+    "oaf-package":    { "marker": "[E2E:oaf:package]",     "calls": 2 },
     "tool-mcp-echo":  { "marker": "[E2E:tool:mcp_echo]",   "calls": 2 },
     "mcpapp-form":    { "marker": "[E2E:mcpapp:form]",     "calls": 2 },
     "hitl-submit":    { "marker": "[E2E:hitl:submit]",     "calls": 2, "variants": ["denied"] },
