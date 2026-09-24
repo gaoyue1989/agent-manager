@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -42,9 +43,23 @@ type ConfigView struct {
 	ResCPU, ResMem, LimCPU, LimMem string
 	RegisterTimeout                time.Duration
 	RegisterRetry                  int
+	// PackageDownloadBase create_oaf_zip 返回 download_url 的基地址（空则取 DefaultPackageDownloadBase）
+	PackageDownloadBase string
 	// DeployBuilder 业务 Deployment 构造门面（内置构造 + 可选环境 overlay）；
 	// nil 视为纯内置构造，模式同 ImageAllowed 函数字段便于测试注入。
 	DeployBuilder *k8s.DeploymentBuilder
+}
+
+// DefaultPackageDownloadBase 集群内默认下载基地址（业务 Agent Pod 同 namespace 可达）。
+const DefaultPackageDownloadBase = "http://platform-backend.agent-platform.svc.cluster.local:8080"
+
+// PackageDownloadURL 拼接整包下载 URL（create_oaf_zip 交付给 present_url 代理下载）。
+func (c *Core) PackageDownloadURL(packageID uint) string {
+	base := strings.TrimRight(c.Cfg.PackageDownloadBase, "/")
+	if base == "" {
+		base = DefaultPackageDownloadBase
+	}
+	return fmt.Sprintf("%s/api/v1/packages/%d/download", base, packageID)
 }
 
 // deployBuilder 兜底取 builder：未注入时退回纯内置构造（历史行为）。

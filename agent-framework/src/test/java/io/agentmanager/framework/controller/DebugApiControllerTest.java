@@ -75,7 +75,7 @@ class DebugApiControllerTest {
         when(props.file()).thenReturn(new AgentManagerProperties.FileConfig(
             true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf,"
             + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
-            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"));
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""));
 
         mockMvc.perform(get("/debug/config/env"))
             .andExpect(status().isOk())
@@ -96,7 +96,7 @@ class DebugApiControllerTest {
         when(props.file()).thenReturn(new AgentManagerProperties.FileConfig(
             true, 20, 20, "image/*,text/plain,text/markdown,text/csv,application/pdf,"
             + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*",
-            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files"));
+            5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""));
 
         mockMvc.perform(get("/debug/config/env"))
             .andExpect(status().isOk())

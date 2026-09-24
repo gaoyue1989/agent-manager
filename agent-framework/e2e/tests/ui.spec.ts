@@ -151,11 +151,12 @@ test.fixme('U11 文件交付下载卡片与历史回放', async ({ page }) => {
 });
 
 // U13（2026-09-24 发布助手无法下载 OAF 包回归门禁）：oaf-package 夹具不含 edit_file，
-// 不受 D8 影响——create_oaf_zip 的下载卡片实时渲染 + 回放仍在，替 U11 把文件卡片 UI
-// 链路留在门禁内（F9 锁 API 契约，本用例锁渲染与回放）。
+// 不受 D8 影响——OAF 打包迁移至平台 MCP 后，present_url 登记的外部交付物下载卡片
+// 实时渲染 + 回放仍在（下载经 /files/{id} 代理），替 U11 把文件卡片 UI
+// 链路留在门禁内（F12 锁 API 契约，本用例锁渲染与回放）。
 // 回放路径按 active 项的 data-sid 精确点选：各会话记忆提取后台调用会随时刷新
 // updated_at，列表首位不可靠（不能点 nth=0）。
-test('U13 create_oaf_zip 打包下载卡片（实时渲染 + 历史回放）', async ({ page }) => {
+test('U13 OAF 打包下载卡片（实时渲染 + 历史回放）', async ({ page }) => {
   await send(page, '[E2E:oaf:package]');
   // 实时 file_ready 卡片（LLM 单 turn，含工具执行）
   const dl = page.locator(`${SEL.chatInner} a[href*="/files/"]`).first();

@@ -8,7 +8,7 @@
 ---
 
 >
-> **现状核对（2026-09-07）**：本文为设计稿（未实施）。当前自定义工具仍以 `@Tool` 注解 + Spring Bean 形式硬编码于 `tool/` 包（`BusinessTools` / `FileTools` / `OafPackageTools`），按 `AgentScopeConfig.customTools` 列表注入 Toolkit。如需热插拔可重新评估本文方案。
+> **现状核对（2026-09-24 更新）**：本文为设计稿（未实施）。当前自定义工具仍以 `@Tool` 注解 + Spring Bean 形式硬编码于 `tool/` 包（`BusinessTools` / `FileTools`——含 present_file 与 present_url），按 `AgentScopeConfig.customTools` 列表注入 Toolkit。原 `OafPackageTools`（check_oaf_package / create_oaf_zip）已于 2026-09 迁出至平台 backend MCP（见 [../../docs/design/oaf-tools-extraction-design.md](../../docs/design/oaf-tools-extraction-design.md)）——业务领域工具走 MCP、框架通用能力走 @Tool 的分层即是本文插件机制未来服务的边界。如需热插拔可重新评估本文方案。
 
 ## 一、背景与目标
 

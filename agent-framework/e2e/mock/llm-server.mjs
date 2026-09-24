@@ -69,6 +69,9 @@ function callIndex(messages) {
   return Math.max(1, n);
 }
 
+/** bench mock MCP 基地址（oaf-package 夹具 {{BENCH_MCP_BASE}} 占位符替换用） */
+const BENCH_MCP_BASE = process.env.BENCH_MCP_BASE || `http://127.0.0.1:${process.env.BENCH_MCP_PORT || '18082'}`;
+
 function route(reqBody) {
   const messages = reqBody.messages ?? [];
   // 最后一条 user 消息携带场景标记
@@ -215,7 +218,9 @@ const server = http.createServer((req, res) => {
       const placeholders = fx.rewrites ?? [];
       const argValue = arg ?? '';
       let chunks = call.chunks ?? [];
-      chunks = chunks.map(c => (placeholders.length ? substitute(c, placeholders, argValue) : c));
+      chunks = chunks
+        .map(c => (placeholders.length ? substitute(c, placeholders, argValue) : c))
+        .map(c => c.split('{{BENCH_MCP_BASE}}').join(BENCH_MCP_BASE));
       const overrideJson = ARGS_OVERRIDE[name];
       if (overrideJson) chunks = applyArgsOverride(chunks, overrideJson.replace('{{appId}}', argValue));
       if (reqBody.stream === false) {

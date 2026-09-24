@@ -175,7 +175,7 @@ say "场景 X：异常"
 W=$(curl -s -o /dev/null -w '%{http_code}' "$AGENT_URL/files/00000000-0000-0000-0000-000000000000")
 assert_eq "X-1 不存在文件 → 404" "$W" "404"
 
-say "场景 S8：按描述生成 OAF 部署包（check_oaf_package → create_oaf_zip → 下载）"
+say "场景 S8：按描述生成 OAF 部署包（check_oaf_package → MCP create_oaf_zip → present_url → 代理下载）"
 S8_OK=0
 S8_SID="file-e2e-s8-$RANDOM-$RANDOM"
 for attempt in 1 2 3; do
@@ -232,9 +232,9 @@ for attempt in 1 2; do
       -d "{\"sessionId\":\"$S9_SID\",\"message\":\"你好\",\"userId\":\"$UID_SFX\"}" > /dev/null 2>&1
     sleep 5
   fi
-  S9_MSG="生成一个名为 $S9_NAME 的 OAF 部署包并上传到平台。必须完成：
-1. create_oaf_zip(package_name=\"$S9_NAME.zip\", agents_md=<AGENTS.md 全文，name 与 agentKey 均为 $S9_NAME，含全部必填字段>)。打包前可先 check_oaf_package 校验
-2. upload_package(filename=\"$S9_NAME.zip\", content_base64=<上一步返回的 content_base64>)
+  S9_MSG="生成一个名为 $S9_NAME 的 OAF 部署包并登记到平台。必须完成：
+1. check_oaf_package(agents_md=<AGENTS.md 全文，name 与 agentKey 均为 $S9_NAME，含全部必填字段>) 校验通过
+2. create_oaf_zip(package_name=\"$S9_NAME.zip\", agents_md=<同一份 AGENTS.md>)——工具会校验、组包并直接在平台登记，返回 packageId（不要再调 upload_package）
 完成后回复 packageId。不要做其他事情，不要发布。"
   curl -s --max-time 420 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
     -d "$(python3 -c "import json,sys;print(json.dumps({'sessionId':'$S9_SID','message':sys.argv[1],'userId':'$UID_SFX'}))" "$S9_MSG")" > /dev/null 2>&1

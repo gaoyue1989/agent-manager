@@ -14,6 +14,7 @@ import io.agentmanager.framework.service.WorkspaceReader;
 import io.agentmanager.framework.service.storage.FileStorage;
 import io.agentscope.core.agent.RuntimeContext;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,6 +46,81 @@ class FileToolsTest {
 
     private RuntimeContext ctx() {
         return RuntimeContext.builder().userId("alice").sessionId("s1").build();
+    }
+
+    // ===== present_url（外部交付物登记，docs/design/oaf-tools-extraction-design.md）=====
+
+    private FileTools toolsWithPrefixes(String prefixes) {
+        var base = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var f = base.file();
+        var file = new AgentManagerProperties.FileConfig(f.uploadEnabled(), f.uploadMaxMb(),
+            f.uploadMaxPending(), f.uploadAllowedMime(), f.imageMaxMb(), f.imageInlineTotalMb(),
+            f.presentMaxMb(), f.downloadEnabled(), f.retentionDays(), f.storageType(),
+            f.storageLocalDir(), f.storageS3Endpoint(), f.storageS3AccessKey(), f.storageS3SecretKey(),
+            f.storageS3Bucket(), prefixes);
+        var props = new AgentManagerProperties(base.llm(), base.server(), base.checkpoint(),
+            "/config", "", base.cleanup(), file, base.sse(), base.harness());
+        return new FileTools(fileAssetStore, fileStorage, props, sandboxConfig, mock(WorkspaceReader.class));
+    }
+
+    @Test
+    void presentUrlShouldRegisterExternalRow() throws Exception {
+        var t = toolsWithPrefixes("http://platform-backend.agent-platform.svc.cluster.local:8080");
+        var url = "http://platform-backend.agent-platform.svc.cluster.local:8080/api/v1/packages/3/download";
+        var result = t.presentUrl(ctx(), "weather-agent.zip", url, "application/zip", 704L);
+
+        assertTrue(result.contains("\"file_id\""), "返回 file_id: " + result);
+        assertTrue(result.contains("weather-agent.zip"), "返回文件名: " + result);
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        var row = captor.getValue();
+        assertEquals("external", row.storageType(), "storage_type=external: " + row);
+        assertEquals(url, row.storageKey(), "storage_key 即外部 URL: " + row);
+        assertEquals(704L, row.size());
+        assertEquals("generated", row.origin());
+        // 外部交付物不写文件存储后端
+        verify(fileStorage, org.mockito.Mockito.never()).write(anyString(), any(), any(Long.class), anyString());
+    }
+
+    @Test
+    void presentUrlShouldFailWithoutPrefixes() {
+        var result = tools.presentUrl(ctx(), "a.zip", "http://x/y", null, null);
+        assertTrue(result.contains("FILE_EXTERNAL_URL_PREFIXES"), "未配置白名单应禁用: " + result);
+    }
+
+    @Test
+    void presentUrlShouldRejectNonAllowlisted() {
+        var t = toolsWithPrefixes("http://ok.example");
+        assertTrue(t.presentUrl(ctx(), "a.zip", "http://evil.example/y", null, null)
+            .contains("not in configured external prefixes"), "非白名单域应拒绝");
+        // 前缀伪装（域名后缀拼接）同样拒绝
+        assertTrue(t.presentUrl(ctx(), "a.zip", "http://ok.example.evil/y", null, null)
+            .contains("not in configured external prefixes"), "前缀伪装应拒绝");
+        // 非 http(s) 协议拒绝
+        assertTrue(t.presentUrl(ctx(), "a.zip", "file:///etc/passwd", null, null)
+            .contains("must be http(s)"), "非 http(s) 应拒绝");
+    }
+
+    @Test
+    void presentUrlShouldReuseFileIdOnDuplicate() {
+        var t = toolsWithPrefixes("http://ok.example");
+        org.mockito.Mockito.doThrow(new IllegalStateException("Duplicate entry"))
+            .when(fileAssetStore).insert(any(FileAssetStore.FileAsset.class));
+        when(fileAssetStore.findByStorage("external", "http://ok.example/a.zip"))
+            .thenReturn(Optional.of(new FileAssetStore.FileAsset("existing-id", "bob", null, null,
+                "a.zip", "a.zip", "application/zip", 1, "external", "http://ok.example/a.zip",
+                "generated", "injected", java.time.LocalDateTime.now())));
+        var result = t.presentUrl(ctx(), "a.zip", "http://ok.example/a.zip", null, null);
+        assertTrue(result.contains("existing-id"), "同 URL 重复交付应复用 file_id: " + result);
+    }
+
+    @Test
+    void presentUrlShouldSanitizeFileName() {
+        var t = toolsWithPrefixes("http://ok.example");
+        assertTrue(t.presentUrl(ctx(), "../evil name.zip", "http://ok.example/a.zip", null, null)
+            .contains("evil name.zip"), "文件名取 basename");
+        assertTrue(t.presentUrl(ctx(), "   ", "http://ok.example/a.zip", null, null)
+            .contains("invalid file_name"), "空文件名拒绝");
     }
 
     @Test

@@ -8,7 +8,7 @@ connection:
   timeout: 300
 
 # 人工确认核心：五个变更类工具必须经 permission_ask 由人核对参数后执行；
-# 查询类、上传与注册重试为 allow 直接执行（平台可信内网，无独立身份体系）。
+# 查询类、打包登记、上传与注册重试为 allow 直接执行（平台可信内网，无独立身份体系）。
 # 禁止再配置 read_only: true / permission.mode: bypass —— 二者会短路 ask 确认流
 # （read_only 强制 readOnly 注册，bypass 全放行，见 McpToolRegistrar）。
 permissions:
@@ -18,6 +18,8 @@ permissions:
     get_package_detail: allow
     list_services: allow
     get_service_status: allow
+    check_oaf_package: allow
+    create_oaf_zip: allow
     upload_package: allow
     register_service: allow
     publish_service: ask

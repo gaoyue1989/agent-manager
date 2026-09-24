@@ -150,6 +150,95 @@ public class FileTools {
             + "\",\"mime_type\":\"" + mime + "\",\"size\":" + bytes.length + "}";
     }
 
+    /**
+     * 外部交付物登记工具（与 present_file 同构的 file_ready 卡片链路，见
+     * docs/design/oaf-tools-extraction-design.md）。
+     *
+     * <p>产物本体在外部系统（如平台 create_oaf_zip 返回的包 download_url），本工具只登记
+     * file_asset（storage_type=external，storage_key=URL），不写文件存储后端；卡片实时
+     * file_ready 与历史回放统一走 GET /files/{id} 的服务端代理下载（前缀白名单防 SSRF）。
+     */
+    @Tool(
+        name = "present_url",
+        description = "Register an EXTERNAL resource (an http(s) URL produced by another system, "
+            + "e.g. the download_url returned by the create_oaf_zip platform tool) as a "
+            + "user-downloadable deliverable card. MUST be called to deliver any externally-hosted "
+            + "artifact; the card appears immediately and in session history replay. "
+            + "The url must match the configured external prefix allowlist. "
+            + "Returns JSON with file_id/file_name/mime_type/size.",
+        concurrencySafe = true)
+    public String presentUrl(
+        RuntimeContext ctx,
+        @ToolParam(name = "file_name", description = "Display/download file name, e.g. weather-agent.zip")
+                String fileName,
+        @ToolParam(name = "url", description = "External http(s) URL of the artifact (e.g. download_url from create_oaf_zip)")
+                String url,
+        @ToolParam(name = "mime_type", description = "MIME type (optional, default application/octet-stream)",
+                required = false) String mimeType,
+        @ToolParam(name = "size", description = "Artifact size in bytes if known (optional)",
+                required = false) Long size) {
+        var prefixes = props.file().externalUrlPrefixList();
+        if (prefixes.isEmpty()) {
+            return err("present_url unavailable: no external URL prefixes configured (FILE_EXTERNAL_URL_PREFIXES)");
+        }
+        if (url == null || url.isBlank()) {
+            return err("url is required");
+        }
+        var u = url.trim();
+        if (!u.startsWith("http://") && !u.startsWith("https://")) {
+            return err("url must be http(s): " + u);
+        }
+        // 前缀白名单（SSRF 收敛）：仅允许已配置前缀下的 URL
+        var allowed = prefixes.stream().anyMatch(p -> u.equals(p) || u.startsWith(p + "/"));
+        if (!allowed) {
+            return err("url not in configured external prefixes: " + u);
+        }
+        var name = sanitizeDisplayName(fileName);
+        if (name == null) {
+            return err("invalid file_name: " + fileName);
+        }
+        var userKey = ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()
+            ? ctx.getUserId() : (ctx != null && ctx.getSessionId() != null ? ctx.getSessionId() : "debug-user");
+        var mime = mimeType == null || mimeType.isBlank() ? "application/octet-stream" : mimeType.trim();
+        long sz = size == null ? 0L : size;
+        // 幂等复用：uk_storage(storage_type, storage_key) 全局唯一，同 URL 重复交付复用既有 file_id
+        //（file_ready 合成时会回写最新 reply_id/session_id，卡片关联跟随最近一次交付）
+        var id = UUID.randomUUID().toString();
+        try {
+            fileAssetStore.insert(new FileAssetStore.FileAsset(
+                id, userKey, null, null, name, name, mime, sz,
+                "external", u, "generated", "injected", java.time.LocalDateTime.now()));
+        } catch (Exception e) {
+            var existing = fileAssetStore.findByStorage("external", u);
+            if (existing.isPresent()) {
+                id = existing.get().id();
+            } else {
+                return err("metadata write failed: " + e.getMessage());
+            }
+        }
+        log.info("present_url: registered {} -> {}", name, u);
+        return "{\"file_id\":\"" + id + "\",\"file_name\":\"" + escape(name)
+            + "\",\"mime_type\":\"" + escape(mime) + "\",\"size\":" + sz + "}";
+    }
+
+    /** 展示文件名 sanitize：basename、去控制字符、非空 */
+    private static String sanitizeDisplayName(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        var base = name.replace('\\', '/');
+        int slash = base.lastIndexOf('/');
+        if (slash >= 0) {
+            base = base.substring(slash + 1);
+        }
+        base = base.replaceAll("[\\p{Cntrl}]", "_").trim();
+        return base.isBlank() || ".".equals(base) || "..".equals(base) ? null : base;
+    }
+
+    private static String escape(String s) {
+        return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+    }
+
     /** 路径规范化：拒绝 ../ 逃逸；统一返回工作区相对路径（无前导 /workspace） */
     private String normalizeWorkspacePath(String filePath) {
         if (filePath == null || filePath.isBlank()) {

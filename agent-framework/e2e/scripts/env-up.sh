@@ -62,7 +62,7 @@ cat > "$AGENT_CFG/logback-e2e.xml" <<'XML'
 XML
 
 # ---------- 2. mock 进程 ----------
-MOCK_LLM_PORT="$LLM_MOCK_PORT" node "$ROOT/mock/llm-server.mjs" > "$LOGS/mock-llm.log" 2>&1 &
+MOCK_LLM_PORT="$LLM_MOCK_PORT" BENCH_MCP_PORT="$BENCH_MCP_PORT" node "$ROOT/mock/llm-server.mjs" > "$LOGS/mock-llm.log" 2>&1 &
 echo $! > "$RUNTIME/mock-llm.pid"
 MOCK_MCP_PORT="$BENCH_MCP_PORT" node "$ROOT/../bench/mock-mcp/server.js" > "$LOGS/mock-bench-mcp.log" 2>&1 &
 echo $! > "$RUNTIME/mock-bench-mcp.pid"

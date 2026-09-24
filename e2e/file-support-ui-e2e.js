@@ -143,7 +143,7 @@ const shot = async (page, name) => { try { await page.screenshot({ path: path.jo
     }
     await shot(page, "10-download");
 
-    // U11-U13: 生成 OAF 部署包对话场景（check_oaf_package → create_oaf_zip → file_ready 卡片）
+    // U11-U13: 生成 OAF 部署包对话场景（check_oaf_package → MCP create_oaf_zip → present_url → file_ready 卡片）
     // 切新会话（避免长上下文干扰 LLM 生成流程），包名运行级唯一
     const genName = `ui-gen-agent-${Date.now().toString().slice(-6)}`;
     await page.click('[data-testid="new-session"]').catch(() => {});
@@ -158,8 +158,8 @@ const shot = async (page, name) => { try { await page.screenshot({ path: path.jo
       }, { timeout: 20000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 2000));
       const genMsg = attempt === 1
-        ? `帮我生成一个名为 ${genName} 的 OAF 部署包（简单 agent：把用户输入原样返回）。走完整流程：写 AGENTS.md（name 与 agentKey 均为 ${genName}，含全部必填字段）→ check_oaf_package 校验（valid=true 才继续）→ create_oaf_zip 打包交付下载。不要发布，不要用 write_file 在沙箱写文件。`
-        : `生成名为 ${genName} 的 OAF 部署包并交付下载：写 AGENTS.md（name/agentKey=${genName}，必填字段齐全）→ check_oaf_package → create_oaf_zip。不要发布。`;
+        ? `帮我生成一个名为 ${genName} 的 OAF 部署包（简单 agent：把用户输入原样返回）。走完整流程：写 AGENTS.md（name 与 agentKey 均为 ${genName}，含全部必填字段）→ check_oaf_package 校验（valid=true 才继续）→ create_oaf_zip 打包（平台直接登记）→ present_url 交付下载卡片。不要发布，不要用 write_file 在沙箱写文件。`
+        : `生成名为 ${genName} 的 OAF 部署包并交付下载：写 AGENTS.md（name/agentKey=${genName}，必填字段齐全）→ check_oaf_package → create_oaf_zip → present_url 交付。不要发布。`;
       await page.$eval('[data-testid="chat-input"]', (el) => { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
       await page.type('[data-testid="chat-input"]', genMsg);
       await page.click('[data-testid="chat-send"]');

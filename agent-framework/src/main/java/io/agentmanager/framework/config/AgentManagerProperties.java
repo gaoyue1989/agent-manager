@@ -145,8 +145,22 @@ public record AgentManagerProperties(
         /** s3 后端 secretKey（敏感，.env.secrets） */
         @DefaultValue("") String storageS3SecretKey,
         /** s3 后端 bucket */
-        @DefaultValue("agent-files") String storageS3Bucket
+        @DefaultValue("agent-files") String storageS3Bucket,
+        /** present_url 外部交付物 URL 前缀白名单（逗号分隔，防 SSRF；空=禁用外部交付） */
+        @DefaultValue("") String externalUrlPrefixes
     ) {
+
+        /** 解析外部交付 URL 白名单为列表（去空白、去尾斜杠、忽略空项） */
+        public java.util.List<String> externalUrlPrefixList() {
+            if (externalUrlPrefixes == null || externalUrlPrefixes.isBlank()) {
+                return java.util.List.of();
+            }
+            return java.util.Arrays.stream(externalUrlPrefixes.split(","))
+                .map(String::trim)
+                .map(s -> s.replaceAll("/+$", ""))
+                .filter(s -> !s.isEmpty())
+                .toList();
+        }
         /**
          * 默认 MIME 白名单：图片/文本/PDF/Office 之外放行 zip（OAF 配置包经 📎 上传后注入
          * 工作区，助手凭路径调 upload_package 发布）；x-zip-compressed 兼容 Windows 浏览器。
