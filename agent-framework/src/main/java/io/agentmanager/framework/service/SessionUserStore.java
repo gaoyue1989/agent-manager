@@ -98,6 +98,29 @@ public class SessionUserStore {
     }
 
     /**
+     * 查询指定会话的标题（session_user.remark）。别名：与 updateRemark 对偶，供标题服务调用。
+     *
+     * @param sessionId 会话 ID
+     * @return 标题，不存在或为空时返回空串
+     */
+    public String findRemark(String sessionId) {
+        return findRemarkBySession(sessionId);
+    }
+
+    /**
+     * 更新会话标题（session_user.remark）；行不存在时补建（统一走 {@link #upsertColumn}，
+     * 规避 MySQL 1093 —— INSERT ... VALUES (子查询引用同表) 的旧写法）。
+     *
+     * @param sessionId 会话 ID
+     * @param remark    标题
+     * @return 是否写入成功
+     */
+    public boolean updateRemark(String sessionId, String remark) {
+        upsertColumn(sessionId, "remark", remark != null ? remark : "");
+        return true;
+    }
+
+    /**
      * 查询指定会话的用户 ID。
      *
      * @param sessionId 会话 ID

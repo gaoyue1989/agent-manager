@@ -515,10 +515,10 @@ public class ThreadController {
             return List.of();
         }
     }
-    /** 将 title 写入 session_user.remark（字段不存在则 ALTER TABLE 添加；SQL 统一在 SessionUserStore） */
+    /** 将 title 写入 session_user.remark（统一走 SessionUserStore，规避 MySQL 1093；SQL 单一来源） */
     private void upsertRemark(String sessionId, String title) {
         ensureRemarkColumn();
-        sessionUserStore.upsertRemark(sessionId, title);
+        sessionUserStore.updateRemark(sessionId, title);
     }
 
     /** 幂等确保 remark 列存在 */

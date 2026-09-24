@@ -414,6 +414,96 @@ class ChatStreamControllerTest {
 
     // ===== 原有 MCP / present_file 测试保留 =====
 
+    // ===== 工具摘要帧（人可读输出）=====
+
+    @Test
+    void chatShouldEmitToolSummaryAndResultPreview() {
+        // 可观测性契约：轻量客户端不该只看到「🔧 write_file 完成」。
+        // 后端必须把 delta 参数/结果拼好，合成「创建 output/create-ai-ppt.js 2行」「执行 npm install」
+        // 这样的一行摘要，客户端零解析即可展示。
+        var sessionId = "test-user-sum1";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, modelCatalog, sessionTitleService);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-sum1");
+        var start = new io.agentscope.core.event.ToolCallStartEvent("r-sum1", "c-sum1", "write_file");
+        // 真实场景下 delta 帧的工具名是占位符 __fragment__（e2e-ci-plan §11.3 D3）
+        var d1 = new io.agentscope.core.event.ToolCallDeltaEvent("r-sum1", "c-sum1", "__fragment__",
+            "{\"path\":\"output/create-ai-ppt.js\",\"content\":\"a\\nb\"}");
+        var callEnd = new io.agentscope.core.event.ToolCallEndEvent("r-sum1", "c-sum1", "write_file");
+        var rDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent("r-sum1", "c-sum1", "write_file",
+            "文件写入成功\n多余明细");
+        var rEnd = new io.agentscope.core.event.ToolResultEndEvent("r-sum1", "c-sum1", "write_file",
+            io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent("r-sum1");
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) d1, (AgentEvent) callEnd,
+                (AgentEvent) rDelta, (AgentEvent) rEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus, atLeastOnce()).emitSynthetic(eq(sessionId), anyString(),
+            typeCap.capture(), payloadCap.capture());
+
+        var summaryIdx = typeCap.getAllValues().indexOf("tool_call_summary");
+        assertTrue(summaryIdx >= 0, "应发射 tool_call_summary 帧，实际: " + typeCap.getAllValues());
+        var summary = payloadCap.getAllValues().get(summaryIdx);
+        assertTrue(summary.contains("\"summary\":\"创建 output/create-ai-ppt.js 2行\""),
+            "摘要应给出路径与行数: " + summary);
+        assertTrue(summary.contains("\"toolName\":\"write_file\""), summary);
+        assertTrue(summary.contains("\"toolCallId\":\"c-sum1\""), summary);
+
+        var previewIdx = typeCap.getAllValues().indexOf("tool_result_preview");
+        assertTrue(previewIdx >= 0, "应发射 tool_result_preview 帧，实际: " + typeCap.getAllValues());
+        var preview = payloadCap.getAllValues().get(previewIdx);
+        assertTrue(preview.contains("\"preview\":\"文件写入成功\""), "预览取结果首行: " + preview);
+    }
+
+    @Test
+    void chatShouldEmitTerminalStatePreviewOnFailedTool() {
+        // 失败时预览是终态文案（比结果文本更值得让用户知道）
+        var sessionId = "test-user-sum2";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, modelCatalog, sessionTitleService);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-sum2");
+        var start = new io.agentscope.core.event.ToolCallStartEvent("r-sum2", "c-sum2", "execute");
+        var callEnd = new io.agentscope.core.event.ToolCallEndEvent("r-sum2", "c-sum2", "execute");
+        var rEnd = new io.agentscope.core.event.ToolResultEndEvent("r-sum2", "c-sum2", "execute",
+            io.agentscope.core.message.ToolResultState.ERROR);
+        var agentEnd = new AgentEndEvent("r-sum2");
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd,
+                (AgentEvent) rEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null), null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus, atLeastOnce()).emitSynthetic(eq(sessionId), anyString(),
+            typeCap.capture(), payloadCap.capture());
+        var idx = typeCap.getAllValues().indexOf("tool_result_preview");
+        assertTrue(idx >= 0, "失败也要发预览帧: " + typeCap.getAllValues());
+        assertTrue(payloadCap.getAllValues().get(idx).contains("执行失败"),
+            payloadCap.getAllValues().get(idx));
+    }
+
     @Test
     void chatShouldEmitFileReadyWithAgentRelativeDownloadUrl() {
         // 契约（docs/api-frontend-sse.md）：file_ready.download_url 固定为相对路径
@@ -426,7 +516,8 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fr1");
         var replyId = "r-fr1";
@@ -469,7 +560,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            fileAssetStore, mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
+            fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip1");
         var replyId = "r-zip1";
@@ -512,7 +603,8 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-zip2");
         var replyId = "r-zip2";
@@ -575,7 +667,7 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), registrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
+            mock(io.agentmanager.framework.service.FileAssetStore.class), registrar, modelCatalog, sessionTitleService);
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui1");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui1", "c-ui1", "show_form");
@@ -606,7 +698,8 @@ class ChatStreamControllerTest {
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
-            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar, mock(ModelCatalog.class), mock(SessionTitleService.class));
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
 
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui2");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui2", "c-ui2", "echo");
@@ -1025,9 +1118,9 @@ class ChatStreamControllerTest {
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
         verify(modelCatalog).validateSelectable("m2");
-        // 落库先于 turn 启动（本 turn 生效）：模型绑定 + 首条消息触发标题生成（系统模型）
+        // 落库先于 turn 启动（本 turn 生效）：模型绑定 + 标题服务被调用（master 版每条消息调，内部跳过已有标题）
         verify(sessionUserStore).upsertModel(anyString(), eq("m2"));
-        verify(sessionTitleService).generateAsync(anyString(), eq("hello"));
+        verify(sessionTitleService).generateAsync(anyString(), eq("hello"), eq("alice"));
     }
 
     @Test
@@ -1047,18 +1140,16 @@ class ChatStreamControllerTest {
     }
 
     @Test
-    void chatShouldGenerateTitleOnFirstTurnWithClientProvidedSessionId() {
-        // 前端首条消息自带 sessionId（webui-xxx）：不能用 sessionId 是否为空判定"新会话"，
-        // 以 session_user 是否存在该行为准（回归：早期实现导致前端场景标题永不生成）
+    void chatShouldTriggerTitleServiceWithClientProvidedSessionId() {
+        // 前端首条消息自带 sessionId（webui-xxx）；master 版服务每条消息触发，内部按已有标题跳过
         var sessionId = "webui-m5";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-m5");
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m5")));
-        when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn(null); // 首次出现
 
         collect(sessionId, "hello", "webui");
 
-        verify(sessionTitleService).generateAsync(sessionId, "hello");
+        verify(sessionTitleService).generateAsync(sessionId, "hello", "webui");
     }
 
     @Test
@@ -1071,8 +1162,7 @@ class ChatStreamControllerTest {
 
         collect(sessionId, "hello", "alice"); // ChatRequest.model = null
 
-        // 缺省 = 不改变绑定；非首次对话（会话已存在）不触发标题生成
+        // 缺省 = 不改变绑定（master 版标题服务每条消息都会被调用，内部按已有标题跳过）
         verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
-        verify(sessionTitleService, never()).generateAsync(anyString(), anyString());
     }
 }

@@ -295,6 +295,20 @@ public class AgentScopeConfig {
         return ChatModelFactory.build(llm, harness);
     }
 
+    /**
+     * 会话标题生成专用模型：与主对话模型同配置的独立实例（**系统模型**，LLM_* 环境变量），
+     * 供 {@link io.agentmanager.framework.service.SessionTitleService} 在会话首条消息后异步生成标题。
+     * 不参与 HarnessAgent 装配（独立实例，避免影响主链路追踪/日志包装）；
+     * 叠加 TracingModelWrapper：标题调用绕过 middleware 链，补 OTel span（title）。
+     */
+    @Bean
+    public io.agentscope.core.model.Model titleGenerationModel(AgentManagerProperties props) {
+        var llm = props.llm();
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
+        return new io.agentmanager.framework.service.TracingModelWrapper(
+            ChatModelFactory.build(llm, harness), "title");
+    }
+
     @Bean
     public HarnessAgent harnessAgent(
         AgentManagerProperties props,
@@ -469,16 +483,15 @@ public class AgentScopeConfig {
     }
 
     /**
-     * 会话标题生成服务：系统模型（LLM_* 环境变量）+ OTel span（title）。
-     * 会话首条用户消息异步生成标题写 session_user.remark；失败仅告警，不影响对话。
+     * 会话标题生成服务：装配 master 版实现（@Qualifier("titleGenerationModel") 注入 + 并发去重 + 空结果回退）。
+     * 标题固定使用系统模型，不受会话级模型切换影响。
      */
     @Bean
     public io.agentmanager.framework.service.SessionTitleService sessionTitleService(
-            io.agentmanager.framework.service.ModelCatalog modelCatalog,
+            io.agentscope.core.model.Model titleGenerationModel,
             SessionUserStore sessionUserStore) {
-        var titleModel = new io.agentmanager.framework.service.TracingModelWrapper(
-            modelCatalog.systemModel(), "title");
-        return new io.agentmanager.framework.service.SessionTitleService(titleModel, sessionUserStore);
+        return new io.agentmanager.framework.service.SessionTitleService(
+            titleGenerationModel, sessionUserStore);
     }
 
     @Bean

@@ -1,109 +1,126 @@
 package io.agentmanager.framework.service;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.Model;
 import reactor.core.publisher.Flux;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 /**
- * SessionTitleService 单元测试：系统模型生成标题（清洗/截断/已有标题不覆盖/LLM 异常 fail-soft）。
+ * 会话标题生成服务测试（LLM 标题生成 + 清洗 + 已存在跳过）。
  */
 class SessionTitleServiceTest {
 
-    private static final String SID = "webui-title-1";
-
     private Model model;
-    private SessionUserStore store;
+    private SessionUserStore sessionUserStore;
     private SessionTitleService service;
 
     @BeforeEach
     void setUp() {
         model = mock(Model.class);
-        store = mock(SessionUserStore.class);
-        service = new SessionTitleService(model, store);
-        when(store.findRemarkBySession(SID)).thenReturn("");
+        sessionUserStore = mock(SessionUserStore.class);
+        // 同步 Executor：异步路径在测试中即时执行，断言确定
+        service = new SessionTitleService(model, sessionUserStore, Runnable::run);
+    }
+
+    private void stubModelText(String text) {
+        List<ContentBlock> blocks = List.of(TextBlock.builder().text(text).build());
+        when(model.stream(any(), any(), any()))
+            .thenReturn(Flux.just(ChatResponse.builder().content(blocks).build()));
     }
 
     @Test
-    void shouldGenerateSanitizedTitleAndWriteRemark() {
-        stubLlm("《发布助手测试》\n");
+    void generateAsyncShouldPersistGeneratedTitle() {
+        when(sessionUserStore.findRemark("sid-1")).thenReturn("");
+        stubModelText("如何部署智能体");
 
-        var title = service.generate(SID, "帮我发布 packageId=3 的配置包");
+        service.generateAsync("sid-1", "我想知道怎么把智能体部署到k8s集群", "alice");
 
-        assertEquals("发布助手测试", title);
-        verify(store).upsertRemark(SID, "发布助手测试");
+        verify(sessionUserStore).updateRemark("sid-1", "如何部署智能体");
     }
 
     @Test
-    void shouldNotOverwriteExistingTitle() {
-        when(store.findRemarkBySession(SID)).thenReturn("手动命名");
+    void generateAsyncShouldSkipWhenTitleAlreadyExists() {
+        when(sessionUserStore.findRemark("sid-2")).thenReturn("已有标题");
 
-        var title = service.generate(SID, "任意消息");
+        service.generateAsync("sid-2", "第二条消息", "alice");
 
-        assertNull(title);
-        verify(model, never()).stream(anyList(), anyList(), any());
-        verify(store, never()).upsertRemark(any(), any());
+        verify(model, never()).stream(any(), any(), any());
+        verify(sessionUserStore, never()).updateRemark(anyString(), anyString());
     }
 
     @Test
-    void shouldFailSoftOnLlmError() {
-        when(model.stream(anyList(), anyList(), any()))
-            .thenReturn(Flux.error(new RuntimeException("llm down")));
+    void generateAsyncShouldSkipBlankMessage() {
+        service.generateAsync("sid-3", "   ", "alice");
 
-        var title = service.generate(SID, "任意消息");
-
-        assertNull(title);
-        verify(store, never()).upsertRemark(any(), any());
+        verify(sessionUserStore, never()).findRemark(anyString());
+        verify(model, never()).stream(any(), any(), any());
     }
 
     @Test
-    void shouldSkipWriteWhenOutputBlank() {
-        stubLlm("   \n  ");
+    void generateAsyncShouldFallbackToFirstMessageWhenModelReturnsNoText() {
+        when(sessionUserStore.findRemark("sid-4")).thenReturn("");
+        when(model.stream(any(), any(), any())).thenReturn(Flux.empty());
 
-        var title = service.generate(SID, "任意消息");
+        service.generateAsync("sid-4", "hello world", "alice");
 
-        assertNull(title);
-        verify(store, never()).upsertRemark(any(), any());
+        verify(sessionUserStore).updateRemark("sid-4", "hello world");
     }
 
     @Test
-    void shouldTruncateOverlongTitle() {
-        stubLlm("标".repeat(100));
-
-        var title = service.generate(SID, "任意消息");
-
-        assertEquals(SessionTitleService.TITLE_MAX_CHARS, title.length());
-        verify(store).upsertRemark(SID, title);
+    void generateTitleShouldReturnNullWhenModelReturnsEmpty() {
+        when(model.stream(any(), any(), any())).thenReturn(Flux.empty());
+        assertNull(service.generateTitle("hello"));
     }
 
     @Test
-    void asyncShouldIgnoreBlankInputs() {
-        service.generateAsync(null, "消息");
-        service.generateAsync(SID, "  ");
-
-        verify(model, never()).stream(anyList(), anyList(), any());
+    void generateTitleShouldSanitizeModelOutput() {
+        stubModelText("\"部署流程。\"\n多余的说明");
+        assertEquals("部署流程", service.generateTitle("怎么部署"));
     }
 
-    private void stubLlm(String text) {
-        when(model.stream(anyList(), anyList(), any())).thenReturn(Flux.just(
-            ChatResponse.builder()
-                .id("r1")
-                .content(List.of(TextBlock.builder().text(text).build()))
-                .finishReason("stop")
-                .build()));
+    @Test
+    void sanitizeShouldStripQuotesPunctuationAndTruncate() {
+        assertEquals("如何部署", SessionTitleService.sanitize("  “如何部署？”  "));
+        assertEquals("", SessionTitleService.sanitize(null));
+        var longTitle = "一".repeat(80);
+        assertEquals(SessionTitleService.MAX_TITLE_LEN,
+            SessionTitleService.sanitize(longTitle).length());
+    }
+
+    @Test
+    void sanitizeShouldPickFirstNonBlankLineAndStripPrefix() {
+        // 模型常在标题前输出空行
+        assertEquals("部署流程", SessionTitleService.sanitize("\n\n部署流程。\n说明"));
+        // 常见“标题：”前缀被去除
+        assertEquals("部署流程", SessionTitleService.sanitize("标题：部署流程"));
+        // 只有标点/引号时视为空
+        assertEquals("", SessionTitleService.sanitize("\"\""));
+    }
+
+    @Test
+    void fallbackTitleShouldCollapseWhitespaceAndTruncate() {
+        assertEquals("你好 世界", SessionTitleService.fallbackTitle("  你好\n\t世界  "));
+        var longMsg = "请帮我检查一下这段代码是否存在并发安全问题";
+        var t = SessionTitleService.fallbackTitle(longMsg);
+        assertEquals(SessionTitleService.FALLBACK_TITLE_LEN + 1, t.length());
+        assertTrue(t.endsWith("…"));
+        assertEquals("", SessionTitleService.fallbackTitle("   "));
     }
 }
