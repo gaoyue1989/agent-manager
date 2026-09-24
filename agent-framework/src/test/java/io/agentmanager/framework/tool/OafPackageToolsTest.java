@@ -104,6 +104,12 @@ class OafPackageToolsTest {
             org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong(),
             org.mockito.ArgumentMatchers.eq("application/zip"));
         org.mockito.Mockito.verify(store).insert(org.mockito.ArgumentMatchers.any(FileAssetStore.FileAsset.class));
+        // session_id 必须留空由控制器回写业务会话：ctx.getSessionId() 是网关恒定 gw-hash，
+        // 落库会让历史回放按业务会话查不到下载卡片（2026-09-24 修复）
+        var assetCap = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        org.mockito.Mockito.verify(store).insert(assetCap.capture());
+        assertTrue(assetCap.getValue().sessionId() == null,
+            "session_id 应留空待控制器回写: " + assetCap.getValue());
         // 解包验证内容
         var b64 = java.util.regex.Matcher.quoteReplacement(result);
         var m = java.util.regex.Pattern.compile("\"content_base64\":\"([^\"]+)\"").matcher(result);

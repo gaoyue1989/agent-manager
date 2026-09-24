@@ -105,7 +105,7 @@ public class ChatStreamController {
         orphanTurnWatchdog.shutdown();
     }
 
-    /** present_file 工具结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
+    /** 产出文件工具（present_file/create_oaf_zip）结果文本累积（toolCallId &rarr; 文本桶，64KB 上限防内存膨胀） */
     private final java.util.concurrent.ConcurrentHashMap<String, StringBuilder> presentFileBuffers =
         new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -406,9 +406,10 @@ public class ChatStreamController {
             }
         }
 
-        // present_file 结果累积（同样按登记名判定）
+        // 产出文件工具（present_file/create_oaf_zip）结果累积（同样按登记名判定）
         if (event instanceof ToolResultTextDeltaEvent trd
-                && isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())) {
+                && (isTool(trd.getToolCallId(), "present_file", trd.getToolCallName())
+                    || isTool(trd.getToolCallId(), "create_oaf_zip", trd.getToolCallName()))) {
             turnBucketKeys.add(trd.getToolCallId());
             accumulatePresentFile(trd.getToolCallId(), String.valueOf(trd.getDelta()));
         }
@@ -430,8 +431,11 @@ public class ChatStreamController {
             eventBus.closeSession(sessionId);
         }
 
-        // present_file 完成合成 file_ready
-        if (event instanceof ToolResultEndEvent tre && "present_file".equals(tre.getToolCallName())) {
+        // 产出文件工具完成合成 file_ready（create_oaf_zip 与 present_file 返回同构 JSON，
+        // 复用同一条下载卡片链路——此前只覆盖 present_file，打包工具始终无卡片）
+        if (event instanceof ToolResultEndEvent tre
+                && ("present_file".equals(tre.getToolCallName())
+                    || "create_oaf_zip".equals(tre.getToolCallName()))) {
             emitFileReadyViaEventBus(sessionId, replyId, tre.getToolCallId());
         }
 
@@ -470,7 +474,7 @@ public class ChatStreamController {
         }
     }
 
-    // ===== present_file 累积 & 合成 =====
+    // ===== 产出文件工具（present_file/create_oaf_zip）累积 & file_ready 合成 =====
 
     /**
      * 该 toolCallId 是否属于指定工具：优先查登记表（ToolCallStart 登记的权威名字），
@@ -504,9 +508,16 @@ public class ChatStreamController {
         if (toolCallId == null) return;
         var buf = presentFileBuffers.computeIfAbsent(toolCallId, k -> new StringBuilder());
         synchronized (buf) {
-            if (buf.length() + delta.length() > PRESENT_FILE_BUFFER_MAX) {
+            int room = PRESENT_FILE_BUFFER_MAX - buf.length();
+            if (room <= 0) {
                 log.warn("present_file result buffer overflow for toolCallId {}, dropping tail", toolCallId);
                 return;
+            }
+            // 溢出保留头部、截去尾部（原实现单个 delta 超限会整段丢弃，桶里空无一字）：
+            // file_id/file_name 等元数据固定在 JSON 前部，头部留存即可被 parseFileResult 正则救回
+            if (delta.length() > room) {
+                log.warn("present_file result buffer overflow for toolCallId {}, dropping tail", toolCallId);
+                delta = delta.substring(0, room);
             }
             buf.append(delta);
         }
@@ -518,14 +529,13 @@ public class ChatStreamController {
         String json;
         synchronized (buf) { json = buf.toString(); }
         try {
-            var node = JSON.readTree(json);
-            if (node != null && node.isTextual()) node = JSON.readTree(node.asText());
+            var node = parseFileResult(json);
             if (node != null && node.has("error")) {
-                log.debug("present_file returned error: {}, skip file_ready", node.get("error").asText());
+                log.debug("file tool returned error: {}, skip file_ready", node.get("error").asText());
                 return;
             }
-            if (node == null || !node.has("file_id") || !node.has("file_name")) {
-                log.warn("present_file result missing file_id/file_name, skip file_ready");
+            if (node == null || !node.has("file_id")) {
+                log.warn("file tool result missing file_id, skip file_ready (sid={})", sessionId);
                 return;
             }
             var fileId = node.get("file_id").asText();
@@ -545,6 +555,45 @@ public class ChatStreamController {
         } catch (Exception e) {
             log.warn("file_ready synthesis failed: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 产出文件工具结果文本 → JSON 节点。
+     *
+     * <p>全文解析失败时正则兜底：create_oaf_zip 返回体尾部带 content_base64（zip 全量 base64），
+     * 超出 {@link #PRESENT_FILE_BUFFER_MAX} 被截尾后 readTree 必失败；而 file_id/file_name/
+     * mime_type/size 固定位于 JSON 前部，从残存头部提取即可救回下载卡片。
+     */
+    private com.fasterxml.jackson.databind.JsonNode parseFileResult(String json) {
+        try {
+            var node = JSON.readTree(json);
+            if (node != null && node.isTextual()) {
+                node = JSON.readTree(node.asText());
+            }
+            if (node != null && node.isObject()) {
+                return node;
+            }
+        } catch (Exception ignored) {
+            // 落到正则兜底
+        }
+        var node = JSON.createObjectNode();
+        var id = java.util.regex.Pattern
+            .compile("\"file_id\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"").matcher(json);
+        if (!id.find()) {
+            return null;
+        }
+        node.put("file_id", id.group(1));
+        var name = java.util.regex.Pattern
+            .compile("\"file_name\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(json);
+        node.put("file_name", name.find() ? name.group(1) : "file");
+        var mime = java.util.regex.Pattern
+            .compile("\"mime_type\"\\s*:\\s*\"([^\"]+)\"").matcher(json);
+        if (mime.find()) {
+            node.put("mime_type", mime.group(1));
+        }
+        var size = java.util.regex.Pattern.compile("\"size\"\\s*:\\s*(\\d+)").matcher(json);
+        node.put("size", size.find() ? Long.parseLong(size.group(1)) : 0L);
+        return node;
     }
 
     // ===== write_file 输入截获 → KV =====
