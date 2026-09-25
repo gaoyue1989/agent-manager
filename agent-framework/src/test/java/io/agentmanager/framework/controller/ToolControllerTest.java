@@ -11,6 +11,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpManager;
@@ -28,6 +29,9 @@ class ToolControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
+    private OafConfigHolder oafConfigHolder;
+
+    @org.mockito.Mock
     private OafConfig oafConfig;
 
     @MockBean
@@ -47,8 +51,11 @@ class ToolControllerTest {
 
     @BeforeEach
     void setUp() {
+        org.mockito.Mockito.when(oafConfigHolder.get()).thenReturn(oafConfig);
         // mcpConfigs 是 mock List，stub iterator 返回空迭代器，模拟无 MCP 配置
-        when(mcpConfigs.iterator()).thenReturn(java.util.Collections.emptyIterator());
+        // InfoController/ToolController 已切动态配置：controller 调 mcpManager.loadConfigs(holder 配置)
+        when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(java.util.Collections.emptyList());
     }
 
     @Test
@@ -67,7 +74,7 @@ class ToolControllerTest {
 
     @Test
     void listMcpShouldReturnConfigs() throws Exception {
-        when(mcpManager.getMcpSummaries(mcpConfigs))
+        when(mcpManager.getMcpSummaries(org.mockito.ArgumentMatchers.anyList()))
             .thenReturn(List.of(Map.of("server", "weather-service", "tools", List.of())));
 
         mockMvc.perform(get("/mcp"))
