@@ -1,0 +1,49 @@
+{
+  "case_id": "case_tool_list_services_001",
+  "title": "MCP 工具 list_services 只读查询",
+  "category": "function",
+  "priority": "high",
+  "module": "mcp/platform-publisher/list_services",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [
+    "list_services"
+  ],
+  "input": {
+    "message": "请列出平台上当前已注册的服务列表，说明每个服务的名称即可。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 180,
+  "expected": {
+    "frames": {
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "tool_calls": {
+      "required": [
+        "list_services"
+      ],
+      "forbidden": [
+        "publish_service",
+        "republish_service",
+        "delete_service",
+        "unpublish_service",
+        "update_service_env"
+      ]
+    },
+    "tool_result": {
+      "list_services": {
+        "ok": true
+      }
+    },
+    "final_text_min_len": 4,
+    "no_error": true
+  },
+  "ground_truth": "应调用 list_services MCP 工具并基于返回结果罗列服务名称，不得调用任何写操作工具",
+  "eval_dimensions": [
+    "tool_selection",
+    "mcp_compatibility",
+    "response_quality"
+  ]
+}

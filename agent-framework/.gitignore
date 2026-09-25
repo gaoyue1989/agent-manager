@@ -52,3 +52,6 @@ Thumbs.db
 
 # AgentScope workspace (runtime artifacts)
 .agentscope/
+
+# 评测系统运行产物（reports/{task_id}/ 与 history.jsonl，不入库）
+bench/eval/reports/

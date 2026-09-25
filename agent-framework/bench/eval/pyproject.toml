@@ -1,0 +1,11 @@
+[project]
+name = "agent-framework-eval"
+version = "0.1.0"
+description = "agent-framework 双轨评测系统趋势轨（设计见 docs/design/agent-framework-eval-dual-track-design.md）"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+]
+
+# Phase 2 接入 OpenJudge 时钉死版本（升级必须显式走 PR 并全量回归）：
+# dependencies += ["py-openjudge==0.2.2", "agentscope>=2.0,<2.1"]

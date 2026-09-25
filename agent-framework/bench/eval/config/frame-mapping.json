@@ -1,0 +1,57 @@
+{
+  "version": "2026-09-25",
+  "description": "SSE 帧词表契约（两轨共享唯一事实源）。权威定义见 controller/AgentEventSseSerializer.java 与 controller/ChatStreamController.java；框架升级新增枚举时同步更新本文件。设计依据 docs/design/agent-framework-eval-dual-track-design.md §4.1",
+  "sdk_frames": [
+    "AGENT_START", "AGENT_END", "AGENT_RESULT",
+    "MODEL_CALL_START", "MODEL_CALL_END",
+    "TEXT_BLOCK_START", "TEXT_BLOCK_DELTA", "TEXT_BLOCK_END",
+    "THINKING_BLOCK_START", "THINKING_BLOCK_DELTA", "THINKING_BLOCK_END",
+    "DATA_BLOCK_START", "DATA_BLOCK_DELTA", "DATA_BLOCK_END",
+    "TOOL_CALL_START", "TOOL_CALL_DELTA", "TOOL_CALL_END",
+    "TOOL_RESULT_START", "TOOL_RESULT_TEXT_DELTA", "TOOL_RESULT_DATA_DELTA", "TOOL_RESULT_END",
+    "EXCEED_MAX_ITERS",
+    "REQUIRE_USER_CONFIRM",
+    "REQUIRE_EXTERNAL_EXECUTION",
+    "USER_CONFIRM_RESULT",
+    "EXTERNAL_EXECUTION_RESULT",
+    "REQUEST_STOP", "SUBAGENT_EXPOSED", "HINT_BLOCK", "ALL_TOOLS_DENIED", "CUSTOM"
+  ],
+  "synthetic_frames": [
+    "session_created", "waiting", "done", "error", "task_update",
+    "permission_ask", "file_ready", "tool_call_summary", "tool_result_preview"
+  ],
+  "notes": {
+    "REQUIRE_USER_CONFIRM": "序列化时 type 覆写为 permission_ask（AgentEventSseSerializer.java:123），线上不会出现枚举原名词表",
+    "MODEL_CALL_END": "携带 usage：inputTokens / outputTokens / totalTokens",
+    "error": "控制器合成帧，字段为 error（不是 message）",
+    "tool_result_end_state": "state 取值 = ToolResultState 枚举名：SUCCESS/ERROR/INTERRUPTED/DENIED/RUNNING",
+    "done_task_update": "done/task_update/error 仅由 AgentRuntimeService.invokeStream（A2A/内部通道）方言发出；POST /threads/chat 主对话流以 AGENT_END 收尾，不发 done（2026-09-25 对 release-agent 实测确认），断言请用 AGENT_END",
+    "file_ready": "仅 /threads/chat 路径合成（ChatStreamController:622）；invokeStream 方言无此帧"
+  },
+  "usage_frame": {
+    "type": "MODEL_CALL_END",
+    "fields": { "input": "inputTokens", "output": "outputTokens", "total": "totalTokens" }
+  },
+  "hitl": {
+    "ask_frame": "permission_ask",
+    "ask_tool_calls_field": "tool_calls",
+    "result_frame": "USER_CONFIRM_RESULT"
+  },
+  "concerns": {
+    "session_created": ["session_created"],
+    "text_stream": ["TEXT_BLOCK_START", "TEXT_BLOCK_DELTA", "TEXT_BLOCK_END"],
+    "thinking_stream": ["THINKING_BLOCK_START", "THINKING_BLOCK_DELTA", "THINKING_BLOCK_END"],
+    "tool_call": ["TOOL_CALL_START", "TOOL_CALL_DELTA", "TOOL_CALL_END", "tool_call_summary"],
+    "tool_result": ["TOOL_RESULT_START", "TOOL_RESULT_TEXT_DELTA", "TOOL_RESULT_DATA_DELTA", "TOOL_RESULT_END", "tool_result_preview"],
+    "model_call": ["MODEL_CALL_START", "MODEL_CALL_END"],
+    "hitl": ["permission_ask", "USER_CONFIRM_RESULT"],
+    "delivery": ["file_ready"],
+    "turn_end": ["AGENT_END", "done"],
+    "error": ["error"]
+  },
+  "final_output": {
+    "text_delta_frame": "TEXT_BLOCK_DELTA",
+    "text_delta_field": "delta"
+  },
+  "terminal_frames": ["AGENT_END", "done", "error", "permission_ask"]
+}

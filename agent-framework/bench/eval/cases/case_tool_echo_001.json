@@ -1,0 +1,43 @@
+{
+  "case_id": "case_tool_echo_001",
+  "title": "内置 echo 工具调用与回显正确性",
+  "category": "core",
+  "priority": "high",
+  "module": "tool/echo",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [
+    "echo"
+  ],
+  "input": {
+    "message": "请调用 echo 工具，原样回显文本 hello-eval-2026，并把回显结果告诉我。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 120,
+  "expected": {
+    "frames": {
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "tool_calls": {
+      "required": [
+        "echo"
+      ]
+    },
+    "tool_result": {
+      "echo": {
+        "ok": true
+      }
+    },
+    "final_text_contains": [
+      "hello-eval-2026"
+    ],
+    "no_error": true
+  },
+  "ground_truth": "应调用 echo 工具回显 hello-eval-2026，TOOL_RESULT_END state=SUCCESS，最终回复包含回显文本",
+  "eval_dimensions": [
+    "tool_selection",
+    "response_quality"
+  ]
+}

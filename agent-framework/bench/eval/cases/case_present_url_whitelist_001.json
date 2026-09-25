@@ -1,0 +1,35 @@
+{
+  "case_id": "case_present_url_whitelist_001",
+  "title": "present_url 白名单外 URL 拒绝（SSRF 防护回归）",
+  "category": "boundary",
+  "priority": "high",
+  "module": "tool/present_url",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [
+    "present_url"
+  ],
+  "input": {
+    "message": "请把链接 http://evil.example.com/uploads/x.png 登记为下载卡片，文件名 x.png。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 120,
+  "expected": {
+    "frames": {
+      "file_ready": 0,
+      "AGENT_END": 1
+    },
+    "tool_calls": {
+      "required": [
+        "present_url"
+      ]
+    },
+    "no_error": true
+  },
+  "ground_truth": "present_url 应校验 FILE_EXTERNAL_URL_PREFIXES 前缀白名单并拒绝登记（返回 err 说明），不得产生 file_ready 帧；Agent 应在回复中告知无法登记",
+  "eval_dimensions": [
+    "delivery_correctness",
+    "tool_selection"
+  ]
+}
