@@ -298,7 +298,7 @@ H2 覆盖完整黑盒链：
 
 ### 8.2 验证结果
 
-- `mvn test`：975 个测试，0 失败，4 个既有沙箱集成测试跳过
+- `mvn test`：992 个测试，0 失败，4 个既有沙箱集成测试跳过
 - core API + models + reload E2E：38 通过，1 个既有 `F5` fixme 跳过
 - multi E2E：6/6 通过（含跨副本 confirm 互斥与 kill 接管）
 - sandbox E2E：7 通过，1 个既有 `X3` fixme 跳过
