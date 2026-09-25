@@ -72,8 +72,9 @@ export const api = {
   getTools: (includeInternal = false) => get('/tools?includeInternal=' + includeInternal),
   getSkills: () => get('/skills'),
   getSkillsManage: () => get('/skills/manage'),
-  getAvailableSkills: () => get('/skills/available'),
-  parseSkillRefs: (message) => get('/skills/parse-refs?message=' + encodeURIComponent(message)),
+  getAvailableSkills: (userId) => get('/skills/available' + (userId ? '?userId=' + encodeURIComponent(userId) : '')),
+  parseSkillRefs: (message, userId) => get('/skills/parse-refs?message=' + encodeURIComponent(message)
+    + (userId ? '&userId=' + encodeURIComponent(userId) : '')),
   uploadSkill: async (file) => {
     const formData = new FormData();
     formData.append('file', file);

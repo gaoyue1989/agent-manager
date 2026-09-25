@@ -313,8 +313,8 @@ public class ChatStreamController {
                 eventBus.beginTurn(finalSessionId);
 
                 // ===== 4. 构造消息 =====
-                // 注入 @Skill 引用
-                var processedMessage = skillInjectionService.injectSkillReferences(message);
+                // 注入 @Skill 引用（按 session userId 合并该用户 L4 个人技能）
+                var processedMessage = skillInjectionService.injectSkillReferences(message, finalUserId);
 
                 if (body.fileIds() != null && !(sandboxConfig != null && sandboxConfig.enabled())) {
                     for (var fileId : body.fileIds()) {

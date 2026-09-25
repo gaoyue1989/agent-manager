@@ -66,12 +66,17 @@ class SkillInjectionServiceTest {
         return new SkillManageService(props);
     }
 
+    private UserSkillService userSkillService() {
+        // L4 合并对现有用例为空（mock 默认返回空集合/Optional.empty）
+        return org.mockito.Mockito.mock(UserSkillService.class);
+    }
+
     private SkillCatalogService catalogService() {
-        return new SkillCatalogService(oafConfig(), props, manageService());
+        return new SkillCatalogService(oafConfig(), props, manageService(), userSkillService());
     }
 
     private SkillInjectionService injectionService() {
-        return new SkillInjectionService(catalogService(), manageService());
+        return new SkillInjectionService(catalogService(), manageService(), userSkillService());
     }
 
     private void writeSkill(String name, String description, String body) throws IOException {
@@ -129,7 +134,7 @@ class SkillInjectionServiceTest {
         writeSkill("disabled-skill", "Disabled", "# Disabled");
         var manage = manageService();
         manage.toggleSkill("disabled-skill"); // disable
-        var service = new SkillInjectionService(catalogService(), manage);
+        var service = new SkillInjectionService(catalogService(), manage, userSkillService());
         var refs = service.parseSkillReferences("@disabled-skill help");
         assertTrue(refs.isEmpty());
     }
@@ -212,7 +217,7 @@ class SkillInjectionServiceTest {
         writeSkill("old-skill", "Old skill", "# Old");
         var manage = manageService();
         manage.toggleSkill("old-skill"); // disable
-        var service = new SkillInjectionService(catalogService(), manage);
+        var service = new SkillInjectionService(catalogService(), manage, userSkillService());
         var result = service.injectSkillReferences("用@old-skill 处理");
         assertTrue(result.contains("@old-skill"), "Disabled skill @ should remain as-is");
         assertFalse(result.contains("## Referenced Skills"), "No skills should be injected");
@@ -237,7 +242,7 @@ class SkillInjectionServiceTest {
         writeSkill("xlsx", "Excel tool", "# XLSX");
         var manage = manageService();
         manage.toggleSkill("xlsx"); // disable xlsx
-        var catalog = new SkillCatalogService(oafConfig(), props, manage);
+        var catalog = new SkillCatalogService(oafConfig(), props, manage, userSkillService());
         var available = catalog.availableSkills();
         assertEquals(1, available.size());
         assertEquals("pdf", available.get(0).get("name"));
@@ -249,9 +254,29 @@ class SkillInjectionServiceTest {
         writeSkill("a", "A", "# A");
         var manage = manageService();
         manage.toggleSkill("a"); // disable
-        var catalog = new SkillCatalogService(oafConfig(), props, manage);
+        var catalog = new SkillCatalogService(oafConfig(), props, manage, userSkillService());
         var available = catalog.availableSkills();
         assertTrue(available.isEmpty());
+    }
+
+    @Test
+    void injectShouldUseUserL4SkillWhenUserIdProvided() {
+        var userService = org.mockito.Mockito.mock(UserSkillService.class);
+        org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
+            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false)));
+        org.mockito.Mockito.when(userService.readSkill("u1", "personal-a", null))
+            .thenReturn(java.util.Optional.of(new UserSkillService.UserSkillContent(
+                "u1", "personal-a", "---\nname: personal-a\n---\nPersonal body",
+                "user", true, 1, List.of("SKILL.md"), true)));
+        var service = new SkillInjectionService(catalogService(), manageService(), userService);
+
+        var injected = service.injectSkillReferences("@personal-a 请处理", "u1");
+        assertTrue(injected.contains("Personal body"), injected);
+        assertEquals(List.of("personal-a"), service.parseSkillReferences("@personal-a", "u1"));
+
+        // 无 userId：L4 不参与，@ 引用保留原样（不注入个人技能内容）
+        var noUser = service.injectSkillReferences("@personal-a 请处理");
+        assertFalse(noUser.contains("Personal body"), noUser);
     }
 
     private static int countOccurrences(String text, String substr) {

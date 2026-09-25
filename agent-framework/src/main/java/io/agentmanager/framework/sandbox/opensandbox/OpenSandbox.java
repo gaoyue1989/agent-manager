@@ -41,6 +41,7 @@ public class OpenSandbox extends AbstractBaseSandbox {
     private final WorkspaceSyncService workspaceSyncService;
     private final AtomicBoolean runtimeInjected = new AtomicBoolean(false);
     private final AtomicBoolean uploadsInjected = new AtomicBoolean(false);
+    private final AtomicBoolean userSkillsMaterialized = new AtomicBoolean(false);
     private volatile String userKey;
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
@@ -128,6 +129,9 @@ public class OpenSandbox extends AbstractBaseSandbox {
         // 上传文件注入兜底（幂等）：create/resume 注入可能因 userKey 未绑定而跳过，
         // 此处用实例 userKey 重试（execute/文件工具首次调用即触发）
         injectPendingUploads();
+        // 会话开始物化 L4（幂等）：把 KV 的用户技能投影进容器 /workspace/skills，
+        // 使管理面写入/从包内下发在沙箱档会话内生效（兜底路径，主路径见 SandboxUserKeyMiddleware）
+        materializeUserSkills();
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
@@ -246,6 +250,45 @@ public class OpenSandbox extends AbstractBaseSandbox {
             } catch (Exception e) {
                 // 注入失败不阻塞：沙箱内无历史记忆时 agent 仍可运行，下次 exec 重试
                 log.warn("Failed to inject runtime files into sandbox: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 沙箱档「会话开始物化 L4」（幂等，每实例一次）：把该用户 KV 里的个人技能
+     * （{@code agents/{agent}/users/{uid}/skills}）投影进容器 {@code /workspace/skills}，
+     * 使管理面 PUT / 从包内下发在同代容器内对会话生效。
+     *
+     * <p>调用点：{@link SandboxUserKeyMiddleware#onAgent}（主路径，acquire 之后、agent 执行前）
+     * 与 {@link #doExec}（兜底，首次命令执行前）。KV 为权威：admin-override 栅栏技能照写、
+     * tombstone 技能跳过；只写不删。失败仅告警不阻塞会话。
+     */
+    public void materializeUserSkills() {
+        if (workspaceReader == null || userSkillsMaterialized.get()) {
+            return;
+        }
+        var uid = userKey;
+        if ((uid == null || uid.isBlank()) && filesystemSpec != null) {
+            // acquire 先于 middleware 时实例未绑定 userKey，从 spec ThreadLocal 兜底
+            uid = filesystemSpec.peekPendingUserKey();
+        }
+        if (uid == null || uid.isBlank()) {
+            return;
+        }
+        synchronized (userSkillsMaterialized) {
+            if (userSkillsMaterialized.get()) {
+                return;
+            }
+            try {
+                int count = workspaceReader.materializeUserSkills(osbSandbox, uid);
+                userSkillsMaterialized.set(true);
+                if (count > 0) {
+                    log.info("[sandbox-open] materialized {} L4 skill(s) into container for user {}",
+                        count, uid);
+                }
+            } catch (Exception e) {
+                // fail-soft：容器内保留 L2 基线/上一代副本，下次 acquire 重试
+                log.warn("[sandbox-open] materialize L4 skills failed for user {}: {}", uid, e.getMessage());
             }
         }
     }

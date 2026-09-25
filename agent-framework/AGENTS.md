@@ -166,7 +166,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 配置动态 reload | ✅ | OAF 包（PVC /config）原位更新免重启：`POST /admin/reload`（auto 指纹分流：仅 MCP 配置变→`OafReloadService.reloadMcpAll` 原地 reload（toolkit.removeMcpClient + registerOne，声明增删即时生效）；AGENTS.md 变→`reloadAgent` 整包重建（`HarnessAgentFactory` 重用启动装配，`WorkspaceInitializer.reinitialize` 覆盖生成文件，`AgentRuntimeService.swapAgent`/`A2aAgentRefHolder`/`OafConfigHolder` 原子切引用，旧 agent MCP 连接收尾）。失败回滚保持旧 agent；生效=下一轮对话；`AgentRuntimeService`/`HarnessAgentRunner` 持 volatile 引用，A2A 经 holder 间接持有。设计/时序/E2E 见 [docs/oaf-dynamic-reload-plan.md](docs/oaf-dynamic-reload-plan.md)；`tool/CustomTool` 标记接口收窄 `List` 注入候选（防 Spring 循环依赖） |
-| 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user）；用户技能管理面 `/skills/users/*`（列出/读取/写入/删除/从包内下发，调试页 Skills 模块「用户技能」区块；删除 = 回落包内基线 + 写删除标记防沙箱回写复活）。**沙箱档 L4 写入落库（本次修复）**：沙箱会话内 skill_manage 把 L4 写进容器 `/workspace/skills`，由 `WorkspaceSyncService.syncBack` 在每次 call 结束回写 agent_fs（`WorkspaceSyncService.java:132` 起 `syncUserSkills`，命名空间/key 一律经 `WorkspaceReader.writeUserSkillFile`，`WorkspaceReader.java:414`）——修复前只回写 MEMORY.md/memory/，L4 技能随容器 TTL 到期丢失。**回写仲裁（两个 KV 元数据键，命中即跳过同名技能）**：删除写 `/{name}/.deleted`（防删除被容器内副本复活）、管理面写入（PUT/下发）写 `/{name}/.admin-override`（防管理面写入被同代容器内旧副本在下次 call 结束时改回）；代价是标记生效期间该技能在容器内的 skill_manage 修改不落库，状态与清除方式经列表 `tombstones`/`adminOverride` 字段与删除/PUT 响应下发（调试页醒目标注）。**生效范围分档**：非沙箱档管理面 L4 下轮会话生效；沙箱档会话读容器内 `/workspace/skills` 副本，管理面写入需「会话开始物化 L4」能力（尚未实现）才对会话生效，概览见下表端点说明与 `e2e/user-skill-admin-e2e.sh` 档位说明；设计/根因/验证见 [../docs/design/user-skill-admin-design.md](../docs/design/user-skill-admin-design.md) |
+| 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user）；用户技能管理面 `/skills/users/*`（列出/读取/写入/删除/从包内下发，调试页 Skills 模块「用户技能」区块；删除 = 回落包内基线 + 写删除标记防沙箱回写复活）。**沙箱档 L4 写入落库（本次修复）**：沙箱会话内 skill_manage 把 L4 写进容器 `/workspace/skills`，由 `WorkspaceSyncService.syncBack` 在每次 call 结束回写 agent_fs（`WorkspaceSyncService.java:132` 起 `syncUserSkills`，命名空间/key 一律经 `WorkspaceReader.writeUserSkillFile`，`WorkspaceReader.java:414`）——修复前只回写 MEMORY.md/memory/，L4 技能随容器 TTL 到期丢失。**回写仲裁（两个 KV 元数据键，命中即跳过同名技能）**：删除写 `/{name}/.deleted`（防删除被容器内副本复活）、管理面写入（PUT/下发）写 `/{name}/.admin-override`（防管理面写入被同代容器内旧副本在下次 call 结束时改回）；代价是标记生效期间该技能在容器内的 skill_manage 修改不落库，状态与清除方式经列表 `tombstones`/`adminOverride` 字段与删除/PUT 响应下发（调试页醒目标注）。**生效范围分档**：非沙箱档管理面 L4 下轮会话生效；沙箱档会话读容器内 `/workspace/skills` 副本，管理面写入由「会话开始物化 L4」（`WorkspaceReader.materializeUserSkills`，`SandboxUserKeyMiddleware.onAgent` 在每次 acquire 后投影进容器；`/{name}/.deleted` 跳过、admin-override 照写、只写不删）在该用户下一个 turn 生效；`/skills/available`、`/skills/parse-refs` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。概览见下表端点说明与 `e2e/user-skill-admin-e2e.sh` 档位说明；设计/根因/验证见 [../docs/design/user-skill-admin-design.md](../docs/design/user-skill-admin-design.md) |
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟；可经 `AGENT_MEMORY_ENABLED=false` 完全关闭（不注册 memory_* 工具 + 不执行 flush/整合 + 沙箱不注入/回写记忆文件） |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
 | Plan Mode | ✅ | enablePlanMode() |
@@ -276,6 +276,10 @@ OAF `deniedTools` 字段控制排除列表。
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件操作/Shell 在 OpenSandbox 隔离沙箱执行） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
+| `SANDBOX_PROJECTION_ENABLED` | `true` | | 工作区投影开关（issue #27）：关闭后每次 sandbox start 不再 hydrate 投影目录（AGENTS.md/skills 等），降低每轮对话沙箱同步开销；skills 依赖强的包不要关 |
+| `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；Redis 不可用时 fail-open |
+| `SANDBOX_GUARD_LEASE_SECONDS` | `900` | | 守卫租约 TTL（崩溃自愈） |
+| （env 未设置时）OAF `config.sandbox.enabled` | — | | 包级沙箱开关（issue #27b）：`SANDBOX_ENABLED` 显式设置时优先；env 未设置时读包 frontmatter `config.sandbox.enabled`，均未声明回退 false。生效裁决统一在 SandboxRuntime |
 | `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制（MiB） |
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
@@ -304,11 +308,13 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
 | GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记） |
+| GET | `/skills/available` | 可用技能摘要（name+description，供 @Skill 提示）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 描述为准），无则仅全局目录 |
+| GET | `/skills/parse-refs` | 解析消息中的 @Skill 引用（`?message=`；同样按 `X-User-Id`/`?userId=` 合并 L4 校验） |
 | GET | `/skills/users` | 存在个人技能覆盖（L4，agent_fs `agents/{agent}/users/{uid}/skills`）的用户索引（触顶截断时带 `truncated=true`；**索引查询失败 500**，不降级成 200 + 空列表） |
 | GET | `/skills/users/{userId}` | 某用户的个人技能列表（`hasPackageBaseline`=删除后回落该包内技能，`adminOverride`=带管理面写入栅栏；`tombstones` 列出已删除但标记仍在的技能；枚举/标记读取失败 500，不降级为空） |
 | GET | `/skills/users/{userId}/{name}` | 技能文件内容（?file= 相对路径，默认 SKILL.md；L4 优先，无覆盖回落包内基线，source=user/package；`files`/`version`/`hasUserOverride` 与 source 同源，`userOverrideExists` 表示该用户另有个人覆盖） |
-| PUT | `/skills/users/{userId}/{name}` | 新建/覆盖该用户 SKILL.md（个人覆盖；≤100KB）。**生效范围分档（务必看）**：非沙箱档（SANDBOX_ENABLED=false）下轮会话生效；沙箱档只写 agent_fs KV，会话读的是容器内 `/workspace/skills` 副本，**不会回注容器**，需容器换代或「会话开始物化 L4」能力（尚未实现）才对该用户会话生效。写入同时置写侧栅栏 `/{name}/.admin-override`：同代容器内旧副本在下次 call 结束时**不会**把该 KV 写入改回容器版本；代价是该技能在容器内用 skill_manage 的后续修改也不再回写落库（删除该技能可清除栅栏） |
-| DELETE | `/skills/users/{userId}/{name}` | 删除该用户个人覆盖（全部文件，写 KV 删除标记 `/{name}/.deleted` 防回写复活，并清除写侧栅栏；响应带 `tombstone`=标记名+清除方式）→ 有包内同名技能则回落基线，否则该技能消失。**标记无 TTL**：该用户此后在同代（及后续）容器内用 skill_manage 重建同名技能不会被回写落库，需管理面重新写入或从包内下发才清除标记。沙箱档下删除同样只作用于 KV：容器内副本在容器换代前仍对该用户会话可见（管理面无「KV → 容器」物化路径） |
+| PUT | `/skills/users/{userId}/{name}` | 新建/覆盖该用户 SKILL.md（个人覆盖；≤100KB）。**生效范围分档（务必看）**：非沙箱档（SANDBOX_ENABLED=false）下轮会话生效；沙箱档写 agent_fs KV 并由「会话开始物化 L4」在该用户下一个 turn 投影进容器 `/workspace/skills` 生效。写入同时置写侧栅栏 `/{name}/.admin-override`：同代容器内旧副本在下次 call 结束时**不会**把该 KV 写入改回容器版本；代价是该技能在容器内用 skill_manage 的后续修改也不再回写落库（删除该技能可清除栅栏） |
+| DELETE | `/skills/users/{userId}/{name}` | 删除该用户个人覆盖（全部文件，写 KV 删除标记 `/{name}/.deleted` 防回写复活，并清除写侧栅栏；响应带 `tombstone`=标记名+清除方式）→ 有包内同名技能则回落基线，否则该技能消失。**标记无 TTL**：该用户此后在同代（及后续）容器内用 skill_manage 重建同名技能不会被回写落库，需管理面重新写入或从包内下发才清除标记。沙箱档下删除作用于 KV + tombstone：会话开始物化时不再写回容器，但容器内旧副本在容器换代前仍可能对该用户可见 |
 | POST | `/skills/users/{userId}/{name}/sync-from-package` | 把包内同名技能以包内清单为准**全量替换**为该用户个人版本（含 scripts/ 等资源；差集清理多余旧文件、失败回滚）；非 UTF-8/二进制文件显式跳过并列入响应 `skipped`；同样置写侧栅栏 `/{name}/.admin-override` |
 | GET | `/debug/user-skills` | 个人技能用户索引（调试页 Skills 模块「用户技能」区块数据源，与 `/skills/users` 同源；同上带 `truncated`；索引查询失败 500） |
 | GET | `/mcp` | MCP 服务器列表 |

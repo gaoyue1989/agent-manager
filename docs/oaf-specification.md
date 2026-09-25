@@ -149,6 +149,9 @@ orchestration:
       action: "review"
 
 # === TOOLS (Optional) ===
+# 语义（issue #28）：声明/展示意图，非存在性开关——内置 @Tool 工具运行时恒注册，
+# /tools?includeInternal=true 返回运行时注册集（declared 字段标注是否在列表内）；
+# 要移除内置工具用 deniedTools（类粒度，整个工具类的所有方法一并剔除）
 
 tools: ["Read", "Edit", "Bash", "Glob", "Grep"]
 
@@ -156,6 +159,10 @@ tools: ["Read", "Edit", "Bash", "Glob", "Grep"]
 
 config:
   temperature: 0.7
+  # 包级沙箱开关（issue #27b，可选）：SANDBOX_ENABLED 环境变量显式设置时优先；
+  # env 未设置时本声明生效；均未声明默认关闭沙箱（RemoteFilesystemSpec 模式）
+  sandbox:
+    enabled: true
   max_tokens: 4096
   require_confirmation: false
 

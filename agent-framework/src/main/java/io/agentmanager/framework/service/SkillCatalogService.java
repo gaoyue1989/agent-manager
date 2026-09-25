@@ -15,6 +15,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.FileSystemSkillRepository;
+import io.agentscope.core.skill.util.MarkdownSkillParser;
 
 /**
  * 动态技能目录：为对外 API（GET /skills、A2A agent-card、/debug/config/oaf）提供
@@ -40,11 +41,14 @@ public class SkillCatalogService {
     private final OafConfig oafConfig;
     private final FileSystemSkillRepository repository;
     private final SkillManageService manageService;
+    private final UserSkillService userSkillService;
 
     public SkillCatalogService(OafConfig oafConfig, AgentManagerProperties props,
-                               SkillManageService manageService) {
+                               SkillManageService manageService,
+                               UserSkillService userSkillService) {
         this.oafConfig = oafConfig;
         this.manageService = manageService;
+        this.userSkillService = userSkillService;
         var skillsDir = Path.of(props.resolvedConfigDir()).resolve("skills");
         // 目录不存在（包未携带 skills）时不构造：官方构造器要求目录必须存在
         this.repository = Files.isDirectory(skillsDir)
@@ -163,13 +167,77 @@ public class SkillCatalogService {
      * 等价于 list() 的精简视图，去掉 version/source/required 等管理字段。
      */
     public List<Map<String, String>> availableSkills() {
-        return list().stream()
-            .map(m -> Map.<String, String>of(
-                "name", (String) m.getOrDefault("name", ""),
-                "description", (String) m.getOrDefault("description", "")
-            ))
-            .filter(m -> !m.get("name").isBlank())
-            .toList();
+        return toNameDesc(collectAvailable(null));
+    }
+
+    /**
+     * 按用户合并的可用 Skill 摘要（全局目录 ∪ 该用户 L4 个人技能，同名 L4 覆盖描述）。
+     *
+     * <p>{@code userId} 为空时等价于 {@link #availableSkills()}。L4 合并失败降级为全局目录
+     * （不阻断 @ 补全）；被 SkillManageService 禁用的包内技能仍不出现。
+     */
+    public List<Map<String, String>> availableSkills(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return availableSkills();
+        }
+        return toNameDesc(collectAvailable(userId));
+    }
+
+    /** name → description 合并视图：全局目录为底，L4 个人技能覆盖同名描述（并补入独有技能） */
+    private Map<String, String> collectAvailable(String userId) {
+        var merged = new LinkedHashMap<String, String>();
+        for (var m : list()) {
+            var name = (String) m.get("name");
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            merged.put(name, (String) m.getOrDefault("description", ""));
+        }
+        if (userId != null && !userId.isBlank()) {
+            try {
+                for (var skill : userSkillService.listSkills(userId)) {
+                    var name = skill.name();
+                    if (name == null || name.isBlank()) {
+                        continue;
+                    }
+                    merged.put(name, l4Description(userId, name));
+                }
+            } catch (Exception e) {
+                // L4 合并失败降级为全局目录，避免 @ 补全整体不可用
+                log.warn("availableSkills: merge L4 failed for user {}: {}", userId, e.getMessage());
+            }
+        }
+        return merged;
+    }
+
+    /** 读取 L4 SKILL.md frontmatter 的 description（解析失败返回空串） */
+    private String l4Description(String userId, String name) {
+        try {
+            var opt = userSkillService.readSkill(userId, name, null);
+            if (opt.isEmpty() || opt.get().content() == null) {
+                return "";
+            }
+            var parsed = MarkdownSkillParser.parse(opt.get().content());
+            var meta = parsed != null ? parsed.getMetadata() : null;
+            var desc = meta != null ? meta.get("description") : null;
+            return desc != null ? String.valueOf(desc) : "";
+        } catch (Exception e) {
+            log.debug("availableSkills: read L4 skill {} for user {} failed: {}", name, userId, e.getMessage());
+            return "";
+        }
+    }
+
+    private static List<Map<String, String>> toNameDesc(Map<String, String> merged) {
+        var out = new ArrayList<Map<String, String>>();
+        for (var e : merged.entrySet()) {
+            if (e.getKey() == null || e.getKey().isBlank()) {
+                continue;
+            }
+            out.add(Map.of(
+                "name", e.getKey(),
+                "description", e.getValue() != null ? e.getValue() : ""));
+        }
+        return out;
     }
 
     private static Map<String, Object> entry(

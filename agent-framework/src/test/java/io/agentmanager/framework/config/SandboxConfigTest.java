@@ -15,6 +15,7 @@ class SandboxConfigTest {
             false, "opensandbox/code-interpreter:v1.1.0", 60, 1024, 1,
             List.of("/opt/code-interpreter/code-interpreter.sh"),
             Duration.ofMillis(100),
+            true, true, 900,
             new SandboxConfig.OpenSandboxConfig("192.168.31.155:8090", "key"));
 
         assertFalse(config.enabled());
@@ -33,6 +34,7 @@ class SandboxConfigTest {
         var config = new SandboxConfig(
             true, "ubuntu:24.04", 30, 512, 2, List.of("python", "main.py"),
             Duration.ofSeconds(1),
+            true, true, 900,
             new SandboxConfig.OpenSandboxConfig("127.0.0.1:8090", "k"));
 
         assertTrue(config.enabled());

@@ -49,6 +49,9 @@ class ToolControllerTest {
     @MockBean
     private SkillCatalogService skillCatalog;
 
+    @MockBean
+    private io.agentmanager.framework.service.InternalToolRegistry internalToolRegistry;
+
     @BeforeEach
     void setUp() {
         org.mockito.Mockito.when(oafConfigHolder.get()).thenReturn(oafConfig);
@@ -99,13 +102,34 @@ class ToolControllerTest {
 
     @Test
     void listToolsShouldIncludeInternalWhenRequested() throws Exception {
-        when(oafConfig.tools()).thenReturn(List.of("Read", "Bash", "Edit"));
+        // issue #28：内置清单以运行时注册集为准（registry），declared 标注 OAF 声明意图
+        when(internalToolRegistry.listInternalTools()).thenReturn(List.of(
+            Map.of("name", "get_current_time", "category", "internal", "source", "builtin", "declared", true),
+            Map.of("name", "present_url", "category", "internal", "source", "builtin", "declared", false)
+        ));
 
         mockMvc.perform(get("/tools?includeInternal=true"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.tools").isArray())
-            .andExpect(jsonPath("$.tools[0].name").value("Read"))
+            .andExpect(jsonPath("$.tools[0].name").value("get_current_time"))
             .andExpect(jsonPath("$.tools[0].category").value("internal"))
-            .andExpect(jsonPath("$.totalCount").value(3));
+            .andExpect(jsonPath("$.tools[0].declared").value(true))
+            .andExpect(jsonPath("$.tools[1].name").value("present_url"))
+            .andExpect(jsonPath("$.tools[1].declared").value(false))
+            .andExpect(jsonPath("$.internalCount").value(2))
+            .andExpect(jsonPath("$.totalCount").value(2));
+    }
+
+    @Test
+    void listToolsInternalShouldFallBackToRegistryEvenWhenOafToolsEmpty() throws Exception {
+        // 回归 issue #28 失真场景：OAF tools:[] 但运行时注册存在 → 清单不得为空
+        when(internalToolRegistry.listInternalTools()).thenReturn(List.of(
+            Map.of("name", "echo", "category", "internal", "source", "builtin", "declared", false)
+        ));
+
+        mockMvc.perform(get("/tools?includeInternal=true"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.tools[0].name").value("echo"))
+            .andExpect(jsonPath("$.totalCount").value(1));
     }
 }

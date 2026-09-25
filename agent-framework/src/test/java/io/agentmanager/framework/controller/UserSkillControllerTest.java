@@ -20,6 +20,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.UserSkillService;
 import io.agentmanager.framework.service.UserSkillService.SyncOutcome;
 import io.agentmanager.framework.service.UserSkillService.UserSkillContent;
@@ -44,17 +45,17 @@ class UserSkillControllerTest {
     @BeforeEach
     void setUp() {
         service = mock(UserSkillService.class);
-        mvc = MockMvcBuilders.standaloneSetup(new UserSkillController(service, sandboxConfig(false))).build();
+        mvc = MockMvcBuilders.standaloneSetup(new UserSkillController(service, sandboxRuntime(false))).build();
     }
 
     /** 沙箱档控制器：成功提示必须说明“只写 KV、不会回注容器” */
     private MockMvc sandboxMvc() {
-        return MockMvcBuilders.standaloneSetup(new UserSkillController(service, sandboxConfig(true))).build();
+        return MockMvcBuilders.standaloneSetup(new UserSkillController(service, sandboxRuntime(true))).build();
     }
 
-    private static SandboxConfig sandboxConfig(boolean enabled) {
-        return new SandboxConfig(enabled, "img", 60, 1024, 1, List.of("/entry.sh"),
-            java.time.Duration.ofMillis(100), null);
+    private static SandboxRuntime sandboxRuntime(boolean enabled) {
+        return new SandboxRuntime(new SandboxConfig(enabled, "img", 60, 1024, 1, List.of("/entry.sh"),
+            java.time.Duration.ofMillis(100), true, true, 900, null), enabled);
     }
 
     // ---------- 用户索引 ----------
@@ -412,7 +413,7 @@ class UserSkillControllerTest {
         when(manageService.readSkillContent("users"))
             .thenThrow(new IllegalArgumentException("Skill 'users' 的 SKILL.md 不存在"));
         var bothMvc = MockMvcBuilders.standaloneSetup(
-            new UserSkillController(service, sandboxConfig(false)),
+            new UserSkillController(service, sandboxRuntime(false)),
             new SkillManageController(manageService,
                 mock(io.agentmanager.framework.service.SkillCatalogService.class),
                 mock(io.agentmanager.framework.service.SkillInjectionService.class))).build();

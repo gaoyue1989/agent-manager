@@ -7,7 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
-import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.WorkspaceReader;
@@ -36,28 +36,28 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     private final FileAssetStore fileAssetStore;
     private final FileStorage fileStorage;
     private final AgentManagerProperties props;
-    private final SandboxConfig sandboxConfig;
+    private final SandboxRuntime sandboxRuntime;
     private final WorkspaceReader workspaceReader;
     private final OpenSandboxFilesystemSpec sandboxFilesystemSpec;
 
     public FileTools(FileAssetStore fileAssetStore,
                      FileStorage fileStorage,
                      AgentManagerProperties props,
-                     SandboxConfig sandboxConfig,
+                     SandboxRuntime sandboxRuntime,
                      WorkspaceReader workspaceReader) {
-        this(fileAssetStore, fileStorage, props, sandboxConfig, workspaceReader, null);
+        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, null);
     }
 
     public FileTools(FileAssetStore fileAssetStore,
                      FileStorage fileStorage,
                      AgentManagerProperties props,
-                     SandboxConfig sandboxConfig,
+                     SandboxRuntime sandboxRuntime,
                      WorkspaceReader workspaceReader,
                      OpenSandboxFilesystemSpec sandboxFilesystemSpec) {
         this.fileAssetStore = fileAssetStore;
         this.fileStorage = fileStorage;
         this.props = props;
-        this.sandboxConfig = sandboxConfig;
+        this.sandboxRuntime = sandboxRuntime;
         this.workspaceReader = workspaceReader;
         this.sandboxFilesystemSpec = sandboxFilesystemSpec;
     }
@@ -93,7 +93,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             } catch (IllegalArgumentException e) {
                 return err("file_content_base64 is not valid base64");
             }
-        } else if (sandboxConfig.enabled()) {
+        } else if (sandboxRuntime.enabled()) {
             // 沙箱直读：取当前会话沙箱（acquire 时注册到 spec），校验归属 userKey 防并发串沙箱
             var sandbox = sandboxFilesystemSpec != null ? sandboxFilesystemSpec.getLatestSandbox() : null;
             var boundKey = sandbox != null ? sandbox.getUserKey() : null;

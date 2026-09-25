@@ -8,7 +8,7 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.http.HttpStatus;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
-import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
@@ -39,7 +39,7 @@ public class FileControllerTest {
         fileStorage = mock(FileStorage.class);
         fileAssetStore = mock(FileAssetStore.class);
         props = testProps();
-        var sandbox = mock(SandboxConfig.class);
+        var sandbox = mock(SandboxRuntime.class);
         when(sandbox.enabled()).thenReturn(false);
         controller = new FileController(fileStorage, fileAssetStore, props, sandbox);
     }
@@ -117,7 +117,7 @@ public class FileControllerTest {
                 "image/*", 5, 15, 50, true, 7, "local", "/tmp", "", "", "", "b", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             AgentManagerProperties.HarnessConfig.defaults());
-        var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxConfig.class));
+        var c = new FileController(fileStorage, fileAssetStore, disabled, mock(SandboxRuntime.class));
         var file = new MockMultipartFile("file", "a.png", "image/png", new byte[]{1});
         assertEquals(HttpStatus.FORBIDDEN, c.upload(file, null, null, null).getStatusCode());
     }
@@ -264,7 +264,7 @@ public class FileControllerTest {
             var url = "http://127.0.0.1:" + port + "/pkg/1/download";
             var id = "550e8400-e29b-41d4-a716-446655440010";
             var c = new FileController(fileStorage, fileAssetStore,
-                propsWithExternalPrefix("http://127.0.0.1:" + port), mock(SandboxConfig.class));
+                propsWithExternalPrefix("http://127.0.0.1:" + port), mock(SandboxRuntime.class));
             when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id, url, "weather-agent.zip")));
 
             var resp = c.download(id, 0);
@@ -301,7 +301,7 @@ public class FileControllerTest {
             var port = server.getAddress().getPort();
             var id = "550e8400-e29b-41d4-a716-446655440012";
             var c = new FileController(fileStorage, fileAssetStore,
-                propsWithExternalPrefix("http://127.0.0.1:" + port), mock(SandboxConfig.class));
+                propsWithExternalPrefix("http://127.0.0.1:" + port), mock(SandboxRuntime.class));
             when(fileAssetStore.get(id)).thenReturn(java.util.Optional.of(externalAsset(id,
                 "http://127.0.0.1:" + port + "/pkg/2/download", "a.zip")));
             assertEquals(HttpStatus.BAD_GATEWAY, c.download(id, 0).getStatusCode());

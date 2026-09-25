@@ -65,6 +65,9 @@ class DebugApiControllerTest {
     private LogCollector logCollector;
 
     @MockBean
+    private io.agentmanager.framework.service.SandboxRuntime sandboxRuntime;
+
+    @MockBean
     private SkillCatalogService skillCatalog;
 
     @MockBean

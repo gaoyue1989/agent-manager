@@ -44,35 +44,46 @@ public class SkillInjectionService {
 
     private final SkillCatalogService catalogService;
     private final SkillManageService manageService;
+    private final UserSkillService userSkillService;
 
     public SkillInjectionService(SkillCatalogService catalogService,
-                                  SkillManageService manageService) {
+                                  SkillManageService manageService,
+                                  UserSkillService userSkillService) {
         this.catalogService = catalogService;
         this.manageService = manageService;
+        this.userSkillService = userSkillService;
     }
 
     /**
-     * 注入 @Skill 引用到用户消息中。
-     *
-     * <p>处理流程：
-     * 1. 扫描消息中所有 @SkillName 标记
-     * 2. 对每个标记查找已启用的 Skill
-     * 3. 将 @SkillName 替换为结构化引用块
-     * 4. 在消息末尾追加所有匹配 Skill 的完整内容
+     * 注入 @Skill 引用到用户消息中（不合并用户 L4 个人技能）。
      *
      * @param message 原始用户消息
      * @return 处理后的消息（含 Skill 注入），若无 @ 标记则返回原消息
      */
     public String injectSkillReferences(String message) {
+        return injectSkillReferences(message, null);
+    }
+
+    /**
+     * 注入 @Skill 引用到用户消息中，并按 session userId 合并该用户的 L4 个人技能。
+     *
+     * <p>处理流程：
+     * 1. 扫描消息中所有 @SkillName 标记
+     * 2. 对每个标记查找已启用的 Skill（全局目录 ∪ 该用户 L4 个人技能）
+     * 3. 将 @SkillName 替换为结构化引用块
+     * 4. 在消息末尾追加所有匹配 Skill 的完整内容（L4 优先，无覆盖回落包内基线）
+     *
+     * @param message 原始用户消息
+     * @param userId  会话生效的 userId（网关注入；可为 null，此时仅全局目录）
+     * @return 处理后的消息（含 Skill 注入），若无 @ 标记则返回原消息
+     */
+    public String injectSkillReferences(String message, String userId) {
         if (message == null || message.isBlank() || !message.contains("@")) {
             return message;
         }
 
-        // 1. 获取所有已启用 Skill 的 name 集合，用于快速校验
-        var enabledSkills = catalogService.list().stream()
-            .filter(m -> Boolean.TRUE.equals(m.get("enabled")))
-            .map(m -> (String) m.get("name"))
-            .collect(Collectors.toSet());
+        // 1. 获取所有已启用 Skill 的 name 集合（全局目录 ∪ 该用户 L4）
+        var enabledSkills = enabledSkillNames(userId);
 
         if (enabledSkills.isEmpty()) {
             return message;
@@ -116,7 +127,7 @@ public class SkillInjectionService {
 
         for (var skillName : referencedSkills) {
             try {
-                var content = manageService.readSkillContent(skillName);
+                var content = readSkillContent(userId, skillName);
                 contentBuilder.append("\n### Skill: ").append(skillName).append("\n");
                 contentBuilder.append("```\n");
                 contentBuilder.append(content);
@@ -147,14 +158,22 @@ public class SkillInjectionService {
      * @return 匹配到的 Skill 名称列表（去重，保持顺序）
      */
     public List<String> parseSkillReferences(String message) {
+        return parseSkillReferences(message, null);
+    }
+
+    /**
+     * 解析消息中的 @SkillName 标记（按 session userId 合并 L4 个人技能后校验）。
+     *
+     * @param message 用户消息
+     * @param userId  会话生效的 userId（网关注入；可为 null，此时仅全局目录）
+     * @return 匹配到的 Skill 名称列表（去重，保持顺序）
+     */
+    public List<String> parseSkillReferences(String message, String userId) {
         if (message == null || message.isBlank() || !message.contains("@")) {
             return List.of();
         }
 
-        var enabledSkills = catalogService.list().stream()
-            .filter(m -> Boolean.TRUE.equals(m.get("enabled")))
-            .map(m -> (String) m.get("name"))
-            .collect(Collectors.toSet());
+        var enabledSkills = enabledSkillNames(userId);
 
         var result = new ArrayList<String>();
         var seen = new java.util.LinkedHashSet<String>();
@@ -169,5 +188,53 @@ public class SkillInjectionService {
         }
 
         return result;
+    }
+
+    /**
+     * 已启用技能名集合：全局目录（已启用）∪ 该用户 L4 个人技能。
+     * L4 合并失败降级为全局目录，不阻断 @ 注入。
+     */
+    private java.util.Set<String> enabledSkillNames(String userId) {
+        var names = new java.util.LinkedHashSet<String>();
+        catalogService.list().stream()
+            .filter(m -> Boolean.TRUE.equals(m.get("enabled")))
+            .map(m -> (String) m.get("name"))
+            .filter(n -> n != null && !n.isBlank())
+            .forEach(names::add);
+        if (userId != null && !userId.isBlank()) {
+            try {
+                for (var skill : userSkillService.listSkills(userId)) {
+                    if (skill.name() != null && !skill.name().isBlank()) {
+                        names.add(skill.name());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("enabledSkillNames: merge L4 failed for user {}: {}", userId, e.getMessage());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 读取技能内容：L4 个人技能优先，无覆盖回落包内基线。
+     *
+     * @throws IOException 两侧都读不到（与 manageService.readSkillContent 一致，交由调用方降级处理）
+     */
+    private String readSkillContent(String userId, String skillName) throws IOException {
+        if (userId != null && !userId.isBlank()) {
+            try {
+                var opt = userSkillService.readSkill(userId, skillName, null);
+                if (opt.isPresent()) {
+                    var content = opt.get().content();
+                    if (content != null && !content.isBlank()) {
+                        return content;
+                    }
+                }
+            } catch (Exception e) {
+                // L4 读取异常不阻断：回落包内基线
+                log.debug("read L4 skill {} for user {} failed: {}", skillName, userId, e.getMessage());
+            }
+        }
+        return manageService.readSkillContent(skillName);
     }
 }

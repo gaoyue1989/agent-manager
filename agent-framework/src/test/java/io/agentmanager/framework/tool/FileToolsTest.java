@@ -7,7 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
-import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.WorkspaceReader;
@@ -30,17 +30,17 @@ class FileToolsTest {
 
     private FileStorage fileStorage;
     private FileAssetStore fileAssetStore;
-    private SandboxConfig sandboxConfig;
+    private SandboxRuntime sandboxRuntime;
     private FileTools tools;
 
     @BeforeEach
     void setUp() {
         fileStorage = mock(FileStorage.class);
         fileAssetStore = mock(FileAssetStore.class);
-        sandboxConfig = mock(SandboxConfig.class);
-        when(sandboxConfig.enabled()).thenReturn(false);
+        sandboxRuntime = mock(SandboxRuntime.class);
+        when(sandboxRuntime.enabled()).thenReturn(false);
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
-        tools = new FileTools(fileAssetStore, fileStorage, props, sandboxConfig,
+        tools = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
             mock(WorkspaceReader.class));
     }
 
@@ -60,7 +60,7 @@ class FileToolsTest {
             f.storageS3Bucket(), prefixes);
         var props = new AgentManagerProperties(base.llm(), base.server(), base.checkpoint(),
             "/config", "", base.cleanup(), file, base.sse(), base.harness());
-        return new FileTools(fileAssetStore, fileStorage, props, sandboxConfig, mock(WorkspaceReader.class));
+        return new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, mock(WorkspaceReader.class));
     }
 
     @Test
@@ -167,7 +167,7 @@ class FileToolsTest {
 
     @Test
     void presentFileSandboxModeRequiresBase64() {
-        when(sandboxConfig.enabled()).thenReturn(true);
+        when(sandboxRuntime.enabled()).thenReturn(true);
         var result = tools.presentFile(ctx(), "outputs/x.txt", null);
         assertTrue(result.contains("file_content_base64"), "沙箱模式必须传 base64: " + result);
     }
@@ -196,7 +196,7 @@ class FileToolsTest {
         when(ws.readWorkspaceFile("alice", "outputs/kv.txt")).thenReturn(
             "from-kv".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
-        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxConfig, ws);
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime, ws);
 
         var result = t.presentFile(ctx(), "outputs/kv.txt", null);
         assertTrue(result.contains("from-kv") || result.contains("\"file_id\""),
@@ -206,7 +206,7 @@ class FileToolsTest {
     @Test
     void presentFileSandboxReadsFromSandboxWorkspace() throws Exception {
         // 沙箱模式：无 base64 时经 spec.latestSandbox.readWorkspaceFile 直读（同 userKey 校验通过）
-        when(sandboxConfig.enabled()).thenReturn(true);
+        when(sandboxRuntime.enabled()).thenReturn(true);
         var spec = mock(OpenSandboxFilesystemSpec.class);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
         when(spec.getLatestSandbox()).thenReturn(sandbox);
@@ -214,7 +214,7 @@ class FileToolsTest {
         when(sandbox.readWorkspaceFile("outputs/pkg.zip")).thenReturn(
             "PK\u0003\u0004fake-zip".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
-        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxConfig,
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
             mock(WorkspaceReader.class), spec);
 
         var result = t.presentFile(ctx(), "/workspace/outputs/pkg.zip", null);
@@ -225,13 +225,13 @@ class FileToolsTest {
     @Test
     void presentFileSandboxRejectsForeignUserSandbox() throws Exception {
         // userKey 不匹配（并发串沙箱防护）：不应读取，报错提示
-        when(sandboxConfig.enabled()).thenReturn(true);
+        when(sandboxRuntime.enabled()).thenReturn(true);
         var spec = mock(OpenSandboxFilesystemSpec.class);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
         when(spec.getLatestSandbox()).thenReturn(sandbox);
         when(sandbox.getUserKey()).thenReturn("other-user");
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
-        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxConfig,
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
             mock(WorkspaceReader.class), spec);
 
         var result = t.presentFile(ctx(), "outputs/x.txt", null);

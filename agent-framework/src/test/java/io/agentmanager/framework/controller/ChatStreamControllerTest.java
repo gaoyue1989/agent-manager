@@ -130,7 +130,7 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.isHeld(anyString())).thenReturn(false);
 
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         controller = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -424,7 +424,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-sum1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -474,7 +474,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-sum2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -512,7 +512,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-fr1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -555,7 +555,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-zip1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var fileAssetStore = mock(io.agentmanager.framework.service.FileAssetStore.class);
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
@@ -599,7 +599,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-zip2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -660,7 +660,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-ui1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var registrar = mock(McpToolRegistrar.class);
         when(registrar.resolveUiRef("show_form"))
             .thenReturn(new McpToolRegistrar.UiRef("ui://approval/form.html", "approval"));
@@ -694,7 +694,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-ui2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
