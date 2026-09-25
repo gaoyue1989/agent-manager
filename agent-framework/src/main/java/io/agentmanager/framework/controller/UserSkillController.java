@@ -207,10 +207,10 @@ public class UserSkillController {
                 + ("created".equals(outcome.action()) ? "创建" : "更新")
                 + "（已写入 agent_fs）"
                 + (sandboxMode()
-                    ? "；当前 SANDBOX_ENABLED=true，该写入不会回注沙箱容器，且已置管理面写入栅栏——"
+                    ? "；当前 SANDBOX_ENABLED=true，该写入已落 agent_fs 并置管理面写入栅栏——"
                       + "同代容器内旧副本在下次 call 结束时不会把它改回容器版本（代价：该技能在容器内用"
-                      + "skill_manage 的后续修改同样不再回写落库，删除该技能可清除栅栏）；需容器换代或"
-                      + "“会话开始物化 L4”能力（尚未实现）才对该用户会话生效"
+                      + "skill_manage 的后续修改同样不再回写落库，删除该技能可清除栅栏）；"
+                      + "会话开始物化 L4 已启用：该用户下一个 turn 开始时会把本写入投影进容器 /workspace/skills 生效"
                     : "，用户 " + userId + " 下轮会话生效"));
             return ResponseEntity.ok(resp);
         } catch (UserSkillService.ContentTooLargeException e) {
@@ -259,7 +259,8 @@ public class UserSkillController {
                 + userId + (hasBaseline ? " 回落包内基线" : " 无包内同名技能，该技能已消失")
                 + "；标记生效期间该用户在同代（及后续）容器内用 skill_manage 重建同名技能不会被回写落库"
                 + (sandboxMode()
-                    ? "；当前 SANDBOX_ENABLED=true，容器内副本在容器换代前仍对该用户会话可见"
+                    ? "；当前 SANDBOX_ENABLED=true，tombstone 生效：下一次会话物化时不再写回容器"
+                      + "（容器内旧副本在容器换代前仍可能对该用户会话可见）"
                     : ""));
             return ResponseEntity.ok(resp);
         } catch (IllegalArgumentException e) {
@@ -300,7 +301,9 @@ public class UserSkillController {
             resp.put("message", "包内技能 '" + name + "' 已下发为用户 " + userId + " 的个人版本"
                 + (sync.skipped().isEmpty() ? "" : "（跳过 " + sync.skipped().size() + " 个非 UTF-8 文件: "
                     + String.join(", ", sync.skipped()) + "）")
-                + (sandboxMode() ? "；当前 SANDBOX_ENABLED=true，该写入不会回注沙箱容器" : ""));
+                + (sandboxMode()
+                    ? "；当前 SANDBOX_ENABLED=true，该用户下一个 turn 开始时物化进容器 /workspace/skills 生效"
+                    : ""));
             return ResponseEntity.ok(resp);
         } catch (UserSkillService.ContentTooLargeException e) {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "content_too_large", e.getMessage());

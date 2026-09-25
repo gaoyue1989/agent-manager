@@ -84,6 +84,11 @@ class SkillCatalogServiceTest {
         return new SkillManageService(props());
     }
 
+    private UserSkillService userSkillService() {
+        // L4 合并对现有用例为空（mock 默认返回空集合）
+        return org.mockito.Mockito.mock(UserSkillService.class);
+    }
+
     private Map<String, Object> byName(SkillCatalogService service, String name) {
         return service.list().stream()
             .filter(m -> name.equals(m.get("name")))
@@ -93,7 +98,7 @@ class SkillCatalogServiceTest {
     @Test
     void directoryOnlySkillShouldBeLocalDynamic() throws IOException {
         writeSkill("extra-skill", "Dynamic skill", "2.0.0");
-        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService());
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService(), userSkillService());
 
         var entry = byName(service, "extra-skill");
         assertNotNull(entry, "extra-skill should be in list()");
@@ -107,7 +112,7 @@ class SkillCatalogServiceTest {
     @Test
     void declaredOnlySkillShouldBeMarkedMissing() {
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("ghost-skill", "Only declared", true))), props(), manageService());
+            oafConfig(List.of(declared("ghost-skill", "Only declared", true))), props(), manageService(), userSkillService());
 
         var entry = byName(service, "ghost-skill");
         assertEquals("Only declared", entry.get("description"));
@@ -122,7 +127,7 @@ class SkillCatalogServiceTest {
         // 声明 description="Declared desc"，目录 SKILL.md description="Disk desc" → 以目录为准
         writeSkill("demo", "Disk desc", "1.2.0");
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("demo", "Declared desc", true))), props(), manageService());
+            oafConfig(List.of(declared("demo", "Declared desc", true))), props(), manageService(), userSkillService());
 
         var entry = byName(service, "demo");
         assertEquals("Disk desc", entry.get("description"));
@@ -138,7 +143,7 @@ class SkillCatalogServiceTest {
     void runtimeDirectoryChangeShouldBeVisibleImmediately() throws IOException {
         writeSkill("a", "Skill A", "1.0.0");
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("b", "Skill B", false))), props(), manageService());
+            oafConfig(List.of(declared("b", "Skill B", false))), props(), manageService(), userSkillService());
 
         assertEquals(2, service.list().size());
 
@@ -157,7 +162,7 @@ class SkillCatalogServiceTest {
     @Test
     void modifiedSkillMdShouldBeReRead() throws IOException {
         writeSkill("a", "Old desc", "1.0.0");
-        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService());
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService(), userSkillService());
         assertEquals("Old desc", byName(service, "a").get("description"));
 
         // 修改 SKILL.md（强制 mtime 变化，模拟 PVC 原位更新）
@@ -170,7 +175,7 @@ class SkillCatalogServiceTest {
 
     @Test
     void emptyDirectoryAndNoDeclarationsShouldReturnEmptyList() {
-        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService());
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService(), userSkillService());
         assertTrue(service.list().isEmpty());
     }
 
@@ -190,11 +195,37 @@ class SkillCatalogServiceTest {
 
         );
         var service = new SkillCatalogService(
-            oafConfig(List.of(declared("ghost", "Only declared", false))), emptyProps, new SkillManageService(emptyProps));
+            oafConfig(List.of(declared("ghost", "Only declared", false))), emptyProps, new SkillManageService(emptyProps),
+            userSkillService());
 
         assertTrue(service.dynamicSkillNames().isEmpty());
         assertEquals(1, service.list().size());
         assertEquals("ghost", service.list().get(0).get("name"));
+    }
+
+    @Test
+    void availableSkillsShouldMergeUserL4Overrides() {
+        var userService = org.mockito.Mockito.mock(UserSkillService.class);
+        org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
+            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false)));
+        org.mockito.Mockito.when(userService.readSkill("u1", "personal-a", null))
+            .thenReturn(java.util.Optional.of(new UserSkillService.UserSkillContent(
+                "u1", "personal-a",
+                "---\nname: personal-a\ndescription: Personal skill\n---\nbody",
+                "user", true, 1, List.of("SKILL.md"), true)));
+
+        var service = new SkillCatalogService(
+            oafConfig(List.of(declared("global-a", "Global skill", false))),
+            props(), manageService(), userService);
+
+        var merged = service.availableSkills("u1");
+        var byName = merged.stream().collect(java.util.stream.Collectors.toMap(
+            m -> m.get("name"), m -> m.get("description")));
+        assertEquals("Global skill", byName.get("global-a"));
+        assertEquals("Personal skill", byName.get("personal-a"));
+
+        // 无 userId：不合并 L4（仅全局目录）
+        assertTrue(service.availableSkills().stream().noneMatch(m -> "personal-a".equals(m.get("name"))));
     }
 
     private static void deleteRecursively(Path root) throws IOException {

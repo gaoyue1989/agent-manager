@@ -38,7 +38,9 @@ import io.agentmanager.framework.model.OafConfig;
  * 否则 OAF 名中的通配符会错配（agent 名不受限，可能含下划线）。
  *
  * <p>生效范围：非沙箱档推理直接读 agent_fs 的 L4（同名 L4 覆盖 L2）；沙箱档会话读容器内
- * {@code /workspace/skills} 副本，管理面写入需“会话开始物化 L4”能力（尚未实现）才对会话生效。
+ * {@code /workspace/skills} 副本，管理面写入由「会话开始物化 L4」
+ * （{@link WorkspaceReader#materializeUserSkills}，经 SandboxUserKeyMiddleware 在每次 acquire
+ * 后投影进容器）在该用户下一个 turn 生效。
  * 沙箱回写侧的两道仲裁（均落在技能目录的 {@code .} 元数据键上，回写命中即跳过同名技能）：
  * 删除写 {@code /{name}/.deleted}（防删除被静默还原）、写入写 {@code /{name}/.admin-override}
  * （防管理面写入被同代容器内旧副本改回）。

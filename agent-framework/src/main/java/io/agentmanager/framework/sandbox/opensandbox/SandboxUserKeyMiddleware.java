@@ -60,6 +60,9 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                     }
                 }
                 sandbox.injectPendingUploads();
+                // 会话开始物化 L4：把管理面写入/从包内下发的用户技能投影进容器，
+                // 否则沙箱档会话读的仍是容器内旧副本（管理面只写 KV，不回注容器）
+                sandbox.materializeUserSkills();
             }
         }
         return next.apply(input);

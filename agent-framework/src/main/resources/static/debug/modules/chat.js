@@ -216,6 +216,7 @@ function bindEvents() {
     ctx.state.setState('ui.userId', v);
     updateConnBadge();
     loadThreads();
+    loadAvailableSkills();   // userId 变化 → 重新拉取该用户的 @ 候选（含 L4）
   });
   uidInput.addEventListener('blur', () => {
     // 失焦时确保非空
@@ -232,7 +233,9 @@ function autoGrow() {
 
 async function loadAvailableSkills() {
   try {
-    mentionSkills = (await ctx.api.getAvailableSkills()) || [];
+    // 带上当前 userId：后端会合并该用户的 L4 个人技能到 @ 候选（网关场景由 X-User-Id 注入）
+    const uid = ctx.state.getState('ui.userId') || 'debug-user';
+    mentionSkills = (await ctx.api.getAvailableSkills(uid)) || [];
   } catch (e) {
     mentionSkills = [];
   }

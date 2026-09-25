@@ -418,6 +418,54 @@ class WorkspaceReaderTest {
         assertTrue(reader.listUserSkillTombstones("brand-new-user").isEmpty(), "新用户无标记且不抛错");
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void materializeUserSkillsShouldProjectL4IntoContainer() {
+        var store = store();
+        var reader = readerWithAgent(store);
+        reader.writeUserSkillFile(USER, "pdf-extract", "SKILL.md", "---\nname: pdf-extract\n---\nbody");
+        reader.writeUserSkillFile(USER, "pdf-extract", "scripts/run.sh", "#!/bin/sh\necho hi");
+
+        var sandbox = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        var files = org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class);
+        org.mockito.Mockito.when(sandbox.files()).thenReturn(files);
+        var cap = org.mockito.ArgumentCaptor.forClass(java.util.List.class);
+        org.mockito.Mockito.doNothing().when(files).write(cap.capture());
+
+        int materialized = reader.materializeUserSkills(sandbox, USER);
+
+        assertEquals(1, materialized);
+        var paths = ((java.util.List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>)
+            cap.getValue()).stream().map(e -> e.getPath()).toList();
+        assertTrue(paths.contains("/workspace/skills/pdf-extract/SKILL.md"), paths.toString());
+        assertTrue(paths.contains("/workspace/skills/pdf-extract/scripts/run.sh"), paths.toString());
+    }
+
+    @Test
+    void materializeUserSkillsShouldSkipNewUserAndTombstonedSkill() {
+        var store = store();
+        var reader = readerWithAgent(store);
+
+        // 新用户无 L4：不写任何 entry
+        var osb1 = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        org.mockito.Mockito.when(osb1.files()).thenReturn(org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class));
+        assertEquals(0, reader.materializeUserSkills(osb1, USER));
+
+        // 有 SKILL.md 但带删除标记：跳过不物化
+        reader.writeUserSkillFile(USER, "gone", "SKILL.md", "# gone");
+        reader.markUserSkillDeleted(USER, "gone");
+        var osb2 = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        var files2 = org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class);
+        org.mockito.Mockito.when(osb2.files()).thenReturn(files2);
+
+        assertEquals(0, reader.materializeUserSkills(osb2, USER));
+        org.mockito.Mockito.verify(files2, org.mockito.Mockito.never())
+            .write(org.mockito.ArgumentMatchers.anyList());
+    }
+
     /** delete 委托真实 InMemoryStore，但 delete 抛异常（store 故障） */
     private static final class DeleteFailingStore
             implements io.agentscope.harness.agent.filesystem.remote.store.BaseStore {

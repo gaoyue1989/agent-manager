@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -64,21 +65,33 @@ public class SkillManageController {
      * 前端可在输入框中检测 @ 符号后调用此接口展示候选列表。
      */
     @GetMapping("/available")
-    public List<Map<String, String>> listAvailable() {
-        return catalogService.availableSkills();
+    public List<Map<String, String>> listAvailable(
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+            @RequestParam(value = "userId", required = false) String userId) {
+        // 网关注入的 X-User-Id 优先（登录态真实用户）；无则回落查询参数（调试/测试）
+        var effective = effectiveUserId(headerUserId, userId);
+        return catalogService.availableSkills(effective);
     }
 
     /**
      * 解析消息中的 @Skill 引用（预览用）。
      * 前端在输入过程中可调用此接口实时展示已匹配的 Skill 列表。
+     * 按 session userId 合并该用户的 L4 个人技能（X-User-Id 头优先）。
      *
      * @param message 用户输入的消息片段
      */
     @GetMapping("/parse-refs")
     public ResponseEntity<Map<String, Object>> parseReferences(
-            @RequestParam("message") String message) {
-        var refs = skillInjectionService.parseSkillReferences(message);
+            @RequestParam("message") String message,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+            @RequestParam(value = "userId", required = false) String userId) {
+        var refs = skillInjectionService.parseSkillReferences(message, effectiveUserId(headerUserId, userId));
         return ResponseEntity.ok(Map.of("skills", refs, "count", refs.size()));
+    }
+
+    /** 取生效 userId：网关 Header 优先，其次查询参数 */
+    private static String effectiveUserId(String headerUserId, String queryUserId) {
+        return (headerUserId != null && !headerUserId.isBlank()) ? headerUserId : queryUserId;
     }
 
     /**
