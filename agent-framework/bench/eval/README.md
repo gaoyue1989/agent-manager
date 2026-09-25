@@ -1,5 +1,8 @@
 # agent-framework 评测飞轮（walking skeleton）
 
+> **日常使用看 [FLYWHEEL.md](FLYWHEEL.md)**（怎么用 / 何时用 / 场景命令表 / 排障）；
+> 本文是模块结构、关键事实与已知问题的参考手册。
+
 对应设计：[docs/design/agent-framework-eval-dual-track-design.md](../../docs/design/agent-framework-eval-dual-track-design.md)
 （双轨评测：门禁轨=CI e2e 断言，趋势轨=本目录 Python 工程。本 README 描述趋势轨骨架的现状。）
 
