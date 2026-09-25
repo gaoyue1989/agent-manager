@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 38 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 41 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -51,13 +51,13 @@
 | [sse-optimization-a1-a5-design.md](sse-optimization-a1-a5-design.md) | SSE 链路优化五项（A1 toSSE 收口 / A2 Tailer 空闲退避 / A3 emit 失败不广播 / A4 控制器桶清理 / A5 TurnFinalizer 抽取），已实施 |
 | [hitl-tool-summary-recovery-design.md](hitl-tool-summary-recovery-design.md) | HITL 恢复流工具调用摘要兜底（RESULT_END 按 toolCallId 补发「执行 工具名」），**已实施**（2026-09-25；含方案比较与幂等/回放语义） |
 | [session-model-switch-design.md](session-model-switch-design.md) | 会话模型切换（model_config 托管模型 CRUD + 会话级 model 绑定 + 系统模型管标题/记忆压缩），**已实施**（2026-09-24；含实施记录与两处偏差：`GET /models?all=true`、未引入 env 备选列表） |
+| [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | 自定义工具插件化加载（Java SPI + plugins/ 目录），**已实施**（2026-09-25；BFPP 并入 `List<CustomTool>` 注入源，工厂/reload 重建//tools/HITL 零改动共享，单测 11 用例 + 部署冒烟 12 断言全 PASS；含复核前提与实施差异记录） |
+| [change-execution-order.md](change-execution-order.md) | v2.0→v2.1 整体升级执行顺序与结果记录（MysqlDistributedStore/HarnessAgent/Workspace/五功能/多租户，2026-08-06，头部含 2026-09-07 现状核对） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
 
 | 文档 | 说明 |
 |------|------|
-| [file-support-plan.md](file-support-plan.md) | 文档解析（POI/Tika/PDFBox）+ 图片多模态识别提案，未实施 |
-| [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | Java SPI + plugins/ 热插拔自定义工具提案，未实施 |
 | [pvc-to-s3-migration-plan.md](pvc-to-s3-migration-plan.md) | PVC 使用盘点 + 双集群（共用 MySQL）下文件/OAF 包迁 S3 影响评估（2026-09-20 评估稿，**未实施**；含 §6.4b 沙箱模式影响：OpenSandbox 自身 HA，部署形态决定会话能否跨集群续） |
 | [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload（2026-09-25 **M1/M2 已实施，部署环境 E2E 验证通过**；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施） |
 

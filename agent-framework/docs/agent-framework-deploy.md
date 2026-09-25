@@ -153,6 +153,7 @@ Tomcat started on port 8100
 | `SERVER_HOST` | string | `0.0.0.0` | | 监听地址（绑 `agent.server.host`） |
 | `SERVER_PORT` | int | `8100` | | 服务端口（绑 `agent.server.port` 与 Spring `server.port`） |
 | `AGENT_CONFIG_DIR` | path | `/config` | | OAF 配置目录（绑 `agent.config-dir`） |
+| `AGENT_PLUGINS_DIR` | path | `{AGENT_CONFIG_DIR}/plugins` | | 工具插件目录：启动期 `ToolPluginBootstrapper` 扫描 jar（SPI 注册 `ToolPlugin`），工具并入 `List<CustomTool>` 注入源（BFPP 直读环境变量，不经属性绑定；见 [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md)） |
 | `FILE_UPLOAD_MAX_MB` | int | `20` | | Spring multipart 单文件/请求上限（绑 `spring.servlet.multipart.max-file-size` / `max-request-size`） |
 
 #### 4.1.3 数据库 / Checkpoint（MysqlDistributedStore）
