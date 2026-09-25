@@ -127,26 +127,31 @@ async def execute_once(
 async def run_suite(
     cases: list[dict[str, Any]], base_url: str,
     repeat: int = 3, workers: int = 5, capabilities: set[str] | None = None,
-    on_trace: Any = None,
+    env_tags: set[str] | None = None, on_trace: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """并发执行用例套件（每用例 repeat 次），返回 (traces, skipped)。
 
     能力匹配：requires_tools 中存在被测 Agent 不可用的工具 → 整条用例 skip。
+    环境门禁：requires_env（设计 §4.6，如 plugin:echo-tool / mock_mcp:ask / reload）
+    未被供给满足 → skip；env_tags=None 视为空集（未供给环境时环境用例一律跳过）。
     on_trace(trace)：每条轨迹完成即回调（长跑任务的增量进度，避免整体静默）。
     """
     skipped: list[dict[str, str]] = []
     runnable: list[dict[str, Any]] = []
-    if capabilities is not None:
-        effective = set(capabilities) | _BUILTIN_TOOLS
-        for case in cases:
-            missing = [t for t in case.get("requires_tools") or [] if t not in effective]
-            if missing:
-                skipped.append({"case_id": case["case_id"],
-                                "reason": f"被测 Agent 缺少工具: {missing}"})
-            else:
-                runnable.append(case)
-    else:
-        runnable = list(cases)
+    effective_env = set(env_tags or [])
+    effective_caps = (set(capabilities) | _BUILTIN_TOOLS) if capabilities is not None else None
+    for case in cases:
+        missing_tools = ([t for t in case.get("requires_tools") or []
+                         if effective_caps is not None and t not in effective_caps])
+        missing_env = [e for e in case.get("requires_env") or [] if e not in effective_env]
+        if missing_tools:
+            skipped.append({"case_id": case["case_id"],
+                            "reason": f"被测 Agent 缺少工具: {missing_tools}"})
+        elif missing_env:
+            skipped.append({"case_id": case["case_id"],
+                            "reason": f"评测环境未供给: {missing_env}"})
+        else:
+            runnable.append(case)
 
     sem = asyncio.Semaphore(max(1, workers))
 

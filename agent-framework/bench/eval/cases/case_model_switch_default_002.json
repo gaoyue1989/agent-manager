@@ -1,0 +1,34 @@
+{
+  "case_id": "case_model_switch_default_002",
+  "title": "会话级模型切换：system 回默认模型正常对话",
+  "category": "function",
+  "priority": "medium",
+  "module": "controller/chat_stream/model_switch",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [],
+  "requires_env": [
+    "session_model"
+  ],
+  "input": {
+    "message": "请用一句话介绍你自己。",
+    "userId": "eval-test",
+    "model": "system"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 120,
+  "expected": {
+    "frames": {
+      "session_created": 1,
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "final_text_min_len": 6,
+    "no_error": true
+  },
+  "ground_truth": "model=system 应绑定回默认/系统模型并正常完成对话（api.md:335 语义：''/system=回默认模型），不产生 error 帧、帧序完整",
+  "eval_dimensions": [
+    "protocol_compliance",
+    "response_quality"
+  ]
+}
