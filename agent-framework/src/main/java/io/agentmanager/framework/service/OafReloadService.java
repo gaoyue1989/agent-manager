@@ -58,6 +58,7 @@ public class OafReloadService {
     private final LLMLogger llmLogger;
     private final UiContextStore uiContextStore;
     private final SessionUserStore sessionUserStore;
+    private final io.agentmanager.framework.service.ModelCatalog modelCatalog;
     private final ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider;
 
     /** 当前指纹快照（AGENTS.md + mcp 配置目录的 mtime+size）；null=尚未记录 */
@@ -83,6 +84,7 @@ public class OafReloadService {
         LLMLogger llmLogger,
         UiContextStore uiContextStore,
         SessionUserStore sessionUserStore,
+        io.agentmanager.framework.service.ModelCatalog modelCatalog,
         ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
     ) {
         this.oafConfigLoader = oafConfigLoader;
@@ -98,6 +100,7 @@ public class OafReloadService {
         this.llmLogger = llmLogger;
         this.uiContextStore = uiContextStore;
         this.sessionUserStore = sessionUserStore;
+        this.modelCatalog = modelCatalog;
         this.sandboxSpecProvider = sandboxSpecProvider;
         this.fingerprint.set(scanFingerprint());
     }
@@ -230,12 +233,16 @@ public class OafReloadService {
         log.info("[Reload] workspace reinitialized at {}", workspacePath);
 
         // 3. 构建全新 agent（内含新 Toolkit + MCP 全量注册，fail-soft/required 语义与启动一致）。
-        //    必须在 build 前捕获旧注册的 server 名：build 会覆写 registrar 的注册跟踪。
-        var oldServerNames = List.copyOf(mcpToolRegistrar.getRegisteredServerNames());
+        //    必须在 build 前捕获旧注册的 wrapper 对象：build 会覆写 registrar 的注册跟踪，
+        //    事后按名字查拿到的是新注册的 wrapper（按名关闭会误杀新连接）。
+        var oldWrappers = new LinkedHashMap<String, io.agentscope.core.tool.mcp.McpClientWrapper>();
+        for (var name : mcpToolRegistrar.getRegisteredServerNames()) {
+            oldWrappers.put(name, mcpToolRegistrar.getRegisteredWrapper(name));
+        }
         HarnessAgent newAgent;
         try {
             newAgent = harnessAgentFactory.build(newConfig, distributedStore, llmLogger,
-                uiContextStore, sessionUserStore, sandboxSpecProvider.getIfAvailable());
+                uiContextStore, sessionUserStore, modelCatalog, sandboxSpecProvider.getIfAvailable());
         } catch (Exception e) {
             log.error("[Reload] agent rebuild failed, keeping old agent: {}", e.getMessage(), e);
             throw new IOException("agent rebuild failed: " + e.getMessage(), e);
@@ -246,19 +253,20 @@ public class OafReloadService {
         a2aAgentRefHolder.update(newAgent);
         oafConfigHolder.update(newConfig);
 
-        // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients，按 build 前捕获的
-        //    旧 server 名逐个 removeMcpClient + closeQuietly；删除型变更的 server 也被覆盖）
+        // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients）：按 build 前
+        //    捕获的旧 wrapper 对象直接 close，旧 toolkit 侧再 removeMcpClient 摘标准路径工具；
+        //    按对象关闭（非按名字）——registrar 跟踪此刻已是新注册，按名会误杀新连接。
         if (oldAgent != null) {
             try {
                 var oldToolkit = oldAgent.getToolkit();
-                for (var serverName : oldServerNames) {
+                for (var e2 : oldWrappers.entrySet()) {
                     try {
-                        oldToolkit.removeMcpClient(serverName)
+                        oldToolkit.removeMcpClient(e2.getKey())
                             .block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
                     } catch (Exception ignore) {
                         // 旧 server 可能本就未注册（fail-soft），尽力而为
                     }
-                    mcpToolRegistrar.closeWrapperQuietlyByName(serverName);
+                    mcpToolRegistrar.closeWrapperQuietly(e2.getValue());
                 }
             } catch (Exception e) {
                 log.warn("[Reload] old agent MCP cleanup incomplete: {}", e.getMessage());

@@ -117,7 +117,7 @@ class OafReloadServiceTest {
         // injectBuildDependencies 是 package-private，同包测试可达：直接置桩走反射不必要，
         // 工厂 mock 后 build() 返回桩 agent，依赖注入字段未置也不走真实路径。
         var newAgent = mock(HarnessAgent.class);
-        when(factory.build(any(), any(), any(), any(), any(), any())).thenReturn(newAgent);
+        when(factory.build(any(), any(), any(), any(), any(), any(), any())).thenReturn(newAgent);
         when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of("server-a"));
         var wrapper = mock(io.agentscope.core.tool.mcp.McpClientWrapper.class);
         when(registrar.getRegisteredWrapper("server-a")).thenReturn(wrapper);
@@ -126,7 +126,8 @@ class OafReloadServiceTest {
         service = new OafReloadService(loader, holder, props, factory, registrar,
             resourceProxy, workspaceInitializer, runtimeService, a2aHolder,
             mock(DistributedStore.class), new LLMLogger(), mock(UiContextStore.class),
-            mock(SessionUserStore.class), noopSandboxProvider);
+            mock(SessionUserStore.class),
+            mock(io.agentmanager.framework.service.ModelCatalog.class), noopSandboxProvider);
     }
 
     private OafConfig oafWithMcpServers(String serverName) {
@@ -212,7 +213,7 @@ class OafReloadServiceTest {
 
         Mtc.tick(5);
         writeAgentsMd("name: test-agent\n---\nchanged");
-        when(factory.build(any(), any(), any(), any(), any(), any()))
+        when(factory.build(any(), any(), any(), any(), any(), any(), any()))
             .thenThrow(new RuntimeException("build failed"));
 
         assertThrows(java.io.IOException.class, () -> service.reloadAgent());

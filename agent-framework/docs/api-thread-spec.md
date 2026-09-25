@@ -16,7 +16,8 @@
 | GET | `/threads/{sessionId}/llm-calls` | LLM 调用记录 | `application/json` |
 | GET | `/threads` | 会话列表 | `application/json` |
 | DELETE | `/threads/{sessionId}` | 删除会话（级联清理所有关联数据） | `application/json` |
-| PATCH | `/threads/{sessionId}` | 更新会话（目前支持重命名） | `application/json` |
+| PATCH | `/threads/{sessionId}` | 更新会话（重命名 + 会话模型切换，见 §3.8） | `application/json` |
+| GET | `/models` | 可选模型列表（会话模型选择器数据源，见 §3.8） | `application/json` |
 
 ---
 
@@ -60,7 +61,8 @@ X-User-Id: user-123
   "message": "帮我分析一下销售数据",     // 必填（或 fileIds 至少一项）
   "userId": "user-123",                 // 可选，X-User-Id 优先
   "sessionId": "my-session-1",          // 可选，省略则自动生成 UUID 并首发 session_created
-  "fileIds": ["file-abc", "file-def"]   // 可选，上传文件 ID
+  "fileIds": ["file-abc", "file-def"],  // 可选，上传文件 ID
+  "model": "3f1c..."                    // 可选，会话模型（GET /models 的 id，见 §3.8；缺省=不改变绑定）
 }
 ```
 
@@ -190,6 +192,7 @@ GET /threads/my-session-001/subscribe?afterSeq=13
   "user_id": "user-123",
   "updated_at": "2026-09-10T10:30:00",
   "title": "销售数据分析",
+  "model": "",
   "pendingConfirm": null,
   "files": [
     {"file_id": "f-1", "file_name": "report.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "size": 12345}
@@ -216,6 +219,7 @@ GET /threads?userId=user-123
     "thread_id": "001",
     "user_id": "user-123",
     "title": "销售数据分析",
+    "model": "3f1c...",
     "updated_at": "2026-09-10T10:30:00"
   },
   {
@@ -223,10 +227,14 @@ GET /threads?userId=user-123
     "thread_id": "002",
     "user_id": "user-123",
     "title": "",
+    "model": "",
     "updated_at": "2026-09-09T15:00:00"
   }
 ]
 ```
+
+> `title`：手动重命名或**系统模型自动生成**（新会话首条消息后异步生成，≤20 字，已有标题不覆盖）；
+> `model`：会话绑定模型 id，空串 = 默认（系统）模型。
 
 ### 3.7 DELETE /threads/{sessionId} — 删除会话
 
@@ -242,13 +250,14 @@ GET /threads?userId=user-123
 }
 ```
 
-### 3.8 PATCH /threads/{sessionId} — 更新会话
+### 3.8 PATCH /threads/{sessionId} — 更新会话（重命名 + 会话模型切换）
 
 **请求体：**
 
 ```json
 {
-  "title": "Q3 销售分析"
+  "title": "Q3 销售分析",
+  "model": "3f1c..."
 }
 ```
 
@@ -257,11 +266,25 @@ GET /threads?userId=user-123
 ```json
 {
   "session_id": "my-session-001",
-  "title": "Q3 销售分析"
+  "title": "Q3 销售分析",
+  "model": "3f1c..."
 }
 ```
 
-> `title` 存储在 `session_user.remark` 字段（自动 DDL 添加）
+> `title` 存储在 `session_user.remark` 字段；`model` 存储在 `session_user.model` 列（均自动 DDL 添加）。
+
+**会话模型（model 字段）语义** —— `/threads/chat` 的 `model` 与 PATCH 一致：
+
+| 取值 | 行为 |
+|------|------|
+| 缺省 / `null` | 不改变会话绑定（PATCH 响应回显当前绑定） |
+| `""` 或 `"system"` | 清除覆盖，回到默认（系统）模型 |
+| 托管模型 id | 校验（存在且 enabled）→ 绑定该模型，**下一次模型调用生效**（含进行中 turn 的后续 ReAct 轮） |
+| 未知 id / 已禁用 | `400` + `{"error":"unknown_model"|"model_disabled","message":"..."}`；chat 端点返回 SSE error 帧 |
+
+模型列表数据源：`GET /models` → `{default_model, models:[{id, name, model_id, is_default, source, enabled}]}`；
+托管模型的增删改与连接测试见 `/models` REST（debug 页「Models」模块）与
+[session-model-switch-design.md](session-model-switch-design.md)。系统模型（`LLM_*`）只读，恒为标题生成与记忆压缩所用。
 
 ---
 

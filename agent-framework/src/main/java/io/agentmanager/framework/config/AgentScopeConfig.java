@@ -263,6 +263,27 @@ public class AgentScopeConfig {
         return java.util.Arrays.asList(businessTools, fileTools);
     }
 
+    /** 按 LLM 配置构建 ChatModel（装配逻辑见 {@link ChatModelFactory}，托管/系统模型共用同一口径） */
+    io.agentscope.extensions.model.openai.OpenAIChatModel buildChatModel(
+        AgentManagerProperties.LLMConfig llm,
+        AgentManagerProperties.HarnessConfig harness) {
+        return ChatModelFactory.build(llm, harness);
+    }
+
+    /**
+     * 会话标题生成专用模型：与主对话模型同配置的独立实例（**系统模型**，LLM_* 环境变量），
+     * 供 {@link io.agentmanager.framework.service.SessionTitleService} 在会话首条消息后异步生成标题。
+     * 不参与 HarnessAgent 装配（独立实例，避免影响主链路追踪/日志包装）；
+     * 叠加 TracingModelWrapper：标题调用绕过 middleware 链，补 OTel span（title）。
+     */
+    @Bean
+    public io.agentscope.core.model.Model titleGenerationModel(AgentManagerProperties props) {
+        var llm = props.llm();
+        var harness = props.harness() != null ? props.harness() : AgentManagerProperties.HarnessConfig.defaults();
+        return new io.agentmanager.framework.service.TracingModelWrapper(
+            ChatModelFactory.build(llm, harness), "title");
+    }
+
     /**
      * HarnessAgent 单例：构建逻辑在 {@link HarnessAgentFactory}（启动与 reload 共用同一装配代码）。
      * reload 时 OafReloadService 调 factory.build(...) 重建并经 AgentRuntimeService/A2A
@@ -277,10 +298,23 @@ public class AgentScopeConfig {
         LLMLogger llmLogger,
         UiContextStore uiContextStore,
         SessionUserStore sessionUserStore,
+        io.agentmanager.framework.service.ModelCatalog modelCatalog,
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         return harnessAgentFactory.build(oafConfig, distributedStore, llmLogger,
-            uiContextStore, sessionUserStore, sandboxSpec);
+            uiContextStore, sessionUserStore, modelCatalog, sandboxSpec);
+    }
+
+    /**
+     * 会话标题生成服务：装配 master 版实现（@Qualifier("titleGenerationModel") 注入 + 并发去重 + 空结果回退）。
+     * 标题固定使用系统模型，不受会话级模型切换影响。
+     */
+    @Bean
+    public io.agentmanager.framework.service.SessionTitleService sessionTitleService(
+            io.agentscope.core.model.Model titleGenerationModel,
+            SessionUserStore sessionUserStore) {
+        return new io.agentmanager.framework.service.SessionTitleService(
+            titleGenerationModel, sessionUserStore);
     }
 
     @Bean

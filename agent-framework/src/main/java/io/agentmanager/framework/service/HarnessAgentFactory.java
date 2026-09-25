@@ -99,6 +99,7 @@ public class HarnessAgentFactory {
         LLMLogger llmLogger,
         UiContextStore uiContextStore,
         SessionUserStore sessionUserStore,
+        io.agentmanager.framework.service.ModelCatalog modelCatalog,
         @Autowired(required = false) OpenSandboxFilesystemSpec sandboxSpec
     ) {
         var llm = props.llm();
@@ -147,6 +148,10 @@ public class HarnessAgentFactory {
                 // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
                 // 长流程（撰写→校验→修正→打包→登记→汇报），默认放宽至 20 轮（AGENT_REACT_MAX_ITERS 可调）
                 .maxIters(harness.maxIters())
+                // 注意：会话模型路由必须最先注册（最外层）——先替换 model 再进链，
+                // 下游 LLM 记录/span/实际调用看到的都是会话生效模型
+                .middleware(new io.agentmanager.framework.service.SessionModelMiddleware(
+                    sessionUserStore, modelCatalog))
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
@@ -254,41 +259,11 @@ public class HarnessAgentFactory {
         }
     }
 
-    /** public：供 config 包的单测（AgentScopeConfigTest）断言上下文窗口参数透传。 */
+    /** ChatModel 装配统一走 {@link io.agentmanager.framework.config.ChatModelFactory}（托管/系统模型共用同一口径）；public 供 config 包单测断言上下文窗口透传 */
     public io.agentscope.extensions.model.openai.OpenAIChatModel buildChatModel(
         AgentManagerProperties.LLMConfig llm,
         AgentManagerProperties.HarnessConfig harness) {
-        var optionsBuilder = io.agentscope.core.model.GenerateOptions.builder()
-            .temperature(llm.temperature())
-            .maxTokens(llm.maxTokens());
-        // Qwen3 / vLLM: enableThinking=false → chat_template_kwargs.enable_thinking=false
-        // 关闭深度思考模式，避免响应中包含 <think>...</think> 冗余内容
-        if (!llm.enableThinking()) {
-            optionsBuilder.additionalBodyParam("chat_template_kwargs",
-                java.util.Map.of("enable_thinking", false));
-            log.info("Deep thinking disabled: chat_template_kwargs.enable_thinking=false");
-        }
-        var modelBuilder = io.agentscope.extensions.model.openai.OpenAIChatModel.builder()
-            .apiKey(llm.apiKey())
-            .modelName(llm.modelId())
-            .baseUrl(llm.baseUrl());
-        // 模型上下文窗口（LLM_CONTEXT_LENGTH）：> 0 才传入，未配置保持框架默认行为
-        if (llm.contextLength() > 0) {
-            modelBuilder.contextWindowSize(llm.contextLength());
-        }
-        return modelBuilder
-            .generateOptions(optionsBuilder.build())
-            .httpTransport(io.agentscope.core.model.transport.JdkHttpTransport.builder()
-                .client(java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                    .build())
-                .config(io.agentscope.core.model.transport.HttpTransportConfig.builder()
-                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                    .readTimeout(Duration.ofSeconds(harness.httpReadTimeoutSeconds()))
-                    .writeTimeout(Duration.ofSeconds(harness.httpWriteTimeoutSeconds()))
-                    .build())
-                .build())
-            .build();
+        return io.agentmanager.framework.config.ChatModelFactory.build(llm, harness);
     }
 
     /**

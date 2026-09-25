@@ -1,7 +1,9 @@
 // 发布助手共享类型：page.tsx（状态与 SSE 逻辑）与渲染组件共用
 export type FileCard = { file_id: string; file_name: string; mime_type: string; size: number; download_url: string };
 export type AttachItem = { fileId: string; name: string; mime: string; size: number };
-export type ThreadItem = { peer: string; fullKey: string; updatedAt: string };
+export type ThreadItem = { peer: string; fullKey: string; updatedAt: string; title?: string; model?: string };
+/** 会话可切换模型（GET /models）：id="system" 为系统模型（默认），is_default 标记当前默认项 */
+export type ModelOption = { id: string; name: string; provider?: string; model_id?: string; is_default?: boolean; source?: string; enabled?: boolean };
 
 export type ToolCallInfo = {
   id?: string;

@@ -162,14 +162,6 @@ public class McpToolRegistrar {
         closeQuietly(wrapper);
     }
 
-    /** reload 兜底：按 server 名关闭并移除跟踪的 wrapper（旧 agent 收尾用，未跟踪时 no-op）。 */
-    public void closeWrapperQuietlyByName(String serverName) {
-        var w = registeredWrappers.remove(serverName);
-        if (w != null) {
-            closeQuietly(w);
-        }
-    }
-
     public String registerOne(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         var uiMapping = loadUiMapping(mcp);
         uiMappings.put(mcp.server(), uiMapping);

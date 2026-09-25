@@ -12,7 +12,7 @@ import { completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settleP
 import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import MessageItem from "./components/MessageItem";
 import PermissionCard from "./components/PermissionCard";
-import type { AttachItem, ChatMsg, FileCard, ThreadItem } from "./components/types";
+import type { AttachItem, ChatMsg, FileCard, ModelOption, ThreadItem } from "./components/types";
 import { IconArrowUp, IconHistory, IconLoader, IconPaperclip, IconPlus, IconSparkles, IconX } from "./components/icons";
 
 const AGENT_BASE = "/agent/release-agent";
@@ -66,6 +66,9 @@ export default function AssistantPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const sessionLoading = useRef(true);
+  // 会话模型：GET /models 可选列表（404 → 隐藏 picker）；modelId 为空串或 "system" 表示默认模型
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelId, setModelId] = useState<string>("system");
   // 存在未处理（pending/unknown）确认卡时锁定发送，避免新请求覆盖运行时未消费的确认上下文
   const awaitingConfirm = messages.some((m) => m.confirm && (m.confirm.status === "pending" || m.confirm.status === "unknown"));
   const sessionLocked = busy || historyLoading || uploading;
@@ -80,15 +83,31 @@ export default function AssistantPage() {
       const items = list
         .map((t) => {
           const p = parseChatThread(t.session_id ?? "");
-          return p ? { ...p, updatedAt: (t.updated_at ?? "").replace("T", " ").slice(0, 19) } : null;
+          return p ? {
+            ...p,
+            updatedAt: (t.updated_at ?? "").replace("T", " ").slice(0, 19),
+            title: (t.title ?? "").trim(),
+            model: t.model ?? "",
+          } : null;
         })
         .filter(Boolean) as ThreadItem[];
       setThreads(items.slice(0, 20));
     } catch { /* 列表加载失败静默（面板显示空态） */ }
   }, []);
 
-  // 侧边栏会话列表：进入页面即加载
+  /** 可选模型列表（GET /models；老后端无此端点时 404，picker 不渲染，行为与升级前一致） */
+  const loadModels = useCallback(async () => {
+    try {
+      const resp = await fetch(`${AGENT_BASE}/models`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setModels(Array.isArray(data?.models) ? data.models : []);
+    } catch { /* 模型列表加载失败静默（picker 不渲染，走默认模型） */ }
+  }, []);
+
+  // 侧边栏会话列表 + 模型列表：进入页面即加载
   useEffect(() => { loadThreads(); }, [loadThreads]);
+  useEffect(() => { loadModels(); }, [loadModels]);
 
   /** 历史消息回放：GET /threads/{fullKey}/history → ChatMsg[]（含未消费 HITL 卡片重建 + 产出文件卡片），渲染与实时流同构 */
   const loadHistory = useCallback(async (fullKey: string) => {
@@ -200,10 +219,30 @@ export default function AssistantPage() {
             for (let i = next.length - 1; i >= 0; i--) {
               if (next[i].role === "assistant") { idx = i; break; }
             }
+            // 工具名兜底：摘要帧（tool_call_summary）通常晚一帧到达，用它把「write_file」换成
+            // 「创建 output/create-ai-ppt.js 408行」这类具体在干嘛的描述
             next.splice(idx, 0, { role: "tool", content: `${ev.toolName}`, toolCallId: ev.toolCallId, pending: true });
             return next;
           });
           break;
+        case "tool_call_summary": {
+          // 后端已把 delta 参数拼好并解析出关键字段，前端直接展示即可（无需自己解析 JSON）
+          const sid = ev.toolCallId;
+          const label = typeof ev.summary === "string" && ev.summary ? ev.summary : null;
+          if (!sid || !label) break;
+          setMessages((prev) => prev.map((m) =>
+            m.role === "tool" && m.toolCallId === sid ? { ...m, content: label } : m));
+          break;
+        }
+        case "tool_result_preview": {
+          // 「输出 …」：结果首行（失败时为终态文案），挂到对应工具步骤上可展开查看
+          const pid = ev.toolCallId;
+          const preview = typeof ev.preview === "string" && ev.preview ? ev.preview : null;
+          if (!pid || !preview) break;
+          setMessages((prev) => prev.map((m) =>
+            m.role === "tool" && m.toolCallId === pid && !m.output ? { ...m, output: preview } : m));
+          break;
+        }
         case "TOOL_RESULT_END": {
           setMessages((prev) => completeToolCall(prev, ev));
           break;
@@ -357,6 +396,8 @@ export default function AssistantPage() {
     setInput("");
     window.localStorage.setItem("oaf-assistant-sid", item.peer);
     sessionId.current = item.peer;
+    // 回显该会话绑定的模型（无绑定/已被删除 → 系统默认）
+    setModelId(item.model && item.model.trim() ? item.model : "system");
     setHistoryLoading(true);
     const msgs = await loadHistory(item.fullKey);
     setMessages(msgs.length > 0
@@ -367,6 +408,16 @@ export default function AssistantPage() {
     loadThreads(); // 切换后刷新列表（时间戳排序变化 + 当前会话高亮）
     resumeTurn(item.peer); // 目标会话若仍在执行，与刷新恢复同一链路续传
   }, [sessionLocked, loadHistory, loadThreads, resumeTurn]);
+
+  /** 回显当前会话已绑定的模型（GET /threads/{sid}.model；未绑定 → system 默认） */
+  const syncSessionModel = useCallback(async (sid: string) => {
+    try {
+      const resp = await fetch(`${AGENT_BASE}/threads/${encodeURIComponent(sid)}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setModelId(data?.model && String(data.model).trim() ? String(data.model) : "system");
+    } catch { /* 回显失败保持当前选择 */ }
+  }, []);
 
   useEffect(() => {
     const sid = getSessionId();
@@ -383,8 +434,9 @@ export default function AssistantPage() {
         resumeTurn(sid);
       }
     });
+    syncSessionModel(sid);
     return () => { cancelled = true; resumeRef.current?.abort(); };
-  }, [loadHistory, resumeTurn]);
+  }, [loadHistory, resumeTurn, syncSessionModel]);
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [messages]);
@@ -472,7 +524,8 @@ export default function AssistantPage() {
     setAttachments([]);
     try {
       await consumeStream(`${AGENT_BASE}/threads/chat`,
-        { message: text, userId: "webui", sessionId: sessionId.current, fileIds }, (card) => {
+        // model 随消息下发：字段缺省不改变会话绑定，传值即切换（本 turn 生效并持久化）；"system" = 回默认模型
+        { message: text, userId: "webui", sessionId: sessionId.current, fileIds, model: modelId }, (card) => {
           setMessages((prev) => [...prev, { role: "assistant", content: "", confirm: card }]);
         });
     } catch (e: any) {
@@ -482,7 +535,7 @@ export default function AssistantPage() {
       setBusy(false);
       loadThreads(); // 新会话首轮对话后进入历史列表
     }
-  }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant, loadThreads]);
+  }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant, loadThreads, modelId]);
 
   const resetSession = () => {
     if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
@@ -529,6 +582,16 @@ export default function AssistantPage() {
           className="flex size-9 items-center justify-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50">
           {uploading ? <IconLoader className="size-4 animate-spin" /> : <IconPaperclip className="size-4" />}
         </button>
+        {models.length > 0 && (
+          <select value={modelId} onChange={(e) => setModelId(e.target.value)}
+            data-testid="model-select" disabled={sessionLocked}
+            title="会话模型（下一条消息生效并绑定到本会话）"
+            className="ml-1 max-w-[150px] truncate rounded-full border border-gray-200 bg-white/80 py-1 pl-2 pr-6 text-[11px] text-gray-500 outline-none transition hover:border-blue-300 focus:border-blue-300 disabled:opacity-50">
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>{m.name || m.id}</option>
+            ))}
+          </select>
+        )}
         <span className="ml-1 hidden select-none text-[11px] text-gray-300 sm:block">Enter 发送 · Shift+Enter 换行 · 附件点 📎</span>
         <button onClick={() => send()} disabled={sessionLocked || awaitingConfirm || (!input.trim() && attachments.length === 0)}
           data-testid="chat-send" aria-label="发送"
@@ -577,8 +640,12 @@ export default function AssistantPage() {
                     data-testid="history-item"
                     className={`w-full rounded-lg px-2.5 py-2 text-left transition disabled:opacity-50 ${
                       sessionId.current === t.peer ? "bg-blue-50 ring-1 ring-blue-100" : "hover:bg-gray-100/70"}`}>
-                    <span className={`block truncate font-mono text-xs ${sessionId.current === t.peer ? "font-medium text-blue-700" : "text-gray-600"}`}>{t.peer}</span>
-                    <span className="mt-0.5 block text-[11px] text-gray-400">{t.updatedAt || "—"}</span>
+                    <span className={`block truncate text-xs ${sessionId.current === t.peer ? "font-medium text-blue-700" : "text-gray-600"}`}>
+                      {t.title || t.peer}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[11px] text-gray-400">
+                      {t.updatedAt || "—"}{t.model ? ` · ${t.model}` : ""}
+                    </span>
                   </button>
                 </li>
               ))}

@@ -172,7 +172,8 @@ class AgentScopeConfigTest {
         var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
             props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()));
         assertThrows(RuntimeException.class,
-            () -> factory.build(oaf, store, new LLMLogger(), null, null, null));
+            () -> factory.build(oaf, store, new LLMLogger(), null, null,
+                mock(io.agentmanager.framework.service.ModelCatalog.class), null));
     }
 
     // ---------- buildPermissionContext：自定义工具 HITL 装配（hitl-permission-plan 6.1） ----------
@@ -361,7 +362,8 @@ class AgentScopeConfigTest {
 
         var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
             props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()));
-        var agent = factory.build(oaf, store, new LLMLogger(), null, null, null);
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
         return new java.util.TreeSet<>(agent.getToolkit().getToolNames());
     }
 
