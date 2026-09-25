@@ -69,7 +69,10 @@ agent-framework/
 │   │   │   ├── sandbox/opensandbox/             # OpenSandbox 沙箱集成 (OpenSandbox/Client/FilesystemSpec/WorkspaceSyncService：MEMORY.md+memory/ 与 skills/ 回写 KV)
 │   │   │   ├── tool/
 │   │   │   │   ├── BusinessTools.java           # @Tool 注解自定义工具 (get_current_time, echo)
-│   │   │   │   └── FileTools.java               # present_file / present_url 工具 (工作区产物与外部交付物注册)
+│   │   │   │   ├── FileTools.java               # present_file / present_url 工具 (工作区产物与外部交付物注册)
+│   │   │   │   ├── CustomTool.java              # 自定义工具标记接口（List 注入收集收窄，防循环依赖）
+│   │   │   │   ├── ToolPlugin.java              # 工具插件 SPI（extends CustomTool，jar 内 META-INF/services 注册）
+│   │   │   │   └── ToolPluginBootstrapper.java  # BFPP：plugins/ 目录扫描 + ServiceLoader 加载，工具实例并入 List<CustomTool> 注入源
 │   │   │   └── controller/
 │   │   │       ├── InfoController.java          # GET /、/metadata、/system-prompt
 │   │   │       ├── HealthController.java        # GET /health
@@ -166,6 +169,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 配置动态 reload | ✅ | OAF 包（PVC /config）原位更新免重启：`POST /admin/reload`（auto 指纹分流：仅 MCP 配置变→`OafReloadService.reloadMcpAll` 原地 reload（toolkit.removeMcpClient + registerOne，声明增删即时生效）；AGENTS.md 变→`reloadAgent` 整包重建（`HarnessAgentFactory` 重用启动装配，`WorkspaceInitializer.reinitialize` 覆盖生成文件，`AgentRuntimeService.swapAgent`/`A2aAgentRefHolder`/`OafConfigHolder` 原子切引用，旧 agent MCP 连接收尾）。失败回滚保持旧 agent；生效=下一轮对话；`AgentRuntimeService`/`HarnessAgentRunner` 持 volatile 引用，A2A 经 holder 间接持有。设计/时序/E2E 见 [docs/oaf-dynamic-reload-plan.md](docs/oaf-dynamic-reload-plan.md)；`tool/CustomTool` 标记接口收窄 `List` 注入候选（防 Spring 循环依赖） |
+| 工具插件 | ✅ | Java SPI 免重编译加载自定义工具：插件 jar 放 `{AGENT_PLUGINS_DIR}`（默认 `{AGENT_CONFIG_DIR}/plugins`），启动期 `ToolPluginBootstrapper`（BFPP）扫描 + `ServiceLoader` 实例化 `ToolPlugin` 实现，工具实例注册为单例并入 `List<CustomTool>` 注入源——HarnessAgentFactory（启动 + reload 整包重建）、InternalToolRegistry（/tools）、HITL 白名单零改动共享；`{jar名}/config.yaml` 支持 `${ENV_VAR}` 替换；插件更新需重启（类卸载限制），框架类须 provided 不打进 jar。示例 `e2e/plugin-echo/` + 冒烟 `e2e/scripts/plugin-smoke.sh`（12 断言），设计/实施见 [docs/tool-plugin-extension-plan.md](docs/tool-plugin-extension-plan.md) |
 | 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user）；用户技能管理面 `/skills/users/*`（列出/读取/写入/删除/从包内下发，调试页 Skills 模块「用户技能」区块；删除 = 回落包内基线 + 写删除标记防沙箱回写复活）。**沙箱档 L4 写入落库（本次修复）**：沙箱会话内 skill_manage 把 L4 写进容器 `/workspace/skills`，由 `WorkspaceSyncService.syncBack` 在每次 call 结束回写 agent_fs（`WorkspaceSyncService.java:132` 起 `syncUserSkills`，命名空间/key 一律经 `WorkspaceReader.writeUserSkillFile`，`WorkspaceReader.java:414`）——修复前只回写 MEMORY.md/memory/，L4 技能随容器 TTL 到期丢失。**回写仲裁（两个 KV 元数据键，命中即跳过同名技能）**：删除写 `/{name}/.deleted`（防删除被容器内副本复活）、管理面写入（PUT/下发）写 `/{name}/.admin-override`（防管理面写入被同代容器内旧副本在下次 call 结束时改回）；代价是标记生效期间该技能在容器内的 skill_manage 修改不落库，状态与清除方式经列表 `tombstones`/`adminOverride` 字段与删除/PUT 响应下发（调试页醒目标注）。**生效范围分档**：非沙箱档管理面 L4 下轮会话生效；沙箱档会话读容器内 `/workspace/skills` 副本，管理面写入由「会话开始物化 L4」（`WorkspaceReader.materializeUserSkills`，`SandboxUserKeyMiddleware.onAgent` 在每次 acquire 后投影进容器；`/{name}/.deleted` 跳过、admin-override 照写、只写不删）在该用户下一个 turn 生效；`/skills/available`、`/skills/parse-refs` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。概览见下表端点说明与 `e2e/user-skill-admin-e2e.sh` 档位说明；设计/根因/验证见 [../docs/design/user-skill-admin-design.md](../docs/design/user-skill-admin-design.md) |
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟；可经 `AGENT_MEMORY_ENABLED=false` 完全关闭（不注册 memory_* 工具 + 不执行 flush/整合 + 沙箱不注入/回写记忆文件） |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
@@ -207,6 +211,14 @@ invokeStream(message, threadId, userId) → Flux<Map>
 > OAF 打包工具（`check_oaf_package` / `create_oaf_zip`）2026-09 迁至平台 backend 的 platform-publisher MCP
 > （直建包返回 packageId/download_url，零 base64 经 LLM），发布助手经 `present_url` 交付；
 > 分层原则：业务领域工具走 MCP，框架通用能力走 @Tool。设计见 [../docs/design/oaf-tools-extraction-design.md](../docs/design/oaf-tools-extraction-design.md)
+
+**工具插件（Java SPI）**：无需重编译/重建镜像加载自定义工具——独立 jar（`META-INF/services` 注册
+`ToolPlugin` 实现）放入 `{AGENT_PLUGINS_DIR}`（默认 `{AGENT_CONFIG_DIR}/plugins`），启动期
+`ToolPluginBootstrapper`（BFPP）经 `ServiceLoader` 加载并把工具实例并入 `List<CustomTool>` 注入源，
+deniedTools 过滤、HITL、/tools、OAF reload 整包重建全部自动生效；`{jar名}/config.yaml` 支持
+`${ENV_VAR}` 注入 `configure()`。约束：插件 jar 不得打包 agent-framework/agentscope-core 类（provided），
+插件更新需重启。冒烟验证 `e2e/scripts/plugin-smoke.sh`；设计/实施记录见
+[docs/tool-plugin-extension-plan.md](docs/tool-plugin-extension-plan.md)。
 
 ### MCP 工具
 
