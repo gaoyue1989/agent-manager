@@ -9,6 +9,9 @@
   python3 bench/eval/flywheel.py run [--base-url URL] [--since SHA] [--only ID]
                                      [--repeat N] [--workers N] [--with-gen N]
                                      [--judge] [--rca-llm] [--no-cleanup]
+                                     [--provision] [--no-teardown]
+  python3 bench/eval/flywheel.py provision --since SHA [--oaf-base DIR] [--plugin-src DIR]
+  python3 bench/eval/flywheel.py teardown
   python3 bench/eval/flywheel.py verify [--task-id ID] [--base-url URL]
   python3 bench/eval/flywheel.py selftest
   python3 bench/eval/flywheel.py status
@@ -87,6 +90,26 @@ def _summary_row(task_id: str, trace: dict[str, Any], trace_path: str) -> dict[s
 
 async def cmd_run(args: argparse.Namespace) -> int:
     base_url = args.base_url or _default_base_url()
+    env_tags: set[str] | None = None
+    if args.provision:
+        # ①.5 环境供给（设计 §4.5）：按变更组装 OAF 包/mock/实例，跑契约预检后进入原流程
+        from provision import provision_env
+        try:
+            if not args.since:
+                print("[provision] --provision 需要 --since <sha> 指定变更基线")
+                return 2
+            st = provision_env(EVAL_DIR, REPO_DIR, args.since,
+                               base_dir=args.oaf_base, plugin_src=args.plugin_src)
+            base_url = st["base_url"]
+            env_tags = set(st["env_tags"])
+        except Exception as e:
+            print(f"[provision][FAIL] {e}")
+            return 2
+    else:
+        from provision import load_runtime_state
+        st = load_runtime_state(EVAL_DIR)
+        if st and st.get("base_url") == base_url:
+            env_tags = set(st.get("env_tags", []))
     commit = _git_commit8()
     task_id = f"{commit}-trend-{time.strftime('%Y%m%d-%H%M%S')}"
     task_dir = REPORTS_DIR / task_id
@@ -175,7 +198,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
     try:
         traces, skipped = await suite_runner.run_suite(
             cases, base_url, repeat=args.repeat, workers=args.workers,
-            capabilities=capabilities, on_trace=on_trace)
+            capabilities=capabilities, env_tags=env_tags, on_trace=on_trace)
 
         by_case: dict[str, list[dict[str, Any]]] = {}
         for t in traces:
@@ -256,9 +279,33 @@ async def cmd_run(args: argparse.Namespace) -> int:
                           f"请稍后手动处理: {sorted(still)}")
             except Exception as e:
                 print(f"[cleanup][WARN] 清理异常: {e}")
+        if args.provision and not args.no_teardown:
+            from provision import instance as prov_inst
+            prov_inst.teardown(EVAL_DIR / prov_inst.RUNTIME_NAME)
+            print("[teardown] 已停止被测实例与 mock（infra 容器保留）")
 
     print(f"[done] 通过 {pass_count}/{len(by_case)}；报告: reports/{task_id}/report.md")
     return 0 if not failed else 1
+
+
+def cmd_provision(args: argparse.Namespace) -> int:
+    """①.5 环境供给（设计 §4.5）：按变更组装 OAF 包 + mock + 实例，预检后保留环境供调试/复用。"""
+    from provision import provision_env
+    try:
+        st = provision_env(EVAL_DIR, REPO_DIR, args.since,
+                           base_dir=args.oaf_base, plugin_src=args.plugin_src)
+    except Exception as e:
+        print(f"[provision][FAIL] {e}")
+        return 2
+    print(f"[provision] 环境保持运行：base_url={st['base_url']}（teardown 用 flywheel.py teardown）")
+    return 0
+
+
+def cmd_teardown(_: argparse.Namespace) -> int:
+    from provision import instance as prov_inst
+    prov_inst.teardown(EVAL_DIR / prov_inst.RUNTIME_NAME)
+    print("[teardown] 已停止被测实例与 mock（infra 容器保留）")
+    return 0
 
 
 async def cmd_verify(args: argparse.Namespace) -> int:
@@ -433,7 +480,22 @@ def main() -> int:
     pr.add_argument("--judge", action="store_true", help="启用语义打分（需 EVAL_LLM_*）")
     pr.add_argument("--rca-llm", action="store_true", help="失败项 LLM 深度根因（需 EVAL_LLM_*）")
     pr.add_argument("--no-cleanup", action="store_true", help="保留评测会话不删除")
+    pr.add_argument("--provision", action="store_true",
+                    help="先按变更供给评测环境（OAF 包/插件/mock MCP/实例，需 --since）")
+    pr.add_argument("--no-teardown", action="store_true", help="供给模式下保留实例与 mock 不停止")
+    pr.add_argument("--oaf-base", type=Path, default=None,
+                    help="OAF 包 base 目录（缺省用 provision/templates/eval-agent）")
+    pr.add_argument("--plugin-src", default=None, help="插件源码目录覆盖（缺省 e2e/plugin-echo）")
     pr.set_defaults(func=cmd_run)
+
+    pp = sub.add_parser("provision", help="按变更供给评测环境（组装 OAF 包 + mock + 实例 + 预检）")
+    pp.add_argument("--since", required=True, help="变更基线 commit")
+    pp.add_argument("--oaf-base", type=Path, default=None, help="OAF 包 base 目录")
+    pp.add_argument("--plugin-src", default=None, help="插件源码目录覆盖")
+    pp.set_defaults(func=cmd_provision)
+
+    pt = sub.add_parser("teardown", help="停止被测实例与 mock（infra 容器保留）")
+    pt.set_defaults(func=cmd_teardown)
 
     pv = sub.add_parser("verify", help="修复后回归：重跑上一轮失败用例 + core 集")
     pv.add_argument("--task-id", default=None, help="指定上一轮任务（默认最近一轮）")

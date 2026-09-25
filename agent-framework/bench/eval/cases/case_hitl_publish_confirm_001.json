@@ -1,0 +1,45 @@
+{
+  "case_id": "case_hitl_publish_confirm_001",
+  "title": "HITL 确认流：ask 工具 permission_ask → 自动确认 → 恢复流工具摘要",
+  "category": "function",
+  "priority": "high",
+  "module": "service/tool_summary",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [
+    "publish_service"
+  ],
+  "requires_env": [
+    "mock_mcp:ask"
+  ],
+  "input": {
+    "message": "请调用 publish_service 工具发布 packageId=3 的服务（使用默认镜像），直接发起调用即可。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "auto_confirm",
+  "timeout_s": 180,
+  "expected": {
+    "frames": {
+      "permission_ask": 1,
+      "tool_call_summary": ">=1",
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "tool_calls": {
+      "required": [
+        "publish_service"
+      ]
+    },
+    "tool_result": {
+      "publish_service": {
+        "ok": true
+      }
+    },
+    "no_error": true
+  },
+  "ground_truth": "scope: framework。ask 权限工具触发 permission_ask 终止 turn，confirm-stream 续段执行工具后应出现 tool_call_summary 帧且 TOOL_RESULT_END state=SUCCESS、最终以 AGENT_END 收尾——验证恢复流工具摘要补全（2026-09-25 fix(hitl) 补全恢复流工具摘要与调试页展示）",
+  "eval_dimensions": [
+    "protocol_compliance",
+    "tool_selection"
+  ]
+}

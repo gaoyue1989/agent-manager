@@ -1,0 +1,46 @@
+{
+  "case_id": "case_tool_plugin_echo_001",
+  "title": "工具插件加载：echo_query 插件工具调用与回显（tool-plugin-extension 覆盖）",
+  "category": "function",
+  "priority": "high",
+  "module": "tool/plugin",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [
+    "echo_query"
+  ],
+  "requires_env": [
+    "plugin:echo-tool"
+  ],
+  "input": {
+    "message": "请调用 echo_query 工具回显文本 hello-plugin-eval，并把回显结果告诉我。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 120,
+  "expected": {
+    "frames": {
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "tool_calls": {
+      "required": [
+        "echo_query"
+      ]
+    },
+    "tool_result": {
+      "echo_query": {
+        "ok": true
+      }
+    },
+    "final_text_contains": [
+      "hello-plugin-eval"
+    ],
+    "no_error": true
+  },
+  "ground_truth": "scope: framework。SPI 插件 echo-tool 注册的 echo_query 工具可被正常调用：应调用 echo_query 回显 hello-plugin-eval，TOOL_RESULT_END state=SUCCESS，最终回复包含回显文本——验证 ToolPluginBootstrapper 插件加载链路（2026-09-25 tool-plugin-extension）",
+  "eval_dimensions": [
+    "tool_selection",
+    "protocol_compliance"
+  ]
+}
