@@ -1,0 +1,40 @@
+{
+  "case_id": "case_tool_time_001",
+  "title": "内置 get_current_time 工具查询时区时间",
+  "category": "function",
+  "priority": "medium",
+  "module": "tool/get_current_time",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [
+    "get_current_time"
+  ],
+  "input": {
+    "message": "请查询上海时区（Asia/Shanghai）的当前时间并告诉我。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 120,
+  "expected": {
+    "frames": {
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "tool_calls": {
+      "required": [
+        "get_current_time"
+      ]
+    },
+    "tool_result": {
+      "get_current_time": {
+        "ok": true
+      }
+    },
+    "no_error": true
+  },
+  "ground_truth": "应调用 get_current_time（timezone=Asia/Shanghai）并基于工具结果回答当前时间",
+  "eval_dimensions": [
+    "tool_selection",
+    "response_quality"
+  ]
+}

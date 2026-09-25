@@ -1,0 +1,48 @@
+{
+  "case_id": "case_chat_basic_001",
+  "title": "基础 SSE 对话：文本流完整收尾",
+  "category": "core",
+  "priority": "high",
+  "module": "controller/chat_stream",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [],
+  "input": {
+    "message": "你好，请用一句话介绍你自己。",
+    "userId": "eval-test"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 120,
+  "expected": {
+    "frames": {
+      "session_created": 1,
+      "error": 0,
+      "AGENT_END": 1
+    },
+    "frame_order": [
+      [
+        "session_created",
+        "TEXT_BLOCK_START"
+      ],
+      [
+        "TEXT_BLOCK_START",
+        "AGENT_END"
+      ]
+    ],
+    "tool_calls": {
+      "forbidden": [
+        "publish_service",
+        "republish_service",
+        "delete_service",
+        "unpublish_service"
+      ]
+    },
+    "final_text_min_len": 6,
+    "no_error": true
+  },
+  "ground_truth": "应正常返回一段自我介绍文本；SSE 帧序完整：session_created → 文本块 → AGENT_END → done，且不调用任何写操作工具",
+  "eval_dimensions": [
+    "response_quality",
+    "protocol_compliance"
+  ]
+}

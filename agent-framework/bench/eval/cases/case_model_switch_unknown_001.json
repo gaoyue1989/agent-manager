@@ -1,0 +1,23 @@
+{
+  "case_id": "case_model_switch_unknown_001",
+  "title": "会话级模型切换：未知模型显式拒绝（validateSelectable）",
+  "category": "boundary",
+  "priority": "medium",
+  "module": "controller/chat_stream/model_switch",
+  "source": "manual",
+  "status": "active",
+  "requires_tools": [],
+  "input": {
+    "message": "你好",
+    "userId": "eval-test",
+    "model": "nonexistent-model-for-eval"
+  },
+  "hitl_policy": "none",
+  "timeout_s": 60,
+  "expected": {
+    "frames": {"error": 1, "AGENT_END": 0, "done": 0, "session_created": 0, "TEXT_BLOCK_DELTA": 0},
+    "error_contains": ["nonexistent-model-for-eval"]
+  },
+  "ground_truth": "model 字段指向 ModelCatalog 中不存在的模型时应显式拒绝：返回 error 帧、消息包含被拒模型名，不创建会话、不出文本、不进入 agent 执行（ChatStreamController validateSelectable 前置校验）",
+  "eval_dimensions": ["protocol_compliance"]
+}
