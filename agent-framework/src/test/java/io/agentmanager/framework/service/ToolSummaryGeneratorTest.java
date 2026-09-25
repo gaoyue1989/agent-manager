@@ -114,6 +114,16 @@ class ToolSummaryGeneratorTest {
     }
 
     @Test
+    void resumedSummaryShouldUseFriendlyToolNameWithoutArgs() {
+        assertEquals("执行 submit_application",
+            ToolSummaryGenerator.resumedCallSummary("submit_application"));
+        assertEquals("执行 publish_service",
+            ToolSummaryGenerator.resumedCallSummary("mcp__oaf__publish_service"));
+        assertEquals("调用工具", ToolSummaryGenerator.resumedCallSummary(null));
+        assertEquals("调用工具", ToolSummaryGenerator.resumedCallSummary(" "));
+    }
+
+    @Test
     void overlongCommandShouldBeTruncated() {
         var cmd = "x".repeat(500);
         var summary = ToolSummaryGenerator.callSummary("execute", "{\"command\":\"" + cmd + "\"}");

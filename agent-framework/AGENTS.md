@@ -95,7 +95,7 @@ agent-framework/
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
 │   └── test/                                  # 83 个测试类 / 883 个 @Test（含默认跳过的沙箱集成测试）
-├── docs/                                     # 设计与改进方案文档 (36 份, 索引见 docs/README.md)
+├── docs/                                     # 设计与改进方案文档 (38 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)

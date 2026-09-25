@@ -2,6 +2,7 @@ package io.agentmanager.framework.service;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
@@ -48,6 +49,9 @@ public final class TurnToolSummaryTracker {
 
     /** toolCallId → 拼接中的结果文本 */
     private final ConcurrentHashMap<String, StringBuilder> resultBuffers = new ConcurrentHashMap<>();
+
+    /** 已产出过调用摘要的 toolCallId（恢复段只有 RESULT_END 时据此补发一次，防重复） */
+    private final Set<String> summarizedCalls = ConcurrentHashMap.newKeySet();
 
     /** 摘要帧的落库/广播回调（由控制器注入 EventBus） */
     private final Emitter emitter;
@@ -98,6 +102,9 @@ public final class TurnToolSummaryTracker {
         if (summary == null || summary.isBlank()) {
             return;
         }
+        if (toolCallId != null) {
+            summarizedCalls.add(toolCallId);
+        }
         emit("tool_call_summary", fields(
             "type", "tool_call_summary",
             "toolCallId", toolCallId == null ? "" : toolCallId,
@@ -114,6 +121,18 @@ public final class TurnToolSummaryTracker {
     public void onToolResultEnd(ToolResultEndEvent e) {
         var toolCallId = e.getToolCallId();
         var toolName = resolveName(toolCallId, e.getToolCallName());
+
+        // HITL 恢复段没有 TOOL_CALL_* 重放：RESULT_END 是本 turn 首个可识别该调用的终结事件。
+        // 此时补发一帧无参数兜底摘要（「执行 工具名」），保证前端工具行有标题；Set.add 同时完成
+        // 「本次补发」标记，后续重放/重复 RESULT_END 不会再发第二帧调用摘要。
+        if (toolCallId != null && summarizedCalls.add(toolCallId)) {
+            emit("tool_call_summary", fields(
+                "type", "tool_call_summary",
+                "toolCallId", toolCallId,
+                "toolName", toolName == null ? "" : toolName,
+                "summary", ToolSummaryGenerator.resumedCallSummary(toolName)));
+        }
+
         var result = take(resultBuffers, toolCallId);
         var state = e.getState() != null ? e.getState().name() : "";
         var preview = ToolSummaryGenerator.resultPreview(toolName, result, state);
@@ -156,6 +175,7 @@ public final class TurnToolSummaryTracker {
         toolNames.clear();
         argBuffers.clear();
         resultBuffers.clear();
+        summarizedCalls.clear();
     }
 
     // ===== 内部 =====
