@@ -3,6 +3,7 @@ package io.agentmanager.framework.controller;
 import java.util.List;
 import java.util.Map;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,6 +12,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import io.agentmanager.framework.model.AgentCardNotes;
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.AgentRuntimeService;
@@ -27,7 +29,15 @@ class AgentCardControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
+    private OafConfigHolder oafConfigHolder;
+
+    @org.mockito.Mock
     private OafConfig oafConfig;
+
+    @BeforeEach
+    void stubOafConfigHolder() {
+        org.mockito.Mockito.when(oafConfigHolder.get()).thenReturn(oafConfig);
+    }
 
     @MockBean
     private A2uiService a2uiService;

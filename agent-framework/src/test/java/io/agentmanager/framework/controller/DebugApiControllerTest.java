@@ -12,6 +12,7 @@ import java.util.Map;
 
 import javax.sql.DataSource;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -21,6 +22,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.LogCollector;
 import io.agentmanager.framework.service.SkillCatalogService;
@@ -44,7 +46,17 @@ class DebugApiControllerTest {
     private AgentManagerProperties props;
 
     @MockBean
+    private OafConfigHolder oafConfigHolder;
+    @MockBean
+    private io.agentmanager.framework.config.SandboxConfig sandboxConfig;
+
+    @org.mockito.Mock
     private OafConfig oafConfig;
+
+    @BeforeEach
+    void stubOafConfigHolder() {
+        org.mockito.Mockito.when(oafConfigHolder.get()).thenReturn(oafConfig);
+    }
 
     @MockBean
     private DataSource dataSource;

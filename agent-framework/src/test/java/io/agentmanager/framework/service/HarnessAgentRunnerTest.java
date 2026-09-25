@@ -17,7 +17,33 @@ import reactor.core.publisher.Flux;
 class HarnessAgentRunnerTest {
 
     private final HarnessAgent agent = mock(HarnessAgent.class);
-    private final HarnessAgentRunner runner = new HarnessAgentRunner(agent);
+    private final A2aAgentRefHolder holder = holderWith(agent);
+    private final HarnessAgentRunner runner = new HarnessAgentRunner(holder);
+
+    /** 测试用 holder：ObjectProvider 直返桩 agent（绕过 Spring 惰性解析）。 */
+    static A2aAgentRefHolder holderWith(HarnessAgent agent) {
+        return new A2aAgentRefHolder(new org.springframework.beans.factory.ObjectProvider<>() {
+            @Override
+            public HarnessAgent getIfAvailable() {
+                return agent;
+            }
+
+            @Override
+            public HarnessAgent getObject(Object... args) {
+                return agent;
+            }
+
+            @Override
+            public HarnessAgent getObject() {
+                return agent;
+            }
+
+            @Override
+            public HarnessAgent getIfUnique() {
+                return agent;
+            }
+        });
+    }
 
     @Test
     void getAgentNameShouldDelegate() {

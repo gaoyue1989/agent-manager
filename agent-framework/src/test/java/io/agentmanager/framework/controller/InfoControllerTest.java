@@ -3,6 +3,7 @@ package io.agentmanager.framework.controller;
 import java.util.List;
 import java.util.Map;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,6 +11,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpManager;
@@ -25,13 +27,24 @@ class InfoControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
+    private OafConfigHolder oafConfigHolder;
+
+    @org.mockito.Mock
     private OafConfig oafConfig;
+
+    @BeforeEach
+    void stubOafConfigHolder() {
+        org.mockito.Mockito.when(oafConfigHolder.get()).thenReturn(oafConfig);
+    }
 
     @MockBean
     private AgentRuntimeService agentRuntime;
 
     @MockBean
     private McpManager mcpManager;
+
+    @MockBean
+    private io.agentmanager.framework.service.McpToolRegistrar mcpToolRegistrar;
 
     @MockBean
     private List<Map<String, Object>> mcpConfigs;
@@ -73,7 +86,7 @@ class InfoControllerTest {
                 "Code review skill", List.of("bash", "python"),
                 "", "", java.util.Map.of())
         ));
-        when(mcpManager.getMcpSummaries(mcpConfigs))
+                when(mcpManager.getMcpSummaries(org.mockito.ArgumentMatchers.anyList()))
             .thenReturn(List.of(Map.of("server", "weather-service", "tool_count", 3)));
 
         mockMvc.perform(get("/metadata"))

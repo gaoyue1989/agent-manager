@@ -14,9 +14,9 @@ import io.agentscope.core.a2a.server.transport.TransportProperties;
 
 import io.agentmanager.framework.model.AgentCardNotes;
 import io.agentmanager.framework.model.OafConfig;
+import io.agentmanager.framework.service.A2aAgentRefHolder;
 import io.agentmanager.framework.service.HarnessAgentRunner;
 import io.agentmanager.framework.service.MySqlTaskStore;
-import io.agentscope.harness.agent.HarnessAgent;
 
 @Configuration
 public class A2AServerConfig {
@@ -24,7 +24,7 @@ public class A2AServerConfig {
 
     @Bean
     @DependsOn("harnessAgent")
-    public AgentScopeA2aServer a2aServer(HarnessAgent harnessAgent, OafConfig oafConfig,
+    public AgentScopeA2aServer a2aServer(A2aAgentRefHolder a2aAgentRefHolder, OafConfig oafConfig,
                                          DataSource dataSource, AgentManagerProperties props) {
         var serverCfg = props.server();
         // 0.0.0.0 是监听通配地址，不能作为对外注册地址；多实例/非标准端口场景
@@ -41,7 +41,9 @@ public class A2AServerConfig {
             .path("/")
             .build();
 
-        var runner = new HarnessAgentRunner(harnessAgent);
+        // runner 经 holder 间接持有 agent（volatile）：OAF reload 整包重建后
+        // A2A 链路自动路由到新 agent；进行中的事件流持旧引用跑完不受影响
+        var runner = new HarnessAgentRunner(a2aAgentRefHolder);
 
         var server = AgentScopeA2aServer.builder(runner)
             .agentCard(card)

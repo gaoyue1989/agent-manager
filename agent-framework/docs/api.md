@@ -142,6 +142,52 @@ curl http://localhost:8100/tools
 
 ---
 
+### POST /admin/reload
+
+OAF 配置动态 reload（docs/oaf-dynamic-reload-plan.md）。PVC /config 原位更新后免重启生效。
+
+```bash
+curl -X POST "http://localhost:8100/admin/reload?scope=auto"
+curl -X POST "http://localhost:8100/admin/reload?scope=mcp&server=weather"
+```
+
+**Query 参数：**
+
+| 参数 | 说明 |
+|------|------|
+| `scope` | `auto`（默认，指纹比对自动分流：仅 MCP 配置变 → 原地 reload；AGENTS.md 变 → 整包重建 agent）/ `mcp`（仅 MCP 原地 reload，重解析 frontmatter，声明增删即时生效；可加 `&server=<name>` 精准单 server）/ `agent`（强制整包重建，含 MCP 全量注册） |
+
+**响应（200）：**
+
+```json
+{
+  "scope": "mcp",
+  "fingerprint_changed": true,
+  "agent_rebuilt": false,
+  "mcp_servers": [{"server": "weather", "action": "reloaded", "ok": true, "tool_count": 1}]
+}
+```
+
+- `action`：`reloaded` / `removed`（声明已删除）/ `skipped`（fail-soft 注册失败）/ `registered`（整包重建路径）
+- **失败（500）**：`{"scope", "error", "note": "old configuration remains active"}` —— 旧配置继续服务，修正后重新触发即可
+- 生效语义：下一轮对话；进行中 turn 不打断；重复触发（指纹未变）返回 `scope=noop`
+
+---
+
+### GET /admin/reload
+
+reload 只读状态（无副作用）。
+
+```bash
+curl http://localhost:8100/admin/reload
+```
+
+```json
+{"scope": "status", "registeredServers": [{"server": "weather", "connected": true, "tool_count": 1}]}
+```
+
+---
+
 ### GET /mcp/{server}/resources/ui
 
 MCP Apps：读取工具 UI 资源 HTML（经 CSP 元数据注入返回）。

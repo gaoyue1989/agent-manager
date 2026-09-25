@@ -16,7 +16,7 @@ import io.agentscope.core.tool.ToolParam;
  * <p>每个 @Tool 方法会通过反射自动生成 JSON Schema 暴露给 LLM，
  * 支持 RuntimeContext / AgentState 等框架参数自动注入。
  */
-public class BusinessTools {
+public class BusinessTools implements io.agentmanager.framework.tool.CustomTool {
 
     @Tool(
         name = "get_current_time",

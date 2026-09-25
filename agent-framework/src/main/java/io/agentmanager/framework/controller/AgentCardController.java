@@ -6,8 +6,8 @@ import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.AgentCardNotes;
-import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.A2uiService;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.SkillCatalogService;
@@ -15,14 +15,14 @@ import io.agentmanager.framework.service.SkillCatalogService;
 @RestController
 public class AgentCardController {
 
-    private final OafConfig oafConfig;
+    private final OafConfigHolder oafConfigHolder;
     private final A2uiService a2uiService;
     private final AgentRuntimeService agentRuntime;
     private final SkillCatalogService skillCatalog;
 
-    public AgentCardController(OafConfig oafConfig, A2uiService a2uiService,
+    public AgentCardController(OafConfigHolder oafConfigHolder, A2uiService a2uiService,
                                AgentRuntimeService agentRuntime, SkillCatalogService skillCatalog) {
-        this.oafConfig = oafConfig;
+        this.oafConfigHolder = oafConfigHolder;
         this.a2uiService = a2uiService;
         this.agentRuntime = agentRuntime;
         this.skillCatalog = skillCatalog;
@@ -30,6 +30,8 @@ public class AgentCardController {
 
     @GetMapping("/.well-known/agent-card.json")
     public Map<String, Object> agentCard() {
+        // holder 动态读取：reload 后新 name/version/description 即时反映到卡片
+        var oafConfig = oafConfigHolder.get();
         // 动态技能目录：运行中新增/删除的技能即时反映到 A2A 卡片
         var skills = skillCatalog.list().stream()
             .map(s -> Map.of(

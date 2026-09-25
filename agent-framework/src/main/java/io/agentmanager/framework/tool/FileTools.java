@@ -29,7 +29,7 @@ import io.agentscope.core.tool.ToolParam;
  *       兼容旧方式 file_content_base64 显式传入（base64 -w0 /workspace/xxx）</li>
  * </ul>
  */
-public class FileTools {
+public class FileTools implements io.agentmanager.framework.tool.CustomTool {
 
     private static final Logger log = LoggerFactory.getLogger(FileTools.class);
 

@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import io.agentmanager.framework.model.OafConfig;
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpManager;
 import io.agentmanager.framework.service.McpToolRegistrar;
@@ -17,24 +17,21 @@ import io.agentmanager.framework.service.SkillCatalogService;
 @RestController
 public class ToolController {
 
-    private final OafConfig oafConfig;
+    private final OafConfigHolder oafConfigHolder;
     private final AgentRuntimeService agentRuntime;
-    private final List<Map<String, Object>> mcpConfigs;
     private final McpManager mcpManager;
     private final McpToolRegistrar mcpToolRegistrar;
     private final SkillCatalogService skillCatalog;
 
     public ToolController(
-        OafConfig oafConfig,
+        OafConfigHolder oafConfigHolder,
         AgentRuntimeService agentRuntime,
-        List<Map<String, Object>> mcpConfigs,
         McpManager mcpManager,
         McpToolRegistrar mcpToolRegistrar,
         SkillCatalogService skillCatalog
     ) {
-        this.oafConfig = oafConfig;
+        this.oafConfigHolder = oafConfigHolder;
         this.agentRuntime = agentRuntime;
-        this.mcpConfigs = mcpConfigs;
         this.mcpManager = mcpManager;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.skillCatalog = skillCatalog;
@@ -51,7 +48,14 @@ public class ToolController {
 
     @GetMapping("/mcp")
     public List<Map<String, Object>> listMcp() {
-        return mcpManager.getMcpSummaries(mcpConfigs);
+        return mcpManager.getMcpSummaries(currentMcpConfigs());
+    }
+
+    /**
+     * 当前 MCP 配置：从磁盘按最新 frontmatter 声明加载（reload 后即时反映）。
+     */
+    private List<Map<String, Object>> currentMcpConfigs() {
+        return mcpManager.loadConfigs(oafConfigHolder.get().mcpServers());
     }
 
     /**
@@ -69,7 +73,7 @@ public class ToolController {
 
         // 2. 内置工具（可选）
         if (includeInternal) {
-            oafConfig.tools().stream()
+            oafConfigHolder.get().tools().stream()
                 .map(name -> Map.<String, Object>of("name", name, "category", "internal"))
                 .forEach(tools::add);
         }
@@ -83,7 +87,7 @@ public class ToolController {
 
     private List<Map<String, Object>> getMcpTools() {
         List<Map<String, Object>> result = new ArrayList<>();
-        for (var config : mcpConfigs) {
+        for (var config : currentMcpConfigs()) {
             String serverName = (String) config.getOrDefault("server", "unknown");
             mcpToolRegistrar.getToolsByServer(serverName).stream()
                 .map(tool -> {
