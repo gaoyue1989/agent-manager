@@ -7,6 +7,7 @@ export interface ChatOpts {
   sessionId?: string;
   userId?: string;
   fileIds?: string[];
+  model?: string;
   timeoutMs?: number;
   base?: string;
 }
@@ -17,7 +18,13 @@ export function chat(opts: ChatOpts): Collected {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     signal: AbortSignal.timeout(opts.timeoutMs ?? 45_000),
-    body: JSON.stringify({ message: opts.message, sessionId: opts.sessionId, userId: opts.userId, fileIds: opts.fileIds }),
+    body: JSON.stringify({
+      message: opts.message,
+      sessionId: opts.sessionId,
+      userId: opts.userId,
+      fileIds: opts.fileIds,
+      model: opts.model,
+    }),
   });
   return collectStream(p, (opts.timeoutMs ?? 45_000));
 }

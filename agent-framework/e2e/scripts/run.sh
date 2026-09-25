@@ -16,7 +16,7 @@ if [ "$FAILED" -eq 0 ]; then
 fi
 if [ "$FAILED" -eq 0 ]; then
   case "$GROUP" in
-    core)    PROJECTS="--project=api-core --project=ui" ;;
+    core)    PROJECTS="--project=api-core --project=api-models --project=api-reload --project=ui" ;;
     multi)   PROJECTS="--project=api-multi --project=ui-multi --project=api-multi-kill" ;;
     sandbox) PROJECTS="--project=api-sandbox" ;;
     *) echo "未知组 $GROUP"; PROJECTS="" ;;
