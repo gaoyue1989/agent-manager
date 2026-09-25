@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 37 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 38 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -49,6 +49,7 @@
 | [event-system-upgrade-plan.md](event-system-upgrade-plan.md) | 事件体系升级（含逐条作废声明），历史快照 |
 | [a2a-tasks-get-plan.md](a2a-tasks-get-plan.md) | A2A tasks/get + SDK 全量透传，已完成 |
 | [sse-optimization-a1-a5-design.md](sse-optimization-a1-a5-design.md) | SSE 链路优化五项（A1 toSSE 收口 / A2 Tailer 空闲退避 / A3 emit 失败不广播 / A4 控制器桶清理 / A5 TurnFinalizer 抽取），已实施 |
+| [hitl-tool-summary-recovery-design.md](hitl-tool-summary-recovery-design.md) | HITL 恢复流工具调用摘要兜底（RESULT_END 按 toolCallId 补发「执行 工具名」），**已实施**（2026-09-25；含方案比较与幂等/回放语义） |
 | [session-model-switch-design.md](session-model-switch-design.md) | 会话模型切换（model_config 托管模型 CRUD + 会话级 model 绑定 + 系统模型管标题/记忆压缩），**已实施**（2026-09-24；含实施记录与两处偏差：`GET /models?all=true`、未引入 env 备选列表） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）

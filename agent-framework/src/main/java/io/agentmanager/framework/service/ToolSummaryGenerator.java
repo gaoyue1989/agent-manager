@@ -76,11 +76,27 @@ public final class ToolSummaryGenerator {
     }
 
     /**
+     * 恢复执行段（HITL confirm 后）的兜底调用摘要。
+     *
+     * <p>SDK 恢复流只重发 {@code TOOL_RESULT_*}，不再重发原 {@code TOOL_CALL_*} 参数事件；
+     * 此时无法从参数中提取路径/命令，但前端仍需要一帧可展示的调用标题，故固定为「执行 工具名」。
+     *
+     * @param toolName 工具注册名（MCP 展示名取末段）
+     * @return 单行摘要；永不为 null
+     */
+    static String resumedCallSummary(String toolName) {
+        if (toolName == null || toolName.isBlank()) {
+            return "调用工具";
+        }
+        return truncate("执行 " + friendlyName(toolName), MAX_SUMMARY);
+    }
+
+    /**
      * 工具结果预览：取结果首行（或首个非空行），便于「输出 …」形式展示。
      *
      * <p>非 SUCCESS 时优先展示终态（失败/拒绝/中断），因为它比结果文本更值得让用户知道。
      *
-     * @param toolName  工具注册名（预留扩展：未来按工具定制结果预览）
+     * @param toolName 工具注册名（预留扩展：未来按工具定制结果预览）
      * @param resultText 已拼接完成的结果文本
      * @param state      {@code ToolResultState} 名（SUCCESS/ERROR/INTERRUPTED/DENIED/RUNNING）
      * @return 预览文本；无有效内容时返回 {@code null}（调用方据此跳过发帧）

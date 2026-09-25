@@ -987,13 +987,26 @@ function onToolCallEnd(r, tcId) {
   updateToolGroupTitle(r);
 }
 
-function onToolCallSummary(r, tcId, summary) {
+function onToolCallSummary(r, tcId, summary, toolName) {
   if (!tcId || !summary) return;
-  const tc = pendingToolCalls[tcId];
-  if (tc) tc.summary = summary;
-  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  const tc = pendingToolCalls[tcId] || (toolName ? {
+    name: toolName, argsRaw: '', argsText: '', resultRaw: null, state: null
+  } : null);
+  if (tc) {
+    pendingToolCalls[tcId] = tc;
+    tc.summary = summary;
+  }
+  let rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  // confirm-stream 会创建新的回复容器，但恢复段不会重发 TOOL_CALL_START。
+  // 摘要帧因此可能是当前回复里该 toolCallId 的首个可见事件：补建行后再更新标题。
+  if (!rowEl) {
+    onToolCallStart(r, tcId, toolName || (tc && tc.name) || 'tool');
+    rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  }
   const nameEl = rowEl ? rowEl.querySelector('.tc-name') : null;
   if (nameEl) nameEl.textContent = summary;
+  rebuildToolRows(r);
+  updateToolGroupTitle(r);
 }
 
 function onToolResultPreview(r, tcId, preview) {
@@ -1032,9 +1045,6 @@ function rebuildToolRows(r) {
       state: tc.state || 'running'
     });
   }).join('');
-  r.toolsBodyEl.querySelectorAll('.tool-call-row').forEach((el) => {
-    el.addEventListener('click', () => window.App.toolRowToggle(el));
-  });
   scrollToBottom(false);
 }
 
@@ -1429,7 +1439,7 @@ function handleEvent(data) {
     }
     case 'tool_call_summary': {
       // 后端已拼好 delta 参数并解析出关键字段：直接把工具行标题换成「创建 x.js 408行」
-      if (r) onToolCallSummary(r, data.toolCallId, data.summary);
+      if (r) onToolCallSummary(r, data.toolCallId, data.summary, data.toolName);
       break;
     }
     case 'tool_result_preview': {

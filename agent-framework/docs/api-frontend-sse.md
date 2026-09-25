@@ -1127,7 +1127,7 @@ GET /skills/manage
 | `TOOL_RESULT_START` | 工具结果开始 | `toolCallId`, `toolCallName` |
 | `TOOL_RESULT_TEXT_DELTA` | 工具结果文本增量 | `delta`, `toolCallId`, `toolCallName` |
 | `TOOL_RESULT_END` | 工具结果结束 | `state`, `toolCallId`, `toolCallName` |
-| `tool_call_summary` | 紧随 `TOOL_CALL_END`，工具参数到齐 | `summary`, `toolCallId`, `toolName` |
+| `tool_call_summary` | 正常链路紧随 `TOOL_CALL_END`；HITL 恢复链路紧随 `TOOL_RESULT_END` 兜底补发 | `summary`, `toolCallId`, `toolName` |
 | `tool_result_preview` | 紧随 `TOOL_RESULT_END`，工具结果到齐 | `preview`, `toolCallId`, `toolName` |
 
 #### `tool_call_summary` / `tool_result_preview`（人可读摘要，2026-09-23 新增）
@@ -1144,6 +1144,10 @@ GET /skills/manage
 {"type":"tool_call_summary","toolCallId":"call-abc","toolName":"write_file","summary":"创建 output/create-ai-ppt.js 408行","replyId":"r1"}
 {"type":"tool_result_preview","toolCallId":"call-abc","toolName":"write_file","preview":"文件写入成功","replyId":"r1"}
 ```
+
+> **HITL 恢复链路：** SDK 的 `confirm-stream` 恢复段不重放 `TOOL_CALL_*`，服务端会在首个
+> `TOOL_RESULT_END` 后按 `toolCallId` 兜底补发 `tool_call_summary`（文案为「执行 {工具名}」），
+> 随后再发 `tool_result_preview`。该兜底帧同样落库并支持续传/回放，且同一工具调用只补发一次。
 
 渲染约定：
 - `tool_call_summary.summary` —— **替换**工具行的标题（原为工具名），如「执行 cd... && node output/create-ai-ppt.js」

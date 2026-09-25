@@ -147,6 +147,7 @@ const server = http.createServer((req, res) => {
       stats.count += 1;
       stats.calls.push({
         scenario: isBackground ? 'background-synth' : (name ?? marker), arg,
+        model: reqBody.model ?? null,
         msgCount: messages.length,
         roles: messages.map(m => m.role),
         systemContent,

@@ -3,7 +3,7 @@
  * 选择器契约见 lib/selectors.ts（源自 static/debug 模块，example approval e2e 已验证交互手法）。
  */
 import { test, expect, type Page } from '@playwright/test';
-import { ids, sessionIdFor } from '../lib/env.js';
+import { BASE, ids, sessionIdFor } from '../lib/env.js';
 import { SEL } from '../lib/selectors.js';
 import { createApprovalApp } from '../lib/client.js';
 import { PNG_1PX } from '../lib/files.js';
@@ -23,6 +23,18 @@ async function send(page: Page, text: string) {
   const btn = page.locator(SEL.sendBtn);
   await expect(btn).toBeEnabled();
   await btn.click();
+}
+
+/** 预置已确认申请单：批准后工具应真实成功，而非只验证确认卡消失。 */
+async function createConfirmedApp(): Promise<string> {
+  const app = await createApprovalApp();
+  const response = await fetch(`${BASE}/mcp/approval/tools/confirm_application`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ arguments: { application_id: app, action: 'confirm' }, confirmed: true, userId: U }),
+  });
+  expect(response.ok, await response.text()).toBe(true);
+  return app;
 }
 
 test('U1 模块渲染冒烟（10 路由无报错）', async ({ page }) => {
@@ -60,15 +72,24 @@ test('U3 会话列表与回放', async ({ page }) => {
   await expect(page.locator(SEL.chatInner)).toContainText(/./);
 });
 
-test('U4 HITL 批准全流程', async ({ page }) => {
-  const app = await createApprovalApp();
+test('U4 HITL 批准全流程与恢复流工具摘要', async ({ page }) => {
+  const app = await createConfirmedApp();
   await send(page, `[E2E:hitl:submit](${app})`);
   const card = page.locator(SEL.confirmCard);
   await expect(card).toBeVisible({ timeout: 120_000 });
   await expect(card.locator(SEL.confirmToolName)).toContainText('submit_application');
   await card.locator(SEL.confirmApprove).click();
-  // 批准后工具结果 + 收尾消息（等确认卡消失或完成态）
   await expect(card).toBeHidden({ timeout: 120_000 });
+
+  // confirm-stream 使用新回复容器；摘要到达时应补建原 toolCallId 的工具行
+  const group = page.locator('.tool-group-header').last();
+  await expect(group).toBeVisible({ timeout: 120_000 });
+  await group.click();
+  const row = page.locator('.tool-call-row').last();
+  await expect(row.locator('.tc-name')).toHaveText('执行 submit_application');
+  await row.click();
+  await expect(row.locator('xpath=following-sibling::div[contains(@class,"tool-call-body")]'))
+    .toContainText(/SUCCESS: application APP-/);
 });
 
 test('U5 HITL 拒绝', async ({ page }) => {

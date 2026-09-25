@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // agent-framework E2E（e2e-ci-plan §6）：单运行器承载 API（node fetch 收 SSE）+ UI（chromium）
-// project 分组映射 CI job：api-core / ui → e2e-core；api-multi / ui-multi → e2e-multi；api-sandbox → e2e-sandbox
+// project 分组映射 CI job：api-core / api-models / api-reload / ui → e2e-core；api-multi / ui-multi / api-multi-kill → e2e-multi；api-sandbox → e2e-sandbox
 const BASE = process.env.E2E_BASE ?? 'http://127.0.0.1:8100';
 
 export default defineConfig({
@@ -21,6 +21,8 @@ export default defineConfig({
   },
   projects: [
     { name: 'api-core', testMatch: /tests\/api-core\.spec\.ts/, use: { ...devicesDesktop() } },
+    { name: 'api-models', testMatch: /tests\/api-models\.spec\.ts/, use: { ...devicesDesktop() } },
+    { name: 'api-reload', testMatch: /tests\/api-reload\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi', testMatch: /tests\/api-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-sandbox', testMatch: /tests\/api-sandbox\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui', testMatch: /tests\/ui\.spec\.ts/, use: { ...devicesDesktop() } },

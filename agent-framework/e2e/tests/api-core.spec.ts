@@ -81,6 +81,17 @@ test('S4 内置工具调用', async () => {
   const results = toolResults(stream.frames);
   expect(results.length).toBeGreaterThan(0);
   expect(String((results[0] as Record<string, unknown>).state ?? '')).toBe('SUCCESS');
+  const callSummary = stream.frames.find(f => f.type === 'tool_call_summary' && f.toolName === 'echo') as Record<string, unknown> | undefined;
+  expect(callSummary, '缺少 tool_call_summary 合成帧').toBeTruthy();
+  expect(String(callSummary!.summary)).toContain('echo 端到端回显内容');
+  expect(String(callSummary!.replyId ?? '')).not.toBe('');
+  const resultPreview = stream.frames.find(f => f.type === 'tool_result_preview' && f.toolName === 'echo') as Record<string, unknown> | undefined;
+  expect(resultPreview, '缺少 tool_result_preview 合成帧').toBeTruthy();
+  expect(String(resultPreview!.preview)).toContain('echo:');
+  const rawToolEnd = stream.frames.findIndex(f => f.type === 'TOOL_RESULT_END' && f.toolCallId === callSummary!.toolCallId);
+  const previewIndex = stream.frames.indexOf(resultPreview!);
+  expect(rawToolEnd).toBeGreaterThanOrEqual(0);
+  expect(previewIndex).toBeGreaterThan(rawToolEnd);
   expect(stream.terminal?.type).toBe('done');
   // history 侧 state 为小写 success
   const h = await history(sid);
@@ -133,8 +144,15 @@ test('S7 线程生命周期管理', async ({ request }) => {
   expect(JSON.stringify(list)).toContain(sid);
   const one = await request.get(`/threads/${sid}`);
   expect(one.status()).toBe(200);
-  const patch = await patchThread(sid, { title: `e2e-title-${uniq()}` });
+  const manualTitle = `e2e-title-${uniq()}`;
+  const patch = await patchThread(sid, { title: manualTitle });
   expect([200, 204]).toContain(patch.status);
+  const titled = await pollUntil(async () => {
+    const res = await request.get(`/threads?userId=${encodeURIComponent(U)}`);
+    const rows = await res.json() as Array<Record<string, unknown>>;
+    return rows.find(row => row.session_id === sid);
+  }, row => row?.title === manualTitle);
+  expect(titled?.title).toBe(manualTitle);
   const llmCalls = await request.get(`/threads/${sid}/llm-calls`);
   expect(llmCalls.status()).toBe(200);
   expect(await deleteThread(sid)).toBeLessThan(300);
@@ -154,6 +172,30 @@ test('S8 history 回放工具配对', async () => {
   expect(tc!.state).toBe('success');
   expect(String(tc!.output ?? '').length).toBeGreaterThan(0);
   expect(tc!.id).toBeTruthy();
+});
+
+test('S9 首轮消息自动生成标题，手工标题后续不被覆盖', async ({ request }) => {
+  const sid = sessionIdFor(`s9-${uniq()}`);
+  const first = chat({ message: '[E2E:plain]请总结本次会话主题', userId: U, sessionId: sid });
+  await waitTerminal(first);
+
+  const generated = await pollUntil(async () => {
+    const res = await request.get(`/threads?userId=${encodeURIComponent(U)}`);
+    const rows = await res.json() as Array<Record<string, unknown>>;
+    return rows.find(row => row.session_id === sid);
+  }, row => typeof row?.title === 'string' && row.title.length > 0);
+  expect(generated?.title).toBe('端到端链路畅通，测试正常');
+
+  const manualTitle = `手工标题-${uniq()}`;
+  const patched = await patchThread(sid, { title: manualTitle });
+  expect(patched.status).toBe(200);
+  const second = chat({ message: '[E2E:plain]继续对话', userId: U, sessionId: sid });
+  await waitTerminal(second);
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  const res = await request.get(`/threads?userId=${encodeURIComponent(U)}`);
+  const rows = await res.json() as Array<Record<string, unknown>>;
+  expect(rows.find(row => row.session_id === sid)?.title).toBe(manualTitle);
 });
 
 // ---------- F 组：文件上传下载 ----------
@@ -240,6 +282,11 @@ test('F12 OAF 打包交付（MCP create_oaf_zip + present_url + 代理下载 + �
   expect(stream.terminal?.type).toBe('done');
   expect(toolNames(stream.frames)).toContain('create_oaf_zip');
   expect(toolNames(stream.frames)).toContain('present_url');
+  const callSummaries = stream.frames.filter(f => f.type === 'tool_call_summary');
+  expect(callSummaries.some(f => f.toolName === 'create_oaf_zip')).toBe(true);
+  expect(callSummaries.some(f => f.toolName === 'present_url')).toBe(true);
+  const resultPreviews = stream.frames.filter(f => f.type === 'tool_result_preview');
+  expect(resultPreviews.some(f => f.toolName === 'present_url')).toBe(true);
   // 实时 file_ready 帧：download_url 固定 /files/{id} 相对路径（前端拼 AGENT_BASE）
   const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
   expect(ready, '缺少 file_ready 帧（create_oaf_zip 应与 present_file 同链路合成）').toBeTruthy();
@@ -328,7 +375,12 @@ test('H1 ask 挂起与状态', async ({ request }) => {
   expect(toolCalls[0].name).toBe('submit_application');
   const st = await status(sid);
   expect(st.state).toBe('waiting_confirm');
-  const h = await history(sid);
+  const h = await pollUntil(
+    async () => history(sid),
+    value => (value.pendingConfirm as Record<string, unknown> | null)?.source === 'agent_state',
+    10_000,
+    200,
+  );
   const pc = h.pendingConfirm as Record<string, unknown>;
   expect(pc).toBeTruthy();
   expect(((pc.tools as Array<Record<string, unknown>>)[0]).tool_call_id).toBe(toolCalls[0].tool_call_id);
@@ -347,6 +399,19 @@ test('H2 批准（confirm-stream）', async () => {
   expect(rec.terminal?.type).toBe('done');
   const results = toolResults(rec.frames);
   expect(String((results[0] as Record<string, unknown>).state ?? '')).toBe('SUCCESS');
+  // HITL 恢复流没有 TOOL_CALL_* 重放：RESULT_END 后必须补发调用摘要，再发结果预览
+  const summary = rec.frames.find(f => f.type === 'tool_call_summary' && f.toolName === 'submit_application') as Record<string, unknown> | undefined;
+  expect(summary, 'HITL 恢复流缺少 tool_call_summary 兜底帧').toBeTruthy();
+  expect(String(summary!.summary)).toBe('执行 submit_application');
+  expect(String(summary!.replyId ?? '')).not.toBe('');
+  const preview = rec.frames.find(f => f.type === 'tool_result_preview' && f.toolName === 'submit_application') as Record<string, unknown> | undefined;
+  expect(preview, 'HITL 恢复流缺少 tool_result_preview').toBeTruthy();
+  expect(rec.frames.indexOf(summary!)).toBeLessThan(rec.frames.indexOf(preview!));
+  // 兜底摘要走 emitSynthetic 落库：断连续传/刷新回放必须同样可见
+  const replay = subscribe(sid, 0);
+  await waitTerminal(replay);
+  expect(replay.frames.some(f => f.type === 'tool_call_summary' && f.toolName === 'submit_application')).toBe(true);
+  expect(replay.frames.some(f => f.type === 'tool_result_preview' && f.toolName === 'submit_application')).toBe(true);
   const h = await history(sid);
   expect(h.pendingConfirm ?? null).toBeNull();
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);

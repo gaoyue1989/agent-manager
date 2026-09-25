@@ -86,9 +86,11 @@ class TurnToolSummaryTrackerTest {
         t.onToolResultDelta(new ToolResultTextDeltaEvent("reply-1", "tc-1", "execute", "后续明细"));
         t.onToolResultEnd(new ToolResultEndEvent("reply-1", "tc-1", "execute", ToolResultState.SUCCESS));
 
-        assertEquals(1, emitted.size());
-        assertEquals("tool_result_preview", emitted.get(0).type());
-        assertEquals("PPT 生成成功。", field(emitted.get(0).payload(), "preview"));
+        // CALL_END 未到达（例如恢复段）时也会先补一帧调用摘要
+        assertEquals(2, emitted.size());
+        assertEquals("tool_call_summary", emitted.get(0).type());
+        assertEquals("tool_result_preview", emitted.get(1).type());
+        assertEquals("PPT 生成成功。", field(emitted.get(1).payload(), "preview"));
     }
 
     @Test
@@ -96,17 +98,52 @@ class TurnToolSummaryTrackerTest {
         var t = tracker();
         t.onToolResultEnd(new ToolResultEndEvent("reply-1", "tc-9", "execute", ToolResultState.ERROR));
 
-        assertEquals(1, emitted.size());
-        assertEquals("❌ 执行失败", field(emitted.get(0).payload(), "preview"));
+        // 恢复段无 CALL_END：先补调用摘要，再给失败终态预览
+        assertEquals(2, emitted.size());
+        assertEquals("tool_call_summary", emitted.get(0).type());
+        assertEquals("执行 execute", field(emitted.get(0).payload(), "summary"));
+        assertEquals("tool_result_preview", emitted.get(1).type());
+        assertEquals("❌ 执行失败", field(emitted.get(1).payload(), "preview"));
     }
 
     @Test
-    void emptySuccessResultShouldEmitNothing() {
+    void emptySuccessResultWithoutCallEndShouldStillEmitFallbackSummary() throws Exception {
         var t = tracker();
         t.onToolResultDelta(new ToolResultTextDeltaEvent("reply-1", "tc-1", "write_file", "  \n "));
         t.onToolResultEnd(new ToolResultEndEvent("reply-1", "tc-1", "write_file", ToolResultState.SUCCESS));
 
-        assertTrue(emitted.isEmpty(), "空结果不该产生噪音帧");
+        // HITL 恢复段即使工具结果为空，工具行也必须有调用标题；只是不发空结果预览
+        assertEquals(1, emitted.size());
+        assertEquals("tool_call_summary", emitted.get(0).type());
+        assertEquals("执行 write_file", field(emitted.get(0).payload(), "summary"));
+    }
+
+    @Test
+    void resultEndShouldNotDuplicateCallSummaryWhenCallEndAlreadyArrived() throws Exception {
+        var t = tracker();
+        t.onToolCallStart(new ToolCallStartEvent("reply-1", "tc-1", "execute"));
+        t.onToolCallDelta(new ToolCallDeltaEvent("reply-1", "tc-1", "__fragment__", "{\"command\":\"npm test\"}"));
+        t.onToolResultDelta(new ToolResultTextDeltaEvent("reply-1", "tc-1", "execute", "测试完成"));
+        t.onToolCallEnd(new ToolCallEndEvent("reply-1", "tc-1", "execute"));
+        t.onToolResultEnd(new ToolResultEndEvent("reply-1", "tc-1", "execute", ToolResultState.SUCCESS));
+
+        assertEquals(2, emitted.size());
+        assertEquals("tool_call_summary", emitted.get(0).type());
+        assertEquals("执行 npm test", field(emitted.get(0).payload(), "summary"));
+        assertEquals("tool_result_preview", emitted.get(1).type());
+    }
+
+    @Test
+    void replayedResultEndShouldNotEmitSecondFallbackSummary() throws Exception {
+        var t = tracker();
+        t.onToolResultDelta(new ToolResultTextDeltaEvent("reply-1", "tc-1", "submit_application", "SUCCESS"));
+        var end = new ToolResultEndEvent("reply-1", "tc-1", "submit_application", ToolResultState.SUCCESS);
+        t.onToolResultEnd(end);
+        t.onToolResultEnd(end);
+
+        assertEquals(2, emitted.size());
+        assertEquals("tool_call_summary", emitted.get(0).type());
+        assertEquals("tool_result_preview", emitted.get(1).type());
     }
 
     // ===== 工具名判定与缓冲复用 =====
@@ -175,7 +212,8 @@ class TurnToolSummaryTrackerTest {
         t.onToolResultDelta(new ToolResultTextDeltaEvent("reply-1", "tc-1", "execute", "x".repeat(70000)));
         t.onToolResultEnd(new ToolResultEndEvent("reply-1", "tc-1", "execute", ToolResultState.SUCCESS));
 
-        assertFalse(emitted.isEmpty());
-        assertTrue(field(emitted.get(0).payload(), "preview").endsWith("…"));
+        assertEquals(2, emitted.size());
+        assertEquals("tool_call_summary", emitted.get(0).type());
+        assertTrue(field(emitted.get(1).payload(), "preview").endsWith("…"));
     }
 }
