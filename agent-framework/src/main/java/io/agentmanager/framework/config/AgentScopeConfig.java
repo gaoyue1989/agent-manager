@@ -37,21 +37,24 @@ public class AgentScopeConfig {
     private static final Logger log = LoggerFactory.getLogger(AgentScopeConfig.class);
 
     /**
-     * 沙箱文件系统（SANDBOX_ENABLED=true 时装配）。
-     * 未启用时返回 null（@Bean 返回 null = 不注册），harnessAgent 走默认 RemoteFilesystemSpec。
-     * 注意：不用 @ConditionalOnProperty——环境变量 SANDBOX_ENABLED 绑定为 sandbox.enabled，
-     * 与 agent.sandbox.enabled 键不一致会导致条件误判，方法内判断 config.enabled() 更可靠。
+     * 沙箱文件系统（SandboxRuntime.enabled() 时装配，issue #27）。
+     * enabled 生效值经 SandboxRuntime 三层裁决（SANDBOX_ENABLED env 显式 > OAF 包声明
+     * config.sandbox.enabled > yml 默认）。装配两个 harness 官方能力：
+     * - workspaceProjectionEnabled：投影开关（SANDBOX_PROJECTION_ENABLED，默认 true）
+     * - executionGuard：Redis 版 SandboxExecutionGuard（SANDBOX_GUARD_ENABLED，默认 true）
      */
     @Bean
     public OpenSandboxFilesystemSpec sandboxFilesystemSpec(
         SandboxConfig config,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
         WorkspaceSyncService workspaceSyncService,
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
-        io.agentmanager.framework.service.storage.FileStorage fileStorage
+        io.agentmanager.framework.service.storage.FileStorage fileStorage,
+        org.springframework.beans.factory.ObjectProvider<RedisClient> redisClientProvider
     ) {
-        if (!config.enabled()) {
-            log.info("Sandbox disabled (agent.sandbox.enabled=false), using RemoteFilesystemSpec mode");
+        if (!sandboxRuntime.enabled()) {
+            log.info("Sandbox disabled (SandboxRuntime), using RemoteFilesystemSpec mode");
             return null;
         }
         log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={})",
@@ -74,6 +77,22 @@ public class AgentScopeConfig {
             .fileAssetStore(fileAssetStore)
             .fileStorage(fileStorage)
             .isolationScope(IsolationScope.USER);
+        // 工作区投影开关（issue #27 缓解项）：SANDBOX_PROJECTION_ENABLED=false 时 sandbox start
+        // 不再 hydrate 投影目录，降低每轮对话的沙箱同步开销（skills 依赖强的包不要关）
+        spec.workspaceProjectionEnabled(sandboxRuntime.projectionEnabled());
+        // 并发执行守卫（issue #27c，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId
+        // 的沙箱获取，消解并发 hydrate 互踩与端口竞态的触发面；Redis 不可用时守卫内部 fail-open
+        if (sandboxRuntime.guardEnabled()) {
+            var redisClient = redisClientProvider.getIfAvailable();
+            if (redisClient != null) {
+                spec.executionGuard(new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
+                    redisClient, "sbx:guard", sandboxRuntime.guardLeaseSeconds() * 1000L));
+                log.info("SandboxExecutionGuard enabled (scope=USER serialized, leaseTtl={}s)",
+                    sandboxRuntime.guardLeaseSeconds());
+            } else {
+                log.warn("SandboxExecutionGuard requested (SANDBOX_GUARD_ENABLED) but no RedisClient bean — running unguarded");
+            }
+        }
         // 请求级 userId 注入：middleware 与 acquire 同一订阅链，顺序执行
         spec.setUserKeyMiddleware(new io.agentmanager.framework.sandbox.opensandbox.SandboxUserKeyMiddleware(spec));
         return spec;
@@ -237,12 +256,12 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         io.agentmanager.framework.config.AgentManagerProperties props,
-        io.agentmanager.framework.config.SandboxConfig sandboxConfig,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
         org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
     ) {
         return new io.agentmanager.framework.tool.FileTools(fileAssetStore, fileStorage, props,
-            sandboxConfig, workspaceReader, sandboxSpecProvider.getIfAvailable());
+            sandboxRuntime, workspaceReader, sandboxSpecProvider.getIfAvailable());
     }
 
     /**
@@ -261,6 +280,19 @@ public class AgentScopeConfig {
         // 泛型收窄为 CustomTool 标记接口：List<Object> 会把全部 Bean 扫为候选，
         // 与 OafReloadService/HarnessAgentFactory 形成循环依赖（见 CustomTool javadoc）
         return java.util.Arrays.asList(businessTools, fileTools);
+    }
+
+    /**
+     * 内置工具运行时注册表（issue #28）：{@code /tools?includeInternal=true} 的唯一事实源。
+     * 与 customTools 同源（同一批 @Tool bean），deniedTools 类粒度剔除语义与 harnessAgent
+     * 装配一致；经 OafConfigHolder 每请求取值，OAF reload（deniedTools 变更）即时反映。
+     */
+    @Bean
+    public io.agentmanager.framework.service.InternalToolRegistry internalToolRegistry(
+        OafConfigHolder oafConfigHolder,
+        List<io.agentmanager.framework.tool.CustomTool> customTools
+    ) {
+        return new io.agentmanager.framework.service.InternalToolRegistry(oafConfigHolder, customTools);
     }
 
     /** 按 LLM 配置构建 ChatModel（装配逻辑见 {@link ChatModelFactory}，托管/系统模型共用同一口径） */

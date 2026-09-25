@@ -276,6 +276,10 @@ OAF `deniedTools` 字段控制排除列表。
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件操作/Shell 在 OpenSandbox 隔离沙箱执行） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
+| `SANDBOX_PROJECTION_ENABLED` | `true` | | 工作区投影开关（issue #27）：关闭后每次 sandbox start 不再 hydrate 投影目录（AGENTS.md/skills 等），降低每轮对话沙箱同步开销；skills 依赖强的包不要关 |
+| `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；Redis 不可用时 fail-open |
+| `SANDBOX_GUARD_LEASE_SECONDS` | `900` | | 守卫租约 TTL（崩溃自愈） |
+| （env 未设置时）OAF `config.sandbox.enabled` | — | | 包级沙箱开关（issue #27b）：`SANDBOX_ENABLED` 显式设置时优先；env 未设置时读包 frontmatter `config.sandbox.enabled`，均未声明回退 false。生效裁决统一在 SandboxRuntime |
 | `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制（MiB） |
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |

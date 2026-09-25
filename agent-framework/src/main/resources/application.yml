@@ -47,6 +47,9 @@ agent:
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
     execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
+    projection-enabled: ${SANDBOX_PROJECTION_ENABLED:true}
+    guard-enabled: ${SANDBOX_GUARD_ENABLED:true}
+    guard-lease-seconds: ${SANDBOX_GUARD_LEASE_SECONDS:900}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}

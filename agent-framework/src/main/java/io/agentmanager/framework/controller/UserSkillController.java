@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.UserSkillService;
 
 /**
@@ -35,7 +35,7 @@ import io.agentmanager.framework.service.UserSkillService;
  * {@code content} 时同时匹配，由更具体的后者命中（返回包内技能内容，而非该用户技能列表）。
  * 这是既有路由下的窄边界，索引（/skills/users 与 /debug/user-skills）与写入/删除路径不受影响。
  *
- * <p><b>生效范围分档</b>（成功提示按 {@link SandboxConfig#enabled()} 区分，避免运维误判）：
+ * <p><b>生效范围分档</b>（成功提示按 {@link SandboxRuntime#enabled()} 区分，避免运维误判）：
  * <ul>
  *   <li>非沙箱档（SANDBOX_ENABLED=false）：推理直接读 agent_fs 的 L4，同名技能 L4 覆盖 L2，
  *       写入/删除下一轮会话生效；</li>
@@ -63,16 +63,16 @@ public class UserSkillController {
             + "/sync-from-package）会清除标记";
 
     private final UserSkillService userSkillService;
-    private final SandboxConfig sandboxConfig;
+    private final SandboxRuntime sandboxRuntime;
 
-    public UserSkillController(UserSkillService userSkillService, SandboxConfig sandboxConfig) {
+    public UserSkillController(UserSkillService userSkillService, SandboxRuntime sandboxRuntime) {
         this.userSkillService = userSkillService;
-        this.sandboxConfig = sandboxConfig;
+        this.sandboxRuntime = sandboxRuntime;
     }
 
     /** 沙箱档提示（写在成功消息里，避免“显示已生效、实际不回注容器”的误判） */
     private boolean sandboxMode() {
-        return sandboxConfig != null && sandboxConfig.enabled();
+        return sandboxRuntime.enabled();
     }
 
     /**

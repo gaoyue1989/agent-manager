@@ -60,7 +60,7 @@ class AgentScopeConfigTest {
         var tool = config.businessTools();
         var fileTools = config.fileTools(mock(io.agentmanager.framework.service.FileAssetStore.class),
             mock(io.agentmanager.framework.service.storage.FileStorage.class), propsForLlm(),
-            mock(io.agentmanager.framework.config.SandboxConfig.class),
+            mock(io.agentmanager.framework.service.SandboxRuntime.class),
             mock(io.agentmanager.framework.service.WorkspaceReader.class),
             new org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec>() {
                 @Override

@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.service.AgentRuntimeService;
+import io.agentmanager.framework.service.InternalToolRegistry;
 import io.agentmanager.framework.service.McpManager;
 import io.agentmanager.framework.service.McpToolRegistrar;
 import io.agentmanager.framework.service.SkillCatalogService;
@@ -22,19 +23,22 @@ public class ToolController {
     private final McpManager mcpManager;
     private final McpToolRegistrar mcpToolRegistrar;
     private final SkillCatalogService skillCatalog;
+    private final InternalToolRegistry internalToolRegistry;
 
     public ToolController(
         OafConfigHolder oafConfigHolder,
         AgentRuntimeService agentRuntime,
         McpManager mcpManager,
         McpToolRegistrar mcpToolRegistrar,
-        SkillCatalogService skillCatalog
+        SkillCatalogService skillCatalog,
+        InternalToolRegistry internalToolRegistry
     ) {
         this.oafConfigHolder = oafConfigHolder;
         this.agentRuntime = agentRuntime;
         this.mcpManager = mcpManager;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.skillCatalog = skillCatalog;
+        this.internalToolRegistry = internalToolRegistry;
     }
 
     /**
@@ -60,6 +64,9 @@ public class ToolController {
 
     /**
      * 工具列表：默认只返回 MCP 业务工具，内置工具需显式 includeInternal=true。
+     * 内置部分以 {@link InternalToolRegistry} 的运行时注册集为准（issue #28）：
+     * OAF {@code tools:} 是声明/展示语义而非存在性开关，declared 字段标注声明意图；
+     * registry 经 OafConfigHolder 每请求取值，OAF reload（deniedTools 变更）即时反映。
      */
     @GetMapping("/tools")
     public Map<String, Object> listTools(
@@ -71,17 +78,19 @@ public class ToolController {
         List<Map<String, Object>> mcpTools = getMcpTools();
         tools.addAll(mcpTools);
 
-        // 2. 内置工具（可选）
+        // 2. 内置工具（可选）：运行时注册集 + declared 标注
+        int internalCount = 0;
         if (includeInternal) {
-            oafConfigHolder.get().tools().stream()
-                .map(name -> Map.<String, Object>of("name", name, "category", "internal"))
-                .forEach(tools::add);
+            var internalTools = internalToolRegistry.listInternalTools();
+            tools.addAll(internalTools);
+            internalCount = internalTools.size();
         }
 
         return Map.of(
             "tools", tools,
             "totalCount", tools.size(),
-            "mcpCount", mcpTools.size()
+            "mcpCount", mcpTools.size(),
+            "internalCount", internalCount
         );
     }
 

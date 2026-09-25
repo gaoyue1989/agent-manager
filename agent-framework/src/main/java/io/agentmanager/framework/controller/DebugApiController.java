@@ -26,6 +26,7 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.service.LogCollector;
 import io.agentmanager.framework.service.SkillCatalogService;
@@ -47,6 +48,7 @@ public class DebugApiController {
     private final DataSource dataSource;
     private final LogCollector logCollector;
     private final SandboxConfig sandboxConfig;
+    private final SandboxRuntime sandboxRuntime;
     private final SkillCatalogService skillCatalog;
     private final UserSkillService userSkillService;
 
@@ -56,6 +58,7 @@ public class DebugApiController {
         DataSource dataSource,
         LogCollector logCollector,
         SandboxConfig sandboxConfig,
+        SandboxRuntime sandboxRuntime,
         SkillCatalogService skillCatalog,
         UserSkillService userSkillService
     ) {
@@ -64,6 +67,7 @@ public class DebugApiController {
         this.dataSource = dataSource;
         this.logCollector = logCollector;
         this.sandboxConfig = sandboxConfig;
+        this.sandboxRuntime = sandboxRuntime;
         this.skillCatalog = skillCatalog;
         this.userSkillService = userSkillService;
     }
@@ -261,7 +265,7 @@ public class DebugApiController {
     @GetMapping("/sandbox")
     public Map<String, Object> sandbox() {
         var m = new LinkedHashMap<String, Object>();
-        m.put("enabled", sandboxConfig.enabled());
+        m.put("enabled", sandboxRuntime.enabled());
         m.put("image", sandboxConfig.image());
         m.put("timeout_minutes", sandboxConfig.timeoutMinutes());
         m.put("memory_mb", sandboxConfig.memoryMb());
@@ -281,10 +285,10 @@ public class DebugApiController {
         var base = Path.of(props.resolvedConfigDir()).resolve(".agentscope").resolve("workspace");
         if (!Files.exists(base)) {
             return Map.of("exists", false, "path", base.toString(), "files", List.of(),
-                "sandbox_mode", sandboxConfig.enabled());
+                "sandbox_mode", sandboxRuntime.enabled());
         }
         return Map.of("exists", true, "path", base.toString(), "files", listWorkspaceFiles(base, base),
-            "sandbox_mode", sandboxConfig.enabled());
+            "sandbox_mode", sandboxRuntime.enabled());
     }
 
     /** 系统日志（内存 Appender，最近 500 条） */

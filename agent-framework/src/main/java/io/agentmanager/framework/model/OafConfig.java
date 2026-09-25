@@ -37,6 +37,26 @@ public record OafConfig(
     public boolean hasSubAgents() { return !subAgents.isEmpty(); }
     public boolean hasDeniedTools() { return deniedTools != null && !deniedTools.isEmpty(); }
 
+    /**
+     * 包级沙箱开关（frontmatter {@code config.sandbox.enabled}，issue #27b）。
+     *
+     * @return Boolean.TRUE/FALSE = 包作者显式声明（参与 SandboxRuntime 三层裁决的第二优先级）；
+     *         null = 未声明（回落部署级 env / yml 默认）
+     */
+    public Boolean packageSandboxEnabled() {
+        if (rawFrontmatter == null) {
+            return null;
+        }
+        if (rawFrontmatter.get("config") instanceof Map<?, ?> cfg) {
+            if (cfg.get("sandbox") instanceof Map<?, ?> sandbox) {
+                var v = sandbox.get("enabled");
+                if (v instanceof Boolean b) return b;
+                if (v instanceof String s && !s.isBlank()) return Boolean.parseBoolean(s.trim());
+            }
+        }
+        return null;
+    }
+
     public String getCatalogId() {
         var hc = rawFrontmatter != null ? rawFrontmatter.get("harnessConfig") : null;
         if (hc instanceof Map<?, ?> harness) {

@@ -25,7 +25,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
-import io.agentmanager.framework.config.SandboxConfig;
+import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
@@ -54,14 +54,14 @@ public class FileController {
     private final FileStorage fileStorage;
     private final FileAssetStore fileAssetStore;
     private final AgentManagerProperties props;
-    private final SandboxConfig sandboxConfig;
+    private final SandboxRuntime sandboxRuntime;
 
     public FileController(FileStorage fileStorage, FileAssetStore fileAssetStore,
-                          AgentManagerProperties props, SandboxConfig sandboxConfig) {
+                          AgentManagerProperties props, SandboxRuntime sandboxRuntime) {
         this.fileStorage = fileStorage;
         this.fileAssetStore = fileAssetStore;
         this.props = props;
-        this.sandboxConfig = sandboxConfig;
+        this.sandboxRuntime = sandboxRuntime;
     }
 
     /**
@@ -266,7 +266,7 @@ public class FileController {
 
     /** 沙箱模式判断（agent.sandbox.enabled）：上传文件 pending 挂账待沙箱注入 */
     private boolean isSandboxMode() {
-        return sandboxConfig != null && sandboxConfig.enabled();
+        return sandboxRuntime.enabled();
     }
 
     /** userId 规范化：网关 Header 优先，空值降级 "debug-user"（与 chat 一致） */
