@@ -6,9 +6,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
+import io.agentmanager.framework.config.ChatUiChannelProvider;
 import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
@@ -84,7 +87,8 @@ public class ChatStreamController {
     static Duration WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
     static Duration ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
 
-    private final ChatUiChannel chatChannel;
+    /** 当前 Agent 对应的 Channel 工厂：reload 后必须从 AgentRuntimeService 取引用，不能复用旧 Agent 的 Channel */
+    private final Supplier<ChatUiChannel> chatChannelSupplier;
     private final AgentRuntimeService runtimeService;
     private final TurnLeaseStore turnLeaseStore;
     private final ToolAuditStore toolAuditStore;
@@ -134,6 +138,7 @@ public class ChatStreamController {
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
         new com.fasterxml.jackson.databind.ObjectMapper();
 
+    /** 兼容单测与嵌入式调用：固定使用传入的 Channel。 */
     public ChatStreamController(ChatUiChannel chatChannel,
                                 AgentRuntimeService runtimeService,
                                 TurnLeaseStore turnLeaseStore,
@@ -150,7 +155,51 @@ public class ChatStreamController {
                                 McpToolRegistrar mcpToolRegistrar,
                                 ModelCatalog modelCatalog,
                                 SessionTitleService sessionTitleService) {
-        this.chatChannel = chatChannel;
+        this((Supplier<ChatUiChannel>) () -> chatChannel, runtimeService, turnLeaseStore, toolAuditStore, workspaceInjector,
+            sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
+            skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
+    }
+
+    /** Spring 装配入口：每轮对话从当前 Agent 创建 Channel，reload 后不会继续使用旧 Agent 的引用。 */
+    @Autowired
+    public ChatStreamController(ChatUiChannelProvider channelProvider,
+                                AgentRuntimeService runtimeService,
+                                TurnLeaseStore turnLeaseStore,
+                                ToolAuditStore toolAuditStore,
+                                UploadWorkspaceInjector workspaceInjector,
+                                SandboxConfig sandboxConfig,
+                                SessionEventBus eventBus,
+                                SessionEventStore eventStore,
+                                SessionUserStore sessionUserStore,
+                                WorkspaceReader workspaceReader,
+                                AgentManagerProperties props,
+                                SkillInjectionService skillInjectionService,
+                                io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+                                McpToolRegistrar mcpToolRegistrar,
+                                ModelCatalog modelCatalog,
+                                SessionTitleService sessionTitleService) {
+        this((Supplier<ChatUiChannel>) channelProvider::current, runtimeService, turnLeaseStore, toolAuditStore, workspaceInjector,
+            sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
+            skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
+    }
+
+    private ChatStreamController(Supplier<ChatUiChannel> chatChannelSupplier,
+                                 AgentRuntimeService runtimeService,
+                                 TurnLeaseStore turnLeaseStore,
+                                 ToolAuditStore toolAuditStore,
+                                 UploadWorkspaceInjector workspaceInjector,
+                                 SandboxConfig sandboxConfig,
+                                 SessionEventBus eventBus,
+                                 SessionEventStore eventStore,
+                                 SessionUserStore sessionUserStore,
+                                 WorkspaceReader workspaceReader,
+                                 AgentManagerProperties props,
+                                 SkillInjectionService skillInjectionService,
+                                 io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+                                 McpToolRegistrar mcpToolRegistrar,
+                                 ModelCatalog modelCatalog,
+                                 SessionTitleService sessionTitleService) {
+        this.chatChannelSupplier = chatChannelSupplier;
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.toolAuditStore = toolAuditStore;
@@ -342,7 +391,11 @@ public class ChatStreamController {
                 // sendStream 的**同步**异常也必须落在这个 try 里：它抛之前租约已经到手，
                 // 而续租线程不看本段是否还活着——漏放租约就是该 session 被永久锁死
                 // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
-                chatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
+                var currentChatChannel = chatChannelSupplier.get();
+                if (currentChatChannel == null) {
+                    throw new IllegalStateException("no active agent channel");
+                }
+                currentChatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
                             finalUserId, sink, turnEnded, turnBucketKeys, toolSummary),

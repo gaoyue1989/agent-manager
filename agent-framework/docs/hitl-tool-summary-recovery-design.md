@@ -219,6 +219,19 @@ tool_result_preview
 连续切换两次，用户看到的结果是“点击后仍未展开”。重建阶段不再重复绑定，保留内联入口；
 `onToolCallStart` 创建的动态初始行仍使用 `addEventListener`。
 
+### 4.8 reload 后 Channel 必须跟随当前 Agent
+
+`ChatUiChannel` 在 `agent.channel(...)` 时绑定具体 Agent。启动期注入的单例 Channel 在
+`OafReloadService.reloadAgent()` 替换 `AgentRuntimeService.agent` 后仍指向旧 Agent，导致：
+
+- 旧 Agent 的 MCP 连接已被 reload 关闭；
+- reload 后新 Agent 的权限规则不会作用于对话；
+- HITL 工具被直接执行，确认卡不出现。
+
+新增 `ChatUiChannelProvider`，`ChatStreamController` 每轮对话从 `AgentRuntimeService.getAgent()`
+创建当前 Agent 的 Channel；启动期 `ChannelConfig.chatUiChannel` 保留仅供兼容旧注入点，
+不再作为动态对话入口。这样 reload 前后对话、权限与 MCP 状态始终来自同一个 Agent 引用。
+
 ---
 
 ## 5. 时序
@@ -290,19 +303,22 @@ H2 覆盖完整黑盒链：
 |---|---|
 | `TurnToolSummaryTracker.java` | 新增 `summarizedCalls`；`RESULT_END` 缺少调用摘要时兜底补发一次 |
 | `ToolSummaryGenerator.java` | 新增 `resumedCallSummary`：「执行 {工具名}」 |
-| `static/debug/modules/chat.js` | 摘要在新 confirm 回复中补建并认领原 `toolCallId` 工具行 |
+| `static/debug/modules/chat.js` | 摘要在新 confirm 回复中补建并认领原 `toolCallId` 工具行；重建工具行去除重复点击绑定 |
+| `ChatUiChannelProvider.java` / `ChannelConfig.java` | 每 turn 从当前 Agent 创建 Channel，reload 后不再复用旧 Agent 引用 |
+| `ChatStreamController.java` | 生产装配改用动态 Channel provider，保留旧构造供单测 |
 | `TurnToolSummaryTrackerTest.java` | 恢复段兜底、失败终态、空结果、去重、正常链路不重复 |
 | `ToolSummaryGeneratorTest.java` | 兜底文案与 MCP 末段名 |
 | `api-core.spec.ts` H2 | 真实 HITL 批准流断言摘要、预览、顺序与 `/subscribe` 回放 |
 | `ui.spec.ts` U4 | Debug 页展开工具组，断言摘要标题与成功结果可见 |
+| `ChannelConfigTest.java` | provider 随 `AgentRuntimeService.getAgent()` 切换到新 Agent |
 
 ### 8.2 验证结果
 
-- `mvn test`：992 个测试，0 失败，4 个既有沙箱集成测试跳过
-- core API + models + reload E2E：38 通过，1 个既有 `F5` fixme 跳过
+- `mvn test`：993 个测试，0 失败，4 个既有沙箱集成测试跳过
+- core 组（api-core + api-models + api-reload + ui）E2E：54 通过，3 个既有 fixme（F5/U8/U11）跳过
 - multi E2E：6/6 通过（含跨副本 confirm 互斥与 kill 接管）
 - sandbox E2E：7 通过，1 个既有 `X3` fixme 跳过
-- Debug UI E2E：16 个启用场景通过，2 个既有 fixme（U8/U11）跳过
+- reload → UI 顺序回归：19 通过，2 个既有 fixme 跳过（HITL 卡片、摘要、成功结果均通过）
 - Chromium 黑盒截图：`permission_ask` → 批准后显示「执行 submit_application」及真实成功结果，`pageErrors=[]`
 
 ---
