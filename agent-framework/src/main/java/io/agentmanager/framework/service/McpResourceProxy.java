@@ -10,7 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import io.agentmanager.framework.model.OafConfig;
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
 
@@ -33,14 +33,14 @@ public class McpResourceProxy {
     /** 资源大小上限（1MB，防超大 HTML 拖垮代理） */
     private static final int MAX_RESOURCE_BYTES = 1024 * 1024;
 
-    private final OafConfig oafConfig;
+    private final OafConfigHolder oafConfigHolder;
     private final McpToolRegistrar toolRegistrar;
 
     /** serverName -> 懒连接 McpSyncClient（连接失败不缓存，下次重试） */
     private final Map<String, McpSyncClient> clients = new ConcurrentHashMap<>();
 
-    public McpResourceProxy(OafConfig oafConfig, McpToolRegistrar toolRegistrar) {
-        this.oafConfig = oafConfig;
+    public McpResourceProxy(OafConfigHolder oafConfigHolder, McpToolRegistrar toolRegistrar) {
+        this.oafConfigHolder = oafConfigHolder;
         this.toolRegistrar = toolRegistrar;
     }
 
@@ -181,6 +181,37 @@ public class McpResourceProxy {
         return clients.containsKey(serverName) || getOrCreateClient(serverName) != null;
     }
 
+    /**
+     * 主动失效指定 server 的独立懒连接（MCP reload 后调用）：
+     * 旧 config.yaml 建立的连接关闭并移除，下次访问按新配置重建。
+     * server 未建立过连接时为 no-op。
+     */
+    public void evictClient(String serverName) {
+        if (serverName == null || serverName.isBlank()) {
+            return;
+        }
+        var client = clients.remove(serverName);
+        if (client != null) {
+            try {
+                client.closeGracefully();
+            } catch (Exception e) {
+                try {
+                    client.close();
+                } catch (Exception ignore) {
+                    // 尽力而为
+                }
+            }
+            log.info("McpResourceProxy: evicted client for server {} (reload)", serverName);
+        }
+    }
+
+    /** 失效全部独立懒连接（整包重建 agent 时调用）。 */
+    public void evictAllClients() {
+        for (var serverName : List.copyOf(clients.keySet())) {
+            evictClient(serverName);
+        }
+    }
+
     /** 构建响应 CSP 元数据（阶段一以静态声明为准 + 默认宽松策略；资源动态 _meta.ui.csp 交集为 P2） */
     private Map<String, Object> buildCspMap(String serverName) {
         var csp = toolRegistrar.getUiMapping(serverName).csp();
@@ -219,7 +250,7 @@ public class McpResourceProxy {
             if (again != null) {
                 return again;
             }
-            var mcp = oafConfig.mcpServers().stream()
+            var mcp = oafConfigHolder.get().mcpServers().stream()
                 .filter(m -> m.server().equals(serverName))
                 .findFirst().orElseThrow(() -> new McpProxyException(404, "mcp server not registered: " + serverName));
             var client = toolRegistrar.buildSyncClient(mcp);

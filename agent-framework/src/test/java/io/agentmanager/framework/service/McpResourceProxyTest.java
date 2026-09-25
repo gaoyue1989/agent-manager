@@ -47,7 +47,8 @@ class McpResourceProxyTest {
         registrar = new McpToolRegistrar(props);
         oafConfig = mock(OafConfig.class);
         when(oafConfig.mcpServers()).thenReturn(List.of(new OafConfig.McpServerConfig("v", "weather", "1.0", "weather", true)));
-        proxy = new McpResourceProxy(oafConfig, registrar);
+        var holder = new io.agentmanager.framework.config.OafConfigHolder(oafConfig);
+        proxy = new McpResourceProxy(holder, registrar);
     }
 
     private void writeConfigYaml(String server, String content) throws Exception {

@@ -13,24 +13,28 @@ import reactor.core.publisher.Flux;
 /**
  * 将 HarnessAgent 适配为 A2A Server 的 AgentRunner。
  * 每个 A2A 请求通过 RuntimeContext(userId, sessionId) 路由到共享的 HarnessAgent 实例。
+ *
+ * <p>agent 引用经 {@link A2aAgentRefHolder} 间接持有（volatile 读取）：
+ * OAF reload 整包重建后 holder 原子切换，后续 A2A 请求自动路由到新 agent，
+ * 进行中的事件流持有旧引用继续完成、不受切换影响。
  */
 public class HarnessAgentRunner implements AgentRunner {
 
-    private final HarnessAgent agent;
+    private final A2aAgentRefHolder agentHolder;
     private final Map<String, String> taskSessionMap = new ConcurrentHashMap<>();
 
-    public HarnessAgentRunner(HarnessAgent agent) {
-        this.agent = agent;
+    public HarnessAgentRunner(A2aAgentRefHolder agentHolder) {
+        this.agentHolder = agentHolder;
     }
 
     @Override
     public String getAgentName() {
-        return agent.getName();
+        return agentHolder.get().getName();
     }
 
     @Override
     public String getAgentDescription() {
-        return agent.getDescription();
+        return agentHolder.get().getDescription();
     }
 
     /**
@@ -51,7 +55,7 @@ public class HarnessAgentRunner implements AgentRunner {
 
         taskSessionMap.put(options.getTaskId(), options.getSessionId());
 
-        return agent.streamEvents(requestMessages, ctx)
+        return agentHolder.get().streamEvents(requestMessages, ctx)
             .doFinally(signal -> taskSessionMap.remove(options.getTaskId()));
     }
 
@@ -59,7 +63,7 @@ public class HarnessAgentRunner implements AgentRunner {
     public void stop(String taskId) {
         var sessionId = taskSessionMap.get(taskId);
         if (sessionId != null) {
-            agent.interrupt();
+            agentHolder.get().interrupt();
         }
     }
 }

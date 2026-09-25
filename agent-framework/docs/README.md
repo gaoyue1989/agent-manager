@@ -58,6 +58,7 @@
 | [file-support-plan.md](file-support-plan.md) | 文档解析（POI/Tika/PDFBox）+ 图片多模态识别提案，未实施 |
 | [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | Java SPI + plugins/ 热插拔自定义工具提案，未实施 |
 | [pvc-to-s3-migration-plan.md](pvc-to-s3-migration-plan.md) | PVC 使用盘点 + 双集群（共用 MySQL）下文件/OAF 包迁 S3 影响评估（2026-09-20 评估稿，**未实施**；含 §6.4b 沙箱模式影响：OpenSandbox 自身 HA，部署形态决定会话能否跨集群续） |
+| [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload（2026-09-25 **M1/M2 已实施，部署环境 E2E 验证通过**；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施） |
 
 ## ④ 已被取代（结论失效，仅供考古）
 

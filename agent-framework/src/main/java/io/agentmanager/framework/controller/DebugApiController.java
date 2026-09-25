@@ -26,7 +26,7 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.SandboxConfig;
-import io.agentmanager.framework.model.OafConfig;
+import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.service.LogCollector;
 import io.agentmanager.framework.service.SkillCatalogService;
 import io.agentmanager.framework.service.UserSkillService;
@@ -43,7 +43,7 @@ public class DebugApiController {
     private static final java.util.Set<String> STATS_TABLES = java.util.Set.of("agent_state", "agent_fs", "file_asset");
 
     private final AgentManagerProperties props;
-    private final OafConfig oafConfig;
+    private final OafConfigHolder oafConfigHolder;
     private final DataSource dataSource;
     private final LogCollector logCollector;
     private final SandboxConfig sandboxConfig;
@@ -52,7 +52,7 @@ public class DebugApiController {
 
     public DebugApiController(
         AgentManagerProperties props,
-        OafConfig oafConfig,
+        OafConfigHolder oafConfigHolder,
         DataSource dataSource,
         LogCollector logCollector,
         SandboxConfig sandboxConfig,
@@ -60,7 +60,7 @@ public class DebugApiController {
         UserSkillService userSkillService
     ) {
         this.props = props;
-        this.oafConfig = oafConfig;
+        this.oafConfigHolder = oafConfigHolder;
         this.dataSource = dataSource;
         this.logCollector = logCollector;
         this.sandboxConfig = sandboxConfig;
@@ -98,6 +98,7 @@ public class DebugApiController {
     /** OAF 配置（AGENTS.md frontmatter） */
     @GetMapping("/config/oaf")
     public Map<String, Object> oafConfig() {
+        var oafConfig = oafConfigHolder.get();
         var result = new LinkedHashMap<String, Object>();
         result.put("name", oafConfig.name());
         result.put("vendorKey", oafConfig.vendorKey());
