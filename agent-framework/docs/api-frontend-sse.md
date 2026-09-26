@@ -738,28 +738,41 @@ A2A Agent Card 发现端点。
 
 ### 7.1 GET /tools
 
-工具列表。
+工具列表。`includeInternal=true` 时输出两段并列的内置视图（issue #39 拆字段）：
+`tools` 内的 `internal` 段为 CustomTool 运行时注册集（含插件 SPI 并入的工具，issue #28），
+`tools` 之外的 `sdkInternal` 段为 SDK（Harness 框架）注册进 Toolkit 的内置工具实际注册集
+（文件/记忆/会话/计划/技能/子 Agent/异步任务/Shell 等，取自运行中 agent，deniedTools 剔除后剩余）。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `includeInternal` | Boolean | ❌ | 是否包含内置工具，默认 `false` |
+| `includeInternal` | Boolean | ❌ | 是否包含内置工具（internal + sdkInternal 两段），默认 `false` |
 
-**响应：**
+**响应（includeInternal=true）：**
 
 ```json
 {
   "tools": [
     {
-      "name": "write_file",
-      "server": "filesystem",
+      "name": "get_weather",
+      "server": "weather-service",
       "category": "mcp",
-      "description": "Write content to a file",
-      "uiResourceUri": "ui://filesystem/write-file",
-      "appOnly": false
+      "description": "Get weather"
+    },
+    {
+      "name": "echo",
+      "category": "internal",
+      "source": "builtin",
+      "declared": true
     }
   ],
-  "totalCount": 5,
-  "mcpCount": 5
+  "totalCount": 2,
+  "mcpCount": 1,
+  "internalCount": 1,
+  "sdkInternal": [
+    { "name": "plan_enter", "category": "sdk", "source": "sdk" },
+    { "name": "read_file", "category": "sdk", "source": "sdk" }
+  ],
+  "sdkInternalCount": 2
 }
 ```
 
@@ -767,10 +780,13 @@ A2A Agent Card 发现端点。
 |------|------|
 | `name` | 工具名 |
 | `server` | 来源 MCP 服务器名 |
-| `category` | `mcp` / `builtin` |
+| `category` | `mcp` / `internal` / `sdk` |
 | `description` | 工具描述 |
 | `uiResourceUri` | （可选）MCP Apps UI 资源 URI |
 | `appOnly` | （可选）`true` 时仅卡片展示，不在对话中暴露 |
+| `declared` | （仅 internal 段）是否在 OAF `tools:` 声明列表内——声明是展示意图，非存在性开关 |
+| `totalCount` / `mcpCount` / `internalCount` | 只统计 MCP + CustomTool 段（既有口径不变），SDK 段规模看 `sdkInternalCount` |
+| `sdkInternal` / `sdkInternalCount` | SDK 内置工具段（独立于 `tools` 数组，调用方按需取用） |
 
 ### 7.2 GET /skills
 

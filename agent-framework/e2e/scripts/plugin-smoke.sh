@@ -217,6 +217,14 @@ check "未声明时插件工具 declared=false" tool_declared_is "$RT/tools-inte
 tools_snapshot "$RT/tools-plain.json"
 check "默认 /tools 不暴露内部工具（internalCount=0）" field_num_is "$RT/tools-plain.json" internalCount 0
 
+# SDK 内置工具独立段落（issue #39 拆字段）：取自运行中 agent 的 Toolkit 实际注册集，
+# 不并入 tools/totalCount/internalCount。冒烟环境 read_file 只可能来自 SDK 段；
+# 下限 20 留足 feature 开关余量（实测 27，子 Agent 等按开关注册）
+check "sdkInternal 段透出 SDK 内置工具（read_file）" grep -q '"name":"read_file"' "$RT/tools-internal.json"
+check "sdkInternal 条目带 category=sdk 标记" grep -q '"category":"sdk"' "$RT/tools-internal.json"
+check "sdkInternalCount>=20（SDK 实际注册集）" field_is "$RT/tools-internal.json" sdkInternalCount 20
+check "默认 /tools sdkInternalCount=0" field_num_is "$RT/tools-plain.json" sdkInternalCount 0
+
 # 声明 tools: [echo_query] 后 declared 标注应翻转为 true（OAF tools 声明是展示意图，非存在性开关）
 write_agents 'tools:
   - echo_query
@@ -247,6 +255,10 @@ tools_snapshot "$RT/tools-denied.json" includeInternal
 # 内置工具（echo/present_file 等）不受插件级 deniedTools 影响，这里只要求总数收敛下降
 check "deniedTools 后 internalCount 同步收敛（${BEFORE_INTERNAL} → $(field_num "$RT/tools-denied.json" internalCount)）" \
   field_lt "$RT/tools-denied.json" internalCount "$BEFORE_INTERNAL"
+# SDK 段只剔除命中 deniedTools 的名字，插件级剔除不应波及 SDK 内置集
+BEFORE_SDK=$(field_num "$RT/tools-declared.json" sdkInternalCount)
+check "deniedTools 后 sdkInternal 不受影响（${BEFORE_SDK} → $(field_num "$RT/tools-denied.json" sdkInternalCount)）" \
+  field_num_is "$RT/tools-denied.json" sdkInternalCount "$BEFORE_SDK"
 
 # 撤销恢复
 mv "$RT/agent-config/AGENTS.md.bak" "$RT/agent-config/AGENTS.md"

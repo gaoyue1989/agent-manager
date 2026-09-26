@@ -283,9 +283,12 @@ public class AgentScopeConfig {
     }
 
     /**
-     * 内置工具运行时注册表（issue #28）：{@code /tools?includeInternal=true} 的唯一事实源。
+     * 内置工具运行时注册表（issue #28）：/tools includeInternal 中 CustomTool 段的事实源。
      * 与 customTools 同源（同一批 @Tool bean），deniedTools 类粒度剔除语义与 harnessAgent
      * 装配一致；经 OafConfigHolder 每请求取值，OAF reload（deniedTools 变更）即时反映。
+     * SDK（Harness 框架）自注册的内置工具不在此列——经
+     * {@link io.agentmanager.framework.service.InternalToolRegistry#listSdkInternalTools}
+     * 从运行中 agent 的 Toolkit 实际注册集透出（issue #39 拆字段口径）。
      */
     @Bean
     public io.agentmanager.framework.service.InternalToolRegistry internalToolRegistry(
