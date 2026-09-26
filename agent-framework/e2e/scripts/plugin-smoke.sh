@@ -82,6 +82,16 @@ $1
 EOF
 }
 write_agents ""
+# 最小 logback 配置（仅控制台）：应用自带配置强写 /applog，CI 非 root 不可写致启动失败
+# （同 env-up.sh §1.5，2026-09-25 实测踩过）
+cat > "$RT/agent-config/logback-e2e.xml" <<'XML'
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder><pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern></encoder>
+  </appender>
+  <root level="INFO"><appender-ref ref="CONSOLE"/></root>
+</configuration>
+XML
 # config.yaml：验证 ${ENV_VAR} 替换注入（PLUGIN_SMOKE_MARKER 经服务环境变量注入，configure 回调口径单测已覆盖）
 cat > "$RT/agent-config/plugins/echo-tool/config.yaml" <<EOF
 marker: \${PLUGIN_SMOKE_MARKER}
@@ -124,6 +134,7 @@ AGENT_REDIS_URL="$REDIS_URL" \
 AGENT_CONFIG_DIR="$RT/agent-config" AGENT_WORKSPACE_DIR="$RT/workspace" \
 SERVER_PORT="$PORT" SERVER_HOST="127.0.0.1" \
 FILE_STORAGE_TYPE=local FILE_STORAGE_LOCAL_DIR="$RT/files" \
+LOGGING_CONFIG="file:$RT/agent-config/logback-e2e.xml" \
 SANDBOX_ENABLED=false PLUGIN_SMOKE_MARKER=smoke-ok \
 nohup java -Xms256m -Xmx768m -jar "$JAR" > "$LOG" 2>&1 &
 AGENT_PID=$!
