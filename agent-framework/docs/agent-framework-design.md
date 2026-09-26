@@ -1,9 +1,11 @@
 # Agent Framework — 设计文档
 
 > 注：本篇为 v2.1 时点快照。目录树/类清单的最新权威是 [../AGENTS.md](../AGENTS.md)；其后新增的 SessionEventBus、SkillManage*、HistoryConfig 等类见彼处与 docs/README.md 索引。
+> **例外：§6 依赖版本与 §5.3 环境变量默认值不是快照**——它们会直接误导实现，本版已按 `pom.xml` / `application.yml` 订正（复核日期 2026-09-26）。
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
+**复核日期:** 2026-09-26（master @ `a263b92`）——§6 依赖升级至 agentscope 2.0.3、§5.3 订正三个默认值
 
 ---
 
@@ -416,11 +418,14 @@ config/
 | `LLM_MODEL_ID` | — | ✓ | 模型 ID |
 | `LLM_BASE_URL` | — | ✓ | LLM API 端点 URL |
 | `LLM_PROVIDER` | `openai` | | 提供商标识 |
-| `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
-| `LLM_MAX_TOKENS` | `4096` | | 最大输出 token |
+| `LLM_TEMPERATURE` | `0.3` | | 生成温度 |
+| `LLM_MAX_TOKENS` | `16384` | | 最大输出 token |
 | `LLM_TIMEOUT` | `120` | | API 调用超时(秒) |
+| `LLM_ENABLE_THINKING` | `false` | | `false` → 注入 `chat_template_kwargs.enable_thinking=false`（Qwen3 / vLLM） |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置） |
-| `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录 |
+| `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录（只读） |
+| `AGENT_WORKSPACE_DIR` | 回落 `AGENT_CONFIG_DIR` | | 可写工作区；平台部署必须显式设 `/workspace` |
+| `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关；`false` = 完全关闭记忆 |
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
@@ -446,10 +451,10 @@ config/
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| agentscope-harness | 2.0.0 | HarnessAgent + Workspace + Memory + Compaction + Filesystem |
-| agentscope-extensions-model-openai | 2.0.0 | OpenAI 兼容 LLM |
-| agentscope-extensions-mysql | 2.0.0 | MysqlDistributedStore (agent_state + agent_fs) |
-| agentscope-extensions-a2a-server | 2.0.0 | A2A 协议 Server |
+| agentscope-harness | 2.0.3 | HarnessAgent + Workspace + Memory + Compaction + Filesystem |
+| agentscope-extensions-model-openai | 2.0.3 | OpenAI 兼容 LLM |
+| agentscope-extensions-mysql | 2.0.3 | MysqlDistributedStore (agent_state + agent_fs) |
+| agentscope-extensions-a2a-server | 2.0.3 | A2A 协议 Server |
 | com.alibaba.opensandbox:sandbox | 1.0.18 | OpenSandbox Java SDK（沙箱模式） |
 | Spring Boot | 3.3.5 | HTTP 服务框架 |
 | SnakeYAML | 2.x | YAML frontmatter 解析 |

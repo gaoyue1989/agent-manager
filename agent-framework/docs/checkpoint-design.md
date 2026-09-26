@@ -2,6 +2,13 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
+**复核日期:** 2026-09-26
+
+> **现状核对（2026-09-26）**：本篇被 docs/README.md 列为 **schema 权威**，但头部日期停在 2026-08-06，
+> 且 SDK 已从 2.0.0 升到 **2.0.3**——带来 `agent_state` 的 `version` 列与 CAS 乐观锁语义（见 §10，
+> 另见 [history-agentstate-design.md](history-agentstate-design.md) §10）。
+> 本版订正组件版本、补齐 §5.1 的 version/CAS 说明、补全 §4.1 尾注漏掉的三张表。
+> **权威范围**：§5 的表结构为权威；§2.3 组件树为快照，最新以 [../AGENTS.md](../AGENTS.md) 为准。
 
 ---
 
@@ -13,10 +20,10 @@ Agent Framework 使用 **AgentScope MySQL 扩展**实现会话持久化。通过
 
 | 组件 | 版本 | 用途 |
 |------|------|------|
-| agentscope-extensions-mysql | 2.0.0 | MysqlDistributedStore (MysqlAgentStateStore + JdbcStore) |
-| agentscope-harness | 2.0.0 | HarnessAgent + Workspace + Filesystem |
-| agentscope-core | 2.0.0 | RuntimeContext / AgentState |
-| agentscope-extensions-model-openai | 2.0.0 | OpenAI 兼容 LLM |
+| agentscope-extensions-mysql | 2.0.3 | MysqlDistributedStore (MysqlAgentStateStore + JdbcStore) |
+| agentscope-harness | 2.0.3 | HarnessAgent + Workspace + Filesystem |
+| agentscope-core | 2.0.3 | RuntimeContext / AgentState |
+| agentscope-extensions-model-openai | 2.0.3 | OpenAI 兼容 LLM |
 | MySQL Connector/J | 8.x | JDBC 驱动 |
 | HikariCP | 5.x | 连接池 |
 
@@ -132,7 +139,15 @@ src/main/java/io/agentmanager/framework/
 | `CHECKPOINT_USERNAME` | `agent_manager` | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | MySQL 密码 |
 
-除 `agent_state`/`agent_fs` 外，无状态单次流与文件能力还引入 `confirm_context`/`turn_lease`/`tool_audit_log`/`ui_context`/`file_asset` 等表（服务启动自动建表，结构见 [api.md](api.md)）。
+除 `agent_state`/`agent_fs`（SDK 侧）外，框架自建 8 张表（服务启动自动建表，结构见 [api.md](api.md) §数据库表）：
+`confirm_context` / `turn_lease` / `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` /
+`model_config` / `session_user`。
+
+> 此前此处的尾注只列了 5 张，漏了 `session_user`、`model_config`、`kv_sync_key`；本版已补齐。
+
+另外，**事件流（`session_event`）自 2026-09-16 起整体迁至 Redis Streams**——MySQL 侧仅保留迁移期结构。
+事件事实来源是 Redis 的 `sess:{sid}:events`（Stream）与 `sess:{sid}:replies`（ZSET），
+见 [api.md](api.md) §`session_event` 与 [api-frontend-sse.md](api-frontend-sse.md) §14。
 
 K8s Pod 内连接需使用 Docker 网关 IP `172.20.0.1` 代替 `127.0.0.1`。
 
@@ -164,7 +179,10 @@ CREATE TABLE IF NOT EXISTS agent_state (
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ```
 
-### 5.2 agent_fs 表
+> ⚠️ **上表是 2.0.0 时的 DDL 快照。** agentscope **2.0.3** 的 `MysqlAgentStateStore` 改用
+> `namespace_path` / `item_key` / `version` 三列并启用**乐观锁 CAS** 写入。
+> 实际表结构由 SDK 在 `createIfNotExist=true` 时自建，**以 `DESCRIBE agent_state` 的实际输出为准**。
+> CAS 与 `conflictPolicy` 的行为分析见 [history-agentstate-design.md](history-agentstate-design.md) §10。
 
 ```sql
 CREATE TABLE IF NOT EXISTS agent_fs (

@@ -2,6 +2,13 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
+**复核日期:** 2026-09-26（master @ `a263b92`）
+
+> **现状核对（2026-09-26）**：本版按 `application.yml` + 各 `@ConfigurationProperties` 重核并**补齐缺失变量**
+> （原 §4.1 缺约 30 个，含全部 `AGENT_REACT_*` / `AGENT_HTTP_*` / `AGENT_MEMORY_*` / `AGENT_COMPACTION_*` /
+> `AGENT_DB_POOL_*` / `AGENT_SSE_*` / `AGENT_HISTORY_*`），并订正三处默认值
+> （`LLM_TEMPERATURE` 0.7→**0.3**、`LLM_MAX_TOKENS` 4096→**16384**、`LLM_ENABLE_THINKING` 补录）。
+> 面向使用者的端到端流程见 [agent-creation-guide.md](agent-creation-guide.md)。
 
 ---
 
@@ -141,9 +148,10 @@ Tomcat started on port 8100
 | `LLM_MODEL_ID` | string | — | ✓ | 模型 ID（绑 `agent.llm.model-id`） |
 | `LLM_BASE_URL` | string | — | ✓ | LLM API 端点，OpenAI 兼容（绑 `agent.llm.base-url`） |
 | `LLM_PROVIDER` | string | `openai` | | 提供商标识（绑 `agent.llm.provider`） |
-| `LLM_TEMPERATURE` | float | `0.7` | | 生成温度（绑 `agent.llm.temperature`） |
-| `LLM_MAX_TOKENS` | int | `4096` | | 最大输出 token（绑 `agent.llm.max-tokens`） |
+| `LLM_TEMPERATURE` | float | `0.3` | | 生成温度（绑 `agent.llm.temperature`） |
+| `LLM_MAX_TOKENS` | int | `16384` | | 最大输出 token（绑 `agent.llm.max-tokens`） |
 | `LLM_TIMEOUT` | int | `120` | | API 调用超时（秒，绑 `agent.llm.timeout`） |
+| `LLM_ENABLE_THINKING` | bool | `false` | | 深度思考开关。`false` → 注入 `chat_template_kwargs.enable_thinking=false`（Qwen3 / vLLM），避免响应混入 `<think>` 内容（绑 `agent.llm.enable-thinking`） |
 | `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
 
 #### 4.1.2 服务 / Spring
@@ -152,7 +160,10 @@ Tomcat started on port 8100
 |------|------|--------|------|------|
 | `SERVER_HOST` | string | `0.0.0.0` | | 监听地址（绑 `agent.server.host`） |
 | `SERVER_PORT` | int | `8100` | | 服务端口（绑 `agent.server.port` 与 Spring `server.port`） |
-| `AGENT_CONFIG_DIR` | path | `/config` | | OAF 配置目录（绑 `agent.config-dir`） |
+| `AGENT_CONFIG_DIR` | path | `/config` | | OAF 配置目录，**只读**（绑 `agent.config-dir`） |
+| `AGENT_WORKSPACE_DIR` | path | 回落 `AGENT_CONFIG_DIR` | | 可写工作区。**平台部署必须显式设 `/workspace`**，否则框架会尝试往只读的 `/config` 写生成文件（绑 `agent.workspace-dir`） |
+| `LOG_PATH` | path | `${user.home}/logs/agent-framework` | | logback 文件日志目录（绑 `logging.config` 相关） |
+| `APP_LOG_LEVEL` | string | `INFO` | | `io.agentmanager.framework` 包级日志级别 |
 | `AGENT_PLUGINS_DIR` | path | `{AGENT_CONFIG_DIR}/plugins` | | 工具插件目录：启动期 `ToolPluginBootstrapper` 扫描 jar（SPI 注册 `ToolPlugin`），工具并入 `List<CustomTool>` 注入源（BFPP 直读环境变量，不经属性绑定；见 [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md)） |
 | `FILE_UPLOAD_MAX_MB` | int | `20` | | Spring multipart 单文件/请求上限（绑 `spring.servlet.multipart.max-file-size` / `max-request-size`） |
 
@@ -176,7 +187,10 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `SANDBOX_TIMEOUT_MINUTES` | int | `60` | | 沙箱超时（分钟，到期自动销毁；resume 404 自动降级重建，绑 `agent.sandbox.timeout-minutes`） |
 | `SANDBOX_MEMORY_MB` | int | `1024` | | 沙箱内存限制 MiB（绑 `agent.sandbox.memory-mb`） |
 | `SANDBOX_CPU_COUNT` | int | `1` | | 沙箱 CPU 限制（绑 `agent.sandbox.cpu-count`） |
-| `SANDBOX_ENTRYPOINT` | string (csv) | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；绑 `agent.sandbox.entrypoint`） |
+| `SANDBOX_ENTRYPOINT` | string (csv) | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`）。⚠️ **该环境变量实际不生效**——`application.yml` 无 `agent.sandbox.entrypoint` 占位符，只靠 `@DefaultValue`；要覆盖需用 `AGENT_SANDBOX_ENTRYPOINT`（Spring 松弛绑定） |
+| `SANDBOX_PROJECTION_ENABLED` | bool | `true` | | 关闭后每次 sandbox start 不再 hydrate 投影目录。**skills 依赖强的包不要关**（绑 `agent.sandbox.projection-enabled`） |
+| `SANDBOX_GUARD_ENABLED` | bool | `true` | | Redis SET NX 串行化同 userId 沙箱获取，避免并发重复创建；Redis 不可用时 fail-open（绑 `agent.sandbox.guard-enabled`） |
+| `SANDBOX_GUARD_LEASE_SECONDS` | int | `900` | | 沙箱获取串行化租约时长（秒）（绑 `agent.sandbox.guard-lease-seconds`） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | duration | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x；绑 `agent.sandbox.execd-grace-shutdown`） |
 | `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
 | `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |
@@ -202,6 +216,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_STORAGE_S3_ACCESS_KEY` | string | — | ✓(s3) | S3 AccessKey（绑 `agent.file.storage-s3-access-key`） |
 | `FILE_STORAGE_S3_SECRET_KEY` | string | — | ✓(s3) | S3 SecretKey（绑 `agent.file.storage-s3-secret-key`） |
 | `FILE_STORAGE_S3_BUCKET` | string | `agent-files` | | S3 Bucket（绑 `agent.file.storage-s3-bucket`） |
+| `FILE_EXTERNAL_URL_PREFIXES` | string (csv) | 空（**禁用**） | | `present_url` 外部交付的 URL 前缀白名单，**防 SSRF**。留空即禁用外部交付；发布助手在集群内需设 `http://platform-backend.agent-platform.svc.cluster.local:8080`。非白名单 URL 返回 403 |
 
 #### 4.1.6 会话清理（`AGENT_CLEANUP_*`，见 [api.md](api.md) §清理配置）
 
@@ -232,7 +247,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 #### 4.1.8 事件流存储 / Redis（`agent.redis.*`，绑 `AgentRedisProperties`）
 
 > `session_event` 自 2026-09-16 起存 **Redis Streams**（数据模型见
-> [api-frontend-sse.md](api-frontend-sse.md) §12；实现为 `service/RedisEventLog.java`）。
+> [api-frontend-sse.md](api-frontend-sse.md) §14；实现为 `service/RedisEventLog.java`）。
 > 配置段 `agent.redis` 已随 `application.yml` 入库，键与 `AgentRedisProperties` 字段一一对应。
 
 | 变量 | 类型 | 默认值 | 必填 | 说明 |
@@ -252,6 +267,47 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
   每日定时清理（`SessionCleanupService`）**不再涉及** session_event，删除会话走
   `DELETE /threads/{sid}` 对两把 key（`sess:{sid}:events` / `sess:{sid}:replies`）的一次 `DEL`。
 
+
+#### 4.1.9 Harness 运行时（`agent.harness.*`）
+
+> **2026-09-26 补录**：本节此前整体缺失。ReAct 轮数、HTTP 超时、记忆与压缩、连接池均在此段。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_REACT_MAX_ITERS` | int | `20` | ReAct 最大迭代轮数（SDK 默认 10）。长流程 Agent 需放宽 |
+| `AGENT_HTTP_CONNECT_TIMEOUT_SECONDS` | int | `30` | LLM HTTP 建连超时（秒） |
+| `AGENT_HTTP_READ_TIMEOUT_SECONDS` | int | `180` | LLM HTTP 读超时（秒） |
+| `AGENT_HTTP_WRITE_TIMEOUT_SECONDS` | int | `30` | LLM HTTP 写超时（秒） |
+| `AGENT_MEMORY_ENABLED` | bool | `true` | **记忆总开关**。`false` = 完全关闭：不注册 `memory_*` 工具、不执行 flush / 整合、沙箱不注入 / 回写记忆文件，且压缩前刷写（`flushBeforeCompact`）一并失效 |
+| `AGENT_MEMORY_FLUSH_THROTTLE_MINUTES` | int | `10` | 记忆 flush 节流（分钟） |
+| `AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS` | int | `8000` | 记忆整合单次处理上限（tokens） |
+| `AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES` | int | `60` | 两次整合最小间隔（分钟） |
+| `AGENT_COMPACTION_TRIGGER_MESSAGES` | int | `30` | 上下文压缩触发条数 |
+| `AGENT_COMPACTION_KEEP_MESSAGES` | int | `10` | 压缩后保留条数 |
+| `AGENT_COMPACTION_FLUSH_BEFORE_COMPACT` | bool | `true` | 压缩前先刷写记忆（记忆关闭时失效） |
+| `AGENT_COMPACTION_OFFLOAD_BEFORE_COMPACT` | bool | `true` | 压缩前先落盘会话 |
+| `AGENT_DB_POOL_MAX_SIZE` | int | `10` | HikariCP 最大连接数 |
+| `AGENT_DB_POOL_MIN_IDLE` | int | `2` | HikariCP 最小空闲连接 |
+| `AGENT_DB_POOL_CONNECTION_TIMEOUT_MS` | int | `30000` | 取连接超时（毫秒） |
+| `AGENT_DB_POOL_IDLE_TIMEOUT_MS` | int | `600000` | 连接空闲回收（毫秒） |
+| `AGENT_DB_POOL_MAX_LIFETIME_MS` | int | `1800000` | 连接最大存活（毫秒） |
+
+#### 4.1.10 SSE 可靠传输（`agent.sse.*`）
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_SSE_HEARTBEAT_SECONDS` | int | `20` | 心跳间隔（秒）。防 Nginx / CDN 的 60s 读超时断连 |
+| `AGENT_SSE_SINKS_EVICTION_MINUTES` | int | `5` | 无订阅者的 sink 清理阈值（分钟） |
+| `AGENT_SSE_SINKS_BUFFER_SIZE` | int | `256` | 每 sink 缓冲条数 |
+| `AGENT_SSE_TAIL_POLL_MS` | int | `300` | 观察者路径轮询间隔（毫秒）。⚠️ `application.yml` **无该占位符**，靠 `@ConfigurationProperties` 松弛绑定 |
+
+#### 4.1.11 History 与诊断（`agent.history.*`）
+
+> ⚠️ `application.yml` **没有 `agent.history` 段**，本节变量同样靠 Spring 松弛绑定 + `@DefaultValue` 生效。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | int | `8000` | history 工具输出截断上限；`<=0` 关闭截断。敏感值另行遮掩 |
 
 ### 4.2 AGENTS.md 配置字段
 
@@ -322,20 +378,43 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
 | GET | `/skills` | 技能列表（声明 ∪ /config/skills 目录事实合并） |
+| GET | `/skills/manage`、`/skills/available`、`/skills/parse-refs` | 技能管理列表 / `@` 补全候选 / `@Skill` 解析预览 |
+| POST | `/skills/upload` | 上传 zip 格式 Skill 包 |
+| DELETE | `/skills/{name}` | 删除 Skill |
+| PUT | `/skills/{name}/toggle` | 启停切换 |
+| GET/PUT | `/skills/{name}/content` | 读 / 写 SKILL.md |
+| GET | `/skills/users`、`/skills/users/{userId}` | 用户个人技能（L4）索引 / 列表 |
+| GET/PUT/DELETE | `/skills/users/{userId}/{name}` | 读 / 写 / 删个人技能（删除写 tombstone） |
+| POST | `/skills/users/{userId}/{name}/sync-from-package` | 包内基线下发为个人版 |
 | GET | `/mcp` | MCP 服务器列表 |
-| GET | `/tools` | 工具列表 |
+| GET | `/tools?includeInternal=true` | 工具列表（MCP + 自定义 + SDK 内置三段） |
+| GET | `/mcp/{server}/resources`、`/mcp/{server}/resources/ui` | MCP 资源 / ui:// 资源 |
+| POST | `/mcp/{server}/tools/{tool}` | 直调 MCP 工具（需确认时返回 403 `needsConfirm`） |
+| POST | `/mcp/ui-context` | 卡片静默上下文回传 |
 | GET | `/debug` | 调试页面（302 → `/debug/`） |
+| GET | `/debug/config/env`、`/debug/config/oaf`、`/debug/database/status`、`/debug/memory`、`/debug/user-skills`、`/debug/sandbox`、`/debug/workspace`、`/debug/logs` | Debug 观测面（**均无鉴权**） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
-| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm |
-| GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/chat` | 单次流 SSE 对话（唯一对话入口，sessionId 在 body，支持 fileIds） |
-| POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步/流式） |
+| GET | `/threads/{sid}` | 会话详情 |
+| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm + files |
+| PATCH | `/threads/{sid}` | 重命名 / 换会话模型 |
+| DELETE | `/threads/{sid}` | 删除会话（级联） |
+| GET | `/threads/{sid}/llm-calls` | LLM 调用记录（内存，重启即丢） |
+| GET | `/threads/{sid}/subscribe` | **断线重连 / 跨副本续传**（`?afterSeq=` `&replyId=`） |
+| GET | `/threads/{sid}/status` | **刷新恢复判态**（5 态；存储不可用返回 503） |
+| POST | `/threads/chat` | 单次流 SSE 对话（唯一对话入口，sessionId 在 body，支持 fileIds / model） |
+| POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步 / 流式） |
 | POST | `/files/upload` | 文件上传 |
-| GET | `/files/{fileId}` | 文件下载/预览 |
+| GET | `/files/{fileId}` | 文件下载/预览（`?inline=1` 内联） |
+| GET/POST | `/models` | 托管模型列表 / 新建（会话模型选择器的数据源） |
+| GET/PATCH/DELETE | `/models/{id}` | 托管模型详情 / 更新 / 删除 |
+| POST | `/models/{id}/test` | 模型连通性测试（失败 502） |
+| POST/GET | `/admin/reload` | OAF 包热加载（`?scope=auto`、`mcp`、`agent`）/ 只读状态 |
+| GET | `/actuator/health` | Actuator 健康检查（yml 无 `management:` 段，**只暴露 health**） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 
-完整参数与 SSE 帧格式见 [api.md](api.md)。
+完整参数与 SSE 帧格式见 [api.md](api.md)；面向使用者的端到端流程见
+[agent-creation-guide.md](agent-creation-guide.md)。
 
 ---
 

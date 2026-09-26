@@ -1,7 +1,9 @@
 # agent-framework GitHub Actions E2E 验证体系设计（e2e-ci-plan）
 
-> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci 三个 e2e job 运行；实施记录与缺陷清单见 §11）
-> 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 3 个 e2e job）
+> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **四个** e2e job 运行 + `eval-selftest`；实施记录与缺陷清单见 §11）
+> 复核日期：2026-09-26 —— 本版把全文「三个 e2e job」统一为四个，§7 草案替换为「已实施 + 现状指向」，
+> §5 补 P 组用例定义，§11 补 2026-09-25/26 的实施记录。
+> 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 4 个 e2e job + `eval-selftest`）
 > 前置：无 —— 不依赖 Kind 集群、platform-backend、前端、真实 LLM API Key、任何 GitHub Secrets
 > 复用：`bench/mock-llm`、`bench/mock-mcp`、`example/approval-forms`（mock MCP + 选择器先例）、`docs/api-thread-spec.md`（协议权威）
 > v2 变更（2026-09-18）：① 沙箱服务改为 **mock 实现**（不再部署真实 OpenSandbox Server / 拉取镜像）；② 新增 **F 组文件上传下载验证矩阵**（原 S9 扩充为独立场景组）
@@ -15,8 +17,8 @@
 
 | 验证层 | 现状 | 缺口 |
 |--------|------|------|
-| 单元测试（CI 已有） | 61 类 / 676 用例，controller 层用 MockMvc standalone + Mockito mock `HarnessAgent`/各 Store | LLM HTTP、SSE 真实序列化、MySQL/Redis 真实读写、MCP 真实协议全部被 mock 掉 |
-| 集成测试（本地手动） | `HITL_MYSQL_IT=1`、`REDIS_IT=1`、`SANDBOX_IT=1`、`S3_IT=1` 环境变量门控的 `*IT` 类 | surefire 不捡 `*IT`，CI 从不执行 |
+| 单元测试（CI 已有） | **1026 用例 / 0 失败 / 4 跳过**（2026-09-26 实跑；101 个测试类。静态注解 1047 个，差额 21 来自 5 支不被 surefire 默认 include 的 `*IT`）。controller 层用 MockMvc standalone + Mockito mock `HarnessAgent`/各 Store | LLM HTTP、SSE 真实序列化、MySQL/Redis 真实读写、MCP 真实协议全部被 mock 掉 |
+| 集成测试（本地手动） | `HITL_MYSQL_IT=1`、`REDIS_IT=1`、`SANDBOX_IT=1`、`S3_IT=1` 环境变量门控的 `*IT` 类，共 5 支 21 例 | surefire 不捡 `*IT`，CI 从不执行 |
 | 平台 E2E（仓库根 `e2e/`） | 面向 Kind 全链路（platform-backend + release-agent + 真实 LLM） | 需要人工维护的集群与 `.env.secrets`，无法进 GitHub Actions，且测的是"平台编排"不是"agent-framework 本体" |
 | 压测设施（`bench/`） | mock-llm（OpenAI 兼容）+ mock-mcp（streamableHttp）+ docker MySQL 编排 | 只服务并发压测，无断言体系 |
 
@@ -107,7 +109,8 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
-四个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用 `concurrency.group = e2e-${{ github.ref }}` + `cancel-in-progress` 抑制同分支重复跑。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，四个 job 同级硬门禁。
+四个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
+（组名含 workflow 维度，跨工作流互不取消——见根 `AGENTS.md` CI 章节）。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，四个 job 同级硬门禁。
 
 > `e2e-plugin` 与其余三组形态不同：不经 Playwright，由 `scripts/plugin-smoke.sh` 现场编译示例插件 jar
 > （`e2e/plugin-echo/`）并自起被测进程——插件编译需要 `target/classes` 与 `.m2` 的 agentscope-core，
@@ -435,6 +438,25 @@ agent-config/
 
 > 明确**不做**：A2A 驱动 ask 工具（挂起态 A2A 无法批准是已声明的设计限制，`AgentCardNotes.A2A_CHANNEL_LIMITATION`），e2e 不为已知限制写红测。
 
+### 5.9 P 组 — 自定义工具插件（e2e-plugin job）
+
+> **2026-09-26 补录**：本组随 `fa4b2cd` 进入 CI，此前只在 §2.3 有一行 job 描述，用例定义缺失。
+> 形态与其他三组不同：**不经 Playwright**，由 `e2e/scripts/plugin-smoke.sh` 现场编译示例插件 jar
+> （`e2e/plugin-echo/`）+ 自起被测进程执行。
+
+| # | 场景 | 断言 |
+|---|------|------|
+| P1 | SPI 加载 | `ToolPluginBootstrapper` 启动日志出现插件扫描与实例化；插件工具进入 `List<CustomTool>` 注入源 |
+| P2 | `/tools` 运行时注册集 | `GET /tools?includeInternal=true` 出现插件工具，`category=internal`、`source=builtin` |
+| P3 | `sdkInternal` 段（issue #39） | 透出 SDK 内置工具实际注册集（如 `read_file`），且 `sdkInternalCount >= 20` |
+| P4 | 默认不含内置 | 不带 `includeInternal` 时 `internalCount=0` 且 `sdkInternal=[]` |
+| P5 | OAF reload 存活 | `POST /admin/reload?scope=auto` 后插件工具仍在注册集内 |
+| P6 | `deniedTools` 剔除 | 声明 `deniedTools` 的插件工具从 internal 与 sdkInternal 两段同时消失 |
+| P7 | 自定义工具三态权限 | 插件工具可被 `config.permission.tools` 声明为 `ask`，走 HITL 确认流 |
+
+> 断言数随 issue 演进：初版 12 断言 → issue #39 后 30 断言（`sdkInternal` 相关 +6）。
+> 插件更新需重启才生效（类卸载限制），故 P5 只验证 Agent 重建后**框架侧**存活，不验证热加载插件。
+
 ---
 
 ## 6. 测试代码结构与技术选型
@@ -492,55 +514,36 @@ agent-framework/e2e/
 
 ---
 
-## 7. CI 工作流变更（agent-framework-ci.yml 增补草案）
+## 7. CI 工作流变更（已实施）
 
-```yaml
-  e2e-core:
-    name: E2E 核心（API+UI）
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    services:
-      mysql:
-        image: mysql:8.0
-        env: { MYSQL_ROOT_PASSWORD: e2e-root, MYSQL_DATABASE: agent_framework_e2e,
-               MYSQL_USER: e2e, MYSQL_PASSWORD: e2e-pass }
-        ports: ['3306:3306']
-        options: >-
-          --health-cmd "mysqladmin ping -prootpass" --health-interval 5s
-          --health-timeout 5s --health-retries 20
-      redis:
-        image: redis:7-bookworm
-        ports: ['6379:6379']
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 5s
-          --health-timeout 5s --health-retries 20
-          --cmd "redis-server --appendonly yes --maxmemory-policy noeviction"   # 对齐 RedisEventLog 自检期望
-    env: { E2E_GROUP: core }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '21', cache: maven }
-      - uses: actions/setup-node@v4
-        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
-      - run: mvn -B -DskipTests package        # working-directory: agent-framework
-      - run: npx playwright install --with-deps chromium   # working-directory: agent-framework/e2e；首次后走 PLAYWRIGHT_BROWSERS_PATH + actions/cache
-      - run: npm run check:fixtures        # 录制件覆盖校验：场景注册表 ↔ fixtures 一一对应 + 敏感信息扫描，缺件即红
-      - run: ./scripts/run.sh core
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with: { name: e2e-logs-core, path: agent-framework/e2e/.runtime/ }
+> **现状核对（2026-09-26）**：本节此前是一份「增补草案」，其内容（`needs: test`、`timeout-minutes: 25`、
+> `npm run check:fixtures`、`--health-cmd "mysqladmin ping -prootpass"`）**与已落地的 workflow 已全部不一致**，
+> 容易误导读者以为还有第二份真相。草案删除，现状以下面两处为准：
+> - **job 拆分与预算**：§2.3
+> - **workflow 原文**：`.github/workflows/agent-framework-ci.yml`（8 个 job：`changes` / `test` / `eval-selftest` /
+>   `e2e-core` / `e2e-multi` / `e2e-sandbox` / `e2e-plugin` / `build-push`）
 
-  e2e-multi:    # 同上骨架；E2E_GROUP=multi；run.sh 内起 8101/8102 双实例 + nginx LB(:8100)；只跑 api-multi+ui-multi
-  e2e-sandbox:  # 同 core 骨板（services/步骤完全一致）；E2E_GROUP=sandbox；
-                # run.sh 额外起 mock/sandbox-server.mjs(:8090)，实例 SANDBOX_ENABLED=true；只跑 api-sandbox
-```
+**与草案的关键差异（实测）：**
 
-- `run.sh` 退出码透传给 job；`check:fixtures` 在三个 e2e job 均作前置（录制件缺失/含敏感串直接红，不带病进测试）；失败 artifact 含 §3.4 全部取证
-- 三个 e2e job 并入现有 `concurrency` 策略；不新增 Secrets；无 docker build/pull（除 services/nginx）
-- 预计总时长：单测 ~6min → e2e 三 job 并行（core ~12-15 / multi ~10-15 / sandbox ~8-12min），与 build-push 并行，master 全量 CI 墙钟 ~25min 封顶
+| 项 | 草案 | 实际 |
+|----|------|------|
+| `needs` | `test` | `changes`（目录过滤 job；e2e 与单测并行，不等单测） |
+| `timeout-minutes` | 25 | 30 |
+| 夹具校验 | `npm run check:fixtures` | `node scripts/check-fixtures.mjs`（CI 下无执行位，直接调 node） |
+| MySQL 健康检查 | `mysqladmin ping -prootpass` | `mysqladmin ping -h localhost` |
+| job 数 | 3 | 4（+ `eval-selftest`） |
+| artifact | — | 另上传 `playwright-report/` 与 `.runtime-plugin/` |
 
----
+**运维要点（2026-09-25 实测踩坑）：**
+
+`e2e` / `plugin-smoke` 脚本用 `LOGGING_CONFIG` 注入**只输出到控制台**的 logback 配置。
+若沿用默认 logback 配置，框架会尝试写 `/applog/${HOST_NAME}/trace.log`——CI 里容器以非 root 运行、
+该卷不可写，**直接导致启动失败**。这是 `4a1d38d` 修的坑：新脚本只注入 console-only 配置。
+`/applog` 不可写是这类「自起进程」job 的通用前置，排查启动失败时先看这条。
+
+**分支保护注意事项：** `e2e-plugin` 与 `eval-selftest` 是**新增 job，默认不是必需检查**——
+红了只告警不挡合并。要转必需需仓库管理员在分支保护里加勾
+（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）。
 
 ## 8. 实施计划（分期合入，每期可独立回滚）
 
@@ -664,7 +667,7 @@ CI run 35433743261 五个 job 全绿（单测 / E2E 核心 / E2E 多副本 / E2E
 | **D8** | SDK `FilesystemUtils.countOccurrences` 空串死循环 | `indexOf("", i)` 恒返回 i、游标不前进 → 单线程 CPU 100% 挂死；触发路径：`LocalFilesystem.edit` 对空/相同内容做替换（F5 夹具的 edit_file 调用），并连带卡死 `HarnessGateway` 会话闸门释放，实例级不可恢复 | 框架侧规避：`WorkspaceReader.writeWorkspaceFile` 对"内容相同/KV 文件为空"短路返回；edit_file 工具路径属 SDK 缺陷（已立档，F5/U11 保持 fixme 待 SDK 修复）；另在 env-up 增加数据重置（ASKING 挂起态跨轮残留会让整组用例"流未收敛"） |
 | **D9** | Debug 页 `window.App` 初始化时序 | 模块顶层/异步回调引用 `ctx.utils` 时 `window.App` 尚未挂载 → "Cannot read properties of null"（U1 偶发） | 尝试修复引入更严重回归（UI 8 失败），已回滚；保持现状（偶发且不影响功能），记录待查 |
 
-**最终 e2e 状态**：core 30 用例（含 fixme）/ sandbox 8 / ui 10 / multi+kill 8——除 F5、U11、X3（D8 同链路）、U8（D9 前端时序）外全部转正；单测 680 全绿。
+**最终 e2e 状态**：core 30 用例（含 fixme）/ sandbox 8 / ui 10 / multi+kill 8——除 F5、U11、X3（D8 同链路）、U8（D9 前端时序）外全部转正；单测全绿。
 
 #### 11.3.1 复核后撤销的两条（原判断为 e2e 自身假设错误）
 

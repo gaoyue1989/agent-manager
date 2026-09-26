@@ -1,11 +1,17 @@
 # Agent Framework — 前端对接接口文档（SSE 模式）
 
-**版本:** v2.3.0 | **架构:** 无状态单次流 SSE（Durable SSE）  
+**版本:** v2.4.0 | **架构:** 无状态单次流 SSE（Durable SSE）  
 **Base URL:** `http://{host}:8100`  
-**Content-Type:** 请求 `application/json`；SSE 响应 `text/event-stream`
+**Content-Type:** 请求 `application/json`；SSE 响应 `text/event-stream`  
+**复核日期:** 2026-09-26（master @ `a263b92`）
 
 > **通用请求头：** 所有接口均支持 `X-User-Id` 请求头传递用户标识（网关注入优先，
 > 缺省回落请求参数中的 `userId`，再缺省 `debug-user`）。
+
+> **本版变更（v2.4.0）**：`/status` 补 `interrupted` 态与 503 分支；`TOOL_RESULT_END.state`
+> 枚举订正为 `SUCCESS`/`ERROR`/`INTERRUPTED`/`DENIED`/`RUNNING`；**修正续传游标示例**（游标在 SSE
+> `id:` 行而非 `data` 内的 `seq`）；补 `/models` CRUD、`/admin/reload`、`/skills/users/*` 三组端点；
+> 修目录死锚。面向使用者的上手流程见 [agent-creation-guide.md](agent-creation-guide.md)。
 
 ---
 
@@ -31,11 +37,13 @@
    - [GET /files/{fileId}](#52-get-filesfileid)
 6. [Agent 信息接口](#6-agent-信息接口)
 7. [工具与 MCP 接口](#7-工具与-mcp-接口)
-8. [Skill 管理与 @引用接口](#8-skill-管理与引用接口)
+8. [Skill 管理与 @引用接口](#8-skill-管理与-引用接口)
 9. [SSE 事件词表（完整）](#9-sse-事件词表完整)
-9. [错误处理](#9-错误处理)
-10. [前端对接指南](#10-前端对接指南)
-11. [数据表参考](#11-数据表参考)
+10. [模型管理接口](#10-模型管理接口)
+11. [运维接口（OAF 热加载）](#11-运维接口oaf-热加载)
+12. [错误处理](#12-错误处理)
+13. [前端对接指南](#13-前端对接指南)
+14. [数据表参考](#14-数据表参考)
 
 ---
 
@@ -54,7 +62,7 @@
 ```
 
 **核心特性：**
-- **事件持久化**：所有 Agent 事件写入 `session_event`（session 事件流，已迁到 Redis Streams，见 §12），SSE 断连后可通过 `GET /subscribe?afterSeq=N` 回放+续传
+- **事件持久化**：所有 Agent 事件写入 `session_event`（session 事件流，已迁到 Redis Streams，见 §14），SSE 断连后可通过 `GET /subscribe?afterSeq=N` 回放+续传
 - **Turn 租约串行化**：同 session 并发请求自动排队（waiting 帧），超时 120s 返回 error
 - **HITL 暂停**：`permission_ask` 时上下文落库、释放租约，确认后走 `confirm-stream` 恢复
 - **心跳防超时**：EventBus 心跳流（默认 20s 间隔），防止 Nginx/CDN 读超时
@@ -112,6 +120,7 @@ Accept: text/event-stream
 | `message` | String | ⚠️ | 用户消息内容（`message` 与 `fileIds` 至少填一项） |
 | `userId` | String | ❌ | 用户标识，默认 `debug-user`（`X-User-Id` Header 优先） |
 | `sessionId` | String | ❌ | 会话 ID（不传则自动生成 UUID） |
+| `model` | String | ❌ | 会话级模型选择（`model_config.id`）。`""`/`"system"` 清除覆盖回默认；未知或已停用 → error 帧 `unknown_model` / `model_disabled` |
 | `fileIds` | Array\<String\> | ⚠️ | 上传文件 ID 列表 |
 
 **新会话 SSE 响应示例：**
@@ -167,12 +176,15 @@ Accept: text/event-stream
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `afterSeq` | Integer | ❌ | 回放游标（从该序号之后开始回放），默认 0 |
+| `afterSeq` | Integer | ❌ | 回放游标（回放**严格大于**该 seq 的事件），默认 0 = 从头回放 |
+
+> ⚠️ **本端点不读 `Last-Event-ID` 请求头。** 浏览器原生 `EventSource` 的自动重连对本 API 无效
+> ——必须用 `fetch` + `ReadableStream`（见 §13），或自建 EventSource 并把最后的 `id:` 显式拼进 `afterSeq`。
 | `replyId` | String | ❌ | Turn 标识，仅回放/订阅指定 turn 的事件 |
 
 **响应行为：**
 
-- **Turn 进行中**：先回放 `afterSeq` 之后的历史事件（从 `session_event` 事件流读取，见 §12），再对同一存储做游标追赶（`SessionEventTailer` 轮询）——观察者路径**不使用**本 Pod 的 EventBus
+- **Turn 进行中**：先回放 `afterSeq` 之后的历史事件（从 `session_event` 事件流读取，见 §14），再对同一存储做游标追赶（`SessionEventTailer` 轮询）——观察者路径**不使用**本 Pod 的 EventBus
 - **Turn 已完成**：回放历史事件后追加 `done` 帧并关闭（不订阅实时流）
 
 **`done` 帧示例（仅已完成 turn 出现）：**
@@ -207,10 +219,30 @@ GET /threads/{sessionId}/status
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `state` | String | `working` / `completed` / `waiting_confirm` / `idle` |
+| `state` | String | `working` / `completed` / `waiting_confirm` / `idle` / `interrupted`（5 态） |
 | `latest_event_seq` | Integer | 最新事件序号（供 `afterSeq` 参数使用） |
 | `reply_id` | String | 当前 turn 的回复 ID |
 | `pending_confirm` | String/Object | 待确认上下文（`waiting_confirm` 时非空） |
+
+**5 态语义：**
+
+| state | 含义 | 前端动作 |
+|-------|------|----------|
+| `working` | 有活跃租约，正在执行 | 走 `/subscribe?afterSeq={latest_event_seq}` |
+| `waiting_confirm` | 挂起等待人工确认 | 渲染确认卡（用 `pending_confirm` 重建） |
+| `completed` | 正常终态 | 回放历史 |
+| `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占 | 展示中断态，允许重发 |
+| `idle` | 无事件、无租约、无待确认 | 显示空白输入状态 |
+
+**503 分支（事件存储不可用）：**
+
+```json
+HTTP/1.1 503
+{"error":"event_store_unavailable"}
+```
+
+MySQL / Redis 任一不可用都会显式报错，而不是假装 idle。
+**必须保留本地游标、不得重置为 0**，否则会触发整场重放。
 
 **前端刷新恢复逻辑：**
 
@@ -218,7 +250,9 @@ GET /threads/{sessionId}/status
 1. GET /status → 判断 state
 2. working / waiting_confirm → GET /subscribe?afterSeq=N 续传
 3. completed → GET /subscribe?afterSeq=N 回放（收到 done 帧后关闭）
-4. idle → 显示空白输入状态
+4. interrupted → 展示中断态（执行副本已崩溃，本 turn 无法继续）
+5. idle → 显示空白输入状态
+6. 503 event_store_unavailable → 保留本地游标，走错误提示，不要重置为 0
 ```
 
 ---
@@ -302,7 +336,7 @@ Accept: text/event-stream
 data: {"type":"AGENT_START","replyId":"reply-001",...,"id":"evt-100"}
 data: {"type":"TOOL_RESULT_START","toolCallId":"call-abc","toolCallName":"write_file",...,"id":"evt-101"}
 data: {"type":"TOOL_RESULT_TEXT_DELTA","delta":"File written successfully","toolCallId":"call-abc",...,"id":"evt-102"}
-data: {"type":"TOOL_RESULT_END","state":"COMPLETE","toolCallId":"call-abc",...,"id":"evt-103"}
+data: {"type":"TOOL_RESULT_END","state":"SUCCESS","toolCallId":"call-abc",...,"id":"evt-103"}
 data: {"type":"TEXT_BLOCK_START","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-104"}
 data: {"type":"TEXT_BLOCK_DELTA","delta":"文件已写入","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-105"}
 data: {"type":"AGENT_END","replyId":"reply-001","id":"evt-106"}
@@ -460,7 +494,7 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 
 ### 4.4 PATCH /threads/{sessionId}
 
-重命名会话（title 写入 session_user.remark）。
+重命名会话 / 切换会话级模型。**两个字段都可选**，只传其一合法。
 
 ```
 PATCH /threads/{sessionId}
@@ -471,13 +505,15 @@ Content-Type: application/json
 
 ```json
 {
-  "title": "报表分析"
+  "title": "报表分析",
+  "model": "my-model-id"
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `title` | String | ✅ | 新标题（不可为空） |
+| `title` | String | ❌ | 新标题（不可为空）。自动生成后也可在此手动改 |
+| `model` | String | ❌ | 会话绑定模型（`model_config.id`）；`""`/`"system"` 清除覆盖回默认 |
 
 **响应：**
 
@@ -1065,15 +1101,46 @@ GET /skills/manage
 
 ### 8.5 Skill 管理操作端点
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/skills/upload` | POST | 上传 zip 格式的 Skill 包 |
-| `/skills/{name}` | DELETE | 删除指定 Skill |
-| `/skills/{name}/toggle` | PUT | 切换启停状态 |
-| `/skills/{name}/content` | GET | 读取 SKILL.md 内容 |
-| `/skills/{name}/content` | PUT | 修改 SKILL.md 内容 |
+`/config/skills` 是**只读**的 OAF 包内容，因此管理面走 `agent_fs`（可写区），分两档：
+包内基线（L2，动态加载）+ 用户个人技能（L4，按 userId 隔离）。设计与仲裁语义见
+[oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)。
 
-详细参数与响应格式见 [7.x 工具与 MCP 接口](#7-工具与-mcp-接口) 中的 Skill 相关端点。
+**包内技能管理：**
+
+| 端点 | 方法 | 说明 | 响应 |
+|------|------|------|------|
+| `/skills/manage` | GET | 全部技能（含禁用项，多一个 `enabled`） | `[{name, description, enabled, ...}]` |
+| `/skills/available` | GET | `@` 补全候选。按 `X-User-Id`（或 `?userId=`）合并该用户 L4 | `[{name, description}]` |
+| `/skills/parse-refs?message=` | GET | 预览消息中的 `@Skill` 解析 | `{skills:[...], count}` |
+| `/skills/upload` | POST | 上传 zip 格式的 Skill 包（multipart `file`，≤20MB） | `{name, message, skill?}` |
+| `/skills/{name}` | DELETE | 删除指定 Skill（校验无 `..` / `/` / `\` 开头 `.`） | `{name, message}` |
+| `/skills/{name}/toggle` | PUT | 切换启停状态 | `{name, enabled, message}` |
+| `/skills/{name}/content` | GET | 读取 SKILL.md 内容 | `{name, content}` |
+| `/skills/{name}/content` | PUT | 修改 SKILL.md 内容，body `{content}`（≤100KB） | `{name, message}` |
+
+**用户个人技能（L4）：**
+
+| 端点 | 方法 | 说明 | 响应 |
+|------|------|------|------|
+| `/skills/users` | GET | 有个人技能的用户索引 | `{count, users:[...], truncated?}` |
+| `/skills/users/{userId}` | GET | 该用户的 L4 技能 | `{userId, skills, tombstones}` |
+| `/skills/users/{userId}/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
+| `/skills/users/{userId}/{name}` | PUT | 写个人技能，body `{content}` | `{userId, name, action, version, message}` |
+| `/skills/users/{userId}/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
+| `/skills/users/{userId}/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |
+
+> ⚠️ 路由歧义（框架内已注明）：`GET /skills/users/{userId}` 与 `GET /skills/{name}/content`
+> 在 `userId == "content"` 时同时匹配，由更具体的 `/skills/{name}/content` 命中。
+
+**生效范围分档：** 非沙箱档管理面写入**下一轮会话生效**；沙箱档会话读容器内 `/workspace/skills` 副本，
+管理面写入由「会话开始物化 L4」（`WorkspaceReader.materializeUserSkills`）投影进容器，
+在**该用户下一个 turn** 生效。
+
+**回写仲裁（两个 KV 元数据键，命中即跳过同名技能）：** 删除写 `/{name}/.deleted`（防容器内副本复活），
+管理面写入写 `/{name}/.admin-override`（防管理面写入被同代容器旧副本改回）。代价是标记生效期间，
+容器内 `skill_manage` 对该技能的修改不落库。状态与清除方式经 `tombstones` 字段与删除 / PUT 响应下发。
+
+调试页在「用户技能」区块展示同名信息并醒目标注仲裁标记。
 
 ---
 
@@ -1192,7 +1259,9 @@ GET /skills/manage
 
 前端收到 `ui` 字段后，可通过 `GET /mcp/{server}/resources/ui?uri=ui://...` 拉取卡片 HTML 渲染。
 
-**`TOOL_RESULT_END.state` 枚举值：** `COMPLETE` / `ERROR`
+**`TOOL_RESULT_END.state` 枚举值：** `SUCCESS` / `ERROR` / `INTERRUPTED` / `DENIED` / `RUNNING`
+
+> ⚠️ 早期版本文档写作 `COMPLETE`，实际取自 SDK `ToolResultState.name()`，**没有 `COMPLETE` 这个值**。
 
 ### 9.7 文件产出事件
 
@@ -1253,13 +1322,80 @@ GET /skills/manage
 
 | type | 触发时机 | 关键字段 |
 |------|---------|---------|
+| `session_created` | 新会话首帧（仅请求未传 `sessionId` 时） | `session_id` |
 | `waiting` | 排队等待（每 15s 一帧） | 无 |
-| `done` | 历史回放结束（仅 `/subscribe` 已完成 turn 时出现） | 无 |
+| `done` | 历史回放结束（**仅 `/subscribe`** 追到终态时补发；`POST /threads/chat` 不发） | 无 |
+| `interrupted` | 执行副本崩溃（**仅 `/subscribe`** 补发，随后关流） | `reason: "turn_interrupted"` |
 | `error` | 执行错误 | `error`（错误信息字符串） |
+
+> 控制帧与心跳 `:hb` **都没有 `id:` 行**，也不含 `type` 之外的事件 ID 字段。
+> 通用字段只有 `type`；`data.id`（SDK 事件 ID）只在真实事件帧上出现。
 
 ---
 
-## 10. 错误处理
+## 10. 模型管理接口
+
+会话模型选择器的数据源与托管模型 CRUD。系统模型（未选模型的会话、标题生成、记忆 flush/整合、
+上下文压缩）由环境变量 `LLM_*` 决定，**不可**通过本组端点修改。
+设计与实施记录见 [session-model-switch-design.md](session-model-switch-design.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/models` | 可选模型列表。query `all=true` 含已停用项。响应 `{default_model:"system", models:[...]}` |
+| GET | `/models/{id}` | 模型详情（`api_key_masked` 脱敏）。404 `model_not_found` |
+| POST | `/models` | 新建托管模型 |
+| PATCH | `/models/{id}` | 更新（缺省字段=不变；`apiKey: ""` 表示清除）。系统模型只读 → 400 `system_model_readonly` |
+| DELETE | `/models/{id}` | 删除，返回 `{id, deleted:true}` |
+| POST | `/models/{id}/test` | 连通性测试。成功 200 `{id, ok, latency_ms, reply}`；失败 **502** `{id, ok:false, error:"model_test_failed", message}` |
+
+**创建 / 更新的请求体（camelCase）：**
+
+| 字段 | 类型 | 必填 | 长度上限 |
+|------|------|------|----------|
+| `name` | String | ✓ | 128 |
+| `modelId` | String | ✓ | 128 |
+| `baseUrl` | String | ✓ | 512 |
+| `provider` | String | | 默认 `openai` |
+| `apiKey` | String | | 512 |
+| `temperature` / `maxTokens` / `timeoutSeconds` | Number | | |
+| `enableThinking` | Boolean | | |
+| `contextLength` | Number | | ≤0 不传给模型 |
+| `enabled` | Boolean | | 默认 true |
+
+错误码：400 `invalid_config` / `duplicate_name`；502 `model_test_failed`。
+
+**会话绑定模型：** `POST /threads/chat` 的 `model` 字段，或 `PATCH /threads/{sessionId}`。
+传 `""` / `"system"` 清除覆盖回默认；未知或已停用 → error 帧 `unknown_model` / `model_disabled`。
+
+---
+
+## 11. 运维接口（OAF 热加载）
+
+OAF 包（PVC `/config`）原位更新后免重启生效。设计见
+[oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/admin/reload?scope=auto` | **默认**。按指纹自动分流 |
+| POST | `/admin/reload?scope=mcp&server=weather` | 精准重载单个 MCP server |
+| POST | `/admin/reload?scope=agent` | 强制整包重建 HarnessAgent |
+| GET | `/admin/reload` | 只读状态：`{scope:"status", registeredServers:[...]}` |
+
+**响应（POST 200）：** `{scope, fingerprint_changed, agent_rebuilt, mcp_servers:[{server, action, ok, tool_count}], error?}`
+其中 `action` ∈ `reloaded` / `removed` / `skipped` / `registered`。
+
+**分流规则：** 只有 `mcp-configs` 变 → 原地 reload MCP（`toolkit.removeMcpClient` + 重新注册，
+声明增删即时生效）；`AGENTS.md` 变 → 整包重建 Agent。指纹扫描 `AGENTS.md` + 各 `configDir` 子目录，
+**跳过 `skills/`**（技能有自己的每轮重扫机制）。
+
+**生效边界：下一轮对话。** 进行中的 turn 不打断。
+失败时**保留旧配置**继续服务，返回 500 + `{"note":"old configuration remains active"}`。
+
+> 本端点**无鉴权**（与 `/debug/*` 同级），部署时依赖集群内网入口保护。
+
+---
+
+## 12. 错误处理
 
 流式场景下错误以 SSE error 帧返回：
 
@@ -1286,7 +1422,7 @@ data: {"type":"error","error":"turn_in_progress: session 'xxx' has an active tur
 
 ---
 
-## 11. 前端对接指南
+## 13. 前端对接指南
 
 ```javascript
 // 推荐使用 fetch + ReadableStream 读取 SSE
@@ -1311,12 +1447,17 @@ async function sendChat(sessionId, message, userId, fileIds) {
     const { done, value } = await reader.read();
     if (done) break;
 
+    // SSE 帧解析：`id:` 行是游标(seq)，`data:` 行是 JSON 负载。
+    // ⚠️ data 里没有 seq 字段；data.id 是 SDK 事件 ID，两者不是一回事。
     const text = decoder.decode(value);
-    const lines = text.split('\n').filter(l => l.startsWith('data: '));
-    for (const line of lines) {
-      const event = JSON.parse(line.slice(6));
-      if (event.seq) lastSeq = event.seq;
-      handleEvent(event);
+    let frameId = null;
+    for (const line of text.split('\n')) {
+      if (line.startsWith('id: ')) frameId = parseInt(line.slice(4), 10);
+      else if (line.startsWith('data: ')) {
+        const event = JSON.parse(line.slice(6));
+        if (frameId !== null) lastSeq = frameId;   // 游标来自 id: 行
+        handleEvent(event);
+      }
     }
   }
   return lastSeq; // 用于断连续传
@@ -1450,7 +1591,7 @@ function handleEvent(event) {
 
 ---
 
-## 12. 数据表参考
+## 14. 数据表参考
 
 ### confirm_context
 
@@ -1553,7 +1694,7 @@ Stream 字段：
 ### A.1 普通对话（无工具调用）
 
 ```
-→ POST /threads/acme-test-agent:t1/chat  {"message":"你好","userId":"alice"}
+→ POST /threads/chat  {"message":"你好","userId":"alice"}   ← sessionId 在 body，不在路径
 
 data: {"type":"AGENT_START","replyId":"r1","sessionId":"acme-test-agent:t1","id":"e1"}
 data: {"type":"MODEL_CALL_START","replyId":"r1","id":"e2"}
@@ -1569,7 +1710,7 @@ data: {"type":"AGENT_END","replyId":"r1","id":"e9"}
 ### A.2 工具调用 + HITL 确认 + 恢复
 
 ```
-→ POST /threads/acme-test-agent:t1/chat  {"message":"写文件","userId":"alice"}
+→ POST /threads/chat  {"message":"写文件","userId":"alice"}
 
 data: {"type":"AGENT_START","replyId":"r1",...,"id":"e1"}
 data: {"type":"MODEL_CALL_START","replyId":"r1","id":"e2"}
@@ -1591,7 +1732,7 @@ data: {"type":"permission_ask","tool_calls":[{"tool_call_id":"call-abc","name":"
 data: {"type":"AGENT_START","replyId":"r1",...,"id":"e10"}
 data: {"type":"TOOL_RESULT_START","toolCallId":"call-abc","toolCallName":"write_file",...,"id":"e11"}
 data: {"type":"TOOL_RESULT_TEXT_DELTA","delta":"File written successfully","toolCallId":"call-abc",...,"id":"e12"}
-data: {"type":"TOOL_RESULT_END","state":"COMPLETE","toolCallId":"call-abc",...,"id":"e13"}
+data: {"type":"TOOL_RESULT_END","state":"SUCCESS","toolCallId":"call-abc",...,"id":"e13"}
 data: {"type":"TEXT_BLOCK_START","replyId":"r1","blockId":"b10",...,"id":"e14"}
 data: {"type":"TEXT_BLOCK_DELTA","delta":"文件已写入","replyId":"r1","blockId":"b10",...,"id":"e15"}
 data: {"type":"AGENT_END","replyId":"r1","id":"e16"}
@@ -1605,7 +1746,7 @@ POST /files/upload  (multipart/form-data: file=report.xlsx, userId=alice)
 ← {"file_id":"f1e2d3c4-...","file_name":"report.xlsx","mime_type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","size":12345}
 
 → 2. 携带 fileIds 发起对话
-POST /threads/acme-test-agent:t1/chat
+POST /threads/chat
 {"message":"分析这份报表并生成汇总","userId":"alice","fileIds":["f1e2d3c4-..."]}
 
 data: {"type":"AGENT_START","replyId":"r1",...,"id":"e1"}
@@ -1618,7 +1759,7 @@ data: {"type":"TOOL_CALL_START","toolName":"present_file","toolCallId":"call-010
 data: {"type":"TOOL_CALL_END","toolCallId":"call-010","toolCallName":"present_file","id":"e21"}
 data: {"type":"TOOL_RESULT_START","toolCallId":"call-010","toolCallName":"present_file","id":"e22"}
 data: {"type":"TOOL_RESULT_TEXT_DELTA","delta":"{\"file_id\":\"g7h8i9j0-...\",\"file_name\":\"summary.xlsx\",...}","toolCallId":"call-010","id":"e23"}
-data: {"type":"TOOL_RESULT_END","state":"COMPLETE","toolCallId":"call-010","id":"e24"}
+data: {"type":"TOOL_RESULT_END","state":"SUCCESS","toolCallId":"call-010","id":"e24"}
 （present_file 工具完成 → 合成 file_ready 帧）
 data: {"type":"file_ready","file_id":"g7h8i9j0-...","file_name":"summary.xlsx","mime_type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","size":6789,"download_url":"/files/g7h8i9j0-...","id":"e25"}
 data: {"type":"TEXT_BLOCK_START","replyId":"r1","blockId":"b30","id":"e26"}
@@ -1634,9 +1775,11 @@ data: {"type":"AGENT_END","replyId":"r1","id":"e28"}
 → GET /threads/acme-test-agent:t1/subscribe?afterSeq=42
 
 （先回放 seq 43~50 的历史事件，再订阅实时流）
-data: {"type":"TEXT_BLOCK_DELTA","delta":"继续","replyId":"r1","blockId":"b1","seq":43,"id":"e43"}
+id: 43
+data: {"type":"TEXT_BLOCK_DELTA","delta":"继续","replyId":"r1","blockId":"b1","id":"e43"}
 ...
-data: {"type":"AGENT_END","replyId":"r1","seq":50,"id":"e50"}
+id: 50
+data: {"type":"AGENT_END","replyId":"r1","id":"e50"}
 （Turn 已完成 → 追加 done 帧）
 data: {"type":"done"}
 （流关闭）
