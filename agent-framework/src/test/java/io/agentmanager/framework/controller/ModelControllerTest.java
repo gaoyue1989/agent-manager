@@ -274,6 +274,99 @@ class ModelControllerTest {
         assertEquals(false, resp.getBody().get("ok"));
     }
 
+    // ===== 采样参数：reasoningEffort / frequencyPenalty / provider 校验（model-params-design.md）=====
+
+    @Test
+    void createShouldRejectInvalidReasoningEffortFormat() {
+        var resp = controller.createModel(new ModelController.UpsertRequest("M1", null, "m", "http://x/v1",
+            null, null, null, null, null, null, null, "Medium", null)); // 大写非法
+
+        assertEquals(400, resp.getStatusCode().value());
+        assertEquals("invalid_config", resp.getBody().get("error"));
+        verify(store, never()).insert(any());
+    }
+
+    @Test
+    void createShouldRejectOutOfRangeFrequencyPenalty() {
+        var resp = controller.createModel(new ModelController.UpsertRequest("M1", null, "m", "http://x/v1",
+            null, null, null, null, null, null, null, null, 2.5));
+
+        assertEquals(400, resp.getStatusCode().value());
+        assertEquals("invalid_config", resp.getBody().get("error"));
+        verify(store, never()).insert(any());
+    }
+
+    @Test
+    void createShouldRejectUnknownProviderDialect() {
+        var resp = controller.createModel(new ModelController.UpsertRequest("M1", "tensorrt", "m",
+            "http://x/v1", null, null, null, null, null, null, null, null, null));
+
+        assertEquals(400, resp.getStatusCode().value());
+        assertEquals("invalid_config", resp.getBody().get("error"));
+        verify(store, never()).insert(any());
+    }
+
+    @Test
+    void createShouldPersistSamplingParamsForVllmDialect() {
+        when(store.findByName("M9")).thenReturn(Optional.empty());
+
+        var resp = controller.createModel(new ModelController.UpsertRequest("M9", "vllm", "m9",
+            "http://x/v1", null, null, null, null, null, null, null, "medium", 0.5));
+
+        assertEquals(200, resp.getStatusCode().value());
+        assertEquals("medium", resp.getBody().get("reasoning_effort"));
+        assertEquals(0.5, resp.getBody().get("frequency_penalty"));
+
+        var saved = org.mockito.ArgumentCaptor.forClass(ModelConfigStore.ModelConfig.class);
+        verify(store).insert(saved.capture());
+        assertEquals("vllm", saved.getValue().provider());
+        assertEquals("medium", saved.getValue().reasoningEffort());
+        assertEquals(0.5, saved.getValue().frequencyPenalty());
+    }
+
+    @Test
+    void patchShouldTreatSamplingParamsAsAbsentEqualsKeep() {
+        when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", null, true))); // effort=low, freq=0.5
+
+        // 全缺省 = 全不变
+        controller.updateModel("m1", new ModelController.UpsertRequest(null, null, null, null,
+            null, null, null, null, null, null, null));
+        var keep = org.mockito.ArgumentCaptor.forClass(ModelConfigStore.ModelConfig.class);
+        verify(store).update(keep.capture());
+        assertEquals("low", keep.getValue().reasoningEffort());
+        assertEquals(0.5, keep.getValue().frequencyPenalty());
+    }
+
+    @Test
+    void patchShouldClearReasoningEffortWithBlankStringOnly() {
+        when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", null, true)));
+
+        // reasoningEffort 空串 = 清除（NULL，不下发）；frequencyPenalty 缺省 = 不变
+        controller.updateModel("m1", new ModelController.UpsertRequest(null, null, null, null,
+            null, null, null, null, null, null, null, "", null));
+        var cleared = org.mockito.ArgumentCaptor.forClass(ModelConfigStore.ModelConfig.class);
+        verify(store).update(cleared.capture());
+        assertNull(cleared.getValue().reasoningEffort());
+        assertEquals(0.5, cleared.getValue().frequencyPenalty());
+    }
+
+    @Test
+    void patchShouldReplaceFrequencyPenaltyButNeverClearIt() {
+        when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", null, true)));
+
+        // frequencyPenalty 非法值 400；合法替换生效（不支持撤销下发，D4）
+        var bad = controller.updateModel("m1", new ModelController.UpsertRequest(null, null, null,
+            null, null, null, null, null, null, null, null, null, -3.0));
+        assertEquals(400, bad.getStatusCode().value());
+
+        controller.updateModel("m1", new ModelController.UpsertRequest(null, null, null, null,
+            null, null, null, null, null, null, null, "high", 0.0));
+        var replaced = org.mockito.ArgumentCaptor.forClass(ModelConfigStore.ModelConfig.class);
+        verify(store, org.mockito.Mockito.times(1)).update(replaced.capture()); // bad 请求未触达 store
+        assertEquals("high", replaced.getValue().reasoningEffort());
+        assertEquals(0.0, replaced.getValue().frequencyPenalty());
+    }
+
     // ===== 掩码 =====
 
     @Test
@@ -289,12 +382,12 @@ class ModelControllerTest {
 
     private static ModelConfigStore.ModelConfig cfg(String id, String name, String apiKey, boolean enabled) {
         return new ModelConfigStore.ModelConfig(id, name, "openai", "model-" + id,
-            "http://vllm:1/v1", apiKey, 0.3, 8192, 60, false, 0, enabled,
+            "http://vllm:1/v1", apiKey, 0.3, 8192, 60, false, "low", 0.5, 0, enabled,
             Instant.parse("2026-09-24T00:00:00Z"), Instant.parse("2026-09-24T00:00:00Z"));
     }
 
     private static AgentManagerProperties.LLMConfig llm(String apiKey) {
         return new AgentManagerProperties.LLMConfig(apiKey, "qwen3-32b", "http://sys:1/v1",
-            "openai", 0.3, 16384, 120, false, 0);
+            "openai", 0.3, 16384, 120, false, 0, "", null);
     }
 }

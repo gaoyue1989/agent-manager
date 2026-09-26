@@ -58,6 +58,14 @@ public class ModelController {
     private static final int MAX_MODEL_ID_LEN = 128;
     private static final int MAX_BASE_URL_LEN = 512;
     private static final int MAX_API_KEY_LEN = 512;
+    private static final int MAX_REASONING_EFFORT_LEN = 16;
+
+    /** provider 方言值域（写入路径严格校验；方言映射见 ChatModelFactory.applyDialect，未知存量值读取时按 openai 兜底） */
+    private static final java.util.Set<String> PROVIDER_DIALECTS =
+        java.util.Set.of("openai", "vllm", "sglang", "glm", "deepseek");
+    /** 错误消息用稳定排序（Set 迭代顺序不确定，同一非法值的提示会漂移） */
+    private static final List<String> PROVIDER_DIALECTS_SORTED =
+        PROVIDER_DIALECTS.stream().sorted().toList();
 
     private final ModelConfigStore store;
     private final ModelCatalog catalog;
@@ -98,6 +106,7 @@ public class ModelController {
         var name = trim(body.name());
         var modelId = trim(body.modelId());
         var baseUrl = trim(body.baseUrl());
+        var provider = trim(body.provider());
         if (name.isEmpty() || modelId.isEmpty() || baseUrl.isEmpty()) {
             return invalid("name, modelId and baseUrl are required");
         }
@@ -105,18 +114,25 @@ public class ModelController {
         if (lengthError != null) {
             return invalid(lengthError);
         }
+        var paramError = validateSamplingParams(provider, body.reasoningEffort(),
+            body.frequencyPenalty());
+        if (paramError != null) {
+            return invalid(paramError);
+        }
         if (store.findByName(name).isPresent()) {
             return ResponseEntity.badRequest().body(Map.of(
                 "error", "duplicate_name", "message", "model name already exists: " + name));
         }
         var cfg = new ModelConfigStore.ModelConfig(
             UUID.randomUUID().toString(), name,
-            trim(body.provider()).isEmpty() ? "openai" : trim(body.provider()),
+            provider.isEmpty() ? "openai" : provider,
             modelId, baseUrl, normKey(body.apiKey()),
             defaultIfNull(body.temperature(), 0.3),
             defaultIfNull(body.maxTokens(), 16384),
             defaultIfNull(body.timeoutSeconds(), 120),
             defaultIfNull(body.enableThinking(), false),
+            normEffort(body.reasoningEffort()),
+            body.frequencyPenalty(),
             defaultIfNull(body.contextLength(), 0),
             defaultIfNull(body.enabled(), true),
             null, null);
@@ -150,6 +166,11 @@ public class ModelController {
         if (lengthError != null) {
             return invalid(lengthError);
         }
+        var paramError = validateSamplingParams(body.provider(), body.reasoningEffort(),
+            body.frequencyPenalty());
+        if (paramError != null) {
+            return invalid(paramError);
+        }
         // 改名唯一性：命中其他配置即冲突
         if (!name.equals(old.name()) && store.findByName(name).isPresent()) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -157,6 +178,12 @@ public class ModelController {
         }
         // apiKey 三态：缺省=不变；空串=清除；非空=替换
         var apiKey = body.apiKey() == null ? old.apiKey() : normKey(body.apiKey());
+        // reasoningEffort 三态：缺省=不变；空串=清除（null，不下发）；非空=替换（已通过格式校验）
+        var reasoningEffort = body.reasoningEffort() == null
+            ? old.reasoningEffort() : normEffort(body.reasoningEffort());
+        // frequencyPenalty 二态：缺省=不变；非 null=替换（不支持撤销下发，见设计文档 D4）
+        var frequencyPenalty = body.frequencyPenalty() == null
+            ? old.frequencyPenalty() : body.frequencyPenalty();
 
         var cfg = new ModelConfigStore.ModelConfig(
             old.id(), name,
@@ -166,6 +193,8 @@ public class ModelController {
             body.maxTokens() != null ? body.maxTokens() : old.maxTokens(),
             body.timeoutSeconds() != null ? body.timeoutSeconds() : old.timeoutSeconds(),
             body.enableThinking() != null ? body.enableThinking() : old.enableThinking(),
+            reasoningEffort,
+            frequencyPenalty,
             body.contextLength() != null ? body.contextLength() : old.contextLength(),
             body.enabled() != null ? body.enabled() : old.enabled(),
             old.createdAt(), old.updatedAt());
@@ -246,6 +275,8 @@ public class ModelController {
         m.put("max_tokens", llm.maxTokens());
         m.put("timeout_seconds", llm.timeout());
         m.put("enable_thinking", llm.enableThinking());
+        m.put("reasoning_effort", blankToNull(llm.reasoningEffort()));
+        m.put("frequency_penalty", llm.frequencyPenalty());
         m.put("context_length", llm.contextLength());
         m.put("enabled", true);
         m.put("is_default", true);
@@ -267,6 +298,8 @@ public class ModelController {
         m.put("max_tokens", cfg.maxTokens());
         m.put("timeout_seconds", cfg.timeoutSeconds());
         m.put("enable_thinking", cfg.enableThinking());
+        m.put("reasoning_effort", blankToNull(cfg.reasoningEffort()));
+        m.put("frequency_penalty", cfg.frequencyPenalty());
         m.put("context_length", cfg.contextLength());
         m.put("enabled", cfg.enabled());
         m.put("is_default", false);
@@ -315,6 +348,42 @@ public class ModelController {
         return null;
     }
 
+    /**
+     * 采样参数校验（POST 全量 / PATCH 仅校验本次传入项）：
+     * provider 方言值域、reasoningEffort 格式（小写字母数字下划线，值集因模型而异不做白名单）、
+     * frequencyPenalty 范围（OpenAI 语义 [-2.0, 2.0]）。
+     *
+     * @return null = 通过；非 null = 400 message
+     */
+    private static String validateSamplingParams(String provider, String reasoningEffort,
+                                                 Double frequencyPenalty) {
+        if (provider != null && !provider.isBlank() && !PROVIDER_DIALECTS.contains(provider.trim())) {
+            return "provider must be one of " + PROVIDER_DIALECTS_SORTED + ": " + provider.trim();
+        }
+        if (reasoningEffort != null && !reasoningEffort.isBlank()
+            && !reasoningEffort.trim().matches("^[a-z0-9_]{1," + MAX_REASONING_EFFORT_LEN + "}$")) {
+            return "reasoningEffort must match ^[a-z0-9_]{1," + MAX_REASONING_EFFORT_LEN + "}$";
+        }
+        if (frequencyPenalty != null && (frequencyPenalty < -2.0 || frequencyPenalty > 2.0)) {
+            return "frequencyPenalty must be within [-2.0, 2.0]";
+        }
+        return null;
+    }
+
+    /** reasoningEffort 归一：空白 → null（NULL = 不下发）；其余去空白（写入前已过格式校验） */
+    private static String normEffort(String reasoningEffort) {
+        if (reasoningEffort == null) {
+            return null;
+        }
+        var trimmed = reasoningEffort.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    /** 空串归 null（视图层：NULL = 不下发） */
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s;
+    }
+
     /** 空白归一：null/空白 → null（DB 存 NULL = 回落系统密钥） */
     private static String normKey(String apiKey) {
         if (apiKey == null) {
@@ -360,7 +429,8 @@ public class ModelController {
 
     /**
      * 新增/更新请求体（camelCase，与 ChatRequest 同风格）：
-     * 新增时 name/modelId/baseUrl 必填；PATCH 时字段缺省=不变，apiKey 传空串=清除回落系统密钥。
+     * 新增时 name/modelId/baseUrl 必填；PATCH 时字段缺省=不变，apiKey 传空串=清除回落系统密钥，
+     * reasoningEffort 传空串=清除（NULL，不下发）。
      */
     public record UpsertRequest(
         String name,
@@ -373,7 +443,19 @@ public class ModelController {
         Integer timeoutSeconds,
         Boolean enableThinking,
         Integer contextLength,
-        Boolean enabled
+        Boolean enabled,
+        /** 推理强度：null=不变（PATCH）/不下发（POST）；空串=清除；非空经格式校验后替换 */
+        String reasoningEffort,
+        /** 频率惩罚：null=不变/不下发；非 null 经范围校验后替换（不可撤销下发，见设计文档 D4） */
+        Double frequencyPenalty
     ) {
+        /** 兼容旧调用（既有测试 11 参签名）：新采样参数缺省 = 不下发/不变 */
+        public UpsertRequest(String name, String provider, String modelId, String baseUrl,
+                             String apiKey, Double temperature, Integer maxTokens,
+                             Integer timeoutSeconds, Boolean enableThinking, Integer contextLength,
+                             Boolean enabled) {
+            this(name, provider, modelId, baseUrl, apiKey, temperature, maxTokens, timeoutSeconds,
+                enableThinking, contextLength, enabled, null, null);
+        }
     }
 }

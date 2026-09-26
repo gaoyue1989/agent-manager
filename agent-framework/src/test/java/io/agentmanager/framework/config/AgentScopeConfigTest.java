@@ -276,7 +276,7 @@ class AgentScopeConfigTest {
     private static AgentManagerProperties propsForLlm() {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
-                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0),
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
             emptyServer(),
             new AgentManagerProperties.CheckpointConfig(
                 "jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
@@ -299,13 +299,13 @@ class AgentScopeConfigTest {
     }
 
     private static AgentManagerProperties.LLMConfig emptyLlm() {
-        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0);
+        return new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0, "", null);
     }
 
     @Test
     void chatModelShouldApplyContextLengthWhenConfigured() {
         var llm = new AgentManagerProperties.LLMConfig(
-            "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 131072);
+            "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 131072, "", null);
 
         var model = factory.buildChatModel(llm, harnessConfig());
 
@@ -315,7 +315,7 @@ class AgentScopeConfigTest {
     @Test
     void chatModelShouldIgnoreContextLengthWhenNotConfigured() {
         var llm = new AgentManagerProperties.LLMConfig(
-            "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0);
+            "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null);
 
         var model = factory.buildChatModel(llm, harnessConfig());
 
@@ -356,7 +356,7 @@ class AgentScopeConfigTest {
 
         var props = new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
-                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0),
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
             emptyServer(), emptyCheckpoint(), "/config", "", cleanupConfig(), emptyFileConfig(),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300), harness);
 
