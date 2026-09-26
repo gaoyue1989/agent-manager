@@ -11,9 +11,10 @@ from . import sse_client
 
 _REQUIRED_CASE_KEYS = ("case_id", "title", "category", "input", "expected")
 
-# 框架内置 @Tool 工具（echo/get_current_time/present_file/present_url）运行时无条件注册，
-# /tools?includeInternal=true 只反映 OAF 声明视图——2026-09-25 对 release-agent 实测：
-# 未声明 echo 时 echo 用例仍 PASS。故内置工具视为恒可用，能力门禁只管 MCP 工具。
+# 框架自定义 @Tool（echo/get_current_time/present_file/present_url）运行时无条件注册。
+# issue #39 落地后 /tools?includeInternal=true 已含 sdkInternal 段（SDK 内置工具实际注册集），
+# 能力门禁可见全量工具；此 frozenset 降级为兜底——对接旧版本接口（无 sdkInternal 段）时
+# 四个自定义内置工具仍恒可用，避免用例被静默跳过。
 _BUILTIN_TOOLS = frozenset({"echo", "get_current_time", "present_file", "present_url"})
 
 
@@ -34,13 +35,19 @@ def load_cases(cases_dir: Path) -> list[dict[str, Any]]:
 
 
 async def fetch_capabilities(base_url: str) -> set[str]:
-    """获取被测 Agent 可用工具名集合（MCP + 内置），用于用例能力匹配。"""
+    """获取被测 Agent 可用工具名集合（MCP + 内置自定义 + SDK 内置），用于用例能力匹配。
+
+    issue #39 后 /tools?includeInternal=true 拆两段：tools（MCP + CustomTool）与
+    sdkInternal（SDK/Harness 内置工具实际注册集），两段并集即全量可调用能力。
+    """
     async with httpx_client() as client:
         resp = await client.get(f"{base_url.rstrip('/')}/tools",
                                 params={"includeInternal": "true"})
         resp.raise_for_status()
-        tools = resp.json().get("tools", [])
-        return {t.get("name") for t in tools if t.get("name")}
+        data = resp.json()
+        names = {t.get("name") for t in data.get("tools", []) if t.get("name")}
+        names |= {t.get("name") for t in data.get("sdkInternal", []) if t.get("name")}
+        return names
 
 
 def httpx_client() -> Any:
@@ -131,9 +138,10 @@ async def run_suite(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """并发执行用例套件（每用例 repeat 次），返回 (traces, skipped)。
 
-    能力匹配：requires_tools 中存在被测 Agent 不可用的工具 → 整条用例 skip。
+    能力匹配：requires_tools 中存在被测 Agent 不可用的工具 → 整条用例 skip
+    （kind=capability，报告单列醒目提示，区别于预期内的环境分流）。
     环境门禁：requires_env（设计 §4.6，如 plugin:echo-tool / mock_mcp:ask / reload）
-    未被供给满足 → skip；env_tags=None 视为空集（未供给环境时环境用例一律跳过）。
+    未被供给满足 → skip（kind=env）；env_tags=None 视为空集（未供给环境时环境用例一律跳过）。
     on_trace(trace)：每条轨迹完成即回调（长跑任务的增量进度，避免整体静默）。
     """
     skipped: list[dict[str, str]] = []
@@ -146,9 +154,11 @@ async def run_suite(
         missing_env = [e for e in case.get("requires_env") or [] if e not in effective_env]
         if missing_tools:
             skipped.append({"case_id": case["case_id"],
+                            "kind": "capability",
                             "reason": f"被测 Agent 缺少工具: {missing_tools}"})
         elif missing_env:
             skipped.append({"case_id": case["case_id"],
+                            "kind": "env",
                             "reason": f"评测环境未供给: {missing_env}"})
         else:
             runnable.append(case)

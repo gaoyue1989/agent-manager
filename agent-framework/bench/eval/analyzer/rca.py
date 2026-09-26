@@ -93,8 +93,19 @@ def build_report(task_id: str, meta: dict[str, Any], traces: list[dict[str, Any]
             lines.append(_fmt_case_row(t))
 
     if skipped:
-        lines += ["", "## 跳过用例（能力不满足）", ""]
-        lines += [f"- {s['case_id']}: {s['reason']}" for s in skipped]
+        # issue #39：能力缺失跳过与环境分流跳过分开列——前者是被测 Agent 能力与用例声明
+        # 失配的信号（用例未执行且不计入通过率，容易被静默忽略），需醒目提示
+        cap_skips = [s for s in skipped if s.get("kind") == "capability"]
+        env_skips = [s for s in skipped if s.get("kind") != "capability"]
+        lines += ["", "## 跳过用例（不计入通过率）", ""]
+        if cap_skips:
+            lines += ["### ⚠️ 能力缺失（requires_tools 未满足：被测 Agent 缺少工具，"
+                      "需排查能力清单或用例声明）", ""]
+            lines += [f"- {s['case_id']}: {s['reason']}" for s in cap_skips]
+            lines += [""]
+        if env_skips:
+            lines += ["### 环境未供给（requires_env，预期分流）", ""]
+            lines += [f"- {s['case_id']}: {s['reason']}" for s in env_skips]
 
     if judge_results:
         lines += ["", "## 语义打分（judge，advisory 不阻断）", "",

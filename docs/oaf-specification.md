@@ -151,6 +151,7 @@ orchestration:
 # === TOOLS (Optional) ===
 # 语义（issue #28）：声明/展示意图，非存在性开关——内置 @Tool 工具运行时恒注册，
 # /tools?includeInternal=true 返回运行时注册集（declared 字段标注是否在列表内）；
+# SDK/Harness 框架自注册的内置工具在响应的 sdkInternal 独立段落透出（issue #39）；
 # 要移除内置工具用 deniedTools（类粒度，整个工具类的所有方法一并剔除）
 
 tools: ["Read", "Edit", "Bash", "Glob", "Grep"]

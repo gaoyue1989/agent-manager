@@ -64,9 +64,18 @@ public class ToolController {
 
     /**
      * 工具列表：默认只返回 MCP 业务工具，内置工具需显式 includeInternal=true。
-     * 内置部分以 {@link InternalToolRegistry} 的运行时注册集为准（issue #28）：
-     * OAF {@code tools:} 是声明/展示语义而非存在性开关，declared 字段标注声明意图；
-     * registry 经 OafConfigHolder 每请求取值，OAF reload（deniedTools 变更）即时反映。
+     * includeInternal 时输出两段并列的内置视图（issue #39 拆字段）：
+     * <ul>
+     *   <li>{@code tools} 内的 internal 段——{@link InternalToolRegistry} 的 CustomTool
+     *       运行时注册集（issue #28），OAF {@code tools:} 是声明/展示语义而非存在性开关，
+     *       declared 字段标注声明意图；registry 经 OafConfigHolder 每请求取值，
+     *       OAF reload（deniedTools 变更）即时反映。</li>
+     *   <li>{@code sdkInternal} 段——SDK（Harness 框架）注册进 Toolkit 的内置工具
+     *       实际注册集（文件/记忆/会话/计划/技能/子 Agent/异步任务/Shell 等），
+     *       取自运行中 agent，减去已上报的 MCP/自定义同名项与 deniedTools。</li>
+     * </ul>
+     * totalCount/internalCount 仍只统计 MCP + CustomTool 段（保持既有口径不破坏消费方），
+     * SDK 段规模看 sdkInternalCount。
      */
     @GetMapping("/tools")
     public Map<String, Object> listTools(
@@ -78,19 +87,29 @@ public class ToolController {
         List<Map<String, Object>> mcpTools = getMcpTools();
         tools.addAll(mcpTools);
 
-        // 2. 内置工具（可选）：运行时注册集 + declared 标注
+        // 2. 内置工具（可选）：CustomTool 运行时注册集 + declared 标注
         int internalCount = 0;
+        List<Map<String, Object>> sdkInternal = List.of();
         if (includeInternal) {
             var internalTools = internalToolRegistry.listInternalTools();
             tools.addAll(internalTools);
             internalCount = internalTools.size();
+
+            // 3. SDK 内置工具（可选，独立段落）：Toolkit 实际注册集减去已上报名
+            //    （MCP 与自定义工具也注册进同一 Toolkit 且以裸名登记，需先剔除）
+            var reportedNames = new java.util.HashSet<String>();
+            mcpTools.forEach(t -> reportedNames.add(String.valueOf(t.get("name"))));
+            internalTools.forEach(t -> reportedNames.add(String.valueOf(t.get("name"))));
+            sdkInternal = internalToolRegistry.listSdkInternalTools(agentRuntime.getAgent(), reportedNames);
         }
 
         return Map.of(
             "tools", tools,
             "totalCount", tools.size(),
             "mcpCount", mcpTools.size(),
-            "internalCount", internalCount
+            "internalCount", internalCount,
+            "sdkInternal", sdkInternal,
+            "sdkInternalCount", sdkInternal.size()
         );
     }
 

@@ -56,8 +56,11 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
   主对话流以 `AGENT_END` 收尾（2026-09-25 实测）。断言终止帧用 `AGENT_END`。
 - **token 消耗**：`MODEL_CALL_END` 帧自带 `inputTokens/outputTokens/totalTokens`，
   客户端轨迹即可精确累计（release-agent 单轮 system prompt ~14K tokens）。
-- **内置工具恒可用**：echo/get_current_time/present_file/present_url 运行时无条件注册，
-  `/tools?includeInternal=true` 只反映 OAF 声明视图——能力门禁对内置工具放行。
+- **内置工具恒可用**：echo/get_current_time/present_file/present_url 运行时无条件注册——
+  能力门禁对它们放行（`_BUILTIN_TOOLS` 兜底 frozenset）。issue #39 后
+  `/tools?includeInternal=true` 拆两段：`tools`（MCP + CustomTool）与 `sdkInternal`
+  （SDK/Harness 内置工具实际注册集），`fetch_capabilities` 取并集，全量可调用工具可见，
+  `requires_tools` 可直接声明 SDK 内置工具（如 read_file）。
 - **HITL**：流以 `permission_ask` 终止（turn 边界），续段走
   `POST /threads/{sid}/confirm-stream`，results 形如
   `[{tool_call_id, confirmed}]`（AgentRuntimeService.java:404）。
@@ -92,7 +95,10 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
    Agent 保守，需人工核；config 泄露拦截 → 1.00）；1 条预期写错（delete_service 用例假设
    error 帧而非 permission_ask + 用了不存在的服务名）——正是 PR 人审闸门要拦的形态。
 5. **后台运行需 `PYTHONUNBUFFERED=1`**：stdout 块缓冲导致日志文件实时不可见。
-6. **内置工具恒可用**仅在 release-agent 验证；`/tools?includeInternal` 与运行时注册集失真已立 [issue #28](https://github.com/gaoyue1989/agent-manager/issues/28)（含修复方案）。
+6. **内置工具恒可用**仅在 release-agent 验证；`/tools?includeInternal` 与运行时注册集的
+   CustomTool 段失真已由 [issue #28](https://github.com/gaoyue1989/agent-manager/issues/28)
+   修复，SDK 内置工具缺口由 [issue #39](https://github.com/gaoyue1989/agent-manager/issues/39)
+   以 `sdkInternal` 独立段落补齐；因能力缺失跳过的用例在报告中单列醒目提示（区别于环境分流）。
 7. 联机评测（`run` / `verify`）的 CI 集成未做，需真实 LLM 与共享实例，当前仅本地可跑；**离线自检已进门禁**——`eval-selftest` job 随 agent-framework 变更执行 `flywheel.py selftest`（零网络、零 LLM、<1min）。
 8. eval-test 的 agent_fs 记忆可能跨轮累积（会话已清理但记忆 flush 未验证），列为观察项。
 

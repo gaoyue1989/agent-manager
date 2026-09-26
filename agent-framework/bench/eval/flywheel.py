@@ -460,7 +460,26 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     r2 = checks_mod.evaluate({"frames": {"AGENT_END": 1, "done": 0}}, no_done)
     assert all(c["passed"] for c in r2), r2
 
-    print(f"selftest PASS（帧映射 + 检查器 + HITL 视图 + 错误断言 + 失败分类，"
+    # issue #39：能力门禁跳过分类（kind）与报告渲染——capability 单列醒目、env 预期分流。
+    # 两条用例全部被跳过 → runnable 为空，run_suite 不发起任何网络请求（离线可测）。
+    async def _skip_probe() -> None:
+        skip_cases = [
+            {"case_id": "case_skip_tool", "title": "t", "category": "c",
+             "input": {"message": "hi"}, "expected": {}, "requires_tools": ["read_file"]},
+            {"case_id": "case_skip_env", "title": "t", "category": "c",
+             "input": {"message": "hi"}, "expected": {}, "requires_env": ["reload"]},
+        ]
+        _, skipped = await suite_runner.run_suite(
+            skip_cases, "http://127.0.0.1:1", repeat=1, capabilities={"echo"}, env_tags=set())
+        kinds = {s["case_id"]: s.get("kind") for s in skipped}
+        assert kinds == {"case_skip_tool": "capability", "case_skip_env": "env"}, skipped
+        rep = rca_mod.build_report("selftest-skip", {}, [], skipped)
+        assert "⚠️ 能力缺失" in rep and "case_skip_tool" in rep, rep
+        assert "环境未供给" in rep and "case_skip_env" in rep, rep
+
+    asyncio.run(_skip_probe())
+
+    print(f"selftest PASS（帧映射 + 检查器 + HITL 视图 + 错误断言 + 失败分类 + 跳过分类，"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧）")
     return 0
 

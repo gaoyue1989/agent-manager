@@ -99,4 +99,30 @@ class InternalToolRegistryTest {
         assertTrue(names.contains("get_current_time"));
         assertTrue(names.contains("echo"));
     }
+
+    @Test
+    void sdkInternalShouldSubtractReportedAndDeniedNames() {
+        // issue #39：SDK 段 = 运行中 agent Toolkit 实际注册集 − 已上报名（MCP/自定义）− deniedTools
+        var agent = mock(io.agentscope.harness.agent.HarnessAgent.class);
+        var toolkit = mock(io.agentscope.core.tool.Toolkit.class);
+        when(agent.getToolkit()).thenReturn(toolkit);
+        when(toolkit.getToolNames()).thenReturn(new java.util.LinkedHashSet<>(List.of(
+            "read_file", "write_file", "memory_save", "echo", "get_weather", "plan_enter")));
+
+        var registry = new InternalToolRegistry(
+            holder(List.of(), List.of("memory_save")), List.of(new BusinessTools()));
+        // echo（自定义 @Tool）与 get_weather（MCP 裸名）已上报，memory_save 命中 deniedTools
+        var items = registry.listSdkInternalTools(agent, Set.of("echo", "get_weather"));
+
+        var names = items.stream().map(m -> (String) m.get("name")).toList();
+        assertEquals(List.of("plan_enter", "read_file", "write_file"), names, "剔除后剩余 SDK 内置且有序");
+        items.forEach(m -> assertEquals("sdk", m.get("category")));
+    }
+
+    @Test
+    void sdkInternalShouldReturnEmptyWhenAgentNotReady() {
+        // fail-soft：agent 未就绪（启动早期/测试环境）时返回空段，不抛异常
+        var registry = new InternalToolRegistry(holder(List.of(), List.of()), List.of());
+        assertTrue(registry.listSdkInternalTools(null, Set.of("echo")).isEmpty());
+    }
 }

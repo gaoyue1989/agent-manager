@@ -132,4 +132,50 @@ class ToolControllerTest {
             .andExpect(jsonPath("$.tools[0].name").value("echo"))
             .andExpect(jsonPath("$.totalCount").value(1));
     }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listToolsShouldExposeSdkInternalSectionWhenRequested() throws Exception {
+        // issue #39 拆字段：SDK 内置工具走独立 sdkInternal 段，不计入 tools/totalCount/internalCount
+        when(internalToolRegistry.listInternalTools()).thenReturn(List.of(
+            Map.of("name", "echo", "category", "internal", "source", "builtin", "declared", false)
+        ));
+        when(internalToolRegistry.listSdkInternalTools(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any()))
+            .thenReturn(List.of(
+                Map.of("name", "plan_enter", "category", "sdk", "source", "sdk"),
+                Map.of("name", "read_file", "category", "sdk", "source", "sdk")));
+        var agent = org.mockito.Mockito.mock(io.agentscope.harness.agent.HarnessAgent.class);
+        var toolkit = org.mockito.Mockito.mock(io.agentscope.core.tool.Toolkit.class);
+        when(agentRuntime.getAgent()).thenReturn(agent);
+        when(agent.getToolkit()).thenReturn(toolkit);
+        when(toolkit.getToolNames()).thenReturn(java.util.Set.of("echo", "read_file", "plan_enter"));
+
+        mockMvc.perform(get("/tools?includeInternal=true"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sdkInternal.length()").value(2))
+            .andExpect(jsonPath("$.sdkInternal[0].name").value("plan_enter"))
+            .andExpect(jsonPath("$.sdkInternal[0].category").value("sdk"))
+            .andExpect(jsonPath("$.sdkInternal[1].name").value("read_file"))
+            .andExpect(jsonPath("$.sdkInternalCount").value(2))
+            // 既有口径不变：SDK 段不并入 tools/totalCount/internalCount
+            .andExpect(jsonPath("$.totalCount").value(1))
+            .andExpect(jsonPath("$.internalCount").value(1));
+
+        // 控制器传给 registry 的排除集 = 已上报名（MCP 裸名 + 自定义 @Tool 名），不含 SDK 名
+        var captor = org.mockito.ArgumentCaptor.forClass(java.util.Set.class);
+        org.mockito.Mockito.verify(internalToolRegistry).listSdkInternalTools(
+            org.mockito.ArgumentMatchers.same(agent), captor.capture());
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of("echo"), captor.getValue());
+    }
+
+    @Test
+    void listToolsDefaultShouldCarryEmptySdkInternal() throws Exception {
+        // 默认请求不触碰 agent：sdkInternal 恒为空段（字段稳定存在，新增键对消费方无感）
+        mockMvc.perform(get("/tools"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sdkInternal").isEmpty())
+            .andExpect(jsonPath("$.sdkInternalCount").value(0));
+    }
 }
