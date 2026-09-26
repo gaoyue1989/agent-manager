@@ -379,7 +379,7 @@ docker run -d --name agent-framework -p 8100:8100 \
   agent-framework:latest
 ```
 
-链路追踪（OTel Java Agent 方案，详见 [docs/tracing-design.md](docs/tracing-design.md)）：设 `OTEL_EXPORTER_OTLP_ENDPOINT` 即自动启用（ENTRYPOINT 注入 `-javaagent`），**不可**设 `OTEL_TRACES_EXPORTER=none`（会连 Agent 导出一起禁用）：
+链路追踪（OTel Java Agent 方案，详见 [docs/tracing-design.md](docs/tracing-design.md)）：设 `OTEL_EXPORTER_OTLP_ENDPOINT` 即自动启用（ENTRYPOINT 注入 `-javaagent`），**不可**设 `OTEL_TRACES_EXPORTER=none`（会连 Agent 导出一起禁用）；`ModelIoTracingMiddleware`/`ToolCallTracingMiddleware` 额外把模型与工具调用的实际输入输出补录到 chat/execute_tool span（`gen_ai.*.messages` / `gen_ai.tool.call.*`，超长截断）：
 
 ```bash
 docker run -d --name agent-framework -p 8100:8100 \

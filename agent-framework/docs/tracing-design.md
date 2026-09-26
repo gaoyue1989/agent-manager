@@ -1188,6 +1188,10 @@ docker run -d --name jaeger \
 | `gen_ai.request.tools.count` | OtelTracingMiddleware | 工具数 |
 | `gen_ai.usage.input_tokens` | OtelTracingMiddleware | 输入 token |
 | `gen_ai.usage.output_tokens` | OtelTracingMiddleware | 输出 token |
+| `gen_ai.input.messages` | ModelIoTracingMiddleware | 模型实际输入（完整 messages 的 role/content JSON，超 8192 字符截断） |
+| `gen_ai.output.messages` | ModelIoTracingMiddleware | 模型实际输出（正文/思考/工具调用 JSON，随流式事件累积，同截断） |
+| `gen_ai.tool.call.arguments` | ToolCallTracingMiddleware | 工具调用入参（[{id, name, description, arguments}] JSON，描述由 onModelCall ToolSchema 缓存补齐，同截断；批次多调用为数组扩展） |
+| `gen_ai.tool.call.result` | ToolCallTracingMiddleware | 工具调用出参（[{id, name, state, output}] JSON，出参随 ToolResult 增量事件累积，state 取自 ToolResultEndEvent；批次多调用为数组扩展） |
 | `gen_ai.tool.name` | OtelTracingMiddleware | 工具名 |
 | `gen_ai.tool.call.count` | OtelTracingMiddleware | 工具调用数 |
 | `gen_ai.tool.call.id` | OtelTracingMiddleware | 工具调用 ID |
@@ -1222,6 +1226,12 @@ docker run -d --name jaeger \
 | 用户/会话 | 无 | 无 | 有 |
 
 **三者互不冲突**，洋葱模型中各自独立执行。
+
+> 注：`ModelIoTracingMiddleware` / `ToolCallTracingMiddleware`（注册于 OtelTracingMiddleware 之后）
+> 补齐"内容"维度——前者把模型实际输入/输出写入 chat span，后者把工具调用名称/描述/入参/出参
+> 写入 execute_tool span（单条属性超 8192 字符截断）。每次调用写一次（End 事件/complete/error 先到者触发）；
+> **取消路径不保证写入**——cancel 信号由外向内传播，外层 Otel 先 end span，本层 setAttribute 被 SDK 丢弃。
+> memory/compaction（TracingModelWrapper）绕过 onModelCall/onActing 链，暂不覆盖内容属性。
 
 ---
 

@@ -154,6 +154,10 @@ public class HarnessAgentFactory {
                     sessionUserStore, modelCatalog))
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
+                // 模型实际输入/输出补录到 chat span（gen_ai.input/output.messages）
+                .middleware(new io.agentmanager.framework.service.ModelIoTracingMiddleware())
+                // 工具调用名称/描述/入参/出参补录到 execute_tool span
+                .middleware(new io.agentmanager.framework.service.ToolCallTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
                 .middleware(new io.agentmanager.framework.service.FrameworkTracingMiddleware(oafConfig.slug()))
                 // ReAct 推理轮次 span（order=0，覆盖 onReasoning）
