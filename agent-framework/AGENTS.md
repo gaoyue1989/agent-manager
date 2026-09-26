@@ -97,7 +97,7 @@ agent-framework/
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
-│   └── test/                                  # 83 个测试类 / 883 个 @Test（含默认跳过的沙箱集成测试）
+│   └── test/                                  # 101 个实跑测试类 / 1026 个用例（2026-09-26 实跑，0 失败 4 跳过）
 ├── docs/                                     # 设计与改进方案文档 (38 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -405,8 +405,11 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 83 个测试类 / 883 个 @Test（实测 find src/test -name '*Test.java' 与 grep -rh '@Test' src/test；
-             # 实跑 860 用例、0 失败，其中跳过 4 个沙箱集成测试；S3FileStorageIT 等 *IT 按命名不参与 surefire）
+mvn test     # 2026-09-26 实跑：1026 用例、0 失败、0 错误、4 跳过、BUILD SUCCESS（~55s，JDK 21）
+             # 实跑 101 个测试类。静态注解清点为 106 文件 / 1047 个 @Test，差额 21 全部来自
+             # 5 支按命名不参与 surefire 的 *IT（RedisEventLogIT 10 / SessionEventStoreCrossReplicaIT 6 /
+             # S3FileStorageIT 3 / SessionUserStoreMySqlIT 1 / ThreadHistoryConfirmIT 1），需 -Dtest= 显式跑
+             # 跳过的 4 例全部来自 OpenSandboxApiIntegrationTest（需真实 OpenSandbox Server 可达）
 mvn -o test  # 离线模式 (离线开发镜像内)
 ```
 

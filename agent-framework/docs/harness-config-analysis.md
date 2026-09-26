@@ -1,6 +1,9 @@
 # AgentScope Harness 配置化分析文档
 
 > **目的**：梳理 agent-framework 中 AgentScope Harness 相关的固定变量，识别可配置化项，形成变更方案。
+> **范围声明**：§1–§3 是 2026-09-15 编制时点的**分析快照**，其中的「代码位置」行号（多处指向 `AgentScopeConfig.java`）
+> 已随重构失效——HarnessAgent 装配与中间件注册已迁至 `service/HarnessAgentFactory.java`，LLM 模型装配已抽到
+> `config/ChatModelFactory.java`。常量与配置项本身仍然有效，行号不作为依据。
 > **状态**：设计文档（仅分析，不做代码变更）
 > **日期**：2026-09-15
 
@@ -23,8 +26,9 @@
 | 类别 | 环境变量 | 默认值 | 绑定位置 |
 |------|---------|--------|---------|
 | LLM | `LLM_API_KEY`, `LLM_MODEL_ID`, `LLM_BASE_URL`, `LLM_PROVIDER` | - | `AgentManagerProperties.LLMConfig` |
-| LLM | `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT` | 0.7, 4096, 120 | `AgentManagerProperties.LLMConfig` |
-| LLM | `LLM_CONTEXT_LENGTH` | 0（≤0 不传给模型） | `AgentManagerProperties.LLMConfig`；>0 时传入 `OpenAIChatModel.contextWindowSize()`（见 AgentScopeConfig.buildChatModel） |
+| LLM | `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT` | **0.3, 16384**, 120 | `AgentManagerProperties.LLMConfig` |
+| LLM | `LLM_ENABLE_THINKING` | false | `AgentManagerProperties.LLMConfig`；`false` → 注入 `chat_template_kwargs.enable_thinking=false` |
+| LLM | `LLM_CONTEXT_LENGTH` | 0（≤0 不传给模型） | `AgentManagerProperties.LLMConfig`；>0 时传入 `OpenAIChatModel.contextWindowSize()`（见 `config/ChatModelFactory.java`） |
 | 服务 | `SERVER_PORT`, `SERVER_HOST` | 8100, 0.0.0.0 | `AgentManagerProperties.ServerConfig` |
 | 数据库 | `CHECKPOINT_JDBC_URL`, `CHECKPOINT_USERNAME`, `CHECKPOINT_PASSWORD`, `CHECKPOINT_DB_NAME` | - | `AgentManagerProperties.CheckpointConfig` |
 | 沙箱 | `SANDBOX_ENABLED`, `SANDBOX_IMAGE`, `SANDBOX_TIMEOUT_MINUTES` 等 | - | `SandboxConfig` |
@@ -34,7 +38,15 @@
 
 ### 1.3 ⚠️ 关键发现：LLM 参数未生效
 
-> **更新（2026-09-20）：已修复。** AgentScopeConfig 现已把 temperature/maxTokens 传入 builder（:292-293），并在 `LLM_CONTEXT_LENGTH>0` 时传入 contextWindowSize（:307，见 docs/design/llm-context-length-config-design.md）。下文分析保留作过程记录。
+> **更新（2026-09-20）：已修复。** temperature/maxTokens 现已传入 builder，并在 `LLM_CONTEXT_LENGTH>0` 时传入
+> contextWindowSize（见 [../docs/design/llm-context-length-config-design.md](../../docs/design/llm-context-length-config-design.md)）。
+> **再更新（2026-09-25）**：该装配逻辑已从 `AgentScopeConfig` 抽到 **`config/ChatModelFactory.java`**
+> （`.temperature()` / `.maxTokens()` / `contextWindowSize()` / HTTP 超时），成为**系统模型与托管模型的唯一装配出口**——
+> 两处共用同一套口径，避免装配逻辑漂移。原先 §1.3 引用的行号已失效。
+>
+> 同源提醒：OAF 包 frontmatter 的 `model.*` 与 `config.temperature` / `config.max_tokens` **至今仍不参与实际 LLM 调用**，
+> 只回显到生成的 workspace AGENTS.md 与 `/debug/config`、`/metadata`。换模型请用 `LLM_MODEL_ID` 环境变量或 `/models` 托管模型。
+> 下文分析保留作过程记录。
 
 **`LLM_TEMPERATURE` 和 `LLM_MAX_TOKENS` 虽然在 `application.yml` 中绑定到了 `AgentManagerProperties.LLMConfig`，但在 `AgentScopeConfig.harnessAgent()` 构造模型时从未传递给 `OpenAIChatModel.builder()` 或 `HarnessAgent.builder()`。**
 

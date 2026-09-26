@@ -111,7 +111,7 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（83 类 / 883 个 @Test，实跑 860 用例）+ `eval-selftest`（评测飞轮离线自检） | 核心/多副本/沙箱/工具插件四 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| agent-framework-ci | `mvn test`（2026-09-26 实跑 1026 用例 / 0 失败 / 4 跳过，101 个实跑测试类）+ `eval-selftest`（评测飞轮离线自检） | 核心/多副本/沙箱/工具插件四 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
 
 ### 日常提交流程（必须走 PR 门禁）
 

@@ -2,11 +2,16 @@
 
 > **状态: 🚧 已实施 + 单元测试全绿 + Jaeger E2E 验证通过（2026-08-13）**
 >
-> - 步骤 1–13 完成：当时 300 用例 0 失败（现 61 测试类 / 456 个 @Test）；第十节 10 项验证全部通过
+> - 步骤 1–13 完成：当时 300 用例 0 失败（**2026-09-26 实跑更新**：`mvn test` 1026 用例、0 失败、4 跳过、BUILD SUCCESS，101 个实跑测试类）；第十节 10 项验证全部通过
 > - **最终选型：OTel Java Agent v2.12.0**（4.7 方案 A）——自研 HTTP Filter 方案实测 MVC 异步断链（验证 #5 失败），Agent 方案单一 trace_id 达成。生产部署走 Agent；`OtelConfig`/`HttpTracingFilter` 保留为无 Agent 环境的 fallback（第七节验证结果、第八节风险状态）
 > - 步骤 14 完成：Dockerfile 内置 agent jar + 自动注入 + Makefile `otel-agent` 目标（2026-08-13 验证 ✅，见 4.7 与第十节）
 > - 步骤 15 完成：Dockerfile.dev 预置 javaagent jar + OTel 1.61.0 依赖缓存，已导出离线镜像（2026-08-13）
 > - 全部 15 个实施步骤完成 ✅
+> - **步骤 16/17 完成（2026-09-26）**：`ModelIoTracingMiddleware` / `ToolCallTracingMiddleware` 把模型与工具调用的
+>   **实际输入输出**补录到 chat / execute_tool span（`gen_ai.input.messages` / `gen_ai.output.messages` /
+>   `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result`，超长截断）。详见 §8 与第九节尾注
+> - **注册位置变更（2026-09-25）**：中间件注册已从 `config/AgentScopeConfig.java` 迁至
+>   `service/HarnessAgentFactory.java`（HarnessAgent 装配与 reload 重建的唯一出口）
 
 ## 一、背景与目标
 
@@ -88,39 +93,26 @@ agentscope-core-2.0.0.jar
 > **已修正（实施阶段核实 SDK 2.0.0 字节码）**：`MiddlewareBase` **无 `order()` 方法**（仅有 5 个钩子默认方法），此前"按 order() 降序排序"的假设错误。实际机制：
 > - `ReActAgent` 构造器将中间件存为 `List.copyOf([GracefulShutdownMiddleware, ...builder.middlewares])`，**无排序**
 > - `MiddlewareChain.build()` 从列表末尾向前遍历构建洋葱链 → **注册顺序 = 执行顺序，先注册者 = 更外层 = 更先执行**
-> - 结论：执行位置由 `.middleware()` **调用顺序**决定。当前注册顺序（AgentScopeConfig）：`Otel → Framework → Reasoning → LlmLogging → SandboxUserKey`，恰好满足"Otel 最外层、Framework/Reasoning 内层"的设计意图。
+> - 结论：执行位置由 `.middleware()` **调用顺序**决定。**当前注册顺序（`service/HarnessAgentFactory.java`，2026-09-25 起）**：
+`Otel → ModelIo → ToolCall → Framework → Reasoning → LlmLogging → SandboxUserKey`——
+共 7 个中间件（此前 5 个），两个 IO 补录中间件紧跟 `OtelTracingMiddleware` 之后、其余内层中间件之前注册，
+因此它们观测到的是「已完成上下文注入、但未进入推理」的那一层。
+
+**当前注册的 7 个中间件（外 → 内 = 注册顺序）：**
+
+| # | 中间件 | 登记类 | 钩子 | 作用 |
+|---|--------|--------|------|------|
+| 1 | `OtelTracingMiddleware` | OTel SDK | — | 创建 span，经 `ContextPropagationOperator.runWithContext` 注入 Reactor Context |
+| 2 | `ModelIoTracingMiddleware` | 本仓 | `onModelCall` | 把模型实际输入/输出 messages 写入 chat span（`gen_ai.input.messages` / `gen_ai.output.messages`，超 8192 字符截断） |
+| 3 | `ToolCallTracingMiddleware` | 本仓 | `onToolCall` | 工具入参/结果写入 execute_tool span（`gen_ai.tool.call.arguments` / `.result`，同上截断） |
+| 4 | `FrameworkTracingMiddleware` | 本仓 | `next.apply` | 此时 `Span.current()` 已指向 Otel 的 span → 写入 `userId` / `sessionId` |
+| 5 | `ReasoningTracingMiddleware` | 本仓 | `onReasoning` | 每轮推理 span |
+| 6 | `LlmLoggingMiddleware` | 本仓 | `onModelCall` | 记录到 `LLMLogger` 内存（`GET /threads/{sid}/llm-calls` 数据源） |
+| 7 | `SandboxUserKeyMiddleware` | 本仓 | `onAgent` | 注入 userId 到 ThreadLocal（最内层，紧邻核心 agent 逻辑） |
 
 ```
-执行顺序（外 → 内）＝注册顺序（.middleware() 调用顺序）：
-
-┌─────────────────────────────────────────────────────────────┐
-│  MiddlewareChain 执行顺序（外 → 内）                          │
-│                                                             │
-│  ┌─ OtelTracingMiddleware（最先注册，最外层）───────────────┐ │
-│  │  创建 span，通过 ContextPropagationOperator.runWithContext │ │
-│  │  将 span context 注入 Reactor Context                    │ │
-│  │                                                         │ │
-│  │  ┌─ FrameworkTracingMiddleware（第 2 注册）────────────┐  │ │
-│  │  │  next.apply(input) 内部执行时，Span.current()      │  │ │
-│  │  │  已指向 Otel 创建的 span → 写入 userId/sessionId   │  │ │
-│  │  │                                                    │  │ │
-│  │  │  ┌─ ReasoningTracingMiddleware（第 3 注册）───────┐  │  │ │
-│  │  │  │  onReasoning: 创建每轮推理 span                │  │  │ │
-│  │  │  │                                                │  │  │ │
-│  │  │  │  ┌─ LlmLoggingMiddleware（第 4 注册）───────┐  │  │  │ │
-│  │  │  │  │  onModelCall: 记录到 LLMLogger 内存      │  │  │  │ │
-│  │  │  │  │                                          │  │  │  │ │
-│  │  │  │  │  ┌─ SandboxUserKeyMiddleware（最内层）─┐  │  │  │  │ │
-│  │  │  │  │  │  onAgent: 注入 userId 到 ThreadLocal│  │  │  │  │ │
-│  │  │  │  │  │  (实际核心 agent 逻辑)              │  │  │  │  │ │
-│  │  │  │  │  └────────────────────────────────────┘  │  │  │  │ │
-│  │  │  │  └──────────────────────────────────────────┘  │  │  │ │
-│  │  │  └────────────────────────────────────────────────┘  │  │ │
-│  │  └──────────────────────────────────────────────────────┘  │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-
-注：SandboxUserKeyMiddleware 仅在沙箱模式（SANDBOX_ENABLED=true）下注册。
+外 ──▶ Otel ──▶ ModelIo ──▶ ToolCall ──▶ Framework ──▶ Reasoning ──▶ LlmLogging ──▶ SandboxUserKey ──▶ 核心 agent 逻辑 ──▶ 内
+                                                          （第 4 层往内，Span.current() 已可用）
 ```
 
 **Reasoning 嵌套关系**（ReasoningTracingMiddleware 末实现 onAgent/onModelCall 为直通；OtelTracingMiddleware 未实现 onReasoning 为直通）：
@@ -1294,6 +1286,8 @@ docker run -d --name jaeger \
 | P3 | 沙箱 exec 内部延迟细分 | 沙箱内代码执行在 `execute_tool` 内无细分 | 在 OpenSandbox exec 调用处埋点（与 SDK 行为对齐后再评估） |
 | P3 | 推理轮次编号 | reasoning span 无轮次序号 | Reactor Context 传计数器（见 4.8 注释） |
 | P3 | flush 与 consolidation 的 span 区分 | 共用同一 model 实例，span 名称统一为 `memory` | 向 SDK 提交 MemoryConfig 拆分 model 的 issue（见 4.10 注释） |
+| P3 | IO 补录：取消路径属性丢失 | 2026-09-26 实测。取消时 span 已 `end()`，此后 `onModelCall` / `onToolCall` 追加的属性会被 OTel 丢弃 | 需 SDK 支持向已结束 span 补写，或在取消钩子中提前落属性 |
+| P3 | IO 补录：`TracingModelWrapper` 路径无内容属性 | memory flush / consolidation / compaction 走包装 model，不经过 `ModelIoTracingMiddleware` 的观测点 | 需在 `TracingModelWrapper` 内复用同一套 messages 提取逻辑 |
 
 ---
 
@@ -1305,7 +1299,7 @@ docker run -d --name jaeger \
 |------|------|------|---------|
 | 单元测试 | JUnit 5 + Mockito + InMemorySpanExporter | 无外部服务 | 各 tracing 组件的 span 创建/属性/状态/委托 |
 | 集成验证 | 手动 E2E（第七节）+ Jaeger | 本地 Jaeger + MySQL + LLM key | 全链路 span 层级、trace 唯一性、沙箱模式 |
-| 回归保障 | 全量 `mvn test`（当时 300 用例，现 456） | 无 | 确保 tracing 接入不破坏既有功能 |
+| 回归保障 | 全量 `mvn test`（当时 300 用例；**2026-09-26 实跑 1026 用例 / 0 失败 / 4 跳过**） | 无 | 确保 tracing 接入不破坏既有功能 |
 
 ### 13.2 测试基础设施 `TracingTestBase`
 
@@ -1370,7 +1364,17 @@ public abstract class TracingTestBase {
 
 ### 13.3 单元测试清单
 
-新增/扩展 7 个测试类（沿用现有纯 JUnit 5 + Mockito 风格，参考 `LlmLoggingMiddlewareTest`）：
+新增/扩展 **9 个**测试类（沿用现有纯 JUnit 5 + Mockito 风格，参考 `LlmLoggingMiddlewareTest`）。
+**全部用例数已按 2026-09-26 实跑核对**：追踪系列现共 **48 例**（既有 7 类 32 例 + IO 补录 2 类 16 例）。
+
+**2026-09-26 随 IO 补录新增 2 个：**
+
+| 测试类 | 覆盖组件 | 关键用例 | 验证点 |
+|--------|---------|---------|--------|
+| `ModelIoTracingMiddlewareTest`（6 用例） | 模型 IO 补录 | ①正常请求把输入 messages 写入 `gen_ai.input.messages`；②流式输出累积到 `gen_ai.output.messages`；③超 8192 字符截断；④描述缓存不重复序列化；⑤无活跃 span 时直通；⑥batch 场景数组扩展 | 四个 content 属性、截断长度、委托等价性 |
+| `ToolCallTracingMiddlewareTest`（10 用例） | 工具 IO 补录 | ①入参写入 `gen_ai.tool.call.arguments`；②结果写入 `gen_ai.tool.call.result`；③超长截断；④错误结果路径；⑤`tool_call_id` 关联；⑥无活跃 span 直通等 | execute_tool span 属性、截断、异常路径 |
+
+**2026-08 随基础追踪新增/扩展 7 个：**
 
 | 测试类 | 覆盖组件 | 关键用例 | 验证点 |
 |--------|---------|---------|--------|
@@ -1472,7 +1476,7 @@ void shouldPassThroughWhenNoSdkRegistered() {
 2. **no-op 场景必须测**：`OTEL_TRACES_EXPORTER=none`（默认）时所有组件应透传且零开销——示例 3 覆盖。
 3. **Reactor 异步性**：span 结束发生在 `doOnComplete/doOnError`，断言前必须 `blockLast()` 或 `StepVerifier` 同步化；`Flux.defer` 保证惰性创建 span（订阅时才创建）。
 4. **不 mock OTel 全局对象**：用 `InMemorySpanExporter` 走真实链路，避免 `mock(Span.class)` 掩盖上下文传播问题。
-5. **全量回归**：`mvn test` 全量用例通过为验收底线（当前 61 测试类 / 456 个 @Test）；`LlmLoggingMiddlewareTest`、`InMemoryLogAppenderTest` 等既有测试不得因中间件链改动而失败。
+5. **全量回归**：`mvn test` 全量用例通过为验收底线（**2026-09-26 实跑：1026 用例、0 失败、4 跳过、BUILD SUCCESS**）；`LlmLoggingMiddlewareTest`、`InMemoryLogAppenderTest` 等既有测试不得因中间件链改动而失败。
 6. **离线环境**：`opentelemetry-sdk-testing` 为新增 test 依赖，离线开发镜像（Dockerfile.dev）需同步缓存（见 4.1 注意）。
 7. **随机 traceId 生成**（2026-08-13 实施时发现）：比例采样测试**不能用 UUID**——UUID v4 低位含变体位（`10`），导致 `longFromBase16String(traceId, 16)` 解析出的 64 位恒 ≥ 2^62，ratio:0.5 永远不可能采样（实测 1000/1000 不采样）。用 `String.format("%016x%016x", random.nextLong(), random.nextLong())` 生成均匀随机 traceId。
 8. **`Span.current()` 捕获时机**（2026-08-13）：`runWithContext` 的 makeCurrent 在信号投递时生效（`ContextPropagationOperator` 的 hook 包装 subscriber），`Flux.defer` 的 supplier 在订阅期执行，此时上下文尚未激活。断言"下游 Span.current() == reasoning span"必须在 `doOnNext`/`doOnComplete` 类信号回调中捕获。

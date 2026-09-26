@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 41 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 42 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -11,18 +11,19 @@
 
 | 文档 | 说明 |
 |------|------|
-| [agent-framework-design.md](agent-framework-design.md) | v2.1 框架总体设计：架构、模块分层、类/表/端点清单（目录树为 v2.1 快照，最新以 ../AGENTS.md 为准） |
-| [agent-framework-deploy.md](agent-framework-deploy.md) | 部署手册：前置条件、Docker、全量环境变量表（含 AGENT_REDIS_URL 必配项） |
-| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式 |
-| [api.md](api.md) | REST API 全量参考（无状态单次流架构） |
-| [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威） |
-| [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.3.0：Durable SSE + HITL + 文件 + Skill 管理 + 事件词表（被多处源码 javadoc 引用） |
-| [checkpoint-design.md](checkpoint-design.md) | Checkpoint 持久化设计：MysqlDistributedStore、agent_state/agent_fs 表结构（schema 权威） |
+| **[agent-creation-guide.md](agent-creation-guide.md)** | **🆕 面向框架使用者的上手指南（2026-09-26 新增）**：5 分钟快速开始 → OAF 包结构与构建 → 配置说明 → 测试环境部署（三法）→ API 调用完整流程（对话/续传/HITL/文件/技能/A2A）→ 能力地图 → 常见坑。**不知道从哪篇读起就先读这篇** |
+| [agent-framework-design.md](agent-framework-design.md) | v2.1 框架总体设计：架构、模块分层、类/表/端点清单（目录树为 v2.1 快照，最新以 ../AGENTS.md 为准；§6 依赖与 §5.3 默认值已按 pom/application.yml 订正） |
+| [agent-framework-deploy.md](agent-framework-deploy.md) | 部署手册：前置条件、Docker、**全量环境变量表**（含 AGENT_REDIS_URL 必配项；2026-09-26 补齐 Harness/SSE/History 三段） |
+| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计基线为 2026-09-17 实跑；当前规模以静态清点标注） |
+| [api.md](api.md) | REST API 全量参考（无状态单次流架构；2026-09-26 补齐会话三态/观察者端点/技能管理端点/8 张表，`/tools` 三段契约已同步 issue #39） |
+| [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制） |
+| [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.4.0：Durable SSE + HITL + 文件 + Skill 管理 + 模型 + 热加载 + 事件词表（被多处源码 javadoc 引用；本版修目录死锚与续传游标示例） |
+| [checkpoint-design.md](checkpoint-design.md) | Checkpoint 持久化设计：MysqlDistributedStore、agent_state/agent_fs 表结构（schema 权威；已按 agentscope 2.0.3 订正） |
 | [history-agentstate-design.md](history-agentstate-design.md) | History 权威化设计：agent_state 为消息级事实来源（已实施，被源码注释引用） |
-| [tracing-design.md](tracing-design.md) | OTel 链路追踪设计（已实施，被 Makefile/Dockerfile 引用） |
+| [tracing-design.md](tracing-design.md) | OTel 链路追踪设计（已实施，被 Makefile/Dockerfile 引用；含 2026-09-26 的模型/工具 IO 内容补录） |
 | [offline-dev-image.md](offline-dev-image.md) | 离线开发镜像 java-dev 手册（被 Dockerfile.dev 引用） |
-| [e2e-ci-plan.md](e2e-ci-plan.md) | GitHub Actions E2E 体系：已实施的 v3 录制回放架构 + 实施记录与框架缺陷清单 D1–D9 |
-| [harness-config-analysis.md](harness-config-analysis.md) | Harness 配置化分析：三层配置盘点 + 环境变量绑定证据链（1.3 发现的 LLM 参数问题已修复） |
+| [e2e-ci-plan.md](e2e-ci-plan.md) | GitHub Actions E2E 体系：已实施的 v3 录制回放架构 + **四个 e2e job 与 eval-selftest** + 实施记录与框架缺陷清单 D1–D9 |
+| [harness-config-analysis.md](harness-config-analysis.md) | Harness 配置化分析：三层配置盘点 + 环境变量绑定证据链（Phase 1 已实施；LLM 装配已收敛到 ChatModelFactory） |
 | [concurrency-benchmark-plan.md](concurrency-benchmark-plan.md) | 并发压测方案与执行结论（被 bench/ 脚本引用，不移动） |
 
 ## ② 已实施的设计记录（历史快照，方案已落地，保留作决策与机制依据）
@@ -51,7 +52,8 @@
 | [sse-optimization-a1-a5-design.md](sse-optimization-a1-a5-design.md) | SSE 链路优化五项（A1 toSSE 收口 / A2 Tailer 空闲退避 / A3 emit 失败不广播 / A4 控制器桶清理 / A5 TurnFinalizer 抽取），已实施 |
 | [hitl-tool-summary-recovery-design.md](hitl-tool-summary-recovery-design.md) | HITL 恢复流工具调用摘要兜底（RESULT_END 按 toolCallId 补发「执行 工具名」），**已实施**（2026-09-25；含方案比较与幂等/回放语义） |
 | [session-model-switch-design.md](session-model-switch-design.md) | 会话模型切换（model_config 托管模型 CRUD + 会话级 model 绑定 + 系统模型管标题/记忆压缩），**已实施**（2026-09-24；含实施记录与两处偏差：`GET /models?all=true`、未引入 env 备选列表） |
-| [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | 自定义工具插件化加载（Java SPI + plugins/ 目录），**已实施**（2026-09-25；BFPP 并入 `List<CustomTool>` 注入源，工厂/reload 重建//tools/HITL 零改动共享，单测 11 用例 + 部署冒烟 12 断言全 PASS；含复核前提与实施差异记录） |
+| [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | 自定义工具插件化加载（Java SPI + plugins/ 目录），**已实施**（2026-09-25；BFPP 并入 `List<CustomTool>` 注入源，工厂/reload 重建//tools/HITL 零改动共享；2026-09-26 起 `/tools` 新增 `sdkInternal` 段透出 SDK 内置工具注册集，冒烟扩到 30 断言） |
+| [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload，**M1/M2 已实施，部署环境 E2E 验证通过**（2026-09-25；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施）。**2026-09-26 由 ③ 档移入本档**——此前索引归类与文档自身状态矛盾 |
 | [change-execution-order.md](change-execution-order.md) | v2.0→v2.1 整体升级执行顺序与结果记录（MysqlDistributedStore/HarnessAgent/Workspace/五功能/多租户，2026-08-06，头部含 2026-09-07 现状核对） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
@@ -59,7 +61,6 @@
 | 文档 | 说明 |
 |------|------|
 | [pvc-to-s3-migration-plan.md](pvc-to-s3-migration-plan.md) | PVC 使用盘点 + 双集群（共用 MySQL）下文件/OAF 包迁 S3 影响评估（2026-09-20 评估稿，**未实施**；含 §6.4b 沙箱模式影响：OpenSandbox 自身 HA，部署形态决定会话能否跨集群续） |
-| [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload（2026-09-25 **M1/M2 已实施，部署环境 E2E 验证通过**；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施） |
 
 ## ④ 已被取代（结论失效，仅供考古）
 
@@ -70,5 +71,14 @@
 
 ## 关联文档
 
-- 平台级历史设计归档：根目录 [../../docs/design/](../../docs/design/)（REDESIGN.md、HITL 验收等）
+- **评测飞轮**（2026-09-26 补入索引，此前完全缺失）：
+  - 使用指南：[../bench/eval/FLYWHEEL.md](../bench/eval/FLYWHEEL.md)（六步闭环：使用方法/使用时机/场景命令表/排障）
+  - 骨架说明：[../bench/eval/README.md](../bench/eval/README.md)
+  - 设计稿：[../../docs/design/agent-framework-eval-dual-track-design.md](../../docs/design/agent-framework-eval-dual-track-design.md)、
+    [../../docs/design/agent-framework-eval-env-provisioning-design.md](../../docs/design/agent-framework-eval-env-provisioning-design.md)
+  - CI 门禁：`eval-selftest` job，详见 [e2e-ci-plan.md](e2e-ci-plan.md) §2.3
+- 平台级历史设计归档：根目录 [../../docs/design/](../../docs/design/)（REDESIGN.md、HITL 验收、用户技能管理等）
+- OAF 包规范（平台侧权威）：[../../docs/oaf-specification.md](../../docs/oaf-specification.md)
+- 平台部署指南：[../../docs/deployment.md](../../docs/deployment.md)
 - E2E 用例矩阵：[../../e2e/AGENTS.md](../../e2e/AGENTS.md)；压测工具：[../bench/README.md](../bench/README.md)
+- 可直接照抄的 OAF 样例：`../../release-agent/`、`../e2e/fixtures/agent-config/`、`../example/approval-forms/agent-config/`

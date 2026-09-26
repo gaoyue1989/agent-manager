@@ -5,14 +5,31 @@
 > 包内容原位更新后，agent **无需重启 Pod** 即可在下一轮推理中感知新增/修改/删除的技能。
 > **范围：仅 agent-framework 工程**。平台 backend（Go）不涉及（包内容如何更新不由平台保证，动态加载只对"PVC 上文件原位变化"这一事实生效）。
 >
-> 依赖版本：agentscope-harness **2.0.0**（本项目 pom 现用版本）。
+> 依赖版本：agentscope-harness **2.0.3**（本项目 pom 现用版本；本篇正文按 2.0.0 编制，结论不受影响）。
 > 官方实现位置：agentscope-java `agentscope-core/io.agentscope.core.skill` + `agentscope-harness/io.agentscope.harness.agent.skill`。
 > **M2 过程中发现并修复了平台 backend 的包目录误清 bug（见附录 C）。**
 
 ---
 
 >
-> **现状核对（2026-09-07）**：M1/M2 已完成（agent-framework 主体 2026-09-07，集群 E2E 同日验证通过，依赖 agentscope-harness 2.0.0 与 pom 实际版本一致）。M3（远程技能扩展）未开始。测试：新增 `SkillCatalogServiceTest` 7 用例、`OafSkillRepositoryTest` 5 用例。
+> **现状核对（2026-09-07）**：M1/M2 已完成（agent-framework 主体 2026-09-07，集群 E2E 同日验证通过）。M3（远程技能扩展）未开始。测试：新增 `SkillCatalogServiceTest`、`OafSkillRepositoryTest`。
+>
+> **⚠️ 现状核对（2026-09-26）—— 本篇的 L4 描述已落后两代，读前必读：**
+> 本篇正文认为 L4 技能只有 `skill_manage` / `propose_skill` 两条写入路径。**2026-09-23/24 落地了完整的用户管理面与沙箱档 L4 修复**，
+> 以下为本篇未覆盖的现状（端点见 [api.md](api.md) §技能管理 API，设计见 [../docs/design/user-skill-admin-design.md](../../docs/design/user-skill-admin-design.md)）：
+> ① **用户管理面 6 个端点**：`GET /skills/users`、`GET /skills/users/{userId}`、
+>    `GET/PUT/DELETE /skills/users/{userId}/{name}`、`POST /skills/users/{userId}/{name}/sync-from-package`；
+>    调试页 `/debug/user-skills` + 「用户技能」区块。
+> ② **沙箱档 L4 写入回写修复**：会话内 `skill_manage` 把 L4 写进容器 `/workspace/skills`，
+>    由 `WorkspaceSyncService.syncBack` 每次 call 结束回写 `agent_fs`——修复前只回写 MEMORY.md/memory/，L4 随容器 TTL 到期丢失。
+> ③ **会话开始物化 L4**：`WorkspaceReader.materializeUserSkills` 在每次 acquire 后把 L4 投影进容器，
+>    `/{name}/.deleted` 跳过、admin-override 照写、只写不删。
+> ④ **回写仲裁**：删除写 `/{name}/.deleted`、管理面写入写 `/{name}/.admin-override`；
+>    代价是标记生效期间容器内修改不落库，状态经 `tombstones` 字段下发。
+> ⑤ `/skills/available` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。
+> ⑥ `sync-from-package` 跳过清单按字典序返回（`6ddf70f`）。
+>
+> 本篇关于 **L2 目录动态加载（每轮重扫、不重启生效）** 的核心结论仍然有效，未受影响。
 
 ## 一、结论先行（官方已有，缺的是接线）
 

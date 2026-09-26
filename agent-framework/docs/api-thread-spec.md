@@ -1,6 +1,12 @@
 # 会话管理 API 对接规范
 
-> 版本：v1.0 | 更新：2026-09-10
+> 版本：v1.1 | 更新：2026-09-26
+>
+> **现状核对（2026-09-26）**：本版按 master `a263b92` 重核，补入 `interrupted` 态、
+> `tool_call_summary` / `tool_result_preview` 两个合成帧、`/status` 的 503 分支，
+> 以及 §六「ASKING 挂起期限制」（此前 e2e-ci-plan §11 缺陷 D4 标为「`api-thread-spec` 描述待更新」，本版已补）。
+> 范围限定为**会话域契约**；`/skills/*`、`/models` CRUD 等非会话端点见 [api.md](api.md)。
+> 面向使用者的上手流程见 [agent-creation-guide.md](agent-creation-guide.md)。
 
 ## 一、接口总览
 
@@ -46,7 +52,18 @@ X-User-Id: user-123
 {"type":"error","error":"turn_in_progress: session 'xxx' has an active turn and queue timeout reached"}
 ```
 
-**前端必须等收到 `{"type":"done"}` 后再发下一条消息。**
+**前端必须等本轮终态后再发下一条消息。**（终态是 `AGENT_END` / `error` / `permission_ask`；
+`POST /threads/chat` 收到 `AGENT_END` 后流直接关闭，**不发 `done` 帧**，`done` 只由 `/subscribe` 补发。）
+
+**ASKING 挂起期限制（e2e 缺陷 D4 的契约澄清）：**
+
+`permission_ask` 挂起时，**Turn 租约已释放但 SDK 会话处于 ASKING 状态**。此时对新 turn 发消息，
+会被 SDK 的**会话级守卫**拒绝（error 帧中含 `ASKING` 字样），而不是进入排队。
+
+这不是 Turn 租约能覆盖的范围——租约模型假设「执行中不可打断」，而 HITL 是「主动让出执行权等待外部输入」。
+因此客户端的正确做法是：**收到 `permission_ask` 后必须走 confirm 流程，在确认完成前不要发新消息。**
+
+E2E 的 H6 场景按此真实行为断言，不按「排队后成功」断言。
 
 ---
 
@@ -181,6 +198,17 @@ GET /threads/my-session-001/subscribe?afterSeq=13
 | `completed` | Turn 已完成 |
 | `waiting_confirm` | 等待人工确认（`pending_confirm` 非空） |
 | `idle` | 空闲，等待用户输入 |
+| `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占（2026-09 起新增的第 5 态） |
+
+**503 分支（事件存储不可用）：**
+
+```json
+HTTP/1.1 503
+{"error":"event_store_unavailable"}
+```
+
+MySQL / Redis 任一不可用都会显式报错，而不是假装 idle。**客户端必须保留本地游标、不得重置为 0**，
+否则会触发整场重放。前端需自行区分 503 与「真的没有事件」。
 
 ### 3.5 GET /threads/{sessionId} — 会话详情
 
@@ -312,13 +340,22 @@ GET /threads?userId=user-123
 | `TOOL_CALL_END` | S→C | `toolCallId`, `toolCallName` | 工具调用结束 |
 | `TOOL_RESULT_START` | S→C | `toolCallId`, `toolCallName` | 工具结果开始 |
 | `TOOL_RESULT_TEXT_DELTA` | S→C | `delta`, `toolCallId`, `toolCallName` | 工具结果文本增量 |
-| `TOOL_RESULT_DATA_DELTA` | S→C | `tool_call_id`, `tool_call_name`, `media_type`, `data`/`url` | 工具结果二进制增量 |
-| `TOOL_RESULT_END` | S→C | `state`, `toolCallId`, `toolCallName` | 工具结果结束 |
-| `permission_ask` | S→C | `reply_id`, `tool_calls[]` | HITL 请求确认 |
-| `file_ready` | S→C | `file_id`, `file_name`, `mime_type`, `size`, `download_url` | 产出文件就绪 |
-| `waiting` | S→C | — | 排队等待租约 |
-| `error` | S→C | `error` | 错误 |
-| `done` | S→C | — | Turn 完成 |
+| `TOOL_RESULT_DATA_DELTA` | S→C | `tool_call_id`, `tool_call_name`, `media_type`, `data`/`url` | 工具结果二进制增量（⚠️ **字段是 snake_case**，与同组 camelCase 事件不一致） |
+| `TOOL_RESULT_END` | S→C | `state`, `toolCallId`, `toolCallName` | 工具结果结束。`state` ∈ `SUCCESS`/`ERROR`/`INTERRUPTED`/`DENIED`/`RUNNING` |
+| `tool_call_summary` | S→C | `summary`, `toolCallId`, `toolName` | **合成帧**：工具调用中文摘要。HITL 恢复段 SDK 不重放 `TOOL_CALL_*`，框架按 `toolCallId` 在 `RESULT_END` 兜底补发 |
+| `tool_result_preview` | S→C | `preview`, `toolCallId`, `toolName` | **合成帧**：工具结果预览（同上兜底机制） |
+| `AGENT_RESULT` | S→C | `replyId` | 最终结果聚合（实测于 HITL 恢复段末尾、`AGENT_END` 之前） |
+| `USER_CONFIRM_RESULT` | S→C | `replyId`, `confirmed` | HITL 确认结果落地（`confirm-stream` 恢复段首个业务事件） |
+| `permission_ask` | S→C | `reply_id`, `tool_calls[]` | HITL 请求确认。**不携带 `suggested_rules`**（SDK `ToolUseBlock` 无此方法） |
+| `file_ready` | S→C | `file_id`, `file_name`, `mime_type`, `size`, `download_url` | 产出文件就绪。`download_url` 恒为相对路径 `/files/{id}`，前端需拼 Base URL |
+| `session_created` | S→C | `session_id` | **仅新会话首帧**（请求未传 `sessionId` 时）。回传的是 `PathSafe` 清洗后的值，应以此为准 |
+| `waiting` | S→C | — | 排队等待租约，每 15s 一帧，最多等 120s |
+| `error` | S→C | `error` | 错误（如 `turn_in_progress` 排队超时、`unknown_model`） |
+| `done` | S→C | — | **仅 `/subscribe` 追到终态时补发**；`POST /threads/chat` **不发** `done` 帧（收到 `AGENT_END` 后流直接关闭） |
+| `interrupted` | S→C | `reason:"turn_interrupted"` | **仅 `/subscribe` 补发**：执行副本崩溃，本 turn 无法继续 |
+
+> 合成帧（`tool_call_summary` / `tool_result_preview` / `file_ready`）经 `emitSynthetic` 落库后广播，
+> **支持断线回放**——刷新页面能从历史里完整重建工具气泡。
 
 ### 4.2 心跳
 
@@ -330,13 +367,15 @@ GET /threads?userId=user-123
 
 前端忽略即可，作用是防止 Nginx/CDN 的 60s 读超时断连。
 
+间隔由 `AGENT_SSE_HEARTBEAT_SECONDS` 控制（默认 20）。心跳帧**没有 `id:` 行**，不推进游标。
+
 ---
 
 ## 五、前端状态机
 
 ```
                     ┌──────────────┐
-                    │    IDLE      │ ← 初始/收到 done
+                    │    IDLE      │ ← 初始 / 收到 error / 收到 AGENT_END
                     └──────┬───────┘
                            │ 用户发送消息
                            ▼
@@ -356,7 +395,15 @@ GET /threads?userId=user-123
                │
                ▼
          回到 IDLE
+
+  ┌──────────────┐
+  │ INTERRUPTED  │ ← 收到 interrupted 帧，或 /status 返回 state=interrupted
+  │ 执行副本崩溃  │   展示中断态，允许用户重发
+  └──────────────┘
 ```
+
+`/status` 的 `state` 与前端状态机的映射：`idle`→IDLE、`working`→WORKING、
+`waiting_confirm`→WAITING_CONFIRM、`interrupted`→INTERRUPTED、`completed`→回放历史后进 IDLE。
 
 ---
 
@@ -390,9 +437,11 @@ GET /threads?userId=user-123
 | HTTP | SSE error | 说明 |
 |------|-----------|------|
 | 400 | `message or fileIds is required` | 请求体缺少 message 和 fileIds |
+| 400 | `unknown_model` / `model_disabled` | 会话 `model` 参数指向未知或已停用的托管模型 |
 | 404 | `confirm_context_not_found` | 确认上下文不存在或已过期 |
 | 409 | `confirm_already_consumed` | 确认已被处理 |
-| 409 | `turn_in_progress` | 会话正在执行中，等 done 后重试 |
+| 409 | `turn_in_progress` | 会话正在执行中（含**正在等待人工确认**），等本轮终态后重试 |
+| 503 | — | `GET /status` 事件存储不可用，响应体 `{"error":"event_store_unavailable"}`（保留本地游标，勿重置） |
 | 500 | `error` | 服务端内部错误 |
 
 ---
