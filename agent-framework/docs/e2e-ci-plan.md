@@ -100,12 +100,20 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | job | 副本 | 内容 | 依赖 | 预算 |
 |-----|------|------|------|------|
 | `test`（已有） | — | mvn test | — | ~6min |
+| `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
 | `e2e-core` | 1 | S/F/H/M/A 组 API + U 组 UI（§5.1-5.5、§5.7-5.8） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
+| `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
-三个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用 `concurrency.group = e2e-${{ github.ref }}` + `cancel-in-progress` 抑制同分支重复跑。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，三个 job 同级硬门禁。
+四个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用 `concurrency.group = e2e-${{ github.ref }}` + `cancel-in-progress` 抑制同分支重复跑。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，四个 job 同级硬门禁。
+
+> `e2e-plugin` 与其余三组形态不同：不经 Playwright，由 `scripts/plugin-smoke.sh` 现场编译示例插件 jar
+> （`e2e/plugin-echo/`）并自起被测进程——插件编译需要 `target/classes` 与 `.m2` 的 agentscope-core，
+> 且部分断言要看注册期启动日志（Bootstrapper / 工厂 / SDK Toolkit 三处），这些可观测性无法经 HTTP 拿到。
+> 脚本从 `MYSQL_URL`/`REDIS_URL` 推导基础设施端口，与本地开发（3307/16379）同路径；
+> 场景标记 `[E2E:plugin:echo]` 路由到 `mock/fixtures/llm/plugin-echo.json`。
 
 ---
 

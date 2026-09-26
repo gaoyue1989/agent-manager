@@ -93,7 +93,7 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
    error 帧而非 permission_ask + 用了不存在的服务名）——正是 PR 人审闸门要拦的形态。
 5. **后台运行需 `PYTHONUNBUFFERED=1`**：stdout 块缓冲导致日志文件实时不可见。
 6. **内置工具恒可用**仅在 release-agent 验证；`/tools?includeInternal` 与运行时注册集失真已立 [issue #28](https://github.com/gaoyue1989/agent-manager/issues/28)（含修复方案）。
-7. CI 集成（eval-gate job / nightly workflow / 第七项必需检查）未做，当前仅本地可跑。
+7. 联机评测（`run` / `verify`）的 CI 集成未做，需真实 LLM 与共享实例，当前仅本地可跑；**离线自检已进门禁**——`eval-selftest` job 随 agent-framework 变更执行 `flywheel.py selftest`（零网络、零 LLM、<1min）。
 8. eval-test 的 agent_fs 记忆可能跨轮累积（会话已清理但记忆 flush 未验证），列为观察项。
 
 ## 已实测可用的链路（2026-09-25，真实 LLM）
@@ -109,5 +109,5 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
 - `GeneralEvaluator` 编排换装（当前自研 asyncio 并发 + n_repeat）
 - 双视角采集（`/threads/{sid}/subscribe` 服务端回放交叉比对）
 - 语义去重（当前仅文本规范化去重）、用例状态机（draft→observing→active）
-- `eval-gate` CI job（门禁轨，扩展 e2e）与 nightly workflow
+- `eval-gate` CI job（门禁轨，扩展 e2e）与 nightly workflow（离线 selftest 已由 `eval-selftest` job 覆盖）
 - gen 冒烟与 judge 依赖 `EVAL_LLM_*`，未在真实 key 下实测

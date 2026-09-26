@@ -412,16 +412,19 @@ mvn -o test  # 离线模式 (离线开发镜像内)
 
 ### E2E（GitHub Actions 实测 + 本地可复现）
 
-`e2e/` 目录承载 CI 级黑盒 E2E（设计文档 [docs/e2e-ci-plan.md](docs/e2e-ci-plan.md)），随 agent-framework-ci 推送 master 触发，三个 job 并行：
+`e2e/` 目录承载 CI 级黑盒 E2E（设计文档 [docs/e2e-ci-plan.md](docs/e2e-ci-plan.md)），随 agent-framework-ci 推送 master 触发，四个 job 并行：
 
 | job | 内容 |
 |-----|------|
 | e2e-core | S 基础 / F 文件上传下载 / H HITL / M MCP Apps / A A2A + U Debug 页 UI |
 | e2e-multi | R 组多副本（双实例 + nginx 轮询：断连续传/kill 接管/并发 confirm 互斥/事件对账）+ U9 |
 | e2e-sandbox | X 组沙箱（mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流） |
+| e2e-plugin | P 组工具插件（`scripts/plugin-smoke.sh`，非 Playwright：现场编译插件 jar + 自起进程，断言 SPI 注册链路 / `/tools?includeInternal` 运行时注册集 / OAF reload 存活 / deniedTools 剔除 / 自定义工具三态权限） |
+
+另有 `eval-selftest` job 跑评测飞轮离线自检（`bench/eval/flywheel.py selftest`，零网络零 LLM）——联机 `run/verify` 需真实 LLM 与共享实例，仍不进门禁。
 
 - **mock 架构 = 真实服务录制回放**：LLM 响应来自真实 LLM 录制件（`e2e/mock/fixtures/llm/`），沙箱协议来自本机真实 OpenSandbox Server 录制件（`e2e/mock/fixtures/sandbox/`）；场景标记 `[E2E:*]` 只做路由。录制脚本 `scripts/record-*.mjs` 仅开发机使用（密钥走 .env.secrets），CI 纯回放零密钥
-- 环境编排 `scripts/env-up.sh / env-down.sh / run.sh`，CI 与本地同路径；`npm run check:fixtures` 校验录制件覆盖与脱敏
+- 环境编排 `scripts/env-up.sh / env-down.sh / run.sh`，CI 与本地同路径；`npm run check:fixtures` 校验录制件覆盖与脱敏。`plugin-smoke.sh` 自带编排，基础设施端口由 `MYSQL_URL`/`REDIS_URL` 推导（CI 3306/6379、本地 3307/16379 同路径）
 - 已知框架语义缺陷（e2e 实测定位，详见 e2e-ci-plan.md §11.3）：
   ① **HITL 批准后恢复执行时工具参数丢失**——`agent_state` 里 SDK 持久化的 `tool_use.input` 为空 `{}`，而恢复路径优先从 state 重建（覆盖了 `confirm_context` 表里完好的参数）；
   ② **非沙箱模式 write_file→present_file 断裂**——KV 同步判定用 `ToolCallDeltaEvent.getToolCallName()`，而该字段实测返回占位符 `"__fragment__"`（工具名只在 `ToolCallStartEvent` 上），故同步永不执行、present_file 读不到文件；
