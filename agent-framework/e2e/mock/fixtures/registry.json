@@ -66,6 +66,13 @@
     "sandbox-read": {
       "marker": "[E2E:tool:read:sb]",
       "calls": 2
+    },
+    "plugin-echo": {
+      "marker": "[E2E:plugin:echo]",
+      "calls": 2,
+      "variants": [
+        "denied"
+      ]
     }
   },
   "sandbox": [

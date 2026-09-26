@@ -31,6 +31,7 @@ const MARKER_MAP = {
   'hitl:submit': 'hitl-submit', 'mcpapp:form': 'mcpapp-form',
   'execute': 'execute', 'execute:fail': 'execute-fail',
   'tool:write:sb': 'sandbox-write', 'tool:read:sb': 'sandbox-read',
+  'plugin:echo': 'plugin-echo',   // 工具插件冒烟（plugin-smoke.sh）：调插件工具 echo_query
 };
 
 // 需要运行时参数的场景：tool_call arguments 整体重写为指定 JSON（{{appId}} → 标记参数）。

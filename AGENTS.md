@@ -111,7 +111,7 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（83 类 / 883 个 @Test，实跑 860 用例） | 核心/多副本/沙箱三 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| agent-framework-ci | `mvn test`（83 类 / 883 个 @Test，实跑 860 用例）+ `eval-selftest`（评测飞轮离线自检） | 核心/多副本/沙箱/工具插件四 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
 
 ### 日常提交流程（必须走 PR 门禁）
 
@@ -124,9 +124,11 @@ git checkout -b feat/xxx        # 命名：feat/ | fix/ | chore/ | docs/
 git push origin feat/xxx
 
 # 3. 开 PR 到 master（GitHub 网页或 gh pr create）
-#    → 六项必需检查自动执行：
+#    → 必需检查自动执行：
 #      单测 (mvn test) / 单测 (go vet + go test) / 单测 (lint + build)
 #      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）
+#    另有两个非必需 job 同步跑（红只告警不挡合并，但应一并修）：
+#      E2E 工具插件（SPI+三态权限）/ 评测自检（flywheel selftest）
 
 # 4. 全绿后合并（网页 Merge 按钮）
 #    红了就修：提交会自动重跑检查
@@ -135,6 +137,7 @@ git push origin feat/xxx
 ### 分支保护（master，强制）
 
 - **六项必需状态检查**：上表三个单测 + agent-framework 三个 E2E job；未全绿合并请求被拒（`blocked`）
+- **新增 job 默认不是必需检查**：`E2E 工具插件` 与 `评测自检` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
 - **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
 - **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR
 - **禁止 force push / 删除分支**

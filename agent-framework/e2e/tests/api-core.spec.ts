@@ -24,11 +24,22 @@ test('S1 元数据端点全量暴露', async ({ request }) => {
   }
   const tools = await (await request.get('/tools')).json();
   const toolStr = JSON.stringify(tools);
-  // /tools 仅列 MCP 工具（内置工具不经此端点暴露）
+  // 默认视图仅列 MCP 工具；内置/自定义工具需显式 includeInternal=true（issue #28）
   expect(toolStr).toContain('bench_echo');           // bench MCP（read_only）
   expect(toolStr).toContain('show_application_form'); // approval MCP（ui.tools）
   expect(toolStr).toContain('confirm_application');
   expect(toolStr).toContain('appOnly');
+  expect(tools.internalCount).toBe(0);               // 默认不暴露内部工具
+  // includeInternal：运行时注册集以 @Tool bean 为准（非 frontmatter tools 声明视图），
+  // declared 标注声明意图。插件化自定义工具的注册/剔除见 e2e-plugin job（plugin-smoke.sh）。
+  const internal = await (await request.get('/tools?includeInternal=true')).json();
+  expect(internal.internalCount).toBeGreaterThan(0);
+  const internalStr = JSON.stringify(internal);
+  for (const name of ['echo', 'present_file', 'present_url']) {
+    expect(internalStr, name).toContain(`"name":"${name}"`);
+  }
+  // 本 fixture 未声明 tools: → 运行时集全部 declared=false
+  expect(internalStr).toContain('"declared":false');
   const mcps = await (await request.get('/mcp')).json();
   const serverNames = JSON.stringify(mcps);
   for (const s of ['bench', 'approval', 'denied', 'cards']) expect(serverNames).toContain(s);

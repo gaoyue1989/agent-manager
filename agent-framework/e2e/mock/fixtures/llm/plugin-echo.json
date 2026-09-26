@@ -1,0 +1,99 @@
+{
+ "scenario": "plugin-echo",
+ "model": "mimo",
+ "recordedAt": "2026-09-26T00:00:00.000Z",
+ "rewrites": [
+  "",
+  ""
+ ],
+ "calls": [
+  {
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "# Plugin Smoke Agent\n\n插件部署冒烟专用配置。\n",
+      "name": "system"
+     },
+     {
+      "role": "user",
+      "content": "[E2E:plugin:echo] 请调用 echo_query 工具，参数 text 为：插件回显内容。",
+      "name": "plugin-smoke"
+     }
+    ]
+   },
+   "chunks": [
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900000,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_plugin_echo_001\",\"function\":{\"arguments\":\"\",\"name\":\"echo_query\"},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900000,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"{\\\"text\\\": \\\"\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900000,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"插件\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900000,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"回显\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900001,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"内容\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900001,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"\\\"}\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900001,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":1789900001,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho1_aa\",\"choices\":[],\"created\":1789900001,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":24,\"prompt_tokens\":1200,\"total_tokens\":1224,\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_tokens_details\":null}}",
+    "[DONE]"
+   ]
+  },
+  {
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "# Plugin Smoke Agent\n\n插件部署冒烟专用配置。\n",
+      "name": "system"
+     },
+     {
+      "role": "user",
+      "content": "[E2E:plugin:echo] 请调用 echo_query 工具，参数 text 为：插件回显内容。",
+      "name": "plugin-smoke"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "name": "Plugin_Smoke_Agent",
+      "tool_calls": [
+       {
+        "id": "call_plugin_echo_001",
+        "type": "function",
+        "function": {
+         "name": "echo_query",
+         "arguments": "{\"text\": \"插件回显内容\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "\"echo:插件回显内容\"",
+      "tool_call_id": "call_plugin_echo_001"
+     }
+    ]
+   },
+   "chunks": [
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"echo_query\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\" 工具\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"已成功回\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"显：\\\"echo:插件回显内容\\\"\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"。\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\",\"usage\":null}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":18,\"prompt_tokens\":1300,\"total_tokens\":1318,\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_tokens_details\":{\"cached_tokens\":1200}}}",
+    "[DONE]"
+   ]
+  }
+ ],
+ "variants": {
+  "denied": {
+   "chunks": [
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"echo_query\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\" 工具调用被拒绝\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"（Permission denied by user），未执行。\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\",\"usage\":null}",
+    "[DONE]"
+   ]
+  }
+ }
+}

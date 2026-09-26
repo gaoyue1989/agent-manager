@@ -49,6 +49,24 @@ jobs:
         working-directory: agent-framework
         run: mvn -B test
 
+  # 评测飞轮离线自检（bench/eval）：零网络、零 LLM，只验帧映射 / 检查器 / HITL 视图 /
+  # 错误断言 / 失败分类五段纯函数逻辑。改动 eval 代码后必跑，替代人工记得执行 selftest。
+  # 联机 run/verify 需要真实 LLM 与共享实例（README 记录 --workers>1 不稳定），仍不进门禁。
+  eval-selftest:
+    name: 评测自检 (flywheel selftest)
+    needs: changes
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: 安装运行依赖
+        run: pip install --disable-pip-version-check 'httpx>=0.27'
+      - name: 评测飞轮离线自检
+        working-directory: agent-framework
+        run: python3 bench/eval/flywheel.py selftest
+
   e2e-core:
     name: E2E 核心（API+UI）
     # 与 test 并行（黑盒门禁相互独立）：单测仅 ~1min，串行等待占整链 wall ~1/4
@@ -224,6 +242,64 @@ jobs:
           path: |
             agent-framework/e2e/.runtime/
             agent-framework/e2e/playwright-report/
+          retention-days: 5
+
+  # 工具插件 SPI 加载冒烟（b0fc8a7 起的插件化能力此前无任何门禁覆盖）：
+  # 现场编译示例插件 → 独立进程起服务 → 断言注册链路 / /tools?includeInternal 运行时
+  # 注册集（issue #28）/ OAF reload 存活 / deniedTools 剔除 / 自定义工具三态权限。
+  # 纯黑盒（只打 HTTP + 读启动日志），不需要浏览器，故不装 Playwright。
+  e2e-plugin:
+    name: E2E 工具插件（SPI + 三态权限）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # 脚本从这两个连接串推导基础设施端口，与本地开发（3307/16379）走同一条代码路径
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: 构建被测 jar（插件编译依赖 target/classes 与 .m2 的 agentscope-core）
+        working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 录制件校验
+        working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - name: 工具插件部署冒烟
+        working-directory: agent-framework/e2e
+        run: ./scripts/plugin-smoke.sh
+      - name: 失败取证
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-plugin
+          path: |
+            agent-framework/e2e/.runtime-plugin/
           retention-days: 5
 
   build-push:
