@@ -109,3 +109,7 @@ agent-framework/e2e/test-results/
 agent-framework/e2e/node_modules/
 # 工作流真机探测脚本与运行日志（一次性验证产物）
 out/
+
+# 仓库根目录临时打包产物（如手工试传的 skill-test-package.zip）；只忽略根级，
+# 不影响 e2e/fixtures/*.zip 等入库 fixture 的新增
+/*.zip
