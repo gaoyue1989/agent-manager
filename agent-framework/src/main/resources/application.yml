@@ -32,6 +32,8 @@ agent:
     timeout: ${LLM_TIMEOUT:120}
     enable-thinking: ${LLM_ENABLE_THINKING:false}
     context-length: ${LLM_CONTEXT_LENGTH:0}
+    reasoning-effort: ${LLM_REASONING_EFFORT:}
+    frequency-penalty: ${LLM_FREQUENCY_PENALTY:}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}

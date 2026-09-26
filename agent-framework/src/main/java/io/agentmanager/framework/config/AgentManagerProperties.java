@@ -56,7 +56,11 @@ public record AgentManagerProperties(
         @DefaultValue("4096") int maxTokens,
         @DefaultValue("120") int timeout,
         @DefaultValue("true") boolean enableThinking,
-        @DefaultValue("0") int contextLength
+        @DefaultValue("0") int contextLength,
+        /** 推理强度（reasoning_effort）；空 = 不下发，由端点默认行为决定（方言映射见 ChatModelFactory） */
+        @DefaultValue("") String reasoningEffort,
+        /** 频率惩罚；null = 不下发。绑定空串时 Spring 转为 null（env 未配置即不下发） */
+        Double frequencyPenalty
     ) {}
 
     public record ServerConfig(

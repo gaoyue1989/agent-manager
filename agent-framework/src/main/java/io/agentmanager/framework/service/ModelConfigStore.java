@@ -43,15 +43,30 @@ public class ModelConfigStore {
         int maxTokens,
         int timeoutSeconds,
         boolean enableThinking,
+        /** 推理强度；null = 不下发（方言映射见 ChatModelFactory.applyDialect） */
+        String reasoningEffort,
+        /** 频率惩罚；null = 不下发 */
+        Double frequencyPenalty,
         int contextLength,
         boolean enabled,
         Instant createdAt,
         Instant updatedAt
-    ) {}
+    ) {
+        /** 兼容旧调用（既有测试 14 参签名）：新采样参数缺省 = 不下发 */
+        public ModelConfig(String id, String name, String provider, String modelId, String baseUrl,
+                           String apiKey, double temperature, int maxTokens, int timeoutSeconds,
+                           boolean enableThinking, int contextLength, boolean enabled,
+                           Instant createdAt, Instant updatedAt) {
+            this(id, name, provider, modelId, baseUrl, apiKey, temperature, maxTokens,
+                timeoutSeconds, enableThinking, null, null, contextLength, enabled,
+                createdAt, updatedAt);
+        }
+    }
 
     private static final String COLUMNS =
         "id, name, provider, model_id, base_url, api_key, temperature, max_tokens, "
-            + "timeout_seconds, enable_thinking, context_length, enabled, created_at, updated_at";
+            + "timeout_seconds, enable_thinking, reasoning_effort, frequency_penalty, "
+            + "context_length, enabled, created_at, updated_at";
 
     private final DataSource dataSource;
 
@@ -65,27 +80,64 @@ public class ModelConfigStore {
              var stmt = conn.createStatement()) {
             stmt.executeUpdate("""
                 CREATE TABLE IF NOT EXISTS model_config (
-                  id              VARCHAR(64)   NOT NULL PRIMARY KEY,
-                  name            VARCHAR(128)  NOT NULL,
-                  provider        VARCHAR(32)   NOT NULL DEFAULT 'openai',
-                  model_id        VARCHAR(128)  NOT NULL,
-                  base_url        VARCHAR(512)  NOT NULL,
-                  api_key         VARCHAR(512)  DEFAULT NULL,
-                  temperature     DOUBLE        NOT NULL DEFAULT 0.3,
-                  max_tokens      INT           NOT NULL DEFAULT 16384,
-                  timeout_seconds INT           NOT NULL DEFAULT 120,
-                  enable_thinking TINYINT(1)    NOT NULL DEFAULT 0,
-                  context_length  INT           NOT NULL DEFAULT 0,
-                  enabled         TINYINT(1)    NOT NULL DEFAULT 1,
-                  created_at      DATETIME(3)   NOT NULL,
-                  updated_at      DATETIME(3)   NOT NULL,
+                  id               VARCHAR(64)   NOT NULL PRIMARY KEY,
+                  name             VARCHAR(128)  NOT NULL,
+                  provider         VARCHAR(32)   NOT NULL DEFAULT 'openai',
+                  model_id         VARCHAR(128)  NOT NULL,
+                  base_url         VARCHAR(512)  NOT NULL,
+                  api_key          VARCHAR(512)  DEFAULT NULL,
+                  temperature      DOUBLE        NOT NULL DEFAULT 0.3,
+                  max_tokens       INT           NOT NULL DEFAULT 16384,
+                  timeout_seconds  INT           NOT NULL DEFAULT 120,
+                  enable_thinking  TINYINT(1)    NOT NULL DEFAULT 0,
+                  reasoning_effort VARCHAR(16)   DEFAULT NULL,
+                  frequency_penalty DOUBLE       DEFAULT NULL,
+                  context_length   INT           NOT NULL DEFAULT 0,
+                  enabled          TINYINT(1)    NOT NULL DEFAULT 1,
+                  created_at       DATETIME(3)   NOT NULL,
+                  updated_at       DATETIME(3)   NOT NULL,
                   UNIQUE KEY uk_model_name (name)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """);
+            // 存量库演进：CREATE TABLE IF NOT EXISTS 不补列，逐列检查后 ALTER（MySQL 8.0 无 ADD COLUMN IF NOT EXISTS）
+            ensureColumn(conn, "reasoning_effort",
+                "ALTER TABLE model_config ADD COLUMN reasoning_effort VARCHAR(16) DEFAULT NULL "
+                    + "AFTER enable_thinking");
+            ensureColumn(conn, "frequency_penalty",
+                "ALTER TABLE model_config ADD COLUMN frequency_penalty DOUBLE DEFAULT NULL "
+                    + "AFTER reasoning_effort");
             log.info("ModelConfigStore: model_config table ready");
         } catch (Exception e) {
             throw new IllegalStateException("Failed to init model_config table: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 缺列补列（幂等）：供存量库平滑演进，新库由上面的 CREATE TABLE 直接建齐。
+     * 多副本并发冷启动可能同时 ALTER，Duplicate column（SQLState 42S21）视为已被并发启动补齐。
+     */
+    private static void ensureColumn(java.sql.Connection conn, String column, String ddl)
+            throws SQLException {
+        try (var ps = conn.prepareStatement(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    + "WHERE table_schema = DATABASE() AND table_name = 'model_config' AND column_name = ?")) {
+            ps.setString(1, column);
+            try (var rs = ps.executeQuery()) {
+                if (rs.next() && rs.getLong(1) > 0) {
+                    return;
+                }
+            }
+        }
+        try (var stmt = conn.createStatement()) {
+            stmt.executeUpdate(ddl);
+        } catch (SQLException e) {
+            if (!"42S21".equals(e.getSQLState())) {
+                throw e;
+            }
+            log.info("ModelConfigStore: model_config column '{}' already added by concurrent startup", column);
+            return;
+        }
+        log.info("ModelConfigStore: model_config column '{}' added", column);
     }
 
     /** 全部托管模型（管理视图：含 disabled），按创建时间升序 */
@@ -133,9 +185,9 @@ public class ModelConfigStore {
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement("""
                  INSERT INTO model_config (id, name, provider, model_id, base_url, api_key, temperature,
-                     max_tokens, timeout_seconds, enable_thinking, context_length, enabled,
-                     created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))
+                     max_tokens, timeout_seconds, enable_thinking, reasoning_effort, frequency_penalty,
+                     context_length, enabled, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))
                  """)) {
             ps.setString(1, cfg.id());
             ps.setString(2, cfg.name());
@@ -147,8 +199,14 @@ public class ModelConfigStore {
             ps.setInt(8, cfg.maxTokens());
             ps.setInt(9, cfg.timeoutSeconds());
             ps.setBoolean(10, cfg.enableThinking());
-            ps.setInt(11, cfg.contextLength());
-            ps.setBoolean(12, cfg.enabled());
+            ps.setString(11, cfg.reasoningEffort());
+            if (cfg.frequencyPenalty() != null) {
+                ps.setDouble(12, cfg.frequencyPenalty());
+            } else {
+                ps.setNull(12, java.sql.Types.DOUBLE);
+            }
+            ps.setInt(13, cfg.contextLength());
+            ps.setBoolean(14, cfg.enabled());
             ps.executeUpdate();
             log.info("model_config created: id={}, name={}, modelId={}", cfg.id(), cfg.name(), cfg.modelId());
         } catch (Exception e) {
@@ -163,7 +221,8 @@ public class ModelConfigStore {
              var ps = conn.prepareStatement("""
                  UPDATE model_config SET name = ?, provider = ?, model_id = ?, base_url = ?, api_key = ?,
                      temperature = ?, max_tokens = ?, timeout_seconds = ?, enable_thinking = ?,
-                     context_length = ?, enabled = ?, updated_at = NOW(3)
+                     reasoning_effort = ?, frequency_penalty = ?, context_length = ?, enabled = ?,
+                     updated_at = NOW(3)
                  WHERE id = ?
                  """)) {
             // 参数顺序与 bindAll 不同：UPDATE 以 name 起始，WHERE id 收尾
@@ -176,9 +235,15 @@ public class ModelConfigStore {
             ps.setInt(7, cfg.maxTokens());
             ps.setInt(8, cfg.timeoutSeconds());
             ps.setBoolean(9, cfg.enableThinking());
-            ps.setInt(10, cfg.contextLength());
-            ps.setBoolean(11, cfg.enabled());
-            ps.setString(12, cfg.id());
+            ps.setString(10, cfg.reasoningEffort());
+            if (cfg.frequencyPenalty() != null) {
+                ps.setDouble(11, cfg.frequencyPenalty());
+            } else {
+                ps.setNull(11, java.sql.Types.DOUBLE);
+            }
+            ps.setInt(12, cfg.contextLength());
+            ps.setBoolean(13, cfg.enabled());
+            ps.setString(14, cfg.id());
             var n = ps.executeUpdate() > 0;
             if (n) {
                 log.info("model_config updated: id={}, name={}", cfg.id(), cfg.name());
@@ -221,6 +286,11 @@ public class ModelConfigStore {
 
     /** model_config 行 → ModelConfig */
     private ModelConfig map(ResultSet rs) throws SQLException {
+        var reasoningEffort = rs.getString("reasoning_effort"); // getString：NULL 直接返回 null
+        Double frequencyPenalty = rs.getDouble("frequency_penalty"); // getDouble：NULL 返回 0.0，需紧跟 wasNull 判定
+        if (rs.wasNull()) {
+            frequencyPenalty = null;
+        }
         return new ModelConfig(
             rs.getString("id"),
             rs.getString("name"),
@@ -232,6 +302,8 @@ public class ModelConfigStore {
             rs.getInt("max_tokens"),
             rs.getInt("timeout_seconds"),
             rs.getBoolean("enable_thinking"),
+            reasoningEffort,
+            frequencyPenalty,
             rs.getInt("context_length"),
             rs.getBoolean("enabled"),
             toInstant(rs.getTimestamp("created_at")),

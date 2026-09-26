@@ -84,7 +84,7 @@ public class ModelCatalog {
     ModelCatalog(ModelConfigStore store, AgentManagerProperties props, long cacheTtlMillis) {
         this.store = store;
         this.systemLlm = props.llm() != null ? props.llm()
-            : new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0);
+            : new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0, "", null);
         this.harness = props.harness() != null ? props.harness()
             : AgentManagerProperties.HarnessConfig.defaults();
         this.cacheTtlMillis = cacheTtlMillis;
@@ -220,7 +220,9 @@ public class ModelCatalog {
             cfg.maxTokens(),
             cfg.timeoutSeconds(),
             cfg.enableThinking(),
-            cfg.contextLength()
+            cfg.contextLength(),
+            cfg.reasoningEffort(),
+            cfg.frequencyPenalty()
         );
         return new RequestBodyLoggingModelWrapper(ChatModelFactory.build(llm, harness));
     }

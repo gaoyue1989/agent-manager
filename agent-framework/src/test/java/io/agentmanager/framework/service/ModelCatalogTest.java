@@ -209,7 +209,7 @@ class ModelCatalogTest {
     private static AgentManagerProperties props(String systemModelId) {
         return new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig("sk-sys", systemModelId, "http://sys:1/v1",
-                "openai", 0.3, 16384, 120, false, 0),
+                "openai", 0.3, 16384, 120, false, 0, "", null),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/cp", "u", "p", "cp"),
             "/config", "",

@@ -272,10 +272,12 @@ OAF `deniedTools` 字段控制排除列表。
 | `LLM_API_KEY` | — | ✓ | LLM API 密钥 |
 | `LLM_MODEL_ID` | — | ✓ | 模型 ID |
 | `LLM_BASE_URL` | — | ✓ | LLM API 端点 |
-| `LLM_PROVIDER` | `openai` | | 提供商标识 |
+| `LLM_PROVIDER` | `openai` | | 推理引擎方言（`openai`/`vllm`/`sglang`/`glm`/`deepseek`），决定思考/推理参数下发位置（见 ChatModelFactory.applyDialect） |
 | `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
 | `LLM_MAX_TOKENS` | `4096` | | 最大 token |
 | `LLM_TIMEOUT` | `120` | | 超时(秒) |
+| `LLM_REASONING_EFFORT` | — | | 推理强度（如 low/medium/high）；空 = 不下发，值集因端点而异 |
+| `LLM_FREQUENCY_PENALTY` | — | | 频率惩罚 [-2.0, 2.0]；空 = 不下发 |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置，不传给模型） |
 | `AGENT_CONFIG_DIR` | `/config` | | Agent 配置目录 |
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
@@ -308,6 +310,9 @@ OAF `deniedTools` 字段控制排除列表。
 > 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
 > 托管模型存 `model_config` 表（`/models` REST CRUD，debug 页「Models」模块可管理），会话经 `model` 字段按会话选择，
 > 仅影响该会话的对话调用；详见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md)。
+> **采样参数方言（2026-09-27）**：思考开关/推理强度的下发位置由 `provider` 方言决定（`openai` 顶层 effort；
+> `vllm`/`sglang` 合并走 `chat_template_kwargs`；`glm` 走 `thinking.type`+顶层；`deepseek` 不下发），
+> NULL/空 = 不下发；详见 [docs/model-params-design.md](docs/model-params-design.md)。
 
 ---
 
@@ -342,8 +347,8 @@ OAF `deniedTools` 字段控制排除列表。
 | POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复） |
 | GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
-| POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；重复 name 400） |
-| PATCH | `/models/{id}` | 更新托管模型（字段缺省=不变；`apiKey=""`=清空回落系统密钥） |
+| POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；采样参数可空：`reasoningEffort` 格式 `^[a-z0-9_]{1,16}$`、`frequencyPenalty` ∈[-2,2]、`provider` ∈方言枚举；重复 name 400） |
+| PATCH | `/models/{id}` | 更新托管模型（字段缺省=不变；`apiKey=""`=清空回落系统密钥；`reasoningEffort=""`=清除不下发） |
 | DELETE | `/models/{id}` | 删除托管模型（引用会话自动回落默认模型） |
 | POST | `/models/{id}/test` | 模型连接测试（真实发一次最小 completion，返回 ok/latency_ms/reply） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |

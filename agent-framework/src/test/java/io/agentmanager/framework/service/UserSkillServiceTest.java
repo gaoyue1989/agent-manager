@@ -57,7 +57,7 @@ class UserSkillServiceTest {
     /** 与 SkillManageServiceTest 同款：显式构造属性（configDir = 临时目录） */
     private static AgentManagerProperties props(Path configDir) {
         return new AgentManagerProperties(
-            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120, true, 0),
+            new AgentManagerProperties.LLMConfig("sk-test", "gpt-4", "https://api.openai.com/v1", "openai", 0.7, 4096, 120, true, 0, "", null),
             new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
             new AgentManagerProperties.CheckpointConfig("jdbc:mysql://localhost:3306/test", "user", "pass", "test"),
             configDir.toString(),
