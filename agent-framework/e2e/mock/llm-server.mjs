@@ -154,6 +154,15 @@ const server = http.createServer((req, res) => {
         systemContent,
         toolCallNames: messages.flatMap(m => (m.tool_calls ?? []).map(t => t?.function?.name)).filter(Boolean),
         hasImageBlock: JSON.stringify(messages).includes('"image_url"') || JSON.stringify(messages).includes('data:image'),
+        // 采样参数在 LLM 请求体中的实际落点（MOD6/MOD7 方言矩阵断言面：
+        // ChatModelFactory.applyDialect 四分支——vllm/sglang 合并走 chat_template_kwargs、
+        // glm 走 thinking、openai 兜底走顶层一等字段、deepseek 不下发）
+        sampling: {
+          chat_template_kwargs: reqBody.chat_template_kwargs ?? null,
+          thinking: reqBody.thinking ?? null,
+          reasoning_effort: reqBody.reasoning_effort ?? null,
+          frequency_penalty: reqBody.frequency_penalty ?? null,
+        },
         at: Date.now(),
       });
       if (isBackground) {
