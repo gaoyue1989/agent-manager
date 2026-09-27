@@ -782,11 +782,21 @@ public class AgentRuntimeService {
             String replyId = fromTable.replyId() != null && !fromTable.replyId().isBlank()
                 ? fromTable.replyId()
                 : (fromState != null ? fromState.replyId() : "");
+            // 恢复身份（Channel 流程的 gw sessionId + peer）优先取表行：storeConfirmContext 在
+            // permission_ask 广播前同步落库，恒可用；state 快照要等 ask 段收尾（AGENT_END 处理）
+            // 才落库，confirm 抢到锁后立即读时 fromState 可能为 null——取 state 身份会得到
+            // null → buildResumeContext 回落 fullThreadId 兜底槽 → 空会话恢复丢全部上下文
+            //（e2e R5/工具插件 ask 批准实测）。A2A 流程表行身份为 null，回落 state（行为不变）。
+            var runtimeSid = fromTable.runtimeSessionId() != null && !fromTable.runtimeSessionId().isBlank()
+                ? fromTable.runtimeSessionId()
+                : (fromState != null ? fromState.runtimeSessionId() : null);
+            var runtimeUid = fromTable.runtimeUserId() != null && !fromTable.runtimeUserId().isBlank()
+                ? fromTable.runtimeUserId()
+                : (fromState != null ? fromState.runtimeUserId() : null);
             log.info("[HITL] resolveConfirmContext: table hit (complete params) for {}, tools={}, replyId={}",
                 fullThreadId, tools.keySet(), replyId);
             return new ConfirmContext(tools, replyId, Instant.now(), new AtomicBoolean(true),
-                fromState != null ? fromState.runtimeSessionId() : null,
-                fromState != null ? fromState.runtimeUserId() : null);
+                runtimeSid, runtimeUid);
         }
 
         if (fromState != null) {
