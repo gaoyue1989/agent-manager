@@ -322,6 +322,23 @@ public class ChatStreamController {
                 return;
             }
 
+            // ===== 1.5 ASKING 预检（issue #47/#48）：挂起会话不接受新 turn =====
+            // ASKING 态下的普通消息会被 SDK 在 turn 入口拒绝（doCallInner 抛 "ASKING state
+            // ... cannot proceed"），但拒绝原因的 error 帧与 AGENT_END 正常收尾存在时序竞态：
+            // AGENT_END 先经 endTurn→closeSession 关流，迟到的 error 帧落在已关闭 session 上
+            // 被丢弃，客户端拿到零帧空响应（本地稳定复现、CI 时序未触发）。入口直接拒绝后
+            // SDK 路径不再触达，error 帧恒达。预检放在抢到租约之后：与 confirm 恢复 turn
+            // 互斥——恢复完成前本 turn 排队等待，恢复后 state 已更新，不会误拒。
+            if (runtimeService.hasPendingConfirm(finalSessionId)) {
+                log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
+                turnLeaseStore.release(finalSessionId, token);
+                sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
+                    + "' is in ASKING state (waiting for tool approval); approve or deny the "
+                    + "pending tool call before sending new messages"));
+                sink.complete();
+                return;
+            }
+
             // ===== 2. 启动续租 =====
             // 构造失败必须显式释放：guard 的构造里若在起线程之前就抛了（判据计算、线程池创建），
             // 没有任何人持有 token，而下面那段的 catch 也覆盖不到它。没有续租线程时租约会在

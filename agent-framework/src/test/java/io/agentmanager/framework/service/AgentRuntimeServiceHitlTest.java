@@ -534,4 +534,44 @@ class AgentRuntimeServiceHitlTest {
         assertEquals(Map.of("packageId", 166), block.getInput(), "input 取 state 侧完好参数");
         assertEquals("{\"packageId\":166}", block.getContent(), "content 与 state 侧参数保持一致");
     }
+
+    // ---------- ASKING 预检（issue #47/#48）：chat 入口拒绝的双源判定 ----------
+
+    /** state 有 ASKING 快照（表无行）→ true：SDK 权威源优先命中 */
+    @Test
+    void hasPendingConfirmShouldHitOnStateSnapshot() {
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        var askingEntry = Map.<String, Object>of("tool_call_id", "call-1");
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(askingEntry), Map.of(), "reply-1",
+                Map.of("session_id", "", "user_id", "")));
+        when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
+        service.setAgentStateReader(stateReader);
+
+        assertTrue(service.hasPendingConfirm(SID));
+    }
+
+    /** state 空（未写入/读失败）但 confirm_context 仍有行 → true：兜底源生效 */
+    @Test
+    void hasPendingConfirmShouldFallBackToConfirmContextRow() {
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(), Map.of(), "", Map.of("session_id", "", "user_id", "")));
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(toolUseBlock("call-1")), Instant.now())));
+        service.setAgentStateReader(stateReader);
+
+        assertTrue(service.hasPendingConfirm(SID));
+    }
+
+    /** 两源皆空 → false（setUp 的 service 未装配 stateReader，null 分支一并覆盖） */
+    @Test
+    void hasPendingConfirmShouldBeFalseWhenBothSourcesEmpty() {
+        when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
+
+        assertFalse(service.hasPendingConfirm(SID));
+    }
 }

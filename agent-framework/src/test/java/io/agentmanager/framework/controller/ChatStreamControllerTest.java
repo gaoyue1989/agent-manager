@@ -349,6 +349,44 @@ class ChatStreamControllerTest {
             "空消息应返回 error 帧: " + frames);
     }
 
+    // ===== ASKING 态入口预检（issue #47/#48）=====
+
+    @Test
+    void chatShouldRejectNewTurnWhenSessionPendingConfirm() {
+        // 挂起会话的新 turn 必须在入口直接拒绝并回含 ASKING 的 error 帧：
+        // 放行到 SDK 时，拒绝原因的 error 帧会与 AGENT_END 正常收尾竞态（AGENT_END 先
+        // closeSession 关流，error 帧迟到被丢），客户端拿到零帧空响应（#47/#48）
+        var sessionId = "test-user-pc1";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-pc1");
+        when(runtimeService.hasPendingConfirm(sessionId)).thenReturn(true);
+
+        var frames = collect(sessionId, "[E2E:plain]", "alice");
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("ASKING")),
+            "挂起会话应回含 ASKING 的 error 帧: " + frames);
+        // SDK 路径不得触达，预检拒绝不产生任何 agent 事件落库
+        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+        verify(eventStore, never()).append(any(), any(), any(), any());
+        // 租约必须放回（拒绝与释放同在订阅回调线程上先行于 complete，无需 timeout 等待）
+        verify(turnLeaseStore).release(sessionId, "tok-pc1");
+    }
+
+    @Test
+    void chatShouldProceedWhenSessionNotPendingConfirm() {
+        // 非挂起会话不受预检影响（hasPendingConfirm 缺省 mock 为 false），照常走 SDK
+        var sessionId = "test-user-pc2";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-pc2");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-pc2")));
+
+        var frames = collect(sessionId, "hello", "alice");
+
+        verify(chatChannel).sendStream(any(ChatUiRequest.class));
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-pc2");
+        assertTrue(frames.stream().noneMatch(f -> f != null && f.contains("turn_pending_confirm")),
+            "非挂起会话不应出现预检拒绝帧: " + frames);
+    }
+
     @Test
     void chatShouldAttachSessionKeyToUserMessage() {
         var sessionId = "test-user-s7"; // 不与 chatShouldReleaseLeaseWhenSendStreamThrowsSynchronously 复用：JUnit 方法顺序在 JDK 间有差异，复用会话 ID 会让前者的收尾与后者的租约验证交错
