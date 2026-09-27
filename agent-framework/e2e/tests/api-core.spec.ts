@@ -2,12 +2,17 @@
  * e2e-core API 组：S 基础 / F 文件 / H HITL / M MCP Apps / A A2A（e2e-ci-plan §5）。
  * 协议权威：docs/api-thread-spec.md v1.0。
  */
-import { test, expect } from '@playwright/test';
+import { test, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
 import { BASE, BENCH_MCP, ids, sessionIdFor } from '../lib/env.js';
 import { chat, status, subscribe, history, threads, deleteThread, patchThread, a2a, llmStats, llmReset, createApprovalApp, confirmStream, confirmSync } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic } from '../lib/sse.js';
 import { upload, download, textBytes, pngBytes } from '../lib/files.js';
+import { seedCompactionArchive } from '../lib/archive-seed.js';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const U = 'e2e-tester';
 let uniqueSeq = 0;
@@ -603,6 +608,105 @@ test('A3/A4 tasks/get 路由与 A2A 限制声明', async () => {
   expect(r.json.error === undefined || r.json.error?.code !== -32601).toBe(true); // 方法已路由（非 Method not found）
 });
 
+// A5（e5d6ff3 回归门禁·A2A 面）：S7 只钉了 Channel 链路的 llm-calls 反查，
+// A2A 链路此前零断言——SessionKeyResolver 在 A2A 下应把记录落在调用方 metadata.sessionId
+//（SessionKeyResolver.java 链路表；单测 LlmLoggingMiddlewareTest#shouldPreferSessionIdOnA2ALink），
+// 解析回归（记录落共享桶/别的键 → 按 sid 查询恒空）在门禁不可见。复用 plain 夹具，无 mock 扩展。
+test('A5 A2A message/stream 后 llm-calls 按 metadata sessionId 反查非空', async ({ request }) => {
+  const sid = sessionIdFor(`a5-${uniq()}`);
+  const res = await request.post('/', {
+    data: {
+      jsonrpc: '2.0', id: 5, method: 'message/stream',
+      params: {
+        message: {
+          kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
+          parts: [{ kind: 'text', text: `[E2E:plain]` }],
+          metadata: { userId: U, sessionId: sid },
+        },
+      },
+    },
+  });
+  expect(res.status()).toBe(200);
+  const text = await res.text(); // blocking：流读完即任务终态（A2 同款完成 barrier）
+  expect(text).toContain('data:'); // SSE 形态（A2AController.convertToSse → ServerSentEvent）
+
+  type LlmCallsBody = {
+    session_id: string;
+    calls: Array<{
+      call_id: string; timestamp: number;
+      request: { messages: Array<{ role: string; content: string }> };
+      response: { usage: Record<string, number> };
+    }>;
+  };
+  const body = await pollUntil(
+    async () => (await request.get(`/threads/${sid}/llm-calls`)).json() as LlmCallsBody,
+    b => (b.calls?.length ?? 0) > 0,
+  );
+  // 回显查询键：记录键口径 = 规范会话 id（docs/api.md llm-calls 节）
+  expect(body.session_id).toBe(sid);
+  const call = body.calls[0];
+  expect(String(call.call_id)).toContain('call-');
+  expect(Number(call.timestamp)).toBeGreaterThan(0);
+  // 记录的是模型输入消息：A2A 文本 part 原样进 user 消息（role 为 SDK 枚举大写 'USER'）
+  expect(call.request.messages.some(m => m.role === 'USER' && m.content.includes('[E2E:plain]'))).toBe(true);
+  // usage 契约（LlmLoggingMiddleware：三键恒在，数值可为 0）
+  for (const k of ['input_tokens', 'output_tokens', 'total_tokens']) {
+    expect(Number(call.response.usage[k]), `usage.${k}`).toBeGreaterThanOrEqual(0);
+  }
+});
+
+// A6（e5d6ff3 串桶回归·A2A 面，数据正确性）：两个 A2A 会话（message/send，A1 同款面）各带
+// run 内唯一 token，互查双方记录。两道判据对应两类回归形态：
+// ① 记录退化到共享桶（gw-hash/"global"）或互换/错路由到对方会话键——按 sid 精确查询与
+//    末段归一回退（LLMLogger.java:43-49）均未命中，GET 恒返回 []，红在 callsOf 的
+//    pollUntil 超时（超时消息携带最后观测 calls:[]）；
+// ② 串写进仍可按 sid 反查到的桶（双写/归一末段碰撞/回退命中对方桶）——非空收敛通过，
+//    红在交叉 token 断言（not.toContain 对方 token）。
+// 两 sid 末段（a6a-/a6b- + uniq）互异（LLMLogger.java:54-60 归一规则）：既保证①不发生
+// 回退误命中，也保证②的负向断言不被回退误伤。
+test('A6 双 A2A 会话 llm-calls 互查不串桶', async ({ request }) => {
+  const sidA = sessionIdFor(`a6a-${uniq()}`);
+  const sidB = sessionIdFor(`a6b-${uniq()}`);
+  const tokenA = `A6A-${uniq()}`;
+  const tokenB = `A6B-${uniq()}`;
+  const send = (sid: string, token: string) => a2a('message/send', {
+    message: {
+      kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
+      parts: [{ kind: 'text', text: `[E2E:plain] ${token}` }],
+      metadata: { userId: U, sessionId: sid },
+    },
+  });
+  for (const [sid, token] of [[sidA, tokenA], [sidB, tokenB]] as const) {
+    const r = await send(sid, token);
+    expect(r.status).toBe(200);
+    expect(r.json.error).toBeUndefined();
+  }
+  const callsOf = (sid: string) => pollUntil(
+    async () => (await request.get(`/threads/${sid}/llm-calls`)).json() as { session_id: string; calls: unknown[] },
+    b => (b.calls?.length ?? 0) > 0,
+  );
+  const bodyA = await callsOf(sidA); // 判据①：共享桶/错键形态在此超时红
+  const bodyB = await callsOf(sidB);
+  expect(bodyA.session_id).toBe(sidA);
+  expect(bodyB.session_id).toBe(sidB);
+  expect(JSON.stringify(bodyA)).toContain(tokenA);
+  expect(JSON.stringify(bodyA), 'B 的内容落进了 A 的桶').not.toContain(tokenB); // 判据②
+  expect(JSON.stringify(bodyB)).toContain(tokenB);
+  expect(JSON.stringify(bodyB), 'A 的内容落进了 B 的桶').not.toContain(tokenA); // 判据②
+});
+
+// A7（查询契约负例·无 LLM，MOD 组风格）：未运行过的会话查 llm-calls 恒空——为 A5/A6 的
+// "非空"锚定意义：端点不得对任意 sid 全局倾倒记录（LLMLogger.getCalls 退化为全量返回时在此红）。
+// ThreadController 无会话存在性校验，未知 sid 固定 200 + 空数组（ThreadController.java:354）。
+test('A7 llm-calls 未知会话恒空（查询契约）', async ({ request }) => {
+  const ghost = sessionIdFor(`a7-${uniq()}`);
+  const res = await request.get(`/threads/${ghost}/llm-calls`);
+  expect(res.status()).toBe(200);
+  const body = await res.json() as { session_id: string; calls: unknown[] };
+  expect(body.session_id).toBe(ghost);
+  expect(body.calls).toEqual([]);
+});
+
 // ---------- SK 组：用户技能（L4）管理面探针 ----------
 // 说明：完整管理面场景（PUT/GET/DELETE/sync-from-package + A2A 生效性）见仓库根 e2e/user-skill-admin-e2e.sh
 //（手工脚本，需平台已发布带 skills 的自建服务）；此处只钉住端点路由与响应契约，防路由写错静默合入。
@@ -631,4 +735,390 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
   const bad = await request.get('/skills/users/.hidden/ghost');
   expect(bad.status()).toBe(400);
   expect((await bad.json()).error).toBe('invalid_user_id');
+});
+
+// ---------- SK 组：/skills/available 与 parse-refs 按用户合并 L4（d0c3eaa） ----------
+// 合并语义（同名 L4 覆盖描述/独有补入/X-User-Id 头优先/删除回落）此前只有单测覆盖，
+// e2e HTTP 黑盒面零断言（grep skills/available|parse-refs 于 tests/ 零命中）。
+
+/** 写入用户 L4 技能主文件：description 承载 /available 合并视图的覆盖描述（l4Description 解析 frontmatter） */
+async function putL4(request: APIRequestContext, uid: string, name: string, description: string): Promise<APIResponse> {
+  const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+  return request.put(`/skills/users/${encodeURIComponent(uid)}/${encodeURIComponent(name)}`, { data: { content } });
+}
+
+/** /available 返回顺序（全局目录序 + L4 追加）不参与契约，深比较前按 name 归一 */
+const nameSorted = (arr: unknown) =>
+  (arr as Array<Record<string, string>>).slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+
+test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、Header 优先、删除回落', async ({ request }) => {
+  // 旧行为基线（不传 userId）：全局启用目录的 name+description 精简视图（SkillCatalogService.availableSkills()）
+  const baseline = await (await request.get('/skills/available')).json() as Array<Record<string, string>>;
+  expect(Array.isArray(baseline)).toBe(true);
+  for (const e of baseline) expect(Object.keys(e).sort()).toEqual(['description', 'name']);
+  const baseDemo = baseline.find(e => e.name === 'demo-skill');
+  expect(baseDemo, 'fixture 目录应含 demo-skill（fixtures/agent-config/skills）').toBeTruthy();
+  // 空串 userId 等价不传（effectiveUserId blank → 全局目录）
+  expect(nameSorted(await (await request.get('/skills/available?userId=')).json()))
+    .toEqual(nameSorted(baseline));
+
+  const uidA = ids(`sk2-a-${uniq()}`);
+  const uidB = ids(`sk2-b-${uniq()}`);
+  // 无任何 L4 的用户：合并视图与全局目录全等（合并不得让 @ 候选缩水/变形）。
+  // 注：KV 读取失败严格分支黑盒不可注入（WorkspaceReader 把枚举失败按空处理），此处钉其可达降级面
+  expect(nameSorted(await (await request.get(`/skills/available?userId=${encodeURIComponent(uidB)}`)).json()))
+    .toEqual(nameSorted(baseline));
+
+  const l4Only = `e2e-l4-${uniq()}`;
+  const markerA = `L4A覆盖-${uniq()}`;
+  const onlyMarker = `L4独有-${uniq()}`;
+  const markerB = `L4B覆盖-${uniq()}`;
+  const putDemo = await putL4(request, uidA, 'demo-skill', markerA);
+  expect(putDemo.status()).toBe(200);
+  const putBody = await putDemo.json() as Record<string, unknown>;
+  expect(putBody.action).toBe('created');
+  expect(Number(putBody.version)).toBeGreaterThan(0);
+  expect(((await (await putL4(request, uidA, l4Only, onlyMarker)).json()) as Record<string, unknown>).action).toBe('created');
+  // uidB 写入必须显式断言成功：否则下方「X-User-Id 优先」的负向断言（hdr 不含 markerB）
+  // 在 PUT 失败时自然成立，头部优先级实际未被行使（假绿窗口，SK1 注释所防的静默合入形态）
+  const putB = await putL4(request, uidB, 'demo-skill', markerB);
+  expect(putB.status()).toBe(200);
+  expect(((await putB.json()) as Record<string, unknown>).action).toBe('created');
+
+  // 合并视图：同名 L4 描述覆盖全局 + L4 独有技能补入
+  const merged = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
+  expect(merged.find(e => e.name === 'demo-skill')?.description).toBe(markerA);
+  expect(merged.find(e => e.name === l4Only)?.description).toBe(onlyMarker);
+
+  // X-User-Id 头优先于 ?userId=（网关注入登录态优先）：返回 A 的视图且不混入 B 的 L4
+  const hdr = await (await request.get('/skills/available', { headers: { 'X-User-Id': uidA }, params: { userId: uidB } })).json() as Array<Record<string, string>>;
+  expect(hdr.find(e => e.name === 'demo-skill')?.description).toBe(markerA);
+  expect(hdr.find(e => e.name === l4Only)?.description).toBe(onlyMarker);
+  expect(JSON.stringify(hdr)).not.toContain(markerB);
+
+  // 不传 userId 始终是全局目录：写入后公共视图仍不泄漏个人技能
+  const globalAfter = await (await request.get('/skills/available')).json() as Array<Record<string, string>>;
+  expect(globalAfter.find(e => e.name === 'demo-skill')?.description).toBe(baseDemo!.description);
+  expect(JSON.stringify(globalAfter)).not.toContain(l4Only);
+
+  // 删除回落：demo-skill 删除（有包内基线）→ 合并视图回落全局描述
+  const del = await request.delete(`/skills/users/${encodeURIComponent(uidA)}/demo-skill`);
+  expect(del.status()).toBe(200);
+  expect(((await del.json()) as Record<string, unknown>).hasPackageBaseline).toBe(true);
+  await pollUntil(async () => {
+    const rows = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
+    return rows.find(e => e.name === 'demo-skill');
+  }, e => e?.description === baseDemo!.description, 15_000);
+  // 独有技能删除 → 从合并视图消失（无包内基线，该技能对该用户已不可见）
+  expect((await request.delete(`/skills/users/${encodeURIComponent(uidA)}/${encodeURIComponent(l4Only)}`)).status()).toBe(200);
+  await pollUntil(async () => {
+    const rows = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
+    return rows.some(e => e.name === l4Only);
+  }, gone => !gone, 15_000);
+});
+
+test('SK3 /skills/parse-refs 按用户合并解析 @Skill 引用', async ({ request }) => {
+  const uid = ids(`sk3-${uniq()}`);
+  const l4Name = `e2e-l4-${uniq()}`;
+  expect(((await (await putL4(request, uid, l4Name, `L4引用-${uniq()}`)).json()) as Record<string, unknown>).action).toBe('created');
+
+  const refs = async (message: string, userId?: string) => {
+    const q = new URLSearchParams({ message });
+    if (userId) q.set('userId', userId);
+    const res = await request.get(`/skills/parse-refs?${q}`);
+    expect(res.status()).toBe(200);
+    return await res.json() as { skills: string[]; count: number };
+  };
+
+  // 全局技能 + L4 技能合并命中；重复引用去重保序；count 与 skills 一致
+  const both = await refs(`@demo-skill 和 @${l4Name} 再 @demo-skill`, uid);
+  expect(both.skills).toEqual(['demo-skill', l4Name]);
+  expect(both.count).toBe(both.skills.length);
+
+  // 不传 userId：L4 个人技能不可见（@ 注入链路的合并依赖生效 userId）
+  expect(await refs(`@${l4Name}`)).toEqual({ skills: [], count: 0 });
+  // 邮箱形态不误匹配（(?<![\w]) lookbehind）；目录外名称被 enabledSkillNames 过滤
+  expect(await refs('联系 user@example.com', uid)).toEqual({ skills: [], count: 0 });
+  expect(await refs('@no-such-skill-x', uid)).toEqual({ skills: [], count: 0 });
+  // 中文紧邻 @ 合法（技能名收尾于串尾，避免中文字符类把后续中文吞进名字）
+  expect((await refs(`用@${l4Name}`, uid)).skills).toEqual([l4Name]);
+});
+
+test('SK4 禁用的包内技能不进 /available 与 parse-refs（恢复原状）', async ({ request }) => {
+  // 前置自愈：上轮异常残留禁用态则先拨回（toggle 对称，.skill-states.json 实时生效）
+  const st0 = (await (await request.get('/skills/manage')).json() as Array<Record<string, unknown>>)
+    .find(s => s.name === 'demo-skill');
+  expect(st0, 'fixture 目录应含 demo-skill').toBeTruthy();
+  if (st0!.enabled === false) await request.put('/skills/demo-skill/toggle');
+
+  const uid = ids(`sk4-${uniq()}`); // 纯全局视图用户（无 L4 覆盖）
+  expect((((await (await request.put('/skills/demo-skill/toggle')).json()) as Record<string, unknown>)).enabled).toBe(false);
+  try {
+    // 无 userId 视图剔除
+    let rows = await (await request.get('/skills/available')).json() as Array<Record<string, string>>;
+    expect(rows.some(e => e.name === 'demo-skill')).toBe(false);
+    // 带 userId 合并视图同样剔除（该用户无同名 L4 → 不得复活）
+    rows = await (await request.get(`/skills/available?userId=${encodeURIComponent(uid)}`)).json() as Array<Record<string, string>>;
+    expect(rows.some(e => e.name === 'demo-skill')).toBe(false);
+    // @ 引用解析同源（enabledSkillNames）：禁用技能不再命中
+    const refs = await (await request.get(`/skills/parse-refs?${new URLSearchParams({ message: '@demo-skill 演示一下', userId: uid })}`)).json() as { skills: string[]; count: number };
+    expect(refs).toEqual({ skills: [], count: 0 });
+  } finally {
+    await request.put('/skills/demo-skill/toggle'); // 恢复启用，不污染后续用例/project
+  }
+  const st1 = (await (await request.get('/skills/manage')).json() as Array<Record<string, unknown>>)
+    .find(s => s.name === 'demo-skill');
+  expect(st1!.enabled).toBe(true);
+  const rows = await (await request.get('/skills/available')).json() as Array<Record<string, string>>;
+  expect(rows.some(e => e.name === 'demo-skill')).toBe(true);
+});
+
+// ---------- HA 组：压缩归档历史（#45，docs/session-history-archive-design.md） ----------
+// 契约权威：ThreadController#threadHistory（includeArchived/limit/beforeId → hasMore/nextBeforeId、
+// origin 双源标记、role=compaction 合成项）。e2e 实例归档默认开启（application.yml
+// AGENT_HISTORY_ARCHIVE_ENABLED:true，start-agent.sh 未覆盖）——对话 write-through 归档，
+// 合并视图是真默认路径，此前用例对它零断言。
+
+type HistoryMsg = Record<string, unknown>;
+
+/** 带 query 的 history 查询（lib/client.js 的 history 不带参） */
+async function historyQ(sid: string, query = ''): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BASE}/threads/${encodeURIComponent(sid)}/history${query ? `?${query}` : ''}`);
+  expect(res.status, 'history HTTP 状态').toBe(200);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+const userTexts = (h: Record<string, unknown>) =>
+  ((h.messages ?? []) as HistoryMsg[]).filter(m => m.role === 'user').map(m => String(m.content));
+
+test('HA1 未压缩会话 history 合并视图契约与双源一致', async () => {
+  const sid = sessionIdFor(`ha1-${uniq()}`);
+  const first = `ha1-first-${uniq()}`;
+  const second = `ha1-second-${uniq()}`;
+  for (const arg of [first, second]) {
+    const s = chat({ message: `[E2E:plain](${arg})`, userId: U, sessionId: sid });
+    await waitTerminal(s);
+    expect(s.terminal?.type).toBe('done');
+  }
+  // 合并视图（includeArchived 默认 true）：等两轮 user 消息都可见（吸收落库时序）
+  const merged = await pollUntil(async () => historyQ(sid), h => userTexts(h).length >= 2);
+  expect(merged.hasMore).toBe(false);
+  expect(merged.nextBeforeId ?? null).toBeNull();
+  const msgs = merged.messages as HistoryMsg[];
+  expect(msgs.length).toBeGreaterThan(0);
+  const seen = new Set<string>();
+  for (const m of msgs) {
+    expect(String(m.msg_id ?? '')).not.toBe('');
+    expect(['archive', 'state'], JSON.stringify(m)).toContain(m.origin);
+    seen.add(String(m.msg_id));
+  }
+  expect(seen.size, '合并视图 msg_id 不得重复（双源去重回归即在此红）').toBe(msgs.length);
+  for (const m of msgs) expect(m.origin, '未压缩会话应全部 origin=archive').toBe('archive');
+  // 内容双源一致：带标记的 user 消息在两视图同序同文
+  const markerOf = (ts: string[]) => ts.filter(t => t.includes('ha1-'));
+  expect(markerOf(userTexts(merged))).toEqual([`[E2E:plain](${first})`, `[E2E:plain](${second})`]);
+  const stateOnly = await historyQ(sid, 'includeArchived=false');
+  expect(stateOnly.hasMore).toBe(false);
+  expect(stateOnly.nextBeforeId ?? null).toBeNull();
+  expect(markerOf(userTexts(stateOnly))).toEqual(markerOf(userTexts(merged)));
+  // origin 是合并视图专属键：state-only 视图不得携带
+  for (const m of (stateOnly.messages ?? []) as HistoryMsg[]) expect('origin' in m).toBe(false);
+});
+
+test('HA2 beforeId 游标全量遍历：不丢页、不重复、末页收敛', async () => {
+  const sid = sessionIdFor(`ha2-${uniq()}`);
+  for (const arg of [`ha2-a-${uniq()}`, `ha2-b-${uniq()}`]) {
+    const s = chat({ message: `[E2E:plain](${arg})`, userId: U, sessionId: sid });
+    await waitTerminal(s);
+    expect(s.terminal?.type).toBe('done');
+  }
+  const full = await pollUntil(async () => historyQ(sid), h => userTexts(h).length >= 2);
+  expect(full.hasMore).toBe(false); // 小会话在默认 200 条内，首页即全量
+  const fullIds = ((full.messages ?? []) as HistoryMsg[]).map(m => String(m.msg_id));
+
+  // limit=1 逐页向后翻（游标 = 本页最旧归档行 id），直到末页
+  const pageIds: string[] = [];
+  let cursor: number | null = null;
+  for (let i = 0; i < 50; i++) {
+    const page = await historyQ(sid, cursor === null ? 'limit=1' : `limit=1&beforeId=${cursor}`);
+    const msgs = (page.messages ?? []) as HistoryMsg[];
+    expect(msgs.length, `第 ${i + 1} 页不得为空`).toBeGreaterThanOrEqual(1);
+    for (const m of msgs) pageIds.push(String(m.msg_id));
+    if (!page.hasMore) {
+      expect(page.nextBeforeId ?? null, '末页不得再给游标').toBeNull();
+      break;
+    }
+    expect(typeof page.nextBeforeId).toBe('number');
+    const next = Number(page.nextBeforeId);
+    if (cursor !== null) expect(next, '游标必须严格递减').toBeLessThan(cursor);
+    cursor = next;
+  }
+  // 全量遍历恰好覆盖首页视图：不丢页（游标跳行）也不重复（跨页去重失效）
+  expect(pageIds.length).toBe(fullIds.length);
+  expect(new Set(pageIds)).toEqual(new Set(fullIds));
+  // 分页游标是合并视图专属：state-only 视图忽略 limit 恒 hasMore=false
+  const statePaged = await historyQ(sid, 'includeArchived=false&limit=1');
+  expect(statePaged.hasMore).toBe(false);
+});
+
+test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走归档行', async () => {
+  const sid = sessionIdFor(`ha3-${uniq()}`);
+  const mark = uniq();
+  const tailArg = `ha3-tail-${mark}`;
+  // 1) 真实一轮对话充当"未归档尾部"（write-through 也会归档它，下一步删其归档行）
+  const s = chat({ message: `[E2E:plain](${tailArg})`, userId: U, sessionId: sid });
+  await waitTerminal(s);
+  expect(s.terminal?.type).toBe('done');
+  // 2) 种子：清本会话归档行 → 直插压缩前历史 + __compaction_summary__
+  const seed = seedCompactionArchive(`${U}:${sid}`, sid, mark, U);
+
+  // 3) 首页合并视图：归档基底升序 + 摘要分隔条 + state 尾部合入基底末尾
+  const full = await historyQ(sid);
+  const msgs = (full.messages ?? []) as HistoryMsg[];
+  const m1i = msgs.findIndex(m => m.msg_id === seed.m1);
+  const sum = msgs.find(m => m.msg_id === seed.summaryId);
+  const m3i = msgs.findIndex(m => m.msg_id === seed.m3);
+  expect(m1i, '压缩前用户消息(归档)缺失').toBeGreaterThanOrEqual(0);
+  expect(sum, '压缩摘要分隔条合成项缺失').toBeTruthy();
+  expect(m3i, '压缩前助手消息(归档)缺失').toBeGreaterThanOrEqual(0);
+  expect(m1i).toBeLessThan(msgs.indexOf(sum!));
+  expect(msgs.indexOf(sum!)).toBeLessThan(m3i); // 归档行按 id 升序为时间线基底
+  expect(sum!.role).toBe('compaction');
+  expect(sum!.type).toBe('compaction_summary');
+  expect(String(sum!.content)).toContain(`压缩摘要-${mark}`);
+  expect(String(sum!.created_at ?? '')).toContain('2026-09-27 10:00');
+  expect('origin' in sum!, '分隔条合成项不标 origin').toBe(false);
+  expect(msgs.find(m => m.msg_id === seed.m1)!.origin).toBe('archive');
+  expect(msgs.find(m => m.msg_id === seed.m3)!.origin).toBe('archive');
+  const tail = msgs.find(m => m.origin === 'state' && String(m.content).includes(tailArg));
+  expect(tail, '未归档尾部必须以 origin=state 合入基底末尾').toBeTruthy();
+  expect(msgs.indexOf(tail!)).toBeGreaterThan(m3i);
+  const idsAll = msgs.map(m => String(m.msg_id));
+  expect(new Set(idsAll).size, '全视图 msg_id 不得重复').toBe(idsAll.length);
+  expect(full.hasMore).toBe(false);
+  expect(full.nextBeforeId ?? null).toBeNull();
+
+  // 4) 翻页（limit=2）：首页 = 最新 2 条归档 + state 尾部；游标指向本页最旧归档行
+  const page1 = await historyQ(sid, 'limit=2');
+  const p1 = (page1.messages ?? []) as HistoryMsg[];
+  expect(page1.hasMore).toBe(true);
+  expect(typeof page1.nextBeforeId).toBe('number');
+  expect(p1.some(m => m.msg_id === seed.summaryId), '分隔条在中间页同样渲染').toBe(true);
+  expect(p1.some(m => m.origin === 'state' && String(m.content).includes(tailArg)),
+    '首页(beforeId=null)才合入 state 尾部').toBe(true);
+  expect(p1.some(m => m.msg_id === seed.m1), 'limit=2 首页不得包含更早归档行').toBe(false);
+
+  // 5) 深翻页只走归档行：尾部不得再现，游标恰落在 [m1]
+  const page2 = await historyQ(sid, `limit=2&beforeId=${Number(page1.nextBeforeId)}`);
+  const p2 = (page2.messages ?? []) as HistoryMsg[];
+  expect(p2.map(m => String(m.msg_id))).toEqual([seed.m1]);
+  expect(p2[0].origin).toBe('archive');
+  expect(p2.some(m => 'origin' in m && m.origin === 'state'), '深翻页不得合入 state 消息').toBe(false);
+  expect(p2.some(m => String(m.content).includes(tailArg)), '深翻页不得再现尾部').toBe(false);
+  expect(page2.hasMore).toBe(false);
+  expect(page2.nextBeforeId ?? null).toBeNull();
+
+  await deleteThread(sid).catch(() => undefined); // 级联清理种子归档行（S7 同款）
+});
+
+// ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------
+// 覆盖缺口：e2e tests/scripts/mock/config 对 AGENT_MEMORY_ENABLED 零命中（grep exit=1）。
+// 整组包进 describe：文件级 beforeAll 会在 S1 之前拉起第二 JVM 且 spawn 失败炸全文件——
+// describe 级 hooks（workers=1 串行）恰在 HA 组之后、MEM1 之前触发，爆炸半径限于本组。
+test.describe('MEM 记忆关断', () => {
+  const runtimeDir = process.env.E2E_RUNTIME_DIR ?? '.runtime';
+  const MEM_PORT = process.env.E2E_MEMOFF_PORT ?? String(Number(new URL(BASE).port) + 10);
+  const MEM_BASE = `http://127.0.0.1:${MEM_PORT}`;
+  const START_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '../scripts/start-agent.sh');
+  const MEMORY_TOOLS = ['memory_search', 'memory_get', 'memory_save']; // HarnessAgentFactory.java:52
+
+  let memoffPid: number | null = null;
+
+  test.beforeAll(async () => {
+    // start-agent.sh 内联 env 白名单（LLM_BASE_URL 等）之外原样透传子进程：
+    // AGENT_MEMORY_ENABLED=false 经 spawnSync env 命中 application.yml:111 relaxed binding
+    const r = spawnSync('bash', [START_SCRIPT, 'memoff', MEM_PORT], {
+      encoding: 'utf8', timeout: 150_000,
+      env: { ...process.env, AGENT_MEMORY_ENABLED: 'false' },
+    });
+    if (r.status !== 0) {
+      throw new Error(`memory-off 实例启动失败 exit=${r.status}\nstdout: ${(r.stdout ?? '').slice(-400)}\nstderr: ${(r.stderr ?? '').slice(-800)}`);
+    }
+    try {
+      const pid = Number(fs.readFileSync(path.join(runtimeDir, 'agent-memoff.pid'), 'utf8').trim());
+      if (Number.isInteger(pid) && pid > 0) memoffPid = pid;
+    } catch { /* pid 文件缺失交由用例内请求失败暴露 */ }
+    // 显式等就绪：wait-ready 通过后仍有瞬断窗口（冷启动竞态），beforeAll 自证 /health 200
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        if ((await fetch(`${MEM_BASE}/health`)).status === 200) break;
+      } catch { /* 未就绪，继续轮询 */ }
+      if (Date.now() > deadline) throw new Error(`memory-off 实例 60s 内未就绪：${MEM_BASE}/health`);
+      await new Promise(r => setTimeout(r, 500));
+    }
+  });
+
+  test.afterAll(async () => {
+    if (memoffPid !== null) { try { process.kill(memoffPid); } catch { /* 已退出 */ } }
+  });
+
+  test('MEM1 记忆关断实例 /tools 契约：sdkInternal 无 memory_*，默认实例对照组在', async ({ request }) => {
+    const off = await (await fetch(`${MEM_BASE}/tools?includeInternal=true`)).json() as {
+      sdkInternal?: Array<{ name: string }>;
+    };
+    // fail-soft 容错：sdkInternal 枚举异常时返回空列表（InternalToolRegistry fail-soft）——
+    // 先断言在字段，避免 TypeError 掩盖『端点异常』与『工具仍注册』两种故障的区分
+    expect(Array.isArray(off.sdkInternal), `关断实例 /tools sdkInternal 段异常：${JSON.stringify(off).slice(0, 200)}`).toBe(true);
+    const offSdk = (off.sdkInternal ?? []).map(t => t.name);
+    for (const name of MEMORY_TOOLS) {
+      expect(offSdk, `${name} 在关断实例仍注册（disableMemoryTools 未生效/false 分支装配回归）`).not.toContain(name);
+    }
+    expect(offSdk, '关记忆不得误伤文件系统内置工具').toContain('read_file');
+    const plainView = await (await fetch(`${MEM_BASE}/tools`)).json();
+    expect(JSON.stringify(plainView), '默认视图 MCP 工具不受记忆开关影响').toContain('bench_echo');
+
+    // 对照组：默认实例（AGENT_MEMORY_ENABLED 缺省 true）必须暴露 memory_* ——防两向回归：
+    // 对照缺失=默认被误读为关；关断实例出现=false 分支未生效
+    const base = await request.get('/tools?includeInternal=true');
+    expect(base.status()).toBe(200);
+    const baseBody = await base.json() as { sdkInternal?: Array<{ name: string }> };
+    expect(Array.isArray(baseBody.sdkInternal), '默认实例 /tools sdkInternal 段异常（fail-soft 空列表）').toBe(true);
+    const baseSdk = (baseBody.sdkInternal ?? []).map(t => t.name);
+    for (const name of MEMORY_TOOLS) {
+      expect(baseSdk, `默认实例缺少 ${name}（对照组失效：默认值或 sdkInternal 暴露通道回归）`).toContain(name);
+    }
+  });
+
+  test('MEM2 关断实例 [E2E:plain] 对话正常且无记忆提取后台 LLM 调用（卫生级）', async () => {
+    const sid = sessionIdFor(`mem2-${uniq()}`);
+    const stream = chat({ message: `[E2E:plain]`, userId: 'e2e-memoff', sessionId: sid, base: MEM_BASE });
+    await waitTerminal(stream);
+    expect(stream.terminal?.type).toBe('done');
+    // 冷实例首帧可能是 AGENT_START（session_created 非首帧契约），只断对话链路完整可用
+    expect(textOf(stream.frames).length).toBeGreaterThan(2);
+    const h = await history(sid, MEM_BASE);
+    expect(h._http === undefined || h._http === 200).toBe(true);
+
+    // 文件级 beforeEach llmReset 给出干净窗口；mock 为两实例共享、全局窗口
+    const stats = await llmStats();
+    expect(stats.calls.some(c => c.scenario === 'plain'), '主对话未到达 mock（实例/路由错配）').toBe(true);
+    // 记忆提取判据（llm-server.mjs）：无 system 或 system 含 'memory extraction assistant'
+    // → background-synth。标题生成自带 system（SessionTitleService）归入 plain，不误伤。
+    // ⚠卫生级信号：flush 走 throttled 触发（默认 10 分钟节流），即便 false 分支回归，
+    // 秒级窗口内大概率也不产生 background-synth（空转通过）；确定性拦截在 MEM1（工具注册）
+    // 与 MEM3（分支日志）。共享窗口无来源实例字段，BASE 异步 flush 理论可落窗误红（概率低）。
+    const bg = stats.calls.filter(c => c.scenario === 'background-synth');
+    expect(bg, `窗口内出现 background-synth（若源于本实例即 hooks 未关，亦可能为共享窗口污染，见注释）：${JSON.stringify(bg).slice(0, 300)}`).toHaveLength(0);
+  });
+
+  test('MEM3 关断分支装配日志直证（disableMemoryHooks/disableMemoryTools 分支执行）', async () => {
+    const health = await fetch(`${MEM_BASE}/health`);
+    expect(health.status).toBe(200);
+    // 该日志行是 memoryEnabled=false else 分支的唯一可观测出口（HarnessAgentFactory），
+    // agent @Bean 启动即装配，/health 就绪时必已落盘；
+    // 日志经 start-agent.sh 重定向 + env-up.sh 渲染的控制台 logback 落盘
+    const log = fs.readFileSync(path.join(runtimeDir, 'logs', 'agent-memoff.log'), 'utf8');
+    expect(log).toContain('Memory fully disabled');
+  });
 });

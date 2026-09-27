@@ -4,7 +4,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { BASE, sessionIdFor } from '../lib/env.js';
-import { chat, history } from '../lib/client.js';
+import { chat, history, a2a } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults } from '../lib/matchers.js';
 import { upload, textBytes } from '../lib/files.js';
 
@@ -159,4 +159,148 @@ test('X7 命令失败传播（exit code 经文本返回）', async () => {
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
   const exe = tcs.find(t => t.name === 'execute');
   expect(String(exe?.output)).toContain('Exit code: 2');
+});
+
+// ---------- X 组：沙箱档用户技能（管理面 PUT/DELETE → 容器物化 → syncBack 回写仲裁） ----------
+// 覆盖缺口：api-sandbox.spec.ts 此前 grep skill 零命中——物化（管理面写入下一 turn 投影）
+// 与回写（容器→KV，tombstone/admin-override 仲裁）三段链路均无行为级覆盖。
+// 观测通道：mock OpenSandbox /stats fileOps 记录 /files/upload 流水，SDK 写容器走同一路由。
+
+test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock fileOps 证据）', async ({ request }) => {
+  const uid = U();
+  const skill = `e2e-skill-${uniq()}`; // 全程唯一，避免与 L2/.skills-cache 路径串扰
+  const marker = `MAT-${uniq()}`;
+  const content = `---\nname: ${skill}\ndescription: e2e materialize probe\nversion: 1.0.0\n---\n\n# ${skill}\n\n${marker}\n`;
+
+  // 基线：新用户无 L4、无 tombstone
+  const empty = await request.get(`/skills/users/${uid}`);
+  expect(empty.status()).toBe(200);
+  const emptyBody = await empty.json();
+  expect(emptyBody.skills).toEqual([]);
+  expect(emptyBody.tombstones).toEqual([]);
+
+  // 管理面 PUT（KV 权威写 + admin-override 栅栏）
+  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content } });
+  expect(put.status()).toBe(200);
+  const putBody = await put.json();
+  expect(putBody.action).toBe('created');
+  expect(Number(putBody.version)).toBeGreaterThan(0);
+  expect(String(putBody.message)).toContain('管理面写入栅栏'); // 沙箱档提示契约
+
+  // KV 视图：source=user / adminOverride=true
+  const detail = await request.get(`/skills/users/${uid}/${skill}`);
+  expect(detail.status()).toBe(200);
+  const detailBody = await detail.json();
+  expect(detailBody.source).toBe('user');
+  expect(detailBody.hasUserOverride).toBe(true);
+  expect(String(detailBody.content)).toContain(marker);
+  const list = await (await request.get(`/skills/users/${uid}`)).json();
+  const entry = (list.skills as Array<Record<string, unknown>>).find(s => s.name === skill);
+  expect(entry).toBeTruthy();
+  expect(entry!.adminOverride).toBe(true);
+
+  // 下一 turn 物化：acquire 后 SandboxUserKeyMiddleware 把 L4 投影进容器 /workspace/skills。
+  // 观测通道：物化走「staging(/tmp/workspace.tar.b64) 上传 + tar 解包」管道，fileOps 只有 staging
+  // 路径——改用与真实协议同源的 files/download 探针直证容器内文件（新 uid 首 turn 必产生新 create）
+  const createsBefore = (await sandboxStats()).creates.length;
+  const sid = sessionIdFor(`x10-${uniq()}`);
+  // turn 走 A2A：metadata.userId 会透传进 RuntimeContext，沙箱 userKey=真实用户，
+  // 会话开始物化（onAgent 主路径）才按用户 KV 生效（Channel 链路 ctx.userId 为空，
+  // userKey 退化为 sessionId，per-user 物化/回写不生效——独立 issue 跟进）
+  const a2aRes = await a2a('message/send', {
+    message: {
+      kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
+      parts: [{ kind: 'text', text: `[E2E:plain]` }],
+      metadata: { userId: uid, sessionId: sid },
+    },
+  });
+  expect(a2aRes.status).toBe(200);
+  expect(a2aRes.json.error).toBeUndefined();
+  const creates = (await sandboxStats()).creates;
+  expect(creates.length, '新用户首 turn 未创建沙箱').toBe(createsBefore + 1);
+  const probe = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${creates[createsBefore].id}/proxy/44772/files/download?path=${encodeURIComponent(`/workspace/skills/${skill}/SKILL.md`)}`);
+  expect(probe.status, '容器内 /workspace/skills/{skill}/SKILL.md 不可下载（L4 未物化）').toBe(200);
+  expect(await probe.text()).toContain(marker);
+
+  // 负例（无 LLM，MOD 组风格）
+  const emptyPut = await request.put(`/skills/users/${uid}/x10-neg`, { data: { content: '  ' } });
+  expect(emptyPut.status()).toBe(400);
+  expect((await emptyPut.json()).error).toBe('empty_content');
+  const badName = await request.put(`/skills/users/${uid}/a..b`, { data: { content } });
+  expect(badName.status()).toBe(400);
+  expect((await badName.json()).error).toBe('invalid_name');
+  const big = await request.put(`/skills/users/${uid}/x10-neg`, { data: { content: 'x'.repeat(100 * 1024 + 1) } });
+  expect(big.status()).toBe(413);
+  expect((await big.json()).error).toBe('content_too_large');
+});
+
+test('X11 管理面 DELETE → tombstone 防复活（同会话同代容器 syncBack 仲裁）+ 物化不再投影', async ({ request }) => {
+  const uid = U();
+  const skill = `e2e-skill-${uniq()}`;
+  const content = `---\nname: ${skill}\ndescription: e2e tombstone probe\nversion: 1.0.0\n---\n\n# ${skill}\n`;
+
+  const putMarker = `TOMB-${uniq()}`;
+  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content: `${content}
+${putMarker}
+` } });
+  expect(put.status()).toBe(200);
+
+  // turn1：物化基线（容器内出现该技能副本，经 files/download 探针直证——物化走 staging tar 管道，
+  // fileOps 只记 staging 路径，见 X10 注释）
+  const createsBefore = (await sandboxStats()).creates.length;
+  const sidA = sessionIdFor(`x11-${uniq()}`); // turn2 复用同一 sid：同会话跨 call resume 同代容器
+  // A2A turn（同 X10：metadata.userId 透传，物化主路径按真实用户生效）
+  const w = await a2a('message/send', {
+    message: {
+      kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
+      parts: [{ kind: 'text', text: `[E2E:plain]` }],
+      metadata: { userId: uid, sessionId: sidA },
+    },
+  });
+  expect(w.status).toBe(200);
+  expect(w.json.error).toBeUndefined();
+  const creates = (await sandboxStats()).creates;
+  expect(creates.length).toBeGreaterThanOrEqual(createsBefore + 1);
+  const downloadProbe = () => fetch(`${SANDBOX_MOCK}/v1/sandboxes/${creates[createsBefore].id}/proxy/44772/files/download?path=${encodeURIComponent(`/workspace/skills/${skill}/SKILL.md`)}`);
+  expect((await downloadProbe()).status, 'turn1 后容器内技能副本缺失（未物化）').toBe(200);
+
+  // 管理面 DELETE：写 tombstone
+  const del = await request.delete(`/skills/users/${uid}/${skill}`);
+  expect(del.status()).toBe(200);
+  const delBody = await del.json();
+  expect(delBody.deletedFiles).toBe(1); // PUT 只写 SKILL.md，.deleted 标记不计入（listSkillFiles 排除 . 元数据段）
+  expect(delBody.tombstone.name).toBe(skill);
+  expect(String(delBody.tombstone.clearHint)).toContain('sync-from-package');
+  expect(String(delBody.message)).toContain('不会被回写落库');
+
+  // KV 面立即可见：技能消失、tombstones 列出、明细 404（无包内基线）
+  const names = (j: { skills: Array<Record<string, unknown>>; tombstones: Array<Record<string, unknown>> }) => ({
+    skills: j.skills.map(s => String(s.name)),
+    tombs: j.tombstones.map(t => String(t.name)),
+  });
+  const after = names(await (await request.get(`/skills/users/${uid}`)).json());
+  expect(after.skills).not.toContain(skill);
+  expect(after.tombs).toContain(skill);
+  const gone = await request.get(`/skills/users/${uid}/${skill}`);
+  expect(gone.status()).toBe(404);
+  expect((await gone.json()).error).toBe('not_found');
+
+  // turn2：复用 sidA（同会话同代容器）——materialize 跳过已删技能，stop() syncBack 面对容器内存活副本：
+  // tombstone 闸门（WorkspaceSyncService syncOneSkill）是 KV 不复活的唯一防线，坏实现会在此变红
+  const r = await a2a('message/send', {
+    message: {
+      kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
+      parts: [{ kind: 'text', text: `[E2E:plain]` }],
+      metadata: { userId: uid, sessionId: sidA },
+    },
+  });
+  expect(r.status).toBe(200);
+  expect(r.json.error).toBeUndefined();
+  // 同代容器副本仍在（未被重物化覆盖/未删除），且 KV 不复活
+  const probe2 = await downloadProbe();
+  expect(probe2.status, '同代容器内存活副本丢失').toBe(200);
+  expect(await probe2.text()).toContain(putMarker);
+  const final = names(await (await request.get(`/skills/users/${uid}`)).json());
+  expect(final.skills).not.toContain(skill);
+  expect(final.tombs).toContain(skill);
 });

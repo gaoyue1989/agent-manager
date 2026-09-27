@@ -5,9 +5,10 @@
 import { test, expect, type Page } from '@playwright/test';
 import { BASE, ids, sessionIdFor } from '../lib/env.js';
 import { SEL } from '../lib/selectors.js';
-import { createApprovalApp, llmReset, llmStats } from '../lib/client.js';
+import { chat, createApprovalApp, deleteThread, llmReset, llmStats } from '../lib/client.js';
 import { PNG_1PX } from '../lib/files.js';
-import { pollUntil } from '../lib/matchers.js';
+import { pollUntil, waitTerminal } from '../lib/matchers.js';
+import { seedCompactionArchive } from '../lib/archive-seed.js';
 
 const U = 'e2e-ui';
 let uniqueSeq = 0;
@@ -485,4 +486,39 @@ test('U14 会话模型切换：下拉选择→绑定生效→切会话恢复→�
   } finally {
     await request.delete(`/models/${modelId}`).catch(() => undefined);
   }
+});
+
+// U15（#45 的 UI 交付面）：压缩分隔条历史回放——role=compaction 合成项经归档合并视图
+// 渲染为 details.compaction-divider 折叠卡。种子设施与 api-core HA3 共用 lib/archive-seed.ts
+//（无 compact 录制件，直插 __compaction_summary__ 归档行；真实一轮对话充当 state 尾部）。
+// 复核修订：不能用文件级 U('e2e-ui')——debug 页会话列表按页面当前 userId 服务端过滤
+//（chat.js loadThreads 以 state 'ui.userId'||'debug-user' 调 getThreads），新开页面
+//（Playwright 全新 context 无 localStorage）uid 恒为 'debug-user'，其余 userId 的会话
+// 永不渲染。会话与种子必须同用 'debug-user'（页面默认身份，零额外交互）。
+const UI_UID = 'debug-user';
+
+test('U15 压缩分隔条历史回放（归档合并视图渲染）', async ({ page }) => {
+  const sid = sessionIdFor(`u15-${uniq()}`);
+  const mark = uniq();
+  const tailArg = `u15-tail-${mark}`;
+  const stream = chat({ message: `[E2E:plain](${tailArg})`, userId: UI_UID, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const seed = seedCompactionArchive(`${UI_UID}:${sid}`, sid, mark, UI_UID);
+
+  await page.goto('/debug/');
+  // 页面默认身份即 debug-user，列表会拉到本会话；若未来页面默认身份变化，
+  // 兜底手法是先 fill('#uidInput', UI_UID) 触发 input 监听器重拉列表
+  const item = page.locator(`${SEL.threadList} .thread-item[data-sid="${sid}"]`);
+  await item.waitFor({ state: 'visible', timeout: 30_000 });
+  await item.click();
+  // 压缩分隔条：role=compaction 合成项的折叠卡（chat.js addCompactionDivider）
+  const divider = page.locator(`${SEL.chatInner} details.compaction-divider`);
+  await expect(divider).toBeVisible({ timeout: 60_000 });
+  await expect(divider.locator('summary')).toContainText('上下文已压缩');
+  await divider.locator('summary').click();
+  await expect(page.locator(`${SEL.chatInner} .compaction-summary`)).toContainText(`压缩摘要-${mark}`);
+  // 未归档尾部消息照常回放（合并视图不影响尾部渲染）
+  await expect(page.locator(SEL.chatInner)).toContainText(tailArg, { timeout: 30_000 });
+  await deleteThread(sid).catch(() => undefined);
 });
