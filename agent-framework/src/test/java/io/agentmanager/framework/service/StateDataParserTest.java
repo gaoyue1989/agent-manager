@@ -70,8 +70,9 @@ class StateDataParserTest {
         var arr = StateDataParser.findMessagesArray(STATE_DATA);
         var list = StateDataParser.toRoleContentList(arr);
         assertEquals(2, list.size());
-        assertEquals(Map.of("role", "user", "content", "hello"), list.get(0));
-        assertEquals(Map.of("role", "assistant", "content", "hi"), list.get(1));
+        // msg_id 透传（history 归档双源合并按 msg_id 对齐归档行，docs/session-history-archive-design.md）
+        assertEquals(Map.of("role", "user", "content", "hello", "msg_id", "m1"), list.get(0));
+        assertEquals(Map.of("role", "assistant", "content", "hi", "msg_id", "m2"), list.get(1));
     }
 
     @Test

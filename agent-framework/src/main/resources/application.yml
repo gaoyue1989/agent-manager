@@ -42,6 +42,11 @@ agent:
     username: ${CHECKPOINT_USERNAME:agent_manager}
     password: ${CHECKPOINT_PASSWORD:Agent@Manager2026}
     db-name: ${CHECKPOINT_DB_NAME:}
+  # 会话消息轨归档（压缩后历史可查，docs/session-history-archive-design.md）
+  # true = AgentState 落库时 write-through 归档到 session_message，history 返回归档合并视图
+  # false = 完全回退现状（不写归档表、history 仅读 agent_state）
+  history:
+    archive-enabled: ${AGENT_HISTORY_ARCHIVE_ENABLED:true}
   sandbox:
     enabled: ${SANDBOX_ENABLED:false}
     image: ${SANDBOX_IMAGE:opensandbox/code-interpreter:v1.1.0}

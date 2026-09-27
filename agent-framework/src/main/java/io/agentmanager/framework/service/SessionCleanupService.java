@@ -22,6 +22,8 @@ import org.springframework.stereotype.Service;
  *   <li>confirm_context：TTL 过期未消费 → ConfirmContextStore.deleteExpired</li>
  *   <li>tool_audit_log：超过保留天数（默认 30 天）→ ToolAuditStore.deleteBefore（O3 审计仅保留元信息）</li>
  *   <li>agent_state / agent_fs：会话记录超期（默认 7 天）→ 既有 deleteBefore</li>
+ *   <li>session_message：会话消息轨归档超期（与 agent_state 同 7 天语义）→ deleteBefore
+ *       （docs/session-history-archive-design.md）</li>
  *   <li>session_user：会话-用户映射超期（默认 7 天，与 agent_state 对齐）→ SessionUserStore.deleteBefore</li>
  * </ul>
  *
@@ -76,18 +78,19 @@ public class SessionCleanupService {
         confirmContextStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
 
-        // 3. 清理会话记录（agent_state / agent_fs / session_user）
+        // 3. 清理会话记录（agent_state / agent_fs / session_message / session_user）
         Instant cutoff = Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS);
         int stateCleaned = deleteBefore("agent_state", cutoff);
         int fsCleaned = deleteBefore("agent_fs", cutoff);
+        int messageCleaned = deleteBefore("session_message", cutoff);
         int userMappingCleaned = sessionUserStore.deleteBefore(cutoff);
 
         // 4. 清理过期上传文件（file-upload-download-plan §15-7）：
         //    超保留期（默认 7 天）且非 pending 状态的 upload 行 → 删行 + 删存储对象
         cleanupExpiredUploads();
 
-        log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}, session_user={}",
-            memCleaned, stateCleaned, fsCleaned, userMappingCleaned);
+        log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}, session_message={}, session_user={}",
+            memCleaned, stateCleaned, fsCleaned, messageCleaned, userMappingCleaned);
     }
 
     /** 过期上传文件清理：删 DB 行 + 删存储对象（先删行后删对象，对象删除失败仅告警可重试） */
@@ -137,7 +140,7 @@ public class SessionCleanupService {
     private static final int SESSION_RETENTION_DAYS = 7;
 
     /** 允许 deleteBefore 清理的表名白名单（防 SQL 注入） */
-    private static final java.util.Set<String> CLEANUP_TABLES = java.util.Set.of("agent_state", "agent_fs");
+    private static final java.util.Set<String> CLEANUP_TABLES = java.util.Set.of("agent_state", "agent_fs", "session_message");
 
     /**
      * 删除指定表中 updated_at 早于 cutoff 的记录。

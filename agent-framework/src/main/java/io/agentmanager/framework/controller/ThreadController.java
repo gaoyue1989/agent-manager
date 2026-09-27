@@ -51,8 +51,14 @@ public class ThreadController {
     private final AgentStateReader agentStateReader;
     private final io.agentmanager.framework.service.ModelCatalog modelCatalog;
     private final int toolOutputMaxChars;
+    /** 会话消息轨归档查询（null = 未启用归档，history 仅走 agent_state 现状行为） */
+    private final io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
+    private final boolean archiveEnabled;
 
-    /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限） */
+    /** history 默认返回条数（归档合并视图分页；<=0 不分页） */
+    static final int DEFAULT_HISTORY_LIMIT = 200;
+
+    /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限，不启用归档合并） */
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
                             ConfirmContextStore confirmContextStore,
@@ -61,10 +67,12 @@ public class ThreadController {
                             io.agentmanager.framework.service.ModelCatalog modelCatalog) {
         this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
             new AgentStateReader(dataSource), modelCatalog,
-            io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
+            io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS,
+            false, null);
     }
 
-    /** Spring 装配入口：截断上限取 AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS（默认 8000） */
+    /** Spring 装配入口：截断上限取 AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS（默认 8000）；
+     *  归档开关取 AGENT_HISTORY_ARCHIVE_ENABLED（默认 true，详见 docs/session-history-archive-design.md） */
     @org.springframework.beans.factory.annotation.Autowired
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
@@ -73,14 +81,17 @@ public class ThreadController {
                             SessionEventStore sessionEventStore,
                             AgentStateReader agentStateReader,
                             io.agentmanager.framework.service.ModelCatalog modelCatalog,
-                            io.agentmanager.framework.config.HistoryConfig historyConfig) {
+                            io.agentmanager.framework.config.HistoryConfig historyConfig,
+                            io.agentmanager.framework.service.SessionMessageStore sessionMessageStore) {
         this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
             agentStateReader, modelCatalog,
             historyConfig != null ? historyConfig.toolOutputMaxChars()
-                : io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
+                : io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS,
+            historyConfig == null || historyConfig.archiveEnabled(),
+            sessionMessageStore);
     }
 
-    /** 全参构造（测试可直接指定截断上限） */
+    /** 兼容构造（测试可直接指定截断上限，不启用归档合并） */
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
                             ConfirmContextStore confirmContextStore,
@@ -89,6 +100,21 @@ public class ThreadController {
                             AgentStateReader agentStateReader,
                             io.agentmanager.framework.service.ModelCatalog modelCatalog,
                             int toolOutputMaxChars) {
+        this(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore,
+            agentStateReader, modelCatalog, toolOutputMaxChars, false, null);
+    }
+
+    /** 全参构造（测试可指定归档合并） */
+    public ThreadController(DataSource dataSource,
+                            LLMLogger llmLogger,
+                            ConfirmContextStore confirmContextStore,
+                            SessionUserStore sessionUserStore,
+                            SessionEventStore sessionEventStore,
+                            AgentStateReader agentStateReader,
+                            io.agentmanager.framework.service.ModelCatalog modelCatalog,
+                            int toolOutputMaxChars,
+                            boolean archiveEnabled,
+                            io.agentmanager.framework.service.SessionMessageStore sessionMessageStore) {
         this.dataSource = dataSource;
         this.llmLogger = llmLogger;
         this.confirmContextStore = confirmContextStore;
@@ -97,6 +123,8 @@ public class ThreadController {
         this.agentStateReader = agentStateReader;
         this.modelCatalog = modelCatalog;
         this.toolOutputMaxChars = toolOutputMaxChars;
+        this.archiveEnabled = archiveEnabled && sessionMessageStore != null;
+        this.sessionMessageStore = sessionMessageStore;
     }
 
     /** Thread 列表：agent_state 表 session_id 去重（真实会话来源）；可按 userId 过滤 */
@@ -173,9 +201,20 @@ public class ThreadController {
         return result;
     }
 
-    /** Thread 历史消息：从 AgentState 解析（含工具状态与结果）；附待确认卡片与产出文件 */
+    /**
+     * Thread 历史消息：归档合并视图（默认）或仅 AgentState；附待确认卡片与产出文件。
+     *
+     * <p>归档开启时返回压缩前的全量历史 + 压缩分隔条（docs/session-history-archive-design.md）：
+     * {@code includeArchived=false} 退回仅 agent_state 的现状行为；
+     * {@code limit}（默认 200，{@code <=0} 不分页）+ {@code beforeId} 游标翻页，
+     * 响应附 {@code hasMore}/{@code nextBeforeId}。
+     */
     @GetMapping("/{sessionId}/history")
-    public Map<String, Object> threadHistory(@PathVariable String sessionId) {
+    public Map<String, Object> threadHistory(
+            @PathVariable String sessionId,
+            @RequestParam(value = "includeArchived", required = false, defaultValue = "true") boolean includeArchived,
+            @RequestParam(value = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit,
+            @RequestParam(value = "beforeId", required = false) Long beforeId) {
         // state 只读一次：消息解析与确认卡重建共用同一份快照（避免同请求内重复查库）
         var stateData = agentStateReader.loadStateData(sessionId);
         var result = new LinkedHashMap<String, Object>();
@@ -184,7 +223,7 @@ public class ThreadController {
         // 产出文件卡片（present_file/present_url 登记时 session_id = gw-hash）：
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
-        result.put("messages", loadMessages(sessionId, stateData));
+        putHistoryMessages(result, sessionId, stateData, includeArchived, beforeId, limit);
         return result;
     }
 
@@ -217,11 +256,11 @@ public class ThreadController {
             result.put("updated_at", "");
         }
 
-        // 消息历史
+        // 消息历史（详情接口固定首页合并视图，翻页走 /history 的 beforeId）
         var stateData = agentStateReader.loadStateData(sessionId);
         result.put("pendingConfirm", pendingConfirmPayload(sessionId, stateData));
         result.put("files", generatedFiles(sessionId));
-        result.put("messages", loadMessages(sessionId, stateData));
+        putHistoryMessages(result, sessionId, stateData, true, null, DEFAULT_HISTORY_LIMIT);
         return result;
     }
 
@@ -234,6 +273,11 @@ public class ThreadController {
         // 1. agent_state + agent_fs（会话状态与工作区文件）
         totalDeleted += deleteBySessionId("agent_state", sessionId);
         totalDeleted += deleteBySessionId("agent_fs", sessionId);
+
+        // 1.5 session_message（会话消息轨归档，5 形谓词删除，走 store 自有方法）
+        if (sessionMessageStore != null) {
+            totalDeleted += sessionMessageStore.deleteBySession(sessionId);
+        }
 
         // 2. session_event（SSE 事件历史）——已迁 Redis，走 store 删两个 key，
         //    不能再走 deleteBySessionId（那张表还在但已不再写入）
@@ -456,6 +500,200 @@ public class ThreadController {
         return count;
     }
 
+    /** history 响应的 messages 载体（归档合并视图附分页游标） */
+    private record HistoryView(List<Map<String, Object>> messages, boolean hasMore, Long nextBeforeId) {}
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper MSG_MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /** 组装 history/messages 响应段：归档开启走双源合并，否则仅 agent_state 现状行为 */
+    private void putHistoryMessages(Map<String, Object> result, String sessionId, String stateData,
+                                    boolean includeArchived, Long beforeId, int limit) {
+        if (includeArchived && archiveEnabled) {
+            var view = loadMessagesMerged(sessionId, stateData, beforeId, limit);
+            result.put("messages", view.messages());
+            result.put("hasMore", view.hasMore());
+            result.put("nextBeforeId", view.nextBeforeId());
+        } else {
+            result.put("messages", loadMessages(sessionId, stateData));
+            result.put("hasMore", false);
+            result.put("nextBeforeId", null);
+        }
+    }
+
+    /**
+     * 归档双源合并（docs/session-history-archive-design.md §7）：
+     * 归档行（session_message，压缩前原文）按 id 升序为时间线基底；agent_state 当前上下文的
+     * 独有消息（存量会话/未归档尾部）在首页末尾合入；摘要消息（__compaction_summary__）
+     * 渲染为压缩分隔条合成项。归档行不可用时降级为仅 agent_state（fail-soft）。
+     *
+     * <p>分页：归档行按 id 游标（beforeId）取最新 limit 条；state 独有消息只在首页
+     * （beforeId=null）合入，翻页只走归档行，避免跨页重复。
+     */
+    private HistoryView loadMessagesMerged(String sessionId, String stateData, Long beforeId, int limit) {
+        try {
+            var rows = java.util.Collections
+                .<io.agentmanager.framework.service.SessionMessageStore.ArchivedRow>emptyList();
+            boolean hasMore = false;
+            Long nextBeforeId = null;
+            if (sessionMessageStore != null) {
+                if (limit <= 0) {
+                    rows = sessionMessageStore.findPage(sessionId, beforeId, 0);
+                } else {
+                    // 多取一条判定 hasMore：升序返回时最旧的一条属于下一页，剔除后余下即本页
+                    rows = sessionMessageStore.findPage(sessionId, beforeId, limit + 1);
+                    hasMore = rows.size() > limit;
+                    if (hasMore) {
+                        rows = rows.subList(1, rows.size());
+                        nextBeforeId = rows.isEmpty() ? null : rows.get(0).id();
+                    }
+                }
+            }
+
+            // 时间线基底：归档行（升序）→ 消息节点；同 msg_id 取较新行（多 slot 形态命中时去重）
+            var merged = MSG_MAPPER.createArrayNode();
+            var archivedIds = new java.util.HashSet<String>();
+            var replyByMsgId = new java.util.HashMap<String, String>();
+            var createdAtByMsgId = new java.util.HashMap<String, String>();
+            for (var row : rows) {
+                var node = parseMsgNode(row.msgJson());
+                if (node == null) {
+                    continue;
+                }
+                var id = node.path("id").asText("");
+                if (!id.isBlank() && !archivedIds.add(id)) {
+                    continue;
+                }
+                merged.add(node);
+                if (!id.isBlank()) {
+                    if (row.replyId() != null && !row.replyId().isBlank()) {
+                        replyByMsgId.put(id, row.replyId());
+                    }
+                    if (row.createdAt() != null) {
+                        createdAtByMsgId.put(id, row.createdAt().toString());
+                    }
+                }
+            }
+            // 首页才合入 state 独有消息（未归档尾部/存量会话）；深翻页只走归档行。
+            // 过滤用**全会话**归档集而非当前页：否则「归档行在其他页」的 state 节点会在首页
+            // 重复合入（实测 limit=3 首页出现 4 条的根因，见设计文档 §15）
+            if (beforeId == null) {
+                var allArchivedIds = sessionMessageStore != null
+                    ? sessionMessageStore.findAllMsgIds(sessionId)
+                    : java.util.Set.<String>of();
+                var stateArr = io.agentmanager.framework.service.StateDataParser.findMessagesArray(stateData);
+                if (stateArr != null) {
+                    for (var node : stateArr) {
+                        var id = node.path("id").asText("");
+                        if (!id.isBlank() && allArchivedIds.contains(id)) {
+                            continue;
+                        }
+                        merged.add(node);
+                    }
+                }
+            }
+
+            var dtos = io.agentmanager.framework.service.StateDataParser.toRoleContentList(merged, toolOutputMaxChars);
+            var messages = postProcessMerged(dtos, archivedIds, replyByMsgId, createdAtByMsgId);
+            fillReplyIds(sessionId, messages);
+            return new HistoryView(messages, hasMore, nextBeforeId);
+        } catch (Exception e) {
+            log.warn("loadMessagesMerged failed for {}: {}", sessionId, e.getMessage());
+            return new HistoryView(loadMessages(sessionId, stateData), false, null);
+        }
+    }
+
+    /** 归档合并后处理：摘要消息 → 压缩分隔条合成项；其余补 origin 与 reply_id（仅 assistant，最终以 fillReplyIds 回填为准） */
+    private List<Map<String, Object>> postProcessMerged(List<Map<String, Object>> dtos,
+            java.util.Set<String> archivedIds, Map<String, String> replyByMsgId,
+            Map<String, String> createdAtByMsgId) {
+        var out = new ArrayList<Map<String, Object>>(dtos.size());
+        for (var dto : dtos) {
+            var msgId = dto.get("msg_id") instanceof String s && !s.isBlank() ? s : null;
+            var name = dto.get("name") instanceof String n ? n : null;
+            if (io.agentmanager.framework.service.SessionMessageStore.SUMMARY_MESSAGE_NAME.equals(name)) {
+                var item = new LinkedHashMap<String, Object>();
+                item.put("role", "compaction");
+                item.put("type", "compaction_summary");
+                item.put("content", dto.getOrDefault("content", ""));
+                if (msgId != null) {
+                    item.put("msg_id", msgId);
+                    var createdAt = createdAtByMsgId.get(msgId);
+                    if (createdAt != null) {
+                        item.put("created_at", createdAt);
+                    }
+                }
+                out.add(item);
+                continue;
+            }
+            dto.put("origin", msgId != null && archivedIds.contains(msgId) ? "archive" : "state");
+            // reply_id 仅 assistant 携带（前端按它关联 turn 的文件卡片）；最终值以
+            // fillReplyIds 的 Redis 顺序回填为准
+            if ("assistant".equals(dto.get("role")) && msgId != null) {
+                var replyId = replyByMsgId.get(msgId);
+                if (replyId != null && !replyId.isBlank()) {
+                    dto.put("reply_id", replyId);
+                }
+            }
+            out.add(dto);
+        }
+        return out;
+    }
+
+    /** 归档 msg_data JSON → 消息节点；解析失败返回 null（跳过该条，fail-soft） */
+    private static com.fasterxml.jackson.databind.JsonNode parseMsgNode(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return MSG_MAPPER.readTree(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * reply_id 回填：取该 session 出现过的 reply_id，按**首个事件的 seq** 升序分配给
+     * assistant 消息。数据源是 Redis 的 reply 索引（ZSET，score = 首个 seq），
+     * 与原 SQL 的 GROUP BY reply_id ORDER BY MIN(seq) 等价。
+     * 这是 reply_id 的唯一来源——实测 {@code AgentState.getReplyId()} 为会话级而非逐轮
+     * （设计文档 §15），归档侧不盖戳，本方法对合并视图与 state-only 视图行为一致。
+     *
+     * <p>与原查询有两处刻意的差异：
+     *  - 原查询只认 event_type = 'AGENT_START'；索引覆盖带该 replyId 的**任意**事件。
+     *    AGENT_START 是一个 turn 的首个事件，所以顺序一致；差别只在「AGENT_START 丢了
+     *    的 turn」现在也会出现——那更正确，不是缺陷。
+     *  - 失败时 findReplyIds **返回 null 而不是空列表**：空列表会被下游当成「这个会话没有 reply」，
+     *    而实际是「读不到」。两者对历史的呈现不同，不能在类型上混为一谈。
+     */
+    private void fillReplyIds(String sessionId, List<Map<String, Object>> msgs) {
+        var needs = msgs.stream()
+            .anyMatch(m -> "assistant".equals(m.get("role")));
+        if (!needs) {
+            return;
+        }
+        List<String> replyIds = null;
+        try {
+            replyIds = sessionEventStore.findReplyIds(sessionId);
+        } catch (Exception e) {
+            // 从 debug 提到 warn：静默缺 reply_id 会让前端的历史消息失去与 turn 的关联，
+            // 这是**内容层面的错误**，不该按调试信息处理
+            log.warn("reply_id lookup failed for {} — 历史消息将缺少 reply_id: {}",
+                sessionId, e.toString());
+        }
+        if (replyIds == null) {
+            return;
+        }
+        // 按 AGENT_START 出现顺序，依次分配 reply_id 给 assistant 消息
+        int idx = 0;
+        for (var m : msgs) {
+            if ("assistant".equals(m.get("role")) && idx < replyIds.size()) {
+                m.put("reply_id", replyIds.get(idx));
+                idx++;
+            }
+        }
+    }
+
     /** 从 agent_state 加载历史消息（状态 JSON 读取与解析口径见 {@link AgentStateReader}）。
      *
      *  <p>工具调用与结果的执行状态直接来自 AgentState（官方 SDK 自动持久化）：
@@ -472,43 +710,7 @@ public class ThreadController {
             var msgs = io.agentmanager.framework.service.StateDataParser
                 .toRoleContentList(io.agentmanager.framework.service.StateDataParser
                     .findMessagesArray(stateData), toolOutputMaxChars);
-
-            // 回填 reply_id：取该 session 出现过的 reply_id，按**首个事件的 seq** 升序分配给
-            // assistant 消息。数据源是 Redis 的 reply 索引（ZSET，score = 首个 seq），
-            // 与原 SQL 的 GROUP BY reply_id ORDER BY MIN(seq) 等价。
-            //
-            // 与原查询有两处刻意的差异：
-            //  - 原查询只认 event_type = 'AGENT_START'；索引覆盖带该 replyId 的**任意**事件。
-            //    AGENT_START 是一个 turn 的首个事件，所以顺序一致；差别只在「AGENT_START 丢了
-            //    的 turn」现在也会出现——那更正确，不是缺陷。
-            //  - 失败时**返回 null 而不是空列表**：空列表会被下游当成「这个会话没有 reply」，
-            //    而实际是「读不到」。两者对历史的呈现不同，不能在类型上混为一谈。
-            var assistantCount = msgs.stream()
-                .filter(m -> "assistant".equals(m.get("role")))
-                .count();
-            if (assistantCount == 0) {
-                return msgs;
-            }
-            List<String> replyIds = null;
-            try {
-                replyIds = sessionEventStore.findReplyIds(sessionId);
-            } catch (Exception e) {
-                // 从 debug 提到 warn：静默缺 reply_id 会让前端的历史消息失去与 turn 的关联，
-                // 这是**内容层面的错误**，不该按调试信息处理
-                log.warn("reply_id lookup failed for {} — 历史消息将缺少 reply_id: {}",
-                    sessionId, e.toString());
-            }
-            if (replyIds == null) {
-                return msgs;
-            }
-            // 按 AGENT_START 出现顺序，依次分配 reply_id 给 assistant 消息
-            int idx = 0;
-            for (var m : msgs) {
-                if ("assistant".equals(m.get("role")) && idx < replyIds.size()) {
-                    m.put("reply_id", replyIds.get(idx));
-                    idx++;
-                }
-            }
+            fillReplyIds(sessionId, msgs);
             return msgs;
         } catch (Exception e) {
             log.warn("loadMessages failed for {}: {}", sessionId, e.getMessage());

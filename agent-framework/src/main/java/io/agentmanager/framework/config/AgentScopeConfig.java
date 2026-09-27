@@ -229,20 +229,33 @@ public class AgentScopeConfig {
      * 需放宽校验以支持沙箱状态持久化。
      */
     @Bean
-    public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props) {
+    public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props,
+            io.agentmanager.framework.service.SessionMessageStore sessionMessageStore,
+            io.agentmanager.framework.config.HistoryConfig historyConfig) {
         var dbName = props.checkpoint().resolvedDbName();
-        // AskingContentBackfillStateStore：持久化前把 ASKING tool_use 块 content 回填为 input 的
-        // JSON 字符串——修复 HITL 恢复时 ToolValidator 抛 'argument "content" is null'（写侧治本）
+        // AgentStateStore 装饰链（自内向外，顺序不可换）：
+        //   ① SandboxAwareMysqlAgentStateStore —— 真实 MySQL 存储（放宽沙箱 slot ID 校验）
+        //   ② SessionMessageArchiveStateStore —— 会话消息轨 write-through 归档（压缩后历史可查，
+        //      docs/session-history-archive-design.md）；须在 Backfill 之内才拿得到回填后形态
+        //   ③ AskingContentBackfillStateStore —— 持久化前把 ASKING tool_use 块 content 回填为
+        //      input 的 JSON 字符串——修复 HITL 恢复时 ToolValidator 抛 'argument "content" is null'
+        io.agentscope.core.state.AgentStateStore agentStateStore =
+            new io.agentmanager.framework.sandbox.opensandbox.SandboxAwareMysqlAgentStateStore(
+                dataSource, dbName, "agent_state", true);
+        if (historyConfig == null || historyConfig.archiveEnabled()) {
+            agentStateStore = new io.agentmanager.framework.service.SessionMessageArchiveStateStore(
+                agentStateStore, sessionMessageStore);
+        }
         var store = DistributedStore.builder()
             .agentStateStore(new io.agentmanager.framework.sandbox.opensandbox.AskingContentBackfillStateStore(
-                new io.agentmanager.framework.sandbox.opensandbox.SandboxAwareMysqlAgentStateStore(
-                    dataSource, dbName, "agent_state", true)))
+                agentStateStore))
             .baseStore(JdbcStore.builder(dataSource)
                 .tableName("agent_fs")
                 .initializeSchema(true)
                 .build())
             .build();
-        log.info("DistributedStore initialized ({} . agent_state + agent_fs)", dbName);
+        log.info("DistributedStore initialized ({} . agent_state + agent_fs, historyArchive={})",
+            dbName, historyConfig == null || historyConfig.archiveEnabled());
         return store;
     }
 

@@ -114,7 +114,7 @@ agent-framework/
 ### 1. AgentScopeConfig — Agent 装配
 
 创建 `HarnessAgent` Bean，配置：
-- **MysqlDistributedStore**: AgentState + 工作区文件统一持久化
+- **MysqlDistributedStore**: AgentState + 工作区文件统一持久化（AgentStateStore 装饰链自内向外：SandboxAwareMysqlAgentStateStore → SessionMessageArchiveStateStore【会话消息轨 write-through 归档 session_message，压缩后历史可查】→ AskingContentBackfillStateStore【最外层，ASKING content 回填】；归档开关 `AGENT_HISTORY_ARCHIVE_ENABLED`）
 - **RemoteFilesystemSpec(IsolationScope.USER)**: 按 userId 多租户隔离
 - **MemoryConfig**: 记忆管理（MEMORY.md + memory/，flush 节流）
 - **CompactionConfig**: 上下文压缩（30 条触发，保留 10 条）
@@ -258,6 +258,7 @@ OAF `deniedTools` 字段控制排除列表。
 | 数据类型 | 隔离维度 | 存储位置 |
 |----------|---------|---------|
 | AgentState | (userId, sessionId) | agent_state 表 |
+| 会话消息轨 | (userId, sessionId) | session_message 表（AgentState 每次落库 write-through 归档，`{normalizeUser(userId)}:{sessionId}` 复合键同 agent_state.session_id） |
 | MEMORY.md | userId | agent_fs 表 |
 | memory/ | userId | agent_fs 表 |
 | skills/ | 包内 L2 共享 + 用户 L4 覆盖 | agent_fs 表（L4：`agents/{agent}/users/{uid}/skills`，key `/{技能名}/{相对路径}`；沙箱档由 syncBack 回写该命名空间，回写仲裁靠 `/{技能名}/.deleted` 与 `/{技能名}/.admin-override` 两个元数据键） |
@@ -304,6 +305,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `FILE_EXTERNAL_URL_PREFIXES` | 空(禁用) | | present_url 外部交付物与 /files/{id} 代理下载共用的 URL 前缀白名单（逗号分隔）；发布助手集群内必配 `http://platform-backend.agent-platform.svc.cluster.local:8080` |
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
+| `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关：`false` = 完全关闭记忆——不注册 `memory_*` 工具 + 不执行 flush/整合（`disableMemoryHooks` + `disableMemoryTools`）；沙箱不再注入/回写记忆文件（技能回写不受影响） |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24）**：`LLM_*` 是**系统模型**——未显式选择模型的会话的对话模型，
@@ -347,7 +349,7 @@ OAF `deniedTools` 字段控制排除列表。
 | GET | `/debug` | 调试页面（静态资源） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
-| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
+| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
 | POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |

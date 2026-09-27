@@ -5,7 +5,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
  * 历史回放配置（GET /threads/{sid}/history）。
- * 环境变量前缀：AGENT_HISTORY_*（如 AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS）
+ * 环境变量前缀：AGENT_HISTORY_*（如 AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS、
+ * AGENT_HISTORY_ARCHIVE_ENABLED）
  *
  * <p><b>为什么是独立类而不是 {@link AgentManagerProperties} 的嵌套 record：</b>
  * {@code AgentManagerProperties} 有 16 处测试按位置传参构造，往里加组件会波及全部 16 处；
@@ -20,10 +21,16 @@ public record HistoryConfig(
      * 截断后附 output_truncated / output_full_length 供前端提示。
      * {@code <= 0} 表示不截断。
      */
-    @DefaultValue("8000") int toolOutputMaxChars
+    @DefaultValue("8000") int toolOutputMaxChars,
+    /**
+     * 会话消息轨归档开关（docs/session-history-archive-design.md），默认开启。
+     * 关闭时不装配 SessionMessageArchiveStateStore（不再写 session_message），
+     * history 查询自动回退为仅 agent_state 的现状行为。
+     */
+    @DefaultValue("true") boolean archiveEnabled
 ) {
     /** 代码默认值兜底：配置节缺失（如测试直接构造）时使用 */
     public static HistoryConfig defaults() {
-        return new HistoryConfig(io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS);
+        return new HistoryConfig(io.agentmanager.framework.service.StateDataParser.DEFAULT_TOOL_OUTPUT_MAX_CHARS, true);
     }
 }

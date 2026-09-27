@@ -358,7 +358,7 @@ class ThreadControllerTest {
         when(rs.getString("state_data")).thenReturn(
             "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":\"hi\"}]}");
 
-        var result = controller.threadHistory("acme:t1");
+        var result = controller.threadHistory("acme:t1", true, 200, null);
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals("user", messages.get(0).get("role"));
@@ -383,7 +383,7 @@ class ThreadControllerTest {
         when(rs.getString("state_data")).thenReturn(
             "{\"nested\":{\"messages\":[{\"role\":\"user\",\"parts\":[{\"text\":\"p1\"}]}]}}");
 
-        var result = controller.threadHistory("acme:t2");
+        var result = controller.threadHistory("acme:t2", true, 200, null);
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals("[{\"text\":\"p1\"}]", messages.get(0).get("content"));
@@ -409,7 +409,7 @@ class ThreadControllerTest {
             "{\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"reasoning\"}," +
             "{\"type\":\"text\",\"text\":\"hi\"}],\"metadata\":{}}]}");
 
-        var result = controller.threadHistory("acme:s5");
+        var result = controller.threadHistory("acme:s5", true, 200, null);
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals("user", messages.get(0).get("role"));
@@ -436,7 +436,7 @@ class ThreadControllerTest {
             "{\"context\":[{\"role\":\"ASSISTANT\"," +
             "\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal reasoning\"}]}]}");
 
-        var result = controller.threadHistory("acme:s6");
+        var result = controller.threadHistory("acme:s6", true, 200, null);
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
@@ -457,7 +457,7 @@ class ThreadControllerTest {
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(false); // no messages
 
-        var result = controller.threadHistory("acme:t3");
+        var result = controller.threadHistory("acme:t3", true, 200, null);
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
@@ -467,7 +467,7 @@ class ThreadControllerTest {
     void threadHistoryShouldReturnEmptyOnException() throws Exception {
         // generatedFiles throws, loadMessages also throws -> empty messages
         when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
-        var result = controller.threadHistory("acme:t4");
+        var result = controller.threadHistory("acme:t4", true, 200, null);
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
@@ -484,7 +484,7 @@ class ThreadControllerTest {
         // Skip generatedFiles and loadMessages by throwing
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
-        var result = controller.threadHistory("acme:mt1");
+        var result = controller.threadHistory("acme:mt1", true, 200, null);
         assertNotNull(result.get("pendingConfirm"));
         assertTrue(result.get("pendingConfirm").toString().contains("call-9"));
     }
@@ -494,7 +494,7 @@ class ThreadControllerTest {
         when(confirmContextStore.findPending(anyString())).thenReturn(Optional.empty());
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
-        var result = controller.threadHistory("acme:mt2");
+        var result = controller.threadHistory("acme:mt2", true, 200, null);
         assertNull(result.get("pendingConfirm"));
     }
 
