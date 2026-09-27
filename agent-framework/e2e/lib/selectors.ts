@@ -7,6 +7,7 @@ export const SEL = {
   newThread: '#btnNewThread',
   threadList: '#threadList',
   uidInput: '#uidInput',
+  modelSelect: '#modelSelect',
   modeA2A: '#modeA2A',
   modeChannel: '#modeChannel',
   confirmCard: '.confirm-card',

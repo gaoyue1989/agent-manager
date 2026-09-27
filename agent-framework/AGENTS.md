@@ -96,7 +96,7 @@ agent-framework/
 │   │           ├── index.html                   # 调试页入口
 │   │           ├── css/                         # 样式 (base/components/layout)
 │   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
-│   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace)
+│   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/models/sandbox/skills/workspace)
 │   └── test/                                  # 101 个实跑测试类 / 1026 个用例（2026-09-26 实跑，0 失败 4 跳过）
 ├── docs/                                     # 设计与改进方案文档 (38 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
@@ -313,6 +313,12 @@ OAF `deniedTools` 字段控制排除列表。
 > **采样参数方言（2026-09-27）**：思考开关/推理强度的下发位置由 `provider` 方言决定（`openai` 顶层 effort；
 > `vllm`/`sglang` 合并走 `chat_template_kwargs`；`glm` 走 `thinking.type`+顶层；`deepseek` 不下发），
 > NULL/空 = 不下发；详见 [docs/model-params-design.md](docs/model-params-design.md)。
+> **debug 页会话模型 picker（2026-09-27）**：调试页 header（User 右侧）新增模型下拉框，与「Models」管理面配套——
+> 管理面管模型、picker 切模型。Channel 模式随 `POST /threads/chat` 的 `model` 字段下发；
+> **A2A 模式无 `model` 入参**（`ChatRequest.model` 仅存在于 `/threads/chat`），改为发送前 `PATCH /threads/{sid}`
+> 落 `session_user.model`，由 `SessionModelMiddleware` 实时查库路由。切换会话按 `GET /threads` 的 `model` 回显，
+> 新建会话回落 system，绑定模型被删除后同样回落；PATCH 失败（如 `model_disabled`）toast 报错并回滚下拉框。
+> 见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md) §9 C / §14。
 
 ---
 

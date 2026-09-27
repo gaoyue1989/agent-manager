@@ -129,7 +129,7 @@ export const api = {
   // 单次流对话（durable-sse-plan 改造版：POST /chat 事件经 EventBus 广播）
   // 返回 { close(), lastEventId } 供重连使用
   // 排队等待期间后端发 waiting 帧；结束发 done 帧；异常发 error 帧
-  sendChat: (sessionId, message, userId, fileIds, { onEvent, onWaiting, onError, onEnd } = {}) => {
+  sendChat: (sessionId, message, userId, fileIds, { model, onEvent, onWaiting, onError, onEnd } = {}) => {
     const path = '/threads/chat';
     const controller = new AbortController();
     // 追踪 SSE lastEventId（对应 session_event.seq），用于断连重连
@@ -138,6 +138,7 @@ export const api = {
       let resp;
       try {
         const body = { message, userId: userId || 'debug-user', sessionId };
+        if (model) body.model = model;
         if (fileIds && fileIds.length > 0) {
           body.fileIds = fileIds;
         }
