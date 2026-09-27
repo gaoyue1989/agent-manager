@@ -478,7 +478,7 @@ class ThreadControllerTest {
         var pending = new ConfirmContextStore.PendingConfirm("reply-9", List.of(
             ToolUseBlock.builder().id("call-9").name("get_weather")
                 .input(java.util.Map.of("city", "beijing")).build()),
-            java.time.Instant.now());
+            java.time.Instant.now(), null, null);
         when(confirmContextStore.findPending(anyString())).thenReturn(Optional.of(pending));
 
         // Skip generatedFiles and loadMessages by throwing
