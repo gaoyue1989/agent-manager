@@ -491,6 +491,14 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/llm-calls
 
 **响应：** `{"session_id": "...", "calls": [{"call_id": "...", "timestamp": "...", "request": {...}, "response": {...}}]}`
 
+**记录键口径**：`sessionId` 取规范会话 id（= `session_user.session_id`，与 `GET /threads` 列表、
+history/PATCH/DELETE 同键），由 `SessionKeyResolver` 从 RuntimeContext 反查解析——`sessionId` 与
+`userId` 两个候选中，谁在 session_user 登记过谁就是规范 sid。注意 Channel 链路
+（`/threads/chat`）下 `RuntimeContext.sessionId` 是网关按 canonicalKey 派生的 `gw-hash`
+（同进程所有 peer 共享，**不是任何会话的规范 key**），前端 sid 落在 `RuntimeContext.userId`；
+若直接用 `ctx.getSessionId()` 落记录，所有会话的记录会串进同一个 gw-hash 桶、按 sid 查询恒为空
+（issue #44）。
+
 ---
 
 ## 无状态单次流 SSE API

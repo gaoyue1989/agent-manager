@@ -1187,8 +1187,8 @@ docker run -d --name jaeger \
 | `gen_ai.tool.name` | OtelTracingMiddleware | 工具名 |
 | `gen_ai.tool.call.count` | OtelTracingMiddleware | 工具调用数 |
 | `gen_ai.tool.call.id` | OtelTracingMiddleware | 工具调用 ID |
-| `agentscope.user.id` | FrameworkTracingMiddleware | 用户 ID |
-| `agentscope.session.id` | FrameworkTracingMiddleware | 会话 ID |
+| `agentscope.user.id` | FrameworkTracingMiddleware | 真实用户 ID（session_user 反查，非网关 peer） |
+| `agentscope.session.id` | FrameworkTracingMiddleware | 规范会话 ID（session_user.session_id，非网关 gw-hash） |
 | `agentscope.tenant.prefix` | FrameworkTracingMiddleware | 租户前缀 |
 | `sandbox.id` | TracingSandboxClient | 沙箱实例 ID |
 | `sandbox.image` | TracingSandboxClient | 沙箱镜像名 |
@@ -1200,6 +1200,13 @@ docker run -d --name jaeger \
 | `gen_ai.operation.name=compaction` | TracingModelWrapper | 上下文压缩的 LLM 调用 |
 
 > 注：`FrameworkTracingMiddleware` 覆盖 onAgent/onModelCall/onActing 三个钩子，`agentscope.user.id`/`session.id`/`tenant.prefix` 出现在**所有层级 span**（invoke_agent/chat/execute_tool/reasoning），而非仅根 span。
+>
+> 注：`session.id`/`user.id` 记的是**业务规范键**（经 `SessionKeyResolver` 反查 session_user），不是
+> RuntimeContext 原值。Channel 链路（/threads/chat 经 ChatUiChannel 网关）下 ctx.sessionId 是网关按
+> canonicalKey 派生的 gw-hash（同进程所有 peer 共享）、ctx.userId 是网关 peer，直接记录会让
+> session.id 全进程同值（按会话过滤失效、各会话 span 互相可见）、user.id 变成会话 id——
+> 与 `GET /threads/{sid}/llm-calls` 恒空是同一根因（issue #44）。
+> 解析在每个 hook 入口做一次、结果 memo 进 RuntimeContext（生命周期 = 一个 turn），不在事件级热路径查库。
 >
 > 注：`trace_id`/`span_id` 由 `TraceIdLogEnricher` 注入日志（debug 页面 + 控制台），不属 span 属性。
 
@@ -1378,7 +1385,7 @@ public abstract class TracingTestBase {
 
 | 测试类 | 覆盖组件 | 关键用例 | 验证点 |
 |--------|---------|---------|--------|
-| `FrameworkTracingMiddlewareTest` | 属性补充 | ①活跃 span 下 onAgent/onModelCall/onActing 写入属性；②userId/sessionId 为空跳过；③事件透传不改变流 | span attributes（user.id/session.id/tenant.prefix）、事件顺序 |
+| `FrameworkTracingMiddlewareTest` | 属性补充 | ①活跃 span 下 onAgent/onModelCall/onActing 写入属性；②userId/sessionId 为空跳过；③事件透传不改变流；④Channel 形态（gw-hash + peer）写规范 sid 与真实用户；⑤A2A 形态保留原值；⑥同一 ctx 多次解析只查库一次 | span attributes（user.id/session.id/tenant.prefix）、事件顺序、查库次数 |
 | `ReasoningTracingMiddlewareTest` | 轮次 span | ①正常完成 → OK 状态；②error 流 → ERROR + recordException；③cancel → span 结束；④next 链内部 `Span.current()` 为 reasoning span（父子前提） | span 名称 `reasoning <name>`、状态、异常事件、active span 一致性 |
 | `TracingSandboxClientTest` | 沙箱 span | ①create 成功 → OK + sandbox.id/image；②create 抛异常 → ERROR + 异常事件；③resume/delete 成功；④serialize/deserialize 委托 | span 状态/属性、异常传播 |
 | `TracingModelWrapperTest` | model 装饰 | ①stream 创建 `memory`/`compaction` span + usage 属性（构造含 `ChatUsage` 的 `ChatResponse`）；②父 span 活跃时租户属性复制；③委托方法（getModelName 等）；④error 路径 | span 名称/usage/属性复制、委托等价性 |

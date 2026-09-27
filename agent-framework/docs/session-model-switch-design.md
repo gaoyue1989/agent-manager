@@ -213,6 +213,10 @@ CREATE TABLE IF NOT EXISTS model_config (
 ```
 
 - **最外层注册**：下游 `LlmLoggingMiddleware`、OTel span 看到的都是生效模型（调试口径正确）。
+- **候选 key 的规范解析已收敛**：`SessionKeyResolver`（issue #44）把同款"sessionId → userId 两级候选"
+  提升为共享翻译层——LLM 调用记录（`/threads/{sid}/llm-calls`）与 span 属性
+  （`agentscope.session.id` / `agentscope.user.id`）改用它，避免各处各自实现后与本中间件口径分叉。
+  本中间件的 `candidateKeys` 保持独立（只需查 model 列，不取 user_id）。
 - **切换生效点**：`chat.model` 落库先于 turn 启动 → 本 turn 即生效；`PATCH` → 下一次模型调用生效。
 - **标题/记忆/压缩不受影响**：直调 `model.stream()` 不经本链（§1）。
 

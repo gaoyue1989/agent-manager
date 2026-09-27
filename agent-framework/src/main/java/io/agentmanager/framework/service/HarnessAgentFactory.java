@@ -140,6 +140,11 @@ public class HarnessAgentFactory {
             var permCfg = mcpToolRegistrar.collectPermissionRules(oafConfig);
             var permissionContext = buildPermissionContext(oafConfig, permCfg, customToolNames);
 
+            // 业务规范键解析（RuntimeContext → 规范会话/用户）：Channel 链路下 ctx.sessionId
+            // 是全进程共享的网关 gw-hash、ctx.userId 是 peer，不翻译会让 LLM 记录与 span
+            // 属性都记成运行时路由键——前者按 sid 查不到（issue #44），后者按会话过滤失效
+            var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
                 .sysPrompt(oafConfig.systemPrompt())
@@ -159,11 +164,15 @@ public class HarnessAgentFactory {
                 // 工具调用名称/描述/入参/出参补录到 execute_tool span
                 .middleware(new io.agentmanager.framework.service.ToolCallTracingMiddleware())
                 // 框架级属性补充（userId/sessionId/tenant，order=0，覆盖 onAgent/onModelCall/onActing）
-                .middleware(new io.agentmanager.framework.service.FrameworkTracingMiddleware(oafConfig.slug()))
+                .middleware(new io.agentmanager.framework.service.FrameworkTracingMiddleware(
+                    oafConfig.slug(), sessionKeyResolver))
                 // ReAct 推理轮次 span（order=0，覆盖 onReasoning）
                 .middleware(new io.agentmanager.framework.service.ReasoningTracingMiddleware())
                 // LLM 调用记录（debug 页面，order=1，默认值，保留）
-                .middleware(new LlmLoggingMiddleware(llmLogger))
+                // 记录键用规范 sid：Channel 链路下 ctx.sessionId 是全进程共享的网关 gw-hash，
+                // 直接用它会让所有会话的记录串到同一个桶、且按 /threads/{sid}/llm-calls
+                // 永远查不到（issue #44）
+                .middleware(new LlmLoggingMiddleware(llmLogger, sessionKeyResolver))
                 // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
                 .middleware(new ToolCallValidationMiddleware())
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
