@@ -77,7 +77,7 @@ class ConfirmControllerTest {
         lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
         // 同步 confirm 现在也抢租约（与 confirm-stream 对齐）：默认允许抢到，
         // 个别用例可重新打桩返回 null 以验证 409 turn_in_progress
-        lenient().when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-1");
+        lenient().when(turnLeaseStore.acquire(anyString(), any())).thenReturn("tok-1");
 
         // SessionEventBus 依赖 SessionEventStore（mock）
         eventStore = mock(SessionEventStore.class);
@@ -195,7 +195,7 @@ class ConfirmControllerTest {
     void confirmShouldReturn409WhenTurnLeaseUnavailable() throws Exception {
         // 多副本/并发：该会话有执行段在进行中，同步 confirm 必须拒绝恢复执行
         // （否则两个执行段会同时写同一份 AgentState）
-        when(turnLeaseStore.tryAcquire(anyString())).thenReturn(null);
+        when(turnLeaseStore.acquire(anyString(), any())).thenReturn(null);
         stubPendingStoreRow();
         when(confirmContextStore.consume(anyString()))
             .thenReturn(new ConfirmContextStore.StoredRow(
@@ -252,7 +252,7 @@ class ConfirmControllerTest {
     @Test
     void confirmStreamShouldStopWritingAfterLeaseLost() throws Exception {
         stubPendingStoreRow();
-        when(turnLeaseStore.tryAcquire("t1")).thenReturn("tok-lost");
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-lost");
         // 亚秒配置把「丢锁」逼到 20ms 内出现，早于下面 50ms 才到达的事件
         when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofMillis(20));
         when(turnLeaseStore.ttl()).thenReturn(Duration.ofMillis(60));
@@ -299,7 +299,7 @@ class ConfirmControllerTest {
         when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
             .thenReturn(reactor.core.publisher.Flux.just(
                 (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-2")));
-        when(turnLeaseStore.tryAcquire("t1")).thenReturn("tok-c1");
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-c1");
         // 持久化成功返回合法 seq（append 真实语义从 1 起；mock 默认 0 在 A3 后不广播——
         // 那正是本应被消除的「永不落库却实时可见」瑕疵帧）
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);

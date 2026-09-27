@@ -186,7 +186,7 @@ public class ConfirmContextStore {
     public Optional<PendingConfirm> findPending(String sessionId) {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
-                 SELECT tool_calls_json, reply_id, created_at FROM confirm_context
+                 SELECT tool_calls_json, reply_id, runtime_session_id, runtime_user_id, created_at FROM confirm_context
                  WHERE (session_id = ?
                         OR RIGHT(session_id, CHAR_LENGTH(?) + 1) = CONCAT(':', ?)
                         OR RIGHT(session_id, CHAR_LENGTH(?) + 2) = CONCAT('__', ?))
@@ -207,7 +207,9 @@ public class ConfirmContextStore {
             return Optional.of(new PendingConfirm(
                 rs.getString("reply_id"),
                 toToolCalls(rs.getString("tool_calls_json")),
-                createdAt(rs).toInstant()));
+                createdAt(rs).toInstant(),
+                rs.getString("runtime_session_id"),
+                rs.getString("runtime_user_id")));
         } catch (Exception e) {
             log.warn("ConfirmContextStore: findPending failed for {}: {}", sessionId, e.getMessage());
             return Optional.empty();
@@ -300,11 +302,13 @@ public class ConfirmContextStore {
     ) {
     }
 
-    /** 待确认上下文（刷新重建用，无内部 runtime 细节） */
+    /** 待确认上下文（刷新重建用，无内部 runtime 细节；runtime 两列供 HITL 恢复取会话身份） */
     public record PendingConfirm(
         String replyId,
         List<ToolUseBlock> toolCalls,
-        Instant createdAt
+        Instant createdAt,
+        String runtimeSessionId,
+        String runtimeUserId
     ) {
         /** 序列化为前端 pendingConfirm.tools[] 词表 */
         public List<Map<String, Object>> toolsJson() {

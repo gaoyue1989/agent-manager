@@ -534,13 +534,16 @@ public class ChatStreamController {
             toolSummary.onToolResultDelta(trd);
         }
 
-        // HITL
+        // HITL：挂起点只落确认上下文与广播 permission_ask 帧，**不在这里释放租约/关流**。
+        // SDK 的 AgentState（ASKING 快照，跨副本恢复的依据）在 turn 收尾（AGENT_END 处理）才落库，
+        // 此处提前 release 会让 confirm 在快照落地前抢到锁：恢复侧读不到 state 身份 →
+        // 回落 fullThreadId 兜底槽 → 空会话恢复丢全部上下文（e2e R5/工具插件 ask 批准 实测）。
+        // 收尾统一走 AGENT_END 的 endTurn（closeSession → release，顺序保证先刷后放锁）。
         if (event instanceof RequireUserConfirmEvent) {
             log.info("[chat] HITL permission_ask: sessionId={}, tools={}", sessionId,
                 ((RequireUserConfirmEvent) event).getToolCalls().stream()
                     .map(tc -> tc.getName()).toList());
             runtimeService.storeConfirmContext(sessionId, event);
-            lease.release();
         }
 
         eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
@@ -550,11 +553,9 @@ public class ChatStreamController {
         // 必须在原事件之后发射——前端按 toolCallId 认领工具行，先到的是原始事件。
         emitToolSummary(toolSummary, event);
 
-        // HITL 是 turn 边界：permission_ask 已广播，关闭 sink 让订阅者正常结束。
-        // 必须在 emit 之后——否则订阅者收不到 permission_ask（durable-sse-multinode-plan §3.4.4）。
-        if (event instanceof RequireUserConfirmEvent) {
-            eventBus.closeSession(sessionId);
-        }
+        // HITL 挂起后不再在此关流：permission_ask 帧已广播，订阅者随后收到 AGENT_END 帧
+        // （前端忽略该帧、e2e 终态归一仍取 permission_ask），closeSession 由紧随的
+        // endTurn 统一执行——先刷缓冲/落库再放锁，confirm 排队抢锁时快照必然已可见。
 
         // 产出文件工具完成合成 file_ready（present_url 与 present_file 返回同构 JSON，
         // 复用同一条下载卡片链路；外部交付物经 /files/{id} 代理下载）
@@ -581,10 +582,10 @@ public class ChatStreamController {
      * 任何 SSE 字节，先后不影响行为。
      *
      * <p>覆盖的终态：AGENT_END、源流 error/complete 回调、onCancel 看护强收（均走本方法）。
-     * <b>HITL 是部分覆盖</b>：permission_ask 路径先 release 租约再直接 closeSession、不经
-     * 3 参 endTurn，本 turn 的桶清理推迟到源 flux complete/error 回调的 endTurn——正常必达；
-     * flux 永不 complete 且连接无 onCancel 时与现状一样不清（无恶化）。终态后理论上仍可能
-     * 有极晚事件回调 re-put（与现状相同的既有边界，桶上限 64KB/2MB 兜底）。
+     * <b>HITL 与普通终态同路</b>：permission_ask 只落确认上下文 + 广播帧，不再提前
+     * release/closeSession——ASKING 快照随 AGENT_END 收尾落库后才放锁，confirm 排队
+     * 抢到锁时恢复要素必然齐备（见 handleEventAndEmit 的 HITL 注释）。终态后理论上仍可能
+     * 有极晚事件回调 re-put（既有边界，桶上限 64KB/2MB 兜底）。
      */
     private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId,
                                           java.util.concurrent.atomic.AtomicBoolean turnEnded,
