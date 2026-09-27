@@ -13,6 +13,7 @@ let fileInput = null;
 let uploadPreview = null;
 let uploadFiles = null;
 let uidInput = null;
+let modelSelect = null;     // 模型切换下拉框
 
 // @Skill 提及状态
 let mentionDropdown = null;
@@ -79,6 +80,7 @@ function render() {
         <span class="sub" id="connBadge"></span>
         <div style="margin-left:auto"></div>
         <label class="uid-label" title="用户标识，同 userId 共享 workspace 和 memory">User&nbsp;<input id="uidInput" class="input uid-input" type="text" spellcheck="false"></label>
+        <label class="uid-label" title="会话模型：切换当前会话使用的模型">Model&nbsp;<select id="modelSelect" class="input uid-input" style="cursor:pointer"></select></label>
         <div class="seg">
           <button id="modeA2A" class="active">A2A</button>
           <button id="modeChannel">Channel</button>
@@ -122,6 +124,8 @@ export default {
     uploadFiles = document.getElementById('uploadFiles');
     uidInput = document.getElementById('uidInput');
     uidInput.value = ctx.state.getState('ui.userId') || 'debug-user';
+    modelSelect = document.getElementById('modelSelect');
+    modelSelect.addEventListener('change', onModelChange);
     updateConnBadge();
 
     // @Skill 提及
@@ -130,6 +134,7 @@ export default {
 
     bindEvents();
     messagesEl.innerHTML = '<div class="chat-greeting">How can I help you today?</div>';
+    loadModels();
     loadThreads();
     // 刷新恢复：localStorage 中若有当前会话，自动选中并加载历史；
     // 若该 turn 仍在执行，selectThread → tryResumeSSE 会自动续传实时输出。
@@ -455,6 +460,9 @@ async function loadThreads(force) {
     });
     // 列表加载后同步顶栏标题（后端异步生成的标题会随本轮 loadThreads 出现）
     updateConnBadge();
+    // 同步当前会话的模型选择（后端可能已通过 PATCH 更新了 model 绑定）
+    const cur = currentSessionId();
+    if (cur) restoreModelForSession(cur);
   } catch (e) {
     if (force) ctx.utils.toast('Failed to load threads: ' + e.message, 'error');
   }
@@ -466,6 +474,7 @@ async function selectThread(sessionId) {
   if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } activeSubHandle = null; }
   ctx.state.setState('threads.current', sessionId);
   document.getElementById('btnLlmCalls').disabled = false;
+  restoreModelForSession(sessionId);
   updateConnBadge();
   // 重置回放游标与当前回复：新会话从 0 开始（不回放旧会话事件），也避免沿用旧气泡
   lastEventId = 0;
@@ -562,7 +571,56 @@ function newThread() {
   currentReply = null;
   messagesEl.innerHTML = '<div class="msg system">New thread started</div>';
   document.getElementById('btnLlmCalls').disabled = true;
+  // 新建会话重置为默认模型
+  if (modelSelect) modelSelect.value = 'system';
   updateConnBadge();
+}
+
+// ---------- 模型切换 ----------
+
+async function loadModels() {
+  if (!modelSelect) return;
+  try {
+    const data = await ctx.api.getModels(false);
+    const list = (data && data.models) || [];
+    // 保留 system 默认项 + 启用的托管模型
+    const enabled = list.filter((m) => m.enabled !== false);
+    modelSelect.innerHTML = '<option value="system">System Default</option>'
+      + enabled.filter((m) => m.id !== 'system').map((m) =>
+        '<option value="' + ctx.utils.esc(m.id) + '">' + ctx.utils.esc(m.name) + '</option>'
+      ).join('');
+  } catch (e) {
+    // 模型接口不可用时静默降级（兼容旧版后端）
+    console.warn('[chat] loadModels failed:', e.message);
+  }
+}
+
+/** 切换模型：PATCH /threads/{sid} 持久化到 session_user.model（失败回滚下拉框） */
+async function onModelChange() {
+  const previous = currentSessionModel();
+  const ok = await bindSessionModel(currentSessionId(), modelSelect.value);
+  if (!ok) modelSelect.value = previous;
+}
+
+/** 当前会话的已绑定模型（下拉框当前值），用于切换失败时回滚 */
+function currentSessionModel() {
+  const sid = currentSessionId();
+  if (!sid || !modelSelect) return 'system';
+  const list = ctx.state.getState('threads.list') || [];
+  const t = list.find((x) => x && x.session_id === sid);
+  return (t && t.model) || 'system';
+}
+
+/** 从 thread 列表数据恢复当前会话的模型选择 */
+function restoreModelForSession(sessionId) {
+  if (!modelSelect) return;
+  const list = ctx.state.getState('threads.list') || [];
+  const t = list.find((x) => x && x.session_id === sessionId);
+  const bound = (t && t.model) || 'system';
+  // 绑定模型可能已被删除（此时服务端回落默认），下拉框无对应 option 会显示空白：
+  // 统一回落到 system，使界面与服务端实际生效的模型保持一致
+  const exists = Array.from(modelSelect.options).some((o) => o.value === bound);
+  modelSelect.value = exists ? bound : 'system';
 }
 
 // ---------- 历史加载 ----------
@@ -1629,18 +1687,48 @@ async function sendMessage() {
   loadAvailableSkills();
 
   const mode = ctx.state.getState('ui.streamMode');
+  const model = (modelSelect && modelSelect.value !== 'system') ? modelSelect.value : '';
 
   if (mode === 'channel') {
-    await sendChannelSingleStream(text, sid, fileIds);
+    // Channel 链路：model 随请求体下发，后端在 turn 起始处绑定
+    await sendChannelSingleStream(text, sid, fileIds, model);
   } else {
     // A2A 模式不支持文件上传，提示用户切换到 Channel 模式
     if (fileIds && fileIds.length > 0) {
       ctx.utils.toast('A2A 模式不支持文件上传，已自动切换到 Channel 模式', 'warn');
       setStreamMode('channel');
-      await sendChannelSingleStream(text, sid, fileIds);
+      await sendChannelSingleStream(text, sid, fileIds, model);
     } else {
+      // A2A 链路无 model 入参（ChatRequest.model 仅存在于 /threads/chat，
+      // 见 docs/session-model-switch-design.md §5.5），只能靠 session_user.model 绑定路由，
+      // 故发送前先 PATCH 落库；新会话此刻 sid 已在客户端生成，可直接绑定。
+      await bindSessionModel(sid, model || 'system');
       await sendA2AStream(text, sid);
     }
+  }
+}
+
+/**
+ * PATCH 会话模型绑定。返回是否成功——失败时下拉框回滚，
+ * 避免界面显示的模型与服务端实际绑定不一致。
+ */
+async function bindSessionModel(sid, modelId) {
+  if (!sid) return true;
+  try {
+    const resp = await fetch(ctx.api.BASE + '/threads/' + encodeURIComponent(sid), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId })
+    });
+    if (!resp.ok) {
+      let msg = 'HTTP ' + resp.status;
+      try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (e) { /* 非 JSON 响应保留状态码 */ }
+      throw new Error(msg);
+    }
+    return true;
+  } catch (e) {
+    ctx.utils.toast('模型切换失败: ' + e.message, 'error');
+    return false;
   }
 }
 
@@ -1668,7 +1756,7 @@ function resetStreamingState() {
   activeSubHandle = null;
 }
 
-async function sendChannelSingleStream(text, sid, fileIds) {
+async function sendChannelSingleStream(text, sid, fileIds, model) {
   // durable-sse-plan 改造版：
   // 1. POST /chat → 事件经 EventBus 广播，SSE 断连不影响 agent 执行
   // 2. SSE 断连后自动通过 GET /subscribe 重连续传
@@ -1768,6 +1856,7 @@ async function sendChannelSingleStream(text, sid, fileIds) {
   reconnectAttempts = 0;
   const uid = ctx.state.getState('ui.userId') || 'debug-user';
   activeChatHandle = ctx.api.sendChat(sid, text, uid, fileIds, {
+    model,
     onWaiting: () => {
       if (!waitingSince) waitingSince = Date.now();
       showWaiting();

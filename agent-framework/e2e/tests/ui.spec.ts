@@ -5,8 +5,9 @@
 import { test, expect, type Page } from '@playwright/test';
 import { BASE, ids, sessionIdFor } from '../lib/env.js';
 import { SEL } from '../lib/selectors.js';
-import { createApprovalApp } from '../lib/client.js';
+import { createApprovalApp, llmReset, llmStats } from '../lib/client.js';
 import { PNG_1PX } from '../lib/files.js';
+import { pollUntil } from '../lib/matchers.js';
 
 const U = 'e2e-ui';
 let uniqueSeq = 0;
@@ -401,4 +402,87 @@ test('U-SK7 删除标记（tombstone）与写入栅栏必须显式提示', async
   await expect(page.locator('#userSkillList')).toContainText('tombstone');
   await expect(page.locator('#userSkillList')).toContainText('demo-gone');
   await expect(page.locator('#userSkillList')).toContainText('不会被回写落库');
+});
+
+// ---------- 会话模型切换（U14）----------
+
+const LLM_MOCK = (process.env.E2E_LLM_MOCK ?? 'http://127.0.0.1:18081').replace(/\/$/, '');
+
+test('U14 会话模型切换：下拉选择→绑定生效→切会话恢复→新建重置', async ({ page, request }) => {
+  await llmReset();
+  const name = `e2e-ui-model-${uniq()}`;
+  const created = await request.post('/models', {
+    data: { name, modelId: 'e2e-ui-switched', baseUrl: `${LLM_MOCK}/v1`, apiKey: 'sk-e2e-ui-switch', timeoutSeconds: 5 },
+  });
+  expect(created.status()).toBe(200);
+  const modelId = String((await created.json()).id);
+
+  try {
+    await page.goto('/debug/');
+    await page.locator(SEL.modeChannel).click();
+
+    // 1) 下拉框随 /models 填充：System Default + 托管模型
+    const select = page.locator(SEL.modelSelect);
+    await expect(select).toBeVisible();
+    await expect(select.locator('option[value="system"]')).toHaveCount(1);
+    await expect(select.locator(`option[value="${modelId}"]`)).toHaveCount(1);
+
+    // 2) 无会话时选模型 → 发首条消息：model 随 /threads/chat 下发并绑定到该会话
+    await select.selectOption(modelId);
+    await page.locator(SEL.chatInput).fill('[E2E:plain]切到托管模型');
+    const btn = page.locator(SEL.sendBtn);
+    await expect(btn).toBeEnabled();
+    await btn.click();
+    await expect(btn).toBeEnabled({ timeout: 120_000 });
+    // 真实 LLM 调用确实走了托管模型（modelId 而非系统模型）
+    await pollUntil(
+      async () => (await llmStats()).calls,
+      calls => calls.some(call => call.model === 'e2e-ui-switched'),
+    );
+    const boundSid = await page.locator(`${SEL.threadList} .thread-item.active`).getAttribute('data-sid', { timeout: 30_000 });
+    expect(boundSid, '应已创建并选中会话').toBeTruthy();
+    expect((await (await request.get(`/threads/${boundSid}`)).json()).model).toBe(modelId);
+
+    // 3) 新建会话 → 下拉回落 System Default（不继承上一个会话的绑定）
+    await page.locator(SEL.newThread).click();
+    await expect(select).toHaveValue('system');
+
+    // 4) 切回原会话 → 下拉恢复该会话的绑定
+    await page.locator(`${SEL.threadList} .thread-item[data-sid="${boundSid}"]`).click();
+    await expect(select).toHaveValue(modelId);
+
+    // 5) 已有会话内改选 System Default → PATCH 清除绑定，回落系统模型
+    await select.selectOption('system');
+    await pollUntil(
+      async () => (await request.get(`/threads/${boundSid}`)).json().then((b: any) => b.model),
+      m => m === '' || m === 'system' || m == null,
+    );
+
+    // 6) A2A 模式同样要能切模型：A2A 链路不认请求体 model（ChatRequest.model 仅 /threads/chat），
+    //    靠发送前 PATCH 落 session_user.model 路由。此处锁该回退路径——
+    //    修复前 A2A 新会话完全不绑定，界面显示托管模型而实际跑系统模型。
+    await page.locator(SEL.newThread).click();
+    await select.selectOption(modelId);
+    await page.locator(SEL.modeA2A).click(); // 默认即 A2A，显式点击保证状态确定
+    await page.locator(SEL.chatInput).fill('[E2E:plain]A2A 模式切模型');
+    await expect(page.locator(SEL.sendBtn)).toBeEnabled();
+    await page.locator(SEL.sendBtn).click();
+    // newThread 只清 state，DOM 里旧条目仍挂 .active 直到下次 loadThreads——
+    // 必须等 active 会话确实切走，否则读到的是旧 sid（断言会假失败）
+    const activeItem = page.locator(`${SEL.threadList} .thread-item.active`);
+    await expect(activeItem).not.toHaveAttribute('data-sid', boundSid, { timeout: 30_000 });
+    const a2aSid = await activeItem.getAttribute('data-sid');
+    expect(a2aSid, 'A2A 应创建会话').toBeTruthy();
+    await pollUntil(
+      async () => (await request.get(`/threads/${a2aSid}`)).json().then((b: any) => b.model),
+      m => m === modelId,
+    );
+    // A2A 实际调用也应走托管模型
+    await pollUntil(
+      async () => (await llmStats()).calls,
+      calls => calls.some(call => call.model === 'e2e-ui-switched'),
+    );
+  } finally {
+    await request.delete(`/models/${modelId}`).catch(() => undefined);
+  }
 });

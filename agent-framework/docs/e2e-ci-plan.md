@@ -426,6 +426,7 @@ agent-config/
 | U10 | 文件上传对话（UI） | 附件按钮上传 note.txt → 发送 `[E2E:tool:read](uploads/note.txt)` | 上传出现附件预览条；回复含 read_file 工具行 + 文件内容摘录；图片上传呈缩略预览（image 内联路径的 UI 面） |
 | U11 | 文件交付下载卡片（UI） | `[E2E:file:deliver]` → 消息内下载卡片 → 点击下载 → 切走会话再切回 | `file_ready` 卡片渲染（文件名/大小）；下载触发浏览器下载且内容正确；历史回放（U3 切换/刷新）后卡片仍在且可下载（F10 的 UI 面） |
 | U13 | create_oaf_zip 打包下载卡片（UI，2026-09-24 回归门禁；oaf-package 夹具不含 edit_file 不受 D8 影响，替 fixme 的 U11 把文件卡片链路留在门禁内） | `[E2E:oaf:package]` → 实时下载卡片 → 刷新后按 data-sid 点选原会话回放 | `file_ready` 卡片实时渲染（含 e2e-oaf-agent.zip 文件名）；历史回放（按 active 项 data-sid 精确点选，列表首位因记忆提取后台刷新 updated_at 不可靠）后卡片仍在（F12 的 UI 面） |
+| U14 | 会话模型切换 picker（UI，2026-09-27 补齐 debug 页切模型缺口） | 下拉选托管模型 → Channel 发消息 → 新建会话 → 切回原会话 → 改选 system → A2A 模式重走一遍 | 下拉随 `GET /models` 填充 system + 托管项；`llmStats` 证实真实 LLM 调用走托管模型（非仅 UI 显示）；`GET /threads/{sid}` 证实绑定落库；新建回落 system、切回恢复绑定、改选 system 清除绑定；**A2A 模式**同样绑定（该链路无 `model` 入参，靠发送前 PATCH 落 `session_user.model`，见 [session-model-switch-design.md](session-model-switch-design.md) §9 C）；`newThread` 只清 state，DOM 旧条目仍挂 `.active`，须等 active 会话切走再取 sid（否则读到旧会话假失败） |
 
 ### 5.8 A 组 — A2A（e2e-core）
 

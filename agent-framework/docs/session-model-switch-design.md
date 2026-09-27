@@ -237,6 +237,16 @@ CREATE TABLE IF NOT EXISTS model_config (
 - 功能：模型列表（系统只读 + 托管）、新增/编辑表单（apiKey 密码框 + 掩码回显 + 留空=不修改）、启用/禁用、删除（确认提示"引用会话将回落默认模型"）、**测试连接**按钮（展示 ok/latency/error）；
 - 全部走 §4.1 REST，与 debug 页现有 `/debug/config/env` 等只读诊断区并列。
 
+**C. debug 页对话 picker（`static/debug/modules/chat.js`，2026-09-27 补充）**
+
+管理面（B）与对话面（A）此前割裂：debug 页只能管模型、切不了模型。补充 header 模型下拉框，与发布助手 picker 对齐：
+
+- 位置/数据源：chat 模块 header（User 输入框右侧）`<select id="modelSelect">`，数据源 `GET /models`（仅启用项）；接口不可用时静默降级（兼容旧版后端）；
+- 随消息下发：Channel 模式把选中值放进 `POST /threads/chat` 的 `model` 字段（复用 §4.2 语义，`system`/空 = 回落默认）；
+- **A2A 模式走 PATCH 而非请求体**——`ChatRequest.model` 只存在于 `/threads/chat`，A2A 链路无对应入参（§5.5 声明的"未来可选项"），故发送前先 `PATCH /threads/{sid}` 落 `session_user.model`，由 `SessionModelMiddleware` 实时查库路由；新会话 sid 在客户端生成，可直接绑定；
+- 会话生命周期：新建会话回落 System Default；切换会话 / 线程列表刷新后按 `GET /threads` 的 `model` 回显；绑定的模型被删除后下拉回落 system（与服务端 fail-soft 回落一致，避免显示空白）；
+- 失败处理：PATCH 非 2xx（如 `model_disabled`）时 toast 报错并回滚下拉框，不让界面显示与服务端绑定不一致。
+
 ## 10. 测试计划
 
 | 层 | 用例 |
@@ -294,6 +304,32 @@ CREATE TABLE IF NOT EXISTS model_config (
   `static/debug/js/app.js` + `static/debug/js/api.js`（路由与 API 客户端）、
   `frontend/src/app/assistant/page.tsx` + `components/types.ts`（picker、随消息携带 model、会话回显、侧栏标题）。
 - **后续可选项**（未做，需要时另开）：A2A 链路经 `message.metadata.model` 切换会话模型；会话模型变更的审计事件。
+  注：§9 C 的 debug 页 A2A picker **未走** `message.metadata.model`（后端不解析该键），而是发送前 PATCH 落库——
+  A2A 协议侧透传仍留作后续可选项。
+
+## 14. 补充实施记录（2026-09-27，debug 页对话 picker）
+
+- **背景**：§9 B 的模型管理面与 §9 A 的发布助手 picker 之外，debug 页自身只能管模型、不能切模型，
+  调试多模型对比需绕到发布助手。补 `static/debug/modules/chat.js` header 下拉框（§9 C）。
+- **改动**：`static/debug/modules/chat.js`（picker + 会话生命周期 + PATCH 落库）、
+  `static/debug/js/api.js`（`sendChat` 增 `model` 选项）、`e2e/lib/selectors.ts`（`modelSelect` 契约）、
+  `e2e/tests/ui.spec.ts`（U14）。
+- **代码评审发现并修复的三处问题**：
+  1. **A2A 死代码**：初版给 A2A 请求塞 `metadata.model`，但 `A2AController.normalizeMessageSendBody` 只解析
+     `userId`/`sessionId`（§5.5 已声明 A2A 切模型是"未来可选项"），该键被 SDK 原样透传后丢弃——不仅无效，
+     更造成"A2A 支持切模型"的错觉，且**新会话下界面显示托管模型、实际跑系统模型的静默错配**。
+     改为发送前 `PATCH /threads/{sid}`（新会话 sid 客户端已生成，可直接绑定）。
+  2. **PATCH 失败被吞**：原 `onModelChange` 不看响应体，模型被禁用（`model_disabled` → 400）时下拉框仍显示
+     新值而服务端未绑定。改为提取 `bindSessionModel()` 统一处理，非 2xx 时 toast 报错 + 回滚下拉框。
+  3. **已删模型显示空白**：`session_user.model` 保留已删除模型的 id，而下拉框无该 option，
+     `select.value` 赋值落到 `selectedIndex=-1` 显示空白。改为回落 system，与服务端 fail-soft 回落一致。
+- **验证**：`npm run test:core` 55 通过 / 3 跳过（既有 `test.fixme`：U8、U11、F5）；
+  U14 覆盖下拉填充、Channel 随消息下发、会话绑定落库、新建回落、切会话回显、清除绑定、A2A 发送前 PATCH 路径。
+  另用真实模型（OpenRouter `stealth/space-bunny-alpha` 注册为托管模型）实机走查：连接测试 2349ms ok、
+  切换后模型自述 `provider openai`（即注册时填写值，mock 不可能知道）且产生 THINKING_BLOCK 与真实 token 用量，
+  确认路由确实落到托管端点；PATCH 回 `system` 后回落 mock 话术。
+- **顺带发现的既有限制**（非本次引入，已另开 issue）：`GET /threads/{sid}/llm-calls` 的记录来自 mock LLM
+  服务侧通道，托管模型（真实端点）调用不经过它，故该端点对托管模型恒返回 `calls: []`。
 
 ### 13.1 本地实机冒烟发现的缺陷（已一并修复）
 
