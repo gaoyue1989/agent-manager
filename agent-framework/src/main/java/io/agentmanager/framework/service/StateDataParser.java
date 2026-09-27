@@ -311,6 +311,16 @@ public final class StateDataParser {
             var msg = new java.util.LinkedHashMap<String, Object>();
             msg.put("role", extractRole(m));
             msg.put("content", content);
+            // 消息标识与名（history 双源合并按 msg_id 对齐归档行、按 name 识别压缩摘要消息；
+            // 缺失时不写键，保持旧响应形态不变）
+            var msgId = m.path("id").asText("");
+            if (!msgId.isBlank()) {
+                msg.put("msg_id", msgId);
+            }
+            var name = m.path("name").asText("");
+            if (!name.isBlank()) {
+                msg.put("name", name);
+            }
             if (!tools.isEmpty()) {
                 msg.put("tool_calls", tools);
             }

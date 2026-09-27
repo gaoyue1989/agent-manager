@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 42 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 43 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -55,6 +55,7 @@
 | [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | 自定义工具插件化加载（Java SPI + plugins/ 目录），**已实施**（2026-09-25；BFPP 并入 `List<CustomTool>` 注入源，工厂/reload 重建//tools/HITL 零改动共享；2026-09-26 起 `/tools` 新增 `sdkInternal` 段透出 SDK 内置工具注册集，冒烟扩到 30 断言） |
 | [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload，**M1/M2 已实施，部署环境 E2E 验证通过**（2026-09-25；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施）。**2026-09-26 由 ③ 档移入本档**——此前索引归类与文档自身状态矛盾 |
 | [change-execution-order.md](change-execution-order.md) | v2.0→v2.1 整体升级执行顺序与结果记录（MysqlDistributedStore/HarnessAgent/Workspace/五功能/多租户，2026-08-06，头部含 2026-09-07 现状核对） |
+| [session-history-archive-design.md](session-history-archive-design.md) | 压缩后会话历史可查（session_message 消息轨 + AgentStateStore 归档装饰器 write-through + history 双源合并渲染压缩分隔条），**已实施**（2026-09-27；含 agentscope-java/deer-flow/QwenPaw 三机制调研结论、§13 评审核对记录 R1–R9 与 §15 实施记录；API 契约见 api.md history 节） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
 

@@ -642,7 +642,8 @@ async function loadThreadHistory(sessionId) {
     let lastAssistantEl = null;
     let lastAssistantContentEl = null;
     for (const m of msgs) {
-      if (m.role === 'user') addMessage('user', m.content || '');
+      if (m.role === 'compaction') addCompactionDivider(m.content || '');
+      else if (m.role === 'user') addMessage('user', m.content || '');
       else if (m.role === 'assistant' || m.role === 'agent') {
         const refs = addAssistantHistory(m.content || '', m.tool_calls || []);
         lastAssistantEl = refs.msgEl;
@@ -687,6 +688,26 @@ async function loadThreadHistory(sessionId) {
 }
 
 // ---------- 消息渲染（官方对齐） ----------
+
+/** 压缩分隔条：role=compaction 的合成项（docs/session-history-archive-design.md §7.3），
+ *  折叠卡样式——摘要正文 Markdown 渲染，默认收起不打断回放流 */
+function addCompactionDivider(summary) {
+  const el = document.createElement('div');
+  el.className = 'msg system';
+  const details = document.createElement('details');
+  details.className = 'compaction-divider';
+  const summaryEl = document.createElement('summary');
+  summaryEl.textContent = '上下文已压缩 · 早期消息已归档（点开查看压缩摘要）';
+  const body = document.createElement('div');
+  body.className = 'compaction-summary';
+  body.innerHTML = renderMarkdown(summary || '');
+  details.appendChild(summaryEl);
+  details.appendChild(body);
+  el.appendChild(details);
+  messagesEl.appendChild(el);
+  scrollToBottom(false);
+  return el;
+}
 
 function addMessage(role, content) {
   const msg = document.createElement('div');

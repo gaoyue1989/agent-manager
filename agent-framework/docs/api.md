@@ -350,13 +350,28 @@ curl http://localhost:8100/threads
 
 Thread 历史消息 + pendingConfirm。
 
-**数据源**：`agent_state`（官方 SDK 自动持久化的 AgentState）是消息级事实的权威来源——
+**查询参数**：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `includeArchived` | `true` | 归档合并开关；`false` 退回仅 agent_state 的现状行为 |
+| `limit` | `200` | 归档合并视图分页条数；`<=0` 不分页 |
+| `beforeId` | — | 归档行 id 游标（取该 id 之前更早的一页）；翻页只走归档行 |
+
+**数据源**：归档开启（`AGENT_HISTORY_ARCHIVE_ENABLED`，默认 true）时为**双源合并视图**——
+归档消息轨 `session_message`（append-only，AgentState 落库时 write-through，压缩前的原文在此）
+按 id 升序为时间线基底，`agent_state` 当前上下文的未归档消息合入基底末尾；压缩摘要消息
+（`__compaction_summary__`）渲染为 `role=compaction` 分隔条。**压缩不再吞噬历史**。
+归档关闭或查询故障时自动回退仅 `agent_state`。
+
+`agent_state`（官方 SDK 自动持久化的 AgentState）仍是当前上下文的事实来源——
 工具调用带 `state`（ToolCallState：pending/asking/allowed/submitted/finished），
 工具结果带 `state`（ToolResultState：success/error/denied/interrupted）与 `output`，
 覆盖 HITL 批准后的恢复段，不受 Redis 事件流 TTL 限制。
 `pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
 的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。
-详见 [history-agentstate-design.md](history-agentstate-design.md)。
+详见 [history-agentstate-design.md](history-agentstate-design.md) 与
+[session-history-archive-design.md](session-history-archive-design.md)。
 
 ```bash
 curl http://localhost:8100/threads/acme-test-agent:thread-1/history
@@ -375,8 +390,9 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
         ]
     },
     "messages": [
-        {"role": "user", "content": "提交申请"},
-        {"role": "assistant", "content": "请确认是否提交？",
+        {"role": "user", "content": "提交申请", "msg_id": "m1", "origin": "archive", "reply_id": "reply-001"},
+        {"role": "compaction", "type": "compaction_summary", "content": "…压缩摘要…", "msg_id": "m2", "created_at": "…"},
+        {"role": "assistant", "content": "请确认是否提交？", "msg_id": "m3", "origin": "archive",
          "tool_calls": [
             {"id": "call_1", "name": "list_images", "input": {},
              "state": "success", "output": "images: [...]"},
@@ -384,12 +400,24 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
              "state": "asking"}
          ]}
     ],
+    "hasMore": false,
+    "nextBeforeId": null,
     "files": [
         {"file_id": "…", "file_name": "report.pdf", "mime_type": "application/pdf",
          "size": 102400, "reply_id": "reply-001", "download_url": "/files/…"}
     ]
 }
 ```
+
+**合并视图新增字段**（`messages[]`，存量会话仅 `origin=state` 或缺省）：
+
+| 字段 | 说明 |
+|------|------|
+| `msg_id` | SDK Msg.id（toRoleContentList 透传；tool_calls 内层的 `id` 是工具调用 id，勿混淆） |
+| `origin` | `archive`（来自消息轨归档，压缩前原文）/ `state`（来自 agent_state 当前上下文） |
+| `role=compaction` 项 | 压缩分隔条合成项：`type=compaction_summary`，`content` 为摘要文本；老前端忽略即可 |
+| `reply_id` | 仅 assistant 携带；来自 Redis 顺序回填（按首个事件 seq 逐轮分配）。归档不盖戳——实测 `AgentState.getReplyId()` 为会话级而非逐轮（见 session-history-archive-design.md §15） |
+| `hasMore` / `nextBeforeId` | 归档分页游标；`nextBeforeId` 传回 `beforeId` 取更早一页 |
 
 > **`files[]` 是本轮新增同步的字段**：产出文件（`present_file` / `present_url`）在历史回放时经
 > `file_asset` 表关联本会话，供前端补渲染下载卡片。
@@ -410,7 +438,8 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 ### GET /threads/{sessionId}
 
 会话详情：`session_id` / `user_id` / `model` / `updated_at` / `pendingConfirm` / `files` / `messages`。
-结构与 `GET /threads/{sessionId}/history` 基本一致，额外带 `user_id`、`model`、`updated_at`。
+结构与 `GET /threads/{sessionId}/history` 基本一致，额外带 `user_id`、`model`、`updated_at`；
+messages 固定为归档合并视图首页（翻页走 history 的 `beforeId`）。
 
 ```bash
 curl http://localhost:8100/threads/acme-test-agent:thread-1
