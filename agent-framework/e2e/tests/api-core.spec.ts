@@ -166,6 +166,14 @@ test('S7 线程生命周期管理', async ({ request }) => {
   expect(titled?.title).toBe(manualTitle);
   const llmCalls = await request.get(`/threads/${sid}/llm-calls`);
   expect(llmCalls.status()).toBe(200);
+  // 记录键必须与查询键一致：Channel 链路 ctx.sessionId 是全进程共享的网关 gw-hash，
+  // 按它落记录会让本查询恒为空、且各会话记录串进同一个桶（issue #44）。
+  // 此前只断 200 正是 CI 看不见该缺陷的原因，这里必须断到非空。
+  const callsBody = await pollUntil(
+    async () => (await request.get(`/threads/${sid}/llm-calls`)).json() as { calls: unknown[] },
+    body => (body.calls?.length ?? 0) > 0,
+  );
+  expect(callsBody.calls.length).toBeGreaterThan(0);
   expect(await deleteThread(sid)).toBeLessThan(300);
   // 实测：删除后 GET 详情仍 200（空壳），权威信号是列表移除
   await pollUntil(async () => threads(), list => !JSON.stringify(list).includes(sid), 15_000);

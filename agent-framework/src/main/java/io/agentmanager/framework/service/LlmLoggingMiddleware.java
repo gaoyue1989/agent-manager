@@ -19,13 +19,25 @@ import reactor.core.publisher.Flux;
  * LLM 调用记录中间件：通过 SDK 官方中间件扩展点 onModelCall 拦截每次模型调用，
  * 在 ModelCallEndEvent 发出时记录 请求(messages/tools) + 用量(usage) 到 LLMLogger，
  * 供 debug 页面 /debug/threads/{sessionId}/llm-calls 展示。
+ *
+ * <p>记录键必须是规范会话 id（session_user.session_id），与查询端同键，见
+ * {@code resolveSessionKey}——这是本中间件最易错的地方：Channel 链路下
+ * RuntimeContext.sessionId 是全进程共享的网关 gw-hash，直接用会让所有会话的记录
+ * 串进同一个桶，且按前端 sid 查询恒为空（issue #44）。
  */
 public class LlmLoggingMiddleware implements MiddlewareBase {
 
     private final LLMLogger llmLogger;
+    private final SessionKeyResolver sessionKeyResolver;
 
+    /** 无规范键解析（单测 / 极简装配）：退化为 RuntimeContext 原始顺序 */
     public LlmLoggingMiddleware(LLMLogger llmLogger) {
+        this(llmLogger, null);
+    }
+
+    public LlmLoggingMiddleware(LLMLogger llmLogger, SessionKeyResolver sessionKeyResolver) {
         this.llmLogger = llmLogger;
+        this.sessionKeyResolver = sessionKeyResolver;
     }
 
     @Override
@@ -57,14 +69,29 @@ public class LlmLoggingMiddleware implements MiddlewareBase {
         });
     }
 
-    /** 会话标识：优先完整 sessionId（与 /debug/threads 列表一致），缺失时回退 userId */
-    private static String resolveSessionKey(RuntimeContext ctx) {
-        var sid = ctx.getSessionId();
-        if (sid != null && !sid.isBlank()) {
-            return sid;
+    /**
+     * 记录键必须与查询端 {@code GET /threads/{sessionId}/llm-calls} 的 sid 一致，
+     * 即规范会话 id（session_user.session_id）——解析规则与口径见
+     * {@code SessionKeyResolver}：Channel 链路下 ctx.sessionId 是全进程共享的网关
+     * gw-hash，直接用它会让所有会话的记录串进同一个桶且按 sid 恒查不到（issue #44）。
+     * 两个候选都解析不出时用 "global" 汇聚，避免记录整体丢失。
+     */
+    private String resolveSessionKey(RuntimeContext ctx) {
+        if (sessionKeyResolver == null) {
+            // 无 store 的极简装配：退化为 RuntimeContext 原始顺序
+            var sid = ctx == null ? null : trimToNull(ctx.getSessionId());
+            if (sid != null) {
+                return sid;
+            }
+            var uid = ctx == null ? null : trimToNull(ctx.getUserId());
+            return uid != null ? uid : "global";
         }
-        var uid = ctx.getUserId();
-        return uid != null && !uid.isBlank() ? uid : "global";
+        var canonical = sessionKeyResolver.canonicalSessionId(ctx);
+        return canonical != null ? canonical : "global";
+    }
+
+    private static String trimToNull(String s) {
+        return s == null || s.isBlank() ? null : s;
     }
 
     /** Msg → {role, content} 简化结构，供前端弹窗直接渲染 */

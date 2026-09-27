@@ -3,7 +3,10 @@ package io.agentmanager.framework.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
@@ -141,5 +144,106 @@ class FrameworkTracingMiddlewareTest extends TracingTestBase {
         assertEquals(2, result.size());
         // doOnNext 仅副作用，不改变事件流
         assertEquals("r1", ((ModelCallEndEvent) result.get(0)).getReplyId());
+    }
+
+    // ===== issue #44 同源缺陷：span 属性必须是业务规范键，不是 RuntimeContext 原值 =====
+
+    /**
+     * Channel 链路形态：ctx.sessionId = 网关共享 gw-hash、ctx.userId = peer（前端 sid）。
+     * 记原值会让 agentscope.session.id 全进程同值、agentscope.user.id 变成会话 id，
+     * 按会话/用户过滤 trace 失效且各会话 span 互相可见。
+     */
+    @Test
+    void shouldRecordCanonicalSessionAndRealUserOnChannelLink() {
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
+        when(store.findUserIdBySession("peer-sid-1")).thenReturn("alice");
+        var middleware = new FrameworkTracingMiddleware("acme", new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("gw-3f20f08c5499");
+        when(ctx.getUserId()).thenReturn("peer-sid-1");
+
+        var tracer = io.opentelemetry.api.GlobalOpenTelemetry.getTracer("test");
+        var span = tracer.spanBuilder("invoke_agent test-agent").startSpan();
+        try (var scope = span.makeCurrent()) {
+            middleware.onAgent(mock(Agent.class), ctx, new AgentInput(List.of()),
+                i -> Flux.just(someEvent(), someEvent())).blockLast();
+        } finally {
+            span.end();
+        }
+
+        var attrs = findSpans("invoke_agent test-agent").get(0).getAttributes();
+        assertEquals("peer-sid-1",
+            attrs.get(io.opentelemetry.api.common.AttributeKey.stringKey("agentscope.session.id")));
+        assertEquals("alice",
+            attrs.get(io.opentelemetry.api.common.AttributeKey.stringKey("agentscope.user.id")));
+    }
+
+    /** A2A 链路：ctx.sessionId 已是调用方 sid、ctx.userId 已是真实用户，两个属性原样保留 */
+    @Test
+    void shouldKeepContextValuesOnA2ALink() {
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("a2a-sid-1")).thenReturn("caller");
+        var middleware = new FrameworkTracingMiddleware("acme", new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("a2a-sid-1");
+        when(ctx.getUserId()).thenReturn("real-user");
+
+        var tracer = io.opentelemetry.api.GlobalOpenTelemetry.getTracer("test");
+        var span = tracer.spanBuilder("invoke_agent test-agent").startSpan();
+        try (var scope = span.makeCurrent()) {
+            middleware.onAgent(mock(Agent.class), ctx, new AgentInput(List.of()),
+                i -> Flux.just(someEvent())).blockLast();
+        } finally {
+            span.end();
+        }
+
+        var attrs = findSpans("invoke_agent test-agent").get(0).getAttributes();
+        assertEquals("a2a-sid-1",
+            attrs.get(io.opentelemetry.api.common.AttributeKey.stringKey("agentscope.session.id")));
+        assertEquals("caller",
+            attrs.get(io.opentelemetry.api.common.AttributeKey.stringKey("agentscope.user.id")));
+    }
+
+    /**
+     * 热路径约束：解析结果 memo 在 RuntimeContext（生命周期 = 一个 turn），
+     * 多 hook / 多事件不得反复查库——事件级查库会把 span 采集变成 DB 密集型负载。
+     */
+    @Test
+    void shouldResolveOncePerRuntimeContext() {
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
+        when(store.findUserIdBySession("peer-sid-2")).thenReturn("bob");
+        var middleware = new FrameworkTracingMiddleware("acme", new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("gw-3f20f08c5499");
+        when(ctx.getUserId()).thenReturn("peer-sid-2");
+
+        // 用 map 承载 ctx 的 memo 语义（真实 RuntimeContext 也按 key 存）
+        var memoStore = new java.util.concurrent.ConcurrentHashMap<Class<?>, Object>();
+        when(ctx.get(any(Class.class))).thenAnswer(inv -> memoStore.get(inv.getArgument(0)));
+        org.mockito.Mockito.doAnswer(inv -> {
+            memoStore.put(inv.getArgument(0), inv.getArgument(1));
+            return null;
+        }).when(ctx).put(any(Class.class), any());
+
+        var tracer = io.opentelemetry.api.GlobalOpenTelemetry.getTracer("test");
+        var span = tracer.spanBuilder("invoke_agent test-agent").startSpan();
+        try (var scope = span.makeCurrent()) {
+            middleware.onAgent(mock(Agent.class), ctx, new AgentInput(List.of()),
+                    i -> Flux.just(someEvent(), someEvent(), someEvent())).blockLast();
+            middleware.onModelCall(mock(Agent.class), ctx,
+                    new ModelCallInput(List.of(), List.of(), null, mock(Model.class)),
+                    i -> Flux.just(someEvent())).blockLast();
+        } finally {
+            span.end();
+        }
+
+        // 4 个事件 + 2 个 hook，DB 反查仍只发生 2 次（每个候选各一次），后续全走 memo
+        verify(store, times(1)).findUserIdBySession("gw-3f20f08c5499");
+        verify(store, times(1)).findUserIdBySession("peer-sid-2");
     }
 }

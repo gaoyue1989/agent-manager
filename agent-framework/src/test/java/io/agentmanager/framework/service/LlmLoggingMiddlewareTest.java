@@ -151,4 +151,106 @@ class LlmLoggingMiddlewareTest {
 
         assertEquals(1, logger.getCalls("global").size());
     }
+
+    // ===== issue #44：记录键必须与 /threads/{sid}/llm-calls 的查询键一致 =====
+
+    /**
+     * Channel 链路（/threads/chat 经 ChatUiChannel 网关）：sessionId = 网关按 canonicalKey
+     * 派生的 gw-hash（同进程所有 peer 共享），前端 sid 落在 userId。
+     * 记录必须写到 userId，否则按 sid 查询恒空、且各会话记录互相串。
+     */
+    @Test
+    void shouldLogUnderPeerWhenSessionIdIsSharedGatewayHash() {
+        var logger = new LLMLogger();
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
+        when(store.findUserIdBySession("debug-user_sid-1")).thenReturn("debug-user");
+        var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("gw-3f20f08c5499");
+        when(ctx.getUserId()).thenReturn("debug-user_sid-1");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), List.of(), null, model);
+
+        middleware.onModelCall(mock(Agent.class), ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 2, 3, 0.1))))
+            .blockLast();
+
+        assertEquals(1, logger.getCalls("debug-user_sid-1").size());
+        // 共享 gw-hash 桶必须为空：否则所有会话的 prompt 串到一处
+        assertEquals(0, logger.getCalls("gw-3f20f08c5499").size());
+    }
+
+    /** A2A 链路：sessionId 已是调用方 sid（规范），即便 userId 也登记过也优先用 sessionId */
+    @Test
+    void shouldPreferSessionIdOnA2ALink() {
+        var logger = new LLMLogger();
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("a2a-sid-1")).thenReturn("caller");
+        var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("a2a-sid-1");
+        when(ctx.getUserId()).thenReturn("real-user");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), List.of(), null, model);
+
+        middleware.onModelCall(mock(Agent.class), ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 2, 3, 0.1))))
+            .blockLast();
+
+        assertEquals(1, logger.getCalls("a2a-sid-1").size());
+        assertEquals(0, logger.getCalls("real-user").size());
+    }
+
+    /** 两个候选都未登记（如 direct invoke 的 {tenant}__{tid}）：沿用 sessionId，读取侧前缀归回退仍能命中 */
+    @Test
+    void shouldKeepSessionIdWhenNeitherCandidateRegistered() {
+        var logger = new LLMLogger();
+        var store = mock(SessionUserStore.class);
+        var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("acme-test-agent__thread-1");
+        when(ctx.getUserId()).thenReturn("vendor-key");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), List.of(), null, model);
+
+        middleware.onModelCall(mock(Agent.class), ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 2, 3, 0.1))))
+            .blockLast();
+
+        assertEquals(1, logger.getCalls("acme-test-agent__thread-1").size());
+    }
+
+    /** 反查抛异常（DB 抖动）时 fail-soft 回落 sessionId，不得因记录可观测性丢一次模型调用 */
+    @Test
+    void shouldNotBreakWhenLookupThrows() {
+        var logger = new LLMLogger();
+        var store = mock(SessionUserStore.class);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenThrow(new RuntimeException("db down"));
+        when(store.findUserIdBySession("debug-user_sid-2")).thenThrow(new RuntimeException("db down"));
+        var middleware = new LlmLoggingMiddleware(logger, new SessionKeyResolver(store));
+
+        var ctx = mock(RuntimeContext.class);
+        when(ctx.getSessionId()).thenReturn("gw-3f20f08c5499");
+        when(ctx.getUserId()).thenReturn("debug-user_sid-2");
+
+        var model = mock(Model.class);
+        when(model.getModelName()).thenReturn("m");
+        var input = new ModelCallInput(List.of(), List.of(), null, model);
+
+        middleware.onModelCall(mock(Agent.class), ctx, input,
+            (i) -> Flux.just(new ModelCallEndEvent("r", new ChatUsage(1, 2, 3, 0.1))))
+            .blockLast();
+
+        assertEquals(1, logger.getCalls("gw-3f20f08c5499").size());
+    }
 }
