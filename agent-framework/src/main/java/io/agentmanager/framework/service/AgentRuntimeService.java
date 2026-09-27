@@ -661,6 +661,31 @@ public class AgentRuntimeService {
         confirmContextStore.checkAvailable(fullThreadId);
     }
 
+    /**
+     * 会话是否挂起待人工确认（ASKING）。双源任一命中即视为挂起：
+     * <ol>
+     *   <li><b>AgentState</b>（SDK 权威源）：存在 ASKING 工具即该轮仍挂起，与会话同寿命；</li>
+     *   <li><b>confirm_context</b>（兜底源）：state 尚未写入或写入失败时的待确认行。</li>
+     * </ol>
+     *
+     * <p>用途：{@code /threads/chat} 入口预检（issue #47/#48）。ASKING 态下的普通消息会被
+     * SDK 在 turn 入口拒绝（{@code doCallInner} 抛 "ASKING state ... cannot proceed"），但
+     * 拒绝原因的 error 帧与 AGENT_END 正常收尾存在时序竞态——AGENT_END 先经 endTurn
+     * &rarr; closeSession 关流，迟到的 error 帧落在已关闭 session 上被丢弃，客户端拿到零帧
+     * 空响应。入口预检直接拒绝后 SDK 路径不再触达，竞态消除。
+     *
+     * <p>fail-soft：两源读失败都按未挂起处理（放行，由 SDK 拒绝路径兜底）——可观测性降级
+     * 但不阻断对话，与 {@link SessionKeyResolver} 的降级取向一致。
+     */
+    public boolean hasPendingConfirm(String sessionId) {
+        var fullThreadId = makeThreadId(sessionId);
+        if (agentStateReader != null
+                && !agentStateReader.loadAskingSnapshot(fullThreadId, stripTenantPrefix(fullThreadId)).isEmpty()) {
+            return true;
+        }
+        return confirmContextStore.findPending(fullThreadId).isPresent();
+    }
+
     /** DB CAS 取出并标记已消费（防重复确认 → 409） */
     ConfirmContext consumeConfirmContext(String sessionId) {
         log.debug("[HITL] consumeConfirmContext: sessionId={}", sessionId);
