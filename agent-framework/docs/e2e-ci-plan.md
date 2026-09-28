@@ -103,7 +103,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 |-----|------|------|------|------|
 | `test`（已有） | — | mvn test | — | ~6min |
 | `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
-| `e2e-core` | 1 | S/F/H/M/A 组 API + U 组 UI（§5.1-5.5、§5.7-5.8） | needs: changes（与单测并行） | ~12-15min |
+| `e2e-core` | 1 | S/F/H/M/A/FW/RD 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.11） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
 | `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
@@ -129,6 +129,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | 3306 / 6379 | MySQL / Redis（services 固定映射 localhost） |
 | 8100 | 被测入口：core/sandbox job = 实例本体；multi job = nginx LB |
 | 8101 / 8102 | multi job 两副本 |
+| 8110 / 8111 / 8112 | describe 级 spawnSync 第二实例（MEM 记忆关断 +10 / RD Redis 前缀隔离 +11 / FW3 Flyway 升级路径 +12）；env `E2E_MEMOFF_PORT` / `E2E_RD_PREFIX_PORT` 可覆盖 |
 | 18081 / 18082 / 8813 | mock LLM / bench MCP / approval MCP（沿用 bench 与 example 既有端口约定） |
 | 8090 | mock OpenSandbox 管理口（仅 sandbox job） |
 | 41000-41099 | mock OpenSandbox 每沙箱 execd 代理端口池（仅 sandbox job；上限 100 个并发虚拟沙箱，远超用例需要） |
@@ -457,6 +458,58 @@ agent-config/
 
 > 断言数随 issue 演进：初版 12 断言 → issue #39 后 30 断言（`sdkInternal` 相关 +6）。
 > 插件更新需重启才生效（类卸载限制），故 P5 只验证 Agent 重建后**框架侧**存活，不验证热加载插件。
+
+### 5.10 FW 组 — /threads slot 双形态匹配与 Flyway（e2e-core；2026-09-29 补录）
+
+> **2026-09-29 补录**：76e0e74 把 ThreadController 的列表两 SQL、getThread 元信息、deleteBySessionId
+> 匹配从 `= ? OR LIKE CONCAT(?, ':%')` 换成 SUBSTRING_INDEX 冒号前/后段双向匹配（AGENT_STATE_JOIN，
+> ThreadController.java:58-60），修复规范形态槽位 `{userId}:{sid}` 匹配落空（详情 updated_at 退化、
+> 删除留孤儿行）——但 S7 对此零断言。V6 存量回填（V6__backfill_session_user_from_agent_state.sql）
+> 的三道守卫与 baseline-version=5 升级路径同样零覆盖。契约权威：`ThreadController#AGENT_STATE_JOIN`
+> 与 `db/migration/V6__backfill_session_user_from_agent_state.sql`。DB 直查走 mysql2
+>（`lib/archive-seed.ts` 同款连接方式与地址解析顺序）；FW3 复用 MEM 组第二实例编排
+>（`scripts/start-agent.sh`，端口 BASE+12 避开 MEM(+10)/multi(+1/+2)）。
+> 配套基建修复（同变更）：`e2e/scripts/reset-data.mjs` TABLES 清单补 `agui_interrupt`（V2 引入、
+> 此前漏清）——漏清使复用库第二轮 env-up 走「schema 非空 + 历史表缺失」baseline(5) 路径，
+> V6 因 session_user 被 DROP 而失败、主实例启动死亡（CI fresh services 不受影响，本地二轮起必踩）。
+
+| # | 场景 | 步骤 | 断言 |
+|---|------|------|------|
+| FW1 | A2A 规范槽位（`{userId}:{sid}`）列表/详情可见、删除无孤儿行 | A2A `message/send` 带 run 级唯一 userId/sessionId → DB 直查 agent_state 末段臂含精确 `{uid}:{sid}` 槽位 → GET /threads 列表含 sid → GET /threads/{sid} 详情 → DELETE → 列表移除（S7 同款权威信号） | 详情 updated_at 非空且 user_id===uid（旧 LIKE 前缀实现对规范槽位恒 ''，回退旧实现仅被本用例钉）；删除后详情 updated_at==='' 且 agent_state 双臂命中 sid 计数===0（孤儿行残留即红） |
+| FW2 | 老 Channel 形态槽位（`{peer}:{gw-hash}`）SQL 直插种子 | 直插 session_user + agent_state 行（state_data 不含 $.session_id/$.user_id，V6 形状条件恒跳过；两轨 updated_at 时间戳刻意错开）→ GET /threads?userId=uid → GET /threads/{peer} 详情 → DELETE → 列表移除 | 列表/详情 updated_at 取自 agent_state 轨 toContain 种子值（冒号前段臂被删 → LEFT JOIN 落空 → updated_at 空串即红；回退旧 LIKE 前缀钉不住本用例——LIKE 恰命中老形态，该回归归 FW1）；user_id===uid；删除后列表/详情/agent_state/session_user 四面无残留 |
+| FW3 | V6 存量回填 + baseline-on-migrate 升级路径（MEM 组同款第二实例） | beforeAll 直插 5 行规范形态 agent_state 种子（正例 `{uidPos}:{sidPos}` + V6:50 守卫 `{uidNoSid}:unknown` + V6:49 守卫 `unknown:{sidNoUid}` + V6:51 守卫同 sid 双 uid 一对）→ DROP flyway_schema_history → spawnSync `start-agent.sh fwv6 <BASE+12>` → 对第二实例断言 + DB 查 flyway_schema_history → afterAll kill + 清种子/回填行 | 正例入列且 updated_at 溯源 agent_state（末段臂 JOIN）；三守卫行均不入列（对应守卫被删时该行入列、在对应用户视图可见即红）；历史表 version 恰为 `['5','6']` 且全 success（baseline-version 被抬高 → V6 静默跳过形态在此红） |
+
+> 不覆盖（有意）：V6 INSERT IGNORE 幂等重跑（历史表已含 version=6 时二次启动无迁移可跑，黑盒无从与
+> "守卫正确"区分）；flyway checksum 破坏（被 env-up wait-ready 隐式拦截）；deleteBySessionId 的
+> agent_fs 分支静默失效（ThreadController.java:467-471 对无 session_id 列的 agent_fs 执行 DELETE、
+> 异常被吞，先于 76e0e74 的既有行为，超出缺口范围）；"全新库 Flyway 重建即服务可用"由既有套件
+> 隐式强覆盖（迁移不执行 → turn_lease 缺失 → 所有聊天流不收敛 → S2 起整组红），不另设用例。
+
+### 5.11 RD 组 — Redis 前缀隔离（e2e-core；2026-09-29 补录）
+
+> **2026-09-29 补录**：d31cd93 新增 agent.redis.mode/cluster-nodes/prefix（env
+> AGENT_REDIS_MODE/CLUSTER_NODES/PREFIX）与 RedisConnectionFacade 统一连接门面——多 Agent 共用
+> oaf-redis 时前缀切分 sess:*/sbx:guard:* key（docs/redis-cluster-prefix-design.md §1），此前 e2e
+> 对 AGENT_REDIS_* 零命中，前缀隔离无双实例行为级用例（R 组多副本是「无前缀同命名空间共享」语义，
+> 恰反向）。行为依据：RedisEventLog eventsKey/repliesKey（facade.key 前缀）与
+> RedisSandboxExecutionGuard 同源。编排仿 MEM 组：describe 级 spawnSync 起前缀实例
+>（start-agent.sh 的 `VAR=val nohup java` 不清空父环境，AGENT_REDIS_PREFIX 透传生效；端口 BASE+11，
+> env E2E_RD_PREFIX_PORT 可覆盖）。前缀只切 Redis key——共享 MySQL 的 history/threads 列表面
+> 【不】隔离是设计内语义，用例刻意只断言 Redis 支撑的 /status 与 /subscribe 面。
+
+| # | 场景 | 步骤 | 断言 |
+|---|------|------|------|
+| RD1 | 同 Redis 双实例前缀隔离：事件流与断线续传互不可见 | turn1 落默认实例（无前缀）记 aSeq → 前缀实例 status 必 idle/0 → 前缀实例 subscribe 空关流 → turn2 同 sessionId+userId 落前缀实例记 bSeq → 双向 subscribe 全量回放对账 | 双方 chat 均 done；status@前缀（turn2 前）state=idle 且 latest_event_seq=0（前缀失效读到 A 的流即红，决定性断言）；空流订阅业务帧 0 条；双向回放 seq 单调、末帧 done、业务帧 max seq 精确 ===aSeq / ===bSeq（串流即溢出，无阈值余量依赖）；终查 status@默认仍 aSeq |
+| RD2 | 删除会话前缀互不影响：DELETE 只清本实例命名空间 | 同 sid+userId 双实例各一 turn 记 aSeq/bSeq → 前缀实例 DELETE → 默认实例 DELETE | DELETE 返回 200；前缀侧 latest_event_seq 归 0（己方流已清）；默认侧 state=completed 且 latest_event_seq 仍 aSeq（deleteSession 未走前缀、波及对方流即红）、subscribe 回放完整 maxSeq===aSeq；反向删除后默认侧归 0（双向语义闭环） |
+| RD3 | 前缀配置生效直证：门面启动日志 prefix 字段（含冒号规范化与对照组） | 读 `.runtime/logs/agent-rdpfx.log` 与 `agent-a.log`（RedisConnectionFacade.create standalone 摘要行；MEM3 同款日志直证手法） | rdpfx 日志含 `RedisClient configured`、`mode=standalone`、`prefix="e2e-isolated:"`（normalizedPrefix 自动补冒号契约）；agent-a 日志含 `prefix=""`（默认实例零前缀对照，防前缀 env 泄漏进主实例） |
+
+> 不覆盖（有意）：沙箱守卫族（sbx:guard:*）前缀行为——守卫仅 SANDBOX_ENABLED=true 激活（core 组
+> 两实例均 sandbox=false）且 wall-clock 时序断言 flaky，前缀施加机制已由单测
+> RedisConnectionFacadeTest（sess:/sbx:guard: 两族 key 拼接）+ RD1/RD2 行为级（同一门面 key() 入口）
+> 三层覆盖；cluster 模式——e2e 基础设施为单节点 standalone Redis，无集群夹具不可黑盒（单测
+> AgentRedisPropertiesTest/RedisConnectionFacadeTest + 真 Redis IT 覆盖）；AGENT_REDIS_PREFIX 非法值
+> 启动失败负例——校验在紧凑构造器单测已覆盖，e2e 侧一条负例烧约 95s（wait-ready 不感知进程死亡）
+> 不值；f4db8ca Channel 链路 userKey 反查——X15/X9 已持续看守（api-sandbox.spec.ts）。
 
 ---
 
