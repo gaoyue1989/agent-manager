@@ -8,14 +8,13 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.agentmanager.framework.config.AgentRedisProperties;
+import io.agentmanager.framework.redis.RedisConnectionFacade;
 import io.lettuce.core.Range;
-import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisCommandTimeoutException;
 import io.lettuce.core.RedisConnectionException;
@@ -23,7 +22,8 @@ import io.lettuce.core.RedisException;
 import io.lettuce.core.RedisFuture;
 import io.lettuce.core.XAddArgs;
 import io.lettuce.core.ZAddArgs;
-import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
+import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
 import io.lettuce.core.Limit;
 
 /**
@@ -80,13 +80,6 @@ public class RedisEventLog {
     /** 到顶时的报错原文（noeviction 下的写入失败） */
     private static final String ERR_OOM = "OOM command not allowed";
 
-    /**
-     * 建连失败后的退避窗口（毫秒）。Redis 不可达时，若每次操作都去 connect，
-     * 每次都会阻塞到 connectTimeout（默认 2s）——等于把 Redis 的故障放大成
-     * 「每条 append 卡 2 秒」。窗口内的调用立刻抛上一次的异常，不再尝试建连。
-     */
-    private static final long CONNECT_BACKOFF_MS = 1000;
-
     /** 带序号的一条事件（ID 由 seq 决定） */
     public record Entry(int seq, String type, String replyId, String payload) {}
 
@@ -96,88 +89,72 @@ public class RedisEventLog {
     /** 一个 reply 的首个 seq（ZSET 索引项） */
     public record ReplyBoundary(String replyId, int firstSeq) {}
 
-    private final RedisClient client;
+    private final RedisConnectionFacade facade;
     private final int maxLenPerStream;
     private final long commandTimeoutMs;
 
-    /** 惰性连接：启动时不建连，所以 Redis 可达与否不影响服务启动 */
-    private volatile StatefulRedisConnection<String, String> conn;
-
-    /** 自检只跑一次（成功才置位，见 {@link #selfCheck}） */
+    /** 持久性自检只跑一次（成功才置位，经门面首连钩子触发，见 {@link #selfCheck}） */
     private final AtomicBoolean selfChecked = new AtomicBoolean(false);
 
-    /** 上一次建连失败的原因（退避窗口内直接复用它抛出，避免造 Lettuce 异常对象） */
-    private final AtomicReference<RedisException> lastConnectFailure = new AtomicReference<>();
-    private volatile long lastConnectFailureAt = 0L;
-
-    public RedisEventLog(RedisClient client, AgentRedisProperties props) {
-        this.client = client;
+    public RedisEventLog(RedisConnectionFacade facade, AgentRedisProperties props) {
+        this.facade = facade;
         this.maxLenPerStream = props.maxLenPerStream();
         this.commandTimeoutMs = props.commandTimeoutMs();
+        // 自检经门面首连钩子触发：建连逻辑（含退避）已收拢到 RedisConnectionFacade，
+        // 本类只保留「自检语义」本身（只告警不 abort、失败不置位下次重试）
+        facade.onFirstConnect(this::selfCheck);
     }
 
-    static String eventsKey(String sessionId) {
-        return "sess:" + sessionId + ":events";
+    /**
+     * key 组装：统一走门面前缀；cluster 模式下 sid 加 hash tag。
+     *
+     * <p><b>cluster hash tag 的必要性</b>：appendBatch 的管道依赖「ZADD 索引先于 XADD 数据」
+     * 的顺序保证（见 appendBatch 注释）。cluster 连接上发往不同 slot 的命令走不同节点连接，
+     * 跨节点无顺序保证，该不变量会失效——把 sid 用 {@code {...}} 包成 hash tag，让
+     * {@code sess:{sid}:events} 与 {@code sess:{sid}:replies} 必落同一 slot / 同一节点，
+     * 管道序恢复成立。standalone 模式保持原 key 名（存量数据零迁移；滚动升级时活跃会话
+     * 的回放不中断）。**对 API 无影响**：key 名不出现在任何响应里，事件对象只带
+     * seq/type/payload/replyId，游标（seq）语义不变。
+     */
+    // 包级可见：RedisEventLogIT 直接读 key TTL/长度，key 形态（前缀 + hash tag）本身就是断言对象
+    String eventsKey(String sessionId) {
+        var sid = facade.isClusterMode() ? hashTag(sessionId) : sessionId;
+        return facade.key("sess:" + sid + ":events");
     }
 
-    static String repliesKey(String sessionId) {
-        return "sess:" + sessionId + ":replies";
+    String repliesKey(String sessionId) {
+        var sid = facade.isClusterMode() ? hashTag(sessionId) : sessionId;
+        return facade.key("sess:" + sid + ":replies");
+    }
+
+    /** {@code sid} → {@code {sid}}（Redis hash tag，cluster 模式专用） */
+    private static String hashTag(String sessionId) {
+        return "{" + sessionId + "}";
     }
 
     // ---------------------------------------------------------------- 连接
 
-    /**
-     * 取连接，必要时建连（并在建连成功后跑一次自检）。
-     *
-     * <p>{@code ClientOptions.disconnectedBehavior(REJECT_COMMANDS)} 保证**已建立**的连接
-     * 在断线期间立刻让命令失败，而不是缓冲到重连成功。
-     */
-    private StatefulRedisConnection<String, String> connection() {
-        var c = conn;
-        if (c != null && c.isOpen()) {
-            return c;
-        }
-        synchronized (this) {
-            if (conn != null && conn.isOpen()) {
-                return conn;
-            }
-            var failure = lastConnectFailure.get();
-            if (failure != null
-                    && System.currentTimeMillis() - lastConnectFailureAt < CONNECT_BACKOFF_MS) {
-                throw failure;   // 退避窗口内：立刻失败，不阻塞调用线程
-            }
-            try {
-                var fresh = client.connect();
-                conn = fresh;
-                lastConnectFailure.set(null);
-                selfCheck(fresh);
-                return fresh;
-            } catch (RedisException e) {
-                lastConnectFailure.set(e);
-                lastConnectFailureAt = System.currentTimeMillis();
-                throw e;   // RedisException 是非受检异常，调用方无需声明
-            }
-        }
-    }
+    // 建连、退避、自检调度已整体迁入 RedisConnectionFacade（守卫与事件日志共享一份逻辑），
+    // 本类经 sync()/async() 取命令视图即可。
 
     /**
      * 启动自检：{@code appendonly} 与 {@code maxmemory-policy} 是否合规。
      *
      * <p><b>只告警，绝不 abort。</b>两者都是客户端设不了的运维面配置，与仓库既有的
-     * 「响亮跳过」取向一致：说清后果，交人工处置。
+     * 「响亮跳过」取向一致：说清后果，交人工处置。由 {@link RedisConnectionFacade}
+     * 的首连钩子触发（首次连接成功之后，报错才可信）。
      *
-     * <p>放在**首次连接成功之后**而不是构造期：构造期连不上就没得查，且会让启动
-     * 卡一个 connectTimeout。这样只有真能跟 Redis 说话时才自检，报错也才可信。
-     *
-     * <p>失败时**不置位** {@code selfChecked}，留给下一次调用重试；成功才置位——
+     * <p>失败时**不置位** {@code selfChecked}，留给下一次建连重试；成功才置位——
      * 否则一次瞬时抖动就永久失去这次自检。
+     *
+     * <p>cluster 模式下 CONFIG GET 只反映被路由到的单节点——自检是 advisory 日志，
+     * 节点级结论可接受。
      */
-    private void selfCheck(StatefulRedisConnection<String, String> c) {
+    private void selfCheck(RedisClusterCommands<String, String> sync) {
         if (selfChecked.get()) {
             return;
         }
         try {
-            var sync = c.sync();
             var appendonly = sync.configGet("appendonly").get("appendonly");
             var policy = sync.configGet("maxmemory-policy").get("maxmemory-policy");
             // 三条都以「RedisEventLog: 持久性自检」开头：运维可直接 grep 这一个前缀拿到结论，
@@ -231,7 +208,7 @@ public class RedisEventLog {
         }
         List<RedisFuture<?>> futures = new ArrayList<>(entries.size() + 4);
         try {
-            var async = connection().async();
+            RedisClusterAsyncCommands<String, String> async = facade.async();
             var events = eventsKey(sessionId);
             var replies = repliesKey(sessionId);
 
@@ -370,7 +347,8 @@ public class RedisEventLog {
      */
     public List<Event> range(String sessionId, int fromSeq, Integer toSeqInclusive, int limit) {
         var upper = toSeqInclusive != null ? toSeqInclusive + "-0" : "+";
-        var msgs = connection().sync().xrange(
+        RedisClusterCommands<String, String> sync = facade.sync();
+        var msgs = sync.xrange(
             eventsKey(sessionId),
             Range.create(fromSeq + "-0", upper),
             Limit.from(limit));
@@ -386,7 +364,7 @@ public class RedisEventLog {
         // Range.unbounded() 是 XREVRANGE 的正确写法。
         // **不要**写成 Range.create("+", "-")——实测返回空列表（不是报错，是静默返回空），
         // 而这个静默空值会让 tailSeq 恒为 0、seq 从 1 重发、之后每条 XADD 全被拒。
-        var msgs = connection().sync().xrevrange(
+        var msgs = facade.sync().xrevrange(
             eventsKey(sessionId), Range.unbounded(), Limit.from(1));
         return msgs.isEmpty() ? null : toEvent(msgs.get(0));
     }
@@ -409,7 +387,7 @@ public class RedisEventLog {
      * {@code GROUP BY reply_id ORDER BY MIN(seq)}。
      */
     public List<ReplyBoundary> replies(String sessionId) {
-        var scored = connection().sync().zrangeWithScores(repliesKey(sessionId), 0, -1);
+        var scored = facade.sync().zrangeWithScores(repliesKey(sessionId), 0, -1);
         var out = new ArrayList<ReplyBoundary>(scored.size());
         for (var sv : scored) {
             out.add(new ReplyBoundary(sv.getValue(), (int) sv.getScore()));
@@ -417,10 +395,24 @@ public class RedisEventLog {
         return out;
     }
 
-    /** 删除该 session 的全部 key（级联删除用）。返回删除的 key 数。 */
+    /**
+     * 删除该 session 的全部 key（级联删除用）。返回删除的 key 数。
+     *
+     * <p>**两次单 key DEL，不合并**：cluster 下多 key 命令要求所有 key 同 slot（CROSSSLOT）。
+     * standalone 模式 key 无 hash tag，两个 key 几乎必然不同 slot；即便 cluster 模式加了
+     * hash tag 也不依赖它——两次单 key DEL 在任何模式下都合法。
+     */
     public int deleteSession(String sessionId) {
-        var n = connection().sync().del(eventsKey(sessionId), repliesKey(sessionId));
-        return n != null ? n.intValue() : 0;
+        int n = 0;
+        var d1 = facade.sync().del(eventsKey(sessionId));
+        var d2 = facade.sync().del(repliesKey(sessionId));
+        if (d1 != null) {
+            n += d1;
+        }
+        if (d2 != null) {
+            n += d2;
+        }
+        return n;
     }
 
     /**

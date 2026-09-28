@@ -8,10 +8,9 @@ import org.slf4j.LoggerFactory;
 import io.agentscope.harness.agent.sandbox.SandboxExecutionGuard;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
 import io.agentscope.harness.agent.sandbox.SandboxLease;
-import io.lettuce.core.RedisClient;
+import io.agentmanager.framework.redis.RedisConnectionFacade;
 import io.lettuce.core.RedisException;
 import io.lettuce.core.SetArgs;
-import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.ScriptOutputType;
 
 /**
@@ -39,31 +38,31 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
 
     private static final long RETRY_INTERVAL_MS = 200;
 
-    private final RedisClient redisClient;
-    private final long leaseTtlMs;
-    private final String keyPrefix;
+    /** 裸 key 的固定段（实际 key = facade.key(前缀 + scope + value)，前缀由门面统一追加） */
+    private static final String GUARD_PREFIX = "sbx:guard";
 
-    /** 惰性连接：Redis 可达与否不影响服务启动（与 RedisEventLog 同款策略） */
-    private volatile StatefulRedisConnection<String, String> conn;
+    private final RedisConnectionFacade facade;
+    private final long leaseTtlMs;
 
     /** fail-open 限流：上次告警时间戳，60s 内不重复刷屏 */
     private volatile long lastFailOpenWarnAt = 0L;
 
-    public RedisSandboxExecutionGuard(RedisClient redisClient, String keyPrefix, long leaseTtlMs) {
-        this.redisClient = redisClient;
-        this.keyPrefix = keyPrefix;
+    public RedisSandboxExecutionGuard(RedisConnectionFacade facade, long leaseTtlMs) {
+        this.facade = facade;
         this.leaseTtlMs = leaseTtlMs;
     }
 
     @Override
     public SandboxLease tryEnter(SandboxIsolationKey key) throws InterruptedException {
-        String redisKey = keyPrefix + ":" + key.getScope().name().toLowerCase() + ":" + key.getValue();
+        // 多 Agent 共用 oaf-redis 时 sbx:guard:user:{uid} 会跨服务互锁——agent.redis.prefix
+        // 经 facade.key() 统一切分（本类的旧构造器注入 keyPrefix 的职责已并入门面）
+        String redisKey = facade.key(GUARD_PREFIX + ":"
+            + key.getScope().name().toLowerCase() + ":" + key.getValue());
         String token = UUID.randomUUID().toString();
         var args = SetArgs.Builder.nx().px(leaseTtlMs);
         while (true) {
             try {
-                var c = connection();
-                String resp = c.sync().set(redisKey, token, args);
+                String resp = commands().set(redisKey, token, args);
                 if ("OK".equals(resp)) {
                     return new RedisLease(redisKey, token);
                 }
@@ -76,17 +75,12 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
         }
     }
 
-    private StatefulRedisConnection<String, String> connection() {
-        var c = conn;
-        if (c != null && c.isOpen()) {
-            return c;
-        }
-        synchronized (this) {
-            if (conn == null || !conn.isOpen()) {
-                conn = redisClient.connect();
-            }
-            return conn;
-        }
+    /**
+     * 同步命令视图经门面取（惰性建连 + 建连退避已收拢在门面，与 RedisEventLog 共享一份逻辑）。
+     * SET/Lua EVAL 都是单 key 命令，standalone 与 cluster 连接的 sync 视图同源。
+     */
+    private io.lettuce.core.cluster.api.sync.RedisClusterCommands<String, String> commands() {
+        return facade.sync();
     }
 
     private void failOpen(String redisKey, Exception cause) {
@@ -111,8 +105,7 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
         @Override
         public void close() {
             try {
-                var c = connection();
-                c.sync().eval(RELEASE_LUA, ScriptOutputType.INTEGER, new String[]{redisKey}, token);
+                commands().eval(RELEASE_LUA, ScriptOutputType.INTEGER, new String[]{redisKey}, token);
             } catch (RedisException e) {
                 // 释放失败无害：TTL 到期自愈，仅记录
                 log.info("Sandbox guard lease release failed (TTL will recover): key={}, cause={}",
