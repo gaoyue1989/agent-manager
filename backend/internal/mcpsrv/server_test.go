@@ -169,6 +169,16 @@ func TestMCPPublishFlowAndReservedKey(t *testing.T) {
 	}
 	svcID := uint(out["serviceId"].(float64))
 
+	// 等待异步 waiter 推进到终态（fake 集群不可达 → deploy_failed）：
+	// UpdateEnv 拒绝 deploying 状态，顺序调用与异步推进存在窗口竞态（CI 实测 flake）
+	for i := 0; i < 50; i++ {
+		_, out, _ = call(t, cs, "get_service_status", map[string]any{"serviceId": svcID})
+		if out["status"] == "deploy_failed" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	isErr, out, _ = call(t, cs, "get_service_status", map[string]any{"k8sName": "oaf-acme-demo"})
 	if isErr || out["status"] == "" {
 		t.Fatalf("get_service_status by k8sName: %v", out)
