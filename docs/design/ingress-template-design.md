@@ -90,5 +90,5 @@ overlay 支持每服务占位符（发布期替换，保证单文件模板服务
 - 2026-09-28：设计定稿并实施（分支 `feat/ingress-template`，PR #59）。
   - 单测：`cd backend && make test` 全绿；新增 IngressBuilder SMP 语义/不变量（含 defaultBackend、pathType 缺失）/Endpoint 派生/启动探针用例，Publish endpoint 跟随模板、违规不落库、Republish 回写用例。
   - e2e：`e2e/platform-e2e.sh` 50/50 PASS（platform-backend:v6 部署后实跑）。
-  - 部署：`platform-backend:v6` 已在 kind 集群 rollout（未设置 INGRESS_TEMPLATE，现网行为不变）。
+  - 部署：`platform-backend:v7`（合并后 master）已在 kind 集群 rollout（未设置 INGRESS_TEMPLATE，现网行为不变）；随后完成**部署后功能验证**：验证 overlay（host=verify.example.com + path=/verify-agent）下发布 → Ingress 对象形态/Endpoint 派生/经模板 host+path 真实拉取 agent-card 200/旧路径 404 全过，违规 overlay 发布被拒且不落库，Republish 换 host 后 endpoint 与 Ingress 同步回写、新 host 流量 200；验证后回滚模板配置零残留，platform-e2e.sh 复跑 50/50。
   - CR（独立评审）：P1 defaultBackend 归属唯一绕过 + P2（pathType 缺失不拦、rule-host 用例空洞、探针 class 与配置同参、host 自带端口偏差说明）当轮修复；文档三处（根/backend AGENTS.md、deployment.md §七）随 PR 提交。
