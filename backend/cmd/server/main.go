@@ -59,12 +59,6 @@ func main() {
 		PackageDownloadBase: cfg.PackageDownloadBase,
 	})
 
-	// 平台默认配置对象兜底：空配置也创建空 CM/Secret，
-	// 保证业务 Deployment envFrom 引用永不 CreateContainerConfigError
-	if err := core.EnsurePlatformObjects(); err != nil {
-		log.Fatalf("platform default config objects: %v", err)
-	}
-
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())

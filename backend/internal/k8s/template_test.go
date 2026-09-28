@@ -139,8 +139,8 @@ spec:
 			if c.Image != "agent-framework:latest" {
 				t.Fatal("agent image must stay")
 			}
-			if len(c.EnvFrom) != 4 {
-				t.Fatal("agent envFrom must stay (4 sources)")
+			if len(c.EnvFrom) != 2 {
+				t.Fatal("agent envFrom must stay (2 sources)")
 			}
 		}
 	}

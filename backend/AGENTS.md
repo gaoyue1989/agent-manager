@@ -48,15 +48,15 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 
 ## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
 
-**敏感键一律走 K8s Secret，不进 ConfigMap/env_json；非敏感默认配置走平台级 ConfigMap**。设计见 [../docs/design/platform-default-config-secret-design.md](../docs/design/platform-default-config-secret-design.md)。
+**敏感键一律走 K8s Secret，不进 ConfigMap/env_json；平台默认配置仅作为发布/编辑 env 时的表单默认填入，不经运行时注入、不影响任何已发布服务**。设计见 [../docs/design/platform-default-config-secret-design.md](../docs/design/platform-default-config-secret-design.md)（R3 修订为最终形态）。
 
-- **字段模板**（`internal/service/platformconfig/template.go`，全仓唯一字段定义源）：分组 llm/mysql/redis/sandbox；`Sensitive` 标记驱动平台 CM/Secret 拆分渲染、服务 env 路由分类、页面掩码。`SANDBOX_ENABLED` 明确排除（保护 OAF 包 frontmatter 三层裁决）
-- **五层 env 优先级**：保留键（显式 env）＞ 服务 Secret `{name}-env-secret` ＞ 服务 CM `{name}-env` ＞ 平台 Secret `oaf-platform-default-secret` ＞ 平台 CM `oaf-platform-default-config`（Deployment envFrom 四源按此顺序，K8s 多源同键后引用者覆盖先引用者）
-- **命名规则**：平台对象名不得以 `-env`/`-env-secret` 结尾（服务 CM/Secret 名恒为 `{k8sName}-env(-secret)`，防同类型同名碰撞）
-- **服务 env 路由**（`internal/service/envroute.go`）：发布/PATCH env 中命中模板 Sensitive 或 `secretKeys` 的键路由进 `services.env_secret_json` + 服务 Secret，绝不写 env_json/CM；敏感键三态——非空=设置、空串=删除（回落平台默认）、缺失=sticky 保持不变；旧 env_json 中的存量敏感键在任意写路径自动迁入 Secret（防丢失规则）
-- **平台配置 API**：`GET/PUT /api/v1/platform-config`（PUT 部分更新：出现=设置、空串=删除、缺失=不变；未知键 400；清除必填键 400；敏感值永不回明文仅 hasValue）、`POST /api/v1/platform-config/apply-restart`（重刷 Deployment spec + 滚动重启 running/register_failed 服务，一步带上四源 envFrom 与最新默认值）
-- **Ensure 时机**：平台 CM/Secret 于 backend 启动（空配置建空对象防 CreateContainerConfigError）、保存后、每次 applyAll 前幂等兜底；服务 Secret 随 publish 创建（无敏感键为空对象）；Delete 连带清理服务 Secret，平台对象不受服务删除影响
-- **RBAC**：platform-backend Role 已加 secrets `get/list/create/update`（manifests/platform.yaml）；overlay 不变量新增：envFrom 四源引用必须保留（template.go）
+- **字段模板**（`internal/service/platformconfig/template.go`，全仓唯一字段定义源）：分组 llm/mysql/redis/sandbox；`Sensitive` 标记驱动服务 env 路由分类与页面掩码。`SANDBOX_ENABLED` 明确排除（保护 OAF 包 frontmatter 三层裁决）
+- **envFrom 两源**：容器 envFrom = 服务 Secret `{name}-env-secret`（敏感，在前）+ 服务 CM `{name}-env`（非敏感，在后可覆盖）；无平台级注入
+- **默认填入语义（R3）**：平台默认配置只存 DB（`platform_config` 表），`GET /platform-config` 展示视图敏感键掩码，`GET /platform-config/defaults` 返回含敏感明文的平面键值表专供表单预填；发布向导预填 defaults，详情页「填入平台默认」补缺失键（显式保存才生效）；改默认配置不影响存量服务
+- **服务 env 路由**（`internal/service/envroute.go`）：发布/PATCH env 中命中模板 Sensitive 或 `secretKeys` 的键路由进 `services.env_secret_json` + 服务 Secret，绝不写 env_json/CM；敏感键三态——非空=设置、空串=删除、缺失=sticky 保持不变；旧 env_json 中的存量敏感键在任意写路径自动迁入 Secret（防丢失规则）
+- **平台配置 API**：`GET/PUT /api/v1/platform-config`（PUT 部分更新：出现=设置、空串=删除、缺失=不变；未知键 400；清除必填键 400；展示视图敏感值永不回明文）、`GET /api/v1/platform-config/defaults`（预填数据源）
+- **服务 Secret 生命周期**：publish 创建（无敏感键为空对象）；Delete 连带清理（RBAC secrets `get/list/create/update/delete`，delete 仅此路径使用）；Unpublish 保留
+- **RBAC**：platform-backend Role 含 secrets `get/list/create/update/delete`（manifests/platform.yaml）；overlay 不变量：envFrom 两源引用必须保留（template.go）
 - MCP：`publish_service`/`update_service_env` 自动继承路由（`UpdateEnvIn` 增 `secretKeys`）；`get/update_platform_config` 工具为 P2
 
 ## 包在线预览与编辑（package_version.go + fs.go 扩展）

@@ -74,6 +74,26 @@ export default function ServiceDetailPage() {
     }
   };
 
+  // 填入平台默认（R3）：把默认配置中服务尚未配置的键追加为可编辑行，显式保存后才生效；
+  // 不点保存则服务 env 保持原样（平台配置变更不影响存量服务）
+  const fillDefaults = async () => {
+    try {
+      const [cfg, dflt] = await Promise.all([api.getPlatformConfig(), api.getPlatformDefaults()]);
+      const sensitive = new Set(cfg.groups.flatMap((g) => g.fields.filter((f) => f.sensitive).map((f) => f.envKey)));
+      const existing = new Set([...envRows.map((r) => r.key), ...secretRows.map((r) => r.key)].filter(Boolean));
+      const entries = Object.entries(dflt.values).filter(([k]) => !existing.has(k));
+      if (entries.length === 0) { setMsg("平台默认配置的键均已存在，无需填入"); return; }
+      const newPlain = entries.filter(([k]) => !sensitive.has(k)).map(([key, value]) => ({ key, value }));
+      const newSecret = entries.filter(([k]) => sensitive.has(k)).map(([key, value]) => ({ key, value, del: false }));
+      if (newPlain.length) setEnvRows((rows) => [...rows, ...newPlain]);
+      if (newSecret.length) setSecretRows((rows) => [...rows.filter((r) => r.key.trim()), ...newSecret]);
+      setEnvDirty(true); setSecretDirty(true);
+      setMsg(`已填入 ${entries.length} 项平台默认值，请检查后点「保存并滚动重启」生效`);
+    } catch (e: any) {
+      setMsg(`填入失败: ${e.message}`);
+    }
+  };
+
   const saveEnv = async () => {
     const env: Record<string, string> = {};
     const secretKeys: string[] = [];
@@ -181,6 +201,8 @@ export default function ServiceDetailPage() {
         <div className="flex items-center justify-between mb-2">
           <h2 className="font-medium">环境变量</h2>
           <div className="space-x-2">
+            <button onClick={fillDefaults} data-testid="detail-fill-defaults"
+              className="text-xs px-2 py-1 border rounded hover:bg-gray-100">填入平台默认</button>
             <button onClick={() => { setEnvRows([...envRows, { key: "", value: "" }]); setEnvDirty(true); }}
               data-testid="detail-add-env" className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加变量</button>
             <button onClick={saveEnv} disabled={savingEnv} data-testid="save-env-btn"

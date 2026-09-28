@@ -1,7 +1,7 @@
 "use client";
-// 平台默认配置：全部业务 agent 共享的 redis/mysql/llm/sandbox 兜底配置。
-// 敏感键（模板 Sensitive）存 K8s Secret、页面掩码（留空=保持不变）；非敏感键存 ConfigMap。
-// 保存后需"滚动重启运行中服务"才对存量服务生效（env 为启动期绑定）。
+// 平台默认配置：作为「发布新服务 / 编辑 env」时的表单默认填入（R3 语义）。
+// 修改默认配置不影响任何已发布服务——服务只携带自己发布/编辑时显式确认的 env；
+// 敏感键（模板 Sensitive）在展示视图掩码，经发布页/详情页填入后落服务 Secret。
 // 设计见 docs/design/platform-default-config-secret-design.md
 import { useCallback, useEffect, useState } from "react";
 import { api, PlatformConfigField, PlatformConfigView } from "@/lib/api";
@@ -41,7 +41,7 @@ export default function SettingsPage() {
     return values;
   };
 
-  const save = async (restart: boolean) => {
+  const save = async () => {
     if (!view) return;
     // 清除非敏感必填键需确认（后端同样校验清除必填键直接 400）
     const clearing = (view.groups ?? []).flatMap((g) => g.fields)
@@ -51,18 +51,7 @@ export default function SettingsPage() {
     setMsg("");
     try {
       await api.updatePlatformConfig(buildValues()!);
-      if (restart) {
-        if (!confirm("将滚动重启全部运行中的服务（配置重启后才生效），确定？")) {
-          setMsg("已保存配置，未重启服务");
-          await load();
-          return;
-        }
-        const res = await api.applyRestartPlatformConfig();
-        setMsg(`已保存并触发重启：${res.restarted.length} 个服务` +
-          (res.skipped.length ? `，跳过 ${res.skipped.length} 个（${res.skipped.map((s) => s.name || s.id).join("、")}）` : ""));
-      } else {
-        setMsg("已保存。新发布服务自动生效；运行中服务需滚动重启后生效");
-      }
+      setMsg("已保存。默认值将在下次发布新服务或编辑 env 填入时提供；不影响任何已发布服务");
       setSecret({});
       await load();
     } catch (e: any) {
@@ -79,8 +68,8 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-xl font-semibold">平台默认配置</h1>
         <p className="text-xs text-gray-500 mt-1">
-          全部业务 agent 共享的兜底配置；服务可在发布/详情页按需覆盖非敏感项。
-          带锁标记的字段存于 K8s Secret（保存后不回显）；修改后需滚动重启运行中服务才生效。
+          作为「发布新服务 / 编辑环境变量」时的表单默认填入模板（带锁字段经填入后存入服务 Secret）。
+          修改默认配置<b>不影响任何已发布服务</b>，只影响之后的填入内容。
           {view.updatedAt && <span className="ml-2">最近更新：{new Date(view.updatedAt).toLocaleString()}</span>}
         </p>
       </div>
@@ -129,14 +118,8 @@ export default function SettingsPage() {
         </section>
       ))}
 
-      <div className="space-x-2">
-        <button onClick={() => save(false)} disabled={saving} data-testid="cfg-save"
-          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded px-5 py-2 text-sm">保存</button>
-        <button onClick={() => save(true)} disabled={saving} data-testid="cfg-save-restart"
-          className="border border-blue-600 text-blue-600 hover:bg-blue-50 disabled:opacity-50 rounded px-5 py-2 text-sm">
-          保存并滚动重启运行中服务
-        </button>
-      </div>
+      <button onClick={save} disabled={saving} data-testid="cfg-save"
+        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded px-5 py-2 text-sm">保存</button>
     </div>
   );
 }

@@ -1,17 +1,17 @@
-// 平台默认配置：GET/PUT /api/v1/platform-config、apply-restart 与集群对象渲染
-// （设计见 docs/design/platform-default-config-secret-design.md）。
-// DB platform_config 表为事实源；按模板 Sensitive 拆分渲染为平台 CM（非敏感）+ Secret（敏感）。
+// 平台默认配置：GET/PUT /api/v1/platform-config 与 GET /platform-config/defaults。
+// 默认配置仅作为「发布新服务 / 编辑 env」时的表单默认填入（R3 修订），不经 envFrom
+// 运行时注入——平台配置变更不影响任何已发布服务，服务只携带自己显式配置的 env。
+// DB platform_config 表为事实源；审计只记动作与键名，不记值。
+// 设计见 docs/design/platform-default-config-secret-design.md。
 package service
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	"gorm.io/gorm"
 
-	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/service/platformconfig"
 	"agent-manager/backend/internal/store"
 )
@@ -31,7 +31,7 @@ type PlatformConfigFieldView struct {
 	Multiline   bool      `json:"multiline"`
 	Placeholder string    `json:"placeholder,omitempty"`
 	HasValue    bool      `json:"hasValue"`
-	Value       string    `json:"value,omitempty"` // 仅非敏感键回填真实值
+	Value       string    `json:"value,omitempty"` // 仅非敏感键回填
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
@@ -46,48 +46,6 @@ type PlatformConfigGroupView struct {
 type PlatformConfigView struct {
 	Groups    []PlatformConfigGroupView `json:"groups"`
 	UpdatedAt *time.Time                `json:"updatedAt,omitempty"`
-}
-
-// ApplyRestartRequest POST /platform-config/apply-restart 入参；serviceIds 为空 = 全部可重启服务。
-type ApplyRestartRequest struct {
-	ServiceIDs []uint `json:"serviceIds"`
-}
-
-// AppliedService 已触发滚动重启的服务。
-type AppliedService struct {
-	ID   uint   `json:"id"`
-	Name string `json:"name"`
-}
-
-// SkippedService 未触发重启的服务与原因（单个失败不阻塞其余）。
-type SkippedService struct {
-	ID     uint   `json:"id"`
-	Name   string `json:"name"`
-	Reason string `json:"reason"`
-}
-
-// ApplyRestartResult apply-restart 响应。
-type ApplyRestartResult struct {
-	Restarted []AppliedService `json:"restarted"`
-	Skipped   []SkippedService `json:"skipped"`
-}
-
-// EnsurePlatformObjects 渲染并落集群平台默认配置对象（启动/保存/发布前三处幂等触发）。
-// 空配置也创建空对象，保证业务 Deployment envFrom 引用永不 CreateContainerConfigError。
-func (c *Core) EnsurePlatformObjects() error {
-	values, err := c.loadPlatformValues()
-	if err != nil {
-		return err
-	}
-	plain, secret := platformconfig.Split(values, nil)
-	ns := c.Cfg.Namespace
-	if err := c.K8s.EnsureConfigMap(k8s.PlatformDefaultConfigMap(ns, plain)); err != nil {
-		return fmt.Errorf("platform configmap: %w", err)
-	}
-	if err := c.K8s.EnsureSecret(k8s.PlatformDefaultSecret(ns, secret)); err != nil {
-		return fmt.Errorf("platform secret: %w", err)
-	}
-	return nil
 }
 
 // loadPlatformValues 读取平台配置事实源 → 键值 map。
@@ -142,8 +100,26 @@ func (c *Core) GetPlatformConfig() (*PlatformConfigView, error) {
 	return view, nil
 }
 
+// GetPlatformDefaults 返回已配置默认值的平面键值表（含敏感键明文）。
+// 专供发布向导 / 详情页「填入平台默认」的表单预填（R3 语义：默认值本就是供复制进服务的模板）；
+// GET /platform-config 展示视图仍保持敏感掩码。
+func (c *Core) GetPlatformDefaults() (map[string]string, error) {
+	values, err := c.loadPlatformValues()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		if v != "" && platformconfig.KnownKeys()[k] {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 // UpdatePlatformConfig 部分更新：出现且非空 = 设置、出现且空串 = 删除、未出现 = 不变。
 // 校验：未知键 400；清除必填键 400（必填仅防误清，不做全局完整性检查）。
+// 只写 DB，不触碰集群——默认配置不影响任何已发布服务（R3 语义）。
 func (c *Core) UpdatePlatformConfig(values map[string]string) (*PlatformConfigView, error) {
 	if len(values) == 0 {
 		return nil, ErrEmptyConfigValues
@@ -185,79 +161,5 @@ func (c *Core) UpdatePlatformConfig(values map[string]string) (*PlatformConfigVi
 	if err != nil {
 		return nil, err
 	}
-	if err := c.EnsurePlatformObjects(); err != nil {
-		return nil, err
-	}
 	return c.GetPlatformConfig()
-}
-
-// ApplyRestart 对运行中/register_failed 服务重刷 Deployment spec（带四源 envFrom 与
-// 最新平台默认值）并滚动重启；逐服务独立推进，单个失败不阻塞其余。
-func (c *Core) ApplyRestart(req ApplyRestartRequest) (*ApplyRestartResult, error) {
-	res := &ApplyRestartResult{Restarted: []AppliedService{}, Skipped: []SkippedService{}}
-	var targets []store.ServiceEntity
-	if len(req.ServiceIDs) > 0 {
-		if err := c.DB.Where("id IN ?", req.ServiceIDs).Find(&targets).Error; err != nil {
-			return nil, err
-		}
-		seen := map[uint]bool{}
-		for i := range targets {
-			seen[targets[i].ID] = true
-		}
-		for _, id := range req.ServiceIDs {
-			if !seen[id] {
-				res.Skipped = append(res.Skipped, SkippedService{ID: id, Reason: "not found"})
-			}
-		}
-	} else {
-		if err := c.DB.Where("status IN ?", []string{store.StatusRunning, store.StatusRegisterFailed}).
-			Find(&targets).Error; err != nil {
-			return nil, err
-		}
-	}
-	restarted := make([]string, 0, len(targets))
-	for i := range targets {
-		svc := &targets[i]
-		switch svc.Status {
-		case store.StatusRunning, store.StatusRegisterFailed:
-		default:
-			res.Skipped = append(res.Skipped, SkippedService{ID: svc.ID, Name: svc.DisplayName,
-				Reason: "status " + svc.Status + " not restartable"})
-			continue
-		}
-		if err := c.reapplyAndRestart(svc); err != nil {
-			res.Skipped = append(res.Skipped, SkippedService{ID: svc.ID, Name: svc.DisplayName, Reason: err.Error()})
-			continue
-		}
-		res.Restarted = append(res.Restarted, AppliedService{ID: svc.ID, Name: svc.DisplayName})
-		restarted = append(restarted, fmt.Sprintf("%d", svc.ID))
-	}
-	_ = c.DB.Create(&store.PlatformConfigEvent{Action: "apply_restart", EnvKeys: mustJSON(restarted)}).Error
-	return res, nil
-}
-
-// reapplyAndRestart 重刷 Deployment spec + 打 restartedAt 注解滚动重启 + 重新注册。
-// 仅打注解不变更 podTemplate——存量服务的单源 envFrom 永远带不上四源引用，必须重刷 spec。
-func (c *Core) reapplyAndRestart(svc *store.ServiceEntity) error {
-	plain, secret, err := c.partitionServiceEnv(svc)
-	if err != nil {
-		return err
-	}
-	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
-	params.EnvSecret = secret
-	dep, err := c.deployBuilder().Build(params)
-	if err != nil {
-		return fmt.Errorf("deployment: %w", err)
-	}
-	if err := c.K8s.EnsureDeployment(dep); err != nil {
-		return fmt.Errorf("deployment: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := c.K8s.RestartDeployment(ctx, c.Cfg.Namespace, svc.K8sName); err != nil {
-		return fmt.Errorf("restart: %w", err)
-	}
-	c.transition(svc, store.StatusDeploying, "platform config applied, rolling restart")
-	c.asyncWaitAndRegister(svc.ID)
-	return nil
 }

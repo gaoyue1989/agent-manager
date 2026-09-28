@@ -61,14 +61,6 @@ func TestPublishRoutesSensitiveEnvToSecret(t *testing.T) {
 	if string(sobj.Data["LLM_API_KEY"]) != "sk-1" {
 		t.Fatalf("service secret data wrong: %v", sobj.Data)
 	}
-
-	// 平台默认对象随 applyAll 兜底创建（当前无配置 → 空对象）
-	if _, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), k8s.DefaultConfigCMName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("platform default CM must exist: %v", err)
-	}
-	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.DefaultSecretName, metav1.GetOptions{}); err != nil {
-		t.Fatalf("platform default secret must exist: %v", err)
-	}
 }
 
 // TestPublishSecretKeysForceRouting secretKeys 指定的任意键强制进服务 Secret。
@@ -181,9 +173,9 @@ func TestRepublishPreservesServiceSecret(t *testing.T) {
 	}
 }
 
-// TestUpdatePlatformConfigFlow 校验 + 拆分渲染 + 掩码。
+// TestUpdatePlatformConfigFlow 校验 + 掩码 + defaults 数据源（R3：不再渲染集群对象）。
 func TestUpdatePlatformConfigFlow(t *testing.T) {
-	core, fk, done := newTestCore(t)
+	core, _, done := newTestCore(t)
 	defer done()
 
 	// 未知键拒绝
@@ -216,31 +208,21 @@ func TestUpdatePlatformConfigFlow(t *testing.T) {
 			t.Fatalf("plain field should回填: %+v", f)
 		}
 	}
-	// 拆分渲染：非敏感进 CM，敏感进 Secret
-	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), k8s.DefaultConfigCMName, metav1.GetOptions{})
+	// defaults 数据源：含敏感与非敏感全量值（发布/编辑表单默认填入用）
+	defaults, err := core.GetPlatformDefaults()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cm.Data["LLM_BASE_URL"] != "http://llm" || cm.Data["LLM_TEMPERATURE"] != "0.5" {
-		t.Fatalf("platform CM wrong: %+v", cm.Data)
-	}
-	if _, ok := cm.Data["LLM_API_KEY"]; ok {
-		t.Fatal("platform CM must not contain sensitive key")
-	}
-	sec, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.DefaultSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(sec.Data["LLM_API_KEY"]) != "sk-platform" || len(sec.Data) != 1 {
-		t.Fatalf("platform secret wrong: %v", sec.Data)
+	if defaults["LLM_API_KEY"] != "sk-platform" || defaults["LLM_BASE_URL"] != "http://llm" {
+		t.Fatalf("defaults wrong: %+v", defaults)
 	}
 	// 非必填键可清除
 	if _, err := core.UpdatePlatformConfig(map[string]string{"LLM_TEMPERATURE": ""}); err != nil {
 		t.Fatalf("clear optional: %v", err)
 	}
-	cm, _ = fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), k8s.DefaultConfigCMName, metav1.GetOptions{})
-	if _, ok := cm.Data["LLM_TEMPERATURE"]; ok {
-		t.Fatal("cleared key must leave platform CM")
+	defaults, _ = core.GetPlatformDefaults()
+	if _, ok := defaults["LLM_TEMPERATURE"]; ok {
+		t.Fatal("cleared key must leave defaults")
 	}
 	// 审计只记键名不记值
 	var events []store.PlatformConfigEvent
@@ -253,51 +235,7 @@ func TestUpdatePlatformConfigFlow(t *testing.T) {
 	}
 }
 
-// TestApplyRestartFlow 只重启可重启状态的服务；spec 重刷带四源 envFrom。
-func TestApplyRestartFlow(t *testing.T) {
-	core, fk, done := newTestCore(t)
-	defer done()
-	pkg := uploadTestPkg(t, core, "")
-	if !strings.Contains(pkg.Slug, "acme/demo") {
-		t.Fatalf("fixture slug changed: %s", pkg.Slug)
-	}
-	pkg2 := uploadTestPkg(t, core, "2")
-	running := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LLM_API_KEY": "sk-r"}, nil)
-	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", running.ID).Update("status", store.StatusRunning)
-
-	stopped := publishWithEnv(t, core, fk, pkg2.ID, nil, nil)
-	core.DB.Model(&store.ServiceEntity{}).Where("id = ?", stopped.ID).Update("status", store.StatusStopped)
-
-	res, err := core.ApplyRestart(ApplyRestartRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Restarted) != 1 || res.Restarted[0].ID != running.ID {
-		t.Fatalf("restarted wrong: %+v", res.Restarted)
-	}
-	// stopped 不在候选集合（查询即过滤 running/register_failed），不算 skipped
-	if len(res.Skipped) != 0 {
-		t.Fatalf("skipped wrong: %+v", res.Skipped)
-	}
-	if len(fk.Restarts()) != 1 {
-		t.Fatalf("restart calls: %v", fk.Restarts())
-	}
-	// spec 重刷：envFrom 四源（存量单源服务由此升级）
-	dep, _ := fk.GetDeployment("test", running.K8sName)
-	if len(dep.Spec.Template.Spec.Containers[0].EnvFrom) != 4 {
-		t.Fatal("apply-restart must refresh envFrom to 4 sources")
-	}
-	// 点名过滤 + not found
-	res, err = core.ApplyRestart(ApplyRestartRequest{ServiceIDs: []uint{stopped.ID, 999}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Restarted) != 0 || len(res.Skipped) != 2 {
-		t.Fatalf("filtered restart wrong: %+v", res)
-	}
-}
-
-// TestDeleteRemovesServiceSecret 删除服务连带清理服务 Secret（平台对象保留）。
+// TestDeleteRemovesServiceSecret 删除服务连带清理服务 Secret。
 func TestDeleteRemovesServiceSecret(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
@@ -312,9 +250,6 @@ func TestDeleteRemovesServiceSecret(t *testing.T) {
 	}
 	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.EnvSecretName(svc.K8sName), metav1.GetOptions{}); err == nil {
 		t.Fatal("service secret must be deleted")
-	}
-	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.DefaultSecretName, metav1.GetOptions{}); err != nil {
-		t.Fatal("platform secret must survive service delete")
 	}
 }
 

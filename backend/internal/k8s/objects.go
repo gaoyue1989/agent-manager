@@ -41,11 +41,6 @@ const (
 	// 日志规范挂载：/applog/${HOST_NAME}/trace.log 为容器云日志采集唯一来源，logback 写入该目录
 	ApplogVolumeName = "applog"
 	ApplogMountPath  = "/applog"
-	// 平台默认配置对象（namespace 单例）：非敏感键走 CM、敏感键走 Secret。
-	// 命名不得以 "-env"/"-env-secret" 结尾——服务 CM/Secret 名恒为 {k8sName}-env(-secret)
-	// 且 k8sName 恒以 oaf- 开头，否则特定服务名（如 "agent-default"）会同类型同名碰撞。
-	DefaultConfigCMName = "oaf-platform-default-config"
-	DefaultSecretName   = "oaf-platform-default-secret"
 )
 
 // SanitizeK8sName 任意输入转 DNS-1123 label：小写字母数字 '-'，≤63 字符。
@@ -118,26 +113,6 @@ func EnvSecret(p ObjectParams) *corev1.Secret {
 	}
 }
 
-// PlatformDefaultConfigMap 构造平台默认配置 CM（模板 Sensitive=false 且有值的键）。
-func PlatformDefaultConfigMap(ns string, data map[string]string) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: DefaultConfigCMName, Namespace: ns, Labels: platformLabels()},
-		Data:       data,
-	}
-}
-
-// PlatformDefaultSecret 构造平台默认配置 Secret（模板 Sensitive=true 且有值的键）。
-func PlatformDefaultSecret(ns string, data map[string]string) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: DefaultSecretName, Namespace: ns, Labels: platformLabels()},
-		Data:       stringMapToBytes(data),
-	}
-}
-
-func platformLabels() map[string]string {
-	return map[string]string{ManagedByLabel: ManagedByValue}
-}
-
 func stringMapToBytes(m map[string]string) map[string][]byte {
 	out := make(map[string][]byte, len(m))
 	for k, v := range m {
@@ -179,13 +154,12 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 						Image:           p.Image,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Ports:           []corev1.ContainerPort{{ContainerPort: AgentPort}},
-						// envFrom 四源（K8s 多源同键后引用者覆盖先引用者，K8s 1.32 实测）：
-						// 平台默认（非敏感 CM + 敏感 Secret）在前作兜底，服务级（CM + Secret）在后可覆盖
+						// envFrom 两源（K8s 多源同键后引用者覆盖先引用者）：服务敏感 Secret 在前，
+						// 服务 CM 在后可覆盖同名键。平台默认配置不经 envFrom 注入——仅作为发布/
+						// 编辑 env 时的表单默认填入（R3 修订），服务只携带自己显式配置的 env
 						EnvFrom: []corev1.EnvFromSource{
-							{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: DefaultConfigCMName}}},
-							{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: DefaultSecretName}}},
-							{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}},
 							{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: EnvSecretName(p.K8sName)}}},
+							{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}},
 						},
 						Env: fixedEnv,
 						VolumeMounts: []corev1.VolumeMount{

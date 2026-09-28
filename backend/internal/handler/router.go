@@ -255,7 +255,9 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 		OK(c, images)
 	})
 
-	// 平台默认配置：设置页读写 + 显式滚动重启生效（docs/design/platform-default-config-secret-design.md）
+	// 平台默认配置：设置页读写 + 表单默认填入数据源。
+	// R3 语义：默认配置仅作为发布/编辑 env 时的表单预填，不经 envFrom 注入，
+	// 不影响任何已发布服务（docs/design/platform-default-config-secret-design.md）
 	pc := g.Group("/platform-config")
 	{
 		pc.GET("", func(c *gin.Context) {
@@ -265,6 +267,14 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 				return
 			}
 			OK(c, view)
+		})
+		pc.GET("/defaults", func(c *gin.Context) {
+			values, err := core.GetPlatformDefaults()
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, gin.H{"values": values})
 		})
 		pc.PUT("", func(c *gin.Context) {
 			var body struct {
@@ -280,21 +290,6 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 				return
 			}
 			OK(c, view)
-		})
-		pc.POST("/apply-restart", func(c *gin.Context) {
-			var req service.ApplyRestartRequest
-			if c.Request.ContentLength > 0 {
-				if err := c.ShouldBindJSON(&req); err != nil {
-					Fail(c, http.StatusBadRequest, err.Error())
-					return
-				}
-			}
-			res, err := core.ApplyRestart(req)
-			if err != nil {
-				mapError(c, err)
-				return
-			}
-			OK(c, res)
 		})
 	}
 

@@ -28,9 +28,10 @@ function PublishForm() {
   const [image, setImage] = useState("");
   const [name, setName] = useState("");
   const [replicas, setReplicas] = useState(1);
-  // 预填敏感行已移除：LLM/MySQL/Redis/沙箱基础配置由平台默认配置提供（"平台配置"页维护），
-  // 此处仅需按服务覆盖的项；模板敏感键填写后自动路由进服务 Secret（不落 ConfigMap）
+  // 默认填入（R3）：env 行预填平台默认配置的已配置项（GET /platform-config/defaults），
+  // 可任意增删改——服务只落这里显式提交的 env；平台配置变更不影响任何已发布服务
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
+  const [sensitiveKeys, setSensitiveKeys] = useState<Set<string>>(new Set()); // 模板敏感键：输入框用 password 呈现
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -40,6 +41,17 @@ function PublishForm() {
       const imgs = await api.listImages();
       setImages(imgs);
       if (imgs.length > 0) setImage((cur) => cur || imgs[0].Image);
+      // 默认填入：并发拉 schema（敏感键集合）与已配置默认值
+      const [cfg, dflt] = await Promise.all([
+        api.getPlatformConfig().catch(() => null),
+        api.getPlatformDefaults().catch(() => null),
+      ]);
+      if (cfg) {
+        setSensitiveKeys(new Set(cfg.groups.flatMap((g) => g.fields.filter((f) => f.sensitive).map((f) => f.envKey))));
+      }
+      const values = dflt?.values ?? {};
+      const rows = Object.entries(values).map(([key, value]) => ({ key, value }));
+      setEnvRows((cur) => (cur.length === 0 && rows.length > 0 ? rows : cur)); // 不覆盖用户已编辑内容
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
@@ -166,8 +178,8 @@ function PublishForm() {
             className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加变量</button>
         </div>
         <p className="text-xs text-gray-400 mb-2">
-          LLM / MySQL / Redis / 沙箱基础配置由<Link href="/settings" className="text-blue-600 hover:underline mx-1">平台默认配置</Link>提供，此处仅需添加按服务覆盖的项；
-          AGENT_CONFIG_DIR / SERVER_HOST / SERVER_PORT 为平台保留键，敏感键（如 LLM_API_KEY）自动存入服务 Secret。
+          已预填<Link href="/settings" className="text-blue-600 hover:underline mx-1">平台默认配置</Link>的已配置项，可任意增删改（提交后随服务保存，敏感键存入服务 Secret）；
+          AGENT_CONFIG_DIR / SERVER_HOST / SERVER_PORT 为平台保留键。
         </p>
         <table className="w-full text-sm">
           <tbody data-testid="env-table">
@@ -178,8 +190,9 @@ function PublishForm() {
                     placeholder="KEY" data-testid={`env-key-${i}`} className="border rounded p-1.5 w-full" />
                 </td>
                 <td className="pr-2 pb-2">
-                  <input value={r.value} onChange={(e) => setEnvRows(envRows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
-                    placeholder="VALUE" data-testid={`env-value-${i}`} className="border rounded p-1.5 w-full" />
+                  <input type={sensitiveKeys.has(r.key) ? "password" : "text"} autoComplete="off"
+                    value={r.value} onChange={(e) => setEnvRows(envRows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
+                    placeholder={sensitiveKeys.has(r.key) ? "VALUE（敏感，存服务 Secret）" : "VALUE"} data-testid={`env-value-${i}`} className="border rounded p-1.5 w-full" />
                 </td>
                 <td className="pb-2">
                   <button onClick={() => setEnvRows(envRows.filter((_, j) => j !== i))} data-testid={`env-del-${i}`}

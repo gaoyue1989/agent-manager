@@ -163,7 +163,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	return svc, nil
 }
 
-// applyAll 幂等创建/更新平台默认对象+服务 env 两级对象+Deployment+Service+Ingress。
+// applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service+Ingress。
 // Deployment 经 DeployBuilder（内置构造 + 可选环境 overlay 合并 + 不变量校验），
 // overlay 违规视为 apply 失败，服务转 error 状态。Build 纯函数零成本前置：
 // 非法 overlay 时任何对象不落半套资源。
@@ -171,10 +171,6 @@ func (c *Core) applyAll(p k8s.ObjectParams) error {
 	dep, err := c.deployBuilder().Build(p)
 	if err != nil {
 		return fmt.Errorf("deployment: %w", err)
-	}
-	// 平台默认配置对象兜底自愈（被误删自动重建，发布即引用）
-	if err := c.EnsurePlatformObjects(); err != nil {
-		return fmt.Errorf("platform defaults: %w", err)
 	}
 	if err := c.applyServiceEnvObjects(p); err != nil {
 		return err

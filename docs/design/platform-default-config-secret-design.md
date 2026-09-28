@@ -1,6 +1,13 @@
 # 平台默认配置与敏感键 Secret 化（redis / mysql / llm / sandbox）— 设计文档
 
-**日期**：2026-09-28　**状态**：已实施（P1 当日落地，真实集群实测通过，见 §11 实施与验证记录）
+**日期**：2026-09-28　**状态**：已实施（P1 当日落地，R3 修订同日完成并经真实集群 E2E，见 §11 实施与验证记录）
+
+> **R3 修订（2026-09-28 评审后，最终形态）**：默认配置**不经 envFrom 运行时注入**，仅作为「发布新服务 / 编辑环境变量」时的**表单默认填入**；修改平台默认配置不影响任何已发布服务（存量服务只携带自己显式配置的 env）。据此相对 R2 的变化：
+> 1. Deployment envFrom 由四源回归**两源**（服务 Secret `{name}-env-secret` + 服务 CM `{name}-env`），平台 CM/Secret 对象（`oaf-platform-default-config` / `oaf-platform-default-secret`）不再创建（文中相关表格/链路描述已被取代）；
+> 2. `POST /platform-config/apply-restart` 端点移除（失去存在意义），PUT 只写 DB；
+> 3. 新增 `GET /api/v1/platform-config/defaults`：返回已配置默认值的平面键值表（**含敏感键明文**——默认值本就是供复制进服务的模板，展示视图 GET /platform-config 仍掩码）；
+> 4. 前端：发布向导预填 defaults、详情页「填入平台默认」按钮、设置页移除重启按钮；
+> 5. per-service Secret、敏感路由、sticky 三态、存量迁移机制**保持不变**（这些关乎服务自身 env 的落点，与默认配置的注入方式无关）。
 
 > R2 修订说明（2026-09-28 评审后）：非敏感键不进 Secret，改由平台级 ConfigMap 承载；Secret 只放敏感键（`LLM_API_KEY`、`OPENSANDBOX_API_KEY`、`AGENT_REDIS_URL`、`CHECKPOINT_PASSWORD` 等）；每创建一个 agent 服务同时创建对应的 per-service Secret，服务级敏感 env 落该 Secret 而非 ConfigMap。
 
@@ -289,4 +296,14 @@ MCP 对齐（P2，见 §9）：`get_platform_config` / `update_platform_config`�
 - **E2E**（2026-09-28 两轮实跑，CI 之外本机集群执行）：
   - 新增 `e2e/platform-config-secret-e2e.sh`（46 断言全绿）：P 场景模板 schema/PUT 掩码/未知键与清必填 400；Q 场景集群拆分渲染（Secret 敏感 / CM 非敏感互斥断言）；R 场景发布**不带 env** → running（默认值跑通 LLM/MySQL/Redis 全链路）+ envFrom 四源顺序 + Pod 内敏感键存在性（值不回显）+ 服务 CM 空对象；S 场景携带敏感键发布 → 路由服务 Secret、详情无明文、envSecretKeys 掩码；T 场景 sticky 保持 + 空串删除回落默认；U 场景 apply-restart 点名生效 + spec 重刷保持四源；V 场景删除零残留且平台对象保留；
   - 存量 `platform-e2e.sh` 回归 50/50 全绿（修复其 E1 用例 `/tmp/opencode` 目录未创建的存量缺陷）；`package-edit-e2e.sh`/`file-support-e2e.sh` 等携带敏感键 env 的脚本与新路由语义兼容（值仍送达 Pod，仅落点移入 Secret）。
-- **P2 待办**：MCP 工具 `get/update_platform_config`；`get_service_status` 的 env 输出改造为掩码结构；manifests 自举 secret 占位符化；release-agent 静态清单接入平台 CM/Secret。
+- **P2 待办**：MCP 工具 `get/update_platform_config`；`get_service_status` 的 env 输出改造为掩码结构；manifests 自举 secret 占位符化；release-agent 静态清单 env 可改用发布页默认填入。
+
+### R3 实施与验证（同日，最终形态）
+
+R1~R4 评审决定改为「默认填入」语义（见文首 R3 修订），同日完成实施并重验：
+
+- **代码变化**：envFrom 回归两源（服务 Secret + 服务 CM）；移除平台 CM/Secret 构造与启动/发布期 Ensure、移除 `apply-restart` 端点；新增 `GET /platform-config/defaults`（含敏感明文，专供表单预填）；前端发布向导预填 defaults（敏感键 password 呈现）、详情页「填入平台默认」按钮（缺失键显式填入，保存才生效）、设置页移除重启按钮并更新文案。单测 `go vet` + `go test ./...` 全绿（用例同步改为两源断言 + defaults 数据源断言）；前端 eslint 0 error、`next build` 通过。
+- **E2E（R3 后两套全绿）**：
+  - `e2e/platform-config-secret-e2e.sh` 改写为 R3 语义，26 断言全绿：P 模板 schema / PUT 掩码 / 未知键与清必填 400 / defaults 数据源；R **隔离性**——最小 env（仅 checkpoint/redis）发布 → running、envFrom 两源、Pod 无平台默认 LLM 键、平台对象不存在；S **默认填入流**——以 defaults 返回值整体作为 env 发布（模拟向导预填提交）→ running（真实配置全链路）+ 敏感键路由服务 Secret + 详情无明文 + envJson 剔除全部模板敏感键；T sticky 保持 + 空串删除；U **改平台默认不影响存量服务**（服务状态与 Deployment generation 均不变，新值仅反映在 defaults 端点）；V 删除零残留。
+  - 存量 `platform-e2e.sh` 回归 50/50 全绿。
+- **部署状态**：`platform-backend:v5` / `platform-frontend:v8` 已滚动上线；集群遗留的平台 CM/Secret 已删除。

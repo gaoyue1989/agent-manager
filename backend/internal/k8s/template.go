@@ -118,13 +118,11 @@ func validateDeployment(p ObjectParams, d *appsv1.Deployment) error {
 		return fmt.Errorf("container %q missing (must not be renamed/dropped)", "agent")
 	}
 	cs := d.Spec.Template.Spec.Containers[agent]
-	// envFrom 必含四源引用：服务 CM/Secret + 平台默认 CM/Secret
-	// （平台默认配置下发链路，docs/design/platform-default-config-secret-design.md §3.1）
+	// envFrom 必含两源引用：服务 Secret（敏感 env）+ 服务 CM（非敏感 env）。
+	// 平台默认配置不经 envFrom 注入（R3 修订），不校验平台对象。
 	wantEnvFrom := map[string]bool{
-		p.K8sName + "-env":       false,
 		EnvSecretName(p.K8sName): false,
-		DefaultConfigCMName:      false,
-		DefaultSecretName:        false,
+		p.K8sName + "-env":       false,
 	}
 	for _, ef := range cs.EnvFrom {
 		name := ""
