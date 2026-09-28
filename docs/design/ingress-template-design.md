@@ -1,6 +1,6 @@
 # 业务 Ingress 模板（INGRESS_TEMPLATE）设计
 
-> 状态：实施中（2026-09-28）
+> 状态：已实施（2026-09-28，见 §9 实施记录）
 > 关联代码：`backend/internal/k8s/template.go`（IngressBuilder）、`backend/internal/service/publish.go`（接线）、`backend/templates/ingress-overlay.example.yaml`（示例）
 
 ## 1. 背景与目标
@@ -50,7 +50,7 @@ overlay 支持每服务占位符（发布期替换，保证单文件模板服务
 现状 Endpoint 是 config 固定公式（`http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`），与 Ingress spec 脱节。改为：
 
 - `k8s.IngressEndpoint(ing, fallbackHost, port)`：取第一条带尾缀 path 的规则 → host 取 `rule.Host`（空则回落 `INGRESS_HOST`；host 已含 `:` 视为自带端口，不再拼接）→ path 剥 `(/|$)(.*)` 得对外前缀（剥空即根路径）→ scheme 按 `spec.tls` 是否非空（https/http）→ 端口取 `INGRESS_PORT`。
-- 对内置构造（无 overlay）派生结果与旧公式逐字符一致——`TestPublishHappyPath` 的 endpoint 断言即回归锁。
+- 对内置构造（无 overlay）派生结果与旧公式一致——`TestPublishHappyPath` 的 endpoint 断言即回归锁。**唯一刻意偏差**：旧公式恒拼 `:{INGRESS_PORT}`，新派生在 host 自带端口（如 `INGRESS_HOST=1.2.3.4:30080`）时不重复拼接（旧行为是双端口 bug，新行为更合理，`fallback-host-with-port` 用例固化）。
 - 模板改 host 后的 DNS/端口可达性由环境负责，平台只保证展示地址一致；TLS 下端口仍取 `INGRESS_PORT`（若环境未在该端口终止 TLS，不要在模板配 TLS）。
 
 ## 6. 发布时序与失败语义
@@ -87,4 +87,8 @@ overlay 支持每服务占位符（发布期替换，保证单文件模板服务
 
 ## 9. 实施记录
 
-- 2026-09-28：设计定稿，编码与测试进行中（分支 `feat/ingress-template`）。
+- 2026-09-28：设计定稿并实施（分支 `feat/ingress-template`，PR #59）。
+  - 单测：`cd backend && make test` 全绿；新增 IngressBuilder SMP 语义/不变量（含 defaultBackend、pathType 缺失）/Endpoint 派生/启动探针用例，Publish endpoint 跟随模板、违规不落库、Republish 回写用例。
+  - e2e：`e2e/platform-e2e.sh` 50/50 PASS（platform-backend:v6 部署后实跑）。
+  - 部署：`platform-backend:v6` 已在 kind 集群 rollout（未设置 INGRESS_TEMPLATE，现网行为不变）。
+  - CR（独立评审）：P1 defaultBackend 归属唯一绕过 + P2（pathType 缺失不拦、rule-host 用例空洞、探针 class 与配置同参、host 自带端口偏差说明）当轮修复；文档三处（根/backend AGENTS.md、deployment.md §七）随 PR 提交。

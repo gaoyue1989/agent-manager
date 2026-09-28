@@ -399,7 +399,7 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
 `
-	b, err := NewIngressBuilder(writeOverlay(t, overlay))
+	b, err := NewIngressBuilder(writeOverlay(t, overlay), "nginx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +442,7 @@ spec:
                 port:
                   number: 8100
 `
-	b, err := NewIngressBuilder(writeOverlay(t, overlay))
+	b, err := NewIngressBuilder(writeOverlay(t, overlay), "nginx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,6 +526,26 @@ metadata:
 spec:
   ingressClassName: traefik
 `,
+		"default-backend": `
+spec:
+  defaultBackend:
+    service:
+      name: other-svc
+      port:
+        number: 80
+`,
+		"path-type-missing": `
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /agent/{{SHORT_NAME}}(/|$)(.*)
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`,
 		"wrong-backend": `
 spec:
   rules:
@@ -598,17 +618,17 @@ spec:
 // TestIngressBuilderSyntaxErrorFailFast 非法 YAML / 缺文件 / 试渲染违规（硬编码
 // 服务名或 metadata）启动即失败。
 func TestIngressBuilderSyntaxErrorFailFast(t *testing.T) {
-	if _, err := NewIngressBuilder(writeOverlay(t, "spec: [broken")); err == nil {
+	if _, err := NewIngressBuilder(writeOverlay(t, "spec: [broken"), "nginx"); err == nil {
 		t.Fatal("broken yaml must fail at startup")
 	}
-	if _, err := NewIngressBuilder(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+	if _, err := NewIngressBuilder(filepath.Join(t.TempDir(), "missing.yaml"), "nginx"); err == nil {
 		t.Fatal("missing file must fail at startup")
 	}
-	if _, err := NewIngressBuilder(writeOverlay(t, "metadata:\n  name: hijacked\n")); err == nil {
+	if _, err := NewIngressBuilder(writeOverlay(t, "metadata:\n  name: hijacked\n"), "nginx"); err == nil {
 		t.Fatal("invariant-violating overlay must fail at startup probe")
 	}
 	// 硬编码具体服务 backend：探针（哑参数 oaf-template-probe）即拒绝，逼用占位符
-	if _, err := NewIngressBuilder(writeOverlay(t, fullIngressRules("other-svc", "/x(/|$)(.*)"))); err == nil {
+	if _, err := NewIngressBuilder(writeOverlay(t, fullIngressRules("other-svc", "/x(/|$)(.*)")), "nginx"); err == nil {
 		t.Fatal("hardcoded service backend must fail at startup probe")
 	}
 }
@@ -645,8 +665,13 @@ func TestIngressEndpointTable(t *testing.T) {
 			want: "http://1.2.3.4:30080/agent/acme-demo/",
 		},
 		{
-			name: "rule-host", ing: base, host: "1.2.3.4", port: 30080,
-			want: "http://1.2.3.4:30080/agent/acme-demo/",
+			name: "rule-host-overrides-fallback",
+			ing: func() *networkingv1.Ingress {
+				ing := base.DeepCopy()
+				ing.Spec.Rules[0].Host = "demo.example.com"
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "http://demo.example.com:30080/agent/acme-demo/",
 		},
 		{
 			name: "fallback-host-with-port", ing: base, host: "172.20.0.2:30080", port: 30080,

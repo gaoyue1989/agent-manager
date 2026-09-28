@@ -231,9 +231,11 @@ type IngressBuilder struct {
 }
 
 // NewIngressBuilder 语义同 NewDeploymentBuilder：文件缺失/语法错误/哑参数试渲染
-// 违规均启动即失败（fail-fast）。试渲染用哑参数 oaf-template-probe/default——
-// overlay 不得硬编码 metadata.name/namespace（每服务发布期才确定）。
-func NewIngressBuilder(path string) (*IngressBuilder, error) {
+// 违规均启动即失败（fail-fast）。ingressClass 传运行配置值（cfg.IngressClass），
+// 保证探针与发布期同参——overlay 显式写 class 只允许等于配置值，否则试渲染即拒绝。
+// 试渲染用哑参数 oaf-template-probe/default——overlay 不得硬编码
+// metadata.name/namespace（每服务发布期才确定）。
+func NewIngressBuilder(path, ingressClass string) (*IngressBuilder, error) {
 	if path == "" {
 		return &IngressBuilder{}, nil
 	}
@@ -242,9 +244,7 @@ func NewIngressBuilder(path string) (*IngressBuilder, error) {
 		return nil, fmt.Errorf("read ingress overlay %s: %w", path, err)
 	}
 	b := &IngressBuilder{overlay: data, hasOverlay: true}
-	// IngressClass 哑参取平台默认 nginx：class 校验语义是"overlay 显式写必须等于配置值"，
-	// 探针无法感知自定义 INGRESS_CLASS，故示例文件约定 overlay 不写 class（由平台注入）。
-	if _, err := b.Build(ObjectParams{K8sName: Prefix + "template-probe", Namespace: "default", IngressClass: "nginx"}); err != nil {
+	if _, err := b.Build(ObjectParams{K8sName: Prefix + "template-probe", Namespace: "default", IngressClass: ingressClass}); err != nil {
 		return nil, fmt.Errorf("ingress overlay %s invalid: %w", path, err)
 	}
 	return b, nil
@@ -296,6 +296,11 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 	if ing.Spec.IngressClassName != nil && *ing.Spec.IngressClassName != p.IngressClass {
 		return fmt.Errorf("spec.ingressClassName must stay %s", p.IngressClass)
 	}
+	// defaultBackend 是 rules 之外的 catch-all 路由入口：不拦会绕过归属唯一
+	// （未匹配 /agent/{short} 的流量打到其他服务），内置构造恒为 nil
+	if ing.Spec.DefaultBackend != nil {
+		return fmt.Errorf("spec.defaultBackend must stay empty (per-service object)")
+	}
 	ann := ing.Annotations
 	for k, want := range map[string]string{
 		annRewriteTarget: rewriteTargetValue,
@@ -320,6 +325,10 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 			if path.Backend.Service == nil || path.Backend.Service.Name != svcName ||
 				path.Backend.Service.Port.Number != AgentPort {
 				return fmt.Errorf("backend must stay %s:%d (per-service object)", svcName, AgentPort)
+			}
+			// pathType 为 v1 必填：漏写会被 apiserver 拒绝，提前在此反馈
+			if path.PathType == nil {
+				return fmt.Errorf("path %q must set pathType", path.Path)
 			}
 			if !strings.HasSuffix(path.Path, ingressPathSuffix) {
 				return fmt.Errorf("path %q must keep suffix %s (rewrite-target %s relies on it)",

@@ -43,7 +43,7 @@ func main() {
 
 	// 业务 Ingress 构造门面：INGRESS_TEMPLATE 指向 overlay 文件（可空），
 	// 语义同 DeploymentBuilder（SMP 合并 + 不变量校验 + 启动 fail-fast）。
-	ingBuilder, err := k8sclient.NewIngressBuilder(cfg.IngressTemplate)
+	ingBuilder, err := k8sclient.NewIngressBuilder(cfg.IngressTemplate, cfg.IngressClass)
 	if err != nil {
 		log.Fatalf("ingress template: %v", err)
 	}

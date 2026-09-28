@@ -490,7 +490,7 @@ func ingressTemplate(t *testing.T, content string) *k8s.IngressBuilder {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b, err := k8s.NewIngressBuilder(path)
+	b, err := k8s.NewIngressBuilder(path, "nginx")
 	if err != nil {
 		t.Fatalf("new ingress builder: %v", err)
 	}
