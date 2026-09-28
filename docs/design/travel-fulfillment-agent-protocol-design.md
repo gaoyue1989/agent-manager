@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | **设计定稿 v1.1（待实施）**，含 2026-09-28 两轮评审修订 |
+| 状态 | **设计定稿 v1.2（待实施）**，含 2026-09-28 三轮评审/确认修订 |
 | 日期 | 2026-09-28 |
 | 参考 | 官方案例 [order-fulfillment](https://java.agentscope.io/v2/zh/service/cases/order-fulfillment)（AgentScope Service + Team 形态）；协议文档 [integration/protocol](https://java.agentscope.io/v2/zh/integration/protocol) |
 | 关联代码 | agent-framework SDK `io.agentscope:*:2.0.3`；`extensions-a2a-client`（已在 pom 未用）；`extensions-agent-protocol`（待引入） |
@@ -36,6 +36,8 @@
 | F10 | 远程提交的 userId 链：`AgentSpawnTool` 直接取父 `RuntimeContext.userId`（`currentUserId`）填入 `RemoteSubmitContext.userId` → 序列化为 `context.user_id` 下传——**父侧 ctx.userId 是网关 peer/gw-hash 时（Channel 链路，issue #44），子服务将拿到错误 userId** | AgentSpawnTool/RemoteSubmitContext 拆解 + 本仓库 issue #44 |
 | F11 | 我们的对话路径是**每请求直调** `agent.streamEvents(...)`（`AgentRuntimeService.invokeStream:165`），无常驻分发循环——后台任务完成**没有任何东西自动替 lead 推进 turn**；"结果注入下一轮"的"下一轮"缺触发方 | 本仓库代码 |
 | F12 | 业务 Ingress 单正则全量路由：`path /agent/{short}(/|$)(.*) → rewrite /$2`（`backend/internal/k8s/objects.go:247`，use-regex）——服务根下**所有**端点（含启用协议后的 `/tasks*`）经 NodePort 30080 外可达，叠加 F1 无认证 = 未防护的远程调度入口 | backend objects.go |
+| F13 | AgentSpawnTool 字节码内部类型为 `List<RemotePendingConfirm>`（pendingConfirms），**无裸 `RequireUserConfirmEvent` 字样**——远程确认大概率以 RemotePendingConfirm 快照/事件形态进入父流（官方文档口径为"转发 RequireUserConfirmEvent"，静态无法定论，M0 ① 终裁） | AgentSpawnTool strings 拆解 |
+| F14 | agent-protocol 默认 `AgentFactory = agentProvider.getObject()`（拿 **Spring bean**）；我们 OAF reload 是 `swapAgent` 换 volatile 引用 + holder 模式、**bean 永不替换**（A2A 服务端正是为此经 `A2aAgentRefHolder` 间接持有）——member 不自定义工厂则 reload 后协议任务全部跑在旧 agent 实例上 | AgentProtocolAutoConfiguration 源码 + 本仓库 reload 链路 |
 
 ## 2. 总体架构
 
@@ -117,6 +119,7 @@ config:
 5. **执行阶段**：lead `agent_spawn(booking, 按方案执行…, timeout_seconds=0)` → 立即返回 `task_id`，**父 turn 结束、释放租约**。**写任务串行规约**：前一写任务终态前不得再 spawn 写任务（§5.3 有框架级兜底）。
 6. 子 agent 执行到写 MCP 工具（ask）→ 子任务挂起（`awaiting_confirm`）→ PROPAGATE 将 `RequireUserConfirmEvent` 转发进父流 → **RemoteConfirmBridge**（§5）落 `confirm_context`（多行，FIFO）→ 前端确认卡。
 7. 用户批准/拒绝 → Bridge 调 `resumeTask(..., RemoteConfirmDecision)`（approve→ALLOW，reject→DENY）→ **Bridge 异步监听子任务终态**（`/wait`）→ 终态即以合成消息（「任务 {task_id} 已终态，请汇总交付」）驱动一次内部 lead 汇总 turn（走 `invokeStream` 同一管线：acquire 租约 → `streamEvents` → 事件写 durable SSE）。**开着 confirm-stream 的用户在当前流尾直接看到汇总；离线用户经 `/threads/{sid}/subscribe` 续传与 history 可见**。唤醒仅对「经确认卡批准/拒绝而续跑的远程任务」启用。
+   **实现要点（第三轮确认）**：`invokeStream` 本身**不写** durable 事件流——SessionEventBus 的 emit 是 Controller 层职责（`AgentRuntimeService:486` 注释明示）。Bridge 驱动汇总 turn 时必须复刻该 emit（或抽公共方法供 controller 与 Bridge 共用），否则离线用户经 `/subscribe` 不可见。
 
 ## 5. RemoteConfirmBridge（远程确认适配层，两轮评审后的完整形态）
 
@@ -144,10 +147,16 @@ config:
 - resume 后 Bridge 异步 `/wait` 终态 → 驱动 lead 汇总 turn（§4 步骤 7）；终态与决策写 tool_audit。
 - 远程行超 TTL 未消费 → Bridge 定时任务自动 `resume(DENY, reason=confirm_timeout)` 并记审计（用户不作为分支，§9）。
 
-### 5.5 确认卡关联
+### 5.5 确认事件形态与卡片关联
 
+- **形态预期（第三轮确认修正，F13）**：AgentSpawnTool 字节码内部类型为 `List<RemotePendingConfirm>`、无裸 `RequireUserConfirmEvent` 字样——远程确认**大概率以 RemotePendingConfirm 快照/事件形态**进入父流（官方文档口径为"转发 RequireUserConfirmEvent"，静态无法定论）。Bridge 识别实现以 **RemotePendingConfirm 为主形态**准备，`RequireUserConfirmEvent` 直达为备选，M0 ① 终裁。
 - 转发事件的 replyId 是子侧的：Bridge 落库时以 `remote_task`（`{service, task_id, tool_calls, child_reply_id}`）为锚点，不依赖 replyId 与父 state 匹配。
-- M0 断言①需分辨转发事件形态（`RequireUserConfirmEvent` 直达父流 vs 任务快照），两种形态对应 Bridge 两种识别实现。
+
+### 5.6 已知偏差：parent_session_id 传 gw-hash
+
+- `RemoteSubmitContext.parentSessionId` 取父 `ctx.sessionId`，Channel 链路下是全进程共享的 gw-hash（issue #44 同源）而非规范 sid。
+- 影响仅限子侧日志/追踪的会话聚合；跨服务会话关联由 Bridge 的 `remote_task` 表承担（落卡以规范 sid 为键），`plan_id` 对账兜底。
+- **决策**：不在 `RemoteUserIdMiddleware` 里顺手写回 sessionId（SDK 内部对该 ctx 可能有其他假设，沿用 `SessionKeyResolver` 后期翻译模式）；M0 ③ 观察到子侧按 gw-hash 聚合**属预期偏差，不判 bug**。
 
 ## 6. 两阶段权限与安全（含认证 filter）
 
@@ -174,7 +183,7 @@ config:
 
 | 数据 | 方案 |
 |---|---|
-| TaskRecord（子任务协议元数据） | **bean override**：`@Bean ProtocolTaskRepository` 返回 `WorkspaceProtocolTaskRepository(本服务 HarnessAgent 的 WorkspaceManager)`（F6 公开构造），借 DistributedStore 落 `agent_fs`（MySQL、跨副本可见）；WorkspaceManager 可达性未验证（M0 ④b，风险 §13.7）——不可达则退化为本地 FS + `AGENT_PROTOCOL_TASK_STORE` 指向 emptyDir。**禁止指向 `/config`（PVC subPath 只读）** |
+| TaskRecord（子任务协议元数据） | **bean override**：`@Bean ProtocolTaskRepository` 返回 `WorkspaceProtocolTaskRepository(本服务 HarnessAgent 的 WorkspaceManager)`（F6 公开构造），借 DistributedStore 落 `agent_fs`（MySQL、跨副本可见）；**getter 可达性已验证**（`HarnessAgent.getWorkspaceManager()` 公开方法，javap 实证——M0 ④b 收窄为验证 store 落库行为）；异常时退化为本地 FS + `AGENT_PROTOCOL_TASK_STORE` 指向 emptyDir。**禁止指向 `/config`（PVC subPath 只读）** |
 | TaskRecord 清理 | 终态记录保留 N 天后清理（`AGENT_PROTOCOL_TASK_RETENTION_DAYS`，默认 7）：扩展 `SessionCleanupService`；需验证与现有清理维度不冲突（合成桶 `agents/_agentscope_protocol/` 不在会话/附件清理路径内——M1 测试点） |
 | SSE 事件 | `AgentProtocolEventBus` 默认内存（replay 256）——M1 单副本可接受；M3 提供 Redis Streams 实现（复用 oaf-redis + `AGENT_REDIS_PREFIX` 隔离）后放开多副本 |
 | 对话状态 | 各服务自有 `agent_state`（共享 oaf_checkpoint）；子任务 taskId 即子会话，userId 继承自 `context.user_id`（经 §8 lead 侧 `RemoteUserIdMiddleware` 规范化，F10），`IsolationScope.USER` 语义连续 |
@@ -187,7 +196,7 @@ config:
 **member 端**（所有 OAF 服务获得可被远程调度能力，默认关闭、存量零影响）
 1. `pom.xml`：+ `agentscope-extensions-agent-protocol`（2.0.3）。
 2. `AgentManagerProperties` / `application.yml`：`AGENT_PROTOCOL_ENABLED`（默认 false）、`AGENT_PROTOCOL_AUTH_TOKEN`（启用时必填，缺失 fail-fast）、`AGENT_PROTOCOL_TASK_STORE`、`AGENT_PROTOCOL_TASK_RETENTION_DAYS`。
-3. 新增 `config/AgentProtocolConfig.java`：TaskRepository bean override（§7）。
+3. 新增 `config/AgentProtocolConfig.java`：TaskRepository bean override（§7）+ **自定义 `AgentFactory`：`request -> agentRuntimeService.getAgent()`**——复刻 `A2aAgentRefHolder` 间接持有模式。**不可依赖默认工厂**（F14）：默认工厂拿 Spring bean，而 OAF reload 的 `swapAgent` 只换 volatile 引用不换 bean，不覆盖则 reload 后协议任务全部跑在旧 agent 实例（旧配置、MCP 已收尾）。
 4. 新增 `service/protocol/AgentProtocolAuthFilter.java`：`/tasks*` token 校验（§6.2）。
 5. 新增 `service/protocol/PhaseDenyMiddleware.java` + `RuntimeContextCustomizer`（L4，二期）。
 6. `InfoController`/AgentCard：透出 `agent_protocol` 状态；`SessionCleanupService`：TaskRecord 清理。
@@ -196,7 +205,7 @@ config:
 1. `HarnessAgentFactory`：`subAgents()` 中 endpoint 非空者构造远程 `SubagentDeclaration`（`.url(endpoint).remoteStreaming(true).remoteStreamDetail(FULL).remoteAskPolicy(PROPAGATE).headers(env 解析含 token)`）经 `.subagents(...)` 注册；headers 来源 `AGENT_REMOTE_HEADERS_JSON`（占位符规范，不进包）。
 2. **`WorkspaceInitializer.writeSubagents` 修订**：endpoint 非空者**跳过 md 生成**（否则 `DynamicSubagentsMiddleware` 每轮重扫的本地声明与静态远程声明同名双注册，胜负未定义）；reload 的 stale 清理同步识别。
 3. 新增 `service/RemoteConfirmBridge.java`（§5 全部职责：识别/多行落卡/FIFO/决策路由/终态唤醒/超时治理）+ `confirm_context` 表 `(session_id, confirm_key)` 复合键演进与存量回填（Flyway 新 V 文件）。
-4. 新增 `service/RemoteUserIdMiddleware.java`：onActing/onAgent 阶段把 Channel 链路的 peer/gw-hash userId 经 `SessionUserStore` 反查规范 userId 写回 `RuntimeContext`（与 `McpUserContextMiddleware` 同源逻辑复用 `SessionKeyResolver`），供 `AgentSpawnTool.currentUserId` 取到真值（F10）。
+4. 新增 `service/RemoteUserIdMiddleware.java`：onActing/onAgent 阶段把 Channel 链路的 peer/gw-hash userId 经 `SessionUserStore` 反查规范 userId 写回 `RuntimeContext`（与 `McpUserContextMiddleware` 同源逻辑复用 `SessionKeyResolver`），供 `AgentSpawnTool.currentUserId` 取到真值（F10）。**只写回 userId、不写回 sessionId**（§5.6 决策）。
 5. `OafReloadService` 整包重建已重走 factory，声明随 reload 刷新（现有机制，e2e 覆盖）。
 
 **平台端（backend）**
@@ -226,12 +235,12 @@ config:
 
 ## 11. 实施计划
 
-- **M0 双服务探针（先行，1–2 天，/tmp 双进程不动主干）**，断言（两轮评审后扩为七项）：
-  ① background spawn（timeout_seconds=0）→ 子 ask 挂起 → **确认事件形态**（`RequireUserConfirmEvent` 直达父流 vs 任务快照）→ Bridge 落卡 → 批准 → `resumeTask` → **批准后汇总 turn 可见**（SSE 流尾或 subscribe 续传）全链路；
+- **M0 双服务探针（先行，1–2 天，/tmp 双进程不动主干）**，断言（三轮评审/确认后定稿为七项）：
+  ① background spawn（timeout_seconds=0）→ 子 ask 挂起 → **确认事件形态终裁**（预期以 `RemotePendingConfirm` 快照为主、`RequireUserConfirmEvent` 直达为备选，F13）→ Bridge 落卡 → 批准 → `resumeTask` → **批准后汇总 turn 可见**（SSE 流尾或 subscribe 续传——需 Bridge 自行 emit 事件总线，§4 步骤 7 实现要点）全链路；
   ② 拒绝分支（DENY 决策 → 子任务终止 → 汇总汇报）；
-  ③ 父进程崩溃重启后任务状态重查与续跑；
-  ④a `deny_rules` 下传生效；④b TaskRecord 经 WorkspaceManager 构造落 agent_fs（含 getter 可达性）；④c **子侧收到 `user_id` == 规范用户**（Channel 链路 peer 场景）；④d `McpUserContextMiddleware` 在 agent-protocol 路径的行为（含 session_user 反查分支）；④e jackson 2.21.1 与 Spring Boot 3.3 管理版本兼容。
-  **任何一条不通即回炉设计**（① 决定 Bridge 识别实现；④b 决定 §7 首选/退化；④c 决定 RemoteUserIdMiddleware 必要性）。
+  ③ 父进程崩溃重启后任务状态重查与续跑（子侧按 gw-hash 聚合 parent_session_id 属 §5.6 已知偏差，不判 bug）；
+  ④a `deny_rules` 下传生效；④b TaskRecord 经 WorkspaceManager 构造落 agent_fs 的实际行为（getter 已验证存在，§7）；④c **子侧收到 `user_id` == 规范用户**（Channel 链路 peer 场景，决定 RemoteUserIdMiddleware 必要性）；④d `McpUserContextMiddleware` 在 agent-protocol 路径的行为（含 session_user 反查分支）；④e 依赖兼容（jackson 2.21.1 × Spring Boot 3.3 管理版本 + 自动配置共存；agent-protocol 不带 grpc，无 grpc 面）。
+  **任何一条不通即回炉设计**（① 决定 Bridge 识别实现；④b 决定 §7 首选/退化）。
 - **M1 框架能力**：§8 member 1–4/6 + lead 1–4；单测（endpoint→声明映射、md 跳过、Bridge 决策路由与 FIFO、AuthFilter fail-fast、RemoteUserIdMiddleware）+ e2e 新增 **T 组**（远程子 agent：正常/确认/拒绝/超时/子服务下线/父崩溃恢复/无 token 401/存量服务零影响；双进程编排参考 `plugin-smoke.sh` 先例）。
 - **M2 业务示例包**：trip-lead + booking + approval 三包经平台发布走通，验收按 §12；**顺带量化 token 成本**（子任务独立上下文的放大倍数，写入运维文档）。
 - **M3 加固**：L4 PhaseDenyMiddleware、EventBus Redis 化与多副本放开、平台 Job 薄封装、`AGENT_REACT_MAX_ITERS` 实测调优、Ingress overlay 排除 /tasks（可选纵深）。
@@ -258,9 +267,10 @@ config:
 4. OAF 规范演进：`agents[].endpoint` 语义从"保留未用"变为"远程子 agent"，需同步规范/发布助手/平台校验（§8 文档清单）。
 5. lead 单轮需容纳两阶段多次 spawn，`AGENT_REACT_MAX_ITERS`（默认 20）按 M2 实测调。
 6. 远程声明 `description` 现仅 `role` 一句（`delegations` SDK 不识别），路由质量依赖描述质量——M1 与本地 subagent 描述增强一并修。
-7. **`HarnessAgent` 的 WorkspaceManager getter 可达性未验证**（§7 首选方案的前提，M0 ④b；退化路径已备）。
+7. ~~WorkspaceManager getter 可达性未验证~~ **已验证存在**（`HarnessAgent.getWorkspaceManager()` 公开方法，javap 实证，第三轮 C1）；M0 ④b 收窄为验证 store 落库行为，异常走 §7 退化路径。
 8. **多 agent 链路 token 成本放大**（子任务独立上下文），M2 量化后定预算策略；当前无配额机制。
 9. Bridge 终态唤醒依赖 `/wait` 长轮询的可用性（默认 `sseTimeoutMs=3h` 覆盖）；极端情况退化为下一用户 turn 消费交付（不悬挂，仅延迟可见）。
+10. Bridge 复刻 controller 层 SessionEventBus emit（或抽公共方法）涉及 `ChatStreamController` 现有链路重构——回归依赖 T 组与既有 durable SSE 用例（第三轮 C5）。
 
 ## 14. 附录：评审记录
 
@@ -293,3 +303,14 @@ config:
 | P3-10 | plan_id 检索=JSON LIKE，量级未定义 | — | §10 明确现状与后续优化定位 |
 | P3-11 | WorkspaceManager getter 可达性未入风险清单 | — | §13.7 |
 | P3-12 | token 成本治理缺失；AGENTS.md 等文档更新未列 | — | §13.8 + §8 文档更新清单 + M2 量化 |
+
+### 第三轮（2026-09-28，残余确认）
+
+| # | 事项 | 结论 | 处置 |
+|---|------|------|------|
+| C1 | WorkspaceManager getter 可达性（原风险 13.7） | javap 实证 `HarnessAgent.getWorkspaceManager()` 存在 | §7/§13.7 关闭；M0 ④b 收窄为落库行为验证 |
+| C2 | 确认事件形态静态线索 | AgentSpawnTool 内部为 `List<RemotePendingConfirm>`，无裸 `RequireUserConfirmEvent` 字样（F13） | §5.5 以 RemotePendingConfirm 为主形态准备，M0 ① 终裁 |
+| C3 | member 端默认 AgentFactory × OAF reload | 默认工厂拿 Spring bean，`swapAgent` 只换 volatile 引用不换 bean → reload 后协议任务跑旧 agent 实例（**新发现遗漏**，F14） | §8 member-3：自定义 AgentFactory 接 `agentRuntimeService.getAgent()`（复刻 A2aAgentRefHolder 模式） |
+| C4 | parent_session_id 传 gw-hash | Channel 链路 `ctx.sessionId` 即 gw-hash（issue #44 同源），静态确认 | §5.6 已知偏差：不写回 sessionId、Bridge 表承担关联、M0 ③ 不判 bug |
+| C5 | invokeStream 是否写 durable 事件流 | 否——SessionEventBus emit 是 Controller 层职责（`AgentRuntimeService:486` 注释） | §4 步骤 7 实现要点 + §13.10 回归风险 |
+| C6 | agent-protocol 依赖面 | 不带 grpc（aistio 才有 grpc 传递面） | M0 ④e 范围收窄为 jackson + 自动配置共存 |
