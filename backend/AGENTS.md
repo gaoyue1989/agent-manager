@@ -57,7 +57,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - **平台配置 API**：`GET/PUT /api/v1/platform-config`（PUT 部分更新：出现=设置、空串=删除、缺失=不变；未知键 400；清除必填键 400；展示视图敏感值永不回明文）、`GET /api/v1/platform-config/defaults`（预填数据源）
 - **服务 Secret 生命周期**：publish 创建（无敏感键为空对象）；Delete 连带清理（RBAC secrets `get/list/create/update/delete`，delete 仅此路径使用）；Unpublish 保留
 - **RBAC**：platform-backend Role 含 secrets `get/list/create/update/delete`（manifests/platform.yaml）；overlay 不变量：envFrom 两源引用必须保留（template.go）
-- MCP：`publish_service`/`update_service_env` 自动继承路由（`UpdateEnvIn` 增 `secretKeys`）；`get/update_platform_config` 工具为 P2
+- MCP：`publish_service`/`update_service_env` 自动继承路由（`UpdateEnvIn` 增 `secretKeys`）；`get_platform_defaults` 返回预填数据源（values 含敏感明文 + fields 元数据，供发布助手预填 env，敏感值不得回显进回复）；设置页通道 `get/update_platform_config` 工具仍为 P2
 
 ## 包在线预览与编辑（package_version.go + fs.go 扩展）
 

@@ -169,6 +169,16 @@ func TestMCPPublishFlowAndReservedKey(t *testing.T) {
 	}
 	svcID := uint(out["serviceId"].(float64))
 
+	// 等待异步 waiter 推进到终态（fake 集群不可达 → deploy_failed）：
+	// UpdateEnv 拒绝 deploying 状态，顺序调用与异步推进存在窗口竞态（CI 实测 flake）
+	for i := 0; i < 50; i++ {
+		_, out, _ = call(t, cs, "get_service_status", map[string]any{"serviceId": svcID})
+		if out["status"] == "deploy_failed" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	isErr, out, _ = call(t, cs, "get_service_status", map[string]any{"k8sName": "oaf-acme-demo"})
 	if isErr || out["status"] == "" {
 		t.Fatalf("get_service_status by k8sName: %v", out)
@@ -231,6 +241,64 @@ func TestMCPListServicesFilter(t *testing.T) {
 	isErr, out, _ = call(t, cs, "list_services", map[string]any{"status": "running"})
 	if isErr || len(out["items"].([]map[string]any)) != 0 {
 		t.Fatalf("filter running should be empty: %v", out)
+	}
+}
+
+// get_platform_defaults：平台默认配置预填数据源（values 含敏感明文 + fields 元数据）。
+func TestMCPGetPlatformDefaults(t *testing.T) {
+	cs, core, done := newMCPClient(t)
+	defer done()
+
+	// 未配置：values 为空对象
+	isErr, out, _ := call(t, cs, "get_platform_defaults", map[string]any{})
+	if isErr {
+		t.Fatalf("get_platform_defaults empty: %v", out)
+	}
+	if values, ok := out["values"].(map[string]any); !ok || len(values) != 0 {
+		t.Fatalf("empty config should yield empty values: %v", out["values"])
+	}
+
+	if _, err := core.UpdatePlatformConfig(map[string]string{
+		"LLM_API_KEY":         "sk-test-123",
+		"LLM_BASE_URL":        "https://api.example.com/v1",
+		"CHECKPOINT_PASSWORD": "pw",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	isErr, out, _ = call(t, cs, "get_platform_defaults", map[string]any{})
+	if isErr {
+		t.Fatalf("get_platform_defaults: %v", out)
+	}
+	values, _ := out["values"].(map[string]any)
+	// 含敏感键明文（与 GET /platform-config/defaults 同源，供发布 env 预填）
+	if values["LLM_API_KEY"] != "sk-test-123" || values["CHECKPOINT_PASSWORD"] != "pw" {
+		t.Fatalf("values should contain configured defaults incl. sensitive plaintext: %v", values)
+	}
+	if _, exists := values["LLM_MODEL_ID"]; exists {
+		t.Fatalf("unconfigured keys must not appear: %v", values)
+	}
+
+	// 字段元数据：required/sensitive 标记齐全；SANDBOX_ENABLED 明确排除（保护包 frontmatter 三层裁决）
+	fields, _ := out["fields"].([]any)
+	seen := map[string]map[string]any{}
+	for _, f := range fields {
+		fm, ok := f.(map[string]any)
+		if !ok {
+			t.Fatalf("field entry should be object: %v", f)
+		}
+		key, _ := fm["envKey"].(string)
+		seen[key] = fm
+	}
+	if len(seen) == 0 {
+		t.Fatalf("fields metadata missing: %v", out["fields"])
+	}
+	if _, exists := seen["SANDBOX_ENABLED"]; exists {
+		t.Fatal("SANDBOX_ENABLED must be excluded from platform config template")
+	}
+	llmKey := seen["LLM_API_KEY"]
+	if llmKey == nil || llmKey["sensitive"] != true || llmKey["required"] != true || llmKey["group"] != "llm" {
+		t.Fatalf("LLM_API_KEY metadata wrong: %v", llmKey)
 	}
 }
 

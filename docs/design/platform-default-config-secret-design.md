@@ -214,6 +214,8 @@ Ensure 时机三处（幂等，参照既有 `EnsureConfigMap`）：① backend �
 
 MCP 对齐（P2，见 §9）：`get_platform_config` / `update_platform_config`；`publish_service` / `update_service_env` 自动继承路由与掩码（同调 Core 层）；`get_service_status` 现将 `detail.EnvJSON` 原文直出（server.go:221-225），需同步改为"非敏感 env + envSecretKeys 掩码"结构。注意敏感参数会进入 release-agent 会话历史与 checkpoint（轨迹落 MySQL/Redis），实现时敏感值需掩码回显并标注"页面为推荐通道"。
 
+**defaults 通道（2026-09-28 已落地）**：新增 MCP 工具 `get_platform_defaults`——发布助手是发布向导的对话形态，与前端预填同源同语义（values 含敏感明文，供整体填充 publish/update 的 env 参数，敏感键自动路由服务 Secret；fields 携带 required/sensitive 元数据）；工具描述与 release-agent 规范（AGENTS.md 工作规范 3 / env-required skill）均要求敏感值不得回显进回复。`get/update_platform_config`（设置页 schema 通道）仍按本节掩码口径作为 P2 待办。
+
 ## 5. 前端设计
 
 ### 5.1 新页面 `/settings`（平台默认配置）
@@ -296,7 +298,7 @@ MCP 对齐（P2，见 §9）：`get_platform_config` / `update_platform_config`�
 - **E2E**（2026-09-28 两轮实跑，CI 之外本机集群执行）：
   - 新增 `e2e/platform-config-secret-e2e.sh`（46 断言全绿）：P 场景模板 schema/PUT 掩码/未知键与清必填 400；Q 场景集群拆分渲染（Secret 敏感 / CM 非敏感互斥断言）；R 场景发布**不带 env** → running（默认值跑通 LLM/MySQL/Redis 全链路）+ envFrom 四源顺序 + Pod 内敏感键存在性（值不回显）+ 服务 CM 空对象；S 场景携带敏感键发布 → 路由服务 Secret、详情无明文、envSecretKeys 掩码；T 场景 sticky 保持 + 空串删除回落默认；U 场景 apply-restart 点名生效 + spec 重刷保持四源；V 场景删除零残留且平台对象保留；
   - 存量 `platform-e2e.sh` 回归 50/50 全绿（修复其 E1 用例 `/tmp/opencode` 目录未创建的存量缺陷）；`package-edit-e2e.sh`/`file-support-e2e.sh` 等携带敏感键 env 的脚本与新路由语义兼容（值仍送达 Pod，仅落点移入 Secret）。
-- **P2 待办**：MCP 工具 `get/update_platform_config`；`get_service_status` 的 env 输出改造为掩码结构；manifests 自举 secret 占位符化；release-agent 静态清单 env 可改用发布页默认填入。
+- **P2 待办**：MCP 工具 `get/update_platform_config`（`get_platform_defaults` 已落地，见 §4 defaults 通道）；`get_service_status` 的 env 输出改造为掩码结构；manifests 自举 secret 占位符化；release-agent 静态清单 env 可改用发布页默认填入。
 
 ### R3 实施与验证（同日，最终形态）
 
