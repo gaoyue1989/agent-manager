@@ -12,9 +12,9 @@ import org.springframework.stereotype.Service;
  * Turn 租约存储（turn_lease 表，无状态单次流架构 4.1.3）。
  *
  * <p>租约解决的是产品语义：同一 session 的活跃执行段并发会产生重复 turn，
- * 故以租约将执行段串行化。锁只覆盖活跃执行段（消息进入 → AGENT_END/error/
- * permission_ask 暂停点），不覆盖人工决策挂起期——HITL 暂停即让出锁，
- * 挂起期间新消息可直接 acquire 执行。
+ * 故以租约将执行段串行化。锁只覆盖活跃执行段（消息进入 → AGENT_END/error 收尾），
+ * 不覆盖人工决策挂起期——HITL 挂起后随 turn 收尾放锁；挂起期间新消息由 chat 入口
+ * 预检拒绝（#47/#48），confirm 恢复需重新 acquire（带超时排队，桥接收尾窗口）。
  *
  * <p>实现：租约 token + 短 TTL + 续租（不用 GET_LOCK，避免长 turn 耗尽连接池）。
  * 轮询为独立短连接，不占用连接池；崩溃由 TTL 过期兜底接管。

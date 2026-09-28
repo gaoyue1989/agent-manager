@@ -284,7 +284,7 @@ class AgentRuntimeServiceHitlTest {
             io.agentscope.core.message.ToolCallState.ASKING);
         when(confirmContextStore.findPending(anyString())).thenReturn(
             java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
-                "reply-1", List.of(tableBlock), Instant.now())));
+                "reply-1", List.of(tableBlock), Instant.now(), null, null)));
 
         // state 侧：同名工具但参数为空（实测 SDK 行为）
         var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
@@ -464,7 +464,7 @@ class AgentRuntimeServiceHitlTest {
             Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
         when(confirmContextStore.findPending(anyString())).thenReturn(
             java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
-                "reply-1", List.of(tableBlock), Instant.now())));
+                "reply-1", List.of(tableBlock), Instant.now(), null, null)));
 
         var agent2 = mock(HarnessAgent.class);
         var replyMsg = mock(Msg.class);
@@ -501,7 +501,7 @@ class AgentRuntimeServiceHitlTest {
             Map.of(), "{}", null, io.agentscope.core.message.ToolCallState.ASKING);
         when(confirmContextStore.findPending(anyString())).thenReturn(
             java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
-                "reply-1", List.of(tableBlock), Instant.now())));
+                "reply-1", List.of(tableBlock), Instant.now(), null, null)));
 
         var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
         var stateBlock = new ToolUseBlock("call-1", "publish_service",
@@ -561,7 +561,7 @@ class AgentRuntimeServiceHitlTest {
                 List.of(), Map.of(), "", Map.of("session_id", "", "user_id", "")));
         when(confirmContextStore.findPending(anyString())).thenReturn(
             java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
-                "reply-1", List.of(toolUseBlock("call-1")), Instant.now())));
+                "reply-1", List.of(toolUseBlock("call-1")), Instant.now(), null, null)));
         service.setAgentStateReader(stateReader);
 
         assertTrue(service.hasPendingConfirm(SID));

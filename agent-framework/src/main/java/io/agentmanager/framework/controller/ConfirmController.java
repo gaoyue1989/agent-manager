@@ -36,14 +36,19 @@ import reactor.core.publisher.Flux;
  * <p>错误码（12.5）：缓存 miss → 404 {@code confirm_context_not_found}；重复确认（CAS 防护）→ 409
  * {@code confirm_already_consumed}；confirm-stream 预检失败以 error SSE 帧返回。
  *
- * <p>执行权语义：confirm 恢复 = 新执行段，confirm-stream 需先 acquire turn 租约；permission_ask
- * 暂停点锁已让出，此处通常可直接抢到；抢不到（并发确认/新消息正在执行）→ error 帧 turn_in_progress。
+ * <p>执行权语义：confirm 恢复 = 新执行段，两侧端点都先带超时排队抢 turn 租约。chat 侧
+ * permission_ask 后租约要到 turn 收尾（AGENT_END 处理）才释放——保证 ASKING 快照先落库，
+ * confirm 撞进这个收尾窗口时排队等一拍即可；超时仍抢不到（并发确认/新消息正在执行）→
+ * 409 turn_in_progress / error 帧 turn_in_progress。
  */
 @RestController
 @RequestMapping("/threads/{sessionId}")
 public class ConfirmController {
 
     private static final Logger log = LoggerFactory.getLogger(ConfirmController.class);
+
+    /** 抢锁排队上限：覆盖 ask 段收尾尾部时延（百毫秒级）绰绰有余，又不在长 turn 上久挂 */
+    private static final java.time.Duration ACQUIRE_WAIT = java.time.Duration.ofSeconds(10);
 
     private final AgentRuntimeService runtimeService;
     private final TurnLeaseStore turnLeaseStore;
@@ -102,7 +107,8 @@ public class ConfirmController {
         // 抢 Turn 租约：与 confirm-stream / chat 同一把锁（turn_lease 表，跨副本互斥）。
         // 未抢到说明该会话正有执行段在跑（另一副本的对话/确认，或本会话上一段未释放），
         // 此时不得恢复执行——否则两个执行段会同时写同一份 AgentState。
-        var token = turnLeaseStore.tryAcquire(sessionId);
+        // 带超时排队：桥接 ask 段收尾窗口（见 ACQUIRE_WAIT），超时回落 409。
+        var token = turnLeaseStore.acquire(sessionId, ACQUIRE_WAIT);
         if (token == null) {
             log.info("[confirm] turn_in_progress, rejected (sid={})", sessionId);
             return ResponseEntity.status(409).body(Map.of(
@@ -165,8 +171,8 @@ public class ConfirmController {
                 return;
             }
 
-            // ===== 2. 抢 Turn 租约 =====
-            var token = turnLeaseStore.tryAcquire(finalSessionId);
+            // ===== 2. 抢 Turn 租约（带超时排队，桥接 ask 段收尾窗口；超时回 error 帧）=====
+            var token = turnLeaseStore.acquire(finalSessionId, ACQUIRE_WAIT);
             if (token == null) {
                 sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
                     + "' has an active turn"));

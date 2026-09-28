@@ -25,8 +25,10 @@ import org.slf4j.LoggerFactory;
  * <p><b>调用方必须在写入前检查 {@link #isLost()}</b>：判定为丢锁意味着本副本已不再拥有该
  * session 的写入权，继续 append 会用与接管者重叠的 seq 区间写事件。
  *
- * <p>语义约束：租约只覆盖活跃执行段；permission_ask（HITL 暂停点）即让出锁；挂起期间新消息
- * 可直接执行；confirm-stream 恢复 = 新执行段需重新 acquire。
+ * <p>语义约束：租约只覆盖活跃执行段，到 turn 收尾（AGENT_END/error 处理）释放；HITL
+ * permission_ask 只落确认上下文 + 广播帧，不提前让出锁（ASKING 快照随收尾落库后再放行
+ * confirm 恢复）；挂起期间新消息由 chat 入口预检拒绝；confirm-stream 恢复 = 新执行段需
+ * 重新 acquire（带超时排队）。
  */
 public final class TurnLeaseGuard implements AutoCloseable {
 
