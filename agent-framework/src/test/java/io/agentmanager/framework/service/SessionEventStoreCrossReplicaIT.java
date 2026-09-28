@@ -17,11 +17,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.http.codec.ServerSentEvent;
 
 import io.agentmanager.framework.config.AgentRedisProperties;
-import io.lettuce.core.ClientOptions;
-import io.lettuce.core.RedisClient;
-import io.lettuce.core.RedisURI;
-import io.lettuce.core.SocketOptions;
-import io.lettuce.core.TimeoutOptions;
+import io.agentmanager.framework.redis.RedisConnectionFacade;
 
 /**
  * 跨副本（两个 Pod 共用一个 Redis）集成测试——验证 session_event 从 MySQL 迁到 Redis Streams
@@ -35,7 +31,7 @@ import io.lettuce.core.TimeoutOptions;
  * 测试就只是在测假实现（与 {@code RedisEventLogIT} 同一取向）。
  *
  * <h2>「两个 Pod」是怎么建模的</h2>
- * 两个**独立的 {@link RedisClient}**（两条独立 TCP 连接）各自包一个 {@link RedisEventLog} 与一个
+ * 两个**独立的 {@link RedisConnectionFacade}**（两条独立 TCP 连接）各自包一个 {@link RedisEventLog} 与一个
  * {@link SessionEventStore}，分别叫 {@code podA} / {@code podB}。关键在于两个 store 实例：
  * seq 计数器（{@code seqCounters}）与攒批缓冲（{@code pending}）都是**实例私有字段**，所以
  * 「B 没见过这个 session」在进程内是真的——它没有该 session 的任何计数器与缓冲，
@@ -77,8 +73,8 @@ class SessionEventStoreCrossReplicaIT {
     private static final Duration AWAIT = Duration.ofSeconds(15);
 
     private String url;
-    private RedisClient podAClient;
-    private RedisClient podBClient;
+    private RedisConnectionFacade facadeA;
+    private RedisConnectionFacade facadeB;
     private RedisEventLog logA;
     private RedisEventLog logB;
     private SessionEventStore podA;
@@ -90,13 +86,13 @@ class SessionEventStoreCrossReplicaIT {
     @BeforeAll
     void setUp() {
         url = System.getenv().getOrDefault("REDIS_IT_URL", "redis://127.0.0.1:6379");
-        // 两个 client = 两条独立连接，模型上对应两个 Pod 各自的 Redis 连接；
+        // 两个门面 = 两条独立连接，模型上对应两个 Pod 各自的 Redis 连接；
         // 「共享」的部分只有 Redis 本身，客户端侧不缓存任何东西
-        podAClient = newClient(url);
-        podBClient = newClient(url);
-        logA = new RedisEventLog(podAClient,
+        facadeA = newFacade(url);
+        facadeB = newFacade(url);
+        logA = new RedisEventLog(facadeA,
             new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM));
-        logB = new RedisEventLog(podBClient,
+        logB = new RedisEventLog(facadeB,
             new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM));
         podA = new SessionEventStore(logA, 7, BATCH_SIZE, FLUSH_INTERVAL_MS);
         podB = new SessionEventStore(logB, 7, BATCH_SIZE, FLUSH_INTERVAL_MS);
@@ -104,8 +100,8 @@ class SessionEventStoreCrossReplicaIT {
 
     @AfterAll
     void tearDown() {
-        podAClient.shutdown();
-        podBClient.shutdown();
+        facadeA.close();
+        facadeB.close();
     }
 
     /**
@@ -124,16 +120,9 @@ class SessionEventStoreCrossReplicaIT {
         sids.clear();
     }
 
-    private static RedisClient newClient(String url) {
-        var client = RedisClient.create(RedisURI.create(url));
-        client.setOptions(ClientOptions.builder()
-            .socketOptions(SocketOptions.builder()
-                .connectTimeout(Duration.ofMillis(2000)).build())
-            .timeoutOptions(TimeoutOptions.enabled(Duration.ofMillis(2000)))
-            .autoReconnect(true)
-            .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
-            .build());
-        return client;
+    private static RedisConnectionFacade newFacade(String url) {
+        return RedisConnectionFacade.create(
+            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM));
     }
 
     /** 每个用例独立的 session id（前缀固定 {@code it-}，@AfterEach 整体清理） */

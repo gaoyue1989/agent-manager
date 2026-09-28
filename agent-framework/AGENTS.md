@@ -287,7 +287,10 @@ OAF `deniedTools` 字段控制排除列表。
 | `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析，保证与 agent_fs 同库） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
-| `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | | session_event 事件流存储（Redis Streams）；集群内必配 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`，缺省指向 Pod 自身 localhost 导致事件不落地（见 docs/api-frontend-sse.md §12） |
+| `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | | session_event 事件流存储（Redis Streams）；集群内必配 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`，缺省指向 Pod 自身 localhost 导致事件不落地（见 docs/api-frontend-sse.md §12）。cluster 模式下兼任单种子节点 |
+| `AGENT_REDIS_MODE` | `standalone` | | 连接模式：`standalone` \| `cluster`（sentinel 暂不支持）；设计见 docs/redis-cluster-prefix-design.md |
+| `AGENT_REDIS_CLUSTER_NODES` | 空 | | cluster 模式种子节点（逗号分隔）；空 = 回落 AGENT_REDIS_URL 作单种子，拓扑自动发现 |
+| `AGENT_REDIS_PREFIX` | 空 | | key 统一前缀（多 Agent 共用 oaf-redis 的隔离切分）；空 = 不加前缀（与存量部署一致）；不能含 `{ }`；改前缀后旧 key 不可见（TTL 消亡），须首次部署时定好 |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件操作/Shell 在 OpenSandbox 隔离沙箱执行） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
