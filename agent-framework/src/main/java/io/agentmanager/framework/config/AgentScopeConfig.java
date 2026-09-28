@@ -213,8 +213,14 @@ public class AgentScopeConfig {
      * AgentStateStore 使用 SandboxAwareMysqlAgentStateStore：官方 MysqlAgentStateStore
      * 拒绝含 "/" 的 ID，而沙箱 slot ID 形如 sandbox/user/{agentId}/{userId（框架固定格式），
      * 需放宽校验以支持沙箱状态持久化。
+     *
+     * <p><b>@DependsOn("flywayInitializer") 不可省</b>：SDK store 构造期就会建
+     * agent_state/agent_fs（CREATE IF NOT EXISTS），若抢在 Flyway 迁移之前执行，全新库上
+     * Flyway 会因 schema 非空走 baseline-on-migrate 路径直接基线收场——V1..V5 全部跳过，
+     * session_user/turn_lease 等表缺失，对话链路静默瘫痪（2026-09-28 CI E2E 四 job 全红根因）。
      */
     @Bean
+    @org.springframework.context.annotation.DependsOn("flywayInitializer")
     public DistributedStore distributedStore(DataSource dataSource, AgentManagerProperties props,
             io.agentmanager.framework.service.SessionMessageStore sessionMessageStore,
             io.agentmanager.framework.config.HistoryConfig historyConfig) {

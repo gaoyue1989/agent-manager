@@ -31,7 +31,7 @@ JAR=$(ls -t "$ROOT"/../target/agent-framework-*.jar 2>/dev/null | head -1)
 [ -n "${JAR:-}" ] || { echo "未找到 jar（先 mvn -DskipTests package）"; exit 1; }
 
 # ---------- -1. 数据重置：清空上一轮 E2E 遗留数据（防脏数据污染 ASK/租约语义） ----------
-# 用 node 直连（无 mysql/redis-cli 依赖）；表由实例启动时 initSchema 重建
+# 用 node 直连（无 mysql/redis-cli 依赖）；表由实例启动时 Flyway 迁移重建（db/migration）
 if [ "${E2E_RESET_DATA:-true}" = "true" ]; then
   node "$ROOT/scripts/reset-data.mjs" "$MYSQL_URL" "$MYSQL_USER" "$MYSQL_PASS" "$REDIS_URL" || true
 fi
