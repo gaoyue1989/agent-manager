@@ -232,9 +232,11 @@ func registerTools(s *mcp.Server, core *service.Core) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "update_service_env",
 		Description: "全量替换服务环境变量并滚动重启（长操作：返回 deploying，需轮询）。" +
-			"注意：env 必须包含全部所需键值（覆盖语义）；AGENT_CONFIG_DIR/SERVER_HOST/SERVER_PORT 为平台保留键不可设置。",
+			"注意：env 必须包含全部所需键值（覆盖语义）；AGENT_CONFIG_DIR/SERVER_HOST/SERVER_PORT 为平台保留键不可设置；" +
+			"模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY）自动路由进服务 Secret。" +
+			"平台共享的默认配置请用平台配置页（/settings）设置。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in UpdateEnvIn) (*mcp.CallToolResult, JSONOut, error) {
-		svc, err := core.UpdateEnv(in.ServiceID, in.Env)
+		svc, err := core.UpdateEnv(in.ServiceID, in.Env, in.SecretKeys)
 		if err != nil {
 			return errResult(err.Error())
 		}
@@ -358,8 +360,9 @@ type StatusIn struct {
 	K8sName   string `json:"k8sName,omitempty"`
 }
 type UpdateEnvIn struct {
-	ServiceID uint              `json:"serviceId"`
-	Env       map[string]string `json:"env"`
+	ServiceID  uint              `json:"serviceId"`
+	Env        map[string]string `json:"env"`
+	SecretKeys []string          `json:"secretKeys,omitempty"`
 }
 type RepublishIn struct {
 	ServiceID uint    `json:"serviceId"`

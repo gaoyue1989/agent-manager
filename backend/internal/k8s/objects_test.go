@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -68,9 +69,27 @@ func TestDeploymentConstruction(t *testing.T) {
 	if cs.Image != "agent-framework:latest" || cs.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("image: %v", cs.Image)
 	}
-	// envFrom ConfigMap
-	if len(cs.EnvFrom) != 1 || cs.EnvFrom[0].ConfigMapRef.Name != "oaf-acme-demo-env" {
-		t.Fatalf("envFrom: %+v", cs.EnvFrom)
+	// envFrom 四源：平台默认 CM/Secret 兜底在前，服务 CM/Secret 在后可覆盖
+	// （K8s 多源同键后引用者覆盖先引用者）
+	if len(cs.EnvFrom) != 4 {
+		t.Fatalf("envFrom should have 4 sources, got %d: %+v", len(cs.EnvFrom), cs.EnvFrom)
+	}
+	wantEnvFrom := []string{
+		DefaultConfigCMName, DefaultSecretName,
+		"oaf-acme-demo-env", EnvSecretName("oaf-acme-demo"),
+	}
+	for i, want := range wantEnvFrom {
+		src := cs.EnvFrom[i]
+		var got string
+		switch {
+		case src.ConfigMapRef != nil:
+			got = src.ConfigMapRef.Name
+		case src.SecretRef != nil:
+			got = src.SecretRef.Name
+		}
+		if got != want {
+			t.Fatalf("envFrom[%d] = %q, want %q (order matters: later overrides)", i, got, want)
+		}
 	}
 	// 固定注入保留键
 	fixed := map[string]string{}
@@ -200,6 +219,19 @@ func TestReservedKeys(t *testing.T) {
 	for _, k := range []string{"AGENT_CONFIG_DIR", "SERVER_HOST", "SERVER_PORT", "AGENT_WORKSPACE_DIR", "HOST_NAME"} {
 		if !ReservedEnvKeys[k] {
 			t.Errorf("%s should be reserved", k)
+		}
+	}
+}
+
+// 平台对象名不得满足服务 CM/Secret 命名模式 {oaf-*}-env(-secret)，
+// 否则特定服务名（如 "agent-default"）会同类型同名碰撞（设计 §3.4 命名规则）。
+func TestPlatformObjectNamesNotColliding(t *testing.T) {
+	suffixes := []string{"-env", "-env-secret"}
+	for _, n := range []string{DefaultConfigCMName, DefaultSecretName} {
+		for _, suf := range suffixes {
+			if strings.HasSuffix(n, suf) {
+				t.Errorf("platform object name %q must not end with %q", n, suf)
+			}
 		}
 	}
 }

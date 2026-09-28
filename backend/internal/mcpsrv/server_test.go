@@ -43,7 +43,7 @@ func newMCPClient(t *testing.T) (*mcp.ClientSession, *service.Core, func()) {
 	if sqlDB, e := db.DB(); e == nil {
 		sqlDB.SetMaxOpenConns(1)
 	}
-	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	dir, _ := os.MkdirTemp("", "oafmcp-*")

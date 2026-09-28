@@ -190,13 +190,14 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 		sv.PATCH("/:id/env", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 			var body struct {
-				Env map[string]string `json:"env"`
+				Env        map[string]string `json:"env"`
+				SecretKeys []string          `json:"secretKeys"`
 			}
 			if err := c.ShouldBindJSON(&body); err != nil {
 				Fail(c, http.StatusBadRequest, err.Error())
 				return
 			}
-			svc, err := core.UpdateEnv(uint(id), body.Env)
+			svc, err := core.UpdateEnv(uint(id), body.Env, body.SecretKeys)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -253,6 +254,49 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 		type img struct{ Image, Label string }
 		OK(c, images)
 	})
+
+	// 平台默认配置：设置页读写 + 显式滚动重启生效（docs/design/platform-default-config-secret-design.md）
+	pc := g.Group("/platform-config")
+	{
+		pc.GET("", func(c *gin.Context) {
+			view, err := core.GetPlatformConfig()
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, view)
+		})
+		pc.PUT("", func(c *gin.Context) {
+			var body struct {
+				Values map[string]string `json:"values"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			view, err := core.UpdatePlatformConfig(body.Values)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, view)
+		})
+		pc.POST("/apply-restart", func(c *gin.Context) {
+			var req service.ApplyRestartRequest
+			if c.Request.ContentLength > 0 {
+				if err := c.ShouldBindJSON(&req); err != nil {
+					Fail(c, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
+			res, err := core.ApplyRestart(req)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, res)
+		})
+	}
 
 	r.GET("/healthz", func(c *gin.Context) {
 		OK(c, gin.H{"status": "up"})

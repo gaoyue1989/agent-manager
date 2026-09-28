@@ -28,14 +28,9 @@ function PublishForm() {
   const [image, setImage] = useState("");
   const [name, setName] = useState("");
   const [replicas, setReplicas] = useState(1);
-  const [envRows, setEnvRows] = useState<EnvRow[]>([
-    { key: "LLM_API_KEY", value: "" },
-    { key: "LLM_MODEL_ID", value: "" },
-    { key: "LLM_BASE_URL", value: "" },
-    { key: "CHECKPOINT_JDBC_URL", value: "jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC" },
-    { key: "CHECKPOINT_USERNAME", value: "oaf" },
-    { key: "CHECKPOINT_PASSWORD", value: "" },
-  ]);
+  // 预填敏感行已移除：LLM/MySQL/Redis/沙箱基础配置由平台默认配置提供（"平台配置"页维护），
+  // 此处仅需按服务覆盖的项；模板敏感键填写后自动路由进服务 Secret（不落 ConfigMap）
+  const [envRows, setEnvRows] = useState<EnvRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState("");
 
@@ -170,7 +165,10 @@ function PublishForm() {
           <button onClick={() => setEnvRows([...envRows, { key: "", value: "" }])} data-testid="add-env-row"
             className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加变量</button>
         </div>
-        <p className="text-xs text-gray-400 mb-2">任意增删改；AGENT_CONFIG_DIR / SERVER_HOST / SERVER_PORT 为平台保留键。</p>
+        <p className="text-xs text-gray-400 mb-2">
+          LLM / MySQL / Redis / 沙箱基础配置由<Link href="/settings" className="text-blue-600 hover:underline mx-1">平台默认配置</Link>提供，此处仅需添加按服务覆盖的项；
+          AGENT_CONFIG_DIR / SERVER_HOST / SERVER_PORT 为平台保留键，敏感键（如 LLM_API_KEY）自动存入服务 Secret。
+        </p>
         <table className="w-full text-sm">
           <tbody data-testid="env-table">
             {envRows.map((r, i) => (

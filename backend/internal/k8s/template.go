@@ -118,16 +118,30 @@ func validateDeployment(p ObjectParams, d *appsv1.Deployment) error {
 		return fmt.Errorf("container %q missing (must not be renamed/dropped)", "agent")
 	}
 	cs := d.Spec.Template.Spec.Containers[agent]
-	// envFrom 必含 {name}-env ConfigMap
-	foundEnvFrom := false
+	// envFrom 必含四源引用：服务 CM/Secret + 平台默认 CM/Secret
+	// （平台默认配置下发链路，docs/design/platform-default-config-secret-design.md §3.1）
+	wantEnvFrom := map[string]bool{
+		p.K8sName + "-env":     false,
+		EnvSecretName(p.K8sName): false,
+		DefaultConfigCMName:    false,
+		DefaultSecretName:      false,
+	}
 	for _, ef := range cs.EnvFrom {
-		if ef.ConfigMapRef != nil && ef.ConfigMapRef.Name == p.K8sName+"-env" {
-			foundEnvFrom = true
-			break
+		name := ""
+		switch {
+		case ef.ConfigMapRef != nil:
+			name = ef.ConfigMapRef.Name
+		case ef.SecretRef != nil:
+			name = ef.SecretRef.Name
+		}
+		if _, ok := wantEnvFrom[name]; ok {
+			wantEnvFrom[name] = true
 		}
 	}
-	if !foundEnvFrom {
-		return fmt.Errorf("envFrom %s-env ConfigMap missing", p.K8sName)
+	for name, found := range wantEnvFrom {
+		if !found {
+			return fmt.Errorf("envFrom %s missing", name)
+		}
 	}
 	// /config 只读 subPath 挂载（OAF 包加载核心机制）+ 平台功能挂载存在性：
 	// volumeMounts 按 mountPath 合并，overlay 可用 $patch: delete 精确移除单条，

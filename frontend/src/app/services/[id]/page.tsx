@@ -21,6 +21,9 @@ export default function ServiceDetailPage() {
   const [msg, setMsg] = useState("");
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [envDirty, setEnvDirty] = useState(false);
+  // 敏感变量：value 仅承载新输入（空且未标记删除 = 保持不变，不上送）；del = 显式删除（回落平台默认）
+  const [secretRows, setSecretRows] = useState<{ key: string; value: string; del: boolean }[]>([]);
+  const [secretDirty, setSecretDirty] = useState(false);
   const [savingEnv, setSavingEnv] = useState(false);
   const [pkg, setPkg] = useState<PackageRec | null>(null);
   const [versions, setVersions] = useState<PackageRec[]>([]);
@@ -33,7 +36,12 @@ export default function ServiceDetailPage() {
       if (!envDirty) {
         let env: Record<string, string> = {};
         try { env = JSON.parse(d.envJson || "{}"); } catch {}
-        setEnvRows(Object.entries(env).map(([key, value]) => ({ key, value })));
+        // 敏感键（含存量未迁移键）从普通区剔除，归入敏感区掩码显示
+        const secretNames = new Set((d.envSecretKeys || []).map((k) => k.key));
+        setEnvRows(Object.entries(env).filter(([key]) => !secretNames.has(key)).map(([key, value]) => ({ key, value })));
+      }
+      if (!secretDirty) {
+        setSecretRows((d.envSecretKeys || []).map((k) => ({ key: k.key, value: "", del: false })));
       }
       // 配置包信息 + 同 slug 版本列表（升级用）；失败不阻塞主视图。
       // 版本列表只拉一次（versionsLoaded 守卫）：5s 轮询重拉会重置升级下拉选择
@@ -47,7 +55,7 @@ export default function ServiceDetailPage() {
     } catch (e: any) {
       setMsg(`加载失败: ${e.message}`);
     }
-  }, [id, envDirty, versionsLoaded]);
+  }, [id, envDirty, secretDirty, versionsLoaded]);
 
   useEffect(() => {
     load();
@@ -68,10 +76,18 @@ export default function ServiceDetailPage() {
 
   const saveEnv = async () => {
     const env: Record<string, string> = {};
+    const secretKeys: string[] = [];
     for (const r of envRows) if (r.key.trim()) env[r.key.trim()] = r.value;
+    // 敏感键三态：输入新值=设置、标记删除=清空（回落平台默认）、两者皆无=保持不变（sticky 不上送）
+    for (const r of secretRows) {
+      if (!r.key.trim()) continue;
+      if (r.del) { env[r.key.trim()] = ""; secretKeys.push(r.key.trim()); }
+      else if (r.value.trim()) { env[r.key.trim()] = r.value.trim(); secretKeys.push(r.key.trim()); }
+    }
     setSavingEnv(true);
-    await act(() => api.updateEnv(id, env), "env 已更新，滚动重启中");
+    await act(() => api.updateEnv(id, env, secretKeys), "env 已更新，滚动重启中");
     setEnvDirty(false);
+    setSecretDirty(false);
     setSavingEnv(false);
   };
 
@@ -160,17 +176,18 @@ export default function ServiceDetailPage() {
         )}
       </section>
 
-      {/* env 编辑 */}
+      {/* env 编辑：普通变量（ConfigMap 全量覆盖）+ 敏感变量（服务 Secret 掩码） */}
       <section className="bg-white border rounded p-4">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="font-medium">环境变量（全量覆盖语义）</h2>
+          <h2 className="font-medium">环境变量</h2>
           <div className="space-x-2">
             <button onClick={() => { setEnvRows([...envRows, { key: "", value: "" }]); setEnvDirty(true); }}
-              data-testid="detail-add-env" className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加</button>
+              data-testid="detail-add-env" className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加变量</button>
             <button onClick={saveEnv} disabled={savingEnv} data-testid="save-env-btn"
               className="text-xs px-3 py-1 bg-blue-600 disabled:opacity-50 text-white rounded hover:bg-blue-700">保存并滚动重启</button>
           </div>
         </div>
+        <p className="text-xs text-gray-400 mb-2">普通变量（全量覆盖语义）：</p>
         <table className="w-full text-sm">
           <tbody>
             {envRows.map((r, i) => (
@@ -190,6 +207,42 @@ export default function ServiceDetailPage() {
             ))}
           </tbody>
         </table>
+        <div className="flex items-center justify-between mt-4 mb-2 pt-3 border-t">
+          <h3 className="text-sm font-medium">敏感变量 <span className="text-[10px] px-1 rounded bg-gray-100 border text-gray-500">🔒 存于服务 Secret</span></h3>
+          <button onClick={() => { setSecretRows([...secretRows, { key: "", value: "", del: false }]); setSecretDirty(true); }}
+            data-testid="detail-add-secret" className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加敏感变量</button>
+        </div>
+        <p className="text-xs text-gray-400 mb-2">
+          值保存后不回显；输入新值=覆盖，留空=保持不变，点「删除」=移除该键（回落平台默认配置）。
+        </p>
+        {!secretRows.length ? <p className="text-xs text-gray-400" data-testid="dsecret-empty">无敏感变量（平台默认配置生效）</p> : (
+          <table className="w-full text-sm">
+            <tbody>
+              {secretRows.map((r, i) => (
+                <tr key={i} className={r.del ? "opacity-50" : ""}>
+                  <td className="pr-2 pb-2 w-2/5">
+                    <input value={r.key} onChange={(e) => { setSecretRows(secretRows.map((x, j) => j === i ? { ...x, key: e.target.value } : x)); setSecretDirty(true); }}
+                      placeholder="KEY（如 LLM_API_KEY）" data-testid={`dsecret-key-${i}`} className="border rounded p-1.5 w-full" />
+                  </td>
+                  <td className="pr-2 pb-2">
+                    <input type="password" autoComplete="new-password" value={r.value}
+                      onChange={(e) => { setSecretRows(secretRows.map((x, j) => j === i ? { ...x, value: e.target.value } : x)); setSecretDirty(true); }}
+                      placeholder="已配置，输入新值覆盖" data-testid={`dsecret-value-${i}`} className="border rounded p-1.5 w-full" />
+                  </td>
+                  <td className="pb-2 whitespace-nowrap">
+                    {r.del ? (
+                      <button onClick={() => { setSecretRows(secretRows.map((x, j) => j === i ? { ...x, del: false } : x)); setSecretDirty(true); }}
+                        className="text-xs text-gray-500 hover:text-gray-700 px-2 underline">撤销删除</button>
+                    ) : (
+                      <button onClick={() => { setSecretRows(secretRows.map((x, j) => j === i ? { ...x, del: true } : x)); setSecretDirty(true); }}
+                        data-testid={`dsecret-del-${i}`} className="text-xs text-red-500 hover:text-red-700 px-2">删除</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       {/* Agent Card */}

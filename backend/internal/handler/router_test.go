@@ -44,7 +44,7 @@ func newTestServer(t *testing.T) (*gin.Engine, *service.Core, *k8sclient.FakeK8s
 	if sqlDB, e := db.DB(); e == nil {
 		sqlDB.SetMaxOpenConns(1)
 	}
-	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	dir, _ := os.MkdirTemp("", "oaffs-*")
