@@ -30,7 +30,8 @@ import io.agentmanager.framework.redis.RedisConnectionFacade;
  *   REDIS_IT=1 REDIS_IT_URL=redis://127.0.0.1:6399 mvn test -Dtest=RedisEventLogIT
  * </pre>
  *
- * <p>key 前缀固定为 {@code sess:it-<uuid>:*}，每个用例结束即删，不会碰到真实业务数据。
+ * <p>key 前缀固定为 {@code sess:it-<uuid>:*}（REDIS_IT_PREFIX 非空时整体再带该前缀），
+ * 每个用例结束即删，不会碰到真实业务数据。
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfEnvironmentVariable(named = "REDIS_IT", matches = "true|1")
