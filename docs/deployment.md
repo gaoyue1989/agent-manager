@@ -138,3 +138,33 @@ kubectl -n agent-platform set env deploy/platform-backend DEPLOYMENT_TEMPLATE-  
 - overlay 按 K8s Strategic Merge Patch 语义合并：`volumes`/`containers` 按 name 子合并（换 PVC 名只写 `claimName` 一个字段），其余内置字段保留；追加容器即新增 sidecar。
 - 非法 overlay **启动即失败**（backend CrashLoop，日志指明违例项）；发布期二次校验兜底，违规发布被拒、服务转 error。
 - overlay 变更只影响之后 apply 的服务；**存量服务需 republish 或 rollout restart 才滚动到新形态**。
+
+## 七、业务 Ingress 环境模板（INGRESS_TEMPLATE，可选）
+
+每个业务服务的 Ingress 由 platform-backend 内置逻辑构造；需要自定义**域名（host）、对外前缀（path）、TLS、白名单/CORS 类注解**时，可通过可选的 YAML overlay 调整，不改 Go 代码。模式与 §六 完全一致：
+
+```bash
+# 1) 从示例裁剪出环境的 overlay
+#    合并规则/占位符/校验不变量/完整 rules 抄改样例见 backend/templates/ingress-overlay.example.yaml 注释
+kubectl -n agent-platform create configmap ingress-template \
+  --from-file=overlay.yaml=backend/templates/ingress-overlay.example.yaml
+
+# 2) 挂载给 platform-backend 并设置环境变量（volume/mount 与 §六 可复用同名资源则跳过）
+kubectl -n agent-platform patch deploy platform-backend --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"ingress-tpl","mountPath":"/etc/oaf/ingress-template","readOnly":true}},
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"ingress-tpl","configMap":{"name":"ingress-template"}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"INGRESS_TEMPLATE","value":"/etc/oaf/ingress-template/overlay.yaml"}}]'
+
+# 3) 生效与回滚
+kubectl -n agent-platform rollout restart deployment/platform-backend   # 新发布/republish 即带 overlay 形态
+kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # 回滚=去掉环境变量
+```
+
+行为要点：
+
+- **不设置 `INGRESS_TEMPLATE` = 纯内置构造**，行为与未上此功能前完全一致。
+- 占位符发布期按服务替换：`{{K8S_NAME}}`（backend 指向 `{{K8S_NAME}}-svc`）、`{{SHORT_NAME}}`（path 前缀）；**不得硬编码服务名/metadata.name**（启动探针即拒绝）。
+- `annotations`/`labels` 按 key 合并（只写新增项即保留内置注解）；**`rules`/`tls` 写了即整体替换**——改 host/path 必须抄完整 rules 块。
+- 校验不变量：backend 必须指向本服务；path 必须保留 `(/|$)(.*)` 尾缀（rewrite 依赖）；`x-forwarded-prefix` 必须与对外前缀一致（改 path 同步改）；SSE 长超时注解必须保留。
+- 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：host 取规则的 Host（空回落 `INGRESS_HOST`）、配 TLS 按 https 拼、端口取 `INGRESS_PORT`（Host 自带端口不重复拼）。改 host 后 DNS/端口可达性由环境自行保证；环境未在 `INGRESS_PORT` 终止 TLS 时不要配 TLS。
+- 非法 overlay 启动即失败；发布/republish 期违规直接拒绝（Publish 不落库，Republish 保持原状）。存量服务需 republish 才滚动到新形态。
