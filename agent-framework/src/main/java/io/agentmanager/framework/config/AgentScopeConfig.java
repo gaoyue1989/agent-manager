@@ -51,6 +51,7 @@ public class AgentScopeConfig {
         WorkspaceSyncService workspaceSyncService,
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
+        SessionUserStore sessionUserStore,
         org.springframework.beans.factory.ObjectProvider<RedisClient> redisClientProvider
     ) {
         if (!sandboxRuntime.enabled()) {
@@ -59,6 +60,10 @@ public class AgentScopeConfig {
         }
         log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={})",
             config.opensandbox().serverUrl(), config.image());
+        // 业务规范键解析（issue #52）：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId），
+        // 沙箱 userKey 须经 session_user 反查真实用户，否则 per-user 技能物化/回写退化为
+        // per-session 命名空间。与 HarnessAgentFactory 的 LLM 记录/span 翻译同一实现（memo 共享）。
+        var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
         var spec = new OpenSandboxFilesystemSpec()
             .serverUrl(config.opensandbox().serverUrl())
             .apiKey(config.opensandbox().apiKey())
@@ -77,6 +82,7 @@ public class AgentScopeConfig {
             .fileAssetStore(fileAssetStore)
             .fileStorage(fileStorage)
             .isolationScope(IsolationScope.USER);
+        spec.setSessionKeyResolver(sessionKeyResolver);
         // 工作区投影开关（issue #27 缓解项）：SANDBOX_PROJECTION_ENABLED=false 时 sandbox start
         // 不再 hydrate 投影目录，降低每轮对话的沙箱同步开销（skills 依赖强的包不要关）
         spec.workspaceProjectionEnabled(sandboxRuntime.projectionEnabled());
@@ -94,7 +100,8 @@ public class AgentScopeConfig {
             }
         }
         // 请求级 userId 注入：middleware 与 acquire 同一订阅链，顺序执行
-        spec.setUserKeyMiddleware(new io.agentmanager.framework.sandbox.opensandbox.SandboxUserKeyMiddleware(spec));
+        spec.setUserKeyMiddleware(new io.agentmanager.framework.sandbox.opensandbox.SandboxUserKeyMiddleware(
+            spec, sessionKeyResolver));
         return spec;
     }
 
@@ -271,10 +278,14 @@ public class AgentScopeConfig {
         io.agentmanager.framework.config.AgentManagerProperties props,
         io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
+        SessionUserStore sessionUserStore,
         org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
     ) {
+        // 规范键解析（issue #52）：present_file 沙箱归属校验须与 SandboxUserKeyMiddleware
+        // 同源反查真实用户，否则 Channel 链路 ctx.userId（网关 peer）与沙箱绑定键不等 → 直读被误拒
+        var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
         return new io.agentmanager.framework.tool.FileTools(fileAssetStore, fileStorage, props,
-            sandboxRuntime, workspaceReader, sandboxSpecProvider.getIfAvailable());
+            sandboxRuntime, workspaceReader, sandboxSpecProvider.getIfAvailable(), sessionKeyResolver);
     }
 
     /**

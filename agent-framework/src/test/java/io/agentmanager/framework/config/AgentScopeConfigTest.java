@@ -62,6 +62,7 @@ class AgentScopeConfigTest {
             mock(io.agentmanager.framework.service.storage.FileStorage.class), propsForLlm(),
             mock(io.agentmanager.framework.service.SandboxRuntime.class),
             mock(io.agentmanager.framework.service.WorkspaceReader.class),
+            mock(io.agentmanager.framework.service.SessionUserStore.class),
             new org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec>() {
                 @Override
                 public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getIfAvailable()

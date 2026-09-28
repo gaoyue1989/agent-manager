@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.service.SandboxRuntime;
+import io.agentmanager.framework.service.SessionKeyResolver;
 import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.WorkspaceReader;
@@ -39,13 +40,15 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     private final SandboxRuntime sandboxRuntime;
     private final WorkspaceReader workspaceReader;
     private final OpenSandboxFilesystemSpec sandboxFilesystemSpec;
+    /** 业务规范键解析（issue #52）：沙箱归属校验须与 SandboxUserKeyMiddleware 同源反查真实用户 */
+    private final SessionKeyResolver sessionKeyResolver;
 
     public FileTools(FileAssetStore fileAssetStore,
                      FileStorage fileStorage,
                      AgentManagerProperties props,
                      SandboxRuntime sandboxRuntime,
                      WorkspaceReader workspaceReader) {
-        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, null);
+        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, null, null);
     }
 
     public FileTools(FileAssetStore fileAssetStore,
@@ -54,12 +57,45 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
                      SandboxRuntime sandboxRuntime,
                      WorkspaceReader workspaceReader,
                      OpenSandboxFilesystemSpec sandboxFilesystemSpec) {
+        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, sandboxFilesystemSpec, null);
+    }
+
+    public FileTools(FileAssetStore fileAssetStore,
+                     FileStorage fileStorage,
+                     AgentManagerProperties props,
+                     SandboxRuntime sandboxRuntime,
+                     WorkspaceReader workspaceReader,
+                     OpenSandboxFilesystemSpec sandboxFilesystemSpec,
+                     SessionKeyResolver sessionKeyResolver) {
         this.fileAssetStore = fileAssetStore;
         this.fileStorage = fileStorage;
         this.props = props;
         this.sandboxRuntime = sandboxRuntime;
         this.workspaceReader = workspaceReader;
         this.sandboxFilesystemSpec = sandboxFilesystemSpec;
+        this.sessionKeyResolver = sessionKeyResolver;
+    }
+
+    /**
+     * 解析沙箱归属校验键：经 SessionKeyResolver 反查真实用户（与 SandboxUserKeyMiddleware
+     * 同源，issue #52）。沙箱实例绑定的是规范用户键——若此处用 RuntimeContext 原值（Channel
+     * 链路下是网关 peer=前端 sessionId），归属比对恒不等 → 沙箱直读被误拒、file_ready 丢失。
+     * 反查不可用/未命中时回落原值（userId 优先，空则 sessionId，兜底 debug-user）。
+     */
+    private String resolveUserKey(RuntimeContext ctx) {
+        if (sessionKeyResolver != null && ctx != null) {
+            var real = sessionKeyResolver.realUserId(ctx);
+            if (real != null && !real.isBlank()) {
+                return real;
+            }
+        }
+        if (ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()) {
+            return ctx.getUserId();
+        }
+        if (ctx != null && ctx.getSessionId() != null && !ctx.getSessionId().isBlank()) {
+            return ctx.getSessionId();
+        }
+        return "debug-user";
     }
 
     @Tool(
@@ -83,8 +119,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         if (norm == null) {
             return err("invalid path: " + filePath + " (must be inside workspace)");
         }
-        var userKey = ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()
-            ? ctx.getUserId() : (ctx != null && ctx.getSessionId() != null ? ctx.getSessionId() : "debug-user");
+        var userKey = resolveUserKey(ctx);
         // 2. 获取字节：显式 base64 优先；否则沙箱模式经 execd 直读，非沙箱从 KV 读
         byte[] bytes = null;
         if (fileContentBase64 != null && !fileContentBase64.isBlank()) {
@@ -197,8 +232,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         if (name == null) {
             return err("invalid file_name: " + fileName);
         }
-        var userKey = ctx != null && ctx.getUserId() != null && !ctx.getUserId().isBlank()
-            ? ctx.getUserId() : (ctx != null && ctx.getSessionId() != null ? ctx.getSessionId() : "debug-user");
+        var userKey = resolveUserKey(ctx);
         var mime = mimeType == null || mimeType.isBlank() ? "application/octet-stream" : mimeType.trim();
         long sz = size == null ? 0L : size;
         // 幂等复用：uk_storage(storage_type, storage_key) 全局唯一，同 URL 重复交付复用既有 file_id
