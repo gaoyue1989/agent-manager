@@ -286,4 +286,7 @@ MCP 对齐（P2，见 §9）：`get_platform_config` / `update_platform_config`�
   6. 删除测试服务 → Deployment/CM/Ingress 与服务 Secret 全部清理，平台对象保留，服务列表零残留 ✅。
 - **实施期发现并修复**：RBAC 缺 `delete` verb 导致服务删除时 `{name}-env-secret` 残留（`Delete()` 的 `_ =` 吞掉 403）——已补 `delete` verb（仅服务 Secret 清理路径使用）并端到端复验零残留；§3.4/§7 RBAC 表述同步修正。
 - **存量数据**：现网两个服务未动；其 env 中如仍有模板敏感键，按 §3.6 防丢失规则在下一次 PATCH/republish 时自动迁入服务 Secret。
+- **E2E**（2026-09-28 两轮实跑，CI 之外本机集群执行）：
+  - 新增 `e2e/platform-config-secret-e2e.sh`（46 断言全绿）：P 场景模板 schema/PUT 掩码/未知键与清必填 400；Q 场景集群拆分渲染（Secret 敏感 / CM 非敏感互斥断言）；R 场景发布**不带 env** → running（默认值跑通 LLM/MySQL/Redis 全链路）+ envFrom 四源顺序 + Pod 内敏感键存在性（值不回显）+ 服务 CM 空对象；S 场景携带敏感键发布 → 路由服务 Secret、详情无明文、envSecretKeys 掩码；T 场景 sticky 保持 + 空串删除回落默认；U 场景 apply-restart 点名生效 + spec 重刷保持四源；V 场景删除零残留且平台对象保留；
+  - 存量 `platform-e2e.sh` 回归 50/50 全绿（修复其 E1 用例 `/tmp/opencode` 目录未创建的存量缺陷）；`package-edit-e2e.sh`/`file-support-e2e.sh` 等携带敏感键 env 的脚本与新路由语义兼容（值仍送达 Pod，仅落点移入 Secret）。
 - **P2 待办**：MCP 工具 `get/update_platform_config`；`get_service_status` 的 env 输出改造为掩码结构；manifests 自举 secret 占位符化；release-agent 静态清单接入平台 CM/Secret。
