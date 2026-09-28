@@ -41,26 +41,6 @@ public class UiContextStore {
 
     public UiContextStore(DataSource dataSource) {
         this.dataSource = dataSource;
-        initSchema();
-    }
-
-    /** 建表（幂等），失败 fail-fast（DB 不可用本就不该继续） */
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS ui_context (
-                    session_id         VARCHAR(255)  NOT NULL,
-                    content            MEDIUMTEXT    NULL,
-                    structured_context JSON          NULL,
-                    updated_at         DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-                    PRIMARY KEY (session_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            log.info("UiContextStore: ui_context table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init ui_context table: " + e.getMessage(), e);
-        }
     }
 
     /**

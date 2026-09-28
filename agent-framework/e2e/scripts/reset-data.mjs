@@ -16,7 +16,9 @@ const m = /jdbc:mysql:\/\/([^:/]+):(\d+)\/([^?]+)/.exec(jdbcUrl ?? '');
 if (!m) { console.log('[reset] MYSQL_URL 解析失败，跳过'); process.exit(0); }
 const [, host, port, db] = m;
 const TABLES = ['agent_state', 'agent_fs', 'confirm_context', 'turn_lease', 'session_user',
-  'file_asset', 'ui_context', 'kv_sync_key', 'tool_audit_log', 'model_config', 'session_message'];
+  'file_asset', 'ui_context', 'kv_sync_key', 'tool_audit_log', 'model_config', 'session_message',
+  // Flyway 历史表：不清掉的话，实例重启后 Flyway 认为迁移已应用、不会重建上面被 DROP 的表
+  'flyway_schema_history'];
 
 // 优先用 mysql 客户端；缺失时回退到 JDBC 不可用 → 仅提示（CI 镜像默认带 mysql 客户端）
 let dropped = 0;

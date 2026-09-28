@@ -48,29 +48,6 @@ public class ConfirmContextStore {
     public ConfirmContextStore(DataSource dataSource, Duration ttl) {
         this.dataSource = dataSource;
         this.ttl = ttl;
-        initSchema();
-    }
-
-    /** 建表（幂等），失败 fail-fast */
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS confirm_context (
-                  session_id      VARCHAR(255) PRIMARY KEY,
-                  tool_calls_json MEDIUMTEXT NOT NULL,
-                  reply_id        VARCHAR(64),
-                  runtime_session_id VARCHAR(255),
-                  runtime_user_id    VARCHAR(255),
-                  created_at      DATETIME(3) NOT NULL,
-                  consumed        TINYINT(1) NOT NULL DEFAULT 0,
-                  KEY idx_created_at (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            log.info("ConfirmContextStore: confirm_context table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init confirm_context table: " + e.getMessage(), e);
-        }
     }
 
     /** 覆盖式写入确认上下文（同 session 新 ASK 覆盖旧条目；consumed 重置为 0） */

@@ -17,6 +17,7 @@ Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运�
 | A2A 协议 | AgentScopeA2aServer + HarnessAgentRunner (JSON-RPC) |
 | A2UI | AgentScope 事件流驱动 |
 | 数据库 | GreatSQL 8.0 (端口 3307, DB `agent_manager_test`) |
+| DB schema 迁移 | Flyway 10.10 (flyway-core + flyway-mysql + spring-jdbc，`db/migration/V*.sql`，baseline-on-migrate) |
 | 构建工具 | Maven 3.9+ |
 | JDK | 21+ |
 
@@ -92,6 +93,7 @@ agent-framework/
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
+│   │       ├── db/migration/                    # Flyway 版本化迁移（V1 基线 e91d1f0 + V2..；表结构/数据演进一律新增 V 文件，禁止构造器手工 DDL）
 │   │       └── static/debug/                    # 调试页面 (拆分架构)
 │   │           ├── index.html                   # 调试页入口
 │   │           ├── css/                         # 样式 (base/components/layout)
@@ -263,6 +265,17 @@ OAF `deniedTools` 字段控制排除列表。
 | memory/ | userId | agent_fs 表 |
 | skills/ | 包内 L2 共享 + 用户 L4 覆盖 | agent_fs 表（L4：`agents/{agent}/users/{uid}/skills`，key `/{技能名}/{相对路径}`；沙箱档由 syncBack 回写该命名空间，回写仲裁靠 `/{技能名}/.deleted` 与 `/{技能名}/.admin-override` 两个元数据键） |
 | sessions/ | userId | agent_fs 表 |
+
+---
+
+## DB Schema 迁移（Flyway，2026-09-28 接入）
+
+表结构/数据演进由 Flyway 管理（`src/main/resources/db/migration/V<N>__<描述>.sql`，命名带来源提交 hash），配置见 `application.yml` 的 `spring.flyway.*`（`baseline-on-migrate=true`，`baseline-version=5`）：
+
+- **存量库**（有表、无历史表）首启自动基线到 V5，仅执行之后的增量；**全新库**（CI E2E/新环境）从 V1 完整重建；多副本同时启动由历史表锁互斥；迁移失败即启动失败（fail-fast）。
+- **纪律**：演进一律新增 V 文件；禁止修改已合并的 V 文件（checksum 校验拒绝启动）；禁止在 Store 构造器/请求路径手工 DDL（`initSchema/ensureColumn` 模式已移除）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（V6 `session_user` 回填即范例：自洽规范槽位 + unknown/共享 gw-hash 桶守卫 + INSERT IGNORE 幂等）。
+- **两个静默坑（详见 [../docs/design/db-migration-flyway-design.md](../docs/design/db-migration-flyway-design.md) §6.1）**：① 不引 starter-jdbc 的工程必须显式补 `spring-jdbc`，否则 `FlywayConfiguration` 因 `@ConditionalOnClass(JdbcUtils)` 不满足而**静默不装配**——启动零报错、迁移零执行；② SDK `distributedStore` bean 构造期会建 `agent_state/agent_fs`，必须 `@DependsOn("flywayInitializer")`（bean 名是 `flywayInitializer`），否则全新库上 Flyway 因 schema 非空走 baseline 路径跳过 V1..V5。
+- 真实 MySQL 的 `*MySqlIT` 经 `TestSchemaMigrator`（test 下）执行同一批迁移文件，测试 schema 与生产同源；`e2e/scripts/reset-data.mjs` 需同时清理 `flyway_schema_history`（已含）。
 
 ---
 

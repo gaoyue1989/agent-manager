@@ -140,14 +140,16 @@ class SessionMessageStoreTest {
     // ===== SQL 形态锁定 =====
 
     @Test
-    void initSchemaShouldCreateTableWithUniqueKey() throws Exception {
-        new SessionMessageStore(dataSource); // 构造即 initSchema
-        var sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeUpdate(sqlCap.capture());
-        var ddl = sqlCap.getValue();
-        assertTrue(ddl.contains("CREATE TABLE IF NOT EXISTS session_message"));
-        assertTrue(ddl.contains("UNIQUE KEY uk_session_msg (session_id, msg_id)"), "幂等唯一键");
-        assertTrue(ddl.contains("KEY idx_session_id (session_id, id)"));
+    void sessionMessageMigrationShouldKeepUniqueKeyAndIndex() throws Exception {
+        // 构造器不再建表（表结构由 Flyway db/migration 接管）；
+        // 锁定 V5 迁移文件的关键约束，防止后续改动误删幂等唯一键与翻页索引
+        try (var in = getClass().getResourceAsStream(
+                "/db/migration/V5__062e01f_session_message.sql")) {
+            var ddl = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(ddl.contains("CREATE TABLE session_message"));
+            assertTrue(ddl.contains("UNIQUE KEY uk_session_msg (session_id, msg_id)"), "幂等唯一键");
+            assertTrue(ddl.contains("KEY idx_session_id (session_id, id)"));
+        }
     }
 
     @Test

@@ -42,7 +42,6 @@ public class TurnLeaseStore {
         this.dataSource = dataSource;
         this.ttl = ttl;
         this.renewInterval = renewInterval;
-        initSchema();
     }
 
     /** 续租间隔（TurnLeaseGuard 使用；应小于 ttl，默认 ttl/3） */
@@ -53,25 +52,6 @@ public class TurnLeaseStore {
     /** 租约 TTL（TurnLeaseGuard 用于判断「续租故障已持续超过一个租约周期」） */
     public Duration ttl() {
         return ttl;
-    }
-
-    /** 建表（幂等），失败 fail-fast（DB 不可用本就不该继续） */
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS turn_lease (
-                  session_id VARCHAR(255) PRIMARY KEY,
-                  token      CHAR(36) NOT NULL,
-                  expires_at DATETIME(3) NOT NULL,
-                  created_at DATETIME(3) NOT NULL,
-                  KEY idx_expires_at (expires_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            log.info("TurnLeaseStore: turn_lease table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init turn_lease table: " + e.getMessage(), e);
-        }
     }
 
     /**

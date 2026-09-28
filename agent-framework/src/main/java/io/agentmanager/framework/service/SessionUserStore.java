@@ -15,6 +15,9 @@ import org.springframework.stereotype.Service;
  *
  * <p>记录每个 session 归属的 userId，供 GET /threads?userId=xxx 按用户过滤。
  * 在会话首次发起（chat / confirm）时 upsert 写入，与 agent_state 生命周期解耦。
+ *
+ * <p>表结构由 Flyway 迁移管理（db/migration，V1 基线 + V3 增 model 列 + V6 存量回填），
+ * 不再在构造器里手工 DDL。
  */
 @Service
 public class SessionUserStore {
@@ -28,30 +31,6 @@ public class SessionUserStore {
 
     public SessionUserStore(DataSource dataSource) {
         this.dataSource = dataSource;
-        initSchema();
-    }
-
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS session_user (
-                  session_id  VARCHAR(255) NOT NULL PRIMARY KEY,
-                  user_id     VARCHAR(255) NOT NULL,
-                  remark      VARCHAR(512) DEFAULT '',
-                  model       VARCHAR(128) DEFAULT '',
-                  created_at  DATETIME(3)  NOT NULL,
-                  updated_at  DATETIME(3)  NOT NULL,
-                  KEY idx_user_id (user_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            // 历史表结构演进（CREATE TABLE IF NOT EXISTS 不会给旧表补列）
-            ensureColumn("remark", "remark VARCHAR(512) DEFAULT '' AFTER user_id");
-            ensureColumn("model", "model VARCHAR(128) DEFAULT '' AFTER remark");
-            log.info("SessionUserStore: session_user table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init session_user table: " + e.getMessage(), e);
-        }
     }
 
     /**
@@ -230,22 +209,6 @@ public class SessionUserStore {
             log.warn("SessionUserStore: find {} failed for sid={}: {}", column, sessionId, e.getMessage());
         }
         return "";
-    }
-
-    /** 幂等确保列存在（历史表结构演进，ALREADY 存在时跳过） */
-    private void ensureColumn(String column, String ddl) {
-        try (var conn = dataSource.getConnection();
-             var rs = conn.getMetaData().getColumns(null, null, "session_user", column)) {
-            if (!rs.next()) {
-                try (var stmt = conn.createStatement()) {
-                    stmt.executeUpdate("ALTER TABLE session_user ADD COLUMN " + ddl);
-                    log.info("SessionUserStore: added '{}' column to session_user table", column);
-                }
-            }
-        } catch (Exception e) {
-            // 与 ThreadController.ensureRemarkColumn 同口径：探测失败不阻断启动（列已存在时 ALTER 也不会执行）
-            log.debug("SessionUserStore: ensureColumn '{}' check skipped: {}", column, e.getMessage());
-        }
     }
 
     /**

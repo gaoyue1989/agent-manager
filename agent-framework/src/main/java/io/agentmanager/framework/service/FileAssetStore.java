@@ -29,7 +29,6 @@ public class FileAssetStore {
 
     public FileAssetStore(DataSource dataSource) {
         this.dataSource = dataSource;
-        initSchema();
     }
 
     /** 元数据行（字节不在 DB，见类注释） */
@@ -48,59 +47,6 @@ public class FileAssetStore {
         String status,
         LocalDateTime createdAt
     ) {}
-
-    /** 建表（幂等），失败 fail-fast */
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt0 = conn.createStatement()) {
-            stmt0.execute("""
-                CREATE TABLE IF NOT EXISTS kv_sync_key (
-                  rel_path VARCHAR(512) NOT NULL,
-                  user_key VARCHAR(255) NOT NULL,
-                  updated_at DATETIME NOT NULL,
-                  PRIMARY KEY (rel_path)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-                """);
-        } catch (Exception e) {
-            log.warn("FileAssetStore: kv_sync_key init skipped: {}", e.getMessage());
-        }
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS file_asset (
-                  id             VARCHAR(36)  PRIMARY KEY,
-                  user_key       VARCHAR(255) NOT NULL,
-                  session_id     VARCHAR(255),
-                  reply_id       VARCHAR(64),
-                  file_name      VARCHAR(255) NOT NULL,
-                  workspace_path VARCHAR(512),
-                  mime_type      VARCHAR(128) NOT NULL,
-                  size           BIGINT       NOT NULL,
-                  storage_type   VARCHAR(16)  NOT NULL,
-                  storage_key    VARCHAR(512) NOT NULL,
-                  origin         VARCHAR(16)  NOT NULL,
-                  status         VARCHAR(16)  NOT NULL DEFAULT 'pending',
-                  created_at     DATETIME(3)  NOT NULL,
-KEY idx_user_status (user_key, status),
-              KEY idx_session (session_id, created_at),
-              KEY idx_origin_status (origin, status, created_at),
-              KEY idx_reply (reply_id),
-              UNIQUE KEY uk_storage (storage_type, storage_key)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            // 幂等加列：reply_id（已有表时 ALTER）
-            try {
-                stmt.executeUpdate("ALTER TABLE file_asset ADD COLUMN reply_id VARCHAR(64) DEFAULT NULL AFTER session_id");
-                stmt.executeUpdate("ALTER TABLE file_asset ADD KEY idx_reply (reply_id)");
-                log.info("FileAssetStore: added reply_id column to file_asset");
-            } catch (Exception alterEx) {
-                // 列已存在则忽略
-            }
-            log.info("FileAssetStore: file_asset table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init file_asset table: " + e.getMessage(), e);
-        }
-    }
 
     /** 插入元数据（存储对象已写入后再调用；status 由调用方指定） */
     public void insert(FileAsset asset) {

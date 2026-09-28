@@ -50,31 +50,7 @@ public class ToolAuditStore {
     public ToolAuditStore(DataSource dataSource, int retentionDays) {
         this.dataSource = dataSource;
         this.retentionDays = retentionDays;
-        initSchema();
         flushScheduled();
-    }
-
-    /** 建表（幂等），失败 fail-fast */
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS tool_audit_log (
-                  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-                  session_id  VARCHAR(255) NOT NULL,
-                  tool_name   VARCHAR(255) NOT NULL,
-                  tool_call_id VARCHAR(64),
-                  state       VARCHAR(32),
-                  payload_json MEDIUMTEXT,
-                  created_at  DATETIME(3) NOT NULL,
-                  KEY idx_session (session_id, id),
-                  KEY idx_created_at (created_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            log.info("ToolAuditStore: tool_audit_log table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init tool_audit_log table: " + e.getMessage(), e);
-        }
     }
 
     private void flushScheduled() {
