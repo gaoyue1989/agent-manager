@@ -53,6 +53,11 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 > `AGENT_REDIS_URL=redis://oaf-redis.agent-platform.svc.cluster.local:6379`（oaf-redis 已随 platform.yaml 部署）。
 > 缺省值指向 `127.0.0.1`（Pod 自身），session_event 事件不落 Redis、SSE 断线回放/续传全挂——部署必配。
 
+> **DB schema 迁移（Flyway，2026-09-28 起）**：agent-framework 启动时自动执行
+> `db/migration` 版本化迁移——存量库首次启动自动基线（V1..V5 已就位，仅跑增量）、
+> 全新库从 V1 完整重建，发版无需人工干预；多副本同时启动由历史表锁互斥。
+> 此后表结构/数据演进只新增 V 文件（见 docs/design/db-migration-flyway-design.md），不再手工改库。
+
 ## 五、业务日志规范（agent-framework）
 
 业务 Agent（framework 镜像）日志按《容器日志收集方案-v2》规范输出：容器云日志收集器**仅采集** `/applog/${HOST_NAME}/trace.log`，控制台日志与其他文件均不采集。
