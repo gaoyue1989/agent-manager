@@ -20,9 +20,9 @@ import com.mysql.cj.jdbc.MysqlDataSource;
  *   CHECKPOINT_USERNAME=agent_manager CHECKPOINT_PASSWORD=... mvn test -Dtest=ModelConfigStoreMySqlIT
  * </pre>
  *
- * <p><b>覆盖动机（2026-09-27 review 暴露）</b>：model_config 表演进（reasoning_effort /
- * frequency_penalty 补列）全部在 {@code initSchema/ensureColumn} 里，而单测对 store 一律 mock，
- * ensureColumn 的参数绑定顺序、ALTER 竞态容错、新列 NULL 读写只有真实 MySQL 能验证。
+ * <p><b>覆盖动机</b>：model_config 的建表与 sampling 参数补列在 Flyway 迁移
+ * V3/V4（db/migration）里，而单测对 store 一律 mock。只有真实 MySQL 能验证
+ * 迁移文件建齐两列、存量旧表补列后旧行 NULL 语义，以及新列全量读写往返。
  */
 @EnabledIfEnvironmentVariable(named = "HITL_MYSQL_IT", matches = "1")
 class ModelConfigStoreMySqlIT {
@@ -31,9 +31,11 @@ class ModelConfigStoreMySqlIT {
     void freshSchemaShouldRoundTripSamplingParamsAndStayIdempotent() throws Exception {
         var dataSource = dataSource();
         dropTable(dataSource);
-        // 全新建表（含新列）
+        // 全新建表：迁移链 V1..V6（model_config 由 V3 建表、V4 补 sampling 列）
+        io.agentmanager.framework.support.TestSchemaMigrator.migrate(dataSource);
+        // 二次执行 = 二次启动：重复迁移必须等价（表/列已存在被跳过，且不抛异常）
+        io.agentmanager.framework.support.TestSchemaMigrator.migrate(dataSource);
         var store = new ModelConfigStore(dataSource);
-        // 二次构造 = 二次启动：ensureColumn 必须幂等（列已存在 → 不再 ALTER，且不抛异常）
         var storeAgain = new ModelConfigStore(dataSource);
 
         var id = "it-" + UUID.randomUUID();
@@ -95,10 +97,11 @@ class ModelConfigStoreMySqlIT {
                 """);
         }
 
-        // 启动即迁移：缺列自动 ALTER 补齐
-        var store = new ModelConfigStore(dataSource);
+        // 跑迁移链：V3 的 CREATE TABLE 跳过（表已存在），V4 补列 ALTER 落地
+        io.agentmanager.framework.support.TestSchemaMigrator.migrate(dataSource);
         assertEquals("reasoning_effort", columnNameOf(dataSource, "reasoning_effort"));
         assertEquals("frequency_penalty", columnNameOf(dataSource, "frequency_penalty"));
+        var store = new ModelConfigStore(dataSource);
 
         try {
             // 旧行两新列为 NULL → 不下发语义

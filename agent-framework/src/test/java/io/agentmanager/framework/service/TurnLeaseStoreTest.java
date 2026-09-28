@@ -35,10 +35,9 @@ class TurnLeaseStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        var stmt = mock(java.sql.Statement.class);
-        when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.createStatement()).thenReturn(stmt);
-        when(stmt.executeUpdate(anyString())).thenReturn(0);
+        // schema 由 Flyway 迁移管理（db/migration），构造器不再建表：
+        // 这里只 stub 业务路径（renew）用到的连接
+        lenient().when(dataSource.getConnection()).thenReturn(conn);
         lenient().when(conn.prepareStatement(contains("UPDATE turn_lease"))).thenReturn(renewPs);
 
         store = new TurnLeaseStore(dataSource, Duration.ofSeconds(60), Duration.ofSeconds(20));

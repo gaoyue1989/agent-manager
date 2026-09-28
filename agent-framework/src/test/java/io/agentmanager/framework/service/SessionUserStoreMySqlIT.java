@@ -33,6 +33,7 @@ class SessionUserStoreMySqlIT {
         dataSource.setURL(System.getenv("CHECKPOINT_JDBC_URL"));
         dataSource.setUser(System.getenv("CHECKPOINT_USERNAME"));
         dataSource.setPassword(System.getenv("CHECKPOINT_PASSWORD"));
+        io.agentmanager.framework.support.TestSchemaMigrator.migrate(dataSource);
         var store = new SessionUserStore(dataSource);
         var sid = "it-model_" + UUID.randomUUID();
 
