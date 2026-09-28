@@ -134,6 +134,9 @@ case "$E2E_GROUP" in
 esac
 
 # ---------- 4. env.json ----------
+# mysql*/redis* 字段供 start-agent.sh 与种子设施回读：本地两段式运行（env-up 与
+# playwright 分属两条命令）时 DB/Redis 地址经此文件传递，无须手工贯穿环境变量；
+# 显式注入的 env 仍然优先（回读只作缺省来源，见 start-agent.sh / lib/archive-seed.ts）
 cat > "$RUNTIME/env.json" <<EOF
 {
   "group": "$E2E_GROUP",
@@ -144,7 +147,11 @@ cat > "$RUNTIME/env.json" <<EOF
   "benchMcp": "http://127.0.0.1:${BENCH_MCP_PORT}",
   "approvalMcp": "http://127.0.0.1:${APPROVAL_MCP_PORT}",
   "sandboxMock": "http://127.0.0.1:${SANDBOX_MOCK_PORT}",
-  "sandboxEnabled": $SANDBOX_ENABLED
+  "sandboxEnabled": $SANDBOX_ENABLED,
+  "mysqlUrl": "$MYSQL_URL",
+  "mysqlUser": "$MYSQL_USER",
+  "mysqlPass": "$MYSQL_PASS",
+  "redisUrl": "$REDIS_URL"
 }
 EOF
 echo "[env-up] group=$E2E_GROUP base=http://127.0.0.1:${E2E_BASE_PORT} 就绪"

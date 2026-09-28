@@ -4,7 +4,10 @@
 # 保证"重试"真正具备自愈能力，而不是死在 stale pid 防护上。
 # 用法：./scripts/start-agent.sh <name> <port>
 # 前置：env-up.sh 已完成（agent-config 已渲染、mock 进程已就绪）；
-#       共享变量（MYSQL_URL/REDIS_URL/LLM_MOCK_PORT 等）与 env-up.sh 同默认值，经环境变量透传覆盖。
+#       共享变量（MYSQL_URL/REDIS_URL/LLM_MOCK_PORT 等）经环境变量透传覆盖；
+#       未注入时回读 .runtime/env.json（env-up 产物，见其 mysql*/redis* 字段），
+#       本地两段式运行（env-up 与 playwright 分属两条命令）不再要求手工贯穿环境变量；
+#       两者都缺省时才落内置默认值（与 CI services 端口一致）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -12,10 +15,6 @@ ROOT=$(pwd)
 NAME="${1:?用法: start-agent.sh <name> <port>}"
 PORT="${2:?用法: start-agent.sh <name> <port>}"
 LLM_MOCK_PORT="${LLM_MOCK_PORT:-18081}"
-MYSQL_URL="${MYSQL_URL:-jdbc:mysql://127.0.0.1:3306/agent_framework_e2e}"
-MYSQL_USER="${MYSQL_USER:-e2e}"
-MYSQL_PASS="${MYSQL_PASS:-e2e-pass}"
-REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
 SANDBOX_MOCK_PORT="${SANDBOX_MOCK_PORT:-8090}"
 BENCH_MCP_PORT="${BENCH_MCP_PORT:-18082}"
@@ -23,6 +22,20 @@ BENCH_MCP_PORT="${BENCH_MCP_PORT:-18082}"
 RUNTIME="$ROOT/.runtime"
 LOGS="$RUNTIME/logs"
 AGENT_CFG="$RUNTIME/agent-config"
+
+# env.json 回读：只填「环境变量未注入」的键（显式 env 仍最优先）
+if [ -f "$RUNTIME/env.json" ] && command -v node >/dev/null 2>&1; then
+  jget() { node -e "try{const j=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));const v=j[process.argv[1]];if(v!=null&&v!=='')console.log(v)}catch{}" "$1" "$RUNTIME/env.json"; }
+  : "${MYSQL_URL:=$(jget mysqlUrl)}"
+  : "${MYSQL_USER:=$(jget mysqlUser)}"
+  : "${MYSQL_PASS:=$(jget mysqlPass)}"
+  : "${REDIS_URL:=$(jget redisUrl)}"
+fi
+MYSQL_URL="${MYSQL_URL:-jdbc:mysql://127.0.0.1:3306/agent_framework_e2e}"
+MYSQL_USER="${MYSQL_USER:-e2e}"
+MYSQL_PASS="${MYSQL_PASS:-e2e-pass}"
+REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
+
 JAR=$(ls -t "$ROOT"/../target/agent-framework-*.jar 2>/dev/null | head -1)
 [ -n "${JAR:-}" ] || { echo "未找到 jar（先 mvn -DskipTests package）"; exit 1; }
 [ -d "$AGENT_CFG" ] || { echo "未找到 $AGENT_CFG（先 env-up.sh 渲染配置）"; exit 1; }

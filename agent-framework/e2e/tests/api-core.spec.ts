@@ -970,7 +970,7 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
   await waitTerminal(s);
   expect(s.terminal?.type).toBe('done');
   // 2) 种子：清本会话归档行 → 直插压缩前历史 + __compaction_summary__
-  const seed = seedCompactionArchive(`${U}:${sid}`, sid, mark, U);
+  const seed = await seedCompactionArchive(`${U}:${sid}`, sid, mark, U);
 
   // 3) 首页合并视图：归档基底升序 + 摘要分隔条 + state 尾部合入基底末尾
   const full = await historyQ(sid);
