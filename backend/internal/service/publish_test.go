@@ -174,7 +174,7 @@ func TestUpdateEnvFlow(t *testing.T) {
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 
-	updated, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"})
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"}, nil)
 	if err != nil {
 		t.Fatalf("update env: %v", err)
 	}
@@ -197,11 +197,11 @@ func TestUpdateEnvFullOverwriteSemantics(t *testing.T) {
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_A": "1", "KEY_B": "2"}); err != nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_A": "1", "KEY_B": "2"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed) // 回到稳态再改第二次
-	updated, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_C": "3"})
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_C": "3"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestUpdateEnvDeployingRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Publish 同步落库为 deploying，异步注册在 RegisterTimeout 后才推进
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); !errors.Is(err, ErrBadState) {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}, nil); !errors.Is(err, ErrBadState) {
 		t.Fatalf("expect ErrBadState while deploying, got %v", err)
 	}
 }
@@ -237,7 +237,7 @@ func TestUpdateEnvRestartFailure(t *testing.T) {
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 
 	fk.FailNextRestart(1, errors.New("patch conflict"))
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); err == nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}, nil); err == nil {
 		t.Fatal("restart failure must propagate")
 	}
 	got, _ := core.Get(svc.ID)
@@ -354,7 +354,7 @@ func TestUpdateEnvStoppedRejected(t *testing.T) {
 	if _, err := core.Unpublish(svc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); err == nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}, nil); err == nil {
 		t.Fatal("env update on stopped service must fail")
 	}
 }

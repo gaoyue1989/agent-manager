@@ -68,9 +68,26 @@ func TestDeploymentConstruction(t *testing.T) {
 	if cs.Image != "agent-framework:latest" || cs.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("image: %v", cs.Image)
 	}
-	// envFrom ConfigMap
-	if len(cs.EnvFrom) != 1 || cs.EnvFrom[0].ConfigMapRef.Name != "oaf-acme-demo-env" {
-		t.Fatalf("envFrom: %+v", cs.EnvFrom)
+	// envFrom 两源：服务敏感 Secret 在前，服务 CM 在后可覆盖同名键
+	// （平台默认配置不经 envFrom 注入，R3 修订）
+	if len(cs.EnvFrom) != 2 {
+		t.Fatalf("envFrom should have 2 sources, got %d: %+v", len(cs.EnvFrom), cs.EnvFrom)
+	}
+	wantEnvFrom := []string{
+		EnvSecretName("oaf-acme-demo"), "oaf-acme-demo-env",
+	}
+	for i, want := range wantEnvFrom {
+		src := cs.EnvFrom[i]
+		var got string
+		switch {
+		case src.ConfigMapRef != nil:
+			got = src.ConfigMapRef.Name
+		case src.SecretRef != nil:
+			got = src.SecretRef.Name
+		}
+		if got != want {
+			t.Fatalf("envFrom[%d] = %q, want %q (order matters: later overrides)", i, got, want)
+		}
 	}
 	// 固定注入保留键
 	fixed := map[string]string{}

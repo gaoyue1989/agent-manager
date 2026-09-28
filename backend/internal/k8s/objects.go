@@ -71,11 +71,16 @@ func ShortName(k8sName string) string {
 	return strings.TrimPrefix(k8sName, Prefix)
 }
 
+// EnvSecretName 服务级敏感 env Secret 名。
+func EnvSecretName(k8sName string) string { return k8sName + "-env-secret" }
+
 type ObjectParams struct {
 	K8sName   string
 	Namespace string
 	Image     string
-	Env       map[string]string // 用户 env（已校验，不含保留键）
+	Env       map[string]string // 用户非敏感 env（已校验，不含保留键；模板敏感键已路由至 EnvSecret）
+	// EnvSecret 服务敏感 env（模板 Sensitive 键 + secretKeys 指定键；与 Env 按模板分区互斥）
+	EnvSecret map[string]string
 	Replicas  int32
 	SubPath   string // packages/{packageId}
 
@@ -90,12 +95,30 @@ func labels(k8sName string) map[string]string {
 	return map[string]string{LabelKey: k8sName, ManagedByLabel: ManagedByValue}
 }
 
-// EnvConfigMap 构造 env ConfigMap（oaf-{name}-env）。
+// EnvConfigMap 构造 env ConfigMap（oaf-{name}-env，非敏感 env）。
 func EnvConfigMap(p ObjectParams) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: p.K8sName + "-env", Namespace: p.Namespace, Labels: labels(p.K8sName)},
 		Data:       p.Env,
 	}
+}
+
+// EnvSecret 构造服务级敏感 env Secret（{k8sName}-env-secret；无敏感键时为空对象，
+// 保持 Deployment envFrom 引用统一）。空值不进入：避免 Spring 占位符 ${VAR:default}
+// 遇空串 env 不回落默认值。
+func EnvSecret(p ObjectParams) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: EnvSecretName(p.K8sName), Namespace: p.Namespace, Labels: labels(p.K8sName)},
+		Data:       stringMapToBytes(p.EnvSecret),
+	}
+}
+
+func stringMapToBytes(m map[string]string) map[string][]byte {
+	out := make(map[string][]byte, len(m))
+	for k, v := range m {
+		out[k] = []byte(v)
+	}
+	return out
 }
 
 // Deployment 构造业务 Deployment（固定注入保留键 + PVC subPath 挂载 /config）。
@@ -131,8 +154,14 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 						Image:           p.Image,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						Ports:           []corev1.ContainerPort{{ContainerPort: AgentPort}},
-						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}}},
-						Env:             fixedEnv,
+						// envFrom 两源（K8s 多源同键后引用者覆盖先引用者）：服务敏感 Secret 在前，
+						// 服务 CM 在后可覆盖同名键。平台默认配置不经 envFrom 注入——仅作为发布/
+						// 编辑 env 时的表单默认填入（R3 修订），服务只携带自己显式配置的 env
+						EnvFrom: []corev1.EnvFromSource{
+							{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: EnvSecretName(p.K8sName)}}},
+							{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}},
+						},
+						Env: fixedEnv,
 						VolumeMounts: []corev1.VolumeMount{
 							// OAF 包只读挂载到 /config（同一可写卷的只读 subPath）；工作区为独立可写空目录
 							{Name: FilesVolumeName, MountPath: "/config", SubPath: p.SubPath, ReadOnly: true},

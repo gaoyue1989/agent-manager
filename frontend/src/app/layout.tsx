@@ -13,6 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Link href="/" className="text-sm text-gray-700 hover:text-blue-600">服务列表</Link>
           <Link href="/publish" className="text-sm text-gray-700 hover:text-blue-600">发布新服务</Link>
           <Link href="/assistant" className="text-sm text-gray-700 hover:text-blue-600">发布助手</Link>
+          <Link href="/settings" className="text-sm text-gray-700 hover:text-blue-600">平台配置</Link>
         </nav>
         <main className="max-w-6xl mx-auto p-6">{children}</main>
       </body>

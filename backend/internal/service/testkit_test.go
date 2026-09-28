@@ -19,7 +19,7 @@ func newTestCore(t *testing.T) (*Core, *k8sfake.FakeK8s, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, _ := db.DB()

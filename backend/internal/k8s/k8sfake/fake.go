@@ -87,6 +87,24 @@ func (f *FakeK8s) EnsureConfigMap(cm *corev1.ConfigMap) error {
 	return err
 }
 
+func (f *FakeK8s) EnsureSecret(s *corev1.Secret) error {
+	if err := f.ensureErr(); err != nil {
+		return err
+	}
+	old, err := f.cs.CoreV1().Secrets(s.Namespace).Get(context.TODO(), s.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = f.cs.CoreV1().Secrets(s.Namespace).Create(context.TODO(), s, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	old.Data = s.Data
+	old.Labels = s.Labels
+	_, err = f.cs.CoreV1().Secrets(s.Namespace).Update(context.TODO(), old, metav1.UpdateOptions{})
+	return err
+}
+
 func (f *FakeK8s) EnsureDeployment(d *appsv1.Deployment) error {
 	if err := f.ensureErr(); err != nil {
 		return err
@@ -148,6 +166,10 @@ func (f *FakeK8s) DeleteIngress(ns, name string) error {
 }
 func (f *FakeK8s) DeleteConfigMap(ns, name string) error {
 	return ignoreNF(f.cs.CoreV1().ConfigMaps(ns).Delete(context.TODO(), name, metav1.DeleteOptions{}))
+}
+
+func (f *FakeK8s) DeleteSecret(ns, name string) error {
+	return ignoreNF(f.cs.CoreV1().Secrets(ns).Delete(context.TODO(), name, metav1.DeleteOptions{}))
 }
 
 func (f *FakeK8s) GetDeployment(ns, name string) (*appsv1.Deployment, error) {

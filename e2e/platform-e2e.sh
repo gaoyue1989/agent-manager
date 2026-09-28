@@ -165,7 +165,7 @@ RR=$(api POST "/services/$SVC_ID/register")
 assert_eq "B15 手动重注册成功" "$(echo "$RR" | jq -r '.data.status')" "running"
 
 say "异常路径"
-BADZIP=/tmp/opencode/bad.zip; echo notazip > $BADZIP
+BADZIP=/tmp/opencode/bad.zip; mkdir -p "$(dirname "$BADZIP")"; echo notazip > $BADZIP
 W=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/packages" -F "file=@$BADZIP")
 assert_eq "E1 非法 zip → 400" "$W" "400"
 W=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/packages" -F "file=@$FIXDIR/bad-no-agentsmd.zip")

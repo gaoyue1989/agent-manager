@@ -17,12 +17,13 @@ backend/
 ├── internal/
 │   ├── handler/                # Gin 薄层（respond/middleware/router）
 │   ├── mcpsrv/server.go        # MCP 工具门面（go-sdk v1.3.1 streamableHttp）
-│   ├── service/                # 业务层：package/publish/register/status/env
+│   ├── service/                # 业务层：package/publish/register/status/env/envroute/platformconfig
+│   │   ├── platformconfig/     # 平台默认配置字段模板（全仓唯一字段定义源）
 │   │   └── package_version.go  # 包在线预览/编辑派生（FileContent/Zip/CreateVersion）
 │   ├── k8s/                    # client-go typed 封装 + 对象构造（纯函数可测）
 │   │   ├── template.go         # DeploymentBuilder：内置构造 + overlay(SMP) + 不变量校验
 │   │   └── k8sfake/            # 测试用 fake Client 实现
-│   ├── store/                  # GORM 模型（oaf_packages/services/service_events）+ PVC 文件操作
+│   ├── store/                  # GORM 模型（oaf_packages/services/service_events/platform_config）+ PVC 文件操作
 │   └── oaf/oaf.go              # OAG v0.8.0 frontmatter 解析校验（宽松模式 warnings）
 ```
 
@@ -45,6 +46,19 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - 业务 Ingress 注入 proxy-read/send-timeout=3600（A2A blocking 长对话必需）
 - zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）
 
+## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
+
+**敏感键一律走 K8s Secret，不进 ConfigMap/env_json；平台默认配置仅作为发布/编辑 env 时的表单默认填入，不经运行时注入、不影响任何已发布服务**。设计见 [../docs/design/platform-default-config-secret-design.md](../docs/design/platform-default-config-secret-design.md)（R3 修订为最终形态）。
+
+- **字段模板**（`internal/service/platformconfig/template.go`，全仓唯一字段定义源）：分组 llm/mysql/redis/sandbox；`Sensitive` 标记驱动服务 env 路由分类与页面掩码。`SANDBOX_ENABLED` 明确排除（保护 OAF 包 frontmatter 三层裁决）
+- **envFrom 两源**：容器 envFrom = 服务 Secret `{name}-env-secret`（敏感，在前）+ 服务 CM `{name}-env`（非敏感，在后可覆盖）；无平台级注入
+- **默认填入语义（R3）**：平台默认配置只存 DB（`platform_config` 表），`GET /platform-config` 展示视图敏感键掩码，`GET /platform-config/defaults` 返回含敏感明文的平面键值表专供表单预填；发布向导预填 defaults，详情页「填入平台默认」补缺失键（显式保存才生效）；改默认配置不影响存量服务
+- **服务 env 路由**（`internal/service/envroute.go`）：发布/PATCH env 中命中模板 Sensitive 或 `secretKeys` 的键路由进 `services.env_secret_json` + 服务 Secret，绝不写 env_json/CM；敏感键三态——非空=设置、空串=删除、缺失=sticky 保持不变；旧 env_json 中的存量敏感键在任意写路径自动迁入 Secret（防丢失规则）
+- **平台配置 API**：`GET/PUT /api/v1/platform-config`（PUT 部分更新：出现=设置、空串=删除、缺失=不变；未知键 400；清除必填键 400；展示视图敏感值永不回明文）、`GET /api/v1/platform-config/defaults`（预填数据源）
+- **服务 Secret 生命周期**：publish 创建（无敏感键为空对象）；Delete 连带清理（RBAC secrets `get/list/create/update/delete`，delete 仅此路径使用）；Unpublish 保留
+- **RBAC**：platform-backend Role 含 secrets `get/list/create/update/delete`（manifests/platform.yaml）；overlay 不变量：envFrom 两源引用必须保留（template.go）
+- MCP：`publish_service`/`update_service_env` 自动继承路由（`UpdateEnvIn` 增 `secretKeys`）；`get/update_platform_config` 工具为 P2
+
 ## 包在线预览与编辑（package_version.go + fs.go 扩展）
 
 - **包不可变**：包目录经 subPath 只读挂载进业务 Pod，在线编辑永不原地写 —— `CreateVersion` 基于「基础包 + upserts − deletes」在内存合成 zip，走与 Upload 完全相同的校验落盘管线（InspectZip → ParseOAF/Validate → 事务入库 → ExtractZipTo），生成新 `OafPackage` 记录 + 新 PVC 目录 `packages/{newID}`
@@ -62,5 +76,5 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - 环境变量 `DEPLOYMENT_TEMPLATE` 指向 overlay 文件路径（建议 ConfigMap 只读挂载）；**不设置 = 纯内置构造，行为与历史版本完全一致**
 - overlay 生效时机：发布/重新发布/上下线的 apply 时合并落集群；存量服务需重新 apply（republish 或 rollout restart）才滚动到新形态
 - fail-fast：启动时以哑参数试渲染，overlay 语法/类型/不变量错误直接 `log.Fatal` 拒绝启动；发布期再校验兜底（哑参数恰好通过、真实参数违规的 overlay 在 apply 时拒绝，服务转 error）
-- 校验不变量（违规即拒）：禁改 metadata.name/namespace、spec.replicas、spec.selector（含 matchExpressions）；必含 agent 主容器、envFrom {name}-env、/config 只读 subPath、/workspace、/data/files、/applog 可写挂载、保留键 env；volumeMount 引用的 volume 必须存在
+- 校验不变量（违规即拒）：禁改 metadata.name/namespace、spec.replicas、spec.selector（含 matchExpressions）；必含 agent 主容器、envFrom 四源引用（服务 CM/Secret + 平台默认 CM/Secret）、/config 只读 subPath、/workspace、/data/files、/applog 可写挂载、保留键 env；volumeMount 引用的 volume 必须存在
 - overlay 用法与可改项（PVC 名、imagePullSecrets、nodeSelector、tolerations、sidecar 等）见 `templates/deployment-overlay.example.yaml` 内注释
