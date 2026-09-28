@@ -54,7 +54,7 @@ class ThreadControllerHistoryMergeTest {
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip db paths"));
         ds = new DataSourceHolder(dataSource);
         confirmContextStore = mock(ConfirmContextStore.class);
-        when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(java.util.Optional.empty());
         sessionEventStore = mock(SessionEventStore.class);
         agentStateReader = mock(AgentStateReader.class);
         sessionMessageStore = mock(SessionMessageStore.class);

@@ -116,6 +116,20 @@ agent:
     # key 统一前缀（多 Agent 共用 oaf-redis 的隔离切分）；空 = 不加前缀（行为与存量部署一致）。
     # 改前缀后旧 key 不可见（靠 TTL 消亡），须在首次部署时定好；不能含 { }（hash tag 语法）
     prefix: ${AGENT_REDIS_PREFIX:}
+  # Agent Protocol（远程子 agent 服务端，travel-fulfillment agent-protocol 设计 §6/§7/§8 member）：
+  # 默认关闭——enabled=false 时不注册 /tasks* 端点、不装配认证 filter，存量服务零影响。
+  # enabled=true 时 authToken 必填（缺失启动即失败，fail-fast，设计 §6.2）。
+  # SDK 命名空间的同步映射见下方 agentscope.agent-protocol.*（同一批环境变量双落点）。
+  agent-protocol:
+    enabled: ${AGENT_PROTOCOL_ENABLED:false}
+    auth-token: ${AGENT_PROTOCOL_AUTH_TOKEN:}
+    # 本地 FS TaskStore 路径（agent_fs bean override 生效时不使用，§7 退化路径；禁止指向只读的 /config）
+    task-store: ${AGENT_PROTOCOL_TASK_STORE:}
+    retention-days: ${AGENT_PROTOCOL_TASK_RETENTION_DAYS:7}
+    # 以下三项为 lead 端 / RemoteConfirmBridge（桥组件，后续里程碑）预留
+    remote-confirm-ttl-hours: ${AGENT_REMOTE_CONFIRM_TTL_HOURS:24}
+    remote-poll-seconds: ${AGENT_REMOTE_POLL_SECONDS:5}
+    remote-headers-json: ${AGENT_REMOTE_HEADERS_JSON:}
   # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
   harness:
     # ReAct 推理
@@ -154,3 +168,20 @@ otel:
       headers: ${OTEL_EXPORTER_OTLP_HEADERS:}
   service:
     name: ${OTEL_SERVICE_NAME:agent-framework}
+
+# Agent Protocol 扩展（agentscope-extensions-agent-protocol）的 SDK 自动配置命名空间。
+# 与上方 agent.agent-protocol.* 同一批环境变量双落点：本节供 SDK 自动装配读取
+# （agentscope.agent-protocol.enabled=true + 容器内有 HarnessAgent bean 即生效）。
+# task-store-path 默认为空走容器本地 FS；我们的 ProtocolTaskRepository bean override
+# （AgentProtocolConfig）会让 TaskRecord 落 agent_fs，此键仅作 §7 退化路径兜底。
+# hitl/streaming 默认必须为 true：resume（HITL 确认续跑，设计 §5.4）与 /events SSE
+# （lead 侧 remoteStreaming 消费）在 SDK 侧默认均为关闭态，关闭即协议端确认链路断裂
+# （SDK 2.0.3 行为：resume 抛 "HITL is disabled"、/events 抛 "streaming is disabled"）。
+# enabled 与 agent.agent-protocol.enabled 同绑 AGENT_PROTOCOL_ENABLED 必须保持一致：
+# 仅覆盖 SDK 键会得到无认证的 /tasks* 端点，AgentProtocolConfig 启动期即拒绝（§6.2）。
+agentscope:
+  agent-protocol:
+    enabled: ${AGENT_PROTOCOL_ENABLED:false}
+    task-store-path: ${AGENT_PROTOCOL_TASK_STORE:}
+    hitl-enabled: ${AGENT_PROTOCOL_HITL_ENABLED:true}
+    streaming-enabled: ${AGENT_PROTOCOL_STREAMING_ENABLED:true}

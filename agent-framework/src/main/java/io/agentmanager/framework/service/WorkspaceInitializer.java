@@ -135,6 +135,16 @@ public class WorkspaceInitializer {
 
         var declared = new ArrayList<String>();
         for (var agent : oafConfig.subAgents()) {
+            // endpoint 非空 = 远程子 agent 声明（travel-fulfillment §8 lead-2）：由
+            // HarnessAgentFactory 经 builder.subagents(...) 注册 SDK 远程声明，跳过本地
+            // md 生成——否则 DynamicSubagentsMiddleware 每轮重扫出的本地声明与静态远程
+            // 声明同名双注册（胜负未定义）。declared 集合**不含**远程声明：reload
+            // （force=true）的 stale 清理因此会把这类 agent 升级为 endpoint 声明之前
+            // 生成过的旧 md 一并删除（本地/远程二选一，不留残余）。
+            if (agent.endpoint() != null && !agent.endpoint().isBlank()) {
+                log.info("Subagent '{}' declares endpoint, skip local md (remote declaration)", agent.agent());
+                continue;
+            }
             var agentFile = subagentsDir.resolve(agent.agent() + ".md");
             declared.add(agentFile.getFileName().toString());
             if (!force && Files.exists(agentFile)) {

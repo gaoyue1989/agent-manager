@@ -4,10 +4,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
@@ -21,17 +23,24 @@ public class InfoController {
     private final AgentRuntimeService agentRuntime;
     private final McpManager mcpManager;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final AgentManagerProperties props;
+    /** SDK 协议属性：仅 agent-protocol 启用时由扩展自动配置装配，关闭时为空 */
+    private final ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties;
 
     public InfoController(
         OafConfigHolder oafConfigHolder,
         AgentRuntimeService agentRuntime,
         McpManager mcpManager,
-        McpToolRegistrar mcpToolRegistrar
+        McpToolRegistrar mcpToolRegistrar,
+        AgentManagerProperties props,
+        ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties
     ) {
         this.oafConfigHolder = oafConfigHolder;
         this.agentRuntime = agentRuntime;
         this.mcpManager = mcpManager;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.props = props;
+        this.agentProtocolProperties = agentProtocolProperties;
     }
 
     /**
@@ -42,6 +51,23 @@ public class InfoController {
         return mcpManager.loadConfigs(oafConfigHolder.get().mcpServers());
     }
 
+    /**
+     * Agent Protocol（远程子 agent 服务端）状态透出：
+     * enabled 以本服务配置（agent.agent-protocol.enabled）为准——它同时决定认证过滤器
+     * 与端点是否装配；streaming/hitl 读 SDK 扩展属性（仅启用时存在，关闭时报 false）；
+     * task_store 为配置的本地 FS 退化路径（agent_fs bean override 生效时实际不使用）。
+     */
+    private Map<String, Object> agentProtocolStatus() {
+        var protocol = props.agentProtocol();
+        var sdk = agentProtocolProperties.getIfAvailable();
+        return Map.of(
+            "enabled", protocol != null && protocol.enabled(),
+            "streaming", sdk != null && sdk.isStreamingEnabled(),
+            "hitl", sdk != null && sdk.isHitlEnabled(),
+            "task_store", protocol != null ? protocol.taskStore() : ""
+        );
+    }
+
     @GetMapping("/")
     public Map<String, Object> root() {
         var oafConfig = oafConfigHolder.get();
@@ -50,7 +76,8 @@ public class InfoController {
             "slug", oafConfig.slug(),
             "version", oafConfig.version(),
             "description", oafConfig.description(),
-            "protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0"),
+            "protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0",
+                "agent_protocol", agentProtocolStatus()),
             "oaf", Map.of(
                 "tools", oafConfig.tools(),
                 "skills", oafConfig.skills().size(),
@@ -94,6 +121,7 @@ public class InfoController {
             .toList());
         result.put("mcp", mcpManager.getMcpSummaries(currentMcpConfigs()));
         result.put("protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0"));
+        result.put("agent_protocol", agentProtocolStatus());
 
         // 详细信息（可选）
         if (includeDetails) {

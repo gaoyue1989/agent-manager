@@ -39,6 +39,7 @@ agent-framework/
 │   │   │   │   ├── OafConfigLoader.java         # AGENTS.md 解析
 │   │   │   │   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent + MysqlDistributedStore)
 │   │   │   │   ├── A2AServerConfig.java         # A2A Server 配置 (HarnessAgentRunner)
+│   │   │   │   ├── AgentProtocolConfig.java     # Agent Protocol 服务端装配（协议默认关闭：TaskRepository agent_fs override + reload-safe AgentFactory + token fail-fast，含 service/protocol/AgentProtocolAuthFilter 注册）
 │   │   │   │   └── ChannelConfig.java           # ChatUiChannel Bean
 │   │   │   ├── model/
 │   │   │   │   └── OafConfig.java               # OAF 配置模型 (含 deniedTools)
@@ -163,6 +164,10 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - 兼容转换：message/send 与 message/stream 自动补全 SDK 反序列化必需字段（`kind:"message"`、`messageId`、parts `kind:"text"`、`blocking:true`），顶层 `userId`/`sessionId` → `message.metadata`
 - `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表读取构造 A2A Task（save no-op，消息已由 AgentScope 自动持久化）
 - 多租户：SDK 从 `message.metadata.userId` / `message.metadata.sessionId` 读取（AgentScopeAgentExecutor）
+
+### 5. AgentProtocolConfig / AgentProtocolAuthFilter — Agent Protocol 服务端（远程子 agent 面，默认关闭）
+
+`config/AgentProtocolConfig`（条件装配 `agent.agent-protocol.enabled=true`：ProtocolTaskRepository bean override → TaskRecord 落 agent_fs 跨重启可 resume；自定义 AgentFactory → `agentRuntimeService.getAgent()` 防 reload 跑旧实例（F14）；token 缺失 fail-fast）+ `service/protocol/AgentProtocolAuthFilter`（/tasks* 前置校验 `X-Agent-Protocol-Token`，无/错一律 401）。终态 TaskRecord 保留期扫描在 `SessionCleanupService`（SDK 2.0.3 无删除 API，暂为扫描留痕）。`/` 与 `/metadata` 透出 `agent_protocol` 状态。设计/事实基础见 [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md)
 
 ---
 
@@ -323,6 +328,15 @@ OAF `deniedTools` 字段控制排除列表。
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关：`false` = 完全关闭记忆——不注册 `memory_*` 工具 + 不执行 flush/整合（`disableMemoryHooks` + `disableMemoryTools`）；沙箱不再注入/回写记忆文件（技能回写不受影响） |
+| `AGENT_PROTOCOL_ENABLED` | `false` | | Agent Protocol（远程子 agent 服务端）总开关：true 时注册 `/tasks*` 端点 + 认证 filter + TaskRepository agent_fs bean override；false 存量零影响（/tasks 404）。设计见 docs/design/travel-fulfillment-agent-protocol-design.md |
+| `AGENT_PROTOCOL_AUTH_TOKEN` | — | ✓（协议启用时） | 服务间认证 token（Header `X-Agent-Protocol-Token`）：`AGENT_PROTOCOL_ENABLED=true` 时**必填**，缺失启动即失败（fail-fast）；无/错 token 一律 401（AgentProtocolAuthFilter）。敏感值经平台 Secret 路由，不落 ConfigMap |
+| `AGENT_PROTOCOL_TASK_STORE` | 空 | | TaskRecord 本地 FS 退化路径（§7）：agent_fs bean override 生效时不使用；**禁止指向 `/config`**（PVC subPath 只读）。同值双落点：`agent.agent-protocol.task-store` 与 SDK `agentscope.agent-protocol.task-store-path` |
+| `AGENT_PROTOCOL_TASK_RETENTION_DAYS` | `7` | | 终态 TaskRecord 保留天数（SessionCleanupService 每日扫描；SDK 2.0.3 无删除 API，当前扫描计数留痕、物理清理待 SDK 提供 delete） |
+| `AGENT_PROTOCOL_HITL_ENABLED` | `true` | | SDK 扩展 `agentscope.agent-protocol.hitl-enabled`：关闭即 resume 抛 "HITL is disabled"（远程确认链路断裂），member 服务端固定开启；SDK 原始默认 false |
+| `AGENT_PROTOCOL_STREAMING_ENABLED` | `true` | | SDK 扩展 `agentscope.agent-protocol.streaming-enabled`：关闭即 `/tasks/{id}/events` SSE 抛 "streaming is disabled"（lead 侧 remoteStreaming 无法消费），member 服务端固定开启；SDK 原始默认 false |
+| `AGENT_REMOTE_CONFIRM_TTL_HOURS` | `24` | | 远程确认挂起独立 TTL 小时数（lead 端 RemoteConfirmBridge 用，confirm_context 远程行超时自动 DENY + 审计）；member 侧仅透出 |
+| `AGENT_REMOTE_POLL_SECONDS` | `5` | | 远程任务快照轮询周期秒（lead 端 Bridge 唯一确认源 `GET /tasks/{id}`，F15）；member 侧仅透出 |
+| `AGENT_REMOTE_HEADERS_JSON` | 空 | | lead 端远程子 agent 声明 headers JSON（注入 `X-Agent-Protocol-Token` 等，值走 env 不进包）；member 侧不消费。敏感键，平台路由进 `{name}-env-secret` |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24）**：`LLM_*` 是**系统模型**——未显式选择模型的会话的对话模型，
 > 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
@@ -384,6 +398,7 @@ OAF `deniedTools` 字段控制排除列表。
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps: 卡片工具调用代理（ask 工具 403 + needsConfirm 走确认流） |
 | POST | `/mcp/ui-context` | MCP Apps (4.7): 静默更新模型上下文（ui_context 表持久化，Hook 下次调用注入） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
+| POST/GET | `/tasks*` | **Agent Protocol 远程子 agent 服务端（默认关闭）**：`AGENT_PROTOCOL_ENABLED=true` 才由 SDK 扩展注册——`POST /tasks` 提交、`GET /tasks/{id}` 快照（确认源，F15）、`/{id}/wait`、`/{id}/cancel`、`/{id}/events`(SSE)、`/{id}/resume`；全部经 AgentProtocolAuthFilter 前置校验 `X-Agent-Protocol-Token`，无/错 token 一律 401。关闭时 404、行为与现状完全一致 |
 
 ---
 

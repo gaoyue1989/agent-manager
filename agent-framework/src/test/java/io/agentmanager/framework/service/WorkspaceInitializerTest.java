@@ -125,6 +125,23 @@ class WorkspaceInitializerTest {
     }
 
     @Test
+    void shouldSkipMdGenerationForEndpointDeclarations() throws Exception {
+        // endpoint 非空 = 远程子 agent 声明（travel-fulfillment §8 lead-2）：
+        // 由 HarnessAgentFactory 注册 SDK 远程声明，本地 md 不生成（防同名双注册）
+        var remote = new OafConfig.SubAgentConfig("internal", "booking", "1.0.0", "订票专员",
+            List.of(), false, "http://booking.agent-platform.svc.cluster.local:8100");
+        var local = new OafConfig.SubAgentConfig("openai", "researcher", "1.0.0", "researcher",
+            List.of("research"), false, "");
+        var ws = initializer.initialize(tempDir,
+            config(List.of(), List.of(), List.of(), List.of(), List.of(remote, local)));
+
+        assertFalse(Files.exists(ws.resolve("subagents/booking.md")),
+            "endpoint 声明不应生成本地 subagents/*.md");
+        assertTrue(Files.exists(ws.resolve("subagents/researcher.md")),
+            "endpoint 为空者维持本地 md 链路");
+    }
+
+    @Test
     void shouldNotOverwriteExistingWorkspaceFiles() throws Exception {
         var ws = initializer.initialize(tempDir, config(List.of(), List.of(), List.of(), List.of(), List.of()));
 

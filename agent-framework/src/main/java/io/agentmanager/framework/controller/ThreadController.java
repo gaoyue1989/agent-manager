@@ -379,8 +379,14 @@ public class ThreadController {
      *
      * <p><b>权威来源是 AgentState</b>：官方 SDK 把挂起的 ASKING 工具连同 replyId 一起
      * 持久化在最后一条 assistant 消息里（2.0.3 起），与会话同寿命——因此确认卡片在
-     * confirm_context 的 30 分钟 TTL 之后依然能重建。
-     * confirm_context 仅作兜底（老会话、SDK 未写入 metadata 的场景）。
+     * confirm_context 的 30 分钟 TTL 之后依然能重建。远程确认行（RemoteConfirmBridge 落卡）
+     * 不在父 state，只能来自 confirm_context。
+     *
+     * <p>FIFO 单卡（V7，travel-fulfillment 设计 §5.2）：confirm_context 兜底取
+     * {@link ConfirmContextStore#findHeadPending} ——最早未消费行（任意 confirm_key，
+     * 本地 30min / 远程 24h TTL 分档懒过滤），并发远程挂起排队等待而非悬挂。
+     * 远程行附 {@code confirm_key}/{@code remote_task} 字段（additive，前端零改动），
+     * 确认端点凭 confirmKey 路由到远程任务。
      */
     private Map<String, Object> pendingConfirmPayload(String sessionId, String stateData) {
         var asking = stateData != null
@@ -395,13 +401,17 @@ public class ThreadController {
             m.put("source", "agent_state");
             return m;
         }
-        return confirmContextStore.findPending(sessionId)
+        return confirmContextStore.findHeadPending(sessionId)
             .map(p -> {
                 var m = new LinkedHashMap<String, Object>();
-                m.put("reply_id", p.replyId());
+                m.put("reply_id", p.replyId() != null ? p.replyId() : "");
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
                 m.put("source", "confirm_context");
+                if (p.isRemote()) {
+                    m.put("confirm_key", p.confirmKey());
+                    m.put("remote_task", p.remoteTask());
+                }
                 return m;
             })
             .orElse(null);

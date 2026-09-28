@@ -11,6 +11,7 @@ import java.util.TreeSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
@@ -24,6 +25,9 @@ import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.memory.compaction.ToolResultEvictionConfig;
 import io.agentscope.harness.agent.filesystem.spec.RemoteFilesystemSpec;
 import io.agentscope.harness.agent.memory.MemoryConfig;
+import io.agentscope.harness.agent.subagent.RemoteAskPolicy;
+import io.agentscope.harness.agent.subagent.SubagentDeclaration;
+import io.agentscope.harness.agent.subagent.protocol.RemoteStreamDetail;
 
 /**
  * HarnessAgent 构建工厂：AgentScopeConfig 启动装配与 OafReloadService 整包重建共用。
@@ -70,17 +74,23 @@ public class HarnessAgentFactory {
     private final WorkspaceInitializer workspaceInitializer;
     private final McpToolRegistrar mcpToolRegistrar;
     private final List<io.agentmanager.framework.tool.CustomTool> customTools;
+    private final RemoteConfirmBridge remoteConfirmBridge;
 
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
         McpToolRegistrar mcpToolRegistrar,
-        List<io.agentmanager.framework.tool.CustomTool> customTools
+        List<io.agentmanager.framework.tool.CustomTool> customTools,
+        // @Lazy 破 bean 环：Factory → RemoteConfirmBridge → AgentRuntimeService（@Bean）
+        // → HarnessAgent（@Bean）→ Factory。代理在首次 spawn 抓取时才解析目标——
+        // 发生在 context refresh 之后的运行期，启动期不触发环上的任何创建
+        @Lazy RemoteConfirmBridge remoteConfirmBridge
     ) {
         this.props = props;
         this.workspaceInitializer = workspaceInitializer;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.customTools = customTools;
+        this.remoteConfirmBridge = remoteConfirmBridge;
     }
 
     /**
@@ -178,12 +188,36 @@ public class HarnessAgentFactory {
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
                 // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
                 .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
+                // 远程子 agent 身份规范化（F10，travel-fulfillment §8 lead-4）：Channel 链路
+                // ctx.userId 是网关 peer，agent_spawn 组装 RemoteSubmitContext 直取
+                // ctx.getUserId()——须在工具执行前经 session_user 反查写回规范 userId
+                // （RuntimeContext.userId 无 setter，中间件内反射写回、失败 fail-soft）。
+                // 只写 userId 不写 sessionId（设计 §5.6）。置于 McpUserContextMiddleware
+                // 之后：后者按 peer 直接反查写入 McpMeta 的生产行为保持不变；本中间件
+                // 解析复用 SessionKeyResolver 的 turn 级 memo（外层追踪中间件已按原始
+                // ctx 计算完毕），写回只影响其后读取 ctx.getUserId() 的消费方（agent_spawn）
+                .middleware(new RemoteUserIdMiddleware(sessionUserStore))
+                // agent_spawn 结果抓取（travel-fulfillment §5.5）：RemoteConfirmBridge 在途任务
+                // 登记的唯一入口——解析 agent_spawn 结果文本的 task_id 连同入参交桥登记
+                // (session → endpoint, taskId)；缺此中间件则快照轮询（F15 唯一确认源）永不生效，
+                // 远程确认卡永不落库。复用上方 sessionKeyResolver 实例（turn 级 memo 共享，
+                // 与追踪中间件对原始 ctx 的解析结果一致）；抓取/登记全程 fail-soft 不影响父流
+                .middleware(new RemoteSpawnCaptureMiddleware(remoteConfirmBridge, sessionKeyResolver))
                 // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
                 .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
+
+            // 远程子 agent 声明（travel-fulfillment B1，§8 lead-1）：OAF agents[].endpoint
+            // 非空者注册为 SDK 远程声明（经 Agent Protocol 调度子服务 /tasks）；endpoint
+            // 为空者不在此注册，维持 workspace subagents/*.md 本地链路（同一包可混用）。
+            // headers 统一来自 AGENT_REMOTE_HEADERS_JSON（服务间认证 token 等，值走 env 不进包）。
+            var remoteSubagents = buildRemoteSubagentDeclarations(oafConfig);
+            if (!remoteSubagents.isEmpty()) {
+                builder.subagents(remoteSubagents);
+            }
 
             // OAF 包内技能目录注册为市场层（skill 四层优先级 L2）：
             // HarnessSkillMiddleware 每轮推理重扫目录（mtime+size 短路），PVC 上
@@ -277,6 +311,89 @@ public class HarnessAgentFactory {
         AgentManagerProperties.LLMConfig llm,
         AgentManagerProperties.HarnessConfig harness) {
         return io.agentmanager.framework.config.ChatModelFactory.build(llm, harness);
+    }
+
+    /** remoteHeadersJson 解析用（ObjectMapper 线程安全，复用实例） */
+    private static final com.fasterxml.jackson.databind.ObjectMapper REMOTE_HEADERS_MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * 构造远程子 agent 声明（travel-fulfillment-agent-protocol-design §8 lead-1，B1 Agent Protocol）：
+     * OAF agents[].endpoint 非空者映射为 SDK SubagentDeclaration——name=agent、
+     * description=role、url=endpoint、remoteStreaming=true（子事件全文回流父 SSE）、
+     * remoteStreamDetail=FULL、remoteAskPolicy=PROPAGATE（M0 F15 实测父流不转发确认
+     * 事件，确认以 RemoteConfirmBridge 快照轮询为唯一来源，PROPAGATE 保留为语义声明）。
+     * headers 解析自 AgentManagerProperties 的 agentProtocol().remoteHeadersJson
+     * （agent.agent-protocol.remote-headers-json ← AGENT_REMOTE_HEADERS_JSON：JSON 对象、
+     * 值须为字符串）——解析失败记 warn 跳过而非启动失败（子服务侧 AuthFilter 对
+     * 无/错 token 兜底 401）。
+     * endpoint 为空者不映射，维持 workspace subagents/*.md 本地链路（可混用）。
+     *
+     * <p>public：供单测断言声明映射（与 {@link #buildPermissionContext} 同例）。
+     */
+    public java.util.List<SubagentDeclaration> buildRemoteSubagentDeclarations(OafConfig oafConfig) {
+        var declarations = new java.util.ArrayList<SubagentDeclaration>();
+        for (var agent : oafConfig.subAgents()) {
+            var endpoint = agent.endpoint();
+            if (endpoint == null || endpoint.isBlank()) {
+                continue; // 本地 subagent：走 WorkspaceInitializer 生成 subagents/*.md
+            }
+            var declared = SubagentDeclaration.builder()
+                .name(agent.agent())
+                // SDK build() 校验 description 非空（blank 直接拒绝构建）：role 缺失时回落
+                // agent 名兜底，路由语义弱化但不阻断装配（描述质量影响委派路由，设计 §13.6）
+                .description(agent.role() != null && !agent.role().isBlank()
+                    ? agent.role() : agent.agent())
+                .url(endpoint)
+                .remoteStreaming(true)
+                .remoteStreamDetail(RemoteStreamDetail.FULL)
+                .remoteAskPolicy(RemoteAskPolicy.PROPAGATE);
+            var headers = parseRemoteHeaders();
+            if (!headers.isEmpty()) {
+                declared.headers(headers);
+            }
+            declarations.add(declared.build());
+            log.info("Remote subagent declared: {} -> {}", agent.agent(), endpoint);
+        }
+        return declarations;
+    }
+
+    /**
+     * 解析 agent.agent-protocol.remote-headers-json（AGENT_REMOTE_HEADERS_JSON）为
+     * header 映射：空白/缺失返回空 map；JSON 非法或非对象、值非字符串时记 warn 跳过
+     * 对应内容（fail-soft，不阻断 agent 构建）。
+     */
+    private java.util.Map<String, String> parseRemoteHeaders() {
+        var protocol = props.agentProtocol();
+        var json = protocol != null ? protocol.remoteHeadersJson() : null;
+        if (json == null || json.isBlank()) {
+            return java.util.Map.of();
+        }
+        com.fasterxml.jackson.databind.JsonNode node;
+        try {
+            node = REMOTE_HEADERS_MAPPER.readTree(json);
+        } catch (Exception e) {
+            log.warn("agent.remote-headers-json parse failed, remote headers skipped: {}", e.getMessage());
+            return java.util.Map.of();
+        }
+        if (node == null || !node.isObject()) {
+            log.warn("agent.remote-headers-json is not a JSON object, remote headers skipped");
+            return java.util.Map.of();
+        }
+        var headers = new java.util.LinkedHashMap<String, String>();
+        node.fields().forEachRemaining(entry -> {
+            var value = entry.getValue();
+            if (value == null || value.isNull()) {
+                log.warn("agent.remote-headers-json entry '{}' is null, skipped", entry.getKey());
+                return;
+            }
+            if (!value.isTextual()) {
+                log.warn("agent.remote-headers-json entry '{}' is not a string, skipped", entry.getKey());
+                return;
+            }
+            headers.put(entry.getKey(), value.asText());
+        });
+        return headers;
     }
 
     /**

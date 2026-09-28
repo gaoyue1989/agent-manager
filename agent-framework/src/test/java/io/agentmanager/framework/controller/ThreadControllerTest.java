@@ -477,7 +477,8 @@ class ThreadControllerTest {
             ToolUseBlock.builder().id("call-9").name("get_weather")
                 .input(java.util.Map.of("city", "beijing")).build()),
             java.time.Instant.now(), null, null);
-        when(confirmContextStore.findPending(anyString())).thenReturn(Optional.of(pending));
+        // V7 多行化：history 兜底取 FIFO 头（任意 confirm_key 的最早未消费行）
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(pending));
 
         // Skip generatedFiles and loadMessages by throwing
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
@@ -489,11 +490,35 @@ class ThreadControllerTest {
 
     @Test
     void threadHistoryShouldReturnNullPendingConfirmWhenNone() throws Exception {
-        when(confirmContextStore.findPending(anyString())).thenReturn(Optional.empty());
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.empty());
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
         var result = controller.threadHistory("acme:mt2", true, 200, null);
         assertNull(result.get("pendingConfirm"));
+    }
+
+    /** V7：远程确认行经 history 暴露（additive 字段 confirm_key/remote_task，前端零改动） */
+    @Test
+    void threadHistoryShouldSurfaceRemoteConfirmRowWithAnchor() throws Exception {
+        // Map.of 不允许 null 值：child_reply_id 用 LinkedHashMap 承载 null
+        var anchor = new java.util.LinkedHashMap<String, Object>();
+        anchor.put("service", "booking");
+        anchor.put("task_id", "t-42");
+        anchor.put("child_reply_id", null);
+        var remoteRow = new ConfirmContextStore.PendingConfirm(
+            "acme:mt3", "task:t-42", null,
+            List.of(ToolUseBlock.builder().id("call-r").name("create_order")
+                .input(java.util.Map.of("order_id", "O-1")).build()),
+            java.time.Instant.now(), null, null, anchor);
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(remoteRow));
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
+
+        var result = controller.threadHistory("acme:mt3", true, 200, null);
+        assertNotNull(result.get("pendingConfirm"));
+        var payload = result.get("pendingConfirm").toString();
+        assertTrue(payload.contains("task:t-42"), "confirm_key 透出供确认端点路由: " + payload);
+        assertTrue(payload.contains("remote_task"), payload);
+        assertTrue(payload.contains("booking"), payload);
     }
 
     // ========== extractThreadId ==========

@@ -26,7 +26,8 @@ class AgentScopeConfigTest {
     private final AgentScopeConfig config = new AgentScopeConfig();
     private final io.agentmanager.framework.service.HarnessAgentFactory factory =
         new io.agentmanager.framework.service.HarnessAgentFactory(
-            propsForLlm(), null, null, java.util.List.of());
+            propsForLlm(), null, null, java.util.List.of(),
+            mock(io.agentmanager.framework.service.RemoteConfirmBridge.class));
 
     @Test
     void mcpManagerShouldUseConfigPath() {
@@ -171,7 +172,8 @@ class AgentScopeConfigTest {
         }
 
         var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
-            props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()));
+            props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()),
+            mock(io.agentmanager.framework.service.RemoteConfirmBridge.class));
         assertThrows(RuntimeException.class,
             () -> factory.build(oaf, store, new LLMLogger(), null, null,
                 mock(io.agentmanager.framework.service.ModelCatalog.class), null));
@@ -362,7 +364,8 @@ class AgentScopeConfigTest {
             new AgentManagerProperties.SseConfig(20, 5, 256, 300), harness);
 
         var factory = new io.agentmanager.framework.service.HarnessAgentFactory(
-            props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()));
+            props, ws, mcp, List.of((io.agentmanager.framework.tool.CustomTool) new BusinessTools()),
+            mock(io.agentmanager.framework.service.RemoteConfirmBridge.class));
         var agent = factory.build(oaf, store, new LLMLogger(), null, null,
             mock(io.agentmanager.framework.service.ModelCatalog.class), null);
         return new java.util.TreeSet<>(agent.getToolkit().getToolNames());
