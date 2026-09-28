@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"agent-manager/backend/internal/service"
+	"agent-manager/backend/internal/service/platformconfig"
 	"agent-manager/backend/internal/store"
 )
 
@@ -154,6 +155,30 @@ func registerTools(s *mcp.Server, core *service.Core) {
 
 	// ---- OAF 包生成（发布助手对话式打包，语义自 agent-framework 迁入） ----
 	registerOafTools(s, core)
+
+	// ---- 平台配置 ----
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "get_platform_defaults",
+		Description: "获取平台默认配置（管理员在设置页维护的 LLM/MySQL/Redis/Sandbox 共享基础配置）。" +
+			"发布或编辑 env 前应先调用：values 中已配置的键直接预填进 env，不要让用户重复提供；" +
+			"fields 标明各键是否必填/敏感。values 含敏感键明文（与发布向导预填同源），" +
+			"仅用于填充 publish_service/update_service_env 的 env 参数（敏感键自动路由进服务 Secret），回复中不得明文回显。",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, JSONOut, error) {
+		values, err := core.GetPlatformDefaults()
+		if err != nil {
+			return errResult(err.Error())
+		}
+		fields := []map[string]any{}
+		for _, g := range platformconfig.Template() {
+			for _, f := range g.Fields {
+				fields = append(fields, map[string]any{
+					"envKey": f.EnvKey, "group": g.Name,
+					"required": f.Required, "sensitive": f.Sensitive,
+				})
+			}
+		}
+		return okResult(map[string]any{"values": values, "fields": fields})
+	})
 
 	// ---- 服务发布与管理 ----
 	mcp.AddTool(s, &mcp.Tool{

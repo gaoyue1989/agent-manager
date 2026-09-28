@@ -234,6 +234,64 @@ func TestMCPListServicesFilter(t *testing.T) {
 	}
 }
 
+// get_platform_defaults：平台默认配置预填数据源（values 含敏感明文 + fields 元数据）。
+func TestMCPGetPlatformDefaults(t *testing.T) {
+	cs, core, done := newMCPClient(t)
+	defer done()
+
+	// 未配置：values 为空对象
+	isErr, out, _ := call(t, cs, "get_platform_defaults", map[string]any{})
+	if isErr {
+		t.Fatalf("get_platform_defaults empty: %v", out)
+	}
+	if values, ok := out["values"].(map[string]any); !ok || len(values) != 0 {
+		t.Fatalf("empty config should yield empty values: %v", out["values"])
+	}
+
+	if _, err := core.UpdatePlatformConfig(map[string]string{
+		"LLM_API_KEY":         "sk-test-123",
+		"LLM_BASE_URL":        "https://api.example.com/v1",
+		"CHECKPOINT_PASSWORD": "pw",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	isErr, out, _ = call(t, cs, "get_platform_defaults", map[string]any{})
+	if isErr {
+		t.Fatalf("get_platform_defaults: %v", out)
+	}
+	values, _ := out["values"].(map[string]any)
+	// 含敏感键明文（与 GET /platform-config/defaults 同源，供发布 env 预填）
+	if values["LLM_API_KEY"] != "sk-test-123" || values["CHECKPOINT_PASSWORD"] != "pw" {
+		t.Fatalf("values should contain configured defaults incl. sensitive plaintext: %v", values)
+	}
+	if _, exists := values["LLM_MODEL_ID"]; exists {
+		t.Fatalf("unconfigured keys must not appear: %v", values)
+	}
+
+	// 字段元数据：required/sensitive 标记齐全；SANDBOX_ENABLED 明确排除（保护包 frontmatter 三层裁决）
+	fields, _ := out["fields"].([]any)
+	seen := map[string]map[string]any{}
+	for _, f := range fields {
+		fm, ok := f.(map[string]any)
+		if !ok {
+			t.Fatalf("field entry should be object: %v", f)
+		}
+		key, _ := fm["envKey"].(string)
+		seen[key] = fm
+	}
+	if len(seen) == 0 {
+		t.Fatalf("fields metadata missing: %v", out["fields"])
+	}
+	if _, exists := seen["SANDBOX_ENABLED"]; exists {
+		t.Fatal("SANDBOX_ENABLED must be excluded from platform config template")
+	}
+	llmKey := seen["LLM_API_KEY"]
+	if llmKey == nil || llmKey["sensitive"] != true || llmKey["required"] != true || llmKey["group"] != "llm" {
+		t.Fatalf("LLM_API_KEY metadata wrong: %v", llmKey)
+	}
+}
+
 // ---- helpers ----
 
 func uploadViaMCP(t *testing.T, cs *mcp.ClientSession) uint {
