@@ -56,6 +56,12 @@ func TestPlatformConfigAPI(t *testing.T) {
 		t.Fatalf("unknown key should 400, got %d", w.Code)
 	}
 
+	// 空 values 400（非 500）
+	w, _ = doJSON(t, r, "PUT", "/api/v1/platform-config", map[string]any{"values": map[string]string{}})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("empty values should 400, got %d", w.Code)
+	}
+
 	// apply-restart：无服务 → 空结果
 	w, out = doJSON(t, r, "POST", "/api/v1/platform-config/apply-restart", nil)
 	if w.Code != http.StatusOK {

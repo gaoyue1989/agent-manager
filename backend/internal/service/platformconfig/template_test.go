@@ -50,10 +50,10 @@ func TestRequiredKeys(t *testing.T) {
 
 func TestSplit(t *testing.T) {
 	values := map[string]string{
-		"LLM_API_KEY":   "sk-1",
-		"LOG_LEVEL":     "info",
-		"MY_MCP_TOKEN":  "tok",
-		"LLM_BASE_URL":  "http://x",
+		"LLM_API_KEY":  "sk-1",
+		"LOG_LEVEL":    "info",
+		"MY_MCP_TOKEN": "tok",
+		"LLM_BASE_URL": "http://x",
 	}
 	plain, secret := Split(values, map[string]bool{"MY_MCP_TOKEN": true})
 	if len(plain) != 2 || plain["LOG_LEVEL"] != "info" || plain["LLM_BASE_URL"] != "http://x" {

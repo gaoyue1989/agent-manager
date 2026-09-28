@@ -187,7 +187,7 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 							{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: p.K8sName + "-env"}}},
 							{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: EnvSecretName(p.K8sName)}}},
 						},
-						Env:             fixedEnv,
+						Env: fixedEnv,
 						VolumeMounts: []corev1.VolumeMount{
 							// OAF 包只读挂载到 /config（同一可写卷的只读 subPath）；工作区为独立可写空目录
 							{Name: FilesVolumeName, MountPath: "/config", SubPath: p.SubPath, ReadOnly: true},

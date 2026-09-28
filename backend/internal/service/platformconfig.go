@@ -19,6 +19,7 @@ import (
 var (
 	ErrUnknownConfigKey  = errors.New("unknown platform config key")
 	ErrRequiredConfigKey = errors.New("required platform config key cannot be cleared")
+	ErrEmptyConfigValues = errors.New("platform config values is required")
 )
 
 // PlatformConfigFieldView 设置页字段视图：敏感值永不回明文，仅 hasValue。
@@ -145,7 +146,7 @@ func (c *Core) GetPlatformConfig() (*PlatformConfigView, error) {
 // 校验：未知键 400；清除必填键 400（必填仅防误清，不做全局完整性检查）。
 func (c *Core) UpdatePlatformConfig(values map[string]string) (*PlatformConfigView, error) {
 	if len(values) == 0 {
-		return nil, errors.New("platform config values is required")
+		return nil, ErrEmptyConfigValues
 	}
 	known := platformconfig.KnownKeys()
 	for k, v := range values {

@@ -43,6 +43,7 @@ func mapError(c *gin.Context, err error) {
 		errors.Is(err, service.ErrUpsertInvalid),
 		errors.Is(err, service.ErrUnknownConfigKey),
 		errors.Is(err, service.ErrRequiredConfigKey),
+		errors.Is(err, service.ErrEmptyConfigValues),
 		errors.Is(err, store.ErrNoAgentsMD),
 		errors.Is(err, store.ErrZipTooLarge),
 		errors.Is(err, store.ErrTooManyFiles),

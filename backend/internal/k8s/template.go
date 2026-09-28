@@ -121,10 +121,10 @@ func validateDeployment(p ObjectParams, d *appsv1.Deployment) error {
 	// envFrom 必含四源引用：服务 CM/Secret + 平台默认 CM/Secret
 	// （平台默认配置下发链路，docs/design/platform-default-config-secret-design.md §3.1）
 	wantEnvFrom := map[string]bool{
-		p.K8sName + "-env":     false,
+		p.K8sName + "-env":       false,
 		EnvSecretName(p.K8sName): false,
-		DefaultConfigCMName:    false,
-		DefaultSecretName:      false,
+		DefaultConfigCMName:      false,
+		DefaultSecretName:        false,
 	}
 	for _, ef := range cs.EnvFrom {
 		name := ""

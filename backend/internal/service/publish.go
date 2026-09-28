@@ -84,8 +84,8 @@ type PublishRequest struct {
 	// Env 用户环境变量（全量覆盖语义）；模板敏感键自动路由进服务 Secret，绝不落 CM/env_json
 	Env map[string]string `json:"env"`
 	// SecretKeys 强制按敏感处理的任意键（如 MCP token），与模板敏感键一并路由进服务 Secret
-	SecretKeys []string          `json:"secretKeys"`
-	Replicas   int32             `json:"replicas"`
+	SecretKeys []string `json:"secretKeys"`
+	Replicas   int32    `json:"replicas"`
 }
 
 // NewCore 组装业务层。
@@ -270,7 +270,8 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	if err := c.K8s.RestartDeployment(ctx, c.Cfg.Namespace, svc.K8sName); err != nil {
 		return nil, err
 	}
-	c.transition(svc, store.StatusDeploying, "env updated, rolling restart")
+	// DB 先于 transition：若顺序颠倒，DB 写失败会留下 deploying 且无 goroutine 推进，
+	// 而 deploying 拒绝再次 UpdateEnv，服务将卡死（原实现即 DB 在前，保持该失败语义）
 	svc.EnvJSON = mustJSON(plain)
 	svc.EnvSecretJSON = mustJSON(secret)
 	if err := c.DB.Model(svc).Updates(map[string]interface{}{
@@ -278,17 +279,18 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 	}).Error; err != nil {
 		return nil, err
 	}
+	c.transition(svc, store.StatusDeploying, "env updated, rolling restart")
 	c.asyncWaitAndRegister(svc.ID)
 	return svc, nil
 }
 
 // RepublishOptions 可选变更字段；nil/0 表示沿用现状。
 type RepublishOptions struct {
-	PackageID *uint
-	Image     *string
-	Replicas  *int32
-	Env       map[string]string // 非 nil 时全量替换（非敏感部分；敏感键路由语义同 UpdateEnv）
-	SecretKeys []string         // Env 非 nil 时生效：强制按敏感处理的任意键
+	PackageID  *uint
+	Image      *string
+	Replicas   *int32
+	Env        map[string]string // 非 nil 时全量替换（非敏感部分；敏感键路由语义同 UpdateEnv）
+	SecretKeys []string          // Env 非 nil 时生效：强制按敏感处理的任意键
 }
 
 // Republish 幂等重建全套资源（可换包/镜像/env），并滚动重启重新注册。
