@@ -13,7 +13,7 @@ backend/
 ├── cmd/server/main.go          # 入口：装配 REST + MCP + K8s + DB
 ├── config/config.go            # 环境变量（MYSQL_DSN 必填无默认）
 ├── Dockerfile                  # golang:1.26 多阶段构建
-├── templates/                  # deployment-overlay.example.yaml（DEPLOYMENT_TEMPLATE 示例）
+├── templates/                  # deployment-overlay.example.yaml / ingress-overlay.example.yaml（overlay 示例）
 ├── internal/
 │   ├── handler/                # Gin 薄层（respond/middleware/router）
 │   ├── mcpsrv/server.go        # MCP 工具门面（go-sdk v1.3.1 streamableHttp）
@@ -21,7 +21,7 @@ backend/
 │   │   ├── platformconfig/     # 平台默认配置字段模板（全仓唯一字段定义源）
 │   │   └── package_version.go  # 包在线预览/编辑派生（FileContent/Zip/CreateVersion）
 │   ├── k8s/                    # client-go typed 封装 + 对象构造（纯函数可测）
-│   │   ├── template.go         # DeploymentBuilder：内置构造 + overlay(SMP) + 不变量校验
+│   │   ├── template.go         # DeploymentBuilder/IngressBuilder：内置构造 + overlay(SMP) + 不变量校验
 │   │   └── k8sfake/            # 测试用 fake Client 实现
 │   ├── store/                  # GORM 模型（oaf_packages/services/service_events/platform_config）+ PVC 文件操作
 │   └── oaf/oaf.go              # OAG v0.8.0 frontmatter 解析校验（宽松模式 warnings）
@@ -78,3 +78,11 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - fail-fast：启动时以哑参数试渲染，overlay 语法/类型/不变量错误直接 `log.Fatal` 拒绝启动；发布期再校验兜底（哑参数恰好通过、真实参数违规的 overlay 在 apply 时拒绝，服务转 error）
 - 校验不变量（违规即拒）：禁改 metadata.name/namespace、spec.replicas、spec.selector（含 matchExpressions）；必含 agent 主容器、envFrom 四源引用（服务 CM/Secret + 平台默认 CM/Secret）、/config 只读 subPath、/workspace、/data/files、/applog 可写挂载、保留键 env；volumeMount 引用的 volume 必须存在
 - overlay 用法与可改项（PVC 名、imagePullSecrets、nodeSelector、tolerations、sidecar 等）见 `templates/deployment-overlay.example.yaml` 内注释
+
+## 业务 Ingress 模板（INGRESS_TEMPLATE）
+
+- 业务 Ingress 由 `internal/k8s/template.go` 的 `IngressBuilder` 构造，模式与 DeploymentBuilder 完全一致：**内置纯函数构造为基线**（`objects.go:Ingress`）+ 可选 YAML overlay 经 **Strategic Merge Patch** 合并 + **不变量校验**；SMP helper 为泛型 `applySMPOverlay[T]`（两种 builder 共用）
+- 环境变量 `INGRESS_TEMPLATE` 指向 overlay 文件路径；**不设置 = 纯内置构造，行为与历史版本完全一致**。overlay 支持每服务占位符 `{{K8S_NAME}}`/`{{SHORT_NAME}}`（发布期替换，保证模板服务无关、启动探针可哑参渲染）
+- 允许改 host/path/TLS/追加注解；rules/tls 是普通列表（SMP **整体替换**），annotations/labels 是 map（按 key 合并）。校验不变量（违规即拒）：禁改 metadata.name/namespace、平台 labels、spec.ingressClassName；归属唯一（所有 backend 指向本服务 `{name}-svc:8100`）；每条 path 必须以 `(/|$)(.*)` 结尾且 use-regex=true、rewrite-target=/$2 保留；**x-forwarded-prefix 必须等于对外前缀**（改 path 必须同步改它）；proxy-read/send-timeout 必须保留
+- **Endpoint 随合并结果派生**（`k8s.IngressEndpoint`）：host 取第一条规则的 Host（空回落 INGRESS_HOST，自带端口不重复拼）、path 剥尾缀得对外前缀、TLS→https、端口取 INGRESS_PORT。Publish 落库前 Build（违规直接拒绝**不落库**，与 image 校验同级）；Republish 事务前 Build 随事务回写 endpoint；StartAgain 不改 endpoint（经 applyAll 重新校验，违规转 error）
+- overlay 用法与完整 rules 抄改样例见 `templates/ingress-overlay.example.yaml`；设计见 [../docs/design/ingress-template-design.md](../docs/design/ingress-template-design.md)

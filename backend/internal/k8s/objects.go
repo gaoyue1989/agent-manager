@@ -231,6 +231,19 @@ func Service(p ObjectParams) *corev1.Service {
 	}
 }
 
+// Ingress 路由形状常量：path 尾缀与 rewrite-target 成对（尾缀第 2 捕获组喂给 /$2），
+// 内置构造与 overlay 校验（template.go validateIngress）共用。
+const (
+	ingressPathSuffix   = "(/|$)(.*)"
+	rewriteTargetValue  = "/$2"
+	annRewriteTarget    = "nginx.ingress.kubernetes.io/rewrite-target"
+	annUseRegex         = "nginx.ingress.kubernetes.io/use-regex"
+	annSSLRedirect      = "nginx.ingress.kubernetes.io/ssl-redirect"
+	annProxyReadTimeout = "nginx.ingress.kubernetes.io/proxy-read-timeout"
+	annProxySendTimeout = "nginx.ingress.kubernetes.io/proxy-send-timeout"
+	annXForwardedPrefix = "nginx.ingress.kubernetes.io/x-forwarded-prefix"
+)
+
 // Ingress 构造 nginx Ingress：path /agent/{short}(/|$)(.*) → rewrite /$2。
 func Ingress(p ObjectParams) *networkingv1.Ingress {
 	short := ShortName(p.K8sName)
@@ -239,14 +252,14 @@ func Ingress(p ObjectParams) *networkingv1.Ingress {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
 			Annotations: map[string]string{
-				"nginx.ingress.kubernetes.io/rewrite-target": "/$2",
-				"nginx.ingress.kubernetes.io/use-regex":      "true",
-				"nginx.ingress.kubernetes.io/ssl-redirect":   "false",
+				annRewriteTarget:  rewriteTargetValue,
+				annUseRegex:       "true",
+				annSSLRedirect:    "false",
 				// A2A blocking 请求与 SSE 流式场景需要长超时
-				"nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
-				"nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
+				annProxyReadTimeout: "3600",
+				annProxySendTimeout: "3600",
 				// 向后端透传外部前缀（Debug Console 尾斜杠重定向等场景）
-				"nginx.ingress.kubernetes.io/x-forwarded-prefix": fmt.Sprintf("/agent/%s", short),
+				annXForwardedPrefix: fmt.Sprintf("/agent/%s", short),
 			},
 		},
 		Spec: networkingv1.IngressSpec{
@@ -254,7 +267,7 @@ func Ingress(p ObjectParams) *networkingv1.Ingress {
 			Rules: []networkingv1.IngressRule{{
 				IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
 					Paths: []networkingv1.HTTPIngressPath{{
-						Path:     fmt.Sprintf("/agent/%s(/|$)(.*)", short),
+						Path:     fmt.Sprintf("/agent/%s%s", short, ingressPathSuffix),
 						PathType: &pt,
 						Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
 							Name: p.K8sName + "-svc",
