@@ -58,7 +58,6 @@ public final class RedisConnectionFacade implements AutoCloseable {
      */
     private static final long CONNECT_BACKOFF_MS = 1000;
 
-    private final AgentRedisProperties props;
     private final String prefix;
     private final boolean clusterMode;
 
@@ -81,7 +80,6 @@ public final class RedisConnectionFacade implements AutoCloseable {
 
     private RedisConnectionFacade(AgentRedisProperties props, RedisClient standaloneClient,
                                   RedisClusterClient clusterClient) {
-        this.props = props;
         this.prefix = props.normalizedPrefix();
         this.clusterMode = props.isCluster();
         this.standaloneClient = standaloneClient;
@@ -199,13 +197,6 @@ public final class RedisConnectionFacade implements AutoCloseable {
             throw new IllegalStateException("syncConnection() 仅 standalone 模式可用");
         }
         return standaloneConnection();
-    }
-
-    /**
-     * 前缀是否已配置（诊断用；key 组装本身只经 {@link #key(String)}）。
-     */
-    public boolean hasPrefix() {
-        return !prefix.isEmpty();
     }
 
     /**

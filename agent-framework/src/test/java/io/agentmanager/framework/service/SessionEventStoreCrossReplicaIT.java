@@ -49,7 +49,8 @@ import io.agentmanager.framework.redis.RedisConnectionFacade;
  *   REDIS_IT=1 REDIS_IT_URL=redis://127.0.0.1:6399 mvn -o test -Dtest=SessionEventStoreCrossReplicaIT
  * </pre>
  *
- * <p>key 前缀固定为 {@code sess:it-<uuid>:*}，每个用例结束即从两个副本各删一遍，不会碰到业务数据。
+ * <p>key 前缀固定为 {@code sess:it-<uuid>:*}（REDIS_IT_PREFIX 非空时整体再带该前缀，两副本同前缀），
+ * 每个用例结束即从两个副本各删一遍，不会碰到业务数据。
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfEnvironmentVariable(named = "REDIS_IT", matches = "true|1")
@@ -86,14 +87,19 @@ class SessionEventStoreCrossReplicaIT {
     @BeforeAll
     void setUp() {
         url = System.getenv().getOrDefault("REDIS_IT_URL", "redis://127.0.0.1:6379");
+        // REDIS_IT_PREFIX 非空时走「带前缀」路径（与 RedisEventLogIT 同款开关）；
+        // 两个副本必须同前缀——它们建模同一部署的两个 Pod，共享同一 agent.redis.prefix
+        prefix = System.getenv().getOrDefault("REDIS_IT_PREFIX", "");
         // 两个门面 = 两条独立连接，模型上对应两个 Pod 各自的 Redis 连接；
         // 「共享」的部分只有 Redis 本身，客户端侧不缓存任何东西
         facadeA = newFacade(url);
         facadeB = newFacade(url);
         logA = new RedisEventLog(facadeA,
-            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM));
+            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM,
+                AgentRedisProperties.Mode.standalone, "", prefix));
         logB = new RedisEventLog(facadeB,
-            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM));
+            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM,
+                AgentRedisProperties.Mode.standalone, "", prefix));
         podA = new SessionEventStore(logA, 7, BATCH_SIZE, FLUSH_INTERVAL_MS);
         podB = new SessionEventStore(logB, 7, BATCH_SIZE, FLUSH_INTERVAL_MS);
     }
@@ -122,8 +128,12 @@ class SessionEventStoreCrossReplicaIT {
 
     private static RedisConnectionFacade newFacade(String url) {
         return RedisConnectionFacade.create(
-            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM));
+            new AgentRedisProperties(url, 2000, 2000, MAX_LEN_PER_STREAM,
+                AgentRedisProperties.Mode.standalone, "", prefix));
     }
+
+    /** REDIS_IT_PREFIX 读取结果（两副本共用同一前缀） */
+    private static String prefix;
 
     /** 每个用例独立的 session id（前缀固定 {@code it-}，@AfterEach 整体清理） */
     private String newSession() {

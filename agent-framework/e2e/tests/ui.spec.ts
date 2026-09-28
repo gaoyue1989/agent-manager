@@ -504,7 +504,7 @@ test('U15 压缩分隔条历史回放（归档合并视图渲染）', async ({ p
   const stream = chat({ message: `[E2E:plain](${tailArg})`, userId: UI_UID, sessionId: sid });
   await waitTerminal(stream);
   expect(stream.terminal?.type).toBe('done');
-  const seed = seedCompactionArchive(`${UI_UID}:${sid}`, sid, mark, UI_UID);
+  const seed = await seedCompactionArchive(`${UI_UID}:${sid}`, sid, mark, UI_UID);
 
   await page.goto('/debug/');
   // 页面默认身份即 debug-user，列表会拉到本会话；若未来页面默认身份变化，
