@@ -1,6 +1,6 @@
 # 平台默认配置与敏感键 Secret 化（redis / mysql / llm / sandbox）— 设计文档
 
-**日期**：2026-09-28　**状态**：设计定稿（待实施；R2 修订：敏感/非敏感分离 + 每服务独立 Secret）
+**日期**：2026-09-28　**状态**：已实施（P1 当日落地，真实集群实测通过，见 §11 实施与验证记录）
 
 > R2 修订说明（2026-09-28 评审后）：非敏感键不进 Secret，改由平台级 ConfigMap 承载；Secret 只放敏感键（`LLM_API_KEY`、`OPENSANDBOX_API_KEY`、`AGENT_REDIS_URL`、`CHECKPOINT_PASSWORD` 等）；每创建一个 agent 服务同时创建对应的 per-service Secret，服务级敏感 env 落该 Secret 而非 ConfigMap。
 
@@ -140,7 +140,7 @@ Ensure 时机三处（幂等，参照既有 `EnsureConfigMap`）：① backend �
 
 - `applyAll` 中 `EnsureSecret({name}-env-secret)` 与 `EnsureConfigMap({name}-env)` 并列；`Unpublish` 保留两者（与现状 CM 一致），`Delete` 一并删除。
 - 生命周期独立于服务：平台级两个对象不被 `Unpublish`/`Delete` 触碰。
-- RBAC（`manifests/platform.yaml:220` rules）：platform-backend 增加 `secrets` 资源 `get/list/create/update`（**现状无 secrets 权限，必须随本期一并下发**）。
+- RBAC（`manifests/platform.yaml:220` rules）：platform-backend 增加 `secrets` 资源 `get/list/create/update/delete`（**现状无 secrets 权限，必须随本期一并下发**；`delete` 为服务删除时清理 `{name}-env-secret` 所必需——实施期实测发现：缺 delete 时 `Delete()` 的 `_ =` 吞掉 403 导致服务 Secret 残留；平台默认 Secret 后端从不删除，无扩散风险）。
 
 ### 3.5 更新与生效链路
 
@@ -243,7 +243,7 @@ MCP 对齐（P2，见 §9）：`get_platform_config` / `update_platform_config`�
 - **已知限制**：
   - `platform_config` 与 `env_secret_json` 敏感值为 MySQL 明文，与现状 `model_config.api_key` 明文列同信任域；静态加密（master key 置 `.env.secrets`）列为后续增强。
   - **Secret 化收敛的是"清单与平台存储面"，不是 Pod 内可见性**——env 注入后对拥有业务 Pod exec 权限者仍可 `env` 读明文，这是 env 传递机制固有属性；进一步收敛需 Secret volume 挂载 + 框架侧支持，超出本期。
-- RBAC 最小化：secrets 仅 `get/list/create/update`；平台与服务 Secret 仅本 namespace 业务 Pod envFrom 消费。
+- RBAC 最小化：secrets `get/list/create/update/delete`（delete 仅服务 Secret 清理路径）；平台与服务 Secret 仅本 namespace 业务 Pod envFrom 消费。
 - 框架侧既有防线不变：`/debug` 密码掩码、Redis 日志只打 host/port/db。
 
 ## 8. 测试与验收
@@ -271,3 +271,19 @@ MCP 对齐（P2，见 §9）：`get_platform_config` / `update_platform_config`�
 2. **apply-restart 是否并入 PUT**（一个按钮 vs 两个动作）——本文档取两个动作，避免误触全局重启；如总要多点一次可再加 `applyRestart:true` 参数。
 3. **S3 组本期不纳入**——模板结构已预留，随时可加组。
 4. **服务级敏感键 sticky 语义**（PATCH 未出现的敏感键保持不变）与 env 全量覆盖心智不完全一致——选择 sticky 是为防页面盲点误删；如希望严格全量，需前端始终回传完整敏感键集合。
+
+## 11. 实施与验证记录（2026-09-28）
+
+**实现范围**：§9 P1 全量（backend / frontend / manifests RBAC / 文档）；镜像 `platform-backend:v4`、`platform-frontend:v7` 已导入集群并滚动上线。
+
+- **单测**：`go vet` + `go test ./...` 全绿（新增 template/envroute/platformconfig/handler 四组用例：模板键一致性对拍、SANDBOX_ENABLED 排除、平台对象名防碰撞后缀、Split 路由、sticky/显式删除优先于存量迁移、republish 保持服务 Secret、平台配置校验与拆分渲染、apply-restart 状态过滤与 spec 重刷、Delete 清理、掩码不泄漏）；前端 `eslint` 0 error、`next build` 通过（/settings 路由生成）。
+- **真实集群实测**（kind，K8s 1.32，nginx :8911 入口）：
+  1. backend 启动自动创建空平台对象 `oaf-platform-default-config`（CM）/ `oaf-platform-default-secret`（Secret）✅；
+  2. 从 release-agent 现网配置提取模板键值 PUT /platform-config（code 0）→ 拆分渲染正确：Secret 含 AGENT_REDIS_URL / CHECKPOINT_PASSWORD / LLM_API_KEY / OPENSANDBOX_API_KEY，CM 含 CHECKPOINT_JDBC_URL / CHECKPOINT_USERNAME / LLM_BASE_URL / LLM_MODEL_ID / OPENSANDBOX_SERVER_URL，GET 响应敏感键仅 hasValue ✅；
+  3. **发布不带任何 env 的服务 → A2A 注册成功转 running**（平台默认值经 envFrom 跑通 LLM/MySQL/Redis 全链路）；Deployment envFrom 四源顺序正确；Pod 内 `env` 断言敏感键存在（值不回显）；服务 CM 空、服务 Secret 空对象 ✅；
+  4. 发布携带 `LLM_API_KEY` → envJson 剔除该键、服务 Secret 收纳（CM 仅 LOG_LEVEL）；`GET /services/:id` 响应无明文、`envSecretKeys` 掩码视图正确 ✅；
+  5. PUT 修改 LLM_TEMPERATURE → apply-restart 点名测试服务 → deploying→running（scope 过滤生效，未触碰现网 mcdonalds-ordering-agent / release-agent）✅；
+  6. 删除测试服务 → Deployment/CM/Ingress 与服务 Secret 全部清理，平台对象保留，服务列表零残留 ✅。
+- **实施期发现并修复**：RBAC 缺 `delete` verb 导致服务删除时 `{name}-env-secret` 残留（`Delete()` 的 `_ =` 吞掉 403）——已补 `delete` verb（仅服务 Secret 清理路径使用）并端到端复验零残留；§3.4/§7 RBAC 表述同步修正。
+- **存量数据**：现网两个服务未动；其 env 中如仍有模板敏感键，按 §3.6 防丢失规则在下一次 PATCH/republish 时自动迁入服务 Secret。
+- **P2 待办**：MCP 工具 `get/update_platform_config`；`get_service_status` 的 env 输出改造为掩码结构；manifests 自举 secret 占位符化；release-agent 静态清单接入平台 CM/Secret。
