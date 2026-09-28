@@ -57,12 +57,14 @@ export default function ServiceDetailPage() {
     }
   }, [id, envDirty, secretDirty, versionsLoaded]);
 
+  // 轮询依赖 load 本体（其 useCallback 闭包携带 envDirty/secretDirty 最新值）：
+  // 若只依赖 [id]，setInterval 会永远持有挂载时的旧闭包（dirty 恒为 false），
+  // 每 5s 用服务端值覆盖未保存的编辑/填入内容
   useEffect(() => {
     load();
     const t = setInterval(load, 5000); // 状态轮询
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [load]);
 
   const act = async (fn: () => Promise<unknown>, okMsg: string) => {
     try {
