@@ -5,6 +5,7 @@ import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.agentmanager.framework.service.SessionKeyResolver;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
@@ -17,46 +18,55 @@ import reactor.core.publisher.Flux;
  *
  * 框架内部文件操作（memory_save 等）调用沙箱 exec 时 RuntimeContext 为空（实测），
  * OpenSandbox 无法从 exec 获取 userId。本 middleware 在 agent 调用链（onAgent）上
- * 把请求的 userId 注入 OpenSandboxFilesystemSpec 的 ThreadLocal，
+ * 把生效 userKey 注入 OpenSandboxFilesystemSpec 的 ThreadLocal，
  * 与 SandboxLifecycleMiddleware.acquire（创建/恢复沙箱）在同一订阅链顺序执行，
  * OpenSandboxClient.create/resume 时读取并绑定到沙箱实例，供 stop() 回写使用。
  * 同时作为上传文件注入兜底（acquire 可能先于本 middleware 拿不到 userKey）。
+ *
+ * <p>userKey 解析经 {@link SessionKeyResolver}（与 MCP McpMeta 注入、LLM-calls 记录键
+ * 同一翻译层）：Channel 链路（/threads/chat 经 ChatUiChannel 网关）ctx.userId 是网关
+ * peer（=前端 sessionId）、ctx.sessionId 是共享 gw-hash，原样使用会让 per-user 技能
+ * 物化/回写退化为 per-session 命名空间（issue #52）；A2A / invoke 链路反查未命中时
+ * 退化为旧行为（userId 优先，空则 sessionId），保持注入与回写同一命名空间。
  */
 public class SandboxUserKeyMiddleware implements MiddlewareBase {
 
     private static final Logger log = LoggerFactory.getLogger(SandboxUserKeyMiddleware.class);
 
     private final OpenSandboxFilesystemSpec spec;
+    private final SessionKeyResolver sessionKeyResolver;
 
     public SandboxUserKeyMiddleware(OpenSandboxFilesystemSpec spec) {
+        this(spec, null);
+    }
+
+    public SandboxUserKeyMiddleware(OpenSandboxFilesystemSpec spec, SessionKeyResolver sessionKeyResolver) {
         this.spec = spec;
+        this.sessionKeyResolver = sessionKeyResolver;
     }
 
     @Override
     public Flux<AgentEvent> onAgent(Agent agent, RuntimeContext ctx, AgentInput input,
                                     Function<AgentInput, Flux<AgentEvent>> next) {
         if (ctx != null) {
-            var userId = ctx.getUserId();
-            if (userId != null && !userId.isBlank()) {
-                spec.setPendingUserKey(userId);
-            } else {
-                spec.setPendingUserKey(ctx.getSessionId());
-            }
+            var userKey = resolveUserKey(ctx);
+            spec.setPendingUserKey(userKey);
             // 注入兜底：acquire（create/resume）可能先于本 middleware 且拿不到 userKey，
             // 此处沙箱实例已就绪 + userKey 已确定 → 绑定并注入（幂等，见 file-upload-download-plan §6.2）
             var sandbox = spec.getLatestSandbox();
-            log.info("[sandbox-userkey] onAgent: key={}, latestSandbox={}", userId, sandbox != null ? "present" : "null");
+            log.info("[sandbox-userkey] onAgent: key={}, latestSandbox={}", userKey, sandbox != null ? "present" : "null");
             if (sandbox != null) {
-                var key = userId != null && !userId.isBlank() ? userId : ctx.getSessionId();
-                sandbox.setUserKey(key);
+                if (userKey != null && !userKey.isBlank()) {
+                    sandbox.setUserKey(userKey);
+                }
                 var store = spec.getFileAssetStore();
                 var sandboxId = sandbox.getOsbState().getSandboxId();
-                if (store != null) {
+                if (store != null && userKey != null && !userKey.isBlank()) {
                     // reset 仅在新沙箱代执行（每次 create 即换代）：旧容器注入状态回滚 pending →
                     // 本 turn 重新注入。同沙箱代重复 onAgent（多实例竞争）不再 reset，防循环。
-                    if (!spec.isInjectedOnSandbox(key, sandboxId)) {
-                        store.resetInjectedToPending(key);
-                        spec.markInjectedOnSandbox(key, sandboxId);
+                    if (!spec.isInjectedOnSandbox(userKey, sandboxId)) {
+                        store.resetInjectedToPending(userKey);
+                        spec.markInjectedOnSandbox(userKey, sandboxId);
                     }
                 }
                 sandbox.injectPendingUploads();
@@ -64,7 +74,31 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                 // 否则沙箱档会话读的仍是容器内旧副本（管理面只写 KV，不回注容器）
                 sandbox.materializeUserSkills();
             }
+            // 立即清除 ThreadLocal：本 turn 已把 userKey 直接绑定到沙箱实例，残留值会被
+            // 同线程下个 turn 的 create/bindUserKey 消费（实测：错误 uid 抢先触发 create 路径
+            // materializeUserSkills 置位实例 flag → 正确 uid 的物化被静默跳过）
+            spec.clearPendingUserKey();
         }
         return next.apply(input);
+    }
+
+    /**
+     * 解析沙箱隔离键（业务用户键）：session_user 反查真实 userId，
+     * 反查不可用/未命中时降级旧行为（userId 优先，空则 sessionId）。
+     * SessionKeyResolver 内部 fail-soft（查库异常返回 null），此处不再包 try/catch。
+     */
+    private String resolveUserKey(RuntimeContext ctx) {
+        if (sessionKeyResolver != null) {
+            var real = sessionKeyResolver.realUserId(ctx);
+            if (real != null && !real.isBlank()) {
+                return real;
+            }
+        }
+        var userId = ctx.getUserId();
+        if (userId != null && !userId.isBlank()) {
+            return userId;
+        }
+        var sessionId = ctx.getSessionId();
+        return sessionId != null && !sessionId.isBlank() ? sessionId : null;
     }
 }

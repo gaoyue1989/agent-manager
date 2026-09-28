@@ -92,6 +92,37 @@ class OpenSandboxTest {
     }
 
     @Test
+    void doExecShouldResolveRealUserViaSessionKeyResolver() throws Exception {
+        // Channel 链路（issue #52）：ctx.userId 是网关 peer（=前端 sessionId），doExec
+        // 须与 SandboxUserKeyMiddleware 同源反查真实用户，不得用 ctx 原值覆盖退化
+        var osb = mockOsb(mockExecution(0, "ok", ""));
+        var spec = new OpenSandboxFilesystemSpec();
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession("gw-hash")).thenReturn(null);
+        when(store.findUserIdBySession("front-sid")).thenReturn("alice");
+        spec.setSessionKeyResolver(new io.agentmanager.framework.service.SessionKeyResolver(store));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, spec);
+
+        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("front-sid").build();
+        sandbox.exec(ctx, "echo hi", 30);
+
+        assertEquals("alice", sandbox.getUserKey());
+    }
+
+    @Test
+    void doExecShouldFallBackToCtxValuesWithoutResolver() throws Exception {
+        // 未装配 resolver：保持旧行为（userId 优先，空则降级 sessionId）
+        var osb = mockOsb(mockExecution(0, "ok", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        sandbox.exec(RuntimeContext.builder().userId("u1").build(), "echo hi", 30);
+        assertEquals("u1", sandbox.getUserKey());
+
+        sandbox.exec(RuntimeContext.builder().sessionId("s-1").build(), "echo hi", 30);
+        assertEquals("s-1", sandbox.getUserKey());
+    }
+
+    @Test
     void doSetupWorkspaceShouldCreateWorkspaceDir() throws Exception {
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);

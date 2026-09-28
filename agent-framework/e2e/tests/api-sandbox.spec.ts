@@ -205,8 +205,8 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   const createsBefore = (await sandboxStats()).creates.length;
   const sid = sessionIdFor(`x10-${uniq()}`);
   // turn 走 A2A：metadata.userId 会透传进 RuntimeContext，沙箱 userKey=真实用户，
-  // 会话开始物化（onAgent 主路径）才按用户 KV 生效（Channel 链路 ctx.userId 为空，
-  // userKey 退化为 sessionId，per-user 物化/回写不生效——独立 issue 跟进）
+  // 会话开始物化（onAgent 主路径）才按用户 KV 生效（Channel 链路 userKey 退化问题
+  // 已由 issue #52 修复，Channel 侧回归见 X15）
   const a2aRes = await a2a('message/send', {
     message: {
       kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
@@ -303,4 +303,30 @@ ${putMarker}
   const final = names(await (await request.get(`/skills/users/${uid}`)).json());
   expect(final.skills).not.toContain(skill);
   expect(final.tombs).toContain(skill);
+});
+
+test('X15 Channel 链路（/threads/chat）per-user 技能物化（issue #52 回归）', async ({ request }) => {
+  // 修复前：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId）、ctx.sessionId 是共享
+  // gw-hash，SandboxUserKeyMiddleware 原样取 ctx 值 → 物化按 peer 查 KV 恒 0 条，per-user
+  // 技能"静默丢失"。修复后经 session_user 反查真实用户（与 MCP McpMeta 注入同源）。
+  const uid = U();
+  const skill = `e2e-skill-${uniq()}`;
+  const marker = `CHN-${uniq()}`;
+  const content = `---\nname: ${skill}\ndescription: e2e channel materialize probe\nversion: 1.0.0\n---\n\n# ${skill}\n\n${marker}\n`;
+
+  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content } });
+  expect(put.status()).toBe(200);
+
+  // turn 走 Channel chat（非 A2A）：物化探针同 X10（files/download 直证容器内文件）
+  const createsBefore = (await sandboxStats()).creates.length;
+  const sid = sessionIdFor(`x15-${uniq()}`);
+  const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+
+  const creates = (await sandboxStats()).creates;
+  expect(creates.length, '新会话首 turn 未创建沙箱').toBe(createsBefore + 1);
+  const probe = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${creates[createsBefore].id}/proxy/44772/files/download?path=${encodeURIComponent(`/workspace/skills/${skill}/SKILL.md`)}`);
+  expect(probe.status, 'Channel 链路容器内技能未物化（userKey 仍退化为 sessionId）').toBe(200);
+  expect(await probe.text()).toContain(marker);
 });

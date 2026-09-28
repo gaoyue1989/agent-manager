@@ -148,14 +148,24 @@ public class OpenSandbox extends AbstractBaseSandbox {
     }
 
     /**
-     * 解析 KV 隔离 key：优先 userId，为空时降级 sessionId。
-     * 与框架 IsolationScope.USER → SESSION 降级语义一致（debug 页面等
+     * 解析 KV 隔离 key：经 SessionKeyResolver 反查真实用户（与 SandboxUserKeyMiddleware
+     * 同源）。Channel 链路 ctx.userId 是网关 peer（=前端 sessionId）——middleware 已把
+     * 真实用户绑定到实例，此处若原样取 ctx 值会把 userKey 覆盖退化回 per-session 命名空间
+     * （issue #52）。反查不可用/未命中时保持旧行为：userId 优先，为空降级 sessionId
+     * （与框架 IsolationScope.USER → SESSION 降级语义一致，debug 页面等
      * Channel 路径 userId 为空，实测 state_data.user_id=""），
      * 保证注入/回写使用同一命名空间。
      */
     private String resolveUserKey(RuntimeContext ctx) {
         if (ctx == null) {
             return null;
+        }
+        var resolver = filesystemSpec != null ? filesystemSpec.getSessionKeyResolver() : null;
+        if (resolver != null) {
+            var real = resolver.realUserId(ctx);
+            if (real != null && !real.isBlank()) {
+                return real;
+            }
         }
         var userId = ctx.getUserId();
         if (userId != null && !userId.isBlank()) {

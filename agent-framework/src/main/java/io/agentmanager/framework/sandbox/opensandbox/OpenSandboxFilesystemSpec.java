@@ -32,6 +32,8 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private SandboxUserKeyMiddleware userKeyMiddleware;
     private io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private io.agentmanager.framework.service.storage.FileStorage fileStorage;
+    /** 业务规范键解析器（OpenSandbox.resolveUserKey 与 middleware 同源反查真实用户，issue #52；可空=退化为旧行为） */
+    private io.agentmanager.framework.service.SessionKeyResolver userKeyResolver;
 
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
@@ -91,6 +93,16 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         return this;
     }
 
+    /** 规范键解析器（Channel 链路 ctx.userId 是网关 peer，userKey 须经 session_user 反查真实用户） */
+    public io.agentmanager.framework.service.SessionKeyResolver getSessionKeyResolver() {
+        return userKeyResolver;
+    }
+
+    public OpenSandboxFilesystemSpec setSessionKeyResolver(io.agentmanager.framework.service.SessionKeyResolver resolver) {
+        this.userKeyResolver = resolver;
+        return this;
+    }
+
     /**
      * 设置待绑定的用户 key（由 SandboxUserKeyMiddleware 在 agent 调用链上调用，
      * 与 acquire 在同一订阅线程顺序执行，ThreadLocal 天然按请求隔离）。
@@ -104,6 +116,11 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         var key = pendingUserKey.get();
         pendingUserKey.remove();
         return key;
+    }
+
+    /** 清除待绑定 key（SandboxUserKeyMiddleware 消费后调用；reactor 线程池复用，残留会污染下个 turn 的 create） */
+    public void clearPendingUserKey() {
+        pendingUserKey.remove();
     }
 
     /** 读取但不清除待绑定用户 key（注入兜底：doExec 时 middleware 已设置） */
