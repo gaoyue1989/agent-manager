@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | **设计定稿 v1.2（待实施）**，含 2026-09-28 三轮评审/确认修订 |
+| 状态 | **设计定稿 v1.3（待实施）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15） |
 | 日期 | 2026-09-28 |
 | 参考 | 官方案例 [order-fulfillment](https://java.agentscope.io/v2/zh/service/cases/order-fulfillment)（AgentScope Service + Team 形态）；协议文档 [integration/protocol](https://java.agentscope.io/v2/zh/integration/protocol) |
 | 关联代码 | agent-framework SDK `io.agentscope:*:2.0.3`；`extensions-a2a-client`（已在 pom 未用）；`extensions-agent-protocol`（待引入） |
@@ -38,6 +38,11 @@
 | F12 | 业务 Ingress 单正则全量路由：`path /agent/{short}(/|$)(.*) → rewrite /$2`（`backend/internal/k8s/objects.go:247`，use-regex）——服务根下**所有**端点（含启用协议后的 `/tasks*`）经 NodePort 30080 外可达，叠加 F1 无认证 = 未防护的远程调度入口 | backend objects.go |
 | F13 | AgentSpawnTool 字节码内部类型为 `List<RemotePendingConfirm>`（pendingConfirms），**无裸 `RequireUserConfirmEvent` 字样**——远程确认大概率以 RemotePendingConfirm 快照/事件形态进入父流（官方文档口径为"转发 RequireUserConfirmEvent"，静态无法定论，M0 ① 终裁） | AgentSpawnTool strings 拆解 |
 | F14 | agent-protocol 默认 `AgentFactory = agentProvider.getObject()`（拿 **Spring bean**）；我们 OAF reload 是 `swapAgent` 换 volatile 引用 + holder 模式、**bean 永不替换**（A2A 服务端正是为此经 `A2aAgentRefHolder` 间接持有）——member 不自定义工厂则 reload 后协议任务全部跑在旧 agent 实例上 | AgentProtocolAutoConfiguration 源码 + 本仓库 reload 链路 |
+| F15 | **（M0 实测）远端子 agent 的 `remoteAskPolicy=PROPAGATE` 不产生任何父流确认事件**——背景/同步两种 spawn 均无 `RequireUserConfirmEvent`/`RemotePendingConfirm` 进父流；远端 spawn 恒异步（`timeout_seconds=60` 也立即返回 task_id，不走阻塞语义）；父侧 `wait_async_results` 对 awaiting 任务固定 60s 超时、`task_output` 只显示 Running。**父侧唯一可靠确认源 = member `GET /tasks/{id}` 快照** | M0 探针 run3（§15） |
+| F16 | **（M0 实测）`context.deny_rules` 不被 agent-protocol 扩展消费**（扩展源码零 deny/Permission 处理；harness 负责在父侧填充 `RemoteSubmitContext.denyRules`，member 侧应用需自实现）；实测原样 POST 带 deny_rules 的提交仍走 ask 挂起（fail-closed 方向，安全无损） | M0 探针 ④a + 扩展源码检索 |
+| F17 | **（M0 实测）SDK 批准续跑缺陷**：ask 挂起 → resume(approved=true) 后，子 run 的**所有**后续工具执行持续 ERROR（"content 参数验证失败"），任务以错误报告**伪 COMPLETED**；被批准的工具未产生副作用。与已知 SDK HITL 缺陷家族同源（e2e-ci-plan §11.3 ①：批准恢复后 tool_use.input 丢失）。**拒绝路径（approved=false）不受影响，干净终止** | M0 探针 ①/②（§15） |
+| F18 | **（M0 实测）部分权限上下文 fail-closed**：只声明两条规则时，未声明的内置工具（glob_files/list_files）也逐一 ask 挂起——member 必须复用完整"声明三态 + 未声明自动放行"规则展开（`HarnessAgentFactory.buildPermissionContext` 已有），否则确认卡密度爆炸 | M0 探针 ① |
+| F19 | **（M0 实测）身份与持久化链路成立**：`context.user_id` 全链路透传（子侧中间件捕获 == lead ctx.userId）；子侧 sessionId = taskId；TaskRecord 文件存储跨 member kill -9 重启保留快照且可 resume；全链路 JSON 序列化在 Spring Boot 3.3.5 BOM（jackson 管控 2.17.2，覆盖扩展声明的 2.21.1）下正常 | M0 探针 ④b/④c/④d/④e（§15） |
 
 ## 2. 总体架构
 
@@ -117,8 +122,9 @@ config:
 3. lead 汇总事实，产出**处置方案**（结构化 JSON：动作清单、费用、`expected_version`、`plan_id`），请求用户批准。
 4. 用户批准（对话级；写操作本身还会在步骤 6 再过一道工具级确认）。
 5. **执行阶段**：lead `agent_spawn(booking, 按方案执行…, timeout_seconds=0)` → 立即返回 `task_id`，**父 turn 结束、释放租约**。**写任务串行规约**：前一写任务终态前不得再 spawn 写任务（§5.3 有框架级兜底）。
-6. 子 agent 执行到写 MCP 工具（ask）→ 子任务挂起（`awaiting_confirm`）→ PROPAGATE 将 `RequireUserConfirmEvent` 转发进父流 → **RemoteConfirmBridge**（§5）落 `confirm_context`（多行，FIFO）→ 前端确认卡。
-7. 用户批准/拒绝 → Bridge 调 `resumeTask(..., RemoteConfirmDecision)`（approve→ALLOW，reject→DENY）→ **Bridge 异步监听子任务终态**（`/wait`）→ 终态即以合成消息（「任务 {task_id} 已终态，请汇总交付」）驱动一次内部 lead 汇总 turn（走 `invokeStream` 同一管线：acquire 租约 → `streamEvents` → 事件写 durable SSE）。**开着 confirm-stream 的用户在当前流尾直接看到汇总；离线用户经 `/threads/{sid}/subscribe` 续传与 history 可见**。唤醒仅对「经确认卡批准/拒绝而续跑的远程任务」启用。
+6. 子 agent 执行到写 MCP 工具（ask）→ 子任务挂起（`awaiting_confirm`）。**（M0 修订，F15）**：PROPAGATE 不产生父流事件、父侧 barrier/task_output 均不可见——**RemoteConfirmBridge 以快照轮询为唯一确认源**（对 lead 声明的 endpoint 周期 `GET /tasks/{id}`，或扫描任务清单），发现 `awaiting_confirm` 即落 `confirm_context`（多行，FIFO）→ 前端确认卡。
+   **（M0 修订，F17）一期人工闸门上移到父级**：SDK 批准续跑存在缺陷（resume 后工具执行持续 ERROR），一期子服务写工具**不设 ask**——「执行需批准」由 §4 步骤 4 的 **plan 批准**承担（与官方案例"阶段间批准"同构），子工具全 allow + L3 服务端校验（expected_version/plan_id）兜底；子侧工具级 ask 作为 SDK 修复后的可选增强。相应地步骤 6 的子侧挂起在常态业务流中不出现（快照轮询保留，覆盖 L4/异常路径与未来增强）。
+7. 用户批准/拒绝 → （一期：批准作用于 plan，spawn 携带已批准 plan 执行；若走子侧 ask 增强路径）Bridge 调 `resumeTask(..., RemoteConfirmDecision)`（approve→ALLOW，reject→DENY——M0 实测拒绝路径干净终止，F17）→ **Bridge 异步监听子任务终态**（`/wait`）→ 终态即以合成消息（「任务 {task_id} 已终态，请汇总交付」）驱动一次内部 lead 汇总 turn（走 `invokeStream` 同一管线：acquire 租约 → `streamEvents` → 事件写 durable SSE）。**开着 confirm-stream 的用户在当前流尾直接看到汇总；离线用户经 `/threads/{sid}/subscribe` 续传与 history 可见**。唤醒仅对「经确认卡批准/拒绝而续跑的远程任务」启用。
    **实现要点（第三轮确认）**：`invokeStream` 本身**不写** durable 事件流——SessionEventBus 的 emit 是 Controller 层职责（`AgentRuntimeService:486` 注释明示）。Bridge 驱动汇总 turn 时必须复刻该 emit（或抽公共方法供 controller 与 Bridge 共用），否则离线用户经 `/subscribe` 不可见。
 
 ## 5. RemoteConfirmBridge（远程确认适配层，两轮评审后的完整形态）
@@ -143,14 +149,15 @@ config:
 
 ### 5.4 决策路由与终态唤醒
 
-- confirm-stream 收到决策：行含 `remote_task` → **不**走父 state 恢复，组 `RemoteConfirmDecision` 调 `POST /tasks/{id}/resume`（approve→ALLOW，reject→DENY）。
-- resume 后 Bridge 异步 `/wait` 终态 → 驱动 lead 汇总 turn（§4 步骤 7）；终态与决策写 tool_audit。
+- confirm-stream 收到决策：行含 `remote_task` → **不**走父 state 恢复，组 `RemoteConfirmDecision` 调 `POST /tasks/{id}/resume`（approve→ALLOW，reject→DENY；**M0 实测拒绝路径干净终止、无副作用**）。
+- resume 后 Bridge 异步 `/wait` 终态 → 驱动 lead 汇总 turn（§4 步骤 7）；终态与决策写 tool_audit。**（M0 修订）**一期闸门在父级 plan 批准时，此路由作用于子侧 ask 增强路径；plan 未批准时 lead 不发起写委派（L1 规约 + Bridge 快照巡检兜底）。
 - 远程行超 TTL 未消费 → Bridge 定时任务自动 `resume(DENY, reason=confirm_timeout)` 并记审计（用户不作为分支，§9）。
 
-### 5.5 确认事件形态与卡片关联
+### 5.5 确认来源：快照轮询（M0 定论，F15）
 
-- **形态预期（第三轮确认修正，F13）**：AgentSpawnTool 字节码内部类型为 `List<RemotePendingConfirm>`、无裸 `RequireUserConfirmEvent` 字样——远程确认**大概率以 RemotePendingConfirm 快照/事件形态**进入父流（官方文档口径为"转发 RequireUserConfirmEvent"，静态无法定论）。Bridge 识别实现以 **RemotePendingConfirm 为主形态**准备，`RequireUserConfirmEvent` 直达为备选，M0 ① 终裁。
-- 转发事件的 replyId 是子侧的：Bridge 落库时以 `remote_task`（`{service, task_id, tool_calls, child_reply_id}`）为锚点，不依赖 replyId 与父 state 匹配。
+- **原"监听父流转发事件"形态被 M0 排除**：PROPAGATE 下背景/同步 spawn 均无确认事件进父流；远端 spawn 恒异步（立即返回 task_id），`wait_async_results` 对 awaiting 任务固定 60s 超时，`task_output` 只显示 Running——父侧完全不可见。
+- **Bridge 唯一确认源 = member `GET /tasks/{id}` 快照**（`status=awaiting_confirm` + `pending_confirms[{toolCallId,toolName,toolInputJson}]`）：对 lead 声明的每个 endpoint 维护在途任务清单（spawn 记录 + 定时对账），轮询周期 `AGENT_REMOTE_POLL_SECONDS`（默认 5s；轮询仅在存在在途任务时进行）。
+- 落库锚点：`remote_task`（`{service, task_id, tool_calls, child_reply_id}`），不依赖 replyId 与父 state 匹配。
 
 ### 5.6 已知偏差：parent_session_id 传 gw-hash
 
@@ -165,12 +172,12 @@ config:
 | 层 | 机制 | 保障 |
 |---|---|---|
 | L1 软约束 | lead 提示词两阶段协议、plan schema、写任务串行规约 | 引导，可绕过 → L2 兜底 |
-| L2 准入 | 子服务写工具 ask（frontmatter `config.permission.tools` + MCP `permissions.tools`）→ 任何写操作必然人工批准（对应官方"模型输出 approved 不算授权"） | 架构级"执行需批准" |
-| L3 硬约束 | 写 MCP 工具契约强制 `expected_version` + `plan_id`，服务端拒绝版本不符/重复提交；查询工具 `read_only: true` | 与 L2 独立，防注入后错误写 |
+| L2 准入 | **一期（M0 修订，F17）**：人工闸门 = §4 步骤 4 的 **plan 批准**（对话级确认卡，走既有 confirm 链路）——plan 未批准 lead 不得发起写委派；子服务写工具全 allow（SDK 批准续跑缺陷规避）。**二期（SDK 修复后）**：子服务写工具 ask（frontmatter + MCP permissions）→ 工具级确认卡经 Bridge 路由 | 一期架构级"执行需批准"（阶段间批准，与官方案例同构）；二期细化为工具级 |
+| L3 硬约束 | 写 MCP 工具契约强制 `expected_version` + `plan_id`，服务端拒绝版本不符/重复提交（**plan_id 仅在 plan 批准后签发有效**）；查询工具 `read_only: true` | 与 L2 独立，防注入后错误写；即使写工具无 ask 也不可绕过批准 |
 | L4 阶段硬切（二期） | lead 委派时 `remoteContextAttributes` 传 `phase`；子服务 `RuntimeContextCustomizer.flatten("phase")` + `PhaseDenyMiddleware`：`phase=diagnose` 时强制 deny 写工具 | 等价官方"节点切授权" |
-| 兜底 | `context.deny_rules`（父 DENY 规则下传子侧执行，F4） | 纵深防御 |
+| 兜底 | ~~`context.deny_rules` 下传~~ **（M0 修订，F16）扩展不消费该字段**：M1 在 member `AgentFactory`/`RuntimeContextCustomizer` 读 `context.deny_rules` 自行注册动态 DENY 规则（实测未配置时 fail-closed 到 ask，方向安全） | 纵深防御（需自实现） |
 
-**显式残差（第二轮 P3 修订）**：L4 落地前，诊断阶段"只读"实为软约束——模型在诊断阶段误调写工具会被 L2 拦下弹确认卡（安全无损、体验有损）。验收以「诊断阶段零确认卡出现」为设计异常信号（§12 断言 9）。
+**显式残差（第二轮 P3 修订）**：L4 落地前，诊断阶段"只读"实为软约束——一期由 L3 服务端校验兜底（诊断期 plan_id 未签发，写工具必然被拒），验收以「诊断阶段零写审计」为口径（§12 断言 1/9）。
 
 ### 6.2 服务间认证与信任边界（第二轮 P1-1 修订）
 
@@ -235,12 +242,11 @@ config:
 
 ## 11. 实施计划
 
-- **M0 双服务探针（先行，1–2 天，/tmp 双进程不动主干）**，断言（三轮评审/确认后定稿为七项）：
-  ① background spawn（timeout_seconds=0）→ 子 ask 挂起 → **确认事件形态终裁**（预期以 `RemotePendingConfirm` 快照为主、`RequireUserConfirmEvent` 直达为备选，F13）→ Bridge 落卡 → 批准 → `resumeTask` → **批准后汇总 turn 可见**（SSE 流尾或 subscribe 续传——需 Bridge 自行 emit 事件总线，§4 步骤 7 实现要点）全链路；
-  ② 拒绝分支（DENY 决策 → 子任务终止 → 汇总汇报）；
-  ③ 父进程崩溃重启后任务状态重查与续跑（子侧按 gw-hash 聚合 parent_session_id 属 §5.6 已知偏差，不判 bug）；
-  ④a `deny_rules` 下传生效；④b TaskRecord 经 WorkspaceManager 构造落 agent_fs 的实际行为（getter 已验证存在，§7）；④c **子侧收到 `user_id` == 规范用户**（Channel 链路 peer 场景，决定 RemoteUserIdMiddleware 必要性）；④d `McpUserContextMiddleware` 在 agent-protocol 路径的行为（含 session_user 反查分支）；④e 依赖兼容（jackson 2.21.1 × Spring Boot 3.3 管理版本 + 自动配置共存；agent-protocol 不带 grpc，无 grpc 面）。
-  **任何一条不通即回炉设计**（① 决定 Bridge 识别实现；④b 决定 §7 首选/退化）。
+- **M0 双服务探针（✅ 已完成，2026-09-28，/tmp 双进程；七项断言结果与两个设计级发现见 §15）**：
+  ① 全链路 ✅（spawn→ask 挂起→快照→resume→COMPLETED→交付下一轮回流）；并发现在：PROPAGATE 不转发事件（F15）、批准续跑 SDK 缺陷（F17）；
+  ② 拒绝分支 ✅（干净终止、无副作用、不受缺陷影响）；
+  ③ 父崩溃 ✅（kill -9 lead 后 member 任务存活 awaiting、可继续 resume）；
+  ④a deny_rules ❌（扩展不消费，转 M1 自实现，F16）；④b TaskRecord 持久化 ✅（文件存储跨 member 重启保留+可 resume；agent_fs 变体 M1）；④c userId 透传 ✅；④d 中间件上下文可见 ✅；④e 依赖兼容 ✅（Boot 3.3.5 BOM 管控 jackson 2.17.2）。
 - **M1 框架能力**：§8 member 1–4/6 + lead 1–4；单测（endpoint→声明映射、md 跳过、Bridge 决策路由与 FIFO、AuthFilter fail-fast、RemoteUserIdMiddleware）+ e2e 新增 **T 组**（远程子 agent：正常/确认/拒绝/超时/子服务下线/父崩溃恢复/无 token 401/存量服务零影响；双进程编排参考 `plugin-smoke.sh` 先例）。
 - **M2 业务示例包**：trip-lead + booking + approval 三包经平台发布走通，验收按 §12；**顺带量化 token 成本**（子任务独立上下文的放大倍数，写入运维文档）。
 - **M3 加固**：L4 PhaseDenyMiddleware、EventBus Redis 化与多副本放开、平台 Job 薄封装、`AGENT_REACT_MAX_ITERS` 实测调优、Ingress overlay 排除 /tasks（可选纵深）。
@@ -261,7 +267,7 @@ config:
 
 ## 13. 风险清单
 
-1. **确认事件形态未知**（`RequireUserConfirmEvent` 直达父流 or 仅任务快照）——决定 Bridge 识别实现，M0 ①。
+1. ~~确认事件形态未知~~ **已定论（M0，F15）**：无任何父流转发事件，Bridge 以快照轮询为唯一确认源（§5.5）。**新增首险：SDK 批准续跑缺陷（F17）**——一期以"闸门上移父级 plan 批准"规避（§6.1 L2），子侧 ask 转二期，跟进 SDK 版本修复。
 2. 子服务 `SANDBOX_GUARD_ENABLED` 会按 userId 串行化同用户沙箱获取——booking/approval 同用户并发诊断任务可能排队（非错误，容量规划计入）。
 3. Agent Protocol 无版本协商——两端 SDK 版本必须一致（2.0.3），纳入 `AVAILABLE_IMAGES` 白名单语义。
 4. OAF 规范演进：`agents[].endpoint` 语义从"保留未用"变为"远程子 agent"，需同步规范/发布助手/平台校验（§8 文档清单）。
@@ -314,3 +320,40 @@ config:
 | C4 | parent_session_id 传 gw-hash | Channel 链路 `ctx.sessionId` 即 gw-hash（issue #44 同源），静态确认 | §5.6 已知偏差：不写回 sessionId、Bridge 表承担关联、M0 ③ 不判 bug |
 | C5 | invokeStream 是否写 durable 事件流 | 否——SessionEventBus emit 是 Controller 层职责（`AgentRuntimeService:486` 注释） | §4 步骤 7 实现要点 + §13.10 回归风险 |
 | C6 | agent-protocol 依赖面 | 不带 grpc（aistio 才有 grpc 传递面） | M0 ④e 范围收窄为 jackson + 自动配置共存 |
+
+## 15. M0 双服务探针实测报告（2026-09-28，已完成）
+
+探针形态：`/tmp/m0/{member,lead}` 两个最小 Spring Boot 3.3.5 应用（JDK 21，未动主干）——member 挂 `extensions-agent-protocol:2.0.3`（`enabled=true`，file TaskStore）+ HarnessAgent（`query_order`=allow、`create_order`=ask）+ ctx 捕获中间件；lead 挂远程子 agent 声明（`url=http://127.0.0.1:8201`、`remoteStreaming=true`、`remoteAskPolicy=PROPAGATE`）+ SSE 触发端点与事件留痕。模型为真实 LLM（OpenAI 兼容端点）。
+
+### 断言结果
+
+| 断言 | 结果 | 证据要点 |
+|---|---|---|
+| ① 全链路 | ✅ 机制闭环 + ⚠️ 两个设计级发现 | `agent_spawn`→member `POST /tasks`→子调 `create_order`→`awaiting_confirm`+`pending_confirms[{toolCallId,toolName,toolInputJson}]`→`resume(approved=true)`→任务 COMPLETED→**交付在 lead 下一轮以结果回流并汇报**（无自动推送，F11 实证） |
+| ①-发现 A | ⚠️ **批准续跑 SDK 缺陷（F17）** | resume 后子 run 所有工具执行持续 ERROR（"content 参数验证失败"，AgentTraceMiddleware `state=ERROR` ×4），被批准的 `create_order` 无副作用，任务伪 COMPLETED；与 e2e-ci-plan §11.3 ① 同族 |
+| ①-发现 B | ⚠️ **PROPAGATE 不转发（F15）** | 背景/同步 spawn 均无确认事件进父流；`timeout_seconds=60` 同步 spawn 立即返回 `task_id`（远端恒异步）；`wait_async_results` 60s 超时（"empty wait"）；`task_output` 只显示 Running |
+| ② 拒绝分支 | ✅✅ | `resume(approved=false)`→终态 success、result=「订单创建操作被用户拒绝。」、**无副作用、不受发现 A 影响** |
+| ③ 父崩溃 | ✅ | `kill -9` lead 后 member 任务保持 `awaiting_confirm`，期间直接 resume 成功转换终态（会话上下文在默认存储下不跨重启，生产 MysqlDistributedStore 覆盖，M1 确认） |
+| ④a deny_rules | ❌ | 原样 `context.deny_rules` 提交仍走 ask 挂起；扩展源码零 deny/Permission 处理（F16），M1 自实现（AgentFactory/Customizer 读 context 注册动态规则） |
+| ④b TaskRecord | ✅ | file TaskStore 跨 member `kill -9` 重启保留快照（同 toolCallId）且 resume 可转换终态；agent_fs（MySQL）变体按 §7 在 M1 落地 |
+| ④c userId 透传 | ✅ | 子侧中间件捕获 `userId=u-canonical-42` == lead ctx.userId；子侧 sessionId = taskId |
+| ④d 中间件可见性 | ✅ | onModelCall 中间件在协议路径正常捕获 ctx（McpUserContextMiddleware 前置条件成立；MCP header 端到端验证留 M1 mock MCP） |
+| ④e 依赖兼容 | ✅ | Boot 3.3.5 BOM 将 jackson 管控至 2.17.2（覆盖扩展声明 2.21.1），全链路 JSON 正常；自动配置与我们的 Bean 共存无冲突 |
+| 附加 | ⚠️ | 部分权限上下文 fail-closed：未声明内置工具（glob_files/list_files）逐一 ask（F18）——member 必须走完整规则展开（buildPermissionContext 已有） |
+
+### 设计落点（v1.3 变更汇总）
+
+1. **Bridge 确认源转正为快照轮询**（§5.5）：对在途任务周期 `GET /tasks/{id}`，`AGENT_REMOTE_POLL_SECONDS` 默认 5s；原"父流事件监听"从设计中移除。
+2. **一期人工闸门上移父级 plan 批准**（§4 步骤 6/§6.1 L2）：子服务写工具一期全 allow（规避 F17），`plan_id` 批准后签发 + L3 服务端校验兜底；子侧工具级 ask 转 SDK 修复后的二期增强——与官方案例"阶段间批准"语义同构。
+3. **deny_rules 兜底转自实现**（§6.1）：M1 在 member 侧读 context 注册动态 DENY 规则。
+4. 新增事实 F15–F19；§13 风险 1 关闭并替换为 F17 缺陷跟进。
+5. M1 清单增补：Bridge 快照轮询器与在途任务对账、deny_rules 自实现、member 走 buildPermissionContext 完整展开的确认、member/lead 会话状态依赖 MysqlDistributedStore 的确认。
+
+### 第四轮（2026-09-28，M0 实测）
+
+| # | 事项 | 结论 | 处置 |
+|---|------|------|------|
+| R4-1 | M0 七项断言 | ①②③④b④c④d④e 通过；④a 不通过；①含两个设计级发现 | §15 实测报告；v1.3 变更汇总 |
+| R4-2 | PROPAGATE 转发 | 不转发（F15），父侧全盲 | §5.5 快照轮询转正 |
+| R4-3 | 批准续跑 | SDK 缺陷（F17），伪 COMPLETED | 一期闸门上移父级 plan 批准（§6.1 L2），子侧 ask 转二期 |
+| R4-4 | deny_rules | 扩展不消费（F16） | M1 自实现动态 DENY 注册 |
