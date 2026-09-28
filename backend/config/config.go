@@ -39,6 +39,7 @@ type Config struct {
 	RegisterRetry   int           // agent-card 拉取重试次数
 
 	DeploymentTemplate string // 业务 Deployment overlay 文件路径（Strategic Merge Patch），空=纯内置构造
+	IngressTemplate    string // 业务 Ingress overlay 文件路径（Strategic Merge Patch），空=纯内置构造
 
 	AuthToken string // 非空时启用 Bearer 校验
 
@@ -61,6 +62,7 @@ func Load() (*Config, error) {
 		RegisterTimeout:     time.Duration(envInt("REGISTER_TIMEOUT_SEC", 120)) * time.Second,
 		RegisterRetry:       envInt("REGISTER_RETRY", 5),
 		DeploymentTemplate:  envStr("DEPLOYMENT_TEMPLATE", ""),
+		IngressTemplate:     envStr("INGRESS_TEMPLATE", ""),
 		AuthToken:           envStr("AUTH_TOKEN", ""),
 		PackageDownloadBase: envStr("PACKAGE_DOWNLOAD_BASE", "http://platform-backend.agent-platform.svc.cluster.local:8080"),
 	}

@@ -48,6 +48,8 @@ type ConfigView struct {
 	// DeployBuilder 业务 Deployment 构造门面（内置构造 + 可选环境 overlay）；
 	// nil 视为纯内置构造，模式同 ImageAllowed 函数字段便于测试注入。
 	DeployBuilder *k8s.DeploymentBuilder
+	// IngressBuilder 业务 Ingress 构造门面（内置构造 + 可选环境 overlay）；nil 同上。
+	IngressBuilder *k8s.IngressBuilder
 }
 
 // DefaultPackageDownloadBase 集群内默认下载基地址（业务 Agent Pod 同 namespace 可达）。
@@ -68,6 +70,14 @@ func (c *Core) deployBuilder() *k8s.DeploymentBuilder {
 		return c.Cfg.DeployBuilder
 	}
 	return &k8s.DeploymentBuilder{}
+}
+
+// ingressBuilder 兜底取 builder：语义同 deployBuilder。
+func (c *Core) ingressBuilder() *k8s.IngressBuilder {
+	if c.Cfg.IngressBuilder != nil {
+		return c.Cfg.IngressBuilder
+	}
+	return &k8s.IngressBuilder{}
 }
 
 var (
@@ -124,6 +134,13 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	plain, secret := splitUserEnv(req.Env, req.SecretKeys)
 	params := c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath)
 	params.EnvSecret = secret
+	// Ingress overlay 纯函数前置：非法 overlay 直接拒绝且不落库（与 image 校验同级，
+	// 模板违规属平台配置错误，不产生 deploying/error 垃圾记录）；同时派生展示
+	// endpoint——模板可改 host/path，公式随合并后 Ingress 走（无 overlay 时与旧公式一致）。
+	ing, err := c.ingressBuilder().Build(params)
+	if err != nil {
+		return nil, fmt.Errorf("ingress: %w", err)
+	}
 	svc := &store.ServiceEntity{
 		K8sName:       k8sName,
 		DisplayName:   orStr(req.Name, pkg.Name),
@@ -135,7 +152,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		Status:        store.StatusCreated,
 		AgentCardJSON: "{}",
 		SkillsJSON:    "[]",
-		Endpoint:      fmt.Sprintf("http://%s:%d/agent/%s/", c.Cfg.IngressHost, c.Cfg.IngressPort, k8s.ShortName(k8sName)),
+		Endpoint:      k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort),
 		ClusterURL:    fmt.Sprintf("http://%s-svc.%s.svc.cluster.local:%d", k8sName, c.Cfg.Namespace, k8s.AgentPort),
 		ShortName:     k8s.ShortName(k8sName),
 	}
@@ -164,7 +181,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 }
 
 // applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service+Ingress。
-// Deployment 经 DeployBuilder（内置构造 + 可选环境 overlay 合并 + 不变量校验），
+// Deployment/Ingress 均经 builder（内置构造 + 可选环境 overlay 合并 + 不变量校验），
 // overlay 违规视为 apply 失败，服务转 error 状态。Build 纯函数零成本前置：
 // 非法 overlay 时任何对象不落半套资源。
 func (c *Core) applyAll(p k8s.ObjectParams) error {
@@ -172,13 +189,17 @@ func (c *Core) applyAll(p k8s.ObjectParams) error {
 	if err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
+	ing, err := c.ingressBuilder().Build(p)
+	if err != nil {
+		return fmt.Errorf("ingress: %w", err)
+	}
 	if err := c.applyServiceEnvObjects(p); err != nil {
 		return err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
 		return fmt.Errorf("service: %w", err)
 	}
-	if err := c.K8s.EnsureIngress(k8s.Ingress(p)); err != nil {
+	if err := c.K8s.EnsureIngress(ing); err != nil {
 		return fmt.Errorf("ingress: %w", err)
 	}
 	if err := c.K8s.EnsureDeployment(dep); err != nil {
@@ -335,6 +356,16 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		replicas = *opt.Replicas
 	}
 
+	// Ingress overlay 纯函数前置（事务前）：非法 overlay 直接拒绝，库与 K8s 均保持
+	// 原状；同时派生展示 endpoint 随事务回写（模板/配置变更后展示地址跟随合并结果）。
+	params := c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID))
+	params.EnvSecret = secret
+	ing, err := c.ingressBuilder().Build(params)
+	if err != nil {
+		return nil, fmt.Errorf("ingress: %w", err)
+	}
+	endpoint := k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort)
+
 	err = c.DB.Transaction(func(tx *gorm.DB) error {
 		if newPkgID != svc.PackageID {
 			tx.Model(&store.OafPackage{}).Where("id = ?", svc.PackageID).
@@ -346,7 +377,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 			}
 		}
 		updates := map[string]interface{}{
-			"image": image, "replicas": replicas,
+			"image": image, "replicas": replicas, "endpoint": endpoint,
 			"env_json": mustJSON(plain), "env_secret_json": mustJSON(secret),
 		}
 		return tx.Model(svc).Updates(updates).Error
@@ -356,9 +387,8 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	}
 	svc.PackageID, svc.Image, svc.Replicas = newPkgID, image, int(replicas)
 	svc.EnvJSON, svc.EnvSecretJSON = mustJSON(plain), mustJSON(secret)
+	svc.Endpoint = endpoint
 
-	params := c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID))
-	params.EnvSecret = secret
 	if err := c.applyAll(params); err != nil {
 		c.transition(svc, store.StatusError, "republish apply failed: "+err.Error())
 		return nil, err

@@ -1,0 +1,80 @@
+# 业务 Ingress overlay 示例（Strategic Merge Patch 语义）
+#
+# 用法：
+#   1. 按需裁剪本文件内容（只保留要改的字段），存为 ConfigMap 或宿主文件
+#   2. 给 platform-backend 设置环境变量 INGRESS_TEMPLATE 指向该文件路径
+#      （ConfigMap 挂载姿势见 docs/deployment.md §六/§七，同 DEPLOYMENT_TEMPLATE）
+#   3. kubectl rollout restart deployment/platform-backend
+#
+# 占位符（发布期按服务替换，模板保持服务无关）：
+#   {{K8S_NAME}}   → oaf-{short}（backend service 名 = {{K8S_NAME}}-svc）
+#   {{SHORT_NAME}} → 去掉 oaf- 前缀的短名（path/x-forwarded-prefix 用）
+#
+# 合并规则（K8s Strategic Merge Patch on networkingv1.Ingress）：
+#   - metadata.annotations/labels 为 map：按 key 合并——只写要新增/覆盖的注解即可
+#     保留全部内置注解；写 null 删除单条
+#   - spec.rules / spec.tls 为普通列表（无 patch 策略）：**写了即整体替换**——
+#     想改 host/path 必须写完整 rules 块（见下方示例，可直接抄改）
+#   - overlay 不得硬编码 metadata.name/namespace 与具体服务名（发布期才确定，
+#     硬编码会被启动探针拒绝；用占位符引用）
+#
+# 校验（违规即启动失败/发布失败，错误信息指明违例项）：
+#   - 禁改：metadata.name/namespace、平台 labels、spec.ingressClassName
+#   - 归属唯一：所有 backend 必须指向本服务 {{K8S_NAME}}-svc:8100（发布期替换）
+#   - 路由形状：每条 path 必须以 (/|$)(.*) 结尾；use-regex=true、
+#     rewrite-target=/$2 必须保留（rewrite 语义依赖第 2 捕获组）
+#   - x-forwarded-prefix 必须等于对外前缀（path 剥掉 (/|$)(.*) 后缀）——
+#     改 path 必须同步改该注解，否则 Debug Console/外链错位
+#   - proxy-read/send-timeout 必须保留（SSE 长连接；数值可按环境调整）
+#
+# Endpoint 联动：平台记录的访问地址自动取合并后第一条规则的 Host + path 前缀
+# （Host 为空回落 INGRESS_HOST；配了 TLS 则按 https 拼；端口取 INGRESS_PORT，
+# Host 自带端口时不重复拼接）。模板改 host 后 DNS/端口可达性由环境自行保证。
+#
+# ---- 以下示例全部注释，按需取消注释（可组合） ----
+#
+# 1) 自定义域名 + 自定义对外前缀（rules 整体替换，含配套 x-forwarded-prefix）
+# metadata:
+#   annotations:
+#     nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
+# spec:
+#   rules:
+#     - host: demo.example.com
+#       http:
+#         paths:
+#           - path: /my-agent(/|$)(.*)      # 前缀可改，尾缀 (/|$)(.*) 必须保留
+#             pathType: ImplementationSpecific
+#             backend:
+#               service:
+#                 name: "{{K8S_NAME}}-svc"
+#                 port:
+#                   number: 8100
+#
+# 2) 只加域名（path 保持内置 /agent/{short} 形态）
+# metadata:
+#   annotations:
+#     nginx.ingress.kubernetes.io/x-forwarded-prefix: /agent/{{SHORT_NAME}}
+# spec:
+#   rules:
+#     - host: demo.example.com
+#       http:
+#         paths:
+#           - path: /agent/{{SHORT_NAME}}(/|$)(.*)
+#             pathType: ImplementationSpecific
+#             backend:
+#               service:
+#                 name: "{{K8S_NAME}}-svc"
+#                 port:
+#                   number: 8100
+#
+# 3) TLS（配了 TLS 后平台按 https 拼展示地址；需环境在 INGRESS_PORT 上终止 TLS）
+# spec:
+#   tls:
+#     - hosts: [demo.example.com]
+#       secretName: demo-example-com-tls
+#
+# 4) 追加注解（map 按 key 合并，内置注解全保留）
+# metadata:
+#   annotations:
+#     nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+#     nginx.ingress.kubernetes.io/enable-cors: "true"

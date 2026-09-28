@@ -3,9 +3,12 @@ package service
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/k8s/k8sfake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -475,5 +478,130 @@ func TestListMergesPodStatus(t *testing.T) {
 	filtered, _ := core.List(store.StatusRunning, "", 0)
 	if len(filtered) != 0 {
 		t.Fatal("status filter should exclude deploying svc")
+	}
+}
+
+// ---- Ingress 模板（INGRESS_TEMPLATE）----
+
+// ingressTemplate 写临时 overlay 文件并构建 builder（经启动探针，与真实装配同路径）。
+func ingressTemplate(t *testing.T, content string) *k8s.IngressBuilder {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ingress-overlay.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := k8s.NewIngressBuilder(path)
+	if err != nil {
+		t.Fatalf("new ingress builder: %v", err)
+	}
+	return b
+}
+
+// hostOnlyOverlay 只加域名的完整 rules overlay（path 保持内置形态，占位符引用服务名）。
+func hostOnlyOverlay(host string) string {
+	return fmt.Sprintf(`
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /agent/{{SHORT_NAME}}
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /agent/{{SHORT_NAME}}(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`, host)
+}
+
+// Endpoint 跟随 Ingress 模板：模板改 host/path 后，发布记录的展示地址随合并结果派生。
+func TestPublishEndpointFollowsIngressTemplate(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressBuilder = ingressTemplate(t, fmt.Sprintf(`
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
+spec:
+  rules:
+    - host: demo.example.com
+      http:
+        paths:
+          - path: /my-agent(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`))
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if svc.Endpoint != "http://demo.example.com:30080/my-agent/" {
+		t.Fatalf("endpoint must follow template, got %q", svc.Endpoint)
+	}
+}
+
+// Ingress 模板违规：Publish 直接拒绝且不落库（不产生 deploying/error 垃圾记录）。
+// overlay 硬编码探针名（oaf-template-probe）可穿过启动探针、在真实发布期被拒——
+// 恰是"硬编码服务名"的典型误用形态。
+func TestPublishInvalidIngressOverlayRejectedWithoutRecord(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
+	pkg := uploadTestPkg(t, core, "")
+	if _, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"}); err == nil {
+		t.Fatal("publish must fail on invalid ingress overlay")
+	}
+	var cnt int64
+	core.DB.Model(&store.ServiceEntity{}).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("no service record must be created, got %d", cnt)
+	}
+}
+
+// Republish 回写：模板变更后展示地址随合并结果更新。
+func TestRepublishEndpointFollowsTemplateChange(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressBuilder = ingressTemplate(t, hostOnlyOverlay("one.example.com"))
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	if svc.Endpoint != "http://one.example.com:30080/agent/acme-demo/" {
+		t.Fatalf("initial endpoint: %q", svc.Endpoint)
+	}
+	core.Cfg.IngressBuilder = ingressTemplate(t, hostOnlyOverlay("two.example.com"))
+	updated, err := core.Republish(svc.ID, RepublishOptions{})
+	if err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if updated.Endpoint != "http://two.example.com:30080/agent/acme-demo/" {
+		t.Fatalf("endpoint must be rewritten on republish, got %q", updated.Endpoint)
+	}
+}
+
+// Republish 模板违规：事务前拒绝，库中记录保持原状（状态/endpoint 均不变）。
+func TestRepublishInvalidOverlayKeepsRecord(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
+	if _, err := core.Republish(svc.ID, RepublishOptions{}); err == nil {
+		t.Fatal("republish must fail on invalid overlay")
+	}
+	got, _ := core.Get(svc.ID)
+	if got.Status != store.StatusRegisterFailed {
+		t.Fatalf("status must stay register_failed, got %s", got.Status)
+	}
+	if got.Endpoint != svc.Endpoint {
+		t.Fatalf("endpoint must stay unchanged, got %q want %q", got.Endpoint, svc.Endpoint)
 	}
 }

@@ -41,6 +41,13 @@ func main() {
 		log.Fatalf("deployment template: %v", err)
 	}
 
+	// 业务 Ingress 构造门面：INGRESS_TEMPLATE 指向 overlay 文件（可空），
+	// 语义同 DeploymentBuilder（SMP 合并 + 不变量校验 + 启动 fail-fast）。
+	ingBuilder, err := k8sclient.NewIngressBuilder(cfg.IngressTemplate)
+	if err != nil {
+		log.Fatalf("ingress template: %v", err)
+	}
+
 	core := service.NewCore(db, fs, kc, service.ConfigView{
 		Namespace:           cfg.Namespace,
 		IngressClass:        cfg.IngressClass,
@@ -56,6 +63,7 @@ func main() {
 		RegisterTimeout:     cfg.RegisterTimeout,
 		RegisterRetry:       cfg.RegisterRetry,
 		DeployBuilder:       depBuilder,
+		IngressBuilder:      ingBuilder,
 		PackageDownloadBase: cfg.PackageDownloadBase,
 	})
 
