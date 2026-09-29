@@ -627,4 +627,39 @@ class RemoteConfirmBridgeTest {
         verify(store).put(eq(CONFIRM_KEY), eq(SID), anyList(), isNull(), isNull(),
             isNull(), anyString());
     }
+
+    // ===== 7. 后台收割兜底（F23 残留） =====
+
+    @Test
+    void backgroundTerminalShouldWakeLeadWithHarvestHint() {
+        // 未经确认路由的后台任务（同步窗口超时升格）直接到终态：此前只清登记不交付
+        registerInFlightTask();
+        taskClient.nextStatus = new RemoteTaskStatus("success", null, List.of());
+        when(runtimeService.invokeStream(anyString(), anyString(), any()))
+            .thenReturn(Flux.just(Map.of("type", "done", "token", "收割完成")));
+
+        bridge.pollOnce();
+
+        verify(turnLeaseStore, timeout(3000)).tryAcquire(SID);
+        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString());
+        verify(turnLeaseStore, timeout(3000)).release(SID, "tok-1");
+        // 收割话术：提示先 task_output 取结果（确定性收割，不靠模型自觉）
+        var messageCap = ArgumentCaptor.forClass(String.class);
+        verify(runtimeService, timeout(3000)).invokeStream(messageCap.capture(), eq(SID), any());
+        assertTrue(messageCap.getValue().contains("task_output(task_id='" + TASK_ID + "')"),
+            "后台收割唤醒应提示 task_output 取结果: " + messageCap.getValue());
+    }
+
+    @Test
+    void wakeShouldBeIdempotentPerTask() {
+        when(runtimeService.invokeStream(anyString(), anyString(), any()))
+            .thenReturn(Flux.just(Map.of("type", "done", "token", "ok")));
+
+        bridge.wakeLead(SID, TASK_ID, "成功完成");
+        bridge.wakeLead(SID, TASK_ID, "成功完成");
+
+        // 决策路径 + 后台路径对同一终态只发一次汇总 turn
+        org.mockito.Mockito.verify(runtimeService, org.mockito.Mockito.timeout(3000).times(1))
+            .invokeStream(anyString(), eq(SID), any());
+    }
 }
