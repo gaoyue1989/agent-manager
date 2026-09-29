@@ -161,10 +161,11 @@ func viewTaskID(job *store.A2aJob) string {
 	return job.TaskID
 }
 
-// a2aClaimExpired 认领租期判断：reserved_at 距今超过 2×发送超时+60s 可接管
-//（发送超时可配置，覆盖阻塞式长对话；崩溃残留最终自愈）。
+// a2aClaimExpired 认领资格判断：空 task_id = 未认领，立即可认领（释放路径复位为空串，
+// 不受 reserved_at 影响）；持有认领的行 reserved_at 距今超过 2×发送超时+60s 才可接管
+//（崩溃残留/结果未知最终自愈）。
 func (c *Core) a2aClaimExpired(job *store.A2aJob) bool {
-	if job.ReservedAt == nil {
+	if job.TaskID == "" || job.ReservedAt == nil {
 		return true
 	}
 	return time.Since(*job.ReservedAt) > c.a2aClaimLease()
@@ -258,8 +259,11 @@ func (c *Core) sendA2AMessage(clusterURL, text string) (string, error) {
 	}
 	var out struct {
 		Result struct {
-			ID   string `json:"id"`
-			Task struct {
+			// AgentScope A2A 服务端 message/send 返回最终 Message（kind=message），
+			// 锚点字段为驼峰 taskId（部署实测）；Task 形态与顶层 id 兜底兼容
+			ID     string `json:"id"`
+			TaskID string `json:"taskId"`
+			Task   struct {
 				ID string `json:"id"`
 			} `json:"task"`
 		} `json:"result"`
@@ -273,7 +277,10 @@ func (c *Core) sendA2AMessage(clusterURL, text string) (string, error) {
 	if out.Err.Message != "" {
 		return "", fmt.Errorf("a2a error: %s", out.Err.Message)
 	}
-	taskID := out.Result.ID
+	taskID := out.Result.TaskID
+	if taskID == "" {
+		taskID = out.Result.ID
+	}
 	if taskID == "" {
 		taskID = out.Result.Task.ID
 	}

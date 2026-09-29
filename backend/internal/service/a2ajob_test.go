@@ -38,10 +38,12 @@ func fakeA2aMember(t *testing.T, status int, rpcErr string, taskID string, calls
 			})
 			return
 		}
+		// 真实形态（部署实测）：AgentScope 返回最终 Message，锚点为驼峰 taskId
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"jsonrpc": "2.0", "id": 1,
-			"result": map[string]any{"id": taskID, "kind": "task",
-				"status": map[string]any{"state": "submitted"}},
+			"result": map[string]any{"role": "agent", "kind": "message",
+				"messageId": "msg-" + taskID, "taskId": taskID,
+				"parts": []map[string]any{{"kind": "text", "text": "done"}}},
 		})
 	}))
 }
