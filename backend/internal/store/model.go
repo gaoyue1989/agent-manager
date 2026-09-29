@@ -92,3 +92,18 @@ type PlatformConfigEvent struct {
 	EnvKeys   string    `gorm:"type:json" json:"envKeys"` // 本次涉及键名数组
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
+
+// A2aJob 幂等 Job 映射（A2A message/send 平台薄封装，travel-fulfillment 设计 §8/§12：
+// 外部触发的 Job Endpoint 对齐官方 API key + Idempotency-Key 语义——taskId 只是执行
+// 句柄非幂等键，重复 message/send 会建新任务，映射表以 (service, key) 保证稳定锚点）。
+type A2aJob struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// ServiceID + IdempotencyKey 联合唯一：并发同键的幂等锁（先预留后发送）
+	ServiceID      uint   `gorm:"index:idx_a2a_job_service_key,unique" json:"serviceId"`
+	IdempotencyKey string `gorm:"size:128;index:idx_a2a_job_service_key,unique" json:"idempotencyKey"`
+	TaskID         string `gorm:"size:128" json:"taskId"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+func (A2aJob) TableName() string { return "a2a_jobs" }
