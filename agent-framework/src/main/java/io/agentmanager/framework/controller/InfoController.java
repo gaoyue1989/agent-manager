@@ -52,20 +52,28 @@ public class InfoController {
     }
 
     /**
-     * Agent Protocol（远程子 agent 服务端）状态透出：
-     * enabled 以本服务配置（agent.agent-protocol.enabled）为准——它同时决定认证过滤器
+     * Agent Protocol（远程子 agent 服务端）状态词表——单一来源，/.well-known/agent-card.json
+     * （AgentCardController）同源复用（travel-fulfillment 设计 §8 member-6）。
+     *
+     * <p>enabled 以本服务配置（agent.agent-protocol.enabled）为准——它同时决定认证过滤器
      * 与端点是否装配；streaming/hitl 读 SDK 扩展属性（仅启用时存在，关闭时报 false）；
      * task_store 为配置的本地 FS 退化路径（agent_fs bean override 生效时实际不使用）。
      */
-    private Map<String, Object> agentProtocolStatus() {
-        var protocol = props.agentProtocol();
-        var sdk = agentProtocolProperties.getIfAvailable();
+    public static Map<String, Object> agentProtocolStatus(
+        AgentManagerProperties props,
+        ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties) {
+        var protocol = props != null ? props.agentProtocol() : null;
+        var sdk = agentProtocolProperties != null ? agentProtocolProperties.getIfAvailable() : null;
         return Map.of(
             "enabled", protocol != null && protocol.enabled(),
             "streaming", sdk != null && sdk.isStreamingEnabled(),
             "hitl", sdk != null && sdk.isHitlEnabled(),
             "task_store", protocol != null ? protocol.taskStore() : ""
         );
+    }
+
+    private Map<String, Object> agentProtocolStatus() {
+        return agentProtocolStatus(props, agentProtocolProperties);
     }
 
     @GetMapping("/")

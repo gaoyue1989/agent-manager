@@ -574,4 +574,126 @@ class AgentRuntimeServiceHitlTest {
 
         assertFalse(service.hasPendingConfirm(SID));
     }
+
+    // ---------- findPendingConfirm（status 端点/观察者 probe）：FIFO 头 + 远程行透出 ----------
+
+    /** 远程行 → additive 透出 confirm_key/remote_task（Debug Console 刷新恢复依赖） */
+    @Test
+    void findPendingConfirmShouldExposeRemoteRowFields() {
+        var remoteTask = Map.<String, Object>of("service", "order-agent", "task_id", "task-9");
+        when(confirmContextStore.findHeadPending("acme-test-agent__t1")).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "acme-test-agent__t1", "task:task-9", "reply-9",
+                List.of(toolUseBlock("call-9")), Instant.now(), null, null, remoteTask)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertEquals("task:task-9", payload.get("confirm_key"));
+        assertEquals(remoteTask, payload.get("remote_task"));
+        assertEquals("reply-9", payload.get("reply_id"));
+    }
+
+    /** 远程行 reply_id=NULL（Bridge 落卡真实形态）→ 不 NPE，回落空串（CR P0-1 回归） */
+    @Test
+    void findPendingConfirmShouldTolerateNullReplyIdOnRemoteRow() {
+        var remoteTask = Map.<String, Object>of("service", "order-agent", "task_id", "task-9");
+        when(confirmContextStore.findHeadPending("acme-test-agent__t1")).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "acme-test-agent__t1", "task:task-9", null,
+                List.of(toolUseBlock("call-9")), Instant.now(), null, null, remoteTask)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertEquals("", payload.get("reply_id"));
+        assertEquals("task:task-9", payload.get("confirm_key"));
+    }
+
+    /** 本地行 → 不带 confirm_key/remote_task（前端既有字段零改动） */
+    @Test
+    void findPendingConfirmShouldNotExposeRemoteFieldsForLocalRow() {
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(toolUseBlock("call-1")), Instant.now(), null, null)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertFalse(payload.containsKey("confirm_key"));
+        assertFalse(payload.containsKey("remote_task"));
+    }
+
+    /** 无待确认行 → null（status 据此给 idle/completed 而非 waiting_confirm） */
+    @Test
+    void findPendingConfirmShouldReturnNullWhenNoPendingRow() {
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(java.util.Optional.empty());
+
+        assertNull(service.findPendingConfirm(SID));
+    }
+
+    // ---------- 幽灵卡抑制（F20）：PROPAGATE 转发的远程 ask 不落 local 行 ----------
+
+    /** ask 的 tool_call_id 命中未消费远程行锚点 → 跳过落库（远程行是唯一有效决策路由） */
+    @Test
+    void putConfirmContextShouldSuppressPropagatedRemoteAsk() {
+        var ghostRow = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9",
+                "tool_calls", List.of(Map.of("id", "call-1", "name", "create_order"))));
+        when(confirmContextStore.findUnconsumedRemote("acme-test-agent__t1"))
+            .thenReturn(List.of(ghostRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+    }
+
+    /** Channel 链路形态：远程行以 raw sid 存储（比 fullThreadId 短），双形态查询命中抑制 */
+    @Test
+    void putConfirmContextShouldSuppressWhenRemoteRowStoredUnderRawSid() {
+        var ghostRow = new ConfirmContextStore.PendingConfirm(
+            "t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9",
+                "tool_calls", List.of(Map.of("id", "call-1", "name", "create_order"))));
+        // 长/短两形态查询都 stub 命中即证明双形态展开生效（raw sid 行仅被短键查询命中）
+        when(confirmContextStore.findUnconsumedRemote("acme-test-agent__t1"))
+            .thenReturn(List.of());
+        when(confirmContextStore.findUnconsumedRemote("t1")).thenReturn(List.of(ghostRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+        verify(confirmContextStore).findUnconsumedRemote("t1");
+    }
+
+    /** 本地自有 ask（id 不在远程锚点）→ 照常落库，HITL 行为不变 */
+    @Test
+    void putConfirmContextShouldStoreGenuineLocalAsk() {
+        when(confirmContextStore.findUnconsumedRemote(anyString())).thenReturn(List.of());
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+    }
+
+    /** 远程行锚点损坏/无 tool_calls → fail-open 照常落库（不因去重逻辑阻断真实本地 ask） */
+    @Test
+    void putConfirmContextShouldFailOpenWhenAnchorDamaged() {
+        var brokenRow = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9"));
+        when(confirmContextStore.findUnconsumedRemote(anyString())).thenReturn(List.of(brokenRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+    }
 }

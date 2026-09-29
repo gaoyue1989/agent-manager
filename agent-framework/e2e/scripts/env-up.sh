@@ -130,7 +130,17 @@ case "$E2E_GROUP" in
       -v "$NGINX_CONF:/etc/nginx/nginx.conf:ro" nginx:alpine > /dev/null
     "$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${E2E_BASE_PORT}/health" 30 nginx-lb
     ;;
-  *) echo "E2E_GROUP 必须是 core|multi|sandbox"; exit 1;;
+  protocol)
+    # T 组先行（travel-fulfillment 设计 §11 M1 / PR #62 遗留 P1-1 切片）：
+    # a = 存量形态（协议关，断言 /tasks 404 + 基础链路零影响）；
+    # p = 协议实例（AGENT_PROTOCOL_ENABLED=true + 固定 token，断言无/错 token 401、
+    #     卡片透出 agent_protocol）。spawn/确认/拒绝/超时/父崩溃五场景需 mock-LLM
+    #     双进程脚本化编排，属 T 组二期。
+    start_jar "$E2E_BASE_PORT" "a"
+    AGENT_PROTOCOL_ENABLED=true AGENT_PROTOCOL_AUTH_TOKEN="e2e-protocol-token" \
+      start_jar "$((E2E_BASE_PORT + 1))" "p"
+    ;;
+  *) echo "E2E_GROUP 必须是 core|multi|sandbox|protocol"; exit 1;;
 esac
 
 # ---------- 4. env.json ----------
@@ -143,6 +153,7 @@ cat > "$RUNTIME/env.json" <<EOF
   "base": "http://127.0.0.1:${E2E_BASE_PORT}",
   "replicaA": "http://127.0.0.1:$((E2E_BASE_PORT + 1))",
   "replicaB": "http://127.0.0.1:$((E2E_BASE_PORT + 2))",
+  "protocolBase": "http://127.0.0.1:$((E2E_BASE_PORT + 1))",
   "llmMock": "http://127.0.0.1:${LLM_MOCK_PORT}",
   "benchMcp": "http://127.0.0.1:${BENCH_MCP_PORT}",
   "approvalMcp": "http://127.0.0.1:${APPROVAL_MCP_PORT}",

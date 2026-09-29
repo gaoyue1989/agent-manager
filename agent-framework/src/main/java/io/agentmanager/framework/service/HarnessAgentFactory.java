@@ -190,6 +190,10 @@ public class HarnessAgentFactory {
                 .middleware(new LlmLoggingMiddleware(llmLogger, sessionKeyResolver))
                 // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
                 .middleware(new ToolCallValidationMiddleware())
+                // 远程子 agent 动态 DENY（travel-fulfillment F16/§6.1）：协议任务携带的
+                // context.deny_rules 按工具名拦截执行；非协议轮次无该 RuntimeContext 属性，
+                // 零开销直通
+                .middleware(new io.agentmanager.framework.service.protocol.ProtocolDenyRulesMiddleware())
                 // MCP 用户上下文注入（唯一注入点）：把生效 userId 写入 McpMeta，
                 // 供 MCP 工具调用走 _meta / userHeaders 双通道（Channel 链路按 session 反查真实 userId）
                 .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
