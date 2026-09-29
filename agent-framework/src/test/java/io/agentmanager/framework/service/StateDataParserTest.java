@@ -394,9 +394,10 @@ class StateDataParserTest {
 
     @Test
     void maskShouldRedactSensitiveKeyValuePairs() {
-        // 实测线上真实形态：get_service_status 的 output 里 LLM_API_KEY 明文
+        // 线上实测形态：get_service_status 的 output 里 LLM_API_KEY 明文
+        // （值已脱敏为全零占位，仅保留 tp- 前缀与 51 位长度，确保仍能命中凭据字符集分支）
         assertEquals("LLM_API_KEY: " + StateDataParser.MASKED,
-            StateDataParser.maskSensitiveText("LLM_API_KEY: tp-c9dgn7tl95bl9d2lptfdwq4qsozazbrfit3vehndv0mmyw13"));
+            StateDataParser.maskSensitiveText("LLM_API_KEY: tp-000000000000000000000000000000000000000000000000"));
         assertEquals("\"CHECKPOINT_PASSWORD\": " + StateDataParser.MASKED,
             StateDataParser.maskSensitiveText("\"CHECKPOINT_PASSWORD\": \"OafPlatform2026\""));
         assertEquals("api_key = " + StateDataParser.MASKED,
@@ -410,7 +411,7 @@ class StateDataParserTest {
     void maskShouldRedactPlatformTokensAndBearer() {
         // 平台 token 形态（无键名提示也要遮）
         assertEquals(StateDataParser.MASKED,
-            StateDataParser.maskSensitiveText("tp-c9dgn7tl95bl9d2lptfdwq4qsozazbrfit3vehndv0mmyw13"));
+            StateDataParser.maskSensitiveText("tp-000000000000000000000000000000000000000000000000"));
         // Bearer 凭据保留前缀
         assertEquals("Bearer " + StateDataParser.MASKED,
             StateDataParser.maskSensitiveText("Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"));
