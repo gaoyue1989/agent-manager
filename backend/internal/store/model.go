@@ -101,9 +101,11 @@ type A2aJob struct {
 	// ServiceID + IdempotencyKey 联合唯一：并发同键的幂等锁（先预留后发送）
 	ServiceID      uint   `gorm:"index:idx_a2a_job_service_key,unique" json:"serviceId"`
 	IdempotencyKey string `gorm:"size:128;index:idx_a2a_job_service_key,unique" json:"idempotencyKey"`
-	TaskID         string `gorm:"size:128" json:"taskId"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	TaskID         string `gorm:"size:256" json:"taskId"`
+	// ReservedAt 预留/认领时刻：认领租期判断（2×发送超时+60s 过期可接管，崩溃残留自愈）
+	ReservedAt *time.Time `json:"reservedAt"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
 }
 
 func (A2aJob) TableName() string { return "a2a_jobs" }
