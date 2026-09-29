@@ -324,6 +324,12 @@ OAF `deniedTools` 字段控制排除列表。
 > 落 `session_user.model`，由 `SessionModelMiddleware` 实时查库路由。切换会话按 `GET /threads` 的 `model` 回显，
 > 新建会话回落 system，绑定模型被删除后同样回落；PATCH 失败（如 `model_disabled`）toast 报错并回滚下拉框。
 > 见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md) §9 C / §14。
+> **debug 页消息按到达顺序分段渲染（2026-09-29）**：回复内段落（思考块/文本气泡/工具组/卡片）一律按事件
+> 到达顺序排列，连续同类段落合并——模型的开场白留在它那批工具步骤上方，不再整体置底。
+> 实现要点：`chat.js` 以 `tailTextEl`/`tailTools` 维护段落尾指针（思考/文本/工具互为失效点，光标随段终结移除），
+> 工具行经 `tc.group` 记归属组（结果/摘要晚于下一段文本时仍写回正确的组）；
+> 历史回放依据 `GET /threads/{sid}/history` assistant 消息的 `blocks` 有序数组（`StateDataParser.extractOrderedBlocks`，
+> 只增不改字段，旧数据无 blocks 时退回「工具组在上、文本在下」旧布局）。见 [docs/api.md](docs/api.md) blocks 字段说明。
 
 ---
 
