@@ -19,13 +19,20 @@ public class AgentCardController {
     private final A2uiService a2uiService;
     private final AgentRuntimeService agentRuntime;
     private final SkillCatalogService skillCatalog;
+    /** Agent Protocol 状态来源：本服务配置 + SDK 扩展属性（仅启用时装配，见 InfoController 词表） */
+    private final io.agentmanager.framework.config.AgentManagerProperties props;
+    private final org.springframework.beans.factory.ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties;
 
     public AgentCardController(OafConfigHolder oafConfigHolder, A2uiService a2uiService,
-                               AgentRuntimeService agentRuntime, SkillCatalogService skillCatalog) {
+                               AgentRuntimeService agentRuntime, SkillCatalogService skillCatalog,
+                               io.agentmanager.framework.config.AgentManagerProperties props,
+                               org.springframework.beans.factory.ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties) {
         this.oafConfigHolder = oafConfigHolder;
         this.a2uiService = a2uiService;
         this.agentRuntime = agentRuntime;
         this.skillCatalog = skillCatalog;
+        this.props = props;
+        this.agentProtocolProperties = agentProtocolProperties;
     }
 
     @GetMapping("/.well-known/agent-card.json")
@@ -65,6 +72,9 @@ public class AgentCardController {
             "outputModes", List.of("text", "text/plain", "a2ui/v0.8")
         )) : skills);
         card.put("extensions", List.of(a2uiService.getExtensionDeclaration()));
+        // Agent Protocol（远程子 agent 服务端）状态：与 InfoController /metadata 同一词表
+        //（additive 字段，A2A schema 外扩展，消费方不识别即忽略——travel-fulfillment §8 member-6）
+        card.put("agent_protocol", InfoController.agentProtocolStatus(props, agentProtocolProperties));
         card.put("securitySchemes", Map.of(
             "bearer", Map.of("scheme", "bearer", "description", "Bearer token authentication")
         ));
