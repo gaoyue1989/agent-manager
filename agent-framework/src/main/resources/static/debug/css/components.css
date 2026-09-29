@@ -68,6 +68,8 @@
 .msg.user .msg-bubble { background: var(--primary); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
 .msg.assistant .msg-bubble { background: var(--card); color: var(--text-h); border: 1px solid var(--border-subtle); border-bottom-left-radius: 4px; box-shadow: var(--shadow-tab); }
 .msg .msg-bubble-content { display: flex; flex-direction: column; gap: 4px; }
+/* 内容分段后文本气泡成为 contentEl 的子元素：保持与旧版一致的收缩宽度（工具组/思考块/卡片仍 width:100%） */
+.msg .msg-bubble-content .msg-bubble { align-self: flex-start; }
 .msg .thinking-label { font-size: 12px; }
 .msg pre { background: var(--muted); padding: 8px; border-radius: 6px; overflow-x: auto; margin: 6px 0; font-size: 11px; color: var(--text-h); }
 .msg code { background: var(--muted); padding: 1px 4px; border-radius: 4px; }

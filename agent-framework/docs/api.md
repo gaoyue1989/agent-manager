@@ -431,6 +431,21 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 | `output_truncated` | 可选：`true` 表示因超限被截断 |
 | `output_full_length` | 可选：截断前的完整字符数 |
 
+**有序块序列**（assistant 消息可选字段 `blocks`）：
+
+`content` 是所有 text 块的拼接、`tool_calls` 是工具块的集合——两者是平行提取，彼此先后已丢。
+`blocks` 按 `Msg.content` 原始块序补回该信息，供 Debug Console 按**真实发生顺序**渲染
+（开场白留在它那批工具步骤的上方）；元素形如：
+
+| 元素 | 字段 | 说明 |
+|------|------|------|
+| `{"type":"text","text":"…"}` | `text` | 一个 text 块的原文 |
+| `{"type":"tool","id":"…","name":"…"}` | `id`/`name` | 一个 tool_use 块；`state`/`output` 等结果字段仍从 `tool_calls[]` 按 id 认领 |
+
+- thinking 块不上屏、tool_result 块不进 `blocks`（结果仍由 `tool_calls[]` 承载）
+- 仅 assistant 消息携带；content 非数组（旧格式字符串）时不写该键，前端退回「工具组在上、文本在下」旧布局
+- 既有键（`content`/`tool_calls`/`msg_id`/…）不受影响
+
 截断上限由 `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` 控制（默认 8000，`<=0` 关闭）。
 
 ---

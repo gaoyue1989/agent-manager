@@ -645,7 +645,8 @@ async function loadThreadHistory(sessionId) {
       if (m.role === 'compaction') addCompactionDivider(m.content || '');
       else if (m.role === 'user') addMessage('user', m.content || '');
       else if (m.role === 'assistant' || m.role === 'agent') {
-        const refs = addAssistantHistory(m.content || '', m.tool_calls || []);
+        // blocks 由后端按 Msg.content 块序给出（旧数据无此字段 → 退回旧布局）
+        const refs = addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks);
         lastAssistantEl = refs.msgEl;
         lastAssistantContentEl = refs.contentEl;
         if (m.reply_id) {
@@ -676,8 +677,7 @@ async function loadThreadHistory(sessionId) {
       if (toolCalls.length > 0) {
         const fakeReply = {
           replyId: pc.reply_id,
-          contentEl: lastAssistantContentEl,
-          textEl: lastAssistantContentEl
+          contentEl: lastAssistantContentEl
         };
         renderConfirmCard(fakeReply, { tool_calls: toolCalls });
       }
@@ -748,33 +748,55 @@ function writeMarkdown(el, html) {
   }
 }
 
-/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染）
+/** 历史 assistant 消息：按 blocks 块序分段渲染（文本气泡与工具组按真实发生顺序交错）；
+ *  无 blocks 的旧数据退回「工具组在上、文本在下」旧布局
  *  @returns {{ msgEl: HTMLElement, contentEl: HTMLElement }} 元素引用，供历史回放时追加卡片 */
-function addAssistantHistory(content, toolCalls) {
+function addAssistantHistory(content, toolCalls, blocks) {
   const msg = document.createElement('div');
   msg.className = 'msg assistant';
-  let contentEl = null;
-  if ((toolCalls || []).length > 0) {
-    msg.innerHTML = renderToolGroupBlock(toolCalls.map((tc) => ({
-      type: 'tool_call',
-      name: tc.name,
-      argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
-      resultText: null,
-      state: 'success'
-    })));
-  }
-  if (content) {
+  const callOf = (tc) => ({
+    type: 'tool_call',
+    name: tc.name,
+    argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
+    resultText: null,
+    state: 'success'
+  });
+  const appendBubble = (text) => {
     const bubbleEl = document.createElement('div');
     bubbleEl.className = 'msg-bubble';
-    writeMarkdown(bubbleEl, renderMarkdown(content));
+    writeMarkdown(bubbleEl, renderMarkdown(text));
     msg.appendChild(bubbleEl);
-    contentEl = bubbleEl;
+  };
+  if (Array.isArray(blocks) && blocks.length > 0) {
+    // 块序即发生序：相邻 tool 块收进同一组，文本块独立成气泡（与实时流分段规则一致）
+    let group = null;
+    const flushGroup = () => {
+      if (group) {
+        msg.insertAdjacentHTML('beforeend', renderToolGroupBlock(group));
+        group = null;
+      }
+    };
+    for (const b of blocks) {
+      if (b && b.type === 'text' && b.text) {
+        flushGroup();
+        appendBubble(b.text);
+      } else if (b && b.type === 'tool') {
+        const tc = (toolCalls || []).find((c) => b.id && c.id === b.id) || {};
+        group = group || [];
+        group.push(callOf(tc));
+      }
+    }
+    flushGroup();
+  } else {
+    if ((toolCalls || []).length > 0) {
+      msg.insertAdjacentHTML('beforeend', renderToolGroupBlock((toolCalls || []).map(callOf)));
+    }
+    if (content) appendBubble(content);
   }
-  // 无文本内容时，用 msg 本身作为容器（文件卡片可直接追加到 msg）
-  if (!contentEl) contentEl = msg;
+  // 卡片统一挂到消息末尾（实时流 contentEl 同语义）：文本气泡之后、互不嵌套
   messagesEl.appendChild(msg);
   scrollToBottom(false);
-  return { msgEl: msg, contentEl: contentEl };
+  return { msgEl: msg, contentEl: msg };
 }
 
 /** 工具分组块（默认折叠） */
@@ -918,11 +940,14 @@ function ensureReply(replyId) {
   messagesEl.appendChild(div);
   const r = {
     replyId,
-    text: '',
     thinking: '',
     thinkingActive: false,
     toolCalls: {},     // tcId -> call
-    toolOrder: [],
+    // 段落尾指针：contentEl 内的段落（思考块/文本气泡/工具组/卡片）按事件到达顺序排列，
+    // 连续同类段落合并进同一段——tailText 是末尾文本气泡，tailTools 是末尾工具组
+    tailTextEl: null,
+    tailText: '',
+    tailTools: null,
     elapsedStart: Date.now(),
     usage: { input: 0, output: 0 },
     modelCalls: 0,
@@ -959,6 +984,7 @@ function finishReply(replyId) {
   const r = replyId ? (replyMap[replyId] || null) : currentReply;
   if (r) {
     r.thinkingActive = false;
+    closeTextTail(r); // 末段文本的光标随回复终结移除
     updateReplyFooter(r, false);
   }
   if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
@@ -966,7 +992,20 @@ function finishReply(replyId) {
 
 // ---------- 思维链 ----------
 
+/** 收尾文本段：光标随段终结移除（分段后各段独立存在，不清理会永久闪烁） */
+function closeTextTail(r) {
+  if (r.tailTextEl) {
+    const cur = r.tailTextEl.querySelector('.cursor');
+    if (cur) cur.remove();
+  }
+  r.tailTextEl = null;
+  r.tailText = '';
+}
+
 function ensureThinking(r) {
+  // 思考是独立段落：开始新思考意味着上一段文本/工具组收尾，后续内容按到达顺序另起一段
+  closeTextTail(r);
+  r.tailTools = null;
   if (!r.activeThinkingEl) {
     const el = document.createElement('div');
     el.className = 'thinking-block';
@@ -1006,36 +1045,48 @@ function endThinking(r) {
 
 // ---------- 工具流式渲染 ----------
 
-function ensureToolTextEl(r) {
-  if (!r.textEl) {
+/** 末尾文本气泡：不存在就新开一段。工具组/思考块插入过即视为上一段文本完结，
+ *  之后的文本另起一条气泡——模型的开场白因此能留在它那批工具步骤的上方 */
+function ensureTextBubble(r) {
+  if (!r.tailTextEl) {
+    r.tailTools = null; // 文本段开始：前面连续的工具调用收成一个组，之后的工具另起一组
     const el = document.createElement('div');
     el.className = 'msg-bubble';
-    r.contentEl.parentNode.insertBefore(el, r.contentEl.nextSibling);
-    r.textEl = el;
+    r.contentEl.appendChild(el);
+    r.tailTextEl = el;
+    r.tailText = '';
   }
-  return r.textEl;
+  return r.tailTextEl;
 }
 
+/** 末尾工具组：连续的工具调用合并进同一组；文本/思考段落插入后即收尾，之后的工具另起一组 */
 function ensureToolGroupEl(r) {
-  if (!r.toolsGroupEl) {
+  if (!r.tailTools) {
+    closeTextTail(r);
     const wrap = document.createElement('div');
     wrap.className = 'tool-group';
     wrap.innerHTML = '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">' +
       '<span class="tg-arrow">▶</span><span class="tg-title"></span></div>' +
       '<div class="tool-group-body"></div>';
     r.contentEl.appendChild(wrap);
-    r.toolsGroupEl = wrap;
-    r.toolsBodyEl = wrap.querySelector('.tool-group-body');
-    r.toolsTitleEl = wrap.querySelector('.tg-title');
+    r.tailTools = {
+      bodyEl: wrap.querySelector('.tool-group-body'),
+      titleEl: wrap.querySelector('.tg-title'),
+      tcIds: []
+    };
   }
-  return r.toolsGroupEl;
+  return r.tailTools;
 }
 
 function onToolCallStart(r, tcId, name) {
   if (!pendingToolCalls[tcId]) pendingToolCalls[tcId] = { name, argsRaw: '', argsText: '', resultRaw: null, state: null };
   if (r.toolCalls[tcId]) return; // 已存在
-  r.toolCalls[tcId] = pendingToolCalls[tcId];
-  r.toolOrder.push(tcId);
+  const tc = pendingToolCalls[tcId];
+  r.toolCalls[tcId] = tc;
+  endThinking(r); // 行动开始：思考段收尾（标签定格，不再计时）
+  const g = ensureToolGroupEl(r);
+  tc.group = g; // 行归属组：结果/摘要晚于下一段文本时仍能找到正确的组重建
+  g.tcIds.push(tcId);
   const rowEl = document.createElement('div');
   rowEl.className = 'tool-call-row shimmer';
   rowEl.dataset.tcid = tcId;
@@ -1043,9 +1094,8 @@ function onToolCallStart(r, tcId, name) {
     '<span class="tc-state">' + ctx.utils.toolStateIcon('running') + '</span>' +
     '<span class="tc-toggle">▶</span>';
   rowEl.addEventListener('click', () => window.App.toolRowToggle(rowEl));
-  ensureToolGroupEl(r);
-  r.toolsBodyEl.appendChild(rowEl);
-  updateToolGroupTitle(r);
+  g.bodyEl.appendChild(rowEl);
+  updateToolGroupTitle(r, g);
   scrollToBottom(false);
 }
 
@@ -1055,15 +1105,21 @@ function onToolCallDelta(r, tcId, delta) {
   tc.argsRaw = (tc.argsRaw || '') + delta;
   try { tc.argsText = JSON.stringify(JSON.parse(tc.argsRaw), null, 2); }
   catch { tc.argsText = tc.argsRaw; }
-  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  const rowEl = findToolRowEl(r, tcId);
   if (rowEl) rowEl.classList.remove('shimmer');
-  updateToolGroupTitle(r);
+  updateToolGroupTitle(r, tc.group);
 }
 
 function onToolCallEnd(r, tcId) {
-  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  const tc = pendingToolCalls[tcId];
+  const rowEl = findToolRowEl(r, tcId);
   if (rowEl) rowEl.classList.remove('shimmer');
-  updateToolGroupTitle(r);
+  updateToolGroupTitle(r, tc && tc.group);
+}
+
+/** 行全局查找：行归属各自的组，不假设它在末尾组里 */
+function findToolRowEl(r, tcId) {
+  return r.contentEl ? r.contentEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
 }
 
 function onToolCallSummary(r, tcId, summary, toolName) {
@@ -1075,17 +1131,18 @@ function onToolCallSummary(r, tcId, summary, toolName) {
     pendingToolCalls[tcId] = tc;
     tc.summary = summary;
   }
-  let rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  let rowEl = findToolRowEl(r, tcId);
   // confirm-stream 会创建新的回复容器，但恢复段不会重发 TOOL_CALL_START。
   // 摘要帧因此可能是当前回复里该 toolCallId 的首个可见事件：补建行后再更新标题。
   if (!rowEl) {
     onToolCallStart(r, tcId, toolName || (tc && tc.name) || 'tool');
-    rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+    rowEl = findToolRowEl(r, tcId);
   }
   const nameEl = rowEl ? rowEl.querySelector('.tc-name') : null;
   if (nameEl) nameEl.textContent = summary;
-  rebuildToolRows(r);
-  updateToolGroupTitle(r);
+  const g = (tc && tc.group) || r.tailTools;
+  rebuildToolRows(r, g);
+  updateToolGroupTitle(r, g);
 }
 
 function onToolResultPreview(r, tcId, preview) {
@@ -1108,13 +1165,15 @@ function onToolResultDelta(r, tcId, delta) {
 function onToolResultEnd(r, tcId, state) {
   const tc = pendingToolCalls[tcId];
   if (tc) tc.state = state;
-  rebuildToolRows(r);
-  updateToolGroupTitle(r);
+  const g = (tc && tc.group) || r.tailTools;
+  rebuildToolRows(r, g);
+  updateToolGroupTitle(r, g);
 }
 
-function rebuildToolRows(r) {
-  if (!r.toolsBodyEl) return;
-  r.toolsBodyEl.innerHTML = r.toolOrder.map((tcId) => {
+function rebuildToolRows(r, g) {
+  g = g || r.tailTools;
+  if (!g) return;
+  g.bodyEl.innerHTML = g.tcIds.map((tcId) => {
     const tc = r.toolCalls[tcId] || {};
     return renderToolRow({
       name: tc.name,
@@ -1127,12 +1186,13 @@ function rebuildToolRows(r) {
   scrollToBottom(false);
 }
 
-function updateToolGroupTitle(r) {
-  if (!r.toolsTitleEl) return;
-  const calls = r.toolOrder.map((id) => r.toolCalls[id] || {}).filter((c) => c.name);
+function updateToolGroupTitle(r, g) {
+  g = g || r.tailTools;
+  if (!g || !g.titleEl) return;
+  const calls = g.tcIds.map((id) => r.toolCalls[id] || {}).filter((c) => c.name);
   if (calls.length === 0) return;
   const summary = summarizeToolCalls(calls);
-  r.toolsTitleEl.textContent = summary.title;
+  g.titleEl.textContent = summary.title;
 }
 
 // ---------- 文件下载卡片（file_ready） ----------
@@ -1214,9 +1274,8 @@ function renderConfirmCard(r, data) {
   card.querySelector('[data-act="reject"]').addEventListener('click', () =>
     submitConfirm(calls, false));
 
-  // 卡片插到回复气泡之后（等同工具组位置）
-  const anchor = r.textEl || r.contentEl;
-  anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  // 卡片作为独立段落挂在回复内容末尾（工具组之后），确认后由 dismissConfirmCard 移除
+  r.contentEl.appendChild(card);
   pendingConfirm = { replyId: r.replyId, calls, cardEl: card };
   scrollToBottom(true);
 }
@@ -1327,8 +1386,7 @@ function renderMcpAppCard(r, data) {
     '</div>' +
     '<div class="mcp-apps-body"><div class="mcp-apps-loading">加载中…</div></div>';
   card.querySelector('.mcp-apps-header').addEventListener('click', () => card.classList.toggle('open'));
-  // 挂载到回复内容容器（textEl 会被 TEXT_BLOCK_DELTA 的 innerHTML 整体重写，
-  // 若工具调用发生在文本输出之后，卡片会被误清，故固定挂 contentEl，与工具行一致）
+  // 挂载到回复内容容器末尾：文本按段渲染后各段独立重写，卡片不会被文本覆盖
   const anchor = r.contentEl;
   anchor.appendChild(card);
   const bodyEl = card.querySelector('.mcp-apps-body');
@@ -1390,12 +1448,8 @@ function renderAppConfirmCard(call) {
     };
     card.querySelector('[data-act="approve"]').addEventListener('click', () => settle(true));
     card.querySelector('[data-act="reject"]').addEventListener('click', () => settle(false));
-    const anchor = currentReply ? (currentReply.textEl || currentReply.contentEl) : messagesEl;
-    if (anchor && anchor.parentNode) {
-      anchor.parentNode.insertBefore(card, anchor.nextSibling);
-    } else if (anchor) {
-      anchor.appendChild(card);
-    }
+    const anchor = currentReply ? currentReply.contentEl : messagesEl;
+    if (anchor) anchor.appendChild(card);
     scrollToBottom(true);
   });
 }
@@ -1455,11 +1509,12 @@ function handleEvent(data) {
   switch (data.type) {
     case 'TEXT_BLOCK_DELTA': {
       if (r) {
-        r.text += (data.delta || '');
         endThinking(r);
-        // Markdown 写入后追加光标节点：cursor span 在 sanitize 之外，不参与解析，避免被吞
-        const el = ensureToolTextEl(r);
-        writeMarkdown(el, renderMarkdown(r.text));
+        // Markdown 写入后追加光标节点：cursor span 在 sanitize 之外，不参与解析，避免被吞。
+        // 文本按段渲染（每段独立 innerHTML 重写），段落之间互不覆盖工具组/卡片
+        const el = ensureTextBubble(r);
+        r.tailText += (data.delta || '');
+        writeMarkdown(el, renderMarkdown(r.tailText));
         const cur = document.createElement('span');
         cur.className = 'cursor';
         el.appendChild(cur);
