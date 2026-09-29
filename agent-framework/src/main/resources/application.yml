@@ -18,6 +18,17 @@ spring:
     multipart:
       max-file-size: ${FILE_UPLOAD_MAX_MB:20}MB
       max-request-size: ${FILE_UPLOAD_MAX_MB:20}MB
+  # 版本化 schema/数据迁移（db/migration/V*.sql，数据源取唯一的 DataSource bean）：
+  # - 全新库：从 V1 基线起完整重建；
+  # - 存量库（有表、无 flyway_schema_history）：baseline 到 baseline-version
+  #   （V1..V5 的 DDL 现网均已就位），仅执行之后的增量（V6 存量回填起）；
+  # - 多副本同时启动由 Flyway 历史表锁互斥，仅一副本执行迁移，失败即启动失败。
+  # 此后表结构/数据演进一律新增 V 文件，禁止在 Store 构造器里手工 DDL（已全部移除）。
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 5
 
 agent:
   config-dir: ${AGENT_CONFIG_DIR:}

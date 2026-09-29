@@ -19,6 +19,7 @@ import (
 type Client interface {
 	Namespace() string
 	EnsureConfigMap(cm *corev1.ConfigMap) error
+	EnsureSecret(s *corev1.Secret) error
 	EnsureDeployment(d *appsv1.Deployment) error
 	RestartDeployment(ctx context.Context, ns, name string) error // rollout restart
 	EnsureService(svc *corev1.Service) error
@@ -28,6 +29,7 @@ type Client interface {
 	DeleteService(ns, name string) error
 	DeleteIngress(ns, name string) error
 	DeleteConfigMap(ns, name string) error
+	DeleteSecret(ns, name string) error
 
 	GetDeployment(ns, name string) (*appsv1.Deployment, error)
 	PodStatuses(ns, labelSelector string) ([]PodInfo, error)
@@ -88,6 +90,21 @@ func (c *RealClient) EnsureConfigMap(cm *corev1.ConfigMap) error {
 	existing.Data = cm.Data
 	existing.Labels = cm.Labels
 	_, err = c.cs.CoreV1().ConfigMaps(cm.Namespace).Update(context.TODO(), existing, metav1.UpdateOptions{})
+	return err
+}
+
+func (c *RealClient) EnsureSecret(s *corev1.Secret) error {
+	existing, err := c.cs.CoreV1().Secrets(s.Namespace).Get(context.TODO(), s.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = c.cs.CoreV1().Secrets(s.Namespace).Create(context.TODO(), s, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	existing.Data = s.Data
+	existing.Labels = s.Labels
+	_, err = c.cs.CoreV1().Secrets(s.Namespace).Update(context.TODO(), existing, metav1.UpdateOptions{})
 	return err
 }
 
@@ -172,6 +189,11 @@ func (c *RealClient) DeleteIngress(ns, name string) error {
 
 func (c *RealClient) DeleteConfigMap(ns, name string) error {
 	err := c.cs.CoreV1().ConfigMaps(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	return ignoreNotFound(err)
+}
+
+func (c *RealClient) DeleteSecret(ns, name string) error {
+	err := c.cs.CoreV1().Secrets(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
 	return ignoreNotFound(err)
 }
 

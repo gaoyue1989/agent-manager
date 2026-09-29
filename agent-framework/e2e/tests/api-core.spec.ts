@@ -1,5 +1,6 @@
 /**
- * e2e-core API 组：S 基础 / F 文件 / H HITL / M MCP Apps / A A2A（e2e-ci-plan §5）。
+ * e2e-core API 组：S 基础 / F 文件 / H HITL / M MCP Apps / A A2A / SK 技能管理 / HA 归档历史 /
+ * FW /threads 槽位双形态匹配与 Flyway / RD Redis 前缀隔离（e2e-ci-plan §5，FW 为 §5.10、RD 为 §5.11）。
  * 协议权威：docs/api-thread-spec.md v1.0。
  */
 import { test, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
@@ -9,6 +10,7 @@ import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/
 import { seqMonotonic } from '../lib/sse.js';
 import { upload, download, textBytes, pngBytes } from '../lib/files.js';
 import { seedCompactionArchive } from '../lib/archive-seed.js';
+import mysql from 'mysql2/promise';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -707,6 +709,239 @@ test('A7 llm-calls 未知会话恒空（查询契约）', async ({ request }) =>
   expect(body.calls).toEqual([]);
 });
 
+// ---------- FW 组：/threads slot 双形态匹配 + Flyway（76e0e74/512a6b3，e2e-ci-plan §5.10） ----------
+// 契约权威：ThreadController#AGENT_STATE_JOIN（SUBSTRING_INDEX 冒号前/后段双向匹配，
+// ThreadController.java:58-60）与 db/migration/V6__backfill_session_user_from_agent_state.sql。
+// 此前 S7 只钉可见性与列表移除（详情仅断 status===200、删除只断列表移除），对 updated_at
+// 溯源与删除孤儿零断言：回退旧 LIKE 前缀实现 → FW1（规范臂）红；删冒号前段臂 → FW2 红；
+// baseline-version 抬高/V6 守卫回归 → FW3 红。DB 直查走 mysql2（archive-seed.ts 同款连接
+// 方式与地址解析顺序），两臂 COUNT 与被测 SQL 同口径，不引入新的黑盒面。
+
+/** DB 直连（archive-seed.ts 同款：显式 env > .runtime/env.json > 内置默认，解析失败抛错） */
+async function openDb(): Promise<mysql.Connection> {
+  let jdbc = process.env.MYSQL_URL ?? '';
+  if (!jdbc) {
+    try {
+      const envJson = JSON.parse(
+        fs.readFileSync(path.join(process.env.E2E_RUNTIME_DIR ?? '.runtime', 'env.json'), 'utf8')) as { mysqlUrl?: string };
+      jdbc = envJson.mysqlUrl ?? '';
+    } catch { /* env.json 缺失/坏 JSON：回落内置默认 */ }
+  }
+  if (!jdbc) jdbc = 'jdbc:mysql://127.0.0.1:3306/agent_framework_e2e';
+  const m = /jdbc:mysql:\/\/([^:/]+):(\d+)\/([^?]+)/.exec(jdbc);
+  if (!m) throw new Error(`MYSQL_URL 解析失败: ${jdbc}`);
+  return mysql.createConnection({
+    host: m[1], port: Number(m[2]), database: m[3],
+    user: process.env.MYSQL_USER ?? 'e2e', password: process.env.MYSQL_PASS ?? 'e2e-pass',
+    multipleStatements: true,
+  });
+}
+
+/** agent_state 中冒号前/后段任一命中 key 的行数（与 ThreadController SUBSTRING_INDEX 双臂同口径） */
+async function slotRowCount(key: string): Promise<number> {
+  const conn = await openDb();
+  try {
+    const [rows] = await conn.query(
+      `SELECT COUNT(*) c FROM agent_state
+       WHERE SUBSTRING_INDEX(session_id, ':', 1) = ? OR SUBSTRING_INDEX(session_id, ':', -1) = ?`, [key, key]);
+    return Number((rows as Array<{ c: number }>)[0].c);
+  } finally { await conn.end(); }
+}
+
+test('FW1 A2A 规范槽位（{userId}:{sid}）列表/详情可见、删除无孤儿行', async () => {
+  const sid = sessionIdFor(`fw1-${uniq()}`);
+  const uid = ids(`fw1-u-${uniq()}`);
+  const r = await a2a('message/send', {
+    message: {
+      kind: 'message', messageId: crypto.randomUUID(), role: 'user', blocking: true,
+      parts: [{ kind: 'text', text: `[E2E:plain](fw1-${uniq()})` }],
+      metadata: { userId: uid, sessionId: sid },
+    },
+  });
+  expect(r.status).toBe(200);
+  expect(r.json.error).toBeUndefined();
+
+  // 槽位形态实证：A2A 链路 agent_state 落规范形态 {uid}:{sid}（SessionKeyResolver 链路表原值透传）；
+  // 旧 LIKE 前缀匹配对它恒落空 → 详情 updated_at 恒 ''、删除留孤儿（76e0e74 修复的两症状，
+  // 旧实现回退只被本用例钉：老形态 slot {peer}:{gw-hash} 恰在 LIKE 前缀臂命中范围内，FW2 钉不住该回归）
+  const slots = await pollUntil(async () => {
+    const conn = await openDb();
+    try {
+      const [rows] = await conn.query(
+        `SELECT session_id FROM agent_state WHERE SUBSTRING_INDEX(session_id, ':', -1) = ?`, [sid]);
+      return rows as Array<{ session_id: string }>;
+    } finally { await conn.end(); }
+  }, rows => rows.length > 0, 30_000);
+  expect(slots.some(x => x.session_id === `${uid}:${sid}`), 'A2A 应写规范形态槽位 {uid}:{sid}').toBe(true);
+
+  // 列表可见（session_user 由 A2AController 会话开始前 upsert）
+  await pollUntil(async () => threads(), list => JSON.stringify(list).includes(sid), 30_000);
+
+  // 详情 updated_at 非空：规范槽位经 SUBSTRING_INDEX 末段臂命中（旧实现恒 ''，匹配回归即在此红）
+  const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`)).json() as Record<string, unknown>;
+  expect(String(one.updated_at ?? ''), '详情 updated_at 应取自 agent_state（末段臂命中）').not.toBe('');
+  expect(one.user_id).toBe(uid);
+
+  // 删除：规范槽位行级联清理，不留孤儿（旧实现漏删 → updated_at 残留非空、DB 计数>0）
+  expect(await deleteThread(sid)).toBeLessThan(300);
+  await pollUntil(async () => threads(), list => !JSON.stringify(list).includes(sid), 15_000); // S7 同款权威信号
+  const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`)).json() as Record<string, unknown>;
+  expect(String(oneAfter.updated_at ?? ''), '删除后 updated_at 应为空（孤儿残留即在此红）').toBe('');
+  expect(await slotRowCount(sid), 'agent_state 不得残留 sid 孤儿行').toBe(0);
+});
+
+test('FW2 老 Channel 形态槽位种子：列表/详情 updated_at 取自 agent_state、删除无孤儿', async () => {
+  // 老 Channel 形态 {peer}:{gw-hash} 只在存量/网关链路出现，e2e 对话写不出+固定时间戳
+  // 组合——直插种子做值级断言（HA3/archive-seed 同模式）。两轨时间戳刻意错开：
+  // 本用例钉的是"冒号前段臂被删"类回归（退化 exact-only/后段-only）：此时 LEFT JOIN 不命中
+  // → SELECT 列 MAX(a.updated_at)=NULL → updated_at 落空串路径（ThreadController.java:179），
+  // toContain(STATE_TS) 红；回退旧 LIKE 前缀实现钉不住本用例（LIKE 前缀恰命中老形态，归 FW1）。
+  // ORDER BY 的 COALESCE(created_at) 只影响排序不进断言；session_user 轨时间是
+  // NOT NULL 列的哨兵值，与 agent_state 轨错开仅为来源可区分。
+  const uid = ids(`fw2-u-${uniq()}`);
+  const peer = `fw2-peer-${uniq()}`;
+  const slot = `${peer}:gwk-${uniq()}`;
+  const STATE_TS = '2026-08-08 08:08:08';   // agent_state 轨（JOIN 命中时的期望值）
+  const SU_TS = '2026-01-02 03:04:05.000';  // session_user 轨（NOT NULL 哨兵值，非断言期望）
+  const conn = await openDb();
+  try {
+    // state_data 不含 $.session_id/$.user_id：任何后续重启的 V6 回填都因形状条件（V6:47-48）跳过该行
+    await conn.query(
+      `INSERT INTO session_user (session_id, user_id, remark, created_at, updated_at) VALUES (?, ?, ?, ?, ?);
+       INSERT INTO agent_state (session_id, state_key, item_index, state_data, created_at, updated_at)
+       VALUES (?, 'agent_state', 0, '{"messages":[]}', ?, ?)`,
+      [peer, uid, `FW2种子-${peer}`, SU_TS, SU_TS, slot, '2026-01-02 03:04:05', STATE_TS]);
+  } finally { await conn.end(); }
+
+  // 列表：updated_at 必须取自 agent_state（冒号前段臂命中）；臂被删 → NULL → 空串 → 红
+  const row = await pollUntil(async () => {
+    const res = await fetch(`${BASE}/threads?userId=${encodeURIComponent(uid)}`);
+    const rows = await res.json() as Array<Record<string, unknown>>;
+    return rows.find(x => x.session_id === peer);
+  }, x => !!x, 15_000);
+  expect(String(row!.updated_at ?? ''), '列表 updated_at 应取自 agent_state（冒号前段臂）').toContain(STATE_TS);
+
+  // 详情：同一冒号前段臂（getThread 元信息 SQL）；Timestamp.toString() 尾部 ".0" 用 toContain 吸收
+  const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`)).json() as Record<string, unknown>;
+  expect(String(one.updated_at ?? ''), '详情 updated_at 应取自 agent_state（冒号前段臂）').toContain(STATE_TS);
+  expect(one.user_id).toBe(uid);
+
+  // 删除：老形态槽位行一并清理（冒号前段臂），列表/详情/DB 三面无残留
+  expect(await deleteThread(peer)).toBeLessThan(300);
+  await pollUntil(async () => threads(), list => !JSON.stringify(list).includes(peer), 15_000);
+  const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`)).json() as Record<string, unknown>;
+  expect(String(oneAfter.updated_at ?? ''), '删除后老形态槽位行必须消失').toBe('');
+  expect(await slotRowCount(peer), 'agent_state 不得残留老形态孤儿行').toBe(0);
+  const conn2 = await openDb();
+  try {
+    const [su] = await conn2.query('SELECT COUNT(*) c FROM session_user WHERE session_id = ?', [peer]);
+    expect(Number((su as Array<{ c: number }>)[0].c), 'session_user 行必须已删').toBe(0);
+  } finally { await conn2.end(); }
+});
+
+test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同款第二实例）', () => {
+  const runtimeDir = process.env.E2E_RUNTIME_DIR ?? '.runtime';
+  const FW_PORT = String(Number(new URL(BASE).port) + 12); // 避开 MEM(+10)/multi(+1/+2)
+  const FW_BASE = `http://127.0.0.1:${FW_PORT}`;
+  const START_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '../scripts/start-agent.sh');
+
+  const uidPos = `fw3-pos-u-${uniq()}`;
+  const sidPos = `fw3-pos-sid-${uniq()}`;
+  // sid 侧守卫种子（钉 V6:50 c.sid<>'unknown'）：slot 尾段必须就是 'unknown'（V6:13 注释的
+  // "无主残留"形态）——否则在形状条件 V6:47 就被过滤、永远到不了 :50，守卫没被行使
+  const uidNoSid = `fw3-sg-u-${uniq()}`;
+  // uid 侧守卫种子（钉 V6:49 c.uid<>'unknown'）：slot 首段=unknown、JSON user_id='unknown'（对称形态）
+  const sidNoUid = `fw3-ug-sid-${uniq()}`;
+  const uidClaimA = `fw3-cla-u-${uniq()}`;
+  const uidClaimB = `fw3-clb-u-${uniq()}`;
+  const sidShared = `fw3-shared-sid-${uniq()}`; // 同 sid 两个 uid 认领 = 共享 gw-hash 桶形态（V6:51 守卫）
+  const STATE_TS = '2026-08-08 08:08:08';
+
+  test.beforeAll(async () => {
+    // 1) 种子（模拟升级前存量：只在 agent_state、session_user 不登记）+ 清 Flyway 历史表。
+    // DB/Redis 地址由 start-agent.sh 经继承 env / env.json 解析（与主实例同库，MEM 同款）。
+    const conn = await openDb();
+    try {
+      await conn.query(
+        `INSERT INTO agent_state (session_id, state_key, item_index, state_data, created_at, updated_at) VALUES
+         (?, 'agent_state', 0, ?, '2026-01-02 03:04:05', ?),
+         (?, 'agent_state', 0, ?, '2026-01-02 03:04:05', ?),
+         (?, 'agent_state', 0, ?, '2026-01-02 03:04:05', ?),
+         (?, 'agent_state', 0, ?, '2026-01-02 03:04:05', ?),
+         (?, 'agent_state', 0, ?, '2026-01-02 03:04:05', ?);
+         DROP TABLE IF EXISTS flyway_schema_history;`,
+        [`${uidPos}:${sidPos}`, JSON.stringify({ session_id: sidPos, user_id: uidPos, messages: [] }), STATE_TS,
+         `${uidNoSid}:unknown`, JSON.stringify({ session_id: 'unknown', user_id: uidNoSid, messages: [] }), STATE_TS,
+         `unknown:${sidNoUid}`, JSON.stringify({ session_id: sidNoUid, user_id: 'unknown', messages: [] }), STATE_TS,
+         `${uidClaimA}:${sidShared}`, JSON.stringify({ session_id: sidShared, user_id: uidClaimA, messages: [] }), STATE_TS,
+         `${uidClaimB}:${sidShared}`, JSON.stringify({ session_id: sidShared, user_id: uidClaimB, messages: [] }), STATE_TS]);
+    } finally { await conn.end(); }
+    // 2) 第二实例：schema 非空 + 历史表缺失 → baseline(5) + 仅跑 V6（现网升级同路径，
+    // application.yml flyway.baseline-on-migrate/baseline-version=5）
+    const r = spawnSync('bash', [START_SCRIPT, 'fwv6', FW_PORT], { encoding: 'utf8', timeout: 150_000 });
+    if (r.status !== 0) {
+      throw new Error(`fwv6 实例启动失败 exit=${r.status}\nstdout: ${(r.stdout ?? '').slice(-400)}\nstderr: ${(r.stderr ?? '').slice(-800)}`);
+    }
+    // 显式等就绪：wait-ready 通过后仍有瞬断窗口（冷启动竞态），MEM 组同款
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      try { if ((await fetch(`${FW_BASE}/health`)).status === 200) break; } catch { /* 未就绪 */ }
+      if (Date.now() > deadline) throw new Error(`fwv6 实例 60s 内未就绪：${FW_BASE}/health`);
+      await new Promise(r2 => setTimeout(r2, 500));
+    }
+  });
+
+  test.afterAll(async () => {
+    try {
+      const pid = Number(fs.readFileSync(path.join(runtimeDir, 'agent-fwv6.pid'), 'utf8').trim());
+      if (Number.isInteger(pid) && pid > 0) { try { process.kill(pid); } catch { /* 已退出 */ } }
+    } catch { /* pid 文件缺失交由 env-down 的 agent-*.pid 通配兜底 */ }
+    // 清理种子/回填行（回填产生的 session_user 行按业务 sid 删；守卫回归态的 'unknown' 行定点删；
+    // try/catch 包裹，下轮 env-up reset-data 全量 DROP 兜底）
+    try {
+      const conn = await openDb();
+      try {
+        await conn.query(
+          `DELETE FROM agent_state WHERE session_id IN (?, ?, ?, ?, ?);
+           DELETE FROM session_user WHERE session_id IN (?, ?, ?) OR (session_id = 'unknown' AND user_id = ?);`,
+          [`${uidPos}:${sidPos}`, `${uidNoSid}:unknown`, `unknown:${sidNoUid}`, `${uidClaimA}:${sidShared}`, `${uidClaimB}:${sidShared}`,
+           sidPos, sidShared, sidNoUid, uidNoSid]);
+      } finally { await conn.end(); }
+    } catch { /* 清理失败交由下轮 reset-data 兜底 */ }
+  });
+
+  test('FW3 V6 回填：自洽规范槽位入列且 updated_at 溯源 agent_state；三道守卫行均不入列', async () => {
+    // 正例：回填后列表可见，updated_at = 种子 agent_state 行的 MAX(updated_at)（末段臂 JOIN 命中）
+    const row = await pollUntil(async () => {
+      const res = await fetch(`${FW_BASE}/threads?userId=${encodeURIComponent(uidPos)}`);
+      const rows = await res.json() as Array<Record<string, unknown>>;
+      return rows.find(x => x.session_id === sidPos);
+    }, x => !!x, 15_000);
+    expect(String(row!.updated_at ?? ''), '回填会话列表 updated_at 应取自 agent_state').toContain(STATE_TS);
+    // 守卫1（V6:50 c.sid<>'unknown'）：无主残留不回填——若守卫被删，该行会以
+    // session_id='unknown'、user_id=uidNoSid 入列，在 uidNoSid 视图可见
+    const noSid = await (await fetch(`${FW_BASE}/threads?userId=${encodeURIComponent(uidNoSid)}`)).json() as Array<Record<string, unknown>>;
+    expect(noSid.find(x => x.session_id === 'unknown'), 'sid=unknown 无主残留不得回填（V6:50）').toBeUndefined();
+    // 守卫2（V6:49 c.uid<>'unknown'）：无主行不认领——若守卫被删，(sidNoUid, 'unknown') 入列，
+    // 在字面 'unknown' 用户视图可见
+    const noUid = await (await fetch(`${FW_BASE}/threads?userId=unknown`)).json() as Array<Record<string, unknown>>;
+    expect(noUid.find(x => x.session_id === sidNoUid), `uid=unknown 无主行不得回填（V6:49，sid=${sidNoUid}）`).toBeUndefined();
+    // 守卫3（V6:51 claimants=1）：同 sid 双 uid 认领 = 共享 gw-hash 桶，两个视图都不得出现
+    for (const uid of [uidClaimA, uidClaimB]) {
+      const rows = await (await fetch(`${FW_BASE}/threads?userId=${encodeURIComponent(uid)}`)).json() as Array<Record<string, unknown>>;
+      expect(rows.find(x => x.session_id === sidShared), `共享桶 ${uid} 不得回填（V6:51）`).toBeUndefined();
+    }
+    // 升级路径契约钉：历史表恰为 baseline(5)+V6——baseline-version 被抬高会在此红（V6 静默跳过形态）
+    const conn = await openDb();
+    try {
+      const [hist] = await conn.query('SELECT version, success FROM flyway_schema_history ORDER BY installed_rank');
+      const rows = hist as Array<{ version: string; success: number }>;
+      expect(rows.map(x => x.version)).toEqual(['5', '6']);
+      expect(rows.every(x => x.success === 1), '迁移历史必须全 success').toBe(true);
+    } finally { await conn.end(); }
+  });
+});
+
 // ---------- SK 组：用户技能（L4）管理面探针 ----------
 // 说明：完整管理面场景（PUT/GET/DELETE/sync-from-package + A2A 生效性）见仓库根 e2e/user-skill-admin-e2e.sh
 //（手工脚本，需平台已发布带 skills 的自建服务）；此处只钉住端点路由与响应契约，防路由写错静默合入。
@@ -1120,5 +1355,135 @@ test.describe('MEM 记忆关断', () => {
     // 日志经 start-agent.sh 重定向 + env-up.sh 渲染的控制台 logback 落盘
     const log = fs.readFileSync(path.join(runtimeDir, 'logs', 'agent-memoff.log'), 'utf8');
     expect(log).toContain('Memory fully disabled');
+  });
+});
+
+// ---------- RD 组：Redis 前缀隔离（AGENT_REDIS_PREFIX，d31cd93，e2e-ci-plan §5.11） ----------
+// 覆盖缺口：e2e tests/scripts/mock/lib 对 AGENT_REDIS_* 零命中（grep exit=1）。
+// 多 Agent 共用 oaf-redis 时前缀切分 sess:*/sbx:guard:* key（docs/redis-cluster-prefix-design.md §1）；
+// 断言面 = 同 Redis 双实例（默认无前缀 vs e2e-isolated 前缀）同 sessionId+userId 的
+// /status 与 /subscribe 互不可见（前缀只切 Redis key：共享 MySQL 的 history/threads 列表面
+// 【不】隔离是设计内语义，刻意不断言）。describe 包裹 + spawnSync 仿 MEM 组
+//（workers=1 组内串行，爆炸半径限于本组）。
+test.describe('RD Redis 前缀隔离', () => {
+  const runtimeDir = process.env.E2E_RUNTIME_DIR ?? '.runtime';
+  const RD_PORT = process.env.E2E_RD_PREFIX_PORT ?? String(Number(new URL(BASE).port) + 11);
+  const RD_BASE = `http://127.0.0.1:${RD_PORT}`;
+  const RD_PREFIX = 'e2e-isolated'; // 不含 { }（hash tag 语法被 AgentRedisProperties 校验拒绝）
+  const START_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '../scripts/start-agent.sh');
+
+  let rdpfxPid: number | null = null;
+
+  test.beforeAll(async () => {
+    // start-agent.sh 内联 env（VAR=val nohup java）不清空父环境：AGENT_REDIS_PREFIX 原样透传
+    // 命中 application.yml 的 AGENT_REDIS_PREFIX 占位符（MEM 组 AGENT_MEMORY_ENABLED 同一透传路径）
+    const r = spawnSync('bash', [START_SCRIPT, 'rdpfx', RD_PORT], {
+      encoding: 'utf8', timeout: 150_000,
+      env: { ...process.env, AGENT_REDIS_PREFIX: RD_PREFIX },
+    });
+    if (r.status !== 0) {
+      throw new Error(`prefixed 实例启动失败 exit=${r.status}\nstdout: ${(r.stdout ?? '').slice(-400)}\nstderr: ${(r.stderr ?? '').slice(-800)}`);
+    }
+    try {
+      const pid = Number(fs.readFileSync(path.join(runtimeDir, 'agent-rdpfx.pid'), 'utf8').trim());
+      if (Number.isInteger(pid) && pid > 0) rdpfxPid = pid;
+    } catch { /* pid 文件缺失交由用例内请求失败暴露 */ }
+    // 显式等就绪：wait-ready 通过后仍有瞬断窗口（冷启动竞态），MEM 组同款
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      try { if ((await fetch(`${RD_BASE}/health`)).status === 200) break; } catch { /* 未就绪 */ }
+      if (Date.now() > deadline) throw new Error(`prefixed 实例 60s 内未就绪：${RD_BASE}/health`);
+      await new Promise(r => setTimeout(r, 500));
+    }
+  });
+
+  test.afterAll(async () => {
+    if (rdpfxPid !== null) { try { process.kill(rdpfxPid); } catch { /* 已退出 */ } }
+  });
+
+  /** 回放业务帧的最大 seq（done 为 Tailer 补发合成帧，不计） */
+  const maxSeqOf = (frames: Array<Record<string, unknown> & { type: string }>) =>
+    Math.max(0, ...frames.filter(f => f.type !== 'done').map(f => Number((f as { seq?: number }).seq ?? 0)));
+
+  test('RD1 同 Redis 双实例前缀隔离：事件流与断线续传互不可见', async () => {
+    const sid = sessionIdFor(`rd1-${uniq()}`);
+    // turn1 落默认实例（无前缀）：写 sess:{sid}:events（seq 在 append 时分配，里程碑
+    // AGENT_END 触发整批同管道刷出——waitTerminal 后 latest_event_seq 即终局值，可精确对账）
+    const a = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid });
+    await waitTerminal(a);
+    expect(a.terminal?.type).toBe('done');
+    const aSeq = Number((await status(sid)).latest_event_seq ?? 0);
+    expect(aSeq, '默认实例事件流为空（主实例自身回归）').toBeGreaterThan(0);
+
+    // 前缀实例同名会话此刻必须全空：前缀失效时此处读到 A 的流即红（决定性断言）
+    const before = await status(sid, RD_BASE);
+    expect(before.state).toBe('idle');
+    expect(Number(before.latest_event_seq ?? -1)).toBe(0);
+    // 前缀实例断线续传空关流（tailer 首轮立即探测空流即补 done），A 的帧一条读不到
+    const emptySub = subscribe(sid, 0, RD_BASE);
+    await emptySub.closed;
+    expect(emptySub.frames.filter(f => f.type !== 'done'), '前缀实例续传读到 A 的帧（隔离失效）').toHaveLength(0);
+
+    // turn2 同 sessionId+userId 落前缀实例：写 e2e-isolated:sess:{sid}:events，seq 独立发号
+    const b = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid, base: RD_BASE });
+    await waitTerminal(b);
+    expect(b.terminal?.type).toBe('done');
+    const bSeq = Number((await status(sid, RD_BASE)).latest_event_seq ?? 0);
+    expect(bSeq).toBeGreaterThan(0);
+
+    // 双向续传回放恰好只含各自的流：max seq 精确相等（串流即溢出）
+    const subA = subscribe(sid, 0);
+    await subA.closed;
+    seqMonotonic(subA.frames);
+    expect(subA.frames[subA.frames.length - 1].type).toBe('done');
+    expect(maxSeqOf(subA.frames), 'A 的回放混入 B 的帧').toBe(aSeq);
+    const subB = subscribe(sid, 0, RD_BASE);
+    await subB.closed;
+    seqMonotonic(subB.frames);
+    expect(subB.frames[subB.frames.length - 1].type).toBe('done');
+    expect(maxSeqOf(subB.frames), 'B 的回放混入 A 的帧').toBe(bSeq);
+    // A 的流不因 B 的 turn 变化
+    expect(Number((await status(sid)).latest_event_seq ?? -1)).toBe(aSeq);
+  });
+
+  test('RD2 删除会话前缀互不影响：DELETE 只清本实例命名空间', async () => {
+    const sid = sessionIdFor(`rd2-${uniq()}`);
+    const a = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid });
+    await waitTerminal(a);
+    expect(a.terminal?.type).toBe('done');
+    const aSeq = Number((await status(sid)).latest_event_seq ?? 0);
+    const b = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid, base: RD_BASE });
+    await waitTerminal(b);
+    expect(b.terminal?.type).toBe('done');
+    const bSeq = Number((await status(sid, RD_BASE)).latest_event_seq ?? 0);
+    expect(aSeq).toBeGreaterThan(0);
+    expect(bSeq).toBeGreaterThan(0);
+
+    // 前缀实例删会话：只清 e2e-isolated:sess:{sid}:* 两个 key（RedisEventLog.deleteSession
+    // 经 facade.key 前缀）+ 共享 MySQL 行（前缀只切 Redis key，两实例都会删——设计内语义）
+    expect(await deleteThread(sid, RD_BASE)).toBe(200);
+    expect(Number((await status(sid, RD_BASE)).latest_event_seq ?? -1)).toBe(0); // 自己的流已清
+    expect(Number((await status(sid)).latest_event_seq ?? -1),
+      '前缀实例 DELETE 波及默认实例事件流（deleteSession 未走前缀）').toBe(aSeq);
+    // 默认实例断线续传不受对方删除破坏
+    const subA = subscribe(sid, 0);
+    await subA.closed;
+    expect(subA.frames[subA.frames.length - 1].type).toBe('done');
+    expect(maxSeqOf(subA.frames)).toBe(aSeq);
+    // 反向：默认实例删除只清自己（双向语义闭环）
+    expect(await deleteThread(sid)).toBe(200);
+    expect(Number((await status(sid)).latest_event_seq ?? -1)).toBe(0);
+  });
+
+  test('RD3 前缀配置生效直证：门面启动日志 prefix 字段（含冒号规范化）', () => {
+    // RedisConnectionFacade.create 的 standalone 摘要日志是前缀落地的唯一进程级出口，
+    // /health 就绪时 bean 已装配、日志必已落盘（MEM3 同款日志直证手法）
+    const pfxLog = fs.readFileSync(path.join(runtimeDir, 'logs', 'agent-rdpfx.log'), 'utf8');
+    expect(pfxLog, '前缀实例日志缺 RedisClient configured 行').toContain('RedisClient configured');
+    expect(pfxLog).toContain('mode=standalone');
+    expect(pfxLog).toContain(`prefix="${RD_PREFIX}:"`); // normalizedPrefix 自动补冒号
+    // 对照组：默认实例（env-up 未注入前缀）必须 prefix=""——防前缀 env 泄漏进主实例
+    const baseLog = fs.readFileSync(path.join(runtimeDir, 'logs', 'agent-a.log'), 'utf8');
+    expect(baseLog).toContain('prefix=""');
   });
 });

@@ -224,6 +224,12 @@ rules:
   - apiGroups: [""]
     resources: ["services","configmaps","persistentvolumeclaims","pods","pods/log"]
     verbs: ["get","list","watch","create","update","patch","delete"]
+  # 平台默认配置 Secret + 每服务敏感 env Secret（delete 仅用于服务删除时清理
+  # {name}-env-secret，平台默认 Secret 后端从不删除）
+  # 设计见 docs/design/platform-default-config-secret-design.md §3.4
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get","list","create","update","delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get","list","watch","create","update","patch","delete"]
@@ -258,7 +264,7 @@ spec:
       serviceAccountName: platform-backend
       containers:
         - name: backend
-          image: platform-backend:v1
+          image: platform-backend:v4
           imagePullPolicy: IfNotPresent
           ports: [{ containerPort: 8080 }]
           env:

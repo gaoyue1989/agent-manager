@@ -27,7 +27,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 ## 代码规范
 
-命名语义化，禁止硬编码密钥、魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获；优先复用现有工具，不私自升级框架、乱加依赖；复杂逻辑加中文注释。
+命名语义化，禁止硬编码密钥、魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获；优先复用现有工具，不私自升级框架、乱加依赖；复杂逻辑加中文注释。**agent-framework 的表结构/数据演进一律新增 Flyway 迁移文件**（`agent-framework/src/main/resources/db/migration/V<N>__<描述>.sql`，启动自动执行、存量库自动基线），**禁止**在 Store 构造器或请求路径里手工 DDL（该模式已移除），禁止修改已合并的 V 文件（checksum 校验会拒绝启动）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（见 docs/design/db-migration-flyway-design.md §7）。
 
 ## 输出格式
 
@@ -69,8 +69,9 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 关键约定：
 - 业务 Pod 固定注入 `AGENT_CONFIG_DIR=/config`、`AGENT_WORKSPACE_DIR=/workspace`、`SERVER_HOST/SERVER_PORT`（均为保留键，用户 env 冲突即 400）
-- env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB
-- 业务 Ingress 注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix
+- env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB；模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY 等）自动路由进服务 Secret（`{name}-env-secret`），不落 ConfigMap/env_json
+- 平台默认配置（redis/mysql/llm/sandbox）仅作为「发布新服务 / 编辑 env」时的**表单默认填入**（`/settings` 页维护 → `platform_config` 表 → `GET /platform-config/defaults` 预填）；不经 envFrom 注入，改默认配置不影响任何已发布服务（见 docs/design/platform-default-config-secret-design.md）
+- 业务 Ingress 注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix；形态可用 `INGRESS_TEMPLATE` overlay 调整（允许改 host/path/TLS/追加注解，Endpoint 自动跟随；不设置=内置构造，见 backend/AGENTS.md 与 docs/design/ingress-template-design.md）
 - 敏感配置在 `.env.secrets`（gitignored）
 
 ---

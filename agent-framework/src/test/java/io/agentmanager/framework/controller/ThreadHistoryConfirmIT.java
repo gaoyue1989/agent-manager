@@ -25,6 +25,7 @@ class ThreadHistoryConfirmIT {
         dataSource.setURL(System.getenv("CHECKPOINT_JDBC_URL"));
         dataSource.setUser(System.getenv("CHECKPOINT_USERNAME"));
         dataSource.setPassword(System.getenv("CHECKPOINT_PASSWORD"));
+        io.agentmanager.framework.support.TestSchemaMigrator.migrate(dataSource);
         var store = new ConfirmContextStore(dataSource);
         var controller = new ThreadController(dataSource, new LLMLogger(), store,
             mock(SessionUserStore.class), mock(SessionEventStore.class), mock(io.agentmanager.framework.service.ModelCatalog.class));

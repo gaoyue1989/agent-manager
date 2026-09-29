@@ -190,13 +190,14 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 		sv.PATCH("/:id/env", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 			var body struct {
-				Env map[string]string `json:"env"`
+				Env        map[string]string `json:"env"`
+				SecretKeys []string          `json:"secretKeys"`
 			}
 			if err := c.ShouldBindJSON(&body); err != nil {
 				Fail(c, http.StatusBadRequest, err.Error())
 				return
 			}
-			svc, err := core.UpdateEnv(uint(id), body.Env)
+			svc, err := core.UpdateEnv(uint(id), body.Env, body.SecretKeys)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -253,6 +254,44 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 		type img struct{ Image, Label string }
 		OK(c, images)
 	})
+
+	// 平台默认配置：设置页读写 + 表单默认填入数据源。
+	// R3 语义：默认配置仅作为发布/编辑 env 时的表单预填，不经 envFrom 注入，
+	// 不影响任何已发布服务（docs/design/platform-default-config-secret-design.md）
+	pc := g.Group("/platform-config")
+	{
+		pc.GET("", func(c *gin.Context) {
+			view, err := core.GetPlatformConfig()
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, view)
+		})
+		pc.GET("/defaults", func(c *gin.Context) {
+			values, err := core.GetPlatformDefaults()
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, gin.H{"values": values})
+		})
+		pc.PUT("", func(c *gin.Context) {
+			var body struct {
+				Values map[string]string `json:"values"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			view, err := core.UpdatePlatformConfig(body.Values)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, view)
+		})
+	}
 
 	r.GET("/healthz", func(c *gin.Context) {
 		OK(c, gin.H{"status": "up"})
