@@ -116,6 +116,13 @@ public class McpConnectionWatchdog {
      * 注册失败关闭新连接防泄漏。
      */
     private void rebuild(String server) {
+        // TOCTOU 收窄（CR P1-2）：probeAll 入口的让位检查距此最长一个周期，reload 可能
+        // 已在途——摘旧前重查一次（仍存窗口但从分钟级收窄到毫秒级，残余竞态 fail-soft
+        // 由下一周期再重建自愈）
+        if (oafReloadService.isReloadInProgress()) {
+            log.info("[MCP-watchdog] OAF reload started mid-cycle, defer rebuild of '{}'", server);
+            return;
+        }
         var mcp = currentServerConfig(server);
         if (mcp == null) {
             log.warn("[MCP-watchdog] server '{}' has no active config, skip rebuild", server);
@@ -136,8 +143,13 @@ public class McpConnectionWatchdog {
         mcpToolRegistrar.clearServer(toolkit, server);
         mcpResourceProxy.evictClient(server);
         try {
-            mcpToolRegistrar.registerBuiltClient(toolkit, newWrapper, mcp);
-            log.info("[MCP-watchdog] server '{}' connection rebuilt ({})", server, newWrapper);
+            // registerBuiltClient 失败时自关闭并返回 null（fail-soft），非异常路径
+            var registered = mcpToolRegistrar.registerBuiltClient(toolkit, newWrapper, mcp);
+            if (registered == null) {
+                log.warn("[MCP-watchdog] server '{}' registration failed after rebuild (client closed by registrar)", server);
+            } else {
+                log.info("[MCP-watchdog] server '{}' connection rebuilt ({})", server, newWrapper);
+            }
         } catch (Exception e) {
             mcpToolRegistrar.closeWrapperQuietly(newWrapper);
             log.warn("[MCP-watchdog] server '{}' registration failed after rebuild: {}", server, e.getMessage());

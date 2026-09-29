@@ -594,6 +594,22 @@ class AgentRuntimeServiceHitlTest {
         assertEquals("reply-9", payload.get("reply_id"));
     }
 
+    /** 远程行 reply_id=NULL（Bridge 落卡真实形态）→ 不 NPE，回落空串（CR P0-1 回归） */
+    @Test
+    void findPendingConfirmShouldTolerateNullReplyIdOnRemoteRow() {
+        var remoteTask = Map.<String, Object>of("service", "order-agent", "task_id", "task-9");
+        when(confirmContextStore.findHeadPending("acme-test-agent__t1")).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "acme-test-agent__t1", "task:task-9", null,
+                List.of(toolUseBlock("call-9")), Instant.now(), null, null, remoteTask)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertEquals("", payload.get("reply_id"));
+        assertEquals("task:task-9", payload.get("confirm_key"));
+    }
+
     /** 本地行 → 不带 confirm_key/remote_task（前端既有字段零改动） */
     @Test
     void findPendingConfirmShouldNotExposeRemoteFieldsForLocalRow() {
@@ -633,6 +649,26 @@ class AgentRuntimeServiceHitlTest {
             askEvent("reply-1", toolUseBlock("call-1")), null, null);
 
         verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+    }
+
+    /** Channel 链路形态：远程行以 raw sid 存储（比 fullThreadId 短），双形态查询命中抑制 */
+    @Test
+    void putConfirmContextShouldSuppressWhenRemoteRowStoredUnderRawSid() {
+        var ghostRow = new ConfirmContextStore.PendingConfirm(
+            "t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9",
+                "tool_calls", List.of(Map.of("id", "call-1", "name", "create_order"))));
+        // 长/短两形态查询都 stub 命中即证明双形态展开生效（raw sid 行仅被短键查询命中）
+        when(confirmContextStore.findUnconsumedRemote("acme-test-agent__t1"))
+            .thenReturn(List.of());
+        when(confirmContextStore.findUnconsumedRemote("t1")).thenReturn(List.of(ghostRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+        verify(confirmContextStore).findUnconsumedRemote("t1");
     }
 
     /** 本地自有 ask（id 不在远程锚点）→ 照常落库，HITL 行为不变 */

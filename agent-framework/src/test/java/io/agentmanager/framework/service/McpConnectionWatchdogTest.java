@@ -118,6 +118,18 @@ class McpConnectionWatchdogTest {
         verify(registrar, never()).registerBuiltClient(any(), any(), any());
     }
 
+    /** registerBuiltClient fail-soft 返回 null（自关闭）：不抛异常、不误报重建成功、不重复关闭 */
+    @Test
+    void registerNullReturnShouldNotCloseNorReportRebuilt() {
+        when(wrapper.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));
+        when(registrar.buildClientForReload(any())).thenReturn(newWrapper);
+        when(registrar.registerBuiltClient(any(), any(), any())).thenReturn(null);
+
+        watchdog.probeOne("biz-mcp");
+
+        verify(registrar, never()).closeWrapperQuietly(any());
+    }
+
     @Test
     void registerFailureShouldCloseNewWrapper() {
         when(wrapper.listTools()).thenReturn(Mono.error(new RuntimeException("dead")));

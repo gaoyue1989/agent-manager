@@ -539,6 +539,9 @@ public class RemoteConfirmBridge {
         log.info("[RemoteConfirmBridge] decision routed: sid={}, taskId={}, approved={}, decisions={}",
             sessionId, taskId, approved, decisions.size());
 
+        // 摘在途登记（CR P2-3）：决策路径的终态由 awaitTerminalAndWake 专责监听唤醒，
+        // 摘除后轮询路径不再重复处理同一任务（终态审计/后台收割话术双重触发）
+        inFlight.remove(registryKey(row.sessionId(), taskId));
         // resume 后异步监听终态 → 唤醒 lead 汇总 turn（§4 步骤 7）
         var endpointRef = endpoint;
         wakeExecutor.submit(() -> awaitTerminalAndWake(row.sessionId(), taskId, endpointRef));

@@ -6,6 +6,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -656,8 +657,15 @@ public class AgentRuntimeService {
 
     /**
      * F20 幽灵判据：ask 的任一 tool_call_id 出现在会话未消费远程行的 remote_task.tool_calls
-     * 锚点（{id, name, input}）中。全程 fail-soft：判据失效即照常落库（行为回退到现状，
-     * 不会因去重逻辑阻断真实本地 ask）。
+     * 锚点（{id, name, input}）中。
+     *
+     * <p>sessionId 形态（CR P1-1）：调用方传 fullThreadId（租户前缀长键），而 Bridge 落卡
+     * 键为 canonicalSid（Channel 链路 = 前端 raw sid，比 fullThreadId 短）——前缀兼容 SQL
+     * 只覆盖"查询键 ≤ 存储键"方向，长键查短键行三谓词全不命中。故按 fullThreadId 与
+     * strip 前缀后的 raw sid 各查一次，双形态都覆盖。
+     *
+     * <p>全程 fail-soft：判据失效即照常落库（行为回退到现状，不会因去重逻辑阻断真实本地
+     * ask；Bridge 落卡侧对撞清理兜底最迟 ~5s 收口）。
      */
     private boolean isPropagatedRemoteAsk(String sessionId, List<io.agentscope.core.message.ToolUseBlock> calls) {
         if (calls == null || calls.isEmpty()) {
@@ -671,19 +679,41 @@ public class AgentRuntimeService {
             return false;
         }
         try {
-            for (var row : confirmContextStore.findUnconsumedRemote(sessionId)) {
-                if (!(row.remoteTask() != null && row.remoteTask().get("tool_calls") instanceof List<?> tcs)) {
-                    continue;
-                }
-                for (var tc : tcs) {
-                    if (tc instanceof Map<?, ?> m && m.get("id") instanceof String s
-                            && !s.isBlank() && ids.contains(s)) {
+            for (var sid : distinctLookupSids(sessionId)) {
+                for (var row : confirmContextStore.findUnconsumedRemote(sid)) {
+                    if (isGhostMatch(row, ids)) {
                         return true;
                     }
                 }
             }
         } catch (Exception e) {
             log.debug("[HITL] ghost-ask detection failed (fail-open): {}", e.getMessage());
+        }
+        return false;
+    }
+
+    /** 查询键去重集：fullThreadId + strip 租户前缀后的 raw sid（相同则单元素） */
+    private List<String> distinctLookupSids(String fullThreadId) {
+        var sids = new LinkedHashSet<String>();
+        sids.add(fullThreadId);
+        try {
+            sids.add(stripTenantPrefix(fullThreadId));
+        } catch (Exception e) {
+            log.debug("[HITL] strip tenant prefix failed: {}", e.getMessage());
+        }
+        return List.copyOf(sids);
+    }
+
+    /** 锚点对撞：行的 remote_task.tool_calls 任一 id 命中 ask ids 即视为转发幽灵 */
+    private static boolean isGhostMatch(ConfirmContextStore.PendingConfirm row, java.util.Set<String> ids) {
+        if (!(row.remoteTask() != null && row.remoteTask().get("tool_calls") instanceof List<?> tcs)) {
+            return false;
+        }
+        for (var tc : tcs) {
+            if (tc instanceof Map<?, ?> m && m.get("id") instanceof String s
+                    && !s.isBlank() && ids.contains(s)) {
+                return true;
+            }
         }
         return false;
     }
@@ -898,7 +928,9 @@ public class AgentRuntimeService {
         return confirmContextStore.findHeadPending(fullThreadId)
             .map(p -> {
                 var m = new LinkedHashMap<String, Object>();
-                m.put("reply_id", p.replyId());
+                // 远程行（Bridge 落卡）reply_id 恒为 NULL——Map.copyOf 不接受 null 值，
+                // 判空回落空串（与 ThreadController.pendingConfirmPayload 同口径）
+                m.put("reply_id", p.replyId() != null ? p.replyId() : "");
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
                 if (p.isRemote()) {

@@ -337,11 +337,18 @@ public class ConfirmContextStore {
      * 远程锚点同键）。返回消费行数（审计用）；前缀兼容谓词与查询同口径。
      */
     public int consumeGhostLocalRows(String sessionId, java.util.Collection<String> toolCallIds) {
-        if (toolCallIds == null || toolCallIds.isEmpty()) {
+        // LIKE 通配符转义（id 含 %/_ 时避免扩大匹配面）；"null" 字符串（锚点缺 id 的
+        // String.valueOf 产物）一并过滤
+        var ids = toolCallIds == null ? java.util.List.<String>of()
+            : toolCallIds.stream()
+                .filter(id -> id != null && !id.isBlank() && !"null".equals(id))
+                .map(id -> id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+                .toList();
+        if (ids.isEmpty()) {
             return 0;
         }
         var likePredicates = new StringBuilder();
-        for (int i = 0; i < toolCallIds.size(); i++) {
+        for (int i = 0; i < ids.size(); i++) {
             likePredicates.append(i == 0 ? "" : " OR ").append("tool_calls_json LIKE ?");
         }
         try (var conn = dataSource.getConnection();
@@ -358,7 +365,7 @@ public class ConfirmContextStore {
             for (int k = 0; k < 5; k++) {
                 stmt.setString(i++, sessionId);
             }
-            for (var id : toolCallIds) {
+            for (var id : ids) {
                 stmt.setString(i++, "%\"id\":\"" + id + "\"%");
             }
             return stmt.executeUpdate();
