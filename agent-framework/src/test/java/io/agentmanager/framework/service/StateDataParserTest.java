@@ -70,9 +70,11 @@ class StateDataParserTest {
         var arr = StateDataParser.findMessagesArray(STATE_DATA);
         var list = StateDataParser.toRoleContentList(arr);
         assertEquals(2, list.size());
-        // msg_id 透传（history 归档双源合并按 msg_id 对齐归档行，docs/session-history-archive-design.md）
+        // msg_id 透传（history 归档双源合并按 msg_id 对齐归档行，docs/session-history-archive-design.md）；
+        // user 消息不写 blocks（文本与工具块交错只发生在 assistant 侧）
         assertEquals(Map.of("role", "user", "content", "hello", "msg_id", "m1"), list.get(0));
-        assertEquals(Map.of("role", "assistant", "content", "hi", "msg_id", "m2"), list.get(1));
+        assertEquals(Map.of("role", "assistant", "content", "hi", "msg_id", "m2",
+            "blocks", List.of(Map.of("type", "text", "text", "hi"))), list.get(1));
     }
 
     @Test
@@ -100,6 +102,77 @@ class StateDataParserTest {
     @Test
     void toRoleContentListShouldHandleNull() {
         assertTrue(StateDataParser.toRoleContentList(null).isEmpty());
+    }
+
+    // ========== blocks 有序块序列（Debug Console 按真实发生顺序渲染的依据） ==========
+
+    @Test
+    void blocksShouldFollowContentBlockOrder() {
+        // 模型一轮：思考 → 开场白 → 工具 → 工具 → 结论。content 字符串会把两个文本块拼在一起，
+        // 块序只有 blocks 保留——前端据此把开场白留在工具步骤上方
+        var stateData = """
+            {"context":[{"role":"assistant","content":[
+                {"type":"thinking","thinking":"先探测环境"},
+                {"type":"text","text":"好的，我来连接远程机器。"},
+                {"type":"tool_use","id":"call_a","name":"execute","input":{"command":"ssh a"}},
+                {"type":"tool_use","id":"call_b","name":"execute","input":{"command":"ssh b"}},
+                {"type":"text","text":"已配置完成。"}
+            ]}]}
+            """;
+        var list = StateDataParser.toRoleContentList(StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, list.size());
+        @SuppressWarnings("unchecked")
+        var blocks = (java.util.List<Map<String, Object>>) list.get(0).get("blocks");
+        assertNotNull(blocks);
+        assertEquals(4, blocks.size(), "thinking 块不上屏，不占位");
+        assertEquals("text", blocks.get(0).get("type"));
+        assertEquals("好的，我来连接远程机器。", blocks.get(0).get("text"));
+        assertEquals("tool", blocks.get(1).get("type"));
+        assertEquals("call_a", blocks.get(1).get("id"));
+        assertEquals("execute", blocks.get(1).get("name"));
+        assertEquals("call_b", blocks.get(2).get("id"));
+        assertEquals("已配置完成。", blocks.get(3).get("text"));
+        // 既有键不受影响：content 仍是拼接后的全文，tool_calls 仍是完整列表
+        assertEquals("好的，我来连接远程机器。\n已配置完成。", list.get(0).get("content"));
+        @SuppressWarnings("unchecked")
+        var calls = (java.util.List<Map<String, Object>>) list.get(0).get("tool_calls");
+        assertEquals(2, calls.size());
+        assertTrue(calls.get(0).get("input").toString().contains("ssh a"));
+    }
+
+    @Test
+    void blocksShouldBeOmittedWhenContentIsNotAnArray() {
+        // 旧格式字符串 content：没有块序可给，宁可不写该键，让前端退回「工具组在上」旧布局
+        var list = StateDataParser.toRoleContentList(StateDataParser.findMessagesArray(
+            "{\"context\":[{\"role\":\"assistant\",\"content\":\"纯文本回复\"}]}"));
+
+        assertEquals(1, list.size());
+        assertFalse(list.get(0).containsKey("blocks"));
+        assertEquals("纯文本回复", list.get(0).get("content"));
+    }
+
+    @Test
+    void blocksShouldSkipBlankTextAndToolResultBlocks() {
+        // 空文本块不占位；tool_result 位于后续 TOOL 消息，结果仍由 tool_calls 承载
+        var list = StateDataParser.toRoleContentList(StateDataParser.findMessagesArray("""
+            {"context":[
+              {"role":"ASSISTANT","content":[
+                {"type":"text","text":"   "},
+                {"type":"tool_use","id":"call_a","name":"execute","input":{}}]},
+              {"role":"TOOL","content":[
+                {"type":"tool_result","id":"call_a","output":[{"type":"text","text":"ok"}],"state":"success"}]}
+            ]}
+            """));
+
+        @SuppressWarnings("unchecked")
+        var blocks = (java.util.List<Map<String, Object>>) list.get(0).get("blocks");
+        assertEquals(1, blocks.size());
+        assertEquals("tool", blocks.get(0).get("type"));
+        @SuppressWarnings("unchecked")
+        var calls = (java.util.List<Map<String, Object>>) list.get(0).get("tool_calls");
+        assertEquals("success", calls.get(0).get("state"));
+        assertEquals("ok", calls.get(0).get("output"));
     }
 
     @Test
