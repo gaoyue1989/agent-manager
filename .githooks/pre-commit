@@ -1,0 +1,42 @@
+#!/bin/sh
+# pre-commit 密钥扫描 —— 提交前用 gitleaks 扫描暂存区，命中则阻断提交。
+#
+# 安装（一次性，见 Makefile install-hooks）：
+#     git config core.hooksPath .githooks
+#
+# 依赖：gitleaks >= 8.x
+#     macOS : brew install gitleaks
+#     Linux : 从 https://github.com/gitleaks/gitleaks/releases 下载二进制后 install 到 PATH
+#
+# 紧急绕过（会打印警告，请事后补扫描）：
+#     SKIP_SECRET_SCAN=1 git commit -m "..."
+
+set -e
+
+if [ "${SKIP_SECRET_SCAN}" = "1" ]; then
+  echo "⚠️  [secret-scan] 已通过 SKIP_SECRET_SCAN=1 跳过密钥扫描 —— 请自行确认本次提交不含凭据。" >&2
+  exit 0
+fi
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "✗ [secret-scan] 未找到 gitleaks，已阻断提交。" >&2
+  echo "  安装后重试：brew install gitleaks" >&2
+  echo "  或从 https://github.com/gitleaks/gitleaks/releases 下载安装" >&2
+  echo "  确需跳过：SKIP_SECRET_SCAN=1 git commit -m \"...\"" >&2
+  exit 1
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+config="$repo_root/.gitleaks.toml"
+
+if ! gitleaks protect --staged --redact --verbose --no-banner --exit-code 1 ${config:+--config "$config"} 2>&1; then
+  echo "" >&2
+  echo "✗ [secret-scan] 暂存区中发现疑似密钥，提交已阻断。" >&2
+  echo "  处理方式：把该密钥移入 .env.secrets 等不入库文件，改用 \${VAR} 引用。" >&2
+  echo "  确认是测试假密钥：登记进 .gitleaks.toml 的 [[allowlists]]，并写明用途。" >&2
+  echo "  若为真实凭据：请先到服务商后台吊销并轮换，历史已入库的还需重写。" >&2
+  echo "  确需跳过：SKIP_SECRET_SCAN=1 git commit -m \"...\"" >&2
+  exit 1
+fi
+
+exit 0

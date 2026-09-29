@@ -211,6 +211,19 @@ lint-backend:
 lint-frontend:
 	cd frontend && npm run lint
 
+# === Git hooks（pre-commit 密钥扫描） ===
+# 一次性安装，启用版本化的 .githooks/pre-commit（依赖 gitleaks）
+install-hooks:
+	@command -v gitleaks >/dev/null 2>&1 || { \
+		echo "错误：未找到 gitleaks，请先安装（brew install gitleaks）"; exit 1; }
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/pre-commit
+	@echo "✓ 已启用 pre-commit 密钥扫描（.githooks/pre-commit）"
+
+# 全量扫描工作区密钥（含未提交改动），排查用；不限于暂存区
+secret-scan:
+	gitleaks dir . --redact --exit-code 1
+
 # === 清理 ===
 clean:
 	cd backend && rm -rf bin/
