@@ -1,6 +1,6 @@
 package io.agentmanager.framework.service;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -61,7 +61,7 @@ class McpConnectionWatchdogTest {
         when(oafConfigHolder.get()).thenReturn(oafWithServer("biz-mcp"));
 
         watchdog = new McpConnectionWatchdog(registrar, resourceProxy, agentRuntimeService,
-            oafConfigHolder, oafReloadService, 30, 5);
+            oafConfigHolder, oafReloadService, new McpHealthTiming(30, 5));
     }
 
     private OafConfig oafWithServer(String server) {
@@ -154,12 +154,23 @@ class McpConnectionWatchdogTest {
     @Test
     void disabledIntervalShouldSkipProbe() {
         var disabled = new McpConnectionWatchdog(registrar, resourceProxy, agentRuntimeService,
-            oafConfigHolder, oafReloadService, 0, 5);
+            oafConfigHolder, oafReloadService, new McpHealthTiming(0, 5));
 
         disabled.probeAll();
 
         verify(registrar, never()).getRegisteredWrapper(anyString());
         // 禁用语义下调度兜底周期为 1h（不产生 0/negative 的调度异常）
-        assertEquals(3_600_000L, disabled.probeFixedDelayMs());
+        var timing = new McpHealthTiming(0, 5);
+        assertEquals(3_600_000L, timing.probeFixedDelayMs());
+        assertFalse(timing.enabled());
+    }
+
+    /** 调度参数 bean：正常周期换算 ms（独立 bean 的原因见 McpHealthTiming javadoc） */
+    @Test
+    void timingShouldConvertSecondsToMillis() {
+        var timing = new McpHealthTiming(30, 5);
+        assertEquals(30_000L, timing.probeFixedDelayMs());
+        assertTrue(timing.enabled());
+        assertEquals(5, timing.probeTimeoutSeconds());
     }
 }

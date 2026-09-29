@@ -8,7 +8,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -28,29 +27,19 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
  * OAF reload 进行中整体让位（换连语义同源，避免双 swap 竞态）。全部动作 fail-soft：
  * 单 server 失败只告警，下一周期重试，不影响其他 server 与主流程。
  *
- * <p>配置（env 直传，不经 AgentManagerProperties——兼容构造器按位稳定不扩参）：
- * {@code AGENT_MCP_HEALTH_INTERVAL_SECONDS} 探测周期（默认 30，≤0 关闭）、
- * {@code AGENT_MCP_HEALTH_TIMEOUT_SECONDS} 单次探测超时（默认 5）。启动延迟固定 60s，
- * 给启动期 MCP 注册留出时间。
+ * <p>调度参数在 {@link McpHealthTiming}（独立 bean——@Scheduled SpEL 不能自引用宿主）。
  */
 @Service
 public class McpConnectionWatchdog {
 
     private static final Logger log = LoggerFactory.getLogger(McpConnectionWatchdog.class);
 
-    /** 禁用语义下的兜底周期（1h；配合 probeAll 入口的显式短路，避免 0/negative 触发调度异常） */
-    private static final long DISABLED_FIXED_DELAY_MS = 3_600_000L;
-    private static final long INITIAL_DELAY_MS = 60_000L;
-
     private final McpToolRegistrar mcpToolRegistrar;
     private final McpResourceProxy mcpResourceProxy;
     private final AgentRuntimeService agentRuntimeService;
     private final OafConfigHolder oafConfigHolder;
     private final OafReloadService oafReloadService;
-
-    /** 探测周期秒（≤0 关闭） */
-    private final long intervalSeconds;
-    private final long probeTimeoutSeconds;
+    private final McpHealthTiming timing;
 
     /** per-server 重建在途标记（防同 server 重入；fixedDelay 已保证周期间不重叠） */
     private final Map<String, AtomicBoolean> rebuilding = new ConcurrentHashMap<>();
@@ -64,38 +53,24 @@ public class McpConnectionWatchdog {
             AgentRuntimeService agentRuntimeService,
             OafConfigHolder oafConfigHolder,
             OafReloadService oafReloadService,
-            @Value("${agent.mcp.health-interval-seconds:${AGENT_MCP_HEALTH_INTERVAL_SECONDS:30}}")
-            long intervalSeconds,
-            @Value("${agent.mcp.health-timeout-seconds:${AGENT_MCP_HEALTH_TIMEOUT_SECONDS:5}}")
-            long probeTimeoutSeconds) {
+            McpHealthTiming timing) {
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.mcpResourceProxy = mcpResourceProxy;
         this.agentRuntimeService = agentRuntimeService;
         this.oafConfigHolder = oafConfigHolder;
         this.oafReloadService = oafReloadService;
-        this.intervalSeconds = intervalSeconds;
-        this.probeTimeoutSeconds = probeTimeoutSeconds;
+        this.timing = timing;
     }
 
     /** 周期探测入口（Spring 调度）。disabled 或 OAF reload 进行中整体让位。 */
-    @Scheduled(fixedDelayString = "#{@mcpConnectionWatchdog.probeFixedDelayMs}",
-        initialDelayString = "#{@mcpConnectionWatchdog.probeInitialDelayMs}")
+    @Scheduled(fixedDelayString = "#{@mcpHealthTiming.probeFixedDelayMs}", initialDelayString = "60000")
     public void probeAll() {
-        if (intervalSeconds <= 0 || oafReloadService.isReloadInProgress()) {
+        if (!timing.enabled() || oafReloadService.isReloadInProgress()) {
             return;
         }
         for (var server : mcpToolRegistrar.getRegisteredServerNames()) {
             probeOne(server);
         }
-    }
-
-    /** 供 @Scheduled SpEL 引用的周期（ms）；禁用给 1h 兜底 + 入口短路双保险 */
-    public long probeFixedDelayMs() {
-        return intervalSeconds <= 0 ? DISABLED_FIXED_DELAY_MS : intervalSeconds * 1000L;
-    }
-
-    public long probeInitialDelayMs() {
-        return INITIAL_DELAY_MS;
     }
 
     /** 单 server 探测 + 失联重建（测试可直接调用） */
@@ -127,7 +102,7 @@ public class McpConnectionWatchdog {
     private boolean probe(McpClientWrapper wrapper) {
         try {
             var tools = wrapper.listTools()
-                .block(java.time.Duration.ofSeconds(Math.max(1, probeTimeoutSeconds)));
+                .block(java.time.Duration.ofSeconds(Math.max(1, timing.probeTimeoutSeconds())));
             return tools != null;
         } catch (Exception e) {
             log.info("[MCP-watchdog] probe failed ({}): {}", wrapper.getName(), e.getMessage());
