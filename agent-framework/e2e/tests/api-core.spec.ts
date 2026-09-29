@@ -931,12 +931,13 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
       const rows = await (await fetch(`${FW_BASE}/threads?userId=${encodeURIComponent(uid)}`)).json() as Array<Record<string, unknown>>;
       expect(rows.find(x => x.session_id === sidShared), `共享桶 ${uid} 不得回填（V6:51）`).toBeUndefined();
     }
-    // 升级路径契约钉：历史表恰为 baseline(5)+V6——baseline-version 被抬高会在此红（V6 静默跳过形态）
+    // 升级路径契约钉：历史表恰为 baseline(5)+V6+V7——baseline-version 被抬高会在此红（V6 静默跳过形态）；
+    // 新增迁移（V8+）时同步扩展本期望列表，且新迁移必须像 V6/V7 一样幂等（本场景会在已应用库上重放）
     const conn = await openDb();
     try {
       const [hist] = await conn.query('SELECT version, success FROM flyway_schema_history ORDER BY installed_rank');
       const rows = hist as Array<{ version: string; success: number }>;
-      expect(rows.map(x => x.version)).toEqual(['5', '6']);
+      expect(rows.map(x => x.version)).toEqual(['5', '6', '7']);
       expect(rows.every(x => x.success === 1), '迁移历史必须全 success').toBe(true);
     } finally { await conn.end(); }
   });
