@@ -120,6 +120,18 @@ public class AgentProtocolConfig {
         }
 
         /**
+         * deny_rules 自实现第一环（设计 F16/§6.1：SDK 扩展不消费 context.deny_rules）：
+         * 经 SDK 自动配置收集进 AgentProtocolTaskStore，每次协议任务构建 RuntimeContext 时
+         * 把父级下传的 DENY 规则挂上任务属性，由常驻的 ProtocolDenyRulesMiddleware 拦截执行。
+         */
+        @Bean
+        public io.agentscope.extensions.agentprotocol.RuntimeContextCustomizer
+                protocolDenyRulesContextCustomizer() {
+            log.info("Agent Protocol enabled: RuntimeContextCustomizer -> context.deny_rules 动态 DENY");
+            return new io.agentmanager.framework.service.protocol.ProtocolDenyRulesContextCustomizer();
+        }
+
+        /**
          * TaskRepository bean override：TaskRecord 落 agent_fs（经本服务 HarnessAgent 的
          * WorkspaceManager → DistributedStore）。捕获启动实例的 WorkspaceManager 是安全的：
          * reload 不关闭旧 WorkspaceManager（仅收尾 MCP 连接），且新旧实例指向同一
