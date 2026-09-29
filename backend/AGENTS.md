@@ -41,6 +41,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 
 - 平台保留键：AGENT_CONFIG_DIR / AGENT_WORKSPACE_DIR / SERVER_HOST / SERVER_PORT（用户 env 出现即 400；HOST_NAME 为日志注入保留键）
 - env 全量覆盖语义（PATCH /services/:id/env），上限 64 键 × 32KB
+- A2A 幂等 Job 薄封装（travel-fulfillment §12）：`POST /services/:id/jobs`（header `Idempotency-Key`，回落 body 字段）→ 同 (service, key) 稳定 taskId 锚点（`a2a_jobs` 表联合唯一索引先预留后发送）；`GET /services/:id/jobs/:key` 查映射。仅 running 服务可提交
 - 服务状态机：created→deploying→running|register_failed|deploy_failed；stopped/error 可再 publish
 - WaitReady 要求完整滚动更新完成（generation 对齐 + updatedReplicas 达标 + unavailable=0），防止注册打到旧 Pod
 - 业务 Ingress 注入 proxy-read/send-timeout=3600（A2A blocking 长对话必需）
@@ -50,7 +51,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 
 **敏感键一律走 K8s Secret，不进 ConfigMap/env_json；平台默认配置仅作为发布/编辑 env 时的表单默认填入，不经运行时注入、不影响任何已发布服务**。设计见 [../docs/design/platform-default-config-secret-design.md](../docs/design/platform-default-config-secret-design.md)（R3 修订为最终形态）。
 
-- **字段模板**（`internal/service/platformconfig/template.go`，全仓唯一字段定义源）：分组 llm/mysql/redis/sandbox；`Sensitive` 标记驱动服务 env 路由分类与页面掩码。`SANDBOX_ENABLED` 明确排除（保护 OAF 包 frontmatter 三层裁决）
+- **字段模板**（`internal/service/platformconfig/template.go`，全仓唯一字段定义源）：分组 llm/mysql/redis/sandbox/protocol；`Sensitive` 标记驱动服务 env 路由分类与页面掩码。`SANDBOX_ENABLED` 明确排除（保护 OAF 包 frontmatter 三层裁决）；`AGENT_PROTOCOL_ENABLED` 等按服务开关同样排除（防默认启用扩大 /tasks 暴露面），协议敏感键 `AGENT_PROTOCOL_AUTH_TOKEN`/`AGENT_REMOTE_HEADERS_JSON` 路由 `{name}-env-secret`
 - **envFrom 两源**：容器 envFrom = 服务 Secret `{name}-env-secret`（敏感，在前）+ 服务 CM `{name}-env`（非敏感，在后可覆盖）；无平台级注入
 - **默认填入语义（R3）**：平台默认配置只存 DB（`platform_config` 表），`GET /platform-config` 展示视图敏感键掩码，`GET /platform-config/defaults` 返回含敏感明文的平面键值表专供表单预填；发布向导预填 defaults，详情页「填入平台默认」补缺失键（显式保存才生效）；改默认配置不影响存量服务
 - **服务 env 路由**（`internal/service/envroute.go`）：发布/PATCH env 中命中模板 Sensitive 或 `secretKeys` 的键路由进 `services.env_secret_json` + 服务 Secret，绝不写 env_json/CM；敏感键三态——非空=设置、空串=删除、缺失=sticky 保持不变；旧 env_json 中的存量敏感键在任意写路径自动迁入 Secret（防丢失规则）

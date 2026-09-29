@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -48,6 +50,14 @@ func main() {
 		log.Fatalf("ingress template: %v", err)
 	}
 
+	// A2A 幂等 Job 发送超时（AGENT_A2A_SEND_TIMEOUT_SECONDS 秒；≤0 落默认 300s）
+	a2aSendTimeout := 300 * time.Second
+	if v := os.Getenv("AGENT_A2A_SEND_TIMEOUT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			a2aSendTimeout = time.Duration(n) * time.Second
+		}
+	}
+
 	core := service.NewCore(db, fs, kc, service.ConfigView{
 		Namespace:           cfg.Namespace,
 		IngressClass:        cfg.IngressClass,
@@ -81,6 +91,7 @@ func main() {
 	if err := r.Run(fmt.Sprintf(":%d", cfg.ServerPort)); err != nil {
 		log.Fatal(err)
 	}
+	core.A2ASendTimeout = a2aSendTimeout
 }
 
 func registerMCP(r *gin.Engine, mcpHandler http.Handler, authToken string) {

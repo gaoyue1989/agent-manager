@@ -204,6 +204,38 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			}
 			OK(c, svc)
 		})
+		// A2A message/send 幂等 Job 薄封装（travel-fulfillment §8/§12）：Idempotency-Key
+		// 头（回落 body 字段）→ 同键稳定 taskId 锚点；GET 查映射
+		sv.POST("/:id/jobs", func(c *gin.Context) {
+			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+			var body struct {
+				Text           string `json:"text"`
+				IdempotencyKey string `json:"idempotencyKey"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			key := c.GetHeader("Idempotency-Key")
+			if key == "" {
+				key = body.IdempotencyKey
+			}
+			job, idempotent, err := core.SubmitJob(uint(id), key, body.Text)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, gin.H{"job": job, "idempotent": idempotent})
+		})
+		sv.GET("/:id/jobs/:key", func(c *gin.Context) {
+			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+			job, err := core.GetJob(uint(id), c.Param("key"))
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, job)
+		})
 		action := func(name string, fn func(*service.Core, uint) (interface{}, error)) {
 			sv.POST("/:id/"+name, func(c *gin.Context) {
 				id, _ := strconv.ParseUint(c.Param("id"), 10, 64)

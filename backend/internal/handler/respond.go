@@ -35,7 +35,11 @@ func mapError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrChecksumMismatch):
 		// 乐观锁冲突：基础包已被并发修改
 		Fail(c, http.StatusConflict, err.Error())
-	case errors.Is(err, service.ErrImageNotAllowed),
+	case errors.Is(err, service.ErrJobInFlight):
+		// 同键在途/结果未知：客户端持同键重试直至收敛
+		Fail(c, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrJobInvalid),
+		errors.Is(err, service.ErrImageNotAllowed),
 		errors.Is(err, service.ErrPackageInUse),
 		errors.Is(err, service.ErrBadState),
 		errors.Is(err, service.ErrNoEffectiveChanges),

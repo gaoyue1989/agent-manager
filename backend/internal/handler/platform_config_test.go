@@ -18,8 +18,8 @@ func TestPlatformConfigAPI(t *testing.T) {
 	}
 	data := out["data"].(map[string]interface{})
 	groups := data["groups"].([]interface{})
-	if len(groups) != 4 {
-		t.Fatalf("want 4 groups, got %d", len(groups))
+	if len(groups) != 5 {
+		t.Fatalf("want 5 groups, got %d", len(groups))
 	}
 
 	// PUT：敏感 + 非敏感各一

@@ -69,6 +69,19 @@ var template = []Group{
 			{EnvKey: "SANDBOX_CPU_COUNT", Label: "CPU 核数", Placeholder: "1"},
 		},
 	},
+	{
+		// Agent Protocol（远程子 agent）敏感键：只收敏感两项入模板驱动 Secret 路由
+		//（travel-fulfillment 设计 §8 平台端）。AGENT_PROTOCOL_ENABLED/TASK_STORE/
+		// TASK_RETENTION_DAYS 是按服务启用的开关与存储选择，不进平台默认配置——
+		// 否则发布表单会给全部服务预填"默认启用协议"，扩大 /tasks 暴露面。
+		Name: "protocol", Title: "Agent Protocol（远程子 agent）",
+		Fields: []Field{
+			{EnvKey: "AGENT_PROTOCOL_AUTH_TOKEN", Label: "协议 Token", Sensitive: true,
+				Placeholder: "启用协议的服务 /tasks 认证令牌（lead/member 需同值）"},
+			{EnvKey: "AGENT_REMOTE_HEADERS_JSON", Label: "远程请求头 JSON", Sensitive: true, Multiline: true,
+				Placeholder: `{"X-Agent-Protocol-Token":"..."}`},
+		},
+	},
 }
 
 // Template 返回全部分组（只读遍历用，调用方不得修改）。
