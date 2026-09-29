@@ -190,12 +190,11 @@ public class HarnessAgentFactory {
                 .middleware(new io.agentmanager.framework.mcp.McpUserContextMiddleware(sessionUserStore))
                 // 远程子 agent 身份规范化（F10，travel-fulfillment §8 lead-4）：Channel 链路
                 // ctx.userId 是网关 peer，agent_spawn 组装 RemoteSubmitContext 直取
-                // ctx.getUserId()——须在工具执行前经 session_user 反查写回规范 userId
-                // （RuntimeContext.userId 无 setter，中间件内反射写回、失败 fail-soft）。
-                // 只写 userId 不写 sessionId（设计 §5.6）。置于 McpUserContextMiddleware
-                // 之后：后者按 peer 直接反查写入 McpMeta 的生产行为保持不变；本中间件
-                // 解析复用 SessionKeyResolver 的 turn 级 memo（外层追踪中间件已按原始
-                // ctx 计算完毕），写回只影响其后读取 ctx.getUserId() 的消费方（agent_spawn）
+                // ctx.getUserId()——仅在纯 spawn 轮次的 acting 作用域内经 session_user
+                // 反查写回规范 userId、轮次终止即恢复（PR #62 门禁教训：onAgent 全程改写
+                // 会破坏 SDK HITL 挂起/恢复的 ctx 键一致性）。只写 userId 不写 sessionId
+                // （设计 §5.6）。置于 McpUserContextMiddleware 之后：后者按 peer 直接反查
+                // 写入 McpMeta 的生产行为保持不变
                 .middleware(new RemoteUserIdMiddleware(sessionUserStore))
                 // agent_spawn 结果抓取（travel-fulfillment §5.5）：RemoteConfirmBridge 在途任务
                 // 登记的唯一入口——解析 agent_spawn 结果文本的 task_id 连同入参交桥登记

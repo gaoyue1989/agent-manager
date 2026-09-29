@@ -5,18 +5,22 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 
 import io.agentscope.core.agent.RuntimeContext;
-import io.agentscope.core.middleware.AgentInput;
+import io.agentscope.core.middleware.ActingInput;
+import io.agentscope.core.message.ToolUseBlock;
 import reactor.core.publisher.Flux;
 
 /**
  * RemoteUserIdMiddleware 单测（travel-fulfillment §8 lead-4，F10）：
- * Channel 链路 peer → session_user 反查规范 userId 反射写回；sessionId 不动（§5.6）；
- * A2A/直调/未登记链路原值直通。
+ * 仅纯 agent_spawn 轮次在 acting 作用域内写回规范 userId、Flux 终止即恢复原值
+ * （PR #62 门禁教训：全程改写破坏 SDK HITL 挂起/恢复的 ctx 键一致性）；
+ * sessionId 不动（§5.6）；A2A/直调/未登记链路与混编/非 spawn 轮次原值直通。
  */
 class RemoteUserIdMiddlewareTest {
 
@@ -30,35 +34,74 @@ class RemoteUserIdMiddlewareTest {
         return store;
     }
 
-    /** Channel 链路形态：sessionId=网关 gw-hash、userId=peer（=前端 sid，session_user 已登记） */
+    private static ToolUseBlock call(String name) {
+        return ToolUseBlock.builder().id("tc-" + name).name(name).input(Map.of("k", "v")).build();
+    }
+
+    /** Channel 链路形态：纯 spawn 轮次内 userId 写回为规范用户，轮次终止后恢复原值 */
     @Test
-    void channelPeerShouldBeRewrittenToCanonicalUser() {
+    void pureSpawnRoundShouldRewriteDuringExecutionAndRestoreAfter() {
         var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
         var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+        var seenDuringExecution = new AtomicReference<String>();
         var nextCalled = new AtomicBoolean(false);
 
-        mw.onAgent(null, ctx, new AgentInput(List.of()),
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("agent_spawn"))),
                 input -> {
                     nextCalled.set(true);
+                    seenDuringExecution.set(ctx.getUserId());
                     return Flux.empty();
                 })
             .blockLast();
 
         assertTrue(nextCalled.get(), "下游链路应正常执行");
-        assertEquals("u-canonical-42", ctx.getUserId(), "agent_spawn 直取的 ctx.userId 应为规范用户");
+        assertEquals("u-canonical-42", seenDuringExecution.get(),
+            "agent_spawn 执行期 ctx.userId 应为规范用户（F10）");
+        assertEquals("sess-abc", ctx.getUserId(), "轮次终止后应恢复原值（HITL 键一致性）");
         assertEquals("gw-hash", ctx.getSessionId(), "只写 userId 不写 sessionId（设计 §5.6）");
+    }
+
+    /** HITL ask 轮次（非 spawn 工具）：完全不触碰 ctx——挂起/恢复路径身份不被改写 */
+    @Test
+    void nonSpawnRoundMustNotTouchContext() {
+        var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
+        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("echo_query"))),
+                input -> Flux.empty())
+            .blockLast();
+
+        assertEquals("sess-abc", ctx.getUserId(), "非 spawn 轮次不得改写 ctx");
+    }
+
+    /** 混编轮次（spawn 与其他工具同轮）：保守跳过，不改写 */
+    @Test
+    void mixedRoundShouldBeSkipped() {
+        var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
+        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("agent_spawn"), call("echo_query"))),
+                input -> Flux.empty())
+            .blockLast();
+
+        assertEquals("sess-abc", ctx.getUserId(), "混编轮次保守跳过");
     }
 
     /** A2A 链路形态：userId 已是真实用户（反查未命中回落原值），不应改写 */
     @Test
     void realUserShouldStayUnchanged() {
         var store = mock(SessionUserStore.class);
-        when(store.findUserIdBySession("caller-sid")).thenReturn(null);
         when(store.findUserIdBySession("u-real")).thenReturn(null);
         var mw = middleware(store);
         var ctx = RuntimeContext.builder().sessionId("caller-sid").userId("u-real").build();
 
-        mw.onAgent(null, ctx, new AgentInput(List.of()), input -> Flux.empty()).blockLast();
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("agent_spawn"))),
+                input -> Flux.empty())
+            .blockLast();
 
         assertEquals("u-real", ctx.getUserId());
     }
@@ -71,7 +114,8 @@ class RemoteUserIdMiddlewareTest {
         var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("peer-unknown").build();
         var nextCalled = new AtomicBoolean(false);
 
-        mw.onAgent(null, ctx, new AgentInput(List.of()),
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("agent_spawn"))),
                 input -> {
                     nextCalled.set(true);
                     return Flux.empty();
@@ -91,7 +135,8 @@ class RemoteUserIdMiddlewareTest {
         var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
         var nextCalled = new AtomicBoolean(false);
 
-        mw.onAgent(null, ctx, new AgentInput(List.of()),
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("agent_spawn"))),
                 input -> {
                     nextCalled.set(true);
                     return Flux.empty();
@@ -107,7 +152,8 @@ class RemoteUserIdMiddlewareTest {
         var mw = middleware(storeMapping("sess-abc", "u-42"));
         var nextCalled = new AtomicBoolean(false);
 
-        mw.onAgent(null, null, new AgentInput(List.of()),
+        mw.onActing(null, null,
+                new ActingInput(List.of(call("agent_spawn"))),
                 input -> {
                     nextCalled.set(true);
                     return Flux.empty();
@@ -122,8 +168,22 @@ class RemoteUserIdMiddlewareTest {
         var mw = middleware(storeMapping("sess-abc", "u-42"));
         var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("").build();
 
-        mw.onAgent(null, ctx, new AgentInput(List.of()), input -> Flux.empty()).blockLast();
+        mw.onActing(null, ctx,
+                new ActingInput(List.of(call("agent_spawn"))),
+                input -> Flux.empty())
+            .blockLast();
 
         assertEquals("", ctx.getUserId());
+    }
+
+    /** 工具调用为空的非 acting 轮次：直通 */
+    @Test
+    void emptyToolCallsShouldPassThrough() {
+        var mw = middleware(storeMapping("sess-abc", "u-canonical-42"));
+        var ctx = RuntimeContext.builder().sessionId("gw-hash").userId("sess-abc").build();
+
+        mw.onActing(null, ctx, new ActingInput(List.of()), input -> Flux.empty()).blockLast();
+
+        assertEquals("sess-abc", ctx.getUserId());
     }
 }
