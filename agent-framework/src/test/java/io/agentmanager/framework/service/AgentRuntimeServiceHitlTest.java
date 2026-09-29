@@ -574,4 +574,45 @@ class AgentRuntimeServiceHitlTest {
 
         assertFalse(service.hasPendingConfirm(SID));
     }
+
+    // ---------- findPendingConfirm（status 端点/观察者 probe）：FIFO 头 + 远程行透出 ----------
+
+    /** 远程行 → additive 透出 confirm_key/remote_task（Debug Console 刷新恢复依赖） */
+    @Test
+    void findPendingConfirmShouldExposeRemoteRowFields() {
+        var remoteTask = Map.<String, Object>of("service", "order-agent", "task_id", "task-9");
+        when(confirmContextStore.findHeadPending("acme-test-agent__t1")).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "acme-test-agent__t1", "task:task-9", "reply-9",
+                List.of(toolUseBlock("call-9")), Instant.now(), null, null, remoteTask)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertEquals("task:task-9", payload.get("confirm_key"));
+        assertEquals(remoteTask, payload.get("remote_task"));
+        assertEquals("reply-9", payload.get("reply_id"));
+    }
+
+    /** 本地行 → 不带 confirm_key/remote_task（前端既有字段零改动） */
+    @Test
+    void findPendingConfirmShouldNotExposeRemoteFieldsForLocalRow() {
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(toolUseBlock("call-1")), Instant.now(), null, null)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertFalse(payload.containsKey("confirm_key"));
+        assertFalse(payload.containsKey("remote_task"));
+    }
+
+    /** 无待确认行 → null（status 据此给 idle/completed 而非 waiting_confirm） */
+    @Test
+    void findPendingConfirmShouldReturnNullWhenNoPendingRow() {
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(java.util.Optional.empty());
+
+        assertNull(service.findPendingConfirm(SID));
+    }
 }

@@ -833,15 +833,30 @@ public class AgentRuntimeService {
         confirmContextStore.delete(makeThreadId(sessionId));
     }
 
-    /** 查询待确认上下文（status 端点用，返回前端 pendingConfirm 词表或 null） */
+    /**
+     * 查询待确认上下文（status 端点/观察者 probe 用，返回前端 pendingConfirm 词表或 null）。
+     *
+     * <p>取 {@link ConfirmContextStore#findHeadPending}（任意 confirm_key 的 FIFO 最早未消费行，
+     * 与 history 的 pendingConfirm 同口径）：远程行（Bridge 落卡）不在父 state，若只查 local
+     * 会导致 Debug Console 刷新恢复拿不到待确认卡，且 tail 观察者 probe 把远程挂起误判为
+     * interrupted（本应与 HITL 暂停同为"可正常关流"）。远程行 additive 附
+     * {@code confirm_key}/{@code remote_task}，确认端点凭 confirmKey 路由到远程任务。
+     *
+     * <p>注意与 {@link #hasPendingConfirm}（对话入口预检）的语义分工：后者只认 local——
+     * 远程挂起时父 turn 已结束，用户新消息照常进入新 turn（Bridge 唤醒走抢租约重试）。
+     */
     public Map<String, Object> findPendingConfirm(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);
-        return confirmContextStore.findPending(fullThreadId)
+        return confirmContextStore.findHeadPending(fullThreadId)
             .map(p -> {
                 var m = new LinkedHashMap<String, Object>();
                 m.put("reply_id", p.replyId());
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
+                if (p.isRemote()) {
+                    m.put("confirm_key", p.confirmKey());
+                    m.put("remote_task", p.remoteTask());
+                }
                 return Map.<String, Object>copyOf(m);
             })
             .orElse(null);
