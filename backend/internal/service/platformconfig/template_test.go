@@ -4,11 +4,13 @@ import (
 	"testing"
 )
 
-// 模板敏感键集合（设计 §3.2 "Secret 只需要"的集合）。
+// 模板敏感键集合（设计 §3.2 "Secret 只需要"的集合 + travel-fulfillment §8 平台端
+// 协议敏感键）。
 func TestSensitiveKeys(t *testing.T) {
 	want := map[string]bool{
 		"LLM_API_KEY": true, "CHECKPOINT_PASSWORD": true,
 		"AGENT_REDIS_URL": true, "OPENSANDBOX_API_KEY": true,
+		"AGENT_PROTOCOL_AUTH_TOKEN": true, "AGENT_REMOTE_HEADERS_JSON": true,
 	}
 	got := SensitiveKeys()
 	if len(got) != len(want) {
@@ -32,6 +34,16 @@ func TestSensitiveKeys(t *testing.T) {
 func TestSandboxEnabledExcluded(t *testing.T) {
 	if KnownKeys()["SANDBOX_ENABLED"] {
 		t.Fatal("SANDBOX_ENABLED must not enter the template")
+	}
+}
+
+// 协议启用/存储开关按服务在发布 env 声明，不进平台默认配置（默认预填会给全部
+// 服务开协议、扩大 /tasks 暴露面）；模板只收敏感两项（见 template.go protocol 组）。
+func TestProtocolSwitchesExcluded(t *testing.T) {
+	for _, k := range []string{"AGENT_PROTOCOL_ENABLED", "AGENT_PROTOCOL_TASK_STORE", "AGENT_PROTOCOL_TASK_RETENTION_DAYS"} {
+		if KnownKeys()[k] {
+			t.Errorf("%s must not enter the template", k)
+		}
 	}
 }
 
