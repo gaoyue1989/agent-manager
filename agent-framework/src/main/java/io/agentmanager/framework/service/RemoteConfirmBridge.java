@@ -117,6 +117,9 @@ public class RemoteConfirmBridge {
     /** 传输类错误连续计数（sessionId|taskId → 次数；awaiting/终态/放弃时清除） */
     private final ConcurrentHashMap<String, Integer> transportErrorCounts = new ConcurrentHashMap<>();
 
+    /** 已唤醒守卫（sessionId|taskId）：终态唤醒幂等——决策路径与后台收割路径对同一终态只发一次汇总 turn */
+    private final java.util.Set<String> wokenTasks = ConcurrentHashMap.newKeySet();
+
     /**
      * 终态监听/唤醒线程池：每任务一线程（守护线程，监听结束线程即退出）。
      * 不能用单线程池：每个 routeDecision 提交的监听独占线程最长
@@ -429,6 +432,25 @@ public class RemoteConfirmBridge {
         remoteTask.put("task_id", ref.taskId());
         remoteTask.put("tool_calls", toolCalls);
         remoteTask.put("child_reply_id", null);
+        // 幽灵本地行清理（F20）：PROPAGATE 转发的子 ask 若已被父侧捕获为 confirm_key='local'
+        // 行（Bridge 轮询先于捕获的时序兜底），该行确认不会转发远程任务——按 child
+        // tool_call_id 对撞消费，保远程行唯一决策路由。fail-soft：清理失败照常落远程行。
+        var childIds = toolCalls.stream()
+            .map(t -> String.valueOf(t.get("id")))
+            .filter(s -> !s.isBlank())
+            .toList();
+        try {
+            int purged = confirmContextStore.consumeGhostLocalRows(ref.sessionId(), childIds);
+            if (purged > 0) {
+                log.info("[RemoteConfirmBridge] purged {} ghost local confirm row(s) for task {}", purged, ref.taskId());
+                audit(ref.sessionId(), "remote_confirm", ref.taskId(), "GHOST_LOCAL_PURGED",
+                    payloadJson(Map.of("confirm_key", confirmKey, "purged", purged,
+                        "tool_call_ids", childIds)));
+            }
+        } catch (Exception e) {
+            log.warn("[RemoteConfirmBridge] ghost local row purge failed for task {}: {}",
+                ref.taskId(), e.getMessage());
+        }
         try {
             confirmContextStore.put(confirmKey, ref.sessionId(), toolCalls, null, null, null,
                 MAPPER.writeValueAsString(remoteTask));
@@ -459,6 +481,12 @@ public class RemoteConfirmBridge {
                     "row", "discarded_unconsumed")));
         }
         log.info("[RemoteConfirmBridge] task {} reached terminal state: {}", ref.taskId(), status.status());
+        // 后台收割兜底（travel-fulfillment F23 残留）：未经确认路由的后台任务（同步窗口
+        // 超时升格等）终态此前只清登记不交付——收割全靠模型自觉调 task_output 不可靠
+        //（demo 三轮实证）。此处确定性唤醒 lead 收割：提示先 task_output 取结果再汇总，
+        // 与决策路径（resume 后 awaitTerminalAndWake）语义对齐；幂等由 wakeLead 守卫保证。
+        var terminalDesc = describe(status);
+        wakeExecutor.submit(() -> wakeLead(ref.sessionId(), ref.taskId(), terminalDesc, true));
     }
 
     // ===== 3. 决策路由（confirm 端点对远程行调用，§5.4） =====
@@ -511,6 +539,9 @@ public class RemoteConfirmBridge {
         log.info("[RemoteConfirmBridge] decision routed: sid={}, taskId={}, approved={}, decisions={}",
             sessionId, taskId, approved, decisions.size());
 
+        // 摘在途登记（CR P2-3）：决策路径的终态由 awaitTerminalAndWake 专责监听唤醒，
+        // 摘除后轮询路径不再重复处理同一任务（终态审计/后台收割话术双重触发）
+        inFlight.remove(registryKey(row.sessionId(), taskId));
         // resume 后异步监听终态 → 唤醒 lead 汇总 turn（§4 步骤 7）
         var endpointRef = endpoint;
         wakeExecutor.submit(() -> awaitTerminalAndWake(row.sessionId(), taskId, endpointRef));
@@ -610,6 +641,27 @@ public class RemoteConfirmBridge {
      * （EventBus emit 为 Controller 层职责，本桥自行复刻——否则离线用户 /subscribe 不可见，C5）。
      */
     void wakeLead(String sessionId, String taskId, String terminalDesc) {
+        wakeLead(sessionId, taskId, terminalDesc, false);
+    }
+
+    /**
+     * 合成消息驱动一次 lead 汇总 turn：acquire 租约 → invokeStream → 事件写 durable SSE
+     * （EventBus emit 为 Controller 层职责，本桥自行复刻——否则离线用户 /subscribe 不可见，C5）。
+     *
+     * <p>幂等守卫：同一 (session, task) 只唤醒一次（per-lead 进程生命周期内）——决策路径
+     * （resume 后终态监听）与后台收割路径（onTaskTerminal 轮询终态）可能先后到达同一
+     * 终态，守卫防双重汇总 turn。租约忙放弃的唤醒不回退守卫（与既有"下一用户 turn
+     * 降级收割"语义一致，§13.9）。
+     *
+     * @param harvestViaToolOutput true=后台收割路径：lead 上下文没有子任务过程，提示先
+     *        task_output 取交付结果再汇总（确定性收割）；false=决策路径既有话术
+     */
+    void wakeLead(String sessionId, String taskId, String terminalDesc, boolean harvestViaToolOutput) {
+        if (!wokenTasks.add(registryKey(sessionId, taskId))) {
+            log.debug("[RemoteConfirmBridge] wake already delivered for task {} (sid={}), skip",
+                taskId, sessionId);
+            return;
+        }
         // 有界排队抢租约（与 ConfirmController.ACQUIRE_WAIT 同量级）；抢不到放弃本次唤醒
         var token = acquireLease(sessionId);
         if (token == null) {
@@ -622,8 +674,12 @@ public class RemoteConfirmBridge {
         try {
             eventBus.beginTurn(sessionId);
             var userId = sessionUserStore.findUserIdBySession(sessionId);
-            var message = "远程子任务 " + taskId + " 已终态（" + terminalDesc
-                + "）。请汇总该任务的交付结果并向用户报告，无需再次调用任何工具。";
+            var message = harvestViaToolOutput
+                ? "远程子任务 " + taskId + " 已终态（" + terminalDesc
+                    + "）。请先调用 task_output(task_id='" + taskId + "') 获取该任务的交付结果，"
+                    + "再向用户汇总报告。"
+                : "远程子任务 " + taskId + " 已终态（" + terminalDesc
+                    + "）。请汇总该任务的交付结果并向用户报告，无需再次调用任何工具。";
             log.info("[RemoteConfirmBridge] waking lead summary turn: sid={}, taskId={}", sessionId, taskId);
             runtimeService.invokeStream(message, sessionId, userId)
                 .subscribe(

@@ -94,7 +94,8 @@ public class SessionStreamController {
      *   "state": "working",          // working / completed / waiting_confirm / interrupted / idle
      *   "latest_event_seq": 42,
      *   "reply_id": "...",
-     *   "pending_confirm": null      // 或 HITL 确认上下文
+     *   "pending_confirm": null      // 或 HITL/远程确认上下文（远程行附 confirm_key/remote_task，
+     *                                //  与 history 的 pendingConfirm 同口径：FIFO 最早未消费行）
      * }
      * }</pre>
      */

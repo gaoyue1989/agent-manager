@@ -26,6 +26,19 @@ function replicaUrl(envKey: 'E2E_REPLICA_A' | 'E2E_REPLICA_B', runtimeKey: 'repl
 export const REPLICA_A = replicaUrl('E2E_REPLICA_A', 'replicaA');
 export const REPLICA_B = replicaUrl('E2E_REPLICA_B', 'replicaB');
 
+/** 协议实例（T 组 / protocol 组）：env-up 起 AGENT_PROTOCOL_ENABLED=true 的第二个实例 */
+function runtimeUrl(key: string): string {
+  try {
+    const dir = process.env.E2E_RUNTIME_DIR ?? '.runtime';
+    const envJson = JSON.parse(fs.readFileSync(path.join(dir, 'env.json'), 'utf8')) as Record<string, string>;
+    return String(envJson[key] ?? '');
+  } catch {
+    return '';
+  }
+}
+export const PROTOCOL_BASE = process.env.E2E_PROTOCOL_BASE
+  ?? runtimeUrl('protocolBase') ?? '';
+
 /** bench mock MCP（端口随 env-up.sh BENCH_MCP_PORT；用于观测 tools/call 的 header/_meta） */
 export const BENCH_MCP = process.env.E2E_BENCH_MCP ?? 'http://127.0.0.1:18082';
 

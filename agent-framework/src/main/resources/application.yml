@@ -10,6 +10,11 @@ logging:
     io.agentmanager.framework: ${APP_LOG_LEVEL:INFO}
 
 spring:
+  task:
+    scheduling:
+      pool:
+        # 看门狗 listTools 探测阻塞（≤5s/server）不得拖慢同调度器的 Bridge 轮询/清理任务
+        size: 2
   application:
     name: agent-framework
   main:

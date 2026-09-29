@@ -106,6 +106,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `e2e-core` | 1 | S/F/H/M/A/FW/RD 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.11） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
+| `e2e-protocol`（T 组先行，2026-09-30） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；spawn/确认/拒绝/超时/父崩溃五场景属 T 组二期（需 mock-LLM 双进程脚本化编排） | needs: changes（非必需检查） | ~5min |
 | `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
