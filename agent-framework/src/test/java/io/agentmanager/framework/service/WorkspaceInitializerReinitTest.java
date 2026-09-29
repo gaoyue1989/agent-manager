@@ -100,6 +100,48 @@ class WorkspaceInitializerReinitTest {
     }
 
     @Test
+    void reinitializeShouldDeleteStaleMdOfAgentPromotedToRemoteEndpoint() throws Exception {
+        // 本地 subagent 升级为 endpoint 远程声明（travel-fulfillment §8 lead-2）：
+        // 远程声明不进 declared 集合 → stale 清理天然删除其升级前生成的旧 md
+        var v1 = config("prompt", List.of(
+            new OafConfig.SubAgentConfig("v", "alpha", "1.0", "role-a", List.of(), false, "")));
+        initializer.initialize(tempDir, v1);
+        var subagentsDir = tempDir.resolve(".agentscope/workspace/subagents");
+        assertTrue(Files.exists(subagentsDir.resolve("alpha.md")));
+
+        var v2 = config("prompt", List.of(
+            new OafConfig.SubAgentConfig("v", "alpha", "1.0", "role-a",
+                List.of(), false, "http://alpha.agent-platform.svc.cluster.local:8100")));
+        initializer.reinitialize(tempDir, v2);
+
+        assertFalse(Files.exists(subagentsDir.resolve("alpha.md")),
+            "升级为 endpoint 远程声明后，旧本地 md 应被 stale 清理删除（防同名双注册）");
+    }
+
+    @Test
+    void reinitializeShouldKeepRemoteDeclarationsMdFree() throws Exception {
+        // 远程声明在 reload 前后保持远程：既不生成 md，也不因 stale 清理误删本地链路文件
+        var v1 = config("prompt", List.of(
+            new OafConfig.SubAgentConfig("v", "booking", "1.0", "订票专员",
+                List.of(), false, "http://booking:8100"),
+            new OafConfig.SubAgentConfig("v", "researcher", "1.0", "researcher", List.of(), false, "")));
+        initializer.initialize(tempDir, v1);
+        var subagentsDir = tempDir.resolve(".agentscope/workspace/subagents");
+        assertFalse(Files.exists(subagentsDir.resolve("booking.md")));
+
+        var v2 = config("prompt", List.of(
+            new OafConfig.SubAgentConfig("v", "booking", "1.0", "订票专员",
+                List.of(), false, "http://booking:8100"),
+            new OafConfig.SubAgentConfig("v", "researcher", "1.0", "researcher-new", List.of(), false, "")));
+        initializer.reinitialize(tempDir, v2);
+
+        assertFalse(Files.exists(subagentsDir.resolve("booking.md")),
+            "远程声明经 reload 仍不应生成本地 md");
+        assertTrue(Files.exists(subagentsDir.resolve("researcher.md")),
+            "本地声明 reload 后照常重写");
+    }
+
+    @Test
     void reinitializeShouldNotTouchUserRuntimeFiles() throws Exception {
         initializer.initialize(tempDir, config("v1", List.of()));
         // 模拟用户运行时文件（L4/会话产物，不在生成清单内）

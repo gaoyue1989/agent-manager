@@ -141,6 +141,17 @@
             <version>${agentscope.version}</version>
         </dependency>
 
+        <!-- Agent Protocol（远程子 agent 服务端：POST /tasks、GET /tasks/{id}、/events SSE、
+             /tasks/{id}/resume；自动配置 agentscope.agent-protocol.enabled + HarnessAgent bean。
+             装配见 AgentProtocolConfig（TaskRepository bean override 落 agent_fs + 自定义
+             AgentFactory 接 AgentRuntimeService.getAgent()，防 OAF reload 跑旧实例）。
+             设计见 docs/design/travel-fulfillment-agent-protocol-design.md §6/§7/§8 member -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-agent-protocol</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+
         <!-- LLM Model: OpenAI compatible -->
         <dependency>
             <groupId>io.agentscope</groupId>
