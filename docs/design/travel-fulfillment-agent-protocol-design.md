@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | **设计定稿 v1.3（待实施）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15） |
+| 状态 | **设计定稿 v1.4（M1 已实施，PR #62）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15）+ 2026-09-29 M1 双进程/平台部署实测（§16） |
 | 日期 | 2026-09-28 |
 | 参考 | 官方案例 [order-fulfillment](https://java.agentscope.io/v2/zh/service/cases/order-fulfillment)（AgentScope Service + Team 形态）；协议文档 [integration/protocol](https://java.agentscope.io/v2/zh/integration/protocol) |
 | 关联代码 | agent-framework SDK `io.agentscope:*:2.0.3`；`extensions-a2a-client`（已在 pom 未用）；`extensions-agent-protocol`（待引入） |
@@ -357,3 +357,29 @@ config:
 | R4-2 | PROPAGATE 转发 | 不转发（F15），父侧全盲 | §5.5 快照轮询转正 |
 | R4-3 | 批准续跑 | SDK 缺陷（F17），伪 COMPLETED | 一期闸门上移父级 plan 批准（§6.1 L2），子侧 ask 转二期 |
 | R4-4 | deny_rules | 扩展不消费（F16） | M1 自实现动态 DENY 注册 |
+
+## 16. M1 交付状态与双进程/平台部署实测（2026-09-29，PR #62）
+
+**M1 交付（PR #62，commit c0c398c）**：§8 member 1–4 + lead 1–4 全部落地（member-6 的 AgentCard 透出、平台端对接、文档三件套除外），mvn test / 三项 E2E 门禁全绿。
+
+### 双进程实测（lead+member 真实 LLM，共享 e2e 库）
+
+| # | 断言 | 结果 |
+|---|------|------|
+| D1 | /tasks* 无/错 token 一律 401，对 token 200 | ✅ |
+| D2 | 登记→快照轮询落远程卡（~2s）→ routeDecision → 子任务终态 → 终态唤醒汇总 turn → 全程 tool_audit | ✅（修复两缺陷后） |
+| D3 | TaskRecord 跨 member 重启保留且可 resume（§7 agent_fs） | ✅ |
+| D4 | 子事件回流父 SSE（remoteStreamDetail=FULL） | ✅ |
+| D5 | 残留远程行自愈：任务自行终态后 Bridge CAS 收口 | ✅ |
+| D6 | member 权限覆盖：web_fetch/web_search/load_skill_through_path 未覆盖 → DEFAULT 弹 ask（F18 实证） | ❌→已修（BUILT_IN_TOOL_NAMES 补齐） |
+
+### 实测发现（设计事实修订）
+
+| # | 发现 | 处置 |
+|---|------|------|
+| F20 | **PROPAGATE 实际会把子 ask 转发进父流**（修订 F15）：permission_ask 事件到达父流并被既有 storeConfirmContext 落成 confirm_key='local' 行；但**走 local 行的确认不转发决策给远程任务**（member 收不到 resume，子任务永久挂起）——local 行为"幽灵卡" | Bridge routeDecision（confirm_key='task:{id}'）是**唯一有效决策路由**（§5.4 原则强化）；幽灵卡治理（抑制捕获/去重）转 T 组与后续迭代；双卡并存时 FIFO 与终态自愈行为正常 |
+| F21 | **F17 新形态**：resume(approved=true) 后批准未生效，同一工具以新 toolCallId **重新 ask**（M0 观察为伪 COMPLETED）——同族缺陷 | 一期闸门上移父级 plan 批准（§6.1 L2）的必要性再确认；reject 路径始终干净终止 |
+| F22 | SDK 2.0.3 AgentSpawnTool 实际 schema 主键为 **agent_id**（agent_key/label 为别名口径） | RemoteSpawnCaptureMiddleware/agentNameFromInput 按 agent_id 优先匹配（PR #62 修复）；TASK_ID_PATTERN 剥离尾随引号（超时升格变体结果文本实证） |
+| F23 | **远程 spawn 恒异步的收敛手段**：收割全靠模型自觉调 task_output/wait_async_results 不可靠（快照式返回 + 模型反复放弃，order-fulfillment demo 三轮实证）；SDK AgentSpawnTool 暴露 RuntimeContext 属性 `agentscope.subagent.force_sync`(+`force_sync_timeout_seconds`)，注入后 spawn 阻塞等子任务完成、结果确定性回流 | 框架新增 `RemoteSpawnForceSyncMiddleware`（纯 spawn 轮次作用域注入，env `AGENT_REMOTE_SPAWN_SYNC_WAIT[_SECONDS]` 默认 true/120，§8 lead 挂载）；同步窗口内完成即内联回流，超时走既有升格后台语义 |
+
+**同步超时升格语义实测**：`timeout_seconds=60` 的远程 spawn 同步等待 60s 后升格后台并返回 task_id（F15"恒异步"的准确表述应为"超过同步窗口后恒异步"；窗口内完成则同步返回、无后台句柄、Bridge 不登记——符合设计）。

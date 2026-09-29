@@ -66,6 +66,11 @@ public class HarnessAgentFactory {
         "agent_spawn", "agent_send", "agent_list",
         // 异步任务 (TaskTool / WaitAsyncResultsTool)
         "task_list", "task_output", "task_cancel", "wait_async_results",
+        // 网络 (WebTool，SDK 2.0.3 实测注册；缺口径会在 DEFAULT 模式触发未覆盖 ASK——
+        // order-fulfillment demo 实证，verifyToolCoverage 报 coverage gap)
+        "web_fetch", "web_search",
+        // 技能加载（HarnessSkillMiddleware 注册的按路径加载工具）
+        "load_skill_through_path",
         // 动态子 Agent 生成（未启用时不注册，白名单冗余无害）
         "agent_generate"
     );
@@ -202,6 +207,13 @@ public class HarnessAgentFactory {
                 // 远程确认卡永不落库。复用上方 sessionKeyResolver 实例（turn 级 memo 共享，
                 // 与追踪中间件对原始 ctx 的解析结果一致）；抓取/登记全程 fail-soft 不影响父流
                 .middleware(new RemoteSpawnCaptureMiddleware(remoteConfirmBridge, sessionKeyResolver))
+                // 远程 spawn 强制同步等待（§16 实测发现）：SDK 远程 spawn 恒异步受理，收割
+                // 全靠模型自觉不可靠——注入 SDK force_sync 属性让 spawn 阻塞等子任务完成、
+                // 结果确定性回流。仅作用于纯 spawn 轮次（混编/ask 轮次跳过），可经
+                // AGENT_REMOTE_SPAWN_SYNC_WAIT=false 关闭
+                .middleware(new RemoteSpawnForceSyncMiddleware(
+                    props.agentProtocol() == null || props.agentProtocol().remoteSpawnSyncWait(),
+                    props.agentProtocol() != null ? props.agentProtocol().remoteSpawnSyncWaitSeconds() : 120))
                 // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
                 .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）

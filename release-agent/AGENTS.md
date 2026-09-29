@@ -52,7 +52,7 @@ config:
    - `name` / `vendorKey` / `agentKey` / `version` / `slug`（slug = vendorKey/agentKey，全部 kebab-case）
    - `version` 必须是 semver（如 1.0.0）
    - `description` / `author` / `license`
-   - 可选：`mcpServers`（声明 MCP 依赖，需同时提供 configDir 下的 config.yaml）、`config`（require_confirmation / permission.mode）
+   - 可选：`mcpServers`（声明 MCP 依赖，需同时提供 configDir 下的 config.yaml）、`config`（require_confirmation / permission.mode）、`agents`（组合子 agent；`endpoint` 填远程子 agent 服务地址如 `http://{name}.agent-platform.svc:8100` 即注册为 Agent Protocol 远程子 agent——被委派任务经子服务 `POST /tasks` 执行，子服务须开启 `AGENT_PROTOCOL_ENABLED=true`；lead 服务 env 需配 `AGENT_REMOTE_HEADERS_JSON`（如 `{"X-Agent-Protocol-Token":"<token>"}`，敏感键路由 Secret），子服务 env 需配同一 token 的 `AGENT_PROTOCOL_AUTH_TOKEN`；endpoint 留空则走本地子 agent）
    - 正文描述 agent 角色定位与工作规范（参考本文件结构）
    - **重要：不要用 write_file/edit_file 在沙箱写文件**——AGENTS.md 内容直接作为参数传给下面两个工具即可
 2. **校验（强制）**：**必须调用 `check_oaf_package` 工具**（参数 agents_md=AGENTS.md 全文）校验

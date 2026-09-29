@@ -337,6 +337,8 @@ OAF `deniedTools` 字段控制排除列表。
 | `AGENT_REMOTE_CONFIRM_TTL_HOURS` | `24` | | 远程确认挂起独立 TTL 小时数（lead 端 RemoteConfirmBridge 用，confirm_context 远程行超时自动 DENY + 审计）；member 侧仅透出 |
 | `AGENT_REMOTE_POLL_SECONDS` | `5` | | 远程任务快照轮询周期秒（lead 端 Bridge 唯一确认源 `GET /tasks/{id}`，F15）；member 侧仅透出 |
 | `AGENT_REMOTE_HEADERS_JSON` | 空 | | lead 端远程子 agent 声明 headers JSON（注入 `X-Agent-Protocol-Token` 等，值走 env 不进包）；member 侧不消费。敏感键，平台路由进 `{name}-env-secret` |
+| `AGENT_REMOTE_SPAWN_SYNC_WAIT` | `true` | | 远程 spawn 强制同步等待（lead 端，设计 §16 实测）：注入 SDK `force_sync` 属性让 spawn 阻塞等子任务完成、结果确定性回流（SDK 远程 spawn 恒异步受理，收割靠模型自觉不可靠）。仅作用于纯 spawn 轮次；无远程声明的服务无消费方、无副作用 |
+| `AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS` | `120` | | 强制同步等待秒数（配合上一键），超时后按 SDK 既有升格语义转后台 |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24）**：`LLM_*` 是**系统模型**——未显式选择模型的会话的对话模型，
 > 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。

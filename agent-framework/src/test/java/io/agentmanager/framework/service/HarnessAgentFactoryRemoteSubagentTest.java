@@ -22,7 +22,7 @@ class HarnessAgentFactoryRemoteSubagentTest {
 
     private HarnessAgentFactory factory(String remoteHeadersJson) {
         return factoryWithSettings(new AgentManagerProperties.AgentProtocolSettings(
-            false, "", "", 7, 24, 5, remoteHeadersJson));
+            false, "", "", 7, 24, 5, remoteHeadersJson, true, 120));
     }
 
     private HarnessAgentFactory factoryWithSettings(AgentManagerProperties.AgentProtocolSettings settings) {

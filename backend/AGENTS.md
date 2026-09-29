@@ -54,6 +54,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - **envFrom 两源**：容器 envFrom = 服务 Secret `{name}-env-secret`（敏感，在前）+ 服务 CM `{name}-env`（非敏感，在后可覆盖）；无平台级注入
 - **默认填入语义（R3）**：平台默认配置只存 DB（`platform_config` 表），`GET /platform-config` 展示视图敏感键掩码，`GET /platform-config/defaults` 返回含敏感明文的平面键值表专供表单预填；发布向导预填 defaults，详情页「填入平台默认」补缺失键（显式保存才生效）；改默认配置不影响存量服务
 - **服务 env 路由**（`internal/service/envroute.go`）：发布/PATCH env 中命中模板 Sensitive 或 `secretKeys` 的键路由进 `services.env_secret_json` + 服务 Secret，绝不写 env_json/CM；敏感键三态——非空=设置、空串=删除、缺失=sticky 保持不变；旧 env_json 中的存量敏感键在任意写路径自动迁入 Secret（防丢失规则）
+- **Agent Protocol 敏感键**（travel-fulfillment M1，PR #62）：`AGENT_PROTOCOL_AUTH_TOKEN`（member 服务间认证）与 `AGENT_REMOTE_HEADERS_JSON`（lead 远程声明 headers，内嵌 token）必须按敏感路由——模板清单暂未收录时经发布/PATCH 请求的 `secretKeys` 显式指定（二者为用户 env 键，非平台默认配置组，不进 template.go）；`AGENT_PROTOCOL_ENABLED`/`AGENT_PROTOCOL_TASK_STORE`/`AGENT_PROTOCOL_TASK_RETENTION_DAYS` 为非敏感键走 ConfigMap
 - **平台配置 API**：`GET/PUT /api/v1/platform-config`（PUT 部分更新：出现=设置、空串=删除、缺失=不变；未知键 400；清除必填键 400；展示视图敏感值永不回明文）、`GET /api/v1/platform-config/defaults`（预填数据源）
 - **服务 Secret 生命周期**：publish 创建（无敏感键为空对象）；Delete 连带清理（RBAC secrets `get/list/create/update/delete`，delete 仅此路径使用）；Unpublish 保留
 - **RBAC**：platform-backend Role 含 secrets `get/list/create/update/delete`（manifests/platform.yaml）；overlay 不变量：envFrom 两源引用必须保留（template.go）

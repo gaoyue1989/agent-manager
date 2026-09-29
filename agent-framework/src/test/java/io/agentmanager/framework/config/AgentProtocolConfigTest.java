@@ -74,7 +74,7 @@ class AgentProtocolConfigTest {
     /** enabled=true 而 authToken 空白 → 装配类构造即抛（设计 §6.2 fail-fast，启动失败） */
     @Test
     void enabledWithoutAuthTokenShouldFailFast() {
-        var blank = new AgentManagerProperties.AgentProtocolSettings(true, " ", "", 7, 24, 5, "");
+        var blank = new AgentManagerProperties.AgentProtocolSettings(true, " ", "", 7, 24, 5, "", true, 120);
         var ex = assertThrows(IllegalStateException.class,
             () -> new AgentProtocolConfig.ProtocolEnabledAssembly(blank));
         assertTrue(ex.getMessage().contains("AGENT_PROTOCOL_AUTH_TOKEN"),

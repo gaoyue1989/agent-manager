@@ -325,11 +325,15 @@ public record AgentManagerProperties(
         /** 远程任务快照轮询周期秒（AGENT_REMOTE_POLL_SECONDS，lead/Bridge 用），默认 5 */
         @DefaultValue("5") int remotePollSeconds,
         /** 远程子 agent 声明 headers JSON（AGENT_REMOTE_HEADERS_JSON，lead 用），member 侧不消费 */
-        @DefaultValue("") String remoteHeadersJson
+        @DefaultValue("") String remoteHeadersJson,
+        /** 远程 spawn 强制同步等待（AGENT_REMOTE_SPAWN_SYNC_WAIT，lead 用）：注入 SDK force_sync 属性，spawn 阻塞等子任务完成、结果确定性回流（设计 §16 实测发现）。默认开 */
+        @DefaultValue("true") boolean remoteSpawnSyncWait,
+        /** 强制同步等待秒数（AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS），默认 120 */
+        @DefaultValue("120") int remoteSpawnSyncWaitSeconds
     ) {
         /** 代码默认值兜底：配置节缺失或兼容构造器（测试直接构造）时使用 */
         public static AgentProtocolSettings defaults() {
-            return new AgentProtocolSettings(false, "", "", 7, 24, 5, "");
+            return new AgentProtocolSettings(false, "", "", 7, 24, 5, "", true, 120);
         }
     }
 }

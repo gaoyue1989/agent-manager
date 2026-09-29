@@ -61,7 +61,7 @@ class SessionCleanupServiceProtocolScanTest {
 
     private static AgentManagerProperties propsOf(boolean enabled, int retentionDays) {
         return new AgentManagerProperties(null, null, null, "/config", "", null, null, null, null,
-            new AgentManagerProperties.AgentProtocolSettings(enabled, "tok", "", retentionDays, 24, 5, ""));
+            new AgentManagerProperties.AgentProtocolSettings(enabled, "tok", "", retentionDays, 24, 5, "", true, 120));
     }
 
     private static TaskRecord record(String taskId, TaskStatus status, Instant lastUpdatedAt) {

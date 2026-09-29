@@ -265,6 +265,7 @@ How the agent interacts with users.
 | `role` | string | Role in composition (e.g., "reviewer") |
 | `delegations` | array[string] | Tasks delegated to this agent |
 | `required` | boolean | Whether sub-agent is mandatory |
+| `endpoint` | string | 远程子 agent 端点（Agent Protocol，如 `http://{name}.{namespace}.svc:8100`）。**非空** = 注册为远程子 agent（SDK SubagentDeclaration：经子服务 `POST /tasks` 调度，子事件回流父流；子服务须开启 `AGENT_PROTOCOL_ENABLED=true`，认证头经 lead 的 `AGENT_REMOTE_HEADERS_JSON` 注入，值走 env 不进包）；**空/缺省** = 本地子 agent（workspace `subagents/*.md`）。二者同一包内可混用 |
 
 ### Tools Field (Optional)
 
