@@ -170,6 +170,27 @@ class RemoteConfirmBridgeTest {
     }
 
     @Test
+    void spawnResultShouldRegisterByAgentIdParam() {
+        // demo 实测（2026-09-29 双进程）：SDK 2.0.3 AgentSpawnTool 实际 schema 主键是
+        // agent_id（真实模型自然使用该参数名，任务正确路由），漏匹配会跳过登记、
+        // 快照轮询（F15 唯一确认源）永不生效——回归钉
+        bridge.onAgentSpawnResult(SID, Map.of("agent_id", "booking", "timeout_seconds", 60,
+                "task", "订票任务"),
+            "status: submitted\ntask_id: " + TASK_ID);
+        assertEquals(1, bridge.inFlightCount(), "agent_id 入参应同样命中声明登记");
+    }
+
+    @Test
+    void spawnResultShouldStripTrailingQuoteFromTaskId() {
+        // demo 实测（2026-09-29 双进程）：同步超时升格变体的结果文本 task_id 紧邻 JSON
+        // 收尾引号，\S+ 连引号捕获后快照查询恒 404，轮询静默失效——回归钉
+        bridge.onAgentSpawnResult(SID, Map.of("agent_id", "booking"),
+            "agent_id: booking\\nsession_id: sub-1\\nstatus: timeout\\ntask_id: " + TASK_ID + "\"");
+        assertEquals(1, bridge.inFlightCount(), "尾随引号必须剥离后登记");
+        assertTrue(bridge.inFlightTaskIds().contains(TASK_ID), "登记的 taskId 不得含引号");
+    }
+
+    @Test
     void localSubagentSpawnShouldNotRegister() {
         bridge.onAgentSpawnResult(SID, Map.of("agent_key", "local-helper"), "task_id: t-local");
         assertEquals(0, bridge.inFlightCount(), "无 endpoint 声明 = 本地子 agent，与远程确认无关");

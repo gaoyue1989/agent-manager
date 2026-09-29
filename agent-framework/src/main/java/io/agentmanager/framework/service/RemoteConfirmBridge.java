@@ -69,8 +69,14 @@ public class RemoteConfirmBridge {
     private static final TypeReference<Map<String, Object>> MAP_TYPE =
         new TypeReference<>() {};
 
-    /** agent_spawn 结果文本中的任务句柄形态（SDK AgentSpawnTool："task_id: %s"） */
-    private static final Pattern TASK_ID_PATTERN = Pattern.compile("task_id:\\s*(\\S+)");
+    /**
+     * agent_spawn 结果文本中的任务句柄形态（SDK AgentSpawnTool："task_id: %s"）。
+     * 只捕获 id 字符集（字母/数字/下划线/连字符）：demo 实测（2026-09-29 双进程）同步超时
+     * 升格变体的结果文本里 task_id 紧邻 JSON 收尾引号，\S+ 会把引号一并捕获——带引号的
+     * taskId 查快照恒 404 "task not found"，走传输错误静默重试（连续 60 次才告警），
+     * 快照轮询永不生效。
+     */
+    private static final Pattern TASK_ID_PATTERN = Pattern.compile("task_id:\\s*([A-Za-z0-9_-]+)");
 
     /** 决策路由 confirm_key 前缀（与 ConfirmContextStore 远程行键一致） */
     public static final String CONFIRM_KEY_PREFIX = "task:";
@@ -263,12 +269,15 @@ public class RemoteConfirmBridge {
         return m.find() ? m.group(1) : null;
     }
 
-    /** 工具入参 → 目标子 agent 名（agent_key 优先，label 兜底；均缺返回 null） */
+    /**
+     * 工具入参 → 目标子 agent 名（agent_id 优先——SDK 2.0.3 AgentSpawnTool 实际 schema 主键，
+     * demo 实测模型自然使用该参数名且任务正确路由；agent_key/agent/label 为别名兜底；均缺返回 null）。
+     */
     static String agentNameFromInput(Map<String, Object> toolInput) {
         if (toolInput == null) {
             return null;
         }
-        for (var field : List.of("agent_key", "agent", "label")) {
+        for (var field : List.of("agent_id", "agent_key", "agent", "label")) {
             var v = toolInput.get(field);
             if (v instanceof String s && !s.isBlank()) {
                 return s;
@@ -718,6 +727,12 @@ public class RemoteConfirmBridge {
     /** 在途任务数（测试/运维观察点） */
     int inFlightCount() {
         return inFlight.size();
+    }
+
+    /** 在途 taskId 集合（测试观察点：断言解析清洗后的任务句柄，如尾随引号剥离） */
+    java.util.Set<String> inFlightTaskIds() {
+        return inFlight.values().stream().map(RemoteTaskRef::taskId)
+            .collect(java.util.stream.Collectors.toSet());
     }
 
     /** 远程调用认证头：AGENT_REMOTE_HEADERS_JSON（lead 声明注入，设计 §8 lead-1；懒解析缓存） */
