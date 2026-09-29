@@ -77,7 +77,7 @@ public abstract class AbstractBaseSandbox implements Sandbox {
 | 项目 | 值 |
 |------|-----|
 | 服务地址 | `http://192.168.31.155:8090`（本机 `http://127.0.0.1:8090`） |
-| API Key | `CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW` |
+| API Key | `${OPENSANDBOX_API_KEY}`（见 `.env.secrets`，不入库） |
 | 认证方式 | Header `OPEN-SANDBOX-API-KEY` |
 | 运行时 | Docker（bridge 网络） |
 | execd 端口 | `44772/tcp`（映射到宿主机动态端口 40000-60000） |
@@ -117,7 +117,7 @@ OpenSandbox 提供 Java SDK（`com.alibaba.opensandbox:sandbox`，**最新稳定
 // 连接配置
 ConnectionConfig config = ConnectionConfig.builder()
     .domain("192.168.31.155:8090")
-    .apiKey("CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW")
+    .apiKey(System.getenv("OPENSANDBOX_API_KEY"))
     .protocol("http")
     .build();
 
@@ -978,7 +978,7 @@ agent:
 
 ```bash
 # OpenSandbox
-OPENSANDBOX_API_KEY=CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW
+OPENSANDBOX_API_KEY=<你的 OpenSandbox API Key>
 ```
 
 ---
@@ -1107,13 +1107,16 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 ### 9.1 OpenSandbox Server 验证
 
 ```bash
+# 密钥从本地 .env.secrets 注入，勿写入本文档
+set -a && source agent-framework/.env.secrets && set +a
+
 # 1. 健康检查
 curl http://192.168.31.155:8090/health
 # 预期: {"status":"healthy"}
 
 # 2. 创建测试沙箱
 curl -X POST http://192.168.31.155:8090/v1/sandboxes \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW" \
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "image": {"uri": "opensandbox/code-interpreter:v1.1.0"},
@@ -1124,16 +1127,16 @@ curl -X POST http://192.168.31.155:8090/v1/sandboxes \
 
 # 3. 查询沙箱状态
 curl http://192.168.31.155:8090/v1/sandboxes/<sandbox_id> \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW"
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY"
 
 # 4. 获取 execd 端点
 curl http://192.168.31.155:8090/v1/sandboxes/<sandbox_id>/endpoints/44772 \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW"
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY"
 # 预期: {"endpoint": "192.168.31.155:52051/proxy/44772"}
 
 # 5. 删除测试沙箱
 curl -X DELETE http://192.168.31.155:8090/v1/sandboxes/<sandbox_id> \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW"
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY"
 ```
 
 ### 9.2 镜像兼容性验证
