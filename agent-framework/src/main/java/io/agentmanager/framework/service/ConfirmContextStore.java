@@ -330,6 +330,45 @@ public class ConfirmContextStore {
     }
 
     /**
+     * 清理「幽灵本地行」（travel-fulfillment F20）：PROPAGATE 把子 ask 转发进父流后，
+     * 既有捕获路径会把它落成 confirm_key='local' 行，但走该行的确认不转发远程任务
+     * （member 收不到 resume，子任务永久挂起）——Bridge 落远程行前按 child tool_call_id
+     * 对撞消费。匹配依赖 tool_calls_json 的 [{"id":"..."}] 稳定序列化（本地捕获与
+     * 远程锚点同键）。返回消费行数（审计用）；前缀兼容谓词与查询同口径。
+     */
+    public int consumeGhostLocalRows(String sessionId, java.util.Collection<String> toolCallIds) {
+        if (toolCallIds == null || toolCallIds.isEmpty()) {
+            return 0;
+        }
+        var likePredicates = new StringBuilder();
+        for (int i = 0; i < toolCallIds.size(); i++) {
+            likePredicates.append(i == 0 ? "" : " OR ").append("tool_calls_json LIKE ?");
+        }
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement("""
+                 UPDATE confirm_context SET consumed = 1
+                 WHERE (session_id = ?
+                        OR RIGHT(session_id, CHAR_LENGTH(?) + 1) = CONCAT(':', ?)
+                        OR RIGHT(session_id, CHAR_LENGTH(?) + 2) = CONCAT('__', ?))
+                   AND confirm_key = 'local'
+                   AND consumed = 0
+                   AND (%s)
+                 """.formatted(likePredicates))) {
+            int i = 1;
+            for (int k = 0; k < 5; k++) {
+                stmt.setString(i++, sessionId);
+            }
+            for (var id : toolCallIds) {
+                stmt.setString(i++, "%\"id\":\"" + id + "\"%");
+            }
+            return stmt.executeUpdate();
+        } catch (Exception e) {
+            log.warn("ConfirmContextStore: consumeGhostLocalRows failed for {}: {}", sessionId, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
      * 会话全部未过期远程行（FIFO）。Bridge 并发防御（设计 §5.3）用：
      * 已有未消费远程行又收到新挂起 → ERROR 审计、新任务照常排队。
      */

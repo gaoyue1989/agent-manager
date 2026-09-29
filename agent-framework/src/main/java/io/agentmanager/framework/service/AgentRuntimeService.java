@@ -633,11 +633,59 @@ public class AgentRuntimeService {
         putConfirmContext(sessionId, event, null, null);
     }
 
-    /** 落库待确认上下文（可携带 Channel 网关真实会话 key；同 session 新 ASK 覆盖旧条目） */
+    /**
+     * 落库待确认上下文（可携带 Channel 网关真实会话 key；同 session 新 ASK 覆盖旧条目）。
+     *
+     * <p>幽灵卡抑制（travel-fulfillment F20）：本 SDK 版本 PROPAGATE 会把子 ask 转发进
+     * 父流，被本方法原样落成 confirm_key='local' 行——但走 local 行的确认不转发远程任务
+     * （member 收不到 resume，子任务永久挂起），远程行 task:{task_id} 才是唯一有效决策
+     * 路由。ask 的 tool_call_id 与任一未消费远程行锚点 tool_calls 对撞即视为转发幽灵，
+     * 跳过落库；远程行尚未落地（Bridge 轮询滞后）时由 Bridge 落卡侧对撞清理兜底。
+     */
     void putConfirmContext(String sessionId, RequireUserConfirmEvent event,
                            String runtimeSessionId, String runtimeUserId) {
+        if (isPropagatedRemoteAsk(sessionId, event.getToolCalls())) {
+            log.info("[HITL] suppress ghost local confirm (PROPAGATE'd remote ask, ids={}) — "
+                    + "remote row task:{{task_id}} is the only valid decision route (F20)",
+                event.getToolCalls().stream().map(io.agentscope.core.message.ToolUseBlock::getId).toList());
+            return;
+        }
         confirmContextStore.put(sessionId,
             toolCallsJson(event.getToolCalls()), event.getReplyId(), runtimeSessionId, runtimeUserId);
+    }
+
+    /**
+     * F20 幽灵判据：ask 的任一 tool_call_id 出现在会话未消费远程行的 remote_task.tool_calls
+     * 锚点（{id, name, input}）中。全程 fail-soft：判据失效即照常落库（行为回退到现状，
+     * 不会因去重逻辑阻断真实本地 ask）。
+     */
+    private boolean isPropagatedRemoteAsk(String sessionId, List<io.agentscope.core.message.ToolUseBlock> calls) {
+        if (calls == null || calls.isEmpty()) {
+            return false;
+        }
+        var ids = calls.stream()
+            .map(io.agentscope.core.message.ToolUseBlock::getId)
+            .filter(id -> id != null && !id.isBlank())
+            .collect(java.util.stream.Collectors.toSet());
+        if (ids.isEmpty()) {
+            return false;
+        }
+        try {
+            for (var row : confirmContextStore.findUnconsumedRemote(sessionId)) {
+                if (!(row.remoteTask() != null && row.remoteTask().get("tool_calls") instanceof List<?> tcs)) {
+                    continue;
+                }
+                for (var tc : tcs) {
+                    if (tc instanceof Map<?, ?> m && m.get("id") instanceof String s
+                            && !s.isBlank() && ids.contains(s)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[HITL] ghost-ask detection failed (fail-open): {}", e.getMessage());
+        }
+        return false;
     }
 
     /**

@@ -429,6 +429,25 @@ public class RemoteConfirmBridge {
         remoteTask.put("task_id", ref.taskId());
         remoteTask.put("tool_calls", toolCalls);
         remoteTask.put("child_reply_id", null);
+        // 幽灵本地行清理（F20）：PROPAGATE 转发的子 ask 若已被父侧捕获为 confirm_key='local'
+        // 行（Bridge 轮询先于捕获的时序兜底），该行确认不会转发远程任务——按 child
+        // tool_call_id 对撞消费，保远程行唯一决策路由。fail-soft：清理失败照常落远程行。
+        var childIds = toolCalls.stream()
+            .map(t -> String.valueOf(t.get("id")))
+            .filter(s -> !s.isBlank())
+            .toList();
+        try {
+            int purged = confirmContextStore.consumeGhostLocalRows(ref.sessionId(), childIds);
+            if (purged > 0) {
+                log.info("[RemoteConfirmBridge] purged {} ghost local confirm row(s) for task {}", purged, ref.taskId());
+                audit(ref.sessionId(), "remote_confirm", ref.taskId(), "GHOST_LOCAL_PURGED",
+                    payloadJson(Map.of("confirm_key", confirmKey, "purged", purged,
+                        "tool_call_ids", childIds)));
+            }
+        } catch (Exception e) {
+            log.warn("[RemoteConfirmBridge] ghost local row purge failed for task {}: {}",
+                ref.taskId(), e.getMessage());
+        }
         try {
             confirmContextStore.put(confirmKey, ref.sessionId(), toolCalls, null, null, null,
                 MAPPER.writeValueAsString(remoteTask));

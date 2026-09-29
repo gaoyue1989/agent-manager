@@ -615,4 +615,49 @@ class AgentRuntimeServiceHitlTest {
 
         assertNull(service.findPendingConfirm(SID));
     }
+
+    // ---------- 幽灵卡抑制（F20）：PROPAGATE 转发的远程 ask 不落 local 行 ----------
+
+    /** ask 的 tool_call_id 命中未消费远程行锚点 → 跳过落库（远程行是唯一有效决策路由） */
+    @Test
+    void putConfirmContextShouldSuppressPropagatedRemoteAsk() {
+        var ghostRow = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9",
+                "tool_calls", List.of(Map.of("id", "call-1", "name", "create_order"))));
+        when(confirmContextStore.findUnconsumedRemote("acme-test-agent__t1"))
+            .thenReturn(List.of(ghostRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+    }
+
+    /** 本地自有 ask（id 不在远程锚点）→ 照常落库，HITL 行为不变 */
+    @Test
+    void putConfirmContextShouldStoreGenuineLocalAsk() {
+        when(confirmContextStore.findUnconsumedRemote(anyString())).thenReturn(List.of());
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+    }
+
+    /** 远程行锚点损坏/无 tool_calls → fail-open 照常落库（不因去重逻辑阻断真实本地 ask） */
+    @Test
+    void putConfirmContextShouldFailOpenWhenAnchorDamaged() {
+        var brokenRow = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9"));
+        when(confirmContextStore.findUnconsumedRemote(anyString())).thenReturn(List.of(brokenRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+    }
 }
