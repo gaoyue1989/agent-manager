@@ -89,8 +89,14 @@ test.describe('T7 /tasks 强制 token（协议实例 p）', () => {
 // 双副本同键收敛（P7）在 e2e-protocol-multi 门禁 job（阶段 3）。
 test.describe('J0 组 A2A Job 存量零影响（协议关实例 a）', () => {
   test('未启用 A2A Job 的存量服务 /a2a/jobs 不可达（P0-1 守卫：条件装配关端点）', async ({ request }) => {
-    expect((await request.post(`${BASE}/a2a/jobs`, { data: { text: 'x' } })).status()).toBe(404);
-    expect((await request.get(`${BASE}/a2a/jobs/any-key`)).status()).toBe(404);
+    // 未启用时 POST/GET 落到根映射（SDK JSON-RPC handler）返回 4xx/5xx 错误体——
+    // 守卫目标：不存在活的 Job 端点（无认证/无幂等的触发面），断言非 2xx 且无 job 载荷
+    const post = await request.post(`${BASE}/a2a/jobs`, { data: { text: 'x' } });
+    expect(post.status()).toBeGreaterThanOrEqual(400);
+    expect((await post.json()).job).toBeUndefined();
+    const get = await request.get(`${BASE}/a2a/jobs/any-key`);
+    expect(get.status()).toBeGreaterThanOrEqual(400);
+    expect((await get.json()).job).toBeUndefined();
   });
 });
 
