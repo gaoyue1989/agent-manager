@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	networkingv1 "k8s.io/api/networking/v1"
 
 	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/store"
@@ -33,10 +34,12 @@ type ImageOption struct {
 }
 
 type ConfigView struct {
-	Namespace                      string
-	IngressClass                   string
-	IngressHost                    string
-	IngressPort                    int
+	Namespace    string
+	IngressClass string
+	IngressHost  string
+	IngressPort  int
+	// IngressHostSuffix 业务 Ingress 域名后缀：空=path 模式（历史行为），非空=host 模式
+	IngressHostSuffix              string
 	DefaultImage                   string
 	ImageOptions                   []ImageOption
 	ImageAllowed                   func(string) bool
@@ -152,7 +155,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		Status:        store.StatusCreated,
 		AgentCardJSON: "{}",
 		SkillsJSON:    "[]",
-		Endpoint:      k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort),
+		Endpoint:      k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix),
 		ClusterURL:    fmt.Sprintf("http://%s-svc.%s.svc.cluster.local:%d", k8sName, c.Cfg.Namespace, k8s.AgentPort),
 		ShortName:     k8s.ShortName(k8sName),
 	}
@@ -172,7 +175,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		return nil, err
 	}
 
-	if err := c.applyAll(params); err != nil {
+	if _, err := c.applyAll(params); err != nil {
 		c.transition(svc, store.StatusError, "apply failed: "+err.Error())
 		return nil, err
 	}
@@ -180,32 +183,32 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	return svc, nil
 }
 
-// applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service+Ingress。
-// Deployment/Ingress 均经 builder（内置构造 + 可选环境 overlay 合并 + 不变量校验），
-// overlay 违规视为 apply 失败，服务转 error 状态。Build 纯函数零成本前置：
-// 非法 overlay 时任何对象不落半套资源。
-func (c *Core) applyAll(p k8s.ObjectParams) error {
+// applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service+Ingress，并返回已落集群的
+// Ingress 对象（供调用方派生展示地址，避免二次 Build）。Deployment/Ingress 均经 builder
+// （内置构造 + 可选环境 overlay 合并 + 不变量校验），overlay 违规视为 apply 失败，
+// 服务转 error 状态。Build 纯函数零成本前置：非法 overlay 时任何对象不落半套资源。
+func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 	dep, err := c.deployBuilder().Build(p)
 	if err != nil {
-		return fmt.Errorf("deployment: %w", err)
+		return nil, fmt.Errorf("deployment: %w", err)
 	}
 	ing, err := c.ingressBuilder().Build(p)
 	if err != nil {
-		return fmt.Errorf("ingress: %w", err)
+		return nil, fmt.Errorf("ingress: %w", err)
 	}
 	if err := c.applyServiceEnvObjects(p); err != nil {
-		return err
+		return nil, err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
-		return fmt.Errorf("service: %w", err)
+		return nil, fmt.Errorf("service: %w", err)
 	}
 	if err := c.K8s.EnsureIngress(ing); err != nil {
-		return fmt.Errorf("ingress: %w", err)
+		return nil, fmt.Errorf("ingress: %w", err)
 	}
 	if err := c.K8s.EnsureDeployment(dep); err != nil {
-		return fmt.Errorf("deployment: %w", err)
+		return nil, fmt.Errorf("deployment: %w", err)
 	}
-	return nil
+	return ing, nil
 }
 
 // applyServiceEnvObjects 幂等写入服务 env 两级对象（CM 非敏感 + Secret 敏感）。
@@ -364,7 +367,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	if err != nil {
 		return nil, fmt.Errorf("ingress: %w", err)
 	}
-	endpoint := k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort)
+	endpoint := k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)
 
 	err = c.DB.Transaction(func(tx *gorm.DB) error {
 		if newPkgID != svc.PackageID {
@@ -389,7 +392,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	svc.EnvJSON, svc.EnvSecretJSON = mustJSON(plain), mustJSON(secret)
 	svc.Endpoint = endpoint
 
-	if err := c.applyAll(params); err != nil {
+	if _, err := c.applyAll(params); err != nil {
 		c.transition(svc, store.StatusError, "republish apply failed: "+err.Error())
 		return nil, err
 	}
@@ -415,10 +418,15 @@ func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
 	}
 	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
 	params.EnvSecret = secret
-	if err := c.applyAll(params); err != nil {
+	ing, err := c.applyAll(params)
+	if err != nil {
 		c.transition(svc, store.StatusError, "start again apply failed: "+err.Error())
 		return nil, err
 	}
+	// 重新上线即重建全部对象，Ingress 已按当前配置形态刷新（path/host 模式切换的存量
+	// 服务在此收敛），故同步重算展示地址落库；回写失败只记日志不阻断（apply 已成功，
+	// 状态机应继续推进，避免因展示字段写入失败把服务卡在 error）。
+	c.refreshEndpoint(svc, ing)
 	c.transition(svc, store.StatusDeploying, "started again")
 	c.asyncWaitAndRegister(svc.ID)
 	return svc, nil
@@ -488,8 +496,22 @@ func (c *Core) params(k8sName, image string, env map[string]string, replicas int
 		K8sName: k8sName, Namespace: c.Cfg.Namespace, Image: image,
 		Env: env, Replicas: replicas, SubPath: subPath,
 		IngressClass: c.Cfg.IngressClass, IngressHost: c.Cfg.IngressHost, IngressPort: c.Cfg.IngressPort,
-		RequestsCPU: c.Cfg.ResCPU, RequestsMem: c.Cfg.ResMem, LimitsCPU: c.Cfg.LimCPU, LimitsMem: c.Cfg.LimMem,
+		IngressHostSuffix: c.Cfg.IngressHostSuffix,
+		RequestsCPU:       c.Cfg.ResCPU, RequestsMem: c.Cfg.ResMem, LimitsCPU: c.Cfg.LimCPU, LimitsMem: c.Cfg.LimMem,
 	}
+}
+
+// refreshEndpoint 按（合并后）Ingress 重算展示地址并落库。供 StartAgain 调用：
+// 该路径会重新 apply Ingress，配置（如 INGRESS_HOST_SUFFIX）变更后展示地址需跟随
+// 新形态收敛。写库失败只记日志不返回错误（同 transition 风格：非核心字段不阻断
+// 状态机推进）。
+func (c *Core) refreshEndpoint(svc *store.ServiceEntity, ing *networkingv1.Ingress) {
+	endpoint := k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)
+	if err := c.DB.Model(svc).Update("endpoint", endpoint).Error; err != nil {
+		log.Printf("[endpoint] update svc=%d failed: %v", svc.ID, err)
+		return
+	}
+	svc.Endpoint = endpoint
 }
 
 // uniqName 冲突时追加 -2/-3… 后缀（查库去重，最多 20 次）。

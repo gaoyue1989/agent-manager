@@ -219,7 +219,9 @@ func orDefaultReplicas(r int32) int32 {
 // IngressBuilder 业务 Ingress 构造门面：内置纯函数构造（Ingress，路由形状是平台契约）
 // 为基线，可选 YAML overlay（环境策略，如自定义域名 host/对外前缀 path/TLS/WAF 类
 // 注解）经 Strategic Merge Patch 合并。注意 rules/tls 为普通列表（无 patch 策略），
-// overlay 写了即整体替换；annotations 为 map 按 key 合并。
+// overlay 写了即整体替换；annotations 为 map 按 key 合并。可改范围按 Ingress 模式
+// （IngressHostSuffix 决定）收放：path 模式可改对外前缀 path，host 模式 host 恒为
+// {K8sName}{suffix} 不可偏离（详见 validateIngress）。
 //
 // 配置方式：环境变量 INGRESS_TEMPLATE 指向 overlay 文件；缺省不设置即纯内置构造，
 // 行为与历史版本完全一致。overlay 变更在下次 apply（发布/重新发布/重新上线）时生效。
@@ -233,9 +235,11 @@ type IngressBuilder struct {
 // NewIngressBuilder 语义同 NewDeploymentBuilder：文件缺失/语法错误/哑参数试渲染
 // 违规均启动即失败（fail-fast）。ingressClass 传运行配置值（cfg.IngressClass），
 // 保证探针与发布期同参——overlay 显式写 class 只允许等于配置值，否则试渲染即拒绝。
+// ingressHostSuffix 同理传配置值（cfg.IngressHostSuffix）：它决定校验走 path 还是 host
+// 模式不变量，探针与发布期必须同模式，否则 host 模式的 overlay 会在启动期被误拒。
 // 试渲染用哑参数 oaf-template-probe/default——overlay 不得硬编码
 // metadata.name/namespace（每服务发布期才确定）。
-func NewIngressBuilder(path, ingressClass string) (*IngressBuilder, error) {
+func NewIngressBuilder(path, ingressClass, ingressHostSuffix string) (*IngressBuilder, error) {
 	if path == "" {
 		return &IngressBuilder{}, nil
 	}
@@ -244,7 +248,8 @@ func NewIngressBuilder(path, ingressClass string) (*IngressBuilder, error) {
 		return nil, fmt.Errorf("read ingress overlay %s: %w", path, err)
 	}
 	b := &IngressBuilder{overlay: data, hasOverlay: true}
-	if _, err := b.Build(ObjectParams{K8sName: Prefix + "template-probe", Namespace: "default", IngressClass: ingressClass}); err != nil {
+	if _, err := b.Build(ObjectParams{K8sName: Prefix + "template-probe", Namespace: "default",
+		IngressClass: ingressClass, IngressHostSuffix: ingressHostSuffix}); err != nil {
 		return nil, fmt.Errorf("ingress overlay %s invalid: %w", path, err)
 	}
 	return b, nil
@@ -281,10 +286,13 @@ func ingressOverlayVars(p ObjectParams) *strings.Replacer {
 }
 
 // validateIngress overlay 合并后强校验平台不变量，违规拒绝发布（发布期反馈，而非
-// 让坏流量规则上线）。核心契约：对象归属唯一（backend 全部指向本服务）、rewrite
-// 路由形状完整（path 尾缀捕获组 + use-regex）、x-forwarded-prefix 与对外前缀一致
-// （agent-framework Debug Console/外链依赖）、SSE 长超时保留。
+// 让坏流量规则上线）。两种模式（p.IngressHostSuffix 是否为空）共用部分不变量：
+// 对象归属唯一（backend 全部指向本服务）、pathType 必填、SSE 长超时保留、
+// defaultBackend 恒空；仅 path 模式强制 rewrite 路由形状（path 尾缀捕获组 +
+// use-regex/rewrite-target）与 x-forwarded-prefix 同对外前缀一致，host 模式改为
+// 强制 host 恒为 {K8sName}{suffix}（根路径直出，无前缀可透传）。
 func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
+	hostMode := p.IngressHostSuffix != ""
 	if ing.Name != p.K8sName || ing.Namespace != p.Namespace {
 		return fmt.Errorf("metadata.name/namespace must stay %s/%s", p.Namespace, p.K8sName)
 	}
@@ -302,12 +310,27 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 		return fmt.Errorf("spec.defaultBackend must stay empty (per-service object)")
 	}
 	ann := ing.Annotations
-	for k, want := range map[string]string{
-		annRewriteTarget: rewriteTargetValue,
-		annUseRegex:      "true",
-	} {
-		if ann[k] != want {
-			return fmt.Errorf("annotation %s must stay %s", k, want)
+	if hostMode {
+		// host 模式无前缀可剥：rewrite 三项必须为空（不存在或空串），不是"不校验"。
+		// 放行非空错值有真实后果——x-forwarded-prefix 有明确下游消费者：agent-framework
+		// DebugController 读 X-Forwarded-Prefix 拼 302 的 Location（X-Forwarded-Prefix
+		// 非空即跳 {该值}/debug/，从 path 模式模板照抄写出的错前缀会让 /debug 直接 404）；
+		// rewrite-target 则可能被 ingress-nginx 用于改写整条 location。
+		// 内置构造三项一个都不生成，收紧不影响任何合法 host 模式 overlay。
+		for _, k := range []string{annRewriteTarget, annUseRegex, annXForwardedPrefix} {
+			if ann[k] != "" {
+				return fmt.Errorf("annotation %s must stay empty (host mode has no path prefix to rewrite or strip)", k)
+			}
+		}
+	} else {
+		// path 模式：rewrite 路由形状是硬契约（尾缀第 2 捕获组喂给 /$2）
+		for k, want := range map[string]string{
+			annRewriteTarget: rewriteTargetValue,
+			annUseRegex:      "true",
+		} {
+			if ann[k] != want {
+				return fmt.Errorf("annotation %s must stay %s", k, want)
+			}
 		}
 	}
 	if ann[annProxyReadTimeout] == "" || ann[annProxySendTimeout] == "" {
@@ -317,6 +340,11 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 	svcName := p.K8sName + "-svc"
 	found, prefix := false, ""
 	for _, rule := range ing.Spec.Rules {
+		// host 模式：域名即服务身份，overlay 不得偏离（空 host 会退化成共享入口 IP
+		// 承载根路径，流量串服务且无法定位）。遍历全部 rules，不放过无 http 的规则
+		if hostMode && rule.Host != p.K8sName+p.IngressHostSuffix {
+			return fmt.Errorf("rule host must stay %s (per-service domain)", p.K8sName+p.IngressHostSuffix)
+		}
 		if rule.HTTP == nil {
 			continue
 		}
@@ -329,6 +357,17 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 			// pathType 为 v1 必填：漏写会被 apiserver 拒绝，提前在此反馈
 			if path.PathType == nil {
 				return fmt.Errorf("path %q must set pathType", path.Path)
+			}
+			if hostMode {
+				// host 模式根路径直出：path 是不变量（Endpoint 固定派生为
+				// {scheme}://{K8sName}{suffix}/，若放开 path 会让落库地址与实际服务
+				// 路由错位、前端链接 404），无 rewrite 前缀可校验
+				if path.Path != hostModeRootPath {
+					return fmt.Errorf("path %q must stay %s (host mode serves the root path)",
+						path.Path, hostModeRootPath)
+				}
+				found = true
+				continue
 			}
 			if !strings.HasSuffix(path.Path, ingressPathSuffix) {
 				return fmt.Errorf("path %q must keep suffix %s (rewrite-target %s relies on it)",
@@ -346,6 +385,9 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 	if !found {
 		return fmt.Errorf("spec.rules must keep at least one http path")
 	}
+	if hostMode {
+		return nil
+	}
 	if ann[annXForwardedPrefix] != prefix {
 		return fmt.Errorf("annotation %s must match public path prefix %q (change both together)",
 			annXForwardedPrefix, prefix)
@@ -353,14 +395,28 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 	return nil
 }
 
-// IngressEndpoint 从（合并后）Ingress 派生对外展示地址：host 取第一条带尾缀 path 的
-// 规则 Host（空回落 fallbackHost；host 已含 ":" 视为自带端口不重复拼接），path 剥掉
-// 固定尾缀得对外前缀（剥空即根路径），scheme 按 TLS 有无，端口取入参。仅用于展示
-// 与记录；模板改 host 后的 DNS/端口可达性由环境自行保证。
-func IngressEndpoint(ing *networkingv1.Ingress, fallbackHost string, port int) string {
+// IngressEndpoint 从（合并后）Ingress 派生对外展示地址。模式按配置 hostSuffix 分支
+// （与 validateIngress 同源，不从 path 尾缀嗅探——overlay 改 path 会误导嗅探）：
+//   - host 模式（hostSuffix 非空）：取首条规则的 Host（空则回落 fallbackHost 作防御），
+//     根路径直出，端口 80/443 由域名默认承载，故不拼 port：{scheme}://{host}/
+//   - path 模式（hostSuffix 为空）：host 取第一条带尾缀 path 的规则 Host（空回落
+//     fallbackHost；host 已含 ":" 视为自带端口不重复拼接），path 剥掉固定尾缀得对外
+//     前缀（剥空即根路径），端口取入参
+//
+// scheme 按 TLS 有无。仅用于展示与记录；模板改 host 后的 DNS/端口可达性由环境自行保证。
+func IngressEndpoint(ing *networkingv1.Ingress, fallbackHost string, port int, hostSuffix string) string {
 	scheme, host := "http", fallbackHost
 	if len(ing.Spec.TLS) > 0 {
 		scheme = "https"
+	}
+	if hostSuffix != "" {
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host != "" {
+				host = rule.Host
+				break
+			}
+		}
+		return fmt.Sprintf("%s://%s/", scheme, host)
 	}
 	found, prefix := false, ""
 	for _, rule := range ing.Spec.Rules {

@@ -10,6 +10,7 @@ import (
 
 	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/k8s/k8sfake"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"agent-manager/backend/internal/store"
@@ -490,7 +491,7 @@ func ingressTemplate(t *testing.T, content string) *k8s.IngressBuilder {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b, err := k8s.NewIngressBuilder(path, "nginx")
+	b, err := k8s.NewIngressBuilder(path, "nginx", "")
 	if err != nil {
 		t.Fatalf("new ingress builder: %v", err)
 	}
@@ -603,5 +604,79 @@ func TestRepublishInvalidOverlayKeepsRecord(t *testing.T) {
 	}
 	if got.Endpoint != svc.Endpoint {
 		t.Fatalf("endpoint must stay unchanged, got %q want %q", got.Endpoint, svc.Endpoint)
+	}
+}
+
+// ---- Ingress host 模式（INGRESS_HOST_SUFFIX）----
+
+// hostModeSuffix 演示用的域名后缀（对应 issue §3 示例）。
+const hostModeSuffix = ".region-c86-test.test-kzx1.cncb"
+
+// host 模式端到端：发布的 Ingress 对象与落库 Endpoint 均为域名形态。
+func TestPublishHostMode(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	pkg := uploadTestPkg(t, core, "")
+
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("ingress not created: %v", err)
+	}
+	if ing.Spec.Rules[0].Host != "oaf-acme-demo"+hostModeSuffix {
+		t.Fatalf("ingress host wrong: %q", ing.Spec.Rules[0].Host)
+	}
+	if p := ing.Spec.Rules[0].HTTP.Paths[0]; p.Path != "/" || p.PathType == nil ||
+		*p.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("host mode path wrong: %+v", p)
+	}
+	if _, ok := ing.Annotations["nginx.ingress.kubernetes.io/rewrite-target"]; ok {
+		t.Fatal("host mode ingress must not carry rewrite annotations")
+	}
+	// Endpoint 走域名（不拼 INGRESS_PORT）
+	want := "http://oaf-acme-demo" + hostModeSuffix + "/"
+	if svc.Endpoint != want {
+		t.Fatalf("endpoint = %q, want %q", svc.Endpoint, want)
+	}
+}
+
+// 模式切换（path → host）后重新上线：Ingress 对象被覆盖为新形态，Endpoint 同步重算落库。
+// 存量服务不做后台批量迁移，仅在 apply 路径收敛。
+func TestStartAgainRecomputesEndpointAfterModeSwitch(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	// 先以 path 模式发布并落到可重新上线的状态
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	if svc.Endpoint != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("initial endpoint must be path mode, got %q", svc.Endpoint)
+	}
+	// 切 host 模式后重新上线
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	got, err := core.StartAgain(svc.ID)
+	if err != nil {
+		t.Fatalf("start again: %v", err)
+	}
+	want := "http://oaf-acme-demo" + hostModeSuffix + "/"
+	if got.Endpoint != want {
+		t.Fatalf("endpoint must be recomputed on start again, got %q want %q", got.Endpoint, want)
+	}
+	stored, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Endpoint != want {
+		t.Fatalf("endpoint must be persisted, got %q want %q", stored.Endpoint, want)
+	}
+	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Spec.Rules[0].Host != "oaf-acme-demo"+hostModeSuffix {
+		t.Fatalf("ingress must be re-applied in host mode, got %q", ing.Spec.Rules[0].Host)
 	}
 }
