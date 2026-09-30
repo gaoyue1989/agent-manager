@@ -11,6 +11,7 @@ func TestSensitiveKeys(t *testing.T) {
 		"LLM_API_KEY": true, "CHECKPOINT_PASSWORD": true,
 		"AGENT_REDIS_URL": true, "OPENSANDBOX_API_KEY": true,
 		"AGENT_PROTOCOL_AUTH_TOKEN": true, "AGENT_REMOTE_HEADERS_JSON": true,
+		"AGENT_A2A_JOB_TOKEN": true,
 	}
 	got := SensitiveKeys()
 	if len(got) != len(want) {
@@ -38,9 +39,10 @@ func TestSandboxEnabledExcluded(t *testing.T) {
 }
 
 // 协议启用/存储开关按服务在发布 env 声明，不进平台默认配置（默认预填会给全部
-// 服务开协议、扩大 /tasks 暴露面）；模板只收敏感两项（见 template.go protocol 组）。
+// 服务开协议、扩大 /tasks 暴露面）；模板只收敏感键（见 template.go protocol 组）。
 func TestProtocolSwitchesExcluded(t *testing.T) {
-	for _, k := range []string{"AGENT_PROTOCOL_ENABLED", "AGENT_PROTOCOL_TASK_STORE", "AGENT_PROTOCOL_TASK_RETENTION_DAYS"} {
+	for _, k := range []string{"AGENT_PROTOCOL_ENABLED", "AGENT_PROTOCOL_TASK_STORE", "AGENT_PROTOCOL_TASK_RETENTION_DAYS",
+		"AGENT_A2A_JOB_ENABLED", "AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS", "AGENT_A2A_JOB_RETENTION_HOURS", "AGENT_A2A_JOB_MAX_CONCURRENT"} {
 		if KnownKeys()[k] {
 			t.Errorf("%s must not enter the template", k)
 		}

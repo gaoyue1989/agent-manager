@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | **设计定稿 v1.4（M1 已实施，PR #62）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15）+ 2026-09-29 M1 双进程/平台部署实测（§16） |
+| 状态 | **设计定稿 v1.5（多副本设计 §18 定稿待实施，含 Issue #69 A2A Job 下沉随行；M1 已实施，PR #62/#66/#67）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15）+ 2026-09-29 M1 双进程/平台部署实测（§16）+ 2026-09-30 M1 收尾迭代与 demo 完整化（§17） |
 | 日期 | 2026-09-28 |
 | 参考 | 官方案例 [order-fulfillment](https://java.agentscope.io/v2/zh/service/cases/order-fulfillment)（AgentScope Service + Team 形态）；协议文档 [integration/protocol](https://java.agentscope.io/v2/zh/integration/protocol) |
 | 关联代码 | agent-framework SDK `io.agentscope:*:2.0.3`；`extensions-a2a-client`（已在 pom 未用）；`extensions-agent-protocol`（待引入） |
@@ -16,7 +16,7 @@
 | Team/Leader 编排 | trip-lead 主 agent 提示词 + 远程子 agent 声明（`SubagentDeclaration.url`） | 编排质量依赖模型，需离线评测兜底 |
 | Workflow 节点级授权切换 | 三层防线 + L4 硬约束（§6） | L4 落地前诊断阶段"只读"是软约束（§6 显式残差） |
 | Issue/Run/Attempt 治理 + Task map | OTel trace + tool_audit_log + session_message + `plan_id` 对账 | 无工作流级重放视图 |
-| Job Endpoint（API key + Idempotency-Key） | A2A `message/send` 为入口；**幂等需平台薄封装**（§12，taskId 只是执行句柄非幂等键） | 认证与显式幂等头缺省 |
+| Job Endpoint（API key + Idempotency-Key） | member 侧 `/a2a/jobs`（Issue #69 下沉 agent-framework：Redis 单键幂等状态机 + 独立 token） | `message/send` 本身无认证（既有残差）；24h 窗口外同键重试 = 新任务 |
 
 角色映射：`fulfillment-lead`→`trip-lead`（主 agent，OAF 服务）；`order/inventory/logistics/after-sales`→`booking`（订票）、`approval`（提单审批），各一个 OAF 服务，开启 Agent Protocol 服务端。
 
@@ -192,11 +192,12 @@ config:
 |---|---|
 | TaskRecord（子任务协议元数据） | **bean override**：`@Bean ProtocolTaskRepository` 返回 `WorkspaceProtocolTaskRepository(本服务 HarnessAgent 的 WorkspaceManager)`（F6 公开构造），借 DistributedStore 落 `agent_fs`（MySQL、跨副本可见）；**getter 可达性已验证**（`HarnessAgent.getWorkspaceManager()` 公开方法，javap 实证——M0 ④b 收窄为验证 store 落库行为）；异常时退化为本地 FS + `AGENT_PROTOCOL_TASK_STORE` 指向 emptyDir。**禁止指向 `/config`（PVC subPath 只读）** |
 | TaskRecord 清理 | 终态记录保留 N 天后清理（`AGENT_PROTOCOL_TASK_RETENTION_DAYS`，默认 7）：扩展 `SessionCleanupService`；需验证与现有清理维度不冲突（合成桶 `agents/_agentscope_protocol/` 不在会话/附件清理路径内——M1 测试点） |
-| SSE 事件 | `AgentProtocolEventBus` 默认内存（replay 256）——M1 单副本可接受；M3 提供 Redis Streams 实现（复用 oaf-redis + `AGENT_REDIS_PREFIX` 隔离）后放开多副本 |
+| SSE 事件 | `AgentProtocolEventBus` **bean override 为 Redis Streams 实现**（`ProtocolRedisEventBus`，§18.3；接口仅 publish/subscribe/complete，v2.0.3 字节码实证 + `@ConditionalOnMissingBean` 退位同 F6 机制）：发号/EXPIRE 复刻 `RedisEventLog` 约束（显式 `<seq>-0` XADD、禁自动 ID/XTRIM、TTL 留存），key 复用 oaf-redis + `AGENT_REDIS_PREFIX` 隔离；`AGENT_PROTOCOL_EVENT_BUS=redis\|memory`（默认 redis，Redis 缺失/异常 fail-soft 降级内存，行为不劣化于 v1.4） |
 | 对话状态 | 各服务自有 `agent_state`（共享 oaf_checkpoint）；子任务 taskId 即子会话，userId 继承自 `context.user_id`（经 §8 lead 侧 `RemoteUserIdMiddleware` 规范化，F10），`IsolationScope.USER` 语义连续 |
 | 确认上下文 | 父 `confirm_context` 多行形态（§5.1）为唯一授权事实源 |
+| A2A Job 幂等映射（Issue #69，v1.5 随实施） | member Redis `a2ajob:{idempotencyKey}`（服务前缀隔离）：claim `SET NX` 独占发送权 → 成功 CAS 写 taskId（TTL 24h）；单键原子天然裁决多副本同键并发；backend `a2a_jobs` 表撤除 |
 
-副本策略：M1 子服务 `replicas=1`（平台 Deployment 模板）；TaskRecord store 化后 resume 已可跨重启，EventBus Redis 化后放开多副本。
+副本策略：v1.4 约定 M1 子服务 `replicas=1`；**v1.5 放开多副本**——前提三件套（TaskRecord store 化 ✅ M1 已落地 / lead 侧在途登记持久化 §18.2 / EventBus Redis 化 §18.3）齐备后，lead 与 member 均可 `replicas>1`，验收 = 新必需门禁 `E2E 协议多副本` job（§18.4）。
 
 ## 8. 框架改造清单（文件级，两轮评审后）
 
@@ -217,7 +218,7 @@ config:
 
 **平台端（backend）**
 - env 对接（遵循 platform-default-config-secret 机制）：`AGENT_PROTOCOL_ENABLED`/`AGENT_PROTOCOL_TASK_STORE`/`AGENT_PROTOCOL_TASK_RETENTION_DAYS` → 服务 ConfigMap；`AGENT_PROTOCOL_AUTH_TOKEN`、`AGENT_REMOTE_HEADERS_JSON` → **敏感键清单新增，路由进 `{name}-env-secret`**；发布表单 env 说明更新。
-- 服务详情透出 agent-protocol 状态；Job 化薄封装：`Idempotency-Key → taskId` 映射表（A2A `message/send` 重复提交会建新任务，taskId 非幂等键）。
+- 服务详情透出 agent-protocol 状态；Job 化薄封装由 **Issue #69 下沉 member 侧**（`/a2a/jobs`，Redis 单键幂等；PR #67 的平台 `a2a_jobs` 实现已撤除，backend 回归纯控制面），平台仅保留 `AGENT_A2A_JOB_TOKEN` 敏感键路由。
 
 **文档更新清单**（随 M1 同 PR）：`docs/oaf-specification.md`（`agents[].endpoint` 语义启用）、`agent-framework/AGENTS.md`（新 env/新组件/T 组）、发布助手提示词（endpoint 填写指引）、`backend/AGENTS.md`（敏感键清单）。
 
@@ -229,10 +230,11 @@ config:
 | 同步等待超时（诊断） | 自动升格后台任务 | lead 用 `wait_async_results` 收割 |
 | 用户拒绝确认卡 | Bridge resume 携带 DENY → 子任务终止 | lead 汇总 turn 汇报并回到方案修订 |
 | **用户不作为/确认超时**（第二轮新增） | 远程行超独立 TTL（默认 24h）→ Bridge 自动 `resume(DENY, reason=confirm_timeout)` + 审计 | 卡片过 30min 本地 TTL 后 404 属预期（远程行独立判定，§5.1），超时治理兜底 |
-| 父进程崩溃 | 子任务独立存活（TaskRecord store 化，§7） | 父重启后经任务状态重查；M0 断言 |
-| 子服务重启 | TaskRecord 在 agent_fs，可 resume | EventBus 内存态丢失仅影响历史 SSE 重放 |
+| 父进程崩溃 | 子任务独立存活（TaskRecord store 化，§7） | 父重启/其他副本经 `remote_task_registry` 重建在途登记、自动恢复轮询（§18.2）——未落卡任务不再永久挂起（v1.5 前该场景无兜底）；M0 断言 ③ 扩展为多副本接管断言（P2，§18.4） |
+| 子服务重启 | TaskRecord 在 agent_fs，可 resume | EventBus Redis 化（§18.3）后历史 SSE 重放跨副本/跨重启可见；Redis 故障期 fail-soft 降级内存，仅损失重放窗口 |
 | 3 层上限 | 子不能再 spawn 孙 | 两层扁平；子服务内部分工用本地 subagent |
 | 写任务并发悬挂 | FIFO 排队（§5.3），不悬挂不覆盖 | 违反串行规约记 ERROR 审计 |
+| A2A Job 发送失败（Issue #69） | 确定未受理（连接失败/4xx/JSON-RPC error）释放认领可重试；结果未知（超时/5xx）保留认领刷租期禁重发 | 至少一次语义；副作用由工具层 `plan_id`/`expected_version` 兜底（§12） |
 
 ## 10. 可观测性
 
@@ -249,7 +251,8 @@ config:
   ④a deny_rules ❌（扩展不消费，转 M1 自实现，F16）；④b TaskRecord 持久化 ✅（文件存储跨 member 重启保留+可 resume；agent_fs 变体 M1）；④c userId 透传 ✅；④d 中间件上下文可见 ✅；④e 依赖兼容 ✅（Boot 3.3.5 BOM 管控 jackson 2.17.2）。
 - **M1 框架能力**：§8 member 1–4/6 + lead 1–4；单测（endpoint→声明映射、md 跳过、Bridge 决策路由与 FIFO、AuthFilter fail-fast、RemoteUserIdMiddleware）+ e2e 新增 **T 组**（远程子 agent：正常/确认/拒绝/超时/子服务下线/父崩溃恢复/无 token 401/存量服务零影响；双进程编排参考 `plugin-smoke.sh` 先例）。
 - **M2 业务示例包**：trip-lead + booking + approval 三包经平台发布走通，验收按 §12；**顺带量化 token 成本**（子任务独立上下文的放大倍数，写入运维文档）。
-- **M3 加固**：L4 PhaseDenyMiddleware、EventBus Redis 化与多副本放开、平台 Job 薄封装、`AGENT_REACT_MAX_ITERS` 实测调优、Ingress overlay 排除 /tasks（可选纵深）。
+- **M3 加固**：L4 PhaseDenyMiddleware、EventBus Redis 化与多副本放开、平台 Job 薄封装（PR #67 引入 → **Issue #69 撤除下沉 member 侧**）、`AGENT_REACT_MAX_ITERS` 实测调优、Ingress overlay 排除 /tasks（可选纵深）。
+  - **其中「EventBus Redis 化与多副本放开」提前至 v1.5 定稿实施（§18，含必需门禁 `E2E 协议多副本`）**；L4 / REACT 调优 / Ingress overlay 仍留 M3 余量。
 
 ## 12. 验收标准（M2 场景断言）
 
@@ -407,3 +410,153 @@ mock 与政策版本引用断言），关键场景截图与演示剧本见 demo/
 
 **环境事实**：demo LLM 为 MiMo mimo-v2.5（key 失效症状 = 回复内嵌 401 Invalid API Key，
 经 PATCH env 轮换自愈）；宿主盘曾因 docker build cache 吃满致 MySQL 建表失败（Error 3675）。
+
+## 18. 多副本设计（v1.5，2026-09-30 定稿待实施）
+
+> 决策记录：门禁挂载 = **新建独立必需 job**（`E2E 协议多副本`，需管理员追加分支保护必需检查）；范围 = **一次到位**（lead 侧登记持久化 + member 侧 EventBus Redis 化 + E2E 门禁 + 文档配套）；本文档扩写承载设计。**2026-09-30 追加**：Issue #69（A2A 幂等 Job 下沉 agent-framework，路线 A）随本期同步实施，backend 撤除先行。
+
+### 18.0 目标与非目标
+
+- **目标**：委派链路（spawn → 快照轮询 → 确认路由 → resume → 终态唤醒/收割 → TTL 治理）在 lead、member 各自 `replicas>1`（共享 MySQL/Redis、LB 随机路由、无粘性）下正确工作；任意副本崩溃不丢任务、不重复唤醒/治理；以必需 E2E job 固化为门禁。
+- **目标（随本期同步实施，Issue #69 路线 A）**：A2A 幂等 Job 从 platform-backend 下沉 agent-framework（member 新增 `/a2a/jobs`，Redis 单键原子状态机），backend 撤除 PR #67 P2-3 回归纯控制面。协同点：Job 状态全外置 Redis（`SET NX` + Lua CAS）本身即无状态多副本设计（任意副本裁决同键并发），其多副本验收（同键双副本收敛）并入 §18.4 P7；member 实现细节、撤除清单、语义 delta 与残差**以 Issue #69 设计（v1.1 定稿）为准，不在本文重复**。
+- **非目标**：L4 PhaseDenyMiddleware / Ingress overlay 排除 /tasks（仍留 M3）；`/admin/reload` 多副本扇出（§18.7 边界）；单副本行为任何可见变化；A2A Job 异步提交形态（Issue #69 §2.5 v2 方向）。
+
+### 18.1 现状盘点（v1.4 止，代码行以 PR #66 合并点为准）
+
+已无状态化（跨副本安全，无需改动）：
+
+| 数据/机制 | 载体 | 依据 |
+|---|---|---|
+| 确认卡（唯一授权事实源） | `confirm_context`（MySQL），CAS 消费/FIFO/TTL 分档 | `ConfirmContextStore`（跨副本可见注释 + V7 多行形态） |
+| 决策路由 | DB 行 + endpoint 解析「登记表 → 声明清单」退回 | `RemoteConfirmBridge.routeDecision` / `resolveEndpointForTask` |
+| TaskRecord | `agent_fs`（MySQL，bean override §7） | `AgentProtocolConfig.agentProtocolTaskRepository` |
+| 子任务对话状态 | `agent_state` 共享 oaf_checkpoint（子任务 taskId 即子会话） | §7 |
+| Turn 租约 | `turn_lease`（MySQL token+TTL+续租） | `TurnLeaseStore` |
+| 会话事件流 | Redis Streams durable SSE | `SessionEventBus` + R 组 E2E |
+| 审计 / 平台幂等 Job | `tool_audit_log` / `a2a_jobs` | §10 / PR #67 |
+
+副本本地内存态（本期治理对象）：
+
+| # | 位置 | 多副本/重启下的行为 |
+|---|---|---|
+| G1 | `RemoteConfirmBridge.inFlight`（登记表，注释自认"lead 重启后丢失"） | 未落卡先重启 → awaiting 任务**永久挂起**（TTL sweep 只扫已落库行，无兜底）；已落卡 → 后台收割/自动唤醒退化 |
+| G2 | SDK `AgentProtocolTaskEventBus`（内存 replay 256） | member `/tasks/{id}/events` 重放与实时扇出副本本地；跨副本/断线重连丢事件 |
+| G3 | `scheduledSweep`（`@Scheduled` 每副本执行，无分布式锁） | replicas>1 同一过期行被多副本各发一次 `resume(DENY)`（重复调用 + `TIMEOUT_RESUME_FAILED` 审计噪音） |
+| G4 | `wokenTasks` 守卫（进程内 Set） | 决策路径与后台收割跨副本时守卫失效，存在双汇总 turn 窗口（有租约串行化兜底，低概率） |
+
+### 18.2 lead 侧在途任务登记持久化（治 G1/G3/G4）
+
+**新表 `remote_task_registry`**（Flyway `V8__remote_task_registry.sql`，列类型/字符集对齐 V7 `confirm_context`）：
+
+```sql
+CREATE TABLE remote_task_registry (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  session_id VARCHAR(191) NOT NULL COMMENT 'lead 规范会话 id（SessionKeyResolver 同源）',
+  task_id    VARCHAR(191) NOT NULL COMMENT 'member 协议任务 id',
+  service    VARCHAR(191) NOT NULL COMMENT '目标子服务名（OafConfig.subAgents 声明键）',
+  endpoint   VARCHAR(512) NOT NULL COMMENT 'spawn 时解析的 endpoint 快照',
+  status     VARCHAR(16)  NOT NULL DEFAULT 'IN_FLIGHT' COMMENT 'IN_FLIGHT/WAKING/TERMINAL/GIVEN_UP',
+  created_at DATETIME(3)  NOT NULL,
+  updated_at DATETIME(3)  NOT NULL,
+  UNIQUE KEY uk_session_task (session_id, task_id),
+  KEY idx_status_updated (status, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='lead 侧远程子任务在途登记（多副本重建源，§18）';
+```
+
+机制（五点，全部 fail-soft、不改变单副本可见行为）：
+
+1. **登记**：`onAgentSpawnResult` 落内存 `inFlight`（不变）+ `INSERT IGNORE` registry 行（uk 对撞 = 已登记，幂等）。`confirm_context` 仍是唯一授权事实源，registry 只是**轮询调度簿**。
+2. **重建**：启动后 + `@Scheduled` 每 60s：`SELECT ... WHERE status='IN_FLIGHT' ORDER BY updated_at LIMIT 200` → 不在内存的回填 `inFlight`（endpoint 取行快照）。多副本会重复轮询同一任务——`GET /tasks/{id}` 只读幂等、量级 = 在途任务数 × 副本数 / 轮询周期，可接受；落卡幂等由 `findPending` 前置判定 + `ON DUPLICATE KEY` 兜底，`CARD_QUEUED` 审计仅在 insert 生效（affected==1）时记，避免双份。
+3. **终态收口**：`onTaskTerminal` / 传输超限放弃 → `UPDATE status='TERMINAL'/'GIVEN_UP'`（CAS `WHERE status IN ('IN_FLIGHT','WAKING')`）。终态行保留 7 天后由 `SessionCleanupService` 清理（复用 §7 TaskRecord 清理节奏）。
+4. **唤醒幂等跨副本化（治 G4）**：`wakeLead` 前置 CAS `UPDATE remote_task_registry SET status='WAKING' WHERE session_id=? AND task_id=? AND status='IN_FLIGHT'`，affected==1 才执行汇总 turn——决策路径（`awaitTerminalAndWake`）与后台收割路径（`onTaskTerminal`）统一过此闸；进程内 `wokenTasks` 降级为 registry 无行时的兜底（历史/异常路径），不再是唯一防线。
+5. **sweep 恰好一次（治 G3）**：`sweepExpiredRemote` 将 CAS 消费**前置**——先 `confirmContextStore.consume`（0→1 仅一副本成功），成功者才发 `resume(DENY, reason=confirm_timeout)` + 审计；消费失败（已消费）直接跳过。时序变化语义与 `routeDecision`「resume 失败不回滚消费」一致，resume 失败记 `TIMEOUT_RESUME_FAILED`。另将 `resolveEndpointForTask` 的退回链改为「内存登记 → registry 行快照 → 声明清单」，跨副本确认不再依赖 spawn 副本存活。
+
+### 18.3 member 侧协议 EventBus Redis Streams 化（治 G2）
+
+- **实现**：新增 `service/protocol/ProtocolRedisEventBus implements AgentProtocolEventBus`（接口仅 `publish(taskId, event)` / `subscribe(taskId, fromSeq)` / `complete(taskId)`，v2.0.3 字节码实证）；`AgentProtocolConfig.ProtocolEnabledAssembly` 增加 bean override（`@ConditionalOnMissingBean` 退位机制同 F6，实现时以启动行为实证）。
+- **存储**：`{AGENT_REDIS_PREFIX}protocol:task:{taskId}:events` 流 + `{...}:seq` 计数器。**复刻 `RedisEventLog` 硬约束**：INCR 显式发号 → `XADD <seq>-0`（绝不自动 ID）、EXPIRE 留存（禁 XTRIM）、cluster hash tag 兼容；事件体 Jackson JSON 序列化 `RemoteAgentEvent`（反序列化失败按坏帧跳过 + WARN）。
+- **订阅语义**：`subscribe(taskId, fromSeq)` = XRANGE 回放 `fromSeq` 之后 → XREAD block 实时续流（回放先吐、实时从回放尾接续，对齐 SessionEventBus A3「实时与回放双视图融合」）；断线 `Last-Event-ID` 续传由 SDK controller 既有 `from_seq`/`Last-Event-ID` 支持直接受益（F1）。
+- **complete**：写终态哨兵事件后缩短 EXPIRE（重放窗口收窄至 1h），保证在途订阅者收到 complete 帧再收流。
+- **fail-soft**：Redis 缺失/异常时 publish 降级进程内内存 bus、subscribe 降级内存 replay（复刻 `RedisEventLog.fail` 分级日志模式），绝不阻塞任务执行线程；恢复后新事件自动回主路。
+- **开关**：`AGENT_PROTOCOL_EVENT_BUS=redis|memory`（默认 redis；`AGENT_REDIS_URL` 缺失或初始化失败 → WARN + memory 回退，行为不劣化于 v1.4）。进 `AgentManagerProperties` + `application.yml`，非敏感键走 ConfigMap。
+
+### 18.4 E2E 门禁：`E2E 协议多副本` 必需 job
+
+**拓扑**（`run.sh protocol-multi` 组，共享同一 MySQL + Redis——多副本语义前提，与 §5.3 R 组同款）：
+
+| 实例 | 端口 | 说明 |
+|---|---|---|
+| member LB | :8100 | nginx upstream → member×2 |
+| member×2 | :8103/:8104 | 协议 fixture 包，`AGENT_PROTOCOL_ENABLED=true` + token；**随 Issue #69 加 `AGENT_A2A_JOB_ENABLED=true` + `AGENT_A2A_JOB_TOKEN`**，共享 DB/Redis |
+| lead LB | :8102 | nginx upstream → lead×2 |
+| lead×2 | :8105/:8106 | lead fixture 包（`subAgents[].endpoint` → member LB），共享 DB/Redis |
+| 存量实例 | :8101 | 协议关，P6 零影响口径 |
+
+寻址经 `lib/env.ts` 扩展（`E2E_PROTO_MEMBER_BASE/A/B`、`E2E_PROTO_LEADER_BASE/A/B`，回落 `.runtime/env.json`，复用 REPLICA_A/B 既有模式）；kill/重启手段复用 `api-multi-kill` 先例。
+
+**用例（P 组，`tests/api-protocol-multi.spec.ts`，serial）**：
+
+| # | 场景 | 断言 |
+|---|---|---|
+| P1 | 跨副本确认链路（全程 LB 随机路由） | spawn → awaiting 落卡 → confirm（落任一 lead 副本）→ resume 成功 → COMPLETED → **收割汇总 turn 恰好一次** |
+| P2 | lead 副本崩溃恢复（G1 验收） | 经 LEADER_A spawn → kill LEADER_A → lead_B 60s 内重建登记拾起轮询 → 落卡可见 → confirm（打 LEADER_B）成功 → 收割汇总恰好一次 |
+| P3 | EventBus 跨副本（G2 验收） | 直投 MEMBER_A 建任务 → MEMBER_B `/tasks/{id}/events?from_seq=0` 全量对账（802/802 型）→ 断线 Last-Event-ID 续传不重不漏 |
+| P4 | sweep 恰好一次（G3 验收） | `AGENT_REMOTE_CONFIRM_TTL_HOURS` 调小（≈36s）→ 两 lead 副本 sweep 竞争 → member 恰好收到一次 DENY resume（audit 恰好一条 `confirm_timeout`） |
+| P5 | 双副本无粘性冒烟 | 完整委派会话打 lead LB：R 组口径（/status 判态 + /subscribe 游标续传）+ 委派五阶段断言 |
+| P6 | 存量零影响 | 协议关实例 `/tasks` 无端点，基础链路不受影响（T8 口径复用） |
+| P7 | A2A Job 同键跨副本收敛（Issue #69 PR-C 验收） | 经 member LB 随机路由**同键两次提交**（两次间不保证落同副本）→ 同一 `taskId`、`idempotent=true` 恰好一次、member 侧仅建一个任务；`GET /a2a/jobs/{key}` 两副本各自收敛 `state` 一致；401/400 分类断言（token 面） |
+
+断言数据源：只读 HTTP 端点 + 直查 MySQL（audit 表 / registry 表；CI services mysql 可直连）。
+
+**CI 与分支保护**：
+
+- `.github/workflows/agent-framework-ci.yml` 新增 `e2e-protocol-multi` job（复刻 e2e-protocol job 骨架：mysql+redis services、不装浏览器；timeout 与实例数放宽）；目录过滤触发条件与 e2e-protocol 相同。
+- **必需检查追加**（合并前置操作，管理员执行；job `name:` 与保护规则字符串必须完全一致）：
+
+  ```bash
+  gh api -X PATCH repos/gaoyue1989/agent-manager/branches/master/protection/required_status_checks \
+    --input - <<< "$(gh api repos/gaoyue1989/agent-manager/branches/master/protection/required_status_checks \
+    | jq '.contexts + ["E2E 协议多副本"] | {strict: true, contexts: .}')"
+  ```
+
+  实施时先 `gh api .../protection/required_status_checks` 读当前六项，追加为七项再写回；required_status_checks 不支持增量 PATCH，须整体覆盖（先读后写，勿凭记忆拼 contexts）。
+
+### 18.5 改造清单（文件级）
+
+**agent-framework**
+
+- `src/main/resources/db/migration/V8__remote_task_registry.sql`（新）
+- `service/RemoteTaskRegistryStore.java`（新；对齐 `ConfirmContextStore` 风格：登记/重建查询/CAS 收口/终态清理）
+- `service/RemoteConfirmBridge.java`（登记写库、重建调度、wake CAS 前置、sweep consume 前置、endpoint 解析查库；`wokenTasks` 降级兜底）
+- `service/protocol/ProtocolRedisEventBus.java`（新）
+- `config/AgentProtocolConfig.java`（EventBus bean override + 开关装配）
+- `config/AgentManagerProperties.java` / `application.yml`（`AGENT_PROTOCOL_EVENT_BUS`）
+- `service/SessionCleanupService.java`（registry 终态行 7 天清理）
+- 单测：`RemoteTaskRegistryStoreTest`、`RemoteConfirmBridgeTest` 扩（重建回填/跨副本 wake CAS/sweep 单次/endpoint 查库退回）、`ProtocolRedisEventBusTest`（对齐现有 Redis 测试基建：回放/实时融合/fail-soft 降级/前缀隔离）
+- e2e：`scripts/env-up.sh`（protocol-multi 拓扑）、`lib/env.ts`、`tests/api-protocol-multi.spec.ts`、`playwright.config.ts`（project）、`scripts/run.sh`（group）
+
+**平台/文档（backend 零代码改动）**
+
+- `.github/workflows/agent-framework-ci.yml`：新 job；根 `AGENTS.md` CI 表更新（必需检查六项 → 七项）；`agent-framework/AGENTS.md`（新 env/新组件/e2e 组）；本设计 §7/§9/§11 随实施结果回填实测结论。
+- 敏感键清单无需新增（`AGENT_REDIS_URL`/`AGENT_PROTOCOL_AUTH_TOKEN` 已在 #67 清单）。
+
+**Issue #69 下沉（随本期实施，文件级以 Issue §2.6/§3 为准）**
+
+- **PR-A backend 撤除（先行，只动 `backend/**` + docs → 仅 backend-ci 门禁）**：删 `service/a2ajob.go`+test、`handler/router.go` 两 jobs 路由、`respond.go` 错误映射、`publish.go` `A2ASendTimeout` 字段与装配、`main.go` env 解析、`store/model.go`+`db.go`+`testkit_test.go` 的 `A2aJob` 模型与 AutoMigrate、`mcpsrv/server.go` 工具描述回退、`backend/AGENTS.md` 条目；`template.go` protocol 组补 `AGENT_A2A_JOB_TOKEN` 敏感键（开关键刻意排除，防默认启用扩大暴露面）；平台 MySQL `DROP TABLE IF EXISTS a2a_jobs`（runbook 一行）。撤除安全性已核实（2026-09-30：frontend/e2e/release-agent 对 `/jobs` 零引用、`a2ajob.go` 无后续依赖、超时装配在 `r.Run()` 后不可达）。
+- **PR-B member 实现（与多副本改造并行，只动 `agent-framework/**`）**：`config/AgentA2aJobProperties.java`、`config/A2aJobConfig.java`（条件装配 + token fail-fast + Redis 自检）、`controller/A2aJobController.java`、`service/a2ajob/{A2aJobService,A2aJobRedisStore,A2aJobAuthFilter}.java`；单测/mock/IT 与 `Semaphore(32)` 并发准入按 Issue §2.5/§6；`application.yml` `agent.a2a-job.*`。
+- **PR-C e2e**：不单独立 PR，P7 用例并入 `api-protocol-multi.spec.ts`（本节 e2e 清单同步覆盖）。
+
+**实施顺序**：PR-A（backend-ci 门禁，风险≈0）→ 多副本改造（§18.2/§18.3）与 PR-B（agent-framework-ci 门禁）并行 → P 组门禁 job 全量生效（含 P7）→ 管理员追加分支保护必需检查（七项）。PR-A 与 agent-framework 侧无耦合，`AGENT_A2A_JOB_TOKEN` 敏感键先行合入不产生行为（无服务设置该键）。
+
+### 18.6 兼容性与迁移
+
+- Flyway 新 V8 文件，存量库启动自动迁移（禁改已合并 V 文件）；表为纯新增，无回填需求（存量在途任务本就无登记，TTL 治理语义不变）。
+- 单副本零回归：registry 只是调度簿；sweep consume 前置仅改时序（终态语义一致）；EventBus 默认 redis 但 fail-soft 保证无 Redis 环境不劣化。
+- `AGENT_PROTOCOL_ENABLED` 默认 false 不变；升级即获得多副本能力，`replicas` 平台本就自由配置，无需解锁代码。
+- Issue #69 侧：member `AGENT_A2A_JOB_ENABLED` 默认 false（存量零影响，沿 agent-protocol 先例）；backend 撤除无兼容窗口（零调用方）；平台 `a2a_jobs` 表 DROP 后 AutoMigrate 不再重建（模型同步删除）。
+
+### 18.7 边界与遗留
+
+- **`/admin/reload` 多副本触达**：热更新经 Service LB 只打单副本 → 副本间配置分叉。平台暂不自动调 reload（运维手动端点），约定：**多副本服务改 OAF 包走重新发布（rollout 重建全副本）**；平台侧逐 pod 扇出（endpoints API 逐 pod POST）列为后续可选加固，不在本期。
+- `McpConnectionWatchdog` / `OafReloadService` 天然 per-replica，无需改动。
+- SDK 升级风险：EventBus 接口与 bean 退位机制在 2.0.3 字节码实证，升级需重验（可并入权限覆盖防漂移测试模式）。
