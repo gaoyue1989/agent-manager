@@ -118,6 +118,38 @@ lead 逐字委派 after-sales-agent → biz-mcp 服务端乐观并发校验拒�
 
 ![member 侧透传](docs/img/05-member-propagate.png)
 
+### 附加演示点：远程调用过程可视化（Debug Console 事件流）
+
+> 2026-09-30 起的框架能力（镜像 `agentscope-2.1.0-v20260930-3`+）：Debug Console 的
+> **Channel 模式**（单次流 `/threads/chat` 的平台 SSE 词表；默认 A2A 模式走 JSON-RPC
+> `message/stream` 标准帧，本身不含子 agent 事件）可逐帧看到远程委派全过程：
+
+- lead 的每次 `agent_spawn` 渲染为独立 **远程调用面板**（🛰 + 目标 agent 名 + 状态徽章
+  调用中/子任务运行中/已完成 + 任务文本）；远端子 agent 回流的思考/文本/工具调用
+  （SSE 帧带 `source`/`taskId` 标注）**嵌套展示在面板内**，与 lead 自身内容明确分区；
+- spawn 工具行标题为「远程委派 <agent>：<task>」（`tool_call_summary`），展开可见
+  原始入参与结果（agent_key/session_id/status/reply）；结果预览解析为
+  「<agent> 返回：<reply 首行>」落在面板 footer；
+- 同帧修复（框架侧）：远端子 agent 转发的 `AGENT_END` 不再终结 lead 的 turn——
+  此前它会被当作 turn 终点提前释放租约并关流，SSE 在 spawn 结果返回前被截断
+  （只能靠刷新续传看到后续），ChatStream/Confirm/Channel 三处收尾点已加来源 guard。
+
+诊断阶段的实时流（order-agent 面板已完成，lead 继续 thinking）：
+
+![远程调用面板实时流](docs/img/06-debug-remote-panel-live.png)
+
+四次委派的面板依次排列（logistics 已完成、after-sales 子任务运行中）：
+
+![多面板与运行状态](docs/img/07-debug-remote-panels-parallel.png)
+
+spawn 工具行展开（原始 Arguments/Result）与其对应的面板：
+
+![spawn 行与面板](docs/img/08-debug-spawn-row-and-panel.png)
+
+面板内嵌套展示远端子 agent 的工具调用（get_logistics）：
+
+![面板内嵌工具行](docs/img/09-debug-remote-tool-row.png)
+
 ### 附加演示点：幂等 Job 端点（平台侧）
 
 ```bash

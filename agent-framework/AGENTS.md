@@ -361,6 +361,22 @@ OAF `deniedTools` 字段控制排除列表。
 > 工具行经 `tc.group` 记归属组（结果/摘要晚于下一段文本时仍写回正确的组）；
 > 历史回放依据 `GET /threads/{sid}/history` assistant 消息的 `blocks` 有序数组（`StateDataParser.extractOrderedBlocks`，
 > 只增不改字段，旧数据无 blocks 时退回「工具组在上、文本在下」旧布局）。见 [docs/api.md](docs/api.md) blocks 字段说明。
+> **debug 页远程子 agent 调用面板 + 转发事件收尾 guard（2026-09-30）**：远程委派（Agent Protocol `agent_spawn`
+> → 远端 `/tasks`）全过程可视化 + 三处收尾缺陷修复——
+> ① **SSE 词表带来源标注**：`AgentEventSseSerializer` 对 SDK `tagRemoteForwardedEvent` 打标的转发事件输出
+> `source`（`{parentSessionId}/{agentId}`）与 `taskId`/`parentSessionId` 元数据，并新增 `subagent_exposed`
+> snake_case 帧（SubagentExposedEvent 四字段）；lead 自身事件 source 恒为 null，`isRemoteForwarded()` 为唯一判据。
+> ② **AGENT_END 收尾 guard**（ChatStream/Confirm/AgentRuntimeService.forwardEvent 三处）：远端转发的 AGENT_END
+> 是 spawn 调用进行中的「子任务终点」，此前被当作 turn 终点提前释放租约并 closeSession——SSE 在 spawn 结果返回前
+> 截断（2026-09-30 order-fulfillment demo 实测，序 223 帧后全失）；guard 后 lead 自身 AGENT_END 才收尾，整流完整。
+> ③ **前端远程调用面板**（`chat.js` + components.css `.remote-call`）：`agent_spawn` 工具行开始即开面板（🛰 + agent 名
+> + 状态徽章 调用中/子任务运行中/已完成 + 任务文本），带 source 的转发事件按 `activeRemotePanel` 路由进面板嵌套渲染
+> （复用 reply 渲染助手的 duck-type view），远端工具的 `tool_call_summary`/`tool_result_preview` 合成帧无 source、
+> 按 `remoteToolOwner[tcId]` 归属路由；转发的 AGENT_START/AGENT_END 不触碰主回复生命周期（否则撕裂气泡/提前 Stop）。
+> spawn 结果预览解析（`ToolSummaryGenerator.spawnResultPreview`）：JSON 字符串字面量解包后按行取
+> agent_id/status/task_id/reply →「<agent> 返回：<首行>」/「已受理后台任务 …」/终态文案。
+> **注意 A2A 模式（默认）走 JSON-RPC `message/stream` 标准帧，无子 agent 事件**——完整事件流在 Channel 模式
+> （`/threads/chat` 平台词表）。演示截图见 demo/order-fulfillment/docs/img/06~09。
 
 ---
 

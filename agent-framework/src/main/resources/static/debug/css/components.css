@@ -984,3 +984,81 @@ select.input { cursor: pointer; }
   font-weight: 500;
   cursor: default;
 }
+/* ---------- 远程子 agent 调用面板（Agent Protocol 远程委派可视化） ----------
+ * spawn（agent_spawn 工具行）之后独立成段：头部是目标 agent + 状态 + 任务文本，
+ * 体内嵌套展示远端子 agent 回流的思考/文本/工具调用（SSE 帧带 source 标注的事件）。 */
+.remote-call {
+  width: 100%;
+  margin: 8px 0;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--card);
+  overflow: hidden;
+}
+.remote-call .rc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--accent-bg, var(--muted));
+  cursor: pointer;
+  user-select: none;
+}
+.remote-call .rc-icon { font-size: 13px; }
+.remote-call .rc-agent {
+  color: var(--text-h);
+  font-weight: 600;
+  font-size: 13px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-call .rc-status {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--muted);
+  color: var(--text-dim);
+}
+.remote-call .rc-status.running { background: var(--accent-bg, var(--muted)); color: var(--accent); }
+.remote-call .rc-status.done { background: var(--green-bg); color: var(--green); }
+.remote-call .rc-status.error { background: var(--red-bg); color: var(--red); }
+.remote-call .rc-arrow {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+.remote-call.open .rc-arrow { transform: rotate(90deg); }
+.remote-call .rc-body { display: none; flex-direction: column; gap: 8px; padding: 10px 12px; }
+.remote-call.open .rc-body { display: flex; }
+.remote-call .rc-task {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-call .rc-events { display: flex; flex-direction: column; gap: 8px; }
+/* 嵌套段（远端思考/文本/工具组）在面板内的缩进层次 */
+.remote-call .rc-events .thinking-block,
+.remote-call .rc-events .msg-bubble,
+.remote-call .rc-events .tool-group { width: 100%; }
+.remote-call .rc-events .msg-bubble {
+  background: var(--muted);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.remote-call .rc-footer {
+  border-top: 1px dashed var(--border-subtle);
+  padding-top: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

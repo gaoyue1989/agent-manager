@@ -565,8 +565,11 @@ public class ChatStreamController {
             emitFileReadyViaEventBus(sessionId, replyId, tre.getToolCallId());
         }
 
-        // AGENT_END
-        if (event.getType() == AgentEventType.AGENT_END) {
+        // AGENT_END（仅 lead 自身事件）：远程子 agent 转发的 AGENT_END（source 非空）只是
+        // spawn 调用进行中「子任务运行终点」，若当作 turn 终点会提前释放租约并关流——
+        // SSE 在 spawn 结果/lead 收尾汇报返回前被截断（isRemoteForwarded javadoc 有实测记录）
+        if (event.getType() == AgentEventType.AGENT_END
+                && !AgentEventSseSerializer.isRemoteForwarded(event)) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
             endTurnAndCleanupBuckets(lease, sessionId, turnEnded, turnBucketKeys);
         }

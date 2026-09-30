@@ -123,6 +123,32 @@ public final class AgentEventSseSerializer {
             payload.put("type", "permission_ask");
             payload.put("tool_calls", calls);
             payload.put("reply_id", confirm.getReplyId());
+        } else if (event instanceof io.agentscope.core.event.SubagentExposedEvent sub) {
+            // 子 agent 调用收口帧（AgentSpawnTool 在结果返回时发出）：snake_case 与
+            // permission_ask 同风格，字段供前端「远程调用面板」展示收口标记
+            payload.put("type", "subagent_exposed");
+            putIfNotBlank(payload, "subagent_id", sub.getSubagentId());
+            putIfNotBlank(payload, "agent_id", sub.getAgentId());
+            putIfNotBlank(payload, "session_id", sub.getSessionId());
+            putIfNotBlank(payload, "label", sub.getLabel());
+        }
+
+        // 远端转发标注（AgentSpawnTool.tagRemoteForwardedEvent 对远程子 agent 回流事件打标，
+        // lead 自身事件 source 恒为 null）：前端据此把转发事件路由进「远程调用面板」而非主回复流
+        String source = event.getSource();
+        if (source != null && !source.isBlank()) {
+            payload.put("source", source);
+        }
+        var metadata = event.getMetadata();
+        if (metadata != null) {
+            Object taskId = metadata.get("taskId");
+            if (taskId != null && !String.valueOf(taskId).isBlank()) {
+                payload.put("taskId", String.valueOf(taskId));
+            }
+            Object parentSid = metadata.get("parentSessionId");
+            if (parentSid != null && !String.valueOf(parentSid).isBlank()) {
+                payload.put("parentSessionId", String.valueOf(parentSid));
+            }
         }
 
         // replyId / blockId 通用附注（长连接订阅多 run 区分）
@@ -139,6 +165,27 @@ public final class AgentEventSseSerializer {
             return MAPPER.writeValueAsString(payload);
         } catch (Exception e) {
             return "{}";
+        }
+    }
+
+    /**
+     * 是否为远程子 agent 转发事件。
+     *
+     * <p>SDK {@code AgentSpawnTool.tagRemoteForwardedEvent} 对远程子 agent（Agent Protocol
+     * /tasks）回流的事件统一 {@code withSource} 打标，lead 自身事件 source 恒为 null——
+     * 这也是 {@code AGENT_END} 区分「turn 真正终点」与「子任务运行终点」的唯一判据：
+     * 远程转发的 AGENT_END 若当作 turn 终点，会在 spawn 结果返回前提前释放租约并关流
+     * （2026-09-30 order-fulfillment demo 实测 SSE 截断）。ChatStreamController /
+     * ConfirmController / AgentRuntimeService 三处收尾点共用本判定。
+     */
+    public static boolean isRemoteForwarded(AgentEvent event) {
+        String source = event == null ? null : event.getSource();
+        return source != null && !source.isBlank();
+    }
+
+    private static void putIfNotBlank(Map<String, Object> payload, String key, String value) {
+        if (value != null && !value.isBlank()) {
+            payload.put(key, value);
         }
     }
 

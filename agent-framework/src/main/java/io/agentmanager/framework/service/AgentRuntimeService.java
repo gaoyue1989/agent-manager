@@ -405,6 +405,12 @@ public class AgentRuntimeService {
 
         // ===== 结束事件 =====
         else if (type == AgentEventType.AGENT_END) {
+            // 仅 lead 自身的 AGENT_END 终结流：远程子 agent 转发的 AGENT_END（source 非空）
+            // 出现在 spawn 调用进行中，提前 done/complete 会截断父流（同 ChatStreamController
+            // 收尾 guard，判据收口在 AgentEventSseSerializer#isRemoteForwarded）
+            if (io.agentmanager.framework.controller.AgentEventSseSerializer.isRemoteForwarded(event)) {
+                return;
+            }
             sink.next(Map.of(
                 "type", "task_update", "id", tid,
                 "state", "completed",

@@ -371,8 +371,10 @@ public class ConfirmController {
             eventBus.closeSession(sessionId);
         }
 
-        // AGENT_END → 关闭 EventBus
-        if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {
+        // AGENT_END（仅 lead 自身事件）→ 关闭 EventBus：远程子 agent 转发的 AGENT_END
+        // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
+        if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
+                && !AgentEventSseSerializer.isRemoteForwarded(event)) {
             TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
         }
     }

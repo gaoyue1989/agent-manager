@@ -55,6 +55,12 @@ window.App.toolRowToggle = (el) => {
   el.classList.toggle('open');
 };
 
+// 远程子 agent 调用面板折叠切换（供模块内联 onclick 使用）
+window.App.remoteCallToggle = (headerEl) => {
+  const panel = headerEl.closest('.remote-call');
+  if (panel) panel.classList.toggle('open');
+};
+
 // 思维链块折叠切换（供模块内联 onclick 使用）
 window.App.thinkingToggle = (headerEl) => {
   const body = headerEl.nextElementSibling;
