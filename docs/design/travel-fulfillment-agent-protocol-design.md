@@ -499,9 +499,9 @@ CREATE TABLE remote_task_registry (
 | # | 场景 | 断言 |
 |---|---|---|
 | P1 | 跨副本确认链路（全程 LB 随机路由） | spawn → awaiting 落卡 → confirm（落任一 lead 副本）→ resume 成功 → COMPLETED → **收割汇总 turn 恰好一次** |
-| P2 | lead 副本崩溃恢复（G1 验收） | 经 LEADER_A spawn → kill LEADER_A → lead_B 60s 内重建登记拾起轮询 → 落卡可见 → confirm（打 LEADER_B）成功 → 收割汇总恰好一次 |
+| P2 | lead 副本崩溃恢复（G1 验收） | 经 LEADER_A spawn → kill LEADER_A → lead_B 60s 内重建登记拾起轮询 → 落卡可见 → confirm（打 LEADER_B）成功 → 收割汇总恰好一次（**一期标注 skip**：kill 编排需 R4 同款脚本，确认卡场景归 T 组二期；registry 重建/唤醒 CAS 由单测 28 例覆盖） |
 | P3 | EventBus 跨副本（G2 验收） | 直投 MEMBER_A 建任务 → MEMBER_B `/tasks/{id}/events?from_seq=0` 全量对账（802/802 型）→ 断线 Last-Event-ID 续传不重不漏 |
-| P4 | sweep 恰好一次（G3 验收） | `AGENT_REMOTE_CONFIRM_TTL_HOURS` 调小（≈36s）→ 两 lead 副本 sweep 竞争 → member 恰好收到一次 DENY resume（audit 恰好一条 `confirm_timeout`） |
+| P4 | sweep 恰好一次（G3 验收） | `AGENT_REMOTE_CONFIRM_TTL_HOURS` 调小（≈36s）→ 两 lead 副本 sweep 竞争 → member 恰好收到一次 DENY resume（audit 恰好一条 `confirm_timeout`）（**一期标注 skip**：需 awaiting 确认卡 fixture，归 T 组二期；CAS 收口已由 BridgeMultiReplicaTest 覆盖） |
 | P5 | 双副本无粘性冒烟 | 完整委派会话打 lead LB：R 组口径（/status 判态 + /subscribe 游标续传）+ 委派五阶段断言 |
 | P6 | 存量零影响 | 协议关实例 `/tasks` 无端点，基础链路不受影响（T8 口径复用） |
 | P7 | A2A Job 同键跨副本收敛（Issue #69 PR-C 验收） | 经 member LB 随机路由**同键两次提交**（两次间不保证落同副本）→ 同一 `taskId`、`idempotent=true` 恰好一次、member 侧仅建一个任务；`GET /a2a/jobs/{key}` 两副本各自收敛 `state` 一致；401/400 分类断言（token 面） |
@@ -569,6 +569,13 @@ CREATE TABLE remote_task_registry (
 - **部署验证**：镜像 `agentscope-2.1.0-v20260930-5` 发布 5 个 demo 服务；oaf_checkpoint 存量库 V8 成功应用；真实委派链路下 Redis 出现 `proto:task:*:{events,seq,done}` 键族（事件面真实工作）；live 会话实证 spawn 全部 `status: ok`、子 agent 回复完整回流（含后台完成 `<system-notification>` 通知）、lead 对单个超时成员（logistics）按 §9 降级重试后汇总——委派链路行为正确。**demo e2e 全量 28 断言当日未跑通**：logistics 成员 LLM 反复超时把 T1 单轮拉长超过 e2e 客户端 15 分钟 fetch 上限（当日 LLM 延迟问题，非代码回归——spawn/回复/降级/事件均实证正常）；回归门禁以 CI mock-LLM e2e（三 E2E job）为准。demo spawn 均同步完成（只读工具无确认挂起），registry 0 行属预期——跨副本接管/唤醒路径由阶段 3 P 组门禁用例覆盖。
 - **配套修复**：`e2e/scripts/reset-data.mjs` 清表清单补 `remote_task_registry`（否则复用库第二轮 env-up 走 baseline(5) 跳过 V1 → V6 因 session_user 缺失启动失败，与 V2 agui_interrupt 同款陷阱）。
 - **已知运维事实**：V8 文件在已应用旧版的环境（本机曾部署 v4）上编辑会 checksum 冲突——未合并前修正属正常迭代；对已应用库执行「DROP 空表 + 删历史行」即可干净重放（本次已处理）。
+
+### 18.10 阶段 3 实施记录（2026-09-30，E2E 协议多副本门禁 job）
+
+- **拓扑**（`env-up.sh protocol-multi`，端口 8100-8106）：lead LB(8100)→lead×2(8105/8106，注入 subAgents 指向 member LB + `AGENT_REMOTE_HEADERS_JSON` token)、member LB(8101)→member×2(8103/8104，协议+A2A Job+`AGENT_PROTOCOL_EVENT_BUS=redis`)、存量对照(8102)；两个 nginx 轮询 LB（`start_lb` 复用 fixture 模板改占位符）；per-instance 配置目录经 `E2E_AGENT_CONFIG_DIR` 透传（start-agent.sh 覆盖点）。
+- **mock-LLM 扩展**：新增 `proto-lead-spawn`（lead 调 agent_spawn 同步等待 → 汇报）与 `proto-member-echo`（member 调 bench_echo）双 fixture + 路由表两行；`route()` 增加「多轮 tool 轮续推时回落扫描全部 user 消息取场景标记」（会话级场景跨轮保持）。
+- **P 组用例**（api-protocol-multi.spec.ts，serial）：P1 跨副本委派全链路（lead LB 随机路由 spawn → member 受理 → 收割汇总断言）、P3 EventBus 跨副本对账（taskId 从 Redis `proto:task:*:events` 键族经 RESP 裸 socket 反查——同步 spawn force_sync 语义无 task_id 行，Bridge 登记不触发；直投两副本 /events 对账）、P5 无粘性冒烟、P6 存量零影响（T8 口径 404/500）、P7 A2A Job 同键跨副本收敛（member LB 两次提交 → 同 taskId、idempotent=true、两副本 GET 一致）。P2（kill 接管）/P4（sweep 竞争）一期 skip（需确认卡双进程编排，归 T 组二期；对应 CAS 语义由单测覆盖）。
+- **验证**：本地 protocol-multi 组 5 passed + 2 skipped（P2/P4）；CI `e2e-protocol-multi` job（必需要件就绪后合入）。
 
 ### 18.9 PR-B 实施记录（2026-09-30，Issue #69 member /a2a/jobs）
 

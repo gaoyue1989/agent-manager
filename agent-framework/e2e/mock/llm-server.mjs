@@ -32,6 +32,8 @@ const MARKER_MAP = {
   'execute': 'execute', 'execute:fail': 'execute-fail',
   'tool:write:sb': 'sandbox-write', 'tool:read:sb': 'sandbox-read',
   'plugin:echo': 'plugin-echo',   // 工具插件冒烟（plugin-smoke.sh）：调插件工具 echo_query
+  'proto:lead-spawn': 'proto-lead-spawn',     // 协议多副本 P 组（api-protocol-multi）：lead 调 agent_spawn
+  'proto:member-echo': 'proto-member-echo',   // 协议多副本 P 组：member 调 bench_echo 回显
 };
 
 // 需要运行时参数的场景：tool_call arguments 整体重写为指定 JSON（{{appId}} → 标记参数）。
@@ -75,13 +77,20 @@ const BENCH_MCP_BASE = process.env.BENCH_MCP_BASE || `http://127.0.0.1:${process
 
 function route(reqBody) {
   const messages = reqBody.messages ?? [];
-  // 最后一条 user 消息携带场景标记
+  // 场景标记随消息携带：优先最后一条 user 消息；多轮对话（tool 轮续推）无 user 消息时
+  // 回落扫描全部 user 消息——会话级场景保持一致（proto 委派链路第二轮为 tool 结果续推）
   let marker = null, arg = null;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role !== 'user') continue;
     const m = String(textOfContent(messages[i].content)).match(/\[E2E:([a-zA-Z:_-]+)\](?:\(([^)]*)\))?/);
-    if (m) { marker = m[1]; arg = m[2] ?? null; }
-    break;
+    if (m) { marker = m[1]; arg = m[2] ?? null; break; }
+  }
+  if (!marker) {
+    for (const msg of messages) {
+      if (msg.role !== 'user') continue;
+      const m = String(textOfContent(msg.content)).match(/\[E2E:([a-zA-Z:_-]+)\](?:\(([^)]*)\))?/);
+      if (m) { marker = m[1]; arg = m[2] ?? null; break; }
+    }
   }
   const deniedResume = (() => {
     const last = messages[messages.length - 1];

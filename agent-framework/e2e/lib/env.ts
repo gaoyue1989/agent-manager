@@ -39,6 +39,20 @@ function runtimeUrl(key: string): string {
 export const PROTOCOL_BASE = process.env.E2E_PROTOCOL_BASE
   ?? runtimeUrl('protocolBase') ?? '';
 
+/** 协议多副本（P 组，阶段 3）：lead/member 各双副本 + 轮询 LB（随机路由无粘性） */
+export const PROTO_LEADER_LB = process.env.E2E_PROTO_LEADER_BASE
+  ?? runtimeUrl('protoLeadLB') ?? '';
+export const PROTO_LEADER_A = process.env.E2E_PROTO_LEADER_A
+  ?? runtimeUrl('protoLeadA') ?? '';
+export const PROTO_LEADER_B = process.env.E2E_PROTO_LEADER_B
+  ?? runtimeUrl('protoLeadB') ?? '';
+export const PROTO_MEMBER_LB = process.env.E2E_PROTO_MEMBER_BASE
+  ?? runtimeUrl('protoMemberLB') ?? '';
+export const PROTO_MEMBER_A = process.env.E2E_PROTO_MEMBER_A
+  ?? runtimeUrl('protoMemberA') ?? '';
+export const PROTO_MEMBER_B = process.env.E2E_PROTO_MEMBER_B
+  ?? runtimeUrl('protoMemberB') ?? '';
+
 /** bench mock MCP（端口随 env-up.sh BENCH_MCP_PORT；用于观测 tools/call 的 header/_meta） */
 export const BENCH_MCP = process.env.E2E_BENCH_MCP ?? 'http://127.0.0.1:18082';
 

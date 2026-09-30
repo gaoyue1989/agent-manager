@@ -127,7 +127,7 @@ git push origin feat/xxx
 # 3. 开 PR 到 master（GitHub 网页或 gh pr create）
 #    → 必需检查自动执行：
 #      单测 (mvn test) / 单测 (go vet + go test) / 单测 (lint + build)
-#      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）
+#      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）/ E2E 协议多副本（P 组）
 #    另有两个非必需 job 同步跑（红只告警不挡合并，但应一并修）：
 #      E2E 工具插件（SPI+三态权限）/ 评测自检（flywheel selftest）
 
@@ -137,7 +137,7 @@ git push origin feat/xxx
 
 ### 分支保护（master，强制）
 
-- **六项必需状态检查**：上表三个单测 + agent-framework 三个 E2E job；未全绿合并请求被拒（`blocked`）
+- **七项必需状态检查**：上表三个单测 + agent-framework 四个 E2E job（核心/多副本/沙箱/协议多副本 P 组，§18.4）；未全绿合并请求被拒（`blocked`）
 - **新增 job 默认不是必需检查**：`E2E 工具插件` 与 `评测自检` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
 - **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
 - **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR
