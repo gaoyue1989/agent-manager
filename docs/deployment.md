@@ -54,7 +54,7 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 > 缺省值指向 `127.0.0.1`（Pod 自身），session_event 事件不落 Redis、SSE 断线回放/续传全挂——部署必配。
 
 > **DB schema 迁移（Flyway，2026-09-28 起）**：agent-framework 启动时自动执行
-> `db/migration` 版本化迁移——存量库首次启动自动基线（V1..V5 已就位，仅跑增量）、
+> `db/migration` 版本化迁移——存量库首次启动自动基线（V1..V8 已就位，仅跑增量）、
 > 全新库从 V1 完整重建，发版无需人工干预；多副本同时启动由历史表锁互斥。
 > 此后表结构/数据演进只新增 V 文件（见 docs/design/db-migration-flyway-design.md），不再手工改库。
 

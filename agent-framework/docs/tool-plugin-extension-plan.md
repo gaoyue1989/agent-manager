@@ -377,6 +377,7 @@ curl localhost:8100/tools?includeInternal=true   # 列表含插件工具
 
 > 上述流程已脚本化为 `e2e/scripts/plugin-smoke.sh`（示例插件 `e2e/plugin-echo/`，12 断言，
 > 覆盖三层注册日志 / /tools / reload 存活 / deniedTools 剔除与恢复），2026-09-25 部署冒烟 12/12 PASS。
+> 2026-09-26 随 /tools 拆 `sdkInternal` 段（#39）冒烟扩至 30 断言（新增 SDK 内置工具透出/计数/denied 不波及等 6+ 断言）。
 
 ---
 
@@ -385,7 +386,7 @@ curl localhost:8100/tools?includeInternal=true   # 列表含插件工具
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | `src/main/java/io/agentmanager/framework/tool/ToolPlugin.java` | 新增 | SPI 接口，extends CustomTool（§3.2） |
-| `src/main/java/io/agentmanager/framework/tool/ToolPluginBootstrapper.java` | 新增 | BFPP：目录解析 + 扫描 + URLClassLoader + ServiceLoader + config 注入 + registerSingleton + @PreDestroy close（§3.3） |
+| `src/main/java/io/agentmanager/framework/tool/ToolPluginBootstrapper.java` | 新增 | BFPP：目录解析 + 扫描 + URLClassLoader + ServiceLoader + config 注入 + registerSingleton + DisposableBean 统一 close（§3.3，CR 修订⑤：@PreDestroy 不生效故改之） |
 | `src/test/java/io/agentmanager/framework/tool/ToolPluginBootstrapperTest.java` | 新增 | 加载器与 BFPP 注册单测（§6） |
 | `src/test/java/io/agentmanager/framework/tool/ToolPluginAssemblyTest.java` | 新增 | List<CustomTool> 注入语义集成测试（§6） |
 | `agent-framework/AGENTS.md` | 修改 | 工具体系小节补充插件机制 |

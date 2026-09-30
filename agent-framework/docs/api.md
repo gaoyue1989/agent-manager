@@ -1,7 +1,9 @@
 # Agent Framework — API 文档
 
 **版本:** v2.1.0 (Java) — 无状态单次流架构
-**复核日期:** 2026-09-26（master @ `a263b92`）— 本轮已按源码重核端点清单、`/tools` 契约、数据表与事件类型
+**复核日期:** 2026-10-01（master @ `4a4dea8`）— 增量重核：数据表迁 Flyway（V1–V8）、模型采样参数、
+confirm_context 多行化、`/a2a/jobs`、ASKING 入口预检、远程转发事件标注
+（上一轮 2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
 
 > **现状核对**：本篇是 REST 契约权威，与 [api-frontend-sse.md](api-frontend-sse.md)（前端视角）、
 > [api-thread-spec.md](api-thread-spec.md)（会话协议契约，E2E 断言权威）并行。
@@ -565,18 +567,22 @@ data: {"type":"AGENT_END","replyId":"..."}
 | `AGENT_RESULT` | 最终结果聚合（实测于 HITL 恢复段末尾，`AGENT_END` 之前） |
 | `USER_CONFIRM_RESULT` | HITL 确认结果落地（`confirm-stream` 恢复段首个业务事件） |
 | `AGENT_START` / `AGENT_END` | 执行段起止；**`AGENT_END` 之后流直接关闭** |
-| `error` | 错误（如 `turn_in_progress` 排队超时、`unknown_model`） |
+| `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 结果返回时发出，snake_case 四字段） |
+| `error` | 错误（如 `turn_in_progress` 排队超时、`turn_pending_confirm`、`unknown_model`） |
 | `done` | **仅由 `/threads/{sid}/subscribe` 补发**——`POST /threads/chat` 不发此帧 |
 | `interrupted` | **仅由 `/subscribe` 补发**：`{"type":"interrupted","reason":"turn_interrupted"}` |
 
 > **`data` 里没有 `seq` 字段。** 游标在 SSE `id:` 行上（`EnvelopedEvent.seq()`）；
 > `data.id` 是 SDK 事件 ID，两者不是一回事。控制帧与心跳 `:hb` 没有 `id:` 行。
+>
+> **远程转发标注：** 远程子 agent 事件回流 lead SSE 时 additive 附 `source` / `taskId` /
+> `parentSessionId`（lead 自身事件无 `source`）；转发的 `AGENT_END` 不终结主 turn。
 
 **时序约束：**
 - 单次 POST 即发起完整执行段，无需先建立 SSE 订阅
 - 同 session 并发请求自动排队（Turn 租约），排队超时 120s 返回 error 帧
 - HITL 暂停点：挂起态落 `agent_state`（`confirm_context` 仅兜底），释放 Turn 租约，流关闭；恢复走 `confirm-stream`
-- `permission_ask` 挂起期间发新 turn 会被 SDK 会话级守卫拒绝，需先 confirm
+- `permission_ask` 挂起期间发新 turn 被 `/chat` 入口 ASKING 预检拒绝（error 帧 `turn_pending_confirm`），需先 confirm
 
 ---
 
@@ -748,6 +754,15 @@ curl -X POST "http://localhost:8100/files/upload" \
 
 ---
 
+## A2A 幂等 Job REST（member 侧，默认关闭）
+
+`POST /a2a/jobs` + `GET /a2a/jobs/{key}`（`A2aJobController`，`agent.a2a-job.enabled=true` 时才装配；
+token 经 `Agent-A2A-Job-Token` 头认证，缺失/错误一律 401）。幂等状态机全外置 Redis 单键原子操作，
+发送走 loopback `message/send`；409 = 同键在途/结果未知（持同键重试直至收敛），503 = 并发准入饱和 /
+Redis 故障（fail-closed）。详见 [travel-fulfillment-agent-protocol-design.md](../../docs/design/travel-fulfillment-agent-protocol-design.md) §18。
+
+---
+
 ## 模型 API（会话可切换）
 
 系统模型（`LLM_*` 环境变量，只读，即默认模型）+ 托管模型（`model_config` 表，CRUD）统一暴露；
@@ -776,6 +791,10 @@ curl "http://localhost:8100/models"
 }
 ```
 
+> 上例为节选；完整视图另含 `base_url` / `api_key_masked` / `temperature` / `max_tokens` /
+> `timeout_seconds` / `enable_thinking` / `reasoning_effort` / `frequency_penalty` /
+> `context_length` / `read_only`（系统模型 true）等字段（V4 起含采样参数两列）。
+
 ### GET /models/{id}
 
 模型详情（托管模型含 `api_key_masked` 掩码，不返回明文；系统模型 `read_only=true`）。404 `model_not_found`。
@@ -795,7 +814,8 @@ curl -X POST http://localhost:8100/models -H 'Content-Type: application/json' -d
 
 ### PATCH /models/{id}
 
-局部更新：字段缺省=不变；`apiKey=""`=清空回落系统密钥；系统模型 → `400 system_model_readonly`。
+局部更新：字段缺省=不变；`apiKey=""`=清空回落系统密钥；`reasoningEffort=""`=清除不下发；
+`frequencyPenalty` 范围 [-2, 2]；系统模型 → `400 system_model_readonly`。
 
 ### DELETE /models/{id}
 
@@ -843,27 +863,35 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-服务自建 8 张表，启动时自动建表（幂等）：`confirm_context` / `turn_lease` / `tool_audit_log` /
-`ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user`。
+自建 10 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V8，启动自动执行，
+存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
+`tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
+`session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）。
+设计与规范见 [db-migration-flyway-design.md](../../docs/design/db-migration-flyway-design.md)。
 
 事件流（`session_event`）已整体迁至 Redis Streams，见本节末。SDK 侧的
 `agent_state` / `agent_fs` 表结构见 [checkpoint-design.md](checkpoint-design.md)。
 
 ### confirm_context
 
-HITL 确认上下文（人工确认场景跨副本持久化）。Session 粒度覆盖写，CAS 防重复确认。
+HITL 确认上下文（人工确认场景跨副本持久化）。**V7 起多行化**：主键 `(session_id, confirm_key)`——
+本地 HITL 行 `confirm_key='local'`（同 session 覆盖写，语义不变）；远程确认行 `confirm_key='task:{task_id}'`
+（同 session 多行 FIFO 排队，带 `remote_task` 锚点 JSON，独立 TTL 默认 24h）。
 
 | 列 | 类型 | 说明 |
 |----|------|------|
-| `session_id` | VARCHAR(255) PK | 会话 key |
+| `session_id` | VARCHAR(255) PK 部分 | 会话 key |
+| `confirm_key` | VARCHAR(191) PK 部分 | `local`（本地行）/ `task:{task_id}`（远程确认行，V7） |
 | `tool_calls_json` | MEDIUMTEXT | 待确认工具调用列表（`[{id, name, input}]`） |
+| `remote_task` | MEDIUMTEXT NULL | 远程行锚点 JSON（`{service, task_id, tool_calls, child_reply_id}`），本地行 NULL（V7） |
 | `reply_id` | VARCHAR(64) | 触发确认的 reply 标识 |
 | `runtime_session_id` | VARCHAR(255) | Channel 流程网关推导的真实 sessionId |
 | `runtime_user_id` | VARCHAR(255) | Channel 流程网关推导的真实 userId |
 | `created_at` | DATETIME(3) | 创建时间（TTL 懒判断依据） |
 | `consumed` | TINYINT(1) | 0=待确认，1=已消费（CAS 0→1 防重复） |
 
-**TTL:** 默认 30 分钟（`confirmTtlMinutes`），读时懒判断 + 定时清理兜底。
+**TTL:** 本地行默认 30 分钟（`confirmTtlMinutes`），远程行默认 24h（按 `confirm_key` 分档判定），
+读时懒判断 + 定时清理兜底。
 
 **定位（2026-09 起）：兼容兜底，不再是 HITL 恢复的权威来源。**
 挂起态的权威来源是 `agent_state` 里 SDK 持久化的 ASKING 工具（无 TTL，
@@ -893,27 +921,41 @@ Turn 租约（同一 session 执行段串行化）。Token + 短 TTL + 续租，
 ### model_config
 
 托管模型配置（会话可切换模型的配置来源，见 [session-model-switch-design.md](session-model-switch-design.md)）。
-服务启动时自动建表（幂等）；`api_key` 为**明文列**（内网库，读接口一律掩码返回）。
+Flyway V3 建表、V4 补采样参数列；`api_key` 为**明文列**（内网库，读接口一律掩码返回）。
 
 | 列 | 类型 | 说明 |
 |----|------|------|
 | `id` | VARCHAR(64) PK | UUID；会话按此 id 引用（改名不断链） |
 | `name` | VARCHAR(128) 唯一 | 展示名 |
-| `provider` | VARCHAR(32) | 目前仅 `openai` 兼容端点 |
+| `provider` | VARCHAR(32) | 推理引擎方言（openai / vllm / sglang / glm / deepseek，V4 起枚举校验） |
 | `model_id` | VARCHAR(128) | 发给推理端点的模型名 |
 | `base_url` | VARCHAR(512) | OpenAI 兼容端点 |
 | `api_key` | VARCHAR(512) NULL | NULL = 回落系统 `LLM_API_KEY` |
 | `temperature` / `max_tokens` / `timeout_seconds` | DOUBLE / INT / INT | 采样与超时（默认 0.3 / 16384 / 120） |
-| `enable_thinking` | TINYINT(1) | false 时注入 `chat_template_kwargs.enable_thinking=false` |
+| `enable_thinking` | TINYINT(1) | false 时按 provider 方言注入关闭参数（`ChatModelFactory.applyDialect` 单点收口：vllm/sglang 走 `chat_template_kwargs`、glm 走 `thinking.type`、openai 兜底走顶层一等字段、deepseek 不下发） |
+| `reasoning_effort` | VARCHAR(16) NULL | 推理强度（V4；NULL=不下发，空串清除） |
+| `frequency_penalty` | DOUBLE NULL | 频率惩罚 [-2, 2]（V4；NULL=不下发） |
 | `context_length` | INT | >0 才传给模型 |
 | `enabled` | TINYINT(1) | 会话可选开关 |
 | `created_at` / `updated_at` | DATETIME(3) | — |
 
 ### session_user（会话模型列）
 
-`session_user` 除 `remark`（标题）外新增 `model VARCHAR(128) DEFAULT ''`（启动时幂等 ALTER）：
+`session_user` 除 `remark`（标题）外有 `model VARCHAR(128) DEFAULT ''`（Flyway V3 迁移添加）：
 空串 = 默认（系统）模型；非空 = 绑定 `model_config.id`。`SessionModelMiddleware` 每次模型调用实时读该列，
 多副本下 PATCH/chat 落库即生效（无进程内缓存）。
+
+### session_message（消息轨归档）
+
+会话消息轨 append-only 归档（Flyway V5，`SessionMessageStore` write-through）：AgentState 落库时
+同步写压缩前原文，history 双源合并视图以此为主时间线基底（见上文 `/history`）。清理随
+`AGENT_CLEANUP_SESSION_RETENTION_DAYS`（`SessionCleanupService`）。
+
+### remote_task_registry（远程在途登记）
+
+lead 侧远程子任务在途登记（Flyway V8，travel-fulfillment 设计 §18.2）：spawn 登记行
+（`(session_id, task_id)` 唯一），`status` 状态机 `IN_FLIGHT → TERMINAL / GIVEN_UP`；多副本下
+重建轮询与唤醒幂等的调度簿（confirm_context 仍是唯一授权事实源）。终态行保留 7 天。
 
 ### tool_audit_log
 

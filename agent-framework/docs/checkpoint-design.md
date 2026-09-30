@@ -2,7 +2,7 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
-**复核日期:** 2026-09-26
+**复核日期:** 2026-10-01
 
 > **现状核对（2026-09-26）**：本篇被 docs/README.md 列为 **schema 权威**，但头部日期停在 2026-08-06，
 > 且 SDK 已从 2.0.0 升到 **2.0.3**——带来 `agent_state` 的 `version` 列与 CAS 乐观锁语义（见 §10，
@@ -139,9 +139,10 @@ src/main/java/io/agentmanager/framework/
 | `CHECKPOINT_USERNAME` | `agent_manager` | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | MySQL 密码 |
 
-除 `agent_state`/`agent_fs`（SDK 侧）外，框架自建 8 张表（服务启动自动建表，结构见 [api.md](api.md) §数据库表）：
+除 `agent_state`/`agent_fs`（SDK 侧）外，框架自建 10 张表（表结构由 **Flyway 迁移**管理，
+`db/migration/` V1–V8 启动自动执行、存量库自动 baseline，结构见 [api.md](api.md) §数据库表）：
 `confirm_context` / `turn_lease` / `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` /
-`model_config` / `session_user`。
+`model_config` / `session_user` / `session_message`（V5 消息轨归档）/ `remote_task_registry`（V8 远程在途登记）。
 
 > 此前此处的尾注只列了 5 张，漏了 `session_user`、`model_config`、`kv_sync_key`；本版已补齐。
 
@@ -214,6 +215,9 @@ CREATE TABLE IF NOT EXISTS agent_fs (
 ### 6.1 启动流程
 
 ```
+0. Flyway（flywayInitializer）
+   └── 执行 db/migration V1–V8，先于一切建表依赖 bean（distributedStore 已 @DependsOn 之）
+
 1. AgentScopeConfig.java
    ├── DataSource (HikariCP) 创建
    └── MysqlDistributedStore 创建 (DistributedStore.builder())

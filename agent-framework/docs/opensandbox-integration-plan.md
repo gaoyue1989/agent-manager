@@ -1,7 +1,7 @@
 # OpenSandbox 集成设计方案
 
 >
-> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。USER 级复用（`IsolationScope.USER`） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由 SDK 注入 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
+> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。USER 级复用（`IsolationScope.USER`） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由自研 `RedisSandboxExecutionGuard` 串行化（Redis `SET NX PX` + Lua 释放，`SANDBOX_GUARD_ENABLED` 默认 true；2026-09 起取代初版依赖的框架注入 `JdbcSandboxExecutionGuard`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
 
 ## 1. 背景与目标
 
@@ -949,16 +949,22 @@ public class WorkspaceSyncService {
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `SANDBOX_ENABLED` | `false` | 是否启用沙箱模式 |
+| `SANDBOX_ENABLED` | `false` | 是否启用沙箱模式（生效值经 `SandboxRuntime` 三层裁决：env 显式设置 > OAF 包 frontmatter `config.sandbox.enabled` > yml 默认 false） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | 沙箱超时时间 |
 | `SANDBOX_MEMORY_MB` | `1024` | 内存限制 (MiB) |
 | `SANDBOX_CPU_COUNT` | `1` | CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | 覆盖镜像默认启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
+| `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | 注入沙箱容器 `EXECD_API_GRACE_SHUTDOWN`，execd 每条命令 SSE 结束后的尾窗保持时间 |
+| `SANDBOX_PROJECTION_ENABLED` | `true` | 工作区投影开关（issue #27 缓解项；关闭后每次 sandbox start 不再 hydrate 投影目录） |
+| `SANDBOX_GUARD_ENABLED` | `true` | 并发执行守卫（`RedisSandboxExecutionGuard`，Redis `SET NX` 串行化同 userId 沙箱获取） |
+| `SANDBOX_GUARD_LEASE_SECONDS` | `900` | 守卫租约 TTL（崩溃自愈） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | API 密钥 |
 
 ### 5.2 application.yml
+
+> **现状核对（2026-10-01）**：`entrypoint` 未落 yml 叶子，经 `SANDBOX_ENTRYPOINT` 环境变量宽松绑定生效（Spring relaxed binding，默认值在 `SandboxConfig` 的 `@DefaultValue`）；下块与当前 `application.yml` 一致。
 
 ```yaml
 agent:
@@ -968,10 +974,13 @@ agent:
     timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:60}
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
-    entrypoint: ${SANDBOX_ENTRYPOINT:/opt/code-interpreter/code-interpreter.sh}
+    execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
+    projection-enabled: ${SANDBOX_PROJECTION_ENABLED:true}
+    guard-enabled: ${SANDBOX_GUARD_ENABLED:true}
+    guard-lease-seconds: ${SANDBOX_GUARD_LEASE_SECONDS:900}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
-      api-key: ${OPENSANDBOX_API_KEY}
+      api-key: ${OPENSANDBOX_API_KEY:}
 ```
 
 ### 5.3 .env.secrets (新增)
@@ -1047,7 +1056,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 - `RedisSandboxExecutionGuard`（基于 Redis `SET NX PX`）
 - `JdbcSandboxExecutionGuard`（基于 MySQL `GET_LOCK()`）
 
-当前使用 `DistributedStore` 时，框架会自动注入执行守卫。
+当前（2026-09 起）由 `AgentScopeConfig` 显式注入自研 `RedisSandboxExecutionGuard`（`SANDBOX_GUARD_ENABLED` 默认 true，Redis `SET NX PX` + Lua 释放，key 前缀 `sbx:guard`，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)）；初版依赖的「`DistributedStore` 配置时框架自动注入 `JdbcSandboxExecutionGuard`」路径已不使用。
 
 ### 7.4 资源清理
 
@@ -1078,7 +1087,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 |---|------|------|------|---------|
 | 8 | **Workspace 注入方式** | ✅ 已决策 | **分层结合**：doHydrateWorkspace（框架契约，投影+快照恢复）为主 + KV 运行时文件（MEMORY.md/memory/）**首次 exec 延迟注入**（create() 无 RuntimeContext 拿不到 userId，反编译确认；框架所有文件操作最终走 exec，首次文件操作前注入即可） | `OpenSandboxClient` 实现 |
 | 9 | **沙箱状态序列化** | ⏳ 待测试 | 需测试 `SandboxState` JSON 序列化兼容性 | 状态持久化 |
-| 10 | **沙箱并发控制** | ✅ 已确认 | 使用框架自动注入的 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK()`）：通过 `distributedStore(...)` 配置时框架自动注入 executionGuard，复用现有 MySQL + DistributedStore | 并发安全 |
+| 10 | **沙箱并发控制** | ✅ 已确认 | 使用框架自动注入的 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK()`）：通过 `distributedStore(...)` 配置时框架自动注入 executionGuard，复用现有 MySQL + DistributedStore。**2026-09 更新**：已改为自研 `RedisSandboxExecutionGuard`（`SANDBOX_GUARD_ENABLED` 默认 true，Redis `SET NX`），Jdbc 路径不再使用 | 并发安全 |
 | 11 | **沙箱超时清理** | ✅ 已确认 | **三层清理**：① OpenSandbox timeout 到期自动销毁沙箱；② Agent 侧定时任务（如每 10 分钟）清理 SessionSandboxStateStore 中失效状态；③ resume 失败（404）时即清理该用户状态（配合框架自动降级新建） | 资源管理 |
 
 ### 8.3 Workspace 相关

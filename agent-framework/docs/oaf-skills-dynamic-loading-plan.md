@@ -28,6 +28,7 @@
 >    代价是标记生效期间容器内修改不落库，状态经 `tombstones` 字段下发。
 > ⑤ `/skills/available` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。
 > ⑥ `sync-from-package` 跳过清单按字典序返回（`6ddf70f`）。
+> ⑦ **MCP 侧已补运行时 reload（2026-09-25）**：`POST /admin/reload?scope=auto|mcp|agent`（`AdminReloadController`）+ `OafReloadService` 原地重建 MCP 连接 / 整包重建 agent（见 [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md)）——§2.4 对比表中「MCP 运行时生效需重启、reload 端点官方无需自研」的表述已过时；skill「每轮重扫、无需任何触发通道」的差异化结论仍成立。
 >
 > 本篇关于 **L2 目录动态加载（每轮重扫、不重启生效）** 的核心结论仍然有效，未受影响。
 
@@ -350,8 +351,8 @@ skill_manage(修改 a) → 写 L4（agent_fs, per-user）
 ## 附录 B：本项目现状代码索引
 
 - `service/WorkspaceInitializer.java` `copySkills`（已删除的复制语义根因）
-- `config/OafConfigLoader.java:97` `parseSkills` / `:209` `loadSkillDescription`
-- `config/AgentScopeConfig.java` `harnessAgent` builder（L2 注册插入点，已接线）
+- `config/OafConfigLoader.java:97` `parseSkills` / `:227` `loadSkillDescription`
+- `service/HarnessAgentFactory.java:243` agent 装配（L2 注册插入点，已接线；2026-09-25 OAF 动态 reload 重构后由 `AgentScopeConfig` 迁入）
 - `controller/ToolController.java` GET /skills、`controller/AgentCardController.java` 卡片 skills、`controller/DebugApiController.java` debug config（均已切 SkillCatalogService）
 - `model/OafConfig.java:27` `localSkills()`/`remoteSkills()`（M3 接线点）
 

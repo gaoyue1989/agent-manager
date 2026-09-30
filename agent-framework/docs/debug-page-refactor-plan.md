@@ -5,10 +5,10 @@
 > `DebugController` 改为加载 `classpath:/static/debug/index.html`，旧单文件 `templates/debug_page.html` 已删除。
 > 本文档保留作为重构过程记录。
 >
-> **现状核对（2026-09-07）**：
-> - 目录树/路由表/端点表为重构时的规划快照：js/ 现含 `state.js`、`utils.js`、`mcp-app-host.js`；modules/ 现共 10 个（chat/tools/config/database/logs/mcp/memory/sandbox/skills/workspace）；路由含 `#/sandbox`。
+> **现状核对（2026-09-07，2026-10-01 复核更新）**：
+> - 目录树/路由表/端点表为重构时的规划快照：js/ 现含 `state.js`、`utils.js`、`mcp-app-host.js`；modules/ 现共 11 个（chat/tools/models/config/database/logs/mcp/memory/sandbox/skills/workspace）；路由含 `#/sandbox`、`#/models`（会话模型切换）。
 > - `GET /debug/module/{name}` 未实施；`/memory/search` 未实施；`/memory`、`/config/env`、`/config/oaf`、`/database/status` 实际带 `/debug` 前缀。
-> - 会话 API 现为 `POST /threads/{sid}/chat`（单次流）、`GET /threads`、`/threads/{sid}/history`、`/threads/{sid}/llm-calls`（无 `/debug` 前缀）；另有 `/files/*`、`/mcp/{server}/...`、`POST /mcp/ui-context`、`/metadata`。调试页已不调用 `GET /chat/stream`。
+> - 会话 API 现为 `POST /threads/chat`（单次流，sessionId 在请求体）、`GET /threads`、`/threads/{sid}`、`/threads/{sid}/history`、`/threads/{sid}/llm-calls`、`/threads/{sid}/subscribe`（断连续传）、`/threads/{sid}/status`、`/threads/{sid}/confirm(-stream)`（无 `/debug` 前缀）；另有 `/files/*`、`/models/*`、`/skills/users/*`、`/mcp/{server}/...`、`POST /mcp/ui-context`、`/metadata`。调试页已不调用 `GET /chat/stream`（端点已删除）。
 > - `GET /debug` 302 → `/debug/`；css/js/modules 由 Spring Boot 静态托管，非控制器端点。
 > - api 示例中历史路径应为 `${BASE}/threads/${threadId}/history`。
 

@@ -1,10 +1,15 @@
 # 会话管理 API 对接规范
 
-> 版本：v1.1 | 更新：2026-09-26
+> 版本：v1.2 | 更新：2026-10-01
 >
-> **现状核对（2026-09-26）**：本版按 master `a263b92` 重核，补入 `interrupted` 态、
+> **现状核对（2026-10-01，master `4a4dea8`）**：本版增量——ASKING 拒绝机制更新为 `/chat` 入口
+> 预检 `turn_pending_confirm`（2026-09-27 起）；`/subscribe` 明确不读 `Last-Event-ID`；
+> §3.1 示例去除 `/chat` 不发的 `done` 帧；补 `subagent_exposed` 事件与远程转发标注
+> （`source`/`taskId`/`parentSessionId`）；`/status` 的 `pending_confirm` 补远程确认行口径。
+>
+> **上一版核对（2026-09-26，master `a263b92`）**：补入 `interrupted` 态、
 > `tool_call_summary` / `tool_result_preview` 两个合成帧、`/status` 的 503 分支，
-> 以及 §六「ASKING 挂起期限制」（此前 e2e-ci-plan §11 缺陷 D4 标为「`api-thread-spec` 描述待更新」，本版已补）。
+> 以及 §二「ASKING 挂起期限制」（此前 e2e-ci-plan §11 缺陷 D4 标为「`api-thread-spec` 描述待更新」，本版已补）。
 > 范围限定为**会话域契约**；`/skills/*`、`/models` CRUD 等非会话端点见 [api.md](api.md)。
 > 面向使用者的上手流程见 [agent-creation-guide.md](agent-creation-guide.md)。
 
@@ -58,7 +63,8 @@ X-User-Id: user-123
 **ASKING 挂起期限制（e2e 缺陷 D4 的契约澄清）：**
 
 `permission_ask` 挂起时，**Turn 租约已释放但 SDK 会话处于 ASKING 状态**。此时对新 turn 发消息，
-会被 SDK 的**会话级守卫**拒绝（error 帧中含 `ASKING` 字样），而不是进入排队。
+会被 `/chat` 入口的 **ASKING 预检**拒绝（error 帧 `turn_pending_confirm`，文案含 `ASKING` 字样；
+此前为 SDK 会话级守卫拒绝，入口预检后 SDK 路径不再触达），而不是进入排队。
 
 这不是 Turn 租约能覆盖的范围——租约模型假设「执行中不可打断」，而 HITL 是「主动让出执行权等待外部输入」。
 因此客户端的正确做法是：**收到 `permission_ask` 后必须走 confirm 流程，在确认完成前不要发新消息。**
@@ -121,10 +127,9 @@ data: {"type":"MODEL_CALL_END","id":"evt-11","inputTokens":500,"outputTokens":20
 
 id: 12
 data: {"type":"AGENT_END","id":"evt-12","replyId":"rid-xxx"}
-
-id: 13
-data: {"type":"done"}
 ```
+
+> **注意：** `/chat` 收到 `AGENT_END` 后流直接关闭，**不发 `done` 帧**（见 §4.1 `done` 行）。
 
 #### HITL 场景（工具需人工确认）
 
@@ -167,7 +172,8 @@ data: {"type":"waiting"}
 
 ### 3.3 GET /threads/{sessionId}/subscribe — 断连续传
 
-页面刷新后，根据 `Last-Event-ID` 续传：
+页面刷新后，用 `afterSeq` 查询参数续传（**不读 `Last-Event-ID` 请求头**，原生 `EventSource`
+自动重连对本端点无效）：
 
 ```
 GET /threads/my-session-001/subscribe?afterSeq=13
@@ -199,6 +205,9 @@ GET /threads/my-session-001/subscribe?afterSeq=13
 | `waiting_confirm` | 等待人工确认（`pending_confirm` 非空） |
 | `idle` | 空闲，等待用户输入 |
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占（2026-09 起新增的第 5 态） |
+
+> `pending_confirm`：与 `/history` 同口径取 FIFO 头，本地 HITL 行或远程确认行
+> （远程行 additive 附 `confirm_key` / `remote_task` 字段，2026-09-29 起）。
 
 **503 分支（事件存储不可用）：**
 
@@ -353,9 +362,14 @@ GET /threads?userId=user-123
 | `error` | S→C | `error` | 错误（如 `turn_in_progress` 排队超时、`unknown_model`） |
 | `done` | S→C | — | **仅 `/subscribe` 追到终态时补发**；`POST /threads/chat` **不发** `done` 帧（收到 `AGENT_END` 后流直接关闭） |
 | `interrupted` | S→C | `reason:"turn_interrupted"` | **仅 `/subscribe` 补发**：执行副本崩溃，本 turn 无法继续 |
+| `subagent_exposed` | S→C | `subagent_id`, `agent_id`, `session_id`, `label` | 子 agent 调用收口（`AgentSpawnTool` 结果返回时发出，snake_case，2026-09-30 起） |
 
 > 合成帧（`tool_call_summary` / `tool_result_preview` / `file_ready`）经 `emitSynthetic` 落库后广播，
 > **支持断线回放**——刷新页面能从历史里完整重建工具气泡。
+>
+> **远程转发标注（2026-09-30 起）：** 远程子 agent 事件经 SDK 回流 lead 的 SSE 时，additive 附
+> `source`（lead 自身事件恒无此字段）、`taskId`、`parentSessionId`——前端据此路由进「远程调用面板」；
+> 转发的 `AGENT_END` 只代表子任务终点，**不关闭主 turn 流**。
 
 ### 4.2 心跳
 
@@ -440,7 +454,8 @@ GET /threads?userId=user-123
 | 400 | `unknown_model` / `model_disabled` | 会话 `model` 参数指向未知或已停用的托管模型 |
 | 404 | `confirm_context_not_found` | 确认上下文不存在或已过期 |
 | 409 | `confirm_already_consumed` | 确认已被处理 |
-| 409 | `turn_in_progress` | 会话正在执行中（含**正在等待人工确认**），等本轮终态后重试 |
+| 409 | `turn_in_progress` | 会话正在执行中，等本轮终态后重试 |
+| — (SSE error 帧) | `turn_pending_confirm` | 会话挂起等待人工确认，新 turn 入口预检拒绝（先走 confirm 流程再发新消息） |
 | 503 | — | `GET /status` 事件存储不可用，响应体 `{"error":"event_store_unavailable"}`（保留本地游标，勿重置） |
 | 500 | `error` | 服务端内部错误 |
 
@@ -450,7 +465,7 @@ GET /threads?userId=user-123
 
 1. **不能用 EventSource** — `/chat` 是 POST 请求，`EventSource` 只支持 GET。用 `fetch` + `ReadableStream` 消费。
 
-2. **必须等 done** — 连续发消息必须等 `{"type":"done"}` 后再发，否则会收到 `turn_in_progress` 错误。
+2. **必须等本轮终态** — `/chat` 不发 `done` 帧，连续发消息必须等 `AGENT_END`（或 `error` / `permission_ask` 走完 confirm 流程）后再发，否则会收到 `turn_in_progress`（排队超时）或 `turn_pending_confirm`（ASKING 挂起预检拒绝）错误。
 
 3. **sessionId 持久化** — 存 `localStorage`，刷新后能恢复。换 sessionId = 新会话。
 

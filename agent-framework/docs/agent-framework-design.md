@@ -5,7 +5,7 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
-**复核日期:** 2026-09-26（master @ `a263b92`）——§6 依赖升级至 agentscope 2.0.3、§5.3 订正三个默认值
+**复核日期:** 2026-09-26（master @ `a263b92`）——§6 依赖升级至 agentscope 2.0.3、§5.3 订正三个默认值；2026-10-01 复核补录 §6 新增依赖（agent-protocol/flyway/lettuce/minio 等）与 §5.3 新增变量
 
 ---
 
@@ -423,6 +423,8 @@ config/
 | `LLM_TIMEOUT` | `120` | | API 调用超时(秒) |
 | `LLM_ENABLE_THINKING` | `false` | | `false` → 注入 `chat_template_kwargs.enable_thinking=false`（Qwen3 / vLLM） |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置） |
+| `LLM_REASONING_EFFORT` | 空 | | 推理强度（空 = 不传，2026-09-27 新增） |
+| `LLM_FREQUENCY_PENALTY` | 空 | | 频率惩罚（空 = 不传，2026-09-27 新增） |
 | `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录（只读） |
 | `AGENT_WORKSPACE_DIR` | 回落 `AGENT_CONFIG_DIR` | | 可写工作区；平台部署必须显式设 `/workspace` |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关；`false` = 完全关闭记忆 |
@@ -432,7 +434,9 @@ config/
 | `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
-| `AGENT_REDIS_*` | 见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1.8 | ✓(集群) | session_event 事件流存储（Redis Streams）共 4 项；`AGENT_REDIS_URL` 集群必填（默认 127.0.0.1 仅限本地） |
+| `AGENT_REDIS_*` | 见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1.8 | ✓(集群) | session_event 事件流存储（Redis Streams）共 7 项（2026-09-28 起含 cluster 模式与前缀：`AGENT_REDIS_MODE/_CLUSTER_NODES/_PREFIX`）；`AGENT_REDIS_URL` 集群必填（默认 127.0.0.1 仅限本地） |
+| `AGENT_PROTOCOL_*` / `AGENT_REMOTE_*` | 见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1.12 | | Agent Protocol 远程子 agent（默认关闭；enabled=true 时 token 必填） |
+| `AGENT_A2A_JOB_*` | 见 [agent-framework-deploy.md](agent-framework-deploy.md) §4.1.13 | | A2A 幂等 Job `/a2a/jobs`（默认关闭；enabled=true 时 token 必填） |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时 filesystem 切换为 OpenSandbox） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（到期自动销毁，resume 404 自动降级重建） |
@@ -455,7 +459,13 @@ config/
 | agentscope-extensions-model-openai | 2.0.3 | OpenAI 兼容 LLM |
 | agentscope-extensions-mysql | 2.0.3 | MysqlDistributedStore (agent_state + agent_fs) |
 | agentscope-extensions-a2a-server | 2.0.3 | A2A 协议 Server |
+| agentscope-extensions-a2a-client | 2.0.3 | PartParserRouter（a2a-server 为 provided+optional 不传递，必须显式声明） |
+| agentscope-extensions-agent-protocol | 2.0.3 | Agent Protocol 远程子 agent 服务端（POST /tasks 等，默认关闭） |
 | com.alibaba.opensandbox:sandbox | 1.0.18 | OpenSandbox Java SDK（沙箱模式） |
+| io.minio:minio | 8.5.17 | S3 兼容对象存储 SDK（文件 local/s3 双后端的 s3 档） |
+| org.flywaydb:flyway-core / flyway-mysql | Boot 管理（10.10.x） | DB schema 版本化迁移（db/migration/V*.sql，启动自动执行） |
+| org.springframework:spring-jdbc | Boot 管理 | FlywayAutoConfiguration 必需（缺了迁移静默不装配） |
+| io.lettuce:lettuce-core | Boot 管理（6.3.2） | Redis 客户端（session_event 事件流） |
 | Spring Boot | 3.3.5 | HTTP 服务框架 |
 | SnakeYAML | 2.x | YAML frontmatter 解析 |
 | MySQL Connector/J | 8.x | MySQL JDBC 驱动 |

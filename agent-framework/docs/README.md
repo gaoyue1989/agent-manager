@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 43 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 47 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -13,16 +13,16 @@
 |------|------|
 | **[agent-creation-guide.md](agent-creation-guide.md)** | **🆕 面向框架使用者的上手指南（2026-09-26 新增）**：5 分钟快速开始 → OAF 包结构与构建 → 配置说明 → 测试环境部署（三法）→ API 调用完整流程（对话/续传/HITL/文件/技能/A2A）→ 能力地图 → 常见坑。**不知道从哪篇读起就先读这篇** |
 | [agent-framework-design.md](agent-framework-design.md) | v2.1 框架总体设计：架构、模块分层、类/表/端点清单（目录树为 v2.1 快照，最新以 ../AGENTS.md 为准；§6 依赖与 §5.3 默认值已按 pom/application.yml 订正） |
-| [agent-framework-deploy.md](agent-framework-deploy.md) | 部署手册：前置条件、Docker、**全量环境变量表**（含 AGENT_REDIS_URL 必配项；2026-09-26 补齐 Harness/SSE/History 三段） |
-| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计基线为 2026-09-17 实跑；当前规模以静态清点标注） |
-| [api.md](api.md) | REST API 全量参考（无状态单次流架构；2026-09-26 补齐会话三态/观察者端点/技能管理端点/8 张表，`/tools` 三段契约已同步 issue #39） |
-| [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制） |
+| [agent-framework-deploy.md](agent-framework-deploy.md) | 部署手册：前置条件、Docker、**全量环境变量表**（含 AGENT_REDIS_URL 必配项；2026-09-26 补齐 Harness/SSE/History 三段；2026-10-01 增补 §4.1.12 Agent Protocol 与 §4.1.13 A2A 幂等 Job 两段） |
+| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计为 2026-10-01 实跑 1310 例 / 129 类） |
+| [api.md](api.md) | REST API 全量参考（无状态单次流架构；2026-09-26 补齐会话三态/观察者端点/技能管理端点/8 张表，`/tools` 三段契约已同步 issue #39；2026-10-01 增量重核：数据表迁 Flyway（V1–V8）共自建 10 张表、模型采样参数、confirm_context 多行化、`/a2a/jobs` 等） |
+| [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制；2026-10-01 升 v1.2——ASKING 改 `/chat` 入口预检 `turn_pending_confirm`、`/subscribe` 不读 `Last-Event-ID`、补 `subagent_exposed` 远程转发事件标注等） |
 | [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.4.0：Durable SSE + HITL + 文件 + Skill 管理 + 模型 + 热加载 + 事件词表（被多处源码 javadoc 引用；本版修目录死锚与续传游标示例） |
 | [checkpoint-design.md](checkpoint-design.md) | Checkpoint 持久化设计：MysqlDistributedStore、agent_state/agent_fs 表结构（schema 权威；已按 agentscope 2.0.3 订正） |
 | [history-agentstate-design.md](history-agentstate-design.md) | History 权威化设计：agent_state 为消息级事实来源（已实施，被源码注释引用） |
 | [tracing-design.md](tracing-design.md) | OTel 链路追踪设计（已实施，被 Makefile/Dockerfile 引用；含 2026-09-26 的模型/工具 IO 内容补录） |
 | [offline-dev-image.md](offline-dev-image.md) | 离线开发镜像 java-dev 手册（被 Dockerfile.dev 引用） |
-| [e2e-ci-plan.md](e2e-ci-plan.md) | GitHub Actions E2E 体系：已实施的 v3 录制回放架构 + **四个 e2e job 与 eval-selftest** + 实施记录与框架缺陷清单 D1–D9 |
+| [e2e-ci-plan.md](e2e-ci-plan.md) | GitHub Actions E2E 体系：已实施的 v3 录制回放架构 + **e2e job（核心/多副本/沙箱/协议/协议多副本 + 工具插件）与 eval-selftest** + 实施记录与框架缺陷清单 D1–D9 |
 | [harness-config-analysis.md](harness-config-analysis.md) | Harness 配置化分析：三层配置盘点 + 环境变量绑定证据链（Phase 1 已实施；LLM 装配已收敛到 ChatModelFactory） |
 | [concurrency-benchmark-plan.md](concurrency-benchmark-plan.md) | 并发压测方案与执行结论（被 bench/ 脚本引用，不移动） |
 
@@ -56,6 +56,10 @@
 | [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload，**M1/M2 已实施，部署环境 E2E 验证通过**（2026-09-25；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施）。**2026-09-26 由 ③ 档移入本档**——此前索引归类与文档自身状态矛盾 |
 | [change-execution-order.md](change-execution-order.md) | v2.0→v2.1 整体升级执行顺序与结果记录（MysqlDistributedStore/HarnessAgent/Workspace/五功能/多租户，2026-08-06，头部含 2026-09-07 现状核对） |
 | [session-history-archive-design.md](session-history-archive-design.md) | 压缩后会话历史可查（session_message 消息轨 + AgentStateStore 归档装饰器 write-through + history 双源合并渲染压缩分隔条），**已实施**（2026-09-27；含 agentscope-java/deer-flow/QwenPaw 三机制调研结论、§13 评审核对记录 R1–R9 与 §15 实施记录；API 契约见 api.md history 节） |
+| [model-params-design.md](model-params-design.md) | 模型采样参数扩展（推理强度/思考开关/温度/最大输出/频率惩罚 + provider 列作推理引擎方言选择器），**已实施**（2026-09-27；session-model-switch 的增量设计，model_config 新列随 V4 迁移） |
+| [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md) | Redis Cluster 与 key 前缀隔离（`agent.redis.mode` / `cluster-nodes` / `prefix` 三个配置叶子 + `RedisConnectionFacade` 连接门面；默认配置下行为与存量部署逐字节一致），**已实施**（2026-09-28） |
+| [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) | E2E 覆盖缺口分析第一轮（近 7 天变更 → 25 条补充用例设计稿；其中 19 条已由 bc235c4 落地） |
+| [e2e-coverage-gap-analysis-20260929.md](e2e-coverage-gap-analysis-20260929.md) | E2E 覆盖缺口分析第二轮（近 3 天变更 → FW1-FW3 / RD1-RD3 六条已落地进 api-core.spec.ts；含与上轮文档及 bc235c4 的用例数对账） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
 

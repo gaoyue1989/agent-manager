@@ -3,7 +3,7 @@
 **版本:** v2.4.0 | **架构:** 无状态单次流 SSE（Durable SSE）  
 **Base URL:** `http://{host}:8100`  
 **Content-Type:** 请求 `application/json`；SSE 响应 `text/event-stream`  
-**复核日期:** 2026-09-26（master @ `a263b92`）
+**复核日期:** 2026-10-01（master @ `4a4dea8`）
 
 > **通用请求头：** 所有接口均支持 `X-User-Id` 请求头传递用户标识（网关注入优先，
 > 缺省回落请求参数中的 `userId`，再缺省 `debug-user`）。
@@ -222,7 +222,7 @@ GET /threads/{sessionId}/status
 | `state` | String | `working` / `completed` / `waiting_confirm` / `idle` / `interrupted`（5 态） |
 | `latest_event_seq` | Integer | 最新事件序号（供 `afterSeq` 参数使用） |
 | `reply_id` | String | 当前 turn 的回复 ID |
-| `pending_confirm` | String/Object | 待确认上下文（`waiting_confirm` 时非空） |
+| `pending_confirm` | String/Object | 待确认上下文（`waiting_confirm` 时非空）；与 `/history` 同口径取 FIFO 头，本地 HITL 行或远程确认行（远程行 additive 附 `confirm_key` / `remote_task`） |
 
 **5 态语义：**
 
@@ -488,6 +488,9 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 
 > `pendingConfirm` 仅为待确认状态时存在，无待确认时为 `null`。  
 > `files` 为 Agent 产出的文件列表（origin=generated），前端据此渲染下载卡片。  
+> `messages` 为双源合并时间线（2026-09-27 起）：归档消息轨 `session_message`（压缩前原文）为基底，
+> agent_state 当前上下文的独有消息（存量会话/未归档尾部）在首页末尾合入；摘要消息带
+> `type: "compaction_summary"`——压缩后的会话历史仍可完整回查。  
 > 前端据此在刷新后重建确认卡片和产出文件卡片。
 
 ---
@@ -1153,6 +1156,12 @@ GET /skills/manage
 | `session_created` | `POST /threads/chat` 未传 sessionId 时自动生成（**仅此端点**） | `session_id` |
 | `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role` |
 | `AGENT_END` | Agent 执行完成（**流关闭信号**） | `replyId` |
+| `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 在结果返回时发出，snake_case） | `subagent_id`, `agent_id`, `session_id`, `label` |
+
+> **远程转发标注（2026-09-30 新增）：** 远程子 agent 的事件经 SDK 回流 lead 的 SSE 时，
+> 序列化层对转发事件 additive 附 `source`（来源 agent 名，lead 自身事件恒无此字段）、
+> `taskId`、`parentSessionId` 三字段——前端据此把转发事件路由进「远程调用面板」而非主回复流。
+> 转发的 `AGENT_END` 只代表子任务运行终点，**不关闭主 turn 流**（收尾以 lead 自身 `AGENT_END` 为准）。
 
 **`session_created` 详细结构：**
 
@@ -1360,6 +1369,8 @@ GET /skills/manage
 | `temperature` / `maxTokens` / `timeoutSeconds` | Number | | |
 | `enableThinking` | Boolean | | |
 | `contextLength` | Number | | ≤0 不传给模型 |
+| `reasoningEffort` | String | | 推理强度（如 `low`/`medium`/`high`，按 provider 方言校验）；空串=清除不下发 |
+| `frequencyPenalty` | Number | | 频率惩罚，范围 [-2, 2]；不可撤销下发（置空不回退已下发值） |
 | `enabled` | Boolean | | 默认 true |
 
 错误码：400 `invalid_config` / `duplicate_name`；502 `model_test_failed`。
@@ -1406,6 +1417,7 @@ data: {"type":"error","error":"turn_in_progress: session 'xxx' has an active tur
 | error 值 | 说明 |
 |----------|------|
 | `turn_in_progress: session '...' has an active turn...` | 排队超时（120s），同 session 有活跃执行 |
+| `turn_pending_confirm: session '...' is in ASKING state...` | 会话挂起等待人工确认，新 turn 入口预检拒绝（先走确认流程再发新消息） |
 | `confirm_context_not_found: ...` | 确认上下文不存在或已过期 |
 | `confirm_already_consumed` | 重复确认 |
 | 其他 | 运行时异常信息 |

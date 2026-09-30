@@ -1,9 +1,11 @@
 # agent-framework GitHub Actions E2E 验证体系设计（e2e-ci-plan）
 
-> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **四个** e2e job 运行 + `eval-selftest`；实施记录与缺陷清单见 §11）
+> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **六个** e2e job 运行 + `eval-selftest`；实施记录与缺陷清单见 §11）
 > 复核日期：2026-09-26 —— 本版把全文「三个 e2e job」统一为四个，§7 草案替换为「已实施 + 现状指向」，
 > §5 补 P 组用例定义，§11 补 2026-09-25/26 的实施记录。
-> 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 4 个 e2e job + `eval-selftest`）
+> 增补（2026-10-01）—— 协议门禁扩为两个 job：`e2e-protocol`（T 组先行 + J0/J 组 /a2a/jobs HTTP 面，非必需）
+> 与 `e2e-protocol-multi`（P 组，双 LB 双副本，**必需门禁**）；§2.2/§2.3/§3.1/§5/§6.2/§7 已同步。
+> 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 4 个 e2e job + `eval-selftest`；2026-09-30 起再增协议两个 e2e job，见 §2.3）
 > 前置：无 —— 不依赖 Kind 集群、platform-backend、前端、真实 LLM API Key、任何 GitHub Secrets
 > 复用：`bench/mock-llm`、`bench/mock-mcp`、`example/approval-forms`（mock MCP + 选择器先例）、`docs/api-thread-spec.md`（协议权威）
 > v2 变更（2026-09-18）：① 沙箱服务改为 **mock 实现**（不再部署真实 OpenSandbox Server / 拉取镜像）；② 新增 **F 组文件上传下载验证矩阵**（原 S9 扩充为独立场景组）
@@ -93,7 +95,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | mock MCP（普通工具） | 复用 `bench/mock-mcp/server.js` | node 后台进程 | 18082 | `GET /health` |
 | mock MCP（MCP Apps/HITL） | 复用 `example/approval-forms/mock-mcp/approval_mcp.py` | python3 后台进程（仅标准库） | 8813 | 脚本启动即算就绪 + 首用重试 |
 | **mock OpenSandbox** | **新增** `e2e/mock/sandbox-server.mjs`（协议取自 `mock/fixtures/sandbox/` 真实服务录制件，见 §4.4） | node 后台进程 | 8090（管理）+ 41xxx（execd 代理池） | `GET /health` → `{"status":"healthy"}` |
-| agent-framework | `mvn -B -DskipTests package` 产物 | runner 上直跑 jar | 8100（单副本）/ 8101+8102（多副本） | `GET /health` 200 |
+| agent-framework | `mvn -B -DskipTests package` 产物 | runner 上直跑 jar | 8100（单副本）/ 8101+8102（多副本）/ 8100-8106（protocol-multi：双 LB + 5 实例） | `GET /health` 200 |
 | nginx 轮询 LB | docker run nginx | 多副本 job 专用 | 8100 | 配置装载成功 + 任一 upstream /health |
 | Playwright | `e2e/package.json` | `npx playwright install --with-deps chromium` | — | — |
 
@@ -103,15 +105,16 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 |-----|------|------|------|------|
 | `test`（已有） | — | mvn test | — | ~6min |
 | `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
-| `e2e-core` | 1 | S/F/H/M/A/FW/RD 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.11） | needs: changes（与单测并行） | ~12-15min |
+| `e2e-core` | 1 | S/F/H/M/A/FW/RD 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.11；SK/MEM/HA 组无 §5 小节，用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4，同落 api-core 项目） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
-| `e2e-protocol`（T 组先行，2026-09-30） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；spawn/确认/拒绝/超时/父崩溃五场景属 T 组二期（需 mock-LLM 双进程脚本化编排） | needs: changes（非必需检查） | ~5min |
+| `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
+| `e2e-protocol-multi`（P 组，2026-09-30） | lead×2 + member×2 + 双 nginx LB（8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本；`AGENT_PROTOCOL_EVENT_BUS=redis`，共享 MySQL/Redis） | P1-P7 跨副本委派（travel-fulfillment 设计 §18.4/§18.10）：spawn 随机路由→收割汇总、lead kill 接管、member 事件跨副本对账、TTL 恰好一次、无粘性冒烟、存量零影响、A2A Job 同键收敛（用例定义见 §5.12） | needs: changes（**必需检查**） | timeout 30min |
 | `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
-四个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
-（组名含 workflow 维度，跨工作流互不取消——见根 `AGENTS.md` CI 章节）。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，四个 job 同级硬门禁。
+六个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
+（组名含 workflow 维度，跨工作流互不取消——见根 `AGENTS.md` CI 章节）。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛；核心/多副本/沙箱/协议多副本四个 job 为必需硬门禁（`e2e-protocol` T 组切片、`e2e-plugin` 与 `eval-selftest` 非必需，红了只告警不挡合并）。
 
 > `e2e-plugin` 与其余三组形态不同：不经 Playwright，由 `scripts/plugin-smoke.sh` 现场编译示例插件 jar
 > （`e2e/plugin-echo/`）并自起被测进程——插件编译需要 `target/classes` 与 `.m2` 的 agentscope-core，
@@ -130,6 +133,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | 3306 / 6379 | MySQL / Redis（services 固定映射 localhost） |
 | 8100 | 被测入口：core/sandbox job = 实例本体；multi job = nginx LB |
 | 8101 / 8102 | multi job 两副本 |
+| 8100-8106 | protocol-multi 组（P 组）：8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本 |
 | 8110 / 8111 / 8112 | describe 级 spawnSync 第二实例（MEM 记忆关断 +10 / RD Redis 前缀隔离 +11 / FW3 Flyway 升级路径 +12）；env `E2E_MEMOFF_PORT` / `E2E_RD_PREFIX_PORT` 可覆盖 |
 | 18081 / 18082 / 8813 | mock LLM / bench MCP / approval MCP（沿用 bench 与 example 既有端口约定） |
 | 8090 | mock OpenSandbox 管理口（仅 sandbox job） |
@@ -512,6 +516,23 @@ agent-config/
 > 启动失败负例——校验在紧凑构造器单测已覆盖，e2e 侧一条负例烧约 95s（wait-ready 不感知进程死亡）
 > 不值；f4db8ca Channel 链路 userKey 反查——X15/X9 已持续看守（api-sandbox.spec.ts）。
 
+### 5.12 protocol P 组 — 协议多副本（e2e-protocol-multi job；2026-09-30 补录）
+
+> ⚠ 与 §5.9 的「P 组（自定义工具插件）」重名：本组 P1-P7 是 travel-fulfillment 设计 §18.4/§18.10 的
+> 协议多副本用例（`e2e/tests/api-protocol-multi.spec.ts`），与插件冒烟脚本内部的 P1-P7 编号互不相干。
+> 拓扑：lead×2 + member×2、双 nginx 轮询 LB（无粘性随机路由）、共享同一 MySQL/Redis、
+> 协议事件总线 `AGENT_PROTOCOL_EVENT_BUS=redis`（a4cee7c）。
+
+| # | 场景 | 断言要点 |
+|---|------|---------|
+| P1 | 跨副本委派 | lead LB 随机路由 spawn → member LB 随机路由受理 → 完成 → lead 收割汇总 turn 收敛 |
+| P2 | lead 副本 kill | registry 重建后另一 lead 副本接管轮询与收割 |
+| P3 | member 事件跨副本对账 | A 副本受理的任务在 B 副本 `/events` 全量回放 |
+| P4 | TTL 治理恰好一次 | 过期远程行收口且不重复 resume |
+| P5 | 双副本无粘性冒烟 | LB 入口 `/status` 与 `/health` 对随机路由透明 |
+| P6 | 存量零影响 | 协议关实例无 `/tasks` 端点（T8 口径） |
+| P7 | A2A Job 同键收敛 | 同键两次提交（LB 随机路由）→ 同一 taskId、idempotent 收敛 |
+
 ---
 
 ## 6. 测试代码结构与技术选型
@@ -550,10 +571,15 @@ agent-framework/e2e/
 │   ├── matchers.ts           # expectFrames(有序子集)/expectTerminal(done|permission_ask|error)/seqMonotonic
 │   └── selectors.ts          # §5.7 选择器契约单点维护
 ├── tests/
-│   ├── api-core.spec.ts      # S/F/H/M/A 组（可拆多文件）
+│   ├── api-core.spec.ts      # S/F/H/M/A/SK/MEM/HA/FW/RD 组（可拆多文件；api-models/api-reload 同属 core job）
+│   ├── api-models.spec.ts    # MOD 组（模型管理）
+│   ├── api-reload.spec.ts    # RL 组（OAF reload）
 │   ├── api-multi.spec.ts     # R 组
+│   ├── api-multi-kill.spec.ts # R4（kill 接管）
 │   ├── api-sandbox.spec.ts   # X 组
-│   ├── ui.spec.ts            # U1-U8、U10-U11
+│   ├── api-protocol.spec.ts  # T/J 组（e2e-protocol job）
+│   ├── api-protocol-multi.spec.ts # protocol P 组（e2e-protocol-multi job，§5.12）
+│   ├── ui.spec.ts            # U1-U8、U10-U11、U13-U15、U-SK
 │   └── ui-multi.spec.ts      # U9
 └── .runtime/                 # 运行产物（gitignore）：env.json、实例日志、文件存储、sandboxes/
 ```
@@ -571,12 +597,12 @@ agent-framework/e2e/
 
 ## 7. CI 工作流变更（已实施）
 
-> **现状核对（2026-09-26）**：本节此前是一份「增补草案」，其内容（`needs: test`、`timeout-minutes: 25`、
+> **现状核对（2026-09-26，2026-10-01 随协议两 job 复核）**：本节此前是一份「增补草案」，其内容（`needs: test`、`timeout-minutes: 25`、
 > `npm run check:fixtures`、`--health-cmd "mysqladmin ping -prootpass"`）**与已落地的 workflow 已全部不一致**，
 > 容易误导读者以为还有第二份真相。草案删除，现状以下面两处为准：
 > - **job 拆分与预算**：§2.3
-> - **workflow 原文**：`.github/workflows/agent-framework-ci.yml`（8 个 job：`changes` / `test` / `eval-selftest` /
->   `e2e-core` / `e2e-multi` / `e2e-sandbox` / `e2e-plugin` / `build-push`）
+> - **workflow 原文**：`.github/workflows/agent-framework-ci.yml`（10 个 job：`changes` / `test` / `eval-selftest` /
+>   `e2e-core` / `e2e-multi` / `e2e-sandbox` / `e2e-protocol` / `e2e-protocol-multi` / `e2e-plugin` / `build-push`）
 
 **与草案的关键差异（实测）：**
 
@@ -586,7 +612,7 @@ agent-framework/e2e/
 | `timeout-minutes` | 25 | 30 |
 | 夹具校验 | `npm run check:fixtures` | `node scripts/check-fixtures.mjs`（CI 下无执行位，直接调 node） |
 | MySQL 健康检查 | `mysqladmin ping -prootpass` | `mysqladmin ping -h localhost` |
-| job 数 | 3 | 4（+ `eval-selftest`） |
+| job 数 | 3 | 4（+ `eval-selftest`；2026-09-30 起再增 `e2e-protocol` / `e2e-protocol-multi`，见 §2.3） |
 | artifact | — | 另上传 `playwright-report/` 与 `.runtime-plugin/` |
 
 **运维要点（2026-09-25 实测踩坑）：**

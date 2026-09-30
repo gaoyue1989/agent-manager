@@ -4,13 +4,13 @@
 > 新架构改为 POST /threads/{sid}/chat 单次流（SSE 直吐，执行完即关闭），删除了 GET /threads/{sid}/events 长连接订阅端点和 SessionEventBus。请参考 [stateless-single-stream-plan.md](stateless-single-stream-plan.md)。
 
 > **状态: ✅ 已完成 (2026-08-17，历史快照)**
-> 参考 agentscope 官方前端重构调试页面，已完成主题/布局/会话页/长连接 SSE 全部改造（当时 308 用例全绿；现为 61 个测试类 / 456 个 @Test）。
+> 参考 agentscope 官方前端重构调试页面，已完成主题/布局/会话页/长连接 SSE 全部改造（当时 308 用例全绿；现为 128 个测试类 / 1309 个 @Test，find+grep 静态计数）。
 >
-> **现状核对（2026-09-07）**，除头部声明外，以下内容已随单次流架构作废/变更：
-> - **长连接机制全部作废**：§3.8、第六节 F 项、决策表中「流式传输模型 / A2A 长连接 / 事件总线扇出 (F-A) / 先订阅后发送 / 总线生命周期」各行——现为 POST /threads/{sid}/chat 单次流 + Turn 租约排队（waiting 帧），无 GET /events、无 SessionEventBus、非 fire-and-forget（响应即本次执行流）。
-> - **文件/类名**：`SessionEventBus.java` 未创建且已无必要；`js/api.js` 现为 `sendChat(sessionId, message, userId, {onEvent,onWaiting,onError,onEnd})` 单次流；调试页已不调用 `GET /chat/stream`（端点保留兼容）。`SessionStreamControllerTest` 现为 11 个用例（单次流/waiting/租约/ui 元数据/file_ready/审计）。
-> - **端点路径**：会话历史/触发为 `/threads/{sid}/history`、`/threads/{sid}/chat`（无 `/debug` 前缀）。
-> - chat.js 当年 ~966 行，现 1294 行。
+> **现状核对（2026-09-07，2026-10-01 复核更新）**，除头部声明外，以下内容已随单次流/durable SSE 架构作废/变更：
+> - **长连接机制全部作废**：§3.8、第六节 F 项、决策表中「流式传输模型 / A2A 长连接 / 事件总线扇出 (F-A) / 先订阅后发送 / 总线生命周期」各行——现为 POST /threads/chat 单次流（sessionId 在请求体）+ Turn 租约排队（waiting 帧），无当年设想的 GET /events 订阅端点、非 fire-and-forget（响应即本次执行流）；断线续传另由 durable-sse 改造提供（GET /threads/{sid}/subscribe 回放 + 游标追赶，见 durable-sse-plan.md）。
+> - **文件/类名**：`SessionEventBus.java` 已随 durable-sse 重新引入（职责为进程内扇出 + Redis 事件持久化，非本文设想的 per-session /events 长连接总线）；`js/api.js` 现为 `sendChat(sessionId, message, userId, fileIds, { model, onEvent, onWaiting, onError, onEnd })` 单次流；调试页已不调用 `GET /chat/stream`（该端点已删除）。单次流对话入口现为 `ChatStreamController`（`POST /threads/chat`，ChatStreamControllerTest 39 用例），`SessionStreamControllerTest` 现为 7 个用例（subscribe 回放/status/序列化 ui 元数据）。
+> - **端点路径**：会话历史/触发为 `/threads/{sid}/history`、`/threads/chat`（无 `/debug` 前缀）。
+> - chat.js 当年 ~966 行，现 2384 行。
 > - 验证环境中的 LLM key 已作掩码处理（`sk-WBHF2x…`，勿在文档存明文密钥）。
 
 ---

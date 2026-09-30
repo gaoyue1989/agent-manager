@@ -2,7 +2,7 @@
 
 > **读者**：想在 agent-framework 上构建一个新 Agent 的开发者 / 配置包作者
 > **目标**：从零到一个能跑起来、能被调用的 Agent，覆盖 OAF 包构建 → 测试环境部署 → 配置 → API 调用全流程
-> **状态**：随代码同步维护 | 复核日期 2026-09-26（master @ `a263b92`）
+> **状态**：随代码同步维护 | 复核日期 2026-09-26（master @ `a263b92`）；2026-10-01 复核补充 `agents[]` 远程子 agent 声明与 e2e 分组
 >
 > ✅ **本篇 §1 的示例已于 2026-09-26 端到端实跑验证**（JDK 21 + MySQL 8.0 + Redis 7 + e2e mock LLM/MCP）：
 > 打包 → 启动 → `/health` → `/tools` 三段契约 → SSE 对话 → `session_created`/`AGENT_END` 终态 →
@@ -299,6 +299,7 @@ weather-agent/                      # ← zip 内根目录
 | `tags` | list | 标签 |
 | `mcpServers[]` | list | MCP server 声明，字段见下 |
 | `skills[]` | list | 技能声明 |
+| `agents[]` | list | 子 Agent 声明（`vendor`/`agent`/`version`/`role`/`delegations`/`required`/`endpoint`）。`endpoint` 非空 = **远程子 agent**（lead 经 Agent Protocol 委派给该地址的成员服务，需双方开启 `AGENT_PROTOCOL_ENABLED`，见 agent-framework-deploy.md §4.1.12）；`endpoint` 为空 = 本地 subagent（生成 `subagents/*.md`），两者可混用 |
 | `tools[]` | list[string] | **声明意图**（不是存在性开关），配合 `deniedTools` 剔除工具 |
 | `deniedTools[]` | list[string] | 声明式隐藏，类粒度剔除，且从 `/tools` 的 internal 段中消失 |
 | `config` | object | 权限与运行时配置，见 §4.1 |
@@ -602,7 +603,7 @@ export MYSQL_USER=e2e MYSQL_PASS=e2e-pass
 export REDIS_URL='redis://127.0.0.1:16379'
 
 # 一键跑全套
-E2E_GROUP=core ./e2e/scripts/run.sh       # core | multi | sandbox
+E2E_GROUP=core ./e2e/scripts/run.sh       # core | multi | sandbox | protocol | protocol-multi
 ```
 
 `env-up.sh` 会：重置数据 → 清端口 → 复制 `e2e/fixtures/agent-config` 到 `.runtime/agent-config` → 起 mock LLM / mock MCP / mock 沙箱 → 写 `.runtime/env.json`。
@@ -877,6 +878,7 @@ POST /admin/reload?scope=auto
 | **会话标题自动生成** | 首条消息后异步生成中文标题 | 自动 |
 | **工具调用中文摘要** | `tool_call_summary` / `tool_result_preview` | 自动 |
 | **OAF 动态 reload** | 包内容原地更新 | **下一轮对话** |
+| **远程子 agent（Agent Protocol）** | `agents[].endpoint` 声明远程成员，lead 委派/远程确认桥/deny_rules 动态拦截 | restart |
 | **链路追踪** | OTel span + 模型/工具 IO 内容属性 | 即时 |
 | **A2A 通道** | JSON-RPC，第三方 Agent 可直接调 | — |
 

@@ -2,6 +2,8 @@
 
 > 状态：已实施（2026-09-28，见 §9 实施记录）
 > 关联代码：`backend/internal/k8s/template.go`（IngressBuilder）、`backend/internal/service/publish.go`（接线）、`backend/templates/ingress-overlay.example.yaml`（示例）
+> 2026-09-30 起扩展为 `INGRESS_HOST_SUFFIX` 双模式：§4 校验与 §5 Endpoint 派生按模式分支
+> （host 模式改强制 host=`{K8sName}{suffix}`、path 恒 `/`、rewrite 三项必须为空），见 [ingress-host-mode-design.md](ingress-host-mode-design.md)。
 
 ## 1. 背景与目标
 

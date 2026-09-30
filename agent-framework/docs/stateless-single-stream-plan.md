@@ -1,6 +1,13 @@
 # 无状态单次流架构改造设计（stateless-single-stream-plan）
 
 > 状态：**设计定稿**（决策 O1-O7 已关闭；剩余风险 R3/R12，均由 SPIKE S2 验证收敛）
+> **演进说明（2026-10-01 补记）**：本文"删除长连接、无跨副本事件扇出"的目标形态自 2026-09-14
+> （0cd8a90，DURABLE_SSE）起已被 durable-sse 系列方案接续演进——`SessionEventBus` 以
+> Redis Streams 持久化事件总线形态回归、订阅端点为 `GET /threads/{sid}/subscribe`
+> （本文"现状核对"中"SessionEventBus 已删除"仅对 2026-09-07 时点有效），见
+> [durable-sse-plan.md](durable-sse-plan.md) 与
+> [durable-sse-multinode-plan.md](durable-sse-multinode-plan.md)；本文其余决策（turn_lease 租约、
+> confirm_context 落库、`/threads` 去前缀等）仍为现行架构的来源。
 > 范围：agent-framework（AgentScope Java 2.0.0 + Spring Boot 3.3，端口 8100）
 > 目标部署形态：单 Agent 多副本（无状态水平扩展）
 

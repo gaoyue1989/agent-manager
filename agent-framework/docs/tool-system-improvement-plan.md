@@ -328,16 +328,16 @@ toolkit.registration()
 
 ```bash
 # 启动后检查工具数量
-curl -s http://localhost:8101/tools | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['builtin']), 'tools')"
+curl -s "http://localhost:8100/tools?includeInternal=true" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['sdkInternal']), 'tools')"
 
-# 预期：所有 HarnessAgent 内置工具可用（约 20+ 个），不只有 16 个
+# 预期：所有 HarnessAgent 内置工具可用（约 20+ 个，经 sdkInternal 段透出），不只有 16 个
 ```
 
 ### 5.2 阶段二验证
 
 ```bash
 # 启动后检查 MCP 工具
-curl -s http://localhost:8101/mcp
+curl -s http://localhost:8100/mcp
 
 # 预期：MCP 服务器通过 McpClientBuilder 注册，工具可用
 ```
@@ -346,7 +346,7 @@ curl -s http://localhost:8101/mcp
 
 ```bash
 # 自定义工具可用
-curl -s -X POST http://localhost:8101/ -H "Content-Type: application/json" \
+curl -s -X POST http://localhost:8100/ -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"查询订单 12345"}]}},"id":"1"}'
 
 # 预期：Agent 调用 query_order 工具

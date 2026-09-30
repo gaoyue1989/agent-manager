@@ -129,7 +129,7 @@ bench/eval/
 ```
 {oaf_out}/agent-config/
 ├── AGENTS.md                      # base + 覆盖层合并（mcpServers/deniedTools/config.permission）
-├── mcp-configs/eval-mock/config.yaml   # 生成：url→mock 地址、permissions.tools allow|ask
+├── mcp-configs/{configDir}/config.yaml # 生成：url→mock 地址、permissions.tools allow|ask（configDir 取自 AGENTS.md frontmatter，缺省 mcp-configs/platform）
 ├── plugins/echo-tool.jar               # 按 spec 编译（plugin-smoke.sh 配方）
 ├── plugins/echo-tool/config.yaml       # 插件配置（可选，支持 ${ENV} 替换）
 └── oaf-manifest.json            # 留痕：各层来源、动机 diff 文件、内容 hash、组装时间
@@ -153,13 +153,13 @@ bench/eval/
 
 ### 4.4 `provision/instance.py`——供给与生命周期（G4）
 
-1. `ensure_infra()`：MySQL:3307 + Redis:16379（复用 `e2e/scripts/local-infra.sh`；缺失时 docker 直起并初始化 `agent_manager_test` 库 / `agent_manager` 用户）
-2. `start_instance(env_spec)`：`java -jar`（无 JDK 时经 maven 容器），env 按部署文档 §4：`LLM_*`（`EVAL_TARGET_LLM_*`）、`CHECKPOINT_*`、`AGENT_REDIS_URL`、`AGENT_CONFIG_DIR`=组装产物、插件目录缺省回落 `{config}/plugins`、`SANDBOX_ENABLED=false`、`FILE_STORAGE_TYPE=local`
+1. `ensure_infra()`：MySQL:13306 + Redis:16379（复用 `e2e/scripts/local-infra.sh`；缺失时 docker 直起并初始化 `agent_framework_e2e` 库 / `e2e` 用户，与 e2e 门禁同源）
+2. `start_instance(...)`：docker 起被测实例（`maven:3.9-eclipse-temurin-21` 镜像 `--entrypoint java -jar`，`--network host` 直连本机 MySQL/Redis/mock），env：`LLM_*`（`EVAL_TARGET_LLM_*` 优先、回落 `EVAL_LLM_*`）、`CHECKPOINT_*`、`AGENT_REDIS_URL`、`AGENT_CONFIG_DIR`=组装产物、插件目录缺省回落 `{config}/plugins`、`SANDBOX_ENABLED=false`、`FILE_STORAGE_TYPE=local`
 3. 就绪探测：`GET /health` 轮询至超时
 4. **契约预检（preflight）**——供给是否到位在跑用例前暴露，不产出假 FAIL：
-   - plugins：启动日志 `Tool plugin [x] registered tools:` + `/tools?includeInternal=true` 含插件工具
+   - plugins：`/tools?includeInternal=true` 含插件工具（启动期注册另有 plugin-smoke.sh 日志断言配方，不在预检内）
    - mock_mcp：`/tools` 含 mock 工具（MCP 注册 fail-soft，缺即供给失败）
-   - reload_probe：改 marker → `POST /admin/reload?scope=agent` → 重建后工具仍在（plugin-smoke.sh 断言集移植）
+   - reload_probe：`POST /admin/reload?scope=agent` → 重建后工具仍在（marker 经插件 config `${EVAL_PLUGIN_MARKER}` 注入，plugin-smoke.sh 断言思路移植）
    - session_model_probe：`GET /models` 可用 + 对话带 `model` 无 error 帧
    - 结果落 `reports/{task}/preflight.json`
 5. `teardown()`：停实例与 mock（infra 容器保留复用）；`--no-teardown` 调试用
@@ -167,7 +167,7 @@ bench/eval/
 ### 4.5 CLI 与流程接入
 
 ```bash
-python3 bench/eval/flywheel.py provision --since ca9085d [--oaf-base DIR] [--plugin-src DIR] [--keep]
+python3 bench/eval/flywheel.py provision --since ca9085d [--oaf-base DIR] [--plugin-src DIR]
 python3 bench/eval/flywheel.py run --provision --since ca9085d --repeat 1 --with-gen 2 --judge --rca-llm
 ```
 
