@@ -140,6 +140,10 @@ agent:
     # 结果确定性回流。仅影响纯 spawn 轮次；无远程声明的服务无消费方、无副作用
     remote-spawn-sync-wait: ${AGENT_REMOTE_SPAWN_SYNC_WAIT:true}
     remote-spawn-sync-wait-seconds: ${AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS:120}
+    # 协议事件总线实现（多副本设计 §18.3）：redis = Redis Streams（跨副本可见、跨重启
+    # 可重放，默认）；memory = SDK 内置内存实现（v1.4 行为）。redis 实现在 Redis 缺失
+    # 或运行期异常时自动 fail-soft 降级内存，行为不劣化于 v1.4
+    event-bus: ${AGENT_PROTOCOL_EVENT_BUS:redis}
   # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
   harness:
     # ReAct 推理

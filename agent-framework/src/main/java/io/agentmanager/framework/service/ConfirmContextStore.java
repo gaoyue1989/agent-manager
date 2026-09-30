@@ -111,10 +111,11 @@ public class ConfirmContextStore {
      *
      * @param confirmKey     'local' 或 'task:{task_id}'
      * @param remoteTaskJson 远程锚点 JSON（{service, task_id, tool_calls, child_reply_id}）；本地行 null
+     * @return affected rows：1=新插入、2=覆盖更新（多副本并发落卡的去重审计依据，§18.2）
      */
-    public void put(String confirmKey, String sessionId, List<Map<String, Object>> toolCalls,
-                    String replyId, String runtimeSessionId, String runtimeUserId,
-                    String remoteTaskJson) {
+    public int put(String confirmKey, String sessionId, List<Map<String, Object>> toolCalls,
+                   String replyId, String runtimeSessionId, String runtimeUserId,
+                   String remoteTaskJson) {
         var key = normalizedKey(confirmKey);
         log.debug("[HITL-DB] put: sessionId={}, confirmKey={}, replyId={}, toolCount={}, runtimeSid={}, runtimeUid={}",
             sessionId, key, replyId, toolCalls.size(), runtimeSessionId, runtimeUserId);
@@ -140,7 +141,7 @@ public class ConfirmContextStore {
             stmt.setString(5, replyId);
             stmt.setString(6, runtimeSessionId);
             stmt.setString(7, runtimeUserId);
-            stmt.executeUpdate();
+            return stmt.executeUpdate();
         } catch (Exception e) {
             log.error("ConfirmContextStore: put failed for {}: {}", sessionId, e.getMessage());
             throw new IllegalStateException("failed to persist confirm context: " + e.getMessage(), e);

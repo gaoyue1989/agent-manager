@@ -109,6 +109,34 @@ public class AgentProtocolConfig {
         }
 
         /**
+         * 协议事件总线 bean override（设计 §18.3，多副本 G2）：默认 Redis Streams 实现
+         * （跨副本可订阅/重放，事件面放开多副本）——利用 SDK 自动配置的
+         * {@code @ConditionalOnMissingBean} 退位机制（同 TaskRepository/AgentFactory，
+         * 2.0.3 字节码实证）。{@code AGENT_PROTOCOL_EVENT_BUS=memory} 或无 Redis 门面时
+         * 返回 SDK 内存实现（v1.4 行为）；Redis 运行期异常由
+         * {@link io.agentmanager.framework.service.protocol.ProtocolRedisEventBus}
+         * 内部 fail-soft 降级，不在此处静态选择。
+         */
+        @Bean
+        public io.agentscope.extensions.agentprotocol.AgentProtocolEventBus agentProtocolEventBus(
+                AgentProtocolSettings settings,
+                org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> facade,
+                org.springframework.beans.factory.ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> sdkProps) {
+            if (!"memory".equalsIgnoreCase(settings.eventBus())) {
+                var f = facade.getIfAvailable();
+                if (f != null) {
+                    log.info("Agent Protocol enabled: AgentProtocolEventBus -> redis streams (multi-replica §18.3)");
+                    return new io.agentmanager.framework.service.protocol.ProtocolRedisEventBus(f);
+                }
+                log.warn("AGENT_PROTOCOL_EVENT_BUS=redis 但无 RedisConnectionFacade bean，降级内存总线（v1.4 行为）");
+            }
+            // 内存回退透传 SDK 的 sse-replay-buffer-size（CR P2-4：无参构造会令该配置静默失效）
+            return new io.agentscope.extensions.agentprotocol.AgentProtocolTaskEventBus(
+                sdkProps.getIfAvailable(io.agentscope.extensions.agentprotocol.AgentProtocolProperties::new)
+                    .getSseReplayBufferSize());
+        }
+
+        /**
          * AgentFactory：协议任务（提交 + 每次 resume）运行时取当前 agent。
          * 经 AgentRuntimeService 的 volatile 引用间接持有，OAF reload 整包重建后
          * 协议任务自动路由到新 agent（与 A2A 链路同源语义）。

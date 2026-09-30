@@ -47,6 +47,7 @@ public class SessionCleanupService {
     private final A2aAgentRefHolder agentRefHolder;
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
+    private final RemoteTaskRegistryStore remoteTaskRegistryStore;
 
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
@@ -56,7 +57,8 @@ public class SessionCleanupService {
                                  SessionUserStore sessionUserStore,
                                  A2aAgentRefHolder agentRefHolder,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
-                                 io.agentmanager.framework.service.storage.FileStorage fileStorage) {
+                                 io.agentmanager.framework.service.storage.FileStorage fileStorage,
+                                 RemoteTaskRegistryStore remoteTaskRegistryStore) {
         this.dataSource = dataSource;
         this.sessionManager = sessionManager;
         this.turnLeaseStore = turnLeaseStore;
@@ -66,6 +68,7 @@ public class SessionCleanupService {
         this.agentRefHolder = agentRefHolder;
         this.props = props;
         this.fileStorage = fileStorage;
+        this.remoteTaskRegistryStore = remoteTaskRegistryStore;
     }
 
     /**
@@ -78,11 +81,14 @@ public class SessionCleanupService {
         // 1. 清理内存中的过期会话
         int memCleaned = sessionManager.cleanupExpired();
 
-        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log
+        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log / remote_task_registry
         //    （session_event 已迁 Redis，留存由 key TTL 承担，不在这里清）
         turnLeaseStore.cleanupExpired();
         confirmContextStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
+        // 在途登记终态行保留 7 天（设计 §18.2；与 TaskRecord 清理节奏一致）
+        remoteTaskRegistryStore.deleteTerminalBefore(
+            java.sql.Timestamp.from(Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS)));
 
         // 3. 清理会话记录（agent_state / agent_fs / session_message / session_user）
         Instant cutoff = Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS);

@@ -329,11 +329,14 @@ public record AgentManagerProperties(
         /** 远程 spawn 强制同步等待（AGENT_REMOTE_SPAWN_SYNC_WAIT，lead 用）：注入 SDK force_sync 属性，spawn 阻塞等子任务完成、结果确定性回流（设计 §16 实测发现）。默认开 */
         @DefaultValue("true") boolean remoteSpawnSyncWait,
         /** 强制同步等待秒数（AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS），默认 120 */
-        @DefaultValue("120") int remoteSpawnSyncWaitSeconds
+        @DefaultValue("120") int remoteSpawnSyncWaitSeconds,
+        /** 协议事件总线实现（AGENT_PROTOCOL_EVENT_BUS）：redis | memory，默认 redis——
+         *  Redis 缺失/异常 fail-soft 降级内存（多副本设计 §18.3） */
+        @DefaultValue("redis") String eventBus
     ) {
         /** 代码默认值兜底：配置节缺失或兼容构造器（测试直接构造）时使用 */
         public static AgentProtocolSettings defaults() {
-            return new AgentProtocolSettings(false, "", "", 7, 24, 5, "", true, 120);
+            return new AgentProtocolSettings(false, "", "", 7, 24, 5, "", true, 120, "redis");
         }
     }
 }
