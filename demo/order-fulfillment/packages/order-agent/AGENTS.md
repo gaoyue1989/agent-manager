@@ -2,9 +2,9 @@
 name: order-agent
 vendorKey: internal
 agentKey: order-agent
-version: 1.0.0
+version: 1.1.0
 slug: internal/order-agent
-description: 订单专员（order-fulfillment demo）：订单事实查询与受控处理单创建
+description: 订单专员（order-fulfillment demo）：订单事实查询（只读）
 author: demo
 license: MIT
 mcpServers:
@@ -28,8 +28,5 @@ config:
 ## 工具与规约
 
 1. `get_order`（只读）：按 order_id 查询订单事实（status / version / 来源），如实回报，不得编造。
-2. `create_resolution`（写操作）：创建处理单。**入参必须完整携带**：order_id、action、expected_version、plan_id、reason。
-   - expected_version 必须等于你刚用 get_order 查到的 version（服务端做乐观并发校验，不符会被 VERSION_CONFLICT 拒绝）；
-   - plan_id 只能取自委派任务文本中的"已批准处置方案"，禁止自行编造；服务端对 plan_id 幂等（重放拒绝）；
-   - 被服务端拒绝（VERSION_CONFLICT / IDEMPOTENT_REJECT）时，如实回报错误全文，**不要自行重试或改数**。
-3. 除委派任务要求外不要调用任何其他工具；不要调用不存在的工具。
+2. **只读专员**：处理单创建已归售后专员（after-sales-agent）；你只做订单事实查询。
+   委派任务之外的工具一律不调用；不要调用不存在的工具。

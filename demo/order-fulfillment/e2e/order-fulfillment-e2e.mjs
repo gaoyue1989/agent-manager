@@ -121,18 +121,29 @@ ok('库存事实回流（仓级/调拨）', /(east|south|调拨|仓库|可用)/.
 
 console.log('== T2 处置方案（lead 汇总并给出方案，等待批准）==');
 const turn2 = await chat('fulfillment-lead', sessionId,
-  `请基于诊断结果给出处置方案：reissue 重发该订单。方案 JSON 中 plan_id 必须使用 ${flowPlan}，` +
-  `expected_version 使用诊断得到的当前版本。给出方案后停下等待我批准，未批准前不得执行。`, '/tmp/of-e2e-turn2.sse');
+  `请补全诊断并给出处置方案：reissue 重发该订单。诊断必须包含——委派 logistics-agent 查询该订单的运单事实与时效依据，` +
+  `委派 after-sales-agent 查询执行 reissue 的售后政策（是否允许/是否需审批/政策版本）。` +
+  `方案 JSON 中 plan_id 必须使用 ${flowPlan}，expected_version 使用诊断得到的当前版本，policy_version 使用售后专员返回的政策版本。` +
+  `给出方案后停下等待我批准，未批准前不得执行。`, '/tmp/of-e2e-turn2.sse');
 const turn2Text = turn2.text || '';
 ok('产出处置方案（expected_version/plan_id）', /PLAN-/.test(turn2Text) && /expected_version/.test(turn2Text));
 ok('方案引用本轮订单', new RegExp(pick).test(turn2.text || turn2.sse) || new RegExp(sku).test(turn2.text || turn2.sse));
 // 观察项：方案话术后应等待批准；框架侧已由「T3 需显式批准轮才发起写」保证闸门语义
 ok('等待用户批准（未自行执行）', /(等待|需要|请).{0,12}(批准|确认)|批准后|未经批准|未批准/.test(turn2.text || turn2.sse));
+// 官方案例对齐扩展：诊断必须覆盖物流与售后政策（对应官方 get_logistics/get_policy 契约）
+const ext = await pollStats(s => s.stats.get_logistics >= before.get_logistics + 1 &&
+                                s.stats.get_policy >= before.get_policy + 1, 300_000);
+ok('物流事实委派（get_logistics 落 mock）', ext.stats.get_logistics >= before.get_logistics + 1,
+   JSON.stringify(ext.stats));
+ok('政策核对委派（get_policy 落 mock）', ext.stats.get_policy >= before.get_policy + 1,
+   JSON.stringify(ext.stats));
+ok('方案引用政策版本（POL-v 形态）', /POL-v\d/.test(turn2.text || turn2.sse) || /POL-v/.test(turn2.text || turn2.sse),
+   (turn2.text || '').slice(0, 160));
 
 console.log('== T3 批准后执行（全参数批准指令 → 远程写委派）==');
 const s3 = stats().stats;
 const turn3 = await chat('fulfillment-lead', sessionId,
-  `我批准该处置方案，请立即委派 order-agent 创建处理单。任务参数逐字传递：order_id=${pick}，` +
+  `我批准该处置方案，请立即委派 after-sales-agent 创建处理单。任务参数逐字传递：order_id=${pick}，` +
   `action=reissue，expected_version=${ver}，plan_id=${flowPlan}，reason=客户催发重发。`, '/tmp/of-e2e-turn3.sse');
 ok('执行委派（agent_spawn）', turn3.tools.includes('agent_spawn'));
 const s4 = await pollStats(s => s.stats.create_resolution_ok > s3.create_resolution_ok, 300_000);
@@ -146,7 +157,7 @@ await new Promise(r => setTimeout(r, 6000));
 console.log('== T4 执行交付 ==');
 const expectedRes = (s4.resolutions ?? []).filter(r => r.plan_id === flowPlan).slice(-1)[0]?.resolution_id;
 const turn4 = await chat('fulfillment-lead', sessionId,
-  '请把上一轮委派 order-agent 创建处理单的任务返回结果原样汇报给我，重点是处理单编号（RES- 开头）。', '/tmp/of-e2e-turn4.sse');
+  '请把上一轮委派 after-sales-agent 创建处理单的任务返回结果原样汇报给我，重点是处理单编号（RES- 开头）。', '/tmp/of-e2e-turn4.sse');
 // 断言基于拼接后的完整文本（SSE 分片会把 RES- 与编号拆开）；
 // 用 mock 侧真实 RES 编号断言（不是任意 RES-xxx 形态）
 ok('真实处理单编号回流汇总', !!expectedRes && (turn4.text || '').includes(expectedRes),
@@ -169,7 +180,7 @@ const rej2 = mcpCall({ name: 'create_resolution', arguments: { order_id: pick, a
 ok('plan_id 重放 → IDEMPOTENT_REJECT', rej2.includes('IDEMPOTENT_REJECT'), rej2.slice(0, 160));
 
 console.log('== T7 /tasks 鉴权（经 Ingress，断言 11）==');
-for (const svc of ['order-agent', 'inventory-agent']) {
+for (const svc of ['order-agent', 'inventory-agent', 'logistics-agent', 'after-sales-agent']) {
   const code = await fetch(`${BASE}/agent/${svc}/tasks/probe-${randomUUID()}`).then(r => r.status).catch(e => String(e));
   ok(`${svc} /tasks 无 token → 401`, code === 401, `got ${code}`);
 }

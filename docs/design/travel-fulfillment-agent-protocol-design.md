@@ -383,3 +383,27 @@ config:
 | F23 | **远程 spawn 恒异步的收敛手段**：收割全靠模型自觉调 task_output/wait_async_results 不可靠（快照式返回 + 模型反复放弃，order-fulfillment demo 三轮实证）；SDK AgentSpawnTool 暴露 RuntimeContext 属性 `agentscope.subagent.force_sync`(+`force_sync_timeout_seconds`)，注入后 spawn 阻塞等子任务完成、结果确定性回流 | 框架新增 `RemoteSpawnForceSyncMiddleware`（纯 spawn 轮次作用域注入，env `AGENT_REMOTE_SPAWN_SYNC_WAIT[_SECONDS]` 默认 true/120，§8 lead 挂载）；同步窗口内完成即内联回流，超时走既有升格后台语义 |
 
 **同步超时升格语义实测**：`timeout_seconds=60` 的远程 spawn 同步等待 60s 后升格后台并返回 task_id（F15"恒异步"的准确表述应为"超过同步窗口后恒异步"；窗口内完成则同步返回、无后台句柄、Bridge 不登记——符合设计）。
+
+## 17. M1 收尾迭代与 demo 完整化（2026-09-30，PR #66/#67 已合并 + 部署验证）
+
+**M1 收尾（遗留盘点 P0/P1/P2 代码化）**：MCP 连接看门狗（失联 swap-on-success 原地重建，
+streamableHttp 传输天然自愈、SSE 场景生效）；幽灵卡治理（F20 落地：捕获侧对撞远程锚点抑制 +
+Bridge 落卡侧清理，远程行唯一决策路由）；后台收割（F23 收口：onTaskTerminal 确定性唤醒 lead，
+wakeLead 幂等守卫）；deny_rules 自实现（F16 落地：RuntimeContextCustomizer + acting 拦截动态
+DENY）；权限覆盖防漂移测试（扫描 SDK @Tool 全集）；/status 与 AgentCard 透出远程行/协议状态。
+
+**双代理 CR 实证修订**：Java P0——远程行 reply_id=NULL 致 findPendingConfirm NPE（/status 500、
+观察者断流）；Go P0——幂等 Job 空预留行并发复用双发/映射丢失（改认领令牌独占 + 条件回填/释放 +
+租期接管）；P1×4（幽灵抑制 sessionId 双形态、看门狗 rebuild TOCTOU、A2A 发送超时配置化
+300s + 结果未知保留认领、错误映射 400/409）。实测修订：A2A role 小写 "user"、锚点取
+result.taskId（AgentScope message/send 返回最终 Message）。
+
+**demo 完整化（官方 5 agent × 6 工具形态）**：新增 logistics-agent（get_logistics）与
+after-sales-agent（get_policy/create_resolution/get_resolution——写归售后，对齐官方角色分配）；
+biz-mcp 扩 6 工具；lead 编排升级为诊断四委派（订单/库存/物流/政策）+ 方案含 policy_version；
+平台幂等 Job 端点对齐官方 order-triage Job 语义。**部署验证**：5 服务 running（
+agentscope-2.1.0-v20260930-2 + platform-backend:v8），e2e 扩至 28 断言全绿（新增物流/政策落
+mock 与政策版本引用断言），关键场景截图与演示剧本见 demo/order-fulfillment/DEMO_GUIDE.md。
+
+**环境事实**：demo LLM 为 MiMo mimo-v2.5（key 失效症状 = 回复内嵌 401 Invalid API Key，
+经 PATCH env 轮换自愈）；宿主盘曾因 docker build cache 吃满致 MySQL 建表失败（Error 3675）。

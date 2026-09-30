@@ -21,7 +21,7 @@ PY
 kubectl apply -f "$HERE/k8s/biz-mcp.yaml"
 kubectl -n "$NS" rollout status deployment/biz-mcp --timeout=120s
 
-echo "== 2. 打包并上传三个 OAF 包 =="
+echo "== 2. 打包并上传五个 OAF 包 =="
 upload() { # $1=package dir → 输出 packageId
   local dir="$1" zip
   zip="$(mktemp --suffix=.zip)"
@@ -42,7 +42,9 @@ PY
 PKG_LEAD=$(upload "$HERE/packages/fulfillment-lead")
 PKG_ORDER=$(upload "$HERE/packages/order-agent")
 PKG_INV=$(upload "$HERE/packages/inventory-agent")
-echo "packageId: lead=$PKG_LEAD order=$PKG_ORDER inventory=$PKG_INV"
+PKG_LOG=$(upload "$HERE/packages/logistics-agent")
+PKG_AS=$(upload "$HERE/packages/after-sales-agent")
+echo "packageId: lead=$PKG_LEAD order=$PKG_ORDER inventory=$PKG_INV logistics=$PKG_LOG after-sales=$PKG_AS"
 
 echo "== 3. 组装 env（沿用现网 release-agent 的平台基础设施值）=="
 export NS TOKEN
@@ -70,6 +72,8 @@ PY
 
 ORDER_ENV=$(envjson member)
 INV_ENV=$(envjson member)
+LOG_ENV=$(envjson member)
+AS_ENV=$(envjson member)
 LEAD_ENV=$(envjson lead)
 
 echo "== 4. 发布三个服务 =="
@@ -80,9 +84,11 @@ publish() { # $1=name $2=packageId $3=envJSON
 publish fulfillment-lead "$PKG_LEAD" "$LEAD_ENV" | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print('fulfillment-lead:', d['id'], d['status'])"
 publish order-agent "$PKG_ORDER" "$ORDER_ENV" | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print('order-agent:', d['id'], d['status'])"
 publish inventory-agent "$PKG_INV" "$INV_ENV" | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print('inventory-agent:', d['id'], d['status'])"
+publish logistics-agent "$PKG_LOG" "$LOG_ENV" | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print('logistics-agent:', d['id'], d['status'])"
+publish after-sales-agent "$PKG_AS" "$AS_ENV" | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print('after-sales-agent:', d['id'], d['status'])"
 
 echo "== 5. 等待就绪与注册 =="
-for name in fulfillment-lead order-agent inventory-agent; do
+for name in fulfillment-lead order-agent inventory-agent logistics-agent after-sales-agent; do
   for i in $(seq 1 60); do
     st=$(curl -sf "$API/services?keyword=$name" | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print(d[0]['status'] if d else 'none')" 2>/dev/null || echo none)
     [ "$st" = "running" ] || [ "$st" = "registered" ] && { echo "$name: $st"; break; }
@@ -91,4 +97,4 @@ for name in fulfillment-lead order-agent inventory-agent; do
   done
 done
 echo "== 完成：demo token=$TOKEN =="
-echo "入口：http://127.0.0.1:8911/agent/{fulfillment-lead,order-agent,inventory-agent}/"
+echo "入口：http://127.0.0.1:8911/agent/{fulfillment-lead,order-agent,inventory-agent,logistics-agent,after-sales-agent}/"
