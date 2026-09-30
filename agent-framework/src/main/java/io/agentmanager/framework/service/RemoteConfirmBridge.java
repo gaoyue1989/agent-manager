@@ -103,8 +103,10 @@ public class RemoteConfirmBridge {
     private final TurnLeaseStore turnLeaseStore;
     private final ToolAuditStore toolAuditStore;
     private final RemoteTaskClient taskClient;
+    private final RemoteTaskRegistryStore registryStore;
 
-    /** 在途任务登记表：sessionId|taskId → 引用（内存态；lead 重启后丢失，见设计 §9 与 risks） */
+    /** 在途任务登记表：sessionId|taskId → 引用（内存缓存；持久事实源为 remote_task_registry，
+     *  副本经 rebuildFromRegistry 周期回填——lead 重启/其他副本均可接管轮询，设计 §18.2） */
     private final ConcurrentHashMap<String, RemoteTaskRef> inFlight = new ConcurrentHashMap<>();
 
     /** 远程调用认证头（AGENT_REMOTE_HEADERS_JSON，懒解析缓存） */
@@ -117,7 +119,9 @@ public class RemoteConfirmBridge {
     /** 传输类错误连续计数（sessionId|taskId → 次数；awaiting/终态/放弃时清除） */
     private final ConcurrentHashMap<String, Integer> transportErrorCounts = new ConcurrentHashMap<>();
 
-    /** 已唤醒守卫（sessionId|taskId）：终态唤醒幂等——决策路径与后台收割路径对同一终态只发一次汇总 turn */
+    /** 已唤醒守卫（sessionId|taskId）：终态唤醒幂等的**进程内兜底**——跨副本权威在
+     *  remote_task_registry 的 claimWake CAS（§18.2）；本守卫仅覆盖 registry 无行的
+     *  历史/异常路径（v1.4 行为保持）。 */
     private final java.util.Set<String> wokenTasks = ConcurrentHashMap.newKeySet();
 
     /**
@@ -168,12 +172,14 @@ public class RemoteConfirmBridge {
                                SessionEventBus eventBus,
                                SessionUserStore sessionUserStore,
                                TurnLeaseStore turnLeaseStore,
-                               ToolAuditStore toolAuditStore) {
+                               ToolAuditStore toolAuditStore,
+                               RemoteTaskRegistryStore registryStore) {
         this(confirmContextStore, runtimeService, eventBus, sessionUserStore,
-            turnLeaseStore, toolAuditStore, new SdkRemoteTaskClient());
+            turnLeaseStore, toolAuditStore, new SdkRemoteTaskClient(),
+            pollIntervalMsFromEnv(), registryStore);
     }
 
-    /** 测试构造：注入 fake RemoteTaskClient（不起真实 HTTP） */
+    /** 测试构造：注入 fake RemoteTaskClient（不起真实 HTTP）；registry 直连 DataSource */
     RemoteConfirmBridge(ConfirmContextStore confirmContextStore,
                         AgentRuntimeService runtimeService,
                         SessionEventBus eventBus,
@@ -194,6 +200,20 @@ public class RemoteConfirmBridge {
                         ToolAuditStore toolAuditStore,
                         RemoteTaskClient taskClient,
                         long pollIntervalMs) {
+        this(confirmContextStore, runtimeService, eventBus, sessionUserStore,
+            turnLeaseStore, toolAuditStore, taskClient, pollIntervalMs, null);
+    }
+
+    /** 全参构造：registry store 可注入（测试 null = 兼容旧用例，登记/重建/唤醒 CAS 静默跳过） */
+    RemoteConfirmBridge(ConfirmContextStore confirmContextStore,
+                        AgentRuntimeService runtimeService,
+                        SessionEventBus eventBus,
+                        SessionUserStore sessionUserStore,
+                        TurnLeaseStore turnLeaseStore,
+                        ToolAuditStore toolAuditStore,
+                        RemoteTaskClient taskClient,
+                        long pollIntervalMs,
+                        RemoteTaskRegistryStore registryStore) {
         this.confirmContextStore = confirmContextStore;
         this.runtimeService = runtimeService;
         this.eventBus = eventBus;
@@ -201,6 +221,7 @@ public class RemoteConfirmBridge {
         this.turnLeaseStore = turnLeaseStore;
         this.toolAuditStore = toolAuditStore;
         this.taskClient = taskClient;
+        this.registryStore = registryStore;
         this.pollIntervalMs = pollIntervalMs > 0 ? pollIntervalMs : DEFAULT_POLL_SECONDS * 1000L;
     }
 
@@ -257,6 +278,10 @@ public class RemoteConfirmBridge {
             }
             var key = registryKey(sessionId, taskId);
             inFlight.put(key, new RemoteTaskRef(sessionId, agentName, endpoint, taskId, Instant.now()));
+            // 持久登记（§18.2）：跨重启/跨副本重建源；fail-soft 不影响父流
+            if (registryStore != null) {
+                registryStore.register(sessionId, taskId, agentName, endpoint);
+            }
             log.info("[RemoteConfirmBridge] registered in-flight remote task: sid={}, service={}, taskId={}, endpoint={}",
                 sessionId, agentName, taskId, endpoint);
         } catch (Exception e) {
@@ -374,10 +399,13 @@ public class RemoteConfirmBridge {
                 int consecutive = transportErrorCounts.merge(key, 1, Integer::sum);
                 if (consecutive >= MAX_TRANSPORT_ERROR_POLLS) {
                     log.error("[RemoteConfirmBridge] task {} unreachable for {} consecutive polls "
-                        + "(last error: {}), giving up in-flight registration (sid={})",
+                            + "(last error: {}), giving up in-flight registration (sid={})",
                         ref.taskId(), consecutive, status.error(), ref.sessionId());
                     transportErrorCounts.remove(key);
                     inFlight.remove(key);
+                    if (registryStore != null) {
+                        registryStore.markTerminal(ref.sessionId(), ref.taskId(), true);
+                    }
                     // 未消费确认卡若已落库则保留，交 sweepExpiredRemote 的 TTL 治理兜底
                     audit(ref.sessionId(), "remote_confirm", ref.taskId(), "TRANSPORT_ERROR_GAVE_UP",
                         payloadJson(Map.of("confirm_key", confirmKeyFor(ref.taskId()),
@@ -388,6 +416,36 @@ public class RemoteConfirmBridge {
                 transportErrorCounts.remove(key);
                 onTaskTerminal(ref, status);
             }
+        }
+    }
+
+    /**
+     * 登记重建（设计 §18.2 机制②）：从 remote_task_registry 回填内存登记表——
+     * lead 重启、或同 session 的其他副本，均可由此接管在途任务的轮询/落卡/收割。
+     * 多副本会重复轮询同一任务：GET /tasks/{id} 只读幂等，落卡由 findPending 前置
+     * 判定幂等，唤醒由 claimWake CAS 恰好一次——重复轮询只增加读流量，不产生副作用。
+     * initialDelay 让正常启动路径（spawn 进程内登记）先行，避免与首批轮询竞争。
+     */
+    @Scheduled(fixedDelay = 60_000, initialDelay = 15_000)
+    public void rebuildFromRegistry() {
+        if (registryStore == null) {
+            return;
+        }
+        try {
+            // 上限 500（CR P2-7）：在途任务远低于此值；超限属异常积压，监控登记行数告警
+            for (var row : registryStore.findInFlight(500)) {
+                var key = registryKey(row.sessionId(), row.taskId());
+                if (inFlight.containsKey(key)) {
+                    continue;
+                }
+                inFlight.put(key, new RemoteTaskRef(row.sessionId(), row.service(),
+                    row.endpoint(), row.taskId(), Instant.now()));
+                log.info("[RemoteConfirmBridge] rebuilt in-flight registration from registry: "
+                    + "sid={}, service={}, taskId={} (restart/multi-replica takeover)",
+                    row.sessionId(), row.service(), row.taskId());
+            }
+        } catch (Exception e) {
+            log.warn("[RemoteConfirmBridge] registry rebuild failed: {}", e.getMessage());
         }
     }
 
@@ -452,13 +510,16 @@ public class RemoteConfirmBridge {
                 ref.taskId(), e.getMessage());
         }
         try {
-            confirmContextStore.put(confirmKey, ref.sessionId(), toolCalls, null, null, null,
+            // affected==1 = 新插入才记 CARD_QUEUED（多副本并发落卡竞态时更新方=2 不重复审计，§18.2 机制②）
+            int affected = confirmContextStore.put(confirmKey, ref.sessionId(), toolCalls, null, null, null,
                 MAPPER.writeValueAsString(remoteTask));
-            audit(ref.sessionId(), "remote_confirm", ref.taskId(), "CARD_QUEUED",
-                payloadJson(Map.of("confirm_key", confirmKey, "service", ref.service(),
-                    "tools", toolCalls.stream().map(t -> t.get("name")).toList())));
-            log.info("[RemoteConfirmBridge] remote confirm card queued: sid={}, taskId={}, tools={}",
-                ref.sessionId(), ref.taskId(), toolCalls.stream().map(t -> t.get("name")).toList());
+            if (affected == 1) {
+                audit(ref.sessionId(), "remote_confirm", ref.taskId(), "CARD_QUEUED",
+                    payloadJson(Map.of("confirm_key", confirmKey, "service", ref.service(),
+                        "tools", toolCalls.stream().map(t -> t.get("name")).toList())));
+            }
+            log.info("[RemoteConfirmBridge] remote confirm card queued (affected={}): sid={}, taskId={}, tools={}",
+                affected, ref.sessionId(), ref.taskId(), toolCalls.stream().map(t -> t.get("name")).toList());
         } catch (Exception e) {
             log.error("[RemoteConfirmBridge] failed to persist remote confirm row for task {}: {}",
                 ref.taskId(), e.getMessage(), e);
@@ -574,11 +635,21 @@ public class RemoteConfirmBridge {
         return decisions;
     }
 
-    /** endpoint 解析：登记表优先（spawn 时的声明匹配结果），退回声明清单按 service 名匹配 */
+    /**
+     * endpoint 解析退回链（设计 §18.2 机制⑤）：内存登记表（spawn 副本进程内快照）
+     * → remote_task_registry 持久快照（spawn 副本已亡时，跨副本确认路由仍可定位）
+     * → OAF 声明清单按 service 名匹配。
+     */
     private String resolveEndpointForTask(String sessionId, String taskId, String service) {
         var ref = inFlight.get(registryKey(sessionId, taskId));
         if (ref != null && ref.endpoint() != null && !ref.endpoint().isBlank()) {
             return ref.endpoint();
+        }
+        if (registryStore != null) {
+            var persisted = registryStore.findEndpoint(sessionId, taskId);
+            if (persisted.isPresent()) {
+                return persisted.get();
+            }
         }
         var declared = service != null ? resolveEndpoint(service) : null;
         if (declared != null) {
@@ -648,21 +719,31 @@ public class RemoteConfirmBridge {
      * 合成消息驱动一次 lead 汇总 turn：acquire 租约 → invokeStream → 事件写 durable SSE
      * （EventBus emit 为 Controller 层职责，本桥自行复刻——否则离线用户 /subscribe 不可见，C5）。
      *
-     * <p>幂等守卫：同一 (session, task) 只唤醒一次（per-lead 进程生命周期内）——决策路径
-     * （resume 后终态监听）与后台收割路径（onTaskTerminal 轮询终态）可能先后到达同一
-     * 终态，守卫防双重汇总 turn。租约忙放弃的唤醒不回退守卫（与既有"下一用户 turn
-     * 降级收割"语义一致，§13.9）。
+     * <p>幂等守卫两层（设计 §18.2 机制④）：跨副本权威 = remote_task_registry 的
+     * claimWake CAS（IN_FLIGHT→TERMINAL 认领即收口，affected=1 者唯一获得唤醒权）——
+     * 决策路径（resume 后终态监听）与后台收割路径（onTaskTerminal 轮询终态）可能在不同
+     * 副本先后到达同一终态，CAS 保证汇总 turn 恰好一次；registry 无行（历史/异常路径）
+     * 时降级为进程内 wokenTasks 守卫（v1.4 行为）。认领后租约忙放弃的唤醒不重试
+     * （与既有"下一用户 turn 降级收割"语义一致，§13.9）。
      *
      * @param harvestViaToolOutput true=后台收割路径：lead 上下文没有子任务过程，提示先
      *        task_output 取交付结果再汇总（确定性收割）；false=决策路径既有话术
      */
     void wakeLead(String sessionId, String taskId, String terminalDesc, boolean harvestViaToolOutput) {
-        if (!wokenTasks.add(registryKey(sessionId, taskId))) {
+        // ① 跨副本唤醒认领（registry 无行时走进程内兜底守卫；认领即收口——
+        // claimWake 单语句 IN_FLIGHT→TERMINAL，无中间卡死态，CR P1-3）
+        if (registryStore != null && registryStore.exists(sessionId, taskId)) {
+            if (!registryStore.claimWake(sessionId, taskId)) {
+                log.debug("[RemoteConfirmBridge] wake claim lost for task {} (sid={}), "
+                    + "another replica/path is waking", taskId, sessionId);
+                return;
+            }
+        } else if (!wokenTasks.add(registryKey(sessionId, taskId))) {
             log.debug("[RemoteConfirmBridge] wake already delivered for task {} (sid={}), skip",
                 taskId, sessionId);
             return;
         }
-        // 有界排队抢租约（与 ConfirmController.ACQUIRE_WAIT 同量级）；抢不到放弃本次唤醒
+        // ② 有界排队抢租约（与 ConfirmController.ACQUIRE_WAIT 同量级）；抢不到放弃本次唤醒
         var token = acquireLease(sessionId);
         if (token == null) {
             log.warn("[RemoteConfirmBridge] wake skipped: session {} lease busy (taskId={})", sessionId, taskId);
@@ -748,10 +829,26 @@ public class RemoteConfirmBridge {
         }
     }
 
-    /** 超时治理：自动 resume(DENY, reason=confirm_timeout) + 审计 + CAS 收口 */
+    /**
+     * 超时治理：自动 resume(DENY, reason=confirm_timeout) + 审计 + CAS 收口。
+     *
+     * <p>CAS 消费**前置**（设计 §18.2 机制⑤，多副本 G3）：consume 的 0→1 原子性
+     * 保证同一过期行只有一个副本（或进程）获得治理权，其余直接跳过——v1.4 的
+     * "resume 后收口"在 replicas>1 时会重复发送 DENY。resume 失败仍保持收口
+     * （与 routeDecision「resume 失败不回滚消费」语义一致），审计记
+     * TIMEOUT_RESUME_FAILED 可查。
+     */
     void sweepExpiredRemote() {
         var rows = confirmContextStore.findExpiredRemoteRows();
         for (var row : rows) {
+            try {
+                confirmContextStore.consume(row.sessionId(), row.confirmKey());
+            } catch (Exception e) {
+                // 已被其他副本消费/已过期：本轮治理权在别处，跳过
+                log.debug("[RemoteConfirmBridge] timeout row consume lost for {} (governed elsewhere): {}",
+                    row.confirmKey(), e.getMessage());
+                continue;
+            }
             var taskId = row.remoteTaskField("task_id");
             var service = row.remoteTaskField("service");
             try {
@@ -764,16 +861,11 @@ public class RemoteConfirmBridge {
                 log.warn("[RemoteConfirmBridge] confirm timeout: auto-DENY sent for task {} (sid={})",
                     taskId, row.sessionId());
             } catch (Exception e) {
-                // resume 失败仍收口行：避免每轮重复 resume；子服务不可达时任务自持（fail-safe）
+                // resume 失败仍收口行（消费已前置）：避免每轮重复 resume；子服务不可达时任务自持（fail-safe）
                 log.error("[RemoteConfirmBridge] timeout resume failed for task {} (sid={}): {}",
                     taskId, row.sessionId(), e.getMessage());
                 audit(row.sessionId(), "remote_confirm", taskId, "TIMEOUT_RESUME_FAILED",
                     payloadJson(Map.of("confirm_key", row.confirmKey(), "error", String.valueOf(e.getMessage()))));
-            }
-            try {
-                confirmContextStore.consume(row.sessionId(), row.confirmKey());
-            } catch (Exception e) {
-                log.debug("[RemoteConfirmBridge] timeout row consume skipped for {}: {}", row.confirmKey(), e.getMessage());
             }
         }
     }

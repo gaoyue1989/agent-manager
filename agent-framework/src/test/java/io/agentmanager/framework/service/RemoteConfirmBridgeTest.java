@@ -115,6 +115,9 @@ class RemoteConfirmBridgeTest {
         taskClient = new FakeTaskClient();
         bridge = new RemoteConfirmBridge(store, runtimeService, eventBus, sessionUserStore,
             turnLeaseStore, toolAuditStore, taskClient, 1L /* 1ms 轮询：终态监听测试加速 */);
+        // CARD_QUEUED 审计仅在落卡 insert 生效（affected==1，§18.2）时记：默认 stub 为 1
+        org.mockito.Mockito.lenient().when(store.put(anyString(), anyString(), anyList(),
+            any(), any(), any(), any())).thenReturn(1);
         when(runtimeService.oafConfig()).thenReturn(oafConfigWithBooking());
     }
 

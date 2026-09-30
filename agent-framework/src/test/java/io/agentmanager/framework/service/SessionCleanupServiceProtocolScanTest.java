@@ -32,7 +32,8 @@ class SessionCleanupServiceProtocolScanTest {
     private static SessionCleanupService service(AgentManagerProperties props, A2aAgentRefHolder holder) {
         return new SessionCleanupService(mock(DataSource.class), mock(SessionManager.class),
             mock(TurnLeaseStore.class), mock(ConfirmContextStore.class), mock(ToolAuditStore.class),
-            mock(SessionUserStore.class), holder, props, mock(FileStorage.class));
+            mock(SessionUserStore.class), holder, props, mock(FileStorage.class),
+            mock(RemoteTaskRegistryStore.class));
     }
 
     private static A2aAgentRefHolder holderOf(HarnessAgent agent) {
@@ -61,7 +62,7 @@ class SessionCleanupServiceProtocolScanTest {
 
     private static AgentManagerProperties propsOf(boolean enabled, int retentionDays) {
         return new AgentManagerProperties(null, null, null, "/config", "", null, null, null, null,
-            new AgentManagerProperties.AgentProtocolSettings(enabled, "tok", "", retentionDays, 24, 5, "", true, 120));
+            new AgentManagerProperties.AgentProtocolSettings(enabled, "tok", "", retentionDays, 24, 5, "", true, 120, "memory"));
     }
 
     private static TaskRecord record(String taskId, TaskStatus status, Instant lastUpdatedAt) {

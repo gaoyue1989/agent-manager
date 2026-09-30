@@ -455,7 +455,7 @@ CREATE TABLE remote_task_registry (
   task_id    VARCHAR(191) NOT NULL COMMENT 'member 协议任务 id',
   service    VARCHAR(191) NOT NULL COMMENT '目标子服务名（OafConfig.subAgents 声明键）',
   endpoint   VARCHAR(512) NOT NULL COMMENT 'spawn 时解析的 endpoint 快照',
-  status     VARCHAR(16)  NOT NULL DEFAULT 'IN_FLIGHT' COMMENT 'IN_FLIGHT/WAKING/TERMINAL/GIVEN_UP',
+  status     VARCHAR(16)  NOT NULL DEFAULT 'IN_FLIGHT' COMMENT 'IN_FLIGHT/TERMINAL/GIVEN_UP（认领即收口，无中间态）',
   created_at DATETIME(3)  NOT NULL,
   updated_at DATETIME(3)  NOT NULL,
   UNIQUE KEY uk_session_task (session_id, task_id),
@@ -467,8 +467,8 @@ CREATE TABLE remote_task_registry (
 
 1. **登记**：`onAgentSpawnResult` 落内存 `inFlight`（不变）+ `INSERT IGNORE` registry 行（uk 对撞 = 已登记，幂等）。`confirm_context` 仍是唯一授权事实源，registry 只是**轮询调度簿**。
 2. **重建**：启动后 + `@Scheduled` 每 60s：`SELECT ... WHERE status='IN_FLIGHT' ORDER BY updated_at LIMIT 200` → 不在内存的回填 `inFlight`（endpoint 取行快照）。多副本会重复轮询同一任务——`GET /tasks/{id}` 只读幂等、量级 = 在途任务数 × 副本数 / 轮询周期，可接受；落卡幂等由 `findPending` 前置判定 + `ON DUPLICATE KEY` 兜底，`CARD_QUEUED` 审计仅在 insert 生效（affected==1）时记，避免双份。
-3. **终态收口**：`onTaskTerminal` / 传输超限放弃 → `UPDATE status='TERMINAL'/'GIVEN_UP'`（CAS `WHERE status IN ('IN_FLIGHT','WAKING')`）。终态行保留 7 天后由 `SessionCleanupService` 清理（复用 §7 TaskRecord 清理节奏）。
-4. **唤醒幂等跨副本化（治 G4）**：`wakeLead` 前置 CAS `UPDATE remote_task_registry SET status='WAKING' WHERE session_id=? AND task_id=? AND status='IN_FLIGHT'`，affected==1 才执行汇总 turn——决策路径（`awaitTerminalAndWake`）与后台收割路径（`onTaskTerminal`）统一过此闸；进程内 `wokenTasks` 降级为 registry 无行时的兜底（历史/异常路径），不再是唯一防线。
+3. **终态收口**：传输超限放弃 → `UPDATE status='GIVEN_UP'`（CAS `WHERE status='IN_FLIGHT'`）；唤醒认领本身即收口（见机制 4）。终态行保留 7 天后由 `SessionCleanupService` 清理（复用 §7 TaskRecord 清理节奏）。
+4. **唤醒幂等跨副本化（治 G4，CR 修订：认领即收口）**：`wakeLead` 前置 CAS `UPDATE remote_task_registry SET status='TERMINAL' WHERE session_id=? AND task_id=? AND status='IN_FLIGHT'`（**单语句原子关闭，无 WAKING 中间态**——两步式在认领与收口间进程死亡/DB 抖动会永久卡行：rebuild 不拾起、claim 恒 0、清理不覆盖），affected==1 才执行汇总 turn——决策路径（`awaitTerminalAndWake`）与后台收割路径（`onTaskTerminal`）统一过此闸；进程内 `wokenTasks` 降级为 registry 无行时的兜底（历史/异常路径），不再是唯一防线。
 5. **sweep 恰好一次（治 G3）**：`sweepExpiredRemote` 将 CAS 消费**前置**——先 `confirmContextStore.consume`（0→1 仅一副本成功），成功者才发 `resume(DENY, reason=confirm_timeout)` + 审计；消费失败（已消费）直接跳过。时序变化语义与 `routeDecision`「resume 失败不回滚消费」一致，resume 失败记 `TIMEOUT_RESUME_FAILED`。另将 `resolveEndpointForTask` 的退回链改为「内存登记 → registry 行快照 → 声明清单」，跨副本确认不再依赖 spawn 副本存活。
 
 ### 18.3 member 侧协议 EventBus Redis Streams 化（治 G2）
@@ -560,3 +560,12 @@ CREATE TABLE remote_task_registry (
 - **`/admin/reload` 多副本触达**：热更新经 Service LB 只打单副本 → 副本间配置分叉。平台暂不自动调 reload（运维手动端点），约定：**多副本服务改 OAF 包走重新发布（rollout 重建全副本）**；平台侧逐 pod 扇出（endpoints API 逐 pod POST）列为后续可选加固，不在本期。
 - `McpConnectionWatchdog` / `OafReloadService` 天然 per-replica，无需改动。
 - SDK 升级风险：EventBus 接口与 bean 退位机制在 2.0.3 字节码实证，升级需重验（可并入权限覆盖防漂移测试模式）。
+
+### 18.8 实施记录（2026-09-30，单测/e2e/CR/部署验证）
+
+- **CR（独立评审）**：无 P0；P1×3 全部修复——① tail 循环改「先排水后查 done」（终态帧不再被吞）② 降级订阅以 `fromSeq=0` 进内存总线（宁重复不静默，规避内存/Redis seq 空间断裂导致的永久静默）③ `claimWake` 改**认领即收口**（单语句 IN_FLIGHT→TERMINAL，删除 WAKING 中间态——两步式在认领与收口间进程死亡会永久卡行）。P2 采纳：publish 补 `setTaskId`（SDK 契约）、XADD 被拒不丢事件（兜底内存通道）、CARD_QUEUED 审计仅 insert（affected==1）去重、内存回退透传 SDK replay buffer、V8 索引改 `(status, created_at)`、降级日志 60s 限频、rebuild LIMIT 500。遗留 P2：tail 每订阅者占一个 boundedElastic 线程（并发订阅大时需评估独立 scheduler）；`BLOCK_MS=1000` 与 `commandTimeoutMs≤1000` 的隐式耦合（注释已声明）。
+- **单测**：全量 `mvn test` 1281 用例全绿（4 跳过）；新增 RemoteTaskRegistryStoreTest 12 / RemoteConfirmBridgeMultiReplicaTest 11 / ProtocolRedisEventBusTest 5 / ProtocolRedisEventBusIT（REDIS_IT 门控）。
+- **e2e**：本地 protocol 组 6/6（协议实例携带新事件总线 bean 启动、/tasks 行为不变、存量零影响）。
+- **部署验证**：镜像 `agentscope-2.1.0-v20260930-5` 发布 5 个 demo 服务；oaf_checkpoint 存量库 V8 成功应用；真实委派链路下 Redis 出现 `proto:task:*:{events,seq,done}` 键族（事件面真实工作）；live 会话实证 spawn 全部 `status: ok`、子 agent 回复完整回流（含后台完成 `<system-notification>` 通知）、lead 对单个超时成员（logistics）按 §9 降级重试后汇总——委派链路行为正确。**demo e2e 全量 28 断言当日未跑通**：logistics 成员 LLM 反复超时把 T1 单轮拉长超过 e2e 客户端 15 分钟 fetch 上限（当日 LLM 延迟问题，非代码回归——spawn/回复/降级/事件均实证正常）；回归门禁以 CI mock-LLM e2e（三 E2E job）为准。demo spawn 均同步完成（只读工具无确认挂起），registry 0 行属预期——跨副本接管/唤醒路径由阶段 3 P 组门禁用例覆盖。
+- **配套修复**：`e2e/scripts/reset-data.mjs` 清表清单补 `remote_task_registry`（否则复用库第二轮 env-up 走 baseline(5) 跳过 V1 → V6 因 session_user 缺失启动失败，与 V2 agui_interrupt 同款陷阱）。
+- **已知运维事实**：V8 文件在已应用旧版的环境（本机曾部署 v4）上编辑会 checksum 冲突——未合并前修正属正常迭代；对已应用库执行「DROP 空表 + 删历史行」即可干净重放（本次已处理）。

@@ -112,7 +112,7 @@ class AgentCardControllerTest {
         when(oafConfig.tags()).thenReturn(List.of("test"));
         when(a2uiService.getExtensionDeclaration()).thenReturn(Map.of());
         var settings = new io.agentmanager.framework.config.AgentManagerProperties.AgentProtocolSettings(
-            true, "tok", "", 7, 24, 5, "", true, 120);
+            true, "tok", "", 7, 24, 5, "", true, 120, "memory");
         when(agentManagerProperties.agentProtocol()).thenReturn(settings);
         when(sdkAgentProtocolProperties.isStreamingEnabled()).thenReturn(true);
         when(sdkAgentProtocolProperties.isHitlEnabled()).thenReturn(true);

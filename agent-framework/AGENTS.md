@@ -167,7 +167,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 ### 5. AgentProtocolConfig / AgentProtocolAuthFilter — Agent Protocol 服务端（远程子 agent 面，默认关闭）
 
-`config/AgentProtocolConfig`（条件装配 `agent.agent-protocol.enabled=true`：ProtocolTaskRepository bean override → TaskRecord 落 agent_fs 跨重启可 resume；自定义 AgentFactory → `agentRuntimeService.getAgent()` 防 reload 跑旧实例（F14）；token 缺失 fail-fast）+ `service/protocol/AgentProtocolAuthFilter`（/tasks* 前置校验 `X-Agent-Protocol-Token`，无/错一律 401）。终态 TaskRecord 保留期扫描在 `SessionCleanupService`（SDK 2.0.3 无删除 API，暂为扫描留痕）。`/` 与 `/metadata` 透出 `agent_protocol` 状态。设计/事实基础见 [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md)
+`config/AgentProtocolConfig`（条件装配 `agent.agent-protocol.enabled=true`：ProtocolTaskRepository bean override → TaskRecord 落 agent_fs 跨重启可 resume；自定义 AgentFactory → `agentRuntimeService.getAgent()` 防 reload 跑旧实例（F14）；AgentProtocolEventBus bean override → Redis Streams（§18.3，`AGENT_PROTOCOL_EVENT_BUS=memory` 回退 SDK 内存实现）；token 缺失 fail-fast）+ `service/protocol/AgentProtocolAuthFilter`（/tasks* 前置校验 `X-Agent-Protocol-Token`，无/错一律 401）。终态 TaskRecord 保留期扫描在 `SessionCleanupService`（SDK 2.0.3 无删除 API，暂为扫描留痕；同处清理 remote_task_registry 终态行）。**多副本（设计 §18）**：lead 端在途任务登记持久化在 `remote_task_registry` 表（`RemoteTaskRegistryStore`，V8）——Bridge 重启/跨副本经 `rebuildFromRegistry` 接管轮询，唤醒幂等走 `claimWake` CAS（IN_FLIGHT→WAKING），TTL sweep 以 confirm_context CAS 消费前置保证治理恰好一次；member 端 `/tasks/{id}/events` 事件面经 `ProtocolRedisEventBus` 跨副本可见。`/` 与 `/metadata` 透出 `agent_protocol` 状态。设计/事实基础见 [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md)
 
 ---
 
@@ -339,6 +339,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `AGENT_REMOTE_HEADERS_JSON` | 空 | | lead 端远程子 agent 声明 headers JSON（注入 `X-Agent-Protocol-Token` 等，值走 env 不进包）；member 侧不消费。敏感键，平台路由进 `{name}-env-secret` |
 | `AGENT_REMOTE_SPAWN_SYNC_WAIT` | `true` | | 远程 spawn 强制同步等待（lead 端，设计 §16 实测）：注入 SDK `force_sync` 属性让 spawn 阻塞等子任务完成、结果确定性回流（SDK 远程 spawn 恒异步受理，收割靠模型自觉不可靠）。仅作用于纯 spawn 轮次；无远程声明的服务无消费方、无副作用 |
 | `AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS` | `120` | | 强制同步等待秒数（配合上一键），超时后按 SDK 既有升格语义转后台 |
+| `AGENT_PROTOCOL_EVENT_BUS` | `redis` | | 协议事件总线实现（多副本设计 §18.3）：`redis` = ProtocolRedisEventBus（Redis Streams，`proto:task:{id}:*` 键族经 `agent.redis.prefix` 隔离；显式 seq 发号 + done 标记收流，`/tasks/{id}/events` 跨副本可订阅/跨重启可重放）；`memory` = SDK 内置内存实现（v1.4 行为）。Redis 缺失/异常 fail-soft 降级内存，不劣化 |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活，失联按 reload swap-on-success 语义原地重建（修 biz-mcp 重启后长连接静默失效 → ConnectException 永久失败）；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
 
