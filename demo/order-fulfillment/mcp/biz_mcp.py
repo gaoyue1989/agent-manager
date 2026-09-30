@@ -7,6 +7,9 @@
 只读（诊断阶段）：
 - get_order(order_id)：订单状态 / version / 来源
 - get_inventory(sku)：仓级可用量与调拨约束
+- get_logistics(order_id)：运单（有/无）事实与时效依据（官方契约：物流专员）
+- get_policy(order_id, action)：该动作是否允许 / 是否需审批 / 政策版本（官方契约：售后专员）
+- get_resolution(resolution_id)：查处理单（区分已受理 accepted 与已完成 completed）
 
 写（执行阶段，L3 硬约束——服务端校验，不信任模型自述）：
 - create_resolution(order_id, action, expected_version, plan_id, reason)
@@ -63,10 +66,42 @@ INVENTORY = {
         "transfer_note": "east 仓无货，需从 south 仓调拨；调拨须持已批准处置方案（plan_id）",
     },
 }
+LOGISTICS = {
+    "O-1001": {
+        "order_id": "O-1001", "waybill": None,
+        "lanes": [{"lane": "east->north", "eta_days": 3, "basis": "陆运标快"},
+                  {"lane": "south->north", "eta_days": 5, "basis": "调拨后陆运"}],
+        "eta_basis": "无运单；重发可走 east 仓陆运标快，参考时效 3 天",
+    },
+    "O-1002": {
+        "order_id": "O-1002", "waybill": None,
+        "lanes": [{"lane": "south->north", "eta_days": 2, "basis": "同城标快"},
+                  {"lane": "east->north", "eta_days": 4, "basis": "跨区陆运"}],
+        "eta_basis": "无运单；south 仓有货，同城标快参考时效 2 天",
+    },
+    "O-1003": {
+        "order_id": "O-1003", "waybill": "SF-8821",
+        "lanes": [{"lane": "south->north", "eta_days": 5, "basis": "在途陆运"}],
+        "eta_basis": "已有运单 SF-8821 在途，参考剩余时效 5 天",
+    },
+}
+POLICY = {
+    "default": {
+        "allowed": True, "requires_approval": True,
+        "policy_version": "POL-v3.2",
+        "note": "重发类动作允许执行；须持用户已批准的处置方案（plan_id）与订单当前版本",
+    },
+    "O-1003": {
+        "allowed": False, "requires_approval": True,
+        "policy_version": "POL-v3.2",
+        "note": "该订单已有在途运单，重发类动作被政策限制（须先拦截原运单）",
+    },
+}
 RESOLUTIONS = {}   # resolution_id -> dict
 USED_PLAN_IDS = set()  # L3 幂等：plan_id 只允许消费一次
 STATS = {"create_resolution_ok": 0, "create_resolution_version_conflict": 0,
-         "create_resolution_idempotent_reject": 0, "get_order": 0, "get_inventory": 0}
+         "create_resolution_idempotent_reject": 0, "get_order": 0, "get_inventory": 0,
+         "get_logistics": 0, "get_policy": 0, "get_resolution": 0}
 
 
 def tool_get_order(args):
@@ -87,6 +122,46 @@ def tool_get_inventory(args):
     if not inv:
         return {"isError": True, "content": [{"type": "text", "text": f"sku not found: {sku}"}]}
     return {"content": [{"type": "text", "text": json.dumps(inv, ensure_ascii=False)}]}
+
+
+def tool_get_logistics(args):
+    order_id = args.get("order_id") or args.get("orderId") or ""
+    with STATE_LOCK:
+        STATS["get_logistics"] += 1
+        lg = LOGISTICS.get(order_id)
+    if not lg:
+        return {"isError": True, "content": [{"type": "text", "text": f"order not found in logistics: {order_id}"}]}
+    return {"content": [{"type": "text", "text": json.dumps(lg, ensure_ascii=False)}]}
+
+
+def tool_get_policy(args):
+    order_id = args.get("order_id") or args.get("orderId") or ""
+    action = args.get("action") or ""
+    with STATE_LOCK:
+        STATS["get_policy"] += 1
+        pol = POLICY.get(order_id, POLICY["default"])
+    out = dict(pol)
+    out.update({"order_id": order_id, "action": action})
+    return {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]}
+
+
+def tool_get_resolution(args):
+    rid = args.get("resolution_id") or args.get("resolutionId") or ""
+    with STATE_LOCK:
+        STATS["get_resolution"] += 1
+        r = RESOLUTIONS.get(rid)
+        if r and r["status"] == "accepted":
+            # 受理 → 完成演进：第二次查询起视为已完成（区分已受理与已完成，官方契约）
+            r["status"] = "completed"
+            queried_before = False
+        else:
+            queried_before = bool(r)
+    if not r:
+        return {"isError": True, "content": [{"type": "text", "text": f"resolution not found: {rid}"}]}
+    return {"content": [{"type": "text", "text": json.dumps(
+        {"resolution_id": rid, "order_id": r["order_id"], "action": r["action"],
+         "status": "accepted" if not queried_before else r["status"],
+         "note": "已受理（首次查询）/ 已完成（后续查询）"}, ensure_ascii=False)}]}
 
 
 def tool_create_resolution(args):
@@ -137,6 +212,15 @@ TOOLS = [
     {"name": "get_inventory", "description": "查询 SKU 仓级可用量与调拨约束（只读，诊断用）",
      "inputSchema": {"type": "object", "properties": {
          "sku": {"type": "string"}}, "required": ["sku"]}},
+    {"name": "get_logistics", "description": "查询订单运单（有/无）事实与时效依据（只读，诊断用）",
+     "inputSchema": {"type": "object", "properties": {
+         "order_id": {"type": "string"}}, "required": ["order_id"]}},
+    {"name": "get_policy", "description": "查询订单拟执行动作的售后政策：是否允许/是否需审批/政策版本（只读）",
+     "inputSchema": {"type": "object", "properties": {
+         "order_id": {"type": "string"}, "action": {"type": "string"}}, "required": ["order_id", "action"]}},
+    {"name": "get_resolution", "description": "按处理单号查询执行结果（区分已受理与已完成）",
+     "inputSchema": {"type": "object", "properties": {
+         "resolution_id": {"type": "string"}}, "required": ["resolution_id"]}},
     {"name": "create_resolution", "description": (
         "创建处理单（写操作）。服务端强制校验 expected_version（乐观并发）与 plan_id"
         "（幂等键，只能来自用户已批准的处置方案，重放拒绝）"),
@@ -148,6 +232,8 @@ TOOLS = [
 ]
 
 TOOL_HANDLERS = {"get_order": tool_get_order, "get_inventory": tool_get_inventory,
+                 "get_logistics": tool_get_logistics, "get_policy": tool_get_policy,
+                 "get_resolution": tool_get_resolution,
                  "create_resolution": tool_create_resolution}
 
 

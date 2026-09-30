@@ -1,0 +1,18 @@
+# after-sales-agent 业务 MCP（order-fulfillment demo，官方案例角色映射：售后专员）
+# get_policy 只读；create_resolution 为写工具——走 allow + L3 服务端校验
+# （expected_version 乐观并发 + plan_id 幂等），人工闸门在父级 plan 批准。
+# 注意不要加 read_only: true——会改变注册路径语义（e2e fixture 教训）。
+vendor: "internal"
+server: "biz"
+version: "1.0.0"
+
+connection:
+  type: "streamableHttp"
+  url: "http://biz-mcp.agent-platform.svc:8300/mcp"
+  timeout: 60
+
+permissions:
+  tools:
+    get_policy: allow
+    get_resolution: allow
+    create_resolution: allow
