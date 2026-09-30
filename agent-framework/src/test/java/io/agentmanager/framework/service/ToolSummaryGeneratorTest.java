@@ -174,4 +174,55 @@ class ToolSummaryGeneratorTest {
         // 事件未携带 state 时按成功处理，避免误标失败
         assertEquals("ok", ToolSummaryGenerator.resultPreview("execute", "ok", null));
     }
+
+    // ===== agent_spawn（远程子 agent 委派，order-fulfillment demo 语义） =====
+
+    @Test
+    void agentSpawnCallSummaryShouldHighlightAgentAndTask() {
+        var args = "{\"agent_id\":\"order-agent\",\"task\":\"查询订单 O-1002 的事实\",\"timeout_seconds\":60}";
+        assertEquals("远程委派 order-agent：查询订单 O-1002 的事实",
+            ToolSummaryGenerator.callSummary("agent_spawn", args));
+    }
+
+    @Test
+    void agentSpawnCallSummaryWithoutAgentIdShouldFallback() {
+        assertEquals("启动子 Agent 查询订单",
+            ToolSummaryGenerator.callSummary("agent_spawn", "{\"task\":\"查询订单\"}"));
+    }
+
+    @Test
+    void agentSpawnOkResultShouldParseJsonQuotedReply() {
+        // 远端结果以 JSON 字符串字面量回流（首尾带引号、\n 转义）：解包后按行解析取 reply 首行
+        var result = "\"agent_key: agent:order-agent:uuid\\nagent_id: order-agent\\n"
+            + "session_id: sub-1\\nstatus: ok\\nreply:\\n订单 O-1002 的事实如下：\\nSKU=SKU-9H\"";
+        assertEquals("order-agent 返回：订单 O-1002 的事实如下：",
+            ToolSummaryGenerator.resultPreview("agent_spawn", result, "SUCCESS"));
+    }
+
+    @Test
+    void agentSpawnAcceptedResultShouldShowTaskId() {
+        var result = "\"status: accepted\\ntask_id: task_123\\nagent_id: logistics-agent\"";
+        assertEquals("logistics-agent 已受理后台任务 task_123，等待收割结果",
+            ToolSummaryGenerator.resultPreview("agent_spawn", result, "SUCCESS"));
+    }
+
+    @Test
+    void agentSpawnTimeoutResultShouldShowTerminal() {
+        var result = "\"status: timeout\\ntask_id: task_9\\nagent_id: order-agent\"";
+        assertEquals("⏱ order-agent 等待超时（任务 task_9）",
+            ToolSummaryGenerator.resultPreview("agent_spawn", result, "SUCCESS"));
+    }
+
+    @Test
+    void agentSpawnErrorResultShouldShowError() {
+        var result = "\"status: error\\nagent_id: after-sales-agent\\nerror: L3 校验失败\"";
+        assertEquals("❌ after-sales-agent 执行失败：L3 校验失败",
+            ToolSummaryGenerator.resultPreview("agent_spawn", result, "SUCCESS"));
+    }
+
+    @Test
+    void agentSpawnUnparsableResultShouldFallbackToFirstLine() {
+        // 非 status 键值形态：退回通用首行预览
+        assertEquals("plain text", ToolSummaryGenerator.resultPreview("agent_spawn", "plain text", "SUCCESS"));
+    }
 }
