@@ -23,11 +23,6 @@ type Core struct {
 	Cfg ConfigView
 
 	Packages *PackageService
-
-	// A2ASendTimeout message/send blocking 发送超时（幂等 Job 薄封装用；NewCore 落
-	// a2aSendTimeoutDefault，env AGENT_A2A_SEND_TIMEOUT_SECONDS 可覆盖——零值时
-	// sendA2AMessage/租期计算回落 300s）
-	A2ASendTimeout time.Duration
 }
 
 // ConfigView 发布所需的最小配置集（避免直接依赖 config.Config，便于测试）。
@@ -106,8 +101,7 @@ type PublishRequest struct {
 // NewCore 组装业务层。
 func NewCore(db *gorm.DB, fs *store.FS, kc k8s.Client, cv ConfigView) *Core {
 	return &Core{DB: db, FS: fs, K8s: kc, Cfg: cv,
-		A2ASendTimeout: a2aSendTimeoutDefault,
-		Packages:       &PackageService{DB: db, FS: fs}}
+		Packages: &PackageService{DB: db, FS: fs}}
 }
 
 // Publish 创建全套 K8s 资源并异步等待就绪+注册。

@@ -41,7 +41,6 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 
 - 平台保留键：AGENT_CONFIG_DIR / AGENT_WORKSPACE_DIR / SERVER_HOST / SERVER_PORT（用户 env 出现即 400；HOST_NAME 为日志注入保留键）
 - env 全量覆盖语义（PATCH /services/:id/env），上限 64 键 × 32KB
-- A2A 幂等 Job 薄封装（travel-fulfillment §12）：`POST /services/:id/jobs`（header `Idempotency-Key`，回落 body 字段）→ 同 (service, key) 稳定 taskId 锚点（`a2a_jobs` 表联合唯一索引先预留后发送）；`GET /services/:id/jobs/:key` 查映射。仅 running 服务可提交
 - 服务状态机：created→deploying→running|register_failed|deploy_failed；stopped/error 可再 publish
 - WaitReady 要求完整滚动更新完成（generation 对齐 + updatedReplicas 达标 + unavailable=0），防止注册打到旧 Pod
 - 业务 Ingress 注入 proxy-read/send-timeout=3600（A2A blocking 长对话必需）

@@ -70,7 +70,7 @@ var template = []Group{
 		},
 	},
 	{
-		// Agent Protocol（远程子 agent）敏感键：只收敏感两项入模板驱动 Secret 路由
+		// Agent Protocol（远程子 agent）敏感键：只收敏感键入模板驱动 Secret 路由
 		//（travel-fulfillment 设计 §8 平台端）。AGENT_PROTOCOL_ENABLED/TASK_STORE/
 		// TASK_RETENTION_DAYS 是按服务启用的开关与存储选择，不进平台默认配置——
 		// 否则发布表单会给全部服务预填"默认启用协议"，扩大 /tasks 暴露面。
@@ -80,6 +80,11 @@ var template = []Group{
 				Placeholder: "启用协议的服务 /tasks 认证令牌（lead/member 需同值）"},
 			{EnvKey: "AGENT_REMOTE_HEADERS_JSON", Label: "远程请求头 JSON", Sensitive: true, Multiline: true,
 				Placeholder: `{"X-Agent-Protocol-Token":"..."}`},
+			// A2A 幂等 Job 入口认证（Issue #69 下沉 member 侧后的外部互操作凭据，
+			// 与 /tasks 协议 token 分属两个信任域）；AGENT_A2A_JOB_ENABLED 等开关键
+			// 刻意排除（同上理由：防默认启用扩大 /a2a/jobs 暴露面）
+			{EnvKey: "AGENT_A2A_JOB_TOKEN", Label: "A2A Job Token", Sensitive: true,
+				Placeholder: "启用 A2A Job 的服务 /a2a/jobs 认证令牌"},
 		},
 	},
 }
