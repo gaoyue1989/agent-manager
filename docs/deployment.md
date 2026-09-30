@@ -165,6 +165,35 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 - **不设置 `INGRESS_TEMPLATE` = 纯内置构造**，行为与未上此功能前完全一致。
 - 占位符发布期按服务替换：`{{K8S_NAME}}`（backend 指向 `{{K8S_NAME}}-svc`）、`{{SHORT_NAME}}`（path 前缀）；**不得硬编码服务名/metadata.name**（启动探针即拒绝）。
 - `annotations`/`labels` 按 key 合并（只写新增项即保留内置注解）；**`rules`/`tls` 写了即整体替换**——改 host/path 必须抄完整 rules 块。
-- 校验不变量：backend 必须指向本服务；path 必须保留 `(/|$)(.*)` 尾缀（rewrite 依赖）；`x-forwarded-prefix` 必须与对外前缀一致（改 path 同步改）；SSE 长超时注解必须保留。
-- 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：host 取规则的 Host（空回落 `INGRESS_HOST`）、配 TLS 按 https 拼、端口取 `INGRESS_PORT`（Host 自带端口不重复拼）。改 host 后 DNS/端口可达性由环境自行保证；环境未在 `INGRESS_PORT` 终止 TLS 时不要配 TLS。
+- 校验不变量（**按 Ingress 模式收放**，模式由 `INGRESS_HOST_SUFFIX` 决定，见 §七之二）：backend 必须指向本服务；每条 path 必须设置 pathType；SSE 长超时注解必须保留；**path 模式**另需 path 保留 `(/|$)(.*)` 尾缀（rewrite 依赖）、`x-forwarded-prefix` 与对外前缀一致（改 path 同步改）。
+- 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：path 模式取规则的 Host（空回落 `INGRESS_HOST`）、配 TLS 按 https 拼、端口取 `INGRESS_PORT`（Host 自带端口不重复拼）；host 模式取规则 Host 形如 `http://{K8sName}{后缀}/`（不拼端口）。改 host 后 DNS/端口可达性由环境自行保证；环境未在 `INGRESS_PORT` 终止 TLS 时不要配 TLS。
 - 非法 overlay 启动即失败；发布/republish 期违规直接拒绝（Publish 不落库，Republish 保持原状）。存量服务需 republish 才滚动到新形态。
+
+## 七之二、Ingress host 模式（INGRESS_HOST_SUFFIX，可选）
+
+默认（不设置 `INGRESS_HOST_SUFFIX`）为 **path 模式**：所有服务共享 ingress 入口 IP，靠 `/agent/{short}` 路径前缀 + rewrite 区分。独立测试集群/生产环境要求每服务独立域名时，设置域名后缀切到 **host 模式**：`host = {K8sName}{后缀}`、`path = /`、pathType `Prefix`，无需 rewrite 注解。
+
+> ⚠️ **切换前置检查**：若已配置 `INGRESS_TEMPLATE`（§七），其内容须**先**改成 host 模式样例（`backend/templates/ingress-overlay.example.yaml` 的 H1/H2/H3）再切模式。启动探针与发布期同模式（探针带同一个 `INGRESS_HOST_SUFFIX`），path 形态的 overlay 在 host 模式下会被探针直接判违规 → **platform-backend 启动即失败、CrashLoop、整个平台 API/UI 不可用**（不是"某个服务发布被拒"）。
+
+```bash
+# 1) 切换到 host 模式（后缀必须以 "." 开头；非法格式启动即失败）
+#    ⚠️ 若已配 INGRESS_TEMPLATE，须先把 overlay 内容改成 H1/H2/H3 形态，否则下方
+#       rollout restart 会让 backend CrashLoop
+kubectl -n agent-platform set env deploy/platform-backend \
+  INGRESS_HOST_SUFFIX=.region-c86-test.test-kzx1.cncb
+
+# 2) 生效：滚动重启（存量服务经 republish / 重新上线后收敛到新形态）
+kubectl -n agent-platform rollout restart deployment/platform-backend
+
+# 回滚=去掉环境变量，回到 path 模式
+kubectl -n agent-platform set env deploy/platform-backend INGRESS_HOST_SUFFIX-
+kubectl -n agent-platform rollout restart deployment/platform-backend
+```
+
+行为要点：
+
+- **不设置 = path 模式**，行为与未上此功能前完全一致（默认向后兼容）。
+- 后缀格式启动即校验（fail-fast，backend CrashLoop 日志指明违例项）：必须以 `.` 开头、去点后为合法 DNS-1123 subdomain、**各段 ≤63 字符**、叠加最长 K8sName（67 字符）后总长 ≤253（即后缀 ≤186 字符）。
+- 需 `INGRESS_CLASS` 有值（默认 `nginx`）；域名后缀须在集群 DNS/证书侧可解析——平台只生成 Ingress 对象，不代管 DNS 与证书。
+- 与 `INGRESS_TEMPLATE` 可叠加（§七）：host 模式下 overlay 仍可追加注解、TLS，但 **host 不可偏离** `{K8sName}{后缀}`、**path 恒为 `/`**、backend 仍须指向本服务，且 **rewrite-target / use-regex / x-forwarded-prefix 三项必须为空**。**照抄 path 模式模板（含 x-forwarded-prefix）会导致启动即失败**：探针与发布期同模式，backend CrashLoop、日志指明违例项（该注解非空时业务 Agent 的 `/debug` 还会 302 到 `{该值}/debug/` 而 404，只是根本走不到那一步）。示例文件的 P1-P3 / H1-H3 两组样例不可混抄。
+- 展示地址（Endpoint）随之切换为 `http://{K8sName}{后缀}/`（配 TLS 则 https）。**存量服务不做后台批量迁移**：模式切换后经 republish / 重新上线（StartAgain）时 Ingress 覆盖为新形态、Endpoint 同步重算落库。

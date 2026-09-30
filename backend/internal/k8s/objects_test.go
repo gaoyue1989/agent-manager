@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 func TestSanitizeK8sName(t *testing.T) {
@@ -45,6 +46,7 @@ func TestDeriveAndShortName(t *testing.T) {
 	}
 }
 
+// testParams 不设 IngressHostSuffix —— 即 path 模式，是历史行为的回归锁基准。
 func testParams() ObjectParams {
 	return ObjectParams{
 		K8sName: "oaf-acme-demo", Namespace: "agent-platform",
@@ -53,6 +55,13 @@ func testParams() ObjectParams {
 		SubPath:      "packages/42",
 		IngressClass: "nginx", IngressHost: "1.2.3.4", IngressPort: 30080,
 	}
+}
+
+// hostModeParams 叠加域名后缀 → host 模式（每服务独立域名）。
+func hostModeParams() ObjectParams {
+	p := testParams()
+	p.IngressHostSuffix = ".region-c86-test.test-kzx1.cncb"
+	return p
 }
 
 func TestDeploymentConstruction(t *testing.T) {
@@ -210,6 +219,63 @@ func TestServiceAndIngress(t *testing.T) {
 	}
 	if ing.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name != "oaf-acme-demo-svc" {
 		t.Fatal("ingress backend wrong")
+	}
+}
+
+// TestIngressHostModeConstruction host 模式（IngressHostSuffix 非空）内置构造：
+// 域名 = {K8sName}{suffix}、path 根路径、pathType Prefix、只留 ssl-redirect 与 SSE
+// 超时注解——不得出现任何 rewrite 相关注解（无前缀可剥离）。
+func TestIngressHostModeConstruction(t *testing.T) {
+	ing := Ingress(hostModeParams())
+	if ing.Name != "oaf-acme-demo" || ing.Namespace != "agent-platform" {
+		t.Fatalf("metadata wrong: %s/%s", ing.Namespace, ing.Name)
+	}
+	if ing.Spec.IngressClassName == nil || *ing.Spec.IngressClassName != "nginx" {
+		t.Fatalf("ingressClassName wrong: %v", ing.Spec.IngressClassName)
+	}
+	if len(ing.Spec.Rules) != 1 {
+		t.Fatalf("want exactly one rule, got %d", len(ing.Spec.Rules))
+	}
+	rule := ing.Spec.Rules[0]
+	if rule.Host != "oaf-acme-demo.region-c86-test.test-kzx1.cncb" {
+		t.Fatalf("host wrong: %q", rule.Host)
+	}
+	if len(rule.HTTP.Paths) != 1 {
+		t.Fatalf("want exactly one path, got %d", len(rule.HTTP.Paths))
+	}
+	path := rule.HTTP.Paths[0]
+	if path.Path != "/" {
+		t.Fatalf("host mode must serve root path, got %q", path.Path)
+	}
+	if path.PathType == nil || *path.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("pathType wrong: %v", path.PathType)
+	}
+	if path.Backend.Service == nil || path.Backend.Service.Name != "oaf-acme-demo-svc" ||
+		path.Backend.Service.Port.Number != AgentPort {
+		t.Fatalf("backend wrong: %+v", path.Backend.Service)
+	}
+	wantAnn := map[string]string{
+		annSSLRedirect:      "false",
+		annProxyReadTimeout: "3600",
+		annProxySendTimeout: "3600",
+	}
+	if len(ing.Annotations) != len(wantAnn) {
+		t.Fatalf("host mode annotations must be exactly %v, got %v", wantAnn, ing.Annotations)
+	}
+	for k, want := range wantAnn {
+		if ing.Annotations[k] != want {
+			t.Errorf("annotation %s = %q, want %q", k, ing.Annotations[k], want)
+		}
+	}
+	// rewrite 相关注解在 host 模式一律不得出现
+	for _, k := range []string{annRewriteTarget, annUseRegex, annXForwardedPrefix} {
+		if _, ok := ing.Annotations[k]; ok {
+			t.Errorf("host mode must not carry rewrite annotation %s", k)
+		}
+	}
+	// path 模式（suffix 为空）必须仍无 host：两条分支互斥
+	if h := Ingress(testParams()).Spec.Rules[0].Host; h != "" {
+		t.Fatalf("path mode must stay host-less, got %q", h)
 	}
 }
 

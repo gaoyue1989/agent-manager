@@ -84,6 +84,18 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 
 - 业务 Ingress 由 `internal/k8s/template.go` 的 `IngressBuilder` 构造，模式与 DeploymentBuilder 完全一致：**内置纯函数构造为基线**（`objects.go:Ingress`）+ 可选 YAML overlay 经 **Strategic Merge Patch** 合并 + **不变量校验**；SMP helper 为泛型 `applySMPOverlay[T]`（两种 builder 共用）
 - 环境变量 `INGRESS_TEMPLATE` 指向 overlay 文件路径；**不设置 = 纯内置构造，行为与历史版本完全一致**。overlay 支持每服务占位符 `{{K8S_NAME}}`/`{{SHORT_NAME}}`（发布期替换，保证模板服务无关、启动探针可哑参渲染）
-- 允许改 host/path/TLS/追加注解；rules/tls 是普通列表（SMP **整体替换**），annotations/labels 是 map（按 key 合并）。校验不变量（违规即拒）：禁改 metadata.name/namespace、平台 labels、spec.ingressClassName；归属唯一（所有 backend 指向本服务 `{name}-svc:8100`）；每条 path 必须以 `(/|$)(.*)` 结尾且 use-regex=true、rewrite-target=/$2 保留；**x-forwarded-prefix 必须等于对外前缀**（改 path 必须同步改它）；proxy-read/send-timeout 必须保留
-- **Endpoint 随合并结果派生**（`k8s.IngressEndpoint`）：host 取第一条规则的 Host（空回落 INGRESS_HOST，自带端口不重复拼）、path 剥尾缀得对外前缀、TLS→https、端口取 INGRESS_PORT。Publish 落库前 Build（违规直接拒绝**不落库**，与 image 校验同级）；Republish 事务前 Build 随事务回写 endpoint；StartAgain 不改 endpoint（经 applyAll 重新校验，违规转 error）
+- 允许改 host/path/TLS/追加注解；rules/tls 是普通列表（SMP **整体替换**），annotations/labels 是 map（按 key 合并）。校验不变量（违规即拒）：禁改 metadata.name/namespace、平台 labels、spec.ingressClassName；归属唯一（所有 backend 指向本服务 `{name}-svc:8100`）；每条 path 必须设置 pathType；spec.defaultBackend 恒空；proxy-read/send-timeout 必须保留。**其余不变量按 Ingress 模式收放**（见下节）
+- **Endpoint 随合并结果派生**（`k8s.IngressEndpoint`，模式按 `IngressHostSuffix` 配置分支）：path 模式取第一条带尾缀 path 规则的 Host（空回落 INGRESS_HOST，自带端口不重复拼）+ path 剥尾缀得对外前缀、TLS→https、端口取 INGRESS_PORT；host 模式取规则 Host，形如 `http://{K8sName}{suffix}/`（域名自带 80/443 不拼端口，spec.tls 非空则 https）。Publish 落库前 Build（违规直接拒绝**不落库**，与 image 校验同级）；Republish 事务前 Build 随事务回写 endpoint；**StartAgain apply 成功后重算 endpoint 落库**（模式切换的存量服务在此收敛，写库失败只记日志不阻断）；UpdateEnv 不触 Ingress、不改 endpoint
 - overlay 用法与完整 rules 抄改样例见 `templates/ingress-overlay.example.yaml`；设计见 [../docs/design/ingress-template-design.md](../docs/design/ingress-template-design.md)
+
+## 业务 Ingress 双模式（INGRESS_HOST_SUFFIX）
+
+- 环境变量 `INGRESS_HOST_SUFFIX`（默认空）切换生成形态，**双模式并存、空值 = 现有 path 模式逐字符不变**：`objects.go:Ingress` 与 `template.go:validateIngress` 均以 `IngressHostSuffix != ""` 为唯一判定依据（不从 path 尾缀嗅探，overlay 改 path 会误导嗅探）
+- | `INGRESS_HOST_SUFFIX` | 模式 | 内置形态 |
+  |---|---|---|
+  | 空（默认） | path | 无 host；path `/agent/{short}(/|$)(.*)`、pathType ImplementationSpecific；rewrite-target=/$2、use-regex=true、x-forwarded-prefix=/agent/{short} |
+  | 非空（如 `.region-c86-test.test-kzx1.cncb`） | host | host=`{K8sName}{suffix}`、path `/`、pathType Prefix；**只保留** ssl-redirect=false 与 proxy-read/send-timeout=3600，无任何 rewrite 注解（根路径直出无前缀可剥） |
+- 配置层 fail-fast：`config.Load()` 校验后缀必须以 `.` 开头、去点后为合法 DNS-1123 subdomain（整体形态）**且逐段为合法 DNS label（各段 ≤63，`IsDNS1123Label`——`IsDNS1123Subdomain` 只查点分正则 + 整体 253，不含段长）**，且**叠加最长 K8sName（67 字符 = `oaf-` 前缀 + 63 截断，见 objects.go `DeriveK8sName`/`SanitizeK8sName`）后总长 ≤253**（即后缀 ≤186），非法直接 `log.Fatal` 拒绝启动。拼接后首段（`{K8sName}{后缀首段}`）可能超 63，不额外拒绝：K8s 对 `rules[].host` 只强校验 253 总量
+- 不变量差异（`validateIngress`）：公共项同上节；**path 模式**额外强制 path 尾缀 `(/|$)(.*)`、use-regex/rewrite-target、x-forwarded-prefix 与对外前缀一致；**host 模式**强制每条 rule 的 host == `{K8sName}{suffix}`（空 host 也拒——放行会退化成共享入口 IP 承载根路径、流量串服务）、**path 恒为 `/`**（Endpoint 固定派生为根 URL，放开 path 会让落库地址与实际路由错位、前端链接 404）、**rewrite-target / use-regex / x-forwarded-prefix 三项必须为空**（不是"不校验"：x-forwarded-prefix 有下游消费者——agent-framework `DebugController` 读 `X-Forwarded-Prefix` 拼 302 Location，非空错值会让 `/debug` 跳 404；rewrite-target 可能被 ingress-nginx 用于改写 location。内置构造三项一个都不生成，收紧不影响任何合法 host 模式 overlay）
+- 存量服务**不做后台批量迁移**：EnsureIngress 整体覆盖 spec，模式切换后经 Republish / StartAgain 即收敛为新形态（Endpoint 同步重算落库）
+- 设计见 [../docs/design/ingress-host-mode-design.md](../docs/design/ingress-host-mode-design.md)

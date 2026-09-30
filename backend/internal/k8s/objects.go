@@ -87,6 +87,11 @@ type ObjectParams struct {
 	IngressClass string
 	IngressHost  string
 	IngressPort  int
+	// IngressHostSuffix 域名后缀（见 config.IngressHostSuffix）：空=path 模式
+	// （无 host，靠 /agent/{short} 前缀 + rewrite 区分服务），非空=host 模式
+	// （host={K8sName}{suffix}、根路径直出）。内置构造与 overlay 不变量校验
+	// （template.go validateIngress）共用此值判定模式。
+	IngressHostSuffix string
 
 	RequestsCPU, RequestsMem, LimitsCPU, LimitsMem string
 }
@@ -242,19 +247,64 @@ const (
 	annProxyReadTimeout = "nginx.ingress.kubernetes.io/proxy-read-timeout"
 	annProxySendTimeout = "nginx.ingress.kubernetes.io/proxy-send-timeout"
 	annXForwardedPrefix = "nginx.ingress.kubernetes.io/x-forwarded-prefix"
+	// hostModeRootPath host 模式的对外路径：根路径直出，overlay 不可改（Endpoint 固定
+	// 派生为 {scheme}://{K8sName}{suffix}/，放开 path 会让展示地址与实际路由错位）。
+	hostModeRootPath = "/"
 )
 
-// Ingress 构造 nginx Ingress：path /agent/{short}(/|$)(.*) → rewrite /$2。
+// pathTypePtr 取 PathType 指针（networkingv1.PathType 为值类型，v1 要求非空）。
+func pathTypePtr(t networkingv1.PathType) *networkingv1.PathType { return &t }
+
+// ingressBackend 业务 backend 引用：{K8sName}-svc:8100（Ingress 对象与服务一一对应，
+// 两种模式与 overlay 合并后的不变量校验共用）。
+func ingressBackend(p ObjectParams) networkingv1.IngressBackend {
+	return networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
+		Name: p.K8sName + "-svc",
+		Port: networkingv1.ServiceBackendPort{Number: AgentPort},
+	}}
+}
+
+// Ingress 构造 nginx Ingress，双模式由 IngressHostSuffix 判定（空=path 模式，
+// 即历史行为；非空=host 模式）：
+//   - path 模式：无 host，path /agent/{short}(/|$)(.*) → rewrite /$2（共享入口 IP）
+//   - host 模式：host={K8sName}{suffix}、path 根路径 /、pathType Prefix，
+//     无需 rewrite 注解（每服务独立域名直出）
 func Ingress(p ObjectParams) *networkingv1.Ingress {
+	if p.IngressHostSuffix != "" {
+		// host 模式：只保留 ssl-redirect 与 SSE 长超时，无 rewrite 相关注解
+		return &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
+				Annotations: map[string]string{
+					annSSLRedirect: "false",
+					// A2A blocking 请求与 SSE 流式场景需要长超时
+					annProxyReadTimeout: "3600",
+					annProxySendTimeout: "3600",
+				},
+			},
+			Spec: networkingv1.IngressSpec{
+				IngressClassName: &p.IngressClass,
+				Rules: []networkingv1.IngressRule{{
+					Host: p.K8sName + p.IngressHostSuffix,
+					IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     hostModeRootPath,
+							PathType: pathTypePtr(networkingv1.PathTypePrefix),
+							Backend:  ingressBackend(p),
+						}},
+					}},
+				}},
+			},
+		}
+	}
 	short := ShortName(p.K8sName)
-	pt := networkingv1.PathTypeImplementationSpecific
 	return &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
 			Annotations: map[string]string{
-				annRewriteTarget:  rewriteTargetValue,
-				annUseRegex:       "true",
-				annSSLRedirect:    "false",
+				annRewriteTarget: rewriteTargetValue,
+				annUseRegex:      "true",
+				annSSLRedirect:   "false",
 				// A2A blocking 请求与 SSE 流式场景需要长超时
 				annProxyReadTimeout: "3600",
 				annProxySendTimeout: "3600",
@@ -268,11 +318,8 @@ func Ingress(p ObjectParams) *networkingv1.Ingress {
 				IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
 					Paths: []networkingv1.HTTPIngressPath{{
 						Path:     fmt.Sprintf("/agent/%s%s", short, ingressPathSuffix),
-						PathType: &pt,
-						Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
-							Name: p.K8sName + "-svc",
-							Port: networkingv1.ServiceBackendPort{Number: AgentPort},
-						}},
+						PathType: pathTypePtr(networkingv1.PathTypeImplementationSpecific),
+						Backend:  ingressBackend(p),
 					}},
 				}},
 			}},

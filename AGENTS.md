@@ -71,7 +71,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 - 业务 Pod 固定注入 `AGENT_CONFIG_DIR=/config`、`AGENT_WORKSPACE_DIR=/workspace`、`SERVER_HOST/SERVER_PORT`（均为保留键，用户 env 冲突即 400）
 - env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB；模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY 等）自动路由进服务 Secret（`{name}-env-secret`），不落 ConfigMap/env_json
 - 平台默认配置（redis/mysql/llm/sandbox）仅作为「发布新服务 / 编辑 env」时的**表单默认填入**（`/settings` 页维护 → `platform_config` 表 → `GET /platform-config/defaults` 预填）；不经 envFrom 注入，改默认配置不影响任何已发布服务（见 docs/design/platform-default-config-secret-design.md）
-- 业务 Ingress 注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix；形态可用 `INGRESS_TEMPLATE` overlay 调整（允许改 host/path/TLS/追加注解，Endpoint 自动跟随；不设置=内置构造，见 backend/AGENTS.md 与 docs/design/ingress-template-design.md）
+- 业务 Ingress 双模式（`INGRESS_HOST_SUFFIX` 切换，**默认空 = path 模式，行为不变**）：path 模式注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix、靠 `/agent/{name}` 前缀 + rewrite 区分服务；host 模式（后缀非空，如 `.region-c86-test.test-kzx1.cncb`）为 `host={K8sName}{后缀}` + 根路径直出，只保留 ssl-redirect 与 proxy 超时、无 rewrite 注解。形态可用 `INGRESS_TEMPLATE` overlay 调整（允许改 host/path/TLS/追加注解，host 模式下 host 不可偏离；Endpoint 自动跟随；不设置=内置构造，见 backend/AGENTS.md 与 docs/design/ingress-host-mode-design.md）
 - 敏感配置在 `.env.secrets`（gitignored）
 
 ---
