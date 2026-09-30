@@ -1,10 +1,10 @@
 package io.agentmanager.framework.service.a2ajob;
 
 import java.time.Duration;
-import java.util.List;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import io.agentmanager.framework.redis.RedisConnectionFacade;
@@ -25,6 +25,7 @@ import io.lettuce.core.SetArgs;
  * 多副本下本地状态即谎言，Issue §2.4）。
  */
 @Component
+@ConditionalOnProperty(prefix = "agent.a2a-job", name = "enabled", havingValue = "true")
 public class A2aJobRedisStore {
 
     private static final Logger log = LoggerFactory.getLogger(A2aJobRedisStore.class);
@@ -115,18 +116,4 @@ public class A2aJobRedisStore {
         return r != null && r == 1;
     }
 
-    /** 当前值是否仍为本副本的 claim（发布前自检；诊断用） */
-    public boolean isMine(String idempotencyKey, String token) {
-        return (CLAIM_PREFIX + token).equals(get(idempotencyKey));
-    }
-
-    /** 模块日志前缀统一（分级日志语义对齐 RedisEventLog.fail） */
-    static void warn(Logger logger, String op, String key, Exception e) {
-        logger.warn("[A2aJob] redis {} failed for {}: {}", op, key, e.getMessage());
-    }
-
-    /** 供测试/诊断列出活跃键（低频运维用；KEYS 仅诊断路径使用，业务路径零调用） */
-    public List<String> scanKeys() {
-        return facade.sync().keys("a2ajob:*");
-    }
 }

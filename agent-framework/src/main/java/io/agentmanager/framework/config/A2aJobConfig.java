@@ -28,17 +28,31 @@ import io.agentmanager.framework.service.a2ajob.A2aJobAuthFilter;
 public class A2aJobConfig {
     private static final Logger log = LoggerFactory.getLogger(A2aJobConfig.class);
 
-    /**
-     * token fail-fast：enabled=true 而 authToken 空白 → 启动失败（对外无认证的
-     * 远程触发面不允许静默放行，同 AgentProtocolConfig.requireAuthToken 语义）。
-     */
-    static void requireAuthToken(AgentA2aJobProperties props) {
-        if (props == null || props.authToken() == null || props.authToken().isBlank()) {
-            throw new IllegalStateException(
-                "AGENT_A2A_JOB_ENABLED=true 时必须配置 AGENT_A2A_JOB_TOKEN（/a2a/jobs 入口认证，"
-                    + "Issue #69 §2.3）；未启用 A2A Job 请保持 AGENT_A2A_JOB_ENABLED=false");
+        /**
+         * token fail-fast：enabled=true 而 authToken 空白 → 启动失败（对外无认证的
+         * 远程触发面不允许静默放行，同 AgentProtocolConfig.requireAuthToken 语义）。
+         * 同时校验数值配置边界（CR P2-3）：sendTimeout/retention ≥1（0 会让请求超时
+         * 不可控 / EXPIRE 0 立即删映射）；maxConcurrent ≤ 96（loopback 自环每 Job 占
+         * 2 个 Tomcat 线程，96×2=192 < 默认 200——超过即从设计上回归自环死锁）。
+         */
+        static void requireAuthToken(AgentA2aJobProperties props) {
+            if (props == null || props.authToken() == null || props.authToken().isBlank()) {
+                throw new IllegalStateException(
+                    "AGENT_A2A_JOB_ENABLED=true 时必须配置 AGENT_A2A_JOB_TOKEN（/a2a/jobs 入口认证，"
+                        + "Issue #69 §2.3）；未启用 A2A Job 请保持 AGENT_A2A_JOB_ENABLED=false");
+            }
+            if (props.sendTimeoutSeconds() < 1 || props.retentionHours() < 1 || props.maxConcurrent() < 1) {
+                throw new IllegalStateException(
+                    "AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS / RETENTION_HOURS / MAX_CONCURRENT 必须 ≥1"
+                        + "（收到 " + props.sendTimeoutSeconds() + "/" + props.retentionHours() + "/"
+                        + props.maxConcurrent() + "）");
+            }
+            if (props.maxConcurrent() > 96) {
+                throw new IllegalStateException(
+                    "AGENT_A2A_JOB_MAX_CONCURRENT 上限 96（loopback 自环每 Job 占 2 个 Tomcat 线程，"
+                        + props.maxConcurrent() + "×2 超出默认 200 线程池会自环死锁，Issue #69 §2.5）");
+            }
         }
-    }
 
     /**
      * 条件装配：agent.a2a-job.enabled=true 时注册端点与过滤器（缺省/显式 false 均不装配）。

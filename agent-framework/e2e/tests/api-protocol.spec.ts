@@ -87,6 +87,13 @@ test.describe('T7 /tasks 强制 token（协议实例 p）', () => {
 // ---------- J 组：A2A 幂等 Job HTTP 面（Issue #69 §2.1/§2.3，member 侧单实例） ----------
 // p 实例同开 AGENT_A2A_JOB_ENABLED=true（env-up protocol 组注入）；token 与 /tasks 分域。
 // 双副本同键收敛（P7）在 e2e-protocol-multi 门禁 job（阶段 3）。
+test.describe('J0 组 A2A Job 存量零影响（协议关实例 a）', () => {
+  test('未启用 A2A Job 的存量服务 /a2a/jobs 不可达（P0-1 守卫：条件装配关端点）', async ({ request }) => {
+    expect((await request.post(`${BASE}/a2a/jobs`, { data: { text: 'x' } })).status()).toBe(404);
+    expect((await request.get(`${BASE}/a2a/jobs/any-key`)).status()).toBe(404);
+  });
+});
+
 test.describe('J 组 /a2a/jobs 强制 token 与幂等语义（协议实例 p）', () => {
   const JOB_TOKEN = 'e2e-a2ajob-token';
 

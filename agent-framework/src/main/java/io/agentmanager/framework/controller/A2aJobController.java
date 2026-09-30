@@ -11,12 +11,14 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.a2ajob.A2aJobService;
 import io.agentmanager.framework.service.a2ajob.A2aJobService.JobConflictException;
 import io.agentmanager.framework.service.a2ajob.A2aJobService.JobInvalidException;
 import io.agentmanager.framework.service.a2ajob.A2aJobService.JobUnavailableException;
+import io.agentmanager.framework.service.a2ajob.A2aJobService.SendRejectedException;
 
 /**
  * A2A 幂等 Job 端点（Issue #69 §2.1；member 侧业务面，默认关闭）。
@@ -36,6 +38,7 @@ import io.agentmanager.framework.service.a2ajob.A2aJobService.JobUnavailableExce
  * {@code send-timeout-seconds}（默认 300s）——业务 Ingress 3600s 长超时已就位。
  */
 @RestController
+@ConditionalOnProperty(prefix = "agent.a2a-job", name = "enabled", havingValue = "true")
 public class A2aJobController {
 
     private static final Logger log = LoggerFactory.getLogger(A2aJobController.class);
@@ -63,6 +66,9 @@ public class A2aJobController {
             return fail(HttpStatus.BAD_REQUEST, e.getMessage());
         } catch (JobConflictException e) {
             return failWithRetryAfter(HttpStatus.CONFLICT, e.getMessage());
+        } catch (SendRejectedException e) {
+            // 确定未受理（member 内部失败，请求本身可能合法）：502，同键可立即重试（CR P1-1）
+            return fail(HttpStatus.BAD_GATEWAY, e.getMessage());
         } catch (JobUnavailableException e) {
             return failWithRetryAfter(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage());
         }

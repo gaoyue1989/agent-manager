@@ -69,6 +69,15 @@ class A2aJobControllerTest {
     }
 
     @Test
+    void submitShouldMapSendRejectedTo502WithoutRetryAfter() {
+        // 确定未受理（CR P1-1）：502、无 Retry-After——语义为「同键可立即重试」
+        when(service.submit("k5", "x")).thenThrow(new A2aJobService.SendRejectedException("transport error"));
+        var resp = controller.submit("k5", Map.of("text", "x"));
+        assertEquals(502, resp.getStatusCode().value());
+        org.junit.jupiter.api.Assertions.assertNull(resp.getHeaders().getFirst("Retry-After"));
+    }
+
+    @Test
     void statusShouldMapNotFoundTo404() {
         when(service.status("missing")).thenReturn(null);
         var resp = controller.status("missing");

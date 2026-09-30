@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,6 +43,7 @@ import io.agentmanager.framework.config.AgentA2aJobProperties;
  * 多副本下本地状态即谎言（Issue §2.4）。
  */
 @Service
+@ConditionalOnProperty(prefix = "agent.a2a-job", name = "enabled", havingValue = "true")
 public class A2aJobService {
 
     private static final Logger log = LoggerFactory.getLogger(A2aJobService.class);
@@ -235,7 +237,7 @@ public class A2aJobService {
                     "message", Map.of(
                         "role", "user",
                         "kind", "message",
-                        "messageId", "job-" + idempotencyKey,
+                        "messageId", "job-" + idempotencyKey + "-" + UUID.randomUUID(),
                         "parts", List.of(Map.of("kind", "text", "text", text))),
                     "configuration", Map.of("blocking", true))));
         } catch (Exception e) {
@@ -337,16 +339,6 @@ public class A2aJobService {
         static final RetryOnceSignal INSTANCE = new RetryOnceSignal();
     }
 
-    /** 幂等命中信号（submit 内部捕获后转 200 返回） */
-    static final class IdempotentHitSignal extends RuntimeException {
-        final String taskId;
-
-        IdempotentHitSignal(String taskId) {
-            super(taskId, null, false, false);
-            this.taskId = taskId;
-        }
-    }
-
     /** 400：键或 text 非法 */
     public static final class JobInvalidException extends RuntimeException {
         public JobInvalidException(String message) { super(message); }
@@ -362,9 +354,9 @@ public class A2aJobService {
         public JobUnavailableException(String message) { super(message); }
     }
 
-    /** 确定未受理（连接失败 / 4xx / JSON-RPC error）：可释放重试 */
-    static final class SendRejectedException extends RuntimeException {
-        SendRejectedException(String message) { super(message); }
+    /** 确定未受理（连接失败 / 4xx / JSON-RPC error）：可释放重试（Controller 映射 502，CR P1-1） */
+    public static final class SendRejectedException extends RuntimeException {
+        public SendRejectedException(String message) { super(message); }
     }
 
     /** 结果未知（超时 / 5xx / 无法解析）：保留认领禁重发 */
