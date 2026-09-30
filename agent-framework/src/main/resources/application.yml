@@ -144,6 +144,18 @@ agent:
     # 可重放，默认）；memory = SDK 内置内存实现（v1.4 行为）。redis 实现在 Redis 缺失
     # 或运行期异常时自动 fail-soft 降级内存，行为不劣化于 v1.4
     event-bus: ${AGENT_PROTOCOL_EVENT_BUS:redis}
+  # A2A 幂等 Job（Issue #69 路线 A：member 侧 /a2a/jobs，外部互操作面）：
+  # 默认关闭——enabled=false 不注册端点与认证 filter，存量服务零影响。
+  # enabled=true 时 auth-token 必填（缺失启动即失败）+ Redis 启动自检（硬依赖）。
+  # 与 /tasks 协议 token 分属两个信任域，不复用 AGENT_PROTOCOL_AUTH_TOKEN。
+  a2a-job:
+    enabled: ${AGENT_A2A_JOB_ENABLED:false}
+    auth-token: ${AGENT_A2A_JOB_TOKEN:}
+    send-timeout-seconds: ${AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS:300}
+    retention-hours: ${AGENT_A2A_JOB_RETENTION_HOURS:24}
+    # 并发准入上限：loopback 自环下每个 Job 占 2 个 Tomcat 线程（同步 POST 等自环 +
+    # 自环跑会话），32 并发对默认 200 线程池余量充足，防自环死锁（Issue §2.5）
+    max-concurrent: ${AGENT_A2A_JOB_MAX_CONCURRENT:32}
   # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
   harness:
     # ReAct 推理
