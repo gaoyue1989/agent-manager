@@ -136,8 +136,11 @@ case "$E2E_GROUP" in
     # p = 协议实例（AGENT_PROTOCOL_ENABLED=true + 固定 token，断言无/错 token 401、
     #     卡片透出 agent_protocol）。spawn/确认/拒绝/超时/父崩溃五场景需 mock-LLM
     #     双进程脚本化编排，属 T 组二期。
+    # p 同时开启 A2A Job（Issue #69 §6：E2E 双副本同键收敛在阶段 3 P7；
+    #     此处单实例覆盖 401/400/幂等命中/GET 404 等 HTTP 面）
     start_jar "$E2E_BASE_PORT" "a"
     AGENT_PROTOCOL_ENABLED=true AGENT_PROTOCOL_AUTH_TOKEN="e2e-protocol-token" \
+      AGENT_A2A_JOB_ENABLED=true AGENT_A2A_JOB_TOKEN="e2e-a2ajob-token" \
       start_jar "$((E2E_BASE_PORT + 1))" "p"
     ;;
   *) echo "E2E_GROUP 必须是 core|multi|sandbox|protocol"; exit 1;;

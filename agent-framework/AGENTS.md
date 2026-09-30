@@ -169,6 +169,10 @@ invokeStream(message, threadId, userId) → Flux<Map>
 
 `config/AgentProtocolConfig`（条件装配 `agent.agent-protocol.enabled=true`：ProtocolTaskRepository bean override → TaskRecord 落 agent_fs 跨重启可 resume；自定义 AgentFactory → `agentRuntimeService.getAgent()` 防 reload 跑旧实例（F14）；AgentProtocolEventBus bean override → Redis Streams（§18.3，`AGENT_PROTOCOL_EVENT_BUS=memory` 回退 SDK 内存实现）；token 缺失 fail-fast）+ `service/protocol/AgentProtocolAuthFilter`（/tasks* 前置校验 `X-Agent-Protocol-Token`，无/错一律 401）。终态 TaskRecord 保留期扫描在 `SessionCleanupService`（SDK 2.0.3 无删除 API，暂为扫描留痕；同处清理 remote_task_registry 终态行）。**多副本（设计 §18）**：lead 端在途任务登记持久化在 `remote_task_registry` 表（`RemoteTaskRegistryStore`，V8）——Bridge 重启/跨副本经 `rebuildFromRegistry` 接管轮询，唤醒幂等走 `claimWake` CAS（IN_FLIGHT→WAKING），TTL sweep 以 confirm_context CAS 消费前置保证治理恰好一次；member 端 `/tasks/{id}/events` 事件面经 `ProtocolRedisEventBus` 跨副本可见。`/` 与 `/metadata` 透出 `agent_protocol` 状态。设计/事实基础见 [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md)
 
+### 5.5 A2aJobController / A2aJobService — A2A 幂等 Job（member 侧，默认关闭）
+
+`controller/A2aJobController`（`POST/GET /a2a/jobs`，`Agent-A2A-Job-Token` 认证经 `service/a2ajob/A2aJobAuthFilter`）+ `service/a2ajob/{A2aJobService,A2aJobRedisStore}`（Issue #69 路线 A：幂等状态机全外置 Redis 单键原子操作——`SET NX` claim 独占发送权 → Lua CAS 落 taskId/释放/续租；多副本任意副本可裁决同键并发，无本地态）。发送走 loopback `message/send`（blocking，`Semaphore(maxConcurrent=32)` 准入防自环死锁）；失败分类：确定未受理（连接失败/4xx/JSON-RPC error）释放可重试、结果未知（超时/5xx）保留认领禁重发（at-least-once，副作用由工具层 plan_id/expected_version 兜底）；Redis 运行期故障 503 fail-closed 无本地降级。装配 `config/A2aJobConfig`（enabled=true 时 token fail-fast + Redis 启动自检）；与 /tasks 协议 token 分属两个信任域。backend 侧对应实现已撤除（PR #71）。设计：[Issue #69](https://github.com/gaoyue1989/agent-manager/issues/69) + [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md) §18
+
 ---
 
 ## AgentScope 2.0 功能使用状态
@@ -340,6 +344,11 @@ OAF `deniedTools` 字段控制排除列表。
 | `AGENT_REMOTE_SPAWN_SYNC_WAIT` | `true` | | 远程 spawn 强制同步等待（lead 端，设计 §16 实测）：注入 SDK `force_sync` 属性让 spawn 阻塞等子任务完成、结果确定性回流（SDK 远程 spawn 恒异步受理，收割靠模型自觉不可靠）。仅作用于纯 spawn 轮次；无远程声明的服务无消费方、无副作用 |
 | `AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS` | `120` | | 强制同步等待秒数（配合上一键），超时后按 SDK 既有升格语义转后台 |
 | `AGENT_PROTOCOL_EVENT_BUS` | `redis` | | 协议事件总线实现（多副本设计 §18.3）：`redis` = ProtocolRedisEventBus（Redis Streams，`proto:task:{id}:*` 键族经 `agent.redis.prefix` 隔离；显式 seq 发号 + done 标记收流，`/tasks/{id}/events` 跨副本可订阅/跨重启可重放）；`memory` = SDK 内置内存实现（v1.4 行为）。Redis 缺失/异常 fail-soft 降级内存，不劣化 |
+| `AGENT_A2A_JOB_ENABLED` | `false` | | A2A 幂等 Job（member `/a2a/jobs`，Issue #69）总开关：true 时 `AGENT_A2A_JOB_TOKEN` 必填（缺失启动即失败）+ Redis 启动自检（硬依赖，连不上拒绝启动）；false 存量零影响（端点与 filter 均不装配） |
+| `AGENT_A2A_JOB_TOKEN` | — | ✓（Job 启用时） | /a2a/jobs 入口认证 token（Header `Agent-A2A-Job-Token`）：无/错一律 401。敏感值经平台 Secret 路由；**与 /tasks 协议 token 分属两个信任域，不复用** |
+| `AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS` | `300` | | loopback message/send blocking 发送超时秒；租期 = 2×该值+60s（认领残留的接管窗口） |
+| `AGENT_A2A_JOB_RETENTION_HOURS` | `24` | | 完成态幂等映射保留小时（Redis TTL）；窗口外同键重试 = 新任务（标准幂等窗口语义） |
+| `AGENT_A2A_JOB_MAX_CONCURRENT` | `32` | | 并发准入（Semaphore tryAcquire(0)）：loopback 自环每 Job 占 2 Tomcat 线程，防自环死锁（Issue §2.5）；饱和返回 503 + Retry-After |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活，失联按 reload swap-on-success 语义原地重建（修 biz-mcp 重启后长连接静默失效 → ConnectException 永久失败）；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
 

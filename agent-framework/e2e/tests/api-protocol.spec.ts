@@ -10,7 +10,7 @@
  * （demo/order-fulfillment/e2e 已在真实环境覆盖大半）。
  */
 import { test, expect } from '@playwright/test';
-import { BASE, PROTOCOL_BASE } from '../lib/env.js';
+import { BASE, PROTOCOL_BASE, runId as RUN_ID } from '../lib/env.js';
 
 const TOKEN = 'e2e-protocol-token';
 // 协议实例寻址：env-up 产物 env.json 的 protocolBase（R2/R4 教训——空串地址要显式暴露，
@@ -81,5 +81,56 @@ test.describe('T7 /tasks 强制 token（协议实例 p）', () => {
     // streaming/hitl 读 SDK 扩展属性（启用时存在）
     expect(card.agent_protocol?.streaming).toBe(true);
     expect(card.agent_protocol?.hitl).toBe(true);
+  });
+});
+
+// ---------- J 组：A2A 幂等 Job HTTP 面（Issue #69 §2.1/§2.3，member 侧单实例） ----------
+// p 实例同开 AGENT_A2A_JOB_ENABLED=true（env-up protocol 组注入）；token 与 /tasks 分域。
+// 双副本同键收敛（P7）在 e2e-protocol-multi 门禁 job（阶段 3）。
+test.describe('J 组 /a2a/jobs 强制 token 与幂等语义（协议实例 p）', () => {
+  const JOB_TOKEN = 'e2e-a2ajob-token';
+
+  test('无/错 token 一律 401（POST/GET 全路径）', async ({ request }) => {
+    expect((await request.post(`${P}/a2a/jobs`, { data: { text: 'x' } })).status()).toBe(401);
+    expect((await request.post(`${P}/a2a/jobs`, {
+      headers: { 'Agent-A2A-Job-Token': 'wrong' }, data: { text: 'x' } })).status()).toBe(401);
+    expect((await request.get(`${P}/a2a/jobs/some-key`)).status()).toBe(401);
+  });
+
+  test('正确 token + 非法键/空 text → 400', async ({ request }) => {
+    const h = { 'Agent-A2A-Job-Token': JOB_TOKEN };
+    expect((await request.post(`${P}/a2a/jobs`, {
+      headers: { ...h, 'Idempotency-Key': 'bad key!' }, data: { text: 'x' } })).status()).toBe(400);
+    expect((await request.post(`${P}/a2a/jobs`, {
+      headers: h, data: { text: '' } })).status()).toBe(400);
+  });
+
+  test('幂等全链路：同键两次提交 → 同一 taskId、idempotent=true、仅建一个任务', async ({ request }) => {
+    const h = { 'Agent-A2A-Job-Token': JOB_TOKEN, 'Idempotency-Key': `e2e-job-${RUN_ID}` };
+    const first = await request.post(`${P}/a2a/jobs`, { headers: h, data: { text: '报告你的名字' } });
+    expect(first.status()).toBe(200);
+    const firstBody = await first.json();
+    expect(firstBody.job.taskId).toBeTruthy();
+    expect(firstBody.idempotent).toBe(false);
+
+    // 同键重放：mock-LLM 即时返回 → 任务已完成（done 态）→ 幂等命中
+    const second = await request.post(`${P}/a2a/jobs`, { headers: h, data: { text: '报告你的名字' } });
+    expect(second.status()).toBe(200);
+    const secondBody = await second.json();
+    expect(secondBody.job.taskId).toBe(firstBody.job.taskId);
+    expect(secondBody.idempotent).toBe(true);
+
+    // GET 收敛
+    const st = await request.get(`${P}/a2a/jobs/e2e-job-${RUN_ID}`, { headers: h });
+    expect(st.status()).toBe(200);
+    expect((await st.json()).job.state).toBe('done');
+  });
+
+  test('GET 未知键 → 404；卡片/metadata 透出 a2a_job.enabled=true', async ({ request }) => {
+    const h = { 'Agent-A2A-Job-Token': JOB_TOKEN };
+    expect((await request.get(`${P}/a2a/jobs/no-such-key-${RUN_ID}`, { headers: h })).status()).toBe(404);
+    const meta = await (await request.get(`${P}/metadata`)).json();
+    expect(meta.a2a_job?.enabled).toBe(true);
+    expect(meta.a2a_job?.maxConcurrent).toBeGreaterThan(0);
   });
 });

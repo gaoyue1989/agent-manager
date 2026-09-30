@@ -569,3 +569,10 @@ CREATE TABLE remote_task_registry (
 - **部署验证**：镜像 `agentscope-2.1.0-v20260930-5` 发布 5 个 demo 服务；oaf_checkpoint 存量库 V8 成功应用；真实委派链路下 Redis 出现 `proto:task:*:{events,seq,done}` 键族（事件面真实工作）；live 会话实证 spawn 全部 `status: ok`、子 agent 回复完整回流（含后台完成 `<system-notification>` 通知）、lead 对单个超时成员（logistics）按 §9 降级重试后汇总——委派链路行为正确。**demo e2e 全量 28 断言当日未跑通**：logistics 成员 LLM 反复超时把 T1 单轮拉长超过 e2e 客户端 15 分钟 fetch 上限（当日 LLM 延迟问题，非代码回归——spawn/回复/降级/事件均实证正常）；回归门禁以 CI mock-LLM e2e（三 E2E job）为准。demo spawn 均同步完成（只读工具无确认挂起），registry 0 行属预期——跨副本接管/唤醒路径由阶段 3 P 组门禁用例覆盖。
 - **配套修复**：`e2e/scripts/reset-data.mjs` 清表清单补 `remote_task_registry`（否则复用库第二轮 env-up 走 baseline(5) 跳过 V1 → V6 因 session_user 缺失启动失败，与 V2 agui_interrupt 同款陷阱）。
 - **已知运维事实**：V8 文件在已应用旧版的环境（本机曾部署 v4）上编辑会 checksum 冲突——未合并前修正属正常迭代；对已应用库执行「DROP 空表 + 删历史行」即可干净重放（本次已处理）。
+
+### 18.9 PR-B 实施记录（2026-09-30，Issue #69 member /a2a/jobs）
+
+- **实现**：`AgentA2aJobProperties`（`agent.a2a-job.*`，env `AGENT_A2A_JOB_*`）+ `A2aJobConfig`（条件装配：token fail-fast + Redis PING 启动自检 + filter 注册）+ `A2aJobRedisStore`（SET NX claim / Lua 单键 CAS complete·release·extendLease；无本地降级）+ `A2aJobService`（失败三分类状态机 + `Semaphore(32)` 并发准入 + loopback message/send blocking + taskId 三级回落 + `claim:` 前缀防御）+ `A2aJobAuthFilter`（常数时间比对）+ `A2aJobController`（200/400/409/404/503 + Retry-After）+ InfoController `a2a_job` 透出。
+- **验证**：新增单测 25（Service 13 / Controller 8 / Config 4）；本地 e2e protocol 组 **10/10**——J 组 4 用例覆盖无/错 token 401、非法键/text 400、**幂等全链路（同键两次提交经真实 loopback → mock-LLM → 同一 taskId、idempotent=true、仅建一个任务）**、GET 404 + metadata 透出；本地 e2e Redis 实证 `a2ajob:e2e-job-*` 键落库。
+- **试运行修正**：首次 e2e J 组全挂——jar 未重打包（yml 新节未进产物），复打包后全绿；属流程失误非代码缺陷。
+- **运维事实**：`AGENT_A2A_JOB_TOKEN` 敏感键已在 PR #71 进模板（`AGENT_A2A_JOB_ENABLED` 等开关键刻意排除）；启用 = 发布 env 设两项 + `AGENT_REDIS_URL` 已有即可。
