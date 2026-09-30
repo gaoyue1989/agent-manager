@@ -21,7 +21,7 @@ BENCH_MCP_PORT="${BENCH_MCP_PORT:-18082}"
 
 RUNTIME="$ROOT/.runtime"
 LOGS="$RUNTIME/logs"
-AGENT_CFG="$RUNTIME/agent-config"
+AGENT_CFG="${E2E_AGENT_CONFIG_DIR:-$RUNTIME/agent-config}"
 
 # env.json 回读：只填「环境变量未注入」的键（显式 env 仍最优先）
 if [ -f "$RUNTIME/env.json" ] && command -v node >/dev/null 2>&1; then

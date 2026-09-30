@@ -303,6 +303,65 @@ jobs:
             agent-framework/e2e/playwright-report/
           retention-days: 5
 
+  # P 组（travel-fulfillment 设计 §18.4 多副本门禁，阶段 3）：lead×2 + member×2
+  # （各自 nginx 轮询 LB 随机路由，共享 MySQL/Redis）——委派链路跨副本正确性 +
+  # EventBus 跨副本对账 + A2A Job 同键收敛（P7）+ 存量零影响（P6）。
+  # 必需检查（分支保护追加第 7 项，job name 与保护规则字符串必须完全一致）。
+  e2e-protocol-multi:
+    name: E2E 协议多副本（P 组）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      E2E_GROUP: protocol-multi
+      E2E_BASE_PORT: "8100"
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
+      - working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 安装 Playwright 依赖（protocol-multi 组无 UI 用例，不装浏览器）
+        working-directory: agent-framework/e2e
+        run: npm ci --no-audit --no-fund
+      - working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - working-directory: agent-framework/e2e
+        run: ./scripts/run.sh protocol-multi
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-protocol-multi
+          path: |
+            agent-framework/e2e/.runtime/
+            agent-framework/e2e/playwright-report/
+          retention-days: 5
+
   # 工具插件 SPI 加载冒烟（b0fc8a7 起的插件化能力此前无任何门禁覆盖）：
   # 现场编译示例插件 → 独立进程起服务 → 断言注册链路 / /tools?includeInternal 运行时
   # 注册集（issue #28）/ OAF reload 存活 / deniedTools 剔除 / 自定义工具三态权限。

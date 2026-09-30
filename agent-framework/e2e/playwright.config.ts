@@ -29,6 +29,7 @@ export default defineConfig({
     { name: 'ui', testMatch: /tests\/ui\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui-multi', testMatch: /tests\/ui-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi-kill', testMatch: /tests\/api-multi-kill\.spec\.ts/, use: { ...devicesDesktop() } },
+    { name: 'api-protocol-multi', testMatch: /tests\/api-protocol-multi\.spec\.ts/, use: { ...devicesDesktop() } },
   ],
 });
 
