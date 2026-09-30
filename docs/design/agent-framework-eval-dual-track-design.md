@@ -1,6 +1,7 @@
 # agent-framework 双轨评测系统设计（门禁轨 + 趋势轨）
 
-> 状态：设计定稿（待实施）· 日期：2026-09-25
+> 状态：设计定稿 · 日期：2026-09-25
+> 实施进展（2026-10-01 按代码核对）：骨架期已落地——`bench/eval/flywheel.py` 六步闭环（analyze→gen→eval→judge→rca→verify）+ 契约层 `bench/eval/config/frame-mapping.json` + CI `评测自检`（eval-selftest，非必需检查）job；环境供给见配套设计（已实施）。门禁轨（`tests/api-eval.spec.ts` / `eval-gate` job / `eval-cases.mjs`）、趋势轨 OpenJudge 接入（`graders/correctness.py` 暂直调 LLM-as-judge，见 pyproject.toml Phase 2 注）、nightly workflow 仍待实施。
 > 范围：agent-framework 的黑盒评测体系——确定性门禁轨（扩展现有 e2e）、质量趋势轨（Python + AgentScope evaluate + OpenJudge）、diff 驱动用例生成（四道闸门 + PR 人工审核）、根因分析与修复 patch 建议、人工快照基线。
 > 不做（评审裁剪，见 §2）：知识库/RAG 自迭代、代码自动直改、基线自动更新、LLM judge 分数阻断合并、评测自有 MySQL 库（持久化走文件 + GitHub Issues，§10）。
 > 前置文档：v1 方案《基于 OpenJudge 的 Agent 评测-迭代数据飞轮系统设计》经可行性评审后裁剪重构，评审要点见 §2.3。

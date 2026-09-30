@@ -93,8 +93,9 @@ GET /threads/{sid}/history（改造）：
 
 ## 5. 数据模型
 
-新增一张表，与 `agent_state` 同库（`oaf_checkpoint`，沿用 CHECKPOINT_* 数据源），服务侧初始化建表
-（同 turn_lease / confirm_context 等 8 张自建表惯例）：
+新增一张表，与 `agent_state` 同库（`oaf_checkpoint`，沿用 CHECKPOINT_* 数据源）。实施时（2026-09-27）由
+`SessionMessageStore` 构造器建表；**2026-09-28 起 DDL 迁入 Flyway**（`db/migration/V5__062e01f_session_message.sql`，
+落地形态为 `DATETIME(3) NOT NULL` 无默认值，Store 内建表代码已随 Flyway 改造移除），下述 SQL 保留为设计形态：
 
 ```sql
 CREATE TABLE IF NOT EXISTS session_message (
@@ -301,7 +302,7 @@ E2E（可选，建议做）：mock LLM fixtures 增加 30+ 轮场景触发压缩
 4. **极端时序窗口**：消息在首次 save 前即被压缩移出（理论可达：压缩保留最新尾部 + save 覆盖
    每个 acting 边界，实际不可达）；若实测发现，捕获点前移至自定义 Middleware.onReasoning
    （压缩中间件之前），已在设计中留此后手；
-5. **保留期 7 天**：`SESSION_RETENTION_DAYS` 为硬编码（SessionCleanupService.java:137，
+5. **保留期 7 天**：`SESSION_RETENTION_DAYS` 为硬编码（SessionCleanupService.java:155，
    既有问题不在本方案范围），超期历史与会话一同清理。
 
 ## 13. 评审核对记录（2026-09-27 review）

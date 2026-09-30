@@ -1,8 +1,8 @@
 # SSE 长任务解耦改造设计（durable-sse-plan）
 
-> 状态：**设计稿**，待评审
+> 状态：**已实施**（SessionEventBus + 事件持久化 + `GET /subscribe` + `GET /status` 均已落地），并被后续演进取代/扩展：多副本正确性与落库性能改造见 [durable-sse-multinode-plan.md](durable-sse-multinode-plan.md)（`SessionEventTailer` 承担观察者路径），`session_event` 存储已迁 Redis Streams（见 §3.1 顶部标注）。文中 `POST /threads/{sid}/chat` 现为 `POST /threads/chat`（sessionId 在请求体，权威契约见 api-thread-spec.md）；其余路径/机制描述保留为设计定稿时的记录
 > 范围：agent-framework（AgentScope Java 2.0.0 + Spring Boot 3.3）
-> 前置：已完成 stateless-single-stream-plan，当前架构为无状态单次流 SSE 直吐
+> 前置：已完成 stateless-single-stream-plan，当时架构为无状态单次流 SSE 直吐
 > 目标：解耦 SSE 连接与 agent 执行生命周期，支持长任务不中断、刷新恢复续传
 
 ---

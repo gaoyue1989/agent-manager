@@ -201,6 +201,11 @@ CREATE TABLE IF NOT EXISTS model_config (
 | 幂等 DDL 演进先例 | `ThreadController.ensureRemarkColumn` | `SessionUserStore.ensureColumn`（model 列同款） |
 | SSE 错误帧 `{"type":"error","error":"..."}` | api-thread-spec | chat 带非法 model 时同款 error 帧（`"unknown_model: xxx"`），不引入新帧型 |
 
+> 注（2026-09-28 起）：DDL 演进已整体迁入 Flyway（`db/migration`，V3 承载 model_config 建表与
+> session_user.model 列），上表"幂等 DDL 演进先例"所述 `ThreadController.ensureRemarkColumn` /
+> `SessionUserStore.ensureColumn` 启动幂等 ALTER 模式已随之移除——新表结构/数据演进一律新增
+> V 迁移文件，禁止请求路径手工 DDL（见 docs/design/db-migration-flyway-design.md）。
+
 ## 7. 运行时路由（SessionModelMiddleware）
 
 ```
@@ -334,6 +339,9 @@ CREATE TABLE IF NOT EXISTS model_config (
   确认路由确实落到托管端点；PATCH 回 `system` 后回落 mock 话术。
 - **顺带发现的既有限制**（非本次引入，已另开 issue）：`GET /threads/{sid}/llm-calls` 的记录来自 mock LLM
   服务侧通道，托管模型（真实端点）调用不经过它，故该端点对托管模型恒返回 `calls: []`。
+  **更正（2026-10-01 复核）**：上述根因判断有误——真实原因是 Channel 链路记录键落到网关 gw-hash 而非规范
+  sid（issue #44），与模型无关、对所有会话恒空；已由提交 e5d6ff3（2026-09-27）修复（LlmLoggingMiddleware
+  记录键经 SessionKeyResolver 对齐规范 sid），托管模型调用同样记录在案。
 
 ### 13.1 本地实机冒烟发现的缺陷（已一并修复）
 

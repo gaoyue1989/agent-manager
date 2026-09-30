@@ -1,6 +1,6 @@
 # SSE 链路优化设计（A1–A5）
 
-> 状态：设计定稿，待实施。本文只做设计，不含任何代码改动。
+> 状态：✅ 已实施（2026-09-24，PR #19 `feat/sse-optimize-a1-a5`，五个提交 A5→A1→A3→A2→A4 与 §1.3 顺序一致；`controller/TurnFinalizer.java`、`AgentEventSseSerializer.withReplyId/toSseFrame`、`SessionEventBus` 条件广播、`SessionEventTailer.pollSleepMs`、`ChatStreamController` turn 桶清理均已落码）
 > 范围：A1 toSSE 收口 / A2 Tailer 空闲退避 / A3 emit 持久化失败不广播 / A4 controller 级 Map 兜底清理 / A5 抽 TurnFinalizer（第一步）。
 > **明确不做**：A6 不在本次范围；`.gitignore` 不动（工作区存在他人未提交改动，见 §2.3）。
 

@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| 状态 | **设计定稿 v1.5（多副本设计 §18 定稿待实施，含 Issue #69 A2A Job 下沉随行；M1 已实施，PR #62/#66/#67）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15）+ 2026-09-29 M1 双进程/平台部署实测（§16）+ 2026-09-30 M1 收尾迭代与 demo 完整化（§17） |
+| 状态 | **设计定稿 v1.5（多副本设计 §18 与 Issue #69 A2A Job 下沉已实施，见 §18.8/§18.9/§18.10，E2E 协议多副本已列为分支保护必需检查；M1 已实施，PR #62/#66/#67）**，含 2026-09-28 三轮评审修订 + M0 双服务探针实测结论（§15）+ 2026-09-29 M1 双进程/平台部署实测（§16）+ 2026-09-30 M1 收尾迭代与 demo 完整化（§17） |
 | 日期 | 2026-09-28 |
 | 参考 | 官方案例 [order-fulfillment](https://java.agentscope.io/v2/zh/service/cases/order-fulfillment)（AgentScope Service + Team 形态）；协议文档 [integration/protocol](https://java.agentscope.io/v2/zh/integration/protocol) |
-| 关联代码 | agent-framework SDK `io.agentscope:*:2.0.3`；`extensions-a2a-client`（已在 pom 未用）；`extensions-agent-protocol`（待引入） |
+| 关联代码 | agent-framework SDK `io.agentscope:*:2.0.3`；`extensions-a2a-client`（已在 pom 未用）；`extensions-agent-protocol`（M1 已引入） |
 
 ## 0. 设计立场与官方案例的关系
 
@@ -197,7 +197,7 @@ config:
 | 确认上下文 | 父 `confirm_context` 多行形态（§5.1）为唯一授权事实源 |
 | A2A Job 幂等映射（Issue #69，v1.5 随实施） | member Redis `a2ajob:{idempotencyKey}`（服务前缀隔离）：claim `SET NX` 独占发送权 → 成功 CAS 写 taskId（TTL 24h）；单键原子天然裁决多副本同键并发；backend `a2a_jobs` 表撤除 |
 
-副本策略：v1.4 约定 M1 子服务 `replicas=1`；**v1.5 放开多副本**——前提三件套（TaskRecord store 化 ✅ M1 已落地 / lead 侧在途登记持久化 §18.2 / EventBus Redis 化 §18.3）齐备后，lead 与 member 均可 `replicas>1`，验收 = 新必需门禁 `E2E 协议多副本` job（§18.4）。
+副本策略：v1.4 约定 M1 子服务 `replicas=1`；**v1.5 放开多副本**——前提三件套（TaskRecord store 化 ✅ M1 已落地 / lead 侧在途登记持久化 §18.2 ✅ / EventBus Redis 化 §18.3 ✅）已齐备，lead 与 member 均可 `replicas>1`，验收 = 新必需门禁 `E2E 协议多副本` job（§18.4）。
 
 ## 8. 框架改造清单（文件级，两轮评审后）
 
@@ -411,7 +411,7 @@ mock 与政策版本引用断言），关键场景截图与演示剧本见 demo/
 **环境事实**：demo LLM 为 MiMo mimo-v2.5（key 失效症状 = 回复内嵌 401 Invalid API Key，
 经 PATCH env 轮换自愈）；宿主盘曾因 docker build cache 吃满致 MySQL 建表失败（Error 3675）。
 
-## 18. 多副本设计（v1.5，2026-09-30 定稿待实施）
+## 18. 多副本设计（v1.5，2026-09-30 定稿；当日实施完成，见 §18.8/§18.9/§18.10）
 
 > 决策记录：门禁挂载 = **新建独立必需 job**（`E2E 协议多副本`，需管理员追加分支保护必需检查）；范围 = **一次到位**（lead 侧登记持久化 + member 侧 EventBus Redis 化 + E2E 门禁 + 文档配套）；本文档扩写承载设计。**2026-09-30 追加**：Issue #69（A2A 幂等 Job 下沉 agent-framework，路线 A）随本期同步实施，backend 撤除先行。
 
@@ -575,7 +575,7 @@ CREATE TABLE remote_task_registry (
 - **拓扑**（`env-up.sh protocol-multi`，端口 8100-8106）：lead LB(8100)→lead×2(8105/8106，注入 subAgents 指向 member LB + `AGENT_REMOTE_HEADERS_JSON` token)、member LB(8101)→member×2(8103/8104，协议+A2A Job+`AGENT_PROTOCOL_EVENT_BUS=redis`)、存量对照(8102)；两个 nginx 轮询 LB（`start_lb` 复用 fixture 模板改占位符）；per-instance 配置目录经 `E2E_AGENT_CONFIG_DIR` 透传（start-agent.sh 覆盖点）。
 - **mock-LLM 扩展**：新增 `proto-lead-spawn`（lead 调 agent_spawn 同步等待 → 汇报）与 `proto-member-echo`（member 调 bench_echo）双 fixture + 路由表两行；`route()` 增加「多轮 tool 轮续推时回落扫描全部 user 消息取场景标记」（会话级场景跨轮保持）。
 - **P 组用例**（api-protocol-multi.spec.ts，serial）：P1 跨副本委派全链路（lead LB 随机路由 spawn → member 受理 → 收割汇总断言）、P3 EventBus 跨副本对账（taskId 从 Redis `proto:task:*:events` 键族经 RESP 裸 socket 反查——同步 spawn force_sync 语义无 task_id 行，Bridge 登记不触发；直投两副本 /events 对账）、P5 无粘性冒烟、P6 存量零影响（T8 口径 404/500）、P7 A2A Job 同键跨副本收敛（member LB 两次提交 → 同 taskId、idempotent=true、两副本 GET 一致）。P2（kill 接管）/P4（sweep 竞争）一期 skip（需确认卡双进程编排，归 T 组二期；对应 CAS 语义由单测覆盖）。
-- **验证**：本地 protocol-multi 组 5 passed + 2 skipped（P2/P4）；CI `e2e-protocol-multi` job（必需要件就绪后合入）。
+- **验证**：本地 protocol-multi 组 5 passed + 2 skipped（P2/P4）；CI `e2e-protocol-multi` job 已合入（ee571e7）并列为分支保护必需检查（七项）。
 
 ### 18.9 PR-B 实施记录（2026-09-30，Issue #69 member /a2a/jobs）
 

@@ -87,8 +87,8 @@ Redis（session_event）两集群可连一套也可各自独立，取舍见 §2.
 与 S3 无关，但**同样会让"两集群连一套 MySQL"当场失败**，初稿完全未覆盖：
 
 - `ServiceEntity.K8sName` 是 **uniqueIndex**（`store/model.go:39-41`），`uniqName()` 靠**查库去重**追加 `-2/-3`（`publish.go:373-386`）
-- `Endpoint` 硬拼本集群 `IngressHost`：`fmt.Sprintf("http://%s:%d/agent/%s/", c.Cfg.IngressHost, ...)`（`publish.go:102`）
-- `ClusterURL` 拼集群内 DNS（`...svc.cluster.local`，`publish.go:103`），A2A 注册用 `fetchCard(svc.ClusterURL)`（`register.go:34`）
+- `Endpoint` 拼本集群展示地址：`k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)`（`publish.go:158`；2026-09-30 起支持 INGRESS_HOST_SUFFIX 双模式，但构造的仍是创建它的那个集群视角的地址）
+- `ClusterURL` 拼集群内 DNS（`...svc.cluster.local`，`publish.go:159`），A2A 注册用 `fetchCard(svc.ClusterURL)`（`register.go:34`）
 - 但表里**没有任何集群归属字段**（全表仅 `ClusterURL` 带 "Cluster" 字样，是 URL 不是标识）
 
 后果：两套 backend 连同一库时，同名服务在第二个集群发布会撞 `uniqueIndex`；即便强行插入，

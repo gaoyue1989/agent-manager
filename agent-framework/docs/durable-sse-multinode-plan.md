@@ -1,6 +1,6 @@
 # 事件总线多副本正确性与落库性能改造设计（durable-sse-multinode-plan）
 
-> 状态：**设计稿**，待评审
+> 状态：**已实施**（阶段 1-3 服务端随 [durable-sse-multinode-impl-plan.md](durable-sse-multinode-impl-plan.md) 交付并通过 e2e 多副本专项验证，验收回填见该文末尾；阶段 4 前端重连仍待排期；§2.1 顶部标注记录 D1 被部分推翻与 session_event 迁 Redis Streams）
 > 范围：agent-framework（AgentScope Java 2.0.0 + Spring Boot 3.3.5）
 > 前置：已完成 durable-sse-plan（SessionEventBus + session_event + GET /subscribe + GET /status）
 > 触发：多副本部署即将开启（动机：高可用 + 吞吐）
