@@ -116,3 +116,45 @@ OR SUBSTRING_INDEX(a.session_id, ':', -1) = su.session_id   -- 规范形态 {use
 3. **"新机制只写新数据"的改动，必须同版本配套回填迁移**——本设计 §1.1 的根因正是 DDL 有自动兜底而数据没有。
 4. **读侧兜底保留**：`/threads` 这类"重建视角"查询对未登记数据做降级合并（本 PR 的双向匹配），作为迁移遗漏时的最后防线。
 5. 部署无需人工干预：发版后 release-agent 首启自动基线/迁移；上线前如需演练，可参照 §6 用 scratch MySQL 跑全链对比。
+6. **JSON 守卫与提取禁止同层裸配**：`JSON_VALID` 过滤与 `JSON_EXTRACT` 提取写在同一层派生表时，无聚合的派生表会被优化器 merge 进外层查询，守卫与求值回到同一行级求值层、求值顺序无保证——存量只要有一条非法 JSON 行，整条语句报 ERROR 3141（V6 实测教训，见 §8）。守卫用 `CASE WHEN JSON_VALID(x) THEN … END` 短路，或收敛进内层派生表先物化。
+
+## 8. 已知局限（2026-10-01 复核确认）：V6 的 JSON_VALID 守卫不生效
+
+### 8.1 机制
+
+V6 两个派生表把 `JSON_VALID(a.state_data)` 守卫与 `JSON_EXTRACT(a.state_data, …)` 提取写在同一层 SELECT（§3.4 口径）。其中 `c` 派生表（:27-35）无聚合，MySQL 8.0 优化器将其 merge 进外层查询（EXPLAIN：primary 行直接扫 agent_state），守卫与提取回到同一层、逐行求值顺序无保证：`agent_state` 只要存在一条 `state_key='agent_state'` 且 `state_data` 非法 JSON 的行，整条 `INSERT…SELECT` 即报 `ERROR 3141 (22032) Invalid JSON text … json_extract`。`cl` 派生表（:36-46）因带 GROUP BY 强制物化、内部守卫有效，缺口只在 `c`。迁移失败即启动失败（历史表留 failed 记录，需人工 repair + 清数据），报错不指向具体行。
+
+### 8.2 复现与修复形态验证（2026-10-01，一次性 mysql:8.0 容器）
+
+V1..V5 顺序执行后构造 3 条合法规范行 + 1 条 `state_data='not-json{{{'` 行：执行 V6 报 `ERROR 3141`、session_user 零回填；删除脏行后 V6 立即成功。两种守卫形态在同份数据上验证有效（守卫必须与提取同 alias 逐行短路）：
+
+```sql
+-- 形态 A：CASE 短路（守卫为真才求值提取）
+AND CASE WHEN JSON_VALID(a.state_data)
+         THEN JSON_UNQUOTE(JSON_EXTRACT(a.state_data, '$.session_id')) END IS NOT NULL
+-- 形态 B：守卫收敛进内层派生表先物化，外层只对已过滤行提取
+FROM (SELECT session_id, state_data FROM agent_state
+      WHERE state_key = 'agent_state' AND JSON_VALID(state_data)) t
+```
+
+### 8.3 影响面（2026-10-01 实测）
+
+| 环境 | V6 状态 | 脏行数（`NOT JSON_VALID`） | 暴露 |
+|------|---------|---------------------------|------|
+| oaf_checkpoint（现网，agent_state 196 行） | success=1（2026-09-28） | 0 | 无 |
+| e2e 库 agent_framework_e2e（43 行） | success=1 | 0 | 无 |
+| 全新库 | agent_state 为空 → V6 空转 | — | 无 |
+| **存量库升级**（`baseline-version: 5` 设计路径） | baseline 后首启执行 V6 | 取决于存量数据 | **存在** |
+
+真正的暴露面是存量库升级：`baseline-on-migrate` 把 pre-Flyway 老库基线到 5 后，首个启用 Flyway 的版本对存量数据执行 V6（与恢复旧备份同型）。现网与 e2e 均已零脏行通过，缺陷当前休眠。
+
+### 8.4 处置
+
+V6 已合并、checksum 冻结（§7.1），**不可修改**。对尚未启用 Flyway 的存量环境，升级前先跑检查：
+
+```sql
+SELECT session_id, item_index FROM agent_state
+WHERE state_key = 'agent_state' AND NOT JSON_VALID(state_data);
+```
+
+有结果则先人工修复/清理该批行再升级（非法 JSON 行对读路径本就不可解析——`StateDataParser` 读失败 fail-soft 放行，清理不损失任何"可读"数据）。后续新增迁移凡涉 JSON 守卫，按 §8.2 形态书写，禁止守卫与提取同层裸配。
