@@ -135,6 +135,12 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 
 	// 敏感路由：模板敏感键 + secretKeys 进 EnvSecret（服务 Secret），其余进 Env（CM）
 	plain, secret := splitUserEnv(req.Env, req.SecretKeys)
+	// 空值键不落 CM/Secret（设计 §3.3，同 k8s.EnvSecret 注释）：发布没有「空串=删除」三态
+	// 语义，空值是无意义输入（向导预填的默认值已由 GetPlatformDefaults 过滤，剩余空串来自
+	// 用户手工清空输入框）；空串 env 会让 Spring 占位符 ${VAR:default} 不回落默认值。
+	// PATCH /services/:id/env 的「空串=显式删除」语义不受影响——由 resolveEnvMerge 承担。
+	dropEmptyEnv(plain)
+	dropEmptyEnv(secret)
 	params := c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath)
 	params.EnvSecret = secret
 	// Ingress overlay 纯函数前置：非法 overlay 直接拒绝且不落库（与 image 校验同级，
@@ -565,6 +571,15 @@ func int32Or(v int32) int32 {
 		return 1
 	}
 	return v
+}
+
+// dropEmptyEnv 就地剔除空值键（发布路径的空值过滤，设计 §3.3「空值永不进入 CM/Secret」）。
+func dropEmptyEnv(m map[string]string) {
+	for k, v := range m {
+		if v == "" {
+			delete(m, k)
+		}
+	}
 }
 
 func orStr(a, b string) string {
