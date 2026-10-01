@@ -110,7 +110,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
 | `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
 | `e2e-protocol-multi`（P 组，2026-09-30） | lead×2 + member×2 + 双 nginx LB（8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本；`AGENT_PROTOCOL_EVENT_BUS=redis`，共享 MySQL/Redis） | P1-P7 跨副本委派（travel-fulfillment 设计 §18.4/§18.10）：spawn 随机路由→收割汇总、lead kill 接管、member 事件跨副本对账、TTL 恰好一次、无粘性冒烟、存量零影响、A2A Job 同键收敛（用例定义见 §5.12） | needs: changes（**必需检查**） | timeout 30min |
-| `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
+| `e2e-plugin` | 1 | 插件组（原「P 组」，2026-10-01 改称以消歧——协议多副本 job 亦称「P 组」，见 §5.12；修 #38 low）：工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限 | needs: changes（与单测并行） | ~5min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
 六个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
