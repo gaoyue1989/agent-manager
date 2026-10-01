@@ -74,9 +74,11 @@ public final class RedisConnectionFacade implements AutoCloseable {
         new java.util.concurrent.atomic.AtomicReference<>();
     private volatile long lastConnectFailureAt = 0L;
 
-    /** 首连成功后的自检钩子（如 RedisEventLog 的 appendonly/noeviction 持久性自检） */
+    /** 首连成功后的自检钩子（如 RedisEventLog 的 appendonly/noeviction 持久性自检）。
+     *  CopyOnWrite（修评审 #55）：onFirstConnect 是 public API，契约外的并发注册不得与
+     *  首连迭代（synchronized 块内）产生 ConcurrentModificationException 或丢钩子 */
     private final List<Consumer<RedisClusterCommands<String, String>>> firstConnectHooks =
-        new ArrayList<>();
+        new java.util.concurrent.CopyOnWriteArrayList<>();
 
     private RedisConnectionFacade(AgentRedisProperties props, RedisClient standaloneClient,
                                   RedisClusterClient clusterClient) {

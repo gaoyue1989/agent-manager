@@ -6,6 +6,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -343,6 +344,22 @@ public class SessionMessageStore {
                 newById.put(id, block);
             }
         }
+        // 新增块（新版有而旧版无此块 id）先记录，overlay 后并入（设计 §6.4，修评审 #45）：
+        // 收缩场景此前被静默丢弃，违背「归档行 ≥ 任一单版本信息量」不变量
+        var oldIds = new HashSet<String>();
+        for (var block : oldArr) {
+            var id = block.path("id").asText("");
+            if (!id.isBlank()) {
+                oldIds.add(id);
+            }
+        }
+        var newOnly = new ArrayList<JsonNode>();
+        for (var block : newArr) {
+            var id = block.path("id").asText("");
+            if (!id.isBlank() && !oldIds.contains(id)) {
+                newOnly.add(block);
+            }
+        }
         for (int i = 0; i < oldArr.size(); i++) {
             if (!(oldArr.get(i) instanceof ObjectNode oldBlock)) {
                 continue;
@@ -361,6 +378,12 @@ public class SessionMessageStore {
                 && newBlock.has("content") && !newBlock.get("content").isNull()) {
                 oldBlock.set("content", newBlock.get("content"));
             }
+        }
+        // 新增块直接并入（设计 §6.4，修评审 #45）：新版有而旧版无此块 id → 追加到旧数组
+        // 尾部——收缩场景此前被静默丢弃，违背「归档行 ≥ 任一单版本信息量」不变量。
+        // 幂等：合并结果落库后再重放，这些块已在 oldArr 中（newOnly 为空），不会重复追加
+        for (var block : newOnly) {
+            oldArr.add(block.deepCopy());
         }
     }
 }
