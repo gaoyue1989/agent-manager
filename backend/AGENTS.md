@@ -6,6 +6,18 @@ OAF 服务发布平台管理后端（Go + Gin + GORM + client-go）。同一 HTT
 
 核心链路：上传 OAF zip 包 → 校验解包落共享 PVC → 发布（Deployment+Service+Ingress，envFrom ConfigMap，包 subPath 只读挂 /config + 独立可写工作区卷 /workspace）→ 就绪后拉 `/.well-known/agent-card.json` 注册入库 → 列表/状态/重新发布/下线/删除。包支持在线预览（文件树/单文件/整包下载）与在线编辑（copy-on-write 生成新版本包 → republish 切换服务）。
 
+## 控制面强约束（架构原则一：backend 重启/升级/扩缩容不影响业务 agent 服务）
+
+backend 是控制面，业务服务数据面不经 backend 进程。以下为强制红线，改动触碰任意一条必须先评审：
+
+- **启动零接触**：启动路径只做 `store.AutoMigrate`（平台自身表）+ 模板哑参干跑校验，**禁止**任何启动期创建/更新/删除业务 K8s 对象，禁止引入 Informer/reconcile/sync-all/后台批量迁移（存量服务收敛只经显式 Republish / StartAgain）
+- **显式写唯一**：业务 Deployment/Service/Ingress/CM/Secret 的写操作只能发生在发布 API 链路内（Publish/Republish/StartAgain/UpdateEnv/Unpublish/Delete，REST 与 MCP 同一 Core 方法）；`asyncWaitAndRegister` 等后台推进只允许只读轮询 + HTTP 拉取 + 平台 DB 写；禁止 ticker/cron 定时改写业务资源
+- **禁止生命周期绑定**：构造的业务对象不得设 ownerReferences/finalizer/PropagationPolicy——业务资源只靠命名约定 + label 关联，平台自身的 Deployment/CM 删除不得级联业务资源
+- **Ingress 更新语义**：Ensure* 一律 get→Create/Update 同名对象，禁止 Delete+Create 组合（会闪断业务流量）
+- **数据面直连**：业务 Pod 的 env（CM/Secret envFrom）、配置（PVC subPath 只读）、流量（Ingress→`{name}-svc`）三条链路必须保持不经 backend；不得引入"业务启动向 backend 注册/心跳才可用"之类的反向依赖
+- **单副本语义**：backend 按单副本设计（无 leader 选举、发布链路有查库-写库竞态窗口）；扩多副本前必须先解决发布一致性与 goroutine 推进幂等。已提交的架构约束见 [../AGENTS.md](../AGENTS.md)「架构强约束」
+- 已知边界（不违反原则，运维须知）：发布等待期 backend 重启会丢 in-flight 的 `asyncWaitAndRegister`，服务停在 `deploying`（UpdateEnv/StartAgain 拒绝该状态），仅影响平台状态机、不影响已在跑的 Pod，经 Republish 解救
+
 ## 目录结构
 
 ```

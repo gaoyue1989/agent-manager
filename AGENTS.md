@@ -37,6 +37,23 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 不随意改 Git、Docker 及系统配置；禁用高危删除命令，敏感信息用占位符；不做删核心文件、清依赖等破坏性操作，环境报错先给排查方案。
 
+## 架构强约束（控制面/业务面分层，强制）
+
+两条平台级设计原则，任何改动不得违反；评审时按此清单逐条核对（细则见 backend/AGENTS.md 与 agent-framework/AGENTS.md）：
+
+**原则一：backend 是控制面——重启/升级/扩缩容不得影响任何已发布业务 agent 服务**
+
+- 业务 K8s 资源（Deployment/Service/Ingress/CM/Secret）只允许由显式发布 API（REST/MCP）写入；启动路径禁止任何 reconcile/sync-all/后台批量迁移
+- 禁止 ownerReferences/finalizer 把业务资源生命周期绑到平台自身对象；禁止后台定时任务写业务资源
+- 业务运行时不得依赖 backend 可用性：env 经 K8s CM/Secret envFrom 常驻集群、OAF 包经 PVC 只读直挂、流量经 Ingress 直连 `{name}-svc`，三条链路都不经过 backend 进程
+- backend 按单副本设计（manifests/platform.yaml）；扩多副本前必须先解决发布链路一致性（同名发布竞态、asyncWaitAndRegister 重复推进），且任何平台内部故障/竞态都不得波及业务面
+
+**原则二：agent-framework 是业务面——服务间数据天然隔离 + 每 Pod 无状态可横向扩展**
+
+- 影响正确性的状态只允许存共享存储（MySQL checkpoint / Redis）；Pod 本地（内存、emptyDir）只允许可丢弃/可重建的缓存
+- 禁止 Service `sessionAffinity`；任意请求必须可落任意副本（`/threads/{sid}/subscribe`、`/status`、confirm 等全部基于共享存储裁决）；e2e-multi / e2e-protocol-multi 双副本门禁必须保持
+- 多服务共享同一 MySQL/Redis 时，**必须**为每个服务配独立 checkpoint 库名（`CHECKPOINT_JDBC_URL`）与独立 Redis 前缀（`AGENT_REDIS_PREFIX`）——表结构/Redis key 无 agent 维度，隔离完全靠这一层；缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**当前平台不自动注入/校验这两个键，是已知缺口**：发布多个服务时运维必须显式配置，平台侧自动派生列入后续演进
+
 ---
 
 ## 项目目录结构
