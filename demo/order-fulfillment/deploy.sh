@@ -76,7 +76,7 @@ LOG_ENV=$(envjson member)
 AS_ENV=$(envjson member)
 LEAD_ENV=$(envjson lead)
 
-echo "== 4. 发布三个服务 =="
+echo "== 4. 发布五个服务 =="
 publish() { # $1=name $2=packageId $3=envJSON
   curl -sf -X POST "$API/services" -H 'Content-Type: application/json' \
     -d "$(python3 -c "import json,sys; print(json.dumps({'packageId': int(sys.argv[1]), 'name': sys.argv[2], 'image': sys.argv[3], 'replicas': 1, **json.loads(sys.argv[4])}))" "$2" "$1" "$IMAGE" "$3")"
