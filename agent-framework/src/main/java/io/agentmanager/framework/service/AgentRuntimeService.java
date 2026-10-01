@@ -555,18 +555,26 @@ public class AgentRuntimeService {
      *
      * Channel 流程（ChatStreamController）的会话经 ChatUiChannel 网关路由，
      * 网关按 peer 派生真实会话 key：userId=peer（如 debug-user_xxx），
-     * sessionId=网关恒定 gw-hash（storeConfirmContext 按 canonicalKey 确定性推导，
-     * 恒为 gw-3f20f08c5499，不能依赖 AgentStartEvent.getSessionId()——该字段为 null）。
+     * sessionId=按会话确定性推导的 gw-hash（storeConfirmContext 按 canonicalKey 推导，
+     * 不能依赖 AgentStartEvent.getSessionId()——该字段为 null）。
      * 恢复必须复用同一 (userId, sessionId) 才能命中网关会话中的 pending 工具调用，
      * 否则 SDK 在 (makeThreadId, vendorKey) 下加载不到上下文 → 全新推理丢失状态。
+     *
+     * 兼容（issue #87 PER_PEER 切换的升级窗口）：存量 confirm_context 行的
+     * runtime_session_id 可能仍是 MAIN 形态的全进程共享 gw-hash——按 runtime_user_id
+     * （=peer）重推导 PER_PEER 会话 id，覆盖升级瞬间挂起中的确认（新行天然携带新值）。
      *
      * A2A/invoke 流程（forwardEvent 直接 putConfirmContext，无网关路由）无此信息，
      * 回落 makeThreadId + 显式 userId（与触发侧一致）。
      */
     private RuntimeContext buildResumeContext(ConfirmContext confirmCtx, String fullThreadId, String userId) {
         if (confirmCtx.runtimeSessionId() != null && confirmCtx.runtimeUserId() != null) {
+            var runtimeSessionId = confirmCtx.runtimeSessionId();
+            if (LEGACY_SHARED_GW_SESSION_ID.equals(runtimeSessionId)) {
+                runtimeSessionId = channelGatewaySessionId(confirmCtx.runtimeUserId());
+            }
             return RuntimeContext.builder()
-                .sessionId(confirmCtx.runtimeSessionId())
+                .sessionId(runtimeSessionId)
                 .userId(io.agentmanager.framework.util.PathSafe.sanitize(confirmCtx.runtimeUserId()))
                 .build();
         }
@@ -601,15 +609,19 @@ public class AgentRuntimeService {
 
     /**
      * Channel 流程存储确认上下文（ChatStreamController 调用；rawSessionId 经 makeThreadId 补全前缀）。
-     * Channel 会话经 ChatUiChannel 网关路由，真实会话 key 为 (userId=peer, sessionId=gw-hash)：
-     *  - sessionId 由网关按 canonicalKey 确定性推导（恒为 gw-3f20f08c5499，同进程所有 peer 共享）
+     * Channel 会话经 ChatUiChannel 网关路由（issue #87 起切 PER_PEER），真实会话 key 为
+     * (userId=peer, sessionId=gw-hash)：
+     *  - sessionId 由网关按 canonicalKey 确定性推导（PER_PEER：每会话独立 gw-hash，
+     *    见 {@link #channelGatewaySessionId(String)}；4db16ba~#87 修复前的 MAIN 形态
+     *    为全进程共享 gw-3f20f08c5499，存量行由 V9 迁移重键、在途确认由
+     *    buildResumeContext 兼容翻译）
      *  - userId 即 peer（= rawSessionId，如 debug-user_mt1xxx）
      * HITL 恢复必须复用该组合才能命中 pending 工具调用（见 buildResumeContext）。
      */
     public void storeConfirmContext(String rawSessionId, io.agentscope.core.event.AgentEvent event) {
         if (event instanceof RequireUserConfirmEvent e) {
             var fullThreadId = makeThreadId(rawSessionId);
-            var gwSessionId = channelGatewaySessionId();
+            var gwSessionId = channelGatewaySessionId(rawSessionId);
             log.info("[HITL] storeConfirmContext: rawSessionId={}, fullThreadId={}, gatewaySessionId={}, replyId={}, tools={}",
                 rawSessionId, fullThreadId, gwSessionId, e.getReplyId(),
                 e.getToolCalls().stream().map(tc -> tc.getName()).toList());
@@ -618,14 +630,24 @@ public class AgentRuntimeService {
     }
 
     /**
-     * 复刻 HarnessGateway 的网关会话 id 派生：
+     * 复刻 HarnessGateway 的网关会话 id 派生（PER_PEER 形态，issue #87）：
      * sessionId = "gw-" + SHA-256(canonicalKey) 前 6 字节 hex 形式（12 字符）。
-     * 框架 Channel 通道走 ChatUiChannel 默认配置（DmScope.MAIN、globalDefaultAgentId=main），
-     * MsgContext.canonicalKey() = "chatui" + "|x:agentId=main"（extra 按 key 排序）。
-     * 同进程所有 peer 共享同一会话 id，peer 仅体现在 userId——与 DB 实测一致。
+     * Channel 通道走 ChatUiChannel.perPeer()（DmScope.PER_PEER、globalDefaultAgentId=main），
+     * 路由层 DM 上下文 room=peerId，MsgContext.canonicalKey()
+     * = "chatui|r:{peerId}|x:agentId=main"（extra 按 key 排序）——每会话独立，
+     * SDK 网关 turn 闸门（LocalSessionTurnGate 每key一把）随之按会话互斥。
+     * peerId 须与 ChatStreamController 传入 ChatUiRequest.withPeer 的值一致（PathSafe 后）。
      */
-    private String channelGatewaySessionId() {
-        var canonicalKey = "chatui" + "|x:agentId=main";
+    String channelGatewaySessionId(String peerId) {
+        return gatewaySessionId("chatui|r:" + peerId + "|x:agentId=main");
+    }
+
+    /** 4db16ba~#87 修复前的 MAIN 形态共享网关会话 id（canonicalKey = "chatui|x:agentId=main"）：
+     *  仅用于识别存量 confirm_context 行的 runtime_session_id（buildResumeContext 兼容翻译）。 */
+    private static final String LEGACY_SHARED_GW_SESSION_ID = gatewaySessionId("chatui|x:agentId=main");
+
+    /** "gw-" + SHA-256(canonicalKey) 前 6 字节 hex（12 字符），与 HarnessGateway 派生一致 */
+    private static String gatewaySessionId(String canonicalKey) {
         try {
             var digest = MessageDigest.getInstance("SHA-256")
                 .digest(canonicalKey.getBytes(StandardCharsets.UTF_8));

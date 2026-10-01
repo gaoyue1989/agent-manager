@@ -78,6 +78,9 @@ def _summary_row(task_id: str, trace: dict[str, Any], trace_path: str) -> dict[s
         "task_id": task_id, "case_id": trace["case_id"], "session_id": trace["session_id"],
         "repeat_no": trace["repeat_no"], "status": trace["status"],
         "duration_ms": trace["duration_ms"],
+        # 首帧/启动延迟单列（issue #87）：区分环境排队与用例本身慢
+        "first_event_ms": view.get("first_event_ms"),
+        "agent_start_ms": view.get("agent_start_ms"),
         "event_count": len(trace["events"]),
         "tool_call_count": len(view["tool_calls"]),
         "input_tokens": view["token_usage"]["input"],
@@ -243,7 +246,9 @@ async def cmd_run(args: argparse.Namespace) -> int:
 
         meta = {"commit": commit, "track": "trend", "trigger": "manual",
                 "base_url": base_url, "repeat": args.repeat,
-                "since": since, "case_count": len(by_case)}
+                "since": since, "case_count": len(by_case),
+                # 帧序契约口径（issue #86 断代注记）：写入报告头/账本，跨轮对比先核对
+                "contract": sse_client.MAPPING.get("version")}
         report = rca_mod.build_report(task_id, meta, traces, skipped, analyses, judge_results)
         (task_dir / "report.md").write_text(report, encoding="utf-8")
 
@@ -267,6 +272,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
                          "total_score": (sum(r["score"] for r in judge_results.values())
                                          / len(judge_results)) if judge_results else None,
                          "judge_model": judge_model,
+                         "contract": sse_client.MAPPING.get("version"),
                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
     finally:
         # ---- 会话清理：评测完成/后续阶段崩溃/中断都执行（共享实例不留垃圾） ----
@@ -385,7 +391,9 @@ def cmd_status(_: argparse.Namespace) -> int:
             if line.strip():
                 r = json.loads(line)
                 score = f" score={r['total_score']:.2f}" if r.get("total_score") is not None else ""
-                print(f"{r['ts']}  {r['task_id']}  通过率 {r['pass_rate']:.0%}{score}")
+                # 契约口径列（issue #86 断代）：旧行无此字段显示 "-"，跨轮对比注意口径差异
+                contract = f" 契约={r['contract']}" if r.get("contract") else " 契约=-"
+                print(f"{r['ts']}  {r['task_id']}  通过率 {r['pass_rate']:.0%}{score}{contract}")
     return 0
 
 
@@ -397,6 +405,7 @@ def cmd_selftest(_: argparse.Namespace) -> int:
 
     events = [
         {"t_ms": 0, "type": "session_created", "raw": {"type": "session_created", "session_id": "s1"}},
+        {"t_ms": 5, "type": "AGENT_START", "raw": {"type": "AGENT_START"}},
         {"t_ms": 10, "type": "MODEL_CALL_END",
          "raw": {"type": "MODEL_CALL_END", "inputTokens": 100, "outputTokens": 20, "totalTokens": 120}},
         {"t_ms": 20, "type": "TOOL_CALL_START",
@@ -416,6 +425,9 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert view["tool_calls"][0]["result_state"] == "SUCCESS"
     assert view["terminal"] == "done"
     assert view["frame_counts"]["session_created"] == 1
+    # 首帧/启动延迟字段（issue #87）：first_event 排除 session_created
+    assert view["first_event_ms"] == 5, view["first_event_ms"]
+    assert view["agent_start_ms"] == 5, view["agent_start_ms"]
 
     ok = checks_mod.evaluate({
         "frames": {"done": 1, "error": 0, "file_ready": ">=0"},
@@ -446,6 +458,61 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert hview["terminal"] == "permission_ask"
     assert hview["hitl"]["asks"][0]["tools"] == ["publish_service"]
     assert hview["hitl"]["asks"][0]["tool_calls"][0]["tool_call_id"] == "c9"
+    # 挂起判定（issue #86）：不依赖终帧，按内容配对——旧序（permission_ask 终止）下挂起
+    assert hview["hitl"]["pending"] is True, hview["hitl"]
+
+    # 4db16ba+ 新序（2026-10-01 契约 v2）：ask 段以 AGENT_END 自然收尾，
+    # 终帧不再是 permission_ask，但 hitl.pending 仍须判定挂起
+    # （基线剔除普通轮的 AGENT_END@50/done@60：ask 主段自身以 AGENT_END 收尾一次）
+    ask_main = [e for e in events if e["type"] not in ("done", "AGENT_END")] + [
+        {"t_ms": 60, "type": "TOOL_CALL_START",
+         "raw": {"type": "TOOL_CALL_START", "toolName": "publish_service", "toolCallId": "c9"}},
+        {"t_ms": 70, "type": "permission_ask",
+         "raw": {"type": "permission_ask", "reply_id": "r1",
+                 "tool_calls": [{"tool_call_id": "c9", "name": "publish_service", "input": {}}]}},
+        {"t_ms": 71, "type": "REQUEST_STOP", "raw": {"type": "REQUEST_STOP"}},
+        {"t_ms": 72, "type": "AGENT_RESULT", "raw": {"type": "AGENT_RESULT"}},
+        {"t_ms": 73, "type": "AGENT_END", "raw": {"type": "AGENT_END"}},
+    ]
+    aview = sse_client.build_view(ask_main)
+    assert aview["terminal"] == "AGENT_END", aview["terminal"]
+    assert aview["hitl"]["pending"] is True, aview["hitl"]
+    # 确认续段并入后：配对补齐 → 不再挂起；合并轨迹 2 个 AGENT_END（用例期望同步为 2）
+    merged = ask_main + [
+        {"t_ms": 80, "type": "USER_CONFIRM_RESULT", "raw": {"type": "USER_CONFIRM_RESULT"}},
+        {"t_ms": 90, "type": "TOOL_RESULT_END",
+         "raw": {"type": "TOOL_RESULT_END", "toolCallId": "c9", "state": "SUCCESS"}},
+        {"t_ms": 95, "type": "AGENT_END", "raw": {"type": "AGENT_END"}},
+    ]
+    mview = sse_client.build_view(merged)
+    assert mview["hitl"]["pending"] is False, mview["hitl"]
+    assert mview["hitl"]["confirmed"] is True, mview["hitl"]
+    assert mview["frame_counts"]["AGENT_END"] == 2, mview["frame_counts"]
+    r_merged = checks_mod.evaluate({
+        "frames": {"permission_ask": 1, "AGENT_END": 2, "error": 0},
+        "tool_result": {"publish_service": {"ok": True}},
+    }, mview)
+    assert all(c["passed"] for c in r_merged), r_merged
+    # 恢复身份异常兜底：ask 存在但终帧非法（error）→ 判定仍挂起（auto_confirm 会尝试续段），
+    # 异常终帧由 runner 记入 error_info
+    bad_term = sse_client.build_view(ask_main + [
+        {"t_ms": 74, "type": "error", "raw": {"type": "error", "error": "boom"}}])
+    assert bad_term["hitl"]["pending"] is True and bad_term["terminal"] == "error"
+
+    # 启动排队类（issue #87）：timeout + AGENT_START 缺失/过晚 → 环境排队而非用例失败；
+    # 必须先于关键词规则（超时文案含 timeout/超时，旧逻辑会误归模型交互类）
+    q = rca_mod.classify_failure({"status": "timeout", "error_info": "整体超时（>120s）",
+                                  "view": {"error_frames": [], "agent_start_ms": None},
+                                  "check_results": []})
+    assert q["category"] == "启动排队类", q
+    q2 = rca_mod.classify_failure({"status": "timeout", "error_info": "整体超时（>120s）",
+                                   "view": {"error_frames": [], "agent_start_ms": 169000},
+                                   "check_results": []})
+    assert q2["category"] == "启动排队类", q2
+    q3 = rca_mod.classify_failure({"status": "timeout", "error_info": "整体超时（>120s）",
+                                   "view": {"error_frames": [], "agent_start_ms": 800},
+                                   "check_results": []})
+    assert q3["category"] == "模型交互类", q3  # 启动正常的长超时仍归模型/环境类
 
     err_view = sse_client.build_view(events + [
         {"t_ms": 70, "type": "error", "raw": {"type": "error", "error": "config load failed"}}])
@@ -479,8 +546,8 @@ def cmd_selftest(_: argparse.Namespace) -> int:
 
     asyncio.run(_skip_probe())
 
-    print(f"selftest PASS（帧映射 + 检查器 + HITL 视图 + 错误断言 + 失败分类 + 跳过分类，"
-          f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧）")
+    print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类，"
+          f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
 

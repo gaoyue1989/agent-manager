@@ -27,11 +27,28 @@ _CATEGORY_SUGGESTION = {
     "沙箱相关类": "检查 SANDBOX_ENABLED 与 OpenSandbox 服务连通性",
     "配置加载类": "检查 OAF 包 config.yaml 与环境变量注入",
     "模型交互类": "检查 LLM_BASE_URL/KEY 可用性、模型限流与超时配置",
+    "启动排队类": "被测实例并发排队（非用例本身慢）：排查 turn 闸门/资源竞争，"
+                  "见 docs/design/turn-gate-concurrency-and-hitl-eval-contract-design.md（issue #87）",
 }
+
+# 启动排队判定阈值：AGENT_START 晚于此值视为排队嫌疑（2026-10-01 轮坏值基线 17s~169s，
+# 修复后预期亚秒级；报告与 summary 同用此口径，超阈值在明细表标 ⚠️）
+START_QUEUE_WARN_MS = 15000
 
 
 def classify_failure(trace: dict[str, Any]) -> dict[str, Any]:
     """规则初筛：输入单条轨迹，返回 {category, evidence, suggestion}。"""
+    # 启动排队类（issue #87 形态）先于关键词规则：整体超时的 error_info 含
+    # "timeout/超时"，会被误归模型交互类；AGENT_START 缺失/过晚才是环境排队证据
+    if trace.get("status") == "timeout":
+        agent_start_ms = (trace.get("view") or {}).get("agent_start_ms")
+        if agent_start_ms is None or agent_start_ms > START_QUEUE_WARN_MS:
+            return {"category": "启动排队类",
+                    "evidence": [f"整体超时且 AGENT_START "
+                                 f"{'未到达' if agent_start_ms is None else f'@ {agent_start_ms}ms'}"
+                                 f"（阈值 {START_QUEUE_WARN_MS}ms）"],
+                    "suggestion": _CATEGORY_SUGGESTION["启动排队类"]}
+
     evidences: list[str] = []
     if trace.get("error_info"):
         evidences.append(str(trace["error_info"]))
@@ -57,8 +74,13 @@ def _fmt_case_row(trace: dict[str, Any]) -> str:
     failed = [f"{c['name']}({c['detail']})" for c in checks if not c["passed"]]
     check_txt = "; ".join(failed) if failed else "全部通过"
     usage = trace["view"].get("token_usage", {})
+    # 启动延迟单列（issue #87）：区分环境排队与用例本身慢，超阈值标 ⚠️
+    agent_start_ms = trace["view"].get("agent_start_ms")
+    start_txt = "-" if agent_start_ms is None else f"{agent_start_ms}"
+    if agent_start_ms is not None and agent_start_ms > START_QUEUE_WARN_MS:
+        start_txt += " ⚠️"
     return (f"| {trace['case_id']} | #{trace['repeat_no']} | {trace['status']} "
-            f"| {trace['duration_ms']} | {usage.get('total', '-')} | {check_txt} |")
+            f"| {trace['duration_ms']} | {start_txt} | {usage.get('total', '-')} | {check_txt} |")
 
 
 def build_report(task_id: str, meta: dict[str, Any], traces: list[dict[str, Any]],
@@ -82,11 +104,16 @@ def build_report(task_id: str, meta: dict[str, Any], traces: list[dict[str, Any]
         f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 用例数: {total} · 通过: {total - len(failed_cases)} · 通过率: {pass_rate:.0%} · "
         f"执行: {len(traces)} 次 · token 合计: {total_tokens}",
+    ]
+    # 帧序契约口径注记（issue #86 断代）：跨轮对比时先核对契约版本是否一致
+    if meta.get("contract"):
+        lines.append(f"- 帧序契约: `{meta['contract']}`（HITL 轨迹口径见 frame-mapping.json notes）")
+    lines += [
         "",
         "## 结果明细",
         "",
-        "| 用例 | 重复 | 状态 | 耗时ms | tokens | 检查项 |",
-        "|---|---|---|---|---|---|",
+        "| 用例 | 重复 | 状态 | 耗时ms | 启动ms | tokens | 检查项 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for cid, ts in sorted(by_case.items()):
         for t in sorted(ts, key=lambda x: x["repeat_no"]):
