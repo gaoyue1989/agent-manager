@@ -70,17 +70,23 @@ def grab_dump(container: str, idx: int, out_dir: Path) -> Path:
     dest = out_dir / f"thread-dump-{idx}.txt"
     try:
         out = subprocess.run(
-            ["docker", "exec", container, "jcmd", "1", "Thread.dump", "-l"],
+            ["docker", "exec", container, "jcmd", "1", "Thread.print", "-l"],
             capture_output=True, text=True, timeout=30)
-        dest.write_text(out.stdout or out.stderr, encoding="utf-8")
+        text = out.stdout or out.stderr
+        # JRE 镜像无 jcmd（OCI exec failed）等失败形态标记为无效，不进栈分析
+        if "exec failed" in text or "not found" in text:
+            text = f"(INVALID DUMP: {text.strip()[:200]})\n"
+        dest.write_text(text, encoding="utf-8")
     except FileNotFoundError:
         dest.write_text(f"(docker CLI 不可用，跳过第 {idx} 次转储)\n", encoding="utf-8")
     return dest
 
 
 def analyze_dump(path: Path) -> bool:
-    """转储中是否存在 turn 闸门阻塞栈（缺陷形态证据）。"""
+    """转储中是否存在 turn 闸门阻塞栈（缺陷形态证据）。无效转储（JRE 无 jcmd 等）不计。"""
     text = path.read_text(encoding="utf-8", errors="replace")
+    if text.startswith("(INVALID DUMP") or text.startswith("(docker CLI"):
+        return False
     parked = any(
         "park" in block or "WAITING" in block
         for block in text.split("\n\n")
@@ -102,19 +108,20 @@ async def main_async(args: argparse.Namespace) -> int:
     # req2 发出后周期抓转储，直至其 AGENT_START 出现（转储停止）
     idx = 0
     dumps: list[Path] = []
-    while not req2.done():
-        try:
-            await asyncio.wait_for(start_evt.wait(), timeout=1)
-        except asyncio.TimeoutError:
-            continue
-        start_evt.clear()
+    started = False
+    while not req2.done() and idx < args.max_dumps:
+        if not started:
+            try:
+                await asyncio.wait_for(start_evt.wait(), timeout=1)
+                started = True
+                start_evt.clear()
+            except asyncio.TimeoutError:
+                continue
         idx += 1
         p = await loop.run_in_executor(None, grab_dump, args.container, idx, out_dir)
         dumps.append(p)
         print(f"[diag] thread dump #{idx} -> {p}", flush=True)
         await asyncio.sleep(args.interval)
-        if idx >= args.max_dumps:
-            break
 
     await asyncio.gather(req1, req2, return_exceptions=True)
 
