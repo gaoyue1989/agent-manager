@@ -19,6 +19,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -81,6 +82,49 @@ class A2aJobServiceTest {
         var ex = assertThrows(A2aJobService.JobConflictException.class,
             () -> service.submit("k1", "hello"));
         assertTrue(ex.getMessage().contains("in flight"));
+    }
+
+    // ===== claim 残留（瞬时进程死亡）→ 重试一次 NX =====
+
+    /**
+     * 首轮 claim 撞上残留 claim（进程死于 SET NX 与 complete 之间），复查时键已随租约消失
+     * → 允许恰一次 NX 重抢（否则瞬时死亡让同键请求永久 409）。第二轮拿到执行权即正常受理。
+     */
+    @Test
+    void vanishedClaimResidueShouldRetryClaimOnceAndSubmit() {
+        var svc = new A2aJobService(store, new AgentA2aJobProperties(true, "tok", 1, 24, 4), "1") {
+            @Override
+            String sendBlocking(String key, String text) {
+                return "task-retry";
+            }
+        };
+        // 第一轮：键被他人残留占用；第二轮：NX 成功
+        when(store.claim(eq("k5"), anyString(), any())).thenReturn("claim:other").thenReturn(null);
+        when(store.get("k5")).thenReturn(null);   // 复查：残留键已消失
+        when(store.completeWithTaskId(eq("k5"), anyString(), eq("task-retry"), any())).thenReturn(true);
+
+        var out = svc.submit("k5", "hello");
+
+        assertEquals("task-retry", ((java.util.Map<?, ?>) out.get("job")).get("taskId"));
+        assertEquals(Boolean.FALSE, out.get("idempotent"), "重抢后是新执行，非幂等命中");
+        verify(store, times(2)).claim(eq("k5"), anyString(), any());
+    }
+
+    /**
+     * 两轮都撞上残留 claim（键每次复查都恰好又消失、又立刻被抢回）：第二轮的 RetryOnceSignal
+     * 必须以 409 收口而非死循环——门控就在 attempt==1。
+     */
+    @Test
+    void repeatedVanishingClaimResidueShouldConflictAfterOneRetry() {
+        when(store.claim(eq("k6"), anyString(), any())).thenReturn("claim:a").thenReturn("claim:b");
+        when(store.get("k6")).thenReturn(null);
+
+        var ex = assertThrows(A2aJobService.JobConflictException.class,
+            () -> service.submit("k6", "hello"));
+
+        assertTrue(ex.getMessage().contains("in flight"), ex.getMessage());
+        verify(store, times(2)).claim(eq("k6"), anyString(), any());
+        verify(store, never()).completeWithTaskId(anyString(), anyString(), anyString(), any());
     }
 
     // ===== 确定未受理 → 释放可重试 =====

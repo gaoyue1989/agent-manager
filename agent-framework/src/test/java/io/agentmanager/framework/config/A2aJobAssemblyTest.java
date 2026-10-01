@@ -32,6 +32,16 @@ class A2aJobAssemblyTest {
         return f;
     }
 
+    /** facade mock：PING 抛异常（Redis 不可达 / 认证失败）——自检必须 fail-fast */
+    private static RedisConnectionFacade brokenFacade() {
+        var f = mock(RedisConnectionFacade.class);
+        when(f.sync()).thenReturn(mock(io.lettuce.core.cluster.api.sync.RedisClusterCommands.class));
+        org.mockito.Mockito.lenient().when(f.sync().ping())
+            .thenThrow(new IllegalStateException("Connection refused"));
+        org.mockito.Mockito.lenient().when(f.key(anyString())).thenAnswer(inv -> inv.getArgument(0));
+        return f;
+    }
+
     /** 全链 supplier 组装（withBean(Class) 自动装配在隔离上下文构造器歧义，显式 new 保依赖） */
     private final WebApplicationContextRunner runner = new WebApplicationContextRunner()
         .withConfiguration(AutoConfigurations.of(A2aJobConfig.class))
@@ -89,5 +99,29 @@ class A2aJobAssemblyTest {
             }
             assertThat(cause).hasMessageContaining("MAX_CONCURRENT");
         });
+    }
+
+    /**
+     * enabled=true 但 PING 抛异常（Redis 根本连不上 / 认证失败）→ 启动失败。
+     * Job 路径硬依赖 Redis，配置错误必须在启动期暴露（Issue #69 §2.3 的 fail-fast 承诺），
+     * 而不是等首请求 503。
+     */
+    @Test
+    void enabledWithUnreachableRedisShouldFailStartup() {
+        new WebApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(A2aJobConfig.class))
+            .withBean("facade", RedisConnectionFacade.class, A2aJobAssemblyTest::brokenFacade)
+            .withPropertyValues(
+                "server.port=8100",
+                "agent.a2a-job.enabled=true",
+                "agent.a2a-job.auth-token=tok")
+            .run(ctx -> {
+                assertThat(ctx).hasFailed();
+                var cause = ctx.getStartupFailure();
+                while (cause != null && !(cause instanceof IllegalStateException)) {
+                    cause = cause.getCause();
+                }
+                assertThat(cause).hasMessageContaining("Redis 启动自检失败");
+            });
     }
 }

@@ -522,3 +522,142 @@ test('U15 压缩分隔条历史回放（归档合并视图渲染）', async ({ p
   await expect(page.locator(SEL.chatInner)).toContainText(tailArg, { timeout: 30_000 });
   await deleteThread(sid).catch(() => undefined);
 });
+
+// ---------- U16：assistant 分段渲染顺序（文本气泡 ↔ 工具组交错） ----------
+// 实现见 static/debug/modules/chat.js：实时流由 ensureTextBubble/ensureToolGroupEl
+// 按事件到达顺序追加段落；历史回放由 addAssistantHistory 按后端 blocks 块序渲染
+//（StateDataParser.extractOrderedBlocks 保留 content 块序）。退回旧布局（工具组恒在上、
+// 文本恒在下）的话，模型的开场白会被渲染到它自己的工具步骤之后——而 U3 那类回放断言
+// 只看 toContainText 抓不到这种错位。类名契约：.msg.assistant / .msg-bubble（css/components.css:57-69）、
+// .tool-group（chat.js renderToolGroupBlock）。
+
+/** 首条「既含文本气泡又含工具组」的 assistant 消息内的段落顺序（实时流与回放共用判据） */
+async function segmentOrderOfFirstMixedReply(page: Page) {
+  return page.evaluate((chatSel) => {
+    const msgs = Array.from(document.querySelectorAll(`${chatSel} .msg.assistant`));
+    for (const m of msgs) {
+      const bubble = m.querySelector('.msg-bubble');
+      const tool = m.querySelector('.tool-group');
+      if (!bubble || !tool) continue;
+      // DOCUMENT_POSITION_FOLLOWING = tool 在 bubble 之后 → 文本段先于工具段
+      return {
+        found: true,
+        bubbleBeforeTool: !!(bubble.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING),
+        bubbles: m.querySelectorAll('.msg-bubble').length,
+        toolGroups: m.querySelectorAll('.tool-group').length,
+      };
+    }
+    return { found: false, bubbleBeforeTool: false, bubbles: 0, toolGroups: 0 };
+  }, SEL.chatInner);
+}
+
+// 夹具选择：[E2E:oaf:package]（e2e-ci-plan §4.1.3「开场文本→工具→收尾文本」序列）——
+// 夹具 call 0 首块即开场文本 chunk，随后 tool_calls create_oaf_zip/present_url、收尾文本，
+// 单轮即产出「文本气泡 → 工具组 → 文本气泡」的完整分段；不选 [E2E:file:deliver]：
+// 该夹具含 edit_file（D8 SDK 空串死循环未修，U11 因此 test.fixme），不能进必需门禁组。
+test('U16 分段渲染顺序（开场文本先于工具组：实时流 + blocks 历史回放）', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', e => errors.push(String(e)));
+
+  await send(page, '[E2E:oaf:package]');
+  await expect(page.locator(SEL.sendBtn)).toBeEnabled({ timeout: 180_000 });
+
+  const live = await segmentOrderOfFirstMixedReply(page);
+  expect(live.found, '实时流应出现同时含文本气泡与工具组的 assistant 消息').toBe(true);
+  expect(live.bubbleBeforeTool, '实时流首个文本气泡（开场白）必须在工具组之前').toBe(true);
+  expect(live.bubbles, '工具组之后应有收尾文本段（新开气泡，不回写开场段）').toBeGreaterThanOrEqual(2);
+
+  // 回放：按 data-sid 精确点选（列表首位不可靠，同 U13 口径）
+  const sid = await page.locator(`${SEL.threadList} .thread-item.active`)
+    .getAttribute('data-sid', { timeout: 30_000 });
+  expect(sid, '会话列表应已渲染出当前会话').toBeTruthy();
+  await page.locator(SEL.newThread).click();
+  const item = page.locator(`${SEL.threadList} .thread-item[data-sid="${sid}"]`);
+  await item.waitFor({ state: 'visible', timeout: 30_000 });
+  await item.click();
+  await expect(page.locator(SEL.chatInner)).toContainText('[E2E:oaf:package]', { timeout: 60_000 });
+
+  const replay = await segmentOrderOfFirstMixedReply(page);
+  expect(replay.found, '回放应重建出同时含文本气泡与工具组的 assistant 消息').toBe(true);
+  expect(replay.bubbleBeforeTool, '回放首个文本气泡必须在工具组之前（blocks 块序不得退回旧布局）').toBe(true);
+
+  expect(errors, `pageerror: ${errors.join('; ')}`).toEqual([]);
+});
+
+// ---------- U14b：绑定模型的删除/禁用降级路径（session-model-switch PR43 §14 回归锚点） ----------
+// 此前 U14 六步全为正路径，两处修复主行为零覆盖：
+// ① restoreModelForSession 的 exists 回落（chat.js：绑定模型已删时下拉无对应 option，统一回落
+//    system，使界面与服务端实际生效模型一致）；② bindSessionModel 失败回滚（PATCH 被拒 →
+//    toast「模型切换失败」+ 下拉回滚，界面显示不得与服务端绑定脱节）。
+
+test('U14b 绑定模型删除回落 system + 禁用模型切换失败回滚', async ({ page, request }) => {
+  await llmReset();
+  const mkModel = async (name: string, modelId: string) => {
+    const res = await request.post('/models', {
+      data: { name, modelId, baseUrl: `${LLM_MOCK}/v1`, apiKey: 'sk-e2e-ui-b', timeoutSeconds: 5 },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    return String((await res.json()).id);
+  };
+  const deletedId = await mkModel(`e2e-ui-del-${uniq()}`, 'e2e-ui-deleted');
+  const disabledId = await mkModel(`e2e-ui-dis-${uniq()}`, 'e2e-ui-disabled');
+
+  try {
+    await page.goto('/debug/');
+    await page.locator(SEL.modeChannel).click();
+    const select = page.locator(SEL.modelSelect);
+    await expect(select.locator(`option[value="${deletedId}"]`)).toHaveCount(1);
+    await expect(select.locator(`option[value="${disabledId}"]`)).toHaveCount(1);
+
+    // ---- ① 删除回落：绑定 → DELETE → 刷新页面（loadModels 仅初始化拉取）→ 切回该会话 ----
+    await select.selectOption(deletedId);
+    await page.locator(SEL.chatInput).fill('[E2E:plain](u14b-del)');
+    await page.locator(SEL.sendBtn).click();
+    await expect(page.locator(SEL.sendBtn)).toBeEnabled({ timeout: 120_000 });
+    const sidA = await page.locator(`${SEL.threadList} .thread-item.active`)
+      .getAttribute('data-sid', { timeout: 30_000 });
+    expect(sidA, '删除场景应已创建并选中会话').toBeTruthy();
+    expect((await (await request.get(`/threads/${sidA}`)).json()).model).toBe(deletedId);
+
+    await request.delete(`/models/${deletedId}`);
+    await page.reload();
+    const itemA = page.locator(`${SEL.threadList} .thread-item[data-sid="${sidA}"]`);
+    await itemA.waitFor({ state: 'visible', timeout: 30_000 });
+    await itemA.click();
+    // 列表数据 model=已删 id，但下拉已无对应 option → 必须回落 system 而不是显示空白
+    await expect(select).toHaveValue('system', { timeout: 30_000 });
+
+    // ---- ② 禁用回滚：绑定 → PATCH enabled:false → 改选该模型 → 400 model_disabled ----
+    await page.locator(SEL.newThread).click();
+    await select.selectOption(disabledId);
+    await page.locator(SEL.chatInput).fill('[E2E:plain](u14b-dis)');
+    await page.locator(SEL.sendBtn).click();
+    await expect(page.locator(SEL.sendBtn)).toBeEnabled({ timeout: 120_000 });
+    const sidB = await page.locator(`${SEL.threadList} .thread-item.active`)
+      .getAttribute('data-sid', { timeout: 30_000 });
+    expect(sidB, '禁用场景应已创建并选中会话').toBeTruthy();
+    expect((await (await request.get(`/threads/${sidB}`)).json()).model).toBe(disabledId);
+
+    // 服务端禁用（picker DOM 不刷新，option 仍在——真实的「过期下拉」场景）
+    expect((await request.patch(`/models/${disabledId}`, { data: { enabled: false } })).status()).toBe(200);
+
+    // 先回落 system（清绑定），再发一条消息触发流结束后的 loadThreads——
+    // 让 onModelChange 的回滚基准（currentSessionModel）读到已清空的绑定 ''
+    await select.selectOption('system');
+    await page.locator(SEL.chatInput).fill('[E2E:plain](u14b-dis2)');
+    await page.locator(SEL.sendBtn).click();
+    await expect(page.locator(SEL.sendBtn)).toBeEnabled({ timeout: 120_000 });
+    await expect(select).toHaveValue('system');
+
+    // 改选已禁用模型 → PATCH /threads/{sid} 400 model_disabled → toast + 下拉回滚
+    await select.selectOption(disabledId);
+    await expect(page.locator('#toastContainer')).toContainText('模型切换失败', { timeout: 15_000 });
+    await expect(select).toHaveValue('system');
+    // 最终值与服务端绑定一致（失败的 PATCH 不落库）
+    const serverModel = (await (await request.get(`/threads/${sidB}`)).json()).model;
+    expect(serverModel === '' || serverModel == null || serverModel === 'system').toBeTruthy();
+  } finally {
+    await request.delete(`/models/${deletedId}`).catch(() => undefined);
+    await request.delete(`/models/${disabledId}`).catch(() => undefined);
+  }
+});

@@ -492,6 +492,79 @@ class AgentRuntimeServiceHitlTest {
     }
 
     /**
+     * 回归（e2e R5 根因）：confirm 抢到锁时 ASKING 快照可能还没落库（state 侧为 null），
+     * 此时恢复身份**只能**来自 confirm_context 表行。若 resolveConfirmContext 改成先读 state，
+     * runtimeSessionId/runtimeUserId 双双落空 → buildResumeContext 回落 fullThreadId 兜底槽
+     * → 用一个从未存在过的会话 key 恢复，整个上下文丢失（工具空参数、回复对不上话）。
+     */
+    @Test
+    void resumeConfirmShouldTakeRuntimeIdentityFromTableRowWhenStateSnapshotMissing() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        // 表行带 Channel 网关真实身份（sessionId=gw-hash、userId=peer）
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-3f20f08c5499", "peer-user")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        // state 侧读不到挂起：confirm 抢锁早于 ask 段 AGENT_END 收尾落库，正是 R5 实测时序
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(), java.util.Map.of(), "", java.util.Map.of("session_id", "", "user_id", "")));
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
+            "gw-3f20f08c5499".equals(ctx.getSessionId()) && "peer-user".equals(ctx.getUserId())));
+    }
+
+    /**
+     * 身份优先级（resolveConfirmContext 表行分支）：表行身份与 state 身份**同时**非空时
+     * 必须取表行——storeConfirmContext 在 permission_ask 广播前同步落库，是权威身份；
+     * state 快照随 ask 段收尾才落库，可能滞后。取错侧 → 网关会话 key 漂移。
+     */
+    @Test
+    void resumeConfirmShouldPreferTableRuntimeIdentityOverStateIdentity() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-tableauth", "peer-from-table")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        // state 侧快照命中且身份非空（gw-state/alice）——仍不得覆盖表行身份
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        var stateBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        var askingEntry = new LinkedHashMap<String, Object>();
+        askingEntry.put("tool_call_id", "call-1");
+        askingEntry.put("name", "publish_service");
+        askingEntry.put("input", Map.of("packageId", 166));
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(askingEntry), Map.of("call-1", stateBlock), "reply-1",
+                Map.of("session_id", "gw-state", "user_id", "alice")));
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
+            "gw-tableauth".equals(ctx.getSessionId()) && "peer-from-table".equals(ctx.getUserId())));
+    }
+
+    /**
      * 表块 input 为空（反向异常）且 state 同 id 参数完好：enrich 后 content 同步取 state 侧
      * 完整参数 JSON——若保留表侧 "{}" 会误报缺参（参数校验失败），修复见 enrichWithStateInput。
      */

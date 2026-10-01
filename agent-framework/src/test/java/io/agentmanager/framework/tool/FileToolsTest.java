@@ -238,4 +238,54 @@ class FileToolsTest {
         assertTrue(result.contains("not readable"), "userKey 不匹配应拒绝读取: " + result);
         verify(sandbox, org.mockito.Mockito.never()).readWorkspaceFile(anyString());
     }
+
+    // ===== SessionKeyResolver 反查（issue #52：归属校验须用规范用户键）=====
+
+    /** 7 参构造器 + 真实 SessionKeyResolver（生产装配形态） */
+    private FileTools toolsWithResolver(io.agentmanager.framework.service.SessionUserStore store) {
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        return new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
+            mock(WorkspaceReader.class), null,
+            new io.agentmanager.framework.service.SessionKeyResolver(store));
+    }
+
+    /**
+     * Channel 链路反查命中：ctx.sessionId=gw-hash（同进程所有 peer 共享的网关路由键，session_user
+     * 无此行），ctx.userId=前端 sid（登记行的 key）。反查落到真实用户 alice——若原样记 peer，
+     * 沙箱归属比对恒不等 → 直读被误拒 / file_ready 丢失。
+     */
+    @Test
+    void presentFileShouldUseCanonicalUserKeyResolvedFromPeerSession() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession("gw-3f20f08c5499")).thenReturn(null);
+        when(store.findUserIdBySession("front-sid")).thenReturn("alice");
+        var t = toolsWithResolver(store);
+        var channelCtx = RuntimeContext.builder()
+            .sessionId("gw-3f20f08c5499").userId("front-sid").build();
+
+        var result = t.presentFile(channelCtx, "outputs/ch.txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        assertTrue(result.contains("\"file_id\""), "应登记成功: " + result);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertEquals("alice", captor.getValue().userKey(),
+            "落库 userKey 必须是反查到的规范用户键，而非网关 peer");
+    }
+
+    /** 反查全未命中（A2A / direct invoke 等未登记形态）→ 回落 ctx.userId 原值，行为不变 */
+    @Test
+    void presentFileShouldFallBackToContextUserIdWhenResolverMisses() {
+        var store = mock(io.agentmanager.framework.service.SessionUserStore.class);
+        when(store.findUserIdBySession(anyString())).thenReturn(null);
+        var t = toolsWithResolver(store);
+
+        t.presentFile(ctx(), "outputs/fallback.txt",
+            Base64.getEncoder().encodeToString("hi".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(FileAssetStore.FileAsset.class);
+        verify(fileAssetStore).insert(captor.capture());
+        assertEquals("alice", captor.getValue().userKey(),
+            "反查未命中时回落 ctx.userId 原值（A2A/invoke 行为不变）");
+    }
 }

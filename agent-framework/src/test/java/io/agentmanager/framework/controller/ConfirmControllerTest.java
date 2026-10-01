@@ -313,6 +313,81 @@ class ConfirmControllerTest {
         assertNotNull(frame, "should emit SSE frame");
     }
 
+    @Test
+    void confirmStreamShouldReleaseLeaseAndCloseOnPermissionAsk() {
+        // HITL ask 段收尾接线（ConfirmController 侧，与 ChatStreamController 相反的契约）：
+        // permission_ask → 确认上下文落库 + 立即 lease.release() 让出执行段 + closeSession
+        // 关流（HITL 是 turn 边界）。漏掉 release 会让会话锁到 TTL 过期，confirm 排队全部超时。
+        stubPendingStoreRow();
+        // 本地 ask（2 参构造 source=null，区别于远程转发的带 source 事件）
+        var ask = new io.agentscope.core.event.RequireUserConfirmEvent("reply-ask",
+            List.of(io.agentscope.core.message.ToolUseBlock.builder()
+                .id("call-1").name("get_weather").input(Map.of("city", "beijing")).build()));
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(reactor.core.publisher.Flux.just(ask));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-ask1");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var frames = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+                Map.of("tool_call_id", "call-1", "confirmed", true))))
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames, "permission_ask 帧后应关流返回");
+        // 确认上下文落库（fullThreadId 键，恢复时 buildResumeContext 的身份来源）；
+        // 用 ask 自身 replyId 区分 setUp 播种的那次 put
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(),
+            eq("reply-ask"), any(), any());
+        // ask 即执行段结束：租约让出 + 会话关闭（closeSession → finishTurn；
+        // 源流 complete 的幂等兜底会再走一次 endTurn，故 finishTurn 用 atLeastOnce）
+        verify(turnLeaseStore).release(eq("t1"), eq("tok-ask1"));
+        verify(eventStore, atLeastOnce()).finishTurn("t1");
+        // ask 帧本身已广播（EventBus 落库可见）
+        assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("get_weather")),
+            "permission_ask 帧应经 EventBus 广播: " + frames);
+    }
+
+    @Test
+    void confirmStreamShouldNotCloseSessionOnRemoteForwardedAgentEnd() throws Exception {
+        // 远程子 agent 转发回来的 AGENT_END（source 非空）只是子任务运行终点：
+        // 恢复流仍在进行（spawn 结果/lead 收尾汇报未到，源流尚未 complete），
+        // 不得在这里 closeSession 关流 + 放锁——与 ChatStreamController 同一 guard。
+        stubPendingStoreRow();
+        var events = reactor.core.publisher.Sinks.many().multicast()
+            .<io.agentscope.core.event.AgentEvent>onBackpressureBuffer();
+        var subscribed = new java.util.concurrent.CountDownLatch(1);
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-c2");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+            controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+                    Map.of("tool_call_id", "call-1", "confirmed", true))))
+                .collectList().block(java.time.Duration.ofSeconds(10)));
+        assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS),
+            "confirmStream 未订阅 agent 事件流");
+
+        events.tryEmitNext((io.agentscope.core.event.AgentEvent)
+            new io.agentscope.core.event.AgentEndEvent("reply-3").withSource("gw-1/order-agent"));
+        verify(eventStore, org.mockito.Mockito.timeout(2000))
+            .append(eq("t1"), any(), eq("AGENT_END"), any());
+        sleep(200);
+
+        verify(eventStore, never()).finishTurn("t1");
+        verify(turnLeaseStore, never()).release(anyString(), anyString());
+        assertTrue(!framesFuture.isDone(), "远程 AGENT_END 不得关流: " + framesFuture);
+
+        // lead 自身的 AGENT_END 才收尾
+        events.tryEmitNext(new io.agentscope.core.event.AgentEndEvent("reply-3"));
+        events.tryEmitComplete();
+        framesFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        verify(eventStore, org.mockito.Mockito.timeout(2000)).finishTurn("t1");
+    }
+
     // ===== 多行消费路由（V7：远程 confirmKey 走 RemoteConfirmBridge，不触父 state 恢复） =====
 
     @Test

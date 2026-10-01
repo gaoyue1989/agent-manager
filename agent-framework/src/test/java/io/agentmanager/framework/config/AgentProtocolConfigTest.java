@@ -205,6 +205,76 @@ class AgentProtocolConfigTest {
             });
     }
 
+    // ---------------- AgentProtocolEventBus 装配三分支（§18.3 多副本 G2 总开关） ----------------
+
+    /**
+     * Redis 门面 bean（构造惰性，用不可达种子 URL：装配期只做 key() 前缀拼接，不建连，
+     * 与 ProtocolRedisEventBusTest 同款离线口径）。
+     */
+    @Configuration
+    static class RedisFacadeBeans {
+        @Bean
+        io.agentmanager.framework.redis.RedisConnectionFacade redisConnectionFacade() {
+            return io.agentmanager.framework.redis.RedisConnectionFacade.create(
+                new io.agentmanager.framework.config.AgentRedisProperties(
+                    "redis://127.0.0.1:6399", 300, 300, 1000,
+                    io.agentmanager.framework.config.AgentRedisProperties.Mode.standalone, "", "svc:"));
+        }
+    }
+
+    /** eventBus=redis 且容器有门面 → 跨副本 Redis Streams 总线（选错实现即跨副本丢事件） */
+    @Test
+    void eventBusShouldBeRedisStreamsWhenFacadePresent() {
+        runner.withUserConfiguration(RedisFacadeBeans.class)
+            .withPropertyValues(
+                "agent.agent-protocol.enabled=true",
+                "agent.agent-protocol.auth-token=test-token",
+                "agent.agent-protocol.event-bus=redis")
+            .run(ctx -> {
+                assertFalse(ctx.getStartupFailure() != null, () -> "启动失败: " + ctx.getStartupFailure());
+                assertInstanceOf(
+                    io.agentmanager.framework.service.protocol.ProtocolRedisEventBus.class,
+                    ctx.getBean(io.agentscope.extensions.agentprotocol.AgentProtocolEventBus.class),
+                    "redis + 门面可用 → 必须装配 Redis Streams 总线");
+            });
+    }
+
+    /** eventBus=memory → 显式回落 SDK 内存实现（单副本/无 Redis 部署的既定形态） */
+    @Test
+    void eventBusShouldBeMemoryWhenConfigured() {
+        runner.withUserConfiguration(RedisFacadeBeans.class)
+            .withPropertyValues(
+                "agent.agent-protocol.enabled=true",
+                "agent.agent-protocol.auth-token=test-token",
+                "agent.agent-protocol.event-bus=memory")
+            .run(ctx -> {
+                assertFalse(ctx.getStartupFailure() != null, () -> "启动失败: " + ctx.getStartupFailure());
+                assertInstanceOf(
+                    io.agentscope.extensions.agentprotocol.AgentProtocolTaskEventBus.class,
+                    ctx.getBean(io.agentscope.extensions.agentprotocol.AgentProtocolEventBus.class),
+                    "显式 memory → 内存总线");
+            });
+    }
+
+    /** eventBus=redis 但容器无门面 bean → 降级内存总线且不抛（fail-soft，v1.4 行为） */
+    @Test
+    void eventBusShouldDegradeToMemoryWhenFacadeAbsent() {
+        runner.withPropertyValues(
+                "agent.agent-protocol.enabled=true",
+                "agent.agent-protocol.auth-token=test-token",
+                "agent.agent-protocol.event-bus=redis")
+            .run(ctx -> {
+                assertFalse(ctx.getStartupFailure() != null, () -> "启动失败: " + ctx.getStartupFailure());
+                assertTrue(ctx.getBeansOfType(
+                        io.agentmanager.framework.redis.RedisConnectionFacade.class).isEmpty(),
+                    "本用例前提：容器无 RedisConnectionFacade bean");
+                assertInstanceOf(
+                    io.agentscope.extensions.agentprotocol.AgentProtocolTaskEventBus.class,
+                    ctx.getBean(io.agentscope.extensions.agentprotocol.AgentProtocolEventBus.class),
+                    "无门面时必须降级内存总线而不是启动失败");
+            });
+    }
+
     // ---------------- enabled=false 零装配 ----------------
 
     /** 协议关闭（默认态）：协议 beans 与认证过滤器一个都不注册（存量零影响） */
