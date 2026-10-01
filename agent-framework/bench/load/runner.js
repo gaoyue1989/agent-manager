@@ -61,9 +61,11 @@ const MARKER = SCENARIO_MARKER[SCENARIO] || '[BENCH:plain]';
 /** 每成功请求的期望 LLM 调用数（plain/slow=1，工具场景=2），用于与 mock /stats 对账 */
 const EXPECTED_LLM_CALLS = (MARKER === '[BENCH:plain]' || MARKER === '[BENCH:slow]') ? 1 : 2;
 
-// 启动延迟门禁（issue #87 回归防线，场景 C 专用）：任一路 AGENT_START 相对请求发起
-// 时刻超过阈值即该档 FAIL（exit 3）。坏值基线 17s/47s/69s/169s（全局 turn 闸门），
-// PER_PEER 修复后预期亚秒级。仅 C 档强制（B 档语义不变）。
+// 启动延迟门禁（issue #87 回归防线，场景 C 专用）：判定「排队签名」=
+// ttft（首帧，session_created）快而 AGENT_START 晚，即 agentStartMs - ttftMs 超阈值。
+// 只看 agentStartMs 绝对值会把 1C 容器的首帧/CPU 饱和（ttft 与 agentStart 同时晚，
+// 容量问题，B 档 p95 停止条件已覆盖）误判为跨会话排队回归（实测 10.9s/21s 离群，
+// delta 恒 0；而 #87 缺陷形态 delta = 全部排队时长 17~169s）。
 const ASSERT_START_DELAY_MS = parseInt(arg('assert-start-delay-ms', '10000'), 10);
 const ENFORCE_START_DELAY = SCENARIO === 'C' && ASSERT_START_DELAY_MS > 0;
 
@@ -159,10 +161,14 @@ function chatOnce(sid, userId) {
     function finish(ok, error) {
       if (settled) return;
       settled = true;
+      // 排队签名：首帧到 AGENT_START 的间隔（#87 跨会话闸门排队时此值≈全部排队时长；
+      // 首帧本身晚 = 容量饥饿，delta≈0，不进门禁）
+      const startQueueMs = (agentStartMs !== null && ttftMs !== null)
+        ? Math.max(0, agentStartMs - ttftMs) : null;
       resolve({
         sid, userId, startMs, ok,
         latencyMs: Date.now() - startMs,
-        ttftMs, agentStartMs, waiting,
+        ttftMs, agentStartMs, startQueueMs, waiting,
         error: error || null,
       });
     }
@@ -366,9 +372,10 @@ async function run() {
   const starts = metrics.map((m) => m.agentStartMs).filter((v) => v !== null);
   const waitings = metrics.map((m) => m.waiting);
   const steadyMinutes = STAGE_SECONDS / 60;
-  // 启动延迟门禁（issue #87）：C 档任一路 AGENT_START 超阈值即 FAIL
+  // 启动延迟门禁（issue #87）：C 档任一路「排队签名」（agentStart-ttft）超阈值即 FAIL
+  const startQueues = metrics.map((m) => m.startQueueMs).filter((v) => v !== null);
   const breaches = ENFORCE_START_DELAY
-    ? metrics.filter((m) => m.agentStartMs !== null && m.agentStartMs > ASSERT_START_DELAY_MS).length
+    ? metrics.filter((m) => m.startQueueMs !== null && m.startQueueMs > ASSERT_START_DELAY_MS).length
     : 0;
   const summary = {
     scenario: SCENARIO,
@@ -392,6 +399,10 @@ async function run() {
     agentStartP50Ms: pct(starts, 50),
     agentStartP95Ms: pct(starts, 95),
     agentStartMaxMs: starts.length ? Math.max(...starts) : 0,
+    // 排队签名分布（agentStart-ttft；跨会话排队回归的直接观测量）
+    startQueueSamples: startQueues.length,
+    startQueueP50Ms: pct(startQueues, 50),
+    startQueueP100Ms: startQueues.length ? Math.max(...startQueues) : 0,
     startDelayThresholdMs: ENFORCE_START_DELAY ? ASSERT_START_DELAY_MS : null,
     startDelayBreaches: breaches,
     waitingAvg: waitings.length ? +(waitings.reduce((a, b) => a + b, 0) / waitings.length).toFixed(2) : 0,
