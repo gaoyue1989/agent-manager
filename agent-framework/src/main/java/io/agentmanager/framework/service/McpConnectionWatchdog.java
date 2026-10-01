@@ -25,7 +25,9 @@ import io.agentscope.core.tool.mcp.McpClientWrapper;
  * <p>探活走 {@code listTools()}（发现通道走静态凭据，与用户级 header 注入无关，
  * 单连接覆盖全部用户调用）；重建期间该 server 跳过后续探测（per-server 在途标记），
  * OAF reload 进行中整体让位（换连语义同源，避免双 swap 竞态）。全部动作 fail-soft：
- * 单 server 失败只告警，下一周期重试，不影响其他 server 与主流程。
+ * 单 server 失败只告警，下一周期重试，不影响其他 server 与主流程——重建 register
+ * 失败导致「有配置但未注册」的 server 由 {@code compensateUnregistered} 每周期补偿重建
+ * （否则摘旧后注册失败会让工具静默消失、脱离探测集合）。
  *
  * <p>调度参数在 {@link McpHealthTiming}（独立 bean——@Scheduled SpEL 不能自引用宿主）。
  */
@@ -70,6 +72,41 @@ public class McpConnectionWatchdog {
         }
         for (var server : mcpToolRegistrar.getRegisteredServerNames()) {
             probeOne(server);
+        }
+        compensateUnregistered();
+    }
+
+    /**
+     * 补偿「有 OAF 配置但未注册」的 server：rebuild 的 register 阶段失败时 clearServer
+     * 已摘除旧注册，而 probeOne 只扫已注册集合——若无此口，该 server 的工具会静默消失
+     * 直至手动 OAF reload/重启（违背本类「下一周期重试」的 fail-soft 承诺）。每周期对
+     * 未注册声明走一次重建（含 register），自愈口与探测同一让位/防重入语义。
+     */
+    private void compensateUnregistered() {
+        var oaf = oafConfigHolder.get();
+        if (oaf == null || oaf.mcpServers() == null) {
+            return;
+        }
+        var registered = mcpToolRegistrar.getRegisteredServerNames();
+        for (var m : oaf.mcpServers()) {
+            if (registered.contains(m.server())) {
+                continue;
+            }
+            var flag = rebuilding.computeIfAbsent(m.server(), k -> new AtomicBoolean());
+            if (!flag.compareAndSet(false, true)) {
+                continue;
+            }
+            try {
+                log.info("[MCP-watchdog] server '{}' configured but unregistered, compensating rebuild",
+                    m.server());
+                rebuild(m.server());
+                rebuildCount.incrementAndGet();
+            } catch (Exception e) {
+                log.warn("[MCP-watchdog] compensate rebuild failed for '{}': {}",
+                    m.server(), e.getMessage());
+            } finally {
+                flag.set(false);
+            }
         }
     }
 

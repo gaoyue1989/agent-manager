@@ -121,9 +121,11 @@ public class RemoteConfirmBridge {
     private final ConcurrentHashMap<String, Integer> transportErrorCounts = new ConcurrentHashMap<>();
 
     /** 已唤醒守卫（sessionId|taskId）：终态唤醒幂等的**进程内兜底**——跨副本权威在
-     *  remote_task_registry 的 claimWake CAS（§18.2）；本守卫仅覆盖 registry 无行的
+     *  remote_task_registry 的 tryClaimWake CAS（§18.2）；本守卫仅覆盖 registry 无行的
      *  历史/异常路径（v1.4 行为保持）。 */
     private final java.util.Set<String> wokenTasks = ConcurrentHashMap.newKeySet();
+    /** 进程内唤醒守卫上限（有界化防无界增长；语义见 markWoken） */
+    private static final int WOKEN_TASKS_MAX = 10_000;
 
     /**
      * 终态监听/唤醒线程池：每任务一线程（守护线程，监听结束线程即退出）。
@@ -424,7 +426,7 @@ public class RemoteConfirmBridge {
      * 登记重建（设计 §18.2 机制②）：从 remote_task_registry 回填内存登记表——
      * lead 重启、或同 session 的其他副本，均可由此接管在途任务的轮询/落卡/收割。
      * 多副本会重复轮询同一任务：GET /tasks/{id} 只读幂等，落卡由 findPending 前置
-     * 判定幂等，唤醒由 claimWake CAS 恰好一次——重复轮询只增加读流量，不产生副作用。
+     * 判定幂等，唤醒由 tryClaimWake CAS 恰好一次——重复轮询只增加读流量，不产生副作用。
      * initialDelay 让正常启动路径（spawn 进程内登记）先行，避免与首批轮询竞争。
      */
     @Scheduled(fixedDelay = 60_000, initialDelay = 15_000)
@@ -739,6 +741,20 @@ public class RemoteConfirmBridge {
     }
 
     /**
+     * 进程内唤醒守卫登记（仅 registry 无行的降级路径使用；跨副本权威是 registry CAS）。
+     * 有界化：到达上限整体清空——registry 是权威判据，清空后最坏情形只是「无行」老任务
+     * 多收一次汇总 turn（at-least-once 包络内），换来集合不随进程生命周期无界增长。
+     */
+    private boolean markWoken(String sessionId, String taskId) {
+        if (wokenTasks.size() >= WOKEN_TASKS_MAX) {
+            log.warn("[RemoteConfirmBridge] wokenTasks reached cap {}, clearing in-process guard",
+                WOKEN_TASKS_MAX);
+            wokenTasks.clear();
+        }
+        return wokenTasks.add(registryKey(sessionId, taskId));
+    }
+
+    /**
      * 合成消息驱动一次 lead 汇总 turn：acquire 租约 → invokeStream → 事件写 durable SSE
      * （EventBus emit 为 Controller 层职责，本桥自行复刻——否则离线用户 /subscribe 不可见，C5）。
      */
@@ -751,25 +767,39 @@ public class RemoteConfirmBridge {
      * （EventBus emit 为 Controller 层职责，本桥自行复刻——否则离线用户 /subscribe 不可见，C5）。
      *
      * <p>幂等守卫两层（设计 §18.2 机制④）：跨副本权威 = remote_task_registry 的
-     * claimWake CAS（IN_FLIGHT→TERMINAL 认领即收口，affected=1 者唯一获得唤醒权）——
+     * tryClaimWake CAS（IN_FLIGHT→TERMINAL 认领即收口，affected=1 者唯一获得唤醒权）——
      * 决策路径（resume 后终态监听）与后台收割路径（onTaskTerminal 轮询终态）可能在不同
      * 副本先后到达同一终态，CAS 保证汇总 turn 恰好一次；registry 无行（历史/异常路径）
-     * 时降级为进程内 wokenTasks 守卫（v1.4 行为）。认领后租约忙放弃的唤醒不重试
+     * 时降级为进程内 wokenTasks 守卫（v1.4 行为，有界）。DB 异常分型为 UNAVAILABLE：
+     * 跳过本轮、留待 rebuild 周期重拾——宁延迟不重复（无痕唤醒会让 DB 恢复后的
+     * rebuild 对同一任务二次唤醒）。认领后租约忙放弃的唤醒不重试
      * （与既有"下一用户 turn 降级收割"语义一致，§13.9）。
      *
      * @param harvestViaToolOutput true=后台收割路径：lead 上下文没有子任务过程，提示先
      *        task_output 取交付结果再汇总（确定性收割）；false=决策路径既有话术
      */
     void wakeLead(String sessionId, String taskId, String terminalDesc, boolean harvestViaToolOutput) {
-        // ① 跨副本唤醒认领（registry 无行时走进程内兜底守卫；认领即收口——
-        // claimWake 单语句 IN_FLIGHT→TERMINAL，无中间卡死态，CR P1-3）
-        if (registryStore != null && registryStore.exists(sessionId, taskId)) {
-            if (!registryStore.claimWake(sessionId, taskId)) {
+        // ① 跨副本唤醒认领：认领即收口（tryClaimWake 单语句 IN_FLIGHT→TERMINAL，无中间卡死态）；
+        //    UNAVAILABLE（DB 抖动）不当作「无行/被抢」处理——那会产生无痕唤醒或误吞唤醒
+        if (registryStore != null) {
+            var claim = registryStore.tryClaimWake(sessionId, taskId);
+            if (claim == RemoteTaskRegistryStore.WakeClaim.CONTENTED) {
                 log.debug("[RemoteConfirmBridge] wake claim lost for task {} (sid={}), "
                     + "another replica/path is waking", taskId, sessionId);
                 return;
             }
-        } else if (!wokenTasks.add(registryKey(sessionId, taskId))) {
+            if (claim == RemoteTaskRegistryStore.WakeClaim.UNAVAILABLE) {
+                log.warn("[RemoteConfirmBridge] wake deferred: registry unavailable for task {} "
+                    + "(sid={}), rebuild cycle will re-drive", taskId, sessionId);
+                return;
+            }
+            if (claim == RemoteTaskRegistryStore.WakeClaim.ABSENT
+                && !markWoken(sessionId, taskId)) {
+                log.debug("[RemoteConfirmBridge] wake already delivered for task {} (sid={}), skip",
+                    taskId, sessionId);
+                return;
+            }
+        } else if (!markWoken(sessionId, taskId)) {
             log.debug("[RemoteConfirmBridge] wake already delivered for task {} (sid={}), skip",
                 taskId, sessionId);
             return;

@@ -298,6 +298,18 @@ OAF `deniedTools` 字段控制排除列表。
 
 ---
 
+## 存储层错误分型纪律（2026-10-01，修评审 #72 确认缺陷后确立）
+
+Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`），会被上游当「确认不存在/无主」的业务信号用——多副本协调下产生**无痕唤醒 → 重复汇总 turn**、误吞唤醒、幂等键双发三类窗口。纪律：
+
+- **「确认语义」与「可判定性」必须分型**：协调判定类操作（CAS/exists/claim）返回值必须区分「确认被抢/无行」与「暂时不可判定」。参照 `RemoteTaskRegistryStore.tryClaimWake` 四态（CLAIMED/CONTENTED/ABSENT/UNAVAILABLE）——UNAVAILABLE 一律跳过本轮，交给既有重试循环（rebuild 周期/下一用户 turn），宁延迟不重复。
+- **跨副本幂等只信原子 CAS**，不做「先 exists 再 CAS」两段判定（两段之间既有竞态又各自吞异常）。
+- **竞态原语不许把边界当成功**：`A2aJobRedisStore.claim` 的 NX→GET 键过期窗口原地重试、耗尽抛出 fail-closed，不把 null 快照当认领成功。
+- 进程内兜底守卫（如 `wokenTasks`）必须有界（上限清空，registry 是权威判据），不随进程生命周期无界增长。
+- 周期自愈组件（看门狗/rebuild）只扫「已注册」集合时，必须补偿「有配置但未注册」的成员（`McpConnectionWatchdog.compensateUnregistered`），否则摘旧后注册失败 = 工具静默消失。
+
+---
+
 ## 环境变量
 
 | 变量 | 默认值 | 必填 | 说明 |
