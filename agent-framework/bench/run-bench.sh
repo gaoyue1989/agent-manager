@@ -167,6 +167,7 @@ start_container() {
     -e LLM_API_KEY=bench-mock \
     -e LLM_MODEL_ID=bench-model \
     -e LLM_BASE_URL=http://172.17.0.1:$MOCK_LLM_PORT/v1 \
+    -e AGENT_REDIS_URL="${AGENT_REDIS_URL:-redis://172.17.0.1:16379}" \
     -e CHECKPOINT_JDBC_URL="jdbc:mysql://172.17.0.1:$MYSQL_PORT/agent_manager_bench" \
     -e CHECKPOINT_USERNAME="$MYSQL_USER" \
     -e CHECKPOINT_PASSWORD="$MYSQL_PASSWORD" \
@@ -211,12 +212,13 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
   fi
 
   # 预热：每会话串行 1 次（沙箱全部呈已创建态，create 开销与稳态分离）。
-  # C 档跳过——非沙箱 create 开销可忽略，且 slow 场景预热一轮 = 池大小×30s 纯浪费
-  if [ "$SC" != "C" ]; then
-    say "场景 $SC 预热（sessions=$SC_POOL）"
-    node load/runner.js --mode warmup --scenario "$SC" --session-pool "$SC_POOL" \
-      --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; continue; }
-  fi
+  # C 档只暖 1 轮（session-pool 1）：冷 1C JVM 首轮多并发会出现秒级 JIT/类加载抖动，
+  # 不暖机会让启动延迟门禁吃假阳性（实测 21s 离群，复跑即消失）；全池预热 = 池×30s 不划算
+  C_WARM_POOL="$SC_POOL"
+  [ "$SC" == "C" ] && C_WARM_POOL=1
+  say "场景 $SC 预热（sessions=$C_WARM_POOL）"
+  node load/runner.js --mode warmup --scenario "$SC" --session-pool "$C_WARM_POOL" \
+    --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; continue; }
 
   for C in $STAGE_LIST; do
     # C ≤ 池上限时每个 inflight 独占会话（C 档池 = 并发数，恒独占）

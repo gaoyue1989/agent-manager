@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | 对应 Issue | [#87](https://github.com/gaoyue1989/agent-manager/issues/87)（并发 turn 启动排队 + 无等待反馈）、[#86](https://github.com/gaoyue1989/agent-manager/issues/86)（HITL ask 段帧序契约漂移，评测假阴性） |
-| 状态 | 已实施（2026-10-01，M1~M4 全部落地；mvn test 1353 例 0 失败，flywheel selftest 绿，V9 迁移真库验证通过；e2e/bench C 档待集群环境回归） |
+| 状态 | 已实施 + 集群回归通过（2026-10-01，PR [#88](https://github.com/gaoyue1989/agent-manager/pull/88) 合并 `458092c`；集群回归证据见 §10） |
 | 编制时点 | 2026-10-01，基于 master `3e6903b`、agentscope SDK 2.0.3（源码级考古，证据内联） |
-| 分期 | M1（#86 评测侧）→ M2（#87 根治）→ M3（#87 兜底与观测）→ M4（回归防线）；实施时一次落地，提交评审时仍按期拆分 |
+| 分期 | M1（#86 评测侧）→ M2（#87 根治）→ M3（#87 兜底与观测）→ M4（回归防线）；实施时一次落地合入 PR #88 |
 
 ---
 
@@ -350,7 +350,19 @@ new_seq = [ ...TOOL_CALL_END, MODEL_CALL_END,
 | 心跳帧对前端/评测的干扰 | 复用既有 `waiting` 词表（前端已处理）；评测 `build_view` 对 waiting 本就不计入关键断言（仅 frame_counts） | 开关化（env 常量，默认开） |
 | waiting 心调占用线程 | 独立单线程 daemon 调度器，非 Reactor 线程，遵守 2026-09-19 教训 | — |
 
-## 9. 附录：关键代码路径索引
+## 10. 集群回归记录（2026-10-01，PR #88 合并后实测）
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| CI（PR #88，7 必需检查） | 全绿 | mvn 1353 例 0 失败；E2E 核心/多副本（R5 跨副本 HITL）/沙箱/协议多副本/插件 + 评测自检全过。E2E 核心曾红两次：①迁移契约钉未随 V9 扩展（已修，注释即约定流程）②U14b 会话模型 UI 用例（重跑转绿，确认抖动） |
+| V9 存量迁移（集群真实库） | ✅ | oaf_checkpoint（6 服务共享库）`per peer session rekey` success=1，共享槽位 `gw-3f20f08c5499` 清零、全部重键为每会话 hash；本地 3307 存量库同验。附带发现并修复存量环境漂移：3307 库的 V7 checksum 早于 5f33a5f 幂等化改写（非本次改动），按 Flyway validate 报出的 resolved 值 repair |
+| 6 服务滚动升级 | ✅ | release-agent + order-fulfillment 5 demo 服务全部 rollout 至 `agentscope-2.1.0-v20261001-pp1`，健康运行 |
+| release-agent 并发（集群实测） | ✅ | 基本对话 session_created @0.24s（首帧直发生效）；双路长推理并发：req1 [1.8s, 100s]、req2 [2.1s, 48.2s]——req2 启动延迟 2.1s（修复前形态 = 排队至前一路结束，47~169s），真并发 |
+| HITL 用例（专用实例，新 jar） | ✅ | `case_hitl_publish_confirm_001` 2/2 PASS（10-01 轮为 2/2 假阴性）；轨迹帧序 = 主段 `permission_ask → REQUEST_STOP → AGENT_RESULT → AGENT_END` + confirm 恢复段 `USER_CONFIRM_RESULT → TOOL_RESULT_END(SUCCESS) → AGENT_END`，AGENT_END 计 2、契约 v2026-10-01 |
+| 取证脚本新旧对照 | ✅ | pre-fix 镜像（mock-llm `[BENCH:slow]` 30s/turn）：req2 启动延迟 28.8s（=req1 整 turn），转储抓到 `LocalSessionTurnGate.acquire` park 于 `withGatedStream`（与 §2.1 源码定位逐行吻合）；修复后镜像：req2 @2.1s 启动与 req1（165s）真并发，9 张有效转储零闸门阻塞栈。脚本实跑修正 3 处（Thread.print 命令名 / 转储循环持续抓取 / JRE 无 jcmd 无效转储标记） |
+| bench C 档门禁（1C 容器） | ✅ | C=2/4/8 全过：排队签名（agentStart−ttft）**p100 = 0ms**（#87 基线 17~169s）。agentStart 绝对值在 C=4/8 各出现 1 路 31s/16s 离群但 delta 恒 0——1 核容器首帧/CPU 饱和（容量特征，B 档 p95 停止条件已覆盖），非排队回归。据此门禁从 agentStart 绝对值精化为 ttft→start 排队签名；另修 run-bench.sh 两处：容器 env 缺 `AGENT_REDIS_URL`（Redis 引入前的旧脚本缺口）、C 档补 1 轮预热消冷启动假阳性 |
+
+## 11. 附录：关键代码路径索引
 
 - 平台：`ChatStreamController.java`（chat 入口/租约等待/HITL 落库/收尾）、`ChannelConfig.java`（Channel 构造）、`AgentRuntimeService.java`（gw-hash 推导/confirm 上下文/恢复身份）、`TurnLeaseStore.java`（per-session 跨副本租约）、`SessionKeyResolver` / `AgentStateReader` / `SessionMessageStore`（键形态翻译与多形态兜底）
 - SDK（agentscope 2.0.3，源码 jar）：`HarnessGateway.runStream/withGatedStream`（闸门持有窗口）、`LocalSessionTurnGate`（Semaphore(1,true) per key）、`ChannelRouter.buildDmContext`（DM+MAIN → channel-only key）、`DmScope`、`ChatUiChannel.create/perPeer`、`HarnessAgent.ensureGateway`（`DistributedStore.sessionTurnGate()` 注入点）
