@@ -26,7 +26,7 @@ public final class TestSchemaMigrator {
     private TestSchemaMigrator() {
     }
 
-    /** 按文件名升序执行全部迁移（V1、V2…；已存在的表/列由语句本身保证幂等——V6 为 INSERT IGNORE） */
+    /** 按版本号升序执行全部迁移（V1、V2…；已存在的表/列由语句本身保证幂等——V6 为 INSERT IGNORE） */
     public static void migrate(DataSource dataSource) throws Exception {
         var files = new ArrayList<String>();
         // 迁移目录在测试 classpath（target/classes）下是物理目录，直接枚举；
@@ -37,7 +37,9 @@ public final class TestSchemaMigrator {
                 files.add(f.getName());
             }
         }
-        files.sort(Comparator.naturalOrder());
+        // 按版本号数字排序（修 #58 low）：文件名字典序会让 V10 排在 V2 前——两位数版本
+        // 合入时 *MySqlIT 将按错误顺序执行迁移，与「测试 schema 与生产迁移链同源」契约相悖
+        files.sort(Comparator.comparingInt(TestSchemaMigrator::versionOf));
         try (var conn = dataSource.getConnection()) {
             conn.setAutoCommit(true);
             for (var name : files) {
@@ -58,6 +60,12 @@ public final class TestSchemaMigrator {
                 }
             }
         }
+    }
+
+    /** 迁移文件名中的版本号（V&lt;N&gt;__ 前缀；不匹配的排最后兜底） */
+    static int versionOf(String filename) {
+        var m = java.util.regex.Pattern.compile("^V(\\d+)__").matcher(filename);
+        return m.find() ? Integer.parseInt(m.group(1)) : Integer.MAX_VALUE;
     }
 
     /** 去掉行注释（-- 开头），避免注释里的中文分号/引号干扰语句切分 */

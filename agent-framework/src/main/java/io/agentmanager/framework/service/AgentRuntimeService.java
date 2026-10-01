@@ -763,11 +763,14 @@ public class AgentRuntimeService {
      */
     public boolean hasPendingConfirm(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);
-        if (agentStateReader != null
-                && !agentStateReader.loadAskingSnapshot(fullThreadId, stripTenantPrefix(fullThreadId)).isEmpty()) {
+        // confirm 行先查（索引命中 LIMIT 1）：命中即免掉 agent_state 全量读 + 整包 JSON
+        // 解析（HITL 活跃会话是预检延迟敏感面）。未命中再落 state 扫描——确认卡被 TTL
+        // 清理后仍可从 state 恢复判定的兜底。两源任一命中即为挂起，与旧顺序语义等价。
+        if (confirmContextStore.findPending(fullThreadId).isPresent()) {
             return true;
         }
-        return confirmContextStore.findPending(fullThreadId).isPresent();
+        return agentStateReader != null
+            && !agentStateReader.loadAskingSnapshot(fullThreadId, stripTenantPrefix(fullThreadId)).isEmpty();
     }
 
     /** DB CAS 取出并标记已消费（防重复确认 → 409） */

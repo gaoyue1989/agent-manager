@@ -298,6 +298,13 @@ OAF `deniedTools` 字段控制排除列表。
 
 ---
 
+## 性能观察项（已知、暂缓——触发条件后处理，2026-10-01 评审④归类）
+
+1. **agent_state 热路径五路 OR 全表扫描**：`AgentStateReader.loadFragments` 的 5 路形态匹配（1 等值 + 4 LIKE）使 OR 整体退化为全表扫描，`/threads/chat` 每 turn 的 `hasPendingConfirm` 都会触发一次（agent_state 全量行 + 整包 JSON 解析）。已做的零风险缓解：`AgentRuntimeService.hasPendingConfirm` 改为 confirm 行先查（索引命中即免扫描）。**未做强修的原因**：行序是分片合并语义（多条 item_index 拼数组后取最后一条 assistant）而非快照序，LIMIT/DESC 会破坏合并语义；SQL LIKE 预过滤耦合 SDK 序列化字节形态。**触发条件**：现网 agent_state 行数上万或列表延迟可感知时，按「会话级确认意图缓存位（写入时更新）」方案立项。
+2. **/threads 双臂 SUBSTRING_INDEX JOIN 全表扫描**：双臂均为函数表达式无法走索引（原 LIKE 前缀可走最左前缀）。**未做强修的原因**：单边函数索引无法覆盖 OR 双臂，需查询重写 + 生成列迁移，风险大于现网 196 行的收益。**触发条件**：同上，届时用生成列 `slot_tail` + 索引 + 查询重写一并处理。
+
+---
+
 ## 存储层错误分型纪律（2026-10-01，修评审 #72 确认缺陷后确立）
 
 Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`），会被上游当「确认不存在/无主」的业务信号用——多副本协调下产生**无痕唤醒 → 重复汇总 turn**、误吞唤醒、幂等键双发三类窗口。纪律：
