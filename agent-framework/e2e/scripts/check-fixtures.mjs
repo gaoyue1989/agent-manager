@@ -30,6 +30,28 @@ for (const [scenario, spec] of Object.entries(registry.llm)) {
     if (c.request?.stream && c.chunks?.[c.chunks.length - 1] !== '[DONE]') errors.push(`llm/${scenario}.json call[${i}]: 缺 [DONE] 结束帧`);
     if (!c.request?.stream && !c.body) errors.push(`llm/${scenario}.json call[${i}]: 非流式调用缺 body`);
   }
+  // 同一场景的多次 LLM 调用必须用互不相同的 completion id：真实 OpenAI 兼容端点每次请求
+  // 换一个 id，SDK 直接把 chunk 的 id 当 Msg.id 落库。而 session_message 归档按
+  // (session_id, msg_id) 幂等合并、history 合并视图又按「已归档 msg_id」过滤 state 侧消息
+  // ——id 复用会把一个会话里的多条 assistant 消息折叠成一条，回放只剩最后一条
+  // （实测 oaf-package 夹具三段调用共用一个 id → 回放既无工具组也无开场文本气泡，U16 红）。
+  const idCallIndex = new Map();
+  const reportedIds = new Set();
+  for (const [i, c] of (fx.calls ?? []).entries()) {
+    for (const ch of c.chunks ?? []) {
+      if (typeof ch !== 'string' || ch === '[DONE]') continue;
+      let obj; try { obj = JSON.parse(ch); } catch (e) { errors.push(`llm/${scenario}.json call[${i}]: chunk 解析失败: ${e.message}`); continue; }
+      const cid = obj && typeof obj.id === 'string' ? obj.id : '';
+      if (!cid) continue;
+      const prev = idCallIndex.get(cid);
+      // 同一次调用的所有分片共用一个 id（SSE 本来如此），只有跨调用复用才是问题
+      if (prev === undefined) idCallIndex.set(cid, i);
+      else if (prev !== i && !reportedIds.has(cid)) {
+        reportedIds.add(cid); // 一个 id 只报一次（复用会让该 call 的每个分片都命中）
+        errors.push(`llm/${scenario}.json: completion id "${cid}" 被 call[${prev}] 与 call[${i}] 复用（每次调用须用独立 id，否则历史回放折叠消息）`);
+      }
+    }
+  }
   for (const v of spec.variants ?? []) if (!fx.variants?.[v]?.chunks?.length) errors.push(`llm/${scenario}.json: 缺 variants.${v}`);
 }
 

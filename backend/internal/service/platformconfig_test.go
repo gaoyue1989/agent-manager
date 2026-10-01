@@ -63,6 +63,43 @@ func TestPublishRoutesSensitiveEnvToSecret(t *testing.T) {
 	}
 }
 
+// TestPublishEmptySensitiveKeyNeverEntersSecret 发布空值模板敏感键不变量（bug#1 回归防线）。
+// 设计 §3.3「空值永不进入 CM/Secret」：Publish env 携带 LLM_API_KEY=""（表单预填整包提交、
+// 清空后直发等场景）时，空值不得路由进服务 Secret/env_secret_json（Spring 占位符
+// ${VAR:default} 遇空串 env 不回落默认值），也不得因拆分回落到 CM/env_json 非敏感侧。
+// 需与 Publish 空值过滤修复同 PR 落地：对未修复的 master 本用例为红（刻意断言目标不变量）。
+func TestPublishEmptySensitiveKeyNeverEntersSecret(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID,
+		map[string]string{"LLM_API_KEY": "", "LOG_LEVEL": "info"}, nil)
+
+	if svc.EnvSecretJSON != `{}` {
+		t.Fatalf("empty sensitive key must not enter env_secret_json (design §3.3), got %s", svc.EnvSecretJSON)
+	}
+	if svc.EnvJSON != `{"LOG_LEVEL":"info"}` {
+		t.Fatalf("empty sensitive key must not fall back to plain env_json, got %s", svc.EnvJSON)
+	}
+	sobj, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.EnvSecretName("oaf-acme-demo"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("service secret must exist: %v", err)
+	}
+	if v, ok := sobj.Data["LLM_API_KEY"]; ok {
+		t.Fatalf("service secret must not contain empty-value key (bug#1), got %q", v)
+	}
+	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cm.Data["LLM_API_KEY"]; ok {
+		t.Fatal("CM must not contain the sensitive key even with empty value")
+	}
+	if cm.Data["LOG_LEVEL"] != "info" {
+		t.Fatalf("CM plain env routing must be unaffected: %+v", cm.Data)
+	}
+}
+
 // TestPublishSecretKeysForceRouting secretKeys 指定的任意键强制进服务 Secret。
 func TestPublishSecretKeysForceRouting(t *testing.T) {
 	core, fk, done := newTestCore(t)
