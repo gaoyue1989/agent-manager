@@ -217,7 +217,8 @@ public class HarnessAgentFactory {
                 // AGENT_REMOTE_SPAWN_SYNC_WAIT=false 关闭
                 .middleware(new RemoteSpawnForceSyncMiddleware(
                     props.agentProtocol() == null || props.agentProtocol().remoteSpawnSyncWait(),
-                    props.agentProtocol() != null ? props.agentProtocol().remoteSpawnSyncWaitSeconds() : 120))
+                    props.agentProtocol() != null ? props.agentProtocol().remoteSpawnSyncWaitSeconds() : 120,
+                    remoteSpawnTargetNames(oafConfig)))
                 // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
                 .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）
@@ -331,6 +332,17 @@ public class HarnessAgentFactory {
     /** remoteHeadersJson 解析用（ObjectMapper 线程安全，复用实例） */
     private static final com.fasterxml.jackson.databind.ObjectMapper REMOTE_HEADERS_MAPPER =
         new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /** 远程声明 spawn 目标名集（subAgents() 中 endpoint 非空者）：force-sync 中间件的作用域判据 */
+    static java.util.Set<String> remoteSpawnTargetNames(OafConfig oafConfig) {
+        var names = new java.util.HashSet<String>();
+        for (var sa : oafConfig.subAgents()) {
+            if (sa.endpoint() != null && !sa.endpoint().isBlank()) {
+                names.add(sa.agent());
+            }
+        }
+        return names;
+    }
 
     /**
      * 构造远程子 agent 声明（travel-fulfillment-agent-protocol-design §8 lead-1，B1 Agent Protocol）：

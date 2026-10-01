@@ -291,6 +291,58 @@ public class ConfirmContextStore {
     }
 
     /**
+     * resume 失败重开已消费远程行（consumed 1→0）：恢复「任务未续跑时卡片仍可重开」的
+     * 既有恢复通道，与复活守卫（findLastConsumedRemote）配套——守卫只压 resume 已成功
+     * 后的同轮竞态轮询，真实失败路径在 routeDecision 的 catch 里显式重开。
+     */
+    public void reopenConsumedRemote(String sessionId, String confirmKey) {
+        var key = normalizedKey(confirmKey);
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "UPDATE confirm_context SET consumed = 0 WHERE session_id = ? AND confirm_key = ? AND consumed = 1")) {
+            stmt.setString(1, sessionId);
+            stmt.setString(2, key);
+            int n = stmt.executeUpdate();
+            if (n > 0) {
+                log.info("ConfirmContextStore: reopened consumed remote row (sid={}, key={})", sessionId, key);
+            }
+        } catch (Exception e) {
+            log.warn("ConfirmContextStore: reopen failed for {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /**
+     * 同键最近一条<b>已消费</b>远程行（复活守卫专用读，2026-10-01 修评审 #62 low）：
+     * routeDecision CAS 消费后、member 尚未离开 awaiting_confirm 的窗口内，快照轮询会经
+     * put（ON DUPLICATE KEY UPDATE consumed=0）复活已决策卡片 → 同一任务重复 resume。
+     * 调用方比对 tool_call_id：同轮竞态（id 集一致）跳过落卡；新一轮合法 HITL（id 不同）放行。
+     * 不带 TTL 过滤——竞态窗口在秒级，且跨 TTL 的残留判定宁可保守。
+     */
+    public Optional<PendingConfirm> findLastConsumedRemote(String sessionId, String confirmKey) {
+        var key = normalizedKey(confirmKey);
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement("""
+                 SELECT session_id, confirm_key, tool_calls_json, remote_task, reply_id,
+                        runtime_session_id, runtime_user_id, created_at
+                 FROM confirm_context
+                 WHERE session_id = ? AND confirm_key = ? AND consumed = 1
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                 """)) {
+            stmt.setString(1, sessionId);
+            stmt.setString(2, key);
+            var rs = stmt.executeQuery();
+            if (!rs.next()) {
+                return Optional.empty();
+            }
+            return Optional.of(pendingRowOf(rs));
+        } catch (Exception e) {
+            log.warn("ConfirmContextStore: findLastConsumedRemote failed for {}: {}", sessionId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
      * 会话 FIFO 头：最早未消费行（任意 confirm_key，TTL 按 local/remote 分档懒过滤）。
      * history 的 pendingConfirm 取本方法（设计 §5.2：单卡 FIFO，前端零改动，
      * 并发远程挂起排队等待而非悬挂）。
