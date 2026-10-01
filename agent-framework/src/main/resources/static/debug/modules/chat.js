@@ -605,9 +605,19 @@ async function loadModels() {
 
 /** 切换模型：PATCH /threads/{sid} 持久化到 session_user.model（失败回滚下拉框） */
 async function onModelChange() {
+  const sid = currentSessionId();
   const previous = currentSessionModel();
-  const ok = await bindSessionModel(currentSessionId(), modelSelect.value);
-  if (!ok) modelSelect.value = previous;
+  const target = modelSelect.value;
+  const ok = await bindSessionModel(sid, target);
+  if (!ok) {
+    modelSelect.value = previous;
+    return;
+  }
+  // 同步 threads.list 快照（修 #43）：restoreModelForSession/currentSessionModel 以该
+  // 列表为数据源，PATCH 成功后不更新的话，30s 内切走再切回会回显旧绑定
+  const list = (ctx.state.getState('threads.list') || [])
+    .map((t) => (t && t.session_id === sid) ? { ...t, model: target } : t);
+  ctx.state.setState('threads.list', list);
 }
 
 /** 当前会话的已绑定模型（下拉框当前值），用于切换失败时回滚 */
@@ -1028,6 +1038,8 @@ function ensureThinking(r) {
         if (div.isConnected) lbl.textContent = 'thinking for ' + ctx.utils.formatDuration((Date.now() - start) / 1000);
         else clearInterval(iv);
       }, 1000);
+      // 挂在元素上，endThinking 收尾时清除（修 #64：否则「定格」标签一秒内被覆写回计时）
+      el._thinkingTimer = iv;
     })(el, Date.now());
   }
   return r.activeThinkingEl;
@@ -1044,6 +1056,10 @@ function appendThinkingDelta(r, delta) {
 function endThinking(r) {
   r.thinkingActive = false;
   if (r.activeThinkingEl) {
+    if (r.activeThinkingEl._thinkingTimer) {
+      clearInterval(r.activeThinkingEl._thinkingTimer);
+      r.activeThinkingEl._thinkingTimer = null;
+    }
     const lbl = r.activeThinkingEl.querySelector('.thinking-label');
     if (lbl) lbl.textContent = 'thinking (' + r.thinking.length + ' chars)';
     r.activeThinkingEl.querySelector('.thinking-body').classList.remove('open');
@@ -1117,8 +1133,11 @@ function onToolCallStart(r, tcId, name) {
   rowEl.addEventListener('click', () => window.App.toolRowToggle(rowEl));
   g.bodyEl.appendChild(rowEl);
   updateToolGroupTitle(r, g);
-  // 远程委派开始：开远程调用面板承接后续转发事件
-  if (name === 'agent_spawn') ensureRemotePanel(r, tcId);
+  // 远程委派开始：开远程调用面板承接后续转发事件。仅限顶层回复（r.replyId 存在）——
+  // 嵌套委派（修 #70）时 r 是面板视图对象，创建 replyId=undefined 的孙面板会抢占
+  // activeRemotePanel，其后所有远端转发事件被 routeRemoteEvent 的 replyId 校验静默
+  // 丢弃，子面板冻死；嵌套 spawn 降级为面板内普通工具行展示
+  if (name === 'agent_spawn' && r.replyId) ensureRemotePanel(r, tcId);
   scrollToBottom(false);
 }
 
@@ -1971,7 +1990,14 @@ async function sendMessage() {
       // A2A 链路无 model 入参（ChatRequest.model 仅存在于 /threads/chat，
       // 见 docs/session-model-switch-design.md §5.5），只能靠 session_user.model 绑定路由，
       // 故发送前先 PATCH 落库；新会话此刻 sid 已在客户端生成，可直接绑定。
-      await bindSessionModel(sid, model || 'system');
+      // PATCH 失败（如模型刚被禁用 400 model_disabled）不得照发消息——否则消息以
+      // 服务端旧绑定/回落模型发出，而下拉框仍显示所选模型，恰是本设计要消灭的
+      // 「界面显示与服务端绑定不一致」形态（修 #43）
+      const bound = await bindSessionModel(sid, model || 'system');
+      if (!bound) {
+        ctx.utils.toast('模型绑定失败，消息未发送——请重选模型', 'error');
+        return;
+      }
       await sendA2AStream(text, sid);
     }
   }

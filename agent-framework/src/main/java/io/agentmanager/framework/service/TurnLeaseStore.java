@@ -16,6 +16,11 @@ import org.springframework.stereotype.Service;
  * 不覆盖人工决策挂起期——HITL 挂起后随 turn 收尾放锁；挂起期间新消息由 chat 入口
  * 预检拒绝（#47/#48），confirm 恢复需重新 acquire（带超时排队，桥接收尾窗口）。
  *
+ * <p>两个恢复路径的放锁时序<b>不同</b>（TurnFinalizer javadoc 明示两侧不强行模板化）：
+ * confirm-stream 常规恢复段再挂起时经 handleEventAndEmit 仍是「storeConfirmContext 后
+ * 立即 release 并 closeSession」的旧语义（ConfirmController.java 恢复分支）；仅恢复段
+ * 正常收尾（未再挂起）才走 turn 收尾放锁。维护时勿以本类注释推断两侧一致。
+ *
  * <p>实现：租约 token + 短 TTL + 续租（不用 GET_LOCK，避免长 turn 耗尽连接池）。
  * 轮询为独立短连接，不占用连接池；崩溃由 TTL 过期兜底接管。
  */
