@@ -52,14 +52,25 @@ public class A2aJobRedisStore {
      * 抢占式认领（SET NX EX）：返回 null 表示认领成功（本副本获得独占发送权）；
      * 返回当前值表示同键已被占用（claim:* → in-flight 409；taskId → 幂等命中 200）。
      * Redis 异常抛出（上层 fail-closed 503）。
+     *
+     * <p>NX 失败后 GET 取值存在键恰好过期的竞态窗口（GET 返回 null ≠ 被占用）：
+     * 原地重试 NX 至多 3 次，仍无法取得确定态则抛出（上层 fail-closed 503）——
+     * 旧形态把 null 当「认领成功」会让双副本并发发送，打破同键恰好一次。
      */
     public String claim(String idempotencyKey, String token, Duration lease) {
         var k = key(idempotencyKey);
-        var ok = facade.sync().set(k, CLAIM_PREFIX + token, SetArgs.Builder.nx().ex(lease.toSeconds()));
-        if (ok != null) {
-            return null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            var ok = facade.sync().set(k, CLAIM_PREFIX + token, SetArgs.Builder.nx().ex(lease.toSeconds()));
+            if (ok != null) {
+                return null;
+            }
+            var existing = facade.sync().get(k);
+            if (existing != null) {
+                return existing;
+            }
         }
-        return facade.sync().get(k);
+        throw new IllegalStateException(
+            "a2a job claim race persisted for key " + idempotencyKey + " (nx/get loop exhausted)");
     }
 
     /** 当前值快照（GET；409 后重试 NX 前复查「键已消失」用） */

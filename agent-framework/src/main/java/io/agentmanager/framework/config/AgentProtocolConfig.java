@@ -126,7 +126,10 @@ public class AgentProtocolConfig {
                 var f = facade.getIfAvailable();
                 if (f != null) {
                     log.info("Agent Protocol enabled: AgentProtocolEventBus -> redis streams (multi-replica §18.3)");
-                    return new io.agentmanager.framework.service.protocol.ProtocolRedisEventBus(f);
+                    // 降级内存通道与主通道同 replay 配置（无参构造会让 sse-replay-buffer-size 静默失效，CR P2-4 同源）
+                    return new io.agentmanager.framework.service.protocol.ProtocolRedisEventBus(f,
+                        sdkProps.getIfAvailable(io.agentscope.extensions.agentprotocol.AgentProtocolProperties::new)
+                            .getSseReplayBufferSize());
                 }
                 log.warn("AGENT_PROTOCOL_EVENT_BUS=redis 但无 RedisConnectionFacade bean，降级内存总线（v1.4 行为）");
             }

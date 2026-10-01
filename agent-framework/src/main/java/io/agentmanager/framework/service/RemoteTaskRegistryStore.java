@@ -20,9 +20,9 @@ import org.springframework.stereotype.Service;
  * <ol>
  *   <li><b>spawn 登记</b>：{@link #register} INSERT IGNORE 幂等（uk 对撞 = 已登记）；</li>
  *   <li><b>重建</b>：{@link #findInFlight} 供 Bridge 启动/周期回填内存登记表；</li>
- *   <li><b>唤醒幂等</b>：{@link #claimWake} IN_FLIGHT→TERMINAL 的认领即收口 CAS——
+ *   <li><b>唤醒幂等</b>：{@link #tryClaimWake} IN_FLIGHT→TERMINAL 的认领即收口 CAS——
  *       决策路径与后台收割路径对同一终态只有一个副本（或进程）抢到汇总 turn（G4，
- *       无中间态防卡死，CR P1-3）；</li>
+ *       无中间态防卡死，CR P1-3）；DB 异常分型为 UNAVAILABLE，不与「被抢/无行」混同；</li>
  *   <li><b>endpoint 快照</b>：{@link #findEndpoint} 供跨副本确认路由在内存登记 miss
  *       （spawn 副本已亡）时退回。</li>
  * </ol>
@@ -101,30 +101,34 @@ public class RemoteTaskRegistryStore {
         return rows;
     }
 
-    /** 行是否存在（唤醒 CAS 的"被抢 vs 无行"区分：无行走进程内兜底守卫） */
-    public boolean exists(String sessionId, String taskId) {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.prepareStatement(
-                 "SELECT 1 FROM remote_task_registry WHERE session_id = ? AND task_id = ?")) {
-            stmt.setString(1, sessionId);
-            stmt.setString(2, taskId);
-            return stmt.executeQuery().next();
-        } catch (Exception e) {
-            log.warn("[RemoteTaskRegistry] exists failed (sid={}, taskId={}): {}",
-                sessionId, taskId, e.getMessage());
-            return false;
-        }
+    /** 唤醒认领结果（错误分型：「确认被抢/无行」与「暂时不可判定」必须是不同返回） */
+    public enum WakeClaim {
+        /** 认领成功：行已 IN_FLIGHT→TERMINAL 收口，本副本获得唯一唤醒权 */
+        CLAIMED,
+        /** 行存在但已被其他副本/路径收口：幂等跳过 */
+        CONTENTED,
+        /** 行不存在（登记失败/历史路径）：调用方降级进程内守卫 */
+        ABSENT,
+        /** DB 暂时不可用、状态未知：调用方必须跳过本轮（宁延迟不重复，rebuild 周期会重拾） */
+        UNAVAILABLE
     }
 
     /**
-     * 唤醒认领 CAS（IN_FLIGHT → TERMINAL，**认领即收口**，CR P1-3）：affected=1 表示
-     * 本副本抢到该终态的唯一唤醒权；=0 表示已被其他副本/路径认领（或已收口）。
+     * 唤醒认领单入口（IN_FLIGHT → TERMINAL，**认领即收口**，CR P1-3）：单语句 CAS 抢
+     * 唯一唤醒权——决策路径与后台收割路径对同一终态只有一个副本（或进程）抢到汇总
+     * turn（G4，无中间态防卡死）。
+     *
+     * <p>错误分型（修评审 #72 确认缺陷）：CAS affected=0 时复查一行区分「无行」与「已被抢」，
+     * 任一步 DB 异常返回 {@link WakeClaim#UNAVAILABLE} 而非与业务语义混同——旧形态
+     * exists()/claimWake() 双方法都吞异常返回 false，上层把「DB 抖动」当「无行/被抢」处理，
+     * 产生无痕唤醒（DB 恢复后 rebuild 重拾 → 同一任务重复汇总 turn）与误吞唤醒两类窗口。
      *
      * <p>不设中间态：认领与收口若是两条语句，中间进程死亡/DB 抖动会把行永久卡在
      * 中间态（rebuild 不拾起、claimWake 恒 0、清理不覆盖）——比 v1.4 内存守卫更差。
      * 单语句原子关闭后，唤醒失败（租约忙等）按既有语义降级为「下一用户 turn 收割」。
      */
-    public boolean claimWake(String sessionId, String taskId) {
+    public WakeClaim tryClaimWake(String sessionId, String taskId) {
+        int affected;
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  UPDATE remote_task_registry SET status = ?, updated_at = NOW(3)
@@ -134,11 +138,26 @@ public class RemoteTaskRegistryStore {
             stmt.setString(2, sessionId);
             stmt.setString(3, taskId);
             stmt.setString(4, STATUS_IN_FLIGHT);
-            return stmt.executeUpdate() == 1;
+            affected = stmt.executeUpdate();
         } catch (Exception e) {
-            log.warn("[RemoteTaskRegistry] claimWake failed (sid={}, taskId={}): {}",
+            log.warn("[RemoteTaskRegistry] tryClaimWake CAS failed (sid={}, taskId={}): {}",
                 sessionId, taskId, e.getMessage());
-            return false;
+            return WakeClaim.UNAVAILABLE;
+        }
+        if (affected == 1) {
+            return WakeClaim.CLAIMED;
+        }
+        // affected=0：行不存在（未登记路径，降级进程内守卫）或已收口（幂等跳过）——复查区分
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "SELECT 1 FROM remote_task_registry WHERE session_id = ? AND task_id = ?")) {
+            stmt.setString(1, sessionId);
+            stmt.setString(2, taskId);
+            return stmt.executeQuery().next() ? WakeClaim.CONTENTED : WakeClaim.ABSENT;
+        } catch (Exception e) {
+            log.warn("[RemoteTaskRegistry] tryClaimWake probe failed (sid={}, taskId={}): {}",
+                sessionId, taskId, e.getMessage());
+            return WakeClaim.UNAVAILABLE;
         }
     }
 
