@@ -137,6 +137,10 @@ def build_view(events: list[dict[str, Any]]) -> dict[str, Any]:
     deliveries: list[dict[str, Any]] = []
     hitl_asks: list[dict[str, Any]] = []
     hitl_confirmed = False
+    asked_ids: set[str] = set()
+    result_ended_ids: set[str] = set()
+    first_event_ms: int | None = None
+    agent_start_ms: int | None = None
     usage = {"input": 0, "output": 0, "total": 0}
     text_parts: list[str] = []
     error_frames: list[dict[str, Any]] = []
@@ -153,6 +157,10 @@ def build_view(events: list[dict[str, Any]]) -> dict[str, Any]:
         frame_counts[ftype] = frame_counts.get(ftype, 0) + 1
         order.append(ftype)
         last_seen[ftype] = ev["t_ms"]
+        if ftype != "session_created" and first_event_ms is None:
+            first_event_ms = ev["t_ms"]
+        if ftype == "AGENT_START" and agent_start_ms is None:
+            agent_start_ms = ev["t_ms"]
 
         if ftype == text_delta_frame:
             delta = raw.get(text_delta_field)
@@ -173,6 +181,8 @@ def build_view(events: list[dict[str, Any]]) -> dict[str, Any]:
                                    "t_ms": ev["t_ms"], "result_state": None, "summary": True})
         elif ftype == "TOOL_RESULT_END":
             cid = raw.get("toolCallId")
+            if cid:
+                result_ended_ids.add(cid)
             if cid and cid in calls_by_id:
                 calls_by_id[cid]["result_state"] = raw.get("state")
         elif ftype == _USAGE["type"]:
@@ -181,10 +191,15 @@ def build_view(events: list[dict[str, Any]]) -> dict[str, Any]:
                 if isinstance(val, (int, float)):
                     usage[key] += int(val)
         elif ftype == _HITL["ask_frame"]:
+            ask_tcs = list(raw.get(_HITL["ask_tool_calls_field"], []))
+            for tc in ask_tcs:
+                cid = tc.get("tool_call_id")
+                if cid:
+                    asked_ids.add(cid)
             hitl_asks.append({
                 "t_ms": ev["t_ms"],
-                "tools": [c.get("name") for c in raw.get(_HITL["ask_tool_calls_field"], [])],
-                "tool_calls": list(raw.get(_HITL["ask_tool_calls_field"], [])),
+                "tools": [c.get("name") for c in ask_tcs],
+                "tool_calls": ask_tcs,
                 "reply_id": raw.get("reply_id"),
             })
         elif ftype == _HITL["result_frame"]:
@@ -199,16 +214,22 @@ def build_view(events: list[dict[str, Any]]) -> dict[str, Any]:
     present = [t for t in MAPPING["terminal_frames"] if t in frame_counts]
     if present:
         terminal = max(present, key=lambda t: last_seen[t])
+    # HITL 挂起判定（issue #86）：不依赖终帧（4db16ba 起 ask 段以 AGENT_END 自然收尾），
+    # 按「ask 存在且被 ask 的 tool_call 在本段内无 TOOL_RESULT_END 配对」判定——
+    # 旧序（permission_ask 终止）与新序（AGENT_END 终止）下均成立
+    hitl_pending = bool(asked_ids) and bool(asked_ids - result_ended_ids)
     return {
         "frame_counts": frame_counts,
         "frame_order": order,
         "tool_calls": tool_calls,
         "deliveries": deliveries,
-        "hitl": {"asks": hitl_asks, "confirmed": hitl_confirmed},
+        "hitl": {"asks": hitl_asks, "confirmed": hitl_confirmed, "pending": hitl_pending},
         "token_usage": usage,
         "final_output": "".join(text_parts),
         "error_frames": error_frames,
         "terminal": terminal,
+        "first_event_ms": first_event_ms,
+        "agent_start_ms": agent_start_ms,
     }
 
 

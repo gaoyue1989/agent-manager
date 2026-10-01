@@ -47,17 +47,25 @@ const MIN_SAMPLES = parseInt(arg('min-samples', '20'), 10);
 // 同会话最小 turn 间隔。实测：沙箱模式下一 turn 的 POST_CALL stop()（工作区/记忆回写）
 // 与下一 turn 复用同一沙箱实例存在竞态——背靠背（0 间隔）时 ~50% turn 被上一 turn 的
 // stop() 中途停掉而静默死亡（详见压测报告缺陷发现）。≥500ms 间隔实测 100% 稳定。
-// B0（非沙箱）无此问题，保持 0 间隔测纯容量。
-const MIN_TURN_GAP_MS = parseInt(arg('min-turn-gap-ms', SCENARIO === 'B0' ? '0' : '500'), 10);
+// B0（非沙箱）无此问题，保持 0 间隔测纯容量；C（并发启动延迟档，非沙箱）同理。
+const MIN_TURN_GAP_MS = parseInt(
+  arg('min-turn-gap-ms', (SCENARIO === 'B0' || SCENARIO === 'C') ? '0' : '500'), 10);
 
 // 场景 → 消息标记（mock-llm 状态机据此决定轮数与工具）
 const SCENARIO_MARKER = {
   B0: '[BENCH:plain]', B1: '[BENCH:plain]', B2: '[BENCH:file]',
   B3: '[BENCH:shell]', B4: '[BENCH:mcp]', B5: '[BENCH:plain]',
+  C: '[BENCH:slow]',
 };
 const MARKER = SCENARIO_MARKER[SCENARIO] || '[BENCH:plain]';
-/** 每成功请求的期望 LLM 调用数（plain=1，工具场景=2），用于与 mock /stats 对账 */
-const EXPECTED_LLM_CALLS = MARKER === '[BENCH:plain]' ? 1 : 2;
+/** 每成功请求的期望 LLM 调用数（plain/slow=1，工具场景=2），用于与 mock /stats 对账 */
+const EXPECTED_LLM_CALLS = (MARKER === '[BENCH:plain]' || MARKER === '[BENCH:slow]') ? 1 : 2;
+
+// 启动延迟门禁（issue #87 回归防线，场景 C 专用）：任一路 AGENT_START 相对请求发起
+// 时刻超过阈值即该档 FAIL（exit 3）。坏值基线 17s/47s/69s/169s（全局 turn 闸门），
+// PER_PEER 修复后预期亚秒级。仅 C 档强制（B 档语义不变）。
+const ASSERT_START_DELAY_MS = parseInt(arg('assert-start-delay-ms', '10000'), 10);
+const ENFORCE_START_DELAY = SCENARIO === 'C' && ASSERT_START_DELAY_MS > 0;
 
 const base = new URL(BASE_URL);
 const scenarioDir = path.join(RESULTS_DIR, SCENARIO);
@@ -89,6 +97,7 @@ function chatOnce(sid, userId) {
   return new Promise((resolve) => {
     const startMs = Date.now();
     let ttftMs = null;
+    let agentStartMs = null;
     let waiting = 0;
     let settled = false;
 
@@ -130,6 +139,7 @@ function chatOnce(sid, userId) {
           try { frame = JSON.parse(dataStr); } catch { continue; }
           const type = frame.type || '';
           if (ttftMs === null && type !== 'waiting') ttftMs = Date.now() - startMs;
+          if (type === 'AGENT_START' && agentStartMs === null) agentStartMs = Date.now() - startMs;
           if (type === 'waiting') waiting++;
           else if (type === 'AGENT_END') finish(true, null);
           else if (type === 'error') finish(false, String(frame.error || 'error_frame').slice(0, 200));
@@ -152,7 +162,7 @@ function chatOnce(sid, userId) {
       resolve({
         sid, userId, startMs, ok,
         latencyMs: Date.now() - startMs,
-        ttftMs, waiting,
+        ttftMs, agentStartMs, waiting,
         error: error || null,
       });
     }
@@ -353,8 +363,13 @@ async function run() {
   const okRecs = metrics.filter((m) => m.ok);
   const lat = okRecs.map((m) => m.latencyMs);
   const ttfts = metrics.map((m) => m.ttftMs).filter((v) => v !== null);
+  const starts = metrics.map((m) => m.agentStartMs).filter((v) => v !== null);
   const waitings = metrics.map((m) => m.waiting);
   const steadyMinutes = STAGE_SECONDS / 60;
+  // 启动延迟门禁（issue #87）：C 档任一路 AGENT_START 超阈值即 FAIL
+  const breaches = ENFORCE_START_DELAY
+    ? metrics.filter((m) => m.agentStartMs !== null && m.agentStartMs > ASSERT_START_DELAY_MS).length
+    : 0;
   const summary = {
     scenario: SCENARIO,
     stage: STAGE,
@@ -372,6 +387,13 @@ async function run() {
     maxMs: lat.length ? Math.max(...lat) : 0,
     ttftP50Ms: pct(ttfts, 50),
     ttftP95Ms: pct(ttfts, 95),
+    // 启动延迟分布（agent_start_delay_ms，issue #87 修复方向 3）
+    agentStartSamples: starts.length,
+    agentStartP50Ms: pct(starts, 50),
+    agentStartP95Ms: pct(starts, 95),
+    agentStartMaxMs: starts.length ? Math.max(...starts) : 0,
+    startDelayThresholdMs: ENFORCE_START_DELAY ? ASSERT_START_DELAY_MS : null,
+    startDelayBreaches: breaches,
     waitingAvg: waitings.length ? +(waitings.reduce((a, b) => a + b, 0) / waitings.length).toFixed(2) : 0,
     llmCallsExpected: okRecs.length * EXPECTED_LLM_CALLS,
     aborted,
@@ -381,7 +403,13 @@ async function run() {
   fs.writeFileSync(path.join(scenarioDir, `${STAGE}.summary.json`), JSON.stringify(summary, null, 2));
   console.log(`[done] ${SCENARIO} C=${CONCURRENCY}: ok=${summary.ok} err=${summary.error} ` +
     `req/min=${summary.reqPerMin} p50=${summary.p50Ms} p95=${summary.p95Ms}` +
+    (starts.length ? ` agentStart p50=${summary.agentStartP50Ms} p100=${summary.agentStartMaxMs}` : '') +
     (aborted ? ` [中止: ${abortReason}]` : ''));
+  if (breaches > 0) {
+    console.error(`[done] 启动延迟门禁 FAIL：${breaches} 路 AGENT_START 超过 ` +
+      `${ASSERT_START_DELAY_MS}ms（跨会话排队，见 issue #87 / docs/design/turn-gate-concurrency-and-hitl-eval-contract-design.md）`);
+    process.exit(3);
+  }
   // 非正常中止以非零码退出，编排脚本据此跳过该场景剩余档
   process.exit(aborted ? 2 : 0);
 }
