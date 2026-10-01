@@ -24,6 +24,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentscope.harness.agent.subagent.protocol.RemoteConfirmDecision;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.harness.agent.subagent.protocol.RemotePendingConfirm;
 import io.agentscope.harness.agent.subagent.task.AgentProtocolTaskClient;
 import io.agentscope.harness.agent.subagent.task.RemoteTaskStatus;
@@ -459,6 +460,33 @@ public class RemoteConfirmBridge {
         if (existing.isPresent()) {
             return;   // 卡片已落，等待用户决策
         }
+        // 复活守卫（修评审 #62 low）：routeDecision CAS 消费后、member 尚未离开
+        // awaiting_confirm 的窗口内，本方法被快照轮询重入——put 的 ON DUPLICATE KEY
+        // UPDATE 会把已决策行复活（consumed 重置 0），用户二次确认即对同一任务重复
+        // resume。判据 = tool_call_id：同轮竞态的挂起与已消费行 id 集一致 → 跳过；
+        // 该任务的新一轮合法 HITL 会有全新 tool_call_id → 放行落卡。id 不可辨（当前
+        // 无挂起明细）时保守放行，维持既有行为。
+        var pendingConfirms = status.pendingConfirms() != null ? status.pendingConfirms() : List.<RemotePendingConfirm>of();
+        var currentIds = pendingConfirms.stream()
+            .map(RemotePendingConfirm::getToolCallId)
+            .filter(id -> id != null && !id.isBlank())
+            .toList();
+        if (!currentIds.isEmpty()) {
+            try {
+                var consumed = confirmContextStore.findLastConsumedRemote(ref.sessionId(), confirmKey);
+                if (consumed.isPresent()
+                        && consumed.get().toolCalls() != null
+                        && consumed.get().toolCalls().stream().map(ToolUseBlock::getId).toList().containsAll(currentIds)) {
+                    log.info("[RemoteConfirmBridge] confirm card for task {} already decided "
+                            + "(same tool_call_ids {}), skip resurrection while resume lands",
+                        ref.taskId(), currentIds);
+                    return;
+                }
+            } catch (Exception e) {
+                log.warn("[RemoteConfirmBridge] consumed-row probe failed for task {}: {}",
+                    ref.taskId(), e.getMessage());
+            }
+        }
 
         // 串行规约违反观测信号：同 session 已有其他远程行未消费又来新挂起
         var others = confirmContextStore.findUnconsumedRemote(ref.sessionId()).stream()
@@ -475,7 +503,6 @@ public class RemoteConfirmBridge {
                     "queued_behind", others.stream().map(ConfirmContextStore.PendingConfirm::confirmKey).toList())));
         }
 
-        var pendingConfirms = status.pendingConfirms() != null ? status.pendingConfirms() : List.<RemotePendingConfirm>of();
         var toolCalls = new ArrayList<Map<String, Object>>(pendingConfirms.size());
         for (var pc : pendingConfirms) {
             var m = new LinkedHashMap<String, Object>();
@@ -585,11 +612,15 @@ public class RemoteConfirmBridge {
             taskClient.resumeTask(endpoint, remoteHeaders(), taskId, decisions);
         } catch (IOException e) {
             log.error("[RemoteConfirmBridge] resume failed for task {} ({}): {}", taskId, endpoint, e.getMessage());
+            // resume 失败：重开已消费行，恢复「卡片仍可重开」恢复通道（复活守卫只压 resume
+            // 成功后的同轮竞态轮询）；重开失败则行留 consumed=1，交 ERROR 审计人工介入
+            confirmContextStore.reopenConsumedRemote(sessionId, row.confirmKey());
             audit(sessionId, "remote_confirm", taskId, approved ? "ALLOW" : "DENY",
                 payloadJson(Map.of("confirm_key", row.confirmKey(), "error", String.valueOf(e.getMessage()))));
             throw new IllegalStateException("remote resume failed: " + e.getMessage(), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            confirmContextStore.reopenConsumedRemote(sessionId, row.confirmKey());
             throw new IllegalStateException("remote resume interrupted", e);
         }
         audit(sessionId, "remote_confirm", taskId, approved ? "ALLOW" : "DENY",

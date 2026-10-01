@@ -137,6 +137,31 @@ class ConfirmContextStoreMultiKeyTest {
     }
 
     @Test
+    void findLastConsumedRemoteShouldSelectConsumedRowByKey() throws Exception {
+        // 复活守卫专用读（修 #62 low）：consumed=1 过滤、无 TTL、按 session+key 精确命中主键
+        stubEmptyResult();
+        store.findLastConsumedRemote("webui-1", "task:t-1");
+
+        var sql = capturedSql();
+        assertTrue(sql.contains("consumed = 1"), sql);
+        assertTrue(sql.contains("session_id = ? AND confirm_key = ?"), sql);
+        assertFalse(sql.contains("DATE_SUB"), "无 TTL 过滤（竞态窗口秒级，判定宁可保守）: " + sql);
+        verify(ps).setString(1, "webui-1");
+        verify(ps).setString(2, "task:t-1");
+    }
+
+    @Test
+    void reopenConsumedRemoteShouldResetConsumedFlag() throws Exception {
+        // resume 失败重开通道：UPDATE consumed 1→0，与复活守卫配套
+        stubEmptyResult();
+        store.reopenConsumedRemote("webui-1", "task:t-1");
+
+        var sql = capturedSql();
+        assertTrue(sql.contains("SET consumed = 0"), sql);
+        assertTrue(sql.contains("AND consumed = 1"), sql);
+    }
+
+    @Test
     void findExpiredRemoteRowsShouldSelectExpiredUnconsumedRemote() throws Exception {
         stubEmptyResult();
         store.findExpiredRemoteRows();

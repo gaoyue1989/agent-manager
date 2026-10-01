@@ -36,7 +36,7 @@ class RemoteSpawnForceSyncMiddlewareTest {
 
     @Test
     void pureSpawnRoundShouldInjectForceSyncAttributes() {
-        var mw = new RemoteSpawnForceSyncMiddleware(true, 120);
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 120, java.util.Set.of("booking"));
         var ctx = RuntimeContext.empty();
         AtomicReference<RuntimeContext> seen = new AtomicReference<>();
         mw.onActing(null, ctx, spawnInput(), i -> {
@@ -57,7 +57,7 @@ class RemoteSpawnForceSyncMiddlewareTest {
 
     @Test
     void disabledShouldSkip() {
-        var mw = new RemoteSpawnForceSyncMiddleware(false, 120);
+        var mw = new RemoteSpawnForceSyncMiddleware(false, 120, java.util.Set.of("booking"));
         var ctx = RuntimeContext.empty();
         mw.onActing(null, ctx, spawnInput(), i -> Flux.empty());
         assertNull(ctx.get(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC));
@@ -65,7 +65,7 @@ class RemoteSpawnForceSyncMiddlewareTest {
 
     @Test
     void attributesShouldRestoreToPreviousValuesAfterFlux() {
-        var mw = new RemoteSpawnForceSyncMiddleware(true, 60);
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 60, java.util.Set.of("booking"));
         var ctx = RuntimeContext.empty();
         ctx.put(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC, Boolean.FALSE);
         mw.onActing(null, ctx, spawnInput(), i -> Flux.empty()).blockLast();
@@ -75,12 +75,69 @@ class RemoteSpawnForceSyncMiddlewareTest {
 
     @Test
     void zeroWaitSecondsShouldFallBackToDefault() {
-        var mw = new RemoteSpawnForceSyncMiddleware(true, 0);
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 0, java.util.Set.of("booking"));
         var ctx = RuntimeContext.empty();
         AtomicReference<RuntimeContext> seen = new AtomicReference<>();
         mw.onActing(null, ctx, spawnInput(), i -> { seen.set(ctx); return Flux.<AgentEvent>empty(); });
         assertEquals(120, (Integer) seen.get().get(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC_TIMEOUT_SECONDS));
         assertTrue(seen.get().get(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC) == Boolean.TRUE);
+    }
+
+    // ===== 作用域收敛（修 #62：本地 spawn 不被改写）=====
+
+    @Test
+    void localDeclaredTargetShouldNotBeRewrittenNorInjected() {
+        // 本地子 agent：timeout 0 = fire-and-forget、缺省 = SDK 默认同步窗口——语义不因本中间件改变
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 120, java.util.Set.of("remote-a"));
+        var ctx = RuntimeContext.empty();
+        AtomicReference<ActingInput> seen = new AtomicReference<>();
+        var input = new ActingInput(List.of(ToolUseBlock.builder()
+            .id("c1").name("agent_spawn").input(java.util.Map.of("agent_id", "local-b")).build()));
+        mw.onActing(null, ctx, input, i -> {
+            seen.set(i);
+            return Flux.<AgentEvent>empty();
+        });
+        assertNull(seen.get().toolCalls().get(0).getInput().get("timeout_seconds"),
+            "本地目标入参不被改写");
+        assertNull(ctx.get(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC), "本地目标不注入 force_sync");
+    }
+
+    @Test
+    void mixedRemoteLocalRoundShouldRewriteRemoteOnlyAndSkipCtx() {
+        // 混编轮次：force_sync 是轮级全局——保守只做远程调用逐参改写，不注入 ctx
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 120, java.util.Set.of("remote-a"));
+        var ctx = RuntimeContext.empty();
+        AtomicReference<ActingInput> seen = new AtomicReference<>();
+        var input = new ActingInput(List.of(
+            ToolUseBlock.builder().id("c1").name("agent_spawn")
+                .input(java.util.Map.of("agent_id", "remote-a", "timeout_seconds", 0)).build(),
+            ToolUseBlock.builder().id("c2").name("agent_spawn")
+                .input(java.util.Map.of("agent_id", "local-b", "timeout_seconds", 0)).build()));
+        mw.onActing(null, ctx, input, i -> {
+            seen.set(i);
+            return Flux.<AgentEvent>empty();
+        });
+        var calls = seen.get().toolCalls();
+        assertEquals(120, ((Number) calls.get(0).getInput().get("timeout_seconds")).intValue(),
+            "远程目标入参被改写");
+        assertEquals(0, ((Number) calls.get(1).getInput().get("timeout_seconds")).intValue(),
+            "本地目标入参保持原值");
+        assertNull(ctx.get(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC), "混编轮次不注入 force_sync");
+    }
+
+    @Test
+    void emptyRemoteDeclarationsShouldBeFullyInert() {
+        // 无远程声明 → 零行为变化（契约测试）
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 120, java.util.Set.of());
+        var ctx = RuntimeContext.empty();
+        AtomicReference<ActingInput> seen = new AtomicReference<>();
+        mw.onActing(null, ctx, spawnInput(), i -> {
+            seen.set(i);
+            return Flux.<AgentEvent>empty();
+        });
+        assertTrue(seen.get() == null || seen.get().toolCalls().get(0).getInput().get("timeout_seconds") == null,
+            "无声明时入参零改写");
+        assertNull(ctx.get(RemoteSpawnForceSyncMiddleware.CTX_FORCE_SYNC));
     }
 
     @Test
@@ -93,7 +150,7 @@ class RemoteSpawnForceSyncMiddlewareTest {
 
     @Test
     void zeroOrMissingTimeoutShouldBeRewrittenToWaitSeconds() {
-        var mw = new RemoteSpawnForceSyncMiddleware(true, 120);
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 120, java.util.Set.of("booking"));
         var ctx = RuntimeContext.empty();
         AtomicReference<ActingInput> seen = new AtomicReference<>();
         mw.onActing(null, ctx, spawnInput(), i -> { seen.set(i); return Flux.<AgentEvent>empty(); }).blockLast();
@@ -105,7 +162,7 @@ class RemoteSpawnForceSyncMiddlewareTest {
 
     @Test
     void positiveTimeoutShouldBeKept() {
-        var mw = new RemoteSpawnForceSyncMiddleware(true, 120);
+        var mw = new RemoteSpawnForceSyncMiddleware(true, 120, java.util.Set.of("booking"));
         var ctx = RuntimeContext.empty();
         var input = new ActingInput(List.of(ToolUseBlock.builder()
             .id("c1").name("agent_spawn")
