@@ -61,8 +61,9 @@ async def execute_once(
     """执行一次用例，返回统一轨迹（schema §4.2）：原始事件 + 结构化视图 + 判定结果。
 
     status: success（收到终止帧）| failed（传输/HTTP 错误）| timeout（整体超时）。
-    HITL：流以 permission_ask 终止且 hitl_policy=auto_confirm 时，调 confirm-stream
-    续段并把续段事件并入同一轨迹。
+    HITL：段内出现挂起（hitl.pending：ask 存在且被 ask 的 tool_call 无结果配对，
+    终帧不限——4db16ba 起 ask 段以 AGENT_END 收尾）且 hitl_policy=auto_confirm 时，
+    调 confirm-stream 续段并把续段事件并入同一轨迹。
     """
     inp = case["input"]
     payload = {"message": inp.get("message", ""), "userId": inp.get("userId", "eval-test")}
@@ -88,7 +89,15 @@ async def execute_once(
         session_id = got_sid
         events = list(main_events)
         view_probe = sse_client.build_view(events)
-        pending_ask = view_probe["terminal"] == sse_client.MAPPING["hitl"]["ask_frame"]
+        # 挂起判定（issue #86，4db16ba 契约漂移修复）：不再依赖终帧（旧行为
+        # terminal == permission_ask 在 4db16ba 起恒为 False，auto_confirm 全灭），
+        # 改为「段内出现 ask 且被 ask 的 tool_call 无 TOOL_RESULT_END 配对」——
+        # 旧序（permission_ask 终止）与新序（AGENT_END 终止）下均成立。
+        pending_ask = view_probe["hitl"]["pending"]
+        # 终帧合法性同步放宽：ask 段合法终帧集合 = {permission_ask(旧序), AGENT_END(4db16ba+ 新序)}；
+        # 异常终帧不改变执行结果，仅记入轨迹供 RCA 归类
+        if pending_ask and view_probe["terminal"] not in sse_client.MAPPING["hitl"]["ask_segment_terminal_frames"]:
+            error_info = f"ask 段异常终帧: {view_probe['terminal']}"
 
         if pending_ask and policy == "auto_confirm" and session_id:
             # 自动确认：按 permission_ask 帧携带的 tool_calls 明细逐个确认

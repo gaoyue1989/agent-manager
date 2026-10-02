@@ -26,7 +26,7 @@ import {
   PROTO_MEMBER_LB, PROTO_MEMBER_A, PROTO_MEMBER_B,
   runId,
 } from '../lib/env.js';
-import { chat, history } from '../lib/client.js';
+import { chat } from '../lib/client.js';
 import { textOf } from '../lib/sse.js';
 
 const TOKEN = 'e2e-protocol-token';
@@ -50,23 +50,6 @@ async function spawnViaLb(sid: string, msg: string, timeoutMs = 120_000) {
   return textOf(collected.frames);
 }
 
-/** 等待任务进入指定状态（快照轮询 member LB，随机路由本身即跨副本） */
-async function waitForStatus(request: any, taskId: string, pred: (s: any) => boolean, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  let last: any = null;
-  while (Date.now() < deadline) {
-    const res = await request.get(`${PROTO_MEMBER_LB}/tasks/${taskId}`, {
-      headers: { 'X-Agent-Protocol-Token': TOKEN },
-    });
-    if (res.status() === 200) {
-      last = await res.json();
-      if (pred(last)) return last;
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  throw new Error(`task ${taskId} 未在限时内达到期望状态（last=${JSON.stringify(last)}）`);
-}
-
 // ---------- P1：跨副本完整委派链路 ----------
 
 test('P1 跨副本委派：LB 随机路由 spawn → 完成 → lead 收割汇总', async ({ request }) => {
@@ -83,28 +66,33 @@ test('P2 lead 副本 kill：registry 重建后另一副本接管轮询与收割'
   test.skip(true, 'kill 编排需 env-up 产物 pid 与重启脚本（R4 同款），并入门禁 job 二期切片——registry 重建/唤醒 CAS 已由单测 28 例覆盖');
 });
 
-// Redis task 键反查（P3 专用）：SCAN proto:task:*:events（RESP 裸 socket，无 redis-cli
-// 依赖——CI 与 local-infra 一致，同 reset-data.mjs 手法）。E2E 环境独占 redis，
-// 本轮 taskId = 当前键族最大者（任务单调新增）。
-async function latestTaskIdFromRedis(): Promise<string | null> {
+// Redis task 键集反查（P3 专用）：KEYS proto:task:*:events（RESP 裸 socket，无 redis-cli
+// 依赖——CI 与 local-infra 一致，同 reset-data.mjs 手法；E2E 环境独占 redis）。
+// 修 #74：KEYS 返回顺序无保证（哈希桶序），「取末位当本轮任务」会锚到旧任务使断言
+// 恒真——改取 spawn 前后键集差分，新增键才是本轮任务。
+async function protocolTaskIdsFromRedis(): Promise<Set<string>> {
   const net = await import('node:net');
   const { host, port } = redisTarget();
   return await new Promise(resolve => {
     const sock = net.createConnection({ host, port });
     sock.setTimeout(5000);
     let buf = '';
-    const finish = (v: string | null) => { sock.destroy(); resolve(v); };
+    const finish = (ids: Set<string>) => { sock.destroy(); resolve(ids); };
     sock.on('connect', () => sock.write('*2\r\n$4\r\nKEYS\r\n$19\r\nproto:task:*:events\r\n'));
     sock.on('data', d => {
       buf += d.toString();
-      // RESP 数组：*N\r\n 后每条 $len\r\n<key>\r\n
-      const ids = [...buf.matchAll(/proto:task:([A-Za-z0-9_-]+):events/g)]
-        .map(m => m[1]);
-      if (ids.length) finish(ids[ids.length - 1]);
-      else finish(null);
+      // RESP 数组完整性：*N\r\n 头 + 每项 $len\r\n<payload>\r\n 两行——凑满 N 项才
+      // 解析（修 #74 附带缺陷：首个分片即 finish 会取不全/提前空手而归）
+      const head = /^\*(\d+)\r\n/.exec(buf);
+      if (!head) return;
+      const n = parseInt(head[1], 10);
+      if (buf.split('\r\n').length - 1 < 1 + n * 2) return;
+      const ids = new Set([...buf.matchAll(/proto:task:([A-Za-z0-9_-]+):events/g)]
+        .map(m => m[1]));
+      finish(ids);
     });
-    sock.on('error', () => finish(null));
-    sock.on('timeout', () => finish(null));
+    sock.on('error', () => finish(new Set()));
+    sock.on('timeout', () => finish(new Set()));
   });
 }
 
@@ -120,11 +108,18 @@ test('P3 member 事件跨副本对账：A 受理的任务 B 可 /events 全量�
   const sid = `e2e_${runId}_p3`;
   // 经 lead LB spawn（fixture 同步等待完成）。同步 spawn 结果 status=ok 无 task_id
   // 行（force_sync 语义，§16），Bridge 登记只对后台任务生效——taskId 从 member Redis
-  // 键族反查（E2E 独占实例，最新 events 键即本轮任务；CI local redis 无前缀）
+  // 键族反查（E2E 独占实例；CI local redis 无前缀）：spawn 前后键集差分锁定本轮任务
+  const before = await protocolTaskIdsFromRedis();
   await spawnViaLb(sid,
     `[E2E:proto:lead-spawn] 委派远程子 agent 执行回显任务，完成后汇报结果。`);
-  const taskId = await latestTaskIdFromRedis();
-  expect(taskId, 'Redis 应有本轮协议任务键').toBeTruthy();
+  let taskId: string | null = null;
+  for (let i = 0; i < 20 && !taskId; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    const after = await protocolTaskIdsFromRedis();
+    const fresh = [...after].filter(id => !before.has(id));
+    if (fresh.length > 0) taskId = fresh[0];
+  }
+  expect(taskId, 'Redis 应有本轮协议任务键（spawn 前后差分）').toBeTruthy();
 
   // 直投 MEMBER_A 与 MEMBER_B 各自回放（跨副本可见 = Redis Streams 生效）
   for (const replica of [PROTO_MEMBER_A, PROTO_MEMBER_B]) {
@@ -153,7 +148,7 @@ test('P5 双副本无粘性冒烟：LB 入口 /status 与 /health 对随机路�
     expect(h.status()).toBe(200);
   }
   // /tasks 认证面经 lead LB（未带 token → 401，说明路由到协议实例且 filter 生效）
-  const res = await request.get(`${PROTO_LEADER_LB.replace(/:8100$/, ':8101')}/tasks`);
+  const res = await request.get(`${PROTO_MEMBER_LB}/tasks`);
   expect([401, 404]).toContain(res.status());
 });
 

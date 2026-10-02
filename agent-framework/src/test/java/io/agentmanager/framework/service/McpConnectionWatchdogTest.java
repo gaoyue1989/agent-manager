@@ -163,6 +163,33 @@ class McpConnectionWatchdogTest {
         assertEquals(0, watchdog.stats()[0]);
     }
 
+    /** 补偿自愈口（修 #66 确认缺陷）：「有配置但未注册」的 server 每周期重建重试 */
+    @Test
+    void configuredButUnregisteredServerShouldBeCompensated() {
+        // 模拟 rebuild register 失败后的现场：声明还在、注册集合里没有
+        when(registrar.getRegisteredServerNames()).thenReturn(java.util.Set.of());
+        when(registrar.buildClientForReload(any())).thenReturn(newWrapper);
+
+        watchdog.probeAll();
+
+        var mcp = new OafConfig.McpServerConfig("vendor", "biz-mcp", "1.0.0", "biz-mcp", false);
+        verify(registrar).buildClientForReload(mcp);
+        verify(registrar).clearServer(toolkit, "biz-mcp");
+        verify(registrar).registerBuiltClient(toolkit, newWrapper, mcp);
+        assertEquals(1, watchdog.stats()[1]);
+    }
+
+    /** 已注册 server 只走探测，补偿路径不得重复重建 */
+    @Test
+    void registeredServerShouldNotBeCompensated() {
+        when(wrapper.listTools()).thenReturn(Mono.just(java.util.List.<io.modelcontextprotocol.spec.McpSchema.Tool>of()));
+
+        watchdog.probeAll();
+
+        verify(registrar, never()).clearServer(any(), anyString());
+        assertEquals(0, watchdog.stats()[1]);
+    }
+
     @Test
     void disabledIntervalShouldSkipProbe() {
         var disabled = new McpConnectionWatchdog(registrar, resourceProxy, agentRuntimeService,

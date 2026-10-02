@@ -61,13 +61,21 @@ public class ProtocolRedisEventBus implements AgentProtocolEventBus {
     /** 每次 XREAD 最多取回条数 */
     static final int READ_COUNT = 50;
 
+    /** 降级通道的默认 replay 缓冲（SDK 默认 256，与 v1.4 行为一致） */
+    static final int DEFAULT_REPLAY_BUFFER_SIZE = 256;
+
     /** Redis 门面（null = 纯内存模式，语义等同 SDK 默认实现） */
     private final RedisConnectionFacade facade;
-    /** 降级通道：SDK 内存总线（默认 replay 256，与 v1.4 行为一致） */
-    private final AgentProtocolTaskEventBus memory = new AgentProtocolTaskEventBus();
+    /** 降级通道：SDK 内存总线（replay 与主通道同配置——无参构造会让 sse-replay-buffer-size 静默失效，CR P2-4） */
+    private final AgentProtocolTaskEventBus memory;
 
     public ProtocolRedisEventBus(RedisConnectionFacade facade) {
+        this(facade, DEFAULT_REPLAY_BUFFER_SIZE);
+    }
+
+    public ProtocolRedisEventBus(RedisConnectionFacade facade, int sseReplayBufferSize) {
         this.facade = facade;
+        this.memory = new AgentProtocolTaskEventBus(sseReplayBufferSize);
         if (facade == null) {
             log.info("ProtocolRedisEventBus: no redis facade, pure in-memory mode");
         } else {

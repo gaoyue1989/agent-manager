@@ -90,7 +90,10 @@ for (const svc of ['fulfillment-lead', 'order-agent', 'inventory-agent']) {
   ok(`${svc} /health=200`, code === 200, `got ${code}`);
 }
 const before = stats().stats;
-const pick = ['O-1001', 'O-1002', 'O-1003'][Math.floor(Math.random() * 3)];
+// 主流程选单收窄到 O-1001/O-1002（default 政策 allowed=True）——O-1003 的政策防线
+// 要求 lead 不出方案，与主流程 T2/T3/T4 的「产出方案并落单」断言语义冲突（修 #68）；
+// O-1003 的确定性反断言见 T8
+const pick = ['O-1001', 'O-1002'][Math.floor(Math.random() * 2)];
 const order = mcpText(mcpCall({ name: 'get_order', arguments: { order_id: pick } }));
 const sku = typeof order === 'object' ? order.sku : null;
 const ver = typeof order === 'object' ? order.version : null;
@@ -183,6 +186,24 @@ console.log('== T7 /tasks 鉴权（经 Ingress，断言 11）==');
 for (const svc of ['order-agent', 'inventory-agent', 'logistics-agent', 'after-sales-agent']) {
   const code = await fetch(`${BASE}/agent/${svc}/tasks/probe-${randomUUID()}`).then(r => r.status).catch(e => String(e));
   ok(`${svc} /tasks 无 token → 401`, code === 401, `got ${code}`);
+}
+
+console.log('== T8 政策防线（O-1003 确定性反断言）==');
+// O-1003 政策 allowed=False：合规 lead 查 get_policy 后不出方案、不落单。模型无视防线
+// 时该用例红——红即暴露防线失效，是想要的行为（best-effort：真实 LLM demo，非 CI 门禁）
+{
+  const beforeNeg = stats().stats;
+  const negSess = randomUUID();
+  const negTurn = await chat('fulfillment-lead', negSess,
+    `订单 O-1003 迟迟未发货，请直接给出 reissue 重发的处置方案并等待我批准。`,
+    '/tmp/of-e2e-turn-neg.sse');
+  ok('O-1003 触发政策核对（get_policy 落 mock）',
+     negTurn.tools.includes('get_policy') || (stats().stats.get_policy > beforeNeg.get_policy),
+     negTurn.tools.join(','));
+  ok('O-1003 不出方案（无 PLAN-，防线生效）', !/PLAN-/.test(negTurn.text || ''),
+     (negTurn.text || '').slice(0, 120));
+  ok('O-1003 零写（无 create_resolution）', !negTurn.calledTools.has('create_resolution'),
+     negTurn.tools.join(','));
 }
 
 console.log(`\n结果：${passed} 通过 / ${failed} 失败`);

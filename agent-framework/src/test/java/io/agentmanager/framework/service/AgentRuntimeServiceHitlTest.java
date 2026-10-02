@@ -501,10 +501,11 @@ class AgentRuntimeServiceHitlTest {
     void resumeConfirmShouldTakeRuntimeIdentityFromTableRowWhenStateSnapshotMissing() {
         var tableBlock = new ToolUseBlock("call-1", "publish_service",
             Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
-        // 表行带 Channel 网关真实身份（sessionId=gw-hash、userId=peer）
+        // 表行带 Channel 网关真实身份（sessionId=gw-hash、userId=peer）；PER_PEER 形态
+        // 的 gw-hash 按会话独立（此处用非遗留值验证透传，遗留共享值翻译见下方专测）
         when(confirmContextStore.findPending(anyString())).thenReturn(
             java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
-                "reply-1", List.of(tableBlock), Instant.now(), "gw-3f20f08c5499", "peer-user")));
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-peerunique01", "peer-user")));
 
         var agent2 = mock(HarnessAgent.class);
         var replyMsg = mock(Msg.class);
@@ -522,7 +523,51 @@ class AgentRuntimeServiceHitlTest {
             Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
 
         verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
-            "gw-3f20f08c5499".equals(ctx.getSessionId()) && "peer-user".equals(ctx.getUserId())));
+            "gw-peerunique01".equals(ctx.getSessionId()) && "peer-user".equals(ctx.getUserId())));
+    }
+
+    /**
+     * issue #87 PER_PEER 切换的升级窗口兼容：存量 confirm_context 行的
+     * runtime_session_id 仍是 MAIN 形态全进程共享 gw-hash（gw-3f20f08c5499），
+     * 恢复时必须按 runtime_user_id（=peer）重推导 PER_PEER 会话 id——原样使用会
+     * 恢复到不存在的共享会话（SDK 侧槽位已被 V9 迁移重键），丢全部上下文。
+     */
+    @Test
+    void resumeConfirmShouldTranslateLegacySharedGwSessionIdToPerPeer() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        // 升级瞬间挂起中的旧行：MAIN 共享 gw-hash
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-3f20f08c5499", "peer-user")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        // 期望 = channelGatewaySessionId(peer) 的 PER_PEER 派生值（与 V9 迁移后的
+        // agent_state 槽位一致），且不再是共享值
+        var expected = svc.channelGatewaySessionId("peer-user");
+        assertNotEquals("gw-3f20f08c5499", expected);
+        verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
+            expected.equals(ctx.getSessionId()) && "peer-user".equals(ctx.getUserId())));
+    }
+
+    /**
+     * 网关会话 id 派生钉子（issue #87）：PER_PEER canonicalKey = "chatui|r:{peer}|x:agentId=main"。
+     * 期望值经真实 MySQL SHA2 与 Python hashlib 三方交叉验证（V9 迁移同式）；
+     * SDK 升级若改变派生（DmScope/extra 排序/哈希截断），此测试率先红。
+     */
+    @Test
+    void channelGatewaySessionIdShouldMatchSdkPerPeerCanonicalKey() {
+        assertEquals("gw-a580c3c8af63", service.channelGatewaySessionId("webui-abc-123"));
+        assertNotEquals(service.channelGatewaySessionId("u-1"), service.channelGatewaySessionId("u-2"),
+            "每会话独立 gw-hash（并发闸门按会话互斥的前提）");
     }
 
     /**

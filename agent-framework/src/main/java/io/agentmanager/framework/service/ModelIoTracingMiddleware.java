@@ -100,6 +100,14 @@ public class ModelIoTracingMiddleware implements MiddlewareBase {
                         id -> new ToolCallAcc(
                             e.getToolCallName() == null ? "" : e.getToolCallName(),
                             new StringBuilder()));
+                    // 首块 toolCallName 为 null 时名称曾冻结为空串（修评审 #36）：后续增量
+                    // 携带真实名称时回填（对齐 ToolCallTracingMiddleware.accFor 语义），
+                    // 否则 trace 属性里 tool_calls[].name 恒为 ""
+                    if ((acc.name() == null || acc.name().isEmpty())
+                            && e.getToolCallName() != null && !e.getToolCallName().isEmpty()) {
+                        acc = new ToolCallAcc(e.getToolCallName(), acc.args());
+                        toolCalls.put(e.getToolCallId() == null ? "" : e.getToolCallId(), acc);
+                    }
                     if (e.getDelta() != null) {
                         acc.args().append(e.getDelta());
                     }

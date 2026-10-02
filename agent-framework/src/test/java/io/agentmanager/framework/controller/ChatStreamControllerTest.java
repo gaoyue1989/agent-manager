@@ -342,6 +342,45 @@ class ChatStreamControllerTest {
         ChatStreamController.ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
     }
 
+    /**
+     * 跨层排队 waiting 心跳（issue #87 兜底）：租约到手后 SDK 事件迟迟不来（排队/静默），
+     * 心跳每 WAITING_FRAME_INTERVAL 直发一帧 waiting——首事件到达前客户端不得零反馈；
+     * 心跳帧只进 sink 不进 EventBus（不落库，durable 续传不含）。
+     */
+    @Test
+    void chatShouldEmitWaitingHeartbeatWhileFirstEventDelayed() throws Exception {
+        ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofMillis(100);
+        try {
+            var sessionId = "test-user-hb1";
+            when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-hb");
+            var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
+            var subscribed = new CountDownLatch(1);
+            when(chatChannel.sendStream(any(ChatUiRequest.class)))
+                .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+            var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
+            assertTrue(subscribed.await(3, TimeUnit.SECONDS), "controller 未订阅 agent 事件流");
+            sleep(350);   // 跨 3 个心跳周期，事件保持静默
+
+            events.tryEmitNext(new TextBlockDeltaEvent("reply-hb", "block-hb", "hi"));
+            events.tryEmitNext(new AgentEndEvent("reply-hb"));
+            events.tryEmitComplete();
+
+            var frames = framesFuture.get(5, TimeUnit.SECONDS);
+            long waiting = frames.stream().filter(f -> f != null && f.contains("waiting")).count();
+            assertTrue(waiting >= 2, "首事件前应有心跳 waiting 帧: " + frames);
+            assertTrue(frames.indexOf(frames.stream().filter(f -> f != null && f.contains("TEXT_BLOCK_DELTA"))
+                .findFirst().orElse(null))
+                > frames.lastIndexOf(frames.stream().filter(f -> f != null && f.contains("waiting"))
+                    .reduce((a, b) -> b).orElse(null)),
+                "首个事件帧应晚于最后一个 waiting 帧（首事件即停心跳）: " + frames);
+            // 不落库：EventBus 的 append 第三参为 eventType，心跳帧不得出现
+            verify(eventStore, never()).append(eq(sessionId), anyString(), eq("waiting"), anyString());
+        } finally {
+            ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
+        }
+    }
+
     @Test
     void chatShouldRejectBlankMessage() {
         var frames = collect("test-user-s8", "", "alice");

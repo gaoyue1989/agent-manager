@@ -80,7 +80,9 @@ S2=$(echo "$PUB2" | jq -r '.data.id'); K2=$(echo "$PUB2" | jq -r '.data.k8sName'
 assert_eq "S1 envJson 剔除全部敏感键（语义比较，Go 侧 & 转义为 \u0026 不影响）" \
   "$(echo "$PUB2" | jq -r --argjson want "$WANT_PLAIN" '.data.envJson | fromjson == $want')" "true"
 if wait_status "$S2" running 300; then ok "S2 defaults 填入发布 → running（真实配置全链路）"; else bad "S2 未到 running"; fi
-assert_eq "S3 敏感键落服务 Secret" "$(kubectl -n $NS get secret $K2-env-secret -o json | jq -r '.data.LLM_API_KEY | @base64d')" "$LLM_API_KEY"
+# S3 敏感键比对走 jq 内联等值（修 #57 low：assert_eq 失败分支会把 Secret 明文与 .env.secrets
+# 的真实 key 打进日志——同脚本 S4/P5 均用 assert_not_contains 防泄漏，此处对齐）
+assert_eq "S3 敏感键落服务 Secret"   "$(kubectl -n $NS get secret $K2-env-secret -o json | jq -r --arg want "$LLM_API_KEY" '.data.LLM_API_KEY | @base64d == $want')" "true"
 DETAIL=$(api GET "/services/$S2")
 assert_not_contains "S4 详情不泄漏明文" "$DETAIL" "$LLM_API_KEY"
 assert_contains "S5 envSecretKeys 掩码视图" "$DETAIL" '"key":"LLM_API_KEY","hasValue":true'

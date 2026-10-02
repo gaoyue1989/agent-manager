@@ -104,7 +104,7 @@ lead 逐字委派 after-sales-agent → biz-mcp 服务端乐观并发校验拒�
 
 ### 第三幕：正确版本执行与交付
 
-> 确认，请使用 expected_version=5 重新提交（其余参数不变）。
+> 确认，请使用 expected_version=<以 lead 转述的服务端当前版本为准> 重新提交（其余参数不变；剧本中的数字为截图当时的演示态，fresh 部署下以实际查询为准——照抄固定数字会 VERSION_CONFLICT，修 #68 low）。
 
 成员以正确版本创建处理单成功：真实单号 `RES-61BF1BCA`、订单版本 5→6、状态已受理：
 

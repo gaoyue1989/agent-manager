@@ -176,8 +176,8 @@ class RemoteConfirmBridgeMultiReplicaTest {
 
     @Test
     void wakeClaimLostShouldSkipSummaryTurn() {
-        when(registryStore.exists(SID, TASK_ID)).thenReturn(true);
-        when(registryStore.claimWake(SID, TASK_ID)).thenReturn(false);
+        when(registryStore.tryClaimWake(SID, TASK_ID))
+            .thenReturn(RemoteTaskRegistryStore.WakeClaim.CONTENTED);
 
         bridge.wakeLead(SID, TASK_ID, "成功完成");
 
@@ -187,12 +187,12 @@ class RemoteConfirmBridgeMultiReplicaTest {
 
     @Test
     void wakeClaimWonShouldMarkTerminalAndDriveSummaryTurn() {
-        when(registryStore.exists(SID, TASK_ID)).thenReturn(true);
-        when(registryStore.claimWake(SID, TASK_ID)).thenReturn(true);
+        when(registryStore.tryClaimWake(SID, TASK_ID))
+            .thenReturn(RemoteTaskRegistryStore.WakeClaim.CLAIMED);
 
         bridge.wakeLead(SID, TASK_ID, "成功完成");
 
-        // 认领即收口（claimWake 单语句 IN_FLIGHT→TERMINAL，无独立 markTerminal 步）
+        // 认领即收口（tryClaimWake 单语句 IN_FLIGHT→TERMINAL，无独立 markTerminal 步）
         verify(registryStore, never()).markTerminal(anyString(), anyString(), eq(false));
         verify(turnLeaseStore, timeout(3000)).tryAcquire(SID);
         verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString());
@@ -201,12 +201,26 @@ class RemoteConfirmBridgeMultiReplicaTest {
     @Test
     void wakeWithoutRegistryRowShouldFallBackToInMemoryGuard() {
         // 历史/异常路径：registry 无行 → v1.4 进程内守卫（第二次唤醒被吞）
-        when(registryStore.exists(SID, TASK_ID)).thenReturn(false);
+        when(registryStore.tryClaimWake(SID, TASK_ID))
+            .thenReturn(RemoteTaskRegistryStore.WakeClaim.ABSENT);
 
         bridge.wakeLead(SID, TASK_ID, "成功完成");
         bridge.wakeLead(SID, TASK_ID, "成功完成");
 
         verify(runtimeService, times(1)).invokeStream(anyString(), eq(SID), any());
+    }
+
+    @Test
+    void wakeDeferredWhenRegistryUnavailableShouldNotDriveTurn() {
+        // DB 抖动 ≠ 无行/被抢（错误分型）：跳过本轮、rebuild 周期重拾——
+        // 若无痕唤醒，DB 恢复后 rebuild 会对同一任务二次汇总 turn
+        when(registryStore.tryClaimWake(SID, TASK_ID))
+            .thenReturn(RemoteTaskRegistryStore.WakeClaim.UNAVAILABLE);
+
+        bridge.wakeLead(SID, TASK_ID, "成功完成");
+
+        verify(runtimeService, never()).invokeStream(anyString(), anyString(), any());
+        verify(turnLeaseStore, never()).tryAcquire(anyString());
     }
 
     // ===== G3：sweep CAS 消费前置 =====

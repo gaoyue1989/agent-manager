@@ -20,8 +20,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * RemoteTaskRegistryStore 单测（设计 §18.2）：INSERT IGNORE 登记、claimWake CAS
- * 真值语义、endpoint 快照查询、终态清理——mock JDBC 三件套，断言 SQL 形态与参数绑定
+ * RemoteTaskRegistryStore 单测（设计 §18.2）：INSERT IGNORE 登记、tryClaimWake 四态
+ * 唤醒认领（DB 异常分型 UNAVAILABLE）、endpoint 快照查询、终态清理——mock JDBC 三件套，断言 SQL 形态与参数绑定
  * （风格同 ConfirmContextStoreMultiKeyTest）。失败路径 fail-soft（不抛出）是本 store
  * 的关键契约：登记/收口失败绝不打断父流。
  */
@@ -86,11 +86,11 @@ class RemoteTaskRegistryStoreTest {
         verify(ps).setInt(2, 200);
     }
 
-    // ===== 唤醒认领 CAS =====
+    // ===== 唤醒认领 CAS（tryClaimWake 四态；错误分型：DB 异常 ≠ 被抢/无行）=====
 
     @Test
-    void claimWakeShouldReturnTrueWhenSingleRowAffected() throws Exception {
-        assertTrue(store.claimWake("sid-1", "t-1"));
+    void tryClaimWakeShouldReturnClaimedWhenSingleRowAffected() throws Exception {
+        assertEquals(RemoteTaskRegistryStore.WakeClaim.CLAIMED, store.tryClaimWake("sid-1", "t-1"));
         var sql = capturedSql();
         assertTrue(sql.contains("AND status = ?"), "WHERE status = IN_FLIGHT 的 CAS 守卫: " + sql);
         // 认领即收口（CR P1-3）：单语句 IN_FLIGHT→TERMINAL，无中间卡死态
@@ -99,15 +99,38 @@ class RemoteTaskRegistryStoreTest {
     }
 
     @Test
-    void claimWakeShouldReturnFalseWhenRowAlreadyClaimed() throws Exception {
+    void tryClaimWakeShouldReturnContentedWhenRowAlreadyClaimed() throws Exception {
+        // CAS affected=0 + 复查行存在 = 已被其他副本/路径收口（幂等跳过）
         when(ps.executeUpdate()).thenReturn(0);
-        assertFalse(store.claimWake("sid-1", "t-1"));
+        var rs = mock(java.sql.ResultSet.class);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true);
+        assertEquals(RemoteTaskRegistryStore.WakeClaim.CONTENTED, store.tryClaimWake("sid-1", "t-1"));
     }
 
     @Test
-    void claimWakeFailureShouldReturnFalse() throws Exception {
+    void tryClaimWakeShouldReturnAbsentWhenRowMissing() throws Exception {
+        // CAS affected=0 + 复查无行 = 未登记路径（上层降级进程内守卫）
+        when(ps.executeUpdate()).thenReturn(0);
+        var rs = mock(java.sql.ResultSet.class);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+        assertEquals(RemoteTaskRegistryStore.WakeClaim.ABSENT, store.tryClaimWake("sid-1", "t-1"));
+    }
+
+    @Test
+    void tryClaimWakeShouldReturnUnavailableOnCasFailure() throws Exception {
+        // DB 异常必须与「被抢/无行」分型：UNAVAILABLE 让上层跳过本轮（宁延迟不重复）
         when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("db down"));
-        assertFalse(store.claimWake("sid-1", "t-1"));
+        assertEquals(RemoteTaskRegistryStore.WakeClaim.UNAVAILABLE, store.tryClaimWake("sid-1", "t-1"));
+    }
+
+    @Test
+    void tryClaimWakeShouldReturnUnavailableWhenProbeFailsAfterCasMiss() throws Exception {
+        // CAS 通过但复查行存在性时 DB 抖动：状态未知，同样 UNAVAILABLE
+        when(ps.executeUpdate()).thenReturn(0);
+        when(ps.executeQuery()).thenThrow(new java.sql.SQLException("db down"));
+        assertEquals(RemoteTaskRegistryStore.WakeClaim.UNAVAILABLE, store.tryClaimWake("sid-1", "t-1"));
     }
 
     // ===== 终态收口 =====

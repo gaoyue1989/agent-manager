@@ -241,6 +241,38 @@ class RemoteConfirmBridgeTest {
     }
 
     @Test
+    void pollShouldNotResurrectConsumedCardForSameRound() {
+        // 修 #62 low：routeDecision 消费后、member 尚未离开 awaiting_confirm 的窗口内，
+        // 快照轮询不得经 put 复活已决策卡片（用户二次确认 = 同一任务重复 resume）
+        registerInFlightTask();
+        taskClient.nextStatus = new RemoteTaskStatus("awaiting_confirm", null,
+            List.of(new RemotePendingConfirm("call-1", "create_order", "{\"order_id\":\"O-1\"}")));
+        when(store.findPending(SID, CONFIRM_KEY)).thenReturn(java.util.Optional.empty());
+        when(store.findLastConsumedRemote(SID, CONFIRM_KEY))
+            .thenReturn(java.util.Optional.of(remoteRow("call-1")));
+
+        bridge.pollOnce();
+
+        verify(store, never()).put(anyString(), anyString(), anyList(), any(), any(), any(), any());
+    }
+
+    @Test
+    void pollShouldQueueNewCardForNextConfirmRound() {
+        // 同任务新一轮合法 HITL：tool_call_id 全新 → 放行落卡（守卫不误杀多轮确认）
+        registerInFlightTask();
+        taskClient.nextStatus = new RemoteTaskStatus("awaiting_confirm", null,
+            List.of(new RemotePendingConfirm("call-2-fresh", "create_order", "{\"order_id\":\"O-2\"}")));
+        when(store.findPending(SID, CONFIRM_KEY)).thenReturn(java.util.Optional.empty());
+        when(store.findUnconsumedRemote(SID)).thenReturn(List.of());
+        when(store.findLastConsumedRemote(SID, CONFIRM_KEY))
+            .thenReturn(java.util.Optional.of(remoteRow("call-1")));
+
+        bridge.pollOnce();
+
+        verify(store).put(eq(CONFIRM_KEY), eq(SID), anyList(), isNull(), isNull(), isNull(), anyString());
+    }
+
+    @Test
     void pollShouldSkipWhenCardAlreadyQueued() {
         registerInFlightTask();
         taskClient.nextStatus = new RemoteTaskStatus("awaiting_confirm", null, List.of());
@@ -397,6 +429,23 @@ class RemoteConfirmBridgeTest {
         assertTrue(decisions.get(0).isApproved(), "approve → ALLOW");
         verify(toolAuditStore).record(eq(SID), eq("remote_confirm"), eq(TASK_ID),
             eq("ALLOW"), anyString());
+    }
+
+    @Test
+    void routeDecisionShouldReopenConsumedRowWhenResumeFails() {
+        // resume 失败重开通道（修 #62 medium CR 发现）：consume 已置位，resume 抛 IO 异常
+        // 时必须 reopen（consumed 1→0），否则复活守卫会把该任务的确认卡永久压死
+        registerInFlightTask();
+        taskClient.failResumeWith = new java.io.IOException("member unreachable");
+        when(store.findPending(SID, CONFIRM_KEY)).thenReturn(java.util.Optional.of(remoteRow()));
+
+        try {
+            bridge.routeDecision(SID, CONFIRM_KEY,
+                List.of(Map.of("tool_call_id", "call-1", "confirmed", true)));
+        } catch (IllegalStateException expected) {
+            // 路由失败向上传播（既有语义），断言只关注 reopen
+        }
+        verify(store).reopenConsumedRemote(SID, CONFIRM_KEY);
     }
 
     @Test

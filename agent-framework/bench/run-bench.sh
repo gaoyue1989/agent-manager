@@ -6,13 +6,15 @@
 # 逐档执行（15s ramp + 180s 稳态）→ 汇总报告 → 清理（容器/mock/bench 沙箱）
 #
 # 参数（环境变量可覆盖）：
-#   SCENARIOS=B0,B1,B3,B5   场景子集（全矩阵 B0,B1,B2,B3,B4,B5）
-#   STAGES=1,2,4,8,10,16,32 并发阶梯
+#   SCENARIOS=B0,B1,B3,B5   场景子集（全矩阵 B0,B1,B2,B3,B4,B5；C=并发启动延迟档，issue #87）
+#   STAGES=1,2,4,8,10,16,32 并发阶梯（B 档；C 档固定 C_STAGES=2,4,8）
+#   C_STAGES=2,4,8          C 档并发阶梯
 #   SESSION_POOL=10         会话池上限（沙箱隔离键=sessionId，池大小≈沙箱数）
 #   SANDBOX_MEMORY_MB=256   单沙箱内存上限（方案原定 512Mi；宿主 8G 与常驻 kind 平台共存时
 #                           10×512Mi 会触发宿主 swap 抖动/OOM，实测工作集约 100Mi 故降为 256Mi）
 #   STAGE_SECONDS=180       每档稳态时长
-#   RAMP_SECONDS=15         每档 ramp 时长
+#   RAMP_SECONDS=15         每档 ramp 时长（C 档恒 0，一波齐发）
+#   ASSERT_START_DELAY_MS=10000  C 档启动延迟门禁：任一路 AGENT_START 超阈值该档 FAIL（exit 3）
 #   IMAGE=agent-framework:latest
 #   BASE_URL=http://127.0.0.1:8101
 # =========================================================================
@@ -24,10 +26,12 @@ mkdir -p "$RESULTS"
 
 SCENARIOS="${SCENARIOS:-B0,B1,B3,B5}"
 STAGES="${STAGES:-1,2,4,8,10,16,32}"
+C_STAGES="${C_STAGES:-2,4,8}"
 SESSION_POOL="${SESSION_POOL:-10}"
 STAGE_SECONDS="${STAGE_SECONDS:-180}"
 RAMP_SECONDS="${RAMP_SECONDS:-15}"
 P95_SLO_MS="${P95_SLO_MS:-10000}"
+ASSERT_START_DELAY_MS="${ASSERT_START_DELAY_MS:-10000}"
 IMAGE="${IMAGE:-agent-framework:latest}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8101}"
 CONTAINER="${CONTAINER:-bench-agent-fw}"
@@ -163,6 +167,7 @@ start_container() {
     -e LLM_API_KEY=bench-mock \
     -e LLM_MODEL_ID=bench-model \
     -e LLM_BASE_URL=http://172.17.0.1:$MOCK_LLM_PORT/v1 \
+    -e AGENT_REDIS_URL="${AGENT_REDIS_URL:-redis://172.17.0.1:16379}" \
     -e CHECKPOINT_JDBC_URL="jdbc:mysql://172.17.0.1:$MYSQL_PORT/agent_manager_bench" \
     -e CHECKPOINT_USERNAME="$MYSQL_USER" \
     -e CHECKPOINT_PASSWORD="$MYSQL_PASSWORD" \
@@ -180,38 +185,53 @@ start_container() {
 
 # ===== 4. 逐场景执行 =====
 # 历史结果归档（防跨次混写：jsonl 为追加写，旧档会污染报告）
-if ls results/B[0-9] >/dev/null 2>&1; then
+if ls results/B[0-9] results/C >/dev/null 2>&1; then
   ARCHIVE="results/archive-$(date +%H%M%S)"
   mkdir -p "$ARCHIVE"
-  mv results/B[0-9] "$ARCHIVE"/ 2>/dev/null || true
+  mv results/B[0-9] results/C "$ARCHIVE"/ 2>/dev/null || true
   echo "  历史结果已归档至 $ARCHIVE"
 fi
-STAGE_LIST=$(echo "$STAGES" | tr ',' ' ')
 for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
   say "场景 $SC"
   SANDBOX_FLAG=true
-  [ "$SC" == "B0" ] && SANDBOX_FLAG=false
+  { [ "$SC" == "B0" ] || [ "$SC" == "C" ]; } && SANDBOX_FLAG=false
   start_container "$SANDBOX_FLAG"
 
   # 会话池（沙箱隔离键=sessionId）：B5 固定 1（单会话并发 → turn 租约串行化上界），
-  # 其余 min(SESSION_POOL, 池上限)；C ≤ S 每会话独占，C > S 会话共享触发租约排队
+  # 其余 min(SESSION_POOL, 池上限)；C ≤ S 每会话独占，C > S 会话共享触发租约排队。
+  # C（并发启动延迟档）：每 worker 独占会话（测跨会话排队而非同会话租约排队）
   SC_POOL="${SESSION_POOL:-10}"
   [ "$SC" == "B5" ] && SC_POOL=1
 
-  # 预热：每会话串行 1 次（沙箱全部呈已创建态，create 开销与稳态分离）
-  say "场景 $SC 预热（sessions=$SC_POOL）"
-  node load/runner.js --mode warmup --scenario "$SC" --session-pool "$SC_POOL" \
+  # 场景级并发阶梯：C 档固定 2/4/8（设计 §4.2），B 档用全局 STAGES
+  STAGE_LIST=$(echo "$STAGES" | tr ',' ' ')
+  SC_RAMP="$RAMP_SECONDS"
+  if [ "$SC" == "C" ]; then
+    STAGE_LIST=$(echo "${C_STAGES:-2,4,8}" | tr ',' ' ')
+    SC_RAMP=0   # 一波齐发：排队窗口从第 0 秒开始
+  fi
+
+  # 预热：每会话串行 1 次（沙箱全部呈已创建态，create 开销与稳态分离）。
+  # C 档只暖 1 轮（session-pool 1）：冷 1C JVM 首轮多并发会出现秒级 JIT/类加载抖动，
+  # 不暖机会让启动延迟门禁吃假阳性（实测 21s 离群，复跑即消失）；全池预热 = 池×30s 不划算
+  C_WARM_POOL="$SC_POOL"
+  [ "$SC" == "C" ] && C_WARM_POOL=1
+  say "场景 $SC 预热（sessions=$C_WARM_POOL）"
+  node load/runner.js --mode warmup --scenario "$SC" --session-pool "$C_WARM_POOL" \
     --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; continue; }
 
   for C in $STAGE_LIST; do
-    # C ≤ 池上限时每个 inflight 独占会话
+    # C ≤ 池上限时每个 inflight 独占会话（C 档池 = 并发数，恒独占）
     STAGE_POOL=$SC_POOL
-    [ "$SC" != "B5" ] && [ "$C" -lt "$STAGE_POOL" ] && STAGE_POOL=$C
+    { [ "$SC" != "B5" ] && [ "$SC" != "C" ]; } && [ "$C" -lt "$STAGE_POOL" ] && STAGE_POOL=$C
+    [ "$SC" == "C" ] && STAGE_POOL=$C
     say "场景 $SC 档 C=$C（U=$STAGE_POOL）"
     curl -fsS -m 5 -X POST "http://127.0.0.1:$MOCK_LLM_PORT/reset" >/dev/null
     curl -fsS -m 5 -X POST "http://127.0.0.1:$MOCK_MCP_PORT/reset" >/dev/null
+    # 会话池经 --session-pool 下发（与 runner.js 的 arg 名一致；此前误写 --user-pool 未生效）
     if node load/runner.js --mode run --scenario "$SC" --stage "$C" --concurrency "$C" \
-      --user-pool "$STAGE_POOL" --ramp-seconds "$RAMP_SECONDS" --stage-seconds "$STAGE_SECONDS" \
+      --session-pool "$STAGE_POOL" --ramp-seconds "$SC_RAMP" --stage-seconds "$STAGE_SECONDS" \
+      --assert-start-delay-ms "$ASSERT_START_DELAY_MS" \
       --base-url "$BASE_URL" --results-dir "$RESULTS"; then RC=0; else RC=$?; fi
     # LLM 调用对账落盘（期望值已记录在 summary）
     curl -fsS -m 5 "http://127.0.0.1:$MOCK_LLM_PORT/stats" \
@@ -219,6 +239,10 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
       > "$RESULTS/$SC/$C.llmstats.json" 2>/dev/null || true
     if [ "$RC" -eq 2 ]; then
       echo "  档 C=$C 触发停止条件，场景 $SC 剩余档跳过"
+      break
+    fi
+    if [ "$RC" -eq 3 ]; then
+      echo "  档 C=$C 启动延迟门禁 FAIL（跨会话排队，issue #87），场景 $SC 剩余档跳过"
       break
     fi
     [ "$RC" -ne 0 ] && { echo "  runner 异常退出（rc=$RC），场景 $SC 剩余档跳过"; break; }

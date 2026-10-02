@@ -87,6 +87,23 @@ public class ChatStreamController {
     static Duration WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
     static Duration ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
 
+    /** 首事件延迟告警阈值（issue #87）：超过即 WARN（排队/静默类问题的直接日志证据） */
+    static final long FIRST_EVENT_WARN_MS = 10_000;
+
+    /**
+     * 跨层排队 waiting 心跳调度器（issue #87 兜底）：租约等待期已有 waiting 帧循环，
+     * 但租约**之后**的排队点（SDK turn 闸门、模型连接池等）期间客户端零反馈——用户
+     * 静默、评测误报超时。此处每 WAITING_FRAME_INTERVAL 向 sink 直发一帧 waiting
+     * （不进 EventBus、不落库），首个 SDK 事件或 turn 终态即停。
+     * 独立单线程 daemon：绝不在 Reactor 回调线程上阻塞（2026-09-19 教训）。
+     */
+    private static final java.util.concurrent.ScheduledExecutorService WAIT_HEARTBEAT =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            var t = new Thread(r, "chat-wait-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+
     /** 当前 Agent 对应的 Channel 工厂：reload 后必须从 AgentRuntimeService 取引用，不能复用旧 Agent 的 Channel */
     private final Supplier<ChatUiChannel> chatChannelSupplier;
     private final AgentRuntimeService runtimeService;
@@ -265,6 +282,13 @@ public class ChatStreamController {
         String finalUserId = userId;
         boolean emitSessionCreated = isNewSession;
 
+        // 新会话的首帧 session_created（issue #87 二级症状兜底）：不再在 create 回调里发——
+        // 该回调经 subscribeOn(boundedElastic) 执行，排队 waiter 占满线程池时首帧被推迟
+        // （实测 2.6 分钟、整 turn 零帧）。Flux.just 首元素在订阅线程同步写出，不受调度器排队影响。
+        var head = emitSessionCreated
+            ? Flux.just(sessionCreatedSSE(finalSessionId))
+            : Flux.<ServerSentEvent<String>>empty();
+
         // 会话模型切换（model 可选）：字段缺省 = 不改变会话绑定；传值即绑定到本会话（本 turn 生效）；
         // 空串/system = 清除覆盖回默认模型；未知/禁用 → 拒绝（不改变会话既有绑定）
         var modelProvided = body.model() != null;
@@ -291,15 +315,7 @@ public class ChatStreamController {
         // 空结果回退首条消息截断），不阻塞本次对话流
         sessionTitleService.generateAsync(finalSessionId, message, finalUserId);
 
-        return Flux.<ServerSentEvent<String>>create(sink -> {
-            // ===== 0. 新会话：首个 SSE 事件通知前端 session_id =====
-            if (emitSessionCreated) {
-                sink.next(ServerSentEvent.<String>builder()
-                    .data("{\"type\":\"session_created\",\"session_id\":"
-                        + AgentEventSseSerializer.jsonEsc(finalSessionId) + "}")
-                    .build());
-            }
-
+        var stream = Flux.<ServerSentEvent<String>>create(sink -> {
             // ===== 1. 抢 Turn 租约 =====
             var token = turnLeaseStore.tryAcquire(finalSessionId);
             long deadline = System.currentTimeMillis() + ACQUIRE_TIMEOUT.toMillis();
@@ -356,6 +372,23 @@ public class ChatStreamController {
                 return;
             }
 
+            // ===== 2.5 跨层排队 waiting 心跳（issue #87）=====
+            // 租约等待期由上面循环发 waiting；此处覆盖租约**之后**的排队点（SDK turn 闸门/
+            // 模型连接池等）：每 15s 向 sink 直发一帧 waiting，首个 SDK 事件或任一终态即停。
+            // 心跳帧不进 EventBus、不落库（与租约等待帧同词表，前端零改动、durable 续传不含）。
+            var firstFeedbackSeen = new java.util.concurrent.atomic.AtomicBoolean(false);
+            var heartbeat = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>(
+                WAIT_HEARTBEAT.scheduleAtFixedRate(() -> {
+                    if (!firstFeedbackSeen.get()) {
+                        sink.next(waitingSSE());
+                    }
+                }, WAITING_FRAME_INTERVAL.toMillis(), WAITING_FRAME_INTERVAL.toMillis(),
+                   java.util.concurrent.TimeUnit.MILLISECONDS));
+            // 首事件延迟打点（issue #87 可观测性）：从租约到手到首个事件帧的延迟，
+            // 超 FIRST_EVENT_WARN_MS 升 WARN——排队/静默类问题从此有直接日志证据
+            long turnStartMs = System.currentTimeMillis();
+            var firstEventLogged = new java.util.concurrent.atomic.AtomicBoolean(false);
+
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
             // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
@@ -397,12 +430,35 @@ public class ChatStreamController {
                 // ===== 5. 先订阅 EventBus =====
                 eventBus.subscribe(finalSessionId, 0, replyId)
                     .subscribe(
-                        sse -> sink.next(sse),
+                        sse -> {
+                            // 首个**带 data** 的帧（SDK 事件/合成摘要/error）才算反馈：
+                            // EventBus 的 comment 心跳帧（data=null，重置代理超时用）不算，
+                            // 否则排队静默期会被它提前停掉 waiting 心跳
+                            boolean hasData = sse.data() != null;
+                            if (hasData && firstFeedbackSeen.compareAndSet(false, true)) {
+                                cancelHeartbeat(heartbeat);
+                            }
+                            if (hasData && firstEventLogged.compareAndSet(false, true)) {
+                                long delayMs = System.currentTimeMillis() - turnStartMs;
+                                if (delayMs > FIRST_EVENT_WARN_MS) {
+                                    log.warn("[chat] turn first-event after {}ms (sid={}, rid={}) — "
+                                        + "排队/静默嫌疑，排查 turn 闸门与线程池", delayMs, finalSessionId, replyId);
+                                } else {
+                                    log.debug("[chat] turn first-event after {}ms (sid={}, rid={})",
+                                        delayMs, finalSessionId, replyId);
+                                }
+                            }
+                            sink.next(sse);
+                        },
                         e -> {
                             log.warn("EventBus subscription error (sid={}): {}", finalSessionId, e.getMessage());
+                            cancelHeartbeat(heartbeat);
                             sink.error(e);
                         },
-                        () -> sink.complete());
+                        () -> {
+                            cancelHeartbeat(heartbeat);
+                            sink.complete();
+                        });
 
                 // ===== 6. 启动 agent 执行 =====
                 // sendStream 的**同步**异常也必须落在这个 try 里：它抛之前租约已经到手，
@@ -418,6 +474,7 @@ public class ChatStreamController {
                             finalUserId, sink, turnEnded, turnBucketKeys, toolSummary),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
+                            cancelHeartbeat(heartbeat);
                             if (isTrailingSandboxTeardownError(e)) {
                                 log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
                             } else if (!lease.isLost()) {
@@ -428,10 +485,14 @@ public class ChatStreamController {
                             }
                             endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                         },
-                        () -> endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys));
+                        () -> {
+                            cancelHeartbeat(heartbeat);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
+                        });
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
+                cancelHeartbeat(heartbeat);
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
                     errorSSE("turn_setup_failed: "
                         + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
@@ -449,6 +510,7 @@ public class ChatStreamController {
             sink.onCancel(() -> {
                 log.info("[chat] SSE disconnected, agent execution continues (sid={}, rid={})",
                     finalSessionId, replyId);
+                cancelHeartbeat(heartbeat);
                 orphanTurnWatchdog.schedule(() -> {
                     if (!turnEnded.get()) {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
@@ -460,6 +522,16 @@ public class ChatStreamController {
             });
 
         }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+        // 首帧在订阅线程同步直发（见上方 head 注释），正文经调度器排队执行
+        return head.concatWith(stream);
+    }
+
+    /** 停掉 waiting 心跳（幂等；false=不中断已在执行的任务） */
+    private static void cancelHeartbeat(java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>> heartbeat) {
+        var f = heartbeat.get();
+        if (f != null) {
+            f.cancel(false);
+        }
     }
 
     // ===== 事件处理 =====
@@ -822,6 +894,13 @@ public class ChatStreamController {
     }
 
     // ===== SSE 工厂方法 =====
+
+    private static ServerSentEvent<String> sessionCreatedSSE(String sessionId) {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"session_created\",\"session_id\":"
+                + AgentEventSseSerializer.jsonEsc(sessionId) + "}")
+            .build();
+    }
 
     private static ServerSentEvent<String> waitingSSE() {
         return ServerSentEvent.<String>builder()

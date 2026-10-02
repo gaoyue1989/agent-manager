@@ -3,12 +3,15 @@
  *
  * 脚本化状态机（确定性，见 concurrency-benchmark-plan.md §4.1）：
  *   最后一条消息 role == "tool" → 收尾轮：返回 "BENCH-OK <工具结果回显>"
- *   最后一条消息 role == "user" → 解析场景标记 [BENCH:plain|file|shell|mcp]
+ *   最后一条消息 role == "user" → 解析场景标记 [BENCH:plain|file|shell|mcp|slow]
  *     ├─ plain → 直接返回固定文本（单轮，1 次 LLM 调用）
- *     └─ file/shell/mcp → 返回 tool_calls（write_file / execute / bench_echo）
+ *     ├─ file/shell/mcp → 返回 tool_calls（write_file / execute / bench_echo）
+ *     └─ slow → 长推理流式（issue #87 回归防线）：delta 分片拉满 MOCK_LLM_SLOW_MS
+ *        （默认 30s）再收尾，构造确定性「长 LLM 流式」在途 turn，用于 C 档并发
+ *        启动延迟断言（agent_start_delay_ms，run-bench.sh 场景 C）
  *
  * 端点：POST /v1/chat/completions（stream 均支持）/ GET /stats / POST /reset
- * 延迟注入：MOCK_LLM_DELAY_MS（默认 0）
+ * 延迟注入：MOCK_LLM_DELAY_MS（默认 0）；slow 场景总时长 MOCK_LLM_SLOW_MS（默认 30000）
  * 固定 usage：in=200 / out=50
  */
 'use strict';
@@ -17,18 +20,19 @@ const http = require('http');
 
 const PORT = parseInt(process.env.MOCK_LLM_PORT || '18081', 10);
 const DELAY_MS = parseInt(process.env.MOCK_LLM_DELAY_MS || '0', 10);
+const SLOW_MS = parseInt(process.env.MOCK_LLM_SLOW_MS || '30000', 10);
 const MODEL = 'bench-model';
 
 // ===== 统计（/stats 供与压测端对账） =====
 const stats = {
   total: 0,
-  byScenario: { plain: 0, file: 0, shell: 0, mcp: 0, finalize: 0 },
+  byScenario: { plain: 0, file: 0, shell: 0, mcp: 0, slow: 0, finalize: 0 },
   latencyMs: [],
 };
 
 function reset() {
   stats.total = 0;
-  stats.byScenario = { plain: 0, file: 0, shell: 0, mcp: 0, finalize: 0 };
+  stats.byScenario = { plain: 0, file: 0, shell: 0, mcp: 0, slow: 0, finalize: 0 };
   stats.latencyMs = [];
 }
 
@@ -55,7 +59,7 @@ function messageText(msg) {
 
 /** 从用户消息解析场景与 sessionId："[BENCH:file] session=bench-B1-000001 ..." */
 function parseScenario(text) {
-  const m = /\[BENCH:(plain|file|shell|mcp)\]/.exec(text || '');
+  const m = /\[BENCH:(plain|file|shell|mcp|slow)\]/.exec(text || '');
   const scenario = m ? m[1] : 'plain';
   const sm = /session=([A-Za-z0-9_-]+)/.exec(text || '');
   return { scenario, sid: sm ? sm[1] : 'nosid' };
@@ -137,10 +141,11 @@ async function respond(reqBody, res) {
     stats.byScenario[scenario] = (stats.byScenario[scenario] || 0) + 1;
     toolCalls = toolCallFor(scenario, parsed.sid);
     finish = toolCalls ? 'tool_calls' : 'stop';
-    if (!toolCalls) text = PLAIN_TEXT;
+    if (!toolCalls) text = scenario === 'slow' ? 'BENCH-SLOW-OK' : PLAIN_TEXT;
   }
 
-  await sleep(DELAY_MS);
+  // slow 场景非流式：整体 sleep 模拟长推理（流式走下方分片分支）
+  await sleep(DELAY_MS + (scenario === 'slow' && !stream ? SLOW_MS : 0));
 
   if (!stream) {
     const message = toolCalls
@@ -158,7 +163,18 @@ async function respond(reqBody, res) {
       Connection: 'keep-alive',
     });
     const emit = (obj) => res.write(`data:${obj}\n\n`);
-    if (toolCalls) {
+    if (scenario === 'slow' && !toolCalls) {
+      // 长推理流式：delta 分片拉满 SLOW_MS 再收尾（确定性「长 LLM 流式」在途 turn）
+      const slices = 20;
+      const per = Math.floor(SLOW_MS / slices);
+      emit(chunk(id, created, { role: 'assistant' }, null));
+      for (let i = 0; i < slices; i++) {
+        await sleep(per);
+        emit(chunk(id, created, { content: 'BENCH-SLOW-DELTA ' }, null));
+      }
+      emit(chunk(id, created, { content: 'BENCH-SLOW-OK' }, null));
+      emit(chunk(id, created, {}, finish));
+    } else if (toolCalls) {
       // 首块：role + 工具名；次块：完整 arguments；末块：finish_reason
       const head = { ...toolCalls[0], function: { name: toolCalls[0].function.name, arguments: '' } };
       emit(chunk(id, created, { role: 'assistant', tool_calls: [head] }, null));
@@ -227,5 +243,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[mock-llm] listening on 0.0.0.0:${PORT} (delay=${DELAY_MS}ms)`);
+  console.log(`[mock-llm] listening on 0.0.0.0:${PORT} (delay=${DELAY_MS}ms, slow=${SLOW_MS}ms)`);
 });
