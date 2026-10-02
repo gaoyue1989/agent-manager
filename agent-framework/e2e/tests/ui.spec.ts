@@ -628,13 +628,18 @@ test('U14b 绑定模型删除回落 system + 禁用模型切换失败回滚', as
     await expect(select).toHaveValue('system', { timeout: 30_000 });
 
     // ---- ② 禁用回滚：绑定 → PATCH enabled:false → 改选该模型 → 400 model_disabled ----
+    // 流模式是内存态，上一步 page.reload() 后回落默认 A2A；显式切回 channel 与 step① 对齐
+    await page.locator(SEL.modeChannel).click();
     await page.locator(SEL.newThread).click();
     await select.selectOption(disabledId);
     await page.locator(SEL.chatInput).fill('[E2E:plain](u14b-dis)');
     await page.locator(SEL.sendBtn).click();
     await expect(page.locator(SEL.sendBtn)).toBeEnabled({ timeout: 120_000 });
-    const sidB = await page.locator(`${SEL.threadList} .thread-item.active`)
-      .getAttribute('data-sid', { timeout: 30_000 });
+    // newThread 只清 state，DOM 里旧条目（sidA，绑定=已删模型）仍挂 .active 直到下次
+    // loadThreads——必须等 active 会话确实切走，否则读到旧 sid 断言假失败（同 U14 第 6 步口径）
+    const activeItem = page.locator(`${SEL.threadList} .thread-item.active`);
+    await expect(activeItem).not.toHaveAttribute('data-sid', sidA, { timeout: 30_000 });
+    const sidB = await activeItem.getAttribute('data-sid');
     expect(sidB, '禁用场景应已创建并选中会话').toBeTruthy();
     expect((await (await request.get(`/threads/${sidB}`)).json()).model).toBe(disabledId);
 
