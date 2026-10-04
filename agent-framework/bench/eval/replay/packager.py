@@ -189,11 +189,20 @@ def pack(
     llm = [r for r in _read_jsonl([str(p) for p in sorted((collector / "llm").glob("*.jsonl"))]) if in_range(r)]
     sandbox = [r for r in _read_jsonl([str(p) for p in sorted((collector / "sandbox").glob("*.jsonl"))]) if in_range(r)]
     mcp = [r for r in _read_jsonl([str(p) for p in sorted((collector / "mcp").glob("*.jsonl"))]) if in_range(r)]
+    http_recs = [r for r in _read_jsonl([str(p) for p in sorted((collector / "http").glob("*.jsonl"))])] if (collector / "http").exists() else []
 
     # 单交互落盘（回放器直接消费）
     for rec in llm:
         with open(out / "interactions" / "llm" / f"{rec.get('id', 'x')}.json", "w", encoding="utf-8") as f:
             json.dump(rec, f, ensure_ascii=False, indent=1)
+    # 业务服务 HTTP 交互（附录 C）：作为会话归属证据与前端视角对照进包
+    http_sessions: dict[str, list[str]] = {}
+    for rec in http_recs:
+        (out / "interactions" / "http").mkdir(exist_ok=True)
+        with open(out / "interactions" / "http" / f"{rec.get('id', 'x')}.json", "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=1)
+        if rec.get("session"):
+            http_sessions.setdefault(rec["session"], []).append(rec.get("id"))
 
     sessions = group_llm_sessions(llm)
 
@@ -231,7 +240,7 @@ def pack(
         inputs = tr.get("turns") or [{"input": nz.first_user_text((calls[0].get("request") or {}))}]
         session_obj = {
             "sid": sid,
-            "confidence": g["confidence"],
+            "confidence": "high" if sid in http_sessions else g["confidence"],
             "turns": inputs,
             "final_output": tr.get("final_output", final),
             "frames": tr.get("frame_counts") or {},
@@ -260,14 +269,24 @@ def pack(
         case = {k: v for k, v in case.items() if v is not None}
         with open(out / "cases-draft" / f"{sid}.json", "w", encoding="utf-8") as f:
             json.dump(case, f, ensure_ascii=False, indent=1)
+        confidence = g["confidence"]
+        if sid in http_sessions:
+            confidence = "high"  # HTTP 反代口有该 session 的强记录（附录 C 根治路径）
         correlation[sid] = {
-            "confidence": g["confidence"],
+            "confidence": confidence,
             "llm": [c.get("id") for c in calls],
             "sandbox": [s.get("id") for s in sandbox if s.get("session") == sid],
             "mcp": [m.get("id") for m in mcp if m.get("session") == sid],
+            "http": http_sessions.get(sid, []),
         }
-        session_summaries.append({"sid": sid, "confidence": g["confidence"],
+        session_summaries.append({"sid": sid, "confidence": confidence,
                                   "turns": len(inputs), "llm_calls": len(calls)})
+    # 有 HTTP 反代交互但无 LLM 会话的 session（如纯查询轮）：单列归属条目，
+    # 保证 http 交互在包内可寻址（前端视角回放演进的数据基础）
+    for sid, ids in http_sessions.items():
+        if sid not in correlation:
+            correlation[sid] = {"confidence": "high", "llm": [], "sandbox": [],
+                                "mcp": [], "http": ids}
 
     # 沙箱/MCP 交互落盘（回放器消费；无会话归属的也保留）
     for rec in sandbox:
@@ -298,7 +317,7 @@ def pack(
         "stats": {"llm": len(llm),
                   "llm_main": len(llm) - sum(1 for r in llm if _is_background(r.get("request"))),
                   "llm_background": sum(1 for r in llm if _is_background(r.get("request"))),
-                  "sandbox": len(sandbox), "mcp": len(mcp)},
+                  "sandbox": len(sandbox), "mcp": len(mcp), "http": len(http_recs)},
     }
     with open(out / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)

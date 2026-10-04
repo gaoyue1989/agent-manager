@@ -149,7 +149,8 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
     prof = {
         "ns": "e2e", "display": "e2e 演示服务", "state": "recording",
         "upstream": {"llm": f"{mock_base}/v1", "llm_api_key": "sk-collector-inject-key-1234567890",
-                     "llm_default_model": "mock-record-model", "sandbox": mock_base, "mcp": {"srv1": f"{mock_base}/mcp"}},
+                     "llm_default_model": "mock-record-model", "sandbox": mock_base, "mcp": {"srv1": f"{mock_base}/mcp"},
+                     "agent": "http://127.0.0.1:18991"},
         "record": {"sampling": 1, "body_max_bytes": 262144},
     }
     r = httpx.post(f"{admin}/api/profiles", json=prof, timeout=10).json()
@@ -206,6 +207,20 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
     mcp_rec = _read_latest(work / "collector-data" / "e2e" / "mcp")
     check("MCP 录制 JSON-RPC 对", (mcp_rec.get("request") or {}).get("method") == "tools/call"
           and (mcp_rec.get("response") or {}).get("result"))
+
+    # 2.5b 业务服务反代（kind=http，附录 C）：前端 API 录制 + sessionId 提取
+    httpx.post("http://127.0.0.1:18203/e2e/threads/chat",
+               json={"message": "echo: http-反代-录制", "sessionId": "sess-http-1"}, timeout=30)
+    http_rec = _read_latest(work / "collector-data" / "e2e" / "http")
+    check("HTTP 反代录制 method/path", http_rec.get("method") == "POST" and http_rec.get("path") == "/threads/chat",
+          str(http_rec.get("path")))
+    check("HTTP 反代 session 提取（body）", http_rec.get("session") == "sess-http-1", str(http_rec.get("session")))
+    httpx.get("http://127.0.0.1:18203/e2e/threads/sess-http-2/status", timeout=30)
+    http_recs_all = [json.loads(l) for f2 in (work / "collector-data" / "e2e" / "http").glob("*.jsonl")
+                     for l in f2.read_text(encoding="utf-8").splitlines() if l.strip()]
+    path_rec = next((r for r in http_recs_all if r.get("path", "").startswith("/threads/sess-http-2")), {})
+    check("HTTP 反代 session 提取（path）", path_rec.get("session") == "sess-http-2",
+          f"path={path_rec.get('path')} session={path_rec.get('session')}")
 
     # 2.6 状态三态语义
     httpx.post(f"{admin}/api/profiles/e2e/state", json={"state": "passthrough"}, timeout=10)
@@ -298,6 +313,19 @@ def phase_pack(traces: Path) -> Path:
     check("会话骨架终答非空", bool(sess0.get("recorded_final")), sess0.get("recorded_final", "")[:60])
     conf = {s["sid"]: s["confidence"] for s in m["sessions"]}
     check("session 头强关联=high", "high" in conf.values(), str(conf))
+    # 附录 C：ns=e2e 有反代口交互（collector 阶段产生），打独立包验证 http 交互入包 + 置信度提升
+    pack_http = do_pack(collector_dir=str(work_dir / "collector-data"), ns="e2e",
+                        out_dir=str(work_dir / "pack" / "pk-e2e-http"))
+    m_http = json.loads((pack_http / "manifest.json").read_text(encoding="utf-8"))
+    check("HTTP 交互入包（附录 C）", m_http["stats"].get("http", 0) >= 2, str(m_http["stats"]))
+    corr_http = json.loads((pack_http / "correlation.json").read_text(encoding="utf-8"))
+    with_http = [v for v in corr_http.values() if v.get("http")]
+    # LLM 会话（sess-rec-*）与反代口交互（sess-http-*）在本 e2e 中是不同会话——
+    # 真实场景下同一 session 命名时 http 证据即把指纹聚类的 medium 升 high；
+    # 这里验证 http 交互按自身 session 入 correlation（归属通道打通）
+    check("HTTP 交互按 session 归属（附录 C）", len(with_http) >= 1
+          and all(v["confidence"] == "high" for v in with_http),
+          f"{len(with_http)} 会话带 http 证据（含 {sum(len(v['http']) for v in with_http)} 条交互）")
     return pack_dir
 
 
