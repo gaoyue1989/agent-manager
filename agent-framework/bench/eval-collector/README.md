@@ -56,7 +56,7 @@ POST /api/profiles/{ns}/precheck       上游预检（LLM /models、MCP initiali
 GET  /api/profiles/{ns}/switch-snippet 切换片段   /restore-snippet 还原片段
 GET  /api/interactions?ns=&kind=&limit 交互流水（脱敏摘要）
 POST /api/mask-test                    脱敏预览
-POST /api/pack                         打包（有 packager sidecar 时转发，否则返回等价 CLI）
+POST /api/pack                         打包：EVAL_PACKAGER_URL 指向 studio 打包端点时转发出完整 evalpack，否则返回等价 CLI
 ```
 
 ## 录制数据形态

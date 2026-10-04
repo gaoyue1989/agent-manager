@@ -154,6 +154,8 @@ python3 bench/eval/flywheel.py status     # 趋势账本一览：每轮通过率
 
 ## 6. 离线评测链路（2026-10-04 新增：pack / replay / live）
 
+> **端到端操作手册（含 collector/studio 部署、页面路径、排障）见 [OFFLINE.md](OFFLINE.md)**；本节是 CLI 速查。
+
 飞轮新增三条子命令，与 eval-collector / eval-studio 组成离线闭环（设计
 `docs/design/agent-framework-eval-offline-record-replay-design.md`，实施记录见该文档附录）：
 

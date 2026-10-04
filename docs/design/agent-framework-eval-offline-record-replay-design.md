@@ -63,7 +63,7 @@
 | 组件 | 形态 | 语言/技术 | 部署位置 |
 |------|------|-----------|----------|
 | eval-collector | 常驻录制代理（LLM/SBX/MCP 三协议）+ 内置 Web 控制台（接入向导/状态/配置/打包/下线） | Node.js ≥22 alpine 镜像，零 npm 依赖（沿用 e2e/mock 范式），四固定端口 + 路径前缀多路复用 | 测试环境：宿主机 docker / compose 工作站 / 集群内清单（deploy/k8s.yaml） |
-| packager | 打包器（`flywheel.py pack` 子命令；另容器化为 compose 内 `eval-packager` sidecar，控制台一键触发完整打包） | Python（bench/eval 内新模块 `replay/`） | 离线环境或 compose 工作站，只读访问 collector 存储 + 测试环境 MySQL/Redis |
+| packager | 打包器（`flywheel.py pack` 子命令；实施后由 **eval-studio 镜像承担**：内置打包/回放引擎，compose 工作站共享录制卷，collector 控制台一键触发 `POST /api/packs/from-collector`） | Python（bench/eval 内新模块 `replay/`） | 离线环境或 compose 工作站，只读访问 collector 存储 + 测试环境 MySQL/Redis |
 | replay 引擎 | 回放执行编排（`flywheel.py replay` 子命令） | Python + 三个 mock 回放器（Node/Python） | 离线环境，docker 供给 |
 | eval-studio | web 服务（页面 + API + run 编排 + 按 agent 的目标档案配置切换/保存，replay/live 双模式） | FastAPI + SQLite + React(Vite+Tailwind) 静态托管 | 离线环境，单容器/单进程 |
 
@@ -106,22 +106,10 @@ docker run -d --name eval-collector \
 # 浏览器打开 http://<host>:18300 → 进入接入向导
 ```
 
-**形态二：docker compose 采集工作站（collector + 可选 eval-packager sidecar，一键出完整 evalpack）**
-
-```yaml
-services:
-  collector:
-    image: gaoyue1989/eval-collector:latest
-    ports: ["18200-18202:18200-18202", "18300:18300"]
-    volumes: ["./data:/var/lib/eval-collector", "./conf:/etc/eval-collector"]
-    environment: { EVAL_COLLECTOR_ADMIN_TOKEN: "${ADMIN_TOKEN}" }
-  packager:                        # 可选：完整数据包（会话关联需要它）
-    image: gaoyue1989/eval-packager:latest
-    volumes: ["./data:/var/lib/eval-collector", "./packs:/packs"]
-    environment:                   # 只读凭据；不发布端口，仅 compose 内网可达
-      EVAL_MYSQL_URL: "mysql://ro_user:${MYSQL_RO_PW}@10.x.x.x:3306"
-      EVAL_REDIS_URL: "redis://:${REDIS_RO_PW}@10.x.x.x:6379"
-```
+**形态二：docker compose 采集工作站（collector + eval-studio，一键出完整 evalpack）**——
+实施交付形态见 `bench/eval-collector/docker-compose.yml`（packager 由 eval-studio 镜像承担，
+共享录制卷；控制台「数据打包」经 `EVAL_PACKAGER_URL=http://studio:18400/api/packs/from-collector`
+转调出包）。设计期的独立 `eval-packager` sidecar 镜像不再单独提供。
 
 **形态三：集群内部署**（测试环境即 kind 集群时的推荐形态）：`deploy/k8s.yaml`（Deployment + Service + 录制卷 PVC/hostPath），业务服务以 svc DNS 寻址（如 `http://eval-collector.agent-platform.svc:18200/{ns}/v1`）。该清单由运维 `kubectl apply`，**不经平台发布 API、不设 ownerReferences**——collector 是测试基础设施而非业务 agent 服务，不触碰控制面原则；业务服务的三个键切换仍走平台显式 env 编辑 API（向导生成调用体）。
 
@@ -490,13 +478,13 @@ WS   /api/runs/{id}/events                      # 进度推送
 ```
 agent-framework/bench/eval-collector/        # Docker 镜像源：Node 采集代理 + 内置控制台
   server.mjs、console/index.html（自包含单页，零 CDN 依赖）、collector.yaml
-  Dockerfile、docker-compose.yml（含可选 eval-packager sidecar）、deploy/k8s.yaml、README
+  Dockerfile、docker-compose.yml（collector + eval-studio 工作站）、deploy/k8s.yaml、README
 agent-framework/bench/eval/replay/           # packager.py、normalize.py、trajectory.py
 agent-framework/bench/eval/mock/replay-llm.mjs、replay-sandbox.mjs
 agent-framework/bench/eval-studio/           # FastAPI + 前端
 ```
 
-**修改**：`flywheel.py` 加 `pack` / `replay` 子命令；`pyproject.toml`（如引入 judge 增强依赖则钉版注释）；`.github/workflows/agent-framework-ci.yml`（master push 增推 `gaoyue1989/eval-collector` 与 `eval-packager` 镜像，沿用 buildx + gha 缓存，按目录过滤只在该目录变更时构建）；`FLYWHEEL.md`/`docs/e2e-ci-plan.md`（若 M4 落 CI job）。
+**修改**：`flywheel.py` 加 `pack` / `replay` 子命令；`pyproject.toml`（如引入 judge 增强依赖则钉版注释）；`.github/workflows/agent-framework-ci.yml`（master push 增推 `gaoyue1989/eval-collector` 与 `eval-studio` 镜像，沿用 buildx + gha 缓存，按目录过滤只在该目录变更时构建）；`FLYWHEEL.md`/`docs/e2e-ci-plan.md`（若 M4 落 CI job）。
 
 ---
 
