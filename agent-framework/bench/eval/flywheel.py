@@ -397,6 +397,84 @@ def cmd_status(_: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 离线评测链路（设计 docs/design/agent-framework-eval-offline-record-replay-design.md）：
+# pack（录制数据 → evalpack）/ replay（离线回放 + 轨迹等价）/ live（联机链路评测）
+# ---------------------------------------------------------------------------
+
+def cmd_pack(args: argparse.Namespace) -> int:
+    from replay import packager
+    out = packager.pack(
+        collector_dir=args.collector_dir, out_dir=args.out, ns=args.ns,
+        traces_dir=args.traces, oaf_zip=args.oaf_zip,
+        since=args.since, until=args.until, framework_version=_git_commit8())
+    with open(Path(out) / "manifest.json", encoding="utf-8") as f:
+        manifest = json.load(f)
+    print(f"[pack] evalpack={out} 会话={len(manifest['sessions'])} "
+          f"交互={manifest['stats']} zip={out}.zip")
+    if args.export_e2e_fixtures:
+        from replay.evolve import export_e2e_fixtures
+        export_e2e_fixtures(str(out), args.fixtures_dir)
+    return 0
+
+
+async def cmd_replay(args: argparse.Namespace) -> int:
+    from replay import runner
+    judge_cfg = None
+    if args.judge:
+        from graders.correctness import judge_from_env
+        judge_cfg = judge_from_env()
+        if judge_cfg is None:
+            print("[judge] 跳过（未配置 EVAL_LLM_*）")
+
+    if args.provision:
+        # M2 provision pack 化：evalpack → 独立存储 + 受测 jar（docker）+ 三回放器
+        from provision import replay_pack
+        result = replay_pack.provision_replay(
+            repo_dir=REPO_DIR, eval_dir=EVAL_DIR, pack_dir=args.pack, out_dir=args.out,
+            mode=args.mode, judge_cfg=judge_cfg,
+            case_ids=(args.only.split(",") if args.only else None))
+        return result["exit_code"]
+
+    if args.rebase:
+        # 基线演进：loose 回放（不阻断）→ 捕获实际请求 → 生成新基线包（响应保持录制件）
+        from replay import evolve
+        proc, llm_port = runner.start_replay_llm(
+            args.pack, [r for r in (args.rewrite or "").split(",") if "=" in r])
+        try:
+            code = await runner.run_replay(
+                pack_dir=args.pack, out_dir=args.out,
+                base_url=args.base_url or _default_base_url(), mode="loose",
+                case_ids=(args.only.split(",") if args.only else None),
+                judge_cfg=judge_cfg, replayer=(proc, llm_port))
+            new_pack = evolve.rebase_pack(args.pack, llm_port, args.rebase,
+                                          note=args.rebase_note or "")
+        finally:
+            proc.terminate()
+        return 0 if new_pack.exists() and code in (0, 1) else 1
+
+    rewrites = [r for r in (args.rewrite or "").split(",") if "=" in r]
+    return await runner.run_replay(
+        pack_dir=args.pack, out_dir=args.out, base_url=args.base_url or _default_base_url(),
+        mode=args.mode, case_ids=(args.only.split(",") if args.only else None),
+        judge_cfg=judge_cfg, rewrites=rewrites, keep_replayer=args.keep_replayer)
+
+
+async def cmd_live(args: argparse.Namespace) -> int:
+    from replay import runner
+    judge_cfg = None
+    if args.judge:
+        from graders.correctness import judge_from_env
+        judge_cfg = judge_from_env()
+        if judge_cfg is None:
+            print("[judge] 跳过（未配置 EVAL_LLM_*）")
+    return await runner.run_live(
+        base_url=args.base_url or _default_base_url(), out_dir=args.out,
+        pack_dir=args.pack, cases_dir=str(CASES_DIR) if args.cases else None,
+        case_ids=(args.only.split(",") if args.only else None),
+        judge_cfg=judge_cfg, timeout_s=args.timeout)
+
+
 def cmd_selftest(_: argparse.Namespace) -> int:
     """离线自检：帧映射解析 + 确定性检查器，不依赖网络与被测服务。"""
     mapping = sse_client.MAPPING
@@ -595,6 +673,47 @@ def main() -> int:
     ps.set_defaults(func=cmd_selftest)
     pst = sub.add_parser("status", help="查看运行历史")
     pst.set_defaults(func=cmd_status)
+
+    # ---- 离线评测链路 ----
+    pk = sub.add_parser("pack", help="collector 录制数据 → evalpack 数据包")
+    pk.add_argument("--collector-dir", required=True, help="collector 数据目录（…/data 或 …/data/{ns}）")
+    pk.add_argument("--out", required=True, help="evalpack 输出目录（如 reports/packs/pk-xxx）")
+    pk.add_argument("--ns", default=None, help="只打包该 ns（collector-dir 为 data 根时使用）")
+    pk.add_argument("--traces", default=None, help="driver 轨迹捕获目录（可选，提升用例草稿精度）")
+    pk.add_argument("--oaf-zip", default=None, help="OAF 包 zip 副本（可选）")
+    pk.add_argument("--since", default=None, help="起始时间（ISO，可选）")
+    pk.add_argument("--until", default=None, help="结束时间（ISO，可选）")
+    pk.add_argument("--export-e2e-fixtures", action="store_true",
+                    help="同时导出 e2e/mock/fixtures/llm 夹具（入库走 PR 人审）")
+    pk.add_argument("--fixtures-dir", default=None, help="夹具输出目录（缺省 pack 同级 e2e-fixtures/）")
+    pk.set_defaults(func=cmd_pack)
+
+    prp = sub.add_parser("replay", help="evalpack 离线回放：A1 断言 + A2 轨迹等价 + A3 漂移")
+    prp.add_argument("--pack", required=True, help="evalpack 目录")
+    prp.add_argument("--out", required=True, help="run 产物目录")
+    prp.add_argument("--base-url", default=None, help="被测服务地址（其 LLM 须指向 replay-llm）")
+    prp.add_argument("--mode", choices=["strict", "loose"], default="strict",
+                     help="strict=轨迹失配判失败；loose=只记录漂移（默认 strict）")
+    prp.add_argument("--only", default=None, help="只跑指定 case_id（逗号分隔）")
+    prp.add_argument("--rewrite", default="", help="占位改写 from=to（逗号分隔多组）")
+    prp.add_argument("--judge", action="store_true", help="启用语义打分（需 EVAL_LLM_*）")
+    prp.add_argument("--keep-replayer", action="store_true", help="保留 replay-llm 进程供调试")
+    prp.add_argument("--provision", action="store_true",
+                     help="回放供给：evalpack → 独立存储 + 受测 jar（docker，需 mvn package）+ 三回放器")
+    prp.add_argument("--rebase", default=None, metavar="NEW_PACK_DIR",
+                     help="基线演进：loose 回放后以实际请求生成新基线包（响应保持录制件）")
+    prp.add_argument("--rebase-note", default=None, help="rebase 留痕说明")
+    prp.set_defaults(func=cmd_replay)
+
+    plv = sub.add_parser("live", help="联机链路评测：用例直打真实服务 + 断言/judge")
+    plv.add_argument("--base-url", default=None, help="被测服务地址（真实测试环境）")
+    plv.add_argument("--pack", default=None, help="用例来源 evalpack（与 --cases 二选一）")
+    plv.add_argument("--cases", action="store_true", help="用例来源 = 库内 cases/*.json")
+    plv.add_argument("--out", required=True, help="run 产物目录")
+    plv.add_argument("--only", default=None, help="只跑指定 case_id（逗号分隔）")
+    plv.add_argument("--judge", action="store_true", help="启用语义打分（需 EVAL_LLM_*）")
+    plv.add_argument("--timeout", type=float, default=120.0, help="单轮 SSE 超时秒数")
+    plv.set_defaults(func=cmd_live)
 
     args = p.parse_args()
     result = args.func(args)

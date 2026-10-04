@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eval-collector 控制台</title>
+<style>
+  :root{--bg:#0f1419;--panel:#1a2129;--panel2:#212a34;--line:#2d3947;--fg:#dbe4ee;--dim:#8496a9;
+        --acc:#4da3ff;--ok:#3fb96f;--warn:#e0a83c;--err:#e06c5c;--mono:'SF Mono',Consolas,monospace}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+     font:14px/1.6 -apple-system,'PingFang SC','Microsoft YaHei',sans-serif}
+  header{display:flex;align-items:center;gap:16px;padding:14px 24px;border-bottom:1px solid var(--line)}
+  header h1{font-size:16px;margin:0} header .ver{color:var(--dim);font-size:12px}
+  nav{display:flex;gap:4px;padding:10px 24px 0;border-bottom:1px solid var(--line)}
+  nav button{background:none;border:none;color:var(--dim);padding:8px 16px;cursor:pointer;font-size:14px;
+             border-bottom:2px solid transparent}
+  nav button.on{color:var(--acc);border-bottom-color:var(--acc)}
+  main{padding:24px;max-width:1080px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:18px}
+  .card h2{font-size:15px;margin:0 0 12px} .card h2 .hint{font-weight:400;color:var(--dim);font-size:12px;margin-left:8px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500} td.mono,code,.code{font-family:var(--mono);font-size:12.5px}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px}
+  .tag.rec{background:rgba(63,185,111,.15);color:var(--ok)} .tag.pass{background:rgba(224,168,60,.15);color:var(--warn)}
+  .tag.dis{background:rgba(224,108,92,.15);color:var(--err)} .tag.off{background:var(--panel2);color:var(--dim)}
+  button.btn{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;
+             padding:6px 14px;cursor:pointer;font-size:13px}
+  button.btn:hover{border-color:var(--acc)} button.btn.pri{background:var(--acc);border-color:var(--acc);color:#08131f;font-weight:600}
+  button.btn:disabled{opacity:.5;cursor:not-allowed}
+  input,select,textarea{background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--fg);
+         padding:7px 10px;font-size:13px;width:100%} textarea{font-family:var(--mono);resize:vertical}
+  label{display:block;color:var(--dim);font-size:12px;margin:10px 0 4px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:0 18px}
+  .steps{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  .steps span{padding:3px 12px;border-radius:12px;background:var(--panel2);color:var(--dim);font-size:12px}
+  .steps span.on{background:rgba(77,163,255,.15);color:var(--acc)}
+  pre.code{background:#12181f;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;
+           font-family:var(--mono);font-size:12.5px;white-space:pre-wrap;word-break:break-all;position:relative}
+  pre.code .copy{position:absolute;top:6px;right:6px}
+  .ok{color:var(--ok)} .err{color:var(--err)} .warn{color:var(--warn)} .dim{color:var(--dim)}
+  .row{display:flex;gap:10px;align-items:center} .row .grow{flex:1}
+  .stat{display:inline-block;margin-right:22px} .stat b{font-size:20px;display:block}
+  .stat span{color:var(--dim);font-size:12px}
+  .detail{margin-top:6px;font-size:12px;color:var(--dim);font-family:var(--mono);white-space:pre-wrap;
+          max-height:300px;overflow:auto;background:#12181f;border-radius:6px;padding:8px}
+  .toast{position:fixed;bottom:24px;right:24px;background:var(--panel2);border:1px solid var(--line);
+         padding:10px 18px;border-radius:8px;display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>eval-collector 控制台</h1><span class="ver" id="ver"></span>
+  <span class="grow" style="flex:1"></span>
+  <span class="dim" id="health"></span>
+</header>
+<nav id="nav">
+  <button data-tab="status" class="on">状态面板</button>
+  <button data-tab="wizard">接入向导</button>
+  <button data-tab="config">配置管理</button>
+  <button data-tab="pack">数据打包</button>
+  <button data-tab="teardown">下线向导</button>
+</nav>
+<main id="main"></main>
+<div class="toast" id="toast"></div>
+
+<script>
+/* eslint-disable */
+const $ = (s, el=document) => el.querySelector(s);
+const $$ = (s, el=document) => [...el.querySelectorAll(s)];
+const api = async (p, opt={}) => {
+  const r = await fetch(p, {headers:{'content-type':'application/json'}, ...opt});
+  const j = await r.json().catch(()=>({}));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+};
+const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtB = n => n>1e9?(n/1e9).toFixed(1)+'GB':n>1e6?(n/1e6).toFixed(1)+'MB':n>1e3?(n/1e3).toFixed(1)+'KB':n+'B';
+function toast(msg, ok=true){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
+  t.style.borderColor = ok?'var(--ok)':'var(--err)'; setTimeout(()=>t.style.display='none', 2600); }
+function copy(text){ navigator.clipboard.writeText(text).then(()=>toast('已复制'), ()=>toast('复制失败', false)); }
+const stateTag = s => ({recording:'<span class="tag rec">录制中</span>', passthrough:'<span class="tag pass">仅透传</span>', disabled:'<span class="tag dis">已停用</span>'}[s]||s);
+const MB = 1024*1024;
+
+let tab = 'status', status=null, profiles=[], wiz={step:1, ns:'', display:'', upstream:{llm:'', sandbox:'', mcp:[], llm_api_key:'', llm_default_model:''}, precheck:null};
+
+async function refresh(){ try{ [status, profiles] = await Promise.all([api('/api/status'), api('/api/profiles')]);
+  $('#health').textContent = `profile ${profiles.profiles.length} · 存储 ${fmtB(status.storage_bytes)} · 运行 ${Math.floor(status.uptime_s/60)} 分钟`;
+  $('#ver').textContent = 'v'+status.version; }catch(e){ $('#health').innerHTML = '<span class="err">'+esc(e.message)+'</span>'; } }
+
+const views = {
+  async status(){ const el = $('#main');
+    const rows = status.profiles.map(p=>`
+      <tr><td class="mono">${esc(p.ns)}</td><td>${esc(p.display||'')}</td><td>${stateTag(p.state)}</td>
+      <td>LLM ${p.counts.llm.today}/${p.counts.llm.total} · 沙箱 ${p.counts.sandbox.today}/${p.counts.sandbox.total} · MCP ${p.counts.mcp.today}/${p.counts.mcp.total}</td>
+      <td>${['llm','sandbox','mcp'].filter(k=>p.upstream[k]===true||(Array.isArray(p.upstream[k])&&p.upstream[k].length)).join('/')||'-'}</td></tr>`).join('');
+    el.innerHTML = `
+    <div class="card"><h2>接入概览 <span class="hint">今日/累计 交互数 · 端口 18200 LLM / 18201 沙箱 / 18202 MCP</span></h2>
+      <table><tr><th>ns</th><th>名称</th><th>状态</th><th>交互（今日/累计）</th><th>已配上游</th></tr>${rows||'<tr><td colspan=5 class="dim">暂无接入档案，前往「接入向导」创建</td></tr>'}</table></div>
+    <div class="card"><h2>最近交互流水 <span class="hint">脱敏后数据</span>
+      <select id="ns-sel" style="width:auto">${profiles.profiles.map(p=>`<option value="${esc(p.ns)}">${esc(p.ns)}</option>`).join('')}</select>
+      <select id="kind-sel" style="width:auto"><option value="llm">LLM</option><option value="sandbox">沙箱</option><option value="mcp">MCP</option></select></h2>
+      <div id="flow">…</div></div>`;
+    const load = async () => {
+      const ns=$('#ns-sel').value, kind=$('#kind-sel').value;
+      if(!ns){ $('#flow').innerHTML='<div class="dim">暂无档案</div>'; return; }
+      try{ const {items} = await api(`/api/interactions?ns=${ns}&kind=${kind}&limit=15`);
+        $('#flow').innerHTML = items.length ? `<table><tr><th>时间</th><th>session</th><th>状态</th><th>耗时</th><th>摘要</th></tr>${
+          items.map(i=>`<tr><td class="mono dim">${esc((i.ts||'').replace('T',' ').slice(0,19))}</td>
+          <td class="mono">${esc(i.session||'-')}</td><td>${i.status}</td><td>${i.duration_ms??'-'}ms</td>
+          <td class="mono">${esc(i.summary)}</td></tr>`).join('')}</table>` : '<div class="dim">暂无交互记录</div>';
+      }catch(e){ $('#flow').innerHTML = `<span class="err">${esc(e.message)}</span>`; } };
+    $('#ns-sel').onchange = load; $('#kind-sel').onchange = load; load();
+  },
+
+  async wizard(){ const el = $('#main'); const w = wiz;
+    el.innerHTML = `
+    <div class="steps">${[1,2,3,4,5].map(i=>`<span class="${w.step>=i?'on':''}">${i}.${['创建档案','配置上游','脱敏规则','切换流量','验证采集'][i-1]}</span>`).join('')}</div>
+    <div id="wiz-body"></div>`;
+    const body = $('#wiz-body');
+    if (w.step===1) body.innerHTML = `
+      <div class="card"><h2>① 创建接入档案</h2>
+        <label>业务服务名（ns，= 平台服务名，小写字母/数字/连字符）</label><input id="w-ns" value="${esc(w.ns)}" placeholder="svc-release">
+        <label>展示名（可选）</label><input id="w-display" value="${esc(w.display)}" placeholder="发布助手（测试环境 A）">
+        <div class="row" style="margin-top:14px"><button class="btn pri" id="w-next">下一步</button></div></div>`;
+    if (w.step===1) $('#w-next').onclick = async () => {
+      w.ns = $('#w-ns').value.trim(); w.display = $('#w-display').value.trim();
+      if(!/^[a-z0-9][a-z0-9-]{1,62}$/.test(w.ns)) return toast('ns 格式非法', false);
+      if(profiles.profiles.some(p=>p.ns===w.ns)) return toast('档案已存在，可到「配置管理」编辑', false);
+      w.step=2; views.wizard(); };
+    if (w.step===2) body.innerHTML = `
+      <div class="card"><h2>② 配置上游 <span class="hint">填真实端点；每项可单独预检（网络视角与代理转发一致）</span></h2>
+        <div class="grid">
+        <div><label>LLM 上游（OpenAI 兼容 base，如 https://openrouter.ai/api/v1）</label><input id="u-llm" value="${esc(w.upstream.llm)}">
+             <label>LLM API Key（可选，填则由 collector 注入；不填透传调用方凭据）</label><input id="u-key" type="password" value="${esc(w.upstream.llm_api_key)}">
+             <label>默认模型（可选，业务请求未带 model 时注入）</label><input id="u-model" value="${esc(w.upstream.llm_default_model)}"></div>
+        <div><label>沙箱上游（OpenSandbox 地址，可选）</label><input id="u-sbx" value="${esc(w.upstream.sandbox)}">
+             <label>MCP server（名=URL，每行一个，可选）</label><textarea id="u-mcp" rows="4" placeholder="platform http://platform-backend:8080/mcp">${esc(w.upstream.mcp.map(m=>`${m.name} ${m.url}`).join('\n'))}</textarea></div></div>
+        <div class="row" style="margin-top:14px"><button class="btn" id="w-back">上一步</button>
+             <button class="btn" id="w-check">预检上游</button><button class="btn pri" id="w-next">创建档案并继续</button></div>
+        <div id="w-pre"></div></div>`;
+    if (w.step===2) {
+      $('#w-back').onclick = ()=>{ w.step=1; views.wizard(); };
+      $('#w-check').onclick = async () => {
+        const draft = readUpstream();
+        try{ const r = await api('/api/profiles', {method:'POST', body: JSON.stringify(tempProfile(draft, 'recording'))});
+          const pc = await api(`/api/profiles/${r.ns}/precheck`, {method:'POST'});
+          $('#w-pre').innerHTML = `<div class="detail">${esc(JSON.stringify(pc, null, 2))}</div>`;
+        }catch(e){ $('#w-pre').innerHTML = `<div class="err">${esc(e.message)}</div>`; } };
+      $('#w-next').onclick = async () => {
+        try{ const draft = readUpstream();
+          await api('/api/profiles', {method:'POST', body: JSON.stringify(tempProfile(draft, 'recording'))});
+          w.step=3; views.wizard(); }catch(e){ toast(e.message, false); } };
+    }
+    if (w.step===3) body.innerHTML = `
+      <div class="card"><h2>③ 确认脱敏规则 <span class="hint">默认规则集已内置（密钥/邮箱/手机号/JSON 敏感字段）；录制副本脱敏，透传不受影响</span></h2>
+        <label>贴一段样例报文，预览脱敏效果</label><textarea id="mask-in" rows="5">{"api_key":"sk-or-v1-abcdef1234567890","email":"zhangsan@example.com","phone":"13812345678","content":"普通文本"}</textarea>
+        <div class="row" style="margin:12px 0"><button class="btn" id="mask-btn">预览脱敏</button><button class="btn pri" id="w-next">下一步</button></div>
+        <pre class="code" id="mask-out" style="display:none"></pre></div>`;
+    if (w.step===3) {
+      $('#mask-btn').onclick = async () => { const r = await api('/api/mask-test', {method:'POST', body: JSON.stringify({ns:w.ns, text:$('#mask-in').value})});
+        const o=$('#mask-out'); o.style.display='block'; o.textContent = typeof r.masked==='string'?r.masked:JSON.stringify(r.masked,null,2); };
+      $('#w-next').onclick = ()=>{ w.step=4; views.wizard(); }; }
+    if (w.step===4) { let snip={};
+      try{ snip = await api(`/api/profiles/${w.ns}/switch-snippet`); }catch(e){}
+      body.innerHTML = `
+      <div class="card"><h2>④ 生成切换片段 <span class="hint">把业务服务三个外部依赖键指向 collector（复制即用）</span></h2>
+        <label>平台 env 编辑 API（敏感键保持原值，仅切换 base 地址）</label>
+        <pre class="code">${esc(snip.env_patch_curl||'')}<button class="btn copy" onclick="copy(this.parentNode.textContent.replace('复制',''))">复制</button></pre>
+        <label>OAF 包 mcp-configs url 改写（需 republish 或在线编辑后生效）</label>
+        <pre class="code">${esc((snip.mcp_config_diff||[]).join('\n\n')||'（未配置 MCP 上游）')}</pre>
+        <div class="row"><button class="btn" id="w-back">上一步</button><button class="btn pri" id="w-next">已切换，去验证</button></div></div>`;
+      $('#w-back').onclick = ()=>{ w.step=3; views.wizard(); };
+      $('#w-next').onclick = ()=>{ w.step=5; views.wizard(); }; }
+    if (w.step===5) body.innerHTML = `
+      <div class="card"><h2>⑤ 验证采集</h2>
+        <p class="dim">在被测服务里发一条测试消息，collector 检测到该 ns 首条交互后自动点亮。</p>
+        <div class="row"><span id="v-state" class="dim">等待交互…</span>
+        <button class="btn" id="v-refresh">刷新</button><button class="btn pri" id="w-done">完成</button></div></div>`;
+    if (w.step===5) {
+      const check = async () => { await refresh(); const p = status.profiles.find(x=>x.ns===w.ns);
+        const n = p ? p.counts.llm.total + p.counts.sandbox.total + p.counts.mcp.total : 0;
+        $('#v-state').innerHTML = n>0 ? `<span class="ok">✔ 已捕获 ${n} 条交互，采集链路正常</span>` : '<span class="warn">尚未捕获交互</span>'; };
+      $('#v-refresh').onclick = check; check();
+      $('#w-done').onclick = ()=>{ w.step=1; tab='status'; switchTab('status'); }; }
+    function readUpstream(){
+      return { llm:$('#u-llm').value.trim(), llm_api_key:$('#u-key').value.trim(),
+        llm_default_model:$('#u-model').value.trim(), sandbox:$('#u-sbx').value.trim(),
+        mcp:$('#u-mcp').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
+          const [name, ...rest] = l.split(/\s+/); return {name, url:rest.join(' ')}; }) }; }
+    function tempProfile(d, state){
+      const p = { ns:w.ns, display:w.display, state,
+        upstream:{}, record:{sampling:1, body_max_bytes:1*MB} };
+      if(d.llm) p.upstream.llm = d.llm;
+      if(d.llm_api_key) p.upstream.llm_api_key = d.llm_api_key;
+      if(d.llm_default_model) p.upstream.llm_default_model = d.llm_default_model;
+      if(d.sandbox) p.upstream.sandbox = d.sandbox;
+      if(d.mcp.length) p.upstream.mcp = Object.fromEntries(d.mcp.map(m=>[m.name, m.url]));
+      return p; }
+  },
+
+  async config(){ const el = $('#main');
+    el.innerHTML = `<div class="card"><h2>接入档案</h2><table id="cfg-t"></table></div>`;
+    const t = $('#cfg-t');
+    t.innerHTML = `<tr><th>ns</th><th>名称</th><th>状态</th><th>上游</th><th>操作</th></tr>` +
+      profiles.profiles.map(p=>`<tr>
+        <td class="mono">${esc(p.ns)}</td><td>${esc(p.display||'')}</td><td>${stateTag(p.state)}</td>
+        <td class="mono dim">${esc(JSON.stringify(p.upstream).slice(0,90))}…</td>
+        <td class="row">
+          <select data-ns="${esc(p.ns)}" class="st-sel" style="width:auto">
+            ${['recording','passthrough','disabled'].map(s=>`<option value="${s}" ${p.state===s?'selected':''}>${{recording:'录制中',passthrough:'仅透传',disabled:'停用'}[s]}</option>`).join('')}
+          </select>
+          <button class="btn" onclick="delProfile('${esc(p.ns)}')">删除</button></td></tr>`).join('');
+    $$('.st-sel', t).forEach(s=>s.onchange = async ()=>{
+      try{ await api(`/api/profiles/${s.dataset.ns}/state`, {method:'POST', body:JSON.stringify({state:s.value})});
+        toast('状态已更新'); refresh(); }catch(e){ toast(e.message, false); } });
+  },
+
+  async pack(){ const el = $('#main');
+    const rows = status.profiles.map(p=>`<tr><td class="mono">${esc(p.ns)}</td>
+      <td>LLM ${p.counts.llm.total} · 沙箱 ${p.counts.sandbox.total} · MCP ${p.counts.mcp.total}</td>
+      <td><button class="btn pri" onclick="doPack('${esc(p.ns)}')">导出 evalpack</button></td></tr>`).join('');
+    el.innerHTML = `<div class="card"><h2>数据打包 <span class="hint">collector 侧导出交互数据；完整 evalpack（会话关联+脱敏+用例草稿）由 packager 生成</span></h2>
+      <table><tr><th>ns</th><th>累计交互</th><th>操作</th></tr>${rows||'<tr><td colspan=3 class="dim">暂无档案</td></tr>'}</table>
+      <div id="pack-out" style="margin-top:12px"></div></div>
+      <div class="card"><h2>等价离线 CLI</h2>
+      <pre class="code">python3 bench/eval/flywheel.py pack --collector-dir /var/lib/eval-collector/{ns} \\
+  --out bench/eval/reports/packs/pk-{ns}</pre></div>`;
+  },
+
+  async teardown(){ const el = $('#main');
+    el.innerHTML = `<div class="card"><h2>下线向导 <span class="hint">采集结束的收尾三步</span></h2>
+      <label>选择接入档案</label><select id="td-ns">${profiles.profiles.map(p=>`<option value="${esc(p.ns)}">${esc(p.ns)}</option>`).join('')}</select>
+      <div class="row" style="margin:12px 0"><button class="btn" id="td-gen">生成还原片段</button></div>
+      <div id="td-out"></div></div>`;
+    $('#td-gen').onclick = async () => {
+      const ns = $('#td-ns').value; if(!ns) return;
+      const s = await api(`/api/profiles/${ns}/restore-snippet`);
+      $('#td-out').innerHTML = `
+        <label>① 三个依赖键切回真实上游（复制即用）</label>
+        <pre class="code">${esc(s.env_patch_curl)}<button class="btn copy" onclick="copy(this.parentNode.textContent.replace('复制',''))">复制</button></pre>
+        <label>mcp-configs 还原</label><pre class="code">${esc((s.mcp_config_diff||[]).join('\n\n')||'（无）')}</pre>
+        <p class="dim">② 确认该 ns 已无新流量（状态面板计数停止增长）→ ③ 停止 collector 或将档案置为「仅透传」。</p>`; };
+  },
+};
+
+window.delProfile = async (ns) => { if(!confirm(`删除档案 ${ns}？（已录制数据保留在磁盘）`)) return;
+  await api(`/api/profiles/${ns}`, {method:'DELETE'}); toast('已删除'); await refresh(); views.config(); };
+window.doPack = async (ns) => { const out = $('#pack-out');
+  try{ const r = await api('/api/pack', {method:'POST', body:JSON.stringify({ns})});
+    out.innerHTML = r.pack_id ? `<span class="ok">✔ 数据包 ${esc(r.pack_id)} 已生成</span>`
+      : `<div class="dim">${esc(r.note||'')}${r.cli?`<pre class="code">${esc(r.cli)}</pre>`:''}</div>`; }
+  catch(e){ out.innerHTML = `<span class="err">${esc(e.message)}</span>`; } };
+window.copy = copy;
+
+function switchTab(t){ tab = t;
+  $$('#nav button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
+  views[t]().catch(e=>{ $('#main').innerHTML = `<div class="card"><span class="err">${esc(e.message)}</span></div>`; }); }
+$$('#nav button').forEach(b=>b.onclick = ()=>switchTab(b.dataset.tab));
+refresh().then(()=>views.status());
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
