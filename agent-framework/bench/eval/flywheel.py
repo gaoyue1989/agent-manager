@@ -605,6 +605,39 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     r2 = checks_mod.evaluate({"frames": {"AGENT_END": 1, "done": 0}}, no_done)
     assert all(c["passed"] for c in r2), r2
 
+    # ---- 离线评测链路（M2 验收③）：归一化规则表 + 轨迹等价评估 ----
+    # 规则与 mock/replay-llm.mjs、mock/replay-http.mjs 内置 JS 版本同构，
+    # 两侧改动必须同步——本段断言即同步钉；gw-hash 为框架 AgentStateStore ID 形态。
+    from replay import normalize as nz
+    from replay import trajectory as traj_mod
+
+    assert nz.normalize_text("at 2026-10-04T07:23:06.770Z ok") == "at <TS> ok"
+    assert nz.normalize_text("id=1791098087123 end") == "id=<TS_MS> end"
+    assert nz.normalize_text("uuid 550e8400-e29b-41d4-a716-446655440000!") == "uuid <UUID>!"
+    assert nz.normalize_text("AgentStateStore ID: gw-3f146047e5fd") == "AgentStateStore ID: <GW>"
+    assert nz.normalize_text("http://127.0.0.1:18902/v1") == "<HOST>/v1"
+    assert nz.normalize_text("tok abcdef0123456789abcdef0123456789 end") == "tok <TOKEN> end"
+    assert nz.normalize_text("max_tokens 1024") == "max_tokens 1024"  # 普通数字不受影响
+    fp1 = nz.request_fingerprint({"messages": [{"role": "user", "content": "hi 2026-01-01T00:00:00Z"}]})
+    assert fp1 == nz.request_fingerprint({"messages": [{"role": "user", "content": "hi 2027-01-01T00:00:00Z"}]})
+    assert fp1 != nz.request_fingerprint({"messages": [{"role": "user", "content": "other"}]})
+
+    stats_ok = {"sessions": {"s1": {"calls": 8, "exact": 7, "normalized": 1, "drift": 0, "background": 1}}}
+    t_ok = traj_mod.evaluate_trajectory("s1", stats_ok, expected_llm_calls=8)
+    assert t_ok["step_status"] == "pass" and t_ok["drift_rate"] == 0.0, t_ok
+    stats_bad = {"sessions": {"s1": {"calls": 8, "exact": 6, "normalized": 1, "drift": 1, "background": 0}}}
+    t_bad = traj_mod.evaluate_trajectory("s1", stats_bad, expected_llm_calls=8)
+    assert t_bad["step_status"] == "fail" and t_bad["drift_rate"] == 0.125, t_bad
+    assert traj_mod.run_drift_rate([t_ok, t_bad]) == 0.0625
+
+    from replay.packager import final_text_from_chunks, usage_from_chunks
+    chunks = [json.dumps({"choices": [{"delta": {"content": "你好"}}]}),
+              json.dumps({"choices": [{"delta": {"content": "，世界"}}]}), "[DONE]"]
+    assert final_text_from_chunks(chunks) == "你好，世界"
+    u = usage_from_chunks([json.dumps({"usage": {"prompt_tokens": 3, "completion_tokens": 2,
+                                                 "total_tokens": 5}})])
+    assert u == {"input": 3, "output": 2, "total": 5}
+
     # issue #39：能力门禁跳过分类（kind）与报告渲染——capability 单列醒目、env 预期分流。
     # 两条用例全部被跳过 → runnable 为空，run_suite 不发起任何网络请求（离线可测）。
     async def _skip_probe() -> None:
@@ -624,7 +657,8 @@ def cmd_selftest(_: argparse.Namespace) -> int:
 
     asyncio.run(_skip_probe())
 
-    print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类，"
+    print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
+          f" + 归一化规则/轨迹等价（M2），"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
