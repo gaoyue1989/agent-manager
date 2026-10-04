@@ -75,11 +75,11 @@ def judge_cfg_from(spec: dict[str, Any] | None, use_judge: bool) -> dict[str, st
 # run worker（单线程串行消费 queued run）
 # ---------------------------------------------------------------------------
 
-def _spawn_stub_agent(port: int, llm_base: str) -> subprocess.Popen:
+def _spawn_stub_agent(port: int, llm_base: str, extra_env: dict[str, str] | None = None) -> subprocess.Popen:
     stub = EVAL_DIR / "tests" / "stub-agent.mjs"
     node = shutil.which("node") or "node"
     env = dict(os.environ, STUB_PORT=str(port), STUB_LLM_BASE_URL=llm_base,
-               STUB_LLM_API_KEY="studio-stub")
+               STUB_LLM_API_KEY="studio-stub", **(extra_env or {}))
     return subprocess.Popen([node, str(stub), str(port)], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -113,9 +113,11 @@ def _exec_run(run: dict[str, Any]) -> None:
             proc, llm_port = run_mod.start_replay_llm(pack_dir)
             harness = (spec.get("replay") or {}).get("harness", "builtin-stub")
             if harness == "builtin-stub":
-                # 开箱即用回放沙盒：内置 stub agent 以 replay-llm 为 LLM 上游
+                # 开箱即用回放沙盒：内置 stub agent 以 replay-llm 为 LLM 上游；
+                # replay.extra_env 可注入沙盒环境（如 STUB_MUTATE=1 模拟行为变更的被测版本）
                 stub_port = free_port()
-                stub = _spawn_stub_agent(stub_port, f"http://127.0.0.1:{llm_port}/v1")
+                stub = _spawn_stub_agent(stub_port, f"http://127.0.0.1:{llm_port}/v1",
+                                         extra_env=(spec.get("replay") or {}).get("extra_env"))
                 _wait_health(f"http://127.0.0.1:{stub_port}/healthz")
                 base_url = f"http://127.0.0.1:{stub_port}"
             else:
@@ -481,3 +483,92 @@ def api_trends(profile_id: str | None = None):
         "score_avg": r["report"]["summary"].get("score_avg"),
         "drift_rate": r["report"]["summary"].get("drift_rate"),
     } for r in runs]}
+
+
+# ---- 对比视图（M4 验收：同 pack 多版本对比产出回归结论） ----
+
+def _verdict(sa: str, sb: str) -> str:
+    if sa == "missing":
+        return "new_in_b"
+    if sb == "missing":
+        return "removed_in_b"
+    if sa == "passed" and sb != "passed":
+        return "regression"
+    if sa != "passed" and sb == "passed":
+        return "improved"
+    if sa == "passed" and sb == "passed":
+        return "stable_pass"
+    return "both_failed"
+
+
+@app.get("/api/compare")
+def api_compare(run_a: str, run_b: str):
+    """同 pack 双 run 并排对比：逐用例 verdict（regression/improved/…）+ 检查项差异 + 汇总结论。"""
+    ra, rb = store.get_run(run_a), store.get_run(run_b)
+    if not ra or not rb:
+        raise HTTPException(404, "run 不存在")
+    if not ra["report"] or not rb["report"]:
+        raise HTTPException(400, "所选 run 尚无报告")
+    if ra["pack_id"] != rb["pack_id"]:
+        raise HTTPException(400, f"仅支持同 pack 对比（{ra['pack_id']} vs {rb['pack_id']}）")
+
+    rep_a, rep_b = ra["report"], rb["report"]
+    cases_a = {c["case_id"]: c for c in rep_a["cases"]}
+    cases_b = {c["case_id"]: c for c in rep_b["cases"]}
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for cid in list(dict.fromkeys(list(cases_a) + list(cases_b))):
+        ca, cb = cases_a.get(cid), cases_b.get(cid)
+        sa = ca["status"] if ca else "missing"
+        sb = cb["status"] if cb else "missing"
+        verdict = _verdict(sa, sb)
+        counts[verdict] = counts.get(verdict, 0) + 1
+
+        def _score(c: dict[str, Any] | None) -> float | None:
+            return ((c.get("scores") or {}).get("correctness") or {}).get("score") if c else None
+
+        def _drift(c: dict[str, Any] | None) -> float | None:
+            return (c.get("trajectory") or {}).get("drift_rate") if c else None
+
+        checks_by_name_a = {ch["name"]: ch for ch in (ca.get("checks") or [])} if ca else {}
+        checks_by_name_b = {ch["name"]: ch for ch in (cb.get("checks") or [])} if cb else {}
+        checks_diff = []
+        for name in sorted(set(checks_by_name_a) | set(checks_by_name_b)):
+            pa = checks_by_name_a.get(name, {}).get("passed")
+            pb = checks_by_name_b.get(name, {}).get("passed")
+            if pa != pb:
+                checks_diff.append({"name": name, "passed_a": pa, "passed_b": pb})
+
+        rows.append({
+            "case_id": cid, "verdict": verdict,
+            "status_a": sa, "status_b": sb,
+            "duration_a": ca.get("duration_ms") if ca else None,
+            "duration_b": cb.get("duration_ms") if cb else None,
+            "drift_a": _drift(ca), "drift_b": _drift(cb),
+            "score_a": _score(ca), "score_b": _score(cb),
+            "final_a": (ca.get("final_output") or "")[:200] if ca else None,
+            "final_b": (cb.get("final_output") or "")[:200] if cb else None,
+            "checks_diff": checks_diff,
+        })
+
+    s_a, s_b = rep_a["summary"], rep_b["summary"]
+    regressions = counts.get("regression", 0)
+    conclusion = {
+        "regressions": regressions,
+        "improvements": counts.get("improved", 0),
+        "stable_pass": counts.get("stable_pass", 0),
+        "both_failed": counts.get("both_failed", 0),
+        "pass_rate_a": s_a["pass_rate"], "pass_rate_b": s_b["pass_rate"],
+        "drift_a": s_a.get("drift_rate"), "drift_b": s_b.get("drift_rate"),
+        "verdict": ("检出回归" if regressions else
+                    "存在改进" if counts.get("improved") else
+                    "行为一致（全部稳定通过）" if counts.get("stable_pass") and not counts.get("both_failed")
+                    else "两侧均存在失败"),
+    }
+    return {
+        "run_a": {"run_id": run_a, "created_at": ra["created_at"], "profile_id": ra["profile_id"],
+                  "summary": s_a},
+        "run_b": {"run_id": run_b, "created_at": rb["created_at"], "profile_id": rb["profile_id"],
+                  "summary": s_b},
+        "pack_id": ra["pack_id"], "cases": rows, "counts": counts, "conclusion": conclusion,
+    }

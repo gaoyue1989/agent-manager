@@ -18,7 +18,7 @@ services:
       - ./collector-conf:/etc/eval-collector
     environment:
       EVAL_COLLECTOR_ADMIN_TOKEN: "${ADMIN_TOKEN:?请设置 ADMIN_TOKEN}"
-      EVAL_PACKAGER_URL: http://studio:18400               # 「数据打包」转调 studio 出完整 evalpack
+      EVAL_PACKAGER_URL: http://studio:18400/api/packs/from-collector  # 「数据打包」转调 studio 出完整 evalpack
     restart: unless-stopped
 
   studio:

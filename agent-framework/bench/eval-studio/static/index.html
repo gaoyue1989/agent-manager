@@ -46,6 +46,7 @@
   <button data-tab="packs">数据包</button>
   <button data-tab="cases">用例库</button>
   <button data-tab="runs">评测任务</button>
+  <button data-tab="compare">对比</button>
   <button data-tab="trends">趋势</button>
 </nav>
 <main id="main"></main>
@@ -134,6 +135,15 @@ const views={
     ||'<tr><td colspan=7 class="dim">暂无 run</td></tr>'}</table></div>
   <div class="card" id="rn-detail" style="display:none"></div>`;},
 
+ async compare(){ const rs=(await api('/api/runs')).runs.filter(r=>r.report);
+  $('#main').innerHTML=`<div class="card"><h2>同 pack 双 run 并排对比 <span class="hint">产出回归结论（M4 验收）</span></h2>
+   <div class="grid">
+    <div><label>基准 run（A）</label><select id="cmp-a">${rs.map(r=>`<option value="${esc(r.run_id)}">${esc(r.run_id)}（${pct(r.report.summary.pass_rate)}）</option>`).join('')}</select></div>
+    <div><label>对比 run（B）</label><select id="cmp-b">${rs.map((r,i)=>`<option value="${esc(r.run_id)}" ${i===1?'selected':''}>${esc(r.run_id)}（${pct(r.report.summary.pass_rate)}）</option>`).join('')}</select></div></div>
+   <div class="row" style="margin-top:12px"><button class="btn pri" onclick="doCompare()">对比</button></div>
+   <div id="cmp-out" style="margin-top:16px"></div></div>`;
+  if(rs.length>=2) doCompare(); },
+
  async trends(){ const t=await api('/api/trends');
   $('#main').innerHTML=`<div class="card"><h2>跨 run 趋势 <span class="hint">通过率 / judge 均分 / 漂移率</span></h2>
   <table><tr><th>run</th><th>类型</th><th>数据包</th><th>通过率</th><th>judge 均分</th><th>漂移率</th></tr>
@@ -176,6 +186,32 @@ window.showPack=async(id)=>{const d=await api(`/api/packages/${id}`);const box=$
 window.delPack=async(id)=>{if(!confirm('删除数据包？'))return;await api(`/api/packages/${id}`,{method:'DELETE'});load();};
 window.promoteCase=async(pid,cid)=>{await api('/api/cases/promote',{method:'POST',body:JSON.stringify({pack_id:pid,case_id:cid})});
  toast('已转正');views.cases();};
+window.doCompare=async()=>{const a=$('#cmp-a').value,b=$('#cmp-b').value;
+ if(a===b) return toast('请选择两个不同的 run',false);
+ let r; try{ r=await api(`/api/compare?run_a=${a}&run_b=${b}`);}catch(e){ return toast(e.message,false); }
+ const c=r.conclusion;
+ const badge=v=>({'regression':'<span class="tag err">回归</span>','improved':'<span class="tag ok">改进</span>',
+   'stable_pass':'<span class="tag ok">稳定</span>','both_failed':'<span class="tag dim">两侧失败</span>',
+   'new_in_b':'<span class="tag run">B新增</span>','removed_in_b':'<span class="tag dim">B移除</span>'}[v]||esc(v));
+ $('#cmp-out').innerHTML=`
+  <div class="card"><h2>结论：<span class="${c.regressions?'err':'ok'}">${esc(c.verdict)}</span></h2>
+   <div class="row">
+    <div class="stat"><b>${c.regressions}</b><span>回归用例</span></div>
+    <div class="stat"><b>${c.improvements}</b><span>改进用例</span></div>
+    <div class="stat"><b>${c.stable_pass}</b><span>稳定通过</span></div>
+    <div class="stat"><b>${c.both_failed}</b><span>两侧失败</span></div>
+    <div class="stat"><b>${pct(c.pass_rate_a)} → ${pct(c.pass_rate_b)}</b><span>通过率 A → B</span></div>
+    <div class="stat"><b>${c.drift_a} → ${c.drift_b}</b><span>漂移率 A → B</span></div></div></div>
+  <div class="card"><h2>逐用例对比</h2><table>
+   <tr><th>用例</th><th>结论</th><th>A 状态</th><th>B 状态</th><th>A/B 漂移</th><th>A/B judge</th><th>差异检查项</th><th>终答 A → B</th></tr>
+   ${r.cases.map(x=>`<tr><td class="mono">${esc(x.case_id)}</td><td>${badge(x.verdict)}</td>
+    <td>${esc(x.status_a)}</td><td>${esc(x.status_b)}</td>
+    <td>${x.drift_a??'-'} / ${x.drift_b??'-'}</td>
+    <td>${x.score_a??'-'} / ${x.score_b??'-'}</td>
+    <td class="mono">${x.checks_diff.length?x.checks_diff.map(d=>`${esc(d.name)}${d.passed_a?'✔':'✘'}→${d.passed_b?'✔':'✘'}`).join('<br>'):'-'}</td>
+    <td class="mono dim">${esc(x.final_a||'').slice(0,60)}<br>→ ${esc(x.final_b||'').slice(0,60)}</td></tr>`).join('')}
+  </table></div>`;};
+
 window.createRun=async()=>{const body={type:$('#rn-type').value,profile_id:$('#rn-profile').value,
   pack_id:$('#rn-pack').value||undefined,judge:$('#rn-judge').checked};
  const r=await api('/api/runs',{method:'POST',body:JSON.stringify(body)});

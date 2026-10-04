@@ -31,6 +31,7 @@ ADMIN_TOKEN=<token> EVAL_JUDGE_LLM_* ... docker compose up -d
 | 数据包 | evalpack 上传（CHECKSUMS 强校验）/ 会话明细（关联置信度/终答/token 用量） |
 | 用例库 | 包内用例草稿**人审转正**（draft → active） |
 | 评测任务 | 新建 run（选档案 + 包 + 用例）→ 实时状态 → 报告入口 |
+| 对比 | **同 pack 双 run 并排对比**（M4 验收）：逐用例 verdict（回归/改进/稳定）+ 差异检查项 + 终答对照 + 回归结论汇总（`GET /api/compare?run_a=&run_b=`） |
 | 趋势 | 跨 run 通过率 / judge 均分 / 漂移率 |
 
 ## 核心概念
@@ -66,7 +67,11 @@ GET  /api/cases                POST /api/cases/promote
 POST /api/runs {type,profile_id,pack_id,case_ids,judge}
 GET  /api/runs[/{id}]          GET /api/runs/{id}/report.json|report.html|cases/{case}.trace.json
 GET  /api/trends
+GET  /api/compare?run_a=&run_b=        同 pack 双 run 并排对比（verdict + 回归结论）
 ```
+
+目标档案可注入沙盒环境模拟不同被测版本（`replay.extra_env`，如 `{"STUB_MUTATE": "1"}`）——
+基线/变更两个档案各跑一次，对比视图即产出回归结论。
 
 ## 产物路径（可寻址）
 

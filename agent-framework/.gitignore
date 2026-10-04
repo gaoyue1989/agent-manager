@@ -57,4 +57,10 @@ Thumbs.db
 bench/eval/reports/
 bench/eval/.runtime-replay/
 bench/eval/.runtime-eval/
+# 评测工作站运行时数据（compose 挂载卷，含采集数据与档案配置，绝不入库）
+bench/eval-collector/data/
+bench/eval-collector/conf/
+bench/eval-collector/collector-data/
+bench/eval-collector/collector-conf/
+bench/eval-collector/studio-data/
 bench/eval/.runtime-eval/

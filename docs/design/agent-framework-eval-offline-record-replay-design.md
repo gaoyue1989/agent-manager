@@ -575,6 +575,7 @@ agent-framework/bench/eval-studio/           # FastAPI + 前端
 | --export-e2e-fixtures | `replay/evolve.py export_e2e_fixtures` | evalpack → e2e/mock/fixtures/llm 夹具（calls[].request/chunks 同构），入库走 PR 人审 |
 | OpenJudge 接入 | `graders/openjudge_adapter.py` + `graders/correctness.py` 引擎选择 | 钉版 py-openjudge==0.2.2（pyproject）；EVAL_JUDGE_ENGINE=auto|direct|openjudge；lazy import 未安装自动回落直评；实测正例 raw=5.0→归一化 1.0 |
 | CI | `.github/workflows/agent-framework-ci.yml` | 新增 `eval-replay-offline`（--offline 全链路 e2e，非必需）与 `images-eval`（master push 推 eval-collector/eval-studio 双镜像，buildx + gha 缓存） |
+| 对比视图（M4 验收收口） | `eval-studio/app/main.py` `GET /api/compare` + SPA「对比」页 | 同 pack 双 run 并排对比：逐用例 verdict（regression/improved/stable_pass/both_failed/new/removed）+ 差异检查项 + 终答对照 + 汇总结论；配合 `replay.extra_env`（沙盒环境注入，模拟行为变更的被测版本）即得「基线 vs 变更」回归结论；e2e 断言钉住；另修 collector→studio 打包转发端点对接（EVAL_PACKAGER_URL 为完整端点） |
 | selftest 扩展（M2 验收③） | `flywheel.py cmd_selftest` | 补齐归一化规则（TS/UUID/gw-hash/HOST/TOKEN + 普通数字不受影响）与轨迹等价/漂移率断言，同步钉 JS 侧同构规则；`final_text_from_chunks/usage_from_chunks` 一并钉住 |
 
 ### B.2 金标调 through 过程中固化的契约与规则（重要）

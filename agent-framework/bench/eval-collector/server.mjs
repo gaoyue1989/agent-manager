@@ -822,7 +822,8 @@ async function handleAdmin(req, res) {
     if (!ns) return sendJson(res, 400, { error: '无接入档案' });
     if (PACKAGER_URL) {
       try {
-        const resp = await fetch(`${PACKAGER_URL}/pack`, {
+        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）
+        const resp = await fetch(PACKAGER_URL, {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ...b, ns, collector_data: DATA_DIR }),
         });

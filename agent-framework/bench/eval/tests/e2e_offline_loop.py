@@ -448,6 +448,18 @@ def phase_studio(pack_dir: Path, use_judge: bool) -> None:
         # 跨 run 趋势
         r = httpx.get(f"{base}/api/trends", timeout=10).json()
         check("趋势视图（跨 run）", len(r.get("runs", [])) >= 2, str(len(r.get("runs", []))))
+        # 对比视图（M4 验收：同 pack 双 run 并排对比 + 回归结论）
+        run_a = next((x for x in httpx.get(f"{base}/api/trends", timeout=10).json()["runs"]
+                      if x["type"] == "replay"), None)
+        run_b = next((x for x in httpx.get(f"{base}/api/trends", timeout=10).json()["runs"]
+                      if x["type"] == "live"), None)
+        cmp = httpx.get(f"{base}/api/compare", params={"run_a": run_a["run_id"], "run_b": run_b["run_id"]},
+                        timeout=10).json()
+        check("对比视图（verdict/conclusion 契约）",
+              cmp.get("pack_id") == "pk-e2e-demo" and "conclusion" in cmp
+              and set(cmp.get("counts", {})) <= {"regression", "improved", "stable_pass",
+                                                 "both_failed", "new_in_b", "removed_in_b"}
+              and cmp["cases"], str(cmp.get("counts")))
         # 页面
         r = httpx.get(f"{base}/", timeout=10)
         check("studio 页面可访问", r.status_code == 200 and "eval-studio" in r.text)
