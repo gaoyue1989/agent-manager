@@ -20,11 +20,14 @@
 
 | 组件 | 端口 | 用途 | 镜像 |
 |------|------|------|------|
-| eval-collector | 18200 LLM / 18201 沙箱 / 18202 MCP（数据面，无认证）· 18300 控制台+管理 API | 旁路录制三类外部交互 | `gaoyue1989/eval-collector` |
+| eval-collector | 18200 LLM / 18201 沙箱 / 18202 MCP（数据面，无认证）· 18203 业务服务反代（可选）· 18300 控制台+管理 API | 旁路录制三类外部交互；18203 可选录制前端 API（附录 C） | `gaoyue1989/eval-collector` |
 | eval-studio | 18400 | 评测服务：目标档案 / 包 / 用例 / run / 报告 / 对比 / 趋势；内置打包与回放引擎 | `gaoyue1989/eval-studio` |
 
 业务服务接入 = 三个外部依赖键指向 collector（`LLM_BASE_URL`、`OPENSANDBOX_SERVER_URL`、
 OAF 包 `mcp-configs/*/config.yaml` 的 `connection.url`），**Java 侧零改动**，随时可切回。
+前端 API 录制（可选，附录 C）：档案配 `upstream.agent` 后，把前端 `AGENT_INTERNAL_URL`
+指向 `http://<collector>:18203/{ns}` 即可——HTTP 层入参/返回 + sessionId 强关联一并入包，
+前端零代码改动（纯环境变量切换）。
 
 ## 2. 快速开始（compose 工作站）
 
@@ -147,6 +150,7 @@ curl "localhost:18400/api/compare?run_a=<runA>&run_b=<runB>"
 | 回放漂移 100%（录制明明正常） | 回放期会话状态残留：同 sid 在 DB/Redis 有历史 | 回放前重置存储（DROP/CREATE + 独立 `AGENT_REDIS_PREFIX`）；`--provision` 已内置 |
 | 漂移但录制/回放请求头一致 | 差异在深内容：记忆注入、AgentStateStore ID（gw-hash）、工作区残留导致的工具集变化 | 看 `run-gold-replay/replayer-captured.json` + `drift_samples`；两侧开关一致（如 `AGENT_MEMORY_ENABLED`）；运行目录每 run 清空 |
 | 回放用例失败：`tool_calls.required` 大面积未调用 | expected 把「可用工具目录」当成了「必须调用」 | 用新版 packager 重打包（已修复：required 只取轨迹实际调用） |
+| HTTP 反代口 404 / 录制无 session | 档案未配 `upstream.agent`；`POST /threads/chat` 的 path 段是 "chat" 不是 sid（设计如此，走 body 提取） | 档案补 agent 上游；session 提取规则见 `extractSession` |
 | collector 交互计数与实际调用数不符 | 上游 keep-alive：`[DONE]` 后连接长期不关 | 已修复（[DONE] 语义结束 + 60s 兜底）；确认镜像 ≥ 2026-10-04 |
 | e2e/本地 collector 起不来 EADDRINUSE | 工作站容器占用 18200-18300 | `docker compose -p eval-round stop` 后再跑本地进程 |
 | 录制请求与回放请求 model 不一致 | 打包取到了旁路调用（标题）的模型 | 用新版 packager（`_recorded_model` 取主链最大请求体的 model） |

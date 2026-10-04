@@ -37,6 +37,7 @@ const CONF_DIR = ENV.EVAL_COLLECTOR_CONF || path.join(__dirname, 'conf');
 const PORT_LLM = intEnv('EVAL_COLLECTOR_PORT_LLM', 18200);
 const PORT_SANDBOX = intEnv('EVAL_COLLECTOR_PORT_SANDBOX', 18201);
 const PORT_MCP = intEnv('EVAL_COLLECTOR_PORT_MCP', 18202);
+const PORT_AGENT = intEnv('EVAL_COLLECTOR_PORT_AGENT', 18203);
 const PORT_ADMIN = intEnv('EVAL_COLLECTOR_PORT_ADMIN', 18300);
 const ADMIN_TOKEN = ENV.EVAL_COLLECTOR_ADMIN_TOKEN || '';
 const PACKAGER_URL = (ENV.EVAL_PACKAGER_URL || '').replace(/\/$/, '');
@@ -204,9 +205,9 @@ function validateProfile(p) {
   const ns = String(p.ns || '').trim();
   if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(ns)) return 'ns 须为 2~63 位小写字母/数字/连字符';
   if (!p.upstream || typeof p.upstream !== 'object') return 'upstream 必填';
-  const hasAny = p.upstream.llm || p.upstream.sandbox || (p.upstream.mcp && Object.keys(p.upstream.mcp).length);
+  const hasAny = p.upstream.llm || p.upstream.sandbox || p.upstream.agent || (p.upstream.mcp && Object.keys(p.upstream.mcp).length);
   if (!hasAny) return 'upstream 至少配置 llm / sandbox / mcp 其一';
-  for (const key of ['llm', 'sandbox']) {
+  for (const key of ['llm', 'sandbox', 'agent']) {
     if (p.upstream[key] && !/^https?:\/\//.test(String(p.upstream[key]))) return `upstream.${key} 须为 http(s) 地址`;
   }
   if (p.upstream.mcp) {
@@ -287,7 +288,7 @@ function retentionSweep() {
   let nsList = [];
   try { nsList = fs.readdirSync(DATA_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return; }
   for (const ns of nsList) {
-    for (const kind of ['llm', 'sandbox', 'mcp']) {
+    for (const kind of ['llm', 'sandbox', 'mcp', 'http']) {
       const dir = path.join(DATA_DIR, ns, kind);
       let files = [];
       try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
@@ -332,6 +333,9 @@ async function precheckProfile(p) {
   }
   if (p.upstream.sandbox) {
     out.sandbox = await probeHttp(String(p.upstream.sandbox).replace(/\/$/, '') + '/');
+  }
+  if (p.upstream.agent) {
+    out.agent = await probeHttp(String(p.upstream.agent).replace(/\/$/, '') + '/health');
   }
   if (p.upstream.mcp) {
     out.mcp = {};
@@ -672,6 +676,99 @@ async function handleMCP(req, res) {
   }
 }
 
+// ---- :18203 业务服务反代（kind=http 录制，设计附录 C）-------------------------
+
+/** 从 path/body 提取会话主键（强关联）：/threads/chat 的 body.sessionId、
+ *  /threads/{sid}/... 的 path 段。提取不到返回 null（仍录制，session 为空）。 */
+function extractSession(pathname, reqObj) {
+  let m = pathname.match(/^\/threads\/([^/]+)(?:\/|$)/);
+  // POST /threads/chat 时 path 段是 "chat" 不是 sid——交给 body.sessionId
+  if (m && m[1] !== 'chat') return decodeURIComponent(m[1]);
+  if (reqObj && typeof reqObj.sessionId === 'string' && reqObj.sessionId.trim()) {
+    return reqObj.sessionId.trim();
+  }
+  return null;
+}
+
+async function handleAgent(req, res) {
+  // 路由：/{ns}/<业务服务路径> → profile.upstream.agent
+  const m = req.url.match(/^\/([a-z0-9][a-z0-9-]{1,62})(\/.*)$/);
+  if (!m) return sendJson(res, 404, { error: '路径须为 /{ns}/...' });
+  const [, ns, rest] = m;
+  const r = resolveProfile(ns);
+  if (r.error) return sendJson(res, r.error, { error: r.msg });
+  const p = r.profile;
+  if (!p.upstream.agent) return sendJson(res, 404, { error: `档案 ${ns} 未配置业务服务上游（upstream.agent）` });
+
+  const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
+  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const base = String(p.upstream.agent).replace(/\/$/, '');
+  const target = base + rest;
+
+  let reqObj = null;
+  try { if (body.length) reqObj = JSON.parse(body.toString('utf-8')); } catch { /* 非 JSON 按原文 */ }
+  const session = extractSession(rest.split('?')[0], reqObj);
+  const shouldRecord = p.state === 'recording' && Math.random() <= (p.record?.sampling ?? GLOBAL.defaults.sampling);
+  const rec = shouldRecord ? {
+    kind: 'http', id: `http-${crypto.randomUUID().slice(0, 8)}`, ns,
+    session, ts_start: new Date().toISOString(),
+    method: req.method, path: rest,
+    request: reqObj ?? body.toString('utf-8').slice(0, maxBody),
+    request_truncated: reqTrunc, status: null, duration_ms: null, truncated: false,
+  } : null;
+
+  const t0 = Date.now();
+  let sink = null;
+  let finalized = false;
+  const finalize = () => {
+    if (finalized || !rec) return;
+    finalized = true;
+    rec.ts_end = new Date().toISOString();
+    rec.duration_ms = Date.now() - t0;
+    if (sink?.truncated) rec.truncated = true;
+    const rules = maskRulesFor(p);
+    try { recordInteraction(ns, 'http', maskValue(JSON.parse(JSON.stringify(rec)), rules)); } catch (e) {
+      console.error(`[record][ERROR] ${ns}/http 写入失败: ${e.message}`);
+    }
+  };
+  const finalizeTimer = rec ? setTimeout(finalize, 60_000) : null;
+  if (finalizeTimer) finalizeTimer.unref?.();
+
+  const headers = { ...req.headers };
+  if (p.upstream.agent_api_key) headers.authorization = `Bearer ${p.upstream.agent_api_key}`;
+  await forward({
+    req, res, targetUrl: target, method: req.method, headers,
+    body: body.length ? body : null, profile: p,
+    onResp: (ur) => {
+      rec && (rec.status = ur.statusCode);
+      const ct = String(ur.headers['content-type'] || '');
+      if (rec && ct.includes('text/event-stream')) {
+        sink = { chunks: rec.chunks, truncated: false, onDone: () => finalize() };
+        attachSSECollector(ur, sink, maxBody);
+        ur.on('end', () => finalize());
+        ur.on('close', () => finalize());
+      } else if (rec) {
+        const chunks = [];
+        let total = 0;
+        ur.setEncoding('utf-8');
+        ur.on('data', (s) => {
+          total += s.length;
+          if (total > maxBody) { rec.truncated = true; return; }
+          chunks.push(s);
+        });
+        ur.on('end', () => {
+          const text = chunks.join('');
+          try { rec.response = JSON.parse(text); } catch { rec.response = text.slice(0, maxBody); }
+          finalize();
+        });
+        ur.on('close', () => finalize());
+      }
+    },
+  });
+  finalize();
+  if (finalizeTimer) clearTimeout(finalizeTimer);
+}
+
 function safeJson(text, maxBytes) {
   try { return JSON.parse(text); } catch { return text.slice(0, Math.min(text.length, maxBytes)); }
 }
@@ -709,6 +806,7 @@ async function handleAdmin(req, res) {
         llm: counters.get(`${pf.ns}|llm`) || { today: 0, total: 0 },
         sandbox: counters.get(`${pf.ns}|sandbox`) || { today: 0, total: 0 },
         mcp: counters.get(`${pf.ns}|mcp`) || { today: 0, total: 0 },
+        http: counters.get(`${pf.ns}|http`) || { today: 0, total: 0 },
       },
       created_at: pf.created_at,
     }));
@@ -855,7 +953,11 @@ function buildSwitchSnippet(pf, collectorHost, isSwitch) {
   if (isSwitch) {
     return {
       direction: 'switch',
-      env_keys: { LLM_BASE_URL: addr.llm, OPENSANDBOX_SERVER_URL: addr.sandbox },
+      env_keys: {
+        LLM_BASE_URL: addr.llm,
+        OPENSANDBOX_SERVER_URL: addr.sandbox,
+        ...(pf.upstream.agent ? { AGENT_INTERNAL_URL: `http://${collectorHost}:${PORT_AGENT}/${pf.ns}` } : {}),
+      },
       env_patch_curl: `curl -X PATCH "http://${collectorHost}:30880/api/v1/services/{SERVICE_ID}/env" \\\n  -H "Content-Type: application/json" \\\n  -d '{"env_json": {"LLM_BASE_URL": "${addr.llm}", "OPENSANDBOX_SERVER_URL": "${addr.sandbox}"}}'`,
       mcp_config_diff: Object.entries(mcpAddrs).map(([name, url]) =>
         `# mcp-configs/${name}/config.yaml\n  connection:\n    url: ${url}   # 原值: ${pf.upstream.mcp[name]}`),
@@ -913,6 +1015,9 @@ function summarize(rec) {
     const tool = rq?.params?.name || '';
     return `${method}${tool ? ` ${tool}` : ''}`;
   }
+  if (rec.kind === 'http') {
+    return `${rec.method} ${rec.path}${rec.session ? ` [${rec.session}]` : ''}`;
+  }
   return `${rec.method} ${rec.path}`;
 }
 
@@ -945,6 +1050,7 @@ setInterval(retentionSweep, 3600_000).unref();
 http.createServer(handleLLM).listen(PORT_LLM, () => console.log(`[llm]      :${PORT_LLM}  /{ns}/v1/...`));
 http.createServer(handleSandbox).listen(PORT_SANDBOX, () => console.log(`[sandbox]  :${PORT_SANDBOX}  /{ns}/...`));
 http.createServer(handleMCP).listen(PORT_MCP, () => console.log(`[mcp]      :${PORT_MCP}  /mcp/{ns}/{server}/...`));
+http.createServer(handleAgent).listen(PORT_AGENT, () => console.log(`[agent]    :${PORT_AGENT}  /{ns}/...  （业务服务反代，kind=http 录制）`));
 
 const adminHost = ADMIN_TOKEN ? '0.0.0.0' : '127.0.0.1';
 http.createServer((req, res) => {

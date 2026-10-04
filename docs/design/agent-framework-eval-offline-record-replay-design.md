@@ -82,13 +82,15 @@
 | 18200 | LLM 代理（OpenAI 兼容，SSE 透传） | `/{ns}/v1/...` → 该 ns 档案的 `upstream.llm` |
 | 18201 | 沙箱代理（管理 API + execd 透传） | `/{ns}/...` → 该 ns 档案的 `upstream.sandbox` |
 | 18202 | MCP 代理（streamableHttp JSON-RPC 透传） | `/mcp/{ns}/{server}/...` → 该 ns 档案对应 server |
+| 18203 | 业务服务反代（前端 API 录制，设计附录 C 增补） | `/{ns}/...` → 该 ns 档案的 `upstream.agent`（业务服务自身地址） |
 | 18300 | 管理控制台 + 管理 API | `EVAL_COLLECTOR_ADMIN_TOKEN` Bearer 认证 |
 
-对应业务服务的三个配置键由向导自动生成（用户不手工拼地址）：
+对应业务服务与前端的配置键由向导自动生成（用户不手工拼地址）：
 
 - `LLM_BASE_URL = http://<collector>:18200/{ns}/v1`
 - `OPENSANDBOX_SERVER_URL = <collector>:18201/{ns}`
 - OAF 包 `mcp-configs/{server}/config.yaml` 的 `connection.url = http://<collector>:18202/mcp/{ns}/{server}`
+- 前端（采集模式，可选）：`AGENT_INTERNAL_URL = http://<collector>:18203/{ns}`（Next.js 同源反代目标，见附录 C.3）
 
 > 兼容性注记：LLM base_url 携带路径前缀、沙箱 SDK domain 携带路径，是路径复用路由的两个前提（e2e 已实证 `LLM_BASE_URL` 可带 `/v1` 路径）。M1 首日各做一次真实 SDK spike；任一不成立，该协议退回"端口池按 ns 自动分配 + docker 范围端口映射"模型，向导生成的片段随路由模型自动变化，用户无感。
 
@@ -163,13 +165,14 @@ state: recording                     # recording | passthrough(仅透传不录�
 
 管理 API（`/api/*`，与页面同源、同 token）覆盖上述全部能力，供脚本化与 CI 场景 headless 使用（`curl :18300/api/...`）。
 
-### 2.4 三协议录制要点（复用已有原型）
+### 2.4 录制要点（复用已有原型；三依赖协议 + 业务服务 HTTP 反代）
 
 | 协议 | 母本 | 录制内容 | 备注 |
 |------|------|----------|------|
 | LLM | `e2e/scripts/record-llm.mjs` | 完整请求 body + 流式 SSE chunk 原文（`data:` 载荷逐条）/ 非流式 body；耗时、状态码 | Authorization 头**永不落盘**；chunk 原文保证回放保真（llm-server.mjs 已验证该形态可回放） |
 | 沙箱 | `e2e/scripts/record-sandbox-protocol.mjs` | 管理 API（create/delete/...）与 execd（command/files.*）每次 HTTP 交互：method/path/status/req/resp（NDJSON 事件流整收）| 大 body（文件二进制）按 `body_max_bytes` 截断 + hash |
 | MCP | 新增（参照 mcp_server.py 的 streamableHttp 子集理解） | JSON-RPC 报文对（request id ↔ response）；重点 `tools/call` 的 arguments 与 CallToolResult；notifications 记录不配对 | initialize/tools/list 结果随包记录一次，用于回放目录自描述 |
+| 业务服务 HTTP（附录 C） | 新增（与 LLM 反代同骨架） | 前端/驱动 → 业务服务的完整 HTTP 交互：method/path/入参/响应（SSE 按帧拆收）；重点 `/threads/chat`、`/threads/{sid}/confirm-stream` | `/{ns}/...` 反代口；sessionId 从 path/body 提取为强关联主键；仅测试环境前端开启采集模式时使用 |
 
 **写入模型**：一次交互完成后原子写一条 JSONL（流中断也落已收部分 + `truncated: true`）。存储布局：
 
@@ -509,7 +512,7 @@ agent-framework/bench/eval-studio/           # FastAPI + 前端
 
 ## 10. 风险与开放问题
 
-1. **会话关联歧义**：并发会话同工具同毫秒窗口 → 指纹仲裁仍歧义时标记 ambiguous 人审；后续可评估 Java 侧为 LLM transport 注入 `X-Session-Id` 头（二期小改，需 SDK transport 支持）从根本上消除。
+1. **会话关联歧义**：并发会话同工具同毫秒窗口 → 指纹仲裁仍歧义时标记 ambiguous 人审；根治路径有两级（附录 C 已落地前端侧）：① 前端/驱动请求经 collector 反代口（:18203）时，sessionId 从 path/body 天然提取，LLM/MCP 交互随之精确归属；② Java 侧为 LLM transport 注入 `X-Session-Id` 头（需 SDK transport 支持，暂缓）。
 2. **录制内容合规**：LLM 请求含真实用户数据，脱敏规则需持续维护；evalpack 分发范围与保留策略需随首版落地明确。
 3. **远端委派链路不完整**（P1 边界）：多服务联合回放（端点重写 + 多实例编排）作为 P2 立项评估。
 4. **基线演进成本**：框架 prompt 组装类变更会推高漂移率，需要 `--rebase` 流程（人审后接受新基线）防止基线僵化。
@@ -581,3 +584,65 @@ agent-framework/bench/eval-studio/           # FastAPI + 前端
 - 金标：真实 jar 录制（2 会话，4 交互含 2 背景标题调用）→ provision 回放 strict 2/2 通过、drift=0。
 - OpenJudge：`openjudge-0.2.2` 引擎标识 + 正例 raw=5.0 → score=1.0。
 - `flywheel.py selftest` 回归通过；collector/studio 镜像重建并冒烟通过。
+
+---
+
+## 附录 C：前端 API 录制（第四协议口，:18203 业务服务反代）
+
+> 2026-10-05 增补。动机：一期只录「业务服务 → 外部依赖」三协议，前端 → 业务服务这段的
+> HTTP 入参/返回没有录制——HTTP 层细节（headers、非 200 响应原文）、`/threads/chat` 之外的
+> 接口面、以及真实前端用户流量均缺失；回放评测虽不依赖它（只需用户输入 + 外部交互两端），
+> 但「完整会话录制」语义不闭环。
+
+### C.1 形态：业务服务反向代理口
+
+collector 增加 **:18203** 数据面端口（无认证，与 18200-18202 同边界），路由
+`/{ns}/<业务服务路径>` → 该 ns 档案 `upstream.agent`（业务服务地址）。录制 kind=`http`：
+
+```
+{data}/{ns}/http/YYYYMMDD.jsonl   # method/path/入参/响应（SSE 按帧拆收）+ session 提取结果
+```
+
+- **sessionId 强关联主键**：从 `/threads/chat` 的 body.sessionId、`/threads/{sid}/...` 的
+  path 提取，写入交互记录的 session 字段——打包时 LLM/MCP/沙箱交互按时间窗+该会话窗口
+  直接归属，取代指纹聚类成为 high 置信度的首选依据；
+- SSE 响应（`/threads/chat`、`confirm-stream`、`/subscribe`）按 `data:` 行拆收，与 LLM 录制
+  同机制（`[DONE]` 语义结束 + 兜底），保真回放前端视角的帧流；
+- 大 body 截断 + hash、脱敏规则与三协议共用。
+
+### C.2 用例与边界
+
+| 用例 | 说明 |
+|------|------|
+| 完整会话录制 | HTTP 层（入参/返回/headers 摘要）+ 外部依赖三层，一份 pack 全覆盖 |
+| 回放评测（现有） | 不变：仍只需用户输入 + 外部依赖回放；http 交互作为对照证据进 pack |
+| 前端视角回放（演进） | replay-http 扩展 kind=http 按序回放 HTTP 响应，可复现前端完整会话（P2） |
+| 非 /threads 接口面 | `/status`、文件上传、A2A 等一并录制（透传优先，录制失败不阻断转发） |
+
+边界：反代口**仅测试环境前端采集模式使用**；平台 backend REST（`/api/v1`）不纳入录制范围
+（含平台敏感配置，录制无评测价值）。
+
+### C.3 前端配合（Next.js 同源反代，一处开关）
+
+前端经 `frontend/src/proxy.ts` 同源反代访问业务服务（`/agent/release-agent/...` →
+`AGENT_INTERNAL_URL`）。采集模式 = 部署时把 `AGENT_INTERNAL_URL` 指向
+`http://<collector>:18203/{ns}`（**纯环境变量切换，无需改代码、无需重建镜像**）：
+
+- collector 反代口按原样转发（含 SSE 流式透传），前端行为与直连完全一致；
+- sessionId 提取在 collector 侧完成，前端零改动即获得强会话关联；
+- 额外收益：proxy 层同时注入 `X-Eval-Session` 头（从 cookie/localStorage 会话派生），
+  使「外部依赖三协议」的交互也获得与 HTTP 层一致的强关联主键。
+
+开关生命周期与 §2.6 下线向导一致：采集结束 → 还原 `AGENT_INTERNAL_URL` 指回业务服务。
+
+### C.4 实施记录（2026-10-05，附录 C 落地）
+
+- collector：`:18203` 反代口（`upstream.agent`，`extractSession` 从 path/body 提取——
+  `POST /threads/chat` 的 path 段是 "chat"，自动落 body.sessionId）；kind=http 录制
+  （SSE 按 `[DONE]` 语义收尾）；预检/状态计数/切换片段（含 `AGENT_INTERNAL_URL`）/脱敏全适配。
+- packager：`interactions/http/` 入包；有 http 证据的会话置信度强制 high；http-only 会话
+  （无 LLM 主链的纯查询轮）在 correlation 单列可寻址条目。
+- 前端（frontend/src/proxy.ts）：采集模式 = `AGENT_INTERNAL_URL` 指向
+  `http://<collector>:18203/{ns}`，纯环境变量切换；同时注入 `X-Eval-Session`
+  （cookie `oaf-assistant-sid` 派生）使三协议录制获得与 HTTP 层一致的强关联主键。
+- e2e：HTTP 反代录制/session 双提取（path+body）/入包/归属断言；全量 --offline 94/0。

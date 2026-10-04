@@ -26,6 +26,23 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/v1/sandboxes') {
     return json(res, 200, { id: 'sbx-mock-001', status: 'running', endpoints: {} });
   }
+  // 业务服务反代目标（collector e2e 用）：/threads/* 与 /health
+  if (req.method === 'GET' && req.url === '/health') {
+    return json(res, 200, { ok: true });
+  }
+  if (req.url.startsWith('/threads/')) {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const sid = req.url.match(/^\/threads\/([^/]+)/)?.[1] || 'unknown';
+      if (req.method === 'POST' && req.url === '/threads/chat') {
+        let b = {}; try { b = JSON.parse(Buffer.concat(chunks).toString('utf-8')); } catch { /* 忽略 */ }
+        return json(res, 200, { sessionId: b.sessionId || sid, echoed: b.message ?? '', frames: ['session_created', 'AGENT_END'] });
+      }
+      return json(res, 200, { sessionId: decodeURIComponent(sid), status: 'idle' });
+    });
+    return;
+  }
   // MCP streamableHttp mock（collector e2e 用）：JSON-RPC 通用回声
   if (req.url.startsWith('/mcp')) {
     const chunks = [];
