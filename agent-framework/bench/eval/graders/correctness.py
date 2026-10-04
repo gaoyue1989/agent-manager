@@ -1,8 +1,12 @@
 """正确性 judge：OpenAI 兼容端点打分（0~1）。
 
-骨架期实现：直调 chat completions 做 LLM-as-judge。Phase 2 替换为
-OpenJudge `CorrectnessGrader`（经 OpenJudgeMetric 适配器接入，接口保持不变），
-依赖钉死见 pyproject.toml。需要 EVAL_LLM_BASE_URL / EVAL_LLM_API_KEY / EVAL_LLM_MODEL。
+judge 引擎选择（EVAL_JUDGE_ENGINE，缺省 auto）：
+  auto      py-openjudge 可用（钉版 ==0.2.2，见 pyproject.toml）→ OpenJudge CorrectnessGrader；
+            否则回落本模块直评形态（同一契约：{"score": 0~1, "reason"}）
+  direct    强制直评（LLM-as-judge 单轮）
+  openjudge 强制 OpenJudge（不可用即抛 JudgeUnavailable）
+
+需要 EVAL_LLM_BASE_URL / EVAL_LLM_API_KEY / EVAL_LLM_MODEL。
 """
 
 import json
@@ -35,7 +39,20 @@ def judge_from_env() -> dict[str, str] | None:
 
 async def judge_correctness(case: dict[str, Any], trace: dict[str, Any],
                             cfg: dict[str, str]) -> dict[str, Any]:
-    """对单条用例轨迹打分，返回 {"score": float, "reason": str}。"""
+    """对单条用例轨迹打分，返回 {"score": float, "reason": str}（引擎选择见模块 docstring）。"""
+    engine = os.environ.get("EVAL_JUDGE_ENGINE", "auto").lower()
+    if engine in ("auto", "openjudge"):
+        from graders.openjudge_adapter import openjudge_available, judge_correctness_openjudge
+        if openjudge_available():
+            return await judge_correctness_openjudge(case, trace, cfg)
+        if engine == "openjudge":
+            raise JudgeUnavailable("EVAL_JUDGE_ENGINE=openjudge 但 py-openjudge 未安装（pip install py-openjudge==0.2.2）")
+    return await _judge_direct(case, trace, cfg)
+
+
+async def _judge_direct(case: dict[str, Any], trace: dict[str, Any],
+                        cfg: dict[str, str]) -> dict[str, Any]:
+    """直评形态（骨架期实现；OpenJudge 不可用时的回落）。"""
     user_msg = (
         f"任务描述：{case.get('title', '')}\n"
         f"用户输入：{case['input'].get('message', '')}\n"

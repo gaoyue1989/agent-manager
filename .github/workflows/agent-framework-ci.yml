@@ -67,6 +67,26 @@ jobs:
         working-directory: agent-framework
         run: python3 bench/eval/flywheel.py selftest
 
+  # 离线评测全链路 e2e（设计 docs/design/agent-framework-eval-offline-record-replay-design.md）：
+  # --offline 全程 mock 上游（零真实 LLM），覆盖 collector 三协议录制/脱敏、pack、replay
+  # （A1/A2/A3 + 漂移注入金标）、沙箱/MCP 回放器、rebase 基线演进、studio API 全流程。
+  # 需要 node（runner 预装）+ python3.11 + httpx；docker/mysql 依赖的阶段（provision 金标）不在此跑。
+  # 非必需检查（红了只告警），稳定后再转必需。
+  eval-replay-offline:
+    name: 评测离线回放 e2e (--offline)
+    needs: changes
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: 安装运行依赖
+        run: pip install --disable-pip-version-check 'httpx>=0.27' fastapi uvicorn python-multipart
+      - name: 离线评测全链路 e2e
+        working-directory: agent-framework
+        run: python3 bench/eval/tests/e2e_offline_loop.py --offline --work /tmp/eval-e2e
+
   e2e-core:
     name: E2E 核心（API+UI）
     # 与 test 并行（黑盒门禁相互独立）：单测仅 ~1min，串行等待占整链 wall ~1/4
@@ -460,3 +480,41 @@ jobs:
             gaoyue1989/agent-framework:${{ steps.meta.outputs.tag }}
           cache-from: type=gha,scope=agent-framework
           cache-to: type=gha,mode=max,scope=agent-framework
+
+  # 评测服务双镜像（eval-collector 采集代理 / eval-studio 评测服务），仅 master push。
+  # 上下文约定：collector = bench/eval-collector；studio = bench/（Dockerfile 内 COPY eval/ 引擎代码）。
+  images-eval:
+    name: 构建评测镜像并推送 (collector/studio)
+    needs: [changes, test]
+    if: (needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true')
+        && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 计算镜像 tag（v{日期}）
+        id: meta
+        run: echo "tag=v$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: agent-framework/bench/eval-collector
+          push: true
+          tags: |
+            gaoyue1989/eval-collector:${{ steps.meta.outputs.tag }}
+            gaoyue1989/eval-collector:latest
+          cache-from: type=gha,scope=eval-collector
+          cache-to: type=gha,mode=max,scope=eval-collector
+      - uses: docker/build-push-action@v6
+        with:
+          context: agent-framework/bench
+          file: agent-framework/bench/eval-studio/Dockerfile
+          push: true
+          tags: |
+            gaoyue1989/eval-studio:${{ steps.meta.outputs.tag }}
+            gaoyue1989/eval-studio:latest
+          cache-from: type=gha,scope=eval-studio
+          cache-to: type=gha,mode=max,scope=eval-studio

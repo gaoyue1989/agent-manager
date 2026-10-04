@@ -1,6 +1,7 @@
 # agent-framework 评测飞轮（walking skeleton）
 
 > **日常使用看 [FLYWHEEL.md](FLYWHEEL.md)**（怎么用 / 何时用 / 场景命令表 / 排障）；
+> **离线评测链路（采集→打包→回放→对比）看 [OFFLINE.md](OFFLINE.md)**（端到端操作手册）；
 > 本文是模块结构、关键事实与已知问题的参考手册。
 
 对应设计：[docs/design/agent-framework-eval-dual-track-design.md](../../docs/design/agent-framework-eval-dual-track-design.md)

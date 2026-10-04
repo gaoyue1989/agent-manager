@@ -1,0 +1,7 @@
+# 构建上下文 = bench/，排除本地运行产物（体积与敏感数据不入镜像）
+eval/reports/
+eval/.runtime-eval/
+eval/__pycache__/
+**/__pycache__/
+*.pyc
+eval/tests/*.log

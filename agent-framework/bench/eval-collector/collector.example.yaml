@@ -1,0 +1,13 @@
+# eval-collector 全局配置（可选；不提供则全部使用内置默认值）
+# 接入档案（每业务服务一份）由控制台/管理 API 维护，存于 conf/profiles.json，与本文件分层。
+
+defaults:
+  sampling: 1.0                 # 录制采样率 (0,1]
+  body_max_bytes: 1048576       # 请求/响应录制上限，超限截断 + truncated 标记
+
+storage:
+  retention_days: 14            # 录制文件保留天数（按文件名日期滚动清理）
+
+# 追加脱敏规则（默认规则集之外；录制副本逐字符串值替换，透传内容不受影响）
+# mask_rules:
+#   - {pattern: '[0-9]{17,19}', replace: '<CARD>'}
