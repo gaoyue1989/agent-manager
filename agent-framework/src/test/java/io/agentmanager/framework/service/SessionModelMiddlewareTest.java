@@ -1,6 +1,8 @@
 package io.agentmanager.framework.service;
 
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -97,6 +99,34 @@ class SessionModelMiddlewareTest {
         var used = invoke(ctx("sess-1", "user-1"));
 
         assertSame(defaultModel, used);
+    }
+
+    /** 配置了备用模型：会话自选模型被 FallbackModelWrapper 包裹，主模型失败时切备用 */
+    @Test
+    void shouldWrapSessionModelWithFallbackWhenConfigured() {
+        var target = mock(Model.class);
+        var fallback = mock(Model.class);
+        when(store.findModelBySession("sess-1")).thenReturn("m2");
+        when(catalog.resolve("m2")).thenReturn(Optional.of(target));
+
+        var captured = new AtomicReference<ModelCallInput>();
+        new SessionModelMiddleware(store, catalog, fallback)
+            .onModelCall(null, ctx("sess-1", "user-1"),
+                new ModelCallInput(List.of(), List.of(), null, defaultModel),
+                in -> {
+                    captured.set(in);
+                    return Flux.empty();
+                })
+            .blockLast();
+
+        var used = captured.get().model();
+        assertNotSame(target, used);
+
+        when(target.stream(any(), any(), any())).thenReturn(Flux.error(new RuntimeException("boom")));
+        when(fallback.stream(any(), any(), any())).thenReturn(Flux.empty());
+        used.stream(List.of(), List.of(), null).blockLast();
+
+        verify(fallback).stream(any(), any(), any());
     }
 
     // ===== helpers =====

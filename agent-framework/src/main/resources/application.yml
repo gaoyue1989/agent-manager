@@ -34,6 +34,9 @@ agent:
     context-length: ${LLM_CONTEXT_LENGTH:0}
     reasoning-effort: ${LLM_REASONING_EFFORT:}
     frequency-penalty: ${LLM_FREQUENCY_PENALTY:}
+    # 备用模型（引用 model_config 托管模型 id）：主模型重试耗尽（429/5xx/超时/网络）后自动切换；
+    # 空 = 不启用。默认模型走 SDK 原生 fallback，会话自选模型由 SessionModelMiddleware 补齐
+    fallback-model-id: ${LLM_FALLBACK_MODEL_ID:}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
