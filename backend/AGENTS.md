@@ -6,6 +6,18 @@ OAF 服务发布平台管理后端（Go + Gin + GORM + client-go）。同一 HTT
 
 核心链路：上传 OAF zip 包 → 校验解包落共享 PVC → 发布（Deployment+Service+Ingress，envFrom ConfigMap，包 subPath 只读挂 /config + 独立可写工作区卷 /workspace）→ 就绪后拉 `/.well-known/agent-card.json` 注册入库 → 列表/状态/重新发布/下线/删除。包支持在线预览（文件树/单文件/整包下载）与在线编辑（copy-on-write 生成新版本包 → republish 切换服务）。
 
+## 控制面强约束（架构原则一：backend 重启/升级/扩缩容不影响业务 agent 服务）
+
+backend 是控制面，业务服务数据面不经 backend 进程。以下为强制红线，改动触碰任意一条必须先评审：
+
+- **启动零接触**：启动路径只做 `store.AutoMigrate`（平台自身表）+ 模板哑参干跑校验，**禁止**任何启动期创建/更新/删除业务 K8s 对象，禁止引入 Informer/reconcile/sync-all/后台批量迁移（存量服务收敛只经显式 Republish / StartAgain）
+- **显式写唯一**：业务 Deployment/Service/Ingress/CM/Secret 的写操作只能发生在发布 API 链路内（Publish/Republish/StartAgain/UpdateEnv/Unpublish/Delete，REST 与 MCP 同一 Core 方法）；`asyncWaitAndRegister` 等后台推进只允许只读轮询 + HTTP 拉取 + 平台 DB 写；禁止 ticker/cron 定时改写业务资源
+- **禁止生命周期绑定**：构造的业务对象不得设 ownerReferences/finalizer/PropagationPolicy——业务资源只靠命名约定 + label 关联，平台自身的 Deployment/CM 删除不得级联业务资源
+- **Ingress 更新语义**：Ensure* 一律 get→Create/Update 同名对象，禁止 Delete+Create 组合（会闪断业务流量）
+- **数据面直连**：业务 Pod 的 env（CM/Secret envFrom）、配置（PVC subPath 只读）、流量（Ingress→`{name}-svc`）三条链路必须保持不经 backend；不得引入"业务启动向 backend 注册/心跳才可用"之类的反向依赖
+- **单副本语义**：backend 按单副本设计（无 leader 选举、发布链路有查库-写库竞态窗口）；扩多副本前必须先解决发布一致性与 goroutine 推进幂等。已提交的架构约束见 [../AGENTS.md](../AGENTS.md)「架构强约束」
+- 已知边界（不违反原则，运维须知）：发布等待期 backend 重启会丢 in-flight 的 `asyncWaitAndRegister`，服务停在 `deploying`（UpdateEnv/StartAgain 拒绝该状态），仅影响平台状态机、不影响已在跑的 Pod，经 Republish 解救
+
 ## 目录结构
 
 ```
@@ -13,16 +25,17 @@ backend/
 ├── cmd/server/main.go          # 入口：装配 REST + MCP + K8s + DB
 ├── config/config.go            # 环境变量（MYSQL_DSN 必填无默认）
 ├── Dockerfile                  # golang:1.26 多阶段构建
-├── templates/                  # deployment-overlay.example.yaml（DEPLOYMENT_TEMPLATE 示例）
+├── templates/                  # deployment-overlay.example.yaml / ingress-overlay.example.yaml（overlay 示例）
 ├── internal/
 │   ├── handler/                # Gin 薄层（respond/middleware/router）
 │   ├── mcpsrv/server.go        # MCP 工具门面（go-sdk v1.3.1 streamableHttp）
-│   ├── service/                # 业务层：package/publish/register/status/env
+│   ├── service/                # 业务层：package/publish/register/status/env/envroute/platformconfig
+│   │   ├── platformconfig/     # 平台默认配置字段模板（全仓唯一字段定义源）
 │   │   └── package_version.go  # 包在线预览/编辑派生（FileContent/Zip/CreateVersion）
 │   ├── k8s/                    # client-go typed 封装 + 对象构造（纯函数可测）
-│   │   ├── template.go         # DeploymentBuilder：内置构造 + overlay(SMP) + 不变量校验
+│   │   ├── template.go         # DeploymentBuilder/IngressBuilder：内置构造 + overlay(SMP) + 不变量校验
 │   │   └── k8sfake/            # 测试用 fake Client 实现
-│   ├── store/                  # GORM 模型（oaf_packages/services/service_events）+ PVC 文件操作
+│   ├── store/                  # GORM 模型（oaf_packages/services/service_events/platform_config）+ PVC 文件操作
 │   └── oaf/oaf.go              # OAG v0.8.0 frontmatter 解析校验（宽松模式 warnings）
 ```
 
@@ -45,6 +58,20 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - 业务 Ingress 注入 proxy-read/send-timeout=3600（A2A blocking 长对话必需）
 - zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）
 
+## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
+
+**敏感键一律走 K8s Secret，不进 ConfigMap/env_json；平台默认配置仅作为发布/编辑 env 时的表单默认填入，不经运行时注入、不影响任何已发布服务**。设计见 [../docs/design/platform-default-config-secret-design.md](../docs/design/platform-default-config-secret-design.md)（R3 修订为最终形态）。
+
+- **字段模板**（`internal/service/platformconfig/template.go`，全仓唯一字段定义源）：分组 llm/mysql/redis/sandbox/protocol；`Sensitive` 标记驱动服务 env 路由分类与页面掩码。`SANDBOX_ENABLED` 明确排除（保护 OAF 包 frontmatter 三层裁决）；`AGENT_PROTOCOL_ENABLED` 等按服务开关同样排除（防默认启用扩大 /tasks 暴露面），协议敏感键 `AGENT_PROTOCOL_AUTH_TOKEN`/`AGENT_REMOTE_HEADERS_JSON`/`AGENT_A2A_JOB_TOKEN`（幂等 Job 认证，PR #71 起 template.go 收录）路由 `{name}-env-secret`
+- **envFrom 两源**：容器 envFrom = 服务 Secret `{name}-env-secret`（敏感，在前）+ 服务 CM `{name}-env`（非敏感，在后可覆盖）；无平台级注入
+- **默认填入语义（R3）**：平台默认配置只存 DB（`platform_config` 表），`GET /platform-config` 展示视图敏感键掩码，`GET /platform-config/defaults` 返回含敏感明文的平面键值表专供表单预填；发布向导预填 defaults，详情页「填入平台默认」补缺失键（显式保存才生效）；改默认配置不影响存量服务
+- **服务 env 路由**（`internal/service/envroute.go`）：发布/PATCH env 中命中模板 Sensitive 或 `secretKeys` 的键路由进 `services.env_secret_json` + 服务 Secret，绝不写 env_json/CM；敏感键三态——非空=设置、空串=删除、缺失=sticky 保持不变；旧 env_json 中的存量敏感键在任意写路径自动迁入 Secret（防丢失规则）
+- **Agent Protocol 敏感键**（travel-fulfillment M1，PR #62；PR #71 起三键全部进 template.go 清单）：`AGENT_PROTOCOL_AUTH_TOKEN`（member 服务间认证）、`AGENT_REMOTE_HEADERS_JSON`（lead 远程声明 headers，内嵌 token）与 `AGENT_A2A_JOB_TOKEN`（幂等 Job 认证）经模板 Sensitive 标记自动敏感路由；`AGENT_PROTOCOL_ENABLED`/`AGENT_PROTOCOL_TASK_STORE`/`AGENT_PROTOCOL_TASK_RETENTION_DAYS` 为非敏感键走 ConfigMap
+- **平台配置 API**：`GET/PUT /api/v1/platform-config`（PUT 部分更新：出现=设置、空串=删除、缺失=不变；未知键 400；清除必填键 400；展示视图敏感值永不回明文）、`GET /api/v1/platform-config/defaults`（预填数据源）
+- **服务 Secret 生命周期**：publish 创建（无敏感键为空对象）；Delete 连带清理（RBAC secrets `get/list/create/update/delete`，delete 仅此路径使用）；Unpublish 保留
+- **RBAC**：platform-backend Role 含 secrets `get/list/create/update/delete`（manifests/platform.yaml）；overlay 不变量：envFrom 两源引用必须保留（template.go）
+- MCP：`publish_service`/`update_service_env` 自动继承路由（`UpdateEnvIn` 增 `secretKeys`）；`get_platform_defaults` 返回预填数据源（values 含敏感明文 + fields 元数据，供发布助手预填 env，敏感值不得回显进回复）；设置页通道 `get/update_platform_config` 工具仍为 P2
+
 ## 包在线预览与编辑（package_version.go + fs.go 扩展）
 
 - **包不可变**：包目录经 subPath 只读挂载进业务 Pod，在线编辑永不原地写 —— `CreateVersion` 基于「基础包 + upserts − deletes」在内存合成 zip，走与 Upload 完全相同的校验落盘管线（InspectZip → ParseOAF/Validate → 事务入库 → ExtractZipTo），生成新 `OafPackage` 记录 + 新 PVC 目录 `packages/{newID}`
@@ -62,5 +89,25 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - 环境变量 `DEPLOYMENT_TEMPLATE` 指向 overlay 文件路径（建议 ConfigMap 只读挂载）；**不设置 = 纯内置构造，行为与历史版本完全一致**
 - overlay 生效时机：发布/重新发布/上下线的 apply 时合并落集群；存量服务需重新 apply（republish 或 rollout restart）才滚动到新形态
 - fail-fast：启动时以哑参数试渲染，overlay 语法/类型/不变量错误直接 `log.Fatal` 拒绝启动；发布期再校验兜底（哑参数恰好通过、真实参数违规的 overlay 在 apply 时拒绝，服务转 error）
-- 校验不变量（违规即拒）：禁改 metadata.name/namespace、spec.replicas、spec.selector（含 matchExpressions）；必含 agent 主容器、envFrom {name}-env、/config 只读 subPath、/workspace、/data/files、/applog 可写挂载、保留键 env；volumeMount 引用的 volume 必须存在
+- 校验不变量（违规即拒）：禁改 metadata.name/namespace、spec.replicas、spec.selector（含 matchExpressions）；必含 agent 主容器、envFrom 两源引用（服务 Secret + 服务 CM，无平台级注入——R3 修订后形态，修 #57 low 文档残留）、/config 只读 subPath、/workspace、/data/files、/applog 可写挂载、保留键 env；volumeMount 引用的 volume 必须存在
 - overlay 用法与可改项（PVC 名、imagePullSecrets、nodeSelector、tolerations、sidecar 等）见 `templates/deployment-overlay.example.yaml` 内注释
+
+## 业务 Ingress 模板（INGRESS_TEMPLATE）
+
+- 业务 Ingress 由 `internal/k8s/template.go` 的 `IngressBuilder` 构造，模式与 DeploymentBuilder 完全一致：**内置纯函数构造为基线**（`objects.go:Ingress`）+ 可选 YAML overlay 经 **Strategic Merge Patch** 合并 + **不变量校验**；SMP helper 为泛型 `applySMPOverlay[T]`（两种 builder 共用）
+- 环境变量 `INGRESS_TEMPLATE` 指向 overlay 文件路径；**不设置 = 纯内置构造，行为与历史版本完全一致**。overlay 支持每服务占位符 `{{K8S_NAME}}`/`{{SHORT_NAME}}`（发布期替换，保证模板服务无关、启动探针可哑参渲染）
+- 允许改 host/path/TLS/追加注解；rules/tls 是普通列表（SMP **整体替换**），annotations/labels 是 map（按 key 合并）。校验不变量（违规即拒）：禁改 metadata.name/namespace、平台 labels、spec.ingressClassName；归属唯一（所有 backend 指向本服务 `{name}-svc:8100`）；每条 path 必须设置 pathType；spec.defaultBackend 恒空；proxy-read/send-timeout 必须保留。**其余不变量按 Ingress 模式收放**（见下节）
+- **Endpoint 随合并结果派生**（`k8s.IngressEndpoint`，模式按 `IngressHostSuffix` 配置分支）：path 模式取第一条带尾缀 path 规则的 Host（空回落 INGRESS_HOST，自带端口不重复拼）+ path 剥尾缀得对外前缀、TLS→https、端口取 INGRESS_PORT；host 模式取规则 Host，形如 `http://{K8sName}{suffix}/`（域名自带 80/443 不拼端口，spec.tls 非空则 https）。Publish 落库前 Build（违规直接拒绝**不落库**，与 image 校验同级）；Republish 事务前 Build 随事务回写 endpoint；**StartAgain apply 成功后重算 endpoint 落库**（模式切换的存量服务在此收敛，写库失败只记日志不阻断）；UpdateEnv 不触 Ingress、不改 endpoint
+- overlay 用法与完整 rules 抄改样例见 `templates/ingress-overlay.example.yaml`；设计见 [../docs/design/ingress-template-design.md](../docs/design/ingress-template-design.md)
+
+## 业务 Ingress 双模式（INGRESS_HOST_SUFFIX）
+
+- 环境变量 `INGRESS_HOST_SUFFIX`（默认空）切换生成形态，**双模式并存、空值 = 现有 path 模式逐字符不变**：`objects.go:Ingress` 与 `template.go:validateIngress` 均以 `IngressHostSuffix != ""` 为唯一判定依据（不从 path 尾缀嗅探，overlay 改 path 会误导嗅探）
+- | `INGRESS_HOST_SUFFIX` | 模式 | 内置形态 |
+  |---|---|---|
+  | 空（默认） | path | 无 host；path `/agent/{short}(/|$)(.*)`、pathType ImplementationSpecific；rewrite-target=/$2、use-regex=true、x-forwarded-prefix=/agent/{short} |
+  | 非空（如 `.region-c86-test.test-kzx1.cncb`） | host | host=`{K8sName}{suffix}`、path `/`、pathType Prefix；**只保留** ssl-redirect=false 与 proxy-read/send-timeout=3600，无任何 rewrite 注解（根路径直出无前缀可剥） |
+- 配置层 fail-fast：`config.Load()` 校验后缀必须以 `.` 开头、去点后为合法 DNS-1123 subdomain（整体形态）**且逐段为合法 DNS label（各段 ≤63，`IsDNS1123Label`——`IsDNS1123Subdomain` 只查点分正则 + 整体 253，不含段长）**，且**叠加最长 K8sName（67 字符 = `oaf-` 前缀 + 63 截断，见 objects.go `DeriveK8sName`/`SanitizeK8sName`）后总长 ≤253**（即后缀 ≤186），非法直接 `log.Fatal` 拒绝启动。拼接后首段（`{K8sName}{后缀首段}`）可能超 63，不额外拒绝：K8s 对 `rules[].host` 只强校验 253 总量
+- 不变量差异（`validateIngress`）：公共项同上节；**path 模式**额外强制 path 尾缀 `(/|$)(.*)`、use-regex/rewrite-target、x-forwarded-prefix 与对外前缀一致；**host 模式**强制每条 rule 的 host == `{K8sName}{suffix}`（空 host 也拒——放行会退化成共享入口 IP 承载根路径、流量串服务）、**path 恒为 `/`**（Endpoint 固定派生为根 URL，放开 path 会让落库地址与实际路由错位、前端链接 404）、**rewrite-target / use-regex / x-forwarded-prefix 三项必须为空**（不是"不校验"：x-forwarded-prefix 有下游消费者——agent-framework `DebugController` 读 `X-Forwarded-Prefix` 拼 302 Location，非空错值会让 `/debug` 跳 404；rewrite-target 可能被 ingress-nginx 用于改写 location。内置构造三项一个都不生成，收紧不影响任何合法 host 模式 overlay）
+- 存量服务**不做后台批量迁移**：EnsureIngress 整体覆盖 spec，模式切换后经 Republish / StartAgain 即收敛为新形态（Endpoint 同步重算落库）
+- 设计见 [../docs/design/ingress-host-mode-design.md](../docs/design/ingress-host-mode-design.md)

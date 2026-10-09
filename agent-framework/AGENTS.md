@@ -4,6 +4,16 @@
 
 Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运行 Agent 服务框架。支持 **OAF v0.8.0** 配置规范 (`AGENTS.md` frontmatter)、**A2A v1.0.0** 通信协议 (JSON-RPC + SSE) 和 **A2UI v0.8** 声明式 UI 扩展。通过 MysqlDistributedStore 实现 AgentState + 工作区文件统一持久化，支持 MCP 工具原生集成、记忆管理、上下文压缩、技能自学习、Plan Mode、Channel SSE。
 
+## 业务面强约束（架构原则二：服务间数据隔离 + 无状态多副本）
+
+**每个业务 agent 服务的 Pod 必须无状态、可横向扩展多副本；不同业务 agent 服务之间数据必须隔离。** 以下为强制红线，改动触碰任意一条必须先评审：
+
+- **正确性状态只存共享存储**：影响请求裁决的状态（会话历史 `agent_state`/`session_message`、HITL `confirm_context`、turn 互斥 `turn_lease`、事件流 `sess:*`/`proto:task:*`、幂等 Job `a2ajob:*`）只允许落 MySQL / Redis。Pod 本地（内存 Map、emptyDir `/workspace`、`/applog`）只允许可丢弃或可从共享存储重建的缓存/簿记（如 `SessionManager` 映射、`RemoteConfirmBridge.inFlight` 需可经 `remote_task_registry` 重建）
+- **多副本协调只靠共享存储原子操作**：互斥/CAS 一律用 MySQL PK 冲突、version CAS、Redis `SET NX`/Lua，禁止本地文件锁/内存锁/单机 leader 假设；@Scheduled 任务天然每副本都会跑，必须幂等或 CAS 恰好一次
+- **禁止会话粘性**：不得为 Service/Ingress 引入 `sessionAffinity` 或等价粘性路由；`/threads/{sid}/subscribe|status|confirm*` 必须在"本 Pod 未执行过该 session"时依旧正确（durable SSE 续传语义）。e2e-multi（R 组）与 e2e-protocol-multi（P 组）双副本门禁是本约束的回归保障，不得弱化拓扑（双副本 + 无粘性 LB）
+- **服务间隔离靠部署配置（当前形态）**：表结构与 Redis key 均无 agent 维度，**多服务共享同一 MySQL/Redis 时必须各配独立 `CHECKPOINT_JDBC_URL` 库名与 `AGENT_REDIS_PREFIX`**——共库时 `session_user` 会按 user_id 跨服务串列、`/threads` 列表互相可见；共 Redis 空 prefix 时 `sbx:guard:user:{uid}` 跨服务互锁。平台默认占位符是共享库 + 空前缀，**平台尚不自动注入/校验（已知缺口）**，发布多个服务时必须显式配置；平台侧自动 per-service 派生列入演进
+- **`/config` 只读不变量**：OAF 包挂载点只读（backend objects.go 构造 `ReadOnly: true`），框架代码禁止写 `{AGENT_CONFIG_DIR}` 下任何路径（旧 `SkillManageService` 写 `/config/skills` 属遗留，平台部署下 fail-soft 不可用；用户技能一律走 agent_fs L4）。已提交的架构约束见 [../AGENTS.md](../AGENTS.md)「架构强约束」
+
 ## 技术栈
 
 | 层级 | 技术选型 |
@@ -17,6 +27,7 @@ Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运�
 | A2A 协议 | AgentScopeA2aServer + HarnessAgentRunner (JSON-RPC) |
 | A2UI | AgentScope 事件流驱动 |
 | 数据库 | GreatSQL 8.0 (端口 3307, DB `agent_manager_test`) |
+| DB schema 迁移 | Flyway 10.10 (flyway-core + flyway-mysql + spring-jdbc，`db/migration/V*.sql`，baseline-on-migrate) |
 | 构建工具 | Maven 3.9+ |
 | JDK | 21+ |
 
@@ -38,6 +49,7 @@ agent-framework/
 │   │   │   │   ├── OafConfigLoader.java         # AGENTS.md 解析
 │   │   │   │   ├── AgentScopeConfig.java        # Bean 装配 (HarnessAgent + MysqlDistributedStore)
 │   │   │   │   ├── A2AServerConfig.java         # A2A Server 配置 (HarnessAgentRunner)
+│   │   │   │   ├── AgentProtocolConfig.java     # Agent Protocol 服务端装配（协议默认关闭：TaskRepository agent_fs override + reload-safe AgentFactory + token fail-fast，含 service/protocol/AgentProtocolAuthFilter 注册）
 │   │   │   │   └── ChannelConfig.java           # ChatUiChannel Bean
 │   │   │   ├── model/
 │   │   │   │   └── OafConfig.java               # OAF 配置模型 (含 deniedTools)
@@ -92,6 +104,7 @@ agent-framework/
 │   │   │       └── A2AController.java           # POST / (A2A JSON-RPC, 全量透传 SDK)
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
+│   │       ├── db/migration/                    # Flyway 版本化迁移（V1 基线 e91d1f0 + V2..；表结构/数据演进一律新增 V 文件，禁止构造器手工 DDL）
 │   │       └── static/debug/                    # 调试页面 (拆分架构)
 │   │           ├── index.html                   # 调试页入口
 │   │           ├── css/                         # 样式 (base/components/layout)
@@ -162,6 +175,14 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - `MySqlTaskStore` 注入 SDK：tasks/get 从 agent_state 表读取构造 A2A Task（save no-op，消息已由 AgentScope 自动持久化）
 - 多租户：SDK 从 `message.metadata.userId` / `message.metadata.sessionId` 读取（AgentScopeAgentExecutor）
 
+### 5. AgentProtocolConfig / AgentProtocolAuthFilter — Agent Protocol 服务端（远程子 agent 面，默认关闭）
+
+`config/AgentProtocolConfig`（条件装配 `agent.agent-protocol.enabled=true`：ProtocolTaskRepository bean override → TaskRecord 落 agent_fs 跨重启可 resume；自定义 AgentFactory → `agentRuntimeService.getAgent()` 防 reload 跑旧实例（F14）；AgentProtocolEventBus bean override → Redis Streams（§18.3，`AGENT_PROTOCOL_EVENT_BUS=memory` 回退 SDK 内存实现）；token 缺失 fail-fast）+ `service/protocol/AgentProtocolAuthFilter`（/tasks* 前置校验 `X-Agent-Protocol-Token`，无/错一律 401）。终态 TaskRecord 保留期扫描在 `SessionCleanupService`（SDK 2.0.3 无删除 API，暂为扫描留痕；同处清理 remote_task_registry 终态行）。**多副本（设计 §18）**：lead 端在途任务登记持久化在 `remote_task_registry` 表（`RemoteTaskRegistryStore`，V8）——Bridge 重启/跨副本经 `rebuildFromRegistry` 接管轮询，唤醒幂等走 `claimWake` CAS（IN_FLIGHT→WAKING），TTL sweep 以 confirm_context CAS 消费前置保证治理恰好一次；member 端 `/tasks/{id}/events` 事件面经 `ProtocolRedisEventBus` 跨副本可见。`/` 与 `/metadata` 透出 `agent_protocol` 状态。设计/事实基础见 [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md)
+
+### 5.5 A2aJobController / A2aJobService — A2A 幂等 Job（member 侧，默认关闭）
+
+`controller/A2aJobController`（`POST/GET /a2a/jobs`，`Agent-A2A-Job-Token` 认证经 `service/a2ajob/A2aJobAuthFilter`）+ `service/a2ajob/{A2aJobService,A2aJobRedisStore}`（Issue #69 路线 A：幂等状态机全外置 Redis 单键原子操作——`SET NX` claim 独占发送权 → Lua CAS 落 taskId/释放/续租；多副本任意副本可裁决同键并发，无本地态）。发送走 loopback `message/send`（blocking，`Semaphore(maxConcurrent=32)` 准入防自环死锁）；失败分类：确定未受理（连接失败/4xx/JSON-RPC error）释放可重试、结果未知（超时/5xx）保留认领禁重发（at-least-once，副作用由工具层 plan_id/expected_version 兜底）；Redis 运行期故障 503 fail-closed 无本地降级。装配 `config/A2aJobConfig`（enabled=true 时 token fail-fast + Redis 启动自检）；与 /tasks 协议 token 分属两个信任域。backend 侧对应实现已撤除（PR #71）。设计：[Issue #69](https://github.com/gaoyue1989/agent-manager/issues/69) + [docs/design/travel-fulfillment-agent-protocol-design.md](../docs/design/travel-fulfillment-agent-protocol-design.md) §18
+
 ---
 
 ## AgentScope 2.0 功能使用状态
@@ -169,7 +190,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 配置动态 reload | ✅ | OAF 包（PVC /config）原位更新免重启：`POST /admin/reload`（auto 指纹分流：仅 MCP 配置变→`OafReloadService.reloadMcpAll` 原地 reload（toolkit.removeMcpClient + registerOne，声明增删即时生效）；AGENTS.md 变→`reloadAgent` 整包重建（`HarnessAgentFactory` 重用启动装配，`WorkspaceInitializer.reinitialize` 覆盖生成文件，`AgentRuntimeService.swapAgent`/`A2aAgentRefHolder`/`OafConfigHolder` 原子切引用，旧 agent MCP 连接收尾）。失败回滚保持旧 agent；生效=下一轮对话；`AgentRuntimeService`/`HarnessAgentRunner` 持 volatile 引用，A2A 经 holder 间接持有。设计/时序/E2E 见 [docs/oaf-dynamic-reload-plan.md](docs/oaf-dynamic-reload-plan.md)；`tool/CustomTool` 标记接口收窄 `List` 注入候选（防 Spring 循环依赖） |
-| 工具插件 | ✅ | Java SPI 免重编译加载自定义工具：插件 jar 放 `{AGENT_PLUGINS_DIR}`（默认 `{AGENT_CONFIG_DIR}/plugins`），启动期 `ToolPluginBootstrapper`（BFPP）扫描 + `ServiceLoader` 实例化 `ToolPlugin` 实现，工具实例注册为单例并入 `List<CustomTool>` 注入源——HarnessAgentFactory（启动 + reload 整包重建）、InternalToolRegistry（/tools）、HITL 白名单零改动共享；`{jar名}/config.yaml` 支持 `${ENV_VAR}` 替换；插件更新需重启（类卸载限制），框架类须 provided 不打进 jar。示例 `e2e/plugin-echo/` + 冒烟 `e2e/scripts/plugin-smoke.sh`（30 断言，含 issue #39 sdkInternal 段），设计/实施见 [docs/tool-plugin-extension-plan.md](docs/tool-plugin-extension-plan.md) |
+| 工具插件 | ✅ | Java SPI 免重编译加载自定义工具：插件 jar 放 `{AGENT_PLUGINS_DIR}`（默认 `{AGENT_CONFIG_DIR}/plugins`），启动期 `ToolPluginBootstrapper`（BFPP）扫描 + `ServiceLoader` 实例化 `ToolPlugin` 实现，工具实例注册为单例并入 `List<CustomTool>` 注入源——HarnessAgentFactory（启动 + reload 整包重建）、InternalToolRegistry（/tools）、HITL 白名单零改动共享；`{jar名}/config.yaml` 支持 `${ENV_VAR}` 替换；插件更新需重启（类卸载限制），框架类须 provided 不打进 jar。示例 `e2e/plugin-echo/` + 冒烟 `e2e/scripts/plugin-smoke.sh`（32 断言 = 31 个 check/check_absent + 1 个手工 PASS/FAIL 分支，含 issue #39 sdkInternal 段），设计/实施见 [docs/tool-plugin-extension-plan.md](docs/tool-plugin-extension-plan.md) |
 | 技能（Skill） | ✅ | **动态加载**：/config/skills 注册为 L2 市场仓库（每轮重扫，不重启生效）；SkillCatalogService 为 /skills、A2A 卡片、debug config 提供声明 ∪ 目录合并视图；自学习 L4 覆盖（skill_manage/propose_skill → agent_fs per-user）；用户技能管理面 `/skills/users/*`（列出/读取/写入/删除/从包内下发，调试页 Skills 模块「用户技能」区块；删除 = 回落包内基线 + 写删除标记防沙箱回写复活）。**沙箱档 L4 写入落库（本次修复）**：沙箱会话内 skill_manage 把 L4 写进容器 `/workspace/skills`，由 `WorkspaceSyncService.syncBack` 在每次 call 结束回写 agent_fs（`WorkspaceSyncService.java:132` 起 `syncUserSkills`，命名空间/key 一律经 `WorkspaceReader.writeUserSkillFile`，`WorkspaceReader.java:414`）——修复前只回写 MEMORY.md/memory/，L4 技能随容器 TTL 到期丢失。**回写仲裁（两个 KV 元数据键，命中即跳过同名技能）**：删除写 `/{name}/.deleted`（防删除被容器内副本复活）、管理面写入（PUT/下发）写 `/{name}/.admin-override`（防管理面写入被同代容器内旧副本在下次 call 结束时改回）；代价是标记生效期间该技能在容器内的 skill_manage 修改不落库，状态与清除方式经列表 `tombstones`/`adminOverride` 字段与删除/PUT 响应下发（调试页醒目标注）。**生效范围分档**：非沙箱档管理面 L4 下轮会话生效；沙箱档会话读容器内 `/workspace/skills` 副本，管理面写入由「会话开始物化 L4」（`WorkspaceReader.materializeUserSkills`，`SandboxUserKeyMiddleware.onAgent` 在每次 acquire 后投影进容器；`/{name}/.deleted` 跳过、admin-override 照写、只写不删）在该用户下一个 turn 生效；`/skills/available`、`/skills/parse-refs` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。概览见下表端点说明与 `e2e/user-skill-admin-e2e.sh` 档位说明；设计/根因/验证见 [../docs/design/user-skill-admin-design.md](../docs/design/user-skill-admin-design.md) |
 | 记忆管理 | ✅ | MEMORY.md + memory/，flush 节流 10 分钟；可经 `AGENT_MEMORY_ENABLED=false` 完全关闭（不注册 memory_* 工具 + 不执行 flush/整合 + 沙箱不注入/回写记忆文件） |
 | 上下文压缩 | ✅ | CompactionConfig，30 条触发保留 10 条 |
@@ -266,6 +287,36 @@ OAF `deniedTools` 字段控制排除列表。
 
 ---
 
+## DB Schema 迁移（Flyway，2026-09-28 接入）
+
+表结构/数据演进由 Flyway 管理（`src/main/resources/db/migration/V<N>__<描述>.sql`，命名带来源提交 hash），配置见 `application.yml` 的 `spring.flyway.*`（`baseline-on-migrate=true`，`baseline-version=5`）：
+
+- **存量库**（有表、无历史表）首启自动基线到 V5，仅执行之后的增量；**全新库**（CI E2E/新环境）从 V1 完整重建；多副本同时启动由历史表锁互斥；迁移失败即启动失败（fail-fast）。
+- **纪律**：演进一律新增 V 文件；禁止修改已合并的 V 文件（checksum 校验拒绝启动）；禁止在 Store 构造器/请求路径手工 DDL（`initSchema/ensureColumn` 模式已移除）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（V6 `session_user` 回填即范例：自洽规范槽位 + unknown/共享 gw-hash 桶守卫 + INSERT IGNORE 幂等）。
+- **两个静默坑（详见 [../docs/design/db-migration-flyway-design.md](../docs/design/db-migration-flyway-design.md) §6.1）**：① 不引 starter-jdbc 的工程必须显式补 `spring-jdbc`，否则 `FlywayConfiguration` 因 `@ConditionalOnClass(JdbcUtils)` 不满足而**静默不装配**——启动零报错、迁移零执行；② SDK `distributedStore` bean 构造期会建 `agent_state/agent_fs`，必须 `@DependsOn("flywayInitializer")`（bean 名是 `flywayInitializer`），否则全新库上 Flyway 因 schema 非空走 baseline 路径跳过 V1..V5。
+- 真实 MySQL 的 `*MySqlIT` 经 `TestSchemaMigrator`（test 下）执行同一批迁移文件，测试 schema 与生产同源；`e2e/scripts/reset-data.mjs` 需同时清理 `flyway_schema_history`（已含）。
+
+---
+
+## 性能观察项（已知、暂缓——触发条件后处理，2026-10-01 评审④归类）
+
+1. **agent_state 热路径五路 OR 全表扫描**：`AgentStateReader.loadFragments` 的 5 路形态匹配（1 等值 + 4 LIKE）使 OR 整体退化为全表扫描，`/threads/chat` 每 turn 的 `hasPendingConfirm` 都会触发一次（agent_state 全量行 + 整包 JSON 解析）。已做的零风险缓解：`AgentRuntimeService.hasPendingConfirm` 改为 confirm 行先查（索引命中即免扫描）。**未做强修的原因**：行序是分片合并语义（多条 item_index 拼数组后取最后一条 assistant）而非快照序，LIMIT/DESC 会破坏合并语义；SQL LIKE 预过滤耦合 SDK 序列化字节形态。**触发条件**：现网 agent_state 行数上万或列表延迟可感知时，按「会话级确认意图缓存位（写入时更新）」方案立项。
+2. **/threads 双臂 SUBSTRING_INDEX JOIN 全表扫描**：双臂均为函数表达式无法走索引（原 LIKE 前缀可走最左前缀）。**未做强修的原因**：单边函数索引无法覆盖 OR 双臂，需查询重写 + 生成列迁移，风险大于现网 196 行的收益。**触发条件**：同上，届时用生成列 `slot_tail` + 索引 + 查询重写一并处理。
+
+---
+
+## 存储层错误分型纪律（2026-10-01，修评审 #72 确认缺陷后确立）
+
+Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`），会被上游当「确认不存在/无主」的业务信号用——多副本协调下产生**无痕唤醒 → 重复汇总 turn**、误吞唤醒、幂等键双发三类窗口。纪律：
+
+- **「确认语义」与「可判定性」必须分型**：协调判定类操作（CAS/exists/claim）返回值必须区分「确认被抢/无行」与「暂时不可判定」。参照 `RemoteTaskRegistryStore.tryClaimWake` 四态（CLAIMED/CONTENTED/ABSENT/UNAVAILABLE）——UNAVAILABLE 一律跳过本轮，交给既有重试循环（rebuild 周期/下一用户 turn），宁延迟不重复。
+- **跨副本幂等只信原子 CAS**，不做「先 exists 再 CAS」两段判定（两段之间既有竞态又各自吞异常）。
+- **竞态原语不许把边界当成功**：`A2aJobRedisStore.claim` 的 NX→GET 键过期窗口原地重试、耗尽抛出 fail-closed，不把 null 快照当认领成功。
+- 进程内兜底守卫（如 `wokenTasks`）必须有界（上限清空，registry 是权威判据），不随进程生命周期无界增长。
+- 周期自愈组件（看门狗/rebuild）只扫「已注册」集合时，必须补偿「有配置但未注册」的成员（`McpConnectionWatchdog.compensateUnregistered`），否则摘旧后注册失败 = 工具静默消失。
+
+---
+
 ## 环境变量
 
 | 变量 | 默认值 | 必填 | 说明 |
@@ -288,7 +339,10 @@ OAF `deniedTools` 字段控制排除列表。
 | `CHECKPOINT_DB_NAME` | — | | agent_state 表所在数据库名（可选；未设置时自动从 JDBC URL 解析，保证与 agent_fs 同库） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户名 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
-| `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | | session_event 事件流存储（Redis Streams）；集群内必配 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`，缺省指向 Pod 自身 localhost 导致事件不落地（见 docs/api-frontend-sse.md §12） |
+| `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | | session_event 事件流存储（Redis Streams）；集群内必配 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`，缺省指向 Pod 自身 localhost 导致事件不落地（见 docs/api-frontend-sse.md §12）。cluster 模式下兼任单种子节点 |
+| `AGENT_REDIS_MODE` | `standalone` | | 连接模式：`standalone` \| `cluster`（sentinel 暂不支持）；设计见 docs/redis-cluster-prefix-design.md |
+| `AGENT_REDIS_CLUSTER_NODES` | 空 | | cluster 模式种子节点（逗号分隔）；空 = 回落 AGENT_REDIS_URL 作单种子，拓扑自动发现 |
+| `AGENT_REDIS_PREFIX` | 空 | | key 统一前缀（多 Agent 共用 oaf-redis 的隔离切分）；空 = 不加前缀（与存量部署一致）；不能含 `{ }`；改前缀后旧 key 不可见（TTL 消亡），须首次部署时定好 |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件操作/Shell 在 OpenSandbox 隔离沙箱执行） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
@@ -308,6 +362,25 @@ OAF `deniedTools` 字段控制排除列表。
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关：`false` = 完全关闭记忆——不注册 `memory_*` 工具 + 不执行 flush/整合（`disableMemoryHooks` + `disableMemoryTools`）；沙箱不再注入/回写记忆文件（技能回写不受影响） |
+| `AGENT_PROTOCOL_ENABLED` | `false` | | Agent Protocol（远程子 agent 服务端）总开关：true 时注册 `/tasks*` 端点 + 认证 filter + TaskRepository agent_fs bean override；false 存量零影响（/tasks 404）。设计见 docs/design/travel-fulfillment-agent-protocol-design.md |
+| `AGENT_PROTOCOL_AUTH_TOKEN` | — | ✓（协议启用时） | 服务间认证 token（Header `X-Agent-Protocol-Token`）：`AGENT_PROTOCOL_ENABLED=true` 时**必填**，缺失启动即失败（fail-fast）；无/错 token 一律 401（AgentProtocolAuthFilter）。敏感值经平台 Secret 路由，不落 ConfigMap |
+| `AGENT_PROTOCOL_TASK_STORE` | 空 | | TaskRecord 本地 FS 退化路径（§7）：agent_fs bean override 生效时不使用；**禁止指向 `/config`**（PVC subPath 只读）。同值双落点：`agent.agent-protocol.task-store` 与 SDK `agentscope.agent-protocol.task-store-path` |
+| `AGENT_PROTOCOL_TASK_RETENTION_DAYS` | `7` | | 终态 TaskRecord 保留天数（SessionCleanupService 每日扫描；SDK 2.0.3 无删除 API，当前扫描计数留痕、物理清理待 SDK 提供 delete） |
+| `AGENT_PROTOCOL_HITL_ENABLED` | `true` | | SDK 扩展 `agentscope.agent-protocol.hitl-enabled`：关闭即 resume 抛 "HITL is disabled"（远程确认链路断裂），member 服务端固定开启；SDK 原始默认 false |
+| `AGENT_PROTOCOL_STREAMING_ENABLED` | `true` | | SDK 扩展 `agentscope.agent-protocol.streaming-enabled`：关闭即 `/tasks/{id}/events` SSE 抛 "streaming is disabled"（lead 侧 remoteStreaming 无法消费），member 服务端固定开启；SDK 原始默认 false |
+| `AGENT_REMOTE_CONFIRM_TTL_HOURS` | `24` | | 远程确认挂起独立 TTL 小时数（lead 端 RemoteConfirmBridge 用，confirm_context 远程行超时自动 DENY + 审计）；member 侧仅透出 |
+| `AGENT_REMOTE_POLL_SECONDS` | `5` | | 远程任务快照轮询周期秒（lead 端 Bridge 唯一确认源 `GET /tasks/{id}`，F15）；member 侧仅透出 |
+| `AGENT_REMOTE_HEADERS_JSON` | 空 | | lead 端远程子 agent 声明 headers JSON（注入 `X-Agent-Protocol-Token` 等，值走 env 不进包）；member 侧不消费。敏感键，平台路由进 `{name}-env-secret` |
+| `AGENT_REMOTE_SPAWN_SYNC_WAIT` | `true` | | 远程 spawn 强制同步等待（lead 端，设计 §16 实测）：注入 SDK `force_sync` 属性让 spawn 阻塞等子任务完成、结果确定性回流（SDK 远程 spawn 恒异步受理，收割靠模型自觉不可靠）。仅作用于纯 spawn 轮次；无远程声明的服务无消费方、无副作用 |
+| `AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS` | `120` | | 强制同步等待秒数（配合上一键），超时后按 SDK 既有升格语义转后台 |
+| `AGENT_PROTOCOL_EVENT_BUS` | `redis` | | 协议事件总线实现（多副本设计 §18.3）：`redis` = ProtocolRedisEventBus（Redis Streams，`proto:task:{id}:*` 键族经 `agent.redis.prefix` 隔离；显式 seq 发号 + done 标记收流，`/tasks/{id}/events` 跨副本可订阅/跨重启可重放）；`memory` = SDK 内置内存实现（v1.4 行为）。Redis 缺失/异常 fail-soft 降级内存，不劣化 |
+| `AGENT_A2A_JOB_ENABLED` | `false` | | A2A 幂等 Job（member `/a2a/jobs`，Issue #69）总开关：true 时 `AGENT_A2A_JOB_TOKEN` 必填（缺失启动即失败）+ Redis 启动自检（硬依赖，连不上拒绝启动）；false 存量零影响（端点与 filter 均不装配） |
+| `AGENT_A2A_JOB_TOKEN` | — | ✓（Job 启用时） | /a2a/jobs 入口认证 token（Header `Agent-A2A-Job-Token`）：无/错一律 401。敏感值经平台 Secret 路由；**与 /tasks 协议 token 分属两个信任域，不复用** |
+| `AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS` | `300` | | loopback message/send blocking 发送超时秒；租期 = 2×该值+60s（认领残留的接管窗口） |
+| `AGENT_A2A_JOB_RETENTION_HOURS` | `24` | | 完成态幂等映射保留小时（Redis TTL）；窗口外同键重试 = 新任务（标准幂等窗口语义） |
+| `AGENT_A2A_JOB_MAX_CONCURRENT` | `32` | | 并发准入（Semaphore tryAcquire(0)）：loopback 自环每 Job 占 2 Tomcat 线程，防自环死锁（Issue §2.5）；饱和返回 503 + Retry-After |
+| `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活，失联按 reload swap-on-success 语义原地重建（修 biz-mcp 重启后长连接静默失效 → ConnectException 永久失败）；≤0 关闭；OAF reload 进行中让位 |
+| `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
 
 > **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24）**：`LLM_*` 是**系统模型**——未显式选择模型的会话的对话模型，
 > 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
@@ -326,6 +399,28 @@ OAF `deniedTools` 字段控制排除列表。
 > 落 `session_user.model`，由 `SessionModelMiddleware` 实时查库路由。切换会话按 `GET /threads` 的 `model` 回显，
 > 新建会话回落 system，绑定模型被删除后同样回落；PATCH 失败（如 `model_disabled`）toast 报错并回滚下拉框。
 > 见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md) §9 C / §14。
+> **debug 页消息按到达顺序分段渲染（2026-09-29）**：回复内段落（思考块/文本气泡/工具组/卡片）一律按事件
+> 到达顺序排列，连续同类段落合并——模型的开场白留在它那批工具步骤上方，不再整体置底。
+> 实现要点：`chat.js` 以 `tailTextEl`/`tailTools` 维护段落尾指针（思考/文本/工具互为失效点，光标随段终结移除），
+> 工具行经 `tc.group` 记归属组（结果/摘要晚于下一段文本时仍写回正确的组）；
+> 历史回放依据 `GET /threads/{sid}/history` assistant 消息的 `blocks` 有序数组（`StateDataParser.extractOrderedBlocks`，
+> 只增不改字段，旧数据无 blocks 时退回「工具组在上、文本在下」旧布局）。见 [docs/api.md](docs/api.md) blocks 字段说明。
+> **debug 页远程子 agent 调用面板 + 转发事件收尾 guard（2026-09-30）**：远程委派（Agent Protocol `agent_spawn`
+> → 远端 `/tasks`）全过程可视化 + 三处收尾缺陷修复——
+> ① **SSE 词表带来源标注**：`AgentEventSseSerializer` 对 SDK `tagRemoteForwardedEvent` 打标的转发事件输出
+> `source`（`{parentSessionId}/{agentId}`）与 `taskId`/`parentSessionId` 元数据，并新增 `subagent_exposed`
+> snake_case 帧（SubagentExposedEvent 四字段）；lead 自身事件 source 恒为 null，`isRemoteForwarded()` 为唯一判据。
+> ② **AGENT_END 收尾 guard**（ChatStream/Confirm/AgentRuntimeService.forwardEvent 三处）：远端转发的 AGENT_END
+> 是 spawn 调用进行中的「子任务终点」，此前被当作 turn 终点提前释放租约并 closeSession——SSE 在 spawn 结果返回前
+> 截断（2026-09-30 order-fulfillment demo 实测，序 223 帧后全失）；guard 后 lead 自身 AGENT_END 才收尾，整流完整。
+> ③ **前端远程调用面板**（`chat.js` + components.css `.remote-call`）：`agent_spawn` 工具行开始即开面板（🛰 + agent 名
+> + 状态徽章 调用中/子任务运行中/已完成 + 任务文本），带 source 的转发事件按 `activeRemotePanel` 路由进面板嵌套渲染
+> （复用 reply 渲染助手的 duck-type view），远端工具的 `tool_call_summary`/`tool_result_preview` 合成帧无 source、
+> 按 `remoteToolOwner[tcId]` 归属路由；转发的 AGENT_START/AGENT_END 不触碰主回复生命周期（否则撕裂气泡/提前 Stop）。
+> spawn 结果预览解析（`ToolSummaryGenerator.spawnResultPreview`）：JSON 字符串字面量解包后按行取
+> agent_id/status/task_id/reply →「<agent> 返回：<首行>」/「已受理后台任务 …」/终态文案。
+> **注意 A2A 模式（默认）走 JSON-RPC `message/stream` 标准帧，无子 agent 事件**——完整事件流在 Channel 模式
+> （`/threads/chat` 平台词表）。演示截图见 demo/order-fulfillment/docs/img/06~09。
 
 ---
 
@@ -373,6 +468,7 @@ OAF `deniedTools` 字段控制排除列表。
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps: 卡片工具调用代理（ask 工具 403 + needsConfirm 走确认流） |
 | POST | `/mcp/ui-context` | MCP Apps (4.7): 静默更新模型上下文（ui_context 表持久化，Hook 下次调用注入） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
+| POST/GET | `/tasks*` | **Agent Protocol 远程子 agent 服务端（默认关闭）**：`AGENT_PROTOCOL_ENABLED=true` 才由 SDK 扩展注册——`POST /tasks` 提交、`GET /tasks/{id}` 快照（确认源，F15）、`/{id}/wait`、`/{id}/cancel`、`/{id}/events`(SSE)、`/{id}/resume`；全部经 AgentProtocolAuthFilter 前置校验 `X-Agent-Protocol-Token`，无/错 token 一律 401。关闭时 404、行为与现状完全一致 |
 
 ---
 

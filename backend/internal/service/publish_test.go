@@ -3,10 +3,14 @@ package service
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/k8s/k8sfake"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"agent-manager/backend/internal/store"
@@ -174,7 +178,7 @@ func TestUpdateEnvFlow(t *testing.T) {
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 
-	updated, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"})
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn"}, nil)
 	if err != nil {
 		t.Fatalf("update env: %v", err)
 	}
@@ -197,11 +201,11 @@ func TestUpdateEnvFullOverwriteSemantics(t *testing.T) {
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_A": "1", "KEY_B": "2"}); err != nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_A": "1", "KEY_B": "2"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, core, svc.ID, store.StatusRegisterFailed) // 回到稳态再改第二次
-	updated, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_C": "3"})
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{"KEY_C": "3"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +228,7 @@ func TestUpdateEnvDeployingRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Publish 同步落库为 deploying，异步注册在 RegisterTimeout 后才推进
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); !errors.Is(err, ErrBadState) {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}, nil); !errors.Is(err, ErrBadState) {
 		t.Fatalf("expect ErrBadState while deploying, got %v", err)
 	}
 }
@@ -237,7 +241,7 @@ func TestUpdateEnvRestartFailure(t *testing.T) {
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 
 	fk.FailNextRestart(1, errors.New("patch conflict"))
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); err == nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}, nil); err == nil {
 		t.Fatal("restart failure must propagate")
 	}
 	got, _ := core.Get(svc.ID)
@@ -354,7 +358,7 @@ func TestUpdateEnvStoppedRejected(t *testing.T) {
 	if _, err := core.Unpublish(svc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}); err == nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"A": "B"}, nil); err == nil {
 		t.Fatal("env update on stopped service must fail")
 	}
 }
@@ -475,5 +479,284 @@ func TestListMergesPodStatus(t *testing.T) {
 	filtered, _ := core.List(store.StatusRunning, "", 0)
 	if len(filtered) != 0 {
 		t.Fatal("status filter should exclude deploying svc")
+	}
+}
+
+// ---- Ingress 模板（INGRESS_TEMPLATE）----
+
+// ingressTemplate 写临时 overlay 文件并构建 builder（经启动探针，与真实装配同路径）。
+func ingressTemplate(t *testing.T, content string) *k8s.IngressBuilder {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ingress-overlay.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := k8s.NewIngressBuilder(path, "nginx", "")
+	if err != nil {
+		t.Fatalf("new ingress builder: %v", err)
+	}
+	return b
+}
+
+// hostOnlyOverlay 只加域名的完整 rules overlay（path 保持内置形态，占位符引用服务名）。
+func hostOnlyOverlay(host string) string {
+	return fmt.Sprintf(`
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /agent/{{SHORT_NAME}}
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /agent/{{SHORT_NAME}}(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`, host)
+}
+
+// Endpoint 跟随 Ingress 模板：模板改 host/path 后，发布记录的展示地址随合并结果派生。
+func TestPublishEndpointFollowsIngressTemplate(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressBuilder = ingressTemplate(t, fmt.Sprintf(`
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
+spec:
+  rules:
+    - host: demo.example.com
+      http:
+        paths:
+          - path: /my-agent(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`))
+	pkg := uploadTestPkg(t, core, "")
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if svc.Endpoint != "http://demo.example.com:30080/my-agent/" {
+		t.Fatalf("endpoint must follow template, got %q", svc.Endpoint)
+	}
+}
+
+// Ingress 模板违规：Publish 直接拒绝且不落库（不产生 deploying/error 垃圾记录）。
+// overlay 硬编码探针名（oaf-template-probe）可穿过启动探针、在真实发布期被拒——
+// 恰是"硬编码服务名"的典型误用形态。
+func TestPublishInvalidIngressOverlayRejectedWithoutRecord(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
+	pkg := uploadTestPkg(t, core, "")
+	if _, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"}); err == nil {
+		t.Fatal("publish must fail on invalid ingress overlay")
+	}
+	var cnt int64
+	core.DB.Model(&store.ServiceEntity{}).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("no service record must be created, got %d", cnt)
+	}
+}
+
+// Republish 回写：模板变更后展示地址随合并结果更新。
+func TestRepublishEndpointFollowsTemplateChange(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressBuilder = ingressTemplate(t, hostOnlyOverlay("one.example.com"))
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	if svc.Endpoint != "http://one.example.com:30080/agent/acme-demo/" {
+		t.Fatalf("initial endpoint: %q", svc.Endpoint)
+	}
+	core.Cfg.IngressBuilder = ingressTemplate(t, hostOnlyOverlay("two.example.com"))
+	updated, err := core.Republish(svc.ID, RepublishOptions{})
+	if err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if updated.Endpoint != "http://two.example.com:30080/agent/acme-demo/" {
+		t.Fatalf("endpoint must be rewritten on republish, got %q", updated.Endpoint)
+	}
+}
+
+// Republish 模板违规：事务前拒绝，库中记录保持原状（状态/endpoint 均不变）。
+func TestRepublishInvalidOverlayKeepsRecord(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
+	if _, err := core.Republish(svc.ID, RepublishOptions{}); err == nil {
+		t.Fatal("republish must fail on invalid overlay")
+	}
+	got, _ := core.Get(svc.ID)
+	if got.Status != store.StatusRegisterFailed {
+		t.Fatalf("status must stay register_failed, got %s", got.Status)
+	}
+	if got.Endpoint != svc.Endpoint {
+		t.Fatalf("endpoint must stay unchanged, got %q want %q", got.Endpoint, svc.Endpoint)
+	}
+}
+
+// StartAgain 经 applyAll 重新校验 Ingress overlay：违规转 error 并拒绝上线（设计 §6），
+// 而非静默套用内置形态把服务拉起来。与 Republish/Publish 的"事务前拒绝、记录原样"不同，
+// 该路径已经过了纯函数前置，只能在 apply 失败后落 error。
+func TestStartAgainInvalidOverlayMarksError(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	// overlay 硬编码探针名（oaf-template-probe）：启动探针恰好通过，真实 apply 期
+	// 违反 metadata.name 不变量被拒——"硬编码服务名"的典型误用形态。
+	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
+
+	if _, err := core.StartAgain(svc.ID); err == nil {
+		t.Fatal("start again must fail on invalid ingress overlay")
+	}
+	got, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusError {
+		t.Fatalf("status must be error, got %s", got.Status)
+	}
+	events, _ := core.Events(svc.ID)
+	if len(events) == 0 || !strings.Contains(events[0].Reason, "start again apply failed") {
+		t.Fatalf("start again apply failure event missing: %+v", events)
+	}
+	// 违规形态不得落地集群：applyAll 在 Build 阶段即失败，Ingress 仍是原 path 模式形态
+	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := ing.Spec.Rules[0].HTTP.Paths[0].Path; !strings.HasPrefix(p, "/agent/acme-demo") {
+		t.Fatalf("ingress must keep the previous path-mode rule, got %q", p)
+	}
+}
+
+// ---- Ingress host 模式（INGRESS_HOST_SUFFIX）----
+
+// hostModeSuffix 演示用的域名后缀（对应 issue §3 示例）。
+const hostModeSuffix = ".region-c86-test.test-kzx1.cncb"
+
+// host 模式端到端：发布的 Ingress 对象与落库 Endpoint 均为域名形态。
+func TestPublishHostMode(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	pkg := uploadTestPkg(t, core, "")
+
+	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"})
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("ingress not created: %v", err)
+	}
+	if ing.Spec.Rules[0].Host != "oaf-acme-demo"+hostModeSuffix {
+		t.Fatalf("ingress host wrong: %q", ing.Spec.Rules[0].Host)
+	}
+	if p := ing.Spec.Rules[0].HTTP.Paths[0]; p.Path != "/" || p.PathType == nil ||
+		*p.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("host mode path wrong: %+v", p)
+	}
+	if _, ok := ing.Annotations["nginx.ingress.kubernetes.io/rewrite-target"]; ok {
+		t.Fatal("host mode ingress must not carry rewrite annotations")
+	}
+	// Endpoint 走域名（不拼 INGRESS_PORT）
+	want := "http://oaf-acme-demo" + hostModeSuffix + "/"
+	if svc.Endpoint != want {
+		t.Fatalf("endpoint = %q, want %q", svc.Endpoint, want)
+	}
+}
+
+// 模式切换（path → host）后重新上线：Ingress 对象被覆盖为新形态，Endpoint 同步重算落库。
+// 存量服务不做后台批量迁移，仅在 apply 路径收敛。
+func TestStartAgainRecomputesEndpointAfterModeSwitch(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	// 先以 path 模式发布并落到可重新上线的状态
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	if svc.Endpoint != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("initial endpoint must be path mode, got %q", svc.Endpoint)
+	}
+	// 切 host 模式后重新上线
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	got, err := core.StartAgain(svc.ID)
+	if err != nil {
+		t.Fatalf("start again: %v", err)
+	}
+	want := "http://oaf-acme-demo" + hostModeSuffix + "/"
+	if got.Endpoint != want {
+		t.Fatalf("endpoint must be recomputed on start again, got %q want %q", got.Endpoint, want)
+	}
+	stored, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Endpoint != want {
+		t.Fatalf("endpoint must be persisted, got %q want %q", stored.Endpoint, want)
+	}
+	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Spec.Rules[0].Host != "oaf-acme-demo"+hostModeSuffix {
+		t.Fatalf("ingress must be re-applied in host mode, got %q", ing.Spec.Rules[0].Host)
+	}
+}
+
+// 模式切换（path → host）后重新发布：Endpoint 由 Republish 事务内 updates 独立回写
+// （与 StartAgain 的 refreshEndpoint 两条不同代码路径），存量服务同样在此收敛。
+func TestRepublishRecomputesEndpointAfterHostModeSwitch(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+	if svc.Endpoint != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("initial endpoint must be path mode, got %q", svc.Endpoint)
+	}
+	// 切 host 模式后重新发布（无包/镜像/env 变更）
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	updated, err := core.Republish(svc.ID, RepublishOptions{})
+	if err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	want := "http://oaf-acme-demo" + hostModeSuffix + "/"
+	if updated.Endpoint != want {
+		t.Fatalf("endpoint must be rewritten by republish, got %q want %q", updated.Endpoint, want)
+	}
+	stored, err := core.Get(svc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Endpoint != want {
+		t.Fatalf("endpoint must be persisted by the republish transaction, got %q want %q", stored.Endpoint, want)
+	}
+	// Ingress 形态随之刷新为 host 模式（断言集与 TestPublishHostMode 对称）
+	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Spec.Rules[0].Host != "oaf-acme-demo"+hostModeSuffix {
+		t.Fatalf("ingress must be re-applied in host mode, got %q", ing.Spec.Rules[0].Host)
+	}
+	if p := ing.Spec.Rules[0].HTTP.Paths[0]; p.Path != "/" || p.PathType == nil ||
+		*p.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("host mode path wrong: %+v", p)
+	}
+	if _, ok := ing.Annotations["nginx.ingress.kubernetes.io/rewrite-target"]; ok {
+		t.Fatal("host mode ingress must not carry rewrite annotations")
 	}
 }

@@ -10,6 +10,16 @@
 > **架构变更（2026-08-21，stateless-single-stream）**：原长连接 SSE + SessionEventBus 事件扇出模型已移除，
 > 替换为单次 SSE 流（POST /threads/{sid}/chat）。确认上下文由内存 `confirmCache` 迁移至 `confirm_context` 持久化表；
 > 并发请求通过 `turn_lease` 表串行化。
+>
+> **再核对（2026-10-01）**：端点与语义均仍有效（`POST /threads/{sessionId}/confirm` + `/confirm-stream`，
+> 404/409/`turn_in_progress` 不变），但对话入口自 2026-09-16（47dc740）收敛为 `POST /threads/chat`
+> （sessionId 移入请求体）。权限装配随 Harness 装配迁移：本文 §6.1/§15 所述 `AgentScopeConfig` 的
+> `BUILT_IN_TOOL_NAMES`/`verifyToolCoverage`/`buildPermissionContext` 现位于 `service/HarnessAgentFactory.java`
+> （白名单另由 `HarnessAgentFactoryToolCoverageDriftTest` 扫描 SDK @Tool 全集防漂移，c42ef65）；
+> `ConfirmContextStore`/`TurnLeaseStore` 包路径已由 `store/` 迁至 `service/`；
+> `OafConfig.permissionTools`/`OafConfigLoader.parsePermissionTools`、MCP 三态规则与 §15 扩展均按原文落位；
+> 另有增量机制 deny_rules 自实现（8c2ca93，协议任务动态 DENY 注册 + acting 拦截），不在本文范围。
+> A2A 不支持 HITL 的结论不变（Debug 页 A2A 分支仍无确认卡）。
 
 ---
 

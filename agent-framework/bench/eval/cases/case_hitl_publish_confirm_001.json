@@ -23,7 +23,7 @@
       "permission_ask": 1,
       "tool_call_summary": ">=1",
       "error": 0,
-      "AGENT_END": 1
+      "AGENT_END": 2
     },
     "tool_calls": {
       "required": [
@@ -37,7 +37,7 @@
     },
     "no_error": true
   },
-  "ground_truth": "scope: framework。ask 权限工具触发 permission_ask 终止 turn，confirm-stream 续段执行工具后应出现 tool_call_summary 帧且 TOOL_RESULT_END state=SUCCESS、最终以 AGENT_END 收尾——验证恢复流工具摘要补全（2026-09-25 fix(hitl) 补全恢复流工具摘要与调试页展示）",
+  "ground_truth": "scope: framework。ask 权限工具触发 permission_ask 后主段自然收尾（4db16ba 起帧序 permission_ask → REQUEST_STOP → AGENT_RESULT → AGENT_END，终帧非 permission_ask；旧版本以 permission_ask 终止），confirm-stream 续段执行工具后应出现 tool_call_summary 帧且 TOOL_RESULT_END state=SUCCESS、续段以 AGENT_END 收尾——主段+续段合并轨迹共 2 个 AGENT_END（2026-10-01 契约 v2 对齐，issue #86）——验证恢复流工具摘要补全（2026-09-25 fix(hitl) 补全恢复流工具摘要与调试页展示）",
   "eval_dimensions": [
     "protocol_compliance",
     "tool_selection"

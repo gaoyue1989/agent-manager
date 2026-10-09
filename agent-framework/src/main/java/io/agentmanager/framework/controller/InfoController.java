@@ -4,10 +4,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
@@ -21,17 +23,49 @@ public class InfoController {
     private final AgentRuntimeService agentRuntime;
     private final McpManager mcpManager;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final AgentManagerProperties props;
+    /** SDK 协议属性：仅 agent-protocol 启用时由扩展自动配置装配，关闭时为空 */
+    private final ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties;
+    /** A2A Job 配置：独立绑定（Issue #69），enabled 状态供 /metadata 透出 */
+    private final ObjectProvider<io.agentmanager.framework.config.AgentA2aJobProperties> a2aJobProperties;
+    /** A2A Job 并发准入（仅启用时存在）：availablePermits 可观测 */
+    private final ObjectProvider<io.agentmanager.framework.service.a2ajob.A2aJobService> a2aJobService;
 
     public InfoController(
         OafConfigHolder oafConfigHolder,
         AgentRuntimeService agentRuntime,
         McpManager mcpManager,
-        McpToolRegistrar mcpToolRegistrar
+        McpToolRegistrar mcpToolRegistrar,
+        AgentManagerProperties props,
+        ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties,
+        ObjectProvider<io.agentmanager.framework.config.AgentA2aJobProperties> a2aJobProperties,
+        ObjectProvider<io.agentmanager.framework.service.a2ajob.A2aJobService> a2aJobService
     ) {
         this.oafConfigHolder = oafConfigHolder;
         this.agentRuntime = agentRuntime;
         this.mcpManager = mcpManager;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.props = props;
+        this.agentProtocolProperties = agentProtocolProperties;
+        this.a2aJobProperties = a2aJobProperties;
+        this.a2aJobService = a2aJobService;
+    }
+
+    /**
+     * A2A 幂等 Job 状态词表（Issue #69 §2.3，沿 agent_protocol 透出先例）。
+     * enabled 恒取本服务配置；maxConcurrent/availablePermits 仅启用时有值。
+     */
+    private Map<String, Object> a2aJobStatus() {
+        var p = a2aJobProperties.getIfAvailable();
+        var enabled = p != null && p.enabled();
+        var status = new LinkedHashMap<String, Object>();
+        status.put("enabled", enabled);
+        if (enabled) {
+            status.put("maxConcurrent", p.maxConcurrent());
+            var svc = a2aJobService.getIfAvailable();
+            status.put("availablePermits", svc != null ? svc.availablePermits() : null);
+        }
+        return status;
     }
 
     /**
@@ -42,6 +76,31 @@ public class InfoController {
         return mcpManager.loadConfigs(oafConfigHolder.get().mcpServers());
     }
 
+    /**
+     * Agent Protocol（远程子 agent 服务端）状态词表——单一来源，/.well-known/agent-card.json
+     * （AgentCardController）同源复用（travel-fulfillment 设计 §8 member-6）。
+     *
+     * <p>enabled 以本服务配置（agent.agent-protocol.enabled）为准——它同时决定认证过滤器
+     * 与端点是否装配；streaming/hitl 读 SDK 扩展属性（仅启用时存在，关闭时报 false）；
+     * task_store 为配置的本地 FS 退化路径（agent_fs bean override 生效时实际不使用）。
+     */
+    public static Map<String, Object> agentProtocolStatus(
+        AgentManagerProperties props,
+        ObjectProvider<io.agentscope.extensions.agentprotocol.AgentProtocolProperties> agentProtocolProperties) {
+        var protocol = props != null ? props.agentProtocol() : null;
+        var sdk = agentProtocolProperties != null ? agentProtocolProperties.getIfAvailable() : null;
+        return Map.of(
+            "enabled", protocol != null && protocol.enabled(),
+            "streaming", sdk != null && sdk.isStreamingEnabled(),
+            "hitl", sdk != null && sdk.isHitlEnabled(),
+            "task_store", protocol != null ? protocol.taskStore() : ""
+        );
+    }
+
+    private Map<String, Object> agentProtocolStatus() {
+        return agentProtocolStatus(props, agentProtocolProperties);
+    }
+
     @GetMapping("/")
     public Map<String, Object> root() {
         var oafConfig = oafConfigHolder.get();
@@ -50,7 +109,8 @@ public class InfoController {
             "slug", oafConfig.slug(),
             "version", oafConfig.version(),
             "description", oafConfig.description(),
-            "protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0"),
+            "protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0",
+                "agent_protocol", agentProtocolStatus()),
             "oaf", Map.of(
                 "tools", oafConfig.tools(),
                 "skills", oafConfig.skills().size(),
@@ -94,6 +154,8 @@ public class InfoController {
             .toList());
         result.put("mcp", mcpManager.getMcpSummaries(currentMcpConfigs()));
         result.put("protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0"));
+        result.put("agent_protocol", agentProtocolStatus());
+        result.put("a2a_job", a2aJobStatus());
 
         // 详细信息（可选）
         if (includeDetails) {

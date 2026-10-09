@@ -87,6 +87,24 @@ func (f *FakeK8s) EnsureConfigMap(cm *corev1.ConfigMap) error {
 	return err
 }
 
+func (f *FakeK8s) EnsureSecret(s *corev1.Secret) error {
+	if err := f.ensureErr(); err != nil {
+		return err
+	}
+	old, err := f.cs.CoreV1().Secrets(s.Namespace).Get(context.TODO(), s.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = f.cs.CoreV1().Secrets(s.Namespace).Create(context.TODO(), s, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	old.Data = s.Data
+	old.Labels = s.Labels
+	_, err = f.cs.CoreV1().Secrets(s.Namespace).Update(context.TODO(), old, metav1.UpdateOptions{})
+	return err
+}
+
 func (f *FakeK8s) EnsureDeployment(d *appsv1.Deployment) error {
 	if err := f.ensureErr(); err != nil {
 		return err
@@ -125,15 +143,25 @@ func (f *FakeK8s) EnsureService(svc *corev1.Service) error {
 	return err
 }
 
+// EnsureIngress 语义与 RealClient.EnsureIngress（client.go）同形：不存在则创建，
+// 已存在则整体覆盖 spec/annotations/labels 后更新。缺了更新分支会让"重新发布/重新
+// 上线把 Ingress 刷成新形态"在测试中不可见（如 Ingress path/host 模式切换）。
 func (f *FakeK8s) EnsureIngress(ing *networkingv1.Ingress) error {
 	if err := f.ensureErr(); err != nil {
 		return err
 	}
-	_, err := f.cs.NetworkingV1().Ingresses(ing.Namespace).Get(context.TODO(), ing.Name, metav1.GetOptions{})
+	existing, err := f.cs.NetworkingV1().Ingresses(ing.Namespace).Get(context.TODO(), ing.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = f.cs.NetworkingV1().Ingresses(ing.Namespace).Create(context.TODO(), ing, metav1.CreateOptions{})
 		return err
 	}
+	if err != nil {
+		return err
+	}
+	existing.Spec = ing.Spec
+	existing.Annotations = ing.Annotations
+	existing.Labels = ing.Labels
+	_, err = f.cs.NetworkingV1().Ingresses(ing.Namespace).Update(context.TODO(), existing, metav1.UpdateOptions{})
 	return err
 }
 
@@ -148,6 +176,10 @@ func (f *FakeK8s) DeleteIngress(ns, name string) error {
 }
 func (f *FakeK8s) DeleteConfigMap(ns, name string) error {
 	return ignoreNF(f.cs.CoreV1().ConfigMaps(ns).Delete(context.TODO(), name, metav1.DeleteOptions{}))
+}
+
+func (f *FakeK8s) DeleteSecret(ns, name string) error {
+	return ignoreNF(f.cs.CoreV1().Secrets(ns).Delete(context.TODO(), name, metav1.DeleteOptions{}))
 }
 
 func (f *FakeK8s) GetDeployment(ns, name string) (*appsv1.Deployment, error) {

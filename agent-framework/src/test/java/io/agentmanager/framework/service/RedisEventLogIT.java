@@ -2,7 +2,6 @@ package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -15,11 +14,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import io.agentmanager.framework.config.AgentRedisProperties;
-import io.lettuce.core.ClientOptions;
-import io.lettuce.core.RedisClient;
-import io.lettuce.core.RedisURI;
-import io.lettuce.core.SocketOptions;
-import io.lettuce.core.TimeoutOptions;
+import io.agentmanager.framework.redis.RedisConnectionFacade;
 
 /**
  * {@link RedisEventLog} 集成测试（真实 Redis）。
@@ -35,7 +30,8 @@ import io.lettuce.core.TimeoutOptions;
  *   REDIS_IT=1 REDIS_IT_URL=redis://127.0.0.1:6399 mvn test -Dtest=RedisEventLogIT
  * </pre>
  *
- * <p>key 前缀固定为 {@code sess:it-<uuid>:*}，每个用例结束即删，不会碰到真实业务数据。
+ * <p>key 前缀固定为 {@code sess:it-<uuid>:*}（REDIS_IT_PREFIX 非空时整体再带该前缀），
+ * 每个用例结束即删，不会碰到真实业务数据。
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfEnvironmentVariable(named = "REDIS_IT", matches = "true|1")
@@ -43,27 +39,24 @@ class RedisEventLogIT {
 
     /** 每个用例独立的 session id，保证互相隔离且可整体清理 */
     private String sid;
-    private RedisClient client;
+    private RedisConnectionFacade facade;
     private RedisEventLog log;
     private String url;
 
     @BeforeAll
     void setUp() {
         url = System.getenv().getOrDefault("REDIS_IT_URL", "redis://127.0.0.1:6379");
-        var uri = RedisURI.create(url);
-        client = RedisClient.create(uri);
-        client.setOptions(ClientOptions.builder()
-            .socketOptions(SocketOptions.builder()
-                .connectTimeout(Duration.ofMillis(2000)).build())
-            .timeoutOptions(TimeoutOptions.enabled(Duration.ofMillis(2000)))
-            .autoReconnect(true)
-            .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
-            .build());
+        // REDIS_IT_PREFIX 非空时走「带前缀」路径（验证 agent.redis.prefix 在真 Redis 上的 key 形态）；
+        // 默认无前缀 = 与存量部署逐字节一致
+        prefixEnv = System.getenv().getOrDefault("REDIS_IT_PREFIX", "");
+        facade = RedisConnectionFacade.create(
+            new AgentRedisProperties(url, 2000, 2000, 250_000,
+                AgentRedisProperties.Mode.standalone, "", prefixEnv));
     }
 
     @AfterAll
     void tearDown() {
-        client.shutdown();
+        facade.close();
     }
 
     /** 删掉本用例的两个 key（顺带验证 deleteSession 在真实 Redis 上确实清干净） */
@@ -77,11 +70,14 @@ class RedisEventLogIT {
 
     private RedisEventLog newLog(int maxLen) {
         sid = "it-" + UUID.randomUUID();
-        // RedisEventLog 只取 maxLenPerStream / commandTimeoutMs，url 由 RedisClient 承载；
-        // 这里仍传真实 url，避免读代码时误以为它连的是别处
-        log = new RedisEventLog(client, new AgentRedisProperties(url, 2000, 2000, maxLen));
+        // 门面承载 url/连接管理；这里仍传真实 url，避免读代码时误以为它连的是别处
+        log = new RedisEventLog(facade, new AgentRedisProperties(url, 2000, 2000, maxLen,
+            AgentRedisProperties.Mode.standalone, "", prefixEnv));
         return log;
     }
+
+    /** setUp 里读取的 REDIS_IT_PREFIX（仅日志与构造可读性用） */
+    private String prefixEnv;
 
     private static List<RedisEventLog.Entry> entries(String replyId, int fromSeq, int count) {
         var out = new ArrayList<RedisEventLog.Entry>(count);
@@ -180,13 +176,12 @@ class RedisEventLogIT {
         var l = newLog(250_000);
         l.appendBatch(sid, entries("r", 1, 2), 604_800);
         // 直接读 TTL，断言的是「真的设上了」而不是「我们调用了 EXPIRE」
-        try (var c = client.connect()) {
-            var s = c.sync();
-            long evTtl = s.ttl(RedisEventLog.eventsKey(sid));
-            long rpTtl = s.ttl(RedisEventLog.repliesKey(sid));
-            assertTrue(evTtl > 600_000 && evTtl <= 604_800, "events TTL 应为 7 天，实际 " + evTtl);
-            assertTrue(rpTtl > 600_000 && rpTtl <= 604_800, "replies TTL 应为 7 天，实际 " + rpTtl);
-        }
+        var c = facade.syncConnection();   // 门面共享连接，不关闭
+        var s = c.sync();
+        long evTtl = s.ttl(l.eventsKey(sid));
+        long rpTtl = s.ttl(l.repliesKey(sid));
+        assertTrue(evTtl > 600_000 && evTtl <= 604_800, "events TTL 应为 7 天，实际 " + evTtl);
+        assertTrue(rpTtl > 600_000 && rpTtl <= 604_800, "replies TTL 应为 7 天，实际 " + rpTtl);
     }
 
     /**
@@ -217,11 +212,10 @@ class RedisEventLogIT {
         for (int i = 0; i < 10; i++) {
             l.appendBatch(sid, entries("r", 1 + i * 500, 500), 600);
         }
-        try (var c = client.connect()) {
-            long len = c.sync().xlen(RedisEventLog.eventsKey(sid));
-            assertTrue(len < 5000, "MAXLEN ~ 100 应把 5000 条裁到接近 100，实际 " + len);
-            assertTrue(len >= 100, "近似裁剪不会裁到 100 以下，实际 " + len);
-        }
+        var c = facade.syncConnection();   // 门面共享连接，不关闭
+        long len = c.sync().xlen(l.eventsKey(sid));
+        assertTrue(len < 5000, "MAXLEN ~ 100 应把 5000 条裁到接近 100，实际 " + len);
+        assertTrue(len >= 100, "近似裁剪不会裁到 100 以下，实际 " + len);
         // 裁剪不得影响顶端 seq 的读取（tailSeq 走尾部，与裁剪无关）
         assertEquals(5000, l.tailSeq(sid));
     }
@@ -247,36 +241,44 @@ class RedisEventLogIT {
     void selfCheckLogsMatchActualServerConfig() {
         String appendonly;
         String policy;
-        try (var c = client.connect()) {
-            appendonly = c.sync().configGet("appendonly").get("appendonly");
-            policy = c.sync().configGet("maxmemory-policy").get("maxmemory-policy");
-        }
+        var c = facade.syncConnection();   // 门面共享连接，不关闭
+        appendonly = c.sync().configGet("appendonly").get("appendonly");
+        policy = c.sync().configGet("maxmemory-policy").get("maxmemory-policy");
         try (var logs = new LogCapture()) {
-            newLog(250_000);
-            log.tailSeq(sid);   // 触发首次建连 → 自检
-            var msgs = logs.messages();
+            // 自检钩子挂在门面上、每门面只跑一次——本用例须用**独立门面**，
+            // 避免被前面用例已置位的 selfChecked/已注册钩子吞掉自检痕迹
+            var isolatedFacade = RedisConnectionFacade.create(
+                new AgentRedisProperties(url, 2000, 2000, 250_000));
+            try {
+                var isolatedLog = new RedisEventLog(isolatedFacade,
+                    new AgentRedisProperties(url, 2000, 2000, 250_000));
+                isolatedLog.tailSeq(sid);   // 触发首次建连 → 自检
+                var msgs = logs.messages();
 
-            // 先要**正面证据说明自检确实跑了**：只断言「没报某个错」的话，
-            // 自检整个没执行也能通过——那这条测试就白写了。
-            assertTrue(msgs.stream().anyMatch(m -> m.contains("RedisEventLog: 持久性自检")),
-                "首次建连后必须留下自检的痕迹（通过或告警）：" + msgs);
+                // 先要**正面证据说明自检确实跑了**：只断言「没报某个错」的话，
+                // 自检整个没执行也能通过——那这条测试就白写了。
+                assertTrue(msgs.stream().anyMatch(m -> m.contains("RedisEventLog: 持久性自检")),
+                    "首次建连后必须留下自检的痕迹（通过或告警）：" + msgs);
 
-            boolean compliant = "yes".equalsIgnoreCase(appendonly)
-                && "noeviction".equalsIgnoreCase(policy);
-            if (compliant) {
-                assertTrue(msgs.stream().anyMatch(m -> m.contains("持久性自检通过")),
-                    "服务端配置合规，应报「持久性自检通过」：" + msgs);
-            } else {
-                assertTrue(msgs.stream().anyMatch(m -> m.contains("持久性自检**未通过**")),
-                    "服务端配置不合规，应报「持久性自检未通过」：" + msgs);
-            }
-            if (!"yes".equalsIgnoreCase(appendonly)) {
-                assertTrue(msgs.stream().anyMatch(m -> m.contains("appendonly=")),
-                    "应报出实际的 appendonly 值：" + msgs);
-            }
-            if (!"noeviction".equalsIgnoreCase(policy)) {
-                assertTrue(msgs.stream().anyMatch(m -> m.contains("maxmemory-policy")),
-                    "服务端 policy=" + policy + "，应报淘汰风险：" + msgs);
+                boolean compliant = "yes".equalsIgnoreCase(appendonly)
+                    && "noeviction".equalsIgnoreCase(policy);
+                if (compliant) {
+                    assertTrue(msgs.stream().anyMatch(m -> m.contains("持久性自检通过")),
+                        "服务端配置合规，应报「持久性自检通过」：" + msgs);
+                } else {
+                    assertTrue(msgs.stream().anyMatch(m -> m.contains("持久性自检**未通过**")),
+                        "服务端配置不合规，应报「持久性自检未通过」：" + msgs);
+                }
+                if (!"yes".equalsIgnoreCase(appendonly)) {
+                    assertTrue(msgs.stream().anyMatch(m -> m.contains("appendonly=")),
+                        "应报出实际的 appendonly 值：" + msgs);
+                }
+                if (!"noeviction".equalsIgnoreCase(policy)) {
+                    assertTrue(msgs.stream().anyMatch(m -> m.contains("maxmemory-policy")),
+                        "服务端 policy=" + policy + "，应报淘汰风险：" + msgs);
+                }
+            } finally {
+                isolatedFacade.close();
             }
         }
     }

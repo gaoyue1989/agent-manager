@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	sigsyaml "sigs.k8s.io/yaml"
 )
@@ -52,34 +54,37 @@ func (b *DeploymentBuilder) Build(p ObjectParams) (*appsv1.Deployment, error) {
 	if !b.hasOverlay {
 		return base, nil
 	}
-	patched, err := applyOverlay(base, b.overlay)
+	patchedVal, err := applySMPOverlay(*base, b.overlay, appsv1.Deployment{})
 	if err != nil {
 		return nil, err
 	}
+	patched := &patchedVal
 	if err := validateDeployment(p, patched); err != nil {
 		return nil, fmt.Errorf("overlay violates deployment invariants: %w", err)
 	}
 	return patched, nil
 }
 
-// applyOverlay 对 Deployment 做 Strategic Merge Patch。
-// overlay 为裸 Deployment 对象（非 list），YAML 先转 JSON 再走 apimachinery。
-func applyOverlay(base *appsv1.Deployment, overlay []byte) (*appsv1.Deployment, error) {
+// applySMPOverlay 对已注册 K8s 类型对象做 Strategic Merge Patch：overlay 为 YAML 裸
+// 对象（非 list），先转 JSON 再与 base 合并（patch 元数据取自 proto 零值类型），
+// 结果反序列化返回。Deployment/Ingress 两种 builder 共用。
+func applySMPOverlay[T any](base T, overlay []byte, proto T) (T, error) {
+	var zero T
 	overlayJSON, err := sigsyaml.YAMLToJSON(overlay)
 	if err != nil {
-		return nil, fmt.Errorf("overlay yaml: %w", err)
+		return zero, fmt.Errorf("overlay yaml: %w", err)
 	}
 	baseJSON, err := json.Marshal(base)
 	if err != nil {
-		return nil, fmt.Errorf("marshal base deployment: %w", err)
+		return zero, fmt.Errorf("marshal base object: %w", err)
 	}
-	patchedJSON, err := strategicpatch.StrategicMergePatch(baseJSON, overlayJSON, appsv1.Deployment{})
+	patchedJSON, err := strategicpatch.StrategicMergePatch(baseJSON, overlayJSON, proto)
 	if err != nil {
-		return nil, fmt.Errorf("strategic merge patch: %w", err)
+		return zero, fmt.Errorf("strategic merge patch: %w", err)
 	}
-	out := &appsv1.Deployment{}
-	if err := json.Unmarshal(patchedJSON, out); err != nil {
-		return nil, fmt.Errorf("unmarshal patched deployment: %w", err)
+	var out T
+	if err := json.Unmarshal(patchedJSON, &out); err != nil {
+		return zero, fmt.Errorf("unmarshal patched object: %w", err)
 	}
 	return out, nil
 }
@@ -118,16 +123,28 @@ func validateDeployment(p ObjectParams, d *appsv1.Deployment) error {
 		return fmt.Errorf("container %q missing (must not be renamed/dropped)", "agent")
 	}
 	cs := d.Spec.Template.Spec.Containers[agent]
-	// envFrom 必含 {name}-env ConfigMap
-	foundEnvFrom := false
+	// envFrom 必含两源引用：服务 Secret（敏感 env）+ 服务 CM（非敏感 env）。
+	// 平台默认配置不经 envFrom 注入（R3 修订），不校验平台对象。
+	wantEnvFrom := map[string]bool{
+		EnvSecretName(p.K8sName): false,
+		p.K8sName + "-env":       false,
+	}
 	for _, ef := range cs.EnvFrom {
-		if ef.ConfigMapRef != nil && ef.ConfigMapRef.Name == p.K8sName+"-env" {
-			foundEnvFrom = true
-			break
+		name := ""
+		switch {
+		case ef.ConfigMapRef != nil:
+			name = ef.ConfigMapRef.Name
+		case ef.SecretRef != nil:
+			name = ef.SecretRef.Name
+		}
+		if _, ok := wantEnvFrom[name]; ok {
+			wantEnvFrom[name] = true
 		}
 	}
-	if !foundEnvFrom {
-		return fmt.Errorf("envFrom %s-env ConfigMap missing", p.K8sName)
+	for name, found := range wantEnvFrom {
+		if !found {
+			return fmt.Errorf("envFrom %s missing", name)
+		}
 	}
 	// /config 只读 subPath 挂载（OAF 包加载核心机制）+ 平台功能挂载存在性：
 	// volumeMounts 按 mountPath 合并，overlay 可用 $patch: delete 精确移除单条，
@@ -197,4 +214,237 @@ func orDefaultReplicas(r int32) int32 {
 		return 1
 	}
 	return r
+}
+
+// IngressBuilder 业务 Ingress 构造门面：内置纯函数构造（Ingress，路由形状是平台契约）
+// 为基线，可选 YAML overlay（环境策略，如自定义域名 host/对外前缀 path/TLS/WAF 类
+// 注解）经 Strategic Merge Patch 合并。注意 rules/tls 为普通列表（无 patch 策略），
+// overlay 写了即整体替换；annotations 为 map 按 key 合并。可改范围按 Ingress 模式
+// （IngressHostSuffix 决定）收放：path 模式可改对外前缀 path，host 模式 host 恒为
+// {K8sName}{suffix} 不可偏离（详见 validateIngress）。
+//
+// 配置方式：环境变量 INGRESS_TEMPLATE 指向 overlay 文件；缺省不设置即纯内置构造，
+// 行为与历史版本完全一致。overlay 变更在下次 apply（发布/重新发布/重新上线）时生效。
+type IngressBuilder struct {
+	// overlay 为 Strategic Merge Patch 原文（Ingress JSON/YAML），启动时加载。
+	overlay []byte
+	// hasOverlay 标记是否配置了 overlay：空文件与未配置均视为无 overlay。
+	hasOverlay bool
+}
+
+// NewIngressBuilder 语义同 NewDeploymentBuilder：文件缺失/语法错误/哑参数试渲染
+// 违规均启动即失败（fail-fast）。ingressClass 传运行配置值（cfg.IngressClass），
+// 保证探针与发布期同参——overlay 显式写 class 只允许等于配置值，否则试渲染即拒绝。
+// ingressHostSuffix 同理传配置值（cfg.IngressHostSuffix）：它决定校验走 path 还是 host
+// 模式不变量，探针与发布期必须同模式，否则 host 模式的 overlay 会在启动期被误拒。
+// 试渲染用哑参数 oaf-template-probe/default——overlay 不得硬编码
+// metadata.name/namespace（每服务发布期才确定）。
+func NewIngressBuilder(path, ingressClass, ingressHostSuffix string) (*IngressBuilder, error) {
+	if path == "" {
+		return &IngressBuilder{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read ingress overlay %s: %w", path, err)
+	}
+	b := &IngressBuilder{overlay: data, hasOverlay: true}
+	if _, err := b.Build(ObjectParams{K8sName: Prefix + "template-probe", Namespace: "default",
+		IngressClass: ingressClass, IngressHostSuffix: ingressHostSuffix}); err != nil {
+		return nil, fmt.Errorf("ingress overlay %s invalid: %w", path, err)
+	}
+	return b, nil
+}
+
+// Build 构造业务 Ingress：内置构造 → overlay 合并（占位符按服务替换）→ 不变量校验。
+func (b *IngressBuilder) Build(p ObjectParams) (*networkingv1.Ingress, error) {
+	base := Ingress(p)
+	if !b.hasOverlay {
+		return base, nil
+	}
+	// 占位符按服务替换：rules 整体替换语义下 backend/path 必须引用每服务才确定的
+	// 名称（与"不得硬编码 metadata.name/namespace"同理，保证单文件模板服务无关，
+	// 启动探针也以哑参数走同一替换路径）。
+	overlay := []byte(ingressOverlayVars(p).Replace(string(b.overlay)))
+	patchedVal, err := applySMPOverlay(*base, overlay, networkingv1.Ingress{})
+	if err != nil {
+		return nil, err
+	}
+	patched := &patchedVal
+	if err := validateIngress(p, patched); err != nil {
+		return nil, fmt.Errorf("overlay violates ingress invariants: %w", err)
+	}
+	return patched, nil
+}
+
+// ingressOverlayVars overlay 占位符 → 每服务取值。{{K8S_NAME}}=oaf-{short}（backend
+// 指向 {K8S_NAME}-svc），{{SHORT_NAME}}=去前缀短名（path/x-forwarded-prefix 用）。
+func ingressOverlayVars(p ObjectParams) *strings.Replacer {
+	return strings.NewReplacer(
+		"{{K8S_NAME}}", p.K8sName,
+		"{{SHORT_NAME}}", ShortName(p.K8sName),
+	)
+}
+
+// validateIngress overlay 合并后强校验平台不变量，违规拒绝发布（发布期反馈，而非
+// 让坏流量规则上线）。两种模式（p.IngressHostSuffix 是否为空）共用部分不变量：
+// 对象归属唯一（backend 全部指向本服务）、pathType 必填、SSE 长超时保留、
+// defaultBackend 恒空；仅 path 模式强制 rewrite 路由形状（path 尾缀捕获组 +
+// use-regex/rewrite-target）与 x-forwarded-prefix 同对外前缀一致，host 模式改为
+// 强制 host 恒为 {K8sName}{suffix}（根路径直出，无前缀可透传）。
+func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
+	hostMode := p.IngressHostSuffix != ""
+	if ing.Name != p.K8sName || ing.Namespace != p.Namespace {
+		return fmt.Errorf("metadata.name/namespace must stay %s/%s", p.Namespace, p.K8sName)
+	}
+	for k, want := range labels(p.K8sName) {
+		if ing.Labels[k] != want {
+			return fmt.Errorf("label %s must stay %s", k, want)
+		}
+	}
+	if ing.Spec.IngressClassName != nil && *ing.Spec.IngressClassName != p.IngressClass {
+		return fmt.Errorf("spec.ingressClassName must stay %s", p.IngressClass)
+	}
+	// defaultBackend 是 rules 之外的 catch-all 路由入口：不拦会绕过归属唯一
+	// （未匹配 /agent/{short} 的流量打到其他服务），内置构造恒为 nil
+	if ing.Spec.DefaultBackend != nil {
+		return fmt.Errorf("spec.defaultBackend must stay empty (per-service object)")
+	}
+	ann := ing.Annotations
+	if hostMode {
+		// host 模式无前缀可剥：rewrite 三项必须为空（不存在或空串），不是"不校验"。
+		// 放行非空错值有真实后果——x-forwarded-prefix 有明确下游消费者：agent-framework
+		// DebugController 读 X-Forwarded-Prefix 拼 302 的 Location（X-Forwarded-Prefix
+		// 非空即跳 {该值}/debug/，从 path 模式模板照抄写出的错前缀会让 /debug 直接 404）；
+		// rewrite-target 则可能被 ingress-nginx 用于改写整条 location。
+		// 内置构造三项一个都不生成，收紧不影响任何合法 host 模式 overlay。
+		for _, k := range []string{annRewriteTarget, annUseRegex, annXForwardedPrefix} {
+			if ann[k] != "" {
+				return fmt.Errorf("annotation %s must stay empty (host mode has no path prefix to rewrite or strip)", k)
+			}
+		}
+	} else {
+		// path 模式：rewrite 路由形状是硬契约（尾缀第 2 捕获组喂给 /$2）
+		for k, want := range map[string]string{
+			annRewriteTarget: rewriteTargetValue,
+			annUseRegex:      "true",
+		} {
+			if ann[k] != want {
+				return fmt.Errorf("annotation %s must stay %s", k, want)
+			}
+		}
+	}
+	if ann[annProxyReadTimeout] == "" || ann[annProxySendTimeout] == "" {
+		return fmt.Errorf("annotations %s/%s must stay (SSE long connection)",
+			annProxyReadTimeout, annProxySendTimeout)
+	}
+	svcName := p.K8sName + "-svc"
+	found, prefix := false, ""
+	for _, rule := range ing.Spec.Rules {
+		// host 模式：域名即服务身份，overlay 不得偏离（空 host 会退化成共享入口 IP
+		// 承载根路径，流量串服务且无法定位）。遍历全部 rules，不放过无 http 的规则
+		if hostMode && rule.Host != p.K8sName+p.IngressHostSuffix {
+			return fmt.Errorf("rule host must stay %s (per-service domain)", p.K8sName+p.IngressHostSuffix)
+		}
+		if rule.HTTP == nil {
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			// 归属唯一：Ingress 对象与服务一一对应，backend 必须指向本服务
+			if path.Backend.Service == nil || path.Backend.Service.Name != svcName ||
+				path.Backend.Service.Port.Number != AgentPort {
+				return fmt.Errorf("backend must stay %s:%d (per-service object)", svcName, AgentPort)
+			}
+			// pathType 为 v1 必填：漏写会被 apiserver 拒绝，提前在此反馈
+			if path.PathType == nil {
+				return fmt.Errorf("path %q must set pathType", path.Path)
+			}
+			if hostMode {
+				// host 模式根路径直出：path 是不变量（Endpoint 固定派生为
+				// {scheme}://{K8sName}{suffix}/，若放开 path 会让落库地址与实际服务
+				// 路由错位、前端链接 404），无 rewrite 前缀可校验
+				if path.Path != hostModeRootPath {
+					return fmt.Errorf("path %q must stay %s (host mode serves the root path)",
+						path.Path, hostModeRootPath)
+				}
+				found = true
+				continue
+			}
+			if !strings.HasSuffix(path.Path, ingressPathSuffix) {
+				return fmt.Errorf("path %q must keep suffix %s (rewrite-target %s relies on it)",
+					path.Path, ingressPathSuffix, rewriteTargetValue)
+			}
+			// 单一对外前缀：x-forwarded-prefix 为单值注解，多前缀无法与之一致
+			cur := strings.TrimSuffix(path.Path, ingressPathSuffix)
+			if !found {
+				found, prefix = true, cur
+			} else if prefix != cur {
+				return fmt.Errorf("paths must share one public prefix: %q vs %q", prefix, cur)
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("spec.rules must keep at least one http path")
+	}
+	if hostMode {
+		return nil
+	}
+	if ann[annXForwardedPrefix] != prefix {
+		return fmt.Errorf("annotation %s must match public path prefix %q (change both together)",
+			annXForwardedPrefix, prefix)
+	}
+	return nil
+}
+
+// IngressEndpoint 从（合并后）Ingress 派生对外展示地址。模式按配置 hostSuffix 分支
+// （与 validateIngress 同源，不从 path 尾缀嗅探——overlay 改 path 会误导嗅探）：
+//   - host 模式（hostSuffix 非空）：取首条规则的 Host（空则回落 fallbackHost 作防御），
+//     根路径直出，端口 80/443 由域名默认承载，故不拼 port：{scheme}://{host}/
+//   - path 模式（hostSuffix 为空）：host 取第一条带尾缀 path 的规则 Host（空回落
+//     fallbackHost；host 已含 ":" 视为自带端口不重复拼接），path 剥掉固定尾缀得对外
+//     前缀（剥空即根路径），端口取入参
+//
+// scheme 按 TLS 有无。仅用于展示与记录；模板改 host 后的 DNS/端口可达性由环境自行保证。
+func IngressEndpoint(ing *networkingv1.Ingress, fallbackHost string, port int, hostSuffix string) string {
+	scheme, host := "http", fallbackHost
+	if len(ing.Spec.TLS) > 0 {
+		scheme = "https"
+	}
+	if hostSuffix != "" {
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host != "" {
+				host = rule.Host
+				break
+			}
+		}
+		return fmt.Sprintf("%s://%s/", scheme, host)
+	}
+	found, prefix := false, ""
+	for _, rule := range ing.Spec.Rules {
+		if rule.HTTP == nil {
+			continue
+		}
+		for _, path := range rule.HTTP.Paths {
+			if strings.HasSuffix(path.Path, ingressPathSuffix) {
+				if rule.Host != "" {
+					host = rule.Host
+				}
+				prefix = strings.TrimSuffix(path.Path, ingressPathSuffix)
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	// found=false（无尾缀 path，防御派生）与根路径（剥尾缀后为空）统一回落根 URL
+	return fmt.Sprintf("%s://%s%s/", scheme, hostWithPort(host, port), prefix)
+}
+
+// hostWithPort 拼 host:port；host 已含端口（如 172.20.0.2:30080）时不重复拼接。
+func hostWithPort(host string, port int) string {
+	if strings.Contains(host, ":") {
+		return host
+	}
+	return fmt.Sprintf("%s:%d", host, port)
 }

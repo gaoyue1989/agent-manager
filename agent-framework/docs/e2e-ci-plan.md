@@ -1,9 +1,11 @@
 # agent-framework GitHub Actions E2E 验证体系设计（e2e-ci-plan）
 
-> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **四个** e2e job 运行 + `eval-selftest`；实施记录与缺陷清单见 §11）
+> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **六个** Playwright e2e job 运行，另有评测侧 `eval-selftest` / `eval-replay-offline`；实施记录与缺陷清单见 §11）
 > 复核日期：2026-09-26 —— 本版把全文「三个 e2e job」统一为四个，§7 草案替换为「已实施 + 现状指向」，
 > §5 补 P 组用例定义，§11 补 2026-09-25/26 的实施记录。
-> 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 4 个 e2e job + `eval-selftest`）
+> 增补（2026-10-01）—— 协议门禁扩为两个 job：`e2e-protocol`（T 组先行 + J0/J 组 /a2a/jobs HTTP 面，非必需）
+> 与 `e2e-protocol-multi`（P 组，双 LB 双副本，**必需门禁**）；§2.2/§2.3/§3.1/§5/§6.2/§7 已同步。
+> 范围：agent-framework（新增 `agent-framework/e2e/`）+ `.github/workflows/agent-framework-ci.yml`（新增 4 个 e2e job + `eval-selftest`；2026-09-30 起再增协议两个 e2e job，见 §2.3）
 > 前置：无 —— 不依赖 Kind 集群、platform-backend、前端、真实 LLM API Key、任何 GitHub Secrets
 > 复用：`bench/mock-llm`、`bench/mock-mcp`、`example/approval-forms`（mock MCP + 选择器先例）、`docs/api-thread-spec.md`（协议权威）
 > v2 变更（2026-09-18）：① 沙箱服务改为 **mock 实现**（不再部署真实 OpenSandbox Server / 拉取镜像）；② 新增 **F 组文件上传下载验证矩阵**（原 S9 扩充为独立场景组）
@@ -17,8 +19,8 @@
 
 | 验证层 | 现状 | 缺口 |
 |--------|------|------|
-| 单元测试（CI 已有） | **1026 用例 / 0 失败 / 4 跳过**（2026-09-26 实跑；101 个测试类。静态注解 1047 个，差额 21 来自 5 支不被 surefire 默认 include 的 `*IT`）。controller 层用 MockMvc standalone + Mockito mock `HarnessAgent`/各 Store | LLM HTTP、SSE 真实序列化、MySQL/Redis 真实读写、MCP 真实协议全部被 mock 掉 |
-| 集成测试（本地手动） | `HITL_MYSQL_IT=1`、`REDIS_IT=1`、`SANDBOX_IT=1`、`S3_IT=1` 环境变量门控的 `*IT` 类，共 5 支 21 例 | surefire 不捡 `*IT`，CI 从不执行 |
+| 单元测试（CI 已有） | **1026 用例 / 0 失败 / 4 跳过**（2026-09-26 实跑；101 个测试类。此后随 PR #88 契约钉等继续增长，精确数字以最新 CI run 与 `agent-framework-test.md` 为准）。controller 层用 MockMvc standalone + Mockito mock `HarnessAgent`/各 Store | LLM HTTP、SSE 真实序列化、MySQL/Redis 真实读写、MCP 真实协议全部被 mock 掉 |
+| 集成测试（本地手动） | `REDIS_IT=1`（`RedisEventLogIT` / `SessionEventStoreCrossReplicaIT` / `ProtocolRedisEventBusIT` / `A2aJobRedisStoreIT`）、`HITL_MYSQL_IT=1`（`SessionUserStoreMySqlIT` / `ModelConfigStoreMySqlIT` / `ThreadHistoryConfirmIT`）、`S3_IT=1`（`S3FileStorageIT`）环境变量门控的 `*IT` 类，共 8 支 27 例（`grep -rE '@Test\b'` 清点，对账见 `agent-framework-test.md` §8） | surefire 不捡 `*IT`，CI 从不执行 |
 | 平台 E2E（仓库根 `e2e/`） | 面向 Kind 全链路（platform-backend + release-agent + 真实 LLM） | 需要人工维护的集群与 `.env.secrets`，无法进 GitHub Actions，且测的是"平台编排"不是"agent-framework 本体" |
 | 压测设施（`bench/`） | mock-llm（OpenAI 兼容）+ mock-mcp（streamableHttp）+ docker MySQL 编排 | 只服务并发压测，无断言体系 |
 
@@ -53,7 +55,7 @@
 
 ### 1.4 设计原则
 
-1. **复用优先**：mock LLM fork 自 `bench/mock-llm/server.js`（已验证能驱动真实 agent 完整流），mock MCP 直接复用 `example/approval-forms/mock-mcp/approval_mcp.py`（已实现 ui:// 卡片全协议）与 `bench/mock-mcp/server.js`（read_only 普通工具）。
+1. **复用优先**：mock LLM fork 自 `bench/mock-llm/server.js`（已验证能驱动真实 agent 完整流），mock MCP 派生自 `example/approval-forms/mock-mcp/approval_mcp.py`（已实现 ui:// 卡片全协议，e2e 侧另存一份加观测端点）并复用 `bench/mock-mcp/server.js`（read_only 普通工具）。
 2. **零密钥、零外拉镜像**：所有外部依赖均为 mock 或 GH Actions services；被测进程所需镜像字段（`SANDBOX_IMAGE`）仅是传给 mock 的字符串，从不 pull。`LLM_API_KEY=e2e-dummy`、OpenSandbox api_key 用占位符，不新增任何 GitHub Secrets。
 3. **黑盒**：只打真实 HTTP/SSE（`POST /threads/chat` 收流、`GET /threads/{sid}/subscribe` 续传），不注入 Java 进程内部；被测物是 `mvn package` 产出的 jar 本体。
 4. **CI = 本地同路径**：环境编排收敛为 `agent-framework/e2e/scripts/env-up.sh / env-down.sh / run.sh`，CI 与开发者用同一脚本，本地可完整复现排障。
@@ -72,7 +74,7 @@ ubuntu-latest runner
 ├── GH services: redis:7    (127.0.0.1:6379, appendonly+noeviction)  ← sess:{sid}:events 流
 ├── node e2e/mock/llm-server.mjs      (127.0.0.1:18081, /v1/chat/completions + /stats /reset /health)
 ├── node bench/mock-mcp/server.js     (127.0.0.1:18082, bench_echo, read_only)      [复用直引]
-├── python3 example/approval-forms/mock-mcp/approval_mcp.py (127.0.0.1:8813, ui:// + ask + app_only) [复用直引]
+├── python3 e2e/mock/approval-mcp.py (127.0.0.1:8813, ui:// + ask + app_only) [派生自 example 同名脚本]
 ├── java -jar target/agent-framework-*.jar  (127.0.0.1:8100)
 │     env: LLM_BASE_URL=http://127.0.0.1:18081/v1
 │           CHECKPOINT_JDBC_URL=jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
@@ -81,7 +83,7 @@ ubuntu-latest runner
 └── npx playwright test（API 项目：node fetch 收 SSE；UI 项目：chromium 打 http://127.0.0.1:8100/debug/）
 ```
 
-e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox-server.mjs`（:8090 + 每沙箱代理端口池 41xxx），实例 env 切 `SANDBOX_ENABLED=true`（详见 §4.4）。
+e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox-server.mjs`（单端口 :8090，管理 API 与 execd 代理共用，代理按 `/v1/sandboxes/{id}/proxy/{port}/…` 路径路由），实例 env 切 `SANDBOX_ENABLED=true`（详见 §4.4）。
 
 ### 2.2 组件矩阵
 
@@ -91,9 +93,9 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | Redis 7 | actions services | `services: redis:7-bookworm`，cmd `--appendonly yes --maxmemory-policy noeviction` | 6379 | `redis-cli ping` |
 | mock LLM | **新增** `e2e/mock/llm-server.mjs`（回放 `mock/fixtures/llm/` 录制件，骨架 fork 自 `bench/mock-llm/server.js`） | node 后台进程 | 18081 | `GET /health` |
 | mock MCP（普通工具） | 复用 `bench/mock-mcp/server.js` | node 后台进程 | 18082 | `GET /health` |
-| mock MCP（MCP Apps/HITL） | 复用 `example/approval-forms/mock-mcp/approval_mcp.py` | python3 后台进程（仅标准库） | 8813 | 脚本启动即算就绪 + 首用重试 |
-| **mock OpenSandbox** | **新增** `e2e/mock/sandbox-server.mjs`（协议取自 `mock/fixtures/sandbox/` 真实服务录制件，见 §4.4） | node 后台进程 | 8090（管理）+ 41xxx（execd 代理池） | `GET /health` → `{"status":"healthy"}` |
-| agent-framework | `mvn -B -DskipTests package` 产物 | runner 上直跑 jar | 8100（单副本）/ 8101+8102（多副本） | `GET /health` 200 |
+| mock MCP（MCP Apps/HITL） | **派生** `e2e/mock/approval-mcp.py`（自 `example/approval-forms/mock-mcp/approval_mcp.py` 复制并扩展 `/reset`、`/stats` 两个观测端点与 `confirm_application` 的 `content` 参数；example 原件不动） | python3 后台进程（仅标准库） | 8813 | `GET /stats` 200 |
+| **mock OpenSandbox** | **新增** `e2e/mock/sandbox-server.mjs`（协议取自 `mock/fixtures/sandbox/` 真实服务录制件，见 §4.4） | node 后台进程 | 8090（管理 + execd 代理同端口，路径带 `{id}`/`{port}` 区分） | `GET /health` → `{"status":"healthy"}` |
+| agent-framework | `mvn -B -DskipTests package` 产物 | runner 上直跑 jar | 8100（单副本）/ 8101+8102（多副本）/ 8100-8106（protocol-multi：双 LB + 5 实例） | `GET /health` 200 |
 | nginx 轮询 LB | docker run nginx | 多副本 job 专用 | 8100 | 配置装载成功 + 任一 upstream /health |
 | Playwright | `e2e/package.json` | `npx playwright install --with-deps chromium` | — | — |
 
@@ -103,14 +105,18 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 |-----|------|------|------|------|
 | `test`（已有） | — | mvn test | — | ~6min |
 | `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
-| `e2e-core` | 1 | S/F/H/M/A 组 API + U 组 UI（§5.1-5.5、§5.7-5.8） | needs: changes（与单测并行） | ~12-15min |
+| `e2e-core` | 1 | S/F/H/M/A/FW/RD 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.11；SK/MEM/HA 组无 §5 小节，用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4，同落 api-core 项目） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
-| `e2e-plugin` | 1 | P 组（工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限） | needs: changes（与单测并行） | ~5min |
+| `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
+| `e2e-protocol-multi`（P 组，2026-09-30） | lead×2 + member×2 + 双 nginx LB（8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本；`AGENT_PROTOCOL_EVENT_BUS=redis`，共享 MySQL/Redis） | P1-P7 跨副本委派（travel-fulfillment 设计 §18.4/§18.10）：spawn 随机路由→收割汇总、lead kill 接管、member 事件跨副本对账、TTL 恰好一次、无粘性冒烟、存量零影响、A2A Job 同键收敛（用例定义见 §5.12） | needs: changes（**必需检查**） | timeout 30min |
+| `e2e-plugin` | 1 | 插件组（原「P 组」，2026-10-01 改称以消歧——协议多副本 job 亦称「P 组」，见 §5.12；修 #38 low）：工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限 | needs: changes（与单测并行） | ~5min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
-四个 e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
-（组名含 workflow 维度，跨工作流互不取消——见根 `AGENTS.md` CI 章节）。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛，四个 job 同级硬门禁。
+六个 Playwright e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
+（组名含 workflow 维度，跨工作流互不取消——见根 `AGENTS.md` CI 章节）。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛；核心/多副本/沙箱/协议多副本四个 job 为必需硬门禁（`e2e-protocol` T 组切片、`e2e-plugin` 与 `eval-selftest` 非必需，红了只告警不挡合并）。
+
+> 评测侧 job（不在本文档范围，属离线评测链路）：`eval-selftest`（`bench/eval/flywheel.py selftest`，零网络）、`eval-replay-offline`（`bench/eval/tests/e2e_offline_loop.py --offline` 全链路）、`images-eval`（master push 时构建推送 eval-collector / eval-studio 镜像）。
 
 > `e2e-plugin` 与其余三组形态不同：不经 Playwright，由 `scripts/plugin-smoke.sh` 现场编译示例插件 jar
 > （`e2e/plugin-echo/`）并自起被测进程——插件编译需要 `target/classes` 与 `.m2` 的 agentscope-core，
@@ -129,9 +135,10 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | 3306 / 6379 | MySQL / Redis（services 固定映射 localhost） |
 | 8100 | 被测入口：core/sandbox job = 实例本体；multi job = nginx LB |
 | 8101 / 8102 | multi job 两副本 |
+| 8100-8106 | protocol-multi 组（P 组）：8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本 |
+| 8110 / 8111 / 8112 | describe 级 spawnSync 第二实例（MEM 记忆关断 +10 / RD Redis 前缀隔离 +11 / FW3 Flyway 升级路径 +12）；env `E2E_MEMOFF_PORT` / `E2E_RD_PREFIX_PORT` 可覆盖 |
 | 18081 / 18082 / 8813 | mock LLM / bench MCP / approval MCP（沿用 bench 与 example 既有端口约定） |
-| 8090 | mock OpenSandbox 管理口（仅 sandbox job） |
-| 41000-41099 | mock OpenSandbox 每沙箱 execd 代理端口池（仅 sandbox job；上限 100 个并发虚拟沙箱，远超用例需要） |
+| 8090 | mock OpenSandbox 入口（仅 sandbox job）：管理 API 与 execd 代理共用同一端口，按 `/v1/sandboxes/{id}/proxy/{port}/…` 路径路由，不另开端口池 |
 
 ### 3.2 实例环境变量矩阵
 
@@ -139,7 +146,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 |------|----|------|
 | `LLM_BASE_URL` | `http://127.0.0.1:18081/v1` | OpenAI 兼容，须带 `/v1` |
 | `LLM_API_KEY` / `LLM_MODEL_ID` | `e2e-dummy` / `e2e-mock-model` | 占位符，无真实密钥 |
-| `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3306/agent_framework_e2e` | 库由 MySQL service env 预建；**表全部实例自建**（`TurnLeaseStore.java:63` 等构造器 `initSchema()`，幂等） |
+| `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3306/agent_framework_e2e` | 库由 MySQL service env 预建；**表由 Flyway 迁移建**（`db/migration/V1..V9`，`baseline-version: 5`，全实例启动时各自执行；Store 构造器的 `initSchema()` 手工 DDL 模式已移除，仅 SDK store 侧保留 CREATE IF NOT EXISTS，故 AgentScopeConfig 以 `@DependsOn("flywayInitializer")` 保序） |
 | `CHECKPOINT_USERNAME/PASSWORD` | service 容器 env 同值 | — |
 | `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | 事件流回放必需；Redis 缺失时启动可过但 /status 503 |
 | `AGENT_CONFIG_DIR` | `e2e/fixtures/agent-config` | §4.3 夹具 |
@@ -226,7 +233,7 @@ e2e/scripts/run.sh <group> # env-up → npx playwright test --project=<group> �
 - **严格模式**（CI 默认）：标记无对应夹具 → 500 + 明确错误，宁可红也不静默合成；`MOCK_LLM_ALLOW_SYNTH=1`（仅本地排障）才允许回落手写合成响应，且 `/stats` 标记 `synthesized:true`
 - 断言侧效应：期望文本从夹具读取——测试与夹具同源，不存在"mock 文本 vs 期望文本"两处维护
 
-#### 4.1.3 场景路由表（首期；每场景一个录制夹具）
+#### 4.1.3 场景路由表（每场景一个录制夹具；`slow`/`hang` 是 plain 夹具的时序包装不另占夹具。下表覆盖 `mock/fixtures/registry.json` 登记的 17 个场景，另含 P 组两个 `proto:*` 标记——其夹具已入库且 `MARKER_MAP` 有路由，但未登记进 registry，故 `check-fixtures` 的「llm=17 场景」不含它们）
 
 | 标记 | 行为 | 服务于 |
 |------|------|--------|
@@ -237,13 +244,17 @@ e2e/scripts/run.sh <group> # env-up → npx playwright test --project=<group> �
 | `[E2E:tool:time]` | 返回 tool_calls `get_current_time` | S4 |
 | `[E2E:tool:write](<file>,<content>)` | 返回 tool_calls `write_file` | X3、F 组前置 |
 | `[E2E:tool:read](<path>)` | 返回 tool_calls `read_file` | F1（读上传文件）、X3 |
-| `[E2E:tool:present](<file>)` | 返回 tool_calls `present_file` | F5 |
-| `[E2E:file:deliver](<file>,<content>)` | 两段式：先 `write_file`，tool 结果回流后再 `present_file` | F5/F6/F10（输出文档交付） |
+| `[E2E:file:deliver](<file>,<content>)` | 两段式：先 `write_file`，tool 结果回流后再 `present_file`（present_file 无独立标记，交付链路统一走此标记） | F5/F6/F10、F12（输出文档交付） |
 | `[E2E:oaf:package]` | 返回 tool_calls `create_oaf_zip`（手工合成夹具，frontmatter 校验必过），tool 结果回流后收尾文本 | F12/U13（OAF 打包交付） |
 | `[E2E:tool:mcp_echo](<text>)` | 返回 tool_calls `bench_echo`（MCP） | S5 |
 | `[E2E:hitl:submit](<app>)` | 返回 tool_calls `submit_application`（ask 工具） | H1-H6、U4/U5 |
 | `[E2E:mcpapp:form](<app>)` | 返回 tool_calls `show_application_form`（ui:// 工具） | M1、U6 |
 | `[E2E:execute](<cmd>)` | 返回 tool_calls `execute` | X2/X3 |
+| `[E2E:execute:fail]` | 失败命令（退出码非 0） | X7（命令失败传播） |
+| `[E2E:tool:write:sb](<file>,<content>)` / `[E2E:tool:read:sb](<path>)` | 沙箱档 write_file / read_file（独立录制件，供沙箱物化链路） | X3/X10/X11/X15 |
+| `[E2E:plugin:echo]` | 调插件工具 `echo_query`（registry 登记 `variants=["denied"]`） | e2e-plugin 三态权限（§5.9） |
+| `[E2E:proto:lead-spawn]` | lead 调 `agent_spawn` | P1（§5.12） |
+| `[E2E:proto:member-echo]` | member 调 `bench_echo` 回显 | P1/P3（§5.12） |
 | `[E2E:recall]` | 输出对上一轮 `[E2E:remember](<x>)` 的引用文本（多轮记忆回归） | S3 |
 
 > **夹具即契约**：回放架构下响应内容一律以录制件为准，标记 `<arg>` 仅用于请求侧对齐与断言描述；录制件内 tool_calls 的参数（文件名/命令/应用名）即测试侧固定输入——如 F1 上传的文件名必须取录制件中 `read_file` 的路径 `uploads/note.txt`、X2 的命令即录制件中的 `echo hello-e2a`。
@@ -263,11 +274,11 @@ e2e/scripts/run.sh <group> # env-up → npx playwright test --project=<group> �
 
 | 服务端 | 复用对象 | 提供能力 | 配置侧 |
 |--------|---------|---------|--------|
-| approval MCP（:8813） | `example/approval-forms/mock-mcp/approval_mcp.py`（python 标准库 ThreadingHTTPServer） | `initialize`/`notifications/initialized`/`ping`/`tools/list`/`tools/call`/`resources/read`（`ui://approval/application-form.html`，mimeType `text/html;profile=mcp-app`）+ GET 探测 200 空帧；工具：`create_application`/`get_application`（普通）、`show_application_form`（ui）、`confirm_application`（app_only）、`submit_application`（ask） | 见 §4.3 |
+| approval MCP（:8813） | `e2e/mock/approval-mcp.py`（派生自 `example/approval-forms/mock-mcp/approval_mcp.py`，python 标准库 ThreadingHTTPServer） | `initialize`/`notifications/initialized`/`ping`/`tools/list`/`tools/call`/`resources/read`（`ui://approval/application-form.html`，mimeType `text/html;profile=mcp-app`）+ GET 探测 200 空帧 + `GET /stats`、`POST /reset`；工具：`create_application`/`get_application`（普通）、`show_application_form`（ui）、`confirm_application`（app_only）、`submit_application`（ask） | 见 §4.3 |
 | bench MCP（:18082） | `bench/mock-mcp/server.js` | `bench_echo` + `/stats`（调用计数断言） | `permissions.read_only: true` |
 | deny 语义 | **同一 :8813 服务**在 `mcp-configs/denied/` 下二次注册，`permissions.tools.get_application: deny` | deny 不需要服务端配合（纯 agent 侧权限评估） | 见 §4.3 |
 
-> approval_mcp.py 状态存内存——用例间以应用名参数隔离即可，不需要 /reset（与 example e2e 用法一致）。
+> approval_mcp.py 状态存内存——用例间以应用名参数隔离即可；`e2e/mock/approval-mcp.py` 另提供 `/reset` 与 `/stats` 供本地排障，CI 用例本身不依赖它们。
 
 ### 4.3 agent-config 夹具（`e2e/fixtures/agent-config/`）
 
@@ -309,11 +320,11 @@ agent-config/
 | 分类 | 路由 | mock 行为 |
 |------|------|----------|
 | 管理 | `GET /health` | `{"status":"healthy"}` |
-| 管理 | `POST /v1/sandboxes` | 202；分配 sandboxId + 独立端口（41000 池递增）+ 根目录 `.runtime/sandboxes/{id}/`；起该端口的 execd 代理 listener |
+| 管理 | `POST /v1/sandboxes` | 202；分配 sandboxId + 根目录 `.runtime/sandboxes/{id}/`；端口写在 `/endpoints/{port}` 查询与 `proxy/{port}` 路径里，不单独起 listener |
 | 管理 | `GET /v1/sandboxes/{id}` | 返回 Sandbox 对象（status=running）；未知 id → 404（供 resume 降级路径触发） |
-| 管理 | `GET /v1/sandboxes/{id}/endpoints/{port}` | `{endpoint: "127.0.0.1:<该沙箱端口>/proxy/44772"}`（对齐 direct ingress 形态 `host:port/proxy/44772`，端口即沙箱鉴别器） |
-| 管理 | `DELETE /v1/sandboxes/{id}`、`PATCH .../metadata`、`POST .../renew-expiration` | 删除=关 listener+清目录（可选保留目录供取证）；metadata/renew 通用 200 |
-| execd（每沙箱端口，前缀 `/proxy/44772`） | `HealthApi.ping` | 200 |
+| 管理 | `GET /v1/sandboxes/{id}/endpoints/{port}` | `{endpoint: "127.0.0.1:8090/v1/sandboxes/{id}/proxy/44772"}`（对齐 direct ingress 形态，路径里带 `{id}`+`{port}` 作沙箱鉴别器） |
+| 管理 | `DELETE /v1/sandboxes/{id}`、`PATCH .../metadata`、`POST .../renew-expiration` | 删除=清 `sandboxes` 表项 + 清目录（可选保留目录供取证）；metadata/renew 通用 200 |
+| execd（同端口，前缀 `/v1/sandboxes/{id}/proxy/44772`） | `HealthApi.ping` | 200 |
 | execd | `CommandApi.runCommand`（SSE 事件流：init/output/complete，对照录制件） | **本地受控执行**：`child_process.exec(command, {cwd: 沙箱根目录})`，stdout/stderr/exitCode 按事件序回放 |
 | execd | `FilesystemApi.*`（`/files*` 全家：list/info/upload/download/replace/permissions/search） | 映射到沙箱根目录的真实 fs 操作（路径钳制在根内，防越界） |
 | 观测 | `GET /stats`、`POST /reset`、`POST /admin/destroy/{id}` | /stats：`{creates[], connects[], commands[{sandboxId,cmd,exitCode,stdout}], fileOps[], errors[]}`（X 组断言 + 失败取证）；/admin/destroy：模拟容器 GC（连接即 404），驱动 X6 降级场景 |
@@ -426,7 +437,10 @@ agent-config/
 | U10 | 文件上传对话（UI） | 附件按钮上传 note.txt → 发送 `[E2E:tool:read](uploads/note.txt)` | 上传出现附件预览条；回复含 read_file 工具行 + 文件内容摘录；图片上传呈缩略预览（image 内联路径的 UI 面） |
 | U11 | 文件交付下载卡片（UI） | `[E2E:file:deliver]` → 消息内下载卡片 → 点击下载 → 切走会话再切回 | `file_ready` 卡片渲染（文件名/大小）；下载触发浏览器下载且内容正确；历史回放（U3 切换/刷新）后卡片仍在且可下载（F10 的 UI 面） |
 | U13 | create_oaf_zip 打包下载卡片（UI，2026-09-24 回归门禁；oaf-package 夹具不含 edit_file 不受 D8 影响，替 fixme 的 U11 把文件卡片链路留在门禁内） | `[E2E:oaf:package]` → 实时下载卡片 → 刷新后按 data-sid 点选原会话回放 | `file_ready` 卡片实时渲染（含 e2e-oaf-agent.zip 文件名）；历史回放（按 active 项 data-sid 精确点选，列表首位因记忆提取后台刷新 updated_at 不可靠）后卡片仍在（F12 的 UI 面） |
-| U14 | 会话模型切换 picker（UI，2026-09-27 补齐 debug 页切模型缺口） | 下拉选托管模型 → Channel 发消息 → 新建会话 → 切回原会话 → 改选 system → A2A 模式重走一遍 | 下拉随 `GET /models` 填充 system + 托管项；`llmStats` 证实真实 LLM 调用走托管模型（非仅 UI 显示）；`GET /threads/{sid}` 证实绑定落库；新建回落 system、切回恢复绑定、改选 system 清除绑定；**A2A 模式**同样绑定（该链路无 `model` 入参，靠发送前 PATCH 落 `session_user.model`，见 [session-model-switch-design.md](session-model-switch-design.md) §9 C）；`newThread` 只清 state，DOM 旧条目仍挂 `.active`，须等 active 会话切走再取 sid（否则读到旧会话假失败） |
+| U14 | 会话模型切换 picker（UI，2026-09-27 补齐 debug 页切模型缺口） | 下拉选托管模型 → Channel 发消息 → 新建会话 → 切回原会话 → 改选 system → A2A 模式重走一遍 | 下拉随 `GET /models` 填充 system + 托管项；`llmStats` 证实真实 LLM 调用走托管模型（非仅 UI 显示）；`GET /threads/{sid}` 证实绑定落库；新建回落 system、切回恢复绑定、改选 system 清除绑定；**A2A 模式**同样绑定（该链路无 `model` 入参，靠发送前 PATCH 落 `session_user.model`，见 [session-model-switch-design.md](session-model-switch-design.md) §9 C）；`newThread` 只清 state，DOM 旧条目仍挂 `.active`，须等 active 会话切走再取 sid（否则读到旧会话假失败，f11aec3 已按此修） |
+| U14b | 绑定模型删除/禁用的降级路径（UI，2026-10-01 补齐；U14 六步全为正路径） | 删除已绑定模型 → 会话下拉回落；禁用某模型后 PATCH 绑定被拒 | 绑定模型已删时下拉无对应 option，统一回落 system（`restoreModelForSession` 的 exists 回落），界面与服务端实际生效模型一致；绑定被拒 → toast「模型切换失败」+ 下拉回滚，界面不与服务端绑定脱节（`bindSessionModel`） |
+| U15 | 压缩分隔条历史回放（UI，2026-09-28 随归档合并视图落地） | 造压缩历史种子 → 点选原会话回放 → 展开分隔条 | `details.compaction-divider` 可见、summary 文案含「上下文已压缩」、展开后 `.compaction-summary` 含种子摘要文本；未归档尾部照常回放。用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4.1 |
+| U16 | assistant 分段渲染顺序（UI，2026-10-01 补齐） | 首条既含文本气泡又含工具组的 assistant 消息 → 读段落顺序 | 实时流与历史回放两条路径下，开场文本段都排在工具组段之前（实时流 `ensureTextBubble`/`ensureToolGroupEl` 按事件到达顺序追加；回放 `addAssistantHistory` 按后端 blocks 块序渲染）。退回旧布局（工具组恒在上）时 U3 那类只做 `toContainText` 的断言抓不到此类错位 |
 
 ### 5.8 A 组 — A2A（e2e-core）
 
@@ -458,6 +472,75 @@ agent-config/
 > 断言数随 issue 演进：初版 12 断言 → issue #39 后 30 断言（`sdkInternal` 相关 +6）。
 > 插件更新需重启才生效（类卸载限制），故 P5 只验证 Agent 重建后**框架侧**存活，不验证热加载插件。
 
+### 5.10 FW 组 — /threads slot 双形态匹配与 Flyway（e2e-core；2026-09-29 补录）
+
+> **2026-09-29 补录**：76e0e74 把 ThreadController 的列表两 SQL、getThread 元信息、deleteBySessionId
+> 匹配从 `= ? OR LIKE CONCAT(?, ':%')` 换成 SUBSTRING_INDEX 冒号前/后段双向匹配（AGENT_STATE_JOIN，
+> ThreadController.java:58-60），修复规范形态槽位 `{userId}:{sid}` 匹配落空（详情 updated_at 退化、
+> 删除留孤儿行）——但 S7 对此零断言。V6 存量回填（V6__backfill_session_user_from_agent_state.sql）
+> 的三道守卫与 baseline-version=5 升级路径同样零覆盖。契约权威：`ThreadController#AGENT_STATE_JOIN`
+> 与 `db/migration/V6__backfill_session_user_from_agent_state.sql`。DB 直查走 mysql2
+>（`lib/archive-seed.ts` 同款连接方式与地址解析顺序）；FW3 复用 MEM 组第二实例编排
+>（`scripts/start-agent.sh`，端口 BASE+12 避开 MEM(+10)/multi(+1/+2)）。
+> 配套基建修复（同变更）：`e2e/scripts/reset-data.mjs` TABLES 清单补 `agui_interrupt`（V2 引入、
+> 此前漏清）——漏清使复用库第二轮 env-up 走「schema 非空 + 历史表缺失」baseline(5) 路径，
+> V6 因 session_user 被 DROP 而失败、主实例启动死亡（CI fresh services 不受影响，本地二轮起必踩）。
+
+| # | 场景 | 步骤 | 断言 |
+|---|------|------|------|
+| FW1 | A2A 规范槽位（`{userId}:{sid}`）列表/详情可见、删除无孤儿行 | A2A `message/send` 带 run 级唯一 userId/sessionId → DB 直查 agent_state 末段臂含精确 `{uid}:{sid}` 槽位 → GET /threads 列表含 sid → GET /threads/{sid} 详情 → DELETE → 列表移除（S7 同款权威信号） | 详情 updated_at 非空且 user_id===uid（旧 LIKE 前缀实现对规范槽位恒 ''，回退旧实现仅被本用例钉）；删除后详情 updated_at==='' 且 agent_state 双臂命中 sid 计数===0（孤儿行残留即红） |
+| FW2 | 老 Channel 形态槽位（`{peer}:{gw-hash}`）SQL 直插种子 | 直插 session_user + agent_state 行（state_data 不含 $.session_id/$.user_id，V6 形状条件恒跳过；两轨 updated_at 时间戳刻意错开）→ GET /threads?userId=uid → GET /threads/{peer} 详情 → DELETE → 列表移除 | 列表/详情 updated_at 取自 agent_state 轨 toContain 种子值（冒号前段臂被删 → LEFT JOIN 落空 → updated_at 空串即红；回退旧 LIKE 前缀钉不住本用例——LIKE 恰命中老形态，该回归归 FW1）；user_id===uid；删除后列表/详情/agent_state/session_user 四面无残留 |
+| FW3 | V6 存量回填 + baseline-on-migrate 升级路径（MEM 组同款第二实例） | beforeAll 直插 5 行规范形态 agent_state 种子（正例 `{uidPos}:{sidPos}` + V6:50 守卫 `{uidNoSid}:unknown` + V6:49 守卫 `unknown:{sidNoUid}` + V6:51 守卫同 sid 双 uid 一对）→ DROP flyway_schema_history → spawnSync `start-agent.sh fwv6 <BASE+12>` → 对第二实例断言 + DB 查 flyway_schema_history → afterAll kill + 清种子/回填行 | 正例入列且 updated_at 溯源 agent_state（末段臂 JOIN）；三守卫行均不入列（对应守卫被删时该行入列、在对应用户视图可见即红）；历史表 version 恰为 `['5','6','7','8','9']`（baseline(5)+V6..V9）且全 success（baseline-version 被抬高 → V6 静默跳过形态在此红；新增 V10+ 迁移时同步扩展该期望列表，见 43b9d96） |
+
+> 不覆盖（有意）：V6 INSERT IGNORE 幂等重跑（历史表已含 version=6 时二次启动无迁移可跑，黑盒无从与
+> "守卫正确"区分）；flyway checksum 破坏（被 env-up wait-ready 隐式拦截）；deleteBySessionId 的
+> agent_fs 分支静默失效（ThreadController.java:467-471 对无 session_id 列的 agent_fs 执行 DELETE、
+> 异常被吞，先于 76e0e74 的既有行为，超出缺口范围）；"全新库 Flyway 重建即服务可用"由既有套件
+> 隐式强覆盖（迁移不执行 → turn_lease 缺失 → 所有聊天流不收敛 → S2 起整组红），不另设用例。
+
+### 5.11 RD 组 — Redis 前缀隔离（e2e-core；2026-09-29 补录）
+
+> **2026-09-29 补录**：d31cd93 新增 agent.redis.mode/cluster-nodes/prefix（env
+> AGENT_REDIS_MODE/CLUSTER_NODES/PREFIX）与 RedisConnectionFacade 统一连接门面——多 Agent 共用
+> oaf-redis 时前缀切分 sess:*/sbx:guard:* key（docs/redis-cluster-prefix-design.md §1），此前 e2e
+> 对 AGENT_REDIS_* 零命中，前缀隔离无双实例行为级用例（R 组多副本是「无前缀同命名空间共享」语义，
+> 恰反向）。行为依据：RedisEventLog eventsKey/repliesKey（facade.key 前缀）与
+> RedisSandboxExecutionGuard 同源。编排仿 MEM 组：describe 级 spawnSync 起前缀实例
+>（start-agent.sh 的 `VAR=val nohup java` 不清空父环境，AGENT_REDIS_PREFIX 透传生效；端口 BASE+11，
+> env E2E_RD_PREFIX_PORT 可覆盖）。前缀只切 Redis key——共享 MySQL 的 history/threads 列表面
+> 【不】隔离是设计内语义，用例刻意只断言 Redis 支撑的 /status 与 /subscribe 面。
+
+| # | 场景 | 步骤 | 断言 |
+|---|------|------|------|
+| RD1 | 同 Redis 双实例前缀隔离：事件流与断线续传互不可见 | turn1 落默认实例（无前缀）记 aSeq → 前缀实例 status 必 idle/0 → 前缀实例 subscribe 空关流 → turn2 同 sessionId+userId 落前缀实例记 bSeq → 双向 subscribe 全量回放对账 | 双方 chat 均 done；status@前缀（turn2 前）state=idle 且 latest_event_seq=0（前缀失效读到 A 的流即红，决定性断言）；空流订阅业务帧 0 条；双向回放 seq 单调、末帧 done、业务帧 max seq 精确 ===aSeq / ===bSeq（串流即溢出，无阈值余量依赖）；终查 status@默认仍 aSeq |
+| RD2 | 删除会话前缀互不影响：DELETE 只清本实例命名空间 | 同 sid+userId 双实例各一 turn 记 aSeq/bSeq → 前缀实例 DELETE → 默认实例 DELETE | DELETE 返回 200；前缀侧 latest_event_seq 归 0（己方流已清）；默认侧 state=completed 且 latest_event_seq 仍 aSeq（deleteSession 未走前缀、波及对方流即红）、subscribe 回放完整 maxSeq===aSeq；反向删除后默认侧归 0（双向语义闭环） |
+| RD3 | 前缀配置生效直证：门面启动日志 prefix 字段（含冒号规范化与对照组） | 读 `.runtime/logs/agent-rdpfx.log` 与 `agent-a.log`（RedisConnectionFacade.create standalone 摘要行；MEM3 同款日志直证手法） | rdpfx 日志含 `RedisClient configured`、`mode=standalone`、`prefix="e2e-isolated:"`（normalizedPrefix 自动补冒号契约）；agent-a 日志含 `prefix=""`（默认实例零前缀对照，防前缀 env 泄漏进主实例） |
+
+> 不覆盖（有意）：沙箱守卫族（sbx:guard:*）前缀行为——守卫仅 SANDBOX_ENABLED=true 激活（core 组
+> 两实例均 sandbox=false）且 wall-clock 时序断言 flaky，前缀施加机制已由单测
+> RedisConnectionFacadeTest（sess:/sbx:guard: 两族 key 拼接）+ RD1/RD2 行为级（同一门面 key() 入口）
+> 三层覆盖；cluster 模式——e2e 基础设施为单节点 standalone Redis，无集群夹具不可黑盒（单测
+> AgentRedisPropertiesTest/RedisConnectionFacadeTest + 真 Redis IT 覆盖）；AGENT_REDIS_PREFIX 非法值
+> 启动失败负例——校验在紧凑构造器单测已覆盖，e2e 侧一条负例烧约 95s（wait-ready 不感知进程死亡）
+> 不值；f4db8ca Channel 链路 userKey 反查——X15/X9 已持续看守（api-sandbox.spec.ts）。
+
+### 5.12 protocol P 组 — 协议多副本（e2e-protocol-multi job；2026-09-30 补录）
+
+> ⚠ 与 §5.9 的「P 组（自定义工具插件）」重名：本组 P1-P7 是 travel-fulfillment 设计 §18.4/§18.10 的
+> 协议多副本用例（`e2e/tests/api-protocol-multi.spec.ts`），与插件冒烟脚本内部的 P1-P7 编号互不相干。
+> 拓扑：lead×2 + member×2、双 nginx 轮询 LB（无粘性随机路由）、共享同一 MySQL/Redis、
+> 协议事件总线 `AGENT_PROTOCOL_EVENT_BUS=redis`（a4cee7c）。
+
+| # | 场景 | 断言要点 |
+|---|------|---------|
+| P1 | 跨副本委派 | lead LB 随机路由 spawn → member LB 随机路由受理 → 完成 → lead 收割汇总 turn 收敛 |
+| P2 | lead 副本 kill | registry 重建后另一 lead 副本接管轮询与收割 |
+| P3 | member 事件跨副本对账 | A 副本受理的任务在 B 副本 `/events` 全量回放 |
+| P4 | TTL 治理恰好一次 | 过期远程行收口且不重复 resume |
+| P5 | 双副本无粘性冒烟 | LB 入口 `/status` 与 `/health` 对随机路由透明 |
+| P6 | 存量零影响 | 协议关实例无 `/tasks` 端点（T8 口径） |
+| P7 | A2A Job 同键收敛 | 同键两次提交（LB 随机路由）→ 同一 taskId、idempotent 收敛 |
+
 ---
 
 ## 6. 测试代码结构与技术选型
@@ -472,7 +555,7 @@ agent-config/
 
 ```
 agent-framework/e2e/
-├── package.json              # devDeps: @playwright/test；scripts: test:<core|multi|sandbox>、check:fixtures
+├── package.json              # devDeps: @playwright/test；scripts: check:fixtures、record:llm、test:<core|multi|sandbox>
 ├── playwright.config.ts      # projects: api-core / api-multi / api-sandbox / ui / ui-multi；reporter: html + line
 ├── mock/
 │   ├── llm-server.mjs        # §4.1 回放引擎（骨架 fork 自 bench/mock-llm/server.js，bench 原件不动）
@@ -496,10 +579,15 @@ agent-framework/e2e/
 │   ├── matchers.ts           # expectFrames(有序子集)/expectTerminal(done|permission_ask|error)/seqMonotonic
 │   └── selectors.ts          # §5.7 选择器契约单点维护
 ├── tests/
-│   ├── api-core.spec.ts      # S/F/H/M/A 组（可拆多文件）
+│   ├── api-core.spec.ts      # S/F/H/M/A/SK/MEM/HA/FW/RD 组（可拆多文件；api-models/api-reload 同属 core job；X10/X11/X15 在 api-sandbox.spec.ts）
+│   ├── api-models.spec.ts    # MOD 组（模型管理）
+│   ├── api-reload.spec.ts    # RL 组（OAF reload）
 │   ├── api-multi.spec.ts     # R 组
+│   ├── api-multi-kill.spec.ts # R4（kill 接管）
 │   ├── api-sandbox.spec.ts   # X 组
-│   ├── ui.spec.ts            # U1-U8、U10-U11
+│   ├── api-protocol.spec.ts  # T/J 组（e2e-protocol job）
+│   ├── api-protocol-multi.spec.ts # protocol P 组（e2e-protocol-multi job，§5.12）
+│   ├── ui.spec.ts            # U1-U8、U10-U11、U13-U16（含 U14b）、U-SK
 │   └── ui-multi.spec.ts      # U9
 └── .runtime/                 # 运行产物（gitignore）：env.json、实例日志、文件存储、sandboxes/
 ```
@@ -517,12 +605,13 @@ agent-framework/e2e/
 
 ## 7. CI 工作流变更（已实施）
 
-> **现状核对（2026-09-26）**：本节此前是一份「增补草案」，其内容（`needs: test`、`timeout-minutes: 25`、
+> **现状核对（2026-09-26，2026-10-01 随协议两 job 复核，2026-10-08 随评测飞轮离线化复核）**：本节此前是一份「增补草案」，其内容（`needs: test`、`timeout-minutes: 25`、
 > `npm run check:fixtures`、`--health-cmd "mysqladmin ping -prootpass"`）**与已落地的 workflow 已全部不一致**，
 > 容易误导读者以为还有第二份真相。草案删除，现状以下面两处为准：
 > - **job 拆分与预算**：§2.3
-> - **workflow 原文**：`.github/workflows/agent-framework-ci.yml`（8 个 job：`changes` / `test` / `eval-selftest` /
->   `e2e-core` / `e2e-multi` / `e2e-sandbox` / `e2e-plugin` / `build-push`）
+> - **workflow 原文**：`.github/workflows/agent-framework-ci.yml`（12 个 job：`changes` / `test` / `eval-selftest` /
+>   `eval-replay-offline` / `e2e-core` / `e2e-multi` / `e2e-sandbox` / `e2e-protocol` / `e2e-protocol-multi` /
+>   `e2e-plugin` / `build-push` / `images-eval`；后三个评测 job 属离线评测链路，非本文档范围）
 
 **与草案的关键差异（实测）：**
 
@@ -530,9 +619,9 @@ agent-framework/e2e/
 |----|------|------|
 | `needs` | `test` | `changes`（目录过滤 job；e2e 与单测并行，不等单测） |
 | `timeout-minutes` | 25 | 30 |
-| 夹具校验 | `npm run check:fixtures` | `node scripts/check-fixtures.mjs`（CI 下无执行位，直接调 node） |
+| 夹具校验 | `npm run check:fixtures` | `node scripts/check-fixtures.mjs`（等价于 `npm run check:fixtures`，CI 直接调 node 不经 npm） |
 | MySQL 健康检查 | `mysqladmin ping -prootpass` | `mysqladmin ping -h localhost` |
-| job 数 | 3 | 4（+ `eval-selftest`） |
+| job 数 | 3 | 4（+ `eval-selftest`；2026-09-30 起再增 `e2e-protocol` / `e2e-protocol-multi`，见 §2.3） |
 | artifact | — | 另上传 `playwright-report/` 与 `.runtime-plugin/` |
 
 **运维要点（2026-09-25 实测踩坑）：**
@@ -570,12 +659,12 @@ agent-framework/e2e/
 | R2 | mock LLM 回放与 `agentscope-extensions-model-openai` 解析行为的兼容（tool_calls 增量分片、finish_reason、多轮 tool 消息回流形态） | 场景假红/假绿 | 回放体 = 真实 LLM 的 chunk 原文（录制时已被真实 SDK 成功解析过一轮），格式保真由构造保证；SDK 升级若改变解析行为，CI 回放用例即红——这正是要防的回归 |
 | R3 | Debug 页选择器随前端重构漂移 | UI 组维护成本 | selectors.ts 单点契约 + U1 冒烟先行（选择器失应在 U1 即红，而非散落在深场景） |
 | R4 | kill -9 接管窗口受 runner 调度抖动影响 | R4 偶发超时 | TTL 压至 15s、断言窗口 25s、`expect.poll` 轮询而非固定 sleep；连续 3 run 验证后再纳入硬门禁 |
-| R5 | runner 上多进程/多端口的资源与端口冲突 | 环境不稳 | §3.1 端口静态规划无交集；mock 沙箱代理端口池 41000-41099 仅 sandbox job 监听；job 级隔离互不可见 |
+| R5 | runner 上多进程/多端口的资源与端口冲突 | 环境不稳 | §3.1 端口静态规划无交集；mock 沙箱只监听单一 8090（无独立代理端口池）；job 级隔离互不可见 |
 | R6 | `ACQUIRE_TIMEOUT=120s` 硬编码（`ChatStreamController.java:82`） | R3 完整排队超时路径 CI 不可测 | 本期只测 waiting 帧语义；开放问题：是否值得改成可配置（小改动，但属主工程变更，另行评审，不在本设计内夹带） |
 | R7 | approval_mcp.py 内存态 + 无 /reset | 用例间状态串扰 | 以应用名参数隔离（每用例唯一 app-N），不依赖清理；如需强化再给它加 /reset（改动 example 资产需单独评审） |
 | R8 | 多副本两实例共享 MySQL（连接池 ×2）与 Redis | services 容器连接数上限 | mysql:8.0 默认 max_connections=151，实例池默认 10×2 + mock 零占用，余量充足；不做预调优 |
 | R9 | UI 刷新续传（U7）对 slow 场景时序敏感（reload 时机） | 偶发 | 断言先行：reload 前必须已观察到 ≥1 个渲染中的 delta（`expect` 条件化），保证"刷新发生在 working 态"这一前提成立再触发 |
-| R10 | agent-framework jar 启动失败（schema 初始化 fail-fast：`TurnLeaseStore.java:72-74`）导致整组超时等待 | 定位耗时 | env-up.sh 就绪探测失败时立即 dump 实例日志退出（fail fast + 取证，不空转满 25min） |
+| R10 | agent-framework jar 启动失败（Flyway 迁移 fail-fast：迁移失败即启动失败，`db/migration/V1..V9`）导致整组超时等待 | 定位耗时 | env-up.sh 就绪探测失败时立即 dump 实例日志退出（fail fast + 取证，不空转满 25min） |
 | R11 | F8 超限用例构造 21MB 文件、21 个 pending 上传的用例耗时 | job 拖长 | 21MB 用零填充 buffer 现场生成（~秒级）；pending 用例并行小文件；合计预算 <30s |
 | R12 | mock 沙箱命令白名单过窄挡住 SDK 内部命令（如工作区 hydrate 的管道命令变体） | X3/X6 假红 | 白名单先按录制件实测命令集生成；未知命令记 /stats 并按"允许但告警"灰名单策略（CI 断言无白名单外命令出现在最终稳定版） |
 | R13 | 录制件过期：真实 LLM 行为/模型版本或 OpenSandbox Server 升级后，录制件不再代表现网格式 | 假绿（旧格式仍被旧 SDK 接受）或误红 | 夹具带 `recordedAt/model` 元数据；升级 SDK/依赖/Server 的 PR 流程含"重录 + 重跑 check:fixtures"；录制脚本入库使重录为一键操作 |
@@ -608,7 +697,7 @@ agent-framework/e2e/
 | `src/test`（676 单测） | 不变，继续作为第一道门；e2e 是第二道 |
 | `*IT` 环境门控集成测试 | 不变（本地/集群手动档）；e2e 不替代（IT 有 DB 级白盒断言） |
 | `bench/` | **只读复用** mock-mcp 与编排手法；mock-llm fork 后 bench 原件不动 |
-| `example/approval-forms` | **只读复用** approval_mcp.py 与 e2e 选择器先例 |
+| `example/approval-forms` | **只读复用** approval_mcp.py（e2e 侧派生副本 `e2e/mock/approval-mcp.py`）与 e2e 选择器先例 |
 | 仓库根 `e2e/`（平台级） | 互不重叠：那边测"平台编排 agent-framework"，这边测"agent-framework 本体"；两者共同覆盖发布链路（根 e2e 的 file-support-ui / S 档场景矩阵是 F 组/U10-U11 的取材来源） |
 
 ---

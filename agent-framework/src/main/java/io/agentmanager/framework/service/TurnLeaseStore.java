@@ -16,6 +16,11 @@ import org.springframework.stereotype.Service;
  * 不覆盖人工决策挂起期——HITL 挂起后随 turn 收尾放锁；挂起期间新消息由 chat 入口
  * 预检拒绝（#47/#48），confirm 恢复需重新 acquire（带超时排队，桥接收尾窗口）。
  *
+ * <p>两个恢复路径的放锁时序<b>不同</b>（TurnFinalizer javadoc 明示两侧不强行模板化）：
+ * confirm-stream 常规恢复段再挂起时经 handleEventAndEmit 仍是「storeConfirmContext 后
+ * 立即 release 并 closeSession」的旧语义（ConfirmController.java 恢复分支）；仅恢复段
+ * 正常收尾（未再挂起）才走 turn 收尾放锁。维护时勿以本类注释推断两侧一致。
+ *
  * <p>实现：租约 token + 短 TTL + 续租（不用 GET_LOCK，避免长 turn 耗尽连接池）。
  * 轮询为独立短连接，不占用连接池；崩溃由 TTL 过期兜底接管。
  */
@@ -42,7 +47,6 @@ public class TurnLeaseStore {
         this.dataSource = dataSource;
         this.ttl = ttl;
         this.renewInterval = renewInterval;
-        initSchema();
     }
 
     /** 续租间隔（TurnLeaseGuard 使用；应小于 ttl，默认 ttl/3） */
@@ -53,25 +57,6 @@ public class TurnLeaseStore {
     /** 租约 TTL（TurnLeaseGuard 用于判断「续租故障已持续超过一个租约周期」） */
     public Duration ttl() {
         return ttl;
-    }
-
-    /** 建表（幂等），失败 fail-fast（DB 不可用本就不该继续） */
-    private void initSchema() {
-        try (var conn = dataSource.getConnection();
-             var stmt = conn.createStatement()) {
-            stmt.executeUpdate("""
-                CREATE TABLE IF NOT EXISTS turn_lease (
-                  session_id VARCHAR(255) PRIMARY KEY,
-                  token      CHAR(36) NOT NULL,
-                  expires_at DATETIME(3) NOT NULL,
-                  created_at DATETIME(3) NOT NULL,
-                  KEY idx_expires_at (expires_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                """);
-            log.info("TurnLeaseStore: turn_lease table ready");
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to init turn_lease table: " + e.getMessage(), e);
-        }
     }
 
     /**

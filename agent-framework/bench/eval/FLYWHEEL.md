@@ -149,3 +149,34 @@ python3 bench/eval/flywheel.py status     # 趋势账本一览：每轮通过率
 ## 5. 飞轮成效实录（截至 2026-09-25）
 
 首轮运转（55+ 轨迹）产出：发现并修正了评测契约自身 3 处事实错误（`done` 帧方言、内置工具恒可用、token 采集路径）；挖出框架 3 个真实问题并全部落地修复——#27 沙箱并发缺陷（三组对照实验定界 + 官方方案分析 + PR #30 缓解上线）、#28 `/tools` 清单失真、#29 模型切换认知脱节。用例库从 0 到 6 条，趋势账本就位。**这就是飞轮的价值模型：每转一圈，出问题的成本比上一圈更高——因为回归集变厚了。**
+
+---
+
+## 6. 离线评测链路（2026-10-04 新增：pack / replay / live）
+
+> **端到端操作手册（含 collector/studio 部署、页面路径、排障）见 [OFFLINE.md](OFFLINE.md)**；本节是 CLI 速查。
+
+飞轮新增三条子命令，与 eval-collector / eval-studio 组成离线闭环（设计
+`docs/design/agent-framework-eval-offline-record-replay-design.md`，实施记录见该文档附录）：
+
+```bash
+# ① 打包：collector 录制数据 → evalpack（会话关联 + 脱敏 + 用例草稿 + CHECKSUMS）
+python3 bench/eval/flywheel.py pack --collector-dir /var/lib/eval-collector/rec \
+  --out bench/eval/reports/packs/pk-xxx [--traces 驱动器轨迹目录] [--ns rec]
+
+# ② 离线回放：被测服务 LLM 指向 replay-llm（flywheel 自动拉起），A1 断言 + A2 轨迹等价 + A3 漂移
+node bench/eval/mock/replay-llm.mjs --pack <pack> --port 18902   # 供被测服务作 LLM_BASE_URL
+python3 bench/eval/flywheel.py replay --pack <pack> --out bench/eval/reports/runs/xxx \
+  --base-url http://127.0.0.1:8100 --mode strict [--judge]
+
+# ③ 联机链路评测：用例直打真实测试环境（live 语义：结构层断言 + judge 评文本质量）
+python3 bench/eval/flywheel.py live --pack <pack> --out bench/eval/reports/runs/xxx \
+  --base-url http://... [--judge]
+```
+
+要点：
+
+- **exit code 契约不变**：0 全过 / 1 有失败 / 2 无可执行用例；报告 `report.json`（机器可读）+ `report.html`（自包含可分发）。
+- **确定性来源**：replay-llm 逐 chunk 原文回放（与 e2e 夹具同构）+ 归一化规则表（`replay/normalize.py` 与 replay-llm 内置 JS 版同构，改动须两侧同步）。
+- **金标验证**：行为变更注入后 strict 回放必失败（drift=1.0）——e2e `bench/eval/tests/e2e_offline_loop.py --phase replay` 持续守护。
+- web 全流程（档案切换/包管理/用例人审/run 编排/报告/趋势）见 `bench/eval-studio/`（开箱即用镜像）。

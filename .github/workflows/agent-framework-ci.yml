@@ -67,6 +67,26 @@ jobs:
         working-directory: agent-framework
         run: python3 bench/eval/flywheel.py selftest
 
+  # 离线评测全链路 e2e（设计 docs/design/agent-framework-eval-offline-record-replay-design.md）：
+  # --offline 全程 mock 上游（零真实 LLM），覆盖 collector 三协议录制/脱敏、pack、replay
+  # （A1/A2/A3 + 漂移注入金标）、沙箱/MCP 回放器、rebase 基线演进、studio API 全流程。
+  # 需要 node（runner 预装）+ python3.11 + httpx；docker/mysql 依赖的阶段（provision 金标）不在此跑。
+  # 非必需检查（红了只告警），稳定后再转必需。
+  eval-replay-offline:
+    name: 评测离线回放 e2e (--offline)
+    needs: changes
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: 安装运行依赖
+        run: pip install --disable-pip-version-check 'httpx>=0.27' fastapi uvicorn python-multipart
+      - name: 离线评测全链路 e2e
+        working-directory: agent-framework
+        run: python3 bench/eval/tests/e2e_offline_loop.py --offline --work /tmp/eval-e2e
+
   e2e-core:
     name: E2E 核心（API+UI）
     # 与 test 并行（黑盒门禁相互独立）：单测仅 ~1min，串行等待占整链 wall ~1/4
@@ -244,6 +264,124 @@ jobs:
             agent-framework/e2e/playwright-report/
           retention-days: 5
 
+  # T 组先行（travel-fulfillment 设计 §11 M1 / PR #62 遗留 P1-1 切片）：
+  # 双实例（存量 + 协议开启）黑盒断言 /tasks 强制 token（验收断言 11）、存量零影响
+  # （验收断言 8）与卡片 agent_protocol 透出。spawn/确认/拒绝/超时/父崩溃五场景
+  # 需 mock-LLM 双进程脚本化编排，属 T 组二期。纯 HTTP 断言，不装浏览器。
+  e2e-protocol:
+    name: E2E 协议（T 组先行）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      E2E_GROUP: protocol
+      E2E_BASE_PORT: "8100"
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
+      - working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 安装 Playwright 依赖（protocol 组无 UI 用例，不装浏览器）
+        working-directory: agent-framework/e2e
+        run: npm ci --no-audit --no-fund
+      - working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - working-directory: agent-framework/e2e
+        run: ./scripts/run.sh protocol
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-protocol
+          path: |
+            agent-framework/e2e/.runtime/
+            agent-framework/e2e/playwright-report/
+          retention-days: 5
+
+  # P 组（travel-fulfillment 设计 §18.4 多副本门禁，阶段 3）：lead×2 + member×2
+  # （各自 nginx 轮询 LB 随机路由，共享 MySQL/Redis）——委派链路跨副本正确性 +
+  # EventBus 跨副本对账 + A2A Job 同键收敛（P7）+ 存量零影响（P6）。
+  # 必需检查（分支保护追加第 7 项，job name 与保护规则字符串必须完全一致）。
+  e2e-protocol-multi:
+    name: E2E 协议多副本（P 组）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      E2E_GROUP: protocol-multi
+      E2E_BASE_PORT: "8100"
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
+      - working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 安装 Playwright 依赖（protocol-multi 组无 UI 用例，不装浏览器）
+        working-directory: agent-framework/e2e
+        run: npm ci --no-audit --no-fund
+      - working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - working-directory: agent-framework/e2e
+        run: ./scripts/run.sh protocol-multi
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-protocol-multi
+          path: |
+            agent-framework/e2e/.runtime/
+            agent-framework/e2e/playwright-report/
+          retention-days: 5
+
   # 工具插件 SPI 加载冒烟（b0fc8a7 起的插件化能力此前无任何门禁覆盖）：
   # 现场编译示例插件 → 独立进程起服务 → 断言注册链路 / /tools?includeInternal 运行时
   # 注册集（issue #28）/ OAF reload 存活 / deniedTools 剔除 / 自定义工具三态权限。
@@ -342,3 +480,41 @@ jobs:
             gaoyue1989/agent-framework:${{ steps.meta.outputs.tag }}
           cache-from: type=gha,scope=agent-framework
           cache-to: type=gha,mode=max,scope=agent-framework
+
+  # 评测服务双镜像（eval-collector 采集代理 / eval-studio 评测服务），仅 master push。
+  # 上下文约定：collector = bench/eval-collector；studio = bench/（Dockerfile 内 COPY eval/ 引擎代码）。
+  images-eval:
+    name: 构建评测镜像并推送 (collector/studio)
+    needs: [changes, test]
+    if: (needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true')
+        && github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 计算镜像 tag（v{日期}）
+        id: meta
+        run: echo "tag=v$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: agent-framework/bench/eval-collector
+          push: true
+          tags: |
+            gaoyue1989/eval-collector:${{ steps.meta.outputs.tag }}
+            gaoyue1989/eval-collector:latest
+          cache-from: type=gha,scope=eval-collector
+          cache-to: type=gha,mode=max,scope=eval-collector
+      - uses: docker/build-push-action@v6
+        with:
+          context: agent-framework/bench
+          file: agent-framework/bench/eval-studio/Dockerfile
+          push: true
+          tags: |
+            gaoyue1989/eval-studio:${{ steps.meta.outputs.tag }}
+            gaoyue1989/eval-studio:latest
+          cache-from: type=gha,scope=eval-studio
+          cache-to: type=gha,mode=max,scope=eval-studio

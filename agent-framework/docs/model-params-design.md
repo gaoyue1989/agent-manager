@@ -11,6 +11,7 @@
 | v1 | 初版：五参数链路 + reasoning_effort/frequency_penalty 新增 |
 | v2 | 明确内网自托管引擎（vLLM/SGLang）为第一优先；两引擎方言合并为同一实现；provider 列启用为方言选择器；修正 enable_thinking 无差别注入的兼容缺陷 |
 | v2.1 | 评审修订：provider 空串语义明确为"不变/默认 openai"（与 name/modelId 一致）；§6 补系统模型 runbook；§7 补真实 MySQL IT |
+| v2.2 | 后续演进同步（2026-09-28）：DB 演进全仓迁入 Flyway，两列落 `V4__3dad588_model_config_sampling.sql`，D6 的 `ensureColumn` 代码内迁移被取代（Store 手工 DDL 模式已移除，见 docs/design/db-migration-flyway-design.md）；§3/§7 对应表述以 V4 迁移为准 |
 
 ## 0. 决策记录
 
@@ -21,7 +22,7 @@
 | D3 | `reasoning_effort` 值集**不做白名单**，仅格式校验（`^[a-z0-9_]{1,16}$`） | 值集因模型而异（OpenAI：minimal/low/medium/high；GLM：low/high/max）；模板不认领的 kwarg 在 Jinja 中无害忽略，合法性由 `POST /models/{id}/test` 兜底 |
 | D4 | `frequency_penalty` 范围校验 `[-2.0, 2.0]`，设置后不可撤销"下发"（只能改值，含 0.0） | PATCH record 无法区分"缺省"与"显式 null"；多数端点 0.0 与不传等价。`reasoning_effort` 字符串可表达空串清除，保留三态（对齐 api_key） |
 | D5 | `enable_thinking` 与 `reasoning_effort` **配置层保持两个独立字段** | 正交维度：Qwen3/MiMo 系模板只认开关、gpt-oss 系只认 effort（常思考）；合并成单枚举会丢"思考开但不发 effort"的表达，或对不支持 effort 的模型产生伪档位。**载荷层**在自托管方言下合并进同一个 `chat_template_kwargs` Map（合并点是载荷，不是配置） |
-| D6 | schema 演进用 `information_schema` 检查 + `ALTER TABLE ADD COLUMN` | MySQL 8.0 不支持 `ADD COLUMN IF NOT EXISTS`；ModelConfigStore 现有 initSchema 是手工 DDL，无 flyway |
+| D6 | schema 演进用 `information_schema` 检查 + `ALTER TABLE ADD COLUMN`（实施期方案；**后被 Flyway V4 取代**，见 v2.2 修订） | MySQL 8.0 不支持 `ADD COLUMN IF NOT EXISTS`；ModelConfigStore 现有 initSchema 是手工 DDL，无 flyway |
 | D7 | **vLLM 与 SGLang 合并为同一方言实现**；`provider` 列（已存在，现为摆设）启用为方言选择器，值域约定 `openai`（默认）/`vllm`/`sglang`/`glm`/`deepseek` | 两引擎 OpenAI 兼容层均支持 `chat_template_kwargs` 透传（SGLang 另有服务端级 `--default-chat-template-kwargs`），内网模型思考/effort 控制全部经模板 kwarg，映射分支完全同构；不新增 `reasoning_dialect` 列，避免两个重叠旋钮漂移 |
 | D8 | `openai` 方言**不再无差别注入** `chat_template_kwargs.enable_thinking`（修正现状缺陷） | 现实现对所有端点注入，打到 OpenAI/DeepSeek 官方等严格端点会 400；修正后存量内网模型需迁移 provider 值（见 §6 上线动作） |
 
@@ -64,7 +65,7 @@ ALTER TABLE model_config
 ```
 
 - 存量行两列落 NULL → 下发行为与升级前完全一致（D1）。
-- **代码内迁移**（D6）：`ModelConfigStore.initSchema()` 在 CREATE TABLE（含新列，供全新部署）之后，增加 `ensureColumn(table, column, ddl)`：查 `information_schema.COLUMNS`，缺列则执行 ALTER。幂等、无版本表。
+- **代码内迁移**（D6，**已被 Flyway 取代**）：原方案为 `ModelConfigStore.initSchema()` 内 `ensureColumn` 补列；全仓 DB 演进迁入 Flyway 后，两列由 `db/migration/V4__3dad588_model_config_sampling.sql` 承载（model_config 建表在 V3），Store 内手工 DDL 模式已移除。
 - `provider` 列无 DDL 变更（`VARCHAR(32) DEFAULT 'openai'` 已存在），**值域约定**：`openai` / `vllm` / `sglang` / `glm` / `deepseek`；未知值按 `openai` 兜底（保持现状兼容）。
 - `ModelConfig` record 与 `COLUMNS`、`map(rs)`、INSERT/UPDATE 语句同步加两字段，位置对齐 DDL。
 
@@ -177,7 +178,7 @@ switch (llm.provider()) {
 
 ## 7. 测试要点
 
-1. schema：全新部署建表含新列；存量库 `ensureColumn` 幂等（二次启动不再 ALTER）——真实 MySQL 覆盖见 `ModelConfigStoreMySqlIT`（`HITL_MYSQL_IT=1` 门控，含旧表自动迁移场景）
+1. schema：全新部署经迁移链建表含新列（V3 建表 + V4 补列）；存量库 baseline 到 V5（V1..V5 不再执行，列已在位）——真实 MySQL 覆盖见 `ModelConfigStoreMySqlIT`（`HITL_MYSQL_IT=1` 门控，跑全量迁移链 `TestSchemaMigrator`（按版本号数字升序执行 `db/migration` 全部文件），含旧表自动迁移场景）
 2. CRUD：新参数落库与回读；`reasoningEffort: ""` 清除；非法值（`Medium`/`3.0`/provider 拼错）400
 3. **方言矩阵断言**（抓请求体，每方言一组）：
    - vllm/sglang：effort+开关同入一个 `chat_template_kwargs`（Map 合并、无覆盖丢失）；temperature/max_tokens/frequency_penalty 在顶层

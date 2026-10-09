@@ -180,13 +180,13 @@ tool_declared_is() { # tool_declared_is <快照文件> <工具名> <true|false>
 }
 # HITL 三态：发一轮对话 → 收 permission_ask 终态 → 打印 tool_call_id（空表示未挂起）
 hitl_ask_tcid() { # hitl_ask_tcid <sessionId> <sse 输出文件>
-  curl -sN -X POST "$BASE/threads/chat" -H 'content-type: application/json' \
+  curl -sN --max-time 60 -X POST "$BASE/threads/chat" -H 'content-type: application/json' \
     -d "{\"message\":\"[E2E:plugin:echo] 请调用 echo_query 工具\",\"userId\":\"$SMOKE_USER\",\"sessionId\":\"$1\"}" \
     > "$2" || true
   grep -o '"tool_call_id":"[^"]*"' "$2" | head -1 | cut -d'"' -f4 || true
 }
 confirm() { # confirm <sessionId> <tool_call_id> <true|false>
-  curl -sN -X POST "$BASE/threads/$1/confirm-stream" -H 'content-type: application/json' \
+  curl -sN --max-time 130 -X POST "$BASE/threads/$1/confirm-stream" -H 'content-type: application/json' \
     -d "{\"results\":[{\"tool_call_id\":\"$2\",\"confirmed\":$3}]}" > "$RT/confirm.sse" || true
   sleep 1  # 等 ASK 段租约释放后再读历史（抢锁竞态，同 api-core H2/H3 的 800ms 等待）
 }

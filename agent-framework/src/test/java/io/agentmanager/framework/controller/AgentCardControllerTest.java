@@ -48,6 +48,17 @@ class AgentCardControllerTest {
     @MockBean
     private SkillCatalogService skillCatalog;
 
+    @MockBean
+    private io.agentmanager.framework.config.AgentManagerProperties agentManagerProperties;
+
+    /**
+     * SDK 协议属性以 bean 形式入 context：Spring 对 ObjectProvider 注入点是容器生成的
+     * 依赖解析代理（@MockBean ObjectProvider 不会进构造器），真实 provider 会从这里
+     * 解析到本 mock；未启用语义 = mock 默认 false。
+     */
+    @MockBean
+    private io.agentscope.extensions.agentprotocol.AgentProtocolProperties sdkAgentProtocolProperties;
+
     @Test
     void agentCardShouldReturnCard() throws Exception {
         when(oafConfig.name()).thenReturn("test-agent");
@@ -71,5 +82,45 @@ class AgentCardControllerTest {
             .andExpect(jsonPath("$.defaultInputModes[0]").value("text"))
             .andExpect(jsonPath("$.defaultOutputModes[0]").value("text"))
             .andExpect(jsonPath("$.securitySchemes.bearer").exists());
+    }
+
+    /** 协议未启用（mock 默认：props.agentProtocol()=null、SDK 属性缺位）→ enabled=false 恒存在 */
+    @Test
+    void agentCardShouldExposeDisabledAgentProtocolByDefault() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.vendorKey()).thenReturn("acme");
+        when(skillCatalog.list()).thenReturn(List.of());
+        when(oafConfig.tags()).thenReturn(List.of("test"));
+        when(a2uiService.getExtensionDeclaration()).thenReturn(Map.of());
+
+        mockMvc.perform(get("/.well-known/agent-card.json"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.agent_protocol.enabled").value(false))
+            .andExpect(jsonPath("$.agent_protocol.task_store").value(""));
+    }
+
+    /** 协议启用 → 卡片透出 enabled/streaming/hitl（lead 侧据此发现远程子 agent 能力） */
+    @Test
+    void agentCardShouldExposeEnabledAgentProtocol() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.vendorKey()).thenReturn("acme");
+        when(skillCatalog.list()).thenReturn(List.of());
+        when(oafConfig.tags()).thenReturn(List.of("test"));
+        when(a2uiService.getExtensionDeclaration()).thenReturn(Map.of());
+        var settings = new io.agentmanager.framework.config.AgentManagerProperties.AgentProtocolSettings(
+            true, "tok", "", 7, 24, 5, "", true, 120, "memory");
+        when(agentManagerProperties.agentProtocol()).thenReturn(settings);
+        when(sdkAgentProtocolProperties.isStreamingEnabled()).thenReturn(true);
+        when(sdkAgentProtocolProperties.isHitlEnabled()).thenReturn(true);
+
+        mockMvc.perform(get("/.well-known/agent-card.json"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.agent_protocol.enabled").value(true))
+            .andExpect(jsonPath("$.agent_protocol.streaming").value(true))
+            .andExpect(jsonPath("$.agent_protocol.hitl").value(true));
     }
 }

@@ -492,6 +492,124 @@ class AgentRuntimeServiceHitlTest {
     }
 
     /**
+     * 回归（e2e R5 根因）：confirm 抢到锁时 ASKING 快照可能还没落库（state 侧为 null），
+     * 此时恢复身份**只能**来自 confirm_context 表行。若 resolveConfirmContext 改成先读 state，
+     * runtimeSessionId/runtimeUserId 双双落空 → buildResumeContext 回落 fullThreadId 兜底槽
+     * → 用一个从未存在过的会话 key 恢复，整个上下文丢失（工具空参数、回复对不上话）。
+     */
+    @Test
+    void resumeConfirmShouldTakeRuntimeIdentityFromTableRowWhenStateSnapshotMissing() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        // 表行带 Channel 网关真实身份（sessionId=gw-hash、userId=peer）；PER_PEER 形态
+        // 的 gw-hash 按会话独立（此处用非遗留值验证透传，遗留共享值翻译见下方专测）
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-peerunique01", "peer-user")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        // state 侧读不到挂起：confirm 抢锁早于 ask 段 AGENT_END 收尾落库，正是 R5 实测时序
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(), java.util.Map.of(), "", java.util.Map.of("session_id", "", "user_id", "")));
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
+            "gw-peerunique01".equals(ctx.getSessionId()) && "peer-user".equals(ctx.getUserId())));
+    }
+
+    /**
+     * issue #87 PER_PEER 切换的升级窗口兼容：存量 confirm_context 行的
+     * runtime_session_id 仍是 MAIN 形态全进程共享 gw-hash（gw-3f20f08c5499），
+     * 恢复时必须按 runtime_user_id（=peer）重推导 PER_PEER 会话 id——原样使用会
+     * 恢复到不存在的共享会话（SDK 侧槽位已被 V9 迁移重键），丢全部上下文。
+     */
+    @Test
+    void resumeConfirmShouldTranslateLegacySharedGwSessionIdToPerPeer() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        // 升级瞬间挂起中的旧行：MAIN 共享 gw-hash
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-3f20f08c5499", "peer-user")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        // 期望 = channelGatewaySessionId(peer) 的 PER_PEER 派生值（与 V9 迁移后的
+        // agent_state 槽位一致），且不再是共享值
+        var expected = svc.channelGatewaySessionId("peer-user");
+        assertNotEquals("gw-3f20f08c5499", expected);
+        verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
+            expected.equals(ctx.getSessionId()) && "peer-user".equals(ctx.getUserId())));
+    }
+
+    /**
+     * 网关会话 id 派生钉子（issue #87）：PER_PEER canonicalKey = "chatui|r:{peer}|x:agentId=main"。
+     * 期望值经真实 MySQL SHA2 与 Python hashlib 三方交叉验证（V9 迁移同式）；
+     * SDK 升级若改变派生（DmScope/extra 排序/哈希截断），此测试率先红。
+     */
+    @Test
+    void channelGatewaySessionIdShouldMatchSdkPerPeerCanonicalKey() {
+        assertEquals("gw-a580c3c8af63", service.channelGatewaySessionId("webui-abc-123"));
+        assertNotEquals(service.channelGatewaySessionId("u-1"), service.channelGatewaySessionId("u-2"),
+            "每会话独立 gw-hash（并发闸门按会话互斥的前提）");
+    }
+
+    /**
+     * 身份优先级（resolveConfirmContext 表行分支）：表行身份与 state 身份**同时**非空时
+     * 必须取表行——storeConfirmContext 在 permission_ask 广播前同步落库，是权威身份；
+     * state 快照随 ask 段收尾才落库，可能滞后。取错侧 → 网关会话 key 漂移。
+     */
+    @Test
+    void resumeConfirmShouldPreferTableRuntimeIdentityOverStateIdentity() {
+        var tableBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        when(confirmContextStore.findPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(tableBlock), Instant.now(), "gw-tableauth", "peer-from-table")));
+
+        var agent2 = mock(HarnessAgent.class);
+        var replyMsg = mock(Msg.class);
+        when(replyMsg.getTextContent()).thenReturn("ok");
+        when(agent2.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(replyMsg));
+        var svc = new AgentRuntimeService(OAF, agent2, List.of(), new LLMLogger(), confirmContextStore);
+        // state 侧快照命中且身份非空（gw-state/alice）——仍不得覆盖表行身份
+        var stateReader = mock(io.agentmanager.framework.service.AgentStateReader.class);
+        var stateBlock = new ToolUseBlock("call-1", "publish_service",
+            Map.of("packageId", 166), null, null, io.agentscope.core.message.ToolCallState.ASKING);
+        var askingEntry = new LinkedHashMap<String, Object>();
+        askingEntry.put("tool_call_id", "call-1");
+        askingEntry.put("name", "publish_service");
+        askingEntry.put("input", Map.of("packageId", 166));
+        when(stateReader.loadAskingSnapshot(any(), any())).thenReturn(
+            new io.agentmanager.framework.service.AgentStateReader.AskingSnapshot(
+                List.of(askingEntry), Map.of("call-1", stateBlock), "reply-1",
+                Map.of("session_id", "gw-state", "user_id", "alice")));
+        svc.setAgentStateReader(stateReader);
+
+        svc.resumeWithConfirm(SID, null, List.of(
+            Map.<String, Object>of("tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent2).call(anyList(), argThat((RuntimeContext ctx) ->
+            "gw-tableauth".equals(ctx.getSessionId()) && "peer-from-table".equals(ctx.getUserId())));
+    }
+
+    /**
      * 表块 input 为空（反向异常）且 state 同 id 参数完好：enrich 后 content 同步取 state 侧
      * 完整参数 JSON——若保留表侧 "{}" 会误报缺参（参数校验失败），修复见 enrichWithStateInput。
      */
@@ -573,5 +691,127 @@ class AgentRuntimeServiceHitlTest {
         when(confirmContextStore.findPending(anyString())).thenReturn(java.util.Optional.empty());
 
         assertFalse(service.hasPendingConfirm(SID));
+    }
+
+    // ---------- findPendingConfirm（status 端点/观察者 probe）：FIFO 头 + 远程行透出 ----------
+
+    /** 远程行 → additive 透出 confirm_key/remote_task（Debug Console 刷新恢复依赖） */
+    @Test
+    void findPendingConfirmShouldExposeRemoteRowFields() {
+        var remoteTask = Map.<String, Object>of("service", "order-agent", "task_id", "task-9");
+        when(confirmContextStore.findHeadPending("acme-test-agent__t1")).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "acme-test-agent__t1", "task:task-9", "reply-9",
+                List.of(toolUseBlock("call-9")), Instant.now(), null, null, remoteTask)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertEquals("task:task-9", payload.get("confirm_key"));
+        assertEquals(remoteTask, payload.get("remote_task"));
+        assertEquals("reply-9", payload.get("reply_id"));
+    }
+
+    /** 远程行 reply_id=NULL（Bridge 落卡真实形态）→ 不 NPE，回落空串（CR P0-1 回归） */
+    @Test
+    void findPendingConfirmShouldTolerateNullReplyIdOnRemoteRow() {
+        var remoteTask = Map.<String, Object>of("service", "order-agent", "task_id", "task-9");
+        when(confirmContextStore.findHeadPending("acme-test-agent__t1")).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "acme-test-agent__t1", "task:task-9", null,
+                List.of(toolUseBlock("call-9")), Instant.now(), null, null, remoteTask)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertEquals("", payload.get("reply_id"));
+        assertEquals("task:task-9", payload.get("confirm_key"));
+    }
+
+    /** 本地行 → 不带 confirm_key/remote_task（前端既有字段零改动） */
+    @Test
+    void findPendingConfirmShouldNotExposeRemoteFieldsForLocalRow() {
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(
+            java.util.Optional.of(new ConfirmContextStore.PendingConfirm(
+                "reply-1", List.of(toolUseBlock("call-1")), Instant.now(), null, null)));
+
+        var payload = service.findPendingConfirm(SID);
+
+        assertNotNull(payload);
+        assertFalse(payload.containsKey("confirm_key"));
+        assertFalse(payload.containsKey("remote_task"));
+    }
+
+    /** 无待确认行 → null（status 据此给 idle/completed 而非 waiting_confirm） */
+    @Test
+    void findPendingConfirmShouldReturnNullWhenNoPendingRow() {
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(java.util.Optional.empty());
+
+        assertNull(service.findPendingConfirm(SID));
+    }
+
+    // ---------- 幽灵卡抑制（F20）：PROPAGATE 转发的远程 ask 不落 local 行 ----------
+
+    /** ask 的 tool_call_id 命中未消费远程行锚点 → 跳过落库（远程行是唯一有效决策路由） */
+    @Test
+    void putConfirmContextShouldSuppressPropagatedRemoteAsk() {
+        var ghostRow = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9",
+                "tool_calls", List.of(Map.of("id", "call-1", "name", "create_order"))));
+        when(confirmContextStore.findUnconsumedRemote("acme-test-agent__t1"))
+            .thenReturn(List.of(ghostRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+    }
+
+    /** Channel 链路形态：远程行以 raw sid 存储（比 fullThreadId 短），双形态查询命中抑制 */
+    @Test
+    void putConfirmContextShouldSuppressWhenRemoteRowStoredUnderRawSid() {
+        var ghostRow = new ConfirmContextStore.PendingConfirm(
+            "t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9",
+                "tool_calls", List.of(Map.of("id", "call-1", "name", "create_order"))));
+        // 长/短两形态查询都 stub 命中即证明双形态展开生效（raw sid 行仅被短键查询命中）
+        when(confirmContextStore.findUnconsumedRemote("acme-test-agent__t1"))
+            .thenReturn(List.of());
+        when(confirmContextStore.findUnconsumedRemote("t1")).thenReturn(List.of(ghostRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+        verify(confirmContextStore).findUnconsumedRemote("t1");
+    }
+
+    /** 本地自有 ask（id 不在远程锚点）→ 照常落库，HITL 行为不变 */
+    @Test
+    void putConfirmContextShouldStoreGenuineLocalAsk() {
+        when(confirmContextStore.findUnconsumedRemote(anyString())).thenReturn(List.of());
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+    }
+
+    /** 远程行锚点损坏/无 tool_calls → fail-open 照常落库（不因去重逻辑阻断真实本地 ask） */
+    @Test
+    void putConfirmContextShouldFailOpenWhenAnchorDamaged() {
+        var brokenRow = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", "task:t-9", "child-reply",
+            List.of(), Instant.now(), null, null,
+            Map.of("service", "booking", "task_id", "t-9"));
+        when(confirmContextStore.findUnconsumedRemote(anyString())).thenReturn(List.of(brokenRow));
+
+        service.putConfirmContext("acme-test-agent__t1",
+            askEvent("reply-1", toolUseBlock("call-1")), null, null);
+
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
     }
 }

@@ -46,6 +46,14 @@ const replyMap = {};          // replyId -> builder
 let pendingToolCalls = {};    // tcId -> {name, argsRaw, args, resultRaw, state}
 let thinkingTimer = null;
 
+// 远程子 agent 调用面板（Agent Protocol 远程委派：agent_spawn → 远端 /tasks → 事件回流）。
+// SSE 帧带 source 标注（AgentEventSseSerializer 序列化 SDK tagRemoteForwardedEvent 打标）
+// 即为远端转发事件：路由进对应面板嵌套展示，不进主回复流（否则会撕裂气泡/误触发收尾）。
+let remotePanels = {};        // spawn 工具行 tcId -> panel
+let activeRemotePanel = null; // 当前接收转发事件的 panel（force_sync 串行委派下单活跃）
+let lastRemotePanel = null;   // 最近一个面板：subagent_exposed 晚于结果收口时仍能落 footer
+const remoteToolOwner = {};   // 远端工具 tcId -> panel（摘要/预览帧无 source，按归属路由）
+
 // HITL 待确认状态：permission_ask 事件 → 渲染确认卡片，等待批量决策
 let pendingConfirm = null;    // {replyId, calls: [{tool_call_id, name, input}], cardEl}
 
@@ -597,9 +605,19 @@ async function loadModels() {
 
 /** 切换模型：PATCH /threads/{sid} 持久化到 session_user.model（失败回滚下拉框） */
 async function onModelChange() {
+  const sid = currentSessionId();
   const previous = currentSessionModel();
-  const ok = await bindSessionModel(currentSessionId(), modelSelect.value);
-  if (!ok) modelSelect.value = previous;
+  const target = modelSelect.value;
+  const ok = await bindSessionModel(sid, target);
+  if (!ok) {
+    modelSelect.value = previous;
+    return;
+  }
+  // 同步 threads.list 快照（修 #43）：restoreModelForSession/currentSessionModel 以该
+  // 列表为数据源，PATCH 成功后不更新的话，30s 内切走再切回会回显旧绑定
+  const list = (ctx.state.getState('threads.list') || [])
+    .map((t) => (t && t.session_id === sid) ? { ...t, model: target } : t);
+  ctx.state.setState('threads.list', list);
 }
 
 /** 当前会话的已绑定模型（下拉框当前值），用于切换失败时回滚 */
@@ -645,7 +663,8 @@ async function loadThreadHistory(sessionId) {
       if (m.role === 'compaction') addCompactionDivider(m.content || '');
       else if (m.role === 'user') addMessage('user', m.content || '');
       else if (m.role === 'assistant' || m.role === 'agent') {
-        const refs = addAssistantHistory(m.content || '', m.tool_calls || []);
+        // blocks 由后端按 Msg.content 块序给出（旧数据无此字段 → 退回旧布局）
+        const refs = addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks);
         lastAssistantEl = refs.msgEl;
         lastAssistantContentEl = refs.contentEl;
         if (m.reply_id) {
@@ -676,8 +695,7 @@ async function loadThreadHistory(sessionId) {
       if (toolCalls.length > 0) {
         const fakeReply = {
           replyId: pc.reply_id,
-          contentEl: lastAssistantContentEl,
-          textEl: lastAssistantContentEl
+          contentEl: lastAssistantContentEl
         };
         renderConfirmCard(fakeReply, { tool_calls: toolCalls });
       }
@@ -748,33 +766,55 @@ function writeMarkdown(el, html) {
   }
 }
 
-/** 历史 assistant 消息：工具调用（已完成✓）+ 文本气泡（Markdown 渲染）
+/** 历史 assistant 消息：按 blocks 块序分段渲染（文本气泡与工具组按真实发生顺序交错）；
+ *  无 blocks 的旧数据退回「工具组在上、文本在下」旧布局
  *  @returns {{ msgEl: HTMLElement, contentEl: HTMLElement }} 元素引用，供历史回放时追加卡片 */
-function addAssistantHistory(content, toolCalls) {
+function addAssistantHistory(content, toolCalls, blocks) {
   const msg = document.createElement('div');
   msg.className = 'msg assistant';
-  let contentEl = null;
-  if ((toolCalls || []).length > 0) {
-    msg.innerHTML = renderToolGroupBlock(toolCalls.map((tc) => ({
-      type: 'tool_call',
-      name: tc.name,
-      argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
-      resultText: null,
-      state: 'success'
-    })));
-  }
-  if (content) {
+  const callOf = (tc) => ({
+    type: 'tool_call',
+    name: tc.name,
+    argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
+    resultText: null,
+    state: 'success'
+  });
+  const appendBubble = (text) => {
     const bubbleEl = document.createElement('div');
     bubbleEl.className = 'msg-bubble';
-    writeMarkdown(bubbleEl, renderMarkdown(content));
+    writeMarkdown(bubbleEl, renderMarkdown(text));
     msg.appendChild(bubbleEl);
-    contentEl = bubbleEl;
+  };
+  if (Array.isArray(blocks) && blocks.length > 0) {
+    // 块序即发生序：相邻 tool 块收进同一组，文本块独立成气泡（与实时流分段规则一致）
+    let group = null;
+    const flushGroup = () => {
+      if (group) {
+        msg.insertAdjacentHTML('beforeend', renderToolGroupBlock(group));
+        group = null;
+      }
+    };
+    for (const b of blocks) {
+      if (b && b.type === 'text' && b.text) {
+        flushGroup();
+        appendBubble(b.text);
+      } else if (b && b.type === 'tool') {
+        const tc = (toolCalls || []).find((c) => b.id && c.id === b.id) || {};
+        group = group || [];
+        group.push(callOf(tc));
+      }
+    }
+    flushGroup();
+  } else {
+    if ((toolCalls || []).length > 0) {
+      msg.insertAdjacentHTML('beforeend', renderToolGroupBlock((toolCalls || []).map(callOf)));
+    }
+    if (content) appendBubble(content);
   }
-  // 无文本内容时，用 msg 本身作为容器（文件卡片可直接追加到 msg）
-  if (!contentEl) contentEl = msg;
+  // 卡片统一挂到消息末尾（实时流 contentEl 同语义）：文本气泡之后、互不嵌套
   messagesEl.appendChild(msg);
   scrollToBottom(false);
-  return { msgEl: msg, contentEl: contentEl };
+  return { msgEl: msg, contentEl: msg };
 }
 
 /** 工具分组块（默认折叠） */
@@ -918,11 +958,14 @@ function ensureReply(replyId) {
   messagesEl.appendChild(div);
   const r = {
     replyId,
-    text: '',
     thinking: '',
     thinkingActive: false,
     toolCalls: {},     // tcId -> call
-    toolOrder: [],
+    // 段落尾指针：contentEl 内的段落（思考块/文本气泡/工具组/卡片）按事件到达顺序排列，
+    // 连续同类段落合并进同一段——tailText 是末尾文本气泡，tailTools 是末尾工具组
+    tailTextEl: null,
+    tailText: '',
+    tailTools: null,
     elapsedStart: Date.now(),
     usage: { input: 0, output: 0 },
     modelCalls: 0,
@@ -959,6 +1002,7 @@ function finishReply(replyId) {
   const r = replyId ? (replyMap[replyId] || null) : currentReply;
   if (r) {
     r.thinkingActive = false;
+    closeTextTail(r); // 末段文本的光标随回复终结移除
     updateReplyFooter(r, false);
   }
   if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
@@ -966,7 +1010,20 @@ function finishReply(replyId) {
 
 // ---------- 思维链 ----------
 
+/** 收尾文本段：光标随段终结移除（分段后各段独立存在，不清理会永久闪烁） */
+function closeTextTail(r) {
+  if (r.tailTextEl) {
+    const cur = r.tailTextEl.querySelector('.cursor');
+    if (cur) cur.remove();
+  }
+  r.tailTextEl = null;
+  r.tailText = '';
+}
+
 function ensureThinking(r) {
+  // 思考是独立段落：开始新思考意味着上一段文本/工具组收尾，后续内容按到达顺序另起一段
+  closeTextTail(r);
+  r.tailTools = null;
   if (!r.activeThinkingEl) {
     const el = document.createElement('div');
     el.className = 'thinking-block';
@@ -981,6 +1038,8 @@ function ensureThinking(r) {
         if (div.isConnected) lbl.textContent = 'thinking for ' + ctx.utils.formatDuration((Date.now() - start) / 1000);
         else clearInterval(iv);
       }, 1000);
+      // 挂在元素上，endThinking 收尾时清除（修 #64：否则「定格」标签一秒内被覆写回计时）
+      el._thinkingTimer = iv;
     })(el, Date.now());
   }
   return r.activeThinkingEl;
@@ -997,6 +1056,10 @@ function appendThinkingDelta(r, delta) {
 function endThinking(r) {
   r.thinkingActive = false;
   if (r.activeThinkingEl) {
+    if (r.activeThinkingEl._thinkingTimer) {
+      clearInterval(r.activeThinkingEl._thinkingTimer);
+      r.activeThinkingEl._thinkingTimer = null;
+    }
     const lbl = r.activeThinkingEl.querySelector('.thinking-label');
     if (lbl) lbl.textContent = 'thinking (' + r.thinking.length + ' chars)';
     r.activeThinkingEl.querySelector('.thinking-body').classList.remove('open');
@@ -1006,36 +1069,61 @@ function endThinking(r) {
 
 // ---------- 工具流式渲染 ----------
 
-function ensureToolTextEl(r) {
-  if (!r.textEl) {
+/** 末尾文本气泡：不存在就新开一段。工具组/思考块插入过即视为上一段文本完结，
+ *  之后的文本另起一条气泡——模型的开场白因此能留在它那批工具步骤的上方 */
+function ensureTextBubble(r) {
+  if (!r.tailTextEl) {
+    r.tailTools = null; // 文本段开始：前面连续的工具调用收成一个组，之后的工具另起一组
     const el = document.createElement('div');
     el.className = 'msg-bubble';
-    r.contentEl.parentNode.insertBefore(el, r.contentEl.nextSibling);
-    r.textEl = el;
+    r.contentEl.appendChild(el);
+    r.tailTextEl = el;
+    r.tailText = '';
   }
-  return r.textEl;
+  return r.tailTextEl;
 }
 
+/** 文本增量渲染（主回复与远程面板共用）：Markdown 写入后追加光标节点
+ *  ——cursor span 在 sanitize 之外，不参与解析，避免被吞；按段独立 innerHTML 重写，
+ *  段落之间互不覆盖工具组/卡片 */
+function appendTextDelta(r, delta) {
+  endThinking(r);
+  const el = ensureTextBubble(r);
+  r.tailText += delta;
+  writeMarkdown(el, renderMarkdown(r.tailText));
+  const cur = document.createElement('span');
+  cur.className = 'cursor';
+  el.appendChild(cur);
+}
+
+/** 末尾工具组：连续的工具调用合并进同一组；文本/思考段落插入后即收尾，之后的工具另起一组 */
 function ensureToolGroupEl(r) {
-  if (!r.toolsGroupEl) {
+  if (!r.tailTools) {
+    closeTextTail(r);
     const wrap = document.createElement('div');
     wrap.className = 'tool-group';
     wrap.innerHTML = '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">' +
       '<span class="tg-arrow">▶</span><span class="tg-title"></span></div>' +
       '<div class="tool-group-body"></div>';
     r.contentEl.appendChild(wrap);
-    r.toolsGroupEl = wrap;
-    r.toolsBodyEl = wrap.querySelector('.tool-group-body');
-    r.toolsTitleEl = wrap.querySelector('.tg-title');
+    r.tailTools = {
+      bodyEl: wrap.querySelector('.tool-group-body'),
+      titleEl: wrap.querySelector('.tg-title'),
+      tcIds: []
+    };
   }
-  return r.toolsGroupEl;
+  return r.tailTools;
 }
 
 function onToolCallStart(r, tcId, name) {
   if (!pendingToolCalls[tcId]) pendingToolCalls[tcId] = { name, argsRaw: '', argsText: '', resultRaw: null, state: null };
   if (r.toolCalls[tcId]) return; // 已存在
-  r.toolCalls[tcId] = pendingToolCalls[tcId];
-  r.toolOrder.push(tcId);
+  const tc = pendingToolCalls[tcId];
+  r.toolCalls[tcId] = tc;
+  endThinking(r); // 行动开始：思考段收尾（标签定格，不再计时）
+  const g = ensureToolGroupEl(r);
+  tc.group = g; // 行归属组：结果/摘要晚于下一段文本时仍能找到正确的组重建
+  g.tcIds.push(tcId);
   const rowEl = document.createElement('div');
   rowEl.className = 'tool-call-row shimmer';
   rowEl.dataset.tcid = tcId;
@@ -1043,9 +1131,13 @@ function onToolCallStart(r, tcId, name) {
     '<span class="tc-state">' + ctx.utils.toolStateIcon('running') + '</span>' +
     '<span class="tc-toggle">▶</span>';
   rowEl.addEventListener('click', () => window.App.toolRowToggle(rowEl));
-  ensureToolGroupEl(r);
-  r.toolsBodyEl.appendChild(rowEl);
-  updateToolGroupTitle(r);
+  g.bodyEl.appendChild(rowEl);
+  updateToolGroupTitle(r, g);
+  // 远程委派开始：开远程调用面板承接后续转发事件。仅限顶层回复（r.replyId 存在）——
+  // 嵌套委派（修 #70）时 r 是面板视图对象，创建 replyId=undefined 的孙面板会抢占
+  // activeRemotePanel，其后所有远端转发事件被 routeRemoteEvent 的 replyId 校验静默
+  // 丢弃，子面板冻死；嵌套 spawn 降级为面板内普通工具行展示
+  if (name === 'agent_spawn' && r.replyId) ensureRemotePanel(r, tcId);
   scrollToBottom(false);
 }
 
@@ -1055,15 +1147,23 @@ function onToolCallDelta(r, tcId, delta) {
   tc.argsRaw = (tc.argsRaw || '') + delta;
   try { tc.argsText = JSON.stringify(JSON.parse(tc.argsRaw), null, 2); }
   catch { tc.argsText = tc.argsRaw; }
-  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  const rowEl = findToolRowEl(r, tcId);
   if (rowEl) rowEl.classList.remove('shimmer');
-  updateToolGroupTitle(r);
+  updateToolGroupTitle(r, tc.group);
+  // spawn 入参流式到达：同步远程面板头（agent 名/任务文本）
+  syncRemotePanelArgs(remotePanels[tcId], tc.argsRaw);
 }
 
 function onToolCallEnd(r, tcId) {
-  const rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  const tc = pendingToolCalls[tcId];
+  const rowEl = findToolRowEl(r, tcId);
   if (rowEl) rowEl.classList.remove('shimmer');
-  updateToolGroupTitle(r);
+  updateToolGroupTitle(r, tc && tc.group);
+}
+
+/** 行全局查找：行归属各自的组，不假设它在末尾组里 */
+function findToolRowEl(r, tcId) {
+  return r.contentEl ? r.contentEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
 }
 
 function onToolCallSummary(r, tcId, summary, toolName) {
@@ -1075,17 +1175,18 @@ function onToolCallSummary(r, tcId, summary, toolName) {
     pendingToolCalls[tcId] = tc;
     tc.summary = summary;
   }
-  let rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+  let rowEl = findToolRowEl(r, tcId);
   // confirm-stream 会创建新的回复容器，但恢复段不会重发 TOOL_CALL_START。
   // 摘要帧因此可能是当前回复里该 toolCallId 的首个可见事件：补建行后再更新标题。
   if (!rowEl) {
     onToolCallStart(r, tcId, toolName || (tc && tc.name) || 'tool');
-    rowEl = r.toolsBodyEl ? r.toolsBodyEl.querySelector('[data-tcid="' + ctx.utils.esc(tcId) + '"]') : null;
+    rowEl = findToolRowEl(r, tcId);
   }
   const nameEl = rowEl ? rowEl.querySelector('.tc-name') : null;
   if (nameEl) nameEl.textContent = summary;
-  rebuildToolRows(r);
-  updateToolGroupTitle(r);
+  const g = (tc && tc.group) || r.tailTools;
+  rebuildToolRows(r, g);
+  updateToolGroupTitle(r, g);
 }
 
 function onToolResultPreview(r, tcId, preview) {
@@ -1108,13 +1209,15 @@ function onToolResultDelta(r, tcId, delta) {
 function onToolResultEnd(r, tcId, state) {
   const tc = pendingToolCalls[tcId];
   if (tc) tc.state = state;
-  rebuildToolRows(r);
-  updateToolGroupTitle(r);
+  const g = (tc && tc.group) || r.tailTools;
+  rebuildToolRows(r, g);
+  updateToolGroupTitle(r, g);
 }
 
-function rebuildToolRows(r) {
-  if (!r.toolsBodyEl) return;
-  r.toolsBodyEl.innerHTML = r.toolOrder.map((tcId) => {
+function rebuildToolRows(r, g) {
+  g = g || r.tailTools;
+  if (!g) return;
+  g.bodyEl.innerHTML = g.tcIds.map((tcId) => {
     const tc = r.toolCalls[tcId] || {};
     return renderToolRow({
       name: tc.name,
@@ -1127,12 +1230,135 @@ function rebuildToolRows(r) {
   scrollToBottom(false);
 }
 
-function updateToolGroupTitle(r) {
-  if (!r.toolsTitleEl) return;
-  const calls = r.toolOrder.map((id) => r.toolCalls[id] || {}).filter((c) => c.name);
+function updateToolGroupTitle(r, g) {
+  g = g || r.tailTools;
+  if (!g || !g.titleEl) return;
+  const calls = g.tcIds.map((id) => r.toolCalls[id] || {}).filter((c) => c.name);
   if (calls.length === 0) return;
   const summary = summarizeToolCalls(calls);
-  r.toolsTitleEl.textContent = summary.title;
+  g.titleEl.textContent = summary.title;
+}
+
+// ---------- 远程子 agent 调用面板（Agent Protocol 远程委派可视化） ----------
+
+/**
+ * spawn 调用开始 → 开远程调用面板。面板独立成段嵌在当前回复内容流（spawn 工具行之后），
+ * 远端子 agent 回流的思考/文本/工具调用经 routeRemoteEvent 嵌套展示在面板内。
+ */
+function ensureRemotePanel(r, spawnTcId) {
+  if (remotePanels[spawnTcId]) return remotePanels[spawnTcId];
+  const el = document.createElement('div');
+  el.className = 'remote-call open';
+  el.innerHTML =
+    '<div class="rc-header" onclick="window.App.remoteCallToggle(this)">' +
+      '<span class="rc-icon">🛰</span>' +
+      '<span class="rc-agent">远程 Agent</span>' +
+      '<span class="rc-status running">调用中</span>' +
+      '<span class="rc-arrow">▶</span>' +
+    '</div>' +
+    '<div class="rc-body">' +
+      '<div class="rc-task" style="display:none"></div>' +
+      '<div class="rc-events"></div>' +
+      '<div class="rc-footer" style="display:none"></div>' +
+    '</div>';
+  r.contentEl.appendChild(el);
+  r.tailTools = null; // 面板独立成段：后续 lead 工具调用另起新组，不与 spawn 行混排
+  const p = {
+    tcId: spawnTcId,
+    replyId: r.replyId,
+    el,
+    agentEl: el.querySelector('.rc-agent'),
+    statusEl: el.querySelector('.rc-status'),
+    taskEl: el.querySelector('.rc-task'),
+    eventsEl: el.querySelector('.rc-events'),
+    footerEl: el.querySelector('.rc-footer'),
+    agent: '',
+    taskDone: false,
+    done: false,
+    // 复用主回复渲染助手的视图对象（形状与 reply builder 一致：contentEl/tail*/toolCalls/…）
+    view: {
+      contentEl: el.querySelector('.rc-events'),
+      tailTextEl: null,
+      tailText: '',
+      tailTools: null,
+      toolCalls: {},
+      thinking: '',
+      thinkingActive: false,
+      activeThinkingEl: null
+    }
+  };
+  remotePanels[spawnTcId] = p;
+  activeRemotePanel = p;
+  lastRemotePanel = p;
+  scrollToBottom(false);
+  return p;
+}
+
+/** 远端转发事件路由：复用主回复的思考/文本/工具行渲染，嵌套展示进活跃面板 */
+function routeRemoteEvent(r, data) {
+  const p = activeRemotePanel;
+  if (!p || p.replyId !== r.replyId) return; // 无活跃面板时丢弃（正常时序下 spawn START 先到）
+  const rv = p.view;
+  switch (data.type) {
+    case 'THINKING_BLOCK_DELTA': appendThinkingDelta(rv, data.delta || ''); break;
+    case 'THINKING_BLOCK_END': endThinking(rv); break;
+    case 'TEXT_BLOCK_DELTA': appendTextDelta(rv, data.delta || ''); scrollToBottom(false); break;
+    case 'TOOL_CALL_START':
+      onToolCallStart(rv, data.toolCallId, data.toolName);
+      remoteToolOwner[data.toolCallId] = p;
+      break;
+    case 'TOOL_CALL_DELTA': onToolCallDelta(rv, data.toolCallId, data.delta); break;
+    case 'TOOL_CALL_END': onToolCallEnd(rv, data.toolCallId); break;
+    case 'TOOL_RESULT_START': onToolResultStart(rv, data.toolCallId); break;
+    case 'TOOL_RESULT_TEXT_DELTA': onToolResultDelta(rv, data.toolCallId, data.delta); break;
+    case 'TOOL_RESULT_END': onToolResultEnd(rv, data.toolCallId, data.state); break;
+    default: break; // MODEL_CALL_* 等远端帧不进面板（usage 只累计 lead 自身，避免混计）
+  }
+}
+
+function remotePanelStatus(p, text, cls) {
+  if (!p) return;
+  p.statusEl.textContent = text;
+  p.statusEl.className = 'rc-status ' + (cls || '');
+}
+
+function showRemoteFooter(p, text) {
+  if (!p || !text) return;
+  p.footerEl.style.display = '';
+  p.footerEl.textContent = text;
+}
+
+/** 远端工具摘要/预览帧（合成帧无 source，按 tcId 归属路由）：更新面板内对应工具行 */
+function onRemoteToolSummary(p, tcId, summary) {
+  if (p && summary) onToolCallSummary(p.view, tcId, summary);
+}
+function onRemoteToolPreview(p, tcId, preview) {
+  if (p && preview) onToolResultPreview(p.view, tcId, preview);
+}
+
+/** spawn 入参增量同步到面板头（agent_id/task 到达即展示，不等调用收口；
+ *  兼容未闭合的流式 JSON 片段，task 多行时只显示首行、完整文本进 title 悬浮） */
+function syncRemotePanelArgs(p, argsRaw) {
+  if (!p || !argsRaw) return;
+  const mAgent = argsRaw.match(/"agent_id"\s*:\s*"([^"]+)"/);
+  if (mAgent && mAgent[1] !== p.agent) {
+    p.agent = mAgent[1];
+    p.agentEl.textContent = p.agent;
+  }
+  if (!p.taskDone) {
+    const mFull = argsRaw.match(/"task"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const mPart = !mFull && argsRaw.match(/"task"\s*:\s*"((?:[^"\\]|\\.)*)$/);
+    const captured = mFull ? mFull[1] : (mPart ? mPart[1] : null);
+    if (captured != null) {
+      let task = captured;
+      try { task = JSON.parse('"' + captured + '"'); } catch (e) { /* 转义序列未到齐时用原文 */ }
+      const text = String(task);
+      p.taskEl.textContent = '任务：' + text.split('\n')[0];
+      p.taskEl.title = text;
+      p.taskEl.style.display = '';
+      if (mFull) p.taskDone = true;
+    }
+  }
 }
 
 // ---------- 文件下载卡片（file_ready） ----------
@@ -1214,9 +1440,8 @@ function renderConfirmCard(r, data) {
   card.querySelector('[data-act="reject"]').addEventListener('click', () =>
     submitConfirm(calls, false));
 
-  // 卡片插到回复气泡之后（等同工具组位置）
-  const anchor = r.textEl || r.contentEl;
-  anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  // 卡片作为独立段落挂在回复内容末尾（工具组之后），确认后由 dismissConfirmCard 移除
+  r.contentEl.appendChild(card);
   pendingConfirm = { replyId: r.replyId, calls, cardEl: card };
   scrollToBottom(true);
 }
@@ -1327,8 +1552,7 @@ function renderMcpAppCard(r, data) {
     '</div>' +
     '<div class="mcp-apps-body"><div class="mcp-apps-loading">加载中…</div></div>';
   card.querySelector('.mcp-apps-header').addEventListener('click', () => card.classList.toggle('open'));
-  // 挂载到回复内容容器（textEl 会被 TEXT_BLOCK_DELTA 的 innerHTML 整体重写，
-  // 若工具调用发生在文本输出之后，卡片会被误清，故固定挂 contentEl，与工具行一致）
+  // 挂载到回复内容容器末尾：文本按段渲染后各段独立重写，卡片不会被文本覆盖
   const anchor = r.contentEl;
   anchor.appendChild(card);
   const bodyEl = card.querySelector('.mcp-apps-body');
@@ -1390,12 +1614,8 @@ function renderAppConfirmCard(call) {
     };
     card.querySelector('[data-act="approve"]').addEventListener('click', () => settle(true));
     card.querySelector('[data-act="reject"]').addEventListener('click', () => settle(false));
-    const anchor = currentReply ? (currentReply.textEl || currentReply.contentEl) : messagesEl;
-    if (anchor && anchor.parentNode) {
-      anchor.parentNode.insertBefore(card, anchor.nextSibling);
-    } else if (anchor) {
-      anchor.appendChild(card);
-    }
+    const anchor = currentReply ? currentReply.contentEl : messagesEl;
+    if (anchor) anchor.appendChild(card);
     scrollToBottom(true);
   });
 }
@@ -1420,9 +1640,21 @@ function parseToolArgs(argsRaw) {
 // block 事件统一归入当前 agent 回复，不按 block replyId 另建气泡。
 
 function handleEvent(data) {
+  // 远端转发事件（SSE 帧带 source）：只影响「远程调用面板」，绝不能触碰主回复生命周期
+  // ——转发的 AGENT_START/AGENT_END 携带远端自己的 replyId，若走下方通用处理会另开
+  // 气泡、提前 finishReply（后端收尾 guard 同理，见 AgentEventSseSerializer#isRemoteForwarded）
+  const isRemote = !!data.source;
   // agent 生命周期事件：切换/收尾当前回复
   if (data.type === 'AGENT_START') {
+    if (isRemote) {
+      remotePanelStatus(activeRemotePanel, '子任务运行中', 'running');
+      return;
+    }
     const rr = ensureReply(data.replyId || 'reply-' + Date.now());
+    // 新回合开始：上一回合的面板登记失效（重连回放时 spawn TOOL_CALL_START 会重建面板）
+    remotePanels = {};
+    activeRemotePanel = null;
+    Object.keys(remoteToolOwner).forEach((k) => delete remoteToolOwner[k]);
     setConnecting('chatTitle', true);
     isStreaming = true;
     sendBtn.disabled = true;
@@ -1434,6 +1666,10 @@ function handleEvent(data) {
     return;
   }
   if (data.type === 'AGENT_END') {
+    if (isRemote) {
+      remotePanelStatus(activeRemotePanel, '子任务完成', 'done');
+      return;
+    }
     finishReply(currentReply ? currentReply.replyId : null);
     currentReply = null;
     isStreaming = false;
@@ -1451,18 +1687,15 @@ function handleEvent(data) {
   // block 事件：归入当前 agent 回复（无活跃回复时用自身 replyId 兜底占位）
   const r = currentReply || (data.replyId ? ensureReply(data.replyId) : null);
   if (!r) return;
+  if (isRemote) {
+    routeRemoteEvent(r, data);
+    return;
+  }
 
   switch (data.type) {
     case 'TEXT_BLOCK_DELTA': {
       if (r) {
-        r.text += (data.delta || '');
-        endThinking(r);
-        // Markdown 写入后追加光标节点：cursor span 在 sanitize 之外，不参与解析，避免被吞
-        const el = ensureToolTextEl(r);
-        writeMarkdown(el, renderMarkdown(r.text));
-        const cur = document.createElement('span');
-        cur.className = 'cursor';
-        el.appendChild(cur);
+        appendTextDelta(r, data.delta || '');
       }
       scrollToBottom(false);
       break;
@@ -1513,17 +1746,51 @@ function handleEvent(data) {
         } else {
           onToolResultEnd(r, data.toolCallId, data.state);
         }
+        // spawn 调用收口：远程面板定格终态并停止接收转发事件（结果预览随后落 footer）
+        const sp = remotePanels[data.toolCallId];
+        if (sp) {
+          remotePanelStatus(sp, data.state === 'SUCCESS' ? '已完成' : '失败',
+            data.state === 'SUCCESS' ? 'done' : 'error');
+          sp.done = true;
+          if (activeRemotePanel === sp) activeRemotePanel = null;
+        }
       }
       break;
     }
     case 'tool_call_summary': {
+      // 远端工具的摘要帧（合成帧无 source，按 tcId 归属路由进面板）
+      if (remoteToolOwner[data.toolCallId]) {
+        onRemoteToolSummary(remoteToolOwner[data.toolCallId], data.toolCallId, data.summary);
+        break;
+      }
       // 后端已拼好 delta 参数并解析出关键字段：直接把工具行标题换成「创建 x.js 408行」
       if (r) onToolCallSummary(r, data.toolCallId, data.summary, data.toolName);
       break;
     }
     case 'tool_result_preview': {
-      // 「输出 …」：结果首行（失败时为终态文案）
-      if (r) onToolResultPreview(r, data.toolCallId, data.preview);
+      // 远端工具的预览帧同理按归属路由
+      if (remoteToolOwner[data.toolCallId]) {
+        onRemoteToolPreview(remoteToolOwner[data.toolCallId], data.toolCallId, data.preview);
+        break;
+      }
+      // 「输出 …」：结果首行（失败时为终态文案）；spawn 的预览同时落远程面板 footer
+      if (r) {
+        onToolResultPreview(r, data.toolCallId, data.preview);
+        const sp = remotePanels[data.toolCallId];
+        if (sp && data.preview) showRemoteFooter(sp, '结果：' + data.preview);
+      }
+      break;
+    }
+    case 'subagent_exposed': {
+      // 子 agent 调用收口（AgentSpawnTool 结果返回时后端合成）：面板定格终态标记
+      const sp = activeRemotePanel || lastRemotePanel;
+      if (sp) {
+        const who = data.agent_id || data.label || data.subagent_id || '子 Agent';
+        sp.done = true;
+        remotePanelStatus(sp, '子任务完成', 'done');
+        showRemoteFooter(sp, '✔ ' + who + ' 子任务已返回');
+        if (activeRemotePanel === sp) activeRemotePanel = null;
+      }
       break;
     }
     case 'MODEL_CALL_START': {
@@ -1723,7 +1990,14 @@ async function sendMessage() {
       // A2A 链路无 model 入参（ChatRequest.model 仅存在于 /threads/chat，
       // 见 docs/session-model-switch-design.md §5.5），只能靠 session_user.model 绑定路由，
       // 故发送前先 PATCH 落库；新会话此刻 sid 已在客户端生成，可直接绑定。
-      await bindSessionModel(sid, model || 'system');
+      // PATCH 失败（如模型刚被禁用 400 model_disabled）不得照发消息——否则消息以
+      // 服务端旧绑定/回落模型发出，而下拉框仍显示所选模型，恰是本设计要消灭的
+      // 「界面显示与服务端绑定不一致」形态（修 #43）
+      const bound = await bindSessionModel(sid, model || 'system');
+      if (!bound) {
+        ctx.utils.toast('模型绑定失败，消息未发送——请重选模型', 'error');
+        return;
+      }
       await sendA2AStream(text, sid);
     }
   }

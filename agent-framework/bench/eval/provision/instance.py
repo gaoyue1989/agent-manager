@@ -68,8 +68,12 @@ def start_mock(catalog_path: Path, runtime_dir: Path) -> subprocess.Popen:
 
 
 def start_instance(repo_dir: Path, runtime_dir: Path, target_llm: dict[str, str],
-                   plugin_marker: str = "eval-ok") -> str:
-    """docker 起被测实例（--network host → 直连本机 MySQL/Redis/mock），返回 base_url。"""
+                   plugin_marker: str = "eval-ok", extra_envs: dict[str, str] | None = None) -> str:
+    """docker 起被测实例（--network host → 直连本机 MySQL/Redis/mock），返回 base_url。
+
+    extra_envs：回放供给等场景覆盖/追加环境变量（如 SANDBOX_ENABLED、OPENSANDBOX_SERVER_URL、
+    AGENT_REDIS_PREFIX），同键覆盖默认值。
+    """
     jars = sorted((repo_dir / "target").glob("agent-framework-*.jar"))
     if not jars:
         raise RuntimeError("缺少 agent-framework jar（先 mvn -DskipTests package）")
@@ -91,6 +95,7 @@ def start_instance(repo_dir: Path, runtime_dir: Path, target_llm: dict[str, str]
         "EVAL_PLUGIN_MARKER": plugin_marker,
         "JAVA_OPTS": "-Xmx768m",
     }
+    envs.update(extra_envs or {})
     cmd = ["docker", "run", "-d", "--name", CONTAINER, "--network", "host",
            "-v", f"{repo_dir / 'target'}:/app:ro", "-v", f"{runtime_dir}:/runtime"]
     for k, v in envs.items():

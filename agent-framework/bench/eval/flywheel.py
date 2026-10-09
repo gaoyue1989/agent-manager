@@ -78,6 +78,9 @@ def _summary_row(task_id: str, trace: dict[str, Any], trace_path: str) -> dict[s
         "task_id": task_id, "case_id": trace["case_id"], "session_id": trace["session_id"],
         "repeat_no": trace["repeat_no"], "status": trace["status"],
         "duration_ms": trace["duration_ms"],
+        # 首帧/启动延迟单列（issue #87）：区分环境排队与用例本身慢
+        "first_event_ms": view.get("first_event_ms"),
+        "agent_start_ms": view.get("agent_start_ms"),
         "event_count": len(trace["events"]),
         "tool_call_count": len(view["tool_calls"]),
         "input_tokens": view["token_usage"]["input"],
@@ -243,7 +246,9 @@ async def cmd_run(args: argparse.Namespace) -> int:
 
         meta = {"commit": commit, "track": "trend", "trigger": "manual",
                 "base_url": base_url, "repeat": args.repeat,
-                "since": since, "case_count": len(by_case)}
+                "since": since, "case_count": len(by_case),
+                # 帧序契约口径（issue #86 断代注记）：写入报告头/账本，跨轮对比先核对
+                "contract": sse_client.MAPPING.get("version")}
         report = rca_mod.build_report(task_id, meta, traces, skipped, analyses, judge_results)
         (task_dir / "report.md").write_text(report, encoding="utf-8")
 
@@ -267,6 +272,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
                          "total_score": (sum(r["score"] for r in judge_results.values())
                                          / len(judge_results)) if judge_results else None,
                          "judge_model": judge_model,
+                         "contract": sse_client.MAPPING.get("version"),
                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
     finally:
         # ---- 会话清理：评测完成/后续阶段崩溃/中断都执行（共享实例不留垃圾） ----
@@ -385,8 +391,88 @@ def cmd_status(_: argparse.Namespace) -> int:
             if line.strip():
                 r = json.loads(line)
                 score = f" score={r['total_score']:.2f}" if r.get("total_score") is not None else ""
-                print(f"{r['ts']}  {r['task_id']}  通过率 {r['pass_rate']:.0%}{score}")
+                # 契约口径列（issue #86 断代）：旧行无此字段显示 "-"，跨轮对比注意口径差异
+                contract = f" 契约={r['contract']}" if r.get("contract") else " 契约=-"
+                print(f"{r['ts']}  {r['task_id']}  通过率 {r['pass_rate']:.0%}{score}{contract}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# 离线评测链路（设计 docs/design/agent-framework-eval-offline-record-replay-design.md）：
+# pack（录制数据 → evalpack）/ replay（离线回放 + 轨迹等价）/ live（联机链路评测）
+# ---------------------------------------------------------------------------
+
+def cmd_pack(args: argparse.Namespace) -> int:
+    from replay import packager
+    out = packager.pack(
+        collector_dir=args.collector_dir, out_dir=args.out, ns=args.ns,
+        traces_dir=args.traces, oaf_zip=args.oaf_zip,
+        since=args.since, until=args.until, framework_version=_git_commit8())
+    with open(Path(out) / "manifest.json", encoding="utf-8") as f:
+        manifest = json.load(f)
+    print(f"[pack] evalpack={out} 会话={len(manifest['sessions'])} "
+          f"交互={manifest['stats']} zip={out}.zip")
+    if args.export_e2e_fixtures:
+        from replay.evolve import export_e2e_fixtures
+        export_e2e_fixtures(str(out), args.fixtures_dir)
+    return 0
+
+
+async def cmd_replay(args: argparse.Namespace) -> int:
+    from replay import runner
+    judge_cfg = None
+    if args.judge:
+        from graders.correctness import judge_from_env
+        judge_cfg = judge_from_env()
+        if judge_cfg is None:
+            print("[judge] 跳过（未配置 EVAL_LLM_*）")
+
+    if args.provision:
+        # M2 provision pack 化：evalpack → 独立存储 + 受测 jar（docker）+ 三回放器
+        from provision import replay_pack
+        result = replay_pack.provision_replay(
+            repo_dir=REPO_DIR, eval_dir=EVAL_DIR, pack_dir=args.pack, out_dir=args.out,
+            mode=args.mode, judge_cfg=judge_cfg,
+            case_ids=(args.only.split(",") if args.only else None))
+        return result["exit_code"]
+
+    if args.rebase:
+        # 基线演进：loose 回放（不阻断）→ 捕获实际请求 → 生成新基线包（响应保持录制件）
+        from replay import evolve
+        proc, llm_port = runner.start_replay_llm(
+            args.pack, [r for r in (args.rewrite or "").split(",") if "=" in r])
+        try:
+            code = await runner.run_replay(
+                pack_dir=args.pack, out_dir=args.out,
+                base_url=args.base_url or _default_base_url(), mode="loose",
+                case_ids=(args.only.split(",") if args.only else None),
+                judge_cfg=judge_cfg, replayer=(proc, llm_port))
+            new_pack = evolve.rebase_pack(args.pack, llm_port, args.rebase,
+                                          note=args.rebase_note or "")
+        finally:
+            proc.terminate()
+        return 0 if new_pack.exists() and code in (0, 1) else 1
+
+    rewrites = [r for r in (args.rewrite or "").split(",") if "=" in r]
+    return await runner.run_replay(
+        pack_dir=args.pack, out_dir=args.out, base_url=args.base_url or _default_base_url(),
+        mode=args.mode, case_ids=(args.only.split(",") if args.only else None),
+        judge_cfg=judge_cfg, rewrites=rewrites, keep_replayer=args.keep_replayer)
+
+
+async def cmd_live(args: argparse.Namespace) -> int:
+    from replay import runner
+    judge_cfg = None
+    if args.judge:
+        from graders.correctness import judge_from_env
+        judge_cfg = judge_from_env()
+        if judge_cfg is None:
+            print("[judge] 跳过（未配置 EVAL_LLM_*）")
+    return await runner.run_live(
+        base_url=args.base_url or _default_base_url(), out_dir=args.out,
+        pack_dir=args.pack, cases_dir=str(CASES_DIR) if args.cases else None,
+        case_ids=(args.only.split(",") if args.only else None),
+        judge_cfg=judge_cfg, timeout_s=args.timeout)
 
 
 def cmd_selftest(_: argparse.Namespace) -> int:
@@ -397,6 +483,7 @@ def cmd_selftest(_: argparse.Namespace) -> int:
 
     events = [
         {"t_ms": 0, "type": "session_created", "raw": {"type": "session_created", "session_id": "s1"}},
+        {"t_ms": 5, "type": "AGENT_START", "raw": {"type": "AGENT_START"}},
         {"t_ms": 10, "type": "MODEL_CALL_END",
          "raw": {"type": "MODEL_CALL_END", "inputTokens": 100, "outputTokens": 20, "totalTokens": 120}},
         {"t_ms": 20, "type": "TOOL_CALL_START",
@@ -416,6 +503,9 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert view["tool_calls"][0]["result_state"] == "SUCCESS"
     assert view["terminal"] == "done"
     assert view["frame_counts"]["session_created"] == 1
+    # 首帧/启动延迟字段（issue #87）：first_event 排除 session_created
+    assert view["first_event_ms"] == 5, view["first_event_ms"]
+    assert view["agent_start_ms"] == 5, view["agent_start_ms"]
 
     ok = checks_mod.evaluate({
         "frames": {"done": 1, "error": 0, "file_ready": ">=0"},
@@ -446,6 +536,61 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert hview["terminal"] == "permission_ask"
     assert hview["hitl"]["asks"][0]["tools"] == ["publish_service"]
     assert hview["hitl"]["asks"][0]["tool_calls"][0]["tool_call_id"] == "c9"
+    # 挂起判定（issue #86）：不依赖终帧，按内容配对——旧序（permission_ask 终止）下挂起
+    assert hview["hitl"]["pending"] is True, hview["hitl"]
+
+    # 4db16ba+ 新序（2026-10-01 契约 v2）：ask 段以 AGENT_END 自然收尾，
+    # 终帧不再是 permission_ask，但 hitl.pending 仍须判定挂起
+    # （基线剔除普通轮的 AGENT_END@50/done@60：ask 主段自身以 AGENT_END 收尾一次）
+    ask_main = [e for e in events if e["type"] not in ("done", "AGENT_END")] + [
+        {"t_ms": 60, "type": "TOOL_CALL_START",
+         "raw": {"type": "TOOL_CALL_START", "toolName": "publish_service", "toolCallId": "c9"}},
+        {"t_ms": 70, "type": "permission_ask",
+         "raw": {"type": "permission_ask", "reply_id": "r1",
+                 "tool_calls": [{"tool_call_id": "c9", "name": "publish_service", "input": {}}]}},
+        {"t_ms": 71, "type": "REQUEST_STOP", "raw": {"type": "REQUEST_STOP"}},
+        {"t_ms": 72, "type": "AGENT_RESULT", "raw": {"type": "AGENT_RESULT"}},
+        {"t_ms": 73, "type": "AGENT_END", "raw": {"type": "AGENT_END"}},
+    ]
+    aview = sse_client.build_view(ask_main)
+    assert aview["terminal"] == "AGENT_END", aview["terminal"]
+    assert aview["hitl"]["pending"] is True, aview["hitl"]
+    # 确认续段并入后：配对补齐 → 不再挂起；合并轨迹 2 个 AGENT_END（用例期望同步为 2）
+    merged = ask_main + [
+        {"t_ms": 80, "type": "USER_CONFIRM_RESULT", "raw": {"type": "USER_CONFIRM_RESULT"}},
+        {"t_ms": 90, "type": "TOOL_RESULT_END",
+         "raw": {"type": "TOOL_RESULT_END", "toolCallId": "c9", "state": "SUCCESS"}},
+        {"t_ms": 95, "type": "AGENT_END", "raw": {"type": "AGENT_END"}},
+    ]
+    mview = sse_client.build_view(merged)
+    assert mview["hitl"]["pending"] is False, mview["hitl"]
+    assert mview["hitl"]["confirmed"] is True, mview["hitl"]
+    assert mview["frame_counts"]["AGENT_END"] == 2, mview["frame_counts"]
+    r_merged = checks_mod.evaluate({
+        "frames": {"permission_ask": 1, "AGENT_END": 2, "error": 0},
+        "tool_result": {"publish_service": {"ok": True}},
+    }, mview)
+    assert all(c["passed"] for c in r_merged), r_merged
+    # 恢复身份异常兜底：ask 存在但终帧非法（error）→ 判定仍挂起（auto_confirm 会尝试续段），
+    # 异常终帧由 runner 记入 error_info
+    bad_term = sse_client.build_view(ask_main + [
+        {"t_ms": 74, "type": "error", "raw": {"type": "error", "error": "boom"}}])
+    assert bad_term["hitl"]["pending"] is True and bad_term["terminal"] == "error"
+
+    # 启动排队类（issue #87）：timeout + AGENT_START 缺失/过晚 → 环境排队而非用例失败；
+    # 必须先于关键词规则（超时文案含 timeout/超时，旧逻辑会误归模型交互类）
+    q = rca_mod.classify_failure({"status": "timeout", "error_info": "整体超时（>120s）",
+                                  "view": {"error_frames": [], "agent_start_ms": None},
+                                  "check_results": []})
+    assert q["category"] == "启动排队类", q
+    q2 = rca_mod.classify_failure({"status": "timeout", "error_info": "整体超时（>120s）",
+                                   "view": {"error_frames": [], "agent_start_ms": 169000},
+                                   "check_results": []})
+    assert q2["category"] == "启动排队类", q2
+    q3 = rca_mod.classify_failure({"status": "timeout", "error_info": "整体超时（>120s）",
+                                   "view": {"error_frames": [], "agent_start_ms": 800},
+                                   "check_results": []})
+    assert q3["category"] == "模型交互类", q3  # 启动正常的长超时仍归模型/环境类
 
     err_view = sse_client.build_view(events + [
         {"t_ms": 70, "type": "error", "raw": {"type": "error", "error": "config load failed"}}])
@@ -459,6 +604,39 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert no_done["terminal"] == "AGENT_END", no_done["terminal"]
     r2 = checks_mod.evaluate({"frames": {"AGENT_END": 1, "done": 0}}, no_done)
     assert all(c["passed"] for c in r2), r2
+
+    # ---- 离线评测链路（M2 验收③）：归一化规则表 + 轨迹等价评估 ----
+    # 规则与 mock/replay-llm.mjs、mock/replay-http.mjs 内置 JS 版本同构，
+    # 两侧改动必须同步——本段断言即同步钉；gw-hash 为框架 AgentStateStore ID 形态。
+    from replay import normalize as nz
+    from replay import trajectory as traj_mod
+
+    assert nz.normalize_text("at 2026-10-04T07:23:06.770Z ok") == "at <TS> ok"
+    assert nz.normalize_text("id=1791098087123 end") == "id=<TS_MS> end"
+    assert nz.normalize_text("uuid 550e8400-e29b-41d4-a716-446655440000!") == "uuid <UUID>!"
+    assert nz.normalize_text("AgentStateStore ID: gw-3f146047e5fd") == "AgentStateStore ID: <GW>"
+    assert nz.normalize_text("http://127.0.0.1:18902/v1") == "<HOST>/v1"
+    assert nz.normalize_text("tok abcdef0123456789abcdef0123456789 end") == "tok <TOKEN> end"
+    assert nz.normalize_text("max_tokens 1024") == "max_tokens 1024"  # 普通数字不受影响
+    fp1 = nz.request_fingerprint({"messages": [{"role": "user", "content": "hi 2026-01-01T00:00:00Z"}]})
+    assert fp1 == nz.request_fingerprint({"messages": [{"role": "user", "content": "hi 2027-01-01T00:00:00Z"}]})
+    assert fp1 != nz.request_fingerprint({"messages": [{"role": "user", "content": "other"}]})
+
+    stats_ok = {"sessions": {"s1": {"calls": 8, "exact": 7, "normalized": 1, "drift": 0, "background": 1}}}
+    t_ok = traj_mod.evaluate_trajectory("s1", stats_ok, expected_llm_calls=8)
+    assert t_ok["step_status"] == "pass" and t_ok["drift_rate"] == 0.0, t_ok
+    stats_bad = {"sessions": {"s1": {"calls": 8, "exact": 6, "normalized": 1, "drift": 1, "background": 0}}}
+    t_bad = traj_mod.evaluate_trajectory("s1", stats_bad, expected_llm_calls=8)
+    assert t_bad["step_status"] == "fail" and t_bad["drift_rate"] == 0.125, t_bad
+    assert traj_mod.run_drift_rate([t_ok, t_bad]) == 0.0625
+
+    from replay.packager import final_text_from_chunks, usage_from_chunks
+    chunks = [json.dumps({"choices": [{"delta": {"content": "你好"}}]}),
+              json.dumps({"choices": [{"delta": {"content": "，世界"}}]}), "[DONE]"]
+    assert final_text_from_chunks(chunks) == "你好，世界"
+    u = usage_from_chunks([json.dumps({"usage": {"prompt_tokens": 3, "completion_tokens": 2,
+                                                 "total_tokens": 5}})])
+    assert u == {"input": 3, "output": 2, "total": 5}
 
     # issue #39：能力门禁跳过分类（kind）与报告渲染——capability 单列醒目、env 预期分流。
     # 两条用例全部被跳过 → runnable 为空，run_suite 不发起任何网络请求（离线可测）。
@@ -479,8 +657,9 @@ def cmd_selftest(_: argparse.Namespace) -> int:
 
     asyncio.run(_skip_probe())
 
-    print(f"selftest PASS（帧映射 + 检查器 + HITL 视图 + 错误断言 + 失败分类 + 跳过分类，"
-          f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧）")
+    print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
+          f" + 归一化规则/轨迹等价（M2），"
+          f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
 
@@ -528,6 +707,47 @@ def main() -> int:
     ps.set_defaults(func=cmd_selftest)
     pst = sub.add_parser("status", help="查看运行历史")
     pst.set_defaults(func=cmd_status)
+
+    # ---- 离线评测链路 ----
+    pk = sub.add_parser("pack", help="collector 录制数据 → evalpack 数据包")
+    pk.add_argument("--collector-dir", required=True, help="collector 数据目录（…/data 或 …/data/{ns}）")
+    pk.add_argument("--out", required=True, help="evalpack 输出目录（如 reports/packs/pk-xxx）")
+    pk.add_argument("--ns", default=None, help="只打包该 ns（collector-dir 为 data 根时使用）")
+    pk.add_argument("--traces", default=None, help="driver 轨迹捕获目录（可选，提升用例草稿精度）")
+    pk.add_argument("--oaf-zip", default=None, help="OAF 包 zip 副本（可选）")
+    pk.add_argument("--since", default=None, help="起始时间（ISO，可选）")
+    pk.add_argument("--until", default=None, help="结束时间（ISO，可选）")
+    pk.add_argument("--export-e2e-fixtures", action="store_true",
+                    help="同时导出 e2e/mock/fixtures/llm 夹具（入库走 PR 人审）")
+    pk.add_argument("--fixtures-dir", default=None, help="夹具输出目录（缺省 pack 同级 e2e-fixtures/）")
+    pk.set_defaults(func=cmd_pack)
+
+    prp = sub.add_parser("replay", help="evalpack 离线回放：A1 断言 + A2 轨迹等价 + A3 漂移")
+    prp.add_argument("--pack", required=True, help="evalpack 目录")
+    prp.add_argument("--out", required=True, help="run 产物目录")
+    prp.add_argument("--base-url", default=None, help="被测服务地址（其 LLM 须指向 replay-llm）")
+    prp.add_argument("--mode", choices=["strict", "loose"], default="strict",
+                     help="strict=轨迹失配判失败；loose=只记录漂移（默认 strict）")
+    prp.add_argument("--only", default=None, help="只跑指定 case_id（逗号分隔）")
+    prp.add_argument("--rewrite", default="", help="占位改写 from=to（逗号分隔多组）")
+    prp.add_argument("--judge", action="store_true", help="启用语义打分（需 EVAL_LLM_*）")
+    prp.add_argument("--keep-replayer", action="store_true", help="保留 replay-llm 进程供调试")
+    prp.add_argument("--provision", action="store_true",
+                     help="回放供给：evalpack → 独立存储 + 受测 jar（docker，需 mvn package）+ 三回放器")
+    prp.add_argument("--rebase", default=None, metavar="NEW_PACK_DIR",
+                     help="基线演进：loose 回放后以实际请求生成新基线包（响应保持录制件）")
+    prp.add_argument("--rebase-note", default=None, help="rebase 留痕说明")
+    prp.set_defaults(func=cmd_replay)
+
+    plv = sub.add_parser("live", help="联机链路评测：用例直打真实服务 + 断言/judge")
+    plv.add_argument("--base-url", default=None, help="被测服务地址（真实测试环境）")
+    plv.add_argument("--pack", default=None, help="用例来源 evalpack（与 --cases 二选一）")
+    plv.add_argument("--cases", action="store_true", help="用例来源 = 库内 cases/*.json")
+    plv.add_argument("--out", required=True, help="run 产物目录")
+    plv.add_argument("--only", default=None, help="只跑指定 case_id（逗号分隔）")
+    plv.add_argument("--judge", action="store_true", help="启用语义打分（需 EVAL_LLM_*）")
+    plv.add_argument("--timeout", type=float, default=120.0, help="单轮 SSE 超时秒数")
+    plv.set_defaults(func=cmd_live)
 
     args = p.parse_args()
     result = args.func(args)

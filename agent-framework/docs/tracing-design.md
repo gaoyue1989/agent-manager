@@ -93,26 +93,35 @@ agentscope-core-2.0.0.jar
 > **已修正（实施阶段核实 SDK 2.0.0 字节码）**：`MiddlewareBase` **无 `order()` 方法**（仅有 5 个钩子默认方法），此前"按 order() 降序排序"的假设错误。实际机制：
 > - `ReActAgent` 构造器将中间件存为 `List.copyOf([GracefulShutdownMiddleware, ...builder.middlewares])`，**无排序**
 > - `MiddlewareChain.build()` 从列表末尾向前遍历构建洋葱链 → **注册顺序 = 执行顺序，先注册者 = 更外层 = 更先执行**
-> - 结论：执行位置由 `.middleware()` **调用顺序**决定。**当前注册顺序（`service/HarnessAgentFactory.java`，2026-09-25 起）**：
-`Otel → ModelIo → ToolCall → Framework → Reasoning → LlmLogging → SandboxUserKey`——
-共 7 个中间件（此前 5 个），两个 IO 补录中间件紧跟 `OtelTracingMiddleware` 之后、其余内层中间件之前注册，
+> - 结论：执行位置由 `.middleware()` **调用顺序**决定。**当前注册顺序（`service/HarnessAgentFactory.java`，2026-09-27 起）**：
+`SessionModel → Otel → ModelIo → ToolCall → Framework → Reasoning → LlmLogging → ToolCallValidation → ProtocolDenyRules → McpUserContext → RemoteUserId → RemoteSpawnCapture → RemoteSpawnForceSync →（沙箱档）SandboxUserKey`——
+共 13 个中间件（沙箱模式 +1；2026-09-25 时为 7 个），**会话模型路由中间件（`SessionModelMiddleware`）现注册于 Otel 之前（最外层）**——先替换 model 再进链，
+下游 span/LLM 记录/实际调用看到的都是会话生效模型（见 [session-model-switch-design.md](session-model-switch-design.md) §7）；
+两个 IO 补录中间件仍紧跟 `OtelTracingMiddleware` 之后、其余内层中间件之前注册，
 因此它们观测到的是「已完成上下文注入、但未进入推理」的那一层。
 
-**当前注册的 7 个中间件（外 → 内 = 注册顺序）：**
+**当前注册的 14 个中间件（外 → 内 = 注册顺序；2026-09-27 核对，#14 仅沙箱模式注册）：**
 
 | # | 中间件 | 登记类 | 钩子 | 作用 |
 |---|--------|--------|------|------|
-| 1 | `OtelTracingMiddleware` | OTel SDK | — | 创建 span，经 `ContextPropagationOperator.runWithContext` 注入 Reactor Context |
-| 2 | `ModelIoTracingMiddleware` | 本仓 | `onModelCall` | 把模型实际输入/输出 messages 写入 chat span（`gen_ai.input.messages` / `gen_ai.output.messages`，超 8192 字符截断） |
-| 3 | `ToolCallTracingMiddleware` | 本仓 | `onToolCall` | 工具入参/结果写入 execute_tool span（`gen_ai.tool.call.arguments` / `.result`，同上截断） |
-| 4 | `FrameworkTracingMiddleware` | 本仓 | `next.apply` | 此时 `Span.current()` 已指向 Otel 的 span → 写入 `userId` / `sessionId` |
-| 5 | `ReasoningTracingMiddleware` | 本仓 | `onReasoning` | 每轮推理 span |
-| 6 | `LlmLoggingMiddleware` | 本仓 | `onModelCall` | 记录到 `LLMLogger` 内存（`GET /threads/{sid}/llm-calls` 数据源） |
-| 7 | `SandboxUserKeyMiddleware` | 本仓 | `onAgent` | 注入 userId 到 ThreadLocal（最内层，紧邻核心 agent 逻辑） |
+| 1 | `SessionModelMiddleware` | 本仓 | `onModelCall` | 会话级模型路由（查 `session_user.model` 替换 ModelCallInput.model，最外层） |
+| 2 | `OtelTracingMiddleware` | OTel SDK | — | 创建 span，经 `ContextPropagationOperator.runWithContext` 注入 Reactor Context |
+| 3 | `ModelIoTracingMiddleware` | 本仓 | `onModelCall` | 把模型实际输入/输出 messages 写入 chat span（`gen_ai.input.messages` / `gen_ai.output.messages`，超 8192 字符截断） |
+| 4 | `ToolCallTracingMiddleware` | 本仓 | `onToolCall` | 工具入参/结果写入 execute_tool span（`gen_ai.tool.call.arguments` / `.result`，同上截断） |
+| 5 | `FrameworkTracingMiddleware` | 本仓 | `next.apply` | 此时 `Span.current()` 已指向 Otel 的 span → 写入 `userId` / `sessionId` |
+| 6 | `ReasoningTracingMiddleware` | 本仓 | `onReasoning` | 每轮推理 span |
+| 7 | `LlmLoggingMiddleware` | 本仓 | `onModelCall` | 记录到 `LLMLogger` 内存（`GET /threads/{sid}/llm-calls` 数据源） |
+| 8 | `ToolCallValidationMiddleware` | 本仓 | `onActing` | ToolUseBlock 完整性校验（vLLM/Qwen3 流式畸形 tool call 防御） |
+| 9 | `ProtocolDenyRulesMiddleware` | 本仓 | `onActing` | 协议任务动态 DENY（travel-fulfillment F16，非协议轮次直通） |
+| 10 | `McpUserContextMiddleware` | 本仓 | `onAgent` | MCP 用户上下文注入（生效 userId 写入 McpMeta，唯一注入点） |
+| 11 | `RemoteUserIdMiddleware` | 本仓 | `onActing` | 纯 spawn 轮次作用域内经 session_user 反查写回规范 userId |
+| 12 | `RemoteSpawnCaptureMiddleware` | 本仓 | `onActing` | agent_spawn 结果抓取 → RemoteConfirmBridge 在途登记 |
+| 13 | `RemoteSpawnForceSyncMiddleware` | 本仓 | `onActing` | 远程 spawn 强制同步等待（`AGENT_REMOTE_SPAWN_SYNC_WAIT` 可关） |
+| 14 | `SandboxUserKeyMiddleware` | 本仓 | `onAgent` | 注入 userId 到 ThreadLocal（仅沙箱模式经 `sandboxSpec.getUserKeyMiddleware()` 注册，链尾） |
 
 ```
-外 ──▶ Otel ──▶ ModelIo ──▶ ToolCall ──▶ Framework ──▶ Reasoning ──▶ LlmLogging ──▶ SandboxUserKey ──▶ 核心 agent 逻辑 ──▶ 内
-                                                          （第 4 层往内，Span.current() 已可用）
+外 ──▶ SessionModel ──▶ Otel ──▶ ModelIo ──▶ ToolCall ──▶ Framework ──▶ Reasoning ──▶ LlmLogging ──▶ … ──▶ 核心 agent 逻辑 ──▶ 内
+                                            （第 5 层往内，Span.current() 已可用）
 ```
 
 **Reasoning 嵌套关系**（ReasoningTracingMiddleware 末实现 onAgent/onModelCall 为直通；OtelTracingMiddleware 未实现 onReasoning 为直通）：
@@ -190,7 +199,7 @@ HarnessAgent.wrappedCall()
 ### 3.5 沙箱 Trace 修正后的完整 Span 结构
 
 ```
-HTTP POST / 或 GET /chat/stream             ← HTTP Span Filter（共同父 span，必需）
+HTTP POST /（A2A）或 POST /threads/chat（Channel SSE）  ← HTTP Span Filter（共同父 span，必需）
   ├─ sandbox.create                        ← TracingSandboxClient.create()（秒级）
   ├─ invoke_agent <name>                   ← OtelTracingMiddleware.onAgent()
   │    ├─ reasoning                        ← ReasoningTracingMiddleware（第 1 轮）
@@ -325,7 +334,7 @@ HTTP POST / 或 GET /chat/stream             ← HTTP Span Filter（共同父 sp
 
 **职责**：在 SDK 的 `OtelTracingMiddleware` 基础上补充 agent-framework 特有的业务属性。不重复创建 span，而是通过 `Span.current()` 向 OtelTracingMiddleware 已创建的 span 写入额外属性。**覆盖 onAgent/onModelCall/onActing 三个钩子**，保证 userId/sessionId/tenantPrefix 出现在所有层级的 span 上（而非仅根 span）。
 
-**顺序保证**：执行顺序由注册顺序决定（`MiddlewareChain` 按注册序构建，先注册者更外层，已核实 SDK 2.0.0 字节码，无 order() 机制）。AgentScopeConfig 中本中间件在 `OtelTracingMiddleware` **之后**注册，故在其内层执行。`Span.current()` 在 `next.apply(input)` 内部调用时，OTel Context 已通过 `ContextPropagationOperator.runWithContext()` 注入 Reactor Context。
+**顺序保证**：执行顺序由注册顺序决定（`MiddlewareChain` 按注册序构建，先注册者更外层，已核实 SDK 2.0.0 字节码，无 order() 机制）。本中间件在 `OtelTracingMiddleware` **之后**注册，故在其内层执行（现行注册点 `HarnessAgentFactory`，见 §3.2）。`Span.current()` 在 `next.apply(input)` 内部调用时，OTel Context 已通过 `ContextPropagationOperator.runWithContext()` 注入 Reactor Context。
 
 ```java
 package io.agentmanager.framework.service;
@@ -351,7 +360,7 @@ import reactor.core.publisher.Flux;
  * Span.current() 即可读取到 Otel 创建的 span。
  *
  * <p>执行顺序由注册顺序决定（MiddlewareChain 按注册序构建，先注册者更外层），
- * AgentScopeConfig 中本中间件在 OtelTracingMiddleware 之后注册。
+ * 本中间件在 OtelTracingMiddleware 之后注册（现行注册点 HarnessAgentFactory，见 §3.2）。
  *
  * <p>覆盖 onAgent/onModelCall/onActing 三个钩子，保证 userId/sessionId/tenantPrefix
  * 出现在所有 span（invoke_agent/chat/execute_tool）上，而非仅根 span，
@@ -495,9 +504,13 @@ public class OtelConfig {
 }
 ```
 
-### 4.4 修改 `AgentScopeConfig.java`
+### 4.4 注册点（初版 `AgentScopeConfig.java`，2026-09-25 起迁至 `service/HarnessAgentFactory.java`）
 
 在 `harnessAgent()` 方法中注册 middleware，在 `sandboxFilesystemSpec()` 方法中注入沙箱 tracing：
+
+> **注册点已迁移**：以下代码块是 2026-08 初版形态（`AgentScopeConfig.harnessAgent()`）。
+> 2026-09-25 起中间件注册统一迁到 `service/HarnessAgentFactory.build()`（启动装配与 OAF reload 重建共用），
+> **当前完整注册顺序见 §3.2**（14 个，外→内）。下列片段仅作设计溯源，勿据此判断现行顺序。
 
 **middleware 注册（harnessAgent 方法）：**
 
@@ -528,7 +541,7 @@ protected SandboxClient<?> createClient() {
 }
 ```
 
-> **注册顺序说明**：执行顺序 = 注册顺序（无 order() 机制，见 3.2）。实际注册：`Otel → Framework → Reasoning → LlmLogging → SandboxUserKey(沙箱模式)`，Otel 最外层。
+> **注册顺序说明**：执行顺序 = 注册顺序（无 order() 机制，见 3.2）。设计时注册：`Otel → Framework → Reasoning → LlmLogging → SandboxUserKey(沙箱模式)`；注册点 2026-09-25 起迁至 `service/HarnessAgentFactory.java`，当前完整链见 3.2（`SessionModel → Otel → …`，Otel 之上有会话模型路由中间件）。
 >
 > **沙箱注入点说明**：`SandboxFilesystemSpec.createClient()`（protected）是 SDK 提供的唯一 `SandboxClient` 工厂入口，`SandboxManager` 在 `acquire()` 时调用 `client.create()` 或 `client.resume()`，经过 `TracingSandboxClient` 包装后自动产生 span。
 >
@@ -681,7 +694,7 @@ public class TracingSandboxClient implements SandboxClient<OpenSandboxClientOpti
 
 **覆盖范围**：
 - `POST /`（A2A JSON-RPC 入口）
-- `GET /chat/stream`（Channel SSE 入口）
+- `POST /threads/chat`（Channel SSE 入口；原 `GET /chat/stream` 已于 2026-09-16 随入口收敛删除）
 - 其余端点（/health、/debug 等）按需覆盖
 
 **实现要点**：
@@ -765,7 +778,7 @@ import reactor.core.publisher.Flux;
  * ReAct 推理轮次追踪中间件：每轮 reasoning 创建独立 span。
  *
  * <p>OtelTracingMiddleware 未实现 onReasoning（默认直通），本中间件在其内层执行
- * （AgentScopeConfig 中注册于 Otel 之后，注册顺序=执行顺序，先注册者更外层），
+ * （注册于 Otel 之后，注册顺序=执行顺序，先注册者更外层），
  *
  * <p>模型调用（onModelCall 链）在 reasoning 核心逻辑内执行，本中间件用
  * runWithContext 包裹 next.apply(input)，chat span 自动成为 reasoning span 的子级。
@@ -1001,7 +1014,7 @@ public class TracingModelWrapper implements Model {
 }
 ```
 
-**装配方式**（`AgentScopeConfig.harnessAgent()`）：
+**装配方式**（初版 `AgentScopeConfig.harnessAgent()`；现行注册点 `service/HarnessAgentFactory.java:135/275`，另 `AgentScopeConfig.titleGenerationModel` 为标题生成单独包一层）：
 
 ```java
 var model = OpenAIChatModel.builder()...build();
@@ -1131,7 +1144,7 @@ docker run -d --name jaeger \
    ```
 2. 打开 `http://localhost:16686` → Service 选 `agent-framework` → Find Traces
 3. 验证 trace 结构（非沙箱模式，期望 **单一 trace** 包含以下层级）：
-   - 根 span: `POST /` 或 `GET /chat/stream`（HTTP Filter）
+   - 根 span: `POST /` 或 `POST /threads/chat`（HTTP Filter）
    - 子 span: `invoke_agent <name>`，含 `agentscope.user.id`、`agentscope.session.id`、`agentscope.tenant.prefix`
    - 孙 span: `reasoning <name>`，含 `gen_ai.operation.name=reasoning`
    - 曾孙 span: `chat <model>`，含 `gen_ai.usage.input_tokens`、`gen_ai.usage.output_tokens`，且**同样含** userId/sessionId 属性
@@ -1216,8 +1229,8 @@ docker run -d --name jaeger \
 
 | 维度 | LlmLoggingMiddleware | OtelTracingMiddleware | FrameworkTracingMiddleware |
 |------|---------------------|----------------------|---------------------------|
-| 拦截点 | `onModelCall` | onAgent / onModelCall / onActing | onAgent |
-| order | 1 (默认) | 1 (默认) | 0 |
+| 拦截点 | `onModelCall` | onAgent / onModelCall / onActing | onAgent / onModelCall / onActing |
+| 链上位置（MiddlewareBase 无 order()，见 3.2；本表三者外 → 内） | Otel 之内（Reasoning 之后，三者最内） | SessionModel 之后，本表三者最外 | Otel 之内（ModelIo/ToolCall 之后，三者居中） |
 | 数据去向 | 内存 (LLMLogger) | OTel Collector | OTel Collector |
 | 消费者 | Debug 页面 | Jaeger/Langfuse | Jaeger/Langfuse |
 | 消息内容 | 完整 messages | 仅 count | 仅 count |
@@ -1262,7 +1275,7 @@ docker run -d --name jaeger \
 2. **Reactor 上下文传播**：`OtelTracingMiddleware` 构造时注册 `ContextPropagationOperator`，确保 `publishOn`/`subscribeOn` 跨线程时 span 上下文不丢失。
 3. **版本对齐**：OTel SDK 版本必须与 `agentscope-core` 传递的 `opentelemetry-api` 版本保持一致。**已修正（2026-08-13 实施时发现）**：`agentscope-core` 传递的是 **1.37.0** 而非 1.61.0，已通过 `dependencyManagement` 统一提升到 1.61.0（4.1），否则启动抛 `NoClassDefFoundError: StandardComponentId$ExporterType`。
 4. **Docker 构建**：新增依赖会增加约 15MB 镜像体积，对当前 ~200MB 镜像影响可控。
-5. **中间件顺序**：执行顺序 = 注册顺序（已核实 SDK 2.0.0 无 order() 机制，`MiddlewareChain` 按注册序构建洋葱链，先注册者更外层）。`OtelTracingMiddleware` 必须在 `FrameworkTracingMiddleware`/`ReasoningTracingMiddleware` 之前注册（AgentScopeConfig 已保证），后续改动须保持此注册顺序。
+5. **中间件顺序**：执行顺序 = 注册顺序（已核实 SDK 2.0.0 无 order() 机制，`MiddlewareChain` 按注册序构建洋葱链，先注册者更外层）。`OtelTracingMiddleware` 必须在 `FrameworkTracingMiddleware`/`ReasoningTracingMiddleware` 之前注册（HarnessAgentFactory 已保证），后续改动须保持此注册顺序。
 6. **Span.current() 时序**：`FrameworkTracingMiddleware` 的属性写入在 `doOnNext` 中执行（而非 `next.apply()` 之前），确保此时 Otel 的 `ContextPropagationOperator.runWithContext()` 已生效。
 7. **OTLP 协议**：使用 `OtlpHttpSpanExporter`（HTTP 协议），Jaeger 4318 端口支持 HTTP 和 gRPC，兼容无问题。Langfuse 仅支持 HTTP。
 8. **trace 断链风险（核心）**：HTTP span 是沙箱 span 与 agent span 的共同父级，**不可省略**。没有它，`sandbox.create`/`invoke_agent`/`sandbox.delete` 各自成为独立根 span（3 个互不关联的 trace_id）。且 MVC 异步线程下 Filter 的 `makeCurrent()` 不自动传播，必须用 Java Agent 或 `contextWrite` 方案解决（见 4.7）。验证步骤 #5 是硬性验收条件。**已解决（2026-08-13）**：自研 Filter 方案实测断链（HTTP span 52ms 与 agent 链 68s 分属两个 trace），切换 **OTel Java Agent 方案后单一 trace_id 达成**（第 5/7 节验证结果）。
@@ -1371,8 +1384,13 @@ public abstract class TracingTestBase {
 
 ### 13.3 单元测试清单
 
-新增/扩展 **9 个**测试类（沿用现有纯 JUnit 5 + Mockito 风格，参考 `LlmLoggingMiddlewareTest`）。
-**全部用例数已按 2026-09-26 实跑核对**：追踪系列现共 **48 例**（既有 7 类 32 例 + IO 补录 2 类 16 例）。
+新增/扩展 **10 个**测试类（沿用现有纯 JUnit 5 + Mockito 风格，参考 `LlmLoggingMiddlewareTest`）。
+**全部用例数已按 2026-10-09 实跑核对**（`grep -cE "^\s*@Test\b"` 逐类点算）：追踪系列现共 **59 例 / 10 类**——
+`OtelConfigTest` 5、`TracingSandboxClientTest` 6、`FrameworkTracingMiddlewareTest` 8、`HttpTracingFilterTest` 3、
+`InMemoryLogAppenderTest` 8、`TraceIdConverterTest` 2、`ReasoningTracingMiddlewareTest` 5、`TracingModelWrapperTest` 6、
+`ModelIoTracingMiddlewareTest` 6、`ToolCallTracingMiddlewareTest` 10。
+（2026-09-26 核对时记为「9 类 48 例」，其后 `FrameworkTracingMiddlewareTest` 因 issue #44 补 7 例、
+新增 `TraceIdConverterTest`，故计数上浮。）
 
 **2026-09-26 随 IO 补录新增 2 个：**
 
@@ -1381,7 +1399,7 @@ public abstract class TracingTestBase {
 | `ModelIoTracingMiddlewareTest`（6 用例） | 模型 IO 补录 | ①正常请求把输入 messages 写入 `gen_ai.input.messages`；②流式输出累积到 `gen_ai.output.messages`；③超 8192 字符截断；④描述缓存不重复序列化；⑤无活跃 span 时直通；⑥batch 场景数组扩展 | 四个 content 属性、截断长度、委托等价性 |
 | `ToolCallTracingMiddlewareTest`（10 用例） | 工具 IO 补录 | ①入参写入 `gen_ai.tool.call.arguments`；②结果写入 `gen_ai.tool.call.result`；③超长截断；④错误结果路径；⑤`tool_call_id` 关联；⑥无活跃 span 直通等 | execute_tool span 属性、截断、异常路径 |
 
-**2026-08 随基础追踪新增/扩展 7 个：**
+**2026-08 随基础追踪新增/扩展 7 个（另 2026-09-27 issue #44 新增 `TraceIdConverterTest` 2 例，故实为 8 个）：**
 
 | 测试类 | 覆盖组件 | 关键用例 | 验证点 |
 |--------|---------|---------|--------|

@@ -98,6 +98,27 @@ class SessionMessageStoreTest {
     }
 
     @Test
+    void mergeShouldMergeNewBlocksInWhenShrunk() {
+        // 修 #45（设计 §6.4）：收缩场景下「新版有而旧版无此块 id」的新增块必须直接并入，
+        // 不得静默丢弃——归档行 ≥ 任一单版本信息量
+        var oldJson = "{\"id\":\"m1\",\"role\":\"ASSISTANT\",\"content\":["
+            + "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"echo\","
+            + "\"input\":{\"cmd\":\"" + "y".repeat(60) + "\"},\"state\":\"FINISHED\"}]}";
+        var newJson = "{\"id\":\"m1\",\"role\":\"ASSISTANT\",\"content\":["
+            + "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"echo\","
+            + "\"input\":{\"cmd\":\"yy\"},\"state\":\"FINISHED\"},"
+            + "{\"type\":\"tool_use\",\"id\":\"call-2-new\",\"name\":\"plan\","
+            + "\"input\":{\"city\":\"hangzhou\"},\"state\":\"ASKING\"}]}";
+        var merged = SessionMessageStore.mergeMsgJson(oldJson, newJson);
+        assertTrue(merged.contains("call-2-new"), "收缩场景新增块必须并入: " + merged);
+        assertTrue(merged.contains("hangzhou"), "新增块载荷完整保留");
+        assertTrue(merged.contains("yyyy"), "既有块文本保底不回退");
+        // 幂等：合并结果上重放同一新版，不得重复追加
+        var again = SessionMessageStore.mergeMsgJson(merged, newJson);
+        assertEquals(again.indexOf("call-2-new"), again.lastIndexOf("call-2-new"), "重放零重复");
+    }
+
+    @Test
     void mergeShouldOverlayToolUseContentMirrorWhenPruned() {
         // 收缩版的 tool_use.content（input 镜像回填）随新，input 文本保持旧
         var oldJson = "{\"id\":\"m1\",\"role\":\"ASSISTANT\",\"content\":["
@@ -140,14 +161,16 @@ class SessionMessageStoreTest {
     // ===== SQL 形态锁定 =====
 
     @Test
-    void initSchemaShouldCreateTableWithUniqueKey() throws Exception {
-        new SessionMessageStore(dataSource); // 构造即 initSchema
-        var sqlCap = ArgumentCaptor.forClass(String.class);
-        verify(stmt).executeUpdate(sqlCap.capture());
-        var ddl = sqlCap.getValue();
-        assertTrue(ddl.contains("CREATE TABLE IF NOT EXISTS session_message"));
-        assertTrue(ddl.contains("UNIQUE KEY uk_session_msg (session_id, msg_id)"), "幂等唯一键");
-        assertTrue(ddl.contains("KEY idx_session_id (session_id, id)"));
+    void sessionMessageMigrationShouldKeepUniqueKeyAndIndex() throws Exception {
+        // 构造器不再建表（表结构由 Flyway db/migration 接管）；
+        // 锁定 V5 迁移文件的关键约束，防止后续改动误删幂等唯一键与翻页索引
+        try (var in = getClass().getResourceAsStream(
+                "/db/migration/V5__062e01f_session_message.sql")) {
+            var ddl = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(ddl.contains("CREATE TABLE session_message"));
+            assertTrue(ddl.contains("UNIQUE KEY uk_session_msg (session_id, msg_id)"), "幂等唯一键");
+            assertTrue(ddl.contains("KEY idx_session_id (session_id, id)"));
+        }
     }
 
     @Test

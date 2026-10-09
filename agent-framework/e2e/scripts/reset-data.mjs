@@ -16,7 +16,15 @@ const m = /jdbc:mysql:\/\/([^:/]+):(\d+)\/([^?]+)/.exec(jdbcUrl ?? '');
 if (!m) { console.log('[reset] MYSQL_URL 解析失败，跳过'); process.exit(0); }
 const [, host, port, db] = m;
 const TABLES = ['agent_state', 'agent_fs', 'confirm_context', 'turn_lease', 'session_user',
-  'file_asset', 'ui_context', 'kv_sync_key', 'tool_audit_log', 'model_config', 'session_message'];
+  'file_asset', 'ui_context', 'kv_sync_key', 'tool_audit_log', 'model_config', 'session_message',
+  // V2 引入的 agui_interrupt 必须一并清：漏掉它会让复用库的第二轮 env-up 走
+  // "schema 非空 + 历史表缺失" 的 baseline(5) 路径 → V6 因 session_user 被 DROP 而失败 →
+  // 实例启动死亡（CI fresh services 不受影响，本地/复用库二轮起必踩）
+  'agui_interrupt',
+  // V8 的 remote_task_registry 同理（设计 §18.2）：残留同样触发 baseline(5) 跳过 V1
+  'remote_task_registry',
+  // Flyway 历史表：不清掉的话，实例重启后 Flyway 认为迁移已应用、不会重建上面被 DROP 的表
+  'flyway_schema_history'];
 
 // 优先用 mysql 客户端；缺失时回退到 JDBC 不可用 → 仅提示（CI 镜像默认带 mysql 客户端）
 let dropped = 0;

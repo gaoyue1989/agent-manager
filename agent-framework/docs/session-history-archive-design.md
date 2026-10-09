@@ -93,8 +93,9 @@ GET /threads/{sid}/history（改造）：
 
 ## 5. 数据模型
 
-新增一张表，与 `agent_state` 同库（`oaf_checkpoint`，沿用 CHECKPOINT_* 数据源），服务侧初始化建表
-（同 turn_lease / confirm_context 等 8 张自建表惯例）：
+新增一张表，与 `agent_state` 同库（`oaf_checkpoint`，沿用 CHECKPOINT_* 数据源）。实施时（2026-09-27）由
+`SessionMessageStore` 构造器建表；**2026-09-28 起 DDL 迁入 Flyway**（`db/migration/V5__062e01f_session_message.sql`，
+落地形态为 `DATETIME(3) NOT NULL` 无默认值，Store 内建表代码已随 Flyway 改造移除），下述 SQL 保留为设计形态：
 
 ```sql
 CREATE TABLE IF NOT EXISTS session_message (
@@ -115,8 +116,9 @@ CREATE TABLE IF NOT EXISTS session_message (
 语义说明：
 
 - **session_id**：存 `MysqlAgentStateStore` 的 slot 复合键，格式
-  `"{normalizeUser(userId)}:{sessionId}"`（ThreadController.java:117-119 注释与
-  `MysqlAgentStateStore.slotId` 字节码双重确认；normalizeUser 空值归一 `__anon__`）。
+  `"{normalizeUser(userId)}:{sessionId}"`（`SessionMessageArchiveStateStore.slotKey` 注释与
+  `MysqlAgentStateStore.slotId` 字节码双重确认；ThreadController.java:465 注释说明该列有两种形态；
+  normalizeUser 空值归一 `__anon__`）。
   归档装饰器按同一规则生成（实现时以集成测试锁定与 `agent_state.session_id` 同值）。
 - **msg_id**：`Msg.getId()`（SDK 构建时自动 `generateId()`，非空 UUID 形态）。
 - **msg_data**：单条 Msg 的 JSON。序列化用 Jackson 直写（`State` 是空标记接口，
@@ -301,14 +303,14 @@ E2E（可选，建议做）：mock LLM fixtures 增加 30+ 轮场景触发压缩
 4. **极端时序窗口**：消息在首次 save 前即被压缩移出（理论可达：压缩保留最新尾部 + save 覆盖
    每个 acting 边界，实际不可达）；若实测发现，捕获点前移至自定义 Middleware.onReasoning
    （压缩中间件之前），已在设计中留此后手；
-5. **保留期 7 天**：`SESSION_RETENTION_DAYS` 为硬编码（SessionCleanupService.java:137，
+5. **保留期 7 天**：`SESSION_RETENTION_DAYS` 为硬编码（SessionCleanupService.java:155，
    既有问题不在本方案范围），超期历史与会话一同清理。
 
 ## 13. 评审核对记录（2026-09-27 review）
 
 | # | 发现 | 处置 |
 |---|------|------|
-| R1 | `AgentStateStore` 参数语义序是 `(userId, sessionId, stateKey)`（`slotId` 字节码：`normalizeUser(arg1)+":"+arg2`；ThreadController.java:117-119 注释同证），既有装饰器形参名互换仅命名问题 | 新类按 SDK 语义命名；session_id 复合键格式写入 §5，集成测试锁定同值 |
+| R1 | `AgentStateStore` 参数语义序是 `(userId, sessionId, stateKey)`（`slotId` 字节码：`normalizeUser(arg1)+":"+arg2`；ThreadController.java:465 注释同证 slot 复合键两种形态），既有装饰器形参名互换仅命名问题 | 新类按 SDK 语义命名；session_id 复合键格式写入 §5，集成测试锁定同值 |
 | R2 | Backfill 是先原位 patch 再下传——归档装饰器若放外层将看到 patch 前形态 | 装配位置定为**最内层**（§6.1） |
 | R3 | `State` 是空标记接口，`Msg` 无 `toJson()`，序列化无官方出口 | msg_data 用 Jackson 直写，形态由 round-trip 单测锁定（§5、§10-2） |
 | R4 | 「整体更长才覆盖」会丢状态迁移，「后者覆盖」会丢裁剪前原文 | 升级为**按块合并**：文本取长、状态取新（§6.4） |

@@ -335,6 +335,11 @@ public class OafReloadService {
         reloading.set(false);
     }
 
+    /** OAF reload 是否进行中（MCP 连接看门狗让位判据：换连语义同源，避免双 swap 竞态）。 */
+    public boolean isReloadInProgress() {
+        return reloading.get();
+    }
+
     // ==================== 内部工具 ====================
 
     /** 当前 agent 的 Toolkit（A 路径原地 reload 落在当前 agent 上） */

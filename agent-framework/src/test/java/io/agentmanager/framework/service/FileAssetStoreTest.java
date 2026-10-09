@@ -20,8 +20,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * file_asset 表元数据存储单测（UT-05/06）：DDL 幂等、CRUD、pending→injected 状态机。
- * 与 UiContextStoreTest 同款 mock DataSource 模式（不连真实 DB）。
+ * file_asset 表元数据存储单测（UT-05/06）：CRUD、pending→injected 状态机。
+ * 与 UiContextStoreTest 同款 mock DataSource 模式（不连真实 DB）；
+ * 表结构由 Flyway 迁移管理（db/migration），真实 DDL 行为由 *MySqlIT 覆盖。
  */
 class FileAssetStoreTest {
 
@@ -42,19 +43,6 @@ class FileAssetStoreTest {
         return new FileAssetStore.FileAsset(id, userKey, "s1", null, "a.csv",
             null, "text/csv", 10, "local", "upload/k/" + id + ".csv", "upload", status,
             LocalDateTime.now());
-    }
-
-    @Test
-    void ddlShouldRunAtConstruction() throws Exception {
-        // 构造期执行 DDL：file_asset 与 kv_sync_key 两张表（各自一次连接）
-        verify(dataSource.getConnection(), org.mockito.Mockito.atLeastOnce()).createStatement();
-        // 幂等：再次构造（新 mock）不抛错
-        var ds2 = mock(DataSource.class);
-        when(ds2.getConnection()).thenReturn(mock(Connection.class));
-        var conn2 = mock(Connection.class);
-        when(ds2.getConnection()).thenReturn(conn2);
-        when(conn2.createStatement()).thenReturn(mock(Statement.class));
-        new FileAssetStore(ds2);
     }
 
     @Test

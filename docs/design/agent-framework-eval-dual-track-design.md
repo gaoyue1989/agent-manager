@@ -1,6 +1,7 @@
 # agent-framework 双轨评测系统设计（门禁轨 + 趋势轨）
 
-> 状态：设计定稿（待实施）· 日期：2026-09-25
+> 状态：设计定稿 · 日期：2026-09-25
+> 实施进展（2026-10-09 按代码核对）：已落地——`bench/eval/flywheel.py` 六步闭环（analyze→gen→eval→judge→rca→verify）+ 契约层 `bench/eval/config/frame-mapping.json` + 环境供给（配套设计已实施）+ **OpenJudge 接入**（`graders/openjudge_adapter.py`，pyproject 钉版 `py-openjudge==0.2.2`，`EVAL_JUDGE_ENGINE=auto|direct|openjudge`，未安装自动回落直评）+ **离线化全链路**（`pack`/`replay`/`live` 子命令、eval-collector、eval-studio，见 [离线化设计](agent-framework-eval-offline-record-replay-design.md)）+ CI `评测自检`（eval-selftest）与 `评测离线回放 e2e (--offline)` 两个非必需 job。**仍待实施**：门禁轨（`tests/api-eval.spec.ts` / `eval-gate` job / `eval-cases.mjs`）、nightly/release workflow（§12）。
 > 范围：agent-framework 的黑盒评测体系——确定性门禁轨（扩展现有 e2e）、质量趋势轨（Python + AgentScope evaluate + OpenJudge）、diff 驱动用例生成（四道闸门 + PR 人工审核）、根因分析与修复 patch 建议、人工快照基线。
 > 不做（评审裁剪，见 §2）：知识库/RAG 自迭代、代码自动直改、基线自动更新、LLM judge 分数阻断合并、评测自有 MySQL 库（持久化走文件 + GitHub Issues，§10）。
 > 前置文档：v1 方案《基于 OpenJudge 的 Agent 评测-迭代数据飞轮系统设计》经可行性评审后裁剪重构，评审要点见 §2.3。
@@ -9,13 +10,13 @@
 
 ## 1. 背景与现状基线
 
-### 1.1 现有测试体系盘点（2026-09-25 按当前代码实测核对）
+### 1.1 现有测试体系盘点（基线 2026-09-25；规模列已按 2026-10-09 代码更新）
 
 | 体系 | 规模/形态 | 覆盖维度 | 缺口 |
 |---|---|---|---|
-| 单测 `mvn test` | 96 个测试类 / 973 个 `@Test`（`src/test` 实测；AGENTS.md 自述 83/883 已过时） | 代码级逻辑正确性 | 不评测 Agent 端到端行为 |
-| E2E（Playwright） | 6 个 spec：`api-core / api-multi / api-multi-kill / api-sandbox / ui / ui-multi`（`agent-framework/e2e/tests/`），mock LLM 录制回放（`e2e/mock/llm-server.mjs`，回放 `fixtures/llm/` 真实录制 chunk），三个 CI job（core/multi/sandbox），零密钥零外联 | 功能正确性、多副本续传、沙箱、Debug 页 UI | 断言面向「功能没坏」，不评测「回复质量 / 工具选择合理性 / 轨迹质量」 |
-| bench 压测 | `bench/load/runner.js` + `run-bench.sh`，独立库 `agent_manager_bench`（`bench/sql/init-bench-db.sql`） | 并发稳定性（成功率/P95） | 自述「无断言体系」，不做正确性判断 |
+| 单测 `mvn test` | 140 个含 `@Test` 的源文件 / 1380 个 `@Test` 注解（`src/test` 静态清点，口径 `grep -rE '@Test\b'`，2026-10-09；另 8 支 `*IT` 集成类不在 `mvn test` 默认范围） | 代码级逻辑正确性 | 不评测 Agent 端到端行为 |
+| E2E（Playwright） | 10 个 spec：`api-core / api-models / api-multi / api-multi-kill / api-protocol / api-protocol-multi / api-reload / api-sandbox / ui / ui-multi`（`agent-framework/e2e/tests/`），mock LLM 录制回放（`e2e/mock/llm-server.mjs`，回放 `e2e/mock/fixtures/llm/` 真实录制 chunk），六个 E2E CI job（core / multi / sandbox / protocol / protocol-multi / tool-plugin），零密钥零外联 | 功能正确性、多副本续传、沙箱、协议多副本、Debug 页 UI | 断言面向「功能没坏」，不评测「回复质量 / 工具选择合理性 / 轨迹质量」 |
+| bench 压测 | `bench/load/runner.js` + `run-bench.sh`，独立库 `agent_manager_bench`（`bench/sql/init-bench-db.sql`），C 档带 `ASSERT_START_DELAY_MS` 启动延迟门禁（exit 3） | 并发稳定性（成功率/P95）+ 启动排队延迟 | 仍不做语义正确性判断 |
 | （无） | — | — | **Agent 能力质量评测**（语义、工具选择、轨迹合理性、框架特性合规）、系统化用例沉淀、失败根因定位 |
 
 ### 1.2 版本与依赖事实
@@ -72,7 +73,7 @@
  │   + OpenJudge                       │
  │ mock LLM 回放，零密钥零外联        │  │ 真实 LLM 执行 + LLM judge 打分         │
  │ 确定性断言：SSE 帧/HITL/交付/MCP   │  │ 多维打分 + 基线趋势对比（不阻断）      │
- │ → 第七项必需检查，失败即阻断       │  │ → 报告归档 + 失败项进根因分析          │
+ │ → 第八项必需检查，失败即阻断       │  │ → 报告归档 + 失败项进根因分析          │
  └────────────────┬──────────────────┘  └───────────────┬───────────────────────┘
                   │ 修复合入后回归                        │ 失败轨迹
                   └──────────────┬───────────────────────┘
@@ -91,12 +92,13 @@
 
 ### 4.1 SSE 帧映射表（真实词表）
 
-线上词表的权威定义在 `AgentEventSseSerializer.payload()`（`controller/AgentEventSseSerializer.java:51`）：`type` 默认取 SDK 枚举 `AgentEventType.name()`（大写蛇形，共 31 值，完整清单见附录 A），两处特殊：
+线上词表的权威定义在 `AgentEventSseSerializer.payload()`（`controller/AgentEventSseSerializer.java:51`）：`type` 默认取 SDK 枚举 `AgentEventType.name()`（大写蛇形，共 31 值，完整清单见附录 A），三处特殊：
 
 - `RequireUserConfirmEvent` 序列化时 **type 覆写为 `permission_ask`**（`AgentEventSseSerializer.java:123`，携带 `tool_calls` + `reply_id`）——HITL 请求的线上词条不是枚举名。
-- `MODEL_CALL_END` 携带 usage：`inputTokens / outputTokens / totalTokens`（`AgentEventSseSerializer.java:107-112`）。
+- `SubagentExposedEvent` 序列化时 **type 覆写为 `subagent_exposed`**（`AgentEventSseSerializer.java:129`，携带 `subagent_id/agent_id/session_id/label`）——远程子 agent 调用收口帧。
+- `MODEL_CALL_END` 携带 usage：`inputTokens / outputTokens / totalTokens`（`AgentEventSseSerializer.java:108-112`）。
 
-控制器/服务层另有 9 个合成帧（不经 SDK 枚举；`permission_ask` 双路径：序列化覆写 + invokeStream 链路 emitSynthetic）：`session_created`（`ChatStreamController.java:249`）、`file_ready`（`:622`，present_file/present_url 返回后合成）、`tool_call_summary` / `tool_result_preview`（`TurnToolSummaryTracker.java:101,123`，多副本续传同样可回放）、`task_update`（`AgentRuntimeService.java:163`）、`waiting`、`done`、`error`、`permission_ask`。
+控制器/服务层另有 9 个合成帧（不经 SDK 枚举；`permission_ask` 双路径：序列化覆写 + invokeStream 链路 emitSynthetic）：`session_created`（`ChatStreamController.java:900`，`POST /threads/chat` 映射在 `:254`）、`file_ready`（`:762`，present_file/present_url 返回后合成）、`tool_call_summary` / `tool_result_preview`（`TurnToolSummaryTracker.java:108,142`，多副本续传同样可回放）、`task_update`（`AgentRuntimeService.java:164`）、`waiting`、`done`、`error`、`permission_ask`。
 
 **评测关注点 → 真实帧映射**（v1 方案错误词条一并对照，作为历史教训）：
 
@@ -150,8 +152,8 @@
 ```
 
 - `events` 保留原始帧（含 delta），供 grader 与根因分析取完整上下文。
-- `tool_calls / deliveries / hitl / token_usage` 为帧映射解析后的**结构化视图**，断言与打分主要消费这层，不重复解析原始流。
-- `server_view_diff` 为双视角比对结果（§4.3），无差异为 null。
+- `tool_calls / deliveries / hitl / token_usage` 为帧映射解析后的**结构化视图**（实码 `sse_client.build_view()`，另含 `frame_order` / `error_frames` / `terminal` / `first_event_ms` / `agent_start_ms`），断言与打分主要消费这层，不重复解析原始流。
+- `server_view_diff` 为双视角比对结果（§4.3），无差异为 null。> **双视角采集（辅视角 `/subscribe` 回放 + 事件集 diff）尚未实现**，当前轨迹只有主视角；`server_view_diff` 字段在实码中不存在。
 
 ### 4.3 双视角采集
 
@@ -159,7 +161,7 @@
 |---|---|---|
 | 主视角（客户端） | 评测执行器解析 `POST /threads/chat` SSE 流 | 协议合规以此为准——所见即客户端所得 |
 | 辅视角（服务端） | 执行结束后 `GET /threads/{sid}/subscribe`（`SessionStreamController.java:67`，durable SSE 回放 + 游标追赶，数据源为 Redis Streams 持久化 `SessionEventStore`） | 与主视角做事件集 diff，区分「事件从未产生」（两视角都缺）vs「传输丢失」（仅主视角缺） |
-| LLM 明细 | `GET /threads/{sid}/llm-calls`（`ThreadController.java:310`） | 请求/响应原文，供根因分析；**该接口无 usage 字段** |
+| LLM 明细 | `GET /threads/{sid}/llm-calls`（`ThreadController.java:366`） | 请求/响应原文，供根因分析；**该接口无 usage 字段** |
 
 辅视角走 HTTP 回放，不直连 Redis，保持零侵入。回放需要有效的会话游标语义，评测器在 chat 连接关闭后立即订阅回放全程（from head）。
 
@@ -182,7 +184,7 @@ v1 评审时认为 token 只能估算；复核确认 `MODEL_CALL_END` 帧携带 
 |---|---|---|
 | SSE 协议 | `session_created` 先行；`TEXT_BLOCK_*` / `THINKING_BLOCK_*` / `TOOL_CALL_*` / `TOOL_RESULT_*` 块配对完整（START 必有 END）；`AGENT_END` 后正常收尾（`done`）；`error` 帧格式规范 | 部分散落在 api-core，本组系统化 |
 | HITL 流程 | `ask` 档工具触发 `permission_ask`（含 `tool_calls` 明细）；`POST /threads/{sid}/confirm` 后收到 `USER_CONFIRM_RESULT`；`read_only` 权限下写操作被拒 | api-core 有基础流程，补齐边界 |
-| 交付 | `present_file`/`present_url` 成功 → `file_ready` 帧（`file_id/file_name` 元数据完整）+ `/files/{id}` 可下载；**白名单外 URL 调用 `present_url` 返回 err 且不产生 `file_ready`**（`FILE_EXTERNAL_URL_PREFIXES` SSRF 防护回归，`FileTools.java:182`） | 现有 F12 覆盖部分，本组收编 |
+| 交付 | `present_file`/`present_url` 成功 → `file_ready` 帧（`file_id/file_name` 元数据完整）+ `/files/{id}` 可下载；**白名单外 URL 调用 `present_url` 返回 err 且不产生 `file_ready`**（`FILE_EXTERNAL_URL_PREFIXES` SSRF 防护回归，`FileTools.java:217`） | 现有 F12 覆盖部分，本组收编 |
 | MCP | `/tools` `/mcp` `/skills` 注册清单与 OAF 配置一致；MCP 工具调用成功/失败两路径的帧序列 | 部分覆盖 |
 | 用例回归 | 用例库 active 用例按 `expected` 机器可判字段断言（见 §7.1 格式约束） | 全新 |
 
@@ -211,15 +213,15 @@ v1 评审时认为 token 只能估算；复核确认 `MODEL_CALL_END` 帧携带 
 ```
 
 - 触发范围与现有 job 一致（`agent-framework/**` 或本 workflow 变更）。
-- 合入后分支保护必需检查从六项扩为**七项**（需仓库管理员同步更新保护规则——开放事项 §14）。
+- 合入后分支保护必需检查从**七项**扩为**八项**（需仓库管理员同步更新保护规则——开放事项 §14）。
 - mock 回放依赖 fixtures：若 active 用例需要新场景的 LLM 响应，先按 `record-llm.mjs` 配方补录制件（`check-fixtures.mjs` 会把缺件挡在本地）。
 
 ## 6. 趋势轨（轨道 B）：Python + agentscope.evaluate + OpenJudge
 
 ### 6.1 工程与依赖
 
-- 目录 `agent-framework/bench/eval/`，`pyproject.toml` 钉死：`py-openjudge==0.2.2`、`agentscope>=2.0,<2.1`（以官方 [Evaluation with OpenJudge](https://doc.agentscope.io) 适配路径为准）；升级必须显式 PR。
-- Python 3.11；CI 用 `actions/setup-python`，锁 `requirements.lock`（uv/pip-tools 产物）。
+- 目录 `agent-framework/bench/eval/`，`pyproject.toml` 钉死：`httpx>=0.27`、`py-openjudge==0.2.2`（`agentscope-python` **未引入**——执行与 judge 均为自研 httpx 实现）；升级必须显式 PR。
+- Python `requires-python >=3.10`；CI 用 `actions/setup-python`（3.11）。`requirements.lock` 尚未落地（§11）。
 - 运行环境：本地或专用 runner 起真实 agent-framework（`java -jar` + 集群 MySQL/Redis 或 GH services），LLM 走真实 OpenAI 兼容端点（`EVAL_LLM_API_KEY`）。
 
 ### 6.2 执行链路（AgentScope evaluate 编排）
@@ -349,18 +351,20 @@ v1 评审时认为 token 只能估算；复核确认 `MODEL_CALL_END` 帧携带 
 ```
 bench/eval/reports/               # gitignored；持久化通道见 §10.4
 ├── history.jsonl                  # 跨 run 趋势账本，每 run 追加一行
-└── {task_id}/                     # task_id = {commit8}-{track}-{yyyyMMdd-HHmmss}
-    ├── task.json                  # 任务元数据：commit_hash / framework_ver / track / trigger_type / judge_model / status / case_count / pass_rate / total_score / started_at / finished_at
-    ├── summary.jsonl              # 每用例每重复一行：case_id / session_id / repeat_no / status / duration_ms / event_count / tool_call_count / input_tokens / output_tokens / has_file_ready / unstable 标记 / trace 相对路径
+└── {task_id}/                     # task_id = {commit8}-{track}-{yyyyMMdd-HHmmss}（verify 轮为 -verify- 前缀）
+    ├── task.json                  # 任务元数据：commit / track / trigger / base_url / repeat / since / case_count / contract（帧契约版本）
+    ├── summary.jsonl              # 每用例每重复一行：task_id / case_id / session_id / repeat_no / status / duration_ms / event_count / tool_call_count / input_tokens / output_tokens / has_file_ready / checks_passed / trace 相对路径
     ├── report.md                  # 结构化报告（§8 口径）
-    └── traces/                    # §4.2 统一轨迹 JSON 全量
+    └── traces/{case_id}#{repeat_no}.json   # §4.2 统一轨迹 JSON 全量
 ```
 
-`history.jsonl` 行示例：
+`history.jsonl` 行示例（字段与 `flywheel.py:_append_history()` 一致）：
 
 ```json
-{"task_id":"d0c3eaa1-trend-20260926-030000","commit":"d0c3eaa1","framework_ver":"2.1.0","judge_model":"glm-4.7","case_count":150,"pass_rate":0.92,"total_score":0.87,"ts":"2026-09-26T03:00:00+08:00"}
+{"task_id":"d0c3eaa1-trend-20260926-030000","commit":"d0c3eaa1","track":"trend","case_count":150,"pass_rate":0.92,"total_score":0.87,"judge_model":"glm-4.7","contract":"2026-10-01","ts":"2026-09-26T03:00:00+08:00"}
 ```
+
+> 无 `framework_ver` 字段（框架版本随 commit 走）；verify 轮另写 `track:"verify"` 行。
 
 趋势对比 = `history.jsonl` 最新行 vs 基线 yaml（§9）；方差过滤（§6.4）与双视角 diff 标记落在 `summary.jsonl` 行级，不另建存储。
 
@@ -382,37 +386,43 @@ bench/eval/reports/               # gitignored；持久化通道见 §10.4
 
 满足其一再议，届时优先独立实例或 SQLite（不占平台库）：自建 Web 看板需要任意维度 ad-hoc 查询；轨迹摘要超过数万条且切片查询变慢；出现多写入方并发；issue 统计外溢出 GitHub 能力。
 
-## 11. 目录结构
+## 11. 目录结构（实码为准，2026-10-09 核对）
 
 ```
 agent-framework/
 ├── e2e/                          # 门禁轨（Node，扩展现有工程）
-│   ├── tests/api-eval.spec.ts    # 确定性断言组（run.sh eval）
-│   └── lib/eval-cases.mjs        # 用例库加载器（读 ../bench/eval/cases/）
+│   ├── tests/api-eval.spec.ts    # 确定性断言组（run.sh eval）—— 待实施
+│   └── lib/eval-cases.mjs        # 用例库加载器（读 ../bench/eval/cases/）—— 待实施
 └── bench/
-    └── eval/                     # 趋势轨 + 用例生成 + 分析（Python 3.11）
-        ├── pyproject.toml        # 钉死 py-openjudge / agentscope 版本
-        ├── requirements.lock
+    └── eval/                     # 趋势轨 + 用例生成 + 分析（Python ≥3.10）
+        ├── pyproject.toml        # 钉死 py-openjudge==0.2.2 / httpx（agentscope-python 未引入）
+        ├── flywheel.py           # run / provision / teardown / verify / selftest / status
+        │                         #   + pack / replay / live（离线链路，见离线化设计）
+        ├── FLYWHEEL.md、OFFLINE.md、README.md
         ├── cases/                # 用例库（git 版本化，PR 审核变更）
         ├── executor/             # SSE 客户端 + 帧映射解析 + 双视角采集
-        ├── graders/              # 框架定制 Grader（BaseGrader 扩展）
-        ├── case-gen/             # diff 驱动生成 + 蒸馏入口（四道闸门）
+        ├── graders/              # 框架定制 Grader + openjudge_adapter.py
+        ├── casegen/              # diff 驱动生成 + 蒸馏入口（四道闸门）—— 注意目录名无连字符
         ├── analyzer/             # 根因分析 + 报告生成
+        ├── provision/            # 环境供给（OAF 组装 / 实例生命周期 / 预检 / replay_pack）
+        ├── replay/               # 离线回放（packager / normalize / trajectory / runner / evolve）
+        ├── mock/                 # mcp_server.py（供给侧）+ replay-llm.mjs / replay-http.mjs
+        ├── tests/                # e2e_offline_loop.py 离线全链路 e2e 等
         ├── reports/              # 运行产物（gitignored）：history.jsonl + {task_id}/（§10.2）
         └── config/
-            ├── frame-mapping.json
-            ├── graders.yaml      # 打分器与权重配置
-            └── baselines/        # 基线快照（git 版本化）
+            └── frame-mapping.json  # 唯一帧词表契约（version 2026-10-01）
 ```
+
+> 设计期列出的 `requirements.lock`、`config/graders.yaml`、`config/baselines/` **尚未落地**；`agentscope-python` 也未进依赖（当前 judge 与执行均自研 httpx 实现）。
 
 ## 12. CI 集成汇总
 
 | Workflow | 触发 | Job | 密钥 | 阻断 |
 |---|---|---|---|---|
-| `agent-framework-ci.yml`（改） | push master / PR master | 现有 5 job + **eval-gate** | 无 | 是（第七项必需检查） |
+| `agent-framework-ci.yml`（改） | push master / PR master | 现有 9 job（`单测 (mvn test)` / `评测自检 (flywheel selftest)` / `评测离线回放 e2e (--offline)` / `E2E 核心` / `E2E 多副本` / `E2E 沙箱` / `E2E 协议` / `E2E 协议多副本` / `E2E 工具插件`）+ **eval-gate** | 无 | 是（第八项必需检查） |
 | `agent-framework-eval.yml`（新） | schedule nightly / workflow_dispatch / release | `trend-eval`（全量打分+报告+产物归档 §10.4）、`case-gen`（diff 生成+PR 提交）、`rca`（失败项根因+自动开 issue，发版时） | `EVAL_LLM_API_KEY`（仅此 workflow） | 否 |
 
-分支保护需同步：必需检查增加「E2E 评测门禁（api-eval）」（§14 开放事项）。
+分支保护需同步：必需检查增加「E2E 评测门禁（api-eval）」（§14 开放事项）。当前必需检查为**七项**（三个单测 + 四个 E2E：核心 / 多副本 / 沙箱 / 协议多副本，见根 AGENTS.md）。
 
 ## 13. 实施路线图与验收标准
 
@@ -429,7 +439,7 @@ Phase 3 结束后凭 GitHub Issue 的 fix_status label（§10.3）真实数据�
 | # | 项 | 影响 | 对策 |
 |---|---|---|---|
 | 1 | py-openjudge / agentscope-python 年轻依赖（0.2.0 曾破坏性改名） | 升级可能破坏打分链路 | 版本钉死 + requirements.lock；升级走 PR 全量回归 |
-| 2 | 分支保护七项必需检查需管理员手动更新 | 遗漏则 eval-gate 不阻断 | Phase 1 验收项 |
+| 2 | 分支保护必需检查需管理员手动更新（当前七项 → 八项） | 遗漏则 eval-gate 不阻断 | Phase 1 验收项 |
 | 3 | 门禁轨依赖 mock fixtures，新用例需录制 | 用例扩充成本 | 沿用 `record-llm.mjs` 配方；`check-fixtures.mjs` 前置拦截 |
 | 4 | diff 生成用例的 expected 错误率 | 错误预期会造成误报 | 四道闸门 + PR 人审为硬性关卡 |
 | 5 | judge 分数波动 | 趋势误读 | n_repeat=3 + 方差过滤 + judge 模型固化进基线 |
@@ -438,10 +448,10 @@ Phase 3 结束后凭 GitHub Issue 的 fix_status label（§10.3）真实数据�
 | 8 | 多副本（R 组）场景趋势轨是否覆盖 | 趋势轨 v1 单副本 | 暂不覆盖，多副本正确性由门禁轨 e2e-multi 承担；后续按需扩展 |
 | 9 | 趋势历史依赖宿主磁盘 / artifact 保留期（GH artifacts 默认 90 天） | 历史丢失 | §10.4：优先自建宿主；GH hosted 时 retention 调最大，`history.jsonl` 可由 artifacts 重建 |
 
-## 附录 A：线上帧词表完整清单（截至 2026-09-25）
+## 附录 A：线上帧词表完整清单（截至 2026-10-09）
 
-**SDK 枚举 `AgentEventType`（31 值，序列化默认取 `name()`）**：
-`AGENT_START`、`AGENT_END`、`AGENT_RESULT`、`MODEL_CALL_START`、`MODEL_CALL_END`（带 usage）、`TEXT_BLOCK_START/DELTA/END`、`THINKING_BLOCK_START/DELTA/END`、`DATA_BLOCK_START/DELTA/END`、`TOOL_CALL_START/DELTA/END`、`TOOL_RESULT_START`、`TOOL_RESULT_TEXT_DELTA`、`TOOL_RESULT_DATA_DELTA`、`TOOL_RESULT_END`、`EXCEED_MAX_ITERS`、`REQUIRE_USER_CONFIRM`（线上覆写为 `permission_ask`）、`REQUIRE_EXTERNAL_EXECUTION`、`USER_CONFIRM_RESULT`、`EXTERNAL_EXECUTION_RESULT`、`REQUEST_STOP`、`SUBAGENT_EXPOSED`、`HINT_BLOCK`、`ALL_TOOLS_DENIED`、`CUSTOM`
+**SDK 枚举 `AgentEventType`（31 值，序列化默认取 `name()`；已按 `agentscope-core-2.0.3.jar` javap 复核）**：
+`AGENT_START`、`AGENT_END`、`AGENT_RESULT`、`MODEL_CALL_START`、`MODEL_CALL_END`（带 usage）、`TEXT_BLOCK_START/DELTA/END`、`THINKING_BLOCK_START/DELTA/END`、`DATA_BLOCK_START/DELTA/END`、`TOOL_CALL_START/DELTA/END`、`TOOL_RESULT_START`、`TOOL_RESULT_TEXT_DELTA`、`TOOL_RESULT_DATA_DELTA`、`TOOL_RESULT_END`、`EXCEED_MAX_ITERS`、`REQUIRE_USER_CONFIRM`（线上覆写为 `permission_ask`）、`REQUIRE_EXTERNAL_EXECUTION`、`USER_CONFIRM_RESULT`、`EXTERNAL_EXECUTION_RESULT`、`REQUEST_STOP`、`SUBAGENT_EXPOSED`（线上覆写为 `subagent_exposed`）、`HINT_BLOCK`、`ALL_TOOLS_DENIED`、`CUSTOM`
 
 **合成帧（9 个，控制器/服务层产生，同样入 Redis 事件流可回放；`permission_ask` 有两条产生路径——序列化覆写与 invokeStream 链路 emitSynthetic）**：
 `session_created`、`waiting`、`done`、`error`、`task_update`、`permission_ask`（invokeStream 链路词条）、`file_ready`、`tool_call_summary`、`tool_result_preview`
@@ -452,11 +462,11 @@ Phase 3 结束后凭 GitHub Issue 的 fix_status label（§10.3）真实数据�
 
 | 接口 | 位置 | 评测用途 |
 |---|---|---|
-| `POST /threads/chat`（SSE） | `ChatStreamController.java:188` | 主对话通道，主视角轨迹 |
-| `GET /threads/{sid}/history` | `ThreadController.java:177` | 会话历史权威数据 |
-| `GET /threads/{sid}/llm-calls` | `ThreadController.java:310` | LLM 请求/响应明细（无 usage 字段） |
+| `POST /threads/chat`（SSE） | `ChatStreamController.java:254` | 主对话通道，主视角轨迹 |
+| `GET /threads/{sid}/history` | `ThreadController.java:222` | 会话历史权威数据 |
+| `GET /threads/{sid}/llm-calls` | `ThreadController.java:366` | LLM 请求/响应明细（无 usage 字段） |
 | `GET /threads/{sid}/subscribe`（SSE） | `SessionStreamController.java:67` | 服务端事件回放，双视角辅证 |
-| `GET /threads/{sid}/status` | `SessionStreamController.java:101` | 会话状态查询 |
-| `GET /tools`、`GET /mcp`、`GET /skills` | `ToolController.java` | 能力清单（用例生成输入 / grader 输入） |
-| `POST /threads/{sid}/confirm`（及 confirm-stream） | `ConfirmController.java:90,144` | HITL 用例自动确认 |
-| `GET /files/{fileId}` | `FileController.java` | 交付文件可访问性校验（external 代理回源受白名单约束） |
+| `GET /threads/{sid}/status` | `SessionStreamController.java:102` | 会话状态查询 |
+| `GET /tools`、`GET /mcp`、`GET /skills` | `ToolController.java:80,53,48` | 能力清单（用例生成输入 / grader 输入） |
+| `POST /threads/{sid}/confirm`（及 confirm-stream） | `ConfirmController.java:119,197` | HITL 用例自动确认 |
+| `GET /files/{fileId}` | `FileController.java:153` | 交付文件可访问性校验（external 代理回源受白名单约束） |

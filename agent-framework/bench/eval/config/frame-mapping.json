@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-25",
+  "version": "2026-10-01",
   "description": "SSE 帧词表契约（两轨共享唯一事实源）。权威定义见 controller/AgentEventSseSerializer.java 与 controller/ChatStreamController.java；框架升级新增枚举时同步更新本文件。设计依据 docs/design/agent-framework-eval-dual-track-design.md §4.1",
   "sdk_frames": [
     "AGENT_START", "AGENT_END", "AGENT_RESULT",
@@ -26,7 +26,8 @@
     "error": "控制器合成帧，字段为 error（不是 message）",
     "tool_result_end_state": "state 取值 = ToolResultState 枚举名：SUCCESS/ERROR/INTERRUPTED/DENIED/RUNNING",
     "done_task_update": "done/task_update/error 仅由 AgentRuntimeService.invokeStream（A2A/内部通道）方言发出；POST /threads/chat 主对话流以 AGENT_END 收尾，不发 done（2026-09-25 对 release-agent 实测确认），断言请用 AGENT_END",
-    "file_ready": "仅 /threads/chat 路径合成（ChatStreamController:622）；invokeStream 方言无此帧"
+    "file_ready": "仅 /threads/chat 路径合成（ChatStreamController:622）；invokeStream 方言无此帧",
+    "hitl_ask_terminal": "自 4db16ba（2026-09-27，HITL 恢复收尾窗口竞态修复）起 ask 段帧序为 permission_ask → REQUEST_STOP → AGENT_RESULT → AGENT_END（终帧 AGENT_END，挂起点不再提前 release+关流）；旧版本以 permission_ask 终止。挂起判定不得依赖终帧，须按「ask 存在且被 ask 的 tool_call 无 TOOL_RESULT_END 配对」（hitl.pending，新旧序兼容）"
   },
   "usage_frame": {
     "type": "MODEL_CALL_END",
@@ -35,7 +36,8 @@
   "hitl": {
     "ask_frame": "permission_ask",
     "ask_tool_calls_field": "tool_calls",
-    "result_frame": "USER_CONFIRM_RESULT"
+    "result_frame": "USER_CONFIRM_RESULT",
+    "ask_segment_terminal_frames": ["permission_ask", "AGENT_END"]
   },
   "concerns": {
     "session_created": ["session_created"],

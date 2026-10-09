@@ -28,11 +28,21 @@ export interface ServiceRec {
   envJson: string; replicas: number; status: string; endpoint: string; clusterUrl: string;
   registeredName?: string; registeredVersion?: string; agentCardJson?: string;
   registeredAt?: string | null; createdAt: string;
+  // 服务级敏感键掩码视图（值永不回传，仅键名 + hasValue）
+  envSecretKeys?: EnvSecretKey[];
 }
 export interface PodInfo { name: string; phase: string; ready: boolean; restarts: number; }
 export interface ServiceEvent { id: number; fromStatus: string; toStatus: string; reason: string; createdAt: string; }
 export interface ServiceDetail extends ServiceRec { pods?: PodInfo[]; events: ServiceEvent[]; }
 export interface ImageOption { Image: string; Label: string }
+// 平台默认配置（R3：仅作为发布/编辑 env 时的表单默认填入，不经 envFrom 注入、不影响存量服务）
+export interface EnvSecretKey { key: string; hasValue: boolean; }
+export interface PlatformConfigField {
+  envKey: string; label: string; required: boolean; sensitive: boolean; multiline: boolean;
+  placeholder?: string; hasValue: boolean; value?: string; updatedAt?: string;
+}
+export interface PlatformConfigGroup { name: string; title: string; fields: PlatformConfigField[]; }
+export interface PlatformConfigView { groups: PlatformConfigGroup[]; updatedAt?: string; }
 
 export const api = {
   // 包
@@ -54,10 +64,15 @@ export const api = {
   listServices: (status = "", keyword = "", packageId = 0) =>
     request<(ServiceRec & { pods?: PodInfo[] })[]>(`/services?status=${status}&keyword=${encodeURIComponent(keyword)}&packageId=${packageId}`),
   getService: (id: number) => request<ServiceDetail>(`/services/${id}`),
-  publish: (body: { packageId: number; name?: string; image?: string; env?: Record<string, string>; replicas?: number }) =>
+  publish: (body: { packageId: number; name?: string; image?: string; env?: Record<string, string>; secretKeys?: string[]; replicas?: number }) =>
     request<ServiceRec>(`/services`, { method: "POST", body: JSON.stringify(body) }),
-  updateEnv: (id: number, env: Record<string, string>) =>
-    request<ServiceRec>(`/services/${id}/env`, { method: "PATCH", body: JSON.stringify({ env }) }),
+  updateEnv: (id: number, env: Record<string, string>, secretKeys?: string[]) =>
+    request<ServiceRec>(`/services/${id}/env`, { method: "PATCH", body: JSON.stringify({ env, secretKeys }) }),
+  // 平台默认配置
+  getPlatformConfig: () => request<PlatformConfigView>(`/platform-config`),
+  getPlatformDefaults: () => request<{ values: Record<string, string> }>(`/platform-config/defaults`),
+  updatePlatformConfig: (values: Record<string, string>) =>
+    request<PlatformConfigView>(`/platform-config`, { method: "PUT", body: JSON.stringify({ values }) }),
   republish: (id: number, opt: { packageId?: number } = {}) =>
     request<ServiceRec>(`/services/${id}/republish`, { method: "POST", body: JSON.stringify(opt) }),
   startAgain: (id: number) => request<ServiceRec>(`/services/${id}/publish`, { method: "POST" }),

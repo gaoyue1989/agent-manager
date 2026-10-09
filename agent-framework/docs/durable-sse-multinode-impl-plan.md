@@ -10,6 +10,8 @@
 
 **设计依据：** `docs/durable-sse-multinode-plan.md`（已评审通过）。任务编号与设计文档 §7 实施步骤的对应关系在每节标注。
 
+> **存储层已再迁（2026-09-16，见 multinode-plan §2.1）：** 本文任务书与代码块按实施时的 MySQL 形态书写（`SessionEventStore(DataSource, …)`、`session_event` 表、多值 INSERT 攒批）。落地后 `session_event` 存储迁到 Redis Streams，`SessionEventStore` 构造首参改为 `RedisEventLog`（`src/main/java/.../service/RedisEventLog.java`），MySQL 侧不再有该表；**攒批/seq 分配/游标分页等机制与本文一致**，仅底层句柄从 JDBC 换成 XADD/XRANGE/ZADD。读本文时把 `DataSource` 理解为「事件存储门面」。
+
 **范围：** 服务端阶段 1 + 2 + 3。前端重连（阶段 4）另立排期，不在本计划内。
 
 **关键约束（来自设计文档 §6 R4）：** 本计划全部完成且验证通过之前，**不得将 replicas 调至 >1**。

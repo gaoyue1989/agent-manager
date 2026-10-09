@@ -25,6 +25,9 @@ import org.springframework.stereotype.Service;
  *   <li>session_message：会话消息轨归档超期（与 agent_state 同 7 天语义）→ deleteBefore
  *       （docs/session-history-archive-design.md）</li>
  *   <li>session_user：会话-用户映射超期（默认 7 天，与 agent_state 对齐）→ SessionUserStore.deleteBefore</li>
+ *   <li>Agent Protocol TaskRecord：终态记录超保留期（agent.agent-protocol.retention-days，默认 7 天）
+ *       扫描 → scanExpiredProtocolTaskRecords（合成桶 agents/_agentscope_protocol/ 不在
+ *       会话清理路径内，独立扫描；SDK 2.0.3 暂无删除 API，见方法注释）</li>
  * </ul>
  *
  * <p><b>session_event 不在这里清理。</b>它已迁到 Redis Streams，留存由 key TTL 承担
@@ -41,8 +44,10 @@ public class SessionCleanupService {
     private final ConfirmContextStore confirmContextStore;
     private final ToolAuditStore toolAuditStore;
     private final SessionUserStore sessionUserStore;
+    private final A2aAgentRefHolder agentRefHolder;
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
+    private final RemoteTaskRegistryStore remoteTaskRegistryStore;
 
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
@@ -50,16 +55,20 @@ public class SessionCleanupService {
                                  ConfirmContextStore confirmContextStore,
                                  ToolAuditStore toolAuditStore,
                                  SessionUserStore sessionUserStore,
+                                 A2aAgentRefHolder agentRefHolder,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
-                                 io.agentmanager.framework.service.storage.FileStorage fileStorage) {
+                                 io.agentmanager.framework.service.storage.FileStorage fileStorage,
+                                 RemoteTaskRegistryStore remoteTaskRegistryStore) {
         this.dataSource = dataSource;
         this.sessionManager = sessionManager;
         this.turnLeaseStore = turnLeaseStore;
         this.confirmContextStore = confirmContextStore;
         this.toolAuditStore = toolAuditStore;
         this.sessionUserStore = sessionUserStore;
+        this.agentRefHolder = agentRefHolder;
         this.props = props;
         this.fileStorage = fileStorage;
+        this.remoteTaskRegistryStore = remoteTaskRegistryStore;
     }
 
     /**
@@ -72,11 +81,14 @@ public class SessionCleanupService {
         // 1. 清理内存中的过期会话
         int memCleaned = sessionManager.cleanupExpired();
 
-        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log
+        // 2. 清理数据库层：turn_lease / confirm_context / tool_audit_log / remote_task_registry
         //    （session_event 已迁 Redis，留存由 key TTL 承担，不在这里清）
         turnLeaseStore.cleanupExpired();
         confirmContextStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
+        // 在途登记终态行保留 7 天（设计 §18.2；与 TaskRecord 清理节奏一致）
+        remoteTaskRegistryStore.deleteTerminalBefore(
+            java.sql.Timestamp.from(Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS)));
 
         // 3. 清理会话记录（agent_state / agent_fs / session_message / session_user）
         Instant cutoff = Instant.now().minus(SESSION_RETENTION_DAYS, ChronoUnit.DAYS);
@@ -88,6 +100,9 @@ public class SessionCleanupService {
         // 4. 清理过期上传文件（file-upload-download-plan §15-7）：
         //    超保留期（默认 7 天）且非 pending 状态的 upload 行 → 删行 + 删存储对象
         cleanupExpiredUploads();
+
+        // 5. Agent Protocol 终态 TaskRecord 保留期扫描（协议关闭时为 no-op）
+        scanExpiredProtocolTaskRecords();
 
         log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}, session_message={}, session_user={}",
             memCleaned, stateCleaned, fsCleaned, messageCleaned, userMappingCleaned);
@@ -138,6 +153,55 @@ public class SessionCleanupService {
 
     /** 会话记录保留天数（默认 7 天，保持与配置对齐的语义默认值） */
     private static final int SESSION_RETENTION_DAYS = 7;
+
+    /**
+     * Agent Protocol 终态 TaskRecord 保留期扫描（travel-fulfillment agent-protocol 设计 §7）。
+     *
+     * <p>合成桶 {@code agents/_agentscope_protocol/}（SDK 常量 PROTOCOL_AGENT_ID/PROTOCOL_SESSION_ID）
+     * 不在任何会话清理路径内，需独立按 retention-days 扫描终态（COMPLETED/FAILED/CANCELLED，
+     * {@code TaskStatus.isTerminal()}）且 last_updated 早于截止线的记录。
+     *
+     * <p><b>当前只扫描计数并留痕，不做物理删除</b>：SDK 2.0.3 对 TaskRecord 只提供
+     * write/read/list（WorkspaceManager 无 deleteTaskRecord，ProtocolTaskRepository 仅
+     * save/find，javap 实证），底层为整份任务映射文件的读改写（内部 ReentrantLock 串行），
+     * 绕开 SDK 手改存储会与运行中任务的写入竞态。物理清理待 SDK 提供删除 API 后接入，
+     * 届时本方法即挂接点。
+     */
+    void scanExpiredProtocolTaskRecords() {
+        var protocol = props.agentProtocol();
+        if (protocol == null || !protocol.enabled()) {
+            return; // 协议未启用：无 TaskRecord 产生，直接跳过
+        }
+        try {
+            var agent = agentRefHolder.get();
+            if (agent == null) {
+                log.warn("Agent Protocol TaskRecord 扫描跳过：当前无可用 HarnessAgent");
+                return;
+            }
+            var records = agent.getWorkspaceManager().listTaskRecords(
+                io.agentscope.core.agent.RuntimeContext.empty(),
+                io.agentscope.extensions.agentprotocol.AgentProtocolConstants.PROTOCOL_AGENT_ID,
+                io.agentscope.extensions.agentprotocol.AgentProtocolConstants.PROTOCOL_SESSION_ID);
+            var cutoff = Instant.now().minus(protocol.retentionDays(), ChronoUnit.DAYS);
+            var expired = records.stream()
+                .filter(r -> r.getStatus() != null && r.getStatus().isTerminal())
+                .filter(r -> lastUpdatedOf(r) != null && lastUpdatedOf(r).isBefore(cutoff))
+                .map(io.agentscope.harness.agent.subagent.task.TaskRecord::getTaskId)
+                .toList();
+            if (!expired.isEmpty()) {
+                log.info("Agent Protocol TaskRecord 扫描：{} 条终态记录超过保留期（{} 天），待 SDK 提供删除 API 后清理: {}",
+                    expired.size(), protocol.retentionDays(), expired);
+            }
+        } catch (Exception e) {
+            // 清理属兜底职责，失败不阻断主流程，次日重试
+            log.warn("Agent Protocol TaskRecord 扫描失败: {}", e.getMessage());
+        }
+    }
+
+    /** 记录时间基准：lastUpdatedAt 优先（终态转换时刷新），缺失回落 createdAt */
+    private Instant lastUpdatedOf(io.agentscope.harness.agent.subagent.task.TaskRecord record) {
+        return record.getLastUpdatedAt() != null ? record.getLastUpdatedAt() : record.getCreatedAt();
+    }
 
     /** 允许 deleteBefore 清理的表名白名单（防 SQL 注入） */
     private static final java.util.Set<String> CLEANUP_TABLES = java.util.Set.of("agent_state", "agent_fs", "session_message");

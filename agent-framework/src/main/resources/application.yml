@@ -10,6 +10,11 @@ logging:
     io.agentmanager.framework: ${APP_LOG_LEVEL:INFO}
 
 spring:
+  task:
+    scheduling:
+      pool:
+        # 看门狗 listTools 探测阻塞（≤5s/server）不得拖慢同调度器的 Bridge 轮询/清理任务
+        size: 2
   application:
     name: agent-framework
   main:
@@ -18,6 +23,17 @@ spring:
     multipart:
       max-file-size: ${FILE_UPLOAD_MAX_MB:20}MB
       max-request-size: ${FILE_UPLOAD_MAX_MB:20}MB
+  # 版本化 schema/数据迁移（db/migration/V*.sql，数据源取唯一的 DataSource bean）：
+  # - 全新库：从 V1 基线起完整重建；
+  # - 存量库（有表、无 flyway_schema_history）：baseline 到 baseline-version
+  #   （V1..V5 的 DDL 现网均已就位），仅执行之后的增量（V6 存量回填起）；
+  # - 多副本同时启动由 Flyway 历史表锁互斥，仅一副本执行迁移，失败即启动失败。
+  # 此后表结构/数据演进一律新增 V 文件，禁止在 Store 构造器里手工 DDL（已全部移除）。
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 5
 
 agent:
   config-dir: ${AGENT_CONFIG_DIR:}
@@ -101,6 +117,48 @@ agent:
     connect-timeout-ms: ${AGENT_REDIS_CONNECT_TIMEOUT_MS:2000}
     # 单 session 事件条数上限（内存兜底，非可选优化）
     max-len-per-stream: ${AGENT_REDIS_MAX_LEN_PER_STREAM:250000}
+    # 连接模式：standalone | cluster（sentinel 暂不支持；设计见 docs/redis-cluster-prefix-design.md）
+    mode: ${AGENT_REDIS_MODE:standalone}
+    # cluster 模式种子节点（逗号分隔）；空 = 回落上面 url 作单种子，拓扑自动发现
+    cluster-nodes: ${AGENT_REDIS_CLUSTER_NODES:}
+    # key 统一前缀（多 Agent 共用 oaf-redis 的隔离切分）；空 = 不加前缀（行为与存量部署一致）。
+    # 改前缀后旧 key 不可见（靠 TTL 消亡），须在首次部署时定好；不能含 { }（hash tag 语法）
+    prefix: ${AGENT_REDIS_PREFIX:}
+  # Agent Protocol（远程子 agent 服务端，travel-fulfillment agent-protocol 设计 §6/§7/§8 member）：
+  # 默认关闭——enabled=false 时不注册 /tasks* 端点、不装配认证 filter，存量服务零影响。
+  # enabled=true 时 authToken 必填（缺失启动即失败，fail-fast，设计 §6.2）。
+  # SDK 命名空间的同步映射见下方 agentscope.agent-protocol.*（同一批环境变量双落点）。
+  agent-protocol:
+    enabled: ${AGENT_PROTOCOL_ENABLED:false}
+    auth-token: ${AGENT_PROTOCOL_AUTH_TOKEN:}
+    # 本地 FS TaskStore 路径（agent_fs bean override 生效时不使用，§7 退化路径；禁止指向只读的 /config）
+    task-store: ${AGENT_PROTOCOL_TASK_STORE:}
+    retention-days: ${AGENT_PROTOCOL_TASK_RETENTION_DAYS:7}
+    # 以下三项为 lead 端 / RemoteConfirmBridge（桥组件，后续里程碑）预留
+    remote-confirm-ttl-hours: ${AGENT_REMOTE_CONFIRM_TTL_HOURS:24}
+    remote-poll-seconds: ${AGENT_REMOTE_POLL_SECONDS:5}
+    remote-headers-json: ${AGENT_REMOTE_HEADERS_JSON:}
+    # 远程 spawn 强制同步等待（lead 端，设计 §16 实测）：SDK 远程 spawn 恒异步受理、
+    # 收割全靠模型自觉不可靠——注入 SDK force_sync 属性让 spawn 阻塞等子任务完成、
+    # 结果确定性回流。仅影响纯 spawn 轮次；无远程声明的服务无消费方、无副作用
+    remote-spawn-sync-wait: ${AGENT_REMOTE_SPAWN_SYNC_WAIT:true}
+    remote-spawn-sync-wait-seconds: ${AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS:120}
+    # 协议事件总线实现（多副本设计 §18.3）：redis = Redis Streams（跨副本可见、跨重启
+    # 可重放，默认）；memory = SDK 内置内存实现（v1.4 行为）。redis 实现在 Redis 缺失
+    # 或运行期异常时自动 fail-soft 降级内存，行为不劣化于 v1.4
+    event-bus: ${AGENT_PROTOCOL_EVENT_BUS:redis}
+  # A2A 幂等 Job（Issue #69 路线 A：member 侧 /a2a/jobs，外部互操作面）：
+  # 默认关闭——enabled=false 不注册端点与认证 filter，存量服务零影响。
+  # enabled=true 时 auth-token 必填（缺失启动即失败）+ Redis 启动自检（硬依赖）。
+  # 与 /tasks 协议 token 分属两个信任域，不复用 AGENT_PROTOCOL_AUTH_TOKEN。
+  a2a-job:
+    enabled: ${AGENT_A2A_JOB_ENABLED:false}
+    auth-token: ${AGENT_A2A_JOB_TOKEN:}
+    send-timeout-seconds: ${AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS:300}
+    retention-hours: ${AGENT_A2A_JOB_RETENTION_HOURS:24}
+    # 并发准入上限：loopback 自环下每个 Job 占 2 个 Tomcat 线程（同步 POST 等自环 +
+    # 自环跑会话），32 并发对默认 200 线程池余量充足，防自环死锁（Issue §2.5）
+    max-concurrent: ${AGENT_A2A_JOB_MAX_CONCURRENT:32}
   # Harness 运行时参数（默认值与参数化前硬编码值一致，见 HarnessConfig record）
   harness:
     # ReAct 推理
@@ -139,3 +197,20 @@ otel:
       headers: ${OTEL_EXPORTER_OTLP_HEADERS:}
   service:
     name: ${OTEL_SERVICE_NAME:agent-framework}
+
+# Agent Protocol 扩展（agentscope-extensions-agent-protocol）的 SDK 自动配置命名空间。
+# 与上方 agent.agent-protocol.* 同一批环境变量双落点：本节供 SDK 自动装配读取
+# （agentscope.agent-protocol.enabled=true + 容器内有 HarnessAgent bean 即生效）。
+# task-store-path 默认为空走容器本地 FS；我们的 ProtocolTaskRepository bean override
+# （AgentProtocolConfig）会让 TaskRecord 落 agent_fs，此键仅作 §7 退化路径兜底。
+# hitl/streaming 默认必须为 true：resume（HITL 确认续跑，设计 §5.4）与 /events SSE
+# （lead 侧 remoteStreaming 消费）在 SDK 侧默认均为关闭态，关闭即协议端确认链路断裂
+# （SDK 2.0.3 行为：resume 抛 "HITL is disabled"、/events 抛 "streaming is disabled"）。
+# enabled 与 agent.agent-protocol.enabled 同绑 AGENT_PROTOCOL_ENABLED 必须保持一致：
+# 仅覆盖 SDK 键会得到无认证的 /tasks* 端点，AgentProtocolConfig 启动期即拒绝（§6.2）。
+agentscope:
+  agent-protocol:
+    enabled: ${AGENT_PROTOCOL_ENABLED:false}
+    task-store-path: ${AGENT_PROTOCOL_TASK_STORE:}
+    hitl-enabled: ${AGENT_PROTOCOL_HITL_ENABLED:true}
+    streaming-enabled: ${AGENT_PROTOCOL_STREAMING_ENABLED:true}

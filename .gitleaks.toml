@@ -1,0 +1,41 @@
+# gitleaks 配置 —— pre-commit 密钥扫描
+# 规则基于 gitleaks 默认规则集（[extend] useDefault = true），此处只补充 allowlist。
+# 生效范围：仅扫描 git 暂存区内容（.githooks/pre-commit 调用 protect --staged），
+# 因此被 .gitignore 的文件（.env / .env.secrets / .next / e2e/.runtime）不会参与扫描。
+
+title = "agent-manager gitleaks 配置"
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# 白名单：测试夹具里刻意构造的假密钥。
+# 这些值用于验证 StateDataParser 的文本遮掩分支，必须保持「像真密钥」的形态，
+# 否则测试会退化。逐条锚定全串匹配，避免放行包含该片段的真实密钥。
+# 新增测试夹具时在此登记一行，并写明用途。
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "测试夹具假密钥（非真实凭据）"
+
+regexes = [
+  # agent-framework/src/test/.../StateDataParserTest.java —— 遮掩逻辑用例
+  '''^sk-abc123XYZdef456$''',
+  '''^tp-abcdefghijklmnop1234567890abcdef$''',
+  '''^sk-0123456789abcdefghijkl$''',
+  # agent-framework/e2e/tests/api-models.spec.ts —— E2E 模型接口用例
+  '''^sk-e2e-1234567890abcd$''',
+]
+
+# ---------------------------------------------------------------------------
+# 评测飞轮离线链路（feat/eval-offline-loop）：
+# - collector 控制台「脱敏预览」演示样例：必须保持密钥形态才能演示脱敏效果；
+# - e2e_offline_loop.py：collector 上游 key 注入用例的假密钥（验证注入后不入库）。
+# 均为刻意构造的非真实凭据，逐条全串锚定。
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "评测链路演示样例与注入用例假密钥（非真实凭据）"
+
+regexes = [
+  '''^sk-or-v1-abcdef1234567890$''',
+  '''^sk-collector-inject-key-1234567890$''',
+]

@@ -1,10 +1,13 @@
 package k8s
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 // 写临时 overlay 文件，返回路径。
@@ -139,8 +142,8 @@ spec:
 			if c.Image != "agent-framework:latest" {
 				t.Fatal("agent image must stay")
 			}
-			if len(c.EnvFrom) != 1 {
-				t.Fatal("agent envFrom must stay")
+			if len(c.EnvFrom) != 2 {
+				t.Fatal("agent envFrom must stay (2 sources)")
 			}
 		}
 	}
@@ -360,5 +363,546 @@ func TestBuilderKeepsProbesAndResources(t *testing.T) {
 	}
 	if len(cs.Resources.Requests) == 0 || len(cs.Resources.Limits) == 0 {
 		t.Fatal("resources missing")
+	}
+}
+
+// ---- IngressBuilder ----
+
+// ingressWithOverlay 绕过启动探针直接构造 builder：专测 Build 期校验路径。
+func ingressWithOverlay(t *testing.T, overlay string) *IngressBuilder {
+	t.Helper()
+	return &IngressBuilder{overlay: []byte(overlay), hasOverlay: true}
+}
+
+// TestIngressBuilderNilOverlay 未配置 overlay 时与内置构造完全一致，Endpoint 派生
+// 与旧公式逐字符一致（历史行为回归锁）。
+func TestIngressBuilderNilOverlay(t *testing.T) {
+	b := &IngressBuilder{}
+	p := testParams()
+	got, err := b.Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != Ingress(p).String() {
+		t.Fatal("nil overlay must be identical to built-in construction")
+	}
+	if ep := IngressEndpoint(got, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("endpoint must match legacy formula, got %q", ep)
+	}
+}
+
+// TestIngressBuilderAnnotationsMerge annotations 按 key 合并：追加白名单注解，
+// 内置注解与路由规则全保留。
+func TestIngressBuilderAnnotationsMerge(t *testing.T) {
+	overlay := `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+`
+	b, err := NewIngressBuilder(writeOverlay(t, overlay), "nginx", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testParams()
+	ing, err := b.Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Annotations["nginx.ingress.kubernetes.io/whitelist-source-range"] != "10.0.0.0/8" {
+		t.Fatal("whitelist annotation from overlay missing")
+	}
+	if ing.Annotations[annRewriteTarget] != rewriteTargetValue ||
+		ing.Annotations[annUseRegex] != "true" ||
+		ing.Annotations[annXForwardedPrefix] != "/agent/acme-demo" ||
+		ing.Annotations[annProxyReadTimeout] == "" {
+		t.Fatal("built-in annotations lost after merge")
+	}
+	if ing.Spec.Rules[0].HTTP.Paths[0].Path != "/agent/acme-demo(/|$)(.*)" {
+		t.Fatal("built-in routing lost after merge")
+	}
+}
+
+// TestIngressBuilderHostAndPath rules 整体替换改 host/path：占位符按服务替换，
+// x-forwarded-prefix 同步改写，Endpoint 派生跟随合并结果。
+func TestIngressBuilderHostAndPath(t *testing.T) {
+	overlay := `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
+spec:
+  rules:
+    - host: demo.example.com
+      http:
+        paths:
+          - path: /my-agent(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`
+	b, err := NewIngressBuilder(writeOverlay(t, overlay), "nginx", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testParams()
+	ing, err := b.Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := ing.Spec.Rules[0]
+	if rule.Host != "demo.example.com" {
+		t.Fatalf("host from overlay missing: %q", rule.Host)
+	}
+	path := rule.HTTP.Paths[0]
+	if path.Path != "/my-agent(/|$)(.*)" {
+		t.Fatalf("path from overlay missing: %q", path.Path)
+	}
+	if path.Backend.Service.Name != "oaf-acme-demo-svc" {
+		t.Fatalf("placeholder must be substituted per service, got %q", path.Backend.Service.Name)
+	}
+	if ing.Annotations[annXForwardedPrefix] != "/my-agent" {
+		t.Fatal("x-forwarded-prefix from overlay missing")
+	}
+	if ep := IngressEndpoint(ing, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != "http://demo.example.com:30080/my-agent/" {
+		t.Fatalf("endpoint must follow merged ingress, got %q", ep)
+	}
+}
+
+// TestIngressBuilderTLS 允许配置 TLS（无不变量限制），Endpoint 按 https 派生。
+func TestIngressBuilderTLS(t *testing.T) {
+	overlay := `
+spec:
+  tls:
+    - hosts: [demo.example.com]
+      secretName: demo-tls
+`
+	b := ingressWithOverlay(t, overlay)
+	p := testParams()
+	ing, err := b.Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ing.Spec.TLS) != 1 || ing.Spec.TLS[0].SecretName != "demo-tls" {
+		t.Fatal("tls section missing")
+	}
+	// rules 未写 → 整体替换不发生，内置规则保留
+	if ing.Spec.Rules[0].HTTP.Paths[0].Path != "/agent/acme-demo(/|$)(.*)" {
+		t.Fatal("built-in routing must stay when overlay omits rules")
+	}
+	if ep := IngressEndpoint(ing, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != "https://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("endpoint must switch to https with tls, got %q", ep)
+	}
+}
+
+// TestIngressBuilderRejectsBadOverlay 禁改字段/破坏不变量的 overlay 必须拒绝。
+func TestIngressBuilderRejectsBadOverlay(t *testing.T) {
+	fullRules := func(host, path string) string {
+		return fmt.Sprintf(`
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /agent/{{SHORT_NAME}}
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: %s
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`, host, path)
+	}
+	cases := map[string]string{
+		"rename": `
+metadata:
+  name: hijacked
+`,
+		"class-changed": `
+spec:
+  ingressClassName: traefik
+`,
+		"default-backend": `
+spec:
+  defaultBackend:
+    service:
+      name: other-svc
+      port:
+        number: 80
+`,
+		"path-type-missing": `
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /agent/{{SHORT_NAME}}(/|$)(.*)
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`,
+		"wrong-backend": `
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /agent/{{SHORT_NAME}}(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: other-svc
+                port:
+                  number: 8100
+`,
+		"path-no-suffix": fullRules("", "/agent/{{SHORT_NAME}}"),
+		"rewrite-changed": `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$3
+`,
+		"use-regex-off": `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "false"
+`,
+		"prefix-mismatch": `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /other
+`,
+		"timeout-dropped": `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: null
+`,
+		"rules-dropped": `
+spec:
+  rules: null
+`,
+		"multi-prefix": `
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /a(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+          - path: /b(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`,
+	}
+	for name, overlay := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := ingressWithOverlay(t, overlay)
+			if _, err := b.Build(testParams()); err == nil {
+				t.Fatalf("overlay %q must be rejected", name)
+			}
+		})
+	}
+}
+
+// TestIngressBuilderSyntaxErrorFailFast 非法 YAML / 缺文件 / 试渲染违规（硬编码
+// 服务名或 metadata）启动即失败。
+func TestIngressBuilderSyntaxErrorFailFast(t *testing.T) {
+	if _, err := NewIngressBuilder(writeOverlay(t, "spec: [broken"), "nginx", ""); err == nil {
+		t.Fatal("broken yaml must fail at startup")
+	}
+	if _, err := NewIngressBuilder(filepath.Join(t.TempDir(), "missing.yaml"), "nginx", ""); err == nil {
+		t.Fatal("missing file must fail at startup")
+	}
+	if _, err := NewIngressBuilder(writeOverlay(t, "metadata:\n  name: hijacked\n"), "nginx", ""); err == nil {
+		t.Fatal("invariant-violating overlay must fail at startup probe")
+	}
+	// 硬编码具体服务 backend：探针（哑参数 oaf-template-probe）即拒绝，逼用占位符
+	if _, err := NewIngressBuilder(writeOverlay(t, fullIngressRules("other-svc", "/x(/|$)(.*)")), "nginx", ""); err == nil {
+		t.Fatal("hardcoded service backend must fail at startup probe")
+	}
+}
+
+// TestIngressBuilderHostModeAnnotationsMerge host 模式 overlay 追加注解（map 按 key
+// 合并）：内置 host/path/backend 全保留，且校验不要求 rewrite 注解。
+func TestIngressBuilderHostModeAnnotationsMerge(t *testing.T) {
+	overlay := `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: 10.0.0.0/8
+`
+	b := ingressWithOverlay(t, overlay)
+	ing, err := b.Build(hostModeParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Annotations["nginx.ingress.kubernetes.io/whitelist-source-range"] != "10.0.0.0/8" {
+		t.Fatal("whitelist annotation from overlay missing")
+	}
+	if ing.Annotations[annProxyReadTimeout] != "3600" || ing.Annotations[annSSLRedirect] != "false" {
+		t.Fatalf("built-in annotations lost after merge: %v", ing.Annotations)
+	}
+	if ing.Spec.Rules[0].Host != "oaf-acme-demo.region-c86-test.test-kzx1.cncb" {
+		t.Fatalf("built-in host lost after merge: %q", ing.Spec.Rules[0].Host)
+	}
+	if ing.Spec.Rules[0].HTTP.Paths[0].Path != "/" {
+		t.Fatal("built-in root path lost after merge")
+	}
+	if ing.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name != "oaf-acme-demo-svc" {
+		t.Fatal("built-in backend lost after merge")
+	}
+	// host 模式：rewrite 三项必须为空，但显式写空串放行（"不存在"与"存在但为空"等价）
+	if _, err := ingressWithOverlay(t, `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: ""
+    nginx.ingress.kubernetes.io/use-regex: ""
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: ""
+`).Build(hostModeParams()); err != nil {
+		t.Fatalf("host mode must accept empty rewrite annotations: %v", err)
+	}
+}
+
+// TestIngressBuilderHostModeRejectsBadOverlay host 模式违规 overlay：改 host、改
+// backend、丢 SSE 超时、丢 pathType、加 defaultBackend 一律拒绝（发布不落库）。
+func TestIngressBuilderHostModeRejectsBadOverlay(t *testing.T) {
+	hostRules := func(host, backend string) string {
+		return fmt.Sprintf(`
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: 8100
+`, host, backend)
+	}
+	cases := map[string]string{
+		"host-hijacked":     hostRules("demo.example.com", "oaf-acme-demo-svc"),
+		"host-empty":        hostRules("", "oaf-acme-demo-svc"),
+		"wrong-backend":     hostRules("oaf-acme-demo.region-c86-test.test-kzx1.cncb", "other-svc"),
+		"timeout-dropped":   "metadata:\n  annotations:\n    nginx.ingress.kubernetes.io/proxy-read-timeout: null\n",
+		"default-backend":   "spec:\n  defaultBackend:\n    service:\n      name: other-svc\n      port:\n        number: 80\n",
+		"path-type-missing": hostModeRulesNoPathType("oaf-acme-demo.region-c86-test.test-kzx1.cncb", "oaf-acme-demo-svc"),
+		// path 恒为根：放开会让 Ingress 只服务 /foo，而落库 Endpoint 仍指根 → 404
+		"path-not-root": hostModeRulesWithPath("oaf-acme-demo.region-c86-test.test-kzx1.cncb", "oaf-acme-demo-svc", "/foo"),
+		"rules-dropped": "spec:\n  rules: null\n",
+		// rewrite 三项在 host 模式必须为空：x-forwarded-prefix 非空会让 DebugController
+		// 302 到 {该值}/debug/ 直接 404（最常见来源=照抄 path 模式模板）
+		"rewrite-target-set":     hostModeAnn("nginx.ingress.kubernetes.io/rewrite-target", "/$2"),
+		"use-regex-set":          hostModeAnn("nginx.ingress.kubernetes.io/use-regex", `"false"`),
+		"x-forwarded-prefix-set": hostModeAnn("nginx.ingress.kubernetes.io/x-forwarded-prefix", "/agent/{{SHORT_NAME}}"),
+	}
+	for name, overlay := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ingressWithOverlay(t, overlay).Build(hostModeParams()); err == nil {
+				t.Fatalf("host-mode overlay %q must be rejected", name)
+			}
+		})
+	}
+}
+
+// TestIngressBuilderHostModeProbe 启动探针须与发布期同模式：host 模式 overlay 经探针
+// 通过；overlay 硬编码探针域名（oaf-template-probe{suffix}）只能骗过探针，真实
+// 发布期因 host 偏离被拒——与 path 模式"硬编码服务名"同构。
+func TestIngressBuilderHostModeProbe(t *testing.T) {
+	const suffix = ".region-c86-test.test-kzx1.cncb"
+	// 只追加注解、不写 rules：内置 host 保持，探针与发布期均通过
+	if _, err := NewIngressBuilder(writeOverlay(t, "metadata:\n  annotations:\n    nginx.ingress.kubernetes.io/enable-cors: \"true\"\n"),
+		"nginx", suffix); err != nil {
+		t.Fatalf("host-mode overlay must pass startup probe: %v", err)
+	}
+	// 偏离域名：探针即拒（省得等到发布期才发现）
+	if _, err := NewIngressBuilder(writeOverlay(t, hostModeRules("demo.example.com", "{{K8S_NAME}}-svc")), "nginx", suffix); err == nil {
+		t.Fatal("host-mode overlay with wrong host must fail at startup probe")
+	}
+	// 硬编码探针域名：探针放行、真实发布拒绝
+	b, err := NewIngressBuilder(writeOverlay(t, hostModeRules("oaf-template-probe"+suffix, "oaf-template-probe-svc")), "nginx", suffix)
+	if err != nil {
+		t.Fatalf("probe-domain overlay should pass probe: %v", err)
+	}
+	if _, err := b.Build(hostModeParams()); err == nil {
+		t.Fatal("hardcoded probe host must be rejected at publish time")
+	}
+}
+
+// hostModeRules host 模式的完整 rules overlay（path 根路径、pathType Prefix）。
+func hostModeRules(host, backend string) string {
+	return fmt.Sprintf(`
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: 8100
+`, host, backend)
+}
+
+// hostModeRulesNoPathType 漏写 pathType 的 host 模式 rules（apiserver 会拒，提前拦）。
+func hostModeRulesNoPathType(host, backend string) string {
+	return fmt.Sprintf(`
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: /
+            backend:
+              service:
+                name: %q
+                port:
+                  number: 8100
+`, host, backend)
+}
+
+// hostModeAnn 单条注解 overlay（host 模式下 rewrite 三项非空应被拒）。
+func hostModeAnn(key, value string) string {
+	return fmt.Sprintf("metadata:\n  annotations:\n    %s: %s\n", key, value)
+}
+
+// hostModeRulesWithPath 指定非根 path 的 host 模式 rules（应被拒：path 是不变量）。
+func hostModeRulesWithPath(host, backend, path string) string {
+	return fmt.Sprintf(`
+spec:
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: %s
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: 8100
+`, host, path, backend)
+}
+
+// fullIngressRules 合法形状的完整 rules overlay（backend 名硬编码），供探针用例复用。
+func fullIngressRules(backend, path string) string {
+	return fmt.Sprintf(`
+spec:
+  rules:
+    - http:
+        paths:
+          - path: %s
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: %q
+                port:
+                  number: 8100
+`, path, backend)
+}
+
+// TestIngressEndpointTable Endpoint 派生：path 模式 host 回落/规则 host/自带端口/TLS/
+// 根前缀/空规则（历史公式回归锁）+ host 模式域名直出（不拼 INGRESS_PORT）。
+func TestIngressEndpointTable(t *testing.T) {
+	base := Ingress(testParams())
+	hostSuffix := ".region-c86-test.test-kzx1.cncb"
+	hostBase := Ingress(hostModeParams())
+	cases := []struct {
+		name   string
+		ing    *networkingv1.Ingress
+		host   string
+		port   int
+		suffix string
+		want   string
+	}{
+		{
+			name: "builtin-legacy-formula", ing: base, host: "1.2.3.4", port: 30080,
+			want: "http://1.2.3.4:30080/agent/acme-demo/",
+		},
+		{
+			name: "rule-host-overrides-fallback",
+			ing: func() *networkingv1.Ingress {
+				ing := base.DeepCopy()
+				ing.Spec.Rules[0].Host = "demo.example.com"
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "http://demo.example.com:30080/agent/acme-demo/",
+		},
+		{
+			name: "fallback-host-with-port", ing: base, host: "172.20.0.2:30080", port: 30080,
+			want: "http://172.20.0.2:30080/agent/acme-demo/",
+		},
+		{
+			name: "root-prefix",
+			ing: func() *networkingv1.Ingress {
+				ing := base.DeepCopy()
+				ing.Spec.Rules[0].HTTP.Paths[0].Path = "(/|$)(.*)"
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "http://1.2.3.4:30080/",
+		},
+		{
+			name: "no-rules-fallback",
+			ing: func() *networkingv1.Ingress {
+				ing := base.DeepCopy()
+				ing.Spec.Rules = nil
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "http://1.2.3.4:30080/",
+		},
+		{
+			name: "tls-scheme",
+			ing: func() *networkingv1.Ingress {
+				ing := base.DeepCopy()
+				ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{"demo.example.com"}}}
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "https://1.2.3.4:30080/agent/acme-demo/",
+		},
+		{
+			name: "host-mode-domain", ing: hostBase, host: "1.2.3.4", port: 30080, suffix: hostSuffix,
+			want: "http://oaf-acme-demo.region-c86-test.test-kzx1.cncb/",
+		},
+		{
+			name: "host-mode-tls", suffix: hostSuffix,
+			ing: func() *networkingv1.Ingress {
+				ing := hostBase.DeepCopy()
+				ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{"oaf-acme-demo.region-c86-test.test-kzx1.cncb"}}}
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "https://oaf-acme-demo.region-c86-test.test-kzx1.cncb/",
+		},
+		{
+			// 防御分支：host 模式下规则无 host（不可能过 validateIngress）时回落 INGRESS_HOST
+			name: "host-mode-no-rule-host", suffix: hostSuffix,
+			ing: func() *networkingv1.Ingress {
+				ing := hostBase.DeepCopy()
+				ing.Spec.Rules[0].Host = ""
+				return ing
+			}(), host: "1.2.3.4", port: 30080,
+			want: "http://1.2.3.4/",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IngressEndpoint(tc.ing, tc.host, tc.port, tc.suffix); got != tc.want {
+				t.Fatalf("want %q, got %q", tc.want, got)
+			}
+		})
 	}
 }

@@ -1,7 +1,9 @@
 # Agent Framework 工具体系现状分析与改进方案
 
 >
-> **现状核对（2026-09-07）**：工具能力已大幅扩展。**自定义工具**除 `get_current_time` / `echo` 外，新增 `present_file`（FileTools, 产物注册交付 → file_ready 帧）、`check_oaf_package` / `create_oaf_zip`（OafPackageTools, OAF 包校验与生成）。**MCP 工具**：`McpToolRegistrar` 已支持 `permissions.read_only: true` 强制只读绕过 HITL、`ActiveMCP.json.selectedTools.enabled` 子集过滤、`ui.tools.{tool}.resource_uri` 静态声明 + `tool.meta()` 动态发现、`ui.app_only: true` 仅卡片不入 LLM 工具集。**MCP Apps**（阶段一/二）已落地：UI 卡片渲染（沙箱 iframe + postMessage）+ 4.7 静默更新（`POST /mcp/ui-context`）。详细见 [mcp-apps-extension-plan.md](mcp-apps-extension-plan.md) 与 [agent-framework-design.md](agent-framework-design.md) §3、§7。
+> **现状核对（2026-09-07，2026-10-01 复核）**：工具能力已大幅扩展。**自定义工具**为 `get_current_time` / `echo`（BusinessTools）+ `present_file` / `present_url`（FileTools，产物注册交付 → file_ready 帧）；原 `check_oaf_package` / `create_oaf_zip`（OafPackageTools）已于 2026-09 迁出至平台 backend MCP（`backend/internal/mcpsrv/oaf_package.go`，见 [../../docs/design/oaf-tools-extraction-design.md](../../docs/design/oaf-tools-extraction-design.md)），本仓 `tool/` 下不再有该类。**MCP 工具**：`McpToolRegistrar` 已支持 `permissions.read_only: true` 强制只读绕过 HITL、`ActiveMCP.json.selectedTools.enabled` 子集过滤、`ui.tools.{tool}.resource_uri` 静态声明 + `tool.meta()` 动态发现、`ui.app_only: true` 仅卡片不入 LLM 工具集。**MCP Apps**（阶段一/二）已落地：UI 卡片渲染（沙箱 iframe + postMessage）+ 4.7 静默更新（`POST /mcp/ui-context`）。**工具插件**：`ToolPlugin` SPI + `ToolPluginBootstrapper`（BFPP）免重编译加载插件工具，见 [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md)。详细见 [mcp-apps-extension-plan.md](mcp-apps-extension-plan.md) 与 [agent-framework-design.md](agent-framework-design.md) §3、§7。
+>
+> 下文 §1 的「现状分析/当前问题」是**改进前**的原始评估（§1.2 列的 `REQUIRED_TOOLS` 硬编码白名单、`mapToolName()` 映射均已按 §4.3 删除，`tools.json` 现只写 `deny`）；落地状态见 §3.1。
 
 ## 1. 现状分析
 
@@ -328,16 +330,16 @@ toolkit.registration()
 
 ```bash
 # 启动后检查工具数量
-curl -s http://localhost:8101/tools | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['builtin']), 'tools')"
+curl -s "http://localhost:8100/tools?includeInternal=true" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['sdkInternal']), 'tools')"
 
-# 预期：所有 HarnessAgent 内置工具可用（约 20+ 个），不只有 16 个
+# 预期：所有 HarnessAgent 内置工具可用（约 20+ 个，经 sdkInternal 段透出），不只有 16 个
 ```
 
 ### 5.2 阶段二验证
 
 ```bash
 # 启动后检查 MCP 工具
-curl -s http://localhost:8101/mcp
+curl -s http://localhost:8100/mcp
 
 # 预期：MCP 服务器通过 McpClientBuilder 注册，工具可用
 ```
@@ -346,7 +348,7 @@ curl -s http://localhost:8101/mcp
 
 ```bash
 # 自定义工具可用
-curl -s -X POST http://localhost:8101/ -H "Content-Type: application/json" \
+curl -s -X POST http://localhost:8100/ -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"查询订单 12345"}]}},"id":"1"}'
 
 # 预期：Agent 调用 query_order 工具

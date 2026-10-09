@@ -133,6 +133,26 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
+    void invokeStreamShouldNotCompleteOnRemoteForwardedAgentEnd() {
+        // 远程子 agent 转发回来的 AGENT_END（source 非空）只代表子任务运行终点，
+        // 不能当作 turn 终点：转发会让父流提前 done/completed 并 complete()，截断 spawn 后续输出。
+        // 与 invokeStreamShouldEmitDoneOnAgentEnd（lead 自身 AGENT_END 收尾）成对钉住 guard 两侧。
+        var remoteEnd = new io.agentscope.core.event.AgentEndEvent("reply-1")
+            .withSource("gw-1/order-agent");
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+            .thenReturn(Flux.just(remoteEnd));
+
+        var events = service.invokeStream("hello", "t1", "alice")
+            .collectList().block();
+
+        assertNotNull(events);
+        assertFalse(events.stream().anyMatch(e -> "done".equals(e.get("type"))),
+            "远程转发的 AGENT_END 不得产出 done 帧: " + events);
+        assertFalse(events.stream().anyMatch(e -> "completed".equals(e.get("state"))),
+            "远程转发的 AGENT_END 不得产出 completed 终态: " + events);
+    }
+
+    @Test
     void invokeStreamShouldPropagateUserId() {
         when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
             .thenReturn(Flux.empty());

@@ -141,6 +141,17 @@
             <version>${agentscope.version}</version>
         </dependency>
 
+        <!-- Agent Protocol（远程子 agent 服务端：POST /tasks、GET /tasks/{id}、/events SSE、
+             /tasks/{id}/resume；自动配置 agentscope.agent-protocol.enabled + HarnessAgent bean。
+             装配见 AgentProtocolConfig（TaskRepository bean override 落 agent_fs + 自定义
+             AgentFactory 接 AgentRuntimeService.getAgent()，防 OAF reload 跑旧实例）。
+             设计见 docs/design/travel-fulfillment-agent-protocol-design.md §6/§7/§8 member -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-agent-protocol</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+
         <!-- LLM Model: OpenAI compatible -->
         <dependency>
             <groupId>io.agentscope</groupId>
@@ -178,6 +189,27 @@
         <dependency>
             <groupId>com.zaxxer</groupId>
             <artifactId>HikariCP</artifactId>
+        </dependency>
+
+        <!-- DB schema 版本化迁移（db/migration/V*.sql，启动时自动执行；
+             flyway-mysql 是 Flyway 10 起 MySQL 方言必需模块。版本由
+             spring-boot-dependencies 管，Boot 3.3.5 → Flyway 10.10.x） -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+        <!-- FlywayAutoConfiguration 运行必需：内层 FlywayConfiguration 有
+             @ConditionalOnClass(JdbcUtils)（spring-jdbc），缺了会**静默不装配**——
+             外层条件照常匹配、启动无任何报错，但迁移整段不执行。
+             本项目不引 starter-jdbc（DataSource 是手搓 Hikari），需显式带上；
+             版本由 spring-boot-dependencies 管。 -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
         </dependency>
 
         <!-- Redis 客户端（session_event 存储，见 docs/durable-sse-multinode-impl-plan.md）

@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.service.RemoteConfirmBridge;
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.SessionUserStore;
 import io.agentmanager.framework.service.TurnLeaseGuard;
@@ -35,6 +36,12 @@ import reactor.core.publisher.Flux;
  *
  * <p>错误码（12.5）：缓存 miss → 404 {@code confirm_context_not_found}；重复确认（CAS 防护）→ 409
  * {@code confirm_already_consumed}；confirm-stream 预检失败以 error SSE 帧返回。
+ *
+ * <p>多行消费路由（V7，travel-fulfillment 设计 §5.4）：请求体可选 {@code confirmKey}，
+ * 缺省 {@code 'local'}——默认消费本地行（现状语义零回归）；{@code task:{task_id}} 等远程键
+ * 走 {@link RemoteConfirmBridge#routeDecision}（approve→ALLOW、reject→DENY 调子任务
+ * {@code POST /tasks/{id}/resume}），<b>不</b>走父 state 恢复、不抢本会话 turn 租约
+ * （唤醒汇总 turn 由 Bridge 自行抢租约驱动）。
  *
  * <p>执行权语义：confirm 恢复 = 新执行段，两侧端点都先带超时排队抢 turn 租约。chat 侧
  * permission_ask 后租约要到 turn 收尾（AGENT_END 处理）才释放——保证 ASKING 快照先落库，
@@ -55,17 +62,34 @@ public class ConfirmController {
     private final SessionEventBus eventBus;
     private final SessionUserStore sessionUserStore;
     private final McpToolRegistrar mcpToolRegistrar;
+    private final RemoteConfirmBridge remoteConfirmBridge;
 
+    /** Spring 装配入口（含远程确认桥） */
+    @org.springframework.beans.factory.annotation.Autowired
     public ConfirmController(AgentRuntimeService runtimeService,
                              TurnLeaseStore turnLeaseStore,
                              SessionEventBus eventBus,
                              SessionUserStore sessionUserStore,
-                             McpToolRegistrar mcpToolRegistrar) {
+                             McpToolRegistrar mcpToolRegistrar,
+                             RemoteConfirmBridge remoteConfirmBridge) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.eventBus = eventBus;
         this.sessionUserStore = sessionUserStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
+        this.remoteConfirmBridge = remoteConfirmBridge;
+    }
+
+    /** 本地行 confirmKey 的判定（多行消费路由：非 local 即远程键） */
+    private static boolean isRemoteKey(String confirmKey) {
+        return !io.agentmanager.framework.service.ConfirmContextStore.LOCAL_KEY
+            .equals(normalizeConfirmKey(confirmKey));
+    }
+
+    private static String normalizeConfirmKey(String confirmKey) {
+        return confirmKey == null || confirmKey.isBlank()
+            ? io.agentmanager.framework.service.ConfirmContextStore.LOCAL_KEY
+            : confirmKey.trim();
     }
 
     /**
@@ -97,6 +121,29 @@ public class ConfirmController {
             @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
         // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+
+        // 多行消费路由：显式远程键（task:{task_id}）→ Bridge 调 /resume，不走父 state 恢复、
+        // 不抢本会话 turn 租约（唤醒汇总 turn 由 Bridge 自行抢租约驱动）
+        if (isRemoteKey(body.confirmKey())) {
+            try {
+                return ResponseEntity.ok(remoteConfirmBridge.routeDecision(
+                    sessionId, normalizeConfirmKey(body.confirmKey()), body.results()));
+            } catch (AgentRuntimeService.ConfirmContextNotFoundException e) {
+                return ResponseEntity.status(404).body(Map.of(
+                    "error", "confirm_context_not_found",
+                    "message", "Session not found or confirm context expired"));
+            } catch (AgentRuntimeService.ConfirmAlreadyConsumedException e) {
+                return ResponseEntity.status(409).body(Map.of(
+                    "error", "confirm_already_consumed",
+                    "message", "This confirm has already been processed"));
+            } catch (Exception e) {
+                // resume 失败/endpoint 不可解析等：行已被 CAS 消费，任务保持挂起等待重试
+                log.warn("[confirm] remote route failed (sid={}): {}", sessionId, e.getMessage());
+                return ResponseEntity.status(500).body(Map.of(
+                    "error", "remote_route_failed",
+                    "message", String.valueOf(e.getMessage())));
+            }
+        }
 
         // 恢复确认时刷新会话-用户映射（确认恢复可能是新的入口，确保映射存在）
         var userId = sessionUserStore.findUserIdBySession(sessionId);
@@ -153,6 +200,31 @@ public class ConfirmController {
         // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         String finalSessionId = sessionId;
+
+        // 多行消费路由：远程键 → Bridge 路由（resume + 异步终态唤醒），本流只回执
+        // confirm_routed/done 两帧——后续汇总 turn 事件经 EventBus durable 落库，
+        // 当前流尾与离线 /subscribe 均可见（设计 §4 步骤 7）
+        if (isRemoteKey(body.confirmKey())) {
+            return Flux.<ServerSentEvent<String>>create(sink -> {
+                try {
+                    var routed = remoteConfirmBridge.routeDecision(
+                        finalSessionId, normalizeConfirmKey(body.confirmKey()), body.results());
+                    sink.next(ServerSentEvent.<String>builder()
+                        .data(AgentEventSseSerializer.payload(routed))
+                        .build());
+                } catch (Exception e) {
+                    log.warn("[confirm-stream] remote route failed (sid={}): {}",
+                        finalSessionId, e.getMessage());
+                    sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
+                        : e.getClass().getSimpleName()));
+                }
+                // done 终态帧：前端按 done 归一流终态（与本地恢复段同契约）
+                sink.next(ServerSentEvent.<String>builder()
+                    .data("{\"type\":\"done\"}")
+                    .build());
+                sink.complete();
+            }).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+        }
 
         // 恢复确认时刷新会话-用户映射
         var confirmUserId = sessionUserStore.findUserIdBySession(finalSessionId);
@@ -299,8 +371,10 @@ public class ConfirmController {
             eventBus.closeSession(sessionId);
         }
 
-        // AGENT_END → 关闭 EventBus
-        if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END) {
+        // AGENT_END（仅 lead 自身事件）→ 关闭 EventBus：远程子 agent 转发的 AGENT_END
+        // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
+        if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
+                && !AgentEventSseSerializer.isRemoteForwarded(event)) {
             TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
         }
     }
@@ -313,6 +387,11 @@ public class ConfirmController {
             .build();
     }
 
-    public record ConfirmRequest(List<Map<String, Object>> results) {
+    /** 请求体：results 必带；confirmKey 可选（缺省 'local'——本地行现状语义；'task:{task_id}' 走远程路由） */
+    public record ConfirmRequest(List<Map<String, Object>> results, String confirmKey) {
+        /** 兼容构造：无 confirmKey（本地行，现状语义） */
+        public ConfirmRequest(List<Map<String, Object>> results) {
+            this(results, null);
+        }
     }
 }

@@ -1,7 +1,7 @@
 # OpenSandbox 集成设计方案
 
 >
-> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。USER 级复用（`IsolationScope.USER`） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由 SDK 注入 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
+> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。USER 级复用（`IsolationScope.USER`） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由自研 `RedisSandboxExecutionGuard` 串行化（Redis `SET NX PX` + Lua 释放，`SANDBOX_GUARD_ENABLED` 默认 true；2026-09 起取代初版依赖的框架注入 `JdbcSandboxExecutionGuard`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
 
 ## 1. 背景与目标
 
@@ -77,7 +77,7 @@ public abstract class AbstractBaseSandbox implements Sandbox {
 | 项目 | 值 |
 |------|-----|
 | 服务地址 | `http://192.168.31.155:8090`（本机 `http://127.0.0.1:8090`） |
-| API Key | `CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW` |
+| API Key | `${OPENSANDBOX_API_KEY}`（见 `.env.secrets`，不入库） |
 | 认证方式 | Header `OPEN-SANDBOX-API-KEY` |
 | 运行时 | Docker（bridge 网络） |
 | execd 端口 | `44772/tcp`（映射到宿主机动态端口 40000-60000） |
@@ -117,7 +117,7 @@ OpenSandbox 提供 Java SDK（`com.alibaba.opensandbox:sandbox`，**最新稳定
 // 连接配置
 ConnectionConfig config = ConnectionConfig.builder()
     .domain("192.168.31.155:8090")
-    .apiKey("CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW")
+    .apiKey(System.getenv("OPENSANDBOX_API_KEY"))
     .protocol("http")
     .build();
 
@@ -935,7 +935,7 @@ public class WorkspaceSyncService {
 | 要点 | 决策 |
 |------|------|
 | 回写频率 | 每次用户请求完成后（同步/流式都覆盖），一致性最好 |
-| 回写内容 | 仅运行时文件（MEMORY.md、memory/），静态模板不回写（沙箱不可修改模板语义） |
+| 回写内容 | 仅运行时文件（MEMORY.md、memory/），静态模板不回写（沙箱不可修改模板语义）。**2026-09 补充**：会话内 `skill_manage` 写入的 L4 用户技能（容器 `/workspace/skills`）也回写 `agent_fs`，否则 L4 随容器 TTL 到期丢失——见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md) 文首现状核对 ② |
 | 回写通道 | `DistributedStore.baseStore()`（JdbcStore → agent_fs），key 与注入时一致 |
 | 失败处理 | 不阻塞主流程，日志告警；沙箱内数据保留，下次 call 或销毁前补偿拉取 |
 | 并发安全 | 同 userId 并发时最后写入胜出（与框架 AgentStateStore 语义一致） |
@@ -949,16 +949,22 @@ public class WorkspaceSyncService {
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `SANDBOX_ENABLED` | `false` | 是否启用沙箱模式 |
+| `SANDBOX_ENABLED` | `false` | 是否启用沙箱模式（生效值经 `SandboxRuntime` 三层裁决：env 显式设置 > OAF 包 frontmatter `config.sandbox.enabled` > yml 默认 false） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | 沙箱超时时间 |
 | `SANDBOX_MEMORY_MB` | `1024` | 内存限制 (MiB) |
 | `SANDBOX_CPU_COUNT` | `1` | CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | 覆盖镜像默认启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
+| `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | 注入沙箱容器 `EXECD_API_GRACE_SHUTDOWN`，execd 每条命令 SSE 结束后的尾窗保持时间 |
+| `SANDBOX_PROJECTION_ENABLED` | `true` | 工作区投影开关（issue #27 缓解项；关闭后每次 sandbox start 不再 hydrate 投影目录） |
+| `SANDBOX_GUARD_ENABLED` | `true` | 并发执行守卫（`RedisSandboxExecutionGuard`，Redis `SET NX` 串行化同 userId 沙箱获取） |
+| `SANDBOX_GUARD_LEASE_SECONDS` | `900` | 守卫租约 TTL（崩溃自愈） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | API 密钥 |
 
 ### 5.2 application.yml
+
+> **现状核对（2026-10-01）**：`entrypoint` 未落 yml 叶子，经 `SANDBOX_ENTRYPOINT` 环境变量宽松绑定生效（Spring relaxed binding，默认值在 `SandboxConfig` 的 `@DefaultValue`）；下块与当前 `application.yml` 一致。
 
 ```yaml
 agent:
@@ -968,17 +974,20 @@ agent:
     timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:60}
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
-    entrypoint: ${SANDBOX_ENTRYPOINT:/opt/code-interpreter/code-interpreter.sh}
+    execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
+    projection-enabled: ${SANDBOX_PROJECTION_ENABLED:true}
+    guard-enabled: ${SANDBOX_GUARD_ENABLED:true}
+    guard-lease-seconds: ${SANDBOX_GUARD_LEASE_SECONDS:900}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
-      api-key: ${OPENSANDBOX_API_KEY}
+      api-key: ${OPENSANDBOX_API_KEY:}
 ```
 
 ### 5.3 .env.secrets (新增)
 
 ```bash
 # OpenSandbox
-OPENSANDBOX_API_KEY=CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW
+OPENSANDBOX_API_KEY=<你的 OpenSandbox API Key>
 ```
 
 ---
@@ -1047,7 +1056,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 - `RedisSandboxExecutionGuard`（基于 Redis `SET NX PX`）
 - `JdbcSandboxExecutionGuard`（基于 MySQL `GET_LOCK()`）
 
-当前使用 `DistributedStore` 时，框架会自动注入执行守卫。
+当前（2026-09 起）由 `AgentScopeConfig` 显式注入自研 `RedisSandboxExecutionGuard`（`SANDBOX_GUARD_ENABLED` 默认 true，Redis `SET NX PX` + Lua 释放，key 前缀 `sbx:guard`，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)）；初版依赖的「`DistributedStore` 配置时框架自动注入 `JdbcSandboxExecutionGuard`」路径已不使用。
 
 ### 7.4 资源清理
 
@@ -1078,7 +1087,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 |---|------|------|------|---------|
 | 8 | **Workspace 注入方式** | ✅ 已决策 | **分层结合**：doHydrateWorkspace（框架契约，投影+快照恢复）为主 + KV 运行时文件（MEMORY.md/memory/）**首次 exec 延迟注入**（create() 无 RuntimeContext 拿不到 userId，反编译确认；框架所有文件操作最终走 exec，首次文件操作前注入即可） | `OpenSandboxClient` 实现 |
 | 9 | **沙箱状态序列化** | ⏳ 待测试 | 需测试 `SandboxState` JSON 序列化兼容性 | 状态持久化 |
-| 10 | **沙箱并发控制** | ✅ 已确认 | 使用框架自动注入的 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK()`）：通过 `distributedStore(...)` 配置时框架自动注入 executionGuard，复用现有 MySQL + DistributedStore | 并发安全 |
+| 10 | **沙箱并发控制** | ✅ 已确认 | 使用框架自动注入的 `JdbcSandboxExecutionGuard`（MySQL `GET_LOCK()`）：通过 `distributedStore(...)` 配置时框架自动注入 executionGuard，复用现有 MySQL + DistributedStore。**2026-09 更新**：已改为自研 `RedisSandboxExecutionGuard`（`SANDBOX_GUARD_ENABLED` 默认 true，Redis `SET NX`），Jdbc 路径不再使用 | 并发安全 |
 | 11 | **沙箱超时清理** | ✅ 已确认 | **三层清理**：① OpenSandbox timeout 到期自动销毁沙箱；② Agent 侧定时任务（如每 10 分钟）清理 SessionSandboxStateStore 中失效状态；③ resume 失败（404）时即清理该用户状态（配合框架自动降级新建） | 资源管理 |
 
 ### 8.3 Workspace 相关
@@ -1093,7 +1102,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 
 | # | 问题 | 状态 | 答案 | 影响范围 |
 |---|------|------|------|---------|
-| 15 | **OpenSandbox Server 高可用** | ✅ 已确认 | **不考虑 OpenSandbox Server 自身高可用**（沙箱服务按单点部署运维）。Agent 侧无状态多副本已满足：SandboxState 存 MySQL（agent_state）、并发锁 JdbcSandboxExecutionGuard（MySQL GET_LOCK 跨副本有效）、记忆回写 KV（MySQL）→ 任意 Agent 副本可 resume 同一用户的同一沙箱 | 运维部署 |
+| 15 | **OpenSandbox Server 高可用** | ✅ 已确认 | **不考虑 OpenSandbox Server 自身高可用**（沙箱服务按单点部署运维）。Agent 侧无状态多副本已满足：SandboxState 存 MySQL（agent_state）、并发锁 RedisSandboxExecutionGuard（Redis `SET NX PX`，共用 oaf-redis 时跨副本有效；多 Agent 共用 Redis 需各自 `AGENT_REDIS_PREFIX` 隔离，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)）、记忆回写 KV（MySQL）→ 任意 Agent 副本可 resume 同一用户的同一沙箱 | 运维部署 |
 | 16 | **沙箱资源限制** | ✅ 已确认 | 默认 `cpu: 1, memory: 1Gi`，可通过 `resourceLimits` 配置 | 沙箱配置 |
 | 17 | **沙箱监控** | ⏳ 待确认 | 可通过 `/v1/sandboxes/<id>/diagnostics/summary` 获取诊断 | 运维监控 |
 | 18 | **沙箱日志** | ⏳ 待确认 | `docker compose logs -f` 查看 Server 日志 | 调试排查 |
@@ -1107,13 +1116,16 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 ### 9.1 OpenSandbox Server 验证
 
 ```bash
+# 密钥从本地 .env.secrets 注入，勿写入本文档
+set -a && source agent-framework/.env.secrets && set +a
+
 # 1. 健康检查
 curl http://192.168.31.155:8090/health
 # 预期: {"status":"healthy"}
 
 # 2. 创建测试沙箱
 curl -X POST http://192.168.31.155:8090/v1/sandboxes \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW" \
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "image": {"uri": "opensandbox/code-interpreter:v1.1.0"},
@@ -1124,16 +1136,16 @@ curl -X POST http://192.168.31.155:8090/v1/sandboxes \
 
 # 3. 查询沙箱状态
 curl http://192.168.31.155:8090/v1/sandboxes/<sandbox_id> \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW"
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY"
 
 # 4. 获取 execd 端点
 curl http://192.168.31.155:8090/v1/sandboxes/<sandbox_id>/endpoints/44772 \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW"
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY"
 # 预期: {"endpoint": "192.168.31.155:52051/proxy/44772"}
 
 # 5. 删除测试沙箱
 curl -X DELETE http://192.168.31.155:8090/v1/sandboxes/<sandbox_id> \
-  -H "OPEN-SANDBOX-API-KEY: CWpXBzEIlS3edCFQBxK2u+cGK9n08GiYKT22f2JzlxdmJNeAh4waxPHwOEp7pFNW"
+  -H "OPEN-SANDBOX-API-KEY: $OPENSANDBOX_API_KEY"
 ```
 
 ### 9.2 镜像兼容性验证
@@ -1186,7 +1198,7 @@ docker run --rm --entrypoint sh opensandbox/code-interpreter:v1.1.0 -c '
 | 沙箱端口 | 8888 / 44772 | 44772 | OpenSandbox execd 端口 | ✅ 已决策 |
 | Workspace 注入 | doHydrateWorkspace / SDK 文件 API | 分层结合（doHydrateWorkspace 为主 + 首次 exec 延迟注入） | 框架契约必须实现 doHydrateWorkspace；KV 运行时文件因 create() 无 userId，改为首次 exec 时注入 | ✅ 已决策 |
 | 沙箱续期 | 自动 renew / 依赖框架自动重建 | 依赖框架自动重建（不续期） | AgentScope 无 renew 机制，但 resume 失败自动降级新建；记忆靠每次回写 KV 恢复；需保留执行环境时加 JdbcSnapshotSpec | ✅ 已决策 |
-| 并发控制 | JdbcSandboxExecutionGuard / 自定义 | JdbcSandboxExecutionGuard | 框架通过 distributedStore 自动注入（MySQL GET_LOCK），复用现有 MySQL + DistributedStore，零额外开发 | ✅ 已决策 |
+| 并发控制 | JdbcSandboxExecutionGuard / 自定义 | ~~JdbcSandboxExecutionGuard~~ → **RedisSandboxExecutionGuard** | 初版依赖框架通过 distributedStore 自动注入（MySQL GET_LOCK）；**2026-09 改为自研 Redis `SET NX PX` 守卫**（`SANDBOX_GUARD_ENABLED` 默认 true），Jdbc 路径不再使用 | ✅ 已决策 |
 | 超时清理 | OpenSandbox 自动销毁 / Agent 定时清理 / resume 失败即清理 | 三层结合 | ① 到期自动销毁 ② 定时清理 SessionSandboxStateStore 失效状态 ③ resume 404 即清理并降级新建 | ✅ 已决策 |
 | 增量更新 | 框架投影哈希比对 / 自定义同步 | 框架投影哈希比对（静态）+ 每次覆盖（运行时） | 静态模板靠框架自带 SHA-256 增量；MEMORY.md/memory/ 每次回写 + 注入覆盖 | ✅ 已决策 |
-| Server 高可用 | 多实例 / 单实例 | 单实例（不考虑 Server 自身高可用） | Agent 侧无状态多副本已满足（SandboxState/并发锁/记忆均在 MySQL），沙箱服务按单点运维 | ✅ 已决策 |
+| Server 高可用 | 多实例 / 单实例 | 单实例（不考虑 Server 自身高可用） | Agent 侧无状态多副本已满足（SandboxState 与记忆在 MySQL、并发锁在 Redis），沙箱服务按单点运维 | ✅ 已决策 |

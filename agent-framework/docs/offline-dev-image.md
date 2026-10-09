@@ -1,6 +1,6 @@
 # Agent Framework 离线开发镜像
 
-离线开发镜像 `gaoyue1989/agent-framework:java-dev` 预装 **JDK 21 + Maven 3.9.9**，并缓存当前 `pom.xml` 的**全部依赖**（含所有 Maven 插件，已验证 `mvn -o test` 全量用例离线通过；用例数随代码演进，当前 456 个 @Test / 61 个测试类）。适用于内网（如 192.168.31.207）等无法访问外网的环境。
+离线开发镜像 `gaoyue1989/agent-framework:java-dev` 预装 **JDK 21 + Maven 3.9.9**，并缓存当前 `pom.xml` 的**全部依赖**（含所有 Maven 插件，已验证 `mvn -o test` 全量用例离线通过；用例数随代码演进，2026-10-09 统计 1380 个 @Test 注解（`grep -rE '@Test\b'`）/ 140 个含 @Test 的源文件）。适用于内网（如 192.168.31.207）等无法访问外网的环境。
 
 ## 镜像内容
 

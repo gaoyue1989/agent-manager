@@ -1,6 +1,7 @@
 package io.agentmanager.framework.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 @ConfigurationProperties(prefix = "agent")
@@ -13,8 +14,38 @@ public record AgentManagerProperties(
     CleanupConfig cleanup,
     FileConfig file,
     SseConfig sse,
-    HarnessConfig harness
+    HarnessConfig harness,
+    AgentProtocolSettings agentProtocol
 ) {
+
+    /**
+     * 显式绑定构造器：record 新增 agentProtocol 组件后出现两个构造器（下方保留一个
+     * 兼容旧按位构造的兼容构造器），Spring Boot 的属性 Binder 在多构造器时要求以
+     * {@code @ConstructorBinding} 指定绑定入口，缺注解会在启动期绑定失败。
+     */
+    @ConstructorBinding
+    public AgentManagerProperties {
+    }
+
+    /**
+     * 兼容旧 9 参构造器（不参与属性绑定，仅供既有测试按位置传参构造，
+     * 与 HistoryConfig javadoc 记载的「加组件波及全部按位构造测试」问题同源）：
+     * 协议配置缺省为默认值（enabled=false，存量行为零变化）。
+     */
+    public AgentManagerProperties(
+        LLMConfig llm,
+        ServerConfig server,
+        CheckpointConfig checkpoint,
+        String configDir,
+        String workspaceDir,
+        CleanupConfig cleanup,
+        FileConfig file,
+        SseConfig sse,
+        HarnessConfig harness
+    ) {
+        this(llm, server, checkpoint, configDir, workspaceDir, cleanup, file, sse, harness,
+            AgentProtocolSettings.defaults());
+    }
 
     /**
      * 工作区基目录：AGENT_WORKSPACE_DIR 优先；未配置时回落到 configDir。
@@ -263,4 +294,49 @@ public record AgentManagerProperties(
             /** 观察者游标轮询间隔（毫秒），默认 300 */
             @DefaultValue("300") int tailPollMs
     ) {}
+
+    /**
+     * Agent Protocol（远程子 agent 服务端）配置组，绑定 agent.agent-protocol.*
+     * （环境变量 AGENT_PROTOCOL_* / AGENT_REMOTE_*，见 travel-fulfillment
+     * agent-protocol 设计 §6.2/§7/§8 member）。
+     *
+     * <p>自带 {@code @ConfigurationProperties} 注解：本 record 经 AgentProtocolConfig 的
+     * {@code @EnableConfigurationProperties} 独立注册（协议关闭时也绑定，供状态透出），
+     * 注册器要求被注册类型自身携带该注解。
+     *
+     * <p>默认 enabled=false：协议端点（/tasks*）不注册、AgentProtocolAuthFilter 不装配，
+     * 存量服务零影响（验收断言 8）。
+     *
+     * <p>remoteConfirmTtlHours / remotePollSeconds / remoteHeadersJson 为 lead 端与
+     * RemoteConfirmBridge（桥组件，后续里程碑）预留的语义槽位，member 侧当前只透出与落库。
+     */
+    @ConfigurationProperties(prefix = "agent.agent-protocol")
+    public record AgentProtocolSettings(
+        /** 协议总开关（AGENT_PROTOCOL_ENABLED），默认关闭 */
+        @DefaultValue("false") boolean enabled,
+        /** 服务间认证 token（AGENT_PROTOCOL_AUTH_TOKEN）：enabled=true 时必填，缺失启动即失败（fail-fast） */
+        @DefaultValue("") String authToken,
+        /** 本地 FS TaskStore 路径（AGENT_PROTOCOL_TASK_STORE）；agent_fs bean override 生效时不使用（§7 退化路径） */
+        @DefaultValue("") String taskStore,
+        /** 终态 TaskRecord 保留天数（AGENT_PROTOCOL_TASK_RETENTION_DAYS），默认 7 */
+        @DefaultValue("7") int retentionDays,
+        /** 远程确认挂起独立 TTL 小时数（AGENT_REMOTE_CONFIRM_TTL_HOURS，lead/Bridge 用），默认 24 */
+        @DefaultValue("24") int remoteConfirmTtlHours,
+        /** 远程任务快照轮询周期秒（AGENT_REMOTE_POLL_SECONDS，lead/Bridge 用），默认 5 */
+        @DefaultValue("5") int remotePollSeconds,
+        /** 远程子 agent 声明 headers JSON（AGENT_REMOTE_HEADERS_JSON，lead 用），member 侧不消费 */
+        @DefaultValue("") String remoteHeadersJson,
+        /** 远程 spawn 强制同步等待（AGENT_REMOTE_SPAWN_SYNC_WAIT，lead 用）：注入 SDK force_sync 属性，spawn 阻塞等子任务完成、结果确定性回流（设计 §16 实测发现）。默认开 */
+        @DefaultValue("true") boolean remoteSpawnSyncWait,
+        /** 强制同步等待秒数（AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS），默认 120 */
+        @DefaultValue("120") int remoteSpawnSyncWaitSeconds,
+        /** 协议事件总线实现（AGENT_PROTOCOL_EVENT_BUS）：redis | memory，默认 redis——
+         *  Redis 缺失/异常 fail-soft 降级内存（多副本设计 §18.3） */
+        @DefaultValue("redis") String eventBus
+    ) {
+        /** 代码默认值兜底：配置节缺失或兼容构造器（测试直接构造）时使用 */
+        public static AgentProtocolSettings defaults() {
+            return new AgentProtocolSettings(false, "", "", 7, 24, 5, "", true, 120, "redis");
+        }
+    }
 }

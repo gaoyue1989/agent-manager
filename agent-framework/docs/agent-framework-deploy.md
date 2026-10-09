@@ -2,7 +2,9 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
-**复核日期:** 2026-09-26（master @ `a263b92`）
+**复核日期:** 2026-09-26（master @ `a263b92`）；2026-10-01 复核补录窗口内新增变量
+（`LLM_REASONING_EFFORT` / `LLM_FREQUENCY_PENALTY`、`AGENT_REDIS_MODE/_CLUSTER_NODES/_PREFIX`、
+`AGENT_HISTORY_ARCHIVE_ENABLED`、Agent Protocol 与 A2A 幂等 Job 两段）并订正 Flyway 问答
 
 > **现状核对（2026-09-26）**：本版按 `application.yml` + 各 `@ConfigurationProperties` 重核并**补齐缺失变量**
 > （原 §4.1 缺约 30 个，含全部 `AGENT_REACT_*` / `AGENT_HTTP_*` / `AGENT_MEMORY_*` / `AGENT_COMPACTION_*` /
@@ -137,7 +139,7 @@ Tomcat started on port 8100
 
 ### 4.1 环境变量完整列表
 
-> 来源：`src/main/resources/application.yml` + `config/AgentManagerProperties.java` + `config/SandboxConfig.java` + `config/AgentRedisProperties.java`。
+> 来源：`src/main/resources/application.yml` + `config/AgentManagerProperties.java` + `config/SandboxConfig.java` + `config/AgentRedisProperties.java` + `config/HistoryConfig.java` + `config/AgentProtocolConfig.java` + `config/AgentA2aJobProperties.java`。
 > Spring 绑定键前缀：`agent.*`（见 `application.yml`）；`OTEL_*` 与 `server.port` 直接由 Spring Boot / OTel 读取。
 
 #### 4.1.1 LLM
@@ -153,6 +155,8 @@ Tomcat started on port 8100
 | `LLM_TIMEOUT` | int | `120` | | API 调用超时（秒，绑 `agent.llm.timeout`） |
 | `LLM_ENABLE_THINKING` | bool | `false` | | 深度思考开关。`false` → 注入 `chat_template_kwargs.enable_thinking=false`（Qwen3 / vLLM），避免响应混入 `<think>` 内容（绑 `agent.llm.enable-thinking`） |
 | `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
+| `LLM_REASONING_EFFORT` | string | 空 | | 推理强度（如 `minimal`/`medium`/`high`；空 = 不传，2026-09-27 新增，绑 `agent.llm.reasoning-effort`） |
+| `LLM_FREQUENCY_PENALTY` | float | 空 | | 频率惩罚（空 = 不传，2026-09-27 新增，绑 `agent.llm.frequency-penalty`） |
 | `LLM_FALLBACK_MODEL_ID` | string | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络）后自动切换；空 = 不启用（绑 `agent.llm.fallback-model-id`）。默认模型走 SDK 原生 fallback，会话自选模型由 `SessionModelMiddleware` 补齐；改动需 `POST /admin/reload` 生效（详见 [model-fallback-design.md](model-fallback-design.md)） |
 
 #### 4.1.2 服务 / Spring
@@ -257,6 +261,9 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `AGENT_REDIS_COMMAND_TIMEOUT_MS` | int | `2000` | | 单条命令超时毫秒（绑 `agent.redis.command-timeout-ms`）。Lettuce 默认**关闭**命令超时，不设则一条命令可无限期占住 Tomcat 线程 |
 | `AGENT_REDIS_CONNECT_TIMEOUT_MS` | int | `2000` | | 建连超时毫秒（绑 `agent.redis.connect-timeout-ms`） |
 | `AGENT_REDIS_MAX_LEN_PER_STREAM` | int | `250000` | | 单 session 事件条数上限（绑 `agent.redis.max-len-per-stream`；`XADD … MAXLEN ~`，内存兜底而非可选优化） |
+| `AGENT_REDIS_MODE` | enum | `standalone` | | 连接模式：`standalone` \| `cluster`（不含 sentinel；绑 `agent.redis.mode`，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)） |
+| `AGENT_REDIS_CLUSTER_NODES` | string (csv) | 空 | | cluster 模式种子节点（逗号分隔）；空 = 回落 `AGENT_REDIS_URL` 作单种子，拓扑自动发现（绑 `agent.redis.cluster-nodes`） |
+| `AGENT_REDIS_PREFIX` | string | 空 | | key 统一前缀（多 Agent 共用 oaf-redis 的隔离切分）；空 = 不加前缀。改前缀后旧 key 不可见（靠 TTL 消亡），不能含 `{ }`（hash tag 语法）（绑 `agent.redis.prefix`） |
 
 部署注意事项：
 
@@ -304,11 +311,48 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 
 #### 4.1.11 History 与诊断（`agent.history.*`）
 
-> ⚠️ `application.yml` **没有 `agent.history` 段**，本节变量同样靠 Spring 松弛绑定 + `@DefaultValue` 生效。
+> 2026-09-27 起 `application.yml` 已有 `agent.history` 段（`archive-enabled` 落 yml）；
+> `toolOutputMaxChars` 仍靠 `@DefaultValue` 兜底（绑 `HistoryConfig`）。
 
 | 变量 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | int | `8000` | history 工具输出截断上限；`<=0` 关闭截断。敏感值另行遮掩 |
+| `AGENT_HISTORY_ARCHIVE_ENABLED` | bool | `true` | 会话消息轨归档开关（session_message write-through，压缩后历史可查）。`false` = 不写归档表，history 回退仅读 agent_state |
+
+#### 4.1.12 Agent Protocol 远程子 agent（`agent.agent-protocol.*`，默认关闭）
+
+> 2026-09-29 新增（travel-fulfillment agent-protocol 设计，887cc00）。`AGENT_PROTOCOL_ENABLED=false`
+> 时不注册 `/tasks*` 端点、不装配认证 filter，存量服务零影响；`true` 时 `AGENT_PROTOCOL_AUTH_TOKEN`
+> 必填（缺失启动即失败）。`AGENTS.md` 的 `agents[].endpoint` 声明远程成员。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_PROTOCOL_ENABLED` | bool | `false` | 总开关（绑 `agent.agent-protocol.enabled` 与 SDK 键 `agentscope.agent-protocol.enabled`，两键必须一致） |
+| `AGENT_PROTOCOL_AUTH_TOKEN` | string | — | `/tasks*` 服务间认证 token（enabled=true 时必填，fail-fast） |
+| `AGENT_PROTOCOL_TASK_STORE` | path | 空 | 本地 FS TaskStore 路径（ProtocolTaskRepository 落 agent_fs 时不使用，仅退化路径兜底；禁止指向只读的 `/config`） |
+| `AGENT_PROTOCOL_TASK_RETENTION_DAYS` | int | `7` | 协议任务记录保留天数 |
+| `AGENT_PROTOCOL_EVENT_BUS` | enum | `redis` | 协议事件总线：`redis`（Redis Streams，跨副本可见可重放）\| `memory`（SDK 内置）；redis 缺失或运行期异常自动 fail-soft 降级 memory |
+| `AGENT_PROTOCOL_HITL_ENABLED` | bool | `true` | SDK 侧 HITL/resume 开关（绑 `agentscope.agent-protocol.hitl-enabled`）——关闭即协议端确认链路断裂 |
+| `AGENT_PROTOCOL_STREAMING_ENABLED` | bool | `true` | SDK 侧 `/events` SSE 开关（绑 `agentscope.agent-protocol.streaming-enabled`） |
+| `AGENT_REMOTE_CONFIRM_TTL_HOURS` | int | `24` | lead 侧 RemoteConfirmBridge 远程确认行 TTL |
+| `AGENT_REMOTE_POLL_SECONDS` | int | `5` | RemoteConfirmBridge 快照轮询间隔（秒） |
+| `AGENT_REMOTE_HEADERS_JSON` | string (JSON) | 空 | lead→member 请求注入 header（JSON 对象、值须为字符串；解析失败 warn 跳过） |
+| `AGENT_REMOTE_SPAWN_SYNC_WAIT` | bool | `true` | 远程 spawn 强制同步等待（SDK force_sync，结果确定性回流；仅影响纯 spawn 轮次） |
+| `AGENT_REMOTE_SPAWN_SYNC_WAIT_SECONDS` | int | `120` | 远程 spawn 同步等待上限（秒） |
+
+#### 4.1.13 A2A 幂等 Job（`agent.a2a-job.*`，默认关闭）
+
+> 2026-09-30 新增（Issue #69 路线 A，member 侧 `/a2a/jobs` 外部互操作面）。enabled=false
+> 不注册端点与认证 filter；true 时 token 必填 + Redis 启动自检（硬依赖）。
+> 与 `/tasks` 协议 token 分属两个信任域，不复用 `AGENT_PROTOCOL_AUTH_TOKEN`。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_A2A_JOB_ENABLED` | bool | `false` | 总开关（绑 `agent.a2a-job.enabled`） |
+| `AGENT_A2A_JOB_TOKEN` | string | — | 入口认证 token（请求头 `Agent-A2A-Job-Token`；enabled=true 时必填，fail-fast） |
+| `AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS` | int | `300` | loopback `message/send`（blocking）发送超时（秒） |
+| `AGENT_A2A_JOB_RETENTION_HOURS` | int | `24` | 完成态映射保留小时（幂等窗口） |
+| `AGENT_A2A_JOB_MAX_CONCURRENT` | int | `32` | 并发准入上限（每 Job 占 2 个 Tomcat 线程，防自环死锁） |
 
 ### 4.2 AGENTS.md 配置字段
 
@@ -413,6 +457,8 @@ LLM 推理 → 选择工具 (如 get_weather)
 | POST/GET | `/admin/reload` | OAF 包热加载（`?scope=auto`、`mcp`、`agent`）/ 只读状态 |
 | GET | `/actuator/health` | Actuator 健康检查（yml 无 `management:` 段，**只暴露 health**） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
+| POST/GET | `/a2a/jobs`、`/a2a/jobs/{key}` | A2A 幂等 Job 提交 / 状态查询（**默认关闭**，`AGENT_A2A_JOB_ENABLED=true` 开启；header `Idempotency-Key` + `Agent-A2A-Job-Token`） |
+| POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:187`） |
 
 完整参数与 SSE 帧格式见 [api.md](api.md)；面向使用者的端到端流程见
 [agent-creation-guide.md](agent-creation-guide.md)。
@@ -552,7 +598,10 @@ K8s Pod 内需使用 Docker 网关 `172.20.0.1` 代替 `127.0.0.1`。
 
 ### Q: agent_fs 表不存在
 
-`MysqlDistributedStore` 会在启动时自动创建。检查 MySQL 用户是否有 CREATE TABLE 权限。
+表结构由 **Flyway 迁移**负责（`db/migration/V*.sql`，全新库从 V1 基线重建、存量库自动
+baseline 到 V5 后执行增量；见根 docs/design/db-migration-flyway-design.md）。SDK store
+构造期仍有 `CREATE TABLE IF NOT EXISTS` 兜底，但被 `@DependsOn("flywayInitializer")` 排在
+迁移之后执行。检查 MySQL 用户是否有 CREATE/ALTER 权限。
 
 ### Q: MCP 工具调用卡住（无响应）
 

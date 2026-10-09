@@ -58,13 +58,9 @@ class ThreadControllerTest {
         controller = new ThreadController(dataSource, llmLogger, confirmContextStore, sessionUserStore, sessionEventStore, modelCatalog);
     }
 
-    /** 让 dataSource.getConnection() 第一次调用抛异常（被 ensureRemarkColumn catch 住），
-     *  第二次调用返回业务 conn。
-     *  这样避免 mock DatabaseMetaData.getColumns() 这个 final 方法。 */
-    private void setupDataSourceWithEnsureRemarkSkipped(Connection businessConn) throws Exception {
-        when(dataSource.getConnection())
-            .thenThrow(new RuntimeException("skip ensureRemarkColumn"))
-            .thenReturn(businessConn);
+    /** 直接返回业务 conn（schema 迁移移交 Flyway 后，listThreads 只取一次连接） */
+    private void stubBusinessConnection(Connection businessConn) throws Exception {
+        when(dataSource.getConnection()).thenReturn(businessConn);
     }
 
     // ========== listThreads (no userId filter) ==========
@@ -74,7 +70,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var stmt = mock(Statement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
         when(rs.next()).thenReturn(true, true, false);
@@ -105,7 +101,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true, true, false);
@@ -114,11 +110,13 @@ class ThreadControllerTest {
         when(rs.getTimestamp("updated_at")).thenReturn(new Timestamp(2000), null);
 
         var result = controller.listThreads("alice", null);
-        // verify SQL uses LEFT JOIN with LIKE matching (agent_state.session_id = slotId format)
+        // verify SQL uses LEFT JOIN matching both slot forms（agent_state 的 slot 有
+        // "{peer}:{key}" 老 Channel 形态与 "{userId}:{sid}" 规范形态，前/后段各匹配一次）
         // 并回显会话模型列 su.model（会话模型切换，见 docs/session-model-switch-design.md）
         verify(conn).prepareStatement("SELECT su.session_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
             + "FROM session_user su LEFT JOIN agent_state a "
-            + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
+            + "ON SUBSTRING_INDEX(a.session_id, ':', 1) = su.session_id "
+            + "OR SUBSTRING_INDEX(a.session_id, ':', -1) = su.session_id "
             + "WHERE su.user_id = ? "
             + "GROUP BY su.session_id, su.remark, su.model "
             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC");
@@ -140,7 +138,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(true, false);
@@ -160,7 +158,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(false);
@@ -174,7 +172,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(false);
@@ -268,7 +266,7 @@ class ThreadControllerTest {
     void patchThreadShouldUpdateTitle() throws Exception {
         var conn = mock(Connection.class);
         var ps = mock(PreparedStatement.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -479,7 +477,8 @@ class ThreadControllerTest {
             ToolUseBlock.builder().id("call-9").name("get_weather")
                 .input(java.util.Map.of("city", "beijing")).build()),
             java.time.Instant.now(), null, null);
-        when(confirmContextStore.findPending(anyString())).thenReturn(Optional.of(pending));
+        // V7 多行化：history 兜底取 FIFO 头（任意 confirm_key 的最早未消费行）
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(pending));
 
         // Skip generatedFiles and loadMessages by throwing
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
@@ -491,11 +490,35 @@ class ThreadControllerTest {
 
     @Test
     void threadHistoryShouldReturnNullPendingConfirmWhenNone() throws Exception {
-        when(confirmContextStore.findPending(anyString())).thenReturn(Optional.empty());
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.empty());
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
         var result = controller.threadHistory("acme:mt2", true, 200, null);
         assertNull(result.get("pendingConfirm"));
+    }
+
+    /** V7：远程确认行经 history 暴露（additive 字段 confirm_key/remote_task，前端零改动） */
+    @Test
+    void threadHistoryShouldSurfaceRemoteConfirmRowWithAnchor() throws Exception {
+        // Map.of 不允许 null 值：child_reply_id 用 LinkedHashMap 承载 null
+        var anchor = new java.util.LinkedHashMap<String, Object>();
+        anchor.put("service", "booking");
+        anchor.put("task_id", "t-42");
+        anchor.put("child_reply_id", null);
+        var remoteRow = new ConfirmContextStore.PendingConfirm(
+            "acme:mt3", "task:t-42", null,
+            List.of(ToolUseBlock.builder().id("call-r").name("create_order")
+                .input(java.util.Map.of("order_id", "O-1")).build()),
+            java.time.Instant.now(), null, null, anchor);
+        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(remoteRow));
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
+
+        var result = controller.threadHistory("acme:mt3", true, 200, null);
+        assertNotNull(result.get("pendingConfirm"));
+        var payload = result.get("pendingConfirm").toString();
+        assertTrue(payload.contains("task:t-42"), "confirm_key 透出供确认端点路由: " + payload);
+        assertTrue(payload.contains("remote_task"), payload);
+        assertTrue(payload.contains("booking"), payload);
     }
 
     // ========== extractThreadId ==========
@@ -505,7 +528,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var stmt = mock(Statement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
         when(rs.next()).thenReturn(true, false);
@@ -523,7 +546,7 @@ class ThreadControllerTest {
         var conn = mock(Connection.class);
         var stmt = mock(Statement.class);
         var rs = mock(ResultSet.class);
-        setupDataSourceWithEnsureRemarkSkipped(conn);
+        stubBusinessConnection(conn);
         when(conn.createStatement()).thenReturn(stmt);
         when(stmt.executeQuery(anyString())).thenReturn(rs);
         when(rs.next()).thenReturn(true, false);

@@ -1,0 +1,43 @@
+# 采集工作站：collector（录制代理）+ eval-studio（评测服务：打包/回放/评测/报告）
+# 用法：
+#   ADMIN_TOKEN=xxx docker compose up -d
+#   浏览器打开 http://<host>:18300 → 接入向导；http://<host>:18400 → eval-studio
+#
+# 两服务共享 ./collector-data：studio 的打包直接读取 collector 录制数据，
+# 测试环境 MySQL/Redis 只读凭据按需注入（用于会话骨架导出；不提供则按
+# X-Eval-Session 头 + 内容指纹做关联）。
+services:
+  collector:
+    image: gaoyue1989/eval-collector:latest
+    container_name: eval-collector
+    ports:
+      - "18200-18202:18200-18202"   # 数据面：LLM / 沙箱 / MCP
+      - "18300:18300"               # 管理控制台
+    volumes:
+      - ./collector-data:/var/lib/eval-collector
+      - ./collector-conf:/etc/eval-collector
+    environment:
+      EVAL_COLLECTOR_ADMIN_TOKEN: "${ADMIN_TOKEN:?请设置 ADMIN_TOKEN}"
+      EVAL_PACKAGER_URL: http://studio:18400/api/packs/from-collector  # 「数据打包」转调 studio 出完整 evalpack
+    restart: unless-stopped
+
+  studio:
+    image: gaoyue1989/eval-studio:latest
+    container_name: eval-studio
+    depends_on: [collector]
+    ports:
+      - "18400:18400"
+    volumes:
+      - ./collector-data:/var/lib/eval-collector          # 共享录制卷：studio 直接出完整 evalpack
+      - ./studio-data:/data                               # evalpack / runs / studio.db
+    environment:
+      STUDIO_DATA_DIR: /data
+      STUDIO_COLLECTOR_DATA: /var/lib/eval-collector      # 使 collector 控制台「数据打包」可直接出包
+      # 会话骨架导出（可选，注入后打包关联更精确；凭据用只读账号）
+      EVAL_MYSQL_URL: "${EVAL_MYSQL_URL:-}"
+      EVAL_REDIS_URL: "${EVAL_REDIS_URL:-}"
+      # judge 模型（评测打分；也可在 studio 目标档案里按 agent 单独配置）
+      EVAL_LLM_BASE_URL: "${EVAL_JUDGE_LLM_BASE_URL:-}"
+      EVAL_LLM_API_KEY: "${EVAL_JUDGE_LLM_API_KEY:-}"
+      EVAL_LLM_MODEL: "${EVAL_JUDGE_LLM_MODEL:-}"
+    restart: unless-stopped

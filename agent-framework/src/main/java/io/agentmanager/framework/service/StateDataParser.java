@@ -324,6 +324,12 @@ public final class StateDataParser {
             if (!tools.isEmpty()) {
                 msg.put("tool_calls", tools);
             }
+            // 有序块序列（只增不改的附加字段）：content/tool_calls 是两条平行提取，彼此先后已丢，
+            // Debug Console 据此按真实发生顺序渲染（缺省时前端退回「工具组在上」旧布局）
+            var blocks = extractOrderedBlocks(m);
+            if (!blocks.isEmpty()) {
+                msg.put("blocks", blocks);
+            }
             result.add(msg);
         }
         return result;
@@ -440,5 +446,52 @@ public final class StateDataParser {
             result.add(call);
         }
         return result;
+    }
+
+    /**
+     * 按 {@code Msg.content} 的原始块序产出「文本块 / 工具块」有序序列。
+     *
+     * <p>{@link #extractContentText} 与 {@link #extractToolCalls} 是两条平行提取：文本块被拼成一个
+     * 字符串、工具块被收成一个数组，两者的相对先后在提取第一步就丢了，前端只能约定「工具组在上、
+     * 文本在下」——模型的开场白会被渲染到它自己的工具步骤后面。本方法保留块序补回该信息。
+     *
+     * <p>thinking 块不上屏、tool_result 块位于后续 TOOL 角色消息（结果仍由
+     * {@link #collectToolResults} 配对合并到 tool_calls 上），两者均不进 blocks。
+     *
+     * <p>只处理 assistant 消息：文本与工具块交错只发生在 assistant 侧，
+     * 其它角色（user 的纯文本、tool 的结果）加了也是噪音。
+     *
+     * @return 元素形如 {@code {type:"text", text}} 或 {@code {type:"tool", id?, name}}；
+     *         content 非数组（旧格式字符串 / 缺失）时为空列表，调用方据此不写 blocks 键
+     */
+    private static List<Map<String, Object>> extractOrderedBlocks(JsonNode msg) {
+        var content = msg.path("content");
+        if (!content.isArray() || !"assistant".equals(extractRole(msg))) {
+            return List.of();
+        }
+        var blocks = new ArrayList<Map<String, Object>>();
+        for (var block : content) {
+            var type = block.path("type").asText("");
+            if ("text".equals(type)) {
+                var text = block.path("text").asText("");
+                if (text.isBlank()) {
+                    continue;
+                }
+                var b = new java.util.LinkedHashMap<String, Object>();
+                b.put("type", "text");
+                b.put("text", text);
+                blocks.add(b);
+            } else if ("tool_use".equals(type)) {
+                var b = new java.util.LinkedHashMap<String, Object>();
+                b.put("type", "tool");
+                var id = block.path("id").asText("");
+                if (!id.isEmpty()) {
+                    b.put("id", id);
+                }
+                b.put("name", block.path("name").asText(""));
+                blocks.add(b);
+            }
+        }
+        return blocks;
     }
 }

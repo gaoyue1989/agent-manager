@@ -64,7 +64,7 @@ public final class ToolSummaryGenerator {
             case "memory_get" -> "读取记忆 " + displayPath(first(fields, "path"));
             case "present_file" -> "交付文件 " + displayPath(first(fields, "file_path", "path"));
             case "session_search" -> "检索会话 " + truncate(firstNonBlank(fields, "", "query"), MAX_ARG);
-            case "agent_spawn" -> "启动子 Agent " + firstNonBlank(fields, "?", "task");
+            case "agent_spawn" -> spawnCallSummary(fields);
             case "task_list", "task_output", "task_cancel", "wait_async_results" -> taskVerb(toolName);
             case "plan_enter", "plan_write", "plan_exit" -> planVerb(toolName);
             default -> null;   // 未识别：退回工具名 + 首个有意义参数
@@ -109,8 +109,108 @@ public final class ToolSummaryGenerator {
         if (resultText == null || resultText.isBlank()) {
             return null;
         }
+        // agent_spawn 结果是结构化键值文本（agent_id/status/task_id/reply:），解析成
+        // 「order-agent 返回：…」形态；解析失败退回通用首行
+        if ("agent_spawn".equals(friendlyName(toolName))) {
+            String spawnPreview = spawnResultPreview(resultText);
+            if (spawnPreview != null) {
+                return spawnPreview;
+            }
+        }
         String line = firstMeaningfulLine(resultText);
         return line == null ? null : truncate(collapse(line), MAX_SUMMARY);
+    }
+
+    // ===== agent_spawn（远程子 agent 委派）摘要 =====
+
+    /**
+     * agent_spawn 调用摘要：突出目标子 agent 与任务文本。
+     *
+     * <p>参数键为 SDK {@code AgentSpawnTool} 注册名 {@code agent_id}/{@code task}
+     * （order-fulfillment demo 实测）；缺 agent_id 时退回旧形态「启动子 Agent …」。
+     */
+    private static String spawnCallSummary(Map<String, Object> fields) {
+        var agent = str(first(fields, "agent_id", "agent_key", "agent"));
+        var task = str(first(fields, "task"));
+        if (!agent.isBlank()) {
+            return "远程委派 " + agent + "：" + truncate(task, MAX_ARG);
+        }
+        return "启动子 Agent " + truncate(task, MAX_ARG);
+    }
+
+    /**
+     * agent_spawn 结果文本结构化解析。
+     *
+     * <p>AgentSpawnTool 远程结果形态（javap 核对 + demo 实测）：
+     * <pre>{@code
+     * agent_key: agent:order-agent:uuid   （可选）
+     * agent_id: order-agent
+     * session_id: sub-xxx                 （可选）
+     * status: ok | accepted | timeout | cancelled | error
+     * task_id: task_xxx                   （accepted/timeout/cancelled 形态携带）
+     * error: xxx                          （error 形态携带）
+     * reply:
+     * <正文（可多行）>
+     * }</pre>
+     *
+     * @return 单行预览；非该形态（解析不到 status）返回 null 退回通用预览
+     */
+    private static String spawnResultPreview(String resultText) {
+        // 结果文本是 JSON 字符串字面量（Agent Protocol 远端结果 JSON 编码后回流，
+        // 首尾带引号、含 \n 转义）：先解包再按行解析；非 JSON 形态原样使用
+        var text = resultText.trim();
+        if (text.startsWith("\"") && text.endsWith("\"") && text.length() >= 2) {
+            try {
+                text = MAPPER.readValue(text, String.class);
+            } catch (Exception e) {
+                text = text.substring(1, text.length() - 1).replace("\\n", "\n");
+            }
+        }
+        String agent = null;
+        String status = null;
+        String taskId = null;
+        String error = null;
+        String reply = null;
+        var lines = text.replace("\r\n", "\n").split("\n", -1);
+        for (int i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (reply == null && line.startsWith("reply:")) {
+                // reply 正文 = reply: 同行剩余（通常为空）+ 后续所有行；保留换行结构，
+                // 供 firstMeaningfulLine 取首行
+                var inline = line.substring("reply:".length()).trim();
+                reply = (inline.isBlank() ? "" : inline + "\n")
+                    + String.join("\n", java.util.Arrays.copyOfRange(lines, i + 1, lines.length));
+                break;
+            }
+            var idx = line.indexOf(':');
+            if (idx <= 0) {
+                continue;
+            }
+            var key = line.substring(0, idx).trim();
+            var value = line.substring(idx + 1).trim();
+            switch (key) {
+                case "agent_id" -> agent = value;
+                case "status" -> status = value;
+                case "task_id" -> taskId = value;
+                case "error" -> error = value;
+                default -> { }
+            }
+        }
+        if (status == null || status.isBlank()) {
+            return null;
+        }
+        var who = agent != null && !agent.isBlank() ? agent : "子 Agent";
+        return switch (status.toLowerCase()) {
+            case "ok" -> who + " 返回：" + truncate(collapse(
+                reply != null && !reply.isBlank() ? firstMeaningfulLine(reply) : "(空回复)"), MAX_SUMMARY);
+            case "accepted" -> who + " 已受理后台任务" + (taskId == null ? "" : " " + taskId)
+                + "，等待收割结果";
+            case "timeout" -> "⏱ " + who + " 等待超时" + (taskId == null ? "" : "（任务 " + taskId + "）");
+            case "cancelled" -> "🚫 " + who + " 任务已取消";
+            case "error" -> "❌ " + who + " 执行失败" + (error == null || error.isBlank()
+                ? "" : "：" + truncate(collapse(error), 60));
+            default -> who + " status: " + status;
+        };
     }
 
     // ===== 内部实现 =====

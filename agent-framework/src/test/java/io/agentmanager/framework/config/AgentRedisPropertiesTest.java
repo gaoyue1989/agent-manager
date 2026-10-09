@@ -2,11 +2,11 @@ package io.agentmanager.framework.config;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-
-import io.lettuce.core.RedisClient;
 
 /**
  * {@code agent.redis} 配置绑定测试。
@@ -46,21 +46,71 @@ class AgentRedisPropertiesTest {
         });
     }
 
-    /** 显式配置必须能覆盖——否则运维改不动。 */
+    /**
+     * 显式配置必须能覆盖——否则运维改不动。
+     */
     @Test
     void explicitValuesOverrideDefaults() {
         runner.withPropertyValues(
                 "agent.redis.url=redis://oaf-redis.agent-platform.svc.cluster.local:6379/2",
                 "agent.redis.command-timeout-ms=500",
                 "agent.redis.connect-timeout-ms=750",
-                "agent.redis.max-len-per-stream=1000")
+                "agent.redis.max-len-per-stream=1000",
+                "agent.redis.mode=cluster",
+                "agent.redis.cluster-nodes=redis://n1:6379, redis://n2:6379",
+                "agent.redis.prefix=ag1")
             .run(ctx -> {
                 var redis = ctx.getBean(AgentRedisProperties.class);
                 assertEquals("redis://oaf-redis.agent-platform.svc.cluster.local:6379/2", redis.url());
                 assertEquals(500, redis.commandTimeoutMs());
                 assertEquals(750, redis.connectTimeoutMs());
                 assertEquals(1000, redis.maxLenPerStream());
+                assertEquals(AgentRedisProperties.Mode.cluster, redis.mode());
+                // clusterNodes 经 clusterNodeList() 去空白滤空
+                assertEquals(List.of("redis://n1:6379", "redis://n2:6379"), redis.clusterNodeList());
+                // prefix 规范化补冒号
+                assertEquals("ag1:", redis.normalizedPrefix());
             });
+    }
+
+    /**
+     * 新增叶子（mode/clusterNodes/prefix）在配置节缺失时必须落到代码默认值——
+     * 与四个原始字段同一条纪律（见 everyLeafFallsBackToDefaultWhenSectionAbsent 的失败模式说明）。
+     */
+    @Test
+    void newLeavesFallBackToDefaultsWhenSectionAbsent() {
+        runner.run(ctx -> {
+            var redis = ctx.getBean(AgentRedisProperties.class);
+            assertEquals(AgentRedisProperties.Mode.standalone, redis.mode());
+            assertEquals("", redis.clusterNodes());
+            assertEquals("", redis.prefix());
+            assertTrue(redis.clusterNodeList().isEmpty());
+            assertEquals("", redis.normalizedPrefix());
+            assertFalse(redis.isCluster());
+        });
+    }
+
+    /** prefix 非法值必须响亮失败：空白、含 { 、含 } 都会破坏 hash tag 语义或等于没配。 */
+    @Test
+    void rejectsIllegalPrefix() {
+        for (String bad : new String[]{"   ", "ag{o}", "ag}", "{ag"}) {
+            var ex = assertThrows(IllegalArgumentException.class,
+                () -> new AgentRedisProperties("redis://127.0.0.1:6379", 2000, 2000, 250000,
+                    AgentRedisProperties.Mode.standalone, "", bad),
+                "非法 prefix 应抛 IllegalArgumentException：" + bad);
+            assertNotNull(ex.getMessage());
+        }
+    }
+
+    /** prefix 规范化：无冒号自动补；已带冒号原样保留；4 参兼容构造器保持空前缀。 */
+    @Test
+    void normalizesPrefixTrailingColon() {
+        assertEquals("ag1:", new AgentRedisProperties("redis://127.0.0.1:6379", 2000, 2000, 250000,
+            AgentRedisProperties.Mode.standalone, "", "ag1").normalizedPrefix());
+        assertEquals("ag1:", new AgentRedisProperties("redis://127.0.0.1:6379", 2000, 2000, 250000,
+            AgentRedisProperties.Mode.standalone, "", "ag1:").normalizedPrefix());
+        assertEquals("", new AgentRedisProperties("redis://127.0.0.1:6379", 2000, 2000, 250000)
+            .normalizedPrefix());
     }
 
     /**
@@ -85,7 +135,7 @@ class AgentRedisPropertiesTest {
      * 否则这条测试会因为任何原因通过（比如构造器 NPE），等于没测。
      */
     @Test
-    void clientBeanFailsFastOnMalformedUrl() {
+    void facadeBeanFailsFastOnMalformedUrl() {
         var config = new AgentScopeConfig();
         for (String bad : new String[]{
                 "not-a-valid-uri",          // URI scheme must not be null
@@ -94,10 +144,21 @@ class AgentRedisPropertiesTest {
                 "redis://127.0.0.1:99999"   // Port out of range
         }) {
             var ex = assertThrows(IllegalArgumentException.class,
-                () -> config.redisClient(new AgentRedisProperties(bad, 2000, 2000, 250000)),
+                () -> config.redisConnectionFacade(
+                    new AgentRedisProperties(bad, 2000, 2000, 250000)),
                 "非法 URL 应抛 IllegalArgumentException 而不是别的异常：" + bad);
             assertNotNull(ex.getMessage(), "异常须带可诊断的信息：" + bad);
         }
+    }
+
+    /** cluster 模式下非法种子节点同样要启动期失败（与 standalone URL 同一纪律）。 */
+    @Test
+    void facadeBeanFailsFastOnMalformedClusterNode() {
+        var config = new AgentScopeConfig();
+        assertThrows(IllegalArgumentException.class,
+            () -> config.redisConnectionFacade(new AgentRedisProperties(
+                "redis://127.0.0.1:6379", 2000, 2000, 250000,
+                AgentRedisProperties.Mode.cluster, "redis://127.0.0.1:99999", "")));
     }
 
     /**
@@ -105,12 +166,19 @@ class AgentRedisPropertiesTest {
      * 这条直接对应「Redis 滚动重启不能变成 agent 集群崩溃循环」。
      */
     @Test
-    void clientBeanSucceedsWhenRedisIsUnreachable() {
+    void facadeBeanSucceedsWhenRedisIsUnreachable() {
         var config = new AgentScopeConfig();
         // 127.0.0.1:1 上不会有 Redis；bean 创建**不应该**抛异常，也不应该阻塞到超时
-        RedisClient client = config.redisClient(
-            new AgentRedisProperties("redis://127.0.0.1:1", 2000, 2000, 250000));
-        assertNotNull(client);
-        client.shutdown();
+        try (var facade = config.redisConnectionFacade(
+                new AgentRedisProperties("redis://127.0.0.1:1", 2000, 2000, 250000))) {
+            assertNotNull(facade);
+        }
+        // cluster 模式同理：种子不可达不影响 bean 创建（拓扑发现惰性发生在 connect 时）
+        try (var facade = config.redisConnectionFacade(new AgentRedisProperties(
+                "redis://127.0.0.1:1", 2000, 2000, 250000,
+                AgentRedisProperties.Mode.cluster, "", ""))) {
+            assertNotNull(facade);
+            assertTrue(facade.isClusterMode());
+        }
     }
 }

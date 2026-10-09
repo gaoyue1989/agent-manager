@@ -1,7 +1,7 @@
 # 多租户隔离方案
 
 >
-> **现状核对（2026-09-07）**：本文方案已落地。多租户默认 `IsolationScope.USER`（`RemoteFilesystemSpec`），数据维度隔离如下：`AgentState` 按 `(userId, sessionId)` 存 `agent_state` 表；`MEMORY.md` / `memory/` / `sessions/` 按 userId 存 `agent_fs` 表；`skills/` 共享底座 + 用户覆盖（OAF 包 skills 在 L2 仓库只读，用户自学习在 L4 覆盖于 `agent_fs`，详见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)）。沙箱模式按 userId USER 级复用。RuntimeContext 透传：A2A `metadata.userId` / Channel `SendOptions.userId()` / 单次流 `userId` 字段，默认回退 `vendorKey`。
+> **现状核对（2026-09-07）**：本文方案已落地。多租户默认 `IsolationScope.USER`（`RemoteFilesystemSpec`），数据维度隔离如下：`AgentState` 按 `(userId, sessionId)` 存 `agent_state` 表；`MEMORY.md` / `memory/` / `sessions/` 按 userId 存 `agent_fs` 表；`skills/` 共享底座 + 用户覆盖（OAF 包 skills 在 L2 仓库只读，用户自学习在 L4 覆盖于 `agent_fs`，详见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)）。沙箱模式按 userId USER 级复用。RuntimeContext 透传：A2A `message.metadata.userId` / 单次流 `POST /threads/chat` 请求体 `userId`（`X-User-Id` 头优先），未指定时回退 `debug-user`（A2A/invoke 链路回退 `vendorKey`）。
 
 ## 1. 现状分析
 
@@ -24,8 +24,8 @@
 | 来源 | userId | 说明 |
 |---|---|---|
 | A2A JSON-RPC | `oafConfig.vendorKey()` | 当前默认使用 vendorKey |
-| Channel SSE | `SendOptions.userId()` | 由调用方指定 |
-| A2A metadata | `params.metadata.userId` | 由调用方指定 |
+| 单次流 `POST /threads/chat` | 请求体 `userId` / `X-User-Id` 头 | 头优先，缺省回退 `debug-user` |
+| A2A metadata | `message.metadata.userId`（顶层 `userId` 同效） | 由调用方指定 |
 
 ### 1.3 AgentScope 2.0 原生多租户能力
 
@@ -112,6 +112,12 @@ workspace/
 
 ### 3.2 当前实现
 
+> 以下为方案落地时的骨架（2026-08）。当前装配已细化：`distributedStore` 增加了
+> AgentStateStore 装饰链（沙箱 slot 校验 / 会话消息归档 / ASKING 回填）并按
+> `props.checkpoint().resolvedDbName()` 取库名，`harnessAgent` Bean 的构建主体已提取到
+> `HarnessAgentFactory`（启动与 OAF reload 共用，见 [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md)）；
+> 沙箱启用时 `filesystem` 换成 `OpenSandboxFilesystemSpec`（同为 `IsolationScope.USER`）。
+
 **AgentScopeConfig.java**:
 ```java
 @Bean
@@ -145,7 +151,8 @@ var ctx = RuntimeContext.builder()
 
 ### 3.3 userId 来源定制
 
-当前 `userId` 固定为 `oafConfig.vendorKey()`。要实现真正的多租户，需从请求中提取 userId：
+本节为方案设计期描述（当时 `userId` 固定为 `oafConfig.vendorKey()`）。实现后的取值链路见
+§1.2 现状表与 `AgentRuntimeService.resolveUserId`（空值回退 `vendorKey`）。以下为原始设计：
 
 #### A2A JSON-RPC 请求
 
@@ -173,17 +180,19 @@ if (userId == null || userId.isBlank()) {
 }
 ```
 
-#### Channel SSE 请求
+#### 单次流请求（`POST /threads/chat`）
 
-通过 `SendOptions.userId()` 指定（已支持）：
+通过请求体 `userId` 指定（已支持；`X-User-Id` 头优先于请求体，见 `ChatStreamController.chat`）：
 
 ```bash
-curl -N "http://localhost:8100/chat/stream?message=hello&userId=alice"
+curl -N -X POST "http://localhost:8100/threads/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"hello","userId":"alice"}'
 ```
 
 #### HTTP Header（可选）
 
-从 `X-User-Id` header 提取：
+从 `X-User-Id` header 提取（`UserIdHeaderFilter.resolveUserId`：头 > 请求体 > `debug-user`）：
 
 ```java
 var userId = request.getHeader("X-User-Id");
@@ -201,13 +210,13 @@ if (userId == null || userId.isBlank()) {
 | 阶段 | 内容 | 工作量 | 状态 |
 |---|---|---|---|
 | 阶段一 | MysqlDistributedStore + IsolationScope.USER | 1 天 | ✅ 已完成 |
-| 阶段二 | userId 从请求中提取（A2A metadata + Channel SendOptions） | 0.5 天 | ✅ 已完成 |
+| 阶段二 | userId 从请求中提取（A2A metadata + 单次流请求体/X-User-Id 头） | 0.5 天 | ✅ 已完成 |
 
 ### 4.2 向后兼容
 
 - **userId 为空时自动降级**：`IsolationScope.USER` 下 userId 为空时降级为 `SESSION` scope
-- **默认值回退**：未指定 userId 时使用 `oafConfig.vendorKey()` 作为默认值
-- **现有行为不变**：Channel SSE 通过 `SendOptions.userId()` 已支持多租户
+- **默认值回退**：未指定 userId 时，A2A/invoke 链路用 `oafConfig.vendorKey()`、单次流链路用 `debug-user`
+- **现有行为不变**：单次流 `POST /threads/chat` 经请求体 `userId` / `X-User-Id` 头已支持多租户
 
 ### 4.3 与认证方案的关系
 

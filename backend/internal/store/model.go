@@ -42,7 +42,11 @@ type ServiceEntity struct {
 	PackageID   uint   `gorm:"index" json:"packageId"`
 	Image       string `gorm:"size:256" json:"image"`
 	EnvJSON     string `gorm:"type:json" json:"envJson"`
-	Replicas    int    `json:"replicas"`
+	// EnvSecretJSON 服务级敏感 env（模板敏感键 + secretKeys 指定键）。
+	// json:"-"：List/Detail/Publish 响应直接内嵌本实体序列化，敏感值绝不随实体直出，
+	// 掩码键集由视图层补充 envSecretKeys（设计见 docs/design/platform-default-config-secret-design.md §3.3）。
+	EnvSecretJSON string `gorm:"type:json" json:"-"`
+	Replicas      int    `json:"replicas"`
 
 	Status     string `gorm:"size:24;index" json:"status"`
 	Endpoint   string `gorm:"size:256" json:"endpoint"`
@@ -69,4 +73,22 @@ type ServiceEvent struct {
 	ToStatus   string    `gorm:"size:24" json:"toStatus"`
 	Reason     string    `gorm:"size:512" json:"reason"`
 	CreatedAt  time.Time `gorm:"index" json:"createdAt"`
+}
+
+// PlatformConfigEntity 平台默认配置事实源（键 → 值，含敏感与非敏感）；
+// 渲染时按模板 Sensitive 拆分到平台 CM（非敏感）/ Secret（敏感），键集合 ⊆ 模板键集合。
+type PlatformConfigEntity struct {
+	EnvKey    string    `gorm:"primaryKey;column:env_key;size:128" json:"envKey"`
+	Value     string    `gorm:"type:text" json:"-"` // 敏感值不随 JSON 直出
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func (PlatformConfigEntity) TableName() string { return "platform_config" }
+
+// PlatformConfigEvent 平台配置审计：只记动作与键名，不记值。
+type PlatformConfigEvent struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Action    string    `gorm:"size:32" json:"action"`    // update / apply_restart
+	EnvKeys   string    `gorm:"type:json" json:"envKeys"` // 本次涉及键名数组
+	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }

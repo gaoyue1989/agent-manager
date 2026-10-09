@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.message.Base64Source;
 import io.agentscope.core.message.DataBlock;
@@ -160,5 +161,47 @@ class AgentEventSseSerializerTest {
         assertEquals("3", frame.id());
         assertEquals(legacyInject(row.payload(), row.replyId()), frame.data());
         assertTrue(frame.data().endsWith("\"replyId\":\"rid-8\"}"));
+    }
+
+    // ===== 远端转发事件标注（Agent Protocol 远程委派可视化，2026-09-30） =====
+
+    @Test
+    void forwardedRemoteEventShouldCarrySourceAndTaskMetadata() {
+        // AgentSpawnTool.tagRemoteForwardedEvent 打标形态：source + metadata(taskId/parentSessionId)
+        var ev = new ToolCallStartEvent("rid-9", "call-9", "get_order")
+            .withSource("gw-3f20f08c/order-agent")
+            .withMetadataEntry("taskId", "task_1")
+            .withMetadataEntry("parentSessionId", "sess-1");
+
+        String json = AgentEventSseSerializer.payload(ev);
+        assertTrue(json.contains("\"source\":\"gw-3f20f08c/order-agent\""), "source 标注: " + json);
+        assertTrue(json.contains("\"taskId\":\"task_1\""), "taskId 元数据: " + json);
+        assertTrue(json.contains("\"parentSessionId\":\"sess-1\""), "parentSessionId 元数据: " + json);
+        assertTrue(AgentEventSseSerializer.isRemoteForwarded(ev), "source 非空 → 远端转发");
+    }
+
+    @Test
+    void localEventShouldNotCarrySourceAndNotBeRemoteForwarded() {
+        // lead 自身事件 source 恒为 null：AGENT_END 收尾 guard 依赖该判定区分 turn 真正终点
+        var ev = new ToolCallStartEvent("rid-10", "call-10", "agent_spawn");
+
+        String json = AgentEventSseSerializer.payload(ev);
+        assertFalse(json.contains("\"source\""), "本地事件不带 source: " + json);
+        assertFalse(json.contains("\"taskId\""), "本地事件不带 taskId: " + json);
+        assertFalse(AgentEventSseSerializer.isRemoteForwarded(ev));
+        assertFalse(AgentEventSseSerializer.isRemoteForwarded(null));
+    }
+
+    @Test
+    void subagentExposedEventShouldSerializeSnakeCaseFields() {
+        var ev = new io.agentscope.core.event.SubagentExposedEvent(
+            "sub-1", "order-agent", "sess-2", "agent:order-agent:uuid");
+
+        String json = AgentEventSseSerializer.payload(ev);
+        assertTrue(json.contains("\"subagent_exposed\""), "snake_case 词条（permission_ask 同风格）: " + json);
+        assertTrue(json.contains("\"subagent_id\":\"sub-1\""), json);
+        assertTrue(json.contains("\"agent_id\":\"order-agent\""), json);
+        assertTrue(json.contains("\"session_id\":\"sess-2\""), json);
+        assertTrue(json.contains("\"label\":\"agent:order-agent:uuid\""), json);
     }
 }

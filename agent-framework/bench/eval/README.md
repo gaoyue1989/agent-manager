@@ -1,6 +1,7 @@
 # agent-framework 评测飞轮（walking skeleton）
 
 > **日常使用看 [FLYWHEEL.md](FLYWHEEL.md)**（怎么用 / 何时用 / 场景命令表 / 排障）；
+> **离线评测链路（采集→打包→回放→对比）看 [OFFLINE.md](OFFLINE.md)**（端到端操作手册）；
 > 本文是模块结构、关键事实与已知问题的参考手册。
 
 对应设计：[docs/design/agent-framework-eval-dual-track-design.md](../../docs/design/agent-framework-eval-dual-track-design.md)
@@ -61,14 +62,25 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
   `/tools?includeInternal=true` 拆两段：`tools`（MCP + CustomTool）与 `sdkInternal`
   （SDK/Harness 内置工具实际注册集），`fetch_capabilities` 取并集，全量可调用工具可见，
   `requires_tools` 可直接声明 SDK 内置工具（如 read_file）。
-- **HITL**：流以 `permission_ask` 终止（turn 边界），续段走
-  `POST /threads/{sid}/confirm-stream`，results 形如
-  `[{tool_call_id, confirmed}]`（AgentRuntimeService.java:404）。
+- **HITL**：自 4db16ba（2026-09-27）起 ask 段帧序为
+  `permission_ask → REQUEST_STOP → AGENT_RESULT → AGENT_END`（主段以 AGENT_END
+  自然收尾，挂起点不再提前 release+关流）；旧版本以 `permission_ask` 终止。
+  **挂起判定不依赖终帧**：按「段内出现 `permission_ask` 且被 ask 的 tool_call
+  在本段无 `TOOL_RESULT_END` 配对」（`hitl.pending`，新旧序兼容）。ask 段合法终帧
+  集合 = `{permission_ask, AGENT_END}`（frame-mapping.json `hitl.ask_segment_terminal_frames`）。
+  续段走 `POST /threads/{sid}/confirm-stream`，results 形如
+  `[{tool_call_id, confirmed}]`（AgentRuntimeService.java:404）；合并轨迹含主段+
+  续段各一个 `AGENT_END`（用例期望 AGENT_END 计 2）。
 - **清理**：run/verify 默认 `DELETE /threads/{sid}` 清理评测会话（失败等 3s 重试一次，
   仍失败打印 WARN——2026-09-25 曾发现静默失败导致共享实例残留，现已修复并外部验证）。
 
 ## 已知问题与边界（按影响排序）
 
+0. **HITL 轨迹口径断代（2026-10-01 已修复判定侧，历史数据不可比）**：4db16ba
+   （2026-09-27）变更 ask 段终止帧序后至本轮修复前，评测执行器 auto_confirm 判定
+   失效，期间所有 HITL 用例数据为假阴性（issue #86 实测 2/2）。09-25 轮与 10-01 轮
+   之后的 HITL 轨迹口径不同：history.jsonl 自 10-01 起记录 `contract` 字段
+   （=frame-mapping.json version），跨轮对比先核对口径。
 1. **外部 OpenSandbox 故障拖垮评测目标（环境问题，需运维处理）**：release-agent
    `SANDBOX_ENABLED=true`，每轮对话（含纯聊天）都经外部沙箱（宿主 docker 容器
    `opensandbox-server`，:8090）做工作区同步。2026-09-25 诊断：**进程活着（/health 200）

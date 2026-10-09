@@ -4,6 +4,14 @@
 > **范围声明**：§1–§3 是 2026-09-15 编制时点的**分析快照**，其中的「代码位置」行号（多处指向 `AgentScopeConfig.java`）
 > 已随重构失效——HarnessAgent 装配与中间件注册已迁至 `service/HarnessAgentFactory.java`，LLM 模型装配已抽到
 > `config/ChatModelFactory.java`。常量与配置项本身仍然有效，行号不作为依据。
+> **更新（2026-10-01）**：§3/§5 的 Phase 1 已由 9b638a2（2026-09-16「Harness 运行时参数配置化」）实施——
+> §2.1 maxIters/HTTP 超时、§2.2 Memory、§2.3 Compaction、§2.4 HikariCP 均经 `agent.harness.*`
+> （`AGENT_*` 环境变量，见 application.yml `harness:` 节与 `AgentManagerProperties.HarnessConfig`）配置化，
+> 并新增 §2 未列的 `AGENT_MEMORY_ENABLED` 记忆总开关；§2.6 A2A Agent Card URL 已改为经
+> `SERVER_HOST/SERVER_PORT` 构造（A2AServerConfig.java:37，不再硬编码 localhost:8100）。
+> §2.5 服务层常量与 §4「不建议配置化」各项（含 `enablePlanMode`/`enableSkillManageTool`）仍为硬编码；
+> §1.3 同源提醒仍成立：OAF frontmatter 的 `model.*`/`temperature`/`max_tokens` 仅回显
+> （WorkspaceInitializer.java:89-90、DebugApiController.java:129-130），不参与实际 LLM 调用。
 > **状态**：设计文档（仅分析，不做代码变更）
 > **日期**：2026-09-15
 

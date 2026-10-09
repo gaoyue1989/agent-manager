@@ -4,7 +4,7 @@
 > 基于 [AgentScope 2.0 Message & Event 文档](https://java.agentscope.io/v2/zh/docs/building-blocks/message-and-event.html)，
 > 对 Debug 页面和后端接口进行升级，补齐缺失的事件类型支持。
 > 实施时发现实际 JAR (agentscope-core 2.0.0) 与文档 API 存在 4 处差异（见 1.4 节），已按实际 API 适配。
-> 新增/更新测试 8 个；当时 166 个测试通过（现 61 测试类 / 456 个 @Test）。
+> 新增/更新测试 8 个；当时 166 个测试通过（2026-09-07 时点 61 测试类 / 456 个 @Test；2026-10-01 grep 统计 137 个测试类 / 1342 个 @Test，含需外部环境的 IT）。
 >
 > **现状核对（2026-09-07）**：
 > - §2.2.2「`StreamController.toSSE` 扩展」整节过时：SSE 字段提取已抽为共用类 `AgentEventSseSerializer`（`AgentEventSseSerializer.java:47-139`），StreamController/SessionStreamController 共用；`StreamController.toSSE` 为薄代理。
@@ -13,6 +13,7 @@
 > - §1.2 「HITL 事件 ❌ 丢弃」已不成立：HITL 现以 `permission_ask` 帧交付（chat.js:981 渲染确认卡片）。
 > - §2.3.1 chat.js：Channel 模式为 `sendChannelSingleStream`（chat.js:1047-1093）走 `POST /threads/{sid}/chat`，A2A 模式为 `sendA2AStream`（:1095-1152）经 `handleFrame` 归一化大写事件后统一交给 `handleEvent`（:870）。
 > - §2.3.3 工具/思维链处理器函数名按代码实际更新：`onToolCallStart/Delta/End`、`onToolResultStart/Delta/End`、`ensureThinking/endThinking`、`appendThinkingDelta`（chat.js:482-602）。
+> - **再核对（2026-10-01；2026-10-08 行号复核）**：2026-09-14/16（0cd8a90/47dc740）对话入口已收敛为 `POST /threads/chat`（sessionId 移入请求体，可选），`StreamController` 与 `GET /chat/stream` 已删除——上两条中「StreamController.toSSE 薄代理」的 StreamController 不复存在；`AgentEventSseSerializer` 现由 ChatStreamController / SessionEventTailer / SessionEventStore / AgentRuntimeService / TurnToolSummaryTracker / RemoteConfirmBridge 等共用；合成帧 `waiting`（ChatStreamController.java:905-908）与 `file_ready`（:745-775，经 `SessionEventBus.emitSynthetic` 落 Redis Streams）随之移入 ChatStreamController。上文 chat.js / AgentRuntimeService 行号已因 3923bd3 / d196712 漂移（`handleEvent` 现于 chat.js:1642、`sendChannelSingleStream` :2054、`sendA2AStream` :2211、permission_ask 分支 :1817、`tool_call_name` 于 AgentRuntimeService.java:296-359），函数名与事件词表本身未变。
 > **后续演进**：长连接 SSE（SessionEventBus + GET /events 订阅）已被 stateless-single-stream-plan.md 取代，
 > 改为 POST /threads/{sid}/chat 单次流 SSE（SSE 直吐，执行完即关闭），详见新架构文档。
 

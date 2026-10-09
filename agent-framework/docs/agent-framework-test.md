@@ -2,11 +2,16 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
-**复核日期:** 2026-09-26
+**复核日期:** 2026-09-26；2026-10-01 再核实跑并补登记 09-27 ~ 10-01 新增测试类；2026-10-08 三核（评审窗口内新增用例对齐）
 
 > **现状核对（2026-09-26）**：§8 统计表的**基线是 2026-09-17 的实跑结果**（657 用例 / 80 文件），
 > 之后新增了大量测试类，原表部分分类数字已明显偏低。本版已在 **JDK 21.0.12 + Maven 3.8.7 上实跑
 > `mvn test`** 核对，下表数字已按实跑结果更新，并补登记 2026-09 新增的测试类。
+> **2026-10-01 再核**：同环境实跑 `mvn -B test` 得 **1310 例 / 0 失败 / 4 跳过（55.8s，BUILD SUCCESS）**，
+> §8 各表数字已再次对齐，§8.2 补 3 支新 `*IT`，§8.3 补 Agent Protocol / A2A Job / 看门狗 / 会话归档等新类。
+> **2026-10-08 三核**：同环境实跑 `mvn -B test` 得 **1353 例 / 0 失败 / 4 跳过（61s，BUILD SUCCESS）**，
+> §8 对账表与各分类数字已对齐（窗口内 #87 排队闸门 / #72 看门狗自愈 / 确认卡复活守卫等补测，§8.4 增
+> `A2aJobRedisStoreClaimRaceTest` / `TestSchemaMigratorVersionOrderTest`）。
 
 ---
 
@@ -100,7 +105,7 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 ChatStreamControllerTest (37 个用例)
+### 4.4 ChatStreamControllerTest (42 个用例)
 
 - `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
 - sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
@@ -126,7 +131,7 @@ class AgentFrameworkApplicationTests {
 - 三个计数字段（`totalCount` / `mcpCount` / `internalCount`）与 `sdkInternalCount` 的口径
 - `deniedTools` 剔除后 internal 与 sdkInternal 两段同时反映
 
-### 4.6 AgentRuntimeServiceTest (16 个用例)
+### 4.6 AgentRuntimeServiceTest (17 个用例)
 
 覆盖场景：
 - userId 透传 / 回退 vendorKey / 空值回退
@@ -137,7 +142,7 @@ class AgentFrameworkApplicationTests {
 - 2 参 invoke 委托到 3 参
 - tenantPrefix = slug
 
-### 4.7 WorkspaceInitializerTest (7 个用例)
+### 4.7 WorkspaceInitializerTest (8 个用例)
 
 覆盖场景：
 - workspace 结构创建（AGENTS.md + tools.json）
@@ -146,6 +151,7 @@ class AgentFrameworkApplicationTests {
 - deny 列表生成
 - **skills 不再本地复制**（/config/skills 由 L2 仓库动态加载，初始化不触碰）
 - subagents 生成
+- **`agents[].endpoint` 声明不生成 subagents/*.md**（远程子 agent 走 SubagentDeclaration，2026-09-29 新增）
 - 幂等不覆盖已有文件
 
 ### 4.8 McpToolRegistrarTest (38 个用例)
@@ -323,45 +329,46 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> **2026-09-26 实跑**（JDK 21.0.12 / Maven 3.8.7，`mvn -B test`，55s）：
-> **`Tests run: 1026, Failures: 0, Errors: 0, Skipped: 4` — BUILD SUCCESS**，耗时 55.4s。
+> **2026-10-08 实跑**（JDK 21.0.12 / Maven 3.8.7，`mvn -B test`，61s）：
+> **`Tests run: 1353, Failures: 0, Errors: 0, Skipped: 4` — BUILD SUCCESS**。
 > 跳过的 4 例全部来自 `OpenSandboxApiIntegrationTest`（需真实 OpenSandbox Server 可达）。
+> 前一次基线：2026-10-01 实跑 1310 例 / 129 类（55.8s）。
 >
 > **与静态清点的对账**（两条口径差异都能解释清楚，可复算）：
 >
 > | 口径 | 数值 | 说明 |
 > |------|------|------|
-> | `grep -rE '@Test\b'` 注解总数 | **1047** | 全量注解 |
-> | 其中 `*IT` 类的注解数 | 21 | `RedisEventLogIT` 10 / `SessionEventStoreCrossReplicaIT` 6 / `S3FileStorageIT` 3 / `SessionUserStoreMySqlIT` 1 / `ThreadHistoryConfirmIT` 1 |
-> | **实跑用例数** | **1026** | 1047 − 21；surefire 默认 include 不匹配 `*IT` |
-> | 含 `@Test` 的源文件 | 106 | 其中 5 个是 `*IT` |
-> | **实跑类数** | **101** | 106 − 5 |
+> | `grep -rE '@Test\b'` 注解总数 | **1380** | 全量注解 |
+> | 其中 `*IT` 类的注解数 | 27 | `RedisEventLogIT` 10 / `SessionEventStoreCrossReplicaIT` 6 / `S3FileStorageIT` 3 / `SessionUserStoreMySqlIT` 1 / `ThreadHistoryConfirmIT` 1 / `A2aJobRedisStoreIT` 2 / `ProtocolRedisEventBusIT` 2 / `ModelConfigStoreMySqlIT` 2 |
+> | **实跑用例数** | **1353** | 1380 − 27；surefire 默认 include 不匹配 `*IT` |
+> | 含 `@Test` 的源文件 | 140 | 其中 8 个是 `*IT` |
+> | **实跑类数** | **132** | 140 − 8（含 `EmptyCompletionRecoveryHookTest` / `ToolCallValidationMiddlewareTest` 两个 `@Nested` 内嵌类） |
 >
-> 即：`mvn test` **不跑那 5 支 `*IT`**，需显式 `-Dtest=`（见 §8.2）。真实 S3 集成 `S3FileStorageIT` 亦需环境变量启用。
+> 即：`mvn test` **不跑那 8 支 `*IT`**，需显式 `-Dtest=`（见 §8.2）。真实 S3 集成 `S3FileStorageIT` 亦需环境变量启用。
 
-下表**逐类取自 2026-09-26 surefire 实跑输出**（`-- in <FQCN>` 行），基线列是 2026-09-17 的旧值：
+下表**逐类取自 2026-10-08 surefire 实跑输出**（`-- in <FQCN>` 行），基线列是 2026-09-17 的旧值：
 
 | 类别 | 用例数 | 对比基线 | 核对方式 |
 |------|--------|---------|----------|
 | OafConfigLoaderTest | 40 | 37 ↑ | ✅ 实跑 |
 | McpToolRegistrarTest | 38 | 37 ↑ | ✅ 实跑 |
-| AgentRuntimeService 系列（Service/McpConfig/Hitl） | 40 | 40 = | 基线值 |
+| AgentRuntimeService 系列（Service/McpConfig/Hitl） | 17 / 12 / 34 = 63 | 40 ↑ | ✅ 实跑 |
 | DebugApiControllerTest | 19 | 15 ↑ | ✅ 实跑 |
-| ThreadControllerTest（含 history 文件下载卡片） | 29 | 25 ↑ | ✅ 实跑 |
-| FileControllerTest / FileToolsTest / FileAssetStoreTest | 20 / 16 / 8 = 44 | 36 ↑ | ✅ 实跑 |
-| ChatStreamControllerTest / SessionStreamControllerTest | 37 / 7 = 44 | 30 ↑ | ✅ 实跑 |
+| ThreadControllerTest（含 history 文件下载卡片与归档合并） | 30 | 25 ↑ | ✅ 实跑 |
+| FileControllerTest / FileToolsTest / FileAssetStoreTest | 20 / 18 / 7 = 45 | 36 ↑ | ✅ 实跑 |
+| ChatStreamControllerTest / SessionStreamControllerTest | 42 / 7 = 49 | 30 ↑ | ✅ 实跑 |
 | ToolControllerTest | 7 | 4 ↑ | ✅ 实跑（含 issue #39 `sdkInternal` 断言） |
-| ConfirmControllerTest | 8 | 6 ↑ | ✅ 实跑 |
+| ConfirmControllerTest（含 multi-key） | 14 | 6 ↑ | ✅ 实跑 |
 | TurnLeaseStoreTest / TurnLeaseGuardTest | 16 | 16 = | 基线值 |
-| OpenSandbox 单测（SandboxConfig/State/Client/Reader 等） | 44 | 44 = | 基线值 |
-| 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 32 | 32 = | 基线值，**未含**下述两个新类 |
+| OpenSandbox 单测（§8.1 逐类合计，含 4 例跳过的 ApiIntegrationTest；TracingSandboxClient 归追踪系列） | 102 | 44 ↑ | ✅ 实跑 |
+| 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 35 | 32 ↑ | ✅ 实跑，**未含**下述两个新类 |
 | └ `ModelIoTracingMiddlewareTest` | 6 | 新增 | ✅ 实跑（2026-09-26，PR #37） |
 | └ `ToolCallTracingMiddlewareTest` | 10 | 新增 | ✅ 实跑（2026-09-26，PR #37） |
 | 其余（tool/config/service/controller/storage） | 见 §8.3 清单 | — | 明细已逐类列出 |
 
 ### 8.3 2026-09 新增测试类登记（基线后未纳入 §8.1/§8.2 的）
 
-按功能归属分组，均为 2026-09 新增。**用例数取自 2026-09-26 实跑输出**（逐类已核对）：
+按功能归属分组，均为 2026-09 新增。**用例数取自 2026-10-08 实跑输出**（逐类已核对）：
 
 | 归属 | 测试类 | 用例数 |
 |------|--------|--------|
@@ -370,28 +377,66 @@ src/test/resources/fixtures/test-agent/
 | 用户技能 | `UserSkillControllerTest` | 27 |
 | 用户技能 | `UserSkillServiceTest` | 35 |
 | 用户技能 | `SkillManageServiceTest` | 12 |
-| 会话模型 | `ModelControllerTest` | 19 |
+| 会话模型 | `ModelControllerTest` | 26 |
 | 会话模型 | `ModelCatalogTest` | 14 |
 | 会话标题 | `SessionTitleServiceTest` | 9 |
 | OAF reload | `OafReloadServiceTest` | 8 |
-| 工具摘要 | `ToolSummaryGeneratorTest` | 22 |
+| 工具摘要 | `ToolSummaryGeneratorTest` | 29 |
 | 工具摘要 | `TurnToolSummaryTrackerTest` | 13 |
 | MCP 多租户 | `McpToolRegistrarUserHeadersTest` | 8 |
 | MCP 多租户 | `UserScopedMcpClientWrapperTest` | 8 |
 | 其他 | `McpManagerTest` / `MySqlTaskStoreTest` / `HarnessAgentRunnerTest` / `AgentScopeConfigTest` / `TurnFinalizerTest` / `EmptyCompletionRecoveryHookTest` / `ToolCallValidationMiddlewareTest` / `A2uiServiceTest` / `SandboxRuntimeTest` / `PathSafeTest` / `AskingContentBackfillStateStoreTest` | 9 / 9 / 7 / 21 / 10 / 12 / 10 / 7 / 7 / 14 / 7 |
+
+### 8.4 2026-09-27 ~ 10-08 新增测试类登记（Agent Protocol / A2A Job / 会话归档等）
+
+用例数取自 2026-10-08 实跑输出（逐类已核对；标注 ※ 的类在 2026-10-01 ~ 10-08 评审窗口内随
+#87 排队闸门 / #72 存储层错误分型与看门狗自愈 / 确认卡复活守卫等修复扩充过用例）：
+
+| 归属 | 测试类 | 用例数 |
+|------|--------|--------|
+| 远程确认桥（lead） | `RemoteConfirmBridgeTest` ※ | 34 |
+| 远程确认桥（lead） | `RemoteConfirmBridgeMultiReplicaTest` ※ | 12 |
+| Agent Protocol member | `AgentProtocolConfigTest` ※ | 16 |
+| Agent Protocol member | `AgentProtocolAuthFilterTest` | 7 |
+| Agent Protocol member | `ProtocolRedisEventBusTest` | 5 |
+| deny_rules（F16） | `ProtocolDenyRulesTest` | 6 |
+| deny_rules（F16） | `ProtocolDenyRulesMiddlewareTest` | 4 |
+| deny_rules（F16） | `ProtocolDenyRulesContextCustomizerTest` | 3 |
+| 远程 spawn / 身份 | `RemoteSpawnForceSyncMiddlewareTest` ※ | 11 |
+| 远程 spawn / 身份 | `RemoteSpawnCaptureMiddlewareTest` | 3 |
+| 远程 spawn / 身份 | `RemoteUserIdMiddlewareTest` | 9 |
+| 远程任务登记（§18 多副本） | `RemoteTaskRegistryStoreTest` ※ | 13 |
+| 远程子 agent 装配 | `HarnessAgentFactoryRemoteSubagentTest` | 8 |
+| 协议清理联动 | `SessionCleanupServiceProtocolScanTest` | 4 |
+| A2A 幂等 Job | `A2aJobServiceTest` ※ | 15 |
+| A2A 幂等 Job | `A2aJobControllerTest` | 9 |
+| A2A 幂等 Job | `A2aJobConfigTest` | 4 |
+| A2A 幂等 Job | `A2aJobAssemblyTest` ※ | 5 |
+| A2A 幂等 Job | `A2aJobRedisStoreClaimRaceTest`（2026-10-01 新增，claim NX→GET 过期竞态三分支） | 3 |
+| MCP 看门狗 | `McpConnectionWatchdogTest` ※ | 11 |
+| 工具白名单防漂移 | `HarnessAgentFactoryToolCoverageDriftTest` | 2 |
+| 装配守卫 | `HarnessAgentFactoryMiddlewareAssemblyTest` ※ | 3 |
+| 沙箱 userKey | `SandboxUserKeyMiddlewareTest` | 7 |
+| 会话消息轨归档 | `SessionMessageStoreTest` ※ | 14 |
+| 会话消息轨归档 | `SessionMessageArchiveStateStoreTest` | 9 |
+| 会话消息轨归档 | `ThreadControllerHistoryMergeTest` | 6 |
+| confirm 多键（V7 迁移） | `ConfirmContextStoreMultiKeyTest` ※ | 16 |
+| 模型采样参数 | `ChatModelFactoryTest` | 10 |
+| Redis cluster/前缀 | `RedisConnectionFacadeTest` | 5 |
+| Flyway 测试迁移序 | `TestSchemaMigratorVersionOrderTest`（2026-10-01 新增，V<N> 版本号数字排序回归） | 2 |
 
 > 另有 `eval-selftest`（`bench/eval/flywheel.py selftest`，评测飞轮离线自检）是 CI 门禁之一，
 > 但**不属 `mvn test` 范畴**，故不在本表。详见 [e2e-ci-plan.md](e2e-ci-plan.md) §2.3。
 
 ### 8.1 沙箱测试（OpenSandbox 集成，2026-08-12 新增）
 
-> **2026-09-26 实跑核对**：下表用例数已逐类取自 surefire 输出，其中 `WorkspaceReaderTest`
+> **2026-10-01 实跑核对**：下表用例数已逐类取自 surefire 输出，其中 `WorkspaceReaderTest`
 > 与 `WorkspaceSyncServiceTest` 随 2026-09-24 用户技能管理面大幅增长（原表 5 / 6 → 现 25 / 26），
-> 其余未变。
+> `OpenSandboxTest` 随沙箱档修复增至 15（原表 13），其余未变。
 
 | 测试类 | 用例数 | 覆盖点 |
 |--------|--------|--------|
-| OpenSandboxTest | 13 | doExec 映射/注入/回写/快照 tar/失败容错/sessionId 降级 |
+| OpenSandboxTest | 15 | doExec 映射/注入/回写/快照 tar/失败容错/sessionId 降级 |
 | OpenSandboxClientTest | 6 | create/resume(connector)/delete/序列化 |
 | OpenSandboxStateTest | 6 | Jackson 序列化 round-trip/type 鉴别器/workspaceSpec→manifest |
 | OpenSandboxFilesystemSpecTest | 4 | clientOptions/workspaceSpec/isolationScope |
@@ -405,7 +450,9 @@ src/test/resources/fixtures/test-agent/
 
 ### 8.2 真 Redis 集成测试（`session_event` 迁 Redis Streams 后新增，2026-09-16）
 
-两支 `*IT` 都需要**真 Redis**，由环境变量门控；**surefire 默认 include 是
+四支真 Redis 的 `*IT` 由环境变量门控（`REDIS_IT=1`；§8 对账口径下 `*IT` 共 8 支 27 例，本节表列
+Redis 四支 + 表末 MySQL 一支，另有 `S3_IT` / `HITL_MYSQL_IT` 门控的三支见 §8 对账，此处不列）；
+**surefire 默认 include 是
 `*Test`/`Test*`/`*Tests`/`*TestCase`，不匹配 `*IT`**，所以 `mvn test` 不会捡到它们，必须显式 `-Dtest=`：
 
 ```bash
@@ -417,10 +464,14 @@ REDIS_IT=1 REDIS_IT_URL=redis://127.0.0.1:6399 \
 |--------|--------|--------|
 | RedisEventLogIT | 10（**不参与 `mvn test`**，需 `-Dtest=`）| `appendBatch` 字段往返（空 replyId 归一为 null）/ `XRANGE` 边界 / `tailSeq` 随流顶端 / reply 索引保留首个 seq 并按序 / `DEL` 两 key 且幂等 / TTL 落到两 key / XADD ID 非递增返回 -1 并记为 writer 冲突 / `maxLenPerStream` 真的裁剪 / 大 payload 字节级往返 / 启动自检日志与服务器实际配置一致 |
 | SessionEventStoreCrossReplicaIT | 6（**不参与 `mvn test`**）| **两个 store 共享同一 Redis**：pod B 回放 pod A 的完整 turn 含终止帧 / pod B 从中途游标续传只看到剩余部分 / pod A 未刷出的缓冲对 pod B 不可见 / 跨 pod seq 交接不冲突 / pod B 经 tailer 看到 pod A 的终止帧 / pod A 删除后 pod B 读到的 key 一并消失 |
+| A2aJobRedisStoreIT | 2（**不参与 `mvn test`**，需 `REDIS_IT=1`）| A2A 幂等 Job 的 Redis 单键状态机往返（2026-09-30 新增；支持 `REDIS_IT_PREFIX` 前缀隔离） |
+| ProtocolRedisEventBusIT | 2（**不参与 `mvn test`**，需 `REDIS_IT=1`）| Agent Protocol 事件总线 Redis 实现往返（2026-09-30 新增；支持 `REDIS_IT_PREFIX`） |
+| ModelConfigStoreMySqlIT | 2（**不参与 `mvn test`**，需 `HITL_MYSQL_IT=1`）| model_config 采样参数列迁移/回环（2026-09-27 新增，随 V4 迁移） |
 
-> 两支 IT 都**不会** `FLUSHALL`/`FLUSHDB`，sessionId 全部 UUID 化，只动自己的 key，因此可以指向
+> 各支 Redis IT 都**不会** `FLUSHALL`/`FLUSHDB`，sessionId / key 全部 UUID 化（新两支还支持
+> `REDIS_IT_PREFIX` 前缀隔离），只动自己的 key，因此可以指向
 > 共享实例。`REDIS_IT_URL` 不设时默认 `redis://127.0.0.1:6379` —— 若那是你在用的实例，建议显式
 > 指到一个临时实例（例如 `redis-server --port 6399 --dir /tmp/x`）。
 
-> 另有 4 例「配置反向验证」不在这两支 IT 里，靠**手动**跑：把服务端设成 `appendonly no` 或
+> 另有 4 例「配置反向验证」不在这四支 IT 里，靠**手动**跑：把服务端设成 `appendonly no` 或
 > `maxmemory-policy allkeys-lru` 后启动应用，确认启动自检如实 ERROR（不 abort 启动）。

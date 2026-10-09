@@ -28,10 +28,17 @@
 >    代价是标记生效期间容器内修改不落库，状态经 `tombstones` 字段下发。
 > ⑤ `/skills/available` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。
 > ⑥ `sync-from-package` 跳过清单按字典序返回（`6ddf70f`）。
+> ⑦ **MCP 侧已补运行时 reload（2026-09-25）**：`POST /admin/reload?scope=auto|mcp|agent`（`AdminReloadController`）+ `OafReloadService` 原地重建 MCP 连接 / 整包重建 agent（见 [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md)）——§2.4 对比表中「MCP 运行时生效需重启、reload 端点官方无需自研」的表述已过时；skill「每轮重扫、无需任何触发通道」的差异化结论仍成立。
 >
 > 本篇关于 **L2 目录动态加载（每轮重扫、不重启生效）** 的核心结论仍然有效，未受影响。
 
 ## 一、结论先行（官方已有，缺的是接线）
+
+> **⚠️ 现状核对（2026-10-09）——本节与 §三 是 M1 改造前的基线快照**：
+> 下表「本项目现状」列与 §三 的差距清单 G1–G4 描述的是**修复前**状态。
+> M1/M2 已完成（见文首状态行）：`/config/skills` 已注册为 L2 `FileSystemSkillRepository`、
+> `WorkspaceInitializer.copySkills()` 已删除、`SkillCatalogService` 已上线，
+> `/skills` 与 A2A 卡片均已切动态数据源。落地后的现状见 §五 与文首「现状核对」。
 
 对 [agentscope-java](https://github.com/agentscope-ai/agentscope-java)（main 分支 + 本地 2.0.0 jar 字节码双重验证）的调研结论：
 
@@ -109,6 +116,10 @@ skill 的动态性来自"每轮重扫"模型，不需要文件 watcher、不需�
 
 ## 三、现状与差距分析
 
+> **现状核对（2026-10-09）**：本节为 M1 改造前基线，G1/G2 已消除、G3 已消除、
+> G4（远程技能）仍未落地。落地现状：L2 仓库注册在
+> `service/HarnessAgentFactory.java:244`，`copySkills()` 已从 `WorkspaceInitializer` 删除。
+
 ### 3.1 现有链路（问题链）
 
 ```
@@ -160,9 +171,9 @@ SkillCatalog → <available_skills> prompt + load_skill_through_path
 
 ## 五、详细设计（文件级改动清单）
 
-### 5.1 新增 `service/OafSkillRepositoryFactory`（或内联于 AgentScopeConfig）
+### 5.1 新增 `service/OafSkillRepositoryFactory`（或内联于 agent 装配处）
 
-**文件**：`src/main/java/io/agentmanager/framework/config/AgentScopeConfig.java`
+**文件**：`src/main/java/io/agentmanager/framework/service/HarnessAgentFactory.java`
 
 在 `harnessAgent(...)` 装配处新增（伪码级别描述，实现按现有代码风格）：
 
@@ -350,8 +361,8 @@ skill_manage(修改 a) → 写 L4（agent_fs, per-user）
 ## 附录 B：本项目现状代码索引
 
 - `service/WorkspaceInitializer.java` `copySkills`（已删除的复制语义根因）
-- `config/OafConfigLoader.java:97` `parseSkills` / `:209` `loadSkillDescription`
-- `config/AgentScopeConfig.java` `harnessAgent` builder（L2 注册插入点，已接线）
+- `config/OafConfigLoader.java:97` `parseSkills` / `:227` `loadSkillDescription`
+- `service/HarnessAgentFactory.java:244` agent 装配（L2 注册插入点，已接线；2026-09-25 OAF 动态 reload 重构后由 `AgentScopeConfig` 迁入）
 - `controller/ToolController.java` GET /skills、`controller/AgentCardController.java` 卡片 skills、`controller/DebugApiController.java` debug config（均已切 SkillCatalogService）
 - `model/OafConfig.java:27` `localSkills()`/`remoteSkills()`（M3 接线点）
 
@@ -387,7 +398,7 @@ skill_manage(修改 a) → 写 L4（agent_fs, per-user）
 
 | 文件 | 改动 |
 |------|------|
-| `config/AgentScopeConfig.java` | harnessAgent 装配处注册 `/config/skills` 为 L2 市场仓库（`FileSystemSkillRepository, writeable=false, source="oaf-package"`），目录缺失时跳过 |
+| `service/HarnessAgentFactory.java` | agent 装配处注册 `/config/skills` 为 L2 市场仓库（`FileSystemSkillRepository, writeable=false, source="oaf-package"`），目录缺失时跳过 |
 | `service/WorkspaceInitializer.java` | 删除 `copySkills`/`copyDirectory`（复制语义根因） |
 | `service/SkillCatalogService.java` | **新增**：声明 ∪ 目录事实合并视图，冲突以目录为准，复用官方 mtime+size 缓存 |
 | `controller/ToolController.java` | GET /skills 切动态数据源 |

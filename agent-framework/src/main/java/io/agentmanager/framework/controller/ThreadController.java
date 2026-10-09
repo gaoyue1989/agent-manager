@@ -31,7 +31,8 @@ import io.agentmanager.framework.service.SessionUserStore;
  *
  * <p>无状态单次流架构下 Thread 列表/历史为只读重建视角：
  * <ul>
- *   <li>GET /threads?userId=xxx —— agent_state 表 session_id 去重，可按 userId 过滤</li>
+ *   <li>GET /threads?userId=xxx —— session_user 驱动（按 userId 过滤），LEFT JOIN agent_state
+ *       取 MAX(updated_at)；表结构与存量数据由 Flyway 迁移管理（db/migration）</li>
  *   <li>GET /threads/{sessionId}/history —— state_data 尽力解析 + 附 pendingConfirm
  *       （confirm_context 未消费待确认，供刷新后重建确认卡片）</li>
  *   <li>GET /threads/{sessionId}/llm-calls —— LLM 调用记录</li>
@@ -42,6 +43,21 @@ import io.agentmanager.framework.service.SessionUserStore;
 public class ThreadController {
 
     private static final Logger log = LoggerFactory.getLogger(ThreadController.class);
+
+    /**
+     * session_user ↔ agent_state 关联条件：agent_state 的会话 slot 有两种形态——
+     * 老 Channel 形态 "{peer}:{canonicalKey}" 与规范形态 "{userId}:{sessionId}"
+     * （见 SessionKeyResolver），而 session_user.session_id 是业务会话 id。
+     * 取冒号前/后两段分别等值匹配，同时覆盖两种形态：纯前缀 LIKE（旧实现）漏掉
+     * 规范形态 slot，导致 A2A 会话整条不可见、Channel 会话 updated_at 退化为
+     * su.created_at。session_id 无冒号时 SUBSTRING_INDEX 返回原值，精确匹配同被覆盖。
+     *
+     * <p>边界：老形态 slot 的冒号后段是共享运行时键（gw-hash），若它恰好与某业务
+     * session_id 同名会被误关联——现网不存在该命名（gw-hash 从不作为 session_user.session_id）。
+     */
+    private static final String AGENT_STATE_JOIN =
+        "ON SUBSTRING_INDEX(a.session_id, ':', 1) = su.session_id "
+            + "OR SUBSTRING_INDEX(a.session_id, ':', -1) = su.session_id ";
 
     private final DataSource dataSource;
     private final LLMLogger llmLogger;
@@ -132,23 +148,18 @@ public class ThreadController {
     public List<Map<String, Object>> listThreads(
             @RequestParam(value = "userId", required = false) String userId,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
-        // 确保 remark 列存在（listThreads 的 SQL 引用了 su.remark）
-        ensureRemarkColumn();
         // 网关 Header 优先 > 请求参数
         if (headerUserId != null && !headerUserId.isBlank()) {
             userId = headerUserId;
         }
         var result = new ArrayList<Map<String, Object>>();
         try (var conn = dataSource.getConnection()) {
-            // 如果指定了 userId，优先从 session_user 表过滤
             if (userId != null && !userId.isBlank()) {
-                // LEFT JOIN 使用 LIKE 匹配：agent_state.session_id 格式为
-                // slotId(userId, canonicalKey) = "{normalizeUser(userId)}:{canonicalKey}"，
-                // 而 session_user.session_id = 前端 peerId。两者不一致，需用 LIKE 前缀匹配。
+                // 指定 userId：session_user 过滤，agent_state 只取 updated_at（双形态匹配见 AGENT_STATE_JOIN）
                 try (var ps = conn.prepareStatement(
                         "SELECT su.session_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
                             + "FROM session_user su LEFT JOIN agent_state a "
-                            + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
+                            + AGENT_STATE_JOIN
                             + "WHERE su.user_id = ? "
                             + "GROUP BY su.session_id, su.remark, su.model "
                             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
@@ -171,12 +182,11 @@ public class ThreadController {
                 }
             } else {
                 // 无 userId 过滤：返回全部会话，附带 user_id + title（从 session_user 表查）
-                // LEFT JOIN 使用 LIKE 匹配（同上，agent_state.session_id 格式与 session_user 不一致）
                 try (var stmt = conn.createStatement();
                      var rs = stmt.executeQuery(
                          "SELECT su.session_id, su.user_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
                              + "FROM session_user su LEFT JOIN agent_state a "
-                             + "ON a.session_id = su.session_id OR a.session_id LIKE CONCAT(su.session_id, ':%') "
+                             + AGENT_STATE_JOIN
                              + "GROUP BY su.session_id, su.user_id, su.remark, su.model "
                              + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
                     while (rs.next()) {
@@ -237,11 +247,13 @@ public class ThreadController {
         var sessionModel = sessionUserStore.findModelBySession(sessionId);
         result.put("model", sessionModel != null ? sessionModel : "");
 
-        // 元信息：从 agent_state 取最新 updated_at（使用 LIKE 匹配前缀，与 loadMessages 一致）
+        // 元信息：从 agent_state 取最新 updated_at（双形态 slot 匹配，与列表 JOIN 同口径；
+        // 历史消息 loadMessages/AgentStateReader 的多形态探测同理）
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(
                  "SELECT MAX(updated_at) AS updated_at FROM agent_state "
-                     + "WHERE session_id = ? OR session_id LIKE CONCAT(?, ':%')")) {
+                     + "WHERE SUBSTRING_INDEX(session_id, ':', 1) = ? "
+                     + "OR SUBSTRING_INDEX(session_id, ':', -1) = ?")) {
             ps.setString(1, sessionId);
             ps.setString(2, sessionId);
             var rs = ps.executeQuery();
@@ -367,8 +379,14 @@ public class ThreadController {
      *
      * <p><b>权威来源是 AgentState</b>：官方 SDK 把挂起的 ASKING 工具连同 replyId 一起
      * 持久化在最后一条 assistant 消息里（2.0.3 起），与会话同寿命——因此确认卡片在
-     * confirm_context 的 30 分钟 TTL 之后依然能重建。
-     * confirm_context 仅作兜底（老会话、SDK 未写入 metadata 的场景）。
+     * confirm_context 的 30 分钟 TTL 之后依然能重建。远程确认行（RemoteConfirmBridge 落卡）
+     * 不在父 state，只能来自 confirm_context。
+     *
+     * <p>FIFO 单卡（V7，travel-fulfillment 设计 §5.2）：confirm_context 兜底取
+     * {@link ConfirmContextStore#findHeadPending} ——最早未消费行（任意 confirm_key，
+     * 本地 30min / 远程 24h TTL 分档懒过滤），并发远程挂起排队等待而非悬挂。
+     * 远程行附 {@code confirm_key}/{@code remote_task} 字段（additive，前端零改动），
+     * 确认端点凭 confirmKey 路由到远程任务。
      */
     private Map<String, Object> pendingConfirmPayload(String sessionId, String stateData) {
         var asking = stateData != null
@@ -383,13 +401,17 @@ public class ThreadController {
             m.put("source", "agent_state");
             return m;
         }
-        return confirmContextStore.findPending(sessionId)
+        return confirmContextStore.findHeadPending(sessionId)
             .map(p -> {
                 var m = new LinkedHashMap<String, Object>();
-                m.put("reply_id", p.replyId());
+                m.put("reply_id", p.replyId() != null ? p.replyId() : "");
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
                 m.put("source", "confirm_context");
+                if (p.isRemote()) {
+                    m.put("confirm_key", p.confirmKey());
+                    m.put("remote_task", p.remoteTask());
+                }
                 return m;
             })
             .orElse(null);
@@ -438,10 +460,12 @@ public class ThreadController {
 
     // ===== 删除会话辅助方法 =====
 
-    /** 按 session_id 删除指定表中的记录（防 SQL 注入：表名白名单校验）。
-     *  agent_state / agent_fs 表的 session_id 格式为 slotId(userId, canonicalKey)，
-     *  即 "{peerId}:{canonicalKey}"，与 session_user.session_id（前端 peerId）不一致，
-     *  因此对这两张表额外使用 LIKE 前缀匹配删除变体记录。 */
+    /**
+     * 按会话 id 删除指定表中的记录（防 SQL 注入：表名白名单校验）。
+     * agent_state / agent_fs 表的 session_id 为 slot 复合键，两种形态都要删：
+     * 老 Channel 形态 "{peer}:{key}"（冒号前段）与规范形态 "{userId}:{sid}"（冒号后段），
+     * 见 {@link #AGENT_STATE_JOIN}。漏删规范形态会在删除会话后留下孤儿状态行。
+     */
     private int deleteBySessionId(String table, String sessionId) {
         // session_event 已不在白名单：它迁到 Redis 后由 sessionEventStore.deleteSession 处理，
         // 留着会让人以为还能从这张表删数据（表还在，但已不再写入）
@@ -450,14 +474,15 @@ public class ThreadController {
         if (!allowed.contains(table)) {
             throw new IllegalArgumentException("Table not in delete whitelist: " + table);
         }
-        var needsLike = java.util.Set.of("agent_state", "agent_fs");
-        var sql = needsLike.contains(table)
-            ? "DELETE FROM " + table + " WHERE session_id = ? OR session_id LIKE CONCAT(?, ':%')"
+        var needsSlotMatch = java.util.Set.of("agent_state", "agent_fs");
+        var sql = needsSlotMatch.contains(table)
+            ? "DELETE FROM " + table + " WHERE SUBSTRING_INDEX(session_id, ':', 1) = ? "
+                + "OR SUBSTRING_INDEX(session_id, ':', -1) = ?"
             : "DELETE FROM " + table + " WHERE session_id = ?";
         try (var conn = dataSource.getConnection();
              var ps = conn.prepareStatement(sql)) {
             ps.setString(1, sessionId);
-            if (needsLike.contains(table)) {
+            if (needsSlotMatch.contains(table)) {
                 ps.setString(2, sessionId);
             }
             return ps.executeUpdate();
@@ -719,22 +744,6 @@ public class ThreadController {
     }
     /** 将 title 写入 session_user.remark（统一走 SessionUserStore，规避 MySQL 1093；SQL 单一来源） */
     private void upsertRemark(String sessionId, String title) {
-        ensureRemarkColumn();
         sessionUserStore.updateRemark(sessionId, title);
-    }
-
-    /** 幂等确保 remark 列存在 */
-    private void ensureRemarkColumn() {
-        try (var conn = dataSource.getConnection();
-             var rs = conn.getMetaData().getColumns(null, null, "session_user", "remark")) {
-            if (!rs.next()) {
-                try (var stmt = conn.createStatement()) {
-                    stmt.executeUpdate("ALTER TABLE session_user ADD COLUMN remark VARCHAR(512) DEFAULT '' AFTER user_id");
-                    log.info("Added 'remark' column to session_user table");
-                }
-            }
-        } catch (Exception e) {
-            log.debug("ensureRemarkColumn check skipped: {}", e.getMessage());
-        }
     }
 }

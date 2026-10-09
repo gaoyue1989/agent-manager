@@ -342,6 +342,45 @@ class ChatStreamControllerTest {
         ChatStreamController.ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
     }
 
+    /**
+     * 跨层排队 waiting 心跳（issue #87 兜底）：租约到手后 SDK 事件迟迟不来（排队/静默），
+     * 心跳每 WAITING_FRAME_INTERVAL 直发一帧 waiting——首事件到达前客户端不得零反馈；
+     * 心跳帧只进 sink 不进 EventBus（不落库，durable 续传不含）。
+     */
+    @Test
+    void chatShouldEmitWaitingHeartbeatWhileFirstEventDelayed() throws Exception {
+        ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofMillis(100);
+        try {
+            var sessionId = "test-user-hb1";
+            when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-hb");
+            var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
+            var subscribed = new CountDownLatch(1);
+            when(chatChannel.sendStream(any(ChatUiRequest.class)))
+                .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+            var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
+            assertTrue(subscribed.await(3, TimeUnit.SECONDS), "controller 未订阅 agent 事件流");
+            sleep(350);   // 跨 3 个心跳周期，事件保持静默
+
+            events.tryEmitNext(new TextBlockDeltaEvent("reply-hb", "block-hb", "hi"));
+            events.tryEmitNext(new AgentEndEvent("reply-hb"));
+            events.tryEmitComplete();
+
+            var frames = framesFuture.get(5, TimeUnit.SECONDS);
+            long waiting = frames.stream().filter(f -> f != null && f.contains("waiting")).count();
+            assertTrue(waiting >= 2, "首事件前应有心跳 waiting 帧: " + frames);
+            assertTrue(frames.indexOf(frames.stream().filter(f -> f != null && f.contains("TEXT_BLOCK_DELTA"))
+                .findFirst().orElse(null))
+                > frames.lastIndexOf(frames.stream().filter(f -> f != null && f.contains("waiting"))
+                    .reduce((a, b) -> b).orElse(null)),
+                "首个事件帧应晚于最后一个 waiting 帧（首事件即停心跳）: " + frames);
+            // 不落库：EventBus 的 append 第三参为 eventType，心跳帧不得出现
+            verify(eventStore, never()).append(eq(sessionId), anyString(), eq("waiting"), anyString());
+        } finally {
+            ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
+        }
+    }
+
     @Test
     void chatShouldRejectBlankMessage() {
         var frames = collect("test-user-s8", "", "alice");
@@ -1202,5 +1241,89 @@ class ChatStreamControllerTest {
 
         // 缺省 = 不改变绑定（master 版标题服务每条消息都会被调用，内部按已有标题跳过）
         verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
+    }
+
+    // ===== AGENT_END 收尾 guard：远程转发事件不得终结 turn =====
+
+    @Test
+    void chatShouldNotReleaseLeaseOnRemoteForwardedAgentEnd() throws Exception {
+        // 远程子 agent 转发回来的 AGENT_END（source 非空）只是「子任务运行终点」：此刻
+        // spawn 调用仍在进行中（源流尚未 complete，spawn 结果/lead 收尾汇报还在路上）。
+        // 若在这里收尾，SSE 会在 spawn 返回前被截断（isRemoteForwarded javadoc 有实测记录）。
+        // 与 chatShouldReleaseLeaseOnNaturalComplete（lead 自身 AGENT_END）成对钉住 guard 两侧。
+        var sessionId = "test-user-rmt";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-rmt");
+
+        var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
+        var subscribed = new CountDownLatch(1);
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+        var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
+        assertTrue(subscribed.await(3, TimeUnit.SECONDS), "controller 未订阅 agent 事件流");
+
+        events.tryEmitNext((AgentEvent) new AgentEndEvent("reply-r").withSource("gw-1/order-agent"));
+        // 等该事件真的走到 handleEventAndEmit（落库即证明事件处理已过 guard 那一行）
+        verify(eventStore, timeout(2000)).append(eq(sessionId), any(), eq("AGENT_END"), any());
+        sleep(200);
+
+        verify(turnLeaseStore, never()).release(anyString(), anyString());
+        verify(eventStore, never()).finishTurn(anyString());
+        assertTrue(!framesFuture.isDone(), "远程 AGENT_END 不得关流: " + framesFuture);
+
+        // 收尾仍由源流 complete 触发（正常路径不受影响）
+        events.tryEmitComplete();
+        framesFuture.get(5, TimeUnit.SECONDS);
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-rmt");
+    }
+
+    @Test
+    void chatShouldHoldLeaseFromPermissionAskUntilAgentEnd() throws Exception {
+        // HITL 新契约：permission_ask 帧只落确认上下文 + 广播，**不释放租约**；
+        // 租约要等随后的 AGENT_END 收尾才放（ASKING 快照先落库，confirm 排队抢锁才读得到身份）。
+        // 提前放锁 → confirm 读不到 state 身份 → 回落 fullThreadId 兜底槽 → 恢复丢全部上下文。
+        var sessionId = "test-user-hitl2";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-hitl2");
+
+        var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
+        var subscribed = new CountDownLatch(1);
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+
+        var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
+        assertTrue(subscribed.await(3, TimeUnit.SECONDS), "controller 未订阅 agent 事件流");
+
+        var ask = (AgentEvent) new io.agentscope.core.event.RequireUserConfirmEvent(
+            "evt-1", "src-1", "reply-hitl",
+            List.of(io.agentscope.core.message.ToolUseBlock.builder()
+                .id("call-1").name("get_weather").input(java.util.Map.of("city", "beijing")).build()));
+        events.tryEmitNext(ask);
+        verify(eventStore, timeout(2000))
+            .append(eq(sessionId), any(), eq("REQUIRE_USER_CONFIRM"), any());
+        sleep(200);
+
+        // 帧已广播、确认上下文已落库，但租约一动不动
+        verify(runtimeService, timeout(2000)).storeConfirmContext(eq(sessionId), any());
+        verify(turnLeaseStore, never()).release(anyString(), anyString());
+        verify(eventStore, never()).finishTurn(anyString());
+
+        // AGENT_END 才收尾：恰一次
+        events.tryEmitNext(new AgentEndEvent("reply-hitl"));
+        verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-hitl2");
+        events.tryEmitComplete();
+
+        var frames = framesFuture.get(5, TimeUnit.SECONDS);
+        verify(turnLeaseStore, times(1)).release(sessionId, "tok-hitl2");
+        verify(eventStore, times(1)).finishTurn(sessionId);
+        int askIdx = -1;
+        int endIdx = -1;
+        for (int i = 0; i < frames.size(); i++) {
+            String f = frames.get(i);
+            if (f == null) continue;
+            if (f.contains("permission_ask") && askIdx < 0) askIdx = i;
+            if (f.contains("AGENT_END") && endIdx < 0) endIdx = i;
+        }
+        assertTrue(askIdx >= 0, "应广播 permission_ask 帧: " + frames);
+        assertTrue(endIdx > askIdx, "AGENT_END 帧应在 permission_ask 之后到达: " + frames);
     }
 }

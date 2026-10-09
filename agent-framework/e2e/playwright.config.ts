@@ -25,9 +25,11 @@ export default defineConfig({
     { name: 'api-reload', testMatch: /tests\/api-reload\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi', testMatch: /tests\/api-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-sandbox', testMatch: /tests\/api-sandbox\.spec\.ts/, use: { ...devicesDesktop() } },
+    { name: 'api-protocol', testMatch: /tests\/api-protocol\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui', testMatch: /tests\/ui\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui-multi', testMatch: /tests\/ui-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi-kill', testMatch: /tests\/api-multi-kill\.spec\.ts/, use: { ...devicesDesktop() } },
+    { name: 'api-protocol-multi', testMatch: /tests\/api-protocol-multi\.spec\.ts/, use: { ...devicesDesktop() } },
   ],
 });
 

@@ -3,6 +3,13 @@
 > **报告性质**：本文档为**静态分析与用例设计**产物，汇编自三份上游材料：①近 7 天功能变更清单；②现有 E2E 覆盖盘点（gateSummary + mockCapabilities + 88 行用例矩阵）；③功能域覆盖结论与缺口（含每条用例设计与逐项复核记录）。
 > 文中引用的 grep、git show、check-fixtures 实跑、本机 e2e 库 13306 SQL 往返、SDK jar javap 反汇编等验证**均由上游评审环节执行**（各处标注了命令与输出，见第 3/4 节「复核证据」），**本次汇编未重新执行这些检查**。
 > **第 4 节全部 25 条用例仅为设计草稿：尚未写入 `agent-framework/e2e/tests/`，亦未执行**（详见 §5.6）。
+>
+> **落地回填（2026-09-28，bc235c4）**：上述 25 条已落地 **19 条** `test()`——HA1-HA3 + U15、MOD4-MOD7、
+> X10/X11（沙箱技能物化/tombstone）、SK2-SK4、MEM1-MEM3、A5-A7，配套 `lib/archive-seed.ts`、
+> reset-data.mjs 清场表补 `session_message`、mock /stats 采样四键均已合入；余 6 条（X12/X13 需
+> skill-manage-sb 录制件、§4.5 记忆面沙箱 no-op、TR1-TR3 需 OTLP mock 基建）尚未实施。下文
+> 「尚未写入 tests/」等表述均为汇编时点状态；第二轮增量比对见
+> [e2e-coverage-gap-analysis-20260929.md](e2e-coverage-gap-analysis-20260929.md)。
 > 被测物：`agent-framework/`（Java 运行时，:8100）；CI 门禁：`.github/workflows/agent-framework-ci.yml`。
 
 ---
@@ -2186,10 +2193,12 @@ test.describe('OTel span 内容属性（TR 组）', () => {
 
 ### 5.5 编号与卫生事项
 
-- **caseId 撞号**：材料三「沙箱技能回写」（§4.3）与「记忆关断」（§4.5）两缺口均将首条用例编为 **X10** 且同落 api-sandbox.spec.ts X 组——落地时须为记忆面用例重编号（建议顺延 X14 起），避免同 spec 内 caseId 冲突。
-- **reset-data.mjs 清场缺口**：TABLES（:18-19）缺 session_message（ThreadController.java:277 已有级联删除语义），归档行跨运行残留属卫生隐患——HA3/U15 落地时一并补。
+- **caseId 撞号**：材料三「沙箱技能回写」（§4.3）与「记忆关断」（§4.5）两缺口均将首条用例编为 **X10** 且同落 api-sandbox.spec.ts X 组。**已在落地时消解**：沙箱技能缺口占用 X10/X11（api-sandbox.spec.ts:169/:237），记忆面用例至今未落地；其后 f4db8ca 又占用 X15（Channel 链路 per-user 物化，:308），故记忆面用例若落地须从 **X16** 起编号，避免同 spec 内 caseId 冲突。
+- **reset-data.mjs 清场缺口**：TABLES（:18-19）缺 session_message（ThreadController.java:277 已有级联删除语义），归档行跨运行残留属卫生隐患——**已随 HA3/U15 落地补齐**（现 TABLES 含 `session_message`）。
 - **既有用例缺号**：sandbox 无 X5、ui 无 U12，盘点如实记录（材料二矩阵）。
 
 ### 5.6 性质声明
 
 **本次为静态分析与用例设计：全部 25 条用例仅停留在本文档草稿，尚未写入 `agent-framework/e2e/tests/`，亦未执行。** 文中引用的 grep、git show、check-fixtures 实跑（OK：llm=17 场景，sandbox=1 文件）、本机 e2e 库 13306 SQL 往返、SDK jar javap 反汇编等验证均为**上游评审环节所做**（材料三复核记录，各处已标注命令与输出），本次汇编未复跑；Playwright 用例的端到端实测在上游亦未执行（本机 :8100 未启动，结论基于源码逐行核对 + 实库 SQL 往返，各缺口小节已标注"未跑项"）。落地时应按第 4 节各用例前置逐条核对环境后实施，并优先吸收各缺口「复核意见」中的修订与边界声明。
+
+> **状态回填（2026-09-28）**：上文「尚未写入」已过时——其中 **19 条已随 bc235c4 落地**（HA1-HA3+U15、MOD4-MOD7、X10/X11、SK2-SK4、MEM1-MEM3、A5-A7 及配套基建），余 6 条（X12/X13、§4.5 记忆面沙箱 no-op、TR1-TR3）待录制件/OTLP mock 基建，见文首「落地回填」。

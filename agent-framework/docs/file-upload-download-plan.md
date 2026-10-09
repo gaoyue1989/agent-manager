@@ -2,6 +2,7 @@
 
 >
 > **现状核对（2026-09-07）**：本文方案已落地。**端点**：`POST /files/upload`（multipart）、`GET /files/{fileId}`（下载/预览，?inline=1）。**存储**：双后端（`FILE_STORAGE_TYPE=local`/`s3`），实现见 `service/storage/LocalFileStorage.java` / `S3FileStorage.java`，七牛云已实测（`S3FileStorageIT` 集成测试）。**元数据表**：`file_asset`（uuid + storage_key + 状态 pending/injected/archived + user_id/session_id 维度）。**沙箱注入**：非沙箱直写本地工作区（幂等 `uniqueWorkspacePath`）；沙箱模式 pending 挂账，OpenSandbox `create/resume` + `SandboxUserKeyMiddleware` 首次 exec 注入。**事件回传**：`POST /threads/{sid}/chat` SSE 流在 `present_file` 工具结果结束时合成 `file_ready` 帧（`SessionStreamController.emitFileReady`，下载 URL 前缀 `/agent/release-agent/files/{fileId}`）。**历史回放**：`GET /threads/{sid}/history` 补齐文件下载卡片（`ThreadControllerTest` 12 用例覆盖）。
+> **再核对（2026-10-01）**：2026-09-14/16（0cd8a90/47dc740）起对话入口收敛为 `POST /threads/chat`（sessionId 在请求体），`file_ready` 合成移至 `ChatStreamController.emitFileReadyViaEventBus`（经 `SessionEventBus.emitSynthetic` 落 Redis Streams，刷新回放/多副本续传一致）；帧内 `download_url` 现为相对路径 `/files/{fileId}`（前端拼 API BASE，网关前缀 `/agent/release-agent` 由部署侧 rewrite 提供）。§18 的 `check_oaf_package`/`create_oaf_zip` 已于 2026-09-24（e2392c1）迁出 agent-framework 落到 Go 后端 MCP（`backend/internal/mcpsrv/oaf_package.go`），`tool/OafPackageTools.java` 不复存在；`FileTools` 另增 `present_url` 外链交付工具（按 `FILE_EXTERNAL_URL_PREFIXES` 白名单放行）。状态机仍为 pending/injected（无 archived 态）。
 
 ## 1. 背景与目标
 

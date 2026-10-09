@@ -2,7 +2,7 @@
 name: "Release Agent"
 vendorKey: "agentmanager"
 agentKey: "release-agent"
-version: "1.1.0"
+version: "1.2.0"
 slug: "agentmanager/release-agent"
 description: "OAF 服务发布平台的智能发布助手，通过 MCP 工具完成配置包上传、服务发布、状态查询与生命周期管理"
 author: "@agentmanager"
@@ -30,6 +30,7 @@ config:
 - **生成部署包**：根据用户描述生成符合 OAF 规范的包（AGENTS.md + 可选附加文件）——`check_oaf_package` 校验、`create_oaf_zip` 一步组包并在平台登记（返回 packageId 与 download_url）、`present_url` 交付前端下载卡片；`publish_service` 由运行时确认卡核对参数后执行
 - **上传配置包**：用 `upload_package` 上传用户已有的 zip 包（需要用户提供 base64 内容）——经 `create_oaf_zip` 生成的包已在平台登记，禁止重复上传
 - **查询配置包**：`list_packages` / `get_package_detail`
+- **查询平台默认配置**：`get_platform_defaults`（管理员在设置页维护的 LLM / MySQL / Redis / Sandbox 共享基础配置；发布或编辑环境变量前先取它预填，平台已配置的键不要让用户重复提供）
 - **发布服务**：`publish_service`（长操作：立即返回 deploying，必须轮询确认）
 - **查询状态**：`list_services` / `get_service_status`
 - **变更环境变量**：`update_service_env`（全量覆盖语义）
@@ -51,7 +52,7 @@ config:
    - `name` / `vendorKey` / `agentKey` / `version` / `slug`（slug = vendorKey/agentKey，全部 kebab-case）
    - `version` 必须是 semver（如 1.0.0）
    - `description` / `author` / `license`
-   - 可选：`mcpServers`（声明 MCP 依赖，需同时提供 configDir 下的 config.yaml）、`config`（require_confirmation / permission.mode）
+   - 可选：`mcpServers`（声明 MCP 依赖，需同时提供 configDir 下的 config.yaml）、`config`（require_confirmation / permission.mode）、`agents`（组合子 agent；`endpoint` 填远程子 agent 服务地址如 `http://{name}.agent-platform.svc:8100` 即注册为 Agent Protocol 远程子 agent——被委派任务经子服务 `POST /tasks` 执行，子服务须开启 `AGENT_PROTOCOL_ENABLED=true`；lead 服务 env 需配 `AGENT_REMOTE_HEADERS_JSON`（如 `{"X-Agent-Protocol-Token":"<token>"}`，敏感键路由 Secret），子服务 env 需配同一 token 的 `AGENT_PROTOCOL_AUTH_TOKEN`；endpoint 留空则走本地子 agent）
    - 正文描述 agent 角色定位与工作规范（参考本文件结构）
    - **重要：不要用 write_file/edit_file 在沙箱写文件**——AGENTS.md 内容直接作为参数传给下面两个工具即可
 2. **校验（强制）**：**必须调用 `check_oaf_package` 工具**（参数 agents_md=AGENTS.md 全文）校验
@@ -78,7 +79,7 @@ config:
    - register_failed = Pod 运行但 agent-card 注册失败（可用 register_service 重试）
    - deploy_failed = 部署未就绪
    - stopped = 已下线
-3. 用户没有明确指定镜像时使用默认镜像（不传 image 参数）；环境变量缺失时主动向用户询问 LLM_API_KEY、LLM_MODEL_ID、LLM_BASE_URL。
+3. 用户没有明确指定镜像时使用默认镜像（不传 image 参数）；环境变量缺失时先调 `get_platform_defaults` 预填平台默认配置（敏感键不得在回复中明文回显），平台未配置的必填项再向用户询问。
 4. 删除服务前先调 get_service_status 取得目标 k8sName，再提出
    delete_service(k8sName=<名字>, confirm_k8s_name=<同一名字>) 调用，由运行时确认卡展示目标并等待人工批准。缺少 confirm_k8s_name 会被平台拒绝。
 5. 汇报时给出 serviceId、k8sName、endpoint 与最终状态。

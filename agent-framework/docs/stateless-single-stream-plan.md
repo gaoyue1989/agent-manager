@@ -1,12 +1,23 @@
 # 无状态单次流架构改造设计（stateless-single-stream-plan）
 
 > 状态：**设计定稿**（决策 O1-O7 已关闭；剩余风险 R3/R12，均由 SPIKE S2 验证收敛）
+> **演进说明（2026-10-01 补记）**：本文"删除长连接、无跨副本事件扇出"的目标形态自 2026-09-14
+> （0cd8a90，DURABLE_SSE）起已被 durable-sse 系列方案接续演进——`SessionEventBus` 以
+> Redis Streams 持久化事件总线形态回归、订阅端点为 `GET /threads/{sid}/subscribe`
+> （本文"现状核对"中"SessionEventBus 已删除"仅对 2026-09-07 时点有效），见
+> [durable-sse-plan.md](durable-sse-plan.md) 与
+> [durable-sse-multinode-plan.md](durable-sse-multinode-plan.md)；本文其余决策（turn_lease 租约、
+> confirm_context 落库、`/threads` 去前缀等）仍为现行架构的来源。
 > 范围：agent-framework（AgentScope Java 2.0.0 + Spring Boot 3.3，端口 8100）
 > 目标部署形态：单 Agent 多副本（无状态水平扩展）
 
 > **现状核对（2026-09-07）**：
-> - **已实施并落地**：单次流 SSE `POST /threads/{sessionId}/chat`（`SessionStreamController.java:52,92`），Turn 租约 `turn_lease` 表互斥 + waiting 帧（120s 排队超时 → error 帧）、HITL 跨副本 `confirm_context` 表（CAS 防重复）、`tool_audit_log` 异步批量审计、`SessionEventBus` 已删除；原长连接订阅端点 `GET /debug/threads/{sid}/events` 不复存在。
-> - **配套端点**：`POST /threads/{sid}/confirm`、`/confirm-stream`（ConfirmController）；`GET /threads`、`/threads/{sid}/history`、`/threads/{sid}/llm-calls`（无 `/debug` 前缀，ThreadController.java:32,73,109）。
+> - **已实施并落地**：单次流 SSE `POST /threads/chat`（`ChatStreamController.java:254`，sessionId 在请求体中可选；
+>   原 `POST /threads/{sessionId}/chat` 已于 2026-09-16 随入口收敛一并删除，commit 47dc740），
+>   Turn 租约 `turn_lease` 表互斥 + waiting 帧（120s 排队超时 → error 帧，另有租约后的跨层排队心跳）、
+>   HITL 跨副本 `confirm_context` 表（CAS 防重复）、`tool_audit_log` 异步批量审计、`SessionEventBus` 已删除；
+>   原长连接订阅端点 `GET /debug/threads/{sid}/events` 不复存在。
+> - **配套端点**：`POST /threads/{sid}/confirm`、`/confirm-stream`（ConfirmController）；`GET /threads`、`/threads/{sessionId}/history`、`/threads/{sid}/llm-calls`（无 `/debug` 前缀，ThreadController.java:147,222,366）。
 > - **测试**：原 §5 列 ~383 用例，现 61 个测试类 / 456 个 @Test。
 > - 文中「`POST /threads/{sid}/chat`（fire-and-forget 触发）」是单次流**取代前**的旧描述，新架构下该端点本身既是触发也是 SSE 响应流，不再 fire-and-forget。
 
@@ -35,6 +46,7 @@
 - 不做全量事件日志（含文本 delta）的审计/回放；
 - 不动 A2A 协议路径（`POST /` JSON-RPC，标准协议自带 resubscribe 语义）；
 - 不动旧 `StreamController`（`GET /chat/stream`），保留兼容。
+  **（后续变更，2026-09-16 commit 47dc740：该端点与其控制器已删除，对话入口收敛为 `POST /threads/chat`）**
 
 ---
 
@@ -44,7 +56,7 @@
 |------|------|------|
 | 对话触发 | `POST /threads/{sid}/chat` fire-and-forget，事件经 `SessionEventBus` 回流到长连接订阅 | **改为 SSE 单次流直吐** |
 | 事件订阅 | `GET /threads/{sid}/events` 长连接 SSE + 15s 心跳 | **删除** |
-| 单次流雏形 | 旧 `GET /chat/stream`（StreamController，一次性 Channel 流），前端 `sendChannelSingleStream` 已使用 | 保留不动 |
+| 单次流雏形 | 旧 `GET /chat/stream`（StreamController，一次性 Channel 流），前端 `sendChannelSingleStream` 已使用 | 保留不动（**后续 2026-09-16 已随入口收敛删除**，见 §1.3 注） |
 | HITL 确认流 | `POST /threads/{sid}/confirm-stream`（单次流，词表一致）+ `/confirm`（同步版） | 保留，上下文来源改造 |
 | 确认上下文 | 进程内 `confirmCache`（ConcurrentHashMap，30min TTL，CAS consumed） | **落库**（confirm_context 表） |
 | 会话历史 | `GET /threads/{sid}/history`（agent_state.state_data 解析 context[]，块级消息含 tool_calls） | 复用 + 附加 pendingConfirm |
@@ -106,7 +118,7 @@ CREATE TABLE IF NOT EXISTS confirm_context (
 - **键**：`fullThreadId`（与 SDK RuntimeContext 一致；`makeThreadId` 的 tenant 前缀各副本一致，由配置派生）。
 - **存储内容**：不序列化整个 `ToolUseBlock`（final 类 + Jackson 多态风险），只存 `{id, name, input}` 字段 JSON；恢复时用 `ToolUseBlock.builder()/.id().name().input()` 或公共构造器重建实例（javap 已确认 `builder()` 存在）。
 - **CAS 消费**：`UPDATE confirm_context SET consumed=1 WHERE session_id=? AND consumed=0`；affected=0 且行存在 → `ConfirmAlreadyConsumedException`（409）；行不存在/过期 → `ConfirmContextNotFoundException`（404）。404/409 语义与现有接口完全一致。
-- **TTL**：沿用 30min（`CONFIRM_TTL_MINUTES` 可配置）；懒判断（读时校验 `created_at`）+ 定时清理。
+- **TTL**：沿用 30min（`AGENT_CLEANUP_CONFIRM_TTL_MINUTES` 可配置）；懒判断（读时校验 `created_at`）+ 定时清理。
 - **覆盖语义**：同 session 新 ASK 覆盖旧条目（与现缓存语义一致）。
 
 #### 4.1.2 tool_audit_log（工具调用轻量审计）
@@ -128,7 +140,7 @@ CREATE TABLE IF NOT EXISTS tool_audit_log (
 - **写入范围**：仅工具类事件（`ToolCallStartEvent` / `ToolCallEndEvent` / `ToolResultStartEvent` / `ToolResultEndEvent`），不含文本 delta 与参数累积 delta。
 - **审计粒度（O3 定稿）**：仅元信息——何时、何工具、何状态（`ToolCallStartEvent` 无 input 字段，参数不可得，见 R2）。不累积 `ToolCallDeltaEvent`。
 - **写入方式**：异步批量（Reactor buffer 100ms 或 50 条合并），失败静默降级，不阻塞 SSE 直吐。
-- **保留期**：默认 30 天（`EVENT_LOG_RETENTION_DAYS`），日级定时清理。
+- **保留期**：默认 30 天（`AGENT_CLEANUP_AUDIT_RETENTION_DAYS`），日级定时清理。
 - **payload**：复用 `AgentEventSseSerializer.payload(event)` 词表（与前端一致，含 MCP ui 元数据）。
 
 #### 4.1.3 turn_lease（Turn 租约，执行权互斥，O1 定稿）
@@ -147,19 +159,20 @@ CREATE TABLE IF NOT EXISTS turn_lease (
 
 采用**租约 token + 短 TTL + 续租**模式（不用 `GET_LOCK`，避免长 turn 耗尽连接池，见 R4）：
 
-**加锁 acquire(sessionId, waitTimeout) → token|null（等待式）**
+**加锁 tryAcquire(sessionId) → token|null（单次尝试，立即返回）**
 ```
 ① 立即尝试：
      INSERT INTO turn_lease VALUES (sid, uuid(), NOW(3)+60s, NOW(3))
        成功 → 拿锁，返回 token
      PK 冲突 → 读该行：
-       未过期 → 进入 ② 排队等待
+       未过期 → 返回 null（调用方排队重试）
        已过期（前持有者已崩溃）→ 条件接管：
          DELETE FROM turn_lease WHERE session_id=? AND expires_at < NOW(3)
-         → affected=1 才重试 ①；=0（被别的副本抢先）→ 进入 ②
-② 排队等待：每 500ms 重试 ①（轮询为独立短连接，不占用连接池），
-   等待期间由上层发 waiting 帧（见 4.2.1）
-③ 超过 waitTimeout（默认 120s）仍未拿到 → 返回 null（HTTP 409 turn_in_progress，兜底）
+         → affected=1 才重试 ①；=0（被别的副本抢先）→ 返回 null
+② Store 另有等待式 `acquire(sessionId, waitTimeout)`（内部按 POLL_INTERVAL_MS 轮询 tryAcquire，
+   阻塞直到拿到或超时返回 null）；对话入口不用它——需在等待期发 waiting 帧，改由上层循环驱动：
+   每 15s 先发 waiting 帧再 tryAcquire（独立短连接，不占用连接池），见 4.2.1
+③ 超过 waitTimeout（默认 120s）仍未拿到 → 上层发 error 帧 `turn_in_progress`（兜底）
 ```
 两个副本同时接管时 `DELETE` 只影响 1 行，重试 `INSERT` 仅一个成功——原子性由 PK 唯一约束保证。
 
@@ -208,12 +221,12 @@ DELETE FROM turn_lease WHERE session_id=? AND token=?
 
 | 方法 | 路径 | 状态 | 说明 |
 |------|------|------|------|
-| POST | `/threads/{sid}/chat` | **改造** | SSE 单次流直吐；请求体 `{message, userId}` 不变；排队等待发 waiting 帧；等待超时（120s）→ 409=`turn_in_progress` |
+| POST | `/threads/chat` | **改造** | SSE 单次流直吐；请求体 `{message, userId, sessionId, fileIds, model}`（sessionId 在体中，可选）；排队等待发 waiting 帧；等待超时（120s）→ error 帧=`turn_in_progress`。**后续变更 2026-09-16**：路径去掉 `{sid}` 段（原 `POST /threads/{sid}/chat`） |
 | GET | `/threads/{sid}/events` | **删除** | 长连接订阅端点移除 |
 | POST | `/threads/{sid}/confirm-stream` | **改造** | 语义不变（预检 404/409 → error SSE 帧；恢复事件流 → done 帧）；**新增 acquire（等待式）**：恢复执行是新执行段，与其他活跃执行段互斥，排队时发 waiting 帧 |
 | POST | `/threads/{sid}/confirm` | 保留 | 同步版不动 |
 | GET | `/threads/{sid}/history` | **扩展** | 响应附加 `pendingConfirm` 字段 |
-| GET | `/chat/stream`（旧） | 保留 | 兼容不动 |
+| GET | `/chat/stream`（旧） | 保留 | 兼容不动（**后续 2026-09-16 已删除**） |
 
 > **路径规范（O7 定稿）**：会话业务接口统一**去掉 `/debug` 前缀**，与现有 `ConfirmController`（`/threads/{sessionId}`）、`ThreadController`（`/threads`）对齐：
 > - `SessionStreamController` 基路径 `/debug/threads/{sessionId}` → `/threads/{sessionId}`；
@@ -224,9 +237,9 @@ DELETE FROM turn_lease WHERE session_id=? AND token=?
 #### 4.2.1 POST /chat 单次流（改造后）
 
 ```
-token = turnLease.acquire(sid, waitTimeout=120s)     ← 等待式（内部 500ms 轮询，不占连接池）
-等待期间：SSE 每 15s 发 {type:"waiting"} 帧           ← 防 Nginx 60s 读超时；前端提示"排队等待中"
-超时仍未拿到 → 409 {error: "turn_in_progress"}       ← 兜底（长执行段 + 排队超时）
+token = turnLease.tryAcquire(sid) 循环至 120s 截止     ← 等待式（每拍独立连接，不占连接池）
+等待期间：每 15s 先发 {type:"waiting"} 帧再重试 acquire  ← 防 Nginx 60s 读超时；前端提示"排队等待中"
+超时仍未拿到 → errorSSE("turn_in_progress: ...") 后 complete  ← 兜底（长执行段 + 排队超时）；非 HTTP 409
 启动续租任务（20s 间隔，TTL 60s）                     ← 绑定执行器生命周期
 sendStream(...)
   .map(event → toSSE(event, registrar))              ← 沿用现有词表 + MCP ui 元数据
@@ -238,7 +251,7 @@ sendStream(...)
 
 - **锁语义**：见 4.1.3。锁覆盖活跃执行段；permission_ask 暂停点即让出锁，挂起期间新消息可自由执行；confirm-stream 恢复是新执行段需重新 acquire。
 - **waiting 帧**：前端收到后显示排队状态；stop 按钮 abort 连接即可取消等待（无服务端副作用——锁未被该请求持有）。
-- **错误语义**：流中途失败发 `{type:error}` 帧后关闭；前端据此提示（对齐旧 /chat/stream）。
+- **错误语义**：流中途失败发 `{type:error}` 帧后关闭；前端据此提示（对齐旧 /chat/stream，该端点已于 2026-09-16 删除）。
 
 #### 4.2.2 history 响应扩展
 
@@ -267,7 +280,7 @@ sendStream(...)
 | `controller/DebugApiController.java` | 扩展 | **会话 API 迁移到 `/threads`**（`/threads`、`/threads/{sessionId}/history`、`/threads/{sessionId}/llm-calls`，与 ThreadController 的 `GET /threads` 合并，O7）；threadHistory 附 pendingConfirm；页面数据端点留在 `/debug` |
 | `service/SessionEventBus.java` | **删除** | 无长连接消费者；`AgentScopeConfig.java:335-347` Bean 装配与构造参数同步清理 |
 | `service/SessionCleanupService.java` | 扩展 | 清理 Agent 数据时联动清理 confirm_context / tool_audit_log（O2 定稿） |
-| `config/AgentManagerProperties.java` | 扩展 | `EVENT_LOG_RETENTION_DAYS`(30)、`CONFIRM_TTL_MINUTES`(30)、`TURN_LEASE_TTL_SECONDS`(60)、`TURN_LEASE_RENEW_SECONDS`(20) |
+| `config/AgentManagerProperties.java` | 扩展 | 清理与租约配置收在 `CleanupConfig` record，**统一 `AGENT_CLEANUP_*` 前缀**：`AGENT_CLEANUP_CONFIRM_TTL_MINUTES`(30)、`AGENT_CLEANUP_TURN_LEASE_TTL_SECONDS`(60)、`AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS`(20)、`AGENT_CLEANUP_AUDIT_RETENTION_DAYS`(30)、`AGENT_CLEANUP_SESSION_RETENTION_DAYS`(7)。原文列的裸键名（`EVENT_LOG_RETENTION_DAYS` 等）未落地 |
 
 ### 4.4 前端设计
 
@@ -373,7 +386,7 @@ sendStream(...)
 confirm_context（consumed/过期条目）、tool_audit_log（过期条目）、turn_lease（残留租约）均需清理。**定稿（O2=a）**：`SessionCleanupService` 清理 Agent 数据时联动清理三表；同时保留各表自身的 TTL 定时清理（confirm_context 30min、tool_audit_log 30 天、turn_lease 过期行）作为兜底。
 
 ### R11. 【多标签页/多端-已定稿】同 session 并发语义（执行段排队）
-单次流架构下同 session 两个标签页同时发消息：第二个请求**排队等待**（waiting 帧提示），前一活跃执行段结束后自动执行；等待超 120s 才返回 409（兜底，提示"该会话有进行中的任务"）。**HITL 挂起期间新消息不排队**（锁已让出，见 R5）。另：页面 A 在 HITL 挂起、页面 B 刷新后弹确认卡片并决策——页面 A 的卡片因无事件回流保持原状，属可接受（多端最终一致由 history 保证）。
+单次流架构下同 session 两个标签页同时发消息：第二个请求**排队等待**（waiting 帧提示），前一活跃执行段结束后自动执行；等待超 120s 才发 `turn_in_progress` error 帧（兜底，提示"该会话有进行中的任务"）。**HITL 挂起期间新消息不排队**（锁已让出，见 R5）。另：页面 A 在 HITL 挂起、页面 B 刷新后弹确认卡片并决策——页面 A 的卡片因无事件回流保持原状，属可接受（多端最终一致由 history 保证）。
 
 ### R12. 【缺口-待 S2 定稿】stop/取消场景（permission_ask 前）的续租停止条件
 **问题**：续租任务与 turn 执行器生命周期绑定；permission_ask 前的 stop（用户点 stop → abort → Flux cancel）时 turn 的处置未定义——若 cancel 中断 turn 而续租不停，锁会残留最长 60s（TTL 兜底）影响下一次请求；若 cancel 仅断订阅而 turn 后台继续跑，stop 按钮语义退化为"只断流不停止"。
@@ -388,10 +401,10 @@ confirm_context（consumed/过期条目）、tool_audit_log（过期条目）、
 
 | # | 问题 | 定稿 | 依据 |
 |---|------|------|------|
-| O1 | Turn 租约实现 | **turn_lease 表锁，执行权语义**（token + TTL 60s + 20s 续租；仅覆盖活跃执行段，permission_ask 暂停点即让出；并发执行排队 + waiting 帧，超时 120s 才 409，4.1.3） | R4/R5/R11：不占连接池、崩溃自恢复；挂起期间新消息可自由进入；正确性本身由 agent_state CAS 兜底，租约仅为执行段互斥 |
+| O1 | Turn 租约实现 | **turn_lease 表锁，执行权语义**（token + TTL 60s + 20s 续租；仅覆盖活跃执行段，permission_ask 暂停点即让出；并发执行排队 + waiting 帧，超时 120s 才发 `turn_in_progress` error 帧，4.1.3） | R4/R5/R11：不占连接池、崩溃自恢复；挂起期间新消息可自由进入；正确性本身由 agent_state CAS 兜底，租约仅为执行段互斥 |
 | O2 | 两表清理归属 | **挂 SessionCleanupService 联动** + 各表 TTL 兜底 | R10 |
 | O3 | 审计粒度 | **仅元信息**（何时/何工具/何状态），不落参数 | R2：ToolCallStartEvent 无 input |
-| O4 | 旧 GET /chat/stream 与前端旧单次流分支 | 保留（非目标） | — |
+| O4 | 旧 GET /chat/stream 与前端旧单次流分支 | 保留（非目标）——**后续变更 2026-09-16（47dc740）：该端点已删除**，对话入口收敛为 `POST /threads/chat` | — |
 | O5 | E2E 脚本同步改造 | **纳入本次范围**：hitl-e2e-test.js / hitl-modes-test.js / mcpapps-e2e.js 改走单次流模式 | 长连接删除后 E2E 设施必须同步，否则破坏 |
 | O6 | 前端模式选择器 | **保留，仅剩 单次流 / A2A 两项**（长连接选项移除） | 便于调试对比两种协议 |
 | O7 | API 路径规范 | **会话业务接口去掉 `/debug` 前缀**：chat/events/history/llm-calls/threads 迁移到 `/threads`（与 ConfirmController/ThreadController 对齐）；页面数据端点保留 `/debug` | 统一会话 API 命名空间，避免"调试专属"误读；4.2 接口表说明 |

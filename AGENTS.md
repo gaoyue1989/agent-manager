@@ -27,7 +27,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 ## 代码规范
 
-命名语义化，禁止硬编码密钥、魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获；优先复用现有工具，不私自升级框架、乱加依赖；复杂逻辑加中文注释。
+命名语义化，禁止硬编码密钥、魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获；优先复用现有工具，不私自升级框架、乱加依赖；复杂逻辑加中文注释。**agent-framework 的表结构/数据演进一律新增 Flyway 迁移文件**（`agent-framework/src/main/resources/db/migration/V<N>__<描述>.sql`，启动自动执行、存量库自动基线），**禁止**在 Store 构造器或请求路径里手工 DDL（该模式已移除），禁止修改已合并的 V 文件（checksum 校验会拒绝启动）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（见 docs/design/db-migration-flyway-design.md §7）。
 
 ## 输出格式
 
@@ -36,6 +36,23 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 ## 安全约束
 
 不随意改 Git、Docker 及系统配置；禁用高危删除命令，敏感信息用占位符；不做删核心文件、清依赖等破坏性操作，环境报错先给排查方案。
+
+## 架构强约束（控制面/业务面分层，强制）
+
+两条平台级设计原则，任何改动不得违反；评审时按此清单逐条核对（细则见 backend/AGENTS.md 与 agent-framework/AGENTS.md）：
+
+**原则一：backend 是控制面——重启/升级/扩缩容不得影响任何已发布业务 agent 服务**
+
+- 业务 K8s 资源（Deployment/Service/Ingress/CM/Secret）只允许由显式发布 API（REST/MCP）写入；启动路径禁止任何 reconcile/sync-all/后台批量迁移
+- 禁止 ownerReferences/finalizer 把业务资源生命周期绑到平台自身对象；禁止后台定时任务写业务资源
+- 业务运行时不得依赖 backend 可用性：env 经 K8s CM/Secret envFrom 常驻集群、OAF 包经 PVC 只读直挂、流量经 Ingress 直连 `{name}-svc`，三条链路都不经过 backend 进程
+- backend 按单副本设计（manifests/platform.yaml）；扩多副本前必须先解决发布链路一致性（同名发布竞态、asyncWaitAndRegister 重复推进），且任何平台内部故障/竞态都不得波及业务面
+
+**原则二：agent-framework 是业务面——服务间数据天然隔离 + 每 Pod 无状态可横向扩展**
+
+- 影响正确性的状态只允许存共享存储（MySQL checkpoint / Redis）；Pod 本地（内存、emptyDir）只允许可丢弃/可重建的缓存
+- 禁止 Service `sessionAffinity`；任意请求必须可落任意副本（`/threads/{sid}/subscribe`、`/status`、confirm 等全部基于共享存储裁决）；e2e-multi / e2e-protocol-multi 双副本门禁必须保持
+- 多服务共享同一 MySQL/Redis 时，**必须**为每个服务配独立 checkpoint 库名（`CHECKPOINT_JDBC_URL`）与独立 Redis 前缀（`AGENT_REDIS_PREFIX`）——表结构/Redis key 无 agent 维度，隔离完全靠这一层；缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**当前平台不自动注入/校验这两个键，是已知缺口**：发布多个服务时运维必须显式配置，平台侧自动派生列入后续演进
 
 ---
 
@@ -69,8 +86,9 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 关键约定：
 - 业务 Pod 固定注入 `AGENT_CONFIG_DIR=/config`、`AGENT_WORKSPACE_DIR=/workspace`、`SERVER_HOST/SERVER_PORT`（均为保留键，用户 env 冲突即 400）
-- env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB
-- 业务 Ingress 注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix
+- env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB；模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY 等）自动路由进服务 Secret（`{name}-env-secret`），不落 ConfigMap/env_json
+- 平台默认配置（redis/mysql/llm/sandbox）仅作为「发布新服务 / 编辑 env」时的**表单默认填入**（`/settings` 页维护 → `platform_config` 表 → `GET /platform-config/defaults` 预填）；不经 envFrom 注入，改默认配置不影响任何已发布服务（见 docs/design/platform-default-config-secret-design.md）
+- 业务 Ingress 双模式（`INGRESS_HOST_SUFFIX` 切换，**默认空 = path 模式，行为不变**）：path 模式注入 proxy-read/send-timeout=3600 与 x-forwarded-prefix、靠 `/agent/{name}` 前缀 + rewrite 区分服务；host 模式（后缀非空，如 `.region-c86-test.test-kzx1.cncb`）为 `host={K8sName}{后缀}` + 根路径直出，只保留 ssl-redirect 与 proxy 超时、无 rewrite 注解。形态可用 `INGRESS_TEMPLATE` overlay 调整（允许改 host/path/TLS/追加注解，host 模式下 host 不可偏离；Endpoint 自动跟随；不设置=内置构造，见 backend/AGENTS.md 与 docs/design/ingress-host-mode-design.md）
 - 敏感配置在 `.env.secrets`（gitignored）
 
 ---
@@ -126,7 +144,7 @@ git push origin feat/xxx
 # 3. 开 PR 到 master（GitHub 网页或 gh pr create）
 #    → 必需检查自动执行：
 #      单测 (mvn test) / 单测 (go vet + go test) / 单测 (lint + build)
-#      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）
+#      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）/ E2E 协议多副本（P 组）
 #    另有两个非必需 job 同步跑（红只告警不挡合并，但应一并修）：
 #      E2E 工具插件（SPI+三态权限）/ 评测自检（flywheel selftest）
 
@@ -136,7 +154,7 @@ git push origin feat/xxx
 
 ### 分支保护（master，强制）
 
-- **六项必需状态检查**：上表三个单测 + agent-framework 三个 E2E job；未全绿合并请求被拒（`blocked`）
+- **七项必需状态检查**：上表三个单测 + agent-framework 四个 E2E job（核心/多副本/沙箱/协议多副本 P 组，§18.4）；未全绿合并请求被拒（`blocked`）
 - **新增 job 默认不是必需检查**：`E2E 工具插件` 与 `评测自检` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
 - **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
 - **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR

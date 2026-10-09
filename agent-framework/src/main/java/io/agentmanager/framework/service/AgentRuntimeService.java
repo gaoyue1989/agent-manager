@@ -6,6 +6,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -404,6 +405,12 @@ public class AgentRuntimeService {
 
         // ===== 结束事件 =====
         else if (type == AgentEventType.AGENT_END) {
+            // 仅 lead 自身的 AGENT_END 终结流：远程子 agent 转发的 AGENT_END（source 非空）
+            // 出现在 spawn 调用进行中，提前 done/complete 会截断父流（同 ChatStreamController
+            // 收尾 guard，判据收口在 AgentEventSseSerializer#isRemoteForwarded）
+            if (io.agentmanager.framework.controller.AgentEventSseSerializer.isRemoteForwarded(event)) {
+                return;
+            }
             sink.next(Map.of(
                 "type", "task_update", "id", tid,
                 "state", "completed",
@@ -548,18 +555,26 @@ public class AgentRuntimeService {
      *
      * Channel 流程（ChatStreamController）的会话经 ChatUiChannel 网关路由，
      * 网关按 peer 派生真实会话 key：userId=peer（如 debug-user_xxx），
-     * sessionId=网关恒定 gw-hash（storeConfirmContext 按 canonicalKey 确定性推导，
-     * 恒为 gw-3f20f08c5499，不能依赖 AgentStartEvent.getSessionId()——该字段为 null）。
+     * sessionId=按会话确定性推导的 gw-hash（storeConfirmContext 按 canonicalKey 推导，
+     * 不能依赖 AgentStartEvent.getSessionId()——该字段为 null）。
      * 恢复必须复用同一 (userId, sessionId) 才能命中网关会话中的 pending 工具调用，
      * 否则 SDK 在 (makeThreadId, vendorKey) 下加载不到上下文 → 全新推理丢失状态。
+     *
+     * 兼容（issue #87 PER_PEER 切换的升级窗口）：存量 confirm_context 行的
+     * runtime_session_id 可能仍是 MAIN 形态的全进程共享 gw-hash——按 runtime_user_id
+     * （=peer）重推导 PER_PEER 会话 id，覆盖升级瞬间挂起中的确认（新行天然携带新值）。
      *
      * A2A/invoke 流程（forwardEvent 直接 putConfirmContext，无网关路由）无此信息，
      * 回落 makeThreadId + 显式 userId（与触发侧一致）。
      */
     private RuntimeContext buildResumeContext(ConfirmContext confirmCtx, String fullThreadId, String userId) {
         if (confirmCtx.runtimeSessionId() != null && confirmCtx.runtimeUserId() != null) {
+            var runtimeSessionId = confirmCtx.runtimeSessionId();
+            if (LEGACY_SHARED_GW_SESSION_ID.equals(runtimeSessionId)) {
+                runtimeSessionId = channelGatewaySessionId(confirmCtx.runtimeUserId());
+            }
             return RuntimeContext.builder()
-                .sessionId(confirmCtx.runtimeSessionId())
+                .sessionId(runtimeSessionId)
                 .userId(io.agentmanager.framework.util.PathSafe.sanitize(confirmCtx.runtimeUserId()))
                 .build();
         }
@@ -594,15 +609,19 @@ public class AgentRuntimeService {
 
     /**
      * Channel 流程存储确认上下文（ChatStreamController 调用；rawSessionId 经 makeThreadId 补全前缀）。
-     * Channel 会话经 ChatUiChannel 网关路由，真实会话 key 为 (userId=peer, sessionId=gw-hash)：
-     *  - sessionId 由网关按 canonicalKey 确定性推导（恒为 gw-3f20f08c5499，同进程所有 peer 共享）
+     * Channel 会话经 ChatUiChannel 网关路由（issue #87 起切 PER_PEER），真实会话 key 为
+     * (userId=peer, sessionId=gw-hash)：
+     *  - sessionId 由网关按 canonicalKey 确定性推导（PER_PEER：每会话独立 gw-hash，
+     *    见 {@link #channelGatewaySessionId(String)}；4db16ba~#87 修复前的 MAIN 形态
+     *    为全进程共享 gw-3f20f08c5499，存量行由 V9 迁移重键、在途确认由
+     *    buildResumeContext 兼容翻译）
      *  - userId 即 peer（= rawSessionId，如 debug-user_mt1xxx）
      * HITL 恢复必须复用该组合才能命中 pending 工具调用（见 buildResumeContext）。
      */
     public void storeConfirmContext(String rawSessionId, io.agentscope.core.event.AgentEvent event) {
         if (event instanceof RequireUserConfirmEvent e) {
             var fullThreadId = makeThreadId(rawSessionId);
-            var gwSessionId = channelGatewaySessionId();
+            var gwSessionId = channelGatewaySessionId(rawSessionId);
             log.info("[HITL] storeConfirmContext: rawSessionId={}, fullThreadId={}, gatewaySessionId={}, replyId={}, tools={}",
                 rawSessionId, fullThreadId, gwSessionId, e.getReplyId(),
                 e.getToolCalls().stream().map(tc -> tc.getName()).toList());
@@ -611,14 +630,24 @@ public class AgentRuntimeService {
     }
 
     /**
-     * 复刻 HarnessGateway 的网关会话 id 派生：
+     * 复刻 HarnessGateway 的网关会话 id 派生（PER_PEER 形态，issue #87）：
      * sessionId = "gw-" + SHA-256(canonicalKey) 前 6 字节 hex 形式（12 字符）。
-     * 框架 Channel 通道走 ChatUiChannel 默认配置（DmScope.MAIN、globalDefaultAgentId=main），
-     * MsgContext.canonicalKey() = "chatui" + "|x:agentId=main"（extra 按 key 排序）。
-     * 同进程所有 peer 共享同一会话 id，peer 仅体现在 userId——与 DB 实测一致。
+     * Channel 通道走 ChatUiChannel.perPeer()（DmScope.PER_PEER、globalDefaultAgentId=main），
+     * 路由层 DM 上下文 room=peerId，MsgContext.canonicalKey()
+     * = "chatui|r:{peerId}|x:agentId=main"（extra 按 key 排序）——每会话独立，
+     * SDK 网关 turn 闸门（LocalSessionTurnGate 每key一把）随之按会话互斥。
+     * peerId 须与 ChatStreamController 传入 ChatUiRequest.withPeer 的值一致（PathSafe 后）。
      */
-    private String channelGatewaySessionId() {
-        var canonicalKey = "chatui" + "|x:agentId=main";
+    String channelGatewaySessionId(String peerId) {
+        return gatewaySessionId("chatui|r:" + peerId + "|x:agentId=main");
+    }
+
+    /** 4db16ba~#87 修复前的 MAIN 形态共享网关会话 id（canonicalKey = "chatui|x:agentId=main"）：
+     *  仅用于识别存量 confirm_context 行的 runtime_session_id（buildResumeContext 兼容翻译）。 */
+    private static final String LEGACY_SHARED_GW_SESSION_ID = gatewaySessionId("chatui|x:agentId=main");
+
+    /** "gw-" + SHA-256(canonicalKey) 前 6 字节 hex（12 字符），与 HarnessGateway 派生一致 */
+    private static String gatewaySessionId(String canonicalKey) {
         try {
             var digest = MessageDigest.getInstance("SHA-256")
                 .digest(canonicalKey.getBytes(StandardCharsets.UTF_8));
@@ -633,11 +662,88 @@ public class AgentRuntimeService {
         putConfirmContext(sessionId, event, null, null);
     }
 
-    /** 落库待确认上下文（可携带 Channel 网关真实会话 key；同 session 新 ASK 覆盖旧条目） */
+    /**
+     * 落库待确认上下文（可携带 Channel 网关真实会话 key；同 session 新 ASK 覆盖旧条目）。
+     *
+     * <p>幽灵卡抑制（travel-fulfillment F20）：本 SDK 版本 PROPAGATE 会把子 ask 转发进
+     * 父流，被本方法原样落成 confirm_key='local' 行——但走 local 行的确认不转发远程任务
+     * （member 收不到 resume，子任务永久挂起），远程行 task:{task_id} 才是唯一有效决策
+     * 路由。ask 的 tool_call_id 与任一未消费远程行锚点 tool_calls 对撞即视为转发幽灵，
+     * 跳过落库；远程行尚未落地（Bridge 轮询滞后）时由 Bridge 落卡侧对撞清理兜底。
+     */
     void putConfirmContext(String sessionId, RequireUserConfirmEvent event,
                            String runtimeSessionId, String runtimeUserId) {
+        if (isPropagatedRemoteAsk(sessionId, event.getToolCalls())) {
+            log.info("[HITL] suppress ghost local confirm (PROPAGATE'd remote ask, ids={}) — "
+                    + "remote row task:{{task_id}} is the only valid decision route (F20)",
+                event.getToolCalls().stream().map(io.agentscope.core.message.ToolUseBlock::getId).toList());
+            return;
+        }
         confirmContextStore.put(sessionId,
             toolCallsJson(event.getToolCalls()), event.getReplyId(), runtimeSessionId, runtimeUserId);
+    }
+
+    /**
+     * F20 幽灵判据：ask 的任一 tool_call_id 出现在会话未消费远程行的 remote_task.tool_calls
+     * 锚点（{id, name, input}）中。
+     *
+     * <p>sessionId 形态（CR P1-1）：调用方传 fullThreadId（租户前缀长键），而 Bridge 落卡
+     * 键为 canonicalSid（Channel 链路 = 前端 raw sid，比 fullThreadId 短）——前缀兼容 SQL
+     * 只覆盖"查询键 ≤ 存储键"方向，长键查短键行三谓词全不命中。故按 fullThreadId 与
+     * strip 前缀后的 raw sid 各查一次，双形态都覆盖。
+     *
+     * <p>全程 fail-soft：判据失效即照常落库（行为回退到现状，不会因去重逻辑阻断真实本地
+     * ask；Bridge 落卡侧对撞清理兜底最迟 ~5s 收口）。
+     */
+    private boolean isPropagatedRemoteAsk(String sessionId, List<io.agentscope.core.message.ToolUseBlock> calls) {
+        if (calls == null || calls.isEmpty()) {
+            return false;
+        }
+        var ids = calls.stream()
+            .map(io.agentscope.core.message.ToolUseBlock::getId)
+            .filter(id -> id != null && !id.isBlank())
+            .collect(java.util.stream.Collectors.toSet());
+        if (ids.isEmpty()) {
+            return false;
+        }
+        try {
+            for (var sid : distinctLookupSids(sessionId)) {
+                for (var row : confirmContextStore.findUnconsumedRemote(sid)) {
+                    if (isGhostMatch(row, ids)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[HITL] ghost-ask detection failed (fail-open): {}", e.getMessage());
+        }
+        return false;
+    }
+
+    /** 查询键去重集：fullThreadId + strip 租户前缀后的 raw sid（相同则单元素） */
+    private List<String> distinctLookupSids(String fullThreadId) {
+        var sids = new LinkedHashSet<String>();
+        sids.add(fullThreadId);
+        try {
+            sids.add(stripTenantPrefix(fullThreadId));
+        } catch (Exception e) {
+            log.debug("[HITL] strip tenant prefix failed: {}", e.getMessage());
+        }
+        return List.copyOf(sids);
+    }
+
+    /** 锚点对撞：行的 remote_task.tool_calls 任一 id 命中 ask ids 即视为转发幽灵 */
+    private static boolean isGhostMatch(ConfirmContextStore.PendingConfirm row, java.util.Set<String> ids) {
+        if (!(row.remoteTask() != null && row.remoteTask().get("tool_calls") instanceof List<?> tcs)) {
+            return false;
+        }
+        for (var tc : tcs) {
+            if (tc instanceof Map<?, ?> m && m.get("id") instanceof String s
+                    && !s.isBlank() && ids.contains(s)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -679,11 +785,14 @@ public class AgentRuntimeService {
      */
     public boolean hasPendingConfirm(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);
-        if (agentStateReader != null
-                && !agentStateReader.loadAskingSnapshot(fullThreadId, stripTenantPrefix(fullThreadId)).isEmpty()) {
+        // confirm 行先查（索引命中 LIMIT 1）：命中即免掉 agent_state 全量读 + 整包 JSON
+        // 解析（HITL 活跃会话是预检延迟敏感面）。未命中再落 state 扫描——确认卡被 TTL
+        // 清理后仍可从 state 恢复判定的兜底。两源任一命中即为挂起，与旧顺序语义等价。
+        if (confirmContextStore.findPending(fullThreadId).isPresent()) {
             return true;
         }
-        return confirmContextStore.findPending(fullThreadId).isPresent();
+        return agentStateReader != null
+            && !agentStateReader.loadAskingSnapshot(fullThreadId, stripTenantPrefix(fullThreadId)).isEmpty();
     }
 
     /** DB CAS 取出并标记已消费（防重复确认 → 409） */
@@ -833,15 +942,32 @@ public class AgentRuntimeService {
         confirmContextStore.delete(makeThreadId(sessionId));
     }
 
-    /** 查询待确认上下文（status 端点用，返回前端 pendingConfirm 词表或 null） */
+    /**
+     * 查询待确认上下文（status 端点/观察者 probe 用，返回前端 pendingConfirm 词表或 null）。
+     *
+     * <p>取 {@link ConfirmContextStore#findHeadPending}（任意 confirm_key 的 FIFO 最早未消费行，
+     * 与 history 的 pendingConfirm 同口径）：远程行（Bridge 落卡）不在父 state，若只查 local
+     * 会导致 Debug Console 刷新恢复拿不到待确认卡，且 tail 观察者 probe 把远程挂起误判为
+     * interrupted（本应与 HITL 暂停同为"可正常关流"）。远程行 additive 附
+     * {@code confirm_key}/{@code remote_task}，确认端点凭 confirmKey 路由到远程任务。
+     *
+     * <p>注意与 {@link #hasPendingConfirm}（对话入口预检）的语义分工：后者只认 local——
+     * 远程挂起时父 turn 已结束，用户新消息照常进入新 turn（Bridge 唤醒走抢租约重试）。
+     */
     public Map<String, Object> findPendingConfirm(String sessionId) {
         var fullThreadId = makeThreadId(sessionId);
-        return confirmContextStore.findPending(fullThreadId)
+        return confirmContextStore.findHeadPending(fullThreadId)
             .map(p -> {
                 var m = new LinkedHashMap<String, Object>();
-                m.put("reply_id", p.replyId());
+                // 远程行（Bridge 落卡）reply_id 恒为 NULL——Map.copyOf 不接受 null 值，
+                // 判空回落空串（与 ThreadController.pendingConfirmPayload 同口径）
+                m.put("reply_id", p.replyId() != null ? p.replyId() : "");
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
+                if (p.isRemote()) {
+                    m.put("confirm_key", p.confirmKey());
+                    m.put("remote_task", p.remoteTask());
+                }
                 return Map.<String, Object>copyOf(m);
             })
             .orElse(null);

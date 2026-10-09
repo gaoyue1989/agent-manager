@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"agent-manager/backend/internal/service"
+	"agent-manager/backend/internal/service/platformconfig"
 	"agent-manager/backend/internal/store"
 )
 
@@ -155,6 +156,30 @@ func registerTools(s *mcp.Server, core *service.Core) {
 	// ---- OAF 包生成（发布助手对话式打包，语义自 agent-framework 迁入） ----
 	registerOafTools(s, core)
 
+	// ---- 平台配置 ----
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "get_platform_defaults",
+		Description: "获取平台默认配置（管理员在设置页维护的 LLM/MySQL/Redis/Sandbox 共享基础配置）。" +
+			"发布或编辑 env 前应先调用：values 中已配置的键直接预填进 env，不要让用户重复提供；" +
+			"fields 标明各键是否必填/敏感。values 含敏感键明文（与发布向导预填同源），" +
+			"仅用于填充 publish_service/update_service_env 的 env 参数（敏感键自动路由进服务 Secret），回复中不得明文回显。",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, JSONOut, error) {
+		values, err := core.GetPlatformDefaults()
+		if err != nil {
+			return errResult(err.Error())
+		}
+		fields := []map[string]any{}
+		for _, g := range platformconfig.Template() {
+			for _, f := range g.Fields {
+				fields = append(fields, map[string]any{
+					"envKey": f.EnvKey, "group": g.Name,
+					"required": f.Required, "sensitive": f.Sensitive,
+				})
+			}
+		}
+		return okResult(map[string]any{"values": values, "fields": fields})
+	})
+
 	// ---- 服务发布与管理 ----
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "publish_service",
@@ -232,9 +257,11 @@ func registerTools(s *mcp.Server, core *service.Core) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "update_service_env",
 		Description: "全量替换服务环境变量并滚动重启（长操作：返回 deploying，需轮询）。" +
-			"注意：env 必须包含全部所需键值（覆盖语义）；AGENT_CONFIG_DIR/SERVER_HOST/SERVER_PORT 为平台保留键不可设置。",
+			"注意：env 必须包含全部所需键值（覆盖语义）；AGENT_CONFIG_DIR/SERVER_HOST/SERVER_PORT 为平台保留键不可设置；" +
+			"模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY/AGENT_PROTOCOL_AUTH_TOKEN/AGENT_REMOTE_HEADERS_JSON）自动路由进服务 Secret。" +
+			"平台共享的默认配置请用平台配置页（/settings）设置。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in UpdateEnvIn) (*mcp.CallToolResult, JSONOut, error) {
-		svc, err := core.UpdateEnv(in.ServiceID, in.Env)
+		svc, err := core.UpdateEnv(in.ServiceID, in.Env, in.SecretKeys)
 		if err != nil {
 			return errResult(err.Error())
 		}
@@ -358,8 +385,9 @@ type StatusIn struct {
 	K8sName   string `json:"k8sName,omitempty"`
 }
 type UpdateEnvIn struct {
-	ServiceID uint              `json:"serviceId"`
-	Env       map[string]string `json:"env"`
+	ServiceID  uint              `json:"serviceId"`
+	Env        map[string]string `json:"env"`
+	SecretKeys []string          `json:"secretKeys,omitempty"`
 }
 type RepublishIn struct {
 	ServiceID uint    `json:"serviceId"`

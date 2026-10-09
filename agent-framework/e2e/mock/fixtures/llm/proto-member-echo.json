@@ -1,0 +1,38 @@
+{
+ "scenario": "proto-member-echo",
+ "model": "e2e-mock-model",
+ "recordedAt": "2026-09-30T08:00:00Z",
+ "rewrites": [
+  "",
+  ""
+ ],
+ "calls": [
+  {
+   "request": {
+    "messages": []
+   },
+   "chunks": [
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": \"call_proto_e2e\", \"function\": {\"arguments\": \"\", \"name\": \"bench_echo\"}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \"{\\\"text\\\":\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \" \\\"hello-\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \"p\\\"}\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": \"tool_calls\", \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"completion_tokens\": 10, \"prompt_tokens\": 100, \"total_tokens\": 110}}",
+    "[DONE]"
+   ]
+  },
+  {
+   "request": {
+    "messages": []
+   },
+   "chunks": [
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": \"echo 已执行完成。\", \"role\": null, \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null, \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": \"stop\", \"index\": 0}]}",
+    "{\"id\": \"proto-e2e-0000000000000000000000000000000\", \"created\": 1789791665, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"completion_tokens\": 10, \"prompt_tokens\": 100, \"total_tokens\": 110}}",
+    "[DONE]"
+   ]
+  }
+ ]
+}

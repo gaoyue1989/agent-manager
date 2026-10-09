@@ -5,6 +5,7 @@
 > 状态：已实施（2026-09-26）。验收轮 `ca9085d..cb2f222`：预检 5 项全绿，手写 12 条用例全 PASS
 > （插件/HITL 摘要/模型切换三类由不可测转可测），`run --with-gen 2 --judge --rca-llm` 全流程走通
 > （12/15，3 条失败均为生成草稿用例 expected 写错，无 agent 缺陷）；详见 §7 验收标准。
+> 代码核对（2026-10-09）：模块落位树、`instance.py` env 键、mock 工具目录名、`preflight` 落盘路径、mcp_server 探活语义已按 `bench/eval/provision/` 实码校正；`provision/replay_pack.py` 为二期离线回放侧新增。
 
 ---
 
@@ -17,7 +18,7 @@
 | ① `bench/eval/casegen/generator.py` `analyze_diff` | diff → 粗粒度模块名（tool/mcp/config/…）+ 风险 | 只回答"改了什么模块"，不回答"测它需要什么环境" |
 | ② 同文件 `_GENERATE_PROMPT` | LLM 生成对话级候选用例 | 生成词汇表限死"只通过 POST /threads/chat + SSE 帧可测"（generator.py:41），控制面行为无法表达 |
 | ③ `bench/eval/executor/` | 对单一 `--base-url` 实例跑用例 + 帧断言 | 无实例生命周期、无环境前置条件、无控制面动作；能力门禁 `requires_tools` 视图缺工具即跳过 |
-| 环境 | — | OAF 包、插件、MCP 后端、模型配置全部由被测实例部署时决定，飞轮不可变更（flywheel.py:89 单 base_url） |
+| 环境 | — | OAF 包、插件、MCP 后端、模型配置全部由被测实例部署时决定，飞轮不可变更（`flywheel.py:cmd_run` 单 base_url） |
 | HITL | `hitl_policy=auto_confirm` 可表达 | **共享实例禁跑**（README 已知问题 3：确认会真的执行平台变更），无 mock 后端则整类不可测 |
 
 ### 1.2 近 3 天变更（ca9085d..HEAD）× 飞轮可测性对照
@@ -28,7 +29,7 @@
 | #32 fix(hitl) 恢复流工具摘要 | `service/ToolSummaryGenerator`、`TurnToolSummaryTracker`、`ChatStreamController` | 带 ask 权限 MCP 工具的实例 + confirm 流 | ❌ 不可测（唯一 MCP 指向真实平台；共享实例禁 HITL） |
 | #32 fix(reload) 对话 Channel 跟随 Agent 引用 | `config/ChannelConfig`、`ChatUiChannelProvider` | 多 Agent 引用 + reload 场景 | ⚠️ 仅对话层可测，通道切换行为黑盒不可表达 |
 | 区间内 oaf-dynamic-reload | `config/*`、`AdminReloadController` | 可改 OAF 配置 + `POST /admin/reload?scope=agent` | ❌ 不可测（executor 无控制面动作） |
-| 区间内会话模型切换 | `ChatRequest.model`（api.md:335） | 对话请求透传 model 参数 | ⚠️ 用例 input 无 model 字段，趋势轨表达不了 |
+| 区间内会话模型切换 | `ChatRequest.model`（api.md `POST /threads/chat` 请求体表 `model` 行） | 对话请求透传 model 参数 | ⚠️ 用例 input 无 model 字段，趋势轨表达不了 |
 | e2e / bench / docs | 测试与文档 | — | 不适用（门禁轨/自测范围） |
 
 **结论**：近期变更的大头（工具插件、HITL 摘要、reload/通道、模型切换）都要求"被测 OAF 包 + 插件 + MCP 后端"随变更重新配置；飞轮只会对既定实例跑对话级用例，上述覆盖面缺口成立。
@@ -80,9 +81,11 @@ bench/eval/
 │   ├── needs.py                # 变更→EnvNeeds 规则（路径前缀 + diff 关键词）
 │   ├── oaf.py                  # OAF 包组装器（base + 覆盖层，确定性，manifest 留痕）
 │   ├── instance.py             # infra + 实例生命周期 + 契约预检
-│   └── templates/eval-agent/   # 最小 OAF base 模板
+│   ├── replay_pack.py          # evalpack → 独立存储 + 受测 jar + 三回放器（离线回放侧，二期）
+│   └── templates/eval-agent/   # 最小 OAF base 模板（当前只有 AGENTS.md 基座）
 ├── mock/
-│   └── mcp_server.py           # mock MCP 服务（streamableHttp 子集，工具目录 JSON 驱动）
+│   ├── mcp_server.py           # mock MCP 服务（streamableHttp 子集，工具目录 JSON 驱动）
+│   └── replay-llm.mjs / replay-http.mjs  # 离线回放器（回放侧，与 mcp_server.py 无关）
 ├── casegen/ executor/ analyzer/ graders/   # 既有；executor 仅加 model 透传与 requires_env
 ├── cases/                      # 用例库（入库走 PR）
 └── flywheel.py                 # 新增 provision 子命令 + run --provision
@@ -101,8 +104,10 @@ bench/eval/
   "since": "ca9085d",
   "modules": {"tool": ["src/.../ToolPluginBootstrapper.java"], "service": ["..."]},
   "env_needs": {
-    "plugins": [{"name": "echo-tool", "src": "e2e/plugin-echo", "reason": "tool/ 变更"}],
-    "mock_mcp": {"tools": ["echo_query", "list_services", "publish_service"],
+    "plugins": [{"name": "echo-tool", "src": "e2e/plugin-echo",
+                 "tools": ["echo_query", "smoke_config"], "reason": "tool/ 变更"}],
+    "mock_mcp": {"tools": ["list_services", "get_service_status", "mock_fail_tool",
+                           "publish_service"],
                  "ask_tools": ["publish_service"]},
     "reload_probe": true,
     "session_model_probe": true
@@ -129,7 +134,7 @@ bench/eval/
 ```
 {oaf_out}/agent-config/
 ├── AGENTS.md                      # base + 覆盖层合并（mcpServers/deniedTools/config.permission）
-├── mcp-configs/eval-mock/config.yaml   # 生成：url→mock 地址、permissions.tools allow|ask
+├── mcp-configs/{configDir}/config.yaml # 生成：url→mock 地址、permissions.tools allow|ask（configDir 取自 AGENTS.md frontmatter，缺省 mcp-configs/platform）
 ├── plugins/echo-tool.jar               # 按 spec 编译（plugin-smoke.sh 配方）
 ├── plugins/echo-tool/config.yaml       # 插件配置（可选，支持 ${ENV} 替换）
 └── oaf-manifest.json            # 留痕：各层来源、动机 diff 文件、内容 hash、组装时间
@@ -142,7 +147,8 @@ bench/eval/
 ### 4.3 `mock/mcp_server.py`——mock MCP 服务（G3）
 
 - 形态：Python 标准库单文件（零第三方依赖），`POST /mcp` JSON-RPC 应答
-  （`initialize` / `notifications/initialized` / `tools/list` / `tools/call`），`GET /mcp` 探活
+  （`initialize` / `notifications/initialized` / `tools/list` / `tools/call`），`GET /mcp/health` 探活
+  （其余 `GET /mcp` 按 streamableHttp 规范回 405，SDK 降级为无 SSE 监听）
 - 工具目录 JSON 驱动（启动参数指定），handler 三类：
   - `echo`：回显参数（确定性断言）
   - `fail`：返回工具错误（错误路径断言）
@@ -153,21 +159,21 @@ bench/eval/
 
 ### 4.4 `provision/instance.py`——供给与生命周期（G4）
 
-1. `ensure_infra()`：MySQL:3307 + Redis:16379（复用 `e2e/scripts/local-infra.sh`；缺失时 docker 直起并初始化 `agent_manager_test` 库 / `agent_manager` 用户）
-2. `start_instance(env_spec)`：`java -jar`（无 JDK 时经 maven 容器），env 按部署文档 §4：`LLM_*`（`EVAL_TARGET_LLM_*`）、`CHECKPOINT_*`、`AGENT_REDIS_URL`、`AGENT_CONFIG_DIR`=组装产物、插件目录缺省回落 `{config}/plugins`、`SANDBOX_ENABLED=false`、`FILE_STORAGE_TYPE=local`
+1. `ensure_infra()`：MySQL:13306 + Redis:16379（复用 `e2e/scripts/local-infra.sh`；缺失时 docker 直起并初始化 `agent_framework_e2e` 库 / `e2e` 用户，与 e2e 门禁同源）
+2. `start_instance(...)`：docker 起被测实例（`maven:3.9-eclipse-temurin-21` 镜像 `--entrypoint java -jar`，`--network host` 直连本机 MySQL/Redis/mock），env：`LLM_*`（`EVAL_TARGET_LLM_*` 优先、回落 `EVAL_LLM_*`）、`CHECKPOINT_*`、`AGENT_REDIS_URL`、`AGENT_CONFIG_DIR`=组装产物、插件目录缺省回落 `{config}/plugins`、`SANDBOX_ENABLED=false`、`FILE_STORAGE_TYPE=local`
 3. 就绪探测：`GET /health` 轮询至超时
 4. **契约预检（preflight）**——供给是否到位在跑用例前暴露，不产出假 FAIL：
-   - plugins：启动日志 `Tool plugin [x] registered tools:` + `/tools?includeInternal=true` 含插件工具
+   - plugins：`/tools?includeInternal=true` 含插件工具（启动期注册另有 plugin-smoke.sh 日志断言配方，不在预检内）
    - mock_mcp：`/tools` 含 mock 工具（MCP 注册 fail-soft，缺即供给失败）
-   - reload_probe：改 marker → `POST /admin/reload?scope=agent` → 重建后工具仍在（plugin-smoke.sh 断言集移植）
+   - reload_probe：`POST /admin/reload?scope=agent` → 重建后工具仍在（marker 经插件配置 `EVAL_PLUGIN_MARKER` 环境变量注入，实例启动时下发，plugin-smoke.sh 断言思路移植）
    - session_model_probe：`GET /models` 可用 + 对话带 `model` 无 error 帧
-   - 结果落 `reports/{task}/preflight.json`
+   - 结果落 `bench/eval/reports/<时间戳>-provision/preflight.json`（与 `env_spec.json` / `oaf-manifest.json` 同目录；`runtime_dir/state.json` 记 base_url 与 mock pid）
 5. `teardown()`：停实例与 mock（infra 容器保留复用）；`--no-teardown` 调试用
 
 ### 4.5 CLI 与流程接入
 
 ```bash
-python3 bench/eval/flywheel.py provision --since ca9085d [--oaf-base DIR] [--plugin-src DIR] [--keep]
+python3 bench/eval/flywheel.py provision --since ca9085d [--oaf-base DIR] [--plugin-src DIR]
 python3 bench/eval/flywheel.py run --provision --since ca9085d --repeat 1 --with-gen 2 --judge --rca-llm
 ```
 
@@ -178,7 +184,7 @@ python3 bench/eval/flywheel.py run --provision --since ca9085d --repeat 1 --with
 ### 4.6 用例格式扩展（G5）与 executor 小改
 
 - 用例新增可选 `requires_env: ["plugin:echo-tool", "mock_mcp:ask", "reload"]`：env_spec 不满足 → SKIP（与 `requires_tools` 同语义，报告单列）
-- executor 的 `input.model` 透传已存在（runner.py `execute_once`，`/threads/chat` body model 字段；语义 api.md:335：未知模型 → error 帧 `unknown_model`），会话模型切换用例可直接表达，本设计无需改 executor 请求面
+- executor 的 `input.model` 透传已存在（`executor/runner.py:execute_once`，`/threads/chat` body model 字段；语义见 api.md `POST /threads/chat` 请求体表 `model` 行：未知模型 → error 帧 `unknown_model: xxx`），会话模型切换用例可直接表达，本设计无需改 executor 请求面
 - 断言词汇表不动（frames / tool_calls / tool_result / final_text_* / error_*）：控制面动作放 preflight 而非用例 setup，维持"用例=纯对话黑盒"原则（决策见 §6.3）
 
 ---

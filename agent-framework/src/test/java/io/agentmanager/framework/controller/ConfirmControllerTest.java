@@ -63,6 +63,7 @@ class ConfirmControllerTest {
     private SessionEventBus eventBus;
     private SessionEventStore eventStore;
     private SessionUserStore sessionUserStore;
+    private io.agentmanager.framework.service.RemoteConfirmBridge remoteConfirmBridge;
     private final io.agentmanager.framework.service.McpToolRegistrar mcpToolRegistrar =
         org.mockito.Mockito.mock(io.agentmanager.framework.service.McpToolRegistrar.class);
 
@@ -99,7 +100,10 @@ class ConfirmControllerTest {
                 new io.agentmanager.framework.model.OafConfig.MemoryConfig("editable", Map.of()),
                 Map.of()),
             agent, List.of(), new io.agentmanager.framework.service.LLMLogger(), confirmContextStore);
-        mvc = MockMvcBuilders.standaloneSetup(new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar)).build();
+        // 远程确认桥（本地路径用例不触达；远程路由用例单独打桩）
+        remoteConfirmBridge = mock(io.agentmanager.framework.service.RemoteConfirmBridge.class);
+        mvc = MockMvcBuilders.standaloneSetup(new ConfirmController(runtimeService, turnLeaseStore,
+            eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge)).build();
 
         // 先注入确认上下文：模拟前端收到 permission_ask（invokeStream 链路 storeConfirmContext 落库）
         var ask = new io.agentscope.core.event.RequireUserConfirmEvent(
@@ -241,7 +245,7 @@ class ConfirmControllerTest {
     void confirmStreamShouldReturnErrorSseFrameWhenContextMissing() {
         doThrow(new AgentRuntimeService.ConfirmContextNotFoundException("nope"))
             .when(confirmContextStore).checkAvailable(anyString());
-        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var frame = controller.confirmStream("nope", new ConfirmController.ConfirmRequest(List.of()))
             .blockFirst();
         assertNotNull(frame, "should emit error SSE frame");
@@ -266,7 +270,7 @@ class ConfirmControllerTest {
         when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
-        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
             controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
                     Map.of("tool_call_id", "call-1", "confirmed", true))))
@@ -303,9 +307,148 @@ class ConfirmControllerTest {
         // 持久化成功返回合法 seq（append 真实语义从 1 起；mock 默认 0 在 A3 后不广播——
         // 那正是本应被消除的「永不落库却实时可见」瑕疵帧）
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
-        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
         assertNotNull(frame, "should emit SSE frame");
+    }
+
+    @Test
+    void confirmStreamShouldReleaseLeaseAndCloseOnPermissionAsk() {
+        // HITL ask 段收尾接线（ConfirmController 侧，与 ChatStreamController 相反的契约）：
+        // permission_ask → 确认上下文落库 + 立即 lease.release() 让出执行段 + closeSession
+        // 关流（HITL 是 turn 边界）。漏掉 release 会让会话锁到 TTL 过期，confirm 排队全部超时。
+        stubPendingStoreRow();
+        // 本地 ask（2 参构造 source=null，区别于远程转发的带 source 事件）
+        var ask = new io.agentscope.core.event.RequireUserConfirmEvent("reply-ask",
+            List.of(io.agentscope.core.message.ToolUseBlock.builder()
+                .id("call-1").name("get_weather").input(Map.of("city", "beijing")).build()));
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(reactor.core.publisher.Flux.just(ask));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-ask1");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var frames = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+                Map.of("tool_call_id", "call-1", "confirmed", true))))
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames, "permission_ask 帧后应关流返回");
+        // 确认上下文落库（fullThreadId 键，恢复时 buildResumeContext 的身份来源）；
+        // 用 ask 自身 replyId 区分 setUp 播种的那次 put
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(),
+            eq("reply-ask"), any(), any());
+        // ask 即执行段结束：租约让出 + 会话关闭（closeSession → finishTurn；
+        // 源流 complete 的幂等兜底会再走一次 endTurn，故 finishTurn 用 atLeastOnce）
+        verify(turnLeaseStore).release(eq("t1"), eq("tok-ask1"));
+        verify(eventStore, atLeastOnce()).finishTurn("t1");
+        // ask 帧本身已广播（EventBus 落库可见）
+        assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("get_weather")),
+            "permission_ask 帧应经 EventBus 广播: " + frames);
+    }
+
+    @Test
+    void confirmStreamShouldNotCloseSessionOnRemoteForwardedAgentEnd() throws Exception {
+        // 远程子 agent 转发回来的 AGENT_END（source 非空）只是子任务运行终点：
+        // 恢复流仍在进行（spawn 结果/lead 收尾汇报未到，源流尚未 complete），
+        // 不得在这里 closeSession 关流 + 放锁——与 ChatStreamController 同一 guard。
+        stubPendingStoreRow();
+        var events = reactor.core.publisher.Sinks.many().multicast()
+            .<io.agentscope.core.event.AgentEvent>onBackpressureBuffer();
+        var subscribed = new java.util.concurrent.CountDownLatch(1);
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-c2");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
+            controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+                    Map.of("tool_call_id", "call-1", "confirmed", true))))
+                .collectList().block(java.time.Duration.ofSeconds(10)));
+        assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS),
+            "confirmStream 未订阅 agent 事件流");
+
+        events.tryEmitNext((io.agentscope.core.event.AgentEvent)
+            new io.agentscope.core.event.AgentEndEvent("reply-3").withSource("gw-1/order-agent"));
+        verify(eventStore, org.mockito.Mockito.timeout(2000))
+            .append(eq("t1"), any(), eq("AGENT_END"), any());
+        sleep(200);
+
+        verify(eventStore, never()).finishTurn("t1");
+        verify(turnLeaseStore, never()).release(anyString(), anyString());
+        assertTrue(!framesFuture.isDone(), "远程 AGENT_END 不得关流: " + framesFuture);
+
+        // lead 自身的 AGENT_END 才收尾
+        events.tryEmitNext(new io.agentscope.core.event.AgentEndEvent("reply-3"));
+        events.tryEmitComplete();
+        framesFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        verify(eventStore, org.mockito.Mockito.timeout(2000)).finishTurn("t1");
+    }
+
+    // ===== 多行消费路由（V7：远程 confirmKey 走 RemoteConfirmBridge，不触父 state 恢复） =====
+
+    @Test
+    void confirmShouldRouteRemoteKeyThroughBridge() throws Exception {
+        when(remoteConfirmBridge.routeDecision(eq("t1"), eq("task:t-123"), anyList()))
+            .thenReturn(Map.of("routed", "remote", "confirm_key", "task:t-123",
+                "task_id", "t-123", "decision", "ALLOW"));
+
+        mvc.perform(post("/threads/t1/confirm")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(MAPPER.writeValueAsString(Map.of(
+                    "confirmKey", "task:t-123",
+                    "results", List.of(Map.of("tool_call_id", "call-1", "confirmed", true))))))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.routed").value("remote"))
+            .andExpect(jsonPath("$.task_id").value("t-123"));
+
+        // 远程路由不走父 state 恢复、不抢本会话租约
+        verify(agent, never()).call(anyList(), any(io.agentscope.core.agent.RuntimeContext.class));
+        verify(turnLeaseStore, never()).acquire(anyString(), any());
+    }
+
+    @Test
+    void confirmShouldReturn404WhenRemoteRowMissing() throws Exception {
+        when(remoteConfirmBridge.routeDecision(anyString(), anyString(), anyList()))
+            .thenThrow(new AgentRuntimeService.ConfirmContextNotFoundException("t1"));
+        mvc.perform(post("/threads/t1/confirm")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(MAPPER.writeValueAsString(Map.of(
+                    "confirmKey", "task:missing",
+                    "results", List.of()))))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("confirm_context_not_found"));
+    }
+
+    @Test
+    void confirmStreamShouldAckRemoteRouteWithoutLease() {
+        when(remoteConfirmBridge.routeDecision(eq("t1"), eq("task:t-123"), anyList()))
+            .thenReturn(Map.of("routed", "remote", "confirm_key", "task:t-123",
+                "task_id", "t-123", "decision", "DENY"));
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var frames = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(
+            List.of(Map.of("tool_call_id", "call-1", "confirmed", false)), "task:t-123"))
+            .collectList().block(java.time.Duration.ofSeconds(5));
+        assertNotNull(frames);
+        assertEquals(2, frames.size(), "远程路由回执 confirm_routed + done 两帧: " + frames);
+        assertTrue(frames.get(0).data().contains("routed"), frames.toString());
+        assertTrue(frames.get(frames.size() - 1).data().contains("done"), frames.toString());
+        // 远程路由不抢租约（setUp 的上下文播种已消耗一次 streamEvents，不按 never 断言）
+        verify(turnLeaseStore, never()).acquire(anyString(), any());
+        verify(turnLeaseStore, never()).tryAcquire(anyString());
+    }
+
+    @Test
+    void confirmStreamShouldReturnErrorFrameWhenRemoteRouteFails() {
+        when(remoteConfirmBridge.routeDecision(anyString(), anyString(), anyList()))
+            .thenThrow(new AgentRuntimeService.ConfirmAlreadyConsumedException("t1"));
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(
+            List.of(), "task:t-123")).blockFirst();
+        assertNotNull(frame);
+        assertTrue(frame.data().contains("error"), frame.data());
     }
 }
