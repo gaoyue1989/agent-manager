@@ -5,10 +5,15 @@
 
 ## 1. 现状分析
 
-### 1.1 当前实现
+> ⚠️ 本章记录的是 **v2.0 → v2.1 升级前**的基线（升级已完成，见文首现状核对）。当前 `agentStateStore`
+> Bean 已被 `distributedStore` Bean 取代（`AgentScopeConfig.distributedStore`，带 AgentStateStore
+> 装饰链、按 `resolvedDbName()` 取库名）。`agent_state` 表结构以
+> `db/migration/V1__baseline_e91d1f0.sql` 为准。
+
+### 1.1 升级前实现
 
 ```java
-// AgentScopeConfig.java:83-86
+// AgentScopeConfig.java（v2.0 时期）
 @Bean
 public AgentStateStore agentStateStore(DataSource dataSource) {
     return new MysqlAgentStateStore(dataSource, "agent_manager_test", "agent_state", true);
@@ -30,6 +35,8 @@ CREATE TABLE agent_state (
 ```
 
 ### 1.2 对照 AgentScope Context 文档的评估
+
+（"当前实现 / 状态"列为**升级前**评估，两项 ⚠️/❌ 均已随本次升级解决）
 
 | 官方要求 | 当前实现 | 状态 |
 |---|---|---|
@@ -93,6 +100,8 @@ CREATE TABLE agent_state (
 );
 
 -- 新增表（JdbcStore 自动创建）
+-- ⚠️ 下方是 2.0.0 时期的 DDL 草图。实际表结构以 db/migration/V1__baseline_e91d1f0.sql 为准
+--    （SDK 自建 + Flyway 基线双写）：namespace_path / item_key / value_json / version / updated_at
 CREATE TABLE agent_fs (
     namespace VARCHAR(255) NOT NULL,    -- 命名空间（如 agents/MyAgent/users/alice）
     path      VARCHAR(512) NOT NULL,    -- 文件相对路径（如 MEMORY.md）
@@ -329,10 +338,10 @@ SELECT * FROM agent_state WHERE session_id = 'bob:thread-001';
 
 ```sql
 -- 用户 alice 的 MEMORY.md
-SELECT * FROM agent_fs WHERE namespace = 'agents/MyAgent/users/alice' AND path = 'MEMORY.md';
+SELECT * FROM agent_fs WHERE namespace_path LIKE 'agents/MyAgent/users/alice%' AND item_key = 'MEMORY.md';
 
 -- 用户 bob 的 MEMORY.md
-SELECT * FROM agent_fs WHERE namespace = 'agents/MyAgent/users/bob' AND path = 'MEMORY.md';
+SELECT * FROM agent_fs WHERE namespace_path LIKE 'agents/MyAgent/users/bob%' AND item_key = 'MEMORY.md';
 ```
 
 ### 5.3 隔离矩阵
@@ -531,7 +540,7 @@ void testWorkspaceFileWrittenToAgentFs() {
 
     // 验证 agent_fs 表有数据
     var rows = jdbcTemplate.queryForList(
-        "SELECT * FROM agent_fs WHERE path LIKE 'memory/%'");
+        "SELECT * FROM agent_fs WHERE item_key LIKE 'memory/%'");
     assertThat(rows).isNotEmpty();
 }
 ```

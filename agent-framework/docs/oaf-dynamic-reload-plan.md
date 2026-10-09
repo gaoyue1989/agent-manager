@@ -9,7 +9,7 @@
 > reload 只对"PVC 上文件原位变化"这一事实生效（与 skills 动态加载的平台边界完全一致）。
 >
 > **实施记录（2026-09-25）**：
-> - 实现与方案的差异：①MCP 配置目录布局为 `/config/{server}/`（McpToolRegistrar.resolveMcpDir 口径），指纹扫描按 configDir 下目录树（排除 skills/）；②`A2aAgentRefHolder`/`OafReloadService` 经 `List<Object> customTools` 泛型收集被扫为装配候选，引入 `tool/CustomTool` 标记接口收窄候选 + holder 改 `ObjectProvider` 惰性注入，消除两处 Spring 循环依赖；③OafReloadService 的 build 依赖用构造器注入（`@Autowired` 方法注入实测不触发）；④`scope=mcp` 会重解析 frontmatter（声明增删即时生效并同步 holder）；⑤GET /admin/reload 提供只读状态。
+> - 实现与方案的差异：①MCP 配置目录布局为 `/config/{server}/`（McpToolRegistrar.resolveMcpDir 口径），指纹扫描按 configDir 下目录树（排除 skills/）；②`A2aAgentRefHolder`/`OafReloadService` 经 `List<Object> customTools` 泛型收集被扫为装配候选，引入 `tool/CustomTool` 标记接口收窄候选 + holder 改 `ObjectProvider` 惰性注入，消除两处 Spring 循环依赖；③OafReloadService 的 build 依赖用构造器注入（`@Autowired` 方法注入实测不触发）；④`scope=mcp` 会重解析 frontmatter（声明增删即时生效并同步 holder）；⑤GET /admin/reload 提供只读状态；⑥§4.5 的 `McpManager.reloadCurrentConfigs(OafConfig)` 未落地——`loadConfigs` 本身已是纯函数，消费方（`ToolController`/`InfoController`）直接 `mcpManager.loadConfigs(oafConfigHolder.get().mcpServers())` 即为动态版；`McpToolRegistrar.clearServer` 实现签名多带一个 `Toolkit` 形参（`clearServer(Toolkit, String)`，需摘工具时同时拿到当前 toolkit）。
 > - 部署环境 E2E（独立进程 + 本地 MySQL/Redis + mock MCP server，E-RL-1~5 全 PASS）：fail-soft 修复后 reload 恢复工具（pid 不变）→ 经 /mcp 代理真实调用成功；声明移除 → 工具下线；整包重建 → 提示词/卡片版本/MCP 全量重注册；非法 frontmatter → 500 + 旧配置继续服务 → 修正后重建成功；重复触发 → noop 幂等。
 > - SIGHUP 通道与定时扫描（M4）未实施；多副本各自触发语义见 §4.3。
 
@@ -21,7 +21,7 @@
 
 | 官方机制 | 说明 | 状态 |
 |----------|------|------|
-| `HarnessAgent` 可重建 + `AgentRuntimeService.setAgent()` | 官方 dataagent 示例的"配置变更→重建 agent"模式（写 workspace/tools.json 后按会话重建 HarnessAgent） | `setAgent()` 已存在（AgentRuntimeService.java:183），只差重建逻辑 |
+| `HarnessAgent` 可重建 + `AgentRuntimeService.setAgent()` | 官方 dataagent 示例的"配置变更→重建 agent"模式（写 workspace/tools.json 后按会话重建 HarnessAgent） | `setAgent()` 已存在（`AgentRuntimeService`），只差重建逻辑 |
 | `Toolkit.registerMcpClient / removeMcpClient / removeTool`（core 公开 API） | MCP 连接运行时增删：remove 关连接摘工具 → register 重连重列工具，即为一次完整 reload | Toolkit 公开方法，无需改 SDK |
 | `FileSystemSkillRepository` 每轮重扫 | skills 动态加载已用此机制上线 | **已完成**（本方案不动） |
 | `DynamicSubagentsMiddleware`（每推理步重扫 `subagents/*.md`） | subagent 定义热加载的官方实现 | 本项目子代理走 `WorkspaceInitializer.writeSubagents` 静态生成，**未启用**（可选增强，见 §8） |
@@ -319,9 +319,12 @@ M1 可独立交付价值（MCP 故障自愈/换地址不重启），M2 是完整
 
 ## 附录 B：本项目现状代码索引
 
-- 装配链：`config/AgentScopeConfig.java:327` harnessAgent（单例）、`:146` oafConfig、`:158` mcpManager/mcpConfigs
-- MCP：`service/McpToolRegistrar.java:94` registerAll（fail-soft/required 语义）、`:203` registeredTools 缓存、`service/McpManager.java:31` loadConfigs、`service/McpResourceProxy.java:39` 独立连接缓存
-- agent 引用持有：`service/AgentRuntimeService.java:42`（`setAgent` :183 已存在）、`config/A2AServerConfig.java:27`、`config/ChannelConfig.java:13`、`service/HarnessAgentRunner.java:19`
-- workspace 生成：`service/WorkspaceInitializer.java`（存在即跳过 = G4）
-- skills 动态加载（已上线，本方案不动）：`config/AgentScopeConfig.java:410`（L2 仓库注册）
+> 行号注记（2026-10 复核）：下列行号取自 2026-09-25 实施时点，后续提交已使其漂移；
+> 类名/方法名经复核仍有效。行号仅供定位入口，以符号名检索为准。
+
+- 装配链：`config/AgentScopeConfig.java` harnessAgent（单例，委托 `service/HarnessAgentFactory`）、oafConfig / oafConfigHolder / mcpManager / mcpConfigs
+- MCP：`service/McpToolRegistrar.java` registerAll / registerOne / clearServer（fail-soft/required 语义）、registeredTools 缓存、`service/McpManager.java` loadConfigs、`service/McpResourceProxy.java` 独立连接缓存（`evictClient`）
+- agent 引用持有：`service/AgentRuntimeService.java`（`setAgent`）、`service/A2aAgentRefHolder.java`、`config/A2AServerConfig.java`、`config/ChannelConfig.java`、`service/HarnessAgentRunner.java`
+- workspace 生成：`service/WorkspaceInitializer.java`（启动期存在即跳过 = G4；`reinitialize` 覆盖重写）
+- skills 动态加载（已上线，本方案不动）：`config/AgentScopeConfig.java`（L2 仓库注册）
 - 前置方案：[oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)（平台边界、PVC 文件级更新语义、E2E 手法均沿用）

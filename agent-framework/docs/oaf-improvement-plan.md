@@ -5,6 +5,11 @@
 
 ## 1. 现状分析
 
+> **注**：§1 是**方案编制时（v0.8.0，2026-09-07 之前）的基线快照**，记录的是改造前的缺口。
+> 落地后的现状以文首「现状核对」为准——Harness 层已接入、`/config/skills` 已改为 L2 市场仓库
+> （不再本地复制），见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md)。
+> 表中的行号为当前代码位置（2026-10-09 核对），字段覆盖结论仍成立。
+
 ### 1.1 字段解析覆盖度
 
 | OAF v0.8.0 字段 | 实现状态 | 文件位置 |
@@ -19,12 +24,12 @@
 | `license` | ✅ | `OafConfigLoader.java:52` |
 | `tags` | ✅ | `OafConfigLoader.java:54` |
 | `tools` | ✅ | `OafConfigLoader.java:56` |
-| `skills` | ✅ | `OafConfigLoader.java:95-108` |
-| `mcpServers` | ✅ | `OafConfigLoader.java:126-140` |
-| `agents` (sub-agents) | ✅ | `OafConfigLoader.java:143-159` |
-| `model` (string/object) | ✅ | `OafConfigLoader.java:162-176` |
-| `config` | ✅ | `OafConfigLoader.java:179-190` |
-| `memory` | ✅ | `OafConfigLoader.java:193-205` |
+| `skills` | ✅ | `OafConfigLoader.java:97-186` |
+| `mcpServers` | ✅ | `OafConfigLoader.java:253-267` |
+| `agents` (sub-agents) | ✅ | `OafConfigLoader.java:270-287` |
+| `model` (string/object) | ✅ | `OafConfigLoader.java:289-307` |
+| `config` | ✅ | `OafConfigLoader.java:309-337` |
+| `memory` | ✅ | `OafConfigLoader.java:362-...` |
 | `packs` | ❌ 未解析 | — |
 | `weblets` | ❌ 未解析 | — |
 | `orchestration` | ❌ 未解析 | — |
@@ -36,9 +41,9 @@
 
 | OAF 目录 | 支持状态 | 说明 |
 |---|---|---|
-| `skills/{name}/SKILL.md` | ✅ | `SkillManager.java:44-72` |
-| `mcp-configs/{server}/ActiveMCP.json` | ✅ | `McpManager.java:51-58` |
-| `mcp-configs/{server}/config.yaml` | ✅ | `McpManager.java:61-72` |
+| `skills/{name}/SKILL.md` | ✅ | `OafConfigLoader.java:227`（描述解析）+ `SkillCatalogService.java`（目录合并视图） |
+| `mcp-configs/{server}/ActiveMCP.json` | ✅ | `McpManager.java:58-65` |
+| `mcp-configs/{server}/config.yaml` | ✅ | `McpManager.java:70-79` |
 | `versions/` | ❌ | 不支持版本历史 |
 | `examples/` | ❌ | 不加载示例 |
 | `tests/` | ❌ | 不加载测试场景 |
@@ -47,9 +52,14 @@
 
 ### 1.3 AgentScope 2.0 功能使用情况
 
-当前实现使用 AgentScope 最底层的 `ReActAgent` + `Toolkit` + `AgentStateStore`，**完全绕过了 Harness 层**：
+> **现状核对（2026-10-09）**：下表是**改造前**基线，已全部落地——Harness 层已接入
+> （`HarnessAgentFactory` 用 `HarnessAgent.builder()`，装配 workspace / distributedStore /
+> `CompactionConfig` / `FileSystemSkillRepository`），沙箱亦已集成
+> （见 [opensandbox-integration-plan.md](opensandbox-integration-plan.md)）。下表保留作对照。
 
-| AgentScope 2.0 功能 | 当前使用状态 | 说明 |
+改造前使用 AgentScope 最底层的 `ReActAgent` + `Toolkit` + `AgentStateStore`，**完全绕过了 Harness 层**：
+
+| AgentScope 2.0 功能 | 改造前使用状态 | 说明 |
 |---|---|---|
 | **技能（Skill）** | ❌ 未使用 | 自定义 `SkillManager`，未用 AgentScope `skillRepository()` 或 Workspace `skills/` |
 | **记忆仓库** | ❌ 未使用 | 未接入 Mem0/ReMe/百炼记忆 |
@@ -62,6 +72,10 @@
 | **沙箱（Sandbox）** | ❌ 未使用 | 未配置 Docker/K8s 沙箱 |
 
 ### 1.4 关键缺失
+
+> **现状核对（2026-10-09）**：1/6 已解决（技能改 L2 市场仓库、Harness 层已接入）；
+> 2–5 仍未解析（`OafConfig` record 无 `packs`/`weblets`/`orchestration` 字段，
+> `getCatalogId()` 仍只取 A2UI catalog_id）。
 
 1. **Remote Skills**: 仅支持 `source: "local"`，忽略远程 URL
 2. **Packs**: Skills 集合包未解析
@@ -468,7 +482,7 @@ public record OafConfig(
 
 ### 3.3 Remote Skills 支持
 
-新增 `service/RemoteSkillFetcher.java`，修改 `SkillManager.java` 支持 `source: "http..."` 的远程 Skill 获取。
+新增 `service/RemoteSkillFetcher.java`，修改 `SkillManageService.java` 支持 `source: "http..."` 的远程 Skill 获取。
 
 ---
 

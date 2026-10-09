@@ -177,10 +177,10 @@ Accept: text/event-stream
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `afterSeq` | Integer | ❌ | 回放游标（回放**严格大于**该 seq 的事件），默认 0 = 从头回放 |
+| `replyId` | String | ❌ | Turn 标识，仅回放/订阅指定 turn 的事件 |
 
 > ⚠️ **本端点不读 `Last-Event-ID` 请求头。** 浏览器原生 `EventSource` 的自动重连对本 API 无效
 > ——必须用 `fetch` + `ReadableStream`（见 §13），或自建 EventSource 并把最后的 `id:` 显式拼进 `afterSeq`。
-| `replyId` | String | ❌ | Turn 标识，仅回放/订阅指定 turn 的事件 |
 
 **响应行为：**
 
@@ -713,7 +713,7 @@ curl http://localhost:8100/files/a1b2c3d4-e5f6-7890-abcd-ef1234567890?inline=1
   "slug": "acme-test-agent",
   "version": "1.0.0",
   "description": "A test agent",
-  "protocols": {"a2a": "1.0.0", "a2ui": "v0.8", "oaf": "v0.8.0"},
+  "protocols": {"a2a": "1.0.0", "a2ui": "v0.8", "oaf": "v0.8.0", "agent_protocol": {"enabled": false, "streaming": false, "hitl": false, "task_store": ""}},
   "oaf": {
     "tools": ["Read", "Bash", "Edit"],
     "skills": 1,

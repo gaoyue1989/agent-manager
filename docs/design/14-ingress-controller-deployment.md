@@ -2,7 +2,9 @@
 
 **日期**: 2026-05-03  
 **版本**: v1.0  
-**状态**: 待部署
+**状态**: 已部署（本文为 2026-05-03 的一次性实施记录；ingress-nginx 已装且 NodePort 30080 在用，现状见 [../deployment.md](../deployment.md)）
+
+> **归档说明（2026-10-09 核对）**：本文描述 v1 时期的一次性部署过程，其中若干引用已随 v2 重构（`eb1295e`）失效——`backend/internal/k8s/sandbox.go` 的 `CreateIngress()` / `DeleteIngress()` 已改为 `backend/internal/k8s/client.go` 的 `EnsureIngress()` / `DeleteIngress()`，§八 引用的 `docs/13-feature-plan.md` 已删除。业务 Ingress 现状（path/host 双模式、模板 overlay）见 [ingress-host-mode-design.md](ingress-host-mode-design.md) 与 [ingress-template-design.md](ingress-template-design.md)。
 
 ---
 
@@ -11,7 +13,7 @@
 ### 1.1 当前状态
 
 Agent Manager 已实现 Ingress 创建逻辑：
-- `backend/internal/k8s/sandbox.go` 包含 `CreateIngress()` / `DeleteIngress()` 方法
+- ~~`backend/internal/k8s/sandbox.go` 包含 `CreateIngress()` / `DeleteIngress()` 方法~~（v1 位置，已删除；现为 `backend/internal/k8s/client.go` 的 `EnsureIngress()` / `DeleteIngress()`，见 `backend/internal/service/publish.go:211`）
 - Agent 发布时自动创建 Ingress，路径 `/agent/{id}`
 - Ingress 配置 `ingressClassName: nginx`
 
@@ -409,4 +411,4 @@ kubectl delete -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/con
 
 - [Kind Ingress 部署指南](https://kind.sigs.k8s.io/docs/user/ingress/)
 - [Nginx Ingress Controller 文档](https://kubernetes.github.io/ingress-nginx/)
-- [Agent Manager 设计文档](docs/13-feature-plan.md#2-k8s-ingress-agent-对外暴露--注册删除)
+- ~~Agent Manager 设计文档（`docs/13-feature-plan.md`）~~ —— 该文件已随 v2 重构删除；平台现状见 [../deployment.md](../deployment.md) 与 [README.md](README.md) 归档清单

@@ -14,7 +14,7 @@
 | **[agent-creation-guide.md](agent-creation-guide.md)** | **🆕 面向框架使用者的上手指南（2026-09-26 新增）**：5 分钟快速开始 → OAF 包结构与构建 → 配置说明 → 测试环境部署（三法）→ API 调用完整流程（对话/续传/HITL/文件/技能/A2A）→ 能力地图 → 常见坑。**不知道从哪篇读起就先读这篇** |
 | [agent-framework-design.md](agent-framework-design.md) | v2.1 框架总体设计：架构、模块分层、类/表/端点清单（目录树为 v2.1 快照，最新以 ../AGENTS.md 为准；§6 依赖与 §5.3 默认值已按 pom/application.yml 订正） |
 | [agent-framework-deploy.md](agent-framework-deploy.md) | 部署手册：前置条件、Docker、**全量环境变量表**（含 AGENT_REDIS_URL 必配项；2026-09-26 补齐 Harness/SSE/History 三段；2026-10-01 增补 §4.1.12 Agent Protocol 与 §4.1.13 A2A 幂等 Job 两段） |
-| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计为 2026-10-01 实跑 1310 例 / 129 类） |
+| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计为 2026-10-08 实跑 1353 例 / 132 类） |
 | [api.md](api.md) | REST API 全量参考（无状态单次流架构；2026-09-26 补齐会话三态/观察者端点/技能管理端点/8 张表，`/tools` 三段契约已同步 issue #39；2026-10-01 增量重核：数据表迁 Flyway（V1–V8）共自建 10 张表、模型采样参数、confirm_context 多行化、`/a2a/jobs` 等） |
 | [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制；2026-10-01 升 v1.2——ASKING 改 `/chat` 入口预检 `turn_pending_confirm`、`/subscribe` 不读 `Last-Event-ID`、补 `subagent_exposed` 远程转发事件标注等） |
 | [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.4.0：Durable SSE + HITL + 文件 + Skill 管理 + 模型 + 热加载 + 事件词表（被多处源码 javadoc 引用；本版修目录死锚与续传游标示例） |
@@ -78,9 +78,11 @@
 
 - **评测飞轮**（2026-09-26 补入索引，此前完全缺失）：
   - 使用指南：[../bench/eval/FLYWHEEL.md](../bench/eval/FLYWHEEL.md)（六步闭环：使用方法/使用时机/场景命令表/排障）
+  - 离线链路指南：[../bench/eval/OFFLINE.md](../bench/eval/OFFLINE.md)（采集 → 打包 → 回放/评测 → 对比端到端操作手册，2026-10-04 新增）
   - 骨架说明：[../bench/eval/README.md](../bench/eval/README.md)
   - 设计稿：[../../docs/design/agent-framework-eval-dual-track-design.md](../../docs/design/agent-framework-eval-dual-track-design.md)、
-    [../../docs/design/agent-framework-eval-env-provisioning-design.md](../../docs/design/agent-framework-eval-env-provisioning-design.md)
+    [../../docs/design/agent-framework-eval-env-provisioning-design.md](../../docs/design/agent-framework-eval-env-provisioning-design.md)、
+    [../../docs/design/agent-framework-eval-offline-record-replay-design.md](../../docs/design/agent-framework-eval-offline-record-replay-design.md)
   - CI 门禁：`eval-selftest` job，详见 [e2e-ci-plan.md](e2e-ci-plan.md) §2.3
 - 平台级历史设计归档：根目录 [../../docs/design/](../../docs/design/)（REDESIGN.md、HITL 验收、用户技能管理等）
 - OAF 包规范（平台侧权威）：[../../docs/oaf-specification.md](../../docs/oaf-specification.md)

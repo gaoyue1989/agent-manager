@@ -32,16 +32,16 @@
 
 ## 2. PVC 使用现状总览
 
-平台唯一的数据卷是 `platform-data` PVC（`manifests/platform.yaml:198-208`，`ReadWriteOnce`，10Gi）。
-业务 Pod 的挂载由 `backend/internal/k8s/objects.go:135-171` 构造。**注意：并非所有业务目录都落在 PVC 上**，
+平台唯一的数据卷是 `platform-data` PVC（`manifests/platform.yaml:198-207`，`ReadWriteOnce`，10Gi）。
+业务 Pod 的挂载由 `backend/internal/k8s/objects.go:171-178` 构造。**注意：并非所有业务目录都落在 PVC 上**，
 
 | 容器内路径 | 卷来源 | 读写 | 平台构造处 | 是否本次范围 |
 |---|---|---|---|---|
-| `/config` | `platform-data` subPath `packages/{id}` | **只读** | `objects.go:137` | ⚠️ **需迁**（初稿"不迁"已推翻，见 §2.5.1） |
-| `/data/files` | `platform-data` subPath `files/` | 可写 | `objects.go:141` | ✅ **本次搬迁对象** |
-| `/workspace` | **emptyDir** | 可写 | `objects.go:138/168` | ❌ 已是临时卷，非 PVC |
-| `/applog` | **emptyDir** | 可写 | `objects.go:143/170` | ❌ 已是临时卷，非 PVC |
-| 后端 `packages/{id}` | `platform-data`（backend 自身挂载 `/data`） | 可写 | `platform.yaml:285` + `store.FS` | ⚠️ **需迁**（与 `/config` 同源，见 §2.5.1） |
+| `/config` | `platform-data` subPath `packages/{id}` | **只读** | `objects.go:172` | ⚠️ **需迁**（初稿"不迁"已推翻，见 §2.5.1） |
+| `/data/files` | `platform-data` subPath `files/` | 可写 | `objects.go:176` | ✅ **本次搬迁对象** |
+| `/workspace` | **emptyDir** | 可写 | `objects.go:173/203` | ❌ 已是临时卷，非 PVC |
+| `/applog` | **emptyDir** | 可写 | `objects.go:178` | ❌ 已是临时卷，非 PVC |
+| 后端 `packages/{id}` | `platform-data`（backend 自身挂载 `/data`） | 可写 | `platform.yaml:281` + `store.FS` | ⚠️ **需迁**（与 `/config` 同源，见 §2.5.1） |
 
 **关键澄清（2026-09-20 修订）**：初稿把 `/config` 与后端包目录标为"不迁"，理由是"各集群本地 PVC 即可"。
 **该结论在共用一份 MySQL 的拓扑下不成立**——包目录 `packages/{id}` 的 id 来自共享自增主键，而 PVC 各自独立，
@@ -60,15 +60,15 @@ Redis（session_event）两集群可连一套也可各自独立，取舍见 §2.
 
 ```
 用户在集群 A 上传 → PackageService.Create 只在 A 的 PVC 落盘 ExtractZipTo("packages/{id}")
-                    package.go:56-58（id 由 tx.Create(rec) 自增产生）
+                    package.go:54-59（id 由 tx.Create(rec) 自增产生）
 服务发布         → pkg.DirPath 作为 PVC subPath 注入业务 Pod 只读挂载
-                    publish.go:91 → k8s/objects.go:137
+                    publish.go:503 → k8s/objects.go:172
 ```
 
 在集群 B 发布同一服务（`services` 行共享，`package_id` 指向同一个包）时：
 
 - B 的 PVC 上**不存在** `packages/{id}` 目录 → 业务 Pod 的 `/config` 挂载为空
-- `OafConfigLoader` 找不到 `AGENTS.md` 直接抛 `IllegalStateException`（`OafConfigLoader.java:28-30`）
+- `OafConfigLoader` 找不到 `AGENTS.md` 直接抛 `IllegalStateException`（`OafConfigLoader.java:28-30`，`load()` 入口）
 - 结果：**业务 Pod 在 B 集群起不来**（CrashLoopBackOff）
 
 这条链否定了初稿「包随发布流程在各集群重传即可」的说法：**重传会生成新的 id，而 `services.package_id`
@@ -86,9 +86,9 @@ Redis（session_event）两集群可连一套也可各自独立，取舍见 §2.
 
 与 S3 无关，但**同样会让"两集群连一套 MySQL"当场失败**，初稿完全未覆盖：
 
-- `ServiceEntity.K8sName` 是 **uniqueIndex**（`store/model.go:39-41`），`uniqName()` 靠**查库去重**追加 `-2/-3`（`publish.go:373-386`）
-- `Endpoint` 拼本集群展示地址：`k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)`（`publish.go:158`；2026-09-30 起支持 INGRESS_HOST_SUFFIX 双模式，但构造的仍是创建它的那个集群视角的地址）
-- `ClusterURL` 拼集群内 DNS（`...svc.cluster.local`，`publish.go:159`），A2A 注册用 `fetchCard(svc.ClusterURL)`（`register.go:34`）
+- `ServiceEntity.K8sName` 是 **uniqueIndex**（`store/model.go:40`），`uniqName()` 靠**查库去重**追加 `-2/-3`（`publish.go:523-...`）
+- `Endpoint` 拼本集群展示地址：`k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)`（`publish.go:164`；2026-09-30 起支持 INGRESS_HOST_SUFFIX 双模式，但构造的仍是创建它的那个集群视角的地址）
+- `ClusterURL` 拼集群内 DNS（`...svc.cluster.local`，`publish.go:165`），A2A 注册用 `fetchCard(svc.ClusterURL)`（`register.go:34`）
 - 但表里**没有任何集群归属字段**（全表仅 `ClusterURL` 带 "Cluster" 字样，是 URL 不是标识）
 
 后果：两套 backend 连同一库时，同名服务在第二个集群发布会撞 `uniqueIndex`；即便强行插入，
@@ -120,10 +120,10 @@ Redis（session_event）两集群可连一套也可各自独立，取舍见 §2.
 
 | 实现 | 类 | 触发条件 | 原子写语义 |
 |---|---|---|---|
-| 本地路径 | `LocalFileStorage.java` | `FILE_STORAGE_TYPE=local`（默认） | tmp + `Files.move(ATOMIC_MOVE)`，失败降级 `REPLACE_EXISTING`（`LocalFileStorage.java:49-62`） |
+| 本地路径 | `LocalFileStorage.java` | `FILE_STORAGE_TYPE=local`（默认） | tmp + `Files.move(ATOMIC_MOVE)`，失败降级 `REPLACE_EXISTING`（`LocalFileStorage.java:51-66`） |
 | S3 兼容 | `S3FileStorage.java` | `FILE_STORAGE_TYPE=s3` | `putObject` 对象级天然原子 |
 
-- 依赖已就位：`io.minio:minio:8.5.17`（`pom.xml:166-170`）
+- 依赖已就位：`io.minio:minio:8.5.17`（`pom.xml:176-181`）
 - 集成测试已就位：`S3FileStorageIT`（七牛云 S3 网关实测过），默认由 `@EnabledIfEnvironmentVariable(S3_IT)`
   跳过，设 `S3_IT=1` 并给 4 个环境变量即可跑真端点
 - 绑定回归测试就位：`S3EnvBindingTest` 锁住"平铺键名"结构（防止 `application.yml` 写成嵌套
@@ -141,7 +141,7 @@ Redis（session_event）两集群可连一套也可各自独立，取舍见 §2.
 | OAF 包生成 | `OafPackageTools.createOafZip`（写） | 同上抽象 |
 | 过期清理 | `SessionCleanupService.cleanupExpiredUploads`（删） | 先删行后删对象，删对象失败仅告警、下轮重试 |
 
-`file_asset` 表（`FileAssetStore.java:70-88`）**只存元数据**（`storage_type` + `storage_key` + 大小/状态），
+`file_asset` 表（`FileAssetStore.java:52-75`）**只存元数据**（`storage_type` + `storage_key` + 大小/状态），
 字节在后端。这一设计是本次切换成本极低的原因：`storage_type` 本就是列数据，切换后端不需要迁移表。
 
 ### 3.2 切换动作
@@ -165,13 +165,13 @@ FILE_STORAGE_S3_BUCKET=agent-files
 
 这是盘点中最重要的发现，**与 S3 无关，但会被任何"统一存储"改造放大**：
 
-- 平台以 `ReadOnly: true` 挂载 `/config`（`backend/internal/k8s/objects.go:137`）
+- 平台以 `ReadOnly: true` 挂载 `/config`（`backend/internal/k8s/objects.go:172`）
 - 但 `SkillManageService` 构造器直接对它 `Files.createDirectories(skillsDir)`（`SkillManageService.java:49`），
   上传 zip（`:127`）、写启停状态 `.skill-states.json`（`:375/393`）、编辑 `SKILL.md`（`writeSkillContent:229`）全部写向它
 - 后果：集群里这些写会**直接失败**——`/config` 只读。技能上传/启停/编辑能力在容器部署下不成立
 
 同时 `-- /config/skills` 被注册为 L2 `FileSystemSkillRepository(skillsDir, false, "oaf-package")`
-（`AgentScopeConfig.java:403`，`writeable=false`），SDK 仓库层会拒绝写，因此**只有 SkillManageService
+（`HarnessAgentFactory.java:244`，`writeable=false`），SDK 仓库层会拒绝写，因此**只有 SkillManageService
 绕过 SDK 的那条写路径踩了坑**，且这一路径损坏时被 `catch` 降级或未显式报错，容易长期不被发现。
 
 ### 4.2 OAF 包迁 S3：必要性来自 §2.5.1，不是技术偏好
@@ -188,11 +188,11 @@ FILE_STORAGE_S3_BUCKET=agent-files
 
 | 消费方 | 位置 | 读取方式 | 迁移影响 |
 |---|---|---|---|
-| OAF frontmatter 解析 | `OafConfigLoader.java:23,32` | `Files.readString(configDir/AGENTS.md)` | 需保证 `/config` 启动时已就绪 |
+| OAF frontmatter 解析 | `OafConfigLoader.java:27,32` | `Files.readString(configDir/AGENTS.md)` | 需保证 `/config` 启动时已就绪 |
 | 包内声明技能的 SKILL.md | `OafConfigLoader.java:176,228` | `configDir/skills/{name}/SKILL.md` | 与技能写路径同批改造 |
-| L2 技能仓库 | `AgentScopeConfig.java:403` | `FileSystemSkillRepository`（`Files.list` + `readAttributes` 做 mtime/size 快照短路） | 若 `/config` 为启动时拉取的 emptyDir，本项可保留不变 |
-| 技能目录服务 | `SkillCatalogService.java:48` | 复用同一 `FileSystemSkillRepository` | 同上 |
-| MCP 配置加载 | `McpToolRegistrar.java:79` / `McpManager.java:44` | 读 `mcp-configs/{server}/config.yaml` | 同上（纯启动期读，无热加载需求） |
+| L2 技能仓库 | `HarnessAgentFactory.java:244` | `FileSystemSkillRepository`（`Files.list` + `readAttributes` 做 mtime/size 快照短路） | 若 `/config` 为启动时拉取的 emptyDir，本项可保留不变 |
+| 技能目录服务 | `SkillCatalogService.java:53-56` | 复用同一 `FileSystemSkillRepository` | 同上 |
+| MCP 配置加载 | `McpToolRegistrar.java:70` / `McpManager.java:43` | 读 `mcp-configs/{server}/config.yaml` | 同上（纯启动期读，无热加载需求） |
 
 **推荐落地方式：initContainer 拉取解压到 emptyDir**
 
@@ -211,7 +211,7 @@ FILE_STORAGE_S3_BUCKET=agent-files
 
 1. **要自研 `SkillRepository`**。实测 `AgentSkillRepository` 只有 9 个方法，SDK 未提供 S3 实现；
    `FileSystemSkillRepository` 内部走 `SkillFileSystemHelper` 的静态 `Files.*` 调用，无法改造成对象后端
-2. **热加载语义要重建**。现有"PVC 原位修改→下一轮生效"依赖 bind mount 的实时性（`AgentScopeConfig.java:400`
+2. **热加载语义要重建**。现有"PVC 原位修改→下一轮生效"依赖 bind mount 的实时性（`HarnessAgentFactory.java:237-240`
    注释所述每轮重扫 + mtime/size 短路）。对象存储没有目录扫描，须用 `listObjects` + `statObject`
    模拟版本签名，既引入 API 调用成本，也把"实时"降级为"轮询间隔内"
 3. **`OafConfigLoader` 的声明技能读取要一并处理**（`:176`/`:228`）——它不是只影响仓库层
@@ -331,7 +331,7 @@ skills/.states/{skillName}            → 启停状态（替代本地 .skill-sta
 目标导向高可用，建议**改造启动语义**（属于必需变更，非可选优化）：
 
 1. 构造器改为**惰性可达性校验**：bucket 探测失败时记录 WARN 并以"未就绪"状态构造完成，
-   让 `/health` 起得来（业务探针为 readiness 15s/5s、liveness 60s/15s，见 `objects.go:145-146`）
+   让 `/health` 起得来（业务探针为 readiness 15s/5s、liveness 60s/15s，见 `objects.go:180-181`）
 2. 首次 `write/read` 时才真正初始化 client；失败按调用点现有错误处理返回（`FileController.upload`
    已有 `500 storage_write_failed`，`download` 已有 `502`）
 3. 就绪探针可选地暴露存储后端状态（建议新增独立 readyz 语义，避免 S3 抖动把整个 Deployment 打挂）
@@ -368,10 +368,10 @@ skills/.states/{skillName}            → 启停状态（替代本地 .skill-sta
 这个选择直接决定沙箱会话能否跨集群续。答案是**共用则能续**，依据如下：
 
 - 沙箱状态**不在 Server 独占内存里**，而是持久化进 MySQL `agent_state`——
-  `SandboxAwareMysqlAgentStateStore`（`AgentScopeConfig.java:232`）放宽了官方校验，放行形如
+  `SandboxAwareMysqlAgentStateStore`（`AgentScopeConfig.java:236`）放宽了官方校验，放行形如
   `sandbox/user/{agentId}/{userId}` 的 slot ID（`SandboxAwareMysqlAgentStateStore.java` 注释所述）
 - `resume()` 是按 `osbState.getSandboxId()` 走 OpenSandbox SDK `connector().connect()` 重连，**不依赖本地 PVC**
-  （`OpenSandboxClient.java:140-151`）
+  （`OpenSandboxClient.java:146-151`）
 - 而 MySQL 是两集群共用的同一份数据
 
 因此，只要两地配置同一个 `OPENSANDBOX_SERVER_URL`，B 集群就能从共享库读出 A 集群写入的 sandboxId 并重连：
@@ -397,10 +397,10 @@ skills/.states/{skillName}            → 启停状态（替代本地 .skill-sta
 
 | 文件类别 | 数据通道 | 跨集群可用 | 依据 |
 |---|---|---|---|
-| **① 用户上传**（`/workspace/uploads/`） | S3 字节 + 共享库 `file_asset` 状态 → execd 注入 | ✅ **可用** | 字节从 `FileStorage`（S3）重读；`pending→injected` 状态在共享 MySQL；`OpenSandboxClient.create/resume` 后都调 `injectPendingUploads()`（`OpenSandboxClient.java:120/160` 附近），新沙箱代还有 `resetInjectedToPending` 兜底（`:118-121`） |
-| **② 运行时记忆**（`MEMORY.md`、`memory/*.md`） | agent_fs（共享 MySQL）⇄ 沙箱双向同步 | ✅ **可用** | 首 exec 前注入（`injectRuntimeFilesIfNeeded`），每次 call 结束 `stop()→syncBack` 回写 KV（`OpenSandbox.java:96-115`、`WorkspaceSyncService.syncBack`）；两集群读同一份 `agent_fs` |
+| **① 用户上传**（`/workspace/uploads/`） | S3 字节 + 共享库 `file_asset` 状态 → execd 注入 | ✅ **可用** | 字节从 `FileStorage`（S3）重读；`pending→injected` 状态在共享 MySQL；`OpenSandboxClient.create/resume` 后都调 `injectPendingUploads()`（`OpenSandboxClient.java:118/160`），新沙箱代还有 `resetInjectedToPending` 兜底（`:115`，delete 路径 `:176`） |
+| **② 运行时记忆**（`MEMORY.md`、`memory/*.md`） | agent_fs（共享 MySQL）⇄ 沙箱双向同步 | ✅ **可用** | 首 exec 前注入（`injectRuntimeFilesIfNeeded`），每次 call 结束 `stop()→syncBack` 回写 KV（`OpenSandbox.java:98-117`、`WorkspaceSyncService.syncBack`）；两集群读同一份 `agent_fs` |
 | **③ Agent 产出并登记的文件**（present_file） | 沙箱 `/workspace` → `FileStorage`（S3）→ `file_asset` | ✅ **可用** | `FileTools.presentFile` 从沙箱直读字节写入存储后端，`file_ready` 卡片 + 下载端点走 S3；登记后即与沙箱容器解耦 |
-| **④ 未登记的中间产物**（脚本输出、临时文件等） | **仅存于沙箱容器** `/workspace` | ⚠️ **取决于部署形态** | 无任何回写通道：`syncBack` 只拉 MEMORY.md/memory/，`NoopSnapshotSpec` 不做快照（`OpenSandboxFilesystemSpec.java:135-136`）；唯一出口是 present_file 显式登记 |
+| **④ 未登记的中间产物**（脚本输出、临时文件等） | **仅存于沙箱容器** `/workspace` | ⚠️ **取决于部署形态** | 无任何回写通道：`syncBack` 只拉 MEMORY.md/memory/skills（L4），`NoopSnapshotSpec` 不做快照（`OpenSandboxFilesystemSpec.java:152-153`）；唯一出口是 present_file 显式登记 |
 
 **第④类的判定依据**（这是唯一受部署形态影响的类别）：
 
@@ -408,7 +408,7 @@ skills/.states/{skillName}            → 启停状态（替代本地 .skill-sta
   （slot ID 形如 `sandbox/user/{agentId}/{userId}`，`SandboxAwareMysqlAgentStateStore` 放行）
 - `resume()` 按 sandboxId 走 `connector().connect()` 重连，且 `connectionConfig` 配置了
   `useServerProxy(true)`——**所有 execd/文件请求经 OpenSandbox Server 代理转发**，
-  客户端不直连沙箱容器（`OpenSandboxClient.java:63-68`），存储的 `sandboxEndpoint` 仅作参考
+  客户端不直连沙箱容器（`OpenSandboxClient.java:63-69`），存储的 `sandboxEndpoint` 仅作参考
 - 因此：**两地共用同一套 HA OpenSandbox Server 时**，B 集群能从共享库读到 sandboxId 并经同一 Server 重连
   → 沙箱容器连同其中间产物**原样存活**，第④类**跨集群可用**
 - **两地各部署一套时**，B 拿 A 的 sandboxId 连自己那套 → 404 → 框架 `SandboxManager.acquire()`
@@ -429,7 +429,7 @@ skills/.states/{skillName}            → 启停状态（替代本地 .skill-sta
 
 ```
 非沙箱：FileStorage.read → Files.write 到本地 {workspace}/.agentscope/workspace/{sessionId}/uploads/
-沙箱：  FileStorage.read → osbSandbox.files().write 注入 /workspace/uploads/   [OpenSandbox.java:196-215]
+沙箱：  FileStorage.read → osbSandbox.files().write 注入 /workspace/uploads/   [OpenSandbox.java:188-217]
         status: pending → injected（FileAssetStore.markInjected）
 ```
 
@@ -438,13 +438,13 @@ skills/.states/{skillName}            → 启停状态（替代本地 .skill-sta
 `FileStorage` 重新读取，S3 化后跨集群重新注入天然可行。
 
 需注意的一点：沙箱注入依赖 `file_asset.status = pending`，而 `listPending` 查的是**共享库**
-（`FileAssetStore:222-228`）。若两集群共用一套 MySQL 且各自连各自的 OpenSandbox，A 集群标记
+（`FileAssetStore:169-185`）。若两集群共用一套 MySQL 且各自连各自的 OpenSandbox，A 集群标记
 `injected` 后 B 集群不会再注入——**这正是期望行为**（同一文件不重复注入），但需确认
-`resetInjectedToPending`（新沙箱代重新注入，`:302`）的触发范围不会跨集群误重置。
+`resetInjectedToPending`（新沙箱代重新注入，`:240`）的触发范围不会跨集群误重置。
 
 #### ④ 记忆回写机制：跨集群可见性的依据
 
-`WorkspaceSyncService.syncBack` 每次请求结束后把沙箱 `/workspace` 的 `MEMORY.md` + `memory/*.md`
+`WorkspaceSyncService.syncBack` 每次请求结束后把沙箱 `/workspace` 的 `MEMORY.md` + `memory/*.md`（+ L4 `skills/`）
 回写 `agent_fs`（MySQL）。**MySQL 两集群共用一套，所以记忆跨集群可见** ✓。
 新会话在 B 集群能读到 A 集群积累的记忆；容器内未回写的中间文件则按 §6.4b② 第④类判定处理。
 

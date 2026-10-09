@@ -1,3 +1,12 @@
+> ⚠️ **已废弃的历史文档（v1 时期执行计划）**：本文描述的 v1 架构已被 REDESIGN.md v2 整体取代。
+> 文中的 agent-sandbox CRD 部署轨道、DeepAgents/Python 代码生成、MinIO 对象存储、
+> Docker 镜像构建、`/api/v1/agents/*` 系列 API 与 `agents`/`code_generations`/`image_builds`/
+> `deployments` 表结构**均已删除且无替代**（v2 改为 K8s 原生 Deployment/Service/Ingress +
+> OAF 包 PVC 只读挂载 + `packages`/`services` 表）。文末「七、下一步」等祈使句是当时语境，
+> **不代表当前待办**。旧实现考古请走 v2 重构前的提交历史（仓库未打 tag）。
+> 当前平台实现以 [REDESIGN.md](./REDESIGN.md)、[../deployment.md](../deployment.md)
+> 与各模块 AGENTS.md 为准。
+
 # Agent Manager 项目执行计划
 
 ---

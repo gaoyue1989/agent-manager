@@ -68,6 +68,11 @@ token exchange、平台用户认证体系本身。
 
 ### 2.4 项目现状(锚点)
 
+> 行号注记(2026-10 复核):下表行号取自 2026-09-21 master(e91d1f0),后续提交已使部分行号漂移;
+> 类名/方法名/配置键均经复核仍然有效(`UserScopedMcpClientWrapper`、`UserHeaderRule`、
+> `McpUserHeaderCustomizer`、`McpUserContextMiddleware.onAgent`、`SessionUserStore.findUserIdBySession`、
+> `UserIdHeaderFilter.resolveUserId`、`McpToolRegistrar.parseUserHeaders`/`buildClient`(已改 `buildAsync().block()`))。
+
 | 现状 | 位置 |
 |------|------|
 | `X-User-Id` 由外部网关注入,框架直接信任;请求体 `userId` fallback;`debug-user` 兜底 | `UserIdHeaderFilter.java`、`ChatStreamController.java:186-189` |

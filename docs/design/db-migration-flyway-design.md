@@ -49,11 +49,18 @@
 | V5 | `session_message` 消息轨归档表 | 062e01f（2026-09-27） |
 | V6 | 存量回填：从 `agent_state` 规范槽位补建 `session_user` 行（数据迁移，见 §3.4） | 本次新增 |
 
+> V7 及以后为本文定稿（2026-09-28）之后的增量，按 §7.1 纪律逐次新增，不回填进本表：
+> V7 `confirm_context` 多行化（新增 `confirm_key`/`remote_task`，主键演进为 `(session_id, confirm_key)`，
+> 887cc00）、V8 `remote_task_registry` 在途任务登记表（a4cee7c）、V9 PER_PEER 会话键迁移
+> （存量 `agent_state` 槽位重键，1a69c97）。基线点与 `baseline-version` 均不因此变动。
+> V7/V8 因 e2e FW3 场景会清空 `flyway_schema_history` 后以 baseline 重放未应用迁移，均以
+> `INFORMATION_SCHEMA` 探测 / `CREATE TABLE IF NOT EXISTS` 守卫做到重复执行幂等。
+
 ### 3.3 升级路径
 
 `application.yml`：`spring.flyway.baseline-on-migrate=true`、`baseline-version=5`。
 
-- **现网存量库**（有表、无 `flyway_schema_history`）：首启自动基线到 V5（V1..V5 的 DDL 均已就位），仅执行 V6 增量；
+- **现网存量库**（有表、无 `flyway_schema_history`）：首启自动基线到 V5（V1..V5 的 DDL 均已就位），仅执行 V6 及其后的增量（当前至 V9）；
 - **全新库**（CI E2E / 新环境）：schema 为空不触发基线，从 V1 完整重建；
 - **多副本同时启动**：Flyway 历史表锁互斥，仅一副本执行迁移，其余等待后校验；
 - **失败语义**：迁移失败即启动失败（fail-fast），替代原先 DDL 失败被 catch 成 warn 静默带病运行。

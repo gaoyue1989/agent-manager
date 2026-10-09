@@ -45,7 +45,7 @@ agent-framework 的基础运行配置（LLM 系统模型、MySQL checkpoint、Re
 
 | 层 | 载体 | 内容 | 优先级 |
 |---|---|---|---|
-| ① 平台保留键 | 容器显式 `env`（`fixedEnv`，`objects.go:106-116`） | `AGENT_CONFIG_DIR` / `AGENT_WORKSPACE_DIR` / `SERVER_HOST` / `SERVER_PORT` / `HOST_NAME` | 最高，不可覆盖 |
+| ① 平台保留键 | 容器显式 `env`（`fixedEnv`，`objects.go:135-143`） | `AGENT_CONFIG_DIR` / `AGENT_WORKSPACE_DIR` / `SERVER_HOST` / `SERVER_PORT` / `HOST_NAME` | 最高，不可覆盖 |
 | ② 服务敏感 env | `envFrom secretRef: {k8sName}-env-secret` | 该服务的敏感键覆盖 | 高 |
 | ③ 服务普通 env | `envFrom configMapRef: {k8sName}-env`（现状） | 该服务的非敏感 env | 中 |
 | ④ 平台敏感默认 | `envFrom secretRef: oaf-agent-default-secret` | 平台敏感键默认值 | 低 |
@@ -147,7 +147,7 @@ Ensure 时机三处（幂等，参照既有 `EnsureConfigMap`）：① backend �
 
 - `applyAll` 中 `EnsureSecret({name}-env-secret)` 与 `EnsureConfigMap({name}-env)` 并列；`Unpublish` 保留两者（与现状 CM 一致），`Delete` 一并删除。
 - 生命周期独立于服务：平台级两个对象不被 `Unpublish`/`Delete` 触碰。
-- RBAC（`manifests/platform.yaml:220` rules）：platform-backend 增加 `secrets` 资源 `get/list/create/update/delete`（**现状无 secrets 权限，必须随本期一并下发**；`delete` 为服务删除时清理 `{name}-env-secret` 所必需——实施期实测发现：缺 delete 时 `Delete()` 的 `_ =` 吞掉 403 导致服务 Secret 残留；平台默认 Secret 后端从不删除，无扩散风险）。
+- RBAC（`manifests/platform.yaml:230-232` rules）：platform-backend 增加 `secrets` 资源 `get/list/create/update/delete`（**现状无 secrets 权限，必须随本期一并下发**；`delete` 为服务删除时清理 `{name}-env-secret` 所必需——实施期实测发现：缺 delete 时 `Delete()` 的 `_ =` 吞掉 403 导致服务 Secret 残留；平台默认 Secret 后端从不删除，无扩散风险）。
 
 ### 3.5 更新与生效链路
 

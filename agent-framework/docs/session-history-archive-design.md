@@ -116,8 +116,9 @@ CREATE TABLE IF NOT EXISTS session_message (
 语义说明：
 
 - **session_id**：存 `MysqlAgentStateStore` 的 slot 复合键，格式
-  `"{normalizeUser(userId)}:{sessionId}"`（ThreadController.java:117-119 注释与
-  `MysqlAgentStateStore.slotId` 字节码双重确认；normalizeUser 空值归一 `__anon__`）。
+  `"{normalizeUser(userId)}:{sessionId}"`（`SessionMessageArchiveStateStore.slotKey` 注释与
+  `MysqlAgentStateStore.slotId` 字节码双重确认；ThreadController.java:465 注释说明该列有两种形态；
+  normalizeUser 空值归一 `__anon__`）。
   归档装饰器按同一规则生成（实现时以集成测试锁定与 `agent_state.session_id` 同值）。
 - **msg_id**：`Msg.getId()`（SDK 构建时自动 `generateId()`，非空 UUID 形态）。
 - **msg_data**：单条 Msg 的 JSON。序列化用 Jackson 直写（`State` 是空标记接口，
@@ -309,7 +310,7 @@ E2E（可选，建议做）：mock LLM fixtures 增加 30+ 轮场景触发压缩
 
 | # | 发现 | 处置 |
 |---|------|------|
-| R1 | `AgentStateStore` 参数语义序是 `(userId, sessionId, stateKey)`（`slotId` 字节码：`normalizeUser(arg1)+":"+arg2`；ThreadController.java:117-119 注释同证），既有装饰器形参名互换仅命名问题 | 新类按 SDK 语义命名；session_id 复合键格式写入 §5，集成测试锁定同值 |
+| R1 | `AgentStateStore` 参数语义序是 `(userId, sessionId, stateKey)`（`slotId` 字节码：`normalizeUser(arg1)+":"+arg2`；ThreadController.java:465 注释同证 slot 复合键两种形态），既有装饰器形参名互换仅命名问题 | 新类按 SDK 语义命名；session_id 复合键格式写入 §5，集成测试锁定同值 |
 | R2 | Backfill 是先原位 patch 再下传——归档装饰器若放外层将看到 patch 前形态 | 装配位置定为**最内层**（§6.1） |
 | R3 | `State` 是空标记接口，`Msg` 无 `toJson()`，序列化无官方出口 | msg_data 用 Jackson 直写，形态由 round-trip 单测锁定（§5、§10-2） |
 | R4 | 「整体更长才覆盖」会丢状态迁移，「后者覆盖」会丢裁剪前原文 | 升级为**按块合并**：文本取长、状态取新（§6.4） |

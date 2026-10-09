@@ -84,6 +84,11 @@ Debug 页 chat.js handleEvent() ──▶ 工具折叠行 / HITL 确认卡片（
 
 ### 2.2 SDK 能力验证结论（javap 实测，mcp-core 0.17.0 / agentscope-core 2.0.0）
 
+> 版本注记（2026-10 复核）：本节结论在当前依赖版本上**依然成立**——项目 `agentscope.version=2.0.3`
+> 传递引入 `io.modelcontextprotocol.sdk:mcp-core:0.17.2`，javap 复核 `McpSchema.ClientCapabilities`
+> 仍只有 `experimental/roots/sampling/elicitation` 四字段、无 `extensions`。下文"0.17.0"为当时的
+> 实测版本标签，实际生效版本为 0.17.2（0.17.x 内结论同）。
+
 | 验证项 | 结论 |
 |-------|------|
 | `McpSchema.Tool` | ✅ **有 `meta` 字段**（`JsonProperty("_meta")`，`Map<String,Object>`），`tool.meta()` 可读 `_meta.ui.resourceUri` → **自动发现可行** |

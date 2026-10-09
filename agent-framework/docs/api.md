@@ -1,9 +1,11 @@
 # Agent Framework — API 文档
 
 **版本:** v2.1.0 (Java) — 无状态单次流架构
-**复核日期:** 2026-10-01（master @ `4a4dea8`）— 增量重核：数据表迁 Flyway（V1–V8）、模型采样参数、
-confirm_context 多行化、`/a2a/jobs`、ASKING 入口预检、远程转发事件标注
-（上一轮 2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
+**复核日期:** 2026-10-08（分支 docs/code-review-2026-10-01）— 增量重核：Flyway V9（#87 PER_PEER 会话重键）、
+llm-calls 记录键 gw-hash 形态订正
+（上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
+`/a2a/jobs`、ASKING 入口预检、远程转发事件标注；
+2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
 
 > **现状核对**：本篇是 REST 契约权威，与 [api-frontend-sse.md](api-frontend-sse.md)（前端视角）、
 > [api-thread-spec.md](api-thread-spec.md)（会话协议契约，E2E 断言权威）并行。
@@ -31,7 +33,8 @@ curl http://localhost:8100/
     "protocols": {
         "a2a": "1.0.0",
         "a2ui": "v0.8",
-        "oaf": "v0.8.0"
+        "oaf": "v0.8.0",
+        "agent_protocol": {"enabled": false, "streaming": false, "hitl": false, "task_store": ""}
     },
     "oaf": {
         "tools": ["Read", "Bash", "Edit"],
@@ -50,6 +53,8 @@ curl http://localhost:8100/
     "engine": "AgentScope Java 2.0"
 }
 ```
+
+> `protocols.agent_protocol` 为远程子 agent（Agent Protocol）能力开关，与 `/.well-known/agent-card.json` 同源（`InfoController.agentProtocolStatus`）；`GET /metadata` 另返回 `agent_protocol` 与 `a2a_job`（A2A 幂等 Job 状态）两个顶层字段。
 
 ---
 
@@ -512,9 +517,10 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/llm-calls
 history/PATCH/DELETE 同键），由 `SessionKeyResolver` 从 RuntimeContext 反查解析——`sessionId` 与
 `userId` 两个候选中，谁在 session_user 登记过谁就是规范 sid。注意 Channel 链路
 （`/threads/chat`）下 `RuntimeContext.sessionId` 是网关按 canonicalKey 派生的 `gw-hash`
-（同进程所有 peer 共享，**不是任何会话的规范 key**），前端 sid 落在 `RuntimeContext.userId`；
-若直接用 `ctx.getSessionId()` 落记录，所有会话的记录会串进同一个 gw-hash 桶、按 sid 查询恒为空
-（issue #44）。
+（issue #87 起 Channel 切 `ChatUiChannel.perPeer()` 后**每会话独立**，此前 MAIN 形态为全进程
+共享 `gw-3f20f08c5499`，存量行由 Flyway V9 重键），**不是任何会话的规范 key**，前端 sid 落在
+`RuntimeContext.userId`；若直接用 `ctx.getSessionId()` 落记录，会话记录落在 gw-hash 桶、
+按 sid 查询恒为空（issue #44）。
 
 ---
 
@@ -863,7 +869,7 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-自建 10 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V8，启动自动执行，
+自建 10 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V9，启动自动执行，
 存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
 `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
 `session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）。
@@ -1026,7 +1032,7 @@ TTL 7 天（自最后写入起），`AGENT_REDIS_MAX_LEN_PER_STREAM` 默认 25 �
 | `AGENT_REDIS_CONNECT_TIMEOUT_MS` | `2000` | |
 | `AGENT_REDIS_MAX_LEN_PER_STREAM` | `250000` | `XADD … MAXLEN ~` 内存兜底 |
 
-详见 [api-thread-spec.md](api-thread-spec.md) §12 与 [api-frontend-sse.md](api-frontend-sse.md) §12。
+详见 [api-frontend-sse.md](api-frontend-sse.md) §14 与 [checkpoint-design.md](checkpoint-design.md) §4.1。
 
 ---
 

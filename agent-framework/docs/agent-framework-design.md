@@ -154,7 +154,7 @@ src/main/java/io/agentmanager/framework/
 ├── tool/
 │   ├── BusinessTools.java           # @Tool 自定义工具 (get_current_time, echo)
 │   ├── FileTools.java               # present_file 工具 (工作区产物注册交付, 触发 file_ready)
-│   └── OafPackageTools.java         # check_oaf_package / create_oaf_zip (OAF 部署包校验与生成)
+│   └── ToolPluginBootstrapper.java  # plugins/ 目录 Java SPI 工具插件扫描 (启动期注册)
 └── controller/
     ├── InfoController.java          # GET /、/metadata、/system-prompt
     ├── HealthController.java        # GET /health
