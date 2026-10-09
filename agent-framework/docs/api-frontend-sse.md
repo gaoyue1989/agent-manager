@@ -608,7 +608,7 @@ Content-Type: multipart/form-data
 |------|--------|------|
 | 上传开关 | `true` | `file.upload-enabled=false` 时返回 403 |
 | 文件大小上限 | 20 MB | `file.upload-max-mb`，超限返回 413 |
-| MIME 白名单 | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*` | `file.upload-allowed-mime`，不匹配返回 415 |
+| MIME 白名单 | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed` | `file.upload-allowed-mime`，不匹配返回 415 |
 | 扩展名/MIME 交叉校验 | — | 扩展名必须与声明的 MIME 类型一致，不一致返回 400 |
 | 待消费文件数上限 | 20 | `file.upload-max-pending`，超限返回 429 |
 

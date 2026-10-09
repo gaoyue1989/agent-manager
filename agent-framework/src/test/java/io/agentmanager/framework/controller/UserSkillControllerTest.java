@@ -1,5 +1,7 @@
 package io.agentmanager.framework.controller;
 
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -7,6 +9,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -398,6 +402,110 @@ class UserSkillControllerTest {
         mvc.perform(post("/skills/users/" + USER + "/" + NAME + "/sync-from-package"))
             .andExpect(status().isInternalServerError())
             .andExpect(jsonPath("$.error").value("sync_failed"));
+    }
+
+    // ---------- zip 上传 ----------
+
+    private static org.springframework.mock.web.MockMultipartFile zipFile(String name, byte[] bytes) {
+        return new org.springframework.mock.web.MockMultipartFile(
+            "file", name, "application/zip", bytes);
+    }
+
+    @Test
+    void uploadZipShouldReturnOutcome() throws Exception {
+        when(service.uploadSkillZip(eq(USER), any(java.io.InputStream.class), eq("demo-a.zip")))
+            .thenReturn(new UserSkillService.ZipUploadOutcome(
+                NAME, "created", List.of("SKILL.md", "scripts/run.sh"), 3L));
+
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .multipart("/skills/users/" + USER + "/upload")
+                .file(zipFile("demo-a.zip", new byte[] {1, 2, 3})))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value(NAME))
+            .andExpect(jsonPath("$.action").value("created"))
+            .andExpect(jsonPath("$.files[1]").value("scripts/run.sh"))
+            .andExpect(jsonPath("$.version").value(3));
+    }
+
+    @Test
+    void uploadZipShouldReturn400ForInvalidUser() throws Exception {
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .multipart("/skills/users/u:v/upload")
+                .file(zipFile("demo-a.zip", new byte[] {1})))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("invalid_user_id"));
+    }
+
+    @Test
+    void uploadZipShouldReturn413WhenOver10Mb() throws Exception {
+        var big = new byte[(int) UserSkillService.MAX_ZIP_BYTES + 1];
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .multipart("/skills/users/" + USER + "/upload")
+                .file(zipFile("big.zip", big)))
+            .andExpect(status().isPayloadTooLarge())
+            .andExpect(jsonPath("$.error").value("zip_too_large"));
+    }
+
+    @Test
+    void uploadZipShouldMapInvalidZipAndServerFailure() throws Exception {
+        doThrow(new IllegalArgumentException("zip 包中未找到 SKILL.md"))
+            .when(service).uploadSkillZip(eq(USER), any(java.io.InputStream.class), any());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .multipart("/skills/users/" + USER + "/upload")
+                .file(zipFile("demo-a.zip", new byte[] {1})))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("invalid_zip"));
+
+        doThrow(new IllegalStateException("KV 不可用"))
+            .when(service).uploadSkillZip(eq(USER), any(java.io.InputStream.class), any());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .multipart("/skills/users/" + USER + "/upload")
+                .file(zipFile("demo-a.zip", new byte[] {1})))
+            .andExpect(status().isInternalServerError())
+            .andExpect(jsonPath("$.error").value("upload_failed"));
+    }
+
+    // ---------- 下载 ----------
+
+    @Test
+    void downloadShouldReturnZipAttachment() throws Exception {
+        when(service.exportSkillZip(USER, NAME)).thenReturn(Optional.of(new byte[] {1, 2, 3}));
+
+        mvc.perform(get("/skills/users/" + USER + "/" + NAME + "/download"))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Content-Type", "application/zip"))
+            .andExpect(header().string("Content-Disposition",
+                org.hamcrest.Matchers.containsString("demo-a.zip")))
+            .andExpect(content().bytes(new byte[] {1, 2, 3}));
+    }
+
+    @Test
+    void downloadShouldReturn404WhenMissing() throws Exception {
+        when(service.exportSkillZip(USER, NAME)).thenReturn(Optional.empty());
+
+        mvc.perform(get("/skills/users/" + USER + "/" + NAME + "/download"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("not_found"));
+    }
+
+    @Test
+    void downloadShouldReturn400ForInvalidIdentifiers() throws Exception {
+        mvc.perform(get("/skills/users/u:v/" + NAME + "/download"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("invalid_user_id"));
+
+        mvc.perform(get("/skills/users/" + USER + "/.bad/download"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("invalid_name"));
+    }
+
+    @Test
+    void downloadShouldReturn500WhenExportFails() throws Exception {
+        doThrow(new IllegalStateException("KV 不可用")).when(service).exportSkillZip(USER, NAME);
+
+        mvc.perform(get("/skills/users/" + USER + "/" + NAME + "/download"))
+            .andExpect(status().isInternalServerError())
+            .andExpect(jsonPath("$.error").value("download_failed"));
     }
 
     // ---------- 路由消歧 ----------

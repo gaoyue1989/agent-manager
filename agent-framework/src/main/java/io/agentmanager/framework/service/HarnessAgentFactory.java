@@ -11,6 +11,7 @@ import java.util.TreeSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
@@ -18,6 +19,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
+import io.agentscope.core.model.Model;
 import io.agentscope.harness.agent.DistributedStore;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.IsolationScope;
@@ -81,6 +83,13 @@ public class HarnessAgentFactory {
     private final List<io.agentmanager.framework.tool.CustomTool> customTools;
     private final RemoteConfirmBridge remoteConfirmBridge;
 
+    /**
+     * 备用模型 id（LLM_FALLBACK_MODEL_ID，引用 model_config 托管模型）；空 = 不启用。
+     * 字段注入（@Value）而非构造参数：本类在单测中直接 new，避免改动所有构造调用点。
+     */
+    @Value("${agent.llm.fallback-model-id:}")
+    private String fallbackModelId;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -129,6 +138,11 @@ public class HarnessAgentFactory {
             // P0: 包装主 model，400 错误时打印请求体 JSON 诊断（排查 Higress 网关注入问题）
             var loggingModel = new io.agentmanager.framework.service.RequestBodyLoggingModelWrapper(model);
 
+            // 备用模型（LLM_FALLBACK_MODEL_ID，引用 model_config 托管模型）：主模型重试耗尽
+            // （429/5xx/超时/网络，SDK 默认）后自动切换。默认模型走 SDK 原生 fallback；
+            // 会话自选模型由 SessionModelMiddleware 用 FallbackModelWrapper 补齐同一语义。
+            var fallbackModel = resolveFallbackModel(modelCatalog);
+
             // P1: 包装 compaction 内部 LLM 调用追踪
             // 不设置 .model() 时 harness 回退使用主 model（无 trace），设置包装后行为不变且带 span
             // （memoryModel 的构造移入下方 memoryEnabled 分支：记忆关闭时不构造）
@@ -171,7 +185,7 @@ public class HarnessAgentFactory {
                 // 注意：会话模型路由必须最先注册（最外层）——先替换 model 再进链，
                 // 下游 LLM 记录/span/实际调用看到的都是会话生效模型
                 .middleware(new io.agentmanager.framework.service.SessionModelMiddleware(
-                    sessionUserStore, modelCatalog))
+                    sessionUserStore, modelCatalog, fallbackModel))
                 // OTel 链路追踪（SDK 内置，创建 span，order=1 默认值）
                 .middleware(new io.agentscope.core.tracing.OtelTracingMiddleware())
                 // 模型实际输入/输出补录到 chat span（gen_ai.input/output.messages）
@@ -225,6 +239,11 @@ public class HarnessAgentFactory {
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
+
+            // 备用模型（默认模型路径）：SDK 原生 fallback，主模型重试预算耗尽后切换
+            if (fallbackModel != null) {
+                builder.fallbackModel(fallbackModel);
+            }
 
             // 远程子 agent 声明（travel-fulfillment B1，§8 lead-1）：OAF agents[].endpoint
             // 非空者注册为 SDK 远程声明（经 Agent Protocol 调度子服务 /tasks）；endpoint
@@ -320,6 +339,31 @@ public class HarnessAgentFactory {
             log.error("Failed to create AgentScope agent: {}", e.getMessage(), e);
             throw new RuntimeException("Agent creation failed", e);
         }
+    }
+
+    /**
+     * 解析备用模型（LLM_FALLBACK_MODEL_ID → model_config 托管模型）。
+     *
+     * <p>构建期解析一次：模型配置变更（/models CRUD）需经 reload 才对备用生效；
+     * 未配置/未找到/已禁用 → 返回 null（不启用 fallback，仅告警不阻断）。
+     */
+    private Model resolveFallbackModel(ModelCatalog modelCatalog) {
+        var id = fallbackModelId == null ? "" : fallbackModelId.trim();
+        if (id.isEmpty()) {
+            return null;
+        }
+        if (modelCatalog == null) {
+            log.warn("LLM fallback model '{}' configured but ModelCatalog is unavailable; "
+                + "fallback disabled", id);
+            return null;
+        }
+        var resolved = modelCatalog.resolve(id);
+        if (resolved.isEmpty()) {
+            log.warn("LLM fallback model '{}' not found/enabled in model_config; fallback disabled", id);
+            return null;
+        }
+        log.info("LLM fallback model enabled: '{}'", id);
+        return resolved.get();
     }
 
     /** ChatModel 装配统一走 {@link io.agentmanager.framework.config.ChatModelFactory}（托管/系统模型共用同一口径）；public 供 config 包单测断言上下文窗口透传 */

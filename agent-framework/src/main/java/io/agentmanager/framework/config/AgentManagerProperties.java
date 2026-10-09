@@ -204,7 +204,7 @@ public record AgentManagerProperties(
         public static final String DEFAULT_UPLOAD_ALLOWED_MIME =
             "image/*,text/plain,text/markdown,text/csv,application/pdf,"
                 + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
-                + "application/zip,application/x-zip-compressed";
+                + "application/msword,application/zip,application/x-zip-compressed";
 
         /** 解析后的存储目录：显式配置优先；未配置则按 OS 选默认值 */
         public String resolvedStorageLocalDir() {

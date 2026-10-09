@@ -13,6 +13,7 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -52,6 +53,10 @@ public class DebugApiController {
     private final SkillCatalogService skillCatalog;
     private final UserSkillService userSkillService;
 
+    /** 备用模型 id（LLM_FALLBACK_MODEL_ID，引用 model_config 托管模型）；空 = 未启用 */
+    @Value("${agent.llm.fallback-model-id:}")
+    private String fallbackModelId;
+
     public DebugApiController(
         AgentManagerProperties props,
         OafConfigHolder oafConfigHolder,
@@ -86,7 +91,8 @@ public class DebugApiController {
                 "provider", llm.provider(),
                 "temperature", llm.temperature(),
                 "max_tokens", llm.maxTokens(),
-                "timeout", llm.timeout()
+                "timeout", llm.timeout(),
+                "fallback_model_id", fallbackModelId == null ? "" : fallbackModelId
             ),
             "server", Map.of("host", server.host(), "port", server.port()),
             "checkpoint", Map.of(

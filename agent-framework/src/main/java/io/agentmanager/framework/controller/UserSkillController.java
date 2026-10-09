@@ -7,7 +7,9 @@ import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.UserSkillService;
@@ -177,6 +180,42 @@ public class UserSkillController {
     }
 
     /**
+     * 下载某用户某技能的整目录为 zip（前端「下载」用）。
+     *
+     * <p>源与列表/读取同口径：有 L4 个人覆盖则打包 L4，否则回落包内（L2）基线；
+     * 两个源都不存在 → 404。文件名 {@code {name}.zip}（RFC 5987 filename* 编码，支持中文）。
+     */
+    @GetMapping("/{userId}/{name}/download")
+    public ResponseEntity<?> downloadSkill(
+            @PathVariable String userId,
+            @PathVariable String name) {
+        if (!UserSkillService.isValidUserId(userId)) {
+            return err(HttpStatus.BAD_REQUEST, "invalid_user_id", "无效的用户标识");
+        }
+        if (!UserSkillService.isValidSkillName(name)) {
+            return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
+        }
+        Optional<byte[]> zip;
+        try {
+            zip = userSkillService.exportSkillZip(userId, name);
+        } catch (Exception e) {
+            log.warn("User skill export failed for {}/{}: {}", userId, name, e.getMessage());
+            return err(HttpStatus.INTERNAL_SERVER_ERROR, "download_failed", "下载失败: " + e.getMessage());
+        }
+        if (zip.isEmpty()) {
+            return err(HttpStatus.NOT_FOUND, "not_found",
+                "技能 '" + name + "' 在用户 " + userId + " 与包内均不存在");
+        }
+        var headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType("application/zip"));
+        headers.setContentLength(zip.get().length);
+        headers.set(HttpHeaders.CONTENT_DISPOSITION,
+            "attachment; filename*=UTF-8''" + urlEncode(name + ".zip"));
+        headers.set("X-Content-Type-Options", "nosniff");
+        return ResponseEntity.ok().headers(headers).body(zip.get());
+    }
+
+    /**
      * 新建/覆盖某用户的技能主文件（SKILL.md）。
      *
      * <p>提示文案分档：非沙箱档“下轮会话生效”；沙箱档只写 agent_fs KV，不会回注容器。
@@ -315,10 +354,71 @@ public class UserSkillController {
         }
     }
 
+    /**
+     * 上传 zip 包作为某用户的个人技能（L4）：解压 → 定位 SKILL.md → 以包内清单全量替换该技能。
+     *
+     * <p>技能名取自 SKILL.md frontmatter {@code name}，缺省回落包裹目录名 / zip 文件名；
+     * 同名技能<b>覆盖</b>。zip 支持扁平（根目录含 SKILL.md）与包裹（一层子目录含 SKILL.md）两种结构。
+     *
+     * <p>体积上限 {@link UserSkillService#MAX_ZIP_BYTES}（10MB），解压后条目数/总大小由
+     * {@link io.agentmanager.framework.service.SkillZipSupport} 兜底。<b>含二进制/非 UTF-8 文件
+     * 拒绝整个包</b>（400）——KV 只存字符串，静默替换会损坏数据。
+     *
+     * <p>沙箱档提示与 {@link #putSkill} 一致：只写 agent_fs KV，由会话开始物化 L4 在该用户下一个 turn 生效。
+     */
+    @PostMapping(value = "/{userId}/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Map<String, Object>> uploadSkillZip(
+            @PathVariable String userId,
+            @RequestParam("file") MultipartFile file) {
+        if (!UserSkillService.isValidUserId(userId)) {
+            return err(HttpStatus.BAD_REQUEST, "invalid_user_id", "无效的用户标识");
+        }
+        if (file == null || file.isEmpty()) {
+            return err(HttpStatus.BAD_REQUEST, "empty_file", "请提供 zip 文件");
+        }
+        if (file.getSize() > UserSkillService.MAX_ZIP_BYTES) {
+            return err(HttpStatus.PAYLOAD_TOO_LARGE, "zip_too_large",
+                "zip 包超过 " + (UserSkillService.MAX_ZIP_BYTES / 1024 / 1024) + "MB 限制");
+        }
+        try (var in = file.getInputStream()) {
+            var outcome = userSkillService.uploadSkillZip(userId, in, file.getOriginalFilename());
+            var resp = new LinkedHashMap<String, Object>();
+            resp.put("userId", userId);
+            resp.put("name", outcome.name());
+            resp.put("action", outcome.action());
+            resp.put("files", outcome.files());
+            resp.put("version", outcome.version());
+            resp.put("message", "用户技能 '" + outcome.name() + "' 已"
+                + ("created".equals(outcome.action()) ? "创建" : "覆盖更新")
+                + "（" + outcome.files().size() + " 个文件，已写入 agent_fs）"
+                + (sandboxMode()
+                    ? "；当前 SANDBOX_ENABLED=true，该用户下一个 turn 开始时物化进容器 /workspace/skills 生效"
+                    : "，用户 " + userId + " 下轮会话生效"));
+            return ResponseEntity.ok(resp);
+        } catch (UserSkillService.ContentTooLargeException e) {
+            return err(HttpStatus.PAYLOAD_TOO_LARGE, "content_too_large", e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return err(HttpStatus.BAD_REQUEST, "invalid_zip", e.getMessage());
+        } catch (Exception e) {
+            log.warn("User skill zip upload failed for {}: {}", userId, e.getMessage());
+            return err(HttpStatus.INTERNAL_SERVER_ERROR, "upload_failed", "上传失败: " + e.getMessage());
+        }
+    }
+
     private static ResponseEntity<Map<String, Object>> err(HttpStatus status, String code, String message) {
         var body = new LinkedHashMap<String, Object>();
         body.put("error", code);
         body.put("message", message);
         return ResponseEntity.status(status).body(body);
+    }
+
+    /** 文件名 URL 编码（RFC 5987 filename*，支持中文技能名） */
+    private static String urlEncode(String name) {
+        try {
+            return java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8)
+                .replace("+", "%20");
+        } catch (Exception e) {
+            return "skill.zip";
+        }
     }
 }
