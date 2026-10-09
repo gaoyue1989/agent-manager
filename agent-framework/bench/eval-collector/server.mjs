@@ -41,6 +41,7 @@ const PORT_AGENT = intEnv('EVAL_COLLECTOR_PORT_AGENT', 18203);
 const PORT_ADMIN = intEnv('EVAL_COLLECTOR_PORT_ADMIN', 18300);
 const ADMIN_TOKEN = ENV.EVAL_COLLECTOR_ADMIN_TOKEN || '';
 const PACKAGER_URL = (ENV.EVAL_PACKAGER_URL || '').replace(/\/$/, '');
+const PACKAGER_TOKEN = ENV.EVAL_PACKAGER_TOKEN || '';  // studio 开启 STUDIO_TOKEN 后的转调凭据（issue #97 评审）
 
 function intEnv(name, dflt) {
   const v = parseInt(ENV[name], 10);
@@ -920,9 +921,12 @@ async function handleAdmin(req, res) {
     if (!ns) return sendJson(res, 400, { error: '无接入档案' });
     if (PACKAGER_URL) {
       try {
-        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）
+        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）；
+        // EVAL_PACKAGER_TOKEN 非空时带 Bearer 头（与 studio 的 STUDIO_TOKEN 同值，compose 已同值注入）
         const resp = await fetch(PACKAGER_URL, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
+          method: 'POST',
+          headers: { 'content-type': 'application/json',
+                     ...(PACKAGER_TOKEN ? { authorization: `Bearer ${PACKAGER_TOKEN}` } : {}) },
           body: JSON.stringify({ ...b, ns, collector_data: DATA_DIR }),
         });
         const text = await resp.text();
