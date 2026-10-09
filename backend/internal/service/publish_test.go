@@ -218,6 +218,60 @@ func TestUpdateEnvFullOverwriteSemantics(t *testing.T) {
 	}
 }
 
+// 空值过滤（issue #97）：UpdateEnv 传入含空串的非敏感键 → 空串=不设置（设计 §3.3），
+// env_json 与活着的 ConfigMap 均不得出现该键（此前仅 Publish 路径过滤）。
+func TestUpdateEnvDropsEmptyPlainKeys(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	updated, err := core.UpdateEnv(svc.ID, map[string]string{"LOG_LEVEL": "warn", "EMPTY_KEY": ""}, nil)
+	if err != nil {
+		t.Fatalf("update env: %v", err)
+	}
+	if strings.Contains(updated.EnvJSON, "EMPTY_KEY") {
+		t.Fatalf("env_json must not contain empty plain key: %s", updated.EnvJSON)
+	}
+	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cm.Data["EMPTY_KEY"]; ok {
+		t.Fatalf("configmap must not contain empty plain key: %+v", cm.Data)
+	}
+	if cm.Data["LOG_LEVEL"] != "warn" {
+		t.Fatalf("non-empty key must still be set: %+v", cm.Data)
+	}
+}
+
+// 空值过滤（issue #97）：Republish 同语义——含空串的非敏感键不落 env_json 与 ConfigMap。
+func TestRepublishDropsEmptyPlainKeys(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	updated, err := core.Republish(svc.ID,
+		RepublishOptions{Env: map[string]string{"LOG_LEVEL": "warn", "EMPTY_KEY": ""}})
+	if err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if strings.Contains(updated.EnvJSON, "EMPTY_KEY") {
+		t.Fatalf("env_json must not contain empty plain key: %s", updated.EnvJSON)
+	}
+	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cm.Data["EMPTY_KEY"]; ok {
+		t.Fatalf("configmap must not contain empty plain key: %+v", cm.Data)
+	}
+	if cm.Data["LOG_LEVEL"] != "warn" {
+		t.Fatalf("non-empty key must still be set: %+v", cm.Data)
+	}
+}
+
 // deploying 状态禁止改 env（滚动进行中重启会互相踩踏）。
 func TestUpdateEnvDeployingRejected(t *testing.T) {
 	core, _, done := newTestCore(t)

@@ -138,7 +138,8 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 空值键不落 CM/Secret（设计 §3.3，同 k8s.EnvSecret 注释）：发布没有「空串=删除」三态
 	// 语义，空值是无意义输入（向导预填的默认值已由 GetPlatformDefaults 过滤，剩余空串来自
 	// 用户手工清空输入框）；空串 env 会让 Spring 占位符 ${VAR:default} 不回落默认值。
-	// PATCH /services/:id/env 的「空串=显式删除」语义不受影响——由 resolveEnvMerge 承担。
+	// 「空串=显式删除」的 PATCH 三态语义由 resolveEnvMerge 承担；三条写路径
+	// （Publish/UpdateEnv/Republish）出口另有 dropEmptyEnv 兜底，空值永不进入 CM/Secret。
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
 	params := c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath)
@@ -260,6 +261,8 @@ func (c *Core) asyncWaitAndRegister(id uint) {
 // UpdateEnv 全量替换 env 并滚动重启。
 // env 为非敏感部分的全量覆盖；模板敏感键或 secretKeys 指定键路由进服务 Secret，
 // 三态语义：出现且非空=设置、出现且空串=删除（回落平台默认）、未出现=sticky 保持不变。
+// 非敏感份空串=不设置（全量覆盖下「不写即删除」，空串无意义），出口 dropEmptyEnv
+// 兜底保证空值不落 CM/env_json/Secret（设计 §3.3）。
 // 旧 env_json 中的存量敏感键自动迁入服务 Secret（设计 §3.6 防丢失规则）。
 func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*store.ServiceEntity, error) {
 	if err := ValidateEnv(env); err != nil {
@@ -283,6 +286,9 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 		return nil, err
 	}
 	plain, secret := resolveEnvMerge(oldPlain, oldSecret, env, secretKeys)
+	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
+	dropEmptyEnv(plain)
+	dropEmptyEnv(secret)
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
@@ -342,6 +348,9 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		secretKeys = opt.SecretKeys
 	}
 	plain, secret := resolveEnvMerge(oldPlain, oldSecret, env, secretKeys)
+	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
+	dropEmptyEnv(plain)
+	dropEmptyEnv(secret)
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
