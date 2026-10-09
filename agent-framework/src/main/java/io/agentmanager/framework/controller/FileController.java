@@ -353,6 +353,8 @@ public class FileController {
             java.util.Set.of("pptx")),
         java.util.Map.entry("application/vnd.ms-excel", java.util.Set.of("xls")),
         java.util.Map.entry("application/vnd.ms-powerpoint", java.util.Set.of("ppt")),
+        // 旧版 Word：标准 MIME 是 application/msword；application/vnd.ms-word 为非标准别名，一并保留兼容
+        java.util.Map.entry("application/msword", java.util.Set.of("doc")),
         java.util.Map.entry("application/vnd.ms-word", java.util.Set.of("doc")),
         java.util.Map.entry("application/xml", java.util.Set.of("xml")),
         java.util.Map.entry("application/javascript", java.util.Set.of("js", "mjs")),

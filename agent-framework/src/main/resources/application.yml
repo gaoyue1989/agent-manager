@@ -50,6 +50,9 @@ agent:
     context-length: ${LLM_CONTEXT_LENGTH:0}
     reasoning-effort: ${LLM_REASONING_EFFORT:}
     frequency-penalty: ${LLM_FREQUENCY_PENALTY:}
+    # 备用模型（引用 model_config 托管模型 id）：主模型重试耗尽（429/5xx/超时/网络）后自动切换；
+    # 空 = 不启用。默认模型走 SDK 原生 fallback，会话自选模型由 SessionModelMiddleware 补齐
+    fallback-model-id: ${LLM_FALLBACK_MODEL_ID:}
   server:
     host: ${SERVER_HOST:0.0.0.0}
     port: ${SERVER_PORT:8100}
@@ -80,7 +83,7 @@ agent:
     upload-enabled: ${FILE_UPLOAD_ENABLED:true}
     upload-max-mb: ${FILE_UPLOAD_MAX_MB:20}
     upload-max-pending: ${FILE_UPLOAD_MAX_PENDING:20}
-    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed}
+    upload-allowed-mime: ${FILE_UPLOAD_ALLOWED_MIME:image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed}
     image-max-mb: ${FILE_IMAGE_MAX_MB:5}
     image-inline-total-mb: ${FILE_IMAGE_INLINE_TOTAL_MB:15}
     present-max-mb: ${FILE_PRESENT_MAX_MB:50}

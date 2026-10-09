@@ -157,6 +157,7 @@ Tomcat started on port 8100
 | `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
 | `LLM_REASONING_EFFORT` | string | 空 | | 推理强度（如 `minimal`/`medium`/`high`；空 = 不传，2026-09-27 新增，绑 `agent.llm.reasoning-effort`） |
 | `LLM_FREQUENCY_PENALTY` | float | 空 | | 频率惩罚（空 = 不传，2026-09-27 新增，绑 `agent.llm.frequency-penalty`） |
+| `LLM_FALLBACK_MODEL_ID` | string | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络）后自动切换；空 = 不启用（绑 `agent.llm.fallback-model-id`）。默认模型走 SDK 原生 fallback，会话自选模型由 `SessionModelMiddleware` 补齐；改动需 `POST /admin/reload` 生效（详见 [model-fallback-design.md](model-fallback-design.md)） |
 
 #### 4.1.2 服务 / Spring
 
@@ -208,7 +209,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_UPLOAD_ENABLED` | bool | `true` | | 上传开关（绑 `agent.file.upload-enabled`） |
 | `FILE_UPLOAD_MAX_MB` | int | `20` | | 单文件大小上限（绑 `agent.file.upload-max-mb`） |
 | `FILE_UPLOAD_MAX_PENDING` | int | `20` | | 用户维度待注入文件数软上限（绑 `agent.file.upload-max-pending`） |
-| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
+| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；`application/msword` 放行旧版 `.doc`；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
 | `FILE_IMAGE_MAX_MB` | int | `5` | | 图片大小上限（绑 `agent.file.image-max-mb`） |
 | `FILE_IMAGE_INLINE_TOTAL_MB` | int | `15` | | 单次请求图片内联总大小上限（绑 `agent.file.image-inline-total-mb`） |
 | `FILE_PRESENT_MAX_MB` | int | `50` | | `present_file` 工具产物大小上限（绑 `agent.file.present-max-mb`） |

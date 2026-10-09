@@ -1,6 +1,7 @@
 package io.agentmanager.framework.service;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,6 +54,8 @@ public class UserSkillService {
     public static final int MAX_CONTENT_BYTES = 100 * 1024;
     /** 从包内下发时的文件数上限（防一次写入过多 KV 对象） */
     public static final int MAX_SYNC_FILES = 200;
+    /** zip 上传压缩包体积上限（10MB）；解压后总大小由 {@link SkillZipSupport#MAX_EXTRACTED_BYTES} 兜底 */
+    public static final long MAX_ZIP_BYTES = 10L * 1024 * 1024;
     /**
      * KV key {@code /{技能名}/{相对路径}} 的字符上限：agent_fs.item_key 为 VARCHAR(255)，
      * 减去 key 里两个 “/” 后为 253；技能名（≤128）与相对路径（≤256）各自合法但组合超限时，
@@ -132,6 +135,9 @@ public class UserSkillService {
      * （非 UTF-8/二进制，KV 只存字符串，静默替换会损坏数据）而被显式跳过的文件。
      */
     public record SyncOutcome(List<String> files, List<String> skipped) {}
+
+    /** zip 上传结果：name 为从包内解析出的技能名，action = created | updated */
+    public record ZipUploadOutcome(String name, String action, List<String> files, long version) {}
 
     // ==================== 名称校验（集中一处维护，禁止路径穿越） ====================
     // 两条硬约束，违反其一就会“写成功但 SDK 读不到”或直接 500：
@@ -397,6 +403,49 @@ public class UserSkillService {
             packageSkillFiles(name), hasOverride));
     }
 
+    /**
+     * 导出某用户某技能的整目录为 zip（前端下载用）。
+     *
+     * <p>源与列表/读取同口径：该用户在本技能有 L4 个人覆盖则导出 L4，否则回落包内（L2）基线；
+     * 两个源都不存在返回 empty（调用方映射 404）。文件均为 UTF-8 文本（L4/包内约定），
+     * 逐文件读不到时跳过（不产出损坏 zip）。
+     *
+     * @return zip 字节；无此技能返回 empty
+     * @throws IllegalArgumentException 无效 userId / 技能名
+     * @throws IllegalStateException    读取或打包失败
+     */
+    public Optional<byte[]> exportSkillZip(String userId, String name) {
+        if (!isValidUserId(userId) || !isValidSkillName(name)) {
+            throw new IllegalArgumentException("无效的用户标识或 Skill 名称");
+        }
+        var hasOverride = workspaceReader.hasUserSkill(userId, name);
+        var files = hasOverride
+            ? new ArrayList<>(workspaceReader.listUserSkills(userId).getOrDefault(name, List.of()))
+            : packageSkillFiles(name);
+        if (files.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            var baos = new java.io.ByteArrayOutputStream();
+            try (var zos = new java.util.zip.ZipOutputStream(baos)) {
+                for (var rel : files) {
+                    var content = hasOverride
+                        ? workspaceReader.readUserSkillFile(userId, name, rel)
+                        : readPackageSkillFile(name, rel);
+                    if (content == null) {
+                        continue;
+                    }
+                    zos.putNextEntry(new java.util.zip.ZipEntry(rel));
+                    zos.write(content.getBytes(StandardCharsets.UTF_8));
+                    zos.closeEntry();
+                }
+            }
+            return Optional.of(baos.toByteArray());
+        } catch (IOException e) {
+            throw new IllegalStateException("导出技能失败: " + e.getMessage());
+        }
+    }
+
     // ==================== 写入 / 删除 / 下发 ====================
 
     /**
@@ -492,14 +541,92 @@ public class UserSkillService {
         if (!Files.isDirectory(sourceDir)) {
             return Optional.empty();
         }
+        return Optional.of(materializeFromDirectory(userId, name, sourceDir, false));
+    }
+
+    /**
+     * zip 上传用户个人技能（覆盖同名 L4）。
+     *
+     * <p>流程：解压 zip 到临时目录 → 定位 SKILL.md（扁平：根目录；包裹：一层子目录）→
+     * 取技能名（frontmatter {@code name} 优先，回落包裹目录名 / zip 文件名）→ 以目录清单
+     * <b>全量替换</b>该用户的 L4 版本（差集清理 + 失败 best-effort 回滚）。
+     *
+     * <p>与「从包内下发」({@link #syncFromPackage}) 的差异（产品决策）：
+     * <ul>
+     *   <li>非 UTF-8/二进制文件<b>拒绝整个包</b>（不是跳过）——KV 只存字符串，静默替换会损坏数据；</li>
+     *   <li>同名技能直接<b>覆盖</b>（{@code action=created|updated}）。</li>
+     * </ul>
+     *
+     * <p>压缩包体积上限 {@link #MAX_ZIP_BYTES}（10MB）由调用方（控制器）前置校验；
+     * 解压后的条目数/总大小上限见 {@link SkillZipSupport}。
+     *
+     * @param zipStream   zip 输入流
+     * @param zipFileName 原始文件名（无 frontmatter name 且非包裹结构时用作技能名）
+     * @return 技能名 + created/updated + 文件清单 + 版本号
+     * @throws IllegalArgumentException 缺 SKILL.md / 名称非法 / 含二进制文件 / 单文件超 100KB /
+     *                                  文件数超限 / key 组合超长
+     * @throws IllegalStateException    zip 解压或 KV 写入失败
+     */
+    public ZipUploadOutcome uploadSkillZip(String userId, InputStream zipStream, String zipFileName) {
+        if (!isValidUserId(userId)) {
+            throw new IllegalArgumentException("无效的用户标识");
+        }
+        Path tmpDir;
+        try {
+            tmpDir = Files.createTempDirectory("user-skill-upload-");
+        } catch (IOException e) {
+            throw new IllegalStateException("创建临时目录失败: " + e.getMessage());
+        }
+        try {
+            SkillZipSupport.extractZip(zipStream, tmpDir);
+            var located = SkillZipSupport.locateSkillRoot(tmpDir);
+            if (located == null) {
+                throw new IllegalArgumentException("Zip 包中未找到 SKILL.md 文件");
+            }
+            var name = SkillZipSupport.extractSkillName(located.skillMd());
+            if (name == null || name.isBlank()) {
+                // 降级：用包裹目录名或 zip 文件名
+                name = !located.skillRoot().equals(tmpDir)
+                    ? located.skillRoot().getFileName().toString()
+                    : SkillZipSupport.stripExtension(zipFileName, "zip");
+            }
+            name = SkillZipSupport.sanitizeSkillName(name);
+            if (name == null || name.isBlank() || !isValidSkillName(name)) {
+                throw new IllegalArgumentException("无效的 Skill 名称");
+            }
+            var existed = workspaceReader.hasUserSkill(userId, name);
+            var sync = materializeFromDirectory(userId, name, located.skillRoot(), true);
+            var version = workspaceReader.userSkillFileVersion(userId, name, WorkspaceReader.SKILL_FILE);
+            log.info("upload_skill_zip: skill {} ({} files) → user {}", name, sync.files().size(), userId);
+            return new ZipUploadOutcome(name, existed ? "updated" : "created", sync.files(), version);
+        } catch (IOException e) {
+            throw new IllegalStateException("Zip 解压失败: " + e.getMessage());
+        } finally {
+            SkillZipSupport.deleteRecursive(tmpDir);
+        }
+    }
+
+    /**
+     * 以某目录为准，把技能整目录物化为该用户的 L4 版本（{@link #syncFromPackage} 与
+     * {@link #uploadSkillZip} 共用）。
+     *
+     * <p>语义是<b>以源目录清单为准的全量替换</b>：源目录已不存在的旧文件（如换版后删掉的 scripts）
+     * 会被差集清理，保证个人目录与源目录一致；任一环节失败都做 best-effort 回滚
+     * （恢复旧内容、删除本次新建的键），不会留下“有 SKILL.md 缺资源”的半份覆盖。
+     *
+     * @param sourceDir     含 SKILL.md 的源目录（包内技能目录 或 zip 解压根目录）
+     * @param rejectNonUtf8 true = 遇非 UTF-8/二进制文件抛异常拒绝整个包；false = 跳过并记入 skipped
+     */
+    private SyncOutcome materializeFromDirectory(String userId, String name, Path sourceDir,
+                                                 boolean rejectNonUtf8) {
         Map<String, String> sourceFiles = new LinkedHashMap<>();
-        var packagePaths = new LinkedHashSet<String>();  // 包内文件全集（含跳过项，用于差集清理）
+        var packagePaths = new LinkedHashSet<String>();  // 源文件全集（含跳过项，用于差集清理）
         var skipped = new ArrayList<String>();           // 非 UTF-8/二进制被显式跳过的文件
         try (Stream<Path> stream = Files.walk(sourceDir)) {
             for (var path : stream.filter(Files::isRegularFile).toList()) {
                 var rel = sourceDir.relativize(path).toString().replace('\\', '/');
                 if (!isValidSkillFilePath(rel) || isMetadataFile(rel)) {
-                    continue; // 隐藏/元数据文件（含 .skill-states.json）不参与下发
+                    continue; // 隐藏/元数据文件（含 .skill-states.json）不参与物化
                 }
                 if (!isValidSkillIdentity(name, rel)) {
                     // KV key 上限（item_key VARCHAR(255)）：入口即拦，否则会落到 KV 写入 500
@@ -513,8 +640,12 @@ public class UserSkillService {
                 }
                 var content = decodeUtf8Strict(bytes);
                 if (content == null) {
+                    if (rejectNonUtf8) {
+                        throw new IllegalArgumentException(
+                            "技能文件 " + rel + " 不是合法的 UTF-8 文本（二进制/非 UTF-8 文件不允许）");
+                    }
                     skipped.add(rel);
-                    log.warn("sync_from_package: 跳过非 UTF-8/二进制文件 {}/{}（{} 字节）",
+                    log.warn("materialize_skill: 跳过非 UTF-8/二进制文件 {}/{}（{} 字节）",
                         name, rel, bytes.length);
                     continue;
                 }
@@ -523,16 +654,16 @@ public class UserSkillService {
         } catch (ContentTooLargeException e) {
             throw e;
         } catch (IOException e) {
-            throw new IllegalStateException("读取包内技能失败: " + e.getMessage());
+            throw new IllegalStateException("读取技能目录失败: " + e.getMessage());
         }
         if (sourceFiles.isEmpty() || !sourceFiles.containsKey(WorkspaceReader.SKILL_FILE)) {
-            throw new IllegalArgumentException("包内技能 '" + name + "' 缺少 " + WorkspaceReader.SKILL_FILE);
+            throw new IllegalArgumentException("技能 '" + name + "' 缺少 " + WorkspaceReader.SKILL_FILE);
         }
         if (sourceFiles.size() > MAX_SYNC_FILES) {
             throw new IllegalArgumentException("技能文件数超过 " + MAX_SYNC_FILES + " 限制");
         }
 
-        // 下发前取 L4 现有文件的“相对路径 → 内容”快照：既用于差集清理，也用于失败回滚
+        // 物化前取 L4 现有文件的“相对路径 → 内容”快照：既用于差集清理，也用于失败回滚
         Map<String, String> previous = new LinkedHashMap<>();
         for (var rel : workspaceReader.listUserSkills(userId).getOrDefault(name, List.of())) {
             var old = workspaceReader.readUserSkillFile(userId, name, rel);
@@ -551,18 +682,18 @@ public class UserSkillService {
         try {
             for (var entry : orderedFiles.entrySet()) {
                 if (!workspaceReader.writeUserSkillFile(userId, name, entry.getKey(), entry.getValue())) {
-                    throw new IllegalStateException("下发失败: " + entry.getKey() + "（KV " + namespaceHint() + "）");
+                    throw new IllegalStateException("写入失败: " + entry.getKey() + "（KV " + namespaceHint() + "）");
                 }
                 written.add(entry.getKey());
             }
-            // 差集清理：包内已不存在的旧文件必须删掉，否则个人版本 ≠ 包内目录（旧 scripts 仍被 L4 覆盖可见）
+            // 差集清理：源目录已不存在的旧文件必须删掉，否则个人版本 ≠ 源目录（旧 scripts 仍被 L4 覆盖可见）
             for (var rel : previous.keySet()) {
                 if (packagePaths.contains(rel)) {
                     continue;
                 }
                 if (!workspaceReader.deleteUserSkillFile(userId, name, rel)) {
                     throw new IllegalStateException(
-                        "清理包内已不存在的旧文件失败: " + rel + "（KV " + namespaceHint() + "）");
+                        "清理源目录已不存在的旧文件失败: " + rel + "（KV " + namespaceHint() + "）");
                 }
                 removed.add(rel);
             }
@@ -571,19 +702,19 @@ public class UserSkillService {
             throw e;
         }
         // 个人版本已重建：清除删除标记，否则沙箱回写侧会一直跳过该技能；并置管理面写入栅栏，
-        // 避免同代容器内旧副本在下次 call 结束时把刚下发的版本改回容器版本
+        // 避免同代容器内旧副本在下次 call 结束时把刚物化的版本改回容器版本
         if (!workspaceReader.clearUserSkillDeletion(userId, name)) {
-            throw new IllegalStateException("下发成功但删除标记清除失败（KV " + namespaceHint() + "）");
+            throw new IllegalStateException("物化成功但删除标记清除失败（KV " + namespaceHint() + "）");
         }
         if (!workspaceReader.markUserSkillAdminOverride(userId, name)) {
-            throw new IllegalStateException("下发成功但管理面写入栅栏写入失败（KV " + namespaceHint() + "）");
+            throw new IllegalStateException("物化成功但管理面写入栅栏写入失败（KV " + namespaceHint() + "）");
         }
-        log.info("sync_from_package: skill {} ({} files, {} skipped) → user {}",
+        log.info("materialize_skill: skill {} ({} files, {} skipped) → user {}",
             name, orderedFiles.size(), skipped.size(), userId);
         // 与 files() 同样按字典序返回：跳过清单源自 Files.walk 的枚举顺序，
         // 不同文件系统不一致（CI runner 上即出现顺序差异），会给出不确定的对外结果
         java.util.Collections.sort(skipped);
-        return Optional.of(new SyncOutcome(new ArrayList<>(orderedFiles.keySet()), skipped));
+        return new SyncOutcome(new ArrayList<>(orderedFiles.keySet()), skipped);
     }
 
     /**

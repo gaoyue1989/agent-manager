@@ -109,6 +109,18 @@ export const api = {
       (file ? '?file=' + encodeURIComponent(file) : '')),
   putUserSkill: (userId, name, content) =>
     put('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name), { content }),
+  uploadUserSkillZip: async (userId, file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const resp = await fetch(BASE + '/skills/users/' + encodeURIComponent(userId) + '/upload', {
+      method: 'POST',
+      body: formData
+    });
+    if (!resp.ok) throw await httpError(resp, '/skills/users/' + userId + '/upload');
+    return resp.json();
+  },
+  userSkillDownloadUrl: (userId, name) =>
+    BASE + '/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name) + '/download',
   deleteUserSkill: (userId, name) =>
     del('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name)),
   syncUserSkillFromPackage: (userId, name) =>
