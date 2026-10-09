@@ -136,34 +136,36 @@ curl http://localhost:8100/skills
 | GET | `/skills/{name}/content` | 读 `SKILL.md`：`{name, content}` |
 | PUT | `/skills/{name}/content` | 写 `SKILL.md`，body `{content}`（≤100KB） |
 
-> `GET /skills/users/{userId}` 与 `GET /skills/{name}/content` 在 `userId == "content"` 时同时匹配，
-> 由更具体的 `/skills/{name}/content` 命中（Spring 路由优先级）。
+> `GET /skills/users/{name}` 与 `GET /skills/{name}/content` 在 `name == "content"` 时同时匹配，
+> 由更具体的 `/skills/{name}/content` 命中（Spring 路由优先级）；`name == "toggle"` 与
+> `PUT /skills/{name}/toggle` 同理。个人技能名恰为 `content`/`toggle` 属既有窄边界。
 
 ### 用户个人技能（L4）
 
-命名空间 `agents/{agent}/users/{uid}/skills`。生效范围分档：非沙箱档下一轮会话生效；
-沙箱档由「会话开始物化 L4」投影进容器，在该用户下一个 turn 生效。
+命名空间 `agents/{agent}/users/{uid}/skills`。**用户身份取网关注入的 `X-User-Id` 请求头**
+（缺失 400 `missing_user_id` / 非法 400 `invalid_user_id`），URL 路径不再携带 userId。
+生效范围分档：非沙箱档下一轮会话生效；沙箱档由「会话开始物化 L4」投影进容器，在该用户下一个 turn 生效。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/skills/users` | 有个人技能的用户索引：`{count, users:[...], truncated?}` |
-| GET | `/skills/users/{userId}` | 该用户的 L4 技能：`{userId, skills, tombstones}` |
-| GET | `/skills/users/{userId}/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
-| GET | `/skills/users/{userId}/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
-| PUT | `/skills/users/{userId}/{name}` | 写个人技能，body `{content}` |
-| POST | `/skills/users/{userId}/upload` | **zip 上传个人技能**（multipart `file`，≤10MB）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
-| DELETE | `/skills/users/{userId}/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
-| POST | `/skills/users/{userId}/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
+| GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}` |
+| GET | `/skills/users/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
+| GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
+| PUT | `/skills/users/{name}` | 写个人技能，body `{content}` |
+| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
+| DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
+| POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
+| GET | `/debug/user-skills` | **全量用户索引**（运维/调试）；`{count, users:[...], truncated?}`；索引失败 500 |
 
 **回写仲裁（两个 KV 元数据键，命中即跳过同名技能）：**
 
 | 标记 | 写入方 | 作用 |
 |------|--------|------|
 | `/{name}/.deleted` | 管理面删除 | 防删除被容器内副本复活 |
-| `/{name}/.admin-override` | 管理面写入（PUT / 下发） | 防管理面写入被同代容器内旧副本改回 |
+| `/{name}/.admin-override` | 管理面写入（PUT / 下发 / 上传） | 防管理面写入被同代容器内旧副本改回 |
 
 代价是标记生效期间，容器内 `skill_manage` 对该技能的修改不落库。状态与清除方式经
-`GET /skills/users/{userId}` 的 `tombstones` 字段与删除 / PUT 响应下发。
+`GET /skills/users` 的 `tombstones` 字段与删除 / PUT 响应下发。
 
 ---
 
