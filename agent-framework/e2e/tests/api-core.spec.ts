@@ -948,7 +948,7 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
 //（手工脚本，需平台已发布带 skills 的自建服务）；此处只钉住端点路由与响应契约，防路由写错静默合入。
 
 test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
-  // 调试页数据源：与 /skills/users 同源，字段为 count/users
+  // 调试页数据源：全量用户索引，字段为 count/users
   const debugIdx = await request.get('/debug/user-skills');
   expect(debugIdx.status()).toBe(200);
   const idx = await debugIdx.json();
@@ -956,19 +956,24 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
   expect(Array.isArray(idx.users)).toBe(true);
   expect(idx.count).toBe(idx.users.length);
 
-  // REST 侧入口（同源）：/skills/users 不是 /skills/{name}/content 的歧义牺牲品
-  const usersRes = await request.get('/skills/users');
-  expect(usersRes.status()).toBe(200);
-  const usersBody = await usersRes.json();
-  expect(usersBody).toHaveProperty('users');
+  // REST 侧入口：/skills/users 现为「我的技能」，用户身份取 X-User-Id 头（网关注入）
+  const mine = await request.get('/skills/users', { headers: { 'X-User-Id': U } });
+  expect(mine.status()).toBe(200);
+  const mineBody = await mine.json();
+  expect(mineBody.userId).toBe(U);
+  expect(Array.isArray(mineBody.skills)).toBe(true);
+  expect(Array.isArray(mineBody.tombstones)).toBe(true);
 
   // 明细：L4 无覆盖 + 包内无同名技能 → 404 not_found（而不是 500/200 空体）
-  const ghost = await request.get(`/skills/users/${U}/ghost-skill-${uniq()}`);
+  const ghost = await request.get(`/skills/users/ghost-skill-${uniq()}`, { headers: { 'X-User-Id': U } });
   expect(ghost.status()).toBe(404);
   expect((await ghost.json()).error).toBe('not_found');
 
-  // 参数校验：非法 userId → 400
-  const bad = await request.get('/skills/users/.hidden/ghost');
+  // 身份校验：缺 X-User-Id → 400 missing_user_id；非法 userId → 400 invalid_user_id
+  const noHdr = await request.get('/skills/users');
+  expect(noHdr.status()).toBe(400);
+  expect((await noHdr.json()).error).toBe('missing_user_id');
+  const bad = await request.get('/skills/users/ghost', { headers: { 'X-User-Id': '.hidden' } });
   expect(bad.status()).toBe(400);
   expect((await bad.json()).error).toBe('invalid_user_id');
 });
@@ -980,7 +985,10 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
 /** 写入用户 L4 技能主文件：description 承载 /available 合并视图的覆盖描述（l4Description 解析 frontmatter） */
 async function putL4(request: APIRequestContext, uid: string, name: string, description: string): Promise<APIResponse> {
   const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
-  return request.put(`/skills/users/${encodeURIComponent(uid)}/${encodeURIComponent(name)}`, { data: { content } });
+  return request.put(`/skills/users/${encodeURIComponent(name)}`, {
+    headers: { 'X-User-Id': uid },
+    data: { content }
+  });
 }
 
 /** /available 返回顺序（全局目录序 + L4 追加）不参与契约，深比较前按 name 归一 */
@@ -1038,7 +1046,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   expect(JSON.stringify(globalAfter)).not.toContain(l4Only);
 
   // 删除回落：demo-skill 删除（有包内基线）→ 合并视图回落全局描述
-  const del = await request.delete(`/skills/users/${encodeURIComponent(uidA)}/demo-skill`);
+  const del = await request.delete('/skills/users/demo-skill', { headers: { 'X-User-Id': uidA } });
   expect(del.status()).toBe(200);
   expect(((await del.json()) as Record<string, unknown>).hasPackageBaseline).toBe(true);
   await pollUntil(async () => {
@@ -1046,7 +1054,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
     return rows.find(e => e.name === 'demo-skill');
   }, e => e?.description === baseDemo!.description, 15_000);
   // 独有技能删除 → 从合并视图消失（无包内基线，该技能对该用户已不可见）
-  expect((await request.delete(`/skills/users/${encodeURIComponent(uidA)}/${encodeURIComponent(l4Only)}`)).status()).toBe(200);
+  expect((await request.delete(`/skills/users/${encodeURIComponent(l4Only)}`, { headers: { 'X-User-Id': uidA } })).status()).toBe(200);
   await pollUntil(async () => {
     const rows = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
     return rows.some(e => e.name === l4Only);

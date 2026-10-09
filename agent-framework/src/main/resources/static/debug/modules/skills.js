@@ -605,15 +605,21 @@ async function handleUserSkillZipUpload() {
   }
 }
 
-/** 下载：整目录 zip（L4 有覆盖则导 L4，否则回落包内基线） */
-function handleUserSkillDownload(userId, name) {
-  var url = ctx.api.userSkillDownloadUrl(userId, name);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = name + '.zip';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+/** 下载：整目录 zip（L4 有覆盖则导 L4，否则回落包内基线）。经 fetch 带 X-User-Id 头取 blob */
+async function handleUserSkillDownload(userId, name) {
+  try {
+    var blob = await ctx.api.downloadUserSkillZip(userId, name);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    ctx.utils.toast('✘ 下载失败: ' + e.message, 'error');
+  }
 }
 
 /** 当前 userId（以输入框为准，编辑/删除时避免用到旧状态） */

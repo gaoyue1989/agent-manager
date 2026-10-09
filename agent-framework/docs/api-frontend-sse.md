@@ -1121,19 +1121,21 @@ GET /skills/manage
 | `/skills/{name}/content` | GET | 读取 SKILL.md 内容 | `{name, content}` |
 | `/skills/{name}/content` | PUT | 修改 SKILL.md 内容，body `{content}`（≤100KB） | `{name, message}` |
 
-**用户个人技能（L4）：**
+**用户个人技能（L4）：** 用户身份取网关注入的 `X-User-Id` 请求头（缺失/非法 400），URL 不携带 userId。
 
 | 端点 | 方法 | 说明 | 响应 |
 |------|------|------|------|
-| `/skills/users` | GET | 有个人技能的用户索引 | `{count, users:[...], truncated?}` |
-| `/skills/users/{userId}` | GET | 该用户的 L4 技能 | `{userId, skills, tombstones}` |
-| `/skills/users/{userId}/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
-| `/skills/users/{userId}/{name}` | PUT | 写个人技能，body `{content}` | `{userId, name, action, version, message}` |
-| `/skills/users/{userId}/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
-| `/skills/users/{userId}/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |
+| `/skills/users` | GET | 当前用户的 L4 技能 | `{userId, skills, tombstones}` |
+| `/skills/users/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
+| `/skills/users/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`） | `application/zip` 附件 |
+| `/skills/users/{name}` | PUT | 写个人技能，body `{content}` | `{userId, name, action, version, message}` |
+| `/skills/users/upload` | POST | zip 上传个人技能（multipart `file`，≤10MB；二进制拒绝） | `{userId, name, action, files, version, message}` |
+| `/skills/users/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
+| `/skills/users/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |
+| `/debug/user-skills` | GET | 全量用户索引（运维/调试） | `{count, users:[...], truncated?}` |
 
-> ⚠️ 路由歧义（框架内已注明）：`GET /skills/users/{userId}` 与 `GET /skills/{name}/content`
-> 在 `userId == "content"` 时同时匹配，由更具体的 `/skills/{name}/content` 命中。
+> ⚠️ 路由歧义（框架内已注明）：`GET /skills/users/{name}` 与 `GET /skills/{name}/content`
+> 在 `name == "content"` 时同时匹配，由更具体的 `/skills/{name}/content` 命中。
 
 **生效范围分档：** 非沙箱档管理面写入**下一轮会话生效**；沙箱档会话读容器内 `/workspace/skills` 副本，
 管理面写入由「会话开始物化 L4」（`WorkspaceReader.materializeUserSkills`）投影进容器，
