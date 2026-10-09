@@ -222,12 +222,69 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
     check("HTTP 反代 session 提取（path）", path_rec.get("session") == "sess-http-2",
           f"path={path_rec.get('path')} session={path_rec.get('session')}")
 
+    # 2.5c 防路径穿越（issue #97 问题7）+ 超长脱敏保护（问题5）
+    kinds = ("llm", "sandbox", "mcp", "http")
+    before = {k: _count_lines(work / "collector-data" / "e2e" / k) for k in kinds}
+    # 拒绝式校验：%2e%2e 与字面 ../ 一律 400。注意字面 ../ 须走 urllib（httpx 客户端会先做
+    # 点段归一化折叠成 /admin，到不了 collector 的校验层）；httpx 对 %2e%2e 原样透传可用。
+    trav_cases = [
+        ("LLM 口", "http://127.0.0.1:18200/e2e/v1/%2e%2e/admin", "httpx"),
+        ("沙箱口", "http://127.0.0.1:18201/e2e/%2e%2e/env", "httpx"),
+        ("MCP 口", "http://127.0.0.1:18202/mcp/e2e/srv1/%2e%2e/secret", "httpx"),
+        ("agent 口", "http://127.0.0.1:18203/e2e/%2e%2e/actuator", "httpx"),
+        ("LLM 口(..)", "http://127.0.0.1:18200/e2e/v1/../../admin", "urllib"),
+        # 多重百分号编码：单轮解码漏放形态（%252e%252e 一轮解码后为 %2e%2e，不含字面 ..），
+        # 循环解码至不动点后须同样 400（终审评审补）
+        ("agent 口(双重编码)", "http://127.0.0.1:18203/e2e/%252e%252e/admin", "urllib"),
+        ("LLM 口(三重编码)", "http://127.0.0.1:18200/e2e/v1/%25252e%25252e/admin", "urllib"),
+    ]
+    for name, url, client in trav_cases:
+        if client == "httpx":
+            r = httpx.get(url, timeout=10)
+            code = r.status_code
+        else:
+            try:
+                with urllib.request.urlopen(url, timeout=10) as resp:
+                    code = resp.status
+            except urllib.error.HTTPError as e:
+                code = e.code
+        check(f"防穿越 {name} 400", code == 400, f"status={code}")
+    after = {k: _count_lines(work / "collector-data" / "e2e" / k) for k in kinds}
+    check("穿越请求不落录制", before == after, f"{before} → {after}")
+
+    # 合法编码形态不误伤：查询串编码参数原样透传（%2F/%20 均放行，mock 侧剥查询串后命中路由）
+    r = httpx.post("http://127.0.0.1:18200/e2e/v1/chat/completions?model=x%2Fa",
+                   json={"stream": False, "messages": [{"role": "user", "content": "echo: 编码参数"}]}, timeout=30)
+    check("合法编码查询串透传（LLM 口 200）", r.status_code == 200, str(r.status_code))
+    llm_latest = _read_latest(work / "collector-data" / "e2e" / "llm")
+    check("录制 path 保留原始查询串", llm_latest.get("path") == "/v1/chat/completions?model=x%2Fa",
+          str(llm_latest.get("path")))
+    r = httpx.post("http://127.0.0.1:18201/e2e/v1/sandboxes?x=a%2Fb", json={"image": "demo:latest"}, timeout=30)
+    check("合法编码查询串透传（沙箱口 200）", r.status_code == 200, str(r.status_code))
+    r = httpx.post("http://127.0.0.1:18202/mcp/e2e/srv1/?t=a%2Fb",
+                   json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": {"name": "echo", "arguments": {"text": "q"}}}, timeout=30)
+    check("合法编码查询串透传（MCP 口 200）", r.status_code == 200, str(r.status_code))
+    r = httpx.get("http://127.0.0.1:18203/e2e/threads/a%20b/status", timeout=30)
+    # agent 口上游（:18991）在本阶段不在线：放行到转发层 = 502；若 400 说明合法编码被误拒
+    check("合法编码路径直达转发层（agent 口 502 非 400）", r.status_code == 502, str(r.status_code))
+
+    # 1MB 病理载荷脱敏（问题5回归锁）：>64KB 单值整段跳过正则并打 mask_skipped——
+    # 修复前该形状触发二次方回溯为分钟级阻塞，本地实测修复后 ~30ms；取 2s 容忍 CI 慢机抖动
+    big = "a" * 1_000_000 + "@"
+    t0 = time.time()
+    mt = httpx.post(f"{admin}/api/mask-test", json={"ns": "e2e", "text": big}, timeout=60).json()
+    elapsed = time.time() - t0
+    check("mask-test 1MB 病理载荷 <2s（修复前分钟级）", elapsed < 2.0, f"{elapsed * 1000:.0f}ms")
+    check("mask-test 超长跳过打标 mask_skipped", mt.get("mask_skipped") is True, str(mt.get("mask_skipped")))
+
     # 2.6 状态三态语义
     httpx.post(f"{admin}/api/profiles/e2e/state", json={"state": "passthrough"}, timeout=10)
+    n_before = _count_lines(work / "collector-data" / "e2e" / "llm")
     httpx.post("http://127.0.0.1:18200/e2e/v1/chat/completions",
                json={"stream": False, "messages": [{"role": "user", "content": "echo: passthrough-should-not-record"}]}, timeout=30)
-    n_before = _count_lines(work / "collector-data" / "e2e" / "llm")
-    check("passthrough 不录制", n_before == 2, f"lines={n_before}")
+    n_after = _count_lines(work / "collector-data" / "e2e" / "llm")
+    check("passthrough 不录制", n_after == n_before, f"lines={n_before}→{n_after}")
     httpx.post(f"{admin}/api/profiles/e2e/state", json={"state": "disabled"}, timeout=10)
     r = httpx.post("http://127.0.0.1:18200/e2e/v1/chat/completions",
                    json={"stream": False, "messages": [{"role": "user", "content": "x"}]}, timeout=10)
@@ -242,7 +299,8 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
     st = httpx.get(f"{admin}/api/status", timeout=10).json()
     pf_e2e = next((x for x in st["profiles"] if x["ns"] == "e2e"), None)
     counts = pf_e2e["counts"] if pf_e2e else {}
-    check("状态计数", counts.get("llm", {}).get("total") == 2
+    # llm 计数与磁盘录制行数一致（2.5c 会追加合法录制，绝对数 2 已不可靠，改对账式断言）
+    check("状态计数", counts.get("llm", {}).get("total") == _count_lines(work / "collector-data" / "e2e" / "llm")
           and counts.get("sandbox", {}).get("total") >= 1 and counts.get("mcp", {}).get("total") >= 1, str(counts))
     return sess
 

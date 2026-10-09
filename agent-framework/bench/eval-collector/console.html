@@ -82,7 +82,7 @@ function copy(text){ navigator.clipboard.writeText(text).then(()=>toast('已复�
 const stateTag = s => ({recording:'<span class="tag rec">录制中</span>', passthrough:'<span class="tag pass">仅透传</span>', disabled:'<span class="tag dis">已停用</span>'}[s]||s);
 const MB = 1024*1024;
 
-let tab = 'status', status=null, profiles=[], wiz={step:1, ns:'', display:'', upstream:{llm:'', sandbox:'', mcp:[], llm_api_key:'', llm_default_model:''}, precheck:null};
+let tab = 'status', status=null, profiles=[], wiz={step:1, ns:'', display:'', upstream:{llm:'', sandbox:'', mcp:[], agent:'', llm_api_key:'', llm_default_model:''}, precheck:null};
 
 async function refresh(){ try{ [status, profiles] = await Promise.all([api('/api/status'), api('/api/profiles')]);
   $('#health').textContent = `profile ${profiles.profiles.length} · 存储 ${fmtB(status.storage_bytes)} · 运行 ${Math.floor(status.uptime_s/60)} 分钟`;
@@ -92,14 +92,14 @@ const views = {
   async status(){ const el = $('#main');
     const rows = status.profiles.map(p=>`
       <tr><td class="mono">${esc(p.ns)}</td><td>${esc(p.display||'')}</td><td>${stateTag(p.state)}</td>
-      <td>LLM ${p.counts.llm.today}/${p.counts.llm.total} · 沙箱 ${p.counts.sandbox.today}/${p.counts.sandbox.total} · MCP ${p.counts.mcp.today}/${p.counts.mcp.total}</td>
-      <td>${['llm','sandbox','mcp'].filter(k=>p.upstream[k]===true||(Array.isArray(p.upstream[k])&&p.upstream[k].length)).join('/')||'-'}</td></tr>`).join('');
+      <td>LLM ${p.counts.llm.today}/${p.counts.llm.total} · 沙箱 ${p.counts.sandbox.today}/${p.counts.sandbox.total} · MCP ${p.counts.mcp.today}/${p.counts.mcp.total} · 业务 ${p.counts.http.today}/${p.counts.http.total}</td>
+      <td>${['llm','sandbox','mcp','agent'].filter(k=>p.upstream[k]===true||(Array.isArray(p.upstream[k])&&p.upstream[k].length)).join('/')||'-'}</td></tr>`).join('');
     el.innerHTML = `
-    <div class="card"><h2>接入概览 <span class="hint">今日/累计 交互数 · 端口 18200 LLM / 18201 沙箱 / 18202 MCP</span></h2>
+    <div class="card"><h2>接入概览 <span class="hint">今日/累计 交互数 · 端口 18200 LLM / 18201 沙箱 / 18202 MCP / 18203 业务服务（agent）</span></h2>
       <table><tr><th>ns</th><th>名称</th><th>状态</th><th>交互（今日/累计）</th><th>已配上游</th></tr>${rows||'<tr><td colspan=5 class="dim">暂无接入档案，前往「接入向导」创建</td></tr>'}</table></div>
     <div class="card"><h2>最近交互流水 <span class="hint">脱敏后数据</span>
       <select id="ns-sel" style="width:auto">${profiles.profiles.map(p=>`<option value="${esc(p.ns)}">${esc(p.ns)}</option>`).join('')}</select>
-      <select id="kind-sel" style="width:auto"><option value="llm">LLM</option><option value="sandbox">沙箱</option><option value="mcp">MCP</option></select></h2>
+      <select id="kind-sel" style="width:auto"><option value="llm">LLM</option><option value="sandbox">沙箱</option><option value="mcp">MCP</option><option value="http">业务服务（HTTP）</option></select></h2>
       <div id="flow">…</div></div>`;
     const load = async () => {
       const ns=$('#ns-sel').value, kind=$('#kind-sel').value;
@@ -135,6 +135,7 @@ const views = {
              <label>LLM API Key（可选，填则由 collector 注入；不填透传调用方凭据）</label><input id="u-key" type="password" value="${esc(w.upstream.llm_api_key)}">
              <label>默认模型（可选，业务请求未带 model 时注入）</label><input id="u-model" value="${esc(w.upstream.llm_default_model)}"></div>
         <div><label>沙箱上游（OpenSandbox 地址，可选）</label><input id="u-sbx" value="${esc(w.upstream.sandbox)}">
+             <label>业务服务上游（agent 反代地址，可选；经 :18203 录制 kind=http 交互）</label><input id="u-agent" value="${esc(w.upstream.agent)}" placeholder="http://svc:8100">
              <label>MCP server（名=URL，每行一个，可选）</label><textarea id="u-mcp" rows="4" placeholder="platform http://platform-backend:8080/mcp">${esc(w.upstream.mcp.map(m=>`${m.name} ${m.url}`).join('\n'))}</textarea></div></div>
         <div class="row" style="margin-top:14px"><button class="btn" id="w-back">上一步</button>
              <button class="btn" id="w-check">预检上游</button><button class="btn pri" id="w-next">创建档案并继续</button></div>
@@ -163,8 +164,11 @@ const views = {
       $('#w-next').onclick = ()=>{ w.step=4; views.wizard(); }; }
     if (w.step===4) { let snip={};
       try{ snip = await api(`/api/profiles/${w.ns}/switch-snippet`); }catch(e){}
+      const envKeys = Object.entries(snip.env_keys||{}).map(([k,v])=>`${k}=${v}`).join('\n') || '（无）';
       body.innerHTML = `
-      <div class="card"><h2>④ 生成切换片段 <span class="hint">把业务服务三个外部依赖键指向 collector（复制即用）</span></h2>
+      <div class="card"><h2>④ 生成切换片段 <span class="hint">把业务服务四个外部依赖键指向 collector（复制即用）</span></h2>
+        <label>本次切换的 env 键（AGENT_INTERNAL_URL 仅在配置了业务服务上游时出现）</label>
+        <pre class="code">${esc(envKeys)}</pre>
         <label>平台 env 编辑 API（敏感键保持原值，仅切换 base 地址）</label>
         <pre class="code">${esc(snip.env_patch_curl||'')}<button class="btn copy" onclick="copy(this.parentNode.textContent.replace('复制',''))">复制</button></pre>
         <label>OAF 包 mcp-configs url 改写（需 republish 或在线编辑后生效）</label>
@@ -179,13 +183,14 @@ const views = {
         <button class="btn" id="v-refresh">刷新</button><button class="btn pri" id="w-done">完成</button></div></div>`;
     if (w.step===5) {
       const check = async () => { await refresh(); const p = status.profiles.find(x=>x.ns===w.ns);
-        const n = p ? p.counts.llm.total + p.counts.sandbox.total + p.counts.mcp.total : 0;
+        const n = p ? p.counts.llm.total + p.counts.sandbox.total + p.counts.mcp.total + p.counts.http.total : 0;
         $('#v-state').innerHTML = n>0 ? `<span class="ok">✔ 已捕获 ${n} 条交互，采集链路正常</span>` : '<span class="warn">尚未捕获交互</span>'; };
       $('#v-refresh').onclick = check; check();
       $('#w-done').onclick = ()=>{ w.step=1; tab='status'; switchTab('status'); }; }
     function readUpstream(){
       return { llm:$('#u-llm').value.trim(), llm_api_key:$('#u-key').value.trim(),
         llm_default_model:$('#u-model').value.trim(), sandbox:$('#u-sbx').value.trim(),
+        agent:$('#u-agent').value.trim(),
         mcp:$('#u-mcp').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
           const [name, ...rest] = l.split(/\s+/); return {name, url:rest.join(' ')}; }) }; }
     function tempProfile(d, state){
@@ -195,6 +200,7 @@ const views = {
       if(d.llm_api_key) p.upstream.llm_api_key = d.llm_api_key;
       if(d.llm_default_model) p.upstream.llm_default_model = d.llm_default_model;
       if(d.sandbox) p.upstream.sandbox = d.sandbox;
+      if(d.agent) p.upstream.agent = d.agent;
       if(d.mcp.length) p.upstream.mcp = Object.fromEntries(d.mcp.map(m=>[m.name, m.url]));
       return p; }
   },
@@ -237,7 +243,7 @@ const views = {
       const ns = $('#td-ns').value; if(!ns) return;
       const s = await api(`/api/profiles/${ns}/restore-snippet`);
       $('#td-out').innerHTML = `
-        <label>① 三个依赖键切回真实上游（复制即用）</label>
+        <label>① 四个依赖键切回真实上游（复制即用）</label>
         <pre class="code">${esc(s.env_patch_curl)}<button class="btn copy" onclick="copy(this.parentNode.textContent.replace('复制',''))">复制</button></pre>
         <label>mcp-configs 还原</label><pre class="code">${esc((s.mcp_config_diff||[]).join('\n\n')||'（无）')}</pre>
         <p class="dim">② 确认该 ns 已无新流量（状态面板计数停止增长）→ ③ 停止 collector 或将档案置为「仅透传」。</p>`; };
