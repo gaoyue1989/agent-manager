@@ -179,7 +179,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 子 Agent | ✅ | subagents/*.md |
 | 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆/用户技能回写 KV） |
 | Agent 状态存储 | ✅ | MysqlDistributedStore (agent_state + agent_fs) |
-| 模型集成 | ✅ | OpenAI 兼容 API |
+| 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 备用模型（`LLM_FALLBACK_MODEL_ID`，见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
 | MCP 启动容错 | ✅ | 默认 fail-soft：server 不可达仅告警跳过不阻断启动；config.yaml `startup.required: true` 可声明严格失败 |
 | A2A 协议 | ✅ | AgentScopeA2aServer + HarnessAgentRunner |
@@ -280,6 +280,7 @@ OAF `deniedTools` 字段控制排除列表。
 | `LLM_REASONING_EFFORT` | — | | 推理强度（如 low/medium/high）；空 = 不下发，值集因端点而异 |
 | `LLM_FREQUENCY_PENALTY` | — | | 频率惩罚 [-2.0, 2.0]；空 = 不下发 |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置，不传给模型） |
+| `LLM_FALLBACK_MODEL_ID` | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络，SDK 默认）后自动切换；空 = 不启用。默认模型走 SDK 原生 `.fallbackModel()`，会话自选模型由 `SessionModelMiddleware` + `FallbackModelWrapper` 补齐（仅首信号失败切换） |
 | `AGENT_CONFIG_DIR` | `/config` | | Agent 配置目录 |
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
@@ -312,6 +313,10 @@ OAF `deniedTools` 字段控制排除列表。
 > 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
 > 托管模型存 `model_config` 表（`/models` REST CRUD，debug 页「Models」模块可管理），会话经 `model` 字段按会话选择，
 > 仅影响该会话的对话调用；详见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md)。
+> **模型备用切换（2026-09-28）**：`LLM_FALLBACK_MODEL_ID` 引用托管模型作为备用，主模型重试耗尽
+> （429/5xx/超时/网络）后首个信号失败即切换——默认模型走 SDK 原生 `.fallbackModel()`，会话自选模型由
+> `SessionModelMiddleware` + `FallbackModelWrapper` 补齐；构建期解析，改备用模型需 `/admin/reload` 生效。
+> 详见 [docs/model-fallback-design.md](docs/model-fallback-design.md)。
 > **采样参数方言（2026-09-27）**：思考开关/推理强度的下发位置由 `provider` 方言决定（`openai` 顶层 effort；
 > `vllm`/`sglang` 合并走 `chat_template_kwargs`；`glm` 走 `thinking.type`+顶层；`deepseek` 不下发），
 > NULL/空 = 不下发；详见 [docs/model-params-design.md](docs/model-params-design.md)。

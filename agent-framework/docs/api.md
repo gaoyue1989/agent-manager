@@ -801,7 +801,7 @@ curl -X POST http://localhost:8100/models -H 'Content-Type: application/json' -d
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/debug` | 调试页面（静态资源） |
-| GET | `/debug/config/env` | 生效环境变量（脱敏） |
+| GET | `/debug/config/env` | 生效环境变量（脱敏）。`llm.fallback_model_id` = 备用模型配置（`LLM_FALLBACK_MODEL_ID`，空串 = 未启用） |
 | GET | `/debug/config/oaf` | OAF 配置 + 技能合并视图（dynamic/declaredButMissing 标记） |
 | GET | `/debug/database/status` | 数据库连接健康状态 |
 | GET | `/debug/memory` | MEMORY.md / memory/ 内容查看 |

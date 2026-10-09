@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 43 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 44 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -19,6 +19,7 @@
 | [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制） |
 | [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.4.0：Durable SSE + HITL + 文件 + Skill 管理 + 模型 + 热加载 + 事件词表（被多处源码 javadoc 引用；本版修目录死锚与续传游标示例） |
 | [checkpoint-design.md](checkpoint-design.md) | Checkpoint 持久化设计：MysqlDistributedStore、agent_state/agent_fs 表结构（schema 权威；已按 agentscope 2.0.3 订正） |
+| [schema-full.sql](schema-full.sql) | **全量建表语句**（2026-09-28 新增）：本工程 9 张表 + SDK 自建 agent_state/agent_fs，含代码内幂等迁移与部署注意；新建库/排障直接照搬 |
 | [history-agentstate-design.md](history-agentstate-design.md) | History 权威化设计：agent_state 为消息级事实来源（已实施，被源码注释引用） |
 | [tracing-design.md](tracing-design.md) | OTel 链路追踪设计（已实施，被 Makefile/Dockerfile 引用；含 2026-09-26 的模型/工具 IO 内容补录） |
 | [offline-dev-image.md](offline-dev-image.md) | 离线开发镜像 java-dev 手册（被 Dockerfile.dev 引用） |
@@ -52,6 +53,7 @@
 | [sse-optimization-a1-a5-design.md](sse-optimization-a1-a5-design.md) | SSE 链路优化五项（A1 toSSE 收口 / A2 Tailer 空闲退避 / A3 emit 失败不广播 / A4 控制器桶清理 / A5 TurnFinalizer 抽取），已实施 |
 | [hitl-tool-summary-recovery-design.md](hitl-tool-summary-recovery-design.md) | HITL 恢复流工具调用摘要兜底（RESULT_END 按 toolCallId 补发「执行 工具名」），**已实施**（2026-09-25；含方案比较与幂等/回放语义） |
 | [session-model-switch-design.md](session-model-switch-design.md) | 会话模型切换（model_config 托管模型 CRUD + 会话级 model 绑定 + 系统模型管标题/记忆压缩），**已实施**（2026-09-24；含实施记录与两处偏差：`GET /models?all=true`、未引入 env 备选列表） |
+| [model-fallback-design.md](model-fallback-design.md) | LLM 备用切换（`LLM_FALLBACK_MODEL_ID` 引用托管模型；默认模型走 SDK 原生 `.fallbackModel()`，会话自选模型由 `SessionModelMiddleware`+`FallbackModelWrapper` 补齐），**已实施**（2026-09-28；含触发语义、生效范围、Debug 页展示与限制） |
 | [tool-plugin-extension-plan.md](tool-plugin-extension-plan.md) | 自定义工具插件化加载（Java SPI + plugins/ 目录），**已实施**（2026-09-25；BFPP 并入 `List<CustomTool>` 注入源，工厂/reload 重建//tools/HITL 零改动共享；2026-09-26 起 `/tools` 新增 `sdkInternal` 段透出 SDK 内置工具注册集，冒烟扩到 30 断言） |
 | [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload，**M1/M2 已实施，部署环境 E2E 验证通过**（2026-09-25；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施）。**2026-09-26 由 ③ 档移入本档**——此前索引归类与文档自身状态矛盾 |
 | [change-execution-order.md](change-execution-order.md) | v2.0→v2.1 整体升级执行顺序与结果记录（MysqlDistributedStore/HarnessAgent/Workspace/五功能/多租户，2026-08-06，头部含 2026-09-07 现状核对） |

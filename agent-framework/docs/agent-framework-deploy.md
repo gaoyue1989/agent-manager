@@ -153,6 +153,7 @@ Tomcat started on port 8100
 | `LLM_TIMEOUT` | int | `120` | | API 调用超时（秒，绑 `agent.llm.timeout`） |
 | `LLM_ENABLE_THINKING` | bool | `false` | | 深度思考开关。`false` → 注入 `chat_template_kwargs.enable_thinking=false`（Qwen3 / vLLM），避免响应混入 `<think>` 内容（绑 `agent.llm.enable-thinking`） |
 | `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
+| `LLM_FALLBACK_MODEL_ID` | string | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络）后自动切换；空 = 不启用（绑 `agent.llm.fallback-model-id`）。默认模型走 SDK 原生 fallback，会话自选模型由 `SessionModelMiddleware` 补齐；改动需 `POST /admin/reload` 生效（详见 [model-fallback-design.md](model-fallback-design.md)） |
 
 #### 4.1.2 服务 / Spring
 
