@@ -6,7 +6,7 @@
 环境变量：
   STUDIO_DATA_DIR     数据目录（默认 ./data）：studio.db / packs/ / runs/
   STUDIO_BENCH_DIR    bench 目录（默认 repo 内 bench/）：定位 eval 代码与 stub-agent
-  STUDIO_TOKEN        访问 token（未设则仅本机默认；STUDIO_SKIP_AUTH=1 显式跳过）
+  STUDIO_TOKEN        访问 token（未设=不启用鉴权；STUDIO_SKIP_AUTH=1 显式跳过；设 token 后 /api/* 全保护，/healthz 与页面豁免）
 """
 
 import asyncio
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 BENCH_DIR = Path(os.environ.get("STUDIO_BENCH_DIR", Path(__file__).resolve().parent.parent.parent))
@@ -35,10 +35,32 @@ from replay import runner as run_mod  # noqa: E402
 from replay.packager import verify_checksums  # noqa: E402
 from app import store  # noqa: E402
 
-app = FastAPI(title="eval-studio", version="0.1.0")
 _SKIP_AUTH = os.environ.get("STUDIO_SKIP_AUTH") == "1"
 _TOKEN = os.environ.get("STUDIO_TOKEN", "")
 _WORKER_STARTED = False
+
+
+def _auth(request: Request) -> None:
+    """全局鉴权依赖（issue #97：原 _auth 定义后从未挂到任何路由，STUDIO_TOKEN 完全无效）。
+
+    语义保持：未设 STUDIO_TOKEN 或 STUDIO_SKIP_AUTH=1 时放行（存量本地用法零破坏）；
+    设 token 后受保护面为 /api/*——/healthz（探活/Dockerfile HEALTHCHECK）与 /
+    （前端页面：401 后浏览器无 UI 可输 token）必须匿名可达，其余缺失/错误的 Bearer 一律 401。
+    注意：全局 dependencies 只覆盖 APIRoute，/docs 等自助文档路由会被绕过——
+    构造 FastAPI 时已显式关闭（docs_url/redoc_url/openapi_url=None），豁免清单仅上述两条。
+    """
+    if _SKIP_AUTH or not _TOKEN:
+        return
+    if request.url.path in ("/healthz", "/"):
+        return
+    if request.headers.get("authorization") != f"Bearer {_TOKEN}":
+        raise HTTPException(401, "token 缺失或错误")
+
+
+# 自助文档路由显式关闭：FastAPI 全局 dependencies 只作用于 APIRoute，
+# setup() 注册的 /docs /redoc /openapi.json 会绕过 _auth 匿名可见完整 API 契约（issue #97 评审）
+app = FastAPI(title="eval-studio", version="0.1.0", dependencies=[Depends(_auth)],
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 
 def free_port() -> int:
@@ -189,13 +211,6 @@ def _startup() -> None:
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
-
-def _auth(request) -> None:
-    if _SKIP_AUTH or not _TOKEN:
-        return
-    if request.headers.get("authorization") != f"Bearer {_TOKEN}":
-        raise HTTPException(401, "token 缺失或错误")
-
 
 @app.get("/healthz")
 def healthz():

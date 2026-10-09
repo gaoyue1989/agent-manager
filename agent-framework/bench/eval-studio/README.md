@@ -5,21 +5,23 @@
 ## 开箱即用（Docker）
 
 ```bash
-docker run -d --name eval-studio -p 18400:18400 \
+docker run -d --name eval-studio -p 127.0.0.1:18400:18400 \
   -v $PWD/studio-data:/data \
   -e EVAL_LLM_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1 \   # judge 模型（可选）
   -e EVAL_LLM_API_KEY=<judge key> \
   -e EVAL_LLM_MODEL=mimo-v2.6-flash \
+  -e STUDIO_TOKEN=<访问token，可选> \
   gaoyue1989/eval-studio:latest
 
-# 浏览器打开 http://<host>:18400
+# 浏览器打开 http://127.0.0.1:18400（远程访问走 SSH 隧道/反代：ssh -L 18400:127.0.0.1:18400 <host>）
+# 容器以非 root（uid 1000）运行：宿主数据目录属主需对齐，chown -R 1000:1000 studio-data
 ```
 
 与 collector 组成采集工作站（推荐 [docker-compose](../eval-collector/docker-compose.yml)）：
 
 ```bash
-ADMIN_TOKEN=<token> EVAL_JUDGE_LLM_* ... docker compose up -d
-# collector :18300 控制台（接入向导/状态/打包/下线） · studio :18400 评测服务
+ADMIN_TOKEN=<token> [STUDIO_TOKEN=<token>] EVAL_JUDGE_LLM_* ... docker compose up -d
+# collector :18300 控制台（接入向导/状态/打包/下线） · studio 绑定回环 127.0.0.1:18400（远程走 SSH 隧道/反代）
 ```
 
 ## 页面（六视图）
@@ -99,6 +101,16 @@ cd bench && docker build -f eval-studio/Dockerfile -t gaoyue1989/eval-studio:lat
 
 ## 安全边界
 
-- 访问 token `STUDIO_TOKEN`（未设时仅建议本机/内网使用）；`STUDIO_SKIP_AUTH=1` 显式跳过（CI/冒烟）。
+- 访问 token `STUDIO_TOKEN`（issue #97 起真正接线为全局鉴权依赖）：未设或 `STUDIO_SKIP_AUTH=1` 时放行
+  （存量本地用法零破坏）；设 token 后 `/api/*` 全保护——缺失/错误的 `Authorization: Bearer` 一律 401。
+  `/healthz`（探活/HEALTHCHECK）与 `/`（前端页面，401 后浏览器无 UI 可输 token）匿名可达，受保护面 = API 面。
+- 前端 token 输入：页面首访经 `#token=xxx`（取值后立即清除 hash 防留在地址栏）或弹窗输入，
+  存 localStorage 后所有请求自动带 `Authorization` 头；收到 401 提示重新输入。
+- 容器以非 root（uid 1000）运行：宿主 bind mount 数据目录属主需对齐，`chown -R 1000:1000 studio-data`
+  ——历史 root 容器写入的存量目录属主为 root，不迁移将 Permission denied（本地非容器开发不受影响）。
+- compose 的 18400 已绑定回环 `127.0.0.1`：远程访问走 SSH 隧道/反代，不再直接暴露公网（刻意的暴露面收敛）。
+- collector 控制台「数据打包」是容器间 server-to-server 转调：collector 侧经 `EVAL_PACKAGER_TOKEN`
+  透传凭据（compose 已与 STUDIO_TOKEN 同值注入），studio 启用鉴权后该转调自动携带 Bearer 正常工作；
+  非 compose 部署时需自行给 collector 设 `EVAL_PACKAGER_TOKEN=<同 STUDIO_TOKEN 值>`。
 - 档案凭据只存 `env:VAR` 引用或 judge 显式配置；导出接口一律剥离敏感值。
 - evalpack 导入强制 CHECKSUMS 校验，篡改包拒收。
