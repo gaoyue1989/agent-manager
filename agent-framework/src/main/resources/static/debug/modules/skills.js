@@ -253,6 +253,10 @@ function renderUserSkillsPanel() {
             'title="新建或覆盖该用户的 SKILL.md">✏ 写入/覆盖</button>' +
           '<button class="btn small" id="userSkillSyncBtn" ' +
             'title="把包内同名技能整目录下发为该用户个人版本">⬇ 从包内下发</button>' +
+          '<input id="userSkillZipInput" type="file" accept=".zip,application/zip" style="display:none">' +
+          '<button class="btn small" id="userSkillZipBtn" ' +
+            'title="上传 zip 包作为该用户个人技能（同名覆盖；含二进制/非 UTF-8 文件会拒绝整个包）">' +
+            '⬆ 上传 zip</button>' +
         '</div>' +
         '<div id="userSkillList"><div class="empty">选择或输入 userId 后点「加载」。</div></div>' +
       '</div>' +
@@ -264,6 +268,11 @@ function renderUserSkillsPanel() {
   });
   document.getElementById('userSkillWriteBtn').addEventListener('click', handleUserSkillWrite);
   document.getElementById('userSkillSyncBtn').addEventListener('click', handleUserSkillSync);
+  document.getElementById('userSkillZipBtn').addEventListener('click', function() {
+    var f = document.getElementById('userSkillZipInput');
+    if (f) f.click();
+  });
+  document.getElementById('userSkillZipInput').addEventListener('change', handleUserSkillZipUpload);
 
   loadUserSkillUsers();
 }
@@ -391,6 +400,7 @@ async function loadUserSkills() {
       '<td style="white-space:nowrap">' +
         '<button class="btn small us-view-btn" data-name="' + ctx.utils.esc(s.name) + '">👁 查看</button> ' +
         '<button class="btn small us-edit-btn" data-name="' + ctx.utils.esc(s.name) + '">✏ 编辑</button> ' +
+        '<button class="btn small us-dl-btn" data-name="' + ctx.utils.esc(s.name) + '">⬇ 下载</button> ' +
         '<button class="btn small danger us-del-btn" data-name="' + ctx.utils.esc(s.name) + '">🗑 删除</button>' +
       '</td></tr>';
   }).join('');
@@ -408,6 +418,9 @@ async function loadUserSkills() {
   });
   body.querySelectorAll('.us-edit-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUserSkillEdit(userId, btn.dataset.name); });
+  });
+  body.querySelectorAll('.us-dl-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { handleUserSkillDownload(userId, btn.dataset.name); });
   });
   body.querySelectorAll('.us-del-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUserSkillDelete(userId, btn.dataset.name); });
@@ -558,6 +571,49 @@ async function handleUserSkillSync() {
   } catch (err) {
     ctx.utils.toast('下发失败: ' + err.message, 'error');
   }
+}
+
+/** zip 上传：把选中的 zip 作为当前 userId 的个人技能（同名覆盖；后端拒绝二进制包） */
+async function handleUserSkillZipUpload() {
+  var fileInput = document.getElementById('userSkillZipInput');
+  if (!fileInput) return;
+  var file = fileInput.files && fileInput.files[0];
+  if (!file) return;
+  var userId = userStateId();
+  if (!userId) {
+    ctx.utils.toast('请先填写 userId', 'error');
+    fileInput.value = '';
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    ctx.utils.toast('✘ zip 包超过 10MB 限制', 'error');
+    fileInput.value = '';
+    return;
+  }
+  var btn = document.getElementById('userSkillZipBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '上传中…'; }
+  try {
+    var result = await ctx.api.uploadUserSkillZip(userId, file);
+    ctx.utils.toast(result.message || ('已上传 ' + result.name), 'success');
+    loadUserSkills();
+    loadUserSkillUsers();
+  } catch (err) {
+    ctx.utils.toast('✘ 上传失败: ' + err.message, 'error');
+  } finally {
+    fileInput.value = '';
+    if (btn) { btn.disabled = false; btn.textContent = '⬆ 上传 zip'; }
+  }
+}
+
+/** 下载：整目录 zip（L4 有覆盖则导 L4，否则回落包内基线） */
+function handleUserSkillDownload(userId, name) {
+  var url = ctx.api.userSkillDownloadUrl(userId, name);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = name + '.zip';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 /** 当前 userId（以输入框为准，编辑/删除时避免用到旧状态） */
