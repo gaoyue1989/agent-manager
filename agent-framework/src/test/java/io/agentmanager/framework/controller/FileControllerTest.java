@@ -229,6 +229,29 @@ public class FileControllerTest {
         assertTrue(FileController.mimeAllowed("application/x-zip-compressed", def));
     }
 
+    /** 旧版 Word（.doc）标准 MIME 为 application/msword：默认白名单与扩展名交叉校验都须放行 */
+    @Test
+    void defaultUploadMimeShouldAllowLegacyDoc() {
+        var def = AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME;
+        assertTrue(FileController.mimeAllowed("application/msword", def),
+            "application/msword 应在默认白名单内");
+        assertTrue(FileController.extensionConsistentWithMime("report.doc", "application/msword"),
+            ".doc 扩展名应与 application/msword 一致");
+        // 非标准别名保持兼容
+        assertTrue(FileController.mimeAllowed("application/vnd.ms-word", def));
+        assertTrue(FileController.extensionConsistentWithMime("report.doc", "application/vnd.ms-word"));
+    }
+
+    @Test
+    void uploadShouldAcceptLegacyDoc() throws Exception {
+        var file = new MockMultipartFile("file", "report.doc", "application/msword",
+            new byte[] {(byte) 0xD0, (byte) 0xCF, 0x11, (byte) 0xE0});
+        var resp = controller.upload(file, "alice", null, null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        assertEquals("report.doc", resp.getBody().get("file_name"));
+        assertEquals("application/msword", resp.getBody().get("mime_type"));
+    }
+
     // ===== 外部交付物代理下载（storage_type=external，present_url 登记行）=====
 
     private AgentManagerProperties propsWithExternalPrefix(String prefixes) {
