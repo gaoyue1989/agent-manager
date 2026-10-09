@@ -2193,8 +2193,8 @@ test.describe('OTel span 内容属性（TR 组）', () => {
 
 ### 5.5 编号与卫生事项
 
-- **caseId 撞号**：材料三「沙箱技能回写」（§4.3）与「记忆关断」（§4.5）两缺口均将首条用例编为 **X10** 且同落 api-sandbox.spec.ts X 组——落地时须为记忆面用例重编号（建议顺延 X14 起），避免同 spec 内 caseId 冲突。
-- **reset-data.mjs 清场缺口**：TABLES（:18-19）缺 session_message（ThreadController.java:277 已有级联删除语义），归档行跨运行残留属卫生隐患——HA3/U15 落地时一并补。
+- **caseId 撞号**：材料三「沙箱技能回写」（§4.3）与「记忆关断」（§4.5）两缺口均将首条用例编为 **X10** 且同落 api-sandbox.spec.ts X 组。**已在落地时消解**：沙箱技能缺口占用 X10/X11（api-sandbox.spec.ts:169/:237），记忆面用例至今未落地；其后 f4db8ca 又占用 X15（Channel 链路 per-user 物化，:308），故记忆面用例若落地须从 **X16** 起编号，避免同 spec 内 caseId 冲突。
+- **reset-data.mjs 清场缺口**：TABLES（:18-19）缺 session_message（ThreadController.java:277 已有级联删除语义），归档行跨运行残留属卫生隐患——**已随 HA3/U15 落地补齐**（现 TABLES 含 `session_message`）。
 - **既有用例缺号**：sandbox 无 X5、ui 无 U12，盘点如实记录（材料二矩阵）。
 
 ### 5.6 性质声明

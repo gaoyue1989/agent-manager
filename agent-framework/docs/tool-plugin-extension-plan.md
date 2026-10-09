@@ -1,6 +1,6 @@
 # 自定义工具插件化加载方案（Java SPI + plugins/ 目录）
 
-> **状态: ✅ 已实施（2026-09-25，单测 + 部署冒烟 12/12 PASS）**
+> **状态: ✅ 已实施（2026-09-25，单测通过 + 部署冒烟 12/12 PASS；冒烟脚本后续随 #39/三态权限扩到 32 断言）**
 > 目标：让 agent-framework **无需重编译、无需重建镜像**即可加载自定义工具 —— 工具代码以独立 jar（插件）形式放入 `plugins/` 目录，
 > 服务启动时自动扫描、类隔离加载、注册进现有 Toolkit，与 `@Tool` 硬编码工具（BusinessTools/FileTools）同权运行。
 > **范围：仅 agent-framework 工程（Java 服务 + 测试）。Go 后端、React 前端、镜像构建流程本次不涉及（平台集成列为后续阶段）。**
@@ -20,9 +20,12 @@
 >   同名插件唯一单例名/config 替换/close 回归/目录回退）+ `ToolPluginAssemblyTest`（ApplicationContextRunner
 >   验证 BFPP 手工单例被 `List<CustomTool>` 注入解析）。全量 `mvn test` 1004 用例通过。
 > - **部署冒烟**：`e2e/plugin-echo/EchoToolPlugin.java`（示例插件源码，兼作开发模板）+
->   `e2e/scripts/plugin-smoke.sh`（现场编译打包插件 jar → 独立进程起服务 → **12 断言全 PASS**：
->   Bootstrapper/HarnessAgentFactory/SDK Toolkit 三层注册日志、/tools 透出、OAF reload 整包重建后
->   工厂与 Toolkit 重新注册且 /tools 仍在、deniedTools 类粒度剔除（日志+接口）、撤销恢复）。
+>   `e2e/scripts/plugin-smoke.sh`（现场编译打包插件 jar → 独立进程起服务 → **32 断言全 PASS**：
+>   Bootstrapper/HarnessAgentFactory/SDK Toolkit 三层注册日志、/tools 透出、`sdkInternal` 段与 declared 标注、
+>   OAF reload 整包重建后工厂与 Toolkit 重新注册且 /tools 仍在、deniedTools 类粒度剔除（日志+接口+internalCount
+>   收敛且不波及 SDK 段）、撤销恢复、自定义工具三态权限 ask 批准/拒绝与 deny 直拒）。
+>   断言数演进：初版 12 → issue #39（sdkInternal）30 → 2026-10-01（#40 low，对齐实际）**32**
+>   （31 个 `check`/`check_absent` + 1 个手工 PASS/FAIL 分支，与 AGENTS.md 记载一致）。
 > - **与方案的差异**：①示例插件落在 `e2e/plugin-echo/`（非 §5 的 `examples/plugins/`），兼作冒烟验证件，
 >   开发模板即 §4 源码；②单测中"类隔离"断言改为 parent-first 复用父类 Class——测试类路径可见 fixture 类时
 >   子加载器委托父加载器（生产环境插件类不在应用类路径，由子加载器自加载，冒烟已覆盖该场景）；
@@ -375,9 +378,11 @@ curl localhost:8100/tools?includeInternal=true   # 列表含插件工具
 # OAF reload（整包重建）后再次调用 —— 插件工具仍在（§3.7 回归点）
 ```
 
-> 上述流程已脚本化为 `e2e/scripts/plugin-smoke.sh`（示例插件 `e2e/plugin-echo/`，12 断言，
-> 覆盖三层注册日志 / /tools / reload 存活 / deniedTools 剔除与恢复），2026-09-25 部署冒烟 12/12 PASS。
-> 2026-09-26 随 /tools 拆 `sdkInternal` 段（#39）冒烟扩至 30 断言（新增 SDK 内置工具透出/计数/denied 不波及等 6+ 断言）。
+> 上述流程已脚本化为 `e2e/scripts/plugin-smoke.sh`（示例插件 `e2e/plugin-echo/`，现 **32 断言**，
+> 覆盖三层注册日志 / /tools 与 `sdkInternal` / declared 标注 / reload 存活 / deniedTools 剔除与恢复 /
+> 自定义工具三态权限），2026-09-25 首跑 12/12 PASS。
+> 2026-09-26 随 /tools 拆 `sdkInternal` 段（#39）扩至 30 断言；2026-09-26 三态权限黑盒（fa4b2cd）后
+> 2026-10-01 对齐实际为 32 断言（#40 low）。
 
 ---
 
@@ -393,7 +398,7 @@ curl localhost:8100/tools?includeInternal=true   # 列表含插件工具
 | `docs/agent-framework-deploy.md` | 修改 | 环境变量表补 `AGENT_PLUGINS_DIR`（默认空，回退 `/config/plugins`） |
 | `docs/tool-plugin-extension-plan.md` | 本文件 | 设计文档（含实施记录） |
 | `e2e/plugin-echo/EchoToolPlugin.java` | 新增 | 示例插件源码（兼作开发模板，2026-09-25 已交付） |
-| `e2e/scripts/plugin-smoke.sh` | 新增 | 部署冒烟：现场编译打包插件 → 独立进程验证 12 断言（2026-09-25 已交付，12/12 PASS） |
+| `e2e/scripts/plugin-smoke.sh` | 新增 | 部署冒烟：现场编译打包插件 → 独立进程验证（2026-09-25 首版 12 断言 12/12 PASS；现 32 断言，见 §4.3 注） |
 
 > 与初稿清单的差异：`AgentManagerProperties` / `application.yml` / `AgentScopeConfig` / `ToolController` 四处改动**全部取消**
 > （BFPP 直读环境变量 + 注入源自动收集，见 §3.4）。

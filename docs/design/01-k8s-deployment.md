@@ -35,7 +35,7 @@ cp ~/go/bin/kind /usr/local/bin/
 ## 3. 集群创建
 
 ### 配置文件
-`docs/kind-config.yaml`:
+集群配置原文内嵌于本节（**仓库内无独立 `docs/kind-config.yaml` 文件**，见 [../deployment.md](../deployment.md) 第 7 行）：
 ```yaml
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -58,7 +58,8 @@ nodes:
 
 ### 创建命令
 ```bash
-kind create cluster --name agent-manager --config docs/kind-config.yaml --wait 5m
+# --config 指向 §3 内嵌的集群配置落盘后的路径（该文件不在仓库内，需自建后传入）
+kind create cluster --name agent-manager --config <kind-config.yaml 路径> --wait 5m
 ```
 
 ## 4. 验证结果

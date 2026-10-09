@@ -457,7 +457,7 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/actuator/health` | Actuator 健康检查（yml 无 `management:` 段，**只暴露 health**） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/a2a/jobs`、`/a2a/jobs/{key}` | A2A 幂等 Job 提交 / 状态查询（**默认关闭**，`AGENT_A2A_JOB_ENABLED=true` 开启；header `Idempotency-Key` + `Agent-A2A-Job-Token`） |
-| POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:184`） |
+| POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:187`） |
 
 完整参数与 SSE 帧格式见 [api.md](api.md)；面向使用者的端到端流程见
 [agent-creation-guide.md](agent-creation-guide.md)。

@@ -1,6 +1,7 @@
 # 评测飞轮离线化改造设计：采集代理 + 数据包 + 回放/链路评测 + 报告（eval offline loop）
 
-> 状态：**已实施（2026-10-04，M1–M4 全部落地 + 全链路 e2e 96 断言全绿 + 双镜像交付；附录 A 为实施记录，附录 B 为二期完成记录）**
+> 状态：**已实施（2026-10-04，M1–M4 全部落地 + 全链路 e2e 96 断言全绿 + 双镜像交付；附录 A 为实施记录，附录 B 为二期完成记录，附录 C 为前端 API 录制增补）**
+> 代码核对（2026-10-09，评审窗口后）：本文多处为设计期描述，已按当前 `agent-framework/bench/` 实码校正——端口模型（:18203 第四协议口）、存储布局（kind 目录扁平 + `audit.jsonl`）、`pack` 实际参数面、run 产物路径、replay-http 回放器、studio API/档案字段、report.json 结构；未随代码交付的项（集群部署清单、MySQL/Redis 会话骨架导出、`framework_ref`/`pack_policy` 等档案键）逐处标注。
 > 前置文档：[agent-framework-eval-dual-track-design.md](agent-framework-eval-dual-track-design.md)（双轨评测总纲）、[agent-framework-eval-env-provisioning-design.md](agent-framework-eval-env-provisioning-design.md)（环境供给）
 > 一句话：把"评测飞轮"从**联机依赖真实 LLM/沙箱/MCP** 升级为**离线闭环**——测试环境旁路录制三类外部交互 → 一键打包 evalpack → 离线部署 OAF 包 + mock 三依赖做确定性回放与 LLM 链路评测 → web 报告与可视化。
 
@@ -71,11 +72,11 @@
 
 ## 2. eval-collector：离线评测数据收集代理（Docker 镜像 + 内置 Web 控制台交付）
 
-采集配置后续会持续变复杂（多服务接入、多 MCP server、脱敏规则演进），因此 collector 的交付形态直接锁定"**降低部署与配置复杂度**"：一个 Docker 镜像、四个固定端口、内置 Web 控制台把"部署 → 接入业务服务 → 验证采集 → 打包 → 下线"全流程做成页面向导，端口/地址/切换片段等细节由控制台代管，用户不手工拼配置。
+采集配置后续会持续变复杂（多服务接入、多 MCP server、脱敏规则演进），因此 collector 的交付形态直接锁定"**降低部署与配置复杂度**"：一个 Docker 镜像、五个固定端口、内置 Web 控制台把"部署 → 接入业务服务 → 验证采集 → 打包 → 下线"全流程做成页面向导，端口/地址/切换片段等细节由控制台代管，用户不手工拼配置。
 
 ### 2.1 交付形态与端口模型
 
-镜像 `gaoyue1989/eval-collector`（Node ≥22 alpine，零 npm 依赖，单进程 = 三协议代理 + 录制器 + 管理控制台）。监听模型为**四固定端口 + 路径前缀多路复用**（多业务服务共用一个实例，不随接入数扩端口）：
+镜像 `gaoyue1989/eval-collector`（Node ≥22 alpine，零 npm 依赖，单进程 = 四协议代理 + 录制器 + 管理控制台）。监听模型为**五个固定端口 + 路径前缀多路复用**（多业务服务共用一个实例，不随接入数扩端口；:18203 为附录 C 增补的业务服务反代口）：
 
 | 端口 | 用途 | 路由键 |
 |------|------|--------|
@@ -100,7 +101,7 @@
 
 ```bash
 docker run -d --name eval-collector \
-  -p 18200-18202:18200-18202 -p 18300:18300 \
+  -p 18200-18203:18200-18203 -p 18300:18300 \
   -v $PWD/eval-collector/data:/var/lib/eval-collector \
   -v $PWD/eval-collector/conf:/etc/eval-collector \
   -e EVAL_COLLECTOR_ADMIN_TOKEN=<token> \
@@ -113,7 +114,7 @@ docker run -d --name eval-collector \
 共享录制卷；控制台「数据打包」经 `EVAL_PACKAGER_URL=http://studio:18400/api/packs/from-collector`
 转调出包）。设计期的独立 `eval-packager` sidecar 镜像不再单独提供。
 
-**形态三：集群内部署**（测试环境即 kind 集群时的推荐形态）：`deploy/k8s.yaml`（Deployment + Service + 录制卷 PVC/hostPath），业务服务以 svc DNS 寻址（如 `http://eval-collector.agent-platform.svc:18200/{ns}/v1`）。该清单由运维 `kubectl apply`，**不经平台发布 API、不设 ownerReferences**——collector 是测试基础设施而非业务 agent 服务，不触碰控制面原则；业务服务的三个键切换仍走平台显式 env 编辑 API（向导生成调用体）。
+**形态三：集群内部署**（测试环境即 kind 集群时的推荐形态）：Deployment + Service + 录制卷 PVC/hostPath，业务服务以 svc DNS 寻址（如 `http://eval-collector.agent-platform.svc:18200/{ns}/v1`）。该清单由运维 `kubectl apply`，**不经平台发布 API、不设 ownerReferences**——collector 是测试基础设施而非业务 agent 服务，不触碰控制面原则；业务服务的三个键切换仍走平台显式 env 编辑 API（向导生成调用体）。> 该 K8s 清单**尚未随本设计交付**（`bench/eval-collector/` 下当前只有 `Dockerfile`/`docker-compose.yml`，无 `deploy/k8s.yaml`）；需要集群形态时按本节描述自建。
 
 卷与环境变量：
 
@@ -122,7 +123,7 @@ docker run -d --name eval-collector \
 | `/var/lib/eval-collector` | 录制数据（按 ns 分桶 JSONL，日轮转，保留策略可配） |
 | `/etc/eval-collector/collector.yaml` | 接入档案（控制台可编辑、校验后热生效、重启持久） |
 | `EVAL_COLLECTOR_ADMIN_TOKEN` | 控制台/管理 API 令牌；未设置时控制台仅绑定 127.0.0.1 |
-| `GET :18300/healthz` | 容器健康检查（含各 ns 上游探活汇总），供 docker HEALTHCHECK / K8s probe |
+| `GET :18300/healthz` | 容器健康检查（`{ok, version, uptime_s, profiles}`，无需认证），供 docker HEALTHCHECK / K8s probe；各 ns 上游探活在 `GET /api/status` 与 `POST /api/profiles/{ns}/precheck` |
 
 ### 2.2 配置分层（复杂度治理）
 
@@ -160,7 +161,7 @@ state: recording                     # recording | passthrough(仅透传不录�
    - ⑤ 验证采集：提示在被测服务发一条测试消息，collector 检测到该 ns 首条交互即点亮通过，转入状态面板。
 2. **状态面板**：按 ns/协议的当日与累计交互数、上游健康、存储占用、最近错误、最近交互流水（摘要 → 点开脱敏后详情）。
 3. **配置管理**：接入档案/脱敏规则/保留策略编辑（校验 + 热生效 + 审计）；按 ns **暂停/恢复录制**（暂停 = 仅透传不录制，业务流量不受影响）。
-4. **数据打包**：导出交互数据包（collector 本地即得）/ 触发完整 evalpack（转调 compose 内 packager sidecar 的 `POST /pack`，产物落 `./packs` 供下载）；未部署 sidecar 时展示等价的离线 CLI 命令。
+4. **数据打包**：导出交互数据包（collector 本地即得）/ 触发完整 evalpack（`POST /api/pack`，按 `EVAL_PACKAGER_URL` 转发到 studio 的 `POST /api/packs/from-collector`，产物落 studio `packs/` 供下载）；未配置 `EVAL_PACKAGER_URL` 时展示等价的离线 CLI 命令（`flywheel.py pack`）。
 5. **下线向导**：生成还原片段（三个键切回原上游——原值在接入时已随档案留存）→ 确认该 ns 已无流量 → 提示删除容器/清单与数据处置。
 
 管理 API（`/api/*`，与页面同源、同 token）覆盖上述全部能力，供脚本化与 CI 场景 headless 使用（`curl :18300/api/...`）。
@@ -180,15 +181,17 @@ state: recording                     # recording | passthrough(仅透传不录�
 /var/lib/eval-collector/{ns}/
   llm/20261004.jsonl          # 每行一个完整交互
   sandbox/20261004.jsonl
-  mcp-platform/20261004.jsonl
-  meta.json                   # 上游地址、配置指纹、collector 版本
+  mcp/20261004.jsonl          # kind 目录即协议名（llm/sandbox/mcp/http），不分 server 子目录
+  http/20261004.jsonl         # 业务服务反代录制（附录 C）
+/var/lib/eval-collector/audit.jsonl          # 档案配置变更审计（扁平单文件，非 {ns}/meta.json）
 ```
 
 LLM 交互记录结构（其余协议同构，略）：
 
 ```json
-{"kind":"llm","id":"llm-000042","ns":"svc-release","ts_start":"...","ts_end":"...",
- "upstream":"http://real-llm/v1","status":200,"duration_ms":8213,"stream":true,
+{"kind":"llm","id":"llm-a1b2c3d4","ns":"svc-release","session":"sess-xxx",
+ "ts_start":"...","ts_end":"...",
+ "upstream":"http://real-llm/v1","path":"/v1/chat/completions","status":200,"duration_ms":8213,
  "request":{"model":"...","messages":[...],"tools":[...]},
  "chunks":["data: {...}\n\n","...","data: [DONE]"],
  "truncated":false}
@@ -200,8 +203,8 @@ LLM 交互记录结构（其余协议同构，略）：
 
 1. **会话骨架来源**（均为已有持久化，只读导出）：
    - MySQL `session_message`（`SessionMessageArchiveStateStore` write-through 全量消息归档）——会话内每轮 user/assistant/tool 消息与内容；
-   - MySQL `tool_audit`（`ToolAuditStore`）——工具调用名、参数、结果审计；
-   - Redis `sess:{sid}:events`（XRANGE）——帧序列时间线，含 `MODEL_CALL_START/END` 窗口与 `TOOL_CALL_*` 帧（见 `config/frame-mapping.json`）。
+   - MySQL `tool_audit_log`（`ToolAuditStore`）——工具调用名、参数、结果审计；
+   - Redis `sess:{sid}:events`（XRANGE，`RedisEventLog`）——帧序列时间线，含 `MODEL_CALL_START/END` 窗口与 `TOOL_CALL_*` 帧（见 `config/frame-mapping.json`）。
 2. **join 算法**（packager 内实现，输出带置信度）：
    - 时间窗：交互 `ts_start` 落在会话活跃窗（首帧~末帧 + 30s 容差）内 → 候选；
    - 内容指纹：LLM 请求 `messages` 末条 user 内容与会话第 k 轮用户消息归一化后一致/相似度 > 0.9，或请求中 tool 消息内容 ⊆ 该会话 tool_audit 结果集 → **强归属**；
@@ -213,7 +216,7 @@ LLM 交互记录结构（其余协议同构，略）：
 ### 2.6 可用性与安全红线（对齐架构强约束）
 
 - collector 是**业务面旁路组件、仅测试环境**：它在采集期间处于外部调用关键路径上，宕机表现等同 LLM 网关不可达。因此：生产环境与正式发版**禁止**指向 collector；采集结束（出包后）经**下线向导**把三个 URL 键切回原上游；collector 自身 `GET /healthz` + 写入失败告警日志。
-- 数据面端口（18200-18202）**不加认证**：它们在业务调用路径上，加认证需要 Java 侧送凭据（违背零侵入前提）；安全边界 = 仅测试网络可达 + 采集窗口期 + 集群形态下建议 NetworkPolicy 限源。管理面（:18300）必须 token（未设置时仅绑 127.0.0.1）。
+- 数据面端口（18200-18203）**不加认证**：它们在业务调用路径上，加认证需要 Java 侧送凭据（违背零侵入前提）；安全边界 = 仅测试网络可达 + 采集窗口期 + 集群形态下建议 NetworkPolicy 限源。管理面（:18300）必须 token（未设置时仅绑 127.0.0.1）。
 - 平台 backend 全程不参与采集链路（三个键属于业务服务 env 配置，不新增任何 backend 写路径），不违反"业务资源只由显式发布 API 写入"。
 - 脱敏两级：采集侧 `mask_rules`（正则/JSON path drop，控制台展示一律为脱敏后数据）+ 打包侧二次脱敏（见 §3.3）；Authorization/api key 永不落盘；evalpack 的 manifest 必须声明已应用规则，未声明不得导入 eval-studio。
 
@@ -226,13 +229,14 @@ LLM 交互记录结构（其余协议同构，略）：
 ```
 python3 bench/eval/flywheel.py pack \
   --collector-dir /var/lib/eval-collector/svc-release \
-  --mysql-url ... --redis-url ...          # 只读，导会话骨架
+  [--ns svc-release] \                      # collector-dir 给到 data 根时按 ns 过滤
   --since 2026-10-03 --until 2026-10-04 \
-  [--sessions sid1,sid2] [--oaf-zip release-agent.zip] \
+  [--traces <驱动器轨迹目录>] [--oaf-zip release-agent.zip] \
+  [--export-e2e-fixtures] \
   --out reports/packs/pk-20261004-a/
 ```
 
-OAF 包来源：优先从平台包存储取当前运行版本（PVC `packages/{id}` 副本 + sha256 校验），也可 `--oaf-zip` 显式指定。**必须**与测试环境实际运行版本一致（meta 记录 slug/version/hash），否则包上标记 `oaf_mismatch` 警告。
+> 当前 `pack` 子命令**只有上述参数**：设计 §2.5 的 MySQL（`session_message`/`tool_audit_log`）/Redis 只读会话骨架导出**未实现**（见附录 A.3 偏差 1），关联走 `X-Eval-Session` 头 + 内容指纹聚类。OAF 包副本经 `--oaf-zip` 显式传入（打包器记 `manifest.runtime.oaf.file/sha256`），尚无"从平台 PVC 自动取当前版本"的路径。
 
 ### 3.2 目录契约（format_version: 1）
 
@@ -240,28 +244,28 @@ OAF 包来源：优先从平台包存储取当前运行版本（PVC `packages/{i
 pk-20261004-a/
   manifest.json               # 见下
   oaf/release-agent.zip       # OAF 包副本（含 mcp-configs 原文）
-  sessions/{sid}.json         # 会话骨架：inputs（逐轮）、帧序列（事件流导出）、
-                              #   tool_calls、final_output、hitl 点（ask/confirm 决策与参数）、
-                              #   token_usage、model_switch 涉及的 model_config 行
+  sessions/{sid}.json         # 会话骨架：turns（逐轮输入）、frames（帧计数）、tool_names、
+                              #   final_output / recorded_final（chunks 反推终答）、hitl、
+                              #   token_usage、confidence、ts_start/ts_end、llm_calls
   interactions/
     llm/{id}.json             # 单交互完整记录（§2.4 结构）
     sandbox/{id}.json
-    mcp/{server}/{id}.json
-  correlation.json            # {sid: {llm:[id], mcp:[...], sandbox:[...], confidence}}
+    mcp/{id}.json             # 扁平按 id 落盘（server 名在记录字段里，不分目录）
+    http/{id}.json            # 业务服务反代交互（附录 C）
+  correlation.json            # {sid: {confidence, llm:[id], mcp:[...], sandbox:[...], http:[...]}}
   cases-draft/{sid}.json      # 自动生成的候选用例（对齐 bench/eval case 格式，人审转正）
   CHECKSUMS                   # 全包 sha256 清单
 ```
 
-`manifest.json`：
+`manifest.json`（实际字段见 `replay/packager.py:pack()`）：
 
 ```json
-{"pack_id":"pk-20261004-a","format_version":"1",
- "source":{"env":"test-env-a","ns":"svc-release","time_range":["...","..."],
-           "collector_version":"..."},
- "runtime":{"framework_version":"<commit>","oaf":{"slug":"vendor/agent","version":"1.2.0","sha256":"..."}},
- "redaction":{"applied":true,"rules":[...]},
- "sessions":[{"sid":"...","confidence":"high","turns":3,"has_hitl":true,"has_remote_spawn":false}],
- "stats":{"llm":42,"mcp":11,"sandbox":6,"bytes":18324567}}
+{"pack_id":"pk-20261004-a","format_version":1,"created_at":"...",
+ "source":{"collector_dir":"...","ns":"svc-release","time_range":["...","..."]},
+ "runtime":{"framework_version":"<commit>","oaf":{"file":"release-agent.zip","sha256":"..."}},
+ "redaction":{"applied":true,"note":"采集侧默认规则已应用；打包侧二次脱敏见 pack 调用参数"},
+ "sessions":[{"sid":"...","confidence":"high","turns":3,"llm_calls":7}],
+ "stats":{"llm":42,"llm_main":38,"llm_background":4,"mcp":11,"sandbox":6,"http":9}}
 ```
 
 ### 3.3 关键处理
@@ -278,17 +282,18 @@ pk-20261004-a/
 
 ```
 对 run 的每个 case（= 一个会话）：
- 1. provision（扩展自 bench/eval/provision/）：
-    docker 起 独立 MySQL(:随机) + 独立 Redis(:随机)
-      —— 库名 eval_{run_id}、AGENT_REDIS_PREFIX=eval-{run_id}-（原则二：独立库/前缀，跑完销毁）
-    起三个回放 mock：replay-llm(:A)、replay-sandbox(:B)、replay-mcp(:C，按包内 server 多实例)
-    起受测 jar：OAF 包来自 evalpack（解到 /config）、LLM_BASE_URL→:A、
-      OPENSANDBOX_SERVER_URL→:B、mcp-configs url 改写→:C、CHECKPOINT/AGENT_REDIS 指向独立容器
-      （受测 jar = 指定构建产物/镜像，用于"同包不同版本"回归对比）
-    预检：contract preflight（沿用 provision.preflight）+ 会话级 model_config seed（录制时切过模型则预置）
+ 1. provision（`replay --provision`，扩展自 bench/eval/provision/；缺省不跑，用 harness=stub/external）：
+    复用 e2e/scripts/local-infra.sh 的 MySQL:13306 + Redis:16379 容器，
+      以 AGENT_REDIS_PREFIX=eval-replay- 隔离键空间（原则二；每 run 清空 .runtime-replay 后起实例）
+    起回放器：replay-llm(:A) + replay-http(:B，沙箱与 MCP 同进程，按包内交互按需拉起)
+    起受测 jar（docker maven:3.9-eclipse-temurin-21，--network host）：
+      OAF 包来自 evalpack（oaf/*.zip 解为 agent-config）、LLM_BASE_URL→:A、
+      有沙箱交互时 SANDBOX_ENABLED=true + OPENSANDBOX_SERVER_URL→:B、mcp-configs url 改写→:B、
+      model 取包内录制模型（回放请求 model 与录制一致，否则指纹漂移）
+    收尾：replayer-captured.json 落 run 产物（漂移诊断/rebase 数据源），随后销毁容器与临时目录
  2. 驱动：sse_client.stream_chat 逐轮回放录制的用户输入；
     HITL：遇 permission_ask 时回放录制的 confirm 决策（approve/deny + 参数）走 confirm-stream
- 3. 采集回放轨迹：驱动器 SSE view + 三个 mock 各自记录"收到的请求 + 回放了的响应 + 匹配结果"
+ 3. 采集回放轨迹：驱动器 SSE view + 各回放器记录"收到的请求 + 回放了的响应 + 匹配结果"
  4. 断言与评测（见 §4.4 / §5）
  5. teardown：销毁容器与临时目录，落 trace
 ```
@@ -309,13 +314,13 @@ pk-20261004-a/
 
 | 类别 | 规则 | 例 |
 |------|------|----|
-| 时间戳 | ISO-8601 / epoch 毫秒模式 → `<TS>` | `2026-10-04T01:02:03Z` |
-| 标识 | UUID / nanoid / 递增 id → `<ID>` | session id、file id |
-| 路径 | 含 id 段的路径 → 归一模板 | `/files/f-123abc` → `/files/<FID>` |
-| 端口/主机 | 回放环境地址 → `<HOST>` | `127.0.0.1:18100` |
-| 随机 token | 长度 ≥N 的 hex/base64 → `<TOKEN>` | |
+| 时间戳 | ISO-8601 → `<TS>`；epoch 毫秒（13 位）→ `<TS_MS>` | `2026-10-04T01:02:03Z` |
+| 标识 | UUID → `<UUID>`；nanoid 形态（22 位 base62）→ `<TOKEN>` | session id、file id |
+| 框架身份 | `gw-` 前缀 hex（AgentStateStore ID / 协议面 peer 规范化产物）→ `<GW>` | `gw-9f2a1c3d4e5f` |
+| 端口/主机 | 回放环境地址（127.0.0.1 / localhost）→ `<HOST>` | `127.0.0.1:18100` |
+| 随机 token | ≥16 位 hex / 22 位 base62url → `<TOKEN>` | api key、trace id |
 
-规则集中在 `replay/normalize.py`（Python，供 packager 关联/断言复用）与 replayer 内同构实现（Node）。规则表进 `selftest` 离线自检。
+规则集中在 `replay/normalize.py`（Python，供 packager 关联/断言复用）与 replayer 内同构实现（Node，`replay-llm.mjs` / `replay-http.mjs`）。规则表进 `selftest` 离线自检。> 设计期的"含 id 段路径 → `<FID>`"模板规则**未实现**——路径里的 id 靠上表的 UUID/TOKEN 规则间接遮蔽。
 
 ### 4.4 轨迹等价与"确定结果路径"
 
@@ -330,21 +335,21 @@ pk-20261004-a/
 - `strict`：任一 normalized 失配 → case fail。用于**回归门禁**（同包 + 已知良好构建做基线）。
 - `loose`：失配不阻断，记 diff 继续。用于**诊断 / 新构建首轮摸底**。
 
-产物路径固定可寻址（"确定结果路径"的另一半语义）：
+产物路径固定可寻址（"确定结果路径"的另一半语义，实际落盘见 `replay/runner.py`）：
 
 ```
 runs/{run_id}/report.json                    # run 汇总 + 全 case 结果
-runs/{run_id}/cases/{case}/trace.json        # 驱动器视角轨迹（沿用现有 trace 结构，扩展字段）
-runs/{run_id}/cases/{case}/trajectory.json   # A2 逐步 diff
-runs/{run_id}/cases/{case}/replayer-logs.json
 runs/{run_id}/report.html                    # 自包含静态报告（可独立分发）
+runs/{run_id}/replayer-logs.json             # 三个回放器的匹配统计（run 级，非 per-case）
+runs/{run_id}/cases/{case_id}.trace.json     # 驱动器视角轨迹（沿用现有 trace 结构，扩展字段）
+runs/{run_id}/cases/{case_id}.trajectory.json# A2 逐步 diff
 ```
 
-### 4.5 replay-sandbox / replay-mcp
+### 4.5 replay-http（沙箱 / MCP 回放器，二期落地）
 
-- **replay-sandbox**：不真执行命令，按 `(method/path, 归一化参数)` 匹配录制交互回放（create 返回录制沙箱 id + 端点、command 返回录制 NDJSON 事件流原文）；`SANDBOX_ENABLED=false` 的会话天然无此类交互。
-- **replay-mcp**：扩展 `bench/eval/mock/mcp_server.py` 加 replay 模式——启动参数给 evalpack 目录，`tools/call` 按 `(tool, 归一化 args)` 匹配录制结果回放；ask 类工具照常发权限流（HITL 决策由驱动器回放）；initialize/tools-list 用包内录制的目录自描述。
-- 三者统一暴露 `/stats`（当次匹配统计：exact/normalized/drift/missing）供 report 聚合。
+- **replay-sandbox**：不真执行命令，按 `(method, 归一化路径, 归一化 body)` 匹配录制交互回放（create 返回录制沙箱 id + 端点、command 返回录制 NDJSON 事件流原文）；`SANDBOX_ENABLED=false` 的会话天然无此类交互。
+- **replay-mcp**：与沙箱同进程共用的 `bench/eval/mock/replay-http.mjs`——启动参数给 evalpack 目录，`tools/call` 按 JSON-RPC 方法 + 归一化 arguments 匹配录制结果回放；ask 类工具照常发权限流（HITL 决策由驱动器回放）；initialize/tools-list 用包内录制的目录自描述。
+- 二者统一暴露 `/stats`（exact/normalized/fallback/miss）供 report 聚合；**未实现**的是"扩展 `mock/mcp_server.py` 加 replay 模式"这条设计路线——最终形态是独立的 `replay-http.mjs`，`mcp_server.py` 保持纯 mock（provision 供给侧用）。
 
 ### 4.6 边界与已知限制（P1 范围声明）
 
@@ -368,7 +373,7 @@ A1 终态断言 + A2 轨迹等价（§4.4）。exit code 契约沿用飞轮：0 
 
 ### 5.2 LLM 评审层（开源组件，永不阻断）
 
-- **主选 OpenJudge（py-openjudge==0.2.2，pyproject 已预留钉版）**：与趋势轨打分一致（0~1 + reason），judge 端点用内网 OpenAI 兼容 LLM（`EVAL_LLM_BASE_URL/_API_KEY/_MODEL`，复用 `graders/correctness.py:judge_from_env`）。
+- **主选 OpenJudge（py-openjudge==0.2.2，pyproject 已钉版并接入）**：与趋势轨打分一致（0~1 + reason），judge 端点用内网 OpenAI 兼容 LLM（`EVAL_LLM_BASE_URL/_API_KEY/_MODEL`，复用 `graders/correctness.py:judge_from_env`）。引擎由 `EVAL_JUDGE_ENGINE=auto|direct|openjudge` 选（默认 auto：lazy import `graders/openjudge_adapter.py`，未安装回落直评；`openjudge` 强制且不可用即报错）。
 - **可选增强 DeepEval**（独立 venv，不进 pyproject 主依赖）：维度库化 + 自带 HTML 报告可嵌入 studio。映射：
   - 终答正确性：`GEval`（criteria 基于 ground_truth=录制终答）
   - 工具选择正确性：`ToolCorrectnessMetric`（expected_tools 来自录制轨迹）
@@ -386,12 +391,12 @@ A1 终态断言 + A2 轨迹等价（§4.4）。exit code 契约沿用飞轮：0 
 
 ```
 bench/eval-studio/
-  app/            # FastAPI：api/、worker/、store/
-  frontend/       # Vite + React + Tailwind（构建产物由 FastAPI 静态托管）
-  data/           # packs/、runs/、studio.db（gitignored）
+  app/            # FastAPI：main.py（API + worker 线程 + store.py）
+  static/index.html  # 自包含 vanilla SPA（零构建，与 collector 控制台同形态）
+  data/           # packs/、runs/、studio.db（gitignored；由 STUDIO_DATA_DIR 指定）
 ```
 
-- 领域对象：`Profile`（评测目标档案，见 §6.2）、`Package`（evalpack 导入）、`Case`（转正用例，含来源 sid）、`Run`（replay | chain 两类；chain 可选目标模式 `target_mode=replay|live`（live = 联机打真实测试环境），由档案带出；参数：profile、pack、cases、受测 jar 引用、mode、judge 配置）、`Report`。
+- 领域对象：`Profile`（评测目标档案，见 §6.2）、`Package`（evalpack 导入）、`Case`（转正用例，含来源 sid）、`Run`（replay | live 两类；目标模式 `target_mode=replay|live`（live = 联机打真实测试环境），由档案带出；参数：profile、pack、cases、受测 jar 引用、mode、judge 配置）、`Report`。
 
 ### 6.2 目标档案（Agent Profile）：按 agent 的配置切换与保存
 
@@ -404,42 +409,49 @@ eval-studio 本质是**面向评测目标的代理/编排服务**——前面面
   "agent": {"oaf_slug": "vendor/release", "platform_service": "svc-release"},
   "target_mode": "replay",                  // replay = 离线回放（默认） | live = 联机打真实服务
   "replay": {                               // target_mode=replay 时使用
-    "pack_policy": "latest|pin:pk-...",     // 默认取该 agent 最新包，可钉版本
-    "framework_ref": "repo-master|image:tag|jar-path",
-    "strictness": "strict|loose",
-    "provision": {"mysql_image": "...", "redis_image": "..."}
+    "harness": "builtin-stub",              // builtin-stub（默认，内置 stub agent，开箱即用）
+                                           //   | external（外部已起实例，读 replay.base_url）
+    "strictness": "strict|loose",            // 默认 strict
+    "base_url": "http://127.0.0.1:8100",    // harness=external 时的受测实例地址
+    "extra_env": {"STUB_MUTATE": "1"}       // 注入 stub 沙盒环境，模拟"行为变更的被测版本"
   },
   "live": {                                 // target_mode=live 时使用
     "base_url": "http://10.x.x.x/agent/svc-release",
-    "collector": "http://eval-collector:18300",   // 可选：联机评测顺带采集出新 evalpack
-    "timeout_s": 300, "hitl_policy": "auto_confirm"
+    "timeout_s": 120                        // 单轮 SSE 超时秒数，默认 120
   },
-  "judge": {"base_url": "...", "model": "...", "dims": ["correctness", "tool_selection"]},
-  "secrets_ref": {"llm_api_key": "env:EVAL_LLM_API_KEY"},  // 凭据只存引用，不落明文
-  "precheck": {"last_status": "ok", "checked_at": "..."}
+  "judge": {"base_url": "...", "api_key": "env:EVAL_LLM_API_KEY", "model": "..."},
+  "secrets_ref": {"llm_api_key": "env:EVAL_LLM_API_KEY"}  // 凭据只存引用，不落明文
 }
 ```
 
-- **切换与保存**：档案全部持久化（SQLite `profile` 表 + JSON 导入/导出，团队可共享）；全局**当前活跃档案**唯一，页面顶栏常显、一键切换；新建 run 默认继承活跃档案，表单最小只需选用例，其余参数可临时覆写（不回写档案）。
-- **live 模式（联机链路评测）**：不 provision 本地回放集群，sse_client 直接打档案里的真实 base_url（studio 即评测代理），断言/judge 与离线回放共用同一套契约；配置 collector 地址后可"**联机评测顺带采集**"——跑一轮真实链路评测同时落出新的 evalpack，喂给下一轮离线回放，形成采集-评测闭环。
-- **预检**：replay 档案校验 pack/框架引用存在与 hash；live 档案探测 base_url 可达（`/.well-known/agent-card.json`）与 judge 端点连通；结果缓存进档案并在切换时展示。
-- **凭据安全**：API key/数据库口令等敏感值只存**引用**（`env:VAR`，由 studio 进程环境注入）或加密字段（密钥 `STUDIO_SECRET_KEY`），页面一律脱敏展示；导出 JSON 不含敏感值。
+> 设计期的 `pack_policy` / `framework_ref` / `provision.{mysql_image,redis_image}` / `live.collector` / `hitl_policy` / `precheck` 缓存等键**当前未被消费**：`pack` 由 run 参数 `pack_id` 显式指定，受测版本经 `replay.extra_env`（stub 形态）或 `harness=external` 表达，live 联机采集走 §6.3 的 `POST /api/packs/from-collector` 独立入口。
 
-### 6.3 API 面（草案）
+- **切换与保存**：档案全部持久化（SQLite `profiles` 表 + `GET /api/profiles/{id}/export` JSON 导出，团队可共享）；全局**当前活跃档案**唯一（`settings.active_profile`），页面顶栏常显、一键切换；新建 run 默认继承活跃档案，表单最小只需选用例，其余参数可临时覆写（不回写档案）。
+- **live 模式（联机链路评测）**：不 provision 本地回放集群，sse_client 直接打档案里的真实 base_url（studio 即评测代理），断言/judge 与离线回放共用同一套契约；由 collector 侧「数据打包」出包喂给下一轮离线回放，形成采集-评测闭环。
+- **预检**：replay 档案校验包存在（`pack_policy.ok`）；live 档案探测 base_url 可达（`/.well-known/agent-card.json`）与 judge 端点连通。
+- **凭据安全**：API key/数据库口令等敏感值只存**引用**（`env:VAR`，由 studio 进程环境注入，`resolve_secrets` 解析），导出 JSON 时 `secrets_ref` 段整体剥离。
+
+### 6.3 API 面（实际实现见 `bench/eval-studio/app/main.py`）
 
 ```
-POST /api/packages（上传 zip，校验 manifest+CHECKSUMS+脱敏声明）
-GET  /api/packages/{id}/sessions/{sid}          # 骨架 + 交互关联 + 置信度
-POST /api/packages/{id}/promote  {sid, edits}   # 会话 → 用例（人审转正）
-GET/POST /api/cases
-GET/POST /api/profiles、PUT /api/profiles/{id}   # 目标档案 CRUD + 导入/导出 JSON（不含敏感值）
-POST /api/profiles/{id}/activate | /precheck     # 切换当前活跃档案 / 连通性与引用预检
-POST /api/runs   {type, profile_id, case_ids, package_id?, framework_ref?, mode, judge{...}}
-                                                 # 档案带默认参数，最小只需 type + profile + cases
-GET  /api/runs/{id}/report(.html)
-GET  /api/runs/{id}/cases/{case}/trace|trajectory
-GET  /api/trends?case_set=&pack=                # 跨 run 对比（回归视图）
-WS   /api/runs/{id}/events                      # 进度推送
+GET    /healthz、GET /                            # 健康检查 / SPA
+POST   /api/packages                             # 上传 zip（校验 manifest.json + CHECKSUMS）
+GET    /api/packages、GET /api/packages/{id}      # 列表 / 详情（manifest + 会话骨架 + 置信度）
+GET    /api/packages/{id}/cases                  # 包内用例草稿
+DELETE /api/packages/{id}
+POST   /api/packs/from-collector                 # 由 collector 控制台「数据打包」转调出完整 evalpack
+POST   /api/cases/promote  {pack_id, case_id}    # 候选用例 → active（人审转正）
+GET    /api/cases?status=
+GET/POST /api/profiles、PUT/DELETE /api/profiles/{id}
+GET    /api/profiles/{id}/export                 # JSON 导出（剥离 secrets_ref，不含敏感值）
+POST   /api/profiles/{id}/activate | /precheck   # 切换活跃档案 / 连通性与引用预检
+POST   /api/runs  {type: replay|live, profile_id, pack_id?, case_ids?, judge?}
+POST   /api/runs   → run worker 线程串行消费（无 WS 推送，进度轮询 GET /api/runs/{id}）
+GET    /api/runs、GET /api/runs/{id}
+GET    /api/runs/{id}/report.json | /report.html
+GET    /api/runs/{id}/cases/{case_id}.trace.json # 轨迹/轨迹 diff 明细
+GET    /api/trends?profile_id=                   # 跨 run 对比（回归视图）
+GET    /api/compare?run_a=&run_b=                # 同 pack 双 run 并排对比（M4）
 ```
 
 ### 6.4 页面（对应需求 2/3）
@@ -448,23 +460,24 @@ WS   /api/runs/{id}/events                      # 进度推送
 2. **目标配置**：目标档案列表/编辑/复制/切换（当前活跃档案顶栏常显、一键切）/预检/导入导出；敏感凭据脱敏展示。评测评测不同 agent = 切档案。
 3. **用例库**：候选用例人审（并排：录制轨迹 vs 派生 expected）→ 转正；可导出回 repo `cases/*.json`（趋势轨复用）。
 4. **评测任务**：新建 run 简化为「选档案 → 选用例 → 跑」（其余参数取档案默认，可临时覆写）+ 实时进度。
-5. **报告中心**：run 汇总看板——通过率、分数分布、耗时 p50/p95、token 用量、A3 漂移率、失败分类（复用 `analyzer/rca.py` 七类）；**明细统计**——用例级 checks 逐项（name/passed/detail）、轨迹逐步 diff 表；**对比视图**——同 pack 不同 framework 版本并排（回归定位主入口）。
-6. **轨迹查看器**：会话帧时间线 + LLM 请求/响应 chunk 级查看 + 工具调用参数/结果 + HITL 卡 + 录制 vs 回放双栏 diff。
+5. **报告中心**：run 汇总看板——通过率、分数分布、耗时、A3 漂移率；**明细统计**——用例级 checks 逐项（name/passed/detail）、轨迹逐步 diff 表；**对比视图**——同 pack 双 run 并排（回归定位主入口）。失败分类复用 `analyzer/rca.py` 的七类口径（当前 report.json 未落 `rca_category` 字段，报告页按需另跑 RCA）。
+6. **轨迹查看器**：会话帧时间线 + 工具调用参数/结果 + HITL 卡 + 录制 vs 回放双栏 diff。
 
-### 6.5 报告契约（report.json 摘录）
+### 6.5 报告契约（report.json 实际结构，见 `replay/runner.py:build_report()`）
 
 ```json
-{"run_id":"...","type":"replay","pack_id":"pk-20261004-a",
- "framework":{"commit":"...","jar_sha256":"..."},"mode":"strict",
- "judge":{"model":"...","dims":[...]},
- "summary":{"case_total":12,"pass":11,"fail":1,"error":0,"pass_rate":0.917,
-   "score_avg":0.93,"score_distribution":[...],"drift_rate":0.02,
-   "duration_ms_p50":...,"token_usage":{...}},
- "cases":[{"case_id":"...","sid":"...","status":"failed",
+{"run_id":"...","type":"replay","pack_id":"pk-20261004-a","mode":"strict",
+ "judge":{"model":"...","skipped":false},
+ "summary":{"case_total":12,"pass":11,"fail":1,"error":0,"pass_rate":0.9167,
+   "score_avg":0.93,"drift_rate":0.02,"duration_ms_total":812345},
+ "cases":[{"case_id":"...","sid":"...","status":"failed","duration_ms":8432,
    "checks":[{"name":"frames.AGENT_END","passed":true,"detail":"..."}],
-   "trajectory_diff":[...],"scores":{"correctness":{"score":0.9,"reason":"..."}},
-   "rca_category":"工具执行失败","trace_path":"cases/case_x/trace.json"}]}
+   "trajectory":[...],"scores":{"correctness":{"score":0.9,"reason":"..."}},
+   "final_output":"...","error_info":null,
+   "trace_path":"cases/case_x.trace.json"}]}
 ```
+
+> 设计期的 `framework.{commit,jar_sha256}`、`summary.{score_distribution,duration_ms_p50,token_usage}`、用例级 `rca_category` **当前未产出**（受测版本信息由 run 参数/档案承载，耗时只有 run 合计 `duration_ms_total`）。
 
 静态 HTML 报告自包含（JSON 内嵌 + 无依赖渲染），可离线分发。
 
@@ -480,11 +493,11 @@ WS   /api/runs/{id}/events                      # 进度推送
 
 ```
 agent-framework/bench/eval-collector/        # Docker 镜像源：Node 采集代理 + 内置控制台
-  server.mjs、console/index.html（自包含单页，零 CDN 依赖）、collector.yaml
-  Dockerfile、docker-compose.yml（collector + eval-studio 工作站）、deploy/k8s.yaml、README
-agent-framework/bench/eval/replay/           # packager.py、normalize.py、trajectory.py
-agent-framework/bench/eval/mock/replay-llm.mjs、replay-sandbox.mjs
-agent-framework/bench/eval-studio/           # FastAPI + 前端
+  server.mjs、console.html（自包含单页，零 CDN 依赖）、collector.example.yaml
+  Dockerfile、docker-compose.yml（collector + eval-studio 工作站）、README
+agent-framework/bench/eval/replay/           # packager.py、normalize.py、trajectory.py、runner.py、evolve.py
+agent-framework/bench/eval/mock/replay-llm.mjs、replay-http.mjs（沙箱/MCP 回放器）
+agent-framework/bench/eval-studio/           # FastAPI + 自包含 SPA（app/ + static/）
 ```
 
 **修改**：`flywheel.py` 加 `pack` / `replay` 子命令；`pyproject.toml`（如引入 judge 增强依赖则钉版注释）；`.github/workflows/agent-framework-ci.yml`（master push 增推 `gaoyue1989/eval-collector` 与 `eval-studio` 镜像，沿用 buildx + gha 缓存，按目录过滤只在该目录变更时构建）；`FLYWHEEL.md`/`docs/e2e-ci-plan.md`（若 M4 落 CI job）。
@@ -503,10 +516,10 @@ agent-framework/bench/eval-studio/           # FastAPI + 前端
 
 | 阶段 | 内容 | 验收 |
 |------|------|------|
-| M1 采集链路 | collector Docker 镜像 + 内置控制台（接入向导）+ 三协议录制 + 脱敏 + 存储 + `pack` 子命令（关联打包；compose 工作站含 packager sidecar） | ① `docker run` / compose 一键起服务，向导五步完成接入并在页面验证首条采集；② 测试环境某服务开采集跑真实会话 → 产出 evalpack；③ 关联置信度抽查：≥95% 会话外部交互正确归属（high 占比报告化）；④ 路径前缀路由的两个 SDK 前提 spike 通过或回落端口池模型 |
+| M1 采集链路 | collector Docker 镜像 + 内置控制台（接入向导）+ 三协议录制 + 脱敏 + 存储 + `pack` 子命令（关联打包；compose 工作站由 eval-studio 镜像承担 packager） | ① `docker run` / compose 一键起服务，向导五步完成接入并在页面验证首条采集；② 测试环境某服务开采集跑真实会话 → 产出 evalpack；③ 关联置信度抽查：≥95% 会话外部交互正确归属（high 占比报告化）；④ 路径前缀路由的两个 SDK 前提 spike 通过或回落端口池模型 |
 | M2 回放链路 | 三个回放器 + provision pack 化 + 驱动 + A1/A2/A3 + `replay` 子命令 | ① 同一构建回放录制会话：无远端委派的会话 strict 模式轨迹等价通过；② 金标验证：用历史引入行为变更的 commit 作受测构建，漂移能被捕获（A2/A3 可见）；③ `selftest` 扩展归一化规则与 trajectory diff 单测 |
 | M3 eval-studio | 目标档案（按 agent 配置切换/保存/预检 + live 联机模式）、包管理/用例人审/run 编排/报告中心/轨迹查看器 | 手工验收：①从上传 evalpack 到查看 run 报告全流程页面可用；②配置两个不同 agent 的档案并一键切换，各自完成一次 run（replay 与 live 各一）；③静态 HTML 报告可独立打开 |
-| M4 链路评测与 CI 化 | OpenJudge 维度接入（DeepEval 可选）、跨 run 趋势、`eval-replay` CI job（非必需起步） | 同 pack 多版本对比视图产出回归结论；CI job 在 agent-framework 变更时离线回放固定 pack 集，零真实 LLM 依赖 |
+| M4 链路评测与 CI 化 | OpenJudge 维度接入（DeepEval 可选）、跨 run 趋势、`eval-replay-offline` CI job（非必需） | 同 pack 多版本对比视图产出回归结论；CI job 在 agent-framework 变更时离线回放固定 pack 集，零真实 LLM 依赖 |
 
 ---
 
@@ -536,7 +549,7 @@ agent-framework/bench/eval-studio/           # FastAPI + 前端
 
 ### A.2 验证记录（2026-10-04 实跑）
 
-- e2e 全量（真实上游）：**PASS 73 / FAIL 0**。真实录制=OpenRouter `stealth/space-bunny-alpha`（2 会话 3 调用经 collector 透传录制）；judge=mimo `mimo-v2.6-flash`（录制↔回放终答一致性打分 1.0）。
+- e2e 全量（真实上游）：**PASS 73 / FAIL 0**（一期当时的断言集；二期扩到 §B.3 的 96 条）。真实录制=OpenRouter `stealth/space-bunny-alpha`（2 会话 3 调用经 collector 透传录制）；judge=mimo `mimo-v2.6-flash`（录制↔回放终答一致性打分 1.0）。
 - 漂移金标：`STUB_MUTATE=1` 注入请求形状变更 → strict 回放 2/2 失败、drift=1.0（A2/A3 捕获行为回归的能力被证实）。
 - `flywheel.py selftest` 原有自检回归通过（帧映射契约未受影响）。
 - 镜像冒烟：`gaoyue1989/eval-collector:0.1.0`（healthz/token 鉴权/控制台）；`gaoyue1989/eval-studio:0.1.0`（容器内导入 evalpack → 建 replay 档案 → 容器内自动拉起 replay-llm+stub 沙盒 → 完整 replay run 2/2 通过、drift=0）。
@@ -580,7 +593,7 @@ agent-framework/bench/eval-studio/           # FastAPI + 前端
 
 ### B.3 验证记录（2026-10-04）
 
-- 全量 e2e（真实录制模型 + mimo judge + OpenJudge + provision 金标 + studio）：**PASS 96 / FAIL 0**；`--offline` 模式供 CI。
+- 全量 e2e（真实录制模型 + mimo judge + OpenJudge + provision 金标 + studio）：**PASS 96 / FAIL 0**；`--offline` 模式供 CI。> 该计数含 provision 金标（9 条）与 OpenJudge 实调（3 条，本机有 `/tmp/ojvenv` + judge 凭据时）；缺这两项时 `--offline` 为 **93 条**——2026-10-09 在无 `/tmp/ojvenv`、无 judge 凭据的环境实跑 `python3 bench/eval/tests/e2e_offline_loop.py --offline` 得 **PASS 93 / FAIL 0**（phase 1/2/3/4/5/5b/5c/5d-1/5d-2/5e/6 全绿，OpenJudge 相按设计回落直评）。
 - 金标：真实 jar 录制（2 会话，4 交互含 2 背景标题调用）→ provision 回放 strict 2/2 通过、drift=0。
 - OpenJudge：`openjudge-0.2.2` 引擎标识 + 正例 raw=5.0 → score=1.0。
 - `flywheel.py selftest` 回归通过；collector/studio 镜像重建并冒烟通过。

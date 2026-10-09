@@ -4,22 +4,26 @@
 
 ## 前置条件
 
-- Kind 单节点集群（`docs/kind-config.yaml`），ingress-nginx 已装（NodePort 30080）
+- Kind 单节点集群（集群名 `agent-manager`；集群配置原文内嵌于 [design/01-k8s-deployment.md](design/01-k8s-deployment.md) §3，仓库内无独立 kind-config.yaml），ingress-nginx 已装（NodePort 30080）
 - 宿主机已装 Docker、kubectl、Go 1.26+（与 backend/go.mod 一致）、Maven+JDK21
 - GOPROXY 走 `https://goproxy.cn,direct`
 
 ## 一、构建镜像
 
+> tag 必须与 `manifests/*.yaml` 中 `image:` 字段一致，否则 apply 后 Pod 拉不到镜像（ImagePullBackOff）。
+> 当前值：`platform-backend:v4`（platform.yaml:267）、`172.20.0.1:5001/platform-frontend:v7`（frontend.yaml:17）、
+> `172.20.0.1:5001/agent-framework:latest`（platform.yaml:275-276 的 AVAILABLE_IMAGES/DEFAULT_IMAGE）。
+
 ```bash
-# 1) agent-framework（业务运行时，Java）
+# 1) agent-framework（业务运行时，Java）——发布助手/业务 Agent 的业务镜像
 cd agent-framework && mvn -q clean package -DskipTests
 docker build -t agent-framework:latest .
 
 # 2) platform-backend（Go 管理后端 + MCP 同进程）
-cd ../backend && docker build -t platform-backend:v1 .
+cd ../backend && docker build -t platform-backend:v4 .
 
 # 3) platform-frontend（Next.js standalone）
-cd ../frontend && docker build -t platform-frontend:v3 .
+cd ../frontend && docker build -t 172.20.0.1:5001/platform-frontend:v7 .
 ```
 
 ## 二、导入镜像到 Kind 节点
@@ -27,12 +31,17 @@ cd ../frontend && docker build -t platform-frontend:v3 .
 > 注意：必须用 `--platform linux/amd64` 导出（官方镜像含 arm64/attestation 条目会导致 ctr 导入失败）
 
 ```bash
-for img in agent-framework:latest platform-backend:v1 platform-frontend:v3; do
+# platform-backend 与 agent-framework 是本地 tag（imagePullPolicy: IfNotPresent），走 ctr 导入
+for img in agent-framework:latest platform-backend:v4; do
   f=/tmp/opencode/$(echo $img | tr ':/' '__').tar
   docker save --platform linux/amd64 -o $f $img
   docker cp $f agent-manager-control-plane:/var/tmp/img.tar
   docker exec agent-manager-control-plane ctr -n k8s.io images import --all-platforms /var/tmp/img.tar
 done
+
+# platform-frontend 是带 registry 前缀的 tag 且 imagePullPolicy: Always
+# → 节点必须能访问 172.20.0.1:5001，先 push 到该registry（不能靠 ctr 导入）
+docker push 172.20.0.1:5001/platform-frontend:v7
 ```
 
 ## 三、部署平台
@@ -48,13 +57,14 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 ## 四、自举发布助手
 
 浏览器打开前端 → 上传 `release-agent/` 打包的 zip（或直接调 API）→ 发布：
-镜像 `agent-framework:latest`，env 填 LLM_*、CHECKPOINT_JDBC_URL 与 AGENT_REDIS_URL（见下）。
+镜像选 `172.20.0.1:5001/agent-framework:latest`（platform.yaml 的 DEFAULT_IMAGE/AVAILABLE_IMAGES，
+即 §一 产出的业务镜像），env 填 LLM_*、CHECKPOINT_JDBC_URL 与 AGENT_REDIS_URL（见下）。
 
 > `AGENT_REDIS_URL=redis://oaf-redis.agent-platform.svc.cluster.local:6379`（oaf-redis 已随 platform.yaml 部署）。
 > 缺省值指向 `127.0.0.1`（Pod 自身），session_event 事件不落 Redis、SSE 断线回放/续传全挂——部署必配。
 
 > **DB schema 迁移（Flyway，2026-09-28 起）**：agent-framework 启动时自动执行
-> `db/migration` 版本化迁移——存量库首次启动自动基线（V1..V8 已就位，仅跑增量）、
+> `db/migration` 版本化迁移——存量库首次启动自动基线（V1..V9 已就位，仅跑增量）、
 > 全新库从 V1 完整重建，发版无需人工干预；多副本同时启动由历史表锁互斥。
 > 此后表结构/数据演进只新增 V 文件（见 docs/design/db-migration-flyway-design.md），不再手工改库。
 

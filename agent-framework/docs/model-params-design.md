@@ -178,7 +178,7 @@ switch (llm.provider()) {
 
 ## 7. 测试要点
 
-1. schema：全新部署经迁移链建表含新列（V3 建表 + V4 补列）；存量库 baseline 到 V5（V1..V5 不再执行，列已在位）——真实 MySQL 覆盖见 `ModelConfigStoreMySqlIT`（`HITL_MYSQL_IT=1` 门控，跑 V1..V6 迁移链，含旧表自动迁移场景）
+1. schema：全新部署经迁移链建表含新列（V3 建表 + V4 补列）；存量库 baseline 到 V5（V1..V5 不再执行，列已在位）——真实 MySQL 覆盖见 `ModelConfigStoreMySqlIT`（`HITL_MYSQL_IT=1` 门控，跑全量迁移链 `TestSchemaMigrator`（按版本号数字升序执行 `db/migration` 全部文件），含旧表自动迁移场景）
 2. CRUD：新参数落库与回读；`reasoningEffort: ""` 清除；非法值（`Medium`/`3.0`/provider 拼错）400
 3. **方言矩阵断言**（抓请求体，每方言一组）：
    - vllm/sglang：effort+开关同入一个 `chat_template_kwargs`（Map 合并、无覆盖丢失）；temperature/max_tokens/frequency_penalty 在顶层
