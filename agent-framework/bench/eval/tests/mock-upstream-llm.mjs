@@ -22,13 +22,14 @@ function json(res, code, obj) {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/stats') return json(res, 200, { calls, echo_calls: echoCalls });
-  if (req.method === 'POST' && req.url === '/reset') { calls = 0; return json(res, 200, { ok: true }); }
-  if (req.method === 'GET' && req.url === '/v1/models') {
+  const p = req.url.split('?')[0]; // 精确匹配路由剥查询串（collector e2e 验证查询串原样透传）
+  if (req.method === 'GET' && p === '/stats') return json(res, 200, { calls, echo_calls: echoCalls });
+  if (req.method === 'POST' && p === '/reset') { calls = 0; echoCalls = 0; return json(res, 200, { ok: true }); }
+  if (req.method === 'GET' && p === '/v1/models') {
     return json(res, 200, { object: 'list', data: [{ id: 'mock-record-model', object: 'model' }] });
   }
   // 沙箱协议 mock（collector e2e 用）：创建沙箱返回固定 id
-  if (req.method === 'POST' && req.url === '/v1/sandboxes') {
+  if (req.method === 'POST' && p === '/v1/sandboxes') {
     return json(res, 200, { id: 'sbx-mock-001', status: 'running', endpoints: {} });
   }
   // 请求体回显（问题6 回归用）：上报收到的字节数与 JSON 可解析性，供断言"转发体完整"
@@ -45,15 +46,15 @@ const server = http.createServer((req, res) => {
     return;
   }
   // 业务服务反代目标（collector e2e 用）：/threads/* 与 /health
-  if (req.method === 'GET' && req.url === '/health') {
+  if (req.method === 'GET' && p === '/health') {
     return json(res, 200, { ok: true });
   }
-  if (req.url.startsWith('/threads/')) {
+  if (p.startsWith('/threads/')) {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
-      const sid = req.url.match(/^\/threads\/([^/]+)/)?.[1] || 'unknown';
-      if (req.method === 'POST' && req.url === '/threads/chat') {
+      const sid = p.match(/^\/threads\/([^/]+)/)?.[1] || 'unknown';
+      if (req.method === 'POST' && p === '/threads/chat') {
         let b = {}; try { b = JSON.parse(Buffer.concat(chunks).toString('utf-8')); } catch { /* 忽略 */ }
         // 业务 /threads/chat 真实形态是 SSE（Spring TEXT_EVENT_STREAM）——按 stub-agent.mjs
         // 帧序吐事件流，data: [DONE] 收尾（collector attachSSECollector 以 [DONE] 为语义结束）
@@ -79,7 +80,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   // MCP streamableHttp mock（collector e2e 用）：JSON-RPC 通用回声
-  if (req.url.startsWith('/mcp')) {
+  if (p.startsWith('/mcp')) {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -90,7 +91,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+  if (req.method === 'POST' && p === '/v1/chat/completions') {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {

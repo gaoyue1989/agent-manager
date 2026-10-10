@@ -737,8 +737,18 @@ def cmd_selftest(_: argparse.Namespace) -> int:
 
     asyncio.run(_skip_probe())
 
+    # issue #97 问题c：collector 自研 YAML 解析器回归断言（抽取 server.mjs 真实实现执行，
+    # 对 example.yaml 每键断言类型与值——防止行尾注释/列表项静默失效回归）
+    yaml_script = EVAL_DIR / "tests" / "collector_yaml_selftest.mjs"
+    try:
+        r = subprocess.run(["node", str(yaml_script)], capture_output=True, text=True, timeout=60)
+    except FileNotFoundError as e:
+        raise AssertionError("collector YAML 断言需要 node（CI runner 预装；本机请自装 Node ≥ 18）") from e
+    assert r.returncode == 0, f"collector YAML 断言失败:\n{r.stdout[-800:]}\n{r.stderr[-800:]}"
+
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
-          f" + 归一化规则/轨迹等价（M2）+ 标识符校验/CHECKSUMS 三重校验（issue #97），"
+          f" + 归一化规则/轨迹等价（M2）+ collector YAML 加载断言 + 标识符校验/CHECKSUMS"
+          f" 三重校验（issue #97），"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 

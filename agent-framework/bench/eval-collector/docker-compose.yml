@@ -14,7 +14,7 @@ services:
     image: gaoyue1989/eval-collector:latest
     container_name: eval-collector
     ports:
-      - "18200-18202:18200-18202"   # 数据面：LLM / 沙箱 / MCP
+      - "18200-18203:18200-18203"   # 数据面：LLM / 沙箱 / MCP / 业务服务（agent）
       - "18300:18300"               # 管理控制台
     volumes:
       - ./collector-data:/var/lib/eval-collector
