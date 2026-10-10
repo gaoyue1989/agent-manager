@@ -14,7 +14,11 @@
 #                           10×512Mi 会触发宿主 swap 抖动/OOM，实测工作集约 100Mi 故降为 256Mi）
 #   STAGE_SECONDS=180       每档稳态时长
 #   RAMP_SECONDS=15         每档 ramp 时长（C 档恒 0，一波齐发）
-#   ASSERT_START_DELAY_MS=10000  C 档启动延迟门禁：任一路排队签名超阈值该档 FAIL
+#   ASSERT_START_DELAY_MS=10000  C 档启动延迟门禁：任一路 AGENT_START 超阈值该档 FAIL（exit 3）
+#   P95_ABORT_MS=30000      档停止条件：稳态 P95 超阈值该档中止（exit 2）；
+#                           必须显式大于 MOCK_LLM_SLOW_MS（C 档 slow turn 总时延 ≈ 排队 + SLOW_MS）
+#   MOCK_LLM_SLOW_MS=12000  mock-llm slow 场景单 turn 时长（C 档在途 turn 构造）；显式导出给
+#                           mock-llm，取值论证见下
 #   IMAGE=agent-framework:latest
 #   BASE_URL=http://127.0.0.1:8101
 # 退出码（issue #97 问题16）：0=全部通过；1=预热失败/runner 异常退出；3=启动延迟门禁 FAIL；
@@ -34,6 +38,12 @@ STAGE_SECONDS="${STAGE_SECONDS:-180}"
 RAMP_SECONDS="${RAMP_SECONDS:-15}"
 P95_SLO_MS="${P95_SLO_MS:-10000}"
 ASSERT_START_DELAY_MS="${ASSERT_START_DELAY_MS:-10000}"
+# P95 停止条件显式下传 runner（--p95-abort-ms），并与 MOCK_LLM_SLOW_MS 解耦（issue #97 问题 14）：
+# 此前 mock 默认 SLOW_MS=30000 恰撞 runner 默认 P95_ABORT_MS=30000 且未显式传参 → C 档 slow
+# turn 总时延 ≥30s 必触发 P95 中止（C=4 必 abort、C=8 永不执行）。取 12000：缺陷形态下
+# C=2 排队签名 ≈SLOW_MS=12s 仍 > 10s 门禁阈值（8000 会漏检 C=2 单档），且与 30000 有 2.5× 余量
+P95_ABORT_MS="${P95_ABORT_MS:-30000}"
+MOCK_LLM_SLOW_MS="${MOCK_LLM_SLOW_MS:-12000}"
 IMAGE="${IMAGE:-agent-framework:latest}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8101}"
 CONTAINER="${CONTAINER:-bench-agent-fw}"
@@ -136,6 +146,9 @@ mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" < sql/
 
 # ===== 2. 启动 mock 服务 =====
 say "启动 mock-llm / mock-mcp"
+# 显式导出 slow 时长：不导出则 mock 用自身默认 30000，撞 P95_ABORT_MS 使 C 档必 abort
+# （mock 对非法值（非数字/负数）会启动即 exit 1，见 mock-llm/server.js readMsEnv）
+export MOCK_LLM_SLOW_MS
 (cd mock-llm && exec node server.js) >>"$RESULTS/mock-llm.log" 2>&1 &
 LLM_PID=$!
 (cd mock-mcp && exec node server.js) >>"$RESULTS/mock-mcp.log" 2>&1 &
@@ -244,7 +257,7 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
     # 会话池经 --session-pool 下发（与 runner.js 的 arg 名一致；此前误写 --user-pool 未生效）
     if node load/runner.js --mode run --scenario "$SC" --stage "$C" --concurrency "$C" \
       --session-pool "$STAGE_POOL" --ramp-seconds "$SC_RAMP" --stage-seconds "$STAGE_SECONDS" \
-      --assert-start-delay-ms "$ASSERT_START_DELAY_MS" \
+      --assert-start-delay-ms "$ASSERT_START_DELAY_MS" --p95-abort-ms "$P95_ABORT_MS" \
       --base-url "$BASE_URL" --results-dir "$RESULTS"; then RC=0; else RC=$?; fi
     # LLM 调用对账落盘（期望值已记录在 summary）
     curl -fsS -m 5 "http://127.0.0.1:$MOCK_LLM_PORT/stats" \
