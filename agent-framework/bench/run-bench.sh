@@ -21,6 +21,8 @@
 #                           mock-llm，取值论证见下
 #   IMAGE=agent-framework:latest
 #   BASE_URL=http://127.0.0.1:8101
+# 退出码（issue #97 问题16）：0=全部通过；1=预热失败/runner 异常退出；3=启动延迟门禁 FAIL；
+#   runner rc=2（触发停止条件）属预期语义，不计失败、不影响脚本退出码
 # =========================================================================
 set -u
 cd "$(dirname "$0")"
@@ -197,13 +199,24 @@ start_container() {
 }
 
 # ===== 4. 逐场景执行 =====
-# 历史结果归档（防跨次混写：jsonl 为追加写，旧档会污染报告）
-if ls results/B[0-9] results/C >/dev/null 2>&1; then
+# 历史结果归档（防跨次混写：jsonl 为追加写，旧档会污染报告）。
+# B 与 C 目录分别判定、各自存在才 mv（issue #97 问题15）：默认场景集（B0,B1,B3,B5）不产生
+# results/C，此前双操作数 `ls results/B[0-9] results/C` 在 C 缺席时恒 exit 2，归档永不触发
+B_DIRS=$(ls -d results/B[0-9] 2>/dev/null || true)
+if [ -n "$B_DIRS" ] || [ -d results/C ]; then
   ARCHIVE="results/archive-$(date +%H%M%S)"
   mkdir -p "$ARCHIVE"
-  mv results/B[0-9] results/C "$ARCHIVE"/ 2>/dev/null || true
+  if [ -n "$B_DIRS" ]; then
+    mv results/B[0-9] "$ARCHIVE"/ 2>/dev/null || echo "  警告：B 档历史结果归档失败（保留原位）"
+  fi
+  if [ -d results/C ]; then
+    mv results/C "$ARCHIVE"/ 2>/dev/null || echo "  警告：C 档历史结果归档失败（保留原位）"
+  fi
   echo "  历史结果已归档至 $ARCHIVE"
 fi
+# 失败计数（issue #97 问题16）：门禁 FAIL 与运行性失败最终反映到脚本退出码
+FAILED=0      # 预热失败/runner 异常退出等运行性失败 → exit 1
+GATE_FAIL=0   # 启动延迟门禁 FAIL → exit 3
 for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
   say "场景 $SC"
   SANDBOX_FLAG=true
@@ -231,7 +244,7 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
   [ "$SC" == "C" ] && C_WARM_POOL=1
   say "场景 $SC 预热（sessions=$C_WARM_POOL）"
   node load/runner.js --mode warmup --scenario "$SC" --session-pool "$C_WARM_POOL" \
-    --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; continue; }
+    --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; FAILED=1; continue; }
 
   for C in $STAGE_LIST; do
     # C ≤ 池上限时每个 inflight 独占会话（C 档池 = 并发数，恒独占）
@@ -256,9 +269,10 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
     fi
     if [ "$RC" -eq 3 ]; then
       echo "  档 C=$C 启动延迟门禁 FAIL（跨会话排队，issue #87），场景 $SC 剩余档跳过"
+      GATE_FAIL=1
       break
     fi
-    [ "$RC" -ne 0 ] && { echo "  runner 异常退出（rc=$RC），场景 $SC 剩余档跳过"; break; }
+    [ "$RC" -ne 0 ] && { echo "  runner 异常退出（rc=$RC），场景 $SC 剩余档跳过"; FAILED=1; break; }
   done
 done
 
@@ -268,3 +282,8 @@ node load/report.js --results-dir "$RESULTS"
 
 # ===== 6. 清理（trap 兜底：容器/mock/沙箱） =====
 say "完成（容器、mock 进程与 bench 沙箱经 trap 清理；库 agent_manager_bench 保留供复跑）"
+# 退出码（issue #97 问题16）：此前失败形态只 echo+break，退出码恒 0，与全通过不可区分。
+# 门禁 FAIL 优先于运行性失败；rc=2（触发停止条件）属预期语义，不计失败
+[ "$GATE_FAIL" -eq 1 ] && exit 3
+[ "$FAILED" -eq 1 ] && exit 1
+exit 0
