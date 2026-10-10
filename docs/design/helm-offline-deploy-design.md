@@ -14,7 +14,7 @@ PVC 创建、镜像 tag、`INGRESS_HOST` 等环境相关值——换环境要改
 
 1. 单一 Helm chart（**自包含、无外部依赖**）一键部署平台控制面；
 2. 全部环境相关值走 `values.yaml` / `-f values-offline.yaml`，不要求改模板；
-3. **MySQL / Redis / OTel 全部外部化**：chart 不部署、不创建、不管理；
+3. **MySQL / Redis 外部化**：chart 不部署、不创建、不管理（**OTel 已决议暂不考虑**，§5.3）；
 4. **PVC 复用已有**：chart 不创建任何 PVC（平台数据卷由环境预先提供）；
 5. **离线（内网仓库）**：镜像**统一来自环境内网镜像仓库**——chart 不提供镜像预载/搬运，
    仅参数化 registry 前缀与拉取凭据；渲染与安装不依赖公网（无子 chart、无外网访问）。
@@ -77,12 +77,12 @@ charts/oaf-platform/
 | 业务 Pod 资源 | `business.resources.{requestsCpu,requestsMem,limitsCpu,limitsMem}` | 渲染 `RESOURCE_*` 四元组（后端 config.go 默认 250m/256Mi/1/1Gi，作用于**每个业务 Deployment**） |
 | 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | `host`/`port` = **集群 ingress controller 的对外入口地址**（Endpoint 展示拼装用）；host 模式额外 `hostSuffix` |
 | 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 两模式（§6.2，**默认 synthesized 部署期合成**） |
-| 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl,evalCollector.{mode,agentUrl}}` | `agentInternalUrl` 默认指向 release-agent；`publicApiUrl`（`NEXT_PUBLIC_API_URL`，默认空=服务端反代同源）；`evalCollector.*` 为评测录制反代模式（默认关闭，仅评测环境） |
+| 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl}` | `agentInternalUrl` 按 `releaseAgent.enabled` 渲染；`publicApiUrl` 默认空=同源（形态 B 必填）；**EVAL_COLLECTOR_* 已决议不纳入**（评测环境手工设置） |
 | 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.5 |
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
 | 外部 Redis | `external.redis.{url}`（业务侧默认值） | 平台自身不使用 Redis；仅用于种子与文档提示 |
 | 外部 OTel | `otel.{enabled,exporter,endpoint,headers,serviceName}` | 经业务 Deployment overlay 注入，见 §5.3 |
-| 业务 overlay | `business.deploymentOverlay`（OTel 自动段 + `extra` 自备 SMP，合并渲染**单文件**——后端只认一个 `DEPLOYMENT_TEMPLATE` 路径）、`business.ingressOverlay`（自备，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 安装即报错（后端对 suffix 空 + `INGRESS_TEMPLATE` 非空启动 fail-fast，chart 提前拦避免 CrashLoop） |
+| 业务 overlay | `business.deploymentOverlay.extra`（自备 SMP 单文件；**OTel 自动段已决议移除**，如需 OTel 经 extra 手工注入）、`business.ingressOverlay`（自备，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 渲染期 fail（后端 fail-fast，提前拦避免 CrashLoop） |
 | 平台默认值种子 | `platformDefaults.seed.{enabled,llm.*,mysql.*,redis.*,sandbox.*,protocol.*}` | 调平台 API 写入；默认关闭 |
 | 暴露 | `ingress.{className,host,tls,annotations}` + `ingress.backend.host` / `ingress.frontend.host`（分域用） | 仅 Ingress（形态 A/B 见 §6.3），**不提供 NodePort**（已决议）；入口 = 集群 ingress controller |
 | 安全 | `imagePullSecrets[]`、`podSecurityContext`、`existingSecret`（密码类复用已有 Secret） | values 明文仅示例，生产走 `existingSecret` |
@@ -109,9 +109,8 @@ external:
   mysql: { host: oaf-mysql.agent-platform.svc.cluster.local, port: 3306, database: oaf_platform,
            username: oaf, password: "", params: "charset=utf8mb4&parseTime=True&loc=Local" }
   redis: { url: "redis://oaf-redis.agent-platform.svc.cluster.local:6379" }
-otel: { enabled: true, exporter: otlp, endpoint: "http://otel-collector.observability:4318",
-        headers: "", serviceName: "agent-framework" }
-business: { deploymentOverlay: { enabled: true, extra: "" } }
+# otel 组已决议移除（暂不考虑；如需可经 deploymentOverlay.extra 手工注入 OTEL_* env）
+business: { deploymentOverlay: { enabled: false, extra: "" } }
 platformDefaults: { seed: { enabled: true } }          # bootstrap ①：默认配置种子（已决议默认开）
 releaseAgent:                                          # bootstrap ②：发布助手自举（已决议纳入）
   enabled: true
@@ -149,7 +148,7 @@ ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
 | F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
 | F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
 | F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（形态 A 留空=同源 `/api/v1`；**形态 B 必填** backend 公网地址，见 §6.2） | **本次补** |
-| F4-F5 | `EVAL_COLLECTOR_MODE` / `EVAL_COLLECTOR_AGENT_URL` | 前端（评测录制反代） | `frontend.env.evalCollector.*`（默认关闭，仅评测环境） | **本次补** |
+| F4-F5 | `EVAL_COLLECTOR_MODE` / `EVAL_COLLECTOR_AGENT_URL` | 前端（评测录制反代） | **已决议不纳入**（评测环境手工设置） | 本次补→已决议 |
 | R1-R3 | nginx `client_max_body_size` / `proxy_{read,send}_timeout` | platform-router | `router.nginx.*`（默认 200m/3600s） | **本次补** |
 
 不映射（维持后端默认/无 env 面）：Gin 模式、业务镜像 pullPolicy（后端构造固定 `IfNotPresent`，
@@ -176,7 +175,12 @@ ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
 - 文档必须强调（既有约束）：**多服务共享同一 MySQL/Redis 时必须每服务独立 checkpoint 库名
   与 `AGENT_REDIS_PREFIX`**，平台当前不自动派生（已知缺口）。
 
-### 5.3 业务服务 → 外部 OTel（经业务 Deployment overlay）
+### 5.3 业务服务 → 外部 OTel —— **已决议：暂不考虑**（2026-10-10）
+
+> 下列机制说明保留作后续演进参考；首版不实施、values 无 otel 组。临时需求可经
+> `business.deploymentOverlay.extra` 手工注入 `OTEL_*` env 实现（机制同文）。
+
+（原方案存档）
 
 - **平台默认配置没有 OTel 键**（`internal/service/platformconfig/template.go` 仅 llm/mysql/
   redis/sandbox/protocol，且 `platform_config` 拒绝未知键），所以 OTel 不走默认配置。
@@ -366,8 +370,7 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 
 1. ~~PVC 名~~ **已决议：PVC 名需可配置** → 实施 `PLATFORM_PVC_NAME`（后端 env，默认
    `platform-data`；代码已完成待提交，随 PR-B），chart `persistence.existingClaim` 指向任意已有 PVC。
-2. **OTel 方案**：**待决议**——默认按 §5.3 走 `DEPLOYMENT_TEMPLATE` overlay（备选「平台默认配置加
-   OTel 组」需后端改动）。
+2. ~~OTel 方案~~ **已决议：暂不考虑**（§5.3 机制存档备将来；临时需求经 `deploymentOverlay.extra` 手工注入）。
 3. ~~seed Job~~ **已决议：纳入并扩展为 bootstrap Job（两步）**——①默认配置种子（装完即可发布）；
    ②**发布助手 release-agent 亦是 chart 的一部分**（默认开，构建期打包 OAF zip 随 chart 分发，
    装后自动上传并经发布 API 起服务，env 与①同一份 values，见 §5.4）。
@@ -378,8 +381,8 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
    ——token Secret 非镜像，无需）。
 7. ~~集群访问形态~~ **已决议：KUBECONFIG 两模式（§6.2）——`provided`（主动提供）与 `synthesized`
   （部署期自动创建），默认 `synthesized`**；`rbac.clusterScope` 独立可选。
-8. **EVAL_COLLECTOR_\***：**待决议**（推荐提供但默认关闭，仅评测环境）。
+8. ~~EVAL_COLLECTOR_*~~ **已决议：不纳入**（评测环境手工设置 env）。
 9. ~~对外暴露形态~~ **已决议：形态 A（默认）+ 形态 B（高级）两档，不考虑 NodePort 模式**——
    入口一律经集群 ingress controller，`routing.host/port` 描述入口地址。
 
-**仅剩待决议：第 2 项（OTel）与第 8 项（EVAL_COLLECTOR）**；其余全部定案，可进入实施。
+**九项全部定案（2026-10-10），进入实施**：PR-A（chart 本体，含 bootstrap Job/发布助手）→ PR-B（`PLATFORM_PVC_NAME`）→ PR-C（可选冒烟）。
