@@ -82,7 +82,7 @@ charts/oaf-platform/
 | 外部 OTel | `otel.{enabled,exporter,endpoint,headers,serviceName}` | 经业务 Deployment overlay 注入，见 §5.3 |
 | 业务 overlay | `business.deploymentOverlay`（OTel 自动段 + `extra` 自备 SMP，合并渲染**单文件**——后端只认一个 `DEPLOYMENT_TEMPLATE` 路径）、`business.ingressOverlay`（自备，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 安装即报错（后端对 suffix 空 + `INGRESS_TEMPLATE` 非空启动 fail-fast，chart 提前拦避免 CrashLoop） |
 | 平台默认值种子 | `platformDefaults.seed.{enabled,llm.*,mysql.*,redis.*,sandbox.*,protocol.*}` | 调平台 API 写入；默认关闭 |
-| 暴露 | `ingress.{enabled,className,annotations}`、`nodePort.{backend,frontend,enabled}` | NodePort 端口可配（默认 30880/30881） |
+| 暴露 | `ingress.{enabled,className,host,tls,annotations}` + `ingress.backend.host` / `ingress.frontend.host`（分域用）+ `nodePort.{enabled,backend,frontend}` | 两种对外形态见 §6.2；NodePort 默认关（kind 调试可开，30880/30881） |
 | 安全 | `imagePullSecrets[]`、`podSecurityContext`、`existingSecret`（密码类复用已有 Secret） | values 明文仅示例，生产走 `existingSecret` |
 | 通用调度 | `backend/frontend/router` 各自的 `podAnnotations`、`nodeSelector`、`tolerations`、`affinity` | 生产常见诉求；三组件独立配置 |
 | router 高级 | `router.nginx.{clientMaxBodySize,readTimeout,sendTimeout}` | 默认即 subpath-routing 决议值（200m / 3600s），仅超出现状需求时调整 |
@@ -134,7 +134,7 @@ platformDefaults: { seed: { enabled: false } }
 | 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（默认关闭=in-cluster ServiceAccount；开启挂载已有 Secret） | **本次补（评审点名）** |
 | F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
 | F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
-| F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（默认空=服务端反代同源） | **本次补** |
+| F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（形态 A 留空=同源 `/api/v1`；**形态 B 必填** backend 公网地址，见 §6.2） | **本次补** |
 | F4-F5 | `EVAL_COLLECTOR_MODE` / `EVAL_COLLECTOR_AGENT_URL` | 前端（评测录制反代） | `frontend.env.evalCollector.*`（默认关闭，仅评测环境） | **本次补** |
 | R1-R3 | nginx `client_max_body_size` / `proxy_{read,send}_timeout` | platform-router | `router.nginx.*`（默认 200m/3600s） | **本次补** |
 
@@ -201,6 +201,39 @@ platformDefaults: { seed: { enabled: false } }
 - `INGRESS_HOST`/`INGRESS_PORT`/`INGRESS_CLASS` 由 `routing.*` 渲染（Endpoint 展示与 Ingress 构造）。
 - 共享 Ingress 的机会性注解（timeout/ssl-redirect）保留，语义同 subpath-routing §6.4。
 
+### 6.2 对外暴露：backend / frontend / router 的 Ingress 形态
+
+现网清单只有 backend 的 `/api`+`/healthz`（api）与 `/mcp`（3600 超时）两条 Ingress，
+frontend 仅 NodePort。chart 补齐为**两种对外形态**（values 选择，默认 A）：
+
+**形态 A（默认推荐）：统一域名路径分流**
+
+单一入口（`ingress.host`，空 = 无 host catch-all，适合单 IP/测试环境）按最长前缀分流：
+
+| 路径 | backend Service | 必备注解 |
+|---|---|---|
+| `/` | platform-frontend | — |
+| `/api`、`/healthz` | platform-backend | ssl-redirect=false |
+| `/mcp` | platform-backend | **proxy-read/send-timeout=3600**（MCP 长会话，沿用现网 platform-backend-mcp） |
+| `/agent` | platform-router | subpath-routing 共享 Ingress（§6），可选挂同一 host |
+
+- 前端 env **全部默认值即可**：`NEXT_PUBLIC_API_URL` 空 = 浏览器同源调 `/api/v1`（Ingress 直达 backend）；
+  assistant 页硬编码的相对路径 `/agent/release-agent`（`frontend/src/app/assistant/page.tsx:18`）
+  天然命中 router——**这是形态 A 成立的关键约束**。
+- 渲染物：frontend-ingress + backend-ingress（api/mcp）+ router-ingress（共享 /agent，复用 §6 模板）。
+
+**形态 B（高级，分域）**：`ingress.backend.host=api.example.com`、`ingress.frontend.host=ui.example.com`
+
+- `frontend.env.publicApiUrl` 必须设为 `https://api.example.com/api/v1`（浏览器直连 REST；
+  **后端已有 CORS 中间件**，`internal/handler/router.go` `r.Use(CORS())`，已核实）；
+- **前端域名的 Ingress 必须同时把 `/agent` 路由给 platform-router**（assistant 页相对路径约束，
+  否则助手页 404）——chart 在形态 B 下自动为 frontend ingress 追加该规则；
+- MCP 客户端走 backend 域名；TLS 由 `ingress.tls`（cert-manager/环境侧提供证书 Secret）。
+
+**渲染规则**：`ingress.backend.host`/`ingress.frontend.host` 均空 → 形态 A（全部挂 `ingress.host`）；
+任一非空 → 按分域渲染（两个都须非空，chart 校验）。`/mcp` 规则恒带 3600 双超时注解；
+`nodePort.enabled=true` 时同时渲染 NodePort Service（无 Ingress 环境的兜底，与 Ingress 并存不冲突）。
+
 ## 7. 离线部署流程（一键）
 
 ```bash
@@ -259,6 +292,9 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 9. **`INGRESS_TEMPLATE` 与 router 模式互斥**：后端对 suffix 空 + 模板非空启动即拒
    （subpath-routing §4.1）；chart 必须在渲染期 fail（`fail "routing.mode=router 时不可配置 business.ingressOverlay"`），
    否则装出一个 CrashLoop 的 backend。
+10. **形态 B 的两个硬约束**：assistant 页 agent 调用是**硬编码相对路径** `/agent/release-agent`
+   （前端两处文件），分域下前端域名必须同时路由 `/agent`（chart 自动追加，但改前端代码前该约束
+   长期存在）；跨域 REST 依赖后端 CORS 中间件的既有行为（已核实存在），若后续收紧 CORS 需同步评估。
 
 ## 11. 实施拆分
 
@@ -282,3 +318,5 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
    （推荐提供但默认关闭，供集群外开发/特殊 RBAC 排障）
 8. **EVAL_COLLECTOR_* 是否纳入**（§4.3 F4-F5）：评测录制反代属评测环境专属，纳入 chart 增加面；
    推荐「提供但默认关闭」
+9. **对外暴露形态**（§6.2）：形态 A（统一域名路径分流，默认）+ 形态 B（分域，高级）两档是否够用；
+   NodePort 是否保留为可选项（推荐保留，kind/无域名环境兜底）
