@@ -78,7 +78,7 @@ charts/oaf-platform/
 | 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | `host`/`port` = **集群 ingress controller 的对外入口地址**（Endpoint 展示拼装用）；host 模式额外 `hostSuffix` |
 | 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 两模式（§6.2，**默认 synthesized 部署期合成**） |
 | 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl,evalCollector.{mode,agentUrl}}` | `agentInternalUrl` 默认指向 release-agent；`publicApiUrl`（`NEXT_PUBLIC_API_URL`，默认空=服务端反代同源）；`evalCollector.*` 为评测录制反代模式（默认关闭，仅评测环境） |
-| 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.4 |
+| 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.5 |
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
 | 外部 Redis | `external.redis.{url}`（业务侧默认值） | 平台自身不使用 Redis；仅用于种子与文档提示 |
 | 外部 OTel | `otel.{enabled,exporter,endpoint,headers,serviceName}` | 经业务 Deployment overlay 注入，见 §5.3 |
@@ -112,7 +112,17 @@ external:
 otel: { enabled: true, exporter: otlp, endpoint: "http://otel-collector.observability:4318",
         headers: "", serviceName: "agent-framework" }
 business: { deploymentOverlay: { enabled: true, extra: "" } }
-platformDefaults: { seed: { enabled: false } }
+platformDefaults: { seed: { enabled: true } }          # bootstrap ①：默认配置种子（已决议默认开）
+releaseAgent:                                          # bootstrap ②：发布助手自举（已决议纳入）
+  enabled: true
+  name: release-agent
+  packageSource: bundled                               # bundled（chart 内置 zip）/ packageId
+  image: ""                                            # 空 = images.defaultBusiness
+images.bootstrapJob: { repository: harbor.internal/oaf/curl, tag: "8.8" }
+backend:
+  kubeconfig: { mode: synthesized, server: "" }        # 已决议：默认部署期合成（§6.2）
+ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
+# 注：无 nodePort 组（已决议不提供 NodePort 暴露）
 ```
 
 ### 4.3 后端/前端配置全集 ↔ values 映射（2026-10-10 配置面 review 补全）
@@ -135,7 +145,7 @@ platformDefaults: { seed: { enabled: false } }
 | 18 | `INGRESS_TEMPLATE` | config.go | `business.ingressOverlay`（仅 host 模式；router 模式配置即安装报错） | **本次补（评审点名）** |
 | 19 | `AUTH_TOKEN` | config.go | `backend.authToken` | 已有 |
 | 20 | `PACKAGE_DOWNLOAD_BASE` | config.go | `backend.packageDownloadBase` | 已有 |
-| 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（三模式 disabled / provided / synthesized，见 §6.2；**chart 可在部署期创建**） | **本次补（评审点名，已扩三模式）** |
+| 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（两模式 provided / synthesized，**默认 synthesized 部署期创建**，见 §6.2） | **本次补（评审点名，已决议）** |
 | F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
 | F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
 | F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（形态 A 留空=同源 `/api/v1`；**形态 B 必填** backend 公网地址，见 §6.2） | **本次补** |
@@ -208,7 +218,7 @@ platformDefaults: { seed: { enabled: false } }
   `PVCName`），后端无法让「任意已有 PVC 名」生效。
 - **零代码路径**：要求环境中已有 PVC 名为 `platform-data`（`persistence.existingClaim`
   默认同值；chart 渲染时校验，值不等于 `platform-data` 且未开启后端开关则**安装即报错**
-  并提示 §5.4 备选方案）。
+  并提示 §5.5 备选方案）。
 - **建议（待评审决议，推荐同批实施）**：后端新增 `PLATFORM_PVC_NAME` env（默认
   `platform-data`，仅改常量取用处 + 一处测试）→ `persistence.existingClaim` 才真正自由。
 - chart **恒不创建 PVC**：模板不提供 `persistence.create` 开关（连默认关闭的开关都不给，
@@ -295,7 +305,8 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 
 - **air-gapped 无 helm** 时：`helm template oaf ./charts/oaf-platform -f values-offline.yaml --output-dir out/`
   出 YAML 后 `kubectl apply -f out/`（渲染校验也在安装前完成）。
-- chart 侧不发起任何网络访问（无子 chart、无 hook 下载）；seed Job 只访问集群内平台 Service。
+- chart 侧不发起任何网络访问（无子 chart、无 hook 下载）；bootstrap Job 只访问集群内平台 Service
+  （镜像 `images.bootstrapJob` 同样来自内网仓库）。
 - 镜像来源唯一：平台镜像（backend/frontend/router）与业务镜像白名单（`AVAILABLE_IMAGES`）
   都取同一内网仓库，由 `images.*` 与 `images.business[]` 统一渲染，避免两处 tag 错配。
 
@@ -315,7 +326,7 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 |---|---|
 | 原则一：业务资源只由显式发布 API 写入 | chart 不渲染任何业务对象；`helm upgrade/uninstall` **不得**触碰业务 Deployment/Service/Ingress |
 | 原则一：业务运行时不依赖 backend | chart 不改三条链路（envFrom / PVC 只读直挂 / Ingress→`{name}-svc`）；router 为无状态双副本 |
-| 原则一：无后台 reconcile | chart 无 CronJob/控制器；seed Job 为一次性 post-install（可关） |
+| 原则一：无后台 reconcile | chart 无 CronJob/控制器；bootstrap Job 为一次性 post-install（两步可关） |
 | 原则二：业务面多副本与隔离 | chart 不注入 `sessionAffinity`；不改变 `CHECKPOINT_JDBC_URL` / `AGENT_REDIS_PREFIX` 语义（仅经平台默认值传递，文档强调每服务独立） |
 | 卸载语义 | 删除平台对象与 router；**业务对象与已有 PVC 保留**（不设 ownerReference、不设 namespace 级 finalizer）；README 明示「卸载后业务 Pod 仍在运行、`/agent` 路由不可达，需先决定业务下线策略」 |
 
@@ -324,7 +335,7 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 1. **业务服务非 chart 管理**：升级 chart 不影响已发布服务（符合原则一），但也意味着
    overlay / 默认值变更需 **republish** 才对存量生效。
 2. **OTel 经 overlay**：仅新发布/重发布生效；与路由模式正交（host 模式同样适用）。
-3. **PVC 名硬编码**（§5.4）：本设计最大约束，推荐同批加 `PLATFORM_PVC_NAME`。
+3. **PVC 名硬编码**（§5.5）：已决议加 `PLATFORM_PVC_NAME`（随 PR-B）。
 4. **外部 MySQL**：库/账号需预建；schema 由 `AutoMigrate`；chart 不提供备份与版本回退。
 5. **外部 Redis**：`noeviction`/持久化由外部实例负责；`AGENT_REDIS_URL` 每服务独立前缀为
    文档级约束（平台不校验，既有缺口）。
@@ -333,8 +344,9 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
    覆盖推送不会在已缓存节点生效**，业务镜像更新须使用新 tag（仓库既有实践：
    `agentscope-2.1.0-v{日期}`）。
 7. **`helm upgrade` 会滚动 backend/router**（SSE 断流，同 ingress 升级语义）；业务面不受影响。
-8. **seed Job** 依赖平台 API 就绪与 `AUTH_TOKEN`；失败会令 release 处于 failed（可关或
-   用 `--atomic`/`--no-hooks` 控制）。
+8. **bootstrap Job** 依赖平台 API 就绪与 `AUTH_TOKEN`；失败会令 release 处于 failed（两步可独立
+   关闭，或用 `--atomic`/`--no-hooks` 控制）。发布助手步骤额外依赖：内网仓库有 bootstrap 镜像、
+   bundled zip 与 chart 版本一致（包内容演进靠 chart 升级携带新 zip）。
 9. **`INGRESS_TEMPLATE` 与 router 模式互斥**：后端对 suffix 空 + 模板非空启动即拒
    （subpath-routing §4.1）；chart 必须在渲染期 fail（`fail "routing.mode=router 时不可配置 business.ingressOverlay"`），
    否则装出一个 CrashLoop 的 backend。
@@ -347,7 +359,7 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 | PR | 内容 | 依赖 |
 |---|---|---|
 | PR-A | chart 骨架 + 全部模板 + values + README + 离线脚本 + `helm template` 渲染断言（CI 增加 `helm lint` + `helm template --set` 组合断言） | 无 |
-| PR-B（建议同批） | 后端 `PLATFORM_PVC_NAME` env（+ 测试），解 §5.4 约束 | 无 |
+| PR-B（建议同批） | 后端 `PLATFORM_PVC_NAME` env（+ 测试），解 §5.5 约束 | 无 |
 | PR-C（可选） | kind 上以 chart 部署的冒烟（外部 MySQL/Redis 指向 kind 内实例、PVC 沿用 `platform-data`），复用现有集群与自检命令 | PR-A |
 
 ## 12. 评审决议记录（2026-10-10 批量定案）
