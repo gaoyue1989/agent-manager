@@ -122,6 +122,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- fail "business.ingressOverlay.enabled=true 但未给内容：三选一（patch / raw / existingConfigMap）" -}}
 {{- end -}}
 {{- end -}}
+{{- $ipRe := "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" -}}
+{{- if .Values.ingress.host -}}
+{{- if regexMatch $ipRe .Values.ingress.host -}}
+{{- fail "ingress.host 是 IP 地址：Ingress spec.rules[].host 只接受 DNS 名。单 IP/测试环境请留空（catch-all），IP 写到 routing.host（Endpoint 展示用）" -}}
+{{- end -}}
+{{- end -}}
+{{- range $h := list .Values.ingress.backend.host .Values.ingress.frontend.host -}}
+{{- if $h -}}
+{{- if regexMatch $ipRe $h -}}
+{{- fail "ingress.backend.host / ingress.frontend.host 是 IP 地址：Ingress host 只接受 DNS 名" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.platformDefaults.seed.enabled -}}
 {{- if not .Values.platformDefaults.seed.values -}}
 {{- fail "platformDefaults.seed.enabled=true 但 values 为空：请给 LLM/MySQL/Redis 等默认值，或关闭 seed" -}}

@@ -440,3 +440,40 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 `OTEL_TRACES_EXPORTER=otlp` / `OTEL_EXPORTER_OTLP_ENDPOINT=...` → chart 渲染 overlay
 ConfigMap → 后端 `DEPLOYMENT_TEMPLATE` 指向 → 平台发布 release-agent 时 SMP 合并 →
 **业务 Deployment 实际带上两个 OTEL env**（实测 `kubectl get deploy` 断言通过）。
+
+### 13.6 本地环境 Helm 化迁移 + 完整 E2E（2026-10-10）
+
+**迁移**：kind 集群 `agent-platform` 从 `manifests/*.yaml` 自举形态整体切换为本 chart
+（release `oaf`，values 含真实 LLM/MySQL/Redis 配置、5 项业务镜像白名单、
+`kubeconfig.mode=synthesized`）。旧形态平台对象（backend/frontend/router 的
+Deployment/Service/NodePort Service/Ingress/ConfigMap）先删后装；**MySQL/Redis/
+三个 PVC/6 个业务服务全部保留**——迁移窗口内 6 个业务 Pod 持续 Running（原则一
+「业务面不依赖控制面」的直接实测证据）。
+
+**E2E 结果（16 项全过）**
+
+| # | 项 | 结果 |
+|---|---|---|
+| E1 | 平台 API（chart Ingress） | 200，6 服务全部 running |
+| E2 | 存量服务经 chart router | 6/6 → 200 |
+| E3 | card url（旧镜像） | 空串（无前缀感知，符合契约） |
+| E4 | 发布新服务（经 Helm 化后端） | deploying → deploy_failed（无 env，预期）→ PATCH env → **running** |
+| E5 | 无 per-service Ingress | NotFound（router 模式） |
+| E6 | 前缀路由 | health / / / threads 全 200 |
+| E7 | card url 前缀感知 | `http://172.20.0.2:30080/agent/helm-e2e/` |
+| E8 | chat SSE 经前缀（真实 LLM） | 帧序完整（session_created→…→AGENT_END） |
+| E9 | Debug Console 经前缀 | 302 带前缀 → /debug/ 200 → 静态资源 200 |
+| E10 | 上传经前缀 | 200，file_id 返回 |
+| E11 | 前端 UI 经统一入口 | 200（OAF 服务发布平台） |
+| E12 | bootstrap 种子生效 | `/platform-config/defaults` 12 键（LLM/CHECKPOINT/REDIS） |
+| E13 | MCP 端点 | 400 `GET requires an Mcp-Session-Id`（协议正常响应，端点可达） |
+| E14 | legacy Ingress 与 chart router 并存 | 10 条 legacy 对象共存，业务路由 200（收敛按 §4.6 走 republish/手册） |
+| E15 | `helm upgrade` 幂等 | 成功；组件回 Ready；API 与业务路由不受影响 |
+| E16 | bootstrap 判重 | `oaf-release-agent already exists, skip`（幂等实测） |
+
+**E2E 暴露并修复的真问题（第 3 处）**：`ingress.host` 填 IP（`172.20.0.3`）被 apiserver
+拒收（`spec.rules[].host` 仅接受 DNS 名）→ `_helpers.tpl` 渲染期 fail 并提示「单 IP 环境
+留空走 catch-all，IP 填 `routing.host`」；本地 values 相应改为 `ingress.host: ""`。
+
+**运维注记**：manifests 形态的 NodePort Service（30880/30881）随 chart 化移除（决议：
+不提供 NodePort），所有访问统一走 ingress controller NodePort 30080 入口。
