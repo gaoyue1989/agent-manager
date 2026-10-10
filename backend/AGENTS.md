@@ -15,6 +15,7 @@ backend 是控制面，业务服务数据面不经 backend 进程。以下为强
 - **禁止生命周期绑定**：构造的业务对象不得设 ownerReferences/finalizer/PropagationPolicy——业务资源只靠命名约定 + label 关联，平台自身的 Deployment/CM 删除不得级联业务资源
 - **Ingress 更新语义**：Ensure* 一律 get→Create/Update 同名对象，禁止 Delete+Create 组合（会闪断业务流量）
 - **数据面直连**：业务 Pod 的 env（CM/Secret envFrom）、配置（PVC subPath 只读）、流量（Ingress→`{name}-svc`）三条链路必须保持不经 backend；不得引入"业务启动向 backend 注册/心跳才可用"之类的反向依赖
+- **平台数据卷 PVC 名可配**（`PLATFORM_PVC_NAME`，默认 `platform-data`）：业务 Pod 与 backend 共用的共享 PVC 名由该 env 决定（Helm/清单部署指向环境已有 PVC，平台不创建）；空/未设 = 历史常量 `platform-data`（`internal/k8s/objects.go` `PVCName`，仅作默认值）。变更后需 republish 才刷到业务 Deployment（对象名在 apply 期确定）
 - **单副本语义**：backend 按单副本设计（无 leader 选举、发布链路有查库-写库竞态窗口）；扩多副本前必须先解决发布一致性与 goroutine 推进幂等。已提交的架构约束见 [../AGENTS.md](../AGENTS.md)「架构强约束」
 - 已知边界（不违反原则，运维须知）：发布等待期 backend 重启会丢 in-flight 的 `asyncWaitAndRegister`，服务停在 `deploying`（UpdateEnv/StartAgain 拒绝该状态），仅影响平台状态机、不影响已在跑的 Pod，经 Republish 解救
 

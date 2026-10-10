@@ -34,10 +34,12 @@ type ImageOption struct {
 }
 
 type ConfigView struct {
-	Namespace    string
-	IngressClass string
-	IngressHost  string
-	IngressPort  int
+	Namespace string
+	// PlatformPVCName 业务 Pod 挂载的平台数据卷 PVC 名（空 = k8s.PVCName 默认常量）
+	PlatformPVCName string
+	IngressClass    string
+	IngressHost     string
+	IngressPort     int
 	// IngressHostSuffix 业务路由模式开关：空=router 模式（无 per-service Ingress，展示
 	// 地址纯配置拼装），非空=host 模式（历史行为）
 	IngressHostSuffix              string
@@ -523,7 +525,7 @@ func (c *Core) Delete(id uint) error {
 func (c *Core) params(k8sName, image string, env map[string]string, replicas int32, subPath string) k8s.ObjectParams {
 	return k8s.ObjectParams{
 		K8sName: k8sName, Namespace: c.Cfg.Namespace, Image: image,
-		Env: env, Replicas: replicas, SubPath: subPath,
+		Env: env, Replicas: replicas, SubPath: subPath, PVCName: c.Cfg.PlatformPVCName,
 		IngressClass: c.Cfg.IngressClass, IngressHost: c.Cfg.IngressHost, IngressPort: c.Cfg.IngressPort,
 		IngressHostSuffix: c.Cfg.IngressHostSuffix,
 		RequestsCPU:       c.Cfg.ResCPU, RequestsMem: c.Cfg.ResMem, LimitsCPU: c.Cfg.LimCPU, LimitsMem: c.Cfg.LimMem,
