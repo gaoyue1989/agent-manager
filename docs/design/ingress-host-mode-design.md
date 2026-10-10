@@ -7,6 +7,11 @@
 
 ## 1. 背景
 
+> 2026-10-10 起（subpath-routing-design v2）：本文的 path 模式（默认分支）已被 **router 模式**
+> 取代（suffix 空 = 集群内 platform-router 承接子路径，不再生成 ingress-nginx rewrite 注解），
+> host 模式全部保留。本文 path 相关描述仅作历史记录。见 [subpath-routing-design.md](subpath-routing-design.md)。
+
+
 平台内置的 Ingress 构造只有一种形态：**无 host，基于 path + rewrite**——所有服务共享
 ingress 入口 IP，靠 `/agent/{short}` 前缀区分路由。部分环境（独立测试集群、生产）
 要求每服务**独立域名**：`host = {K8sName}{zone-suffix}`、`path = /`、pathType `Prefix`，

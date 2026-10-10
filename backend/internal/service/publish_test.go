@@ -79,6 +79,8 @@ func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 	}
 }
 
+// router 模式（默认，suffix 空）端到端：不创建 per-service Ingress，Endpoint 纯配置
+// 拼装（形状与原 path 模式一致），其余对象照常（subpath-routing-design §4.4）。
 func TestPublishHappyPath(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
@@ -98,8 +100,9 @@ func TestPublishHappyPath(t *testing.T) {
 	if _, err := fk.CS().CoreV1().Services("test").Get(t.Context(), "oaf-acme-demo-svc", metav1.GetOptions{}); err != nil {
 		t.Fatal("service not created")
 	}
-	if _, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{}); err != nil {
-		t.Fatal("ingress not created")
+	// router 模式不构造 per-service Ingress（子路径路由由集群内 platform-router 承担）
+	if _, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{}); err == nil {
+		t.Fatal("router mode must not create per-service ingress")
 	}
 	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
 	if err != nil || cm.Data["LOG_LEVEL"] != "debug" {
@@ -539,68 +542,81 @@ func TestListMergesPodStatus(t *testing.T) {
 // ---- Ingress 模板（INGRESS_TEMPLATE）----
 
 // ingressTemplate 写临时 overlay 文件并构建 builder（经启动探针，与真实装配同路径）。
+// host 模式专用：模板仅对 host 模式有意义（router 模式 config.Load 启动即拒）。
 func ingressTemplate(t *testing.T, content string) *k8s.IngressBuilder {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ingress-overlay.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b, err := k8s.NewIngressBuilder(path, "nginx", "")
+	b, err := k8s.NewIngressBuilder(path, "nginx", hostModeSuffix)
 	if err != nil {
 		t.Fatalf("new ingress builder: %v", err)
 	}
 	return b
 }
 
-// hostOnlyOverlay 只加域名的完整 rules overlay（path 保持内置形态，占位符引用服务名）。
-func hostOnlyOverlay(host string) string {
-	return fmt.Sprintf(`
-metadata:
-  annotations:
-    nginx.ingress.kubernetes.io/x-forwarded-prefix: /agent/{{SHORT_NAME}}
+// hostModeTlsOverlay 追加 TLS 的 host 模式 overlay（占位符与后缀联动）。
+func hostModeTlsOverlay() string {
+	return `
 spec:
-  rules:
-    - host: %s
-      http:
-        paths:
-          - path: /agent/{{SHORT_NAME}}(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: "{{K8S_NAME}}-svc"
-                port:
-                  number: 8100
-`, host)
+  tls:
+    - hosts: ["{{K8S_NAME}}{{HOST_SUFFIX}}"]
+      secretName: agents-wildcard-tls
+`
 }
 
-// Endpoint 跟随 Ingress 模板：模板改 host/path 后，发布记录的展示地址随合并结果派生。
+// router 模式存量收敛（subpath-routing §4.4「存在即删除」）：升级集群上残留的
+// path 模式 per-service Ingress 在 Republish/StartAgain 后被清理，且不产生新对象。
+func TestRouterModeDeletesLegacyIngress(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
+
+	// 预置伪造 legacy path 模式 Ingress（模拟升级前残留，含 rewrite 注解）
+	legacy := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "oaf-acme-demo", Namespace: "test",
+			Annotations: map[string]string{"nginx.ingress.kubernetes.io/rewrite-target": "/$2"},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
+				Paths: []networkingv1.HTTPIngressPath{{Path: "/agent/acme-demo(/|$)(.*)"}},
+			}}}},
+		},
+	}
+	if _, err := fk.CS().NetworkingV1().Ingresses("test").Create(t.Context(), legacy, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := core.Republish(svc.ID, RepublishOptions{}); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	if _, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{}); err == nil {
+		t.Fatal("legacy per-service ingress must be deleted in router mode")
+	}
+	// Endpoint 保持 router 模式拼装（与原 path 模式同形状）
+	got, _ := core.Get(svc.ID)
+	if got.Endpoint != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("endpoint: %q", got.Endpoint)
+	}
+}
+
+// Endpoint 跟随 Ingress 模板（host 模式）：模板加 TLS 后展示地址切 https（host 恒定，
+// path 模式的「改 host/path 改前缀」能力已随模式删除）。
 func TestPublishEndpointFollowsIngressTemplate(t *testing.T) {
 	core, _, done := newTestCore(t)
 	defer done()
-	core.Cfg.IngressBuilder = ingressTemplate(t, fmt.Sprintf(`
-metadata:
-  annotations:
-    nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
-spec:
-  rules:
-    - host: demo.example.com
-      http:
-        paths:
-          - path: /my-agent(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: "{{K8S_NAME}}-svc"
-                port:
-                  number: 8100
-`))
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	core.Cfg.IngressBuilder = ingressTemplate(t, hostModeTlsOverlay())
 	pkg := uploadTestPkg(t, core, "")
 	svc, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"})
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	if svc.Endpoint != "http://demo.example.com:30080/my-agent/" {
-		t.Fatalf("endpoint must follow template, got %q", svc.Endpoint)
+	if svc.Endpoint != "https://oaf-acme-demo"+hostModeSuffix+"/" {
+		t.Fatalf("endpoint must follow template tls, got %q", svc.Endpoint)
 	}
 }
 
@@ -610,6 +626,7 @@ spec:
 func TestPublishInvalidIngressOverlayRejectedWithoutRecord(t *testing.T) {
 	core, _, done := newTestCore(t)
 	defer done()
+	core.Cfg.IngressHostSuffix = hostModeSuffix
 	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
 	pkg := uploadTestPkg(t, core, "")
 	if _, err := core.Publish(PublishRequest{PackageID: pkg.ID, Image: "agent-framework:latest"}); err == nil {
@@ -622,22 +639,23 @@ func TestPublishInvalidIngressOverlayRejectedWithoutRecord(t *testing.T) {
 	}
 }
 
-// Republish 回写：模板变更后展示地址随合并结果更新。
+// Republish 回写：模板变更（无 TLS → 加 TLS）后展示地址随合并结果更新。
 func TestRepublishEndpointFollowsTemplateChange(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
-	core.Cfg.IngressBuilder = ingressTemplate(t, hostOnlyOverlay("one.example.com"))
+	core.Cfg.IngressHostSuffix = hostModeSuffix
+	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  annotations:\n    x/custom: \"1\"\n")
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
-	if svc.Endpoint != "http://one.example.com:30080/agent/acme-demo/" {
+	if svc.Endpoint != "http://oaf-acme-demo"+hostModeSuffix+"/" {
 		t.Fatalf("initial endpoint: %q", svc.Endpoint)
 	}
-	core.Cfg.IngressBuilder = ingressTemplate(t, hostOnlyOverlay("two.example.com"))
+	core.Cfg.IngressBuilder = ingressTemplate(t, hostModeTlsOverlay())
 	updated, err := core.Republish(svc.ID, RepublishOptions{})
 	if err != nil {
 		t.Fatalf("republish: %v", err)
 	}
-	if updated.Endpoint != "http://two.example.com:30080/agent/acme-demo/" {
+	if updated.Endpoint != "https://oaf-acme-demo"+hostModeSuffix+"/" {
 		t.Fatalf("endpoint must be rewritten on republish, got %q", updated.Endpoint)
 	}
 }
@@ -646,6 +664,7 @@ func TestRepublishEndpointFollowsTemplateChange(t *testing.T) {
 func TestRepublishInvalidOverlayKeepsRecord(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
+	core.Cfg.IngressHostSuffix = hostModeSuffix
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 	core.Cfg.IngressBuilder = ingressTemplate(t, "metadata:\n  name: oaf-template-probe\n")
@@ -667,6 +686,7 @@ func TestRepublishInvalidOverlayKeepsRecord(t *testing.T) {
 func TestStartAgainInvalidOverlayMarksError(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
+	core.Cfg.IngressHostSuffix = hostModeSuffix
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishToRegisterFailed(t, core, fk, pkg.ID, "")
 	// overlay 硬编码探针名（oaf-template-probe）：启动探针恰好通过，真实 apply 期
@@ -687,13 +707,13 @@ func TestStartAgainInvalidOverlayMarksError(t *testing.T) {
 	if len(events) == 0 || !strings.Contains(events[0].Reason, "start again apply failed") {
 		t.Fatalf("start again apply failure event missing: %+v", events)
 	}
-	// 违规形态不得落地集群：applyAll 在 Build 阶段即失败，Ingress 仍是原 path 模式形态
+	// 违规形态不得落地集群：applyAll 在 Build 阶段即失败，Ingress 仍是原 host 模式形态
 	ing, err := fk.CS().NetworkingV1().Ingresses("test").Get(t.Context(), "oaf-acme-demo", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := ing.Spec.Rules[0].HTTP.Paths[0].Path; !strings.HasPrefix(p, "/agent/acme-demo") {
-		t.Fatalf("ingress must keep the previous path-mode rule, got %q", p)
+	if p := ing.Spec.Rules[0].HTTP.Paths[0].Path; p != "/" {
+		t.Fatalf("ingress must keep the previous host-mode rule, got %q", p)
 	}
 }
 
