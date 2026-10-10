@@ -396,10 +396,10 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 }
 
 // IngressEndpoint 从（合并后）Ingress 派生对外展示地址（host 模式）：取首条规则的
-// Host（空则回落 fallbackHost 作防御），根路径直出，端口 80/443 由域名默认承载，
-// 故不拼 port：{scheme}://{host}/。scheme 按 TLS 有无。仅用于展示与记录；模板改
-// host 后的 DNS/端口可达性由环境自行保证。
-func IngressEndpoint(ing *networkingv1.Ingress, fallbackHost string, port int, hostSuffix string) string {
+// Host（空则回落 fallbackHost 作防御），根路径直出，端口 80/443 由域名默认承载故不拼
+// port：{scheme}://{host}/。scheme 按 TLS 有无。仅用于展示与记录；模板改 host 后的
+// DNS/端口可达性由环境自行保证。（router 模式不走本函数，见 RouterEndpoint。）
+func IngressEndpoint(ing *networkingv1.Ingress, fallbackHost string) string {
 	scheme, host := "http", fallbackHost
 	if len(ing.Spec.TLS) > 0 {
 		scheme = "https"

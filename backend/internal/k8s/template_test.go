@@ -386,7 +386,7 @@ func TestIngressBuilderNilOverlay(t *testing.T) {
 	if got.String() != Ingress(p).String() {
 		t.Fatal("nil overlay must be identical to built-in construction")
 	}
-	if ep := IngressEndpoint(got, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != "http://oaf-acme-demo.region-c86-test.test-kzx1.cncb/" {
+	if ep := IngressEndpoint(got, p.IngressHost); ep != "http://oaf-acme-demo.region-c86-test.test-kzx1.cncb/" {
 		t.Fatalf("endpoint must match host-mode formula, got %q", ep)
 	}
 	// router 模式（suffix 空）没有 per-service Ingress：Build 一律拒绝（发布流不会走到，
@@ -418,7 +418,7 @@ spec:
 		ing.Spec.Rules[0].HTTP.Paths[0].Path != "/" {
 		t.Fatal("built-in host-mode routing must stay when overlay omits rules")
 	}
-	if ep := IngressEndpoint(ing, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != "https://oaf-acme-demo.region-c86-test.test-kzx1.cncb/" {
+	if ep := IngressEndpoint(ing, p.IngressHost); ep != "https://oaf-acme-demo.region-c86-test.test-kzx1.cncb/" {
 		t.Fatalf("endpoint must switch to https with tls, got %q", ep)
 	}
 }
@@ -457,7 +457,7 @@ spec:
 		t.Fatalf("covering tls overlay must pass: %v", err)
 	}
 	want := "https://oaf-acme-demo.region-c86-test.test-kzx1.cncb/"
-	if ep := IngressEndpoint(ing, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != want {
+	if ep := IngressEndpoint(ing, p.IngressHost); ep != want {
 		t.Fatalf("endpoint must be https domain, got %q want %q", ep, want)
 	}
 }
@@ -688,43 +688,40 @@ spec:
 // INGRESS_HOST / TLS 切 https（不拼 INGRESS_PORT，80/443 由域名承载）。
 // router 模式展示地址不走 Ingress 对象，见 TestRouterEndpoint。
 func TestIngressEndpointTable(t *testing.T) {
-	hostSuffix := ".region-c86-test.test-kzx1.cncb"
 	hostBase := Ingress(hostModeParams())
 	cases := []struct {
-		name   string
-		ing    *networkingv1.Ingress
-		host   string
-		port   int
-		suffix string
-		want   string
+		name string
+		ing  *networkingv1.Ingress
+		host string
+		want string
 	}{
 		{
-			name: "host-mode-domain", ing: hostBase, host: "1.2.3.4", port: 30080, suffix: hostSuffix,
+			name: "host-mode-domain", ing: hostBase, host: "1.2.3.4",
 			want: "http://oaf-acme-demo.region-c86-test.test-kzx1.cncb/",
 		},
 		{
-			name: "host-mode-tls", suffix: hostSuffix,
+			name: "host-mode-tls",
 			ing: func() *networkingv1.Ingress {
 				ing := hostBase.DeepCopy()
 				ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{"oaf-acme-demo.region-c86-test.test-kzx1.cncb"}}}
 				return ing
-			}(), host: "1.2.3.4", port: 30080,
+			}(), host: "1.2.3.4",
 			want: "https://oaf-acme-demo.region-c86-test.test-kzx1.cncb/",
 		},
 		{
 			// 防御分支：host 模式下规则无 host（不可能过 validateIngress）时回落 INGRESS_HOST
-			name: "host-mode-no-rule-host", suffix: hostSuffix,
+			name: "host-mode-no-rule-host",
 			ing: func() *networkingv1.Ingress {
 				ing := hostBase.DeepCopy()
 				ing.Spec.Rules[0].Host = ""
 				return ing
-			}(), host: "1.2.3.4", port: 30080,
+			}(), host: "1.2.3.4",
 			want: "http://1.2.3.4/",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := IngressEndpoint(tc.ing, tc.host, tc.port, tc.suffix); got != tc.want {
+			if got := IngressEndpoint(tc.ing, tc.host); got != tc.want {
 				t.Fatalf("want %q, got %q", tc.want, got)
 			}
 		})

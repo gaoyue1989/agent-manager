@@ -537,7 +537,7 @@ func (c *Core) params(k8sName, image string, env map[string]string, replicas int
 func (c *Core) refreshEndpoint(svc *store.ServiceEntity, ing *networkingv1.Ingress) {
 	endpoint := k8s.RouterEndpoint(c.Cfg.IngressHost, c.Cfg.IngressPort, svc.K8sName)
 	if ing != nil {
-		endpoint = k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)
+		endpoint = k8s.IngressEndpoint(ing, c.Cfg.IngressHost)
 	}
 	if err := c.DB.Model(svc).Update("endpoint", endpoint).Error; err != nil {
 		log.Printf("[endpoint] update svc=%d failed: %v", svc.ID, err)
@@ -557,7 +557,7 @@ func (c *Core) deriveEndpoint(p k8s.ObjectParams) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ingress: %w", err)
 	}
-	return k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix), nil
+	return k8s.IngressEndpoint(ing, c.Cfg.IngressHost), nil
 }
 
 // uniqName 冲突时追加 -2/-3… 后缀（查库去重，最多 20 次）。
