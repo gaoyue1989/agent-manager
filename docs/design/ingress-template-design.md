@@ -7,6 +7,11 @@
 
 ## 1. 背景与目标
 
+> 2026-10-10 起（subpath-routing-design v2）：**path 模式（ingress-nginx 注解 rewrite）已删除**，
+> 模板仅对 host 模式可用（suffix 空 + 模板非空启动即拒）；§4/§5 中 path 模式分支与
+> P1-P3 样例随之移除，本文 path 相关描述仅作历史记录。见 [subpath-routing-design.md](subpath-routing-design.md)。
+
+
 发布服务时平台为每个业务服务创建独立 Ingress 对象（`oaf-{name}`，path `/agent/{short}`，共享 ingress-nginx NodePort 30080），但形态由代码写死：无法按环境自定义域名（host）、对外前缀（path）、TLS 与 WAF/白名单类注解。Deployment 已有同诉求的成熟方案——`DEPLOYMENT_TEMPLATE` overlay（Strategic Merge Patch + 启动探针 + 不变量校验，见 `backend/internal/k8s/template.go`）。
 
 本设计将同一模式复制到 Ingress：

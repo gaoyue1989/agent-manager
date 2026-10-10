@@ -197,28 +197,17 @@ func TestDeploymentConstruction(t *testing.T) {
 	}
 }
 
-func TestServiceAndIngress(t *testing.T) {
+// TestServiceAndRouterEndpoint router 模式（suffix 空）不构造 per-service Ingress：
+// Service 形状不变，对外展示地址由 RouterEndpoint 纯配置拼装（path 模式 rewrite 注解
+// 已随 subpath-routing 设计删除，Ingress 仅剩 host 模式，见 TestIngressHostModeConstruction）。
+func TestServiceAndRouterEndpoint(t *testing.T) {
 	p := testParams()
 	svc := Service(p)
 	if svc.Name != "oaf-acme-demo-svc" || svc.Spec.Ports[0].Port != AgentPort {
 		t.Fatalf("service: %+v", svc)
 	}
-	ing := Ingress(p)
-	path := ing.Spec.Rules[0].HTTP.Paths[0].Path
-	if path != "/agent/acme-demo(/|$)(.*)" {
-		t.Fatalf("ingress path: %q", path)
-	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/rewrite-target"] != "/$2" {
-		t.Fatal("rewrite annotation missing")
-	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] != "3600" {
-		t.Fatal("long proxy timeout annotation missing")
-	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/x-forwarded-prefix"] != "/agent/acme-demo" {
-		t.Fatalf("x-forwarded-prefix wrong: %v", ing.Annotations["nginx.ingress.kubernetes.io/x-forwarded-prefix"])
-	}
-	if ing.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name != "oaf-acme-demo-svc" {
-		t.Fatal("ingress backend wrong")
+	if got := RouterEndpoint(p.IngressHost, p.IngressPort, p.K8sName); got != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("router endpoint: %q", got)
 	}
 }
 
@@ -272,10 +261,6 @@ func TestIngressHostModeConstruction(t *testing.T) {
 		if _, ok := ing.Annotations[k]; ok {
 			t.Errorf("host mode must not carry rewrite annotation %s", k)
 		}
-	}
-	// path 模式（suffix 为空）必须仍无 host：两条分支互斥
-	if h := Ingress(testParams()).Spec.Rules[0].Host; h != "" {
-		t.Fatalf("path mode must stay host-less, got %q", h)
 	}
 }
 

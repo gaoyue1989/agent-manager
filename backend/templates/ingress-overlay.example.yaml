@@ -6,107 +6,46 @@
 #      （ConfigMap 挂载姿势见 docs/deployment.md §六/§七，同 DEPLOYMENT_TEMPLATE）
 #   3. kubectl rollout restart deployment/platform-backend
 #
-# ★ 先确认平台处于哪种 Ingress 模式（环境变量 INGRESS_HOST_SUFFIX 决定），
-#   **校验规则随模式切换**，下面的示例分两组，照错组抄会被发布期校验拒：
-#   - path 模式（INGRESS_HOST_SUFFIX 未设置，默认）：无 host，共享入口 IP 靠
-#     /agent/{short} 前缀 + rewrite 区分服务 → 用示例 P1/P2/P3
-#   - host 模式（INGRESS_HOST_SUFFIX 非空，如 .region-c86-test.test-kzx1.cncb）：
-#     host = {K8sName}{suffix} 固定、path 根路径直出 → 用示例 H1/H2/H3
+# ★ 本模板仅适用于 host 模式（INGRESS_HOST_SUFFIX 非空，如 .region-c86-test.test-kzx1.cncb）：
+#   host = {K8sName}{suffix} 固定、path 根路径直出。
+#   router 模式（INGRESS_HOST_SUFFIX 空）不构造 per-service Ingress（子路径路由由集群内
+#   platform-router 承担，见 manifests/platform-router.yaml 与 subpath-routing-design），
+#   配置 INGRESS_TEMPLATE 会在启动期被直接拒绝。
+#   历史的 path 模式（ingress-nginx rewrite 注解）已删除，P1-P3 示例随之移除。
 #
 # 占位符（发布期按服务替换，模板保持服务无关）：
 #   {{K8S_NAME}}   → oaf-{short}（backend service 名 = {{K8S_NAME}}-svc）
-#   {{SHORT_NAME}} → 去掉 oaf- 前缀的短名（path/x-forwarded-prefix 用）
-#   {{HOST_SUFFIX}} → INGRESS_HOST_SUFFIX 原值（host 模式 TLS hosts/域名与后缀联动，
-#                     换环境零改动；path 模式下替换为空串）
+#   {{HOST_SUFFIX}} → INGRESS_HOST_SUFFIX 原值（TLS hosts/域名与后缀联动，换环境零改动）
 #
 # 合并规则（K8s Strategic Merge Patch on networkingv1.Ingress）：
 #   - metadata.annotations/labels 为 map：按 key 合并——只写要新增/覆盖的注解即可
 #     保留全部注解；写 null 删除单条
 #   - spec.rules / spec.tls 为普通列表（无 patch 策略）：**写了即整体替换**——
-#     想改 host/path 必须写完整 rules 块（见下方示例，可直接抄改）
+#     想写 rules 必须写完整块（见 H3，可直接抄改）
 #   - overlay 不得硬编码 metadata.name/namespace 与具体服务名（发布期才确定，
 #     硬编码会被启动探针拒绝；用占位符引用）
 #
 # 校验（违规即启动失败/发布失败，错误信息指明违例项）：
-#   两种模式共同：
 #   - 禁改：metadata.name/namespace、平台 labels、spec.ingressClassName
 #   - 归属唯一：所有 backend 必须指向本服务 {{K8S_NAME}}-svc:8100（发布期替换）
-#   - 每条 path 必须设置 pathType
+#   - 每条 path 必须设置 pathType，且恒为根路径 /（平台展示地址固定按根 URL 派生，
+#     放开 path 会让展示地址与实际路由错位）
+#   - 每条 rule 的 host 必须等于 {{K8S_NAME}}{{HOST_SUFFIX}}（域名即服务身份，不可
+#     偏离；留空会退化成共享入口 IP 承载根路径，流量串服务）
 #   - spec.defaultBackend 必须保持为空
 #   - proxy-read/send-timeout 必须保留（SSE 长连接；数值可按环境调整）
-#   path 模式额外：
-#   - 路由形状：每条 path 必须以 (/|$)(.*) 结尾；use-regex=true、
-#     rewrite-target=/$2 必须保留（rewrite 语义依赖第 2 捕获组）
-#   - x-forwarded-prefix 必须等于对外前缀（path 剥掉 (/|$)(.*) 后缀）——
-#     改 path 必须同步改该注解，否则 Debug Console/外链错位
-#   host 模式额外：
-#   - 每条 rule 的 host 必须等于 {{K8S_NAME}}{{HOST_SUFFIX}}（域名即服务身份，不可偏离；
-#     留空会退化成共享入口 IP 承载根路径，流量串服务）
-#   - 每条 path 必须为 /（根路径直出；平台展示地址固定按根 URL 派生，放开 path
-#     会让展示地址与实际路由错位）
-#   两种模式共同（TLS）：
-#   - spec.tls 存在时其 hosts 必须覆盖全部非空 rule host——展示地址按「有 TLS 即 https」
-#     派生，不覆盖的域名会得到 https 展示地址 + 无证书死链；path 模式 rule host 为空
-#     （共享入口形态）时豁免
-#   - rewrite-target / use-regex / x-forwarded-prefix 三项**必须为空**（不存在或空串，
-#     仅 host 模式）。
+#   - rewrite-target / use-regex / x-forwarded-prefix 三项**必须为空**（不存在或空串）——
 #     不是"不校验"而是"必须为空"：x-forwarded-prefix 非空会被业务 Agent 读到并 302 到
-#     {该值}/debug/（照抄 path 模式模板写出错前缀 → /debug 直接 404）；rewrite-target
+#     {该值}/debug/（照抄历史 path 模式模板写出错前缀 → /debug 直接 404）；rewrite-target
 #     可能被 ingress-nginx 用于改写整条 location
+#   - TLS：spec.tls 存在时其 hosts 必须覆盖全部 rule host——展示地址按「有 TLS 即
+#     https」派生，不覆盖的域名会得到 https 展示地址 + 无证书死链
 #
-# Endpoint 联动（同样按模式分支）：
-#   - path 模式：合并后第一条带尾缀 path 规则的 Host + path 前缀（Host 为空回落
-#     INGRESS_HOST；配了 TLS 则按 https 拼；端口取 INGRESS_PORT，Host 自带端口时
-#     不重复拼接）
-#   - host 模式：直接取规则 Host，形如 http://{K8sName}{后缀}/（域名自带 80/443，
-#     不拼 INGRESS_PORT；spec.tls 非空则 https）
-#   模板改 host 后的 DNS/端口可达性由环境自行保证。
+# Endpoint 联动：直接取规则 Host，形如 http(s)://{K8sName}{后缀}/（域名自带 80/443，
+# 不拼 INGRESS_PORT；spec.tls 非空则 https）。模板改 host 后的 DNS/端口可达性由环境
+# 自行保证。
 #
 # ---- 以下示例全部注释，按需取消注释（可组合）----
-#
-# ===== path 模式示例（INGRESS_HOST_SUFFIX 未设置）=====
-#
-# P1) 自定义域名 + 自定义对外前缀（rules 整体替换，含配套 x-forwarded-prefix）
-# metadata:
-#   annotations:
-#     nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
-# spec:
-#   rules:
-#     - host: demo.example.com
-#       http:
-#         paths:
-#           - path: /my-agent(/|$)(.*)      # 前缀可改，尾缀 (/|$)(.*) 必须保留
-#             pathType: ImplementationSpecific
-#             backend:
-#               service:
-#                 name: "{{K8S_NAME}}-svc"
-#                 port:
-#                   number: 8100
-#
-# P2) 只加域名（path 保持内置 /agent/{short} 形态）
-# metadata:
-#   annotations:
-#     nginx.ingress.kubernetes.io/x-forwarded-prefix: /agent/{{SHORT_NAME}}
-# spec:
-#   rules:
-#     - host: demo.example.com
-#       http:
-#         paths:
-#           - path: /agent/{{SHORT_NAME}}(/|$)(.*)
-#             pathType: ImplementationSpecific
-#             backend:
-#               service:
-#                 name: "{{K8S_NAME}}-svc"
-#                 port:
-#                   number: 8100
-#
-# P3) TLS（配了 TLS 后平台按 https 拼展示地址；需环境在 INGRESS_PORT 上终止 TLS）
-# spec:
-#   tls:
-#     - hosts: [demo.example.com]
-#       secretName: demo-example-com-tls
-#
-# ===== host 模式示例（INGRESS_HOST_SUFFIX 非空）=====
 #
 # H1) 追加注解 + TLS（**最常用**：不写 rules，内置 {K8S_NAME}{后缀} + 根路径 /
 #     全部保留，只需补环境策略）
