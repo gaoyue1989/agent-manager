@@ -42,6 +42,10 @@ const PORT_ADMIN = intEnv('EVAL_COLLECTOR_PORT_ADMIN', 18300);
 const ADMIN_TOKEN = ENV.EVAL_COLLECTOR_ADMIN_TOKEN || '';
 const PACKAGER_URL = (ENV.EVAL_PACKAGER_URL || '').replace(/\/$/, '');
 const PACKAGER_TOKEN = ENV.EVAL_PACKAGER_TOKEN || '';  // studio 开启 STUDIO_TOKEN 后的转调凭据（issue #97 评审）
+// 请求体硬上限（转发语义）：超限直接 413 拒绝且不转发；录制上限（body_max_bytes）只影响录制副本。
+// 默认 64MB 的取舍：旁路组件、安全边界 = 仅测试网络可达（见文件头），64MB 足以容纳大上下文
+// LLM 请求，同时防单请求内存无界；并发下最坏 64MB/请求，需要收紧时用该 env 调小。
+const BODY_HARD_LIMIT = intEnv('EVAL_COLLECTOR_BODY_HARD_LIMIT_BYTES', 64 * 1024 * 1024);
 
 function intEnv(name, dflt) {
   const v = parseInt(ENV[name], 10);
@@ -421,18 +425,26 @@ function attachSSECollector(upstreamResp, sink, maxBytes) {
   });
 }
 
-function readBody(req, maxBytes) {
+/** 请求体读取双上限（截断与转发分离）：
+ *  - recordLimit（即 body_max_bytes，录制上限）：只决定录制副本的 truncated 标记，
+ *    字节始终完整缓存，保证转发体完整（转发体截断曾致上游收到畸形 JSON，issue #97 问题6）；
+ *  - hardLimit（BODY_HARD_LIMIT，硬上限）：超限置 tooLarge 并停止缓存、继续排空连接
+ *    （排空避免半途断开导致客户端收不到 413 响应），调用方据此直接 413 拒绝且不转发。
+ *  返回的 body 为截至硬上限的完整体（tooLarge 时为部分体，但调用方不会转发它）。 */
+function readBody(req, recordLimit, hardLimit = BODY_HARD_LIMIT) {
   return new Promise((resolve) => {
     const chunks = [];
     let size = 0;
     let truncated = false;
+    let tooLarge = false;
     req.on('data', (c) => {
       size += c.length;
-      if (size > maxBytes) { truncated = true; req.resume(); return; } // 继续接收但不缓存
+      if (size > hardLimit) { tooLarge = true; req.resume(); return; } // 硬上限：停止缓存继续排空
+      if (size > recordLimit) truncated = true; // 录制上限：只置标记，字节照常缓存供转发
       chunks.push(c);
     });
-    req.on('end', () => resolve({ body: Buffer.concat(chunks), truncated }));
-    req.on('error', () => resolve({ body: Buffer.concat(chunks), truncated }));
+    req.on('end', () => resolve({ body: Buffer.concat(chunks), truncated, tooLarge }));
+    req.on('error', () => resolve({ body: Buffer.concat(chunks), truncated, tooLarge }));
   });
 }
 
@@ -467,7 +479,9 @@ async function handleLLM(req, res) {
   if (!p.upstream.llm) return sendJson(res, 404, { error: `档案 ${ns} 未配置 LLM 上游` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const base = String(p.upstream.llm).replace(/\/$/, '');
   // 版本段归一：客户端 base 含 /v1（LLM_BASE_URL=…/{ns}/v1），剥掉后再拼上游
   // （upstream 填业务直连时用的完整 base，如 https://openrouter.ai/api/v1）
@@ -564,7 +578,9 @@ async function handleSandbox(req, res) {
   if (!p.upstream.sandbox) return sendJson(res, 404, { error: `档案 ${ns} 未配置沙箱上游` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const base = String(p.upstream.sandbox).replace(/\/$/, '');
   const target = base + rest;
   const headers = { ...req.headers };
@@ -624,7 +640,9 @@ async function handleMCP(req, res) {
   if (!base) return sendJson(res, 404, { error: `档案 ${ns} 未配置 MCP server: ${server}` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const target = String(base).replace(/\/$/, '') + tail;
   const headers = { ...req.headers };
   if (p.upstream.mcp_api_keys?.[server]) headers.authorization = `Bearer ${p.upstream.mcp_api_keys[server]}`;
@@ -702,7 +720,9 @@ async function handleAgent(req, res) {
   if (!p.upstream.agent) return sendJson(res, 404, { error: `档案 ${ns} 未配置业务服务上游（upstream.agent）` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const base = String(p.upstream.agent).replace(/\/$/, '');
   const target = base + rest;
 
@@ -715,7 +735,9 @@ async function handleAgent(req, res) {
     session, ts_start: new Date().toISOString(),
     method: req.method, path: rest,
     request: reqObj ?? body.toString('utf-8').slice(0, maxBody),
-    request_truncated: reqTrunc, status: null, duration_ms: null, truncated: false,
+    // chunks 与 handleLLM 对齐：SSE 响应时 attachSSECollector 向 rec.chunks 收集 data 载荷，
+    // 缺字段会对 undefined.push 抛 TypeError 致整进程崩溃（issue #97 问题4）
+    request_truncated: reqTrunc, chunks: [], status: null, duration_ms: null, truncated: false,
   } : null;
 
   const t0 = Date.now();
@@ -1051,10 +1073,33 @@ rebuildCounters();
 retentionSweep();
 setInterval(retentionSweep, 3600_000).unref();
 
-http.createServer(handleLLM).listen(PORT_LLM, () => console.log(`[llm]      :${PORT_LLM}  /{ns}/v1/...`));
-http.createServer(handleSandbox).listen(PORT_SANDBOX, () => console.log(`[sandbox]  :${PORT_SANDBOX}  /{ns}/...`));
-http.createServer(handleMCP).listen(PORT_MCP, () => console.log(`[mcp]      :${PORT_MCP}  /mcp/{ns}/{server}/...`));
-http.createServer(handleAgent).listen(PORT_AGENT, () => console.log(`[agent]    :${PORT_AGENT}  /{ns}/...  （业务服务反代，kind=http 录制）`));
+// 进程级异常兜底（仅运行期）：采集代理是旁路组件，可用性优先——五个端口共享同一进程，
+// 任一未捕获异常的默认行为是整进程退出（一崩全崩），这里只记结构化错误日志、不退出。
+// 代价（Node 语义）：异常发生后当前这条请求的响应可能永不完成，由客户端自身超时收场。
+// 注册时机在启动同步逻辑（数据目录构建等）之后：启动期不可恢复错误（如 DATA_DIR 创建失败）
+// 仍走 Node 默认快速崩溃，不被兜底吞成"半初始化但进程存活"的僵尸态。
+process.on('uncaughtException', (e) => {
+  console.error(`[process][ERROR] ${new Date().toISOString()} uncaughtException: ${e.message}\n${e.stack || ''}`);
+});
+process.on('unhandledRejection', (reason) => {
+  const detail = reason instanceof Error ? `${reason.message}\n${reason.stack || ''}` : String(reason);
+  console.error(`[process][ERROR] ${new Date().toISOString()} unhandledRejection: ${detail}`);
+});
+
+/** 端口绑定失败属启动期不可恢复错误（如 EADDRINUSE）：server 'error' 若无监听会抛进
+ *  上面的进程兜底被吞掉（healthz 假活，e2e 编排器靠"启动即死"判定端口冲突会失灵），
+ *  这里显式监听并快速失败退出；运行期异常仍按上方兜底只记日志不退出。 */
+function onListenError(port) {
+  return (e) => {
+    console.error(`[collector][ERROR] ${new Date().toISOString()} 端口 ${port} 监听失败: ${e.message}`);
+    process.exit(1);
+  };
+}
+
+http.createServer(handleLLM).listen(PORT_LLM, () => console.log(`[llm]      :${PORT_LLM}  /{ns}/v1/...`)).on('error', onListenError(PORT_LLM));
+http.createServer(handleSandbox).listen(PORT_SANDBOX, () => console.log(`[sandbox]  :${PORT_SANDBOX}  /{ns}/...`)).on('error', onListenError(PORT_SANDBOX));
+http.createServer(handleMCP).listen(PORT_MCP, () => console.log(`[mcp]      :${PORT_MCP}  /mcp/{ns}/{server}/...`)).on('error', onListenError(PORT_MCP));
+http.createServer(handleAgent).listen(PORT_AGENT, () => console.log(`[agent]    :${PORT_AGENT}  /{ns}/...  （业务服务反代，kind=http 录制）`)).on('error', onListenError(PORT_AGENT));
 
 const adminHost = ADMIN_TOKEN ? '0.0.0.0' : '127.0.0.1';
 http.createServer((req, res) => {
@@ -1069,5 +1114,5 @@ http.createServer((req, res) => {
   });
 }).listen(PORT_ADMIN, adminHost, () => {
   console.log(`[admin]    http://${adminHost}:${PORT_ADMIN}  （${ADMIN_TOKEN ? 'token 已启用' : '未设 EVAL_COLLECTOR_ADMIN_TOKEN，仅本机可访问'}）`);
-});
+}).on('error', onListenError(PORT_ADMIN));
 console.log(`[collector] v${VERSION} data=${DATA_DIR} conf=${CONF_DIR}`);

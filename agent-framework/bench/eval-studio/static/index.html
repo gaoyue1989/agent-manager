@@ -73,7 +73,9 @@ const api=async(p,opt={})=>{const r=await fetch(p,{...opt,headers:{'content-type
     toast(TOKEN?'token 已更新，请重试':'已跳过 token 输入，点右上角「token」可重新设置',false);}
    throw new Error(401);}
   const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.detail||j.error||r.status); return j;};
-const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// HTML 转义须含单引号：id 等用户可控值曾拼进单引号实参的内联 onclick（存储型 XSS 沉淀点）；
+// 现按钮一律 data-* + 事件委托，esc 仍作为所有插值的兜底防线
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pct=v=>(v*100).toFixed(1)+'%';
 function toast(m,ok=true){const t=$('#toast');t.textContent=m;t.style.display='block';
   t.style.borderColor=ok?'var(--ok)':'var(--err)';setTimeout(()=>t.style.display='none',2600);}
@@ -95,12 +97,12 @@ const views={
     recent.map(r=>`<tr><td class="mono">${esc(r.run_id)}</td><td>${r.type}</td>
     <td><span class="tag ${r.status==='done'?'ok':r.status==='error'?'err':'run'}">${esc(r.status)}</span></td>
     <td>${r.report?pct(r.report.summary.pass_rate):'-'}</td>
-    <td><button class="btn" onclick="openRun('${esc(r.run_id)}')">报告</button></td></tr>`).join('')}</table>`
+    <td><button class="btn" data-act="open-run" data-run-id="${esc(r.run_id)}">报告</button></td></tr>`).join('')}</table>`
     :'<span class="dim">暂无 run</span>'}</div>`;},
 
  async profiles(){ $('#main').innerHTML=`
   <div class="card"><h2>目标档案 <span class="hint">按 agent 的真实配置，可切换/保存/预检；评测另一个 agent = 切档案</span>
-    <button class="btn pri" style="float:right" onclick="editProfile()">+ 新建档案</button></h2>
+    <button class="btn pri" style="float:right" data-act="edit-profile">+ 新建档案</button></h2>
   <table id="pf-t"></table></div>
   <div class="card" id="pf-edit" style="display:none"></div>`;
   $('#pf-t').innerHTML=`<tr><th>档案</th><th>模式</th><th>关键配置</th><th>操作</th></tr>`+
@@ -108,20 +110,20 @@ const views={
     <td><span class="tag ${p.spec.target_mode==='live'?'run':'ok'}">${esc(p.spec.target_mode||'replay')}</span></td>
     <td class="mono dim">${esc(JSON.stringify(p.spec.replay||p.spec.live||{})).slice(0,90)}</td>
     <td class="row">
-     ${active===p.id?'<span class="tag ok">活跃</span>':`<button class="btn" onclick="activateProfile('${esc(p.id)}')">设为活跃</button>`}
-     <button class="btn" onclick="editProfile('${esc(p.id)}')">编辑</button>
-     <button class="btn" onclick="precheckProfile('${esc(p.id)}')">预检</button>
-     <button class="btn" onclick="delProfile('${esc(p.id)}')">删除</button></td></tr>`).join('');},
+     ${active===p.id?'<span class="tag ok">活跃</span>':`<button class="btn" data-act="activate-profile" data-id="${esc(p.id)}">设为活跃</button>`}
+     <button class="btn" data-act="edit-profile" data-id="${esc(p.id)}">编辑</button>
+     <button class="btn" data-act="precheck-profile" data-id="${esc(p.id)}">预检</button>
+     <button class="btn" data-act="del-profile" data-id="${esc(p.id)}">删除</button></td></tr>`).join('');},
 
  async packs(){ $('#main').innerHTML=`
   <div class="card"><h2>数据包（evalpack）<span class="hint">flywheel pack / collector 打包产出</span></h2>
-   <div class="row"><input type="file" id="pk-file" accept=".zip"><button class="btn pri" onclick="uploadPack()">上传</button></div>
+   <div class="row"><input type="file" id="pk-file" accept=".zip"><button class="btn pri" data-act="upload-pack">上传</button></div>
    <div style="margin-top:14px"><table><tr><th>包</th><th>会话</th><th>交互</th><th>置信度</th><th>操作</th></tr>
    ${packs.packages.map(p=>`<tr><td class="mono">${esc(p.pack_id)}</td>
-     <td>${(p.manifest.sessions||[]).length}</td><td>${JSON.stringify(p.manifest.stats||{})}</td>
+     <td>${(p.manifest.sessions||[]).length}</td><td>${esc(JSON.stringify(p.manifest.stats||{}))}</td>
      <td>${(p.manifest.sessions||[]).filter(s=>s.confidence==='high').length} high</td>
-     <td class="row"><button class="btn" onclick="showPack('${esc(p.pack_id)}')">明细</button>
-     <button class="btn" onclick="delPack('${esc(p.pack_id)}')">删除</button></td></tr>`).join('')||'<tr><td colspan=5 class="dim">暂无数据包</td></tr>'}
+     <td class="row"><button class="btn" data-act="show-pack" data-pack-id="${esc(p.pack_id)}">明细</button>
+     <button class="btn" data-act="del-pack" data-pack-id="${esc(p.pack_id)}">删除</button></td></tr>`).join('')||'<tr><td colspan=5 class="dim">暂无数据包</td></tr>'}
    </table></div></div><div class="card" id="pk-detail" style="display:none"></div>`;},
 
  async cases(){ const cs=await api('/api/cases');
@@ -131,7 +133,7 @@ const views={
     <td><span class="tag ${c.status==='active'?'ok':'dim'}">${esc(c.status)}</span></td>
     <td class="mono">${esc((c.spec.input||{}).message||'').slice(0,50)}</td>
     <td class="mono dim">${esc(JSON.stringify(c.spec.expected||{})).slice(0,90)}</td>
-    <td>${c.status==='draft'?`<button class="btn pri" onclick="promoteCase('${esc(c.pack_id)}','${esc(c.case_id)}')">转正</button>`:''}</td></tr>`).join('')
+    <td>${c.status==='draft'?`<button class="btn pri" data-act="promote-case" data-pack-id="${esc(c.pack_id)}" data-case-id="${esc(c.case_id)}">转正</button>`:''}</td></tr>`).join('')
     ||'<tr><td colspan=5 class="dim">暂无用例（先上传数据包）</td></tr>'}</table></div>`;},
 
  async runs(){ const rs=await api('/api/runs');
@@ -141,14 +143,14 @@ const views={
      <label>数据包</label><select id="rn-pack">${packs.packages.map(p=>`<option value="${esc(p.pack_id)}">${esc(p.pack_id)}</option>`).join('')}</select></div>
     <div><label>类型</label><select id="rn-type"><option value="replay">replay（离线回放）</option><option value="live">live（联机评测）</option></select>
      <label>选项</label><div class="row"><label style="margin:0"><input type="checkbox" id="rn-judge" checked> LLM judge 评分</label></div></div></div>
-   <div class="row" style="margin-top:14px"><button class="btn pri" onclick="createRun()">运行</button></div></div>
+   <div class="row" style="margin-top:14px"><button class="btn pri" data-act="create-run">运行</button></div></div>
   <div class="card"><h2>历史任务</h2><table><tr><th>run</th><th>类型</th><th>状态</th><th>通过率</th><th>漂移率</th><th>judge</th><th></th></tr>
    ${rs.runs.map(r=>`<tr><td class="mono">${esc(r.run_id)}</td><td>${r.type}</td>
     <td><span class="tag ${r.status==='done'?'ok':r.status.includes('fail')?'warn':r.status==='error'?'err':'run'}">${esc(r.status)}</span></td>
     <td>${r.report?pct(r.report.summary.pass_rate):'-'}</td>
     <td>${r.report&&r.report.summary.drift_rate!=null?r.report.summary.drift_rate:'-'}</td>
     <td>${r.report&&r.report.summary.score_avg!=null?r.report.summary.score_avg.toFixed(2):'-'}</td>
-    <td class="row"><button class="btn" onclick="openRun('${esc(r.run_id)}')">报告</button></td></tr>`).join('')
+    <td class="row"><button class="btn" data-act="open-run" data-run-id="${esc(r.run_id)}">报告</button></td></tr>`).join('')
     ||'<tr><td colspan=7 class="dim">暂无 run</td></tr>'}</table></div>
   <div class="card" id="rn-detail" style="display:none"></div>`;},
 
@@ -157,7 +159,7 @@ const views={
    <div class="grid">
     <div><label>基准 run（A）</label><select id="cmp-a">${rs.map(r=>`<option value="${esc(r.run_id)}">${esc(r.run_id)}（${pct(r.report.summary.pass_rate)}）</option>`).join('')}</select></div>
     <div><label>对比 run（B）</label><select id="cmp-b">${rs.map((r,i)=>`<option value="${esc(r.run_id)}" ${i===1?'selected':''}>${esc(r.run_id)}（${pct(r.report.summary.pass_rate)}）</option>`).join('')}</select></div></div>
-   <div class="row" style="margin-top:12px"><button class="btn pri" onclick="doCompare()">对比</button></div>
+   <div class="row" style="margin-top:12px"><button class="btn pri" data-act="do-compare">对比</button></div>
    <div id="cmp-out" style="margin-top:16px"></div></div>`;
   if(rs.length>=2) doCompare(); },
 
@@ -169,41 +171,57 @@ const views={
    ||'<tr><td colspan=6 class="dim">暂无数据</td></tr>'}</table></div>`;},
 };
 
-window.openRun=async(id)=>{const r=await api(`/api/runs/${id}`);
+// 报告渲染进 sandbox iframe（不带 allow-same-origin/allow-scripts：唯一 origin 且脚本全禁），
+// 替代 window.open+document.write 的同源执行，阻断报告内被注入内容以 studio 同源身份携带凭据调用 API
+async function openRun(id){const r=await api(`/api/runs/${id}`);
  if(!r.report){toast('报告尚未生成',false);return;}
- const s=r.report.summary;
  const html=await fetch(`/api/runs/${id}/report.html`,{headers:authHeaders()}).then(x=>x.text());
- const w=window.open('','_blank'); w.document.write(html); w.document.close();};
-window.activateProfile=async(id)=>{await api(`/api/profiles/${id}/activate`,{method:'POST'});toast('已切换活跃档案');refresh();views.profiles();};
-window.precheckProfile=async(id)=>{const r=await api(`/api/profiles/${id}/precheck`,{method:'POST'});toast('预检完成：'+JSON.stringify(r));};
-window.delProfile=async(id)=>{if(!confirm('删除档案？'))return;await api(`/api/profiles/${id}`,{method:'DELETE'});refresh();views.profiles();};
-window.editProfile=(id)=>{const box=$('#pf-edit');box.style.display='block';
+ $('#run-view')?.remove();
+ const ov=document.createElement('div');ov.id='run-view';
+ ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:99';
+ ov.innerHTML=`<div style="width:min(1000px,94vw);height:88vh;display:flex;flex-direction:column;background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:hidden">
+  <div class="row" style="padding:10px 14px;border-bottom:1px solid var(--line)"><b>评测报告</b><span class="mono dim">${esc(id)}</span><span class="grow"></span><button class="btn" data-act="close-run">关闭</button></div>
+  <iframe style="flex:1;border:0;width:100%" sandbox></iframe></div>`;
+ ov.addEventListener('click',e=>{if(e.target===ov)ov.remove();});
+ document.body.appendChild(ov);
+ ov.querySelector('iframe').srcdoc=html;}
+async function activateProfile(id){await api(`/api/profiles/${id}/activate`,{method:'POST'});toast('已切换活跃档案');refresh();views.profiles();}
+async function precheckProfile(id){const r=await api(`/api/profiles/${id}/precheck`,{method:'POST'});toast('预检完成：'+JSON.stringify(r));}
+async function delProfile(id){if(!confirm('删除档案？'))return;await api(`/api/profiles/${id}`,{method:'DELETE'});refresh();views.profiles();}
+function editProfile(id){const box=$('#pf-edit');box.style.display='block';
  const p=profiles.find(x=>x.id===id);
+ // textarea 内容上下文：esc 转实体后浏览器还原为原始文本，textarea.value 即未转义 JSON（勿再对 .value 二次转义）
  box.innerHTML=`<h2>${p?'编辑':'新建'}目标档案</h2><label>档案 JSON（secrets_ref 支持 env:VAR 引用）</label>
   <textarea id="pf-json" rows="12" class="mono">${esc(JSON.stringify(p?{...p.spec,id:p.id,name:p.name}:{
    id:'prof-',name:'',agent:{oaf_slug:''},target_mode:'replay',
    replay:{pack_policy:'latest',harness:'builtin-stub',strictness:'strict'},
    judge:{},secrets_ref:{}
   },null,2))}</textarea>
-  <div class="row" style="margin-top:10px"><button class="btn pri" onclick="saveProfile()">保存</button></div>`;
- if(p) box.querySelector('#pf-json').value=esc(JSON.stringify({...p.spec,id:p.id,name:p.name},null,2));};
-window.saveProfile=async()=>{const spec=JSON.parse($('#pf-json').value);
- await api('/api/profiles',{method:'POST',body:JSON.stringify(spec)});
- toast('已保存');views.profiles();};
-window.uploadPack=async()=>{const f=$('#pk-file').files[0];if(!f)return toast('先选择 zip',false);
+  <div class="row" style="margin-top:10px"><button class="btn pri" data-act="save-profile">保存</button></div>`;}
+async function saveProfile(){let spec;
+ try{spec=JSON.parse($('#pf-json').value);}
+ catch(e){return toast('档案 JSON 解析失败：'+e.message,false);}
+ const pid=spec&&spec.id;
+ if(!pid||!pid.startsWith('prof-'))return toast('id 必填且以 prof- 开头',false);
+ // 已存在 id 走 PUT 更新（POST 对已存在 id 一律 409），新建走 POST
+ const exists=profiles.some(x=>x.id===pid);
+ await api(exists?`/api/profiles/${encodeURIComponent(pid)}`:'/api/profiles',
+  {method:exists?'PUT':'POST',body:JSON.stringify(spec)});
+ toast('已保存');views.profiles();}
+async function uploadPack(){const f=$('#pk-file').files[0];if(!f)return toast('先选择 zip',false);
  const fd=new FormData();fd.append('file',f);
  const r=await fetch('/api/packages',{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();
  if(!r.ok)return toast(j.detail||'上传失败',false);
- toast(`已导入 ${j.pack_id}（${j.sessions} 会话）`);load();};
-window.showPack=async(id)=>{const d=await api(`/api/packages/${id}`);const box=$('#pk-detail');box.style.display='block';
+ toast(`已导入 ${j.pack_id}（${j.sessions} 会话）`);load();}
+async function showPack(id){const d=await api(`/api/packages/${id}`);const box=$('#pk-detail');box.style.display='block';
  box.innerHTML=`<h2>${esc(id)} 会话明细</h2><table><tr><th>sid</th><th>置信度</th><th>轮次</th><th>终答</th></tr>
  ${d.sessions.map(s=>`<tr><td class="mono">${esc(s.sid)}</td>
   <td><span class="tag ${s.confidence==='high'?'ok':'dim'}">${esc(s.confidence)}</span></td>
-  <td>${(s.turns||[]).length}</td><td class="mono">${esc(s.final_output||'').slice(0,60)}</td></tr>`).join('')}</table>`;};
-window.delPack=async(id)=>{if(!confirm('删除数据包？'))return;await api(`/api/packages/${id}`,{method:'DELETE'});load();};
-window.promoteCase=async(pid,cid)=>{await api('/api/cases/promote',{method:'POST',body:JSON.stringify({pack_id:pid,case_id:cid})});
- toast('已转正');views.cases();};
-window.doCompare=async()=>{const a=$('#cmp-a').value,b=$('#cmp-b').value;
+  <td>${(s.turns||[]).length}</td><td class="mono">${esc(s.final_output||'').slice(0,60)}</td></tr>`).join('')}</table>`;}
+async function delPack(id){if(!confirm('删除数据包？'))return;await api(`/api/packages/${id}`,{method:'DELETE'});load();}
+async function promoteCase(pid,cid){await api('/api/cases/promote',{method:'POST',body:JSON.stringify({pack_id:pid,case_id:cid})});
+ toast('已转正');views.cases();}
+async function doCompare(){const a=$('#cmp-a').value,b=$('#cmp-b').value;
  if(a===b) return toast('请选择两个不同的 run',false);
  let r; try{ r=await api(`/api/compare?run_a=${a}&run_b=${b}`);}catch(e){ return toast(e.message,false); }
  const c=r.conclusion;
@@ -229,7 +247,7 @@ window.doCompare=async()=>{const a=$('#cmp-a').value,b=$('#cmp-b').value;
     <td class="mono dim">${esc(x.final_a||'').slice(0,60)}<br>→ ${esc(x.final_b||'').slice(0,60)}</td></tr>`).join('')}
   </table></div>`;};
 
-window.createRun=async()=>{const body={type:$('#rn-type').value,profile_id:$('#rn-profile').value,
+async function createRun(){const body={type:$('#rn-type').value,profile_id:$('#rn-profile').value,
   pack_id:$('#rn-pack').value||undefined,judge:$('#rn-judge').checked};
  const r=await api('/api/runs',{method:'POST',body:JSON.stringify(body)});
  toast(`run ${r.run_id} 已提交`);views.runs();
@@ -241,6 +259,28 @@ async function switchTab(t){tab=t;$$('nav button').forEach(b=>b.classList.toggle
  try{await views[t]();}catch(e){$('#main').innerHTML=`<div class="card"><span class="err">${esc(e.message)}</span></div>`;}}
 async function load(){await refresh(); try{packs=await api('/api/packages');}catch(e){}}
 $$('#nav button').forEach(b=>b.onclick=async()=>{switchTab(b.dataset.tab);});
+// 事件委托：动态渲染按钮统一经 data-act 分发（id 只走 data-* 属性 + esc 转义，
+// 不再拼进内联 onclick 的 JS 字符串实参，消除属性内代码注入这一类问题）
+document.addEventListener('click',e=>{
+ const b=e.target.closest('[data-act]');
+ if(!b) return;
+ const id=b.dataset.id, runId=b.dataset.runId, packId=b.dataset.packId, caseId=b.dataset.caseId;
+ switch(b.dataset.act){
+  case 'open-run': openRun(runId); break;
+  case 'close-run': $('#run-view')?.remove(); break;
+  case 'edit-profile': editProfile(id); break;
+  case 'activate-profile': activateProfile(id); break;
+  case 'precheck-profile': precheckProfile(id); break;
+  case 'del-profile': delProfile(id); break;
+  case 'save-profile': saveProfile(); break;
+  case 'upload-pack': uploadPack(); break;
+  case 'show-pack': showPack(packId); break;
+  case 'del-pack': delPack(packId); break;
+  case 'promote-case': promoteCase(packId, caseId); break;
+  case 'create-run': createRun(); break;
+  case 'do-compare': doCompare(); break;
+ }});
+
 $('#token-btn').onclick=()=>{saveToken(prompt('访问 token（留空=匿名）')||'');AUTH_SKIP=!TOKEN;
  switchTab(tab);};  // switchTab 内含 load(refresh)+当前视图重渲染：401 错误卡片随即被正常内容替换，不留陈旧报错
 switchTab('dash'); setInterval(refresh,10000);

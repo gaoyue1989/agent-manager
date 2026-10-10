@@ -16,6 +16,8 @@
 # 占位符（发布期按服务替换，模板保持服务无关）：
 #   {{K8S_NAME}}   → oaf-{short}（backend service 名 = {{K8S_NAME}}-svc）
 #   {{SHORT_NAME}} → 去掉 oaf- 前缀的短名（path/x-forwarded-prefix 用）
+#   {{HOST_SUFFIX}} → INGRESS_HOST_SUFFIX 原值（host 模式 TLS hosts/域名与后缀联动，
+#                     换环境零改动；path 模式下替换为空串）
 #
 # 合并规则（K8s Strategic Merge Patch on networkingv1.Ingress）：
 #   - metadata.annotations/labels 为 map：按 key 合并——只写要新增/覆盖的注解即可
@@ -38,11 +40,16 @@
 #   - x-forwarded-prefix 必须等于对外前缀（path 剥掉 (/|$)(.*) 后缀）——
 #     改 path 必须同步改该注解，否则 Debug Console/外链错位
 #   host 模式额外：
-#   - 每条 rule 的 host 必须等于 {{K8S_NAME}}{后缀}（域名即服务身份，不可偏离；
+#   - 每条 rule 的 host 必须等于 {{K8S_NAME}}{{HOST_SUFFIX}}（域名即服务身份，不可偏离；
 #     留空会退化成共享入口 IP 承载根路径，流量串服务）
 #   - 每条 path 必须为 /（根路径直出；平台展示地址固定按根 URL 派生，放开 path
 #     会让展示地址与实际路由错位）
-#   - rewrite-target / use-regex / x-forwarded-prefix 三项**必须为空**（不存在或空串）。
+#   两种模式共同（TLS）：
+#   - spec.tls 存在时其 hosts 必须覆盖全部非空 rule host——展示地址按「有 TLS 即 https」
+#     派生，不覆盖的域名会得到 https 展示地址 + 无证书死链；path 模式 rule host 为空
+#     （共享入口形态）时豁免
+#   - rewrite-target / use-regex / x-forwarded-prefix 三项**必须为空**（不存在或空串，
+#     仅 host 模式）。
 #     不是"不校验"而是"必须为空"：x-forwarded-prefix 非空会被业务 Agent 读到并 302 到
 #     {该值}/debug/（照抄 path 模式模板写出错前缀 → /debug 直接 404）；rewrite-target
 #     可能被 ingress-nginx 用于改写整条 location
@@ -109,7 +116,7 @@
 #     nginx.ingress.kubernetes.io/enable-cors: "true"
 # spec:
 #   tls:
-#     - hosts: ["{{K8S_NAME}}.region-c86-test.test-kzx1.cncb"]
+#     - hosts: ["{{K8S_NAME}}{{HOST_SUFFIX}}"]   # TLS hosts 必须覆盖 rule host，否则校验拒绝
 #       secretName: agents-wildcard-tls
 #
 # H2) 追加注解（map 按 key 合并，内置注解全保留）
@@ -119,11 +126,11 @@
 #     nginx.ingress.kubernetes.io/enable-cors: "true"
 #
 # H3) 完整 rules（host 与 path 均为不变量、不可改；仅在需要显式写出整块时使用，
-#     如改 pathType。host 里的域名后缀需按 INGRESS_HOST_SUFFIX 原样写出，
-#     {{K8S_NAME}} 只能替换服务名段）
+#     如改 pathType。host 用 {{K8S_NAME}}{{HOST_SUFFIX}} 组合写出，与 INGRESS_HOST_SUFFIX
+#     自动联动，模板保持环境无关）
 # spec:
 #   rules:
-#     - host: "{{K8S_NAME}}.region-c86-test.test-kzx1.cncb"   # 不可偏离 {{K8S_NAME}}{后缀}
+#     - host: "{{K8S_NAME}}{{HOST_SUFFIX}}"   # 不可偏离 {{K8S_NAME}}{{HOST_SUFFIX}}
 #       http:
 #         paths:
 #           - path: /                                        # 恒为根路径

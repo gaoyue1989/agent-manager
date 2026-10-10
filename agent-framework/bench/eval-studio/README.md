@@ -113,4 +113,8 @@ cd bench && docker build -f eval-studio/Dockerfile -t gaoyue1989/eval-studio:lat
   透传凭据（compose 已与 STUDIO_TOKEN 同值注入），studio 启用鉴权后该转调自动携带 Bearer 正常工作；
   非 compose 部署时需自行给 collector 设 `EVAL_PACKAGER_TOKEN=<同 STUDIO_TOKEN 值>`。
 - 档案凭据只存 `env:VAR` 引用或 judge 显式配置；导出接口一律剥离敏感值。
-- evalpack 导入强制 CHECKSUMS 校验，篡改包拒收。
+- evalpack 导入强制 CHECKSUMS 校验（含反向扫描：未登记文件拒收），篡改包拒收。
+- 客户端可控标识符（pack_id / session id / case_id / ns）落盘读盘前统一白名单校验
+  （`bench/eval/replay/ids.py`：字母/数字开头，仅字母数字点下划线连字符，禁 `..` 与路径分隔符，
+  非法返回 400），杜绝路径穿越任意删写（issue #97）；上传先解压到临时 staging、全部校验通过才落最终目录。
+- 上传大小上限 `STUDIO_MAX_UPLOAD_BYTES`（字节，默认 268435456 = 256MB），超限返回 413。

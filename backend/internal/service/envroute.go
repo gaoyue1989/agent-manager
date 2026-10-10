@@ -61,6 +61,8 @@ func (c *Core) partitionServiceEnv(svc *store.ServiceEntity) (plain, secret map[
 // resolveEnvMerge 写路径合并：以旧两级 env 为基底（含存量迁移），传入 env 为
 // 非敏感部分的全量覆盖；敏感键三态——出现且非空=设置、出现且空串=删除
 // （回落平台默认值）、未出现=sticky 保持不变（防页面盲点误删）。
+// 非敏感份空串=不设置：plain 全量覆盖语义下「不写该键」即删除，空串是无意义输入，
+// 直接剔除不落 CM/env_json（设计 §3.3「空值永不进入 CM/Secret」，与 Publish 同语义）。
 func resolveEnvMerge(oldPlain, oldSecret, env map[string]string, secretKeys []string) (plain, secret map[string]string) {
 	secret = map[string]string{}
 	for k, v := range oldSecret {
@@ -73,6 +75,7 @@ func resolveEnvMerge(oldPlain, oldSecret, env map[string]string, secretKeys []st
 		}
 	}
 	plain, inSecret := splitUserEnv(env, secretKeys)
+	dropEmptyEnv(plain) // 空串=不设置（设计 §3.3）：非敏感份与 secret 份的空串删除对齐
 	for k, v := range inSecret {
 		if v == "" {
 			delete(secret, k) // 空串=显式删除，优先于 sticky/迁移

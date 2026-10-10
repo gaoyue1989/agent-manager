@@ -635,18 +635,26 @@ collector 增加 **:18203** 数据面端口（无认证，与 18200-18202 同边
 边界：反代口**仅测试环境前端采集模式使用**；平台 backend REST（`/api/v1`）不纳入录制范围
 （含平台敏感配置，录制无评测价值）。
 
-### C.3 前端配合（Next.js 同源反代，一处开关）
+### C.3 前端配合（Next.js 同源反代，独立开关）
 
 前端经 `frontend/src/proxy.ts` 同源反代访问业务服务（`/agent/release-agent/...` →
-`AGENT_INTERNAL_URL`）。采集模式 = 部署时把 `AGENT_INTERNAL_URL` 指向
-`http://<collector>:18203/{ns}`（**纯环境变量切换，无需改代码、无需重建镜像**）：
+`AGENT_INTERNAL_URL`）。采集模式 = 显式开关 `EVAL_COLLECTOR_MODE=1` 且
+`EVAL_COLLECTOR_AGENT_URL` 指向 `http://<collector>:18203/{ns}`
+（2026-10-09 修订，issue #97：原实现以 `EVAL_COLLECTOR_AGENT_URL` 是否非空串作开关——
+该变量无人设置、`undefined !== ""` 恒真，导致采集模式默认恒开；修订后开关与目标拆为
+两个变量，`AGENT_INTERNAL_URL` 保持指向业务服务、不再需要采集期来回切换。
+**纯环境变量切换，无需改代码、无需重建镜像**，开关默认关闭）：
 
 - collector 反代口按原样转发（含 SSE 流式透传），前端行为与直连完全一致；
 - sessionId 提取在 collector 侧完成，前端零改动即获得强会话关联；
-- 额外收益：proxy 层同时注入 `X-Eval-Session` 头（从 cookie/localStorage 会话派生），
-  使「外部依赖三协议」的交互也获得与 HTTP 层一致的强关联主键。
+- 额外收益：proxy 层同时注入 `X-Eval-Session` 头（从 cookie `oaf-assistant-sid`
+  派生——assistant 页在 localStorage 之外同步双写该 cookie，2026-10-09 修订前只写
+  localStorage、proxy 的 cookie 读取恒不触发），使「外部依赖三协议」的交互也获得
+  与 HTTP 层一致的强关联主键。
 
-开关生命周期与 §2.6 下线向导一致：采集结束 → 还原 `AGENT_INTERNAL_URL` 指回业务服务。
+开关生命周期与 §2.6 下线向导一致：采集结束 → 删除 `EVAL_COLLECTOR_MODE`（或置非 `1`
+值）即还原，`EVAL_COLLECTOR_AGENT_URL` 可保留。开关开启但目标未设置：proxy 打告警
+日志并退回普通代理（不注入），不会把流量打到未定义地址。
 
 ### C.4 实施记录（2026-10-05，附录 C 落地）
 
@@ -658,4 +666,8 @@ collector 增加 **:18203** 数据面端口（无认证，与 18200-18202 同边
 - 前端（frontend/src/proxy.ts）：采集模式 = `AGENT_INTERNAL_URL` 指向
   `http://<collector>:18203/{ns}`，纯环境变量切换；同时注入 `X-Eval-Session`
   （cookie `oaf-assistant-sid` 派生）使三协议录制获得与 HTTP 层一致的强关联主键。
+  （2026-10-09 修订，issue #97：开关改为显式 `EVAL_COLLECTOR_MODE=1` + 独立
+  `EVAL_COLLECTOR_AGENT_URL`——原「目标指向即开关」依赖的变量无人设置恒为非空串，
+  采集模式默认恒开；cookie `oaf-assistant-sid` 由 assistant 页 localStorage/cookie
+  双写落地，proxy 的读取真实生效。现行语义见 C.3。）
 - e2e：HTTP 反代录制/session 双提取（path+body）/入包/归属断言；全量 --offline 94/0。

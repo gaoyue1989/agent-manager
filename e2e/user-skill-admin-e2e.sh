@@ -3,9 +3,9 @@
 #
 # 覆盖场景（自建包 + 自建服务，脚本自己清理）：
 #   P  构造带 skills/demo-a 的包并发布服务
-#   1  管理接口 PUT /skills/users/{uid}/{name}（写个人覆盖）→ action/version
+#   1  管理接口 PUT /skills/users/{name}（写个人覆盖，用户身份走 X-User-Id 头）→ action/version
 #   2  GET 明细 source=user / hasUserOverride=true / hasPackageBaseline=true
-#   3  索引：GET /skills/users 与 /debug/user-skills 均列出该 userId
+#   3  索引：GET /debug/user-skills 列出该 userId；GET /skills/users（带 X-User-Id）列出本人技能
 #   4  A2A：该用户读到个人覆盖 marker；另一个用户仍读到包内 marker（用户隔离）
 #   5  DELETE → GET 回落 source=package（内容与包内逐字节一致）；A2A 新会话回落包内 marker
 #   6  POST sync-from-package → source=user 且内容与包内逐字节一致（含 scripts/ 资源）
@@ -83,12 +83,20 @@ svc_body() { # svc_body <method> <path> [json-body]
     curl -s -X "$m" "$(svc_url)$p"
   fi
 }
-assert_svc_error() { # assert_svc_error <case> <method> <path> <want-status> <want-error> [body-file]
-  local case_name=$1 m=$2 p=$3 want_status=$4 want_error=$5 body_file=${6:-} out code payload err
-  if [ -n "$body_file" ]; then
-    out=$(curl -s -w '\n%{http_code}' -X "$m" "$(svc_url)$p" -H 'Content-Type: application/json' -d @"$body_file")
+svc_body_u() { # svc_body_u <uid> <method> <path> [json-body] —— 个人技能接口：用户身份走 X-User-Id 头
+  local uid=$1 m=$2 p=$3 b=${4:-}
+  if [ -n "$b" ]; then
+    curl -s -X "$m" "$(svc_url)$p" -H 'Content-Type: application/json' -H "X-User-Id: $uid" -d "$b"
   else
-    out=$(curl -s -w '\n%{http_code}' -X "$m" "$(svc_url)$p")
+    curl -s -X "$m" "$(svc_url)$p" -H "X-User-Id: $uid"
+  fi
+}
+assert_svc_error() { # assert_svc_error <case> <uid> <method> <path> <want-status> <want-error> [body-file]
+  local case_name=$1 uid=$2 m=$3 p=$4 want_status=$5 want_error=$6 body_file=${7:-} out code payload err
+  if [ -n "$body_file" ]; then
+    out=$(curl -s -w '\n%{http_code}' -X "$m" "$(svc_url)$p" -H 'Content-Type: application/json' -H "X-User-Id: $uid" -d @"$body_file")
+  else
+    out=$(curl -s -w '\n%{http_code}' -X "$m" "$(svc_url)$p" -H "X-User-Id: $uid")
   fi
   code=$(echo "$out" | tail -1)
   payload=$(echo "$out" | sed '$d')
@@ -291,28 +299,28 @@ EOF
 PUT_BODY=$(python3 -c "
 import json,sys
 print(json.dumps({'content': open(sys.argv[1]).read()}))" "$WORKDIR/override.json")
-PUT_RESP=$(svc_body PUT "/skills/users/$UID_A/demo-a" "$PUT_BODY")
+PUT_RESP=$(svc_body_u "$UID_A" PUT "/skills/users/demo-a" "$PUT_BODY")
 assert_eq "1.1 PUT 新建个人覆盖 action=created" "$(echo "$PUT_RESP" | jq -r '.action')" "created"
 PUT_VER=$(echo "$PUT_RESP" | jq -r '.version')
 case "$PUT_VER" in ''|null|0) bad "1.2 返回 KV 版本号（got: $PUT_VER）";; *) ok "1.2 返回 KV 版本号 (version=$PUT_VER)";; esac
 
 say "E2：明细视图（GET 个人覆盖）"
-GET_RESP=$(svc_body GET "/skills/users/$UID_A/demo-a")
+GET_RESP=$(svc_body_u "$UID_A" GET "/skills/users/demo-a")
 assert_eq "2.1 source=user"        "$(echo "$GET_RESP" | jq -r '.source')" "user"
 assert_eq "2.2 hasUserOverride"    "$(echo "$GET_RESP" | jq -r '.hasUserOverride')" "true"
 assert_eq "2.3 hasPackageBaseline（删除后有基线可回落）" \
-  "$(svc_body GET "/skills/users/$UID_A" | jq -r '.skills[0].hasPackageBaseline')" "true"
+  "$(svc_body_u "$UID_A" GET "/skills/users" | jq -r '.skills[0].hasPackageBaseline')" "true"
 assert_contains "2.4 内容为写入的覆盖版本" "$(echo "$GET_RESP" | jq -r '.content')" "$OVERRIDE_MARKER"
-PKG_VIEW=$(svc_body GET "/skills/users/$UID_B/demo-a")
+PKG_VIEW=$(svc_body_u "$UID_B" GET "/skills/users/demo-a")
 assert_eq "2.5 未写入的用户读到的仍是包内基线" "$(echo "$PKG_VIEW" | jq -r '.source')" "package"
 assert_eq "2.6 包内同一技能存在（hasPackageBaseline）" \
   "$(svc_body GET "/skills/manage" | jq -r '[.[] | select(.name=="demo-a")] | length')" "1"
 
 say "E3：用户索引"
-LIST_SKILLS=$(svc_body GET "/skills/users/$UID_A")
+LIST_SKILLS=$(svc_body_u "$UID_A" GET "/skills/users")
 assert_contains "3.1 GET /skills/users/{uid} 列出个人技能" "$(echo "$LIST_SKILLS" | jq -c '.skills[].name')" "demo-a"
 assert_eq "3.2 该用户技能条数" "$(echo "$LIST_SKILLS" | jq -r '.skills | length')" "1"
-USERS_IDX=$(svc_body GET "/skills/users")
+USERS_IDX=$(svc_body GET "/debug/user-skills")
 assert_contains "3.3 GET /skills/users 索引含该用户" "$(echo "$USERS_IDX" | jq -c '.users[].userId')" "$UID_A"
 DEBUG_IDX=$(svc_body GET "/debug/user-skills")
 assert_contains "3.4 /debug/user-skills 索引含该用户" "$(echo "$DEBUG_IDX" | jq -c '.users[].userId')" "$UID_A"
@@ -320,7 +328,7 @@ assert_contains "3.4 /debug/user-skills 索引含该用户" "$(echo "$DEBUG_IDX"
 # 比 /skills/users/{userId} 更具体，userId 恰为 "content" 时由前者命中；
 # 包内无名为 users 的技能 → 404 not_found（该 userId 的明细仍可用 /skills/users 索引 + 写入路径）
 assert_svc_error "3.5 歧义路径 /skills/users/content 由包内技能内容路由命中 → 404" \
-  GET "/skills/users/content" 404 not_found
+  "$UID_A" GET "/skills/users/content" 404 not_found
 
 ###############################################################################
 if [ "${SANDBOX:-0}" == "1" ]; then
@@ -336,9 +344,9 @@ fi
 
 ###############################################################################
 say "E5：删除个人覆盖 → 回落包内基线"
-DEL_RESP=$(svc_body DELETE "/skills/users/$UID_A/demo-a")
+DEL_RESP=$(svc_body_u "$UID_A" DELETE "/skills/users/demo-a")
 assert_eq "5.1 DELETE 返回删除文件数（SKILL.md）" "$(echo "$DEL_RESP" | jq -r '.deletedFiles')" "1"
-FALLBACK=$(svc_body GET "/skills/users/$UID_A/demo-a")
+FALLBACK=$(svc_body_u "$UID_A" GET "/skills/users/demo-a")
 assert_eq "5.2 删除后 source=package" "$(echo "$FALLBACK" | jq -r '.source')" "package"
 assert_eq "5.3 删除后 hasUserOverride=false" "$(echo "$FALLBACK" | jq -r '.hasUserOverride')" "false"
 echo "$FALLBACK" | jq -jr '.content' > "$WORKDIR/fallback.md"
@@ -347,17 +355,17 @@ if cmp -s "$WORKDIR/fallback.md" "$WORKDIR/skills/demo-a/SKILL.md"; then
 else
   bad "5.4 回落内容与包内不一致 ($(wc -c <"$WORKDIR/fallback.md") vs $(wc -c <"$WORKDIR/skills/demo-a/SKILL.md") bytes)"
 fi
-assert_eq "5.5 个人技能列表已清空" "$(svc_body GET "/skills/users/$UID_A" | jq -r '.skills | length')" "0"
+assert_eq "5.5 个人技能列表已清空" "$(svc_body_u "$UID_A" GET "/skills/users" | jq -r '.skills | length')" "0"
 if [ "${SANDBOX:-0}" != "1" ]; then
   a2a_assert_marker "5.6 A2A 新会话回落包内 marker" "$PUB_NAME" "$UID_A" "$USAGE_PROMPT" "PKG-DEMO-A-4f7c"
 fi
 
 ###############################################################################
 say "E6：从包内下发（sync-from-package，含资源文件）"
-SYNC_RESP=$(svc_body POST "/skills/users/$UID_A/demo-a/sync-from-package" '{}')
+SYNC_RESP=$(svc_body_u "$UID_A" POST "/skills/users/demo-a/sync-from-package" '{}')
 assert_eq "6.1 下发文件数（SKILL.md + scripts/hello.sh）" "$(echo "$SYNC_RESP" | jq -r '.files | length')" "2"
 assert_contains "6.2 下发清单含 scripts/hello.sh" "$(echo "$SYNC_RESP" | jq -c '.files')" "scripts/hello.sh"
-SYNC_VIEW=$(svc_body GET "/skills/users/$UID_A/demo-a")
+SYNC_VIEW=$(svc_body_u "$UID_A" GET "/skills/users/demo-a")
 assert_eq "6.3 下发后 source=user" "$(echo "$SYNC_VIEW" | jq -r '.source')" "user"
 echo "$SYNC_VIEW" | jq -jr '.content' > "$WORKDIR/synced.md"
 if cmp -s "$WORKDIR/synced.md" "$WORKDIR/skills/demo-a/SKILL.md"; then
@@ -365,7 +373,7 @@ if cmp -s "$WORKDIR/synced.md" "$WORKDIR/skills/demo-a/SKILL.md"; then
 else
   bad "6.4 下发内容与包内不一致"
 fi
-svc_body GET "/skills/users/$UID_A/demo-a?file=scripts/hello.sh" | jq -jr '.content' > "$WORKDIR/synced.sh"
+svc_body_u "$UID_A" GET "/skills/users/demo-a?file=scripts/hello.sh" | jq -jr '.content' > "$WORKDIR/synced.sh"
 if cmp -s "$WORKDIR/synced.sh" "$WORKDIR/skills/demo-a/scripts/hello.sh"; then
   ok "6.5 资源文件亦下发且逐字节一致（scripts/hello.sh）"
 else
@@ -374,15 +382,15 @@ fi
 
 ###############################################################################
 say "E7：负例（非法输入 / 不存在 / 超限）"
-assert_svc_error "7.1 非法 userId → 400" GET "/skills/users/.hidden/demo-a" 400 invalid_user_id
-assert_svc_error "7.2 非法技能名（路径穿越）→ 400" GET "/skills/users/$UID_A/a..b" 400 invalid_name
-assert_svc_error "7.3 两侧都不存在 → 404" GET "/skills/users/$UID_A/ghost-skill" 404 not_found
-assert_svc_error "7.4 删除无个人覆盖的技能 → 404" DELETE "/skills/users/us-ghost-$TS/demo-a" 404 not_found
-assert_svc_error "7.5 包内无该技能 → 下发 404" POST "/skills/users/$UID_A/ghost-skill/sync-from-package" 404 not_found
+assert_svc_error "7.1 非法 userId（X-User-Id）→ 400" ".hidden" GET "/skills/users/demo-a" 400 invalid_user_id
+assert_svc_error "7.2 非法技能名（路径穿越）→ 400" "$UID_A" GET "/skills/users/a..b" 400 invalid_name
+assert_svc_error "7.3 两侧都不存在 → 404" "$UID_A" GET "/skills/users/ghost-skill" 404 not_found
+assert_svc_error "7.4 删除无个人覆盖的技能 → 404" "us-ghost-$TS" DELETE "/skills/users/demo-a" 404 not_found
+assert_svc_error "7.5 包内无该技能 → 下发 404" "$UID_A" POST "/skills/users/ghost-skill/sync-from-package" 404 not_found
 python3 -c "
 import json,sys
 print(json.dumps({'content': 'x' * (100*1024 + 1)}))" > "$WORKDIR/big.json"
-assert_svc_error "7.6 内容 >100KB → 413" PUT "/skills/users/$UID_A/demo-a" 413 content_too_large "$WORKDIR/big.json"
+assert_svc_error "7.6 内容 >100KB → 413" "$UID_A" PUT "/skills/users/demo-a" 413 content_too_large "$WORKDIR/big.json"
 
 ###############################################################################
 if [ "${SANDBOX:-0}" == "1" ]; then
@@ -504,7 +512,7 @@ $SBX_DEL_MARKER
     "$(sbx_l4_rows)" "/$SBX_DEL_SKILL/SKILL.md"
 
   # 9.2~9.4 管理面 DELETE → 写 tombstone，且技能行被清空
-  DEL_RESP_SBX=$(svc_body DELETE "/skills/users/$UID_SBX/$SBX_DEL_SKILL")
+  DEL_RESP_SBX=$(svc_body_u "$UID_SBX" DELETE "/skills/users/$SBX_DEL_SKILL")
   DEL_FILES=$(echo "$DEL_RESP_SBX" | jq -r '.deletedFiles // 0')
   if [ "${DEL_FILES:-0}" -ge 1 ]; then
     ok "9.2 管理面 DELETE 命中 L4 覆盖 (deletedFiles=$DEL_FILES)"
@@ -518,7 +526,7 @@ $SBX_DEL_MARKER
   assert_not_contains "9.5 删除后 KV 已无 SKILL.md 行" "$(sbx_l4_rows)" "/$SBX_DEL_SKILL/SKILL.md"
   assert_contains "9.6 删除后仅剩删除标记（tombstone）" "$(sbx_l4_rows)" "/$SBX_DEL_SKILL/.deleted"
   assert_svc_error "9.7 删除后明细回落（无包内同名技能 → 404）" \
-    GET "/skills/users/$UID_SBX/$SBX_DEL_SKILL" 404 not_found
+    "$UID_SBX" GET "/skills/users/$SBX_DEL_SKILL" 404 not_found
 
   # 9.8 再发一条同 uid 消息触发 stop() 回写：同代容器内副本不得把已删除技能“复活”
   a2a_send "$PUB_NAME" "$UID_SBX" '请只回复 ok。' >/dev/null
@@ -539,7 +547,7 @@ $SBX_ADMIN_MARKER"
   python3 -c "
 import json,sys
 print(json.dumps({'content': sys.argv[1]}))" "$PUT_SBX_MD" > "$WORKDIR/put-sbx.json"
-  PUT_RESP_SBX=$(svc_body PUT "/skills/users/$UID_SBX/$SBX_DEL_SKILL" "$(cat "$WORKDIR/put-sbx.json")")
+  PUT_RESP_SBX=$(svc_body_u "$UID_SBX" PUT "/skills/users/$SBX_DEL_SKILL" "$(cat "$WORKDIR/put-sbx.json")")
   # 删除后 L4 已无该技能 → 本次 PUT 是重建（action=created）
   assert_eq "9.9 管理面 PUT 重建（清删除标记）" \
     "$(echo "$PUT_RESP_SBX" | jq -r '.action')" "created"

@@ -140,7 +140,7 @@ def phase_unit() -> None:
 # 阶段 2：collector 三协议录制 + 管理 API（hermetic，mock 上游）
 # ---------------------------------------------------------------------------
 
-def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
+def phase_collector(work: Path, mock_up: Proc, collector: Proc, collector_hl: "Proc | None" = None) -> str:
     print("\n[phase 2] collector 三协议录制 + 管理 API（hermetic）")
     admin = "http://127.0.0.1:18300"
     mock_base = f"http://127.0.0.1:{mock_up.port}"
@@ -150,7 +150,7 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
         "ns": "e2e", "display": "e2e 演示服务", "state": "recording",
         "upstream": {"llm": f"{mock_base}/v1", "llm_api_key": "sk-collector-inject-key-1234567890",
                      "llm_default_model": "mock-record-model", "sandbox": mock_base, "mcp": {"srv1": f"{mock_base}/mcp"},
-                     "agent": "http://127.0.0.1:18991"},
+                     "agent": mock_base},
         "record": {"sampling": 1, "body_max_bytes": 262144},
     }
     r = httpx.post(f"{admin}/api/profiles", json=prof, timeout=10).json()
@@ -222,6 +222,41 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
     check("HTTP 反代 session 提取（path）", path_rec.get("session") == "sess-http-2",
           f"path={path_rec.get('path')} session={path_rec.get('session')}")
 
+    # 2.5c 业务反代口 SSE 真实形态（issue #97 问题4 回归）：/threads/chat 上游本就吐
+    # text/event-stream——录制文件须含 chunks、collector 进程与各端口事件循环须存活
+    # （问题6 的截断/转发回归见 2.8，需专用小硬上限实例）
+    sse_frames = []
+    with httpx.stream("POST", "http://127.0.0.1:18203/e2e/threads/chat",
+                      json={"message": "echo: sse-反代-录制", "sessionId": "sess-http-sse"}, timeout=30) as resp:
+        check("HTTP 反代 SSE 透传 content-type", "event-stream" in resp.headers.get("content-type", ""),
+              resp.headers.get("content-type", ""))
+        for line in resp.iter_lines():
+            if line.startswith("data:"):
+                sse_frames.append(line[5:].strip())
+    check("HTTP 反代 SSE 帧尾 [DONE]", bool(sse_frames) and sse_frames[-1] == "[DONE]" and len(sse_frames) > 2,
+          f"{len(sse_frames)} frames")
+    sse_rec = {}
+    deadline = time.time() + 5.0
+    while time.time() < deadline:  # 录制落盘在响应完成后进行，轮询到 SSE 记录（含 chunks）出现为止
+        sse_rec = _read_latest(work / "collector-data" / "e2e" / "http")
+        if sse_rec.get("chunks"):
+            break
+        time.sleep(0.2)
+    check("HTTP 反代 SSE 录制含 chunks 且与透传一致", sse_rec.get("chunks") == sse_frames,
+          f"{len(sse_rec.get('chunks') or [])} chunks vs {len(sse_frames)} frames")
+    check("HTTP 反代 SSE 录制 session 关联", sse_rec.get("session") == "sess-http-sse",
+          str(sse_rec.get("session")))
+    check("collector 进程存活（SSE 录制后）", collector.p.poll() is None)
+    check("admin 口 healthz 200（SSE 录制后）", httpx.get(f"{admin}/healthz", timeout=5).status_code == 200)
+    alive, codes = True, []
+    for port in (18200, 18201, 18202, 18203):
+        # 用不存在的 ns 探活：collector 直接 404、不经上游不产生录制，不污染 2.6 的行数断言
+        r = httpx.get(f"http://127.0.0.1:{port}/no-such-ns/__probe404__", timeout=5)
+        codes.append(r.status_code)
+        if r.status_code != 404:
+            alive = False
+    check("其余端口事件循环存活（必 404 仍响应）", alive, str(codes))
+
     # 2.6 状态三态语义
     httpx.post(f"{admin}/api/profiles/e2e/state", json={"state": "passthrough"}, timeout=10)
     httpx.post("http://127.0.0.1:18200/e2e/v1/chat/completions",
@@ -244,6 +279,47 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc) -> str:
     counts = pf_e2e["counts"] if pf_e2e else {}
     check("状态计数", counts.get("llm", {}).get("total") == 2
           and counts.get("sandbox", {}).get("total") >= 1 and counts.get("mcp", {}).get("total") >= 1, str(counts))
+
+    # 2.8 超录制上限转发完整性 + 硬上限 413（issue #97 问题6 回归）：
+    # 打专用小硬上限实例（EVAL_COLLECTOR_BODY_HARD_LIMIT_BYTES=65536，独立端口/数据目录），
+    # 不污染主 collector 的录制计数（2.6/2.7 的行数与 total 断言不受影响）
+    if collector_hl is not None:
+        hl_admin = "http://127.0.0.1:18214"
+        r = httpx.post(f"{hl_admin}/api/profiles", json={
+            "ns": "hl", "display": "硬上限验证", "state": "recording",
+            "upstream": {"llm": f"{mock_base}/v1"},
+            "record": {"sampling": 1, "body_max_bytes": 1024}}, timeout=10).json()
+        check("硬限实例建档案（录制上限 1024B）", r.get("ns") == "hl", json.dumps(r, ensure_ascii=False)[:120])
+
+        def json_body_of(total: int) -> bytes:
+            # 构造恰好 total 字节的合法 JSON 请求体（"A" 填充，不转义不变形）
+            prefix, suffix = b'{"messages":[{"role":"user","content":"', b'"}]}'
+            return prefix + b"A" * (total - len(prefix) - len(suffix)) + suffix
+
+        # ① 超录制上限（4KB > 1024B、低于硬上限）：必须完整转发到上游（截断语义只落录制副本）
+        body4k = json_body_of(4096)
+        r = httpx.post("http://127.0.0.1:18210/hl/v1/echo", content=body4k,
+                       headers={"content-type": "application/json"}, timeout=30).json()
+        check("超录制上限转发上游收完整体（字节数一致）", r.get("received_len") == len(body4k),
+              f"received={r.get('received_len')} sent={len(body4k)}")
+        check("超录制上限转发体可解析（非畸形 JSON）", r.get("json_ok") is True)
+        hl_rec = {}
+        deadline = time.time() + 5.0
+        while time.time() < deadline:  # 录制落盘异步，轮询到记录出现为止
+            hl_rec = _read_latest(work / "collector-data-hl" / "hl" / "llm")
+            if hl_rec.get("request_truncated"):
+                break
+            time.sleep(0.2)
+        check("超录制上限仅录制副本置 request_truncated", hl_rec.get("request_truncated") is True,
+              f"request_truncated={hl_rec.get('request_truncated')}")
+        # ② 超硬上限（128KB > 64KB）：直接 413 且不转发（上游 echo 命中计数不变）
+        echo_before = httpx.get(f"{mock_base}/stats", timeout=10).json().get("echo_calls", 0)
+        r = httpx.post("http://127.0.0.1:18210/hl/v1/echo", content=json_body_of(131072),
+                       headers={"content-type": "application/json"}, timeout=30)
+        check("超硬上限拒绝 413", r.status_code == 413, str(r.status_code))
+        echo_after = httpx.get(f"{mock_base}/stats", timeout=10).json().get("echo_calls", 0)
+        check("超硬上限未转发上游（echo 计数不变）", echo_after == echo_before, f"{echo_before} → {echo_after}")
+        check("硬限实例进程存活", collector_hl.p.poll() is None)
     return sess
 
 
@@ -873,6 +949,9 @@ def main() -> int:
             import shutil as _sh
             _sh.rmtree(work_dir / "collector-data", ignore_errors=True)
             _sh.rmtree(work_dir / "collector-conf", ignore_errors=True)
+            # 硬限实例（问题6 回归）同样幂等重建：mock 上游端口每轮随机，残留档案会指向旧端口
+            _sh.rmtree(work_dir / "collector-data-hl", ignore_errors=True)
+            _sh.rmtree(work_dir / "collector-conf-hl", ignore_errors=True)
             collector = Proc("collector", ["node", str(BENCH_DIR / "eval-collector" / "server.mjs")],
                              work_dir, env={"EVAL_COLLECTOR_DATA": str(work_dir / "collector-data"),
                                             "EVAL_COLLECTOR_CONF": str(work_dir / "collector-conf")},
@@ -886,7 +965,20 @@ def main() -> int:
                                  "record": {"sampling": 1, "body_max_bytes": 262144}}, timeout=10)
             # replayers 阶段依赖 ns=e2e 的 hermetic 录制（含沙箱/MCP 交互）→ 隐式带跑 collector 阶段
             if run_all or "collector" in phases or "replayers" in phases:
-                phase_collector(work_dir, mock_up, collector)
+                # 硬上限专用实例（问题6 回归，phase_collector 2.8 用）：独立端口/数据目录 +
+                # 小硬上限 64KB（默认 64MB 太大，用例载荷不现实），与主 collector 完全隔离
+                collector_hl = Proc("collector-hl", ["node", str(BENCH_DIR / "eval-collector" / "server.mjs")],
+                                    work_dir, env={"EVAL_COLLECTOR_DATA": str(work_dir / "collector-data-hl"),
+                                                   "EVAL_COLLECTOR_CONF": str(work_dir / "collector-conf-hl"),
+                                                   "EVAL_COLLECTOR_PORT_LLM": "18210",
+                                                   "EVAL_COLLECTOR_PORT_SANDBOX": "18211",
+                                                   "EVAL_COLLECTOR_PORT_MCP": "18212",
+                                                   "EVAL_COLLECTOR_PORT_AGENT": "18213",
+                                                   "EVAL_COLLECTOR_PORT_ADMIN": "18214",
+                                                   "EVAL_COLLECTOR_BODY_HARD_LIMIT_BYTES": "65536"},
+                                    health="http://127.0.0.1:18214/healthz")
+                procs.append(collector_hl)
+                phase_collector(work_dir, mock_up, collector, collector_hl)
             if run_all or any(p in phases for p in ("record", "pack", "replay", "rebase", "fixtures")):
                 port = free_port()
                 stub_rec = Proc("stub-record", ["node", str(TESTS_DIR / "stub-agent.mjs"), "18941"],
