@@ -163,3 +163,31 @@ func TestLoadIngressHostSuffix(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadPlatformPVCName PLATFORM_PVC_NAME：默认 platform-data（历史行为）；显式覆盖生效
+// （Helm/清单指向环境已有 PVC）。
+func TestLoadPlatformPVCName(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "u:p@tcp(localhost:3306)/oaf_platform")
+	t.Setenv("AVAILABLE_IMAGES", "img1|A")
+	t.Setenv("DEFAULT_IMAGE", "")
+	t.Setenv("INGRESS_TEMPLATE", "")
+	t.Setenv("INGRESS_HOST_SUFFIX", "")
+
+	t.Setenv("PLATFORM_PVC_NAME", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PlatformPVCName != "platform-data" {
+		t.Fatalf("default PVC name must be platform-data, got %q", c.PlatformPVCName)
+	}
+
+	t.Setenv("PLATFORM_PVC_NAME", "existing-oaf-data")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PlatformPVCName != "existing-oaf-data" {
+		t.Fatalf("override must win, got %q", c.PlatformPVCName)
+	}
+}

@@ -83,6 +83,9 @@ type ObjectParams struct {
 	EnvSecret map[string]string
 	Replicas  int32
 	SubPath   string // packages/{packageId}
+	// PVCName 业务 Pod 挂载的平台数据卷 PVC 名（环境侧预先提供，平台不创建）。
+	// 空 = 默认 PVCName 常量（历史行为）；Helm/清单部署可指向环境已有 PVC。
+	PVCName string
 
 	IngressClass string
 	IngressHost  string
@@ -197,7 +200,7 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 							// 不设 ForceReadOnly——同一 PVC 不可同时以 ro/rw 双 volume 引用
 							Name: FilesVolumeName,
 							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: PVCName},
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: orDefault(p.PVCName, PVCName)},
 							},
 						},
 						{Name: WorkspaceVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
