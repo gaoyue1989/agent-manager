@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:,">
+<title>Agent Monitor</title>
+<!-- 复用调试控制台的样式与 vendor（同属本服务静态资源，避免重复打包体积） -->
+<link rel="stylesheet" href="../debug/css/base.css">
+<link rel="stylesheet" href="../debug/css/layout.css">
+<link rel="stylesheet" href="../debug/css/components.css">
+<link rel="stylesheet" href="../debug/vendor/highlight.min.css">
+<script src="../debug/vendor/highlight.min.js"></script>
+<script src="../debug/vendor/lang/java.min.js"></script>
+<script src="../debug/vendor/lang/python.min.js"></script>
+<script src="../debug/vendor/lang/javascript.min.js"></script>
+<script src="../debug/vendor/lang/bash.min.js"></script>
+<script src="../debug/vendor/lang/json.min.js"></script>
+<script src="../debug/vendor/lang/yaml.min.js"></script>
+<script src="../debug/vendor/lang/xml.min.js"></script>
+<script src="../debug/vendor/lang/sql.min.js"></script>
+<script src="../debug/vendor/lang/markdown.min.js"></script>
+<script src="../debug/vendor/marked.min.js"></script>
+<script src="../debug/vendor/purify.min.js"></script>
+<script>
+  // 主题初始化（localStorage 手动覆盖 > 系统自动），与调试页共用同一偏好
+  (function () {
+    var t = 'debug-theme';
+    var saved = null;
+    try { saved = localStorage.getItem(t); } catch (e) {}
+    if (saved === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else if (saved === 'light') {
+      document.documentElement.classList.add('light');
+    }
+  })();
+</script>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="header-left">
+      <h1>Agent Monitor</h1>
+      <span id="agentName" class="agent-name">...</span>
+    </div>
+    <div class="header-right">
+      <span id="statusDot" class="status-dot warn"></span>
+      <span id="statusText" class="status-text">connecting...</span>
+      <span id="checkpointStatus" class="status-text"></span>
+      <button id="themeToggle" class="theme-toggle" title="切换明暗主题">●</button>
+    </div>
+  </header>
+  <div class="main">
+    <main class="content" id="module-content">
+      <div class="module-loading">Loading monitor...</div>
+    </main>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

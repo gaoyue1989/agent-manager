@@ -73,6 +73,14 @@ class DebugApiControllerTest {
     @MockBean
     private UserSkillService userSkillService;
 
+    @MockBean
+    private io.agentmanager.framework.service.ConfirmContextStore confirmContextStore;
+
+    private void stubConfirmTtl() {
+        when(confirmContextStore.ttl()).thenReturn(java.time.Duration.ofMinutes(30));
+        when(confirmContextStore.remoteTtl()).thenReturn(java.time.Duration.ofHours(24));
+    }
+
     private AgentManagerProperties.LLMConfig llmConfig(String key) {
         return new AgentManagerProperties.LLMConfig(
             key, "gpt-4", "http://localhost/v1", "openai", 0.7, 4096, 120, true, 0, "", null);
@@ -285,8 +293,157 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.error").value("store down"));
     }
 
-    // ---------- user skills（L4 个人覆盖索引） ----------
+    // ---------- monitor（运营监控：跨用户会话与问答） ----------
 
+    @Test
+    void monitorOverviewShouldAggregateStats() throws Exception {
+        stubConfirmTtl();
+        var conn = mock(Connection.class);
+        var stmt1 = mock(Statement.class);
+        var rs1 = mock(ResultSet.class);
+        var stmt2 = mock(Statement.class);
+        var rs2 = mock(ResultSet.class);
+        var errStmt = mock(Statement.class);
+        var errRs = mock(ResultSet.class);
+        var psPending = mock(PreparedStatement.class);
+        var pendingRs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.createStatement()).thenReturn(stmt1, stmt2, errStmt);
+        when(stmt1.executeQuery(anyString())).thenReturn(rs1);
+        when(stmt2.executeQuery(anyString())).thenReturn(rs2);
+        when(errStmt.executeQuery(anyString())).thenReturn(errRs);
+        when(conn.prepareStatement(anyString())).thenReturn(psPending);
+        when(psPending.executeQuery()).thenReturn(pendingRs);
+        when(rs1.next()).thenReturn(true, false);
+        when(rs1.getLong("total_sessions")).thenReturn(12L);
+        when(rs1.getLong("total_users")).thenReturn(3L);
+        when(rs1.getLong("sessions_today")).thenReturn(2L);
+        when(rs1.getLong("active_sessions_today")).thenReturn(1L);
+        when(rs2.next()).thenReturn(true, true, false);
+        when(rs2.getString("role")).thenReturn("user", "assistant");
+        when(rs2.getLong("c")).thenReturn(20L, 18L);
+        when(rs2.getLong("today")).thenReturn(4L, 4L);
+        when(errRs.next()).thenReturn(true, true, false);
+        when(errRs.getString("sid")).thenReturn("s1", "s2");
+        when(errRs.getLong("total")).thenReturn(10L, 5L);
+        when(errRs.getLong("errors")).thenReturn(3L, 1L);
+        when(pendingRs.next()).thenReturn(true, false);
+        when(pendingRs.getString("session_id")).thenReturn("s1");
+
+        mockMvc.perform(get("/debug/monitor/overview"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.connected").value(true))
+            .andExpect(jsonPath("$.total_sessions").value(12))
+            .andExpect(jsonPath("$.total_users").value(3))
+            .andExpect(jsonPath("$.total_questions").value(20))
+            .andExpect(jsonPath("$.total_answers").value(18))
+            .andExpect(jsonPath("$.total_messages").value(38))
+            .andExpect(jsonPath("$.messages_today").value(8))
+            .andExpect(jsonPath("$.sessions_today").value(2))
+            .andExpect(jsonPath("$.sessions_with_error").value(2))
+            .andExpect(jsonPath("$.sessions_pending_confirm").value(1))
+            .andExpect(jsonPath("$.sessions_with_problem").value(2));
+    }
+
+    @Test
+    void monitorOverviewShouldReportConnectionError() throws Exception {
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
+
+        mockMvc.perform(get("/debug/monitor/overview"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.connected").value(false))
+            .andExpect(jsonPath("$.error").value("db down"));
+    }
+
+    @Test
+    void monitorSessionsShouldReturnFilteredList() throws Exception {
+        stubConfirmTtl();
+        var conn = mock(Connection.class);
+        var aggStmt = mock(Statement.class);
+        var aggRs = mock(ResultSet.class);
+        var psPending = mock(PreparedStatement.class);
+        var pendingRs = mock(ResultSet.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.createStatement()).thenReturn(aggStmt);
+        when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
+        when(conn.prepareStatement(anyString())).thenReturn(psPending, ps);
+        when(psPending.executeQuery()).thenReturn(pendingRs);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(aggRs.next()).thenReturn(false);
+        when(pendingRs.next()).thenReturn(false);
+        when(rs.next()).thenReturn(true, false);
+        when(rs.getString("session_id")).thenReturn("s1");
+        when(rs.getString("user_id")).thenReturn("alice");
+        when(rs.getString("remark")).thenReturn("hello title");
+        when(rs.getString("model")).thenReturn("gpt-4");
+        when(rs.getTimestamp("updated_at")).thenReturn(java.sql.Timestamp.valueOf("2026-10-10 10:00:00"));
+        when(rs.getTimestamp("created_at")).thenReturn(java.sql.Timestamp.valueOf("2026-10-09 09:00:00"));
+
+        mockMvc.perform(get("/debug/monitor/sessions").param("userId", "alice"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.count").value(1))
+            .andExpect(jsonPath("$.hasMore").value(false))
+            .andExpect(jsonPath("$.sessions[0].session_id").value("s1"))
+            .andExpect(jsonPath("$.sessions[0].user_id").value("alice"))
+            .andExpect(jsonPath("$.sessions[0].title").value("hello title"))
+            .andExpect(jsonPath("$.sessions[0].message_count").value(0))
+            .andExpect(jsonPath("$.sessions[0].has_error").value(false))
+            .andExpect(jsonPath("$.sessions[0].error_count").value(0))
+            .andExpect(jsonPath("$.sessions[0].pending_confirm").value(false));
+    }
+
+    @Test
+    void monitorSessionsOnlyProblemShouldFilterToFailedSessions() throws Exception {
+        stubConfirmTtl();
+        var conn = mock(Connection.class);
+        var aggStmt = mock(Statement.class);
+        var aggRs = mock(ResultSet.class);
+        var psPending = mock(PreparedStatement.class);
+        var pendingRs = mock(ResultSet.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.createStatement()).thenReturn(aggStmt);
+        when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
+        when(conn.prepareStatement(anyString())).thenReturn(psPending, ps);
+        when(psPending.executeQuery()).thenReturn(pendingRs);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(aggRs.next()).thenReturn(true, false);
+        when(aggRs.getString("sid")).thenReturn("s1");
+        when(aggRs.getLong("total")).thenReturn(4L);
+        when(aggRs.getLong("errors")).thenReturn(2L);
+        when(pendingRs.next()).thenReturn(false);
+        // 两行会话：s1 有工具失败、s2 正常 → 仅异常过滤后只剩 s1
+        when(rs.next()).thenReturn(true, true, false);
+        when(rs.getString("session_id")).thenReturn("s1", "s2");
+        when(rs.getString("user_id")).thenReturn("alice", "bob");
+        when(rs.getString("remark")).thenReturn("failed one", "ok one");
+        when(rs.getString("model")).thenReturn("", "");
+        when(rs.getTimestamp("updated_at")).thenReturn(java.sql.Timestamp.valueOf("2026-10-10 10:00:00"));
+        when(rs.getTimestamp("created_at")).thenReturn(java.sql.Timestamp.valueOf("2026-10-09 09:00:00"));
+
+        mockMvc.perform(get("/debug/monitor/sessions").param("onlyProblem", "true"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.count").value(1))
+            .andExpect(jsonPath("$.sessions[0].session_id").value("s1"))
+            .andExpect(jsonPath("$.sessions[0].message_count").value(4))
+            .andExpect(jsonPath("$.sessions[0].has_error").value(true))
+            .andExpect(jsonPath("$.sessions[0].error_count").value(2));
+    }
+
+    @Test
+    void monitorSessionsShouldReportError() throws Exception {
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
+
+        mockMvc.perform(get("/debug/monitor/sessions"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sessions").isEmpty())
+            .andExpect(jsonPath("$.error").value("db down"));
+    }
+
+    // ---------- user skills（L4 个人覆盖索引） ----------
     @Test
     void userSkillsShouldReturnUserIndex() throws Exception {
         when(userSkillService.listUsers()).thenReturn(new UserSkillService.UserSkillIndex(
