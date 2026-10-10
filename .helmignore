@@ -1,0 +1,3 @@
+# chart 打包忽略（scripts/ 与示例保留在仓库、不进 tgz）
+*.tgz
+.DS_Store
