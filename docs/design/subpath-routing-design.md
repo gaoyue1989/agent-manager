@@ -1,6 +1,6 @@
 # 统一域名子路径访问设计：agent-framework 前缀自感知（方案 A）+ 双模式路由（host 域名 / platform-router）
 
-> 状态：**已实施（2026-10-10，实施记录与验证证据见 §10；§9.5 手工清单待 kind 真机勾选）**。
+> 状态：**已实施（2026-10-10；§9.5 手工清单已真机执行完毕，证据见 §9.5 与 §10.3）**。
 > 修订史：v2 按评审决议**删除 ingress-nginx 注解 rewrite 的 path 模式**，终态仅保留
 > host 域名与 platform-router（nginx 原生 rewrite）两种模式；v3 记录 §8 评审决议并新增
 > **§9 E2E 验证标准——任务完成的硬性判据**；v4 按评审补充 host 模式 e2e 验证（§9.4）；
@@ -363,12 +363,26 @@ Republish（一次动作同时验证 **router→host 模式切换的存量收敛
 go test 门禁（与本相位并行保留）：host 模式 fake 端到端既有用例全绿（Ingress 形态 /
 注解恰三条 / Endpoint 派生）；「suffix 空 + `INGRESS_TEMPLATE` 非空 → 启动失败」用例绿。
 
-### 9.5 手工清单（kind 真机，发布前一次性勾选）
+### 9.5 手工清单（2026-10-10 已执行完毕，证据见下）
 
-1. X6 的 UI 维度（若未自动化）；
-2. TLS/外层代理场景 `X-Forwarded-Proto` 透传正确（map 兜底逻辑，环境具备时验证）；
-3. 长稳 SSE：单条 chat 流 >60s 持续输出不断（心跳 + 超时链路）；
-4. §4.6 升级窗口演练：存量 path 集群按序升级，重叠期抽验请求正确到达（两条路由终点等价）。
+1. **X6 UI 维度 ✅**：本地 router 环境浏览器实驱——经 `/agent/e2e-x/debug/` 打开 debug 页，
+   `BASE` 推导 = `/agent/e2e-x`；切 Channel 模式发 `[E2E:oaf:package]`，真实 UI 渲染下载卡片
+   `📦 e2e-oaf-agent.zip`，href = `/agent/e2e-x/files/{id}`（无双拼），GET 200（`application/zip`，
+   PK 魔数）；反证双拼路径 500。
+2. **TLS/外层代理 X-Forwarded-Proto 透传 ✅**：无头 → `http://127.0.0.1:8101/agent/e2e-x/`
+   （`$http_host` 兜底保端口）；带 `X-Forwarded-Proto: https` + `X-Forwarded-Host: agent.example.com`
+   → `https://agent.example.com/agent/e2e-x/`（透传正确，TLS 卸载场景不丢 https）。
+3. **长稳 SSE ✅**：经 router 单条 chat 流 `[E2E:slow](hi,9000)` 持续 **63s** 输出 12 帧后正常
+   AGENT_END，无代理断流（nginx 3600s 超时 + 心跳链路）。
+4. **§4.6 升级窗口真机演练 ✅**（kind 集群 6 条 legacy path 模式 Ingress + 6 个业务服务）：
+   apply `manifests/platform-router.yaml` → router ×2 Ready → **前缀路由 6/6 服务 200**
+   （真实 kube-dns 动态解析 upstream，本地变体无法覆盖的关键点）→ **重叠期 40/40 连击全 200**
+   （共享 `/agent` Ingress 与 legacy 对象并存，实测「两条路由终点等价、无流量错误」）→
+   负向语义正确（`/agent/` 404、未知服务 502、大小写 404）→ **删除 manifest 后 legacy 路由
+   200、共享 Ingress 归零，集群恢复到演练前状态**（演练为验证性、非迁移性）。
+   > 运维要点（演练实测）：`/agent/{short}` 的路径段是**短名**（去 `oaf-` 前缀，同 Endpoint
+   > 落库值）；误用 K8sName（`/agent/oaf-xxx/`）会解析到不存在的 `oaf-oaf-xxx-svc` → 502
+   > （即「未知服务」语义，非缺陷）。
 
 ### 9.6 完成定义（DoD）
 
@@ -412,7 +426,7 @@ PR-1/2/3 合并；§9.1 全绿；§9.2 用例组进核心 job 且绿；「E2E �
 | §9.2 X 组 | 核心套件本地实跑 **X1–X5 全过**；全量 core e2e 85 passed / 0 failed（含 UI 组） |
 | §9.3 RT 组 | 本地实跑 `run.sh router` **8/8 全过**（经完整 env-up→playwright→env-down 路径）；CI job 随 PR 生效 |
 | §9.4 go test 门禁 | host 模式回归 + 「suffix 空+模板非空启动即拒」+ RequireRouter 用例全绿 |
-| §9.5 手工清单 | **待 kind 真机勾选**（X6 UI 维度 / TLS X-Forwarded-Proto 透传 / >60s 长稳 SSE / §4.6 升级窗口演练） |
+| §9.5 手工清单 | **已执行完毕**（X6 UI 卡片 href 带前缀 GET 200；TLS 透传 http/https 两态；63s 长流；§4.6 真机演练：前缀路由 6/6 + 重叠期 40/40 等价 + 负向正确 + 演练后状态回退） |
 
 ### 10.4 实施期修正（设计未预见）
 
