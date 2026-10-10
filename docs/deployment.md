@@ -1,5 +1,9 @@
 # OAF 服务发布平台 — 部署指南（v2）
 
+> **生产/内网/离线环境请用 [Helm 部署指南](helm-deployment.md)**（外部 MySQL/Redis、复用已有
+> PVC、内网镜像源、values 全量参数化）。本指南的 manifests 自举流程适用于 kind 单机开发环境。
+
+
 > 历史设计归档：[design/](design/)（v2 重构设计见 [design/REDESIGN.md](design/REDESIGN.md)） ｜ 模块指引：各目录 AGENTS.md
 
 ## 前置条件

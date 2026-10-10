@@ -1,7 +1,11 @@
 # oaf-platform Helm Chart
 
-OAF 服务发布平台控制面的一键部署 chart（**自包含**，无子 chart）。设计依据
-[docs/design/helm-offline-deploy-design.md](../../docs/design/helm-offline-deploy-design.md)。
+OAF 服务发布平台控制面的一键部署 chart（**自包含**，无子 chart）。
+
+> **完整部署文档（内网镜像源 / 外部 MySQL·Redis / 复用已有 PVC / 排查速查）：
+> [docs/helm-deployment.md](../../docs/helm-deployment.md)**
+
+设计依据 [docs/design/helm-offline-deploy-design.md](../../docs/design/helm-offline-deploy-design.md)。
 
 部署内容：`platform-backend`（REST + MCP）、`platform-frontend`（UI）、`platform-router`
 （router 模式子路径路由器）、RBAC、对外 Ingress、可选的平台自举钩子（bootstrap Job）。

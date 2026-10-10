@@ -393,7 +393,7 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 
 | PR | 内容 |
 |---|---|
-| PR-A `feat/helm-offline-chart` | `charts/oaf-platform/`（Chart.yaml / values / values-offline 示例 / README / 15 个模板 / NOTES / `resources/release-agent.oaf.zip` + `scripts/pack-release-agent.sh`）+ 本设计文档 |
+| PR-A `feat/helm-offline-chart` | `charts/oaf-platform/`（Chart.yaml / values / values-offline 示例 / README / 15 个模板 / NOTES / `resources/release-agent.oaf.zip` + `scripts/pack-release-agent.sh`）+ 本设计文档 + **[docs/helm-deployment.md](../helm-deployment.md)（详细部署指南：内网镜像源/外部中间件/PVC 复用/排查速查）** |
 | PR-B `feat/platform-pvc-name`（#111） | 后端 `PLATFORM_PVC_NAME`（默认 `platform-data`）+ 测试 + 文档，解 §5.5 PVC 名约束 |
 
 ### 13.2 验证证据
