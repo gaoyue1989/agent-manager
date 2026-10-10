@@ -340,7 +340,10 @@ R 组跑完后**同一集群翻转 suffix，串行执行 §9.4 host 相位 H 组
 | R11 | router 可用性 | 删除一个 platform-router pod → 前缀访问仍 200（双副本兜底） |
 | R12 | 幂等 | 连续两次 Republish 无异常，Ingress 始终仅共享一条 |
 
-### 9.4 host 模式回归验证（同 job 第二相位 e2e H 组 + go test 门禁）
+### 9.4 host 模式回归验证（go test 门禁；e2e H 组按 §10.1 偏差归并手工清单）
+
+> 落地偏差：H 组未落为独立 e2e 相位，host 形态/Endpoint/模式切换收敛由 go test 全量覆盖
+> （见 §10.1 第 2 条），真机项归并 §9.5。
 
 host 模式是终态两模式之一，且 path 模式删除触碰了 host 共用的代码路径
 （`Ingress()` 构造 / `validateIngress` / `IngressEndpoint` / `applyAll` / `EnsureIngress`），
