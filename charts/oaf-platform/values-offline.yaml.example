@@ -1,0 +1,81 @@
+# 离线/内网部署示例（复制为 values-offline.yaml 后按环境改）
+#
+# 前置：
+#   1. 镜像已由发布流水线推入内网仓库（backend/frontend/router/bootstrapJob + 业务镜像白名单）
+#   2. 外部 MySQL 已建库（oaf_platform；业务侧另需 checkpoint 库）并授权
+#   3. 外部 Redis 可用（业务侧用）
+#   4. 已有 PVC（默认要求名为 platform-data；如不同名需 backend 支持 PLATFORM_PVC_NAME，
+#      本 chart 会渲染该 env）
+#
+# 安装：
+#   helm install oaf ./charts/oaf-platform -n agent-platform --create-namespace -f values-offline.yaml
+
+namespaceOverride: ""            # 空 = Release.Namespace
+
+imagePullSecrets:
+  - name: oaf-registry-cred      # 内网仓库拉取凭据
+
+images:
+  backend:  { repository: harbor.internal/oaf/platform-backend,  tag: "v9",           pullPolicy: IfNotPresent }
+  frontend: { repository: harbor.internal/oaf/platform-frontend, tag: "v7",           pullPolicy: IfNotPresent }
+  router:   { repository: harbor.internal/oaf/nginx,             tag: "1.27.1-alpine", pullPolicy: IfNotPresent }
+  bootstrapJob: { repository: harbor.internal/oaf/curl, tag: "8.8.0", pullPolicy: IfNotPresent }
+  business:
+    - { image: "harbor.internal/oaf/agent-framework:agentscope-2.1.0-v20261010", label: "Agent Framework 2.1.0" }
+  defaultBusiness: "harbor.internal/oaf/agent-framework:agentscope-2.1.0-v20261010"
+
+# 路由：router（统一域名 /agent/{short}，默认）或 host（每服务独立域名）
+routing:
+  mode: router
+  ingressClass: nginx
+  host: "10.0.0.10"              # 集群 ingress controller 对外地址（Endpoint 展示）
+  port: 30080
+  # hostSuffix: ".region.example.cn"   # mode=host 时必填
+
+# 对外暴露：形态 A（统一域名路径分流）
+ingress:
+  className: nginx
+  host: "oaf.example.cn"         # 空 = 无 host catch-all（单 IP 测试）
+  # 形态 B（分域）示例：backend.host/frontend.host 同时填，且前端 publicApiUrl 必填
+  # backend:  { host: "api.oaf.example.cn" }
+  # frontend: { host: "ui.oaf.example.cn" }
+  tls: { enabled: true, secretName: oaf-tls }
+  annotations: {}
+
+persistence:
+  existingClaim: platform-data   # 环境已有 PVC（chart 不创建）
+  mountPath: /data
+
+external:
+  mysql:
+    host: mysql.internal.svc.cluster.local
+    port: 3306
+    database: oaf_platform
+    username: oaf
+    password: "CHANGE_ME"        # 占位：真值请改这里，或设 backend.existingSecret（key: mysql-dsn）并清空本节
+  redis:
+    url: "redis://redis.internal.svc.cluster.local:6379"
+
+backend:
+  authToken: ""                  # 生产必填（建议 existingSecret，key: auth-token）
+  kubeconfig:
+    mode: synthesized            # 默认部署期合成（专用 SA + token Secret + kubeconfig）
+    # mode: provided
+    # existingSecret: oaf-remote-kubeconfig   # 跨集群场景：已有 Secret（key: kubeconfig）
+
+platformDefaults:
+  seed:
+    enabled: true
+    values:
+      LLM_BASE_URL: "https://llm.internal/v1"
+      LLM_MODEL_ID: "glm-4.7"
+      LLM_API_KEY: ""            # 建议经 existingSecret 管理（见 README「敏感值」）
+      CHECKPOINT_JDBC_URL: "jdbc:mysql://mysql.internal.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&serverTimezone=UTC"
+      CHECKPOINT_USERNAME: "oaf"
+      CHECKPOINT_PASSWORD: ""
+      AGENT_REDIS_URL: "redis://redis.internal.svc.cluster.local:6379"
+
+releaseAgent:
+  enabled: true                  # 装完自动发布 release-agent（bootstrap Job 第②步）
+  name: release-agent
+  packageSource: bundled

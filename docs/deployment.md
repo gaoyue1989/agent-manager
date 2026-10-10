@@ -122,6 +122,7 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
 3. MCP server 不可达默认不阻断启动（fail-soft）；必需依赖在包内写 `startup.required: true`。
 4. **发布多个业务服务时的数据隔离（强制，见 AGENTS.md「架构强约束」）**：每个服务必须配独立的 `CHECKPOINT_JDBC_URL` 库名（如 `oaf_checkpoint_{service}`，需先建库授权）与非空 `AGENT_REDIS_PREFIX`（如 `{service}:`）。平台默认值是共享 `oaf_checkpoint` 库 + 空 Redis 前缀——多服务沿用默认会互相串数据（`/threads` 会话列表跨服务可见、沙箱并发守卫跨服务互锁），平台当前不校验，靠发布时显式配置保证。
 5. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
+6. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
 
 ## 六、业务 Deployment 环境模板（DEPLOYMENT_TEMPLATE，可选）
 

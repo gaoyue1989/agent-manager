@@ -1,0 +1,55 @@
+OAF 平台已部署（release {{ .Release.Name }}，namespace {{ include "oaf.namespace" . }}）。
+
+## 入口
+
+{{- if eq (include "oaf.splitDomain" .) "true" }}
+- 前端（UI）:      http(s)://{{ .Values.ingress.frontend.host }}/
+- 后端（REST/MCP）: http(s)://{{ .Values.ingress.backend.host }}/api/v1  ·  /mcp
+- 业务 Agent:      http(s)://{{ .Values.ingress.frontend.host }}/agent/{short}/（前端域已路由 /agent）
+{{- else }}
+- 统一入口:        http(s)://{{ default "<集群 ingress 地址>" .Values.ingress.host }}/
+    - 前端 UI        /
+    - 平台 REST      /api/v1        （健康检查 /healthz）
+    - MCP            /mcp
+    - 业务 Agent     /agent/{short}/  （router 模式；{short} 为服务短名，如 release-agent）
+{{- end }}
+{{- if .Values.ingress.tls.enabled }}（TLS: {{ .Values.ingress.tls.secretName }}）
+{{- end }}
+
+## 装后自检
+
+1) 组件就绪
+   kubectl -n {{ include "oaf.namespace" . }} rollout status deploy/{{ include "oaf.fullname" . }}-backend
+{{- if eq .Values.routing.mode "router" }}
+   kubectl -n {{ include "oaf.namespace" . }} rollout status deploy/{{ include "oaf.fullname" . }}-router
+{{- end }}
+2) 平台 API
+   curl -s http://{{ default "<入口>" .Values.ingress.host }}/api/v1/services
+3) 发布一个服务后验证：状态 running、无 per-service Ingress（router 模式）、
+   经 /agent/{short}/health 200。
+
+{{- if .Values.platformDefaults.seed.enabled }}
+## 已执行平台默认配置种子（bootstrap Job 第①步）
+发布新服务向导将自动带出 LLM/MySQL/Redis 等默认值；如需修改：UI `/settings` 页
+或 PUT /api/v1/platform-config。
+{{- end }}
+{{- if .Values.releaseAgent.enabled }}
+## 已自举发布助手（bootstrap Job 第②步）
+服务名 {{ .Values.releaseAgent.name }}（k8sName oaf-{{ .Values.releaseAgent.name }}），
+经 /agent/{{ .Values.releaseAgent.name }}/ 访问；前端助手页默认已指向它。
+{{- end }}
+
+## 重要运维说明
+
+- **业务服务不由 Helm 管理**：`helm upgrade/uninstall` 不触碰任何业务 Deployment/Service/Ingress
+  与已发布服务；`helm uninstall` 后业务 Pod 仍在运行（但入口/路由随平台对象删除而不可达，
+  卸载前请先决定业务下线策略）。
+- **PVC 复用已有**：`{{ include "oaf.pvcName" . }}`（chart 从不创建 PVC；业务 Pod 与 backend 共用）。
+- **外部中间件**：MySQL/Redis 为外部实例，库/账号需预先存在（表由后端 AutoMigrate 自建）。
+- **业务镜像更新**：业务 Pod 固定 imagePullPolicy=IfNotPresent，同 tag 覆盖推送不会在已缓存
+  节点生效 —— 请使用新 tag。
+{{- if eq .Values.routing.mode "router" }}
+
+- **router 模式命名不变量**：`oaf-` 前缀 / `-svc` 后缀 / 端口 8100 / namespace
+  {{ include "oaf.namespace" . }} 固化在 router nginx.conf，与 backend 常量同源，改动须两侧同步。
+{{- end }}

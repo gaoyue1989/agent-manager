@@ -1,0 +1,71 @@
+{{- $ns := include "oaf.namespace" . -}}
+{{- $agentUrl := .Values.frontend.env.agentInternalUrl -}}
+{{- if not $agentUrl -}}
+{{- if .Values.releaseAgent.enabled -}}
+{{- $agentUrl = include "oaf.businessSvcUrl" (dict "name" .Values.releaseAgent.name "root" .) -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oaf.fullname" . }}-frontend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "oaf.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        {{- include "oaf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+      {{- with .Values.frontend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: {{ include "oaf.image" .Values.images.frontend }}
+          imagePullPolicy: {{ .Values.images.frontend.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: BACKEND_INTERNAL_URL
+              value: {{ include "oaf.backendInternalUrl" . | quote }}
+            {{- if $agentUrl }}
+            - name: AGENT_INTERNAL_URL
+              value: {{ $agentUrl | quote }}
+            {{- end }}
+            {{- if .Values.frontend.env.publicApiUrl }}
+            - name: NEXT_PUBLIC_API_URL
+              value: {{ .Values.frontend.env.publicApiUrl | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}

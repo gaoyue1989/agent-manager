@@ -60,6 +60,7 @@ func main() {
 
 	core := service.NewCore(db, fs, kc, service.ConfigView{
 		Namespace:           cfg.Namespace,
+		PlatformPVCName:     cfg.PlatformPVCName,
 		IngressClass:        cfg.IngressClass,
 		IngressHost:         cfg.IngressHost,
 		IngressPort:         cfg.IngressPort,

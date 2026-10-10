@@ -28,6 +28,11 @@ type Config struct {
 	AvailableImages []ImageOption
 	DefaultImage    string
 
+	// PlatformPVCName 业务 Pod 与后端共用的平台数据卷 PVC 名（OAF 包/文件落盘）。
+	// 环境侧预先提供、平台不创建；空 = 默认 "platform-data"（历史行为）。
+	// Helm 部署时指向环境已有 PVC（values.persistence.existingClaim）。
+	PlatformPVCName string
+
 	IngressClass string
 	IngressHost  string // 对外展示地址，如 172.20.0.2:30080
 	IngressPort  int    // ingress http NodePort，仅用于拼接展示 URL
@@ -60,6 +65,7 @@ func Load() (*Config, error) {
 		Namespace:           envStr("NAMESPACE", "agent-platform"),
 		DataRoot:            envStr("DATA_ROOT", "/data"),
 		MySQLDSN:            envStr("MYSQL_DSN", ""),
+		PlatformPVCName:     envStr("PLATFORM_PVC_NAME", "platform-data"),
 		IngressClass:        envStr("INGRESS_CLASS", "nginx"),
 		IngressHost:         envStr("INGRESS_HOST", "localhost"),
 		IngressPort:         envInt("INGRESS_PORT", 30080),
