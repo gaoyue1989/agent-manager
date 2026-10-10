@@ -30,6 +30,8 @@ export default defineConfig({
     { name: 'ui-multi', testMatch: /tests\/ui-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi-kill', testMatch: /tests\/api-multi-kill\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-protocol-multi', testMatch: /tests\/api-protocol-multi\.spec\.ts/, use: { ...devicesDesktop() } },
+    // RT 组（subpath-routing §9.3）：经 platform-router nginx 前缀路由的全链路验证
+    { name: 'api-router', testMatch: /tests\/api-router\.spec\.ts/, use: { ...devicesDesktop() } },
   ],
 });
 

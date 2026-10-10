@@ -1295,9 +1295,14 @@ GET /skills/manage
 
 **前端处理：** 收到 `file_ready` 后渲染文件下载卡片，`download_url` 可直接拼接 Base URL 用于下载或预览。
 
-> **契约（`ChatStreamControllerTest` 契约用例钉死，2026-09-17）：** 服务端永远发**相对路径**
-> `/files/{file_id}`，由前端拼 AGENT_BASE——且历史回放（`/history` 的下载卡片）与实时流两处
-> 入口必须用**同一拼法**：assistant 页曾因回放路径拼了、实时路径没拼而在前端入口 404。
+> **契约（`ChatStreamControllerTest` 契约用例钉死，2026-09-17；2026-10-10 subpath-routing 前缀感知扩展）：**
+> `download_url` 是**从域名根解析的路径**，两种形态：
+> - 直连（无 `X-Forwarded-Prefix` 请求头）：**相对路径** `/files/{file_id}`，由前端拼 AGENT_BASE；
+> - 经代理（请求带 `X-Forwarded-Prefix: /agent/{short}`，如 platform-router / ingress 前缀路由）：
+>   **完整路径** `/agent/{short}/files/{file_id}`，客户端直接按域名根使用，免拼前缀。
+> 前端判别式：以自身 BASE 开头（或 BASE 为空）直接用，否则补 BASE——历史回放（`/history` 的
+> 下载卡片）与实时流两处入口必须用**同一拼法**：assistant 页曾因回放路径拼了、实时路径没拼
+> 而在前端入口 404。
 
 ### 9.8 HITL 确认事件
 
