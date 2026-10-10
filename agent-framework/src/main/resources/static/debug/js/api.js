@@ -1,6 +1,8 @@
 /* ===== API 客户端：统一封装后端端点 ===== */
 
-const BASE = window.location.pathname.replace(/\/debug\/?.*$/, '') || '';
+// 静态页部署在 /debug/ 或独立监控页 /monitor/ 下（可能带 ingress 前缀如 /agent/{name}），
+// 剥掉页面目录段得到外部前缀作为 API 基址；直连部署时为空串。
+const BASE = window.location.pathname.replace(/\/(?:debug|monitor)\/?.*$/, '') || '';
 
 /**
  * 统一构造 HTTP 错误：优先透出后端 body.message（not_found / invalid_user_id / 中文原因等），
@@ -94,6 +96,11 @@ export const api = {
   toggleSkill: (name) => put('/skills/' + encodeURIComponent(name) + '/toggle', {}),
   getSkillContent: (name) => get('/skills/' + encodeURIComponent(name) + '/content'),
   updateSkillContent: (name, content) => put('/skills/' + encodeURIComponent(name) + '/content', { content }),
+  downloadSkillZip: async (name) => {
+    const resp = await fetch(BASE + '/skills/' + encodeURIComponent(name) + '/download');
+    if (!resp.ok) throw await httpError(resp, '/skills/' + name + '/download');
+    return resp.blob();
+  },
   getMcpServers: () => get('/mcp'),
   getMetadata: (includeDetails = false) => get('/metadata?includeDetails=' + includeDetails),
 
@@ -147,6 +154,16 @@ export const api = {
   getThreads: (userId) => get('/threads' + (userId ? '?userId=' + encodeURIComponent(userId) : '')),
   getThreadHistory: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/history'),
   getLlmCalls: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls'),
+
+  // 运营监控（跨用户会话列表 + 使用概览，供调试页 Monitor 面板）
+  getMonitorOverview: () => get('/debug/monitor/overview'),
+  getMonitorSessions: (params = {}) => {
+    const qs = Object.entries(params)
+      .filter(([, v]) => v !== undefined && v !== null && v !== '')
+      .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+      .join('&');
+    return get('/debug/monitor/sessions' + (qs ? '?' + qs : ''));
+  },
 
   // 单次流对话（durable-sse-plan 改造版：POST /chat 事件经 EventBus 广播）
   // 返回 { close(), lastEventId } 供重连使用

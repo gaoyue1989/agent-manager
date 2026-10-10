@@ -1120,6 +1120,7 @@ GET /skills/manage
 | `/skills/{name}/toggle` | PUT | 切换启停状态 | `{name, enabled, message}` |
 | `/skills/{name}/content` | GET | 读取 SKILL.md 内容 | `{name, content}` |
 | `/skills/{name}/content` | PUT | 修改 SKILL.md 内容，body `{content}`（≤100KB） | `{name, message}` |
+| `/skills/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`，含 scripts 等资源） | `application/zip` 附件 |
 
 **用户个人技能（L4）：** 用户身份取网关注入的 `X-User-Id` 请求头（缺失/非法 400），URL 不携带 userId。
 

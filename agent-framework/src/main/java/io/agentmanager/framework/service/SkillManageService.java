@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -146,6 +147,43 @@ public class SkillManageService {
             // 清理临时目录（如果 skillRoot == tmpDir 则已 move 走）
             SkillZipSupport.deleteRecursive(tmpDir);
         }
+    }
+
+    // ========== 下载（导出为 zip） ==========
+
+    /**
+     * 导出指定 Skill 的整目录为 zip（供下载）。
+     *
+     * <p>以 {@code /config/skills/{name}} 目录为事实来源：递归打包全部文件，保留技能内相对路径
+     * 与<b>原始字节</b>（二进制资源不被破坏，区别于 L4 用户技能的纯文本导出）。
+     * 技能目录不存在（如 frontmatter 仅声明未落地）返回 empty，由调用方映射 404。
+     *
+     * @return zip 字节；技能目录不存在返回 {@link Optional#empty()}
+     * @throws IllegalArgumentException 名称越出 skills 目录（路径遍历防护）
+     * @throws IOException              读取或打包失败
+     */
+    public Optional<byte[]> exportSkillZip(String name) throws IOException {
+        var dir = skillsDir.resolve(name).normalize();
+        if (!dir.startsWith(skillsDir.normalize())) {
+            throw new IllegalArgumentException("路径遍历攻击防护");
+        }
+        if (!Files.isDirectory(dir)) {
+            return Optional.empty();
+        }
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new java.util.zip.ZipOutputStream(baos)) {
+            List<Path> files;
+            try (var stream = Files.walk(dir)) {
+                files = stream.filter(Files::isRegularFile).sorted().toList();
+            }
+            for (var path : files) {
+                var rel = dir.relativize(path).toString().replace('\\', '/');
+                zos.putNextEntry(new java.util.zip.ZipEntry(rel));
+                Files.copy(path, zos);
+                zos.closeEntry();
+            }
+        }
+        return Optional.of(baos.toByteArray());
     }
 
     // ========== 删除 ==========

@@ -93,7 +93,8 @@ agent-framework/
 │   │   │       ├── AgentCardController.java     # GET /.well-known/agent-card.json
 │   │   │       ├── UserSkillController.java     # /skills/users 系列（当前用户的读取/写入/zip 上传/下载/删除/从包内下发；身份取网关注入的 X-User-Id 头）
 │   │   │       ├── DebugController.java         # GET /debug
-│   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/threads 等
+│   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/monitor（监控概览+跨用户会话）等
+│   │   │       ├── MonitorPageController.java   # GET /monitor（运营监控独立页入口，从调试页独立出来）
 │   │   │       ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
 │   │   │       ├── ChatStreamController.java    # POST /threads/chat (SSE 单次流, 唯一对话入口)
 │   │   │       ├── SessionStreamController.java # GET /threads/{sid}/subscribe、/{sid}/status
@@ -106,11 +107,12 @@ agent-framework/
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
 │   │       ├── db/migration/                    # Flyway 版本化迁移（V1 基线 e91d1f0 + V2..；表结构/数据演进一律新增 V 文件，禁止构造器手工 DDL）
-│   │       └── static/debug/                    # 调试页面 (拆分架构)
-│   │           ├── index.html                   # 调试页入口
-│   │           ├── css/                         # 样式 (base/components/layout)
-│   │           ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
-│   │           └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/models/sandbox/skills/workspace)
+│   │       ├── static/debug/                    # 调试页面 (拆分架构)
+│   │       │   ├── index.html                   # 调试页入口
+│   │       │   ├── css/                         # 样式 (base/components/layout)
+│   │       │   ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
+│   │       │   └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/models/sandbox/skills/workspace)
+│   │       └── static/monitor/                  # 运营监控独立页 (index.html + app.js 入口 + monitor.js 模块，复用 ../debug 的样式与 vendor)
 │   └── test/                                  # 101 个实跑测试类 / 1026 个用例（2026-09-26 实跑，0 失败 4 跳过）
 ├── docs/                                     # 设计与改进方案文档 (38 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
@@ -444,6 +446,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | DELETE | `/skills/users/{name}` | 删除当前用户个人覆盖（全部文件，写 KV 删除标记 `/{name}/.deleted` 防回写复活，并清除写侧栅栏；响应带 `tombstone`=标记名+清除方式）→ 有包内同名技能则回落基线，否则该技能消失。**标记无 TTL**：该用户此后在同代（及后续）容器内用 skill_manage 重建同名技能不会被回写落库，需管理面重新写入或从包内下发才清除标记。沙箱档下删除作用于 KV + tombstone：会话开始物化时不再写回容器，但容器内旧副本在容器换代前仍可能对该用户可见 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内同名技能以包内清单为准**全量替换**为当前用户个人版本（含 scripts/ 等资源；差集清理多余旧文件、失败回滚）；非 UTF-8/二进制文件显式跳过并列入响应 `skipped`；同样置写侧栅栏 `/{name}/.admin-override` |
 | GET | `/debug/user-skills` | **全量用户索引**（运维/调试用途，仅此入口；与 `UserSkillService.listUsers` 同源；触顶截断带 `truncated=true`；索引查询失败 500） |
+| GET | `/debug/monitor/overview` | **运营监控概览**（跨用户汇总，供调试页 Monitor 面板指标卡）：用户数/会话数/提问数/回答数/今日新增会话/今日活跃会话/今日消息，另含异常会话 `sessions_with_error`（工具失败）、`sessions_pending_confirm`（HITL 待确认）与并集 `sessions_with_problem`；会话用户维度取 `session_user`，消息维度取 `session_message` 归档轨（归档关闭时消息类指标为 0），异常判定见下 |
+| GET | `/debug/monitor/sessions` | **运营监控会话列表**（跨全部用户，可按 `userId` 精确 / `keyword`（标题或会话 id）/ `from`+`to` 时间范围 / `onlyProblem=true`（仅工具失败或 HITL 待确认）/ `limit`(≤500)+`offset` 过滤）：`session_user` 驱动 + `agent_state` 双形态 slot 关联取活跃时间，附 `message_count` 与问题标记 `error_count`/`has_error`/`pending_confirm`（工具失败判据 = `session_message` 中 `tool_result` 终态 error/denied/interrupted；待确认判据 = `confirm_context` 未消费且未过期，TTL 分档同 `ConfirmContextStore`）；`onlyProblem` 时扫描上限 2000 后内存过滤分页。调试页 Monitor 面板数据源，选中会话经 `GET /threads/{sid}/history` 回放问答 |
 
 > 个人技能管理面用户身份一律取网关注入的 `X-User-Id` 头（不再走 URL 路径 userId）；跨用户越权由网关层负责。名称恰为 `content`/`toggle` 的窄边界见 `UserSkillController` 类注释。
 | GET | `/mcp` | MCP 服务器列表 |
@@ -451,6 +455,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/admin/reload?scope=auto\|mcp\|agent` | **OAF 配置动态 reload**（[docs/oaf-dynamic-reload-plan.md](docs/oaf-dynamic-reload-plan.md)）：auto=指纹比对自动分流（仅 MCP 配置变→原地 reload；AGENTS.md 变→整包重建 HarnessAgent）；mcp=仅 MCP 原地 reload（重解析 frontmatter，声明增删即时生效）；agent=强制整包重建。失败保持旧配置服务（500 + 结构化错误），生效语义=下一轮对话，进行中 turn 不打断 |
 | GET | `/admin/reload` | reload 只读状态：当前已注册 MCP server（connected/tool_count） |
 | GET | `/debug` | 调试页面（静态资源） |
+| GET | `/monitor` | **运营监控独立页**（从调试页独立出来的只读页面，仅挂载 Monitor 模块，不暴露 Chat/Config/Database 等调试功能；`/monitor/` 入口由 MonitorPageController 托管，静态资源复用 `/debug` 的样式与 vendor） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
