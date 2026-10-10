@@ -233,5 +233,6 @@ kubectl -n agent-platform rollout status deployment/platform-router --timeout=12
 
 - **已知限制（非 nginx controller 集群）**：共享 Ingress 上的 timeout/ssl-redirect 注解会失效（回落 controller 默认值）——SSE 由 agent-framework 20s 心跳保活（小于常见 60s 读超时）；**长时间无数据的 A2A blocking 请求可能被 controller 默认超时截断**，此类集群需在 controller 侧调大默认超时。
 - **命名不变量**：nginx.conf 固化 `oaf-` 前缀、`-svc` 后缀、端口 8100、namespace `agent-platform`——backend 命名规则变更须同步 manifest。
+- **路径段为短名**：`/agent/{short}` 的 short 是去 `oaf-` 前缀的短名（与服务详情 Endpoint 落库值一致，如 `oaf-order-agent` → `/agent/order-agent/`）；误用 K8sName（`/agent/oaf-order-agent/`）会解析到不存在的 `oaf-oaf-order-agent-svc` → 502（未知服务语义，非缺陷）。
 - router 滚动升级会断其上的 SSE 长连接（`maxUnavailable: 0` 只保新建连接），按运维窗口操作。
 - 未知/已删服务返回 502（DNS 解析失败 + 10s 缓存窗口），与历史 ingress 404 语义不同。
