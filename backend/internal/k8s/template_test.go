@@ -496,6 +496,77 @@ spec:
 	}
 }
 
+// TestIngressBuilderTLSCoverage TLS 覆盖校验三态（issue #97）：spec.tls 存在时其 hosts
+// 必须覆盖全部非空 rule host——展示 Endpoint 按「有 TLS 即 https」派生，不覆盖的域名
+// 会得到 https 展示地址 + 无证书死链；path 模式空 rule host（共享入口形态）豁免。
+func TestIngressBuilderTLSCoverage(t *testing.T) {
+	// 1) TLS 缺 hosts（只配 secretName，hosts 为空列表）→ 拒（host 模式 rule host 非空）
+	if _, err := ingressWithOverlay(t, `
+spec:
+  tls:
+    - secretName: agents-wildcard-tls
+`).Build(hostModeParams()); err == nil {
+		t.Fatal("tls without hosts must be rejected when rule host exists")
+	}
+	// 2) TLS hosts 不覆盖 rule host（{{HOST_SUFFIX}} 拼错/漏后缀）→ 拒
+	if _, err := ingressWithOverlay(t, `
+spec:
+  tls:
+    - hosts: ["{{K8S_NAME}}{{HOST_SUFFIX}}.cn"]
+      secretName: agents-wildcard-tls
+`).Build(hostModeParams()); err == nil {
+		t.Fatal("tls hosts must cover the rule host")
+	}
+	// 3) TLS hosts 正确覆盖（{{HOST_SUFFIX}} 与 INGRESS_HOST_SUFFIX 联动）→ 通过，
+	//    Endpoint 按 https + 域名派生
+	p := hostModeParams()
+	ing, err := ingressWithOverlay(t, `
+spec:
+  tls:
+    - hosts: ["{{K8S_NAME}}{{HOST_SUFFIX}}"]
+      secretName: agents-wildcard-tls
+`).Build(p)
+	if err != nil {
+		t.Fatalf("covering tls overlay must pass: %v", err)
+	}
+	want := "https://oaf-acme-demo.region-c86-test.test-kzx1.cncb/"
+	if ep := IngressEndpoint(ing, p.IngressHost, p.IngressPort, p.IngressHostSuffix); ep != want {
+		t.Fatalf("endpoint must be https domain, got %q want %q", ep, want)
+	}
+	// path 模式同样校验：自定义域名 rule host + TLS hosts 覆盖 → 通过
+	if _, err := ingressWithOverlay(t, `
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /my-agent
+spec:
+  tls:
+    - hosts: [demo.example.com]
+      secretName: demo-tls
+  rules:
+    - host: demo.example.com
+      http:
+        paths:
+          - path: /my-agent(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: "{{K8S_NAME}}-svc"
+                port:
+                  number: 8100
+`).Build(testParams()); err != nil {
+		t.Fatalf("covered path-mode tls must pass: %v", err)
+	}
+	// path 模式 TLS-only overlay（rule host 为空，共享入口形态）不被新校验拦截
+	if _, err := ingressWithOverlay(t, `
+spec:
+  tls:
+    - hosts: [demo.example.com]
+      secretName: demo-tls
+`).Build(testParams()); err != nil {
+		t.Fatalf("tls-only path-mode overlay must stay legal: %v", err)
+	}
+}
+
 // TestIngressBuilderRejectsBadOverlay 禁改字段/破坏不变量的 overlay 必须拒绝。
 func TestIngressBuilderRejectsBadOverlay(t *testing.T) {
 	fullRules := func(host, path string) string {

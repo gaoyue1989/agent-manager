@@ -277,11 +277,14 @@ func (b *IngressBuilder) Build(p ObjectParams) (*networkingv1.Ingress, error) {
 }
 
 // ingressOverlayVars overlay 占位符 → 每服务取值。{{K8S_NAME}}=oaf-{short}（backend
-// 指向 {K8S_NAME}-svc），{{SHORT_NAME}}=去前缀短名（path/x-forwarded-prefix 用）。
+// 指向 {K8S_NAME}-svc），{{SHORT_NAME}}=去前缀短名（path/x-forwarded-prefix 用），
+// {{HOST_SUFFIX}}=INGRESS_HOST_SUFFIX 原值——host 模式 overlay 的 TLS hosts/rule host
+// 与后缀联动（环境无关模板，换环境零改动），path 模式（后缀为空）替换为空串。
 func ingressOverlayVars(p ObjectParams) *strings.Replacer {
 	return strings.NewReplacer(
 		"{{K8S_NAME}}", p.K8sName,
 		"{{SHORT_NAME}}", ShortName(p.K8sName),
+		"{{HOST_SUFFIX}}", p.IngressHostSuffix,
 	)
 }
 
@@ -336,6 +339,24 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 	if ann[annProxyReadTimeout] == "" || ann[annProxySendTimeout] == "" {
 		return fmt.Errorf("annotations %s/%s must stay (SSE long connection)",
 			annProxyReadTimeout, annProxySendTimeout)
+	}
+	// TLS 覆盖校验（issue #97）：spec.tls 存在时其 hosts 必须覆盖全部 rule host。
+	// 展示 Endpoint 的 scheme 只看 len(spec.tls)>0（见 IngressEndpoint）——TLS 不覆盖
+	// 的域名会得到 https 展示地址 + 无证书死链（换环境照抄硬编码后缀的示例即触发）。
+	// 空 rule host 为 path 模式共享入口形态（TLS-only overlay 合法，证书按入口配置），
+	// 豁免；host 模式 rule host 恒非空，必须逐条覆盖。
+	if len(ing.Spec.TLS) > 0 {
+		tlsHosts := map[string]bool{}
+		for _, t := range ing.Spec.TLS {
+			for _, h := range t.Hosts {
+				tlsHosts[h] = true
+			}
+		}
+		for _, rule := range ing.Spec.Rules {
+			if rule.Host != "" && !tlsHosts[rule.Host] {
+				return fmt.Errorf("spec.tls hosts must cover rule host %q (endpoint derives https from tls presence)", rule.Host)
+			}
+		}
 	}
 	svcName := p.K8sName + "-svc"
 	found, prefix := false, ""

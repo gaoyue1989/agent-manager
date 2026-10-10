@@ -70,14 +70,31 @@ test('P2 lead 副本 kill：registry 重建后另一副本接管轮询与收割'
 // 依赖——CI 与 local-infra 一致，同 reset-data.mjs 手法；E2E 环境独占 redis）。
 // 修 #74：KEYS 返回顺序无保证（哈希桶序），「取末位当本轮任务」会锚到旧任务使断言
 // 恒真——改取 spawn 前后键集差分，新增键才是本轮任务。
+// 修 #97：socket error/timeout 不能静默降级成空 Set——before 快照为空集时差分会挑中
+// 历史任务 → /events 断言照样 200+非空 → 假绿。记录错误重试一次，仍失败即 throw。
 async function protocolTaskIdsFromRedis(): Promise<Set<string>> {
-  const net = await import('node:net');
   const { host, port } = redisTarget();
-  return await new Promise(resolve => {
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await protocolTaskIdsOnce(host, port);
+    } catch (e) {
+      lastErr = e as Error;
+      console.warn(`[P3] Redis 键集反查第 ${attempt} 次尝试失败（${host}:${port}）: ${lastErr.message}`);
+    }
+  }
+  throw new Error(`Redis task 键集反查连续失败（${host}:${port}），拒绝以空集参与差分: ${lastErr?.message}`);
+}
+
+/** 单次 KEYS 尝试：RESP 裸 socket 反查；error/timeout 上抛（不静默降级），重试由上层决定 */
+async function protocolTaskIdsOnce(host: string, port: number): Promise<Set<string>> {
+  const net = await import('node:net');
+  return await new Promise((resolve, reject) => {
     const sock = net.createConnection({ host, port });
     sock.setTimeout(5000);
     let buf = '';
     const finish = (ids: Set<string>) => { sock.destroy(); resolve(ids); };
+    const fail = (why: string) => { sock.destroy(); reject(new Error(why)); };
     sock.on('connect', () => sock.write('*2\r\n$4\r\nKEYS\r\n$19\r\nproto:task:*:events\r\n'));
     sock.on('data', d => {
       buf += d.toString();
@@ -91,8 +108,8 @@ async function protocolTaskIdsFromRedis(): Promise<Set<string>> {
         .map(m => m[1]));
       finish(ids);
     });
-    sock.on('error', () => finish(new Set()));
-    sock.on('timeout', () => finish(new Set()));
+    sock.on('error', err => fail(`socket error: ${err.message}`));
+    sock.on('timeout', () => fail('等待 RESP 响应超时（5s）'));
   });
 }
 
