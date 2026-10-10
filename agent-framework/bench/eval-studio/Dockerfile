@@ -3,10 +3,11 @@
 # 构建上下文 = bench/（打包 eval 引擎代码）：
 #   docker build -f eval-studio/Dockerfile -t gaoyue1989/eval-studio:latest .
 # 运行：
-#   docker run -d --name eval-studio -p 18400:18400 \
+#   docker run -d --name eval-studio -p 127.0.0.1:18400:18400 \
 #     -v $PWD/studio-data:/data -v $PWD/collector-data:/var/lib/eval-collector:ro \
 #     -e EVAL_LLM_BASE_URL=... -e EVAL_LLM_API_KEY=... -e EVAL_LLM_MODEL=... \
 #     gaoyue1989/eval-studio:latest
+#   （绑回环收敛暴露面：远程浏览器走 SSH 隧道/反代 ssh -L 18400:127.0.0.1:18400 <host>）
 FROM node:22-alpine
 
 # python3 = FastAPI 应用 + 打包器；node = replay-llm / 内置回放沙盒
@@ -32,5 +33,11 @@ EXPOSE 18400
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s \
   CMD wget -qO- http://127.0.0.1:18400/healthz >/dev/null 2>&1 || exit 1
+
+# 非 root 运行（issue #97）：复用基镜像内置 node 用户（uid/gid=1000；再 adduser -u 1000 会与之冲突），
+# 固定 uid 1000 便于 bind mount 属主对齐——宿主数据目录需 chown 1000:1000（见 README）
+RUN mkdir -p /data && chown -R node:node /data /srv
+
+USER node
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18400", "--app-dir", "/srv"]

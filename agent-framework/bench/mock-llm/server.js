@@ -11,16 +11,36 @@
  *        启动延迟断言（agent_start_delay_ms，run-bench.sh 场景 C）
  *
  * 端点：POST /v1/chat/completions（stream 均支持）/ GET /stats / POST /reset
- * 延迟注入：MOCK_LLM_DELAY_MS（默认 0）；slow 场景总时长 MOCK_LLM_SLOW_MS（默认 30000）
+ * 延迟注入：MOCK_LLM_DELAY_MS（默认 0）；slow 场景总时长 MOCK_LLM_SLOW_MS（默认 30000，
+ * run-bench.sh 显式导出 12000：缺陷形态下 C=2 排队签名 ≈12s 仍超 10s 门禁阈值，
+ * 且与 runner P95_ABORT_MS=30000 保持 2.5× 余量，见 issue #97 问题 14）
+ * 数值 env 校验：MOCK_LLM_DELAY_MS / MOCK_LLM_SLOW_MS 必须是 ≥0 的数字，非法即 exit 1
+ * （NaN 会让 sleep 立即返回 → slow 场景静默退化为瞬时响应 → 门禁恒过假阴性）
  * 固定 usage：in=200 / out=50
  */
 'use strict';
 
 const http = require('http');
 
+// 数值 env 解析：未设/空串用默认；否则必须是非负有限数，非法立即退出（issue #97 问题 14）。
+// 此前 parseInt 无校验：'abc' → NaN → sleep(NaN) 立即返回，slow 场景静默退化为瞬时响应
+// （实测 0.015s/HTTP 200），C 档「长 LLM 流式」在途 turn 消失 → 启动延迟门禁恒过假阴性，
+// 故拒绝启动而非带病降级。PORT 保持 parseInt：绑定失败 listen 回调本就显式报错，非静默。
+function readMsEnv(name, def) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v < 0) {
+    console.error(`[mock-llm] 环境变量 ${name}="${raw}" 非法：必须是 ≥0 的毫秒数。` +
+      `非法值会使 slow 场景静默退化为立即返回（NaN），启动延迟门禁变恒过假阴性，拒绝启动`);
+    process.exit(1);
+  }
+  return v;
+}
+
 const PORT = parseInt(process.env.MOCK_LLM_PORT || '18081', 10);
-const DELAY_MS = parseInt(process.env.MOCK_LLM_DELAY_MS || '0', 10);
-const SLOW_MS = parseInt(process.env.MOCK_LLM_SLOW_MS || '30000', 10);
+const DELAY_MS = readMsEnv('MOCK_LLM_DELAY_MS', 0);
+const SLOW_MS = readMsEnv('MOCK_LLM_SLOW_MS', 30000);
 const MODEL = 'bench-model';
 
 // ===== 统计（/stats 供与压测端对账） =====

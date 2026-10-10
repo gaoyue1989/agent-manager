@@ -66,6 +66,10 @@ const EXPECTED_LLM_CALLS = (MARKER === '[BENCH:plain]' || MARKER === '[BENCH:slo
 // 只看 agentStartMs 绝对值会把 1C 容器的首帧/CPU 饱和（ttft 与 agentStart 同时晚，
 // 容量问题，B 档 p95 停止条件已覆盖）误判为跨会话排队回归（实测 10.9s/21s 离群，
 // delta 恒 0；而 #87 缺陷形态 delta = 全部排队时长 17~169s）。
+// 基线帧保障（issue #97 问题 12）：C 档每槽位首请求不传 sessionId → 后端生成 UUID 且
+// 首帧 session_created 经 Flux.just 同步直发（ChatStreamController）→ ttft 打在基线帧上，
+// 排队签名才可测；从该帧取回后端 sid 供本进程后续 turn 复用。复用 turn 无基线帧
+// （delta=0 不入门禁）——门禁覆盖面 = 并发启动首波 + 零帧兜底，非全量 turn。
 const ASSERT_START_DELAY_MS = parseInt(arg('assert-start-delay-ms', '10000'), 10);
 const ENFORCE_START_DELAY = SCENARIO === 'C' && ASSERT_START_DELAY_MS > 0;
 
@@ -100,14 +104,16 @@ function chatOnce(sid, userId) {
     const startMs = Date.now();
     let ttftMs = null;
     let agentStartMs = null;
+    let createdSid = null;   // session_created 帧回传的后端生成 sid（C 档 fresh 首请求）
     let waiting = 0;
     let settled = false;
 
-    const body = JSON.stringify({
-      message: `bench load test ${MARKER} session=${sid}`,
-      userId,
-      sessionId: sid,
-    });
+    // sid 为空 = C 档 fresh 首请求：body 省略 sessionId 字段 → 后端判 isNewSession=true，
+    // 首帧直发 session_created 基线帧（恒传 sid 会让后端判 isNewSession=false 永不发
+    // 基线帧 → ttft 与 AGENT_START 同帧 → 排队签名恒 0、门禁失效，issue #97 问题 12）
+    const payload = { message: `bench load test ${MARKER} session=${sid ?? 'fresh'}`, userId };
+    if (sid != null) payload.sessionId = sid;
+    const body = JSON.stringify(payload);
     const req = http.request({
       hostname: base.hostname,
       port: base.port,
@@ -142,6 +148,9 @@ function chatOnce(sid, userId) {
           const type = frame.type || '';
           if (ttftMs === null && type !== 'waiting') ttftMs = Date.now() - startMs;
           if (type === 'AGENT_START' && agentStartMs === null) agentStartMs = Date.now() - startMs;
+          // 基线帧取证：session_created 非 waiting 帧天然计入 ttft；回传 sid 供槽位复用
+          if (type === 'session_created' && createdSid === null
+              && typeof frame.session_id === 'string') createdSid = frame.session_id;
           if (type === 'waiting') waiting++;
           else if (type === 'AGENT_END') finish(true, null);
           else if (type === 'error') finish(false, String(frame.error || 'error_frame').slice(0, 200));
@@ -167,6 +176,7 @@ function chatOnce(sid, userId) {
         ? Math.max(0, agentStartMs - ttftMs) : null;
       resolve({
         sid, userId, startMs, ok,
+        createdSessionId: createdSid,
         latencyMs: Date.now() - startMs,
         ttftMs, agentStartMs, startQueueMs, waiting,
         error: error || null,
@@ -337,15 +347,19 @@ async function run() {
 
   // 闭环 worker：线性 ramp 拉起；稳态窗口外不再发起新请求。
   // worker w 固定绑定会话 w % SESSION_POOL：C ≤ S 时每个 inflight 独占会话（无租约排队）；
-  // C > S 时会话被多 worker 共享 → turn 租约排队（池受限区间的真实语义）
+  // C > S 时会话被多 worker 共享 → turn 租约排队（池受限区间的真实语义）。
+  // C 档（issue #97 问题 12）：本 worker 首请求 fresh（不传 sessionId）从 session_created
+  // 取回后端 sid，本进程后续 turn 复用——保证每槽位首波带基线帧；B 档路径不变（固定命名）
   async function worker(wIdx) {
     const startDelay = CONCURRENCY > 1 ? rampMs * (wIdx / CONCURRENCY) : 0;
     const readyAt = t0 + startDelay;
     if (Date.now() < readyAt) await new Promise((r) => setTimeout(r, readyAt - Date.now()));
-    const sid = sessionAt(wIdx % SESSION_POOL);
-    const userId = USER_ID_PREFIX + (wIdx % SESSION_POOL);
+    const slot = wIdx % SESSION_POOL;
+    const userId = USER_ID_PREFIX + slot;
+    let sid = SCENARIO === 'C' ? null : sessionAt(slot);
     while (!aborted && Date.now() < windowEnd) {
       const rec = await chatOnce(sid, userId);
+      if (sid === null && rec.createdSessionId) sid = rec.createdSessionId;
       if (rec.startMs >= t0 + rampMs) record(rec); // 仅稳态发起的请求计入
       if (MIN_TURN_GAP_MS > 0) {
         const endMs = rec.startMs + rec.latencyMs;
@@ -372,11 +386,15 @@ async function run() {
   const starts = metrics.map((m) => m.agentStartMs).filter((v) => v !== null);
   const waitings = metrics.map((m) => m.waiting);
   const steadyMinutes = STAGE_SECONDS / 60;
-  // 启动延迟门禁（issue #87）：C 档任一路「排队签名」（agentStart-ttft）超阈值即 FAIL
+  // 启动延迟门禁（issue #87）：C 档任一路「排队签名」（agentStart-ttft）超阈值，
+  // 或整 turn 零帧（ttft=null，#87 原始最严重形态，issue #97 问题 13），该档即 FAIL。
+  // 零帧集合涵盖 empty_stream、仅 waiting 帧后超时/断连，以及流未建立的 http_5xx/req_error
+  // （两者集合不相交：startQueueMs 非 null 必有 ttft 非 null，可直接相加）
   const startQueues = metrics.map((m) => m.startQueueMs).filter((v) => v !== null);
-  const breaches = ENFORCE_START_DELAY
-    ? metrics.filter((m) => m.startQueueMs !== null && m.startQueueMs > ASSERT_START_DELAY_MS).length
-    : 0;
+  const zeroFrames = metrics.filter((m) => m.ttftMs === null);
+  const queueBreaches = metrics
+    .filter((m) => m.startQueueMs !== null && m.startQueueMs > ASSERT_START_DELAY_MS).length;
+  const breaches = ENFORCE_START_DELAY ? queueBreaches + zeroFrames.length : 0;
   const summary = {
     scenario: SCENARIO,
     stage: STAGE,
@@ -403,6 +421,9 @@ async function run() {
     startQueueSamples: startQueues.length,
     startQueueP50Ms: pct(startQueues, 50),
     startQueueP100Ms: startQueues.length ? Math.max(...startQueues) : 0,
+    // 零帧请求（ttft=null，含 empty_stream / 仅 waiting 后超时 / 流未建立）：恒记录纯观测；
+    // C 档门禁开启时整路计入 startDelayBreaches（比排队超时更严重的失败形态）
+    zeroFrameSamples: zeroFrames.length,
     startDelayThresholdMs: ENFORCE_START_DELAY ? ASSERT_START_DELAY_MS : null,
     startDelayBreaches: breaches,
     waitingAvg: waitings.length ? +(waitings.reduce((a, b) => a + b, 0) / waitings.length).toFixed(2) : 0,
@@ -417,8 +438,9 @@ async function run() {
     (starts.length ? ` agentStart p50=${summary.agentStartP50Ms} p100=${summary.agentStartMaxMs}` : '') +
     (aborted ? ` [中止: ${abortReason}]` : ''));
   if (breaches > 0) {
-    console.error(`[done] 启动延迟门禁 FAIL：${breaches} 路 AGENT_START 超过 ` +
-      `${ASSERT_START_DELAY_MS}ms（跨会话排队，见 issue #87 / docs/design/turn-gate-concurrency-and-hitl-eval-contract-design.md）`);
+    console.error(`[done] 启动延迟门禁 FAIL：${breaches} 路（排队签名超 ${ASSERT_START_DELAY_MS}ms ` +
+      `${queueBreaches} 路；整 turn 零帧/无首帧 ${zeroFrames.length} 路——#87 最严重形态）` +
+      `（跨会话排队，见 issue #87 / docs/design/turn-gate-concurrency-and-hitl-eval-contract-design.md）`);
     process.exit(3);
   }
   // 非正常中止以非零码退出，编排脚本据此跳过该场景剩余档

@@ -44,6 +44,7 @@ const ADMIN_TOKEN = ENV.EVAL_COLLECTOR_ADMIN_TOKEN || '';
 const PACKAGER_URL = (ENV.EVAL_PACKAGER_URL || '').replace(/\/$/, '');
 // 切换/还原片段里的对外主机名：容器/反代场景 Host 头不可信，可用该 env 显式覆盖（缺省从 Host 头派生）
 const PUBLIC_HOST = (ENV.EVAL_COLLECTOR_PUBLIC_HOST || '').trim();
+const PACKAGER_TOKEN = ENV.EVAL_PACKAGER_TOKEN || '';  // studio 开启 STUDIO_TOKEN 后的转调凭据（issue #97 评审）
 // 请求体硬上限（转发语义）：超限直接 413 拒绝且不转发；录制上限（body_max_bytes）只影响录制副本。
 // 默认 64MB 的取舍：旁路组件、安全边界 = 仅测试网络可达（见文件头），64MB 足以容纳大上下文
 // LLM 请求，同时防单请求内存无界；并发下最坏 64MB/请求，需要收紧时用该 env 调小。
@@ -1113,9 +1114,12 @@ async function handleAdmin(req, res) {
     if (!ns) return sendJson(res, 400, { error: '无接入档案' });
     if (PACKAGER_URL) {
       try {
-        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）
+        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）；
+        // EVAL_PACKAGER_TOKEN 非空时带 Bearer 头（与 studio 的 STUDIO_TOKEN 同值，compose 已同值注入）
         const resp = await fetch(PACKAGER_URL, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
+          method: 'POST',
+          headers: { 'content-type': 'application/json',
+                     ...(PACKAGER_TOKEN ? { authorization: `Bearer ${PACKAGER_TOKEN}` } : {}) },
           body: JSON.stringify({ ...b, ns, collector_data: DATA_DIR }),
         });
         const text = await resp.text();
