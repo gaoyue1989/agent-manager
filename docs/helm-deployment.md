@@ -23,8 +23,8 @@
 
 | # | 前提 | 说明 |
 |---|---|---|
-| 1 | Kubernetes 1.24+ | chart 用到 `batch/v1` Job、`networking.k8s.io/v1` |
-| 2 | Helm 3.8+ | 无子 chart，air-gapped 可 `helm template` 出 YAML |
+| 1 | Kubernetes **≥ 1.21**（推荐 1.24+） | `batch/v1` Job（1.21 稳定）；Ingress `networking.k8s.io/v1`（1.19+）。`synthesized` kubeconfig 依赖的显式 service-account-token Secret 在 1.24+ 需显式创建——chart 已如此渲染 |
+| 2 | Helm **≥ 3.4**（推荐 3.10+） | chart 用 `deepCopy` 等 3.4+ 模板函数；`apiVersion: v2`。实测基线 Helm 3.14；无 helm 的 air-gapped 可 `helm template` 出 YAML 后 `kubectl apply` |
 | 3 | ingress controller 已部署 | 任意实现（路径 `/agent` Prefix 属 Ingress 核心规范）；nginx 类可识别 chart 的超时注解 |
 | 4 | **内网镜像仓库**可用，且下列镜像已推送（§一） | 节点可拉取；私有仓库需 imagePullSecret |
 | 5 | **外部 MySQL** 已建库授权（§三.1） | `oaf_platform`（元数据）+ 业务 checkpoint 库 |

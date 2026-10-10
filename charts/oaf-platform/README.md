@@ -10,6 +10,10 @@ OAF 服务发布平台控制面的一键部署 chart（**自包含**，无子 ch
 部署内容：`platform-backend`（REST + MCP）、`platform-frontend`（UI）、`platform-router`
 （router 模式子路径路由器）、RBAC、对外 Ingress、可选的平台自举钩子（bootstrap Job）。
 
+**版本要求**：Helm **≥ 3.4**（chart 使用 `deepCopy` 等模板函数；`apiVersion: v2`）；Kubernetes
+**≥ 1.21**（`batch/v1` Job；Ingress `networking.k8s.io/v1` 需 1.19+）。实测基线：Helm 3.14 + K8s 1.32。
+air-gapped 无 helm 时 `helm template --output-dir` 出 YAML 后 `kubectl apply`（渲染与校验在安装期外完成）。
+
 **不部署 / 不创建**：MySQL、Redis、OpenSandbox、**任何 PVC**、业务 agent 服务
 （业务服务由平台发布 API 动态创建，**Helm 永不管理**）。
 
