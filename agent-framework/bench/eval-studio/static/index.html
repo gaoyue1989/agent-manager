@@ -39,7 +39,8 @@
 </head>
 <body>
 <header><h1>eval-studio</h1><span class="dim">离线评测服务 · 录制回放 / 链路评测 / 报告</span>
-  <span class="grow"></span><span class="pill" id="active-profile">未选择档案</span></header>
+  <span class="grow"></span><span class="pill" id="active-profile">未选择档案</span>
+  <button class="btn" id="token-btn" title="设置 eval-studio 访问 token（STUDIO_TOKEN）">token</button></header>
 <nav id="nav">
   <button data-tab="dash" class="on">概览</button>
   <button data-tab="profiles">目标配置</button>
@@ -54,7 +55,23 @@
 
 <script>
 const $=(s,el=document)=>el.querySelector(s), $$=(s,el=document)=>[...el.querySelectorAll(s)];
-const api=async(p,opt={})=>{const r=await fetch(p,{headers:{'content-type':'application/json'},...opt});
+// 访问 token（issue #97）：首载优先 location.hash 的 #token=xxx（存 localStorage 后立即清 hash，
+// 防 token 留在地址栏/历史记录），否则读 localStorage，仍无则弹窗输入（可取消=匿名继续，
+// 服务端未设 STUDIO_TOKEN 时本就放行）。token 仅用于请求头，不拼入任何 HTML/onclick。
+const authHeaders=()=>TOKEN?{'authorization':`Bearer ${TOKEN}`}:{};
+const saveToken=t=>{t=(t||'').trim();
+ if(t)localStorage.setItem('studio-token',t);else localStorage.removeItem('studio-token');TOKEN=t;};
+let TOKEN='',AUTH_SKIP=false;  // AUTH_SKIP：用户放弃输入后置位——周期任务（10s refresh / run 轮询）遇 401 不再弹窗，经顶栏「token」按钮主动恢复
+TOKEN=(()=>{const m=location.hash.match(/^#token=([^&]+)/);
+ let t='';if(m){try{t=decodeURIComponent(m[1]);}catch{t='';}}  // 畸形百分号编码（如 #token=%）按无 token 处理，防 URIError 中断整页初始化
+ if(t)saveToken(t);
+ else if(!localStorage.getItem('studio-token')){saveToken(prompt('访问 token（未设 token 直接取消）')||'');AUTH_SKIP=!TOKEN;}
+ if(TOKEN)history.replaceState(null,'',location.pathname+location.search);
+ return localStorage.getItem('studio-token')||'';})();
+const api=async(p,opt={})=>{const r=await fetch(p,{...opt,headers:{'content-type':'application/json',...authHeaders(),...(opt.headers||{})}});
+  if(r.status===401){if(!AUTH_SKIP){saveToken(prompt('token 无效或缺失，请重新输入')||'');AUTH_SKIP=!TOKEN;
+    toast(TOKEN?'token 已更新，请重试':'已跳过 token 输入，点右上角「token」可重新设置',false);}
+   throw new Error(401);}
   const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.detail||j.error||r.status); return j;};
 // HTML 转义须含单引号：id 等用户可控值曾拼进单引号实参的内联 onclick（存储型 XSS 沉淀点）；
 // 现按钮一律 data-* + 事件委托，esc 仍作为所有插值的兜底防线
@@ -158,7 +175,7 @@ const views={
 // 替代 window.open+document.write 的同源执行，阻断报告内被注入内容以 studio 同源身份携带凭据调用 API
 async function openRun(id){const r=await api(`/api/runs/${id}`);
  if(!r.report){toast('报告尚未生成',false);return;}
- const html=await fetch(`/api/runs/${id}/report.html`).then(x=>x.text());
+ const html=await fetch(`/api/runs/${id}/report.html`,{headers:authHeaders()}).then(x=>x.text());
  $('#run-view')?.remove();
  const ov=document.createElement('div');ov.id='run-view';
  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:99';
@@ -193,7 +210,7 @@ async function saveProfile(){let spec;
  toast('已保存');views.profiles();}
 async function uploadPack(){const f=$('#pk-file').files[0];if(!f)return toast('先选择 zip',false);
  const fd=new FormData();fd.append('file',f);
- const r=await fetch('/api/packages',{method:'POST',body:fd});const j=await r.json();
+ const r=await fetch('/api/packages',{method:'POST',body:fd,headers:authHeaders()});const j=await r.json();
  if(!r.ok)return toast(j.detail||'上传失败',false);
  toast(`已导入 ${j.pack_id}（${j.sessions} 会话）`);load();}
 async function showPack(id){const d=await api(`/api/packages/${id}`);const box=$('#pk-detail');box.style.display='block';
@@ -263,6 +280,9 @@ document.addEventListener('click',e=>{
   case 'create-run': createRun(); break;
   case 'do-compare': doCompare(); break;
  }});
+
+$('#token-btn').onclick=()=>{saveToken(prompt('访问 token（留空=匿名）')||'');AUTH_SKIP=!TOKEN;
+ switchTab(tab);};  // switchTab 内含 load(refresh)+当前视图重渲染：401 错误卡片随即被正常内容替换，不留陈旧报错
 switchTab('dash'); setInterval(refresh,10000);
 </script>
 </body>

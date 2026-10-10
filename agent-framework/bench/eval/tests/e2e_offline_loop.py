@@ -571,6 +571,46 @@ def phase_studio(pack_dir: Path, use_judge: bool) -> None:
         studio.stop()
 
 
+def phase_studio_auth() -> None:
+    """鉴权接线用例（issue #97）：STUDIO_TOKEN 非空时 /api/* 必须强制 Bearer。
+
+    独立临时实例（端口 18401 + 独立 STUDIO_DATA_DIR）：与主 studio 不共享 sqlite，
+    双 worker 也不会互抢 queued run；STUDIO_SKIP_AUTH 必须显式置空——Proc 复制
+    os.environ，主流程注入的 =1 若泄漏进来会恒放行、用例变假绿。
+    健康检查走 /healthz（鉴权豁免路径），依赖 main.py 的豁免语义。
+    """
+    print("\n[phase 6b] eval-studio 鉴权接线（STUDIO_TOKEN 全局依赖）")
+    import shutil as _sh
+    _sh.rmtree(work_dir / "studio-auth-data", ignore_errors=True)
+    studio = Proc("studio-auth", [sys.executable, "-m", "uvicorn", "app.main:app",
+                                  "--port", "18401", "--app-dir", str(BENCH_DIR / "eval-studio")],
+                  work_dir, env={"STUDIO_DATA_DIR": str(work_dir / "studio-auth-data"),
+                                 "STUDIO_BENCH_DIR": str(BENCH_DIR),
+                                 "STUDIO_TOKEN": "e2e-studio-token",
+                                 "STUDIO_SKIP_AUTH": ""},
+                  health="http://127.0.0.1:18401/healthz")
+    try:
+        base = "http://127.0.0.1:18401"
+        r = httpx.get(f"{base}/api/profiles", timeout=10)
+        check("无 token 访问 /api/profiles → 401", r.status_code == 401, str(r.status_code))
+        r = httpx.get(f"{base}/api/profiles", headers={"Authorization": "Bearer wrong-token"}, timeout=10)
+        check("错误 token → 401", r.status_code == 401, str(r.status_code))
+        r = httpx.get(f"{base}/api/profiles", headers={"Authorization": "Bearer e2e-studio-token"}, timeout=10)
+        check("正确 Bearer → 200", r.status_code == 200 and r.json() == {"profiles": [], "active": None},
+              str(r.status_code))
+        r = httpx.post(f"{base}/api/runs", json={"type": "replay"}, timeout=10)
+        check("无 token 写接口 POST /api/runs → 401", r.status_code == 401, str(r.status_code))
+        r = httpx.get(f"{base}/healthz", timeout=10)
+        check("无 token /healthz → 200（探活豁免）", r.status_code == 200, str(r.status_code))
+        r = httpx.get(f"{base}/", timeout=10)
+        check("无 token 页面 / → 200（前端豁免）", r.status_code == 200 and "eval-studio" in r.text)
+        r = httpx.get(f"{base}/docs", timeout=10)
+        check("无 token /docs → 404（自助文档路由已关闭，防绕过全局鉴权）", r.status_code == 404,
+              str(r.status_code))
+    finally:
+        studio.stop()
+
+
 def _wait_run(base: str, run_id: str, timeout_s: int = 300) -> dict | None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -983,6 +1023,7 @@ def main() -> int:
                              health="http://127.0.0.1:18961/healthz")
             procs.append(stub_live)
             phase_studio(pack_dir, use_judge)
+            phase_studio_auth()
 
         print(f"\n==== e2e 结果：PASS {PASS} / FAIL {FAIL} ====")
         return 0 if FAIL == 0 else 1
