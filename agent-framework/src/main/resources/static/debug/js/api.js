@@ -96,6 +96,11 @@ export const api = {
   toggleSkill: (name) => put('/skills/' + encodeURIComponent(name) + '/toggle', {}),
   getSkillContent: (name) => get('/skills/' + encodeURIComponent(name) + '/content'),
   updateSkillContent: (name, content) => put('/skills/' + encodeURIComponent(name) + '/content', { content }),
+  downloadSkillZip: async (name) => {
+    const resp = await fetch(BASE + '/skills/' + encodeURIComponent(name) + '/download');
+    if (!resp.ok) throw await httpError(resp, '/skills/' + name + '/download');
+    return resp.blob();
+  },
   getMcpServers: () => get('/mcp'),
   getMetadata: (includeDetails = false) => get('/metadata?includeDetails=' + includeDetails),
 

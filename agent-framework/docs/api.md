@@ -135,6 +135,7 @@ curl http://localhost:8100/skills
 | PUT | `/skills/{name}/toggle` | 启停切换：`{name, enabled, message}` |
 | GET | `/skills/{name}/content` | 读 `SKILL.md`：`{name, content}` |
 | PUT | `/skills/{name}/content` | 写 `SKILL.md`，body `{content}`（≤100KB） |
+| GET | `/skills/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`，含 `scripts` 等资源、保留原始字节）；技能仅被 frontmatter 声明而无目录 → 404 |
 
 > `GET /skills/users/{name}` 与 `GET /skills/{name}/content` 在 `name == "content"` 时同时匹配，
 > 由更具体的 `/skills/{name}/content` 命中（Spring 路由优先级）；`name == "toggle"` 与

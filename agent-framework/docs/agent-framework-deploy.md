@@ -428,6 +428,7 @@ LLM 推理 → 选择工具 (如 get_weather)
 | DELETE | `/skills/{name}` | 删除 Skill |
 | PUT | `/skills/{name}/toggle` | 启停切换 |
 | GET/PUT | `/skills/{name}/content` | 读 / 写 SKILL.md |
+| GET | `/skills/{name}/download` | 下载 Skill 整目录为 zip |
 | GET | `/skills/users`、`/skills/users/{userId}` | 用户个人技能（L4）索引 / 列表 |
 | GET/PUT/DELETE | `/skills/users/{userId}/{name}` | 读 / 写 / 删个人技能（删除写 tombstone） |
 | POST | `/skills/users/{userId}/{name}/sync-from-package` | 包内基线下发为个人版 |

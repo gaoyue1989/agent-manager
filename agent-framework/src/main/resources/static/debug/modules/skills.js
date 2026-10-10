@@ -100,6 +100,9 @@ async function loadSkills() {
           '</button>' +
           '<button class="btn small skill-detail-btn" data-idx="' + idx + '">👁 详情</button>' +
           '<button class="btn small skill-edit-btn" data-idx="' + idx + '">✏ 编辑</button>' +
+          (s.declaredButMissing !== true
+            ? '<button class="btn small skill-download-btn" data-idx="' + idx + '">⬇ 下载</button>'
+            : '') +
           (s.source === 'local-dynamic' || s.dynamic
             ? '<button class="btn small danger skill-delete-btn" data-idx="' + idx + '">🗑 删除</button>'
             : '') +
@@ -116,6 +119,9 @@ async function loadSkills() {
   });
   body.querySelectorAll('.skill-edit-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleEdit(Number(btn.dataset.idx)); });
+  });
+  body.querySelectorAll('.skill-download-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { handleDownload(Number(btn.dataset.idx)); });
   });
   body.querySelectorAll('.skill-delete-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleDelete(Number(btn.dataset.idx)); });
@@ -166,6 +172,26 @@ function handleDetail(idx) {
   var skill = skillData[idx];
   if (!skill) return;
   ctx.utils.showJsonModal('Skill: ' + (skill.name || ''), skill);
+}
+
+/** 下载：整目录 zip（源为 /config/skills 包内目录，含 scripts 等资源）。经 fetch 取 blob */
+async function handleDownload(idx) {
+  var skill = skillData[idx];
+  if (!skill) return;
+  try {
+    var blob = await ctx.api.downloadSkillZip(skill.name);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = skill.name + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    ctx.utils.toast('已下载 ' + skill.name + '.zip', 'success');
+  } catch (err) {
+    ctx.utils.toast('下载失败: ' + err.message, 'error');
+  }
 }
 
 async function handleEdit(idx) {
