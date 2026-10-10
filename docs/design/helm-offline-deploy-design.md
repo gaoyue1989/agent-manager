@@ -74,7 +74,7 @@ charts/oaf-platform/
 | 业务镜像白名单 | `images.business[]`（`{image,label}`）、`images.defaultBusiness` | 渲染 `AVAILABLE_IMAGES` / `DEFAULT_IMAGE`（**必须与实际可拉取 tag 一致**，否则发布被 400 拒） |
 | 业务 Pod 资源 | `business.resources.{requestsCpu,requestsMem,limitsCpu,limitsMem}` | 渲染 `RESOURCE_*` 四元组（后端 config.go 默认 250m/256Mi/1/1Gi，作用于**每个业务 Deployment**） |
 | 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | router 模式：`host`=对外 IP、`port`=NodePort；host 模式额外 `hostSuffix` |
-| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 默认关闭（in-cluster），开启时挂载已有 Secret 供集群外开发/特殊 RBAC 场景 |
+| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 三模式见 §6.2（默认 disabled=in-cluster） |
 | 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl,evalCollector.{mode,agentUrl}}` | `agentInternalUrl` 默认指向 release-agent；`publicApiUrl`（`NEXT_PUBLIC_API_URL`，默认空=服务端反代同源）；`evalCollector.*` 为评测录制反代模式（默认关闭，仅评测环境） |
 | 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.4 |
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
@@ -131,7 +131,7 @@ platformDefaults: { seed: { enabled: false } }
 | 18 | `INGRESS_TEMPLATE` | config.go | `business.ingressOverlay`（仅 host 模式；router 模式配置即安装报错） | **本次补（评审点名）** |
 | 19 | `AUTH_TOKEN` | config.go | `backend.authToken` | 已有 |
 | 20 | `PACKAGE_DOWNLOAD_BASE` | config.go | `backend.packageDownloadBase` | 已有 |
-| 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（默认关闭=in-cluster ServiceAccount；开启挂载已有 Secret） | **本次补（评审点名）** |
+| 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（三模式 disabled / provided / synthesized，见 §6.2；**chart 可在部署期创建**） | **本次补（评审点名，已扩三模式）** |
 | F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
 | F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
 | F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（形态 A 留空=同源 `/api/v1`；**形态 B 必填** backend 公网地址，见 §6.2） | **本次补** |
@@ -201,7 +201,27 @@ platformDefaults: { seed: { enabled: false } }
 - `INGRESS_HOST`/`INGRESS_PORT`/`INGRESS_CLASS` 由 `routing.*` 渲染（Endpoint 展示与 Ingress 构造）。
 - 共享 Ingress 的机会性注解（timeout/ssl-redirect）保留，语义同 subpath-routing §6.4。
 
-### 6.2 对外暴露：backend / frontend / router 的 Ingress 形态
+### 6.2 后端集群访问（KUBECONFIG 三模式，chart 可部署期创建）
+
+后端 `main.go` 读 `KUBECONFIG`：非空 → 标准 `clientcmd` 从该路径加载；空 → InClusterConfig
+（Pod 自身 ServiceAccount）。chart 三模式：
+
+| 模式 | 渲染物 | 适用 |
+|---|---|---|
+| `disabled`（默认） | 仅 SA + Role + RoleBinding（现有 RBAC） | 控制面与业务面同集群同 namespace（**绝大多数部署**） |
+| `provided` | 挂载运维提供的 kubeconfig（`existingSecret` 引用已有 Secret，或 `content` 注入新建 Secret）→ 设 `KUBECONFIG` | **业务面在另一集群**（backend 在管理集群、业务 agent 发布到工作集群）；本地开发 |
+| `synthesized` | chart **部署期合成** kubeconfig：专用 ServiceAccount（绑定 chart 渲染的 Role/ClusterRole）+ 显式创建 `type: kubernetes.io/service-account-token` 的 Secret（1.24+ 不自动生成，**显式创建仍会被 token controller 填充**）+ kubeconfig 文件（`tokenFile` 引用挂载的 token、CA 引用 Pod 投影的 `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`、`server` 默认 `https://kubernetes.default.svc` 可覆写）挂载并设 env | 需要**以独立身份访问本集群**（审计/权限隔离） |
+
+**判别指引（防误用）**：若诉求只是「更大权限 / 跨 namespace」，**不需要 kubeconfig**——开
+`rbac.clusterScope=true`（chart 渲染 ClusterRole + ClusterRoleBinding 绑到 Pod 的 SA）即可；
+KUBECONFIG 的真实价值是**跨集群**（provided）与**独立身份**（synthesized）。
+
+**synthesized 的限制**（README 明示）：长生命周期 SA token（不过期、非 TokenRequest bound
+token，属 deprecated 机制但 1.32 仍支持）→ 安全面比 in-cluster 差一档，token Secret 按
+敏感凭据管理；`server` DNS 名依赖 apiserver 证书 SAN 覆盖 `kubernetes.default.svc`
+（kubeadm/主流托管集群默认覆盖，个别环境用 `kubeconfig.server` 覆写为 Service IP）。
+
+### 6.3 对外暴露：backend / frontend / router 的 Ingress 形态
 
 现网清单只有 backend 的 `/api`+`/healthz`（api）与 `/mcp`（3600 超时）两条 Ingress，
 frontend 仅 NodePort。chart 补齐为**两种对外形态**（values 选择，默认 A）：
@@ -314,8 +334,9 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 5. **是否保留 `manifests/` 自举**（推荐保留，二者并存）
 6. **镜像清单口径**：chart 所需镜像（backend/frontend/router）与业务白名单统一由 values 渲染、
    统一内网仓库前缀（推荐）；`imagePullSecrets` 由 chart 透传到三类 Deployment
-7. **KUBECONFIG 是否纳入**（§4.3 #21）：默认关闭（in-cluster），还是干脆不提供（保持纯 in-cluster）？
-   （推荐提供但默认关闭，供集群外开发/特殊 RBAC 排障）
+7. **集群访问形态**（§6.2 三模式 + `rbac.clusterScope`）：disabled（默认）/ provided（跨集群，
+   运维提供）/ synthesized（**chart 部署期合成**，独立身份访问本集群）；跨 namespace 权限走
+   `rbac.clusterScope` 而非 kubeconfig。推荐三模式全实现、默认 disabled
 8. **EVAL_COLLECTOR_* 是否纳入**（§4.3 F4-F5）：评测录制反代属评测环境专属，纳入 chart 增加面；
    推荐「提供但默认关闭」
 9. **对外暴露形态**（§6.2）：形态 A（统一域名路径分流，默认）+ 形态 B（分域，高级）两档是否够用；
