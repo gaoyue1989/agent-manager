@@ -82,7 +82,7 @@ charts/oaf-platform/
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
 | 外部 Redis | `external.redis.{url}`（业务侧默认值） | 平台自身不使用 Redis；仅用于种子与文档提示 |
 | 外部 OTel | `otel.{enabled,exporter,endpoint,headers,serviceName}` | 经业务 Deployment overlay 注入，见 §5.3 |
-| 业务 overlay | `business.deploymentOverlay.extra`（自备 SMP 单文件；**OTel 自动段已决议移除**，如需 OTel 经 extra 手工注入）、`business.ingressOverlay`（自备，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 渲染期 fail（后端 fail-fast，提前拦避免 CrashLoop） |
+| 业务 overlay | `business.deploymentOverlay.{patch,raw,existingConfigMap}`（三选一：结构化 SMP / 原文粘贴 / 运维自管 ConfigMap；**OTel 自动段已决议移除**，如需 OTel 经此手工注入）、`business.ingressOverlay.*`（同三选一，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 渲染期 fail（后端 fail-fast）；enabled 但三来源全空 → 渲染期 fail |
 | 平台默认值种子 | `platformDefaults.seed.{enabled,llm.*,mysql.*,redis.*,sandbox.*,protocol.*}` | 调平台 API 写入；默认关闭 |
 | 暴露 | `ingress.{className,host,tls,annotations}` + `ingress.backend.host` / `ingress.frontend.host`（分域用） | 仅 Ingress（形态 A/B 见 §6.3），**不提供 NodePort**（已决议）；入口 = 集群 ingress controller |
 | 安全 | `imagePullSecrets[]`、`podSecurityContext`、`existingSecret`（密码类复用已有 Secret） | values 明文仅示例，生产走 `existingSecret` |
@@ -180,7 +180,7 @@ ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
 > 下列机制说明保留作后续演进参考；首版不实施、values 无 otel 组。临时需求可经
 > `business.deploymentOverlay.extra` 手工注入 `OTEL_*` env 实现（机制同文）。
 
-（原方案存档）
+（原方案存档；实际落地见 §13.5：overlay 三来源 + 真机闭环验证）
 
 - **平台默认配置没有 OTel 键**（`internal/service/platformconfig/template.go` 仅 llm/mysql/
   redis/sandbox/protocol，且 `platform_config` 拒绝未知键），所以 OTel 不走默认配置。
@@ -423,3 +423,20 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
   `pack-release-agent.sh` 前置步骤）；
 - 多 release 同 namespace 的冲突（router Service 固定名）——平台按「每 namespace 一套」设计，
   不做多 release 支持。
+
+### 13.5 DEPLOYMENT_TEMPLATE / INGRESS_TEMPLATE 可配置性（评审问询补强）
+
+`DEPLOYMENT_TEMPLATE` 与 `INGRESS_TEMPLATE` 均可由 values 配置，且支持三种来源：
+
+| values | 说明 |
+|---|---|
+| `business.deploymentOverlay.patch`（map） | **推荐**：结构化 Strategic Merge Patch，values 里直接写 YAML（如给业务容器追加 `OTEL_*` env） |
+| `business.deploymentOverlay.raw`（string） | 原样粘贴 overlay 文本（复杂/既有文件迁移） |
+| `business.deploymentOverlay.existingConfigMap` | 运维自管的已有 ConfigMap（chart 不渲染，直接挂载 + 设 env；`existingConfigMapKey` 默认 `overlay.yaml`） |
+
+`business.ingressOverlay.*` 同构（仅 host 模式）。`enabled=true` 而三来源全空 → 渲染期 fail。
+
+**真机闭环验证**（kind 独立 ns）：values 的 `patch` 注入
+`OTEL_TRACES_EXPORTER=otlp` / `OTEL_EXPORTER_OTLP_ENDPOINT=...` → chart 渲染 overlay
+ConfigMap → 后端 `DEPLOYMENT_TEMPLATE` 指向 → 平台发布 release-agent 时 SMP 合并 →
+**业务 Deployment 实际带上两个 OTEL env**（实测 `kubectl get deploy` 断言通过）。

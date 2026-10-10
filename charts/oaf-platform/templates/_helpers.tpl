@@ -112,6 +112,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else if ne .Values.backend.kubeconfig.mode "synthesized" -}}
 {{- fail "backend.kubeconfig.mode 只能是 synthesized 或 provided" -}}
 {{- end -}}
+{{- if .Values.business.deploymentOverlay.enabled -}}
+{{- if and (not .Values.business.deploymentOverlay.patch) (not .Values.business.deploymentOverlay.raw) (not .Values.business.deploymentOverlay.existingConfigMap) -}}
+{{- fail "business.deploymentOverlay.enabled=true 但未给内容：三选一（patch 结构化 / raw 文本 / existingConfigMap 已有 ConfigMap）" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.business.ingressOverlay.enabled -}}
+{{- if and (not .Values.business.ingressOverlay.patch) (not .Values.business.ingressOverlay.raw) (not .Values.business.ingressOverlay.existingConfigMap) -}}
+{{- fail "business.ingressOverlay.enabled=true 但未给内容：三选一（patch / raw / existingConfigMap）" -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.platformDefaults.seed.enabled -}}
 {{- if not .Values.platformDefaults.seed.values -}}
 {{- fail "platformDefaults.seed.enabled=true 但 values 为空：请给 LLM/MySQL/Redis 等默认值，或关闭 seed" -}}

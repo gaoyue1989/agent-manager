@@ -39,7 +39,7 @@ air-gapped 无 helm 时：`helm template oaf ./charts/oaf-platform -f values-off
 | `backend.kubeconfig.mode` | `synthesized`（默认，部署期合成：专用 SA + token Secret + kubeconfig）或 `provided`（跨集群，给 `existingSecret`/`content`） |
 | `backend.authToken` | REST/MCP Bearer（生产必填；建议 `backend.existingSecret`，key `auth-token`） |
 | `business.resources` | 业务 Pod 资源四元组（渲染 `RESOURCE_*`，影响每个发布的服务） |
-| `business.deploymentOverlay` | `DEPLOYMENT_TEMPLATE`（SMP，作用于每个业务 Deployment）。OTel 暂不考虑，如需经 `extra` 注入 |
+| `business.deploymentOverlay` | `DEPLOYMENT_TEMPLATE`（SMP，作用于每个业务 Deployment）：三选一 `patch`（结构化，推荐）/ `raw`（原文）/ `existingConfigMap`（运维自管）。OTel 暂不考虑，如需经此注入 `OTEL_*` |
 | `business.ingressOverlay` | `INGRESS_TEMPLATE`，**仅 host 模式**（router 模式配置即渲染期报错） |
 | `platformDefaults.seed` | bootstrap 第①步：写平台默认配置（**只接受平台配置键**：llm/mysql/redis/sandbox/protocol 分组，键名同 `backend/internal/service/platformconfig/template.go`；未知键被平台 400 拒绝），使发布向导自动预填 |
 | `releaseAgent.env` | 发布助手的**业务 env**（服务级键如 `SANDBOX_ENABLED`/`FILE_EXTERNAL_URL_PREFIXES`/`AGENT_REDIS_PREFIX`）；与 `platformDefaults.seed.values` 合并（后者优先） |

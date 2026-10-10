@@ -155,12 +155,12 @@ spec:
         {{- if .Values.business.deploymentOverlay.enabled }}
         - name: business-overlay
           configMap:
-            name: {{ include "oaf.fullname" . }}-business-overlay
+            name: {{ default (printf "%s-business-overlay" (include "oaf.fullname" .)) .Values.business.deploymentOverlay.existingConfigMap }}
         {{- end }}
         {{- if and .Values.business.ingressOverlay.enabled (eq .Values.routing.mode "host") }}
         - name: ingress-overlay
           configMap:
-            name: {{ include "oaf.fullname" . }}-ingress-overlay
+            name: {{ default (printf "%s-ingress-overlay" (include "oaf.fullname" .)) .Values.business.ingressOverlay.existingConfigMap }}
         {{- end }}
         {{- if eq .Values.backend.kubeconfig.mode "synthesized" }}
         - name: kubeconfig

@@ -122,12 +122,24 @@ business:
     requestsMem: 256Mi
     limitsCpu: "1"
     limitsMem: 1Gi
+  # DEPLOYMENT_TEMPLATE（Strategic Merge Patch，作用于每个业务 Deployment；OTel 已决议
+  # 暂不考虑，如需经此注入 OTEL_* env）。三选一来源：
+  #   patch            —— 结构化 SMP（推荐，values 里写 YAML map）
+  #   raw              —— 原样粘贴的 overlay 文本（复杂/既有文件迁移用）
+  #   existingConfigMap—— 运维自管的已有 ConfigMap（chart 不渲染，直接挂载）
   deploymentOverlay:
-    enabled: false               # DEPLOYMENT_TEMPLATE（Strategic Merge Patch；OTel 暂不考虑，如需经 extra 注入）
-    extra: ""
+    enabled: false
+    patch: {}
+    raw: ""
+    existingConfigMap: ""
+    existingConfigMapKey: overlay.yaml
+  # INGRESS_TEMPLATE：仅 host 模式（router 模式配置即渲染期报错）；同样三选一
   ingressOverlay:
-    enabled: false               # INGRESS_TEMPLATE：仅 host 模式（router 模式配置即渲染期报错）
-    content: ""
+    enabled: false
+    patch: {}
+    raw: ""
+    existingConfigMap: ""
+    existingConfigMapKey: overlay.yaml
 
 # ---------- 平台默认配置种子（bootstrap Job 第①步；同时作为发布助手的 env） ----------
 platformDefaults:
