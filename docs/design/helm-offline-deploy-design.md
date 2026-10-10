@@ -30,11 +30,11 @@ PVC 创建、镜像 tag、`INGRESS_HOST` 等环境相关值——换环境要改
 
 | 组件 | 渲染对象 | 条件 |
 |---|---|---|
-| platform-backend | ServiceAccount + Role + RoleBinding、Deployment、Service（ClusterIP + 可选 NodePort）、Ingress（`/api`、`/healthz`、`/mcp`） | 恒有（Ingress / NodePort 可关） |
-| platform-frontend | Deployment、Service（ClusterIP + 可选 NodePort） | 恒有 |
+| platform-backend | ServiceAccount + Role + RoleBinding（synthesized 模式下另有专用 SA/token Secret，见 §6.2）、Deployment、Service（ClusterIP）、Ingress（`/api`、`/healthz`、`/mcp`） | 恒有 |
+| platform-frontend | Deployment、Service（ClusterIP）、Ingress（§6.3 形态 A/B） | 恒有 |
 | platform-router | ConfigMap（nginx.conf）、Deployment（副本数可配，默认 2）、Service、共享 Ingress（`/agent`） | `routing.mode=router`（默认） |
 | 业务 Deployment overlay | ConfigMap（供后端 `DEPLOYMENT_TEMPLATE` 挂载） | `business.deploymentOverlay.enabled` |
-| 平台默认配置种子 | post-install/post-upgrade Job（调平台 API） | `platformDefaults.seed.enabled` |
+| **bootstrap Job**（平台自举钩子） | post-install/post-upgrade Job，两步可独立开关：①写入平台默认配置（§5.2）；②上传 release-agent OAF 包并经发布 API 起服务（§5.4） | `platformDefaults.seed.enabled` / `releaseAgent.enabled` |
 | **不管理** | MySQL、Redis、OpenSandbox、业务 agent（Deployment/Service/Ingress/CM/Secret）、**任何 PVC**、namespace 内既有对象 | — |
 
 ## 3. Chart 目录结构
@@ -45,12 +45,14 @@ charts/oaf-platform/
 ├── values.yaml                       # 全量默认值（kind 开发语义）
 ├── values-offline.yaml.example       # 离线示例（内网仓库前缀 / 外部中间件 / 已有 PVC）
 ├── README.md                         # 快速开始、内网仓库配置、命名同步约束、卸载语义
+├── resources/release-agent.oaf.zip   # 发布助手 OAF 包（构建期由 scripts/pack-release-agent.sh 从 release-agent/ 源打包）
+├── scripts/pack-release-agent.sh     # 构建期执行：源 → zip（chart 打包流水线用，装期不跑）
 └── templates/
     ├── _helpers.tpl                  # 命名/labels/必填校验（required）
     ├── namespace.yaml                # 可选创建（默认跟随 Release.Namespace）
     ├── serviceaccount.yaml           # SA + Role + RoleBinding（沿用现有 RBAC 规则集）
     ├── backend-deployment.yaml
-    ├── backend-service.yaml          # ClusterIP + 可选 NodePort
+    ├── backend-service.yaml          # ClusterIP（不渲染 NodePort，已决议）
     ├── backend-ingress.yaml          # /api /healthz /mcp（可选，class/annotations 可配）
     ├── frontend-deployment.yaml
     ├── frontend-service.yaml
@@ -59,7 +61,7 @@ charts/oaf-platform/
     ├── router-service.yaml
     ├── router-ingress.yaml           # 共享 /agent Ingress（零 rewrite 注解）
     ├── business-overlay-configmap.yaml
-    ├── seed-defaults-job.yaml        # 可选：写入平台默认配置
+    ├── bootstrap-job.yaml            # 自举钩子：默认配置种子 + 发布助手（分步开关，§5.2/§5.4）
     └── NOTES.txt                     # 装后指引：入口地址、自检命令、回滚与卸载语义
 ```
 
@@ -73,8 +75,8 @@ charts/oaf-platform/
 | 镜像 | `images.backend.{repository,tag,pullPolicy}`、`images.frontend.*`、`images.router.*` | **repository 含内网 registry 前缀**（如 `harbor.internal/oaf/platform-backend`）；凭据经 `imagePullSecrets` |
 | 业务镜像白名单 | `images.business[]`（`{image,label}`）、`images.defaultBusiness` | 渲染 `AVAILABLE_IMAGES` / `DEFAULT_IMAGE`（**必须与实际可拉取 tag 一致**，否则发布被 400 拒） |
 | 业务 Pod 资源 | `business.resources.{requestsCpu,requestsMem,limitsCpu,limitsMem}` | 渲染 `RESOURCE_*` 四元组（后端 config.go 默认 250m/256Mi/1/1Gi，作用于**每个业务 Deployment**） |
-| 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | router 模式：`host`=对外 IP、`port`=NodePort；host 模式额外 `hostSuffix` |
-| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 三模式见 §6.2（默认 disabled=in-cluster） |
+| 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | `host`/`port` = **集群 ingress controller 的对外入口地址**（Endpoint 展示拼装用）；host 模式额外 `hostSuffix` |
+| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 两模式（§6.2，**默认 synthesized 部署期合成**） |
 | 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl,evalCollector.{mode,agentUrl}}` | `agentInternalUrl` 默认指向 release-agent；`publicApiUrl`（`NEXT_PUBLIC_API_URL`，默认空=服务端反代同源）；`evalCollector.*` 为评测录制反代模式（默认关闭，仅评测环境） |
 | 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.4 |
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
@@ -82,9 +84,11 @@ charts/oaf-platform/
 | 外部 OTel | `otel.{enabled,exporter,endpoint,headers,serviceName}` | 经业务 Deployment overlay 注入，见 §5.3 |
 | 业务 overlay | `business.deploymentOverlay`（OTel 自动段 + `extra` 自备 SMP，合并渲染**单文件**——后端只认一个 `DEPLOYMENT_TEMPLATE` 路径）、`business.ingressOverlay`（自备，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 安装即报错（后端对 suffix 空 + `INGRESS_TEMPLATE` 非空启动 fail-fast，chart 提前拦避免 CrashLoop） |
 | 平台默认值种子 | `platformDefaults.seed.{enabled,llm.*,mysql.*,redis.*,sandbox.*,protocol.*}` | 调平台 API 写入；默认关闭 |
-| 暴露 | `ingress.{enabled,className,host,tls,annotations}` + `ingress.backend.host` / `ingress.frontend.host`（分域用）+ `nodePort.{enabled,backend,frontend}` | 两种对外形态见 §6.2；NodePort 默认关（kind 调试可开，30880/30881） |
+| 暴露 | `ingress.{className,host,tls,annotations}` + `ingress.backend.host` / `ingress.frontend.host`（分域用） | 仅 Ingress（形态 A/B 见 §6.3），**不提供 NodePort**（已决议）；入口 = 集群 ingress controller |
 | 安全 | `imagePullSecrets[]`、`podSecurityContext`、`existingSecret`（密码类复用已有 Secret） | values 明文仅示例，生产走 `existingSecret` |
 | 通用调度 | `backend/frontend/router` 各自的 `podAnnotations`、`nodeSelector`、`tolerations`、`affinity` | 生产常见诉求；三组件独立配置 |
+| 发布助手 | `releaseAgent.{enabled,name,packageSource,image}` | 默认开；`packageSource`: `bundled`（chart 内置 zip）/ `packageId`（环境已导入包 id）；详见 §5.4 |
+| bootstrap 镜像 | `images.bootstrapJob.{repository,tag}` | 自举 Job 的 curl 容器，**同样来自内网仓库** |
 | router 高级 | `router.nginx.{clientMaxBodySize,readTimeout,sendTimeout}` | 默认即 subpath-routing 决议值（200m / 3600s），仅超出现状需求时调整 |
 | 数据卷绑定 | `persistence.mountPath`（默认 `/data`） | 渲染时**同时**设后端 `DATA_ROOT` 与挂载点（两者必须一致，chart 绑定） |
 
@@ -151,13 +155,13 @@ platformDefaults: { seed: { enabled: false } }
   （后端启动 `AutoMigrate` 自建表）；业务侧另需 `oaf_checkpoint` 库（§5.2）。
 - chart **不**创建库、不提供备份/迁移 Job。
 
-### 5.2 业务服务 → 外部 MySQL(checkpoint) / Redis（经平台默认配置）
+### 5.2 业务服务 → 外部 MySQL(checkpoint) / Redis（经平台默认配置，bootstrap Job 第①步）
 
 - 平台**不向业务 Pod 注入**这两类配置：业务 env 来自「发布时配置」，而发布向导的默认值
   来自**平台默认配置**（`platform_config` 表 → `GET /platform-config/defaults` 预填）。
-- 因此 chart 通过 `platformDefaults.seed`（可选 Job）把 `external.mysql`（`CHECKPOINT_JDBC_URL`/
-  `CHECKPOINT_USERNAME`/`CHECKPOINT_PASSWORD`）与 `external.redis`（`AGENT_REDIS_URL`）
-  写入平台默认配置 → 「发布新服务」自动带出 → 一键语义闭环。
+- 因此 chart 通过 **bootstrap Job 第①步**（`platformDefaults.seed.enabled`，默认开）把
+  `external.mysql`（`CHECKPOINT_JDBC_URL`/`CHECKPOINT_USERNAME`/`CHECKPOINT_PASSWORD`）与
+  `external.redis`（`AGENT_REDIS_URL`）等写入平台默认配置 → 「发布新服务」自动带出 → 一键语义闭环。
 - 不启用种子时：运维在 `/settings` 页手工维护（chart 不阻塞部署）。
 - 文档必须强调（既有约束）：**多服务共享同一 MySQL/Redis 时必须每服务独立 checkpoint 库名
   与 `AGENT_REDIS_PREFIX`**，平台当前不自动派生（已知缺口）。
@@ -177,7 +181,28 @@ platformDefaults: { seed: { enabled: false } }
 - 备选（未采纳）：给平台默认配置新增 OTel 分组 → 需后端改代码（模板 + 校验），超出本
   chart 范围，列为后续演进。
 
-### 5.4 PVC 复用（含一处硬编码约束，需决议）
+### 5.4 发布助手自举（bootstrap Job 第②步，release-agent 亦是 chart 的一部分）
+
+发布助手（release-agent，智能发布 OAF 包）默认随 chart 一起交付，装完即可用——前端 assistant
+页的 `AGENT_INTERNAL_URL` 默认就指向 `oaf-release-agent-svc`，不装助手则该页不可用。
+
+- **交付物**：`release-agent/`（仓库源）在 **chart 构建期**由 `scripts/pack-release-agent.sh`
+  打成 OAF zip 入 `resources/release-agent.oaf.zip` 随 chart 分发（装期不打包，离线无依赖）；
+  `packageSource: packageId` 时改用环境已导入的包（复用在线编辑产物，灵活性）。
+- **执行**（bootstrap Job 第②步，`releaseAgent.enabled` 默认开，①②独立开关）：
+  1. 上传包：`POST /api/v1/packages`（multipart，bundled zip）→ 得 packageId；
+  2. 发布服务：`POST /api/v1/services`（name=`release-agent`，image=`releaseAgent.image`
+     默认 `images.defaultBusiness`，**env 组装自 `platformDefaults.seed.*` 同一份 values**——
+     与①天然一致，助手开箱即有 LLM/MySQL/Redis 配置）。
+- **顺序**：①写默认值 → ②发布助手（同一 Job 内串行）；幂等：已存在同名服务则跳过发布步骤
+  （查 `GET /api/v1/services` 判重，升级重跑安全）。
+- **产物语义**：助手是**经平台发布 API 创建的业务服务**（Deployment/Service/无 per-service
+  Ingress，router 模式经 `/agent/release-agent` 访问）——`helm uninstall` **不删除它**（业务对象，
+  §9 语义一致）；删除走平台下线/删除 API。
+- 联动：`frontend.env.agentInternalUrl` 默认值由 chart 按 `releaseAgent.enabled` 渲染
+  （开=指向 `oaf-release-agent-svc`，关=空并提示助手页不可用）。
+
+### 5.5 PVC 复用（含一处硬编码约束，需决议）
 
 - 业务 Pod 与后端的 PVC 名是**编译期常量** `platform-data`（`internal/k8s/objects.go`
   `PVCName`），后端无法让「任意已有 PVC 名」生效。
@@ -201,30 +226,30 @@ platformDefaults: { seed: { enabled: false } }
 - `INGRESS_HOST`/`INGRESS_PORT`/`INGRESS_CLASS` 由 `routing.*` 渲染（Endpoint 展示与 Ingress 构造）。
 - 共享 Ingress 的机会性注解（timeout/ssl-redirect）保留，语义同 subpath-routing §6.4。
 
-### 6.2 后端集群访问（KUBECONFIG 三模式，chart 可部署期创建）
+### 6.2 后端集群访问（KUBECONFIG 两模式，已决议：**默认 synthesized 部署期合成**）
 
-后端 `main.go` 读 `KUBECONFIG`：非空 → 标准 `clientcmd` 从该路径加载；空 → InClusterConfig
-（Pod 自身 ServiceAccount）。chart 三模式：
+后端 `main.go` 读 `KUBECONFIG`：非空 → 标准 `clientcmd` 从该路径加载；空 → InClusterConfig。
+chart 两模式（`backend.kubeconfig.mode`）：
 
 | 模式 | 渲染物 | 适用 |
 |---|---|---|
-| `disabled`（默认） | 仅 SA + Role + RoleBinding（现有 RBAC） | 控制面与业务面同集群同 namespace（**绝大多数部署**） |
+| `synthesized`（**默认，已决议**） | chart **部署期合成** kubeconfig：专用 ServiceAccount（chart 渲染的 Role/ClusterRole 绑定到**该 SA**）+ 显式创建 `type: kubernetes.io/service-account-token` 的 Secret（1.24+ 不自动生成，**显式创建仍会被 token controller 填充**）+ kubeconfig 文件（`tokenFile` 引用挂载的 token、CA 引用 Pod 投影的 `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`、`server` 默认 `https://kubernetes.default.svc` 可覆写）挂载并设 env | 默认形态：**独立显式身份**访问本集群（权限与审计均与 Pod 默认 SA 解耦，RBAC 绑定面清晰） |
 | `provided` | 挂载运维提供的 kubeconfig（`existingSecret` 引用已有 Secret，或 `content` 注入新建 Secret）→ 设 `KUBECONFIG` | **业务面在另一集群**（backend 在管理集群、业务 agent 发布到工作集群）；本地开发 |
-| `synthesized` | chart **部署期合成** kubeconfig：专用 ServiceAccount（绑定 chart 渲染的 Role/ClusterRole）+ 显式创建 `type: kubernetes.io/service-account-token` 的 Secret（1.24+ 不自动生成，**显式创建仍会被 token controller 填充**）+ kubeconfig 文件（`tokenFile` 引用挂载的 token、CA 引用 Pod 投影的 `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`、`server` 默认 `https://kubernetes.default.svc` 可覆写）挂载并设 env | 需要**以独立身份访问本集群**（审计/权限隔离） |
 
-**判别指引（防误用）**：若诉求只是「更大权限 / 跨 namespace」，**不需要 kubeconfig**——开
-`rbac.clusterScope=true`（chart 渲染 ClusterRole + ClusterRoleBinding 绑到 Pod 的 SA）即可；
-KUBECONFIG 的真实价值是**跨集群**（provided）与**独立身份**（synthesized）。
-
-**synthesized 的限制**（README 明示）：长生命周期 SA token（不过期、非 TokenRequest bound
-token，属 deprecated 机制但 1.32 仍支持）→ 安全面比 in-cluster 差一档，token Secret 按
-敏感凭据管理；`server` DNS 名依赖 apiserver 证书 SAN 覆盖 `kubernetes.default.svc`
-（kubeadm/主流托管集群默认覆盖，个别环境用 `kubeconfig.server` 覆写为 Service IP）。
+补充：
+- `rbac.clusterScope=true` 仍独立可用（ClusterRole 语义）；synthesized 模式下 ClusterRole
+  绑定到专用 SA。
+- **synthesized 注意事项**（README 明示）：长生命周期 SA token（不过期、非 TokenRequest
+  bound token，deprecated 机制但 1.32 仍支持）→ token Secret 按敏感凭据管理，`helm uninstall`
+  随 chart 清理；`server` DNS 名依赖 apiserver 证书 SAN 覆盖 `kubernetes.default.svc`
+  （kubeadm/主流托管集群默认覆盖，个别环境用 `kubeconfig.server` 覆写为 Service IP）。
 
 ### 6.3 对外暴露：backend / frontend / router 的 Ingress 形态
 
 现网清单只有 backend 的 `/api`+`/healthz`（api）与 `/mcp`（3600 超时）两条 Ingress，
-frontend 仅 NodePort。chart 补齐为**两种对外形态**（values 选择，默认 A）：
+frontend 仅 NodePort。chart 补齐为**两种对外形态**（values 选择，默认 A；**已决议：不提供
+NodePort 暴露**，入口一律经集群 ingress controller，`routing.host/port` 描述该入口地址供
+Endpoint 展示拼装）：
 
 **形态 A（默认推荐）：统一域名路径分流**
 
@@ -252,7 +277,8 @@ frontend 仅 NodePort。chart 补齐为**两种对外形态**（values 选择，
 
 **渲染规则**：`ingress.backend.host`/`ingress.frontend.host` 均空 → 形态 A（全部挂 `ingress.host`）；
 任一非空 → 按分域渲染（两个都须非空，chart 校验）。`/mcp` 规则恒带 3600 双超时注解；
-`nodePort.enabled=true` 时同时渲染 NodePort Service（无 Ingress 环境的兜底，与 Ingress 并存不冲突）。
+注：不渲染任何 NodePort Service（已决议）；kind/无域名环境直接用 ingress controller 的
+NodePort 入口（`routing.host:port` 即该地址）。
 
 ## 7. 离线部署流程（一键）
 
@@ -324,20 +350,24 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 | PR-B（建议同批） | 后端 `PLATFORM_PVC_NAME` env（+ 测试），解 §5.4 约束 | 无 |
 | PR-C（可选） | kind 上以 chart 部署的冒烟（外部 MySQL/Redis 指向 kind 内实例、PVC 沿用 `platform-data`），复用现有集群与自检命令 | PR-A |
 
-## 12. 评审关注点（建议逐条决议）
+## 12. 评审决议记录（2026-10-10 批量定案）
 
-1. ~~§5.4 PVC 名~~ **已决议（2026-10-10）：PVC 名需可配置** → 实施 `PLATFORM_PVC_NAME`（后端 env，默认
-   `platform-data`；实现已完成待提交，随 PR-B 走），chart `persistence.existingClaim` 指向任意已有 PVC。
-2. **OTel 方案**：确认走 `DEPLOYMENT_TEMPLATE` overlay（备选「平台默认配置加 OTel 组」需后端改动）
-3. **seed Job 是否纳入**：纳入则一键部署后即可直接发布；不纳入则部署后仍需 `/settings` 手工填默认值
-4. **chart 目录位置**：`charts/oaf-platform`（推荐）vs `deploy/helm/...`
-5. **是否保留 `manifests/` 自举**（推荐保留，二者并存）
-6. **镜像清单口径**：chart 所需镜像（backend/frontend/router）与业务白名单统一由 values 渲染、
-   统一内网仓库前缀（推荐）；`imagePullSecrets` 由 chart 透传到三类 Deployment
-7. **集群访问形态**（§6.2 三模式 + `rbac.clusterScope`）：disabled（默认）/ provided（跨集群，
-   运维提供）/ synthesized（**chart 部署期合成**，独立身份访问本集群）；跨 namespace 权限走
-   `rbac.clusterScope` 而非 kubeconfig。推荐三模式全实现、默认 disabled
-8. **EVAL_COLLECTOR_* 是否纳入**（§4.3 F4-F5）：评测录制反代属评测环境专属，纳入 chart 增加面；
-   推荐「提供但默认关闭」
-9. **对外暴露形态**（§6.2）：形态 A（统一域名路径分流，默认）+ 形态 B（分域，高级）两档是否够用；
-   NodePort 是否保留为可选项（推荐保留，kind/无域名环境兜底）
+1. ~~PVC 名~~ **已决议：PVC 名需可配置** → 实施 `PLATFORM_PVC_NAME`（后端 env，默认
+   `platform-data`；代码已完成待提交，随 PR-B），chart `persistence.existingClaim` 指向任意已有 PVC。
+2. **OTel 方案**：**待决议**——默认按 §5.3 走 `DEPLOYMENT_TEMPLATE` overlay（备选「平台默认配置加
+   OTel 组」需后端改动）。
+3. ~~seed Job~~ **已决议：纳入并扩展为 bootstrap Job（两步）**——①默认配置种子（装完即可发布）；
+   ②**发布助手 release-agent 亦是 chart 的一部分**（默认开，构建期打包 OAF zip 随 chart 分发，
+   装后自动上传并经发布 API 起服务，env 与①同一份 values，见 §5.4）。
+4. ~~chart 目录位置~~ **已决议：`charts/oaf-platform`**。
+5. ~~是否保留 manifests/~~ **已决议：保留**（kind 开发自举与 chart 并存）。
+6. ~~镜像清单口径~~ **已决议：统一由 values 渲染、统一内网仓库前缀**；`imagePullSecrets` 由 chart
+   透传（三类 Deployment + bootstrap Job；synthesized 模式的专用 SA 同样可加 imagePullSecrets 不适用
+   ——token Secret 非镜像，无需）。
+7. ~~集群访问形态~~ **已决议：KUBECONFIG 两模式（§6.2）——`provided`（主动提供）与 `synthesized`
+  （部署期自动创建），默认 `synthesized`**；`rbac.clusterScope` 独立可选。
+8. **EVAL_COLLECTOR_\***：**待决议**（推荐提供但默认关闭，仅评测环境）。
+9. ~~对外暴露形态~~ **已决议：形态 A（默认）+ 形态 B（高级）两档，不考虑 NodePort 模式**——
+   入口一律经集群 ingress controller，`routing.host/port` 描述入口地址。
+
+**仅剩待决议：第 2 项（OTel）与第 8 项（EVAL_COLLECTOR）**；其余全部定案，可进入实施。
