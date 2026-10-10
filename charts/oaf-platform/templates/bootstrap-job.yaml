@@ -20,9 +20,10 @@ data:
   seed.json: {{ printf "{\"values\":%s}" (.Values.platformDefaults.seed.values | toJson) | quote }}
   {{- end }}
   {{- if .Values.releaseAgent.enabled }}
+  # 业务 env = seed.values（平台默认配置键）∪ releaseAgent.env（服务级键，后者优先）
   publish.json: {{ printf "{\"packageId\":0,\"name\":%s,\"image\":%s,\"env\":%s,\"secretKeys\":%s,\"replicas\":%d}"
       (.Values.releaseAgent.name | quote) ($img | quote)
-      (.Values.platformDefaults.seed.values | toJson)
+      (merge (deepCopy .Values.platformDefaults.seed.values) .Values.releaseAgent.env | toJson)
       (.Values.platformDefaults.seed.sensitiveKeys | toJson)
       (int .Values.releaseAgent.replicas) | quote }}
   {{- end }}

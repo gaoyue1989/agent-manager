@@ -148,3 +148,8 @@ releaseAgent:
   packageId: 0
   image: ""                      # 空 = images.defaultBusiness
   replicas: 1
+  # 发布助手的**业务 env**（可含服务级键：SANDBOX_ENABLED / FILE_EXTERNAL_URL_PREFIXES /
+  # AGENT_REDIS_PREFIX / AGENT_PROTOCOL_ENABLED 等）；与 platformDefaults.seed.values 合并
+  #（后者覆盖前者）。注意两个键域不同：seed 只接受平台默认配置键（llm/mysql/redis/sandbox/
+  # protocol 分组，见 internal/service/platformconfig/template.go），服务级键写这里。
+  env: {}

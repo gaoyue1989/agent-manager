@@ -386,3 +386,40 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
    入口一律经集群 ingress controller，`routing.host/port` 描述入口地址。
 
 **九项全部定案（2026-10-10），进入实施**：PR-A（chart 本体，含 bootstrap Job/发布助手）→ PR-B（`PLATFORM_PVC_NAME`）→ PR-C（可选冒烟）。
+
+## 13. 实施记录（2026-10-10）
+
+### 13.1 实施清单
+
+| PR | 内容 |
+|---|---|
+| PR-A `feat/helm-offline-chart` | `charts/oaf-platform/`（Chart.yaml / values / values-offline 示例 / README / 15 个模板 / NOTES / `resources/release-agent.oaf.zip` + `scripts/pack-release-agent.sh`）+ 本设计文档 |
+| PR-B `feat/platform-pvc-name`（#111） | 后端 `PLATFORM_PVC_NAME`（默认 `platform-data`）+ 测试 + 文档，解 §5.5 PVC 名约束 |
+
+### 13.2 验证证据
+
+| 项 | 结果 |
+|---|---|
+| `helm lint` | 通过（默认空值下的 `fail` 提示为预期：必填项未给） |
+| 渲染校验矩阵 | **12/12**：负例（host 缺 suffix / router+ingressOverlay / 分域单边 / packageId=0 / seed 空 / provided 缺参 / mode 非法）全拒；正例（host+后缀 / 形态 B / provided+content / 双关）全渲染；host 模式无 router 对象且带 `INGRESS_HOST_SUFFIX` |
+| 清单合法性 | `helm template` + `kubectl apply --dry-run=client` 通过；seed/publish JSON 合法（含合并后的业务 env） |
+| **kind 真机冒烟**（独立 ns `oaf-chart-test` + 独立库，零干扰既有实例） | 一次 `helm install`：backend/frontend/router 全 Ready；**bootstrap Job Complete**（① seed http=200 写入平台默认配置；② 上传内置包 id=1 → 发布 release-agent http=200）；release-agent 由平台建起并达 **running**；经 chart Ingress（`Host: oaf-chart-test.local`）`/api/v1/services` 200、`/agent/release-agent/{health,/,agent-card}` 全 200；**card `url` = `http://oaf-chart-test.local/agent/release-agent/`**（前缀感知经 chart 部署的 router 生效）；`helm uninstall` 后 PVC 保留（卸载语义实测） |
+
+### 13.3 冒烟暴露并修复的两个真问题（设计未预见）
+
+1. **router Service 名是后端常量，不可随 release 名渲染**：后端 `RequireRouter` 按
+   `k8s.RouterServiceName = "platform-router-svc"` 查找，chart 初版渲染为
+   `{release}-router` → backend 启动即 CrashLoop（实测）。已改为固定名 + 注释，
+   并补入 README「命名不变量」。
+2. **seed 与业务 env 是两个键域**：`platform_config` 只接受平台配置键
+   （llm/mysql/redis/sandbox/protocol，未知键 400 `unknown platform config key`），
+   服务级键（`SANDBOX_ENABLED`/`FILE_EXTERNAL_URL_PREFIXES`/`AGENT_REDIS_PREFIX` 等）
+   不能进 seed。已拆 values：`platformDefaults.seed.values`（平台配置键）+
+   `releaseAgent.env`（业务键，合并后作为发布助手 env，后者优先），README 说明两键域。
+
+### 13.4 后续（未纳入本次）
+
+- chart 的 CI 集成（`helm lint`/渲染矩阵脚本进 CI）与 chart 版本发布流水线（含
+  `pack-release-agent.sh` 前置步骤）；
+- 多 release 同 namespace 的冲突（router Service 固定名）——平台按「每 namespace 一套」设计，
+  不做多 release 支持。

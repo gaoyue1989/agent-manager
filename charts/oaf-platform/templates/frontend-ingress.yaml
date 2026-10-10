@@ -44,6 +44,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "oaf.fullname" . }}-router
+                name: platform-router-svc   # 后端常量 k8s.RouterServiceName（不可改名）
                 port: { number: 80 }
           {{- end }}

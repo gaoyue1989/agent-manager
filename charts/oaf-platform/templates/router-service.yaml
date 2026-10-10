@@ -1,9 +1,13 @@
 {{- if eq .Values.routing.mode "router" }}
 {{- $ns := include "oaf.namespace" . -}}
+# ⚠️ 名称固定为 platform-router-svc —— 后端常量 k8s.RouterServiceName
+# （internal/k8s/objects.go）；router 模式启动自检 RequireRouter 按此名查找，
+# 改名会让 backend 启动即 CrashLoop（真机冒烟实测）。与 oaf-/-svc/8100/namespace
+# 同为跨模块命名不变量，不可随 release 名变化。
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "oaf.fullname" . }}-router
+  name: platform-router-svc
   namespace: {{ $ns }}
   labels:
     {{- include "oaf.labels" . | nindent 4 }}

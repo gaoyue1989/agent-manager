@@ -41,7 +41,8 @@ air-gapped 无 helm 时：`helm template oaf ./charts/oaf-platform -f values-off
 | `business.resources` | 业务 Pod 资源四元组（渲染 `RESOURCE_*`，影响每个发布的服务） |
 | `business.deploymentOverlay` | `DEPLOYMENT_TEMPLATE`（SMP，作用于每个业务 Deployment）。OTel 暂不考虑，如需经 `extra` 注入 |
 | `business.ingressOverlay` | `INGRESS_TEMPLATE`，**仅 host 模式**（router 模式配置即渲染期报错） |
-| `platformDefaults.seed` | bootstrap 第①步：写平台默认配置（`values` 为 envKey→value 自由映射，键名同 `backend/internal/service/platformconfig/template.go`），使发布向导自动预填 |
+| `platformDefaults.seed` | bootstrap 第①步：写平台默认配置（**只接受平台配置键**：llm/mysql/redis/sandbox/protocol 分组，键名同 `backend/internal/service/platformconfig/template.go`；未知键被平台 400 拒绝），使发布向导自动预填 |
+| `releaseAgent.env` | 发布助手的**业务 env**（服务级键如 `SANDBOX_ENABLED`/`FILE_EXTERNAL_URL_PREFIXES`/`AGENT_REDIS_PREFIX`）；与 `platformDefaults.seed.values` 合并（后者优先） |
 | `releaseAgent.*` | bootstrap 第②步：**发布助手自举**（默认开）。`packageSource: bundled` 用 chart 内置包，`packageId` 用环境已导入包 |
 
 ## 平台自举钩子（bootstrap Job）
@@ -69,7 +70,8 @@ kubectl -n agent-platform create secret generic oaf-secrets \
 ## 命名不变量（与 backend 同源，改动须两侧同步）
 
 router 模式的 nginx.conf 固化：`oaf-` 前缀 / `-svc` 后缀 / 业务端口 8100 /
-namespace（= 本 chart 的 namespace）。`/agent/{short}` 的 `{short}` 为**去 `oaf-` 前缀的短名**
+namespace（= 本 chart 的 namespace）；**router Service 名固定 `platform-router-svc`**
+（后端常量 `k8s.RouterServiceName`，router 模式启动自检按此查找，改名即 CrashLoop）。`/agent/{short}` 的 `{short}` 为**去 `oaf-` 前缀的短名**
 （与服务详情 Endpoint 一致）；误用 k8sName 会得到 502（未知服务语义）。
 
 ## 卸载语义
