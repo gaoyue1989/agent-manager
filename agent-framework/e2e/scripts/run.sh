@@ -21,6 +21,7 @@ if [ "$FAILED" -eq 0 ]; then
     sandbox) PROJECTS="--project=api-sandbox" ;;
     protocol) PROJECTS="--project=api-protocol" ;;
     protocol-multi) PROJECTS="--project=api-protocol-multi" ;;
+    router)  PROJECTS="--project=api-router" ;;
     *) echo "未知组 $GROUP"; PROJECTS="" ;;
   esac
   if ! npx playwright test $PROJECTS; then FAILED=1; fi

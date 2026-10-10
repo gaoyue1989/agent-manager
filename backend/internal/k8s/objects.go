@@ -87,10 +87,10 @@ type ObjectParams struct {
 	IngressClass string
 	IngressHost  string
 	IngressPort  int
-	// IngressHostSuffix 域名后缀（见 config.IngressHostSuffix）：空=path 模式
-	// （无 host，靠 /agent/{short} 前缀 + rewrite 区分服务），非空=host 模式
-	// （host={K8sName}{suffix}、根路径直出）。内置构造与 overlay 不变量校验
-	// （template.go validateIngress）共用此值判定模式。
+	// IngressHostSuffix 域名后缀（见 config.IngressHostSuffix）：空=router 模式
+	// （不构造 per-service Ingress，子路径路由由集群内 platform-router 承担，
+	// 见 RouterServiceName），非空=host 模式（host={K8sName}{suffix}、根路径直出）。
+	// 内置构造与 overlay 不变量校验（template.go validateIngress）共用此值判定模式。
 	IngressHostSuffix string
 
 	RequestsCPU, RequestsMem, LimitsCPU, LimitsMem string
@@ -236,20 +236,20 @@ func Service(p ObjectParams) *corev1.Service {
 	}
 }
 
-// Ingress 路由形状常量：path 尾缀与 rewrite-target 成对（尾缀第 2 捕获组喂给 /$2），
-// 内置构造与 overlay 校验（template.go validateIngress）共用。
+// Ingress 注解常量（host 模式）：内置构造与 overlay 校验（template.go validateIngress）共用。
+// 注：子路径路由已收敛为 router 模式（集群内 platform-router 原生 rewrite，见
+// manifests/platform-router.yaml 与 subpath-routing-design），平台不再生成任何
+// ingress-nginx rewrite 注解（rewrite-target/use-regex/x-forwarded-prefix）。
 const (
-	ingressPathSuffix   = "(/|$)(.*)"
-	rewriteTargetValue  = "/$2"
-	annRewriteTarget    = "nginx.ingress.kubernetes.io/rewrite-target"
-	annUseRegex         = "nginx.ingress.kubernetes.io/use-regex"
 	annSSLRedirect      = "nginx.ingress.kubernetes.io/ssl-redirect"
 	annProxyReadTimeout = "nginx.ingress.kubernetes.io/proxy-read-timeout"
 	annProxySendTimeout = "nginx.ingress.kubernetes.io/proxy-send-timeout"
-	annXForwardedPrefix = "nginx.ingress.kubernetes.io/x-forwarded-prefix"
 	// hostModeRootPath host 模式的对外路径：根路径直出，overlay 不可改（Endpoint 固定
 	// 派生为 {scheme}://{K8sName}{suffix}/，放开 path 会让展示地址与实际路由错位）。
 	hostModeRootPath = "/"
+	// RouterServiceName router 模式的集群内子路径路由器 Service
+	// （manifests/platform-router.yaml 一次性自举；启动自检见 RequireRouter）。
+	RouterServiceName = "platform-router-svc"
 )
 
 // pathTypePtr 取 PathType 指针（networkingv1.PathType 为值类型，v1 要求非空）。
@@ -264,61 +264,31 @@ func ingressBackend(p ObjectParams) networkingv1.IngressBackend {
 	}}
 }
 
-// Ingress 构造 nginx Ingress，双模式由 IngressHostSuffix 判定（空=path 模式，
-// 即历史行为；非空=host 模式）：
-//   - path 模式：无 host，path /agent/{short}(/|$)(.*) → rewrite /$2（共享入口 IP）
-//   - host 模式：host={K8sName}{suffix}、path 根路径 /、pathType Prefix，
-//     无需 rewrite 注解（每服务独立域名直出）
+// Ingress 构造 host 模式 nginx Ingress（host={K8sName}{suffix}、path 根路径 /、
+// pathType Prefix，仅 ssl-redirect 与 SSE 长超时注解，无 rewrite 相关注解）。
+//
+// 契约：IngressHostSuffix 必须非空——suffix 空 = router 模式，平台不构造任何
+// per-service Ingress（IngressBuilder.Build 对此 fail-fast），子路径路由由集群内
+// platform-router 承担（见 RouterServiceName）。
 func Ingress(p ObjectParams) *networkingv1.Ingress {
-	if p.IngressHostSuffix != "" {
-		// host 模式：只保留 ssl-redirect 与 SSE 长超时，无 rewrite 相关注解
-		return &networkingv1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
-				Annotations: map[string]string{
-					annSSLRedirect: "false",
-					// A2A blocking 请求与 SSE 流式场景需要长超时
-					annProxyReadTimeout: "3600",
-					annProxySendTimeout: "3600",
-				},
-			},
-			Spec: networkingv1.IngressSpec{
-				IngressClassName: &p.IngressClass,
-				Rules: []networkingv1.IngressRule{{
-					Host: p.K8sName + p.IngressHostSuffix,
-					IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
-						Paths: []networkingv1.HTTPIngressPath{{
-							Path:     hostModeRootPath,
-							PathType: pathTypePtr(networkingv1.PathTypePrefix),
-							Backend:  ingressBackend(p),
-						}},
-					}},
-				}},
-			},
-		}
-	}
-	short := ShortName(p.K8sName)
 	return &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
 			Annotations: map[string]string{
-				annRewriteTarget: rewriteTargetValue,
-				annUseRegex:      "true",
-				annSSLRedirect:   "false",
+				annSSLRedirect: "false",
 				// A2A blocking 请求与 SSE 流式场景需要长超时
 				annProxyReadTimeout: "3600",
 				annProxySendTimeout: "3600",
-				// 向后端透传外部前缀（Debug Console 尾斜杠重定向等场景）
-				annXForwardedPrefix: fmt.Sprintf("/agent/%s", short),
 			},
 		},
 		Spec: networkingv1.IngressSpec{
 			IngressClassName: &p.IngressClass,
 			Rules: []networkingv1.IngressRule{{
+				Host: p.K8sName + p.IngressHostSuffix,
 				IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
 					Paths: []networkingv1.HTTPIngressPath{{
-						Path:     fmt.Sprintf("/agent/%s%s", short, ingressPathSuffix),
-						PathType: pathTypePtr(networkingv1.PathTypeImplementationSpecific),
+						Path:     hostModeRootPath,
+						PathType: pathTypePtr(networkingv1.PathTypePrefix),
 						Backend:  ingressBackend(p),
 					}},
 				}},

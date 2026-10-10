@@ -174,38 +174,65 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 
 行为要点：
 
-- **不设置 `INGRESS_TEMPLATE` = 纯内置构造**，行为与未上此功能前完全一致。
-- 占位符发布期按服务替换：`{{K8S_NAME}}`（backend 指向 `{{K8S_NAME}}-svc`）、`{{SHORT_NAME}}`（path 前缀）；**不得硬编码服务名/metadata.name**（启动探针即拒绝）。
-- `annotations`/`labels` 按 key 合并（只写新增项即保留内置注解）；**`rules`/`tls` 写了即整体替换**——改 host/path 必须抄完整 rules 块。
-- 校验不变量（**按 Ingress 模式收放**，模式由 `INGRESS_HOST_SUFFIX` 决定，见 §七之二）：backend 必须指向本服务；每条 path 必须设置 pathType；SSE 长超时注解必须保留；**path 模式**另需 path 保留 `(/|$)(.*)` 尾缀（rewrite 依赖）、`x-forwarded-prefix` 与对外前缀一致（改 path 同步改）。
-- 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：path 模式取规则的 Host（空回落 `INGRESS_HOST`）、配 TLS 按 https 拼、端口取 `INGRESS_PORT`（Host 自带端口不重复拼）；host 模式取规则 Host 形如 `http://{K8sName}{后缀}/`（不拼端口）。改 host 后 DNS/端口可达性由环境自行保证；环境未在 `INGRESS_PORT` 终止 TLS 时不要配 TLS。
+- **不设置 `INGRESS_TEMPLATE` = 纯内置构造**。**模板仅 host 模式可用**（`INGRESS_HOST_SUFFIX` 非空；router 模式无 per-service Ingress，suffix 空 + 模板非空启动即拒）。
+- 占位符发布期按服务替换：`{{K8S_NAME}}`（backend 指向 `{{K8S_NAME}}-svc`）；**不得硬编码服务名/metadata.name**（启动探针即拒绝）。
+- `annotations`/`labels` 按 key 合并（只写新增项即保留内置注解）；**`rules`/`tls` 写了即整体替换**——写 rules 必须抄完整块（host/path 均为不变量，见 §七之三）。
+- 校验不变量（host 模式）：backend 必须指向本服务；每条 path 必须设置 pathType 且恒为 `/`；rule host 恒为 `{K8sName}{后缀}`；SSE 长超时注解必须保留；rewrite-target / use-regex / x-forwarded-prefix 三项必须为空。
+- 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：host 模式取规则 Host 形如 `http(s)://{K8sName}{后缀}/`（不拼端口）。改 host 后 DNS/端口可达性由环境自行保证；环境未终止 TLS 时不要配 TLS。
 - 非法 overlay 启动即失败；发布/republish 期违规直接拒绝（Publish 不落库，Republish 保持原状）。存量服务需 republish 才滚动到新形态。
 
-## 七之二、Ingress host 模式（INGRESS_HOST_SUFFIX，可选）
+## 七之二、业务路由双模式（INGRESS_HOST_SUFFIX：router / host）
 
-默认（不设置 `INGRESS_HOST_SUFFIX`）为 **path 模式**：所有服务共享 ingress 入口 IP，靠 `/agent/{short}` 路径前缀 + rewrite 区分。独立测试集群/生产环境要求每服务独立域名时，设置域名后缀切到 **host 模式**：`host = {K8sName}{后缀}`、`path = /`、pathType `Prefix`，无需 rewrite 注解。
+`INGRESS_HOST_SUFFIX` 是业务路由模式的**唯一开关**（subpath-routing-design v2 起，历史 ingress-nginx 注解 rewrite 的 path 模式已删除）：
 
-> ⚠️ **切换前置检查**：若已配置 `INGRESS_TEMPLATE`（§七），其内容须**先**改成 host 模式样例（`backend/templates/ingress-overlay.example.yaml` 的 H1/H2/H3）再切模式。启动探针与发布期同模式（探针带同一个 `INGRESS_HOST_SUFFIX`），path 形态的 overlay 在 host 模式下会被探针直接判违规 → **platform-backend 启动即失败、CrashLoop、整个平台 API/UI 不可用**（不是"某个服务发布被拒"）。
+| `INGRESS_HOST_SUFFIX` | 模式 | 形态 |
+|---|---|---|
+| 空（默认） | **router** | 不构造 per-service Ingress；统一域名 `/agent/{short}` 子路径由集群内 **platform-router** nginx 承接（§七之三部署）；Endpoint = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/` |
+| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解 |
+
+> ⚠️ **router 模式启动自检**：suffix 空时 backend 启动即检查 `platform-router-svc` 存在，缺失则 CrashLoop（报错指向 §七之三的 manifest）——先 apply platform-router 再升级 backend。**suffix 空 + `INGRESS_TEMPLATE` 非空同样启动即拒**（router 无 per-service Ingress，模板无处生效）。
+
+host 模式切换（后缀必须以 `.` 开头、各段 ≤63、叠加最长 K8sName 后总长 ≤253）：
 
 ```bash
-# 1) 切换到 host 模式（后缀必须以 "." 开头；非法格式启动即失败）
-#    ⚠️ 若已配 INGRESS_TEMPLATE，须先把 overlay 内容改成 H1/H2/H3 形态，否则下方
-#       rollout restart 会让 backend CrashLoop
+# ⚠️ 若已配 INGRESS_TEMPLATE，须先把 overlay 内容改成 H1/H2/H3 形态（host 模式样例）
 kubectl -n agent-platform set env deploy/platform-backend \
   INGRESS_HOST_SUFFIX=.region-c86-test.test-kzx1.cncb
-
-# 2) 生效：滚动重启（存量服务经 republish / 重新上线后收敛到新形态）
 kubectl -n agent-platform rollout restart deployment/platform-backend
-
-# 回滚=去掉环境变量，回到 path 模式
+# 回滚：清空后缀并重启；router 模式恢复需 platform-router 已部署（§七之三）
 kubectl -n agent-platform set env deploy/platform-backend INGRESS_HOST_SUFFIX-
-kubectl -n agent-platform rollout restart deployment/platform-backend
 ```
 
 行为要点：
 
-- **不设置 = path 模式**，行为与未上此功能前完全一致（默认向后兼容）。
-- 后缀格式启动即校验（fail-fast，backend CrashLoop 日志指明违例项）：必须以 `.` 开头、去点后为合法 DNS-1123 subdomain、**各段 ≤63 字符**、叠加最长 K8sName（67 字符）后总长 ≤253（即后缀 ≤186 字符）。
-- 需 `INGRESS_CLASS` 有值（默认 `nginx`）；域名后缀须在集群 DNS/证书侧可解析——平台只生成 Ingress 对象，不代管 DNS 与证书。
-- 与 `INGRESS_TEMPLATE` 可叠加（§七）：host 模式下 overlay 仍可追加注解、TLS，但 **host 不可偏离** `{K8sName}{后缀}`、**path 恒为 `/`**、backend 仍须指向本服务，且 **rewrite-target / use-regex / x-forwarded-prefix 三项必须为空**。**照抄 path 模式模板（含 x-forwarded-prefix）会导致启动即失败**：探针与发布期同模式，backend CrashLoop、日志指明违例项（该注解非空时业务 Agent 的 `/debug` 还会 302 到 `{该值}/debug/` 而 404，只是根本走不到那一步）。示例文件的 P1-P3 / H1-H3 两组样例不可混抄。
-- 展示地址（Endpoint）随之切换为 `http://{K8sName}{后缀}/`（配 TLS 则 https）。**存量服务不做后台批量迁移**：模式切换后经 republish / 重新上线（StartAgain）时 Ingress 覆盖为新形态、Endpoint 同步重算落库。
+- host 模式需 `INGRESS_CLASS` 有值（默认 `nginx`）；域名后缀须在集群 DNS/证书侧可解析——平台只生成 Ingress 对象，不代管 DNS 与证书。
+- **存量服务不做后台批量迁移**：模式切换后经 republish / 重新上线（StartAgain）收敛——host 模式刷 Ingress 形态；router 模式对同名 Ingress「存在即删除」（清理 path 时代残留）——Endpoint 均同步重算落库。残留兜底：`kubectl -n agent-platform delete ingress -l app.kubernetes.io/managed-by=oaf-platform`（排除 `platform-agent-router` 自身）。
+- 展示地址（Endpoint）随模式切换：router = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`（与历史 path 模式同形状，前端零改动）；host = `http(s)://{K8sName}{后缀}/`。
+
+## 七之三、platform-router 部署（router 模式，默认）
+
+router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）：
+
+```bash
+# kind 环境先导入镜像
+docker pull nginx:1.27.1-alpine && kind load docker-image nginx:1.27.1-alpine --name <集群名>
+
+# 部署 router（ConfigMap + Deployment×2 + Service + 共享 Ingress /agent）
+kubectl apply -f manifests/platform-router.yaml
+kubectl -n agent-platform rollout status deployment/platform-router --timeout=120s
+
+# 升级窗口（存量 path 模式集群，subpath-routing §4.6）：
+# 1) apply 本 manifest（router 就绪；共享 Ingress 与存量业务 Ingress 的 /agent/* 路径
+#    重叠期内两条路由终点等价——都到 svc:8100 根路径，无流量错误，仅尽快收敛）
+# 2) 更新 platform-backend 镜像 + rollout restart（router 模式激活，启动自检通过）
+# 3) 逐服务 republish / startagain：存量 Ingress 被清理、Endpoint 收敛
+# 4) 残留兜底：按平台归属 label 批量删业务 Ingress（排除 platform-agent-router）
+```
+
+运维注意：
+
+- **已知限制（非 nginx controller 集群）**：共享 Ingress 上的 timeout/ssl-redirect 注解会失效（回落 controller 默认值）——SSE 由 agent-framework 20s 心跳保活（小于常见 60s 读超时）；**长时间无数据的 A2A blocking 请求可能被 controller 默认超时截断**，此类集群需在 controller 侧调大默认超时。
+- **命名不变量**：nginx.conf 固化 `oaf-` 前缀、`-svc` 后缀、端口 8100、namespace `agent-platform`——backend 命名规则变更须同步 manifest。
+- **路径段为短名**：`/agent/{short}` 的 short 是去 `oaf-` 前缀的短名（与服务详情 Endpoint 落库值一致，如 `oaf-order-agent` → `/agent/order-agent/`）；误用 K8sName（`/agent/oaf-order-agent/`）会解析到不存在的 `oaf-oaf-order-agent-svc` → 502（未知服务语义，非缺陷）。
+- router 滚动升级会断其上的 SSE 长连接（`maxUnavailable: 0` 只保新建连接），按运维窗口操作。
+- 未知/已删服务返回 502（DNS 解析失败 + 10s 缓存窗口），与历史 ingress 404 语义不同。

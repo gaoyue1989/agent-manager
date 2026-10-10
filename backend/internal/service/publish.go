@@ -38,7 +38,8 @@ type ConfigView struct {
 	IngressClass string
 	IngressHost  string
 	IngressPort  int
-	// IngressHostSuffix 业务 Ingress 域名后缀：空=path 模式（历史行为），非空=host 模式
+	// IngressHostSuffix 业务路由模式开关：空=router 模式（无 per-service Ingress，展示
+	// 地址纯配置拼装），非空=host 模式（历史行为）
 	IngressHostSuffix              string
 	DefaultImage                   string
 	ImageOptions                   []ImageOption
@@ -138,17 +139,19 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// 空值键不落 CM/Secret（设计 §3.3，同 k8s.EnvSecret 注释）：发布没有「空串=删除」三态
 	// 语义，空值是无意义输入（向导预填的默认值已由 GetPlatformDefaults 过滤，剩余空串来自
 	// 用户手工清空输入框）；空串 env 会让 Spring 占位符 ${VAR:default} 不回落默认值。
-	// PATCH /services/:id/env 的「空串=显式删除」语义不受影响——由 resolveEnvMerge 承担。
+	// 「空串=显式删除」的 PATCH 三态语义由 resolveEnvMerge 承担；三条写路径
+	// （Publish/UpdateEnv/Republish）出口另有 dropEmptyEnv 兜底，空值永不进入 CM/Secret。
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
 	params := c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath)
 	params.EnvSecret = secret
-	// Ingress overlay 纯函数前置：非法 overlay 直接拒绝且不落库（与 image 校验同级，
-	// 模板违规属平台配置错误，不产生 deploying/error 垃圾记录）；同时派生展示
-	// endpoint——模板可改 host/path，公式随合并后 Ingress 走（无 overlay 时与旧公式一致）。
-	ing, err := c.ingressBuilder().Build(params)
+	// 展示 endpoint 派生 + Ingress overlay 纯函数前置（host 模式）：非法 overlay 直接
+	// 拒绝且不落库（与 image 校验同级，模板违规属平台配置错误，不产生 deploying/error
+	// 垃圾记录）；模板可改 host/TLS，公式随合并后 Ingress 走。router 模式无
+	// per-service Ingress，纯配置拼装（RouterEndpoint）。
+	endpoint, err := c.deriveEndpoint(params)
 	if err != nil {
-		return nil, fmt.Errorf("ingress: %w", err)
+		return nil, err
 	}
 	svc := &store.ServiceEntity{
 		K8sName:       k8sName,
@@ -161,7 +164,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		Status:        store.StatusCreated,
 		AgentCardJSON: "{}",
 		SkillsJSON:    "[]",
-		Endpoint:      k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix),
+		Endpoint:      endpoint,
 		ClusterURL:    fmt.Sprintf("http://%s-svc.%s.svc.cluster.local:%d", k8sName, c.Cfg.Namespace, k8s.AgentPort),
 		ShortName:     k8s.ShortName(k8sName),
 	}
@@ -189,27 +192,39 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	return svc, nil
 }
 
-// applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service+Ingress，并返回已落集群的
-// Ingress 对象（供调用方派生展示地址，避免二次 Build）。Deployment/Ingress 均经 builder
-// （内置构造 + 可选环境 overlay 合并 + 不变量校验），overlay 违规视为 apply 失败，
-// 服务转 error 状态。Build 纯函数零成本前置：非法 overlay 时任何对象不落半套资源。
+// applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service，并返回已落集群的
+// Ingress 对象（host 模式，供调用方派生展示地址，避免二次 Build；router 模式恒 nil）。
+// Deployment/Ingress 均经 builder（内置构造 + 可选环境 overlay 合并 + 不变量校验），
+// overlay 违规视为 apply 失败，服务转 error 状态。Build 纯函数零成本前置：非法
+// overlay 时任何对象不落半套资源。
+//
+// router 模式（IngressHostSuffix 空）：不构造 per-service Ingress（子路径路由由集群内
+// platform-router 承担），并对同名 Ingress「存在即删除」（NotFound 容忍）——存量
+// path 模式对象与共享 /agent Ingress 路径重叠，经显式发布 API 收敛（不做后台批量迁移）。
 func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 	dep, err := c.deployBuilder().Build(p)
 	if err != nil {
 		return nil, fmt.Errorf("deployment: %w", err)
 	}
-	ing, err := c.ingressBuilder().Build(p)
-	if err != nil {
-		return nil, fmt.Errorf("ingress: %w", err)
+	var ing *networkingv1.Ingress
+	if c.Cfg.IngressHostSuffix == "" {
+		if err := c.K8s.DeleteIngress(p.Namespace, p.K8sName); err != nil {
+			return nil, fmt.Errorf("ingress cleanup: %w", err)
+		}
+	} else {
+		ing, err = c.ingressBuilder().Build(p)
+		if err != nil {
+			return nil, fmt.Errorf("ingress: %w", err)
+		}
+		if err := c.K8s.EnsureIngress(ing); err != nil {
+			return nil, fmt.Errorf("ingress: %w", err)
+		}
 	}
 	if err := c.applyServiceEnvObjects(p); err != nil {
 		return nil, err
 	}
 	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
 		return nil, fmt.Errorf("service: %w", err)
-	}
-	if err := c.K8s.EnsureIngress(ing); err != nil {
-		return nil, fmt.Errorf("ingress: %w", err)
 	}
 	if err := c.K8s.EnsureDeployment(dep); err != nil {
 		return nil, fmt.Errorf("deployment: %w", err)
@@ -260,6 +275,8 @@ func (c *Core) asyncWaitAndRegister(id uint) {
 // UpdateEnv 全量替换 env 并滚动重启。
 // env 为非敏感部分的全量覆盖；模板敏感键或 secretKeys 指定键路由进服务 Secret，
 // 三态语义：出现且非空=设置、出现且空串=删除（回落平台默认）、未出现=sticky 保持不变。
+// 非敏感份空串=不设置（全量覆盖下「不写即删除」，空串无意义），出口 dropEmptyEnv
+// 兜底保证空值不落 CM/env_json/Secret（设计 §3.3）。
 // 旧 env_json 中的存量敏感键自动迁入服务 Secret（设计 §3.6 防丢失规则）。
 func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*store.ServiceEntity, error) {
 	if err := ValidateEnv(env); err != nil {
@@ -283,6 +300,9 @@ func (c *Core) UpdateEnv(id uint, env map[string]string, secretKeys []string) (*
 		return nil, err
 	}
 	plain, secret := resolveEnvMerge(oldPlain, oldSecret, env, secretKeys)
+	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
+	dropEmptyEnv(plain)
+	dropEmptyEnv(secret)
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
@@ -342,6 +362,9 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		secretKeys = opt.SecretKeys
 	}
 	plain, secret := resolveEnvMerge(oldPlain, oldSecret, env, secretKeys)
+	// 出口兜底：空值永不进入 CM/env_json/env_secret_json（设计 §3.3，与 Publish 同语义）
+	dropEmptyEnv(plain)
+	dropEmptyEnv(secret)
 	if len(plain)+len(secret) > MaxEnvKeys {
 		return nil, fmt.Errorf("too many env keys: %d (max %d)", len(plain)+len(secret), MaxEnvKeys)
 	}
@@ -365,15 +388,15 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		replicas = *opt.Replicas
 	}
 
-	// Ingress overlay 纯函数前置（事务前）：非法 overlay 直接拒绝，库与 K8s 均保持
-	// 原状；同时派生展示 endpoint 随事务回写（模板/配置变更后展示地址跟随合并结果）。
+	// Ingress overlay 纯函数前置（事务前，host 模式）：非法 overlay 直接拒绝，库与 K8s
+	// 均保持原状；同时派生展示 endpoint 随事务回写（模板/配置变更后展示地址跟随合并
+	// 结果）。router 模式纯配置拼装（RouterEndpoint）。
 	params := c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID))
 	params.EnvSecret = secret
-	ing, err := c.ingressBuilder().Build(params)
+	endpoint, err := c.deriveEndpoint(params)
 	if err != nil {
-		return nil, fmt.Errorf("ingress: %w", err)
+		return nil, err
 	}
-	endpoint := k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)
 
 	err = c.DB.Transaction(func(tx *gorm.DB) error {
 		if newPkgID != svc.PackageID {
@@ -507,17 +530,34 @@ func (c *Core) params(k8sName, image string, env map[string]string, replicas int
 	}
 }
 
-// refreshEndpoint 按（合并后）Ingress 重算展示地址并落库。供 StartAgain 调用：
-// 该路径会重新 apply Ingress，配置（如 INGRESS_HOST_SUFFIX）变更后展示地址需跟随
-// 新形态收敛。写库失败只记日志不返回错误（同 transition 风格：非核心字段不阻断
-// 状态机推进）。
+// refreshEndpoint 重算展示地址并落库。供 StartAgain 调用：该路径会重新 apply 全部
+// 对象，配置（如 INGRESS_HOST_SUFFIX）变更后展示地址需跟随新形态收敛（host→router
+// 模式切换的存量服务在此收敛；router 模式 ing 恒 nil，纯配置拼装）。写库失败只记
+// 日志不返回错误（同 transition 风格：非核心字段不阻断状态机推进）。
 func (c *Core) refreshEndpoint(svc *store.ServiceEntity, ing *networkingv1.Ingress) {
-	endpoint := k8s.IngressEndpoint(ing, c.Cfg.IngressHost, c.Cfg.IngressPort, c.Cfg.IngressHostSuffix)
+	endpoint := k8s.RouterEndpoint(c.Cfg.IngressHost, c.Cfg.IngressPort, svc.K8sName)
+	if ing != nil {
+		endpoint = k8s.IngressEndpoint(ing, c.Cfg.IngressHost)
+	}
 	if err := c.DB.Model(svc).Update("endpoint", endpoint).Error; err != nil {
 		log.Printf("[endpoint] update svc=%d failed: %v", svc.ID, err)
 		return
 	}
 	svc.Endpoint = endpoint
+}
+
+// deriveEndpoint 按路由模式派生展示地址：host 模式经 IngressBuilder Build（合并后
+// overlay 决定 host/TLS，非法模板在此报错实现发布期 fail-fast）；router 模式纯配置
+// 拼装（RouterEndpoint，形状与原 path 模式一致，前端/DB/MCP 契约零变化）。
+func (c *Core) deriveEndpoint(p k8s.ObjectParams) (string, error) {
+	if c.Cfg.IngressHostSuffix == "" {
+		return k8s.RouterEndpoint(c.Cfg.IngressHost, c.Cfg.IngressPort, p.K8sName), nil
+	}
+	ing, err := c.ingressBuilder().Build(p)
+	if err != nil {
+		return "", fmt.Errorf("ingress: %w", err)
+	}
+	return k8s.IngressEndpoint(ing, c.Cfg.IngressHost), nil
 }
 
 // uniqName 冲突时追加 -2/-3… 后缀（查库去重，最多 20 次）。

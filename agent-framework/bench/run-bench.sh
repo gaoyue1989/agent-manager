@@ -15,8 +15,14 @@
 #   STAGE_SECONDS=180       每档稳态时长
 #   RAMP_SECONDS=15         每档 ramp 时长（C 档恒 0，一波齐发）
 #   ASSERT_START_DELAY_MS=10000  C 档启动延迟门禁：任一路 AGENT_START 超阈值该档 FAIL（exit 3）
+#   P95_ABORT_MS=30000      档停止条件：稳态 P95 超阈值该档中止（exit 2）；
+#                           必须显式大于 MOCK_LLM_SLOW_MS（C 档 slow turn 总时延 ≈ 排队 + SLOW_MS）
+#   MOCK_LLM_SLOW_MS=12000  mock-llm slow 场景单 turn 时长（C 档在途 turn 构造）；显式导出给
+#                           mock-llm，取值论证见下
 #   IMAGE=agent-framework:latest
 #   BASE_URL=http://127.0.0.1:8101
+# 退出码（issue #97 问题16）：0=全部通过；1=预热失败/runner 异常退出；3=启动延迟门禁 FAIL；
+#   runner rc=2（触发停止条件）属预期语义，不计失败、不影响脚本退出码
 # =========================================================================
 set -u
 cd "$(dirname "$0")"
@@ -32,6 +38,12 @@ STAGE_SECONDS="${STAGE_SECONDS:-180}"
 RAMP_SECONDS="${RAMP_SECONDS:-15}"
 P95_SLO_MS="${P95_SLO_MS:-10000}"
 ASSERT_START_DELAY_MS="${ASSERT_START_DELAY_MS:-10000}"
+# P95 停止条件显式下传 runner（--p95-abort-ms），并与 MOCK_LLM_SLOW_MS 解耦（issue #97 问题 14）：
+# 此前 mock 默认 SLOW_MS=30000 恰撞 runner 默认 P95_ABORT_MS=30000 且未显式传参 → C 档 slow
+# turn 总时延 ≥30s 必触发 P95 中止（C=4 必 abort、C=8 永不执行）。取 12000：缺陷形态下
+# C=2 排队签名 ≈SLOW_MS=12s 仍 > 10s 门禁阈值（8000 会漏检 C=2 单档），且与 30000 有 2.5× 余量
+P95_ABORT_MS="${P95_ABORT_MS:-30000}"
+MOCK_LLM_SLOW_MS="${MOCK_LLM_SLOW_MS:-12000}"
 IMAGE="${IMAGE:-agent-framework:latest}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8101}"
 CONTAINER="${CONTAINER:-bench-agent-fw}"
@@ -134,6 +146,9 @@ mysql -h"$MYSQL_HOST" -P"$MYSQL_PORT" -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" < sql/
 
 # ===== 2. 启动 mock 服务 =====
 say "启动 mock-llm / mock-mcp"
+# 显式导出 slow 时长：不导出则 mock 用自身默认 30000，撞 P95_ABORT_MS 使 C 档必 abort
+# （mock 对非法值（非数字/负数）会启动即 exit 1，见 mock-llm/server.js readMsEnv）
+export MOCK_LLM_SLOW_MS
 (cd mock-llm && exec node server.js) >>"$RESULTS/mock-llm.log" 2>&1 &
 LLM_PID=$!
 (cd mock-mcp && exec node server.js) >>"$RESULTS/mock-mcp.log" 2>&1 &
@@ -184,13 +199,24 @@ start_container() {
 }
 
 # ===== 4. 逐场景执行 =====
-# 历史结果归档（防跨次混写：jsonl 为追加写，旧档会污染报告）
-if ls results/B[0-9] results/C >/dev/null 2>&1; then
+# 历史结果归档（防跨次混写：jsonl 为追加写，旧档会污染报告）。
+# B 与 C 目录分别判定、各自存在才 mv（issue #97 问题15）：默认场景集（B0,B1,B3,B5）不产生
+# results/C，此前双操作数 `ls results/B[0-9] results/C` 在 C 缺席时恒 exit 2，归档永不触发
+B_DIRS=$(ls -d results/B[0-9] 2>/dev/null || true)
+if [ -n "$B_DIRS" ] || [ -d results/C ]; then
   ARCHIVE="results/archive-$(date +%H%M%S)"
   mkdir -p "$ARCHIVE"
-  mv results/B[0-9] results/C "$ARCHIVE"/ 2>/dev/null || true
+  if [ -n "$B_DIRS" ]; then
+    mv results/B[0-9] "$ARCHIVE"/ 2>/dev/null || echo "  警告：B 档历史结果归档失败（保留原位）"
+  fi
+  if [ -d results/C ]; then
+    mv results/C "$ARCHIVE"/ 2>/dev/null || echo "  警告：C 档历史结果归档失败（保留原位）"
+  fi
   echo "  历史结果已归档至 $ARCHIVE"
 fi
+# 失败计数（issue #97 问题16）：门禁 FAIL 与运行性失败最终反映到脚本退出码
+FAILED=0      # 预热失败/runner 异常退出等运行性失败 → exit 1
+GATE_FAIL=0   # 启动延迟门禁 FAIL → exit 3
 for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
   say "场景 $SC"
   SANDBOX_FLAG=true
@@ -218,7 +244,7 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
   [ "$SC" == "C" ] && C_WARM_POOL=1
   say "场景 $SC 预热（sessions=$C_WARM_POOL）"
   node load/runner.js --mode warmup --scenario "$SC" --session-pool "$C_WARM_POOL" \
-    --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; continue; }
+    --base-url "$BASE_URL" --results-dir "$RESULTS" || { echo "  预热失败，跳过场景 $SC"; FAILED=1; continue; }
 
   for C in $STAGE_LIST; do
     # C ≤ 池上限时每个 inflight 独占会话（C 档池 = 并发数，恒独占）
@@ -231,7 +257,7 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
     # 会话池经 --session-pool 下发（与 runner.js 的 arg 名一致；此前误写 --user-pool 未生效）
     if node load/runner.js --mode run --scenario "$SC" --stage "$C" --concurrency "$C" \
       --session-pool "$STAGE_POOL" --ramp-seconds "$SC_RAMP" --stage-seconds "$STAGE_SECONDS" \
-      --assert-start-delay-ms "$ASSERT_START_DELAY_MS" \
+      --assert-start-delay-ms "$ASSERT_START_DELAY_MS" --p95-abort-ms "$P95_ABORT_MS" \
       --base-url "$BASE_URL" --results-dir "$RESULTS"; then RC=0; else RC=$?; fi
     # LLM 调用对账落盘（期望值已记录在 summary）
     curl -fsS -m 5 "http://127.0.0.1:$MOCK_LLM_PORT/stats" \
@@ -243,9 +269,10 @@ for SC in $(echo "$SCENARIOS" | tr ',' ' '); do
     fi
     if [ "$RC" -eq 3 ]; then
       echo "  档 C=$C 启动延迟门禁 FAIL（跨会话排队，issue #87），场景 $SC 剩余档跳过"
+      GATE_FAIL=1
       break
     fi
-    [ "$RC" -ne 0 ] && { echo "  runner 异常退出（rc=$RC），场景 $SC 剩余档跳过"; break; }
+    [ "$RC" -ne 0 ] && { echo "  runner 异常退出（rc=$RC），场景 $SC 剩余档跳过"; FAILED=1; break; }
   done
 done
 
@@ -255,3 +282,8 @@ node load/report.js --results-dir "$RESULTS"
 
 # ===== 6. 清理（trap 兜底：容器/mock/沙箱） =====
 say "完成（容器、mock 进程与 bench 沙箱经 trap 清理；库 agent_manager_bench 保留供复跑）"
+# 退出码（issue #97 问题16）：此前失败形态只 echo+break，退出码恒 0，与全通过不可区分。
+# 门禁 FAIL 优先于运行性失败；rc=2（触发停止条件）属预期语义，不计失败
+[ "$GATE_FAIL" -eq 1 ] && exit 3
+[ "$FAILED" -eq 1 ] && exit 1
+exit 0

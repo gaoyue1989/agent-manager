@@ -48,6 +48,16 @@ func main() {
 		log.Fatalf("ingress template: %v", err)
 	}
 
+	// router 模式启动自检（subpath-routing-design §4.1）：INGRESS_HOST_SUFFIX 空 =
+	// 业务子路径流量经集群内 platform-router 路由，该 Service 缺失时发布照常成功但
+	// /agent/* 全部不可达——与 INGRESS_TEMPLATE 探针同策略 fail-fast（CrashLoop 报错
+	// 指向缺 manifest，而非静默放行）。
+	if cfg.IngressHostSuffix == "" {
+		if err := k8sclient.RequireRouter(kc, cfg.Namespace); err != nil {
+			log.Fatalf("router mode: %v", err)
+		}
+	}
+
 	core := service.NewCore(db, fs, kc, service.ConfigView{
 		Namespace:           cfg.Namespace,
 		IngressClass:        cfg.IngressClass,

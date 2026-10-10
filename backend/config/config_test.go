@@ -85,15 +85,16 @@ func TestEnvIntInvalidFallsBack(t *testing.T) {
 	}
 }
 
-// TestLoadIngressHostSuffix INGRESS_HOST_SUFFIX 格式校验：空值放行（path 模式，
-// 历史行为）；非空必须以 "." 开头、去点后为合法 DNS-1123 subdomain、叠加最长
-// K8sName（67 字符）后总长 ≤253。非法即 Load 报错（启动 fail-fast）。
+// TestLoadIngressHostSuffix INGRESS_HOST_SUFFIX 格式校验：空值放行（router 模式）；
+// 非空必须以 "." 开头、去点后为合法 DNS-1123 subdomain、叠加最长 K8sName（67 字符）
+// 后总长 ≤253。非法即 Load 报错（启动 fail-fast）。
 func TestLoadIngressHostSuffix(t *testing.T) {
 	t.Setenv("MYSQL_DSN", "u:p@tcp(localhost:3306)/oaf_platform")
 	t.Setenv("AVAILABLE_IMAGES", "img1|A")
 	t.Setenv("DEFAULT_IMAGE", "")
+	t.Setenv("INGRESS_TEMPLATE", "")
 
-	// 默认空值 = path 模式，行为与未上此功能前一致
+	// 默认空值 = router 模式
 	t.Setenv("INGRESS_HOST_SUFFIX", "")
 	c, err := Load()
 	if err != nil {
@@ -102,6 +103,23 @@ func TestLoadIngressHostSuffix(t *testing.T) {
 	if c.IngressHostSuffix != "" {
 		t.Fatalf("default suffix must stay empty, got %q", c.IngressHostSuffix)
 	}
+
+	// router 模式（suffix 空）+ 残留 Ingress overlay → 启动即拒（无处生效，
+	// 静默忽略会让运维误以为模板在起作用）
+	t.Setenv("INGRESS_TEMPLATE", "/tmp/some-overlay.yaml")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "INGRESS_TEMPLATE") {
+		t.Fatalf("router mode with ingress template must be rejected, got %v", err)
+	}
+	t.Setenv("INGRESS_TEMPLATE", "")
+
+	// host 模式 + 模板：合法组合（模板经 NewIngressBuilder 探针校验）
+	t.Setenv("INGRESS_HOST_SUFFIX", ".region.example.com")
+	t.Setenv("INGRESS_TEMPLATE", "/tmp/some-overlay.yaml")
+	if _, err := Load(); err != nil {
+		t.Fatalf("host mode with ingress template must pass config validation: %v", err)
+	}
+	t.Setenv("INGRESS_TEMPLATE", "")
+	t.Setenv("INGRESS_HOST_SUFFIX", "")
 
 	// 叠加后总长上界 = 253 - 67 = 186。too-long 用例必须**形态合法**（各段 ≤63、
 	// 无首尾空段），否则会被 subdomain 正则/段长校验先拒，根本走不到 253 这条规则，
