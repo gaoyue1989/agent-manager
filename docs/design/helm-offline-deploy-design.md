@@ -72,17 +72,21 @@ charts/oaf-platform/
 | 命名 | `namespaceOverride`、`nameOverride` | 默认 `Release.Namespace`；**须与业务资源所在 namespace 一致**（后端 `NAMESPACE`、router upstream FQDN 同一值） |
 | 镜像 | `images.backend.{repository,tag,pullPolicy}`、`images.frontend.*`、`images.router.*` | **repository 含内网 registry 前缀**（如 `harbor.internal/oaf/platform-backend`）；凭据经 `imagePullSecrets` |
 | 业务镜像白名单 | `images.business[]`（`{image,label}`）、`images.defaultBusiness` | 渲染 `AVAILABLE_IMAGES` / `DEFAULT_IMAGE`（**必须与实际可拉取 tag 一致**，否则发布被 400 拒） |
+| 业务 Pod 资源 | `business.resources.{requestsCpu,requestsMem,limitsCpu,limitsMem}` | 渲染 `RESOURCE_*` 四元组（后端 config.go 默认 250m/256Mi/1/1Gi，作用于**每个业务 Deployment**） |
 | 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | router 模式：`host`=对外 IP、`port`=NodePort；host 模式额外 `hostSuffix` |
-| 后端 | `backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.templates.{deployment,ingress}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入） |
-| 前端 | `frontend.env.backendInternalUrl`、`frontend.env.agentInternalUrl` | 后者默认指向 release-agent（发布助手对话） |
+| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 默认关闭（in-cluster），开启时挂载已有 Secret 供集群外开发/特殊 RBAC 场景 |
+| 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl,evalCollector.{mode,agentUrl}}` | `agentInternalUrl` 默认指向 release-agent；`publicApiUrl`（`NEXT_PUBLIC_API_URL`，默认空=服务端反代同源）；`evalCollector.*` 为评测录制反代模式（默认关闭，仅评测环境） |
 | 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.4 |
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
 | 外部 Redis | `external.redis.{url}`（业务侧默认值） | 平台自身不使用 Redis；仅用于种子与文档提示 |
 | 外部 OTel | `otel.{enabled,exporter,endpoint,headers,serviceName}` | 经业务 Deployment overlay 注入，见 §5.3 |
-| 业务 overlay | `business.deploymentOverlay.{enabled,extra}` | `extra` 为任意 SMP patch（与 `otel.*` 合并渲染） |
+| 业务 overlay | `business.deploymentOverlay`（OTel 自动段 + `extra` 自备 SMP，合并渲染**单文件**——后端只认一个 `DEPLOYMENT_TEMPLATE` 路径）、`business.ingressOverlay`（自备，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 安装即报错（后端对 suffix 空 + `INGRESS_TEMPLATE` 非空启动 fail-fast，chart 提前拦避免 CrashLoop） |
 | 平台默认值种子 | `platformDefaults.seed.{enabled,llm.*,mysql.*,redis.*,sandbox.*,protocol.*}` | 调平台 API 写入；默认关闭 |
 | 暴露 | `ingress.{enabled,className,annotations}`、`nodePort.{backend,frontend,enabled}` | NodePort 端口可配（默认 30880/30881） |
 | 安全 | `imagePullSecrets[]`、`podSecurityContext`、`existingSecret`（密码类复用已有 Secret） | values 明文仅示例，生产走 `existingSecret` |
+| 通用调度 | `backend/frontend/router` 各自的 `podAnnotations`、`nodeSelector`、`tolerations`、`affinity` | 生产常见诉求；三组件独立配置 |
+| router 高级 | `router.nginx.{clientMaxBodySize,readTimeout,sendTimeout}` | 默认即 subpath-routing 决议值（200m / 3600s），仅超出现状需求时调整 |
+| 数据卷绑定 | `persistence.mountPath`（默认 `/data`） | 渲染时**同时**设后端 `DATA_ROOT` 与挂载点（两者必须一致，chart 绑定） |
 
 ### 4.2 values.yaml 骨架（评审用，节选）
 
@@ -106,6 +110,36 @@ otel: { enabled: true, exporter: otlp, endpoint: "http://otel-collector.observab
 business: { deploymentOverlay: { enabled: true, extra: "" } }
 platformDefaults: { seed: { enabled: false } }
 ```
+
+### 4.3 后端/前端配置全集 ↔ values 映射（2026-10-10 配置面 review 补全）
+
+> 来源：`backend/config/config.go`（envStr/envInt 全集 21 项）+ `cmd/server/main.go`（KUBECONFIG）
+> + 前端 `process.env` 5 项。**「本次补」= 首版设计遗漏，review 修正**；实现时以本表为验收清单
+> （chart 渲染产物逐项可对号，防再次漏配）。
+
+| # | 配置项 | 来源 | values 键 | 状态 |
+|---|---|---|---|---|
+| 1 | `SERVER_PORT` | config.go | `backend.serverPort` | **本次补** |
+| 2 | `NAMESPACE` | config.go | `namespaceOverride`（须=Release.Namespace，chart 校验） | 已有 |
+| 3 | `DATA_ROOT` | config.go | `persistence.mountPath`（同时渲染 env 与挂载点） | **本次补绑定** |
+| 4 | `MYSQL_DSN` | config.go | `external.mysql.*` / `dsn` | 已有 |
+| 5-6 | `AVAILABLE_IMAGES` / `DEFAULT_IMAGE` | config.go | `images.business[]` / `images.defaultBusiness` | 已有 |
+| 7-10 | `INGRESS_CLASS/HOST/PORT/HOST_SUFFIX` | config.go | `routing.*` | 已有 |
+| 11-14 | `RESOURCE_REQUESTS_{CPU,MEM}` / `RESOURCE_LIMITS_{CPU,MEM}` | config.go | `business.resources.*`（业务 Pod 资源四元组） | **本次补** |
+| 15-16 | `REGISTER_TIMEOUT_SEC` / `REGISTER_RETRY` | config.go | `backend.register.*` | **本次补** |
+| 17 | `DEPLOYMENT_TEMPLATE` | config.go | `business.deploymentOverlay`（OTel 段 + `extra` 合并渲染单文件） | 已有→扩展 |
+| 18 | `INGRESS_TEMPLATE` | config.go | `business.ingressOverlay`（仅 host 模式；router 模式配置即安装报错） | **本次补（评审点名）** |
+| 19 | `AUTH_TOKEN` | config.go | `backend.authToken` | 已有 |
+| 20 | `PACKAGE_DOWNLOAD_BASE` | config.go | `backend.packageDownloadBase` | 已有 |
+| 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（默认关闭=in-cluster ServiceAccount；开启挂载已有 Secret） | **本次补（评审点名）** |
+| F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
+| F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
+| F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（默认空=服务端反代同源） | **本次补** |
+| F4-F5 | `EVAL_COLLECTOR_MODE` / `EVAL_COLLECTOR_AGENT_URL` | 前端（评测录制反代） | `frontend.env.evalCollector.*`（默认关闭，仅评测环境） | **本次补** |
+| R1-R3 | nginx `client_max_body_size` / `proxy_{read,send}_timeout` | platform-router | `router.nginx.*`（默认 200m/3600s） | **本次补** |
+
+不映射（维持后端默认/无 env 面）：Gin 模式、业务镜像 pullPolicy（后端构造固定 `IfNotPresent`，
+见 §10 风险 6）、router nginx 的 `oaf-`/`-svc`/8100/namespace 命名约定（不变量，非配置）。
 
 ## 5. 三条外部依赖接线（本设计的核心）
 
@@ -222,6 +256,9 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 7. **`helm upgrade` 会滚动 backend/router**（SSE 断流，同 ingress 升级语义）；业务面不受影响。
 8. **seed Job** 依赖平台 API 就绪与 `AUTH_TOKEN`；失败会令 release 处于 failed（可关或
    用 `--atomic`/`--no-hooks` 控制）。
+9. **`INGRESS_TEMPLATE` 与 router 模式互斥**：后端对 suffix 空 + 模板非空启动即拒
+   （subpath-routing §4.1）；chart 必须在渲染期 fail（`fail "routing.mode=router 时不可配置 business.ingressOverlay"`），
+   否则装出一个 CrashLoop 的 backend。
 
 ## 11. 实施拆分
 
@@ -233,10 +270,15 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 
 ## 12. 评审关注点（建议逐条决议）
 
-1. **§5.4 PVC 名**：接受「必须叫 `platform-data`」，还是同批加 `PLATFORM_PVC_NAME`？（推荐后者）
+1. ~~§5.4 PVC 名~~ **已决议（2026-10-10）：PVC 名需可配置** → 实施 `PLATFORM_PVC_NAME`（后端 env，默认
+   `platform-data`；实现已完成待提交，随 PR-B 走），chart `persistence.existingClaim` 指向任意已有 PVC。
 2. **OTel 方案**：确认走 `DEPLOYMENT_TEMPLATE` overlay（备选「平台默认配置加 OTel 组」需后端改动）
 3. **seed Job 是否纳入**：纳入则一键部署后即可直接发布；不纳入则部署后仍需 `/settings` 手工填默认值
 4. **chart 目录位置**：`charts/oaf-platform`（推荐）vs `deploy/helm/...`
 5. **是否保留 `manifests/` 自举**（推荐保留，二者并存）
 6. **镜像清单口径**：chart 所需镜像（backend/frontend/router）与业务白名单统一由 values 渲染、
    统一内网仓库前缀（推荐）；`imagePullSecrets` 由 chart 透传到三类 Deployment
+7. **KUBECONFIG 是否纳入**（§4.3 #21）：默认关闭（in-cluster），还是干脆不提供（保持纯 in-cluster）？
+   （推荐提供但默认关闭，供集群外开发/特殊 RBAC 排障）
+8. **EVAL_COLLECTOR_* 是否纳入**（§4.3 F4-F5）：评测录制反代属评测环境专属，纳入 chart 增加面；
+   推荐「提供但默认关闭」
