@@ -173,14 +173,14 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   const content = `---\nname: ${skill}\ndescription: e2e materialize probe\nversion: 1.0.0\n---\n\n# ${skill}\n\n${marker}\n`;
 
   // 基线：新用户无 L4、无 tombstone
-  const empty = await request.get(`/skills/users/${uid}`);
+  const empty = await request.get('/skills/users', { headers: { 'X-User-Id': uid } });
   expect(empty.status()).toBe(200);
   const emptyBody = await empty.json();
   expect(emptyBody.skills).toEqual([]);
   expect(emptyBody.tombstones).toEqual([]);
 
   // 管理面 PUT（KV 权威写 + admin-override 栅栏）
-  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content } });
+  const put = await request.put(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid }, data: { content } });
   expect(put.status()).toBe(200);
   const putBody = await put.json();
   expect(putBody.action).toBe('created');
@@ -188,13 +188,13 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   expect(String(putBody.message)).toContain('管理面写入栅栏'); // 沙箱档提示契约
 
   // KV 视图：source=user / adminOverride=true
-  const detail = await request.get(`/skills/users/${uid}/${skill}`);
+  const detail = await request.get(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid } });
   expect(detail.status()).toBe(200);
   const detailBody = await detail.json();
   expect(detailBody.source).toBe('user');
   expect(detailBody.hasUserOverride).toBe(true);
   expect(String(detailBody.content)).toContain(marker);
-  const list = await (await request.get(`/skills/users/${uid}`)).json();
+  const list = await (await request.get('/skills/users', { headers: { 'X-User-Id': uid } })).json();
   const entry = (list.skills as Array<Record<string, unknown>>).find(s => s.name === skill);
   expect(entry).toBeTruthy();
   expect(entry!.adminOverride).toBe(true);
@@ -223,13 +223,13 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   expect(await probe.text()).toContain(marker);
 
   // 负例（无 LLM，MOD 组风格）
-  const emptyPut = await request.put(`/skills/users/${uid}/x10-neg`, { data: { content: '  ' } });
+  const emptyPut = await request.put('/skills/users/x10-neg', { headers: { 'X-User-Id': uid }, data: { content: '  ' } });
   expect(emptyPut.status()).toBe(400);
   expect((await emptyPut.json()).error).toBe('empty_content');
-  const badName = await request.put(`/skills/users/${uid}/a..b`, { data: { content } });
+  const badName = await request.put('/skills/users/a..b', { headers: { 'X-User-Id': uid }, data: { content } });
   expect(badName.status()).toBe(400);
   expect((await badName.json()).error).toBe('invalid_name');
-  const big = await request.put(`/skills/users/${uid}/x10-neg`, { data: { content: 'x'.repeat(100 * 1024 + 1) } });
+  const big = await request.put('/skills/users/x10-neg', { headers: { 'X-User-Id': uid }, data: { content: 'x'.repeat(100 * 1024 + 1) } });
   expect(big.status()).toBe(413);
   expect((await big.json()).error).toBe('content_too_large');
 });
@@ -240,7 +240,7 @@ test('X11 管理面 DELETE → tombstone 防复活（同会话同代容器 syncB
   const content = `---\nname: ${skill}\ndescription: e2e tombstone probe\nversion: 1.0.0\n---\n\n# ${skill}\n`;
 
   const putMarker = `TOMB-${uniq()}`;
-  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content: `${content}
+  const put = await request.put(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid }, data: { content: `${content}
 ${putMarker}
 ` } });
   expect(put.status()).toBe(200);
@@ -265,7 +265,7 @@ ${putMarker}
   expect((await downloadProbe()).status, 'turn1 后容器内技能副本缺失（未物化）').toBe(200);
 
   // 管理面 DELETE：写 tombstone
-  const del = await request.delete(`/skills/users/${uid}/${skill}`);
+  const del = await request.delete(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid } });
   expect(del.status()).toBe(200);
   const delBody = await del.json();
   expect(delBody.deletedFiles).toBe(1); // PUT 只写 SKILL.md，.deleted 标记不计入（listSkillFiles 排除 . 元数据段）
@@ -278,10 +278,10 @@ ${putMarker}
     skills: j.skills.map(s => String(s.name)),
     tombs: j.tombstones.map(t => String(t.name)),
   });
-  const after = names(await (await request.get(`/skills/users/${uid}`)).json());
+  const after = names(await (await request.get('/skills/users', { headers: { 'X-User-Id': uid } })).json());
   expect(after.skills).not.toContain(skill);
   expect(after.tombs).toContain(skill);
-  const gone = await request.get(`/skills/users/${uid}/${skill}`);
+  const gone = await request.get(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid } });
   expect(gone.status()).toBe(404);
   expect((await gone.json()).error).toBe('not_found');
 
@@ -300,7 +300,7 @@ ${putMarker}
   const probe2 = await downloadProbe();
   expect(probe2.status, '同代容器内存活副本丢失').toBe(200);
   expect(await probe2.text()).toContain(putMarker);
-  const final = names(await (await request.get(`/skills/users/${uid}`)).json());
+  const final = names(await (await request.get('/skills/users', { headers: { 'X-User-Id': uid } })).json());
   expect(final.skills).not.toContain(skill);
   expect(final.tombs).toContain(skill);
 });
@@ -314,7 +314,7 @@ test('X15 Channel 链路（/threads/chat）per-user 技能物化（issue #52 回
   const marker = `CHN-${uniq()}`;
   const content = `---\nname: ${skill}\ndescription: e2e channel materialize probe\nversion: 1.0.0\n---\n\n# ${skill}\n\n${marker}\n`;
 
-  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content } });
+  const put = await request.put(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid }, data: { content } });
   expect(put.status()).toBe(200);
 
   // turn 走 Channel chat（非 A2A）：物化探针同 X10（files/download 直证容器内文件）

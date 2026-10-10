@@ -17,32 +17,32 @@ async function httpError(resp, path) {
   return err;
 }
 
-async function get(path) {
-  const resp = await fetch(BASE + path);
+async function get(path, headers) {
+  const resp = await fetch(BASE + path, { headers: headers || {} });
   if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
-async function post(path, body) {
+async function post(path, body, headers) {
   const resp = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
     body: JSON.stringify(body)
   });
   if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
-async function del(path) {
-  const resp = await fetch(BASE + path, { method: 'DELETE' });
+async function del(path, headers) {
+  const resp = await fetch(BASE + path, { method: 'DELETE', headers: headers || {} });
   if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
 }
 
-async function put(path, body) {
+async function put(path, body, headers) {
   const resp = await fetch(BASE + path, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
     body: JSON.stringify(body)
   });
   if (!resp.ok) throw await httpError(resp, path);
@@ -57,6 +57,11 @@ async function patch(path, body) {
   });
   if (!resp.ok) throw await httpError(resp, path);
   return resp.json();
+}
+
+/** 用户技能管理面：用户身份走 X-User-Id 头（网关注入登录态；调试页用选中 userId 填充该头） */
+function userHeader(userId) {
+  return userId ? { 'X-User-Id': userId } : {};
 }
 
 export const api = {
@@ -100,19 +105,36 @@ export const api = {
   deleteModel: (id) => del('/models/' + encodeURIComponent(id)),
   testModel: (id) => post('/models/' + encodeURIComponent(id) + '/test', {}),
 
-  // 用户技能（L4 个人覆盖，agent_fs KV：agents/{agent}/users/{userId}/skills）
-  // 索引：/debug/user-skills（调试面）；明细读写：/skills/users/{userId}/{name}
+  // 用户技能（L4 个人覆盖，agent_fs KV：agents/{agent}/users/{uid}/skills）
+  // 用户身份走 X-User-Id 头（网关注入）；索引：/debug/user-skills；明细/上传/下载：/skills/users/*
   getUserSkillUsers: () => get('/debug/user-skills'),
-  getUserSkills: (userId) => get('/skills/users/' + encodeURIComponent(userId)),
+  getUserSkills: (userId) => get('/skills/users', userHeader(userId)),
   getUserSkill: (userId, name, file) =>
-    get('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name) +
-      (file ? '?file=' + encodeURIComponent(file) : '')),
+    get('/skills/users/' + encodeURIComponent(name) + (file ? '?file=' + encodeURIComponent(file) : ''),
+      userHeader(userId)),
   putUserSkill: (userId, name, content) =>
-    put('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name), { content }),
+    put('/skills/users/' + encodeURIComponent(name), { content }, userHeader(userId)),
+  uploadUserSkillZip: async (userId, file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const resp = await fetch(BASE + '/skills/users/upload', {
+      method: 'POST',
+      headers: userHeader(userId),
+      body: formData
+    });
+    if (!resp.ok) throw await httpError(resp, '/skills/users/upload');
+    return resp.json();
+  },
+  downloadUserSkillZip: async (userId, name) => {
+    const resp = await fetch(BASE + '/skills/users/' + encodeURIComponent(name) + '/download',
+      { headers: userHeader(userId) });
+    if (!resp.ok) throw await httpError(resp, '/skills/users/' + name + '/download');
+    return resp.blob();
+  },
   deleteUserSkill: (userId, name) =>
-    del('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name)),
+    del('/skills/users/' + encodeURIComponent(name), userHeader(userId)),
   syncUserSkillFromPackage: (userId, name) =>
-    post('/skills/users/' + encodeURIComponent(userId) + '/' + encodeURIComponent(name) + '/sync-from-package', {}),
+    post('/skills/users/' + encodeURIComponent(name) + '/sync-from-package', {}, userHeader(userId)),
 
   // 调试数据
   getEnvConfig: () => get('/debug/config/env'),

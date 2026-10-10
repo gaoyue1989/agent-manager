@@ -529,7 +529,10 @@ def api_run_report_html(run_id: str):
     path = Path(run["out_dir"]) / "report.html"
     if not path.exists():
         raise HTTPException(404, "报告未生成")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+    # 纵深防御：CSP sandbox 使报告文档脚本全禁、独立 origin，
+    # 即使转义被绕过也无法以 studio 同源身份携带凭据调用 API
+    return HTMLResponse(path.read_text(encoding="utf-8"),
+                        headers={"Content-Security-Policy": "sandbox"})
 
 
 @app.get("/api/runs/{run_id}/cases/{name}")

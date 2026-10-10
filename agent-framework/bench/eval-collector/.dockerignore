@@ -1,0 +1,10 @@
+# 构建上下文 = eval-collector/，Dockerfile 仅 COPY server.mjs console.html；
+# 排除本地录制/配置数据（compose 挂载卷与运行产物，体积与敏感信息不入镜像）
+data/
+conf/
+collector-data/
+collector-conf/
+studio-data/
+# **/ 前缀：无斜杠模式只匹配上下文根，嵌套层需显式递归
+**/.env*
+**/*.log
