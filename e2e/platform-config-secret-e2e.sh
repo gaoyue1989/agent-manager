@@ -91,7 +91,9 @@ say "场景 T：sticky 三态 + 空串删除回落"
 PATCH=$(curl -s -X PATCH "$BASE/services/$S2/env" -H 'Content-Type: application/json' -d '{"env":{"LLM_MODEL_ID":"other-model"}}')
 assert_eq "T1 仅改非敏感键受理" "$(echo "$PATCH" | jq -r '.code')" "0"
 wait_status "$S2" running 300 >/dev/null
-assert_eq "T2 sticky：服务 Secret 敏感键保持" "$(kubectl -n $NS get secret $K2-env-secret -o json | jq -r '.data.LLM_API_KEY | @base64d')" "$LLM_API_KEY"
+# T2 敏感键比对走 jq 内联等值（修 #97：assert_eq 失败分支会把服务 Secret 明文与
+# .env.secrets 的真实 key 打进日志——对齐上方 S3 口径，比较结果只输出 true/false）
+assert_eq "T2 sticky：服务 Secret 敏感键保持" "$(kubectl -n $NS get secret $K2-env-secret -o json | jq -r --arg want "$LLM_API_KEY" '.data.LLM_API_KEY | @base64d == $want')" "true"
 PATCH2=$(curl -s -X PATCH "$BASE/services/$S2/env" -H 'Content-Type: application/json' -d '{"env":{"LLM_API_KEY":"","LLM_MODEL_ID":"other-model"}}')
 assert_eq "T3 空串删除受理" "$(echo "$PATCH2" | jq -r '.code')" "0"
 wait_status "$S2" running 300 >/dev/null

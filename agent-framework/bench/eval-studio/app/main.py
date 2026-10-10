@@ -7,6 +7,7 @@
   STUDIO_DATA_DIR     数据目录（默认 ./data）：studio.db / packs/ / runs/
   STUDIO_BENCH_DIR    bench 目录（默认 repo 内 bench/）：定位 eval 代码与 stub-agent
   STUDIO_TOKEN        访问 token（未设则仅本机默认；STUDIO_SKIP_AUTH=1 显式跳过）
+  STUDIO_MAX_UPLOAD_BYTES  上传 zip 大小上限（默认 268435456 = 256MB，超限返回 413）
 """
 
 import asyncio
@@ -32,6 +33,7 @@ EVAL_DIR = BENCH_DIR / "eval"
 sys.path.insert(0, str(EVAL_DIR))
 
 from replay import runner as run_mod  # noqa: E402
+from replay.ids import InvalidIdentifierError, validate_id  # noqa: E402
 from replay.packager import verify_checksums  # noqa: E402
 from app import store  # noqa: E402
 
@@ -39,6 +41,27 @@ app = FastAPI(title="eval-studio", version="0.1.0")
 _SKIP_AUTH = os.environ.get("STUDIO_SKIP_AUTH") == "1"
 _TOKEN = os.environ.get("STUDIO_TOKEN", "")
 _WORKER_STARTED = False
+
+_DEFAULT_MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+
+
+def _parse_upload_limit() -> int:
+    """STUDIO_MAX_UPLOAD_BYTES 启动时解析一次：非整数/非正值回落默认并打告警，不阻断启动。"""
+    raw = os.environ.get("STUDIO_MAX_UPLOAD_BYTES", "")
+    if not raw:
+        return _DEFAULT_MAX_UPLOAD_BYTES
+    try:
+        val = int(raw)
+    except ValueError:
+        val = 0
+    if val <= 0:
+        print(f"[config] STUDIO_MAX_UPLOAD_BYTES={raw!r} 非法（须为正整数），"
+              f"回落默认 {_DEFAULT_MAX_UPLOAD_BYTES}", file=sys.stderr)
+        return _DEFAULT_MAX_UPLOAD_BYTES
+    return val
+
+
+STUDIO_MAX_UPLOAD_BYTES = _parse_upload_limit()
 
 
 def free_port() -> int:
@@ -290,26 +313,55 @@ async def api_profile_precheck(pid: str):
 
 @app.post("/api/packages")
 async def api_package_upload(file: UploadFile = File(...)):
-    tmp = DATA_DIR / "packs" / f".upload-{int(time.time()*1000)}.zip"
-    tmp.write_bytes(await file.read())
+    """evalpack 上传（issue #97 问题 2：校验全部前置到落最终目录之前，失败不留半包）。
+
+    流程：分块读 zip（按实际字节累计判 STUDIO_MAX_UPLOAD_BYTES 上限，超限 413）
+    → 解压到 packs 下临时 staging → manifest 的 pack_id 标识符校验
+    → CHECKSUMS 强校验 → zip 条目逐条 resolve 防穿越 → 全过才 rmtree 旧目录
+    并 rename 落最终目录；任一步失败清理 staging 返回 400/413。
+    """
+    staging = DATA_DIR / "packs" / f".staging-{int(time.time()*1000)}-{os.urandom(4).hex()}"
+    tmp = DATA_DIR / "packs" / f".upload-{int(time.time()*1000)}-{os.urandom(4).hex()}.zip"
+    manifest: dict[str, Any] = {}
+    pack_id = ""
     try:
+        # 分块读取并按实际字节累计判上限（Content-Length 可缺省/伪造，不可只信请求头）
+        size = 0
+        with open(tmp, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > STUDIO_MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, f"上传超过大小上限 "
+                                             f"{STUDIO_MAX_UPLOAD_BYTES // (1024*1024)}MB")
+                f.write(chunk)
         with zipfile.ZipFile(tmp) as zf:
             names = zf.namelist()
             if "manifest.json" not in names or "CHECKSUMS" not in names:
                 raise HTTPException(400, "不是合法 evalpack（缺 manifest.json/CHECKSUMS）")
-            manifest = json.loads(zf.read("manifest.json"))
-            pack_id = manifest["pack_id"]
-            target = DATA_DIR / "packs" / pack_id
-            if target.exists():
-                shutil.rmtree(target)
-            zf.extractall(target)
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+                pack_id = validate_id("pack_id", manifest["pack_id"])
+            except (KeyError, TypeError, json.JSONDecodeError, InvalidIdentifierError) as e:
+                raise HTTPException(400, f"manifest.json 不合法（缺 pack_id 或标识符非法）: {e}")
+            # 先解压到 staging 校验（zip 内路径穿越绝不能直接伤及 packs/ 现有目录），
+            # zipfile 虽会剥离绝对路径与 '..' 组件，namelist 逐条 resolve 复核为纵深防御
+            staging.mkdir(parents=True)
+            zf.extractall(staging)
+            for name in names:
+                if not (staging / name).resolve().is_relative_to(staging.resolve()):
+                    raise HTTPException(400, f"zip 内路径非法（穿越或符号链接条目）: {name[:80]}")
+            if not verify_checksums(str(staging)):
+                raise HTTPException(400, "CHECKSUMS 校验失败（包被篡改或不完整）")
+        target = DATA_DIR / "packs" / pack_id
+        if target.exists():
+            shutil.rmtree(target)
+        staging.rename(target)
     except zipfile.BadZipFile:
         raise HTTPException(400, "zip 损坏")
     finally:
         tmp.unlink(missing_ok=True)
-    if not verify_checksums(str(target)):
-        shutil.rmtree(target)
-        raise HTTPException(400, "CHECKSUMS 校验失败（包被篡改或不完整）")
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
     store.put_package(pack_id, manifest, str(target))
     # 用例草稿登记（status=draft，待人审转正）
     for p in sorted((target / "cases-draft").glob("*.json")):
@@ -365,7 +417,22 @@ def api_pack_from_collector(body: dict[str, Any]):
     from replay import packager
     ns = body.get("ns")
     pack_id = body.get("pack_id") or f"pk-{ns or 'all'}-{time.strftime('%Y%m%d-%H%M%S')}"
-    out = packager.pack(collector_dir=src, out_dir=str(DATA_DIR / "packs" / pack_id), ns=ns)
+    # 第一段：pack_id / ns 均为客户端可控标识符（ns 拼 collector 读取路径与默认
+    # pack_id，pack_id 拼落盘目录，issue #97 问题 2/9）——先独立校验并 400，
+    # 此段绝不做任何清理动作（pack_id 尚未过校验，rmtree 即穿越删除）
+    try:
+        validate_id("pack_id", pack_id)
+        if ns:
+            validate_id("ns", ns)
+    except InvalidIdentifierError as e:
+        raise HTTPException(400, str(e))
+    # 第二段：pack() 中途因包内 sid 非法（x-eval-session 头，问题 9）抛错时映射 400；
+    # 此时 pack_id 必已过第一段校验，清理 pack() 已建的半包目录路径安全
+    try:
+        out = packager.pack(collector_dir=src, out_dir=str(DATA_DIR / "packs" / pack_id), ns=ns)
+    except InvalidIdentifierError as e:
+        shutil.rmtree(DATA_DIR / "packs" / pack_id, ignore_errors=True)
+        raise HTTPException(400, str(e))
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     store.put_package(pack_id, manifest, str(out))
     for p in sorted((out / "cases-draft").glob("*.json")):
@@ -388,7 +455,14 @@ def api_case_promote(body: dict[str, Any]):
     pkg = store.get_package(pack_id)
     if not pkg:
         raise HTTPException(404, "包不存在")
-    src = Path(pkg["dir"]) / "cases-draft" / f"{body.get('sid') or ''}.json"
+    sid = body.get("sid")
+    # sid 拼进 cases-draft 读路径（与问题 2 同族的客户端可控标识符穿越读点），非法即 400
+    if sid:
+        try:
+            validate_id("session id", sid)
+        except InvalidIdentifierError as e:
+            raise HTTPException(400, str(e))
+    src = Path(pkg["dir"]) / "cases-draft" / f"{sid or ''}.json"
     case = None
     if src.exists():
         case = json.loads(src.read_text(encoding="utf-8"))
@@ -455,7 +529,10 @@ def api_run_report_html(run_id: str):
     path = Path(run["out_dir"]) / "report.html"
     if not path.exists():
         raise HTTPException(404, "报告未生成")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+    # 纵深防御：CSP sandbox 使报告文档脚本全禁、独立 origin，
+    # 即使转义被绕过也无法以 studio 同源身份携带凭据调用 API
+    return HTMLResponse(path.read_text(encoding="utf-8"),
+                        headers={"Content-Security-Policy": "sandbox"})
 
 
 @app.get("/api/runs/{run_id}/cases/{name}")

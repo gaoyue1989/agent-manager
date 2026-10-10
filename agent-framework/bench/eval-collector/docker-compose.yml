@@ -33,6 +33,8 @@ services:
     environment:
       STUDIO_DATA_DIR: /data
       STUDIO_COLLECTOR_DATA: /var/lib/eval-collector      # 使 collector 控制台「数据打包」可直接出包
+      # 上传 zip 大小上限（可选，字节，默认 268435456 = 256MB，超限返回 413）
+      # STUDIO_MAX_UPLOAD_BYTES: "268435456"
       # 会话骨架导出（可选，注入后打包关联更精确；凭据用只读账号）
       EVAL_MYSQL_URL: "${EVAL_MYSQL_URL:-}"
       EVAL_REDIS_URL: "${EVAL_REDIS_URL:-}"
