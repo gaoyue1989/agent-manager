@@ -1,0 +1,133 @@
+{{- if or .Values.platformDefaults.seed.enabled .Values.releaseAgent.enabled }}
+{{- $ns := include "oaf.namespace" . -}}
+{{- $sa := include "oaf.backendServiceAccountName" . -}}
+{{- $secretName := default (printf "%s-secrets" (include "oaf.fullname" .)) .Values.backend.existingSecret -}}
+{{- $img := default (include "oaf.defaultBusinessImage" .) .Values.releaseAgent.image -}}
+---
+# bootstrap 自举钩子（设计 §5.2/§5.4）：
+#   ① platformDefaults.seed.enabled → PUT /api/v1/platform-config 写平台默认配置（发布向导预填）
+#   ② releaseAgent.enabled          → 上传 OAF 包（bundled）并经发布 API 起 release-agent 服务
+# 幂等：同名服务已存在则跳过②；hook 重跑安全。JSON 解析用 sed（不依赖 jq）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oaf.fullname" . }}-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+data:
+  {{- if .Values.platformDefaults.seed.enabled }}
+  seed.json: {{ printf "{\"values\":%s}" (.Values.platformDefaults.seed.values | toJson) | quote }}
+  {{- end }}
+  {{- if .Values.releaseAgent.enabled }}
+  publish.json: {{ printf "{\"packageId\":0,\"name\":%s,\"image\":%s,\"env\":%s,\"secretKeys\":%s,\"replicas\":%d}"
+      (.Values.releaseAgent.name | quote) ($img | quote)
+      (.Values.platformDefaults.seed.values | toJson)
+      (.Values.platformDefaults.seed.sensitiveKeys | toJson)
+      (int .Values.releaseAgent.replicas) | quote }}
+  {{- end }}
+{{- if and .Values.releaseAgent.enabled (eq .Values.releaseAgent.packageSource "bundled") }}
+binaryData:
+  # 发布助手 OAF 包（构建期由 scripts/pack-release-agent.sh 从 release-agent/ 源打包；AGENTS.md 必须在 zip 根）
+  release-agent.oaf.zip: {{ .Files.Get "resources/release-agent.oaf.zip" | b64enc }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "oaf.fullname" . }}-bootstrap
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "oaf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $sa }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bootstrap
+          image: {{ include "oaf.image" .Values.images.bootstrapJob }}
+          imagePullPolicy: {{ .Values.images.bootstrapJob.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              BASE="http://{{ include "oaf.fullname" . }}-backend.{{ $ns }}.svc.cluster.local:{{ .Values.backend.serverPort }}"
+              API="$BASE/api/v1"
+              # 认证头经 curl 配置文件传递（避免 shell 分词破坏 "Bearer xxx"）
+              if [ -n "${AUTH_TOKEN:-}" ]; then
+                printf 'header = "Authorization: Bearer %s"\n' "$AUTH_TOKEN" > /tmp/curlrc
+                CURL_K="-K /tmp/curlrc"
+              else
+                CURL_K=""
+              fi
+              echo "[bootstrap] waiting for platform-backend ..."
+              i=0
+              until curl -sf "$BASE/healthz" >/dev/null 2>&1; do
+                i=$((i+1)); if [ "$i" -gt 90 ]; then echo "backend not ready after 180s"; exit 1; fi
+                sleep 2
+              done
+              {{- if .Values.platformDefaults.seed.enabled }}
+
+              echo "[bootstrap] step 1/2: seed platform defaults"
+              code=$(curl -s $CURL_K -o /tmp/seed.resp -w '%{http_code}' \
+                -X PUT "$API/platform-config" -H 'content-type: application/json' --data @/bootstrap/seed.json)
+              echo "[bootstrap] seed http=$code $(head -c 300 /tmp/seed.resp 2>/dev/null || true)"
+              if [ "$code" != "200" ]; then echo "seed failed"; exit 1; fi
+              {{- end }}
+              {{- if .Values.releaseAgent.enabled }}
+
+              echo "[bootstrap] step 2/2: publish release agent"
+              if curl -s $CURL_K "$API/services" | grep -q "\"k8sName\":\"oaf-{{ .Values.releaseAgent.name }}\""; then
+                echo "[bootstrap] service oaf-{{ .Values.releaseAgent.name }} already exists, skip"
+              else
+                PID={{ int .Values.releaseAgent.packageId }}
+                {{- if eq .Values.releaseAgent.packageSource "bundled" }}
+                echo "[bootstrap] upload bundled OAF package"
+                resp=$(curl -s $CURL_K -X POST "$API/packages" -F "file=@/bootstrap/release-agent.oaf.zip")
+                PID=$(printf '%s' "$resp" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' | head -1)
+                if [ -z "$PID" ]; then echo "package upload failed: $resp"; exit 1; fi
+                echo "[bootstrap] uploaded package id=$PID"
+                {{- end }}
+                body=$(sed "s/\"packageId\":0/\"packageId\":$PID/" /bootstrap/publish.json)
+                code=$(curl -s $CURL_K -o /tmp/pub.resp -w '%{http_code}' \
+                  -X POST "$API/services" -H 'content-type: application/json' --data "$body")
+                echo "[bootstrap] publish http=$code $(head -c 300 /tmp/pub.resp 2>/dev/null || true)"
+                if [ "$code" != "200" ]; then echo "publish failed"; exit 1; fi
+              fi
+              {{- end }}
+
+              echo "[bootstrap] done"
+          {{- if .Values.backend.authToken }}
+          env:
+            - name: AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: auth-token
+          {{- end }}
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /bootstrap
+              readOnly: true
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: {{ include "oaf.fullname" . }}-bootstrap
+{{- end }}

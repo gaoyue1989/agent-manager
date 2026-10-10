@@ -1,0 +1,44 @@
+{{- if eq .Values.routing.mode "router" }}
+{{- $ns := include "oaf.namespace" . -}}
+{{- $split := eq (include "oaf.splitDomain" .) "true" -}}
+{{- $host := .Values.ingress.host -}}
+{{- if $split -}}{{- $host = "" -}}{{- end -}}
+{{- $tls := and .Values.ingress.tls.enabled .Values.ingress.tls.secretName -}}
+# 共享业务入口：/agent → platform-router（零 rewrite 注解；path 属 Ingress 核心规范，
+# 任意 controller 可用）。形态 B 下 host 留空（catch-all）——前端域另有显式 /agent 规则。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "oaf.fullname" . }}-agent-router
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if and $tls $host }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+{{- if $host }}
+    - host: {{ $host | quote }}
+      http:
+{{- else }}
+    - http:
+{{- end }}
+        paths:
+          - path: /agent
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "oaf.fullname" . }}-router
+                port: { number: 80 }
+{{- end }}

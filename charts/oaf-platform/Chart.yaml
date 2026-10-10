@@ -1,0 +1,9 @@
+apiVersion: v2
+name: oaf-platform
+description: OAF 服务发布平台（控制面：platform-backend + platform-frontend + platform-router）。
+  自包含（无子 chart）；MySQL/Redis 外部化、PVC 复用已有、镜像来自环境内网仓库。
+type: application
+version: 0.1.0
+appVersion: "v9"
+keywords: [oaf, agent-platform, a2a]
+home: https://github.com/gaoyue1989/agent-manager

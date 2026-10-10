@@ -1,0 +1,20 @@
+{{- if eq .Values.routing.mode "router" }}
+{{- $ns := include "oaf.namespace" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oaf.fullname" . }}-router
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "oaf.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

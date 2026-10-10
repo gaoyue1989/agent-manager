@@ -1,0 +1,30 @@
+{{- if .Values.business.deploymentOverlay.enabled }}
+{{- $ns := include "oaf.namespace" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oaf.fullname" . }}-business-overlay
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+data:
+  # DEPLOYMENT_TEMPLATE：Strategic Merge Patch，作用于每个业务 Deployment。
+  # 不变量校验见 backend validateDeployment（保留键/envFrom/挂载/selector 不可破坏）。
+  # OTel 已决议暂不考虑；如需，在此追加 env（OTEL_TRACES_EXPORTER / OTEL_EXPORTER_OTLP_ENDPOINT 等）。
+  overlay.yaml: |
+    {{- .Values.business.deploymentOverlay.extra | nindent 4 }}
+{{- end }}
+{{- if and .Values.business.ingressOverlay.enabled (eq .Values.routing.mode "host") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oaf.fullname" . }}-ingress-overlay
+  namespace: {{ include "oaf.namespace" . }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+data:
+  # INGRESS_TEMPLATE（仅 host 模式）：host/path 为不变量，仅可追加注解/TLS。
+  overlay.yaml: |
+    {{- .Values.business.ingressOverlay.content | nindent 4 }}
+{{- end }}

@@ -1,0 +1,18 @@
+{{- $ns := include "oaf.namespace" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oaf.fullname" . }}-frontend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "oaf.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

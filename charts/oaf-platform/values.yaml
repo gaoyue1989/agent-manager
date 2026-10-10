@@ -1,0 +1,150 @@
+# OAF 平台 Helm values（默认值 = 通用环境语义；离线/内网见 values-offline.yaml.example）
+# 设计依据：docs/design/helm-offline-deploy-design.md（§4 values 契约 / §5 外部接线 / §6 路由与暴露）
+
+# ---------- 命名 ----------
+# 空 = Release.Namespace；须与业务资源所在 namespace 一致（backend NAMESPACE、router upstream FQDN 同源渲染）
+namespaceOverride: ""
+nameOverride: ""
+
+# 内网镜像仓库凭据（透传到三类 Deployment + bootstrap Job）
+imagePullSecrets: []
+
+# ---------- 镜像（统一内网仓库前缀；tag 由发布流水线产生） ----------
+images:
+  backend:  { repository: platform-backend,  tag: "v9",           pullPolicy: IfNotPresent }
+  frontend: { repository: platform-frontend, tag: "v7",           pullPolicy: IfNotPresent }
+  router:   { repository: nginx,             tag: "1.27.1-alpine", pullPolicy: IfNotPresent }
+  # bootstrap Job 的 curl 容器（需含 sh + curl；解析 JSON 用 sed，不依赖 jq）
+  bootstrapJob: { repository: curlimages/curl, tag: "8.8.0", pullPolicy: IfNotPresent }
+  # 业务镜像白名单（渲染 AVAILABLE_IMAGES/DEFAULT_IMAGE；必须与实际可拉取 tag 一致，否则发布 400）
+  # 例：[{image: "harbor.internal/oaf/agent-framework:agentscope-2.1.0-v20261010", label: "Agent Framework 2.1.0"}]
+  business: []
+  # 空 = 取 business[0]
+  defaultBusiness: ""
+
+# ---------- 路由（subpath-routing-design 双模式） ----------
+routing:
+  mode: router            # router（默认，chart 部署 platform-router）| host（每服务独立域名）
+  ingressClass: nginx
+  # 集群 ingress controller 的对外入口地址（Endpoint 展示拼装用，如 172.20.0.3 / 域名）
+  host: ""
+  port: 30080
+  hostSuffix: ""          # host 模式必填（以 "." 开头，如 .region.example.cn）
+
+# ---------- 对外暴露（仅 Ingress；不提供 NodePort，已决议） ----------
+ingress:
+  className: nginx
+  # 形态 A：统一域名路径分流（空 = 无 host catch-all，适合单 IP/测试）
+  host: ""
+  # 形态 B：分域（两个都填才生效；此时 ingress.host 忽略）
+  backend:  { host: "" }
+  frontend: { host: "" }
+  tls: { enabled: false, secretName: "" }
+  annotations: {}
+
+# ---------- 平台数据卷（复用已有 PVC，chart 不创建） ----------
+persistence:
+  existingClaim: platform-data   # 必填；渲染 PLATFORM_PVC_NAME（backend 需支持该 env，PR-B）
+  mountPath: /data
+
+# ---------- 外部中间件（chart 不部署） ----------
+external:
+  mysql:
+    dsn: ""                      # 非空则直用（优先）；否则由下列字段拼装
+    host: ""                     # 例 oaf-mysql.agent-platform.svc.cluster.local
+    port: 3306
+    database: oaf_platform
+    username: ""
+    password: ""                 # 建议改用 backend.existingSecret（chart 内明文仅示例）
+    params: "charset=utf8mb4&parseTime=True&loc=Local"
+  redis:
+    url: ""                      # 业务侧 Redis URL（bootstrap 种子用；平台自身不用 Redis）
+
+# ---------- platform-backend ----------
+backend:
+  replicas: 1                    # 固定 1（架构原则一：多副本前须先解决发布链路一致性）
+  serverPort: 8080
+  authToken: ""                  # 生产必填（REST/MCP Bearer）；建议 existingSecret
+  existingSecret: ""             # 已有 Secret 名（key: auth-token）
+  packageDownloadBase: ""        # 空 = 集群内默认（platform-backend svc）
+  register: { timeoutSeconds: 120, retry: 5 }
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 2Gi }
+  # KUBECONFIG 两模式（设计 §6.2）；synthesized = 部署期合成（专用 SA + token Secret + kubeconfig）
+  kubeconfig:
+    mode: synthesized            # synthesized | provided
+    server: ""                   # synthesized：空 = https://kubernetes.default.svc（可覆写为 Service IP）
+    existingSecret: ""           # provided：已有 Secret 名（key: kubeconfig）
+    content: ""                  # provided：直接给 kubeconfig 内容（渲染进 Secret）
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+rbac:
+  clusterScope: false            # true = ClusterRole/ClusterRoleBinding（跨 namespace 管理）
+
+# ---------- platform-frontend ----------
+frontend:
+  replicas: 1
+  env:
+    backendInternalUrl: ""       # 空 = 渲染集群内 svc 地址
+    agentInternalUrl: ""         # 空 = 按 releaseAgent.enabled 渲染（指向 oaf-{name}-svc）
+    publicApiUrl: ""             # NEXT_PUBLIC_API_URL：形态 A 留空（同源）；形态 B 必填 backend 公网地址
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------- platform-router（router 模式） ----------
+router:
+  replicas: 2
+  nginx:
+    clientMaxBodySize: 200m      # 与文件上传对齐；上限最终由应用层裁决
+    readTimeout: 3600s           # SSE/A2A blocking 长连接
+    sendTimeout: 3600s
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------- 业务服务（发布期生效的平台级参数） ----------
+business:
+  resources:                     # 渲染 RESOURCE_* 四元组（每个业务 Deployment）
+    requestsCpu: 250m
+    requestsMem: 256Mi
+    limitsCpu: "1"
+    limitsMem: 1Gi
+  deploymentOverlay:
+    enabled: false               # DEPLOYMENT_TEMPLATE（Strategic Merge Patch；OTel 暂不考虑，如需经 extra 注入）
+    extra: ""
+  ingressOverlay:
+    enabled: false               # INGRESS_TEMPLATE：仅 host 模式（router 模式配置即渲染期报错）
+    content: ""
+
+# ---------- 平台默认配置种子（bootstrap Job 第①步；同时作为发布助手的 env） ----------
+platformDefaults:
+  seed:
+    enabled: true
+    # envKey → value 自由映射（键名与 internal/service/platformconfig/template.go 一致，或从 /settings 页复制）
+    # 例：LLM_API_KEY / LLM_BASE_URL / LLM_MODEL_ID / CHECKPOINT_JDBC_URL / CHECKPOINT_USERNAME /
+    #     CHECKPOINT_PASSWORD / AGENT_REDIS_URL / OPENSANDBOX_SERVER_URL ...
+    values: {}
+    # 上述值中按敏感处理的键（发布助手服务会路由进 Secret；平台默认配置本身由平台侧管理）
+    sensitiveKeys: [LLM_API_KEY, CHECKPOINT_PASSWORD, AGENT_REDIS_URL, OPENSANDBOX_API_KEY, AGENT_PROTOCOL_AUTH_TOKEN]
+
+# ---------- 发布助手自举（bootstrap Job 第②步；release-agent 亦是 chart 的一部分） ----------
+releaseAgent:
+  enabled: true
+  name: release-agent            # 业务服务名（k8sName 派生 oaf-release-agent）
+  packageSource: bundled         # bundled（chart 内置 zip）| packageId（环境已导入包）
+  packageId: 0
+  image: ""                      # 空 = images.defaultBusiness
+  replicas: 1
