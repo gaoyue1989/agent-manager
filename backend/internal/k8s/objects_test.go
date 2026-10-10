@@ -271,3 +271,25 @@ func TestReservedKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestDeploymentPVCNameFollowsParam 业务 Pod 挂载的平台数据卷 PVC 名随参数（Helm/清单部署
+// 指向环境已有 PVC）；空值回落平台默认常量（历史行为不变）。
+func TestDeploymentPVCNameFollowsParam(t *testing.T) {
+	claim := func(p ObjectParams) string {
+		d := Deployment(p)
+		for _, v := range d.Spec.Template.Spec.Volumes {
+			if v.Name == FilesVolumeName && v.PersistentVolumeClaim != nil {
+				return v.PersistentVolumeClaim.ClaimName
+			}
+		}
+		return ""
+	}
+	if got := claim(testParams()); got != PVCName {
+		t.Fatalf("default claim must fall back to %q, got %q", PVCName, got)
+	}
+	p := testParams()
+	p.PVCName = "existing-oaf-data"
+	if got := claim(p); got != "existing-oaf-data" {
+		t.Fatalf("custom claim must be honored, got %q", got)
+	}
+}
