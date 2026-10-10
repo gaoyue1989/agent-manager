@@ -16,8 +16,8 @@ PVC 创建、镜像 tag、`INGRESS_HOST` 等环境相关值——换环境要改
 2. 全部环境相关值走 `values.yaml` / `-f values-offline.yaml`，不要求改模板；
 3. **MySQL / Redis / OTel 全部外部化**：chart 不部署、不创建、不管理；
 4. **PVC 复用已有**：chart 不创建任何 PVC（平台数据卷由环境预先提供）；
-5. **离线**：镜像预载（`kind load` / `docker save | ctr import` / 内网 registry），
-   chart 渲染过程不依赖网络（无子 chart、无 `lookup` 强依赖）。
+5. **离线（内网仓库）**：镜像**统一来自环境内网镜像仓库**——chart 不提供镜像预载/搬运，
+   仅参数化 registry 前缀与拉取凭据；渲染与安装不依赖公网（无子 chart、无外网访问）。
 
 **非目标（明确不做）**
 
@@ -43,9 +43,8 @@ PVC 创建、镜像 tag、`INGRESS_HOST` 等环境相关值——换环境要改
 charts/oaf-platform/
 ├── Chart.yaml                        # apiVersion v2；无 dependencies（自包含）
 ├── values.yaml                       # 全量默认值（kind 开发语义）
-├── values-offline.yaml.example       # 离线示例（内网 registry / 预载 tag / 外置中间件）
-├── README.md                         # 快速开始、离线步骤、命名同步约束、卸载语义
-├── scripts/load-images.sh            # 离线镜像预载（save|import / kind load / registry push）
+├── values-offline.yaml.example       # 离线示例（内网仓库前缀 / 外部中间件 / 已有 PVC）
+├── README.md                         # 快速开始、内网仓库配置、命名同步约束、卸载语义
 └── templates/
     ├── _helpers.tpl                  # 命名/labels/必填校验（required）
     ├── namespace.yaml                # 可选创建（默认跟随 Release.Namespace）
@@ -71,7 +70,7 @@ charts/oaf-platform/
 | 分组 | 键（代表） | 默认 / 说明 |
 |---|---|---|
 | 命名 | `namespaceOverride`、`nameOverride` | 默认 `Release.Namespace`；**须与业务资源所在 namespace 一致**（后端 `NAMESPACE`、router upstream FQDN 同一值） |
-| 镜像 | `images.backend.{repository,tag,pullPolicy}`、`images.frontend.*`、`images.router.*` | 离线时指向内网 registry 或预载 tag；`pullPolicy` 建议 `IfNotPresent` |
+| 镜像 | `images.backend.{repository,tag,pullPolicy}`、`images.frontend.*`、`images.router.*` | **repository 含内网 registry 前缀**（如 `harbor.internal/oaf/platform-backend`）；凭据经 `imagePullSecrets` |
 | 业务镜像白名单 | `images.business[]`（`{image,label}`）、`images.defaultBusiness` | 渲染 `AVAILABLE_IMAGES` / `DEFAULT_IMAGE`（**必须与实际可拉取 tag 一致**，否则发布被 400 拒） |
 | 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | router 模式：`host`=对外 IP、`port`=NodePort；host 模式额外 `hostSuffix` |
 | 后端 | `backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.templates.{deployment,ingress}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入） |
@@ -89,12 +88,14 @@ charts/oaf-platform/
 
 ```yaml
 routing: { mode: router, ingressClass: nginx, host: "172.20.0.3", port: 30080, hostSuffix: "" }
+imagePullSecrets: [{ name: oaf-registry-cred }]
 images:
-  backend:  { repository: platform-backend, tag: "v9", pullPolicy: IfNotPresent }
-  frontend: { repository: platform-frontend, tag: "v7", pullPolicy: IfNotPresent }
-  router:   { repository: nginx, tag: "1.27.1-alpine", pullPolicy: IfNotPresent }
-  business: [{ image: "agent-framework:latest", label: "Agent Framework" }]
-  defaultBusiness: "agent-framework:latest"
+  # repository 均为「内网仓库/项目」全路径，tag 由发布流水线产生
+  backend:  { repository: harbor.internal/oaf/platform-backend, tag: "v9", pullPolicy: IfNotPresent }
+  frontend: { repository: harbor.internal/oaf/platform-frontend, tag: "v7", pullPolicy: IfNotPresent }
+  router:   { repository: harbor.internal/oaf/nginx, tag: "1.27.1-alpine", pullPolicy: IfNotPresent }
+  business: [{ image: "harbor.internal/oaf/agent-framework:agentscope-2.1.0-v20261010", label: "Agent Framework 2.1.0" }]
+  defaultBusiness: "harbor.internal/oaf/agent-framework:agentscope-2.1.0-v20261010"
 persistence: { existingClaim: platform-data, mountPath: /data }
 external:
   mysql: { host: oaf-mysql.agent-platform.svc.cluster.local, port: 3306, database: oaf_platform,
@@ -169,13 +170,11 @@ platformDefaults: { seed: { enabled: false } }
 ## 7. 离线部署流程（一键）
 
 ```bash
-# 1) 预载镜像（三选一；scripts/load-images.sh 封装）
-docker save platform-backend:v9 | ctr -n k8s.io images import -      # 或 kind load docker-image
-#    内网 registry：values 改 images.*.repository 前缀 + load-images.sh --push
-# 2) 一键安装
+# 0) 前置：镜像已由发布流水线推入内网仓库；节点/集群可拉取（imagePullSecrets 就绪）
+# 1) 一键安装（values 指向内网仓库与外部中间件）
 helm install oaf ./charts/oaf-platform -n agent-platform --create-namespace \
   -f values-offline.yaml
-# 3) 装后自检（NOTES.txt 内嵌）
+# 2) 装后自检（NOTES.txt 内嵌）
 kubectl -n agent-platform rollout status deploy/platform-backend deploy/platform-router
 curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 #    发布一个服务 → running、无 per-service Ingress、经 /agent/{short}/health 200
@@ -184,6 +183,8 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 - **air-gapped 无 helm** 时：`helm template oaf ./charts/oaf-platform -f values-offline.yaml --output-dir out/`
   出 YAML 后 `kubectl apply -f out/`（渲染校验也在安装前完成）。
 - chart 侧不发起任何网络访问（无子 chart、无 hook 下载）；seed Job 只访问集群内平台 Service。
+- 镜像来源唯一：平台镜像（backend/frontend/router）与业务镜像白名单（`AVAILABLE_IMAGES`）
+  都取同一内网仓库，由 `images.*` 与 `images.business[]` 统一渲染，避免两处 tag 错配。
 
 ## 8. 与现有 manifests 的关系
 
@@ -214,7 +215,10 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 4. **外部 MySQL**：库/账号需预建；schema 由 `AutoMigrate`；chart 不提供备份与版本回退。
 5. **外部 Redis**：`noeviction`/持久化由外部实例负责；`AGENT_REDIS_URL` 每服务独立前缀为
    文档级约束（平台不校验，既有缺口）。
-6. **镜像 tag 与 `AVAILABLE_IMAGES` 必须一致**（否则发布 400）——两者由同一 values 渲染以降低错配。
+6. **镜像 tag 与 `AVAILABLE_IMAGES` 必须一致**（否则发布 400）——两者由同一 values 渲染以降低错配；
+   业务 Pod 的 `imagePullPolicy` 固定 `IfNotPresent`（backend 构造，非 chart 可调），因此**同 tag
+   覆盖推送不会在已缓存节点生效**，业务镜像更新须使用新 tag（仓库既有实践：
+   `agentscope-2.1.0-v{日期}`）。
 7. **`helm upgrade` 会滚动 backend/router**（SSE 断流，同 ingress 升级语义）；业务面不受影响。
 8. **seed Job** 依赖平台 API 就绪与 `AUTH_TOKEN`；失败会令 release 处于 failed（可关或
    用 `--atomic`/`--no-hooks` 控制）。
@@ -234,5 +238,5 @@ curl -s http://<host>:<port>/api/v1/services           # 平台 API 200
 3. **seed Job 是否纳入**：纳入则一键部署后即可直接发布；不纳入则部署后仍需 `/settings` 手工填默认值
 4. **chart 目录位置**：`charts/oaf-platform`（推荐）vs `deploy/helm/...`
 5. **是否保留 `manifests/` 自举**（推荐保留，二者并存）
-6. **镜像清单口径**：chart 所需镜像（backend/frontend/router）与业务白名单是否统一由 values 渲染
-   （推荐统一，避免 tag 错配）
+6. **镜像清单口径**：chart 所需镜像（backend/frontend/router）与业务白名单统一由 values 渲染、
+   统一内网仓库前缀（推荐）；`imagePullSecrets` 由 chart 透传到三类 Deployment
