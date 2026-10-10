@@ -123,4 +123,39 @@ class AgentCardControllerTest {
             .andExpect(jsonPath("$.agent_protocol.streaming").value(true))
             .andExpect(jsonPath("$.agent_protocol.hitl").value(true));
     }
+
+    /** 直连（无代理头）→ url 恒为空串（注册落库内容不变，subpath-routing §3.1 契约） */
+    @Test
+    void agentCardUrlShouldStayEmptyWithoutForwardedPrefix() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.vendorKey()).thenReturn("acme");
+        when(skillCatalog.list()).thenReturn(List.of());
+        when(oafConfig.tags()).thenReturn(List.of("test"));
+        when(a2uiService.getExtensionDeclaration()).thenReturn(Map.of());
+
+        mockMvc.perform(get("/.well-known/agent-card.json"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.url").value(""));
+    }
+
+    /** 经代理（X-Forwarded-Prefix + X-Forwarded-Host）→ url 填外部基址（带尾斜杠） */
+    @Test
+    void agentCardUrlShouldUseExternalBaseWhenForwarded() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.vendorKey()).thenReturn("acme");
+        when(skillCatalog.list()).thenReturn(List.of());
+        when(oafConfig.tags()).thenReturn(List.of("test"));
+        when(a2uiService.getExtensionDeclaration()).thenReturn(Map.of());
+
+        mockMvc.perform(get("/.well-known/agent-card.json")
+                .header("X-Forwarded-Prefix", "/agent/demo/")
+                .header("X-Forwarded-Host", "entry.example:30080")
+                .header("X-Forwarded-Proto", "https"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.url").value("https://entry.example:30080/agent/demo/"));
+    }
 }
