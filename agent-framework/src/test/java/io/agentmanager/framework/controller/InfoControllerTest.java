@@ -108,4 +108,60 @@ class InfoControllerTest {
             .andExpect(jsonPath("$.system_prompt").value("Full system prompt with skills"))
             .andExpect(jsonPath("$.base_prompt").value("Base prompt"));
     }
+
+    /** 直连（无代理头）：endpoints 根路径 + 无 base_url 键（响应体与变更前一致） */
+    @Test
+    void rootAndMetadataShouldStayUnprefixedWithoutForwardedHeader() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.slug()).thenReturn("acme/test-agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.tools()).thenReturn(List.of());
+        when(oafConfig.skills()).thenReturn(List.of());
+        when(oafConfig.mcpServers()).thenReturn(List.of());
+        when(oafConfig.subAgents()).thenReturn(List.of());
+        when(mcpManager.getMcpSummaries(org.mockito.ArgumentMatchers.anyList())).thenReturn(List.of());
+
+        mockMvc.perform(get("/"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.endpoints.agent_card").value("/.well-known/agent-card.json"))
+            .andExpect(jsonPath("$.base_url").doesNotExist());
+
+        mockMvc.perform(get("/metadata").param("includeDetails", "true"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.endpoints.threads").value("/threads"))
+            .andExpect(jsonPath("$.base_url").doesNotExist());
+    }
+
+    /** 经代理（X-Forwarded-Prefix/Host/Proto）：endpoints 逐项带前缀 + base_url 填外部基址 */
+    @Test
+    void rootAndMetadataShouldHonorForwardedPrefix() throws Exception {
+        when(oafConfig.name()).thenReturn("test-agent");
+        when(oafConfig.slug()).thenReturn("acme/test-agent");
+        when(oafConfig.version()).thenReturn("1.0.0");
+        when(oafConfig.description()).thenReturn("A test agent");
+        when(oafConfig.tools()).thenReturn(List.of());
+        when(oafConfig.skills()).thenReturn(List.of());
+        when(oafConfig.mcpServers()).thenReturn(List.of());
+        when(oafConfig.subAgents()).thenReturn(List.of());
+        when(mcpManager.getMcpSummaries(org.mockito.ArgumentMatchers.anyList())).thenReturn(List.of());
+
+        mockMvc.perform(get("/")
+                .header("X-Forwarded-Prefix", "/agent/demo")
+                .header("X-Forwarded-Host", "entry.example:30080")
+                .header("X-Forwarded-Proto", "https"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.endpoints.agent_card").value("/agent/demo/.well-known/agent-card.json"))
+            .andExpect(jsonPath("$.endpoints.jsonrpc").value("/agent/demo/"))
+            .andExpect(jsonPath("$.endpoints.threads").value("/agent/demo/threads"))
+            .andExpect(jsonPath("$.endpoints.health").value("/agent/demo/health"))
+            .andExpect(jsonPath("$.base_url").value("https://entry.example:30080/agent/demo"));
+
+        mockMvc.perform(get("/metadata").param("includeDetails", "true")
+                .header("X-Forwarded-Prefix", "/agent/demo")
+                .header("X-Forwarded-Host", "entry.example:30080"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.endpoints.agent_card").value("/agent/demo/.well-known/agent-card.json"))
+            .andExpect(jsonPath("$.base_url").value("http://entry.example:30080/agent/demo"));
+    }
 }

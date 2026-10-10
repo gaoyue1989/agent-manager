@@ -166,7 +166,7 @@ class ChatStreamControllerTest {
 
     private List<String> collect(String sessionId, String message, String userId, List<String> fileIds) {
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null), null)
+                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -523,7 +523,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) d1, (AgentEvent) callEnd,
                 (AgentEvent) rDelta, (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -568,7 +568,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd,
                 (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -583,8 +583,8 @@ class ChatStreamControllerTest {
 
     @Test
     void chatShouldEmitFileReadyWithAgentRelativeDownloadUrl() {
-        // 契约（docs/api-frontend-sse.md）：file_ready.download_url 固定为相对路径
-        // "/files/{id}"，由前端拼 AGENT_BASE（/agent/release-agent）成完整下载地址。
+        // 契约（docs/api-frontend-sse.md）：直连（无 X-Forwarded-Prefix）时
+        // file_ready.download_url 固定为相对路径 "/files/{id}"，由前端拼 AGENT_BASE。
         // 前端曾因直接渲染该相对路径导致全入口 404，此用例把契约钉死在后端侧。
         var sessionId = "test-user-fr1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
@@ -609,7 +609,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -619,9 +619,46 @@ class ChatStreamControllerTest {
         assertTrue(payload.contains("\"type\":\"file_ready\""), "type 应为 file_ready: " + payload);
         assertTrue(payload.contains("\"file_id\":\"fid-fr1\""), "应携带 file_id: " + payload);
         assertTrue(payload.contains("\"download_url\":\"/files/fid-fr1\""),
-            "download_url 必须是 /files/{id} 相对路径（前端拼 AGENT_BASE）: " + payload);
-        assertTrue(!payload.contains("download_url\":\"/agent/"),
-            "download_url 不得带 agent 前缀（前端负责拼接）: " + payload);
+            "直连时 download_url 必须是 /files/{id} 相对路径（前端拼 AGENT_BASE）: " + payload);
+    }
+
+    @Test
+    void chatShouldPrefixFileReadyDownloadUrlWhenForwarded() {
+        // subpath-routing-design §3.1：经代理（X-Forwarded-Prefix）访问时 download_url
+        // 下发从域名根解析的完整路径（/agent/demo/files/{id}），外部客户端免拼前缀；
+        // 尾斜杠/多值头由 ExternalUrlSupport 归一。
+        var sessionId = "test-user-fr2";
+        var spyBus = org.mockito.Mockito.spy(eventBus);
+        var skillInjectionService = mock(SkillInjectionService.class);
+        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
+            sessionUserStore, workspaceReader, props, skillInjectionService,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
+
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-fr2");
+        var replyId = "r-fr2";
+        var callId = "c-fr2";
+        var trDelta = new io.agentscope.core.event.ToolResultTextDeltaEvent(replyId, callId,
+            "present_file",
+            "{\"file_id\":\"fid-fr2\",\"file_name\":\"blue.png\",\"mime_type\":\"image/png\",\"size\":42}");
+        var trEnd = new io.agentscope.core.event.ToolResultEndEvent(replyId, callId,
+            "present_file", io.agentscope.core.message.ToolResultState.SUCCESS);
+        var agentEnd = new AgentEndEvent(replyId);
+
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
+
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null),
+                null, "/agent/demo/")
+            .collectList().block(Duration.ofSeconds(10));
+
+        var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(spyBus).emitSynthetic(eq(sessionId), anyString(), eq("file_ready"), payloadCap.capture());
+        var payload = payloadCap.getValue();
+        assertTrue(payload.contains("\"download_url\":\"/agent/demo/files/fid-fr2\""),
+            "带前缀头（含尾斜杠）时 download_url 应为归一化的完整路径: " + payload);
     }
 
     @Test
@@ -653,7 +690,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -699,7 +736,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -752,7 +789,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -784,7 +821,7 @@ class ChatStreamControllerTest {
         when(chatChannel.sendStream(any(ChatUiRequest.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null), null)
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null), null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1172,7 +1209,7 @@ class ChatStreamControllerTest {
         when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope"), null)
+                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope"), null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("unknown_model: nope")),
@@ -1190,7 +1227,7 @@ class ChatStreamControllerTest {
 
         // sessionId 缺省（新会话）+ model 显式指定
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2"), null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2"), null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1207,7 +1244,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m3")));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system"), null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system"), null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);

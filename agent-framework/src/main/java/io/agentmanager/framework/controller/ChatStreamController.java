@@ -253,7 +253,8 @@ public class ChatStreamController {
      */
     @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> chat(@RequestBody ChatRequest body,
-                                              @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+                                              @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+                                              @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader) {
         var message = body.message();
         if ((message == null || message.isBlank()) && (body.fileIds() == null || body.fileIds().isEmpty())) {
             return Flux.just(errorSSE("message or fileIds is required"));
@@ -281,6 +282,11 @@ public class ChatStreamController {
         String finalSessionId = sessionId;
         String finalUserId = userId;
         boolean emitSessionCreated = isNewSession;
+
+        // 对外前缀（subpath-routing-design §3.1）：file_ready 合成发生在异步事件回调线程，
+        // RequestContextHolder 不可靠——入口解析一次，经闭包/参数显式传到合成点；
+        // 直连（无该头）为 null，download_url 维持服务根相对路径（契约不变）
+        var forwardedPrefix = io.agentmanager.framework.util.ExternalUrlSupport.normalizePrefix(forwardedPrefixHeader);
 
         // 新会话的首帧 session_created（issue #87 二级症状兜底）：不再在 create 回调里发——
         // 该回调经 subscribeOn(boundedElastic) 执行，排队 waiter 占满线程池时首帧被推迟
@@ -471,7 +477,7 @@ public class ChatStreamController {
                 currentChatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
-                            finalUserId, sink, turnEnded, turnBucketKeys, toolSummary),
+                            finalUserId, sink, turnEnded, turnBucketKeys, toolSummary, forwardedPrefix),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
@@ -557,7 +563,8 @@ public class ChatStreamController {
                                     FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
                                     java.util.Set<String> turnBucketKeys,
-                                    TurnToolSummaryTracker toolSummary) {
+                                    TurnToolSummaryTracker toolSummary,
+                                    String forwardedPrefix) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             return;
@@ -634,7 +641,7 @@ public class ChatStreamController {
         if (event instanceof ToolResultEndEvent tre
                 && ("present_file".equals(tre.getToolCallName())
                     || "present_url".equals(tre.getToolCallName()))) {
-            emitFileReadyViaEventBus(sessionId, replyId, tre.getToolCallId());
+            emitFileReadyViaEventBus(sessionId, replyId, tre.getToolCallId(), forwardedPrefix);
         }
 
         // AGENT_END（仅 lead 自身事件）：远程子 agent 转发的 AGENT_END（source 非空）只是
@@ -742,7 +749,8 @@ public class ChatStreamController {
         }
     }
 
-    private void emitFileReadyViaEventBus(String sessionId, String replyId, String toolCallId) {
+    private void emitFileReadyViaEventBus(String sessionId, String replyId, String toolCallId,
+                                         String forwardedPrefix) {
         var buf = presentFileBuffers.remove(toolCallId);
         if (buf == null) return;
         String json;
@@ -764,7 +772,9 @@ public class ChatStreamController {
             payload.put("file_name", node.get("file_name").asText());
             payload.put("mime_type", node.has("mime_type") ? node.get("mime_type").asText() : null);
             payload.put("size", node.has("size") ? node.get("size").asLong() : 0);
-            payload.put("download_url", "/files/" + fileId);
+            // subpath-routing-design §3.1：经代理（有 X-Forwarded-Prefix）访问时下发从域名根
+            // 解析的完整路径（客户端免拼前缀）；直连维持 /files/{id} 服务根相对路径（旧契约）
+            payload.put("download_url", (forwardedPrefix == null ? "" : forwardedPrefix) + "/files/" + fileId);
             eventBus.emitSynthetic(sessionId, replyId, "file_ready",
                 AgentEventSseSerializer.payload(payload));
             // 回写 reply_id 和 session_id 到 file_asset，供历史回放按消息/会话维度分发卡片

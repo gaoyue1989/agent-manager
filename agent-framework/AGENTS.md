@@ -474,6 +474,23 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/tasks*` | **Agent Protocol 远程子 agent 服务端（默认关闭）**：`AGENT_PROTOCOL_ENABLED=true` 才由 SDK 扩展注册——`POST /tasks` 提交、`GET /tasks/{id}` 快照（确认源，F15）、`/{id}/wait`、`/{id}/cancel`、`/{id}/events`(SSE)、`/{id}/resume`；全部经 AgentProtocolAuthFilter 前置校验 `X-Agent-Protocol-Token`，无/错 token 一律 401。关闭时 404、行为与现状完全一致 |
 
+### 子路径部署的前缀感知（X-Forwarded-Prefix 契约，2026-10-10）
+
+服务本身不感知部署形态：经统一域名子路径（router 模式，platform-router nginx；或任何
+设置下列头的代理层）访问时，代理剥前缀转发并注入 `X-Forwarded-Prefix`（配套
+`X-Forwarded-Proto`/`X-Forwarded-Host`），对外下发的自引用 URL 随之带前缀（
+`util/ExternalUrlSupport`，subpath-routing-design §3.1）：
+
+| 下发点 | 有前缀头 | 直连/集群内（无头，注册链路 ClusterURL 即此形态） |
+|---|---|---|
+| agent-card `url` | `{scheme}://{host}{prefix}/` | 空串（落库内容不变） |
+| SSE `file_ready.download_url` | `{prefix}/files/{id}`（从域名根解析的完整路径，客户端免拼前缀） | `/files/{id}`（服务根相对路径，前端拼 AGENT_BASE） |
+| `GET /`、`/metadata` 的 `endpoints` | 逐项加前缀 + additive 字段 `base_url` | 根路径，无 `base_url` 键（响应体逐字节不变） |
+
+前端判别式（debug UI chat.js 与平台前端一致）：`url.startsWith(BASE) ? url : BASE + url`。
+门禁：单测（ExternalUrlSupport/AgentCard/Info/ChatStream 前缀维度）+ e2e 核心 X 组
+（LB 透传客户端头注入）+ e2e-router RT 组（nginx router 全链路，fixtures/nginx-router.conf.template）。
+
 ---
 
 ## 启动

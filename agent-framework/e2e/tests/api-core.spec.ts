@@ -1,6 +1,7 @@
 /**
  * e2e-core API 组：S 基础 / F 文件 / H HITL / M MCP Apps / A A2A / SK 技能管理 / HA 归档历史 /
- * FW /threads 槽位双形态匹配与 Flyway / RD Redis 前缀隔离（e2e-ci-plan §5，FW 为 §5.10、RD 为 §5.11）。
+ * FW /threads 槽位双形态匹配与 Flyway / RD Redis 前缀隔离（e2e-ci-plan §5，FW 为 §5.10、RD 为 §5.11）/
+ * X 前缀感知（subpath-routing-design §9.2，X-Forwarded-Prefix 头注入）。
  * 协议权威：docs/api-thread-spec.md v1.0。
  */
 import { test, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
@@ -1495,4 +1496,65 @@ test.describe('RD Redis 前缀隔离', () => {
     const baseLog = fs.readFileSync(path.join(runtimeDir, 'logs', 'agent-a.log'), 'utf8');
     expect(baseLog).toContain('prefix=""');
   });
+});
+
+// ---------- X 组：前缀感知（subpath-routing-design §9.2）----------
+// e2e nginx LB 根代理不设 X-Forwarded-Prefix，但透传客户端任意头 → 用例自带头直证
+// 「服务端对外 URL 自感知」契约（agent-card url / file_ready.download_url / endpoints）；
+// 对照组（无头）钉死旧行为零回归。X6（UI 维度）在 UI 断言机制可承载时补，暂列手工清单。
+
+test('X1 前缀头下 file_ready.download_url 携带完整路径（含尾斜杠归一）', async () => {
+  const sid = sessionIdFor(`x1-${uniq()}`);
+  const stream = chat({
+    message: `[E2E:oaf:package]`, userId: U, sessionId: sid,
+    headers: { 'X-Forwarded-Prefix': '/agent/e2e-x/' },
+  });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
+  expect(ready, '缺少 file_ready 帧').toBeTruthy();
+  expect(String(ready!.download_url)).toMatch(/^\/agent\/e2e-x\/files\/[0-9a-f-]{36}$/);
+});
+
+test('X2 agent-card url 头注入填充与对照（直连空串）', async ({ request }) => {
+  const card = await (await request.get('/.well-known/agent-card.json', {
+    headers: {
+      'X-Forwarded-Prefix': '/agent/e2e-x',
+      'X-Forwarded-Host': 'e2e-entry.example',
+      'X-Forwarded-Proto': 'https',
+    },
+  })).json();
+  expect(card.url).toBe('https://e2e-entry.example/agent/e2e-x/');
+  const bare = await (await request.get('/.well-known/agent-card.json')).json();
+  expect(bare.url).toBe('');
+});
+
+test('X3 GET / endpoints 前缀化 + base_url（多值头取首）', async ({ request }) => {
+  const root = await (await request.get('/', {
+    headers: { 'X-Forwarded-Prefix': '/agent/e2e-x, /other', 'X-Forwarded-Host': 'e2e-entry.example' },
+  })).json();
+  expect(root.endpoints.agent_card).toBe('/agent/e2e-x/.well-known/agent-card.json');
+  expect(root.endpoints.jsonrpc).toBe('/agent/e2e-x/');
+  expect(root.endpoints.threads).toBe('/agent/e2e-x/threads');
+  expect(root.endpoints.health).toBe('/agent/e2e-x/health');
+  expect(root.base_url).toBe('http://e2e-entry.example/agent/e2e-x');
+});
+
+test('X4 /metadata includeDetails endpoints 前缀化 + base_url', async ({ request }) => {
+  const meta = await (await request.get('/metadata?includeDetails=true', {
+    headers: { 'X-Forwarded-Prefix': '/agent/e2e-x', 'X-Forwarded-Host': 'e2e-entry.example' },
+  })).json();
+  expect(meta.endpoints.agent_card).toBe('/agent/e2e-x/.well-known/agent-card.json');
+  expect(meta.endpoints.threads).toBe('/agent/e2e-x/threads');
+  expect(meta.base_url).toBe('http://e2e-entry.example/agent/e2e-x');
+});
+
+test('X5 对照组：无头时 endpoints 根路径且无 base_url 键', async ({ request }) => {
+  const root = await (await request.get('/')).json();
+  expect(root.endpoints.agent_card).toBe('/.well-known/agent-card.json');
+  expect(root.endpoints.jsonrpc).toBe('/');
+  expect(root.base_url).toBeUndefined();
+  const meta = await (await request.get('/metadata?includeDetails=true')).json();
+  expect(meta.endpoints.threads).toBe('/threads');
+  expect(meta.base_url).toBeUndefined();
 });

@@ -36,7 +36,7 @@ public class AgentCardController {
     }
 
     @GetMapping("/.well-known/agent-card.json")
-    public Map<String, Object> agentCard() {
+    public Map<String, Object> agentCard(jakarta.servlet.http.HttpServletRequest req) {
         // holder 动态读取：reload 后新 name/version/description 即时反映到卡片
         var oafConfig = oafConfigHolder.get();
         // 动态技能目录：运行中新增/删除的技能即时反映到 A2A 卡片
@@ -54,7 +54,10 @@ public class AgentCardController {
         card.put("name", oafConfig.name());
         // A2A 通道 HITL 限制声明（ask 工具挂起无法经 A2A 批准，见 AgentCardNotes）
         card.put("description", AgentCardNotes.withA2aLimitation(oafConfig.description()));
-        card.put("url", "");
+        // 对外可达地址（subpath-routing-design §3.1）：经代理（带 X-Forwarded-Prefix）访问时
+        // 填外部基址；直连（注册链路 ClusterURL / e2e LB）无该头 → 保持空串，落库内容不变
+        var externalBase = io.agentmanager.framework.util.ExternalUrlSupport.externalBase(req);
+        card.put("url", externalBase == null ? "" : externalBase + "/");
         card.put("version", oafConfig.version());
         card.put("provider", Map.of("organization", oafConfig.vendorKey()));
         card.put("capabilities", Map.of(

@@ -15,6 +15,9 @@ import io.agentmanager.framework.model.OafConfig;
 import io.agentmanager.framework.service.AgentRuntimeService;
 import io.agentmanager.framework.service.McpManager;
 import io.agentmanager.framework.service.McpToolRegistrar;
+import io.agentmanager.framework.util.ExternalUrlSupport;
+
+import jakarta.servlet.http.HttpServletRequest;
 
 @RestController
 public class InfoController {
@@ -101,32 +104,50 @@ public class InfoController {
         return agentProtocolStatus(props, agentProtocolProperties);
     }
 
+    /**
+     * endpoints 广告词表（subpath-routing-design §3.1）：经代理访问（有外部前缀）时逐项
+     * 加前缀，直连时保持根路径——保证按广告拼 URL 的消费者在前缀路由下不 404。
+     */
+    private static Map<String, String> endpointsMap(String prefix) {
+        var paths = Map.of(
+            "agent_card", "/.well-known/agent-card.json",
+            "jsonrpc", "/",
+            "threads", "/threads",
+            "health", "/health",
+            "debug", "/debug",
+            "metadata", "/metadata");
+        if (prefix == null) {
+            return paths;
+        }
+        var prefixed = new LinkedHashMap<String, String>();
+        paths.forEach((key, path) -> prefixed.put(key, prefix + path));
+        return prefixed;
+    }
+
     @GetMapping("/")
-    public Map<String, Object> root() {
+    public Map<String, Object> root(HttpServletRequest req) {
         var oafConfig = oafConfigHolder.get();
-        return Map.of(
-            "agent", oafConfig.name(),
-            "slug", oafConfig.slug(),
-            "version", oafConfig.version(),
-            "description", oafConfig.description(),
-            "protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0",
-                "agent_protocol", agentProtocolStatus()),
-            "oaf", Map.of(
-                "tools", oafConfig.tools(),
-                "skills", oafConfig.skills().size(),
-                "mcp", oafConfig.mcpServers().size(),
-                "sub_agents", oafConfig.subAgents().size()
-            ),
-            "endpoints", Map.of(
-                "agent_card", "/.well-known/agent-card.json",
-                "jsonrpc", "/",
-                "threads", "/threads",
-                "health", "/health",
-                "debug", "/debug",
-                "metadata", "/metadata"
-            ),
-            "engine", "AgentScope Java 2.0"
-        );
+        var prefix = ExternalUrlSupport.forwardedPrefix(req);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("agent", oafConfig.name());
+        result.put("slug", oafConfig.slug());
+        result.put("version", oafConfig.version());
+        result.put("description", oafConfig.description());
+        result.put("protocols", Map.of("a2a", "1.0.0", "a2ui", "v0.8", "oaf", "v0.8.0",
+            "agent_protocol", agentProtocolStatus()));
+        result.put("oaf", Map.of(
+            "tools", oafConfig.tools(),
+            "skills", oafConfig.skills().size(),
+            "mcp", oafConfig.mcpServers().size(),
+            "sub_agents", oafConfig.subAgents().size()
+        ));
+        result.put("endpoints", endpointsMap(prefix));
+        // additive 字段：仅经代理访问时存在，直连响应体逐字节不变
+        if (prefix != null) {
+            result.put("base_url", ExternalUrlSupport.externalBase(req));
+        }
+        result.put("engine", "AgentScope Java 2.0");
+        return result;
     }
 
     /**
@@ -134,7 +155,8 @@ public class InfoController {
      */
     @GetMapping("/metadata")
     public Map<String, Object> getMetadata(
-        @RequestParam(defaultValue = "false") boolean includeDetails
+        @RequestParam(defaultValue = "false") boolean includeDetails,
+        HttpServletRequest req
     ) {
         var oafConfig = oafConfigHolder.get();
         var result = new LinkedHashMap<String, Object>();
@@ -162,14 +184,11 @@ public class InfoController {
             result.put("tools", oafConfig.tools());
             result.put("subAgents", oafConfig.subAgents());
             result.put("model", oafConfig.model());
-            result.put("endpoints", Map.of(
-                "agent_card", "/.well-known/agent-card.json",
-                "jsonrpc", "/",
-                "threads", "/threads",
-                "health", "/health",
-                "debug", "/debug",
-                "metadata", "/metadata"
-            ));
+            result.put("endpoints", endpointsMap(ExternalUrlSupport.forwardedPrefix(req)));
+            var base = ExternalUrlSupport.externalBase(req);
+            if (base != null) {
+                result.put("base_url", base);
+            }
         }
 
         return result;
