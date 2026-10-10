@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS packages (
   pack_id TEXT PRIMARY KEY, manifest TEXT NOT NULL, dir TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS cases (
-  case_id TEXT PRIMARY KEY, pack_id TEXT NOT NULL, spec TEXT NOT NULL, status TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  pack_id TEXT NOT NULL, case_id TEXT NOT NULL, spec TEXT NOT NULL, status TEXT NOT NULL,
+  created_at TEXT NOT NULL, PRIMARY KEY(pack_id, case_id)
 );
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, type TEXT NOT NULL, profile_id TEXT, pack_id TEXT,
@@ -39,8 +39,25 @@ def init(db_path: str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     _CONN = sqlite3.connect(db_path, check_same_thread=False)
     _CONN.row_factory = sqlite3.Row
+    _migrate_cases_pk()
     _CONN.executescript(_SCHEMA)
     _CONN.commit()
+
+
+def _migrate_cases_pk() -> None:
+    """cases 表主键从 case_id 单列升级为 (pack_id, case_id) 复合主键：旧表跨包同名
+    case_id 会互相覆盖、promote 误伤其他包。SQLite 不支持改主键，检测到非新 schema
+    时整表重建——cases 为一次性运行数据（由包重传登记草稿 / 人审转正可再生），
+    不做存量搬运。"""
+    rows = _CONN.execute("PRAGMA table_info(cases)").fetchall()
+    if not rows:
+        return  # 表不存在，交由 _SCHEMA 按新形态建表
+    pk_cols = [r["name"] for r in sorted((r for r in rows if r["pk"]), key=lambda r: r["pk"])]
+    if pk_cols == ["pack_id", "case_id"]:
+        return
+    with _LOCK:
+        _CONN.execute("DROP TABLE cases")
+        _CONN.commit()
 
 
 def _now() -> str:
@@ -127,9 +144,9 @@ def delete_package(pack_id: str) -> None:
 # ---- cases ----
 
 def upsert_case(case: dict[str, Any], pack_id: str, status: str) -> None:
-    _exec("INSERT INTO cases(case_id,pack_id,spec,status,created_at) VALUES(?,?,?,?,?) "
-          "ON CONFLICT(case_id) DO UPDATE SET spec=excluded.spec, status=excluded.status",
-          (case["case_id"], pack_id, json.dumps(case, ensure_ascii=False), status, _now()))
+    _exec("INSERT INTO cases(pack_id,case_id,spec,status,created_at) VALUES(?,?,?,?,?) "
+          "ON CONFLICT(pack_id, case_id) DO UPDATE SET spec=excluded.spec, status=excluded.status",
+          (pack_id, case["case_id"], json.dumps(case, ensure_ascii=False), status, _now()))
 
 
 def list_cases(status: str | None = None) -> list[dict[str, Any]]:
@@ -141,8 +158,8 @@ def list_cases(status: str | None = None) -> list[dict[str, Any]]:
              "spec": json.loads(r["spec"])} for r in rows]
 
 
-def get_case(case_id: str) -> dict[str, Any] | None:
-    r = _one("SELECT * FROM cases WHERE case_id=?", (case_id,))
+def get_case(pack_id: str, case_id: str) -> dict[str, Any] | None:
+    r = _one("SELECT * FROM cases WHERE pack_id=? AND case_id=?", (pack_id, case_id))
     return {**{k: r[k] for k in ("case_id", "pack_id", "status")},
             "spec": json.loads(r["spec"])} if r else None
 

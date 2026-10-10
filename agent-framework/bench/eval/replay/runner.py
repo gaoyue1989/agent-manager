@@ -12,6 +12,7 @@ exit code 契约与飞轮一致：0 全过 / 1 有失败 / 2 无可执行用例�
 """
 
 import asyncio
+import html
 import json
 import shutil
 import socket
@@ -227,30 +228,34 @@ REPORT_TMPL = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 
 
 def render_report_html(report: dict[str, Any]) -> str:
+    # 报告插值点（case_id/检查项名/模型与录制产出的文本等）可能携带任意内容，error/judge 理由
+    # 经 raw JSON 块入页；所有文本插值统一 html.escape，阻断 report.html 注入
     rows = []
     for c in report["cases"]:
         checks = " ".join(
-            f'<span class="{"ok" if ch["passed"] else "err"}">{ch["name"]}</span>'
+            f'<span class="{"ok" if ch["passed"] else "err"}">{html.escape(str(ch["name"]))}</span>'
             for ch in (c.get("checks") or [])) or '<span class="dim">-</span>'
         score = (c.get("scores") or {}).get("correctness")
         score_str = "-" if not score else f"{score['score']:.2f}"
         traj = c.get("trajectory") or {}
         rows.append(
-            f"<tr><td>{c['case_id']}</td>"
-            f"<td class=\"{'ok' if c['status']=='passed' else 'err'}\">{c['status']}</td>"
+            f"<tr><td>{html.escape(str(c['case_id']))}</td>"
+            f"<td class=\"{'ok' if c['status']=='passed' else 'err'}\">{html.escape(str(c['status']))}</td>"
             f"<td>{c.get('duration_ms','-')}ms</td><td>{checks}</td>"
-            f"<td class=\"dim\">{traj.get('step_status','-')} "
+            f"<td class=\"dim\">{html.escape(str(traj.get('step_status','-')))} "
             f"(drift {traj.get('drift_rate','-')})</td>"
             f"<td>{score_str}</td></tr>")
     s = report["summary"]
     judge_avg = f" · judge均分 <b>{s['score_avg']:.2f}</b>" if s.get("score_avg") is not None else ""
     return REPORT_TMPL.format(
-        run_id=report["run_id"], type=report["type"], pack_id=report.get("pack_id", "-"),
-        mode=report.get("mode", "-"), judge_model=report.get("judge", {}).get("model") or "-",
+        run_id=html.escape(str(report["run_id"])), type=html.escape(str(report["type"])),
+        pack_id=html.escape(str(report.get("pack_id", "-"))),
+        mode=html.escape(str(report.get("mode", "-"))),
+        judge_model=html.escape(str(report.get("judge", {}).get("model") or "-")),
         case_total=s["case_total"], passed=s["pass"], failed=s["fail"],
         pass_rate=f"{s['pass_rate']:.0%}", drift_rate=s.get("drift_rate", 0),
         judge_avg=judge_avg, rows="".join(rows),
-        raw=json.dumps(report, ensure_ascii=False)[:6000])
+        raw=html.escape(json.dumps(report, ensure_ascii=False)[:6000]))
 
 
 def build_report(run_id: str, run_type: str, pack_id: str | None, mode: str,
