@@ -88,10 +88,10 @@
  "variants": {
   "denied": {
    "chunks": [
-    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"echo_query\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
-    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\" 工具调用被拒绝\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
-    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":\"（Permission denied by user），未执行。\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
-    "{\"id\":\"pluginecho2_bb\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\",\"usage\":null}",
+    "{\"id\":\"pluginecho_denied_cc\",\"choices\":[{\"delta\":{\"content\":\"echo_query\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho_denied_cc\",\"choices\":[{\"delta\":{\"content\":\" 工具调用被拒绝\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900002,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho_denied_cc\",\"choices\":[{\"delta\":{\"content\":\"（Permission denied by user），未执行。\",\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"pluginecho_denied_cc\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1789900003,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\",\"usage\":null}",
     "[DONE]"
    ]
   }

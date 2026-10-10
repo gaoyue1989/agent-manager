@@ -63,4 +63,6 @@ bench/eval-collector/conf/
 bench/eval-collector/collector-data/
 bench/eval-collector/collector-conf/
 bench/eval-collector/studio-data/
+# 评测工作站本地库（README 按步跑一次即产生，含录制数据，绝不入库）
+bench/eval-studio/app/data/
 bench/eval/.runtime-eval/
