@@ -24,8 +24,9 @@ OAF 发布平台前端（React 19 + Next.js 16 + Tailwind 3，容器化 standalo
 - **同源反代**（src/proxy.ts，Next 16 proxy 约定，请求期读取 `process.env`，按部署环境用 Deployment env 配置即可，无需重建镜像；未设置时回退集群内默认地址。不可用 next.config.ts rewrites——rewrites() 在构建期求值并烘焙进 standalone server.js 的 `_originalRewrites`，运行时环境变量无法覆盖）：
   - `/api/v1/*` → `$BACKEND_INTERNAL_URL/api/v1/*`（默认 platform-backend svc:8080）
   - `/agent/release-agent/*` → `$AGENT_INTERNAL_URL/*` 去前缀转发（默认 release-agent svc:8100；对话单次流/confirm-stream）
+  - 评测采集模式（默认关）：`EVAL_COLLECTOR_MODE=1` 时该前缀改路由 `$EVAL_COLLECTOR_AGENT_URL`（eval-collector 反代口，如 `http://<collector>:18203/{ns}`）并注入 `x-eval-session`（从 cookie `oaf-assistant-sid` 读取）；开关开启但目标未设置 → console.error 告警并退回普通代理。语义见 docs/design/agent-framework-eval-offline-record-replay-design.md 附录 C
 - **对话单次流解析**（assistant/page.tsx consumeStream）：fetch ReadableStream 手解 SSE `data:` 帧；TEXT_BLOCK_DELTA 增量必须落到「最后一条 assistant 气泡」（工具状态行固定插在其前：步骤在上、答案在下）；permission_ask 渲染确认卡片 → POST confirm-stream
-- **HTTP 非安全上下文无 crypto.randomUUID**——sessionId 用时间戳+随机串兜底（localStorage 持久化）
+- **HTTP 非安全上下文无 crypto.randomUUID**——sessionId 用时间戳+随机串兜底（persistSessionId 做 localStorage + cookie `oaf-assistant-sid` 双写：localStorage 供页面刷新恢复，cookie 供 proxy 采集模式注入 `x-eval-session`）
 - 列表/详情均 5s 轮询实时状态；操作后手动 load() 全刷
 
 ## 构建与部署

@@ -67,3 +67,21 @@ func TestResolveEnvMergeForceKeys(t *testing.T) {
 		t.Fatalf("force key set wrong: %+v", secret)
 	}
 }
+
+// 非敏感份空串=不设置：plain 全量覆盖语义下空串键不落 CM/env_json（设计 §3.3，
+// 与 secret 份空串删除对齐；issue #97 此前仅 secret 份处理，非敏感空串键会原样落库）。
+func TestResolveEnvMergeDropsEmptyPlainKeys(t *testing.T) {
+	plain, secret := resolveEnvMerge(
+		map[string]string{"LOG_LEVEL": "info"},
+		map[string]string{"LLM_API_KEY": "sk-old"},
+		map[string]string{"LOG_LEVEL": "debug", "EMPTY_KEY": "", "OTHER": "x"}, nil)
+	if _, ok := plain["EMPTY_KEY"]; ok {
+		t.Fatalf("empty plain key must not fall into CM/env_json: %+v", plain)
+	}
+	if plain["LOG_LEVEL"] != "debug" || plain["OTHER"] != "x" {
+		t.Fatalf("non-empty plain keys must be kept: %+v", plain)
+	}
+	if secret["LLM_API_KEY"] != "sk-old" {
+		t.Fatalf("sticky secret must stay: %+v", secret)
+	}
+}
