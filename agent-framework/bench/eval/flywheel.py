@@ -223,8 +223,9 @@ async def cmd_run(args: argparse.Namespace) -> int:
                     try:
                         judge_results[cid] = await judge_correctness(cases_map[cid], ts[0], cfg)
                         print(f"  [judge] {cid} = {judge_results[cid]['score']:.2f}")
-                    except JudgeUnavailable as e:
+                    except Exception as e:  # judge 单项失败只降级不阻断（issue #117：畸形 JSON 曾击穿整轮）
                         print(f"  [judge] {cid} 失败: {e}")
+                        judge_results[cid] = {"score": None, "reason": f"judge unavailable: {e}"}
 
         # ---- ⑤ 根因分析（规则初筛）+ 报告 ----
         failed = [cid for cid, ts in by_case.items() if not _case_passed(ts)]
@@ -260,17 +261,19 @@ async def cmd_run(args: argparse.Namespace) -> int:
         judge_model = __import__("os").environ.get("EVAL_LLM_MODEL") if args.judge else None
         pass_count = len(by_case) - len(failed)
         pass_rate = pass_count / len(by_case) if by_case else 0.0
+        # judge 降级条目 score=None（issue #117）：均值只计有分项，全降级则为 None
+        judge_scores = [r["score"] for r in judge_results.values() if r.get("score") is not None]
         with open(task_dir / "task.json", "w", encoding="utf-8") as f:
             json.dump({**meta, "pass_count": pass_count, "pass_rate": pass_rate,
-                       "total_score": (sum(r["score"] for r in judge_results.values())
-                                       / len(judge_results)) if judge_results else None,
+                       "total_score": (sum(judge_scores) / len(judge_scores))
+                                      if judge_scores else None,
                        "judge_model": judge_model,
                        "gen_case_count": len(gen_cases),
                        "analyses": analyses}, f, ensure_ascii=False, indent=1)
         _append_history({"task_id": task_id, "commit": commit, "track": "trend",
                          "case_count": len(by_case), "pass_rate": pass_rate,
-                         "total_score": (sum(r["score"] for r in judge_results.values())
-                                         / len(judge_results)) if judge_results else None,
+                         "total_score": (sum(judge_scores) / len(judge_scores))
+                                        if judge_scores else None,
                          "judge_model": judge_model,
                          "contract": sse_client.MAPPING.get("version"),
                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
@@ -746,9 +749,30 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         raise AssertionError("collector YAML 断言需要 node（CI runner 预装；本机请自装 Node ≥ 18）") from e
     assert r.returncode == 0, f"collector YAML 断言失败:\n{r.stdout[-800:]}\n{r.stderr[-800:]}"
 
+    # ---- issue #117：judge 输出畸形 JSON 必须降级 JudgeUnavailable，不得裸抛 ----
+    from graders.correctness import JudgeUnavailable, parse_judge_verdict
+
+    ok_verdict = parse_judge_verdict('{"score": 0.85, "reason": "正确"}')
+    assert ok_verdict == {"score": 0.85, "reason": "正确"}, ok_verdict
+    # reasoning 模型常在 JSON 外带思考文本 → 走 {...} 提取路径
+    wrapped = parse_judge_verdict('思考中……最终结论：\n{"score": 1, "reason": "一致"}\n以上。')
+    assert wrapped["score"] == 1.0 and wrapped["reason"] == "一致", wrapped
+    # 钳位
+    assert parse_judge_verdict('{"score": 5, "reason": "越界"}')["score"] == 1.0
+    assert parse_judge_verdict('{"score": -2}')["score"] == 0.0
+    # 畸形输出矩阵：截断/多对象/尾逗号/纯文本/空 dict 字符串外溢 → JudgeUnavailable（不是 JSONDecodeError）
+    for bad in ['{"score": 0.5, "reason": "截断', '{"score": 0.5} {"score": 0.6}',
+                '{"score": 0.5, "reason": "尾逗号",}', '完全不是 JSON',
+                '{"score": "不是数字", "reason": "r"}']:
+        try:
+            parse_judge_verdict(bad)
+            raise AssertionError(f"畸形输出应抛 JudgeUnavailable: {bad!r}")
+        except JudgeUnavailable:
+            pass
+
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
           f" + 归一化规则/轨迹等价（M2）+ collector YAML 加载断言 + 标识符校验/CHECKSUMS"
-          f" 三重校验（issue #97），"
+          f" 三重校验（issue #97）+ judge 降级解析（issue #117），"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
