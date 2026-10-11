@@ -21,17 +21,18 @@ public class DebugController {
     /**
      * 无尾斜杠访问（如 /agent/{name}/debug）时 302 到相对的 debug/：
      * 相对资源（css/js）才能基于 .../debug/ 目录正确解析，兼容任意子路径部署。
+     * 前缀经 safeLocationPrefix 校验（issue #116：裸回显可构造 //evil.com 开放重定向）。
      */
     @GetMapping
     public void redirectToSlash(jakarta.servlet.http.HttpServletRequest req,
                                 jakarta.servlet.http.HttpServletResponse resp) throws java.io.IOException {
         // 经 ingress rewrite 后后端只见 /debug，外部前缀由 x-forwarded-prefix 注解透传
-        var prefix = req.getHeader("X-Forwarded-Prefix");
-        if (prefix != null && !prefix.isBlank()) {
+        var prefix = io.agentmanager.framework.util.ExternalUrlSupport.safeLocationPrefix(req);
+        if (prefix != null) {
             resp.setHeader("Location", prefix + "/debug/");
             resp.setStatus(302);
         } else {
-            // 直连部署（无前缀）：相对跳转 /debug → /debug/
+            // 直连部署（无前缀）或前缀非法：相对跳转 /debug → /debug/
             resp.sendRedirect("debug/");
         }
     }

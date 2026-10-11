@@ -36,4 +36,14 @@ class MonitorPageControllerTest {
             .andExpect(status().isFound())
             .andExpect(header().string("Location", "/agent/approval-demo/monitor/"));
     }
+
+    /** 恶意前缀（协议相对/绝对 URL）→ 回落相对跳转，不得整域跳出（issue #116） */
+    @Test
+    void maliciousForwardedPrefixShouldFallBackToRelativeRedirect() throws Exception {
+        for (var evil : new String[] {"//evil.com", "http://evil.com"}) {
+            mockMvc.perform(get("/monitor").header("X-Forwarded-Prefix", evil))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "monitor/"));
+        }
+    }
 }
