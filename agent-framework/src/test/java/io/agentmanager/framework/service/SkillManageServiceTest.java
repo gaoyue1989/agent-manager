@@ -90,6 +90,26 @@ class SkillManageServiceTest {
     }
 
     @Test
+    void uploadZipWithNonUtf8SkillMdShouldFail400() throws IOException {
+        // SKILL.md 本身非 UTF-8（GBK）→ 拒绝上传，不得静默装损坏技能（issue #115：此前误报 500）
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new ZipOutputStream(baos)) {
+            var gbkMd = "---\nname: gbk-skill\ndescription: 中文编码测试\n---\n正文"
+                .getBytes(java.nio.charset.Charset.forName("GBK"));
+            zos.putNextEntry(new ZipEntry("SKILL.md"));
+            zos.write(gbkMd);
+            zos.closeEntry();
+        }
+        var service = createService();
+        var ex = org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> service.uploadSkill(new ByteArrayInputStream(baos.toByteArray()), "gbk.zip")
+        );
+        assertTrue(ex.getMessage().contains("UTF-8"), "应说明 SKILL.md 非 UTF-8 被拒: " + ex.getMessage());
+        assertFalse(Files.exists(skillsDir.resolve("gbk-skill")), "拒绝时不得安装技能");
+    }
+
+    @Test
     void uploadShouldOverwriteExistingSkill() throws IOException {
         var service = createService();
         // 先上传 v1

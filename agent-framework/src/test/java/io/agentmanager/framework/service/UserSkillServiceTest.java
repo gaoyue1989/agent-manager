@@ -587,6 +587,21 @@ class UserSkillServiceTest {
         assertNull(store.get(skillNs(USER), "/demo-a/logo.png"));
     }
 
+    /** SKILL.md 本身为非 UTF-8（GBK）→ 拒绝整个包 400（issue #115：此前误报 500 upload_failed） */
+    @Test
+    void uploadZipShouldRejectNonUtf8SkillMd() throws IOException {
+        var gbk = java.nio.charset.Charset.forName("GBK");
+        var entries = new java.util.LinkedHashMap<String, byte[]>();
+        entries.put(WorkspaceReader.SKILL_FILE, "---\nname: demo-a\ndescription: 中文编码测试\n---\n正文".getBytes(gbk));
+        var zip = zipBytes(entries);
+
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+
+        assertTrue(e.getMessage().contains("UTF-8"), "应说明 SKILL.md 非 UTF-8 被拒: " + e.getMessage());
+        assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝时不得留半份写入");
+    }
+
     /** 缺 SKILL.md → 400；非法 userId → 400 */
     @Test
     void uploadZipShouldRejectMissingSkillMdAndInvalidUser() throws IOException {

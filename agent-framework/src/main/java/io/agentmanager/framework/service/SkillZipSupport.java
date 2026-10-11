@@ -106,9 +106,22 @@ public final class SkillZipSupport {
     /**
      * 从 SKILL.md frontmatter 提取 name 字段（简单解析：首个 --- 之间的 name: 行）。
      * 无 frontmatter/无 name 返回 null。
+     *
+     * <p>SKILL.md 本身非 UTF-8（GBK/二进制）抛 {@link IllegalArgumentException}——zip 上传
+     * 两条路径（L2 全局 / L4 用户）控制器都映射 400，与其它文件的非 UTF-8 拒绝语义一致
+     * （issue #115：此前经 {@code Files.readString} 抛 IOException 被包装成 500 upload_failed）。
      */
     public static String extractSkillName(Path skillMd) throws IOException {
-        var content = Files.readString(skillMd, StandardCharsets.UTF_8);
+        var bytes = Files.readAllBytes(skillMd);
+        String content;
+        try {
+            var decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+            content = decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            throw new IllegalArgumentException("SKILL.md 不是合法的 UTF-8 文本（二进制/非 UTF-8 文件不允许）");
+        }
         if (!content.startsWith("---")) {
             return null;
         }
