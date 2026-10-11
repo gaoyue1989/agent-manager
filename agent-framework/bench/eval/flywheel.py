@@ -760,15 +760,21 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     # 钳位
     assert parse_judge_verdict('{"score": 5, "reason": "越界"}')["score"] == 1.0
     assert parse_judge_verdict('{"score": -2}')["score"] == 0.0
-    # 畸形输出矩阵：截断/多对象/尾逗号/纯文本/空 dict 字符串外溢 → JudgeUnavailable（不是 JSONDecodeError）
+    # 畸形输出矩阵：截断/多对象/尾逗号/纯文本/非 dict JSON/score 非数字/NaN/None → JudgeUnavailable（不是裸异常）
     for bad in ['{"score": 0.5, "reason": "截断', '{"score": 0.5} {"score": 0.6}',
                 '{"score": 0.5, "reason": "尾逗号",}', '完全不是 JSON',
-                '{"score": "不是数字", "reason": "r"}']:
+                '{"score": "不是数字", "reason": "r"}',
+                '[1, 2, 3]', '"just a string"', 'null', '42',
+                '{"score": NaN, "reason": "r"}',   # json.loads 接受 NaN，钳位会反拿满分（review 发现）
+                None]:
         try:
             parse_judge_verdict(bad)
             raise AssertionError(f"畸形输出应抛 JudgeUnavailable: {bad!r}")
         except JudgeUnavailable:
             pass
+    # ±Infinity 钳位语义（inf→1.0 / -inf→0.0）
+    assert parse_judge_verdict('{"score": Infinity}')['score'] == 1.0
+    assert parse_judge_verdict('{"score": -Infinity}')['score'] == 0.0
 
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
           f" + 归一化规则/轨迹等价（M2）+ collector YAML 加载断言 + 标识符校验/CHECKSUMS"
