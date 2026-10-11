@@ -118,6 +118,20 @@ class ChatModelFactoryTest {
         assertTrue(options.getAdditionalBodyParams().isEmpty());
     }
 
+    // ===== buildHttpClient：HTTP 版本口径（issue #114）=====
+
+    @Test
+    void httpClientShouldBePinnedToHttp11() {
+        var harness = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, true, 10, 8000, 60,
+            30, 10, true, true, 7, 1, 5000L, 60000L, 900000L);
+
+        var client = ChatModelFactory.buildHttpClient(harness);
+
+        // JDK 默认 HTTP_2 协商在明文 http:// 端点会发 h2c 升级头，纯 HTTP/1.1 网关判请求体非法（实测 400）
+        assertEquals(java.net.http.HttpClient.Version.HTTP_1_1, client.version());
+    }
+
     // ===== helpers =====
 
     private static AgentManagerProperties.LLMConfig llm(String provider, boolean enableThinking,

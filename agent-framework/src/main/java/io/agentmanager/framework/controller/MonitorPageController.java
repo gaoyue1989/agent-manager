@@ -24,12 +24,13 @@ public class MonitorPageController {
     /**
      * 无尾斜杠访问（如 /agent/{name}/monitor）时 302 到相对的 monitor/：
      * 相对资源（app.js）才能基于 .../monitor/ 目录正确解析，兼容任意子路径部署。
+     * 前缀经 safeLocationPrefix 校验（issue #116：裸回显可构造 //evil.com 开放重定向）。
      */
     @GetMapping
     public void redirectToSlash(jakarta.servlet.http.HttpServletRequest req,
                                 jakarta.servlet.http.HttpServletResponse resp) throws IOException {
-        var prefix = req.getHeader("X-Forwarded-Prefix");
-        if (prefix != null && !prefix.isBlank()) {
+        var prefix = io.agentmanager.framework.util.ExternalUrlSupport.safeLocationPrefix(req);
+        if (prefix != null) {
             resp.setHeader("Location", prefix + "/monitor/");
             resp.setStatus(302);
         } else {

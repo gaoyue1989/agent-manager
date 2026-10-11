@@ -389,6 +389,9 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 > 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
 > 托管模型存 `model_config` 表（`/models` REST CRUD，debug 页「Models」模块可管理），会话经 `model` 字段按会话选择，
 > 仅影响该会话的对话调用；详见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md)。
+> **HTTP 传输口径（2026-10-11，issue #114）**：LLM 专用 HttpClient 固定 **HTTP/1.1**（`ChatModelFactory.buildHttpClient`，
+> 系统模型/托管模型/标题生成全部装配的单一收口）——JDK 默认 HTTP_2 协商对 http:// 明文端点会发 `Upgrade: h2c` 升级头，
+> 不处理 h2c 的 OpenAI 兼容网关把请求体判非法（实测 400「请求体不是合法 JSON」）；https 端点走 ALPN 不受影响。
 > **模型备用切换（2026-09-28）**：`LLM_FALLBACK_MODEL_ID` 引用托管模型作为备用，主模型重试耗尽
 > （429/5xx/超时/网络）后首个信号失败即切换——默认模型走 SDK 原生 `.fallbackModel()`，会话自选模型由
 > `SessionModelMiddleware` + `FallbackModelWrapper` 补齐；构建期解析，改备用模型需 `/admin/reload` 生效。
@@ -495,6 +498,12 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 前端判别式（debug UI chat.js 与平台前端一致）：`url.startsWith(BASE) ? url : BASE + url`。
 门禁：单测（ExternalUrlSupport/AgentCard/Info/ChatStream 前缀维度）+ e2e 核心 X 组
 （LB 透传客户端头注入）+ e2e-router RT 组（nginx router 全链路，fixtures/nginx-router.conf.template）。
+
+**路由语义出口的前缀信任边界（2026-10-11，issue #116）**：302 Location（`/debug`、`/monitor`
+无尾斜杠入口）的前缀必须经 `ExternalUrlSupport.safeLocationPrefix`——`forwardedPrefix` 规范化
+之上校验「以单个 `/` 开头」，拒绝协议相对（`//evil.com`，浏览器按跨域 URL 解析 → 开放重定向）
+与绝对 URL 形态；不合法视为无前缀，回落相对跳转。响应体 URL 拼接（上表三处）仍走
+`forwardedPrefix`（Jackson 转义、无路由语义）。
 
 ---
 

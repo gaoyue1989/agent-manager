@@ -36,6 +36,21 @@ public final class ExternalUrlSupport {
     }
 
     /**
+     * 302 Location 等路由语义出口可用的前缀（issue #116）：{@link #forwardedPrefix}
+     * 规范化之上，校验必须以单个 {@code /} 开头——拒绝协议相对（{@code //evil.com}，
+     * 浏览器解析为跨域 URL）与绝对 URL（{@code http://evil.com}）构造开放重定向。
+     * 不合法视为无前缀，调用方回落相对跳转。响应体 URL 拼接仍走 forwardedPrefix
+     * （Jackson 转义、无路由语义，信任边界见类注释）。
+     */
+    public static String safeLocationPrefix(HttpServletRequest req) {
+        var prefix = forwardedPrefix(req);
+        if (prefix == null || !prefix.startsWith("/") || prefix.startsWith("//")) {
+            return null;
+        }
+        return prefix;
+    }
+
+    /**
      * 外部基址（如 "http://host:30080/agent/foo"，无尾斜杠）；无前缀头返回 null。
      *
      * <p>scheme/host 优先取代理链上游声明（X-Forwarded-Proto / X-Forwarded-Host，

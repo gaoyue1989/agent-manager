@@ -96,4 +96,35 @@ class ExternalUrlSupportTest {
         req.addHeader("Host", "entry.example");
         assertEquals("https://entry.example/agent/demo", ExternalUrlSupport.externalBase(req));
     }
+
+    // ===== safeLocationPrefix（issue #116：302 Location 前缀信任边界）=====
+
+    @Test
+    void safeLocationPrefixShouldAcceptWellFormedPrefix() {
+        var req = req();
+        req.addHeader("X-Forwarded-Prefix", "/agent/demo");
+        assertEquals("/agent/demo", ExternalUrlSupport.safeLocationPrefix(req));
+    }
+
+    @Test
+    void safeLocationPrefixShouldNormalizeTrailingSlashes() {
+        var req = req();
+        req.addHeader("X-Forwarded-Prefix", " /agent/demo/ ");
+        assertEquals("/agent/demo", ExternalUrlSupport.safeLocationPrefix(req));
+    }
+
+    @Test
+    void safeLocationPrefixShouldRejectProtocolRelativeAndAbsoluteUrl() {
+        // //evil.com 浏览器按协议相对解析 → 跨域开放重定向；http:// 绝对地址同理
+        for (var evil : new String[] {"//evil.com", "http://evil.com", "https://evil.com/x"}) {
+            var req = req();
+            req.addHeader("X-Forwarded-Prefix", evil);
+            assertNull(ExternalUrlSupport.safeLocationPrefix(req), "应拒绝: " + evil);
+        }
+    }
+
+    @Test
+    void safeLocationPrefixShouldReturnNullWithoutHeader() {
+        assertNull(ExternalUrlSupport.safeLocationPrefix(req()));
+    }
 }
