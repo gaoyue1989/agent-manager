@@ -1218,6 +1218,45 @@ select.input { cursor: pointer; }
   font-size: 11px;
 }
 
+/* 失败摘要横幅 + 失败工具行高亮（定位「异常是什么」） */
+.monitor-failures {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--red-border);
+  border-radius: 8px;
+  background: var(--red-bg);
+}
+.monitor-failures .mf-title { color: var(--red); font-weight: 600; font-size: 12px; margin-bottom: 6px; }
+.monitor-failures .mf-list { display: flex; flex-direction: column; gap: 4px; }
+.monitor-failures .mf-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; min-width: 0; }
+.monitor-failures .mf-name { font-family: var(--mono); color: var(--text-h); flex-shrink: 0; }
+.monitor-failures .mf-state {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: var(--mono);
+}
+.monitor-failures .mf-state.err { background: var(--red); color: #fff; }
+.monitor-failures .mf-state.warn { background: var(--yellow); color: #fff; }
+.monitor-failures .mf-msg {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-group-header.has-error { color: var(--red); }
+.tool-call-row.has-error { background: var(--red-bg); }
+.tool-call-row .tc-err-label {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  font-family: var(--mono);
+}
+
 @media (max-width: 900px) {
   .monitor-list { width: 240px; flex-basis: 240px; }
 }

@@ -303,15 +303,18 @@ class DebugApiControllerTest {
         var rs1 = mock(ResultSet.class);
         var stmt2 = mock(Statement.class);
         var rs2 = mock(ResultSet.class);
-        var errStmt = mock(Statement.class);
-        var errRs = mock(ResultSet.class);
+        var knownStmt = mock(Statement.class);
+        var knownRs = mock(ResultSet.class);
+        var aggStmt = mock(Statement.class);
+        var aggRs = mock(ResultSet.class);
         var psPending = mock(PreparedStatement.class);
         var pendingRs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.createStatement()).thenReturn(stmt1, stmt2, errStmt);
+        when(conn.createStatement()).thenReturn(stmt1, stmt2, knownStmt, aggStmt);
         when(stmt1.executeQuery(anyString())).thenReturn(rs1);
         when(stmt2.executeQuery(anyString())).thenReturn(rs2);
-        when(errStmt.executeQuery(anyString())).thenReturn(errRs);
+        when(knownStmt.executeQuery(anyString())).thenReturn(knownRs);
+        when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
         when(conn.prepareStatement(anyString())).thenReturn(psPending);
         when(psPending.executeQuery()).thenReturn(pendingRs);
         when(rs1.next()).thenReturn(true, false);
@@ -320,13 +323,17 @@ class DebugApiControllerTest {
         when(rs1.getLong("sessions_today")).thenReturn(2L);
         when(rs1.getLong("active_sessions_today")).thenReturn(1L);
         when(rs2.next()).thenReturn(true, true, false);
-        when(rs2.getString("role")).thenReturn("user", "assistant");
+        when(rs2.getString("role")).thenReturn("USER", "ASSISTANT");
         when(rs2.getLong("c")).thenReturn(20L, 18L);
         when(rs2.getLong("today")).thenReturn(4L, 4L);
-        when(errRs.next()).thenReturn(true, true, false);
-        when(errRs.getString("sid")).thenReturn("s1", "s2");
-        when(errRs.getLong("total")).thenReturn(10L, 5L);
-        when(errRs.getLong("errors")).thenReturn(3L, 1L);
+        // 已登记会话：s1、s2
+        when(knownRs.next()).thenReturn(true, true, false);
+        when(knownRs.getString("session_id")).thenReturn("s1", "s2");
+        // slot 双形态：规范 "u1:s1"（取尾段）与 Channel "s2:gw-abc"（取前段）
+        when(aggRs.next()).thenReturn(true, true, false);
+        when(aggRs.getString("session_id")).thenReturn("u1:s1", "s2:gw-abc");
+        when(aggRs.getLong("total")).thenReturn(10L, 5L);
+        when(aggRs.getLong("errors")).thenReturn(3L, 1L);
         when(pendingRs.next()).thenReturn(true, false);
         when(pendingRs.getString("session_id")).thenReturn("s1");
 
@@ -335,7 +342,7 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.connected").value(true))
             .andExpect(jsonPath("$.total_sessions").value(12))
             .andExpect(jsonPath("$.total_users").value(3))
-            .andExpect(jsonPath("$.total_questions").value(20))
+            .andExpect(jsonPath("$.total_turns").value(20))
             .andExpect(jsonPath("$.total_answers").value(18))
             .andExpect(jsonPath("$.total_messages").value(38))
             .andExpect(jsonPath("$.messages_today").value(8))
@@ -343,6 +350,44 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.sessions_with_error").value(2))
             .andExpect(jsonPath("$.sessions_pending_confirm").value(1))
             .andExpect(jsonPath("$.sessions_with_problem").value(2));
+    }
+
+    /** 幽灵 slot（前缀/后缀都不在 session_user 中，如已清理会话的网关键）必须被忽略，不得计数 */
+    @Test
+    void monitorOverviewShouldIgnoreUnknownSlot() throws Exception {
+        stubConfirmTtl();
+        var conn = mock(Connection.class);
+        var statsStmt = mock(Statement.class);
+        var statsRs = mock(ResultSet.class);
+        var roleStmt = mock(Statement.class);
+        var roleRs = mock(ResultSet.class);
+        var knownStmt = mock(Statement.class);
+        var knownRs = mock(ResultSet.class);
+        var aggStmt = mock(Statement.class);
+        var aggRs = mock(ResultSet.class);
+        var psPending = mock(PreparedStatement.class);
+        var pendingRs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.createStatement()).thenReturn(statsStmt, roleStmt, knownStmt, aggStmt);
+        when(statsStmt.executeQuery(anyString())).thenReturn(statsRs);
+        when(roleStmt.executeQuery(anyString())).thenReturn(roleRs);
+        when(knownStmt.executeQuery(anyString())).thenReturn(knownRs);
+        when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
+        when(conn.prepareStatement(anyString())).thenReturn(psPending);
+        when(psPending.executeQuery()).thenReturn(pendingRs);
+        when(statsRs.next()).thenReturn(true, false);
+        when(roleRs.next()).thenReturn(false);
+        when(knownRs.next()).thenReturn(false);              // 无已登记会话
+        when(aggRs.next()).thenReturn(true, false);
+        when(aggRs.getString("session_id")).thenReturn("peer:gw-abc"); // 两段都不命中 → 跳过
+        when(aggRs.getLong("total")).thenReturn(9L);
+        when(aggRs.getLong("errors")).thenReturn(5L);
+        when(pendingRs.next()).thenReturn(false);
+
+        mockMvc.perform(get("/debug/monitor/overview"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sessions_with_error").value(0))
+            .andExpect(jsonPath("$.sessions_with_problem").value(0));
     }
 
     @Test
@@ -359,6 +404,8 @@ class DebugApiControllerTest {
     void monitorSessionsShouldReturnFilteredList() throws Exception {
         stubConfirmTtl();
         var conn = mock(Connection.class);
+        var knownStmt = mock(Statement.class);
+        var knownRs = mock(ResultSet.class);
         var aggStmt = mock(Statement.class);
         var aggRs = mock(ResultSet.class);
         var psPending = mock(PreparedStatement.class);
@@ -366,11 +413,14 @@ class DebugApiControllerTest {
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.createStatement()).thenReturn(aggStmt);
+        when(conn.createStatement()).thenReturn(knownStmt, aggStmt);
+        when(knownStmt.executeQuery(anyString())).thenReturn(knownRs);
         when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
         when(conn.prepareStatement(anyString())).thenReturn(psPending, ps);
         when(psPending.executeQuery()).thenReturn(pendingRs);
         when(ps.executeQuery()).thenReturn(rs);
+        when(knownRs.next()).thenReturn(true, false);
+        when(knownRs.getString("session_id")).thenReturn("s1");
         when(aggRs.next()).thenReturn(false);
         when(pendingRs.next()).thenReturn(false);
         when(rs.next()).thenReturn(true, false);
@@ -389,6 +439,7 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.sessions[0].user_id").value("alice"))
             .andExpect(jsonPath("$.sessions[0].title").value("hello title"))
             .andExpect(jsonPath("$.sessions[0].message_count").value(0))
+            .andExpect(jsonPath("$.sessions[0].turn_count").value(0))
             .andExpect(jsonPath("$.sessions[0].has_error").value(false))
             .andExpect(jsonPath("$.sessions[0].error_count").value(0))
             .andExpect(jsonPath("$.sessions[0].pending_confirm").value(false));
@@ -398,6 +449,8 @@ class DebugApiControllerTest {
     void monitorSessionsOnlyProblemShouldFilterToFailedSessions() throws Exception {
         stubConfirmTtl();
         var conn = mock(Connection.class);
+        var knownStmt = mock(Statement.class);
+        var knownRs = mock(ResultSet.class);
         var aggStmt = mock(Statement.class);
         var aggRs = mock(ResultSet.class);
         var psPending = mock(PreparedStatement.class);
@@ -405,14 +458,19 @@ class DebugApiControllerTest {
         var ps = mock(PreparedStatement.class);
         var rs = mock(ResultSet.class);
         when(dataSource.getConnection()).thenReturn(conn);
-        when(conn.createStatement()).thenReturn(aggStmt);
+        when(conn.createStatement()).thenReturn(knownStmt, aggStmt);
+        when(knownStmt.executeQuery(anyString())).thenReturn(knownRs);
         when(aggStmt.executeQuery(anyString())).thenReturn(aggRs);
         when(conn.prepareStatement(anyString())).thenReturn(psPending, ps);
         when(psPending.executeQuery()).thenReturn(pendingRs);
         when(ps.executeQuery()).thenReturn(rs);
+        when(knownRs.next()).thenReturn(true, true, false);
+        when(knownRs.getString("session_id")).thenReturn("s1", "s2");
+        // 归档 slot 为 Channel 形态 "{会话}:{网关键}"：应按前段归属到 s1（修复前按尾段会成幽灵）
         when(aggRs.next()).thenReturn(true, false);
-        when(aggRs.getString("sid")).thenReturn("s1");
+        when(aggRs.getString("session_id")).thenReturn("s1:gw-abcdef123456");
         when(aggRs.getLong("total")).thenReturn(4L);
+        when(aggRs.getLong("turns")).thenReturn(2L);
         when(aggRs.getLong("errors")).thenReturn(2L);
         when(pendingRs.next()).thenReturn(false);
         // 两行会话：s1 有工具失败、s2 正常 → 仅异常过滤后只剩 s1
@@ -429,6 +487,7 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.count").value(1))
             .andExpect(jsonPath("$.sessions[0].session_id").value("s1"))
             .andExpect(jsonPath("$.sessions[0].message_count").value(4))
+            .andExpect(jsonPath("$.sessions[0].turn_count").value(2))
             .andExpect(jsonPath("$.sessions[0].has_error").value(true))
             .andExpect(jsonPath("$.sessions[0].error_count").value(2));
     }

@@ -229,7 +229,7 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   const badName = await request.put('/skills/users/a..b', { headers: { 'X-User-Id': uid }, data: { content } });
   expect(badName.status()).toBe(400);
   expect((await badName.json()).error).toBe('invalid_name');
-  const big = await request.put('/skills/users/x10-neg', { headers: { 'X-User-Id': uid }, data: { content: 'x'.repeat(100 * 1024 + 1) } });
+  const big = await request.put('/skills/users/x10-neg', { headers: { 'X-User-Id': uid }, data: { content: 'x'.repeat(1024 * 1024 + 1) } });
   expect(big.status()).toBe(413);
   expect((await big.json()).error).toBe('content_too_large');
 });

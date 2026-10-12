@@ -131,7 +131,7 @@ async function loadOverview() {
     }
     box.innerHTML = statCard('用户总数', data.total_users)
       + statCard('会话总数', data.total_sessions)
-      + statCard('提问总数', data.total_questions)
+      + statCard('轮次总数', data.total_turns)
       + statCard('回答总数', data.total_answers)
       + statCard('消息总数', data.total_messages)
       + statCard('今日新增会话', data.sessions_today)
@@ -187,7 +187,8 @@ function sessionRow(s) {
   const sid = s.session_id || '';
   const title = (s.title || '').trim() || sid;
   const active = sid === selectedSid ? ' active' : '';
-  const count = s.message_count != null ? s.message_count + ' 条消息' : '';
+  const turns = s.turn_count != null ? s.turn_count + ' 轮' : '';
+  const msgTip = s.message_count != null ? s.message_count + ' 条消息' : '';
   const model = s.model ? s.model : '默认模型';
   const flag = s.has_error ? ' has-error' : (s.pending_confirm ? ' has-pending' : '');
   let badges = '';
@@ -201,7 +202,8 @@ function sessionRow(s) {
     + '<div class="ms-title" title="' + ctx.utils.esc(sid) + '">' + ctx.utils.esc(title) + '</div>'
     + '<div class="ms-meta"><span class="ms-user">' + ctx.utils.esc(s.user_id || 'unknown') + '</span>'
     + '<span class="ms-dot">·</span><span>' + ctx.utils.esc(model) + '</span>'
-    + (count ? '<span class="ms-dot">·</span><span>' + ctx.utils.esc(count) + '</span>' : '')
+    + (turns ? '<span class="ms-dot">·</span><span title="' + ctx.utils.esc(msgTip) + '">'
+        + ctx.utils.esc(turns) + '</span>' : '')
     + (badges ? '<span class="ms-badges">' + badges + '</span>' : '')
     + '</div>'
     + '<div class="ms-time">' + ctx.utils.esc((s.updated_at || '').substring(0, 19).replace('T', ' ')) + '</div>'
@@ -250,6 +252,7 @@ function renderConversation(sid, session, data) {
     ? '<div class="monitor-pending">⏳ 该会话有未完成的工具确认（HITL）：'
       + ctx.utils.esc(pendingToolsLabel(data.pendingConfirm)) + '</div>'
     : '';
+  const failures = failureBanner(collectFailures(msgs));
   let body;
   if (msgs.length === 0) {
     body = '<div class="empty">该会话暂无归档消息</div>';
@@ -260,7 +263,63 @@ function renderConversation(sid, session, data) {
     ? '<div class="monitor-files">产出文件：' + (data.files || []).map((f) =>
         '<span class="mf-item">' + ctx.utils.esc(f.file_name || f.file_id) + '</span>').join('') + '</div>'
     : '';
-  return header + pending + body + files;
+  return header + failures + pending + body + files;
+}
+
+/** 工具调用失败终态（与后端 TOOL_ERROR_PREDICATE 一致） */
+const ERROR_STATES = new Set(['error', 'denied', 'interrupted']);
+
+function isErrorState(state) {
+  return ERROR_STATES.has(state);
+}
+
+/** 失败态中文短标签 */
+function stateLabel(state) {
+  if (state === 'error') return '失败';
+  if (state === 'denied') return '拒绝';
+  if (state === 'interrupted') return '中断';
+  return state || '';
+}
+
+/** 失败态样式类：error=红，denied/interrupted=黄 */
+function stateClass(state) {
+  return state === 'error' ? 'err' : 'warn';
+}
+
+/** 扫描本会话所有助手消息的工具调用，收集失败项（error/denied/interrupted） */
+function collectFailures(msgs) {
+  const items = [];
+  for (const m of msgs) {
+    for (const tc of (m.tool_calls || [])) {
+      const st = tc.state || 'success';
+      if (isErrorState(st)) {
+        items.push({ name: tc.name || 'tool', state: st, output: tc.output != null ? String(tc.output) : '' });
+      }
+    }
+  }
+  return items;
+}
+
+/** 单行错误摘要：取首条非空行，截断 */
+function previewLine(text) {
+  const s = String(text == null ? '' : text).trim();
+  if (!s) return '（无输出）';
+  const first = s.split('\n').find((l) => l.trim()) || s;
+  return truncate(first.trim(), 200);
+}
+
+/** 会话顶部失败摘要横幅（无失败返回空串） */
+function failureBanner(items) {
+  if (!items || items.length === 0) {
+    return '';
+  }
+  const rows = items.map((it) =>
+    '<div class="mf-row"><span class="mf-name">' + ctx.utils.esc(it.name) + '</span>'
+    + '<span class="mf-state ' + stateClass(it.state) + '">' + ctx.utils.esc(stateLabel(it.state)) + '</span>'
+    + '<span class="mf-msg" title="' + ctx.utils.esc(it.output ? truncate(String(it.output), 2000) : '') + '">'
+    + ctx.utils.esc(previewLine(it.output)) + '</span></div>').join('');
+  return '<div class="monitor-failures"><div class="mf-title">⚠ 本会话检测到 ' + items.length
+    + ' 个失败的工具调用（下方已自动展开对应工具组）</div><div class="mf-list">' + rows + '</div></div>';
 }
 
 /** HITL 待确认工具名摘要：tools 字段可能是数组（agent_state 源）或 JSON 字符串（confirm_context 源） */
@@ -338,21 +397,27 @@ function assistantBlocks(m) {
 // ---------- 工具调用渲染（复用 Chat 页的全局 CSS 类与折叠开关） ----------
 
 function toolGroupHtml(calls) {
+  const failCount = calls.filter((c) => isErrorState(c.state)).length;
   const rows = calls.map(toolRowHtml).join('');
-  return '<div class="tool-group">'
-    + '<div class="tool-group-header" onclick="window.App.toolGroupToggle(this)">'
-    + '<span class="tg-arrow">▶</span><span>' + ctx.utils.esc(calls.length + ' 次工具调用') + '</span></div>'
+  const label = calls.length + ' 次工具调用' + (failCount ? ' · ' + failCount + ' 失败' : '');
+  return '<div class="tool-group' + (failCount ? ' open' : '') + '">'
+    + '<div class="tool-group-header' + (failCount ? ' has-error' : '')
+    + '" onclick="window.App.toolGroupToggle(this)">'
+    + '<span class="tg-arrow">▶</span><span>' + ctx.utils.esc(label) + '</span></div>'
     + '<div class="tool-group-body">' + rows + '</div></div>';
 }
 
 function toolRowHtml(c) {
+  const err = isErrorState(c.state);
   const body = (c.argsText ? '<div class="tc-label">参数</div><pre>' + ctx.utils.esc(truncate(c.argsText, 4000)) + '</pre>' : '')
     + (c.resultText
         ? '<div class="tc-label">结果' + (c.outputTruncated ? '（已截断）' : '') + '</div><pre>'
           + ctx.utils.esc(truncate(c.resultText, 4000)) + '</pre>'
         : '');
-  return '<div class="tool-call-row" onclick="window.App.toolRowToggle(this)">'
+  return '<div class="tool-call-row' + (err ? ' has-error open' : '')
+    + '" onclick="window.App.toolRowToggle(this)">'
     + '<span class="tc-name">' + ctx.utils.esc(c.name || 'tool') + '</span>'
+    + (err ? '<span class="tc-err-label">' + ctx.utils.esc(stateLabel(c.state)) + '</span>' : '')
     + '<span class="tc-state">' + ctx.utils.toolStateIcon(c.state) + '</span>'
     + (body ? '<span class="tc-toggle">▶</span>' : '')
     + '</div>'

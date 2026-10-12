@@ -469,7 +469,7 @@ test('U14 会话模型切换：下拉选择→绑定生效→切会话恢复→�
     //    修复前 A2A 新会话完全不绑定，界面显示托管模型而实际跑系统模型。
     await page.locator(SEL.newThread).click();
     await select.selectOption(modelId);
-    await page.locator(SEL.modeA2A).click(); // 默认即 A2A，显式点击保证状态确定
+    await page.locator(SEL.modeA2A).click(); // 显式切 A2A 保证状态确定（默认 Channel）
     await page.locator(SEL.chatInput).fill('[E2E:plain]A2A 模式切模型');
     await expect(page.locator(SEL.sendBtn)).toBeEnabled();
     await page.locator(SEL.sendBtn).click();
@@ -633,7 +633,7 @@ test('U14b 绑定模型删除回落 system + 禁用模型切换失败回滚', as
     await expect(select).toHaveValue('system', { timeout: 30_000 });
 
     // ---- ② 禁用回滚：绑定 → PATCH enabled:false → 改选该模型 → 400 model_disabled ----
-    // 流模式是内存态，上一步 page.reload() 后回落默认 A2A；显式切回 channel 与 step① 对齐
+    // 流模式是内存态，上一步 page.reload() 后回落默认 Channel；显式点击与 step① 对齐
     await page.locator(SEL.modeChannel).click();
     await page.locator(SEL.newThread).click();
     await select.selectOption(disabledId);

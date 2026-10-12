@@ -90,8 +90,8 @@ function render() {
         <label class="uid-label" title="用户标识，同 userId 共享 workspace 和 memory">User&nbsp;<input id="uidInput" class="input uid-input" type="text" spellcheck="false"></label>
         <label class="uid-label" title="会话模型：切换当前会话使用的模型">Model&nbsp;<select id="modelSelect" class="input uid-input" style="cursor:pointer"></select></label>
         <div class="seg">
-          <button id="modeA2A" class="active">A2A</button>
-          <button id="modeChannel">Channel</button>
+          <button id="modeA2A">A2A</button>
+          <button id="modeChannel" class="active">Channel</button>
         </div>
         <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
         <button id="btnSysPrompt" class="btn small">System Prompt</button>

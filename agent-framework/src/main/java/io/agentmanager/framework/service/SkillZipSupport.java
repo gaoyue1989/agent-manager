@@ -49,13 +49,14 @@ public final class SkillZipSupport {
             while ((entry = zis.getNextEntry()) != null) {
                 entryCount++;
                 if (entryCount > MAX_ENTRIES) {
-                    throw new IllegalArgumentException("Zip 包内文件数量超过 " + MAX_ENTRIES + " 限制");
+                    throw new IllegalArgumentException(
+                        "zip 包内文件数量超过 " + MAX_ENTRIES + " 个，请精简后重试");
                 }
 
                 // 路径遍历防护
                 var dest = targetDir.resolve(entry.getName()).normalize();
                 if (!dest.startsWith(targetDir.normalize())) {
-                    throw new IllegalArgumentException("Zip 包含非法路径: " + entry.getName());
+                    throw new IllegalArgumentException("zip 包含非法路径：" + entry.getName());
                 }
 
                 if (entry.isDirectory()) {
@@ -70,7 +71,8 @@ public final class SkillZipSupport {
                     totalSize += size;
                     if (totalSize > MAX_EXTRACTED_BYTES) {
                         throw new IllegalArgumentException(
-                            "解压后总大小超过 " + (MAX_EXTRACTED_BYTES / 1024 / 1024) + "MB 限制");
+                            "解压后总大小超过 " + (MAX_EXTRACTED_BYTES / 1024 / 1024)
+                                + "MB，请精简技能资源后重试");
                     }
                 }
                 zis.closeEntry();

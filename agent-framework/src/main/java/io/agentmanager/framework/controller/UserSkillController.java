@@ -221,11 +221,12 @@ public class UserSkillController {
             return invalid;
         }
         if (file == null || file.isEmpty()) {
-            return err(HttpStatus.BAD_REQUEST, "empty_file", "请提供 zip 文件");
+            return err(HttpStatus.BAD_REQUEST, "empty_file", "请选择要上传的 zip 文件");
         }
         if (file.getSize() > UserSkillService.MAX_ZIP_BYTES) {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "zip_too_large",
-                "zip 包超过 " + (UserSkillService.MAX_ZIP_BYTES / 1024 / 1024) + "MB 限制");
+                "上传的 zip 包超过 " + (UserSkillService.MAX_ZIP_BYTES / 1024 / 1024)
+                    + "MB 限制，请压缩后重试");
         }
         try (var in = file.getInputStream()) {
             var outcome = userSkillService.uploadSkillZip(headerUserId, in, file.getOriginalFilename());

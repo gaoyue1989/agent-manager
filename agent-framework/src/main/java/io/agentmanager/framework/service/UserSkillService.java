@@ -50,8 +50,10 @@ import io.agentmanager.framework.model.OafConfig;
 public class UserSkillService {
     private static final Logger log = LoggerFactory.getLogger(UserSkillService.class);
 
-    /** 单个技能文件内容上限（与 /skills/{name}/content 一致） */
-    public static final int MAX_CONTENT_BYTES = 100 * 1024;
+    /** 单个技能文件内容上限（写入 KV 的单文件大小；1MB） */
+    public static final int MAX_CONTENT_BYTES = 1024 * 1024;
+    /** 单技能所有文件的总字节上限（防单技能物化/回写过大；20MB） */
+    public static final long MAX_SKILL_TOTAL_BYTES = 20L * 1024 * 1024;
     /** 从包内下发时的文件数上限（防一次写入过多 KV 对象） */
     public static final int MAX_SYNC_FILES = 200;
     /** zip 上传压缩包体积上限（10MB）；解压后总大小由 {@link SkillZipSupport#MAX_EXTRACTED_BYTES} 兜底 */
@@ -456,7 +458,7 @@ public class UserSkillService {
      * 把管理面写入改回容器版本（与删除侧的 tombstone 对称）。
      *
      * @return created/updated + 版本号
-     * @throws ContentTooLargeException 内容超 100KB
+     * @throws ContentTooLargeException 内容超 {@link #MAX_CONTENT_BYTES}（1MB）
      * @throws IllegalStateException    KV 写入失败（必须显式报错，不能静默）
      */
     public WriteOutcome writeSkill(String userId, String name, String content) {
@@ -467,7 +469,8 @@ public class UserSkillService {
             throw new IllegalArgumentException("内容不能为空");
         }
         if (content.getBytes(StandardCharsets.UTF_8).length > MAX_CONTENT_BYTES) {
-            throw new ContentTooLargeException("SKILL.md 内容超过 100KB 限制");
+            throw new ContentTooLargeException("SKILL.md 内容超过 "
+                + (MAX_CONTENT_BYTES / 1024 / 1024) + "MB 限制，请精简后重试");
         }
         var existed = workspaceReader.hasUserSkill(userId, name);
         if (!workspaceReader.writeUserSkillFile(userId, name, WorkspaceReader.SKILL_FILE, content)) {
@@ -529,7 +532,8 @@ public class UserSkillService {
      * 跳过清单随 {@link SyncOutcome#skipped()} 返回并打告警日志。
      *
      * @return 下发结果（files / skipped）；包内无此技能返回 empty（调用方映射 404）
-     * @throws ContentTooLargeException 单文件超 100KB
+     * @throws ContentTooLargeException 单文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
+     *                                  单技能总大小超 {@link #MAX_SKILL_TOTAL_BYTES}（20MB）
      * @throws IllegalArgumentException 包内技能缺 SKILL.md / 文件数超限 / key 组合超长
      * @throws IllegalStateException    源目录不可读或 KV 写入失败
      */
@@ -563,8 +567,10 @@ public class UserSkillService {
      * @param zipStream   zip 输入流
      * @param zipFileName 原始文件名（无 frontmatter name 且非包裹结构时用作技能名）
      * @return 技能名 + created/updated + 文件清单 + 版本号
-     * @throws IllegalArgumentException 缺 SKILL.md / 名称非法 / 含二进制文件 / 单文件超 100KB /
+     * @throws IllegalArgumentException 缺 SKILL.md / 名称非法 / 含二进制文件 /
      *                                  文件数超限 / key 组合超长
+     * @throws ContentTooLargeException 单文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
+     *                                  单技能总大小超 {@link #MAX_SKILL_TOTAL_BYTES}（20MB）
      * @throws IllegalStateException    zip 解压或 KV 写入失败
      */
     public ZipUploadOutcome uploadSkillZip(String userId, InputStream zipStream, String zipFileName) {
@@ -622,6 +628,7 @@ public class UserSkillService {
         Map<String, String> sourceFiles = new LinkedHashMap<>();
         var packagePaths = new LinkedHashSet<String>();  // 源文件全集（含跳过项，用于差集清理）
         var skipped = new ArrayList<String>();           // 非 UTF-8/二进制被显式跳过的文件
+        long totalBytes = 0;                             // 单技能累计字节（含被跳过的二进制文件）
         try (Stream<Path> stream = Files.walk(sourceDir)) {
             for (var path : stream.filter(Files::isRegularFile).toList()) {
                 var rel = sourceDir.relativize(path).toString().replace('\\', '/');
@@ -631,12 +638,19 @@ public class UserSkillService {
                 if (!isValidSkillIdentity(name, rel)) {
                     // KV key 上限（item_key VARCHAR(255)）：入口即拦，否则会落到 KV 写入 500
                     throw new IllegalArgumentException(
-                        "技能名与文件路径合计超过 " + MAX_SKILL_KEY_LENGTH + " 字符: " + rel);
+                        "技能名与文件路径合计超过 " + MAX_SKILL_KEY_LENGTH
+                            + " 字符，请缩短技能名或文件名后重试（当前: " + rel + "）");
                 }
                 packagePaths.add(rel);
                 var bytes = Files.readAllBytes(path);
                 if (bytes.length > MAX_CONTENT_BYTES) {
-                    throw new ContentTooLargeException("技能文件 " + rel + " 超过 100KB 限制");
+                    throw new ContentTooLargeException("技能文件「" + rel + "」超过单文件 "
+                        + (MAX_CONTENT_BYTES / 1024 / 1024) + "MB 限制，请精简后重试");
+                }
+                totalBytes += bytes.length;
+                if (totalBytes > MAX_SKILL_TOTAL_BYTES) {
+                    throw new ContentTooLargeException("技能「" + name + "」所有文件总大小超过 "
+                        + (MAX_SKILL_TOTAL_BYTES / 1024 / 1024) + "MB 限制，请精简后重试");
                 }
                 var content = decodeUtf8Strict(bytes);
                 if (content == null) {
@@ -660,7 +674,7 @@ public class UserSkillService {
             throw new IllegalArgumentException("技能 '" + name + "' 缺少 " + WorkspaceReader.SKILL_FILE);
         }
         if (sourceFiles.size() > MAX_SYNC_FILES) {
-            throw new IllegalArgumentException("技能文件数超过 " + MAX_SYNC_FILES + " 限制");
+            throw new IllegalArgumentException("技能文件数量超过 " + MAX_SYNC_FILES + " 个，请精简后重试");
         }
 
         // 物化前取 L4 现有文件的“相对路径 → 内容”快照：既用于差集清理，也用于失败回滚
