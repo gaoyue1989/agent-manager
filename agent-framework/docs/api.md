@@ -1,9 +1,11 @@
 # Agent Framework — API 文档
 
 **版本:** v2.1.0 (Java) — 无状态单次流架构
-**复核日期:** 2026-10-01（master @ `4a4dea8`）— 增量重核：数据表迁 Flyway（V1–V8）、模型采样参数、
-confirm_context 多行化、`/a2a/jobs`、ASKING 入口预检、远程转发事件标注
-（上一轮 2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
+**复核日期:** 2026-10-08（分支 docs/code-review-2026-10-01）— 增量重核：Flyway V9（#87 PER_PEER 会话重键）、
+llm-calls 记录键 gw-hash 形态订正
+（上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
+`/a2a/jobs`、ASKING 入口预检、远程转发事件标注；
+2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
 
 > **现状核对**：本篇是 REST 契约权威，与 [api-frontend-sse.md](api-frontend-sse.md)（前端视角）、
 > [api-thread-spec.md](api-thread-spec.md)（会话协议契约，E2E 断言权威）并行。
@@ -31,7 +33,8 @@ curl http://localhost:8100/
     "protocols": {
         "a2a": "1.0.0",
         "a2ui": "v0.8",
-        "oaf": "v0.8.0"
+        "oaf": "v0.8.0",
+        "agent_protocol": {"enabled": false, "streaming": false, "hitl": false, "task_store": ""}
     },
     "oaf": {
         "tools": ["Read", "Bash", "Edit"],
@@ -50,6 +53,8 @@ curl http://localhost:8100/
     "engine": "AgentScope Java 2.0"
 }
 ```
+
+> `protocols.agent_protocol` 为远程子 agent（Agent Protocol）能力开关，与 `/.well-known/agent-card.json` 同源（`InfoController.agentProtocolStatus`）；`GET /metadata` 另返回 `agent_protocol` 与 `a2a_job`（A2A 幂等 Job 状态）两个顶层字段。
 
 ---
 
@@ -130,33 +135,38 @@ curl http://localhost:8100/skills
 | PUT | `/skills/{name}/toggle` | 启停切换：`{name, enabled, message}` |
 | GET | `/skills/{name}/content` | 读 `SKILL.md`：`{name, content}` |
 | PUT | `/skills/{name}/content` | 写 `SKILL.md`，body `{content}`（≤100KB） |
+| GET | `/skills/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`，含 `scripts` 等资源、保留原始字节）；技能仅被 frontmatter 声明而无目录 → 404 |
 
-> `GET /skills/users/{userId}` 与 `GET /skills/{name}/content` 在 `userId == "content"` 时同时匹配，
-> 由更具体的 `/skills/{name}/content` 命中（Spring 路由优先级）。
+> `GET /skills/users/{name}` 与 `GET /skills/{name}/content` 在 `name == "content"` 时同时匹配，
+> 由更具体的 `/skills/{name}/content` 命中（Spring 路由优先级）；`name == "toggle"` 与
+> `PUT /skills/{name}/toggle` 同理。个人技能名恰为 `content`/`toggle` 属既有窄边界。
 
 ### 用户个人技能（L4）
 
-命名空间 `agents/{agent}/users/{uid}/skills`。生效范围分档：非沙箱档下一轮会话生效；
-沙箱档由「会话开始物化 L4」投影进容器，在该用户下一个 turn 生效。
+命名空间 `agents/{agent}/users/{uid}/skills`。**用户身份取网关注入的 `X-User-Id` 请求头**
+（缺失 400 `missing_user_id` / 非法 400 `invalid_user_id`），URL 路径不再携带 userId。
+生效范围分档：非沙箱档下一轮会话生效；沙箱档由「会话开始物化 L4」投影进容器，在该用户下一个 turn 生效。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/skills/users` | 有个人技能的用户索引：`{count, users:[...], truncated?}` |
-| GET | `/skills/users/{userId}` | 该用户的 L4 技能：`{userId, skills, tombstones}` |
-| GET | `/skills/users/{userId}/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
-| PUT | `/skills/users/{userId}/{name}` | 写个人技能，body `{content}` |
-| DELETE | `/skills/users/{userId}/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
-| POST | `/skills/users/{userId}/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}` |
+| GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}` |
+| GET | `/skills/users/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
+| GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
+| PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB） |
+| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
+| DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
+| POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
+| GET | `/debug/user-skills` | **全量用户索引**（运维/调试）；`{count, users:[...], truncated?}`；索引失败 500 |
 
 **回写仲裁（两个 KV 元数据键，命中即跳过同名技能）：**
 
 | 标记 | 写入方 | 作用 |
 |------|--------|------|
 | `/{name}/.deleted` | 管理面删除 | 防删除被容器内副本复活 |
-| `/{name}/.admin-override` | 管理面写入（PUT / 下发） | 防管理面写入被同代容器内旧副本改回 |
+| `/{name}/.admin-override` | 管理面写入（PUT / 下发 / 上传） | 防管理面写入被同代容器内旧副本改回 |
 
 代价是标记生效期间，容器内 `skill_manage` 对该技能的修改不落库。状态与清除方式经
-`GET /skills/users/{userId}` 的 `tombstones` 字段与删除 / PUT 响应下发。
+`GET /skills/users` 的 `tombstones` 字段与删除 / PUT 响应下发。
 
 ---
 
@@ -370,6 +380,20 @@ Thread 历史消息 + pendingConfirm。
 工具调用带 `state`（ToolCallState：pending/asking/allowed/submitted/finished），
 工具结果带 `state`（ToolResultState：success/error/denied/interrupted）与 `output`，
 覆盖 HITL 批准后的恢复段，不受 Redis 事件流 TTL 限制。
+
+> **合成提醒消息已过滤**：SDK 会把后台子 agent 任务投递提醒以 `role=USER` + `name=system` +
+> `metadata.agentscope_synthetic=true` 持久化进 `AgentState.context`（内容形如
+> `<system-reminder>…</system-reminder>`）。它不属对话轮次，history 解析（`StateDataParser`）
+> 按合成标记 + `name=system` 双判据将其剔除，不再以 `role=user` 冒充用户提问上屏。
+> 压缩摘要（`name=__compaction_summary__`）不在此列，照常转 `role=compaction`。
+
+> **turn 执行中即可见用户输入（2026-10-12）**：SDK 只在整轮结束后才落库 agent_state/归档，
+> 此前「发送消息后立即刷新、从历史列表进入会话」详情恒空。现由回合起始中间件
+> （`TurnInputArchiveMiddleware`）在输入确定、尚未执行时把本回合真实用户输入直接归档进
+> `session_message`——turn 执行中 history 至少可见用户提问，助手回复待 turn 结束补齐。
+> slot 键与 turn 结束 write-through 完全同构、`msg_id` 同源，upsert 幂等不产生重复。
+> 归档关闭（`AGENT_HISTORY_ARCHIVE_ENABLED=false`）时不生效（无消费方）。
+
 `pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
 的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。
 详见 [history-agentstate-design.md](history-agentstate-design.md) 与
@@ -512,9 +536,10 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/llm-calls
 history/PATCH/DELETE 同键），由 `SessionKeyResolver` 从 RuntimeContext 反查解析——`sessionId` 与
 `userId` 两个候选中，谁在 session_user 登记过谁就是规范 sid。注意 Channel 链路
 （`/threads/chat`）下 `RuntimeContext.sessionId` 是网关按 canonicalKey 派生的 `gw-hash`
-（同进程所有 peer 共享，**不是任何会话的规范 key**），前端 sid 落在 `RuntimeContext.userId`；
-若直接用 `ctx.getSessionId()` 落记录，所有会话的记录会串进同一个 gw-hash 桶、按 sid 查询恒为空
-（issue #44）。
+（issue #87 起 Channel 切 `ChatUiChannel.perPeer()` 后**每会话独立**，此前 MAIN 形态为全进程
+共享 `gw-3f20f08c5499`，存量行由 Flyway V9 重键），**不是任何会话的规范 key**，前端 sid 落在
+`RuntimeContext.userId`；若直接用 `ctx.getSessionId()` 落记录，会话记录落在 gw-hash 桶、
+按 sid 查询恒为空（issue #44）。
 
 ---
 
@@ -836,7 +861,7 @@ curl -X POST http://localhost:8100/models -H 'Content-Type: application/json' -d
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/debug` | 调试页面（静态资源） |
-| GET | `/debug/config/env` | 生效环境变量（脱敏） |
+| GET | `/debug/config/env` | 生效环境变量（脱敏）。`llm.fallback_model_id` = 备用模型配置（`LLM_FALLBACK_MODEL_ID`，空串 = 未启用） |
 | GET | `/debug/config/oaf` | OAF 配置 + 技能合并视图（dynamic/declaredButMissing 标记） |
 | GET | `/debug/database/status` | 数据库连接健康状态 |
 | GET | `/debug/memory` | MEMORY.md / memory/ 内容查看 |
@@ -863,7 +888,7 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-自建 10 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V8，启动自动执行，
+自建 10 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V9，启动自动执行，
 存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
 `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
 `session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）。
@@ -1026,7 +1051,7 @@ TTL 7 天（自最后写入起），`AGENT_REDIS_MAX_LEN_PER_STREAM` 默认 25 �
 | `AGENT_REDIS_CONNECT_TIMEOUT_MS` | `2000` | |
 | `AGENT_REDIS_MAX_LEN_PER_STREAM` | `250000` | `XADD … MAXLEN ~` 内存兜底 |
 
-详见 [api-thread-spec.md](api-thread-spec.md) §12 与 [api-frontend-sse.md](api-frontend-sse.md) §12。
+详见 [api-frontend-sse.md](api-frontend-sse.md) §14 与 [checkpoint-design.md](checkpoint-design.md) §4.1。
 
 ---
 

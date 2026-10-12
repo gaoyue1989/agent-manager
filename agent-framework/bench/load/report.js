@@ -21,6 +21,7 @@ const SCENARIO_NAMES = {
   B3: '沙箱+Shell',
   B4: '沙箱+MCP 工具',
   B5: '同用户并发（U=1 串行化上界）',
+  C: '并发启动延迟档（issue #87）',
 };
 
 function pct(v) { return v == null ? '-' : v; }
@@ -28,7 +29,7 @@ function pct(v) { return v == null ? '-' : v; }
 function loadSummaries() {
   const out = {};
   for (const dir of fs.readdirSync(RESULTS_DIR, { withFileTypes: true })) {
-    if (!dir.isDirectory() || !/^B\d$/.test(dir.name)) continue;
+    if (!dir.isDirectory() || !/^(B\d|C)$/.test(dir.name)) continue;
     out[dir.name] = [];
     for (const f of fs.readdirSync(path.join(RESULTS_DIR, dir.name)).sort((a, b) => {
       const na = parseInt(a, 10); const nb = parseInt(b, 10);
@@ -98,11 +99,15 @@ function main() {
     if (!summaries.length) continue;
     lines.push(`## ${sc} ${SCENARIO_NAMES[sc] || ''}`);
     lines.push('');
-    lines.push('| C | 成功 | 错误率 | req/min | RPS | P50(ms) | P95(ms) | P99(ms) | TTFT P50(ms) | waiting 均值 | 中止 | 容器CPU max% | 堆峰值MB | MySQL连接 max | 沙箱数 max |');
-    lines.push('|---|------|--------|---------|-----|---------|---------|---------|--------------|--------------|------|--------------|----------|---------------|------------|');
+    // 启动排队三列（issue #97 问题17）：排队签名（AGENT_START−首帧）P50/P100 与门禁超阈路数，
+    // runner 对 B/C 档均无条件写入；老 summary 缺字段时以 '-' 兜底。
+    // 零帧路数列暂不展示：runner 尚未写入 zeroFrameSamples（PR fix/issue97-c-gate-metric 侧改动），
+    // 本分支先不预留渲染不到的死列，待 runner 落地该字段后随其一并补列
+    lines.push('| C | 成功 | 错误率 | req/min | RPS | P50(ms) | P95(ms) | P99(ms) | TTFT P50(ms) | 启动排队P50(ms) | 启动排队P100(ms) | 排队超阈 | waiting 均值 | 中止 | 容器CPU max% | 堆峰值MB | MySQL连接 max | 沙箱数 max |');
+    lines.push('|---|------|--------|---------|-----|---------|---------|---------|--------------|-----------------|------------------|--------|--------------|------|--------------|----------|---------------|------------|');
     for (const s of summaries) {
       const obs = observerSummary(sc, s.stage);
-      lines.push(`| ${s.concurrency} | ${s.ok} | ${s.errorRate == null ? '-' : (s.errorRate * 100).toFixed(1) + '%'} | ${s.reqPerMin} | ${s.rps} | ${pct(s.p50Ms)} | ${pct(s.p95Ms)} | ${pct(s.p99Ms)} | ${pct(s.ttftP50Ms)} | ${s.waitingAvg} | ${s.aborted ? '是(' + s.abortReason + ')' : '否'} | ${obs && obs.cpuMax != null ? obs.cpuMax : '-'} | ${obs && obs.heapMaxMb != null ? obs.heapMaxMb : '-'} | ${obs && obs.threadsMax != null ? obs.threadsMax : '-'} | ${obs && obs.sandboxesMax != null ? obs.sandboxesMax : '-'} |`);
+      lines.push(`| ${s.concurrency} | ${s.ok} | ${s.errorRate == null ? '-' : (s.errorRate * 100).toFixed(1) + '%'} | ${s.reqPerMin} | ${s.rps} | ${pct(s.p50Ms)} | ${pct(s.p95Ms)} | ${pct(s.p99Ms)} | ${pct(s.ttftP50Ms)} | ${pct(s.startQueueP50Ms)} | ${pct(s.startQueueP100Ms)} | ${s.startDelayBreaches ?? '-'} | ${s.waitingAvg} | ${s.aborted ? '是(' + s.abortReason + ')' : '否'} | ${obs && obs.cpuMax != null ? obs.cpuMax : '-'} | ${obs && obs.heapMaxMb != null ? obs.heapMaxMb : '-'} | ${obs && obs.threadsMax != null ? obs.threadsMax : '-'} | ${obs && obs.sandboxesMax != null ? obs.sandboxesMax : '-'} |`);
     }
     // LLM 调用对账（最后档）
     const last = summaries[summaries.length - 1];

@@ -45,15 +45,26 @@ public final class ChatModelFactory {
         return modelBuilder
             .generateOptions(buildOptions(llm))
             .httpTransport(JdkHttpTransport.builder()
-                .client(java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
-                    .build())
+                .client(buildHttpClient(harness))
                 .config(HttpTransportConfig.builder()
                     .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
                     .readTimeout(Duration.ofSeconds(harness.httpReadTimeoutSeconds()))
                     .writeTimeout(Duration.ofSeconds(harness.httpWriteTimeoutSeconds()))
                     .build())
                 .build())
+            .build();
+    }
+
+    /**
+     * LLM 专用 HttpClient（单测断言版本口径）。固定 HTTP/1.1（issue #114）：JDK 默认
+     * HTTP_2 协商在 http:// 明文端点会附 {@code Upgrade: h2c} 升级头，不处理 h2c 的
+     * OpenAI 兼容网关会把请求体判非法（实测 400「请求体不是合法 JSON」）；OpenAI 兼容
+     * 端点全量支持 HTTP/1.1，https 端点走 ALPN 协商不受影响。
+     */
+    static java.net.http.HttpClient buildHttpClient(AgentManagerProperties.HarnessConfig harness) {
+        return java.net.http.HttpClient.newBuilder()
+            .version(java.net.http.HttpClient.Version.HTTP_1_1)
+            .connectTimeout(Duration.ofSeconds(harness.httpConnectTimeoutSeconds()))
             .build();
     }
 

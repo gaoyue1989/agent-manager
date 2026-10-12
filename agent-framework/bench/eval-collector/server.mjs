@@ -2,10 +2,11 @@
 /**
  * eval-collector：离线评测数据收集代理（设计 docs/design/agent-framework-eval-offline-record-replay-design.md §2）
  *
- * 四固定端口 + 路径前缀多路复用（多业务服务共用实例，不随接入数扩端口）：
+ * 五固定端口 + 路径前缀多路复用（多业务服务共用实例，不随接入数扩端口）：
  *   :18200  LLM 代理（OpenAI 兼容）       /{ns}/v1/...        → profile.upstream.llm
  *   :18201  沙箱代理（管理API + execd）    /{ns}/...           → profile.upstream.sandbox
  *   :18202  MCP 代理（streamableHttp）    /mcp/{ns}/{server}/ → profile.upstream.mcp[server]
+ *   :18203  业务服务反代（kind=http）      /{ns}/...           → profile.upstream.agent
  *   :18300  管理控制台 + 管理 API（Bearer token；未设 token 时仅绑 127.0.0.1）
  *
  * 数据面端口不加认证（零侵入前提：业务服务无需携带凭据）；安全边界 = 仅测试网络可达 + 采集窗口期。
@@ -41,33 +42,126 @@ const PORT_AGENT = intEnv('EVAL_COLLECTOR_PORT_AGENT', 18203);
 const PORT_ADMIN = intEnv('EVAL_COLLECTOR_PORT_ADMIN', 18300);
 const ADMIN_TOKEN = ENV.EVAL_COLLECTOR_ADMIN_TOKEN || '';
 const PACKAGER_URL = (ENV.EVAL_PACKAGER_URL || '').replace(/\/$/, '');
+// 切换/还原片段里的对外主机名：容器/反代场景 Host 头不可信，可用该 env 显式覆盖（缺省从 Host 头派生）
+const PUBLIC_HOST = (ENV.EVAL_COLLECTOR_PUBLIC_HOST || '').trim();
+const PACKAGER_TOKEN = ENV.EVAL_PACKAGER_TOKEN || '';  // studio 开启 STUDIO_TOKEN 后的转调凭据（issue #97 评审）
+// 请求体硬上限（转发语义）：超限直接 413 拒绝且不转发；录制上限（body_max_bytes）只影响录制副本。
+// 默认 64MB 的取舍：旁路组件、安全边界 = 仅测试网络可达（见文件头），64MB 足以容纳大上下文
+// LLM 请求，同时防单请求内存无界；并发下最坏 64MB/请求，需要收紧时用该 env 调小。
+const BODY_HARD_LIMIT = intEnv('EVAL_COLLECTOR_BODY_HARD_LIMIT_BYTES', 64 * 1024 * 1024);
 
 function intEnv(name, dflt) {
   const v = parseInt(ENV[name], 10);
   return Number.isFinite(v) ? v : dflt;
 }
 
-/** 极简 YAML 子集解析（仅支持本服务自用 schema：嵌套 map / "- " 列表 / 标量）。
+/** 剥行尾注释：'#' 须在引号外（值里可含 '#'，如密码），且在行首或空白之后才视作注释。
+ *  不剥的后果（issue #97 问题c）：sampling 等数值键带着注释变字符串，采样率比较退化为
+ *  NaN → 永不录制、体积上限失效、保留期 NaN——collector.example.yaml 原样加载即触雷。 */
+function stripComment(line) {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inSingle) { if (ch === "'") inSingle = false; continue; }
+    if (inDouble) { if (ch === '"') inDouble = false; continue; }
+    if (ch === "'") { inSingle = true; continue; }
+    if (ch === '"') { inDouble = true; continue; }
+    if (ch === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) {
+      return line.slice(0, i).trimEnd();
+    }
+  }
+  return line;
+}
+
+/** YAML flow 风格 map（{k: v, ...}）：key 可不带引号、值可单引号——JSON.parse 覆盖不了，这里补齐。
+ *  顶层逗号切分须引号/嵌套感知（脱敏正则值里就有 {m,n} 量词与逗号）。解析失败返回 null。 */
+function parseFlowMap(s) {
+  const inner = s.trim();
+  if (!inner.startsWith('{') || !inner.endsWith('}')) return null;
+  const parts = [];
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let buf = '';
+  for (const ch of inner.slice(1, -1)) {
+    if (inSingle || inDouble) {
+      buf += ch;
+      if ((inSingle && ch === "'") || (inDouble && ch === '"')) { inSingle = false; inDouble = false; }
+      continue;
+    }
+    if (ch === "'") { inSingle = true; buf += ch; continue; }
+    if (ch === '"') { inDouble = true; buf += ch; continue; }
+    if (ch === '{' || ch === '[') depth += 1;
+    if (ch === '}' || ch === ']') depth -= 1;
+    if (ch === ',' && depth === 0) { parts.push(buf); buf = ''; continue; }
+    buf += ch;
+  }
+  if (buf.trim()) parts.push(buf);
+  const out = {};
+  for (const p of parts) {
+    const i = p.indexOf(':');
+    if (i <= 0) return null;
+    out[p.slice(0, i).trim().replace(/^["']|["']$/g, '')] = parseScalar(p.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/** 标量解析：布尔/空值/数字/JSON 或 flow map/带引号字符串。 */
+function parseScalar(s) {
+  if (s === 'true') return true;
+  if (s === 'false') return false;
+  if (s === 'null' || s === '~') return null;
+  if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  if (s.startsWith('{') || s.startsWith('[')) {
+    try { return JSON.parse(s); } catch { /* JSON 失败再按 YAML flow 解析（裸 key / 单引号值） */ }
+    if (s.startsWith('{')) return parseFlowMap(s) ?? s;
+    return s;
+  }
+  return s.replace(/^["']|["']$/g, '');
+}
+
+/** 极简 YAML 子集解析（仅支持本服务自用 schema：嵌套 map / "- " 列表 / 标量 / 行尾注释）。
  *  设计取舍：全局配置项有限，不引入 js-yaml 依赖（零依赖红线）。 */
 function parseMiniYaml(text) {
   const root = {};
   const stack = [{ indent: -1, obj: root }];
   let pendingListKey = null;
   for (const rawLine of text.split(/\r?\n/)) {
-    if (!rawLine.trim() || rawLine.trim().startsWith('#')) continue;
+    if (!rawLine.trim()) continue;
     const indent = rawLine.length - rawLine.trimStart().length;
-    const line = rawLine.trim();
-    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
+    const line = stripComment(rawLine.trim());
+    if (!line || line.startsWith('#')) continue; // 剥后为空 = 全行注释
+    const isListItem = line.startsWith('- ');
+    // 缩进收缩：列表项保留栈顶列表容器（key:\n- item 与 key 同缩进的形态也要归入该列表）
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent
+           && !(isListItem && Array.isArray(stack[stack.length - 1].obj))) {
       stack.pop();
       pendingListKey = null;
     }
     const cur = stack[stack.length - 1].obj;
-    if (line.startsWith('- ')) {
-      // 列表项：挂在上一次出现 "key:" 的位置（仅一层 map 列表，够用）
-      const item = parseScalar(line.slice(2).trim());
-      if (pendingListKey && Array.isArray(cur[pendingListKey])) {
-        if (item && typeof item === 'object' && !Array.isArray(item)) cur[pendingListKey].push(item);
-        else cur[pendingListKey].push(item);
+    if (isListItem) {
+      // 列表项挂载（issue #97 问题c 修复：此前 cur 已是容器数组本身，cur[pendingListKey]
+      // 恒 undefined → push 分支永不可达，整列表被静默丢弃）
+      const list = Array.isArray(cur) ? cur
+        : (pendingListKey && Array.isArray(cur[pendingListKey]) ? cur[pendingListKey] : null);
+      if (!list) continue;
+      const content = line.slice(2).trim();
+      if (content.startsWith('{') || content.startsWith('[')) {
+        // flow 风格项（{pattern: 'x', replace: 'y'}）：整体交标量解析，不能先按 key: 切分
+        // （否则 '{pattern' 会被当成键名）
+        list.push(parseScalar(content));
+        continue;
+      }
+      const kv = content.match(/^([^:]+):\s*(.*)$/);
+      if (kv) {
+        // 块式多行 map 项（- pattern: x → 后续更深缩进的键并入该项）：入列并入栈
+        const item = {};
+        item[kv[1].trim().replace(/^["']|["']$/g, '')] = kv[2].trim() === '' ? null : parseScalar(kv[2].trim());
+        list.push(item);
+        stack.push({ indent, obj: item });
+      } else {
+        list.push(parseScalar(content));
       }
       continue;
     }
@@ -78,11 +172,9 @@ function parseMiniYaml(text) {
     if (val === '') {
       // 可能是子 map，也可能是列表容器——两者都先占位数组，遇到 "- " 复用、遇到缩进 map 覆盖
       cur[key] = [];
+      cur[key].__isListHolder = true;
       pendingListKey = key;
       stack.push({ indent, obj: cur[key] });
-      // 用代理对象继续收子键：数组也能挂属性（JS 允许），后续转 map
-      const holder = cur[key];
-      holder.__isListHolder = true;
     } else {
       cur[key] = parseScalar(val);
       pendingListKey = null;
@@ -107,15 +199,6 @@ function parseMiniYaml(text) {
       return out;
     }
     return node;
-  }
-
-  function parseScalar(s) {
-    if (s === 'true') return true;
-    if (s === 'false') return false;
-    if (s === 'null' || s === '~') return null;
-    if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
-    if (s.startsWith('{') || s.startsWith('[')) { try { return JSON.parse(s); } catch { /* 按字符串 */ } }
-    return s.replace(/^["']|["']$/g, '');
   }
 }
 
@@ -148,7 +231,10 @@ let GLOBAL = loadGlobalConfig();
 const DEFAULT_MASK_RULES = [
   { pattern: '(sk|tp)-[A-Za-z0-9_-]{8,}', replace: '$1-***' },
   { pattern: '"(api_?key|token|secret|password|authorization)"\\s*:\\s*"[^"]*"', replace: '"$1": "***"' },
-  { pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}', replace: '***@***' },
+  // 有界量词线性版（issue #97 问题5）：无界 `+` 在长无间断串上二次方回溯（实测 80k 字符 8s+，
+  // 1MiB 默认 body 上限下可阻塞主线程数十分钟）；{1,64}/{1,255} 取 RFC 5321 local/domain 上界，
+  // 每个起始位置回溯步数有界 → 整体线性，替换语义（'***@***'）不变
+  { pattern: '[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\\.[A-Za-z]{2,24}', replace: '***@***' },
   { pattern: '(?<![0-9])1[3-9][0-9]{9}(?![0-9])', replace: '1**********' },
 ];
 
@@ -162,20 +248,35 @@ function maskRulesFor(profile) {
 
 function safeRegex(p) { try { return new RegExp(p, 'g'); } catch { return null; } }
 
-/** 递归对字符串值做脱敏（录制副本专用；透传内容不受影响）。 */
-function maskValue(v, rules) {
+// 单字符串脱敏跳过阈值：正则替换耗时随长度增长且跑在主线程事件循环上（issue #97 问题5），
+// 超过该长度的单值整段跳过脱敏、由调用方在录制副本顶层打 mask_skipped 标记（与 truncated 语义对齐）
+const MASK_SKIP_LENGTH = 64 * 1024;
+
+/** 递归对字符串值做脱敏（录制副本专用；透传内容不受影响）。
+ *  state 可选：调用方传 { skipped: false } 收集超长跳过事件（见 MASK_SKIP_LENGTH）。 */
+function maskValue(v, rules, state = null) {
   if (typeof v === 'string') {
+    if (v.length > MASK_SKIP_LENGTH) {
+      if (state) state.skipped = true;
+      return v;
+    }
     let s = v;
     for (const r of rules) s = s.replace(r.re, r.replace);
     return s;
   }
-  if (Array.isArray(v)) return v.map((x) => maskValue(x, rules));
+  if (Array.isArray(v)) return v.map((x) => maskValue(x, rules, state));
   if (v && typeof v === 'object') {
     const out = {};
-    for (const [k, val] of Object.entries(v)) out[k] = maskValue(val, rules);
+    for (const [k, val] of Object.entries(v)) out[k] = maskValue(val, rules, state);
     return out;
   }
   return v;
+}
+
+/** 脱敏唯一漏斗（四个录制 finalize + 管理 API mask-test 共用）：返回脱敏结果 + 是否发生超长跳过。 */
+function maskWithFlag(value, rules) {
+  const state = { skipped: false };
+  return { masked: maskValue(value, rules, state), mask_skipped: state.skipped };
 }
 
 // ---------------------------------------------------------------------------
@@ -359,13 +460,58 @@ async function precheckProfile(p) {
 
 const HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive', 'upgrade', 'proxy-authorization', 'proxy-connection', 'accept-encoding']);
 
-function forward({ req, res, targetUrl, method, headers, body, profile, onResp }) {
+/** 防路径穿越第一层（issue #97 问题7）：四个数据口把调用方路径与上游 base 裸拼接，而 WHATWG
+ *  new URL 解析时会剥掉 %2e%2e/../ 等点段，可穿越到上游主机任意路径（且转发携带档案存储的
+ *  上游凭据）。这里对调用方原始路径段做拒绝式校验：任意解码轮次的结果含 '..' 或 '%2e'
+ *  （不区分大小写——纯 %2e 文件名等极少数合法编码形态一并拒绝，采集代理安全优先）即拒。
+ *  解码须循环至不动点（封顶 3 轮）：单轮 decodeURI 会漏放多重编码形态（%252e%252e 一轮解码后
+ *  为 %2e%2e，不含字面 '..'），转发又附加档案存储的上游凭据——上游若存在二次解码+归一化即
+ *  构成穿越。只扫 '?' 前的路径部分，查询串不校验，保证合法编码参数（如 model=x%2Fa）与
+ *  查询串原样透传。 */
+function hasPathTraversal(segment) {
+  const pathPart = String(segment || '').split('?')[0];
+  if (!pathPart) return false;
+  let cur = pathPart;
+  for (let round = 0; round < 3 && cur; round++) {
+    if (cur.includes('..') || /%2e/i.test(cur)) return true;
+    let next;
+    try {
+      next = decodeURI(cur);
+    } catch {
+      return true; // 畸形百分号编码：无法验证，按拒绝处理
+    }
+    if (next === cur) break; // 已到解码不动点
+    cur = next;
+  }
+  return false;
+}
+
+/** 上游 base 的路径前缀（供 forward 归一化后前缀校验；base 解析失败返回 null，交由 forward 502）。 */
+function basePathOf(base) {
+  try {
+    const p = new URL(base).pathname.replace(/\/+$/, '');
+    return p || '/';
+  } catch { return null; }
+}
+
+function forward({ req, res, targetUrl, method, headers, body, profile, onResp, upstreamBase }) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(targetUrl); } catch {
       res.writeHead(502, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: `upstream 地址非法: ${targetUrl}` }));
       return resolve();
+    }
+    // 防路径穿越第二层（issue #97 问题7）：上游 base 带非根路径时（LLM/MCP 常见，如 …/api/v1），
+    // 若点段被归一化吃掉，pathname 会脱离 base 前缀——归一化后必须仍落在 base 路径前缀内。
+    // 根路径 base（沙箱/agent 常见）前缀恒为 '/'，此层空转，由调用方第一层原始路径校验承担。
+    if (upstreamBase) {
+      const prefix = basePathOf(upstreamBase);
+      if (prefix && prefix !== '/' && !u.pathname.startsWith(prefix)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: `转发路径越出上游前缀 ${prefix}: ${u.pathname}` }));
+        return resolve();
+      }
     }
     const mod = u.protocol === 'https:' ? https : http;
     const outHeaders = { ...headers };
@@ -420,18 +566,26 @@ function attachSSECollector(upstreamResp, sink, maxBytes) {
   });
 }
 
-function readBody(req, maxBytes) {
+/** 请求体读取双上限（截断与转发分离）：
+ *  - recordLimit（即 body_max_bytes，录制上限）：只决定录制副本的 truncated 标记，
+ *    字节始终完整缓存，保证转发体完整（转发体截断曾致上游收到畸形 JSON，issue #97 问题6）；
+ *  - hardLimit（BODY_HARD_LIMIT，硬上限）：超限置 tooLarge 并停止缓存、继续排空连接
+ *    （排空避免半途断开导致客户端收不到 413 响应），调用方据此直接 413 拒绝且不转发。
+ *  返回的 body 为截至硬上限的完整体（tooLarge 时为部分体，但调用方不会转发它）。 */
+function readBody(req, recordLimit, hardLimit = BODY_HARD_LIMIT) {
   return new Promise((resolve) => {
     const chunks = [];
     let size = 0;
     let truncated = false;
+    let tooLarge = false;
     req.on('data', (c) => {
       size += c.length;
-      if (size > maxBytes) { truncated = true; req.resume(); return; } // 继续接收但不缓存
+      if (size > hardLimit) { tooLarge = true; req.resume(); return; } // 硬上限：停止缓存继续排空
+      if (size > recordLimit) truncated = true; // 录制上限：只置标记，字节照常缓存供转发
       chunks.push(c);
     });
-    req.on('end', () => resolve({ body: Buffer.concat(chunks), truncated }));
-    req.on('error', () => resolve({ body: Buffer.concat(chunks), truncated }));
+    req.on('end', () => resolve({ body: Buffer.concat(chunks), truncated, tooLarge }));
+    req.on('error', () => resolve({ body: Buffer.concat(chunks), truncated, tooLarge }));
   });
 }
 
@@ -460,13 +614,17 @@ async function handleLLM(req, res) {
   const m = req.url.match(/^\/([a-z0-9][a-z0-9-]{1,62})(\/.+)$/);
   if (!m) return sendJson(res, 404, { error: '路径须为 /{ns}/v1/...' });
   const [, ns, rest] = m;
+  // 防穿越（issue #97 问题7）：校验剥 /v1 前的原始 rest，new URL 归一化会吃掉 %2e%2e/../
+  if (hasPathTraversal(rest)) return sendJson(res, 400, { error: '路径含穿越段（.. 或 %2e），拒绝转发' });
   const r = resolveProfile(ns);
   if (r.error) return sendJson(res, r.error, { error: r.msg });
   const p = r.profile;
   if (!p.upstream.llm) return sendJson(res, 404, { error: `档案 ${ns} 未配置 LLM 上游` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const base = String(p.upstream.llm).replace(/\/$/, '');
   // 版本段归一：客户端 base 含 /v1（LLM_BASE_URL=…/{ns}/v1），剥掉后再拼上游
   // （upstream 填业务直连时用的完整 base，如 https://openrouter.ai/api/v1）
@@ -509,7 +667,8 @@ async function handleLLM(req, res) {
     rec.duration_ms = Date.now() - t0;
     if (sink?.truncated) rec.truncated = true;
     const rules = maskRulesFor(p);
-    const masked = maskValue(JSON.parse(JSON.stringify(rec)), rules);
+    const { masked, mask_skipped } = maskWithFlag(JSON.parse(JSON.stringify(rec)), rules);
+    if (mask_skipped) masked.mask_skipped = true; // 超长值跳过脱敏时打标
     try { recordInteraction(ns, 'llm', masked); } catch (e) {
       console.error(`[record][ERROR] ${ns}/llm 写入失败: ${e.message}`);
     }
@@ -518,7 +677,7 @@ async function handleLLM(req, res) {
   if (finalizeTimer) finalizeTimer.unref?.();
   await forward({
     req, res, targetUrl: target, method: req.method, headers,
-    body: fwdBody.length ? fwdBody : null, profile: p,
+    body: fwdBody.length ? fwdBody : null, profile: p, upstreamBase: base,
     onResp: (ur) => {
       rec && (rec.status = ur.statusCode);
       const ct = String(ur.headers['content-type'] || '');
@@ -557,13 +716,17 @@ async function handleSandbox(req, res) {
   const m = req.url.match(/^\/([a-z0-9][a-z0-9-]{1,62})(\/.*)$/);
   if (!m) return sendJson(res, 404, { error: '路径须为 /{ns}/...' });
   const [, ns, rest] = m;
+  // 防穿越（issue #97 问题7）：new URL 归一化会吃掉 %2e%2e/../
+  if (hasPathTraversal(rest)) return sendJson(res, 400, { error: '路径含穿越段（.. 或 %2e），拒绝转发' });
   const r = resolveProfile(ns);
   if (r.error) return sendJson(res, r.error, { error: r.msg });
   const p = r.profile;
   if (!p.upstream.sandbox) return sendJson(res, 404, { error: `档案 ${ns} 未配置沙箱上游` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const base = String(p.upstream.sandbox).replace(/\/$/, '');
   const target = base + rest;
   const headers = { ...req.headers };
@@ -597,14 +760,16 @@ async function handleSandbox(req, res) {
 
   await forward({
     req, res, targetUrl: target, method: req.method, headers,
-    body: body.length ? body : null, profile: p,
+    body: body.length ? body : null, profile: p, upstreamBase: base,
     onResp: rec ? collectResp : undefined,
   });
   if (!rec) return;
   rec.ts_end = new Date().toISOString();
   rec.duration_ms = Date.now() - t0;
   const rules = maskRulesFor(p);
-  try { recordInteraction(ns, 'sandbox', maskValue(JSON.parse(JSON.stringify(rec)), rules)); } catch (e) {
+  const { masked, mask_skipped } = maskWithFlag(JSON.parse(JSON.stringify(rec)), rules);
+  if (mask_skipped) masked.mask_skipped = true; // 超长值跳过脱敏时打标
+  try { recordInteraction(ns, 'sandbox', masked); } catch (e) {
     console.error(`[record][ERROR] ${ns}/sandbox 写入失败: ${e.message}`);
   }
 }
@@ -616,6 +781,8 @@ async function handleMCP(req, res) {
   const m = req.url.match(/^\/mcp\/([a-z0-9][a-z0-9-]{1,62})\/([a-z0-9][a-z0-9_-]{0,62})(\/.*)?$/);
   if (!m) return sendJson(res, 404, { error: '路径须为 /mcp/{ns}/{server}/...' });
   const [, ns, server, tail = '/'] = m;
+  // 防穿越（issue #97 问题7）：new URL 归一化会吃掉 %2e%2e/../
+  if (hasPathTraversal(tail)) return sendJson(res, 400, { error: '路径含穿越段（.. 或 %2e），拒绝转发' });
   const r = resolveProfile(ns);
   if (r.error) return sendJson(res, r.error, { error: r.msg });
   const p = r.profile;
@@ -623,7 +790,9 @@ async function handleMCP(req, res) {
   if (!base) return sendJson(res, 404, { error: `档案 ${ns} 未配置 MCP server: ${server}` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const target = String(base).replace(/\/$/, '') + tail;
   const headers = { ...req.headers };
   if (p.upstream.mcp_api_keys?.[server]) headers.authorization = `Bearer ${p.upstream.mcp_api_keys[server]}`;
@@ -664,14 +833,16 @@ async function handleMCP(req, res) {
 
   await forward({
     req, res, targetUrl: target, method: req.method, headers,
-    body: body.length ? body : null, profile: p,
+    body: body.length ? body : null, profile: p, upstreamBase: String(base),
     onResp: rec ? collectResp : undefined,
   });
   if (!rec) return;
   rec.ts_end = new Date().toISOString();
   rec.duration_ms = Date.now() - t0;
   const rules = maskRulesFor(p);
-  try { recordInteraction(ns, `mcp`, maskValue(JSON.parse(JSON.stringify(rec)), rules)); } catch (e) {
+  const { masked, mask_skipped } = maskWithFlag(JSON.parse(JSON.stringify(rec)), rules);
+  if (mask_skipped) masked.mask_skipped = true; // 超长值跳过脱敏时打标
+  try { recordInteraction(ns, `mcp`, masked); } catch (e) {
     console.error(`[record][ERROR] ${ns}/mcp 写入失败: ${e.message}`);
   }
 }
@@ -695,13 +866,17 @@ async function handleAgent(req, res) {
   const m = req.url.match(/^\/([a-z0-9][a-z0-9-]{1,62})(\/.*)$/);
   if (!m) return sendJson(res, 404, { error: '路径须为 /{ns}/...' });
   const [, ns, rest] = m;
+  // 防穿越（issue #97 问题7）：new URL 归一化会吃掉 %2e%2e/../
+  if (hasPathTraversal(rest)) return sendJson(res, 400, { error: '路径含穿越段（.. 或 %2e），拒绝转发' });
   const r = resolveProfile(ns);
   if (r.error) return sendJson(res, r.error, { error: r.msg });
   const p = r.profile;
   if (!p.upstream.agent) return sendJson(res, 404, { error: `档案 ${ns} 未配置业务服务上游（upstream.agent）` });
 
   const maxBody = (p.record?.body_max_bytes) || GLOBAL.defaults.body_max_bytes;
-  const { body, truncated: reqTrunc } = await readBody(req, maxBody);
+  const { body, truncated: reqTrunc, tooLarge } = await readBody(req, maxBody);
+  // 超硬上限：直接 413 拒绝且不转发（转发体始终是完整体，见 readBody 注释）
+  if (tooLarge) return sendJson(res, 413, { error: `请求体超过硬上限 ${BODY_HARD_LIMIT} 字节，拒绝转发` });
   const base = String(p.upstream.agent).replace(/\/$/, '');
   const target = base + rest;
 
@@ -714,7 +889,9 @@ async function handleAgent(req, res) {
     session, ts_start: new Date().toISOString(),
     method: req.method, path: rest,
     request: reqObj ?? body.toString('utf-8').slice(0, maxBody),
-    request_truncated: reqTrunc, status: null, duration_ms: null, truncated: false,
+    // chunks 与 handleLLM 对齐：SSE 响应时 attachSSECollector 向 rec.chunks 收集 data 载荷，
+    // 缺字段会对 undefined.push 抛 TypeError 致整进程崩溃（issue #97 问题4）
+    request_truncated: reqTrunc, chunks: [], status: null, duration_ms: null, truncated: false,
   } : null;
 
   const t0 = Date.now();
@@ -727,7 +904,9 @@ async function handleAgent(req, res) {
     rec.duration_ms = Date.now() - t0;
     if (sink?.truncated) rec.truncated = true;
     const rules = maskRulesFor(p);
-    try { recordInteraction(ns, 'http', maskValue(JSON.parse(JSON.stringify(rec)), rules)); } catch (e) {
+    const { masked, mask_skipped } = maskWithFlag(JSON.parse(JSON.stringify(rec)), rules);
+    if (mask_skipped) masked.mask_skipped = true; // 超长值跳过脱敏时打标
+    try { recordInteraction(ns, 'http', masked); } catch (e) {
       console.error(`[record][ERROR] ${ns}/http 写入失败: ${e.message}`);
     }
   };
@@ -738,7 +917,7 @@ async function handleAgent(req, res) {
   if (p.upstream.agent_api_key) headers.authorization = `Bearer ${p.upstream.agent_api_key}`;
   await forward({
     req, res, targetUrl: target, method: req.method, headers,
-    body: body.length ? body : null, profile: p,
+    body: body.length ? body : null, profile: p, upstreamBase: base,
     onResp: (ur) => {
       rec && (rec.status = ur.statusCode);
       const ct = String(ur.headers['content-type'] || '');
@@ -785,6 +964,21 @@ function adminAuth(req, res) {
   return false;
 }
 
+/** 从 Host 头派生片段里的对外主机名（剥端口）：IPv6 字面量形如 [::1]:18300，须按 ']' 边界剥
+ *  （replace(/:.*$/, '') 会截出 "["，issue #97）；容器/反代场景 Host 头不可信时，
+ *  EVAL_COLLECTOR_PUBLIC_HOST 显式覆盖（见 PUBLIC_HOST）。 */
+function collectorHostFrom(hostHeader) {
+  if (PUBLIC_HOST) return PUBLIC_HOST;
+  const s = String(hostHeader || '').trim();
+  if (!s) return '127.0.0.1';
+  if (s.startsWith('[')) {
+    const end = s.indexOf(']');
+    return end > 0 ? s.slice(0, end + 1) : s; // 保留 [::1] 整体形态
+  }
+  const idx = s.lastIndexOf(':');
+  return idx > 0 ? s.slice(0, idx) : s;
+}
+
 async function handleAdmin(req, res) {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
@@ -795,13 +989,13 @@ async function handleAdmin(req, res) {
   if (!adminAuth(req, res)) return;
 
   const host = req.headers.host || '127.0.0.1:18300';
-  const collectorHost = host.replace(/:.*$/, '') || '127.0.0.1';
+  const collectorHost = collectorHostFrom(host);
 
   // ---- 状态 ----
   if (p === '/api/status' && req.method === 'GET') {
     const profiles = Object.values(PROFILES).map((pf) => ({
       ns: pf.ns, display: pf.display, state: pf.state,
-      upstream: { llm: !!pf.upstream?.llm, sandbox: !!pf.upstream?.sandbox, mcp: Object.keys(pf.upstream?.mcp || {}) },
+      upstream: { llm: !!pf.upstream?.llm, sandbox: !!pf.upstream?.sandbox, agent: !!pf.upstream?.agent, mcp: Object.keys(pf.upstream?.mcp || {}) },
       counts: {
         llm: counters.get(`${pf.ns}|llm`) || { today: 0, total: 0 },
         sandbox: counters.get(`${pf.ns}|sandbox`) || { today: 0, total: 0 },
@@ -907,8 +1101,8 @@ async function handleAdmin(req, res) {
     try { b = JSON.parse(body.toString('utf-8')); } catch { return sendJson(res, 400, { error: 'JSON 非法' }); }
     const pf = b.ns ? PROFILES[b.ns] : null;
     const rules = maskRulesFor(pf);
-    const masked = maskValue(b.text ?? '', rules);
-    return sendJson(res, 200, { masked, rule_count: rules.length });
+    const { masked, mask_skipped } = maskWithFlag(b.text ?? '', rules);
+    return sendJson(res, 200, { masked, rule_count: rules.length, mask_skipped });
   }
 
   // ---- 打包（转调 packager sidecar，或返回等价 CLI） ----
@@ -920,9 +1114,12 @@ async function handleAdmin(req, res) {
     if (!ns) return sendJson(res, 400, { error: '无接入档案' });
     if (PACKAGER_URL) {
       try {
-        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）
+        // EVAL_PACKAGER_URL 为完整打包端点（如 http://studio:18400/api/packs/from-collector）；
+        // EVAL_PACKAGER_TOKEN 非空时带 Bearer 头（与 studio 的 STUDIO_TOKEN 同值，compose 已同值注入）
         const resp = await fetch(PACKAGER_URL, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
+          method: 'POST',
+          headers: { 'content-type': 'application/json',
+                     ...(PACKAGER_TOKEN ? { authorization: `Bearer ${PACKAGER_TOKEN}` } : {}) },
           body: JSON.stringify({ ...b, ns, collector_data: DATA_DIR }),
         });
         const text = await resp.text();
@@ -951,23 +1148,27 @@ function buildSwitchSnippet(pf, collectorHost, isSwitch) {
     mcpAddrs[name] = `http://${collectorHost}:${PORT_MCP}/mcp/${pf.ns}/${name}`;
   }
   if (isSwitch) {
+    const agentAddr = pf.upstream.agent ? `http://${collectorHost}:${PORT_AGENT}/${pf.ns}` : null;
+    const envJson = { LLM_BASE_URL: addr.llm, OPENSANDBOX_SERVER_URL: addr.sandbox, ...(agentAddr ? { AGENT_INTERNAL_URL: agentAddr } : {}) };
     return {
       direction: 'switch',
       env_keys: {
         LLM_BASE_URL: addr.llm,
         OPENSANDBOX_SERVER_URL: addr.sandbox,
-        ...(pf.upstream.agent ? { AGENT_INTERNAL_URL: `http://${collectorHost}:${PORT_AGENT}/${pf.ns}` } : {}),
+        ...(agentAddr ? { AGENT_INTERNAL_URL: agentAddr } : {}),
       },
-      env_patch_curl: `curl -X PATCH "http://${collectorHost}:30880/api/v1/services/{SERVICE_ID}/env" \\\n  -H "Content-Type: application/json" \\\n  -d '{"env_json": {"LLM_BASE_URL": "${addr.llm}", "OPENSANDBOX_SERVER_URL": "${addr.sandbox}"}}'`,
+      env_patch_curl: `curl -X PATCH "http://${collectorHost}:30880/api/v1/services/{SERVICE_ID}/env" \\\n  -H "Content-Type: application/json" \\\n  -d '{"env_json": ${JSON.stringify(envJson)}}'`,
       mcp_config_diff: Object.entries(mcpAddrs).map(([name, url]) =>
         `# mcp-configs/${name}/config.yaml\n  connection:\n    url: ${url}   # 原值: ${pf.upstream.mcp[name]}`),
       note: '敏感键（LLM_API_KEY 等）保持原值；mcp url 改写须 republish 或在线编辑 OAF 包后生效',
     };
   }
+  const restoreEnv = { LLM_BASE_URL: pf.upstream.llm || '(未配置)', OPENSANDBOX_SERVER_URL: pf.upstream.sandbox || '(未配置)', ...(pf.upstream.agent ? { AGENT_INTERNAL_URL: pf.upstream.agent } : {}) };
+  const restoreCurlEnv = { LLM_BASE_URL: pf.upstream.llm || '', OPENSANDBOX_SERVER_URL: pf.upstream.sandbox || '', ...(pf.upstream.agent ? { AGENT_INTERNAL_URL: pf.upstream.agent } : {}) };
   return {
     direction: 'restore',
-    env_keys: { LLM_BASE_URL: pf.upstream.llm || '(未配置)', OPENSANDBOX_SERVER_URL: pf.upstream.sandbox || '(未配置)' },
-    env_patch_curl: `curl -X PATCH "http://${collectorHost}:30880/api/v1/services/{SERVICE_ID}/env" \\\n  -H "Content-Type: application/json" \\\n  -d '{"env_json": {"LLM_BASE_URL": "${pf.upstream.llm || ''}", "OPENSANDBOX_SERVER_URL": "${pf.upstream.sandbox || ''}"}}'`,
+    env_keys: restoreEnv,
+    env_patch_curl: `curl -X PATCH "http://${collectorHost}:30880/api/v1/services/{SERVICE_ID}/env" \\\n  -H "Content-Type: application/json" \\\n  -d '{"env_json": ${JSON.stringify(restoreCurlEnv)}}'`,
     mcp_config_diff: Object.entries(pf.upstream?.mcp || {}).map(([name, url]) =>
       `# mcp-configs/${name}/config.yaml\n  connection:\n    url: ${url}   # 还原真实上游`),
     note: '还原后建议停止 collector 或将档案置为 passthrough',
@@ -1047,10 +1248,33 @@ rebuildCounters();
 retentionSweep();
 setInterval(retentionSweep, 3600_000).unref();
 
-http.createServer(handleLLM).listen(PORT_LLM, () => console.log(`[llm]      :${PORT_LLM}  /{ns}/v1/...`));
-http.createServer(handleSandbox).listen(PORT_SANDBOX, () => console.log(`[sandbox]  :${PORT_SANDBOX}  /{ns}/...`));
-http.createServer(handleMCP).listen(PORT_MCP, () => console.log(`[mcp]      :${PORT_MCP}  /mcp/{ns}/{server}/...`));
-http.createServer(handleAgent).listen(PORT_AGENT, () => console.log(`[agent]    :${PORT_AGENT}  /{ns}/...  （业务服务反代，kind=http 录制）`));
+// 进程级异常兜底（仅运行期）：采集代理是旁路组件，可用性优先——五个端口共享同一进程，
+// 任一未捕获异常的默认行为是整进程退出（一崩全崩），这里只记结构化错误日志、不退出。
+// 代价（Node 语义）：异常发生后当前这条请求的响应可能永不完成，由客户端自身超时收场。
+// 注册时机在启动同步逻辑（数据目录构建等）之后：启动期不可恢复错误（如 DATA_DIR 创建失败）
+// 仍走 Node 默认快速崩溃，不被兜底吞成"半初始化但进程存活"的僵尸态。
+process.on('uncaughtException', (e) => {
+  console.error(`[process][ERROR] ${new Date().toISOString()} uncaughtException: ${e.message}\n${e.stack || ''}`);
+});
+process.on('unhandledRejection', (reason) => {
+  const detail = reason instanceof Error ? `${reason.message}\n${reason.stack || ''}` : String(reason);
+  console.error(`[process][ERROR] ${new Date().toISOString()} unhandledRejection: ${detail}`);
+});
+
+/** 端口绑定失败属启动期不可恢复错误（如 EADDRINUSE）：server 'error' 若无监听会抛进
+ *  上面的进程兜底被吞掉（healthz 假活，e2e 编排器靠"启动即死"判定端口冲突会失灵），
+ *  这里显式监听并快速失败退出；运行期异常仍按上方兜底只记日志不退出。 */
+function onListenError(port) {
+  return (e) => {
+    console.error(`[collector][ERROR] ${new Date().toISOString()} 端口 ${port} 监听失败: ${e.message}`);
+    process.exit(1);
+  };
+}
+
+http.createServer(handleLLM).listen(PORT_LLM, () => console.log(`[llm]      :${PORT_LLM}  /{ns}/v1/...`)).on('error', onListenError(PORT_LLM));
+http.createServer(handleSandbox).listen(PORT_SANDBOX, () => console.log(`[sandbox]  :${PORT_SANDBOX}  /{ns}/...`)).on('error', onListenError(PORT_SANDBOX));
+http.createServer(handleMCP).listen(PORT_MCP, () => console.log(`[mcp]      :${PORT_MCP}  /mcp/{ns}/{server}/...`)).on('error', onListenError(PORT_MCP));
+http.createServer(handleAgent).listen(PORT_AGENT, () => console.log(`[agent]    :${PORT_AGENT}  /{ns}/...  （业务服务反代，kind=http 录制）`)).on('error', onListenError(PORT_AGENT));
 
 const adminHost = ADMIN_TOKEN ? '0.0.0.0' : '127.0.0.1';
 http.createServer((req, res) => {
@@ -1065,5 +1289,5 @@ http.createServer((req, res) => {
   });
 }).listen(PORT_ADMIN, adminHost, () => {
   console.log(`[admin]    http://${adminHost}:${PORT_ADMIN}  （${ADMIN_TOKEN ? 'token 已启用' : '未设 EVAL_COLLECTOR_ADMIN_TOKEN，仅本机可访问'}）`);
-});
+}).on('error', onListenError(PORT_ADMIN));
 console.log(`[collector] v${VERSION} data=${DATA_DIR} conf=${CONF_DIR}`);

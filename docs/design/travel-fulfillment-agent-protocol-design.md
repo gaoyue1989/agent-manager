@@ -486,11 +486,13 @@ CREATE TABLE remote_task_registry (
 
 | 实例 | 端口 | 说明 |
 |---|---|---|
-| member LB | :8100 | nginx upstream → member×2 |
+| lead LB | :8100 | nginx upstream → lead×2（`E2E_PROTO_LEADER_BASE`） |
+| member LB | :8101 | nginx upstream → member×2（`E2E_PROTO_MEMBER_BASE`） |
+| 存量实例 | :8102 | 协议关，P6 零影响口径 |
 | member×2 | :8103/:8104 | 协议 fixture 包，`AGENT_PROTOCOL_ENABLED=true` + token；**随 Issue #69 加 `AGENT_A2A_JOB_ENABLED=true` + `AGENT_A2A_JOB_TOKEN`**，共享 DB/Redis |
-| lead LB | :8102 | nginx upstream → lead×2 |
 | lead×2 | :8105/:8106 | lead fixture 包（`subAgents[].endpoint` → member LB），共享 DB/Redis |
-| 存量实例 | :8101 | 协议关，P6 零影响口径 |
+
+> 端口分配以 `e2e/scripts/env-up.sh:185-200`（`E2E_BASE_PORT=8100`）为准，与 §18.10 实施记录一致。
 
 寻址经 `lib/env.ts` 扩展（`E2E_PROTO_MEMBER_BASE/A/B`、`E2E_PROTO_LEADER_BASE/A/B`，回落 `.runtime/env.json`，复用 REPLICA_A/B 既有模式）；kill/重启手段复用 `api-multi-kill` 先例。
 
@@ -516,7 +518,7 @@ CREATE TABLE remote_task_registry (
   ```bash
   gh api -X PATCH repos/gaoyue1989/agent-manager/branches/master/protection/required_status_checks \
     --input - <<< "$(gh api repos/gaoyue1989/agent-manager/branches/master/protection/required_status_checks \
-    | jq '.contexts + ["E2E 协议多副本"] | {strict: true, contexts: .}')"
+    | jq '.contexts + ["E2E 协议多副本（P 组）"] | {strict: true, contexts: .}')"
   ```
 
   实施时先 `gh api .../protection/required_status_checks` 读当前六项，追加为七项再写回；required_status_checks 不支持增量 PATCH，须整体覆盖（先读后写，勿凭记忆拼 contexts）。

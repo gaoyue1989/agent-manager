@@ -1,0 +1,54 @@
+{{- if eq .Values.routing.mode "router" }}
+{{- $ns := include "oaf.namespace" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "oaf.fullname" . }}-router-conf
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+data:
+  # 平台约定（与 backend 常量同源的不变量，改动须两侧同步）：oaf- 前缀 / -svc 后缀 /
+  # 业务端口 8100 / namespace {{ $ns }}。设计见 docs/design/subpath-routing-design.md §4.2。
+  nginx.conf: |
+    worker_processes auto;
+    events { worker_connections 10240; }
+    http {
+      access_log /dev/stdout;
+      # 变量 proxy_pass 逐请求解析必须显式指定 resolver；10s 缓存意味着服务删除后
+      # 至多 10s 内残留转发（502）
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
+
+      # 外层 controller 已声明 X-Forwarded-* 时透传，否则按本跳观察值兜底
+      #（$http_host 含端口，保住 NodePort 入口形态的 agent-card url 可达）
+      map $http_x_forwarded_proto $fwd_proto { default $http_x_forwarded_proto; "" $scheme; }
+      map $http_x_forwarded_host  $fwd_host  { default $http_x_forwarded_host;  ""  $http_host; }
+
+      server {
+        listen 8080;
+        client_max_body_size {{ .Values.router.nginx.clientMaxBodySize }};
+
+        # [a-z0-9-] 限定字符集：$short 只出现在域名 label 位置，杜绝路径注入 upstream；
+        # nginx 在 location 匹配前已做 URI 归一化（合并斜杠、消解 ../）
+        location ~ ^/agent/(?<short>[a-z0-9-]+) {
+          rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀：nginx 原生能力
+          proxy_pass http://oaf-$short-svc.{{ $ns }}.svc.cluster.local:8100;
+          proxy_set_header Host              $host;
+          proxy_set_header X-Forwarded-Proto $fwd_proto;
+          proxy_set_header X-Forwarded-Host  $fwd_host;
+          proxy_set_header X-Forwarded-Prefix /agent/$short;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_buffering off;
+          proxy_request_buffering off;
+          proxy_read_timeout {{ .Values.router.nginx.readTimeout }};
+          proxy_send_timeout {{ .Values.router.nginx.sendTimeout }};
+        }
+
+        location = /healthz { access_log off; return 200 "ok"; }
+        location / { return 404; }
+      }
+    }
+{{- end }}

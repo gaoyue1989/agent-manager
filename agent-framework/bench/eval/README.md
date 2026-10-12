@@ -19,7 +19,8 @@
 | ⑥ 修改代码后重新评测 | `verify`（重跑上一轮失败用例 + core 集，输出转绿对比） | ✅ 已验证 |
 
 语义打分（`--judge`，`graders/correctness.py`）：OpenAI 兼容 judge，Phase 2 换装 OpenJudge
-`CorrectnessGrader`（接口不变）。judge 分数只进报告，**永不阻断**。
+`CorrectnessGrader`（接口不变）。judge 分数只进报告，**永不阻断**——judge 输出畸形 JSON /
+score 不可解析时按用例降级为 `n/a`（issue #117），报告「语义打分」表内同列呈现，趋势均值只计有分项。
 
 ## 快速开始
 

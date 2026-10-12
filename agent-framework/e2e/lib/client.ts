@@ -10,13 +10,15 @@ export interface ChatOpts {
   model?: string;
   timeoutMs?: number;
   base?: string;
+  /** 附加请求头（X 组前缀感知用例：注入 X-Forwarded-* 直证服务端自感知契约） */
+  headers?: Record<string, string>;
 }
 
 export function chat(opts: ChatOpts): Collected {
   const base = opts.base ?? BASE;
   const p = fetch(`${base}/threads/chat`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...(opts.headers ?? {}) },
     signal: AbortSignal.timeout(opts.timeoutMs ?? 45_000),
     body: JSON.stringify({
       message: opts.message,

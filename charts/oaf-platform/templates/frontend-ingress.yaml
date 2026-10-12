@@ -1,0 +1,49 @@
+{{- $ns := include "oaf.namespace" . -}}
+{{- $split := eq (include "oaf.splitDomain" .) "true" -}}
+{{- $host := .Values.ingress.host -}}
+{{- if $split -}}{{- $host = .Values.ingress.frontend.host -}}{{- end -}}
+{{- $tls := and .Values.ingress.tls.enabled .Values.ingress.tls.secretName -}}
+# frontend 对外 Ingress：形态 A 挂 /（统一域名）；形态 B 另追加 /agent → platform-router
+# （assistant 页 agent 调用为硬编码相对路径 /agent/release-agent，前端域必须能路由它）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "oaf.fullname" . }}-frontend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if $tls }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+{{- if $host }}
+    - host: {{ $host | quote }}
+      http:
+{{- else }}
+    - http:
+{{- end }}
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "oaf.fullname" . }}-frontend
+                port: { number: 3000 }
+          {{- if and $split (eq .Values.routing.mode "router") }}
+          # 形态 B：前端域的 /agent 交给 router（业务访问不受分域影响）
+          - path: /agent
+            pathType: Prefix
+            backend:
+              service:
+                name: platform-router-svc   # 后端常量 k8s.RouterServiceName（不可改名）
+                port: { number: 80 }
+          {{- end }}

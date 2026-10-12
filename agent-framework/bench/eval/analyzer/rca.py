@@ -137,8 +137,11 @@ def build_report(task_id: str, meta: dict[str, Any], traces: list[dict[str, Any]
     if judge_results:
         lines += ["", "## 语义打分（judge，advisory 不阻断）", "",
                   "| 用例 | 得分 | 理由 |", "|---|---|---|"]
-        lines += [f"| {cid} | {r['score']:.2f} | {r['reason']} |"
-                  for cid, r in sorted(judge_results.items())]
+        # score=None = judge 不可用降级（issue #117），与有分条目同表呈现便于区分
+        for cid, r in sorted(judge_results.items()):
+            score = r.get("score")
+            cell = "n/a" if score is None else f"{score:.2f}"
+            lines.append(f"| {cid} | {cell} | {r['reason']} |")
 
     if failed_cases and analyses is not None:
         lines += ["", "## 问题清单（按规则初筛分类）", ""]

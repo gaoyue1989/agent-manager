@@ -4,6 +4,7 @@
 
 let ctx = null;
 let models = [];
+let fallbackId = '';
 
 export default {
   mount(container, c) {
@@ -18,6 +19,7 @@ export default {
       <div class="empty" style="text-align:left;padding:0 0 10px">
         会话可切换模型：系统模型来自 LLM_* 环境变量（只读，未显式选择的会话走它）；
         托管模型存 model_config 表，保存即生效。删除被会话引用的模型后，该会话自动回落默认模型。
+        备用模型由 LLM_FALLBACK_MODEL_ID 指定（下方标注 fallback），主模型重试耗尽（429/5xx/超时/网络）后自动切换。
       </div>
       <div class="module-scroll" id="modelsBody"><div class="empty">Loading...</div></div>
     </div>`;
@@ -28,14 +30,19 @@ export default {
   unmount() {
     ctx = null;
     models = [];
+    fallbackId = '';
   }
 };
 
 async function loadModels() {
   const body = document.getElementById('modelsBody');
   try {
-    const data = await ctx.api.getModels(true);
+    const [data, env] = await Promise.all([
+      ctx.api.getModels(true),
+      ctx.api.getEnvConfig().catch(() => null) // 备用配置读取失败不阻断模型列表
+    ]);
     models = (data && data.models) || [];
+    fallbackId = (env && env.llm && env.llm.fallback_model_id) || '';
   } catch (e) {
     if (!ctx) return; // 已切走：丢弃过期渲染
     body.innerHTML = '<div class="empty error-text">Failed to load models: ' + ctx.utils.esc(e.message) + '</div>';
@@ -50,15 +57,25 @@ function renderTable(body) {
     body.innerHTML = '<div class="empty">No models.</div>';
     return;
   }
-  let html = '<table class="data-table"><thead><tr>'
+  let html = '';
+  // 备用模型提示（LLM_FALLBACK_MODEL_ID）：命中列表则标注「fallback」，未命中说明配置无效
+  if (fallbackId) {
+    const matched = models.some((m) => m.id === fallbackId);
+    html += '<div class="empty" style="text-align:left;padding:0 0 8px">备用模型：'
+      + '<span class="mono">' + ctx.utils.esc(fallbackId) + '</span>'
+      + (matched ? '' : '（不在列表中：可能已删除/禁用，备用不生效）') + '</div>';
+  }
+  html += '<table class="data-table"><thead><tr>'
     + '<th>Name</th><th>Model ID</th><th>Base URL</th><th>API Key</th>'
     + '<th>Sampling</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
   for (const m of models) {
     const isSystem = m.source === 'system';
+    const isFallback = !!fallbackId && m.id === fallbackId;
     html += '<tr>'
       + '<td>' + ctx.utils.esc(m.name)
         + (isSystem ? ' <span class="badge dim">system</span>' : '')
-        + (m.is_default ? ' <span class="badge green">default</span>' : '') + '</td>'
+        + (m.is_default ? ' <span class="badge green">default</span>' : '')
+        + (isFallback ? ' <span class="badge yellow">fallback</span>' : '') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.model_id) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.base_url || '—') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.api_key_masked || (isSystem ? '（env）' : '（系统密钥）')) + '</td>'

@@ -12,7 +12,7 @@
 沙箱集成已落地（`SANDBOX_ENABLED=true`，OpenSandbox，USER 级复用 + 每请求记忆回写，详见 [opensandbox-integration-plan.md](opensandbox-integration-plan.md)），但**沙箱模式下的并发承载能力从未量化**。沙箱链路在每个 turn 中新增了多段开销与串行化点：
 
 ```
-POST /threads/{sid}/chat
+POST /threads/chat（sessionId 在请求体）
   ├─ Turn 租约（MySQL turn_lease，同 session 串行）
   ├─ ChatUiChannel → HarnessAgent.streamEvents
   │   ├─ SandboxLifecycleMiddleware.acquire（同 userId GET_LOCK 串行；首次 create、后续 resume）
@@ -34,7 +34,7 @@ POST /threads/{sid}/chat
 ### 1.3 非目标
 
 - 不评估真实 LLM 回复质量（LLM 用 mock，确定性脚本化响应）
-- 不覆盖 A2A 协议全量方法与前端 UI 链路（主对话入口 `POST /threads/{sid}/chat` 单口径）
+- 不覆盖 A2A 协议全量方法与前端 UI 链路（主对话入口 `POST /threads/chat` 单口径，sessionId 在请求体）
 - 不做长时间稳定性/内存泄漏 soak 测试（每档 3 分钟、每场景 ≤ 25 分钟，可后续加档）
 
 ---
@@ -43,7 +43,7 @@ POST /threads/{sid}/chat
 
 | 术语 | 定义 |
 |------|------|
-| **1 个请求** | 一次完整对话 turn：`POST /threads/{sessionId}/chat` 发出 → SSE 收到 `done` 帧 |
+| **1 个请求** | 一次完整对话 turn：`POST /threads/chat` 发出 → SSE 收到 `done` 帧 |
 | **成功请求** | 收到 `done` 帧，且全程无 `error` 帧、HTTP 非 5xx |
 | **失败请求** | error 帧 / 连接超时（默认 120s）/ 断连 / 5xx |
 | **并发 C** | 闭环模型的 inflight 请求数（同时未完成的最大请求数） |
@@ -60,7 +60,7 @@ POST /threads/{sid}/chat
 ```
 ┌─────────────────────── 宿主机（8C/8G，单机压测）───────────────────────────────┐
 │                                                                            │
-│  ┌──────────────┐  POST /threads/{sid}/chat (SSE)  ┌────────────────────┐  │
+│  ┌──────────────┐  POST /threads/chat (SSE)  ┌────────────────────┐  │
 │  │ load runner  │ ───────────────────────────────▶ │ bench-agent-fw 容器│  │
 │  │ (Node.js)    │ ◀──────────── SSE 帧流 ───────── │  ★ 1C / 1G 硬限 ★  │  │
 │  └──────┬───────┘                                  │ agent-framework    │  │
@@ -117,8 +117,9 @@ POST /threads/{sid}/chat
 解析请求最后一条消息：
   role == "tool"  → 进入收尾轮：返回固定文本
                     "BENCH-OK <echo of tool marker>"（含 usage 固定 token 数）
-  role == "user"  → 首轮：解析消息内嵌场景标记 [BENCH:plain|file|shell|mcp]
+  role == "user"  → 首轮：解析消息内嵌场景标记 [BENCH:plain|file|shell|mcp|slow]
                     ├─ plain → 直接返回固定文本（1 次 LLM 调用结束）
+                    ├─ slow  → 延迟响应（C 档启动延迟档用，30s/turn）
                     └─ file/shell/mcp → 返回 tool_calls（1 个工具调用）：
                          file → write_file("/workspace/bench/<sid>.txt", 固定内容)
                          shell→ execute("python3 -c \"print('BENCH-SHELL-OK')\"")
@@ -223,8 +224,13 @@ docker run -d --name bench-agent-fw \
 | **B3** 沙箱 + Shell | ✓ | 2 | + execute（python3 print）经 execd | 最重路径：进程拉起 + 命令执行 |
 | **B4** 沙箱 + MCP 工具 | ✓ | 2 | 同 B1 + mock MCP 调用 | MCP 注册/调用链路叠加开销 |
 | **B5** 同用户并发 | ✓ | 1（B1 同款） | 同 userId × 多 session 并发 | 验证 `JdbcSandboxExecutionGuard` 串行化上界：吞吐 ≈ 1/单请求时延，**预期不随 C 增长**（U=1） |
+| **C** 并发启动延迟 | ✗ | 1（slow，延迟响应） | 无 | **issue #87 回归防线**：跨会话排队签名门禁（详见 §13.6） |
 
 > 每场景独立跑完整阶梯。B1 与 B0 的吞吐差 = 沙箱固定开销；B3 vs B1 = 工具执行开销。
+> C 档为 2026-10-01 新增（turn-gate 并发修复配套）：ramp=0 一波齐发、每 worker 独占会话、
+> 档位固定 2/4/8（`C_STAGES`），门禁断言 `agentStartMs - ttftMs`（排队签名）超
+> `ASSERT_START_DELAY_MS`（默认 10s）即该档 FAIL（exit 3）。设计与集群回归证据见
+> `docs/design/turn-gate-concurrency-and-hitl-eval-contract-design.md` §4.2/§10。
 
 ---
 
@@ -286,7 +292,7 @@ agent-framework/bench/
 └── results/                 # 运行产物（gitignore）
 ```
 
-`run-bench.sh` 参数：`SCENARIOS=B0,B1,B3,B5`（默认核心子集，可改 `B0,B1,B2,B3,B4,B5` 全矩阵）、`STAGES=1,2,4,8,10,16,32`、`USER_POOL=10`、`STAGE_SECONDS=180`、`P95_SLO_MS=10000`。
+`run-bench.sh` 参数（以脚本头部注释为准，2026-10 实跑后已扩）：`SCENARIOS=B0,B1,B3,B5`（默认核心子集，可改 `B0,B1,B2,B3,B4,B5` 全矩阵，含 C 档）、`STAGES=1,2,4,8,10,16,32`、`C_STAGES=2,4,8`（C 档并发阶梯）、`SESSION_POOL=10`、`STAGE_SECONDS=180`、`RAMP_SECONDS=15`（C 档恒 0）、`ASSERT_START_DELAY_MS=10000`（C 档排队签名门禁）、`P95_SLO_MS=10000`；MySQL 独立容器 `MYSQL_PORT=3308`（§13.4 修正）。
 
 ---
 
@@ -386,3 +392,16 @@ agent-framework/bench/
 - B0 曲线（C=1→4 线性 267→637 req/min、P95<1.3s、0 错误）在默认 Hikari 池（10）+ 1C 下成立；C=8 死锁为 harness 缺陷而非资源瓶颈（CPU 峰值 77% 未饱和），修复①后 C≥8 档需重测。
 - 沙箱模式并发结论（上限=1）受缺陷②支配，修复后曲线形状预期改变，需复测；单会话 24~29 req/min 的稳态读数（0 错误）在 500ms 会话间隔约束下有效。
 - 压测期间发现并临时处置的宿主问题：磁盘满（186G→清出 56G）曾导致 MySQL 提交冻结假象，已在最终轮排除（磁盘余量全程 >30G）。
+
+### 13.6 C 档回归门禁（2026-10-01 新增，issue #87）
+
+本篇 §13 的结论（沙箱并发上限=1 等）基于 MAIN 形态共享会话闸门的历史缺陷；2026-10-01
+`ChatUiChannel` 切 `ChatUiChannel.perPeer()`（每会话独立闸门，Flyway V9 存量重键）后，
+`runner.js` 新增 **C 档**作为跨会话排队回归防线（§6.2 场景矩阵已补）：
+
+- 判定「排队签名」= `agentStartMs - ttftMs`（首帧快而 AGENT_START 晚即排队；只看 agentStart
+  绝对值会把 1C 容器首帧/CPU 饱和误判为排队回归），任一路超 `ASSERT_START_DELAY_MS` 该档 FAIL。
+- 终版数据（1C 容器，`[BENCH:slow]` 30s/turn）：C=2/4/8 排队签名 p100 = **0ms**
+  （#87 基线 17~169s），门禁 0 触发。
+- 全量证据与实施记录见
+  `docs/design/turn-gate-concurrency-and-hitl-eval-contract-design.md` §10（集群回归）。

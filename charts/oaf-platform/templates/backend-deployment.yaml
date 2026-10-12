@@ -1,0 +1,180 @@
+{{- $ns := include "oaf.namespace" . -}}
+{{- $sa := include "oaf.backendServiceAccountName" . -}}
+{{- $secretName := default (printf "%s-secrets" (include "oaf.fullname" .)) .Values.backend.existingSecret -}}
+{{- $imgs := list -}}
+{{- range .Values.images.business -}}
+{{- $imgs = append $imgs (printf "%s|%s" .image (default .image .label)) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oaf.fullname" . }}-backend
+  namespace: {{ $ns }}
+  labels:
+    {{- include "oaf.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "oaf.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "oaf.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+      {{- with .Values.backend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $sa }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backend
+          image: {{ include "oaf.image" .Values.images.backend }}
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.serverPort }}
+          env:
+            - name: SERVER_PORT
+              value: {{ .Values.backend.serverPort | quote }}
+            - name: NAMESPACE
+              value: {{ $ns | quote }}
+            - name: DATA_ROOT
+              value: {{ .Values.persistence.mountPath | quote }}
+            # 平台数据卷名可配（PR-B）：业务 Pod 与 backend 共用同一已有 PVC
+            - name: PLATFORM_PVC_NAME
+              value: {{ include "oaf.pvcName" . | quote }}
+            # DSN 含密码：经 Secret 注入，不落 Deployment 明文
+            - name: MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: mysql-dsn
+            - name: AVAILABLE_IMAGES
+              value: {{ join "," $imgs | quote }}
+            - name: DEFAULT_IMAGE
+              value: {{ include "oaf.defaultBusinessImage" . | quote }}
+            - name: INGRESS_CLASS
+              value: {{ .Values.routing.ingressClass | quote }}
+            - name: INGRESS_HOST
+              value: {{ .Values.routing.host | quote }}
+            - name: INGRESS_PORT
+              value: {{ .Values.routing.port | quote }}
+            {{- if eq .Values.routing.mode "host" }}
+            - name: INGRESS_HOST_SUFFIX
+              value: {{ .Values.routing.hostSuffix | quote }}
+            {{- end }}
+            - name: REGISTER_TIMEOUT_SEC
+              value: {{ .Values.backend.register.timeoutSeconds | quote }}
+            - name: REGISTER_RETRY
+              value: {{ .Values.backend.register.retry | quote }}
+            # 业务 Pod 资源四元组（发布期生效）
+            - name: RESOURCE_REQUESTS_CPU
+              value: {{ .Values.business.resources.requestsCpu | quote }}
+            - name: RESOURCE_REQUESTS_MEM
+              value: {{ .Values.business.resources.requestsMem | quote }}
+            - name: RESOURCE_LIMITS_CPU
+              value: {{ .Values.business.resources.limitsCpu | quote }}
+            - name: RESOURCE_LIMITS_MEM
+              value: {{ .Values.business.resources.limitsMem | quote }}
+            {{- if .Values.backend.packageDownloadBase }}
+            - name: PACKAGE_DOWNLOAD_BASE
+              value: {{ .Values.backend.packageDownloadBase | quote }}
+            {{- end }}
+            {{- if .Values.business.deploymentOverlay.enabled }}
+            - name: DEPLOYMENT_TEMPLATE
+              value: /etc/oaf/business-overlay/overlay.yaml
+            {{- end }}
+            {{- if and .Values.business.ingressOverlay.enabled (eq .Values.routing.mode "host") }}
+            - name: INGRESS_TEMPLATE
+              value: /etc/oaf/ingress-overlay/overlay.yaml
+            {{- end }}
+            - name: KUBECONFIG
+              value: /etc/oaf/kubeconfig/kubeconfig
+            {{- if .Values.backend.authToken }}
+            - name: AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: auth-token
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- if .Values.business.deploymentOverlay.enabled }}
+            - name: business-overlay
+              mountPath: /etc/oaf/business-overlay
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.business.ingressOverlay.enabled (eq .Values.routing.mode "host") }}
+            - name: ingress-overlay
+              mountPath: /etc/oaf/ingress-overlay
+              readOnly: true
+            {{- end }}
+            - name: kubeconfig
+              mountPath: /etc/oaf/kubeconfig
+              readOnly: true
+            {{- if eq .Values.backend.kubeconfig.mode "synthesized" }}
+            - name: kubeconfig-token
+              mountPath: /var/run/oaf-kubeconfig
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "oaf.pvcName" . }}
+        {{- if .Values.business.deploymentOverlay.enabled }}
+        - name: business-overlay
+          configMap:
+            name: {{ default (printf "%s-business-overlay" (include "oaf.fullname" .)) .Values.business.deploymentOverlay.existingConfigMap }}
+        {{- end }}
+        {{- if and .Values.business.ingressOverlay.enabled (eq .Values.routing.mode "host") }}
+        - name: ingress-overlay
+          configMap:
+            name: {{ default (printf "%s-ingress-overlay" (include "oaf.fullname" .)) .Values.business.ingressOverlay.existingConfigMap }}
+        {{- end }}
+        {{- if eq .Values.backend.kubeconfig.mode "synthesized" }}
+        - name: kubeconfig
+          secret:
+            secretName: {{ include "oaf.fullname" . }}-backend-kubeconfig
+        - name: kubeconfig-token
+          secret:
+            secretName: {{ include "oaf.fullname" . }}-backend-token
+        {{- else if .Values.backend.kubeconfig.existingSecret }}
+        - name: kubeconfig
+          secret:
+            secretName: {{ .Values.backend.kubeconfig.existingSecret }}
+        {{- else }}
+        - name: kubeconfig
+          secret:
+            secretName: {{ include "oaf.fullname" . }}-backend-kubeconfig
+        {{- end }}

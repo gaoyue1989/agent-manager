@@ -1,7 +1,7 @@
 # MySQL 文件系统实现方案
 
 >
-> **现状核对（2026-09-07）**：`MysqlDistributedStore`（含 `JdbcStore`）已为默认实现，**仅在 `SANDBOX_ENABLED=true` 时切到 `OpenSandboxFilesystemSpec`**。工作区文件路由（`MEMORY.md`/`memory/`/`skills/`/`subagents/`/`knowledge`/`sessions`/`tasks`）通过 `RemoteFilesystemSpec(IsolationScope.USER)` 自动分桶到 `agent_fs` 表。`agent_fs` 表结构见 [checkpoint-design.md](checkpoint-design.md)。
+> **现状核对（2026-09-07）**：`MysqlDistributedStore`（含 `JdbcStore`）已为默认实现，**沙箱启用时切到 `OpenSandboxFilesystemSpec`**（启用判定走 `SandboxRuntime` 三层优先级：`SANDBOX_ENABLED` env 显式 > OAF 包 `config.sandbox.enabled` > yml 默认，非仅 env 一处）。工作区文件路由（`MEMORY.md`/`memory/`/`skills/`/`subagents/`/`knowledge`/`sessions`/`tasks`）通过 `RemoteFilesystemSpec(IsolationScope.USER)` 自动分桶到 `agent_fs` 表。`agent_fs` 表结构见 [checkpoint-design.md](checkpoint-design.md)。
 
 ## 1. 现状分析
 
@@ -176,6 +176,11 @@ CREATE TABLE agent_state (
 ```
 
 #### 表 2: `agent_fs`（新增，JdbcStore 自动创建）
+
+> ⚠️ 下方是 2.0.0 时期的 DDL 草图。**实际表结构以 `db/migration/V1__baseline_e91d1f0.sql` 为准**
+> （SDK 自建 + Flyway 基线双写）：列为 `namespace_path` / `item_key` / `value_json` / `version` / `updated_at`，
+> 主键 `(namespace_path, item_key)`。`agent_state` 同理（2.0.3 起含 `version` 列、乐观锁 CAS），
+> 详见 [checkpoint-design.md](checkpoint-design.md) §5。
 
 ```sql
 CREATE TABLE agent_fs (
@@ -508,7 +513,7 @@ void testMemoryMdWrittenToMysql() {
     Thread.sleep(5000); // 等待异步 flush
 
     var rows = jdbcTemplate.queryForList(
-        "SELECT * FROM agent_fs WHERE path = 'MEMORY.md'");
+        "SELECT * FROM agent_fs WHERE item_key = 'MEMORY.md'");
     assertThat(rows).isNotEmpty();
 }
 ```
@@ -526,7 +531,7 @@ void testMemoryDirectoryAutoAppend() {
 
     var today = java.time.LocalDate.now().toString();
     var rows = jdbcTemplate.queryForList(
-        "SELECT * FROM agent_fs WHERE path = ?",
+        "SELECT * FROM agent_fs WHERE item_key = ?",
         "memory/" + today + ".md");
     assertThat(rows).isNotEmpty();
 }
@@ -548,14 +553,14 @@ void testMemoryIsolationByUserId() {
 
     // 验证 namespace 不同
     var aliceRows = jdbcTemplate.queryForList(
-        "SELECT namespace FROM agent_fs WHERE namespace LIKE '%alice%'");
+        "SELECT namespace_path FROM agent_fs WHERE namespace_path LIKE '%alice%'");
     var bobRows = jdbcTemplate.queryForList(
-        "SELECT namespace FROM agent_fs WHERE namespace LIKE '%bob%'");
+        "SELECT namespace_path FROM agent_fs WHERE namespace_path LIKE '%bob%'");
 
     assertThat(aliceRows).isNotEmpty();
     assertThat(bobRows).isNotEmpty();
-    assertThat(aliceRows.get(0).get("namespace"))
-        .isNotEqualTo(bobRows.get(0).get("namespace"));
+    assertThat(aliceRows.get(0).get("namespace_path"))
+        .isNotEqualTo(bobRows.get(0).get("namespace_path"));
 }
 ```
 
@@ -572,13 +577,13 @@ curl -s "https://api.longcat.chat/openai/v1/chat/completions" \
 
 ```sql
 -- 查看所有命名空间
-SELECT DISTINCT namespace FROM agent_fs;
+SELECT DISTINCT namespace_path FROM agent_fs;
 
 -- 查看用户 alice 的文件
-SELECT path, LENGTH(content) as size FROM agent_fs
-WHERE namespace LIKE '%alice%';
+SELECT item_key, LENGTH(value_json) as size FROM agent_fs
+WHERE namespace_path LIKE '%alice%';
 
 -- 查看 MEMORY.md 内容
-SELECT CONVERT(content USING utf8mb4) as content FROM agent_fs
-WHERE path = 'MEMORY.md' LIMIT 1;
+SELECT CONVERT(value_json USING utf8mb4) as content FROM agent_fs
+WHERE item_key = 'MEMORY.md' LIMIT 1;
 ```

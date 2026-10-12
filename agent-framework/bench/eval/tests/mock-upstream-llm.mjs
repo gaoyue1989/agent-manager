@@ -2,6 +2,10 @@
 /**
  * mock 上游 LLM（OpenAI 兼容子集）：collector 冒烟/e2e 的离线回退上游。
  * - POST /v1/chat/completions：stream=true 逐 chunk SSE；false 返回完整 body
+ * - POST /threads/chat：业务 SSE 真实形态（帧方言对齐 stub-agent.mjs，data: [DONE] 收尾），
+ *   供 collector agent 口（:18203）录制/透传用例覆盖 SSE 分支
+ * - POST /v1/echo：请求体回显（received_len/json_ok），供"超录制上限转发完整体/超硬上限 413
+ *   不转发"用例断言；命中计数经 GET /stats 的 echo_calls 查看
  * - 按末条 user 消息包含的关键词返回固定应答（echo:<文本> → 原样回显）
  * - GET /stats：调用计数；POST /reset 清零
  * 零依赖，Node >= 18。用法：node mock-upstream-llm.mjs [port]
@@ -10,6 +14,7 @@ import http from 'node:http';
 
 const PORT = parseInt(process.argv[2] || process.env.MOCK_UPSTREAM_PORT || '18900', 10);
 let calls = 0;
+let echoCalls = 0; // /v1/echo 命中计数（e2e 断言"413 不转发"用：超硬上限请求不得到达上游）
 
 function json(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json' });
@@ -17,34 +22,65 @@ function json(res, code, obj) {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/stats') return json(res, 200, { calls });
-  if (req.method === 'POST' && req.url === '/reset') { calls = 0; return json(res, 200, { ok: true }); }
-  if (req.method === 'GET' && req.url === '/v1/models') {
+  const p = req.url.split('?')[0]; // 精确匹配路由剥查询串（collector e2e 验证查询串原样透传）
+  if (req.method === 'GET' && p === '/stats') return json(res, 200, { calls, echo_calls: echoCalls });
+  if (req.method === 'POST' && p === '/reset') { calls = 0; echoCalls = 0; return json(res, 200, { ok: true }); }
+  if (req.method === 'GET' && p === '/v1/models') {
     return json(res, 200, { object: 'list', data: [{ id: 'mock-record-model', object: 'model' }] });
   }
   // 沙箱协议 mock（collector e2e 用）：创建沙箱返回固定 id
-  if (req.method === 'POST' && req.url === '/v1/sandboxes') {
+  if (req.method === 'POST' && p === '/v1/sandboxes') {
     return json(res, 200, { id: 'sbx-mock-001', status: 'running', endpoints: {} });
   }
-  // 业务服务反代目标（collector e2e 用）：/threads/* 与 /health
-  if (req.method === 'GET' && req.url === '/health') {
-    return json(res, 200, { ok: true });
-  }
-  if (req.url.startsWith('/threads/')) {
+  // 请求体回显（问题6 回归用）：上报收到的字节数与 JSON 可解析性，供断言"转发体完整"
+  if (req.method === 'POST' && req.url === '/v1/echo') {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
-      const sid = req.url.match(/^\/threads\/([^/]+)/)?.[1] || 'unknown';
-      if (req.method === 'POST' && req.url === '/threads/chat') {
+      echoCalls += 1;
+      const raw = Buffer.concat(chunks);
+      let jsonOk = true;
+      try { JSON.parse(raw.toString('utf-8')); } catch { jsonOk = false; }
+      return json(res, 200, { received_len: raw.length, json_ok: jsonOk });
+    });
+    return;
+  }
+  // 业务服务反代目标（collector e2e 用）：/threads/* 与 /health
+  if (req.method === 'GET' && p === '/health') {
+    return json(res, 200, { ok: true });
+  }
+  if (p.startsWith('/threads/')) {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const sid = p.match(/^\/threads\/([^/]+)/)?.[1] || 'unknown';
+      if (req.method === 'POST' && p === '/threads/chat') {
         let b = {}; try { b = JSON.parse(Buffer.concat(chunks).toString('utf-8')); } catch { /* 忽略 */ }
-        return json(res, 200, { sessionId: b.sessionId || sid, echoed: b.message ?? '', frames: ['session_created', 'AGENT_END'] });
+        // 业务 /threads/chat 真实形态是 SSE（Spring TEXT_EVENT_STREAM）——按 stub-agent.mjs
+        // 帧序吐事件流，data: [DONE] 收尾（collector attachSSECollector 以 [DONE] 为语义结束）
+        const sessionId = b.sessionId || sid;
+        const text = b.message ?? '';
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+        const sse = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        sse({ type: 'session_created', session_id: sessionId });
+        sse({ type: 'AGENT_START' });
+        sse({ type: 'MODEL_CALL_START' });
+        sse({ type: 'TEXT_BLOCK_START' });
+        for (const piece of (text.match(/.{1,6}/gs) || [])) {
+          sse({ type: 'TEXT_BLOCK_DELTA', delta: piece });
+        }
+        sse({ type: 'TEXT_BLOCK_END' });
+        sse({ type: 'MODEL_CALL_END', inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+        sse({ type: 'AGENT_END' });
+        res.write('data: [DONE]\n\n');
+        return res.end();
       }
       return json(res, 200, { sessionId: decodeURIComponent(sid), status: 'idle' });
     });
     return;
   }
   // MCP streamableHttp mock（collector e2e 用）：JSON-RPC 通用回声
-  if (req.url.startsWith('/mcp')) {
+  if (p.startsWith('/mcp')) {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -55,7 +91,7 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+  if (req.method === 'POST' && p === '/v1/chat/completions') {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {

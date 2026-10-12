@@ -4,7 +4,9 @@ version: "1.0.0"
 
 connection:
   type: streamableHttp
-  url: http://platform-backend.agent-platform.svc.cluster.local:8080/mcp
+  # 地址须与 chart 渲染的后端 Service 名一致（_helpers.tpl oaf.fullname 默认= Chart.Name
+  # → 服务名 oaf-platform-backend，与 release 名无关）；Helm 迁移改过服务名，此处勿再回退旧名
+  url: http://oaf-platform-backend.agent-platform.svc.cluster.local:8080/mcp
   timeout: 300
 
 # 人工确认核心：五个变更类工具必须经 permission_ask 由人核对参数后执行；

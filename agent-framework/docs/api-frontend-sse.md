@@ -177,10 +177,10 @@ Accept: text/event-stream
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `afterSeq` | Integer | ❌ | 回放游标（回放**严格大于**该 seq 的事件），默认 0 = 从头回放 |
+| `replyId` | String | ❌ | Turn 标识，仅回放/订阅指定 turn 的事件 |
 
 > ⚠️ **本端点不读 `Last-Event-ID` 请求头。** 浏览器原生 `EventSource` 的自动重连对本 API 无效
 > ——必须用 `fetch` + `ReadableStream`（见 §13），或自建 EventSource 并把最后的 `id:` 显式拼进 `afterSeq`。
-| `replyId` | String | ❌ | Turn 标识，仅回放/订阅指定 turn 的事件 |
 
 **响应行为：**
 
@@ -608,7 +608,7 @@ Content-Type: multipart/form-data
 |------|--------|------|
 | 上传开关 | `true` | `file.upload-enabled=false` 时返回 403 |
 | 文件大小上限 | 20 MB | `file.upload-max-mb`，超限返回 413 |
-| MIME 白名单 | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*` | `file.upload-allowed-mime`，不匹配返回 415 |
+| MIME 白名单 | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed` | `file.upload-allowed-mime`，不匹配返回 415 |
 | 扩展名/MIME 交叉校验 | — | 扩展名必须与声明的 MIME 类型一致，不一致返回 400 |
 | 待消费文件数上限 | 20 | `file.upload-max-pending`，超限返回 429 |
 
@@ -713,7 +713,7 @@ curl http://localhost:8100/files/a1b2c3d4-e5f6-7890-abcd-ef1234567890?inline=1
   "slug": "acme-test-agent",
   "version": "1.0.0",
   "description": "A test agent",
-  "protocols": {"a2a": "1.0.0", "a2ui": "v0.8", "oaf": "v0.8.0"},
+  "protocols": {"a2a": "1.0.0", "a2ui": "v0.8", "oaf": "v0.8.0", "agent_protocol": {"enabled": false, "streaming": false, "hitl": false, "task_store": ""}},
   "oaf": {
     "tools": ["Read", "Bash", "Edit"],
     "skills": 1,
@@ -1120,20 +1120,23 @@ GET /skills/manage
 | `/skills/{name}/toggle` | PUT | 切换启停状态 | `{name, enabled, message}` |
 | `/skills/{name}/content` | GET | 读取 SKILL.md 内容 | `{name, content}` |
 | `/skills/{name}/content` | PUT | 修改 SKILL.md 内容，body `{content}`（≤100KB） | `{name, message}` |
+| `/skills/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`，含 scripts 等资源） | `application/zip` 附件 |
 
-**用户个人技能（L4）：**
+**用户个人技能（L4）：** 用户身份取网关注入的 `X-User-Id` 请求头（缺失/非法 400），URL 不携带 userId。
 
 | 端点 | 方法 | 说明 | 响应 |
 |------|------|------|------|
-| `/skills/users` | GET | 有个人技能的用户索引 | `{count, users:[...], truncated?}` |
-| `/skills/users/{userId}` | GET | 该用户的 L4 技能 | `{userId, skills, tombstones}` |
-| `/skills/users/{userId}/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
-| `/skills/users/{userId}/{name}` | PUT | 写个人技能，body `{content}` | `{userId, name, action, version, message}` |
-| `/skills/users/{userId}/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
-| `/skills/users/{userId}/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |
+| `/skills/users` | GET | 当前用户的 L4 技能 | `{userId, skills, tombstones}` |
+| `/skills/users/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
+| `/skills/users/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`） | `application/zip` 附件 |
+| `/skills/users/{name}` | PUT | 写个人技能，body `{content}`（≤1MB） | `{userId, name, action, version, message}` |
+| `/skills/users/upload` | POST | zip 上传个人技能（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200；二进制拒绝） | `{userId, name, action, files, version, message}` |
+| `/skills/users/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
+| `/skills/users/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |
+| `/debug/user-skills` | GET | 全量用户索引（运维/调试） | `{count, users:[...], truncated?}` |
 
-> ⚠️ 路由歧义（框架内已注明）：`GET /skills/users/{userId}` 与 `GET /skills/{name}/content`
-> 在 `userId == "content"` 时同时匹配，由更具体的 `/skills/{name}/content` 命中。
+> ⚠️ 路由歧义（框架内已注明）：`GET /skills/users/{name}` 与 `GET /skills/{name}/content`
+> 在 `name == "content"` 时同时匹配，由更具体的 `/skills/{name}/content` 命中。
 
 **生效范围分档：** 非沙箱档管理面写入**下一轮会话生效**；沙箱档会话读容器内 `/workspace/skills` 副本，
 管理面写入由「会话开始物化 L4」（`WorkspaceReader.materializeUserSkills`）投影进容器，
@@ -1293,9 +1296,14 @@ GET /skills/manage
 
 **前端处理：** 收到 `file_ready` 后渲染文件下载卡片，`download_url` 可直接拼接 Base URL 用于下载或预览。
 
-> **契约（`ChatStreamControllerTest` 契约用例钉死，2026-09-17）：** 服务端永远发**相对路径**
-> `/files/{file_id}`，由前端拼 AGENT_BASE——且历史回放（`/history` 的下载卡片）与实时流两处
-> 入口必须用**同一拼法**：assistant 页曾因回放路径拼了、实时路径没拼而在前端入口 404。
+> **契约（`ChatStreamControllerTest` 契约用例钉死，2026-09-17；2026-10-10 subpath-routing 前缀感知扩展）：**
+> `download_url` 是**从域名根解析的路径**，两种形态：
+> - 直连（无 `X-Forwarded-Prefix` 请求头）：**相对路径** `/files/{file_id}`，由前端拼 AGENT_BASE；
+> - 经代理（请求带 `X-Forwarded-Prefix: /agent/{short}`，如 platform-router / ingress 前缀路由）：
+>   **完整路径** `/agent/{short}/files/{file_id}`，客户端直接按域名根使用，免拼前缀。
+> 前端判别式：以自身 BASE 开头（或 BASE 为空）直接用，否则补 BASE——历史回放（`/history` 的
+> 下载卡片）与实时流两处入口必须用**同一拼法**：assistant 页曾因回放路径拼了、实时路径没拼
+> 而在前端入口 404。
 
 ### 9.8 HITL 确认事件
 

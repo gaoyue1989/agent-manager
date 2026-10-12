@@ -229,8 +229,13 @@ CREATE TABLE IF NOT EXISTS model_config (
 
 - **记忆压缩**：`CompactionConfig.model` / `MemoryConfig.model` 维持 env 模型现状（注释上标注"系统模型"），零行为变化。
 - **会话标题生成（决策#2，纳入）**：`SessionTitleService`
-  - 触发：`POST /threads/chat` 新会话且首条用户消息非空（A2A 会话本次不触发，前端侧栏本就过滤非 webui 会话）；
-  - 调用：系统模型单次 `stream`（prompt 限首条消息 500 字，输出 ≤20 字标题，maxTokens 小值，60s 超时）；
+  - 触发：仅 `ChatStreamController` 在每轮 `POST /threads/chat` 落库后调 `generateAsync`
+    （`ChatStreamController.java:316`；A2A 链路不触发，前端侧栏本就过滤非 webui 会话）；
+    实际「首轮」判据在服务内：**`session_user.remark` 为空**（已有标题则跳过，手动重命名与既有标题都优先）+
+    消息非空 + 同 session 并发去重（`inFlight`）；
+  - 调用：系统模型单次 `stream`（`SessionTitleService.java:42-54` 实测常量：入参截断 `MAX_INPUT_LEN=1000` 字、
+    输出上限 `MAX_TITLE_LEN=40` 字、回退标题 `FALLBACK_TITLE_LEN=20`、`MAX_OUTPUT_TOKENS=512`、
+    `CALL_TIMEOUT=20s`）；标题固定走系统模型，不受会话级 model 切换影响；
   - 写入：`session_user.remark`（**已有标题不覆盖**——手动重命名优先）；单线程守护 executor，fail-soft；
   - 展示：前端侧栏 `title || sessionId`（决策#3 配套）。
 
@@ -281,7 +286,7 @@ CREATE TABLE IF NOT EXISTS model_config (
 | `controller/ChatStreamController.java` | `ChatRequest.model` + 标题触发 |
 | `controller/ThreadController.java` | `PatchRequest.model`、list/详情返回 `model` |
 | `config/AgentScopeConfig.java` | 注册路由中间件、标题 bean、系统模型注释标注 |
-| `static/debug/js/models.js` + `index.html`/`router.js` | 🆕 debug 页模型管理模块 |
+| `static/debug/modules/models.js` + `js/app.js`/`js/api.js` | 🆕 debug 页模型管理模块（落地路径以 §13 为准：`modules/` 下、路由挂 `js/app.js`） |
 | `frontend/src/app/assistant/page.tsx` + `components/types.ts` | picker、随消息携带 model、会话回显、侧栏标题 |
 | `application.yml` / `.env.example` / `AGENTS.md` / `api.md` / `api-thread-spec.md` | 文档同步 |
 | 单测 | §10 全部 |
@@ -321,8 +326,8 @@ CREATE TABLE IF NOT EXISTS model_config (
 - **背景**：§9 B 的模型管理面与 §9 A 的发布助手 picker 之外，debug 页自身只能管模型、不能切模型，
   调试多模型对比需绕到发布助手。补 `static/debug/modules/chat.js` header 下拉框（§9 C）。
 - **改动**：`static/debug/modules/chat.js`（picker + 会话生命周期 + PATCH 落库）、
-  `static/debug/js/api.js`（`sendChat` 增 `model` 选项）、`e2e/lib/selectors.ts`（`modelSelect` 契约）、
-  `e2e/tests/ui.spec.ts`（U14）。
+  `static/debug/js/api.js`（`sendChat` 增 `model` 选项）、`agent-framework/e2e/lib/selectors.ts`（`modelSelect` 契约）、
+  `agent-framework/e2e/tests/ui.spec.ts`（U14；后续另有 U14b 覆盖绑定模型删除/禁用降级）。
 - **代码评审发现并修复的三处问题**：
   1. **A2A 死代码**：初版给 A2A 请求塞 `metadata.model`，但 `A2AController.normalizeMessageSendBody` 只解析
      `userId`/`sessionId`（§5.5 已声明 A2A 切模型是"未来可选项"），该键被 SDK 原样透传后丢弃——不仅无效，
@@ -355,8 +360,9 @@ PR 提交前用本地 MySQL(3307)/Redis(16379) + e2e mock LLM 起真实实例走
    `ThreadController.upsertRemark` 的**原始写法**，意味着**标题重命名此前一直静默失败**（异常被 catch 成 warn），
    单测用 mock DataSource 覆盖不到。修复：`SessionUserStore.upsertColumn` 改 UPDATE 优先、0 行回落 INSERT
    （remark/model 共用，列名白名单防注入）；新增真实 MySQL IT `SessionUserStoreMySqlIT`（`HITL_MYSQL_IT=1` 开关）作回归守卫。
-3. **标题触发条件与前端流程不符**：前端首条消息自带 `sessionId`（`webui-xxx`），`isNewSession` 恒为 false →
-   标题永不生成。修复：以"`session_user` 中是否已有该会话行"（`firstEverTurn`）判定会话首轮，A2A 已登记会话不触发。
+3. **标题触发条件与前端流程不符**：前端首条消息自带 `sessionId`（`webui-xxx`），若按 `isNewSession`
+   （`sessionId` 是否为空）判定则恒为 false → 标题永不生成。修复：改由 `SessionTitleService.generateAsync`
+   内部的「`session_user.remark` 是否为空」+ `inFlight` 去重判定是否首轮（`firstEverTurn` 这一命名未落地）。
 
 冒烟结论（全部通过）：`GET/POST/PATCH/DELETE /models` 契约与掩码、非法校验词表、模型绑定落库与列表/详情回显、
 **路由决定性验证**（绑定指向无效端口的模型 → chat 失败 = 确认切换生效）、PATCH 中途切回 system → chat 成功、

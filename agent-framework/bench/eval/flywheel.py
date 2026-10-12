@@ -223,8 +223,9 @@ async def cmd_run(args: argparse.Namespace) -> int:
                     try:
                         judge_results[cid] = await judge_correctness(cases_map[cid], ts[0], cfg)
                         print(f"  [judge] {cid} = {judge_results[cid]['score']:.2f}")
-                    except JudgeUnavailable as e:
+                    except Exception as e:  # judge 单项失败只降级不阻断（issue #117：畸形 JSON 曾击穿整轮）
                         print(f"  [judge] {cid} 失败: {e}")
+                        judge_results[cid] = {"score": None, "reason": f"judge unavailable: {e}"}
 
         # ---- ⑤ 根因分析（规则初筛）+ 报告 ----
         failed = [cid for cid, ts in by_case.items() if not _case_passed(ts)]
@@ -260,17 +261,19 @@ async def cmd_run(args: argparse.Namespace) -> int:
         judge_model = __import__("os").environ.get("EVAL_LLM_MODEL") if args.judge else None
         pass_count = len(by_case) - len(failed)
         pass_rate = pass_count / len(by_case) if by_case else 0.0
+        # judge 降级条目 score=None（issue #117）：均值只计有分项，全降级则为 None
+        judge_scores = [r["score"] for r in judge_results.values() if r.get("score") is not None]
         with open(task_dir / "task.json", "w", encoding="utf-8") as f:
             json.dump({**meta, "pass_count": pass_count, "pass_rate": pass_rate,
-                       "total_score": (sum(r["score"] for r in judge_results.values())
-                                       / len(judge_results)) if judge_results else None,
+                       "total_score": (sum(judge_scores) / len(judge_scores))
+                                      if judge_scores else None,
                        "judge_model": judge_model,
                        "gen_case_count": len(gen_cases),
                        "analyses": analyses}, f, ensure_ascii=False, indent=1)
         _append_history({"task_id": task_id, "commit": commit, "track": "trend",
                          "case_count": len(by_case), "pass_rate": pass_rate,
-                         "total_score": (sum(r["score"] for r in judge_results.values())
-                                         / len(judge_results)) if judge_results else None,
+                         "total_score": (sum(judge_scores) / len(judge_scores))
+                                        if judge_scores else None,
                          "judge_model": judge_model,
                          "contract": sse_client.MAPPING.get("version"),
                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
@@ -630,13 +633,93 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert t_bad["step_status"] == "fail" and t_bad["drift_rate"] == 0.125, t_bad
     assert traj_mod.run_drift_rate([t_ok, t_bad]) == 0.0625
 
-    from replay.packager import final_text_from_chunks, usage_from_chunks
+    from replay.packager import final_text_from_chunks, pack, usage_from_chunks, verify_checksums
     chunks = [json.dumps({"choices": [{"delta": {"content": "你好"}}]}),
               json.dumps({"choices": [{"delta": {"content": "，世界"}}]}), "[DONE]"]
     assert final_text_from_chunks(chunks) == "你好，世界"
     u = usage_from_chunks([json.dumps({"usage": {"prompt_tokens": 3, "completion_tokens": 2,
                                                  "total_tokens": 5}})])
     assert u == {"input": 3, "output": 2, "total": 5}
+
+    # ---- issue #97：客户端可控标识符校验（pack_id/sid/case_id 路径穿越防线） ----
+    from replay.ids import InvalidIdentifierError, validate_id
+
+    # 存量合法 id 全集（pack/sid/case 三族形态）必须全部通过
+    valid_ids = [
+        "pk-e2e-demo", "pk-gold", "pk-rebased", "pk-demo-round-20261004-122540",
+        "sess-rec-1", "sess-collector-direct", "sess-http-1", "gold-rec-1",
+        "auto-0001-llm-3f1d2e4a",                      # 指纹聚类合成 sid
+        "case_replay_sess-rec-1", "case_chat_basic_001",
+        "e2e", "rec",                                  # from-collector 的 ns 形态
+        "a" * 128,                                     # 长度上边界
+    ]
+    for v in valid_ids:
+        assert validate_id("test", v) == v, v
+    # 非法形态：穿越/分隔符/坏首字符/越界/非字符串/串尾换行（re $ 陷阱，评审发现）
+    invalid_ids = ["../x", "/etc/cron.d", "a..b", "a/b", "a\\b", "..", ".", "-lead",
+                   "sess rec", "sess:rec", "", "a" * 129, None, 123, "a\n", "a\r\n"]
+    for v in invalid_ids:
+        try:
+            validate_id("test", v)
+            raise AssertionError(f"validate_id 应拒绝: {v!r}")
+        except InvalidIdentifierError:
+            pass
+
+    # ---- issue #97：verify_checksums 三重校验（正向/清单 rel 防穿越/反向扫描） ----
+    import hashlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+
+        def _mk_pack(name: str, checksums: str, extra: dict[str, str] | None = None) -> Path:
+            d = td_path / name
+            d.mkdir(parents=True)
+            (d / "a.txt").write_text("hello", encoding="utf-8")
+            (d / "CHECKSUMS").write_text(checksums, encoding="utf-8")
+            for fname, content in (extra or {}).items():
+                fp = d / fname
+                fp.parent.mkdir(parents=True, exist_ok=True)
+                fp.write_text(content, encoding="utf-8")
+            return d
+
+        sha_hello = hashlib.sha256(b"hello").hexdigest()
+        assert verify_checksums(_mk_pack("ok", f"{sha_hello}  a.txt\n")) is True
+        d = _mk_pack("tampered", f"{sha_hello}  a.txt\n")
+        (d / "a.txt").write_text("evil", encoding="utf-8")
+        assert verify_checksums(d) is False                                    # 内容与清单不符
+        assert verify_checksums(
+            _mk_pack("unregistered", "", extra={"evil.json": "{}"})) is False  # 空清单+多余文件漏过（原缺陷）
+        assert verify_checksums(_mk_pack(
+            "nested-checksums", f"{sha_hello}  a.txt\n",
+            extra={"sessions/CHECKSUMS": "payload"})) is False  # 子目录未登记同名 CHECKSUMS 不豁免（评审发现）
+
+        # 生成/校验豁免口径对齐（评审发现）：oaf_zip 恰名为 CHECKSUMS 时（copy 到
+        # out/oaf/CHECKSUMS），自产包登记它之后必须仍能过自家 verify_checksums
+        src = td_path / "collector" / "e2e" / "llm"
+        src.mkdir(parents=True)
+        rec = {"id": "llm-abcdef01", "session": "sess-ok", "ts_start": "2026-10-09T00:00:00Z",
+               "request": {"messages": [{"role": "user", "content": "hi"}]},
+               "chunks": [json.dumps({"choices": [{"delta": {"content": "yo"}}]}), "[DONE]"]}
+        (src / "20261009.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        oaf = td_path / "CHECKSUMS"
+        oaf.write_text("oaf-content", encoding="utf-8")
+        pk = pack(collector_dir=str(td_path / "collector"), out_dir=str(td_path / "pk-roundtrip"),
+                  ns="e2e", oaf_zip=str(oaf))
+        assert (pk / "oaf" / "CHECKSUMS").exists()
+        assert verify_checksums(pk) is True
+        d = td_path / "missing"
+        d.mkdir()
+        (d / "a.txt").write_text("x", encoding="utf-8")
+        assert verify_checksums(d) is False                                    # 缺 CHECKSUMS 不抛（原缺陷）
+        outside = td_path / "outside.json"
+        outside.write_text("{}", encoding="utf-8")
+        assert verify_checksums(_mk_pack(
+            "abs-rel", f"{hashlib.sha256(outside.read_bytes()).hexdigest()}  {outside}\n")) is False
+        assert verify_checksums(
+            _mk_pack("dotdot-rel", f"{sha_hello}  ../ok/a.txt\n")) is False    # 清单 rel 穿越出包
+        assert verify_checksums(
+            _mk_pack("bad-line", f"{sha_hello} a.txt\n")) is False             # 坏行（缺双空格）判失败
 
     # issue #39：能力门禁跳过分类（kind）与报告渲染——capability 单列醒目、env 预期分流。
     # 两条用例全部被跳过 → runnable 为空，run_suite 不发起任何网络请求（离线可测）。
@@ -656,6 +739,15 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         assert "环境未供给" in rep and "case_skip_env" in rep, rep
 
     asyncio.run(_skip_probe())
+
+    # issue #97 问题c：collector 自研 YAML 解析器回归断言（抽取 server.mjs 真实实现执行，
+    # 对 example.yaml 每键断言类型与值——防止行尾注释/列表项静默失效回归）
+    yaml_script = EVAL_DIR / "tests" / "collector_yaml_selftest.mjs"
+    try:
+        r = subprocess.run(["node", str(yaml_script)], capture_output=True, text=True, timeout=60)
+    except FileNotFoundError as e:
+        raise AssertionError("collector YAML 断言需要 node（CI runner 预装；本机请自装 Node ≥ 18）") from e
+    assert r.returncode == 0, f"collector YAML 断言失败:\n{r.stdout[-800:]}\n{r.stderr[-800:]}"
 
     # ---- usage_frame token 口径（e1551b7）：恒等式 + 全量 prompt 语义 ----
     # 契约 note 声明 inputTokens 为全量 prompt、outputTokens 为全量 completion，
@@ -678,8 +770,36 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         raw = ue["raw"]
         assert raw["inputTokens"] + raw["outputTokens"] == raw["totalTokens"]
 
+    # ---- issue #117：judge 输出畸形 JSON 必须降级 JudgeUnavailable，不得裸抛 ----
+    from graders.correctness import JudgeUnavailable, parse_judge_verdict
+
+    ok_verdict = parse_judge_verdict('{"score": 0.85, "reason": "正确"}')
+    assert ok_verdict == {"score": 0.85, "reason": "正确"}, ok_verdict
+    # reasoning 模型常在 JSON 外带思考文本 → 走 {...} 提取路径
+    wrapped = parse_judge_verdict('思考中……最终结论：\n{"score": 1, "reason": "一致"}\n以上。')
+    assert wrapped["score"] == 1.0 and wrapped["reason"] == "一致", wrapped
+    # 钳位
+    assert parse_judge_verdict('{"score": 5, "reason": "越界"}')["score"] == 1.0
+    assert parse_judge_verdict('{"score": -2}')["score"] == 0.0
+    # 畸形输出矩阵：截断/多对象/尾逗号/纯文本/非 dict JSON/score 非数字/NaN/None → JudgeUnavailable（不是裸异常）
+    for bad in ['{"score": 0.5, "reason": "截断', '{"score": 0.5} {"score": 0.6}',
+                '{"score": 0.5, "reason": "尾逗号",}', '完全不是 JSON',
+                '{"score": "不是数字", "reason": "r"}',
+                '[1, 2, 3]', '"just a string"', 'null', '42',
+                '{"score": NaN, "reason": "r"}',   # json.loads 接受 NaN，钳位会反拿满分（review 发现）
+                None]:
+        try:
+            parse_judge_verdict(bad)
+            raise AssertionError(f"畸形输出应抛 JudgeUnavailable: {bad!r}")
+        except JudgeUnavailable:
+            pass
+    # ±Infinity 钳位语义（inf→1.0 / -inf→0.0）
+    assert parse_judge_verdict('{"score": Infinity}')['score'] == 1.0
+    assert parse_judge_verdict('{"score": -Infinity}')['score'] == 0.0
+
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
-          f" + 归一化规则/轨迹等价（M2） + usage_frame 口径（全量 prompt 恒等式），"
+          f" + 归一化规则/轨迹等价（M2） + usage_frame 口径（全量 prompt 恒等式）"
+          f" + collector YAML 加载断言（issue #97）+ judge 降级解析（issue #117），"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 

@@ -33,6 +33,8 @@ public class WorkspaceReader {
     private static final int MATERIALIZE_MAX_FILES = UserSkillService.MAX_SYNC_FILES;
     /** 沙箱物化：单文件字节上限（与技能 API 同口径，超限跳过不阻塞） */
     private static final int MATERIALIZE_MAX_FILE_BYTES = UserSkillService.MAX_CONTENT_BYTES;
+    /** 沙箱物化：单技能总字节上限（与技能 API 同口径，超限跳过该技能） */
+    private static final long MATERIALIZE_MAX_TOTAL_BYTES = UserSkillService.MAX_SKILL_TOTAL_BYTES;
 
     /** 用户技能（L4）KV 布局：技能名目录 + 技能主文件（与 SDK workspace-writable 仓库一致） */
     public static final String SKILLS_DIR = "skills";
@@ -748,6 +750,8 @@ public class WorkspaceReader {
                 continue;
             }
             var entries = new ArrayList<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>();
+            long totalBytes = 0;
+            boolean tooLarge = false;
             for (var relPath : relFiles) {
                 if (relPath == null || relPath.isBlank()) {
                     continue;
@@ -756,18 +760,26 @@ public class WorkspaceReader {
                 if (content == null) {
                     continue;
                 }
-                if (content.getBytes(StandardCharsets.UTF_8).length > MATERIALIZE_MAX_FILE_BYTES) {
+                var fileBytes = content.getBytes(StandardCharsets.UTF_8).length;
+                if (fileBytes > MATERIALIZE_MAX_FILE_BYTES) {
                     log.warn("materialize_user_skills: {}/{} 超过 {} 字节上限，跳过", name, relPath,
                         MATERIALIZE_MAX_FILE_BYTES);
                     continue;
                 }
+                if (totalBytes + fileBytes > MATERIALIZE_MAX_TOTAL_BYTES) {
+                    log.warn("materialize_user_skills: {} 总大小超过 {} 字节上限，跳过该技能", name,
+                        MATERIALIZE_MAX_TOTAL_BYTES);
+                    tooLarge = true;
+                    break;
+                }
+                totalBytes += fileBytes;
                 entries.add(com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
                     .path("/workspace/" + SKILLS_DIR + "/" + name + "/" + relPath)
                     .data(content)
                     .mode(644)
                     .build());
             }
-            if (entries.isEmpty()) {
+            if (tooLarge || entries.isEmpty()) {
                 continue;
             }
             try {

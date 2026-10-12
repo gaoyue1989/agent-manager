@@ -264,6 +264,67 @@ jobs:
             agent-framework/e2e/playwright-report/
           retention-days: 5
 
+  # RT 组（subpath-routing-design §9.3 本地变体）：单实例 + platform-router nginx
+  # （fixtures/nginx-router.conf.template，与 manifests/platform-router.yaml 语义同源）
+  # ——/agent/{short} 前缀路由剥前缀、X-Forwarded-Prefix 注入（方案 A 端到端：
+  # agent-card url / file_ready download_url / endpoints+base_url）、SSE 续传、
+  # 上传、Debug Console 302 与负向语义。纯 HTTP 断言，不装浏览器。
+  # 初期非必需（同 E2E 工具插件先例），稳定后由管理员转必需检查。
+  e2e-router:
+    name: E2E 路由模式（RT 组）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      E2E_GROUP: router
+      E2E_BASE_PORT: "8100"
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
+      - working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 安装 Playwright 依赖（router 组无 UI 用例，不装浏览器）
+        working-directory: agent-framework/e2e
+        run: npm ci --no-audit --no-fund
+      - working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - working-directory: agent-framework/e2e
+        run: ./scripts/run.sh router
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-router
+          path: |
+            agent-framework/e2e/.runtime/
+            agent-framework/e2e/playwright-report/
+          retention-days: 5
+
   # T 组先行（travel-fulfillment 设计 §11 M1 / PR #62 遗留 P1-1 切片）：
   # 双实例（存量 + 协议开启）黑盒断言 /tasks 强制 token（验收断言 11）、存量零影响
   # （验收断言 8）与卡片 agent_protocol 透出。spawn/确认/拒绝/超时/父崩溃五场景

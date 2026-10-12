@@ -157,6 +157,7 @@ Tomcat started on port 8100
 | `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
 | `LLM_REASONING_EFFORT` | string | 空 | | 推理强度（如 `minimal`/`medium`/`high`；空 = 不传，2026-09-27 新增，绑 `agent.llm.reasoning-effort`） |
 | `LLM_FREQUENCY_PENALTY` | float | 空 | | 频率惩罚（空 = 不传，2026-09-27 新增，绑 `agent.llm.frequency-penalty`） |
+| `LLM_FALLBACK_MODEL_ID` | string | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络）后自动切换；空 = 不启用（绑 `agent.llm.fallback-model-id`）。默认模型走 SDK 原生 fallback，会话自选模型由 `SessionModelMiddleware` 补齐；改动需 `POST /admin/reload` 生效（详见 [model-fallback-design.md](model-fallback-design.md)） |
 
 #### 4.1.2 服务 / Spring
 
@@ -208,7 +209,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_UPLOAD_ENABLED` | bool | `true` | | 上传开关（绑 `agent.file.upload-enabled`） |
 | `FILE_UPLOAD_MAX_MB` | int | `20` | | 单文件大小上限（绑 `agent.file.upload-max-mb`） |
 | `FILE_UPLOAD_MAX_PENDING` | int | `20` | | 用户维度待注入文件数软上限（绑 `agent.file.upload-max-pending`） |
-| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
+| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；`application/msword` 放行旧版 `.doc`；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
 | `FILE_IMAGE_MAX_MB` | int | `5` | | 图片大小上限（绑 `agent.file.image-max-mb`） |
 | `FILE_IMAGE_INLINE_TOTAL_MB` | int | `15` | | 单次请求图片内联总大小上限（绑 `agent.file.image-inline-total-mb`） |
 | `FILE_PRESENT_MAX_MB` | int | `50` | | `present_file` 工具产物大小上限（绑 `agent.file.present-max-mb`） |
@@ -220,7 +221,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_STORAGE_S3_ACCESS_KEY` | string | — | ✓(s3) | S3 AccessKey（绑 `agent.file.storage-s3-access-key`） |
 | `FILE_STORAGE_S3_SECRET_KEY` | string | — | ✓(s3) | S3 SecretKey（绑 `agent.file.storage-s3-secret-key`） |
 | `FILE_STORAGE_S3_BUCKET` | string | `agent-files` | | S3 Bucket（绑 `agent.file.storage-s3-bucket`） |
-| `FILE_EXTERNAL_URL_PREFIXES` | string (csv) | 空（**禁用**） | | `present_url` 外部交付的 URL 前缀白名单，**防 SSRF**。留空即禁用外部交付；发布助手在集群内需设 `http://platform-backend.agent-platform.svc.cluster.local:8080`。非白名单 URL 返回 403 |
+| `FILE_EXTERNAL_URL_PREFIXES` | string (csv) | 空（**禁用**） | | `present_url` 外部交付的 URL 前缀白名单，**防 SSRF**。留空即禁用外部交付；发布助手在集群内需设 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名）。非白名单 URL 返回 403 |
 
 #### 4.1.6 会话清理（`AGENT_CLEANUP_*`，见 [api.md](api.md) §清理配置）
 
@@ -427,6 +428,7 @@ LLM 推理 → 选择工具 (如 get_weather)
 | DELETE | `/skills/{name}` | 删除 Skill |
 | PUT | `/skills/{name}/toggle` | 启停切换 |
 | GET/PUT | `/skills/{name}/content` | 读 / 写 SKILL.md |
+| GET | `/skills/{name}/download` | 下载 Skill 整目录为 zip |
 | GET | `/skills/users`、`/skills/users/{userId}` | 用户个人技能（L4）索引 / 列表 |
 | GET/PUT/DELETE | `/skills/users/{userId}/{name}` | 读 / 写 / 删个人技能（删除写 tombstone） |
 | POST | `/skills/users/{userId}/{name}/sync-from-package` | 包内基线下发为个人版 |
@@ -457,7 +459,7 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/actuator/health` | Actuator 健康检查（yml 无 `management:` 段，**只暴露 health**） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/a2a/jobs`、`/a2a/jobs/{key}` | A2A 幂等 Job 提交 / 状态查询（**默认关闭**，`AGENT_A2A_JOB_ENABLED=true` 开启；header `Idempotency-Key` + `Agent-A2A-Job-Token`） |
-| POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:184`） |
+| POST/GET | `/tasks`、`/tasks/{id}`、`/tasks/{id}/wait`、`/tasks/{id}/cancel`、`/tasks/{id}/events`、`/tasks/{id}/resume` | Agent Protocol 远程子 agent 服务端（**默认关闭**，`AGENT_PROTOCOL_ENABLED=true` 开启；`/tasks/{id}/events` 为 SSE；端点均在 `/tasks*` 认证 filter 覆盖面内，`AgentProtocolConfig.java:187`） |
 
 完整参数与 SSE 帧格式见 [api.md](api.md)；面向使用者的端到端流程见
 [agent-creation-guide.md](agent-creation-guide.md)。

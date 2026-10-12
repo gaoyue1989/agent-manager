@@ -236,13 +236,15 @@ async function stubUserSkillPanel(page: Page, opts: {
   await page.route('**/skills/users**', async route => {
     const req = route.request();
     const url = new URL(req.url());
-    const parts = decodeURIComponent(url.pathname).split('/').filter(Boolean); // [skills, users, uid?, name?]
+    const parts = decodeURIComponent(url.pathname).split('/').filter(Boolean); // [skills, users, name?]
     calls.push({ method: req.method(), path: url.pathname, body: req.postData() || '' });
-    const uid = parts[2];
-    const name = parts[3];
-    const detail = parts.length === 4 && !url.pathname.endsWith('sync-from-package');
-    if (req.method() === 'GET' && !uid) return route.fulfill({ json: { count: users.length, users } });
-    if (req.method() === 'GET' && !detail) {
+    // 用户身份现走 X-User-Id 头（网关注入）；调试页用选中 userId 填充该头
+    const uid = req.headers()['x-user-id'] || '';
+    const name = parts[2];
+    const isList = parts.length === 2;                    // GET /skills/users
+    const isSync = url.pathname.endsWith('/sync-from-package');
+    const isUpload = url.pathname.endsWith('/upload');
+    if (req.method() === 'GET' && isList) {
       const delay = (opts.listDelay || {})[uid] || 0;
       if (delay) await new Promise(r => setTimeout(r, delay));
       return route.fulfill({
@@ -256,7 +258,7 @@ async function stubUserSkillPanel(page: Page, opts: {
         },
       });
     }
-    if (req.method() === 'GET') {
+    if (req.method() === 'GET') {                         // 明细 /skills/users/{name}
       const status = opts.detailStatus ?? 200;
       if (status !== 200) {
         return route.fulfill({ status, json: { error: 'internal_error', message: 'stub 明细读取失败' } });
@@ -272,7 +274,10 @@ async function stubUserSkillPanel(page: Page, opts: {
     if (req.method() === 'DELETE') {
       return route.fulfill({ json: { deletedFiles: 1, hasPackageBaseline: true, message: 'stub 已删除' } });
     }
-    if (req.method() === 'POST') {
+    if (req.method() === 'POST' && isUpload) {
+      return route.fulfill({ json: { name: 'demo-upload', action: 'created', files: ['SKILL.md'], version: 1, message: 'stub 已上传' } });
+    }
+    if (req.method() === 'POST' && isSync) {
       return route.fulfill({ json: { files: ['SKILL.md', 'scripts/hello.sh'], skipped: [], message: 'stub 已下发' } });
     }
     return route.fulfill({ status: 404, json: { error: 'not_found', message: 'stub 未匹配' } });
@@ -317,20 +322,20 @@ test('U-SK2 加载用户 → 编辑保存 → 删除 → 从包内下发', async
   await page.locator('#userSkillEditSave').click();
   await expect(page.locator('#toastContainer')).toContainText('stub 已保存');
   const put = calls.find(c => c.method === 'PUT');
-  expect(put?.path).toBe('/skills/users/alice/demo-alice');
+  expect(put?.path).toBe('/skills/users/demo-alice');
   expect(put?.body).toContain('NEW-CONTENT');
 
   // 删除：confirm 后走 DELETE
   await page.locator('.us-del-btn').first().click();
   await expect(page.locator('#toastContainer')).toContainText('stub 已删除');
-  expect(calls.filter(c => c.method === 'DELETE').map(c => c.path)).toEqual(['/skills/users/alice/demo-alice']);
+  expect(calls.filter(c => c.method === 'DELETE').map(c => c.path)).toEqual(['/skills/users/demo-alice']);
 
   // 从包内下发：填技能名 → POST sync-from-package
   await page.locator('#userSkillNameInput').fill('demo-alice');
   await page.locator('#userSkillSyncBtn').click();
   await expect(page.locator('#toastContainer')).toContainText('stub 已下发');
   expect(calls.filter(c => c.method === 'POST').map(c => c.path))
-    .toEqual(['/skills/users/alice/demo-alice/sync-from-package']);
+    .toEqual(['/skills/users/demo-alice/sync-from-package']);
 
   // 刷新按钮：重新拉取列表与索引（不抛 pageerror 即通过，交互链路复用上面断言）
   await page.locator('#skillRefreshBtn').click();
@@ -358,7 +363,7 @@ test('U-SK3 并发加载不错位：行操作永远作用于该行对应的用�
   // 行操作必须落到 bob（改前 userSkillState.userId 已被置为 bob 但表格是 alice 的行 → 错位）
   await page.locator('.us-del-btn').first().click();
   await expect(page.locator('#toastContainer')).toContainText('stub 已删除');
-  expect(calls.filter(c => c.method === 'DELETE').map(c => c.path)).toEqual(['/skills/users/bob/demo-bob']);
+  expect(calls.filter(c => c.method === 'DELETE').map(c => c.path)).toEqual(['/skills/users/demo-bob']);
 });
 
 test('U-SK4 明细读取 5xx 不得当成“技能不存在”回落空内容新建', async ({ page }) => {
@@ -464,7 +469,7 @@ test('U14 会话模型切换：下拉选择→绑定生效→切会话恢复→�
     //    修复前 A2A 新会话完全不绑定，界面显示托管模型而实际跑系统模型。
     await page.locator(SEL.newThread).click();
     await select.selectOption(modelId);
-    await page.locator(SEL.modeA2A).click(); // 默认即 A2A，显式点击保证状态确定
+    await page.locator(SEL.modeA2A).click(); // 显式切 A2A 保证状态确定（默认 Channel）
     await page.locator(SEL.chatInput).fill('[E2E:plain]A2A 模式切模型');
     await expect(page.locator(SEL.sendBtn)).toBeEnabled();
     await page.locator(SEL.sendBtn).click();
@@ -628,7 +633,7 @@ test('U14b 绑定模型删除回落 system + 禁用模型切换失败回滚', as
     await expect(select).toHaveValue('system', { timeout: 30_000 });
 
     // ---- ② 禁用回滚：绑定 → PATCH enabled:false → 改选该模型 → 400 model_disabled ----
-    // 流模式是内存态，上一步 page.reload() 后回落默认 A2A；显式切回 channel 与 step① 对齐
+    // 流模式是内存态，上一步 page.reload() 后回落默认 Channel；显式点击与 step① 对齐
     await page.locator(SEL.modeChannel).click();
     await page.locator(SEL.newThread).click();
     await select.selectOption(disabledId);

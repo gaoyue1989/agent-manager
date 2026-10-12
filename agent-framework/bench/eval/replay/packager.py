@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from replay import normalize as nz
+from replay.ids import validate_id
 
 PACK_FORMAT_VERSION = 1
 SESSION_GAP_MS = 10 * 60 * 1000  # 指纹聚类的会话切分时间窗
@@ -192,6 +193,7 @@ def pack(
     http_recs = [r for r in _read_jsonl([str(p) for p in sorted((collector / "http").glob("*.jsonl"))])] if (collector / "http").exists() else []
 
     # 单交互落盘（回放器直接消费）
+    # 文件名用交互 id（collector 生成的 llm-<8hex> 等，非客户端可控 session id），不构成穿越面
     for rec in llm:
         with open(out / "interactions" / "llm" / f"{rec.get('id', 'x')}.json", "w", encoding="utf-8") as f:
             json.dump(rec, f, ensure_ascii=False, indent=1)
@@ -228,6 +230,10 @@ def pack(
             traces_by_anchor[nz.normalize_text(turns[0].get("input", ""))] = tr
 
     for sid, g in sorted(sessions.items()):
+        # sid 可能来自 collector 转发的客户端 x-eval-session 头（server.mjs 仅 trim），
+        # 未校验即拼 sessions/{sid}.json / cases-draft/{sid}.json 可路径穿越落盘包外
+        # （issue #97 问题 9）——非法即终止整包，注明来源便于定位录制源头
+        validate_id("session id", sid)
         calls = g["calls"]
         last = calls[-1]
         # 全会话各轮终答拼接（对齐驱动器合并轨迹的 final_output 口径）
@@ -325,9 +331,13 @@ def pack(
         json.dump(correlation, f, ensure_ascii=False, indent=1)
 
     # CHECKSUMS（全包 sha256 清单）
+    # 豁免口径与 verify_checksums 反向扫描对齐：仅按根路径豁免根清单自身——
+    # 若按文件名豁免，oaf_zip 恰名为 CHECKSUMS 时（copy 到 out/oaf/CHECKSUMS）
+    # 该文件既不登记又过不了反向扫描，自产包将报废于自家校验（评审发现）
+    checksums_resolved = (out / "CHECKSUMS").resolve()
     lines = []
     for p in sorted(out.rglob("*")):
-        if p.is_file() and p.name != "CHECKSUMS":
+        if p.is_file() and p.resolve() != checksums_resolved:
             lines.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}")
     (out / "CHECKSUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -341,14 +351,47 @@ def pack(
 
 
 def verify_checksums(pack_dir: str | Path) -> bool:
-    """校验 evalpack CHECKSUMS（studio 导入时强校验）。"""
+    """校验 evalpack CHECKSUMS（studio 导入时强校验，runner load_pack 复用）。
+
+    三重校验（issue #97 问题 21：原实现只正向核对清单内文件，空清单+多余
+    evil.json 会漏过，缺 CHECKSUMS 抛 FileNotFoundError）：
+      ① 正向：清单每条 rel 的 sha256 核对；rel 自身防穿越（拒绝绝对路径、
+         resolve 后必须仍在包目录内——清单随包自带，需防其指向包外文件）；
+      ② 反向：rglob 扫描包内全部文件，凡未登记于清单的（CHECKSUMS 自身除外）
+         判篡改失败；
+      ③ 兜底：CHECKSUMS 缺失/不可读/坏行一律返回 False 不抛穿——与 studio
+         上传入口「缺 CHECKSUMS 即 400」的前置检查语义一致。
+    """
     root = Path(pack_dir)
-    sums = (root / "CHECKSUMS").read_text(encoding="utf-8").splitlines()
-    for line in sums:
-        if not line.strip():
-            continue
-        sha, rel = line.split("  ", 1)
-        p = root / rel
-        if not p.exists() or hashlib.sha256(p.read_bytes()).hexdigest() != sha:
-            return False
+    try:
+        sums = (root / "CHECKSUMS").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    registered: set[Path] = set()
+    root_resolved = root.resolve()
+    try:
+        for line in sums:
+            if not line.strip():
+                continue
+            try:
+                sha, rel = line.split("  ", 1)
+            except ValueError:
+                return False  # 坏行（非「sha256␣␣rel」格式）判校验失败
+            p = root / rel
+            resolved = p.resolve()
+            if rel.startswith("/") or not resolved.is_relative_to(root_resolved):
+                return False  # 清单 rel 为绝对路径或穿越出包目录
+            if not p.exists() or hashlib.sha256(p.read_bytes()).hexdigest() != sha:
+                return False
+            registered.add(resolved)
+        # 反向扫描：多余未登记文件 = 包被塞入未申报内容，拒收。
+        # 仅按根路径排除清单自身（root/CHECKSUMS）——按文件名排除会让子目录下
+        # 未登记的同名 CHECKSUMS 绕过检测（评审发现的走私通道）
+        checksums_resolved = (root / "CHECKSUMS").resolve()
+        for p in root.rglob("*"):
+            resolved = p.resolve()
+            if p.is_file() and resolved != checksums_resolved and resolved not in registered:
+                return False
+    except OSError:
+        return False  # 包内文件不可读等 IO 异常一律判失败
     return True

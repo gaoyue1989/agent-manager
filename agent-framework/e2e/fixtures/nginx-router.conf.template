@@ -1,0 +1,36 @@
+events { worker_connections 1024; }
+# platform-router 本地语义变体（subpath-routing-design §4.2 / §9.3）：
+# 与 manifests/platform-router.yaml 的 ConfigMap nginx.conf 同源的 location/rewrite/
+# proxy_set_header 语义副本——集群形态用 kube-dns 动态解析 upstream（变量 proxy_pass +
+# resolver），本地 e2e 无 kube-dns，upstream 换固定地址（__UPSTREAM__）。两边改动须同步。
+http {
+  access_log /dev/stdout;
+  # $http_host（含端口的原始 Host 头）兜底而非 $host（$host 剥端口，NodePort 入口
+  # 集群上会把 :30080 丢掉、agent-card url 派生出不可达地址）
+  map $http_x_forwarded_proto $fwd_proto { default $http_x_forwarded_proto; "" $scheme; }
+  map $http_x_forwarded_host  $fwd_host  { default $http_x_forwarded_host;  ""  $http_host; }
+
+  server {
+    listen 80;
+    client_max_body_size 200m;
+
+    location ~ ^/agent/(?<short>[a-z0-9-]+) {
+      rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀（与 manifest 同一正则）
+      proxy_pass http://__UPSTREAM__;
+      proxy_set_header Host              $host;
+      proxy_set_header X-Forwarded-Proto $fwd_proto;
+      proxy_set_header X-Forwarded-Host  $fwd_host;
+      proxy_set_header X-Forwarded-Prefix /agent/$short;
+      proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_buffering off;
+      proxy_request_buffering off;
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+    }
+
+    location = /healthz { access_log off; return 200 "ok"; }
+    location / { return 404; }
+  }
+}

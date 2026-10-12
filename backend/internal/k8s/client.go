@@ -34,6 +34,10 @@ type Client interface {
 	GetDeployment(ns, name string) (*appsv1.Deployment, error)
 	PodStatuses(ns, labelSelector string) ([]PodInfo, error)
 	WaitReady(ctx context.Context, ns, name string, timeout time.Duration) error
+
+	// ServiceExists 查询 Service 对象是否存在（不要求 Ready）——router 模式启动
+	// 自检用（RequireRouter）。
+	ServiceExists(ns, name string) (bool, error)
 }
 
 // PodInfo 实时 Pod 状态摘要。
@@ -218,6 +222,17 @@ func (c *RealClient) PodStatuses(ns, labelSelector string) ([]PodInfo, error) {
 		out = append(out, info)
 	}
 	return out, nil
+}
+
+func (c *RealClient) ServiceExists(ns, name string) (bool, error) {
+	_, err := c.cs.CoreV1().Services(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // WaitReady 轮询 Deployment 完成滚动更新：世代对齐、新版本副本全部就绪且无不可用副本。

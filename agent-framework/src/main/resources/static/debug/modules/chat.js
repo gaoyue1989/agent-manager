@@ -90,8 +90,8 @@ function render() {
         <label class="uid-label" title="用户标识，同 userId 共享 workspace 和 memory">User&nbsp;<input id="uidInput" class="input uid-input" type="text" spellcheck="false"></label>
         <label class="uid-label" title="会话模型：切换当前会话使用的模型">Model&nbsp;<select id="modelSelect" class="input uid-input" style="cursor:pointer"></select></label>
         <div class="seg">
-          <button id="modeA2A" class="active">A2A</button>
-          <button id="modeChannel">Channel</button>
+          <button id="modeA2A">A2A</button>
+          <button id="modeChannel" class="active">Channel</button>
         </div>
         <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
         <button id="btnSysPrompt" class="btn small">System Prompt</button>
@@ -1369,7 +1369,10 @@ function renderFileReadyCard(r, data) {
   const fileName = data.file_name || 'file';
   const mimeType = data.mime_type || 'application/octet-stream';
   const size = data.size || 0;
-  const downloadUrl = ctx.api.BASE + (data.download_url || ('/files/' + fileId));
+  // 服务端已知外部前缀（X-Forwarded-Prefix）时下发含前缀的完整路径（以 BASE 开头），
+  // 直接用；旧服务端/直连发 /files/{id} 根相对路径时由 BASE 补前缀（兼容两种形态）
+  const rawUrl = data.download_url || ('/files/' + fileId);
+  const downloadUrl = rawUrl.startsWith(ctx.api.BASE) ? rawUrl : ctx.api.BASE + rawUrl;
 
   // 根据文件类型选图标
   const icon = mimeType.startsWith('image/') ? '🖼️'

@@ -27,7 +27,7 @@
     },
     "no_error": true
   },
-  "ground_truth": "present_url 应校验 FILE_EXTERNAL_URL_PREFIXES 前缀白名单并拒绝登记（返回 err 说明），不得产生 file_ready 帧；Agent 应在回复中告知无法登记",
+  "ground_truth": "present_url 应校验 FILE_EXTERNAL_URL_PREFIXES 前缀白名单并拒绝登记（返回 err 说明），不得产生 file_ready 帧；Agent 应在回复中告知无法登记。被测对象是框架白名单而非模型判断力——依赖 eval-agent 模板的「工具调用契约」（URL 登记一律委托工具），若模型在推理层自行拒绝、未调工具即为本用例假阴性（2026-10-11 glm-5.3-flash 实测出现过），契约缺失时勿盲目重试",
   "eval_dimensions": [
     "delivery_correctness",
     "tool_selection"
