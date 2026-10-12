@@ -186,6 +186,25 @@ class ThreadControllerHistoryMergeTest {
     }
 
     @Test
+    void stateOnlyPathShouldRenderCompactionSummaryAsDivider() {
+        // state-only 路径（归档关闭/includeArchived=false）下压缩摘要不得以 user 身份上屏
+        when(agentStateReader.loadStateData("s1")).thenReturn("{\"session_id\":\"s1\",\"context\":["
+            + "{\"id\":\"m1\",\"name\":\"__compaction_summary__\",\"role\":\"USER\","
+            + "\"content\":[{\"type\":\"text\",\"text\":\"summary text\"}]},"
+            + "{\"id\":\"m2\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}]}");
+
+        var result = controller.threadHistory("s1", false, 200, null);
+
+        var messages = messagesOf(result);
+        assertEquals(2, messages.size());
+        assertEquals("compaction", messages.get(0).get("role"));
+        assertEquals("compaction_summary", messages.get(0).get("type"));
+        assertEquals("summary text", messages.get(0).get("content"));
+        assertEquals("m1", messages.get(0).get("msg_id"));
+        assertEquals("assistant", messages.get(1).get("role"));
+    }
+
+    @Test
     void legacySessionWithoutArchiveRowsShouldBehaveAsBefore() {
         when(agentStateReader.loadStateData("s1")).thenReturn(
             "{\"session_id\":\"s1\",\"context\":["

@@ -10,7 +10,7 @@ import { chat, status, subscribe, history, threads, deleteThread, patchThread, a
 import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic } from '../lib/sse.js';
 import { upload, download, textBytes, pngBytes } from '../lib/files.js';
-import { seedCompactionArchive } from '../lib/archive-seed.js';
+import { seedCompactionArchive, seedSyntheticReminderArchive } from '../lib/archive-seed.js';
 import mysql from 'mysql2/promise';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -1264,6 +1264,40 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
   expect(page2.nextBeforeId ?? null).toBeNull();
 
   await deleteThread(sid).catch(() => undefined); // 级联清理种子归档行（S7 同款）
+});
+
+test('HA4 SDK 合成提醒（后台子任务投递）不以 user 身份上屏', async () => {
+  const sid = sessionIdFor(`ha4-${uniq()}`);
+  const mark = uniq();
+  const tailArg = `ha4-tail-${mark}`;
+  // 真实一轮：注册会话 + 制造 origin=state 的未归档尾部
+  const s = chat({ message: `[E2E:plain](${tailArg})`, userId: U, sessionId: sid });
+  await waitTerminal(s);
+  expect(s.terminal?.type).toBe('done');
+  // 种子：清归档行 → 直插 真实 user + 两条合成提醒（元数据判据 / name=system 陈旧判据）+ assistant
+  const seed = await seedSyntheticReminderArchive(`${U}:${sid}`, sid, mark, U);
+
+  const full = await historyQ(sid);
+  const msgs = (full.messages ?? []) as HistoryMsg[];
+  // 合成提醒必须整条消失（无论带 synthetic 元数据还是仅 name=system）
+  for (const gone of [seed.reminderWithMeta, seed.reminderLegacy]) {
+    expect(msgs.find(m => m.msg_id === gone), `合成提醒 ${gone} 不得出现在 history`).toBeUndefined();
+  }
+  // 任何 user 消息不得携带 <system-reminder> 合成内容或提醒标记
+  for (const m of msgs.filter(m => m.role === 'user')) {
+    expect(String(m.content), 'user 消息不得是合成提醒').not.toContain('<system-reminder>');
+    expect(String(m.content)).not.toContain(`合成提醒-${mark}`);
+  }
+  // 过滤不得误伤：真实用户消息与助手回复照常可见
+  expect(msgs.find(m => m.msg_id === seed.realUser)!.role).toBe('user');
+  expect(msgs.find(m => m.msg_id === seed.assistant)!.role).toBe('assistant');
+  // state-only 视图不读归档种子；仅断言不被提醒污染（state 路径过滤由单测覆盖）
+  const stateOnly = await historyQ(sid, 'includeArchived=false');
+  for (const m of (stateOnly.messages ?? []) as HistoryMsg[]) {
+    if (m.role === 'user') expect(String(m.content)).not.toContain('<system-reminder>');
+  }
+
+  await deleteThread(sid).catch(() => undefined);
 });
 
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------

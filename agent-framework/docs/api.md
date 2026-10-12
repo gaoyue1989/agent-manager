@@ -380,6 +380,13 @@ Thread 历史消息 + pendingConfirm。
 工具调用带 `state`（ToolCallState：pending/asking/allowed/submitted/finished），
 工具结果带 `state`（ToolResultState：success/error/denied/interrupted）与 `output`，
 覆盖 HITL 批准后的恢复段，不受 Redis 事件流 TTL 限制。
+
+> **合成提醒消息已过滤**：SDK 会把后台子 agent 任务投递提醒以 `role=USER` + `name=system` +
+> `metadata.agentscope_synthetic=true` 持久化进 `AgentState.context`（内容形如
+> `<system-reminder>…</system-reminder>`）。它不属对话轮次，history 解析（`StateDataParser`）
+> 按合成标记 + `name=system` 双判据将其剔除，不再以 `role=user` 冒充用户提问上屏。
+> 压缩摘要（`name=__compaction_summary__`）不在此列，照常转 `role=compaction`。
+
 `pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
 的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。
 详见 [history-agentstate-design.md](history-agentstate-design.md) 与

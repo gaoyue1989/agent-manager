@@ -224,7 +224,7 @@ LLM 为**真实服务录制→回放**：`mock/llm-server.mjs` 取最后一条 u
 
 > **说明**：① 以下草稿为设计产物，**尚未写入 tests/ 亦未执行**；② 每个缺口小节末尾附「复核意见（评审留痕）」——其中指出的必红/致命/假绿类问题**已在上方用例草稿中修订吸收**（对照可见：如 U15 统一 debug-user 身份、MOD5 enable_thinking 断 false、MOD6 唯一 modelId、X10(沙箱)/X11/X13 同会话同代容器、SK2 补 uidB PUT 断言、MEM1 describe 作用域、X10(记忆) 改 files/download 探针、A6 双判据表述、TR 组 describe 化与 TR3 弃正则）；③ 复核中引用的实跑验证均出自上游评审记录。
 
-### 4.1 缺口一：压缩后会话历史双源合并与翻页游标（history，#45）—— 4 条：HA1/HA2/HA3/U15
+### 4.1 缺口一：压缩后会话历史双源合并与翻页游标（history，#45）—— 4 条：HA1/HA2/HA3/U15（+ 2026-10-12 补 HA4）
 
 **缺口描述**：服务端已实现 includeArchived/limit/beforeId 入参与 hasMore/nextBeforeId、origin 双源标记、role=compaction 合成项（ThreadController.java:215-226/614-629），但 e2e 对 compaction|includeArchived|beforeId|hasMore 零断言且无 compact 录制件；合并去重/游标回归会导致压缩前历史重复或丢页，属数据正确性级风险，单测 ThreadControllerHistoryMergeTest 不拦端到端装配（归档 Store 开关、store 装配失败回退）。
 
@@ -495,6 +495,31 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
   await deleteThread(sid).catch(() => undefined); // 级联清理种子归档行（S7 同款）
 });
 ```
+
+#### HA4 SDK 合成提醒（后台子任务投递）不以 user 身份上屏（2026-10-12 补）
+
+- **落点**：agent-framework/e2e/tests/api-core.spec.ts（HA 组，HA3 之后）
+- **blocker**：none
+- **背景**：官方 SDK 把后台子 agent 任务投递提醒以 `role=USER` + `name=system` +
+  `metadata.agentscope_synthetic=true` 持久化进 `AgentState.context`（`SubagentsMiddleware.buildDeliveryReminder`），
+  内容为 `<system-reminder>…</system-reminder>`。修复前 history 原样按 `role=user` 回放，用户会看到
+  「并非自己提问、却以 user 出现」的消息（本组即该行为的回归门禁）。
+- **前置**：
+  - 同 HA3 的 e2e-core 环境与归档默认开启；无需新增录制件（复用 plain 夹具与 [E2E:plain] 标记）
+  - 种子设施扩展：`lib/archive-seed.ts` 新增 `seedSyntheticReminderArchive`（清本会话归档行后直插
+    真实 user + 两条合成提醒〔带 synthetic 元数据 / 仅 name=system 的陈旧形态〕+ assistant）
+  - 修复点：`StateDataParser.isSyntheticReminder` + `toRoleContentList` 跳过；`ThreadController.normalizeCompactionSummaries`
+    令 state-only 视图的压缩摘要也转 `role=compaction`
+- **步骤**：
+  1. ha4 会话真实一轮 `[E2E:plain](ha4-tail-*)` 收敛 done（注册会话 + 制造 origin=state 尾部）
+  2. `seedSyntheticReminderArchive(`${U}:${sid}`, sid, mark, U)` 直插归档行
+  3. GET /history（合并视图）与 GET /history?includeArchived=false（state-only）
+- **断言**：
+  - 两条合成提醒的 msg_id 均不出现在合并视图（元数据判据与 name=system 判据双验）
+  - 任一 `role=user` 消息的 content 不含 `<system-reminder>` 与提醒标记（不冒充用户提问）
+  - 过滤不误伤：种子真实 user 与 assistant 照常可见（name=userId 不触发误剔）
+  - state-only 视图 user 消息同样不含 `<system-reminder>`（state 路径过滤由单测 StateDataParserTest 覆盖）
+- **draftCode**：实现即测试，见 `e2e/tests/api-core.spec.ts` 的 `HA4 SDK 合成提醒…` 用例。
 
 #### U15 Debug 页压缩分隔条历史回放（归档合并视图 → details.compaction-divider 渲染）
 
