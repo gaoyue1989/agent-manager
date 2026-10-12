@@ -1488,3 +1488,81 @@ test.describe('RD Redis 前缀隔离', () => {
     expect(baseLog).toContain('prefix=""');
   });
 });
+
+// ---------- CG 组：会话并发（issue #87 perPeer 回归钉） ----------
+// #87 根因：ChatUiChannel 默认 create()（DmScope.MAIN）把所有 DM 折叠成同一
+// canonicalKey（含 agent_state 槽位 gw-3f20f08c5499 全进程共享），SDK 网关按
+// canonicalKey 过 turn 闸门——全进程所有会话 turn 串行，每副本有效并发≈1
+// （#87 实测排队 17s~169s）。修复：两处构造点切 perPeer()（DmScope.PER_PEER，
+// peer=平台 sessionId），canonicalKey 每会话一把闸门。
+// 单测侧只有 AgentRuntimeServiceHitlTest#channelGatewaySessionIdShouldMatchSdkPerPeerCanonicalKey
+// 钉派生式，行为级并发语义此前零门禁。
+// ⚠ 实测口径（2026-10-12 变异验证）：把两处构造点改回 create()（共享槽位）后本组
+// 仍绿——2.0.3 SDK 的 HarnessGateway Gate key 按 session id 粒度解析，MAIN 只折叠
+// agent_state 槽位、**不折叠闸门键**，轻载双流不足以复现 17s+ 排队（#87 原始
+// 复现条件是 worker 并发压测）。故 CG1 定位为「防串行化回归的哨兵」而非确定性
+// 复现器：它守住修复后的并行语义不回退，但 MAIN 回退要在 CI 复现需
+// bench/load C 档（agent_start_delay_ms P100 门禁）那种并发压力。
+test.describe('CG 会话并发', () => {
+  // 两个会话各跑一个慢流（slow 标记：每 chunk 延迟），观察两者的事件时序——
+  // 串行形态下第二个会话的首事件须等第一个收尾。
+  test('CG1 不同会话 turn 并行（#87 perPeer 哨兵）', async () => {
+    const sidA = sessionIdFor(`cg1a-${uniq()}`);
+    const sidB = sessionIdFor(`cg1b-${uniq()}`);
+    // slow(text,chunkMs)：plain 夹具时序包装，每 chunk 间隔 400ms × 8 chunk ≈ 3.2s 收尾
+    const a = chat({ message: `[E2E:slow](cg1a,400,8)`, userId: U, sessionId: sidA, timeoutMs: 60_000 });
+    const b = chat({ message: `[E2E:slow](cg1b,400,8)`, userId: U, sessionId: sidB, timeoutMs: 60_000 });
+    await pollUntil(async () => [a.frames, b.frames], ([fa, fb]) =>
+      fa.some(f => f.type === 'AGENT_START') && fb.some(f => f.type === 'AGENT_START'),
+    60_000, 100);
+    expect(a.frames.find(f => f.type === 'AGENT_START'), 'A 会话未收到 AGENT_START').toBeTruthy();
+    expect(b.frames.find(f => f.type === 'AGENT_START'), 'B 会话未收到 AGENT_START').toBeTruthy();
+    // /threads/chat 流携带 id: 行但为事件哈希（非 seq），时序判据用帧序下标：
+    // B 的启动不得晚于 A 的收尾——真串行（同 key 互斥）时差值为 A 的整段时长量级
+    const endedIdxA = a.frames.findIndex(f => f.type === 'AGENT_END' || f.type === 'done');
+    const startedIdxB = b.frames.findIndex(f => f.type === 'AGENT_START');
+    if (endedIdxA >= 0) {
+      expect(startedIdxB, 'B 的 AGENT_START 晚于 A 的收尾——会话 turn 疑似串行（#87 回退）').toBeLessThan(endedIdxA);
+    }
+    // 两流各自正常收尾（互不干扰）
+    await waitTerminal(a);
+    await waitTerminal(b);
+    expect(a.terminal?.type).toBe('done');
+    expect(b.terminal?.type).toBe('done');
+  });
+
+  // 同会话互斥仍是既有语义（R3 多副本侧同款）：第二 turn 排队并收 waiting 帧，
+  // perPeer 后「按会话互斥」必须保持——本用例防修复把互斥也一并抹掉。
+  test('CG2 同会话第二 turn 排队收 waiting 帧', async () => {
+    const sid = sessionIdFor(`cg2-${uniq()}`);
+    const first = chat({ message: `[E2E:slow](cg2a,300,8)`, userId: U, sessionId: sid, timeoutMs: 60_000 });
+    await pollUntil(async () => first.frames, fs => fs.some(f => f.type === 'MODEL_CALL_START'), 30_000, 100);
+    const second = chat({ message: `[E2E:plain]`, userId: U, sessionId: sid, timeoutMs: 60_000 });
+    await pollUntil(async () => second.frames, fs => fs.some(f => f.type === 'waiting'), 40_000, 500);
+    expect(second.frames.filter(f => f.type === 'waiting').length).toBeGreaterThanOrEqual(1);
+    second.abort();
+    await waitTerminal(first);
+    expect(first.terminal?.type).toBe('done');
+  });
+});
+
+// ---------- Q86 组：HITL ask 段帧序（issue #86 契约 v2 行为钉） ----------
+// 4db16ba 起 ask 段帧序为 permission_ask → REQUEST_STOP → AGENT_RESULT → AGENT_END：
+// ask 段不再提前 release+关流，而是自然收尾到 AGENT_END（终帧 AGENT_END、非 permission_ask）。
+// 旧版 e2e 全组对 AGENT_END 数/挂起后终帧形态零断言，若回退旧序（提前关流）门禁不红。
+test.describe('Q86 HITL ask 段帧序', () => {
+  test('Q86 1 ask 段以 AGENT_END 自然收尾（4db16ba+ 新序）', async ({ request }) => {
+    const app = await createApprovalApp();
+    const sid = sessionIdFor(`q86-${uniq()}`);
+    const ask = chat({ message: `[E2E:hitl:submit](${app})`, userId: U, sessionId: sid });
+    await waitTerminal(ask);
+    // ask 帧为末个业务终态（sse.ts 归一取 permission_ask 优先于 AGENT_END，此处显式钉帧序）
+    expect(ask.terminal?.type).toBe('permission_ask');
+    const types = ask.frames.map(f => f.type);
+    expect(types).toContain('permission_ask');
+    // 新序（4db16ba+）：ask 之后仍收到 SDK 的 AGENT_END 收尾帧；旧序在此处提前关流（无 AGENT_END）
+    expect(types.indexOf('permission_ask')).toBeLessThan(types.lastIndexOf('AGENT_END'));
+    // 会话进入 waiting_confirm 挂起态（ask 帧语义不变）
+    expect((await status(sid)).state).toBe('waiting_confirm');
+  });
+});

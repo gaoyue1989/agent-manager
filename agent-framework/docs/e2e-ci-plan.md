@@ -105,7 +105,7 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 |-----|------|------|------|------|
 | `test`（已有） | — | mvn test | — | ~6min |
 | `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
-| `e2e-core` | 1 | S/F/H/M/A/FW/RD 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.11；SK/MEM/HA 组无 §5 小节，用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4，同落 api-core 项目） | needs: changes（与单测并行） | ~12-15min |
+| `e2e-core` | 1 | S/F/H/M/A/FW/RD/CG/Q86 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.13；SK/MEM/HA 组无 §5 小节，用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4，同落 api-core 项目） | needs: changes（与单测并行） | ~12-15min |
 | `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
 | `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
@@ -533,6 +533,26 @@ agent-config/
 | P6 | 存量零影响 | 协议关实例无 `/tasks` 端点（T8 口径） |
 | P7 | A2A Job 同键收敛 | 同键两次提交（LB 随机路由）→ 同一 taskId、idempotent 收敛 |
 
+### 5.13 CG / Q86 组 — 会话并发与 HITL ask 段帧序（e2e-core；2026-10-12 补录）
+
+> **2026-10-12 补录**：近 5 天两处高风险 Java 变更（1a69c97 的 #87 PER_PEER 会话闸门、
+> 4db16ba 起的 #86 HITL 契约 v2 新帧序）此前**只有单测侧覆盖**，e2e 黑盒面零断言——
+> canonicalKey 若回退 MAIN（或 SDK 升级改变 DmScope 语义）、ask 段提前关流（回旧序），
+> 单测仍绿而线上全会话串行/评测 auto_confirm 全灭。本组把两处拉进 core job 行为级门禁。
+
+| # | 场景 | 断言要点 |
+|---|------|---------|
+| CG1 | 不同会话 turn 并行（#87 perPeer 哨兵） | 两会话各发 `[E2E:slow]` 长流：B 会话的 AGENT_START 必须早于 A 会话的收尾帧；两流均各自正常收尾。**变异验证口径**：将两处构造点改回 `create()`（MAIN/共享槽位）后本用例仍绿——2.0.3 SDK 的 TurnGate key 按 session id 粒度解析，轻载双流复现不出 #87 的 17s+ 排队（原始复现条件是 bench/load C 档并发压测）。故定位为防串行化回归的哨兵，确定性复现归 bench C 档门禁 |
+| CG2 | 同会话第二 turn 排队收 waiting 帧 | 同会话慢流在途 → 第二请求观察 waiting 帧（#87 修复把「按会话互斥」保留后回退 MAIN 的伴生风险：互斥语义被一并抹掉） |
+| Q86 | ask 段以 AGENT_END 自然收尾（#86 新序行为钉） | permission_ask 后仍收到 AGENT_END（帧序上 ask 早于末个 AGENT_END）；会话 awaiting_confirm 挂起态保持。旧序（提前 release+关流）在 `types.lastIndexOf('AGENT_END')` 缺失即红 |
+
+> 不覆盖（有意）：#87 串行化的确定性复现——需并发压测级输入（bench/run-bench.sh C 档
+> `agent_start_delay_ms` P100 门禁承担，e2e 侧 CG1 只作轻载哨兵）；#87 心跳类可观测性
+> （waiting 心跳/首事件 WARN 已由 ChatStreamControllerTest 42 例单测覆盖，e2e 侧 CG2 已
+> 间接证实 waiting 帧到达客户端）；#86 的挂起判定与 auto_confirm 全链路由 flywheel
+> selftest 新旧双序钉子 + 全量评测用例（case_hitl_publish_confirm_001）看守，e2e 侧
+> Q86 只钉帧序这一层。
+
 ---
 
 ## 6. 测试代码结构与技术选型
@@ -571,7 +591,7 @@ agent-framework/e2e/
 │   ├── matchers.ts           # expectFrames(有序子集)/expectTerminal(done|permission_ask|error)/seqMonotonic
 │   └── selectors.ts          # §5.7 选择器契约单点维护
 ├── tests/
-│   ├── api-core.spec.ts      # S/F/H/M/A/SK/MEM/HA/FW/RD 组（可拆多文件；api-models/api-reload 同属 core job）
+│   ├── api-core.spec.ts      # S/F/H/M/A/SK/MEM/HA/FW/RD/CG/Q86 组（可拆多文件；api-models/api-reload 同属 core job）
 │   ├── api-models.spec.ts    # MOD 组（模型管理）
 │   ├── api-reload.spec.ts    # RL 组（OAF reload）
 │   ├── api-multi.spec.ts     # R 组
