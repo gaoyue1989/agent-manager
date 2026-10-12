@@ -13,7 +13,7 @@ const state = {
     current: (() => { try { return localStorage.getItem('debug-sid'); } catch (e) { return null; } })()
   },
   ui: {
-    streamMode: 'a2a', // a2a | channel
+    streamMode: 'channel', // a2a | channel —— 默认 Channel：唯一对话入口，支持 durable SSE 刷新续传
     isStreaming: false,
     theme: null, // 'light' | 'dark' | null(跟随系统)
     userId: (() => { try { return localStorage.getItem('debug-uid') || 'debug-user'; } catch (e) { return 'debug-user'; } })()
