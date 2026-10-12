@@ -179,7 +179,7 @@ class UserSkillServiceTest {
         var oversized = "x".repeat(UserSkillService.MAX_CONTENT_BYTES + 1);
         assertThrows(UserSkillService.ContentTooLargeException.class,
             () -> svc.writeSkill(USER, "demo-a", oversized));
-        // 恰好 100KB 允许
+        // 恰好达到上限允许
         assertEquals("created",
             svc.writeSkill(USER, "demo-a", "y".repeat(UserSkillService.MAX_CONTENT_BYTES)).action());
     }
@@ -523,6 +523,25 @@ class UserSkillServiceTest {
         var e = assertThrows(IllegalArgumentException.class,
             () -> service().syncFromPackage(USER, "many"));
         assertTrue(e.getMessage().contains("文件数"), "文件数超限应给出明确原因: " + e.getMessage());
+    }
+
+    @Test
+    void syncFromPackageShouldRejectSkillExceedingTotalBytes() throws IOException {
+        // 单文件均合法（恰好上限），但累计超过单技能总字节上限 → 413 语义、不留半份
+        var dir = skillManageService.getSkillsDir().resolve("huge");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("SKILL.md"), PKG_SKILL_MD, StandardCharsets.UTF_8);
+        var chunk = "x".repeat(UserSkillService.MAX_CONTENT_BYTES);
+        var filesNeeded = (int) (UserSkillService.MAX_SKILL_TOTAL_BYTES
+            / UserSkillService.MAX_CONTENT_BYTES) + 1;
+        for (var i = 0; i < filesNeeded; i++) {
+            Files.writeString(dir.resolve("f" + i + ".txt"), chunk, StandardCharsets.UTF_8);
+        }
+
+        var e = assertThrows(UserSkillService.ContentTooLargeException.class,
+            () -> service().syncFromPackage(USER, "huge"));
+        assertTrue(e.getMessage().contains("总大小"), "总大小超限应给出明确原因: " + e.getMessage());
+        assertNull(store.get(skillNs(USER), "/huge/SKILL.md"), "超限必须整体失败，不留半份覆盖");
     }
 
     // ========== zip 上传（个人技能 L4） ==========

@@ -152,8 +152,8 @@ curl http://localhost:8100/skills
 | GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}` |
 | GET | `/skills/users/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
 | GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
-| PUT | `/skills/users/{name}` | 写个人技能，body `{content}` |
-| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
+| PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB） |
+| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
 | DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
 | GET | `/debug/user-skills` | **全量用户索引**（运维/调试）；`{count, users:[...], truncated?}`；索引失败 500 |

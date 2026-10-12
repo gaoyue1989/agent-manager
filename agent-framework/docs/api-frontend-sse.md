@@ -1129,8 +1129,8 @@ GET /skills/manage
 | `/skills/users` | GET | 当前用户的 L4 技能 | `{userId, skills, tombstones}` |
 | `/skills/users/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
 | `/skills/users/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`） | `application/zip` 附件 |
-| `/skills/users/{name}` | PUT | 写个人技能，body `{content}` | `{userId, name, action, version, message}` |
-| `/skills/users/upload` | POST | zip 上传个人技能（multipart `file`，≤10MB；二进制拒绝） | `{userId, name, action, files, version, message}` |
+| `/skills/users/{name}` | PUT | 写个人技能，body `{content}`（≤1MB） | `{userId, name, action, version, message}` |
+| `/skills/users/upload` | POST | zip 上传个人技能（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200；二进制拒绝） | `{userId, name, action, files, version, message}` |
 | `/skills/users/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
 | `/skills/users/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |
 | `/debug/user-skills` | GET | 全量用户索引（运维/调试） | `{count, users:[...], truncated?}` |
