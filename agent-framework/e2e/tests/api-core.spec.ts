@@ -1641,6 +1641,8 @@ test.describe('Q86 HITL ask 段帧序', () => {
     // 会话进入 waiting_confirm 挂起态（ask 帧语义不变）
     expect((await status(sid)).state).toBe('waiting_confirm');
   });
+});
+
 // ---------- X 组：前缀感知（subpath-routing-design §9.2）----------
 // e2e nginx LB 根代理不设 X-Forwarded-Prefix，但透传客户端任意头 → 用例自带头直证
 // 「服务端对外 URL 自感知」契约（agent-card url / file_ready.download_url / endpoints）；
