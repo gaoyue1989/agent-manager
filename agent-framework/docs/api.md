@@ -394,6 +394,12 @@ Thread 历史消息 + pendingConfirm。
 > slot 键与 turn 结束 write-through 完全同构、`msg_id` 同源，upsert 幂等不产生重复。
 > 归档关闭（`AGENT_HISTORY_ARCHIVE_ENABLED=false`）时不生效（无消费方）。
 
+> **@Skill 注入区块不上屏（2026-10-12）**：用户消息里的 `@SkillName` 会被
+> `SkillInjectionService` 展开成引用标记 + 整篇 SKILL.md（模型必须有完整 Skill 上下文）。
+> history 展示层会剥离该注入区块（`SkillInjectionService.stripInjectedSkills`），
+> `messages[].content` 只保留**用户自己敲的内容**——如
+> `[@Skill:pdf] 帮我处理文件`。落库原文仍含注入内容（模型上下文事实不变），仅展示剥离。
+
 > **turn 失败留痕（2026-10-12）**：turn 以 `error` 终态结束（如模型网关 503 重试耗尽）时，
 > 失败原因会以一条 `role=assistant`、`name=__turn_error__` 的消息写入 `session_message`
 > （内容 `⚠️ 本次执行失败：<原因>`，`msg_id=__turn_error__:{replyId}` 幂等）。此前错误只以 SSE

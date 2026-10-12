@@ -1353,6 +1353,29 @@ test('HA6 回合失败留痕：刷新后 history 可见失败原因（非孤儿�
   await deleteThread(sid).catch(() => undefined);
 });
 
+test('HA7 @Skill 注入区块不上屏：history 只显示用户原文', async () => {
+  const sid = sessionIdFor(`ha7-${uniq()}`);
+  const own = `ha7-own-${uniq()}`;
+  // @demo-skill 命中夹具技能：注入会把整篇 SKILL.md 追加进用户消息（模型必需），
+  // 但展示层须剥离——否则提问气泡拖着整篇技能文档
+  const s = chat({ message: `@demo-skill [E2E:plain](${own})`, userId: U, sessionId: sid });
+  await waitTerminal(s);
+
+  const h = await pollUntil(async () => historyQ(sid), x =>
+    ((x.messages ?? []) as HistoryMsg[]).some(
+      m => m.role === 'user' && String(m.content).includes(own)));
+  const userMsgs = ((h.messages ?? []) as HistoryMsg[]).filter(m => m.role === 'user');
+  const mine = userMsgs.find(m => String(m.content).includes(own));
+  expect(mine, '用户提问必须在 history 可见').toBeTruthy();
+  expect(String(mine!.content), '提问气泡不得含注入区块').not.toContain('Referenced Skills');
+  expect(String(mine!.content), '提问气泡不得拖着整篇 SKILL.md').not.toContain('demo-skill 技能已加载');
+  // 引用标记保留（反映用户所敲的 @demo-skill），正文仍是用户原文
+  expect(String(mine!.content)).toContain('[@Skill:demo-skill]');
+  expect(String(mine!.content).length, '只剩用户原文，长度远小于注入后').toBeLessThan(150);
+
+  await deleteThread(sid).catch(() => undefined);
+});
+
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------
 // 覆盖缺口：e2e tests/scripts/mock/config 对 AGENT_MEMORY_ENABLED 零命中（grep exit=1）。
 // 整组包进 describe：文件级 beforeAll 会在 S1 之前拉起第二 JVM 且 spawn 失败炸全文件——

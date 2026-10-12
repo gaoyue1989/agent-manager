@@ -42,6 +42,32 @@ public class SkillInjectionService {
         "(?<![\\w])@([\\w\\u4e00-\\u9fff.\\-]+)"
     );
 
+    /**
+     * 注入区块起始标记。
+     *
+     * <p>append（{@link #injectSkillReferences}）与 strip（{@link #stripInjectedSkills}）
+     * 必须用同一常量——分叉会让剥离漂移（漏剥或误剥用户正文）。
+     */
+    public static final String SKILL_SECTION_MARKER = "\n\n---\n## Referenced Skills\n";
+
+    /**
+     * 剥离注入的 Skill 引用区块，还原为「用户自己敲的内容」（history 展示用，不改动模型上下文）。
+     *
+     * <p><b>为什么要剥离</b>：注入把整篇 SKILL.md 追加进用户消息，那是给模型看的上下文
+     * （模型必须有完整 Skill 内容）。但用户可见历史原样渲染这条消息时，提问气泡里会拖着
+     * 整篇技能文档——既冗长，也不是用户输入的任何一部分。剥离后只剩用户原文
+     * （{@code @Name} 已替换为 {@code [@Skill:Name]}，仍反映用户所敲）。
+     *
+     * @return 剥离后的文本；无注入区块时原样返回（null/空安全）
+     */
+    public static String stripInjectedSkills(String text) {
+        if (text == null || text.isEmpty()) {
+            return text == null ? "" : text;
+        }
+        var idx = text.indexOf(SKILL_SECTION_MARKER);
+        return idx >= 0 ? text.substring(0, idx) : text;
+    }
+
     private final SkillCatalogService catalogService;
     private final SkillManageService manageService;
     private final UserSkillService userSkillService;
@@ -121,9 +147,9 @@ public class SkillInjectionService {
         }
         matcher.appendTail(sb);
 
-        // 4. 追加 Skill 内容块
+        // 4. 追加 Skill 内容块（标记与 stripInjectedSkills 共用常量，剥离不漂移）
         var contentBuilder = new StringBuilder(sb.toString());
-        contentBuilder.append("\n\n---\n## Referenced Skills\n");
+        contentBuilder.append(SKILL_SECTION_MARKER);
 
         for (var skillName : referencedSkills) {
             try {

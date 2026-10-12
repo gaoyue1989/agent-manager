@@ -224,7 +224,7 @@ LLM 为**真实服务录制→回放**：`mock/llm-server.mjs` 取最后一条 u
 
 > **说明**：① 以下草稿为设计产物，**尚未写入 tests/ 亦未执行**；② 每个缺口小节末尾附「复核意见（评审留痕）」——其中指出的必红/致命/假绿类问题**已在上方用例草稿中修订吸收**（对照可见：如 U15 统一 debug-user 身份、MOD5 enable_thinking 断 false、MOD6 唯一 modelId、X10(沙箱)/X11/X13 同会话同代容器、SK2 补 uidB PUT 断言、MEM1 describe 作用域、X10(记忆) 改 files/download 探针、A6 双判据表述、TR 组 describe 化与 TR3 弃正则）；③ 复核中引用的实跑验证均出自上游评审记录。
 
-### 4.1 缺口一：压缩后会话历史双源合并与翻页游标（history，#45）—— 4 条：HA1/HA2/HA3/U15（+ 2026-10-12 补 HA4/HA5/HA6）
+### 4.1 缺口一：压缩后会话历史双源合并与翻页游标（history，#45）—— 4 条：HA1/HA2/HA3/U15（+ 2026-10-12 补 HA4/HA5/HA6/HA7）
 
 **缺口描述**：服务端已实现 includeArchived/limit/beforeId 入参与 hasMore/nextBeforeId、origin 双源标记、role=compaction 合成项（ThreadController.java:215-226/614-629），但 e2e 对 compaction|includeArchived|beforeId|hasMore 零断言且无 compact 录制件；合并去重/游标回归会导致压缩前历史重复或丢页，属数据正确性级风险，单测 ThreadControllerHistoryMergeTest 不拦端到端装配（归档 Store 开关、store 装配失败回退）。
 
@@ -548,6 +548,20 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
 - **断言**：终态为 `error`；history 出现恰一条 `role=assistant` 含「本次执行失败」的消息，
   且内容长度大于前缀（含具体原因）
 - **draftCode**：实现即测试，见 `e2e/tests/api-core.spec.ts` 的 `HA6 回合失败留痕…` 用例。
+
+#### HA7 @Skill 注入区块不上屏（history 只显示用户原文，2026-10-12 补）
+
+- **落点**：agent-framework/e2e/tests/api-core.spec.ts（HA 组，HA6 之后）
+- **背景**：`@Skill` 注入把整篇 SKILL.md 追加进用户消息（模型必需），history 原样渲染，
+  提问气泡会拖着整篇技能文档——既冗长又非用户输入。修复：展示层剥离注入区块
+  （`SkillInjectionService.stripInjectedSkills`，append 与 strip 共用同一标记常量）。
+- **前置**：夹具技能 `demo-skill`（`/skills` 动态目录，`S1` 已断言其存在）
+- **步骤**：`@demo-skill [E2E:plain](ha7-own-*)` 单轮 → waitTerminal → pollUntil history 含用户原文
+- **断言**：
+  - user 消息不含 `Referenced Skills`、不含技能正文（`demo-skill 技能已加载`）——注入区块不上屏
+  - 仍保留 `[@Skill:demo-skill]` 引用标记（反映用户所敲）；长度远小于注入后（只剩原文）
+  - 注：注入本身不受影响（落库原文仍含完整 Skill 内容，模型上下文不变），由单测覆盖
+- **draftCode**：实现即测试，见 `e2e/tests/api-core.spec.ts` 的 `HA7 @Skill 注入…` 用例。
 
 #### U15 Debug 页压缩分隔条历史回放（归档合并视图 → details.compaction-divider 渲染）
 
