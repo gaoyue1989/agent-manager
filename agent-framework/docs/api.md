@@ -394,6 +394,13 @@ Thread 历史消息 + pendingConfirm。
 > slot 键与 turn 结束 write-through 完全同构、`msg_id` 同源，upsert 幂等不产生重复。
 > 归档关闭（`AGENT_HISTORY_ARCHIVE_ENABLED=false`）时不生效（无消费方）。
 
+> **turn 失败留痕（2026-10-12）**：turn 以 `error` 终态结束（如模型网关 503 重试耗尽）时，
+> 失败原因会以一条 `role=assistant`、`name=__turn_error__` 的消息写入 `session_message`
+> （内容 `⚠️ 本次执行失败：<原因>`，`msg_id=__turn_error__:{replyId}` 幂等）。此前错误只以 SSE
+> `error` 帧发给当时连着的前端，刷新后 history/status 不体现失败，只剩回合起始归档留下的
+> 用户提问（孤儿提问）——用户无从得知上轮失败。现刷新后可直接在历史里看到失败提示
+> （敏感值已遮掩、超长截断 500 字）。
+
 `pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
 的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。
 详见 [history-agentstate-design.md](history-agentstate-design.md) 与

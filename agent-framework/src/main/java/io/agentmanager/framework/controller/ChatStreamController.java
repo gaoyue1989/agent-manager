@@ -122,6 +122,13 @@ public class ChatStreamController {
     private final ModelCatalog modelCatalog;
     private final SessionTitleService sessionTitleService;
 
+    /**
+     * 会话消息轨存储：turn 失败留痕（{@link #recordTurnError}）用。字段注入（required=false）
+     * 而非构造参数——避免改动全部构造调用点（单测直接 new）；归档关闭时为 null，留痕跳过。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
+
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
 
@@ -485,9 +492,11 @@ public class ChatStreamController {
                                 log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
                             } else if (!lease.isLost()) {
                                 // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
+                                var errText = e.getMessage() != null
+                                    ? e.getMessage() : e.getClass().getSimpleName();
                                 eventBus.emitSynthetic(finalSessionId, replyId, "error",
-                                    "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
-                                        e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
+                                    "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(errText) + "}");
+                                recordTurnError(finalSessionId, replyId, errText);
                             }
                             endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
                         },
@@ -679,6 +688,24 @@ public class ChatStreamController {
             toolCallNames.remove(toolCallId);
             presentFileBuffers.remove(toolCallId);
             writeFileInputBuffers.remove(toolCallId);
+        }
+    }
+
+    /**
+     * turn 失败留痕：把失败原因写入会话消息轨，使刷新后 history 可见「本次执行失败：…」，
+     * 不再只剩回合起始归档留下的用户提问（孤儿提问，用户无法知道上轮失败）。
+     * 归档存储缺失（归档关闭 / 单测）时跳过；失败忽略——留痕不影响主链路。
+     */
+    private void recordTurnError(String sessionId, String replyId, String message) {
+        if (sessionMessageStore == null || message == null || message.isBlank()) {
+            return;
+        }
+        try {
+            var masked = io.agentmanager.framework.service.StateDataParser.maskSensitiveText(message);
+            var text = masked.length() > 500 ? masked.substring(0, 500) : masked;
+            sessionMessageStore.archiveTurnError(sessionId, replyId, "⚠️ 本次执行失败：" + text);
+        } catch (Exception ex) {
+            log.debug("recordTurnError failed (sid={}): {}", sessionId, ex.getMessage());
         }
     }
 

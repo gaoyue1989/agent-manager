@@ -136,6 +136,39 @@ public class SessionMessageStore {
     }
 
     /**
+     * 回合执行失败留痕（2026-10-12）：把一条 assistant 消息写入会话消息轨，使
+     * {@code GET /threads/{sid}/history} 刷新后可见「本次执行失败：…」。
+     *
+     * <p>背景：turn 失败（如模型网关 503 重试耗尽、工具/流异常）只以 SSE {@code error} 帧
+     * 发给当时连着的前端；刷新后 history/status 不体现失败，只剩回合起始归档留下的用户提问
+     * （形如「孤儿提问」，用户无法知道上轮失败）。本方法把失败原因落进消息轨补齐。
+     *
+     * <p>幂等：msg_id 固定为 {@code __turn_error__:{turnId}}（turnId=replyId），同一回合重复
+     * 收尾不产生重复行；{@code sessionId} 用调用方（前端/网关注入）的会话键，与
+     * {@link #findPage} 的等值谓词直接命中。fail-soft：失败仅告警。
+     *
+     * @param turnId  回合标识（replyId）；缺失时回退随机 id（不幂等但不丢留痕）
+     */
+    public void archiveTurnError(String sessionId, String turnId, String message) {
+        if (sessionId == null || sessionId.isBlank() || message == null || message.isBlank()) {
+            return;
+        }
+        try {
+            var msgId = "__turn_error__:"
+                + (turnId != null && !turnId.isBlank() ? turnId : java.util.UUID.randomUUID().toString());
+            var node = MAPPER.createObjectNode();
+            node.put("id", msgId);
+            node.put("name", "__turn_error__");
+            node.put("role", "ASSISTANT");
+            node.putArray("content").addObject().put("type", "text").put("text", message);
+            archiveBatch(sessionId, List.of(new MessageRecord(
+                msgId, KIND_MESSAGE, "ASSISTANT", null, MAPPER.writeValueAsString(node))));
+        } catch (Exception e) {
+            log.warn("SessionMessageStore: archiveTurnError failed for {}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /**
      * 查询会话归档消息：id 小于 beforeId（null = 最新页）中最新的至多 limit 条，按 id 升序返回。
      *
      * <p>session 匹配谓词与 {@link AgentStateReader#loadFragments} 同款 5 形 LIKE：

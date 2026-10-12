@@ -1333,6 +1333,26 @@ test('HA5 turn 执行中 history 即可见用户输入（回合起始归档）',
   await deleteThread(sid).catch(() => undefined);
 });
 
+test('HA6 回合失败留痕：刷新后 history 可见失败原因（非孤儿提问）', async () => {
+  const sid = sessionIdFor(`ha6-${uniq()}`);
+  // 未登记场景标记 → mock LLM 返回 500 → SDK 重试耗尽 → turn 以 error 终态结束
+  const s = chat({ message: '[E2E:ha6-missing-scenario] fail', userId: U, sessionId: sid, timeoutMs: 60_000 });
+  await waitTerminal(s);
+  expect(s.terminal?.type, '未知场景标记应让 turn 以 error 收尾').toBe('error');
+
+  // 失败原因必须落进会话消息轨：刷新后 history 不再只剩孤儿提问
+  const h = await pollUntil(async () => historyQ(sid), x =>
+    ((x.messages ?? []) as HistoryMsg[]).some(
+      m => m.role === 'assistant' && String(m.content).includes('本次执行失败')));
+  const marked = ((h.messages ?? []) as HistoryMsg[]).filter(
+    m => m.role === 'assistant' && String(m.content).includes('本次执行失败'));
+  expect(marked.length, '失败留痕恰一条（同 replyId 幂等）').toBe(1);
+  expect(String(marked[0].content).length, '失败留痕须含具体原因，非仅前缀')
+    .toBeGreaterThan('⚠️ 本次执行失败：'.length);
+
+  await deleteThread(sid).catch(() => undefined);
+});
+
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------
 // 覆盖缺口：e2e tests/scripts/mock/config 对 AGENT_MEMORY_ENABLED 零命中（grep exit=1）。
 // 整组包进 describe：文件级 beforeAll 会在 S1 之前拉起第二 JVM 且 spawn 失败炸全文件——
