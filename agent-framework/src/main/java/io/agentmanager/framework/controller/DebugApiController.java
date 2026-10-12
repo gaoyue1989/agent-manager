@@ -216,7 +216,7 @@ public class DebugApiController {
                     result.put("active_sessions_today", rs.getLong("active_sessions_today"));
                 }
             }
-            long questions = 0;
+            long turns = 0;
             long answers = 0;
             long totalMessages = 0;
             long messagesToday = 0;
@@ -229,15 +229,16 @@ public class DebugApiController {
                     var c = rs.getLong("c");
                     totalMessages += c;
                     messagesToday += rs.getLong("today");
-                    if ("user".equals(role)) {
-                        questions += c;
-                    } else if ("assistant".equals(role)) {
+                    // 归档 role 存 MsgRole 枚举名（大写 USER/ASSISTANT/TOOL/SYSTEM）
+                    if ("USER".equalsIgnoreCase(role)) {
+                        turns += c; // 一条 USER 消息 = 一轮
+                    } else if ("ASSISTANT".equalsIgnoreCase(role)) {
                         answers += c;
                     }
                 }
             }
             result.put("total_messages", totalMessages);
-            result.put("total_questions", questions);
+            result.put("total_turns", turns);
             result.put("total_answers", answers);
             result.put("messages_today", messagesToday);
             // 问题会话：工具失败（error/denied/interrupted）或 HITL 待确认
@@ -258,8 +259,9 @@ public class DebugApiController {
      *
      * <p>数据源与 {@code GET /threads} 一致——{@code session_user} 驱动，LEFT JOIN
      * {@code agent_state} 取活跃时间（双形态 slot 匹配见 {@link #AGENT_STATE_JOIN_MONITOR}）；
-     * 额外按会话合并归档消息数（{@code message_count}）与问题标记（{@code error_count} /
-     * {@code has_error} / {@code pending_confirm}，见 {@link #loadMonitorProblems}）。
+     * 额外按会话合并归档轮次数（{@code turn_count}，{@code role='USER'} 消息数）、消息数
+     * （{@code message_count}）与问题标记（{@code error_count} / {@code has_error} /
+     * {@code pending_confirm}，见 {@link #loadMonitorProblems}）。
      * 时间过滤作用于 {@code session_user.updated_at}（每次 chat/confirm 刷新），
      * 展示的 {@code updated_at} 取 agent_state 与 created_at 的较大者。
      *
@@ -343,6 +345,7 @@ public class DebugApiController {
                         m.put("updated_at", updatedAt != null ? updatedAt.toString()
                             : (createdAt != null ? createdAt.toString() : ""));
                         m.put("message_count", problems.messageCounts().getOrDefault(sid, 0L));
+                        m.put("turn_count", problems.turnCounts().getOrDefault(sid, 0L));
                         m.put("error_count", errorCount);
                         m.put("has_error", errorCount > 0);
                         m.put("pending_confirm", pending);
@@ -375,8 +378,9 @@ public class DebugApiController {
         }
     }
 
-    /** 运营监控问题标记：每会话消息/工具失败计数 + 待确认会话集合 */
+    /** 运营监控问题标记：每会话消息/轮次/工具失败计数 + 待确认会话集合 */
     private record MonitorProblems(java.util.Map<String, Long> messageCounts,
+                                   java.util.Map<String, Long> turnCounts,
                                    java.util.Map<String, Long> errorCounts,
                                    java.util.Set<String> pendingSessions) {
         /** 并集会话数：出现工具失败或有 HITL 待确认的会话总数 */
@@ -388,28 +392,54 @@ public class DebugApiController {
     }
 
     /**
-     * 加载问题标记（两次查询，均为单遍扫描，避免逐行子查询）：
+     * 加载问题标记（三次查询，均为单遍扫描，避免逐行子查询）：
      * <ul>
-     *   <li>会话消息聚合：一次 {@code GROUP BY} 同时得出每会话归档消息总数（{@code message_count}）
-     *       与工具失败数（{@code error_count}，判据见 {@link #TOOL_ERROR_PREDICATE}）</li>
+     *   <li>已登记会话 id（{@code session_user}）：作为 slot 复合键归属的权威判据</li>
+     *   <li>会话消息聚合：按完整 slot 键 {@code GROUP BY session_id}（走 idx_session_id 索引序），
+     *       同时得出每 slot 的归档消息总数、轮次数（{@code role='USER'} 条数）与工具失败数
+     *       （判据见 {@link #TOOL_ERROR_PREDICATE}），再经 {@link #resolveBusinessSid} 归属到真实业务会话</li>
      *   <li>HITL 待确认：{@code confirm_context} 未消费且未过期（{@link #PENDING_CONFIRM_SQL}），
      *       TTL 口径取自 {@link io.agentmanager.framework.service.ConfirmContextStore}</li>
      * </ul>
+     *
+     * <p><b>为何不能直接按 {@code SUBSTRING_INDEX(..., -1)} 取尾段分组</b>：session_message 的
+     * session_id 是 slot 复合键 {@code "{A}:{B}"}——规范形态（A2A/直接调用）A=用户、B=业务会话；
+     * 但 Channel 形态（{@code ChatUiChannel} 网关，issue #87 PER_PEER）A=业务会话、B=网关键
+     * （{@code gw-<hash>}）。只取一段会把 Channel 会话全归到网关键（不在 session_user 中），
+     * 产生「概览有、列表无」的幽灵计数。故按完整 slot 分组后用前缀/后缀双形态与已登记集合匹配。
      */
     private MonitorProblems loadMonitorProblems(Connection conn) throws java.sql.SQLException {
+        // 已登记业务会话 id（session_user 为权威来源）
+        var known = new java.util.HashSet<String>();
+        try (var stmt = conn.createStatement();
+             var rs = stmt.executeQuery("SELECT session_id FROM session_user")) {
+            while (rs.next()) {
+                var sid = rs.getString("session_id");
+                if (sid != null && !sid.isBlank()) {
+                    known.add(sid);
+                }
+            }
+        }
+
         var messageCounts = new java.util.HashMap<String, Long>();
+        var turnCounts = new java.util.HashMap<String, Long>();
         var errorCounts = new java.util.HashMap<String, Long>();
         try (var stmt = conn.createStatement();
              var rs = stmt.executeQuery(
-                 "SELECT SUBSTRING_INDEX(session_id, ':', -1) AS sid, COUNT(*) AS total, "
+                 "SELECT session_id, COUNT(*) AS total, "
+                     + "SUM(CASE WHEN role = 'USER' THEN 1 ELSE 0 END) AS turns, "
                      + "SUM(CASE WHEN (" + TOOL_ERROR_PREDICATE + ") THEN 1 ELSE 0 END) AS errors "
-                     + "FROM session_message GROUP BY sid")) {
+                     + "FROM session_message GROUP BY session_id")) {
             while (rs.next()) {
-                var sid = rs.getString("sid");
-                messageCounts.put(sid, rs.getLong("total"));
+                var businessSid = resolveBusinessSid(rs.getString("session_id"), known);
+                if (businessSid == null) {
+                    continue; // 不属于任何已登记会话（已清理 / 网关键）：跳过，避免幽灵计数
+                }
+                messageCounts.merge(businessSid, rs.getLong("total"), Long::sum);
+                turnCounts.merge(businessSid, rs.getLong("turns"), Long::sum);
                 var errors = rs.getLong("errors");
                 if (errors > 0) {
-                    errorCounts.put(sid, errors);
+                    errorCounts.merge(businessSid, errors, Long::sum);
                 }
             }
         }
@@ -419,11 +449,36 @@ public class DebugApiController {
             ps.setLong(2, confirmContextStore.remoteTtl().toSeconds());
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    pending.add(rs.getString("session_id"));
+                    var sid = rs.getString("session_id");
+                    if (sid != null && known.contains(sid)) {
+                        pending.add(sid);
+                    }
                 }
             }
         }
-        return new MonitorProblems(messageCounts, errorCounts, pending);
+        return new MonitorProblems(messageCounts, turnCounts, errorCounts, pending);
+    }
+
+    /**
+     * 将 slot 复合键 {@code "{A}:{B}"} 归属到已登记业务会话 id（与
+     * {@code ThreadController.AGENT_STATE_JOIN} 同口径）：冒号前/后两段分别与已登记集合匹配。
+     * 优先前缀（Channel 形态 A=业务会话），否则后缀（规范形态 B=业务会话）；两段都不命中返回 null。
+     * slot 无冒号时按整串匹配。
+     */
+    private static String resolveBusinessSid(String slot, java.util.Set<String> known) {
+        if (slot == null || slot.isBlank()) {
+            return null;
+        }
+        int firstColon = slot.indexOf(':');
+        if (firstColon < 0) {
+            return known.contains(slot) ? slot : null;
+        }
+        var prefix = slot.substring(0, firstColon);
+        var suffix = slot.substring(slot.lastIndexOf(':') + 1);
+        if (known.contains(prefix)) {
+            return prefix;
+        }
+        return known.contains(suffix) ? suffix : null;
     }
 
     /** 记忆内容：从 agent_fs 读取 MEMORY.md + memory/ 文件，按用户分组 */
