@@ -1,34 +1,32 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { evalCollectorMode, evalSessionHeader } from "./eval-session.ts";
+import { evalCollectorMode, evalCollectorTarget } from "./eval-session.ts";
 
-// issue #121 对策：proxy 的采集判定原写作 `process.env.EVAL_COLLECTOR_AGENT_URL !== ""`——
-// 该变量在仓库中从未被任何部署/manifest 设置（实际生效的是 AGENT_INTERNAL_URL），
-// 未设置时 undefined !== "" 为 true，采集注入在本地/未注入环境被误开。
-// 判定改为基于实际生效的 AGENT_INTERNAL_URL 且显式排除未设置/空串。
-// 注：当前语义是「AGENT_INTERNAL_URL 非空即注入」，不区分是否真指向 collector
-// （collector 反代口带 /{ns} 子路径、真实业务服务不带）——该歧义登记在 #121，
-// 待运维侧确认是否按子路径形态收紧后再收紧此断言。
+// issue #121 对策：采集模式判定早期基于一个「未设置时恒真」的判空表达式
+// （EVAL_COLLECTOR_AGENT_URL !== ""），本地/未注入环境被误开。现语义钉死为
+// 「显式开关 EVAL_COLLECTOR_MODE=1 + 目标必达」，本组守住两层契约。
 
-test("AGENT_INTERNAL_URL 显式设置即视为采集目标", () => {
-  assert.equal(evalCollectorMode("http://collector:18203/e2e"), true);
+test("EVAL_COLLECTOR_MODE=1 才算采集模式", () => {
+  assert.equal(evalCollectorMode("1"), true);
 });
 
-test("AGENT_INTERNAL_URL 未设置/空串不是采集模式（#121 判空语义）", () => {
+test("未设置/空串/其它取值都不是采集模式（#121 判空语义）", () => {
   assert.equal(evalCollectorMode(undefined), false);
   assert.equal(evalCollectorMode(""), false);
+  assert.equal(evalCollectorMode("0"), false);
+  assert.equal(evalCollectorMode("true"), false);
 });
 
-test("采集模式且 sid 存在时注入", () => {
-  assert.equal(evalSessionHeader("http://collector:18203/e2e", "webui-abc"), "webui-abc");
+test("开关开启且目标已设置时返回 collector 目标", () => {
+  assert.equal(evalCollectorTarget("1", "http://collector:18203/e2e"), "http://collector:18203/e2e");
 });
 
-test("AGENT_INTERNAL_URL 未设置/空串不注入（#121 判空语义）", () => {
-  assert.equal(evalSessionHeader(undefined, "webui-abc"), null);
-  assert.equal(evalSessionHeader("", "webui-abc"), null);
+test("开关未开时不取目标（防止误注入）", () => {
+  assert.equal(evalCollectorTarget(undefined, "http://collector:18203/e2e"), null);
+  assert.equal(evalCollectorTarget("0", "http://collector:18203/e2e"), null);
 });
 
-test("采集模式但 sid 缺失时不注入（#121 现状：cookie 从未被任何一方写入）", () => {
-  assert.equal(evalSessionHeader("http://collector:18203/e2e", undefined), null);
-  assert.equal(evalSessionHeader("http://collector:18203/e2e", ""), null);
+test("开关已开但目标未设置时返回 null（proxy 侧告警并退回普通代理）", () => {
+  assert.equal(evalCollectorTarget("1", undefined), null);
+  assert.equal(evalCollectorTarget("1", ""), null);
 });
