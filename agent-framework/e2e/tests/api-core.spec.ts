@@ -1300,6 +1300,39 @@ test('HA4 SDK 合成提醒（后台子任务投递）不以 user 身份上屏', 
   await deleteThread(sid).catch(() => undefined);
 });
 
+test('HA5 turn 执行中 history 即可见用户输入（回合起始归档）', async () => {
+  const sid = sessionIdFor(`ha5-${uniq()}`);
+  const mark = `ha5-${uniq()}`;
+  // slow 时序包装（plain 夹具每 chunk 400ms）拉长 turn，制造确定的「执行中」窗口
+  const s = chat({ message: `[E2E:slow](${mark},400)`, userId: U, sessionId: sid });
+
+  // 轮询 history：用户消息必须在 turn **仍在执行**（终态未到）时就可见
+  let sawDuringTurn = false;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const h = await history(sid);
+    const users = ((h.messages ?? []) as HistoryMsg[])
+      .filter(m => m.role === 'user' && String(m.content).includes(mark));
+    if (users.length > 0) {
+      // 此刻 s.terminal 仍为 undefined ⇒ 用户输入已先于 turn 终态落库（修复前恒空）
+      sawDuringTurn = s.terminal === undefined;
+      break;
+    }
+    if (s.terminal) break; // 终态已到仍未见用户消息：修复失效
+    await new Promise(r => setTimeout(r, 30));
+  }
+  await waitTerminal(s);
+  expect(sawDuringTurn, 'turn 执行中 history 必须已含用户提问（回合起始归档）').toBe(true);
+
+  // 终态后用户消息仍只有一条：回合起始归档与 turn 结束 write-through 以同 msg_id 幂等去重
+  const full = await historyQ(sid);
+  const dup = ((full.messages ?? []) as HistoryMsg[])
+    .filter(m => m.role === 'user' && String(m.content).includes(mark));
+  expect(dup.length, '用户消息不得因回合起始归档重复').toBe(1);
+
+  await deleteThread(sid).catch(() => undefined);
+});
+
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------
 // 覆盖缺口：e2e tests/scripts/mock/config 对 AGENT_MEMORY_ENABLED 零命中（grep exit=1）。
 // 整组包进 describe：文件级 beforeAll 会在 S1 之前拉起第二 JVM 且 spawn 失败炸全文件——

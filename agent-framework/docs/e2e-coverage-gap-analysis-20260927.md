@@ -521,6 +521,21 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
   - state-only 视图 user 消息同样不含 `<system-reminder>`（state 路径过滤由单测 StateDataParserTest 覆盖）
 - **draftCode**：实现即测试，见 `e2e/tests/api-core.spec.ts` 的 `HA4 SDK 合成提醒…` 用例。
 
+#### HA5 turn 执行中 history 即可见用户输入（回合起始归档，2026-10-12 补）
+
+- **落点**：agent-framework/e2e/tests/api-core.spec.ts（HA 组，HA4 之后）
+- **blocker**：none
+- **背景**：SDK 只在整轮 doCall 结束后 `saveStateToSession`，turn 执行中 agent_state/
+  session_message 皆空——发送消息后立即刷新、从历史列表进入会话详情为空（前端乐观气泡
+  随刷新丢失）。修复：`TurnInputArchiveMiddleware`（onAgent）把本回合真实用户输入
+  直接归档进 session_message，slot 键与 write-through 同构、msg_id 同源幂等。
+- **前置**：复用 plain 夹具 `[E2E:slow](text,chunkMs)` 时序包装拉长 turn，制造确定的执行中窗口
+- **步骤**：发起 slow 对话（不 await 终态）→ 轮询 /history 至用户消息出现 → await 终态 → 再查 /history
+- **断言**：
+  - 用户消息首次出现在 history 时 `stream.terminal === undefined`——turn 仍在执行（修复前恒空，此断言红）
+  - 终态后该用户消息仅一条（回合起始归档与 write-through 幂等去重，重复即红）
+- **draftCode**：实现即测试，见 `e2e/tests/api-core.spec.ts` 的 `HA5 turn 执行中…` 用例。
+
 #### U15 Debug 页压缩分隔条历史回放（归档合并视图 → details.compaction-divider 渲染）
 
 - **落点**：agent-framework/e2e/tests/ui.spec.ts（U 组末尾，U14 之后；ui 项目，随 e2e-core job 执行）

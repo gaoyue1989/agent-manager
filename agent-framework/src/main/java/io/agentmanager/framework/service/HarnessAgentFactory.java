@@ -90,6 +90,18 @@ public class HarnessAgentFactory {
     @Value("${agent.llm.fallback-model-id:}")
     private String fallbackModelId;
 
+    /**
+     * 会话消息轨归档存储：装配回合起始用户输入归档中间件（{@link TurnInputArchiveMiddleware}，
+     * 让 /history 在 turn 执行中即可见用户提问）。字段注入而非 build 参数——避免改动
+     * build(...) 的全部调用点（同 fallbackModelId 的取舍）。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
+
+    /** 历史归档开关（AGENT_HISTORY_ARCHIVE_ENABLED）：关闭时不装配回合起始归档（无消费方） */
+    @Autowired(required = false)
+    private io.agentmanager.framework.config.HistoryConfig historyConfig;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -239,6 +251,15 @@ public class HarnessAgentFactory {
                 .hook(new UiContextInjectionHook(uiContextStore))
                 .workspace(workspacePath)
                 .distributedStore(distributedStore);
+
+            // 回合起始用户输入归档（2026-10-12）：SDK 整轮结束才落库 agent_state/session_message，
+            // turn 执行中 /history 为空——刷新/进历史会话详情前置归档用户提问，助手回复待
+            // turn 结束 write-through 补齐。归档关闭（AGENT_HISTORY_ARCHIVE_ENABLED=false）时不装配。
+            if (sessionMessageStore != null
+                    && (historyConfig == null || historyConfig.archiveEnabled())) {
+                builder.middleware(new io.agentmanager.framework.service.TurnInputArchiveMiddleware(
+                    sessionMessageStore));
+            }
 
             // 备用模型（默认模型路径）：SDK 原生 fallback，主模型重试预算耗尽后切换
             if (fallbackModel != null) {

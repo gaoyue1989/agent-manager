@@ -387,6 +387,13 @@ Thread 历史消息 + pendingConfirm。
 > 按合成标记 + `name=system` 双判据将其剔除，不再以 `role=user` 冒充用户提问上屏。
 > 压缩摘要（`name=__compaction_summary__`）不在此列，照常转 `role=compaction`。
 
+> **turn 执行中即可见用户输入（2026-10-12）**：SDK 只在整轮结束后才落库 agent_state/归档，
+> 此前「发送消息后立即刷新、从历史列表进入会话」详情恒空。现由回合起始中间件
+> （`TurnInputArchiveMiddleware`）在输入确定、尚未执行时把本回合真实用户输入直接归档进
+> `session_message`——turn 执行中 history 至少可见用户提问，助手回复待 turn 结束补齐。
+> slot 键与 turn 结束 write-through 完全同构、`msg_id` 同源，upsert 幂等不产生重复。
+> 归档关闭（`AGENT_HISTORY_ARCHIVE_ENABLED=false`）时不生效（无消费方）。
+
 `pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
 的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。
 详见 [history-agentstate-design.md](history-agentstate-design.md) 与
