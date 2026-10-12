@@ -221,7 +221,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_STORAGE_S3_ACCESS_KEY` | string | — | ✓(s3) | S3 AccessKey（绑 `agent.file.storage-s3-access-key`） |
 | `FILE_STORAGE_S3_SECRET_KEY` | string | — | ✓(s3) | S3 SecretKey（绑 `agent.file.storage-s3-secret-key`） |
 | `FILE_STORAGE_S3_BUCKET` | string | `agent-files` | | S3 Bucket（绑 `agent.file.storage-s3-bucket`） |
-| `FILE_EXTERNAL_URL_PREFIXES` | string (csv) | 空（**禁用**） | | `present_url` 外部交付的 URL 前缀白名单，**防 SSRF**。留空即禁用外部交付；发布助手在集群内需设 `http://platform-backend.agent-platform.svc.cluster.local:8080`。非白名单 URL 返回 403 |
+| `FILE_EXTERNAL_URL_PREFIXES` | string (csv) | 空（**禁用**） | | `present_url` 外部交付的 URL 前缀白名单，**防 SSRF**。留空即禁用外部交付；发布助手在集群内需设 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名）。非白名单 URL 返回 403 |
 
 #### 4.1.6 会话清理（`AGENT_CLEANUP_*`，见 [api.md](api.md) §清理配置）
 
