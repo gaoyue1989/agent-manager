@@ -100,6 +100,9 @@ async function loadSkills() {
           '</button>' +
           '<button class="btn small skill-detail-btn" data-idx="' + idx + '">👁 详情</button>' +
           '<button class="btn small skill-edit-btn" data-idx="' + idx + '">✏ 编辑</button>' +
+          (s.declaredButMissing !== true
+            ? '<button class="btn small skill-download-btn" data-idx="' + idx + '">⬇ 下载</button>'
+            : '') +
           (s.source === 'local-dynamic' || s.dynamic
             ? '<button class="btn small danger skill-delete-btn" data-idx="' + idx + '">🗑 删除</button>'
             : '') +
@@ -116,6 +119,9 @@ async function loadSkills() {
   });
   body.querySelectorAll('.skill-edit-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleEdit(Number(btn.dataset.idx)); });
+  });
+  body.querySelectorAll('.skill-download-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { handleDownload(Number(btn.dataset.idx)); });
   });
   body.querySelectorAll('.skill-delete-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleDelete(Number(btn.dataset.idx)); });
@@ -166,6 +172,26 @@ function handleDetail(idx) {
   var skill = skillData[idx];
   if (!skill) return;
   ctx.utils.showJsonModal('Skill: ' + (skill.name || ''), skill);
+}
+
+/** 下载：整目录 zip（源为 /config/skills 包内目录，含 scripts 等资源）。经 fetch 取 blob */
+async function handleDownload(idx) {
+  var skill = skillData[idx];
+  if (!skill) return;
+  try {
+    var blob = await ctx.api.downloadSkillZip(skill.name);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = skill.name + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    ctx.utils.toast('已下载 ' + skill.name + '.zip', 'success');
+  } catch (err) {
+    ctx.utils.toast('下载失败: ' + err.message, 'error');
+  }
 }
 
 async function handleEdit(idx) {
@@ -253,6 +279,10 @@ function renderUserSkillsPanel() {
             'title="新建或覆盖该用户的 SKILL.md">✏ 写入/覆盖</button>' +
           '<button class="btn small" id="userSkillSyncBtn" ' +
             'title="把包内同名技能整目录下发为该用户个人版本">⬇ 从包内下发</button>' +
+          '<input id="userSkillZipInput" type="file" accept=".zip,application/zip" style="display:none">' +
+          '<button class="btn small" id="userSkillZipBtn" ' +
+            'title="上传 zip 包作为该用户个人技能（同名覆盖；含二进制/非 UTF-8 文件会拒绝整个包）">' +
+            '⬆ 上传 zip</button>' +
         '</div>' +
         '<div id="userSkillList"><div class="empty">选择或输入 userId 后点「加载」。</div></div>' +
       '</div>' +
@@ -264,6 +294,11 @@ function renderUserSkillsPanel() {
   });
   document.getElementById('userSkillWriteBtn').addEventListener('click', handleUserSkillWrite);
   document.getElementById('userSkillSyncBtn').addEventListener('click', handleUserSkillSync);
+  document.getElementById('userSkillZipBtn').addEventListener('click', function() {
+    var f = document.getElementById('userSkillZipInput');
+    if (f) f.click();
+  });
+  document.getElementById('userSkillZipInput').addEventListener('change', handleUserSkillZipUpload);
 
   loadUserSkillUsers();
 }
@@ -382,32 +417,51 @@ async function loadUserSkills() {
       ? '<span class="badge yellow" title="管理面写入栅栏：回写跳过该技能（管理面内容优先），' +
         '容器内 skill_manage 的修改在清除前不落库">管理面栅栏</span>'
       : '';
+    var enabledBadge = s.enabled !== false
+      ? '<span class="badge green">启用</span>'
+      : '<span class="badge red" title="已禁用：该用户后续会话不提供该技能">禁用</span>';
+    var desc = s.description
+      ? '<span title="' + ctx.utils.esc(s.description) + '">' + ctx.utils.esc(s.description) + '</span>'
+      : '<span style="color:var(--text-dim)">—</span>';
     return '<tr>' +
       '<td class="mono">' + ctx.utils.esc(s.name) + ' <span class="badge green">个人覆盖</span> ' + fence + '</td>' +
+      '<td>' + desc + '</td>' +
+      '<td>' + enabledBadge + '</td>' +
       '<td>' + ((s.files || []).length) + '</td>' +
       '<td>' + ctx.utils.formatBytes(s.bytes || 0) + '</td>' +
       '<td>v' + ctx.utils.esc(s.version) + '</td>' +
+      '<td class="mono" style="white-space:nowrap">' + (s.createdAt ? ctx.utils.esc(s.createdAt) : '—') + '</td>' +
       '<td>' + baseline + '</td>' +
       '<td style="white-space:nowrap">' +
+        '<button class="btn small us-toggle-btn" data-name="' + ctx.utils.esc(s.name) + '">' +
+          (s.enabled !== false ? '⏸ 禁用' : '▶ 启用') + '</button> ' +
         '<button class="btn small us-view-btn" data-name="' + ctx.utils.esc(s.name) + '">👁 查看</button> ' +
         '<button class="btn small us-edit-btn" data-name="' + ctx.utils.esc(s.name) + '">✏ 编辑</button> ' +
+        '<button class="btn small us-dl-btn" data-name="' + ctx.utils.esc(s.name) + '">⬇ 下载</button> ' +
         '<button class="btn small danger us-del-btn" data-name="' + ctx.utils.esc(s.name) + '">🗑 删除</button>' +
       '</td></tr>';
   }).join('');
 
   body.innerHTML = (skills.length
     ? '<table class="data-table"><thead><tr>' +
-        '<th>Skill</th><th>文件</th><th>大小</th><th>版本</th><th>删除后</th><th></th>' +
+        '<th>Skill</th><th>描述</th><th>状态</th><th>文件</th><th>大小</th><th>版本</th>' +
+        '<th>创建时间</th><th>删除后</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>'
     : '<div class="empty">该用户暂无个人覆盖（下方为已删除技能的标记）。</div>')
     + tombstonesHtml(tombstones);
 
   // 行操作把本次响应对应的 userId 固化进闭包（不再读可变状态）
+  body.querySelectorAll('.us-toggle-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { handleUserSkillToggle(userId, btn.dataset.name); });
+  });
   body.querySelectorAll('.us-view-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUserSkillView(userId, btn.dataset.name); });
   });
   body.querySelectorAll('.us-edit-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUserSkillEdit(userId, btn.dataset.name); });
+  });
+  body.querySelectorAll('.us-dl-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { handleUserSkillDownload(userId, btn.dataset.name); });
   });
   body.querySelectorAll('.us-del-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUserSkillDelete(userId, btn.dataset.name); });
@@ -543,6 +597,18 @@ async function handleUserSkillDelete(userId, name) {
   }
 }
 
+/** 切换个人技能启停（管理面）；禁用后该用户后续会话不再提供该技能 */
+async function handleUserSkillToggle(userId, name) {
+  if (!userId) return;
+  try {
+    var result = await ctx.api.toggleUserSkill(userId, name);
+    ctx.utils.toast(result.message || (result.enabled ? '已启用' : '已禁用'), 'success');
+    loadUserSkills();
+  } catch (err) {
+    ctx.utils.toast('操作失败: ' + err.message, 'error');
+  }
+}
+
 async function handleUserSkillSync() {
   var userId = userStateId();
   var nameInput = document.getElementById('userSkillNameInput');
@@ -557,6 +623,55 @@ async function handleUserSkillSync() {
     loadUserSkillUsers();
   } catch (err) {
     ctx.utils.toast('下发失败: ' + err.message, 'error');
+  }
+}
+
+/** zip 上传：把选中的 zip 作为当前 userId 的个人技能（同名覆盖；后端拒绝二进制包） */
+async function handleUserSkillZipUpload() {
+  var fileInput = document.getElementById('userSkillZipInput');
+  if (!fileInput) return;
+  var file = fileInput.files && fileInput.files[0];
+  if (!file) return;
+  var userId = userStateId();
+  if (!userId) {
+    ctx.utils.toast('请先填写 userId', 'error');
+    fileInput.value = '';
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    ctx.utils.toast('✘ zip 包超过 10MB 限制', 'error');
+    fileInput.value = '';
+    return;
+  }
+  var btn = document.getElementById('userSkillZipBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '上传中…'; }
+  try {
+    var result = await ctx.api.uploadUserSkillZip(userId, file);
+    ctx.utils.toast(result.message || ('已上传 ' + result.name), 'success');
+    loadUserSkills();
+    loadUserSkillUsers();
+  } catch (err) {
+    ctx.utils.toast('✘ 上传失败: ' + err.message, 'error');
+  } finally {
+    fileInput.value = '';
+    if (btn) { btn.disabled = false; btn.textContent = '⬆ 上传 zip'; }
+  }
+}
+
+/** 下载：整目录 zip（L4 有覆盖则导 L4，否则回落包内基线）。经 fetch 带 X-User-Id 头取 blob */
+async function handleUserSkillDownload(userId, name) {
+  try {
+    var blob = await ctx.api.downloadUserSkillZip(userId, name);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    ctx.utils.toast('✘ 下载失败: ' + e.message, 'error');
   }
 }
 

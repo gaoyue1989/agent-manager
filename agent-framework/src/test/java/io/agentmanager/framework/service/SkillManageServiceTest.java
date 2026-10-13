@@ -90,6 +90,26 @@ class SkillManageServiceTest {
     }
 
     @Test
+    void uploadZipWithNonUtf8SkillMdShouldFail400() throws IOException {
+        // SKILL.md 本身非 UTF-8（GBK）→ 拒绝上传，不得静默装损坏技能（issue #115：此前误报 500）
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new ZipOutputStream(baos)) {
+            var gbkMd = "---\nname: gbk-skill\ndescription: 中文编码测试\n---\n正文"
+                .getBytes(java.nio.charset.Charset.forName("GBK"));
+            zos.putNextEntry(new ZipEntry("SKILL.md"));
+            zos.write(gbkMd);
+            zos.closeEntry();
+        }
+        var service = createService();
+        var ex = org.junit.jupiter.api.Assertions.assertThrows(
+            IllegalArgumentException.class,
+            () -> service.uploadSkill(new ByteArrayInputStream(baos.toByteArray()), "gbk.zip")
+        );
+        assertTrue(ex.getMessage().contains("UTF-8"), "应说明 SKILL.md 非 UTF-8 被拒: " + ex.getMessage());
+        assertFalse(Files.exists(skillsDir.resolve("gbk-skill")), "拒绝时不得安装技能");
+    }
+
+    @Test
     void uploadShouldOverwriteExistingSkill() throws IOException {
         var service = createService();
         // 先上传 v1
@@ -204,7 +224,49 @@ class SkillManageServiceTest {
         assertTrue(dirs.contains("b"));
     }
 
+    // ========== 下载（导出 zip） ==========
+
+    @Test
+    void exportSkillZipShouldIncludeNestedFilesAndPreserveBytes() throws IOException {
+        var service = createService();
+        var skillDir = skillsDir.resolve("dl-test");
+        Files.createDirectories(skillDir.resolve("scripts"));
+        Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: dl-test\n---\n# dl-test\n");
+        Files.writeString(skillDir.resolve("scripts/run.sh"), "echo hi\n");
+        var binary = new byte[] {0, 1, 2, 3, (byte) 0xFF, (byte) 0x80};
+        Files.write(skillDir.resolve("scripts/asset.bin"), binary);
+
+        var zip = service.exportSkillZip("dl-test");
+        assertTrue(zip.isPresent());
+
+        var entries = readZipEntries(zip.get());
+        assertEquals(3, entries.size());
+        assertTrue(entries.containsKey("SKILL.md"));
+        assertTrue(entries.get("scripts/run.sh").length > 0);
+        org.junit.jupiter.api.Assertions.assertArrayEquals(binary, entries.get("scripts/asset.bin"));
+    }
+
+    @Test
+    void exportNonexistentSkillShouldReturnEmpty() throws IOException {
+        var service = createService();
+        assertTrue(service.exportSkillZip("ghost").isEmpty());
+    }
+
     // ========== 工具方法 ==========
+
+    private static Map<String, byte[]> readZipEntries(byte[] zipBytes) throws IOException {
+        var out = new java.util.LinkedHashMap<String, byte[]>();
+        try (var zis = new java.util.zip.ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                if (!entry.isDirectory()) {
+                    out.put(entry.getName(), zis.readAllBytes());
+                }
+                zis.closeEntry();
+            }
+        }
+        return out;
+    }
 
     private String readDescription(SkillManageService service, String name) throws IOException {
         var content = service.readSkillContent(name);

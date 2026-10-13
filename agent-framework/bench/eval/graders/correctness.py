@@ -50,6 +50,38 @@ async def judge_correctness(case: dict[str, Any], trace: dict[str, Any],
     return await _judge_direct(case, trace, cfg)
 
 
+def parse_judge_verdict(content: str) -> dict[str, Any]:
+    """解析 judge 输出为 {"score", "reason"}；解析不了抛 JudgeUnavailable（绝不裸抛）。
+
+    防御序列：整体 JSON → 贪心提取 {...} 片段（reasoning 模型常在 JSON 外带思考文本）
+    → 都失败按 judge 不可用降级。任何畸形输出都不得让评测轮中断（issue #117：
+    此前二次 json.loads 裸抛 JSONDecodeError 击穿调用方 except JudgeUnavailable，
+    整轮 report/history 丢失）。score 钳位 [0,1]；NaN 视为不可解析——json.loads
+    接受 NaN 常量，而 min/max 钳位遇 NaN 会返回 1.0（畸形输出反拿满分）。
+    """
+    if not isinstance(content, str):
+        raise JudgeUnavailable(f"judge 输出不是文本: {content!r:.120}")
+    data = None
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        m = re.search(r"\{.*\}", content, re.S)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except (json.JSONDecodeError, ValueError):
+                pass
+    if not isinstance(data, dict):
+        raise JudgeUnavailable(f"judge 输出无法解析为 JSON 对象: {content[:200]}")
+    try:
+        score = float(data.get("score", 0.0))
+    except (TypeError, ValueError):
+        raise JudgeUnavailable(f"judge score 字段不可解析: {content[:200]}")
+    if score != score:  # NaN：钳位 min(1.0, nan) 返回 1.0，必须在钳位前拦截
+        raise JudgeUnavailable(f"judge score 为 NaN（不可解析）: {content[:200]}")
+    return {"score": max(0.0, min(1.0, score)), "reason": str(data.get("reason", ""))}
+
+
 async def _judge_direct(case: dict[str, Any], trace: dict[str, Any],
                         cfg: dict[str, str]) -> dict[str, Any]:
     """直评形态（骨架期实现；OpenJudge 不可用时的回落）。"""
@@ -74,13 +106,4 @@ async def _judge_direct(case: dict[str, Any], trace: dict[str, Any],
             raise JudgeUnavailable(f"judge 接口返回 {resp.status_code}: {resp.text[:200]}")
         content = resp.json()["choices"][0]["message"]["content"]
 
-    # 防御解析：优先整体 JSON，失败则提取首个 {...} 片段
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", content, re.S)
-        if not m:
-            raise JudgeUnavailable(f"judge 输出无法解析: {content[:200]}")
-        data = json.loads(m.group(0))
-    score = float(data.get("score", 0.0))
-    return {"score": max(0.0, min(1.0, score)), "reason": str(data.get("reason", ""))}
+    return parse_judge_verdict(content)

@@ -2,13 +2,16 @@
 
 **版本:** v2.1.0 (Java)
 **日期:** 2026-08-06
-**复核日期:** 2026-09-26；2026-10-01 再核实跑并补登记 09-27 ~ 10-01 新增测试类
+**复核日期:** 2026-09-26；2026-10-01 再核实跑并补登记 09-27 ~ 10-01 新增测试类；2026-10-08 三核（评审窗口内新增用例对齐）
 
 > **现状核对（2026-09-26）**：§8 统计表的**基线是 2026-09-17 的实跑结果**（657 用例 / 80 文件），
 > 之后新增了大量测试类，原表部分分类数字已明显偏低。本版已在 **JDK 21.0.12 + Maven 3.8.7 上实跑
 > `mvn test`** 核对，下表数字已按实跑结果更新，并补登记 2026-09 新增的测试类。
 > **2026-10-01 再核**：同环境实跑 `mvn -B test` 得 **1310 例 / 0 失败 / 4 跳过（55.8s，BUILD SUCCESS）**，
 > §8 各表数字已再次对齐，§8.2 补 3 支新 `*IT`，§8.3 补 Agent Protocol / A2A Job / 看门狗 / 会话归档等新类。
+> **2026-10-08 三核**：同环境实跑 `mvn -B test` 得 **1353 例 / 0 失败 / 4 跳过（61s，BUILD SUCCESS）**，
+> §8 对账表与各分类数字已对齐（窗口内 #87 排队闸门 / #72 看门狗自愈 / 确认卡复活守卫等补测，§8.4 增
+> `A2aJobRedisStoreClaimRaceTest` / `TestSchemaMigratorVersionOrderTest`）。
 
 ---
 
@@ -102,7 +105,7 @@ class AgentFrameworkApplicationTests {
 - 未知 method 返回 -32601
 - 缺少 method 返回 -32600
 
-### 4.4 ChatStreamControllerTest (39 个用例)
+### 4.4 ChatStreamControllerTest (42 个用例)
 
 - `POST /threads/chat` 单次流事件经 EventBus 输出 / 租约释放 / waiting 排队 / 空消息拒绝
 - sessionId 省略时自动生成 UUID 并发 `session_created`；传了则不生成
@@ -128,7 +131,7 @@ class AgentFrameworkApplicationTests {
 - 三个计数字段（`totalCount` / `mcpCount` / `internalCount`）与 `sdkInternalCount` 的口径
 - `deniedTools` 剔除后 internal 与 sdkInternal 两段同时反映
 
-### 4.6 AgentRuntimeServiceTest (16 个用例)
+### 4.6 AgentRuntimeServiceTest (17 个用例)
 
 覆盖场景：
 - userId 透传 / 回退 vendorKey / 空值回退
@@ -326,46 +329,46 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> **2026-10-01 实跑**（JDK 21.0.12 / Maven 3.8.7，`mvn -B test`，55.8s）：
-> **`Tests run: 1310, Failures: 0, Errors: 0, Skipped: 4` — BUILD SUCCESS**。
+> **2026-10-08 实跑**（JDK 21.0.12 / Maven 3.8.7，`mvn -B test`，61s）：
+> **`Tests run: 1353, Failures: 0, Errors: 0, Skipped: 4` — BUILD SUCCESS**。
 > 跳过的 4 例全部来自 `OpenSandboxApiIntegrationTest`（需真实 OpenSandbox Server 可达）。
-> 前一次基线：2026-09-26 实跑 1026 例 / 101 类（55.4s）。
+> 前一次基线：2026-10-01 实跑 1310 例 / 129 类（55.8s）。
 >
 > **与静态清点的对账**（两条口径差异都能解释清楚，可复算）：
 >
 > | 口径 | 数值 | 说明 |
 > |------|------|------|
-> | `grep -rE '@Test\b'` 注解总数 | **1337** | 全量注解 |
+> | `grep -rE '@Test\b'` 注解总数 | **1380** | 全量注解 |
 > | 其中 `*IT` 类的注解数 | 27 | `RedisEventLogIT` 10 / `SessionEventStoreCrossReplicaIT` 6 / `S3FileStorageIT` 3 / `SessionUserStoreMySqlIT` 1 / `ThreadHistoryConfirmIT` 1 / `A2aJobRedisStoreIT` 2 / `ProtocolRedisEventBusIT` 2 / `ModelConfigStoreMySqlIT` 2 |
-> | **实跑用例数** | **1310** | 1337 − 27；surefire 默认 include 不匹配 `*IT` |
-> | 含 `@Test` 的源文件 | 137 | 其中 8 个是 `*IT` |
-> | **实跑类数** | **129** | 137 − 8 |
+> | **实跑用例数** | **1353** | 1380 − 27；surefire 默认 include 不匹配 `*IT` |
+> | 含 `@Test` 的源文件 | 140 | 其中 8 个是 `*IT` |
+> | **实跑类数** | **132** | 140 − 8（含 `EmptyCompletionRecoveryHookTest` / `ToolCallValidationMiddlewareTest` 两个 `@Nested` 内嵌类） |
 >
 > 即：`mvn test` **不跑那 8 支 `*IT`**，需显式 `-Dtest=`（见 §8.2）。真实 S3 集成 `S3FileStorageIT` 亦需环境变量启用。
 
-下表**逐类取自 2026-10-01 surefire 实跑输出**（`-- in <FQCN>` 行），基线列是 2026-09-17 的旧值：
+下表**逐类取自 2026-10-08 surefire 实跑输出**（`-- in <FQCN>` 行），基线列是 2026-09-17 的旧值：
 
 | 类别 | 用例数 | 对比基线 | 核对方式 |
 |------|--------|---------|----------|
 | OafConfigLoaderTest | 40 | 37 ↑ | ✅ 实跑 |
 | McpToolRegistrarTest | 38 | 37 ↑ | ✅ 实跑 |
-| AgentRuntimeService 系列（Service/McpConfig/Hitl） | 16 / 12 / 30 = 58 | 40 ↑ | ✅ 实跑 |
+| AgentRuntimeService 系列（Service/McpConfig/Hitl） | 17 / 12 / 34 = 63 | 40 ↑ | ✅ 实跑 |
 | DebugApiControllerTest | 19 | 15 ↑ | ✅ 实跑 |
 | ThreadControllerTest（含 history 文件下载卡片与归档合并） | 30 | 25 ↑ | ✅ 实跑 |
-| FileControllerTest / FileToolsTest / FileAssetStoreTest | 20 / 16 / 7 = 43 | 36 ↑ | ✅ 实跑 |
-| ChatStreamControllerTest / SessionStreamControllerTest | 39 / 7 = 46 | 30 ↑ | ✅ 实跑 |
+| FileControllerTest / FileToolsTest / FileAssetStoreTest | 20 / 18 / 7 = 45 | 36 ↑ | ✅ 实跑 |
+| ChatStreamControllerTest / SessionStreamControllerTest | 42 / 7 = 49 | 30 ↑ | ✅ 实跑 |
 | ToolControllerTest | 7 | 4 ↑ | ✅ 实跑（含 issue #39 `sdkInternal` 断言） |
-| ConfirmControllerTest（含 multi-key） | 12 | 6 ↑ | ✅ 实跑 |
+| ConfirmControllerTest（含 multi-key） | 14 | 6 ↑ | ✅ 实跑 |
 | TurnLeaseStoreTest / TurnLeaseGuardTest | 16 | 16 = | 基线值 |
-| OpenSandbox 单测（§8.1 逐类合计，含 4 例跳过的 ApiIntegrationTest；TracingSandboxClient 归追踪系列） | 93 | 44 ↑ | ✅ 实跑 |
-| 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 33 | 32 ↑ | ✅ 实跑，**未含**下述两个新类 |
+| OpenSandbox 单测（§8.1 逐类合计，含 4 例跳过的 ApiIntegrationTest；TracingSandboxClient 归追踪系列） | 102 | 44 ↑ | ✅ 实跑 |
+| 追踪系列（OtelConfig/Filter/Middleware/Wrapper 等） | 35 | 32 ↑ | ✅ 实跑，**未含**下述两个新类 |
 | └ `ModelIoTracingMiddlewareTest` | 6 | 新增 | ✅ 实跑（2026-09-26，PR #37） |
 | └ `ToolCallTracingMiddlewareTest` | 10 | 新增 | ✅ 实跑（2026-09-26，PR #37） |
 | 其余（tool/config/service/controller/storage） | 见 §8.3 清单 | — | 明细已逐类列出 |
 
 ### 8.3 2026-09 新增测试类登记（基线后未纳入 §8.1/§8.2 的）
 
-按功能归属分组，均为 2026-09 新增。**用例数取自 2026-10-01 实跑输出**（逐类已核对）：
+按功能归属分组，均为 2026-09 新增。**用例数取自 2026-10-08 实跑输出**（逐类已核对）：
 
 | 归属 | 测试类 | 用例数 |
 |------|--------|--------|
@@ -384,40 +387,43 @@ src/test/resources/fixtures/test-agent/
 | MCP 多租户 | `UserScopedMcpClientWrapperTest` | 8 |
 | 其他 | `McpManagerTest` / `MySqlTaskStoreTest` / `HarnessAgentRunnerTest` / `AgentScopeConfigTest` / `TurnFinalizerTest` / `EmptyCompletionRecoveryHookTest` / `ToolCallValidationMiddlewareTest` / `A2uiServiceTest` / `SandboxRuntimeTest` / `PathSafeTest` / `AskingContentBackfillStateStoreTest` | 9 / 9 / 7 / 21 / 10 / 12 / 10 / 7 / 7 / 14 / 7 |
 
-### 8.4 2026-09-27 ~ 10-01 新增测试类登记（Agent Protocol / A2A Job / 会话归档等）
+### 8.4 2026-09-27 ~ 10-08 新增测试类登记（Agent Protocol / A2A Job / 会话归档等）
 
-用例数取自 2026-10-01 实跑输出（逐类已核对）：
+用例数取自 2026-10-08 实跑输出（逐类已核对；标注 ※ 的类在 2026-10-01 ~ 10-08 评审窗口内随
+#87 排队闸门 / #72 存储层错误分型与看门狗自愈 / 确认卡复活守卫等修复扩充过用例）：
 
 | 归属 | 测试类 | 用例数 |
 |------|--------|--------|
-| 远程确认桥（lead） | `RemoteConfirmBridgeTest` | 31 |
-| 远程确认桥（lead） | `RemoteConfirmBridgeMultiReplicaTest` | 11 |
-| Agent Protocol member | `AgentProtocolConfigTest` | 13 |
+| 远程确认桥（lead） | `RemoteConfirmBridgeTest` ※ | 34 |
+| 远程确认桥（lead） | `RemoteConfirmBridgeMultiReplicaTest` ※ | 12 |
+| Agent Protocol member | `AgentProtocolConfigTest` ※ | 16 |
 | Agent Protocol member | `AgentProtocolAuthFilterTest` | 7 |
 | Agent Protocol member | `ProtocolRedisEventBusTest` | 5 |
 | deny_rules（F16） | `ProtocolDenyRulesTest` | 6 |
 | deny_rules（F16） | `ProtocolDenyRulesMiddlewareTest` | 4 |
 | deny_rules（F16） | `ProtocolDenyRulesContextCustomizerTest` | 3 |
-| 远程 spawn / 身份 | `RemoteSpawnForceSyncMiddlewareTest` | 8 |
+| 远程 spawn / 身份 | `RemoteSpawnForceSyncMiddlewareTest` ※ | 11 |
 | 远程 spawn / 身份 | `RemoteSpawnCaptureMiddlewareTest` | 3 |
 | 远程 spawn / 身份 | `RemoteUserIdMiddlewareTest` | 9 |
-| 远程任务登记（§18 多副本） | `RemoteTaskRegistryStoreTest` | 11 |
+| 远程任务登记（§18 多副本） | `RemoteTaskRegistryStoreTest` ※ | 13 |
 | 远程子 agent 装配 | `HarnessAgentFactoryRemoteSubagentTest` | 8 |
 | 协议清理联动 | `SessionCleanupServiceProtocolScanTest` | 4 |
-| A2A 幂等 Job | `A2aJobServiceTest` | 13 |
+| A2A 幂等 Job | `A2aJobServiceTest` ※ | 15 |
 | A2A 幂等 Job | `A2aJobControllerTest` | 9 |
 | A2A 幂等 Job | `A2aJobConfigTest` | 4 |
-| A2A 幂等 Job | `A2aJobAssemblyTest` | 4 |
-| MCP 看门狗 | `McpConnectionWatchdogTest` | 9 |
+| A2A 幂等 Job | `A2aJobAssemblyTest` ※ | 5 |
+| A2A 幂等 Job | `A2aJobRedisStoreClaimRaceTest`（2026-10-01 新增，claim NX→GET 过期竞态三分支） | 3 |
+| MCP 看门狗 | `McpConnectionWatchdogTest` ※ | 11 |
 | 工具白名单防漂移 | `HarnessAgentFactoryToolCoverageDriftTest` | 2 |
-| 装配守卫 | `HarnessAgentFactoryMiddlewareAssemblyTest` | 1 |
+| 装配守卫 | `HarnessAgentFactoryMiddlewareAssemblyTest` ※ | 3 |
 | 沙箱 userKey | `SandboxUserKeyMiddlewareTest` | 7 |
-| 会话消息轨归档 | `SessionMessageStoreTest` | 13 |
+| 会话消息轨归档 | `SessionMessageStoreTest` ※ | 14 |
 | 会话消息轨归档 | `SessionMessageArchiveStateStoreTest` | 9 |
 | 会话消息轨归档 | `ThreadControllerHistoryMergeTest` | 6 |
-| confirm 多键（V7 迁移） | `ConfirmContextStoreMultiKeyTest` | 14 |
+| confirm 多键（V7 迁移） | `ConfirmContextStoreMultiKeyTest` ※ | 16 |
 | 模型采样参数 | `ChatModelFactoryTest` | 10 |
 | Redis cluster/前缀 | `RedisConnectionFacadeTest` | 5 |
+| Flyway 测试迁移序 | `TestSchemaMigratorVersionOrderTest`（2026-10-01 新增，V<N> 版本号数字排序回归） | 2 |
 
 > 另有 `eval-selftest`（`bench/eval/flywheel.py selftest`，评测飞轮离线自检）是 CI 门禁之一，
 > 但**不属 `mvn test` 范畴**，故不在本表。详见 [e2e-ci-plan.md](e2e-ci-plan.md) §2.3。

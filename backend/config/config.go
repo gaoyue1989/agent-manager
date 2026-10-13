@@ -28,12 +28,19 @@ type Config struct {
 	AvailableImages []ImageOption
 	DefaultImage    string
 
+	// PlatformPVCName 业务 Pod 与后端共用的平台数据卷 PVC 名（OAF 包/文件落盘）。
+	// 环境侧预先提供、平台不创建；空 = 默认 "platform-data"（历史行为）。
+	// Helm 部署时指向环境已有 PVC（values.persistence.existingClaim）。
+	PlatformPVCName string
+
 	IngressClass string
 	IngressHost  string // 对外展示地址，如 172.20.0.2:30080
 	IngressPort  int    // ingress http NodePort，仅用于拼接展示 URL
-	// IngressHostSuffix 业务 Ingress 域名后缀（如 .region-c86-test.test-kzx1.cncb）：
-	// 空 = path 模式（无 host，靠 /agent/{short} 前缀 + rewrite 区分服务，即历史行为）；
-	// 非空 = host 模式（host={K8sName}{suffix}、根路径直出、无 rewrite 注解）。
+	// IngressHostSuffix 业务路由模式开关（subpath-routing-design §4.1，单一来源）：
+	// 空 = router 模式——不构造 per-service Ingress，统一域名 /agent/{short} 子路径由
+	// 集群内 platform-router（manifests/platform-router.yaml，nginx 原生 rewrite）承接，
+	// 启动自检该 Service 必须存在（k8s.RequireRouter）；
+	// 非空 = host 模式——host={K8sName}{suffix}、根路径直出（历史行为保留）。
 	IngressHostSuffix string
 
 	ResourceRequestsCPU string
@@ -58,6 +65,7 @@ func Load() (*Config, error) {
 		Namespace:           envStr("NAMESPACE", "agent-platform"),
 		DataRoot:            envStr("DATA_ROOT", "/data"),
 		MySQLDSN:            envStr("MYSQL_DSN", ""),
+		PlatformPVCName:     envStr("PLATFORM_PVC_NAME", "platform-data"),
 		IngressClass:        envStr("INGRESS_CLASS", "nginx"),
 		IngressHost:         envStr("INGRESS_HOST", "localhost"),
 		IngressPort:         envInt("INGRESS_PORT", 30080),
@@ -80,6 +88,12 @@ func Load() (*Config, error) {
 	// 与 MYSQL_DSN 缺失同策略（fail-fast），不在发布期逐个报错。
 	if err := validateIngressHostSuffix(c.IngressHostSuffix); err != nil {
 		return nil, err
+	}
+	// router 模式（suffix 空）没有 per-service Ingress，Ingress overlay 无处生效：
+	// 残留的 path 模式模板必须在启动期暴露，而不是静默忽略（subpath-routing §4.1）。
+	if c.IngressHostSuffix == "" && c.IngressTemplate != "" {
+		return nil, errors.New("INGRESS_TEMPLATE is set but INGRESS_HOST_SUFFIX is empty (router mode): " +
+			"router mode builds no per-service ingress, clear INGRESS_TEMPLATE or set a host suffix")
 	}
 	images, def, err := parseImages(envStr("AVAILABLE_IMAGES", ""), envStr("DEFAULT_IMAGE", ""))
 	if err != nil {

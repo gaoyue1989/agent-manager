@@ -24,13 +24,24 @@ const SUGGESTIONS = ["现在有哪些服务？", "把 packageId=3 发布一下",
 // HTTP 环境非安全上下文无 crypto.randomUUID，用时间戳+随机串兜底
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+// sessionId 持久化：localStorage 供页面刷新恢复 + cookie 供同源反代（proxy.ts）读取。
+// 评测采集模式（EVAL_COLLECTOR_MODE=1）下 proxy 据此 cookie 注入 x-eval-session，
+// 使 collector 录制获得与 HTTP 层一致的强会话关联（设计附录 C）
+function persistSessionId(sid: string): void {
+  window.localStorage.setItem("oaf-assistant-sid", sid);
+  document.cookie = `oaf-assistant-sid=${sid}; Path=/; SameSite=Lax`;
+}
+
 function getSessionId(): string {
   if (typeof window === "undefined") return "";
   let sid = window.localStorage.getItem("oaf-assistant-sid");
   if (!sid) {
     sid = `webui-${uid()}`;
-    window.localStorage.setItem("oaf-assistant-sid", sid);
   }
+  // 幂等补写（新建与已有 sid 同路径）：cookie 是会话级（无 Max-Age，浏览器关闭即失效
+  // 而 localStorage 持久），存量用户升级前只写过 localStorage——不补写会让 proxy 在
+  // EVAL_COLLECTOR_MODE=1 下读不到 oaf-assistant-sid，直到手动切换/新开会话才恢复
+  persistSessionId(sid);
   return sid;
 }
 
@@ -394,7 +405,7 @@ export default function AssistantPage() {
     sessionLoading.current = true;
     setAttachments([]);
     setInput("");
-    window.localStorage.setItem("oaf-assistant-sid", item.peer);
+    persistSessionId(item.peer);
     sessionId.current = item.peer;
     // 回显该会话绑定的模型（无绑定/已被删除 → 系统默认）
     setModelId(item.model && item.model.trim() ? item.model : "system");
@@ -542,7 +553,7 @@ export default function AssistantPage() {
     setAttachments([]);
     setInput("");
     const sid = `webui-${uid()}`;
-    window.localStorage.setItem("oaf-assistant-sid", sid);
+    persistSessionId(sid);
     sessionId.current = sid;
     setMessages([{ role: "system", content: "已开启新会话。" }]);
   };

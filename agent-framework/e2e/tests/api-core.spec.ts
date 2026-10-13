@@ -1,6 +1,7 @@
 /**
  * e2e-core API 组：S 基础 / F 文件 / H HITL / M MCP Apps / A A2A / SK 技能管理 / HA 归档历史 /
- * FW /threads 槽位双形态匹配与 Flyway / RD Redis 前缀隔离（e2e-ci-plan §5，FW 为 §5.10、RD 为 §5.11）。
+ * FW /threads 槽位双形态匹配与 Flyway / RD Redis 前缀隔离（e2e-ci-plan §5，FW 为 §5.10、RD 为 §5.11）/
+ * X 前缀感知（subpath-routing-design §9.2，X-Forwarded-Prefix 头注入）。
  * 协议权威：docs/api-thread-spec.md v1.0。
  */
 import { test, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
@@ -9,7 +10,7 @@ import { chat, status, subscribe, history, threads, deleteThread, patchThread, a
 import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic } from '../lib/sse.js';
 import { upload, download, textBytes, pngBytes } from '../lib/files.js';
-import { seedCompactionArchive } from '../lib/archive-seed.js';
+import { seedCompactionArchive, seedSyntheticReminderArchive } from '../lib/archive-seed.js';
 import mysql from 'mysql2/promise';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -948,7 +949,7 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
 //（手工脚本，需平台已发布带 skills 的自建服务）；此处只钉住端点路由与响应契约，防路由写错静默合入。
 
 test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
-  // 调试页数据源：与 /skills/users 同源，字段为 count/users
+  // 调试页数据源：全量用户索引，字段为 count/users
   const debugIdx = await request.get('/debug/user-skills');
   expect(debugIdx.status()).toBe(200);
   const idx = await debugIdx.json();
@@ -956,19 +957,24 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
   expect(Array.isArray(idx.users)).toBe(true);
   expect(idx.count).toBe(idx.users.length);
 
-  // REST 侧入口（同源）：/skills/users 不是 /skills/{name}/content 的歧义牺牲品
-  const usersRes = await request.get('/skills/users');
-  expect(usersRes.status()).toBe(200);
-  const usersBody = await usersRes.json();
-  expect(usersBody).toHaveProperty('users');
+  // REST 侧入口：/skills/users 现为「我的技能」，用户身份取 X-User-Id 头（网关注入）
+  const mine = await request.get('/skills/users', { headers: { 'X-User-Id': U } });
+  expect(mine.status()).toBe(200);
+  const mineBody = await mine.json();
+  expect(mineBody.userId).toBe(U);
+  expect(Array.isArray(mineBody.skills)).toBe(true);
+  expect(Array.isArray(mineBody.tombstones)).toBe(true);
 
   // 明细：L4 无覆盖 + 包内无同名技能 → 404 not_found（而不是 500/200 空体）
-  const ghost = await request.get(`/skills/users/${U}/ghost-skill-${uniq()}`);
+  const ghost = await request.get(`/skills/users/ghost-skill-${uniq()}`, { headers: { 'X-User-Id': U } });
   expect(ghost.status()).toBe(404);
   expect((await ghost.json()).error).toBe('not_found');
 
-  // 参数校验：非法 userId → 400
-  const bad = await request.get('/skills/users/.hidden/ghost');
+  // 身份校验：缺 X-User-Id → 400 missing_user_id；非法 userId → 400 invalid_user_id
+  const noHdr = await request.get('/skills/users');
+  expect(noHdr.status()).toBe(400);
+  expect((await noHdr.json()).error).toBe('missing_user_id');
+  const bad = await request.get('/skills/users/ghost', { headers: { 'X-User-Id': '.hidden' } });
   expect(bad.status()).toBe(400);
   expect((await bad.json()).error).toBe('invalid_user_id');
 });
@@ -980,7 +986,10 @@ test('SK1 用户技能索引与明细端点契约', async ({ request }) => {
 /** 写入用户 L4 技能主文件：description 承载 /available 合并视图的覆盖描述（l4Description 解析 frontmatter） */
 async function putL4(request: APIRequestContext, uid: string, name: string, description: string): Promise<APIResponse> {
   const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
-  return request.put(`/skills/users/${encodeURIComponent(uid)}/${encodeURIComponent(name)}`, { data: { content } });
+  return request.put(`/skills/users/${encodeURIComponent(name)}`, {
+    headers: { 'X-User-Id': uid },
+    data: { content }
+  });
 }
 
 /** /available 返回顺序（全局目录序 + L4 追加）不参与契约，深比较前按 name 归一 */
@@ -1038,7 +1047,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   expect(JSON.stringify(globalAfter)).not.toContain(l4Only);
 
   // 删除回落：demo-skill 删除（有包内基线）→ 合并视图回落全局描述
-  const del = await request.delete(`/skills/users/${encodeURIComponent(uidA)}/demo-skill`);
+  const del = await request.delete('/skills/users/demo-skill', { headers: { 'X-User-Id': uidA } });
   expect(del.status()).toBe(200);
   expect(((await del.json()) as Record<string, unknown>).hasPackageBaseline).toBe(true);
   await pollUntil(async () => {
@@ -1046,7 +1055,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
     return rows.find(e => e.name === 'demo-skill');
   }, e => e?.description === baseDemo!.description, 15_000);
   // 独有技能删除 → 从合并视图消失（无包内基线，该技能对该用户已不可见）
-  expect((await request.delete(`/skills/users/${encodeURIComponent(uidA)}/${encodeURIComponent(l4Only)}`)).status()).toBe(200);
+  expect((await request.delete(`/skills/users/${encodeURIComponent(l4Only)}`, { headers: { 'X-User-Id': uidA } })).status()).toBe(200);
   await pollUntil(async () => {
     const rows = await (await request.get(`/skills/available?userId=${encodeURIComponent(uidA)}`)).json() as Array<Record<string, string>>;
     return rows.some(e => e.name === l4Only);
@@ -1255,6 +1264,116 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
   expect(page2.nextBeforeId ?? null).toBeNull();
 
   await deleteThread(sid).catch(() => undefined); // 级联清理种子归档行（S7 同款）
+});
+
+test('HA4 SDK 合成提醒（后台子任务投递）不以 user 身份上屏', async () => {
+  const sid = sessionIdFor(`ha4-${uniq()}`);
+  const mark = uniq();
+  const tailArg = `ha4-tail-${mark}`;
+  // 真实一轮：注册会话 + 制造 origin=state 的未归档尾部
+  const s = chat({ message: `[E2E:plain](${tailArg})`, userId: U, sessionId: sid });
+  await waitTerminal(s);
+  expect(s.terminal?.type).toBe('done');
+  // 种子：清归档行 → 直插 真实 user + 两条合成提醒（元数据判据 / name=system 陈旧判据）+ assistant
+  const seed = await seedSyntheticReminderArchive(`${U}:${sid}`, sid, mark, U);
+
+  const full = await historyQ(sid);
+  const msgs = (full.messages ?? []) as HistoryMsg[];
+  // 合成提醒必须整条消失（无论带 synthetic 元数据还是仅 name=system）
+  for (const gone of [seed.reminderWithMeta, seed.reminderLegacy]) {
+    expect(msgs.find(m => m.msg_id === gone), `合成提醒 ${gone} 不得出现在 history`).toBeUndefined();
+  }
+  // 任何 user 消息不得携带 <system-reminder> 合成内容或提醒标记
+  for (const m of msgs.filter(m => m.role === 'user')) {
+    expect(String(m.content), 'user 消息不得是合成提醒').not.toContain('<system-reminder>');
+    expect(String(m.content)).not.toContain(`合成提醒-${mark}`);
+  }
+  // 过滤不得误伤：真实用户消息与助手回复照常可见
+  expect(msgs.find(m => m.msg_id === seed.realUser)!.role).toBe('user');
+  expect(msgs.find(m => m.msg_id === seed.assistant)!.role).toBe('assistant');
+  // state-only 视图不读归档种子；仅断言不被提醒污染（state 路径过滤由单测覆盖）
+  const stateOnly = await historyQ(sid, 'includeArchived=false');
+  for (const m of (stateOnly.messages ?? []) as HistoryMsg[]) {
+    if (m.role === 'user') expect(String(m.content)).not.toContain('<system-reminder>');
+  }
+
+  await deleteThread(sid).catch(() => undefined);
+});
+
+test('HA5 turn 执行中 history 即可见用户输入（回合起始归档）', async () => {
+  const sid = sessionIdFor(`ha5-${uniq()}`);
+  const mark = `ha5-${uniq()}`;
+  // slow 时序包装（plain 夹具每 chunk 400ms）拉长 turn，制造确定的「执行中」窗口
+  const s = chat({ message: `[E2E:slow](${mark},400)`, userId: U, sessionId: sid });
+
+  // 轮询 history：用户消息必须在 turn **仍在执行**（终态未到）时就可见
+  let sawDuringTurn = false;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const h = await history(sid);
+    const users = ((h.messages ?? []) as HistoryMsg[])
+      .filter(m => m.role === 'user' && String(m.content).includes(mark));
+    if (users.length > 0) {
+      // 此刻 s.terminal 仍为 undefined ⇒ 用户输入已先于 turn 终态落库（修复前恒空）
+      sawDuringTurn = s.terminal === undefined;
+      break;
+    }
+    if (s.terminal) break; // 终态已到仍未见用户消息：修复失效
+    await new Promise(r => setTimeout(r, 30));
+  }
+  await waitTerminal(s);
+  expect(sawDuringTurn, 'turn 执行中 history 必须已含用户提问（回合起始归档）').toBe(true);
+
+  // 终态后用户消息仍只有一条：回合起始归档与 turn 结束 write-through 以同 msg_id 幂等去重
+  const full = await historyQ(sid);
+  const dup = ((full.messages ?? []) as HistoryMsg[])
+    .filter(m => m.role === 'user' && String(m.content).includes(mark));
+  expect(dup.length, '用户消息不得因回合起始归档重复').toBe(1);
+
+  await deleteThread(sid).catch(() => undefined);
+});
+
+test('HA6 回合失败留痕：刷新后 history 可见失败原因（非孤儿提问）', async () => {
+  const sid = sessionIdFor(`ha6-${uniq()}`);
+  // 未登记场景标记 → mock LLM 返回 500 → SDK 重试耗尽 → turn 以 error 终态结束
+  const s = chat({ message: '[E2E:ha6-missing-scenario] fail', userId: U, sessionId: sid, timeoutMs: 60_000 });
+  await waitTerminal(s);
+  expect(s.terminal?.type, '未知场景标记应让 turn 以 error 收尾').toBe('error');
+
+  // 失败原因必须落进会话消息轨：刷新后 history 不再只剩孤儿提问
+  const h = await pollUntil(async () => historyQ(sid), x =>
+    ((x.messages ?? []) as HistoryMsg[]).some(
+      m => m.role === 'assistant' && String(m.content).includes('本次执行失败')));
+  const marked = ((h.messages ?? []) as HistoryMsg[]).filter(
+    m => m.role === 'assistant' && String(m.content).includes('本次执行失败'));
+  expect(marked.length, '失败留痕恰一条（同 replyId 幂等）').toBe(1);
+  expect(String(marked[0].content).length, '失败留痕须含具体原因，非仅前缀')
+    .toBeGreaterThan('⚠️ 本次执行失败：'.length);
+
+  await deleteThread(sid).catch(() => undefined);
+});
+
+test('HA7 @Skill 注入区块不上屏：history 只显示用户原文', async () => {
+  const sid = sessionIdFor(`ha7-${uniq()}`);
+  const own = `ha7-own-${uniq()}`;
+  // @demo-skill 命中夹具技能：注入会把整篇 SKILL.md 追加进用户消息（模型必需），
+  // 但展示层须剥离——否则提问气泡拖着整篇技能文档
+  const s = chat({ message: `@demo-skill [E2E:plain](${own})`, userId: U, sessionId: sid });
+  await waitTerminal(s);
+
+  const h = await pollUntil(async () => historyQ(sid), x =>
+    ((x.messages ?? []) as HistoryMsg[]).some(
+      m => m.role === 'user' && String(m.content).includes(own)));
+  const userMsgs = ((h.messages ?? []) as HistoryMsg[]).filter(m => m.role === 'user');
+  const mine = userMsgs.find(m => String(m.content).includes(own));
+  expect(mine, '用户提问必须在 history 可见').toBeTruthy();
+  expect(String(mine!.content), '提问气泡不得含注入区块').not.toContain('Referenced Skills');
+  expect(String(mine!.content), '提问气泡不得拖着整篇 SKILL.md').not.toContain('demo-skill 技能已加载');
+  // 引用标记保留（反映用户所敲的 @demo-skill），正文仍是用户原文
+  expect(String(mine!.content)).toContain('[@Skill:demo-skill]');
+  expect(String(mine!.content).length, '只剩用户原文，长度远小于注入后').toBeLessThan(150);
+
+  await deleteThread(sid).catch(() => undefined);
 });
 
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------
@@ -1487,4 +1606,143 @@ test.describe('RD Redis 前缀隔离', () => {
     const baseLog = fs.readFileSync(path.join(runtimeDir, 'logs', 'agent-a.log'), 'utf8');
     expect(baseLog).toContain('prefix=""');
   });
+});
+
+// ---------- CG 组：会话并发（issue #87 perPeer 回归钉） ----------
+// #87 根因：ChatUiChannel 默认 create()（DmScope.MAIN）把所有 DM 折叠成同一
+// canonicalKey（含 agent_state 槽位 gw-3f20f08c5499 全进程共享），SDK 网关按
+// canonicalKey 过 turn 闸门——全进程所有会话 turn 串行，每副本有效并发≈1
+// （#87 实测排队 17s~169s）。修复：两处构造点切 perPeer()（DmScope.PER_PEER，
+// peer=平台 sessionId），canonicalKey 每会话一把闸门。
+// 单测侧只有 AgentRuntimeServiceHitlTest#channelGatewaySessionIdShouldMatchSdkPerPeerCanonicalKey
+// 钉派生式，行为级并发语义此前零门禁。
+// ⚠ 实测口径（2026-10-12 变异验证）：把两处构造点改回 create()（共享槽位）后本组
+// 仍绿——2.0.3 SDK 的 HarnessGateway Gate key 按 session id 粒度解析，MAIN 只折叠
+// agent_state 槽位、**不折叠闸门键**，轻载双流不足以复现 17s+ 排队（#87 原始
+// 复现条件是 worker 并发压测）。故 CG1 定位为「防串行化回归的哨兵」而非确定性
+// 复现器：它守住修复后的并行语义不回退，但 MAIN 回退要在 CI 复现需
+// bench/load C 档（agent_start_delay_ms P100 门禁）那种并发压力。
+test.describe('CG 会话并发', () => {
+  // 两个会话各跑一个慢流（slow 标记：每 chunk 延迟），观察两者的事件时序——
+  // 串行形态下第二个会话的首事件须等第一个收尾。
+  test('CG1 不同会话 turn 并行（#87 perPeer 哨兵）', async () => {
+    const sidA = sessionIdFor(`cg1a-${uniq()}`);
+    const sidB = sessionIdFor(`cg1b-${uniq()}`);
+    // slow(text,chunkMs)：plain 夹具时序包装，每 chunk 间隔 400ms × 8 chunk ≈ 3.2s 收尾
+    const a = chat({ message: `[E2E:slow](cg1a,400,8)`, userId: U, sessionId: sidA, timeoutMs: 60_000 });
+    const b = chat({ message: `[E2E:slow](cg1b,400,8)`, userId: U, sessionId: sidB, timeoutMs: 60_000 });
+    await pollUntil(async () => [a.frames, b.frames], ([fa, fb]) =>
+      fa.some(f => f.type === 'AGENT_START') && fb.some(f => f.type === 'AGENT_START'),
+    60_000, 100);
+    expect(a.frames.find(f => f.type === 'AGENT_START'), 'A 会话未收到 AGENT_START').toBeTruthy();
+    expect(b.frames.find(f => f.type === 'AGENT_START'), 'B 会话未收到 AGENT_START').toBeTruthy();
+    // /threads/chat 流携带 id: 行但为事件哈希（非 seq），时序判据用帧序下标：
+    // B 的启动不得晚于 A 的收尾——真串行（同 key 互斥）时差值为 A 的整段时长量级
+    const endedIdxA = a.frames.findIndex(f => f.type === 'AGENT_END' || f.type === 'done');
+    const startedIdxB = b.frames.findIndex(f => f.type === 'AGENT_START');
+    if (endedIdxA >= 0) {
+      expect(startedIdxB, 'B 的 AGENT_START 晚于 A 的收尾——会话 turn 疑似串行（#87 回退）').toBeLessThan(endedIdxA);
+    }
+    // 两流各自正常收尾（互不干扰）
+    await waitTerminal(a);
+    await waitTerminal(b);
+    expect(a.terminal?.type).toBe('done');
+    expect(b.terminal?.type).toBe('done');
+  });
+
+  // 同会话互斥仍是既有语义（R3 多副本侧同款）：第二 turn 排队并收 waiting 帧，
+  // perPeer 后「按会话互斥」必须保持——本用例防修复把互斥也一并抹掉。
+  test('CG2 同会话第二 turn 排队收 waiting 帧', async () => {
+    const sid = sessionIdFor(`cg2-${uniq()}`);
+    const first = chat({ message: `[E2E:slow](cg2a,300,8)`, userId: U, sessionId: sid, timeoutMs: 60_000 });
+    await pollUntil(async () => first.frames, fs => fs.some(f => f.type === 'MODEL_CALL_START'), 30_000, 100);
+    const second = chat({ message: `[E2E:plain]`, userId: U, sessionId: sid, timeoutMs: 60_000 });
+    await pollUntil(async () => second.frames, fs => fs.some(f => f.type === 'waiting'), 40_000, 500);
+    expect(second.frames.filter(f => f.type === 'waiting').length).toBeGreaterThanOrEqual(1);
+    second.abort();
+    await waitTerminal(first);
+    expect(first.terminal?.type).toBe('done');
+  });
+});
+
+// ---------- Q86 组：HITL ask 段帧序（issue #86 契约 v2 行为钉） ----------
+// 4db16ba 起 ask 段帧序为 permission_ask → REQUEST_STOP → AGENT_RESULT → AGENT_END：
+// ask 段不再提前 release+关流，而是自然收尾到 AGENT_END（终帧 AGENT_END、非 permission_ask）。
+// 旧版 e2e 全组对 AGENT_END 数/挂起后终帧形态零断言，若回退旧序（提前关流）门禁不红。
+test.describe('Q86 HITL ask 段帧序', () => {
+  test('Q86 1 ask 段以 AGENT_END 自然收尾（4db16ba+ 新序）', async ({ request }) => {
+    const app = await createApprovalApp();
+    const sid = sessionIdFor(`q86-${uniq()}`);
+    const ask = chat({ message: `[E2E:hitl:submit](${app})`, userId: U, sessionId: sid });
+    await waitTerminal(ask);
+    // ask 帧为末个业务终态（sse.ts 归一取 permission_ask 优先于 AGENT_END，此处显式钉帧序）
+    expect(ask.terminal?.type).toBe('permission_ask');
+    const types = ask.frames.map(f => f.type);
+    expect(types).toContain('permission_ask');
+    // 新序（4db16ba+）：ask 之后仍收到 SDK 的 AGENT_END 收尾帧；旧序在此处提前关流（无 AGENT_END）
+    expect(types.indexOf('permission_ask')).toBeLessThan(types.lastIndexOf('AGENT_END'));
+    // 会话进入 waiting_confirm 挂起态（ask 帧语义不变）
+    expect((await status(sid)).state).toBe('waiting_confirm');
+  });
+});
+
+// ---------- X 组：前缀感知（subpath-routing-design §9.2）----------
+// e2e nginx LB 根代理不设 X-Forwarded-Prefix，但透传客户端任意头 → 用例自带头直证
+// 「服务端对外 URL 自感知」契约（agent-card url / file_ready.download_url / endpoints）；
+// 对照组（无头）钉死旧行为零回归。X6（UI 维度）在 UI 断言机制可承载时补，暂列手工清单。
+
+test('X1 前缀头下 file_ready.download_url 携带完整路径（含尾斜杠归一）', async () => {
+  const sid = sessionIdFor(`x1-${uniq()}`);
+  const stream = chat({
+    message: `[E2E:oaf:package]`, userId: U, sessionId: sid,
+    headers: { 'X-Forwarded-Prefix': '/agent/e2e-x/' },
+  });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const ready = stream.frames.find(f => f.type === 'file_ready') as Record<string, unknown> | undefined;
+  expect(ready, '缺少 file_ready 帧').toBeTruthy();
+  expect(String(ready!.download_url)).toMatch(/^\/agent\/e2e-x\/files\/[0-9a-f-]{36}$/);
+});
+
+test('X2 agent-card url 头注入填充与对照（直连空串）', async ({ request }) => {
+  const card = await (await request.get('/.well-known/agent-card.json', {
+    headers: {
+      'X-Forwarded-Prefix': '/agent/e2e-x',
+      'X-Forwarded-Host': 'e2e-entry.example',
+      'X-Forwarded-Proto': 'https',
+    },
+  })).json();
+  expect(card.url).toBe('https://e2e-entry.example/agent/e2e-x/');
+  const bare = await (await request.get('/.well-known/agent-card.json')).json();
+  expect(bare.url).toBe('');
+});
+
+test('X3 GET / endpoints 前缀化 + base_url（多值头取首）', async ({ request }) => {
+  const root = await (await request.get('/', {
+    headers: { 'X-Forwarded-Prefix': '/agent/e2e-x, /other', 'X-Forwarded-Host': 'e2e-entry.example' },
+  })).json();
+  expect(root.endpoints.agent_card).toBe('/agent/e2e-x/.well-known/agent-card.json');
+  expect(root.endpoints.jsonrpc).toBe('/agent/e2e-x/');
+  expect(root.endpoints.threads).toBe('/agent/e2e-x/threads');
+  expect(root.endpoints.health).toBe('/agent/e2e-x/health');
+  expect(root.base_url).toBe('http://e2e-entry.example/agent/e2e-x');
+});
+
+test('X4 /metadata includeDetails endpoints 前缀化 + base_url', async ({ request }) => {
+  const meta = await (await request.get('/metadata?includeDetails=true', {
+    headers: { 'X-Forwarded-Prefix': '/agent/e2e-x', 'X-Forwarded-Host': 'e2e-entry.example' },
+  })).json();
+  expect(meta.endpoints.agent_card).toBe('/agent/e2e-x/.well-known/agent-card.json');
+  expect(meta.endpoints.threads).toBe('/agent/e2e-x/threads');
+  expect(meta.base_url).toBe('http://e2e-entry.example/agent/e2e-x');
+});
+
+test('X5 对照组：无头时 endpoints 根路径且无 base_url 键', async ({ request }) => {
+  const root = await (await request.get('/')).json();
+  expect(root.endpoints.agent_card).toBe('/.well-known/agent-card.json');
+  expect(root.endpoints.jsonrpc).toBe('/');
+  expect(root.base_url).toBeUndefined();
+  const meta = await (await request.get('/metadata?includeDetails=true')).json();
+  expect(meta.endpoints.threads).toBe('/threads');
+  expect(meta.base_url).toBeUndefined();
 });

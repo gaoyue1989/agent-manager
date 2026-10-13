@@ -51,6 +51,8 @@ public class WorkspaceSyncService {
     private static final int MAX_SKILL_FILES = UserSkillService.MAX_SYNC_FILES;
     /** 单文件回写上限（与技能 API 同口径，超限跳过不阻塞） */
     private static final int MAX_SKILL_FILE_BYTES = UserSkillService.MAX_CONTENT_BYTES;
+    /** 单技能回写总字节上限（与技能 API 同口径，超限跳过整个技能） */
+    private static final long MAX_SKILL_TOTAL_BYTES = UserSkillService.MAX_SKILL_TOTAL_BYTES;
 
     private final WorkspaceReader workspaceReader;
 
@@ -181,6 +183,11 @@ public class WorkspaceSyncService {
             log.info("skills/ sync: {} 已被管理面显式删除（tombstone），跳过回写", name);
             return false;
         }
+        // 管理面已禁用该技能（启停标记）：跳过回写，避免把容器内旧副本重新落库
+        if (workspaceReader.isUserSkillDisabled(userId, name)) {
+            log.info("skills/ sync: {} 已被管理面禁用（disabled），跳过回写", name);
+            return false;
+        }
         // 管理面已写入该技能（KV 写入栅栏）：同代容器内副本比管理面写入旧，回写即把管理面内容
         // 改回容器版本（本机无集群时的代码推断，E2E 9.6~9.8 为现场验证入口）
         if (workspaceReader.isUserSkillAdminOverride(userId, name)) {
@@ -197,6 +204,14 @@ public class WorkspaceSyncService {
         }
         if (files.size() > MAX_SKILL_FILES) {
             log.warn("skills/ sync: {} 文件数 {} 超过上限 {}，跳过", name, files.size(), MAX_SKILL_FILES);
+            return false;
+        }
+        long totalBytes = 0;
+        for (var value : files.values()) {
+            totalBytes += value.getBytes(StandardCharsets.UTF_8).length;
+        }
+        if (totalBytes > MAX_SKILL_TOTAL_BYTES) {
+            log.warn("skills/ sync: {} 总大小 {} 字节超过上限 {}，跳过", name, totalBytes, MAX_SKILL_TOTAL_BYTES);
             return false;
         }
         // SKILL.md 先写且失败即中止：否则 KV 会留下“有 scripts 资源、无 SKILL.md”的半份覆盖

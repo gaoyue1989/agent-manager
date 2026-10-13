@@ -14,15 +14,15 @@
 
 durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2 预留（§6），当时部署规模为单实例。当前状态：
 
-- agent-framework 由 platform-backend 按 agent 拉起为 K8s Deployment，`replicas` 是发布时可调参数，`< 1` 兜底为 1（`backend/internal/k8s/objects.go:102-104`）
-- 仓库内所有 Deployment 当前均为 `replicas: 1`（`manifests/platform.yaml:48,145`）
-- Service 无 `sessionAffinity`，ingress 无 affinity 注解（`backend/internal/k8s/objects.go:205-220`）
+- agent-framework 由 platform-backend 按 agent 拉起为 K8s Deployment，`replicas` 是发布时可调参数，`< 1` 兜底为 1（`backend/internal/k8s/objects.go:131-133`）
+- 仓库内所有 Deployment 当前均为 `replicas: 1`（`manifests/platform.yaml:48,125,257`）
+- Service 无 `sessionAffinity`，ingress 无 affinity 注解（`backend/internal/k8s/objects.go:228-240`）
 
 即：**代码已经允许 replicas ≥ 2，但没有任何一层配置阻止踩坑**。谁把 replicas 调到 2 就当场激活本文的 F1/F2。
 
 ### 1.2 现状核实
 
-以下每一条均经代码核对，非推测。
+以下每一条均经代码核对，非推测。**本节记录的是改造前（2026-08~09）的代码状态与行号**，作为各问题的取证依据；阶段 1-3 已实施，F1-F8 均已修复（`turnStatus`/`replayOnly`/`currentReplyId` 已删除、`evictStaleSinks` 已独立调度等），故表中行号不再对应当前代码——读时请按「机制」列理解，不要据行号定位现码。
 
 | # | 问题 | 位置 | 机制 | 实际严重性 |
 |---|------|------|------|-----------|
@@ -35,7 +35,7 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 | F7 | `/status` 单次调用 4 次独立借用 | `SessionStreamController.java:323-339` | `isHeld` + `findLatest` + `findMaxSeq` + `findPendingConfirm` | 前端若轮询 status，开销高于游标轮询 |
 | F8 | 写入侧每事件 2 语句 | `SessionEventStore.java:83-102` | `SELECT MAX(seq)+1` + `INSERT`，各自 `prepareStatement`，1 次连接借用 | 2000-token turn ≈ 4200 语句 / 2100 次借用 |
 
-**F2 更正**：`evictStaleSinks()` 的唯一调用点是 `SessionCleanupService.java:82`，位于 `@Scheduled(cron = "0 0 3 * * ?")`（`SessionCleanupService.java:68`）——**每天凌晨 3 点执行一次**。`sinksEvictionDelay` 的 5 分钟是**阈值**而非**检查周期**。因此跨副本 subscribe 后：心跳 `: hb` 照发，前端 `onerror` 不触发、不重连，ingress `proxy-read-timeout` 为 3600s（`backend/internal/k8s/objects.go:216`）也不会砍——连接悬挂至**客户端放弃 / Pod 重启 / 次日凌晨 3 点**。durable-sse-plan §9 R2 所述"Sinks TTL 5min 兜底"在实现层从未生效，这是与多副本无关的独立缺陷。
+**F2 更正**：`evictStaleSinks()` 的唯一调用点是 `SessionCleanupService.java:82`，位于 `@Scheduled(cron = "0 0 3 * * ?")`（`SessionCleanupService.java:68`）——**每天凌晨 3 点执行一次**。`sinksEvictionDelay` 的 5 分钟是**阈值**而非**检查周期**。因此跨副本 subscribe 后：心跳 `: hb` 照发，前端 `onerror` 不触发、不重连，ingress `proxy-read-timeout` 为 3600s（`backend/internal/k8s/objects.go:281`）也不会砍——连接悬挂至**客户端放弃 / Pod 重启 / 次日凌晨 3 点**。durable-sse-plan §9 R2 所述"Sinks TTL 5min 兜底"在实现层从未生效，这是与多副本无关的独立缺陷。
 
 **F3 更正**：`SessionStreamController.java:331` 为 `leaseHeld || busStatus == TurnStatus.WORKING`，是 **OR**。跨副本场景靠 `leaseHeld` 救回；但**本地误报的 WORKING 会赢过 `leaseHeld=false`**。结合 F4，本 Pod 存在残留 sink 时 `/status` 持续报 working。
 
@@ -134,7 +134,7 @@ durable-sse-plan 交付时明确把多实例列为已知限制（§9 R5）与 P2
 - **只降低概率，不提供正确性**：cookie 是浏览器维度而非 session 维度，换设备、cookie 过期（nginx affinity 默认 1h）、扩缩容瞬间都会破。
 - **吞吐动机不需要**：随机 LB 已摊开并发 session。粘性仅在"有 per-session 内存状态需要保温"时有额外收益，而这里唯一的内存状态正是要解耦掉的 sink。
 - **高可用动机下反而更差**：Pod 死亡时一致性哈希把槽位转给后继 Pod，一批本运行正常的 session 被整体改派；随机 LB 下仅该 Pod 上的 turn 受影响，其余 session 无感。
-- **成本**：`session_id` 在 path 中，且 ingress 被 `/agent/{short}(/|$)(.*)` rewrite（`backend/internal/k8s/objects.go:205`），按 session_id 哈希需加 `map` 正则提取 + `upstream-hash-by`，属 Go 侧改动 + 全 agent 共享的配置面。
+- **成本**：`session_id` 在 path 中，且 ingress 被 `/agent/{short}(/|$)(.*)` rewrite（`backend/internal/k8s/objects.go:305`），按 session_id 哈希需加 `map` 正则提取 + `upstream-hash-by`，属 Go 侧改动 + 全 agent 共享的配置面。
 - **明确禁止**：不要使用 Service 的 `sessionAffinity: ClientIP`——在 ingress 之后所有流量源 IP 均为 ingress Pod，会把所有会话钉死到一个副本，等于未扩容。
 
 ### 2.3 D1/D2 的重新评估触发条件

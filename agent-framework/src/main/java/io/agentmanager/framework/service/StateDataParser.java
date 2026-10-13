@@ -227,6 +227,37 @@ public final class StateDataParser {
         return msg.path("role").asText("user").toLowerCase();
     }
 
+    /** SDK 合成消息元数据键（与 {@code Msg.METADATA_SYNTHETIC} 一致） */
+    static final String METADATA_SYNTHETIC = "agentscope_synthetic";
+
+    /** SDK 合成提醒消息的固定 name（TaskReminder/Subagents 中间件均用 "system"） */
+    static final String SYNTHETIC_REMINDER_NAME = "system";
+
+    /**
+     * 判定消息是否为 SDK 注入的合成提醒，而非用户/助手真实产出。
+     *
+     * <p>官方 SDK 会把后台子 agent 任务投递提醒以 {@code role=USER} + {@code name=system} +
+     * {@code metadata.agentscope_synthetic=true} 的形式**持久化进 AgentState.context**
+     * （{@code SubagentsMiddleware.onReasoning} 的 {@code buildDeliveryReminder}），
+     * 内容为 {@code <system-reminder>…</system-reminder>}。它没有真实用户输入/模型回复语义，
+     * history 回放时不得按 user 呈现（否则用户会看到「并非自己提问、却以 user 出现」的消息）。
+     *
+     * <p>判据双保险：优先信 {@code metadata.agentscope_synthetic=true}；老数据/元数据缺失时，
+     * 回落到「role=user 且 name=system」——框架自身的用户消息 name 恒为 userId（Channel）
+     * 或 agent 收发名，不可能是 "system"，误伤面为零。
+     */
+    public static boolean isSyntheticReminder(JsonNode msg) {
+        if (msg == null) {
+            return false;
+        }
+        var metadata = msg.path("metadata");
+        if (metadata.isObject() && metadata.path(METADATA_SYNTHETIC).asBoolean(false)) {
+            return true;
+        }
+        return "user".equals(extractRole(msg))
+            && SYNTHETIC_REMINDER_NAME.equals(msg.path("name").asText(""));
+    }
+
     // ===== 工具结果文本的敏感值遮掩 =====
     // 工具 output 可能回显敏感配置（实测 get_service_status 的 output 含 LLM_API_KEY 明文）。
     // 确认卡对 input 已有 maskInput（结构化遮掩）；output 是纯文本，这里做同语义的文本级遮掩，
@@ -282,6 +313,12 @@ public final class StateDataParser {
      * {@code state}（ToolCallState：pending/asking/allowed/submitted/finished），
      * tool_result 块带 {@code state}（ToolResultState）与 {@code output}。
      * 本方法把它们按 id 配对合并进 assistant 消息的 tool_calls，使历史回放与实时流语义一致。
+     *
+     * <p>SDK 注入的合成提醒（后台子任务投递等，见 {@link #isSyntheticReminder}）不属对话轮次，
+     * 一律跳过，避免以 {@code role=user} 冒充用户输入上屏。
+     *
+     * <p>user 消息的 {@code @Skill} 注入区块（展开的整篇 SKILL.md）在展示层剥离
+     * （{@link SkillInjectionService#stripInjectedSkills}）：只显示用户自己敲的内容。
      */
     public static List<Map<String, Object>> toRoleContentList(JsonNode messagesArray) {
         return toRoleContentList(messagesArray, DEFAULT_TOOL_OUTPUT_MAX_CHARS);
@@ -302,14 +339,23 @@ public final class StateDataParser {
 
         var result = new ArrayList<Map<String, Object>>();
         for (var m : messagesArray) {
-            var content = extractContentText(m);
+            // SDK 合成提醒（后台子任务投递等）无用户/助手语义，跳过，防止冒充 user 上屏
+            if (isSyntheticReminder(m)) {
+                continue;
+            }
+            var role = extractRole(m);
+            // @Skill 注入区块（展开的整篇 SKILL.md）只服务于模型上下文；用户可见历史
+            // 还原为用户自己敲的内容，否则提问气泡会拖着整篇技能文档（非用户输入）
+            var content = "user".equals(role)
+                ? SkillInjectionService.stripInjectedSkills(extractContentText(m))
+                : extractContentText(m);
             var tools = extractToolCalls(m, resultsByCallId);
             // 仅保留有文本内容或工具调用的消息（跳过纯 tool_result 等）
             if (content.isBlank() && tools.isEmpty()) {
                 continue;
             }
             var msg = new java.util.LinkedHashMap<String, Object>();
-            msg.put("role", extractRole(m));
+            msg.put("role", role);
             msg.put("content", content);
             // 消息标识与名（history 双源合并按 msg_id 对齐归档行、按 name 识别压缩摘要消息；
             // 缺失时不写键，保持旧响应形态不变）

@@ -12,6 +12,7 @@ exit code 契约与飞轮一致：0 全过 / 1 有失败 / 2 无可执行用例�
 """
 
 import asyncio
+import html
 import json
 import shutil
 import socket
@@ -29,6 +30,7 @@ sys.path.insert(0, str(EVAL_DIR))
 from executor import checks as checks_mod  # noqa: E402
 from executor import sse_client  # noqa: E402
 from replay import trajectory as traj_mod  # noqa: E402
+from replay.ids import InvalidIdentifierError, validate_id  # noqa: E402
 from replay.packager import verify_checksums  # noqa: E402
 
 REPLAY_LLM_MJS = EVAL_DIR / "mock" / "replay-llm.mjs"
@@ -134,6 +136,12 @@ def load_pack_cases(pack_dir: str, case_ids: list[str] | None = None) -> list[di
         case = json.loads(p.read_text(encoding="utf-8"))
         if case.get("status") == "retired":
             continue
+        # case_id 来自上传包内 cases-draft（客户端可控，issue #97 问题 10）：
+        # 一处校验同时覆盖 run_replay / run_live 的 trace/trajectory 产物写路径
+        try:
+            validate_id("case_id", case.get("case_id"))
+        except InvalidIdentifierError as e:
+            raise RunnerError(f"evalpack 用例 {p.name} 的 case_id 非法: {e}") from e
         cases.append(case)
     if case_ids:
         cases = [c for c in cases if c["case_id"] in set(case_ids)]
@@ -141,6 +149,11 @@ def load_pack_cases(pack_dir: str, case_ids: list[str] | None = None) -> list[di
 
 
 def load_session(pack_dir: str, sid: str) -> dict[str, Any]:
+    # sid 来自包内 case 的 source.sid（客户端可控，issue #97 问题 9 同链路），拼读前校验
+    try:
+        validate_id("session id", sid)
+    except InvalidIdentifierError as e:
+        raise RunnerError(f"evalpack 会话 sid 非法: {e}") from e
     return json.loads((Path(pack_dir) / "sessions" / f"{sid}.json").read_text(encoding="utf-8"))
 
 
@@ -227,30 +240,34 @@ REPORT_TMPL = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 
 
 def render_report_html(report: dict[str, Any]) -> str:
+    # 报告插值点（case_id/检查项名/模型与录制产出的文本等）可能携带任意内容，error/judge 理由
+    # 经 raw JSON 块入页；所有文本插值统一 html.escape，阻断 report.html 注入
     rows = []
     for c in report["cases"]:
         checks = " ".join(
-            f'<span class="{"ok" if ch["passed"] else "err"}">{ch["name"]}</span>'
+            f'<span class="{"ok" if ch["passed"] else "err"}">{html.escape(str(ch["name"]))}</span>'
             for ch in (c.get("checks") or [])) or '<span class="dim">-</span>'
         score = (c.get("scores") or {}).get("correctness")
         score_str = "-" if not score else f"{score['score']:.2f}"
         traj = c.get("trajectory") or {}
         rows.append(
-            f"<tr><td>{c['case_id']}</td>"
-            f"<td class=\"{'ok' if c['status']=='passed' else 'err'}\">{c['status']}</td>"
+            f"<tr><td>{html.escape(str(c['case_id']))}</td>"
+            f"<td class=\"{'ok' if c['status']=='passed' else 'err'}\">{html.escape(str(c['status']))}</td>"
             f"<td>{c.get('duration_ms','-')}ms</td><td>{checks}</td>"
-            f"<td class=\"dim\">{traj.get('step_status','-')} "
+            f"<td class=\"dim\">{html.escape(str(traj.get('step_status','-')))} "
             f"(drift {traj.get('drift_rate','-')})</td>"
             f"<td>{score_str}</td></tr>")
     s = report["summary"]
     judge_avg = f" · judge均分 <b>{s['score_avg']:.2f}</b>" if s.get("score_avg") is not None else ""
     return REPORT_TMPL.format(
-        run_id=report["run_id"], type=report["type"], pack_id=report.get("pack_id", "-"),
-        mode=report.get("mode", "-"), judge_model=report.get("judge", {}).get("model") or "-",
+        run_id=html.escape(str(report["run_id"])), type=html.escape(str(report["type"])),
+        pack_id=html.escape(str(report.get("pack_id", "-"))),
+        mode=html.escape(str(report.get("mode", "-"))),
+        judge_model=html.escape(str(report.get("judge", {}).get("model") or "-")),
         case_total=s["case_total"], passed=s["pass"], failed=s["fail"],
         pass_rate=f"{s['pass_rate']:.0%}", drift_rate=s.get("drift_rate", 0),
         judge_avg=judge_avg, rows="".join(rows),
-        raw=json.dumps(report, ensure_ascii=False)[:6000])
+        raw=html.escape(json.dumps(report, ensure_ascii=False)[:6000]))
 
 
 def build_report(run_id: str, run_type: str, pack_id: str | None, mode: str,
@@ -387,6 +404,11 @@ async def run_live(base_url: str, out_dir: str, pack_dir: str | None = None,
         for p in sorted(Path(cases_dir).glob("*.json")):
             c = json.loads(p.read_text(encoding="utf-8"))
             if c.get("status") != "retired":
+                # 用例库文件虽为仓内资产，case_id 仍统一校验（同为 trace 产物写路径来源）
+                try:
+                    validate_id("case_id", c.get("case_id"))
+                except InvalidIdentifierError as e:
+                    raise RunnerError(f"用例文件 {p.name} 的 case_id 非法: {e}") from e
                 cases.append(c)
         if case_ids:
             cases = [c for c in cases if c["case_id"] in set(case_ids)]

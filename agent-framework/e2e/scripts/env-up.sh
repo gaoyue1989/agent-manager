@@ -155,6 +155,20 @@ case "$E2E_GROUP" in
   core|sandbox)
     start_jar "$E2E_BASE_PORT" "a"
     ;;
+  router)
+    # RT 组（subpath-routing-design §9.3 本地变体）：单实例 + platform-router nginx
+    # （fixtures/nginx-router.conf.template，与 manifests/platform-router.yaml 语义同源）。
+    # 端口分配：8100 agent / 8101 router（routerBase 写入 env.json，全部用例走 /agent/{short} 前缀）。
+    start_jar "$E2E_BASE_PORT" "a"
+    ROUTER_PORT="$((E2E_BASE_PORT + 1))"
+    NGINX_CONF="$RUNTIME/nginx-router.conf"
+    sed "s|__UPSTREAM__|host.docker.internal:$E2E_BASE_PORT|g" \
+      "$ROOT/fixtures/nginx-router.conf.template" > "$NGINX_CONF"
+    docker rm -f e2e-router >/dev/null 2>&1 || true
+    docker run -d --name e2e-router -p "$ROUTER_PORT:80" --add-host=host.docker.internal:host-gateway \
+      -v "$NGINX_CONF:/etc/nginx/nginx.conf:ro" nginx:1.27.1-alpine > /dev/null
+    "$ROOT/scripts/wait-ready.sh" "http://127.0.0.1:${ROUTER_PORT}/agent/e2e-x/health" 30 router
+    ;;
   multi)
     start_jar "$((E2E_BASE_PORT + 1))" "a"
     start_jar "$((E2E_BASE_PORT + 2))" "b"
@@ -199,7 +213,7 @@ case "$E2E_GROUP" in
     start_lb "$((E2E_BASE_PORT + 0))" "$((E2E_BASE_PORT + 5))" "$((E2E_BASE_PORT + 6))" leadlb
     start_lb "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 3))" "$((E2E_BASE_PORT + 4))" memberlb
     ;;
-  *) echo "E2E_GROUP 必须是 core|multi|sandbox|protocol|protocol-multi"; exit 1;;
+  *) echo "E2E_GROUP 必须是 core|multi|sandbox|protocol|protocol-multi|router"; exit 1;;
 esac
 
 # ---------- 4. env.json ----------
@@ -210,6 +224,7 @@ cat > "$RUNTIME/env.json" <<EOF
 {
   "group": "$E2E_GROUP",
   "base": "http://127.0.0.1:${E2E_BASE_PORT}",
+  "routerBase": "http://127.0.0.1:$((E2E_BASE_PORT + 1))",
   "replicaA": "http://127.0.0.1:$((E2E_BASE_PORT + 1))",
   "replicaB": "http://127.0.0.1:$((E2E_BASE_PORT + 2))",
   "protocolBase": "http://127.0.0.1:$((E2E_BASE_PORT + 1))",

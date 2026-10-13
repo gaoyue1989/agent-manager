@@ -207,7 +207,7 @@ class SkillCatalogServiceTest {
     void availableSkillsShouldMergeUserL4Overrides() {
         var userService = org.mockito.Mockito.mock(UserSkillService.class);
         org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
-            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false)));
+            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false, "", true, "")));
         org.mockito.Mockito.when(userService.readSkill("u1", "personal-a", null))
             .thenReturn(java.util.Optional.of(new UserSkillService.UserSkillContent(
                 "u1", "personal-a",
@@ -226,6 +226,22 @@ class SkillCatalogServiceTest {
 
         // 无 userId：不合并 L4（仅全局目录）
         assertTrue(service.availableSkills().stream().noneMatch(m -> "personal-a".equals(m.get("name"))));
+    }
+
+    @Test
+    void availableSkillsShouldExcludeDisabledOverrideIncludingPackageBaseline() {
+        var userService = org.mockito.Mockito.mock(UserSkillService.class);
+        // personal-a 在全局目录存在（L2 基线），用户个人覆盖被禁用 → 该技能对用户整体不可用
+        org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
+            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false,
+                "", false, "")));
+
+        var service = new SkillCatalogService(
+            oafConfig(List.of(declared("personal-a", "Global personal-a", false))),
+            props(), manageService(), userService);
+
+        assertTrue(service.availableSkills("u1").stream()
+                .noneMatch(m -> "personal-a".equals(m.get("name"))), "禁用的个人技能不应出现（含包内同名基线）");
     }
 
     private static void deleteRecursively(Path root) throws IOException {

@@ -5,9 +5,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -158,6 +160,37 @@ public class SkillManageController {
         }
     }
 
+    /**
+     * 下载指定 Skill 的整目录为 zip。
+     *
+     * <p>以 {@code /config/skills/{name}} 目录为事实来源，打包技能内全部文件（含 scripts 等资源，
+     * 保留原始字节）。技能仅被 frontmatter 声明而无目录（{@code declaredButMissing}）→ 404。
+     * 文件名 {@code {name}.zip}（RFC 5987 filename* 编码，支持中文）。
+     */
+    @GetMapping("/{name}/download")
+    public ResponseEntity<?> download(@PathVariable String name) {
+        if (name.contains("..") || name.contains("/") || name.contains("\\") || name.startsWith(".")) {
+            return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
+        }
+        Optional<byte[]> zip;
+        try {
+            zip = manageService.exportSkillZip(name);
+        } catch (IOException e) {
+            log.warn("Skill export failed for {}: {}", name, e.getMessage());
+            return err(HttpStatus.INTERNAL_SERVER_ERROR, "download_failed", "下载失败: " + e.getMessage());
+        }
+        if (zip.isEmpty()) {
+            return err(HttpStatus.NOT_FOUND, "not_found", "Skill '" + name + "' 不存在（可能仅为 frontmatter 声明）");
+        }
+        var headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType("application/zip"));
+        headers.setContentLength(zip.get().length);
+        headers.set(HttpHeaders.CONTENT_DISPOSITION,
+            "attachment; filename*=UTF-8''" + urlEncode(name + ".zip"));
+        headers.set("X-Content-Type-Options", "nosniff");
+        return ResponseEntity.ok().headers(headers).body(zip.get());
+    }
+
     /** 切换 Skill 启停状态 */
     @PutMapping("/{name}/toggle")
     public ResponseEntity<Map<String, Object>> toggle(@PathVariable String name) {
@@ -229,5 +262,15 @@ public class SkillManageController {
         body.put("error", code);
         body.put("message", message);
         return ResponseEntity.status(status).body(body);
+    }
+
+    /** 文件名 URL 编码（RFC 5987 filename*，支持中文技能名） */
+    private static String urlEncode(String name) {
+        try {
+            return java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8)
+                .replace("+", "%20");
+        } catch (Exception e) {
+            return "skill.zip";
+        }
     }
 }

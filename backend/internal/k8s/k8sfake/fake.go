@@ -221,6 +221,17 @@ func (f *FakeK8s) MarkPodRunning(ns, name, appLabel string) {
 	_, _ = f.cs.CoreV1().Pods(ns).Create(context.TODO(), pod, metav1.CreateOptions{})
 }
 
+func (f *FakeK8s) ServiceExists(ns, name string) (bool, error) {
+	_, err := f.cs.CoreV1().Services(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // WaitReady 轮询 fake 中的 Deployment 状态。
 func (f *FakeK8s) WaitReady(ctx context.Context, ns, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

@@ -64,6 +64,10 @@ public class ConfirmController {
     private final McpToolRegistrar mcpToolRegistrar;
     private final RemoteConfirmBridge remoteConfirmBridge;
 
+    /** 会话消息轨存储：confirm 恢复 turn 失败留痕（字段注入 required=false，单测直接 new 时为 null） */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
+
     /** Spring 装配入口（含远程确认桥） */
     @org.springframework.beans.factory.annotation.Autowired
     public ConfirmController(AgentRuntimeService runtimeService,
@@ -302,9 +306,23 @@ public class ConfirmController {
                             finalSessionId, e.getMessage());
                         if (!lease.isLost()) {
                             // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
+                            var errText = e.getMessage() != null
+                                ? e.getMessage() : e.getClass().getSimpleName();
                             eventBus.emitSynthetic(finalSessionId, replyId, "error",
-                                "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(
-                                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()) + "}");
+                                "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(errText) + "}");
+                            // 失败留痕：刷新后 history 可见「本次执行失败：…」（否则只剩孤儿提问）
+                            if (sessionMessageStore != null) {
+                                try {
+                                    var masked = io.agentmanager.framework.service.StateDataParser
+                                        .maskSensitiveText(errText);
+                                    var text = masked.length() > 500 ? masked.substring(0, 500) : masked;
+                                    sessionMessageStore.archiveTurnError(finalSessionId, replyId,
+                                        "⚠️ 本次执行失败：" + text);
+                                } catch (Exception ex) {
+                                    log.debug("record confirm turn error failed (sid={}): {}",
+                                        finalSessionId, ex.getMessage());
+                                }
+                            }
                         }
                         TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
                     },

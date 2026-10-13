@@ -1,0 +1,155 @@
+# platform-router：router 模式（INGRESS_HOST_SUFFIX 空）的集群内子路径路由器
+#（subpath-routing-design §4.2/§4.3）。一次性自举（kubectl apply），backend 发布链路
+# 零写入——nginx 配置静态泛化（正则从 URL 提取服务名 + kube-dns 动态解析 upstream），
+# 新服务只要 {name}-svc 存在，DNS 生效后路由自动可用，无 ConfigMap 热更、无 reload。
+#
+# 固化进 nginx.conf 的平台约定（与 backend 命名规则同级的不变量，改动须两侧同步）：
+#   oaf- 前缀、-svc 后缀、业务端口 8100、namespace agent-platform。
+# kind 环境需先导入镜像：docker pull nginx:1.27.1-alpine && kind load docker-image ...
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-router-conf
+  namespace: agent-platform
+  labels:
+    app.kubernetes.io/name: platform-router
+    app.kubernetes.io/managed-by: oaf-platform
+data:
+  nginx.conf: |
+    worker_processes auto;
+    events { worker_connections 10240; }
+    http {
+      access_log /dev/stdout;
+      # 变量 proxy_pass 逐请求解析必须显式指定 resolver；10s 缓存意味着服务删除后
+      # 至多 10s 内残留转发（502）
+      resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
+
+      # 外层 controller 已声明 X-Forwarded-* 时透传，否则按本跳观察值兜底
+      #（保住 TLS 卸载场景的 https）；host 兜底用 $http_host（含端口）而非 $host
+      #（剥端口会让 NodePort 入口集群的 agent-card url 丢 :30080 变不可达）
+      map $http_x_forwarded_proto $fwd_proto { default $http_x_forwarded_proto; "" $scheme; }
+      map $http_x_forwarded_host  $fwd_host  { default $http_x_forwarded_host;  ""  $http_host; }
+
+      server {
+        listen 8080;
+        # 与文件上传（POST /files/upload）对齐：入口层不设更严于历史的体量限制，
+        # 上限由应用层裁决
+        client_max_body_size 200m;
+
+        # [a-z0-9-] 限定字符集：$short 只出现在域名 label 位置，杜绝路径注入 upstream；
+        # nginx 在 location 匹配前已做 URI 归一化（合并斜杠、消解 ../）
+        location ~ ^/agent/(?<short>[a-z0-9-]+) {
+          rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀：nginx 原生能力，替代 ingress 注解
+          proxy_pass http://oaf-$short-svc.agent-platform.svc.cluster.local:8100;
+          proxy_set_header Host              $host;
+          proxy_set_header X-Forwarded-Proto $fwd_proto;
+          proxy_set_header X-Forwarded-Host  $fwd_host;
+          proxy_set_header X-Forwarded-Prefix /agent/$short;   # agent-framework 前缀感知的输入契约
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";         # SSE 长连接
+          proxy_buffering off;                    # SSE 不缓冲
+          proxy_request_buffering off;            # 上传直透
+          proxy_read_timeout 3600s;               # 等价原 ingress path 模式注解三件套
+          proxy_send_timeout 3600s;
+        }
+
+        location = /healthz { access_log off; return 200 "ok"; }   # router 自身存活探针
+        location / { return 404; }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-router
+  namespace: agent-platform
+  labels:
+    app.kubernetes.io/name: platform-router
+    app.kubernetes.io/managed-by: oaf-platform
+spec:
+  replicas: 2                    # 业务流量共享组件：双副本控制故障域
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0          # 滚动时不丢新建连接（旧 pod 终止仍会断其上的 SSE 长流，运维窗口操作）
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: platform-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: platform-router
+        app.kubernetes.io/managed-by: oaf-platform
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27.1-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: conf
+          configMap:
+            name: platform-router-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: platform-router-svc     # backend router 模式启动自检对象（k8s.RequireRouter）
+  namespace: agent-platform
+  labels:
+    app.kubernetes.io/name: platform-router
+    app.kubernetes.io/managed-by: oaf-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: platform-router
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# 共享业务入口 Ingress：零 rewrite 注解（path=/agent + Prefix 属 Ingress 核心规范，
+# 任意 controller 可用）。机会性保留 timeout/ssl-redirect 注解：ingress-nginx 集群
+# 生效，其他 controller 忽略后由 20s SSE 心跳兜底（subpath-routing §6.4）。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform-agent-router
+  namespace: agent-platform
+  labels:
+    app.kubernetes.io/name: platform-router
+    app.kubernetes.io/managed-by: oaf-platform
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx       # 按集群实际 controller 调整
+  rules:
+    - http:
+        paths:
+          - path: /agent
+            pathType: Prefix
+            backend:
+              service:
+                name: platform-router-svc
+                port:
+                  number: 80

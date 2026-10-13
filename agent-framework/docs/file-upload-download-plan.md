@@ -316,17 +316,27 @@ private void injectPendingUploadsIfNeeded(RuntimeContext ctx) {
             if (pending.isEmpty()) { uploadsInjected.set(true); return; }
             // 2. 逐文件：FileStorage.read(storage_key) 读字节 → 复用
             //    WorkspaceReader.injectToSandbox 同款 execd 写通道：
-            //    osbSandbox.files().write(WriteEntry(path="/workspace/{wsPath}", data=base64, mode=644))
-            //    注意：逐文件读取+注入（非全量加载），降低内存峰值
+            //    osbSandbox.files().write(WriteEntry(path="uploads/{wsPath}", data=byte[], mode=644))
+            //    注意：逐文件读取+注入（非全量加载），降低内存峰值。
+            //    ⚠️ data 必须传原始字节（byte[]）：execd files API 按提交字节**原样落盘**
+            //    （byte[] → octet-stream；String → text/plain 原文），**不做 base64 解码**
+            //    （SDK jar 无任何 base64 处理，真实沙箱实测钉死）。传 base64 字符串会让
+            //    沙箱内二进制文件（docx/xlsx/图片）全部变成 base64 文本——即模型侧看到
+            //    "文件是 Base64 编码的 docx，解码后提取正文"的根因。
+            //    同名唯一化：沙箱容器可能在远端主机，无法 ls 本地目录，冲突判定改查
+            //    file_asset.listWorkspacePaths（历史注入记录），语义与非沙箱
+            //    uniqueWorkspacePath 一致（_1/_2 后缀，1000 上界 UUID 兜底）。
+            var taken = new HashSet<>(fileAssetStore.listWorkspacePaths(userId, userId));
             for (var f : pending) {
-                var wsPath = "uploads/" + f.fileName();   // 实际工作区路径（唯一化后）
+                var wsPath = uniqueWorkspacePath(taken, f.fileName());  // uploads/{name}，同名 _1/_2
                 try (var in = fileStorage.read(f.storageKey())) {
                     osbSandbox.files().write(List.of(WriteEntry.builder()
-                        .path("/workspace/" + wsPath)       // 统一无前导斜杠，沙箱路径加 /workspace 前缀
-                        .data(Base64.getEncoder().encodeToString(in.readAllBytes()))
+                        .path(wsPath)                        // 无前导斜杠 → 相对 /workspace
+                        .data(in.readAllBytes())             // 原始字节直传（见上⚠️）
                         .mode(644).build()));
                     // 回写 workspace_path（注入成功后才赋值，保证路径与沙箱内实际一致）
                     fileAssetStore.updateWorkspacePath(f.id(), wsPath);
+                    taken.add(wsPath);
                 }
             }
             // 3. 全部成功后批量置 injected
@@ -900,6 +910,15 @@ node chat-ui-file-e2e.js
 14. **E2E 成功判定经验**：不能用回复长度阈值（`len>50`）判成功——LLM 短回复（如"最后一行的第一个字段
     是 last"，17 字符）会被误判失败；改为"流结束（busy 复位）+ 回复非思考中"。
     U6/S1-5/S-S6 哨兵断言放宽：LLM 偶发只复述结果不复述内容 → 增加"具体读取值/文件名"双轨判定。
+15. **execd files API 原样落盘语义（2026-10-13 实测钉死）**：SDK `Sandbox.files().write(WriteEntry.data(x))`
+    把 x **原样**作为 multipart `file` part 提交（byte[] → octet-stream、String → text/plain 原文），
+    execd **不做任何 base64 解码**（sandbox-1.0.18 jar 内无 base64 处理）。首版注入实现传
+    `Base64.encode(bytes)` 字符串 → 沙箱内二进制文件全部变成 base64 文本（真实沙箱 A/B 实测：
+    517 字节 docx 落盘 692 字节 base64 文本、`zipfile.BadZipFile`；byte[] 直传则逐位一致），
+    且模型侧表现为自行"Base64 解码后提取正文"掩盖故障。同批修复：沙箱注入路径补同名唯一化
+    （旧实现 `uploads/{fileName}` 直拼，同名多文件静默互相覆盖，模型误判"重复上传"）。
+    门禁：单测 OpenSandboxTest 3 例（byte[] 直传/跨 turn 同名 _1/同批同名）+
+    e2e X16（二进制逐字节一致）/ X17（同名唯一化两份内容完好）。
 
 ### 17.3 遗留（P4，未实施）
 

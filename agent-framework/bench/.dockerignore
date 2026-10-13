@@ -1,7 +1,15 @@
 # 构建上下文 = bench/，排除本地运行产物（体积与敏感数据不入镜像）
+# eval-studio 镜像 COPY 目标：eval-studio/{requirements.txt,app,static} 与 eval/，均须保留
 eval/reports/
 eval/.runtime-eval/
 eval/__pycache__/
 **/__pycache__/
 *.pyc
 eval/tests/*.log
+# 采集代理整个目录不是本上下文 COPY 目标，且含本地录制/配置数据（自有 .dockerignore 覆盖自身构建）
+eval-collector/
+# 评测工作站本地库（README 按步跑一次即产生，含录制数据）
+eval-studio/app/data/
+# 密钥/日志类文件一律不入构建上下文（**/ 前缀：无斜杠模式只匹配上下文根，嵌套层需显式递归）
+**/.env*
+**/*.log

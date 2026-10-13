@@ -197,28 +197,17 @@ func TestDeploymentConstruction(t *testing.T) {
 	}
 }
 
-func TestServiceAndIngress(t *testing.T) {
+// TestServiceAndRouterEndpoint router 模式（suffix 空）不构造 per-service Ingress：
+// Service 形状不变，对外展示地址由 RouterEndpoint 纯配置拼装（path 模式 rewrite 注解
+// 已随 subpath-routing 设计删除，Ingress 仅剩 host 模式，见 TestIngressHostModeConstruction）。
+func TestServiceAndRouterEndpoint(t *testing.T) {
 	p := testParams()
 	svc := Service(p)
 	if svc.Name != "oaf-acme-demo-svc" || svc.Spec.Ports[0].Port != AgentPort {
 		t.Fatalf("service: %+v", svc)
 	}
-	ing := Ingress(p)
-	path := ing.Spec.Rules[0].HTTP.Paths[0].Path
-	if path != "/agent/acme-demo(/|$)(.*)" {
-		t.Fatalf("ingress path: %q", path)
-	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/rewrite-target"] != "/$2" {
-		t.Fatal("rewrite annotation missing")
-	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/proxy-read-timeout"] != "3600" {
-		t.Fatal("long proxy timeout annotation missing")
-	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/x-forwarded-prefix"] != "/agent/acme-demo" {
-		t.Fatalf("x-forwarded-prefix wrong: %v", ing.Annotations["nginx.ingress.kubernetes.io/x-forwarded-prefix"])
-	}
-	if ing.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name != "oaf-acme-demo-svc" {
-		t.Fatal("ingress backend wrong")
+	if got := RouterEndpoint(p.IngressHost, p.IngressPort, p.K8sName); got != "http://1.2.3.4:30080/agent/acme-demo/" {
+		t.Fatalf("router endpoint: %q", got)
 	}
 }
 
@@ -273,10 +262,6 @@ func TestIngressHostModeConstruction(t *testing.T) {
 			t.Errorf("host mode must not carry rewrite annotation %s", k)
 		}
 	}
-	// path 模式（suffix 为空）必须仍无 host：两条分支互斥
-	if h := Ingress(testParams()).Spec.Rules[0].Host; h != "" {
-		t.Fatalf("path mode must stay host-less, got %q", h)
-	}
 }
 
 func TestReservedKeys(t *testing.T) {
@@ -284,5 +269,27 @@ func TestReservedKeys(t *testing.T) {
 		if !ReservedEnvKeys[k] {
 			t.Errorf("%s should be reserved", k)
 		}
+	}
+}
+
+// TestDeploymentPVCNameFollowsParam 业务 Pod 挂载的平台数据卷 PVC 名随参数（Helm/清单部署
+// 指向环境已有 PVC）；空值回落平台默认常量（历史行为不变）。
+func TestDeploymentPVCNameFollowsParam(t *testing.T) {
+	claim := func(p ObjectParams) string {
+		d := Deployment(p)
+		for _, v := range d.Spec.Template.Spec.Volumes {
+			if v.Name == FilesVolumeName && v.PersistentVolumeClaim != nil {
+				return v.PersistentVolumeClaim.ClaimName
+			}
+		}
+		return ""
+	}
+	if got := claim(testParams()); got != PVCName {
+		t.Fatalf("default claim must fall back to %q, got %q", PVCName, got)
+	}
+	p := testParams()
+	p.PVCName = "existing-oaf-data"
+	if got := claim(p); got != "existing-oaf-data" {
+		t.Fatalf("custom claim must be honored, got %q", got)
 	}
 }

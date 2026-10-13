@@ -43,7 +43,8 @@ async function loadConfig() {
         ['LLM_PROVIDER', env.llm.provider],
         ['LLM_TEMPERATURE', env.llm.temperature],
         ['LLM_MAX_TOKENS', env.llm.max_tokens],
-        ['LLM_TIMEOUT', env.llm.timeout]
+        ['LLM_TIMEOUT', env.llm.timeout],
+        ['LLM_FALLBACK_MODEL_ID', env.llm.fallback_model_id || '(未启用)']
       ]],
       ['Server', env.server && [
         ['SERVER_HOST', env.server.host],

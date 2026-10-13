@@ -104,6 +104,99 @@ class StateDataParserTest {
         assertTrue(StateDataParser.toRoleContentList(null).isEmpty());
     }
 
+    // ========== SDK 合成提醒过滤（后台子任务投递不得冒充 user 上屏） ==========
+
+    @Test
+    void toRoleContentListShouldDropSyntheticTaskDeliveryReminder() {
+        // 形态取自 SubagentsMiddleware.buildDeliveryReminder：role=USER + name=system
+        // + metadata.agentscope_synthetic=true，被持久化进 AgentState.context
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","name":"webui-s1","content":[{"type":"text","text":"发布服务"}]},
+               {"id":"r1","role":"USER","name":"system",
+                "metadata":{"agentscope_synthetic":true,"agentscope_reminder_kind":"task_delivery"},
+                "content":[{"type":"text","text":"<system-reminder>1 background subagent task...</system-reminder>"}]},
+               {"id":"a1","role":"ASSISTANT","content":[{"type":"text","text":"已完成"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(2, list.size(), "合成提醒被剔除，仅剩真实用户轮与助手回复");
+        assertEquals("发布服务", list.get(0).get("content"));
+        assertEquals("已完成", list.get(1).get("content"));
+        assertTrue(list.stream().noneMatch(m -> "r1".equals(m.get("msg_id"))));
+    }
+
+    @Test
+    void toRoleContentListShouldDropLegacySyntheticReminderByNameOnly() {
+        // 老数据/元数据缺失形态：role=user + name=system 仍应剔除（框架用户消息 name 恒为 userId）
+        var stateData = """
+            {"context":[
+               {"id":"r1","role":"user","name":"system",
+                "content":[{"type":"text","text":"<system-reminder>todo</system-reminder>"}]}
+             ]}
+            """;
+        assertTrue(StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData)).isEmpty());
+    }
+
+    @Test
+    void toRoleContentListShouldKeepRealUserMessageEvenIfNamed() {
+        // 真实用户消息 name=userId，不得被误剔
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","name":"webui-s1","content":[{"type":"text","text":"你好"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+        assertEquals(1, list.size());
+        assertEquals("你好", list.get(0).get("content"));
+    }
+
+    @Test
+    void userMessageShouldStripInjectedSkillSectionWhileAssistantKept() {
+        // 注入形态取证 SkillInjectionService：@Skill 替换为引用标记后追加整篇 SKILL.md
+        var injected = "用[@Skill:pdf] 处理文件\n\n---\n## Referenced Skills\n"
+            + "\n### Skill: pdf\n```\n# PDF 正文\n```\n\n---\n";
+        var assistant = "好的\n\n---\n## Referenced Skills\n尾巴";
+        var nf = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance;
+        var root = nf.objectNode();
+        var arr = root.putArray("context");
+        var user = arr.addObject();
+        user.put("id", "u1");
+        user.put("role", "USER");
+        user.putArray("content").addObject().put("type", "text").put("text", injected);
+        var asst = arr.addObject();
+        asst.put("id", "a1");
+        asst.put("role", "ASSISTANT");
+        asst.putArray("content").addObject().put("type", "text").put("text", assistant);
+
+        var list = StateDataParser.toRoleContentList(root.get("context"));
+
+        assertEquals(2, list.size());
+        assertEquals("用[@Skill:pdf] 处理文件", list.get(0).get("content"),
+            "user 提问不得拖着整篇 SKILL.md（非用户输入）");
+        // 注入只发生在用户消息：assistant 侧不做剥离
+        assertEquals(assistant, list.get(1).get("content"));
+    }
+
+    @Test
+    void compactionSummaryIsNotTreatedAsSyntheticReminder() {        // 压缩摘要是 role=USER + name=__compaction_summary__（无 synthetic 元数据），
+        // 由 ThreadController 归档合并转 role=compaction，解析层不得误剔
+        var stateData = """
+            {"context":[
+               {"id":"c1","role":"USER","name":"__compaction_summary__",
+                "content":[{"type":"text","text":"Here is a summary of the conversation to date"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+        assertEquals(1, list.size());
+        assertEquals("__compaction_summary__", list.get(0).get("name"));
+    }
+
     // ========== blocks 有序块序列（Debug Console 按真实发生顺序渲染的依据） ==========
 
     @Test

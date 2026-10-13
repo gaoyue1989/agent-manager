@@ -935,7 +935,7 @@ public class WorkspaceSyncService {
 | 要点 | 决策 |
 |------|------|
 | 回写频率 | 每次用户请求完成后（同步/流式都覆盖），一致性最好 |
-| 回写内容 | 仅运行时文件（MEMORY.md、memory/），静态模板不回写（沙箱不可修改模板语义） |
+| 回写内容 | 仅运行时文件（MEMORY.md、memory/），静态模板不回写（沙箱不可修改模板语义）。**2026-09 补充**：会话内 `skill_manage` 写入的 L4 用户技能（容器 `/workspace/skills`）也回写 `agent_fs`，否则 L4 随容器 TTL 到期丢失——见 [oaf-skills-dynamic-loading-plan.md](oaf-skills-dynamic-loading-plan.md) 文首现状核对 ② |
 | 回写通道 | `DistributedStore.baseStore()`（JdbcStore → agent_fs），key 与注入时一致 |
 | 失败处理 | 不阻塞主流程，日志告警；沙箱内数据保留，下次 call 或销毁前补偿拉取 |
 | 并发安全 | 同 userId 并发时最后写入胜出（与框架 AgentStateStore 语义一致） |
@@ -1102,7 +1102,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 
 | # | 问题 | 状态 | 答案 | 影响范围 |
 |---|------|------|------|---------|
-| 15 | **OpenSandbox Server 高可用** | ✅ 已确认 | **不考虑 OpenSandbox Server 自身高可用**（沙箱服务按单点部署运维）。Agent 侧无状态多副本已满足：SandboxState 存 MySQL（agent_state）、并发锁 JdbcSandboxExecutionGuard（MySQL GET_LOCK 跨副本有效）、记忆回写 KV（MySQL）→ 任意 Agent 副本可 resume 同一用户的同一沙箱 | 运维部署 |
+| 15 | **OpenSandbox Server 高可用** | ✅ 已确认 | **不考虑 OpenSandbox Server 自身高可用**（沙箱服务按单点部署运维）。Agent 侧无状态多副本已满足：SandboxState 存 MySQL（agent_state）、并发锁 RedisSandboxExecutionGuard（Redis `SET NX PX`，共用 oaf-redis 时跨副本有效；多 Agent 共用 Redis 需各自 `AGENT_REDIS_PREFIX` 隔离，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)）、记忆回写 KV（MySQL）→ 任意 Agent 副本可 resume 同一用户的同一沙箱 | 运维部署 |
 | 16 | **沙箱资源限制** | ✅ 已确认 | 默认 `cpu: 1, memory: 1Gi`，可通过 `resourceLimits` 配置 | 沙箱配置 |
 | 17 | **沙箱监控** | ⏳ 待确认 | 可通过 `/v1/sandboxes/<id>/diagnostics/summary` 获取诊断 | 运维监控 |
 | 18 | **沙箱日志** | ⏳ 待确认 | `docker compose logs -f` 查看 Server 日志 | 调试排查 |
@@ -1198,7 +1198,7 @@ docker run --rm --entrypoint sh opensandbox/code-interpreter:v1.1.0 -c '
 | 沙箱端口 | 8888 / 44772 | 44772 | OpenSandbox execd 端口 | ✅ 已决策 |
 | Workspace 注入 | doHydrateWorkspace / SDK 文件 API | 分层结合（doHydrateWorkspace 为主 + 首次 exec 延迟注入） | 框架契约必须实现 doHydrateWorkspace；KV 运行时文件因 create() 无 userId，改为首次 exec 时注入 | ✅ 已决策 |
 | 沙箱续期 | 自动 renew / 依赖框架自动重建 | 依赖框架自动重建（不续期） | AgentScope 无 renew 机制，但 resume 失败自动降级新建；记忆靠每次回写 KV 恢复；需保留执行环境时加 JdbcSnapshotSpec | ✅ 已决策 |
-| 并发控制 | JdbcSandboxExecutionGuard / 自定义 | JdbcSandboxExecutionGuard | 框架通过 distributedStore 自动注入（MySQL GET_LOCK），复用现有 MySQL + DistributedStore，零额外开发 | ✅ 已决策 |
+| 并发控制 | JdbcSandboxExecutionGuard / 自定义 | ~~JdbcSandboxExecutionGuard~~ → **RedisSandboxExecutionGuard** | 初版依赖框架通过 distributedStore 自动注入（MySQL GET_LOCK）；**2026-09 改为自研 Redis `SET NX PX` 守卫**（`SANDBOX_GUARD_ENABLED` 默认 true），Jdbc 路径不再使用 | ✅ 已决策 |
 | 超时清理 | OpenSandbox 自动销毁 / Agent 定时清理 / resume 失败即清理 | 三层结合 | ① 到期自动销毁 ② 定时清理 SessionSandboxStateStore 失效状态 ③ resume 404 即清理并降级新建 | ✅ 已决策 |
 | 增量更新 | 框架投影哈希比对 / 自定义同步 | 框架投影哈希比对（静态）+ 每次覆盖（运行时） | 静态模板靠框架自带 SHA-256 增量；MEMORY.md/memory/ 每次回写 + 注入覆盖 | ✅ 已决策 |
-| Server 高可用 | 多实例 / 单实例 | 单实例（不考虑 Server 自身高可用） | Agent 侧无状态多副本已满足（SandboxState/并发锁/记忆均在 MySQL），沙箱服务按单点运维 | ✅ 已决策 |
+| Server 高可用 | 多实例 / 单实例 | 单实例（不考虑 Server 自身高可用） | Agent 侧无状态多副本已满足（SandboxState 与记忆在 MySQL、并发锁在 Redis），沙箱服务按单点运维 | ✅ 已决策 |

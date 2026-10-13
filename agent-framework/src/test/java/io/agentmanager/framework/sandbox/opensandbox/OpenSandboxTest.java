@@ -2,6 +2,7 @@ package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
@@ -12,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
@@ -21,7 +23,9 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
 import com.alibaba.opensandbox.sandbox.domain.services.Commands;
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem;
 
+import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.WorkspaceReader;
+import io.agentmanager.framework.service.storage.FileStorage;
 import io.agentscope.core.agent.RuntimeContext;
 
 class OpenSandboxTest {
@@ -258,5 +262,92 @@ class OpenSandboxTest {
         sandbox.exec(RuntimeContext.builder().sessionId("debug-user:sess-2").build(), "echo x", 30);
 
         verify(reader).readRuntimeFiles("debug-user:sess-2");
+    }
+
+    // ---------- 上传注入（injectPendingUploads）：execd 原样落盘语义 + 同名唯一化 ----------
+
+    private static FileAssetStore mockAssetStore() {
+        var store = mock(FileAssetStore.class);
+        when(store.listWorkspacePaths(anyString(), anyString())).thenReturn(List.of());
+        return store;
+    }
+
+    private static FileStorage mockStorage(byte[] bytes) throws Exception {
+        var storage = mock(FileStorage.class);
+        when(storage.read(anyString())).thenReturn(new ByteArrayInputStream(bytes));
+        return storage;
+    }
+
+    /** 提取 files().write 收到的 WriteEntry.data 原始字节（byte[] 形态） */
+    private static byte[] capturedData(Sandbox osb) {
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files()).write(captor.capture());
+        var entry = (WriteEntry) captor.getValue().get(0);
+        assertInstanceOf(byte[].class, entry.getData(), "data 必须是原始字节（byte[]），String 会被 execd 原样落盘成 base64 文本");
+        return (byte[]) entry.getData();
+    }
+
+    @Test
+    void injectUploadsShouldWriteRawBytesNotBase64() throws Exception {
+        // 回归钉子：execd files API 按提交字节原样落盘（byte[] → octet-stream），
+        // 不做 base64 解码——旧实现传 base64 字符串，沙箱内二进制文件全部损坏
+        var raw = new byte[]{0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, (byte) 0xFF, 0x10}; // zip magic + 二进制
+        var store = mockAssetStore();
+        when(store.listPending("u1", "u1")).thenReturn(List.of(asset("f1", "sample.docx")));
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(raw));
+        sandbox.setUserKey("u1");
+
+        sandbox.injectPendingUploads();
+
+        var written = capturedData(osb);
+        assertArrayEquals(raw, written, "落盘字节必须与上传原始字节逐位一致");
+        verify(osb.files()).write(anyList());
+        verify(store).updateWorkspacePath("f1", "uploads/sample.docx");
+        verify(store).markInjected(List.of("f1"));
+    }
+
+    @Test
+    void injectUploadsShouldDeduplicateSameNameAcrossTurns() throws Exception {
+        // 回归钉子：同名上传注入同一路径会静默覆盖（file_asset 多行 workspace_path 相同）。
+        // 第二 turn 注入第二个同名文件时，须按历史注入记录追加 _1 后缀
+        var store = mockAssetStore();
+        when(store.listWorkspacePaths("u2", "u2")).thenReturn(List.of("uploads/report.docx"));
+        when(store.listPending("u2", "u2")).thenReturn(List.of(asset("f2", "report.docx")));
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u2");
+
+        sandbox.injectPendingUploads();
+
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files()).write(captor.capture());
+        var entry = (WriteEntry) captor.getValue().get(0);
+        assertEquals("uploads/report_1.docx", entry.getPath(), "同名须唯一化为 _1 后缀，防覆盖历史文件");
+    }
+
+    @Test
+    void injectUploadsShouldDeduplicateWithinSameBatch() throws Exception {
+        // 同一批次两份同名文件：第二份也得避开第一份刚分配的路径
+        var store = mockAssetStore();
+        when(store.listWorkspacePaths("u3", "u3")).thenReturn(List.of());
+        when(store.listPending("u3", "u3")).thenReturn(List.of(
+            asset("a", "plan.docx"), asset("b", "plan.docx")));
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null, null, store, mockStorage(new byte[]{1}));
+        sandbox.setUserKey("u3");
+
+        sandbox.injectPendingUploads();
+
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files(), times(2)).write(captor.capture());
+        var paths = captor.getAllValues().stream()
+            .map(l -> ((WriteEntry) l.get(0)).getPath()).toList();
+        assertEquals(List.of("uploads/plan.docx", "uploads/plan_1.docx"), paths);
+    }
+
+    private static FileAssetStore.FileAsset asset(String id, String fileName) {
+        return new FileAssetStore.FileAsset(id, "u", null, null, fileName, null,
+            "application/octet-stream", 1, "local", "upload/x/" + id, "upload", "pending", null);
     }
 }

@@ -37,12 +37,21 @@ public class SessionModelMiddleware implements MiddlewareBase {
     private final SessionUserStore sessionUserStore;
     private final ModelCatalog modelCatalog;
 
+    /** 备用模型（LLM_FALLBACK_MODEL_ID 解析而来）；null = 未启用。 */
+    private final Model fallbackModel;
+
     /** 未知/已删模型 id 的告警去重（避免每轮 ReAct 反复打日志） */
     private final Set<String> warnedUnknownIds = ConcurrentHashMap.newKeySet();
 
     public SessionModelMiddleware(SessionUserStore sessionUserStore, ModelCatalog modelCatalog) {
+        this(sessionUserStore, modelCatalog, null);
+    }
+
+    public SessionModelMiddleware(SessionUserStore sessionUserStore, ModelCatalog modelCatalog,
+                                  Model fallbackModel) {
         this.sessionUserStore = sessionUserStore;
         this.modelCatalog = modelCatalog;
+        this.fallbackModel = fallbackModel;
     }
 
     @Override
@@ -52,8 +61,11 @@ public class SessionModelMiddleware implements MiddlewareBase {
         if (target == null) {
             return next.apply(input);
         }
-        // 整体替换 model 后再进链：下游（LLM 记录/OTel span/实际调用）看到的都是生效模型
-        return next.apply(new ModelCallInput(input.messages(), input.tools(), input.options(), target));
+        // 整体替换 model 后再进链：下游（LLM 记录/OTel span/实际调用）看到的都是生效模型。
+        // 会话自选模型同样套 FallbackModelWrapper：SDK 的 fallbackModel 只包裹默认模型，
+        // 会话路径在此补齐备用语义（首个信号失败才切换，与 SDK 一致）。
+        Model effective = FallbackModelWrapper.wrap(target, fallbackModel);
+        return next.apply(new ModelCallInput(input.messages(), input.tools(), input.options(), effective));
     }
 
     /** 按会话解析目标模型；null = 沿用默认模型 */

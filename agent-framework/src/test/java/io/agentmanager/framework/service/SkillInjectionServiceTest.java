@@ -263,7 +263,7 @@ class SkillInjectionServiceTest {
     void injectShouldUseUserL4SkillWhenUserIdProvided() {
         var userService = org.mockito.Mockito.mock(UserSkillService.class);
         org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
-            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false)));
+            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false, "", true, "")));
         org.mockito.Mockito.when(userService.readSkill("u1", "personal-a", null))
             .thenReturn(java.util.Optional.of(new UserSkillService.UserSkillContent(
                 "u1", "personal-a", "---\nname: personal-a\n---\nPersonal body",
@@ -277,6 +277,43 @@ class SkillInjectionServiceTest {
         // 无 userId：L4 不参与，@ 引用保留原样（不注入个人技能内容）
         var noUser = service.injectSkillReferences("@personal-a 请处理");
         assertFalse(noUser.contains("Personal body"), noUser);
+    }
+
+    // ===== 展示层剥离（history 只显示用户自己敲的内容） =====
+
+    @Test
+    void stripInjectedSkillsShouldRestoreUserTextOnly() throws IOException {
+        writeSkill("pdf", "PDF tool", "# PDF\nRead PDF files.\n很长很长的技术文档…");
+        var service = injectionService();
+        var injected = service.injectSkillReferences("用@pdf 处理文件");
+
+        var shown = SkillInjectionService.stripInjectedSkills(injected);
+        // 只剩用户原文（@pdf 已替换为引用标记），注入区块整体消失
+        assertEquals("用[@Skill:pdf] 处理文件", shown, "history 不得拖着整篇 SKILL.md");
+        assertFalse(shown.contains("## Referenced Skills"));
+        assertFalse(shown.contains("Read PDF files."));
+        // 剥离不影响注入本身（模型仍需完整 Skill 上下文）
+        assertTrue(injected.contains("Read PDF files."));
+    }
+
+    @Test
+    void stripInjectedSkillsMultipleSkillsRemovesWholeSection() throws IOException {
+        writeSkill("pdf", "PDF tool", "# PDF");
+        writeSkill("xlsx", "Excel tool", "# XLSX");
+        var service = injectionService();
+
+        var shown = SkillInjectionService.stripInjectedSkills(
+            service.injectSkillReferences("用@pdf 和 @xlsx 处理"));
+        assertEquals("用[@Skill:pdf] 和 [@Skill:xlsx] 处理", shown);
+        assertFalse(shown.contains("### Skill:"));
+    }
+
+    @Test
+    void stripInjectedSkillsWithoutInjectionReturnsOriginal() {
+        var plain = "用 @pdf 处理（未启用该技能，无注入）";
+        assertEquals(plain, SkillInjectionService.stripInjectedSkills(plain));
+        assertEquals("", SkillInjectionService.stripInjectedSkills(""));
+        assertEquals("", SkillInjectionService.stripInjectedSkills(null));
     }
 
     private static int countOccurrences(String text, String substr) {

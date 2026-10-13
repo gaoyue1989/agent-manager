@@ -7,6 +7,7 @@ import { BASE, sessionIdFor } from '../lib/env.js';
 import { chat, history, a2a } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults } from '../lib/matchers.js';
 import { upload, textBytes } from '../lib/files.js';
+import type { UploadResult } from '../lib/files.js';
 
 const U = () => `e2e-sbx-${Math.random().toString(36).slice(2, 8)}`;
 const SANDBOX_MOCK = process.env.E2E_SANDBOX_MOCK ?? 'http://127.0.0.1:8090';
@@ -173,14 +174,14 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   const content = `---\nname: ${skill}\ndescription: e2e materialize probe\nversion: 1.0.0\n---\n\n# ${skill}\n\n${marker}\n`;
 
   // 基线：新用户无 L4、无 tombstone
-  const empty = await request.get(`/skills/users/${uid}`);
+  const empty = await request.get('/skills/users', { headers: { 'X-User-Id': uid } });
   expect(empty.status()).toBe(200);
   const emptyBody = await empty.json();
   expect(emptyBody.skills).toEqual([]);
   expect(emptyBody.tombstones).toEqual([]);
 
   // 管理面 PUT（KV 权威写 + admin-override 栅栏）
-  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content } });
+  const put = await request.put(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid }, data: { content } });
   expect(put.status()).toBe(200);
   const putBody = await put.json();
   expect(putBody.action).toBe('created');
@@ -188,13 +189,13 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   expect(String(putBody.message)).toContain('管理面写入栅栏'); // 沙箱档提示契约
 
   // KV 视图：source=user / adminOverride=true
-  const detail = await request.get(`/skills/users/${uid}/${skill}`);
+  const detail = await request.get(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid } });
   expect(detail.status()).toBe(200);
   const detailBody = await detail.json();
   expect(detailBody.source).toBe('user');
   expect(detailBody.hasUserOverride).toBe(true);
   expect(String(detailBody.content)).toContain(marker);
-  const list = await (await request.get(`/skills/users/${uid}`)).json();
+  const list = await (await request.get('/skills/users', { headers: { 'X-User-Id': uid } })).json();
   const entry = (list.skills as Array<Record<string, unknown>>).find(s => s.name === skill);
   expect(entry).toBeTruthy();
   expect(entry!.adminOverride).toBe(true);
@@ -223,13 +224,13 @@ test('X10 管理面 PUT 用户技能 → 下一 turn 物化进容器（mock file
   expect(await probe.text()).toContain(marker);
 
   // 负例（无 LLM，MOD 组风格）
-  const emptyPut = await request.put(`/skills/users/${uid}/x10-neg`, { data: { content: '  ' } });
+  const emptyPut = await request.put('/skills/users/x10-neg', { headers: { 'X-User-Id': uid }, data: { content: '  ' } });
   expect(emptyPut.status()).toBe(400);
   expect((await emptyPut.json()).error).toBe('empty_content');
-  const badName = await request.put(`/skills/users/${uid}/a..b`, { data: { content } });
+  const badName = await request.put('/skills/users/a..b', { headers: { 'X-User-Id': uid }, data: { content } });
   expect(badName.status()).toBe(400);
   expect((await badName.json()).error).toBe('invalid_name');
-  const big = await request.put(`/skills/users/${uid}/x10-neg`, { data: { content: 'x'.repeat(100 * 1024 + 1) } });
+  const big = await request.put('/skills/users/x10-neg', { headers: { 'X-User-Id': uid }, data: { content: 'x'.repeat(1024 * 1024 + 1) } });
   expect(big.status()).toBe(413);
   expect((await big.json()).error).toBe('content_too_large');
 });
@@ -240,7 +241,7 @@ test('X11 管理面 DELETE → tombstone 防复活（同会话同代容器 syncB
   const content = `---\nname: ${skill}\ndescription: e2e tombstone probe\nversion: 1.0.0\n---\n\n# ${skill}\n`;
 
   const putMarker = `TOMB-${uniq()}`;
-  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content: `${content}
+  const put = await request.put(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid }, data: { content: `${content}
 ${putMarker}
 ` } });
   expect(put.status()).toBe(200);
@@ -265,7 +266,7 @@ ${putMarker}
   expect((await downloadProbe()).status, 'turn1 后容器内技能副本缺失（未物化）').toBe(200);
 
   // 管理面 DELETE：写 tombstone
-  const del = await request.delete(`/skills/users/${uid}/${skill}`);
+  const del = await request.delete(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid } });
   expect(del.status()).toBe(200);
   const delBody = await del.json();
   expect(delBody.deletedFiles).toBe(1); // PUT 只写 SKILL.md，.deleted 标记不计入（listSkillFiles 排除 . 元数据段）
@@ -278,10 +279,10 @@ ${putMarker}
     skills: j.skills.map(s => String(s.name)),
     tombs: j.tombstones.map(t => String(t.name)),
   });
-  const after = names(await (await request.get(`/skills/users/${uid}`)).json());
+  const after = names(await (await request.get('/skills/users', { headers: { 'X-User-Id': uid } })).json());
   expect(after.skills).not.toContain(skill);
   expect(after.tombs).toContain(skill);
-  const gone = await request.get(`/skills/users/${uid}/${skill}`);
+  const gone = await request.get(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid } });
   expect(gone.status()).toBe(404);
   expect((await gone.json()).error).toBe('not_found');
 
@@ -300,7 +301,7 @@ ${putMarker}
   const probe2 = await downloadProbe();
   expect(probe2.status, '同代容器内存活副本丢失').toBe(200);
   expect(await probe2.text()).toContain(putMarker);
-  const final = names(await (await request.get(`/skills/users/${uid}`)).json());
+  const final = names(await (await request.get('/skills/users', { headers: { 'X-User-Id': uid } })).json());
   expect(final.skills).not.toContain(skill);
   expect(final.tombs).toContain(skill);
 });
@@ -314,7 +315,7 @@ test('X15 Channel 链路（/threads/chat）per-user 技能物化（issue #52 回
   const marker = `CHN-${uniq()}`;
   const content = `---\nname: ${skill}\ndescription: e2e channel materialize probe\nversion: 1.0.0\n---\n\n# ${skill}\n\n${marker}\n`;
 
-  const put = await request.put(`/skills/users/${uid}/${skill}`, { data: { content } });
+  const put = await request.put(`/skills/users/${skill}`, { headers: { 'X-User-Id': uid }, data: { content } });
   expect(put.status()).toBe(200);
 
   // turn 走 Channel chat（非 A2A）：物化探针同 X10（files/download 直证容器内文件）
@@ -329,4 +330,104 @@ test('X15 Channel 链路（/threads/chat）per-user 技能物化（issue #52 回
   const probe = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${creates[createsBefore].id}/proxy/44772/files/download?path=${encodeURIComponent(`/workspace/skills/${skill}/SKILL.md`)}`);
   expect(probe.status, 'Channel 链路容器内技能未物化（userKey 仍退化为 sessionId）').toBe(200);
   expect(await probe.text()).toContain(marker);
+});
+
+// ---------- X16/X17：上传注入语义（execd files API 原样落盘 + 同名唯一化） ----------
+// 回归背景：旧实现把上传字节 base64 后以 String 传 execd files API——execd 按提交字节
+// 原样落盘（byte[] → octet-stream，String → text/plain 原文），不做 base64 解码，
+// 沙箱内二进制文件（docx/xlsx/图片）全部变成 base64 文本（真实沙箱实测钉死）；
+// 且沙箱路径未做同名唯一化，同名多文件静默互相覆盖。观测通道同 X10/X15：
+// 新用户首 turn 必产生新 create，经 files/download 探针直证容器内字节。
+
+/** 最小 docx（PK zip 头 + 非文本字节段：任何 base64/文本化转换都会破坏字节一致性） */
+const DOCX_BYTES = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0x00, 0x01, 0xFE, 0xFF, 0x7F, 0x80, 0x55, 0xAA]);
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/** 新用户上传 → 带 fileIds 的 chat（[E2E:plain] 触发注入）→ 返回本轮新建的全部沙箱 id */
+async function injectViaChat(
+  uid: string,
+  tag: string,
+  files: Array<{ bytes: Buffer; name: string; mime: string }>,
+): Promise<string[]> {
+  const fileIds: string[] = [];
+  for (const f of files) {
+    const up = await upload(BASE, f.bytes, f.name, f.mime, { userId: uid });
+    expect(up.status, `上传 ${f.name}`).toBe(200);
+    fileIds.push((up.body as UploadResult).file_id);
+  }
+  const createsBefore = (await sandboxStats()).creates.length;
+  const sid = sessionIdFor(`${tag}-${uniq()}`);
+  const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid, fileIds });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const creates = (await sandboxStats()).creates;
+  expect(creates.length, '新用户首 turn 未创建沙箱').toBeGreaterThan(createsBefore);
+  return creates.slice(createsBefore).map(c => c.id);
+}
+
+const downloadFromSandbox = (sandboxId: string, path: string) =>
+  fetch(`${SANDBOX_MOCK}/v1/sandboxes/${sandboxId}/proxy/44772/files/download?path=${encodeURIComponent(path)}`);
+
+/**
+ * 注入产物探针（按新沙箱代从新到旧扫描）：返回 {sandboxId, res} 或 null。
+ * 系统注入是 fail-soft（失败保持 pending，下一沙箱代重试），单次单代探测会误报
+ * 慢环境/重试窗口下的瞬时未注入——这正是 CI 假红的一课（PR #126 首跑）。
+ */
+async function probeAcrossGenerations(
+  ids: string[],
+  paths: string[],
+): Promise<{ sandboxId: string; res: Array<Response> } | null> {
+  for (const id of [...ids].reverse()) {
+    const res = await Promise.all(paths.map(p => downloadFromSandbox(id, p)));
+    if (res.every(r => r.ok)) return { sandboxId: id, res };
+  }
+  return null;
+}
+
+test('X16 二进制上传注入后字节逐位一致（execd 原样落盘，无 base64 损坏）', async () => {
+  const uid = U();
+  const name = `sample-${uniq()}.docx`;
+  const path = `/workspace/uploads/${name}`;
+  let ids = await injectViaChat(uid, 'x16', [{ bytes: DOCX_BYTES, name, mime: DOCX_MIME }]);
+
+  // fail-soft 恢复：首代未注入（时序/慢窗口）→ 补一个 turn 触发新沙箱代重新注入
+  let hit = await probeAcrossGenerations(ids, [path]);
+  if (!hit) {
+    ids = ids.concat(await injectViaChat(uid, 'x16-recover', []));
+    hit = await probeAcrossGenerations(ids, [path]);
+  }
+  expect(hit, '上传文件未注入沙箱（含恢复 turn 重试）').toBeTruthy();
+
+  // 旧实现的故障形态：uploads/{name} 是 base64 文本（长度 +33%、内容非 PK 头）——逐字节比对
+  const got = Buffer.from(await hit!.res[0].arrayBuffer());
+  expect(got.equals(DOCX_BYTES), `字节不一致：得到 ${got.length} 字节（旧实现会是 base64 文本约 ${Math.round(DOCX_BYTES.length * 4 / 3)} 字节）`).toBe(true);
+
+  // 探针通道有效性自检：不存在的路径必须 404（防 mock 返回 200 假绿）
+  const neg = await downloadFromSandbox(hit!.sandboxId, `/workspace/uploads/no-such-${uniq()}.bin`);
+  expect(neg.status).toBe(404);
+});
+
+test('X17 同名上传唯一化注入（_1 后缀，两份内容互不覆盖）', async () => {
+  const uid = U();
+  const name = `report-${uniq()}.zip`; // zip 在默认 MIME 白名单内（octet-stream 不在）
+  const bytesA = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0xAA, 0x01]);
+  const bytesB = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0xBB, 0x02]);
+  const stem = name.slice(0, -'.zip'.length);
+  const paths = [`/workspace/uploads/${name}`, `/workspace/uploads/${stem}_1.zip`];
+  let ids = await injectViaChat(uid, 'x17', [
+    { bytes: bytesA, name, mime: 'application/zip' },
+    { bytes: bytesB, name, mime: 'application/zip' },
+  ]);
+
+  // fail-soft 恢复（同 X16）：两份必须在同一沙箱代内同时可见且内容各自完好
+  let hit = await probeAcrossGenerations(ids, paths);
+  if (!hit) {
+    ids = ids.concat(await injectViaChat(uid, 'x17-recover', []));
+    hit = await probeAcrossGenerations(ids, paths);
+  }
+  expect(hit, '同名文件未唯一化注入（_1 后缀缺失或互相覆盖；含恢复 turn 重试）').toBeTruthy();
+
+  const [first, second] = hit!.res;
+  expect(Buffer.from(await first.arrayBuffer()).equals(bytesA), '第一份内容被覆盖或损坏').toBe(true);
+  expect(Buffer.from(await second.arrayBuffer()).equals(bytesB), '第二份内容不等于其上传字节').toBe(true);
 });

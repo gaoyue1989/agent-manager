@@ -34,7 +34,9 @@ public class GlobalExceptionHandler {
         log.warn("[ExceptionHandler] file_too_large: {}", e.getMessage());
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "file_too_large");
-        body.put("message", "File size exceeds the configured upload limit");
+        long max = e.getMaxUploadSize();
+        var limit = max > 0 ? (max / 1024 / 1024) + "MB" : "服务端配置值";
+        body.put("message", "上传文件大小超过限制（单文件上限 " + limit + "），请压缩后重试");
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(body);
     }
 
@@ -43,7 +45,8 @@ public class GlobalExceptionHandler {
         log.warn("[ExceptionHandler] bad_request: {}", e.getMessage());
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "bad_request");
-        body.put("message", e.getMessage() != null ? e.getMessage() : "Invalid request");
+        body.put("message", e.getMessage() != null && !e.getMessage().isBlank()
+            ? e.getMessage() : "请求参数不合法");
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(body);
     }
 
@@ -52,7 +55,8 @@ public class GlobalExceptionHandler {
         log.warn("[ExceptionHandler] conflict: {}", e.getMessage());
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "conflict");
-        body.put("message", e.getMessage() != null ? e.getMessage() : "State conflict");
+        body.put("message", e.getMessage() != null && !e.getMessage().isBlank()
+            ? e.getMessage() : "操作状态冲突，请稍后重试");
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
@@ -61,7 +65,7 @@ public class GlobalExceptionHandler {
         log.error("[ExceptionHandler] unhandled exception: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e);
         var body = new LinkedHashMap<String, Object>();
         body.put("error", "internal_error");
-        body.put("message", "An unexpected error occurred");
+        body.put("message", "服务器内部错误，请稍后重试");
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
     }
 }

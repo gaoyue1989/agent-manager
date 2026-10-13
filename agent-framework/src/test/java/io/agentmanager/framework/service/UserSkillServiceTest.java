@@ -38,6 +38,7 @@ class UserSkillServiceTest {
     private static final String AGENT = "User Skill E2E";
     private static final String USER = "u-alice";
     private static final String PKG_SKILL_MD = "---\nname: demo-a\n---\n\npackage baseline marker\n";
+    private static final String USER_SKILL_MD = "---\nname: demo-a\ndescription: user skill\n---\n\n# user body\n";
 
     @TempDir
     Path tempDir;
@@ -178,7 +179,7 @@ class UserSkillServiceTest {
         var oversized = "x".repeat(UserSkillService.MAX_CONTENT_BYTES + 1);
         assertThrows(UserSkillService.ContentTooLargeException.class,
             () -> svc.writeSkill(USER, "demo-a", oversized));
-        // 恰好 100KB 允许
+        // 恰好达到上限允许
         assertEquals("created",
             svc.writeSkill(USER, "demo-a", "y".repeat(UserSkillService.MAX_CONTENT_BYTES)).action());
     }
@@ -220,6 +221,59 @@ class UserSkillServiceTest {
     @Test
     void listSkillsShouldReturnEmptyForNewUser() {
         assertTrue(service().listSkills("brand-new-user").isEmpty(), "空命名空间不得抛错");
+    }
+
+    @Test
+    void listSkillsShouldExposeDescriptionAndEnabledState() {
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+
+        var s = svc.listSkills(USER).get(0);
+        assertEquals("user skill", s.description(), "应解析 SKILL.md frontmatter description");
+        assertTrue(s.enabled(), "新建默认启用");
+    }
+
+    @Test
+    void toggleSkillShouldFlipAndPersistEnabledState() {
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+        assertTrue(svc.listSkills(USER).get(0).enabled());
+
+        assertFalse(svc.toggleSkill(USER, "demo-a"), "首次切换 → 禁用");
+        assertFalse(svc.listSkills(USER).get(0).enabled());
+        // KV 持久化：新实例（新 WorkspaceReader）读到禁用态
+        assertFalse(service().listSkills(USER).get(0).enabled());
+        assertTrue(service().isSkillDisabled(USER, "demo-a"));
+
+        assertTrue(svc.toggleSkill(USER, "demo-a"), "再次切换 → 启用");
+        assertTrue(svc.listSkills(USER).get(0).enabled());
+    }
+
+    @Test
+    void toggleSkillShouldRejectSkillWithoutUserOverride() {
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().toggleSkill(USER, "ghost"));
+        assertTrue(e.getMessage().contains("ghost"), e.getMessage());
+    }
+
+    @Test
+    void listSkillsShouldExposeCreatedAtFromKvTimestamps() throws Exception {
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        var seq = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() == 0);
+        when(rs.getString("item_key")).thenReturn("/demo-a/scripts/a.sh");
+        when(rs.getLong("updated_at")).thenReturn(1_700_000_000_000L); // 2023-11-14
+
+        var s = svc.listSkills(USER).get(0);
+        assertTrue(s.createdAt().startsWith("2023"), "创建时间取最早 updated_at: " + s.createdAt());
     }
 
     @Test
@@ -522,6 +576,181 @@ class UserSkillServiceTest {
         var e = assertThrows(IllegalArgumentException.class,
             () -> service().syncFromPackage(USER, "many"));
         assertTrue(e.getMessage().contains("文件数"), "文件数超限应给出明确原因: " + e.getMessage());
+    }
+
+    @Test
+    void syncFromPackageShouldRejectSkillExceedingTotalBytes() throws IOException {
+        // 单文件均合法（恰好上限），但累计超过单技能总字节上限 → 413 语义、不留半份
+        var dir = skillManageService.getSkillsDir().resolve("huge");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("SKILL.md"), PKG_SKILL_MD, StandardCharsets.UTF_8);
+        var chunk = "x".repeat(UserSkillService.MAX_CONTENT_BYTES);
+        var filesNeeded = (int) (UserSkillService.MAX_SKILL_TOTAL_BYTES
+            / UserSkillService.MAX_CONTENT_BYTES) + 1;
+        for (var i = 0; i < filesNeeded; i++) {
+            Files.writeString(dir.resolve("f" + i + ".txt"), chunk, StandardCharsets.UTF_8);
+        }
+
+        var e = assertThrows(UserSkillService.ContentTooLargeException.class,
+            () -> service().syncFromPackage(USER, "huge"));
+        assertTrue(e.getMessage().contains("总大小"), "总大小超限应给出明确原因: " + e.getMessage());
+        assertNull(store.get(skillNs(USER), "/huge/SKILL.md"), "超限必须整体失败，不留半份覆盖");
+    }
+
+    // ========== zip 上传（个人技能 L4） ==========
+
+    /** 扁平 zip（根目录含 SKILL.md）：解析 frontmatter name、落库 SKILL.md + 资源文件 */
+    @Test
+    void uploadZipShouldMaterializeAllFiles() throws IOException {
+        var zip = zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD, "scripts/hello.sh", "echo hi");
+
+        var outcome = service().uploadSkillZip(USER, bais(zip), "demo-a.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertEquals("created", outcome.action());
+        assertEquals(List.of("SKILL.md", "scripts/hello.sh"), outcome.files());
+        assertTrue(outcome.version() > 0, "上传后应返回 KV 版本号");
+        assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"));
+        assertEquals("echo hi", store.get(skillNs(USER), "/demo-a/scripts/hello.sh").value().get("content"));
+    }
+
+    /** 包裹 zip（一层子目录含 SKILL.md）取 frontmatter name；无 name 时回落 zip 文件名（去扩展名） */
+    @Test
+    void uploadZipShouldSupportWrappedLayoutAndFallbackToZipFileName() throws IOException {
+        var wrapped = zipText("wrap/" + WorkspaceReader.SKILL_FILE, "---\nname: demo-b\n---\n",
+            "wrap/scripts/x.sh", "echo x");
+        assertEquals("demo-b", service().uploadSkillZip(USER, bais(wrapped), "ignored.zip").name());
+
+        var flatNoName = zipText(WorkspaceReader.SKILL_FILE, "---\ntitle: no name field\n---\n");
+        assertEquals("my-skill",
+            service().uploadSkillZip(USER, bais(flatNoName), "my-skill.zip").name());
+    }
+
+    /** 同名覆盖 = 全量替换：旧版本多余的资源文件必须差集清理，action=updated */
+    @Test
+    void uploadZipShouldOverwriteAndRemoveStaleFiles() throws IOException {
+        var svc = service();
+        svc.uploadSkillZip(USER, bais(zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD,
+            "scripts/hello.sh", "echo hi")), "demo-a.zip");
+        assertNotNull(store.get(skillNs(USER), "/demo-a/scripts/hello.sh"));
+
+        var outcome = svc.uploadSkillZip(USER, bais(zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD,
+            "scripts/bye.sh", "echo bye")), "demo-a.zip");
+
+        assertEquals("updated", outcome.action());
+        assertEquals(List.of("SKILL.md", "scripts/bye.sh"), outcome.files());
+        assertNull(store.get(skillNs(USER), "/demo-a/scripts/hello.sh"), "旧版本多余文件必须清理");
+        assertNotNull(store.get(skillNs(USER), "/demo-a/scripts/bye.sh"));
+    }
+
+    /** 含二进制/非 UTF-8 文件 → 拒绝整个包（不是跳过），且不写入任何文件 */
+    @Test
+    void uploadZipShouldRejectBinaryFileAndWriteNothing() throws IOException {
+        var entries = new java.util.LinkedHashMap<String, byte[]>();
+        entries.put(WorkspaceReader.SKILL_FILE, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+        entries.put("logo.png", new byte[] {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, (byte) 0xFF});
+        var zip = zipBytes(entries);
+
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+
+        assertTrue(e.getMessage().contains("UTF-8"), "应说明非 UTF-8 文件被拒: " + e.getMessage());
+        assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝整个包时不得留半份写入");
+        assertNull(store.get(skillNs(USER), "/demo-a/logo.png"));
+    }
+
+    /** SKILL.md 本身为非 UTF-8（GBK）→ 拒绝整个包 400（issue #115：此前误报 500 upload_failed） */
+    @Test
+    void uploadZipShouldRejectNonUtf8SkillMd() throws IOException {
+        var gbk = java.nio.charset.Charset.forName("GBK");
+        var entries = new java.util.LinkedHashMap<String, byte[]>();
+        entries.put(WorkspaceReader.SKILL_FILE, "---\nname: demo-a\ndescription: 中文编码测试\n---\n正文".getBytes(gbk));
+        var zip = zipBytes(entries);
+
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+
+        assertTrue(e.getMessage().contains("UTF-8"), "应说明 SKILL.md 非 UTF-8 被拒: " + e.getMessage());
+        assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝时不得留半份写入");
+    }
+
+    /** 缺 SKILL.md → 400；非法 userId → 400 */
+    @Test
+    void uploadZipShouldRejectMissingSkillMdAndInvalidUser() throws IOException {
+        var zip = zipText("README.md", "no skill here");
+        assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+        assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip("u:v", bais(zip), "demo-a.zip"));
+    }
+
+    // ========== 导出 zip（下载） ==========
+
+    /** 有 L4 覆盖：导出 L4 全部文件 */
+    @Test
+    void exportZipShouldPackL4Override() throws IOException {
+        var svc = service();
+        svc.uploadSkillZip(USER, bais(zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD,
+            "scripts/run.sh", "echo run")), "demo-a.zip");
+
+        var entries = unzip(svc.exportSkillZip(USER, "demo-a").orElseThrow());
+
+        assertEquals(java.util.Set.of("SKILL.md", "scripts/run.sh"), entries.keySet());
+        assertEquals(USER_SKILL_MD, entries.get("SKILL.md"));
+        assertEquals("echo run", entries.get("scripts/run.sh"));
+    }
+
+    /** 无 L4 覆盖：回落包内（L2）基线打包 */
+    @Test
+    void exportZipShouldFallBackToPackageBaseline() throws IOException {
+        seedPackageSkill("demo-a", PKG_SKILL_MD, "scripts/hello.sh", "echo hi");
+
+        var entries = unzip(service().exportSkillZip(USER, "demo-a").orElseThrow());
+
+        assertEquals(java.util.Set.of("SKILL.md", "scripts/hello.sh"), entries.keySet());
+        assertEquals(PKG_SKILL_MD, entries.get("SKILL.md"));
+        assertEquals("echo hi", entries.get("scripts/hello.sh"));
+    }
+
+    @Test
+    void exportZipShouldReturnEmptyWhenMissing() {
+        assertTrue(service().exportSkillZip(USER, "nope").isEmpty());
+    }
+
+    private static java.util.Map<String, String> unzip(byte[] zip) throws IOException {
+        var map = new java.util.LinkedHashMap<String, String>();
+        try (var zis = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(zip))) {
+            java.util.zip.ZipEntry e;
+            while ((e = zis.getNextEntry()) != null) {
+                map.put(e.getName(), new String(zis.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+        return map;
+    }
+
+    private static java.io.ByteArrayInputStream bais(byte[] bytes) {
+        return new java.io.ByteArrayInputStream(bytes);
+    }
+
+    /** 便捷构造 zip：可变参数为 (相对路径, 文本内容) 交替 */
+    private static byte[] zipText(String... relContentPairs) throws IOException {
+        var map = new java.util.LinkedHashMap<String, byte[]>();
+        for (int i = 0; i < relContentPairs.length; i += 2) {
+            map.put(relContentPairs[i], relContentPairs[i + 1].getBytes(StandardCharsets.UTF_8));
+        }
+        return zipBytes(map);
+    }
+
+    private static byte[] zipBytes(java.util.Map<String, byte[]> entries) throws IOException {
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new java.util.zip.ZipOutputStream(baos)) {
+            for (var e : entries.entrySet()) {
+                zos.putNextEntry(new java.util.zip.ZipEntry(e.getKey()));
+                zos.write(e.getValue());
+                zos.closeEntry();
+            }
+        }
+        return baos.toByteArray();
     }
 
     // ========== 用户索引（agent_fs 聚合） ==========

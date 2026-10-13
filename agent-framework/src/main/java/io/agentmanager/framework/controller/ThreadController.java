@@ -735,12 +735,39 @@ public class ThreadController {
             var msgs = io.agentmanager.framework.service.StateDataParser
                 .toRoleContentList(io.agentmanager.framework.service.StateDataParser
                     .findMessagesArray(stateData), toolOutputMaxChars);
-            fillReplyIds(sessionId, msgs);
-            return msgs;
+            var normalized = normalizeCompactionSummaries(msgs);
+            fillReplyIds(sessionId, normalized);
+            return normalized;
         } catch (Exception e) {
             log.warn("loadMessages failed for {}: {}", sessionId, e.getMessage());
             return List.of();
         }
+    }
+
+    /**
+     * 压缩摘要消息（SDK 落库形态：{@code role=USER} + {@code name=__compaction_summary__}）
+     * 转为 {@code role=compaction} 合成项——state-only 路径（归档关闭或 includeArchived=false）
+     * 与归档合并视图口径一致，避免压缩摘要在无归档时以 user 身份上屏。
+     * 非摘要消息原样透传。
+     */
+    private static List<Map<String, Object>> normalizeCompactionSummaries(List<Map<String, Object>> dtos) {
+        var out = new ArrayList<Map<String, Object>>(dtos.size());
+        for (var dto : dtos) {
+            if (!io.agentmanager.framework.service.SessionMessageStore.SUMMARY_MESSAGE_NAME
+                    .equals(dto.get("name"))) {
+                out.add(dto);
+                continue;
+            }
+            var item = new LinkedHashMap<String, Object>();
+            item.put("role", "compaction");
+            item.put("type", "compaction_summary");
+            item.put("content", dto.getOrDefault("content", ""));
+            if (dto.get("msg_id") != null) {
+                item.put("msg_id", dto.get("msg_id"));
+            }
+            out.add(item);
+        }
+        return out;
     }
     /** 将 title 写入 session_user.remark（统一走 SessionUserStore，规避 MySQL 1093；SQL 单一来源） */
     private void upsertRemark(String sessionId, String title) {

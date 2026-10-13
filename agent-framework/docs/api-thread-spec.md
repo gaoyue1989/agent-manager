@@ -444,6 +444,17 @@ GET /threads?userId=user-123
   └── 3. 无 sessionId → 生成新的，展示空会话
 ```
 
+> **说明（2026-10-12）**：turn 执行中（`state=working`）`GET /threads/{sessionId}` 已能还原
+> **本回合用户提问**——回合起始归档中间件（`TurnInputArchiveMiddleware`）在输入确定、尚未
+> 执行时即把用户输入写入 `session_message`，不再等到整轮结束。助手回复仍由 `/subscribe`
+> 续传增量补齐（历史回放不含未完成消息，见 `assistant` 落库时机）。修复前该窗口内历史恒空，
+> 刷新后连用户自己的提问都看不到。
+>
+> **失败留痕（2026-10-12）**：若 turn 以 `error` 终态结束（如模型网关 503 重试耗尽），服务端
+> 会把 `⚠️ 本次执行失败：<原因>` 以一条 `role=assistant` 消息写入 `session_message`——刷新后
+> `GET /threads/{sessionId}/history` 直接可见失败提示，不再只剩「孤儿提问」。`/status` 此时为
+> `idle`（turn 已结束，无可续传），前端据历史里的失败消息渲染即可。
+
 ---
 
 ## 七、错误码

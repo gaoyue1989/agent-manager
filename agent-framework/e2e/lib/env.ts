@@ -56,6 +56,10 @@ export const PROTO_MEMBER_B = process.env.E2E_PROTO_MEMBER_B
 /** bench mock MCP（端口随 env-up.sh BENCH_MCP_PORT；用于观测 tools/call 的 header/_meta） */
 export const BENCH_MCP = process.env.E2E_BENCH_MCP ?? 'http://127.0.0.1:18082';
 
+/** router 组（RT，subpath-routing §9.3）：platform-router nginx 入口（经 /agent/{short} 前缀） */
+export const ROUTER_BASE = process.env.E2E_ROUTER_BASE
+  ?? runtimeUrl('routerBase') ?? '';
+
 const RUN_ID = process.env.E2E_RUN_ID
   ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 

@@ -249,4 +249,41 @@ class SessionMessageStoreTest {
         assertTrue(sql.startsWith("DELETE FROM session_message"));
         assertTrue(sql.contains("LIKE CONCAT('%:', ?)"));
     }
+
+    // ===== 回合失败留痕（2026-10-12） =====
+
+    @Test
+    void archiveTurnErrorShouldWriteAssistantMessageWithStableTurnId() {
+        var store = org.mockito.Mockito.spy(new SessionMessageStore(dataSource));
+        org.mockito.Mockito.doNothing().when(store)
+            .archiveBatch(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+
+        store.archiveTurnError("webui-sid", "reply-42", "⚠️ 本次执行失败：Retries exhausted: 2/2");
+
+        @SuppressWarnings("unchecked")
+        var cap = ArgumentCaptor.forClass(java.util.List.class);
+        verify(store).archiveBatch(org.mockito.ArgumentMatchers.eq("webui-sid"), cap.capture());
+        var records = (java.util.List<SessionMessageStore.MessageRecord>) cap.getValue();
+        assertEquals(1, records.size());
+        var rec = records.get(0);
+        assertEquals("__turn_error__:reply-42", rec.msgId(), "同一回合重复收尾必须同 id（幂等）");
+        assertEquals("ASSISTANT", rec.role());
+        assertTrue(rec.msgJson().contains("\"role\":\"ASSISTANT\""));
+        assertTrue(rec.msgJson().contains("__turn_error__"));
+        assertTrue(rec.msgJson().contains("本次执行失败"));
+    }
+
+    @Test
+    void archiveTurnErrorShouldSkipBlankInputs() {
+        var store = org.mockito.Mockito.spy(new SessionMessageStore(dataSource));
+        org.mockito.Mockito.doNothing().when(store)
+            .archiveBatch(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+
+        store.archiveTurnError("", "r1", "boom");
+        store.archiveTurnError("sid", "r1", "  ");
+        store.archiveTurnError(null, "r1", "boom");
+
+        verify(store, org.mockito.Mockito.never())
+            .archiveBatch(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+    }
 }
