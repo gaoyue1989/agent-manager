@@ -31,7 +31,8 @@
   },
   "usage_frame": {
     "type": "MODEL_CALL_END",
-    "fields": { "input": "inputTokens", "output": "outputTokens", "total": "totalTokens" }
+    "fields": { "input": "inputTokens", "output": "outputTokens", "total": "totalTokens" },
+    "note": "口径：inputTokens 为全量 prompt（等价 OpenAI prompt_tokens，含 provider 缓存命中部分），outputTokens 为全量 completion；跨运行时对比与成本核算必须按此全量口径。上报「缓存未命中增量」会随缓存命中率升高而趋近 0（见 agent-framework-dsh issue #7）。恒等式 inputTokens + outputTokens === totalTokens。AF 侧取 agentscope ModelCallEndEvent.getUsage().getInputTokens()；dsh 侧须把 pi-ai 归一化（input = prompt − cacheRead − cacheWrite）还原为全量后再上报。"
   },
   "hitl": {
     "ask_frame": "permission_ask",
