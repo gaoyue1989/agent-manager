@@ -82,7 +82,7 @@ class UserSkillControllerTest {
     @Test
     void listSkillsShouldReturnSummaries() throws Exception {
         when(service.listSkills(USER)).thenReturn(List.of(
-            new UserSkillSummary(NAME, List.of("SKILL.md"), 12L, 3L, true, true)));
+            new UserSkillSummary(NAME, List.of("SKILL.md"), 12L, 3L, true, true, "desc", true, "")));
         when(service.listTombstones(USER)).thenReturn(List.of(
             new UserSkillService.UserSkillTombstone("gone-skill", "2026-09-23 12:00:00")));
 
@@ -321,6 +321,48 @@ class UserSkillControllerTest {
         mvc.perform(delete("/skills/users/" + NAME).header(HDR, USER))
             .andExpect(status().isInternalServerError())
             .andExpect(jsonPath("$.error").value("delete_failed"));
+    }
+
+    // ---------- 启停 ----------
+
+    @Test
+    void toggleSkillShouldReturnNewState() throws Exception {
+        when(service.toggleSkill(USER, NAME)).thenReturn(false);
+
+        mvc.perform(put("/skills/users/" + NAME + "/toggle").header(HDR, USER))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value(NAME))
+            .andExpect(jsonPath("$.enabled").value(false));
+    }
+
+    @Test
+    void toggleSkillShouldReturn404WhenNoOverride() throws Exception {
+        doThrow(new IllegalArgumentException("用户 " + USER + " 无个人技能 '" + NAME + "'"))
+            .when(service).toggleSkill(USER, NAME);
+
+        mvc.perform(put("/skills/users/" + NAME + "/toggle").header(HDR, USER))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("not_found"));
+    }
+
+    @Test
+    void toggleSkillShouldRejectInvalidNameAndMissingHeader() throws Exception {
+        mvc.perform(put("/skills/users/a..b/toggle").header(HDR, USER))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("invalid_name"));
+
+        mvc.perform(put("/skills/users/" + NAME + "/toggle"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("missing_user_id"));
+    }
+
+    @Test
+    void toggleSkillShouldReturn500OnFailure() throws Exception {
+        doThrow(new IllegalStateException("KV 不可用")).when(service).toggleSkill(USER, NAME);
+
+        mvc.perform(put("/skills/users/" + NAME + "/toggle").header(HDR, USER))
+            .andExpect(status().isInternalServerError())
+            .andExpect(jsonPath("$.error").value("toggle_failed"));
     }
 
     // ---------- 从包内下发 ----------

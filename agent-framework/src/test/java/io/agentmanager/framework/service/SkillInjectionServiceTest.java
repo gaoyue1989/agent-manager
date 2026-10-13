@@ -263,7 +263,7 @@ class SkillInjectionServiceTest {
     void injectShouldUseUserL4SkillWhenUserIdProvided() {
         var userService = org.mockito.Mockito.mock(UserSkillService.class);
         org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
-            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false)));
+            new UserSkillService.UserSkillSummary("personal-a", List.of("SKILL.md"), 20, 1, false, false, "", true, "")));
         org.mockito.Mockito.when(userService.readSkill("u1", "personal-a", null))
             .thenReturn(java.util.Optional.of(new UserSkillService.UserSkillContent(
                 "u1", "personal-a", "---\nname: personal-a\n---\nPersonal body",

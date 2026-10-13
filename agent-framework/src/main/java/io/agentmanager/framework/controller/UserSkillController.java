@@ -351,6 +351,46 @@ public class UserSkillController {
     }
 
     /**
+     * 切换当前用户某个人技能的启停状态（管理面）。
+     *
+     * <p>仅对存在 L4 个人覆盖的技能可切换（无个人覆盖 → 404）。禁用后该技能对外不可用
+     * （{@code /skills/available}、{@code @Skill} 合并视图排除，沙箱物化/回写跳过）；
+     * 重新写入（PUT）或从包内下发会自动恢复启用。
+     */
+    @PutMapping("/{name}/toggle")
+    public ResponseEntity<Map<String, Object>> toggleSkill(
+            @RequestHeader(value = USER_ID_HEADER, required = false) String headerUserId,
+            @PathVariable String name) {
+        var invalid = userIdError(headerUserId);
+        if (invalid != null) {
+            return invalid;
+        }
+        if (!UserSkillService.isValidSkillName(name)) {
+            return err(HttpStatus.BAD_REQUEST, "invalid_name", "无效的 Skill 名称");
+        }
+        try {
+            var enabled = userSkillService.toggleSkill(headerUserId, name);
+            var resp = new LinkedHashMap<String, Object>();
+            resp.put("userId", headerUserId);
+            resp.put("name", name);
+            resp.put("enabled", enabled);
+            resp.put("message", "个人技能 '" + name + "' 已" + (enabled ? "启用" : "禁用")
+                + (enabled ? "，该用户后续会话可用" : "，该用户后续会话不再提供该技能")
+                + (sandboxMode()
+                    ? (enabled
+                        ? "；当前 SANDBOX_ENABLED=true，该用户下一个 turn 开始时物化进容器生效"
+                        : "；当前 SANDBOX_ENABLED=true，下一次物化不再投影进容器（容器内旧副本在换代前可能仍可见）")
+                    : ""));
+            return ResponseEntity.ok(resp);
+        } catch (IllegalArgumentException e) {
+            return err(HttpStatus.NOT_FOUND, "not_found", e.getMessage());
+        } catch (Exception e) {
+            log.warn("User skill toggle failed for {}/{}: {}", headerUserId, name, e.getMessage());
+            return err(HttpStatus.INTERNAL_SERVER_ERROR, "toggle_failed", "操作失败: " + e.getMessage());
+        }
+    }
+
+    /**
      * 把包内（L2）同名技能整目录下发为当前用户的个人版本（含 scripts 等资源文件）。
      *
      * <p>以包内清单为准全量替换（差集清理多余旧文件）+ 失败回滚；非 UTF-8/二进制文件显式跳过，

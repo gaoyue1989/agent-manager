@@ -230,9 +230,15 @@ public class SkillInjectionService {
         if (userId != null && !userId.isBlank()) {
             try {
                 for (var skill : userSkillService.listSkills(userId)) {
-                    if (skill.name() != null && !skill.name().isBlank()) {
-                        names.add(skill.name());
+                    if (skill.name() == null || skill.name().isBlank()) {
+                        continue;
                     }
+                    if (!skill.enabled()) {
+                        // 被管理面禁用的个人技能：连同包内同名基线一并排除
+                        names.remove(skill.name());
+                        continue;
+                    }
+                    names.add(skill.name());
                 }
             } catch (Exception e) {
                 log.warn("enabledSkillNames: merge L4 failed for user {}: {}", userId, e.getMessage());

@@ -417,13 +417,24 @@ async function loadUserSkills() {
       ? '<span class="badge yellow" title="管理面写入栅栏：回写跳过该技能（管理面内容优先），' +
         '容器内 skill_manage 的修改在清除前不落库">管理面栅栏</span>'
       : '';
+    var enabledBadge = s.enabled !== false
+      ? '<span class="badge green">启用</span>'
+      : '<span class="badge red" title="已禁用：该用户后续会话不提供该技能">禁用</span>';
+    var desc = s.description
+      ? '<span title="' + ctx.utils.esc(s.description) + '">' + ctx.utils.esc(s.description) + '</span>'
+      : '<span style="color:var(--text-dim)">—</span>';
     return '<tr>' +
       '<td class="mono">' + ctx.utils.esc(s.name) + ' <span class="badge green">个人覆盖</span> ' + fence + '</td>' +
+      '<td>' + desc + '</td>' +
+      '<td>' + enabledBadge + '</td>' +
       '<td>' + ((s.files || []).length) + '</td>' +
       '<td>' + ctx.utils.formatBytes(s.bytes || 0) + '</td>' +
       '<td>v' + ctx.utils.esc(s.version) + '</td>' +
+      '<td class="mono" style="white-space:nowrap">' + (s.createdAt ? ctx.utils.esc(s.createdAt) : '—') + '</td>' +
       '<td>' + baseline + '</td>' +
       '<td style="white-space:nowrap">' +
+        '<button class="btn small us-toggle-btn" data-name="' + ctx.utils.esc(s.name) + '">' +
+          (s.enabled !== false ? '⏸ 禁用' : '▶ 启用') + '</button> ' +
         '<button class="btn small us-view-btn" data-name="' + ctx.utils.esc(s.name) + '">👁 查看</button> ' +
         '<button class="btn small us-edit-btn" data-name="' + ctx.utils.esc(s.name) + '">✏ 编辑</button> ' +
         '<button class="btn small us-dl-btn" data-name="' + ctx.utils.esc(s.name) + '">⬇ 下载</button> ' +
@@ -433,12 +444,16 @@ async function loadUserSkills() {
 
   body.innerHTML = (skills.length
     ? '<table class="data-table"><thead><tr>' +
-        '<th>Skill</th><th>文件</th><th>大小</th><th>版本</th><th>删除后</th><th></th>' +
+        '<th>Skill</th><th>描述</th><th>状态</th><th>文件</th><th>大小</th><th>版本</th>' +
+        '<th>创建时间</th><th>删除后</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>'
     : '<div class="empty">该用户暂无个人覆盖（下方为已删除技能的标记）。</div>')
     + tombstonesHtml(tombstones);
 
   // 行操作把本次响应对应的 userId 固化进闭包（不再读可变状态）
+  body.querySelectorAll('.us-toggle-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() { handleUserSkillToggle(userId, btn.dataset.name); });
+  });
   body.querySelectorAll('.us-view-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUserSkillView(userId, btn.dataset.name); });
   });
@@ -579,6 +594,18 @@ async function handleUserSkillDelete(userId, name) {
     loadUserSkillUsers();
   } catch (err) {
     ctx.utils.toast('删除失败: ' + err.message, 'error');
+  }
+}
+
+/** 切换个人技能启停（管理面）；禁用后该用户后续会话不再提供该技能 */
+async function handleUserSkillToggle(userId, name) {
+  if (!userId) return;
+  try {
+    var result = await ctx.api.toggleUserSkill(userId, name);
+    ctx.utils.toast(result.message || (result.enabled ? '已启用' : '已禁用'), 'success');
+    loadUserSkills();
+  } catch (err) {
+    ctx.utils.toast('操作失败: ' + err.message, 'error');
   }
 }
 

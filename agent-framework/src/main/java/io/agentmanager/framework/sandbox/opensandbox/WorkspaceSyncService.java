@@ -183,6 +183,11 @@ public class WorkspaceSyncService {
             log.info("skills/ sync: {} 已被管理面显式删除（tombstone），跳过回写", name);
             return false;
         }
+        // 管理面已禁用该技能（启停标记）：跳过回写，避免把容器内旧副本重新落库
+        if (workspaceReader.isUserSkillDisabled(userId, name)) {
+            log.info("skills/ sync: {} 已被管理面禁用（disabled），跳过回写", name);
+            return false;
+        }
         // 管理面已写入该技能（KV 写入栅栏）：同代容器内副本比管理面写入旧，回写即把管理面内容
         // 改回容器版本（本机无集群时的代码推断，E2E 9.6~9.8 为现场验证入口）
         if (workspaceReader.isUserSkillAdminOverride(userId, name)) {

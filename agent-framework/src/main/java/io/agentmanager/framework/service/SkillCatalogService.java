@@ -200,6 +200,11 @@ public class SkillCatalogService {
                     if (name == null || name.isBlank()) {
                         continue;
                     }
+                    if (!skill.enabled()) {
+                        // 被管理面禁用的个人技能：连同包内同名基线一并隐藏（该用户不可用该技能）
+                        merged.remove(name);
+                        continue;
+                    }
                     merged.put(name, l4Description(userId, name));
                 }
             } catch (Exception e) {

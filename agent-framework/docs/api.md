@@ -149,10 +149,11 @@ curl http://localhost:8100/skills
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}` |
+| GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}`；每个技能含 `description`/`enabled`/`createdAt`/`hasPackageBaseline`/`adminOverride` |
 | GET | `/skills/users/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
 | GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
-| PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB） |
+| PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB）。重新写入自动清除禁用标记（恢复启用） |
+| PUT | `/skills/users/{name}/toggle` | **启停个人技能**（仅对有 L4 覆盖的技能可用，无 → 404）：返回 `{userId, name, enabled, message}`；禁用写 `/{name}/.disabled`，禁用后从 `/skills/available`、`@Skill` 合并视图排除且沙箱物化/回写跳过 |
 | POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
 | DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
