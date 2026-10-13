@@ -336,7 +336,16 @@ function audit(action, detail) {
 
 const counters = new Map(); // key: ns|kind → {today, total, bytes, last_at, last_error}
 
-function kindDir(ns, kind) { return path.join(DATA_DIR, ns, kind); }
+// 录制 kind 全集（issue #97 问题 8）：recordInteraction 的四个调用方即全集，
+// retentionSweep 亦按此枚举遍历。凡拼进 kindDir 的 kind 必须先过此白名单。
+const RECORD_KINDS = new Set(['llm', 'sandbox', 'mcp', 'http']);
+
+function kindDir(ns, kind) {
+  if (!RECORD_KINDS.has(kind)) {
+    throw new Error(`kind 非法（${String(kind).slice(0, 32)}）：仅 ${[...RECORD_KINDS].join(' / ')}`);
+  }
+  return path.join(DATA_DIR, ns, kind);
+}
 
 function todayTag() {
   const d = new Date();
@@ -389,7 +398,7 @@ function retentionSweep() {
   let nsList = [];
   try { nsList = fs.readdirSync(DATA_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return; }
   for (const ns of nsList) {
-    for (const kind of ['llm', 'sandbox', 'mcp', 'http']) {
+    for (const kind of RECORD_KINDS) {
       const dir = path.join(DATA_DIR, ns, kind);
       let files = [];
       try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
@@ -1090,6 +1099,16 @@ async function handleAdmin(req, res) {
     const kind = u.searchParams.get('kind') || 'llm';
     const limit = Math.min(parseInt(u.searchParams.get('limit') || '20', 10) || 20, 200);
     if (!ns || !PROFILES[ns]) return sendJson(res, 400, { error: 'ns 必填且档案须存在' });
+    // kind 白名单（issue #97 问题 8）：kind 与 ns 一样直接拼进 kindDir 的文件路径，
+    // 而它此前只给默认值、无任何校验——'../../secret' 可穿越出 DATA_DIR 读任意
+    // .jsonl。ns 有 validateProfile 收敛，kind 过去不在任何 guard 覆盖内（四个数据口
+    // 的 hasPathTraversal 只作用于转发路径，管不到管理口的这条只读查询）。
+    // 录制侧全集就是这四个（recordInteraction 的四处调用），与 retentionSweep 同一枚举。
+    if (!RECORD_KINDS.has(kind)) {
+      return sendJson(res, 400, {
+        error: `kind 非法：${String(kind).slice(0, 32)}（仅 ${[...RECORD_KINDS].join(' / ')}）`,
+      });
+    }
     const items = readInteractions(ns, kind, limit);
     return sendJson(res, 200, { items });
   }
@@ -1203,10 +1222,16 @@ function summarize(rec) {
   if (rec.kind === 'llm') {
     const msgs = rec.request?.messages;
     if (Array.isArray(msgs)) {
-      const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
-      const text = typeof lastUser?.content === 'string' ? lastUser.content
-        : JSON.stringify(lastUser?.content ?? '');
-      return `model=${rec.request?.model || '?'} msgs=${msgs.length} | ${text.slice(0, 80)}`;
+      // 只回显元信息，不回显消息正文（issue #97 问题 8 附带）：summarize 的结果会经
+      // 管理口 /api/interactions 直接返回，越界读到录制文件时正文即随之泄露；仅保留
+      // 消息条数与角色构成，足够人工定位是哪一个会话，零内容暴露。
+      const roles = {};
+      for (const m of msgs) {
+        const r = String(m?.role ?? 'unknown');
+        roles[r] = (roles[r] || 0) + 1;
+      }
+      const roleDesc = Object.entries(roles).map(([r, n]) => `${r}×${n}`).join(', ');
+      return `model=${rec.request?.model || '?'} msgs=${msgs.length}（${roleDesc}）`;
     }
     return `${rec.method || 'POST'} ${rec.path || ''}`;
   }

@@ -287,6 +287,33 @@ def phase_collector(work: Path, mock_up: Proc, collector: Proc, collector_hl: "P
     after = {k: _count_lines(work / "collector-data" / "e2e" / k) for k in kinds}
     check("穿越请求不落录制", before == after, f"{before} → {after}")
 
+    # 2.5e 管理口 kind 白名单（issue #97 问题 8）：kind 与 ns 一样直接拼进 kindDir，
+    # 此前只给默认值无校验，'../../xxx' 可越出 DATA_DIR 读任意 .jsonl。四个数据口的
+    # hasPathTraversal 只覆盖转发路径，管不到这条只读查询——故在此补管理口断言。
+    admin_trav = [
+        ("相对穿越", "../../etc"),
+        ("URL 编码穿越", "..%2F..%2Fetc"),
+        ("反斜杠形态", "..\\..\\etc"),
+        ("绝对路径", "/etc"),
+        ("空串越界", "."),
+        ("未知 kind", "secret"),
+    ]
+    for name, kind in admin_trav:
+        r = httpx.get(f"{admin}/api/interactions", params={"ns": "e2e", "kind": kind}, timeout=10)
+        check(f"管理口 kind 拒绝 [{name}]", r.status_code == 400,
+              f"kind={kind!r} status={r.status_code} body={r.text[:80]}")
+    # 白名单内核发的 kind 一律放行
+    for k in kinds:
+        r = httpx.get(f"{admin}/api/interactions", params={"ns": "e2e", "kind": k}, timeout=10)
+        check(f"管理口 kind 合法 [{k}] 200", r.status_code == 200, str(r.status_code))
+    # 合法查询不得回显 user 消息正文（summarize 只回元信息，问题 8 附带）。
+    # sentinel 取本文件 164/189 行真实录制的 "echo: xxx" user 正文——修复前 summarize
+    # 会 slice(0,80) 原文回显，该串出现即失败。（不拿邮箱做 sentinel：默认脱敏规则会先
+    # 把它替换成 ***@***，依赖它等于把断言挂在另一道防线上，恒真。）
+    r = httpx.get(f"{admin}/api/interactions", params={"ns": "e2e", "kind": "llm",
+                                                      "limit": 50}, timeout=10)
+    check("管理口 summary 不回显 user 正文", "echo:" not in r.text, r.text[:160])
+
     # 合法编码形态不误伤：查询串编码参数原样透传（%2F/%20 均放行，mock 侧剥查询串后命中路由）
     r = httpx.post("http://127.0.0.1:18200/e2e/v1/chat/completions?model=x%2Fa",
                    json={"stream": False, "messages": [{"role": "user", "content": "echo: 编码参数"}]}, timeout=30)
