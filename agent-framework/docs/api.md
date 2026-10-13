@@ -149,10 +149,11 @@ curl http://localhost:8100/skills
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}` |
+| GET | `/skills/users` | 当前用户的 L4 技能：`{userId, skills, tombstones}`；每个技能含 `description`/`enabled`/`createdAt`/`hasPackageBaseline`/`adminOverride` |
 | GET | `/skills/users/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
 | GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
-| PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB） |
+| PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB）。重新写入自动清除禁用标记（恢复启用） |
+| PUT | `/skills/users/{name}/toggle` | **启停个人技能**（仅对有 L4 覆盖的技能可用，无 → 404）：返回 `{userId, name, enabled, message}`；禁用写 `/{name}/.disabled`，禁用后从 `/skills/available`、`@Skill` 合并视图排除且沙箱物化/回写跳过 |
 | POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。响应 `{name, action, files, version}` |
 | DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
@@ -393,6 +394,19 @@ Thread 历史消息 + pendingConfirm。
 > `session_message`——turn 执行中 history 至少可见用户提问，助手回复待 turn 结束补齐。
 > slot 键与 turn 结束 write-through 完全同构、`msg_id` 同源，upsert 幂等不产生重复。
 > 归档关闭（`AGENT_HISTORY_ARCHIVE_ENABLED=false`）时不生效（无消费方）。
+
+> **@Skill 注入区块不上屏（2026-10-12）**：用户消息里的 `@SkillName` 会被
+> `SkillInjectionService` 展开成引用标记 + 整篇 SKILL.md（模型必须有完整 Skill 上下文）。
+> history 展示层会剥离该注入区块（`SkillInjectionService.stripInjectedSkills`），
+> `messages[].content` 只保留**用户自己敲的内容**——如
+> `[@Skill:pdf] 帮我处理文件`。落库原文仍含注入内容（模型上下文事实不变），仅展示剥离。
+
+> **turn 失败留痕（2026-10-12）**：turn 以 `error` 终态结束（如模型网关 503 重试耗尽）时，
+> 失败原因会以一条 `role=assistant`、`name=__turn_error__` 的消息写入 `session_message`
+> （内容 `⚠️ 本次执行失败：<原因>`，`msg_id=__turn_error__:{replyId}` 幂等）。此前错误只以 SSE
+> `error` 帧发给当时连着的前端，刷新后 history/status 不体现失败，只剩回合起始归档留下的
+> 用户提问（孤儿提问）——用户无从得知上轮失败。现刷新后可直接在历史里看到失败提示
+> （敏感值已遮掩、超长截断 500 字）。
 
 `pendingConfirm` 优先取 state 中挂起的 ASKING 工具（`source=agent_state`，与 confirm_context
 的 30 分钟 TTL 无关），无则回落 confirm_context（`source=confirm_context`，兼容老会话）。

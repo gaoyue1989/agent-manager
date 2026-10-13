@@ -224,6 +224,59 @@ class UserSkillServiceTest {
     }
 
     @Test
+    void listSkillsShouldExposeDescriptionAndEnabledState() {
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+
+        var s = svc.listSkills(USER).get(0);
+        assertEquals("user skill", s.description(), "应解析 SKILL.md frontmatter description");
+        assertTrue(s.enabled(), "新建默认启用");
+    }
+
+    @Test
+    void toggleSkillShouldFlipAndPersistEnabledState() {
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+        assertTrue(svc.listSkills(USER).get(0).enabled());
+
+        assertFalse(svc.toggleSkill(USER, "demo-a"), "首次切换 → 禁用");
+        assertFalse(svc.listSkills(USER).get(0).enabled());
+        // KV 持久化：新实例（新 WorkspaceReader）读到禁用态
+        assertFalse(service().listSkills(USER).get(0).enabled());
+        assertTrue(service().isSkillDisabled(USER, "demo-a"));
+
+        assertTrue(svc.toggleSkill(USER, "demo-a"), "再次切换 → 启用");
+        assertTrue(svc.listSkills(USER).get(0).enabled());
+    }
+
+    @Test
+    void toggleSkillShouldRejectSkillWithoutUserOverride() {
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().toggleSkill(USER, "ghost"));
+        assertTrue(e.getMessage().contains("ghost"), e.getMessage());
+    }
+
+    @Test
+    void listSkillsShouldExposeCreatedAtFromKvTimestamps() throws Exception {
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        var seq = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() == 0);
+        when(rs.getString("item_key")).thenReturn("/demo-a/scripts/a.sh");
+        when(rs.getLong("updated_at")).thenReturn(1_700_000_000_000L); // 2023-11-14
+
+        var s = svc.listSkills(USER).get(0);
+        assertTrue(s.createdAt().startsWith("2023"), "创建时间取最早 updated_at: " + s.createdAt());
+    }
+
+    @Test
     void readSkillShouldFallBackToPackageBaseline() throws IOException {
         seedPackageSkill("demo-a", PKG_SKILL_MD, null, null);
 

@@ -156,8 +156,34 @@ class StateDataParserTest {
     }
 
     @Test
-    void compactionSummaryIsNotTreatedAsSyntheticReminder() {
-        // 压缩摘要是 role=USER + name=__compaction_summary__（无 synthetic 元数据），
+    void userMessageShouldStripInjectedSkillSectionWhileAssistantKept() {
+        // 注入形态取证 SkillInjectionService：@Skill 替换为引用标记后追加整篇 SKILL.md
+        var injected = "用[@Skill:pdf] 处理文件\n\n---\n## Referenced Skills\n"
+            + "\n### Skill: pdf\n```\n# PDF 正文\n```\n\n---\n";
+        var assistant = "好的\n\n---\n## Referenced Skills\n尾巴";
+        var nf = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance;
+        var root = nf.objectNode();
+        var arr = root.putArray("context");
+        var user = arr.addObject();
+        user.put("id", "u1");
+        user.put("role", "USER");
+        user.putArray("content").addObject().put("type", "text").put("text", injected);
+        var asst = arr.addObject();
+        asst.put("id", "a1");
+        asst.put("role", "ASSISTANT");
+        asst.putArray("content").addObject().put("type", "text").put("text", assistant);
+
+        var list = StateDataParser.toRoleContentList(root.get("context"));
+
+        assertEquals(2, list.size());
+        assertEquals("用[@Skill:pdf] 处理文件", list.get(0).get("content"),
+            "user 提问不得拖着整篇 SKILL.md（非用户输入）");
+        // 注入只发生在用户消息：assistant 侧不做剥离
+        assertEquals(assistant, list.get(1).get("content"));
+    }
+
+    @Test
+    void compactionSummaryIsNotTreatedAsSyntheticReminder() {        // 压缩摘要是 role=USER + name=__compaction_summary__（无 synthetic 元数据），
         // 由 ThreadController 归档合并转 role=compaction，解析层不得误剔
         var stateData = """
             {"context":[

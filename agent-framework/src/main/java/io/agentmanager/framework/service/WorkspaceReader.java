@@ -307,6 +307,13 @@ public class WorkspaceReader {
     private static final String ADMIN_OVERRIDE_MARKER = ".admin-override";
 
     /**
+     * 启停标记（disabled，键 {@code /{name}/.disabled}，值为写入时间毫秒）：管理面禁用该用户的
+     * 个人技能后，技能不再对外提供（管理面合并视图排除、沙箱物化/回写跳过）。以 {@code .} 开头属
+     * 元数据段，不计入技能文件；重新写入/下发（{@link #clearUserSkillDisabled}）即恢复启用。
+     */
+    private static final String DISABLED_MARKER = ".disabled";
+
+    /**
      * 列出某用户 L4 技能：技能名 → 该技能下文件相对路径（含 SKILL.md，字典序）。
      *
      * <p>命名空间为空时 {@code ls} 返回失败而非空集（框架语义），此处按“无技能”处理，
@@ -527,6 +534,10 @@ public class WorkspaceReader {
                 log.warn("delete_user_skill: 清除管理面写入栅栏失败（user {} skill {}），删除标记仍生效",
                     safeUserId, name);
             }
+            // 启停标记同样随删除清理（删除后技能已不存在，残留 disabled 无意义）
+            if (!clearUserSkillDisabled(userId, name)) {
+                log.warn("delete_user_skill: 清除启停标记失败（user {} skill {}）", safeUserId, name);
+            }
             int deleted = 0;
             for (var rel : files) {
                 if (!deleteUserSkillFile(userId, name, rel)) {
@@ -624,6 +635,36 @@ public class WorkspaceReader {
             return true; // 无栅栏，无需清除
         }
         return deleteUserSkillFile(userId, name, ADMIN_OVERRIDE_MARKER);
+    }
+
+    /**
+     * 写启停标记（键 {@code /{name}/.disabled}，值为写入时间毫秒）：管理面禁用该用户的个人技能。
+     * 键以 {@code .} 开头属元数据段，不会被 {@link #listUserSkills} 当成技能文件。
+     *
+     * @return true 写入成功；false 参数非法或写入失败（调用方必须显式报错）
+     */
+    public boolean markUserSkillDisabled(String userId, String name) {
+        return writeUserSkillFile(userId, name, DISABLED_MARKER, String.valueOf(System.currentTimeMillis()));
+    }
+
+    /** 该用户该技能是否被管理面禁用 */
+    public boolean isUserSkillDisabled(String userId, String name) {
+        return readUserSkillFile(userId, name, DISABLED_MARKER) != null;
+    }
+
+    /**
+     * 清除启停标记（管理面启用 / 重新写入 / 下发该技能时调用）。
+     *
+     * @return true 已清除或本无标记；false 清除失败（调用方必须显式报错）
+     */
+    public boolean clearUserSkillDisabled(String userId, String name) {
+        if (userId == null || userId.isBlank() || name == null || name.isBlank()) {
+            return false;
+        }
+        if (!isUserSkillDisabled(userId, name)) {
+            return true; // 无标记，无需清除
+        }
+        return deleteUserSkillFile(userId, name, DISABLED_MARKER);
     }
 
     /** 管理面删除标记视图项：技能名 + 标记写入时间（毫秒；值不可解析为 0） */
@@ -742,6 +783,11 @@ public class WorkspaceReader {
             if (isUserSkillDeleted(userId, name)) {
                 // 管理面已删除：不物化（容器内旧副本的清除留给容器换代，见设计文档 §6.2.4）
                 log.debug("materialize_user_skills: {} has tombstone, skip", name);
+                continue;
+            }
+            if (isUserSkillDisabled(userId, name)) {
+                // 管理面已禁用：不物化进容器（技能对该用户整体不可用）
+                log.debug("materialize_user_skills: {} disabled, skip", name);
                 continue;
             }
             if (relFiles.size() > MATERIALIZE_MAX_FILES) {

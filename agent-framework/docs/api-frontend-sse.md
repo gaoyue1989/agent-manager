@@ -1126,10 +1126,11 @@ GET /skills/manage
 
 | 端点 | 方法 | 说明 | 响应 |
 |------|------|------|------|
-| `/skills/users` | GET | 当前用户的 L4 技能 | `{userId, skills, tombstones}` |
+| `/skills/users` | GET | 当前用户的 L4 技能（每项含 `description`/`enabled`/`createdAt`） | `{userId, skills, tombstones}` |
 | `/skills/users/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
 | `/skills/users/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`） | `application/zip` 附件 |
-| `/skills/users/{name}` | PUT | 写个人技能，body `{content}`（≤1MB） | `{userId, name, action, version, message}` |
+| `/skills/users/{name}` | PUT | 写个人技能，body `{content}`（≤1MB；自动清除禁用标记） | `{userId, name, action, version, message}` |
+| `/skills/users/{name}/toggle` | PUT | 启停个人技能（禁用写 `/{name}/.disabled`） | `{userId, name, enabled, message}` |
 | `/skills/users/upload` | POST | zip 上传个人技能（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200；二进制拒绝） | `{userId, name, action, files, version, message}` |
 | `/skills/users/{name}` | DELETE | 删个人技能（**写 tombstone**） | `{..., deletedFiles, hasPackageBaseline, tombstone:{name, clearHint}}` |
 | `/skills/users/{name}/sync-from-package` | POST | 包内基线下发为个人版 | `{files, skipped, message}` |

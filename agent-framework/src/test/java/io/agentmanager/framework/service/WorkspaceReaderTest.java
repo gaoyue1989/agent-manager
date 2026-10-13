@@ -466,6 +466,29 @@ class WorkspaceReaderTest {
             .write(org.mockito.ArgumentMatchers.anyList());
     }
 
+    @Test
+    void disabledMarkerShouldRoundTripAndSkipMaterialize() {
+        var store = store();
+        var reader = readerWithAgent(store);
+        reader.writeUserSkillFile(USER, "off", "SKILL.md", "# off");
+        assertFalse(reader.isUserSkillDisabled(USER, "off"));
+        assertTrue(reader.markUserSkillDisabled(USER, "off"));
+        assertTrue(reader.isUserSkillDisabled(USER, "off"));
+        assertNotNull(store.get(skillNs(USER), "/off/.disabled"));
+
+        var osb = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        var files = org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class);
+        org.mockito.Mockito.when(osb.files()).thenReturn(files);
+        assertEquals(0, reader.materializeUserSkills(osb, USER));
+        org.mockito.Mockito.verify(files, org.mockito.Mockito.never())
+            .write(org.mockito.ArgumentMatchers.anyList());
+
+        assertTrue(reader.clearUserSkillDisabled(USER, "off"));
+        assertFalse(reader.isUserSkillDisabled(USER, "off"));
+        assertNull(store.get(skillNs(USER), "/off/.disabled"));
+    }
+
     /** delete 委托真实 InMemoryStore，但 delete 抛异常（store 故障） */
     private static final class DeleteFailingStore
             implements io.agentscope.harness.agent.filesystem.remote.store.BaseStore {

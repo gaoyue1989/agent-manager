@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import io.agentmanager.framework.model.OafConfig;
+import io.agentscope.core.skill.util.MarkdownSkillParser;
 
 /**
  * 用户技能（L4）管理服务：agent_fs KV 中 {@code agents/{agent}/users/{uid}/skills} 的
@@ -102,9 +103,19 @@ public class UserSkillService {
      */
     public record UserSkillIndex(List<UserSkillUser> users, boolean truncated) {}
 
-    /** 技能摘要（L4 视角；hasPackageBaseline 表示删除后会回落到包内同名技能） */
+    /**
+     * 技能摘要（L4 视角）。
+     *
+     * @param hasPackageBaseline 删除后会回落到包内同名技能
+     * @param adminOverride      带管理面写入栅栏
+     * @param description        SKILL.md frontmatter 的 description（解析失败为空串）
+     * @param enabled            启停状态（false = 管理面已禁用，对外不可用）
+     * @param createdAt          创建时间（该技能现有 KV 键最早的 {@code updated_at}，近似值；
+     *                           格式 {@code yyyy-MM-dd HH:mm:ss.SSS}，取不到为空串）
+     */
     public record UserSkillSummary(String name, List<String> files, long bytes, long version,
-                                   boolean hasPackageBaseline, boolean adminOverride) {}
+                                   boolean hasPackageBaseline, boolean adminOverride,
+                                   String description, boolean enabled, String createdAt) {}
 
     /** 管理面删除标记（tombstone）视图项：该用户该技能已被管理面删除，但标记仍在 KV 中 */
     public record UserSkillTombstone(String name, String deletedAt) {}
@@ -324,9 +335,10 @@ public class UserSkillService {
 
     // ==================== 技能列表 / 读取 ====================
 
-    /** 列出某用户的 L4 技能（含包内基线标记与管理面写入栅栏标记） */
+    /** 列出某用户的 L4 技能（含包内基线标记、管理面写入栅栏、描述、启停状态与创建时间） */
     public List<UserSkillSummary> listSkills(String userId) {
         var skills = workspaceReader.listUserSkills(userId);
+        var createdAt = skillCreatedAt(userId);
         var result = new ArrayList<UserSkillSummary>(skills.size());
         for (var entry : skills.entrySet()) {
             var name = entry.getKey();
@@ -334,9 +346,118 @@ public class UserSkillService {
             result.add(new UserSkillSummary(name, files, totalBytes(userId, name, files),
                 workspaceReader.userSkillFileVersion(userId, name, WorkspaceReader.SKILL_FILE),
                 hasPackageBaseline(name),
-                workspaceReader.isUserSkillAdminOverride(userId, name)));
+                workspaceReader.isUserSkillAdminOverride(userId, name),
+                descriptionOf(userId, name),
+                !workspaceReader.isUserSkillDisabled(userId, name),
+                createdAt.getOrDefault(name, "")));
         }
         return result;
+    }
+
+    /** 解析 L4 SKILL.md frontmatter 的 description（解析失败返回空串，不阻断列表） */
+    private String descriptionOf(String userId, String name) {
+        try {
+            var content = workspaceReader.readUserSkillFile(userId, name, WorkspaceReader.SKILL_FILE);
+            if (content == null) {
+                return "";
+            }
+            var parsed = MarkdownSkillParser.parse(content);
+            var meta = parsed != null ? parsed.getMetadata() : null;
+            var desc = meta != null ? meta.get("description") : null;
+            return desc != null ? String.valueOf(desc) : "";
+        } catch (Exception e) {
+            log.debug("description_of: parse {} for user {} failed: {}", name, userId, e.getMessage());
+            return "";
+        }
+    }
+
+    /**
+     * 每个技能的创建时间（近似值）：该技能现有 KV 键最早的 {@code updated_at}。
+     *
+     * <p>{@code agent_fs} 无 {@code created_at} 列，故以「最早一次写入时间」作为创建时间。
+     * 查询失败不阻断列表（返回空 map，时间仅作展示）。
+     */
+    private Map<String, String> skillCreatedAt(String userId) {
+        var result = new LinkedHashMap<String, String>();
+        if (agentName == null || agentName.isBlank() || userId == null || userId.isBlank()) {
+            return result;
+        }
+        var safeUser = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+        var namespace = "agents\u001F" + agentName + "\u001Fusers\u001F" + safeUser + "\u001Fskills";
+        var sql = "SELECT item_key, updated_at FROM agent_fs WHERE namespace_path = ?";
+        var minAt = new LinkedHashMap<String, Long>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, namespace);
+            try (var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    var name = topSkillName(rs.getString("item_key"));
+                    if (name == null) {
+                        continue;
+                    }
+                    minAt.merge(name, rs.getLong("updated_at"), Math::min);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("skill_created_at: query failed for user {}: {}", safeUser, e.getMessage());
+            return result;
+        }
+        for (var entry : minAt.entrySet()) {
+            var ts = entry.getValue();
+            result.put(entry.getKey(), ts > 0 ? new java.sql.Timestamp(ts).toString() : "");
+        }
+        return result;
+    }
+
+    /** 从 item_key 提取顶层技能名（含资源文件；元数据段 . / _ 开头返回 null） */
+    private static String topSkillName(String itemKey) {
+        if (itemKey == null || itemKey.isBlank()) {
+            return null;
+        }
+        var key = itemKey.startsWith("/") ? itemKey.substring(1) : itemKey;
+        var slash = key.indexOf('/');
+        var name = slash >= 0 ? key.substring(0, slash) : key;
+        if (name.isBlank() || name.charAt(0) == '.' || name.charAt(0) == '_') {
+            return null;
+        }
+        return name;
+    }
+
+    /**
+     * 切换某用户个人技能的启停状态（管理面）。
+     *
+     * <p>仅对存在 L4 个人覆盖的技能可切换；禁用写 {@code /{name}/.disabled} 元数据标记，启用清除之。
+     * 禁用后该技能对外不可用：管理面合并视图（{@code /skills/available}、{@code @Skill}）排除、沙箱物化与
+     * 回写跳过；重新写入/下发会自动清除该标记（恢复启用）。
+     *
+     * @return 切换后的状态（true=启用, false=禁用）
+     * @throws IllegalArgumentException 无效 userId/技能名，或该用户无此 L4 技能
+     * @throws IllegalStateException    标记写/删失败（KV 不可用，必须显式报错）
+     */
+    public boolean toggleSkill(String userId, String name) {
+        if (!isValidUserId(userId) || !isValidSkillName(name)) {
+            throw new IllegalArgumentException("无效的用户标识或 Skill 名称");
+        }
+        if (!workspaceReader.hasUserSkill(userId, name)) {
+            throw new IllegalArgumentException("用户 " + userId + " 无个人技能 '" + name + "'");
+        }
+        if (workspaceReader.isUserSkillDisabled(userId, name)) {
+            if (!workspaceReader.clearUserSkillDisabled(userId, name)) {
+                throw new IllegalStateException("启用失败：清除启停标记失败（KV " + namespaceHint() + "）");
+            }
+            log.info("toggle_skill: {} enabled for user {}", name, userId);
+            return true;
+        }
+        if (!workspaceReader.markUserSkillDisabled(userId, name)) {
+            throw new IllegalStateException("禁用失败：写入启停标记失败（KV " + namespaceHint() + "）");
+        }
+        log.info("toggle_skill: {} disabled for user {}", name, userId);
+        return false;
+    }
+
+    /** 该用户某技能是否被管理面禁用 */
+    public boolean isSkillDisabled(String userId, String name) {
+        return workspaceReader.isUserSkillDisabled(userId, name);
     }
 
     /**
@@ -479,6 +600,10 @@ public class UserSkillService {
         // 用户重新创建：清除删除标记，否则沙箱回写侧会一直跳过该技能
         if (!workspaceReader.clearUserSkillDeletion(userId, name)) {
             throw new IllegalStateException("L4 技能已写入但删除标记清除失败（KV " + namespaceHint() + "）");
+        }
+        // 重新写入即恢复启用（清除禁用标记，否则管理面合并视图仍会隐藏该技能）
+        if (!workspaceReader.clearUserSkillDisabled(userId, name)) {
+            throw new IllegalStateException("L4 技能已写入但启停标记清除失败（KV " + namespaceHint() + "）");
         }
         // 写侧栅栏：本次写入优先于同代容器内旧副本（清除失败必须显式上报，否则写入会被静默改回）
         if (!workspaceReader.markUserSkillAdminOverride(userId, name)) {
@@ -722,6 +847,10 @@ public class UserSkillService {
         }
         if (!workspaceReader.markUserSkillAdminOverride(userId, name)) {
             throw new IllegalStateException("物化成功但管理面写入栅栏写入失败（KV " + namespaceHint() + "）");
+        }
+        // 重新物化即恢复启用（上传/下发后默认启用）
+        if (!workspaceReader.clearUserSkillDisabled(userId, name)) {
+            throw new IllegalStateException("物化成功但启停标记清除失败（KV " + namespaceHint() + "）");
         }
         log.info("materialize_skill: skill {} ({} files, {} skipped) → user {}",
             name, orderedFiles.size(), skipped.size(), userId);

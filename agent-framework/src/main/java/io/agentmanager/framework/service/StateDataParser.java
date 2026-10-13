@@ -316,6 +316,9 @@ public final class StateDataParser {
      *
      * <p>SDK 注入的合成提醒（后台子任务投递等，见 {@link #isSyntheticReminder}）不属对话轮次，
      * 一律跳过，避免以 {@code role=user} 冒充用户输入上屏。
+     *
+     * <p>user 消息的 {@code @Skill} 注入区块（展开的整篇 SKILL.md）在展示层剥离
+     * （{@link SkillInjectionService#stripInjectedSkills}）：只显示用户自己敲的内容。
      */
     public static List<Map<String, Object>> toRoleContentList(JsonNode messagesArray) {
         return toRoleContentList(messagesArray, DEFAULT_TOOL_OUTPUT_MAX_CHARS);
@@ -340,14 +343,19 @@ public final class StateDataParser {
             if (isSyntheticReminder(m)) {
                 continue;
             }
-            var content = extractContentText(m);
+            var role = extractRole(m);
+            // @Skill 注入区块（展开的整篇 SKILL.md）只服务于模型上下文；用户可见历史
+            // 还原为用户自己敲的内容，否则提问气泡会拖着整篇技能文档（非用户输入）
+            var content = "user".equals(role)
+                ? SkillInjectionService.stripInjectedSkills(extractContentText(m))
+                : extractContentText(m);
             var tools = extractToolCalls(m, resultsByCallId);
             // 仅保留有文本内容或工具调用的消息（跳过纯 tool_result 等）
             if (content.isBlank() && tools.isEmpty()) {
                 continue;
             }
             var msg = new java.util.LinkedHashMap<String, Object>();
-            msg.put("role", extractRole(m));
+            msg.put("role", role);
             msg.put("content", content);
             // 消息标识与名（history 双源合并按 msg_id 对齐归档行、按 name 识别压缩摘要消息；
             // 缺失时不写键，保持旧响应形态不变）

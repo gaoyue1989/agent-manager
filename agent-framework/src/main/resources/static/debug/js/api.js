@@ -140,6 +140,8 @@ export const api = {
   },
   deleteUserSkill: (userId, name) =>
     del('/skills/users/' + encodeURIComponent(name), userHeader(userId)),
+  toggleUserSkill: (userId, name) =>
+    put('/skills/users/' + encodeURIComponent(name) + '/toggle', {}, userHeader(userId)),
   syncUserSkillFromPackage: (userId, name) =>
     post('/skills/users/' + encodeURIComponent(name) + '/sync-from-package', {}, userHeader(userId)),
 
