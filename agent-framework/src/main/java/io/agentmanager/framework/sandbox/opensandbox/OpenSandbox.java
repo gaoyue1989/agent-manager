@@ -211,20 +211,26 @@ public class OpenSandbox extends AbstractBaseSandbox {
                     return;
                 }
                 var injectedIds = new java.util.ArrayList<String>();
+                // 已占用的工作区路径（防同名覆盖）：来自 file_asset 历史注入记录，
+                // 沙箱容器可能在远端主机，无法像非沙箱路径那样 ls 本地目录
+                var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(userId, userId));
                 for (var f : pending) {
-                    var wsPath = "uploads/" + f.fileName();
+                    var wsPath = uniqueWorkspacePath(taken, f.fileName());
                     try (var in = fileStorage.read(f.storageKey())) {
                         osbSandbox.files().write(List.of(
                             com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
                                 // execd files API 路径基准 = /workspace（实测：无前导斜杠 → 相对 /workspace；
                                 // 带前导斜杠 → 容器绝对路径，会写错位）。上传文件统一在 /workspace/uploads/
                                 .path(wsPath)
-                                .data(Base64.getEncoder().encodeToString(in.readAllBytes()))
+                                // execd 按提交字节原样落盘（byte[] → octet-stream），不做 base64 解码——
+                                // 传 String 会被当作文本原样写入，二进制文件全部损坏（实测钉死，见 §6.2.3）
+                                .data(in.readAllBytes())
                                 .mode(644)
                                 .build()));
                     }
                     // 注入成功后才回写 workspace_path（保证路径与沙箱内实际一致）
                     fileAssetStore.updateWorkspacePath(f.id(), wsPath);
+                    taken.add(wsPath);
                     injectedIds.add(f.id());
                 }
                 fileAssetStore.markInjected(injectedIds);
@@ -235,6 +241,29 @@ public class OpenSandbox extends AbstractBaseSandbox {
                 log.warn("[sandbox-open] failed to inject pending uploads: {}", e.getMessage());
             }
         }
+    }
+
+    /**
+     * 唯一化工作区路径（uploads/{name}，同名追加 _1/_2，与 UploadWorkspaceInjector 同款语义）。
+     * 冲突判定基于 taken 集合（file_asset 历史注入路径 + 本批次已分配），命中即从集合剔除后返回；
+     * 上界 1000 兜底 UUID（防极端同名风暴无限循环）。
+     */
+    private static String uniqueWorkspacePath(java.util.Set<String> taken, String fileName) {
+        var base = "uploads/" + fileName;
+        if (!taken.contains(base)) {
+            return base;
+        }
+        int dot = fileName.lastIndexOf('.');
+        var stem = dot > 0 ? fileName.substring(0, dot) : fileName;
+        var ext = dot > 0 ? fileName.substring(dot) : "";
+        for (int i = 1; i <= 1000; i++) {
+            var candidate = "uploads/" + stem + "_" + i + ext;
+            if (!taken.contains(candidate)) {
+                return candidate;
+            }
+        }
+        log.warn("[sandbox-open] too many conflicting names for {}, using UUID fallback", fileName);
+        return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
     }
 
     /**
