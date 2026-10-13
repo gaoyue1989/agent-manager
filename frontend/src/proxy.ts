@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { evalCollectorTarget } from "./lib/eval-session";
 
 // 同源反代默认目标(集群内固定地址)。取值在请求期读取环境变量(Next 16 proxy
 // 默认 Node.js runtime,process.env 不被构建期烘焙),部署时通过 Deployment env
@@ -40,13 +41,17 @@ export function proxy(request: NextRequest) {
     // 采集模式:显式开关开启且目标已设置时,目标改取 collector(带 /{ns} 前缀,业务服务
     // 路径整体后移,collector 按前缀路由 + 录制)并注入 X-Eval-Session(前端会话标识派生),
     // 使 collector 对外部依赖三协议(LLM/沙箱/MCP)的录制也能拿到与 HTTP 层一致的强关联主键
-    if (process.env.EVAL_COLLECTOR_MODE === "1") {
-      const collector = process.env.EVAL_COLLECTOR_AGENT_URL;
-      if (collector) {
-        const sid = request.cookies.get("oaf-assistant-sid")?.value;
-        if (sid) headers.set("x-eval-session", sid);
-        return NextResponse.rewrite(joinTarget(collector, `${rest}${search}`), { request: { headers } });
-      }
+    // 判定/取目标逻辑见 lib/eval-session.ts（单测钉住 issue #121 的判空语义）
+    const collector = evalCollectorTarget(
+      process.env.EVAL_COLLECTOR_MODE,
+      process.env.EVAL_COLLECTOR_AGENT_URL,
+    );
+    if (collector) {
+      const sid = request.cookies.get("oaf-assistant-sid")?.value;
+      if (sid) headers.set("x-eval-session", sid);
+      return NextResponse.rewrite(joinTarget(collector, `${rest}${search}`), { request: { headers } });
+    }
+    if (process.env.EVAL_COLLECTOR_MODE === "1" && !process.env.EVAL_COLLECTOR_AGENT_URL) {
       console.error("[proxy] EVAL_COLLECTOR_MODE=1 但 EVAL_COLLECTOR_AGENT_URL 未设置,退回普通代理且不注入 x-eval-session");
     }
     return NextResponse.rewrite(joinTarget(releaseAgent, `${rest}${search}`), { request: { headers } });

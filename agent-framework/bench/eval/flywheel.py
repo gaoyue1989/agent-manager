@@ -749,6 +749,27 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         raise AssertionError("collector YAML 断言需要 node（CI runner 预装；本机请自装 Node ≥ 18）") from e
     assert r.returncode == 0, f"collector YAML 断言失败:\n{r.stdout[-800:]}\n{r.stderr[-800:]}"
 
+    # ---- usage_frame token 口径（e1551b7）：恒等式 + 全量 prompt 语义 ----
+    # 契约 note 声明 inputTokens 为全量 prompt、outputTokens 为全量 completion，
+    # 恒等式 inputTokens + outputTokens === totalTokens。跨运行时对比与成本核算按此
+    # 口径聚合；若上报「缓存未命中增量」会随缓存命中率升高趋近 0（dsh issue #7 成因）。
+    # 字段映射被改键或聚合口径漂移在此红。
+    usage_frame = sse_client.MAPPING["usage_frame"]
+    usage_events = [
+        {"t_ms": 10, "type": usage_frame["type"],
+         "raw": {"type": usage_frame["type"], "inputTokens": 100, "outputTokens": 20, "totalTokens": 120}},
+        {"t_ms": 30, "type": usage_frame["type"],
+         "raw": {"type": usage_frame["type"], "inputTokens": 7, "outputTokens": 3, "totalTokens": 10}},
+    ]
+    uview = sse_client.build_view(usage_events)
+    assert uview["token_usage"] == {"input": 107, "output": 23, "total": 130}, uview["token_usage"]
+    assert uview["token_usage"]["input"] + uview["token_usage"]["output"] \
+        == uview["token_usage"]["total"], "usage_frame 恒等式被破坏"
+    # 单帧恒等式（口径声明的最小校验形态）：每帧也必须满足 input+output===total
+    for ue in usage_events:
+        raw = ue["raw"]
+        assert raw["inputTokens"] + raw["outputTokens"] == raw["totalTokens"]
+
     # ---- issue #117：judge 输出畸形 JSON 必须降级 JudgeUnavailable，不得裸抛 ----
     from graders.correctness import JudgeUnavailable, parse_judge_verdict
 
@@ -777,8 +798,8 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert parse_judge_verdict('{"score": -Infinity}')['score'] == 0.0
 
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
-          f" + 归一化规则/轨迹等价（M2）+ collector YAML 加载断言 + 标识符校验/CHECKSUMS"
-          f" 三重校验（issue #97）+ judge 降级解析（issue #117），"
+          f" + 归一化规则/轨迹等价（M2） + usage_frame 口径（全量 prompt 恒等式）"
+          f" + collector YAML 加载断言（issue #97）+ judge 降级解析（issue #117），"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
