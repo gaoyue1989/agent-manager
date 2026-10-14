@@ -120,6 +120,37 @@ public class UploadWorkspaceInjector {
     }
 
     /**
+     * 用户消息 metadata 中记录上传文件 id 列表的键。
+     *
+     * <p>发送时（ChatStreamController）写入用户 Msg.metadata，随 agent_state / 归档轨一起
+     * 持久化；history 读取时据此把上传文件卡片精确挂回对应的用户消息
+     * （非会话级，见 ThreadController.attachUploadedFiles）。老会话无此记录则不显示上传卡片。
+     */
+    public static final String METADATA_FILE_IDS = "file_ids";
+
+    /**
+     * 上传文件路径提示区块的起始标记。
+     *
+     * <p>append（{@link #buildContentBlocks}）与 strip（{@link #stripUploadHints}）必须用
+     * 同一常量——分叉会让剥离漂移。区块由框架自动追加进用户消息 content，仅供模型读取文件，
+     * 不属于用户输入；history 展示时据此剥离，提问气泡里只剩用户自己敲的内容。
+     */
+    public static final String UPLOAD_SECTION_MARKER = "\n\n---\n## Uploaded Files\n";
+
+    /**
+     * 剥离框架追加的上传文件路径提示区块，还原为「用户自己敲的内容」（history 展示用，
+     * 不改动模型上下文）。无标记时原样返回（null/空安全）。
+     */
+    public static String stripUploadHints(String text) {
+        if (text == null || text.isEmpty()) {
+            return text == null ? "" : text;
+        }
+        var idx = text.indexOf(UPLOAD_SECTION_MARKER);
+        // 多文本块拼接（extractContentText）会在标记前留一个换行，一并去掉再展示
+        return idx >= 0 ? text.substring(0, idx).stripTrailing() : text;
+    }
+
+    /**
      * 构造用户消息 ContentBlock 列表（file-upload-download-plan §7.2）：
      * 图片（≤FILE_IMAGE_MAX_MB 且总预算内）→ ImageBlock(Base64Source) 内联；
      * 其余 → 路径提示文本。
@@ -169,7 +200,8 @@ public class UploadWorkspaceInjector {
         }
         if (!pathHints.isEmpty()) {
             blocks.add(io.agentscope.core.message.TextBlock.builder().text(
-                "用户上传了文件（工作区相对路径）：\n- " + String.join("\n- ", pathHints)
+                UPLOAD_SECTION_MARKER
+                    + "用户上传了文件（工作区相对路径）：\n- " + String.join("\n- ", pathHints)
                     + "\n请用 read_file / list_files 工具或沙箱脚本处理这些文件。")
                 .build());
         }

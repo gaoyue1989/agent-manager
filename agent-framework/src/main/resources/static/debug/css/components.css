@@ -729,6 +729,9 @@ select.input { cursor: pointer; }
 .file-ready-card:hover {
   border-color: var(--border);
 }
+/* 用户上传文件卡片（挂在用户气泡下）：虚线边框 + 右对齐，与 Agent 产出卡片区分 */
+.msg.user > .file-ready-card { align-self: flex-end; }
+.file-ready-card.upload-card { border-style: dashed; }
 .file-ready-info {
   display: flex;
   align-items: center;

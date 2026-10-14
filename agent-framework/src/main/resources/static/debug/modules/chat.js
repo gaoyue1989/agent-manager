@@ -661,7 +661,13 @@ async function loadThreadHistory(sessionId) {
     let lastAssistantContentEl = null;
     for (const m of msgs) {
       if (m.role === 'compaction') addCompactionDivider(m.content || '');
-      else if (m.role === 'user') addMessage('user', m.content || '');
+      else if (m.role === 'user') {
+        const userMsgEl = addMessage('user', m.content || '');
+        // 用户上传文件卡片：挂回对应的用户气泡（后端按用户消息 metadata 的 file_ids 关联）
+        for (const f of (m.files || [])) {
+          renderFileReadyCard({ contentEl: userMsgEl }, f);
+        }
+      }
       else if (m.role === 'assistant' || m.role === 'agent') {
         // blocks 由后端按 Msg.content 块序给出（旧数据无此字段 → 退回旧布局）
         const refs = addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks);
@@ -1383,14 +1389,15 @@ function renderFileReadyCard(r, data) {
     : mimeType === 'application/zip' ? '📦'
     : '📎';
 
+  const isUpload = data.origin === 'upload';
   const card = document.createElement('div');
-  card.className = 'file-ready-card';
+  card.className = 'file-ready-card' + (isUpload ? ' upload-card' : '');
   card.innerHTML =
     '<div class="file-ready-info">' +
       '<span class="file-ready-icon">' + icon + '</span>' +
       '<div class="file-ready-meta">' +
         '<span class="file-ready-name">' + ctx.utils.esc(fileName) + '</span>' +
-        '<span class="file-ready-size">' + formatFileSize(size) + '</span>' +
+        '<span class="file-ready-size">' + (isUpload ? '上传 · ' : '') + formatFileSize(size) + '</span>' +
       '</div>' +
     '</div>' +
     '<a class="btn small file-ready-download" href="' + ctx.utils.esc(downloadUrl) +

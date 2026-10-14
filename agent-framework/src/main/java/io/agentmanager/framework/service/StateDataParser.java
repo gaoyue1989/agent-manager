@@ -233,6 +233,34 @@ public final class StateDataParser {
     /** SDK 合成提醒消息的固定 name（TaskReminder/Subagents 中间件均用 "system"） */
     static final String SYNTHETIC_REMINDER_NAME = "system";
 
+    /** HITL 确认恢复控制消息的 metadata 键（与 {@code Msg.METADATA_CONFIRM_RESULTS} 一致） */
+    static final String METADATA_CONFIRM_RESULTS = "agentscope_confirm_results";
+
+    /**
+     * 提取用户消息 metadata 中记录的上传文件 id 列表。
+     *
+     * <p>写入侧为 {@code UploadWorkspaceInjector.METADATA_FILE_IDS}（发送时随用户消息持久化）；
+     * 仅供 history 层据此把上传文件卡片挂回对应用户消息。缺失/非数组返回空列表。
+     */
+    static List<String> extractFileIds(JsonNode msg) {
+        if (msg == null) {
+            return List.of();
+        }
+        var node = msg.path("metadata").path(
+            io.agentmanager.framework.service.UploadWorkspaceInjector.METADATA_FILE_IDS);
+        if (!node.isArray()) {
+            return List.of();
+        }
+        var ids = new ArrayList<String>();
+        for (var n : node) {
+            var s = n.asText("");
+            if (!s.isBlank()) {
+                ids.add(s);
+            }
+        }
+        return ids;
+    }
+
     /**
      * 判定消息是否为 SDK 注入的合成提醒，而非用户/助手真实产出。
      *
@@ -256,6 +284,24 @@ public final class StateDataParser {
         }
         return "user".equals(extractRole(msg))
             && SYNTHETIC_REMINDER_NAME.equals(msg.path("name").asText(""));
+    }
+
+    /**
+     * 判定消息是否为 HITL 确认后的恢复控制消息，而非用户真实提问。
+     *
+     * <p>框架在人工确认工具调用后构造 {@code buildResumeMsg}（role=USER、name="user"、
+     * metadata 携带 {@code agentscope_confirm_results}，文案形如「人工已批准上述工具调用…」），
+     * 该消息被 SDK 持久化进 AgentState.context 并随归档轨落库。它没有用户输入语义，
+     * history 回放时不得以 user 呈现（否则用户会看到「并非自己提问、却以 user 出现」的消息）。
+     *
+     * <p>判据用 metadata 键（内容/name 都可能与真实提问撞车，不可靠）。
+     */
+    public static boolean isConfirmResume(JsonNode msg) {
+        if (msg == null) {
+            return false;
+        }
+        var metadata = msg.path("metadata");
+        return metadata.isObject() && metadata.has(METADATA_CONFIRM_RESULTS);
     }
 
     // ===== 工具结果文本的敏感值遮掩 =====
@@ -343,20 +389,32 @@ public final class StateDataParser {
             if (isSyntheticReminder(m)) {
                 continue;
             }
+            // HITL 确认恢复控制消息（"人工已批准…"）同样无用户输入语义，不属对话轮次，跳过
+            if (isConfirmResume(m)) {
+                continue;
+            }
             var role = extractRole(m);
-            // @Skill 注入区块（展开的整篇 SKILL.md）只服务于模型上下文；用户可见历史
-            // 还原为用户自己敲的内容，否则提问气泡会拖着整篇技能文档（非用户输入）
+            // user 消息的可见文本只保留用户自己敲的内容：
+            //  - @Skill 注入区块（整篇 SKILL.md）为模型上下文，展示层剥离
+            //  - 上传文件的路径提示为框架自动追加，展示层剥离（文件卡片另经 files 字段下发）
             var content = "user".equals(role)
-                ? SkillInjectionService.stripInjectedSkills(extractContentText(m))
+                ? UploadWorkspaceInjector.stripUploadHints(
+                    SkillInjectionService.stripInjectedSkills(extractContentText(m)))
                 : extractContentText(m);
+            // 用户上传文件 id（写入侧 UploadWorkspaceInjector.METADATA_FILE_IDS）：供 history
+            // 层把上传卡片挂回本用户消息。纯文件轮（无文本）也借此保留，不被下面的"空消息"剪掉
+            var fileIds = "user".equals(role) ? extractFileIds(m) : List.<String>of();
             var tools = extractToolCalls(m, resultsByCallId);
-            // 仅保留有文本内容或工具调用的消息（跳过纯 tool_result 等）
-            if (content.isBlank() && tools.isEmpty()) {
+            // 仅保留有文本内容/工具调用/上传文件的消息（跳过纯 tool_result 等）
+            if (content.isBlank() && tools.isEmpty() && fileIds.isEmpty()) {
                 continue;
             }
             var msg = new java.util.LinkedHashMap<String, Object>();
             msg.put("role", role);
             msg.put("content", content);
+            if (!fileIds.isEmpty()) {
+                msg.put("file_ids", fileIds);
+            }
             // 消息标识与名（history 双源合并按 msg_id 对齐归档行、按 name 识别压缩摘要消息；
             // 缺失时不写键，保持旧响应形态不变）
             var msgId = m.path("id").asText("");

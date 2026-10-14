@@ -441,6 +441,51 @@ class ThreadControllerTest {
     }
 
     @Test
+    void threadHistoryShouldAttachUploadedFilesToUserMessage() throws Exception {
+        // state 读取连接
+        var stateConn = mock(Connection.class);
+        var statePs = mock(PreparedStatement.class);
+        var stateRs = mock(ResultSet.class);
+        when(stateConn.prepareStatement(anyString())).thenReturn(statePs);
+        when(statePs.executeQuery()).thenReturn(stateRs);
+        when(stateRs.next()).thenReturn(true, false);
+        when(stateRs.getString("state_data")).thenReturn(
+            "{\"context\":[{\"id\":\"u1\",\"role\":\"USER\",\"name\":\"alice\","
+                + "\"metadata\":{\"file_ids\":[\"f1\"]},"
+                + "\"content\":[{\"type\":\"text\",\"text\":\"看下附件\"}]}]}");
+        // file_asset 查询连接
+        var fileConn = mock(Connection.class);
+        var filePs = mock(PreparedStatement.class);
+        var fileRs = mock(ResultSet.class);
+        when(fileConn.prepareStatement(anyString())).thenReturn(filePs);
+        when(filePs.executeQuery()).thenReturn(fileRs);
+        when(fileRs.next()).thenReturn(true, false);
+        when(fileRs.getString("id")).thenReturn("f1");
+        when(fileRs.getString("file_name")).thenReturn("report.pdf");
+        when(fileRs.getString("mime_type")).thenReturn("application/pdf");
+        when(fileRs.getLong("size")).thenReturn(2048L);
+
+        when(dataSource.getConnection())
+            .thenReturn(stateConn)                                   // AgentStateReader.loadStateData
+            .thenThrow(new RuntimeException("skip generatedFiles")) // 产出文件查询（被 catch）
+            .thenReturn(fileConn);                                   // attachUploadedFiles
+
+        var result = controller.threadHistory("acme:up1", true, 200, null);
+        @SuppressWarnings("unchecked")
+        var messages = (List<Map<String, Object>>) result.get("messages");
+        assertEquals(1, messages.size());
+        assertEquals("看下附件", messages.get(0).get("content"));
+        @SuppressWarnings("unchecked")
+        var files = (List<Map<String, Object>>) messages.get(0).get("files");
+        assertNotNull(files);
+        assertEquals("f1", files.get(0).get("file_id"));
+        assertEquals("report.pdf", files.get(0).get("file_name"));
+        assertEquals("upload", files.get(0).get("origin"));
+        // file_ids 是内部关联键，展开为 files 后不再外泄
+        assertTrue(messages.get(0).get("file_ids") == null);
+    }
+
+    @Test
     void threadHistoryShouldReturnEmptyWhenNoRow() throws Exception {
         var conn = mock(Connection.class);
         // threadHistory 先读一次 state（AgentStateReader），其后再轮到 generatedFiles/loadMessages
