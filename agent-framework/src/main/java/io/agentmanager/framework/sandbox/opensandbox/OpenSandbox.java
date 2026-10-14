@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.Base64;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -30,8 +31,15 @@ import io.agentscope.harness.agent.sandbox.WorkspaceProjectionApplier;
  *
  * 回写同步在 stop()（框架每次 call 结束都会调用 SandboxManager.release → stop）：
  * doExec 记录 userId，stop 时从沙箱拉取 MEMORY.md/memory/ 写回 KV。
+ *
+ * 同时实现 SandboxFileTransfer：SDK SandboxBackedFilesystem.uploadFiles 对实现该
+ * 接口的沙箱走单文件直传；未实现时每个单文件写入（sessions.json、memory、会话
+ * jsonl 等框架文件）都退化成「单文件 tar → 整套 hydrate 通道」，技能目录较大时
+ * 等于每写一个小文件就传一遍全量投影（实测 30M 技能下单容器重复 10 次全量 tar）。
+ * 技能投影路径（.skills-cache）不受此通道影响——见 {@link #supportsFileTransfer}。
  */
-public class OpenSandbox extends AbstractBaseSandbox {
+public class OpenSandbox extends AbstractBaseSandbox
+        implements io.agentscope.harness.agent.sandbox.SandboxFileTransfer {
 
     private static final Logger log = LoggerFactory.getLogger(OpenSandbox.class);
 
@@ -89,6 +97,39 @@ public class OpenSandbox extends AbstractBaseSandbox {
     public void setUserKey(String userKey) {
         this.userKey = userKey;
         log.info("[sandbox-open] userKey bound: {}", userKey);
+    }
+
+    // ---- SandboxFileTransfer：单文件直传 execd，替代「单文件 tar → 全量 hydrate」退化 ----
+
+    /**
+     * SDK uploadFiles 的直传判定：框架文件（sessions.json/memory/会话 jsonl/outputs 等）
+     * 返回 true 走单文件直传（写 4KB 只传 4KB）。
+     *
+     * <p>技能投影路径（.skills-cache）必须排除：技能目录的进容器语义由受控链路负责
+     * （start 投影 + {@link #refreshProjectionIfStale} 的 hash 一致性检查），若直传绕过，
+     * stage 时序竞态（E-SKILL-4）会重新出现且无 hash 兜底。命中排除即回退 SDK 的
+     * archive→hydrate 通道，由 {@link #doHydrateWorkspace} 传输。
+     */
+    @Override
+    public boolean supportsFileTransfer(String path) {
+        return path != null && !path.contains(".skills-cache");
+    }
+
+    /** 单文件直传：经 execd files API 原样落盘（byte[]，不做 base64 文本转换，见 §6.2.3） */
+    @Override
+    public void uploadFile(String path, byte[] data) throws Exception {
+        // 无前导斜杠 → 相对 /workspace；SDK 传入的 path 已是工作区相对路径
+        osbSandbox.files().write(List.of(
+            com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
+                .path(path)
+                .data(data)
+                .mode(644)
+                .build()));
+    }
+
+    @Override
+    public byte[] downloadFile(String path) throws Exception {
+        return osbSandbox.files().readByteArray(path);
     }
 
     /** 已绑定的用户 key（OpenSandboxClient.delete/create 回滚注入状态用） */
@@ -407,22 +448,42 @@ public class OpenSandbox extends AbstractBaseSandbox {
         return new ByteArrayInputStream(Base64.getDecoder().decode(base64));
     }
 
+    /**
+     * 投影归档传输：gzip 压缩 + 唯一临时文件 + 容器内解包。
+     *
+     * <p>gzip：投影根含技能目录（.skills-cache，可达数十 MB）时压缩传输量 30%+；
+     * 纯随机二进制收益有限，但技能资产（模板/文本/图片）普遍可压。
+     *
+     * <p>唯一临时文件：旧实现所有 hydrate 共用 /tmp/workspace.tar.b64——单文件写入
+     * （SDK uploadFiles 退化路径）与投影刷新并发时，A 刚 rm 临时文件、B 的
+     * files/upload 落在中间 → execd chmod 报 no such file → 写入整体失败，
+     * 下一轮重复传全量投影（实测一个容器生命周期重复 10 次全量 tar 传输）。
+     * 唯一化后各 hydrate 互不干扰。
+     */
     @Override
     protected void doHydrateWorkspace(InputStream archive) throws Exception {
+        // 点号分隔（workspace.{uuid}.tar.gz）：真实 execd 按字面执行无歧义；
+        // e2e mock 的路径映射对 "/workspace" 有 (?![.\w]) 负向前瞻，'-' 分隔会把
+        // workspace-{uuid} 里的 /workspace 也二次映射（'.' 则被前瞻排除，两侧行为一致）
+        var tmpPath = "/tmp/workspace." + UUID.randomUUID() + ".tar.gz";
         var bytes = archive.readAllBytes();
-        var base64 = Base64.getEncoder().encodeToString(bytes);
+        var compressed = new java.io.ByteArrayOutputStream(Math.max(64, bytes.length / 2));
+        try (var gz = new java.util.zip.GZIPOutputStream(compressed)) {
+            gz.write(bytes);
+        }
+        var base64 = Base64.getEncoder().encodeToString(compressed.toByteArray());
 
         // 写入临时文件后解压到 workspace（分两步避免单条命令参数超限）
         osbSandbox.files().write(List.of(
             com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
-                .path("/tmp/workspace.tar.b64")
+                .path(tmpPath)
                 .data(base64)
                 .mode(644)
                 .build()
         ));
         var execution = osbSandbox.commands().run(
-            "base64 -d /tmp/workspace.tar.b64 | tar xf - -C " + getWorkspaceRoot()
-                + " && rm /tmp/workspace.tar.b64");
+            "base64 -d " + tmpPath + " | tar xzf - -C " + getWorkspaceRoot()
+                + " && rm " + tmpPath);
         if (execution.getExitCode() != null && execution.getExitCode() != 0) {
             throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
                 "hydrateWorkspace failed with exit " + execution.getExitCode());

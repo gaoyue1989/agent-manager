@@ -137,16 +137,29 @@ class OpenSandboxTest {
     }
 
     @Test
-    void doHydrateWorkspaceShouldUntarArchive() throws Exception {
+    void doHydrateWorkspaceShouldGzipAndUntarViaUniqueTempFile() throws Exception {
+        // 回归钉子 A：临时文件唯一化——并发 hydrate 共用固定 /tmp/workspace.tar.b64
+        // 会互相 rm/覆盖（chmod no such file → 写入失败 → 重复传全量投影）
         var osb = mockOsb(mockExecution(0, "", ""));
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
-        // tar 包内容（任意字节）经 base64 写入 /tmp 后解压
         var archive = new ByteArrayInputStream("fake-tar-content".getBytes(StandardCharsets.UTF_8));
 
         sandbox.hydrateWorkspace(archive);
 
-        verify(osb.files()).write(anyList());
-        verify(osb.commands()).run(contains("base64 -d /tmp/workspace.tar.b64 | tar xf - -C /workspace"));
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files()).write(captor.capture());
+        var entry = (WriteEntry) captor.getValue().get(0);
+        assertTrue(entry.getPath().startsWith("/tmp/workspace."),
+            "临时文件必须唯一化（/tmp/workspace.{uuid}.tar.gz），不能共用固定路径");
+        assertTrue(entry.getPath().endsWith(".tar.gz"));
+        // 回归钉子 B：写入的是 gzip 压缩后的 base64 文本，解压命令链 tar xzf
+        var b64 = (String) entry.getData();
+        var gunzipped = new String(new java.util.zip.GZIPInputStream(
+            new ByteArrayInputStream(Base64.getDecoder().decode(b64))).readAllBytes(),
+            StandardCharsets.UTF_8);
+        assertEquals("fake-tar-content", gunzipped, "压缩传输必须无损还原归档内容");
+        verify(osb.commands()).run(contains("tar xzf - -C /workspace"));
+        verify(osb.commands()).run(contains("&& rm " + entry.getPath()));
     }
 
     @Test
@@ -389,7 +402,7 @@ class OpenSandboxTest {
 
         // 补水合走 doHydrateWorkspace：base64 写临时 tar + 解压命令
         verify(osb.files(), atLeastOnce()).write(anyList());
-        verify(osb.commands(), atLeastOnce()).run(contains("tar xf - -C /workspace"));
+        verify(osb.commands(), atLeastOnce()).run(contains("tar xzf - -C /workspace"));
         var state = sandbox.getOsbState();
         assertNotNull(state.getWorkspaceProjectionHash(), "补水合后须回写 hash");
         assertFalse(state.getWorkspaceProjectionHash().isEmpty());
@@ -410,7 +423,7 @@ class OpenSandboxTest {
         sandbox.start(); // Branch D：宿主非空 → 水合 + 记 hash
         sandbox.exec(RuntimeContext.builder().userId("u").build(), "ls /workspace", 30);
 
-        verify(osb.commands(), times(1)).run(contains("tar xf - -C /workspace"));
+        verify(osb.commands(), times(1)).run(contains("tar xzf - -C /workspace"));
     }
 
     @Test
@@ -430,7 +443,7 @@ class OpenSandboxTest {
         var failExec = mockExecution(1, "", "untar fail");
         var okExec = mockExecution(0, "ok", "");
         var commands = mock(Commands.class);
-        when(commands.run(contains("tar xf - -C /workspace"))).thenReturn(failExec);
+        when(commands.run(contains("tar xzf - -C /workspace"))).thenReturn(failExec);
         when(commands.run(anyString())).thenReturn(okExec);
         when(osb.commands()).thenReturn(commands);
 
@@ -464,7 +477,7 @@ class OpenSandboxTest {
 
         sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo 2", 30);
 
-        verify(osb.commands(), atLeastOnce()).run(contains("tar xf - -C /workspace"));
+        verify(osb.commands(), atLeastOnce()).run(contains("tar xzf - -C /workspace"));
     }
 
     @Test
@@ -480,6 +493,77 @@ class OpenSandboxTest {
         var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo ok", 30);
 
         assertTrue(result.ok());
-        verify(osb.commands(), never()).run(contains("tar xf - -C /workspace"));
+        verify(osb.commands(), never()).run(contains("tar xzf - -C /workspace"));
+    }
+
+    // ---------- SandboxFileTransfer 单文件直传（替代「单文件写入 → 全量 hydrate」退化） ----------
+
+    @Test
+    void shouldAdvertiseFileTransferForFrameworkPaths() {
+        // 框架文件（sessions.json/memory/会话 jsonl/outputs）走单文件直传：
+        // 未实现该接口时 SDK 把每个单文件写入退化成一次全量 tar hydrate（30M 技能下每写
+        // 一个小文件传 46M），实测单容器重复 10 次全量传输
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertTrue(sandbox.supportsFileTransfer("agents/E2E Test Agent/sessions/sessions.json"));
+        assertTrue(sandbox.supportsFileTransfer("MEMORY.md"));
+        assertTrue(sandbox.supportsFileTransfer("memory/2026-10-14.md"));
+        assertTrue(sandbox.supportsFileTransfer("agents/agent/sessions/gw-x.jsonl"));
+        assertTrue(sandbox.supportsFileTransfer("outputs/result.zip"));
+    }
+
+    @Test
+    void shouldRejectFileTransferForSkillCacheProjection() {
+        // .skills-cache 必须排除：技能进容器由受控链路负责（start 投影 + refreshProjectionIfStale
+        // 的 hash 一致性），直传绕过会让 E-SKILL-4 的 stage 时序竞态重新出现且无 hash 兜底
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertFalse(sandbox.supportsFileTransfer(".skills-cache/u1/oaf-package/demo-skill/SKILL.md"));
+        assertFalse(sandbox.supportsFileTransfer("sub/.skills-cache/x/f.md"), "嵌套 .skills-cache 同样排除");
+        assertFalse(sandbox.supportsFileTransfer((String) null), "防御：null path 不直传");
+    }
+
+    @Test
+    void uploadFileShouldWriteRawBytesToSamePath() throws Exception {
+        // 直传语义：byte[] 原样落盘（execd 不做 base64 解码，同 §6.2.3 上传注入语义）、
+        // 路径保持 SDK 给定的工作区相对路径
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+        var raw = new byte[]{0x7B, 0x22, 0x6B, 0x22, 0x3A, 0x31, 0x7D}; // {"k":1}
+
+        sandbox.uploadFile("agents/a/sessions/sessions.json", raw);
+
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files()).write(captor.capture());
+        var entry = (WriteEntry) captor.getValue().get(0);
+        assertEquals("agents/a/sessions/sessions.json", entry.getPath());
+        assertArrayEquals(raw, (byte[]) entry.getData());
+    }
+
+    @Test
+    void uploadFileFailureShouldSurfaceToCaller() throws Exception {
+        // 直传失败必须抛出（SDK uploadFiles 捕获后记 fail 响应并走下一文件），
+        // 不得静默吞掉——静默会让框架误以为文件已写入
+        var osb = mock(Sandbox.class);
+        var files = mock(Filesystem.class);
+        when(osb.files()).thenReturn(files);
+        doThrow(new RuntimeException("execd down")).when(files).write(anyList());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertThrows(Exception.class,
+            () -> sandbox.uploadFile("MEMORY.md", new byte[]{1}));
+    }
+
+    @Test
+    void downloadFileShouldReadViaExecd() throws Exception {
+        var osb = mock(Sandbox.class);
+        var files = mock(Filesystem.class);
+        when(osb.files()).thenReturn(files);
+        when(files.readByteArray("MEMORY.md")).thenReturn("hello".getBytes(StandardCharsets.UTF_8));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), sandbox.downloadFile("MEMORY.md"));
     }
 }
