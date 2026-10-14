@@ -434,8 +434,14 @@ public class ChatStreamController {
                     }
                 }
                 var blocks = workspaceInjector.buildContentBlocks(body.fileIds(), processedMessage, finalUserId);
+                // 记录本轮上传文件 id（随消息持久化），history 读取时据此把上传卡片挂回本用户消息
+                var msgMeta = new java.util.HashMap<String, Object>();
+                msgMeta.put(UiContextStore.METADATA_SESSION_KEY, finalSessionId);
+                if (body.fileIds() != null && !body.fileIds().isEmpty()) {
+                    msgMeta.put(UploadWorkspaceInjector.METADATA_FILE_IDS, body.fileIds());
+                }
                 var msg = Msg.builder().role(MsgRole.USER).name(finalUserId)
-                    .metadata(Map.of(UiContextStore.METADATA_SESSION_KEY, finalSessionId))
+                    .metadata(msgMeta)
                     .content(blocks).build();
                 messages = new ArrayList<>();
                 messages.add(msg);

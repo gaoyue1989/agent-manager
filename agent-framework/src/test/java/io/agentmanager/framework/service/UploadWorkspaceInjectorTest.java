@@ -121,4 +121,21 @@ class UploadWorkspaceInjectorTest {
         var blocks = injector.buildContentBlocks(List.of("gone"), "go", "alice");
         assertEquals(1, blocks.size(), "缺失文件跳过，仅保留文本");
     }
+
+    @Test
+    void pathHintCarriesSectionMarkerAndStripsCleanly() {
+        when(fileAssetStore.get("doc-1")).thenReturn(Optional.of(
+            new FileAssetStore.FileAsset("doc-1", "alice", "s1", null, "report.docx", "uploads/report_1.docx",
+                "application/msword", 2048, "local", "upload/k/doc-1", "upload", "injected", LocalDateTime.now())));
+        var blocks = injector.buildContentBlocks(List.of("doc-1"), "go", "alice");
+
+        var hint = ((TextBlock) blocks.get(1)).getText();
+        assertTrue(hint.startsWith(UploadWorkspaceInjector.UPLOAD_SECTION_MARKER),
+            "提示块须带剥离标记（与 stripUploadHints 共用常量）");
+        // 拼接后的用户可见文本：用户文本 + 换行 + 标记区块 → 剥离后只剩用户文本
+        assertEquals("go", UploadWorkspaceInjector.stripUploadHints("go\n" + hint));
+        assertEquals("", UploadWorkspaceInjector.stripUploadHints(hint), "纯上传（无用户文本）剥成空");
+        assertEquals("原样", UploadWorkspaceInjector.stripUploadHints("原样"), "无标记时原样返回");
+        assertEquals("", UploadWorkspaceInjector.stripUploadHints(null));
+    }
 }

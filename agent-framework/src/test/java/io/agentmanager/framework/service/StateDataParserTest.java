@@ -155,6 +155,111 @@ class StateDataParserTest {
         assertEquals("你好", list.get(0).get("content"));
     }
 
+    // ========== HITL 确认恢复控制消息过滤（不得冒充 user 上屏） ==========
+
+    @Test
+    void toRoleContentListShouldDropConfirmResumeControlMessage() {
+        // 形态取证 AgentRuntimeService.buildResumeMsg：role=USER + name="user"
+        // + metadata.agentscope_confirm_results，文案为「人工已批准…」，被持久化进 AgentState.context
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","name":"webui-s1","content":[{"type":"text","text":"请发布服务"}]},
+               {"id":"x1","role":"USER","name":"user",
+                "metadata":{"agentscope_confirm_results":[]},
+                "content":[{"type":"text","text":"人工已批准上述工具调用，工具将立即执行。"}]},
+               {"id":"a1","role":"ASSISTANT","content":[{"type":"text","text":"已发布"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(2, list.size(), "确认恢复控制消息被剔除，仅剩真实提问与助手回复");
+        assertEquals("请发布服务", list.get(0).get("content"));
+        assertEquals("已发布", list.get(1).get("content"));
+        assertTrue(list.stream().noneMatch(m -> "x1".equals(m.get("msg_id"))));
+    }
+
+    @Test
+    void isConfirmResumeShouldRequireMetadataKey() {
+        var nf = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance;
+        var withMeta = nf.objectNode();
+        withMeta.putObject("metadata").set("agentscope_confirm_results", nf.arrayNode());
+        assertTrue(StateDataParser.isConfirmResume(withMeta));
+        // 仅有相似文案、无 metadata 的真实用户消息不得被误判
+        assertFalse(StateDataParser.isConfirmResume(
+            nf.objectNode().put("role", "USER").put("content", "人工已批准上述工具调用")));
+        assertFalse(StateDataParser.isConfirmResume(null));
+    }
+
+    @Test
+    void userMessageShouldStripUploadHintsWhileAssistantKept() {
+        // 形态取证 UploadWorkspaceInjector.buildContentBlocks：用户文本块 + 追加的上传提示块
+        var userText = "帮我看看这个文件";
+        var hint = UploadWorkspaceInjector.UPLOAD_SECTION_MARKER
+            + "用户上传了文件（工作区相对路径）：\n- uploads/a.csv\n请用 read_file 处理。";
+        var nf = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance;
+        var root = nf.objectNode();
+        var arr = root.putArray("context");
+        var user = arr.addObject();
+        user.put("id", "u1");
+        user.put("role", "USER");
+        var uc = user.putArray("content");
+        uc.addObject().put("type", "text").put("text", userText);
+        uc.addObject().put("type", "text").put("text", hint);
+
+        var list = StateDataParser.toRoleContentList(root.get("context"));
+
+        assertEquals(1, list.size());
+        assertEquals(userText, list.get(0).get("content"),
+            "用户气泡不得拖着框架追加的文件路径提示");
+    }
+
+    // ========== 用户上传文件 id 透出（history 据此挂上传卡片） ==========
+
+    @Test
+    void userMessageShouldExposeFileIdsFromMetadata() {
+        // 发送时 ChatStreamController 把 fileIds 写入用户消息 metadata（file_ids）
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","name":"webui-s1",
+                "metadata":{"uiContextSessionId":"s1","file_ids":["f1","f2"]},
+                "content":[{"type":"text","text":"看下这两个文件"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, list.size());
+        assertEquals(List.of("f1", "f2"), list.get(0).get("file_ids"));
+    }
+
+    @Test
+    void pureFileTurnShouldBeKeptWithEmptyContentAndFileIds() {
+        // 纯文件轮（无文本）：content 剥离后为空，但带 file_ids 时不得被"空消息"剪掉
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","metadata":{"file_ids":["f9"]},
+                "content":[{"type":"text","text":"\\n\\n---\\n## Uploaded Files\\n- uploads/a.csv"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, list.size(), "纯文件轮必须保留以便渲染上传卡片");
+        assertEquals("", list.get(0).get("content"));
+        assertEquals(List.of("f9"), list.get(0).get("file_ids"));
+    }
+
+    @Test
+    void extractFileIdsShouldHandleMissingOrNonArray() {
+        var nf = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance;
+        assertTrue(StateDataParser.extractFileIds(nf.objectNode()).isEmpty());
+        var meta = nf.objectNode();
+        meta.putObject("metadata").put("file_ids", "not-array");
+        assertTrue(StateDataParser.extractFileIds(meta).isEmpty());
+        assertTrue(StateDataParser.extractFileIds(null).isEmpty());
+    }
+
     @Test
     void userMessageShouldStripInjectedSkillSectionWhileAssistantKept() {
         // 注入形态取证 SkillInjectionService：@Skill 替换为引用标记后追加整篇 SKILL.md

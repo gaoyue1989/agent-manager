@@ -534,15 +534,93 @@ public class ThreadController {
     /** 组装 history/messages 响应段：归档开启走双源合并，否则仅 agent_state 现状行为 */
     private void putHistoryMessages(Map<String, Object> result, String sessionId, String stateData,
                                     boolean includeArchived, Long beforeId, int limit) {
+        List<Map<String, Object>> messages;
         if (includeArchived && archiveEnabled) {
             var view = loadMessagesMerged(sessionId, stateData, beforeId, limit);
-            result.put("messages", view.messages());
+            messages = view.messages();
             result.put("hasMore", view.hasMore());
             result.put("nextBeforeId", view.nextBeforeId());
         } else {
-            result.put("messages", loadMessages(sessionId, stateData));
+            messages = loadMessages(sessionId, stateData);
             result.put("hasMore", false);
             result.put("nextBeforeId", null);
+        }
+        attachUploadedFiles(messages);
+        result.put("messages", messages);
+    }
+
+    /**
+     * 给历史 user 消息附上其上传文件卡片（origin=upload），供前端挂回对应用户气泡。
+     *
+     * <p>关联来源：发送时写入用户消息 metadata 的 {@code file_ids}
+     * （{@link io.agentmanager.framework.service.UploadWorkspaceInjector#METADATA_FILE_IDS}，
+     * 经 StateDataParser 透出为 dto.file_ids）。老会话无该记录 → 不显示上传卡片（只保证新会话）。
+     * 一次性批量查库避免 N+1；查询失败 fail-soft（消息照常返回，仅缺卡片）。
+     */
+    private void attachUploadedFiles(List<Map<String, Object>> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
+        var ids = new java.util.LinkedHashSet<String>();
+        for (var m : messages) {
+            if (!"user".equals(m.get("role"))) {
+                continue;
+            }
+            if (m.get("file_ids") instanceof List<?> list) {
+                for (var o : list) {
+                    if (o != null && !o.toString().isBlank()) {
+                        ids.add(o.toString());
+                    }
+                }
+            }
+        }
+        if (ids.isEmpty()) {
+            return;
+        }
+        var byId = new java.util.HashMap<String, Map<String, Object>>();
+        var placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT id, file_name, mime_type, size FROM file_asset WHERE id IN (" + placeholders + ")")) {
+            int i = 1;
+            for (var id : ids) {
+                ps.setString(i++, id);
+            }
+            try (var rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    var card = new LinkedHashMap<String, Object>();
+                    card.put("file_id", rs.getString("id"));
+                    card.put("file_name", rs.getString("file_name"));
+                    card.put("mime_type", rs.getString("mime_type"));
+                    card.put("size", rs.getLong("size"));
+                    // 前端据此区分"上传"与"产出"卡片（样式/文案）
+                    card.put("origin", "upload");
+                    byId.put(rs.getString("id"), card);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("uploaded files lookup failed: {}", e.getMessage());
+            return;
+        }
+        for (var m : messages) {
+            if (!"user".equals(m.get("role"))) {
+                continue;
+            }
+            if (!(m.get("file_ids") instanceof List<?> list)) {
+                continue;
+            }
+            var cards = new ArrayList<Map<String, Object>>();
+            for (var o : list) {
+                var card = o != null ? byId.get(o.toString()) : null;
+                if (card != null) {
+                    cards.add(card);
+                }
+            }
+            if (!cards.isEmpty()) {
+                m.put("files", cards);
+            }
+            // file_ids 只是关联键，卡片已展开为 files，不必再外泄
+            m.remove("file_ids");
         }
     }
 

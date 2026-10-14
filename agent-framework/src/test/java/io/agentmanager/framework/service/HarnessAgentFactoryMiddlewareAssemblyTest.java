@@ -80,7 +80,7 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
             AgentManagerProperties.AgentProtocolSettings.defaults());
         var bridge = mock(RemoteConfirmBridge.class);
 
-        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(), bridge);
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(), bridge, null, null);
         var agent = factory.build(oaf, store, new LLMLogger(), null, null,
             mock(io.agentmanager.framework.service.ModelCatalog.class), null);
 
@@ -148,7 +148,7 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
                 io.agentscope.core.permission.PermissionMode.DEFAULT,
                 java.util.Map.of(), java.util.Set.of()));
         return new HarnessAgentFactory(props, ws, mcp, List.of(),
-            mock(RemoteConfirmBridge.class));
+            mock(RemoteConfirmBridge.class), null, null);
     }
 
     /**
