@@ -18,6 +18,7 @@ import io.agentscope.harness.agent.sandbox.AbstractBaseSandbox;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
+import io.agentscope.harness.agent.sandbox.WorkspaceProjectionApplier;
 
 /**
  * OpenSandbox 沙箱运行时：包装 SDK Sandbox 句柄，
@@ -42,6 +43,7 @@ public class OpenSandbox extends AbstractBaseSandbox {
     private final AtomicBoolean runtimeInjected = new AtomicBoolean(false);
     private final AtomicBoolean uploadsInjected = new AtomicBoolean(false);
     private final AtomicBoolean userSkillsMaterialized = new AtomicBoolean(false);
+    private final AtomicBoolean projectionRefreshed = new AtomicBoolean(false);
     private volatile String userKey;
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
@@ -106,6 +108,9 @@ public class OpenSandbox extends AbstractBaseSandbox {
             }
         }
         log.info("[sandbox-open] stop() called, userKey={}", userKey);
+        // 投影新鲜度检查按 call 粒度执行：下轮 call 的 onSystemPrompt 可能再 stage 出新
+        // 技能目录（scopeKey 每轮变化），stop 复位后下轮首次 exec 重新比对
+        projectionRefreshed.set(false);
         if (workspaceSyncService != null && userKey != null) {
             try {
                 workspaceSyncService.syncBack(userKey, osbSandbox);
@@ -132,6 +137,8 @@ public class OpenSandbox extends AbstractBaseSandbox {
         // 会话开始物化 L4（幂等）：把 KV 的用户技能投影进容器 /workspace/skills，
         // 使管理面写入/从包内下发在沙箱档会话内生效（兜底路径，主路径见 SandboxUserKeyMiddleware）
         materializeUserSkills();
+        // 工作区投影新鲜度检查（幂等）：补齐「stage 晚于 start」的技能目录（见方法注释）
+        refreshProjectionIfStale();
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
@@ -329,6 +336,58 @@ public class OpenSandbox extends AbstractBaseSandbox {
                 // fail-soft：容器内保留 L2 基线/上一代副本，下次 acquire 重试
                 log.warn("[sandbox-open] materialize L4 skills failed for user {}: {}", uid, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * 工作区投影新鲜度检查（幂等，每 call 一次）：比对宿主投影目录当前内容与
+     * sandbox start 时记录的 hash，变化则把投影 tar 补水合进容器。
+     *
+     * <p>背景：技能目录（.skills-cache/{scopeKey}/oaf-package/...）由 SDK
+     * HarnessSkillMiddleware 在每轮推理的 onSystemPrompt 阶段物化到<b>平台本地</b>工作区，
+     * 而 harness 的投影 hydrate 只发生在 sandbox start 时（之后 hash 一致即跳过）——
+     * stage 晚于 start 的目录永远到不了容器 /workspace，模型经
+     * load_skill_through_path 拿到的 /workspace 路径在 shell 里 ls 不到（E-SKILL-4）。
+     *
+     * <p>逻辑对齐 harness 私有 applyWorkspaceProjectionIfChanged：build() 重扫宿主投影根
+     * （含 .skills-cache），hash 相同跳过；不同则 doHydrateWorkspace 后回写
+     * SandboxState.workspaceProjectionHash（空投影同样回写，与 start 路径一致）。
+     * tar 解包只覆盖归档内文件，不删除容器内模型自产文件（outputs/ 等）。
+     *
+     * <p>调用点：doExec（首个命令执行前）。文件工具若完全绕过 exec 则不触发——
+     * 技能消费路径（执行 scripts/*.sh）必然走 exec，已覆盖。
+     * fail-soft：失败仅告警不阻塞命令，复位标志允许下次 exec 重试。
+     */
+    private void refreshProjectionIfStale() {
+        if (state == null || !projectionRefreshed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            var spec = state.getWorkspaceSpec();
+            if (spec == null) {
+                // 投影未启用（SANDBOX_PROJECTION_ENABLED=false）或 spec 未装配：无可刷新
+                return;
+            }
+            var payload = WorkspaceProjectionApplier.build(spec);
+            if (payload == null) {
+                return;
+            }
+            if (payload.hash().equals(state.getWorkspaceProjectionHash())) {
+                log.debug("[sandbox-open] workspace projection unchanged, skipping refresh");
+                return;
+            }
+            if (payload.fileCount() > 0) {
+                try (var in = new java.io.ByteArrayInputStream(payload.tarBytes())) {
+                    doHydrateWorkspace(in);
+                }
+                log.info("[sandbox-open] workspace projection refreshed: files={}, hash={}",
+                    payload.fileCount(), payload.hash());
+            }
+            // 与 harness start 路径一致：空投影也回写 hash，避免每 call 重算后反复比对
+            state.setWorkspaceProjectionHash(payload.hash());
+        } catch (Exception e) {
+            projectionRefreshed.set(false);
+            log.warn("[sandbox-open] workspace projection refresh failed: {}", e.getMessage());
         }
     }
 

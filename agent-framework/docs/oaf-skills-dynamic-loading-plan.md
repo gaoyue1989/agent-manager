@@ -284,6 +284,27 @@ skill_manage(修改 a) → 写 L4（agent_fs, per-user）
 - `<files-root>` 由 `ShellPathPolicy.sandbox(workspaceRoot)` 渲染为容器内绝对路径；
 - **验证点（里程碑 M2）**：本项目 `OpenSandboxFilesystemSpec` 为自定义沙箱 spec，需实测确认 2.0.0 的 projection 路径在其上生效（`hydrateWorkspace` 注释已声明"静态模板由框架投影注入"，预期成立）。
 
+#### 6.3.1 投影新鲜度（stage 晚于 start 的补水合，2026-10-14 补齐）
+
+时序缺口：stager 物化发生在**每轮推理的 onSystemPrompt**（容器 acquire 之后），而 SDK 的投影
+hydrate 只在 sandbox start 时跑一次（`AbstractBaseSandbox.start` → `applyWorkspaceProjectionIfChanged`，
+hash 一致即跳过）——晚于 start 物化的目录永远到不了容器 `/workspace`。表现为模型经
+`load_skill_through_path` 拿到 `/workspace/.skills-cache/...` 路径，shell（execute 工具）里却
+`ls` 不到该目录（debug 会话实录：gorden-ppt-skill 文件列表 shell 不可见）。
+
+修复（`OpenSandbox.refreshProjectionIfStale`，不依赖 SDK 发版）：每次 call 的首个 exec 前调
+`WorkspaceProjectionApplier.build(spec)` 重算宿主投影 hash，与 `SandboxState.workspaceProjectionHash`
+不一致即 `doHydrateWorkspace` 补水合并回写 hash（空投影同样回写，对齐 SDK start 路径语义）。
+挂载点在 `doExec`（`injectRuntimeFiles` / `injectPendingUploads` / `materializeUserSkills` 之后的第四条幂等懒注入链），
+`stop()` 复位 per-call 标志。fail-soft：失败仅告警不阻塞命令，下次 exec 重试。
+
+边界（有意不处理）：
+
+- 宿主侧被 stager GC 的技能，容器内旧副本不删（tar 解包只覆盖归档内文件）——`load_skill_through_path`
+  不再渲染已删路径，且与 `materializeUserSkills` 的"只写不删"语义一致；
+- 完全绕过 exec 的文件工具不触发检查（技能消费路径 = 执行 scripts/*.sh，必然走 exec）；
+- 每 call 最多一次全量扫盘 + tar 构建（量级 = 技能目录 MB 级），无变化时零网络零容器命令。
+
 ---
 
 ## 七、平台边界（明确不涉及）
@@ -314,7 +335,7 @@ skill_manage(修改 a) → 写 L4（agent_fs, per-user）
 | E-SKILL-1 基线 | 发布带 `skills/demo-a/` 的包 → 对话"你有哪些技能/使用 demo-a 技能" | `<available_skills>` 含 demo-a；`load_skill_through_path` 可读 |
 | E-SKILL-2 动态新增 | 直接向 PVC `packages/{id}/skills/` 原位写入 `demo-b/`（kubectl exec 到节点/hostPath） → **不重启** → 再对话 | 新技能下轮可见可用；`GET /skills` 含 demo-b |
 | E-SKILL-3 动态修改/删除 | 原位改 demo-a 描述、删 demo-b → 再对话 | 描述更新；demo-b 消失 |
-| E-SKILL-4 沙箱 | SANDBOX_ENABLED=true 复跑 E-SKILL-1/2；技能带 `scripts/*.sh` | 沙箱内 `/workspace/.skills-cache/oaf-package/...` 可执行 |
+| E-SKILL-4 沙箱 | SANDBOX_ENABLED=true 复跑 E-SKILL-1/2；技能带 `scripts/*.sh` | 沙箱内 `/workspace/.skills-cache/oaf-package/...` 可执行（**已落地**：mock 沙箱 e2e X18 + 真实 OpenSandbox 冒烟 2026-10-14 双验证，见 §6.3.1） |
 | E-SKILL-5 L4 覆盖 | 会话内 `skill_manage` 修改包内同名技能 → 该用户生效、他用户不受影响 | 官方四层优先级 |
 
 ### 8.3 回归门禁
