@@ -674,6 +674,51 @@ class UserSkillServiceTest {
         assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝时不得留半份写入");
     }
 
+    /**
+     * 新建上传与包内（L2）公共技能重名 → 拒绝（409 语义），不写入任何文件。
+     * 同名 L4 会整体覆盖 L2，用户意图是“新增”而非“改公共技能”，必须挡在入口。
+     */
+    @Test
+    void uploadZipShouldRejectNameConflictingWithPackageBaseline() throws IOException {
+        seedPackageSkill("demo-a", PKG_SKILL_MD, null, null);
+        var zip = zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD, "scripts/hello.sh", "echo hi");
+
+        var e = assertThrows(UserSkillService.SkillNameConflictException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+
+        assertEquals("demo-a", e.skillName());
+        assertTrue(e.getMessage().contains("重名"), "应说明与包内公共技能重名: " + e.getMessage());
+        assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝时不得写入 L4（公共技能必须保持原样）");
+        assertNull(store.get(skillNs(USER), "/demo-a/scripts/hello.sh"));
+    }
+
+    /** 该用户已有同名 L4 个人覆盖时放行（属“更新自己的副本”，历史数据与重复上传都不能被卡死） */
+    @Test
+    void uploadZipShouldAllowSameNameWhenUserOverrideAlreadyExists() throws IOException {
+        seedPackageSkill("demo-a", PKG_SKILL_MD, null, null);
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", "# user override");
+
+        var outcome = svc.uploadSkillZip(USER,
+            bais(zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD)), "demo-a.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertEquals("updated", outcome.action(), "已有个人覆盖的同名上传按更新处理");
+        assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"));
+    }
+
+    /** 包内同名目录但无 SKILL.md（不算技能）→ 不视为冲突，上传放行 */
+    @Test
+    void uploadZipShouldAllowNameMatchingPackageDirWithoutSkillMd() throws IOException {
+        Files.createDirectories(skillManageService.getSkillsDir().resolve("demo-a"));
+
+        var outcome = service().uploadSkillZip(USER,
+            bais(zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD)), "demo-a.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertNotNull(store.get(skillNs(USER), "/demo-a/SKILL.md"));
+    }
+
     /** 缺 SKILL.md → 400；非法 userId → 400 */
     @Test
     void uploadZipShouldRejectMissingSkillMdAndInvalidUser() throws IOException {

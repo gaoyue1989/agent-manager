@@ -626,7 +626,7 @@ async function handleUserSkillSync() {
   }
 }
 
-/** zip 上传：把选中的 zip 作为当前 userId 的个人技能（同名覆盖；后端拒绝二进制包） */
+/** zip 上传：把选中的 zip 作为当前 userId 的个人技能（同名覆盖；后端拒绝二进制包与包内重名新建） */
 async function handleUserSkillZipUpload() {
   var fileInput = document.getElementById('userSkillZipInput');
   if (!fileInput) return;
@@ -651,7 +651,11 @@ async function handleUserSkillZipUpload() {
     loadUserSkills();
     loadUserSkillUsers();
   } catch (err) {
-    ctx.utils.toast('✘ 上传失败: ' + err.message, 'error');
+    // 409 = 与包内公共技能重名：提示改名后重传（想基于公共技能定制走「从包内下发」再编辑）
+    var msg = err.status === 409
+      ? '✘ ' + err.message + '（技能名需与公共技能区分）'
+      : '✘ 上传失败: ' + err.message;
+    ctx.utils.toast(msg, 'error');
   } finally {
     fileInput.value = '';
     if (btn) { btn.disabled = false; btn.textContent = '⬆ 上传 zip'; }

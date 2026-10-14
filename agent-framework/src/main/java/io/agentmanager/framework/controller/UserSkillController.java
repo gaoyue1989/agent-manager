@@ -208,6 +208,10 @@ public class UserSkillController {
      * <p>技能名取自 SKILL.md frontmatter {@code name}，缺省回落包裹目录名 / zip 文件名；
      * 同名技能<b>覆盖</b>。zip 支持扁平（根目录含 SKILL.md）与包裹（一层子目录含 SKILL.md）两种结构。
      *
+     * <p><b>与包内（L2）公共技能重名的新建上传返回 409</b>（{@code name_conflicts_with_package}）：
+     * 同名 L4 会整体覆盖 L2，用户意图是“新增一个自己的技能”而非“改公共技能”，故要求改名后重传
+     * （想基于公共技能定制走「从包内下发」再编辑）；该用户已有同名个人覆盖时按更新放行。
+     *
      * <p>体积上限 {@link UserSkillService#MAX_ZIP_BYTES}（10MB），解压后条目数/总大小由
      * {@link io.agentmanager.framework.service.SkillZipSupport} 兜底。<b>含二进制/非 UTF-8 文件
      * 拒绝整个包</b>（400）——KV 只存字符串，静默替换会损坏数据。
@@ -243,6 +247,9 @@ public class UserSkillController {
                     ? "；当前 SANDBOX_ENABLED=true，该用户下一个 turn 开始时物化进容器 /workspace/skills 生效"
                     : "，用户 " + headerUserId + " 下轮会话生效"));
             return ResponseEntity.ok(resp);
+        } catch (UserSkillService.SkillNameConflictException e) {
+            // 409：与包内公共技能重名（改名后重传；已有个人覆盖时不触发）
+            return err(HttpStatus.CONFLICT, "name_conflicts_with_package", e.getMessage());
         } catch (UserSkillService.ContentTooLargeException e) {
             return err(HttpStatus.PAYLOAD_TOO_LARGE, "content_too_large", e.getMessage());
         } catch (IllegalArgumentException e) {

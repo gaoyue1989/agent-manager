@@ -92,6 +92,26 @@ public class UserSkillService {
         }
     }
 
+    /**
+     * 上传的技能名与包内（L2）公共技能冲突（映射 409）。
+     *
+     * <p>只有「包内有同名 + 该用户尚无该技能的 L4 覆盖」才拒：已存在个人覆盖时的同名上传是
+     * 「更新已有个人技能」（{@code action=updated}），必须放行，否则历史数据与重新上传都会被卡死。
+     */
+    public static class SkillNameConflictException extends RuntimeException {
+        private final String skillName;
+
+        public SkillNameConflictException(String skillName) {
+            super("技能名 '" + skillName + "' 与包内公共技能重名，请修改技能名（SKILL.md frontmatter 的 name"
+                + " 或 zip 内目录名）后重新上传；如需基于公共技能定制，请先用「从包内下发」再编辑");
+            this.skillName = skillName;
+        }
+
+        public String skillName() {
+            return skillName;
+        }
+    }
+
     // ==================== 实体 ====================
 
     /** 用户索引项（调试页下拉/清单） */
@@ -694,6 +714,8 @@ public class UserSkillService {
      * @return 技能名 + created/updated + 文件清单 + 版本号
      * @throws IllegalArgumentException 缺 SKILL.md / 名称非法 / 含二进制文件 /
      *                                  文件数超限 / key 组合超长
+     * @throws SkillNameConflictException 解析出的技能名与包内（L2）公共技能重名，且该用户尚无
+     *                                    该技能的 L4 个人覆盖（避免新建即静默覆盖公共技能）
      * @throws ContentTooLargeException 单文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
      *                                  单技能总大小超 {@link #MAX_SKILL_TOTAL_BYTES}（20MB）
      * @throws IllegalStateException    zip 解压或 KV 写入失败
@@ -726,6 +748,11 @@ public class UserSkillService {
                 throw new IllegalArgumentException("无效的 Skill 名称");
             }
             var existed = workspaceReader.hasUserSkill(userId, name);
+            if (!existed && hasPackageBaseline(name)) {
+                // 新建即与公共技能重名：拒绝（同名 L4 会整体覆盖 L2，用户预期是“新增”而非“改公共技能”）；
+                // 已有个人覆盖时放行（那是更新自己的副本，历史数据与重复上传都必须可走）
+                throw new SkillNameConflictException(name);
+            }
             var sync = materializeFromDirectory(userId, name, located.skillRoot(), true);
             var version = workspaceReader.userSkillFileVersion(userId, name, WorkspaceReader.SKILL_FILE);
             log.info("upload_skill_zip: skill {} ({} files) → user {}", name, sync.files().size(), userId);

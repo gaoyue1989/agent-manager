@@ -461,6 +461,19 @@ class UserSkillControllerTest {
             .andExpect(jsonPath("$.error").value("zip_too_large"));
     }
 
+    /** 与包内公共技能重名 → 409（不是 400 invalid_zip，前端据此提示改名后重传） */
+    @Test
+    void uploadZipShouldReturn409WhenNameConflictsWithPackageSkill() throws Exception {
+        doThrow(new UserSkillService.SkillNameConflictException(NAME))
+            .when(service).uploadSkillZip(eq(USER), any(java.io.InputStream.class), any());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .multipart("/skills/users/upload").file(zipFile("demo-a.zip", new byte[] {1}))
+                .header(HDR, USER))
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("name_conflicts_with_package"))
+            .andExpect(jsonPath("$.message", org.hamcrest.Matchers.containsString("重名")));
+    }
+
     @Test
     void uploadZipShouldMapInvalidZipAndServerFailure() throws Exception {
         doThrow(new IllegalArgumentException("zip 包中未找到 SKILL.md"))
