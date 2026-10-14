@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Manager 蓝图与路线图</title>
+<style>
+  :root{
+    --ink:#1c2028; --sub:#707880; --faint:#98a0a8;
+    --line:#e2e7ee; --line-strong:#cdd6e2;
+    --bg:#fff; --bg-soft:#f7f8fb; --bg-blue:#f2f7ff; --bg-warm:#fdf9f3;
+    --accent:#1c60d6; --warm:#c87614; --green:#16825d; --grey:#8a929c; --red:#c43e3e;
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:#eef1f6; color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Noto Sans CJK SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:15px; line-height:1.6;
+    word-break:keep-all; overflow-wrap:break-word;
+  }
+  .page{
+    max-width:1280px; margin:0 auto; background:var(--bg);
+    padding:56px 64px 48px;
+  }
+
+  /* ---------- 页眉 ---------- */
+  .doc-head{ text-align:center; padding-bottom:28px; border-bottom:2px solid var(--line); }
+  .doc-head h1{ margin:0 0 10px; font-size:38px; letter-spacing:.5px; }
+  .doc-head .sub{ color:var(--sub); font-size:17px; }
+  .doc-head .meta{ margin-top:14px; color:var(--faint); font-size:13px; }
+
+  /* ---------- 区块标题 ---------- */
+  h2.sec{
+    margin:44px 0 20px; font-size:23px; display:flex; align-items:center; gap:12px;
+  }
+  h2.sec::before{
+    content:""; width:6px; height:22px; background:var(--accent); border-radius:3px; flex:none;
+  }
+  h3.sub{ margin:30px 0 14px; font-size:17px; color:var(--ink); }
+  .lead{ color:#4a525c; margin:0 0 18px; }
+  strong{ font-weight:700; }
+
+  /* ---------- 定位 / 四结果 ---------- */
+  .positioning{
+    background:var(--bg-blue); border:1px solid #d6e4f8; border-radius:var(--radius);
+    padding:18px 22px; margin:0 0 22px;
+  }
+  .positioning b{ color:var(--accent); }
+  .goals{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  .goal{
+    background:var(--bg-soft); border:1px solid var(--line); border-radius:var(--radius);
+    padding:16px 16px 18px;
+  }
+  .goal .t{ color:var(--accent); font-weight:700; font-size:16px; margin-bottom:6px; }
+  .goal .d{ color:var(--sub); font-size:13.5px; line-height:1.55; }
+
+  /* ---------- 服务蓝图 ---------- */
+  .bp-wrap{ overflow-x:auto; }
+  table.bp{ width:100%; border-collapse:collapse; table-layout:fixed; font-size:13.5px; }
+  table.bp col.lane{ width:172px; }
+  table.bp th, table.bp td{ border:1px solid var(--line); padding:10px 10px; vertical-align:middle; text-align:center; line-height:1.5; }
+
+  /* 阶段表头 */
+  table.bp thead th{
+    background:var(--accent); color:#fff; border-color:var(--accent);
+    font-size:15px; font-weight:700; padding:12px 8px; letter-spacing:.3px;
+  }
+  table.bp thead th.lane-head{ background:transparent; border:none; }
+
+  /* 泳道标签 */
+  th.lane-label{ text-align:left; padding:12px 12px; font-weight:400; }
+  th.lane-label .n{ display:block; font-size:16px; font-weight:700; }
+  th.lane-label .en{ display:block; font-size:11px; color:var(--faint); letter-spacing:.2px; margin-top:1px; }
+  th.lane-label .ds{ display:block; font-size:12px; color:var(--sub); margin-top:6px; line-height:1.45; }
+
+  tr.evidence td{ background:#f8f9fc; }
+  tr.customer td, tr.customer th.lane-label{ background:#f2f7ff; }
+  tr.front td{ background:#fff; }
+  tr.back td, tr.back th.lane-label{ background:var(--bg-warm); }
+  tr.support td, tr.support th.lane-label{ background:#f6f7f9; }
+
+  /* 左侧色条 */
+  tr.evidence  th.lane-label{ border-left:5px solid var(--grey); }
+  tr.customer  th.lane-label{ border-left:5px solid var(--accent); }
+  tr.front     th.lane-label{ border-left:5px solid var(--accent); }
+  tr.back      th.lane-label{ border-left:5px solid var(--warm); }
+  tr.support   th.lane-label{ border-left:5px solid var(--grey); }
+
+  /* 分界线 */
+  tr.boundary td{ border:none; padding:0; background:transparent; }
+  .bline{ position:relative; height:34px; }
+  .bline::before{
+    content:""; position:absolute; left:0; right:0; top:50%;
+    border-top:2px dashed var(--red);
+  }
+  .bline .lab{
+    position:absolute; left:8px; top:50%; transform:translateY(-50%);
+    background:#fff; padding:2px 10px; font-size:12.5px; color:var(--red); font-weight:700;
+  }
+  .bline .lab em{ font-style:normal; font-weight:400; color:#c98888; font-size:11.5px; margin-left:6px; }
+
+  .bp-note{ margin-top:12px; color:var(--sub); font-size:13px; }
+
+  /* ---------- 路线图 ---------- */
+  .flow{ display:flex; align-items:center; gap:10px; margin:0 0 24px; flex-wrap:wrap; }
+  .flow .step{
+    flex:1 1 0; min-width:150px; text-align:center; background:var(--bg-soft);
+    border:1px solid var(--line); border-radius:10px; padding:12px 10px;
+  }
+  .flow .step .n{ font-size:12px; color:var(--faint); }
+  .flow .step .t{ font-weight:700; font-size:15px; margin-top:2px; }
+  .flow .arrow{ color:var(--accent); font-size:20px; font-weight:700; flex:none; }
+
+  .stage{
+    border:1px solid var(--line); border-left:6px solid var(--grey);
+    border-radius:var(--radius); margin-bottom:16px; overflow:hidden; background:#fff;
+  }
+  .stage.done{ border-left-color:var(--green); }
+  .stage.part{ border-left-color:var(--warm); }
+  .stage.early{ border-left-color:var(--grey); }
+
+  .stage-head{
+    display:flex; align-items:center; gap:14px; padding:14px 20px;
+    border-bottom:1px solid var(--line); background:#fcfdff;
+  }
+  .stage-head .num{ font-size:22px; font-weight:700; color:var(--grey); }
+  .stage.done .stage-head .num{ color:var(--green); }
+  .stage.part .stage-head .num{ color:var(--warm); }
+  .stage-head .name{ font-size:19px; font-weight:700; }
+  .stage-head .en{ font-size:12px; color:var(--faint); margin-left:2px; }
+  .stage-head .badge{
+    margin-left:auto; color:#fff; font-size:13px; font-weight:700;
+    padding:4px 14px; border-radius:999px; white-space:nowrap;
+  }
+  .badge.done{ background:var(--green); }
+  .badge.part{ background:var(--warm); }
+  .badge.early{ background:var(--grey); }
+
+  .stage-body{ display:grid; grid-template-columns:300px 1fr 1fr; gap:0; }
+  .stage-body > div{ padding:16px 20px; }
+  .stage-body > div + div{ border-left:1px solid var(--line); }
+  .col-h{
+    font-size:12.5px; font-weight:700; letter-spacing:.4px;
+    margin-bottom:10px; display:flex; align-items:center; gap:7px;
+  }
+  .col-h::before{ content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .col-h.goal{ color:var(--accent); }
+  .col-h.have{ color:var(--green); }
+  .col-h.todo{ color:var(--warm); }
+
+  .kv{ margin-bottom:12px; }
+  .kv .k{ font-size:12px; color:var(--faint); }
+  .kv .v{ font-size:14px; }
+  .kv .v.strong{ font-weight:700; }
+
+  ul.list{ margin:0; padding:0; list-style:none; }
+  ul.list li{ position:relative; padding-left:15px; margin-bottom:7px; font-size:13.5px; line-height:1.5; }
+  ul.list li::before{ content:""; position:absolute; left:0; top:8px; width:5px; height:5px; border-radius:50%; }
+  ul.have li::before{ background:var(--green); }
+  ul.todo li::before{ background:var(--warm); }
+
+  .stage-foot{
+    padding:11px 20px; background:var(--bg-soft); border-top:1px solid var(--line);
+    font-size:13px; color:var(--sub);
+  }
+  .stage-foot b{ color:var(--ink); }
+
+  /* ---------- 优先级 ---------- */
+  .pri{
+    background:var(--bg-blue); border:1px solid #d6e4f8; border-radius:var(--radius);
+    padding:18px 22px; margin-top:24px;
+  }
+  .pri h3{ margin:0 0 14px; font-size:16px; color:var(--accent); }
+  .pri-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
+  .pri-item .r{ font-size:20px; font-weight:700; color:var(--accent); float:left; margin-right:8px; line-height:1.3; }
+  .pri-item .n{ font-weight:700; font-size:14.5px; }
+  .pri-item .w{ font-size:12.5px; color:var(--sub); line-height:1.5; }
+
+  /* ---------- 结语 ---------- */
+  .closing{
+    margin-top:34px; padding:20px 24px; border-radius:var(--radius);
+    background:#fbfcfd; border:1px solid var(--line); border-left:6px solid var(--accent);
+  }
+  .closing p{ margin:0; font-size:15px; }
+  .note{ margin-top:22px; color:var(--faint); font-size:12.5px; line-height:1.65; }
+
+  /* ---------- 打印 ---------- */
+  @page{ size:A4 landscape; margin:10mm; }
+  @media print{
+    body{ background:#fff; font-size:11px; }
+    .page{ max-width:none; padding:0; }
+    .doc-head h1{ font-size:26px; }
+    .stage, .pri, .closing{ break-inside:avoid; }
+    table.bp{ font-size:10px; }
+    .goals, .pri-grid{ gap:8px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ================= 页眉 ================= -->
+  <header class="doc-head">
+    <h1>Agent Manager 蓝图与路线图</h1>
+    <div class="sub">面向实际业务的智能体交付与持续运营平台</div>
+    <div class="meta">管理沟通稿 · 2026 年 10 月 · 基于当前仓库已实现的能力整理</div>
+  </header>
+
+  <!-- ================= 一、蓝图 ================= -->
+  <h2 class="sec">一、蓝图</h2>
+
+  <div class="positioning">
+    <b>定位</b>：帮助业务团队把智能体接入现有流程，并持续管理其质量、风险与成本——
+    不追求自研所有模型与基础设施，也不替代业务系统。平台按四个业务结果建设：
+  </div>
+
+  <div class="goals">
+    <div class="goal">
+      <div class="t">交付更容易</div>
+      <div class="d">新场景复用已有配置、技能与工具连接，不必从零搭建</div>
+    </div>
+    <div class="goal">
+      <div class="t">运行更可靠</div>
+      <div class="d">任务状态可见、异常可处理、关键操作可控、更新更稳妥</div>
+    </div>
+    <div class="goal">
+      <div class="t">效果可衡量</div>
+      <div class="d">能回答任务完成情况、何处需人工、版本改进是否有效</div>
+    </div>
+    <div class="goal">
+      <div class="t">经验可复用</div>
+      <div class="d">已验证的技能、方案与评测样本用于后续项目</div>
+    </div>
+  </div>
+
+  <h3 class="sub">服务蓝图：完整服务过程</h3>
+  <p class="lead">
+    横向是智能体从提出场景到沉淀复用的五个阶段，纵向按可见性分层——
+    顾客行为与前台行为用户可见，后台行为与支持过程用户不可见，三层之间以
+    互动分界线、可见性分界线、内部互动分界线分隔。
+  </p>
+
+  <div class="bp-wrap">
+  <table class="bp">
+    <colgroup>
+      <col class="lane">
+      <col><col><col><col><col>
+    </colgroup>
+    <thead>
+      <tr>
+        <th class="lane-head"></th>
+        <th>① 提出场景</th>
+        <th>② 配置与发布</th>
+        <th>③ 使用与运行</th>
+        <th>④ 观测与评测</th>
+        <th>⑤ 沉淀与复用</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="evidence">
+        <th class="lane-label">
+          <span class="n">实体证据</span>
+          <span class="en">Physical Evidence</span>
+          <span class="ds">用户能看到的界面与产物</span>
+        </th>
+        <td>发布页<br>发布助手对话</td>
+        <td>服务列表 · 发布状态<br>访问地址</td>
+        <td>业务对话界面<br>文件卡片 · 确认卡片</td>
+        <td>监控页 · 评测报告</td>
+        <td>资产目录<br>配置包 / 技能 / 用例</td>
+      </tr>
+
+      <tr class="customer">
+        <th class="lane-label">
+          <span class="n">顾客行为</span>
+          <span class="en">Customer Actions</span>
+          <span class="ds">业务用户的操作</span>
+        </th>
+        <td>描述业务场景与要求</td>
+        <td>选择镜像<br>填写环境变量 · 确认发布</td>
+        <td>发起任务 · 查看回复<br>确认关键操作</td>
+        <td>查看执行效果 · 提出改进</td>
+        <td>复用已有配置与技能<br>到新场景</td>
+      </tr>
+
+      <tr class="boundary"><td colspan="6">
+        <div class="bline"><span class="lab">互动分界线 <em>Line of Interaction · 用户与平台直接接触</em></span></div>
+      </td></tr>
+
+      <tr class="front">
+        <th class="lane-label">
+          <span class="n">前台行为</span>
+          <span class="en">Frontstage Actions</span>
+          <span class="ds">平台对用户可见的动作</span>
+        </th>
+        <td>发布助手理解需求<br>生成配置包草稿</td>
+        <td>展示发布进度与服务状态</td>
+        <td>流式返回结果<br>弹出人工确认卡</td>
+        <td>展示执行链路与评测结论</td>
+        <td>展示可复用资产与派生关系</td>
+      </tr>
+
+      <tr class="boundary"><td colspan="6">
+        <div class="bline"><span class="lab">可见性分界线 <em>Line of Visibility · 用户可见 / 不可见的分界</em></span></div>
+      </td></tr>
+
+      <tr class="back">
+        <th class="lane-label">
+          <span class="n">后台行为</span>
+          <span class="en">Backstage Actions</span>
+          <span class="ds">平台内部处理（不可见）</span>
+        </th>
+        <td>配置包校验 · 敏感键识别</td>
+        <td>构造 K8s 资源<br>注入配置 · 注册服务</td>
+        <td>会话状态持久化<br>多副本续传 · 沙箱执行</td>
+        <td>调用录制 · 离线回放<br>评估执行 · 根因分析</td>
+        <td>版本管理 · 派生溯源<br>技能自学习与下发</td>
+      </tr>
+
+      <tr class="boundary"><td colspan="6">
+        <div class="bline"><span class="lab">内部互动分界线 <em>Line of Internal Interaction · 平台内部与基础设施的分界</em></span></div>
+      </td></tr>
+
+      <tr class="support">
+        <th class="lane-label">
+          <span class="n">支持过程</span>
+          <span class="en">Support Processes</span>
+          <span class="ds">底层系统与设施</span>
+        </th>
+        <td>镜像仓库 · 共享存储</td>
+        <td>K8s 集群<br>Deployment / Service<br>/ Ingress</td>
+        <td>MySQL · Redis<br>状态与事件流</td>
+        <td>评测引擎 · 持续集成门禁</td>
+        <td>部署交付（Helm）<br>平台管理后端</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="bp-note">
+    <b>读法</b>：横向看一个阶段上下的协作关系；纵向看每一层的可见性——顾客行为以下为用户看不到的平台内部与基础设施。
+  </p>
+
+  <!-- ================= 二、路线图 ================= -->
+  <h2 class="sec">二、路线图</h2>
+
+  <div class="flow">
+    <div class="step"><div class="n">第一步</div><div class="t">单一 Agent 部署</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><div class="n">第二步</div><div class="t">多 Agent 协同</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><div class="n">第三步</div><div class="t">评测飞轮补齐</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><div class="n">第四步</div><div class="t">资产沉淀与复用</div></div>
+  </div>
+
+  <!-- ① -->
+  <div class="stage done">
+    <div class="stage-head">
+      <span class="num">①</span>
+      <span class="name">单一 Agent 部署</span><span class="en">Deploy &amp; Run</span>
+      <span class="badge done">● 基本完成</span>
+    </div>
+    <div class="stage-body">
+      <div>
+        <div class="kv"><div class="k">核心问题</div><div class="v strong">能否可靠地建起来、跑起来</div></div>
+        <div class="kv"><div class="k">目标</div><div class="v">让一个智能体从配置文件变成稳定、可访问、可管理的线上服务</div></div>
+      </div>
+      <div>
+        <div class="col-h have">已具备</div>
+        <ul class="list have">
+          <li>配置包上传 / 版本管理 / 在线编辑</li>
+          <li>发布 / 重新发布 / 下线 / 删除</li>
+          <li>流式交互 · 断线续传 · 文件处理</li>
+          <li>工具调用 · 沙箱执行 · 会话保存</li>
+          <li>运行配置统一维护 · 敏感配置分离</li>
+          <li>智能发布助手：对话式发布与查询</li>
+          <li>平台管理与业务运行分离</li>
+          <li>Helm 部署 · 链路追踪与监控</li>
+        </ul>
+      </div>
+      <div>
+        <div class="col-h todo">待补齐</div>
+        <ul class="list todo">
+          <li>平台管理后端单副本，多副本条件待明确</li>
+          <li>多服务数据隔离仍靠人工配置（已知风险）</li>
+          <li>生产运维：备份恢复、日志留存、异常通知</li>
+        </ul>
+      </div>
+    </div>
+    <div class="stage-foot"><b>进入下一步的标志</b>：一个业务场景可以在不接触底层配置的情况下完成部署、使用和监控。</div>
+  </div>
+
+  <!-- ② -->
+  <div class="stage part">
+    <div class="stage-head">
+      <span class="num">②</span>
+      <span class="name">多 Agent 协同</span><span class="en">Collaboration</span>
+      <span class="badge part">◐ 已打通并验证</span>
+    </div>
+    <div class="stage-body">
+      <div>
+        <div class="kv"><div class="k">核心问题</div><div class="v strong">能否让多个智能体分工配合</div></div>
+        <div class="kv"><div class="k">目标</div><div class="v">让多个有不同职责的智能体分工配合，完成单个 Agent 做不好的任务</div></div>
+      </div>
+      <div>
+        <div class="col-h have">已具备</div>
+        <ul class="list have">
+          <li>并行子 Agent（共享上下文与权限）</li>
+          <li>跨服务编排（远程子 Agent）</li>
+          <li>5 Agent 订单履约示例（已验证）</li>
+          <li>协作中人工确认（跨服务确认卡）</li>
+          <li>按用户与会话分维度隔离</li>
+          <li>多副本与会话跨节点恢复</li>
+        </ul>
+      </div>
+      <div>
+        <div class="col-h todo">待补齐</div>
+        <ul class="list todo">
+          <li>缺统一观测入口：整条协作链路无法串起来看</li>
+          <li>出错时需顺调用关系回溯根因</li>
+          <li>协作能力仍依赖开发配置，缺产品化复用</li>
+        </ul>
+      </div>
+    </div>
+    <div class="stage-foot"><b>进入下一步的标志</b>：一次多 Agent 任务的完整执行过程可以被完整回看，问题能定位到具体环节。</div>
+  </div>
+
+  <!-- ③ -->
+  <div class="stage part">
+    <div class="stage-head">
+      <span class="num">③</span>
+      <span class="name">评测飞轮补齐</span><span class="en">Evaluation Loop</span>
+      <span class="badge part">◐ 骨架已建</span>
+    </div>
+    <div class="stage-body">
+      <div>
+        <div class="kv"><div class="k">核心问题</div><div class="v strong">能否测准效果、证明改进有效</div></div>
+        <div class="kv"><div class="k">目标</div><div class="v">回答效果如何、改进有没有效、发布是否引入退化</div></div>
+      </div>
+      <div>
+        <div class="col-h have">已具备</div>
+        <ul class="list have">
+          <li>调用录制（模型 / 沙箱 / 工具 / 服务）</li>
+          <li>离线回放（无需真实模型）</li>
+          <li>确定性评估 + 模型评估引擎</li>
+          <li>评测界面：用例管理 / 报告 / 对比</li>
+          <li>飞轮自检与离线回放已接入 CI</li>
+        </ul>
+      </div>
+      <div>
+        <div class="col-h todo">待补齐</div>
+        <ul class="list todo">
+          <li>门禁轨：尚未作为独立必需检查接入（设计已有）</li>
+          <li>趋势轨：定期质量评分与告警尚未落地（设计已有）</li>
+          <li>业务效果口径：尚未与任务完成率等指标对应</li>
+          <li>自动化评估替代人工：评估器仍以研发验证为主</li>
+          <li>评测用例与改进记录尚未沉淀为资产</li>
+        </ul>
+      </div>
+    </div>
+    <div class="stage-foot"><b>进入下一步的标志</b>：一次版本发布能明确回答“没有引入退化”；一次效果改进能拿出可对比的数据。</div>
+  </div>
+
+  <!-- ④ -->
+  <div class="stage early">
+    <div class="stage-head">
+      <span class="num">④</span>
+      <span class="name">资产沉淀与复用</span><span class="en">Asset Reuse</span>
+      <span class="badge early">○ 刚起步</span>
+    </div>
+    <div class="stage-body">
+      <div>
+        <div class="kv"><div class="k">核心问题</div><div class="v strong">能否复制到下一个场景</div></div>
+        <div class="kv"><div class="k">目标</div><div class="v">让“做好一个场景”变成“更快做好下一批场景”</div></div>
+      </div>
+      <div>
+        <div class="col-h have">已具备</div>
+        <ul class="list have">
+          <li>配置包版本管理与派生溯源</li>
+          <li>L2 包内共享技能（运行中可动态改）</li>
+          <li>L4 用户个人技能覆盖</li>
+          <li>会话内自主沉淀新技能（自学习）</li>
+          <li>5 Agent 协作可作为编排模板</li>
+          <li>用例库与趋势历史</li>
+        </ul>
+      </div>
+      <div>
+        <div class="col-h todo">待补齐</div>
+        <ul class="list todo">
+          <li>缺显式资产目录：哪些配置 / 技能 / 用例可复用未说清</li>
+          <li>技能含可执行脚本，上线前缺静态检查</li>
+          <li>缺服务身份标识与权限记录</li>
+          <li>调用量与 token 成本缺运营视图与告警</li>
+          <li>复制路径：派生新场景的操作路径需固化</li>
+        </ul>
+      </div>
+    </div>
+    <div class="stage-foot"><b>进入成熟的标志</b>：新场景的大部分配置可以由已有资产组装完成；资产的调用情况与效果有数据可查。</div>
+  </div>
+
+  <div class="pri">
+    <h3>推进优先级</h3>
+    <div class="pri-grid">
+      <div class="pri-item">
+        <span class="r">1</span><span class="n">评测飞轮补齐</span>
+        <div class="w">唯一“缺了它后面全不稳”的能力，且骨架已建、路径清晰</div>
+      </div>
+      <div class="pri-item">
+        <span class="r">2</span><span class="n">单一 Agent 收尾</span>
+        <div class="w">补齐数据隔离与运维能力，扩大部署前必须完成</div>
+      </div>
+      <div class="pri-item">
+        <span class="r">3</span><span class="n">资产沉淀与复用</span>
+        <div class="w">需前两步跑通，否则沉淀只会积累技术债</div>
+      </div>
+      <div class="pri-item">
+        <span class="r">4</span><span class="n">多 Agent 产品化</span>
+        <div class="w">复杂度最高，放在评测能力可靠之后</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 结语 ================= -->
+  <div class="closing">
+    <p>
+      前期已解决智能体“如何统一交付、持续运行、追踪问题”的基础问题；
+      下一阶段要回答的是 <b>“业务是否真正受益、能否稳定使用、能否低成本复制”</b>。
+      每一步都是下一步的前提：没有可靠的单 Agent 运行底座就没有协同；协同的复杂度必须靠评测飞轮才能管住。
+    </p>
+  </div>
+
+  <p class="note">
+    说明：文中“已具备”指仓库中已有实现或验证记录，不代表本次重新进行全量验收，也不代表已取得规模化生产运营成绩；
+    各阶段能力依据本仓库平台说明、配置包与技能管理文档、链路追踪与评测录制回放设计、订单履约示例及持续集成配置整理。
+  </p>
+
+</div>
+</body>
+</html>

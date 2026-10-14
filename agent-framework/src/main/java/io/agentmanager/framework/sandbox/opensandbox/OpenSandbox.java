@@ -18,6 +18,7 @@ import io.agentscope.harness.agent.sandbox.AbstractBaseSandbox;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
+import io.agentscope.harness.agent.sandbox.WorkspaceProjectionApplier;
 
 /**
  * OpenSandbox 沙箱运行时：包装 SDK Sandbox 句柄，
@@ -42,6 +43,7 @@ public class OpenSandbox extends AbstractBaseSandbox {
     private final AtomicBoolean runtimeInjected = new AtomicBoolean(false);
     private final AtomicBoolean uploadsInjected = new AtomicBoolean(false);
     private final AtomicBoolean userSkillsMaterialized = new AtomicBoolean(false);
+    private final AtomicBoolean projectionRefreshed = new AtomicBoolean(false);
     private volatile String userKey;
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
@@ -106,6 +108,9 @@ public class OpenSandbox extends AbstractBaseSandbox {
             }
         }
         log.info("[sandbox-open] stop() called, userKey={}", userKey);
+        // 投影新鲜度检查按 call 粒度执行：下轮 call 的 onSystemPrompt 可能再 stage 出新
+        // 技能目录（scopeKey 每轮变化），stop 复位后下轮首次 exec 重新比对
+        projectionRefreshed.set(false);
         if (workspaceSyncService != null && userKey != null) {
             try {
                 workspaceSyncService.syncBack(userKey, osbSandbox);
@@ -132,6 +137,8 @@ public class OpenSandbox extends AbstractBaseSandbox {
         // 会话开始物化 L4（幂等）：把 KV 的用户技能投影进容器 /workspace/skills，
         // 使管理面写入/从包内下发在沙箱档会话内生效（兜底路径，主路径见 SandboxUserKeyMiddleware）
         materializeUserSkills();
+        // 工作区投影新鲜度检查（幂等）：补齐「stage 晚于 start」的技能目录（见方法注释）
+        refreshProjectionIfStale();
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
@@ -211,20 +218,26 @@ public class OpenSandbox extends AbstractBaseSandbox {
                     return;
                 }
                 var injectedIds = new java.util.ArrayList<String>();
+                // 已占用的工作区路径（防同名覆盖）：来自 file_asset 历史注入记录，
+                // 沙箱容器可能在远端主机，无法像非沙箱路径那样 ls 本地目录
+                var taken = new java.util.HashSet<>(fileAssetStore.listWorkspacePaths(userId, userId));
                 for (var f : pending) {
-                    var wsPath = "uploads/" + f.fileName();
+                    var wsPath = uniqueWorkspacePath(taken, f.fileName());
                     try (var in = fileStorage.read(f.storageKey())) {
                         osbSandbox.files().write(List.of(
                             com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
                                 // execd files API 路径基准 = /workspace（实测：无前导斜杠 → 相对 /workspace；
                                 // 带前导斜杠 → 容器绝对路径，会写错位）。上传文件统一在 /workspace/uploads/
                                 .path(wsPath)
-                                .data(Base64.getEncoder().encodeToString(in.readAllBytes()))
+                                // execd 按提交字节原样落盘（byte[] → octet-stream），不做 base64 解码——
+                                // 传 String 会被当作文本原样写入，二进制文件全部损坏（实测钉死，见 §6.2.3）
+                                .data(in.readAllBytes())
                                 .mode(644)
                                 .build()));
                     }
                     // 注入成功后才回写 workspace_path（保证路径与沙箱内实际一致）
                     fileAssetStore.updateWorkspacePath(f.id(), wsPath);
+                    taken.add(wsPath);
                     injectedIds.add(f.id());
                 }
                 fileAssetStore.markInjected(injectedIds);
@@ -235,6 +248,29 @@ public class OpenSandbox extends AbstractBaseSandbox {
                 log.warn("[sandbox-open] failed to inject pending uploads: {}", e.getMessage());
             }
         }
+    }
+
+    /**
+     * 唯一化工作区路径（uploads/{name}，同名追加 _1/_2，与 UploadWorkspaceInjector 同款语义）。
+     * 冲突判定基于 taken 集合（file_asset 历史注入路径 + 本批次已分配），命中即从集合剔除后返回；
+     * 上界 1000 兜底 UUID（防极端同名风暴无限循环）。
+     */
+    private static String uniqueWorkspacePath(java.util.Set<String> taken, String fileName) {
+        var base = "uploads/" + fileName;
+        if (!taken.contains(base)) {
+            return base;
+        }
+        int dot = fileName.lastIndexOf('.');
+        var stem = dot > 0 ? fileName.substring(0, dot) : fileName;
+        var ext = dot > 0 ? fileName.substring(dot) : "";
+        for (int i = 1; i <= 1000; i++) {
+            var candidate = "uploads/" + stem + "_" + i + ext;
+            if (!taken.contains(candidate)) {
+                return candidate;
+            }
+        }
+        log.warn("[sandbox-open] too many conflicting names for {}, using UUID fallback", fileName);
+        return "uploads/" + stem + "_" + java.util.UUID.randomUUID().toString().substring(0, 8) + ext;
     }
 
     /**
@@ -300,6 +336,58 @@ public class OpenSandbox extends AbstractBaseSandbox {
                 // fail-soft：容器内保留 L2 基线/上一代副本，下次 acquire 重试
                 log.warn("[sandbox-open] materialize L4 skills failed for user {}: {}", uid, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * 工作区投影新鲜度检查（幂等，每 call 一次）：比对宿主投影目录当前内容与
+     * sandbox start 时记录的 hash，变化则把投影 tar 补水合进容器。
+     *
+     * <p>背景：技能目录（.skills-cache/{scopeKey}/oaf-package/...）由 SDK
+     * HarnessSkillMiddleware 在每轮推理的 onSystemPrompt 阶段物化到<b>平台本地</b>工作区，
+     * 而 harness 的投影 hydrate 只发生在 sandbox start 时（之后 hash 一致即跳过）——
+     * stage 晚于 start 的目录永远到不了容器 /workspace，模型经
+     * load_skill_through_path 拿到的 /workspace 路径在 shell 里 ls 不到（E-SKILL-4）。
+     *
+     * <p>逻辑对齐 harness 私有 applyWorkspaceProjectionIfChanged：build() 重扫宿主投影根
+     * （含 .skills-cache），hash 相同跳过；不同则 doHydrateWorkspace 后回写
+     * SandboxState.workspaceProjectionHash（空投影同样回写，与 start 路径一致）。
+     * tar 解包只覆盖归档内文件，不删除容器内模型自产文件（outputs/ 等）。
+     *
+     * <p>调用点：doExec（首个命令执行前）。文件工具若完全绕过 exec 则不触发——
+     * 技能消费路径（执行 scripts/*.sh）必然走 exec，已覆盖。
+     * fail-soft：失败仅告警不阻塞命令，复位标志允许下次 exec 重试。
+     */
+    private void refreshProjectionIfStale() {
+        if (state == null || !projectionRefreshed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            var spec = state.getWorkspaceSpec();
+            if (spec == null) {
+                // 投影未启用（SANDBOX_PROJECTION_ENABLED=false）或 spec 未装配：无可刷新
+                return;
+            }
+            var payload = WorkspaceProjectionApplier.build(spec);
+            if (payload == null) {
+                return;
+            }
+            if (payload.hash().equals(state.getWorkspaceProjectionHash())) {
+                log.debug("[sandbox-open] workspace projection unchanged, skipping refresh");
+                return;
+            }
+            if (payload.fileCount() > 0) {
+                try (var in = new java.io.ByteArrayInputStream(payload.tarBytes())) {
+                    doHydrateWorkspace(in);
+                }
+                log.info("[sandbox-open] workspace projection refreshed: files={}, hash={}",
+                    payload.fileCount(), payload.hash());
+            }
+            // 与 harness start 路径一致：空投影也回写 hash，避免每 call 重算后反复比对
+            state.setWorkspaceProjectionHash(payload.hash());
+        } catch (Exception e) {
+            projectionRefreshed.set(false);
+            log.warn("[sandbox-open] workspace projection refresh failed: {}", e.getMessage());
         }
     }
 

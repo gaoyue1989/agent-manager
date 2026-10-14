@@ -187,6 +187,33 @@ public class FileAssetStore {
         return result;
     }
 
+    /**
+     * 该 user_key（或 session）下已占用的工作区路径（沙箱注入同名唯一化用）。
+     *
+     * <p>沙箱容器可能在远端主机，无法像非沙箱路径那样 ls 本地 uploads/ 目录——
+     * 冲突判定以 file_asset 历史注入记录（workspace_path 已回写）为准。
+     */
+    public List<String> listWorkspacePaths(String userKey, String sessionId) {
+        var result = new ArrayList<String>();
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement("""
+                 SELECT DISTINCT workspace_path FROM file_asset
+                 WHERE workspace_path IS NOT NULL
+                   AND (user_key = ? OR (session_id IS NOT NULL AND session_id = ?))
+                 """)) {
+            stmt.setString(1, userKey);
+            stmt.setString(2, sessionId != null ? sessionId : "");
+            try (var rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    result.add(rs.getString(1));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("FileAssetStore: listWorkspacePaths {} failed: {}", userKey, e.getMessage());
+        }
+        return result;
+    }
+
     /** 该 user_key 下 pending 文件数（上传限流软校验） */
     public int countPending(String userKey) {
         try (var conn = dataSource.getConnection();
