@@ -7,6 +7,7 @@ import { BASE, sessionIdFor } from '../lib/env.js';
 import { chat, history, a2a } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults } from '../lib/matchers.js';
 import { upload, textBytes } from '../lib/files.js';
+import type { UploadResult } from '../lib/files.js';
 
 const U = () => `e2e-sbx-${Math.random().toString(36).slice(2, 8)}`;
 const SANDBOX_MOCK = process.env.E2E_SANDBOX_MOCK ?? 'http://127.0.0.1:8090';
@@ -329,4 +330,104 @@ test('X15 Channel 链路（/threads/chat）per-user 技能物化（issue #52 回
   const probe = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${creates[createsBefore].id}/proxy/44772/files/download?path=${encodeURIComponent(`/workspace/skills/${skill}/SKILL.md`)}`);
   expect(probe.status, 'Channel 链路容器内技能未物化（userKey 仍退化为 sessionId）').toBe(200);
   expect(await probe.text()).toContain(marker);
+});
+
+// ---------- X16/X17：上传注入语义（execd files API 原样落盘 + 同名唯一化） ----------
+// 回归背景：旧实现把上传字节 base64 后以 String 传 execd files API——execd 按提交字节
+// 原样落盘（byte[] → octet-stream，String → text/plain 原文），不做 base64 解码，
+// 沙箱内二进制文件（docx/xlsx/图片）全部变成 base64 文本（真实沙箱实测钉死）；
+// 且沙箱路径未做同名唯一化，同名多文件静默互相覆盖。观测通道同 X10/X15：
+// 新用户首 turn 必产生新 create，经 files/download 探针直证容器内字节。
+
+/** 最小 docx（PK zip 头 + 非文本字节段：任何 base64/文本化转换都会破坏字节一致性） */
+const DOCX_BYTES = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0x00, 0x01, 0xFE, 0xFF, 0x7F, 0x80, 0x55, 0xAA]);
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/** 新用户上传 → 带 fileIds 的 chat（[E2E:plain] 触发注入）→ 返回本轮新建的全部沙箱 id */
+async function injectViaChat(
+  uid: string,
+  tag: string,
+  files: Array<{ bytes: Buffer; name: string; mime: string }>,
+): Promise<string[]> {
+  const fileIds: string[] = [];
+  for (const f of files) {
+    const up = await upload(BASE, f.bytes, f.name, f.mime, { userId: uid });
+    expect(up.status, `上传 ${f.name}`).toBe(200);
+    fileIds.push((up.body as UploadResult).file_id);
+  }
+  const createsBefore = (await sandboxStats()).creates.length;
+  const sid = sessionIdFor(`${tag}-${uniq()}`);
+  const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid, fileIds });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const creates = (await sandboxStats()).creates;
+  expect(creates.length, '新用户首 turn 未创建沙箱').toBeGreaterThan(createsBefore);
+  return creates.slice(createsBefore).map(c => c.id);
+}
+
+const downloadFromSandbox = (sandboxId: string, path: string) =>
+  fetch(`${SANDBOX_MOCK}/v1/sandboxes/${sandboxId}/proxy/44772/files/download?path=${encodeURIComponent(path)}`);
+
+/**
+ * 注入产物探针（按新沙箱代从新到旧扫描）：返回 {sandboxId, res} 或 null。
+ * 系统注入是 fail-soft（失败保持 pending，下一沙箱代重试），单次单代探测会误报
+ * 慢环境/重试窗口下的瞬时未注入——这正是 CI 假红的一课（PR #126 首跑）。
+ */
+async function probeAcrossGenerations(
+  ids: string[],
+  paths: string[],
+): Promise<{ sandboxId: string; res: Array<Response> } | null> {
+  for (const id of [...ids].reverse()) {
+    const res = await Promise.all(paths.map(p => downloadFromSandbox(id, p)));
+    if (res.every(r => r.ok)) return { sandboxId: id, res };
+  }
+  return null;
+}
+
+test('X16 二进制上传注入后字节逐位一致（execd 原样落盘，无 base64 损坏）', async () => {
+  const uid = U();
+  const name = `sample-${uniq()}.docx`;
+  const path = `/workspace/uploads/${name}`;
+  let ids = await injectViaChat(uid, 'x16', [{ bytes: DOCX_BYTES, name, mime: DOCX_MIME }]);
+
+  // fail-soft 恢复：首代未注入（时序/慢窗口）→ 补一个 turn 触发新沙箱代重新注入
+  let hit = await probeAcrossGenerations(ids, [path]);
+  if (!hit) {
+    ids = ids.concat(await injectViaChat(uid, 'x16-recover', []));
+    hit = await probeAcrossGenerations(ids, [path]);
+  }
+  expect(hit, '上传文件未注入沙箱（含恢复 turn 重试）').toBeTruthy();
+
+  // 旧实现的故障形态：uploads/{name} 是 base64 文本（长度 +33%、内容非 PK 头）——逐字节比对
+  const got = Buffer.from(await hit!.res[0].arrayBuffer());
+  expect(got.equals(DOCX_BYTES), `字节不一致：得到 ${got.length} 字节（旧实现会是 base64 文本约 ${Math.round(DOCX_BYTES.length * 4 / 3)} 字节）`).toBe(true);
+
+  // 探针通道有效性自检：不存在的路径必须 404（防 mock 返回 200 假绿）
+  const neg = await downloadFromSandbox(hit!.sandboxId, `/workspace/uploads/no-such-${uniq()}.bin`);
+  expect(neg.status).toBe(404);
+});
+
+test('X17 同名上传唯一化注入（_1 后缀，两份内容互不覆盖）', async () => {
+  const uid = U();
+  const name = `report-${uniq()}.zip`; // zip 在默认 MIME 白名单内（octet-stream 不在）
+  const bytesA = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0xAA, 0x01]);
+  const bytesB = Buffer.from([0x50, 0x4B, 0x03, 0x04, 0xBB, 0x02]);
+  const stem = name.slice(0, -'.zip'.length);
+  const paths = [`/workspace/uploads/${name}`, `/workspace/uploads/${stem}_1.zip`];
+  let ids = await injectViaChat(uid, 'x17', [
+    { bytes: bytesA, name, mime: 'application/zip' },
+    { bytes: bytesB, name, mime: 'application/zip' },
+  ]);
+
+  // fail-soft 恢复（同 X16）：两份必须在同一沙箱代内同时可见且内容各自完好
+  let hit = await probeAcrossGenerations(ids, paths);
+  if (!hit) {
+    ids = ids.concat(await injectViaChat(uid, 'x17-recover', []));
+    hit = await probeAcrossGenerations(ids, paths);
+  }
+  expect(hit, '同名文件未唯一化注入（_1 后缀缺失或互相覆盖；含恢复 turn 重试）').toBeTruthy();
+
+  const [first, second] = hit!.res;
+  expect(Buffer.from(await first.arrayBuffer()).equals(bytesA), '第一份内容被覆盖或损坏').toBe(true);
+  expect(Buffer.from(await second.arrayBuffer()).equals(bytesB), '第二份内容不等于其上传字节').toBe(true);
 });
