@@ -37,7 +37,7 @@ class HarnessAgentFactoryRemoteSubagentTest {
             AgentManagerProperties.HarnessConfig.defaults(),
             settings);
         return new HarnessAgentFactory(props, null, null, List.of(),
-            org.mockito.Mockito.mock(RemoteConfirmBridge.class));
+            org.mockito.Mockito.mock(RemoteConfirmBridge.class), null, null);
     }
 
     private OafConfig oaf(List<OafConfig.SubAgentConfig> subAgents) {

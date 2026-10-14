@@ -82,6 +82,9 @@ public class HarnessAgentFactory {
     private final McpToolRegistrar mcpToolRegistrar;
     private final List<io.agentmanager.framework.tool.CustomTool> customTools;
     private final RemoteConfirmBridge remoteConfirmBridge;
+    /** 技能禁用过滤中间件依赖（L2 包内禁用集 + L4 个人禁用） */
+    private final SkillManageService skillManageService;
+    private final UserSkillService userSkillService;
 
     /**
      * 备用模型 id（LLM_FALLBACK_MODEL_ID，引用 model_config 托管模型）；空 = 不启用。
@@ -110,13 +113,19 @@ public class HarnessAgentFactory {
         // @Lazy 破 bean 环：Factory → RemoteConfirmBridge → AgentRuntimeService（@Bean）
         // → HarnessAgent（@Bean）→ Factory。代理在首次 spawn 抓取时才解析目标——
         // 发生在 context refresh 之后的运行期，启动期不触发环上的任何创建
-        @Lazy RemoteConfirmBridge remoteConfirmBridge
+        @Lazy RemoteConfirmBridge remoteConfirmBridge,
+        // @Lazy 破环：UserSkillService 依赖 OafConfig bean，直接注入会把 Factory 挂到
+        // OafConfig/HarnessAgent 装配链上；代理延迟到运行期解析，启动期零影响
+        @Lazy UserSkillService userSkillService,
+        SkillManageService skillManageService
     ) {
         this.props = props;
         this.workspaceInitializer = workspaceInitializer;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.customTools = customTools;
         this.remoteConfirmBridge = remoteConfirmBridge;
+        this.userSkillService = userSkillService;
+        this.skillManageService = skillManageService;
     }
 
     /**
@@ -231,6 +240,11 @@ public class HarnessAgentFactory {
                 // （设计 §5.6）。置于 McpUserContextMiddleware 之后：后者按 peer 直接反查
                 // 写入 McpMeta 的生产行为保持不变
                 .middleware(new RemoteUserIdMiddleware(sessionUserStore))
+                // 技能禁用过滤（SDK per-call SkillFilter overlay）：被禁用的技能不再出现在
+                // 模型侧 <available_skills>，也无法经 load_skill_through_path 加载——覆盖
+                // L2 包内 + L4 个人（此前禁用只作用于框架自有视图，SDK 技能仓库不认识标记）
+                .middleware(new SkillDisabledFilterMiddleware(
+                    skillManageService, userSkillService, sessionKeyResolver))
                 // agent_spawn 结果抓取（travel-fulfillment §5.5）：RemoteConfirmBridge 在途任务
                 // 登记的唯一入口——解析 agent_spawn 结果文本的 task_id 连同入参交桥登记
                 // (session → endpoint, taskId)；缺此中间件则快照轮询（F15 唯一确认源）永不生效，
