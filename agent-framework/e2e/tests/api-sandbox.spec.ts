@@ -3,6 +3,8 @@
  * 断言面 = agent 行为（TOOL_RESULT/turn 终态）+ mock /stats（create/connect/命令/文件操作流水）。
  */
 import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
 import { BASE, sessionIdFor } from '../lib/env.js';
 import { chat, history, a2a } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults } from '../lib/matchers.js';
@@ -430,4 +432,53 @@ test('X17 同名上传唯一化注入（_1 后缀，两份内容互不覆盖）'
   const [first, second] = hit!.res;
   expect(Buffer.from(await first.arrayBuffer()).equals(bytesA), '第一份内容被覆盖或损坏').toBe(true);
   expect(Buffer.from(await second.arrayBuffer()).equals(bytesB), '第二份内容不等于其上传字节').toBe(true);
+});
+
+// ---------- X18：工作区投影新鲜度（stage 晚于 start 的技能目录补水合，E-SKILL-4） ----------
+// 回归背景：技能目录（.skills-cache/{scope}/oaf-package/...）由 HarnessSkillMiddleware 在
+// 每轮推理 onSystemPrompt 时物化到平台本地工作区，而 SDK 的投影 hydrate 只在 sandbox start
+// 时跑一次——晚于 start 的目录永远到不了容器 /workspace，load_skill_through_path 渲染的
+// 容器路径在 shell 里 ls 不到（debug 会话实录：gorden-ppt-skill 文件列表 shell 不可见）。
+// 修复：doExec 首次命令前重算投影 hash，变化即补水合（OpenSandbox.refreshProjectionIfStale）。
+// 观测通道同 X10：mock 沙箱真实 bash 执行 tar/base64 管道（白名单内），files/download 探针直证。
+
+test('X18 投影新鲜度：start 后新增的技能目录在下一 turn 补水合进容器（E-SKILL-4）', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`x18-${uniq()}`);
+  const marker = `PROJ-${uniq()}`;
+  // 探针目录按 MarketplaceStager 真实布局构造：.skills-cache/{tenant}_{sessionId}/oaf-package/{skill}/
+  // （scopeKeyFor 默认 USER 隔离档 → userId 优先，Channel 链路 userId 即测试传入的 uid）
+  const scope = `${uid}_${sid}`;
+  const hostSkillDir = path.join(
+    process.env.E2E_AGENT_WS_ROOT ?? '.runtime/agent-config/.agentscope/workspace',
+    '.skills-cache', scope, 'oaf-package', `probe-skill-${uniq()}`);
+  const hostSkillFile = path.join(hostSkillDir, 'SKILL.md');
+
+  // turn1：新用户首 turn 建沙箱 + start 投影基线（此刻宿主还没有探针目录）
+  const stream1 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream1);
+  expect(stream1.terminal?.type).toBe('done');
+  const stats1 = await sandboxStats();
+  const sbxId = stats1.creates[stats1.creates.length - 1].id;
+
+  // turn 间隙：模拟 onSystemPrompt staging——往宿主 .skills-cache 写入新技能目录
+  // （与 MarketplaceStager 同位同构；测试进程直写 = 不依赖 LLM 回放层模拟 stage 时序）
+  fs.mkdirSync(hostSkillDir, { recursive: true });
+  fs.writeFileSync(hostSkillFile, `---\nname: probe-skill\ndescription: x18 projection probe\n---\n\n${marker}\n`);
+
+  try {
+    // turn2：同会话 resume + 首次 exec 触发 refreshProjectionIfStale → 补水合进容器
+    const stream2 = chat({ message: `[E2E:execute]`, userId: uid, sessionId: sid });
+    await waitTerminal(stream2);
+    expect(stream2.terminal?.type).toBe('done');
+
+    // 探针：容器内 /workspace/.skills-cache/{scope}/oaf-package/{skill}/SKILL.md 可读且内容一致
+    const containerPath = `/workspace/${path.relative(
+      process.env.E2E_AGENT_WS_ROOT ?? '.runtime/agent-config/.agentscope/workspace', hostSkillFile)}`;
+    const probe = await downloadFromSandbox(sbxId, containerPath);
+    expect(probe.status, `容器内 ${containerPath} 不可读（start 后新增技能目录未补水合）`).toBe(200);
+    expect(await probe.text()).toContain(marker);
+  } finally {
+    fs.rmSync(path.join(hostSkillDir), { recursive: true, force: true }); // 清场：不留宿主脏目录
+  }
 });
