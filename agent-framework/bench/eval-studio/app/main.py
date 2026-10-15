@@ -175,8 +175,6 @@ def _exec_run(run: dict[str, Any]) -> None:
                 mode=(spec.get("replay") or {}).get("strictness", "strict"),
                 case_ids=params.get("case_ids"), judge_cfg=judge_cfg,
                 replayer=(proc, llm_port)))
-            store.update_run(run["run_id"], status="done" if code == 0 else "done_with_failures",
-                             finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         finally:
             if stub:
                 stub.terminate()
@@ -191,15 +189,16 @@ def _exec_run(run: dict[str, Any]) -> None:
             case_ids=params.get("case_ids"), judge_cfg=judge_cfg,
             cases_dir=str(EVAL_DIR / "cases") if params.get("use_library_cases") else None,
             timeout_s=float((spec.get("live") or {}).get("timeout_s", 120))))
-        store.update_run(run["run_id"], status="done" if code == 0 else "done_with_failures",
-                         finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     else:
         raise RuntimeError(f"未知 run 类型: {run['type']}")
 
+    # 终态与 report 必须同一条 UPDATE 原子落库：调用方（e2e _wait_run / 前端轮询）
+    # 以 status 终态为完成信号立即读 report，此前两步写存在 status=done 而
+    # report 尚未挂上的撕裂窗口，偶发"run 完成 — no report"
     report_path = Path(out_dir) / "report.json"
-    if report_path.exists():
-        store.update_run(run["run_id"],
-                         report=json.loads(report_path.read_text(encoding="utf-8")))
+    report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else None
+    store.update_run(run["run_id"], status="done" if code == 0 else "done_with_failures",
+                     finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"), report=report)
 
 
 def _worker_loop() -> None:
