@@ -52,6 +52,12 @@ public class OpenSandbox extends AbstractBaseSandbox
     private final AtomicBoolean uploadsInjected = new AtomicBoolean(false);
     private final AtomicBoolean userSkillsMaterialized = new AtomicBoolean(false);
     private final AtomicBoolean projectionRefreshed = new AtomicBoolean(false);
+    /** 投影 stat 指纹缓存开关（SANDBOX_PROJECTION_FINGERPRINT_CACHE，默认 true；测试构造可关） */
+    private final boolean projectionFingerprintCacheEnabled;
+    /** L4 物化 revision 门控开关（SANDBOX_SKILL_REVISION_GATE，默认 true；测试构造可关） */
+    private final boolean skillRevisionGateEnabled;
+    /** 回写快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true；测试构造可关） */
+    private final boolean syncSnapshotDiffEnabled;
     private volatile String userKey;
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
@@ -82,6 +88,49 @@ public class OpenSandbox extends AbstractBaseSandbox
                        OpenSandboxFilesystemSpec filesystemSpec,
                        FileAssetStore fileAssetStore,
                        FileStorage fileStorage) {
+        this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage, true, true);
+    }
+
+    public OpenSandbox(OpenSandboxState state,
+                       com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
+                       OpenSandboxClientOptions options,
+                       WorkspaceReader workspaceReader,
+                       WorkspaceSyncService workspaceSyncService,
+                       OpenSandboxFilesystemSpec filesystemSpec,
+                       FileAssetStore fileAssetStore,
+                       FileStorage fileStorage,
+                       boolean projectionFingerprintCacheEnabled) {
+        this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage, projectionFingerprintCacheEnabled, true, true);
+    }
+
+    public OpenSandbox(OpenSandboxState state,
+                       com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
+                       OpenSandboxClientOptions options,
+                       WorkspaceReader workspaceReader,
+                       WorkspaceSyncService workspaceSyncService,
+                       OpenSandboxFilesystemSpec filesystemSpec,
+                       FileAssetStore fileAssetStore,
+                       FileStorage fileStorage,
+                       boolean projectionFingerprintCacheEnabled,
+                       boolean skillRevisionGateEnabled) {
+        this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage,
+            projectionFingerprintCacheEnabled, skillRevisionGateEnabled, true);
+    }
+
+    public OpenSandbox(OpenSandboxState state,
+                       com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
+                       OpenSandboxClientOptions options,
+                       WorkspaceReader workspaceReader,
+                       WorkspaceSyncService workspaceSyncService,
+                       OpenSandboxFilesystemSpec filesystemSpec,
+                       FileAssetStore fileAssetStore,
+                       FileStorage fileStorage,
+                       boolean projectionFingerprintCacheEnabled,
+                       boolean skillRevisionGateEnabled,
+                       boolean syncSnapshotDiffEnabled) {
         super(state);
         this.state = state;
         this.osbSandbox = osbSandbox;
@@ -91,6 +140,9 @@ public class OpenSandbox extends AbstractBaseSandbox
         this.filesystemSpec = filesystemSpec;
         this.fileAssetStore = fileAssetStore;
         this.fileStorage = fileStorage;
+        this.projectionFingerprintCacheEnabled = projectionFingerprintCacheEnabled;
+        this.skillRevisionGateEnabled = skillRevisionGateEnabled;
+        this.syncSnapshotDiffEnabled = syncSnapshotDiffEnabled;
     }
 
     /** 绑定用户 key（SandboxUserKeyMiddleware 经 OpenSandboxClient 注入） */
@@ -154,7 +206,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         projectionRefreshed.set(false);
         if (workspaceSyncService != null && userKey != null) {
             try {
-                workspaceSyncService.syncBack(userKey, osbSandbox);
+                // 快照差分（SANDBOX_SYNC_SNAPSHOT_DIFF）：把本会话 gate 传给回写侧，
+                // 只读与快照不一致的容器文件（null gate = 全量读，开关关闭时）
+                var gate = filesystemSpec != null && syncSnapshotDiffEnabled
+                    ? filesystemSpec.skillSyncGate(userKey, state != null ? state.getSandboxId() : null)
+                    : null;
+                workspaceSyncService.syncBack(userKey, osbSandbox, gate);
             } catch (Exception e) {
                 log.warn("Workspace sync back failed: {}", e.getMessage());
             }
@@ -165,21 +222,8 @@ public class OpenSandbox extends AbstractBaseSandbox
     @Override
     protected ExecResult doExec(RuntimeContext ctx, String command, int timeoutSeconds) throws Exception {
         log.info("[sandbox-open] doExec invoked: userKey={}, ctx={}", userKey, ctx != null ? ctx.getUserId() : null);
-        if (ctx != null) {
-            var key = resolveUserKey(ctx);
-            if (key != null) {
-                userKey = key;
-            }
-        }
-        injectRuntimeFilesIfNeeded(ctx);
-        // 上传文件注入兜底（幂等）：create/resume 注入可能因 userKey 未绑定而跳过，
-        // 此处用实例 userKey 重试（execute/文件工具首次调用即触发）
-        injectPendingUploads();
-        // 会话开始物化 L4（幂等）：把 KV 的用户技能投影进容器 /workspace/skills，
-        // 使管理面写入/从包内下发在沙箱档会话内生效（兜底路径，主路径见 SandboxUserKeyMiddleware）
-        materializeUserSkills();
-        // 工作区投影新鲜度检查（幂等）：补齐「stage 晚于 start」的技能目录（见方法注释）
-        refreshProjectionIfStale();
+        // ④ 会话水合协调器：userKey 一次解析 + 四步幂等注入的唯一 doExec 侧入口
+        hydrateForCall(ctx);
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
@@ -193,6 +237,29 @@ public class OpenSandbox extends AbstractBaseSandbox
                 .collect(Collectors.joining("\n"))
             : "";
         return new ExecResult(exitCode, stdout, stderr, false);
+    }
+
+    /**
+     * 会话水合协调器（设计 ④，纯重构无行为变化）：四步幂等注入统一入口——middleware 主路径
+     * （{@link SandboxUserKeyMiddleware#onAgent}）与 doExec 兜底路径共用。各步自带幂等标志
+     * （runtimeInjected/uploadsInjected/userSkillsMaterialized/projectionRefreshed），协调器本身
+     * 无状态；任一步失败不影响后续步骤（各步内部 fail-soft）。
+     *
+     * <p>userKey 解析保持旧行为：ctx 非空即按当前 ctx 重新解析（userId 优先、session_user 反查、
+     * 空则 sessionId）——同实例先后出现的不同 ctx 必须能更新绑定（Channel 降级链路依赖）；
+     * ctx 无果时保持实例已绑定值（middleware 先行绑定的真实用户）不被覆盖（issue #52）。
+     */
+    public void hydrateForCall(RuntimeContext ctx) {
+        if (ctx != null) {
+            var key = resolveUserKey(ctx);
+            if (key != null && !key.isBlank()) {
+                userKey = key;
+            }
+        }
+        injectRuntimeFilesIfNeeded(ctx);
+        injectPendingUploads();
+        materializeUserSkills();
+        refreshProjectionIfStale();
     }
 
     /**
@@ -367,8 +434,30 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return;
             }
             try {
+                var sandboxId = state != null ? state.getSandboxId() : null;
+                var gate = filesystemSpec != null ? filesystemSpec.skillSyncGate(uid, sandboxId) : null;
+                // revision 门控（SANDBOX_SKILL_REVISION_GATE，默认 true）：本沙箱代已物化过
+                // 且 KV revision 未变 → KV 技能集未变 → 跳过全量物化（1 次 get 替代全量 list+read）
+                if (skillRevisionGateEnabled && gate != null && gate.lastMaterialized()) {
+                    var current = workspaceReader.readUserSkillRevision(uid);
+                    if (current != null && current.equals(gate.revision())) {
+                        log.debug("[sandbox-open] L4 skills revision unchanged for user {}, skipping materialize", uid);
+                        userSkillsMaterialized.set(true);
+                        return;
+                    }
+                    if (current == null) {
+                        // revision 读不到（KV 异常/从未写入）：保守走全量物化（现行为）
+                        log.debug("[sandbox-open] L4 revision unknown for user {}, falling back to full materialize", uid);
+                    }
+                }
                 int count = workspaceReader.materializeUserSkills(osbSandbox, uid);
                 userSkillsMaterialized.set(true);
+                if (gate != null) {
+                    // 回填门控：revision 用物化前后各读一次的新值（物化写入已 bump revision）；
+                    // 物化失败（异常）不会走到这里，gate 保持未置位下轮重试
+                    gate.setRevision(workspaceReader.readUserSkillRevision(uid));
+                    gate.setLastMaterialized(true);
+                }
                 if (count > 0) {
                     log.info("[sandbox-open] materialized {} L4 skill(s) into container for user {}",
                         count, uid);
@@ -409,12 +498,20 @@ public class OpenSandbox extends AbstractBaseSandbox
                 // 投影未启用（SANDBOX_PROJECTION_ENABLED=false）或 spec 未装配：无可刷新
                 return;
             }
+            // stat 指纹短路（SANDBOX_PROJECTION_FINGERPRINT_CACHE，默认 true）：指纹未变
+            // → 宿主投影内容未变 → 直接与 state hash 比对跳过 build（省全量读+sha256+堆内 tar）
+            if (projectionFingerprintCacheEnabled
+                && ProjectionFingerprintCache.skipBuild(spec, state.getWorkspaceProjectionHash())) {
+                log.debug("[sandbox-open] workspace projection unchanged (fingerprint hit), skipping refresh");
+                return;
+            }
             var payload = WorkspaceProjectionApplier.build(spec);
             if (payload == null) {
                 return;
             }
             if (payload.hash().equals(state.getWorkspaceProjectionHash())) {
                 log.debug("[sandbox-open] workspace projection unchanged, skipping refresh");
+                ProjectionFingerprintCache.record(spec, payload.hash());
                 return;
             }
             if (payload.fileCount() > 0) {
@@ -426,6 +523,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
             // 与 harness start 路径一致：空投影也回写 hash，避免每 call 重算后反复比对
             state.setWorkspaceProjectionHash(payload.hash());
+            ProjectionFingerprintCache.record(spec, payload.hash());
         } catch (Exception e) {
             projectionRefreshed.set(false);
             log.warn("[sandbox-open] workspace projection refresh failed: {}", e.getMessage());

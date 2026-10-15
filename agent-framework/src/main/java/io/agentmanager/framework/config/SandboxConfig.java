@@ -17,6 +17,10 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * 每次 sandbox start 不再 hydrate 投影目录，skills 依赖强的包不要关）。
  * guardEnabled/guardLeaseSeconds: 并发执行守卫（官方 §9 对 USER 范围的建议，
  * Redis SET NX 串行化同 userId 的沙箱获取；lease 为崩溃自愈 TTL）。
+ * projectionFingerprintCacheEnabled: 投影新鲜度检查 stat 指纹缓存（默认 true；关闭后每次 call
+ * 全量 WorkspaceProjectionApplier.build()——读投影根全部字节 + sha256 + 堆内建 tar）。
+ * skillRevisionGateEnabled: L4 技能 revision 门控（默认 true；关闭后每次 acquire 全量物化 KV 技能进容器）。
+ * syncSnapshotDiffEnabled: 沙箱回写快照差分（默认 true；关闭后每次 call 结束全量读容器 skills/）。
  * enabled 的运行时生效值另经 {@link io.agentmanager.framework.service.SandboxRuntime}
  * 叠加 OAF 包级声明裁决——本字段的绑定值仅是第三优先级（yml 默认）。
  */
@@ -32,6 +36,9 @@ public record SandboxConfig(
     @DefaultValue("true") boolean projectionEnabled,
     @DefaultValue("true") boolean guardEnabled,
     @DefaultValue("900") int guardLeaseSeconds,
+    @DefaultValue("true") boolean projectionFingerprintCacheEnabled,
+    @DefaultValue("true") boolean skillRevisionGateEnabled,
+    @DefaultValue("true") boolean syncSnapshotDiffEnabled,
     OpenSandboxConfig opensandbox
 ) {
     public record OpenSandboxConfig(

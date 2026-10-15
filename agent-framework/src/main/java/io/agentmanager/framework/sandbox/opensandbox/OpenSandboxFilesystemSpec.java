@@ -46,6 +46,34 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private final java.util.concurrent.ConcurrentHashMap<String, String> userInjectedSandbox =
         new java.util.concurrent.ConcurrentHashMap<>();
 
+    /**
+     * 会话水合门控表（pod 本地缓存，真相在 KV/容器）：userKey|sandboxId → 已知同步状态。
+     * ③ revision 门控（物化跳过依据）与 ②′ 快照差分（回写比对基准）共用——见
+     * {@link SkillSyncGate}。容量上界懒清理（超限清空；条目量级=沙箱代数）。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, SkillSyncGate> skillSyncGates =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_SYNC_GATES = 256;
+
+    /** 读取（无则建空 gate）；键 = userKey + '|' + sandboxId */
+    public SkillSyncGate skillSyncGate(String userKey, String sandboxId) {
+        if (userKey == null || userKey.isBlank() || sandboxId == null || sandboxId.isBlank()) {
+            return null;
+        }
+        var key = userKey + "|" + sandboxId;
+        if (skillSyncGates.size() >= MAX_SYNC_GATES && !skillSyncGates.containsKey(key)) {
+            skillSyncGates.clear();
+        }
+        return skillSyncGates.computeIfAbsent(key, k -> new SkillSyncGate());
+    }
+
+    /** 移除某会话的 gate（沙箱代销毁/测试重置用；null 安全） */
+    public void removeSkillSyncGate(String userKey, String sandboxId) {
+        if (userKey != null && sandboxId != null) {
+            skillSyncGates.remove(userKey + "|" + sandboxId);
+        }
+    }
+
     /** 该用户当前是否已在新沙箱代 reset+inject 过 */
     public boolean isInjectedOnSandbox(String userKey, String sandboxId) {
         return sandboxId != null && sandboxId.equals(userInjectedSandbox.get(userKey));

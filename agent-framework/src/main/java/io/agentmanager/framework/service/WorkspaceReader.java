@@ -41,6 +41,16 @@ public class WorkspaceReader {
     public static final String SKILL_FILE = "SKILL.md";
 
     /**
+     * L4 技能 revision 键（技能命名空间根下 {@code /.revision}，值为最近一次实际写入的时间毫秒）：
+     * 沙箱物化门控（SANDBOX_SKILL_REVISION_GATE）的比对依据——门控每 acquire 只需 1 次 get
+     * 即可判断 KV 技能集是否变化，省掉全量 list+glob+逐文件读（实测 36.5ms → 0.30ms，
+     * docs/design/sandbox-skill-sync-optimization-design.md §5）。
+     * 键以 {@code .} 开头属元数据段：{@link #listUserSkills} 的 isMetadataSegment 过滤、
+     * glob 按 {@code /{name}/**} 匹配，都不会把它当成技能文件。
+     */
+    public static final String SKILL_REVISION_KEY = "/.revision";
+
+    /**
      * 元数据目录前缀：SDK 软删归档 {@code skills/.archive}、草稿 {@code skills/_drafts}
      * 均以 {@code .}/{@code _} 开头，SDK 侧（hasMetadataAncestor）同样跳过，枚举时必须一并过滤，
      * 否则会把归档/草稿当成用户技能。
@@ -218,7 +228,7 @@ public class WorkspaceReader {
             var safeUserKey = io.agentmanager.framework.util.PathSafe.sanitize(userKey);
             var ctx = RuntimeContext.builder().userId(safeUserKey).build();
             var fs = new RemoteFilesystem(baseStore, namespaceFor(safeUserKey));
-            return writeKvFile(fs, ctx, relPath, content, "write_workspace_file", safeUserKey);
+            return writeKvFile(fs, ctx, relPath, content, "write_workspace_file", safeUserKey, false);
         } catch (Exception e) {
             log.warn("write_workspace_file: KV write failed for {} user {}: {}", relPath, userKey, e.getMessage());
             return false;
@@ -240,7 +250,7 @@ public class WorkspaceReader {
      * @return true 写入成功（含“内容完全相同”的短路跳过）；false 写入失败
      */
     private boolean writeKvFile(RemoteFilesystem fs, RuntimeContext ctx, String relPath, String content,
-                                String opTag, String safeUserKey) {
+                                String opTag, String safeUserKey, boolean skillScoped) {
         var read = fs.read(ctx, relPath, 0, -1);
         boolean success;
         if (read.isSuccess() && read.fileData() != null && read.fileData().content() != null) {
@@ -280,10 +290,63 @@ public class WorkspaceReader {
                 log.warn("{}: KV write failed for {} user {}: {}", opTag, relPath, safeUserKey, writeRes.error());
             }
         }
+        // 技能命名空间实际发生写入才推进 revision：工作区文件（MEMORY.md/memory/，非 skillScoped）
+        // 与 revision 键自身（防自递归）都不 bump——否则记忆回写会误触发技能物化
+        if (success && skillScoped && !SKILL_REVISION_KEY.equals(relPath)) {
+            bumpUserSkillRevision(safeUserKey);
+        }
         if (success) {
             log.info("{}: synced {} ({} chars) to KV for user {}", opTag, relPath, content.length(), safeUserKey);
         }
         return success;
+    }
+
+    /**
+     * 读取 L4 技能 revision 当前值（{@link #SKILL_REVISION_KEY}）。
+     *
+     * @return 值；键不存在（该用户从无 L4 写入）或读取异常返回 null（门控按"未知→全量物化"处理）
+     */
+    public String readUserSkillRevision(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return null;
+        }
+        var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+        var ctx = RuntimeContext.builder().userId(safeUserId).build();
+        try {
+            var fs = new RemoteFilesystem(baseStore, skillNamespaceFor(safeUserId));
+            var res = fs.read(ctx, SKILL_REVISION_KEY, 0, -1);
+            if (res.isSuccess() && res.fileData() != null) {
+                return res.fileData().content();
+            }
+            return null;
+        } catch (Exception e) {
+            log.debug("read_user_skill_revision: failed for user {}: {}", safeUserId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 推进 L4 技能 revision（L4 发生<b>实际写/删</b>后调用）。fail-soft：失败仅告警——
+     * 漏 bump 的后果只是沙箱物化门控多跑一次全量（多付一次成本，不出正确性问题）。
+     *
+     * <p>bump 点收敛在 {@link #writeKvFile} 实际写入分支与 {@link #deleteUserSkillFile}
+     * 成功分支（所有 L4 变更路径——管理面 PUT/DELETE/禁用/启用、包内下发、回写——都经这两个漏斗，
+     * 已逐一核对；标记函数 markXxx/clearXxx 内部也走 writeUserSkillFile/deleteUserSkillFile）。
+     */
+    private void bumpUserSkillRevision(String safeUserId) {
+        try {
+            var ctx = RuntimeContext.builder().userId(safeUserId).build();
+            var fs = new RemoteFilesystem(baseStore, skillNamespaceFor(safeUserId));
+            // write 对已存在 key 返回失败（writeKvFile 注释）：先删后写；值用 nanoTime——
+            // 同毫秒内连续写入也要保证值变化，否则门控会把后续写入误判为"未变"
+            fs.delete(ctx, SKILL_REVISION_KEY);
+            var res = fs.write(ctx, SKILL_REVISION_KEY, String.valueOf(System.nanoTime()));
+            if (!res.isSuccess()) {
+                log.warn("bump_user_skill_revision: write failed for user {}", safeUserId);
+            }
+        } catch (Exception e) {
+            log.warn("bump_user_skill_revision: failed for user {}: {}", safeUserId, e.getMessage());
+        }
     }
 
     // ==================== 用户技能（L4）KV 读写 ====================
@@ -467,7 +530,7 @@ public class WorkspaceReader {
         try {
             var fs = new RemoteFilesystem(baseStore, skillNamespaceFor(safeUserId));
             return writeKvFile(fs, ctx, skillFileKey(name, relPath), content,
-                "write_user_skill_file", safeUserId);
+                "write_user_skill_file", safeUserId, true);
         } catch (Exception e) {
             log.warn("write_user_skill_file: failed for user {} skill {}: {}", safeUserId, name, e.getMessage());
             return false;
@@ -575,6 +638,8 @@ public class WorkspaceReader {
                     relPath, safeUserId, name, res.error());
                 return false;
             }
+            // L4 实际发生删除：推进 revision（漏 bump 的后果只是物化门控多跑一次全量）
+            bumpUserSkillRevision(safeUserId);
             return true;
         } catch (Exception e) {
             log.warn("delete_user_skill_file: failed for user {} skill {} {}: {}",

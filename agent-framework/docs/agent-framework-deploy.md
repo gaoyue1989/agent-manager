@@ -196,6 +196,9 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `SANDBOX_PROJECTION_ENABLED` | bool | `true` | | 关闭后每次 sandbox start 不再 hydrate 投影目录。**skills 依赖强的包不要关**（绑 `agent.sandbox.projection-enabled`） |
 | `SANDBOX_GUARD_ENABLED` | bool | `true` | | Redis SET NX 串行化同 userId 沙箱获取，避免并发重复创建；Redis 不可用时 fail-open（绑 `agent.sandbox.guard-enabled`） |
 | `SANDBOX_GUARD_LEASE_SECONDS` | int | `900` | | 沙箱获取串行化租约时长（秒）（绑 `agent.sandbox.guard-lease-seconds`） |
+| `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | bool | `true` | | 投影新鲜度检查 stat 指纹缓存（`agent.sandbox.projection-fingerprint-cache-enabled`）；关闭=每 call 全量 build |
+| `SANDBOX_SKILL_REVISION_GATE` | bool | `true` | | L4 物化 revision 门控（`agent.sandbox.skill-revision-gate-enabled`）；关闭=每 acquire 全量物化 |
+| `SANDBOX_SYNC_SNAPSHOT_DIFF` | bool | `true` | | 沙箱回写快照差分（`agent.sandbox.sync-snapshot-diff-enabled`）；关闭=每次 call 全量读容器 skills/ |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | duration | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x；绑 `agent.sandbox.execd-grace-shutdown`） |
 | `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
 | `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |

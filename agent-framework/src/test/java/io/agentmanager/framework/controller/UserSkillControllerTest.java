@@ -59,7 +59,7 @@ class UserSkillControllerTest {
 
     private static SandboxRuntime sandboxRuntime(boolean enabled) {
         return new SandboxRuntime(new SandboxConfig(enabled, "img", 60, 1024, 1, List.of("/entry.sh"),
-            java.time.Duration.ofMillis(100), true, true, 900, null), enabled);
+            java.time.Duration.ofMillis(100), true, true, 900, true, true, true, null), enabled);
     }
 
     // ---------- 列表 / 读取 ----------

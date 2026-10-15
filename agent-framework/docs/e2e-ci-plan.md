@@ -419,6 +419,7 @@ agent-config/
 | X6 | 容器重建降级 | 会话用过沙箱后 `POST /admin/destroy/{id}`（模拟容器 GC）→ 同 user 再对话 + 读旧文件 | resume 连接 404 → 框架降级 create 新沙箱（SandboxManager.acquire 行为）；上传文件 `resetInjectedToPending` 回滚重注入（`OpenSandboxClient.java:112-118` 双保险）→ 旧文件在新沙箱仍可读 |
 | X7 | 命令失败传播 | `[E2E:execute](ls /nonexistent-e2a)` | exitCode≠0；TOOL_RESULT 呈 ERROR 态（stderr 可见）；turn 仍 `done`（单工具失败不炸流） |
 | X18 | 投影新鲜度（E-SKILL-4，2026-10-14 补齐） | turn1 `[E2E:plain]`（start 投影基线）→ 测试进程往宿主 `.skills-cache/{uid}_{sid}/oaf-package/` 写入探针技能（模拟 onSystemPrompt staging 晚于 start）→ turn2 同会话 `[E2E:execute]` | files/download 探针证实容器内 `/workspace/.skills-cache/.../probe-*/SKILL.md` 出现且内容一致（`refreshProjectionIfStale` 补水合；修复前该文件容器内不存在，见 oaf-skills-dynamic-loading-plan §6.3.1） |
+| X19 | 同步稳态零传输（2026-10-15，sandbox-skill-sync-optimization-design 附录 C） | 同会话 turn1 `[E2E:plain]`（建立基线）→ turn2/turn3 同会话 `[E2E:plain]`（无任何变更）→ 各 turn 后查实例日志 | turn2/turn3 后 `materialize_user_skills` / `workspace projection refreshed` / `skill file ... synced` 日志计数与 turn1 后一致（revision 门控 + 投影指纹缓存 + 快照差分三重短路生效；关闭任一开关则恢复现行为） |
 
 > X8-X17（pending 上限/文件交付/用户技能物化三段/Channel userKey/上传注入字节语义与唯一化）
 > 实现于后续 PR，用例定义见 `e2e/tests/api-sandbox.spec.ts` 内注释（X10/X15/X16/X17 头注）。
