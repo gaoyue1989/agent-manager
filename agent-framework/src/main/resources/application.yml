@@ -76,6 +76,9 @@ agent:
     projection-enabled: ${SANDBOX_PROJECTION_ENABLED:true}
     guard-enabled: ${SANDBOX_GUARD_ENABLED:true}
     guard-lease-seconds: ${SANDBOX_GUARD_LEASE_SECONDS:900}
+    projection-fingerprint-cache-enabled: ${SANDBOX_PROJECTION_FINGERPRINT_CACHE:true}
+    skill-revision-gate-enabled: ${SANDBOX_SKILL_REVISION_GATE:true}
+    sync-snapshot-diff-enabled: ${SANDBOX_SYNC_SNAPSHOT_DIFF:true}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}

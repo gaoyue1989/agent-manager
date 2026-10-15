@@ -352,6 +352,9 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_PROJECTION_ENABLED` | `true` | | 工作区投影开关（issue #27）：关闭后每次 sandbox start 不再 hydrate 投影目录（AGENTS.md/skills 等），降低每轮对话沙箱同步开销；skills 依赖强的包不要关 |
 | `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；Redis 不可用时 fail-open |
 | `SANDBOX_GUARD_LEASE_SECONDS` | `900` | | 守卫租约 TTL（崩溃自愈） |
+| `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | `true` | | 投影新鲜度检查 stat 指纹缓存：指纹未变跳过 `WorkspaceProjectionApplier.build()`（省每次 call 全量读+sha256+堆内 tar，实测 4.5MB 工作区 17.9ms→3.2ms）；关闭=逐次全量 build（sandbox-skill-sync-optimization-design ①） |
+| `SANDBOX_SKILL_REVISION_GATE` | `true` | | L4 物化 revision 门控：KV 技能集 `/.revision` 未变且本沙箱代已物化 → 跳过全量物化（1 次 get 替代 list+glob+逐文件读，实测 36.5ms→0.3ms）；关闭=每 acquire 全量（设计 ③） |
+| `SANDBOX_SYNC_SNAPSHOT_DIFF` | `true` | | 沙箱回写快照差分：回写按 manifest（path+size）只读与快照不一致的容器文件（实测 449ms→64ms）；已知盲点=同字节数原位内容漂移不回写（设计 §7 接受）；关闭=每次全量读（设计 ②′） |
 | （env 未设置时）OAF `config.sandbox.enabled` | — | | 包级沙箱开关（issue #27b）：`SANDBOX_ENABLED` 显式设置时优先；env 未设置时读包 frontmatter `config.sandbox.enabled`，均未声明回退 false。生效裁决统一在 SandboxRuntime |
 | `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制（MiB） |
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |

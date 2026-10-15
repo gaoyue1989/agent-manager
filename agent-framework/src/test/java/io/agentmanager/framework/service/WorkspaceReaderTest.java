@@ -338,8 +338,10 @@ class WorkspaceReaderTest {
      */
     @Test
     void listUserSkillsAndDeleteShouldFailExplicitlyWhenEnumerationFails() {
-        // 第 1 次 search 让 ls 成功，第 2 次起（glob）抛异常，做出“枚举失败但技能存在”的场景
-        var store = new SearchFailingStore(2);
+        // 第 1 次 search 让 ls 成功，第 2 次起（glob）抛异常，做出“枚举失败但技能存在”的场景。
+        // search 计数含 revision bump（writeUserSkillFile 成功后写 /.revision，其 RemoteFilesystem
+        // write 内部也走一次 search）——种子里两次写入共消耗 2 次 search，故失败点从 2 后移到 4
+        var store = new SearchFailingStore(4);
         var reader = readerWithAgent(store);
         assertTrue(reader.writeUserSkillFile(USER, "demo-a", "SKILL.md", "# a"));
         assertTrue(reader.writeUserSkillFile(USER, "demo-a", "scripts/hello.sh", "echo hi"));

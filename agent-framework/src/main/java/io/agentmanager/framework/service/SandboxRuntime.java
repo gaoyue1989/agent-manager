@@ -81,4 +81,24 @@ public class SandboxRuntime {
     public int guardLeaseSeconds() {
         return config.guardLeaseSeconds();
     }
+
+    /**
+     * 投影新鲜度检查 stat 指纹缓存（{@code SANDBOX_PROJECTION_FINGERPRINT_CACHE}，默认 true）。
+     * 关闭后每次 call 首次 exec 都全量 {@code WorkspaceProjectionApplier.build()}（实测 4.5MB 工作区
+     * 17.9ms/18.5MB 47.9ms，含堆内 tar 分配）；开启时指纹命中仅 ~3-5ms（见
+     * docs/design/sandbox-skill-sync-optimization-design.md §2.2）。
+     */
+    public boolean projectionFingerprintCacheEnabled() {
+        return config.projectionFingerprintCacheEnabled();
+    }
+
+    /** L4 技能 revision 门控（{@code SANDBOX_SKILL_REVISION_GATE}，默认 true；关闭=每次 acquire 全量物化） */
+    public boolean skillRevisionGateEnabled() {
+        return config.skillRevisionGateEnabled();
+    }
+
+    /** 沙箱回写快照差分（{@code SANDBOX_SYNC_SNAPSHOT_DIFF}，默认 true；关闭=每次 call 全量读容器 skills/） */
+    public boolean syncSnapshotDiffEnabled() {
+        return config.syncSnapshotDiffEnabled();
+    }
 }

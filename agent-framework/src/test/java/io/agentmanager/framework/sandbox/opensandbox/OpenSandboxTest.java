@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 import java.io.ByteArrayInputStream;
@@ -191,11 +193,12 @@ class OpenSandboxTest {
         var sync = mock(WorkspaceSyncService.class);
         var sandbox = new OpenSandbox(state(), osb, options(), null, sync);
 
-        // 先执行命令记录 userId，再 stop 触发回写
+        // 先执行命令记录 userId，再 stop 触发回写。
+        // state() 未设 sandboxId → gate=null（合理降级：无沙箱代元数据时不做快照差分）
         sandbox.exec(RuntimeContext.builder().userId("user-alice").build(), "echo x", 30);
         sandbox.stop();
 
-        verify(sync).syncBack("user-alice", osb);
+        verify(sync).syncBack(eq("user-alice"), eq(osb), isNull());
     }
 
     @Test
@@ -206,7 +209,7 @@ class OpenSandboxTest {
 
         sandbox.stop();
 
-        verify(sync, never()).syncBack(anyString(), any());
+        verify(sync, never()).syncBack(anyString(), any(), any());
     }
 
     @Test
@@ -262,7 +265,7 @@ class OpenSandboxTest {
         sandbox.exec(RuntimeContext.builder().sessionId("debug-user:sess-1").build(), "echo x", 30);
         sandbox.stop();
 
-        verify(sync).syncBack("debug-user:sess-1", osb);
+        verify(sync).syncBack(eq("debug-user:sess-1"), eq(osb), isNull());
     }
 
     @Test
@@ -565,5 +568,109 @@ class OpenSandboxTest {
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
 
         assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), sandbox.downloadFile("MEMORY.md"));
+    }
+
+    // ---------- L4 revision 门控（设计 ③，SANDBOX_SKILL_REVISION_GATE）----------
+
+    /**
+     * 复用 spec（gate 表挂在 spec 上，跨实例持久=生产形态）；每次新 OpenSandbox 实例模拟
+     * 一次新 acquire——实例级幂等标志（userSkillsMaterialized）随实例归零，门控本身经 gate 生效。
+     */
+    private static OpenSandbox gatedInstance(OpenSandboxFilesystemSpec spec, WorkspaceReader reader,
+                                             Sandbox osb, boolean revisionGate) {
+        var st = state();
+        st.setSandboxId("sbx-gate-1"); // 生产由 create 写入；测试显式设置让 gate 生效
+        var sandbox = new OpenSandbox(st, osb, options(), reader, null, spec,
+            null, null, true, revisionGate, true);
+        sandbox.setUserKey("alice");
+        return sandbox;
+    }
+
+    @Test
+    void revisionGateShouldMaterializeOnFirstAcquireThenSkipOnUnchangedRevision() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = mock(WorkspaceReader.class);
+        var spec = new OpenSandboxFilesystemSpec();
+        when(reader.readUserSkillRevision("alice")).thenReturn("rev-1");
+        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+
+        // 第一次 acquire：必须全量物化，物化后回填 gate
+        gatedInstance(spec, reader, osb, true).materializeUserSkills();
+        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"));
+        var gate = spec.skillSyncGate("alice", "sbx-gate-1");
+        assertNotNull(gate);
+        assertTrue(gate.lastMaterialized());
+        assertEquals("rev-1", gate.revision());
+
+        // 第二次 acquire（新实例，revision 未变）：门控跳过（只多一次 revision get）
+        gatedInstance(spec, reader, osb, true).materializeUserSkills();
+        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"));
+    }
+
+    @Test
+    void revisionGateShouldRematerializeWhenRevisionChanges() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = mock(WorkspaceReader.class);
+        var spec = new OpenSandboxFilesystemSpec();
+        when(reader.readUserSkillRevision("alice")).thenReturn("rev-1", "rev-2");
+        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+
+        gatedInstance(spec, reader, osb, true).materializeUserSkills();
+        // 管理面写入了新技能（revision 变化）→ 第二次 acquire 必须重新物化
+        gatedInstance(spec, reader, osb, true).materializeUserSkills();
+        verify(reader, times(2)).materializeUserSkills(any(), eq("alice"));
+    }
+
+    @Test
+    void revisionGateShouldFallbackWhenRevisionUnreadable() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = mock(WorkspaceReader.class);
+        var spec = new OpenSandboxFilesystemSpec();
+        // revision 读不到（KV 异常/键不存在）→ 门控分支跳过（gate 未置位）、保守走全量物化；
+        // 物化后回填读 revision（mock 返回 rev-1），gate 记最新值
+        when(reader.readUserSkillRevision("alice")).thenReturn("rev-1");
+        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+
+        gatedInstance(spec, reader, osb, true).materializeUserSkills();
+        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"));
+        var gate = spec.skillSyncGate("alice", "sbx-gate-1");
+        assertEquals("rev-1", gate.revision(), "物化后应回填最新 revision");
+    }
+
+    @Test
+    void revisionGateDisabledShouldAlwaysMaterialize() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = mock(WorkspaceReader.class);
+        var spec = new OpenSandboxFilesystemSpec();
+        when(reader.readUserSkillRevision("alice")).thenReturn("rev-1");
+        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+
+        gatedInstance(spec, reader, osb, false).materializeUserSkills();
+        gatedInstance(spec, reader, osb, false).materializeUserSkills();
+        verify(reader, times(2)).materializeUserSkills(any(), eq("alice"));
+    }
+
+    @Test
+    void syncBackShouldPassGateWhenSnapshotDiffEnabled() throws Exception {
+        // stop 回写：开关开 → 传 gate（快照差分）；开关关 → 传 null（全量读）
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sync = mock(WorkspaceSyncService.class);
+        var spec = new OpenSandboxFilesystemSpec();
+        var st = state();
+        st.setSandboxId("sbx-diff-1");
+        var sandbox = new OpenSandbox(st, osb, options(), null, sync, spec,
+            null, null, true, true, true);
+        sandbox.exec(RuntimeContext.builder().userId("user-alice").build(), "echo x", 30);
+        sandbox.stop();
+        verify(sync).syncBack(eq("user-alice"), eq(osb), any(SkillSyncGate.class));
+
+        var sync2 = mock(WorkspaceSyncService.class);
+        var st2 = state();
+        st2.setSandboxId("sbx-diff-2");
+        var sandbox2 = new OpenSandbox(st2, osb, options(), null, sync2, spec,
+            null, null, true, true, false);
+        sandbox2.exec(RuntimeContext.builder().userId("user-bob").build(), "echo x", 30);
+        sandbox2.stop();
+        verify(sync2).syncBack(eq("user-bob"), eq(osb), isNull());
     }
 }

@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -482,7 +483,7 @@ class WorkspaceSyncServiceTest {
         assertNull(reader.readUserSkillFile(USER, "sbx-meta", ".archive/old.md"), "归档不得镜像进 KV");
         assertNull(reader.readUserSkillFile(USER, "sbx-meta", "_drafts/wip.md"), "草稿不得镜像进 KV");
         assertNull(reader.readUserSkillFile(USER, "sbx-meta", ".usage.json"));
-        assertEquals(1, store.size(), "只有 SKILL.md 落库");
+        assertEquals(2, store.size(), "SKILL.md + /.revision 各一行（revision 门控的元数据行）");
     }
 
     /** 单个技能文件数超上限（200）→ 整个技能跳过，不写半份 */
@@ -709,5 +710,114 @@ class WorkspaceSyncServiceTest {
         new WorkspaceSyncService(reader).syncBack(USER, osb);
 
         verify(reader, never()).writeUserSkillFile(USER, "fail-skill", "scripts/run.sh", "run");
+    }
+
+    // ---------- 快照差分（设计 ②′，SANDBOX_SYNC_SNAPSHOT_DIFF）----------
+
+    /** 构造「容器 skills/ 单技能 2 文件」场景；返回 mock Filesystem 便于 verify 读取次数 */
+    private record SkillScene(Filesystem files, String skillMd, String runSh) {}
+
+    private static SkillScene skillScene(String skillMd, String runSh) {
+        var files = mock(Filesystem.class);
+        var skillDir = dirEntry("/workspace/skills/sbx-skill");
+        var skillMdEntry = fileEntry("/workspace/skills/sbx-skill/SKILL.md", skillMd.length());
+        var scriptsDir = dirEntry("/workspace/skills/sbx-skill/scripts");
+        var runShEntry = fileEntry("/workspace/skills/sbx-skill/scripts/run.sh", runSh.length());
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(skillDir));
+        when(files.listDirectory("/workspace/skills/sbx-skill"))
+            .thenReturn(List.of(skillMdEntry, scriptsDir));
+        when(files.listDirectory("/workspace/skills/sbx-skill/scripts")).thenReturn(List.of(runShEntry));
+        when(files.readFile("/workspace/skills/sbx-skill/SKILL.md")).thenReturn(skillMd);
+        when(files.readFile("/workspace/skills/sbx-skill/scripts/run.sh")).thenReturn(runSh);
+        return new SkillScene(files, skillMd, runSh);
+    }
+
+    @Test
+    void snapshotDiffShouldSkipUnchangedFilesOnSecondSync() throws Exception {
+        var store = new InMemoryStore();
+        var scene = skillScene("---\\nname: sbx-skill\\n---\\nA", "echo 1");
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(scene.files());
+        var gate = new SkillSyncGate();
+        var svc = service(store, AGENT);
+
+        // 第一轮：快照为空 → 全读（现行为），KV 落库
+        svc.syncBack(USER, osb, gate);
+        verify(scene.files(), times(1)).readFile("/workspace/skills/sbx-skill/SKILL.md");
+
+        // 第二轮：内容与快照一致 → 不再读内容（差分命中）
+        svc.syncBack(USER, osb, gate);
+        verify(scene.files(), times(1)).readFile("/workspace/skills/sbx-skill/SKILL.md");
+        verify(scene.files(), times(1)).readFile("/workspace/skills/sbx-skill/scripts/run.sh");
+    }
+
+    @Test
+    void snapshotDiffShouldReadChangedFileOnly() throws Exception {
+        var store = new InMemoryStore();
+        var scene = skillScene("---\\nname: sbx-skill\\n---\\nA", "echo 1");
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(scene.files());
+        var gate = new SkillSyncGate();
+        var svc = service(store, AGENT);
+        svc.syncBack(USER, osb, gate);
+
+        // 容器内 SKILL.md 被改（size 变化）：只重读该文件，run.sh 不再读
+        var skillMdEntry2 = fileEntry("/workspace/skills/sbx-skill/SKILL.md", 24);
+        var scriptsDir = dirEntry("/workspace/skills/sbx-skill/scripts");
+        when(scene.files().listDirectory("/workspace/skills/sbx-skill"))
+            .thenReturn(List.of(skillMdEntry2, scriptsDir));
+        when(scene.files().readFile("/workspace/skills/sbx-skill/SKILL.md")).thenReturn("---\\nname: changed\\n---\\nB");
+        svc.syncBack(USER, osb, gate);
+        verify(scene.files(), times(2)).readFile("/workspace/skills/sbx-skill/SKILL.md");
+        verify(scene.files(), times(1)).readFile("/workspace/skills/sbx-skill/scripts/run.sh");
+    }
+
+    @Test
+    void snapshotDiffDisabledShouldAlwaysReadAll() throws Exception {
+        var store = new InMemoryStore();
+        var scene = skillScene("---\\nname: sbx-skill\\n---\\nA", "echo 1");
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(scene.files());
+        var gate = new SkillSyncGate();
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+        var svc = new WorkspaceSyncService(reader, false);
+        svc.syncBack(USER, osb, gate);
+        svc.syncBack(USER, osb, gate);
+        // 开关关闭：即使传了 gate 也全量读（现行为）
+        verify(scene.files(), times(2)).readFile("/workspace/skills/sbx-skill/SKILL.md");
+    }
+
+    @Test
+    void snapshotDiffWithNullGateShouldReadAll() throws Exception {
+        var store = new InMemoryStore();
+        var scene = skillScene("---\\nname: sbx-skill\\n---\\nA", "echo 1");
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(scene.files());
+        var svc = service(store, AGENT);
+        svc.syncBack(USER, osb, null);
+        svc.syncBack(USER, osb, null);
+        verify(scene.files(), times(2)).readFile("/workspace/skills/sbx-skill/SKILL.md");
+    }
+
+    @Test
+    void snapshotDiffShouldWriteChangedContentToKV() throws Exception {
+        var store = new InMemoryStore();
+        var scene = skillScene("---\\nname: sbx-skill\\n---\\nA", "echo 1");
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(scene.files());
+        var gate = new SkillSyncGate();
+        var svc = service(store, AGENT);
+        svc.syncBack(USER, osb, gate);
+
+        // run.sh 内容变化（size 6→8）→ 第二轮回写后 KV 必须是新值。
+        // 注意 size 必须真的变化："echo 1"/"echo 2" 等长时差分按设计跳过（快照差分盲点）
+        var runShEntry2 = fileEntry("/workspace/skills/sbx-skill/scripts/run.sh", 8);
+        when(scene.files().listDirectory("/workspace/skills/sbx-skill/scripts")).thenReturn(List.of(runShEntry2));
+        when(scene.files().readFile("/workspace/skills/sbx-skill/scripts/run.sh")).thenReturn("echo 22");
+        svc.syncBack(USER, osb, gate);
+
+        var fs = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
+        var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
+        assertEquals("echo 22", fs.read(ctx, "/sbx-skill/scripts/run.sh", 0, -1).fileData().content());
     }
 }

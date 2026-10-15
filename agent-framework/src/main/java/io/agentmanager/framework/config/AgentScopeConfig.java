@@ -105,11 +105,13 @@ public class AgentScopeConfig {
      * 沙箱回写服务：依赖 WorkspaceReader（而非裸 BaseStore），保证回写命名空间与读取侧一致
      * ——{@code agents/{agent}/users/{uid}}（运行时文件）与
      * {@code agents/{agent}/users/{uid}/skills}（用户技能 L4，key={@code /{技能名}/{路径}}）。
+     * 快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true）经 SandboxRuntime 传入。
      */
     @Bean
     public WorkspaceSyncService workspaceSyncService(
-            io.agentmanager.framework.service.WorkspaceReader workspaceReader) {
-        return new WorkspaceSyncService(workspaceReader);
+            io.agentmanager.framework.service.WorkspaceReader workspaceReader,
+            io.agentmanager.framework.service.SandboxRuntime sandboxRuntime) {
+        return new WorkspaceSyncService(workspaceReader, sandboxRuntime.syncSnapshotDiffEnabled());
     }
 
     /**
