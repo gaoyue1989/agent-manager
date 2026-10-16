@@ -68,8 +68,22 @@ type ListService struct {
 	EnvSecretKeys []EnvSecretKeyView `json:"envSecretKeys"`
 }
 
-// List 列表（可按状态/关键字/包过滤），合并实时 Pod 状态。
-func (c *Core) List(status, keyword string, packageID uint) ([]ListService, error) {
+// PreviewK8sName preview-name 轻端点：派生 K8s 名并检测冲突（不落库）。
+func (c *Core) PreviewK8sName(name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	base := k8s.DeriveK8sName(name, "")
+	var cnt int64
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("k8s_name = ?", base).Count(&cnt).Error; err != nil {
+		return base, false
+	}
+	return base, cnt > 0
+}
+
+// List 列表（可按状态/关键字/包/工作空间过滤），合并实时 Pod 状态。
+// workspaceID 0=不过滤（存量语义）；>0=仅该空间；-1=仅未归属（运维「查看待纳管」）。
+func (c *Core) List(status, keyword string, packageID uint, workspaceID int64) ([]ListService, error) {
 	q := c.DB.Model(&store.ServiceEntity{}).Order("id DESC")
 	if status != "" {
 		q = q.Where("status = ?", status)
@@ -79,6 +93,12 @@ func (c *Core) List(status, keyword string, packageID uint) ([]ListService, erro
 	}
 	if packageID > 0 {
 		q = q.Where("package_id = ?", packageID)
+	}
+	switch {
+	case workspaceID > 0:
+		q = q.Where("workspace_id = ?", workspaceID)
+	case workspaceID < 0:
+		q = q.Where("workspace_id = 0")
 	}
 	var rows []store.ServiceEntity
 	if err := q.Find(&rows).Error; err != nil {

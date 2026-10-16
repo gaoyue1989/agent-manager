@@ -1,10 +1,17 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestMain 统一注入 JWT_SECRET（M0 起 Load 启动期校验该键；config 测试关注其余配置项）。
+func TestMain(m *testing.M) {
+	os.Setenv("JWT_SECRET", "test-secret")
+	os.Exit(m.Run())
+}
 
 func TestParseImages(t *testing.T) {
 	t.Run("label and bare entries", func(t *testing.T) {

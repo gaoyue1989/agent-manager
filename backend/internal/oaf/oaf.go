@@ -77,6 +77,10 @@ type SubAgent struct {
 	Role        string   `yaml:"role" json:"role"`
 	Delegations []string `yaml:"delegations,omitempty" json:"delegations,omitempty"`
 	Required    bool     `yaml:"required" json:"required"`
+	// Endpoint 远程子 agent 服务地址（Agent Protocol；空=本地子代理）。
+	// agent-framework SubAgentConfig 已支持该字段（OafConfigLoader agents[].endpoint），
+	// 此处补齐使 manifest_json 保留声明供 console 编辑链路反查。
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
 }
 
 type RuntimeConfig struct {

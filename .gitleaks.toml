@@ -39,3 +39,20 @@ regexes = [
   '''^sk-or-v1-abcdef1234567890$''',
   '''^sk-collector-inject-key-1234567890$''',
 ]
+
+# ---------------------------------------------------------------------------
+# 控制台拆分（feat/console-user-workspace-split）：
+# - backend 单测：JWT 测试签名密钥（JWT_SECRET 等价物）与 bcrypt 假口令、
+#   sk-test 占位 API Key（验证掩码/Secret 路由，非真实凭据）；
+# - manifests/platform.yaml：部署清单默认值占位（部署时按环境覆盖，见 AGENTS.md 部署章节）。
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "控制台拆分测试与清单占位密钥（非真实凭据）"
+
+regexes = [
+  '''^test-jwt-secret$''',
+  '''^test-secret$''',
+  '''^sk-test$''',
+  '''^oaf-console-jwt-secret-CHANGE-ME$''',
+  '''^sk-abcdefgh1234$''',
+]

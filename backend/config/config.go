@@ -54,7 +54,14 @@ type Config struct {
 	DeploymentTemplate string // 业务 Deployment overlay 文件路径（Strategic Merge Patch），空=纯内置构造
 	IngressTemplate    string // 业务 Ingress overlay 文件路径（Strategic Merge Patch），空=纯内置构造
 
-	AuthToken string // 非空时启用 Bearer 校验
+	AuthToken string // 非空时启用 Bearer 校验（存量运维 API + MCP + admin 兼容通道）
+
+	// JWTSecret 登录 token 签发/校验密钥（控制面拆分 M0；为空启动 fail-fast）
+	JWTSecret string
+	// AdminInitUser / AdminInitPassword 首个 admin 种子（仅 users 表为空时生效，幂等；
+	// 两者任一为空则跳过并 warn——空库无 admin 时 console/admin 不可登录，属部署配置问题）
+	AdminInitUser     string
+	AdminInitPassword string
 
 	PackageDownloadBase string // create_oaf_zip 返回 download_url 的基地址（集群内可达即可，代理方为业务 Agent Pod）
 }
@@ -79,10 +86,18 @@ func Load() (*Config, error) {
 		DeploymentTemplate:  envStr("DEPLOYMENT_TEMPLATE", ""),
 		IngressTemplate:     envStr("INGRESS_TEMPLATE", ""),
 		AuthToken:           envStr("AUTH_TOKEN", ""),
+		JWTSecret:           envStr("JWT_SECRET", ""),
+		AdminInitUser:       envStr("ADMIN_INIT_USER", ""),
+		AdminInitPassword:   envStr("ADMIN_INIT_PASSWORD", ""),
 		PackageDownloadBase: envStr("PACKAGE_DOWNLOAD_BASE", "http://platform-backend.agent-platform.svc.cluster.local:8080"),
 	}
 	if c.MySQLDSN == "" {
 		return nil, errors.New("MYSQL_DSN is required")
+	}
+	// JWT_SECRET 启动期校验（非请求期，M0 §2.1）：为空 fail-fast——登录态签发无密钥
+	// 等于鉴权失效；部署清单/环境必须显式配置（manifests/platform.yaml 已带默认值占位）。
+	if c.JWTSecret == "" {
+		return nil, errors.New("JWT_SECRET is required (console login signing key)")
 	}
 	// 后缀格式非法时直接启动失败：域名形态一经生效会影响全部服务的 Ingress 与展示地址，
 	// 与 MYSQL_DSN 缺失同策略（fail-fast），不在发布期逐个报错。

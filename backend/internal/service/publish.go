@@ -24,6 +24,13 @@ type Core struct {
 	Cfg ConfigView
 
 	Packages *PackageService
+
+	// JWTSecret 登录 token 校验密钥（introspect 数据面用；签发在 handler 层）
+	JWTSecret string
+
+	// OnServiceRunning 服务转 running 后的回调（M5 模型下发挂载点；nil 跳过）。
+	// 在 transition 内 goroutine 触发，失败不影响状态机推进。
+	OnServiceRunning func(serviceID uint)
 }
 
 // ConfigView 发布所需的最小配置集（避免直接依赖 config.Config，便于测试）。
@@ -102,6 +109,23 @@ type PublishRequest struct {
 	// SecretKeys 强制按敏感处理的任意键（如 MCP token），与模板敏感键一并路由进服务 Secret
 	SecretKeys []string `json:"secretKeys"`
 	Replicas   int32    `json:"replicas"`
+
+	// ---- 控制面拆分扩展（M1/M3）：存量调用不传即零影响 ----
+	// WorkspaceID 归属工作空间（0=未归属）；CreatedBy 发布人用户 id
+	WorkspaceID uint `json:"workspaceId"`
+	CreatedBy   uint `json:"createdBy"`
+	// Spec 资源规格档（"" | small | medium | large，决议 4；与 DEPLOYMENT_TEMPLATE
+	// overlay 的 resources 配置互斥校验）
+	Spec string `json:"spec"`
+	// PublicEndpoint 是否发布对外访问入口；nil=true（存量默认）
+	PublicEndpoint *bool `json:"publicEndpoint"`
+}
+
+// spec 档 → Deployment resources 直译映射（决议 4）。
+var specProfiles = map[string][2]string{ // [requestsCPU, requestsMem]（limits 同值直译）
+	"small":  {"1", "2Gi"},
+	"medium": {"2", "4Gi"},
+	"large":  {"4", "8Gi"},
 }
 
 // NewCore 组装业务层。
@@ -110,12 +134,29 @@ func NewCore(db *gorm.DB, fs *store.FS, kc k8s.Client, cv ConfigView) *Core {
 		Packages: &PackageService{DB: db, FS: fs}}
 }
 
+// validateSpec 规格档校验 + 与 DEPLOYMENT_TEMPLATE overlay resources 互斥（决议 4）。
+func (c *Core) validateSpec(spec string) error {
+	if spec == "" {
+		return nil
+	}
+	if _, ok := specProfiles[spec]; !ok {
+		return fmt.Errorf("%w: unknown spec %q (small|medium|large)", ErrInvalidForm, spec)
+	}
+	if c.deployBuilder().OverridesResources() {
+		return fmt.Errorf("%w: DEPLOYMENT_TEMPLATE already configures resources; spec is not allowed", ErrInvalidForm)
+	}
+	return nil
+}
+
 // Publish 创建全套 K8s 资源并异步等待就绪+注册。
 func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err := ValidateEnv(req.Env); err != nil {
 		return nil, err
 	}
 	if err := validateSecretKeys(req.SecretKeys); err != nil {
+		return nil, err
+	}
+	if err := c.validateSpec(req.Spec); err != nil {
 		return nil, err
 	}
 	image := req.Image
@@ -135,6 +176,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err != nil {
 		return nil, err
 	}
+	public := req.PublicEndpoint == nil || *req.PublicEndpoint
 
 	// 敏感路由：模板敏感键 + secretKeys 进 EnvSecret（服务 Secret），其余进 Env（CM）
 	plain, secret := splitUserEnv(req.Env, req.SecretKeys)
@@ -145,7 +187,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// （Publish/UpdateEnv/Republish）出口另有 dropEmptyEnv 兜底，空值永不进入 CM/Secret。
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
-	params := c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath)
+	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
 	// 展示 endpoint 派生 + Ingress overlay 纯函数前置（host 模式）：非法 overlay 直接
 	// 拒绝且不落库（与 image 校验同级，模板违规属平台配置错误，不产生 deploying/error
@@ -154,6 +196,11 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	endpoint, err := c.deriveEndpoint(params)
 	if err != nil {
 		return nil, err
+	}
+	if !public {
+		// M3 §2.4：不发布对外入口 —— host 模式跳过 Ingress 创建；router 模式
+		// （统一 router 域名为静态泛化）仅置空展示地址（页面标注「仅集群内」）
+		endpoint = ""
 	}
 	svc := &store.ServiceEntity{
 		K8sName:       k8sName,
@@ -169,6 +216,11 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		Endpoint:      endpoint,
 		ClusterURL:    fmt.Sprintf("http://%s-svc.%s.svc.cluster.local:%d", k8sName, c.Cfg.Namespace, k8s.AgentPort),
 		ShortName:     k8s.ShortName(k8sName),
+
+		WorkspaceID:    req.WorkspaceID,
+		CreatedBy:      req.CreatedBy,
+		Spec:           req.Spec,
+		PublicEndpoint: req.PublicEndpoint,
 	}
 
 	svc.Status = store.StatusDeploying // 落库即为 deploying（事件保留 created→deploying 审计）
@@ -186,12 +238,39 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		return nil, err
 	}
 
-	if _, err := c.applyAll(params); err != nil {
+	if _, err := c.applyAllPublic(params, public); err != nil {
 		c.transition(svc, store.StatusError, "apply failed: "+err.Error())
 		return nil, err
 	}
 	c.asyncWaitAndRegister(svc.ID)
 	return svc, nil
+}
+
+// applyAllPublic 公共入口开关包装：public=false 时 host 模式跳过 Ingress 创建
+// （M3 §2.4：不发布对外访问入口 = 仅集群内可达）；router 模式行为不变（本就无 per-service
+// Ingress，收敛旧对象语义保持）。
+func (c *Core) applyAllPublic(p k8s.ObjectParams, public bool) (*networkingv1.Ingress, error) {
+	if public || c.Cfg.IngressHostSuffix == "" {
+		return c.applyAll(p)
+	}
+	// host 模式私有发布：跳过 Ingress 构建/写入，并清理历史同名 Ingress（如有）
+	if err := c.K8s.DeleteIngress(p.Namespace, p.K8sName); err != nil {
+		return nil, fmt.Errorf("ingress cleanup: %w", err)
+	}
+	if err := c.applyServiceEnvObjects(p); err != nil {
+		return nil, err
+	}
+	if err := c.K8s.EnsureService(k8s.Service(p)); err != nil {
+		return nil, fmt.Errorf("service: %w", err)
+	}
+	dep, err := c.deployBuilder().Build(p)
+	if err != nil {
+		return nil, fmt.Errorf("deployment: %w", err)
+	}
+	if err := c.K8s.EnsureDeployment(dep); err != nil {
+		return nil, fmt.Errorf("deployment: %w", err)
+	}
+	return nil, nil
 }
 
 // applyAll 幂等创建/更新服务 env 两级对象+Deployment+Service，并返回已落集群的
@@ -339,6 +418,17 @@ type RepublishOptions struct {
 	Replicas   *int32
 	Env        map[string]string // 非 nil 时全量替换（非敏感部分；敏感键路由语义同 UpdateEnv）
 	SecretKeys []string          // Env 非 nil 时生效：强制按敏感处理的任意键
+	Spec       *string           // 规格档（决议 4；空串=清除回平台默认）
+	PublicEndpoint *bool         // 对外入口开关
+}
+
+// applySpec 将规格档直译进 ObjectParams resources（limits 同值，决议 4）。
+func applySpec(p k8s.ObjectParams, spec string) k8s.ObjectParams {
+	if prof, ok := specProfiles[spec]; ok {
+		p.RequestsCPU, p.RequestsMem = prof[0], prof[1]
+		p.LimitsCPU, p.LimitsMem = prof[0], prof[1]
+	}
+	return p
 }
 
 // Republish 幂等重建全套资源（可换包/镜像/env），并滚动重启重新注册。
@@ -389,15 +479,26 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	if opt.Replicas != nil && *opt.Replicas > 0 {
 		replicas = *opt.Replicas
 	}
+	spec := svc.Spec
+	if opt.Spec != nil {
+		spec = *opt.Spec
+	}
+	public := svc.EndpointPublic()
+	if opt.PublicEndpoint != nil {
+		public = *opt.PublicEndpoint
+	}
 
 	// Ingress overlay 纯函数前置（事务前，host 模式）：非法 overlay 直接拒绝，库与 K8s
 	// 均保持原状；同时派生展示 endpoint 随事务回写（模板/配置变更后展示地址跟随合并
 	// 结果）。router 模式纯配置拼装（RouterEndpoint）。
-	params := c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID))
+	params := applySpec(c.params(svc.K8sName, image, plain, replicas, c.pkgDir(newPkgID)), spec)
 	params.EnvSecret = secret
 	endpoint, err := c.deriveEndpoint(params)
 	if err != nil {
 		return nil, err
+	}
+	if !public {
+		endpoint = ""
 	}
 
 	err = c.DB.Transaction(func(tx *gorm.DB) error {
@@ -413,6 +514,7 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 		updates := map[string]interface{}{
 			"image": image, "replicas": replicas, "endpoint": endpoint,
 			"env_json": mustJSON(plain), "env_secret_json": mustJSON(secret),
+			"spec": spec, "public_endpoint": public,
 		}
 		return tx.Model(svc).Updates(updates).Error
 	})
@@ -421,9 +523,10 @@ func (c *Core) Republish(id uint, opt RepublishOptions) (*store.ServiceEntity, e
 	}
 	svc.PackageID, svc.Image, svc.Replicas = newPkgID, image, int(replicas)
 	svc.EnvJSON, svc.EnvSecretJSON = mustJSON(plain), mustJSON(secret)
-	svc.Endpoint = endpoint
+	svc.Endpoint, svc.Spec = endpoint, spec
+	svc.PublicEndpoint = &public
 
-	if _, err := c.applyAll(params); err != nil {
+	if _, err := c.applyAllPublic(params, public); err != nil {
 		c.transition(svc, store.StatusError, "republish apply failed: "+err.Error())
 		return nil, err
 	}
@@ -447,9 +550,9 @@ func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
 	if err != nil {
 		return nil, err
 	}
-	params := c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID))
+	params := applySpec(c.params(svc.K8sName, svc.Image, plain, int32(svc.Replicas), c.pkgDir(svc.PackageID)), svc.Spec)
 	params.EnvSecret = secret
-	ing, err := c.applyAll(params)
+	ing, err := c.applyAllPublic(params, svc.EndpointPublic())
 	if err != nil {
 		c.transition(svc, store.StatusError, "start again apply failed: "+err.Error())
 		return nil, err
@@ -457,7 +560,9 @@ func (c *Core) StartAgain(id uint) (*store.ServiceEntity, error) {
 	// 重新上线即重建全部对象，Ingress 已按当前配置形态刷新（path/host 模式切换的存量
 	// 服务在此收敛），故同步重算展示地址落库；回写失败只记日志不阻断（apply 已成功，
 	// 状态机应继续推进，避免因展示字段写入失败把服务卡在 error）。
-	c.refreshEndpoint(svc, ing)
+	if svc.EndpointPublic() {
+		c.refreshEndpoint(svc, ing)
+	}
 	c.transition(svc, store.StatusDeploying, "started again")
 	c.asyncWaitAndRegister(svc.ID)
 	return svc, nil
@@ -602,6 +707,13 @@ func (c *Core) transition(svc *store.ServiceEntity, to, reason string) {
 	}
 	svc.Status = to
 	log.Printf("[transition] svc=%d %s -> %s (%s)", svc.ID, from, to, reason)
+	// M5 模型下发挂载点：服务转 running 后触发（异步，失败不影响状态机）
+	if to == store.StatusRunning && c.OnServiceRunning != nil {
+		go func(id uint) {
+			defer func() { _ = recover() }()
+			c.OnServiceRunning(id)
+		}(svc.ID)
+	}
 }
 
 func recordEvent(tx *gorm.DB, svcID uint, from, to, reason string) error {

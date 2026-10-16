@@ -14,10 +14,31 @@ import (
 	"agent-manager/backend/internal/service"
 )
 
-// Register 挂载全部 REST 路由（/api/v1）。
-func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label string }, authToken string) {
+// Register 挂载全部 REST 路由。路由分层（设计 §5.3，M0 §2.5）：
+//
+//	/api/v1/auth/*      无鉴权（login/logout/introspect）；me 需 JWT
+//	/api/v1/console/*   JWT（任意角色），workspace 权限由 membership 裁决
+//	/api/v1/admin/*     JWT-admin 或 AUTH_TOKEN（脚本/release-agent 兼容）
+//	/api/v1/{services,packages,images,platform-config}  存量运维 API（AUTH_TOKEN 可选，现状不动）
+//	/mcp                AUTH_TOKEN（main.go 挂载）
+//
+// gin 语义：auth/console/admin 三个子组必须在 legacy `g.Use(Auth)` 之前创建，
+// 否则会继承该中间件（分层单测锁住：设 AUTH_TOKEN 时 /auth/login 可匿名访问、
+// 带 JWT 的 /console/* 不被 AUTH_TOKEN 拦截）。
+func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label string }, authToken, jwtSecret string) {
 	r.Use(CORS())
 	g := r.Group("/api/v1")
+
+	// 1) 公开/认证端点（不继承 legacy Auth）
+	registerAuth(g, core, jwtSecret)
+
+	// 2) console / admin 新面（先建组，后挂 legacy 中间件不影响它们）
+	cg := g.Group("/console", JWTAuth(jwtSecret))
+	registerConsole(cg, core)
+	ag := g.Group("/admin", RequireAdmin(authToken, jwtSecret))
+	registerAdmin(ag, core)
+
+	// 3) legacy 存量（行为与今天完全一致；AUTH_TOKEN 可选语义不变）
 	if authToken != "" {
 		g.Use(Auth(authToken))
 	}
@@ -144,6 +165,21 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			}
 			OK(c, gin.H{"package": rec, "warnings": warnings})
 		})
+		// 模板标记开关（M2 §2.3：用户侧模板页数据源维护入口）
+		pk.PATCH("/:id/template", func(c *gin.Context) {
+			var body struct {
+				IsTemplate *bool `json:"isTemplate"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil || body.IsTemplate == nil {
+				Fail(c, http.StatusBadRequest, "isTemplate is required")
+				return
+			}
+			if err := core.Packages.SetTemplate(parseUint(c.Param("id")), *body.IsTemplate); err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, nil)
+		})
 		pk.DELETE("/:id", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 			if err := core.Packages.Delete(uint(id)); err != nil {
@@ -171,7 +207,8 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 		})
 		sv.GET("", func(c *gin.Context) {
 			pid, _ := strconv.ParseUint(c.Query("packageId"), 10, 64)
-			list, err := core.List(c.Query("status"), c.Query("keyword"), uint(pid))
+			wid, _ := strconv.ParseInt(c.Query("workspaceId"), 10, 64)
+			list, err := core.List(c.Query("status"), c.Query("keyword"), uint(pid), wid)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -204,17 +241,6 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			}
 			OK(c, svc)
 		})
-		action := func(name string, fn func(*service.Core, uint) (interface{}, error)) {
-			sv.POST("/:id/"+name, func(c *gin.Context) {
-				id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
-				out, err := fn(core, uint(id))
-				if err != nil {
-					mapError(c, err)
-					return
-				}
-				OK(c, out)
-			})
-		}
 		sv.POST("/:id/republish", func(c *gin.Context) {
 			id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 			var opt service.RepublishOptions
@@ -231,6 +257,17 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 			}
 			OK(c, out)
 		})
+		action := func(name string, fn func(*service.Core, uint) (interface{}, error)) {
+			sv.POST("/:id/"+name, func(c *gin.Context) {
+				id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+				out, err := fn(core, uint(id))
+				if err != nil {
+					mapError(c, err)
+					return
+				}
+				OK(c, out)
+			})
+		}
 		action("publish", func(core *service.Core, id uint) (interface{}, error) {
 			return core.StartAgain(id)
 		})

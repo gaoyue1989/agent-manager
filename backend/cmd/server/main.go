@@ -26,6 +26,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}
+	// 存量数据幂等回填（设计 §6.3）：仅平台自有表，二次启动零写入；先于路由装配
+	if err := store.Backfill(db, cfg.AdminInitUser, cfg.AdminInitPassword); err != nil {
+		log.Fatalf("migrate backfill: %v", err)
+	}
 	fs := &store.FS{Root: cfg.DataRoot}
 
 	kc, err := k8sclient.NewInCluster(os.Getenv("KUBECONFIG"))
@@ -78,12 +82,15 @@ func main() {
 		IngressBuilder:      ingBuilder,
 		PackageDownloadBase: cfg.PackageDownloadBase,
 	})
+	// 身份与模型下发装配：introspect JWT 校验密钥 + running 后模型连接异步下发（M5）
+	core.JWTSecret = cfg.JWTSecret
+	core.OnServiceRunning = core.DeliverPendingForService
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	handler.Register(r, core, toHandlerImages(cfg.AvailableImages), cfg.AuthToken)
+	handler.Register(r, core, toHandlerImages(cfg.AvailableImages), cfg.AuthToken, cfg.JWTSecret)
 
 	// M3：MCP streamableHttp /mcp 与 REST 同端口挂载
 	// MCP 门面：streamableHttp /mcp 与 REST 同端口

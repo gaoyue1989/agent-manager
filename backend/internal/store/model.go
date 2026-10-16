@@ -20,7 +20,10 @@ type OafPackage struct {
 	Checksum        string    `gorm:"size:64" json:"checksum"`      // zip sha256
 	SourcePackageID uint      `gorm:"index" json:"sourcePackageId"` // 0=上传原始包；>0=由该包编辑派生
 	RefCount        int       `json:"refCount"`
-	CreatedAt       time.Time `json:"createdAt"`
+	// WorkspaceID 归属工作空间：0=平台公共包（所有空间可见，决议 7）；>0=仅本空间可见
+	WorkspaceID uint      `gorm:"index" json:"workspaceId"`
+	IsTemplate  bool      `gorm:"index" json:"isTemplate"` // 模板标记（用户侧模板页数据源）
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 // 服务状态常量（状态机见 REDESIGN §3.9）。
@@ -48,6 +51,14 @@ type ServiceEntity struct {
 	EnvSecretJSON string `gorm:"type:json" json:"-"`
 	Replicas      int    `json:"replicas"`
 
+	// WorkspaceID 归属工作空间（0=未归属，仅运维可见）；CreatedBy 发布人用户 id（0=历史行）
+	WorkspaceID uint `gorm:"index" json:"workspaceId"`
+	CreatedBy   uint `json:"createdBy"`
+	// Spec 资源规格档（"" | small | medium | large，决议 4；空=沿用平台默认资源配置）
+	Spec string `gorm:"size:16" json:"spec"`
+	// PublicEndpoint 是否发布对外访问入口；nil 视为 true（存量行为，M3 §2.4）
+	PublicEndpoint *bool `gorm:"index" json:"publicEndpoint"`
+
 	Status     string `gorm:"size:24;index" json:"status"`
 	Endpoint   string `gorm:"size:256" json:"endpoint"`
 	ClusterURL string `gorm:"size:256" json:"clusterUrl"`
@@ -61,6 +72,11 @@ type ServiceEntity struct {
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// EndpointPublic 兜底取值：nil（存量行）= true（发布对外入口，历史行为）。
+func (s *ServiceEntity) EndpointPublic() bool {
+	return s.PublicEndpoint == nil || *s.PublicEndpoint
 }
 
 func (ServiceEntity) TableName() string { return "services" }
@@ -92,3 +108,135 @@ type PlatformConfigEvent struct {
 	EnvKeys   string    `gorm:"type:json" json:"envKeys"` // 本次涉及键名数组
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
+
+// ---- 控制面拆分新增实体（docs/design/console-user-workspace-split-design.md §6）----
+
+// User 平台用户（role=admin 可进运维侧与任意空间；user 仅本人所属空间）。
+type User struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	Username     string     `gorm:"size:64;uniqueIndex" json:"username"`
+	PasswordHash string     `gorm:"size:128" json:"-"` // bcrypt
+	DisplayName  string     `gorm:"size:128" json:"displayName"`
+	Email        string     `gorm:"size:128" json:"email"`
+	Role         string     `gorm:"size:16;index" json:"role"` // admin | user
+	Status       string     `gorm:"size:16" json:"status"`     // active | disabled
+	LastLoginAt  *time.Time `json:"lastLoginAt"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
+}
+
+func (User) TableName() string { return "users" }
+
+// Workspace 工作空间：用户侧资源隔离与协作单元（slug 形如 ws-{8 hex}）。
+type Workspace struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	Slug        string `gorm:"size:32;uniqueIndex" json:"slug"`
+	Name        string `gorm:"size:128" json:"name"`
+	Description string `gorm:"size:256" json:"description"`
+	OwnerUserID uint   `gorm:"index" json:"ownerUserId"`
+	Status      string `gorm:"size:16" json:"status"`      // active | disabled
+	QuotaJSON   string `gorm:"type:json" json:"quotaJson"` // {"maxAgents":N}，一期仅记录
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+func (Workspace) TableName() string { return "workspaces" }
+
+// WorkspaceMember 空间成员关系（role: owner | admin | member）。
+type WorkspaceMember struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	WorkspaceID uint      `gorm:"uniqueIndex:uk_ws_user;index" json:"workspaceId"`
+	UserID      uint      `gorm:"uniqueIndex:uk_ws_user;index" json:"userId"`
+	Role        string    `gorm:"size:16" json:"role"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+func (WorkspaceMember) TableName() string { return "workspace_members" }
+
+// ApiKey 调用凭证（明文仅签发时返回一次；sha256 落库）。
+type ApiKey struct {
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	WorkspaceID uint       `gorm:"index" json:"workspaceId"`
+	AgentID     *uint      `gorm:"index" json:"agentId"` // nil=空间内全部 Agent
+	UserID      uint       `json:"userId"`               // 签发人
+	Name        string     `gorm:"size:128" json:"name"`
+	KeyPrefix   string     `gorm:"size:16" json:"keyPrefix"`     // ak- 前 8 位（列表识别）
+	KeyHash     string     `gorm:"size:64;uniqueIndex" json:"-"` // sha256 hex，不存明文
+	Status      string     `gorm:"size:16" json:"status"`        // active | revoked
+	LastUsedAt  *time.Time `json:"lastUsedAt"`
+	ExpiresAt   *time.Time `json:"expiresAt"`
+	CreatedAt   time.Time  `json:"createdAt"`
+}
+
+func (ApiKey) TableName() string { return "api_keys" }
+
+// ModelConnection 工作空间级模型连接（对标 AgentCore 模型管理；内网库明文先例=model_config）。
+type ModelConnection struct {
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	WorkspaceID uint       `gorm:"uniqueIndex:uk_mc_ws_name;index" json:"workspaceId"`
+	Name        string     `gorm:"size:128;uniqueIndex:uk_mc_ws_name" json:"name"`
+	Provider    string     `gorm:"size:32" json:"provider"` // 一期仅 openai（OpenAI 兼容）
+	ModelID     string     `gorm:"size:128" json:"modelId"`
+	BaseURL     string     `gorm:"size:512" json:"baseUrl"`
+	APIKey      string     `gorm:"size:512" json:"-"` // 接口一律掩码回显
+	Temperature float64    `json:"temperature"`
+	MaxTokens   int        `json:"maxTokens"`
+	TimeoutSec  int        `json:"timeoutSeconds"`
+	Status      string     `gorm:"size:16" json:"status"` // verified | unverified | failed
+	LastTestedAt *time.Time `json:"lastTestedAt"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+func (ModelConnection) TableName() string { return "model_connections" }
+
+// ModelDelivery 连接 → Agent 下发状态（usage 表数据源；无后台任务，页面手动/running 回调触发）。
+type ModelDelivery struct {
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	ConnectionID  uint       `gorm:"index" json:"connectionId"`
+	ServiceID     uint       `gorm:"index" json:"serviceId"`
+	RemoteModelID string     `gorm:"size:128" json:"remoteModelId"` // Agent /models 返回的 id
+	Status        string     `gorm:"size:16" json:"status"`         // pending | synced | failed | removed
+	Error         string     `gorm:"size:256" json:"error"`
+	SyncedAt      *time.Time `json:"syncedAt"`
+	CreatedAt     time.Time  `json:"createdAt"`
+}
+
+func (ModelDelivery) TableName() string { return "model_deliveries" }
+
+// McpConnector 工作空间级 MCP 连接器配置（创建/更新 Agent 时勾选注入生成包）。
+type McpConnector struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	WorkspaceID    uint       `gorm:"uniqueIndex:uk_conn_ws_name;index" json:"workspaceId"`
+	Name           string     `gorm:"size:64;uniqueIndex:uk_conn_ws_name" json:"name"`
+	Transport      string     `gorm:"size:24" json:"transport"` // streamable_http | sse
+	Endpoint       string     `gorm:"size:512" json:"endpoint"`
+	AuthType       string     `gorm:"size:16" json:"authType"` // none | bearer
+	AuthToken      string     `gorm:"size:512" json:"-"`       // 注入走服务 Secret，不落包
+	TimeoutSec     int        `json:"timeoutSec"`
+	ToolScope      string     `gorm:"type:json" json:"toolScope"`   // {"mode":"all"} | {"mode":"subset","tools":[…]}
+	Permissions    string     `gorm:"type:json" json:"permissions"` // {"tools":{"t":"allow|ask|deny"}}
+	Status         string     `gorm:"size:16" json:"status"`
+	LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+func (McpConnector) TableName() string { return "mcp_connectors" }
+
+// AgentIntegration 集成关系声明（Agent Protocol 远程子 agent；运行时编排零改动）。
+type AgentIntegration struct {
+	ID              uint      `gorm:"primaryKey" json:"id"`
+	WorkspaceID     uint      `gorm:"index" json:"workspaceId"`
+	MemberServiceID uint      `gorm:"index" json:"memberServiceId"`
+	Name            string    `gorm:"size:64" json:"name"`
+	EndpointURL     string    `gorm:"size:256" json:"endpointUrl"`
+	AskPolicy       string    `gorm:"size:16" json:"askPolicy"` // PROPAGATE | DENY
+	RemoteStreaming bool      `json:"remoteStreaming"`
+	AuthHeaderKey   string    `gorm:"size:64" json:"authHeaderKey"`
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+func (AgentIntegration) TableName() string { return "agent_integrations" }
