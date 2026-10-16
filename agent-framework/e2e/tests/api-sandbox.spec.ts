@@ -446,9 +446,11 @@ test('X18 投影新鲜度：start 后新增的技能目录在下一 turn 补水�
   const uid = U();
   const sid = sessionIdFor(`x18-${uniq()}`);
   const marker = `PROJ-${uniq()}`;
-  // 探针目录按 MarketplaceStager 真实布局构造：.skills-cache/{tenant}_{sessionId}/oaf-package/{skill}/
-  // （scopeKeyFor 默认 USER 隔离档 → userId 优先，Channel 链路 userId 即测试传入的 uid）
-  const scope = `${uid}_${sid}`;
+  // 探针目录按 MarketplaceStager 真实布局构造：.skills-cache/{scope}/oaf-package/{skill}/
+  // （scopeKeyFor 默认 USER 隔离档 → ctx.userId 优先；Channel 链路 /threads/chat 经 ChatUiChannel
+  //  以 peer 作 ctx.userId，而本框架 peer = 前端 sessionId，故 scope = sid，
+  //  见 ChatStreamController.sendStream(ChatUiRequest.withPeer(finalSessionId, ...))）
+  const scope = sid;
   const hostSkillDir = path.join(
     process.env.E2E_AGENT_WS_ROOT ?? '.runtime/agent-config/.agentscope/workspace',
     '.skills-cache', scope, 'oaf-package', `probe-skill-${uniq()}`);

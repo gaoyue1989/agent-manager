@@ -66,6 +66,11 @@ agent:
   # false = 完全回退现状（不写归档表、history 仅读 agent_state）
   history:
     archive-enabled: ${AGENT_HISTORY_ARCHIVE_ENABLED:true}
+  # 宿主 .skills-cache 过期 scope 目录 GC（SDK 只回收当前 scope 内孤儿，跨 scope 目录需按龄清扫；
+  # 工作区为 Pod 本地缓存，可安全回收、下轮重新 stage）。其余 cleanup.* 键缺省见 CleanupConfig 的 @DefaultValue
+  cleanup:
+    skill-cache-gc-enabled: ${AGENT_CLEANUP_SKILL_CACHE_GC_ENABLED:true}
+    skill-cache-retention-days: ${AGENT_CLEANUP_SKILL_CACHE_RETENTION_DAYS:2}
   sandbox:
     enabled: ${SANDBOX_ENABLED:false}
     image: ${SANDBOX_IMAGE:opensandbox/code-interpreter:v1.1.0}

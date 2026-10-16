@@ -38,6 +38,9 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
 
+    /** 请求级技能缓存 scope 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取并绑定到沙箱实例 */
+    private final ThreadLocal<String> pendingSkillScope = new ThreadLocal<>();
+
     /** 最近创建/恢复的沙箱实例（middleware.onAgent 注入兜底，见 SandboxUserKeyMiddleware） */
     private final java.util.concurrent.atomic.AtomicReference<OpenSandbox> latestSandbox =
         new java.util.concurrent.atomic.AtomicReference<>();
@@ -155,6 +158,23 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public String peekPendingUserKey() {
         var key = pendingUserKey.get();
         return (key == null || key.isBlank()) ? null : key;
+    }
+
+    /** 设置待绑定的技能缓存 scope（SandboxUserKeyMiddleware.onAgent，与 pendingUserKey 同链设置） */
+    public void setPendingSkillScope(String scope) {
+        pendingSkillScope.set(scope);
+    }
+
+    /** 读取并清除待绑定技能缓存 scope（OpenSandboxClient.create/resume 时调用） */
+    public String takePendingSkillScope() {
+        var scope = pendingSkillScope.get();
+        pendingSkillScope.remove();
+        return scope;
+    }
+
+    /** 清除待绑定 scope（SandboxUserKeyMiddleware.onAgent 消费后调用，防线程池复用残留污染下个 turn） */
+    public void clearPendingSkillScope() {
+        pendingSkillScope.remove();
     }
 
     @Override

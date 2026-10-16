@@ -51,6 +51,12 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
         if (ctx != null) {
             var userKey = resolveUserKey(ctx);
             spec.setPendingUserKey(userKey);
+            // SDK 技能缓存 scope（.skills-cache/<scope>）：与 HarnessSkillMiddleware.scopeKeyFor 同源，
+            // 用于沙箱投影只投放当前会话的 scope 目录（否则整棵 .skills-cache 历史 scope 全灌进容器）
+            var skillScope = SkillCacheScope.scopeSegment(ctx);
+            if (skillScope != null) {
+                spec.setPendingSkillScope(skillScope);
+            }
             // 注入兜底：acquire（create/resume）可能先于本 middleware 且拿不到 userKey，
             // 此处沙箱实例已就绪 + userKey 已确定 → 绑定并注入（幂等，见 file-upload-download-plan §6.2）
             var sandbox = spec.getLatestSandbox();
@@ -58,6 +64,9 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
             if (sandbox != null) {
                 if (userKey != null && !userKey.isBlank()) {
                     sandbox.setUserKey(userKey);
+                }
+                if (skillScope != null) {
+                    sandbox.setSkillCacheScope(skillScope);
                 }
                 var store = spec.getFileAssetStore();
                 var sandboxId = sandbox.getOsbState().getSandboxId();
@@ -78,6 +87,7 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
             // 同线程下个 turn 的 create/bindUserKey 消费（实测：错误 uid 抢先触发 create 路径
             // materializeUserSkills 置位实例 flag → 正确 uid 的物化被静默跳过）
             spec.clearPendingUserKey();
+            spec.clearPendingSkillScope();
         }
         return next.apply(input);
     }

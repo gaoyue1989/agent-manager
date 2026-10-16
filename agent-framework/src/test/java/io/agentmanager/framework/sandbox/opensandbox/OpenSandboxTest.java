@@ -499,6 +499,121 @@ class OpenSandboxTest {
         verify(osb.commands(), never()).run(contains("tar xzf - -C /workspace"));
     }
 
+    // ---------- scoped .skills-cache 投放（方案 1：只投当前会话 scope + 清理容器内其它 scope） ----------
+
+    /** 生产形态投影 spec：投影根不含 .skills-cache（AgentScopeConfig.workspaceProjectionRoots 收窄）。 */
+    private static OpenSandboxState projectedStateNoSkillCache(java.nio.file.Path sourceRoot) {
+        var s = new OpenSandboxState();
+        var ws = new io.agentscope.harness.agent.sandbox.WorkspaceSpec();
+        ws.setRoot("/workspace");
+        var entry = new io.agentscope.harness.agent.sandbox.layout.WorkspaceProjectionEntry();
+        entry.setSourceRoot(sourceRoot.toAbsolutePath().normalize().toString());
+        entry.setIncludeRoots(List.of("AGENTS.md", "skills", "subagents", "knowledge"));
+        ws.setEntries(Map.of("__workspace_projection__", entry));
+        s.setWorkspaceSpec(ws);
+        return s;
+    }
+
+    private static void writeHostSkill(java.nio.file.Path host, String scope, String name) throws Exception {
+        var dir = host.resolve(".skills-cache").resolve(scope).resolve("oaf-package").resolve(name);
+        java.nio.file.Files.createDirectories(dir);
+        java.nio.file.Files.writeString(dir.resolve("SKILL.md"), "---\nname: " + name + "\n---\nhi");
+    }
+
+    @Test
+    void scopedSkillCacheHydratesOnlyCurrentScope() throws Exception {
+        // 宿主 .skills-cache 含两个 scope；投放 tar 只应有当前 scope，其它 scope 目录被清理命令删掉
+        var host = java.nio.file.Files.createTempDirectory("scoped-skill-cache");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-B", "demo-b");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, options(), null, null);
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+
+        var entries = capturedHydrateTarEntries(osb);
+        assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
+        assertTrue(entries.stream().noneMatch(e -> e.contains("sess-B")),
+            "其它 scope 不得进入容器：" + entries);
+
+        // 容器内非当前 scope 残留被清理
+        verify(osb.commands()).run(contains("find /workspace/.skills-cache"));
+        verify(osb.commands()).run(contains("! -name 'sess-A'"));
+    }
+
+    @Test
+    void scopedSkillCacheSkipsWhenScopeUnknown() throws Exception {
+        // 身份未知（ctx null 且未绑定 scope）：不投放、不清理（下次 exec 重试）
+        var host = java.nio.file.Files.createTempDirectory("scoped-unknown");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = mockOsb(mockExecution(0, "ok", ""));
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, options(), null, null);
+        sandbox.start();
+
+        sandbox.hydrateForCall(null);
+
+        verify(osb.commands(), never()).run(contains(".skills-cache"));
+    }
+
+    @Test
+    void scopedSkillCacheUnchangedSkipsRehydrate() throws Exception {
+        // 同 scope 内容未变：第二次 call 不应重复投放 tar（跨 call hash 命中）
+        var host = java.nio.file.Files.createTempDirectory("scoped-same");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, options(), null, null);
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        int after1 = countHydrateTarWrites(osb);
+        sandbox.stop();
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
+        int after2 = countHydrateTarWrites(osb);
+
+        assertEquals(after1, after2, "内容未变时第二次 call 不应重复投放");
+    }
+
+    /** 从 files().write 捕获中定位 hydrate 的临时 tar（/tmp/workspace.*），解出 tar 条目名。 */
+    private static List<String> capturedHydrateTarEntries(Sandbox osb) throws Exception {
+        var captor = ArgumentCaptor.forClass(List.class);
+        verify(osb.files(), atLeastOnce()).write(captor.capture());
+        for (var call : captor.getAllValues()) {
+            var w = (WriteEntry) call.get(0);
+            if (w.getPath() != null && w.getPath().startsWith("/tmp/workspace.")) {
+                return readTarEntryNames((String) w.getData());
+            }
+        }
+        throw new AssertionError("未捕获到 hydrate tar 写入");
+    }
+
+    private static int countHydrateTarWrites(Sandbox osb) throws Exception {
+        var captor = ArgumentCaptor.forClass(List.class);
+        verify(osb.files(), atLeastOnce()).write(captor.capture());
+        int n = 0;
+        for (var call : captor.getAllValues()) {
+            var w = (WriteEntry) call.get(0);
+            if (w.getPath() != null && w.getPath().startsWith("/tmp/workspace.")) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private static List<String> readTarEntryNames(String base64Gz) throws Exception {
+        var names = new java.util.ArrayList<String>();
+        byte[] gz = Base64.getDecoder().decode(base64Gz);
+        try (var in = new java.util.zip.GZIPInputStream(new ByteArrayInputStream(gz));
+             var tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(in)) {
+            org.apache.commons.compress.archivers.tar.TarArchiveEntry e;
+            while ((e = tar.getNextEntry()) != null) {
+                names.add(e.getName());
+            }
+        }
+        return names;
+    }
+
     // ---------- SandboxFileTransfer 单文件直传（替代「单文件写入 → 全量 hydrate」退化） ----------
 
     @Test

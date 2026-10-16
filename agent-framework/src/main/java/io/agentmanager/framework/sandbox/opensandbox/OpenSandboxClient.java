@@ -133,6 +133,10 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             if (key != null && !key.isBlank()) {
                 sandbox.setUserKey(key);
             }
+            var scope = filesystemSpec.takePendingSkillScope();
+            if (scope != null && !scope.isBlank()) {
+                sandbox.setSkillCacheScope(scope);
+            }
         }
     }
 
