@@ -19,7 +19,7 @@
 
 1. **控制台一分为二**：
    - **运维侧**（ops）：承载现有全部功能（服务/包/发布/平台默认配置），面向平台管理员，另新增工作空间管理、用户管理等平台治理页面；
-   - **用户侧**（console，对标 AgentCore）：面向 Agent 开发者/业务用户，以**用户**登录、以**工作空间**隔离资源，提供 Agent 构建（创建/纳管/调试/会话）、资产管理（模型连接/Skill/工具/记忆/凭证）、观测入口。
+   - **用户侧**（console，对标 AgentCore）：面向 Agent 开发者/业务用户，以**用户**登录、以**工作空间**隔离资源，提供 Agent 构建（创建/纳管/调试/会话/集成其它 Agent）、资产管理（模型连接/Skill/MCP 工具/记忆/凭证）；观测大盘一期不做（指标与 Trace 后续从可观测系统接入）。
 2. **引入用户与工作空间**：backend 新增 users / workspaces / workspace_members / api_keys 等实体与登录鉴权（JWT）；存量 services/oaf_packages 挂接 `workspace_id` 归属。
 3. **业务面零改动**：agent-framework 不做任何修改，用户身份经既有 `X-User-Id` 机制透传；数据面（对话流量）依旧不经过 backend。
 4. **存量零破坏**：现有 REST/MCP 路径、AUTH_TOKEN 语义、e2e 门禁全部保持不变。
@@ -97,22 +97,23 @@ AGENT 协作
 |---|---|---|---|
 | 工作空间 workspace | `workspaces` 表 + 前端切换器 | 无 | 新建实体；存量服务/包回填默认工作空间 |
 | 用户/身份与权限 | `users` + `workspace_members` + JWT | 仅 AUTH_TOKEN 全局 token | 新建；角色 admin/user，admin 双侧可进 |
-| Agent（托管 Harness） | `services`（OAF 包 + agent-framework 镜像发布） | 发布链路完整 | 用户侧创建向导 = 发布 API 的用户面包装 |
-| Agent（自定义代码/镜像） | `services`（自定义 image + OAF 包约定） | 已支持任意镜像 | 向导「导入模式」直选镜像 |
+| Agent（托管 Harness） | `services`（创建页生成 OAF 包 + agent-framework 镜像发布） | 发布链路完整 | 用户侧创建页 = **页面填写配置 → 平台生成 OAF 包（登记为 v1）→ 复用既有发布链路** |
+| Agent（自定义代码/镜像） | `services`（自定义 image + OAF 包约定） | 已支持任意镜像 | 创建页「导入 OAF 包」方式（自定义镜像一期不做，列远期） |
 | 纳管 Agent | 存量服务挂 workspace 归属 | 无归属字段 | 运维/管理员把无主服务纳管进工作空间 |
-| Agent 模板 | 精选 OAF 包（打 `template` 标记） | 包体系已有 | 包列表加模板标记，创建向导提供模板入口 |
-| 模型连接 | agent-framework `/models`（model_config 表） | 已有 CRUD+test | 用户侧页面只读选用（一期平台级） |
+| Agent 模板 | 精选 OAF 包（打 `template` 标记） | 包体系已有 | **不作为创建入口**；模板页保留为公共包浏览，复用其资产走「导入 OAF 包」方式派生（copy-on-write） |
+| 模型连接 | 工作空间级模型连接配置（backend 自有表）→ 下发至 Agent 的 `/models` 接口（model_config，见 agent-framework/docs/session-model-switch-design.md） | 框架侧 CRUD+test+会话级切换已实施；连接配置/下发/使用展示为新建 | 用户侧模型连接页 = 连接 CRUD + 连通性测试 + **下发**（配置同步到 Agent 的 `POST/PATCH /models`，幂等）+ **Agent 使用情况展示**（每 Agent 已同步连接/默认模型/同步状态）；调试对话模型切换走 `POST /threads/chat {model}`（数据源 = 该 Agent 自己的 `/models`） |
 | Skill 管理 | `/skills`（L2/L3 包级）+ `/skills/users`（L4 用户级） | 已有完整管理面 | 用户侧 Skill 页对接 L4 + L2/L3 只读 |
-| 工具管理（MCP） | OAF 包 mcp-configs + `/tools` `/mcp` 枚举 | 已有 | 用户侧工具页只读展示；自定义连接器远期 |
+| 工具管理（MCP） | 工作空间级 MCP 连接器配置（backend 自有表）→ Agent 创建/更新时勾选，发布时注入生成包（`mcpServers`/`mcp-configs`） | 包声明已有；连接器配置为新建 | 用户侧工具页 = MCP 配置创建/维护（对标 AgentCore tools/create）；已发布 Agent 的运行时枚举（`/tools` `/mcp`）与三态权限只读展示 |
+| 集成其它 Agent（远程子 agent） | Agent Protocol 远程 SubAgent（`SubagentDeclaration.url` → 对端 `POST /tasks`，见 travel-fulfillment-agent-protocol-design.md） | M1 已实施（双服务实测 + e2e 协议多副本门禁） | 用户侧「集成 Agent」页：登记可集成的 Agent 端点与 lead→member 集成关系；创建页资产配置区勾选 → 写入生成包 `subAgents[].endpoint` |
 | 知识库 | —— | 无 | 仅占位入口，标注「规划中」（经 MCP 接入同 AgentCore 思路） |
 | 记忆空间 | agent-framework 记忆/会话（session_user / debug memory） | 调试面已有 | 一期只读：按会话查看记忆摘要；写管理远期 |
 | 凭证管理 | API Key（调用 agent 的凭证）+ 敏感 env Secret 化 | Secret 路由已有、API Key 无 | 新建 `api_keys` 实体与签发/吊销页 |
 | 调试对话（Playground） | `/threads/chat` SSE + HITL | 发布助手页已打通全链 | 复用为 Agent 详情「调试」Tab（按 agent 直连） |
 | 会话管理 | `/threads` + `/subscribe` + history | 已有 | Agent 详情「会话」Tab（userId=当前用户） |
-| 观测大盘 | eval-studio（18400）/ OTel | 飞轮已有独立服务 | 一期入口外链 + 汇总卡；内嵌大盘远期 |
+| 观测大盘 | 可观测系统（指标/Trace）+ eval-studio（18400） | 飞轮已有独立服务 | **一期不做**：指标与 Trace 后续统一从可观测系统接入；当前仅保留页面占位 + eval-studio 外链 |
 | 资源配置（规格/Session/实例数） | replicas + DEPLOYMENT_TEMPLATE 资源档 | replicas 已有 | 规格三档（1c2g/2c4g/4c8g）后端内置映射；min=replicas，max/Session TTL 远期（HPA 不在本期） |
-| 网络配置（公网/VPC） | Ingress 发布（router/host 双模式） | 已有 | 向导「网络」步=是否发布对外访问入口 |
-| Token 配额 | —— | 无 | 占位开关（不生效），远期接计量 |
+| 网络配置（公网/VPC） | Ingress 发布（router/host 双模式） | 已有 | 创建页「网络配置」区=是否发布对外访问入口 |
+| Token 配额 | —— | 无 | **不做**：不提供占位开关；计量依赖后续可观测体系，届时一并设计 |
 | Team 协作 | 多 Agent 编排（Agent Protocol B1 形态） | 底座已有、无 UI | 远期 |
 
 > 设计取向：**不新建一套 Agent 实体**。用户侧「Agent」就是现有 `services` 行挂上 workspace 归属——避免双实体同步；AgentCore 语义里 Agent≈可运行智能体实例，与我们的 service 一一对应。
@@ -250,14 +251,18 @@ GET  /api/v1/auth/introspect       （二期，供 router auth_request）
 ```
 GET  /api/v1/console/workspaces/:ws/summary        概览统计（agent 数/状态分布/最近发布/最近会话）
 GET  /api/v1/console/workspaces/:ws/agents         Agent 列表（= services 按 workspace 过滤，附 agent_card 摘要）
-POST /api/v1/console/workspaces/:ws/agents         创建并发布（body 为发布向导产物，见 §8.2；内部复用 Core.Publish）
+POST /api/v1/console/workspaces/:ws/agents         创建并发布（body 为创建页表单；服务端生成 OAF 包 v1 后复用 Core.Publish，见 §8.2）
 GET  /api/v1/console/workspaces/:ws/agents/:id     详情
 POST /api/v1/console/workspaces/:ws/agents/:id/{unpublish,publish,republish}
 DELETE /api/v1/console/workspaces/:ws/agents/:id   （仅 owner/admin）
 GET  /api/v1/console/workspaces/:ws/templates      模板包列表（oaf_packages 公共包 + template 标记）
-GET  /api/v1/console/workspaces/:ws/models         模型连接只读（透传 agent-framework /models）
+GET/POST/PATCH/DELETE /api/v1/console/workspaces/:ws/model-connections   模型连接 CRUD（工作空间级配置；name/modelId/baseUrl/apiKey/参数，对标 AgentCore 模型管理）
+POST /api/v1/console/workspaces/:ws/model-connections/:id/test          连通性测试（backend 直连 baseUrl 最小 completion）
+POST /api/v1/console/workspaces/:ws/model-connections/:id/deliver       下发：把连接配置同步到指定 Agent 的 POST/PATCH /models（幂等）
+GET  /api/v1/console/workspaces/:ws/model-connections/usage             Agent 使用情况（每 Agent 已同步连接/默认模型/同步状态）
 GET  /api/v1/console/workspaces/:ws/skills         L2/L3 只读 + 本工作空间 L4 聚合
-GET  /api/v1/console/workspaces/:ws/tools          工具/MCP 枚举（透传 /tools /mcp）
+GET/POST/PATCH/DELETE /api/v1/console/workspaces/:ws/tools    MCP 连接器配置 CRUD（保存为空间级配置，创建/更新 Agent 时注入生成包）
+GET/POST/DELETE /api/v1/console/workspaces/:ws/integrations   集成 Agent：可集成端点注册与 lead→member 集成关系（Agent Protocol）
 GET  /api/v1/console/workspaces/:ws/memory/:agent  记忆/会话摘要只读（一期）
 GET  /api/v1/console/workspaces/:ws/api-keys       签发/列表/吊销
 POST /api/v1/console/workspaces/:ws/api-keys
@@ -292,45 +297,70 @@ GET  /api/v1/admin/audit-logs              审计（一期仅 service_events + p
 
 ### 8.1 概览
 
-工作空间维度统计卡（Agent 总数 / 运行中 / 异常）+ 最近发布时间线 + 快捷入口（创建 Agent / 打开调试 / 观测大盘外链）。数据来自 `console/workspaces/:ws/summary`。
+工作空间维度统计卡（Agent 总数 / 运行中 / 异常）+ 最近发布时间线 + 快捷入口（创建 Agent / 打开调试 / 打开 eval-studio）。数据来自 `console/workspaces/:ws/summary`。
 
-### 8.2 Agent 列表与创建向导
+### 8.2 Agent 列表与创建页
 
 列表：统计卡 + 卡片网格（对标 AgentCore `pageSize=12` 卡片流）+ 状态筛选；卡片含名称/状态徽标/模型/最近更新；操作：调试、详情、下线/上线。顶部按钮「创建 Agent」「纳管 Agent」（纳管仅在有可纳管存量服务时出现）。
 
-创建向导五步（对标 AgentCore 五步表单，逐项落地）：
+创建页 = **单页分区表单**（对标 AgentCore 创建页：右上角「立即创建」+ 表单底部同按钮，无上一步/下一步分步切换；主创建方式与 AgentCore 一致——**页面填写配置 → 生成 OAF 包 → 发布**，而非从模板派生）。自上而下：
 
-| 步 | AgentCore 原型 | 本平台一期实现 |
-|---|---|---|
-| 1 基本信息 | 托管 Harness / 自定义镜像 / 快速创建 | 创建方式三选：**从模板创建**（精选 OAF 包）/ **导入 OAF 包**（上传或选公共包）/ **纳管已有服务**（管理员场景）。Harness 选择 → 运行镜像（默认托管镜像 + 版本下拉，复用 `GET /images`）；名称/描述；模型连接（复用平台默认或从 `/models` 选） |
-| 2 提示词与文件 | 系统提示词 / SOUL.md·AGENTS.md | OAF 包规范承载：模板方式→向导内编辑提示词生成包副本（copy-on-write，复用包在线编辑链路）；导入方式→只读预览包 frontmatter 与 AGENTS.md |
-| 3 资产配置 | Skill/SubAgent/工具/知识库/记忆/凭证 | 只读预览包声明的 skills/tools/mcp（OAF 三层裁决不变，不在向导里改运行行为）；用户级技能（L4）勾选注入；知识库/凭证显示「暂无可用，规划中」 |
-| 4 资源配置 | 规格/Session/TTL/实例数 | 副本数（1/2/3）；规格三档 1c2g / 2c4g / 4c8g（后端内置资源档映射进 Deployment requests/limits，作为 DEPLOYMENT_TEMPLATE 等价的显式参数，不走 overlay）；「实例最大 Session 数 / Session TTL / 最大实例数」一期置灰标注远期（对应 HPA/运行时治理，不做半吊子开关） |
-| 5 网络配置 | 公网/VPC | 「发布对外访问入口」开关（开=执行既有 Ingress/router 发布语义并展示 Endpoint；关=仅集群内可访问）。VPC 不适用置灰 |
+- **选择创建方式**（顶部卡片三选，带说明）：**托管 Harness**（默认，即 agent-framework 托管镜像）/ **导入 OAF 包**（上传 zip 或选公共包派生，copy-on-write）/ **纳管已有服务**（管理员场景）；
+- **1 基本信息**：Agent 名称（必填，K8s short 名与 frontmatter `agentKey`/`slug` 的同源派生源）；运行镜像（托管 Harness 版本下拉，复用 `GET /images`）；模型连接（从工作空间「模型连接」**多选**：首个为默认——发布时注入 `LLM_BASE_URL/LLM_MODEL/LLM_API_KEY` env（key 自动路由服务 Secret），全部勾选连接在 Agent 就绪后异步下发至其 `/models` 接口，见 §8.4）；描述。**Token 配额不做**（评审决议 §13）；
+- **2 文件配置**：系统提示词必填，即**生成包**的 AGENTS.md 正文；页面实时预览将要生成的 OAF 包结构（frontmatter 由表单字段自动派生；SOUL.md、脚本等创建后于包编辑器补充）；
+- **3 Agent 资产配置**：勾选式配置并**写入生成包**（区块顶部展示已选计数）：Skill（本空间 L4 + 公共技能勾选 → `skills` 声明）、SubAgent（名称+职责逐条添加，或从「集成 Agent」已注册端点勾选 → `subAgents`，远程形态带 `endpoint`）、工具/MCP（**从「工具管理」已保存的 MCP 连接器勾选 → 发布时注入** `mcpServers` + `mcp-configs/`；三态权限取连接器默认策略，细调走包编辑器）；凭证/知识库「规划中」；托管 Harness 内置 Shell/文件工具无需添加，运行时三层裁决不变；
+- **4 资源配置**：规格三档 1c2g / 2c4g / 4c8g（映射 Deployment requests/limits，与 DEPLOYMENT_TEMPLATE overlay 互斥保护，见 §13 决议 4）；副本数（1/2/3）；「最大实例数 / 实例最大 Session 数 / Session TTL」一期置灰（远期 HPA/运行时治理）。**创建后的规格变更以运维侧为主**（用户侧创建时选档，后续调整走运维侧，避免双侧同改）；
+- **5 网络配置**：「发布对外访问入口」开关（开=执行既有 Ingress/router 发布语义并展示 Endpoint；关=仅集群内可访问）；VPC 不适用置灰。
 
-提交 = `POST /console/workspaces/:ws/agents` → 后端组装既有 Publish（包解析 → K8s 对象 → 异步 A2A 注册），状态机与事件时间线完全复用。**不新增发布链路语义，只加归属与入口。**
+提交（头部或表单底部「立即创建」）= `POST /console/workspaces/:ws/agents`（body 为表单）→ 后端先**生成 OAF 包**：按表单组装 AGENTS.md（frontmatter identity/metadata/model/config + 系统提示词正文）与 skills/mcp-configs 目录 → 打 zip 登记 `oaf_packages` v1（落 PVC，与上传包同构）→ 再组装既有 Publish（包解析 → K8s 对象 → 异步 A2A 注册），状态机与事件时间线完全复用。**不新增发布链路语义；创建页 = 包生成器 + 发布 API 的用户面包装**。
+
+生成包映射（表单字段 → OAF 产物；frontmatter 派生规则已评审确认，见 §13 决议 5）：
+
+| 表单字段 | OAF 产物 |
+|---|---|
+| 名称 / 描述 | frontmatter `name` / `description`；`vendorKey` 固定平台命名空间（如 `agentmanager`）；`agentKey`/`slug` 由名称 slugify 自动派生（小写 + 连字符），与服务 short 名、K8s `k8s_name` 同源生成，重名校验复用发布链路（空间内包名唯一 + 集群 k8s_name 唯一） |
+| 系统提示词 | AGENTS.md 正文（标准段落骨架：Agent Purpose / Core Responsibilities / Capabilities / Communication Style） |
+| 模型连接 / 模型 | **不进包**：默认连接经发布 env 注入（`LLM_BASE_URL/LLM_MODEL/LLM_API_KEY`，key 路由服务 Secret）；全部勾选连接经下发接口写入 Agent `model_config`；frontmatter `model` 段仅写默认模型名（展示语义，key 永不落包） |
+| Skill 勾选 | frontmatter `skills` 声明（name/source/version；L4 注入仍走运行时，不进包） |
+| SubAgent 添加 | frontmatter `subAgents`（vendor/agent/role/delegations；从「集成 Agent」勾选的端点写入 `endpoint`，认证头经 env 不落包） |
+| 工具/MCP 勾选 | frontmatter `mcpServers`（vendor/server/version/configDir）+ `mcp-configs/<server>/config.yaml`（内容由「工具管理」连接器配置注入生成） |
+| 规格 / 副本 / 网络 | **不进包**：作为 Publish 请求参数（replicas / resources 档 / Ingress 语义） |
+
+生成 v1 即版本链起点。存量演进的主入口 = **编辑页**（表单级，下节）；包编辑器（运维侧，文件级）保留为高级入口，两者共用 copy-on-write 版本链。
+
+### 8.2.1 编辑 Agent（对标 AgentCore 编辑页）
+
+`/console/agents/:id/edit`：与创建页**同构的单页分区表单**（1 基本信息 / 2 文件配置 / 3 Agent 资产配置 / 4 资源配置 / 5 网络配置），预填当前值。与创建页的差异点：
+
+- **无「选择创建方式」卡片**（编辑固定托管 Harness 形态，对标 AgentCore `?kind=harness`）；标题「编辑 Agent」+ 右上/表单底部「保存」（无「上一步/下一步」）；
+- **名称锁定**：K8s short 名创建后不可变（disabled + 说明）；显示名修改同步至新版本包 frontmatter `name`；
+- **保存 = 生成包新版本（copy-on-write 派生 vN+1，复用包在线编辑链路）→ republish**：提示词 / Skill / SubAgent / MCP 变更经 OAF reload **热生效**；镜像 / 规格 / 副本变更随重发布**滚动重启生效**（对标 AgentCore「模型/提示词/Skill/SubAgent/MCP 热更新；实例规格等需重启」语义）；事件时间线新增 republish 记录，版本 Tab 出现新版本行；
+- **模型连接变更**（联动 M5）：新默认连接经 env 更新（UpdateEnv）生效；新勾选连接自动下发 `/models`；移除的连接不自动删远端（保守，模型连接页可管理）；
+- **入口**：Agent 详情头部「编辑」（主按钮）、版本 Tab 当前版本行「编辑」、列表卡片「编辑」；member 只读不可编辑（owner/admin）。
 
 ### 8.3 Agent 详情（Tab 化）
 
-- **概览**：状态/Pod 实时表/Endpoint/事件时间线（复用服务详情数据面）；
-- **调试**：对话 Playground（复用发布助手页 SSE 全链：HITL 确认卡、附件、durable 续传），`AGENT_BASE=/agent/{short}`，`X-User-Id`=当前用户，会话历史按 userId 隔离；
+- **概览**：状态/Pod 实时表/Endpoint/事件时间线（复用服务详情数据面）；头部动作「编辑（主按钮，跳 §8.2.1 编辑页）/ 重发布 / 下线（danger）」，member 只读隐藏动作；
+- **调试**：对话 Playground（复用发布助手页 SSE 全链：HITL 确认卡、附件、durable 续传），`AGENT_BASE=/agent/{short}`，`X-User-Id`=当前用户，会话历史按 userId 隔离；模型下拉对接会话级切换（`POST /threads/chat {model}` / `PATCH /threads/{id}`，session-model-switch-design.md 已实施）；
 - **会话**：`GET /threads?userId=u-{id}`（经业务 Pod 直连）+ 回放/删除；
 - **技能**：L2/L3 只读 + 调试页「用户技能」区块对接；
-- **版本**：包版本历史 + 升级发布（复用 republish 到指定包版本）；
+- **版本**：包版本历史 + 当前版本行「编辑」（跳 §8.2.1 编辑页）+ 历史版本行「升级到此版本」（复用 republish 到指定包版本）；
 - **调用凭证**：本 Agent 的 API Key 列表与调用示例（curl A2A/HTTP，二期网关生效说明）。
 
 ### 8.4 资产管理（工作空间维度）
 
-- **模型连接**：一期只读（平台级模型配置列表 + 连通性测试结果），新增/修改引导到运维侧或后续 workspace 级配置；
+- **集成其它 Agent**（AGENT 构建 → 集成 Agent）：管理本空间可作为远程子 agent 的集成关系（Agent Protocol：对端开启 `agentscope.agent-protocol.enabled` 暴露 `POST /tasks` 等端点）；登记 lead→member 关系、端点 URL、流式/ask 策略与认证（`X-Agent-Protocol-Token` 经 env 注入，不落包）；创建页资产配置区勾选后写入生成包 `subAgents[].endpoint`，运行时 `agent_spawn` 调度、子事件回流父流（travel-fulfillment-agent-protocol-design.md）；
+- **模型连接**（对标 AgentCore 模型管理 add-connection，与 MCP 连接器同构的「先配置、后下发」模式）：**工作空间级连接 CRUD**（backend 自有表：name/modelId/provider/baseUrl/apiKey/temperature/maxTokens/timeout；apiKey 落库内网明文、接口掩码回显）+ **连通性测试**（backend 直连 baseUrl 最小 completion）+ **下发**（发布时勾选的默认连接注入 `LLM_*` env；就绪后全部勾选连接异步同步到 Agent 的 `POST/PATCH /models`，幂等、状态可查）+ **Agent 使用情况展示**（每 Agent：已同步哪些连接 / 默认模型 / 同步状态：pending·synced·failed）；调试对话模型切换数据源 = 该 Agent 自己的 `/models`（含下发连接 + 系统默认）；
 - **Skill 管理**：L4 用户技能 CRUD（直连 `/skills/users`）+ 包级技能只读；
-- **工具管理**：MCP server / 工具枚举只读 + 每工具三态权限（allow/ask/deny）展示；
+- **工具管理（MCP）**：MCP 连接器配置的创建与维护（对标 AgentCore tools/create：名称/传输/Endpoint/认证/工具范围，保存为工作空间级配置，backend 自有表）；Agent 创建或更新时在资产配置步勾选，发布时注入生成包（`mcpServers` + `mcp-configs/`）；已发布 Agent 的运行时工具枚举与三态权限（allow/ask/deny）只读展示；
 - **知识库**：占位页（空态 + 「规划中」说明，对标 AgentCore「知识库经 MCP 接入」）；
 - **记忆空间**：按 Agent×会话只读查看记忆/摘要；编辑与清除策略远期；
-- **凭证管理**：API Key 签发（明文仅展示一次）/列表（前缀识别）/吊销/过期时间。
+- **凭证管理**：API Key 签发（明文仅展示一次）/列表（前缀识别）/吊销/过期时间；
+- **包可见性**（评审决议 7）：公共包（workspace_id=0）所有空间可见；各工作空间的包按空间隔离，空间包仅本空间可见，导入/派生在本空间包列表内进行。
 
-### 8.5 观测大盘
+### 8.5 观测大盘（一期不做）
 
-一期：外链 eval-studio（18400）+ 工作空间内 agent 状态/事件汇总卡。二期：OTel 指标内嵌（平台已具备 DEPLOYMENT_TEMPLATE 注入 OTel 的能力）。
+指标与 Trace 后续统一从可观测系统接入（OTel），本期内不做大盘页与数据聚合：一期仅保留导航占位（标注「规划中」）与 eval-studio（18400）外链入口。概览页统计只保留控制面可得的数据（Agent 总数/运行中/异常）。
 
 ### 8.6 身份与权限（用户侧视角）
 
@@ -361,7 +391,8 @@ src/app/
 │   ├── layout.tsx                  顶栏（工作空间切换器/通知/用户菜单）+ 左侧导航
 │   ├── console/page.tsx                    概览
 │   ├── console/agents/page.tsx             Agent 列表
-│   ├── console/agents/create/page.tsx      创建向导（5 步）
+│   ├── console/agents/create/page.tsx      创建页（单页分区表单）
+│   ├── console/agents/[id]/edit/page.tsx   编辑页（同构表单预填，保存 = 新版本 + republish）
 │   ├── console/agents/[id]/page.tsx        详情（Tab）
 │   ├── console/assets/{models,skills,tools,knowledge,memory,credentials}/page.tsx
 │   ├── console/observability/page.tsx      观测入口
@@ -380,7 +411,7 @@ src/app/
 ### 10.2 复用与新增
 
 - 复用：`lib/api.ts`（扩展 auth/console/admin 三组方法 + 401 统一跳登录）、SSE 流处理与 HITL 组件（发布助手 → 抽成 `components/chat/*` 共享）、`FileTreeView`、`Markdown`、`icons.tsx`、状态徽标 map（顺手收敛到 `lib/status.ts`，消除现有两处重复）。
-- 新增：`WorkspaceSwitcher`、`AuthGuard(middleware)`、`StatCard`、`Wizard`（五步骨架）、`ApiKeyDialog`。
+- 新增：`WorkspaceSwitcher`、`AuthGuard(middleware)`、`StatCard`、`CreateForm`（分区表单骨架）、`ApiKeyDialog`。
 - 状态管理维持现有 useState+轮询风格（不引库）；暗色/组件库本期不引入，保持 Tailwind 原生风格 + 蓝色主色，视觉对齐 AgentCore 的「左导航 + 卡片内容区」。
 
 ### 10.3 proxy.ts 扩展
@@ -413,33 +444,55 @@ src/app/
 
 **P1 用户侧控制台主体**
 - console API 全量（§7.2）+ services/packages 挂 workspace 回填收尾；
-- 用户侧五页群：概览 / Agent 列表 / 创建向导 / Agent 详情（概览+调试+会话 Tab）/ 资产六页（知识库占位）；
+- 用户侧五页群：概览 / Agent 列表 / 创建页 / Agent 详情（概览+调试+会话 Tab）/ 资产六页（知识库占位）；
 - proxy `/agent/*` 通配 + `X-User-Id` 注入；
-- 验收：普通用户在工作空间内创建（模板+导入两种方式）→ 调试 → 下线，全程不进运维侧。
+- 验收：普通用户在工作空间内创建（表单生成包 + 导入包两种方式）→ 调试 → 下线，全程不进运维侧。
 
 **P2 网关与治理增强**
 - router auth_request + introspect + API Key 数据面生效；
-- 观测大盘（eval-studio 跳板 + OTel 汇总）、审计聚合页、Token 配额与规格档完善（视依赖）；
+- 审计聚合页、规格档完善（视依赖）；观测大盘整体后移（指标/Trace 从可观测系统接入，单独设计），一期仅占位 + eval-studio 外链；
 - 存量 API 收敛进 `/api/v1/admin/*`（破坏性变更，单独评审 + e2e 同步改）。
 
-**P3 远期池**：知识库、Team 协作 UI、连接器市场、workspace 级模型配置、HPA/Session 治理、SSO。
+**P3 远期池**：知识库、Team 协作 UI、workspace 级模型配置、HPA/Session 治理、SSO、观测大盘（可观测系统指标/Trace 接入）、Token 计量与配额。
 
 ---
 
-## 13. 开放问题（请评审确认）
+## 13. 评审决议（2026-10-16 已确认，原开放问题全部关闭）
 
-1. **登录方式**：一期仅用户名+密码是否可接受？（SSO/OIDC 已列远期）
-2. **默认工作空间可见性**：存量服务回填进默认空间且对普通用户不可见、需 admin 显式纳管/分配——是否符合预期？还是存量服务直接全员可见？
-3. **数据面鉴权节奏**：一期接受「控制台内身份可信、直连仍开放（与今天同暴露面）」、二期才上 router 网关鉴权，还是必须一期就上？（影响 platform-router 配置与 backend introspect 的排期）
-4. **用户侧创建向导的「规格三档」**：以 Deployment resources 直译实现，是否需要与 DEPLOYMENT_TEMPLATE overlay 机制互斥保护？
-5. **用户自注册**：是否开放用户自主注册（默认进个人空间），还是仅 admin 建号分派？
-6. **包与工作空间的归属**：公共包（workspace_id=0）所有空间可见是否足够，还是包也要严格空间隔离？
+| # | 议题 | 决议 |
+|---|---|---|
+| 1 | 登录方式 | 一期仅用户名+密码（SSO/OIDC 列远期） |
+| 2 | 默认工作空间可见性 | 存量服务回填进默认空间且对普通用户不可见，需 admin 显式纳管/分配——符合预期 |
+| 3 | 数据面鉴权节奏 | 一期接受「控制台内身份可信、直连仍开放（与今天同暴露面）」；二期上 router 网关鉴权（auth_request + introspect + API Key 数据面生效） |
+| 4 | 创建页「规格三档」 | 以 Deployment resources 直译实现，与 DEPLOYMENT_TEMPLATE overlay 机制互斥保护；**创建后的规格变更以运维侧为主**（用户侧创建时选档，后续调整走运维侧） |
+| 5 | frontmatter 派生规则 | `vendorKey` 固定平台命名空间；`agentKey`/`slug` 由 Agent 名称 slugify 自动生成，与 K8s short 名及发布重名校验同源；生成 v1 即版本链起点，后续经包在线编辑 copy-on-write 派生（细化为 §8.2 生成包映射表） |
+| 6 | 用户自注册 | 不开放，仅 admin 建号分派 |
+| 7 | 包与工作空间归属 | 公共包（workspace_id=0）所有空间可见；**各工作空间的包按空间隔离**（空间包仅本空间可见，导入/派生在本空间包列表内进行） |
 
 ---
 
 ## 14. 前端设计 Demo
 
 配套可交互原型（单文件 HTML、零外部依赖、双击浏览器直接打开；hash 路由切换页面）：
-[docs/design/demo/console-user-workspace-demo.html](demo/console-user-workspace-demo.html) —— 覆盖登录页（开发者/管理员两种角色入口）、用户侧（概览 / Agent 列表 / 创建向导五步（含三种创建方式切换）/ Agent 详情六 Tab（含 SSE 调试对话与 HITL 确认卡示例）/ 模板 / 资产管理六页 / 观测入口 / 成员管理）、运维侧（平台概览 / 服务列表（现状风格 + 工作空间列）/ 配置包 / 工作空间管理 / 用户管理 / 审计 / 默认配置），左侧导航分组与 AgentCore 控制台存档同构。
+[docs/design/demo/console-user-workspace-demo.html](demo/console-user-workspace-demo.html) —— 覆盖登录页（开发者/管理员两种角色入口）、用户侧（概览 / Agent 列表 / 创建页（单页分区表单：选择创建方式卡片 + 五个编号区块，右上/底部「立即创建」→ 生成 OAF 包并发布；导入/纳管为次要方式）/ **编辑页（创建页同构表单预填，保存 = copy-on-write 新版本 + republish）** / Agent 详情六 Tab（含 SSE 调试对话与 HITL 确认卡示例）/ 模板 / 集成 Agent（Agent Protocol 远程子 agent）/ 工具管理（MCP 配置创建与注入）/ 模型连接（配置/下发/使用展示）/ 资产管理其余页 / 成员管理 / 观测大盘占位（一期不做））、运维侧（平台概览 / 服务列表（现状风格 + 工作空间列）/ 配置包 / 工作空间管理 / 用户管理 / 审计 / 默认配置），左侧导航分组与 AgentCore 控制台存档同构。
 
 > Demo 为视觉与交互定稿用；实现以本文 §10 的 Next.js 工程结构为准。
+
+---
+
+## 15. 分模块实施文档
+
+本设计已按功能模块拆分为可独立开工/验收的实施文档集：[../implementation/](../implementation/)（索引、完成定义（DoD：单测 + e2e 双绿才算完成）、e2e 落位表与依赖图见其 [README.md](../implementation/README.md)）：
+
+| 模块 | 文档 | 范围 |
+|------|------|------|
+| M0 | [01-auth-skeleton.md](../implementation/01-auth-skeleton.md) | 四表 + JWT + 登录页 + 双侧布局骨架与存量页迁移（P0） |
+| M1 | [02-admin-governance.md](../implementation/02-admin-governance.md) | 运维侧治理：工作空间/用户/审计/纳管（P0） |
+| M2 | [03-console-foundation.md](../implementation/03-console-foundation.md) | console 骨架 / 概览 / Agent 列表 / 切换器 / proxy 通配 |
+| M3 | [04-agent-create.md](../implementation/04-agent-create.md) | 创建页单页表单 + OAF 包生成器 + 复用发布 |
+| M4 | [05-agent-detail.md](../implementation/05-agent-detail.md) | Agent 详情六 Tab（含调试对话复用件抽取） |
+| M5 | [06-model-connection.md](../implementation/06-model-connection.md) | 模型连接配置/测试/下发/使用展示 + 会话级切换 |
+| M6 | [07-mcp-connectors.md](../implementation/07-mcp-connectors.md) | MCP 连接器 CRUD 与发布注入 |
+| M7 | [08-agent-integration.md](../implementation/08-agent-integration.md) | 集成 Agent（Agent Protocol 声明管理） |
+| M8 | [09-workspace-assets.md](../implementation/09-workspace-assets.md) | Skill / 记忆 / API Key / 模板 / 成员 / 占位页 |
+| M9 | [10-gateway-auth.md](../implementation/10-gateway-auth.md) | P2 网关鉴权（auth_request + introspect + API Key 生效） |
