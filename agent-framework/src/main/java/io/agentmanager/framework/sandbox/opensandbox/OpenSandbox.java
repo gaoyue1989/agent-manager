@@ -2,8 +2,11 @@ package io.agentmanager.framework.sandbox.opensandbox;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -20,6 +23,9 @@ import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
 import io.agentscope.harness.agent.sandbox.WorkspaceProjectionApplier;
+import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
+import io.agentscope.harness.agent.sandbox.layout.WorkspaceEntry;
+import io.agentscope.harness.agent.sandbox.layout.WorkspaceProjectionEntry;
 
 /**
  * OpenSandbox 沙箱运行时：包装 SDK Sandbox 句柄，
@@ -59,6 +65,18 @@ public class OpenSandbox extends AbstractBaseSandbox
     /** 回写快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true；测试构造可关） */
     private final boolean syncSnapshotDiffEnabled;
     private volatile String userKey;
+    /**
+     * 本 call 生效的技能缓存 scope 目录名（.skills-cache/&lt;scope&gt;，对齐 SDK
+     * HarnessSkillMiddleware.scopeKeyFor + MarketplaceStager.scopeSegment）。由
+     * SandboxUserKeyMiddleware 绑定；投影据此只投放当前会话的 scope 目录，
+     * 避免把宿主上所有历史 scope 都灌进容器。
+     */
+    private volatile String skillCacheScope;
+    /** 每 call 一次 scoped .skills-cache 投放（stop 复位，下轮首 exec 重查） */
+    private final AtomicBoolean skillCacheRefreshed = new AtomicBoolean(false);
+    /** 上次投放的 scoped .skills-cache 内容 hash（跨 call 保留，未变则跳过重投） */
+    private final java.util.concurrent.atomic.AtomicReference<String> lastSkillCacheHash =
+        new java.util.concurrent.atomic.AtomicReference<>();
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
     private final FileStorage fileStorage;
@@ -151,6 +169,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         log.info("[sandbox-open] userKey bound: {}", userKey);
     }
 
+    /** 绑定技能缓存 scope（SandboxUserKeyMiddleware 经 OpenSandboxClient 注入；见 {@link SkillCacheScope}） */
+    public void setSkillCacheScope(String skillCacheScope) {
+        this.skillCacheScope = skillCacheScope;
+        log.info("[sandbox-open] skillCacheScope bound: {}", skillCacheScope);
+    }
+
     // ---- SandboxFileTransfer：单文件直传 execd，替代「单文件 tar → 全量 hydrate」退化 ----
 
     /**
@@ -204,6 +228,8 @@ public class OpenSandbox extends AbstractBaseSandbox
         // 投影新鲜度检查按 call 粒度执行：下轮 call 的 onSystemPrompt 可能再 stage 出新
         // 技能目录（scopeKey 每轮变化），stop 复位后下轮首次 exec 重新比对
         projectionRefreshed.set(false);
+        // scoped .skills-cache 投放同样按 call 粒度复位（下轮 scope 可能变化或新 stage）
+        skillCacheRefreshed.set(false);
         if (workspaceSyncService != null && userKey != null) {
             try {
                 // 快照差分（SANDBOX_SYNC_SNAPSHOT_DIFF）：把本会话 gate 传给回写侧，
@@ -255,11 +281,21 @@ public class OpenSandbox extends AbstractBaseSandbox
             if (key != null && !key.isBlank()) {
                 userKey = key;
             }
+            // 技能缓存 scope 兜底：优先用 middleware.onAgent 绑定的 turn 级 scope（与 SDK
+            // HarnessSkillMiddleware.onSystemPrompt 同源），仅在未绑定时才从本 ctx 推断——
+            // 避免 RemoteUserIdMiddleware 的 onActing 作用域写回（remote spawn 轮次）污染
+            if (skillCacheScope == null || skillCacheScope.isBlank()) {
+                var scope = SkillCacheScope.scopeSegment(ctx);
+                if (scope != null && !scope.isBlank()) {
+                    skillCacheScope = scope;
+                }
+            }
         }
         injectRuntimeFilesIfNeeded(ctx);
         injectPendingUploads();
         materializeUserSkills();
         refreshProjectionIfStale();
+        hydrateScopedSkillCache();
     }
 
     /**
@@ -527,6 +563,105 @@ public class OpenSandbox extends AbstractBaseSandbox
         } catch (Exception e) {
             projectionRefreshed.set(false);
             log.warn("[sandbox-open] workspace projection refresh failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * scoped 技能缓存投放（方案 1，每 call 一次）：
+     *
+     * <p>背景：SDK 默认投影根含整棵 {@code .skills-cache}，其中按 scope 分片
+     * （{@code .skills-cache/<scopeSegment>/<source-ns>/<skill>/}，scope = IsolationScope.USER 档
+     * 的 {@code ctx.userId}，Channel 链路即会话 id）。宿主工作区跨会话/跨用户共享，历史 scope
+     * 目录永不回收（MarketplaceStager 孤儿 GC 只清当前 scope 内），若整棵投影则把别的会话/用户
+     * 的缓存全灌进容器。本框架改为：SDK 投影根排除 {@code .skills-cache}（见 AgentScopeConfig），
+     * 由本方法只把<b>当前 scope</b>投放进容器，并清理容器内其它 scope 残留。
+     *
+     * <p>投放内容仅供 shell 执行技能脚本使用（{@code load_skill_through_path} 走内存资源/
+     * lazy 仓储，不读容器），因此 doExec（首个命令前）投放即可覆盖消费路径。
+     *
+     * <p>fail-soft：失败仅告警并复位标志，下次 exec 重试。
+     */
+    private void hydrateScopedSkillCache() {
+        if (state == null || !skillCacheRefreshed.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            var spec = state.getWorkspaceSpec();
+            String sourceRoot = projectionSourceRoot(spec);
+            if (sourceRoot == null) {
+                // 投影未启用/未装配：无可投放
+                return;
+            }
+            String scope = skillCacheScope;
+            if (scope == null || scope.isBlank()) {
+                // 身份未知（middleware/exec ctx 均未提供）：跳过，下次 exec 重试
+                skillCacheRefreshed.set(false);
+                return;
+            }
+            Path scopeDir = Path.of(sourceRoot, SkillCacheScope.CACHE_DIR, scope);
+            var payload = Files.isDirectory(scopeDir)
+                ? buildScopedSkillCachePayload(spec, sourceRoot, scope)
+                : null;
+            String hash = payload != null ? payload.hash() : "";
+            if (hash.equals(lastSkillCacheHash.get())) {
+                // 当前 scope 内容未变：容器内已是最新（stop 复位的下一 call 会重查）
+                return;
+            }
+            // 清容器内其它 scope 残留（本代容器可能服务过同用户的其它会话）
+            pruneContainerSkillCache(scope);
+            if (payload != null && payload.fileCount() > 0) {
+                try (var in = new ByteArrayInputStream(payload.tarBytes())) {
+                    doHydrateWorkspace(in);
+                }
+            }
+            lastSkillCacheHash.set(hash);
+            log.info("[sandbox-open] .skills-cache scoped to {} ({} files)",
+                scope, payload != null ? payload.fileCount() : 0);
+        } catch (Exception e) {
+            skillCacheRefreshed.set(false);
+            log.warn("[sandbox-open] scoped .skills-cache hydrate failed: {}", e.getMessage());
+        }
+    }
+
+    /** 用当前 scope 构造投影 payload（includeRoots 只含 {@code .skills-cache/<scope>}）。 */
+    private WorkspaceProjectionApplier.ProjectionPayload buildScopedSkillCachePayload(
+            WorkspaceSpec baseSpec, String sourceRoot, String scope) throws Exception {
+        var ws = new WorkspaceSpec();
+        ws.setRoot(baseSpec != null ? baseSpec.getRoot() : getWorkspaceRoot());
+        var entry = new WorkspaceProjectionEntry();
+        entry.setSourceRoot(sourceRoot);
+        entry.setIncludeRoots(List.of(SkillCacheScope.CACHE_DIR + "/" + scope));
+        Map<String, WorkspaceEntry> entries = new java.util.LinkedHashMap<>();
+        entries.put("__scoped_skill_cache__", entry);
+        ws.setEntries(entries);
+        return WorkspaceProjectionApplier.build(ws);
+    }
+
+    /** 取投影 entry 的宿主机工作区根（sourceRoot）；无投影 entry 返回 null。 */
+    private static String projectionSourceRoot(WorkspaceSpec spec) {
+        if (spec == null || spec.getEntries() == null) {
+            return null;
+        }
+        for (var entryObj : spec.getEntries().values()) {
+            if (entryObj instanceof WorkspaceProjectionEntry entry
+                    && entry.getSourceRoot() != null && !entry.getSourceRoot().isBlank()) {
+                return entry.getSourceRoot();
+            }
+        }
+        return null;
+    }
+
+    /** 删除容器 {@code /workspace/.skills-cache} 下非当前 scope 的目录（保留 keepScope）。 */
+    private void pruneContainerSkillCache(String keepScope) {
+        try {
+            String root = getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR;
+            String cmd = "if [ -d " + root + " ]; then find " + root
+                + " -mindepth 1 -maxdepth 1 -type d ! -name '" + keepScope
+                + "' -exec rm -rf {} +; fi";
+            osbSandbox.commands().run(cmd);
+        } catch (Exception e) {
+            // 清理失败不阻塞（残留仅占空间，不影响当前 scope 执行）
+            log.debug("[sandbox-open] prune .skills-cache failed: {}", e.getMessage());
         }
     }
 

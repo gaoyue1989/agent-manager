@@ -143,8 +143,23 @@ public record AgentManagerProperties(
         /** 工具审计日志保留天数，默认 30 */
         @DefaultValue("30") int auditRetentionDays,
         /** agent_state/agent_fs 会话记录保留天数，默认 7 */
-        @DefaultValue("7") int sessionRetentionDays
-    ) {}
+        @DefaultValue("7") int sessionRetentionDays,
+        /**
+         * 宿主 {@code .skills-cache} 过期 scope 目录 GC 开关（默认 true）。
+         * SDK MarketplaceStager 只回收当前 scope 内的孤儿，跨 scope 目录永不清理——本项按龄清扫，
+         * 防止宿主工作区随会话数无限膨胀（工作区为 Pod 本地缓存，可安全回收、下轮重新 stage）。
+         */
+        @DefaultValue("true") boolean skillCacheGcEnabled,
+        /** 宿主 {@code .skills-cache} scope 目录保留天数（默认 2；≤0 视为关闭） */
+        @DefaultValue("2") int skillCacheRetentionDays
+    ) {
+        /** 兼容构造器（旧 5 参调用方）：技能缓存 GC 取默认（启用 / 保留 2 天）。 */
+        public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
+                             int auditRetentionDays, int sessionRetentionDays) {
+            this(confirmTtlMinutes, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,
+                sessionRetentionDays, true, 2);
+        }
+    }
 
     /**
      * 文件上传/下载配置（file-upload-download-plan 设计文档）。

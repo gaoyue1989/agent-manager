@@ -82,6 +82,11 @@ public class AgentScopeConfig {
         // 工作区投影开关（issue #27 缓解项）：SANDBOX_PROJECTION_ENABLED=false 时 sandbox start
         // 不再 hydrate 投影目录，降低每轮对话的沙箱同步开销（skills 依赖强的包不要关）
         spec.workspaceProjectionEnabled(sandboxRuntime.projectionEnabled());
+        // 技能缓存投影收窄（方案 1）：SDK 默认根含整棵 .skills-cache，按 scope 分片且跨会话/
+        // 跨用户共享，整棵投影会把所有历史 scope 灌进容器（体积大 + 跨用户泄漏）。此处从 SDK
+        // 投影根剔除 .skills-cache，改由 OpenSandbox.hydrateScopedSkillCache 只投放当前会话
+        // scope（.skills-cache/<scope>）并清理容器内其它 scope 残留。
+        spec.workspaceProjectionRoots(List.of("AGENTS.md", "skills", "subagents", "knowledge"));
         // 并发执行守卫（issue #27c，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId
         // 的沙箱获取，消解并发 hydrate 互踩与端口竞态的触发面；Redis 不可用时守卫内部 fail-open
         if (sandboxRuntime.guardEnabled()) {
