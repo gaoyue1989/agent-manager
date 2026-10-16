@@ -119,8 +119,12 @@ export function proxy(request: NextRequest) {
     const short = rest.split("/")[0];
     if (SHORT_NAME_RE.test(short)) {
       const headers = new Headers(request.headers);
+      const session = request.cookies.get("oaf_session")?.value;
       const uid = readUidFromJwtCookie(request);
       if (uid) headers.set("X-User-Id", `u-${uid}`);
+      // M9 §4 调用方同步：oaf_session cookie → Authorization 头（目标若经 router enforce
+      // 模式，auth_request 读 Authorization；目标直连 svc 时该头无副作用）
+      if (session) headers.set("Authorization", `Bearer ${session}`);
       const target = process.env.AGENT_INTERNAL_URL_TEMPLATE
         ? process.env.AGENT_INTERNAL_URL_TEMPLATE.replace("{short}", short)
         : `http://oaf-${short}-svc.agent-platform.svc.cluster.local:8100`;

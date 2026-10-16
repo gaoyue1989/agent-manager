@@ -94,4 +94,18 @@ M0 ──▶ M1 ─┐
 
 | 模块 | 单测 | e2e | 状态 | 备注 |
 |------|------|-----|------|------|
-| M0–M9 | — | — | 未实施 | 2026-10-17 拆分定稿；完成判据见「完成定义（DoD）」，合入后按模块回填单测/e2e 证据链接 |
+| M0 | ✅ jwt/auth/migrate/router 分层矩阵全绿（`make test` 全包 ok） | 手工/集群待跑 | 实施完成（2026-10-17） | feat/console-user-workspace-split：四表+JWT+路由分层+登录页+双布局+迁移重定向；Next16 proxy 取代 middleware（守卫并入 proxy.ts） |
+| M1 | ✅ governance（slug/bind 三态/成员矩阵/删除保护）+ admin HTTP 鉴权三态 | governance 脚本待集群 | 实施完成（2026-10-17） | admin 治理端点 + 工作空间/用户/审计/概览四页 + 服务列表归属列/纳管 + 发布向导归属下拉 |
+| M2 | ✅ consoleview（摘要降级/跨空间 404）+ resolveWorkspace 矩阵 | 核心 job 扩展待集群 | 实施完成（2026-10-17） | console 骨架/概览/列表/切换器；proxy `/agent/{short}` 通配 + X-User-Id 注入 |
+| M3 | ✅ agentgen（slugify/frontmatter golden/mcp config golden/创建编辑链路/spec 互斥/publicEndpoint） | 核心 job 主链路待集群 | 实施完成（2026-10-17） | 创建页单页分区表单 + 编辑页同构复用 + import/adopt 通道（console packages 上传/派生） |
+| M4 | ✅ console 动作端点角色矩阵（handler 层） | 核心 job 待集群 | 实施完成（2026-10-17） | 详情六 Tab + ChatPane 抽取（assistant 页零差异回归，既有 30 用例全绿） |
+| M5 | ✅ modelconn（CRUD/掩码/test 三分支/deliver 幂等假 agent 计数/usage 三态） | model-switch 脚本待集群 | 实施完成（2026-10-17） | 连接页 + 创建页勾选 + OnServiceRunning 回调下发 + 调试下拉透传 |
+| M6 | ✅ mcpconnector（verify 假 MCP 三分支/refCount/config golden） | mcp-connector 脚本待集群 | 实施完成（2026-10-17） | 工具管理页 + agentgen 注入（token 不落包走 Secret） + builtin platform-mcp |
+| M7 | ✅ integration（探测三态/重复 409/引用保护） | 协议多副本 job 待集群 | 实施完成（2026-10-17） | 集成页 + 创建页 SubAgent 接集成下拉 + AGENT_REMOTE_HEADERS_JSON 进 Secret |
+| M8 | ✅ apikey（签发格式/哈希/作用域/吊销/过期惰性） | workspace-assets 脚本待集群 | 实施完成（2026-10-17） | Skill/记忆/凭证/模板/成员页 + invitable-users + 一次性明文弹窗 |
+| M9 | ✅ introspect 双通道（JWT/API Key/吊销 403/作用域 403） | enforce 三态需独立环境 | 后端+router 配置完成（2026-10-17） | /auth/introspect + platform-router auth_request（ROUTER_AUTH_MODE off|report|enforce，默认 off，三档渲染均过 `nginx -t`）；report 灰度 48h 与 enforce 环境验收为上线前置，另行执行 |
+
+> 2026-10-17 实施说明（feat/console-user-workspace-split 分支）：
+> - 「单测」列 = `cd backend && make test`（go vet + go test 全包）与 `cd frontend && npm run lint && npm run build && npm test`（lint 0 errors、tsc 全绿、既有 30 用例全绿）实跑结果；
+> - 「e2e」列标注待集群/手工的条目为 DoD 中无法离线自动化部分（四必需 job 回归、governance/model-switch/mcp-connector/workspace-assets 脚本、enforce 三态环境），合入后按 e2e 落位表在集群环境补跑并回填证据链接；
+> - frontmatter 契约以 agent-framework OafConfigLoader 实测为准：子 agent YAML 键为 `agents`（含 endpoint），设计稿措辞 `subAgents` 为概念名，生成包按运行时契约产出。

@@ -277,6 +277,11 @@ spec:
             - { name: INGRESS_CLASS, value: nginx }
             - { name: INGRESS_HOST, value: "172.20.0.3" }
             - { name: INGRESS_PORT, value: "30080" }
+            # 控制台拆分（console-user-workspace-split M0）：登录签发密钥（缺失启动 fail-fast）
+            # 与首个 admin 种子（仅 users 表空时生效；生产环境务必覆盖为真实随机值）
+            - { name: JWT_SECRET, value: "oaf-console-jwt-secret-CHANGE-ME" }
+            - { name: ADMIN_INIT_USER, value: "admin" }
+            - { name: ADMIN_INIT_PASSWORD, value: "OafConsole2026" }
           volumeMounts:
             - { name: data, mountPath: /data }
           readinessProbe:

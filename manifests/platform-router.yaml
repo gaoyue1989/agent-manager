@@ -16,49 +16,87 @@ metadata:
     app.kubernetes.io/name: platform-router
     app.kubernetes.io/managed-by: oaf-platform
 data:
-  nginx.conf: |
-    worker_processes auto;
-    events { worker_connections 10240; }
-    http {
-      access_log /dev/stdout;
-      # 变量 proxy_pass 逐请求解析必须显式指定 resolver；10s 缓存意味着服务删除后
-      # 至多 10s 内残留转发（502）
-      resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
-
-      # 外层 controller 已声明 X-Forwarded-* 时透传，否则按本跳观察值兜底
-      #（保住 TLS 卸载场景的 https）；host 兜底用 $http_host（含端口）而非 $host
-      #（剥端口会让 NodePort 入口集群的 agent-card url 丢 :30080 变不可达）
-      map $http_x_forwarded_proto $fwd_proto { default $http_x_forwarded_proto; "" $scheme; }
-      map $http_x_forwarded_host  $fwd_host  { default $http_x_forwarded_host;  ""  $http_host; }
-
-      server {
-        listen 8080;
-        # 与文件上传（POST /files/upload）对齐：入口层不设更严于历史的体量限制，
-        # 上限由应用层裁决
-        client_max_body_size 200m;
-
-        # [a-z0-9-] 限定字符集：$short 只出现在域名 label 位置，杜绝路径注入 upstream；
-        # nginx 在 location 匹配前已做 URI 归一化（合并斜杠、消解 ../）
-        location ~ ^/agent/(?<short>[a-z0-9-]+) {
-          rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀：nginx 原生能力，替代 ingress 注解
-          proxy_pass http://oaf-$short-svc.agent-platform.svc.cluster.local:8100;
-          proxy_set_header Host              $host;
-          proxy_set_header X-Forwarded-Proto $fwd_proto;
-          proxy_set_header X-Forwarded-Host  $fwd_host;
-          proxy_set_header X-Forwarded-Prefix /agent/$short;   # agent-framework 前缀感知的输入契约
-          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-          proxy_http_version 1.1;
-          proxy_set_header Connection "";         # SSE 长连接
-          proxy_buffering off;                    # SSE 不缓冲
-          proxy_request_buffering off;            # 上传直透
-          proxy_read_timeout 3600s;               # 等价原 ingress path 模式注解三件套
-          proxy_send_timeout 3600s;
-        }
-
-        location = /healthz { access_log off; return 200 "ok"; }   # router 自身存活探针
-        location / { return 404; }
-      }
+  # 以 nginx 官方镜像 templates+envsubst 机制渲染（/etc/nginx/templates/*.template →
+  # /etc/nginx/conf.d/*.conf，仅替换环境中已定义的变量，$host/$short 等 nginx 变量不受影响）。
+  # ROUTER_AUTH_MODE 由 Deployment env 注入（off|report|enforce），改档 = 改 ConfigMap/env + 滚动重启。
+  default.conf.template: |
+    # 数据面网关鉴权（console-user-workspace-split M9 §3）：
+    #   off     不鉴权：/_auth 直接 200，X-User-Id 透传客户端自报（历史行为，默认）
+    #   report  introspect 结果只记日志放行（灰度观察未鉴权流量比例，≥48h 后转 enforce）
+    #   enforce 无凭据/无效凭据 401、吊销即时 403；作用域不匹配 403（fail-closed）
+    # auth 子请求是短平快元数据调用，业务流量本体不经 backend（原则一不变量）；
+    # SSE 仅握手时一次。身份信任链：report/enforce 以 introspect 结果覆盖客户端自报身份（M9 §4）。
+    map "${ROUTER_AUTH_MODE}" $router_auth_mode {
+      default "off";
+      "report"  "report";
+      "enforce" "enforce";
     }
+    map $router_auth_mode $auth_uid {
+      default $http_x_user_id;   # off：透传客户端自报（frontend proxy 注入或直连自报，历史行为）
+      "report"  $auth_result_uid; # report/enforce：以鉴权结果为准（不信任客户端自报）
+      "enforce" $auth_result_uid;
+    }
+    map $http_x_forwarded_proto $fwd_proto_fwd { default $http_x_forwarded_proto; "" $scheme; }
+    map $http_x_forwarded_host  $fwd_host      { default $http_x_forwarded_host;  "" $http_host; }
+
+    log_format auth '$remote_addr "$request" status=$status auth=$auth_code uid=$auth_result_uid';
+    access_log /dev/stdout auth;
+
+    server {
+      listen 8080;
+      # 与文件上传（POST /files/upload）对齐：入口层不设更严于历史的体量限制，
+      # 上限由应用层裁决
+      client_max_body_size 200m;
+
+      # auth_request 内部子请求：backend introspect（JWT 或 API Key 双通道）。
+      # X-User-Id 响应头经 auth_request_set 回注；X-Original-URI 供 API Key 作用域裁决
+      #（绑定单 Agent 的 key 仅放行该 Agent 路由）。5s 超时 fail-closed（仅 enforce 生效路径）。
+      location = /_auth {
+        internal;
+        if ($router_auth_mode = "off") {
+          return 200;
+        }
+        if ($router_auth_mode = "report") {
+          # 灰度观察：非 2xx 转 200 放行，仅 access_log 记 auth=$auth_code 供统计
+          error_page 401 403 =200 @report_allow;
+        }
+        proxy_pass http://oaf-platform-backend.agent-platform.svc.cluster.local:8080/api/v1/auth/introspect;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Original-URI $request_uri;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 5s;
+      }
+      location @report_allow { internal; return 200; }
+
+      # [a-z0-9-] 限定字符集：$short 只出现在域名 label 位置，杜绝路径注入 upstream；
+      # nginx 在 location 匹配前已做 URI 归一化（合并斜杠、消解 ../）
+      location ~ ^/agent/(?<short>[a-z0-9-]+) {
+        auth_request /_auth;
+        auth_request_set $auth_result_uid $upstream_http_x_user_id;
+        auth_request_set $auth_code $upstream_status;
+
+        rewrite ^/agent/[a-z0-9-]+/?(.*)$ /$1 break;    # 剥前缀：nginx 原生能力，替代 ingress 注解
+        proxy_pass http://oaf-$short-svc.agent-platform.svc.cluster.local:8100;
+        proxy_set_header X-User-Id       $auth_uid;      # off=透传自报 / report+enforce=鉴权结果覆盖
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $fwd_proto_fwd;
+        proxy_set_header X-Forwarded-Host  $fwd_host;
+        proxy_set_header X-Forwarded-Prefix /agent/$short;   # agent-framework 前缀感知的输入契约
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";         # SSE 长连接
+        proxy_buffering off;                    # SSE 不缓冲
+        proxy_request_buffering off;            # 上传直透
+        proxy_read_timeout 3600s;               # 等价原 ingress path 模式注解三件套
+        proxy_send_timeout 3600s;
+      }
+
+      location = /healthz { access_log off; return 200 "ok"; }   # router 自身存活探针
+      location / { return 404; }
+    }
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -89,10 +127,12 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          env:
+            - name: ROUTER_AUTH_MODE          # off | report | enforce（灰度三态，见模板头注释）
+              value: "off"
           volumeMounts:
             - name: conf
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
+              mountPath: /etc/nginx/templates   # nginx 官方 entrypoint envsubst 渲染到 conf.d/
               readOnly: true
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
@@ -109,6 +149,9 @@ spec:
         - name: conf
           configMap:
             name: platform-router-conf
+            items:
+              - key: default.conf.template
+                path: default.conf.template
 ---
 apiVersion: v1
 kind: Service
