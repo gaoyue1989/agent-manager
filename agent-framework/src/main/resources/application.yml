@@ -84,6 +84,11 @@ agent:
     projection-fingerprint-cache-enabled: ${SANDBOX_PROJECTION_FINGERPRINT_CACHE:true}
     skill-revision-gate-enabled: ${SANDBOX_SKILL_REVISION_GATE:true}
     sync-snapshot-diff-enabled: ${SANDBOX_SYNC_SNAPSHOT_DIFF:true}
+    # per-session agent 隔离（上游 #2849 workaround）：每会话独立 HarnessAgent/SandboxBackedFilesystem，
+    # 消解并行 turn 互踩单槽沙箱指针（跨用户 "No active sandbox"/串扰）。开启前确认 MCP 复用层生效
+    session-agent-isolation: ${SANDBOX_SESSION_AGENT_ISOLATION:false}
+    session-agent-cache-max: ${SANDBOX_SESSION_AGENT_CACHE_MAX:500}
+    session-agent-cache-ttl-minutes: ${SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES:30}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}

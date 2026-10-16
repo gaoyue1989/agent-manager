@@ -101,4 +101,19 @@ public class SandboxRuntime {
     public boolean syncSnapshotDiffEnabled() {
         return config.syncSnapshotDiffEnabled();
     }
+
+    /** per-session agent 隔离（{@code SANDBOX_SESSION_AGENT_ISOLATION}，默认 false；上游 #2849 workaround） */
+    public boolean sessionAgentIsolationEnabled() {
+        return config.sessionAgentIsolation();
+    }
+
+    /** 会话级 agent 缓存上限（{@code SANDBOX_SESSION_AGENT_CACHE_MAX}，默认 500） */
+    public int sessionAgentCacheMax() {
+        return config.sessionAgentCacheMax();
+    }
+
+    /** 会话级 agent 空闲过期分钟（{@code SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES}，默认 30） */
+    public int sessionAgentCacheTtlMinutes() {
+        return config.sessionAgentCacheTtlMinutes();
+    }
 }

@@ -39,6 +39,18 @@ public record SandboxConfig(
     @DefaultValue("true") boolean projectionFingerprintCacheEnabled,
     @DefaultValue("true") boolean skillRevisionGateEnabled,
     @DefaultValue("true") boolean syncSnapshotDiffEnabled,
+    /**
+     * per-session agent 隔离（{@code SANDBOX_SESSION_AGENT_ISOLATION}，默认 false）：
+     * 每会话独立 HarnessAgent 实例（含独立 SandboxBackedFilesystem），消解并行 turn 互踩
+     * harness 单槽沙箱指针的跨用户竞态（上游 agentscope-java #2849 的 app 级 workaround）。
+     * 代价：会话数 × agent 实例内存 + MCP 连接（连接经 McpToolRegistrar 复用层共享，见其缓存）。
+     * 开启需先确认 MCP 复用层生效，否则连接数随会话数线性放大。
+     */
+    @DefaultValue("false") boolean sessionAgentIsolation,
+    /** 会话级 agent 缓存上限（{@code SANDBOX_SESSION_AGENT_CACHE_MAX}，默认 500） */
+    @DefaultValue("500") int sessionAgentCacheMax,
+    /** 会话级 agent 空闲过期分钟（{@code SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES}，默认 30） */
+    @DefaultValue("30") int sessionAgentCacheTtlMinutes,
     OpenSandboxConfig opensandbox
 ) {
     public record OpenSandboxConfig(

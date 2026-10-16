@@ -84,6 +84,16 @@ public class McpToolRegistrar {
     /** 已注册连接跟踪: serverName -> McpClientWrapper（registerOne 成功后记录，reload 关闭旧连接用） */
     private final Map<String, McpClientWrapper> registeredWrappers = new ConcurrentHashMap<>();
 
+    /**
+     * 共享连接缓存: serverName -> McpClientWrapper（per-session agent 隔离的配套层）。
+     * wrapper 是无状态引用（initialize 幂等、底层 McpAsyncClient 线程安全，字节码核对），
+     * 多个 toolkit 注册同一 wrapper 安全——一次物理连接服务 N 个会话实例。
+     * 生命周期：只增不主动关；{@link #evictSharedWrappers()}（reload build 前）清缓存后
+     * 旧 wrapper 仅被旧 toolkit 引用，由既有 reload 清理路径关闭。绕过缓存的路径：
+     * {@link #buildClientForReload}（显式换连接）。
+     */
+    private final Map<String, McpClientWrapper> sharedWrappers = new ConcurrentHashMap<>();
+
     public McpToolRegistrar(io.agentmanager.framework.config.AgentManagerProperties props) {
         this.configDir = Path.of(props.resolvedConfigDir());
     }
@@ -162,13 +172,46 @@ public class McpToolRegistrar {
         closeQuietly(wrapper);
     }
 
+    /**
+     * 共享连接入口：命中缓存直接复用；未命中构建并缓存（并发同 server 只建一次）。
+     * 注册失败路径（registerOne catch）**不 close** 共享 wrapper——它可能正被其他
+     * toolkit 引用，生命周期归本缓存统一管理（evict 时统一关）。
+     */
+    private McpClientWrapper sharedClient(OafConfig.McpServerConfig mcp) {
+        var existing = sharedWrappers.get(mcp.server());
+        if (existing != null) {
+            log.info("[MCP] reusing shared client for server '{}'", mcp.server());
+            return existing;
+        }
+        var built = buildClient(mcp);
+        if (built == null) {
+            return null;
+        }
+        var prev = sharedWrappers.putIfAbsent(mcp.server(), built);
+        if (prev != null) {
+            // 并发构建竞态：用先到者，后到者立即关闭（尚未被任何 toolkit 引用，close 安全）
+            closeQuietly(built);
+            return prev;
+        }
+        return built;
+    }
+
+    /** 清空共享连接缓存（reload build 前调用）：旧 wrapper 仅被旧 toolkit 引用，随旧实例清理路径关闭 */
+    public void evictSharedWrappers() {
+        var n = sharedWrappers.size();
+        sharedWrappers.clear();
+        if (n > 0) {
+            log.info("[MCP] shared client cache evicted: {} wrapper(s) released to old toolkits", n);
+        }
+    }
+
     public String registerOne(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         var uiMapping = loadUiMapping(mcp);
         uiMappings.put(mcp.server(), uiMapping);
         toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
         readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
         startupRequired.put(mcp.server(), isStartupRequired(mcp));
-        var wrapper = buildClient(mcp);
+        var wrapper = sharedClient(mcp);
         if (wrapper == null) {
             log.warn("[MCP] skipped server '{}': client build failed", mcp.server());
             return null;
@@ -191,13 +234,15 @@ public class McpToolRegistrar {
             }
             var prev = registeredWrappers.put(mcp.server(), wrapper);
             if (prev != null && prev != wrapper) {
-                // 重注册路径（reload）：旧连接已由调用方 removeMcpClient 关闭，此处兜底防泄漏
+                // 重注册路径（reload，走 buildClientForReload 显式换连接）：旧连接已由调用方
+                // removeMcpClient 关闭，此处兜底防泄漏。prev 是旧专属连接（非共享缓存成员）
                 closeQuietly(prev);
             }
             log.info("MCP client registered: {} ({})", mcp.server(), wrapper);
             return mcp.server();
         } catch (Exception e) {
-            closeQuietly(wrapper);
+            // 共享 wrapper 不得在此 close：它可能正被其他 toolkit 引用，
+            // 生命周期归 sharedWrappers 缓存统一管理（evict 时经 reload 清理路径关闭）
             if (Boolean.TRUE.equals(startupRequired.get(mcp.server()))) {
                 log.error("[MCP] server '{}' declared startup.required=true but registration failed", mcp.server(), e);
                 throw new IllegalStateException(

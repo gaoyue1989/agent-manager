@@ -87,14 +87,16 @@ public class AgentScopeConfig {
         // 投影根剔除 .skills-cache，改由 OpenSandbox.hydrateScopedSkillCache 只投放当前会话
         // scope（.skills-cache/<scope>）并清理容器内其它 scope 残留。
         spec.workspaceProjectionRoots(List.of("AGENTS.md", "skills", "subagents", "knowledge"));
-        // 并发执行守卫（issue #27c，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId
-        // 的沙箱获取，消解并发 hydrate 互踩与端口竞态的触发面；Redis 不可用时守卫内部 fail-open
+        // 并发执行守卫（issue #27c，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同用户
+        // 的沙箱获取，消解并发 hydrate 互踩与端口竞态的触发面；Redis 不可用时守卫内部 fail-open。
+        // 锁键经 session_user 反查真实用户（Channel 链路 key.value 是网关 peer=前端 sessionId，
+        // 直接组键会让 USER 串行化退化为每会话一把，2026-10-16 实测确认）；无 store 时回退原值
         if (sandboxRuntime.guardEnabled()) {
             var redisFacade = redisFacadeProvider.getIfAvailable();
             if (redisFacade != null) {
                 spec.executionGuard(new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
-                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L));
-                log.info("SandboxExecutionGuard enabled (scope=USER serialized, leaseTtl={}s)",
+                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore));
+                log.info("SandboxExecutionGuard enabled (scope=USER serialized by real userId, leaseTtl={}s)",
                     sandboxRuntime.guardLeaseSeconds());
             } else {
                 log.warn("SandboxExecutionGuard requested (SANDBOX_GUARD_ENABLED) but no RedisConnectionFacade bean — running unguarded");
@@ -458,11 +460,32 @@ public class AgentScopeConfig {
         List<Map<String, Object>> mcpConfigs,
         LLMLogger llmLogger,
         io.agentmanager.framework.service.ConfirmContextStore confirmContextStore,
-        io.agentmanager.framework.service.AgentStateReader agentStateReader
+        io.agentmanager.framework.service.AgentStateReader agentStateReader,
+        org.springframework.beans.factory.ObjectProvider<SandboxRuntime> sandboxRuntimeProvider,
+        HarnessAgentFactory harnessAgentFactory,
+        DistributedStore distributedStore,
+        UiContextStore uiContextStore,
+        SessionUserStore sessionUserStore,
+        io.agentmanager.framework.service.ModelCatalog modelCatalog,
+        org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
     ) {
-        var service = new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore);
+        var sandboxRuntime = sandboxRuntimeProvider.getIfAvailable();
+        boolean isolation = sandboxRuntime != null && sandboxRuntime.sessionAgentIsolationEnabled();
+        var service = isolation
+            ? new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore,
+                true, sandboxRuntime.sessionAgentCacheMax(), sandboxRuntime.sessionAgentCacheTtlMinutes())
+            : new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore);
         // HITL 恢复优先走 AgentState（无 TTL）：官方 SDK 把 ASKING 工具连同 replyId 持久化在 state 里
         service.setAgentStateReader(agentStateReader);
+        if (isolation) {
+            // 会话级工厂与 OafReloadService 的 B 路径同参（build 入参完全一致）；
+            // reload 时 OafReloadService 会更新此工厂并清缓存（世代失效）
+            service.setSessionAgentFactory(() -> harnessAgentFactory.build(oafConfig,
+                distributedStore, llmLogger, uiContextStore, sessionUserStore, modelCatalog,
+                sandboxSpecProvider.getIfAvailable()));
+            log.info("Per-session agent isolation enabled (cacheMax={}, ttlMinutes={}m)",
+                sandboxRuntime.sessionAgentCacheMax(), sandboxRuntime.sessionAgentCacheTtlMinutes());
+        }
         return service;
     }
 }

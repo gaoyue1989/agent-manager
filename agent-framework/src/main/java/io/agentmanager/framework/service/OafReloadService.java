@@ -235,10 +235,13 @@ public class OafReloadService {
         // 3. 构建全新 agent（内含新 Toolkit + MCP 全量注册，fail-soft/required 语义与启动一致）。
         //    必须在 build 前捕获旧注册的 wrapper 对象：build 会覆写 registrar 的注册跟踪，
         //    事后按名字查拿到的是新注册的 wrapper（按名关闭会误杀新连接）。
+        //    同时先清空 MCP 共享连接缓存（per-session 隔离配套）：否则新 build 会复用旧连接，
+        //    第 5 步按旧 wrapper 对象 close 时把新 toolkit 正在用的连接一起关掉。
         var oldWrappers = new LinkedHashMap<String, io.agentscope.core.tool.mcp.McpClientWrapper>();
         for (var name : mcpToolRegistrar.getRegisteredServerNames()) {
             oldWrappers.put(name, mcpToolRegistrar.getRegisteredWrapper(name));
         }
+        mcpToolRegistrar.evictSharedWrappers();
         HarnessAgent newAgent;
         try {
             newAgent = harnessAgentFactory.build(newConfig, distributedStore, llmLogger,
@@ -252,6 +255,13 @@ public class OafReloadService {
         var oldAgent = agentRuntimeService.swapAgent(newAgent);
         a2aAgentRefHolder.update(newAgent);
         oafConfigHolder.update(newConfig);
+
+        // 4.5 per-session agent 隔离世代失效 + 工厂更新：缓存的旧实例按旧配置构建，全部作废；
+        //     会话级工厂改绑新配置构建器（capture 本次的构建参数，等价于 reloadAgent 对共享 agent 的重建）
+        agentRuntimeService.setSessionAgentFactory(() -> harnessAgentFactory.build(newConfig,
+            distributedStore, llmLogger, uiContextStore, sessionUserStore, modelCatalog,
+            sandboxSpecProvider.getIfAvailable()));
+        agentRuntimeService.evictAllSessionAgents();
 
         // 5. 旧 agent 的 MCP 连接收尾（旧 toolkit 无公开 closeMcpClients）：按 build 前
         //    捕获的旧 wrapper 对象直接 close，旧 toolkit 侧再 removeMcpClient 摘标准路径工具；

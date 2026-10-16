@@ -43,6 +43,17 @@ public class AgentRuntimeService {
     private volatile io.agentscope.harness.agent.HarnessAgent agent;
     private final List<Map<String, Object>> mcpConfigs;
 
+    /**
+     * per-session agent 隔离（上游 #2849 的 app 级 workaround，SANDBOX_SESSION_AGENT_ISOLATION 开关）：
+     * 并行 turn 互踩 harness 单槽 {@code SandboxBackedFilesystem}（B 的 releaseForCall 清空/覆盖
+     * 共享指针 → A 的活跃长任务抛 "No active sandbox"）。开启后每会话独占 agent 实例，单例不再被
+     * 跨会话并发读写。实例由 {@link #sessionAgentFactory} 惰性构建，正确性状态全在共享存储
+     * （checkpoint/turn_lease/confirm_context），驱逐/重建不破坏语义——同会话互斥由 turn_lease 裁决。
+     */
+    private final SessionAgentCache sessionAgents;
+    /** 会话级 agent 构建工厂：null = 隔离关闭，全部走共享单例 {@link #agent} */
+    private volatile java.util.function.Supplier<io.agentscope.harness.agent.HarnessAgent> sessionAgentFactory;
+
     public AgentRuntimeService(
         OafConfig oafConfig,
         io.agentscope.harness.agent.HarnessAgent agent,
@@ -50,17 +61,49 @@ public class AgentRuntimeService {
         LLMLogger llmLogger,
         ConfirmContextStore confirmContextStore
     ) {
+        this(oafConfig, agent, mcpConfigs, llmLogger, confirmContextStore, false, 0, 0);
+    }
+
+    /** 隔离开启时的完整构造：cacheMax=0 取默认 500，cacheTtlMinutes=0 取默认 30 */
+    public AgentRuntimeService(
+        OafConfig oafConfig,
+        io.agentscope.harness.agent.HarnessAgent agent,
+        List<Map<String, Object>> mcpConfigs,
+        LLMLogger llmLogger,
+        ConfirmContextStore confirmContextStore,
+        boolean sessionIsolationEnabled,
+        int cacheMax,
+        int cacheTtlMinutes
+    ) {
         this.oafConfig = oafConfig;
         this.tenantPrefix = oafConfig.slug();
         this.agent = agent;
         this.mcpConfigs = mcpConfigs;
         this.llmLogger = llmLogger;
         this.confirmContextStore = confirmContextStore;
+        this.sessionAgents = sessionIsolationEnabled
+            ? new SessionAgentCache(cacheMax > 0 ? cacheMax : 500,
+                cacheTtlMinutes > 0 ? cacheTtlMinutes : 30)
+            : null;
     }
 
     /** 注入 AgentState 读取器（Bean 装配时调用；测试可不注入，回落 confirm_context） */
     public void setAgentStateReader(AgentStateReader agentStateReader) {
         this.agentStateReader = agentStateReader;
+    }
+
+    /** per-session 隔离是否生效（观测/日志判断用） */
+    public boolean sessionIsolationEnabled() {
+        return sessionAgents != null;
+    }
+
+    /**
+     * 注册会话级 agent 构建工厂（装配期调用，reload 时由 OafReloadService 更新为新构建器）。
+     * 工厂内应完成全新的 Toolkit/MCP/sandbox spec 组装——与本类持有的共享 agent 等价但独立。
+     */
+    public void setSessionAgentFactory(
+            java.util.function.Supplier<io.agentscope.harness.agent.HarnessAgent> factory) {
+        this.sessionAgentFactory = factory;
     }
 
     public String tenantPrefix() { return tenantPrefix; }
@@ -129,7 +172,7 @@ public class AgentRuntimeService {
                 .build();
 
             var userMsg = new UserMessage("user", message);
-            var result = agent.call(List.of(userMsg), ctx).block();
+            var result = getAgent(fullThreadId).call(List.of(userMsg), ctx).block();
 
             var responseText = result != null ? result.getTextContent() : "";
             log.info("[invoke] done: threadId={}, responseLen={}", fullThreadId, responseText.length());
@@ -163,7 +206,7 @@ public class AgentRuntimeService {
         return Flux.create(sink -> {
             sink.next(Map.of("type", "task_update", "id", tid, "state", "working"));
 
-            agent.streamEvents(List.of(userMsg), ctx)
+            getAgent(fullThreadId).streamEvents(List.of(userMsg), ctx)
                 .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
                 .doOnError(e -> {
                     log.error("[invokeStream] stream error: threadId={}, error={}", fullThreadId, e.getMessage(), e);
@@ -191,6 +234,40 @@ public class AgentRuntimeService {
     }
 
     /**
+     * 会话级 agent：隔离开启时按 sessionId 取/建（LRU+TTL 驱逐），未开启或 sid 缺失时
+     * 回退共享单例——调用方语义与 {@link #getAgent()} 完全一致，可无脑替换。
+     */
+    public io.agentscope.harness.agent.HarnessAgent getAgent(String sessionId) {
+        if (sessionAgents == null || sessionId == null || sessionId.isBlank()) {
+            return this.agent;
+        }
+        return sessionAgents.get(sessionId);
+    }
+
+    /** 驱逐某会话的隔离实例（HITL 挂起等需要确定性重建的场景预留；当前无调用方） */
+    public void evictSessionAgent(String sessionId) {
+        if (sessionAgents != null && sessionId != null) {
+            sessionAgents.remove(sessionId);
+        }
+    }
+
+    /** 清空全部会话级实例（OAF reload 世代失效：旧实例按旧配置构建，一律作废重建） */
+    public void evictAllSessionAgents() {
+        if (sessionAgents != null) {
+            int n = sessionAgents.size();
+            sessionAgents.clear();
+            if (n > 0) {
+                log.info("[session-agent] generation invalidated: {} per-session instance(s) evicted", n);
+            }
+        }
+    }
+
+    /** 当前会话级实例数（观测/单测用；隔离关闭恒为 0） */
+    public int sessionCacheSize() {
+        return sessionAgents != null ? sessionAgents.size() : 0;
+    }
+
+    /**
      * OAF reload 原子切换：替换 agent 引用并返回旧实例（调用方负责旧 agent 的 MCP 收尾）。
      * 下一轮对话生效；进行中 turn 已捕获旧引用，继续在旧 agent 上完成。
      */
@@ -199,6 +276,82 @@ public class AgentRuntimeService {
         this.agent = next;
         return old;
     }
+
+    /**
+     * 会话级 agent 缓存：accessOrder LRU + 惰性 TTL 过期（JDK 自带，不引缓存依赖）。
+     * computeIfAbsent 保证同会话并发首请求只构建一次；构建失败不缓存（下次重试）。
+     * 重建成本被逐会话摊销：MCP 连接经 {@code McpToolRegistrar} 的 per-server 复用层共享，
+     * 唯独 SandboxBackedFilesystem/middleware 状态天然 per-instance（这正是隔离的目的）。
+     */
+    private final class SessionAgentCache {
+        private final int max;
+        private final long ttlMs;
+        private final Object lock = new Object();
+        // accessOrder=true：get/put 都把条目移到尾部，eldest=头部即 LRU 淘汰点
+        private LinkedHashMap<String, Entry> map;
+
+        SessionAgentCache(int max, int ttlMinutes) {
+            this.max = max;
+            this.ttlMs = ttlMinutes * 60_000L;
+            this.map = new LinkedHashMap<>(64, 0.75f, true);
+        }
+
+        io.agentscope.harness.agent.HarnessAgent get(String sid) {
+            var factory = sessionAgentFactory;
+            if (factory == null) {
+                return agent;
+            }
+            long now = System.currentTimeMillis();
+            synchronized (lock) {
+                var e = map.get(sid);
+                if (e != null && now - e.at < ttlMs) {
+                    return e.agent;
+                }
+                // 过期/不存在：先移除旧条目（构建失败不留脏数据）
+                if (e != null) {
+                    map.remove(sid);
+                }
+                io.agentscope.harness.agent.HarnessAgent built;
+                try {
+                    built = factory.get();
+                } catch (RuntimeException ex) {
+                    log.error("[session-agent] build failed for sid={}, falling back to shared agent: {}",
+                        sid, ex.getMessage(), ex);
+                    return agent;
+                }
+                map.put(sid, new Entry(built, now));
+                // LRU 驱逐：仅驱逐无进行中 turn 的实例无法廉价探测，依赖 turn_lease 的
+                // 请求互斥——被驱逐实例上的进行中 turn 持有旧引用照常完成（与 reload 同语义）
+                while (map.size() > max) {
+                    var eldest = map.entrySet().iterator().next();
+                    log.info("[session-agent] evict LRU sid={}", eldest.getKey());
+                    map.remove(eldest.getKey());
+                }
+                return built;
+            }
+        }
+
+        void remove(String sid) {
+            synchronized (lock) {
+                map.remove(sid);
+            }
+        }
+
+        /** 世代失效（reload）：清空并替换新 map，避免遍历旧 map 时与新请求竞争 */
+        void clear() {
+            synchronized (lock) {
+                map = new LinkedHashMap<>(64, 0.75f, true);
+            }
+        }
+
+        int size() {
+            synchronized (lock) {
+                return map.size();
+            }
+        }
+    }
+
+    private record Entry(io.agentscope.harness.agent.HarnessAgent agent, long at) {}
 
     /**
      * 逐事件转发（invokeStream 与 resumeWithConfirmStream 共用）：
@@ -438,7 +591,7 @@ public class AgentRuntimeService {
         var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
 
-        var result = agent.call(List.of(resumeMsg), ctx).block();
+        var result = getAgent(fullThreadId).call(List.of(resumeMsg), ctx).block();
         var responseText = result != null ? result.getTextContent() : "";
         log.info("[resume-confirm] done: threadId={}, responseLen={}", fullThreadId, responseText.length());
         return Map.of("response", responseText, "thread_id", tid);
@@ -463,7 +616,7 @@ public class AgentRuntimeService {
                 var confirmCtx = resolveConfirmContext(fullThreadId);   // 优先 state（无 TTL），回落 confirm_context
                 var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
                 var resumeMsg = buildResumeMsg(confirmCtx, results);
-                agent.streamEvents(List.of(resumeMsg), ctx)
+                getAgent(fullThreadId).streamEvents(List.of(resumeMsg), ctx)
                     .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
                     .doOnError(e -> {
                         log.error("[resume-confirm-stream] error: threadId={}, error={}", fullThreadId, e.getMessage(), e);
@@ -513,7 +666,7 @@ public class AgentRuntimeService {
         var confirmCtx = resolveConfirmContext(fullThreadId);
         var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
-        return agent.streamEvents(List.of(resumeMsg), ctx);
+        return getAgent(fullThreadId).streamEvents(List.of(resumeMsg), ctx);
     }
 
     /** 构造携带 confirm_results metadata 的恢复消息（调用方已消费确认上下文） */

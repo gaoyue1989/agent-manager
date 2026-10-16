@@ -29,12 +29,22 @@ public class ChannelConfig {
      * 当前 Agent 的 Channel 工厂：每轮对话从 AgentRuntimeService 当前引用创建，
      * 避免 OAF reload 后 ChatStreamController 继续复用启动期 Agent 的旧 Channel。
      * perPeer 的必要性见上方 chatUiChannel 的注释（issue #87）。
+     * current(sessionId)：per-session agent 隔离开启时按会话取 agent 实例。
      */
     @Bean
     public ChatUiChannelProvider chatUiChannelProvider(AgentRuntimeService runtimeService) {
-        return () -> {
-            var agent = runtimeService.getAgent();
-            return agent == null ? null : agent.channel(ChatUiChannel.perPeer());
+        return new ChatUiChannelProvider() {
+            @Override
+            public ChatUiChannel current() {
+                var agent = runtimeService.getAgent();
+                return agent == null ? null : agent.channel(ChatUiChannel.perPeer());
+            }
+
+            @Override
+            public ChatUiChannel current(String sessionId) {
+                var agent = runtimeService.getAgent(sessionId);
+                return agent == null ? null : agent.channel(ChatUiChannel.perPeer());
+            }
         };
     }
 }

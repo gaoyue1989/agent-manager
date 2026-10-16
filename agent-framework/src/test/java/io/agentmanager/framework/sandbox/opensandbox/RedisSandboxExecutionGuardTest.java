@@ -13,6 +13,7 @@ import io.agentmanager.framework.redis.RedisConnectionFacade;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RedisSandboxExecutionGuardTest {
@@ -71,5 +72,68 @@ class RedisSandboxExecutionGuardTest {
         assertEquals("USER", key.getScope().name());
         // redis key 前缀拼接格式稳定（guard 与排查口径一致）
         assertNotNull(Set.of(key.getScope().name().toLowerCase()));
+    }
+
+    // ===== 锁键值翻译（Channel 链路 key.value=网关 peer，须反查真实用户再组键）=====
+
+    @Test
+    void userScopeValueShouldTranslateToRealUserIdViaSessionUserLookup() {
+        // Channel 链路：peer-sid-1 是前端 sessionId，session_user 登记其真实用户 alice
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("peer-sid-1")).thenReturn("alice");
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertEquals("alice", guard.resolveUserLockValue("peer-sid-1"));
+    }
+
+    @Test
+    void lookupMissShouldFallBackToRawValue() {
+        // A2A / invoke 链路（ctx.userId 即真实用户）或未登记会话：反查 null → 原值回退，行为不变
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("real-user")).thenReturn(null);
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertEquals("real-user", guard.resolveUserLockValue("real-user"));
+    }
+
+    @Test
+    void lookupShouldBeCachedWithinTtlWindow() {
+        // 自旋重试每 200ms 一次 tryEnter：反查必须被缓存挡住，否则打爆 DB
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("peer-sid-2")).thenReturn("bob");
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertEquals("bob", guard.resolveUserLockValue("peer-sid-2"));
+        assertEquals("bob", guard.resolveUserLockValue("peer-sid-2"));
+        assertEquals("bob", guard.resolveUserLockValue("peer-sid-2"));
+        org.mockito.Mockito.verify(store, org.mockito.Mockito.times(1)).findUserIdBySession("peer-sid-2");
+    }
+
+    @Test
+    void negativeLookupShouldNotFallbackSpamWithinWindow() {
+        // 未命中也走负缓存：TTL 窗口内不重复查库（自旋路径每 200ms 触发的防线）
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("unregistered")).thenReturn(null);
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertEquals("unregistered", guard.resolveUserLockValue("unregistered"));
+        assertEquals("unregistered", guard.resolveUserLockValue("unregistered"));
+        org.mockito.Mockito.verify(store, org.mockito.Mockito.times(1)).findUserIdBySession("unregistered");
+    }
+
+    @Test
+    void storeLookupFailureShouldFallBackToRawValue() {
+        // 查库异常：fail-soft 回退原值，守卫不得因翻译层故障阻断（与 Redis fail-open 同原则）
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("any"))
+            .thenThrow(new RuntimeException("db down"));
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertEquals("any", guard.resolveUserLockValue("any"));
+    }
+
+    @Test
+    void nullOrBlankValueShouldBypassLookup() {
+        // 空值直通，不触达 store（防御 resolve 前置判空语义）
+        var store = org.mockito.Mockito.mock(io.agentmanager.framework.service.SessionUserStore.class);
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store);
+        assertNull(guard.resolveUserLockValue(null));
+        assertEquals("", guard.resolveUserLockValue(""));
+        org.mockito.Mockito.verifyNoInteractions(store);
     }
 }
