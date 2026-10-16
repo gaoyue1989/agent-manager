@@ -166,10 +166,62 @@ class FileToolsTest {
     }
 
     @Test
-    void presentFileSandboxModeRequiresBase64() {
+    void presentFileSandboxModeRejectsBase64Param() {
+        // 沙箱模式不再接受 file_content_base64（防大文件 base64 复述截断 → file_ready 静默丢失）：
+        // 基类防御分支应直接报错，不做沙箱直读、不登记
         when(sandboxRuntime.enabled()).thenReturn(true);
-        var result = tools.presentFile(ctx(), "outputs/x.txt", null);
-        assertTrue(result.contains("file_content_base64"), "沙箱模式必须传 base64: " + result);
+        var result = tools.presentFile(ctx(), "outputs/x.txt", "aGVsbG8=");
+        assertTrue(result.contains("error"), "沙箱模式传 base64 应报错: " + result);
+        verify(fileAssetStore, org.mockito.Mockito.never()).insert(any());
+    }
+
+    @Test
+    void sandboxSubclassSchemaShouldExposeSingleParamPresentFile() throws Exception {
+        // 沙箱注册形态：present_file 仅 file_path 单参数（无 file_content_base64），
+        // present_url 透传保留（Toolkit.registerTool 只扫 getDeclaredMethods，必须子类重声明）
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var spec = mock(OpenSandboxFilesystemSpec.class);
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools.SandboxAwareFileTools(fileAssetStore, fileStorage, props,
+            sandboxRuntime, mock(WorkspaceReader.class), spec, null);
+
+        var presentFileParams = new java.util.HashSet<String>();
+        for (var p : t.getClass().getDeclaredMethod("presentFile",
+                io.agentscope.core.agent.RuntimeContext.class, String.class).getParameters()) {
+            var ann = p.getAnnotation(io.agentscope.core.tool.ToolParam.class);
+            if (ann != null) presentFileParams.add(ann.name());
+        }
+        assertTrue(presentFileParams.contains("file_path"), "file_path 必须在 schema: " + presentFileParams);
+        assertTrue(!presentFileParams.contains("file_content_base64"),
+            "沙箱形态不得暴露 file_content_base64: " + presentFileParams);
+
+        var names = new java.util.HashSet<String>();
+        for (var m : t.getClass().getDeclaredMethods()) {
+            var ann = m.getAnnotation(io.agentscope.core.tool.Tool.class);
+            if (ann != null) names.add(ann.name());
+        }
+        assertTrue(names.contains("present_file") && names.contains("present_url"),
+            "子类必须同时声明两个工具（getDeclaredMethods 不含继承）: " + names);
+    }
+
+    @Test
+    void sandboxSubclassPresentFileReadsDirectlyFromSandbox() throws Exception {
+        // 沙箱形态单参数调用 → 走沙箱直读并登记成功（大文件链路的实际入口）
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var spec = mock(OpenSandboxFilesystemSpec.class);
+        var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
+        when(spec.getLatestSandbox()).thenReturn(sandbox);
+        when(sandbox.getUserKey()).thenReturn("alice");
+        when(sandbox.readWorkspaceFile("outputs/big.pptx")).thenReturn(
+            new byte[2 * 1024 * 1024]);
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools.SandboxAwareFileTools(fileAssetStore, fileStorage, props,
+            sandboxRuntime, mock(WorkspaceReader.class), spec, null);
+
+        var result = t.presentFile(ctx(), "/workspace/outputs/big.pptx");
+        assertTrue(result.contains("\"file_id\""), "沙箱直读应登记成功: " + result);
+        assertTrue(result.contains("\"size\":2097152"), "2MB 文件应完整登记: " + result);
+        verify(sandbox).readWorkspaceFile("outputs/big.pptx");
     }
 
     @Test

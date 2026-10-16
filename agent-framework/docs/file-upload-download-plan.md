@@ -499,6 +499,15 @@ public String presentFile(RuntimeContext ctx, @ToolParam(name="file_path") Strin
 {"file_id":"uuid","file_name":"report.pdf","mime_type":"application/pdf","size":102400}
 ```
 
+> **沙箱形态参数裁剪（2026-10-16）**：沙箱部署注册 `FileTools.SandboxAwareFileTools`
+> 子类（`AgentScopeConfig#fileTools` 按 `SandboxRuntime.enabled()` 二选一），present_file
+> 仅 `file_path` 单参数、仅 execd 直读；`file_content_base64` 为非沙箱（KV 工作区）专属。
+> 原因：base64 回退要求 LLM 在 tool call 参数里复述文件全文（1MB 文件 ≈ 1.37MB base64
+> 文本），必超输出 token 上限被截断 → 解码失败 → 工具返回 error → `emitFileReadyViaEventBus`
+> 检测 error 静默跳过 file_ready——用户视角即「大文件生成完没有下载卡片」。基类沙箱分支
+> 对显式 base64 一律拒绝（运行期防线，防反射调用绕过 schema）。SDK `Toolkit.registerTool`
+> 反射只扫 `getDeclaredMethods`（不含继承），故子类同时重声明 present_url 纯透传。
+
 ### 8.2 注册
 
 `FileTools` 加入 `customTools`（`AgentScopeConfig`，与 BusinessTools 并列），受 `tools.json deny` 与 OAF `deniedTools` 过滤（既有机制自动生效）。
@@ -586,7 +595,7 @@ P2 扩展（`A2AController` 预处理，对齐既有"兼容转换"模式）：�
 | `FILE_UPLOAD_ALLOWED_MIME` | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/zip,application/x-zip-compressed` | MIME 白名单（逗号分隔，支持 * 通配；逐项列出，不用宽泛 `text/*`） |
 | `FILE_IMAGE_MAX_MB` | `5` | 图片内联单文件大小上限（超限图片降级为路径提示，不内联） |
 | `FILE_IMAGE_INLINE_TOTAL_MB` | `15` | 图片内联总字节预算（多图叠加超限后续图片降级路径提示，防上下文溢出） |
-| `FILE_PRESENT_MAX_MB` | `50` | present_file 工具产出文件大小上限（超出工具返回错误） |
+| `FILE_PRESENT_MAX_MB` | `50` | present_file 工具产出文件大小上限（超出工具返回错误；沙箱模式直读不受 LLM 复述限制，该上限对大 pptx/zip 即实际门控） |
 | `FILE_DOWNLOAD_ENABLED` | `true` | 下载端点开关 |
 | `FILE_RETENTION_DAYS` | `7` | upload 文件保留天数（P2 清理，删行+删存储对象） |
 | `FILE_STORAGE_TYPE` | `local` | 存储后端：`local` / `s3`（Dify storage_type 同构） |
