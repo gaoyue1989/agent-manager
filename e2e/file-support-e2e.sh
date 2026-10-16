@@ -313,15 +313,16 @@ if [ "${SANDBOX:-0}" == "1" ]; then
   else
     echo "  \033[33mSKIP\033[0m S-S6（缺少 fixtures/demo.docx fixture）"
   fi
-  # S-S7：沙箱产出文档 → present_file → 下载（直接传 base64；长上下文 LLM 偶发误判工具集 → 新会话重试）
-  SENT_B64=$(printf '%s' "$FILE_SENTINEL" | base64 -w0)
-  READY=$(chat "调用 present_file 工具：file_path='/workspace/outputs/result.txt'，file_content_base64='$SENT_B64'")
+  # S-S7：沙箱产出文档 → present_file 直读 → 下载
+  # （沙箱形态无 file_content_base64 参数：LLM 复述大文件 base64 必超输出上限截断，
+  #   大文件链路必须走 execd 直读；先用 shell 在沙箱 /workspace 落盘再登记）
+  READY=$(chat "执行命令：mkdir -p /workspace/outputs && printf '%s' '$FILE_SENTINEL' > /workspace/outputs/result.txt，然后调用 present_file 工具登记：file_path='/workspace/outputs/result.txt'")
   case "$READY" in *file_ready*) ok "S-S7 产出文件回传 file_ready";; *)
     # 长对话后 LLM 可能误判工具集（"工具集不包含 present_file"）→ 新会话重试
     SID_NEW="file-e2e-s7-$RANDOM-$RANDOM"
     chat_new() { curl -s --max-time 300 -X POST "$AGENT_URL/threads/chat" -H 'Content-Type: application/json' \
       -d "{\"sessionId\":\"$SID_NEW\",\"message\":$(python3 -c "import json,sys;print(json.dumps(sys.argv[1]))" "$1"),\"userId\":\"$UID_SFX\"}"; }
-    READY=$(chat_new "请立即调用 present_file 工具登记文件：file_path='/workspace/outputs/result.txt'，file_content_base64='$SENT_B64'，不要做其他事情")
+    READY=$(chat_new "执行命令：mkdir -p /workspace/outputs && printf '%s' '$FILE_SENTINEL' > /workspace/outputs/result.txt，然后立即调用 present_file 工具登记：file_path='/workspace/outputs/result.txt'，不要做其他事情")
     case "$READY" in *file_ready*) ok "S-S7 产出文件回传 file_ready（新会话重试）";; *) bad "S-S7 产出文件回传 file_ready (body missing: file_ready)";; esac
   ;; esac
   GFID=$(echo "$READY" | python3 -c "
@@ -335,9 +336,8 @@ for line in sys.stdin:
   if [ -n "$GFID" ]; then
     DG="/tmp/opencode/dl-gen-$UID_SFX.txt"
     curl -s "$AGENT_URL/files/$GFID" -o "$DG"
-    # 内容精确性由 S3 覆盖（S3-2 断言 FILE-SENTINEL-42）；此处断言文件可下载且非空
-    # （LLM 解码 base64 偶发错误，file_ready+可下载即证明沙箱产出回传链路通）
-    if [ -s "$DG" ]; then ok "S-S7 下载产出非空"; else bad "S-S7 下载产出为空"; fi
+    # 沙箱直读不经 LLM 复述，字节级精确：断言内容即哨兵值（回写链路 + 直读一致性一次覆盖）
+    assert_eq "S-S7 下载字节一致（直读）" "$(cat "$DG" 2>/dev/null)" "$FILE_SENTINEL"
   else
     bad "S-S7 未提取到 file_id"
   fi
