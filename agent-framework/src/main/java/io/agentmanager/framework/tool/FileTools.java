@@ -25,9 +25,12 @@ import io.agentscope.core.tool.ToolParam;
  *
  * <p>文件读取策略：
  * <ul>
- *   <li>非沙箱模式：file_path 为工作区相对路径，从 KV（agent_fs）读取</li>
- *   <li>沙箱模式：优先经 execd files API 从当前沙箱工作区直读（file_path 相对路径）；
- *       兼容旧方式 file_content_base64 显式传入（base64 -w0 /workspace/xxx）</li>
+ *   <li>非沙箱模式（{@link SandboxAwareFileTools} 之外的注册形态）：file_path 为
+ *       工作区相对路径，从 KV（agent_fs）读取，兼容 file_content_base64 显式传入</li>
+ *   <li>沙箱模式：{@link SandboxAwareFileTools} 覆写 presentFile，
+ *       仅经 execd files API 从当前沙箱工作区直读（file_path 相对路径）。
+ *       不提供 file_content_base64 回退——大文件 base64 需 LLM 在 tool call 参数里
+ *       复述全文，超输出上限即截断，工具报错后 file_ready 静默丢失</li>
  * </ul>
  */
 public class FileTools implements io.agentmanager.framework.tool.CustomTool {
@@ -102,17 +105,15 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
         name = "present_file",
         description = "Register a file produced in the workspace (report/image/document/zip package) to the platform "
             + "so the user can download it. MUST be called for any generated output file. "
-            + "Provide file_path (workspace-relative, e.g. outputs/report.txt or /workspace/outputs/x.png). "
-            + "file_content_base64 is OPTIONAL: in sandbox mode the file is read directly from the sandbox "
-            + "workspace via the sandbox API (preferred); if direct read fails you may fall back to passing "
-            + "file_content_base64 (get it via shell: base64 -w0 <path>). "
+            + "Provide file_path (workspace-relative, e.g. outputs/report.txt or /workspace/outputs/x.png); "
+            + "the file content is read directly from the workspace by the platform. "
             + "Returns JSON with file_id/file_name/mime_type/size.",
         concurrencySafe = true)
     public String presentFile(
             RuntimeContext ctx,
             @ToolParam(name = "file_path", description = "Workspace path of the file to present")
                     String filePath,
-            @ToolParam(name = "file_content_base64", description = "Base64-encoded file content (optional in sandbox mode)",
+            @ToolParam(name = "file_content_base64", description = "Base64-encoded file content (optional; non-sandbox only)",
                     required = false) String fileContentBase64) {
         // 1. 路径校验：必须位于工作区内（沙箱 /workspace/ 前缀；非沙箱相对路径防 ../）
         var norm = normalizeWorkspacePath(filePath);
@@ -120,9 +121,14 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             return err("invalid path: " + filePath + " (must be inside workspace)");
         }
         var userKey = resolveUserKey(ctx);
-        // 2. 获取字节：显式 base64 优先；否则沙箱模式经 execd 直读，非沙箱从 KV 读
+        // 2. 获取字节：显式 base64 仅非沙箱合法（KV 工作区可能没有 LLM 未落盘的内容）；
+        //    沙箱模式一律拒绝——LLM 复述大文件 base64 必超输出上限截断，file_ready 静默丢失
         byte[] bytes = null;
         if (fileContentBase64 != null && !fileContentBase64.isBlank()) {
+            if (sandboxRuntime.enabled()) {
+                return err("file_content_base64 is not supported in sandbox mode; "
+                    + "the platform reads the file directly from the sandbox workspace via file_path");
+            }
             try {
                 bytes = Base64.getDecoder().decode(fileContentBase64);
             } catch (IllegalArgumentException e) {
@@ -130,6 +136,8 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             }
         } else if (sandboxRuntime.enabled()) {
             // 沙箱直读：取当前会话沙箱（acquire 时注册到 spec），校验归属 userKey 防并发串沙箱
+            // （沙箱部署的注册形态是 SandboxAwareFileTools：schema 无 base64 参数，
+            //  此分支仅为防御直读兜底——例如手工反射调用）
             var sandbox = sandboxFilesystemSpec != null ? sandboxFilesystemSpec.getLatestSandbox() : null;
             var boundKey = sandbox != null ? sandbox.getUserKey() : null;
             if (sandbox != null && (boundKey == null || boundKey.isBlank() || boundKey.equals(userKey))) {
@@ -137,7 +145,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
             }
             if (bytes == null) {
                 return err("sandbox mode: file not readable in sandbox workspace: " + norm
-                    + " (make sure the file exists under /workspace; or pass file_content_base64 explicitly)");
+                    + " (make sure the file exists under /workspace; check the path with list_files)");
             }
         } else {
             bytes = readFromWorkspace(ctx, norm);
@@ -359,5 +367,78 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     private static String err(String msg) {
         var safe = msg.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
         return "{\"error\":\"" + safe + "\"}";
+    }
+
+    /**
+     * 沙箱部署专用注册形态：{@code present_file} 无 {@code file_content_base64} 参数，
+     * 仅经 execd files API 从沙箱工作区直读。
+     *
+     * <p>为什么不复用基类方法签名：工具 JSON schema 由 {@code @ToolParam} 注解在注册期
+     * 静态生成（Toolkit 反射 getDeclaredMethods），而沙箱开关注定于部署级
+     * （{@code SandboxRuntime} 启动时三层裁决、进程内不变）——由
+     * {@code AgentScopeConfig#customTools} 按模式二选一注册。
+     *
+     * <p>移除该参数的原因：base64 回退要求 LLM 在 tool call 参数里复述文件全文
+     * （1MB 文件 ≈ 1.37MB base64 文本），必然超过输出 token 上限被截断，解码失败后
+     * 工具返回 error，file_ready 合成静默跳过——用户视角即「大文件生成完没有下载卡片」。
+     * 沙箱直读不经 LLM，无此上限。
+     */
+    public static class SandboxAwareFileTools extends FileTools {
+
+        public SandboxAwareFileTools(FileAssetStore fileAssetStore,
+                                            FileStorage fileStorage,
+                                            AgentManagerProperties props,
+                                            SandboxRuntime sandboxRuntime,
+                                            WorkspaceReader workspaceReader,
+                                            OpenSandboxFilesystemSpec sandboxFilesystemSpec,
+                                            SessionKeyResolver sessionKeyResolver) {
+            super(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader,
+                sandboxFilesystemSpec, sessionKeyResolver);
+        }
+
+        @Tool(
+            name = "present_file",
+            description = "Register a file produced in the sandbox workspace (report/image/document/zip package) "
+                + "to the platform so the user can download it. MUST be called for any generated output file. "
+                + "Provide file_path (workspace-relative, e.g. outputs/report.pptx or /workspace/outputs/x.png); "
+                + "the file content is read directly from the sandbox workspace by the platform "
+                + "(no content parameter needed, works for large binaries). "
+                + "Returns JSON with file_id/file_name/mime_type/size.",
+            concurrencySafe = true)
+        public String presentFile(
+                RuntimeContext ctx,
+                @ToolParam(name = "file_path", description = "Workspace path of the file to present")
+                        String filePath) {
+            // 与父类 3 参形态构成重载（少一个参数）：getDeclaredMethods 只取子类声明，
+            // Toolkit 恰好只注册这个单参数 schema
+            return super.presentFile(ctx, filePath, null);
+        }
+
+        /**
+         * Toolkit.registerTool 反射只扫 getDeclaredMethods（不含继承），present_url 必须
+         * 在子类重新声明，否则沙箱部署丢失该工具（与 present_file 同构的纯透传）。
+         */
+        @Tool(
+            name = "present_url",
+            description = "Register an EXTERNAL resource (an http(s) URL produced by another system, "
+                + "e.g. the download_url returned by the create_oaf_zip platform tool) as a "
+                + "user-downloadable deliverable card. MUST be called to deliver any externally-hosted "
+                + "artifact; the card appears immediately and in session history replay. "
+                + "The url must match the configured external prefix allowlist. "
+                + "Returns JSON with file_id/file_name/mime_type/size.",
+            concurrencySafe = true)
+        public String presentUrl(
+                RuntimeContext ctx,
+                @ToolParam(name = "file_name", description = "Display/download file name, e.g. weather-agent.zip")
+                        String fileName,
+                @ToolParam(name = "url", description = "External http(s) URL of the artifact (e.g. download_url from create_oaf_zip)")
+                        String url,
+                @ToolParam(name = "mime_type", description = "MIME type (optional, default application/octet-stream)",
+                        required = false) String mimeType,
+                @ToolParam(name = "size", description = "Artifact size in bytes if known (optional)",
+                        required = false) Long size) {
+            // 同签名覆写：仅为让 getDeclaredMethods 能看到（注册透传，语义全在父类）
+            return super.presentUrl(ctx, fileName, url, mimeType, size);
+        }
     }
 }

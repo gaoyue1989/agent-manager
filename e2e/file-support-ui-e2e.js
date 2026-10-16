@@ -102,11 +102,11 @@ const shot = async (page, name) => { try { await page.screenshot({ path: path.jo
       return btn && !btn.disabled;
     }, { timeout: 20000 }).catch(() => {});
     await new Promise(r => setTimeout(r, 2000));
-    const b64 = Buffer.from("UI-SENTINEL-OUTPUT-67890").toString("base64");
+    // 沙箱形态的 present_file 无 file_content_base64 参数：先 shell 落盘再直读登记
     let fileCardCount = 0;
     for (let attempt = 1; attempt <= 3; attempt++) {
       await page.$eval('[data-testid="chat-input"]', (el) => { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
-      await page.type('[data-testid="chat-input"]', `调用 present_file 工具：file_path='outputs/ui-test.txt'，file_content_base64='${b64}'`);
+      await page.type('[data-testid="chat-input"]', `执行命令：mkdir -p /workspace/outputs && printf 'UI-SENTINEL-OUTPUT-67890' > /workspace/outputs/ui-test.txt，然后调用 present_file 工具：file_path='outputs/ui-test.txt'`);
       await page.click('[data-testid="chat-send"]');
 
       // U8: 等待 present_file 完成 → file-ready 卡片出现

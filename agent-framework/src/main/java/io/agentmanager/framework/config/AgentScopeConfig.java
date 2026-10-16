@@ -278,6 +278,13 @@ public class AgentScopeConfig {
         // 规范键解析（issue #52）：present_file 沙箱归属校验须与 SandboxUserKeyMiddleware
         // 同源反查真实用户，否则 Channel 链路 ctx.userId（网关 peer）与沙箱绑定键不等 → 直读被误拒
         var sessionKeyResolver = new SessionKeyResolver(sessionUserStore);
+        // 沙箱部署注册无 file_content_base64 参数的形态：base64 回退要求 LLM 在 tool call
+        // 参数里复述文件全文，大文件必超输出上限被截断 → 工具报错 → file_ready 静默丢失
+        if (sandboxRuntime.enabled()) {
+            return new io.agentmanager.framework.tool.FileTools.SandboxAwareFileTools(
+                fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader,
+                sandboxSpecProvider.getIfAvailable(), sessionKeyResolver);
+        }
         return new io.agentmanager.framework.tool.FileTools(fileAssetStore, fileStorage, props,
             sandboxRuntime, workspaceReader, sandboxSpecProvider.getIfAvailable(), sessionKeyResolver);
     }
