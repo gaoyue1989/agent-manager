@@ -484,3 +484,33 @@ test('X18 投影新鲜度：start 后新增的技能目录在下一 turn 补水�
     fs.rmSync(path.join(hostSkillDir), { recursive: true, force: true }); // 清场：不留宿主脏目录
   }
 });
+
+// ---------- X19：Channel 双会话并发沙箱 turn（上游 #2849 单槽互踩回归） ----------
+// 回归背景：SDK SandboxBackedFilesystem 每 agent 单槽（volatile Sandbox），并行 turn 互相
+// 覆盖/清空（B 的 releaseForCall 清槽 → A 撞 "No active sandbox"）；guard 键在 Channel 链路
+// 曾退化为前端 sessionId（每会话一把锁），防不住跨会话并发。修复组合：①guard 键经
+// session_user 反查真实 userId（同用户串行）；②SANDBOX_SESSION_AGENT_ISOLATION per-session
+// agent（跨会话各持独立文件系统，默认关，CI 沙箱 job 已开启——见 scripts/env-up.sh）。
+// 断言面：两会话并发跑沙箱 turn，双方都必须正常终态且工具结果正确——单槽互踩下 B 会把
+// A 的 turn 打成 error（实测复现：B 探针收尾与 A 第 2 轮推理同毫秒撞窗口）。
+
+test('X19 双会话并发沙箱 turn 互不干扰（#2849 单槽互踩回归）', async () => {
+  const uidA = U();
+  const uidB = U();
+  const sidA = sessionIdFor(`x19a-${uniq()}`);
+  const sidB = sessionIdFor(`x19b-${uniq()}`);
+  // 同发并发（Promise.all 保证同 tick 发起）：A/B 各自首 turn 创建沙箱 + 执行命令
+  const [ra, rb] = await Promise.all([
+    (async () => { const s = chat({ message: `[E2E:execute]`, userId: uidA, sessionId: sidA, timeoutMs: 120_000 }); await waitTerminal(s); return s; })(),
+    (async () => { const s = chat({ message: `[E2E:execute]`, userId: uidB, sessionId: sidB, timeoutMs: 120_000 }); await waitTerminal(s); return s; })(),
+  ]);
+  // 双方终态：必须是 done 而非 error（单槽互踩的典型症状是另一方 "No active sandbox" error）
+  expect(ra.terminal?.type, `会话 A 终态异常: ${JSON.stringify(ra.terminal)}`).toBe('done');
+  expect(rb.terminal?.type, `会话 B 终态异常: ${JSON.stringify(rb.terminal)}`).toBe('done');
+  // 双方工具结果正确（execute 夹具固定 echo hello-e2a）
+  expect(textOf(ra.frames)).toContain('hello-e2a');
+  expect(textOf(rb.frames)).toContain('hello-e2a');
+  // 双方各自创建了沙箱（跨会话隔离：两个 create 流水，非共享同一沙箱代）
+  const stats = await sandboxStats();
+  expect(stats.creates.length).toBeGreaterThanOrEqual(2);
+});

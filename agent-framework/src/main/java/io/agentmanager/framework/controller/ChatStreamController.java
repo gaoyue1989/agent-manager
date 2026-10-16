@@ -106,6 +106,8 @@ public class ChatStreamController {
 
     /** 当前 Agent 对应的 Channel 工厂：reload 后必须从 AgentRuntimeService 取引用，不能复用旧 Agent 的 Channel */
     private final Supplier<ChatUiChannel> chatChannelSupplier;
+    /** per-session channel：Spring 装配路径置 true——chat turn 按 sessionId 取会话级 agent（#2849 隔离） */
+    private final boolean perSessionChannel;
     private final AgentRuntimeService runtimeService;
     private final TurnLeaseStore turnLeaseStore;
     private final ToolAuditStore toolAuditStore;
@@ -162,6 +164,19 @@ public class ChatStreamController {
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON =
         new com.fasterxml.jackson.databind.ObjectMapper();
 
+    /**
+     * 会话级 Channel：从 {@code AgentRuntimeService.getAgent(sessionId)}（per-session 隔离
+     * 开启时为该会话专属实例，关闭时为共享单例）创建 ChatUiChannel。与
+     * {@code ChatUiChannelProvider.current(sessionId)} 同一语义，直接走 runtimeService
+     * 引用而非 provider 接口——provider 的 {@code current()} 方法引用会被折叠成无参
+     * Supplier，丢失 sessionId 维度（实测踩坑：instanceof 判 lambda 恒 false）。
+     */
+    private ChatUiChannel sessionChannel(String sessionId) {
+        var agent = runtimeService.getAgent(sessionId);
+        return agent == null ? null
+            : agent.channel(io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel.perPeer());
+    }
+
     /** 兼容单测与嵌入式调用：固定使用传入的 Channel。 */
     public ChatStreamController(ChatUiChannel chatChannel,
                                 AgentRuntimeService runtimeService,
@@ -181,7 +196,7 @@ public class ChatStreamController {
                                 SessionTitleService sessionTitleService) {
         this((Supplier<ChatUiChannel>) () -> chatChannel, runtimeService, turnLeaseStore, toolAuditStore, workspaceInjector,
             sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
-            skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
+            skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService, false);
     }
 
     /** Spring 装配入口：每轮对话从当前 Agent 创建 Channel，reload 后不会继续使用旧 Agent 的引用。 */
@@ -204,7 +219,7 @@ public class ChatStreamController {
                                 SessionTitleService sessionTitleService) {
         this((Supplier<ChatUiChannel>) channelProvider::current, runtimeService, turnLeaseStore, toolAuditStore, workspaceInjector,
             sandboxConfig, eventBus, eventStore, sessionUserStore, workspaceReader, props,
-            skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService);
+            skillInjectionService, fileAssetStore, mcpToolRegistrar, modelCatalog, sessionTitleService, true);
     }
 
     private ChatStreamController(Supplier<ChatUiChannel> chatChannelSupplier,
@@ -222,9 +237,11 @@ public class ChatStreamController {
                                  io.agentmanager.framework.service.FileAssetStore fileAssetStore,
                                  McpToolRegistrar mcpToolRegistrar,
                                  ModelCatalog modelCatalog,
-                                 SessionTitleService sessionTitleService) {
+                                 SessionTitleService sessionTitleService,
+                                 boolean perSessionChannel) {
         this.chatChannelSupplier = chatChannelSupplier;
         this.runtimeService = runtimeService;
+        this.perSessionChannel = perSessionChannel;
         this.turnLeaseStore = turnLeaseStore;
         this.toolAuditStore = toolAuditStore;
         this.workspaceInjector = workspaceInjector;
@@ -483,7 +500,11 @@ public class ChatStreamController {
                 // sendStream 的**同步**异常也必须落在这个 try 里：它抛之前租约已经到手，
                 // 而续租线程不看本段是否还活着——漏放租约就是该 session 被永久锁死
                 // （后续每个请求都拿不到租约，观察者也会一直 probe 到 RUNNING）。
-                var currentChatChannel = chatChannelSupplier.get();
+                // per-session 路径：channel 绑定到会话级 agent 实例（#2849 单槽隔离）；
+                // 兼容路径（单测/嵌入式，固定 channel）：走原 supplier
+                var currentChatChannel = perSessionChannel
+                    ? sessionChannel(finalSessionId)
+                    : chatChannelSupplier.get();
                 if (currentChatChannel == null) {
                     throw new IllegalStateException("no active agent channel");
                 }

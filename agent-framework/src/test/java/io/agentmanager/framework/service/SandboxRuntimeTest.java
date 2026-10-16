@@ -21,7 +21,7 @@ class SandboxRuntimeTest {
 
     private static SandboxConfig config(boolean bound) {
         return new SandboxConfig(bound, "img", 60, 1024, 1, List.of("/entry.sh"),
-            java.time.Duration.ofMillis(100), true, true, 900, true, true, true, null);
+            java.time.Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30, null);
     }
 
     private static OafConfig oafWithPackage(Boolean packageEnabled) {
