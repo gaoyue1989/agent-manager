@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, PackageRec } from "@/lib/api";
+import { Badge, Btn } from "@/components/ui";
 
 function fmtSize(n?: number) {
   if (!n && n !== 0) return "—";
@@ -31,6 +32,15 @@ export default function PackagesPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // 模板标记开关（M2 §2.3：用户侧模板页数据源维护入口）
+  const toggleTemplate = async (p: PackageRec) => {
+    try {
+      await api.setPackageTemplate(p.id, !p.isTemplate);
+      setMsg(p.isTemplate ? `已取消模板标记：${p.slug}` : `已标记为官方模板：${p.slug}`);
+      await load();
+    } catch (e: any) { setMsg(`操作失败: ${e.message}`); }
+  };
+
   const del = async (p: PackageRec) => {
     if (!confirm(`确认删除包 ${p.slug}@${p.version}？删除后不可恢复。`)) return;
     try {
@@ -46,7 +56,7 @@ export default function PackagesPage() {
     <div data-testid="packages-page">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold">配置包</h1>
-        <Link href="/publish" className="bg-blue-600 hover:bg-blue-700 text-white text-sm rounded px-4 py-2">
+        <Link href="/admin/publish" className="bg-blue-600 hover:bg-blue-700 text-white text-sm rounded px-4 py-2">
           上传新包（发布页）
         </Link>
       </div>
@@ -60,14 +70,14 @@ export default function PackagesPage() {
           <thead>
             <tr className="text-left text-gray-500 border-b">
               <th className="p-2">包</th><th className="p-2">描述</th><th className="p-2">文件</th>
-              <th className="p-2">大小</th><th className="p-2">被引用</th><th className="p-2">创建时间</th><th className="p-2">操作</th>
+              <th className="p-2">大小</th><th className="p-2">被引用</th><th className="p-2">模板</th><th className="p-2">创建时间</th><th className="p-2">操作</th>
             </tr>
           </thead>
           <tbody>
             {packages.map((p) => (
               <tr key={p.id} className="border-b hover:bg-gray-50" data-testid={`pkg-row-${p.id}`}>
                 <td className="p-2 font-medium">
-                  <Link href={`/packages/${p.id}`} className="text-blue-600 hover:underline">{p.slug}</Link>
+                  <Link href={`/admin/packages/${p.id}`} className="text-blue-600 hover:underline">{p.slug}</Link>
                   <span className="ml-1 text-gray-400">@{p.version}</span>
                   {p.sourcePackageId ? (
                     <span className="ml-2 text-xs text-gray-400">派生自 #{p.sourcePackageId}</span>
@@ -81,13 +91,18 @@ export default function PackagesPage() {
                     ? <span className="text-green-700">{p.refCount} 个服务</span>
                     : <span className="text-gray-400">未引用</span>}
                 </td>
+                <td className="p-2">
+                  {p.isTemplate
+                    ? <Badge status="running">官方模板</Badge>
+                    : <Btn sm onClick={() => toggleTemplate(p)}>设为模板</Btn>}
+                </td>
                 <td className="p-2 text-xs">{new Date(p.createdAt).toLocaleString()}</td>
                 <td className="p-2 space-x-1 whitespace-nowrap">
-                  <Link href={`/packages/${p.id}`} data-testid={`pkg-view-${p.id}`}
+                  <Link href={`/admin/packages/${p.id}`} data-testid={`pkg-view-${p.id}`}
                     className="text-xs px-2 py-1 border rounded hover:bg-gray-100 inline-block">预览</Link>
                   <Link href={`/packages/${p.id}/edit`} data-testid={`pkg-edit-${p.id}`}
                     className="text-xs px-2 py-1 border rounded hover:bg-gray-100 inline-block">编辑</Link>
-                  <button onClick={() => router.push(`/publish?packageId=${p.id}`)}
+                  <button onClick={() => router.push(`/admin/publish?packageId=${p.id}`)}
                     className="text-xs px-2 py-1 border rounded hover:bg-gray-100">发布</button>
                   <a href={api.downloadPackage(p.id)}
                     className="text-xs px-2 py-1 border rounded hover:bg-gray-100 inline-block">下载</a>
