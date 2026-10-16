@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { ConsoleWsContext, useCurrentWs, useMe } from "@/lib/useMe";
+import { ConsoleWsContext, ConsoleWsRoleContext, useCurrentWs, useMe } from "@/lib/useMe";
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
 
 const NAV: { group?: string; items: { href: string; label: string; soon?: boolean }[] }[] = [
@@ -160,7 +160,9 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
               你还未加入任何工作空间。请联系平台管理员在「运维侧 → 工作空间管理」中创建并邀请你加入。
             </div>
           ) : current ? (
-            <ConsoleWsContext.Provider value={current.id}>{children}</ConsoleWsContext.Provider>
+            <ConsoleWsContext.Provider value={current.id}>
+              <ConsoleWsRoleContext.Provider value={current.role}>{children}</ConsoleWsRoleContext.Provider>
+            </ConsoleWsContext.Provider>
           ) : null}
         </main>
       </div>

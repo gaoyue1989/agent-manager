@@ -48,7 +48,13 @@ export function useCurrentWs(me: MeResponse | null): [WorkspaceBrief | null, (ws
 import { createContext, useContext } from "react";
 
 export const ConsoleWsContext = createContext<number>(0);
+export const ConsoleWsRoleContext = createContext<string>("member");
 
 export function useConsoleWs(): number {
   return useContext(ConsoleWsContext);
+}
+
+/** 当前空间内本人角色（owner/admin 可写，member 只读——页面按钮显隐用） */
+export function useConsoleWsRole(): string {
+  return useContext(ConsoleWsRoleContext);
 }

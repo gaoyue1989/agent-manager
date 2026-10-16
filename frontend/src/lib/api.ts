@@ -41,6 +41,7 @@ export interface ServiceRec {
   envJson: string; replicas: number; status: string; endpoint: string; clusterUrl: string;
   registeredName?: string; registeredVersion?: string; agentCardJson?: string;
   registeredAt?: string | null; createdAt: string;
+  shortName?: string; skillsJson?: string; updatedAt?: string;
   workspaceId?: number; createdBy?: number; spec?: string; publicEndpoint?: boolean | null;
   // 服务级敏感键掩码视图（值永不回传，仅键名 + hasValue）
   envSecretKeys?: EnvSecretKey[];
@@ -119,6 +120,8 @@ export interface AgentFormPayload {
   mcpServers: { connectorId?: number; builtin?: string }[];
   spec: string; replicas: number; publicEndpoint?: boolean;
   remoteAuth?: Record<string, string>;
+  importPackageId?: number;
+  adoptServiceId?: number;
 }
 export interface EditFormView {
   name: string; k8sName: string; description: string; image: string;
@@ -248,6 +251,26 @@ export const api = {
       remove: (ws: number | string, userId: number) => request(`/console/workspaces/${ws}/members/${userId}`, { method: "DELETE" }),
       invitable: (ws: number | string) => request<UserView[]>(`/console/workspaces/${ws}/invitable-users`),
     },
+    // 空间包（import 模式数据源：公共包 + 本空间包，决议 7）
+    packages: (ws: number | string, keyword = "") =>
+      request<PackageRec[]>(`/console/workspaces/${ws}/packages?keyword=${encodeURIComponent(keyword)}`),
+    uploadPackage: (ws: number | string, file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      return fetch(`${BASE}/console/workspaces/${ws}/packages`, { method: "POST", body: fd })
+        .then(async (res) => {
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+              window.location.href = "/login";
+            }
+            throw new Error(body?.message || `HTTP ${res.status}`);
+          }
+          return body?.data as PackageRec;
+        });
+    },
+    // 镜像列表（console 用户不可调 legacy /images——AUTH_TOKEN 组；console 端点 JWT 可读）
+    images: () => request<ImageOption[]>(`/console/images`),
   },
 
   // ---- 运维侧 admin（M1；JWT-admin 或 AUTH_TOKEN）----

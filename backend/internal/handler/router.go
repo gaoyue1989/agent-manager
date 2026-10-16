@@ -34,7 +34,7 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 
 	// 2) console / admin 新面（先建组，后挂 legacy 中间件不影响它们）
 	cg := g.Group("/console", JWTAuth(jwtSecret))
-	registerConsole(cg, core)
+	registerConsole(cg, core, images)
 	ag := g.Group("/admin", RequireAdmin(authToken, jwtSecret))
 	registerAdmin(ag, core)
 

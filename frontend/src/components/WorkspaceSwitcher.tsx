@@ -3,7 +3,6 @@
 // 普通用户一期不可建（决议 6：仅 admin 建号分派）→ toast 引导找管理员。
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
 import type { MeResponse, WorkspaceBrief } from "@/lib/api";
 
 export default function WorkspaceSwitcher({ me, current, onPick }: {

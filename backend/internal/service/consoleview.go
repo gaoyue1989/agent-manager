@@ -192,6 +192,18 @@ func (c *Core) ConsoleAgentVersions(workspaceID, serviceID uint) ([]PackageVersi
 	return out, nil
 }
 
+// ConsolePackages 空间可见包列表：公共包（workspace_id=0）+ 本空间包（决议 7）。
+func (c *Core) ConsolePackages(workspaceID uint, keyword string) ([]store.OafPackage, error) {
+	q := c.DB.Model(&store.OafPackage{}).
+		Where("workspace_id = 0 OR workspace_id = ?", workspaceID)
+	if keyword != "" {
+		q = q.Where("name LIKE ? OR slug LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	var out []store.OafPackage
+	err := q.Order("id DESC").Find(&out).Error
+	return out, err
+}
+
 // ConsoleAgentPods 实时 Pod 表（详情 Tab1；5s 轮询由前端驱动）。
 func (c *Core) ConsoleAgentPods(workspaceID, id uint) ([]k8s.PodInfo, error) {
 	svc, err := c.Get(id)

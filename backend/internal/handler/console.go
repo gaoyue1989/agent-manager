@@ -87,9 +87,57 @@ func mapCreateError(c *gin.Context, err error) {
 }
 
 // registerConsole 挂载 console 端点（g 已是 /console 组，带 JWTAuth 中间件）。
-func registerConsole(g *gin.RouterGroup, core *service.Core) {
+func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Image, Label string }) {
 	cg := g
 	cg.Use(resolveWorkspace(core))
+
+	// 镜像列表（console 用户不可调 legacy /images——AUTH_TOKEN 组；此处 JWT 即可读）
+	cg.GET("/images", func(c *gin.Context) {
+		OK(c, images)
+	})
+
+	// 空间包列表（决议 7：公共包（workspace_id=0）全空间可见 + 本空间包）
+	cg.GET("/workspaces/:ws/packages", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ConsolePackages(wsID, c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
+	// 空间包上传（import 模式；zip 与 legacy 上传同校验管线）
+	cg.POST("/workspaces/:ws/packages", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		fh, err := c.FormFile("file")
+		if err != nil {
+			Fail(c, http.StatusBadRequest, "multipart field 'file' is required: "+err.Error())
+			return
+		}
+		f, err := fh.Open()
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		defer f.Close()
+		rec, err := core.Packages.UploadTo(fh.Filename, f, wsID)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, respOK(rec))
+	})
 
 	// ---- M2：概览 / Agent 列表 / 模板 ----
 	cg.GET("/workspaces/:ws/summary", func(c *gin.Context) {
@@ -148,6 +196,42 @@ func registerConsole(g *gin.RouterGroup, core *service.Core) {
 		var form service.AgentForm
 		if err := c.ShouldBindJSON(&form); err != nil {
 			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		if form.Mode == "adopt" {
+			// 纳管模式（管理员场景，M3 §2.6）：存量服务挂入当前空间
+			if c.GetString("role") != "admin" {
+				Fail(c, http.StatusForbidden, "forbidden: adopt requires platform admin")
+				return
+			}
+			if form.AdoptServiceID == nil || *form.AdoptServiceID == 0 {
+				Fail(c, http.StatusBadRequest, "adopt mode requires adoptServiceId")
+				return
+			}
+			svc, err := core.BindService(wsID, *form.AdoptServiceID)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, gin.H{"service": svc})
+			return
+		}
+		if form.Mode == "import" {
+			// 导入模式（M3 §2.6）：上传包/公共包派生 → 复用发布
+			var pkgID uint
+			if form.ImportPackageID != nil {
+				pkgID = *form.ImportPackageID
+			}
+			if pkgID == 0 {
+				Fail(c, http.StatusBadRequest, "import mode requires importPackageId")
+				return
+			}
+			svc, pkg, err := core.CreateAgentImport(wsID, uid, &form, pkgID)
+			if err != nil {
+				mapCreateError(c, err)
+				return
+			}
+			c.JSON(http.StatusAccepted, respOK(gin.H{"service": svc, "package": pkg}))
 			return
 		}
 		svc, pkg, err := core.CreateAgent(wsID, uid, &form)

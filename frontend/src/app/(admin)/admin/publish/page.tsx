@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { api, ImageOption, PackageRec } from "@/lib/api";
+import { api, ImageOption, PackageRec, type WorkspaceAdminView } from "@/lib/api";
 
 type EnvRow = { key: string; value: string };
 
@@ -34,10 +34,14 @@ function PublishForm() {
   const [sensitiveKeys, setSensitiveKeys] = useState<Set<string>>(new Set()); // 模板敏感键：输入框用 password 呈现
   const [submitting, setSubmitting] = useState(false);
   const [msg, setMsg] = useState("");
+  // 归属工作空间（M1 §3.1 可选增强：admin 发布时即可指定归属，免二次纳管）
+  const [workspaces, setWorkspaces] = useState<WorkspaceAdminView[]>([]);
+  const [workspaceId, setWorkspaceId] = useState(0);
 
   const load = useCallback(async () => {
     try {
       setPackages(await api.listPackages());
+      api.admin.listWorkspaces().then((ws) => setWorkspaces(ws)).catch(() => {});
       const imgs = await api.listImages();
       setImages(imgs);
       if (imgs.length > 0) setImage((cur) => cur || imgs[0].Image);
@@ -111,8 +115,8 @@ function PublishForm() {
     setSubmitting(true);
     setMsg("");
     try {
-      const svc = await api.publish({ packageId: selectedPkg!, name: name || undefined, image, env, replicas });
-      router.push(`/services/${svc.id}`);
+      const svc = await api.publish({ packageId: selectedPkg!, name: name || undefined, image, env, replicas, workspaceId: workspaceId || undefined });
+      router.push(`/admin/services/${svc.id}`);
     } catch (e: any) {
       setMsg(`发布失败: ${e.message}`);
       setSubmitting(false);
@@ -144,7 +148,7 @@ function PublishForm() {
         {pkgSummary && <p className="mt-2 text-xs text-gray-500" data-testid="pkg-summary">{pkgSummary}</p>}
         {selectedPkg && (
           <p className="mt-1 text-xs">
-            <Link href={`/packages/${selectedPkg}`} target="_blank" className="text-blue-600 hover:underline">
+            <Link href={`/admin/packages/${selectedPkg}`} target="_blank" className="text-blue-600 hover:underline">
               查看包详情 / 在线预览 ↗
             </Link>
           </p>
@@ -168,6 +172,15 @@ function PublishForm() {
           <input type="number" min={1} value={replicas} onChange={(e) => setReplicas(Math.max(1, Number(e.target.value)))}
             data-testid="replicas-input" className="border rounded p-1.5 text-sm block mt-1 w-24" />
         </label>
+        <label className="block mt-3 text-sm">归属工作空间（可选，免二次纳管）
+          <select value={workspaceId} onChange={(e) => setWorkspaceId(Number(e.target.value))}
+            data-testid="publish-ws-select" className="border rounded p-1.5 text-sm block mt-1 w-full max-w-md">
+            <option value={0}>未归属（default，可后续纳管）</option>
+            {workspaces.filter((w) => w.slug !== "default" && w.status === "active").map((w) => (
+              <option key={w.id} value={w.id}>{w.name}（{w.slug}）</option>
+            ))}
+          </select>
+        </label>
       </section>
 
       {/* 步骤 3：环境变量 */}
@@ -178,7 +191,7 @@ function PublishForm() {
             className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加变量</button>
         </div>
         <p className="text-xs text-gray-400 mb-2">
-          已预填<Link href="/settings" className="text-blue-600 hover:underline mx-1">平台默认配置</Link>的已配置项，可任意增删改（提交后随服务保存，敏感键存入服务 Secret）；
+          已预填<Link href="/admin/settings" className="text-blue-600 hover:underline mx-1">平台默认配置</Link>的已配置项，可任意增删改（提交后随服务保存，敏感键存入服务 Secret）；
           AGENT_CONFIG_DIR / SERVER_HOST / SERVER_PORT 为平台保留键。
         </p>
         <table className="w-full text-sm">

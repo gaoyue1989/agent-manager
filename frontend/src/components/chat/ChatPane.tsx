@@ -640,7 +640,7 @@ export default function ChatPane({
           </span>
           <div className="min-w-0">
             <h1 className="text-sm font-semibold tracking-tight text-gray-900">{title}</h1>
-            <p className="truncate text-[11px] text-gray-400">对话式驱动发布全流程</p>
+            <p className="truncate text-[11px] text-gray-400">{subtitle}</p>
           </div>
         </div>
         <div className="px-3 pt-3">

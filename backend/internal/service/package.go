@@ -70,9 +70,14 @@ func (s *PackageService) registerZipCore(filename string, r io.Reader, workspace
 	return rec, nil
 }
 
-// Upload 校验并落盘一个 OAF zip 包，返回入库记录。
+// Upload 校验并落盘一个 OAF zip 包，返回入库记录（公共包语义 workspace_id=0）。
 func (s *PackageService) Upload(filename string, r io.Reader) (*store.OafPackage, error) {
 	return s.registerZipCore(filename, r, 0, 0, "")
+}
+
+// UploadTo 空间包上传（console import 模式）：落库即归属该空间（决议 7）。
+func (s *PackageService) UploadTo(filename string, r io.Reader, workspaceID uint) (*store.OafPackage, error) {
+	return s.registerZipCore(filename, r, workspaceID, 0, "")
 }
 
 // RegisterGenerated 生成器产物登记（M3）：内存 zip → 落 PVC + 入库（workspace 归属，

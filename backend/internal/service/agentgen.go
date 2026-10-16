@@ -73,6 +73,10 @@ type AgentForm struct {
 	PublicEndpoint   *bool          `json:"publicEndpoint"`
 	// RemoteAuth 集成凭证（endpoint → 认证头值）：仅进当次发布 Secret，不落表不落包（M7 §2.3）
 	RemoteAuth map[string]string `json:"remoteAuth,omitempty"`
+	// ImportPackageID import 模式：上传包 / 公共包派生来源
+	ImportPackageID *uint `json:"importPackageId,omitempty"`
+	// AdoptServiceID adopt 模式（纳管存量服务，仅平台 admin）：存量 service id
+	AdoptServiceID *uint `json:"adoptServiceId,omitempty"`
 }
 
 var (
@@ -596,6 +600,70 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 		return svc, pkg, nil // 下发登记失败不阻断创建（usage 页可手动触发）
 	}
 	return svc, pkg, nil
+}
+
+// CreateAgentImport 导入模式（M3 §2.6）：公共包 copy-on-write 派生本空间副本（或
+// 直接引用本空间已上传包）→ 复用 Publish 发布。form.Name 缺省取包名。
+func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, packageID uint) (*store.ServiceEntity, *store.OafPackage, error) {
+	base, err := c.Packages.Get(packageID)
+	if err != nil {
+		return nil, nil, ErrNotFound
+	}
+	if base.WorkspaceID != workspaceID && base.WorkspaceID != 0 {
+		return nil, nil, ErrNotFound // 非公共包且非本空间 → 不可见
+	}
+	pkg := base
+	if base.WorkspaceID == 0 {
+		// 公共包派生副本（决议 7：导入/派生在本空间包列表内进行，不影响原包）
+		files, err := c.Packages.CollectBaseFiles(base)
+		if err != nil {
+			return nil, nil, err
+		}
+		// frontmatter version 递增避免同 slug+version 重复提示；slug 保持（空间内唯一即可）
+		cfg, err := parseOAFConfig(string(files["AGENTS.md"]))
+		if err != nil {
+			return nil, nil, err
+		}
+		files["AGENTS.md"] = []byte(mustRewriteVersion(files["AGENTS.md"], nextVersion(cfg.Version)))
+		pkg, err = c.Packages.RegisterGeneratedFrom(workspaceID, base, files, nextVersion(cfg.Version))
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	image := form.Image
+	if image == "" {
+		image = c.Cfg.DefaultImage
+	}
+	svc, err := c.Publish(PublishRequest{
+		PackageID: pkg.ID, Name: orStr(form.Name, pkg.Name), Image: image,
+		Replicas: int32(form.Replicas), Spec: form.Spec, PublicEndpoint: form.PublicEndpoint,
+		WorkspaceID: workspaceID, CreatedBy: userID,
+	})
+	if err != nil {
+		return nil, pkg, err
+	}
+	return svc, pkg, nil
+}
+
+// mustRewriteVersion 替换 frontmatter version 行（导入派生用，正文不动；失败返回原文）。
+func mustRewriteVersion(agentsMD []byte, version string) string {
+	out, err := rewriteAgentsMDVersion(agentsMD, version)
+	if err != nil {
+		return string(agentsMD)
+	}
+	return out
+}
+
+// rewriteAgentsMDVersion 替换 frontmatter version 行（导入派生用，正文不动）。
+func rewriteAgentsMDVersion(agentsMD []byte, version string) (string, error) {
+	s := string(agentsMD)
+	parts := strings.SplitN(s, "---", 3)
+	if len(parts) < 3 {
+		return s, fmt.Errorf("invalid AGENTS.md")
+	}
+	re := regexp.MustCompile(`(?m)^version:\s*".*?"\s*$`)
+	head := re.ReplaceAllString(parts[1], fmt.Sprintf("version: %q", version))
+	return head + "---" + parts[2], nil
 }
 
 // EditFormView 编辑页预填体（M3 §2.7）。
