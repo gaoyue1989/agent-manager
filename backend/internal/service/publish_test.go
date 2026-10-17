@@ -31,9 +31,13 @@ func publishToRegisterFailed(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgI
 	return &got
 }
 
-// 回归锁：多服务引用同一包时，删除其中一个不得清掉仍被引用的包目录。
-// 旧实现的读-改-写竞态会误判归零触发 RemovePackage，业务 Pod /config 变空
-// （AGENTS.md not found CrashLoop）。修复后 refCount 原子递减 + 事务外按最终值判定。
+// 回归锁：删除服务不得破坏包的完整性。两层保障：
+// 1) 多服务引用同一包时，删除其中一个不得清掉仍被引用的包目录（旧实现的读-改-写
+//    竞态会误判归零触发 RemovePackage，业务 Pod /config 变空 → AGENTS.md not found
+//    CrashLoop）；refCount 原子递减。
+// 2) 引用归零也不清目录（issue #140）：包记录与文件必须保持一致——旧逻辑归零清目录
+//    但留记录，产生预览/下载/再发布全 404 的悬空包；包是独立资产，仅显式删包 API
+//    可记录+目录同删。
 func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
@@ -63,7 +67,7 @@ func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 		t.Fatalf("svcB should remain: %v", err)
 	}
 
-	// 最后一个引用释放：refCount=0 → 目录清理
+	// 最后一个引用释放：refCount=0，包记录与文件保持一致（不再清目录，issue #140）
 	if err := core.Delete(svcB.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +78,11 @@ func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 	if got.RefCount != 0 {
 		t.Fatalf("refCount=%d want 0", got.RefCount)
 	}
-	if _, err := core.FS.Tree(got.DirPath); err == nil {
-		t.Fatal("package dir should be removed after last ref released")
+	if _, err := core.FS.Tree(got.DirPath); err != nil {
+		t.Fatalf("package dir must survive ref_count=0 (no dangling record): %v", err)
+	}
+	if _, err := core.Packages.ReadFile(got, "AGENTS.md"); err != nil {
+		t.Fatalf("package files readable after all services deleted: %v", err)
 	}
 }
 
@@ -505,8 +512,9 @@ func TestDeleteCleansEverything(t *testing.T) {
 	if got.RefCount != 0 {
 		t.Fatalf("refCount=%d want 0", got.RefCount)
 	}
-	if _, err := core.FS.Tree(got.DirPath); err == nil {
-		t.Fatal("package dir should be removed after last ref released")
+	// 包记录与文件保持一致（issue #140）：归零不再清目录，不产生悬空包
+	if _, err := core.FS.Tree(got.DirPath); err != nil {
+		t.Fatalf("package dir must survive (record+files consistent): %v", err)
 	}
 	if _, err := core.Get(svc.ID); err != ErrNotFound {
 		t.Fatalf("service row should be gone, got %v", err)

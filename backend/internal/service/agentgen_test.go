@@ -123,7 +123,7 @@ func TestAgentGenFrontmatterGolden(t *testing.T) {
 // TestAgentGenMcpConfigGolden config.yaml 字段契约（M6 §2.3）。
 func TestAgentGenMcpConfigGolden(t *testing.T) {
 	got := mcpConfigYAML("ticket-system", "streamable_http", "http://mcp.internal:9090/mcp", 90,
-		`{"mode":"all"}`, `{"tools":{"ticket_query":"allow","ticket_escalate":"ask"}}`)
+		`{"mode":"all"}`, `{"tools":{"ticket_query":"allow","ticket_escalate":"ask"}}`, "none")
 	for _, want := range []string{
 		"server: ticket-system", "vendor: agentmanager", "type: streamableHttp",
 		"url: http://mcp.internal:9090/mcp", "timeout: 90",
@@ -133,13 +133,34 @@ func TestAgentGenMcpConfigGolden(t *testing.T) {
 			t.Errorf("config.yaml missing %q:\n%s", want, got)
 		}
 	}
+	// 无认证连接器不写 auth 段
+	if strings.Contains(got, "auth:") {
+		t.Fatalf("none authType should omit auth:\n%s", got)
+	}
 	// mode=all 未声明工具不写 tools 段
-	empty := mcpConfigYAML("n", "sse", "http://x/sse", 0, `{"mode":"all"}`, `{}`)
+	empty := mcpConfigYAML("n", "sse", "http://x/sse", 0, `{"mode":"all"}`, `{}`, "")
 	if strings.Contains(empty, "tools:") {
 		t.Fatalf("empty permissions should omit tools:\n%s", empty)
 	}
 	if !strings.Contains(builtinPlatformMCPConfig(), "platform-publisher") {
 		t.Fatal("builtin template")
+	}
+}
+
+// TestAgentGenMcpConfigBearerAuth bearer 连接器必须输出 auth.token 占位符（issue #139）：
+// 真实 token 走服务 Secret env（MCP_TOKEN_<NAME>），包内只有运行时可解析的 ${ENV} 引用。
+func TestAgentGenMcpConfigBearerAuth(t *testing.T) {
+	got := mcpConfigYAML("mcd-mcp", "streamableHttp", "https://mcp.mcd.cn", 120,
+		`{"mode":"all"}`, `{}`, "bearer")
+	if !strings.Contains(got, "token: ${MCP_TOKEN_MCD_MCP}") {
+		t.Fatalf("bearer auth token placeholder missing:\n%s", got)
+	}
+	if strings.Contains(got, "sk-") {
+		t.Fatalf("real token must never land in package:\n%s", got)
+	}
+	// env 键与 buildPublishEnv 注入键同源：sanitizeEnvKey（连字符转下划线）
+	if got := mcpConfigYAML("my-mcp.x", "sse", "http://x/sse", 0, `{}`, `{}`, "bearer"); !strings.Contains(got, "${MCP_TOKEN_MY_MCP_X}") {
+		t.Fatalf("sanitized env key missing:\n%s", got)
 	}
 }
 
@@ -384,8 +405,9 @@ func TestCreateAgentMergesPlatformDefaults(t *testing.T) {
 	if err := jsonUnmarshalStrict(svc.EnvJSON, &env); err != nil {
 		t.Fatal(err)
 	}
-	if env["CHECKPOINT_JDBC_URL"] != "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint" {
-		t.Fatalf("checkpoint default not merged: %+v", env)
+	// 默认值合并后经发布隔离派生改写为 per-service 库名（issue #142）
+	if env["CHECKPOINT_JDBC_URL"] != "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint_oaf_demo_agent?createDatabaseIfNotExist=true" {
+		t.Fatalf("checkpoint default not merged+derived: %+v", env)
 	}
 	if env["LLM_MODEL"] != "right-model" {
 		t.Fatalf("connection must override defaults: %q", env["LLM_MODEL"])
