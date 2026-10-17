@@ -1,7 +1,7 @@
 "use client";
 // 用户侧 · 模型连接（M5 §3.1，demo c/models）：连接表 + Agent 使用情况表；
 // 新建/编辑走右侧抽屉（slide-over，不复刻 demo 右栏常驻表单——评审反馈改为弹出）。
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type ModelConnectionView, type ModelConnUsageRow } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
 import { Badge, Btn, Card, Note, PageHead } from "@/components/ui";
@@ -155,66 +155,113 @@ export default function ModelsPage() {
         </tbody>
       </table>
 
-      <div className="mb-2 text-xs text-gray-400">Agent 使用情况</div>
-      <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="usage-table">
-        <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
-          <th className="p-2.5">Agent</th><th className="p-2.5">默认模型连接</th><th className="p-2.5">已同步连接</th>
-          <th className="p-2.5">下发状态</th><th className="p-2.5 text-right">操作</th>
-        </tr></thead>
-        <tbody>
+      <div className="mb-2 mt-1 flex items-center justify-between">
+        <span className="text-xs text-gray-400">Agent 使用情况（含运行时模型清单）</span>
+        <span className="flex items-center gap-3 text-[11px] text-gray-400">
+          <span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-blue-500" />本空间下发</span>
+          <span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-gray-300" />存量/系统</span>
+          <span className="inline-flex items-center gap-1"><i className="size-2 rounded-full bg-emerald-500" />默认</span>
+        </span>
+      </div>
+      {usage.length === 0 ? (
+        <Card><div className="py-8 text-center text-sm text-gray-400">空间内暂无 Agent</div></Card>
+      ) : (
+        <div className="mb-5 grid grid-cols-1 gap-3 xl:grid-cols-2" data-testid="usage-table">
           {usage.map((u) => {
-            const conns = u.connections ?? []; // nil 序列化兜底（后端已改 []，旧包过渡期防御）
+            const conns = u.connections ?? []; // nil 序列化兜底
             const rt = u.runtimeModels ?? null; // null = 业务面拉取失败
-            const worst = conns.some((c) => c.status === "failed") ? "failed"
-              : conns.some((c) => c.status === "pending") ? "pending"
-                : conns.length > 0 ? "synced" : "";
+            const failed = conns.filter((c) => c.status === "failed");
+            const pending = conns.filter((c) => c.status === "pending");
+            const synced = conns.filter((c) => c.status === "synced");
+            const deliverable = conns.filter((c) => c.status !== "synced");
             return (
-              <Fragment key={u.serviceId}>
-              <tr className="border-b hover:bg-gray-50">
-                <td className="p-2.5 font-medium">{u.displayName}</td>
-                <td className="p-2.5 text-xs">{u.defaultConnectionName || "系统默认"}</td>
-                <td className="p-2.5 text-xs">
-                  {conns.map((c) => (
-                    <span key={c.connectionId} title={c.error} className="mr-1 inline-block rounded bg-gray-100 px-1.5 py-0.5 text-[11px]">{c.name}</span>
-                  ))}
-                  {conns.length === 0 && <span className="text-gray-400">—</span>}
-                </td>
-                <td className="p-2.5">{worst ? <Badge status={worst === "synced" ? "running" : worst}>{worst === "synced" ? "已同步" : worst === "pending" ? "待同步" : "失败"}</Badge> : <span className="text-xs text-gray-400">—</span>}</td>
-                <td className="p-2.5 text-right">
-                  {writable && conns.length > 0 && (
-                    <Btn sm onClick={() => Promise.all(conns.filter((c) => c.status !== "synced").map((c) => deliver(c.connectionId, u.serviceId)))}>
-                      {worst === "synced" ? "重新下发" : "下发"}
+              <div key={u.serviceId} data-testid={`usage-card-${u.serviceId}`}
+                className="flex flex-col rounded-xl border border-gray-200 bg-white">
+                {/* 头部：Agent + 默认模型 + 下发状态徽标 + 操作 */}
+                <div className="flex items-center gap-2.5 border-b border-gray-100 px-4 py-3">
+                  <span className="flex size-7 flex-none items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-500 text-[12px] font-semibold text-white">
+                    {(u.displayName || "?").slice(0, 1)}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <b className="block truncate text-[13px] font-semibold">{u.displayName}</b>
+                    <small className="text-[11px] text-gray-400">
+                      默认模型：{(() => {
+                        const rtDef = (rt ?? []).find((m) => m.isDefault);
+                        return rtDef ? rtDef.name : (u.defaultConnectionName || "系统默认");
+                      })()}
+                    </small>
+                  </div>
+                  {failed.length > 0 ? <Badge status="error">下发失败 {failed.length}</Badge>
+                    : pending.length > 0 ? <Badge status="pending">待同步 {pending.length}</Badge>
+                    : synced.length > 0 ? <Badge status="running">已同步 {synced.length}</Badge>
+                    : <Badge status="stopped">未下发</Badge>}
+                  {writable && deliverable.length > 0 && (
+                    <Btn sm kind="pri" testid={`deliver-${u.serviceId}`}
+                      onClick={() => Promise.all(deliverable.map((c) => deliver(c.connectionId, u.serviceId)))}>
+                      {synced.length > 0 ? "重新下发" : "下发"}
                     </Btn>
                   )}
-                </td>
-              </tr>
-              <tr className="border-b last:border-0 bg-gray-50/40">
-                <td colSpan={5} className="p-2.5 text-xs" data-testid={`rt-models-${u.serviceId}`}>
-                  {rt === null ? (
-                    <span className="text-gray-400">运行时模型：拉取失败（业务面不可达或非 running）</span>
-                  ) : rt.length === 0 ? (
-                    <span className="text-gray-400">运行时模型：暂无（Agent 侧 model_config 为空）</span>
-                  ) : (
-                    <>
-                      <span className="mr-2 font-medium text-gray-600">运行时模型（Agent 侧存量 {rt.length} 个）：</span>
-                      {rt.map((m) => (
-                        <span key={m.id} title={`${m.modelId} @ ${m.baseUrl || "system"}`}
-                          className={`mr-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] ${m.delivered ? "bg-blue-50 text-blue-700" : "bg-gray-100 text-gray-600"}`}>
-                          {m.isDefault && <b className="text-emerald-600">默认</b>}
-                          {m.name}
-                          <span className="text-gray-400">·{m.source === "system" ? "系统" : m.delivered ? "已下发" : "存量"}</span>
+                </div>
+                {/* 下发连接明细（本空间勾选的连接在该 Agent 上的状态） */}
+                {conns.length > 0 && (
+                  <div className="border-b border-gray-100 px-4 py-2.5">
+                    <div className="mb-1.5 text-[11px] font-medium text-gray-400">本空间连接下发</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {conns.map((c) => (
+                        <span key={c.connectionId} title={c.error || `${c.name} → ${c.remoteModelId || "-"}`}
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${
+                            c.status === "synced" ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : c.status === "failed" ? "border-red-200 bg-red-50 text-red-600"
+                            : "border-amber-200 bg-amber-50 text-amber-700"}`}>
+                          <i className={`size-1.5 rounded-full ${c.status === "synced" ? "bg-emerald-500" : c.status === "failed" ? "bg-red-500" : "bg-amber-500"}`} />
+                          {c.name}
+                          <span className="text-gray-400">
+                            {c.status === "synced" ? "已同步" : c.status === "failed" ? "失败" : "待同步"}
+                          </span>
                         </span>
                       ))}
-                    </>
+                    </div>
+                  </div>
+                )}
+                {/* 运行时模型清单（Agent 侧 /models 真实状态） */}
+                <div className="flex-1 px-4 py-2.5">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-[11px] font-medium text-gray-400">运行时模型（Agent 侧实际加载）</span>
+                    {rt !== null && <span className="text-[11px] text-gray-400">{rt.length} 个</span>}
+                  </div>
+                  {rt === null ? (
+                    <div className="flex items-center gap-1.5 text-xs text-gray-400">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-3.5"><circle cx="12" cy="12" r="9" /><path d="M12 8v4m0 4h.01" /></svg>
+                      拉取失败（业务面不可达或非 running）
+                    </div>
+                  ) : rt.length === 0 ? (
+                    <div className="text-xs text-gray-400">暂无（Agent 侧 model_config 为空）</div>
+                  ) : (
+                    <div className="flex max-h-[104px] flex-wrap gap-1.5 overflow-y-auto">
+                      {rt.map((m) => (
+                        <span key={m.id}
+                          title={`${m.name}\nmodel_id: ${m.modelId}\n来源: ${m.baseUrl || "系统内置"}${m.delivered ? "\n由本空间连接下发" : ""}`}
+                          className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${
+                            m.isDefault ? "border-emerald-300 bg-emerald-50 font-medium text-emerald-800"
+                            : m.delivered ? "border-blue-200 bg-blue-50 text-blue-700"
+                            : "border-gray-200 bg-gray-50 text-gray-600"}`}>
+                          {m.isDefault && (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="size-3 text-emerald-500"><path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4L12 14.4 7.2 16.9l.9-5.4L4.2 7.7l5.4-.8L12 2z" /></svg>
+                          )}
+                          <span className="truncate">{m.name}</span>
+                          <span className="text-gray-400">
+                            {m.source === "system" ? "系统" : m.delivered ? "已下发" : "存量"}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
                   )}
-                </td>
-              </tr>
-              </Fragment>
+                </div>
+              </div>
             );
           })}
-          {usage.length === 0 && <tr><td colSpan={5} className="p-5 text-center text-sm text-gray-400">空间内暂无 Agent</td></tr>}
-        </tbody>
-      </table>
+        </div>
+      )}
       <Note>使用链路：创建/更新 Agent 勾选连接 → 默认连接经发布 env 注入（LLM_BASE_URL/LLM_MODEL/LLM_MODEL_ID/LLM_API_KEY → 服务 Secret）；Agent 就绪后全部勾选连接幂等下发至其 <code>/models</code> 接口，调试对话可会话级切换。</Note>
 
       <Drawer open={drawer.open} testid="conn-drawer" width={480}
