@@ -21,7 +21,7 @@ export default function Drawer({ open, title, onClose, children, width = 480, te
     <div className="fixed inset-0 z-[60]" data-testid={testid}>
       <div className="absolute inset-0 bg-black/30" onClick={onClose} data-testid="drawer-mask" />
       <aside role="dialog" aria-label={typeof title === "string" ? title : undefined}
-        style={{ width }}
+        style={{ width: `min(${width}px, calc(100vw - 24px))` }}
         className="absolute right-0 top-0 flex h-full flex-col border-l border-gray-200 bg-white shadow-2xl animate-slide-in-right">
         <header className="flex flex-none items-center justify-between border-b border-gray-200 px-4 py-3">
           <b className="text-sm font-semibold">{title}</b>

@@ -49,7 +49,7 @@ test.afterEach(async ({ request }) => {
     await request.delete(`/models/${id}`).catch(() => undefined);
   }
   for (const sid of sessionIds.splice(0)) {
-    await deleteThread(sid).catch(() => undefined);
+    await deleteThread(sid, BASE, U).catch(() => undefined);
   }
 });
 
@@ -132,7 +132,7 @@ test('MOD3 会话 PATCH 切换模型并影响下一轮真实 LLM 请求', async 
   const first = chat({ message: '[E2E:plain]先使用系统模型', userId: USER_ID, sessionId: sid });
   await waitTerminal(first);
 
-  const patched = await patchThread(sid, { model: id });
+  const patched = await patchThread(sid, { model: id }, BASE, U);
   expect(patched.status).toBe(200);
   expect((await patched.json()).model).toBe(id);
   const detail = await request.get(`/threads/${sid}`);
@@ -146,7 +146,7 @@ test('MOD3 会话 PATCH 切换模型并影响下一轮真实 LLM 请求', async 
   );
 
   await request.patch(`/models/${id}`, { data: { enabled: false } });
-  const rejected = await patchThread(sid, { model: id });
+  const rejected = await patchThread(sid, { model: id }, BASE, U);
   expect(rejected.status).toBe(400);
   expect((await rejected.json()).error).toBe('model_disabled');
   expect((await (await request.get(`/threads/${sid}`)).json()).model).toBe(id);
@@ -344,7 +344,7 @@ test('MOD6 托管模型方言矩阵：采样参数在 LLM 请求体中的实际�
 
     const sid = `e2e-dialect-${provider}-${uniq()}`;
     sessionIds.push(sid);
-    const patched = await patchThread(sid, { model: id });
+    const patched = await patchThread(sid, { model: id }, BASE, U);
     expect(patched.status).toBe(200);
 
     const stream = chat({ message: `[E2E:plain]验证 ${provider} 方言`, userId: USER_ID, sessionId: sid });

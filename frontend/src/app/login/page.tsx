@@ -54,15 +54,18 @@ function LoginForm() {
         <h3 className="text-base font-semibold">登录控制台</h3>
         <p className="text-xs text-gray-400 mb-4">首个管理员由 ADMIN_INIT_USER 环境变量种子创建</p>
         <label className="block text-[13px] font-medium mb-1.5">用户名</label>
-        <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username"
+        <input value={username} onChange={(e) => { setErr(""); setUsername(e.target.value); }} autoComplete="username"
           data-testid="login-username"
           className="w-full rounded-md border border-gray-300 px-2.5 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 mb-3" />
         <label className="block text-[13px] font-medium mb-1.5">密码</label>
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password"
+        <input type="password" value={password} onChange={(e) => { setErr(""); setPassword(e.target.value); }} autoComplete="current-password"
           data-testid="login-password"
           className="w-full rounded-md border border-gray-300 px-2.5 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 mb-4" />
         {err && <div data-testid="login-error" className="mb-3 rounded-md bg-red-50 border border-red-200 px-2.5 py-1.5 text-xs text-red-700">{err}</div>}
-        <button type="submit" disabled={busy || !username.trim() || !password}
+        {/* 空白（纯空格）输入时按钮禁用并给中性提示（issue #153：旧错误残留误导） */}
+        {(username.trim() !== "" && password.trim() === "") && !err &&
+          <div className="mb-3 rounded-md bg-gray-50 border border-gray-200 px-2.5 py-1.5 text-xs text-gray-500">请输入密码</div>}
+        <button type="submit" disabled={busy || !username.trim() || !password.trim()}
           data-testid="login-submit"
           className="w-full rounded-lg bg-blue-600 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-50">
           {busy ? "登录中…" : "登录"}

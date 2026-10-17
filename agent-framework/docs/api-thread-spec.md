@@ -42,6 +42,19 @@
 X-User-Id: user-123
 ```
 
+### 2.1.1 会话归属校验（2026-10-18 起，issue #158）
+
+所有按 `sessionId` 操作的端点（history / 详情 / 删除 / PATCH / llm-calls / subscribe /
+status / confirm / confirm-stream / chat 续聊）先查 `session_user` 归属：
+
+- 请求者身份解析与 §2.1 同口径（`X-User-Id` 头 > body `userId` > `debug-user`）；
+- 会话无归属行（存量会话）放行；有归属行且 ≠ 请求者 → **404** `thread_not_found`
+  （不泄露会话存在性）；无头请求视作 `debug-user`，不能访问真实用户会话（fail-closed）；
+- `/chat` 续聊他人会话同样拒绝（error 帧 `thread_not_found`），且**不会**改写会话归属
+  （旧实现的 upsert ON DUPLICATE KEY 会把他人会话夺到请求者名下）。
+
+接入方（网关/前端）应始终透传 `X-User-Id`；调试页以选中 userId 填充该头。
+
 ### 2.2 sessionId 规则
 
 - 由前端生成（建议 `crypto.randomUUID()`）
@@ -463,6 +476,7 @@ GET /threads?userId=user-123
 |------|-----------|------|
 | 400 | `message or fileIds is required` | 请求体缺少 message 和 fileIds |
 | 400 | `unknown_model` / `model_disabled` | 会话 `model` 参数指向未知或已停用的托管模型 |
+| 404 | `thread_not_found` | 会话不存在或非归属用户（归属校验，issue #158；响应体 `{"error":"thread_not_found"}`，SSE 端点以 404 状态码表达） |
 | 404 | `confirm_context_not_found` | 确认上下文不存在或已过期 |
 | 409 | `confirm_already_consumed` | 确认已被处理 |
 | 409 | `turn_in_progress` | 会话正在执行中，等本轮终态后重试 |

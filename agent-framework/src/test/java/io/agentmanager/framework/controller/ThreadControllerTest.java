@@ -201,7 +201,7 @@ class ThreadControllerTest {
         when(rs.next()).thenReturn(true, false);
         when(rs.getTimestamp("updated_at")).thenReturn(new Timestamp(3000));
 
-        var result = controller.getThread("acme__s1");
+        var result = controller.getThread("acme__s1", "alice").getBody();
         assertEquals("acme__s1", result.get("session_id"));
         assertEquals("alice", result.get("user_id"));
         assertEquals(new Timestamp(3000).toString(), result.get("updated_at"));
@@ -223,7 +223,7 @@ class ThreadControllerTest {
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(false);
 
-        var result = controller.getThread("acme__s2");
+        var result = controller.getThread("acme__s2", null).getBody();
         assertEquals("", result.get("updated_at"));
     }
 
@@ -238,7 +238,7 @@ class ThreadControllerTest {
         when(ps.executeUpdate()).thenReturn(1);
         when(ps.executeQuery()).thenReturn(mock(ResultSet.class));
 
-        var response = controller.deleteThread("acme__s1");
+        var response = controller.deleteThread("acme__s1", null);
         assertEquals(200, response.getStatusCode().value());
         var body = response.getBody();
         assertNotNull(body);
@@ -254,7 +254,7 @@ class ThreadControllerTest {
     void deleteThreadShouldHandleDbError() throws Exception {
         when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
 
-        var response = controller.deleteThread("acme__s1");
+        var response = controller.deleteThread("acme__s1", null);
         var body = response.getBody();
         assertNotNull(body);
         assertEquals("acme__s1", body.get("session_id"));
@@ -271,7 +271,7 @@ class ThreadControllerTest {
         when(ps.executeUpdate()).thenReturn(1);
 
         var body = new ThreadController.PatchRequest("New Title", null);
-        var response = controller.patchThread("acme__s1", body);
+        var response = controller.patchThread("acme__s1", null, body);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("New Title", response.getBody().get("title"));
     }
@@ -279,7 +279,7 @@ class ThreadControllerTest {
     @Test
     void patchThreadWithBlankTitleShouldNotUpdate() throws Exception {
         var body = new ThreadController.PatchRequest("", null);
-        var response = controller.patchThread("acme__s1", body);
+        var response = controller.patchThread("acme__s1", null, body);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("", response.getBody().get("title"));
     }
@@ -287,7 +287,7 @@ class ThreadControllerTest {
     @Test
     void patchThreadWithNullTitleShouldNotUpdate() throws Exception {
         var body = new ThreadController.PatchRequest(null, null);
-        var response = controller.patchThread("acme__s1", body);
+        var response = controller.patchThread("acme__s1", null, body);
         assertEquals(200, response.getStatusCode().value());
         assertEquals("", response.getBody().get("title"));
     }
@@ -298,7 +298,7 @@ class ThreadControllerTest {
     void patchShouldBindModelWhenValid() {
         when(modelCatalog.validateSelectable("m2")).thenReturn(null);
 
-        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, "m2"));
+        var response = controller.patchThread("acme__s1", null, new ThreadController.PatchRequest(null, "m2"));
 
         assertEquals(200, response.getStatusCode().value());
         assertEquals("m2", response.getBody().get("model"));
@@ -309,7 +309,7 @@ class ThreadControllerTest {
     void patchShouldRejectUnknownModel() {
         when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
 
-        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, "nope"));
+        var response = controller.patchThread("acme__s1", null, new ThreadController.PatchRequest(null, "nope"));
 
         assertEquals(400, response.getStatusCode().value());
         assertEquals("unknown_model", response.getBody().get("error"));
@@ -318,7 +318,7 @@ class ThreadControllerTest {
 
     @Test
     void patchShouldClearModelOnSystemSelection() {
-        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, "system"));
+        var response = controller.patchThread("acme__s1", null, new ThreadController.PatchRequest(null, "system"));
 
         assertEquals(200, response.getStatusCode().value());
         assertEquals("", response.getBody().get("model"));
@@ -331,7 +331,7 @@ class ThreadControllerTest {
     void patchWithoutModelShouldEchoCurrentBinding() {
         when(sessionUserStore.findModelBySession("acme__s1")).thenReturn("m1");
 
-        var response = controller.patchThread("acme__s1", new ThreadController.PatchRequest(null, null));
+        var response = controller.patchThread("acme__s1", null, new ThreadController.PatchRequest(null, null));
 
         assertEquals("m1", response.getBody().get("model"));
         verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
@@ -356,7 +356,7 @@ class ThreadControllerTest {
         when(rs.getString("state_data")).thenReturn(
             "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"},{\"role\":\"assistant\",\"content\":\"hi\"}]}");
 
-        var result = controller.threadHistory("acme:t1", true, 200, null);
+        var result = controller.threadHistory("acme:t1", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals("user", messages.get(0).get("role"));
@@ -381,7 +381,7 @@ class ThreadControllerTest {
         when(rs.getString("state_data")).thenReturn(
             "{\"nested\":{\"messages\":[{\"role\":\"user\",\"parts\":[{\"text\":\"p1\"}]}]}}");
 
-        var result = controller.threadHistory("acme:t2", true, 200, null);
+        var result = controller.threadHistory("acme:t2", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals("[{\"text\":\"p1\"}]", messages.get(0).get("content"));
@@ -407,7 +407,7 @@ class ThreadControllerTest {
             "{\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"reasoning\"}," +
             "{\"type\":\"text\",\"text\":\"hi\"}],\"metadata\":{}}]}");
 
-        var result = controller.threadHistory("acme:s5", true, 200, null);
+        var result = controller.threadHistory("acme:s5", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals("user", messages.get(0).get("role"));
@@ -434,7 +434,7 @@ class ThreadControllerTest {
             "{\"context\":[{\"role\":\"ASSISTANT\"," +
             "\"content\":[{\"type\":\"thinking\",\"thinking\":\"internal reasoning\"}]}]}");
 
-        var result = controller.threadHistory("acme:s6", true, 200, null);
+        var result = controller.threadHistory("acme:s6", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
@@ -470,7 +470,7 @@ class ThreadControllerTest {
             .thenThrow(new RuntimeException("skip generatedFiles")) // 产出文件查询（被 catch）
             .thenReturn(fileConn);                                   // attachUploadedFiles
 
-        var result = controller.threadHistory("acme:up1", true, 200, null);
+        var result = controller.threadHistory("acme:up1", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertEquals(1, messages.size());
@@ -500,7 +500,7 @@ class ThreadControllerTest {
         when(ps.executeQuery()).thenReturn(rs);
         when(rs.next()).thenReturn(false); // no messages
 
-        var result = controller.threadHistory("acme:t3", true, 200, null);
+        var result = controller.threadHistory("acme:t3", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
@@ -510,7 +510,7 @@ class ThreadControllerTest {
     void threadHistoryShouldReturnEmptyOnException() throws Exception {
         // generatedFiles throws, loadMessages also throws -> empty messages
         when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
-        var result = controller.threadHistory("acme:t4", true, 200, null);
+        var result = controller.threadHistory("acme:t4", null, true, 200, null).getBody();
         @SuppressWarnings("unchecked")
         var messages = (List<Map<String, Object>>) result.get("messages");
         assertTrue(messages.isEmpty());
@@ -528,7 +528,7 @@ class ThreadControllerTest {
         // Skip generatedFiles and loadMessages by throwing
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
-        var result = controller.threadHistory("acme:mt1", true, 200, null);
+        var result = controller.threadHistory("acme:mt1", null, true, 200, null).getBody();
         assertNotNull(result.get("pendingConfirm"));
         assertTrue(result.get("pendingConfirm").toString().contains("call-9"));
     }
@@ -538,7 +538,7 @@ class ThreadControllerTest {
         when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.empty());
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
-        var result = controller.threadHistory("acme:mt2", true, 200, null);
+        var result = controller.threadHistory("acme:mt2", null, true, 200, null).getBody();
         assertNull(result.get("pendingConfirm"));
     }
 
@@ -558,7 +558,7 @@ class ThreadControllerTest {
         when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(remoteRow));
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
 
-        var result = controller.threadHistory("acme:mt3", true, 200, null);
+        var result = controller.threadHistory("acme:mt3", null, true, 200, null).getBody();
         assertNotNull(result.get("pendingConfirm"));
         var payload = result.get("pendingConfirm").toString();
         assertTrue(payload.contains("task:t-42"), "confirm_key 透出供确认端点路由: " + payload);
@@ -609,7 +609,7 @@ class ThreadControllerTest {
     @Test
     void llmCallsShouldReturnRecords() {
         llmLogger.logCall("s1", Map.of("model", "gpt-4"), Map.of("content", "ok"));
-        var result = controller.llmCalls("s1");
+        var result = controller.llmCalls("s1", null).getBody();
         @SuppressWarnings("unchecked")
         var calls = (List<Map<String, Object>>) result.get("calls");
         assertEquals(1, calls.size());
@@ -619,9 +619,89 @@ class ThreadControllerTest {
 
     @Test
     void llmCallsShouldReturnEmptyForUnknownThread() {
-        var result = controller.llmCalls("unknown");
+        var result = controller.llmCalls("unknown", null).getBody();
         @SuppressWarnings("unchecked")
         var calls = (List<Map<String, Object>>) result.get("calls");
         assertTrue(calls.isEmpty());
+    }
+
+    // ========== 归属校验（issue #158：非归属用户 404，不泄露存在性） ==========
+
+    @Test
+    void threadHistoryShouldRejectForeignUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("acme__s1")).thenReturn("alice");
+
+        var response = controller.threadHistory("acme__s1", "bob", true, 200, null);
+
+        assertEquals(404, response.getStatusCode().value());
+        assertEquals("thread_not_found", response.getBody().get("error"));
+        // 拒绝发生在任何数据读取之前
+        verify(dataSource, never()).getConnection();
+    }
+
+    @Test
+    void threadHistoryShouldAllowOwnerAndLegacyUnmapped() throws Exception {
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn)
+            .thenThrow(new RuntimeException("skip generatedFiles"))
+            .thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+
+        // 归属用户放行
+        when(sessionUserStore.findUserIdBySession("acme__s1")).thenReturn("alice");
+        assertEquals(200, controller.threadHistory("acme__s1", "alice", true, 200, null)
+            .getStatusCode().value());
+        // 无映射行（存量会话）放行
+        when(sessionUserStore.findUserIdBySession("acme__s2")).thenReturn(null);
+        assertEquals(200, controller.threadHistory("acme__s2", "bob", true, 200, null)
+            .getStatusCode().value());
+    }
+
+    @Test
+    void getThreadShouldRejectForeignUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("acme__s1")).thenReturn("alice");
+
+        var response = controller.getThread("acme__s1", "bob");
+
+        assertEquals(404, response.getStatusCode().value());
+        assertEquals("thread_not_found", response.getBody().get("error"));
+        verify(dataSource, never()).getConnection();
+    }
+
+    @Test
+    void deleteThreadShouldRejectForeignUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("acme__s1")).thenReturn("alice");
+
+        var response = controller.deleteThread("acme__s1", "bob");
+
+        assertEquals(404, response.getStatusCode().value());
+        verify(dataSource, never()).getConnection();
+        verify(confirmContextStore, never()).delete(anyString());
+    }
+
+    @Test
+    void patchThreadShouldRejectForeignUser() {
+        when(sessionUserStore.findUserIdBySession("acme__s1")).thenReturn("alice");
+
+        var response = controller.patchThread("acme__s1", "bob",
+            new ThreadController.PatchRequest("Hijacked", "m1"));
+
+        assertEquals(404, response.getStatusCode().value());
+        verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
+        verify(sessionUserStore, never()).updateRemark(anyString(), anyString());
+    }
+
+    @Test
+    void llmCallsShouldRejectForeignUser() {
+        when(sessionUserStore.findUserIdBySession("s1")).thenReturn("alice");
+
+        var response = controller.llmCalls("s1", "bob");
+
+        assertEquals(404, response.getStatusCode().value());
+        assertEquals("thread_not_found", response.getBody().get("error"));
     }
 }

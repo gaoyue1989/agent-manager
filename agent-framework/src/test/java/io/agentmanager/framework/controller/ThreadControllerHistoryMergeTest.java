@@ -59,8 +59,11 @@ class ThreadControllerHistoryMergeTest {
         agentStateReader = mock(AgentStateReader.class);
         sessionMessageStore = mock(SessionMessageStore.class);
 
+        var sessionUserStore = mock(SessionUserStore.class);
+        // 无映射行（null）= 存量会话，归属校验放行
+        when(sessionUserStore.findUserIdBySession(anyString())).thenReturn(null);
         controller = new ThreadController(dataSource, new LLMLogger(), confirmContextStore,
-            mock(SessionUserStore.class), sessionEventStore, agentStateReader,
+            sessionUserStore, sessionEventStore, agentStateReader,
             mock(ModelCatalog.class), 8000, true, sessionMessageStore);
     }
 
@@ -82,8 +85,8 @@ class ThreadControllerHistoryMergeTest {
         + "{\"id\":\"m4\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"tail\"}]}]}";
 
     @SuppressWarnings("unchecked")
-    private List<Map<String, Object>> messagesOf(Map<String, Object> result) {
-        return (List<Map<String, Object>>) result.get("messages");
+    private List<Map<String, Object>> messagesOf(org.springframework.http.ResponseEntity<Map<String, Object>> result) {
+        return (List<Map<String, Object>>) result.getBody().get("messages");
     }
 
     // ===== 合并视图 =====
@@ -99,7 +102,7 @@ class ThreadControllerHistoryMergeTest {
             row(3, "m3", "message", "ASSISTANT", null, MSG_M3)));
         when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r-turn-1"));
 
-        var result = controller.threadHistory("s1", true, 200, null);
+        var result = controller.threadHistory("s1", null, true, 200, null);
 
         var messages = messagesOf(result);
         assertEquals(4, messages.size());
@@ -123,8 +126,8 @@ class ThreadControllerHistoryMergeTest {
         assertEquals("tail", messages.get(3).get("content"));
         assertEquals("state", messages.get(3).get("origin"));
         assertNull(messages.get(3).get("reply_id"));
-        assertFalse((Boolean) result.get("hasMore"));
-        assertNull(result.get("nextBeforeId"));
+        assertFalse((Boolean) result.getBody().get("hasMore"));
+        assertNull(result.getBody().get("nextBeforeId"));
         verify(sessionEventStore).findReplyIds("s1");
     }
 
@@ -139,7 +142,7 @@ class ThreadControllerHistoryMergeTest {
         when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r-turn-1"));
 
         // limit=2 → findPage 收到 limit+1=3；升序返回中最旧一条属于下一页
-        var result = controller.threadHistory("s1", true, 2, null);
+        var result = controller.threadHistory("s1", null, true, 2, null);
 
         verify(sessionMessageStore).findPage(eq("s1"), eq(null), eq(3));
         var messages = messagesOf(result);
@@ -148,8 +151,8 @@ class ThreadControllerHistoryMergeTest {
         assertEquals("summary text", messages.get(0).get("content"));
         assertEquals("hi", messages.get(1).get("content"));
         assertEquals("tail", messages.get(2).get("content"));
-        assertTrue((Boolean) result.get("hasMore"));
-        assertEquals(2L, ((Number) result.get("nextBeforeId")).longValue());
+        assertTrue((Boolean) result.getBody().get("hasMore"));
+        assertEquals(2L, ((Number) result.getBody().get("nextBeforeId")).longValue());
     }
 
     @Test
@@ -158,7 +161,7 @@ class ThreadControllerHistoryMergeTest {
         when(sessionMessageStore.findPage(eq("s1"), eq(2L), anyInt())).thenReturn(List.of(
             row(1, "m1", "message", "USER", "r1", MSG_M1)));
 
-        var result = controller.threadHistory("s1", true, 200, 2L);
+        var result = controller.threadHistory("s1", null, true, 200, 2L);
 
         // 翻页不再合入 state 独有消息（m4），避免跨页重复；全会话归档集也无需查询
         var messages = messagesOf(result);
@@ -173,7 +176,7 @@ class ThreadControllerHistoryMergeTest {
     void includeArchivedFalseShouldFallbackToStateOnly() {
         when(agentStateReader.loadStateData("s1")).thenReturn(STATE_DATA);
 
-        var result = controller.threadHistory("s1", false, 200, null);
+        var result = controller.threadHistory("s1", null, false, 200, null);
 
         verify(sessionMessageStore, never()).findPage(anyString(), any(), anyInt());
         verify(sessionMessageStore, never()).findAllMsgIds(anyString());
@@ -181,8 +184,8 @@ class ThreadControllerHistoryMergeTest {
         assertEquals(2, messages.size());
         assertEquals("hi", messages.get(0).get("content"));
         assertEquals("tail", messages.get(1).get("content"));
-        assertFalse((Boolean) result.get("hasMore"));
-        assertNull(result.get("nextBeforeId"));
+        assertFalse((Boolean) result.getBody().get("hasMore"));
+        assertNull(result.getBody().get("nextBeforeId"));
     }
 
     @Test
@@ -193,7 +196,7 @@ class ThreadControllerHistoryMergeTest {
             + "\"content\":[{\"type\":\"text\",\"text\":\"summary text\"}]},"
             + "{\"id\":\"m2\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}]}");
 
-        var result = controller.threadHistory("s1", false, 200, null);
+        var result = controller.threadHistory("s1", null, false, 200, null);
 
         var messages = messagesOf(result);
         assertEquals(2, messages.size());
@@ -214,7 +217,7 @@ class ThreadControllerHistoryMergeTest {
         when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of());
         when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r1", "r2"));
 
-        var result = controller.threadHistory("s1", true, 200, null);
+        var result = controller.threadHistory("s1", null, true, 200, null);
 
         // 存量会话（无归档行）：消息来自 state、origin=state、reply_id 走既有顺序猜测兜底
         var messages = messagesOf(result);
@@ -222,7 +225,7 @@ class ThreadControllerHistoryMergeTest {
         assertEquals("state", messages.get(0).get("origin"));
         assertEquals("state", messages.get(1).get("origin"));
         assertEquals("r1", messages.get(1).get("reply_id"));
-        assertFalse((Boolean) result.get("hasMore"));
+        assertFalse((Boolean) result.getBody().get("hasMore"));
     }
 
     @Test
@@ -231,12 +234,12 @@ class ThreadControllerHistoryMergeTest {
         when(sessionMessageStore.findPage(anyString(), any(), anyInt()))
             .thenThrow(new RuntimeException("db down"));
 
-        var result = controller.threadHistory("s1", true, 200, null);
+        var result = controller.threadHistory("s1", null, true, 200, null);
 
         // fail-soft：归档查询故障降级为仅 agent_state
         var messages = messagesOf(result);
         assertEquals(2, messages.size());
         assertEquals("hi", messages.get(0).get("content"));
-        assertFalse((Boolean) result.get("hasMore"));
+        assertFalse((Boolean) result.getBody().get("hasMore"));
     }
 }

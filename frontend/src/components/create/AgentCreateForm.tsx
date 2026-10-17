@@ -2,7 +2,7 @@
 // 创建/编辑 Agent 共用表单（M3 §3.1，demo c/create 与 c/edit 同构还原）：
 // 选择创建方式三卡片（仅创建页）+ 五个编号区块（基本信息/文件配置/资产配置/资源配置/网络配置）。
 // 编辑模式：无方式卡片、名称锁定、标题/按钮换「保存」、提交 PUT（copy-on-write 新版本 + republish）。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec } from "@/lib/api";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
@@ -69,6 +69,9 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<{ agentKey: string; slug: string; k8sName: string; conflict: boolean } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // 提交互斥锁（issue #151）：双击时第二次 click 仍持旧闭包（按钮 disabled 未及重渲染），
+  // useState 布尔挡不住——用 ref 在函数入口同步短路
+  const submitLock = useRef(false);
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
@@ -112,13 +115,17 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
   };
 
   const submit = async () => {
+    if (submitLock.current) return; // 请求在途中：吞掉重复触发（issue #151）
+    submitLock.current = true;
     setMsg("");
     if (mode === "create" && state.mode === "harness") {
-      if (!state.name.trim()) { setMsg("请填写 Agent 名称"); return; }
-      if (!state.prompt.trim()) { setMsg("请填写系统提示词（将写入生成包 AGENTS.md 正文）"); return; }
-      if (state.modelConnections.length === 0) { setMsg("请至少勾选一条模型连接（先到「资产管理 → 模型连接」创建）"); return; }
+      if (!state.name.trim()) { setMsg("请填写 Agent 名称"); submitLock.current = false; return; }
+      // OAF 契约必填（issue #150）：留空时后端拒绝，前端先拦并给出可操作提示
+      if (!state.description.trim()) { setMsg("请填写描述（将写入生成包 AGENTS.md frontmatter）"); submitLock.current = false; return; }
+      if (!state.prompt.trim()) { setMsg("请填写系统提示词（将写入生成包 AGENTS.md 正文）"); submitLock.current = false; return; }
+      if (state.modelConnections.length === 0) { setMsg("请至少勾选一条模型连接（先到「资产管理 → 模型连接」创建）"); submitLock.current = false; return; }
     }
-    if (mode === "edit" && !state.prompt.trim()) { setMsg("系统提示词不能为空"); return; }
+    if (mode === "edit" && !state.prompt.trim()) { setMsg("系统提示词不能为空"); submitLock.current = false; return; }
     setSubmitting(true);
     try {
       if (mode === "create" && state.mode === "import") {
@@ -127,13 +134,13 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
           const rec = await api.console.uploadPackage(ws, uploadFile);
           pkgId = rec.id;
         }
-        if (!pkgId) { setMsg("请上传 zip 包或选择空间内已有包"); setSubmitting(false); return; }
+        if (!pkgId) { setMsg("请上传 zip 包或选择空间内已有包"); setSubmitting(false); submitLock.current = false; return; }
         const out = await api.console.createAgent(ws, { ...state, importPackageId: pkgId });
         router.push(`/console/agents/${out.service.id}`);
         return;
       }
       if (mode === "create" && state.mode === "adopt") {
-        if (!state.adoptServiceId) { setMsg("请选择要纳管的存量服务"); setSubmitting(false); return; }
+        if (!state.adoptServiceId) { setMsg("请选择要纳管的存量服务"); setSubmitting(false); submitLock.current = false; return; }
         const out = await api.console.createAgent(ws, { ...state, adoptServiceId: state.adoptServiceId });
         router.push(out.service?.id ? `/console/agents/${out.service.id}` : "/console/agents");
         return;
@@ -148,6 +155,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     } catch (e: any) {
       setMsg(e.message || "提交失败");
       setSubmitting(false);
+      submitLock.current = false;
     }
   };
 
@@ -221,7 +229,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                   ? "服务名（K8s short 名）创建后不可变；显示名修改将同步至新版本包 frontmatter name"
                   : preview ? `agentKey: ${preview.agentKey} · slug: ${preview.slug} · K8s: ${preview.k8sName}${preview.conflict ? " · ⚠ 重名冲突" : ""}`
                     : "同时作为 K8s 服务名与生成包 agentKey / slug 的派生源"}>
-                <input value={state.name} disabled={mode === "edit"} data-testid="agent-name"
+                <input value={state.name} disabled={mode === "edit"} data-testid="agent-name" maxLength={128}
                   onBlur={(e) => previewName(e.target.value)}
                   onChange={(e) => { setMsg(""); setState((s) => ({ ...s, name: e.target.value })); }}
                   className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm disabled:bg-gray-50 disabled:text-gray-500" />
@@ -261,9 +269,9 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                 </table>
               )}
             </Field>
-            <Field label="描述">
-              <textarea rows={2} maxLength={256} value={state.description}
-                onChange={(e) => setState((s) => ({ ...s, description: e.target.value }))}
+            <Field label="描述" required>
+              <textarea rows={2} maxLength={256} value={state.description} data-testid="agent-description"
+                onChange={(e) => { setMsg(""); setState((s) => ({ ...s, description: e.target.value })); }}
                 className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm" />
             </Field>
           </Section>

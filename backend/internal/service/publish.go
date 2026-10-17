@@ -236,7 +236,9 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	svc.Status = store.StatusDeploying // 落库即为 deploying（事件保留 created→deploying 审计）
 	err = c.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(svc).Error; err != nil {
-			return err
+			// 唯一键冲突（并发同名发布竞态）等存储错误翻译为业务哨兵（issue #151：
+			// 并发重复提交曾以 502 Duplicate entry 直出）
+			return translateStorageError(err)
 		}
 		if err := tx.Model(&store.OafPackage{}).Where("id = ?", pkg.ID).
 			UpdateColumn("ref_count", gorm.Expr("ref_count + 1")).Error; err != nil {
@@ -686,11 +688,32 @@ func (c *Core) uniqName(base string) (string, error) {
 		if i > 20 {
 			return "", errors.New("too many name collisions")
 		}
+		suffix := fmt.Sprintf("-%d", i)
 		name = fmt.Sprintf("%s-%d", base, i)
 		if len(name) > 63 {
-			return "", errors.New("cannot derive unique k8s name within 63 chars")
+			// base 接近 63 上限时收缩 base 预算给后缀（issue #149：直接报错会卡死发布）
+			trimmed := strings.TrimRight(base[:63-len(suffix)], "-")
+			name = trimmed + suffix
 		}
 	}
+}
+
+// translateStorageError 将 MySQL 驱动层错误翻译为业务哨兵（部署环境 driver 未开
+// TranslateError，duplicate/超长不会映射为 gorm.ErrDuplicatedKey 等，裸错误会经
+// mapError/mapCreateError 以 500/502 直出并泄漏列名——issue #149/#151）。
+func translateStorageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "duplicate") || strings.Contains(msg, "1062") {
+		return fmt.Errorf("%w: duplicate_name (unique key conflict)", ErrConflict)
+	}
+	if strings.Contains(msg, "1406") || strings.Contains(lower, "data too long") {
+		return fmt.Errorf("%w: input too long for storage", ErrInvalidForm)
+	}
+	return err
 }
 
 func (c *Core) pkgDir(pkgID uint) string {

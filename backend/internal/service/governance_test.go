@@ -3,6 +3,7 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"agent-manager/backend/internal/store"
@@ -73,9 +74,13 @@ func TestAdminWorkspaceCRUD(t *testing.T) {
 		t.Fatalf("quota: %+v", found.Quota)
 	}
 
-	// 删除保护：有成员 → 409
+	// 删除保护：成员 >1（owner + 普通成员）→ 409（仅剩 owner 可级联删，见 TestWorkspaceOwnerTransfer）
+	extra := seedUserIn(t, c, "member1", "user", w.ID, "member")
 	if err := c.AdminDeleteWorkspace(w.ID); err == nil {
-		t.Fatal("non-empty workspace should be protected")
+		t.Fatal("workspace with member should be protected")
+	}
+	if err := c.RemoveMember(42, w.ID, extra.ID); err != nil {
+		t.Fatalf("remove member: %v", err)
 	}
 	// 空空间（无成员无 Agent）可删
 	empty, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "空空间"})
@@ -84,6 +89,96 @@ func TestAdminWorkspaceCRUD(t *testing.T) {
 	}
 	if err := c.AdminDeleteWorkspace(empty.ID); err != nil {
 		t.Fatalf("delete empty: %v", err)
+	}
+}
+
+// TestWorkspaceOwnerTransfer owner 转移 + 仅剩 owner 的空间可级联删除（issue #157）。
+func TestWorkspaceOwnerTransfer(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	oldOwner := seedUserIn(t, c, "ws-owner", "user", 0, "")
+	newOwner := seedUserIn(t, c, "ws-new-owner", "user", 0, "")
+
+	w, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "转移空间", OwnerUserID: oldOwner.ID})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 死锁对照（修复前行为）：PATCH ownerUserId 静默无效 + owner 不可移除 → 空间永不可删。
+	// 修复后：转移 owner → 原 owner 降为 member → 移除 → 删除成功。
+	newOwnerID := newOwner.ID
+	patched, err := c.AdminPatchWorkspace(w.ID, PatchWorkspaceInput{OwnerUserID: &newOwnerID})
+	if err != nil {
+		t.Fatalf("transfer owner: %v", err)
+	}
+	if patched.OwnerUserID != newOwner.ID {
+		t.Fatalf("owner_user_id: %d (want %d)", patched.OwnerUserID, newOwner.ID)
+	}
+	var oldM, newM store.WorkspaceMember
+	if err := c.DB.Where("workspace_id = ? AND user_id = ?", w.ID, oldOwner.ID).First(&oldM).Error; err != nil {
+		t.Fatalf("old owner membership missing: %v", err)
+	}
+	if oldM.Role != "member" {
+		t.Fatalf("old owner should be demoted to member, got %q", oldM.Role)
+	}
+	if err := c.DB.Where("workspace_id = ? AND user_id = ?", w.ID, newOwner.ID).First(&newM).Error; err != nil || newM.Role != "owner" {
+		t.Fatalf("new owner membership: %+v err=%v", newM, err)
+	}
+
+	// 移除降级后的原 owner（修复前：owner 不可移除 → 死锁）→ 仅剩新 owner → 级联删除成功
+	if err := c.RemoveMember(42, w.ID, oldOwner.ID); err != nil {
+		t.Fatalf("remove demoted owner: %v", err)
+	}
+	if err := c.AdminDeleteWorkspace(w.ID); err != nil {
+		t.Fatalf("delete with only owner: %v", err)
+	}
+	var cnt int64
+	c.DB.Model(&store.WorkspaceMember{}).Where("workspace_id = ?", w.ID).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("member rows should be cascaded, got %d", cnt)
+	}
+
+	// 直删路径：仅剩 owner（未转移）的空间同样可删（死锁场景的最短解）
+	w0, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "仅owner空间", OwnerUserID: oldOwner.ID})
+	if err != nil {
+		t.Fatalf("create w0: %v", err)
+	}
+	if err := c.AdminDeleteWorkspace(w0.ID); err != nil {
+		t.Fatalf("delete owner-only workspace: %v", err)
+	}
+
+	// 非法转移：不存在的用户 400；ownerUserId=0 400
+	w2, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "转移空间2", OwnerUserID: oldOwner.ID})
+	if err != nil {
+		t.Fatalf("create2: %v", err)
+	}
+	ghost := uint(999999)
+	if _, err := c.AdminPatchWorkspace(w2.ID, PatchWorkspaceInput{OwnerUserID: &ghost}); err == nil {
+		t.Fatal("ghost owner should fail")
+	}
+	zero := uint(0)
+	if _, err := c.AdminPatchWorkspace(w2.ID, PatchWorkspaceInput{OwnerUserID: &zero}); err == nil {
+		t.Fatal("ownerUserId=0 should fail")
+	}
+	// 已有成员行的用户被提为 owner（不重复建行）
+	existing := seedUserIn(t, c, "ws-member2", "user", w2.ID, "member")
+	existingID := existing.ID
+	if _, err := c.AdminPatchWorkspace(w2.ID, PatchWorkspaceInput{OwnerUserID: &existingID}); err != nil {
+		t.Fatalf("transfer to existing member: %v", err)
+	}
+	var rows []store.WorkspaceMember
+	c.DB.Where("workspace_id = ?", w2.ID).Order("user_id").Find(&rows)
+	if len(rows) != 2 {
+		t.Fatalf("member rows: %d (want 2, no duplicates)", len(rows))
+	}
+	for _, r := range rows {
+		want := "member"
+		if r.UserID == existing.ID {
+			want = "owner"
+		}
+		if r.Role != want {
+			t.Fatalf("member %d role %q (want %q)", r.UserID, r.Role, want)
+		}
 	}
 }
 
@@ -356,5 +451,19 @@ func TestAuditActorRecorded(t *testing.T) {
 	}
 	if create.Actor != admin.DisplayName {
 		t.Fatalf("actor resolved to display name, got %q want %q", create.Actor, admin.DisplayName)
+	}
+}
+
+// TestInputLengthCaps issue #149：空间/用户名超长 400（不再 500 Data too long 直出）。
+func TestInputLengthCaps(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	if _, err := c.AdminCreateWorkspace(1, CreateWorkspaceInput{Name: strings.Repeat("w", 200)}); err == nil ||
+		!strings.Contains(err.Error(), "name too long") {
+		t.Fatalf("long ws name: %v", err)
+	}
+	if _, err := c.AdminCreateUser(1, strings.Repeat("u", 200), "pw", "", "user"); err == nil ||
+		!strings.Contains(err.Error(), "username too long") {
+		t.Fatalf("long username: %v", err)
 	}
 }

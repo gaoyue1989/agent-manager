@@ -66,6 +66,7 @@ export default function PackagesPage() {
       ) : packages.length === 0 ? (
         <p className="text-gray-500" data-testid="packages-empty">暂无配置包，请在发布页上传 zip 包。</p>
       ) : (
+        <div className="overflow-x-auto">
         <table className="w-full bg-white border border-gray-200 rounded text-sm" data-testid="packages-table">
           <thead>
             <tr className="text-left text-gray-500 border-b">
@@ -113,6 +114,7 @@ export default function PackagesPage() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

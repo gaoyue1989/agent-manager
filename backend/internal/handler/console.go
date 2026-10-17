@@ -7,6 +7,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -22,6 +23,12 @@ func resolveWorkspace(core *service.Core) gin.HandlerFunc {
 		u, err := core.GetUser(uid)
 		if err != nil {
 			Fail(c, http.StatusUnauthorized, "user not found")
+			c.Abort()
+			return
+		}
+		// 禁用用户旧 JWT 立即失效（issue #148，与 /auth/me、RequireAdmin 同口径）
+		if u.Status == "disabled" {
+			Fail(c, http.StatusForbidden, "user is disabled")
 			c.Abort()
 			return
 		}
@@ -82,7 +89,15 @@ func mapCreateError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrNotFound):
 		Fail(c, http.StatusNotFound, err.Error())
 	default:
-		Fail(c, http.StatusBadGateway, "publish failed: "+err.Error())
+		msg := err.Error()
+		// OAF 包契约校验失败是用户输入问题，按 400 返回（issue #150：曾以 502 直出）；
+		// 存量映射口径与 respond.go mapError 的字符串映射一致
+		if strings.Contains(msg, "invalid AGENTS.md") || strings.Contains(msg, "parse AGENTS.md") ||
+			strings.Contains(msg, "invalid zip") {
+			Fail(c, http.StatusBadRequest, msg)
+			return
+		}
+		Fail(c, http.StatusBadGateway, "publish failed: "+msg)
 	}
 }
 

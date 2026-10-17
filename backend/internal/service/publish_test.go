@@ -401,7 +401,7 @@ func TestUniqNameCollisionLimit(t *testing.T) {
 	}
 }
 
-// 冲突后缀导致名字超过 63 字符时必须报错（K8s 名长度硬限制）。
+// 冲突后缀超 63 时收缩 base 预算保住后缀（issue #149：曾直接报错卡死发布）。
 func TestUniqNameTooLong(t *testing.T) {
 	core, _, done := newTestCore(t)
 	defer done()
@@ -409,8 +409,15 @@ func TestUniqNameTooLong(t *testing.T) {
 	if err := core.DB.Create(&store.ServiceEntity{K8sName: long}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.uniqName(long); err == nil || !strings.Contains(err.Error(), "63") {
-		t.Fatalf("expect 63-char limit error, got %v", err)
+	got, err := core.uniqName(long)
+	if err != nil {
+		t.Fatalf("uniqName should shrink base to fit suffix: %v", err)
+	}
+	if len(got) > 63 {
+		t.Fatalf("name exceeds 63: %q (%d)", got, len(got))
+	}
+	if !strings.HasPrefix(got, "oaf-") || !strings.HasSuffix(got, "-2") {
+		t.Fatalf("unexpected shrunk name: %q", got)
 	}
 }
 

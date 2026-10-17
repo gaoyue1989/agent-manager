@@ -18,6 +18,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -35,12 +37,14 @@ class SessionStreamControllerTest {
     private AgentRuntimeService runtimeService;
     private TurnLeaseStore turnLeaseStore;
     private SessionEventStore eventStore;
+    private io.agentmanager.framework.service.SessionUserStore sessionUserStore;
 
     @BeforeEach
     void setUp() {
         runtimeService = mock(AgentRuntimeService.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
         eventStore = mock(SessionEventStore.class);
+        sessionUserStore = mock(io.agentmanager.framework.service.SessionUserStore.class);
 
         when(runtimeService.findPendingConfirm(anyString())).thenReturn(null);
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
@@ -48,10 +52,13 @@ class SessionStreamControllerTest {
         when(eventStore.findLatestStrict(anyString())).thenReturn(null);
         when(eventStore.queryAfter(anyString(), anyString(), anyInt())).thenReturn(Flux.empty());
         when(turnLeaseStore.isHeld(anyString())).thenReturn(false);
+        // 无映射行（null）= 存量会话，归属校验放行
+        when(sessionUserStore.findUserIdBySession(anyString())).thenReturn(null);
 
         var tailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
             Duration.ofMillis(300));
-        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer);
+        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer,
+            sessionUserStore);
     }
 
     // ===== GET /subscribe 测试 =====
@@ -68,7 +75,7 @@ class SessionStreamControllerTest {
 
         when(eventStore.findMaxSeq(sessionId)).thenReturn(5);
 
-        var frames = controller.subscribe(sessionId, 0, "rid-sub")
+        var frames = controller.subscribe(sessionId, null, 0, "rid-sub")
             .collectList().block(Duration.ofSeconds(5));
 
         assertNotNull(frames);
@@ -89,7 +96,7 @@ class SessionStreamControllerTest {
         when(eventStore.findLatestStrict(sessionId)).thenReturn(
             new SessionEventStore.EnvelopedEvent(10, "TEXT_BLOCK_DELTA", "{}", "rid-st1"));
 
-        var result = controller.status(sessionId).getBody();
+        var result = controller.status(sessionId, null).getBody();
         assertEquals("working", result.get("state"));
         assertEquals(10, result.get("latest_event_seq"));
     }
@@ -103,7 +110,7 @@ class SessionStreamControllerTest {
             new SessionEventStore.EnvelopedEvent(20, "AGENT_END", "{}", "rid-st2"));
         when(runtimeService.findPendingConfirm(sessionId)).thenReturn(null);
 
-        var result = controller.status(sessionId).getBody();
+        var result = controller.status(sessionId, null).getBody();
         assertEquals("completed", result.get("state"));
     }
 
@@ -114,7 +121,7 @@ class SessionStreamControllerTest {
         when(eventStore.findMaxSeq(sessionId)).thenReturn(0);
         when(runtimeService.findPendingConfirm(sessionId)).thenReturn(null);
 
-        var result = controller.status(sessionId).getBody();
+        var result = controller.status(sessionId, null).getBody();
         assertEquals("idle", result.get("state"));
     }
 
@@ -128,7 +135,7 @@ class SessionStreamControllerTest {
         when(runtimeService.findPendingConfirm(sessionId)).thenReturn(
             java.util.Map.of("reply_id", "rid-st4", "tools", "[]"));
 
-        var result = controller.status(sessionId).getBody();
+        var result = controller.status(sessionId, null).getBody();
         assertEquals("waiting_confirm", result.get("state"));
     }
 
@@ -149,5 +156,45 @@ class SessionStreamControllerTest {
         String json = AgentEventSseSerializer.payload(tc, null, null);
         assertTrue(!json.contains("\"ui\""), "无 UI 工具不应携带 ui 字段: " + json);
         assertTrue(json.contains("\"toolName\":\"echo\""), "原词表字段保持: " + json);
+    }
+
+    // ===== 归属校验（issue #158） =====
+
+    @Test
+    void statusShouldRejectForeignUser() {
+        when(sessionUserStore.findUserIdBySession("foreign-sid")).thenReturn("alice");
+
+        var resp = controller.status("foreign-sid", "bob");
+
+        assertEquals(404, resp.getStatusCode().value());
+        assertEquals("thread_not_found", resp.getBody().get("error"));
+        verify(runtimeService, never()).findPendingConfirm(anyString());
+    }
+
+    @Test
+    void statusShouldAllowOwner() {
+        when(sessionUserStore.findUserIdBySession("own-sid")).thenReturn("alice");
+        when(eventStore.findLatestStrict("own-sid")).thenReturn(null);
+
+        var resp = controller.status("own-sid", "alice");
+
+        assertEquals(200, resp.getStatusCode().value());
+    }
+
+    @Test
+    void subscribeShouldRejectForeignUser() {
+        when(sessionUserStore.findUserIdBySession("foreign-sid")).thenReturn("alice");
+
+        var err = controller.subscribe("foreign-sid", "bob", 0, null)
+            .map(v -> (Object) v)
+            .last()
+            .onErrorResume(e -> reactor.core.publisher.Mono.just(e))
+            .block(Duration.ofSeconds(2));
+
+        assertTrue(err instanceof org.springframework.web.server.ResponseStatusException,
+            "应返回错误信号: " + err);
+        assertEquals(404, ((org.springframework.web.server.ResponseStatusException) err)
+            .getStatusCode().value());
+        verify(eventStore, never()).queryAfter(anyString(), anyString(), anyInt());
     }
 }

@@ -226,11 +226,12 @@ async function selectSession(sid) {
   const detailEl = document.getElementById('monitorDetail');
   if (!detailEl) return;
   detailEl.innerHTML = '<div class="empty">Loading conversation...</div>';
+  // 归属校验（issue #158）：回放以会话归属者身份读取（监控页跨用户，取列表行 user_id）
+  const session = sessions.find((x) => x.session_id === sid) || {};
   try {
-    const data = await ctx.api.getThreadHistory(sid);
+    const data = await ctx.api.getThreadHistory(sid, session.user_id);
     // 丢弃过期响应：等待期间用户可能已切到别的会话
     if (!ctx || seq !== detailSeq) return;
-    const session = sessions.find((x) => x.session_id === sid) || {};
     detailEl.innerHTML = renderConversation(sid, session, data);
     highlightCode(detailEl);
   } catch (e) {

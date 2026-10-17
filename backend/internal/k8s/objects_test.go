@@ -46,6 +46,22 @@ func TestDeriveAndShortName(t *testing.T) {
 	}
 }
 
+// 派生名总长必须 ≤63（issue #149：前缀 + 63 字符 base 曾拼出 67 字符，超 DNS label 上限）。
+func TestDeriveK8sNameLengthCap(t *testing.T) {
+	long := repeat("z", 100)
+	got := DeriveK8sName(long, "x/y")
+	if len(got) > 63 {
+		t.Fatalf("derived name length %d exceeds 63: %q", len(got), got)
+	}
+	if got != "oaf-"+repeat("z", 59) {
+		t.Fatalf("unexpected truncation: %q", got)
+	}
+	// 非 ASCII 输入 sanitize 后长度收缩，同样满足上限
+	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got) > 63 {
+		t.Fatalf("cjk derive: %q (%d)", got, len(got))
+	}
+}
+
 // testParams 不设 IngressHostSuffix —— 即 path 模式，是历史行为的回归锁基准。
 func testParams() ObjectParams {
 	return ObjectParams{

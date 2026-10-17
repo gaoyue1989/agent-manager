@@ -220,11 +220,18 @@ public class ThreadController {
      * 响应附 {@code hasMore}/{@code nextBeforeId}。
      */
     @GetMapping("/{sessionId}/history")
-    public Map<String, Object> threadHistory(
+    public ResponseEntity<Map<String, Object>> threadHistory(
             @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestParam(value = "includeArchived", required = false, defaultValue = "true") boolean includeArchived,
             @RequestParam(value = "limit", required = false, defaultValue = "" + DEFAULT_HISTORY_LIMIT) int limit,
             @RequestParam(value = "beforeId", required = false) Long beforeId) {
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        // 归属校验（issue #158）：非归属用户 404，不泄露会话存在性
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return threadNotFound(sessionId);
+        }
         // state 只读一次：消息解析与确认卡重建共用同一份快照（避免同请求内重复查库）
         var stateData = agentStateReader.loadStateData(sessionId);
         var result = new LinkedHashMap<String, Object>();
@@ -234,13 +241,26 @@ public class ThreadController {
         // 历史回放与 SSE file_ready 渲染保持一致
         result.put("files", generatedFiles(sessionId));
         putHistoryMessages(result, sessionId, stateData, includeArchived, beforeId, limit);
-        return result;
+        return ResponseEntity.ok(result);
+    }
+
+    /** 归属拒绝的统一 404 响应（与其他端点的 error/message 词表一致） */
+    private ResponseEntity<Map<String, Object>> threadNotFound(String sessionId) {
+        return ResponseEntity.status(404).body(Map.of(
+            "error", "thread_not_found",
+            "message", "Session '" + sessionId + "' not found"));
     }
 
     /** Thread 详情：返回会话元信息 + 历史消息 + pendingConfirm + 产出文件 */
     @GetMapping("/{sessionId}")
-    public Map<String, Object> getThread(@PathVariable String sessionId) {
+    public ResponseEntity<Map<String, Object>> getThread(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return threadNotFound(sessionId);
+        }
         var result = new LinkedHashMap<String, Object>();
         result.put("session_id", sessionId);
         result.put("user_id", sessionUserStore.findUserIdBySession(sessionId));
@@ -273,13 +293,19 @@ public class ThreadController {
         result.put("pendingConfirm", pendingConfirmPayload(sessionId, stateData));
         result.put("files", generatedFiles(sessionId));
         putHistoryMessages(result, sessionId, stateData, true, null, DEFAULT_HISTORY_LIMIT);
-        return result;
+        return ResponseEntity.ok(result);
     }
 
     /** 删除会话：级联清理所有关联数据 */
     @DeleteMapping("/{sessionId}")
-    public ResponseEntity<Map<String, Object>> deleteThread(@PathVariable String sessionId) {
+    public ResponseEntity<Map<String, Object>> deleteThread(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return threadNotFound(sessionId);
+        }
         int totalDeleted = 0;
 
         // 1. agent_state + agent_fs（会话状态与工作区文件）
@@ -326,8 +352,13 @@ public class ThreadController {
     @PatchMapping("/{sessionId}")
     public ResponseEntity<Map<String, Object>> patchThread(
             @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestBody PatchRequest body) {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return threadNotFound(sessionId);
+        }
 
         if (body.title() != null && !body.title().isBlank()) {
             // 将 title 写入 session_user 表的 remark 字段
@@ -364,14 +395,20 @@ public class ThreadController {
 
     /** LLM 调用记录（LLMLogger） */
     @GetMapping("/{sessionId}/llm-calls")
-    public Map<String, Object> llmCalls(@PathVariable String sessionId) {
+    public ResponseEntity<Map<String, Object>> llmCalls(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return threadNotFound(io.agentmanager.framework.util.PathSafe.sanitize(sessionId));
+        }
         var calls = llmLogger.getCalls(sessionId).stream().map(c -> Map.<String, Object>of(
             "call_id", c.callId(),
             "timestamp", c.timestamp(),
             "request", c.request(),
             "response", c.response()
         )).toList();
-        return Map.of("session_id", sessionId, "calls", calls);
+        return ResponseEntity.ok(Map.of("session_id", sessionId, "calls", calls));
     }
 
     /**

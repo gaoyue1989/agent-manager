@@ -20,10 +20,10 @@ test('R1 completed 续传全量回放', async () => {
   const sid = sessionIdFor(`r1-${uniq()}`);
   const s1 = chat({ message: `[E2E:plain]`, userId: U, sessionId: sid });
   await waitTerminal(s1);
-  const st = await status(sid);
+  const st = await status(sid, BASE, U);
   expect(st.state).toBe('completed');
   const latestSeq = Number(st.latest_event_seq ?? 0);
-  const sub = subscribe(sid, 0);
+  const sub = subscribe(sid, 0, BASE, undefined, U);
   await sub.closed;
   seqMonotonic(sub.frames);
   // 回放帧数与事件存储一致（末帧 done 为 Tailer 补发）
@@ -41,14 +41,14 @@ test('R2 working 跨副本断连续传（尾部事件）', async () => {
   await pollUntil(async () => slow.frames, fs => fs.some(f => f.type === 'TEXT_BLOCK_DELTA'), 30_000, 100);
   const cutSeq = Number((slow.frames[slow.frames.length - 1] as Frame & { seq?: number }).seq ?? 0);
   slow.abort();
-  const st = await status(sid, REPLICA_B);
+  const st = await status(sid, REPLICA_B, U);
   expect(st.state).toBe('working'); // 断连不杀任务（租约在 A）
-  const sub = subscribe(sid, cutSeq, REPLICA_B);
+  const sub = subscribe(sid, cutSeq, REPLICA_B, undefined, U);
   await sub.closed;
   expect(sub.frames[sub.frames.length - 1].type).toBe('done'); // B 观测到终态
   const seqs = sub.frames.map(f => (f as Frame & { seq?: number }).seq).filter((s): s is number => s !== undefined);
   for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBeGreaterThanOrEqual(seqs[i - 1]); // seq 无回退
-  await pollUntil(async () => status(sid, REPLICA_B), s => s.state === 'completed', 60_000);
+  await pollUntil(async () => status(sid, REPLICA_B, U), s => s.state === 'completed', 60_000);
 });
 
 test('R3 同会话并发排队 waiting', async () => {
@@ -72,13 +72,13 @@ test('R5 跨副本并发 confirm 互斥', async () => {
   expect(ask.terminal?.type).toBe('permission_ask');
   const tcid = ((ask.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
   const [ra, rb] = await Promise.all([
-    confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], REPLICA_A),
-    confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], REPLICA_B),
+    confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], REPLICA_A, U),
+    confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], REPLICA_B, U),
   ]);
   const statuses = [ra.status, rb.status].sort();
   expect(statuses[0]).toBe(200);
   expect([409, 404]).toContain(statuses[1]); // 另一侧 409（turn_in_progress/confirm_already_consumed）
-  await pollUntil(async () => history(sid), (h) => {
+  await pollUntil(async () => history(sid, BASE, U), (h) => {
     const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
     // 互斥语义 = 工具恰好进入一次终态（success/error 皆可；success 因 H2 同款框架缺陷可能为 error）
     const terminal = tcs.filter(t => t.name === 'submit_application' && (t.state === 'success' || t.state === 'error')).length;
@@ -89,7 +89,7 @@ test('R5 跨副本并发 confirm 互斥', async () => {
 test('R6 跨副本事件完整性对账', async () => {
   const sid = sessionIdFor(`r6-${uniq()}`);
   // B 先建立观察订阅（回放 + 实时追尾至终态）
-  const observer = subscribe(sid, 0, REPLICA_B);
+  const observer = subscribe(sid, 0, REPLICA_B, undefined, U);
   const direct = chat({ message: `[E2E:slow](z,60,40)`, userId: U, sessionId: sid, base: REPLICA_A });
   await waitTerminal(direct);
   // 先钉终态：error 时把错误文本带出来，避免只剩 AGENT_END=0 的哑失败

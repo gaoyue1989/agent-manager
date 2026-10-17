@@ -150,15 +150,16 @@ test('X9 文件交付全链路（write→present→file_ready→下载）', asyn
 });
 
 test('X7 命令失败传播（exit code 经文本返回）', async () => {
+  const uid = U();
   const sid = sessionIdFor(`x7-${uniq()}`);
-  const stream = chat({ message: `[E2E:execute:fail]`, userId: U(), sessionId: sid });
+  const stream = chat({ message: `[E2E:execute:fail]`, userId: uid, sessionId: sid });
   await waitTerminal(stream);
   expect(toolNames(stream.frames)).toContain('execute');
   const results = toolResults(stream.frames);
   expect(String((results[0] as Record<string, unknown>).state ?? '')).toBe('SUCCESS'); // 工具执行完成 ≠ 命令成功
   expect(textOf(stream.frames)).toContain('nonexistent-e2a-dir'); // stderr 可见
   expect(stream.terminal?.type).toBe('done'); // 单命令失败不炸流
-  const h = await history(sid);
+  const h = await history(sid, BASE, uid);
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
   const exe = tcs.find(t => t.name === 'execute');
   expect(String(exe?.output)).toContain('Exit code: 2');

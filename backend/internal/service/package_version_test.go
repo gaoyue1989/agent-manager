@@ -153,18 +153,20 @@ func TestCreateVersionDupVersionWarning(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
 	base := uploadTestPkg(t, c, "")
-	// 直接再上传同 slug+version 的包（绕过 slug 辅助函数限制）
-	dupZip := buildTestZip(map[string]string{"AGENTS.md": testAgentsMD})
+	// 直接再上传同 slug、version=2.0.0 的包（绕过 slug 辅助函数限制）
+	dupZip := buildTestZip(map[string]string{"AGENTS.md": replaceVersion(testAgentsMD, "2.0.0")})
 	if _, err := c.Packages.Upload("dup.zip", bytesReader(dupZip)); err != nil {
 		t.Fatal(err)
 	}
 	rec, warnings, err := c.Packages.CreateVersion(base, VersionRequest{
-		Upserts: []VersionUpsert{{Path: "README.md", Content: "changed"}},
+		// 显式改版本（2.0.0 ≠ base.Version → 不触发 #155 自动 bump）撞 dup 包
+		Upserts: []VersionUpsert{{Path: "README.md", Content: "changed"},
+			{Path: "AGENTS.md", Content: replaceVersion(testAgentsMD, "2.0.0")}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 生成的新版本 slug+version 与 dup 包相同 → 应有重复提示
+	// 显式撞版本 → 应有重复提示
 	found := false
 	for _, w := range warnings {
 		if strings.Contains(w, "already exists") {
@@ -235,4 +237,40 @@ func TestListFilterBySlug(t *testing.T) {
 // replaceVersion 替换 AGENTS.md 中 version 行。
 func replaceVersion(md, v string) string {
 	return strings.Replace(md, "version: 1.0.0", "version: "+v, 1)
+}
+
+// TestCreateVersionAutoBumpVersion issue #155：仅改普通文件（不动 frontmatter version）时
+// 自动 bump patch，避免同 slug@version 重复行；显式改版原则尊重显式值。
+func TestCreateVersionAutoBumpVersion(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	base := uploadTestPkg(t, c, "") // testAgentsMD version=1.0.0
+
+	// 不改 version：自动 1.0.0 → 1.0.1
+	rec, _, err := c.Packages.CreateVersion(base, VersionRequest{
+		Upserts: []VersionUpsert{{Path: "note.md", Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Version != "1.0.1" {
+		t.Fatalf("auto bump: version=%s (want 1.0.1)", rec.Version)
+	}
+	// 新包 AGENTS.md frontmatter 同步为 1.0.1（重写值带引号，合法 YAML、解析语义不变）
+	md, _ := c.Packages.ReadFile(rec, "AGENTS.md")
+	if !strings.Contains(string(md), "1.0.1") {
+		t.Fatalf("AGENTS.md version not rewritten: %s", md)
+	}
+	if _, err := c.Packages.ReadFile(rec, "note.md"); err != nil {
+		t.Fatal("upserted file missing in new package")
+	}
+
+	// 显式改版本：尊重 2.0.0，不再递增
+	rec2, _, err := c.Packages.CreateVersion(base, VersionRequest{
+		Upserts: []VersionUpsert{{Path: "AGENTS.md", Content: replaceVersion(testAgentsMD, "2.0.0")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec2.Version != "2.0.0" {
+		t.Fatalf("explicit version: %s (want 2.0.0)", rec2.Version)
+	}
 }

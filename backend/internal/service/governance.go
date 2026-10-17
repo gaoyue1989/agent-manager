@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -106,6 +107,10 @@ func (c *Core) AdminCreateWorkspace(actor uint, in CreateWorkspaceInput) (*store
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidForm)
 	}
+	// workspaces.name 列 varchar(128)（issue #149：超长输入曾以 500 Data too long 直出）
+	if utf8.RuneCountInString(in.Name) > 128 {
+		return nil, fmt.Errorf("%w: name too long (max 128)", ErrInvalidForm)
+	}
 	if in.OwnerUserID > 0 {
 		if _, err := c.GetUser(in.OwnerUserID); err != nil {
 			return nil, fmt.Errorf("%w: owner user not found", ErrInvalidForm)
@@ -150,15 +155,17 @@ func (c *Core) AdminCreateWorkspace(actor uint, in CreateWorkspaceInput) (*store
 	return w, nil
 }
 
-// PatchWorkspaceInput 更新入参（nil 字段=不变）。
+// PatchWorkspaceInput 更新入参（nil 字段=不变）。OwnerUserID 非 nil 即 owner 转移
+// （issue #157：原实现静默忽略该字段，owner 空间既不能转移也不能删，形成删除死锁）。
 type PatchWorkspaceInput struct {
 	Name        *string                `json:"name"`
 	Description *string                `json:"description"`
 	Status      *string                `json:"status"`
+	OwnerUserID *uint                  `json:"ownerUserId"`
 	Quota       map[string]interface{} `json:"quota"`
 }
 
-// AdminPatchWorkspace 停用/改配额：仅控制台层数据，不影响已运行业务面（原则一）。
+// AdminPatchWorkspace 停用/改配额/转移 owner：仅控制台层数据，不影响已运行业务面（原则一）。
 func (c *Core) AdminPatchWorkspace(id uint, in PatchWorkspaceInput) (*store.Workspace, error) {
 	var w store.Workspace
 	if err := c.DB.First(&w, id).Error; err != nil {
@@ -181,15 +188,70 @@ func (c *Core) AdminPatchWorkspace(id uint, in PatchWorkspaceInput) (*store.Work
 		b, _ := json.Marshal(in.Quota)
 		updates["quota_json"] = string(b)
 	}
-	if len(updates) > 0 {
-		if err := c.DB.Model(&w).Updates(updates).Error; err != nil {
-			return nil, err
+	// owner 转移（issue #157）：workspace.owner_user_id 与 members 角色同事务演进——
+	// 新 owner 建行/提为 owner，原 owner 降为 member（之后可按普通成员移除）
+	transferOwner := in.OwnerUserID != nil && *in.OwnerUserID != w.OwnerUserID
+	oldOwner := w.OwnerUserID
+	if transferOwner {
+		newOwner := *in.OwnerUserID
+		if newOwner == 0 {
+			return nil, fmt.Errorf("%w: ownerUserId must be a valid user id", ErrInvalidForm)
 		}
+		if _, err := c.GetUser(newOwner); err != nil {
+			return nil, fmt.Errorf("%w: owner user not found", ErrInvalidForm)
+		}
+	}
+	if len(updates) == 0 && !transferOwner {
+		return &w, nil
+	}
+	err := c.DB.Transaction(func(tx *gorm.DB) error {
+		if len(updates) > 0 {
+			if err := tx.Model(&w).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		if transferOwner {
+			newOwner := *in.OwnerUserID
+			if err := tx.Model(&w).Update("owner_user_id", newOwner).Error; err != nil {
+				return err
+			}
+			// 原 owner 成员行降级为 member（无成员行的空间仅头指针变化）。
+			// 注意用事务前捕获的 oldOwner：上方 Update 会把 w.OwnerUserID 回写为新值
+			if err := tx.Model(&store.WorkspaceMember{}).
+				Where("workspace_id = ? AND user_id = ? AND role = ?", id, oldOwner, "owner").
+				Update("role", "member").Error; err != nil {
+				return err
+			}
+			// 新 owner：已有成员行提为 owner，否则补建
+			res := tx.Model(&store.WorkspaceMember{}).
+				Where("workspace_id = ? AND user_id = ?", id, newOwner).
+				Update("role", "owner")
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				if err := tx.Create(&store.WorkspaceMember{WorkspaceID: id,
+					UserID: newOwner, Role: "owner"}).Error; err != nil {
+					return err
+				}
+			}
+			w.OwnerUserID = newOwner
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if transferOwner {
+		c.recordAudit("workspace.transfer_owner", w.Slug, w.OwnerUserID, map[string]interface{}{
+			"newOwnerUserId": *in.OwnerUserID, "oldOwnerUserId": oldOwner,
+		})
 	}
 	return &w, nil
 }
 
-// AdminDeleteWorkspace 仅空空间可删（无成员无 Agent → 400 workspace_not_empty）。
+// AdminDeleteWorkspace 删除空间：无 Agent 且成员仅剩 owner（或无成员）可删；
+// 仅剩 owner 时级联清理成员关系（issue #157：owner 保护 + 删除保护曾构成删除死锁）。
 func (c *Core) AdminDeleteWorkspace(id uint) error {
 	var w store.Workspace
 	if err := c.DB.First(&w, id).Error; err != nil {
@@ -205,10 +267,18 @@ func (c *Core) AdminDeleteWorkspace(id uint) error {
 	if err := c.DB.Model(&store.ServiceEntity{}).Where("workspace_id = ?", id).Count(&agents).Error; err != nil {
 		return err
 	}
-	if members > 0 || agents > 0 {
+	if agents > 0 || members > 1 {
 		return fmt.Errorf("%w: workspace_not_empty", ErrConflict)
 	}
-	return c.DB.Delete(&w).Error
+	return c.DB.Transaction(func(tx *gorm.DB) error {
+		// 级联清掉仅剩的 owner 成员行（members==1）；0 成员时无行可删
+		if members > 0 {
+			if err := tx.Where("workspace_id = ?", id).Delete(&store.WorkspaceMember{}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Delete(&w).Error
+	})
 }
 
 // ---- 用户管理 ----
@@ -217,6 +287,10 @@ func (c *Core) AdminDeleteWorkspace(id uint) error {
 func (c *Core) AdminCreateUser(actor uint, username, password, displayName, role string) (*store.User, error) {
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
 		return nil, fmt.Errorf("%w: username and password are required", ErrInvalidForm)
+	}
+	// users.username 列 varchar(64)（issue #149：超长输入曾以 500 Data too long 直出）
+	if utf8.RuneCountInString(username) > 64 {
+		return nil, fmt.Errorf("%w: username too long (max 64)", ErrInvalidForm)
 	}
 	if role != "admin" && role != "user" {
 		role = "user"

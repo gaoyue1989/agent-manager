@@ -17,10 +17,13 @@ export default function PackageDetailPage() {
   const id = Number(params.id);
 
   const [detail, setDetail] = useState<PackageDetail | null>(null);
-  const [sel, setSel] = useState<string>("AGENTS.md");
+  const [sel, setSel] = useState<string>("");
   const [file, setFile] = useState<PackageFileContent | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  // 文件读取错误单独成通道（issue #152）：此前覆盖包级 msg，
+  // 不存在的包会显示「读取文件失败: record not found」误导排查方向
+  const [fileMsg, setFileMsg] = useState("");
 
   // 版本历史（同 slug）
   const [versions, setVersions] = useState<PackageRec[]>([]);
@@ -29,15 +32,27 @@ export default function PackageDetailPage() {
   const [services, setServices] = useState<ServiceRec[]>([]);
   const [servicesErr, setServicesErr] = useState(false);
 
+  // 非法 ID 直接错误态（issue #152：NaN/0/负数曾永久「加载中…」）
+  const invalidId = !Number.isInteger(id) || id <= 0;
+
   const load = useCallback(async () => {
     try {
       const d = await api.getPackage(id);
       setDetail(d);
+      // 默认选中树中第一个文件（issue #152：硬编码 AGENTS.md，无该文件的包必然 404）
+      const first = (function pick(es: FileEntry[]): string {
+        for (const e of es) {
+          if (e.isDir) { const f = pick(e.children || []); if (f) return f; }
+          else return e.path;
+        }
+        return "";
+      })(d.tree || []);
+      setSel(first);
       // 版本历史与引用服务并行加载（失败不阻塞主视图，但给出提示）
       api.listPackages("", d.package.slug).then(setVersions).catch(() => setVersionsErr(true));
       api.listServices("", "", id).then(setServices).catch(() => setServicesErr(true));
     } catch (e: any) {
-      setMsg(`加载失败: ${e.message}`);
+      setMsg(`包加载失败: ${e.message}`);
     }
   }, [id]);
 
@@ -48,14 +63,15 @@ export default function PackageDetailPage() {
     let cancelled = false;
     setFileLoading(true);
     api.getPackageFile(id, sel)
-      .then((f) => { if (!cancelled) { setFile(f); setMsg(""); } })
-      .catch((e: any) => { if (!cancelled) setFile(null); if (!cancelled) setMsg(`读取文件失败: ${e.message}`); })
+      .then((f) => { if (!cancelled) { setFile(f); setFileMsg(""); } })
+      .catch((e: any) => { if (!cancelled) { setFile(null); setFileMsg(`读取文件失败: ${e.message}`); } })
       .finally(() => { if (!cancelled) setFileLoading(false); });
     return () => { cancelled = true; };
   }, [id, sel]);
 
-  if (msg && !detail) return <p className="text-gray-500">{msg || "加载中…"}</p>;
-  if (!detail) return <p className="text-gray-500">加载中…</p>;
+  if (invalidId) return <p className="text-sm text-gray-500">包不存在：非法 ID（{String(params.id)}）</p>;
+  if (msg && !detail) return <p className="text-sm text-gray-500">{msg || "加载中…"}</p>;
+  if (!detail) return <p className="text-sm text-gray-500">加载中…</p>;
 
   const pkg = detail.package;
   const tree: FileEntry[] = detail.tree || [];
@@ -99,13 +115,14 @@ export default function PackageDetailPage() {
         <div className="text-xs text-gray-400">共 {pkg.fileCount} 个文件 · checksum: {pkg.checksum ? `${pkg.checksum.slice(0, 16)}…` : "—"}</div>
       </section>
 
-        {/* 文件树 + 预览器（.md/.markdown 渲染，与后端 IsTextContent 白名单一致） */}
-      <section className="grid grid-cols-[260px_1fr] gap-4">
+        {/* 文件树 + 预览器（.md/.markdown 渲染，与后端 IsTextContent 白名单一致）；窄屏单列堆叠（issue #154） */}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[260px_1fr]">
         <div className="bg-white border rounded p-3 max-h-[480px] overflow-auto">
           <h2 className="font-medium mb-2 text-sm">文件</h2>
           <FileTreeView entries={tree} selected={sel} onSelect={setSel} />
         </div>
         <div className="bg-white border rounded p-3 max-h-[480px] overflow-auto" data-testid="pkg-file-viewer">
+          {fileMsg && <div className="mb-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{fileMsg}</div>}
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm font-medium break-all">{sel}</span>
             {file?.binary && (

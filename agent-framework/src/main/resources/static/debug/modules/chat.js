@@ -497,8 +497,10 @@ async function selectThread(sessionId) {
 
 /** ★ durable-sse-plan §4.3：页面刷新后检测 turn 状态，自动续传 */
 async function tryResumeSSE(sessionId) {
+  // 会话端点按 X-User-Id 校验归属（issue #158），调试页带选中 userId
+  const uid = ctx.state.getState('ui.userId') || 'debug-user';
   try {
-    const status = await ctx.api.getStatus(sessionId);
+    const status = await ctx.api.getStatus(sessionId, uid);
     // ★ interrupted 也走订阅（与 startReconnect 的分支保持一致）：观察者路径会先回放已落库的
     // 部分输出，再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
     // 若落入不订阅的分支，刷新/切换线程后既看不到中断提示，服务端的 interrupted 帧
@@ -537,6 +539,7 @@ async function tryResumeSSE(sessionId) {
       activeSubHandle = ctx.api.subscribe(sessionId, {
         afterSeq: lastEventId,
         replyId: currentReplyId,
+        userId: uid,
         onEvent: (evt) => {
           reconnectAttempts = 0;
           if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
@@ -648,7 +651,8 @@ async function loadThreadHistory(sessionId) {
   teardownAllAppHosts();
   pendingToolCalls = {};
   try {
-    const data = await ctx.api.getThreadHistory(sessionId);
+    const data = await ctx.api.getThreadHistory(sessionId,
+      ctx.state.getState('ui.userId') || 'debug-user');
     const msgs = data.messages || [];
     messagesEl.innerHTML = '';
     if (msgs.length === 0) {
@@ -1528,6 +1532,7 @@ function consumeConfirmStream(sid, results, render) {
     }
 
     ctx.api.confirmStream(sid, results, {
+      userId: ctx.state.getState('ui.userId') || 'debug-user',
       onEvent: (data) => {
         if (render) handleEvent(data);
         if (data.type === 'error') finish(new Error(data.error || 'confirm-stream error'));
@@ -2022,7 +2027,9 @@ async function bindSessionModel(sid, modelId) {
   try {
     const resp = await fetch(ctx.api.BASE + '/threads/' + encodeURIComponent(sid), {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign({ 'Content-Type': 'application/json' },
+        // 归属校验（issue #158）：带选中 userId（网关场景由 X-User-Id 注入，直连场景取输入框）
+        { 'X-User-Id': ctx.state.getState('ui.userId') || 'debug-user' }),
       body: JSON.stringify({ model: modelId })
     });
     if (!resp.ok) {
@@ -2097,7 +2104,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     console.log(`[durable-sse] reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}), afterSeq=${lastEventId}`);
     setTimeout(() => {
       // 先查状态，确认 turn 是否仍在执行
-      ctx.api.getStatus(sid).then(status => {
+      ctx.api.getStatus(sid, ctx.state.getState('ui.userId') || 'debug-user').then(status => {
         // ★ interrupted 也走订阅：观察者路径会先回放已落库的部分输出（用户能看到确实产出的内容），
         // 再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
         // 若落入下面的 else 分支，用户只会看到一个没有任何内容的 AGENT_END，无从得知执行已中断。
@@ -2125,6 +2132,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     activeSubHandle = ctx.api.subscribe(sessionId, {
       afterSeq,
       replyId,
+      userId: ctx.state.getState('ui.userId') || 'debug-user',
       onEvent: (evt) => {
         reconnectAttempts = 0; // 收到事件说明连接正常，重置计数
         hideWaiting();
@@ -2146,6 +2154,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     activeSubHandle = ctx.api.subscribe(sessionId, {
       afterSeq,
       replyId,
+      userId: ctx.state.getState('ui.userId') || 'debug-user',
       onEvent: (evt) => {
         hideWaiting();
         handleEvent(evt);
@@ -2339,7 +2348,7 @@ async function showLlmCalls() {
   const sid = currentSessionId();
   if (!sid) return;
   try {
-    const data = await ctx.api.getLlmCalls(sid);
+    const data = await ctx.api.getLlmCalls(sid, ctx.state.getState('ui.userId') || 'debug-user');
     const calls = data.calls || [];
     let html = '<h2>LLM Calls — ' + ctx.utils.esc(sid) + '</h2>';
     if (calls.length === 0) {

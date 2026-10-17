@@ -64,7 +64,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | `/api/v1/auth/me` | JWT（Bearer 或 `oaf_session` cookie） | 401 |
 | `/api/v1/auth/introspect` | 数据面专用：`Authorization: Bearer <JWT>` 或 `Bearer ak-…`（API Key） | 按无凭据语义返回 401/403 |
 | `/api/v1/console/*` | JWT（任意角色）+ 空间成员裁决 | 401；无成员关系的空间 404 |
-| `/api/v1/admin/*` | JWT（**admin 角色**）或 `AUTH_TOKEN` | 401；user 角色访问 403 |
+| `/api/v1/admin/*` | JWT（**admin 角色**，按 DB 实时角色/状态裁决）或 `AUTH_TOKEN` | 401；user 角色访问 403；admin 被降级/禁用后**旧 token 即时 403**（删号 401，issue #148） |
 | `/api/v1/{services,packages,images,platform-config}` | `AUTH_TOKEN`（存量面，语义不变） | **当前环境未配置 AUTH_TOKEN → 匿名放行**（现状行为，配置后变 401） |
 | `/mcp` | 同上 | 当前匿名放行 |
 | `/agent/{short}/*`（数据面） | 网关三态 `ROUTER_AUTH_MODE`（见下） | 当前 `off` → 不鉴权 |
@@ -201,6 +201,8 @@ curl -s -X POST $BASE/console/workspaces/<ws-id>/api-keys -H "Authorization: Bea
 - 错误密码 401、禁用账号 403、匿名 `/auth/me` 401（统一文案不泄露账号是否存在）。
 - user 访问非成员空间 → 404（不是 403，避免空间存在性泄露）；user 直访 admin 面 → 403。
 - 重复用户名 → **400**（`duplicate_username`；曾出现 500，已修复）。注意状态码语义分组：表单/重名类错误统一 400，资源冲突类（重复加入成员、owner 移除/降级保护、删除保护、跨空间 bind）统一 409，归属缺失 404。
+- 工作空间 owner 管理（issue #157 修复后）：`PATCH /admin/workspaces/:id {"ownerUserId":<id>}` 即 owner 转移（原 owner 自动降为 member、可再移除；新 owner 无成员行则补建）；删除规则为「无 Agent 且成员 ≤1」——仅剩 owner 的空间可删（级联清成员关系），owner 创建的空间不再死锁。
+- 表单长度上限（issue #149）：用户名 ≤64、空间名 ≤128、Agent 展示名 ≤128（slug 化后 ≤59）、模型连接名 ≤128 / baseUrl ≤512、MCP 连接器名 ≤64；超限一律 400，不再出现 500 `Data too long`。模型连接 baseUrl 必须是含主机的 http(s) URL（`http://` 裸协议 400，issue #156）。
 - admin 对自己创建的空间是隐式成员（无需邀请即可访问 console）。
 - 重复邀请同一成员 → 拒绝（曾出现 500，已修复）。
 - default 空间存量服务 bind 到业务空间成功；再次 bind 或跨空间冲突 → 409。

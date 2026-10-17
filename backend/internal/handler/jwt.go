@@ -2,11 +2,14 @@
 package handler
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"agent-manager/backend/internal/authtoken"
+	"agent-manager/backend/internal/service"
 )
 
 const sessionCookieName = "oaf_session"
@@ -55,8 +58,10 @@ func JWTAuth(secret string) gin.HandlerFunc {
 }
 
 // RequireAdmin admin 面鉴权：先试 AUTH_TOKEN Bearer（脚本/release-agent 兼容，
-// 命中直接放行），否则 JWT 且 role=admin，否则 401/403。
-func RequireAdmin(authToken, secret string) gin.HandlerFunc {
+// 命中直接放行），否则 JWT 且用户当前 role=admin/status=active，否则 401/403。
+// role/status 以 DB 实时值为准（issue #148：JWT 内嵌 role 有效期 12h，
+// 降级/禁用后旧 token 必须立即失效，不能只看 claims）。
+func RequireAdmin(authToken, secret string, core *service.Core) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if authToken != "" && c.GetHeader("Authorization") == "Bearer "+authToken {
 			c.Set("uid", uint(0))
@@ -71,11 +76,28 @@ func RequireAdmin(authToken, secret string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if claims.Role != "admin" {
-			Fail(c, 403, "forbidden: admin role required")
+		u, err := core.GetUser(claims.UID)
+		if err != nil {
+			if errors.Is(err, service.ErrNotFound) {
+				Fail(c, http.StatusUnauthorized, "user not found")
+			} else {
+				Fail(c, http.StatusInternalServerError, "auth user lookup failed")
+			}
 			c.Abort()
 			return
 		}
+		if u.Status == "disabled" {
+			Fail(c, http.StatusForbidden, "user is disabled")
+			c.Abort()
+			return
+		}
+		if u.Role != "admin" {
+			Fail(c, http.StatusForbidden, "forbidden: admin role required")
+			c.Abort()
+			return
+		}
+		claims.Role = u.Role
+		claims.Sub = u.Username
 		c.Set("uid", claims.UID)
 		c.Set("role", claims.Role)
 		c.Set("username", claims.Sub)

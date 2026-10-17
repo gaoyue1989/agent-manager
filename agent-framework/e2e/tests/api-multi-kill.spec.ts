@@ -68,15 +68,15 @@ test('R4 kill 执行副本 → 接管 interrupted', async ({}, testInfo) => {
   }
   const sid = sessionIdFor(`r4-${uniq()}`);
   const slow = chat({ message: `[E2E:slow](x,1500,12)`, userId: U, sessionId: sid, base: REPLICA_A, timeoutMs: 30_000 });
-  await pollUntil(async () => status(sid, REPLICA_B), s => s.state === 'working', 30_000);
+  await pollUntil(async () => status(sid, REPLICA_B, U), s => s.state === 'working', 30_000);
   process.kill(pid, 'SIGKILL');
   // 接管判定链：kill → 租约到期（TTL 15s/续期 5s，最坏 kill+15s）→ B 侧 tail 判定 interrupted；
   // 预算放宽到 60s 吸收慢节点（用例总超时 180s 足够），超时则带双侧证据抛出（见 catch）
   let st: Record<string, unknown>;
   try {
-    st = await pollUntil(async () => status(sid, REPLICA_B), s => s.state === 'interrupted', 60_000, 1000);
+    st = await pollUntil(async () => status(sid, REPLICA_B, U), s => s.state === 'interrupted', 60_000, 1000);
   } catch (e) {
-    const [aStatus, bStatus] = await Promise.all([status(sid, REPLICA_A), status(sid, REPLICA_B)]);
+    const [aStatus, bStatus] = await Promise.all([status(sid, REPLICA_A, U), status(sid, REPLICA_B, U)]);
     throw new Error(
       `接管超时证据：pidAlive(A)=${livePid() !== null} status(A)=${JSON.stringify(aStatus)} ` +
       `status(B)=${JSON.stringify(bStatus)} 原始错误=${(e as Error).message}`,

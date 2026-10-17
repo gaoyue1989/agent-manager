@@ -42,6 +42,12 @@ UNVER=$(req POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"uv-$TS\",\"modelId\":\"m\",\"baseUrl\":\"http://x.invalid/v1\",\"apiKey\":\"k\"}" "" "$TOKEN" | jqr "['data']['id']")
 UVFORM=$(echo "$FORM_TPL" | sed "s/NAME/name-$TS/; s/CID/$UNVER/")
 assert_eq "未验证连接 400" "$(code POST /console/workspaces/$WS/agents "$UVFORM" "" "$TOKEN")" "400"
+NODESC=$(echo "$FORM_TPL" | sed "s/NAME/name-$TS/; s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['description']='';print(json.dumps(d))")
+assert_eq "空描述 400（#150，原 502 invalid AGENTS.md）" "$(code POST /console/workspaces/$WS/agents "$NODESC" "" "$TOKEN")" "400"
+LONGNAME=$(echo "$FORM_TPL" | sed "s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['name']='a'*200;print(json.dumps(d))")
+assert_eq "200 字符名称 400（#149，原 502 Data too long）" "$(code POST /console/workspaces/$WS/agents "$LONGNAME" "" "$TOKEN")" "400"
+SLUG63=$(echo "$FORM_TPL" | sed "s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['name']='b'*63;print(json.dumps(d))")
+assert_eq "slug 63 字符名称 400（#149，oaf- 前缀预算 59）" "$(code POST /console/workspaces/$WS/agents "$SLUG63" "" "$TOKEN")" "400"
 
 # ---- preview-name：确定性 + 重名预检（与创建同名——agentKey 是名字的派生）----
 NAME="部署验证-$TS"

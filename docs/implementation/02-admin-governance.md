@@ -55,10 +55,17 @@ GET   /api/v1/admin/users
 POST  /api/v1/admin/users            {username, password, displayName?, role}
   → 201；密码 bcrypt；username 冲突 400 duplicate_username
 PATCH /api/v1/admin/users/:id        {role?, status?, password?}
-  → 改密=重置 bcrypt；禁用仅挡 login 与 console JWT 新请求（已发 token 12h 内有效，M0 取舍）
+  → 改密=重置 bcrypt；禁用/降级即时撤销已发 JWT（issue #148）：admin 面按 DB 实时
+    role/status 裁决（403 user is disabled / 403 admin role required）、删号 401，
+    console 面 resolveWorkspace 与 /auth/introspect（数据面）同口径
 POST  /api/v1/admin/workspaces/:id/members     {userId, role}        // 加入成员
 PATCH /api/v1/admin/workspaces/:id/members/:uid {role}               // 改角色
-DELETE /api/v1/admin/workspaces/:id/members/:uid                    // 移除（owner 不可移除，400）
+DELETE /api/v1/admin/workspaces/:id/members/:uid                    // 移除（owner 行不可移除，409）
+PATCH /api/v1/admin/workspaces/:id         {ownerUserId}             // owner 转移（issue #157）：
+  → 同事务迁移 members 角色（新 owner 建行/提 owner，原 owner 降 member 可移除）；
+    ownerUserId=0/用户不存在 400
+DELETE /api/v1/admin/workspaces/:id   // 删除保护：有 Agent 或成员>1 → 409 workspace_not_empty；
+    仅剩 owner（或无成员）可删并级联清理成员关系（#157 死锁解除）
 ```
 
 ### 2.4 审计（一期聚合视图，不建新表）

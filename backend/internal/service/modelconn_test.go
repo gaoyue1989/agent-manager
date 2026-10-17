@@ -391,3 +391,52 @@ func joinJSONMaps(ms []map[string]interface{}) string {
 
 // safeMutex 测试互斥（map 并发保护）。
 func safeMutex() *sync.Mutex { return &sync.Mutex{} }
+
+// TestModelConnBaseURLHostRequired issue #156："http://"/"https://" 无主机值必须 400，
+// 不再漏过校验后于测试阶段报 no Host in request URL。
+func TestModelConnBaseURLHostRequired(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000bbb2", "URL空间")
+	for _, bad := range []string{"http://", "https://", "http:///path", "not-a-url", "ftp://x"} {
+		if _, err := c.CreateModelConnection(ws.ID, CreateModelConnInput{
+			Name: "bad-" + bad, ModelID: "m", BaseURL: bad}); err == nil {
+			t.Fatalf("baseUrl %q should be rejected", bad)
+		}
+	}
+	// PATCH 路径同样拦截
+	v, err := c.CreateModelConnection(ws.ID, CreateModelConnInput{
+		Name: "ok", ModelID: "m", BaseURL: "https://api.x/v1"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	hostless := "http://"
+	if _, err := c.UpdateModelConnection(ws.ID, v.ID, PatchModelConnInput{BaseURL: &hostless}); err == nil {
+		t.Fatal("patch to hostless URL should be rejected")
+	}
+	// 合法含主机 URL 通过
+	if _, err := c.CreateModelConnection(ws.ID, CreateModelConnInput{
+		Name: "ok2", ModelID: "m", BaseURL: "http://192.168.1.10:8000/v1"}); err != nil {
+		t.Fatalf("valid host URL rejected: %v", err)
+	}
+}
+
+// TestModelConnFieldLengthCaps issue #149：超长字段 400 而非 500 Data too long。
+func TestModelConnFieldLengthCaps(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000ccc3", "长度空间")
+	if _, err := c.CreateModelConnection(ws.ID, CreateModelConnInput{
+		Name: strings.Repeat("x", 200), ModelID: "m", BaseURL: "https://a/v1"}); err == nil ||
+		!strings.Contains(err.Error(), "name too long") {
+		t.Fatalf("long name: %v", err)
+	}
+	if _, err := c.CreateModelConnection(ws.ID, CreateModelConnInput{
+		Name: "ok", ModelID: strings.Repeat("m", 200), BaseURL: "https://a/v1"}); err == nil {
+		t.Fatal("long modelId should fail")
+	}
+	if _, err := c.CreateModelConnection(ws.ID, CreateModelConnInput{
+		Name: "ok3", ModelID: "m", BaseURL: "https://a/" + strings.Repeat("p", 600)}); err == nil {
+		t.Fatal("long baseUrl should fail")
+	}
+}

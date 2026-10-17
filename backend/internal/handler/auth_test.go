@@ -93,6 +93,108 @@ func TestAuthLoginBranches(t *testing.T) {
 	}
 }
 
+// TestRequireAdminRevocation 降级/禁用/删号后旧 JWT 立即失效（issue #148）：
+// RequireAdmin 以 DB 实时 role/status 裁决，不再信任 token 内嵌 claims。
+func TestRequireAdminRevocation(t *testing.T) {
+	r, core, _, done := newTestServer(t)
+	defer done()
+	if err := core.DB.Create(&store.User{Username: "ex-admin", PasswordHash: mustHash("p"),
+		Role: "admin", Status: "active"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	w, out := doJSON(t, r, http.MethodPost, "/api/v1/auth/login",
+		map[string]string{"username": "ex-admin", "password": "p"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	token := out["data"].(map[string]interface{})["token"].(string)
+	adminGet := func() int {
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/admin/workspaces", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		return doCode(t, r, req)
+	}
+	if code := adminGet(); code != http.StatusOK {
+		t.Fatalf("fresh admin token: %d", code)
+	}
+
+	// 降级 role=user → 同一 token 立即 403
+	if err := core.DB.Model(&store.User{}).Where("username = ?", "ex-admin").
+		Update("role", "user").Error; err != nil {
+		t.Fatal(err)
+	}
+	if code := adminGet(); code != http.StatusForbidden {
+		t.Fatalf("demoted admin old token: %d (want 403)", code)
+	}
+
+	// 重新提权后再禁用 → 同一 token 立即 403（非 401，语义=身份仍在但被停用）
+	if err := core.DB.Model(&store.User{}).Where("username = ?", "ex-admin").
+		Updates(map[string]interface{}{"role": "admin"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if code := adminGet(); code != http.StatusOK {
+		t.Fatalf("re-promoted: %d", code)
+	}
+	if err := core.DB.Model(&store.User{}).Where("username = ?", "ex-admin").
+		Update("status", "disabled").Error; err != nil {
+		t.Fatal(err)
+	}
+	if code := adminGet(); code != http.StatusForbidden {
+		t.Fatalf("disabled admin old token: %d (want 403)", code)
+	}
+
+	// 删号 → 401
+	if err := core.DB.Where("username = ?", "ex-admin").Delete(&store.User{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if code := adminGet(); code != http.StatusUnauthorized {
+		t.Fatalf("deleted admin old token: %d (want 401)", code)
+	}
+
+	// AUTH_TOKEN 通道不受影响（uid=0 无 DB 用户）
+	r2, _, _, done2 := newTestServerWithToken(t, "tok-1")
+	defer done2()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/admin/workspaces", nil)
+	req.Header.Set("Authorization", "Bearer tok-1")
+	if code := doCode(t, r2, req); code != http.StatusOK {
+		t.Fatalf("auth token channel broken: %d", code)
+	}
+}
+
+// TestConsoleDisabledUserRejected console 面 resolveWorkspace 对禁用用户 403（issue #148 同口径）。
+func TestConsoleDisabledUserRejected(t *testing.T) {
+	r, core, _, done := newTestServer(t)
+	defer done()
+	u := store.User{Username: "dev", PasswordHash: mustHash("p"), Role: "user", Status: "active"}
+	if err := core.DB.Create(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+	ws := store.Workspace{Slug: "ws-bbbb0001", Name: "dev-ws", Status: "active", QuotaJSON: "{}"}
+	if err := core.DB.Create(&ws).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := core.DB.Create(&store.WorkspaceMember{WorkspaceID: ws.ID, UserID: u.ID, Role: "owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	w, out := doJSON(t, r, http.MethodPost, "/api/v1/auth/login",
+		map[string]string{"username": "dev", "password": "p"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	token := out["data"].(map[string]interface{})["token"].(string)
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/console/workspaces/me/summary", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if code := doCode(t, r, req); code != http.StatusOK {
+		t.Fatalf("active user console: %d", code)
+	}
+	if err := core.DB.Model(&store.User{}).Where("id = ?", u.ID).
+		Update("status", "disabled").Error; err != nil {
+		t.Fatal(err)
+	}
+	if code := doCode(t, r, req); code != http.StatusForbidden {
+		t.Fatalf("disabled user console old token: %d (want 403)", code)
+	}
+}
+
 // TestAuthRouterLayering AUTH_TOKEN 与 JWT 并存时的分层放行矩阵（M0 §2.5）：
 //
 //	/auth/login            匿名 200（不被 AUTH_TOKEN 拦）

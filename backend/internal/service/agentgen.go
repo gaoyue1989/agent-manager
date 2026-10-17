@@ -11,8 +11,11 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -571,13 +574,23 @@ func (f *AgentForm) remoteAuthFor(endpoint string) string {
 }
 
 // CreateAgent 创建并发布（M3 §2.2）：生成包 v1 → core.Publish → 下发登记 pending。
-// 事务边界：包登记成功 → Publish 失败时包保留（孤儿包无害，可删）。
+// 失败语义（issue #149/#150/#151）：表单校验前置（400 而非发布后的 502）；
+// 包登记成功后的任何失败回删刚生成的包（不留孤儿数据）。
 func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.ServiceEntity, *store.OafPackage, error) {
 	if form.Mode == "" {
 		form.Mode = "harness"
 	}
 	if strings.TrimSpace(form.Name) == "" {
 		return nil, nil, fmt.Errorf("%w: name is required", ErrInvalidForm)
+	}
+	// 展示名按 services.display_name 列容量校验（128），中文等非 slug 字符不受
+	// agentKey 59 字符预算约束（slugify 后兜底 md5 名）
+	if utf8.RuneCountInString(strings.TrimSpace(form.Name)) > 128 {
+		return nil, nil, fmt.Errorf("%w: name too long (max 128)", ErrInvalidForm)
+	}
+	if strings.TrimSpace(form.Description) == "" {
+		// OAF 契约必填字段前置校验（issue #150：留空曾经发布链路报 502）
+		return nil, nil, fmt.Errorf("%w: description is required", ErrInvalidForm)
 	}
 	if strings.TrimSpace(form.Prompt) == "" {
 		return nil, nil, fmt.Errorf("%w: prompt is required", ErrInvalidForm)
@@ -589,8 +602,12 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 	if err != nil {
 		return nil, nil, err
 	}
-	// agentKey 派生（决议 5）：与 k8s short 名同源 slugify；空间内包名唯一校验
+	// agentKey 派生（决议 5）：与 k8s short 名同源 slugify；k8s 名 = "oaf-" + agentKey，
+	// 总长须 ≤63 → agentKey ≤59（issue #149：63 字符 key 曾拼出 67 字符 k8s 名报 1406）
 	agentKey := SlugifyAgentKey(form.Name)
+	if len(agentKey) > 59 {
+		return nil, nil, fmt.Errorf("%w: name too long (max 59 characters after slugify)", ErrInvalidForm)
+	}
 	var cnt int64
 	if err := c.DB.Model(&store.OafPackage{}).Where("slug = ? AND workspace_id = ?",
 		platformVendorKey+"/"+agentKey, workspaceID).Count(&cnt).Error; err != nil {
@@ -608,8 +625,15 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 	if err != nil {
 		return nil, nil, err
 	}
+	// 发布失败回删刚生成的包（DB 行 + PVC 文件；删除失败仅告警——孤儿包可手工清理）
+	cleanupPkg := func() {
+		if delErr := c.Packages.Delete(pkg.ID); delErr != nil {
+			log.Printf("[agentgen] cleanup package %d after failed publish: %v", pkg.ID, delErr)
+		}
+	}
 	env, secretKeys, err := c.buildPublishEnv(workspaceID, def, form)
 	if err != nil {
+		cleanupPkg()
 		return nil, nil, err
 	}
 	image := form.Image
@@ -625,7 +649,8 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 		K8sNameBase: agentKey, // 决议 5：k8s 名与 agentKey 同源（中文名 sanitize 后为兜底名）
 	})
 	if err != nil {
-		return nil, pkg, err // 包保留（孤儿包无害），502 语义由 handler 层包装
+		cleanupPkg()
+		return nil, nil, err
 	}
 	// 下发登记：全部勾选连接 pending（running 后 OnServiceRunning 回调逐条 deliver）
 	if err := c.registerDeliveries(conns, svc.ID); err != nil {
@@ -686,16 +711,27 @@ func mustRewriteVersion(agentsMD []byte, version string) string {
 	return out
 }
 
-// rewriteAgentsMDVersion 替换 frontmatter version 行（导入派生用，正文不动）。
+// rewriteAgentsMDVersion 替换 frontmatter 的 version 行（导入派生/包编辑器自动递增用，
+// 正文不动）。只扫首个 frontmatter 段（避免误伤正文中的 version: 行），值兼容
+// 引号/无引号两种形态——旧实现 SplitN("---") 重组会丢开界符、且只认带引号的
+// version（testAgentsMD 等无引号包会静默不替换，issue #155 排障时发现）。
 func rewriteAgentsMDVersion(agentsMD []byte, version string) (string, error) {
 	s := string(agentsMD)
-	parts := strings.SplitN(s, "---", 3)
-	if len(parts) < 3 {
-		return s, fmt.Errorf("invalid AGENTS.md")
+	const open = "---\n"
+	if !strings.HasPrefix(s, open) {
+		return s, fmt.Errorf("invalid AGENTS.md: missing YAML frontmatter")
 	}
-	re := regexp.MustCompile(`(?m)^version:\s*".*?"\s*$`)
-	head := re.ReplaceAllString(parts[1], fmt.Sprintf("version: %q", version))
-	return head + "---" + parts[2], nil
+	headEnd := strings.Index(s[len(open):], "\n---")
+	if headEnd < 0 {
+		return s, fmt.Errorf("invalid AGENTS.md: unterminated YAML frontmatter")
+	}
+	head := s[:len(open)+headEnd]
+	re := regexp.MustCompile(`(?m)^version:\s*(?:"[^"]*"|'[^']*'|\S+)\s*$`)
+	if !re.MatchString(head) {
+		return s, fmt.Errorf("invalid AGENTS.md: version line not found")
+	}
+	out := re.ReplaceAllString(head, "version: "+strconv.Quote(version))
+	return out + s[len(open)+headEnd:], nil
 }
 
 // EditFormView 编辑页预填体（M3 §2.7）。

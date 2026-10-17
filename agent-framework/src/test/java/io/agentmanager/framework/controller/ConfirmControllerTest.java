@@ -246,7 +246,7 @@ class ConfirmControllerTest {
         doThrow(new AgentRuntimeService.ConfirmContextNotFoundException("nope"))
             .when(confirmContextStore).checkAvailable(anyString());
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frame = controller.confirmStream("nope", new ConfirmController.ConfirmRequest(List.of()))
+        var frame = controller.confirmStream("nope", null, new ConfirmController.ConfirmRequest(List.of()))
             .blockFirst();
         assertNotNull(frame, "should emit error SSE frame");
         assertTrue(frame.data().contains("confirm_context_not_found"),
@@ -272,7 +272,7 @@ class ConfirmControllerTest {
 
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
-            controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+            controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
                     Map.of("tool_call_id", "call-1", "confirmed", true))))
                 .collectList().block(Duration.ofSeconds(10)));
         assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS), "未订阅 agent 事件流");
@@ -308,7 +308,7 @@ class ConfirmControllerTest {
         // 那正是本应被消除的「永不落库却实时可见」瑕疵帧）
         when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+        var frame = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
         assertNotNull(frame, "should emit SSE frame");
     }
@@ -330,7 +330,7 @@ class ConfirmControllerTest {
 
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frames = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+        var frames = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
                 Map.of("tool_call_id", "call-1", "confirmed", true))))
             .collectList().block(Duration.ofSeconds(10));
 
@@ -365,7 +365,7 @@ class ConfirmControllerTest {
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
-            controller.confirmStream("t1", new ConfirmController.ConfirmRequest(List.of(
+            controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
                     Map.of("tool_call_id", "call-1", "confirmed", true))))
                 .collectList().block(java.time.Duration.ofSeconds(10)));
         assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS),
@@ -429,7 +429,7 @@ class ConfirmControllerTest {
             .thenReturn(Map.of("routed", "remote", "confirm_key", "task:t-123",
                 "task_id", "t-123", "decision", "DENY"));
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frames = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(
+        var frames = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(
             List.of(Map.of("tool_call_id", "call-1", "confirmed", false)), "task:t-123"))
             .collectList().block(java.time.Duration.ofSeconds(5));
         assertNotNull(frames);
@@ -446,9 +446,43 @@ class ConfirmControllerTest {
         when(remoteConfirmBridge.routeDecision(anyString(), anyString(), anyList()))
             .thenThrow(new AgentRuntimeService.ConfirmAlreadyConsumedException("t1"));
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frame = controller.confirmStream("t1", new ConfirmController.ConfirmRequest(
+        var frame = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(
             List.of(), "task:t-123")).blockFirst();
         assertNotNull(frame);
         assertTrue(frame.data().contains("error"), frame.data());
+    }
+
+    // ===== 归属校验（issue #158）：非归属用户 404，远程键路由前同样拦截 =====
+
+    @Test
+    void confirmShouldRejectForeignUser() throws Exception {
+        when(sessionUserStore.findUserIdBySession("foreign-sid")).thenReturn("alice");
+
+        mvc.perform(post("/threads/foreign-sid/confirm")
+                .header("X-User-Id", "bob")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"results\":[],\"confirmKey\":\"local\"}"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("thread_not_found"));
+        verify(turnLeaseStore, never()).acquire(anyString(), any());
+    }
+
+    @Test
+    void confirmStreamShouldRejectForeignUser() {
+        when(sessionUserStore.findUserIdBySession("foreign-sid")).thenReturn("alice");
+        var ctrl = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+
+        var err = ctrl.confirmStream("foreign-sid", "bob",
+                new ConfirmController.ConfirmRequest(List.of(), "local"))
+            .map(v -> (Object) v)
+            .last()
+            .onErrorResume(e -> Mono.just(e))
+            .block(Duration.ofSeconds(2));
+
+        assertTrue(err instanceof org.springframework.web.server.ResponseStatusException);
+        assertEquals(404, ((org.springframework.web.server.ResponseStatusException) err)
+            .getStatusCode().value());
+        verify(turnLeaseStore, never()).acquire(anyString(), any());
     }
 }
