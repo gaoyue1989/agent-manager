@@ -105,3 +105,24 @@ func TestPublishPublicEndpointFalse(t *testing.T) {
 	}
 	_ = raw
 }
+
+// TestPublishSpecMicro 最低配置档 micro = 250m/256Mi（平台默认档同值，低配单节点友好）。
+func TestPublishSpecMicro(t *testing.T) {
+	c, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, c, "")
+	svc, err := c.Publish(PublishRequest{PackageID: pkg.ID, Name: "micro-svc",
+		Image: "agent-framework:latest", Spec: "micro"})
+	if err != nil {
+		t.Fatalf("publish micro: %v", err)
+	}
+	dep, err := fk.GetDeployment("test", svc.K8sName)
+	if err != nil {
+		t.Fatalf("deployment: %v", err)
+	}
+	res := dep.Spec.Template.Spec.Containers[0].Resources
+	if res.Requests.Cpu().String() != "250m" || res.Requests.Memory().String() != "256Mi" ||
+		res.Limits.Cpu().String() != "250m" || res.Limits.Memory().String() != "256Mi" {
+		t.Fatalf("micro resources: %s", res.String())
+	}
+}

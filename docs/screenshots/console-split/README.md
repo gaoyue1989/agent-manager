@@ -18,6 +18,7 @@
 | 截图 | 说明 |
 |------|------|
 | [04-agent-create.png](04-agent-create.png) | 创建 Agent 单页分区表单：选择创建方式三卡片（托管 Harness/导入/纳管）+ 五区块（基本信息/文件配置/资产配置/资源配置/网络配置），右上与底部双「立即创建」 |
+| [04b-agent-create-micro-default.png](04b-agent-create-micro-default.png) | 创建页资源配置：**micro 最低配置（250m/256Mi）默认选中**——低配单节点友好，四档 micro/small/medium/large |
 | [05-console-templates.png](05-console-templates.png) | Agent 模板：平台公共包（workspace_id=0 + is_template）卡片，「去导入」走 copy-on-write 派生 |
 | [06-console-integrations.png](06-console-integrations.png) | 集成 Agent：已建立集成关系（lead→member，ask 策略/被引用）+ 可注册候选端点（probe 在线探测） |
 

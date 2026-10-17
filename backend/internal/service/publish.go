@@ -127,6 +127,7 @@ type PublishRequest struct {
 
 // spec 档 → Deployment resources 直译映射（决议 4）。
 var specProfiles = map[string][2]string{ // [requestsCPU, requestsMem]（limits 同值直译）
+	"micro":  {"250m", "256Mi"}, // 最低配置（= 平台默认资源档，低配单节点友好）
 	"small":  {"1", "2Gi"},
 	"medium": {"2", "4Gi"},
 	"large":  {"4", "8Gi"},
@@ -144,7 +145,7 @@ func (c *Core) validateSpec(spec string) error {
 		return nil
 	}
 	if _, ok := specProfiles[spec]; !ok {
-		return fmt.Errorf("%w: unknown spec %q (small|medium|large)", ErrInvalidForm, spec)
+		return fmt.Errorf("%w: unknown spec %q (micro|small|medium|large)", ErrInvalidForm, spec)
 	}
 	if c.deployBuilder().OverridesResources() {
 		return fmt.Errorf("%w: DEPLOYMENT_TEMPLATE already configures resources; spec is not allowed", ErrInvalidForm)

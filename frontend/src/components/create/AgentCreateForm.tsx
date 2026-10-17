@@ -21,8 +21,9 @@ export interface AgentFormState {
 }
 
 export const SPEC_CARDS = [
-  { id: "small", title: "1核 2G", sub: "0.5 CU · 调试/轻载" },
-  { id: "medium", title: "2核 4G", sub: "1 CU · 生产常规" },
+  { id: "micro", title: "最低配置", sub: "250m/256Mi · 调试/低配节点（默认）" },
+  { id: "small", title: "1核 2G", sub: "0.5 CU · 常规" },
+  { id: "medium", title: "2核 4G", sub: "1 CU · 生产" },
   { id: "large", title: "4核 8G", sub: "2 CU · 高并发" },
 ];
 
@@ -57,7 +58,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     name: initial?.name ?? "", description: initial?.description ?? "",
     image: initial?.image ?? "", modelConnections: initial?.modelConnections ?? [],
     prompt: initial?.prompt ?? "", skills: initial?.skills ?? [], subAgents: initial?.subAgents ?? [],
-    mcpServers: initial?.mcpServers ?? [], spec: initial?.spec || "medium",
+    mcpServers: initial?.mcpServers ?? [], spec: initial?.spec || "micro",
     replicas: initial?.replicas || 1, publicEndpoint: initial?.publicEndpoint ?? true,
   });
   const [images, setImages] = useState<ImageOption[]>([]);

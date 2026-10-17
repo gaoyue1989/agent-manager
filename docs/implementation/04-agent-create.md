@@ -7,6 +7,9 @@
 | demo 对照 | `c/create`（选择创建方式三卡片 + 1~5 编号区块 + 右上/底部「立即创建」） |
 > **实装与验收**：页面实拍 [../screenshots/console-split/04-agent-create.png](../screenshots/console-split/04-agent-create.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
 > e2e 套件 [../../e2e/console-split/m3-agent-create.sh](../../e2e/console-split/m3-agent-create.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
+> **规格档演进（2026-10-17）**：新增 micro 最低配置档（250m/256Mi，= 平台默认资源档）并作为创建页默认选中——
+> 低配单节点友好（部署实测 medium 2C/4Gi 在 8G 节点必然 Pending）；四档 micro/small/medium/large，
+> 后端 `specProfiles` 与前端 SPEC_CARDS 同步。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：agentgen/publish/console 三组测试全绿（含 frontmatter golden 比对与编辑链路，`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（核心 job 扩展，主链路）：表单创建→running→A2A 注册→对话一句→下载包断言 frontmatter/mcp-configs/token 不落包→**编辑改提示词保存→v2 republish→再对话断言新行为**；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 
