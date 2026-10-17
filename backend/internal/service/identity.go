@@ -90,10 +90,27 @@ func (c *Core) ListUserWorkspaces(u *store.User) ([]WorkspaceBrief, error) {
 		return nil, err
 	}
 	out := make([]WorkspaceBrief, 0, len(rows))
+	seen := map[uint]bool{}
 	for _, r := range rows {
 		out = append(out, WorkspaceBrief{ID: r.ID, Slug: r.Slug, Name: r.Name, Role: r.Role})
+		seen[r.ID] = true
 	}
 	if u.Role == "admin" {
+		// 设计 §5.1「admin 可进任意工作空间」的列表侧落地：补齐全部未加入的 active
+		// 工作空间（含 default——用户侧需能看到存量纳管池，ResolveWorkspace 已允许
+		// admin 解析），角色标 admin；前端切换器因此可见全空间
+		var rest []row
+		if err := c.DB.Table("workspaces w").
+			Select("w.id, w.slug, w.name, 'admin' AS role").
+			Where("w.status = ? AND w.id NOT IN (?)", "active",
+				c.DB.Table("workspace_members").Select("workspace_id").Where("user_id = ?", u.ID)).
+			Order("w.id ASC").Scan(&rest).Error; err != nil {
+			return nil, err
+		}
+		for _, r := range rest {
+			out = append(out, WorkspaceBrief{ID: r.ID, Slug: r.Slug, Name: r.Name, Role: r.Role})
+			seen[r.ID] = true
+		}
 		out = append(out, WorkspaceBrief{ID: 0, Slug: "admin", Name: "平台管理员", Role: "admin"})
 	}
 	return out, nil

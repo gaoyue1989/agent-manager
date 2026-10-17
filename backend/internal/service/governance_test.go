@@ -287,3 +287,46 @@ func itoa(v uint) string {
 	}
 	return string(digits)
 }
+
+// TestAdminSeesAllWorkspaces 平台管理员 me 列表含全部 active 空间（含未加入的 default，
+// 设计 §5.1 列表侧落地）；普通用户仅见成员空间。
+func TestAdminSeesAllWorkspaces(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	if err := store.Backfill(c.DB, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+	wsA := seedWs(t, c, "ws-aaaa1001", "空间A")
+	seedWs(t, c, "ws-bbbb1002", "空间B")
+	seedWs(t, c, "ws-cccc1003", "停用空间C")
+	c.DB.Model(&store.Workspace{}).Where("slug = ?", "ws-cccc1003").Update("status", "disabled")
+	_ = wsA
+	adminU := seedUserIn(t, c, "list-admin", "admin", 0, "")
+	userU := seedUserIn(t, c, "list-user", "user", 0, "")
+
+	// admin：默认空间 + 全部 active 空间（含未加入的 A/B）+ 虚拟项
+	got, err := c.ListUserWorkspaces(adminU)
+	if err != nil {
+		t.Fatalf("admin list: %v", err)
+	}
+	names := map[string]string{}
+	for _, w := range got {
+		names[w.Name] = w.Role
+	}
+	for _, want := range []string{"default", "空间A", "空间B", "平台管理员"} {
+		if _, ok := names[want]; !ok {
+			t.Fatalf("admin should see %q, got %+v", want, got)
+		}
+	}
+	if _, ok := names["停用空间C"]; ok {
+		t.Fatal("disabled workspace must not appear")
+	}
+	if names["空间B"] != "admin" {
+		t.Fatalf("unjoined space role should be admin: %+v", names)
+	}
+	// 普通用户：仅成员空间，无虚拟项
+	gotU, err := c.ListUserWorkspaces(userU)
+	if err != nil || len(gotU) != 0 {
+		t.Fatalf("user with no membership should see empty, got %+v err=%v", gotU, err)
+	}
+}
