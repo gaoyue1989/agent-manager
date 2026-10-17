@@ -271,12 +271,15 @@ func mcpSessionHeaders(authToken string) [][2]string {
 func mcpListTools(endpoint, authToken string, timeoutSec int) ([]McpToolInfo, int64, error) {
 	client := httpTimeoutClient(timeoutSec)
 	start := time.Now()
+	// 会话头在 initialize 后回填；tools/list 必须复用同一 Mcp-Session-Id
+	//（go-sdk 服务端按会话校验状态，缺头会报 "invalid during session initialization"——部署实测）
+	sessionHeaders := mcpSessionHeaders(authToken)
 	do := func(req mcpRPCRequest) (json.RawMessage, [][2]string, error) {
 		body, err := json.Marshal(req)
 		if err != nil {
 			return nil, nil, err
 		}
-		respBody, headers, err := client.Post(endpoint, body, mcpSessionHeaders(authToken))
+		respBody, headers, err := client.Post(endpoint, body, sessionHeaders)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -305,8 +308,7 @@ func mcpListTools(endpoint, authToken string, timeoutSec int) ([]McpToolInfo, in
 		return nil, time.Since(start).Milliseconds(), err
 	}
 	_ = initResult
-	// 会话头回传（Mcp-Session-Id 等）
-	sessionHeaders := mcpSessionHeaders(authToken)
+	// 会话头回传（Mcp-Session-Id 等）——回填进共享 sessionHeaders，供后续通知与 tools/list 复用
 	for _, k := range []string{"Mcp-Session-Id", "MCP-Session-Id", "mcp-session-id"} {
 		if v := headerGet(headers, k); v != "" {
 			sessionHeaders = append(sessionHeaders, [2]string{"Mcp-Session-Id", v})

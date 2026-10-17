@@ -67,7 +67,9 @@ func (c *Core) ConsoleSummary(workspaceID uint) (*SummaryView, error) {
 	if err != nil {
 		return nil, err
 	}
-	sv.RecentEvents = events
+	if sv.RecentEvents == nil {
+		sv.RecentEvents = []SummaryEvent{} // 空时间线序列化 []（nil → null）
+	}
 	return &sv, nil
 }
 

@@ -527,6 +527,7 @@ func (c *Core) ModelConnectionUsage(workspaceID uint) ([]UsageRow, error) {
 				row.DefaultConnectionName = mc.Name
 			}
 		}
+		row.Connections = []UsageConnRow{} // 空下发表也序列化 []（nil slice 会出 null，前端崩）
 		var deliveries []store.ModelDelivery
 		if err := c.DB.Where("service_id = ?", s.ID).Order("id ASC").Find(&deliveries).Error; err != nil {
 			return nil, err

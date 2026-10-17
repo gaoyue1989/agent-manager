@@ -394,3 +394,29 @@ func TestCreateAgentMergesPlatformDefaults(t *testing.T) {
 		t.Fatalf("legacy system-model key must follow connection: %q", env["LLM_MODEL_ID"])
 	}
 }
+
+// TestSlugifyDigitLeading 中文名+数字尾缀派生出数字开头 agentKey 时补 agent- 前缀
+// （OAF kebab 校验 ^[a-z] 开头；部署实测整包校验失败）。
+func TestSlugifyDigitLeading(t *testing.T) {
+	got := SlugifyAgentKey("部署验证-1792201311")
+	if got[0] < 'a' || got[0] > 'z' {
+		t.Fatalf("agentKey must start with letter, got %q", got)
+	}
+	if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(got) {
+		t.Fatalf("not kebab: %q", got)
+	}
+}
+
+// TestSanitizeEnvKey 连接器名转 env 键：连字符转下划线（部署 e2e 实测非法键）。
+func TestSanitizeEnvKey(t *testing.T) {
+	for name, want := range map[string]string{
+		"bearer-mcp-1792206205": "BEARER_MCP_1792206205",
+		"ticket-system":         "TICKET_SYSTEM",
+		"platform":              "PLATFORM",
+		"a--b":                  "A_B",
+	} {
+		if got := sanitizeEnvKey(name); got != want {
+			t.Errorf("sanitizeEnvKey(%q)=%q want %q", name, got, want)
+		}
+	}
+}

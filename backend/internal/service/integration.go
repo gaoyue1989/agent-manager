@@ -69,7 +69,11 @@ func (c *Core) ListIntegrations(workspaceID uint) (*IntegrationList, error) {
 	}
 	relations := make([]IntegrationView, 0, len(rows))
 	for _, r := range rows {
-		v := IntegrationView{AgentIntegration: r, ReferencedBy: refs[r.EndpointURL]}
+		refd := refs[r.EndpointURL]
+		if refd == nil {
+			refd = []uint{} // 空引用序列化 []（nil → null 前端崩）
+		}
+		v := IntegrationView{AgentIntegration: r, ReferencedBy: refd}
 		if v.AskPolicy == "" {
 			v.AskPolicy = "PROPAGATE"
 		}

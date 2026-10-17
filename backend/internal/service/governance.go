@@ -3,7 +3,6 @@ package service
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -333,9 +332,18 @@ func (c *Core) AddMember(workspaceID, userID uint, role string) (*store.Workspac
 	if _, err := c.GetUser(userID); err != nil {
 		return nil, fmt.Errorf("%w: user not found", ErrInvalidForm)
 	}
+	// 先查重：MySQL driver 未开 TranslateError，唯一索引冲突会裸 500（部署实测）
+	var dup int64
+	if err := c.DB.Model(&store.WorkspaceMember{}).
+		Where("workspace_id = ? AND user_id = ?", workspaceID, userID).Count(&dup).Error; err != nil {
+		return nil, err
+	}
+	if dup > 0 {
+		return nil, fmt.Errorf("%w: already a member", ErrConflict)
+	}
 	m := &store.WorkspaceMember{WorkspaceID: workspaceID, UserID: userID, Role: role}
 	if err := c.DB.Create(m).Error; err != nil {
-		if errors.Is(err, gorm.ErrDuplicatedKey) || strings.Contains(strings.ToLower(err.Error()), "unique") {
+		if strings.Contains(err.Error(), "1062") || strings.Contains(strings.ToLower(err.Error()), "duplicate") {
 			return nil, fmt.Errorf("%w: already a member", ErrConflict)
 		}
 		return nil, err

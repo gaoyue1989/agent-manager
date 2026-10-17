@@ -92,6 +92,14 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 			OK(c, svc)
 		})
 		// 成员管理（运维侧直接维护成员，M1 §2.3）
+		ws.GET("/:id/members", func(c *gin.Context) {
+			list, err := core.ListMembers(parseUint(c.Param("id")))
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, list)
+		})
 		ws.POST("/:id/members", func(c *gin.Context) {
 			var body struct {
 				UserID uint   `json:"userId"`

@@ -101,6 +101,11 @@ func SlugifyAgentKey(name string) string {
 	if len(converted) > 63 {
 		converted = strings.Trim(converted[:63], "-")
 	}
+	// OAF kebab 校验要求 ^[a-z] 开头：中文名剥离后仅剩数字（如 "部署-1792" → "1792"）
+	// 会整包校验失败（部署实测）——数字开头补 agent- 前缀
+	if len(converted) > 0 && converted[0] >= '0' && converted[0] <= '9' {
+		converted = "agent-" + converted
+	}
 	return converted
 }
 
@@ -537,8 +542,12 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 	return env, secretKeys, nil
 }
 
+// env 键只允许 [A-Z0-9_]：连接器名的连字符必须转下划线
+// （agentKeyInvalidRe 允许 '-'，直接复用会产出非法键 "MCP_TOKEN_BEARER-MCP-x"——e2e 实测）
+var envKeySanitizeRe = regexp.MustCompile(`[^a-z0-9]+`)
+
 func sanitizeEnvKey(name string) string {
-	out := agentKeyInvalidRe.ReplaceAllString(strings.ToLower(name), "_")
+	out := envKeySanitizeRe.ReplaceAllString(strings.ToLower(name), "_")
 	return strings.ToUpper(strings.Trim(out, "_"))
 }
 

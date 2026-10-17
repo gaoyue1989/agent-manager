@@ -61,7 +61,13 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			Update("workspace_id", defWS.ID).Error; err != nil {
 			return err
 		}
-		// 4) oaf_packages.workspace_id 保持 0=公共包，不回填（决议 7）
+		// 4) oaf_packages：决议 7 语义 0=公共包；AutoMigrate 对存量表加列旧行为 NULL
+		// （与 services 同坑，部署实测：旧包版本链在 console 不可见）——NULL 归一为 0
+		if err := tx.Model(&OafPackage{}).
+			Where("workspace_id IS NULL").
+			Update("workspace_id", 0).Error; err != nil {
+			return err
+		}
 		return nil
 	})
 }

@@ -170,3 +170,31 @@ func TestBackfillHandlesNullWorkspaceColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestBackfillNormalizesPackageNullWorkspace 存量包 workspace_id NULL → 0（公共包语义），
+// 否则版本链/包列表查不到旧包（部署实测）。
+func TestBackfillNormalizesPackageNullWorkspace(t *testing.T) {
+	db := newMigrateDB(t)
+	// 模拟存量：先建旧 schema 行再补列（旧行 NULL）
+	type legacyPkg struct {
+		ID   uint `gorm:"primaryKey"`
+		Slug string `gorm:"size:200"`
+	}
+	if err := db.Table("oaf_packages").AutoMigrate(&legacyPkg{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO oaf_packages (id, slug, created_at) VALUES (1,'a/b',CURRENT_TIMESTAMP)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&OafPackage{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+	var got OafPackage
+	db.First(&got, 1)
+	if got.WorkspaceID != 0 {
+		t.Fatalf("NULL package workspace should normalize to 0, got %d", got.WorkspaceID)
+	}
+}
