@@ -23,11 +23,14 @@ fi
 
 # ---- CRUD / 掩码 / 唯一性 ----
 C1=$(req POST /console/workspaces/$WS/model-connections \
-  "{\"name\":\"conn-a-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"sk-m5test1234567890\"}" "" "$TOKEN")
+  "{\"name\":\"conn-a-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN")
 C1_ID=$(echo "$C1" | jqr "['data']['id']")
 assert_eq "建连接 201" "$([ -n "$C1_ID" ] && echo yes || echo no)" "yes"
-assert_contains "apiKeyMasked 掩码（无明文）" "$(echo "$C1" | head -c 2000)" "sk-***"
-assert_not_contains "响应体无 apiKey 明文" "$C1" "sk-m5test1234567890"
+# 掩码断言按 maskKey 公式算期望值（首3+***+尾4）；真实 key（供应商已拒绝占位 key，
+# 「真实端点 ok=true」需要可用凭据）
+MASK=$(python3 -c "k='$LLM_KEY'.strip();print(k[:3]+'***'+k[-4:])")
+assert_contains "apiKeyMasked 掩码（无明文）" "$(echo "$C1" | head -c 2000)" "$MASK"
+assert_not_contains "响应体无 apiKey 明文" "$C1" "$LLM_KEY"
 assert_eq "空间内重名 400" "$(code POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"conn-a-$TS\",\"modelId\":\"m\",\"baseUrl\":\"http://x/v1\"}" "" "$TOKEN")" "400"
 assert_eq "非法 baseUrl 400" "$(code POST /console/workspaces/$WS/model-connections \
