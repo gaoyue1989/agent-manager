@@ -52,7 +52,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 - 影响正确性的状态只允许存共享存储（MySQL checkpoint / Redis）；Pod 本地（内存、emptyDir）只允许可丢弃/可重建的缓存
 - 禁止 Service `sessionAffinity`；任意请求必须可落任意副本（`/threads/{sid}/subscribe`、`/status`、confirm 等全部基于共享存储裁决）；e2e-multi / e2e-protocol-multi 双副本门禁必须保持
-- 多服务共享同一 MySQL/Redis 时，**必须**为每个服务配独立 checkpoint 库名（`CHECKPOINT_JDBC_URL`）与独立 Redis 前缀（`AGENT_REDIS_PREFIX`）——表结构/Redis key 无 agent 维度，隔离完全靠这一层；缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**当前平台不自动注入/校验这两个键，是已知缺口**：发布多个服务时运维必须显式配置，平台侧自动派生列入后续演进
+- 多服务共享同一 MySQL/Redis 时，隔离靠 per-service checkpoint 库名与 Redis 前缀——表结构/Redis key 无 agent 维度，缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**Publish 新建服务时平台自动派生这两键**（issue #142：`CHECKPOINT_JDBC_URL` 改写 `{原库}_{k8s 名}` + 自动建库、`AGENT_REDIS_PREFIX={k8s 名}:`，用户显式值优先；前置条件是 MySQL 账号有 `{原库}_%` 模式库授权）。**存量服务 env 已固化不自动迁移**，收敛需显式改 env 后 republish（校验维度仍是缺口：平台不校验用户显式配的共享值）
 
 ---
 

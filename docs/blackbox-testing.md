@@ -54,7 +54,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 角色语义（测试用例设计的权限边界）：
 
 - **用户角色** `admin | user`：admin 可进运维侧与**任意**工作空间；user 仅本人所属空间。
-- **空间成员角色** `owner | admin | member`：作用于单个工作空间内（写入操作要求 member 以上，管理类操作按端点裁决）。
+- **空间成员角色** `owner | admin | member`：作用于单个工作空间内——owner/admin 可写（创建/编辑/删除 Agent 等），**member 只读 + 调试**（写操作后端 403，前端不渲染写入口，设计 §5.1）。
 
 ## 3. 鉴权矩阵（路由分层）
 
