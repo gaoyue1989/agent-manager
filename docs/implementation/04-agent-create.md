@@ -58,7 +58,11 @@ POST /api/v1/console/workspaces/:ws/agents        （owner/admin，member 403）
   → 409 duplicate_name（k8s_name 冲突 = 既有发布重名校验同源；slug 冲突 = 空间内包名唯一）
 ```
 
-实现即「生成包 v1 → core.Publish」，事务边界：包登记成功 → Publish 失败时包保留（孤儿包无害，可在包列表删除；返回 502 带 publish 错误详情）。
+实现即「生成包 v1 → core.Publish」。失败语义（issue #149/#150/#151）：description 空/
+名称超长（展示名 >128 字符、slug 化 agentKey >59 字符）在生成包前前置校验 → 400；包登记
+成功后的任何失败（buildPublishEnv / Publish）回删刚生成的包（不留孤儿）→ 502；Publish
+落库撞 services.idx_services_k8s_name（并发同名竞态）经 translateStorageError → 409
+duplicate_name（MySQL driver 未开 TranslateError，1062/1406 驱动裸错误统一翻译，不外泄列名）。
 
 ### 2.3 包生成器（agentgen.go，决议 5 的落地）
 
