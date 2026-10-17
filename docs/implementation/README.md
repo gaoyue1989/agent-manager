@@ -111,6 +111,14 @@ M0 ──▶ M1 ─┐
 > - 业务面零影响：既有 8 个业务 Pod 全部为升级前启动（原则一实战核验）；`/login` 循环重定向、存量服务 NULL 回填、重复用户名 500、admin 隐式成员、LLM_MODEL_ID 旧键跟随等 6 个部署期缺陷已修复并补回归单测
 > - 宿主机统一入口 :8911 已确认服务新前端（/login 200、/ 307→/login）；浏览器如见旧版为本地缓存，强刷即可
 >
+> **2026-10-17 按功能 e2e 套件（e2e/console-split/，九模块全 PASS）**：
+> lib.sh 公共断言库 + m0-auth～m8-workspace-assets 八个模块脚本 + run-all.sh 聚合 runner，180+ 断言，
+> 覆盖实施文档各模块「测试要点」的可自动化部分（登录三分支/路由分层矩阵/治理全链/resolveWorkspace
+> 矩阵/创建编辑全链含包契约与 SSE 热生效/生命周期状态机/模型连接 CRUD-测试-下发-usage-会话切换/
+> MCP 连接器 verify 三分支与注入断言/集成探测与引用保护/API Key 与成员矩阵）。kind 集群实跑
+> 九模块全 PASS；套件实跑暴露并修复 2 个产品缺陷（MCP_TOKEN env 键连字符非法、重复加入成员 500）
+> 与 1 个端点缺失（admin 成员列表）。运行方式见 run-all.sh 头注释。
+>
 > 2026-10-17 实施说明（feat/console-user-workspace-split 分支）：
 > - 「单测」列 = `cd backend && make test`（go vet + go test 全包）与 `cd frontend && npm run lint && npm run build && npm test`（lint 0 errors、tsc 全绿、既有 30 用例全绿）实跑结果；
 > - 「e2e」列标注待集群/手工的条目为 DoD 中无法离线自动化部分（四必需 job 回归、governance/model-switch/mcp-connector/workspace-assets 脚本、enforce 三态环境），合入后按 e2e 落位表在集群环境补跑并回填证据链接；
