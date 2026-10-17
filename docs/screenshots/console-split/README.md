@@ -10,6 +10,7 @@
 |------|------|
 | [01-login.png](01-login.png) | 登录页：左品牌区 + 右登录卡（首个 admin 由 `ADMIN_INIT_USER` 种子创建）；未登录访问任意页 307 跳转至此 |
 | [02-console-overview.png](02-console-overview.png) | 用户侧概览：工作空间统计卡（Agent 总数/运行/异常/已下线）+ 最近发布时间线 + 快捷入口 |
+| [25-admin-ws-switcher-all.png](25-admin-ws-switcher-all.png) | 平台管理员的工作空间切换器：可见全部工作空间（含未加入的与 default 存量池，设计 §5.1 列表侧落地；普通用户仅见自己的成员空间） |
 | [03-console-agents.png](03-console-agents.png) | Agent 列表：状态/关键字筛选 + 卡片网格（头像字/状态徽标/模型·副本·版本 tag/调试·详情入口） |
 
 ## AGENT 构建
