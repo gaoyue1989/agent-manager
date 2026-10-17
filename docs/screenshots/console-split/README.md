@@ -36,6 +36,7 @@
 |------|------|
 | [07-assets-models.png](07-assets-models.png) | 模型连接：连接表（掩码/状态/已下发数）+ Agent 使用情况表（默认连接/下发状态） |
 | [08-assets-models-drawer.png](08-assets-models-drawer.png) | 模型连接新建/编辑右侧抽屉（slide-over）：遮罩/Esc 关闭；编辑支持 apiKey 留空保持、空格清除 |
+| [07b-assets-models-runtime.png](07b-assets-models-runtime.png) | Agent 使用情况含**运行时存量模型**展开行：直连 Agent /models 的真实清单（系统/存量/已下发来源标注 + 默认标记），与 model_deliveries 对照 |
 | [09-assets-tools.png](09-assets-tools.png) | 工具管理：MCP 连接器表（platform-mcp 平台内置置顶）+ 三态权限策略表 |
 | [09-assets-tools-drawer.png](09-assets-tools-drawer.png) | 新建 MCP 连接器右侧抽屉（slide-over，与模型连接页同交互）：保存后自动 initialize + tools/list 验证 |
 | [10-assets-skills.png](10-assets-skills.png) | Skill 管理：L4 用户技能（所选 Agent 直连，per-user 如实标注）+ 包级技能只读聚合 |

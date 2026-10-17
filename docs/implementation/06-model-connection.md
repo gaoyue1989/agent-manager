@@ -5,7 +5,10 @@
 | 依赖 | M2（console 骨架）、M3（创建页勾选与发布注入）、M4（调试 Tab 挂模型下拉） |
 | 对应设计 | §3.2「模型连接」行、§8.4；对标 AgentCore 模型管理（[help.aliyun.com/zh/agentcore/model-management](https://help.aliyun.com/zh/agentcore/model-management)，add-connection 形态）；下发目标契约 [agent-framework/docs/session-model-switch-design.md](../../agent-framework/docs/session-model-switch-design.md)（已实施） |
 | demo 对照 | `c/models`（连接配置表 + Agent 使用情况表 + 新建表单预览）、创建页「模型连接」多选勾选表 |
-> **实装与验收**：页面实拍 [../screenshots/console-split/07-assets-models.png](../screenshots/console-split/07-assets-models.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> **实装与验收**：页面实拍 [../screenshots/console-split/07-assets-models.png](../screenshots/console-split/07-assets-models.png) 与
+> [07b-assets-models-runtime.png](../screenshots/console-split/07b-assets-models-runtime.png)（Agent 使用情况含**运行时存量模型**展开行：直连 Agent `/models` 真实清单，
+> 来源标注 系统/存量/已下发 + 默认标记，与 model_deliveries 对照；业务面不可达时如实显示拉取失败。部署实测发现并修复：**模型热切换不得连带 spec 变更**——
+> 编辑页切默认连接时若顺带改规格会滚动重启，单节点内存不足即 Pending「Pod 无法启动」，规格调整仅运维侧入口）；（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
 > e2e 套件 [../../e2e/console-split/m5-model-connection.sh](../../e2e/console-split/m5-model-connection.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 | 上游参考 | M6（MCP 连接器）——两者同构：**先配置、测试，再经创建/更新 Agent 勾选下发，并展示 Agent 使用情况** |
 

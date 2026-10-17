@@ -84,9 +84,12 @@ export interface ModelConnectionView {
   apiKeyMasked: string; temperature: number; maxTokens: number; timeoutSeconds: number;
   status: string; lastTestedAt?: string | null; deliveryCount: number;
 }
+export interface RuntimeModel { id: string; name: string; source: string; modelId: string; baseUrl?: string; isDefault: boolean; delivered: boolean; }
 export interface ModelConnUsageRow {
   serviceId: number; displayName: string; defaultConnectionName: string;
   connections: { connectionId: number; name: string; status: string; remoteModelId: string; error: string; syncedAt?: string | null }[];
+  /** Agent 运行时 /models 实际清单（含存量/手动配置；null = 业务面拉取失败） */
+  runtimeModels?: RuntimeModel[] | null;
 }
 export interface McpConnectorView {
   id: number; workspaceId: number; name: string; transport: string; endpoint: string;

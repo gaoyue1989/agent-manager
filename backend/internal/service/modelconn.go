@@ -499,12 +499,27 @@ type UsageConnRow struct {
 	SyncedAt      *time.Time `json:"syncedAt"`
 }
 
-// UsageRow usage 行（每 Agent：默认连接 + 已勾选连接状态组）。
+// UsageRow usage 行（每 Agent：默认连接 + 已勾选连接状态组 + 运行时存量模型）。
 type UsageRow struct {
 	ServiceID             uint           `json:"serviceId"`
 	DisplayName           string         `json:"displayName"`
 	DefaultConnectionName string         `json:"defaultConnectionName"`
 	Connections           []UsageConnRow `json:"connections"`
+	// RuntimeModels Agent 运行时 /models 的实际模型清单（含历史下发、手动配置的存量；
+	//拉取失败为 null——业务面不可达时如实呈现而非空数组）
+	RuntimeModels []RuntimeModel `json:"runtimeModels"`
+}
+
+// RuntimeModel 运行时 /models 单条（Agent 侧 model_config，全部模型来源的真实清单）。
+type RuntimeModel struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Source   string `json:"source"` // system | managed
+	ModelID  string `json:"modelId"`
+	BaseURL  string `json:"baseUrl"`
+	IsDefault bool  `json:"isDefault"`
+	// Delivered 由本空间连接下发而来（与 model_deliveries.remote_model_id 对得上）
+	Delivered bool `json:"delivered"`
 }
 
 // ModelConnectionUsage Agent 使用情况聚合（M5 §2.2）。
@@ -543,6 +558,38 @@ func (c *Core) ModelConnectionUsage(workspaceID uint) ([]UsageRow, error) {
 				ConnectionID: d.ConnectionID, Name: name, Status: status,
 				RemoteModelID: d.RemoteModelID, Error: d.Error, SyncedAt: d.SyncedAt,
 			})
+		}
+		// 运行时存量模型（Agent /models 真实清单；失败留 nil，前端显示拉取失败）
+		if s.Status == "running" {
+			client := &http.Client{Timeout: 8 * time.Second}
+			if resp, err := httpGetJSON(client, s.ClusterURL+"/models"); err == nil {
+				var rm struct {
+					DefaultModel string `json:"default_model"`
+					Models       []struct {
+						ID      string `json:"id"`
+						Name    string `json:"name"`
+						Source  string `json:"source"`
+						ModelID string `json:"model_id"`
+						BaseURL string `json:"base_url"`
+					} `json:"models"`
+				}
+				if json.Unmarshal(resp, &rm) == nil {
+					deliveredIDs := map[string]bool{}
+					for _, d := range deliveries {
+						if d.RemoteModelID != "" {
+							deliveredIDs[d.RemoteModelID] = true
+						}
+					}
+					for _, m := range rm.Models {
+						row.RuntimeModels = append(row.RuntimeModels, RuntimeModel{
+							ID: m.ID, Name: m.Name, Source: m.Source,
+							ModelID: m.ModelID, BaseURL: m.BaseURL,
+							IsDefault: m.ID == rm.DefaultModel,
+							Delivered: deliveredIDs[m.ID],
+						})
+					}
+				}
+			}
 		}
 		out = append(out, row)
 	}

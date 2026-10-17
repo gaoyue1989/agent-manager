@@ -1,7 +1,7 @@
 "use client";
 // 用户侧 · 模型连接（M5 §3.1，demo c/models）：连接表 + Agent 使用情况表；
 // 新建/编辑走右侧抽屉（slide-over，不复刻 demo 右栏常驻表单——评审反馈改为弹出）。
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { api, type ModelConnectionView, type ModelConnUsageRow } from "@/lib/api";
 import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
 import { Badge, Btn, Card, Note, PageHead } from "@/components/ui";
@@ -164,11 +164,13 @@ export default function ModelsPage() {
         <tbody>
           {usage.map((u) => {
             const conns = u.connections ?? []; // nil 序列化兜底（后端已改 []，旧包过渡期防御）
+            const rt = u.runtimeModels ?? null; // null = 业务面拉取失败
             const worst = conns.some((c) => c.status === "failed") ? "failed"
               : conns.some((c) => c.status === "pending") ? "pending"
                 : conns.length > 0 ? "synced" : "";
             return (
-              <tr key={u.serviceId} className="border-b last:border-0 hover:bg-gray-50">
+              <Fragment key={u.serviceId}>
+              <tr className="border-b hover:bg-gray-50">
                 <td className="p-2.5 font-medium">{u.displayName}</td>
                 <td className="p-2.5 text-xs">{u.defaultConnectionName || "系统默认"}</td>
                 <td className="p-2.5 text-xs">
@@ -186,6 +188,28 @@ export default function ModelsPage() {
                   )}
                 </td>
               </tr>
+              <tr className="border-b last:border-0 bg-gray-50/40">
+                <td colSpan={5} className="p-2.5 text-xs" data-testid={`rt-models-${u.serviceId}`}>
+                  {rt === null ? (
+                    <span className="text-gray-400">运行时模型：拉取失败（业务面不可达或非 running）</span>
+                  ) : rt.length === 0 ? (
+                    <span className="text-gray-400">运行时模型：暂无（Agent 侧 model_config 为空）</span>
+                  ) : (
+                    <>
+                      <span className="mr-2 font-medium text-gray-600">运行时模型（Agent 侧存量 {rt.length} 个）：</span>
+                      {rt.map((m) => (
+                        <span key={m.id} title={`${m.modelId} @ ${m.baseUrl || "system"}`}
+                          className={`mr-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] ${m.delivered ? "bg-blue-50 text-blue-700" : "bg-gray-100 text-gray-600"}`}>
+                          {m.isDefault && <b className="text-emerald-600">默认</b>}
+                          {m.name}
+                          <span className="text-gray-400">·{m.source === "system" ? "系统" : m.delivered ? "已下发" : "存量"}</span>
+                        </span>
+                      ))}
+                    </>
+                  )}
+                </td>
+              </tr>
+              </Fragment>
             );
           })}
           {usage.length === 0 && <tr><td colSpan={5} className="p-5 text-center text-sm text-gray-400">空间内暂无 Agent</td></tr>}
