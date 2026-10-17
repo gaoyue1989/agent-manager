@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { api, type AgentListItem } from "@/lib/api";
-import { useConsoleWs } from "@/lib/useMe";
+import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
 import { Badge, Card, PageHead, StatCard, Tag } from "@/components/ui";
 
 const AVA_GRADIENTS = [
@@ -14,6 +14,8 @@ function avaCls(id: number) { return AVA_GRADIENTS[id % AVA_GRADIENTS.length]; }
 
 export default function AgentsPage() {
   const ws = useConsoleWs();
+  const role = useConsoleWsRole();
+  const writable = role === "owner" || role === "admin"; // member 只读：隐藏创建入口（issue #141）
   const [list, setList] = useState<AgentListItem[]>([]);
   const [status, setStatus] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -33,8 +35,8 @@ export default function AgentsPage() {
   return (
     <div data-testid="console-agents">
       <PageHead title="Agent" sub="工作空间内可见的智能体实例（= services 按空间过滤，不新建实体）"
-        actions={<Link href="/console/agents/create" data-testid="agents-create"
-          className="inline-flex items-center gap-1.5 rounded-md border border-blue-600 bg-blue-600 px-3 py-1.5 text-[13px] text-white hover:bg-blue-700">+ 创建 Agent</Link>} />
+        actions={writable ? <Link href="/console/agents/create" data-testid="agents-create"
+          className="inline-flex items-center gap-1.5 rounded-md border border-blue-600 bg-blue-600 px-3 py-1.5 text-[13px] text-white hover:bg-blue-700">+ 创建 Agent</Link> : undefined} />
       {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
       <div className="mb-3.5 grid grid-cols-3 gap-3">
         <StatCard label="Agent 总数" value={list.length} />
@@ -57,7 +59,10 @@ export default function AgentsPage() {
       </div>
       {loading ? <p className="text-sm text-gray-400">加载中…</p> : list.length === 0 ? (
         <Card><div className="py-10 text-center text-sm text-gray-400">
-          工作空间内暂无 Agent —— 点击右上角「创建 Agent」开始，或让管理员把存量服务纳管进本空间。
+          {/* 区分「空间为空」与「筛选/搜索无匹配」——统一空态会误导用户以为空间为空（issue #146） */}
+          {(keyword || status)
+            ? <>未找到匹配的 Agent —— 试试其他关键词或清除筛选条件（当前：{status ? `状态=${status} ` : ""}{keyword ? `关键词="${keyword}"` : ""}）</>
+            : <>工作空间内暂无 Agent —— 点击右上角「创建 Agent」开始，或让管理员把存量服务纳管进本空间。</>}
         </div></Card>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" data-testid="agents-grid">
