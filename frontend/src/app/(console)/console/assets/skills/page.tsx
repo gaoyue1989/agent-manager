@@ -89,8 +89,9 @@ export default function SkillsPage() {
                 {g.workspaceId === 0 ? <Tag>公共包</Tag> : null}
                 <span className="ml-auto flex items-center gap-2">
                   <small className="text-[11px] text-gray-400">
-                    {g.skills.some((s) => s.usedBy.length > 0)
-                      ? `被引用：${[...new Set(g.skills.flatMap((s) => s.usedBy))].join("、")}`
+                    {/* usedBy ?? []：后端旧版本可能序列化 null，直接取 length 会整页崩 */}
+                    {g.skills.some((s) => (s.usedBy ?? []).length > 0)
+                      ? `被引用：${[...new Set(g.skills.flatMap((s) => s.usedBy ?? []))].join("、")}`
                       : "未被引用"}
                   </small>
                   <Link href={`/admin/packages/${pkgId}`} data-testid={`skill-pkg-${pkgId}`}

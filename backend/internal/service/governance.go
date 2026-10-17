@@ -102,7 +102,7 @@ type CreateWorkspaceInput struct {
 }
 
 // AdminCreateWorkspace 创建空间并写入 owner 成员关系（同事务）。
-func (c *Core) AdminCreateWorkspace(in CreateWorkspaceInput) (*store.Workspace, error) {
+func (c *Core) AdminCreateWorkspace(actor uint, in CreateWorkspaceInput) (*store.Workspace, error) {
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidForm)
 	}
@@ -144,7 +144,7 @@ func (c *Core) AdminCreateWorkspace(in CreateWorkspaceInput) (*store.Workspace, 
 	if err != nil {
 		return nil, err
 	}
-	c.recordAudit("workspace.create", w.Slug, map[string]interface{}{
+	c.recordAudit("workspace.create", w.Slug, actor, map[string]interface{}{
 		"name": w.Name, "ownerUserId": in.OwnerUserID,
 	})
 	return w, nil
@@ -214,7 +214,7 @@ func (c *Core) AdminDeleteWorkspace(id uint) error {
 // ---- 用户管理 ----
 
 // AdminCreateUser 建号（密码 bcrypt；username 冲突 400）。
-func (c *Core) AdminCreateUser(username, password, displayName, role string) (*store.User, error) {
+func (c *Core) AdminCreateUser(actor uint, username, password, displayName, role string) (*store.User, error) {
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
 		return nil, fmt.Errorf("%w: username and password are required", ErrInvalidForm)
 	}
@@ -244,7 +244,7 @@ func (c *Core) AdminCreateUser(username, password, displayName, role string) (*s
 		}
 		return nil, err
 	}
-	c.recordAudit("user.create", username, map[string]interface{}{"role": role})
+	c.recordAudit("user.create", username, actor, map[string]interface{}{"role": role})
 	return u, nil
 }
 
@@ -318,7 +318,7 @@ func (c *Core) AdminListUsers() ([]UserView, error) {
 // ---- 成员关系 ----
 
 // AddMember 加入成员（停用空间拒绝新成员加入）。
-func (c *Core) AddMember(workspaceID, userID uint, role string) (*store.WorkspaceMember, error) {
+func (c *Core) AddMember(actor, workspaceID, userID uint, role string) (*store.WorkspaceMember, error) {
 	if role != "owner" && role != "admin" && role != "member" {
 		return nil, fmt.Errorf("%w: invalid role", ErrInvalidForm)
 	}
@@ -348,13 +348,13 @@ func (c *Core) AddMember(workspaceID, userID uint, role string) (*store.Workspac
 		}
 		return nil, err
 	}
-	c.recordAudit("member.update", fmt.Sprintf("ws-%d/user-%d", workspaceID, userID),
+	c.recordAudit("member.update", fmt.Sprintf("ws-%d/user-%d", workspaceID, userID), actor,
 		map[string]interface{}{"op": "add", "role": role})
 	return m, nil
 }
 
 // UpdateMemberRole 改角色（owner 不可降级为 member——空间必须有 owner）。
-func (c *Core) UpdateMemberRole(workspaceID, userID uint, role string) error {
+func (c *Core) UpdateMemberRole(actor, workspaceID, userID uint, role string) error {
 	if role != "owner" && role != "admin" && role != "member" {
 		return fmt.Errorf("%w: invalid role", ErrInvalidForm)
 	}
@@ -369,13 +369,13 @@ func (c *Core) UpdateMemberRole(workspaceID, userID uint, role string) error {
 	if err := c.DB.Model(&m).Update("role", role).Error; err != nil {
 		return err
 	}
-	c.recordAudit("member.update", fmt.Sprintf("ws-%d/user-%d", workspaceID, userID),
+	c.recordAudit("member.update", fmt.Sprintf("ws-%d/user-%d", workspaceID, userID), actor,
 		map[string]interface{}{"op": "role", "role": role})
 	return nil
 }
 
 // RemoveMember 移除成员（owner 不可移除）。
-func (c *Core) RemoveMember(workspaceID, userID uint) error {
+func (c *Core) RemoveMember(actor, workspaceID, userID uint) error {
 	var m store.WorkspaceMember
 	if err := c.DB.Where("workspace_id = ? AND user_id = ?", workspaceID, userID).
 		First(&m).Error; err != nil {
@@ -387,7 +387,7 @@ func (c *Core) RemoveMember(workspaceID, userID uint) error {
 	if err := c.DB.Delete(&m).Error; err != nil {
 		return err
 	}
-	c.recordAudit("member.update", fmt.Sprintf("ws-%d/user-%d", workspaceID, userID),
+	c.recordAudit("member.update", fmt.Sprintf("ws-%d/user-%d", workspaceID, userID), actor,
 		map[string]interface{}{"op": "remove"})
 	return nil
 }
@@ -436,7 +436,7 @@ func (c *Core) InvitableUsers(workspaceID uint) ([]UserView, error) {
 
 // BindService 纳管：存量服务挂入空间（仅当当前归属为 default 空间或 0；
 // 已在其他业务空间 → 409 already_bound）。
-func (c *Core) BindService(workspaceID, serviceID uint) (*store.ServiceEntity, error) {
+func (c *Core) BindService(actor, workspaceID, serviceID uint) (*store.ServiceEntity, error) {
 	svc, err := c.Get(serviceID)
 	if err != nil {
 		return nil, err
@@ -455,7 +455,7 @@ func (c *Core) BindService(workspaceID, serviceID uint) (*store.ServiceEntity, e
 		return nil, err
 	}
 	svc.WorkspaceID = workspaceID
-	c.recordAudit("workspace.bind", svc.K8sName, map[string]interface{}{
+	c.recordAudit("workspace.bind", svc.K8sName, actor, map[string]interface{}{
 		"workspaceId": workspaceID, "serviceId": serviceID,
 	})
 	return svc, nil

@@ -39,7 +39,7 @@ func TestAdminWorkspaceCRUD(t *testing.T) {
 	owner := seedUserIn(t, c, "owner1", "user", 0, "")
 
 	// 创建：slug 自动生成 + owner 成员关系
-	w, err := c.AdminCreateWorkspace(CreateWorkspaceInput{Name: "客服空间", OwnerUserID: owner.ID,
+	w, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "客服空间", OwnerUserID: owner.ID,
 		Quota: map[string]interface{}{"maxAgents": 10}})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -52,7 +52,7 @@ func TestAdminWorkspaceCRUD(t *testing.T) {
 		t.Fatalf("owner membership: %+v err=%v", m, err)
 	}
 	// 空名 400
-	if _, err := c.AdminCreateWorkspace(CreateWorkspaceInput{Name: " "}); err == nil {
+	if _, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: " "}); err == nil {
 		t.Fatal("empty name should fail")
 	}
 	// 列表聚合
@@ -78,7 +78,7 @@ func TestAdminWorkspaceCRUD(t *testing.T) {
 		t.Fatal("non-empty workspace should be protected")
 	}
 	// 空空间（无成员无 Agent）可删
-	empty, err := c.AdminCreateWorkspace(CreateWorkspaceInput{Name: "空空间"})
+	empty, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "空空间"})
 	if err != nil {
 		t.Fatalf("create empty: %v", err)
 	}
@@ -107,16 +107,16 @@ func TestBindServiceThreeStates(t *testing.T) {
 	}
 
 	// default → 目标空间 ok
-	bound, err := c.BindService(ws.ID, svc.ID)
+	bound, err := c.BindService(42, ws.ID, svc.ID)
 	if err != nil || bound.WorkspaceID != ws.ID {
 		t.Fatalf("bind default→ws: %v %+v", err, bound)
 	}
 	// 已在业务空间 → 换绑到其他空间 409 already_bound
-	if _, err := c.BindService(other.ID, svc.ID); err == nil {
+	if _, err := c.BindService(42, other.ID, svc.ID); err == nil {
 		t.Fatal("bind bound service should 409")
 	}
 	// 不存在服务 404
-	if _, err := c.BindService(ws.ID, 9999); err == nil {
+	if _, err := c.BindService(42, ws.ID, 9999); err == nil {
 		t.Fatal("missing service should 404")
 	}
 	// 未归属（0）→ 可绑
@@ -129,7 +129,7 @@ func TestBindServiceThreeStates(t *testing.T) {
 	if err := c.DB.Create(svc2).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.BindService(ws.ID, svc2.ID); err != nil {
+	if _, err := c.BindService(42, ws.ID, svc2.ID); err != nil {
 		t.Fatalf("bind orphan: %v", err)
 	}
 }
@@ -142,31 +142,31 @@ func TestMemberRoleMatrix(t *testing.T) {
 	admin1 := seedUserIn(t, c, "adm", "user", 0, "")
 	mem := seedUserIn(t, c, "mem", "user", 0, "")
 
-	if _, err := c.AddMember(ws.ID, owner.ID, "owner"); err != nil {
+	if _, err := c.AddMember(42, ws.ID, owner.ID, "owner"); err != nil {
 		t.Fatalf("add owner: %v", err)
 	}
-	if _, err := c.AddMember(ws.ID, admin1.ID, "admin"); err != nil {
+	if _, err := c.AddMember(42, ws.ID, admin1.ID, "admin"); err != nil {
 		t.Fatalf("add admin: %v", err)
 	}
-	if _, err := c.AddMember(ws.ID, mem.ID, "member"); err != nil {
+	if _, err := c.AddMember(42, ws.ID, mem.ID, "member"); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	// 重复加入 409
-	if _, err := c.AddMember(ws.ID, mem.ID, "member"); err == nil {
+	if _, err := c.AddMember(42, ws.ID, mem.ID, "member"); err == nil {
 		t.Fatal("duplicate member should conflict")
 	}
 	// owner 不可降级 / 不可移除
-	if err := c.UpdateMemberRole(ws.ID, owner.ID, "member"); err == nil {
+	if err := c.UpdateMemberRole(42, ws.ID, owner.ID, "member"); err == nil {
 		t.Fatal("owner demote should fail")
 	}
-	if err := c.RemoveMember(ws.ID, owner.ID); err == nil {
+	if err := c.RemoveMember(42, ws.ID, owner.ID); err == nil {
 		t.Fatal("owner remove should fail")
 	}
 	// member → admin ok；再移除 ok
-	if err := c.UpdateMemberRole(ws.ID, mem.ID, "admin"); err != nil {
+	if err := c.UpdateMemberRole(42, ws.ID, mem.ID, "admin"); err != nil {
 		t.Fatalf("promote member: %v", err)
 	}
-	if err := c.RemoveMember(ws.ID, mem.ID); err != nil {
+	if err := c.RemoveMember(42, ws.ID, mem.ID); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 }
@@ -174,7 +174,7 @@ func TestMemberRoleMatrix(t *testing.T) {
 func TestUserManagement(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
-	u, err := c.AdminCreateUser("zhangsan", "secret1", "张工", "user")
+	u, err := c.AdminCreateUser(42, "zhangsan", "secret1", "张工", "user")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestUserManagement(t *testing.T) {
 		t.Fatal("password hash mismatch")
 	}
 	// 重名 400
-	if _, err := c.AdminCreateUser("zhangsan", "x", "", "user"); err == nil {
+	if _, err := c.AdminCreateUser(42, "zhangsan", "x", "", "user"); err == nil {
 		t.Fatal("duplicate username should fail")
 	}
 	// 重置密码
@@ -254,7 +254,7 @@ func TestAuditLogsAggregation(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
 	ws := seedWs(t, c, "ws-fff0005", "审计空间")
-	if _, err := c.AdminCreateWorkspace(CreateWorkspaceInput{Name: "审计2"}); err != nil {
+	if _, err := c.AdminCreateWorkspace(42, CreateWorkspaceInput{Name: "审计2"}); err != nil {
 		t.Fatal(err)
 	}
 	_ = ws
@@ -328,5 +328,33 @@ func TestAdminSeesAllWorkspaces(t *testing.T) {
 	gotU, err := c.ListUserWorkspaces(userU)
 	if err != nil || len(gotU) != 0 {
 		t.Fatalf("user with no membership should see empty, got %+v err=%v", gotU, err)
+	}
+}
+
+// TestAuditActorRecorded 治理审计必须记录操作者（issue #143）：recordAudit 写入
+// actor 用户 id，AuditLogs 读取侧回查为显示名。
+func TestAuditActorRecorded(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	admin := seedUserIn(t, c, "audit-admin", "admin", 0, "")
+	if _, err := c.AdminCreateUser(admin.ID, "zhangsan", "secret1", "张工", "user"); err != nil {
+		t.Fatal(err)
+	}
+	items, total, err := c.AuditLogs(1, 50)
+	if err != nil || total < 1 {
+		t.Fatalf("audit: %v total=%d", err, total)
+	}
+	var create *AuditItem
+	for i := range items {
+		if items[i].Action == "user.create" {
+			create = &items[i]
+			break
+		}
+	}
+	if create == nil {
+		t.Fatalf("user.create event missing: %+v", items)
+	}
+	if create.Actor != admin.DisplayName {
+		t.Fatalf("actor resolved to display name, got %q want %q", create.Actor, admin.DisplayName)
 	}
 }

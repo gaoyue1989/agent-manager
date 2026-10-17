@@ -127,7 +127,9 @@ type PublishRequest struct {
 
 // spec 档 → Deployment resources 直译映射（决议 4）。
 var specProfiles = map[string][2]string{ // [requestsCPU, requestsMem]（limits 同值直译）
-	"micro":  {"250m", "256Mi"}, // 最低配置（= 平台默认资源档，低配单节点友好）
+	// micro：最低配置档，limits=256Mi 放不下托管 Java 运行时（OOMKilled CrashLoop，
+	// issue #136）——仅极轻量自备镜像可用，创建页默认档是 small 且对 micro 显式警示
+	"micro":  {"250m", "256Mi"},
 	"small":  {"1", "2Gi"},
 	"medium": {"2", "4Gi"},
 	"large":  {"4", "8Gi"},
@@ -192,6 +194,9 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	// （Publish/UpdateEnv/Republish）出口另有 dropEmptyEnv 兜底，空值永不进入 CM/Secret。
 	dropEmptyEnv(plain)
 	dropEmptyEnv(secret)
+	// 会话隔离派生（issue #142）：k8sName 定型后按服务派生独立 checkpoint 库名与
+	// Redis key 前缀——仅 env 未显式配置时生效，用户显式值优先
+	c.applyIsolationEnv(k8sName, plain, secret)
 	params := applySpec(c.params(k8sName, image, plain, int32Or(req.Replicas), pkg.DirPath), req.Spec)
 	params.EnvSecret = secret
 	// 展示 endpoint 派生 + Ingress overlay 纯函数前置（host 模式）：非法 overlay 直接
@@ -617,16 +622,11 @@ func (c *Core) Delete(id uint) error {
 		return err
 	}
 
-	// 目录清理移出事务：按事务提交后的最终引用计数判定，
-	// 与并发发布（ref_count+1）天然互斥，只有真正归零才清理 PVC 目录。
-	var pkg store.OafPackage
-	if err := c.DB.First(&pkg, svc.PackageID).Error; err == nil && pkg.RefCount <= 0 {
-		if rmErr := c.FS.RemovePackage(pkg.DirPath); rmErr != nil {
-			log.Printf("[delete] remove package dir %s failed: %v", pkg.DirPath, rmErr)
-		} else {
-			log.Printf("[delete] package %d dir %s removed (ref_count=0)", pkg.ID, pkg.DirPath)
-		}
-	}
+	// 包目录不再随服务删除清理（issue #140）：旧逻辑 ref_count 归零即 RemovePackage，
+	// 但 oaf_packages 记录保留，产生「记录在、文件没了」的悬空包（预览/下载/再发布全
+	// 404）。包是独立资产（可再发布、版本链可回溯），与显式删包 API（Packages.Delete，
+	// 记录+目录同删）保持一致：服务删除只递减引用计数，文件保留。
+	// 存量悬空包（目录已清、记录在）无法自动识别，需要管理员经删包 API 手工清理。
 	return nil
 }
 

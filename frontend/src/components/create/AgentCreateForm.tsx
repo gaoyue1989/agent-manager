@@ -21,10 +21,10 @@ export interface AgentFormState {
 }
 
 export const SPEC_CARDS = [
-  { id: "micro", title: "最低配置", sub: "250m/256Mi · 调试/低配节点（默认）" },
-  { id: "small", title: "1核 2G", sub: "0.5 CU · 常规" },
+  { id: "small", title: "1核 2G", sub: "0.5 CU · 常规（默认）" },
   { id: "medium", title: "2核 4G", sub: "1 CU · 生产" },
   { id: "large", title: "4核 8G", sub: "2 CU · 高并发" },
+  { id: "micro", title: "最低配置", sub: "250m/256Mi · ⚠️ 不满足托管 Java 运行时，会被 OOMKilled，仅极轻量自备镜像调试用" },
 ];
 
 function Section({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
@@ -58,7 +58,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     name: initial?.name ?? "", description: initial?.description ?? "",
     image: initial?.image ?? "", modelConnections: initial?.modelConnections ?? [],
     prompt: initial?.prompt ?? "", skills: initial?.skills ?? [], subAgents: initial?.subAgents ?? [],
-    mcpServers: initial?.mcpServers ?? [], spec: initial?.spec || "micro",
+    mcpServers: initial?.mcpServers ?? [], spec: initial?.spec || "small",
     replicas: initial?.replicas || 1, publicEndpoint: initial?.publicEndpoint ?? true,
   });
   const [images, setImages] = useState<ImageOption[]>([]);
@@ -222,7 +222,8 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                   : preview ? `agentKey: ${preview.agentKey} · slug: ${preview.slug} · K8s: ${preview.k8sName}${preview.conflict ? " · ⚠ 重名冲突" : ""}`
                     : "同时作为 K8s 服务名与生成包 agentKey / slug 的派生源"}>
                 <input value={state.name} disabled={mode === "edit"} data-testid="agent-name"
-                  onBlur={(e) => previewName(e.target.value)} onChange={(e) => setState((s) => ({ ...s, name: e.target.value }))}
+                  onBlur={(e) => previewName(e.target.value)}
+                  onChange={(e) => { setMsg(""); setState((s) => ({ ...s, name: e.target.value })); }}
                   className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm disabled:bg-gray-50 disabled:text-gray-500" />
               </Field>
               <Field label="运行镜像（托管 Harness）" hint={mode === "edit" ? "变更镜像将随重发布滚动重启生效" : "托管 Harness 内置 Agent Loop 与 Shell / 文件工具"}>
@@ -249,7 +250,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                         <td className="p-2">
                           <input type="checkbox" checked={state.modelConnections.some((x) => x.connectionId === cn.id)}
                             disabled={cn.status !== "verified"}
-                            onChange={() => toggleConn(cn.id)} className="accent-blue-600" />
+                            onChange={() => { setMsg(""); toggleConn(cn.id); }} className="accent-blue-600" />
                         </td>
                         <td className="p-2 font-medium">{cn.name}<div className="font-mono text-[11px] text-gray-400">{cn.modelId}</div></td>
                         <td className="p-2"><Tag>{connRole(cn.id)}</Tag></td>
@@ -271,7 +272,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
             <Note>提交时按本页填写内容{mode === "edit" ? "生成包新版本（copy-on-write 派生，不影响历史版本）" : "生成全新 OAF 包"}：系统提示词写入包内 AGENTS.md 正文，frontmatter 由表单字段自动派生；SOUL.md、脚本等可在创建后于包编辑器补充。</Note>
             <Field label="系统提示词" required hint={`${state.prompt.length} / 100000 字符 · 提交时写入生成包的 AGENTS.md 正文`}>
               <textarea rows={9} maxLength={100000} value={state.prompt} data-testid="agent-prompt"
-                onChange={(e) => setState((s) => ({ ...s, prompt: e.target.value }))}
+                onChange={(e) => { setMsg(""); setState((s) => ({ ...s, prompt: e.target.value })); }}
                 className="w-full rounded-md border border-gray-300 px-2.5 py-2 font-mono text-xs" />
             </Field>
             <div className="mb-1.5 text-xs text-gray-400">将生成的 OAF 包（预览）</div>

@@ -199,19 +199,25 @@ func buildAgentsMD(fm fmRoot, prompt string) (string, error) {
 
 // mcpConfigYAML 连接器行 → mcp-configs/<name>/config.yaml（M6 §2.3 字段契约）。
 // mode=all 且未声明工具 → 不写 tools 段（运行时按未声明自动放行）。
-func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, permissions string) string {
+// authType=bearer 时输出 auth.token 占位符：真实 token 走服务 Secret env
+// （buildPublishEnv 注入 MCP_TOKEN_<NAME>），运行时 McpToolRegistrar 对 ${ENV}
+// 占位符解析后带 Authorization: Bearer 连接（不落包明文，issue #139）。
+func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, permissions, authType string) string {
 	if timeoutSec <= 0 {
 		timeoutSec = 120
 	}
 	type block struct {
-		Server      string `yaml:"server"`
-		Vendor      string `yaml:"vendor"`
-		Version     string `yaml:"version"`
-		Connection  struct {
+		Server     string `yaml:"server"`
+		Vendor     string `yaml:"vendor"`
+		Version    string `yaml:"version"`
+		Connection struct {
 			Type    string `yaml:"type"`
 			URL     string `yaml:"url"`
 			Timeout int    `yaml:"timeout"`
 		} `yaml:"connection"`
+		Auth *struct {
+			Token string `yaml:"token"`
+		} `yaml:"auth,omitempty"`
 		Permissions struct {
 			Tools map[string]string `yaml:"tools,omitempty"`
 		} `yaml:"permissions,omitempty"`
@@ -230,6 +236,11 @@ func mcpConfigYAML(name, transport, endpoint string, timeoutSec int, toolScope, 
 	}
 	b.Connection.URL = endpoint
 	b.Connection.Timeout = timeoutSec
+	if authType == "bearer" {
+		b.Auth = &struct {
+			Token string `yaml:"token"`
+		}{Token: "${MCP_TOKEN_" + sanitizeEnvKey(name) + "}"}
+	}
 	var perm struct {
 		Tools map[string]string `json:"tools"`
 	}
@@ -349,7 +360,7 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 			return nil, fmt.Errorf("%w: mcp connector %d not found", ErrInvalidForm, ref.ConnectorID)
 		}
 		files["mcp-configs/"+conn.Name+"/config.yaml"] =
-			[]byte(mcpConfigYAML(conn.Name, conn.Transport, conn.Endpoint, conn.TimeoutSec, conn.ToolScope, conn.Permissions))
+			[]byte(mcpConfigYAML(conn.Name, conn.Transport, conn.Endpoint, conn.TimeoutSec, conn.ToolScope, conn.Permissions, conn.AuthType))
 	}
 	return files, nil
 }

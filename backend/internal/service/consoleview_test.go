@@ -2,6 +2,8 @@
 package service
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"agent-manager/backend/internal/store"
@@ -22,24 +24,44 @@ func TestConsoleSummaryAndAgents(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// 造事件：概览「最近发布」时间线（join services 过滤本空间，倒序 10 条）
+	for i, st := range []string{store.StatusRunning, store.StatusError} {
+		svc := &store.ServiceEntity{K8sName: "oaf-ev-" + itoa(uint(i+30)), DisplayName: "ev" + itoa(uint(i+30)),
+			PackageID: 1, WorkspaceID: ws.ID, Status: st}
+		if err := c.DB.Create(svc).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := c.DB.Create(&store.ServiceEvent{ServiceID: svc.ID, FromStatus: store.StatusCreated,
+			ToStatus: st, Reason: "publish requested"}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
 	sum, err := c.ConsoleSummary(ws.ID)
 	if err != nil {
 		t.Fatalf("summary: %v", err)
 	}
-	if sum.Agents.Total != 4 || sum.Agents.Running != 2 || sum.Agents.Error != 1 || sum.Agents.Stopped != 1 {
+	if sum.Agents.Total != 6 || sum.Agents.Running != 3 || sum.Agents.Error != 2 || sum.Agents.Stopped != 1 {
 		t.Fatalf("counts: %+v", sum.Agents)
+	}
+	// 时间线非空（漏赋值时恒空数组，issue #144）且字段映射正确
+	if len(sum.RecentEvents) != 2 {
+		t.Fatalf("recentEvents: %+v", sum.RecentEvents)
+	}
+	if sum.RecentEvents[0].DisplayName == "" || sum.RecentEvents[0].ToStatus == "" || sum.RecentEvents[0].ServiceID == 0 {
+		t.Fatalf("recentEvent mapping: %+v", sum.RecentEvents[0])
 	}
 
 	list, err := c.ConsoleAgents(ws.ID, "", "")
-	if err != nil || len(list) != 4 {
+	if err != nil || len(list) != 6 {
 		t.Fatalf("agents: %v n=%d", err, len(list))
 	}
-	if list[0].Model != "qwen-plus" {
-		t.Fatalf("model from env: %+v", list[0])
+	byName, _ := c.ConsoleAgents(ws.ID, "", "svc10")
+	if len(byName) != 1 || byName[0].Model != "qwen-plus" {
+		t.Fatalf("model from env: %+v", byName)
 	}
 	// 状态过滤
 	running, _ := c.ConsoleAgents(ws.ID, store.StatusRunning, "")
-	if len(running) != 2 {
+	if len(running) != 3 {
 		t.Fatalf("status filter: %d", len(running))
 	}
 	// 关键字过滤
@@ -110,4 +132,38 @@ func TestTemplatesListAndToggle(t *testing.T) {
 		t.Fatalf("templates after toggle: %+v", tpl)
 	}
 	_ = ws
+}
+
+// TestSpaceSkillsUsedByNotNull 未被引用的技能 usedBy 必须序列化为 []（nil → null 会让
+// 前端直接取 length 整页崩，issue #138）；被引用时回填服务显示名。
+func TestSpaceSkillsUsedByNotNull(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-66660006", "技能空间")
+	pkg := uploadTestPkg(t, c, "")
+	if err := c.DB.Model(&store.OafPackage{}).Where("id = ?", pkg.ID).
+		Update("manifest_json", `{"skills":[{"name":"skill-a","description":"d-a"}]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 未被引用：usedBy = []（JSON 层面断言非 null）
+	items, err := c.SpaceSkills(ws.ID, "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items: %v n=%d", err, len(items))
+	}
+	b, _ := json.Marshal(items[0])
+	if !strings.Contains(string(b), `"usedBy":[]`) {
+		t.Fatalf("usedBy must serialize as [], got: %s", b)
+	}
+
+	// 空间内服务引用该包：usedBy = [显示名]
+	svc := &store.ServiceEntity{K8sName: "oaf-skill-ref", DisplayName: "引用方",
+		PackageID: pkg.ID, WorkspaceID: ws.ID, Status: store.StatusRunning}
+	if err := c.DB.Create(svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	items, _ = c.SpaceSkills(ws.ID, "")
+	if len(items) != 1 || len(items[0].UsedBy) != 1 || items[0].UsedBy[0] != "引用方" {
+		t.Fatalf("usedBy ref: %+v", items)
+	}
 }

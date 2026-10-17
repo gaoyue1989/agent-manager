@@ -25,6 +25,9 @@ data:
     CREATE DATABASE IF NOT EXISTS oaf_checkpoint DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     GRANT ALL ON oaf_platform.* TO 'oaf'@'%';
     GRANT ALL ON oaf_checkpoint.* TO 'oaf'@'%';
+    -- 会话隔离派生（issue #142）：per-service checkpoint 库（oaf_checkpoint_<k8s 名>）
+    -- 由业务 Pod 首连自动建库（createDatabaseIfNotExist=true），账号需模式级建库权限
+    GRANT ALL ON `oaf_checkpoint\_%`.* TO 'oaf'@'%';
     FLUSH PRIVILEGES;
 ---
 apiVersion: v1
