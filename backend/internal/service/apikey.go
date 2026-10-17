@@ -65,8 +65,8 @@ func (c *Core) IssueApiKey(in IssueApiKeyInput) (*store.ApiKey, string, error) {
 	if err := c.DB.Create(rec).Error; err != nil {
 		return nil, "", err
 	}
-	c.recordAudit("api_key.issue", rec.KeyPrefix, map[string]interface{}{
-		"kind": "api_key.issue", "actor": in.UserID, "name": in.Name,
+	c.recordAudit("api_key.issue", rec.KeyPrefix, in.UserID, map[string]interface{}{
+		"kind": "api_key.issue", "name": in.Name,
 	})
 	return rec, plain, nil
 }
@@ -101,8 +101,8 @@ func (c *Core) ListApiKeys(workspaceID uint, agentID uint) ([]ApiKeyView, error)
 	return out, nil
 }
 
-// RevokeApiKey 吊销（行保留审计）。
-func (c *Core) RevokeApiKey(workspaceID, id uint) error {
+// RevokeApiKey 吊销（行保留审计；actor 记操作者）。
+func (c *Core) RevokeApiKey(actor, workspaceID, id uint) error {
 	res := c.DB.Model(&store.ApiKey{}).
 		Where("id = ? AND workspace_id = ?", id, workspaceID).
 		Update("status", "revoked")
@@ -112,7 +112,7 @@ func (c *Core) RevokeApiKey(workspaceID, id uint) error {
 	if res.RowsAffected == 0 {
 		return ErrNotFound
 	}
-	c.recordAudit("api_key.revoke", fmt.Sprintf("key-%d", id), map[string]interface{}{
+	c.recordAudit("api_key.revoke", fmt.Sprintf("key-%d", id), actor, map[string]interface{}{
 		"kind": "api_key.revoke", "workspace": workspaceID,
 	})
 	return nil

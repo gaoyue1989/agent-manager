@@ -106,9 +106,11 @@ func (c *Core) ListIntegrations(workspaceID uint) (*IntegrationList, error) {
 	return &IntegrationList{Relations: relations, Candidates: candidates}, nil
 }
 
-// probeAgentCard 候选探测：GET {svc}:8100/agent-card.json（protocolEnabled=false 不探测）。
+// probeAgentCard 候选探测：GET {svc}:8100/.well-known/agent-card.json（protocolEnabled=false
+// 不探测）。路径与 A2A 注册链路（register.go fetchCard）一致——A2A 规范卡片固定在
+// /.well-known/ 下，缺前缀会全部误判 unreachable（issue #137）。
 func probeAgentCard(client *http.Client, clusterURL string) bool {
-	resp, err := client.Get(strings.TrimRight(clusterURL, "/") + "/agent-card.json")
+	resp, err := client.Get(strings.TrimRight(clusterURL, "/") + "/.well-known/agent-card.json")
 	if err != nil {
 		return false
 	}

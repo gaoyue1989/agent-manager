@@ -71,6 +71,7 @@ func (c *Core) ConsoleSummary(workspaceID uint) (*SummaryView, error) {
 	if err != nil {
 		return nil, err
 	}
+	sv.RecentEvents = events // 扫描结果回写视图（漏赋值会让时间线恒空，issue #144）
 	if sv.RecentEvents == nil {
 		sv.RecentEvents = []SummaryEvent{} // 空时间线序列化 []（nil → null）
 	}
@@ -267,6 +268,11 @@ func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, 
 		if keyword != "" && !strings.Contains(p.Name, keyword) && !strings.Contains(p.Slug, keyword) {
 			// 包名不匹配也继续——技能名可能匹配
 		}
+		// 无引用的包 usedBy 为 nil：JSON 序列化成 null，前端直接取 length 崩（issue #138）
+		ub := usedBy[p.ID]
+		if ub == nil {
+			ub = []string{}
+		}
 		manifest := p.ManifestJSON
 		var cfg struct {
 			Skills []struct {
@@ -285,7 +291,7 @@ func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, 
 				Name: s.Name, Description: s.Description,
 				PackageID: p.ID, PackageSlug: p.Slug, PackageVersion: p.Version,
 				WorkspaceID: p.WorkspaceID, Declared: true,
-				UsedBy: usedBy[p.ID],
+				UsedBy: ub,
 			})
 			seen[fmt.Sprintf("%d/%s", p.ID, s.Name)] = true
 		}
@@ -310,7 +316,7 @@ func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, 
 								Name: name, Description: desc,
 								PackageID: p.ID, PackageSlug: p.Slug, PackageVersion: p.Version,
 								WorkspaceID: p.WorkspaceID, Declared: false,
-								UsedBy: usedBy[p.ID],
+								UsedBy: ub,
 							})
 							seen[key] = true
 						}

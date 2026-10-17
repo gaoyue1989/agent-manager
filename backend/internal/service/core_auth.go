@@ -27,12 +27,17 @@ func (c *Core) GetUser(id uint) (*store.User, error) {
 
 // recordAudit 治理/凭证类审计事件：写 service_events 同表（service_id=0，reason 编码
 // kind/actor/detail JSON），避免一期建独立 audit_logs 表（M1 §2.4 设计决议）。
+// actor 为操作者用户 id（数字写入；读取侧 AuditLogs 按 id 回查显示名）——缺失时审计
+// 无法追溯操作者（issue #143），handler 层从 JWT 中间件取 uid 传入。
 // 非事务上下文调用（治理动作为单行写，失败仅记日志不回滚主操作）。
-func (c *Core) recordAudit(action, object string, detail map[string]interface{}) {
+func (c *Core) recordAudit(action, object string, actor uint, detail map[string]interface{}) {
 	if detail["kind"] == nil {
 		detail["kind"] = action
 	}
 	detail["object"] = object
+	if actor > 0 && detail["actor"] == nil {
+		detail["actor"] = actor
+	}
 	b, _ := json.Marshal(detail)
 	if len(b) > 512 {
 		b = b[:512]

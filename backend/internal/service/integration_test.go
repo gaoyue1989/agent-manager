@@ -19,10 +19,14 @@ func TestIntegrationCRUDAndProbe(t *testing.T) {
 	defer done()
 	ws := seedWs(t, c, "ws-2000bbb1", "集成空间")
 
-	// 候选探测三态：online（假 agent-card）/ unreachable / skipped（未开启协议）
+	// 候选探测三态：online（假 agent-card）/ unreachable / skipped（未开启协议）。
+	// 路径精确断言 /.well-known/agent-card.json：HasSuffix 会同时放过错误路径
+	// /agent-card.json，掩盖探活路径错误（issue #137）
 	online := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/agent-card.json") {
+		if r.URL.Path == "/.well-known/agent-card.json" {
 			_, _ = w.Write([]byte(`{"name":"member","version":"1.0.0"}`))
+		} else {
+			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	defer online.Close()
@@ -146,7 +150,7 @@ func TestApiKeyLifecycle(t *testing.T) {
 		}
 	}
 	// 吊销
-	if err := c.RevokeApiKey(ws.ID, rec.ID); err != nil {
+	if err := c.RevokeApiKey(1, ws.ID, rec.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	var fresh store.ApiKey
@@ -199,7 +203,7 @@ func TestIntrospectApiKeyChannel(t *testing.T) {
 		t.Fatalf("scope mismatch: %d", w2.Code)
 	}
 	// 吊销后即时 403
-	_ = c.RevokeApiKey(ws.ID, rec.ID)
+	_ = c.RevokeApiKey(1, ws.ID, rec.ID)
 	req3, _ := http.NewRequest(http.MethodGet, "http://router/api/v1/auth/introspect", nil)
 	req3.Header.Set("Authorization", "Bearer "+plain)
 	w3 := httptest.NewRecorder()

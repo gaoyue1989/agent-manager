@@ -31,7 +31,7 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 				Fail(c, http.StatusBadRequest, err.Error())
 				return
 			}
-			w, err := core.AdminCreateWorkspace(in)
+			w, err := core.AdminCreateWorkspace(c.GetUint("uid"), in)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -84,7 +84,7 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 				Fail(c, http.StatusBadRequest, "serviceId is required")
 				return
 			}
-			svc, err := core.BindService(parseUint(c.Param("id")), body.ServiceID)
+			svc, err := core.BindService(c.GetUint("uid"), parseUint(c.Param("id")), body.ServiceID)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -112,7 +112,7 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 			if body.Role == "" {
 				body.Role = "member"
 			}
-			m, err := core.AddMember(parseUint(c.Param("id")), body.UserID, body.Role)
+			m, err := core.AddMember(c.GetUint("uid"), parseUint(c.Param("id")), body.UserID, body.Role)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -127,14 +127,14 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 				Fail(c, http.StatusBadRequest, err.Error())
 				return
 			}
-			if err := core.UpdateMemberRole(parseUint(c.Param("id")), parseUint(c.Param("uid")), body.Role); err != nil {
+			if err := core.UpdateMemberRole(c.GetUint("uid"), parseUint(c.Param("id")), parseUint(c.Param("uid")), body.Role); err != nil {
 				mapError(c, err)
 				return
 			}
 			OK(c, nil)
 		})
 		ws.DELETE("/:id/members/:uid", func(c *gin.Context) {
-			if err := core.RemoveMember(parseUint(c.Param("id")), parseUint(c.Param("uid"))); err != nil {
+			if err := core.RemoveMember(c.GetUint("uid"), parseUint(c.Param("id")), parseUint(c.Param("uid"))); err != nil {
 				mapError(c, err)
 				return
 			}
@@ -166,7 +166,7 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 			if body.Role == "" {
 				body.Role = "user"
 			}
-			u, err := core.AdminCreateUser(body.Username, body.Password, body.DisplayName, body.Role)
+			u, err := core.AdminCreateUser(c.GetUint("uid"), body.Username, body.Password, body.DisplayName, body.Role)
 			if err != nil {
 				mapError(c, err)
 				return

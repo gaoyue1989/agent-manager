@@ -223,7 +223,7 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 				Fail(c, http.StatusBadRequest, "adopt mode requires adoptServiceId")
 				return
 			}
-			svc, err := core.BindService(wsID, *form.AdoptServiceID)
+			svc, err := core.BindService(uid, wsID, *form.AdoptServiceID)
 			if err != nil {
 				mapError(c, err)
 				return
@@ -729,7 +729,7 @@ func registerConsoleApiKeys(cg *gin.RouterGroup, core *service.Core) {
 			return
 		}
 		wsID, _, _ := wsCtx(c)
-		if err := core.RevokeApiKey(wsID, parseUint(c.Param("id"))); err != nil {
+		if err := core.RevokeApiKey(c.GetUint("uid"), wsID, parseUint(c.Param("id"))); err != nil {
 			mapError(c, err)
 			return
 		}
@@ -777,7 +777,7 @@ func registerConsoleMembers(cg *gin.RouterGroup, core *service.Core) {
 		if body.Role == "" {
 			body.Role = "member"
 		}
-		m, err := core.AddMember(wsID, body.UserID, body.Role)
+		m, err := core.AddMember(c.GetUint("uid"), wsID, body.UserID, body.Role)
 		if err != nil {
 			mapError(c, err)
 			return
@@ -796,7 +796,7 @@ func registerConsoleMembers(cg *gin.RouterGroup, core *service.Core) {
 			Fail(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := core.UpdateMemberRole(wsID, parseUint(c.Param("uid")), body.Role); err != nil {
+		if err := core.UpdateMemberRole(c.GetUint("uid"), wsID, parseUint(c.Param("uid")), body.Role); err != nil {
 			mapError(c, err)
 			return
 		}
@@ -807,7 +807,7 @@ func registerConsoleMembers(cg *gin.RouterGroup, core *service.Core) {
 			return
 		}
 		wsID, _, _ := wsCtx(c)
-		if err := core.RemoveMember(wsID, parseUint(c.Param("uid"))); err != nil {
+		if err := core.RemoveMember(c.GetUint("uid"), wsID, parseUint(c.Param("uid"))); err != nil {
 			mapError(c, err)
 			return
 		}
