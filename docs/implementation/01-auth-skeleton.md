@@ -5,6 +5,8 @@
 | 依赖 | 无（首个模块） |
 | 对应设计 | §5 身份与鉴权、§6 数据模型与迁移、§10 前端信息架构、§12 P0 |
 | demo 对照 | 登录页 `#oaLogin`（开发者/管理员双角色卡）、顶栏 `oa-top`、运维侧导航 `#navAdmin` |
+> **实装与验收**：页面实拍 [../screenshots/console-split/01-login.png](../screenshots/console-split/01-login.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m0-auth.sh](../../e2e/console-split/m0-auth.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：§5 列出的 jwt/auth/migrate/router 四组测试全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（核心 job 扩展）：登录→双侧骨架可达、存量 URL 重定向（`/services/1`→`/admin/services/1`）、四必需 job 保持全绿；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 

@@ -5,6 +5,8 @@
 | 依赖 | M2（console 骨架）、M3（创建页勾选与发布注入）、M4（调试 Tab 挂模型下拉） |
 | 对应设计 | §3.2「模型连接」行、§8.4；对标 AgentCore 模型管理（[help.aliyun.com/zh/agentcore/model-management](https://help.aliyun.com/zh/agentcore/model-management)，add-connection 形态）；下发目标契约 [agent-framework/docs/session-model-switch-design.md](../../agent-framework/docs/session-model-switch-design.md)（已实施） |
 | demo 对照 | `c/models`（连接配置表 + Agent 使用情况表 + 新建表单预览）、创建页「模型连接」多选勾选表 |
+> **实装与验收**：页面实拍 [../screenshots/console-split/07-assets-models.png](../screenshots/console-split/07-assets-models.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m5-model-connection.sh](../../e2e/console-split/m5-model-connection.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 | 上游参考 | M6（MCP 连接器）——两者同构：**先配置、测试，再经创建/更新 Agent 勾选下发，并展示 Agent 使用情况** |
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：modelconn CRUD/掩码/test 三分支/deliver 幂等（假 agent `/models` 计数断言）/usage 三态聚合全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（脚本 model-switch）：建连接→测试→创建 Agent 勾选→running 后 usage pending→synced→调试切换两轮（下发模型↔system）断言 session_user.model→删连接 usage 标记 removed；release-agent/远端停机降级为手工项（PR 附记录）；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。

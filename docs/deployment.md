@@ -61,6 +61,17 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 > 转档 = `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
 > 后 rollout restart，回滚同路径改回 off；enforce 前须先在控制台签发 API Key 或以 JWT 调用）。
 
+### 控制台拆分按功能 e2e（e2e/console-split/）
+
+部署后一键回归（180+ 断言，M0–M8 九模块；M9 enforce 三态需独立环境）：
+
+```bash
+BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_API_KEY=.. LLM_BASE_URL=.. LLM_MODEL=..]   # 缺省自动从 release-agent env 读取
+  bash e2e/console-split/run-all.sh               # 全跑；或传模块号 m0 m3 ... 选择性跑
+```
+
+实装截图画廊：[docs/screenshots/console-split/README.md](screenshots/console-split/README.md)。
+
 ## 四、自举发布助手
 
 浏览器打开前端 → 上传 `release-agent/` 打包的 zip（或直接调 API）→ 发布：

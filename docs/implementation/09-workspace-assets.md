@@ -5,6 +5,8 @@
 | 依赖 | M2（骨架）；凭证作用域联动 M3/M4 |
 | 对应设计 | §8.4 资产管理、§3.2 映射行、§13 决议 7 |
 | demo 对照 | `c/skills`、`c/memory`、`c/credentials`、`c/templates`、`c/members`、`c/knowledge`、`c/obs` |
+> **实装与验收**：页面实拍 [../screenshots/console-split/12-assets-credentials.png](../screenshots/console-split/12-assets-credentials.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m8-workspace-assets.sh](../../e2e/console-split/m8-workspace-assets.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：apikey 签发格式/哈希/作用域/吊销过期惰性判定等全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（脚本 workspace-assets）：API Key 签发（明文仅一次）/作用域过滤/吊销即时生效、成员角色变化即时生效、Skill L4 增删对调试即时生效、模板「去导入」链路；③§9 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 

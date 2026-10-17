@@ -111,6 +111,9 @@ M0 ──▶ M1 ─┐
 > - 业务面零影响：既有 8 个业务 Pod 全部为升级前启动（原则一实战核验）；`/login` 循环重定向、存量服务 NULL 回填、重复用户名 500、admin 隐式成员、LLM_MODEL_ID 旧键跟随等 6 个部署期缺陷已修复并补回归单测
 > - 宿主机统一入口 :8911 已确认服务新前端（/login 200、/ 307→/login）；浏览器如见旧版为本地缓存，强刷即可
 >
+> **实装截图画廊**：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)——24 张 kind 集群实拍
+> （登录/用户侧全页群/详情六 Tab/模型连接抽屉/运维侧治理页），与各模块文档「demo 对照」锚点一一对应。
+>
 > **2026-10-17 按功能 e2e 套件（e2e/console-split/，九模块全 PASS）**：
 > lib.sh 公共断言库 + m0-auth～m8-workspace-assets 八个模块脚本 + run-all.sh 聚合 runner，180+ 断言，
 > 覆盖实施文档各模块「测试要点」的可自动化部分（登录三分支/路由分层矩阵/治理全链/resolveWorkspace

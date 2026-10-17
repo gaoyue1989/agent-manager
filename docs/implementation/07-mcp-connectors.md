@@ -5,6 +5,8 @@
 | 依赖 | M2（console 骨架）；注入生效依赖 M3（生成器消费连接器） |
 | 对应设计 | §3.2「工具管理（MCP）」行、§8.4；对标 AgentCore tools/create |
 | demo 对照 | `c/tools`（连接器配置表 + 新建表单预览 + 三态权限默认策略） |
+> **实装与验收**：页面实拍 [../screenshots/console-split/09-assets-tools.png](../screenshots/console-split/09-assets-tools.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m6-mcp-connector.sh](../../e2e/console-split/m6-mcp-connector.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：mcpconnector CRUD/verify 三分支/refCount + agentgen config.yaml golden 全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（脚本 mcp-connector）：连接器 verify（以平台自身 `/mcp` 为靶）→创建 Agent 勾选→包 config.yaml 断言→Secret 含 `MCP_TOKEN_*` 且包内无 token；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 

@@ -5,6 +5,8 @@
 | 依赖 | M2（console 骨架）；写入生效依赖 M3（生成器消费集成关系） |
 | 对应设计 | §3.2「集成其它 Agent」行、§8.4；上游机制 [../design/travel-fulfillment-agent-protocol-design.md](../design/travel-fulfillment-agent-protocol-design.md)（已实施） |
 | demo 对照 | `c/integrations`（已建立集成关系表 + 可注册端点表） |
+> **实装与验收**：页面实拍 [../screenshots/console-split/06-console-integrations.png](../screenshots/console-split/06-console-integrations.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m7-integration.sh](../../e2e/console-split/m7-integration.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：integration 候选探测三态/endpoint 派生/重复 409/引用保护 + agentgen subAgents golden 全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（协议多副本 job 扩展 + 声明链路断言）：集成登记→创建 lead→spawn 一轮子任务回流（可用 travel demo 双服务形态）；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 

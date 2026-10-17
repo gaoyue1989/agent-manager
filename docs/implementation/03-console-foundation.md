@@ -5,6 +5,8 @@
 | 依赖 | M0；M1 的纳管端点（可选增强，非阻塞） |
 | 对应设计 | §7.2 console API、§8.1 概览、§8.2 列表、§10 前端信息架构、§10.3 proxy |
 | demo 对照 | `(console)` 布局与 `navConsole`、`c/overview` 概览、`c/agents` Agent 列表、`oa-ws` 工作空间切换器 |
+> **实装与验收**：页面实拍 [../screenshots/console-split/02-console-overview.png](../screenshots/console-split/02-console-overview.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m2-console-foundation.sh](../../e2e/console-split/m2-console-foundation.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：console/consoleview 两组测试全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（核心 job 扩展）：概览/列表渲染、proxy 注入 `X-User-Id`（业务侧 session_user 前缀断言）、assistant 页回归零差异；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 

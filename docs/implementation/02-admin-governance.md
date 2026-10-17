@@ -5,6 +5,8 @@
 | 依赖 | M0（表与鉴权中间件） |
 | 对应设计 | §9 运维侧调整、§7.3 admin API |
 | demo 对照 | `a/overview` 平台概览、`a/workspaces` 工作空间管理、`a/users` 用户管理、`a/audit` 审计、`a/services` 服务列表（工作空间列） |
+> **实装与验收**：页面实拍 [../screenshots/console-split/21-admin-workspaces.png](../screenshots/console-split/21-admin-workspaces.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m1-governance.sh](../../e2e/console-split/m1-governance.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：governance/admin 两组测试全绿（`cd backend && make test`）+ `cd frontend && npm run lint && npm run build`；②e2e（新脚本 governance，首版非必需 job）：admin 建号→建空间→bind 存量服务→服务列表归属断言；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 

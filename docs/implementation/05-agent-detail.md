@@ -5,6 +5,8 @@
 | 依赖 | M2（console 骨架 + proxy）；凭证 Tab 的 API Key 签发依赖 M8（可先渲染空态） |
 | 对应设计 | §7.2 console API、§8.3 Agent 详情 |
 | demo 对照 | `c/detail`（六 Tab + SSE 调试对话 + HITL 确认卡示例） |
+> **实装与验收**：页面实拍 [../screenshots/console-split/16-agent-detail-overview.png](../screenshots/console-split/16-agent-detail-overview.png)（画廊：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)）；
+> e2e 套件 [../../e2e/console-split/m4-agent-detail.sh](../../e2e/console-split/m4-agent-detail.sh)（kind 集群实跑 PASS，2026-10-17；聚合入口 [run-all.sh](../../e2e/console-split/run-all.sh)）。
 
 > **完成定义（DoD，硬性门槛）**：本模块标记完成必须**单测 + e2e 双绿**——①单测：console 动作端点角色矩阵全绿（`cd backend && make test`）+ 前端既有 `assistant-events.test.mjs` / `confirm-card.test.mjs` 不动全绿（证明组件抽取无损）+ `npm run lint && npm run build`；②e2e（核心 job）：详情六 Tab、调试对话含一次 ask 确认、会话用户隔离、下线；assistant 页回归；③§4 验收清单全勾。PR 附 CI run 与 e2e 证据链接，缺一不可。
 
