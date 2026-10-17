@@ -38,20 +38,28 @@ DELETE /api/v1/console/workspaces/:ws/api-keys/:id   // 吊销（status=revoked�
 
 Agent 详情 Tab6（M4 留位）：过滤 `agentId=当前` 的列表 + curl 示例块（endpoint 真实值替换）。
 
-## 3. Skill 管理
+## 3. Skill 管理（口径修订 2026-10-17：OAF 包配置技能清单）
 
-### 3.1 页面（`assets/skills/page.tsx` 新建，对照 demo `c/skills`）
+> **口径修订**：页面不再涉及 L4 用户技能/运行时分级概念——技能分级是 Agent 运行时的加载概念，
+> 本页只做 **OAF 包配置技能**的展示与查询。技能的新增/修改/删除 = Agent 编辑页（copy-on-write
+> 生成新版本包）或包编辑器，页面提供入口而非直接操作。
 
-- 左：「本空间用户技能（L4）」表（技能/描述/作者/状态/停用·删除）+「上传技能」按钮；
-- 右：「包级技能（随 OAF 包 · 只读）」tag 列表（聚合本空间各服务包的 skills 声明）+ 注（demo 原文）：编辑包级技能请进入 Agent 详情 → 版本 → 编辑（copy-on-write）。
+### 3.1 页面（assets/skills/page.tsx 重写）
 
-### 3.2 实现口径（重要）
+- 数据源：`GET /console/workspaces/:ws/skills?keyword=`（新增端点）——遍历空间可见包
+  （公共 workspace_id=0 + 本空间，决议 7），聚合两类条目：
+  - **frontmatter skills 声明**（`declared: true`）：解析包 manifest 的 skills 段（name/description）；
+  - **包内 skills/ 目录扫描**（`declared: false`）：`skills/<name>/SKILL.md` 的 frontmatter
+    description 字段（缺失取首个正文行）——目录是事实来源，声明是意图，未声明也列出；
+- 按包分组展示：包头（slug/版本/公共标记/被引用服务/「包编辑器」与「经 Agent 编辑添加技能」入口）+
+  技能表（名称 mono/描述/来源 Badge）；关键字过滤（技能名/描述）+「仅看 frontmatter 声明」开关；
+- 原上传/停用/删除操作与「所选 Agent 直连 L4」交互全部移除（M8 §10 对应用例作废）。
 
-L4 技能存储在 **agent-framework 实例内**（per-service KV `/skills/users`，userId 命名空间）。空间级管理页取数目标：
+### 3.2 实现口径
 
-- 页面顶部 Agent 下拉（本空间 running 服务）；
-- L4 CRUD 直连所选 Agent（经 proxy `/agent/{short}/skills/users`，带 `X-User-Id`——**注意 L4 是 per-user 的**：管理页操作的是「当前登录用户」的技能集；跨成员共享语义（demo「本空间共享」）一期降级为「空间 owner/admin 各自维护自己的 L4」，页面副标题如实标注；跨用户 L4 共享列远期）；
-- 包级只读：`services.skills_json` 聚合（注册时已落库）。
+- 后端：`SpaceSkills` 聚合（consoleview.go）+ `GET /console/workspaces/:ws/skills` 路由；
+  引用标注 = 空间内运行包 id 反查服务 displayName；
+- 运行时技能分级（L1-L4）仍由 agent-framework 维护，零改动。
 
 ## 4. 记忆空间
 
@@ -106,3 +114,4 @@ L4 技能存储在 **agent-framework 实例内**（per-service KV `/skills/users
 
 - `apikey_test.go`：签发格式与前缀、sha256 落库、明文不回读（列表无 hash 字段）、吊销/过期状态惰性判定、作用域过滤。
 - 手工：双账号验证成员权限变化即时生效（role 查询为请求期裁决）。
+- ~~Skill L4 增删对调试即时生效~~（口径修订后作废：本页只做包配置技能展示，无 L4 操作）。

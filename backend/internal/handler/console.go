@@ -96,6 +96,21 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		OK(c, images)
 	})
 
+	// 空间技能清单（OAF 包配置技能聚合：frontmatter skills 声明 + 包内 skills/ 目录扫描）
+	cg.GET("/workspaces/:ws/skills", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.SpaceSkills(wsID, c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
+
 	// 空间包列表（决议 7：公共包（workspace_id=0）全空间可见 + 本空间包）
 	cg.GET("/workspaces/:ws/packages", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)

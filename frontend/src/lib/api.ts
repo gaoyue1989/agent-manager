@@ -254,6 +254,10 @@ export const api = {
       remove: (ws: number | string, userId: number) => request(`/console/workspaces/${ws}/members/${userId}`, { method: "DELETE" }),
       invitable: (ws: number | string) => request<UserView[]>(`/console/workspaces/${ws}/invitable-users`),
     },
+    // 空间技能清单（OAF 包配置技能聚合：frontmatter skills 声明 + 包内 skills/ 目录）
+    spaceSkills: (ws: number | string, keyword = "") =>
+      request<{ name: string; description: string; packageId: number; packageSlug: string; packageVersion: string; workspaceId: number; declared: boolean; usedBy: string[] }[]>(
+        `/console/workspaces/${ws}/skills?keyword=${encodeURIComponent(keyword)}`),
     // 空间包（import 模式数据源：公共包 + 本空间包，决议 7）
     packages: (ws: number | string, keyword = "") =>
       request<PackageRec[]>(`/console/workspaces/${ws}/packages?keyword=${encodeURIComponent(keyword)}`),

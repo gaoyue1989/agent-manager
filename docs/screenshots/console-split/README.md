@@ -40,7 +40,7 @@
 | [07b-assets-models-runtime.png](07b-assets-models-runtime.png) | Agent 使用情况**卡片式视图**：每 Agent 一卡——头部（默认模型/下发状态徽标/下发按钮）+ 本空间连接下发明细（状态色点）+ 运行时模型清单（系统/存量/已下发来源色分 + 默认星标，hover 看 model_id@baseUrl） |
 | [09-assets-tools.png](09-assets-tools.png) | 工具管理：MCP 连接器表（platform-mcp 平台内置置顶）+ 三态权限策略表 |
 | [09-assets-tools-drawer.png](09-assets-tools-drawer.png) | 新建 MCP 连接器右侧抽屉（slide-over，与模型连接页同交互）：保存后自动 initialize + tools/list 验证 |
-| [10-assets-skills.png](10-assets-skills.png) | Skill 管理：L4 用户技能（所选 Agent 直连，per-user 如实标注）+ 包级技能只读聚合 |
+| [10-assets-skills.png](10-assets-skills.png) | Skill 管理：**OAF 包配置技能清单**（按包分组：frontmatter skills 声明 + 包内 skills/ 目录扫描，来源标注/描述/被引用/编辑入口）。口径修订：去 L4 运行时分级，只做配置展示与查询 |
 | [11-assets-memory.png](11-assets-memory.png) | 记忆空间：按 Agent×用户只读会话聚合；API 调用身份占位说明（不造假数据） |
 | [12-assets-credentials.png](12-assets-credentials.png) | 凭证管理：工作空间级 API Key 表 + 签发弹窗（作用域全空间/单 Agent + 有效期） |
 | [15-console-knowledge.png](15-console-knowledge.png) | 知识库占位页（规划中，一期经 MCP 连接器接入外部检索） |

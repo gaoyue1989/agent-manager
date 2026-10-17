@@ -102,7 +102,7 @@ AGENT 协作
 | 纳管 Agent | 存量服务挂 workspace 归属 | 无归属字段 | 运维/管理员把无主服务纳管进工作空间 |
 | Agent 模板 | 精选 OAF 包（打 `template` 标记） | 包体系已有 | **不作为创建入口**；模板页保留为公共包浏览，复用其资产走「导入 OAF 包」方式派生（copy-on-write） |
 | 模型连接 | 工作空间级模型连接配置（backend 自有表）→ 下发至 Agent 的 `/models` 接口（model_config，见 agent-framework/docs/session-model-switch-design.md） | 框架侧 CRUD+test+会话级切换已实施；连接配置/下发/使用展示为新建 | 用户侧模型连接页 = 连接 CRUD + 连通性测试 + **下发**（配置同步到 Agent 的 `POST/PATCH /models`，幂等）+ **Agent 使用情况展示**（每 Agent 已同步连接/默认模型/同步状态）；调试对话模型切换走 `POST /threads/chat {model}`（数据源 = 该 Agent 自己的 `/models`） |
-| Skill 管理 | `/skills`（L2/L3 包级）+ `/skills/users`（L4 用户级） | 已有完整管理面 | 用户侧 Skill 页对接 L4 + L2/L3 只读 |
+| Skill 管理 | OAF 包的配置技能（frontmatter skills 声明 + 包内 skills/ 目录） | 已有完整管理面 | 用户侧 Skill 页 = **包配置技能清单**（展示与查询：按包分组/来源标注/被引用/编辑入口）；技能新增修改经 Agent 编辑页 copy-on-write。**不做运行时分级（L1-L4）管理**——分级是 Agent 运行时概念（2026-10-17 口径修订） |
 | 工具管理（MCP） | 工作空间级 MCP 连接器配置（backend 自有表）→ Agent 创建/更新时勾选，发布时注入生成包（`mcpServers`/`mcp-configs`） | 包声明已有；连接器配置为新建 | 用户侧工具页 = MCP 配置创建/维护（对标 AgentCore tools/create）；已发布 Agent 的运行时枚举（`/tools` `/mcp`）与三态权限只读展示 |
 | 集成其它 Agent（远程子 agent） | Agent Protocol 远程 SubAgent（`SubagentDeclaration.url` → 对端 `POST /tasks`，见 travel-fulfillment-agent-protocol-design.md） | M1 已实施（双服务实测 + e2e 协议多副本门禁） | 用户侧「集成 Agent」页：登记可集成的 Agent 端点与 lead→member 集成关系；创建页资产配置区勾选 → 写入生成包 `subAgents[].endpoint` |
 | 知识库 | —— | 无 | 仅占位入口，标注「规划中」（经 MCP 接入同 AgentCore 思路） |
@@ -481,7 +481,7 @@ src/app/
 ### 14.1 实装截图（2026-10-17 部署验证实拍）
 
 实施完成后按 demo 对照逐页实装，实拍截图见 **[../screenshots/console-split/README.md](../screenshots/console-split/README.md)**（24 张，1440×900，kind 集群 backend v14 / frontend v11）：
-登录页（01）→ 用户侧骨架与概览（02）→ Agent 列表（03）→ 创建页单页分区表单（04，对照本节 §8.2 五区块）→ 模板（05）→ 集成 Agent（06）→ 模型连接列表与右侧抽屉（07/08）、工具管理连接器表与新建抽屉（09/09-assets-tools-drawer）（**交互演进：新建/编辑类表单从 demo 右栏常驻改为 slide-over 抽屉**）→ Skill（10）→ 记忆（11）→ 凭证（12）→ 成员（13）→ 观测/知识库占位（14/15）→ Agent 详情六 Tab（16–19）→ 运维侧服务列表/工作空间/用户/审计/概览（20–24）。
+登录页（01）→ 用户侧骨架与概览（02）→ Agent 列表（03）→ 创建页单页分区表单（04，对照本节 §8.2 五区块）→ 模板（05）→ 集成 Agent（06）→ 模型连接列表与右侧抽屉（07/08）、工具管理连接器表与新建抽屉（09/09-assets-tools-drawer）（**交互演进：新建/编辑类表单从 demo 右栏常驻改为 slide-over 抽屉**）→ Skill（10，口径修订：包配置技能清单，去 L4）→ 记忆（11）→ 凭证（12）→ 成员（13）→ 观测/知识库占位（14/15）→ Agent 详情六 Tab（16–19）→ 运维侧服务列表/工作空间/用户/审计/概览（20–24）。
 
 ---
 

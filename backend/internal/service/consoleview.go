@@ -4,7 +4,11 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/store"
@@ -217,4 +221,140 @@ func (c *Core) ConsoleAgentPods(workspaceID, id uint) ([]k8s.PodInfo, error) {
 	}
 	pods, _ := c.K8s.PodStatuses(c.Cfg.Namespace, k8s.LabelKey+"="+svc.K8sName)
 	return pods, nil
+}
+
+// SpaceSkillItem 工作空间技能清单条目：来自 OAF 包的配置技能（frontmatter skills 声明
+// 优先；无声明但包内有 skills/ 目录时按目录条目列出——目录是事实来源，声明仅为意图）。
+type SpaceSkillItem struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// PackageID / PackageSlug / PackageVersion 技能所在包（copy-on-write 编辑入口）
+	PackageID      uint   `json:"packageId"`
+	PackageSlug    string `json:"packageSlug"`
+	PackageVersion string `json:"packageVersion"`
+	WorkspaceID    uint   `json:"workspaceId"` // 0=公共包技能
+	// Declared 来自包 frontmatter skills 声明（true）或包内 skills/ 目录扫描（false）
+	Declared bool `json:"declared"`
+	// UsedBy 空间内引用该包为运行包的服务名列表
+	UsedBy []string `json:"usedBy"`
+}
+
+// SpaceSkills 工作空间技能清单聚合：遍历空间可见包（公共 + 本空间，决议 7），
+// 解析 frontmatter skills 声明 + 扫描包内 skills/ 目录（SKILL.md 的 frontmatter
+// description 字段取描述），并标注引用服务。数据源全部是 OAF 包配置——不涉运行时分级。
+func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, error) {
+	pkgs, err := c.Packages.List("", "")
+	if err != nil {
+		return nil, err
+	}
+	// 引用表：包 id → 使用中的服务名
+	usedBy := map[uint][]string{}
+	var svcs []store.ServiceEntity
+	if err := c.DB.Where("workspace_id = ?", workspaceID).Find(&svcs).Error; err != nil {
+		return nil, err
+	}
+	for _, s := range svcs {
+		if s.PackageID > 0 {
+			usedBy[s.PackageID] = append(usedBy[s.PackageID], s.DisplayName)
+		}
+	}
+	items := []SpaceSkillItem{}
+	seen := map[string]bool{} // 包id+技能名 去重
+	for _, p := range pkgs {
+		if p.WorkspaceID != 0 && p.WorkspaceID != workspaceID {
+			continue
+		}
+		if keyword != "" && !strings.Contains(p.Name, keyword) && !strings.Contains(p.Slug, keyword) {
+			// 包名不匹配也继续——技能名可能匹配
+		}
+		manifest := p.ManifestJSON
+		var cfg struct {
+			Skills []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"skills"`
+		}
+		_ = json.Unmarshal([]byte(manifest), &cfg)
+		declared := map[string]string{}
+		for _, s := range cfg.Skills {
+			if s.Name == "" {
+				continue
+			}
+			declared[s.Name] = s.Description
+			items = append(items, SpaceSkillItem{
+				Name: s.Name, Description: s.Description,
+				PackageID: p.ID, PackageSlug: p.Slug, PackageVersion: p.Version,
+				WorkspaceID: p.WorkspaceID, Declared: true,
+				UsedBy: usedBy[p.ID],
+			})
+			seen[fmt.Sprintf("%d/%s", p.ID, s.Name)] = true
+		}
+		// 目录扫描：skills/*/SKILL.md（未声明也列出——目录是事实来源）
+		tree, err := c.Packages.Tree(&p)
+		if err != nil {
+			continue
+		}
+		var scan func(ents []store.FileEntry)
+		scan = func(ents []store.FileEntry) {
+			for _, e := range ents {
+				if e.IsDir {
+					if strings.HasPrefix(e.Path, "skills/") && strings.Count(e.Path, "/") == 1 {
+						name := strings.TrimPrefix(e.Path, "skills/")
+						key := fmt.Sprintf("%d/%s", p.ID, name)
+						if !seen[key] {
+							desc := ""
+							if data, err := c.Packages.ReadFile(&p, e.Path+"/SKILL.md"); err == nil {
+								desc = parseSkillDescription(string(data))
+							}
+							items = append(items, SpaceSkillItem{
+								Name: name, Description: desc,
+								PackageID: p.ID, PackageSlug: p.Slug, PackageVersion: p.Version,
+								WorkspaceID: p.WorkspaceID, Declared: false,
+								UsedBy: usedBy[p.ID],
+							})
+							seen[key] = true
+						}
+					}
+					scan(e.Children)
+				}
+			}
+		}
+		scan(tree)
+	}
+	// keyword 过滤（技能名/描述）
+	if keyword != "" {
+		filtered := items[:0]
+		for _, it := range items {
+			if strings.Contains(it.Name, keyword) || strings.Contains(it.Description, keyword) {
+				filtered = append(filtered, it)
+			}
+		}
+		items = filtered
+	}
+	return items, nil
+}
+
+// parseSkillDescription 从 SKILL.md 提取描述：frontmatter description 字段，
+// 缺失时取首个非标题正文行。
+func parseSkillDescription(content string) string {
+	parts := strings.SplitN(content, "---", 3)
+	if len(parts) == 3 {
+		var fm struct {
+			Description string `yaml:"description"`
+		}
+		if err := yaml.Unmarshal([]byte(parts[1]), &fm); err == nil && fm.Description != "" {
+			return fm.Description
+		}
+	}
+	for _, line := range strings.Split(parts[len(parts)-1], "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if len(line) > 120 {
+			line = line[:120] + "…"
+		}
+		return line
+	}
+	return ""
 }
