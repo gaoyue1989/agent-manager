@@ -130,3 +130,43 @@ func TestNewSlugShape(t *testing.T) {
 		t.Fatal("slug should be random")
 	}
 }
+
+// TestBackfillHandlesNullWorkspaceColumn AutoMigrate 对既有表加列时旧行为 NULL（非 0），
+// 回填必须同时覆盖两种形态（部署实测发现的缺口）。
+func TestBackfillHandlesNullWorkspaceColumn(t *testing.T) {
+	db := newMigrateDB(t)
+	// 模拟存量库：先建旧 schema 行，再加列（旧行 → NULL）
+	type legacy struct {
+		ID          uint `gorm:"primaryKey"`
+		K8sName     string `gorm:"size:63;uniqueIndex"`
+		DisplayName string `gorm:"size:128"`
+	}
+	if err := db.Table("services").AutoMigrate(&legacy{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO services (id, k8s_name, display_name, created_at, updated_at) VALUES (1,'oaf-old','old',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&ServiceEntity{}); err != nil { // 加新列，旧行 workspace_id=NULL
+		t.Fatal(err)
+	}
+	var nullCnt int64
+	db.Table("services").Where("workspace_id IS NULL").Count(&nullCnt)
+	if nullCnt != 1 {
+		t.Fatalf("precondition: expect 1 NULL row, got %d", nullCnt)
+	}
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	var ws Workspace
+	db.Where("slug = ?", "default").First(&ws)
+	var got ServiceEntity
+	db.First(&got, 1)
+	if got.WorkspaceID != ws.ID {
+		t.Fatalf("NULL row not backfilled: workspace_id=%d want %d", got.WorkspaceID, ws.ID)
+	}
+	// 二跑幂等
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+}

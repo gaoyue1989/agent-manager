@@ -24,7 +24,9 @@ func jsonUnmarshalStrict(raw string, v interface{}) error {
 // parseOAFConfig 解析 AGENTS.md（编辑预填用）。
 func parseOAFConfig(content string) (*oaf.Config, error) { return oaf.ParseOAF(content) }
 
-// userWsRole 查询用户在空间内的成员角色（无记录 → ErrWorkspaceNotFound）。
+// userWsRole 查询用户在空间内的成员角色。与 ResolveWorkspace 同口径：
+// 平台 admin 无成员记录时给隐式 admin 角色（§5.1；编辑链路写权限裁决用，
+// 漏同步会让 admin 编辑自己建的空间 502，部署实测）。
 func (c *Core) userWsRole(userID, workspaceID uint) (string, error) {
 	var m struct {
 		Role string
@@ -34,8 +36,11 @@ func (c *Core) userWsRole(userID, workspaceID uint) (string, error) {
 		Scan(&m).Error; err != nil {
 		return "", err
 	}
-	if m.Role == "" {
-		return "", ErrWorkspaceNotFound
+	if m.Role != "" {
+		return m.Role, nil
 	}
-	return m.Role, nil
+	if u, err := c.GetUser(userID); err == nil && u.Role == "admin" {
+		return "admin", nil
+	}
+	return "", ErrWorkspaceNotFound
 }

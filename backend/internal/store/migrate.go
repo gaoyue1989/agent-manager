@@ -54,8 +54,10 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			}
 			log.Printf("[migrate] created default workspace (id=%d)", defWS.ID)
 		}
-		// 3) 未归属服务 → default 空间（决议 2：用户侧不可见，admin 经纳管再分配）
-		if err := tx.Model(&ServiceEntity{}).Where("workspace_id = 0").
+		// 3) 未归属服务 → default 空间（决议 2：用户侧不可见，admin 经纳管再分配）。
+		// 注意 NULL：AutoMigrate 对既有表新增列时旧行填 NULL（非 0），两种形态都要回填
+		if err := tx.Model(&ServiceEntity{}).
+			Where("workspace_id IS NULL OR workspace_id = 0").
 			Update("workspace_id", defWS.ID).Error; err != nil {
 			return err
 		}

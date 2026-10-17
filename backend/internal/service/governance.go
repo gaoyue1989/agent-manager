@@ -222,6 +222,15 @@ func (c *Core) AdminCreateUser(username, password, displayName, role string) (*s
 	if role != "admin" && role != "user" {
 		role = "user"
 	}
+	// 先查重：MySQL driver 未开 TranslateError 时 duplicate key 不翻译为
+	// gorm.ErrDuplicatedKey，靠 errors.Is 拦不住（部署实测 500）——显式查重兜主路径
+	var cnt int64
+	if err := c.DB.Model(&store.User{}).Where("username = ?", username).Count(&cnt).Error; err != nil {
+		return nil, err
+	}
+	if cnt > 0 {
+		return nil, fmt.Errorf("%w: duplicate_username", ErrDuplicateName)
+	}
 	hash, err := store.HashPassword(password)
 	if err != nil {
 		return nil, err
@@ -229,7 +238,9 @@ func (c *Core) AdminCreateUser(username, password, displayName, role string) (*s
 	u := &store.User{Username: username, PasswordHash: hash,
 		DisplayName: displayName, Role: role, Status: "active"}
 	if err := c.DB.Create(u).Error; err != nil {
-		if errors.Is(err, gorm.ErrDuplicatedKey) || strings.Contains(strings.ToLower(err.Error()), "unique") {
+		// 并发窗口兜底：唯一索引冲突按重名语义返回
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate") ||
+			strings.Contains(err.Error(), "1062") {
 			return nil, fmt.Errorf("%w: duplicate_username", ErrDuplicateName)
 		}
 		return nil, err

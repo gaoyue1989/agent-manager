@@ -8,6 +8,8 @@ package service
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -85,19 +87,16 @@ var (
 )
 
 // SlugifyAgentKey 名称 → agentKey（决议 5）：小写、非 [a-z0-9-] 转 -、压缩连续 -、
-// 去首尾 -。中文字符全部剥离；结果为空时回退 agent-{6hex}（纯中文名可用，
-// 实际派生值经 preview-name 轻端点实时展示给用户确认）。
+// 去首尾 -。中文字符全部剥离；结果为空时确定性回退 agent-{md5 前 6 位}——同名恒同 key，
+// preview-name 预览与实际创建必然一致（随机回退会让两次派生不一致，部署实测发现）。
 func SlugifyAgentKey(name string) string {
 	lower := strings.ToLower(name)
 	converted := agentKeyInvalidRe.ReplaceAllString(lower, "-")
 	converted = agentKeyDashRe.ReplaceAllString(converted, "-")
 	converted = strings.Trim(converted, "-")
 	if converted == "" {
-		b := make([]byte, 3)
-		if _, err := cryptoRandRead(b); err != nil {
-			return "agent"
-		}
-		return "agent-" + fmt.Sprintf("%x", b)
+		sum := md5.Sum([]byte(name))
+		return "agent-" + hex.EncodeToString(sum[:3])
 	}
 	if len(converted) > 63 {
 		converted = strings.Trim(converted[:63], "-")
@@ -481,9 +480,21 @@ func (c *Core) validateModelConnections(workspaceID uint, refs []ModelConnRef) (
 func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, form *AgentForm) (map[string]string, []string, error) {
 	env := map[string]string{}
 	var secretKeys []string
+	// 平台默认配置预填（与发布向导「已预填平台默认配置」同语义，R3）：checkpoint/redis 等
+	// 运行必需 env 自动带入；下方模型连接 / MCP token 注入覆盖同名键（表单优先）
+	if defaults, err := c.GetPlatformDefaults(); err == nil {
+		for k, v := range defaults {
+			if v != "" {
+				env[k] = v
+			}
+		}
+	}
 	if def != nil {
 		env["LLM_BASE_URL"] = def.BaseURL
 		env["LLM_MODEL"] = def.ModelID
+		// 旧键同步覆盖：agent-framework 系统默认模型读 LLM_MODEL_ID（部署实测：平台
+		// defaults 里的旧 LLM_MODEL_ID 不覆盖会让系统模型与勾选连接不一致，对话 400）
+		env["LLM_MODEL_ID"] = def.ModelID
 		if def.APIKey != "" {
 			env["LLM_API_KEY"] = def.APIKey
 			secretKeys = append(secretKeys, "LLM_API_KEY")
@@ -591,6 +602,7 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 		Replicas: int32(form.Replicas), Spec: form.Spec,
 		PublicEndpoint: form.PublicEndpoint,
 		WorkspaceID:    workspaceID, CreatedBy: userID,
+		K8sNameBase: agentKey, // 决议 5：k8s 名与 agentKey 同源（中文名 sanitize 后为兜底名）
 	})
 	if err != nil {
 		return nil, pkg, err // 包保留（孤儿包无害），502 语义由 handler 层包装

@@ -68,12 +68,12 @@ type ListService struct {
 	EnvSecretKeys []EnvSecretKeyView `json:"envSecretKeys"`
 }
 
-// PreviewK8sName preview-name 轻端点：派生 K8s 名并检测冲突（不落库）。
+// PreviewK8sName preview-name 轻端点：按 agentKey 同源派生 K8s 名并检测冲突（不落库）。
 func (c *Core) PreviewK8sName(name string) (string, bool) {
 	if name == "" {
 		return "", false
 	}
-	base := k8s.DeriveK8sName(name, "")
+	base := k8s.DeriveK8sName(SlugifyAgentKey(name), "")
 	var cnt int64
 	if err := c.DB.Model(&store.ServiceEntity{}).Where("k8s_name = ?", base).Count(&cnt).Error; err != nil {
 		return base, false

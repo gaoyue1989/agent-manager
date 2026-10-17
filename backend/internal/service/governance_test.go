@@ -232,9 +232,10 @@ func TestResolveWorkspaceMatrix(t *testing.T) {
 	if _, _, err := c.ResolveWorkspace(stranger, itoa(ws.ID)); err != ErrWorkspaceNotFound {
 		t.Fatalf("stranger: %v", err)
 	}
-	// admin 无成员关系 → 404
-	if _, _, err := c.ResolveWorkspace(adminU, itoa(ws.ID)); err != ErrWorkspaceNotFound {
-		t.Fatalf("admin no membership: %v", err)
+	// admin 无成员记录 → 隐式放行（设计 §5.1 平台管理员身份；部署实测修正）
+	_, role, err := c.ResolveWorkspace(adminU, itoa(ws.ID))
+	if err != nil || role != "admin" {
+		t.Fatalf("admin implicit membership: %v role=%s", err, role)
 	}
 	// default 空间：admin 可解析，普通用户 404
 	if _, _, err := c.ResolveWorkspace(adminU, itoa(def.ID)); err != nil {

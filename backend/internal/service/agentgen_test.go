@@ -325,3 +325,72 @@ func TestEditFormCrossWorkspace(t *testing.T) {
 		t.Fatalf("cross workspace edit-form: %v", err)
 	}
 }
+
+// TestCreateAgentChineseNameK8sDerive 纯中文显示名（决议 5 同源派生）：k8s 名从
+// agentKey 派生而非中文名（中文 sanitize 后为兜底 "svc" 名，部署实测撞名 deploy_failed）。
+func TestCreateAgentChineseNameK8sDerive(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-dddd4444", "中文名空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "c1", "m1", "http://b1/v1")
+	form := goldenForm()
+	form.Name = "部署验证助手"
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	svc, pkg, err := c.CreateAgent(ws.ID, 1, form)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	agentKey := pkg.Slug[len("agentmanager/"):] // 从生成包反向取（确定性回退下与重新派生一致）
+	if svc.K8sName != "oaf-"+agentKey {
+		t.Fatalf("k8s name should derive from agentKey: %q (agentKey=%q)", svc.K8sName, agentKey)
+	}
+	if svc.DisplayName != "部署验证助手" {
+		t.Fatalf("display name kept: %q", svc.DisplayName)
+	}
+	if pkg.Slug != "agentmanager/"+agentKey {
+		t.Fatalf("slug: %q", pkg.Slug)
+	}
+}
+
+// TestCreateAgentMergesPlatformDefaults 创建链路合并平台默认配置（发布向导同语义）：
+// checkpoint/redis 运行必需 env 自动带入；模型连接注入的 LLM_* 优先于 defaults。
+func TestCreateAgentMergesPlatformDefaults(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-eeee5555", "默认配置空间")
+	// 平台默认配置：写入 checkpoint + LLM_*（后者应被连接注入覆盖）
+	if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "CHECKPOINT_JDBC_URL",
+		Value: "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "LLM_MODEL",
+		Value: "wrong-default"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: "LLM_MODEL_ID",
+		Value: "wrong-default-id"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	conn := seedVerifiedConn(t, c, ws.ID, "c1", "right-model", "http://b1/v1")
+	form := goldenForm()
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	svc, _, err := c.CreateAgent(ws.ID, 1, form)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env := map[string]string{}
+	if err := jsonUnmarshalStrict(svc.EnvJSON, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env["CHECKPOINT_JDBC_URL"] != "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint" {
+		t.Fatalf("checkpoint default not merged: %+v", env)
+	}
+	if env["LLM_MODEL"] != "right-model" {
+		t.Fatalf("connection must override defaults: %q", env["LLM_MODEL"])
+	}
+	if env["LLM_MODEL_ID"] != "right-model" {
+		t.Fatalf("legacy system-model key must follow connection: %q", env["LLM_MODEL_ID"])
+	}
+}

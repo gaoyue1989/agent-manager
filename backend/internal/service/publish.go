@@ -117,6 +117,10 @@ type PublishRequest struct {
 	// Spec 资源规格档（"" | small | medium | large，决议 4；与 DEPLOYMENT_TEMPLATE
 	// overlay 的 resources 配置互斥校验）
 	Spec string `json:"spec"`
+	// K8sNameBase k8s 名派生源覆盖（M3 决议 5 同源派生）：非空时 k8s 名从它派生而非
+	// req.Name——console 创建链路传 agentKey（纯中文显示名 sanitize 后为空会撞
+	// "svc" 兜底名，部署实测）；存量调用不传即零影响
+	K8sNameBase string `json:"k8sNameBase,omitempty"`
 	// PublicEndpoint 是否发布对外访问入口；nil=true（存量默认）
 	PublicEndpoint *bool `json:"publicEndpoint"`
 }
@@ -171,7 +175,7 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 		return nil, fmt.Errorf("package %d: %w", req.PackageID, err)
 	}
 
-	k8sName := k8s.DeriveK8sName(req.Name, pkg.Slug)
+	k8sName := k8s.DeriveK8sName(orStr(req.K8sNameBase, req.Name), pkg.Slug)
 	k8sName, err = c.uniqName(k8sName)
 	if err != nil {
 		return nil, err

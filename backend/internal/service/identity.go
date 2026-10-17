@@ -161,8 +161,14 @@ func (c *Core) ResolveWorkspace(u *store.User, wsParam string) (*store.Workspace
 	var m store.WorkspaceMember
 	err := c.DB.Where("workspace_id = ? AND user_id = ?", ws.ID, u.ID).First(&m).Error
 	if err != nil {
-		// 不暴露 403/404 差异细节，统一 404
-		return nil, "", ErrWorkspaceNotFound
+		// 设计 §5.1：admin 可进任意工作空间（平台管理员身份）——无成员记录时给隐式
+		// admin 角色（覆盖 admin 建空间未传 ownerUserId 的场景；部署实测发现）
+		if u.Role == "admin" {
+			m = store.WorkspaceMember{WorkspaceID: ws.ID, UserID: u.ID, Role: "admin"}
+		} else {
+			// 不暴露 403/404 差异细节，统一 404
+			return nil, "", ErrWorkspaceNotFound
+		}
 	}
 	return &ws, m.Role, nil
 }

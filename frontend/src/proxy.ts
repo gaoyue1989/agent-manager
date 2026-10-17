@@ -54,6 +54,11 @@ function guardPage(request: NextRequest): NextResponse | null {
   if (pathname.startsWith("/api/") || pathname.startsWith("/agent/") || pathname.startsWith("/mcp")) {
     return null;
   }
+  // 登录页无条件放行（漏掉会让未登录访问 /login 循环 302——部署实测 kubelet 探针
+  // "stopped after 10 redirects" 暴露）
+  if (pathname === "/login") {
+    return null;
+  }
   const session = request.cookies.get("oaf_session")?.value;
   if (!session) {
     const url = request.nextUrl.clone();

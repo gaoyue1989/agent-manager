@@ -105,6 +105,12 @@ M0 ──▶ M1 ─┐
 | M8 | ✅ apikey（签发格式/哈希/作用域/吊销/过期惰性） | workspace-assets 脚本待集群 | 实施完成（2026-10-17） | Skill/记忆/凭证/模板/成员页 + invitable-users + 一次性明文弹窗 |
 | M9 | ✅ introspect 双通道（JWT/API Key/吊销 403/作用域 403） | enforce 三态需独立环境 | 后端+router 配置完成（2026-10-17） | /auth/introspect + platform-router auth_request（ROUTER_AUTH_MODE off|report|enforce，默认 off，三档渲染均过 `nginx -t`）；report 灰度 48h 与 enforce 环境验收为上线前置，另行执行 |
 
+> **2026-10-17 部署验证（kind 集群实跑，backend/frontend v10）**：
+> - 冒烟 `e2e/console-split-e2e.sh` **21/21 全绿**（M0 登录三分支/me/路由分层；M1 建号/建空间/纳管三态/成员保护/删除保护；用户侧边界 default 404·admin 面 403·本空间 200；M8 API Key 明文一次/吊销；M9 introspect 吊销 403 + JWT 通道 X-User-Id 回写）
+> - E2E 主链路：建空间 → 模型连接（连通性测试 1254ms）→ 创建 Agent「部署验证助手」（纯中文名 → 确定性 agentKey 派生，生成包 v1 → 复用发布 → running 25s）→ Pod env 分级断言（CM 含 LLM_MODEL/BASE_URL+checkpoint 默认合并、Secret 含 LLM_API_KEY，spec=small 直译 1C/2Gi）→ 下发 usage synced（远端 model id 回填）→ Agent /models 回读含下发模型 → 编辑链路 PUT（copy-on-write v1.0.1 + republish，提示词 v2 经 SSE 对话验证热生效）→ 会话按 `session_user=u-1` 落库（X-User-Id 全链路透传）
+> - 业务面零影响：既有 8 个业务 Pod 全部为升级前启动（原则一实战核验）；`/login` 循环重定向、存量服务 NULL 回填、重复用户名 500、admin 隐式成员、LLM_MODEL_ID 旧键跟随等 6 个部署期缺陷已修复并补回归单测
+> - 宿主机统一入口 :8911 已确认服务新前端（/login 200、/ 307→/login）；浏览器如见旧版为本地缓存，强刷即可
+>
 > 2026-10-17 实施说明（feat/console-user-workspace-split 分支）：
 > - 「单测」列 = `cd backend && make test`（go vet + go test 全包）与 `cd frontend && npm run lint && npm run build && npm test`（lint 0 errors、tsc 全绿、既有 30 用例全绿）实跑结果；
 > - 「e2e」列标注待集群/手工的条目为 DoD 中无法离线自动化部分（四必需 job 回归、governance/model-switch/mcp-connector/workspace-assets 脚本、enforce 三态环境），合入后按 e2e 落位表在集群环境补跑并回填证据链接；
