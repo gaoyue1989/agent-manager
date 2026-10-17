@@ -45,6 +45,7 @@ export default function UsersPage() {
       <PageHead title="用户管理" sub="运维侧新增 · 首个 admin 由 ADMIN_INIT_USER 环境变量种子创建 · 用户自注册不开放（决议 6）"
         actions={<Btn kind="pri" testid="user-create-btn" onClick={() => setCreating(true)}>+ 创建用户</Btn>} />
       {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      <div className="overflow-x-auto">
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="user-table">
         <thead>
           <tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
@@ -79,6 +80,7 @@ export default function UsersPage() {
           ))}
         </tbody>
       </table>
+      </div>
 
       {creating && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" data-testid="user-create-dialog">

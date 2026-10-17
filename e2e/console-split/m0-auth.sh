@@ -55,4 +55,16 @@ assert_eq "logout 200" "$(code POST /auth/logout)" "200"
 ADMIN_ID=$(req GET /admin/users "" "$TOKEN" | python3 -c "import sys,json;print(sum(1 for u in json.load(sys.stdin)['data'] if u['username']=='$ADMIN_USER'))")
 assert_eq "admin 账号唯一（种子幂等）" "$ADMIN_ID" "1"
 
+# 7) 权限撤销即时生效（issue #148）：降级/禁用后旧 JWT 立刻失去 admin 面
+REV_USER="m0-revoke-$TS"
+REV_ID=$(seed_user "$TOKEN" "$REV_USER" "Revoke123!" admin)
+REV_TOKEN=$(req POST /auth/login "{\"username\":\"$REV_USER\",\"password\":\"Revoke123!\"}" | jqr "['data']['token']")
+assert_eq "新管理员可读 admin 面" "$(code GET /admin/workspaces "" "$REV_TOKEN")" "200"
+req PATCH /admin/users/$REV_ID '{"role":"user"}' "" "$TOKEN" >/dev/null
+assert_eq "降级后旧 token 403（#148）" "$(code GET /admin/workspaces "" "$REV_TOKEN")" "403"
+req PATCH /admin/users/$REV_ID '{"role":"admin"}' "" "$TOKEN" >/dev/null
+assert_eq "复权后旧 token 恢复 200" "$(code GET /admin/workspaces "" "$REV_TOKEN")" "200"
+req PATCH /admin/users/$REV_ID '{"status":"disabled"}' "" "$TOKEN" >/dev/null
+assert_eq "禁用后旧 token 403（#148）" "$(code GET /admin/workspaces "" "$REV_TOKEN")" "403"
+
 finish "M0-auth"

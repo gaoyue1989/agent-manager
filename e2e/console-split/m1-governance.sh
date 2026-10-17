@@ -19,7 +19,7 @@ assert_eq "角色变更 admin" "$(req PATCH /admin/users/$U1 "{\"role\":\"admin\
 req PATCH /admin/users/$U1 "{\"password\":\"NewPass999\"}" "" "$TOKEN" >/dev/null
 assert_eq "旧密码 401" "$(code POST /auth/login '{"username":"m1-user-'$TS'","password":"Pass12345!"}')" "401"
 assert_contains "新密码可登录" "$(req POST /auth/login '{"username":"m1-user-'$TS'","password":"NewPass999"}')" '"token"'
-# 禁用 → 登录 403（M0 取舍：已发 token 12h 内仍有效）
+# 禁用 → 登录 403（已发 token 的即时撤销见 M0 §7，issue #148）
 req PATCH /admin/users/$U2 "{\"status\":\"disabled\"}" "" "$TOKEN" >/dev/null
 assert_eq "禁用后登录 403" "$(code POST /auth/login '{"username":"m1-admin-'$TS'","password":"Pass12345!"}')" "403"
 # 非法角色/状态 400
@@ -74,5 +74,24 @@ assert_contains "审计含 workspace.create" "$AUDIT" "workspace.create"
 assert_contains "审计含 user.create" "$AUDIT" "user.create"
 assert_contains "审计含 member.update" "$AUDIT" "member.update"
 assert_contains "审计含 workspace.bind" "$AUDIT" "workspace.bind"
+
+# ---- owner 转移与仅剩 owner 删除（issue #157：转移未实现 + 删除死锁）----
+U4=$(seed_user "$TOKEN" "m1-newowner-$TS" "Pass12345!")
+WS2=$(seed_ws "$TOKEN" "m1-ws2-$TS" "$U1")
+assert_eq "转移前 ownerUserId=U1" "$(req GET /admin/workspaces/$WS2 "" "$TOKEN" | jqr "['data']['ownerUserId']")" "$U1"
+req PATCH /admin/workspaces/$WS2 "{\"ownerUserId\":$U4}" "" "$TOKEN" >/dev/null
+assert_eq "owner 转移生效（#157）" "$(req GET /admin/workspaces/$WS2 "" "$TOKEN" | jqr "['data']['ownerUserId']")" "$U4"
+assert_eq "原 owner 降为 member（可移除）" "$(req GET /admin/workspaces/$WS2/members "" "$TOKEN" | python3 -c "import sys,json;print([m['role'] for m in json.load(sys.stdin)['data'] if m['userId']==$U1][0])")" "member"
+assert_eq "新 owner 成员角色 owner" "$(req GET /admin/workspaces/$WS2/members "" "$TOKEN" | python3 -c "import sys,json;print([m['role'] for m in json.load(sys.stdin)['data'] if m['userId']==$U4][0])")" "owner"
+assert_eq "幽灵 owner 400" "$(code PATCH /admin/workspaces/$WS2 '{"ownerUserId":999999}' "" "$TOKEN")" "400"
+# 成员 >1（owner + 原 owner）删除仍 409；移除降级成员后仅剩 owner → 200
+assert_eq "多成员删除 409" "$(code DELETE /admin/workspaces/$WS2 "" "$TOKEN")" "409"
+assert_eq "降级后的原 owner 可移除" "$(code DELETE /admin/workspaces/$WS2/members/$U1 "" "$TOKEN")" "200"
+assert_eq "仅剩 owner 可删除（#157 死锁解除）" "$(code DELETE /admin/workspaces/$WS2 "" "$TOKEN")" "200"
+# 直删路径：带 owner 但从未加过成员的空间直接删（级联清 owner 成员行）
+WS3=$(seed_ws "$TOKEN" "m1-ws3-$TS" "$U4")
+assert_eq "仅剩 owner 空间直删 200" "$(code DELETE /admin/workspaces/$WS3 "" "$TOKEN")" "200"
+# 超长空间名 400（#149，原 500 Data too long）
+assert_eq "200 字符空间名 400" "$(code POST /admin/workspaces "{\"name\":\"$(printf 'w%.0s' $(seq 200))\"}" "" "$TOKEN")" "400"
 
 finish "M1-governance"

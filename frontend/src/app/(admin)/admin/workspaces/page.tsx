@@ -69,6 +69,7 @@ export default function WorkspacesPage() {
       <PageHead title="工作空间管理" sub="运维侧新增 · 空间是用户侧资源隔离与协作单元（不等于运行时隔离域，checkpoint 库/Redis 前缀仍需发布 env 显式配置）"
         actions={<Btn kind="pri" testid="ws-create-btn" onClick={() => setCreating(true)}>+ 创建工作空间</Btn>} />
       {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      <div className="overflow-x-auto">
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="ws-table">
         <thead>
           <tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
@@ -98,6 +99,7 @@ export default function WorkspacesPage() {
           ))}
         </tbody>
       </table>
+      </div>
       <Note tone="warn">工作空间是控制台层的资源归属，不等于运行时隔离域；每服务 checkpoint 库名与 Redis 前缀仍需在发布 env 中显式配置（已知缺口，见设计文档 §11）。</Note>
 
       {creating && (
@@ -130,6 +132,7 @@ export default function WorkspacesPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" data-testid="ws-agents-dialog">
           <Card title={`空间内 Agent · ${agents.ws.name}`} className="max-h-[70vh] w-[760px] overflow-auto">
             {agents.items.length === 0 ? <p className="text-sm text-gray-400">空间内暂无 Agent</p> : (
+              <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr className="border-b text-left text-xs text-gray-500">
                   <th className="p-2">服务</th><th className="p-2">状态</th><th className="p-2">Endpoint</th><th className="p-2 text-right">纳管/移出</th>
@@ -158,6 +161,7 @@ export default function WorkspacesPage() {
                   ))}
                 </tbody>
               </table>
+              </div>
             )}
             <div className="mt-3 text-right"><Btn onClick={() => setAgents(null)}>关闭</Btn></div>
           </Card>

@@ -26,21 +26,24 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   };
   return (
     <div className="min-h-screen">
-      <nav className="sticky top-0 z-40 flex items-center gap-5 border-b border-gray-200 bg-white px-6 py-3">
-        <span className="text-lg font-bold">OAF 发布平台</span>
-        <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-600">运维侧</span>
-        {LINKS.map((l) => (
-          <Link key={l.href} href={l.href} className="text-sm text-gray-700 hover:text-blue-600">{l.label}</Link>
-        ))}
-        <span className="ml-auto flex items-center gap-3 text-sm">
+      <nav className="sticky top-0 z-40 flex items-center gap-5 border-b border-gray-200 bg-white px-4 py-3 sm:px-6">
+        <span className="flex-none text-lg font-bold">OAF 发布平台</span>
+        <span className="flex-none rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-600">运维侧</span>
+        {/* 窄屏导航横向滚动而非挤爆页面（issue #154：9 个链接平铺曾撑出 839px） */}
+        <div className="flex flex-1 items-center gap-4 overflow-x-auto sm:gap-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {LINKS.map((l) => (
+            <Link key={l.href} href={l.href} className="flex-none whitespace-nowrap text-sm text-gray-700 hover:text-blue-600">{l.label}</Link>
+          ))}
+        </div>
+        <span className="ml-auto flex flex-none items-center gap-3 text-sm">
           {me?.user.role === "admin" && (
             <Link href="/console" data-testid="switch-console" className="text-gray-500 hover:text-blue-600">用户侧</Link>
           )}
-          <span className="text-gray-500">{me?.user.displayName || me?.user.username || ""}</span>
+          <span className="hidden text-gray-500 sm:inline">{me?.user.displayName || me?.user.username || ""}</span>
           <button onClick={logout} data-testid="admin-logout" className="text-gray-400 hover:text-red-600">退出</button>
         </span>
       </nav>
-      <main className="mx-auto max-w-6xl p-6">{children}</main>
+      <main className="mx-auto max-w-6xl p-4 sm:p-6">{children}</main>
     </div>
   );
 }

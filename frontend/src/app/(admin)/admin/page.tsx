@@ -77,6 +77,7 @@ export default function ServicesPage() {
       ) : services.length === 0 ? (
         <p className="text-gray-500" data-testid="empty-hint">暂无服务，点击「发布新服务」开始。</p>
       ) : (
+        <div className="overflow-x-auto">
         <table className="w-full bg-white border border-gray-200 rounded text-sm" data-testid="service-table">
           <thead>
             <tr className="text-left text-gray-500 border-b">
@@ -131,6 +132,7 @@ export default function ServicesPage() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

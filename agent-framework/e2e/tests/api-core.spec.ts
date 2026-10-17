@@ -75,7 +75,7 @@ test('S2 单次流基础帧序', async () => {
   expect(stream.terminal?.type).toBe('done');
   expect(textOf(stream.frames).length).toBeGreaterThan(2);
   // 返回的 session_id 可用于续接（/history 一致）
-  const h = await history(sid);
+  const h = await history(sid, BASE, U);
   expect(h._http === undefined || h._http === 200).toBe(true);
 });
 
@@ -113,7 +113,7 @@ test('S4 内置工具调用', async () => {
   expect(previewIndex).toBeGreaterThan(rawToolEnd);
   expect(stream.terminal?.type).toBe('done');
   // history 侧 state 为小写 success
-  const h = await history(sid);
+  const h = await history(sid, BASE, U);
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
   expect(tcs.some(t => t.name === 'echo' && t.state === 'success')).toBe(true);
 });
@@ -159,12 +159,12 @@ test('S7 线程生命周期管理', async ({ request }) => {
   const sid = sessionIdFor(`s7-${uniq()}`);
   const stream = chat({ message: `[E2E:plain]`, userId: U, sessionId: sid });
   await waitTerminal(stream);
-  const list = await threads();
+  const list = await threads(BASE, U);
   expect(JSON.stringify(list)).toContain(sid);
-  const one = await request.get(`/threads/${sid}`);
+  const one = await request.get(`/threads/${sid}`, { headers: { 'X-User-Id': U } });
   expect(one.status()).toBe(200);
   const manualTitle = `e2e-title-${uniq()}`;
-  const patch = await patchThread(sid, { title: manualTitle });
+  const patch = await patchThread(sid, { title: manualTitle }, BASE, U);
   expect([200, 204]).toContain(patch.status);
   const titled = await pollUntil(async () => {
     const res = await request.get(`/threads?userId=${encodeURIComponent(U)}`);
@@ -172,26 +172,81 @@ test('S7 线程生命周期管理', async ({ request }) => {
     return rows.find(row => row.session_id === sid);
   }, row => row?.title === manualTitle);
   expect(titled?.title).toBe(manualTitle);
-  const llmCalls = await request.get(`/threads/${sid}/llm-calls`);
+  const llmCalls = await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': U } });
   expect(llmCalls.status()).toBe(200);
   // 记录键必须与查询键一致：Channel 链路 ctx.sessionId 是全进程共享的网关 gw-hash，
   // 按它落记录会让本查询恒为空、且各会话记录串进同一个桶（issue #44）。
   // 此前只断 200 正是 CI 看不见该缺陷的原因，这里必须断到非空。
   const callsBody = await pollUntil(
-    async () => (await request.get(`/threads/${sid}/llm-calls`)).json() as { calls: unknown[] },
+    async () => (await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': U } })).json() as { calls: unknown[] },
     body => (body.calls?.length ?? 0) > 0,
   );
   expect(callsBody.calls.length).toBeGreaterThan(0);
-  expect(await deleteThread(sid)).toBeLessThan(300);
+  expect(await deleteThread(sid, BASE, U)).toBeLessThan(300);
   // 实测：删除后 GET 详情仍 200（空壳），权威信号是列表移除
-  await pollUntil(async () => threads(), list => !JSON.stringify(list).includes(sid), 15_000);
+  await pollUntil(async () => threads(BASE, U), list => !JSON.stringify(list).includes(sid), 15_000);
+});
+
+// ---------- SEC 组：会话归属（issue #158，IDOR 修复回归门禁） ----------
+
+test('SEC1 用户 A 会话对用户 B/匿名全端点不可见；B 的 chat 不得夺主', async ({ request }) => {
+  const userA = `sec-a-${uniq()}`;
+  const userB = `sec-b-${uniq()}`;
+  const sid = sessionIdFor(`sec1-${uniq()}`);
+  const stream = chat({ message: `[E2E:plain]`, userId: userA, sessionId: sid, headers: { 'X-User-Id': userA } });
+  await waitTerminal(stream);
+
+  // B 逐端点访问：全部 404（不泄露会话存在性）
+  expect((await history(sid, BASE, userB))._http).toBe(404);
+  expect((await status(sid, BASE, userB))._http).toBe(404);
+  expect((await request.get(`/threads/${sid}`, { headers: { 'X-User-Id': userB } })).status()).toBe(404);
+  expect((await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': userB } })).status()).toBe(404);
+  expect((await patchThread(sid, { title: 'hijack' }, BASE, userB)).status).toBe(404);
+  expect(await deleteThread(sid, BASE, userB)).toBe(404);
+
+  // 无头请求（匿名 debug-user 身份）同样不可见真实用户会话（fail-closed）
+  expect((await request.get(`/threads/${sid}/history`)).status()).toBe(404);
+
+  // B 的 chat 不得夺主（原 upsert ON DUPLICATE KEY 会把归属改写到 B 名下）
+  const takeover = chat({ message: `[E2E:plain]`, userId: userB, sessionId: sid });
+  await waitTerminal(takeover);
+  expect(JSON.stringify(takeover.frames)).toContain('thread_not_found');
+
+  // A 的读写不受影响，归属未变
+  expect((await history(sid, BASE, userA)).messages).toBeTruthy();
+  const listA = await threads(BASE, userA);
+  expect(JSON.stringify(listA)).toContain(sid);
+  const listB = await threads(BASE, userB);
+  expect(JSON.stringify(listB)).not.toContain(sid);
+
+  // 归属用户删除 → 200
+  expect(await deleteThread(sid, BASE, userA)).toBe(200);
+});
+
+test('SEC2 subscribe/confirm 非归属 404（拒绝发生在租约获取前）', async ({ request }) => {
+  const userA = `sec-a2-${uniq()}`;
+  const userB = `sec-b2-${uniq()}`;
+  const sid = sessionIdFor(`sec2-${uniq()}`);
+  const stream = chat({ message: `[E2E:plain]`, userId: userA, sessionId: sid, headers: { 'X-User-Id': userA } });
+  await waitTerminal(stream);
+
+  // subscribe：非归属 → HTTP 404（错误先于任何 SSE 帧写出）
+  const subRes = await request.get(`/threads/${sid}/subscribe?afterSeq=0`, { headers: { 'X-User-Id': userB } });
+  expect(subRes.status()).toBe(404);
+  // confirm（同步端点）：非归属 → 404 thread_not_found
+  const cf = await confirmSync(sid, [{ tool_call_id: 'none', confirmed: true }], BASE, userB);
+  expect(cf.status).toBe(404);
+  expect((cf.body as Record<string, string>).error).toBe('thread_not_found');
+
+  // 归属用户删除不受影响
+  expect(await deleteThread(sid, BASE, userA)).toBe(200);
 });
 
 test('S8 history 回放工具配对', async () => {
   const sid = sessionIdFor(`s8-${uniq()}`);
   const stream = chat({ message: `[E2E:tool:time]`, userId: U, sessionId: sid });
   await waitTerminal(stream);
-  const h = await history(sid);
+  const h = await history(sid, BASE, U);
   expect(h.pendingConfirm ?? null).toBeNull();
   const msgs = h.messages as Array<Record<string, unknown>>;
   const tc = msgs.flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>).find(t => t.name === 'get_current_time');
@@ -214,7 +269,7 @@ test('S9 首轮消息自动生成标题，手工标题后续不被覆盖', async
   expect(generated?.title).toBe('端到端链路畅通，测试正常');
 
   const manualTitle = `手工标题-${uniq()}`;
-  const patched = await patchThread(sid, { title: manualTitle });
+  const patched = await patchThread(sid, { title: manualTitle }, BASE, U);
   expect(patched.status).toBe(200);
   const second = chat({ message: '[E2E:plain]继续对话', userId: U, sessionId: sid });
   await waitTerminal(second);
@@ -325,7 +380,7 @@ test('F12 OAF 打包交付（MCP create_oaf_zip + present_url + 代理下载 + �
   expect(dl.bytes!.length).toBeGreaterThan(0);
   expect(dl.bytes!.subarray(0, 2).toString('latin1')).toBe('PK');
   // 历史回放按业务会话可查（session_id 绑定断裂即在此红）
-  const h = await history(sid);
+  const h = await history(sid, BASE, U);
   const files = (h.files ?? []) as Array<Record<string, unknown>>;
   const hit = files.find(f => f.file_id === ready!.file_id);
   expect(hit, '历史回放未按会话返回产出文件（file_asset.session_id 绑定断裂）').toBeTruthy();
@@ -400,10 +455,10 @@ test('H1 ask 挂起与状态', async ({ request }) => {
   expect(ask?.type).toBe('permission_ask');
   const toolCalls = (ask as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>;
   expect(toolCalls[0].name).toBe('submit_application');
-  const st = await status(sid);
+  const st = await status(sid, BASE, U);
   expect(st.state).toBe('waiting_confirm');
   const h = await pollUntil(
-    async () => history(sid),
+    async () => history(sid, BASE, U),
     value => (value.pendingConfirm as Record<string, unknown> | null)?.source === 'agent_state',
     10_000,
     200,
@@ -421,7 +476,7 @@ test('H2 批准（confirm-stream）', async () => {
   await waitTerminal(ask1);
   const tcid = ((ask1.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
   await new Promise(r => setTimeout(r, 800)); // 等 ASK 段租约释放（confirm 抢锁竞态）
-  const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: true }]);
+  const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: true }], BASE, 120_000, U);
   await waitTerminal(rec);
   expect(rec.terminal?.type).toBe('done');
   const results = toolResults(rec.frames);
@@ -435,11 +490,11 @@ test('H2 批准（confirm-stream）', async () => {
   expect(preview, 'HITL 恢复流缺少 tool_result_preview').toBeTruthy();
   expect(rec.frames.indexOf(summary!)).toBeLessThan(rec.frames.indexOf(preview!));
   // 兜底摘要走 emitSynthetic 落库：断连续传/刷新回放必须同样可见
-  const replay = subscribe(sid, 0);
+  const replay = subscribe(sid, 0, BASE, undefined, U);
   await waitTerminal(replay);
   expect(replay.frames.some(f => f.type === 'tool_call_summary' && f.toolName === 'submit_application')).toBe(true);
   expect(replay.frames.some(f => f.type === 'tool_result_preview' && f.toolName === 'submit_application')).toBe(true);
-  const h = await history(sid);
+  const h = await history(sid, BASE, U);
   expect(h.pendingConfirm ?? null).toBeNull();
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
   expect(tcs.some(t => t.name === 'submit_application' && t.state === 'success')).toBe(true);
@@ -452,10 +507,10 @@ test('H3 拒绝', async () => {
   await waitTerminal(ask1);
   const tcid = ((ask1.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
   await new Promise(r => setTimeout(r, 800)); // 等 ASK 段租约释放（confirm 抢锁竞态）
-  const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: false }]);
+  const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: false }], BASE, 120_000, U);
   await waitTerminal(rec);
   expect(rec.terminal?.type).toBe('done');
-  const h = await history(sid);
+  const h = await history(sid, BASE, U);
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
   expect(tcs.some(t => t.name === 'submit_application' && t.state === 'denied')).toBe(true);
 });
@@ -467,9 +522,9 @@ test('H4 重复确认 409', async () => {
   await waitTerminal(ask1);
   const tcid = ((ask1.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
   await new Promise(r => setTimeout(r, 800)); // 等 ASK 段租约释放（confirm 抢锁竞态）
-  const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: true }]);
+  const rec = confirmStream(sid, [{ tool_call_id: tcid, confirmed: true }], BASE, 120_000, U);
   await waitTerminal(rec);
-  const again = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }]);
+  const again = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], BASE, U);
   expect([409, 404]).toContain(again.status); // confirm_already_consumed / confirm_context_not_found
 });
 
@@ -480,9 +535,9 @@ test('H5 同步 confirm 批准', async () => {
   await waitTerminal(ask1);
   const tcid = ((ask1.terminal as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>)[0].tool_call_id as string;
   await new Promise(r => setTimeout(r, 800)); // 等 ASK 段租约释放（confirm 抢锁竞态）
-const r = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }]);
+const r = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], BASE, U);
   expect(r.status).toBe(200);
-  await pollUntil(async () => history(sid), (h) => {
+  await pollUntil(async () => history(sid, BASE, U), (h) => {
     const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
     return tcs.some(t => t.name === 'submit_application' && t.state === 'success');
   }, 60_000);
@@ -499,7 +554,7 @@ test('H6 挂起期间新消息的行为（ASKING 态拒绝新 turn）', async ()
   await waitTerminal(next);
   expect(next.terminal?.type).toBe('error');
   expect(String((next.terminal as Record<string, unknown>).error)).toContain('ASKING');
-  const st = await status(sid);
+  const st = await status(sid, BASE, U);
   expect(st.state).toBe('waiting_confirm'); // 挂起项保持
 });
 
@@ -642,7 +697,7 @@ test('A5 A2A message/stream 后 llm-calls 按 metadata sessionId 反查非空', 
     }>;
   };
   const body = await pollUntil(
-    async () => (await request.get(`/threads/${sid}/llm-calls`)).json() as LlmCallsBody,
+    async () => (await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': U } })).json() as LlmCallsBody,
     b => (b.calls?.length ?? 0) > 0,
   );
   // 回显查询键：记录键口径 = 规范会话 id（docs/api.md llm-calls 节）
@@ -685,7 +740,7 @@ test('A6 双 A2A 会话 llm-calls 互查不串桶', async ({ request }) => {
     expect(r.json.error).toBeUndefined();
   }
   const callsOf = (sid: string) => pollUntil(
-    async () => (await request.get(`/threads/${sid}/llm-calls`)).json() as { session_id: string; calls: unknown[] },
+    async () => (await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': U } })).json() as { session_id: string; calls: unknown[] },
     b => (b.calls?.length ?? 0) > 0,
   );
   const bodyA = await callsOf(sidA); // 判据①：共享桶/错键形态在此超时红
@@ -700,7 +755,7 @@ test('A6 双 A2A 会话 llm-calls 互查不串桶', async ({ request }) => {
 
 // A7（查询契约负例·无 LLM，MOD 组风格）：未运行过的会话查 llm-calls 恒空——为 A5/A6 的
 // "非空"锚定意义：端点不得对任意 sid 全局倾倒记录（LLMLogger.getCalls 退化为全量返回时在此红）。
-// ThreadController 无会话存在性校验，未知 sid 固定 200 + 空数组（ThreadController.java:354）。
+// 未知 sid 无 session_user 归属行 → 归属校验放行（存量语义），固定 200 + 空数组。
 test('A7 llm-calls 未知会话恒空（查询契约）', async ({ request }) => {
   const ghost = sessionIdFor(`a7-${uniq()}`);
   const res = await request.get(`/threads/${ghost}/llm-calls`);
@@ -776,7 +831,7 @@ test('FW1 A2A 规范槽位（{userId}:{sid}）列表/详情可见、删除无孤
   expect(slots.some(x => x.session_id === `${uid}:${sid}`), 'A2A 应写规范形态槽位 {uid}:{sid}').toBe(true);
 
   // 列表可见（session_user 由 A2AController 会话开始前 upsert）
-  await pollUntil(async () => threads(), list => JSON.stringify(list).includes(sid), 30_000);
+  await pollUntil(async () => threads(BASE, U), list => JSON.stringify(list).includes(sid), 30_000);
 
   // 详情 updated_at 非空：规范槽位经 SUBSTRING_INDEX 末段臂命中（旧实现恒 ''，匹配回归即在此红）
   const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`)).json() as Record<string, unknown>;
@@ -784,8 +839,8 @@ test('FW1 A2A 规范槽位（{userId}:{sid}）列表/详情可见、删除无孤
   expect(one.user_id).toBe(uid);
 
   // 删除：规范槽位行级联清理，不留孤儿（旧实现漏删 → updated_at 残留非空、DB 计数>0）
-  expect(await deleteThread(sid)).toBeLessThan(300);
-  await pollUntil(async () => threads(), list => !JSON.stringify(list).includes(sid), 15_000); // S7 同款权威信号
+  expect(await deleteThread(sid, BASE, U)).toBeLessThan(300);
+  await pollUntil(async () => threads(BASE, U), list => !JSON.stringify(list).includes(sid), 15_000); // S7 同款权威信号
   const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`)).json() as Record<string, unknown>;
   expect(String(oneAfter.updated_at ?? ''), '删除后 updated_at 应为空（孤儿残留即在此红）').toBe('');
   expect(await slotRowCount(sid), 'agent_state 不得残留 sid 孤儿行').toBe(0);
@@ -828,8 +883,8 @@ test('FW2 老 Channel 形态槽位种子：列表/详情 updated_at 取自 agent
   expect(one.user_id).toBe(uid);
 
   // 删除：老形态槽位行一并清理（冒号前段臂），列表/详情/DB 三面无残留
-  expect(await deleteThread(peer)).toBeLessThan(300);
-  await pollUntil(async () => threads(), list => !JSON.stringify(list).includes(peer), 15_000);
+  expect(await deleteThread(peer, BASE, U)).toBeLessThan(300);
+  await pollUntil(async () => threads(BASE, U), list => !JSON.stringify(list).includes(peer), 15_000);
   const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`)).json() as Record<string, unknown>;
   expect(String(oneAfter.updated_at ?? ''), '删除后老形态槽位行必须消失').toBe('');
   expect(await slotRowCount(peer), 'agent_state 不得残留老形态孤儿行').toBe(0);
@@ -1263,7 +1318,7 @@ test('HA3 压缩摘要分隔条 + 未归档尾部双源合并 + 深翻页只走�
   expect(page2.hasMore).toBe(false);
   expect(page2.nextBeforeId ?? null).toBeNull();
 
-  await deleteThread(sid).catch(() => undefined); // 级联清理种子归档行（S7 同款）
+  await deleteThread(sid, BASE, U).catch(() => undefined); // 级联清理种子归档行（S7 同款）
 });
 
 test('HA4 SDK 合成提醒（后台子任务投递）不以 user 身份上屏', async () => {
@@ -1297,7 +1352,7 @@ test('HA4 SDK 合成提醒（后台子任务投递）不以 user 身份上屏', 
     if (m.role === 'user') expect(String(m.content)).not.toContain('<system-reminder>');
   }
 
-  await deleteThread(sid).catch(() => undefined);
+  await deleteThread(sid, BASE, U).catch(() => undefined);
 });
 
 test('HA5 turn 执行中 history 即可见用户输入（回合起始归档）', async () => {
@@ -1310,7 +1365,7 @@ test('HA5 turn 执行中 history 即可见用户输入（回合起始归档）',
   let sawDuringTurn = false;
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    const h = await history(sid);
+    const h = await history(sid, BASE, U);
     const users = ((h.messages ?? []) as HistoryMsg[])
       .filter(m => m.role === 'user' && String(m.content).includes(mark));
     if (users.length > 0) {
@@ -1330,7 +1385,7 @@ test('HA5 turn 执行中 history 即可见用户输入（回合起始归档）',
     .filter(m => m.role === 'user' && String(m.content).includes(mark));
   expect(dup.length, '用户消息不得因回合起始归档重复').toBe(1);
 
-  await deleteThread(sid).catch(() => undefined);
+  await deleteThread(sid, BASE, U).catch(() => undefined);
 });
 
 test('HA6 回合失败留痕：刷新后 history 可见失败原因（非孤儿提问）', async () => {
@@ -1350,7 +1405,7 @@ test('HA6 回合失败留痕：刷新后 history 可见失败原因（非孤儿�
   expect(String(marked[0].content).length, '失败留痕须含具体原因，非仅前缀')
     .toBeGreaterThan('⚠️ 本次执行失败：'.length);
 
-  await deleteThread(sid).catch(() => undefined);
+  await deleteThread(sid, BASE, U).catch(() => undefined);
 });
 
 test('HA7 @Skill 注入区块不上屏：history 只显示用户原文', async () => {
@@ -1373,7 +1428,7 @@ test('HA7 @Skill 注入区块不上屏：history 只显示用户原文', async (
   expect(String(mine!.content)).toContain('[@Skill:demo-skill]');
   expect(String(mine!.content).length, '只剩用户原文，长度远小于注入后').toBeLessThan(150);
 
-  await deleteThread(sid).catch(() => undefined);
+  await deleteThread(sid, BASE, U).catch(() => undefined);
 });
 
 // ---------- MEM 组：记忆总开关关断分支（AGENT_MEMORY_ENABLED=false） ----------
@@ -1452,7 +1507,7 @@ test.describe('MEM 记忆关断', () => {
     expect(stream.terminal?.type).toBe('done');
     // 冷实例首帧可能是 AGENT_START（session_created 非首帧契约），只断对话链路完整可用
     expect(textOf(stream.frames).length).toBeGreaterThan(2);
-    const h = await history(sid, MEM_BASE);
+    const h = await history(sid, MEM_BASE, U);
     expect(h._http === undefined || h._http === 200).toBe(true);
 
     // 文件级 beforeEach llmReset 给出干净窗口；mock 为两实例共享、全局窗口
@@ -1532,15 +1587,15 @@ test.describe('RD Redis 前缀隔离', () => {
     const a = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid });
     await waitTerminal(a);
     expect(a.terminal?.type).toBe('done');
-    const aSeq = Number((await status(sid)).latest_event_seq ?? 0);
+    const aSeq = Number((await status(sid, BASE, U)).latest_event_seq ?? 0);
     expect(aSeq, '默认实例事件流为空（主实例自身回归）').toBeGreaterThan(0);
 
     // 前缀实例同名会话此刻必须全空：前缀失效时此处读到 A 的流即红（决定性断言）
-    const before = await status(sid, RD_BASE);
+    const before = await status(sid, RD_BASE, U);
     expect(before.state).toBe('idle');
     expect(Number(before.latest_event_seq ?? -1)).toBe(0);
     // 前缀实例断线续传空关流（tailer 首轮立即探测空流即补 done），A 的帧一条读不到
-    const emptySub = subscribe(sid, 0, RD_BASE);
+    const emptySub = subscribe(sid, 0, RD_BASE, undefined, U);
     await emptySub.closed;
     expect(emptySub.frames.filter(f => f.type !== 'done'), '前缀实例续传读到 A 的帧（隔离失效）').toHaveLength(0);
 
@@ -1548,22 +1603,22 @@ test.describe('RD Redis 前缀隔离', () => {
     const b = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid, base: RD_BASE });
     await waitTerminal(b);
     expect(b.terminal?.type).toBe('done');
-    const bSeq = Number((await status(sid, RD_BASE)).latest_event_seq ?? 0);
+    const bSeq = Number((await status(sid, RD_BASE, U)).latest_event_seq ?? 0);
     expect(bSeq).toBeGreaterThan(0);
 
     // 双向续传回放恰好只含各自的流：max seq 精确相等（串流即溢出）
-    const subA = subscribe(sid, 0);
+    const subA = subscribe(sid, 0, BASE, undefined, U);
     await subA.closed;
     seqMonotonic(subA.frames);
     expect(subA.frames[subA.frames.length - 1].type).toBe('done');
     expect(maxSeqOf(subA.frames), 'A 的回放混入 B 的帧').toBe(aSeq);
-    const subB = subscribe(sid, 0, RD_BASE);
+    const subB = subscribe(sid, 0, RD_BASE, undefined, U);
     await subB.closed;
     seqMonotonic(subB.frames);
     expect(subB.frames[subB.frames.length - 1].type).toBe('done');
     expect(maxSeqOf(subB.frames), 'B 的回放混入 A 的帧').toBe(bSeq);
     // A 的流不因 B 的 turn 变化
-    expect(Number((await status(sid)).latest_event_seq ?? -1)).toBe(aSeq);
+    expect(Number((await status(sid, BASE, U)).latest_event_seq ?? -1)).toBe(aSeq);
   });
 
   test('RD2 删除会话前缀互不影响：DELETE 只清本实例命名空间', async () => {
@@ -1571,28 +1626,28 @@ test.describe('RD Redis 前缀隔离', () => {
     const a = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid });
     await waitTerminal(a);
     expect(a.terminal?.type).toBe('done');
-    const aSeq = Number((await status(sid)).latest_event_seq ?? 0);
+    const aSeq = Number((await status(sid, BASE, U)).latest_event_seq ?? 0);
     const b = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid, base: RD_BASE });
     await waitTerminal(b);
     expect(b.terminal?.type).toBe('done');
-    const bSeq = Number((await status(sid, RD_BASE)).latest_event_seq ?? 0);
+    const bSeq = Number((await status(sid, RD_BASE, U)).latest_event_seq ?? 0);
     expect(aSeq).toBeGreaterThan(0);
     expect(bSeq).toBeGreaterThan(0);
 
     // 前缀实例删会话：只清 e2e-isolated:sess:{sid}:* 两个 key（RedisEventLog.deleteSession
     // 经 facade.key 前缀）+ 共享 MySQL 行（前缀只切 Redis key，两实例都会删——设计内语义）
-    expect(await deleteThread(sid, RD_BASE)).toBe(200);
-    expect(Number((await status(sid, RD_BASE)).latest_event_seq ?? -1)).toBe(0); // 自己的流已清
-    expect(Number((await status(sid)).latest_event_seq ?? -1),
+    expect(await deleteThread(sid, RD_BASE, U)).toBe(200);
+    expect(Number((await status(sid, RD_BASE, U)).latest_event_seq ?? -1)).toBe(0); // 自己的流已清
+    expect(Number((await status(sid, BASE, U)).latest_event_seq ?? -1),
       '前缀实例 DELETE 波及默认实例事件流（deleteSession 未走前缀）').toBe(aSeq);
     // 默认实例断线续传不受对方删除破坏
-    const subA = subscribe(sid, 0);
+    const subA = subscribe(sid, 0, BASE, undefined, U);
     await subA.closed;
     expect(subA.frames[subA.frames.length - 1].type).toBe('done');
     expect(maxSeqOf(subA.frames)).toBe(aSeq);
     // 反向：默认实例删除只清自己（双向语义闭环）
-    expect(await deleteThread(sid)).toBe(200);
-    expect(Number((await status(sid)).latest_event_seq ?? -1)).toBe(0);
+    expect(await deleteThread(sid, BASE, U)).toBe(200);
+    expect(Number((await status(sid, BASE, U)).latest_event_seq ?? -1)).toBe(0);
   });
 
   test('RD3 前缀配置生效直证：门面启动日志 prefix 字段（含冒号规范化）', () => {
@@ -1682,7 +1737,7 @@ test.describe('Q86 HITL ask 段帧序', () => {
     // 新序（4db16ba+）：ask 之后仍收到 SDK 的 AGENT_END 收尾帧；旧序在此处提前关流（无 AGENT_END）
     expect(types.indexOf('permission_ask')).toBeLessThan(types.lastIndexOf('AGENT_END'));
     // 会话进入 waiting_confirm 挂起态（ask 帧语义不变）
-    expect((await status(sid)).state).toBe('waiting_confirm');
+    expect((await status(sid, BASE, U)).state).toBe('waiting_confirm');
   });
 });
 

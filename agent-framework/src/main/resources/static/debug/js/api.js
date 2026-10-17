@@ -51,10 +51,10 @@ async function put(path, body, headers) {
   return resp.json();
 }
 
-async function patch(path, body) {
+async function patch(path, body, headers) {
   const resp = await fetch(BASE + path, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
     body: JSON.stringify(body)
   });
   if (!resp.ok) throw await httpError(resp, path);
@@ -153,9 +153,13 @@ export const api = {
   getWorkspace: () => get('/debug/workspace'),
   getSandbox: () => get('/debug/sandbox'),
   getLogs: (level = 'all', limit = 100) => get('/debug/logs?level=' + level + '&limit=' + limit),
-  getThreads: (userId) => get('/threads' + (userId ? '?userId=' + encodeURIComponent(userId) : '')),
-  getThreadHistory: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/history'),
-  getLlmCalls: (sessionId) => get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls'),
+  // 会话读取走归属用户身份（issue #158：/threads/{sid} 端点按 X-User-Id 校验归属，
+  // 调试页以选中 userId 填充该头，与网关注入行为一致）
+  getThreads: (userId) => get('/threads' + (userId ? '?userId=' + encodeURIComponent(userId) : ''), userHeader(userId)),
+  getThreadHistory: (sessionId, userId) =>
+    get('/threads/' + encodeURIComponent(sessionId) + '/history', userHeader(userId)),
+  getLlmCalls: (sessionId, userId) =>
+    get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls', userHeader(userId)),
 
   // 运营监控（跨用户会话列表 + 使用概览，供调试页 Monitor 面板）
   getMonitorOverview: () => get('/debug/monitor/overview'),
@@ -246,7 +250,7 @@ export const api = {
 
   // ★ 新增：GET /subscribe — SSE 重连续传（durable-sse-plan §4.2）
   // 返回 { close(), lastEventId } 供后续重连使用
-  subscribe: (sessionId, { afterSeq, replyId, onEvent, onError, onEnd } = {}) => {
+  subscribe: (sessionId, { afterSeq, replyId, userId, onEvent, onError, onEnd } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/subscribe';
     const controller = new AbortController();
     let lastEventId = afterSeq || 0;
@@ -255,7 +259,7 @@ export const api = {
       if (replyId) url += '&replyId=' + encodeURIComponent(replyId);
       let resp;
       try {
-        resp = await fetch(url, { signal: controller.signal });
+        resp = await fetch(url, { signal: controller.signal, headers: userHeader(userId) });
       } catch (e) {
         if (controller.signal.aborted) return;
         if (onError) onError(e);
@@ -311,15 +315,15 @@ export const api = {
   },
 
   // ★ 新增：GET /status — 查询 turn 状态（durable-sse-plan §4.3）
-  getStatus: (sessionId) =>
-    get('/threads/' + encodeURIComponent(sessionId) + '/status'),
+  getStatus: (sessionId, userId) =>
+    get('/threads/' + encodeURIComponent(sessionId) + '/status', userHeader(userId)),
 
   // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）  // HITL 确认（独立端点，见 hitl-permission-plan.md 6.3）
-  confirmToolCall: (sessionId, results) =>
-    post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }),
+  confirmToolCall: (sessionId, results, userId) =>
+    post('/threads/' + encodeURIComponent(sessionId) + '/confirm', { results }, userHeader(userId)),
 
   // HITL 确认后事件流（SSE；恢复为新执行段，后端先 acquire turn 租约，排队/冲突以 error 帧返回）
-  confirmStream: (sessionId, results, { onEvent, onError } = {}) => {
+  confirmStream: (sessionId, results, { onEvent, onError, userId } = {}) => {
     const path = '/threads/' + encodeURIComponent(sessionId) + '/confirm-stream';
     const controller = new AbortController();
     const connect = async () => {
@@ -327,7 +331,7 @@ export const api = {
       try {
         resp = await fetch(BASE + path, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: Object.assign({ 'Content-Type': 'application/json' }, userHeader(userId)),
           body: JSON.stringify({ results }),
           signal: controller.signal
         });

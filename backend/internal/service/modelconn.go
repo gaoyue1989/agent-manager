@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -86,13 +88,33 @@ func (c *Core) ListModelConnections(workspaceID uint) ([]ModelConnView, error) {
 	return out, nil
 }
 
-// CreateModelConnection 新建（空间内 name 唯一；baseUrl 须 http(s)）。
+// validateBaseURL 校验 baseUrl 为含主机的 http(s) URL（issue #156：仅前缀判断时
+// "http://" 这类无主机值会漏过，保存后测试阶段才报 no Host in request URL）。
+func validateBaseURL(u string) error {
+	parsed, err := url.Parse(u)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("%w: baseUrl must be a valid http(s) URL with host", ErrInvalidForm)
+	}
+	return nil
+}
+
+// CreateModelConnection 新建（空间内 name 唯一；baseUrl 须含主机的 http(s) URL）。
 func (c *Core) CreateModelConnection(workspaceID uint, in CreateModelConnInput) (*ModelConnView, error) {
 	if strings.TrimSpace(in.Name) == "" || strings.TrimSpace(in.ModelID) == "" {
 		return nil, fmt.Errorf("%w: name and modelId are required", ErrInvalidForm)
 	}
-	if !strings.HasPrefix(in.BaseURL, "http://") && !strings.HasPrefix(in.BaseURL, "https://") {
-		return nil, fmt.Errorf("%w: baseUrl must be http(s)", ErrInvalidForm)
+	// 列容量校验（issue #149：超长输入曾以 500 Data too long 直出）
+	if utf8.RuneCountInString(in.Name) > 128 {
+		return nil, fmt.Errorf("%w: name too long (max 128)", ErrInvalidForm)
+	}
+	if utf8.RuneCountInString(in.ModelID) > 128 {
+		return nil, fmt.Errorf("%w: modelId too long (max 128)", ErrInvalidForm)
+	}
+	if utf8.RuneCountInString(in.BaseURL) > 512 {
+		return nil, fmt.Errorf("%w: baseUrl too long (max 512)", ErrInvalidForm)
+	}
+	if err := validateBaseURL(in.BaseURL); err != nil {
+		return nil, err
 	}
 	var cnt int64
 	if err := c.DB.Model(&store.ModelConnection{}).
@@ -150,6 +172,12 @@ func (c *Core) UpdateModelConnection(workspaceID, id uint, in PatchModelConnInpu
 		updates["model_id"] = *in.ModelID
 	}
 	if in.BaseURL != nil && *in.BaseURL != "" {
+		if err := validateBaseURL(*in.BaseURL); err != nil {
+			return nil, err
+		}
+		if utf8.RuneCountInString(*in.BaseURL) > 512 {
+			return nil, fmt.Errorf("%w: baseUrl too long (max 512)", ErrInvalidForm)
+		}
 		updates["base_url"] = *in.BaseURL
 	}
 	if in.APIKey != nil {

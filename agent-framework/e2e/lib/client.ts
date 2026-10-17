@@ -2,6 +2,11 @@
 import { collectStream, type Collected, type Frame } from './sse.js';
 import { BASE } from './env.js';
 
+/** 会话归属头（issue #158：/threads/{sid} 端点按 X-User-Id 校验归属） */
+export function userHeaders(userId?: string): Record<string, string> {
+  return userId ? { 'X-User-Id': userId } : {};
+}
+
 export interface ChatOpts {
   message?: string;
   sessionId?: string;
@@ -31,22 +36,23 @@ export function chat(opts: ChatOpts): Collected {
   return collectStream(p, (opts.timeoutMs ?? 45_000));
 }
 
-export async function status(sessionId: string, base = BASE): Promise<Record<string, unknown>> {
-  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/status`);
+export async function status(sessionId: string, base = BASE, userId?: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/status`, { headers: userHeaders(userId) });
   if (!res.ok) return { _http: res.status };
   return res.json() as Promise<Record<string, unknown>>;
 }
 
 /** 游标续传：afterSeq 之后的帧 + 补发终态（Tailer 语义） */
-export function subscribe(sessionId: string, afterSeq = 0, base = BASE, replyId?: string): Collected {
+export function subscribe(sessionId: string, afterSeq = 0, base = BASE, replyId?: string, userId?: string): Collected {
   const q = new URLSearchParams({ afterSeq: String(afterSeq) });
   if (replyId) q.set('replyId', replyId);
-  const p = fetch(`${base}/threads/${encodeURIComponent(sessionId)}/subscribe?${q}`, { signal: AbortSignal.timeout(120_000) });
+  const p = fetch(`${base}/threads/${encodeURIComponent(sessionId)}/subscribe?${q}`,
+    { signal: AbortSignal.timeout(120_000), headers: userHeaders(userId) });
   return collectStream(p, 120_000);
 }
 
-export async function history(sessionId: string, base = BASE): Promise<Record<string, unknown>> {
-  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/history`);
+export async function history(sessionId: string, base = BASE, userId?: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/history`, { headers: userHeaders(userId) });
   if (!res.ok) return { _http: res.status };
   return res.json() as Promise<Record<string, unknown>>;
 }
@@ -54,9 +60,9 @@ export async function history(sessionId: string, base = BASE): Promise<Record<st
 export interface ConfirmResult { tool_call_id: string; confirmed: boolean }
 
 /** 流式确认（HITL 恢复：新执行段重新 acquire 租约） */
-export function confirmStream(sessionId: string, results: ConfirmResult[], base = BASE, timeoutMs = 120_000): Collected {
+export function confirmStream(sessionId: string, results: ConfirmResult[], base = BASE, timeoutMs = 120_000, userId?: string): Collected {
   const p = fetch(`${base}/threads/${encodeURIComponent(sessionId)}/confirm-stream`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...userHeaders(userId) },
     signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify({ results }),
   });
@@ -64,9 +70,9 @@ export function confirmStream(sessionId: string, results: ConfirmResult[], base 
 }
 
 /** 同步确认（非流式；租约保护下恢复） */
-export async function confirmSync(sessionId: string, results: ConfirmResult[], base = BASE): Promise<{ status: number; body: Record<string, unknown> }> {
+export async function confirmSync(sessionId: string, results: ConfirmResult[], base = BASE, userId?: string): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/confirm`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', ...userHeaders(userId) },
     signal: AbortSignal.timeout(120_000),
     body: JSON.stringify({ results }),
   });
@@ -75,20 +81,21 @@ export async function confirmSync(sessionId: string, results: ConfirmResult[], b
   return { status: res.status, body };
 }
 
-export async function threads(base = BASE): Promise<unknown[]> {
-  const res = await fetch(`${base}/threads`);
+export async function threads(base = BASE, userId?: string): Promise<unknown[]> {
+  const res = await fetch(`${base}/threads`, { headers: userHeaders(userId) });
   const j = await res.json();
   return Array.isArray(j) ? j : (j.threads ?? j.items ?? []);
 }
 
-export async function deleteThread(sessionId: string, base = BASE): Promise<number> {
-  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+export async function deleteThread(sessionId: string, base = BASE, userId?: string): Promise<number> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE', headers: userHeaders(userId) });
   return res.status;
 }
 
-export async function patchThread(sessionId: string, body: Record<string, unknown>, base = BASE): Promise<Response> {
+export async function patchThread(sessionId: string, body: Record<string, unknown>, base = BASE, userId?: string): Promise<Response> {
   return fetch(`${base}/threads/${encodeURIComponent(sessionId)}`, {
-    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    method: 'PATCH', headers: { 'content-type': 'application/json', ...userHeaders(userId) }, body: JSON.stringify(body),
   });
 }
 

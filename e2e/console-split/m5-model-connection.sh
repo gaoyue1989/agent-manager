@@ -32,6 +32,12 @@ assert_eq "空间内重名 400" "$(code POST /console/workspaces/$WS/model-conne
   "{\"name\":\"conn-a-$TS\",\"modelId\":\"m\",\"baseUrl\":\"http://x/v1\"}" "" "$TOKEN")" "400"
 assert_eq "非法 baseUrl 400" "$(code POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"b-$TS\",\"modelId\":\"m\",\"baseUrl\":\"ftp://x\"}" "" "$TOKEN")" "400"
+assert_eq "无主机 baseUrl 400（#156，http:// 曾漏过校验）" "$(code POST /console/workspaces/$WS/model-connections \
+  "{\"name\":\"hostless-$TS\",\"modelId\":\"m\",\"baseUrl\":\"http://\"}" "" "$TOKEN")" "400"
+assert_eq "https:// 无主机同样 400（#156）" "$(code POST /console/workspaces/$WS/model-connections \
+  "{\"name\":\"hostless2-$TS\",\"modelId\":\"m\",\"baseUrl\":\"https://\"}" "" "$TOKEN")" "400"
+assert_eq "超长连接名 400（#149，原 500）" "$(code POST /console/workspaces/$WS/model-connections \
+  "{\"name\":\"$(printf 'x%.0s' $(seq 200))-$TS\",\"modelId\":\"m\",\"baseUrl\":\"http://x/v1\"}" "" "$TOKEN")" "400"
 assert_eq "跨空间隔离（他空间列表不含）" "$(req GET /console/workspaces/$(seed_ws "$TOKEN" "m5-ws2-$TS")/model-connections "" "$TOKEN" | grep -c "conn-a-$TS")" "0"
 
 # ---- test 三分支 ----

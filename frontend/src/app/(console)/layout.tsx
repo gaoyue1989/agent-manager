@@ -60,6 +60,10 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
   const router = useRouter();
   const [userOpen, setUserOpen] = useState(false);
   const userRef = useRef<HTMLDivElement>(null);
+  // 窄屏侧边栏抽屉（issue #154：固定 212px 曾把内容挤出横向滚动）
+  const [navOpen, setNavOpen] = useState(false);
+  // 路由变化即收起移动端抽屉
+  useEffect(() => { setNavOpen(false); }, [pathname]);
 
   useEffect(() => {
     const close = (e: MouseEvent) => { if (!userRef.current?.contains(e.target as Node)) setUserOpen(false); };
@@ -83,30 +87,34 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between border-b border-gray-200 bg-white px-4">
-        <div className="flex items-center gap-2.5">
+      <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
+          <button onClick={() => setNavOpen(!navOpen)} data-testid="nav-toggle" aria-label="导航"
+            className="-ml-1 rounded-md p-1.5 text-gray-600 hover:bg-gray-100 md:hidden">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="size-5"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
           <Link href="/console" className="flex items-center gap-2 pr-2 text-sm font-semibold">
             <span className="flex size-[26px] items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-blue-400 text-white">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-[15px]"><rect x="4" y="7" width="16" height="12" rx="3" /><circle cx="9" cy="13" r="1.2" fill="currentColor" stroke="none" /><circle cx="15" cy="13" r="1.2" fill="currentColor" stroke="none" /></svg>
             </span>
-            智能体平台
+            <span className="hidden sm:inline">智能体平台</span>
           </Link>
           {me && current && <WorkspaceSwitcher me={me} current={current} onPick={pick} />}
-          <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600">用户侧</span>
+          <span className="hidden rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] text-blue-600 sm:inline">用户侧</span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-none items-center gap-1.5">
           {isAdmin && (
             <Link href="/admin" data-testid="switch-admin"
               className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] text-gray-500 hover:bg-gray-100 hover:text-gray-900">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="size-4"><path d="M12 3 4 6v6c0 4.4 3.4 8 8 9 4.6-1 8-4.6 8-9V6l-8-3Z" /><path d="m9 12 2 2 4-4" /></svg>
-              运维侧
+              <span className="hidden sm:inline">运维侧</span>
             </Link>
           )}
           <div ref={userRef} className="relative">
             <button onClick={() => setUserOpen(!userOpen)} data-testid="user-menu"
               className="flex items-center gap-1.5 rounded-lg px-2 py-1 hover:bg-gray-100">
               <span className="flex size-6 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 text-xs text-white">{initial}</span>
-              <span className="text-[13px] text-gray-700">{me?.user.displayName || me?.user.username || "…"}</span>
+              <span className="hidden text-[13px] text-gray-700 sm:inline">{me?.user.displayName || me?.user.username || "…"}</span>
             </button>
             {userOpen && (
               <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-44 rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl">
@@ -123,7 +131,10 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
         </div>
       </header>
       <div className="flex flex-1">
-        <aside className="w-[212px] flex-none overflow-y-auto border-r border-gray-200 bg-white px-2 py-2.5" data-testid="console-nav">
+        {/* 窄屏抽屉遮罩 */}
+        {navOpen && <div className="fixed inset-0 z-40 bg-black/30 md:hidden" onClick={() => setNavOpen(false)} />}
+        <aside data-testid="console-nav"
+          className={`fixed inset-y-0 left-0 z-50 w-[212px] flex-none overflow-y-auto border-r border-gray-200 bg-white px-2 pt-[60px] transition-transform duration-200 md:static md:translate-x-0 md:px-2 md:pt-2.5 ${navOpen ? "translate-x-0" : "-translate-x-full"}`}>
           {NAV.map((sec, i) => (
             <div key={i}>
               {sec.group && <div className="px-3 pb-1 pt-3.5 text-[11px] tracking-wider text-gray-400">{sec.group}</div>}

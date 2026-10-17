@@ -37,7 +37,12 @@ export default function AgentDetailPage() {
     try { setDetail(await api.console.agentDetail(ws, sid)); setMsg(""); }
     catch (e: any) { setMsg(`加载失败: ${e.message}`); }
   }, [ws, sid]);
-  useEffect(() => { if (ws && sid) load(); }, [ws, sid, load]);
+  // 非法 ID（NaN/0/负数）直接进错误态（issue #152：曾既不请求也不置错误，永久「加载中…」）
+  const invalidId = !Number.isInteger(sid) || sid <= 0;
+  useEffect(() => {
+    if (invalidId) { setMsg("Agent 不存在：非法 ID"); return; }
+    if (ws) load();
+  }, [ws, sid, load, invalidId]);
 
   const act = async (action: "publish" | "unpublish" | "republish" | "register", okMsg: string) => {
     try {
@@ -52,6 +57,11 @@ export default function AgentDetailPage() {
     catch (e: any) { setMsg(`删除失败: ${e.message}`); }
   };
 
+  if (invalidId && !detail) return (
+    <div data-testid="agent-detail-invalid" className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">
+      Agent 不存在：非法 ID（{String(id)}）
+    </div>
+  );
   if (msg && !detail) return <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>;
   if (!detail) return <p className="text-sm text-gray-400">加载中…</p>;
 
@@ -171,6 +181,7 @@ function PodTable({ ws, id }: { ws: number; id: number }) {
   }, [ws, id]);
   if (pods.length === 0) return <p className="text-sm text-gray-400">暂无 Pod（未部署或已下线）</p>;
   return (
+    <div className="overflow-x-auto">
     <table className="w-full text-sm">
       <thead><tr className="border-b text-left text-xs text-gray-500"><th className="p-2">Pod</th><th className="p-2">状态</th><th className="p-2">重启</th><th className="p-2">就绪</th></tr></thead>
       <tbody>
@@ -184,6 +195,7 @@ function PodTable({ ws, id }: { ws: number; id: number }) {
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -226,6 +238,7 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
   }
   return (
     <>
+      <div className="overflow-x-auto">
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="threads-table">
         <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
           <th className="p-2.5">会话</th><th className="p-2.5">标题</th><th className="p-2.5">用户</th>
@@ -251,6 +264,7 @@ function ThreadsTab({ shortName, uid }: { shortName: string; uid: string }) {
           {rows.length === 0 && !loading && <tr><td colSpan={7} className="p-6 text-center text-sm text-gray-400">当前用户暂无会话（去「调试」发一句话即可建立）</td></tr>}
         </tbody>
       </table>
+      </div>
       <div className="mt-2.5 text-xs text-gray-400">会话数据存于服务 checkpoint 库与 Redis Streams，跨副本可续传；此处为按用户过滤视图。</div>
     </>
   );
@@ -276,6 +290,7 @@ function SkillsTab({ detail, shortName }: { detail: ServiceDetail; shortName: st
     <div className="grid grid-cols-1 gap-3.5 lg:grid-cols-2">
       <Card title="包级技能（L2/L3 · 随包只读）">
         {(pkgSkills.length ?? 0) === 0 ? <p className="text-sm text-gray-400">当前包未声明技能</p> : (
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead><tr className="border-b text-left text-xs text-gray-500"><th className="p-2">技能</th><th className="p-2">来源</th><th className="p-2">状态</th></tr></thead>
             <tbody>
@@ -288,9 +303,11 @@ function SkillsTab({ detail, shortName }: { detail: ServiceDetail; shortName: st
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Card>
       <Card title="用户级技能（L4 · 当前登录用户的技能集）">
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="border-b text-left text-xs text-gray-500"><th className="p-2">技能</th><th className="p-2">描述</th><th className="p-2 text-right">操作</th></tr></thead>
           <tbody>
@@ -304,6 +321,7 @@ function SkillsTab({ detail, shortName }: { detail: ServiceDetail; shortName: st
             {l4.length === 0 && <tr><td colSpan={3} className="p-4 text-xs text-gray-400">暂无用户级技能（上传入口见「资产管理 → Skill 管理」，L4 按用户隔离）</td></tr>}
           </tbody>
         </table>
+        </div>
       </Card>
     </div>
   );
@@ -328,6 +346,7 @@ function VersionsTab({ ws, sid, detail, writable, onReload }: {
   return (
     <>
       {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      <div className="overflow-x-auto">
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="versions-table">
         <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
           <th className="p-2.5">包版本</th><th className="p-2.5">包 ID</th><th className="p-2.5">派生自</th>
@@ -359,6 +378,7 @@ function VersionsTab({ ws, sid, detail, writable, onReload }: {
           ))}
         </tbody>
       </table>
+      </div>
       <div className="mt-2.5 text-xs text-gray-400">
         编辑 = 表单级 copy-on-write 派生新版本 + republish（提示词/Skill/SubAgent/MCP 热生效；镜像/规格/副本滚动重启）；包编辑器为文件级高级入口，两者共用版本链。
       </div>
@@ -398,6 +418,7 @@ function CredentialsTab({ ws, sid, detail, writable }: { ws: number; sid: number
       <Note tone="warn">一期凭证仅用于身份标识与控制台内调用记账；对外数据面网关鉴权（auth_request + API Key 校验）在二期生效（设计 §5.4）。</Note>
       {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
       {writable && <div className="mb-3"><Btn kind="pri" onClick={() => setCreating(true)}>+ 签发 API Key（作用域：本 Agent）</Btn></div>}
+      <div className="overflow-x-auto">
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="cred-table">
         <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
           <th className="p-2.5">名称</th><th className="p-2.5">Key</th><th className="p-2.5">状态</th>
@@ -416,6 +437,7 @@ function CredentialsTab({ ws, sid, detail, writable }: { ws: number; sid: number
           {keys.length === 0 && <tr><td colSpan={5} className="p-6 text-center text-sm text-gray-400">本 Agent 暂无调用凭证</td></tr>}
         </tbody>
       </table>
+      </div>
       <div className="mt-3.5">
         <div className="mb-1.5 text-xs text-gray-400">调用示例（A2A JSON-RPC · 二期网关生效后需携带 Bearer）</div>
         <pre className="overflow-x-auto rounded-lg bg-[#0d1526] p-3 font-mono text-[11.5px] leading-6 text-[#c9d6f2]">

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 	"time"
 
 	"agent-manager/backend/internal/store"
@@ -91,6 +92,10 @@ func (c *Core) connectorRefCount(workspaceID uint, name string) int64 {
 func (c *Core) CreateMcpConnector(workspaceID uint, in CreateMcpConnectorInput) (*McpConnectorView, error) {
 	if strings.TrimSpace(in.Name) == "" || strings.TrimSpace(in.Endpoint) == "" {
 		return nil, fmt.Errorf("%w: name and endpoint are required", ErrInvalidForm)
+	}
+	// mcp_connectors.name 列 varchar(64)（issue #149：超长输入曾以 500 Data too long 直出）
+	if utf8.RuneCountInString(in.Name) > 64 {
+		return nil, fmt.Errorf("%w: name too long (max 64)", ErrInvalidForm)
 	}
 	if in.Transport != "sse" && in.Transport != "streamable_http" && in.Transport != "" {
 		return nil, fmt.Errorf("%w: invalid transport", ErrInvalidForm)

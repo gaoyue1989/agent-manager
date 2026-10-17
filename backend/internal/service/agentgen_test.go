@@ -3,6 +3,7 @@
 package service
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -440,5 +441,95 @@ func TestSanitizeEnvKey(t *testing.T) {
 		if got := sanitizeEnvKey(name); got != want {
 			t.Errorf("sanitizeEnvKey(%q)=%q want %q", name, got, want)
 		}
+	}
+}
+
+// TestCreateAgentDescriptionRequired issue #150：描述留空必须 400 表单错误，
+// 而不是包登记后的 502 invalid AGENTS.md。
+func TestCreateAgentDescriptionRequired(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-55550005", "描述空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "c1", "m1", "http://b1/v1")
+	form := goldenForm()
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	form.Description = " "
+	_, _, err := c.CreateAgent(ws.ID, 1, form)
+	if err == nil || !errors.Is(err, ErrInvalidForm) || !strings.Contains(err.Error(), "description is required") {
+		t.Fatalf("description required: %v", err)
+	}
+	// 未产生任何包记录
+	var cnt int64
+	c.DB.Model(&store.OafPackage{}).Where("workspace_id = ?", ws.ID).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("no package should be created, got %d", cnt)
+	}
+}
+
+// TestCreateAgentNameTooLong issue #149：超长名称 400（不再 502 Data too long）。
+func TestCreateAgentNameTooLong(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-44440004", "长名空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "c1", "m1", "http://b1/v1")
+	mk := func(name string) *AgentForm {
+		form := goldenForm()
+		form.Name = name
+		form.ModelConnections[0].ConnectionID = conn.ID
+		form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+		return form
+	}
+	// 展示名 200 字符（超 display_name 列 128）
+	if _, _, err := c.CreateAgent(ws.ID, 1, mk(strings.Repeat("a", 200))); err == nil ||
+		!strings.Contains(err.Error(), "name too long (max 128)") {
+		t.Fatalf("200-char name: %v", err)
+	}
+	// ASCII 名 slug 后 63 字符（超 oaf- 前缀预算 59）
+	if _, _, err := c.CreateAgent(ws.ID, 1, mk(strings.Repeat("b", 63))); err == nil ||
+		!strings.Contains(err.Error(), "max 59") {
+		t.Fatalf("63-char slug name: %v", err)
+	}
+}
+
+// TestCreateAgentCleansUpPackageOnPublishFailure issue #149/#151：包登记成功后
+// Publish 失败必须回删包（不留孤儿），错误映射为 400/409（镜像白名单 → 400）。
+func TestCreateAgentCleansUpPackageOnPublishFailure(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-33330003", "清理空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "c1", "m1", "http://b1/v1")
+	form := goldenForm()
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	form.Image = "evil:not-allowed" // Publish 入口镜像白名单拒绝
+
+	_, _, err := c.CreateAgent(ws.ID, 1, form)
+	if err == nil {
+		t.Fatal("publish should fail on image allowlist")
+	}
+	var cnt int64
+	c.DB.Model(&store.OafPackage{}).Where("workspace_id = ?", ws.ID).Count(&cnt)
+	if cnt != 0 {
+		t.Fatalf("orphan package left behind: %d", cnt)
+	}
+}
+
+// TestTranslateStorageError issue #149/#151：MySQL 驱动裸错误 → 业务哨兵。
+func TestTranslateStorageError(t *testing.T) {
+	_ = translateStorageError(nil)
+	dup := translateStorageError(errors.New(
+		"Error 1062 (23000): Duplicate entry 'oaf-x' for key 'services.idx_services_k8s_name'"))
+	if !errors.Is(dup, ErrConflict) || !strings.Contains(dup.Error(), "duplicate_name") {
+		t.Fatalf("1062 should map to ErrConflict: %v", dup)
+	}
+	long := translateStorageError(errors.New(
+		"Error 1406 (22001): Data too long for column 'k8s_name' at row 1"))
+	if !errors.Is(long, ErrInvalidForm) {
+		t.Fatalf("1406 should map to ErrInvalidForm: %v", long)
+	}
+	other := errors.New("connection refused")
+	if translateStorageError(other) != other {
+		t.Fatal("unrelated errors must pass through")
 	}
 }

@@ -18,6 +18,15 @@ function ConnForm({ ws, editing, onDone }: {
 
   const submit = async () => {
     setErr("");
+    // URL 结构校验与后端 validateBaseURL 同口径（issue #156）：必须含主机的 http(s) URL
+    try {
+      const u = new URL(form.baseUrl);
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("bad protocol");
+      if (!u.host) throw new Error("no host");
+    } catch {
+      setErr("Base URL 必须是含主机的 http(s) 地址，如 https://api.deepseek.com/v1");
+      return;
+    }
     setBusy(true);
     try {
       if (editing) {
@@ -129,6 +138,7 @@ export default function ModelsPage() {
       {msg && <div data-testid="models-msg" className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
 
       <div className="mb-2 mt-1 text-xs text-gray-400">已保存的模型连接（工作空间级）</div>
+      <div className="overflow-x-auto">
       <table className="mb-5 w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="conn-list">
         <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
           <th className="p-2.5">连接名称</th><th className="p-2.5">model_id</th><th className="p-2.5">Base URL</th>
@@ -154,6 +164,7 @@ export default function ModelsPage() {
           {conns.length === 0 && <tr><td colSpan={6} className="p-6 text-center text-sm text-gray-400">暂无连接，点右上角「新建模型连接」创建第一条</td></tr>}
         </tbody>
       </table>
+      </div>
 
       <div className="mb-2 mt-1 flex items-center justify-between">
         <span className="text-xs text-gray-400">Agent 使用情况（含运行时模型清单）</span>

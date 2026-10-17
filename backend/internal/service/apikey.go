@@ -187,6 +187,16 @@ func (c *Core) Introspect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"code":401,"message":"invalid credential"}`, http.StatusUnauthorized)
 		return
 	}
+	// 禁用用户旧 JWT 立即失效（issue #148；数据面 fail-closed，删号由 Parse 后查不到用户兜底）
+	var u store.User
+	if err := c.DB.First(&u, claims.UID).Error; err != nil {
+		http.Error(w, `{"code":401,"message":"invalid credential"}`, http.StatusUnauthorized)
+		return
+	}
+	if u.Status == "disabled" {
+		http.Error(w, `{"code":403,"message":"user is disabled"}`, http.StatusForbidden)
+		return
+	}
 	setHeader(claims.UID)
 	writeIntrospectOK(w, 0, nil)
 }

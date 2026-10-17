@@ -28,6 +28,7 @@ export default function AuditPage() {
     <div data-testid="admin-audit">
       <PageHead title="审计日志" sub="一期聚合 service_events / platform_config_events 视图；独立 audit_logs 表在二期" />
       {msg && <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">{msg}</div>}
+      <div className="overflow-x-auto">
       <table className="w-full rounded-lg border border-gray-200 bg-white text-sm" data-testid="audit-table">
         <thead>
           <tr className="border-b bg-gray-50 text-left text-xs text-gray-500">
@@ -48,6 +49,7 @@ export default function AuditPage() {
           {items.length === 0 && <tr><td colSpan={5} className="p-6 text-center text-sm text-gray-400">暂无审计记录</td></tr>}
         </tbody>
       </table>
+      </div>
       <div className="mt-3 flex items-center justify-end gap-2 text-xs text-gray-500">
         <span>共 {total} 条</span>
         <Btn sm disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</Btn>

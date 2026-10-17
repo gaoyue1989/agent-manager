@@ -24,6 +24,7 @@ class SessionStreamControllerStatusTest {
     @Mock private TurnLeaseStore turnLeaseStore;
     @Mock private AgentRuntimeService runtimeService;
     @Mock private SessionEventStore eventStore;
+    @Mock private io.agentmanager.framework.service.SessionUserStore sessionUserStore;
 
     private SessionEventTailer tailer;
     private SessionStreamController controller;
@@ -32,7 +33,10 @@ class SessionStreamControllerStatusTest {
     void setUp() {
         tailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
             Duration.ofMillis(300));
-        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer);
+        // 无映射行（findUserIdBySession → null）= 存量会话，归属校验放行
+        when(sessionUserStore.findUserIdBySession(anyString())).thenReturn(null);
+        controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer,
+            sessionUserStore);
     }
 
     @Test
@@ -42,7 +46,7 @@ class SessionStreamControllerStatusTest {
             new SessionEventStore.EnvelopedEvent(9, "TEXT_BLOCK_DELTA", "{}", "rid-1"));
         when(runtimeService.findPendingConfirm("sid-1")).thenReturn(null);
 
-        Map<String, Object> body = controller.status("sid-1").getBody();
+        Map<String, Object> body = controller.status("sid-1", null).getBody();
         assertEquals("interrupted", body.get("state"));
         assertEquals(9, body.get("latest_event_seq"));
     }
@@ -54,7 +58,7 @@ class SessionStreamControllerStatusTest {
             new SessionEventStore.EnvelopedEvent(3, "TEXT_BLOCK_DELTA", "{}", "rid-2"));
         when(runtimeService.findPendingConfirm("sid-2")).thenReturn(null);
 
-        Map<String, Object> body = controller.status("sid-2").getBody();
+        Map<String, Object> body = controller.status("sid-2", null).getBody();
         // 跨副本关键点：本 Pod 没有 sink，也必须报 working
         assertEquals("working", body.get("state"));
     }
@@ -66,7 +70,7 @@ class SessionStreamControllerStatusTest {
             new SessionEventStore.EnvelopedEvent(12, "AGENT_END", "{}", "rid-3"));
         when(runtimeService.findPendingConfirm("sid-3")).thenReturn(null);
 
-        Map<String, Object> body = controller.status("sid-3").getBody();
+        Map<String, Object> body = controller.status("sid-3", null).getBody();
         assertEquals("completed", body.get("state"));
         assertEquals(12, body.get("latest_event_seq"));
     }
@@ -77,7 +81,7 @@ class SessionStreamControllerStatusTest {
             new SessionEventStore.EnvelopedEvent(5, "permission_ask", "{}", "rid-4"));
         when(runtimeService.findPendingConfirm("sid-4")).thenReturn(Map.of("tools", "[]"));
 
-        Map<String, Object> body = controller.status("sid-4").getBody();
+        Map<String, Object> body = controller.status("sid-4", null).getBody();
         assertEquals("waiting_confirm", body.get("state"));
     }
 
@@ -87,7 +91,7 @@ class SessionStreamControllerStatusTest {
         when(eventStore.findLatestStrict("sid-5")).thenReturn(null);
         when(runtimeService.findPendingConfirm("sid-5")).thenReturn(null);
 
-        Map<String, Object> body = controller.status("sid-5").getBody();
+        Map<String, Object> body = controller.status("sid-5", null).getBody();
         assertEquals("idle", body.get("state"));
         assertEquals(0, body.get("latest_event_seq"));
     }
@@ -106,7 +110,7 @@ class SessionStreamControllerStatusTest {
         when(eventStore.findLatestStrict("sid-6"))
             .thenThrow(new RuntimeException("redis connection refused"));
 
-        var resp = controller.status("sid-6");
+        var resp = controller.status("sid-6", null);
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, resp.getStatusCode());
         assertEquals("event_store_unavailable", resp.getBody().get("error"));

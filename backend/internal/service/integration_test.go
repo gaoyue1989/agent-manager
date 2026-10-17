@@ -217,15 +217,27 @@ func TestIntrospectApiKeyChannel(t *testing.T) {
 	if w4.Code != http.StatusUnauthorized {
 		t.Fatalf("no credential: %d", w4.Code)
 	}
-	// JWT 通道：签发 token（与 handler 同 secret/格式）→ 200
-	tok := signTestJWT(42)
+	// JWT 通道：签发 token（与 handler 同 secret/格式）+ DB 存在 active 用户 → 200；
+	// 禁用/删号用户的旧 token 即时失效（issue #148）
+	hash, _ := store.HashPassword("p-jwtuser")
+	c.DB.Create(&store.User{Username: "jwtuser", PasswordHash: hash, Role: "user", Status: "active"})
+	var jwtUser store.User
+	c.DB.Where("username = ?", "jwtuser").First(&jwtUser)
+	tok := signTestJWT(jwtUser.ID)
 	req5, _ := http.NewRequest(http.MethodGet, "http://router/api/v1/auth/introspect", nil)
 	c.JWTSecret = "test-jwt-secret"
 	req5.Header.Set("Authorization", "Bearer "+tok)
 	w5 := httptest.NewRecorder()
 	c.Introspect(w5, req5)
-	if w5.Code != http.StatusOK || w5.Header().Get("X-User-Id") != "u-42" {
+	if w5.Code != http.StatusOK || w5.Header().Get("X-User-Id") != fmt.Sprintf("u-%d", jwtUser.ID) {
 		t.Fatalf("jwt channel: %d %q", w5.Code, w5.Header().Get("X-User-Id"))
+	}
+	// 禁用后同 token 即时 403
+	c.DB.Model(&store.User{}).Where("id = ?", jwtUser.ID).Update("status", "disabled")
+	w6 := httptest.NewRecorder()
+	c.Introspect(w6, req5)
+	if w6.Code != http.StatusForbidden {
+		t.Fatalf("jwt disabled user: %d (want 403)", w6.Code)
 	}
 	// last_used_at 节流写
 	var fresh store.ApiKey
