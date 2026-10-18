@@ -122,15 +122,19 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
   };
 
   // Skill 勾选/取消：按 包id+技能名 定位（同名技能可来自不同包），加入即写入
-  // 生成包 skills 声明（source=package，提交时复制 skills/ 目录进包）
+  // 生成包 skills 声明（source=package，提交时复制 skills/ 目录进包）。
+  // 同名技能互斥（issue #173）：勾选同名另一来源时自动替换（后勾选生效），
+  // 生成包 skills 声明与 skills/ 目录均只保留一份，避免重复声明静默覆盖。
   const toggleSkill = (sk: SkillOption) => {
     setState((s) => {
       const has = s.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
+      if (has) {
+        return { ...s, skills: s.skills.filter((x) => !(x.name === sk.name && x.packageId === sk.packageId)) };
+      }
+      const replaced = s.skills.filter((x) => x.name !== sk.name);
       return {
         ...s,
-        skills: has
-          ? s.skills.filter((x) => !(x.name === sk.name && x.packageId === sk.packageId))
-          : [...s.skills, { name: sk.name, source: "package", packageId: sk.packageId, version: sk.packageVersion }],
+        skills: [...replaced, { name: sk.name, source: "package", packageId: sk.packageId, version: sk.packageVersion }],
       };
     });
   };
@@ -342,23 +346,40 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                   </tbody>
                 </table>
                 <div className="mt-2 rounded-lg border border-gray-200" data-testid="skill-pool">
-                  <div className="border-b border-gray-100 bg-gray-50/60 px-3 py-1.5 text-[11px] text-gray-500">可用技能（空间内 OAF 包）</div>
+                  <div className="border-b border-gray-100 bg-gray-50/60 px-3 py-1.5 text-[11px] text-gray-500">可用技能（空间内 OAF 包 · 同名技能取其一，切换来源即替换）</div>
                   <div className="max-h-44 overflow-y-auto">
-                    {skillPool.map((sk) => {
-                      const checked = state.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
-                      return (
-                        <label key={`${sk.packageId}-${sk.name}`} className="flex cursor-pointer items-start gap-2 border-b border-gray-100 px-3 py-1.5 text-xs last:border-0">
-                          <input type="checkbox" checked={checked} className="mt-0.5 accent-blue-600"
-                            data-testid={`skill-opt-${sk.name}`} onChange={() => toggleSkill(sk)} />
-                          <span className="min-w-0">
-                            <b className="font-medium">{sk.name}</b>
-                            <span className="ml-1.5 font-mono text-[10.5px] text-gray-400">{sk.packageSlug}@{sk.packageVersion}</span>
-                            <small className="block truncate text-gray-400">{sk.description || "（无描述）"}</small>
-                          </span>
-                        </label>
-                      );
-                    })}
-                    {skillPool.length === 0 && <div className="px-3 py-2.5 text-[11px] text-gray-400">暂无可用技能 —— 上传包含 skills/ 目录的 OAF 包后出现在此（全量清单见「资产管理 → Skill 管理」）</div>}
+                    {(() => {
+                      // 候选池同名去重（issue #173）：同名技能只展示一条（优先已勾选来源），
+                      // 避免「同名两条可同时勾选 → 生成包重复声明并静默覆盖」
+                      const byName = new Map<string, SkillOption>();
+                      for (const sk of skillPool) {
+                        const picked = state.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
+                        const cur = byName.get(sk.name);
+                        if (!cur || (picked && !state.skills.some((x) => x.name === cur.name && x.packageId === cur.packageId))) {
+                          if (!cur || picked) byName.set(sk.name, sk);
+                        }
+                      }
+                      const pool = [...byName.values()];
+                      if (pool.length === 0) {
+                        return <div className="px-3 py-2.5 text-[11px] text-gray-400">暂无可用技能 —— 上传包含 skills/ 目录的 OAF 包后出现在此（全量清单见「资产管理 → Skill 管理」）</div>;
+                      }
+                      return pool.map((sk) => {
+                        const checked = state.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
+                        const dupCount = skillPool.filter((x) => x.name === sk.name).length;
+                        return (
+                          <label key={`${sk.packageId}-${sk.name}`} className="flex cursor-pointer items-start gap-2 border-b border-gray-100 px-3 py-1.5 text-xs last:border-0">
+                            <input type="checkbox" checked={checked} className="mt-0.5 accent-blue-600"
+                              data-testid={`skill-opt-${sk.name}`} onChange={() => toggleSkill(sk)} />
+                            <span className="min-w-0">
+                              <b className="font-medium">{sk.name}</b>
+                              <span className="ml-1.5 font-mono text-[10.5px] text-gray-400">{sk.packageSlug}@{sk.packageVersion}</span>
+                              {dupCount > 1 && <span className="ml-1.5 text-[10.5px] text-amber-600">{checked ? `（已选来源；另有 ${dupCount - 1} 个同名来源，切换即替换）` : `（另有 ${dupCount - 1} 个同名来源，勾选即选此条）`}</span>}
+                              <small className="block truncate text-gray-400">{sk.description || "（无描述）"}</small>
+                            </span>
+                          </label>
+                        );
+                      });
+                    })()}
                   </div>
                 </div>
 

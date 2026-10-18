@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"agent-manager/backend/internal/oaf"
 	"agent-manager/backend/internal/store"
@@ -27,6 +28,8 @@ var (
 	ErrAgentsMDUndeletable = errors.New("AGENTS.md at package root cannot be deleted")
 	// ErrUpsertInvalid 版本请求的客户端输入类错误（超限/编码非法），统一映射 400
 	ErrUpsertInvalid = errors.New("invalid version request")
+	// ErrVersionConflict 同 slug 的版本号被并发保存占用（issue #172）：映射 409
+	ErrVersionConflict = errors.New("package version conflict (concurrent save)")
 )
 
 // FileContent 单文件预览载荷：binary=true 时 content 为空，前端引导走下载端点。
@@ -82,6 +85,14 @@ const maxUpsertFileBytes = 256 << 10
 // maxUpsertTotalBytes 单次请求 upserts 内容总量上限（防多文件聚合放大内存）。
 const maxUpsertTotalBytes = 4 << 20
 
+// reservedRootDirs 运行时按目录扫描的保留根路径（OAF 规范 §目录结构）：包编辑器
+// 禁止以文件形式占用（issue #174——根文件 skills 曾让 skills/ 技能目录不可读、
+// 运行时扫描行为不可预期）。
+var reservedRootDirs = map[string]bool{
+	"skills":      true,
+	"mcp-configs": true,
+}
+
 // base64LenLimit 由目标字节数反推 base64 编码串长度上限（4 字符编 3 字节）。
 func base64LenLimit(n int) int { return (n*4 + 2) / 3 }
 
@@ -110,6 +121,10 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 		clean, err := store.CleanSubPath(u.Path)
 		if err != nil {
 			return nil, nil, fmt.Errorf("upsert %q: %w", u.Path, err)
+		}
+		// 保留目录名不可被文件占用（issue #174）：一级路径恰为保留目录名 → 400
+		if reservedRootDirs[clean] {
+			return nil, nil, fmt.Errorf("%w: %q is a reserved directory name (skills, mcp-configs)", ErrUpsertInvalid, clean)
 		}
 		var content []byte
 		switch strings.ToLower(u.Encoding) {
@@ -176,21 +191,23 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 	if !changed {
 		return nil, nil, ErrNoEffectiveChanges
 	}
-	// 版本自动递增（issue #155）：变更集应用后 frontmatter version 仍等于基础包版本时，
-	// 自动 bump patch（与 Agent 编辑链路 nextVersion 同口径），保证 slug@version 可区分、
-	// 版本链不出现重复行；用户显式改了 version（≠ base.Version）则尊重显式值。
-	// rewrite 失败保持原文——frontmatter 非法时由下方 ParseOAF/Validate 统一报错。
-	if baseCfg, perr := oaf.ParseOAF(string(files["AGENTS.md"])); perr == nil && baseCfg.Version == base.Version {
-		if out, rerr := rewriteAgentsMDVersion(files["AGENTS.md"], nextVersion(base.Version)); rerr == nil {
-			files["AGENTS.md"] = []byte(out)
-		}
+	// 解析新 AGENTS.md frontmatter（事务前只读预检：解析失败属用户输入错误，
+	// 提前返回可避免无谓的锁等待；事务内版本号决策以行锁下的最新链尾为准）
+	preCfg, err := oaf.ParseOAF(string(files["AGENTS.md"]))
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse AGENTS.md: %w", err)
 	}
+	if err := preCfg.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("invalid AGENTS.md: %w", err)
+	}
+	// 显式改了版本（≠ base.Version）→ 尊重显式值；否则自动 bump（具体值事务内定）
+	explicitVersion := preCfg.Version != base.Version
+
+	// 复用上传管线：校验 + 解析 frontmatter（版本决策在 commitVersionTx 事务内）
 	zipData, err := buildZipBytes(files)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// 复用上传管线：校验 + 解析 frontmatter + 事务入库 + 落盘
 	zi, err := s.FS.InspectZip(bytes.NewReader(zipData))
 	if err != nil {
 		return nil, nil, err
@@ -209,41 +226,145 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 			warnings = append(warnings, fmt.Sprintf("mcpServer %q configDir %q missing in package", m.Server, m.ConfigDir))
 		}
 	}
-	// 同 slug+version 已有其他包：提示不阻断
-	var dupCnt int64
-	if err := s.DB.Model(&store.OafPackage{}).Where("slug = ? AND version = ? AND id <> ?",
-		cfg.Slug, cfg.Version, base.ID).Count(&dupCnt).Error; err != nil {
+
+	// 版本决策 + 入库在同一事务（issue #172）：对同 slug 版本链行加 FOR UPDATE 锁
+	// 串行化「读链尾 → 定版本号 → 插入」，并发保存只有一个成功，其余 409 或串行递增。
+	// 锁对象是 slug 链上行集——copy-on-write 不改任何已有行，锁只保证同一 slug 的
+	// 并发创建互斥；无行时（首版本）退化为唯一索引兜底（并发插入撞 uk 必有一个失败）。
+	rec, dupWarn, err := s.commitVersionTx(base, files, cfg, zi, explicitVersion)
+	if dupWarn != "" {
+		warnings = append(warnings, dupWarn)
+	}
+	if err != nil {
 		return nil, nil, err
 	}
-	if dupCnt > 0 {
-		warnings = append(warnings, fmt.Sprintf("package %s@%s already exists (other than base)", cfg.Slug, cfg.Version))
-	}
+	return rec, warnings, nil
+}
 
-	manifest, _ := json.Marshal(cfg)
-	warnJSON, _ := json.Marshal(warnings)
-	rec := &store.OafPackage{
-		Name: cfg.Name, Slug: cfg.Slug, Version: cfg.Version,
-		Description:  cfg.Description,
-		ManifestJSON: string(manifest), WarningsJSON: string(warnJSON),
-		Checksum:  zi.Checksum,
-		FileCount: zi.FileCount, TotalSize: zi.TotalSize,
-		SourcePackageID: base.ID,
-	}
-	err = s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(rec).Error; err != nil {
+// commitVersionTx 版本号决策（自动 bump / 显式值冲突裁决）+ zip 重打包 + 入库落盘。
+// 事务内对同 slug 全部已有版本行加 FOR UPDATE：串行化并发保存的 nextVersion 计算，
+// 消除「校验基础包 checksum（copy-on-write 恒通过）→ 双双插入同版本」的竞态窗口。
+func (s *PackageService) commitVersionTx(base *store.OafPackage, files map[string][]byte,
+	cfg *oaf.Config, zi *store.ZipInfo, explicitVersion bool) (*store.OafPackage, string, error) {
+
+	var rec *store.OafPackage
+	var dupWarn string
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		rec = nil
+		dupWarn = ""
+		// 锁定同 slug 全部版本行（版本链）：并发事务在此排队
+		var locked []store.OafPackage
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("slug = ?", cfg.Slug).Find(&locked).Error; err != nil {
 			return err
 		}
+		// 链上最新版本（id 最大 = 最新创建）
+		latest := base.Version
+		if len(locked) > 0 {
+			latest = locked[len(locked)-1].Version
+		}
+		version := cfg.Version
+		if explicitVersion {
+			// 用户显式指定版本：撞链即拒绝（409），不再静默并存（issue #172 预期语义）
+			for _, p := range locked {
+				if p.Version == version && p.ID != base.ID {
+					return fmt.Errorf("%w: %s@%s already exists (id=%d)",
+						ErrVersionConflict, cfg.Slug, version, p.ID)
+				}
+			}
+		} else {
+			// 自动 bump（issue #155 口径延续）：基于「行锁下的链尾最新版本」递增，
+			// 并发串行化后第二个请求拿到 1.0.2 而非重复 1.0.1
+			version = nextVersion(latest)
+			if out, rerr := rewriteAgentsMDVersion(files["AGENTS.md"], version); rerr == nil {
+				files["AGENTS.md"] = []byte(out)
+			}
+			// frontmatter 改动 → 重打包重校验（checksum/文件数以最终 zip 为准）
+			zipData, berr := buildZipBytes(files)
+			if berr != nil {
+				return berr
+			}
+			zi2, err := s.FS.InspectZip(bytes.NewReader(zipData))
+			if err != nil {
+				return err
+			}
+			cfg2, err := oaf.ParseOAF(string(zi2.AgentsMD))
+			if err != nil {
+				return fmt.Errorf("parse AGENTS.md: %w", err)
+			}
+			if err := cfg2.Validate(); err != nil {
+				return fmt.Errorf("invalid AGENTS.md: %w", err)
+			}
+			cfg = cfg2
+			zi = zi2
+		}
+		// 防御：自动 bump 结果与显式值都再查一次唯一性（锁内天然无并发，防存量脏数据）
+		var dupCnt int64
+		if err := tx.Model(&store.OafPackage{}).Where("slug = ? AND version = ? AND id <> ?",
+			cfg.Slug, cfg.Version, base.ID).Count(&dupCnt).Error; err != nil {
+			return err
+		}
+		if dupCnt > 0 {
+			if explicitVersion {
+				return fmt.Errorf("%w: %s@%s already exists", ErrVersionConflict, cfg.Slug, cfg.Version)
+			}
+			// 自动 bump 撞存量（如人工造的 .fix 行）：继续顺延直至空位（链已锁，有限轮）
+			for i := 0; i < store.MaxEntries; i++ {
+				version = nextVersion(version)
+				var c int64
+				if err := tx.Model(&store.OafPackage{}).Where("slug = ? AND version = ? AND id <> ?",
+					cfg.Slug, version, base.ID).Count(&c).Error; err != nil {
+					return err
+				}
+				if c == 0 {
+					if out, rerr := rewriteAgentsMDVersion(files["AGENTS.md"], version); rerr == nil {
+						files["AGENTS.md"] = []byte(out)
+					}
+					zipData, berr := buildZipBytes(files)
+					if berr != nil {
+						return berr
+					}
+					zi2, err := s.FS.InspectZip(bytes.NewReader(zipData))
+					if err != nil {
+						return err
+					}
+					cfg2, err := oaf.ParseOAF(string(zi2.AgentsMD))
+					if err != nil {
+						return fmt.Errorf("parse AGENTS.md: %w", err)
+					}
+					if err := cfg2.Validate(); err != nil {
+						return fmt.Errorf("invalid AGENTS.md: %w", err)
+					}
+					cfg = cfg2
+					zi = zi2
+					break
+				}
+			}
+		}
+		manifest, _ := json.Marshal(cfg)
+		warnJSON, _ := json.Marshal(dupWarn)
+		rec = &store.OafPackage{
+			Name: cfg.Name, Slug: cfg.Slug, Version: cfg.Version,
+			Description:  cfg.Description,
+			ManifestJSON: string(manifest), WarningsJSON: string(warnJSON),
+			Checksum:  zi.Checksum,
+			FileCount: zi.FileCount, TotalSize: zi.TotalSize,
+			SourcePackageID: base.ID,
+		}
+		if err := tx.Create(rec).Error; err != nil {
+			return translateStorageError(err)
+		}
 		rec.DirPath = fmt.Sprintf("packages/%d", rec.ID)
-		// 落盘失败则回滚记录
+		// 落盘失败则回滚记录（zip 重新打包后 ExtractZipTo 需最终 zi）
 		if _, _, _, werr := s.FS.ExtractZipTo(rec.DirPath, zi); werr != nil {
 			return werr
 		}
 		return tx.Model(rec).Update("dir_path", rec.DirPath).Error
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, dupWarn, err
 	}
-	return rec, warnings, nil
+	return rec, dupWarn, nil
 }
 
 // collectBaseFiles 读取基础包全部文件内容为 path→content 映射。

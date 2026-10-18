@@ -1,8 +1,12 @@
 package service
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"agent-manager/backend/internal/store"
 )
 
 // TestCreateVersionUpsertAndDelete 编辑派生主链路：改 AGENTS.md + 删文件 + 新增文件。
@@ -104,11 +108,44 @@ func TestCreateVersionRejectsIllegalInput(t *testing.T) {
 		{"bad base64", VersionRequest{Upserts: []VersionUpsert{{Path: "a.txt", Content: "!!!", Encoding: "base64"}}}},
 		{"invalid frontmatter", VersionRequest{Upserts: []VersionUpsert{{Path: "AGENTS.md", Content: "no frontmatter"}}}},
 		{"invalid semver", VersionRequest{Upserts: []VersionUpsert{{Path: "AGENTS.md", Content: replaceVersion(testAgentsMD, "not-semver")}}}},
+		// issue #174：保留目录名不可被根文件占用
+		{"upsert reserved skills", VersionRequest{Upserts: []VersionUpsert{{Path: "skills", Content: "x"}}}},
+		{"upsert reserved mcp-configs", VersionRequest{Upserts: []VersionUpsert{{Path: "mcp-configs", Content: "x"}}}},
 	}
 	for _, tc := range cases {
 		if _, _, err := c.Packages.CreateVersion(base, tc.req); err == nil {
 			t.Errorf("%s: want error, got nil", tc.name)
 		}
+	}
+}
+
+// TestUploadReservedRootFileRejected issue #174：上传包内根文件 skills/mcp-configs
+// 占用保留目录名 → 400（运行时按目录扫描技能/MCP 配置，同名文件让目录不可读）。
+func TestUploadReservedRootFileRejected(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	bad := buildTestZip(map[string]string{
+		"AGENTS.md": testAgentsMD,
+		"skills":    "x",
+	})
+	if _, err := c.Packages.Upload("bad.zip", bytesReader(bad)); err == nil {
+		t.Fatal("root file skills should be rejected")
+	}
+	bad2 := buildTestZip(map[string]string{
+		"AGENTS.md":   testAgentsMD,
+		"mcp-configs": "x",
+	})
+	if _, err := c.Packages.Upload("bad2.zip", bytesReader(bad2)); err == nil {
+		t.Fatal("root file mcp-configs should be rejected")
+	}
+	// 正常 skills/ 目录条目不受影响（目录条目与 skills/<name>/ 文件均放行）
+	ok := buildTestZip(map[string]string{
+		"AGENTS.md":                  testAgentsMD,
+		"skills/demo/SKILL.md":       "---\nname: demo\ndescription: d\n---\nbody",
+		"mcp-configs/fs/config.yaml": "connection:\n  type: sse\n",
+	})
+	if _, err := c.Packages.Upload("ok.zip", bytesReader(ok)); err != nil {
+		t.Fatalf("legit skills/ mcp-configs/ dirs should upload: %v", err)
 	}
 }
 
@@ -148,8 +185,9 @@ func TestCreateVersionInvalidYAML(t *testing.T) {
 	}
 }
 
-// TestCreateVersionDupVersionWarning 同 slug+version 已有其他包时追加 warning。
-func TestCreateVersionDupVersionWarning(t *testing.T) {
+// TestCreateVersionDupVersionWarning 显式改版本撞已有包 → 409 冲突（issue #172：
+// 同 slug+version 由唯一索引 + 锁内查重裁决，不再静默并存追加 warning）。
+func TestCreateVersionDupVersionConflict(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
 	base := uploadTestPkg(t, c, "")
@@ -158,23 +196,59 @@ func TestCreateVersionDupVersionWarning(t *testing.T) {
 	if _, err := c.Packages.Upload("dup.zip", bytesReader(dupZip)); err != nil {
 		t.Fatal(err)
 	}
-	rec, warnings, err := c.Packages.CreateVersion(base, VersionRequest{
-		// 显式改版本（2.0.0 ≠ base.Version → 不触发 #155 自动 bump）撞 dup 包
+	_, _, err := c.Packages.CreateVersion(base, VersionRequest{
+		// 显式改版本（2.0.0 ≠ base.Version → 不触发自动 bump）撞 dup 包
 		Upserts: []VersionUpsert{{Path: "README.md", Content: "changed"},
 			{Path: "AGENTS.md", Content: replaceVersion(testAgentsMD, "2.0.0")}},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("want ErrVersionConflict, got %v", err)
 	}
-	// 显式撞版本 → 应有重复提示
-	found := false
-	for _, w := range warnings {
-		if strings.Contains(w, "already exists") {
-			found = true
+}
+
+// TestCreateVersionSerialBump 并发保存串行化（issue #172 核心）：同一基础包并发两次
+// 编辑（不带 checksum），自动 bump 必须串行递增为 1.0.1 / 1.0.2，不产生重复版本行。
+func TestCreateVersionSerialBump(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	base := uploadTestPkg(t, c, "")
+
+	const workers = 4
+	type result struct {
+		ver string
+		err error
+	}
+	results := make(chan result, workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			rec, _, err := c.Packages.CreateVersion(base, VersionRequest{
+				Upserts: []VersionUpsert{{Path: fmt.Sprintf("lock-%d.md", i), Content: "x"}},
+			})
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{ver: rec.Version}
+		}(i)
+	}
+	vers := map[string]int{}
+	for i := 0; i < workers; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("concurrent save failed: %v", r.err)
 		}
+		vers[r.ver]++
 	}
-	if !found {
-		t.Fatalf("expected dup warning, got %v (rec version=%s slug=%s)", warnings, rec.Version, rec.Slug)
+	if len(vers) != workers {
+		t.Fatalf("duplicate versions from concurrent saves: %v", vers)
+	}
+	// 链上无重复版本行（唯一索引兜底验证）
+	var dups int64
+	c.DB.Model(&store.OafPackage{}).Select("COUNT(*)").
+		Where("slug = ?", base.Slug).
+		Group("slug, version").Having("COUNT(*) > 1").Count(&dups)
+	if dups > 0 {
+		t.Fatalf("slug %s has duplicate version rows", base.Slug)
 	}
 }
 
@@ -200,7 +274,8 @@ func TestPackageFileContent(t *testing.T) {
 	}
 }
 
-// TestPackageZip 整包打包可再次通过上传管线。
+// TestPackageZip 整包打包可再次通过上传管线。重打包产物升一个 patch 版本
+// （issue #172：同 slug+version 唯一索引后，重复上传同版本返回 409）。
 func TestPackageZip(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
@@ -209,12 +284,38 @@ func TestPackageZip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	re, err := c.Packages.Upload("repack.zip", bytesReader(data))
+	// 改写版本为 1.0.1 再上传（同 slug+version 已被 base 占用）
+	zi, err := c.FS.InspectZip(bytesReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	md := strings.Replace(string(zi.AgentsMD), "version: 1.0.0", "version: 1.0.1", 1)
+	repack, err := c.Packages.rezipWithAgentsMD(&zi, []byte(md))
+	if err != nil {
+		t.Fatal(err)
+	}
+	re, err := c.Packages.Upload("repack.zip", bytesReader(repack))
 	if err != nil {
 		t.Fatalf("repackaged zip should pass upload pipeline: %v", err)
 	}
 	if re.Slug != base.Slug {
 		t.Fatalf("slug mismatch %s vs %s", re.Slug, base.Slug)
+	}
+}
+
+// TestUploadDuplicateSlugVersionRejected issue #172 语义固化：上传链路重复 slug+version
+// → 409（REDESIGN §3.3.5 的并存语义被唯一索引取代，版本链不出现重复行）。
+func TestUploadDuplicateSlugVersionRejected(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	_ = uploadTestPkg(t, c, "")
+	dupZip := buildTestZip(map[string]string{
+		"AGENTS.md":                  testAgentsMD,
+		"mcp-configs/fs/config.yaml": "connection:\n  type: sse\n",
+	})
+	_, err := c.Packages.Upload("dup.zip", bytesReader(dupZip))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate slug+version upload should map ErrConflict, got %v", err)
 	}
 }
 

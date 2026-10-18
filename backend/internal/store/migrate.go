@@ -68,8 +68,54 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			Update("workspace_id", 0).Error; err != nil {
 			return err
 		}
+		// 5) oaf_packages：(slug, version) 唯一索引的存量重复行归一（issue #172）
+		// 已前移到 Open（AutoMigrate 之前，见 dedupPackageVersions）——重复行会让
+		// 唯一索引创建失败启动即挂
 		return nil
 	})
+}
+
+// dedupPackageVersions (slug, version) 唯一索引的存量重复行归一（issue #172）。
+// 必须在 AutoMigrate 之前执行：重复行会让唯一索引创建失败启动即挂。
+// 保留同组最早一行（版本链起点/被引用概率最高），后续行 version 加 ".fix{N}"
+// 后缀让位——历史黑盒测试产生的重复节点按 id 先后可区分。
+// 幂等：正常库无重复行，二次启动零写入。仅写平台自有表。
+func dedupPackageVersions(db *gorm.DB) error {
+	type dupRow struct {
+		ID   uint
+		Slug string
+	}
+	var dupGroups []dupRow
+	if err := db.Model(&OafPackage{}).
+		Select("MIN(id) as id, slug").
+		Group("slug, version").
+		Having("COUNT(*) > 1").
+		Scan(&dupGroups).Error; err != nil {
+		return err
+	}
+	for _, g := range dupGroups {
+		var recs []OafPackage
+		if err := db.Where("slug = ?", g.Slug).
+			Order("id ASC").Find(&recs).Error; err != nil {
+			return err
+		}
+		// 同 slug 内按 version 分桶：桶内首行（最早 id）保持，后续行顺延加后缀
+		seen := map[string]int{}
+		for _, r := range recs {
+			n, ok := seen[r.Version]
+			seen[r.Version] = n + 1
+			if !ok {
+				continue
+			}
+			if err := db.Model(&OafPackage{}).Where("id = ?", r.ID).
+				Update("version", fmt.Sprintf("%s.fix%d", r.Version, n)).Error; err != nil {
+				return err
+			}
+			log.Printf("[migrate] normalized duplicate package slug=%s version=%s id=%d -> %s.fix%d",
+				r.Slug, r.Version, r.ID, r.Version, n)
+		}
+	}
+	return nil
 }
 
 // NewSlug 生成 ws-{8 hex} 形态的工作空间 slug（冲突重试由调用方负责）。

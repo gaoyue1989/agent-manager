@@ -165,7 +165,7 @@ backend/
 2. 安全校验：拒绝 zip slip（每个条目 `filepath.Clean` 后必须仍在目标根内）、拒绝符号链接/设备文件条目。
 3. 必须含根级 `AGENTS.md`；frontmatter 解析复用现有 `ParseOAF` + `Validate()`（identity 五字段 + metadata 四字段必填、kebab-case、semver 等校验规则不变）。**宽松模式**：`mcpServers[].configDir` 指向目录缺失、skills 引用无法解析等仅产生 warnings 随包记录入库并在详情/发布确认页展示，不阻断上传与发布。
 4. 解包落盘共享 PVC：`{DATA_ROOT}/packages/{packageId}/`，保留目录结构（AGENTS.md、skills/**、mcp-configs/** 等）。
-5. 入库 `packages` 表（manifest 关键字段摘要 + sha256 checksum）。同 slug+version 重复上传允许并存为新 packageId（服务发布时绑定具体 packageId）；被任一 service 引用中的包禁止删除。
+5. 入库 `packages` 表（manifest 关键字段摘要 + sha256 checksum）。**同 slug+version 全局唯一**（issue #172 更新原「允许并存」决议：重复版本节点无法区分先后、升级/回滚可能选错包）——`(slug, version)` 唯一索引 + 存量重复行启动归一（保留最早行，后续行加 `.fix{N}` 后缀）；上传重复 slug+version → 409，编辑/导入派生链路撞版在事务内自动顺延 patch。保留根目录名 `skills`/`mcp-configs` 不可被根文件占用（issue #174）。被任一 service 引用中的包禁止删除。
 
 ### 3.4 发布流程（Publish）
 

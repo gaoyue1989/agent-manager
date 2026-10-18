@@ -121,6 +121,14 @@ func validateEntry(zf *zip.File) error {
 		strings.Contains(name, "\\") || strings.Contains(clean, "../") {
 		return ErrZipSlip
 	}
+	// 保留目录名不可被根文件占用（issue #174）：一级路径恰为保留目录名且非目录条目
+	// → 拒绝（运行时按 skills/、mcp-configs/ 目录扫描，同名文件让目录不可读）
+	if !strings.Contains(clean, string(filepath.Separator)) && !zf.FileInfo().IsDir() {
+		switch clean {
+		case "skills", "mcp-configs":
+			return fmt.Errorf("%w: %q is a reserved directory name", ErrZipSlip, clean)
+		}
+	}
 	return nil
 }
 

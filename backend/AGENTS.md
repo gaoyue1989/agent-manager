@@ -79,7 +79,9 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 
 - **包不可变**：包目录经 subPath 只读挂载进业务 Pod，在线编辑永不原地写 —— `CreateVersion` 基于「基础包 + upserts − deletes」在内存合成 zip，走与 Upload 完全相同的校验落盘管线（InspectZip → ParseOAF/Validate → 事务入库 → ExtractZipTo），生成新 `OafPackage` 记录 + 新 PVC 目录 `packages/{newID}`
 - REST：`GET /packages/:id/files?path=`（单文件预览，文本判定 = 扩展名白名单 + NUL 嗅探双保险，512KB 上限，二进制返回 `binary:true` 引导下载）、`GET /packages/:id/files/download`、`GET /packages/:id/download`（整包 zip 打包，产物可通过 InspectZip 复检）、`POST /packages/:id/versions`（生成新版本）
-- CreateVersion 校验链：路径复用 `store.CleanSubPath`（`..`/`\`/绝对路径/超长统一包装 `ErrZipSlip`→400）→ 单文件 256KB 上限 → 根级 `AGENTS.md` 删除保护 → 无有效变更 400（与基础包逐字节对比）→ frontmatter 重新 ParseOAF/Validate → 同 slug+version 重复追加 warning 不阻断
+- CreateVersion 校验链：路径复用 `store.CleanSubPath`（`..`/`\`/绝对路径/超长统一包装 `ErrZipSlip`→400；一级路径为保留目录名 `skills`/`mcp-configs` 的文件 → 400，issue #174，上传 validateEntry 同口径）→ 单文件 256KB 上限 → 根级 `AGENTS.md` 删除保护 → 无有效变更 400（与基础包逐字节对比）→ frontmatter 重新 ParseOAF/Validate → 版本决策在事务内（issue #172）
+- **(slug, version) 唯一**（issue #172）：`OafPackage` 模型 `uk_pkg_slug_version` 唯一索引；`store.Open` 在 AutoMigrate **之前**跑 `dedupPackageVersions`（存量重复行保留最早、后续加 `.fix{N}` 后缀，否则索引建不出来启动即挂）；`CreateVersion`/`registerZipCore`（派生链路）在事务内对同 slug 版本链 `FOR UPDATE` 锁后决策版本——自动 bump 基于锁下链尾，显式版本撞链 409（`ErrVersionConflict`/`translateStorageError`）；上传链路撞版 409（原「并存」语义废止，见 docs/design/REDESIGN.md §3.3.5 更新）
+- 同名技能去重（issue #173）：`deriveFrontmatter`/`buildAgentFiles` 对 `form.Skills` 按 name 去重（首个勾选生效；frontmatter 声明与 skills/ 目录复制同口径），前端候选池同名互斥
 - 乐观锁：请求带 `expectedBaseChecksum` 与当前基础包不符返回 409（`ErrChecksumMismatch`）
 - `OafPackage.SourcePackageID` 记录派生溯源（0=上传原始包）；fileCount/totalSize 上传/派生时统计
 - 错误映射：fs.ErrNotExist → 404（文件不存在），ErrZipSlip/ErrNoEffectiveChanges 等 → 400

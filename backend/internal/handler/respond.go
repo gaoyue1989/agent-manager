@@ -40,8 +40,9 @@ func mapError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrDuplicateName), errors.Is(err, service.ErrInvalidForm),
 		errors.Is(err, service.ErrInvalidCredentials):
 		Fail(c, http.StatusBadRequest, err.Error())
-	case errors.Is(err, service.ErrChecksumMismatch):
-		// 乐观锁冲突：基础包已被并发修改
+	case errors.Is(err, service.ErrChecksumMismatch),
+		errors.Is(err, service.ErrVersionConflict):
+		// 乐观锁/版本冲突：基础包已被并发修改或版本号被并发保存占用（issue #172）
 		Fail(c, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrImageNotAllowed),
 		errors.Is(err, service.ErrPackageInUse),

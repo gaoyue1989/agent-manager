@@ -1,6 +1,8 @@
 package store
 
 import (
+	"fmt"
+
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -13,6 +15,11 @@ func Open(dsn string) (*gorm.DB, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	// (slug, version) 唯一索引的存量重复行归一（issue #172）必须先于 AutoMigrate：
+	// 重复行会让索引创建失败启动即挂；幂等，无重复行零写入
+	if err := dedupPackageVersions(db); err != nil {
+		return nil, fmt.Errorf("dedup package versions: %w", err)
 	}
 	if err := db.AutoMigrate(&OafPackage{}, &ServiceEntity{}, &ServiceEvent{},
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},

@@ -606,7 +606,7 @@ func TestCreateAgentImportCleanupOnPublishFailure(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()
 	ws := seedWs(t, c, "ws-55550010", "导入清理空间")
-	pub := uploadTestPkg(t, c, "2")   // 公共包（workspace_id=0）→ 导入派生副本
+	pub := uploadTestPkg(t, c, "2") // 公共包（workspace_id=0）→ 导入派生副本
 	own := uploadTestPkg(t, c, "3") // 需要本空间包：上传后改归属
 	if err := c.DB.Model(&store.OafPackage{}).Where("id = ?", own.ID).
 		Update("workspace_id", ws.ID).Error; err != nil {
@@ -631,5 +631,51 @@ func TestCreateAgentImportCleanupOnPublishFailure(t *testing.T) {
 	c.DB.Model(&store.OafPackage{}).Where("id = ?", own.ID).Count(&cnt)
 	if cnt != 1 {
 		t.Fatalf("own-space package must be kept: %d", cnt)
+	}
+}
+
+// TestSkillDedupSameName issue #173：同名技能重复勾选（不同源包）→ frontmatter 只保留
+// 首个声明，skills/ 目录只复制首个勾选的源目录——不再产生重复声明与静默覆盖。
+func TestSkillDedupSameName(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	// 两个源包都带同名技能 webapp-testing（内容与 slug 各异）
+	mk := func(agentKey string) *store.OafPackage {
+		md := strings.Replace(testAgentsMD, "agentKey: demo", "agentKey: "+agentKey, 1)
+		md = strings.Replace(md, "slug: acme/demo", "slug: acme/"+agentKey, 1)
+		zipBytes := buildTestZip(map[string]string{
+			"AGENTS.md":                      md,
+			"skills/webapp-testing/SKILL.md": "---\nname: webapp-testing\ndescription: from " + agentKey + "\n---\nbody " + agentKey,
+		})
+		rec, err := c.Packages.Upload(agentKey+".zip", bytesReader(zipBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec
+	}
+	pkgA := mk("pkg-a")
+	pkgB := mk("pkg-b")
+
+	form := &AgentForm{
+		Name: "dedup-agent", Description: "d", Prompt: "p",
+		Skills: []SkillRef{
+			{Name: "webapp-testing", Source: "package", PackageID: pkgA.ID},
+			{Name: "webapp-testing", Source: "package", PackageID: pkgB.ID},
+		},
+	}
+	fm := c.deriveFrontmatter(form, "dedup-agent", "1.0.0")
+	if len(fm.Skills) != 1 || fm.Skills[0].Name != "webapp-testing" {
+		t.Fatalf("frontmatter skills must dedup to 1, got %+v", fm.Skills)
+	}
+	files, err := c.buildAgentFiles(fm, form, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillMD := string(files["skills/webapp-testing/SKILL.md"])
+	if !strings.Contains(skillMD, "from pkg-a") {
+		t.Fatalf("first-checked source must win, got: %s", skillMD)
+	}
+	if strings.Contains(skillMD, "from pkg-b") {
+		t.Fatal("second same-name skill silently overwrote the first")
 	}
 }

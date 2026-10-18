@@ -61,9 +61,12 @@ assert_contains "slug = agentmanager/agentKey" "$(echo "$P1" | jqr "['data']['sl
 # ---- 创建 → running ----
 FORM=$(echo "$FORM_TPL" | sed "s/NAME/$NAME/; s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['spec']='';print(json.dumps(d))")
 M3_SVC=""
+M3_IPKG=""
 cleanup_m3() {
   [ -n "$M3_SVC" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC "" "$TOKEN" >/dev/null 2>&1
   [ -n "$M3_SVC2" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC2 "" "$TOKEN" >/dev/null 2>&1
+  # 导入源包清理（#172 唯一索引：残留会让后续轮次上传撞 slug+version 409）
+  [ -n "$M3_IPKG" ] && code DELETE /packages/$M3_IPKG "" "$TOKEN" >/dev/null 2>&1
 }
 trap cleanup_m3 EXIT
 M3_WS="$WS"
@@ -119,14 +122,15 @@ assert_eq "同 slug 再建 409" "$(code POST /console/workspaces/$WS/agents "$FO
 
 # ---- 导入模式（#161）：无 env 合法包 → 导入 → 平台默认 env 合并 + Pod Ready ----
 # 曾不经 buildPublishEnv：service env 只有隔离键，Pod 用镜像内置账号连库 Access denied
+# agentKey/slug 带 TS（#172 同 slug+version 唯一索引后，历史轮次残留包会撞 409）
 python3 - <<PYEOF
 import zipfile
 md = """---
 name: Import Probe
 vendorKey: acme
-agentKey: import-probe
+agentKey: import-probe-$TS
 version: 1.0.0
-slug: acme/import-probe
+slug: acme/import-probe-$TS
 description: import mode env merge probe
 author: "@e2e"
 license: MIT
@@ -137,6 +141,7 @@ with zipfile.ZipFile("/tmp/m3-import-$TS.zip", "w") as z:
 PYEOF
 UP=$(curl -s -X POST "$BASE/console/workspaces/$WS/packages" -H "Authorization: Bearer $TOKEN" -F "file=@/tmp/m3-import-$TS.zip")
 IPKG=$(echo "$UP" | jqr "['data']['id']")
+M3_IPKG="$IPKG"
 assert_eq "无 env 合法包上传 200" "$([ -n "$IPKG" ] && [ "$IPKG" != "None" ] && echo yes || echo no)" "yes"
 IMPORT=$(req POST /console/workspaces/$WS/agents \
   "{\"mode\":\"import\",\"name\":\"import-probe-$TS\",\"importPackageId\":$IPKG,\"modelConnections\":[{\"connectionId\":$CONN_ID,\"isDefault\":true}],\"spec\":\"small\",\"replicas\":1,\"publicEndpoint\":true}" "" "$TOKEN")
