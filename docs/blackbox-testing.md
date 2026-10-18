@@ -209,6 +209,10 @@ curl -s -X POST $BASE/console/workspaces/<ws-id>/api-keys -H "Authorization: Bea
 - 工作空间仍有归属服务时删除 → 拒绝（删除保护）。
 - MCP 连接器 env 键含连字符 → 400（曾出现非法 K8s 键，已修复）。
 - 模型连接下发后 Agent `/models` 回读应包含下发模型；usage 状态 pending → synced。
+- 导入模式创建 Agent（issue #161 修复后）：env 与 harness 同语义——平台默认配置恒合并（CM 含 `CHECKPOINT_USERNAME` 等、Secret 含 `CHECKPOINT_PASSWORD`/`LLM_API_KEY`），勾选模型连接则注入 `LLM_*`；无 env 合法包导入后 Pod 应 running（曾缺 env 导致 `Access denied` CrashLoopBackOff）。
+- 包内 skills/ 目录合规（issue #163 修复后）：缺 `SKILL.md` / 无 frontmatter / frontmatter name 与目录不一致 / 非法名称（大写、空格、`!`、超 64 字符、连续连字符）/ 描述超 1024 / 声明但目录缺失 → 上传不阻断但 `warningsJson` 逐条提示，`GET /console/workspaces/:ws/skills` 条目带 `issues[]` 标注；合法技能无 issues。
+- 声明式技能描述（issue #164 修复后）：frontmatter `skills:` 声明（无 description 字段）在 Skill 清单中回读包内 `SKILL.md` 描述，不再为空串。
+- 包上传超限错误形态（issue #165 修复后）：>20MB zip → 400 JSON `zip exceeds …`（曾为入口 nginx HTML 413，ingress `proxy-body-size` 已放宽 200m）；解压总量 >100MB → 400 JSON `extracted content exceeds limit`（曾为 500）。
 
 ## 7. 现成 e2e 套件（回归优先跑这些）
 

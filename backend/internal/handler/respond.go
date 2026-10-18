@@ -55,6 +55,7 @@ func mapError(c *gin.Context, err error) {
 		errors.Is(err, store.ErrNoAgentsMD),
 		errors.Is(err, store.ErrZipTooLarge),
 		errors.Is(err, store.ErrTooManyFiles),
+		errors.Is(err, store.ErrExtractTooLarge),
 		errors.Is(err, store.ErrZipSlip):
 		Fail(c, http.StatusBadRequest, err.Error())
 	default:

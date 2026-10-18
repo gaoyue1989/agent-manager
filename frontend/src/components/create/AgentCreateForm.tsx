@@ -20,6 +20,15 @@ export interface AgentFormState {
   importPackageId?: number; adoptServiceId?: number;
 }
 
+// SkillOption Skill 候选池条目（GET /console/workspaces/:ws/skills 的合规子集，issue #162）
+interface SkillOption {
+  name: string;
+  description: string;
+  packageId: number;
+  packageSlug: string;
+  packageVersion: string;
+}
+
 export const SPEC_CARDS = [
   { id: "small", title: "1核 2G", sub: "0.5 CU · 常规（默认）" },
   { id: "medium", title: "2核 4G", sub: "1 CU · 生产" },
@@ -66,6 +75,9 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
   const [connectors, setConnectors] = useState<McpConnectorView[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationView[]>([]);
   const [packages, setPackages] = useState<PackageRec[]>([]);
+  // Skill 候选池（issue #162：创建/编辑页此前无添加入口，与「从可用列表添加」文案不符）：
+  // 空间内 OAF 包技能清单，过滤不合规条目（issues，issue #163）
+  const [skillPool, setSkillPool] = useState<SkillOption[]>([]);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<{ agentKey: string; slug: string; k8sName: string; conflict: boolean } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -80,6 +92,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     api.console.tools.list(ws).then(setConnectors).catch(() => {});
     api.console.integrations.list(ws).then((r) => setIntegrations(r.relations.filter((x) => x.enabled))).catch(() => {});
     api.console.packages(ws).then(setPackages).catch(() => {});
+    api.console.spaceSkills(ws).then((list) => setSkillPool(list.filter((s) => !(s.issues ?? []).length))).catch(() => {});
   }, [ws]);
   useEffect(() => {
     if (!state.image && images.length > 0) setState((s) => ({ ...s, image: images[0].Image }));
@@ -106,6 +119,20 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     const idx = state.modelConnections.findIndex((x) => x.connectionId === id);
     if (idx < 0) return "—";
     return idx === 0 ? "默认（注入 LLM_* env）" : "就绪后下发 /models";
+  };
+
+  // Skill 勾选/取消：按 包id+技能名 定位（同名技能可来自不同包），加入即写入
+  // 生成包 skills 声明（source=package，提交时复制 skills/ 目录进包）
+  const toggleSkill = (sk: SkillOption) => {
+    setState((s) => {
+      const has = s.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
+      return {
+        ...s,
+        skills: has
+          ? s.skills.filter((x) => !(x.name === sk.name && x.packageId === sk.packageId))
+          : [...s.skills, { name: sk.name, source: "package", packageId: sk.packageId, version: sk.packageVersion }],
+      };
+    });
   };
 
   const selectedCount = {
@@ -299,21 +326,41 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
             <Note>勾选的资产将写入生成的 OAF 包（frontmatter skills / agents / mcpServers + mcp-configs/）：MCP 配置取自「工具管理」、远程 SubAgent 端点取自「集成 Agent」；运行时三层裁决不变。</Note>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div>
-                <div className="mb-2 text-xs text-gray-400">Skill（从可用列表添加）</div>
+                <div className="mb-2 text-xs text-gray-400">Skill（从可用列表勾选添加）</div>
                 <table className="w-full rounded-lg border border-gray-200 text-sm" data-testid="skill-table">
                   <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500"><th className="w-9 p-2"></th><th className="p-2">技能</th><th className="p-2">来源</th></tr></thead>
                   <tbody>
                     {state.skills.map((sk, i) => (
-                      <tr key={sk.name} className="border-b last:border-0">
+                      <tr key={`${sk.packageId ?? 0}-${sk.name}`} className="border-b last:border-0">
                         <td className="p-2"><input type="checkbox" checked className="accent-blue-600"
                           onChange={() => setState((s) => ({ ...s, skills: s.skills.filter((_, j) => j !== i) }))} /></td>
                         <td className="p-2 font-medium">{sk.name}</td>
-                        <td className="p-2"><Tag>{sk.source === "l4" ? "用户级 · L4（运行时注入）" : "公共技能（进包）"}</Tag></td>
+                        <td className="p-2"><Tag>{sk.source === "l4" ? "用户级 · L4（运行时注入）" : "OAF 包技能（进包）"}</Tag></td>
                       </tr>
                     ))}
-                    {state.skills.length === 0 && <tr><td colSpan={3} className="p-3 text-xs text-gray-400">从 Agent 详情 → 技能 / 模板包中可用技能按需声明（一期可留空）</td></tr>}
+                    {state.skills.length === 0 && <tr><td colSpan={3} className="p-3 text-xs text-gray-400">尚未勾选技能 —— 从下方可用列表勾选（一期可留空）</td></tr>}
                   </tbody>
                 </table>
+                <div className="mt-2 rounded-lg border border-gray-200" data-testid="skill-pool">
+                  <div className="border-b border-gray-100 bg-gray-50/60 px-3 py-1.5 text-[11px] text-gray-500">可用技能（空间内 OAF 包）</div>
+                  <div className="max-h-44 overflow-y-auto">
+                    {skillPool.map((sk) => {
+                      const checked = state.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
+                      return (
+                        <label key={`${sk.packageId}-${sk.name}`} className="flex cursor-pointer items-start gap-2 border-b border-gray-100 px-3 py-1.5 text-xs last:border-0">
+                          <input type="checkbox" checked={checked} className="mt-0.5 accent-blue-600"
+                            data-testid={`skill-opt-${sk.name}`} onChange={() => toggleSkill(sk)} />
+                          <span className="min-w-0">
+                            <b className="font-medium">{sk.name}</b>
+                            <span className="ml-1.5 font-mono text-[10.5px] text-gray-400">{sk.packageSlug}@{sk.packageVersion}</span>
+                            <small className="block truncate text-gray-400">{sk.description || "（无描述）"}</small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                    {skillPool.length === 0 && <div className="px-3 py-2.5 text-[11px] text-gray-400">暂无可用技能 —— 上传包含 skills/ 目录的 OAF 包后出现在此（全量清单见「资产管理 → Skill 管理」）</div>}
+                  </div>
+                </div>
 
                 <div className="mb-2 mt-4 text-xs text-gray-400">SubAgent（名称 + 职责，或从「集成 Agent」勾选远程端点）</div>
                 <table className="w-full rounded-lg border border-gray-200 text-sm" data-testid="subagent-table">

@@ -13,6 +13,10 @@ metadata:
     {{- include "oaf.labels" . | nindent 4 }}
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # 包上传链路：入口须宽于后端应用上限（MaxZipSize 20MB），超限由 backend 返回
+    # JSON 400——ingress-nginx 默认 proxy-body-size 1m 会以 HTML 413 拒绝，前端无法
+    # 解析（issue #165）；200m 与宿主机 nginx / platform-router 同口径
+    nginx.ingress.kubernetes.io/proxy-body-size: "200m"
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -56,6 +60,8 @@ metadata:
     # MCP 长会话/SSE：与现网 platform-backend-mcp 同口径
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # MCP upload_package 走 JSON+base64（20MB 包 → 27MB 请求体），与 /api 同口径放宽
+    nginx.ingress.kubernetes.io/proxy-body-size: "200m"
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

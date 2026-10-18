@@ -79,7 +79,7 @@ func TestAgentCardSummaryDegrade(t *testing.T) {
 	// agent_card_json 损坏 → 摘要降级为包名+描述，不 500
 	svc := &store.ServiceEntity{K8sName: "oaf-degrade", DisplayName: "降级服务",
 		PackageID: pkg.ID, WorkspaceID: ws.ID, Status: store.StatusRunning,
-		AgentCardJSON: "{corrupt", }
+		AgentCardJSON: "{corrupt"}
 	if err := c.DB.Create(svc).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -165,5 +165,68 @@ func TestSpaceSkillsUsedByNotNull(t *testing.T) {
 	items, _ = c.SpaceSkills(ws.ID, "")
 	if len(items) != 1 || len(items[0].UsedBy) != 1 || items[0].UsedBy[0] != "引用方" {
 		t.Fatalf("usedBy ref: %+v", items)
+	}
+}
+
+// TestSpaceSkillsDeclaredDescriptionFallback issue #164：声明式技能（frontmatter
+// skills 无 description 字段）回读包内 SKILL.md 的 frontmatter 描述。
+func TestSpaceSkillsDeclaredDescriptionFallback(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-66660007", "技能描述空间")
+	pkg := uploadTestPkg(t, c, "")
+	if err := c.DB.Model(&store.OafPackage{}).Where("id = ?", pkg.ID).
+		Update("manifest_json", `{"skills":[{"name":"webapp-testing"},{"name":"ghost"}]}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.FS.WriteZipTo(pkg.DirPath, buildTestZip(map[string]string{
+		"AGENTS.md":                      testAgentsMD,
+		"skills/webapp-testing/SKILL.md": "---\nname: webapp-testing\ndescription: toolkit for web apps\n---\nbody",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	items, err := c.SpaceSkills(ws.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]SpaceSkillItem{}
+	for _, it := range items {
+		byName[it.Name] = it
+	}
+	if it, ok := byName["webapp-testing"]; !ok || !it.Declared || it.Description != "toolkit for web apps" {
+		t.Fatalf("declared skill must read SKILL.md description: %+v", byName["webapp-testing"])
+	}
+	// 声明但目录缺失：标注 issue（不阻断清单）
+	if it, ok := byName["ghost"]; !ok || len(it.Issues) != 1 || !strings.Contains(it.Issues[0], "directory missing") {
+		t.Fatalf("ghost skill must be annotated: %+v", byName["ghost"])
+	}
+}
+
+// TestSpaceSkillsIssuesAnnotation issue #163：目录扫描技能的不合规项标注在条目上。
+func TestSpaceSkillsIssuesAnnotation(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-66660008", "技能合规空间")
+	pkg := uploadTestPkg(t, c, "")
+	if _, _, err := c.FS.WriteZipTo(pkg.DirPath, buildTestZip(map[string]string{
+		"AGENTS.md":               testAgentsMD,
+		"skills/broken/README.md": "no SKILL.md",
+		"skills/valid/SKILL.md":   "---\nname: valid\ndescription: ok\n---\nbody",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	items, err := c.SpaceSkills(ws.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]SpaceSkillItem{}
+	for _, it := range items {
+		byName[it.Name] = it
+	}
+	if it, ok := byName["broken"]; !ok || len(it.Issues) != 1 || !strings.Contains(it.Issues[0], "missing skills/broken/SKILL.md") {
+		t.Fatalf("broken must be annotated: %+v", byName["broken"])
+	}
+	if it, ok := byName["valid"]; !ok || len(it.Issues) != 0 {
+		t.Fatalf("valid must have no issues: %+v", byName["valid"])
 	}
 }

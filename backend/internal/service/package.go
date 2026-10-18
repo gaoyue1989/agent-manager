@@ -1,11 +1,13 @@
 package service
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 
 	"gorm.io/gorm"
 
@@ -20,6 +22,39 @@ type PackageService struct {
 }
 
 var ErrPackageInUse = errors.New("package is referenced by services")
+
+// skillWarningsFromZip 从 zip 条目做 skills/ 目录合规检查（checkSkillDirs 的 zip 数据源
+// 适配），结果展平为包级 warnings（`skill "名": 问题`）。
+func skillWarningsFromZip(zi *store.ZipInfo) []string {
+	files := map[string]*zip.File{}
+	paths := make([]string, 0, len(zi.Reader.File))
+	for _, zf := range zi.Reader.File {
+		if zf.FileInfo().IsDir() {
+			continue
+		}
+		files[zf.Name] = zf
+		paths = append(paths, zf.Name)
+	}
+	issues := checkSkillDirs(func(name string) ([]byte, error) {
+		zf, ok := files[name]
+		if !ok {
+			return nil, fs.ErrNotExist
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(rc)
+	}, paths)
+	warnings := make([]string, 0, len(issues))
+	for _, is := range issues {
+		for _, msg := range is.Issues {
+			warnings = append(warnings, fmt.Sprintf("skill %q: %s", is.Name, msg))
+		}
+	}
+	return warnings
+}
 
 // registerZipCore 上传/生成共用的落盘+登记核心（Upload 保持 multipart 入口语义）。
 // workspaceID>0 = 空间包（仅本空间可见）；0 = 平台公共包（决议 7）。
@@ -42,6 +77,8 @@ func (s *PackageService) registerZipCore(filename string, r io.Reader, workspace
 			warnings = append(warnings, fmt.Sprintf("mcpServer %q configDir %q missing in package", m.Server, m.ConfigDir))
 		}
 	}
+	// skills/ 目录合规检查（issue #163）：宽松模式同引用缺失——只写 warnings 不阻断
+	warnings = append(warnings, skillWarningsFromZip(zi)...)
 	manifest, _ := json.Marshal(cfg)
 	warnJSON, _ := json.Marshal(warnings)
 

@@ -17,8 +17,8 @@ func TestSlugifyAgentKey(t *testing.T) {
 		{"Hello World", "hello-world"},
 		{"  --Foo__Bar!!--  ", "foo-bar"},
 		{"API 网关 v2", "api-v2"}, // 中文剥离、空格转连字符
-		{"---", "agent-"},        // 空结果回退 agent-{hex}
-		{"客服工单助手", "agent-"},  // 纯中文回退
+		{"---", "agent-"},       // 空结果回退 agent-{hex}
+		{"客服工单助手", "agent-"},    // 纯中文回退
 	}
 	for _, tc := range cases {
 		got := SlugifyAgentKey(tc.in)
@@ -531,5 +531,105 @@ func TestTranslateStorageError(t *testing.T) {
 	other := errors.New("connection refused")
 	if translateStorageError(other) != other {
 		t.Fatal("unrelated errors must pass through")
+	}
+}
+
+// TestCreateAgentImportMergesPlatformDefaults issue #161：导入链路与 harness 同语义——
+// 平台默认 env 恒合并（包不带 DB/LLM env 时曾缺 CHECKPOINT_*/LLM_* → Pod Access
+// denied CrashLoopBackOff）；勾选模型连接时 LLM_* 覆盖默认值；不勾选则保留平台默认。
+func TestCreateAgentImportMergesPlatformDefaults(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-55550009", "导入空间")
+	for _, kv := range [][2]string{
+		{"CHECKPOINT_JDBC_URL", "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint"},
+		{"CHECKPOINT_USERNAME", "agent_manager"},
+		{"CHECKPOINT_PASSWORD", "pw"},
+		{"LLM_BASE_URL", "http://gw/v1"},
+	} {
+		if err := c.DB.Create(&store.PlatformConfigEntity{EnvKey: kv[0], Value: kv[1]}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkg := uploadTestPkg(t, c, "")
+	envOf := func(svc *store.ServiceEntity) map[string]string {
+		env := map[string]string{}
+		if err := jsonUnmarshalStrict(svc.EnvJSON, &env); err != nil {
+			t.Fatal(err)
+		}
+		return env
+	}
+
+	// 不勾选模型连接：平台默认 env 全量带入（含 secret 路由的密码键）
+	form := &AgentForm{Mode: "import", Name: "import-no-conn", ImportPackageID: &pkg.ID, Replicas: 1}
+	svc, _, err := c.CreateAgentImport(ws.ID, 1, form, pkg.ID)
+	if err != nil {
+		t.Fatalf("import without conns: %v", err)
+	}
+	env := envOf(svc)
+	if env["CHECKPOINT_USERNAME"] != "agent_manager" || env["CHECKPOINT_JDBC_URL"] == "" {
+		t.Fatalf("platform defaults not merged: %+v", env)
+	}
+	if env["CHECKPOINT_JDBC_URL"] != "jdbc:mysql://oaf-mysql:3306/oaf_checkpoint_oaf_import_no_conn?createDatabaseIfNotExist=true" {
+		t.Fatalf("isolation derivation missing: %q", env["CHECKPOINT_JDBC_URL"])
+	}
+
+	// 勾选模型连接：LLM_* 来自连接（覆盖平台默认），并登记下发
+	conn := seedVerifiedConn(t, c, ws.ID, "c1", "gpt-x", "http://b1/v1")
+	form = &AgentForm{Mode: "import", Name: "import-with-conn",
+		ModelConnections: []ModelConnRef{{ConnectionID: conn.ID, IsDefault: true}},
+		ImportPackageID:  &pkg.ID, Replicas: 1}
+	svc2, _, err := c.CreateAgentImport(ws.ID, 1, form, pkg.ID)
+	if err != nil {
+		t.Fatalf("import with conns: %v", err)
+	}
+	env = envOf(svc2)
+	if env["LLM_BASE_URL"] != "http://b1/v1" || env["LLM_MODEL"] != "gpt-x" {
+		t.Fatalf("connection env not injected: %+v", env)
+	}
+	// API key 按 secretKeys 路由进服务 Secret（不落 plain env）
+	secret := map[string]string{}
+	if err := jsonUnmarshalStrict(svc2.EnvSecretJSON, &secret); err != nil {
+		t.Fatal(err)
+	}
+	if secret["LLM_API_KEY"] != "sk-test" {
+		t.Fatalf("LLM_API_KEY must route to service secret: %+v", secret)
+	}
+	if env["CHECKPOINT_USERNAME"] != "agent_manager" {
+		t.Fatalf("platform defaults must merge with connection env: %+v", env)
+	}
+}
+
+// TestCreateAgentImportCleanupOnPublishFailure 导入失败语义：派生副本回删（不留孤儿），
+// 本空间已上传包保留（用户资产）。
+func TestCreateAgentImportCleanupOnPublishFailure(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-55550010", "导入清理空间")
+	pub := uploadTestPkg(t, c, "2")   // 公共包（workspace_id=0）→ 导入派生副本
+	own := uploadTestPkg(t, c, "3") // 需要本空间包：上传后改归属
+	if err := c.DB.Model(&store.OafPackage{}).Where("id = ?", own.ID).
+		Update("workspace_id", ws.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	bad := "evil:not-allowed" // Publish 入口镜像白名单拒绝
+
+	form := &AgentForm{Mode: "import", ImportPackageID: &pub.ID, Replicas: 1, Image: bad}
+	if _, _, err := c.CreateAgentImport(ws.ID, 1, form, pub.ID); err == nil {
+		t.Fatal("publish should fail on image allowlist")
+	}
+	var cnt int64
+	c.DB.Model(&store.OafPackage{}).Where("workspace_id = ?", ws.ID).Count(&cnt)
+	if cnt != 1 { // 仅 own 保留；派生副本已回删
+		t.Fatalf("derived copy must be cleaned up, workspace pkgs = %d", cnt)
+	}
+
+	form = &AgentForm{Mode: "import", ImportPackageID: &own.ID, Replicas: 1, Image: bad}
+	if _, _, err := c.CreateAgentImport(ws.ID, 1, form, own.ID); err == nil {
+		t.Fatal("publish should fail on image allowlist")
+	}
+	c.DB.Model(&store.OafPackage{}).Where("id = ?", own.ID).Count(&cnt)
+	if cnt != 1 {
+		t.Fatalf("own-space package must be kept: %d", cnt)
 	}
 }

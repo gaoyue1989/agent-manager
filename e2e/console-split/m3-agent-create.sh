@@ -61,7 +61,10 @@ assert_contains "slug = agentmanager/agentKey" "$(echo "$P1" | jqr "['data']['sl
 # ---- 创建 → running ----
 FORM=$(echo "$FORM_TPL" | sed "s/NAME/$NAME/; s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['spec']='';print(json.dumps(d))")
 M3_SVC=""
-cleanup_m3() { [ -n "$M3_SVC" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC "" "$TOKEN" >/dev/null 2>&1; }
+cleanup_m3() {
+  [ -n "$M3_SVC" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC "" "$TOKEN" >/dev/null 2>&1
+  [ -n "$M3_SVC2" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC2 "" "$TOKEN" >/dev/null 2>&1
+}
 trap cleanup_m3 EXIT
 M3_WS="$WS"
 CREATE=$(req POST /console/workspaces/$WS/agents "$FORM" "" "$TOKEN")
@@ -113,6 +116,47 @@ fi
 
 # ---- 重名 409（空间内 slug 唯一）----
 assert_eq "同 slug 再建 409" "$(code POST /console/workspaces/$WS/agents "$FORM" "" "$TOKEN")" "409"
+
+# ---- 导入模式（#161）：无 env 合法包 → 导入 → 平台默认 env 合并 + Pod Ready ----
+# 曾不经 buildPublishEnv：service env 只有隔离键，Pod 用镜像内置账号连库 Access denied
+python3 - <<PYEOF
+import zipfile
+md = """---
+name: Import Probe
+vendorKey: acme
+agentKey: import-probe
+version: 1.0.0
+slug: acme/import-probe
+description: import mode env merge probe
+author: "@e2e"
+license: MIT
+---
+导入探针：被问候时回答 import-probe ok。"""
+with zipfile.ZipFile("/tmp/m3-import-$TS.zip", "w") as z:
+    z.writestr("AGENTS.md", md)
+PYEOF
+UP=$(curl -s -X POST "$BASE/console/workspaces/$WS/packages" -H "Authorization: Bearer $TOKEN" -F "file=@/tmp/m3-import-$TS.zip")
+IPKG=$(echo "$UP" | jqr "['data']['id']")
+assert_eq "无 env 合法包上传 200" "$([ -n "$IPKG" ] && [ "$IPKG" != "None" ] && echo yes || echo no)" "yes"
+IMPORT=$(req POST /console/workspaces/$WS/agents \
+  "{\"mode\":\"import\",\"name\":\"import-probe-$TS\",\"importPackageId\":$IPKG,\"modelConnections\":[{\"connectionId\":$CONN_ID,\"isDefault\":true}],\"spec\":\"small\",\"replicas\":1,\"publicEndpoint\":true}" "" "$TOKEN")
+ISVC=$(echo "$IMPORT" | jqr "['data']['service']['id']")
+M3_SVC2="$ISVC"
+assert_eq "导入 202 返回 service" "$([ -n "$ISVC" ] && [ "$ISVC" != "None" ] && echo yes || echo no)" "yes"
+IST=$(wait_status "$TOKEN" "$WS" "$ISVC" 180 running register_failed deploy_failed)
+assert_eq "导入发布到 running（Pod Ready，#161 主断言）" "$IST" "running"
+if [ "$KUBE_OK" = "1" ] && [ "$IST" = "running" ]; then
+  IK8S=$(echo "$IMPORT" | jqr "['data']['service']['k8sName']")
+  ICM=$(kubectl -n $KNS get cm $IK8S-env -o jsonpath='{.data}' 2>/dev/null)
+  ISEC=$(kubectl -n $KNS get secret $IK8S-env-secret -o jsonpath='{.data}' 2>/dev/null)
+  assert_contains "导入 CM 含 CHECKPOINT_USERNAME（平台默认合并）" "$ICM" '"CHECKPOINT_USERNAME"'
+  assert_contains "导入 CM 含 LLM_MODEL（勾选连接注入）" "$ICM" '"LLM_MODEL"'
+  assert_contains "导入 CM 含 AGENT_REDIS_PREFIX（隔离派生）" "$ICM" '"AGENT_REDIS_PREFIX"'
+  assert_contains "导入 Secret 含 CHECKPOINT_PASSWORD" "$ISEC" "CHECKPOINT_PASSWORD"
+  assert_contains "导入 Secret 含 LLM_API_KEY" "$ISEC" "LLM_API_KEY"
+else
+  skip "kubectl 不可用或未 running，跳过导入 env 分级断言"
+fi
 
 # ---- 编辑链路：copy-on-write v1.0.1 + republish + 提示词热生效 ----
 EDIT=$(echo "$FORM" | python3 -c "import sys,json;d=json.load(sys.stdin);d['name']='部署验证-$TS';d['prompt']='你是 M3 e2e 验证助手。被问候时回答：我是 m3e2e-agent v2 版本。';print(json.dumps(d))")

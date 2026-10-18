@@ -255,8 +255,9 @@ export const api = {
       invitable: (ws: number | string) => request<UserView[]>(`/console/workspaces/${ws}/invitable-users`),
     },
     // 空间技能清单（OAF 包配置技能聚合：frontmatter skills 声明 + 包内 skills/ 目录）
+    // issues：目录合规问题（issue #163，与包上传 warnings 同口径；缺省 = 合规）
     spaceSkills: (ws: number | string, keyword = "") =>
-      request<{ name: string; description: string; packageId: number; packageSlug: string; packageVersion: string; workspaceId: number; declared: boolean; usedBy: string[] }[]>(
+      request<{ name: string; description: string; packageId: number; packageSlug: string; packageVersion: string; workspaceId: number; declared: boolean; issues?: string[]; usedBy: string[] }[]>(
         `/console/workspaces/${ws}/skills?keyword=${encodeURIComponent(keyword)}`),
     // 空间包（import 模式数据源：公共包 + 本空间包，决议 7）
     packages: (ws: number | string, keyword = "") =>
