@@ -69,6 +69,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "http://oaf-%s-svc.%s.svc.cluster.local:8100" .name (include "oaf.namespace" .root) -}}
 {{- end -}}
 
+{{/* 前端 /agent/{short} 数据面反代目标模板（proxy.ts AGENT_INTERNAL_URL_TEMPLATE） */}}
+{{- define "oaf.agentInternalUrlTemplate" -}}
+{{- default (printf "http://oaf-{short}-svc.%s.svc.cluster.local:8100" (include "oaf.namespace" .)) .Values.frontend.env.agentInternalUrlTemplate -}}
+{{- end -}}
+
 {{/* 是否形态 B（分域）：backend/frontend host 都非空 */}}
 {{- define "oaf.splitDomain" -}}
 {{- if and .Values.ingress.backend.host .Values.ingress.frontend.host -}}true{{- else -}}false{{- end -}}
@@ -87,6 +92,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and (not .Values.external.mysql.dsn) (not .Values.external.mysql.password) -}}
 {{- fail "external.mysql.password 为空：给密码、改 dsn 直给，或设 backend.existingSecret（key: mysql-dsn）" -}}
 {{- end -}}
+{{- end -}}
+{{- if and (not .Values.backend.existingSecret) (not .Values.backend.jwtSecret) -}}
+{{- fail "backend.jwtSecret 必填（控制台登录 JWT 签发密钥，后端缺失启动 fail-fast）；也可用 backend.existingSecret 提供 key jwt-secret" -}}
+{{- end -}}
+{{- if not (has .Values.routing.authMode (list "off" "report" "enforce")) -}}
+{{- fail (printf "routing.authMode=%q 非法：只能是 off | report | enforce" .Values.routing.authMode) -}}
 {{- end -}}
 {{- if eq .Values.routing.mode "host" -}}
 {{- if not .Values.routing.hostSuffix -}}

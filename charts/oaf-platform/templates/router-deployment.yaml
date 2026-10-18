@@ -51,10 +51,14 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          env:
+            # 数据面网关鉴权三态（console-user-workspace-split M9 §3）：nginx 模板经
+            # 官方镜像 entrypoint envsubst 渲染，改档 = 改 values + helm upgrade
+            - name: ROUTER_AUTH_MODE
+              value: {{ .Values.routing.authMode | quote }}
           volumeMounts:
             - name: conf
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
+              mountPath: /etc/nginx/templates   # nginx 官方 entrypoint envsubst 渲染到 conf.d/
               readOnly: true
           readinessProbe:
             httpGet: { path: /healthz, port: http }
