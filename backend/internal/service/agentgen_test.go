@@ -485,10 +485,10 @@ func TestCreateAgentNameTooLong(t *testing.T) {
 		!strings.Contains(err.Error(), "name too long (max 128)") {
 		t.Fatalf("200-char name: %v", err)
 	}
-	// ASCII 名 slug 后 63 字符（超 oaf- 前缀预算 59）
-	if _, _, err := c.CreateAgent(ws.ID, 1, mk(strings.Repeat("b", 63))); err == nil ||
-		!strings.Contains(err.Error(), "max 59") {
-		t.Fatalf("63-char slug name: %v", err)
+	// ASCII 名 slug 后 49 字符（超 oaf- 前缀 + 子对象后缀预算 48）
+	if _, _, err := c.CreateAgent(ws.ID, 1, mk(strings.Repeat("b", 49))); err == nil ||
+		!strings.Contains(err.Error(), "max 48") {
+		t.Fatalf("49-char slug name: %v", err)
 	}
 }
 

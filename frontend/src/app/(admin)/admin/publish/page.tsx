@@ -164,8 +164,8 @@ function PublishForm() {
             <option key={im.Image} value={im.Image}>{im.Label ? `${im.Label} (${im.Image})` : im.Image}</option>
           ))}
         </select>
-        <label className="block mt-3 text-sm">服务名（可选，缺省取包 slug）
-          <input value={name} onChange={(e) => setName(e.target.value)} data-testid="name-input"
+        <label className="block mt-3 text-sm">服务名（可选，缺省取包 slug；≤128 字符，超长派生的 K8s 对象名会被拒绝）
+          <input value={name} onChange={(e) => setName(e.target.value)} data-testid="name-input" maxLength={128}
             className="border rounded p-1.5 text-sm block mt-1 w-full max-w-md" placeholder="留空自动生成" />
         </label>
         <label className="block mt-3 text-sm">副本数

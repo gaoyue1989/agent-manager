@@ -603,10 +603,11 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 		return nil, nil, err
 	}
 	// agentKey 派生（决议 5）：与 k8s short 名同源 slugify；k8s 名 = "oaf-" + agentKey，
-	// 总长须 ≤63 → agentKey ≤59（issue #149：63 字符 key 曾拼出 67 字符 k8s 名报 1406）
+	// 且还要派生 "{name}-svc"/"{name}-env-secret" 等子对象名（同为 DNS-1123 ≤63）→
+	// agentKey ≤48（issue #149 复测残留：超长名先落库再被 K8s API 拒绝，残留记录）
 	agentKey := SlugifyAgentKey(form.Name)
-	if len(agentKey) > 59 {
-		return nil, nil, fmt.Errorf("%w: name too long (max 59 characters after slugify)", ErrInvalidForm)
+	if len(agentKey) > 48 {
+		return nil, nil, fmt.Errorf("%w: name too long (max 48 characters after slugify)", ErrInvalidForm)
 	}
 	var cnt int64
 	if err := c.DB.Model(&store.OafPackage{}).Where("slug = ? AND workspace_id = ?",
