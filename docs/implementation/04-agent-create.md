@@ -116,7 +116,7 @@ mcpServers:
 
 **目录组装**：
 
-- `skills/<name>/**`：source=package 的勾选，从被引用公共包**复制**技能目录进生成包（copy-on-write 语义）；scope=l4 的勾选**不进包**（运行时注入，frontmatter 不写）；
+- `skills/<name>/**`：source=package 的勾选，从被引用公共包**复制**技能目录进生成包（copy-on-write 语义）；scope=l4 的勾选**不进包**（运行时注入，frontmatter 不写）；**同名技能去重**（issue #173）——同名只保留首个勾选（frontmatter 声明与 skills/ 目录复制同口径），前端候选池同名互斥（勾选另一来源即替换）；
 - `mcp-configs/<server>/config.yaml`：由 M6 连接器行生成——`server/vendor(=agentmanager)/version/connection{type,url,timeout}/permissions.tools`（格式对齐 `release-agent/mcp-configs/platform/config.yaml`）；连接器 authType=bearer 时 token **不写入包**，走发布 env：`MCP_TOKEN_{SERVER}` 进 Secret（SecretKeys 追加）；
 - 其余目录不生成（SOUL.md、脚本由用户后续在包编辑器补）。
 

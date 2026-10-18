@@ -213,6 +213,9 @@ curl -s -X POST $BASE/console/workspaces/<ws-id>/api-keys -H "Authorization: Bea
 - 包内 skills/ 目录合规（issue #163 修复后）：缺 `SKILL.md` / 无 frontmatter / frontmatter name 与目录不一致 / 非法名称（大写、空格、`!`、超 64 字符、连续连字符）/ 描述超 1024 / 声明但目录缺失 → 上传不阻断但 `warningsJson` 逐条提示，`GET /console/workspaces/:ws/skills` 条目带 `issues[]` 标注；合法技能无 issues。
 - 声明式技能描述（issue #164 修复后）：frontmatter `skills:` 声明（无 description 字段）在 Skill 清单中回读包内 `SKILL.md` 描述，不再为空串。
 - 包上传超限错误形态（issue #165 修复后）：>20MB zip → 400 JSON `zip exceeds …`（曾为入口 nginx HTML 413，ingress `proxy-body-size` 已放宽 200m）；解压总量 >100MB → 400 JSON `extracted content exceeds limit`（曾为 500）。
+- 并发包编辑保存（issue #172 修复后）：同一基础包并发 N 个 `POST /packages/:id/versions`（相同 `expectedBaseChecksum`）→ 全部成功时版本链严格串行（1.0.1/1.0.2/…），**不再出现重复 version**；显式指定已被占用的版本 → 409。同 slug+version 全局唯一（`(slug,version)` 唯一索引 + 启动时存量重复行自动加 `.fix{N}` 后缀归一），上传重复 slug+version → 409（原允许并存）。
+- 包编辑器保留目录名（issue #174 修复后）：upsert 根路径 `skills` / `mcp-configs` 文件 → 400 `reserved directory name`；上传含同名根文件的 zip → 400（曾 200 生成损坏包，`skills/AGENTS.md` 读取 500）。
+- 同名技能重复勾选（issue #173 修复后）：创建/编辑页候选池同名技能只展示一条（多来源时标注）；后端 `buildAgentFiles` 对 `form.Skills` 按 name 去重——生成包 frontmatter 只一条声明、`skills/` 目录只复制首个勾选来源，不再重复声明静默覆盖。
 
 ## 7. 现成 e2e 套件（回归优先跑这些）
 

@@ -40,7 +40,9 @@ func TestListChineseNameFallback(t *testing.T) {
 	if svc.K8sName != "oaf-svc" {
 		t.Fatalf("k8sName=%q want oaf-svc fallback", svc.K8sName)
 	}
-	pkg2 := uploadTestPkg(t, core, "")
+	// 第二个包换 slug 上传（同 slug+version 唯一索引，issue #172）；
+	// 中文名同样清洗为空 → 回退名冲突，uniqName 加 -2 后缀
+	pkg2 := uploadTestPkg(t, core, "2")
 	svc2, err := core.Publish(PublishRequest{PackageID: pkg2.ID, Name: "工单机器人"})
 	if err != nil {
 		t.Fatal(err)

@@ -9,8 +9,8 @@ import (
 type OafPackage struct {
 	ID              uint      `gorm:"primaryKey" json:"id"`
 	Name            string    `gorm:"size:128" json:"name"`
-	Slug            string    `gorm:"size:200;index" json:"slug"`
-	Version         string    `gorm:"size:32" json:"version"`
+	Slug            string    `gorm:"size:200;uniqueIndex:uk_pkg_slug_version" json:"slug"`
+	Version         string    `gorm:"size:32;uniqueIndex:uk_pkg_slug_version" json:"version"`
 	Description     string    `gorm:"type:text" json:"description"`
 	ManifestJSON    string    `gorm:"type:json" json:"manifestJson"` // frontmatter 原文
 	WarningsJSON    string    `gorm:"type:json" json:"warningsJson"` // 宽松模式 warnings

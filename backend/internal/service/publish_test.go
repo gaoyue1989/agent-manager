@@ -169,7 +169,9 @@ func TestPublishNameConflictSuffix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg2 := uploadTestPkg(t, core, "")
+	// 同 slug+version 唯一索引（issue #172）：第二个包换 slug 上传；
+	// k8s 名按包 slug 派生不同（oaf-acme-demo vs oaf-acme-demo2）
+	pkg2 := uploadTestPkg(t, core, "2")
 	s2, err := core.Publish(PublishRequest{PackageID: pkg2.ID})
 	if err != nil {
 		t.Fatal(err)
@@ -177,8 +179,8 @@ func TestPublishNameConflictSuffix(t *testing.T) {
 	if s1.K8sName == s2.K8sName {
 		t.Fatalf("name collision unresolved: %s", s2.K8sName)
 	}
-	if s2.K8sName != "oaf-acme-demo-2" {
-		t.Fatalf("expect suffix -2, got %q", s2.K8sName)
+	if s2.K8sName != "oaf-acme-demo2" {
+		t.Fatalf("expect derived name oaf-acme-demo2, got %q", s2.K8sName)
 	}
 }
 

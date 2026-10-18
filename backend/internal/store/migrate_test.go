@@ -2,6 +2,7 @@ package store
 
 import (
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -137,7 +138,7 @@ func TestBackfillHandlesNullWorkspaceColumn(t *testing.T) {
 	db := newMigrateDB(t)
 	// 模拟存量库：先建旧 schema 行，再加列（旧行 → NULL）
 	type legacy struct {
-		ID          uint `gorm:"primaryKey"`
+		ID          uint   `gorm:"primaryKey"`
 		K8sName     string `gorm:"size:63;uniqueIndex"`
 		DisplayName string `gorm:"size:128"`
 	}
@@ -177,7 +178,7 @@ func TestBackfillNormalizesPackageNullWorkspace(t *testing.T) {
 	db := newMigrateDB(t)
 	// 模拟存量：先建旧 schema 行再补列（旧行 NULL）
 	type legacyPkg struct {
-		ID   uint `gorm:"primaryKey"`
+		ID   uint   `gorm:"primaryKey"`
 		Slug string `gorm:"size:200"`
 	}
 	if err := db.Table("oaf_packages").AutoMigrate(&legacyPkg{}); err != nil {
@@ -196,5 +197,64 @@ func TestBackfillNormalizesPackageNullWorkspace(t *testing.T) {
 	db.First(&got, 1)
 	if got.WorkspaceID != 0 {
 		t.Fatalf("NULL package workspace should normalize to 0, got %d", got.WorkspaceID)
+	}
+}
+
+// TestDedupPackageVersions issue #172：(slug, version) 重复行归一——保留最早一行，
+// 后续行加 .fix{N} 后缀；幂等（二跑零变更）；归一后 AutoMigrate 唯一索引可建。
+func TestDedupPackageVersions(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟存量库：无唯一索引的旧表 + 重复行（历史黑盒测试产物）
+	type legacyPkg struct {
+		ID      uint      `gorm:"primaryKey"`
+		Slug    string    `gorm:"size:200"`
+		Version string    `gorm:"size:32"`
+		Created time.Time `gorm:"column:created_at;autoCreateTime"`
+	}
+	if err := db.Table("oaf_packages").AutoMigrate(&legacyPkg{}); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		id  uint
+		ver string
+	}{
+		{1, "1.0.0"}, {2, "1.0.1"}, {3, "1.0.1"}, {4, "1.0.1"}, {5, "2.0.0"}, {6, "2.0.0"},
+	}
+	for _, r := range rows {
+		if err := db.Exec("INSERT INTO oaf_packages (id, slug, version, created_at) VALUES (?, 'a/b', ?, CURRENT_TIMESTAMP)",
+			r.id, r.ver).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dedupPackageVersions(db); err != nil {
+		t.Fatalf("dedup: %v", err)
+	}
+	want := map[uint]string{1: "1.0.0", 2: "1.0.1", 3: "1.0.1.fix1", 4: "1.0.1.fix2", 5: "2.0.0", 6: "2.0.0.fix1"}
+	for id, ver := range want {
+		var got OafPackage
+		if err := db.First(&got, id).Error; err != nil {
+			t.Fatalf("row %d missing: %v", id, err)
+		}
+		if got.Version != ver {
+			t.Errorf("row %d version=%q want %q", id, got.Version, ver)
+		}
+	}
+	// 幂等：二跑结果不变
+	if err := dedupPackageVersions(db); err != nil {
+		t.Fatal(err)
+	}
+	for id, ver := range want {
+		var got OafPackage
+		db.First(&got, id)
+		if got.Version != ver {
+			t.Errorf("second pass row %d version=%q want %q", id, got.Version, ver)
+		}
+	}
+	// 归一后 AutoMigrate 唯一索引可建（模拟 Open 启动顺序）
+	if err := db.AutoMigrate(&OafPackage{}); err != nil {
+		t.Fatalf("unique index should apply after dedup: %v", err)
 	}
 }

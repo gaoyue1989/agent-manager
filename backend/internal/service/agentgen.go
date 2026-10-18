@@ -327,10 +327,15 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 			delete(files, p)
 		}
 	}
+	copiedSkill := map[string]bool{} // 同名技能只复制首个勾选的源目录（issue #173）
 	for _, s := range form.Skills {
 		if s.Source != "package" || s.PackageID == 0 || s.Name == "" {
 			continue
 		}
+		if copiedSkill[s.Name] {
+			continue // 同名技能后勾选的源包不再覆盖（与 frontmatter 去重同口径）
+		}
+		copiedSkill[s.Name] = true
 		src, err := c.Packages.Get(s.PackageID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: skill source package %d not found", ErrInvalidForm, s.PackageID)
@@ -423,10 +428,17 @@ func (c *Core) deriveFrontmatter(form *AgentForm, agentKey, version string) fmRo
 			}
 		}
 	}
+	seenSkill := map[string]bool{}
 	for _, s := range form.Skills {
 		if s.Source == "l4" || s.Name == "" {
 			continue
 		}
+		// 同名技能去重（issue #173）：同名只保留首个勾选——frontmatter skills 声明
+		// 按名称解析，重复声明会静默覆盖（skills/ 目录后写覆盖先写），用户无法预期
+		if seenSkill[s.Name] {
+			continue
+		}
+		seenSkill[s.Name] = true
 		v := s.Version
 		if v == "" {
 			v = "1.0.0"

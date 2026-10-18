@@ -718,7 +718,9 @@ func translateStorageError(err error) error {
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "duplicate") || strings.Contains(msg, "1062") {
+	// mysql 1062 / sqlite "UNIQUE constraint failed"（单测内存库）统一归 ErrConflict
+	if strings.Contains(lower, "duplicate") || strings.Contains(msg, "1062") ||
+		strings.Contains(lower, "unique constraint") {
 		return fmt.Errorf("%w: duplicate_name (unique key conflict)", ErrConflict)
 	}
 	if strings.Contains(msg, "1406") || strings.Contains(lower, "data too long") {

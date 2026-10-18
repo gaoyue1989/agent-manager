@@ -44,12 +44,13 @@ MCP 对齐新增工具：`get_package_file`、`create_package_version`（配合�
 
 1. 乐观锁：`expectedBaseChecksum` 与基础包不符 → **409**；
 2. 路径合法性：逐条走 `store.CleanSubPath`（`..`/`\`/绝对/超长 → `ErrZipSlip` → 400）；
+   一级路径为保留目录名 `skills`/`mcp-configs`（以文件占用）→ 400（issue #174，上传管线 validateEntry 同口径拒绝）；
 3. 单文件 256KB 上限；encoding 支持 utf8/base64；
 4. 根级 `AGENTS.md` 不可删除（前后端双重提示）；
 5. upsert 与 delete 同路径冲突时 upsert 优先；
 6. 与基础包逐字节对比，无有效变更 → 400（`no effective changes`）;
 7. 新 `AGENTS.md` 重新 `ParseOAF + Validate`（name/slug/version 取自新 frontmatter）；
-8. 同 slug+version 已有其他包 → 追加 warning 不阻断；warnings（mcpServer configDir 缺失等）按上传规则重算。
+8. **版本号决策在事务内**（issue #172）：对同 slug 版本链行加 `FOR UPDATE` 锁串行化「读链尾 → 定版本 → 插入」——自动 bump 基于**锁下链尾最新版本**递增（并发保存串行为 1.0.1/1.0.2/…），用户显式指定版本撞链 → 409（`ErrVersionConflict`）；`(slug, version)` 数据库唯一索引兜底（`OafPackage` 模型 + `Open` 中 `dedupPackageVersions` 存量重复行归一，先于 AutoMigrate 执行）。warnings（mcpServer configDir 缺失等）按上传规则重算。
 
 ## 4. 前端结构
 
