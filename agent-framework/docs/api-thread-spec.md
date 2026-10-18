@@ -50,6 +50,11 @@ status / confirm / confirm-stream / chat 续聊）先查 `session_user` 归属�
 - 请求者身份解析与 §2.1 同口径（`X-User-Id` 头 > body `userId` > `debug-user`）；
 - 会话无归属行（存量会话）放行；有归属行且 ≠ 请求者 → **404** `thread_not_found`
   （不泄露会话存在性）；无头请求视作 `debug-user`，不能访问真实用户会话（fail-closed）；
+  2026-10-18 修订：模型绑定/标题 PATCH 先于首聊时由单列 upsert 补建的**占位行**
+  （`user_id='unknown'`）不构成归属主张，同样放行——首个真实身份的 chat 认领该行
+  （MOD6 场景回归钉）；SSE 端点（subscribe/confirm-stream）的 404 以**同步
+  ResponseStatusException** 表达（先于流式响应提交；错误信号形态会因响应已提交落 500，
+  且全局兜底异常处理器须对 `ResponseStatusException` 透传状态码）；
 - `/chat` 续聊他人会话同样拒绝（error 帧 `thread_not_found`），且**不会**改写会话归属
   （旧实现的 upsert ON DUPLICATE KEY 会把他人会话夺到请求者名下）。
 

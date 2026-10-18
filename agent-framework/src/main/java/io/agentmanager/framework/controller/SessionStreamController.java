@@ -76,12 +76,13 @@ public class SessionStreamController {
             @RequestParam(required = false) String replyId) {
 
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
-        // 归属校验（issue #158）：非归属用户 404（错误先于任何 SSE 帧写出，
-        // Spring MVC 会把 ResponseStatusException 翻译为 404 状态码）
+        // 归属校验（issue #158）：非归属用户 404（错误先于任何 SSE 帧写出）。
+        // 必须在方法体内同步 throw——返回 Flux.error 时 MVC 已按 SSE 流式提交响应头，
+        // 错误信号无法再改状态码，实测落 500（SEC2 e2e 钉）
         if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
                 sessionUserStore, sessionId, headerUserId)) {
-            return Flux.error(new org.springframework.web.server.ResponseStatusException(
-                HttpStatus.NOT_FOUND, "Session '" + sessionId + "' not found"));
+            throw new org.springframework.web.server.ResponseStatusException(
+                HttpStatus.NOT_FOUND, "Session '" + sessionId + "' not found");
         }
         return tailer.tail(sessionId, replyId, afterSeq != null ? afterSeq : 0);
     }

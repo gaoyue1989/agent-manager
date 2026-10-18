@@ -51,7 +51,10 @@ public class SessionAccessGuard {
     public static boolean ownedBy(SessionUserStore store, String sessionId, String headerUserId) {
         var requester = (headerUserId == null || headerUserId.isBlank()) ? ANONYMOUS_USER : headerUserId;
         var owner = store.findUserIdBySession(sessionId);
-        // 无映射行放行（存量会话）；有映射要求严格相等
-        return owner == null || owner.equals(requester);
+        // 无映射行放行（存量会话）；占位行（PATCH 先于首聊经 upsertModel/upsertRemark
+        // 补建，user_id='unknown'，MOD6 场景）不构成归属主张，同样放行——首个真实身份
+        // 的 chat 会经 upsert 认领该行；其余有映射要求严格相等
+        return owner == null || SessionUserStore.PLACEHOLDER_USER.equals(owner)
+            || owner.equals(requester);
     }
 }

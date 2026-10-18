@@ -28,6 +28,7 @@ import reactor.core.publisher.Mono;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -473,16 +474,11 @@ class ConfirmControllerTest {
         var ctrl = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
 
-        var err = ctrl.confirmStream("foreign-sid", "bob",
-                new ConfirmController.ConfirmRequest(List.of(), "local"))
-            .map(v -> (Object) v)
-            .last()
-            .onErrorResume(e -> Mono.just(e))
-            .block(Duration.ofSeconds(2));
-
-        assertTrue(err instanceof org.springframework.web.server.ResponseStatusException);
-        assertEquals(404, ((org.springframework.web.server.ResponseStatusException) err)
-            .getStatusCode().value());
+        // 404 以同步 throw 返回（先于 SSE 响应提交；Flux.error 会让 MVC 落 500）
+        var ex = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+            () -> ctrl.confirmStream("foreign-sid", "bob",
+                new ConfirmController.ConfirmRequest(List.of(), "local")));
+        assertEquals(404, ex.getStatusCode().value());
         verify(turnLeaseStore, never()).acquire(anyString(), any());
     }
 }

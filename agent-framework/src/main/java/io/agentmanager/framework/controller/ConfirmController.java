@@ -216,13 +216,13 @@ public class ConfirmController {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         String finalSessionId = sessionId;
 
-        // 归属校验（issue #158）：非归属用户 404（错误先于任何 SSE 帧写出，
-        // ResponseStatusException 由 MVC 翻译为状态码）
+        // 归属校验（issue #158）：非归属用户 404（错误先于任何 SSE 帧写出）。
+        // 同 subscribe：必须同步 throw，Flux.error 时 SSE 响应头已提交，实测落 500
         if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
                 sessionUserStore, sessionId, headerUserId)) {
-            return Flux.error(new org.springframework.web.server.ResponseStatusException(
+            throw new org.springframework.web.server.ResponseStatusException(
                 org.springframework.http.HttpStatus.NOT_FOUND,
-                "Session '" + sessionId + "' not found"));
+                "Session '" + sessionId + "' not found");
         }
 
         // 多行消费路由：远程键 → Bridge 路由（resume + 异步终态唤醒），本流只回执
