@@ -187,13 +187,14 @@ hitl_ask_tcid() { # hitl_ask_tcid <sessionId> <sse 输出文件>
 }
 confirm() { # confirm <sessionId> <tool_call_id> <true|false>
   curl -sN --max-time 130 -X POST "$BASE/threads/$1/confirm-stream" -H 'content-type: application/json' \
+    -H "X-User-Id: $SMOKE_USER" \
     -d "{\"results\":[{\"tool_call_id\":\"$2\",\"confirmed\":$3}]}" > "$RT/confirm.sse" || true
   sleep 1  # 等 ASK 段租约释放后再读历史（抢锁竞态，同 api-core H2/H3 的 800ms 等待）
 }
 # 历史里的工具终态。<threads/:sid/history 是缩进 JSON，且 tool_calls 条目内含嵌套 input 对象，
 # 正则无法可靠跨花括号配对——交由 node 解析后按「工具名 + state」成对判定。
 history_state_is() { # history_state_is <sessionId> <工具名> <success|denied|...>
-  curl -sf "$BASE/threads/$1/history" > "$RT/history.json" || echo '{}' > "$RT/history.json"
+  curl -sf -H "X-User-Id: $SMOKE_USER" "$BASE/threads/$1/history" > "$RT/history.json" || echo '{}' > "$RT/history.json"
   node -e '
     const h = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     const hit = (h.messages ?? []).some(m => (m.tool_calls ?? []).some(t => t.name === process.argv[2] && t.state === process.argv[3]));
@@ -278,7 +279,7 @@ TCID=$(hitl_ask_tcid "$SID_ASK" "$RT/ask.sse")
 check "config.permission.tools=ask 触发 permission_ask 挂起" grep -q '"type":"permission_ask"' "$RT/ask.sse"
 check "permission_ask 指向插件工具 echo_query" bash -c "grep -q '\"name\":\"echo_query\"' '$RT/ask.sse'"
 check "挂起后 /threads/:sid/status 为 waiting_confirm" bash -c \
-  "curl -sf '$BASE/threads/$SID_ASK/status' | grep -q '\"state\":\"waiting_confirm\"'"
+  "curl -sf -H 'X-User-Id: $SMOKE_USER' '$BASE/threads/$SID_ASK/status' | grep -q '\"state\":\"waiting_confirm\"'"
 
 confirm "$SID_ASK" "${TCID:-none}" true
 check "ask 批准后工具执行成功" history_state_is "$SID_ASK" echo_query success

@@ -68,7 +68,7 @@ test('RT5 SSE 断线续传经前缀（durable 回放）', async () => {
   await waitTerminal(stream);
   // 不传 sessionId → 首帧 session_created（与核心组 S2 同姿势）
   const sid = String((stream.frames[0] as Record<string, unknown>).session_id);
-  const replay = subscribe(sid, 0, `${R}${PREFIX}`);
+  const replay = subscribe(sid, 0, `${R}${PREFIX}`, undefined, 'e2e-router');
   await replay.closed;
   expect(replay.frames.map(f => f.type)).toContain('done');
 });
