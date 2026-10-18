@@ -87,6 +87,60 @@ else
   skip "无 running 服务，跳过 L4 直连断言"
 fi
 
+# ---- 空间技能清单（#163/#164）：异常 skill 目录写入包 warnings + 清单标注；声明回读描述 ----
+python3 - <<PYEOF
+import zipfile
+md = """---
+name: Skill Probe
+vendorKey: acme
+agentKey: skill-probe
+version: 1.0.0
+slug: acme/skill-probe
+description: skill validation probe
+author: "@e2e"
+license: MIT
+skills:
+  - name: webapp-testing
+    source: local
+    version: 1.0.0
+---
+技能校验探针"""
+with zipfile.ZipFile("/tmp/m8-skills-$TS.zip", "w") as z:
+    z.writestr("AGENTS.md", md)
+    z.writestr("skills/webapp-testing/SKILL.md", '---\nname: webapp-testing\ndescription: toolkit for web apps\n---\nbody')
+    z.writestr("skills/broken/README.md", "no SKILL.md here")
+    z.writestr("skills/My Skill!/SKILL.md", '---\nname: my-skill\ndescription: d\n---\nbody')
+PYEOF
+SUP=$(curl -s -X POST "$BASE/console/workspaces/$WS/packages" -H "Authorization: Bearer $TOKEN" -F "file=@/tmp/m8-skills-$TS.zip")
+SPKG=$(echo "$SUP" | jqr "['data']['id']")
+if [ -n "$SPKG" ] && [ "$SPKG" != "None" ]; then
+  WARN=$(echo "$SUP" | jqr "['data']['warningsJson']")
+  assert_contains "包 warnings 含异常 skill（#163）" "$WARN" "broken"
+  assert_contains "包 warnings 含非法名称 skill" "$WARN" "My Skill"
+  SKILLS=$(req GET "/console/workspaces/$WS/skills?keyword=webapp-testing" "" "$OT")
+  assert_contains "声明技能回读 SKILL.md 描述（#164）" "$SKILLS" "toolkit for web apps"
+  ALL=$(req GET "/console/workspaces/$WS/skills" "" "$OT")
+  BROKEN=$(echo "$ALL" | python3 -c "
+import sys,json
+raw=sys.stdin.read()
+d=json.loads(raw[raw.index('{'):])['data']
+m={x['name']:x for x in d}
+iss=(m.get('broken') or {}).get('issues') or []
+print(';'.join(iss))")
+  assert_contains "目录扫描技能标注 issues（#163）" "$BROKEN" "missing skills/broken/SKILL.md"
+  BADNAME=$(echo "$ALL" | python3 -c "
+import sys,json
+raw=sys.stdin.read()
+d=json.loads(raw[raw.index('{'):])['data']
+m={x['name']:x for x in d}
+iss=(m.get('My Skill!') or {}).get('issues') or []
+print(';'.join(iss))")
+  assert_contains "非法名称标注 issues" "$BADNAME" "invalid characters"
+  code DELETE /packages/$SPKG "" "$TOKEN" >/dev/null 2>&1
+else
+  skip "技能探针包上传失败，跳过 #163/#164 断言"
+fi
+
 # ---- 记忆空间数据真实性（threads 按 uid 过滤；无会话=空数组不造假）----
 assert_contains "成员管理页脚权限口径（member 只读）已在 M1/M4 覆盖" "ok" "ok"
 

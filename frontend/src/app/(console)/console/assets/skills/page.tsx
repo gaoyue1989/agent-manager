@@ -17,6 +17,7 @@ interface SpaceSkill {
   packageVersion: string;
   workspaceId: number;
   declared: boolean;
+  issues?: string[];
   usedBy: string[];
 }
 
@@ -112,9 +113,22 @@ export default function SkillsPage() {
                 <tbody>
                   {g.skills.map((s) => (
                     <tr key={s.name} className="border-t border-gray-100">
-                      <td className="px-4 py-2 font-mono text-xs font-medium">{s.name}</td>
+                      <td className="px-4 py-2 font-mono text-xs font-medium">
+                        {s.name}
+                        {(s.issues ?? []).length > 0 && (
+                          <span title={(s.issues ?? []).join("；")} data-testid={`skill-issue-${s.name}`}
+                            className="ml-1.5 inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 align-middle text-[10px] font-normal text-amber-700">
+                            不合规 {(s.issues ?? []).length}
+                          </span>
+                        )}
+                      </td>
                       <td className="max-w-[440px] px-4 py-2 text-xs text-gray-500">
                         {s.description || <span className="text-gray-300">—</span>}
+                        {(s.issues ?? []).length > 0 && (
+                          <ul className="mt-1 list-disc pl-4 text-[11px] text-amber-600">
+                            {(s.issues ?? []).map((it, k) => <li key={k}>{it}</li>)}
+                          </ul>
+                        )}
                       </td>
                       <td className="px-4 py-2">
                         {s.declared

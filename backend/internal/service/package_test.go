@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -63,5 +64,34 @@ func TestPackageUploadNestedModelNameParity(t *testing.T) {
 	}
 	if rec.Name != "Demo" {
 		t.Fatalf("nested model.name must not override top-level name, got %q", rec.Name)
+	}
+}
+
+// TestUploadSkillDirWarnings issue #163：上传包内异常 skills/ 目录写入 warnings
+// （不阻断上传）；合法技能无告警。
+func TestUploadSkillDirWarnings(t *testing.T) {
+	core, _, done := newTestCore(t)
+	defer done()
+	rec, err := core.Packages.Upload("edge.zip", bytesReader(buildTestZip(map[string]string{
+		"AGENTS.md":                      testAgentsMD,
+		"skills/webapp-testing/SKILL.md": "---\nname: webapp-testing\ndescription: toolkit\n---\nbody",
+		"skills/broken/README.md":        "no SKILL.md",
+		"skills/nofm/SKILL.md":           "body only",
+	})))
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	var warnings []string
+	if err := json.Unmarshal([]byte(rec.WarningsJSON), &warnings); err != nil {
+		t.Fatalf("warnings json: %v (%s)", err, rec.WarningsJSON)
+	}
+	joined := strings.Join(warnings, "\n")
+	for _, want := range []string{`skill "broken"`, `skill "nofm"`} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("warnings missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "webapp-testing") {
+		t.Fatalf("valid skill must not warn: %s", joined)
 	}
 }

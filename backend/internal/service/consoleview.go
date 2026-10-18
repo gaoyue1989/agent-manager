@@ -236,6 +236,8 @@ type SpaceSkillItem struct {
 	WorkspaceID    uint   `json:"workspaceId"` // 0=公共包技能
 	// Declared 来自包 frontmatter skills 声明（true）或包内 skills/ 目录扫描（false）
 	Declared bool `json:"declared"`
+	// Issues 目录合规问题（issue #163：与包上传 warnings 同口径；空/缺省 = 无）
+	Issues []string `json:"issues"`
 	// UsedBy 空间内引用该包为运行包的服务名列表
 	UsedBy []string `json:"usedBy"`
 }
@@ -281,25 +283,68 @@ func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, 
 			} `json:"skills"`
 		}
 		_ = json.Unmarshal([]byte(manifest), &cfg)
+		// skills/ 目录合规检查（issue #163）：zip 上传 warnings 同口径，标注在条目上；
+		// 同时拿到「声明技能是否有目录」供声明条目标注
+		tree, err := c.Packages.Tree(&p)
+		if err != nil {
+			continue
+		}
+		var filePaths []string
+		var walk func(ents []store.FileEntry)
+		walk = func(ents []store.FileEntry) {
+			for _, e := range ents {
+				if e.IsDir {
+					walk(e.Children)
+					continue
+				}
+				filePaths = append(filePaths, e.Path)
+			}
+		}
+		walk(tree)
+		issuesBySkill := map[string][]string{}
+		for _, it := range checkSkillDirs(func(name string) ([]byte, error) {
+			return c.Packages.ReadFile(&p, name)
+		}, filePaths) {
+			issuesBySkill[it.Name] = it.Issues
+		}
+		dirExists := map[string]bool{}
+		for _, fp := range filePaths {
+			if strings.HasPrefix(fp, "skills/") {
+				if rest := strings.TrimPrefix(strings.Trim(fp, "/"), "skills/"); rest != "" {
+					if name := strings.SplitN(rest, "/", 2)[0]; name != "" && name != "SKILL.md" {
+						dirExists[name] = true
+					}
+				}
+			}
+		}
 		declared := map[string]string{}
 		for _, s := range cfg.Skills {
 			if s.Name == "" {
 				continue
 			}
-			declared[s.Name] = s.Description
+			// 声明结构无 description 字段：回读包内 SKILL.md（issue #164——曾恒为空串，
+			// 运行时 /skills 却有完整描述）
+			desc := s.Description
+			if desc == "" {
+				if data, err := c.Packages.ReadFile(&p, "skills/"+s.Name+"/SKILL.md"); err == nil {
+					desc = parseSkillDescription(string(data))
+				}
+			}
+			declared[s.Name] = desc
+			issues := issuesBySkill[s.Name]
+			if !dirExists[s.Name] {
+				issues = append(append([]string{}, issues...), "declared but skills/"+s.Name+"/ directory missing")
+			}
 			items = append(items, SpaceSkillItem{
-				Name: s.Name, Description: s.Description,
+				Name: s.Name, Description: desc,
 				PackageID: p.ID, PackageSlug: p.Slug, PackageVersion: p.Version,
 				WorkspaceID: p.WorkspaceID, Declared: true,
+				Issues: issues,
 				UsedBy: ub,
 			})
 			seen[fmt.Sprintf("%d/%s", p.ID, s.Name)] = true
 		}
 		// 目录扫描：skills/*/SKILL.md（未声明也列出——目录是事实来源）
-		tree, err := c.Packages.Tree(&p)
-		if err != nil {
-			continue
-		}
 		var scan func(ents []store.FileEntry)
 		scan = func(ents []store.FileEntry) {
 			for _, e := range ents {
@@ -316,6 +361,7 @@ func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, 
 								Name: name, Description: desc,
 								PackageID: p.ID, PackageSlug: p.Slug, PackageVersion: p.Version,
 								WorkspaceID: p.WorkspaceID, Declared: false,
+								Issues: issuesBySkill[name],
 								UsedBy: ub,
 							})
 							seen[key] = true

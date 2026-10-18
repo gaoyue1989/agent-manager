@@ -49,8 +49,15 @@ Agent 详情 Tab6（M4 留位）：过滤 `agentId=当前` 的列表 + curl 示�
 - 数据源：`GET /console/workspaces/:ws/skills?keyword=`（新增端点）——遍历空间可见包
   （公共 workspace_id=0 + 本空间，决议 7），聚合两类条目：
   - **frontmatter skills 声明**（`declared: true`）：解析包 manifest 的 skills 段（name/description）；
+    声明结构无 description 字段时**回读包内 `skills/<name>/SKILL.md`** 的 frontmatter 描述
+    （issue #164，2026-10-18——曾恒为空串，运行时 `/skills` 却有完整描述）；
   - **包内 skills/ 目录扫描**（`declared: false`）：`skills/<name>/SKILL.md` 的 frontmatter
     description 字段（缺失取首个正文行）——目录是事实来源，声明是意图，未声明也列出；
+- **目录合规标注**（issue #163，2026-10-18）：条目带 `issues[]` 字段（与包上传 warnings 同口径，
+  规则对齐运行时 OafConfigLoader 降级验证：缺 SKILL.md / 无 frontmatter / 缺 name /
+  frontmatter name 与目录不一致 / 非法名称（`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`、≤64 字符、
+  无连续连字符）/ 描述超 1024 字符 / 声明但目录缺失）；页面对不合规条目显示「不合规 N」徽标
+  并列出明细；包上传登记同样写入 `warningsJson`（`skill "名": 问题`，宽松模式不阻断）；
 - 按包分组展示：包头（slug/版本/公共标记/被引用服务/「包编辑器」与「经 Agent 编辑添加技能」入口）+
   技能表（名称 mono/描述/来源 Badge）；关键字过滤（技能名/描述）+「仅看 frontmatter 声明」开关；
 - 原上传/停用/删除操作与「所选 Agent 直连 L4」交互全部移除（M8 §10 对应用例作废）。
@@ -59,6 +66,12 @@ Agent 详情 Tab6（M4 留位）：过滤 `agentId=当前` 的列表 + curl 示�
 
 - 后端：`SpaceSkills` 聚合（consoleview.go）+ `GET /console/workspaces/:ws/skills` 路由；
   引用标注 = 空间内运行包 id 反查服务 displayName；
+- 目录合规检查：`skillcheck.go` 的 `checkSkillDirs`（zip 条目与 PVC 文件树两种数据源复用——
+  `registerZipCore` 产包级 warnings、`SpaceSkills` 产条目 issues）；
+- 创建/编辑页 Skill 选择器（issue #162，2026-10-18）：`AgentCreateForm` Skill 区块新增
+  「可用技能（空间内 OAF 包）」候选列表（数据源同 `spaceSkills`，过滤 issues 非空条目），
+  勾选即写入表单 `skills`（source=package，提交时复制 `skills/` 目录进生成包），
+  创建页与编辑页共用；此前区块只有文案没有添加入口，与「从可用列表添加」不符；
 - 运行时技能分级（L1-L4）仍由 agent-framework 维护，零改动。
 
 ## 4. 记忆空间

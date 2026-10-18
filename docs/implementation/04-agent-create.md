@@ -153,6 +153,9 @@ type PublishRequest struct {
 ### 2.6 次要创建方式
 
 - `import`：直接复用现有 `POST /packages`（上传）+ `POST /services`（发布），console 层只做归属透传；公共包派生 = 既有 `POST /packages/:id/versions`（copy-on-write）后发布；
+  - **env 与 harness 同语义**（issue #161，2026-10-18）：导入链路同样经 `buildPublishEnv` 合并平台默认配置（checkpoint/redis/llm/sandbox）——曾不经合并，包不带 DB/LLM env 时 Pod 用镜像内置账号连库 `Access denied` CrashLoopBackOff；隔离派生（per-service checkpoint 库 / Redis 前缀）照常生效；
+  - **模型连接可选**：勾选则校验（verified/唯一默认）并注入 `LLM_*`（key 进服务 Secret）+ 就绪后下发登记；不勾选 = 包自带 env 的导入场景，仅合并平台默认；
+  - **失败语义**：派生副本发布失败回删（不留孤儿数据）；本空间已上传包是用户资产不删；
 - `adopt`：透传 M1 的 `admin bind`（console 侧仅 admin 角色显示入口）。
 
 ### 2.7 编辑链路（对标 AgentCore 编辑页，设计 §8.2.1）

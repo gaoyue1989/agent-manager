@@ -661,6 +661,9 @@ func (c *Core) CreateAgent(workspaceID, userID uint, form *AgentForm) (*store.Se
 
 // CreateAgentImport 导入模式（M3 §2.6）：公共包 copy-on-write 派生本空间副本（或
 // 直接引用本空间已上传包）→ 复用 Publish 发布。form.Name 缺省取包名。
+// env 与 harness 模式同语义（issue #161：曾不经 buildPublishEnv，包不带 DB/LLM env
+// 时 Pod 用镜像内置账号连库 Access denied CrashLoopBackOff）：平台默认配置恒合并；
+// 模型连接可选——勾选则校验并注入 LLM_*（不勾 = 包自带 env 的导入场景）。
 func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, packageID uint) (*store.ServiceEntity, *store.OafPackage, error) {
 	base, err := c.Packages.Get(packageID)
 	if err != nil {
@@ -668,6 +671,17 @@ func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, pack
 	}
 	if base.WorkspaceID != workspaceID && base.WorkspaceID != 0 {
 		return nil, nil, ErrNotFound // 非公共包且非本空间 → 不可见
+	}
+	var def *store.ModelConnection
+	var conns []*store.ModelConnection
+	if len(form.ModelConnections) > 0 {
+		if def, conns, err = c.validateModelConnections(workspaceID, form.ModelConnections); err != nil {
+			return nil, nil, err
+		}
+	}
+	env, secretKeys, err := c.buildPublishEnv(workspaceID, def, form)
+	if err != nil {
+		return nil, nil, err
 	}
 	pkg := base
 	if base.WorkspaceID == 0 {
@@ -693,11 +707,23 @@ func (c *Core) CreateAgentImport(workspaceID, userID uint, form *AgentForm, pack
 	}
 	svc, err := c.Publish(PublishRequest{
 		PackageID: pkg.ID, Name: orStr(form.Name, pkg.Name), Image: image,
+		Env: env, SecretKeys: secretKeys,
 		Replicas: int32(form.Replicas), Spec: form.Spec, PublicEndpoint: form.PublicEndpoint,
 		WorkspaceID: workspaceID, CreatedBy: userID,
 	})
 	if err != nil {
+		// 派生副本发布失败回删（不留孤儿数据，同 CreateAgent 失败语义）；
+		// 本空间已上传包是用户资产，不删
+		if pkg.ID != base.ID {
+			if delErr := c.Packages.Delete(pkg.ID); delErr != nil {
+				log.Printf("[agentgen] cleanup derived package %d after failed import publish: %v", pkg.ID, delErr)
+			}
+		}
 		return nil, pkg, err
+	}
+	// 下发登记：勾选了模型连接时同 harness 模式（失败不阻断创建，usage 页可手动触发）
+	if len(conns) > 0 {
+		_ = c.registerDeliveries(conns, svc.ID)
 	}
 	return svc, pkg, nil
 }
