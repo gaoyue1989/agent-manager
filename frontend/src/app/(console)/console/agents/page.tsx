@@ -76,7 +76,8 @@ export default function AgentsPage() {
                 <b className="min-w-0 flex-1 truncate text-[13.5px] font-semibold">{a.displayName}</b>
                 <Badge status={a.status} />
               </div>
-              <p className="min-h-[32px] text-xs leading-relaxed text-gray-400">
+              {/* break-all：描述含长 token（工具名/连接串）时强制换行，否则撑破卡片（issue #154 复测残留） */}
+              <p className="min-h-[32px] break-all text-xs leading-relaxed text-gray-400">
                 {a.cardSummary.description || a.cardSummary.name || "（包内未声明描述）"}
               </p>
               <div className="flex flex-wrap gap-1.5">

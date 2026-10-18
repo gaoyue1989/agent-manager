@@ -849,3 +849,27 @@ func TestRepublishRecomputesEndpointAfterHostModeSwitch(t *testing.T) {
 		t.Fatal("host mode ingress must not carry rewrite annotations")
 	}
 }
+
+// TestPublishObjectNameBudget issue #149 复测残留：子对象名（-svc/-env-secret）超
+// DNS-1123 63 上限时必须 400 且不落库（曾先落 deploying 记录再被 K8s API 拒绝 →
+// 500 invalid metadata.name + 残留）；正常超长展示名经 DeriveK8sName 截断后可发布。
+func TestPublishObjectNameBudget(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, c, "")
+
+	// 100 字符展示名：DeriveK8sName 按 "-env-secret" 后缀预算截断（oaf-+48）→
+	// 全部子对象名 ≤63，发布成功（复测残留的 500 invalid metadata.name 根治）
+	svc, err := c.Publish(PublishRequest{PackageID: pkg.ID, Name: strings.Repeat("z", 100)})
+	if err != nil {
+		t.Fatalf("100-char display name should publish: %v", err)
+	}
+	if len(svc.K8sName) != 4+48 || len(svc.K8sName+"-svc") > 63 || len(svc.K8sName+"-env-secret") > 63 {
+		t.Fatalf("derived object names exceed 63: k8s=%q (%d)", svc.K8sName, len(svc.K8sName))
+	}
+	// 展示名列容量：>128 runes 直接 400（display_name varchar(128)）
+	_, err = c.Publish(PublishRequest{PackageID: pkg.ID, Name: strings.Repeat("长", 200)})
+	if err == nil || !errors.Is(err, ErrInvalidForm) || !strings.Contains(err.Error(), "name too long (max 128)") {
+		t.Fatalf("200-rune name: %v", err)
+	}
+}

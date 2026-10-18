@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -166,6 +167,10 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	if err := c.validateSpec(req.Spec); err != nil {
 		return nil, err
 	}
+	// 展示名列容量校验（issue #149：display_name varchar(128)，超长曾以 500 直出）
+	if utf8.RuneCountInString(strings.TrimSpace(req.Name)) > 128 {
+		return nil, fmt.Errorf("%w: name too long (max 128)", ErrInvalidForm)
+	}
 	image := req.Image
 	if image == "" {
 		image = c.Cfg.DefaultImage
@@ -179,6 +184,12 @@ func (c *Core) Publish(req PublishRequest) (*store.ServiceEntity, error) {
 	}
 
 	k8sName := k8s.DeriveK8sName(orStr(req.K8sNameBase, req.Name), pkg.Slug)
+	// 子对象名预算前置校验（issue #149 复测残留）：Service "{name}-svc"、Secret
+	// "{name}-env-secret" 同为 DNS-1123 ≤63——超预算必须 400 拒绝，否则先落库再被
+	// K8s API 拒绝（500 invalid metadata.name），残留 deploying/error 记录
+	if n := len(k8sName + "-env-secret"); n > 63 {
+		return nil, fmt.Errorf("%w: name too long (derived k8s name %q exceeds object-name budget)", ErrInvalidForm, k8sName)
+	}
 	k8sName, err = c.uniqName(k8sName)
 	if err != nil {
 		return nil, err

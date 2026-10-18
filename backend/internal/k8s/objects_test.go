@@ -46,18 +46,26 @@ func TestDeriveAndShortName(t *testing.T) {
 	}
 }
 
-// 派生名总长必须 ≤63（issue #149：前缀 + 63 字符 base 曾拼出 67 字符，超 DNS label 上限）。
+// 派生名总长必须为最长子对象名（"{name}-env-secret"）预留后缀预算（issue #149：
+// k8s 名贴 63 时 -svc 后缀拼出 67 被 K8s API 拒绝，且发布已落库 → 残留记录）。
 func TestDeriveK8sNameLengthCap(t *testing.T) {
 	long := repeat("z", 100)
 	got := DeriveK8sName(long, "x/y")
-	if len(got) > 63 {
-		t.Fatalf("derived name length %d exceeds 63: %q", len(got), got)
+	// oaf-(4) + base(≤52) + "-env-secret"(11) ≤ 67... 实际约束：k8s 名 ≤52，子对象 ≤63
+	if len(got) > 63-len("-env-secret") {
+		t.Fatalf("derived name length %d exceeds %d: %q", len(got), 63-len("-env-secret"), got)
 	}
-	if got != "oaf-"+repeat("z", 59) {
-		t.Fatalf("unexpected truncation: %q", got)
+	if got != "oaf-"+repeat("z", 48) {
+		t.Fatalf("unexpected truncation: %q (want oaf- + 48 z)", got)
+	}
+	if n := len(got + "-svc"); n > 63 {
+		t.Fatalf("svc object name %d exceeds 63", n)
+	}
+	if n := len(got + "-env-secret"); n > 63 {
+		t.Fatalf("secret object name %d exceeds 63", n)
 	}
 	// 非 ASCII 输入 sanitize 后长度收缩，同样满足上限
-	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got) > 63 {
+	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got) > 63-len("-env-secret") {
 		t.Fatalf("cjk derive: %q (%d)", got, len(got))
 	}
 }

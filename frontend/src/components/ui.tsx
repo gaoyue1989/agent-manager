@@ -55,7 +55,10 @@ export function Note({ children, tone = "info" }: { children: React.ReactNode; t
     : tone === "plain"
       ? "border-gray-200 bg-gray-50 text-gray-600"
       : "border-blue-200 bg-blue-50 text-blue-700";
-  return <div className={`mb-3 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${cls}`}>{children}</div>;
+  // block 布局：flex 会把内嵌 <code> 长串（如 LLM_BASE_URL/... 斜杠串）变成不可压缩的
+  // min-width:auto 匿名/元素 flex item，页面横向溢出（issue #154 复测残留，models 页
+  // 实测 451>335；改 block 后文本自然换行，内嵌 code 经 break-all 断行）
+  return <div className={`mb-3 block break-words rounded-lg border px-3 py-2 text-xs [&_code]:break-all ${cls}`}>{children}</div>;
 }
 
 export function Btn({ children, onClick, kind = "default", sm, disabled, testid, type = "button" }: {
