@@ -6,7 +6,7 @@
  */
 import { test, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
 import { BASE, BENCH_MCP, ids, sessionIdFor } from '../lib/env.js';
-import { chat, status, subscribe, history, threads, deleteThread, patchThread, a2a, llmStats, llmReset, createApprovalApp, confirmStream, confirmSync } from '../lib/client.js';
+import { chat, status, subscribe, history, threads, deleteThread, patchThread, a2a, llmStats, llmReset, createApprovalApp, confirmStream, confirmSync, userHeaders } from '../lib/client.js';
 import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic } from '../lib/sse.js';
 import { upload, download, textBytes, pngBytes } from '../lib/files.js';
@@ -831,17 +831,17 @@ test('FW1 A2A 规范槽位（{userId}:{sid}）列表/详情可见、删除无孤
   expect(slots.some(x => x.session_id === `${uid}:${sid}`), 'A2A 应写规范形态槽位 {uid}:{sid}').toBe(true);
 
   // 列表可见（session_user 由 A2AController 会话开始前 upsert）
-  await pollUntil(async () => threads(BASE, U), list => JSON.stringify(list).includes(sid), 30_000);
+  await pollUntil(async () => threads(BASE, uid), list => JSON.stringify(list).includes(sid), 30_000);
 
   // 详情 updated_at 非空：规范槽位经 SUBSTRING_INDEX 末段臂命中（旧实现恒 ''，匹配回归即在此红）
-  const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`)).json() as Record<string, unknown>;
+  const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`, { headers: userHeaders(uid) })).json() as Record<string, unknown>;
   expect(String(one.updated_at ?? ''), '详情 updated_at 应取自 agent_state（末段臂命中）').not.toBe('');
   expect(one.user_id).toBe(uid);
 
   // 删除：规范槽位行级联清理，不留孤儿（旧实现漏删 → updated_at 残留非空、DB 计数>0）
-  expect(await deleteThread(sid, BASE, U)).toBeLessThan(300);
-  await pollUntil(async () => threads(BASE, U), list => !JSON.stringify(list).includes(sid), 15_000); // S7 同款权威信号
-  const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`)).json() as Record<string, unknown>;
+  expect(await deleteThread(sid, BASE, uid)).toBeLessThan(300);
+  await pollUntil(async () => threads(BASE, uid), list => !JSON.stringify(list).includes(sid), 15_000); // S7 同款权威信号
+  const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(sid)}`, { headers: userHeaders(uid) })).json() as Record<string, unknown>;
   expect(String(oneAfter.updated_at ?? ''), '删除后 updated_at 应为空（孤儿残留即在此红）').toBe('');
   expect(await slotRowCount(sid), 'agent_state 不得残留 sid 孤儿行').toBe(0);
 });
@@ -878,14 +878,14 @@ test('FW2 老 Channel 形态槽位种子：列表/详情 updated_at 取自 agent
   expect(String(row!.updated_at ?? ''), '列表 updated_at 应取自 agent_state（冒号前段臂）').toContain(STATE_TS);
 
   // 详情：同一冒号前段臂（getThread 元信息 SQL）；Timestamp.toString() 尾部 ".0" 用 toContain 吸收
-  const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`)).json() as Record<string, unknown>;
+  const one = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`, { headers: userHeaders(uid) })).json() as Record<string, unknown>;
   expect(String(one.updated_at ?? ''), '详情 updated_at 应取自 agent_state（冒号前段臂）').toContain(STATE_TS);
   expect(one.user_id).toBe(uid);
 
   // 删除：老形态槽位行一并清理（冒号前段臂），列表/详情/DB 三面无残留
-  expect(await deleteThread(peer, BASE, U)).toBeLessThan(300);
+  expect(await deleteThread(peer, BASE, uid)).toBeLessThan(300);
   await pollUntil(async () => threads(BASE, U), list => !JSON.stringify(list).includes(peer), 15_000);
-  const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`)).json() as Record<string, unknown>;
+  const oneAfter = await (await fetch(`${BASE}/threads/${encodeURIComponent(peer)}`, { headers: userHeaders(uid) })).json() as Record<string, unknown>;
   expect(String(oneAfter.updated_at ?? ''), '删除后老形态槽位行必须消失').toBe('');
   expect(await slotRowCount(peer), 'agent_state 不得残留老形态孤儿行').toBe(0);
   const conn2 = await openDb();
@@ -1183,7 +1183,7 @@ type HistoryMsg = Record<string, unknown>;
 
 /** 带 query 的 history 查询（lib/client.js 的 history 不带参） */
 async function historyQ(sid: string, query = ''): Promise<Record<string, unknown>> {
-  const res = await fetch(`${BASE}/threads/${encodeURIComponent(sid)}/history${query ? `?${query}` : ''}`);
+  const res = await fetch(`${BASE}/threads/${encodeURIComponent(sid)}/history${query ? `?${query}` : ''}`, { headers: userHeaders(U) });
   expect(res.status, 'history HTTP 状态').toBe(200);
   return res.json() as Promise<Record<string, unknown>>;
 }
@@ -1507,7 +1507,7 @@ test.describe('MEM 记忆关断', () => {
     expect(stream.terminal?.type).toBe('done');
     // 冷实例首帧可能是 AGENT_START（session_created 非首帧契约），只断对话链路完整可用
     expect(textOf(stream.frames).length).toBeGreaterThan(2);
-    const h = await history(sid, MEM_BASE, U);
+    const h = await history(sid, MEM_BASE, 'e2e-memoff');
     expect(h._http === undefined || h._http === 200).toBe(true);
 
     // 文件级 beforeEach llmReset 给出干净窗口；mock 为两实例共享、全局窗口
@@ -1587,15 +1587,15 @@ test.describe('RD Redis 前缀隔离', () => {
     const a = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid });
     await waitTerminal(a);
     expect(a.terminal?.type).toBe('done');
-    const aSeq = Number((await status(sid, BASE, U)).latest_event_seq ?? 0);
+    const aSeq = Number((await status(sid, BASE, 'e2e-rd')).latest_event_seq ?? 0);
     expect(aSeq, '默认实例事件流为空（主实例自身回归）').toBeGreaterThan(0);
 
     // 前缀实例同名会话此刻必须全空：前缀失效时此处读到 A 的流即红（决定性断言）
-    const before = await status(sid, RD_BASE, U);
+    const before = await status(sid, RD_BASE, 'e2e-rd');
     expect(before.state).toBe('idle');
     expect(Number(before.latest_event_seq ?? -1)).toBe(0);
     // 前缀实例断线续传空关流（tailer 首轮立即探测空流即补 done），A 的帧一条读不到
-    const emptySub = subscribe(sid, 0, RD_BASE, undefined, U);
+    const emptySub = subscribe(sid, 0, RD_BASE, undefined, 'e2e-rd');
     await emptySub.closed;
     expect(emptySub.frames.filter(f => f.type !== 'done'), '前缀实例续传读到 A 的帧（隔离失效）').toHaveLength(0);
 
@@ -1603,22 +1603,22 @@ test.describe('RD Redis 前缀隔离', () => {
     const b = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid, base: RD_BASE });
     await waitTerminal(b);
     expect(b.terminal?.type).toBe('done');
-    const bSeq = Number((await status(sid, RD_BASE, U)).latest_event_seq ?? 0);
+    const bSeq = Number((await status(sid, RD_BASE, 'e2e-rd')).latest_event_seq ?? 0);
     expect(bSeq).toBeGreaterThan(0);
 
     // 双向续传回放恰好只含各自的流：max seq 精确相等（串流即溢出）
-    const subA = subscribe(sid, 0, BASE, undefined, U);
+    const subA = subscribe(sid, 0, BASE, undefined, 'e2e-rd');
     await subA.closed;
     seqMonotonic(subA.frames);
     expect(subA.frames[subA.frames.length - 1].type).toBe('done');
     expect(maxSeqOf(subA.frames), 'A 的回放混入 B 的帧').toBe(aSeq);
-    const subB = subscribe(sid, 0, RD_BASE, undefined, U);
+    const subB = subscribe(sid, 0, RD_BASE, undefined, 'e2e-rd');
     await subB.closed;
     seqMonotonic(subB.frames);
     expect(subB.frames[subB.frames.length - 1].type).toBe('done');
     expect(maxSeqOf(subB.frames), 'B 的回放混入 A 的帧').toBe(bSeq);
     // A 的流不因 B 的 turn 变化
-    expect(Number((await status(sid, BASE, U)).latest_event_seq ?? -1)).toBe(aSeq);
+    expect(Number((await status(sid, BASE, 'e2e-rd')).latest_event_seq ?? -1)).toBe(aSeq);
   });
 
   test('RD2 删除会话前缀互不影响：DELETE 只清本实例命名空间', async () => {
@@ -1626,28 +1626,28 @@ test.describe('RD Redis 前缀隔离', () => {
     const a = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid });
     await waitTerminal(a);
     expect(a.terminal?.type).toBe('done');
-    const aSeq = Number((await status(sid, BASE, U)).latest_event_seq ?? 0);
+    const aSeq = Number((await status(sid, BASE, 'e2e-rd')).latest_event_seq ?? 0);
     const b = chat({ message: `[E2E:plain]`, userId: 'e2e-rd', sessionId: sid, base: RD_BASE });
     await waitTerminal(b);
     expect(b.terminal?.type).toBe('done');
-    const bSeq = Number((await status(sid, RD_BASE, U)).latest_event_seq ?? 0);
+    const bSeq = Number((await status(sid, RD_BASE, 'e2e-rd')).latest_event_seq ?? 0);
     expect(aSeq).toBeGreaterThan(0);
     expect(bSeq).toBeGreaterThan(0);
 
     // 前缀实例删会话：只清 e2e-isolated:sess:{sid}:* 两个 key（RedisEventLog.deleteSession
     // 经 facade.key 前缀）+ 共享 MySQL 行（前缀只切 Redis key，两实例都会删——设计内语义）
-    expect(await deleteThread(sid, RD_BASE, U)).toBe(200);
-    expect(Number((await status(sid, RD_BASE, U)).latest_event_seq ?? -1)).toBe(0); // 自己的流已清
-    expect(Number((await status(sid, BASE, U)).latest_event_seq ?? -1),
+    expect(await deleteThread(sid, RD_BASE, 'e2e-rd')).toBe(200);
+    expect(Number((await status(sid, RD_BASE, 'e2e-rd')).latest_event_seq ?? -1)).toBe(0); // 自己的流已清
+    expect(Number((await status(sid, BASE, 'e2e-rd')).latest_event_seq ?? -1),
       '前缀实例 DELETE 波及默认实例事件流（deleteSession 未走前缀）').toBe(aSeq);
     // 默认实例断线续传不受对方删除破坏
-    const subA = subscribe(sid, 0, BASE, undefined, U);
+    const subA = subscribe(sid, 0, BASE, undefined, 'e2e-rd');
     await subA.closed;
     expect(subA.frames[subA.frames.length - 1].type).toBe('done');
     expect(maxSeqOf(subA.frames)).toBe(aSeq);
     // 反向：默认实例删除只清自己（双向语义闭环）
-    expect(await deleteThread(sid, BASE, U)).toBe(200);
-    expect(Number((await status(sid, BASE, U)).latest_event_seq ?? -1)).toBe(0);
+    expect(await deleteThread(sid, BASE, 'e2e-rd')).toBe(200);
+    expect(Number((await status(sid, BASE, 'e2e-rd')).latest_event_seq ?? -1)).toBe(0);
   });
 
   test('RD3 前缀配置生效直证：门面启动日志 prefix 字段（含冒号规范化）', () => {

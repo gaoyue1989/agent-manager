@@ -13,6 +13,7 @@ import reactor.core.publisher.Flux;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -185,16 +186,10 @@ class SessionStreamControllerTest {
     void subscribeShouldRejectForeignUser() {
         when(sessionUserStore.findUserIdBySession("foreign-sid")).thenReturn("alice");
 
-        var err = controller.subscribe("foreign-sid", "bob", 0, null)
-            .map(v -> (Object) v)
-            .last()
-            .onErrorResume(e -> reactor.core.publisher.Mono.just(e))
-            .block(Duration.ofSeconds(2));
-
-        assertTrue(err instanceof org.springframework.web.server.ResponseStatusException,
-            "应返回错误信号: " + err);
-        assertEquals(404, ((org.springframework.web.server.ResponseStatusException) err)
-            .getStatusCode().value());
+        // 404 以同步 throw 返回（先于 SSE 响应提交；Flux.error 会让 MVC 落 500，SEC2 e2e 钉）
+        var ex = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+            () -> controller.subscribe("foreign-sid", "bob", 0, null));
+        assertEquals(404, ex.getStatusCode().value());
         verify(eventStore, never()).queryAfter(anyString(), anyString(), anyInt());
     }
 }

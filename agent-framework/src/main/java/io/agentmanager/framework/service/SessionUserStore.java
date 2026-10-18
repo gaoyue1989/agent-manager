@@ -24,6 +24,13 @@ public class SessionUserStore {
 
     private static final Logger log = LoggerFactory.getLogger(SessionUserStore.class);
 
+    /**
+     * 占位身份：单列 upsert（model/remark）打向尚无映射行的会话时补建行的 user_id。
+     * 该行不构成归属主张——首个真实身份的 chat 会经 upsert 认领（issue #158 守卫
+     * 据此放行，见 SessionAccessGuard）。
+     */
+    public static final String PLACEHOLDER_USER = "unknown";
+
     /** 允许经 {@link #upsertColumn}/{@link #findColumnBySession} 读写的列白名单（防 SQL 拼接注入） */
     private static final java.util.Set<String> UPDATABLE_COLUMNS = java.util.Set.of("model", "remark");
 
@@ -180,7 +187,7 @@ public class SessionUserStore {
             // 补建行：ON DUPLICATE KEY 兜住并发插入竞态（此时以已存在行为准，仅补列值）
             try (var ps = conn.prepareStatement(
                     "INSERT INTO session_user (session_id, user_id, " + column + ", created_at, updated_at) "
-                        + "VALUES (?, 'unknown', ?, NOW(3), NOW(3)) "
+                        + "VALUES (?, '" + PLACEHOLDER_USER + "', ?, NOW(3), NOW(3)) "
                         + "ON DUPLICATE KEY UPDATE " + column + " = VALUES(" + column + "), updated_at = NOW(3)")) {
                 ps.setString(1, sessionId);
                 ps.setString(2, value);

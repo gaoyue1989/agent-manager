@@ -4,7 +4,7 @@
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { BASE } from '../lib/env.js';
-import { chat, deleteThread, llmReset, llmStats, patchThread } from '../lib/client.js';
+import { chat, deleteThread, llmReset, llmStats, patchThread, userHeaders } from '../lib/client.js';
 import { waitTerminal, pollUntil } from '../lib/matchers.js';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -49,7 +49,7 @@ test.afterEach(async ({ request }) => {
     await request.delete(`/models/${id}`).catch(() => undefined);
   }
   for (const sid of sessionIds.splice(0)) {
-    await deleteThread(sid, BASE, U).catch(() => undefined);
+    await deleteThread(sid, BASE, USER_ID).catch(() => undefined);
   }
 });
 
@@ -132,10 +132,10 @@ test('MOD3 会话 PATCH 切换模型并影响下一轮真实 LLM 请求', async 
   const first = chat({ message: '[E2E:plain]先使用系统模型', userId: USER_ID, sessionId: sid });
   await waitTerminal(first);
 
-  const patched = await patchThread(sid, { model: id }, BASE, U);
+  const patched = await patchThread(sid, { model: id }, BASE, USER_ID);
   expect(patched.status).toBe(200);
   expect((await patched.json()).model).toBe(id);
-  const detail = await request.get(`/threads/${sid}`);
+  const detail = await request.get(`/threads/${sid}`, { headers: userHeaders(USER_ID) });
   expect((await detail.json()).model).toBe(id);
 
   const second = chat({ message: '[E2E:plain]切换到托管模型', userId: USER_ID, sessionId: sid });
@@ -146,10 +146,10 @@ test('MOD3 会话 PATCH 切换模型并影响下一轮真实 LLM 请求', async 
   );
 
   await request.patch(`/models/${id}`, { data: { enabled: false } });
-  const rejected = await patchThread(sid, { model: id }, BASE, U);
+  const rejected = await patchThread(sid, { model: id }, BASE, USER_ID);
   expect(rejected.status).toBe(400);
   expect((await rejected.json()).error).toBe('model_disabled');
-  expect((await (await request.get(`/threads/${sid}`)).json()).model).toBe(id);
+  expect((await (await request.get(`/threads/${sid}`, { headers: userHeaders(USER_ID) })).json()).model).toBe(id);
 
   const invalid = chat({ message: '[E2E:plain]未知模型', userId: USER_ID, sessionId: `e2e-invalid-${uniq()}`, model: `missing-${uniq()}` });
   await waitTerminal(invalid);
@@ -344,7 +344,7 @@ test('MOD6 托管模型方言矩阵：采样参数在 LLM 请求体中的实际�
 
     const sid = `e2e-dialect-${provider}-${uniq()}`;
     sessionIds.push(sid);
-    const patched = await patchThread(sid, { model: id }, BASE, U);
+    const patched = await patchThread(sid, { model: id }, BASE, USER_ID);
     expect(patched.status).toBe(200);
 
     const stream = chat({ message: `[E2E:plain]验证 ${provider} 方言`, userId: USER_ID, sessionId: sid });
