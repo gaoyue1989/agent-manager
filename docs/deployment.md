@@ -48,11 +48,29 @@ docker push 172.20.0.1:5001/platform-frontend:v7
 
 ```bash
 cd manifests
-kubectl apply -f platform.yaml          # ns/RBAC/PVC/MySQL8/platform-backend
+kubectl apply -f platform.yaml          # ns/RBAC/PVC/MySQL8/platform-backend（含 JWT_SECRET/ADMIN_INIT_*，生产先覆盖占位值）
 kubectl apply -f platform-ingress.yaml # REST/MCP 入口
+kubectl apply -f platform-router.yaml  # 业务子路径路由器（ROUTER_AUTH_MODE 默认 off）
 kubectl apply -f frontend.yaml         # 前端 NodePort 30881
 kubectl -n agent-platform rollout status deployment --timeout=300s
 ```
+
+> **控制台拆分（2026-10 起）**：frontend 升级后浏览器访问任意页面先跳 `/login`（首个 admin 由
+> `ADMIN_INIT_USER/ADMIN_INIT_PASSWORD` 种子创建）。数据面网关鉴权分三档灰度
+> （platform-router `ROUTER_AUTH_MODE=off|report|enforce`，默认 off 行为与历史一致；
+> 转档 = `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
+> 后 rollout restart，回滚同路径改回 off；enforce 前须先在控制台签发 API Key 或以 JWT 调用）。
+
+### 控制台拆分按功能 e2e（e2e/console-split/）
+
+部署后一键回归（180+ 断言，M0–M8 九模块；M9 enforce 三态需独立环境）：
+
+```bash
+BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_API_KEY=.. LLM_BASE_URL=.. LLM_MODEL=..]   # 缺省自动从 release-agent env 读取
+  bash e2e/console-split/run-all.sh               # 全跑；或传模块号 m0 m3 ... 选择性跑
+```
+
+实装截图画廊：[docs/screenshots/console-split/README.md](screenshots/console-split/README.md)。
 
 ## 四、自举发布助手
 
@@ -109,10 +127,17 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 |----|----|
 | MySQL（oaf-mysql） | 用户 `oaf` / 密码 `OafPlatform2026`（root 同） |
 | LLM | `.env.secrets`（mimo-v2.5） |
+| JWT_SECRET（控制台登录签发密钥，2026-10 起） | platform.yaml 默认占位 `oaf-console-jwt-secret-CHANGE-ME`——**生产必须覆盖**（缺失启动 fail-fast；更换即全员重新登录） |
+| ADMIN_INIT_USER / ADMIN_INIT_PASSWORD（首个 admin 种子） | 默认 `admin` / `OafConsole2026`——仅 users 表为空时生效；生产环境首登后立即改密（运维侧 → 用户管理 → 重置密码） |
 
-Checkpoint DSN 模板：
+Checkpoint DSN 模板（新发布服务由平台自动派生 per-service 库名，见「运维备忘 4」）：
 ```
 jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+```
+
+评测飞轮外链（可选，前端构建时注入；未配置则控制台隐藏入口）：
+```
+# frontend 构建参数：NEXT_PUBLIC_EVAL_STUDIO_URL=http://{部署主机}:18400
 ```
 
 ## 运维备忘
@@ -120,7 +145,11 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
 1. **更新任一镜像后**：重新 save/import 后必须 `kubectl -n agent-platform rollout restart deployment/<name>`——同名 tag 不会自动触发滚动，且 Ingress 注解由 platform-backend 下发，改注解逻辑后必须重启它再 republish。
 2. 业务 Pod 的 OAF 包挂载在 `/config`（只读）+ 工作区 `/workspace`（可写）+ 日志目录 `/applog`（可写，规范日志输出，见「五、业务日志规范」）。
 3. MCP server 不可达默认不阻断启动（fail-soft）；必需依赖在包内写 `startup.required: true`。
-4. **发布多个业务服务时的数据隔离（强制，见 AGENTS.md「架构强约束」）**：每个服务必须配独立的 `CHECKPOINT_JDBC_URL` 库名（如 `oaf_checkpoint_{service}`，需先建库授权）与非空 `AGENT_REDIS_PREFIX`（如 `{service}:`）。平台默认值是共享 `oaf_checkpoint` 库 + 空 Redis 前缀——多服务沿用默认会互相串数据（`/threads` 会话列表跨服务可见、沙箱并发守卫跨服务互锁），平台当前不校验，靠发布时显式配置保证。
+4. **发布多个业务服务时的数据隔离（issue #142 起新发布自动派生）**：Publish 新建服务时自动派生独立 checkpoint 库（`CHECKPOINT_JDBC_URL` 改写为 `{原库}_{k8s 名}` + `createDatabaseIfNotExist=true` 首连自动建库）与 Redis key 前缀（`AGENT_REDIS_PREFIX={k8s 名}:`，仅平台已配置共享 Redis 时）——用户显式配置的值优先于派生；**存量服务不受影响**（env 已固化），收敛需显式改 env 后 republish。**前置授权**：MySQL 账号须能建 `{原库}_%` 模式库——fresh 集群 init.sql 已含 `GRANT ALL ON \`oaf_checkpoint\_%\`.*`；存量集群手工执行一次：
+   ```sql
+   GRANT ALL ON `oaf_checkpoint\_%`.* TO 'oaf'@'%'; FLUSH PRIVILEGES;
+   ```
+   未派生的存量默认值（共享 `oaf_checkpoint` 库 + 空 Redis 前缀）多服务沿用仍会互相串数据。
 5. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
 6. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
 

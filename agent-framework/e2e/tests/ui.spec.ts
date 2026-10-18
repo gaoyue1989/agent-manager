@@ -525,7 +525,7 @@ test('U15 压缩分隔条历史回放（归档合并视图渲染）', async ({ p
   await expect(page.locator(`${SEL.chatInner} .compaction-summary`)).toContainText(`压缩摘要-${mark}`);
   // 未归档尾部消息照常回放（合并视图不影响尾部渲染）
   await expect(page.locator(SEL.chatInner)).toContainText(tailArg, { timeout: 30_000 });
-  await deleteThread(sid).catch(() => undefined);
+  await deleteThread(sid, BASE, UI_UID).catch(() => undefined);
 });
 
 // ---------- U16：assistant 分段渲染顺序（文本气泡 ↔ 工具组交错） ----------

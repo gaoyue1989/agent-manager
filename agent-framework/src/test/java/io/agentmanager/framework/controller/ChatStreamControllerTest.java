@@ -1363,4 +1363,41 @@ class ChatStreamControllerTest {
         assertTrue(askIdx >= 0, "应广播 permission_ask 帧: " + frames);
         assertTrue(endIdx > askIdx, "AGENT_END 帧应在 permission_ask 之后到达: " + frames);
     }
+
+    // ===== 归属校验（issue #158 防夺主）：他人会话拒绝且不写映射 =====
+
+    @Test
+    void chatShouldRejectForeignSessionWithoutTakeover() {
+        var sessionId = "alice-private-session";
+        when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
+
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null), null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames);
+        assertEquals(1, frames.size());
+        assertTrue(frames.get(0).data().contains("thread_not_found"),
+            "拒绝帧应带 thread_not_found: " + frames.get(0).data());
+        // 关键：不得把会话改写到 bob 名下
+        verify(sessionUserStore, never()).upsert(anyString(), anyString());
+        verify(turnLeaseStore, never()).tryAcquire(anyString());
+    }
+
+    @Test
+    void chatShouldAllowOwnerContinueAndNewSession() {
+        var sessionId = "alice-own-session";
+        when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        var end = new AgentEndEvent("reply-1");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(reactor.core.publisher.Flux.just(end));
+
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null), null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames);
+        verify(sessionUserStore).upsert(sessionId, "alice");
+    }
 }

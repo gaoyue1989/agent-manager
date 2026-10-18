@@ -332,6 +332,17 @@ public class ChatStreamController {
             }
         }
 
+        // 归属校验（issue #158 防夺主）：已存在的会话只允许归属用户继续对话——
+        // 下方 upsert 的 ON DUPLICATE KEY UPDATE 会把他人会话改写到请求者名下；
+        // 无映射行（新会话/存量）放行。拒绝以 error SSE 帧返回（与 message 校验
+        // 同通道），不写任何映射/模型绑定/标题。
+        if (!isNewSession && !io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, finalSessionId, finalUserId)) {
+            log.info("[chat] reject foreign session: sessionId={}, userId={}", finalSessionId, finalUserId);
+            return Flux.just(errorSSE("thread_not_found: session '" + finalSessionId
+                + "' not found"));
+        }
+
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
 

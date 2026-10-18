@@ -11,7 +11,7 @@ Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运�
 - **正确性状态只存共享存储**：影响请求裁决的状态（会话历史 `agent_state`/`session_message`、HITL `confirm_context`、turn 互斥 `turn_lease`、事件流 `sess:*`/`proto:task:*`、幂等 Job `a2ajob:*`）只允许落 MySQL / Redis。Pod 本地（内存 Map、emptyDir `/workspace`、`/applog`）只允许可丢弃或可从共享存储重建的缓存/簿记（如 `SessionManager` 映射、`RemoteConfirmBridge.inFlight` 需可经 `remote_task_registry` 重建）
 - **多副本协调只靠共享存储原子操作**：互斥/CAS 一律用 MySQL PK 冲突、version CAS、Redis `SET NX`/Lua，禁止本地文件锁/内存锁/单机 leader 假设；@Scheduled 任务天然每副本都会跑，必须幂等或 CAS 恰好一次
 - **禁止会话粘性**：不得为 Service/Ingress 引入 `sessionAffinity` 或等价粘性路由；`/threads/{sid}/subscribe|status|confirm*` 必须在"本 Pod 未执行过该 session"时依旧正确（durable SSE 续传语义）。e2e-multi（R 组）与 e2e-protocol-multi（P 组）双副本门禁是本约束的回归保障，不得弱化拓扑（双副本 + 无粘性 LB）
-- **服务间隔离靠部署配置（当前形态）**：表结构与 Redis key 均无 agent 维度，**多服务共享同一 MySQL/Redis 时必须各配独立 `CHECKPOINT_JDBC_URL` 库名与 `AGENT_REDIS_PREFIX`**——共库时 `session_user` 会按 user_id 跨服务串列、`/threads` 列表互相可见；共 Redis 空 prefix 时 `sbx:guard:user:{uid}` 跨服务互锁。平台默认占位符是共享库 + 空前缀，**平台尚不自动注入/校验（已知缺口）**，发布多个服务时必须显式配置；平台侧自动 per-service 派生列入演进
+- **服务间隔离靠部署配置（当前形态）**：表结构与 Redis key 均无 agent 维度，**多服务共享同一 MySQL/Redis 时必须各配独立 `CHECKPOINT_JDBC_URL` 库名与 `AGENT_REDIS_PREFIX`**——共库时 `session_user` 会按 user_id 跨服务串列、`/threads` 列表互相可见；共 Redis 空 prefix 时 `sbx:guard:user:{uid}` 跨服务互锁。平台 Publish 新建服务时已自动派生独立库与前缀（issue #142），**存量服务与显式配置仍是部署侧责任**（平台不校验显式配的共享值）
 - **`/config` 只读不变量**：OAF 包挂载点只读（backend objects.go 构造 `ReadOnly: true`），框架代码禁止写 `{AGENT_CONFIG_DIR}` 下任何路径（旧 `SkillManageService` 写 `/config/skills` 属遗留，平台部署下 fail-soft 不可用；用户技能一律走 agent_fs L4）。已提交的架构约束见 [../AGENTS.md](../AGENTS.md)「架构强约束」
 
 ## 技术栈

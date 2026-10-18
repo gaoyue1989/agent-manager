@@ -1,0 +1,226 @@
+"use client";
+// 发布向导：上传/选择 OAF 包 → 选镜像 → 编辑环境变量 → 提交发布
+// 支持 ?packageId= 深链预选包（从包详情/列表"去发布"跳入）
+import { useCallback, useEffect, useRef, useState, Suspense } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { api, ImageOption, PackageRec, type WorkspaceAdminView } from "@/lib/api";
+
+type EnvRow = { key: string; value: string };
+
+export default function PublishPage() {
+  return (
+    <Suspense fallback={<p className="text-gray-500">加载中…</p>}>
+      <PublishForm />
+    </Suspense>
+  );
+}
+
+function PublishForm() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [packages, setPackages] = useState<PackageRec[]>([]);
+  const [images, setImages] = useState<ImageOption[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [selectedPkg, setSelectedPkg] = useState<number | null>(null);
+  const [pkgSummary, setPkgSummary] = useState("");
+  const [image, setImage] = useState("");
+  const [name, setName] = useState("");
+  const [replicas, setReplicas] = useState(1);
+  // 默认填入（R3）：env 行预填平台默认配置的已配置项（GET /platform-config/defaults），
+  // 可任意增删改——服务只落这里显式提交的 env；平台配置变更不影响任何已发布服务
+  const [envRows, setEnvRows] = useState<EnvRow[]>([]);
+  const [sensitiveKeys, setSensitiveKeys] = useState<Set<string>>(new Set()); // 模板敏感键：输入框用 password 呈现
+  const [submitting, setSubmitting] = useState(false);
+  const [msg, setMsg] = useState("");
+  // 归属工作空间（M1 §3.1 可选增强：admin 发布时即可指定归属，免二次纳管）
+  const [workspaces, setWorkspaces] = useState<WorkspaceAdminView[]>([]);
+  const [workspaceId, setWorkspaceId] = useState(0);
+
+  const load = useCallback(async () => {
+    try {
+      setPackages(await api.listPackages());
+      api.admin.listWorkspaces().then((ws) => setWorkspaces(ws)).catch(() => {});
+      const imgs = await api.listImages();
+      setImages(imgs);
+      if (imgs.length > 0) setImage((cur) => cur || imgs[0].Image);
+      // 默认填入：并发拉 schema（敏感键集合）与已配置默认值
+      const [cfg, dflt] = await Promise.all([
+        api.getPlatformConfig().catch(() => null),
+        api.getPlatformDefaults().catch(() => null),
+      ]);
+      if (cfg) {
+        setSensitiveKeys(new Set(cfg.groups.flatMap((g) => g.fields.filter((f) => f.sensitive).map((f) => f.envKey))));
+      }
+      const values = dflt?.values ?? {};
+      const rows = Object.entries(values).map(([key, value]) => ({ key, value }));
+      setEnvRows((cur) => (cur.length === 0 && rows.length > 0 ? rows : cur)); // 不覆盖用户已编辑内容
+    } catch (e: any) {
+      setMsg(`加载失败: ${e.message}`);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // 深链预选：?packageId=（包详情/列表"去发布"入口）。
+  // 独立 effect 只依赖 packages 就绪 + 深链值，避免 load 依赖 selectedPkg 造成全量重拉
+  useEffect(() => {
+    if (packages.length === 0 || selectedPkg !== null) return;
+    const deep = Number(searchParams.get("packageId"));
+    if (!deep) return;
+    const hit = packages.find((p) => p.id === deep);
+    if (hit) {
+      setSelectedPkg(hit.id);
+      setPkgSummary(`${hit.slug}@${hit.version}（${hit.fileCount} 个文件）`);
+      setName(hit.name);
+    }
+  }, [packages, searchParams, selectedPkg]);
+
+  const onUpload = async (file: File) => {
+    setUploading(true);
+    setMsg("");
+    try {
+      const rec = await api.uploadPackage(file);
+      await load();
+      setSelectedPkg(rec.id);
+      setPkgSummary(`${rec.slug}@${rec.version}（${rec.fileCount} 个文件）`);
+      setName(rec.name);
+      if ((rec as any).warningsJson && (rec as any).warningsJson !== "[]") {
+        setMsg(`上传成功，但有校验警告：${(rec as any).warningsJson}`);
+      } else {
+        setMsg("上传成功");
+      }
+    } catch (e: any) {
+      setMsg(`上传失败: ${e.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const choosePkg = async (id: number) => {
+    setSelectedPkg(id);
+    try {
+      const d = await api.getPackage(id);
+      setPkgSummary(`${d.package.slug}@${d.package.version}（${d.package.fileCount} 个文件）`);
+      setName(d.package.name);
+    } catch (e: any) {
+      setMsg(`读取包失败: ${e.message}`);
+    }
+  };
+
+  const submit = async () => {
+    if (!selectedPkg) { setMsg("请先选择或上传 OAF 配置包"); return; }
+    const env: Record<string, string> = {};
+    for (const r of envRows) if (r.key.trim()) env[r.key.trim()] = r.value;
+    setSubmitting(true);
+    setMsg("");
+    try {
+      const svc = await api.publish({ packageId: selectedPkg!, name: name || undefined, image, env, replicas, workspaceId: workspaceId || undefined });
+      router.push(`/admin/services/${svc.id}`);
+    } catch (e: any) {
+      setMsg(`发布失败: ${e.message}`);
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div data-testid="publish-page" className="space-y-6">
+      <h1 className="text-xl font-semibold">发布新服务</h1>
+      {msg && <div data-testid="publish-msg" className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">{msg}</div>}
+
+      {/* 步骤 1：配置包 */}
+      <section className="bg-white border rounded p-4">
+        <h2 className="font-medium mb-2">1. OAF 配置包</h2>
+        <input ref={fileRef} type="file" accept=".zip" className="hidden" data-testid="zip-input"
+          onChange={(e) => e.target.files?.[0] && onUpload(e.target.files[0])} />
+        <button onClick={() => fileRef.current?.click()} disabled={uploading} data-testid="upload-btn"
+          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm rounded px-4 py-2">
+          {uploading ? "上传中…" : "上传 zip 包"}
+        </button>
+        <span className="mx-3 text-gray-400 text-xs">或选择已有包</span>
+        <select value={selectedPkg ?? ""} onChange={(e) => choosePkg(Number(e.target.value))} data-testid="pkg-select"
+          className="border rounded p-1.5 text-sm min-w-[240px]">
+          <option value="">— 选择配置包 —</option>
+          {packages.map((p) => (
+            <option key={p.id} value={p.id}>{p.slug}@{p.version} ({p.fileCount} files)</option>
+          ))}
+        </select>
+        {pkgSummary && <p className="mt-2 text-xs text-gray-500" data-testid="pkg-summary">{pkgSummary}</p>}
+        {selectedPkg && (
+          <p className="mt-1 text-xs">
+            <Link href={`/admin/packages/${selectedPkg}`} target="_blank" className="text-blue-600 hover:underline">
+              查看包详情 / 在线预览 ↗
+            </Link>
+          </p>
+        )}
+      </section>
+
+      {/* 步骤 2：镜像与实例 */}
+      <section className="bg-white border rounded p-4">
+        <h2 className="font-medium mb-2">2. 运行镜像</h2>
+        <select value={image} onChange={(e) => setImage(e.target.value)} data-testid="image-select"
+          className="border rounded p-1.5 text-sm w-full max-w-md">
+          {images.map((im) => (
+            <option key={im.Image} value={im.Image}>{im.Label ? `${im.Label} (${im.Image})` : im.Image}</option>
+          ))}
+        </select>
+        <label className="block mt-3 text-sm">服务名（可选，缺省取包 slug；≤128 字符，超长派生的 K8s 对象名会被拒绝）
+          <input value={name} onChange={(e) => setName(e.target.value)} data-testid="name-input" maxLength={128}
+            className="border rounded p-1.5 text-sm block mt-1 w-full max-w-md" placeholder="留空自动生成" />
+        </label>
+        <label className="block mt-3 text-sm">副本数
+          <input type="number" min={1} value={replicas} onChange={(e) => setReplicas(Math.max(1, Number(e.target.value)))}
+            data-testid="replicas-input" className="border rounded p-1.5 text-sm block mt-1 w-24" />
+        </label>
+        <label className="block mt-3 text-sm">归属工作空间（可选，免二次纳管）
+          <select value={workspaceId} onChange={(e) => setWorkspaceId(Number(e.target.value))}
+            data-testid="publish-ws-select" className="border rounded p-1.5 text-sm block mt-1 w-full max-w-md">
+            <option value={0}>未归属（default，可后续纳管）</option>
+            {workspaces.filter((w) => w.slug !== "default" && w.status === "active").map((w) => (
+              <option key={w.id} value={w.id}>{w.name}（{w.slug}）</option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      {/* 步骤 3：环境变量 */}
+      <section className="bg-white border rounded p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="font-medium">3. 环境变量</h2>
+          <button onClick={() => setEnvRows([...envRows, { key: "", value: "" }])} data-testid="add-env-row"
+            className="text-xs px-2 py-1 border rounded hover:bg-gray-100">+ 添加变量</button>
+        </div>
+        <p className="text-xs text-gray-400 mb-2">
+          已预填<Link href="/admin/settings" className="text-blue-600 hover:underline mx-1">平台默认配置</Link>的已配置项，可任意增删改（提交后随服务保存，敏感键存入服务 Secret）；
+          AGENT_CONFIG_DIR / SERVER_HOST / SERVER_PORT 为平台保留键。
+        </p>
+        <table className="w-full text-sm">
+          <tbody data-testid="env-table">
+            {envRows.map((r, i) => (
+              <tr key={i}>
+                <td className="pr-2 pb-2 w-2/5">
+                  <input value={r.key} onChange={(e) => setEnvRows(envRows.map((x, j) => j === i ? { ...x, key: e.target.value } : x))}
+                    placeholder="KEY" data-testid={`env-key-${i}`} className="border rounded p-1.5 w-full" />
+                </td>
+                <td className="pr-2 pb-2">
+                  <input type={sensitiveKeys.has(r.key) ? "password" : "text"} autoComplete="off"
+                    value={r.value} onChange={(e) => setEnvRows(envRows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
+                    placeholder={sensitiveKeys.has(r.key) ? "VALUE（敏感，存服务 Secret）" : "VALUE"} data-testid={`env-value-${i}`} className="border rounded p-1.5 w-full" />
+                </td>
+                <td className="pb-2">
+                  <button onClick={() => setEnvRows(envRows.filter((_, j) => j !== i))} data-testid={`env-del-${i}`}
+                    className="text-red-500 hover:text-red-700 px-2">×</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <button onClick={submit} disabled={submitting || !selectedPkg} data-testid="submit-publish"
+        className="bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded px-6 py-2 text-sm">
+        {submitting ? "发布中…" : "确认发布"}
+      </button>
+    </div>
+  );
+}

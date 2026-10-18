@@ -203,7 +203,7 @@ func registerTools(s *mcp.Server, core *service.Core) {
 		Name:        "list_services",
 		Description: "列出已发布服务及实时状态（可按 status/keyword 过滤）。",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in ListServicesIn) (*mcp.CallToolResult, JSONOut, error) {
-		list, err := core.List(in.Status, in.Keyword, 0)
+		list, err := core.List(in.Status, in.Keyword, 0, 0)
 		if err != nil {
 			return errResult(err.Error())
 		}

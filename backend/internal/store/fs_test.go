@@ -234,8 +234,8 @@ func TestInspectZipExtractedTooLarge(t *testing.T) {
 		t.Fatalf("fixture should stay under raw zip limit, got %d", len(data))
 	}
 	_, err := f.InspectZip(bytes.NewReader(data))
-	if err == nil || !strings.Contains(err.Error(), "extracted content exceeds limit") {
-		t.Fatalf("expected extracted limit error, got %v", err)
+	if !errors.Is(err, ErrExtractTooLarge) { // 哨兵错误：mapError 映射 400（issue #165）
+		t.Fatalf("expected ErrExtractTooLarge, got %v", err)
 	}
 }
 

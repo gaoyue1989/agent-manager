@@ -26,6 +26,9 @@ var (
 	ErrZipTooLarge  = fmt.Errorf("zip exceeds %d bytes", MaxZipSize)
 	ErrTooManyFiles = fmt.Errorf("zip exceeds %d entries", MaxEntries)
 	ErrZipSlip      = errors.New("illegal path in zip (zip-slip or symlink)")
+	// ErrExtractTooLarge 解压总量超限（校验类错误，mapError 映射 400——曾为匿名错误
+	// 落 500，监控把用户输入问题误判为服务端故障，issue #165）
+	ErrExtractTooLarge = errors.New("extracted content exceeds limit")
 )
 
 // ZipInfo 校验通过后的 zip 摘要与读取器。
@@ -83,7 +86,7 @@ func (f *FS) InspectZip(r io.Reader) (*ZipInfo, error) {
 		}
 		total += int64(zf.UncompressedSize64)
 		if total > MaxExtracted {
-			return nil, errors.New("extracted content exceeds limit")
+			return nil, ErrExtractTooLarge
 		}
 		if zf.Name == "AGENTS.md" {
 			rc, err := zf.Open()

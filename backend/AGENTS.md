@@ -57,7 +57,9 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - 服务状态机：created→deploying→running|register_failed|deploy_failed；stopped/error 可再 publish
 - WaitReady 要求完整滚动更新完成（generation 对齐 + updatedReplicas 达标 + unavailable=0），防止注册打到旧 Pod
 - 业务 Ingress 注入 proxy-read/send-timeout=3600（A2A blocking 长对话必需）
-- zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）
+- zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）；超限类错误（ErrZipTooLarge/ErrTooManyFiles/ErrExtractTooLarge）统一 400 JSON（issue #165）——入口链路（宿主机 nginx / ingress-nginx `proxy-body-size: 200m` / platform-router `client_max_body_size`）须宽于应用 20MB 上限，超限由 backend 出 JSON
+- skills/ 目录合规检查（issue #163）：`service/skillcheck.go` `checkSkillDirs` 宽松模式——上传登记写包 `warningsJson`、`SpaceSkills` 产条目 `issues`；规则对齐运行时 OafConfigLoader 降级验证（SKILL.md 存在性 / frontmatter name/description / 名称正则与 64 长度 / 描述 1024），只提示不阻断
+- 导入模式 env（issue #161）：`CreateAgentImport` 与 harness 同走 `buildPublishEnv`——平台默认恒合并、模型连接可选（勾选则校验+注入+下发登记）；派生副本发布失败回删，本空间已上传包保留
 
 ## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
 

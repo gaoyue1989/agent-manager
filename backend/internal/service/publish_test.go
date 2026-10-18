@@ -31,9 +31,13 @@ func publishToRegisterFailed(t *testing.T, core *Core, fk *k8sfake.FakeK8s, pkgI
 	return &got
 }
 
-// 回归锁：多服务引用同一包时，删除其中一个不得清掉仍被引用的包目录。
-// 旧实现的读-改-写竞态会误判归零触发 RemovePackage，业务 Pod /config 变空
-// （AGENTS.md not found CrashLoop）。修复后 refCount 原子递减 + 事务外按最终值判定。
+// 回归锁：删除服务不得破坏包的完整性。两层保障：
+// 1) 多服务引用同一包时，删除其中一个不得清掉仍被引用的包目录（旧实现的读-改-写
+//    竞态会误判归零触发 RemovePackage，业务 Pod /config 变空 → AGENTS.md not found
+//    CrashLoop）；refCount 原子递减。
+// 2) 引用归零也不清目录（issue #140）：包记录与文件必须保持一致——旧逻辑归零清目录
+//    但留记录，产生预览/下载/再发布全 404 的悬空包；包是独立资产，仅显式删包 API
+//    可记录+目录同删。
 func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
@@ -63,7 +67,7 @@ func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 		t.Fatalf("svcB should remain: %v", err)
 	}
 
-	// 最后一个引用释放：refCount=0 → 目录清理
+	// 最后一个引用释放：refCount=0，包记录与文件保持一致（不再清目录，issue #140）
 	if err := core.Delete(svcB.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +78,11 @@ func TestDeleteKeepsPackageWhenRefCountPositive(t *testing.T) {
 	if got.RefCount != 0 {
 		t.Fatalf("refCount=%d want 0", got.RefCount)
 	}
-	if _, err := core.FS.Tree(got.DirPath); err == nil {
-		t.Fatal("package dir should be removed after last ref released")
+	if _, err := core.FS.Tree(got.DirPath); err != nil {
+		t.Fatalf("package dir must survive ref_count=0 (no dangling record): %v", err)
+	}
+	if _, err := core.Packages.ReadFile(got, "AGENTS.md"); err != nil {
+		t.Fatalf("package files readable after all services deleted: %v", err)
 	}
 }
 
@@ -394,7 +401,7 @@ func TestUniqNameCollisionLimit(t *testing.T) {
 	}
 }
 
-// 冲突后缀导致名字超过 63 字符时必须报错（K8s 名长度硬限制）。
+// 冲突后缀超 63 时收缩 base 预算保住后缀（issue #149：曾直接报错卡死发布）。
 func TestUniqNameTooLong(t *testing.T) {
 	core, _, done := newTestCore(t)
 	defer done()
@@ -402,8 +409,15 @@ func TestUniqNameTooLong(t *testing.T) {
 	if err := core.DB.Create(&store.ServiceEntity{K8sName: long}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.uniqName(long); err == nil || !strings.Contains(err.Error(), "63") {
-		t.Fatalf("expect 63-char limit error, got %v", err)
+	got, err := core.uniqName(long)
+	if err != nil {
+		t.Fatalf("uniqName should shrink base to fit suffix: %v", err)
+	}
+	if len(got) > 63 {
+		t.Fatalf("name exceeds 63: %q (%d)", got, len(got))
+	}
+	if !strings.HasPrefix(got, "oaf-") || !strings.HasSuffix(got, "-2") {
+		t.Fatalf("unexpected shrunk name: %q", got)
 	}
 }
 
@@ -505,8 +519,9 @@ func TestDeleteCleansEverything(t *testing.T) {
 	if got.RefCount != 0 {
 		t.Fatalf("refCount=%d want 0", got.RefCount)
 	}
-	if _, err := core.FS.Tree(got.DirPath); err == nil {
-		t.Fatal("package dir should be removed after last ref released")
+	// 包记录与文件保持一致（issue #140）：归零不再清目录，不产生悬空包
+	if _, err := core.FS.Tree(got.DirPath); err != nil {
+		t.Fatalf("package dir must survive (record+files consistent): %v", err)
 	}
 	if _, err := core.Get(svc.ID); err != ErrNotFound {
 		t.Fatalf("service row should be gone, got %v", err)
@@ -526,14 +541,14 @@ func TestListMergesPodStatus(t *testing.T) {
 	_ = svcPublished
 	fk.MarkPodRunning("test", "pod-1", "oaf-acme-demo")
 
-	list, err := core.List("", "", 0)
+	list, err := core.List("", "", 0, 0)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v n=%d", err, len(list))
 	}
 	if len(list[0].Pods) != 1 || !list[0].Pods[0].Ready {
 		t.Fatalf("pods merge failed: %+v", list[0].Pods)
 	}
-	filtered, _ := core.List(store.StatusRunning, "", 0)
+	filtered, _ := core.List(store.StatusRunning, "", 0, 0)
 	if len(filtered) != 0 {
 		t.Fatal("status filter should exclude deploying svc")
 	}
@@ -832,5 +847,29 @@ func TestRepublishRecomputesEndpointAfterHostModeSwitch(t *testing.T) {
 	}
 	if _, ok := ing.Annotations["nginx.ingress.kubernetes.io/rewrite-target"]; ok {
 		t.Fatal("host mode ingress must not carry rewrite annotations")
+	}
+}
+
+// TestPublishObjectNameBudget issue #149 复测残留：子对象名（-svc/-env-secret）超
+// DNS-1123 63 上限时必须 400 且不落库（曾先落 deploying 记录再被 K8s API 拒绝 →
+// 500 invalid metadata.name + 残留）；正常超长展示名经 DeriveK8sName 截断后可发布。
+func TestPublishObjectNameBudget(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, c, "")
+
+	// 100 字符展示名：DeriveK8sName 按 "-env-secret" 后缀预算截断（oaf-+48）→
+	// 全部子对象名 ≤63，发布成功（复测残留的 500 invalid metadata.name 根治）
+	svc, err := c.Publish(PublishRequest{PackageID: pkg.ID, Name: strings.Repeat("z", 100)})
+	if err != nil {
+		t.Fatalf("100-char display name should publish: %v", err)
+	}
+	if len(svc.K8sName) != 4+48 || len(svc.K8sName+"-svc") > 63 || len(svc.K8sName+"-env-secret") > 63 {
+		t.Fatalf("derived object names exceed 63: k8s=%q (%d)", svc.K8sName, len(svc.K8sName))
+	}
+	// 展示名列容量：>128 runes 直接 400（display_name varchar(128)）
+	_, err = c.Publish(PublishRequest{PackageID: pkg.ID, Name: strings.Repeat("长", 200)})
+	if err == nil || !errors.Is(err, ErrInvalidForm) || !strings.Contains(err.Error(), "name too long (max 128)") {
+		t.Fatalf("200-rune name: %v", err)
 	}
 }

@@ -1,0 +1,36 @@
+{
+  "scenario": "proto-lead-spawn-bg",
+  "model": "e2e-mock-model",
+  "recordedAt": "2026-10-01T00:00:00Z",
+  "note": "手工合成（非录制）：P2 lead 副本 kill 接管用例的后台委派轮——混编轮次（文本+spawn+bench_echo）绕开 force_sync 的同步阻塞，spawn 异步受理产出 task_id 供在途登记；task 文本指向 member 的 [E2E:slow] 夹具（约 15-30s），为「登记→kill 持有副本→另一副本 rebuild 接管轮询→收割」留出窗口。",
+  "calls": [
+    {
+      "request": {
+        "stream": true,
+        "note": "末条 user → 混编轮次（文本 + agent_spawn + bench_echo）：混编不走 force_sync（RemoteSpawnForceSyncMiddleware 仅注入纯 spawn 轮次），spawn 以 timeout_seconds=0 异步受理返回 task_id → RemoteSpawnCaptureMiddleware 登记在途注册表（P2 接管编排的前提）"
+      },
+      "chunks": [
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {\"content\": \"好的，我把回显任务转为后台执行，并顺手自检工具面。\", \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": \"call_bgspawn1\", \"function\": {\"arguments\": \"\", \"name\": \"agent_spawn\"}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 0, \"id\": null, \"function\": {\"arguments\": \"{\\\"agent_id\\\": \\\"e2e-agent\\\", \\\"task\\\": \\\"[E2E:slow](bg2,2000,15)\\\", \\\"timeout_seconds\\\": 0}\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 1, \"id\": \"call_bgecho1\", \"function\": {\"arguments\": \"\", \"name\": \"bench_echo\"}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {\"content\": null, \"role\": null, \"reasoning_content\": null, \"tool_calls\": [{\"index\": 1, \"id\": null, \"function\": {\"arguments\": \"{\\\"text\\\": \\\"p2-mixed\\\"}\", \"name\": null}, \"type\": \"function\"}]}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture\", \"choices\": [{\"delta\": {}, \"finish_reason\": \"tool_calls\", \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "[DONE]"
+      ]
+    },
+    {
+      "request": {
+        "stream": true,
+        "note": "末条 tool ×2 → 收尾文本（后台受理回执）"
+      },
+      "chunks": [
+        "{\"id\": \"e2e-lead-spawn-bg-fixture-2\", \"choices\": [{\"delta\": {\"content\": \"\", \"role\": \"assistant\", \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture-2\", \"choices\": [{\"delta\": {\"content\": \"后台任务已受理，完成后我会另行汇报结果。\", \"role\": null, \"reasoning_content\": null, \"tool_calls\": null}, \"finish_reason\": null, \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "{\"id\": \"e2e-lead-spawn-bg-fixture-2\", \"choices\": [{\"delta\": {}, \"finish_reason\": \"stop\", \"index\": 0}], \"created\": 1727100000, \"model\": \"e2e-mock-model\", \"object\": \"chat.completion.chunk\"}",
+        "[DONE]"
+      ]
+    }
+  ]
+}

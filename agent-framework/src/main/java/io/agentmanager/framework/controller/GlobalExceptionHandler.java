@@ -60,6 +60,21 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
+    /**
+     * ResponseStatusException 按其自带状态码透传（404/409/413…）。
+     * 若无此映射，下方 catch-all 会把它吞成 500——SSE 端点（subscribe/confirm-stream）
+     * 的会话归属 404（issue #158）正是经此路径返回，SEC2 e2e 钉。
+     */
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public ResponseEntity<Map<String, Object>> handleResponseStatus(
+            org.springframework.web.server.ResponseStatusException e) {
+        log.warn("[ExceptionHandler] {}: {}", e.getStatusCode(), e.getReason());
+        var body = new LinkedHashMap<String, Object>();
+        body.put("error", "request_rejected");
+        body.put("message", e.getReason() != null ? e.getReason() : e.getStatusCode().toString());
+        return ResponseEntity.status(e.getStatusCode()).body(body);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleUnhandledException(Exception e) {
         log.error("[ExceptionHandler] unhandled exception: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e);

@@ -52,6 +52,12 @@
 }
 .animate-fade-in { animation: fade-in 0.3s ease-out both; }
 
+@keyframes slide-in-right {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-slide-in-right { animation: slide-in-right 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
 /* 消息区细滚动条 */
 .chat-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .chat-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }

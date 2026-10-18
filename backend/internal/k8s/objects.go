@@ -45,25 +45,36 @@ const (
 
 // SanitizeK8sName 任意输入转 DNS-1123 label：小写字母数字 '-'，≤63 字符。
 func SanitizeK8sName(in string) string {
+	return SanitizeK8sNameMax(in, 63)
+}
+
+// SanitizeK8sNameMax 同 SanitizeK8sName，但上限可调（派生带前缀的名字时按前缀预算收缩）。
+func SanitizeK8sNameMax(in string, max int) string {
 	s := strings.ToLower(in)
 	s = dnsNameRe.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "svc"
 	}
-	if len(s) > 63 {
-		s = strings.TrimRight(s[:63], "-")
+	if len(s) > max {
+		s = strings.TrimRight(s[:max], "-")
+		if s == "" {
+			s = "svc"
+		}
 	}
 	return s
 }
 
-// DeriveK8sName slug("vendor/agent") 或自定义名 → "oaf-{sanitized}"。
+// DeriveK8sName slug("vendor/agent") 或自定义名 → "oaf-{sanitized}"，总长 ≤48：
+// 运行时还要派生 Service "{name}-svc" / Secret "{name}-env-secret" 等子对象名
+// （同为 DNS-1123 ≤63，issue #149：k8s 名贴 63 上限时 -svc 后缀拼出 67 被 API 拒绝，
+// 且发布先落库 → 残留 deploying/error 记录），为最长后缀 "-env-secret"(11) 预算。
 func DeriveK8sName(displayName, slug string) string {
 	base := displayName
 	if base == "" {
 		base = strings.ReplaceAll(slug, "/", "-")
 	}
-	return Prefix + SanitizeK8sName(base)
+	return Prefix + SanitizeK8sNameMax(base, 63-len(Prefix)-len("-env-secret"))
 }
 
 // ShortName 去掉 oaf- 前缀，用于 ingress path /agent/{short}。

@@ -17,13 +17,72 @@ const DEFAULT_RELEASE_AGENT = "http://oaf-release-agent-svc.agent-platform.svc.c
 
 const RELEASE_AGENT_PREFIX = "/agent/release-agent";
 
+// 业务 short 名白名单（防注入；与 backend k8s.ShortName 派生同形态）
+const SHORT_NAME_RE = /^[a-z0-9](-[a-z0-9])*$/;
+
 // 拼接目标 URL:base 允许携带子路径(如经 ingress 的 /agent/release-agent 或 collector 的 /{ns})。
 // 必须字符串拼接而非 new URL(path, base)——绝对 path 会整体覆盖 base 的路径部分。
 function joinTarget(base: string, pathAndQuery: string): string {
   return `${base.replace(/\/+$/, "")}${pathAndQuery}`;
 }
 
+// oaf_session（JWT）payload 解析（仅 base64 解码，不验签——权威鉴权在 backend，
+// 控制台路径身份可信即可；M2 §3.2 / 设计 §5.4 一期口径）。
+function readJwtPayload(token: string): { uid?: number; role?: string } | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const json = Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function readUidFromJwtCookie(request: NextRequest): string | null {
+  const token = request.cookies.get("oaf_session")?.value;
+  if (!token) return null;
+  const payload = readJwtPayload(token);
+  return payload?.uid != null ? String(payload.uid) : null;
+}
+
+// 页面路由守卫（Next 16 proxy 取代 middleware；M0 §3.1 UX 层，权威裁决在 backend）：
+//   无 oaf_session cookie → /login（带 next 回跳）；/admin/* 非 admin → /console。
+// 数据面（/api、/agent、/mcp）与静态资源由 matcher 排除，不走本守卫。
+function guardPage(request: NextRequest): NextResponse | null {
+  const { pathname } = request.nextUrl;
+  if (pathname.startsWith("/api/") || pathname.startsWith("/agent/") || pathname.startsWith("/mcp")) {
+    return null;
+  }
+  // 登录页无条件放行（漏掉会让未登录访问 /login 循环 302——部署实测 kubelet 探针
+  // "stopped after 10 redirects" 暴露）
+  if (pathname === "/login") {
+    return null;
+  }
+  const session = request.cookies.get("oaf_session")?.value;
+  if (!session) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/login";
+    url.search = pathname === "/" ? "" : `?next=${encodeURIComponent(pathname)}`;
+    return NextResponse.redirect(url);
+  }
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    const payload = readJwtPayload(session);
+    if (payload && payload.role !== "admin") {
+      const url = request.nextUrl.clone();
+      url.pathname = "/console";
+      url.search = "";
+      return NextResponse.redirect(url);
+    }
+  }
+  return null;
+}
+
 export function proxy(request: NextRequest) {
+  // 1) 页面守卫（matcher 覆盖页面路径；命中数据面前缀时直接放行进下方反代分支）
+  const guarded = guardPage(request);
+  if (guarded) return guarded;
+
   const { pathname, search } = request.nextUrl;
 
   // 前端同源反代后端 REST,浏览器无需直连
@@ -33,7 +92,7 @@ export function proxy(request: NextRequest) {
   }
 
   // 发布助手对话:无状态单次流(POST /threads/chat 与 /threads/{sid}/confirm-stream)。
-  // 去除 /agent/release-agent 前缀后转发到 release-agent 根路径
+  // 去除 /agent/release-agent 前缀后转发到 release-agent 根路径（专属规则在前，注入逻辑不动）
   if (pathname.startsWith(RELEASE_AGENT_PREFIX)) {
     const rest = pathname.slice(RELEASE_AGENT_PREFIX.length) || "/";
     const releaseAgent = process.env.AGENT_INTERNAL_URL || DEFAULT_RELEASE_AGENT;
@@ -57,9 +116,37 @@ export function proxy(request: NextRequest) {
     return NextResponse.rewrite(joinTarget(releaseAgent, `${rest}${search}`), { request: { headers } });
   }
 
+  // 控制台调试/会话数据面（M2 §3.2）：/agent/{short}/* → oaf-{short}-svc（与 platform-router
+  // 同名规则）。身份：解 oaf_session payload 注入 X-User-Id: u-{uid}（替代历史硬编码 "webui"）；
+  // 无 cookie/解不出 uid 不注入放行（业务侧按现状匿名处理——直连暴露面与今天一致，决议 3）。
+  if (pathname.startsWith("/agent/")) {
+    const rest = pathname.slice("/agent/".length);
+    const short = rest.split("/")[0];
+    if (SHORT_NAME_RE.test(short)) {
+      const headers = new Headers(request.headers);
+      const session = request.cookies.get("oaf_session")?.value;
+      const uid = readUidFromJwtCookie(request);
+      if (uid) headers.set("X-User-Id", `u-${uid}`);
+      // M9 §4 调用方同步：oaf_session cookie → Authorization 头（目标若经 router enforce
+      // 模式，auth_request 读 Authorization；目标直连 svc 时该头无副作用）
+      if (session) headers.set("Authorization", `Bearer ${session}`);
+      const target = process.env.AGENT_INTERNAL_URL_TEMPLATE
+        ? process.env.AGENT_INTERNAL_URL_TEMPLATE.replace("{short}", short)
+        : `http://oaf-${short}-svc.agent-platform.svc.cluster.local:8100`;
+      const sub = rest.slice(short.length) || "/";
+      return NextResponse.rewrite(joinTarget(target, `${sub}${search}`), { request: { headers } });
+    }
+  }
+
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/api/v1/:path*", "/agent/release-agent/:path*"],
+  matcher: [
+    // 数据面反代
+    "/api/v1/:path*",
+    "/agent/:path*",
+    // 页面路径守卫（排除 API/数据面/静态资源）
+    "/((?!api|agent|mcp|_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|svg|ico|webp|txt|xml)$).*)",
+  ],
 };

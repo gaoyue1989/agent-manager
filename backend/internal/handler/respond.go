@@ -30,8 +30,16 @@ func Fail(c *gin.Context, status int, msg string) {
 // mapError 业务错误 → HTTP 状态码。
 func mapError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, service.ErrNotFound), errors.Is(err, gorm.ErrRecordNotFound):
+	case errors.Is(err, service.ErrNotFound), errors.Is(err, gorm.ErrRecordNotFound),
+		errors.Is(err, service.ErrWorkspaceNotFound):
 		Fail(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrUserDisabled):
+		Fail(c, http.StatusForbidden, err.Error())
+	case errors.Is(err, service.ErrConflict):
+		Fail(c, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrDuplicateName), errors.Is(err, service.ErrInvalidForm),
+		errors.Is(err, service.ErrInvalidCredentials):
+		Fail(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrChecksumMismatch):
 		// 乐观锁冲突：基础包已被并发修改
 		Fail(c, http.StatusConflict, err.Error())
@@ -47,6 +55,7 @@ func mapError(c *gin.Context, err error) {
 		errors.Is(err, store.ErrNoAgentsMD),
 		errors.Is(err, store.ErrZipTooLarge),
 		errors.Is(err, store.ErrTooManyFiles),
+		errors.Is(err, store.ErrExtractTooLarge),
 		errors.Is(err, store.ErrZipSlip):
 		Fail(c, http.StatusBadRequest, err.Error())
 	default:

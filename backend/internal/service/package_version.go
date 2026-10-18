@@ -176,6 +176,15 @@ func (s *PackageService) CreateVersion(base *store.OafPackage, req VersionReques
 	if !changed {
 		return nil, nil, ErrNoEffectiveChanges
 	}
+	// 版本自动递增（issue #155）：变更集应用后 frontmatter version 仍等于基础包版本时，
+	// 自动 bump patch（与 Agent 编辑链路 nextVersion 同口径），保证 slug@version 可区分、
+	// 版本链不出现重复行；用户显式改了 version（≠ base.Version）则尊重显式值。
+	// rewrite 失败保持原文——frontmatter 非法时由下方 ParseOAF/Validate 统一报错。
+	if baseCfg, perr := oaf.ParseOAF(string(files["AGENTS.md"])); perr == nil && baseCfg.Version == base.Version {
+		if out, rerr := rewriteAgentsMDVersion(files["AGENTS.md"], nextVersion(base.Version)); rerr == nil {
+			files["AGENTS.md"] = []byte(out)
+		}
+	}
 	zipData, err := buildZipBytes(files)
 	if err != nil {
 		return nil, nil, err

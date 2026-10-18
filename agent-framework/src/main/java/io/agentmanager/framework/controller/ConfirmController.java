@@ -122,9 +122,18 @@ public class ConfirmController {
      */
     @PostMapping(value = "/confirm", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> confirm(
-            @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
+            @PathVariable String sessionId,
+            @org.springframework.web.bind.annotation.RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+            @RequestBody ConfirmRequest body) {
         // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        // 归属校验（issue #158）：非归属用户 404（含远程键路由前——确认本身就是写操作）
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return ResponseEntity.status(404).body(Map.of(
+                "error", "thread_not_found",
+                "message", "Session '" + sessionId + "' not found"));
+        }
 
         // 多行消费路由：显式远程键（task:{task_id}）→ Bridge 调 /resume，不走父 state 恢复、
         // 不抢本会话 turn 租约（唤醒汇总 turn 由 Bridge 自行抢租约驱动）
@@ -200,10 +209,21 @@ public class ConfirmController {
      */
     @PostMapping(value = "/confirm-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> confirmStream(
-            @PathVariable String sessionId, @RequestBody ConfirmRequest body) {
+            @PathVariable String sessionId,
+            @org.springframework.web.bind.annotation.RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+            @RequestBody ConfirmRequest body) {
         // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         String finalSessionId = sessionId;
+
+        // 归属校验（issue #158）：非归属用户 404（错误先于任何 SSE 帧写出）。
+        // 同 subscribe：必须同步 throw，Flux.error 时 SSE 响应头已提交，实测落 500
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND,
+                "Session '" + sessionId + "' not found");
+        }
 
         // 多行消费路由：远程键 → Bridge 路由（resume + 异步终态唤醒），本流只回执
         // confirm_routed/done 两帧——后续汇总 turn 事件经 EventBus durable 落库，

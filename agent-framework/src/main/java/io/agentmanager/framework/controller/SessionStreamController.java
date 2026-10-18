@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -41,15 +42,18 @@ public class SessionStreamController {
     private final AgentRuntimeService runtimeService;
     private final SessionEventStore eventStore;
     private final SessionEventTailer tailer;
+    private final io.agentmanager.framework.service.SessionUserStore sessionUserStore;
 
     public SessionStreamController(AgentRuntimeService runtimeService,
                                    TurnLeaseStore turnLeaseStore,
                                    SessionEventStore eventStore,
-                                   SessionEventTailer tailer) {
+                                   SessionEventTailer tailer,
+                                   io.agentmanager.framework.service.SessionUserStore sessionUserStore) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.eventStore = eventStore;
         this.tailer = tailer;
+        this.sessionUserStore = sessionUserStore;
     }
 
     // ===== GET /subscribe：重连续传 =====
@@ -67,10 +71,19 @@ public class SessionStreamController {
     @GetMapping(value = "/subscribe", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> subscribe(
             @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
             @RequestParam(required = false) Integer afterSeq,
             @RequestParam(required = false) String replyId) {
 
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        // 归属校验（issue #158）：非归属用户 404（错误先于任何 SSE 帧写出）。
+        // 必须在方法体内同步 throw——返回 Flux.error 时 MVC 已按 SSE 流式提交响应头，
+        // 错误信号无法再改状态码，实测落 500（SEC2 e2e 钉）
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                HttpStatus.NOT_FOUND, "Session '" + sessionId + "' not found");
+        }
         return tailer.tail(sessionId, replyId, afterSeq != null ? afterSeq : 0);
     }
 
@@ -100,8 +113,17 @@ public class SessionStreamController {
      * }</pre>
      */
     @GetMapping(value = "/status", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<Map<String, Object>> status(@PathVariable String sessionId) {
+    public ResponseEntity<Map<String, Object>> status(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        // 归属校验（issue #158）：非归属用户 404，不泄露会话存在性
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                "error", "thread_not_found",
+                "message", "Session '" + sessionId + "' not found"));
+        }
         var pendingConfirm = runtimeService.findPendingConfirm(sessionId);
 
         // 必须用 strict 版：宽容的 findLatest 在**读不到**时返回 null，于是下面会算出

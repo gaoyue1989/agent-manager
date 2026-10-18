@@ -44,7 +44,9 @@ func newTestServer(t *testing.T) (*gin.Engine, *service.Core, *k8sclient.FakeK8s
 	if sqlDB, e := db.DB(); e == nil {
 		sqlDB.SetMaxOpenConns(1)
 	}
-	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{},
+		&store.User{}, &store.Workspace{}, &store.WorkspaceMember{}, &store.ApiKey{},
+		&store.ModelConnection{}, &store.ModelDelivery{}, &store.McpConnector{}, &store.AgentIntegration{}); err != nil {
 		t.Fatal(err)
 	}
 	dir, _ := os.MkdirTemp("", "oaffs-*")
@@ -57,9 +59,10 @@ func newTestServer(t *testing.T) (*gin.Engine, *service.Core, *k8sclient.FakeK8s
 		RegisterTimeout: 400 * time.Millisecond,
 		RegisterRetry:   0,
 	})
+	core.JWTSecret = "test-secret"
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	Register(r, core, nil, "")
+	Register(r, core, nil, "", "test-secret")
 	cleanup := func() { os.RemoveAll(dir) }
 	return r, core, fk, cleanup
 }
@@ -176,7 +179,7 @@ func TestImagesEndpoint(t *testing.T) {
 	images := []struct{ Image, Label string }{{"agent-framework:latest", "Agent Framework"}}
 	r2 := gin.New()
 	gin.SetMode(gin.TestMode)
-	Register(r2, nil, images, "")
+	Register(r2, nil, images, "", "test-secret")
 	w, out := doJSON(t, r2, http.MethodGet, "/api/v1/images", nil)
 	if w.Code != http.StatusOK || len(out["data"].([]interface{})) != 1 {
 		t.Fatalf("images: %d %v", w.Code, out)

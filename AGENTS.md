@@ -52,7 +52,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 - 影响正确性的状态只允许存共享存储（MySQL checkpoint / Redis）；Pod 本地（内存、emptyDir）只允许可丢弃/可重建的缓存
 - 禁止 Service `sessionAffinity`；任意请求必须可落任意副本（`/threads/{sid}/subscribe`、`/status`、confirm 等全部基于共享存储裁决）；e2e-multi / e2e-protocol-multi 双副本门禁必须保持
-- 多服务共享同一 MySQL/Redis 时，**必须**为每个服务配独立 checkpoint 库名（`CHECKPOINT_JDBC_URL`）与独立 Redis 前缀（`AGENT_REDIS_PREFIX`）——表结构/Redis key 无 agent 维度，隔离完全靠这一层；缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**当前平台不自动注入/校验这两个键，是已知缺口**：发布多个服务时运维必须显式配置，平台侧自动派生列入后续演进
+- 多服务共享同一 MySQL/Redis 时，隔离靠 per-service checkpoint 库名与 Redis 前缀——表结构/Redis key 无 agent 维度，缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**Publish 新建服务时平台自动派生这两键**（issue #142：`CHECKPOINT_JDBC_URL` 改写 `{原库}_{k8s 名}` + 自动建库、`AGENT_REDIS_PREFIX={k8s 名}:`，用户显式值优先；前置条件是 MySQL 账号有 `{原库}_%` 模式库授权）。**存量服务 env 已固化不自动迁移**，收敛需显式改 env 后 republish（校验维度仍是缺口：平台不校验用户显式配的共享值）
 
 ---
 
@@ -90,6 +90,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 - env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB；模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY 等）自动路由进服务 Secret（`{name}-env-secret`），不落 ConfigMap/env_json
 - 平台默认配置（redis/mysql/llm/sandbox）仅作为「发布新服务 / 编辑 env」时的**表单默认填入**（`/settings` 页维护 → `platform_config` 表 → `GET /platform-config/defaults` 预填）；不经 envFrom 注入，改默认配置不影响任何已发布服务（见 docs/design/platform-default-config-secret-design.md）
 - 业务路由双模式（`INGRESS_HOST_SUFFIX` 唯一开关）：**空（默认）= router 模式**——不构造 per-service Ingress，统一域名 `/agent/{name}` 子路径由集群内 platform-router nginx 承接（原生 rewrite 剥前缀，**不依赖任何 ingress controller 注解**；启动自检 platform-router-svc 存在），Endpoint = `{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`；**非空 = host 模式**——`host={K8sName}{后缀}` + 根路径直出，只保留 ssl-redirect 与 proxy 超时、无 rewrite 注解。`INGRESS_TEMPLATE` overlay 仅 host 模式可用（允许改 TLS/追加注解，host/path 为不变量；Endpoint 自动跟随；不设置=内置构造）。**历史 ingress-nginx 注解 rewrite 的 path 模式已删除**（subpath-routing-design v2 决议），升级窗口见该设计 §4.6
+- 控制台拆分（2026-10，feat/console-user-workspace-split）：backend 新增 `JWT_SECRET`（必填，缺失启动 fail-fast）与 `ADMIN_INIT_USER/PASSWORD`（首个 admin 种子，仅 users 空表时生效）；`/api/v1/auth/*`（login/me/introspect）、`/api/v1/console/*`（JWT）、`/api/v1/admin/*`（JWT-admin 或 AUTH_TOKEN）为新面，存量 `{services,packages,images,platform-config}` 与 `/mcp` 语义不变；数据面网关鉴权三态开关 `ROUTER_AUTH_MODE`（off|report|enforce，router nginx auth_request → `GET /api/v1/auth/introspect`，默认 off）
 - 敏感配置在 `.env.secrets`（gitignored）
 
 ---

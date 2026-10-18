@@ -24,6 +24,9 @@ type DeploymentBuilder struct {
 	overlay []byte
 	// hasOverlay 标记是否配置了 overlay：空文件与未配置均视为无 overlay。
 	hasOverlay bool
+	// hasResources 标记 overlay 是否配置了容器 resources：规格档（spec）互斥校验用
+	// （决议 4：overlay resources 与显式 spec 二选一，防双写漂移）。
+	hasResources bool
 }
 
 // NewDeploymentBuilder 读取 overlay 文件构建 builder；path 为空返回默认 builder
@@ -38,6 +41,7 @@ func NewDeploymentBuilder(path string) (*DeploymentBuilder, error) {
 		return nil, fmt.Errorf("read deployment overlay %s: %w", path, err)
 	}
 	b := &DeploymentBuilder{overlay: data, hasOverlay: true}
+	b.hasResources = overlayHasResources(data)
 	// 启动期以哑参数试渲染一次，语法/结构错误 fail-fast（与 MYSQL_DSN 缺失同策略）。
 	// 试渲染用哑参数 oaf-template-probe/default：overlay 不得硬编码
 	// metadata.name/namespace（每服务发布期才确定），报错提示
@@ -46,6 +50,28 @@ func NewDeploymentBuilder(path string) (*DeploymentBuilder, error) {
 		return nil, fmt.Errorf("deployment overlay %s invalid: %w", path, err)
 	}
 	return b, nil
+}
+
+// OverridesResources overlay 是否配置了容器 resources（规格档互斥校验用）。
+func (b *DeploymentBuilder) OverridesResources() bool { return b.hasResources }
+
+// overlayHasResources 解析 overlay（YAML/JSON）判断是否设置容器 resources。
+// 解析失败视为 false（Build 时自会报语法错误，不在此重复报错路径）。
+func overlayHasResources(overlay []byte) bool {
+	var dep appsv1.Deployment
+	jsonData, err := sigsyaml.YAMLToJSON(overlay)
+	if err != nil {
+		return false
+	}
+	if err := json.Unmarshal(jsonData, &dep); err != nil {
+		return false
+	}
+	for _, ctr := range dep.Spec.Template.Spec.Containers {
+		if len(ctr.Resources.Requests) > 0 || len(ctr.Resources.Limits) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Build 构造业务 Deployment：内置构造 → overlay 合并 → 不变量校验。
