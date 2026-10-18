@@ -30,6 +30,10 @@ routing:
   host: ""
   port: 30080
   hostSuffix: ""          # host 模式必填（以 "." 开头，如 .region.example.cn）
+  # 控制台拆分（M9）：数据面网关鉴权三态（router nginx auth_request → backend introspect）
+  #   off     不鉴权（历史行为，默认）；report 只记日志放行（灰度观察）；enforce fail-closed
+  # 转档 = 改本值 + helm upgrade（router Pod 滚动重启；与裸清单 set env + rollout 等价）
+  authMode: "off"
 
 # ---------- 对外暴露（仅 Ingress；不提供 NodePort，已决议） ----------
 ingress:
@@ -65,7 +69,11 @@ backend:
   replicas: 1                    # 固定 1（架构原则一：多副本前须先解决发布链路一致性）
   serverPort: 8080
   authToken: ""                  # 生产必填（REST/MCP Bearer）；建议 existingSecret
-  existingSecret: ""             # 已有 Secret 名（key: auth-token）
+  existingSecret: ""             # 已有 Secret 名（keys: mysql-dsn / auth-token / jwt-secret / admin-init-password）
+  # 控制台拆分（2026-10，M0）：登录 JWT 签发密钥 + 首个 admin 种子
+  jwtSecret: ""                  # 登录签发密钥（后端缺失启动 fail-fast）；空且未用 existingSecret → 渲染期失败
+  adminInitUser: admin           # 首个 admin 用户名（仅 users 表为空时生效，幂等；空 = 跳过种子）
+  adminInitPassword: OafConsole2026  # 首个 admin 密码（经 Secret 注入；生产务必覆盖，首登后立即改密）
   packageDownloadBase: ""        # 空 = 集群内默认（platform-backend svc）
   register: { timeoutSeconds: 120, retry: 5 }
   resources:
@@ -91,6 +99,7 @@ frontend:
   env:
     backendInternalUrl: ""       # 空 = 渲染集群内 svc 地址
     agentInternalUrl: ""         # 空 = 按 releaseAgent.enabled 渲染（指向 oaf-{name}-svc）
+    agentInternalUrlTemplate: "" # 空 = 按 namespace 渲染 oaf-{short}-svc 模板（console 调试/会话数据面 /agent/{short}）
     publicApiUrl: ""             # NEXT_PUBLIC_API_URL：形态 A 留空（同源）；形态 B 必填 backend 公网地址
   resources:
     requests: { cpu: 100m, memory: 128Mi }

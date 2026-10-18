@@ -60,6 +60,17 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 > （platform-router `ROUTER_AUTH_MODE=off|report|enforce`，默认 off 行为与历史一致；
 > 转档 = `kubectl -n agent-platform set env deploy/platform-router ROUTER_AUTH_MODE=enforce`
 > 后 rollout restart，回滚同路径改回 off；enforce 前须先在控制台签发 API Key 或以 JWT 调用）。
+>
+> **Helm 部署路径（charts/oaf-platform）等价配置**：`backend.jwtSecret`（登录签发密钥，**渲染期必填**，
+> 经 Secret 注入；复用已有 Secret 时 keys 契约 `mysql-dsn/auth-token/jwt-secret/admin-init-password`）、
+> `backend.adminInitUser/adminInitPassword`（首个 admin 种子，生产必须覆盖）、
+> `routing.authMode`（off|report|enforce，默认 off）。完整 values 参考见
+> [design/helm-offline-deploy-design.md](design/helm-offline-deploy-design.md) §4.1/§4.3；改这些值 = `helm upgrade`。
+>
+> **存量升级提示（router 模式）**：集群里若残留历史 per-service Ingress（旧的 path/host 模式
+> `oaf-<name>` 资源），其 `/agent/<name>` 更具体路径会**绕过 platform-router**（鉴权与路由都不生效）。
+> 迁移到 router 模式 / 转 enforce 前应删除这类遗留 Ingress（`kubectl -n agent-platform get ingress`
+> 逐一核对：只应保留 `*-backend-api`、`*-backend-mcp`、`*-frontend`、`*-agent-router`）。
 
 ### 控制台拆分按功能 e2e（e2e/console-split/）
 

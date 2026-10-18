@@ -117,6 +117,23 @@ spec:
                   name: {{ $secretName }}
                   key: auth-token
             {{- end }}
+            # 控制台拆分（2026-10）：登录 JWT 签发密钥（必填，后端缺失启动 fail-fast）
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: jwt-secret
+            {{- if .Values.backend.adminInitUser }}
+            - name: ADMIN_INIT_USER
+              value: {{ .Values.backend.adminInitUser | quote }}
+            {{- end }}
+            {{- if .Values.backend.adminInitPassword }}
+            - name: ADMIN_INIT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: admin-init-password
+            {{- end }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}

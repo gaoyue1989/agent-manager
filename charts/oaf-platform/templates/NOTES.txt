@@ -18,6 +18,10 @@ OAF 平台已部署（release {{ .Release.Name }}，namespace {{ include "oaf.na
 
 ## 装后自检
 
+0) 控制台登录（2026-10 控制台拆分起）
+   - 首个 admin 由 `backend.adminInitUser/adminInitPassword` 种子创建（仅 users 表为空时生效）；
+     **生产部署务必覆盖密码，首登后立即改密**。
+   - `backend.jwtSecret` 为登录签发密钥（后端缺失启动 fail-fast）；更换即全员重新登录。
 1) 组件就绪
    kubectl -n {{ include "oaf.namespace" . }} rollout status deploy/{{ include "oaf.fullname" . }}-backend
 {{- if eq .Values.routing.mode "router" }}

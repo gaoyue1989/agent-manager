@@ -75,9 +75,9 @@ charts/oaf-platform/
 | 镜像 | `images.backend.{repository,tag,pullPolicy}`、`images.frontend.*`、`images.router.*` | **repository 含内网 registry 前缀**（如 `harbor.internal/oaf/platform-backend`）；凭据经 `imagePullSecrets` |
 | 业务镜像白名单 | `images.business[]`（`{image,label}`）、`images.defaultBusiness` | 渲染 `AVAILABLE_IMAGES` / `DEFAULT_IMAGE`（**必须与实际可拉取 tag 一致**，否则发布被 400 拒） |
 | 业务 Pod 资源 | `business.resources.{requestsCpu,requestsMem,limitsCpu,limitsMem}` | 渲染 `RESOURCE_*` 四元组（后端 config.go 默认 250m/256Mi/1/1Gi，作用于**每个业务 Deployment**） |
-| 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix` | `host`/`port` = **集群 ingress controller 的对外入口地址**（Endpoint 展示拼装用）；host 模式额外 `hostSuffix` |
-| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`kubeconfig` 两模式（§6.2，**默认 synthesized 部署期合成**） |
-| 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,publicApiUrl}` | `agentInternalUrl` 按 `releaseAgent.enabled` 渲染；`publicApiUrl` 默认空=同源（形态 B 必填）；**EVAL_COLLECTOR_* 已决议不纳入**（评测环境手工设置） |
+| 路由 | `routing.mode`（`router`\|`host`）、`routing.ingressClass`、`routing.host`、`routing.port`、`routing.hostSuffix`、`routing.authMode` | `host`/`port` = **集群 ingress controller 的对外入口地址**（Endpoint 展示拼装用）；host 模式额外 `hostSuffix`；`authMode`（off\|report\|enforce，默认 off）= 数据面网关鉴权三态（console 拆分 M9，router nginx auth_request → backend introspect） |
+| 后端 | `backend.serverPort`（8080，联动 Service targetPort）、`backend.replicas`（固定 1，见原则一）、`backend.authToken`、`backend.jwtSecret`、`backend.adminInitUser/adminInitPassword`、`backend.resources`、`backend.packageDownloadBase`、`backend.register.{timeoutSeconds,retry}`、`backend.kubeconfig.{mode,server,existingSecret,content}` | `authToken` 为空则关闭 Bearer 校验（**生产必填**，经 Secret 注入）；`jwtSecret`（控制台登录签发密钥，**渲染期必填**——空且未用 `backend.existingSecret` 直接失败；后端缺失启动 fail-fast，更换即全员重新登录）；`adminInitUser/adminInitPassword` = 首个 admin 种子（仅 users 表为空时生效，密码经 Secret 注入，**生产必须覆盖**）；`kubeconfig` 两模式（§6.2，**默认 synthesized 部署期合成**） |
+| 前端 | `frontend.env.{backendInternalUrl,agentInternalUrl,agentInternalUrlTemplate,publicApiUrl}` | `agentInternalUrl` 按 `releaseAgent.enabled` 渲染；`agentInternalUrlTemplate` 空 = 按 namespace 渲染 `oaf-{short}-svc` 模板（console 调试/会话数据面 `/agent/{short}` 反代）；`publicApiUrl` 默认空=同源（形态 B 必填）；**EVAL_COLLECTOR_* 已决议不纳入**（评测环境手工设置） |
 | 数据卷 | `persistence.existingClaim`、`persistence.mountPath`（`/data`） | **不创建**，见 §5.5 |
 | 外部 MySQL | `external.mysql.{host,port,database,username,password,params}` 或 `dsn` 直给 | 平台元数据库（`oaf_platform`）与业务 checkpoint 库（`oaf_checkpoint`）见 §5.1/§5.2 |
 | 外部 Redis | `external.redis.{url}`（业务侧默认值） | 平台自身不使用 Redis；仅用于种子与文档提示 |
@@ -85,7 +85,7 @@ charts/oaf-platform/
 | 业务 overlay | `business.deploymentOverlay.{patch,raw,existingConfigMap}`（三选一：结构化 SMP / 原文粘贴 / 运维自管 ConfigMap；**OTel 自动段已决议移除**，如需 OTel 经此手工注入）、`business.ingressOverlay.*`（同三选一，**仅 host 模式**） | router 模式配置 `ingressOverlay` → chart 渲染期 fail（后端 fail-fast）；enabled 但三来源全空 → 渲染期 fail |
 | 平台默认值种子 | `platformDefaults.seed.{enabled,llm.*,mysql.*,redis.*,sandbox.*,protocol.*}` | 调平台 API 写入；默认关闭 |
 | 暴露 | `ingress.{className,host,tls,annotations}` + `ingress.backend.host` / `ingress.frontend.host`（分域用） | 仅 Ingress（形态 A/B 见 §6.3），**不提供 NodePort**（已决议）；入口 = 集群 ingress controller |
-| 安全 | `imagePullSecrets[]`、`podSecurityContext`、`existingSecret`（密码类复用已有 Secret） | values 明文仅示例，生产走 `existingSecret` |
+| 安全 | `imagePullSecrets[]`、`podSecurityContext`、`backend.existingSecret`（密码类复用已有 Secret，**keys 契约：`mysql-dsn` / `auth-token` / `jwt-secret` / `admin-init-password`**） | values 明文仅示例，生产走 `existingSecret`；缺 `jwt-secret` 键会导致 backend 容器起不来（CreateContainerConfigError） |
 | 通用调度 | `backend/frontend/router` 各自的 `podAnnotations`、`nodeSelector`、`tolerations`、`affinity` | 生产常见诉求；三组件独立配置 |
 | 发布助手 | `releaseAgent.{enabled,name,packageSource,image}` | 默认开；`packageSource`: `bundled`（chart 内置 zip）/ `packageId`（环境已导入包 id）；详见 §5.4 |
 | bootstrap 镜像 | `images.bootstrapJob.{repository,tag}` | 自举 Job 的 curl 容器，**同样来自内网仓库** |
@@ -145,11 +145,15 @@ ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
 | 19 | `AUTH_TOKEN` | config.go | `backend.authToken` | 已有 |
 | 20 | `PACKAGE_DOWNLOAD_BASE` | config.go | `backend.packageDownloadBase` | 已有 |
 | 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（两模式 provided / synthesized，**默认 synthesized 部署期创建**，见 §6.2） | **本次补（评审点名，已决议）** |
+| 22 | `JWT_SECRET` | config.go（控制台拆分 M0，**必填 fail-fast**） | `backend.jwtSecret`（经 Secret 注入；空且未用 existingSecret → 渲染期 fail） | 2026-10-18 补 |
+| 23-24 | `ADMIN_INIT_USER` / `ADMIN_INIT_PASSWORD` | config.go（首个 admin 种子，仅 users 表空时生效） | `backend.adminInitUser` / `backend.adminInitPassword`（密码经 Secret） | 2026-10-18 补 |
 | F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
 | F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
+| F2b | `AGENT_INTERNAL_URL_TEMPLATE` | 前端 proxy.ts（console 拆分：`/agent/{short}` 数据面） | `frontend.env.agentInternalUrlTemplate`（空 = 按 namespace 渲染） | 2026-10-18 补 |
 | F3 | `NEXT_PUBLIC_API_URL` | 前端 | `frontend.env.publicApiUrl`（形态 A 留空=同源 `/api/v1`；**形态 B 必填** backend 公网地址，见 §6.2） | **本次补** |
 | F4-F5 | `EVAL_COLLECTOR_MODE` / `EVAL_COLLECTOR_AGENT_URL` | 前端（评测录制反代） | **已决议不纳入**（评测环境手工设置） | 本次补→已决议 |
 | R1-R3 | nginx `client_max_body_size` / `proxy_{read,send}_timeout` | platform-router | `router.nginx.*`（默认 200m/3600s） | **本次补** |
+| R4 | `ROUTER_AUTH_MODE`（off\|report\|enforce） | platform-router（console 拆分 M9） | `routing.authMode`（默认 off；router 配置为 envsubst 模板，改档 = helm upgrade） | 2026-10-18 补 |
 
 不映射（维持后端默认/无 env 面）：Gin 模式、业务镜像 pullPolicy（后端构造固定 `IfNotPresent`，
 见 §10 风险 6）、router nginx 的 `oaf-`/`-svc`/8100/namespace 命名约定（不变量，非配置）。

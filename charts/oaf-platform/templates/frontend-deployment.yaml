@@ -59,6 +59,9 @@ spec:
             - name: AGENT_INTERNAL_URL
               value: {{ $agentUrl | quote }}
             {{- end }}
+            # 控制台调试/会话数据面：/agent/{short}/* → oaf-{short}-svc（按命名空间渲染）
+            - name: AGENT_INTERNAL_URL_TEMPLATE
+              value: {{ include "oaf.agentInternalUrlTemplate" . | quote }}
             {{- if .Values.frontend.env.publicApiUrl }}
             - name: NEXT_PUBLIC_API_URL
               value: {{ .Values.frontend.env.publicApiUrl | quote }}
