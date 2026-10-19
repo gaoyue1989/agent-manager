@@ -33,7 +33,7 @@ type Config struct {
 	// Helm 部署时指向环境已有 PVC（values.persistence.existingClaim）。
 	PlatformPVCName string
 
-	IngressClass string
+	IngressClass string // 空 = 业务 Ingress 不写 ingressClassName（集群默认 IngressClass 兜底）
 	IngressHost  string // 对外展示地址，如 172.20.0.2:30080
 	IngressPort  int    // ingress http NodePort，仅用于拼接展示 URL
 	// IngressHostSuffix 业务路由模式开关（subpath-routing-design §4.1，单一来源）：
@@ -73,7 +73,9 @@ func Load() (*Config, error) {
 		DataRoot:            envStr("DATA_ROOT", "/data"),
 		MySQLDSN:            envStr("MYSQL_DSN", ""),
 		PlatformPVCName:     envStr("PLATFORM_PVC_NAME", "platform-data"),
-		IngressClass:        envStr("INGRESS_CLASS", "nginx"),
+		// INGRESS_CLASS 缺省为空 = 业务 Ingress 不写 spec.ingressClassName，
+		// 由 apiserver 落到集群默认 IngressClass（default-class 标注）；显式非空才固定
+		IngressClass:        envStr("INGRESS_CLASS", ""),
 		IngressHost:         envStr("INGRESS_HOST", "localhost"),
 		IngressPort:         envInt("INGRESS_PORT", 30080),
 		IngressHostSuffix:   envStr("INGRESS_HOST_SUFFIX", ""),

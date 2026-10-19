@@ -58,10 +58,32 @@ func TestLoadRequiresMySQLDSN(t *testing.T) {
 	t.Setenv("MYSQL_DSN", "")
 	t.Setenv("AVAILABLE_IMAGES", "img1|A")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MYSQL_DSN is required") {
-		t.Fatalf("expect MYSQL_DSN required error, got %v", err)
+		t.Fatal(err)
 	}
 }
 
+// TestLoadIngressClassEmptyMeansClusterDefault INGRESS_CLASS 未设置/空 = 空串透传
+// （业务 Ingress 不写 ingressClassName，集群默认兜底）；显式值原样保留。
+func TestLoadIngressClassEmptyMeansClusterDefault(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "u:p@tcp(localhost:3306)/oaf_platform")
+	t.Setenv("AVAILABLE_IMAGES", "img1|A")
+	t.Setenv("INGRESS_CLASS", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IngressClass != "" {
+		t.Fatalf("empty INGRESS_CLASS must stay empty (cluster default), got %q", c.IngressClass)
+	}
+	t.Setenv("INGRESS_CLASS", "nginx")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IngressClass != "nginx" {
+		t.Fatalf("explicit INGRESS_CLASS must be kept, got %q", c.IngressClass)
+	}
+}
 func TestLoadParsesImagesAndAllowedCheck(t *testing.T) {
 	t.Setenv("MYSQL_DSN", "u:p@tcp(localhost:3306)/oaf_platform")
 	t.Setenv("AVAILABLE_IMAGES", "agent-framework:latest|Agent Framework, other:v1|Other")

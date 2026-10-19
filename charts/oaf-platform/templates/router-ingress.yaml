@@ -21,7 +21,10 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
+  # className 留空 = 不写 ingressClassName，由调度器按集群默认 IngressClass（default-class 标注）裁决
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
   {{- if and $tls $host }}
   tls:
     - hosts: [{{ $host | quote }}]

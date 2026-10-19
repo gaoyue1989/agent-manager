@@ -27,14 +27,14 @@ images:
 # 路由：router（统一域名 /agent/{short}，默认）或 host（每服务独立域名）
 routing:
   mode: router
-  ingressClass: nginx
+  ingressClass: nginx           # 留空 = 业务 Ingress 不写 ingressClassName（集群默认兜底）
   host: "10.0.0.10"              # 集群 ingress controller 对外地址（Endpoint 展示）
   port: 30080
   # hostSuffix: ".region.example.cn"   # mode=host 时必填
 
 # 对外暴露：形态 A（统一域名路径分流）
 ingress:
-  className: nginx
+  className: nginx               # 留空 = 落到集群默认 IngressClass（default-class 标注）
   host: "oaf.example.cn"         # 空 = 无 host catch-all（单 IP 测试）
   # 形态 B（分域）示例：backend.host/frontend.host 同时填，且前端 publicApiUrl 必填
   # backend:  { host: "api.oaf.example.cn" }
