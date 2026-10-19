@@ -5,6 +5,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -384,6 +385,86 @@ func (c *Core) SpaceSkills(workspaceID uint, keyword string) ([]SpaceSkillItem, 
 		items = filtered
 	}
 	return items, nil
+}
+
+// SandboxItem 沙箱配置总览条目（demo c/sandbox，只读）：每 Agent 的沙箱启用状态
+// + 生效来源（SandboxRuntime 三层裁决的展示还原）+ 资源规格。
+type SandboxItem struct {
+	ServiceID   uint   `json:"serviceId"`
+	DisplayName string `json:"displayName"`
+	K8sName     string `json:"k8sName"`
+	Status      string `json:"status"` // services 行状态（运行中/已下线…）
+	// Enabled 生效结果（env 显式 > 包声明 > 默认 false）
+	Enabled bool `json:"enabled"`
+	// Source 生效来源："env" | "package" | "default"
+	Source string `json:"source"`
+	// PackageDeclared 包 frontmatter config.sandbox.enabled（未声明 nil；展示用）
+	PackageDeclared *bool `json:"packageDeclared,omitempty"`
+	// EnvExplicit 部署 env SANDBOX_ENABLED 显式设置（值不回传，仅事实）
+	EnvExplicit bool `json:"envExplicit"`
+	// 资源规格（env 注入值；空 = 运行时默认）
+	Image         string `json:"image,omitempty"`
+	TimeoutMinutes int   `json:"timeoutMinutes,omitempty"`
+	MemoryMB      int    `json:"memoryMb,omitempty"`
+	CPUCount      int    `json:"cpuCount,omitempty"`
+}
+
+// ConsoleSandbox 空间内 Agent 沙箱配置总览（只读；修改入口在编辑页沙箱区块）。
+func (c *Core) ConsoleSandbox(workspaceID uint, keyword string) ([]SandboxItem, error) {
+	q := c.DB.Model(&store.ServiceEntity{}).Where("workspace_id = ?", workspaceID)
+	if keyword != "" {
+		q = q.Where("display_name LIKE ? OR k8s_name LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+	}
+	var rows []store.ServiceEntity
+	if err := q.Order("id DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]SandboxItem, 0, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		item := SandboxItem{
+			ServiceID: r.ID, DisplayName: r.DisplayName, K8sName: r.K8sName, Status: r.Status,
+		}
+		env := map[string]string{}
+		_ = json.Unmarshal([]byte(r.EnvJSON), &env)
+		if v, ok := env["SANDBOX_ENABLED"]; ok {
+			item.EnvExplicit = true
+			item.Enabled = v == "true"
+			item.Source = "env"
+		}
+		if v, ok := env["SANDBOX_IMAGE"]; ok {
+			item.Image = v
+		}
+		item.TimeoutMinutes = envInt(env["SANDBOX_TIMEOUT_MINUTES"])
+		item.MemoryMB = envInt(env["SANDBOX_MEMORY_MB"])
+		item.CPUCount = envInt(env["SANDBOX_CPU_COUNT"])
+		// 包声明：env 显式设置时仅作展示（不改变生效结果）
+		if r.PackageID > 0 {
+			if pkg, err := c.Packages.Get(r.PackageID); err == nil {
+				if md, err := c.Packages.ReadFile(pkg, "AGENTS.md"); err == nil {
+					if cfg, err := parseOAFConfig(string(md)); err == nil && cfg.Config != nil && cfg.Config.Sandbox != nil {
+						declared := cfg.Config.Sandbox.Enabled
+						item.PackageDeclared = &declared
+						if !item.EnvExplicit {
+							item.Enabled = declared
+							item.Source = "package"
+						}
+					}
+				}
+			}
+		}
+		if !item.EnvExplicit && item.PackageDeclared == nil {
+			item.Source = "default" // 三层均未声明：默认关闭
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// envInt env 数值解析（非法/缺省回 0 = 不展示）。
+func envInt(v string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(v))
+	return n
 }
 
 // parseSkillDescription 从 SKILL.md 提取描述：frontmatter description 字段，

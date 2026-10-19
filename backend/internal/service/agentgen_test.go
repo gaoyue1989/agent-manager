@@ -679,3 +679,170 @@ func TestSkillDedupSameName(t *testing.T) {
 		t.Fatal("second same-name skill silently overwrote the first")
 	}
 }
+
+// TestAgentGenSandboxForm 沙箱配置（demo §5）三层落点：
+// 1) sandbox=nil → 包无 config 声明、env 无 SANDBOX_*；
+// 2) 显式开 + 资源项 → 包声明 config.sandbox.enabled=true + env 注入；
+// 3) 显式关 → 包声明 enabled=false（必须落包，否则 copy-on-write 沿用旧 true）。
+func TestAgentGenSandboxForm(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-sbx-0001", "沙箱空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+
+	mkForm := func(name string) *AgentForm {
+		form := goldenForm()
+		form.Name = name
+		form.ModelConnections[0].ConnectionID = conn.ID
+		form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+		return form
+	}
+	// 1) 未提交
+	svc, pkg, err := c.CreateAgent(ws.ID, 1, mkForm("plain-agent"))
+	if err != nil {
+		t.Fatalf("create plain: %v", err)
+	}
+	md, _ := c.Packages.ReadFile(pkg, "AGENTS.md")
+	if strings.Contains(string(md), "sandbox") {
+		t.Fatalf("plain form must not declare sandbox, got:\n%s", md)
+	}
+	env := map[string]string{}
+	if err := c.DB.First(svc, svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	_ = jsonUnmarshalStrict(svc.EnvJSON, &env)
+	for _, k := range []string{"SANDBOX_ENABLED", "SANDBOX_IMAGE", "SANDBOX_TIMEOUT_MINUTES", "SANDBOX_MEMORY_MB", "SANDBOX_CPU_COUNT"} {
+		if _, ok := env[k]; ok {
+			t.Fatalf("plain form must not inject %s", k)
+		}
+	}
+	// 2) 显式开 + 资源项（负值护栏同测）
+	on := true
+	f := mkForm("sbx-on-agent")
+	f.Sandbox = &SandboxForm{Enabled: &on, Image: "opensandbox/code-interpreter:v1.1.0", TimeoutMin: 90, MemoryMB: 2048, CPUCount: -1}
+	svc2, pkg2, err := c.CreateAgent(ws.ID, 1, f)
+	if err != nil {
+		t.Fatalf("create sandbox on: %v", err)
+	}
+	md2, _ := c.Packages.ReadFile(pkg2, "AGENTS.md")
+	if !strings.Contains(string(md2), "sandbox:") || !strings.Contains(string(md2), "enabled: true") {
+		t.Fatalf("sandbox declaration missing:\n%s", md2)
+	}
+	if err := c.DB.First(svc2, svc2.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	env2 := map[string]string{}
+	_ = jsonUnmarshalStrict(svc2.EnvJSON, &env2)
+	if env2["SANDBOX_IMAGE"] != "opensandbox/code-interpreter:v1.1.0" ||
+		env2["SANDBOX_TIMEOUT_MINUTES"] != "90" || env2["SANDBOX_MEMORY_MB"] != "2048" {
+		t.Fatalf("sandbox env: %+v", env2)
+	}
+	if _, ok := env2["SANDBOX_CPU_COUNT"]; ok {
+		t.Fatal("negative cpuCount must not be injected")
+	}
+	if _, ok := env2["SANDBOX_ENABLED"]; ok {
+		t.Fatal("SANDBOX_ENABLED must never be injected (env would override package declaration)")
+	}
+	// 3) 显式关
+	off := false
+	f3 := mkForm("sbx-off-agent")
+	f3.Sandbox = &SandboxForm{Enabled: &off}
+	_, pkg3, err := c.CreateAgent(ws.ID, 1, f3)
+	if err != nil {
+		t.Fatalf("create sandbox off: %v", err)
+	}
+	md3, _ := c.Packages.ReadFile(pkg3, "AGENTS.md")
+	if !strings.Contains(string(md3), "enabled: false") {
+		t.Fatalf("explicit off must persist declaration:\n%s", md3)
+	}
+}
+
+// TestEditFormSandboxRoundTrip 编辑回显：创建（开+资源项）→ EditForm 反解沙箱字段。
+func TestEditFormSandboxRoundTrip(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-sbx-0002", "沙箱回显空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+	on := true
+	form := goldenForm()
+	form.ModelConnections[0].ConnectionID = conn.ID
+	form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+	form.Sandbox = &SandboxForm{Enabled: &on, Image: "opensandbox/code-interpreter:v1.1.0", TimeoutMin: 45, MemoryMB: 512, CPUCount: 2}
+	svc, _, err := c.CreateAgent(ws.ID, 1, form)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	view, err := c.EditForm(ws.ID, svc.ID)
+	if err != nil {
+		t.Fatalf("edit form: %v", err)
+	}
+	if view.Sandbox == nil || view.Sandbox.Enabled == nil || !*view.Sandbox.Enabled {
+		t.Fatalf("sandbox enabled roundtrip: %+v", view.Sandbox)
+	}
+	if view.Sandbox.Image != "opensandbox/code-interpreter:v1.1.0" ||
+		view.Sandbox.TimeoutMin != 45 || view.Sandbox.MemoryMB != 512 || view.Sandbox.CPUCount != 2 {
+		t.Fatalf("sandbox resources roundtrip: %+v", view.Sandbox)
+	}
+}
+
+// TestConsoleSandboxOverview 总览 API：生效来源三层（env > 包声明 > 默认）判定。
+func TestConsoleSandboxOverview(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-sbx-0003", "沙箱总览空间")
+	conn := seedVerifiedConn(t, c, ws.ID, "qwen-plus", "qwen-plus", "https://llm.example/v1")
+
+	mk := func(name string, sbx *SandboxForm) *store.ServiceEntity {
+		form := goldenForm()
+		form.Name = name
+		form.ModelConnections[0].ConnectionID = conn.ID
+		form.Skills, form.SubAgents, form.McpServers = nil, nil, nil
+		form.Sandbox = sbx
+		svc, _, err := c.CreateAgent(ws.ID, 1, form)
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return svc
+	}
+	on := true
+	mk("pkg-on-agent", &SandboxForm{Enabled: &on})           // 包声明开
+	mk("env-off-agent", &SandboxForm{Enabled: &on})          // 后面把 env 改成显式关（env 优先）
+	mk("default-agent", nil)                                  // 未声明
+
+	// env 显式关（直接改库模拟存量部署 env）
+	var envSvc store.ServiceEntity
+	if err := c.DB.Where("display_name = ?", "env-off-agent").First(&envSvc).Error; err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{}
+	_ = jsonUnmarshalStrict(envSvc.EnvJSON, &env)
+	env["SANDBOX_ENABLED"] = "false"
+	b, _ := jsonMarshal(env)
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("id = ?", envSvc.ID).
+		Update("env_json", string(b)).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := c.ConsoleSandbox(ws.ID, "")
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	byName := map[string]SandboxItem{}
+	for _, it := range list {
+		byName[it.DisplayName] = it
+	}
+	if it := byName["pkg-on-agent"]; !it.Enabled || it.Source != "package" || it.PackageDeclared == nil || !*it.PackageDeclared {
+		t.Fatalf("pkg-on-agent: %+v", it)
+	}
+	if it := byName["env-off-agent"]; it.Enabled || it.Source != "env" || !it.EnvExplicit {
+		t.Fatalf("env-off-agent: %+v", it)
+	}
+	if it := byName["default-agent"]; it.Enabled || it.Source != "default" || it.PackageDeclared != nil {
+		t.Fatalf("default-agent: %+v", it)
+	}
+	// keyword 过滤
+	kl, err := c.ConsoleSandbox(ws.ID, "default")
+	if err != nil || len(kl) != 1 {
+		t.Fatalf("keyword filter: %+v err=%v", kl, err)
+	}
+}

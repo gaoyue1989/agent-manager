@@ -87,6 +87,15 @@ type RuntimeConfig struct {
 	Temperature         float64 `yaml:"temperature,omitempty" json:"temperature,omitempty"`
 	MaxTokens           int     `yaml:"max_tokens,omitempty" json:"max_tokens,omitempty"`
 	RequireConfirmation bool    `yaml:"require_confirmation,omitempty" json:"require_confirmation,omitempty"`
+	// Sandbox 包级沙箱开关（OAF 规范 issue #27b）：SANDBOX_ENABLED env 显式设置时
+	// 优先于本声明；env 未设置时运行时读此声明；均未声明默认关闭（SandboxRuntime 三层裁决）。
+	Sandbox *SandboxSpec `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+}
+
+// SandboxSpec 包级沙箱声明（仅承载 enabled 开关；镜像/超时/内存/CPU 属部署资源项，
+// 走发布 env SANDBOX_*，不进包——与 platformconfig 模板排除 SANDBOX_ENABLED 同因）。
+type SandboxSpec struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 type Memory struct {

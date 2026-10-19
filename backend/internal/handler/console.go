@@ -183,6 +183,20 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		}
 		OK(c, view)
 	})
+	// 沙箱配置总览（只读）：Agent 沙箱状态 + 生效来源 + 资源规格；修改入口在编辑页
+	cg.GET("/workspaces/:ws/sandbox", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ConsoleSandbox(wsID, c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
 	cg.GET("/workspaces/:ws/agents", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)
 		if err != nil {

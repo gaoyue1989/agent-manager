@@ -205,6 +205,48 @@ MT=$(req POST /auth/login "{\"username\":\"m3-member-$TS\",\"password\":\"Pass12
 assert_eq "member PUT 403" "$(code PUT /console/workspaces/$WS/agents/$SVC "$EDIT" "" "$MT")" "403"
 assert_eq "member DELETE 403" "$(code DELETE /console/workspaces/$WS/agents/$SVC "" "$MT")" "403"
 
+# ---- 沙箱配置（demo §5）：创建带 sandbox → 包声明 + SANDBOX_* env → 总览三层 → 编辑回显 ----
+SBXON=$(echo "$FORM_TPL" | sed "s/NAME/sbx-on-$TS/; s/CID/$CONN_ID/" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d['spec']=''
+d['sandbox']={'enabled':True,'image':'opensandbox/code-interpreter:v1.1.0','timeoutMinutes':90,'memoryMb':2048,'cpuCount':2}
+print(json.dumps(d))")
+SBXC=$(req POST /console/workspaces/$WS/agents "$SBXON" "" "$TOKEN")
+SBXSVC=$(echo "$SBXC" | jqr "['data']['service']['id']")
+SBXPKG=$(echo "$SBXC" | jqr "['data']['package']['id']")
+cleanup_m3_add() { [ -n "$SBXSVC" ] && code DELETE /console/workspaces/$WS/agents/$SBXSVC "" "$TOKEN" >/dev/null 2>&1; }
+trap 'cleanup_m3; cleanup_m3_add' EXIT
+assert_eq "沙箱创建 202" "$([ -n "$SBXSVC" ] && [ "$SBXSVC" != "None" ] && echo yes || echo no)" "yes"
+SBXMD=$(curl -s "$BASE/packages/$SBXPKG/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import zipfile,sys
+print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
+assert_contains "沙箱包声明 config.sandbox.enabled" "$SBXMD" "enabled: true"
+SBXENV=$(req GET /console/workspaces/$WS/agents/$SBXSVC "" "$TOKEN")
+echo "$SBXENV" | grep -q 'SANDBOX_IMAGE' && SBXIMG=found || SBXIMG=missing
+assert_contains "SANDBOX_* 资源 env 注入" "$SBXIMG" "found"
+echo "$SBXENV" | grep -q 'SANDBOX_ENABLED' && SBXSW=injected || SBXSW=absent
+assert_eq "SANDBOX_ENABLED 不经 env 注入（包声明承载）" "$SBXSW" "absent"
+SBXROW=$(req GET "/console/workspaces/$WS/sandbox?keyword=sbx-on-$TS" "" "$TOKEN")
+assert_contains "总览：生效来源=package" "$SBXROW" '"source":"package"'
+assert_contains "总览：资源规格回显" "$SBXROW" '"memoryMb":2048'
+SBXEDIT=$(echo "$SBXON" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d['name']='sbx-on-$TS'
+d['sandbox']={'enabled':False,'image':'','timeoutMinutes':0,'memoryMb':0,'cpuCount':0}
+print(json.dumps(d))")
+SBXE=$(req PUT /console/workspaces/$WS/agents/$SBXSVC "$SBXEDIT" "" "$TOKEN")
+assert_contains "编辑显式关 → 新版本包声明 false" "$(echo "$SBXE" | jqr "['data']['package']['version']")" "1.0.1"
+SBXPKG2=$(echo "$SBXE" | jqr "['data']['package']['id']")
+SBXMD2=$(curl -s "$BASE/packages/$SBXPKG2/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import zipfile,sys
+print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
+assert_contains "显式关落包（copy-on-write 不沿用旧 true）" "$SBXMD2" "enabled: false"
+SBXEF=$(req GET "/console/workspaces/$WS/sandbox?keyword=sbx-on-$TS" "" "$TOKEN")
+assert_contains "总览刷新：包声明 false 生效" "$SBXEF" '"enabled":false'
+code DELETE /console/workspaces/$WS/agents/$SBXSVC "" "$TOKEN" >/dev/null 2>&1
+
 # ---- 清理（顺带覆盖 DELETE）----
 assert_eq "删除 Agent 200" "$(code DELETE /console/workspaces/$WS/agents/$SVC "" "$TOKEN")" "200"
 

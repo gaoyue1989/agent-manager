@@ -1,10 +1,10 @@
 "use client";
 // 创建/编辑 Agent 共用表单（M3 §3.1，demo c/create 与 c/edit 同构还原）：
-// 选择创建方式三卡片（仅创建页）+ 五个编号区块（基本信息/文件配置/资产配置/资源配置/网络配置）。
+// 选择创建方式三卡片（仅创建页）+ 六个编号区块（基本信息/文件配置/资产配置/资源配置/沙箱配置/网络配置）。
 // 编辑模式：无方式卡片、名称锁定、标题/按钮换「保存」、提交 PUT（copy-on-write 新版本 + republish）。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec } from "@/lib/api";
+import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type SandboxFormPayload } from "@/lib/api";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import { PERM_STYLE } from "@/lib/status";
 
@@ -16,6 +16,7 @@ export interface AgentFormState {
   skills: { name: string; source: string; packageId?: number; version?: string }[];
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
+  sandbox: SandboxFormPayload;
   spec: string; replicas: number; publicEndpoint: boolean;
   importPackageId?: number; adoptServiceId?: number;
 }
@@ -67,7 +68,9 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     name: initial?.name ?? "", description: initial?.description ?? "",
     image: initial?.image ?? "", modelConnections: initial?.modelConnections ?? [],
     prompt: initial?.prompt ?? "", skills: initial?.skills ?? [], subAgents: initial?.subAgents ?? [],
-    mcpServers: initial?.mcpServers ?? [], spec: initial?.spec || "small",
+    mcpServers: initial?.mcpServers ?? [],
+    sandbox: initial?.sandbox ?? { enabled: null, image: "", timeoutMinutes: 0, memoryMb: 0, cpuCount: 0 },
+    spec: initial?.spec || "small",
     replicas: initial?.replicas || 1, publicEndpoint: initial?.publicEndpoint ?? true,
   });
   const [images, setImages] = useState<ImageOption[]>([]);
@@ -196,7 +199,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
         title={mode === "create" ? "创建 Agent" : <>编辑 Agent <Tag>当前 v{initial?.version}</Tag></>}
         sub={mode === "create"
           ? "填写配置生成 OAF 包并发布（自动注册 A2A）——托管 Harness 主模式；导入/纳管为次要方式"
-          : "保存将生成包新版本（copy-on-write）并重发布：提示词/Skill/SubAgent/MCP 热生效；镜像/规格/副本滚动重启生效"}
+          : "保存将生成包新版本（copy-on-write）并重发布：提示词/Skill/SubAgent/MCP/沙箱开关热生效；镜像/规格/副本/沙箱资源 env 滚动重启生效"}
         actions={<>
           <Btn onClick={() => router.push(mode === "edit" ? `/console/agents` : "/console/agents")}>取消</Btn>
           <Btn kind="pri" testid={mode === "create" ? "agent-submit" : "agent-save"} disabled={submitting} onClick={submit}>
@@ -472,7 +475,59 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
             </div>
           </Section>
 
-          <Section n={5} title="网络配置">
+          <Section n={5} title="沙箱配置（OpenSandbox）">
+            <div className="flex items-center gap-2.5 py-2.5">
+              <button type="button" role="switch" aria-checked={state.sandbox.enabled === true} data-testid="sandbox-switch"
+                onClick={() => setState((s) => ({ ...s, sandbox: { ...s.sandbox, enabled: s.sandbox.enabled !== true } }))}
+                className={`relative h-[19px] w-[34px] flex-none rounded-full transition ${state.sandbox.enabled === true ? "bg-blue-600" : "bg-gray-300"}`}>
+                <span className={`absolute top-0.5 size-[15px] rounded-full bg-white transition-all ${state.sandbox.enabled === true ? "left-[17px]" : "left-0.5"}`} />
+              </button>
+              <span className="text-[13px]"><b className="font-medium">启用沙箱</b><br />
+                <small className="text-gray-400">
+                  {state.sandbox.enabled === null
+                    ? "未声明（默认关）——开 = 文件操作 / Shell 在 OpenSandbox 隔离沙箱执行（写入生成包 frontmatter config.sandbox.enabled）；关 = 主机工作区执行"
+                    : state.sandbox.enabled
+                      ? mode === "edit" ? "当前已启用（包声明 config.sandbox.enabled）· 变更随保存的新版本包 reload 热生效" : "开 = 文件操作 / Shell 在 OpenSandbox 隔离沙箱执行（写入生成包 frontmatter config.sandbox.enabled）"
+                      : "已显式关闭（包声明 enabled: false）· 主机工作区执行"}
+                </small></span>
+            </div>
+            <div className={state.sandbox.enabled === true ? "" : "pointer-events-none opacity-45"} data-testid="sandbox-config">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <Field label="沙箱镜像" hint="留空 = 运行时默认镜像（opensandbox/code-interpreter）">
+                  <input value={state.sandbox.image ?? ""} data-testid="sandbox-image" placeholder="opensandbox/code-interpreter:v1.1.0"
+                    onChange={(e) => setState((s) => ({ ...s, sandbox: { ...s.sandbox, image: e.target.value } }))}
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm" />
+                </Field>
+                <Field label="超时（分钟）" hint="留空 = 运行时默认 60">
+                  <input type="number" min={1} value={state.sandbox.timeoutMinutes || ""} data-testid="sandbox-timeout"
+                    onChange={(e) => setState((s) => ({ ...s, sandbox: { ...s.sandbox, timeoutMinutes: Number(e.target.value) || 0 } }))}
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm" />
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <Field label="内存上限（MB）" hint="留空 = 运行时默认 1024">
+                  <input type="number" min={1} value={state.sandbox.memoryMb || ""} data-testid="sandbox-memory"
+                    onChange={(e) => setState((s) => ({ ...s, sandbox: { ...s.sandbox, memoryMb: Number(e.target.value) || 0 } }))}
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm" />
+                </Field>
+                <Field label="CPU 核数" hint="留空 = 运行时默认 1">
+                  <input type="number" min={1} value={state.sandbox.cpuCount || ""} data-testid="sandbox-cpu"
+                    onChange={(e) => setState((s) => ({ ...s, sandbox: { ...s.sandbox, cpuCount: Number(e.target.value) || 0 } }))}
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm" />
+                </Field>
+              </div>
+              <div className="rounded-md bg-gray-100 px-3 py-1.5 font-mono text-xs text-gray-600">
+                OpenSandbox Server：<span className="text-blue-600">使用平台默认配置</span>
+                <span className="ml-1 font-sans text-gray-400">（运维侧「默认配置」页维护；API Key 经服务 Secret 注入，不落包）</span>
+              </div>
+            </div>
+            <div className="mt-1 text-[11.5px] text-gray-400">
+              开关写入生成包 frontmatter config.sandbox.enabled（随包版本走）；镜像 / 超时 / 内存 / CPU 作为发布 env（SANDBOX_*）注入。
+              已发布 Agent 的沙箱总览见「资产管理 → 沙箱配置」（只读）。
+            </div>
+          </Section>
+
+          <Section n={6} title="网络配置">
             <div className="flex items-center gap-2.5 border-b border-dashed border-gray-200 py-2.5">
               <button type="button" role="switch" aria-checked={state.publicEndpoint} data-testid="public-endpoint-switch"
                 onClick={() => setState((s) => ({ ...s, publicEndpoint: !s.publicEndpoint }))}
