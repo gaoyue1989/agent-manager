@@ -24,6 +24,7 @@ const NAV: { group?: string; items: { href: string; label: string; soon?: boolea
       { href: "/console/assets/models", label: "模型连接" },
       { href: "/console/assets/skills", label: "Skill 管理" },
       { href: "/console/assets/tools", label: "工具管理" },
+      { href: "/console/assets/sandbox", label: "沙箱配置" },
       { href: "/console/assets/knowledge", label: "知识库", soon: true },
       { href: "/console/assets/memory", label: "记忆空间" },
       { href: "/console/assets/credentials", label: "凭证管理" },
@@ -40,6 +41,7 @@ function NavIcon({ label }: { label: string }) {
     "集成 Agent": "M8 12h8M12 8v8m7-4a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z",
     模型连接: "M4 6h16M4 12h16M4 18h16M7 6v12", "Skill 管理": "m12 3 2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5Z",
     工具管理: "M14 6a4 4 0 1 0 4 4l4 4-4 4-4-4a4 4 0 0 1-4-4L4 4l4 4 6-2Z",
+    沙箱配置: "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1ZM8 9h8M8 13h8M8 17h5",
     知识库: "M4 4h13a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3V4ZM8 8h8M8 12h8",
     记忆空间: "M9 4a5 5 0 0 1 5 5v1a5 5 0 0 1 0 8 5 5 0 0 1-9-3 5 5 0 0 1 0-8 5 5 0 0 1 4-3Z",
     凭证管理: "M15 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM3 5h18v14H3zM7 9h4",
@@ -87,7 +89,8 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-40 flex h-[52px] items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 sm:px-4">
+      {/* z-[60] 高于侧边栏 z-50：顶栏内下拉（工作空间/用户菜单）需覆盖侧边栏 */}
+      <header className="sticky top-0 z-[60] flex h-[52px] items-center justify-between gap-2 border-b border-gray-200 bg-white px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2 sm:gap-2.5">
           <button onClick={() => setNavOpen(!navOpen)} data-testid="nav-toggle" aria-label="导航"
             className="-ml-1 rounded-md p-1.5 text-gray-600 hover:bg-gray-100 md:hidden">
