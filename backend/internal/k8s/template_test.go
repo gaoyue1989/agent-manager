@@ -583,6 +583,44 @@ spec:
 	}
 }
 
+// TestIngressBuilderEmptyClassOverlayLocked 空配置（IngressClass=""，集群默认兜底）
+// 下 class 锁的三分支：overlay 不写 class → 保持省略；overlay 显式写 class → 放行
+// （环境自选默认类之外的类）；overlay 写空串 → 拒（apiserver 会拒收空串）。
+func TestIngressBuilderEmptyClassOverlayLocked(t *testing.T) {
+	emptyClass := hostModeParams()
+	emptyClass.IngressClass = ""
+
+	// 内置构造（无 overlay）：class 保持省略
+	ing, err := (&IngressBuilder{}).Build(emptyClass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ing.Spec.IngressClassName != nil {
+		t.Fatalf("empty config must omit ingressClassName, got %q", *ing.Spec.IngressClassName)
+	}
+
+	// overlay 补写显式 class：放行且值保留
+	ing, err = ingressWithOverlay(t, "spec:\n  ingressClassName: traefik\n").Build(emptyClass)
+	if err != nil {
+		t.Fatalf("overlay may pin an explicit class when config is empty: %v", err)
+	}
+	if ing.Spec.IngressClassName == nil || *ing.Spec.IngressClassName != "traefik" {
+		t.Fatalf("overlay class must stay, got %v", ing.Spec.IngressClassName)
+	}
+
+	// overlay 写空串：拒绝（空串会被 apiserver 拒收）
+	if _, err := ingressWithOverlay(t, `spec:
+  ingressClassName: ""
+`).Build(emptyClass); err == nil {
+		t.Fatal("overlay with empty ingressClassName must be rejected")
+	}
+
+	// 非空配置回归锁：overlay 写别的 class 仍拒绝
+	if _, err := ingressWithOverlay(t, "spec:\n  ingressClassName: traefik\n").Build(hostModeParams()); err == nil {
+		t.Fatal("non-empty config must lock ingressClassName to the configured value")
+	}
+}
+
 // TestIngressBuilderHostModeProbe 启动探针须与发布期同模式：host 模式 overlay 经探针
 // 通过；overlay 硬编码探针域名（oaf-template-probe{suffix}）只能骗过探针，真实
 // 发布期因 host 偏离被拒——与 path 模式"硬编码服务名"同构。

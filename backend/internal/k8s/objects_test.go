@@ -288,6 +288,28 @@ func TestIngressHostModeConstruction(t *testing.T) {
 	}
 }
 
+// TestIngressEmptyClassOmitsField IngressClass 空 = 不写 spec.ingressClassName
+// （apiserver 落到集群默认 IngressClass；写空串会被拒，必须整体省略）；
+// 路由形状（host/path/backend/注解）与显式 class 构造逐项一致。
+func TestIngressEmptyClassOmitsField(t *testing.T) {
+	p := hostModeParams()
+	p.IngressClass = ""
+	ing := Ingress(p)
+	if ing.Spec.IngressClassName != nil {
+		t.Fatalf("empty IngressClass must omit spec.ingressClassName, got %q", *ing.Spec.IngressClassName)
+	}
+	if len(ing.Spec.Rules) != 1 {
+		t.Fatalf("routing shape must stay, rules: %+v", ing.Spec.Rules)
+	}
+	if ing.Spec.Rules[0].Host != p.K8sName+p.IngressHostSuffix {
+		t.Fatalf("host wrong: %q", ing.Spec.Rules[0].Host)
+	}
+	if ing.Annotations[annSSLRedirect] != "false" ||
+		ing.Annotations[annProxyReadTimeout] != "3600" || ing.Annotations[annProxySendTimeout] != "3600" {
+		t.Fatalf("annotations must stay: %v", ing.Annotations)
+	}
+}
+
 func TestReservedKeys(t *testing.T) {
 	for _, k := range []string{"AGENT_CONFIG_DIR", "SERVER_HOST", "SERVER_PORT", "AGENT_WORKSPACE_DIR", "HOST_NAME"} {
 		if !ReservedEnvKeys[k] {

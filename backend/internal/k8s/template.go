@@ -260,10 +260,12 @@ type IngressBuilder struct {
 }
 
 // NewIngressBuilder 语义同 NewDeploymentBuilder：文件缺失/语法错误/哑参数试渲染
-// 违规均启动即失败（fail-fast）。ingressClass 传运行配置值（cfg.IngressClass），
-// 保证探针与发布期同参——overlay 显式写 class 只允许等于配置值，否则试渲染即拒绝。
-// ingressHostSuffix 同理传配置值（cfg.IngressHostSuffix）：它决定校验走 path 还是 host
-// 模式不变量，探针与发布期必须同模式，否则 host 模式的 overlay 会在启动期被误拒。
+// 违规均启动即失败（fail-fast）。ingressClass 传运行配置值（cfg.IngressClass，空 =
+// 集群默认 IngressClass 兜底），保证探针与发布期同参——overlay 显式写 class 只允许
+// 等于配置值，否则试渲染即拒绝；空配置时 overlay 可补写显式 class（validateIngress
+// 分支联动）。ingressHostSuffix 同理传配置值（cfg.IngressHostSuffix）：它决定校验走
+// path 还是 host 模式不变量，探针与发布期必须同模式，否则 host 模式的 overlay 会在
+// 启动期被误拒。
 // 试渲染用哑参数 oaf-template-probe/default——overlay 不得硬编码
 // metadata.name/namespace（每服务发布期才确定）。
 func NewIngressBuilder(path, ingressClass, ingressHostSuffix string) (*IngressBuilder, error) {
@@ -344,8 +346,15 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 			return fmt.Errorf("label %s must stay %s", k, want)
 		}
 	}
-	if ing.Spec.IngressClassName != nil && *ing.Spec.IngressClassName != p.IngressClass {
-		return fmt.Errorf("spec.ingressClassName must stay %s", p.IngressClass)
+	// IngressClass 锁与内置构造联动：非空配置 → 合并后必须仍等于配置值（overlay 显式
+	// 写 class 只允许同值）；空配置（不写 ingressClassName，集群默认兜底）→ overlay
+	// 可以补写显式 class，但空串必须拒绝（apiserver 会拒收，语义上应整体省略）。
+	if p.IngressClass != "" {
+		if ing.Spec.IngressClassName != nil && *ing.Spec.IngressClassName != p.IngressClass {
+			return fmt.Errorf("spec.ingressClassName must stay %s", p.IngressClass)
+		}
+	} else if ing.Spec.IngressClassName != nil && *ing.Spec.IngressClassName == "" {
+		return fmt.Errorf("spec.ingressClassName must stay empty: omit the field (cluster default) or pin an explicit class")
 	}
 	// defaultBackend 是 rules 之外的 catch-all 路由入口：不拦会绕过归属唯一
 	// （未匹配本服务 host 的流量打到其他服务），内置构造恒为 nil

@@ -25,6 +25,7 @@ images:
 # ---------- 路由（subpath-routing-design 双模式） ----------
 routing:
   mode: router            # router（默认，chart 部署 platform-router）| host（每服务独立域名）
+  # 业务 Ingress 的 IngressClass；留空 = 后端不写 ingressClassName（集群默认兜底）
   ingressClass: nginx
   # 集群 ingress controller 的对外入口地址（Endpoint 展示拼装用，如 172.20.0.3 / 域名）
   host: ""
@@ -37,6 +38,7 @@ routing:
 
 # ---------- 对外暴露（仅 Ingress；不提供 NodePort，已决议） ----------
 ingress:
+  # 留空 = Ingress 不写 ingressClassName，落到集群默认 IngressClass（default-class 标注）
   className: nginx
   # 形态 A：统一域名路径分流（空 = 无 host catch-all，适合单 IP/测试）
   host: ""

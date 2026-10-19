@@ -285,6 +285,21 @@ func ingressBackend(p ObjectParams) networkingv1.IngressBackend {
 // per-service Ingress（IngressBuilder.Build 对此 fail-fast），子路径路由由集群内
 // platform-router 承担（见 RouterServiceName）。
 func Ingress(p ObjectParams) *networkingv1.Ingress {
+	spec := networkingv1.IngressSpec{
+		Rules: []networkingv1.IngressRule{{
+			Host: p.K8sName + p.IngressHostSuffix,
+			IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
+				Paths: []networkingv1.HTTPIngressPath{{
+					Path:     hostModeRootPath,
+					PathType: pathTypePtr(networkingv1.PathTypePrefix),
+					Backend:  ingressBackend(p),
+				}},
+			}},
+		}},
+	}
+	if p.IngressClass != "" {
+		spec.IngressClassName = &p.IngressClass
+	}
 	return &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.K8sName, Namespace: p.Namespace, Labels: labels(p.K8sName),
@@ -295,18 +310,6 @@ func Ingress(p ObjectParams) *networkingv1.Ingress {
 				annProxySendTimeout: "3600",
 			},
 		},
-		Spec: networkingv1.IngressSpec{
-			IngressClassName: &p.IngressClass,
-			Rules: []networkingv1.IngressRule{{
-				Host: p.K8sName + p.IngressHostSuffix,
-				IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
-					Paths: []networkingv1.HTTPIngressPath{{
-						Path:     hostModeRootPath,
-						PathType: pathTypePtr(networkingv1.PathTypePrefix),
-						Backend:  ingressBackend(p),
-					}},
-				}},
-			}},
-		},
+		Spec: spec,
 	}
 }

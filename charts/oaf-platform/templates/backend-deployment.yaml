@@ -73,8 +73,11 @@ spec:
               value: {{ join "," $imgs | quote }}
             - name: DEFAULT_IMAGE
               value: {{ include "oaf.defaultBusinessImage" . | quote }}
+            # 留空 = 不注入，后端业务 Ingress 不写 ingressClassName（集群默认兜底）
+            {{- with .Values.routing.ingressClass }}
             - name: INGRESS_CLASS
-              value: {{ .Values.routing.ingressClass | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             - name: INGRESS_HOST
               value: {{ .Values.routing.host | quote }}
             - name: INGRESS_PORT

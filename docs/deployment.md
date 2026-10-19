@@ -246,7 +246,7 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_HOST_SUFFIX-
 
 行为要点：
 
-- host 模式需 `INGRESS_CLASS` 有值（默认 `nginx`）；域名后缀须在集群 DNS/证书侧可解析——平台只生成 Ingress 对象，不代管 DNS 与证书。
+- host 模式的 `INGRESS_CLASS` 留空 = 业务 Ingress 不写 `ingressClassName`，落到集群默认 IngressClass（default-class 标注）；显式给值（默认 `nginx`）则固定。域名后缀须在集群 DNS/证书侧可解析——平台只生成 Ingress 对象，不代管 DNS 与证书。
 - **存量服务不做后台批量迁移**：模式切换后经 republish / 重新上线（StartAgain）收敛——host 模式刷 Ingress 形态；router 模式对同名 Ingress「存在即删除」（清理 path 时代残留）——Endpoint 均同步重算落库。残留兜底：`kubectl -n agent-platform delete ingress -l app.kubernetes.io/managed-by=oaf-platform`（排除 `platform-agent-router` 自身）。
 - 展示地址（Endpoint）随模式切换：router = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`（与历史 path 模式同形状，前端零改动）；host = `http(s)://{K8sName}{后缀}/`。
 
