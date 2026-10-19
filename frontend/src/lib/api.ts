@@ -114,6 +114,13 @@ export interface MemberView {
   id: number; workspaceId: number; userId: number; role: string; createdAt: string;
   user?: UserView | null;
 }
+export interface SandboxFormPayload {
+  enabled: boolean | null;
+  image?: string;
+  timeoutMinutes?: number;
+  memoryMb?: number;
+  cpuCount?: number;
+}
 export interface AgentFormPayload {
   mode?: string; name: string; description?: string; image?: string;
   modelConnections: { connectionId: number; isDefault: boolean }[];
@@ -121,10 +128,18 @@ export interface AgentFormPayload {
   skills: { name: string; source: string; packageId?: number; version?: string }[];
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
+  sandbox?: SandboxFormPayload | null;
   spec: string; replicas: number; publicEndpoint?: boolean;
   remoteAuth?: Record<string, string>;
   importPackageId?: number;
   adoptServiceId?: number;
+}
+// 沙箱配置总览条目（GET /console/workspaces/:ws/sandbox，只读）
+export interface SandboxItem {
+  serviceId: number; displayName: string; k8sName: string; status: string;
+  enabled: boolean; source: "env" | "package" | "default";
+  packageDeclared?: boolean | null; envExplicit: boolean;
+  image?: string; timeoutMinutes?: number; memoryMb?: number; cpuCount?: number;
 }
 export interface EditFormView {
   name: string; k8sName: string; description: string; image: string;
@@ -132,6 +147,7 @@ export interface EditFormView {
   prompt: string; skills: { name: string; source: string; packageId?: number; version?: string }[];
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
+  sandbox?: SandboxFormPayload | null;
   spec: string; replicas: number; publicEndpoint: boolean; version: string; packageId: number;
 }
 export interface AuditItem { time: string; actor: string; action: string; object: string; detail: string; }
@@ -185,6 +201,9 @@ export const api = {
   // ---- 用户侧 console（M2–M8；workspace 以 :ws 路径段指定）----
   console: {
     summary: (ws: number | string) => request<ConsoleSummary>(`/console/workspaces/${ws}/summary`),
+    // 沙箱配置总览（只读；修改入口在 Agent 编辑页沙箱区块）
+    sandbox: (ws: number | string, keyword = "") =>
+      request<SandboxItem[]>(`/console/workspaces/${ws}/sandbox?keyword=${encodeURIComponent(keyword)}`),
     agents: (ws: number | string, status = "", keyword = "") =>
       request<AgentListItem[]>(`/console/workspaces/${ws}/agents?status=${encodeURIComponent(status)}&keyword=${encodeURIComponent(keyword)}`),
     agentDetail: (ws: number | string, id: number) => request<ServiceDetail>(`/console/workspaces/${ws}/agents/${id}`),

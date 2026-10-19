@@ -62,6 +62,31 @@ type McpServerRef struct {
 	Builtin     string `json:"builtin,omitempty"` // "platform"
 }
 
+// SandboxForm 创建/编辑表单的沙箱配置（demo §5 沙箱配置区块）。
+// Enabled 指针区分「未提交」（nil，包不写声明、env 不注入）与「显式开/关」：
+// 显式关必须落包声明 config.sandbox.enabled=false——否则运行时三层裁决会回退到
+// 包内已有旧版本的 true（copy-on-write 沿用），用户关闭的意图失效。
+type SandboxForm struct {
+	Enabled   *bool  `json:"enabled"`
+	Image     string `json:"image,omitempty"`     // 空 = 运行时默认镜像（不注入 env）
+	TimeoutMin int  `json:"timeoutMinutes,omitempty"` // 0 = 不注入（运行时默认 60）
+	MemoryMB  int    `json:"memoryMb,omitempty"`  // 0 = 不注入（运行时默认 1024）
+	CPUCount  int    `json:"cpuCount,omitempty"`  // 0 = 不注入（运行时默认 1）
+}
+
+// normalized 沙箱资源项边界校验：负值归零（不注入），上限护栏防误填。
+func (s *SandboxForm) normalized() {
+	if s.TimeoutMin < 0 {
+		s.TimeoutMin = 0
+	}
+	if s.MemoryMB < 0 {
+		s.MemoryMB = 0
+	}
+	if s.CPUCount < 0 {
+		s.CPUCount = 0
+	}
+}
+
 // AgentForm 创建/编辑共用表单（编辑无 mode，见 UpdateAgent）。
 type AgentForm struct {
 	Mode             string         `json:"mode"` // harness | import | adopt
@@ -73,6 +98,7 @@ type AgentForm struct {
 	Skills           []SkillRef     `json:"skills"`
 	SubAgents        []SubAgentRef  `json:"subAgents"`
 	McpServers       []McpServerRef `json:"mcpServers"`
+	Sandbox          *SandboxForm   `json:"sandbox,omitempty"`
 	Spec             string         `json:"spec"`
 	Replicas         int            `json:"replicas"`
 	PublicEndpoint   *bool          `json:"publicEndpoint"`
@@ -175,6 +201,17 @@ type fmRoot struct {
 	Skills      []fmSkill     `yaml:"skills,omitempty"`
 	Agents      []fmSubAgent  `yaml:"agents,omitempty"`
 	MCPServers  []fmMCPServer `yaml:"mcpServers,omitempty"`
+	// Config 仅承载沙箱声明（温度等运行参数经包编辑器维护，创建表单不管）
+	Config *fmConfig `yaml:"config,omitempty"`
+}
+
+// fmConfig frontmatter config 段（对齐 OAF 规范 config.sandbox.enabled）。
+type fmConfig struct {
+	Sandbox *fmSandbox `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+}
+
+type fmSandbox struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 // buildAgentsMD 生成 AGENTS.md（frontmatter + 提示词正文，所见即所得不改写）。
@@ -472,6 +509,11 @@ func (c *Core) deriveFrontmatter(form *AgentForm, agentKey, version string) fmRo
 			})
 		}
 	}
+	// 沙箱声明：仅显式提交（sandbox != nil 且 enabled != nil）时写入
+	// config.sandbox.enabled——包声明只在 env 未显式设置时生效（SandboxRuntime 三层裁决）
+	if form.Sandbox != nil && form.Sandbox.Enabled != nil {
+		fm.Config = &fmConfig{Sandbox: &fmSandbox{Enabled: *form.Sandbox.Enabled}}
+	}
 	return fm
 }
 
@@ -563,6 +605,25 @@ func (c *Core) buildPublishEnv(workspaceID uint, def *store.ModelConnection, for
 				env["AGENT_REMOTE_HEADERS_JSON"] = string(b)
 				secretKeys = append(secretKeys, "AGENT_REMOTE_HEADERS_JSON")
 			}
+		}
+	}
+	// 沙箱资源项（demo §5）：显式填写的 SANDBOX_* 覆盖平台默认值预填；
+	// 全空/未提交不注入（运行时默认镜像与资源上限）。开关键不在此注入——
+	// env 显式设置会永久压过包声明（platformconfig 模板排除 SANDBOX_ENABLED 同因）
+	if form.Sandbox != nil {
+		s := form.Sandbox
+		s.normalized()
+		if s.Image != "" {
+			env["SANDBOX_IMAGE"] = s.Image
+		}
+		if s.TimeoutMin > 0 {
+			env["SANDBOX_TIMEOUT_MINUTES"] = strconv.Itoa(s.TimeoutMin)
+		}
+		if s.MemoryMB > 0 {
+			env["SANDBOX_MEMORY_MB"] = strconv.Itoa(s.MemoryMB)
+		}
+		if s.CPUCount > 0 {
+			env["SANDBOX_CPU_COUNT"] = strconv.Itoa(s.CPUCount)
 		}
 	}
 	return env, secretKeys, nil
@@ -784,6 +845,7 @@ type EditFormView struct {
 	Skills           []SkillRef     `json:"skills"`
 	SubAgents        []SubAgentRef  `json:"subAgents"`
 	McpServers       []McpServerRef `json:"mcpServers"`
+	Sandbox          *SandboxForm   `json:"sandbox,omitempty"`
 	Spec             string         `json:"spec"`
 	Replicas         int            `json:"replicas"`
 	PublicEndpoint   bool           `json:"publicEndpoint"`
@@ -857,6 +919,37 @@ func (c *Core) EditForm(workspaceID, serviceID uint) (*EditFormView, error) {
 	if view.ModelConnections == nil {
 		view.ModelConnections = []ModelConnRef{}
 	}
+	// 沙箱回显（demo §5）：包声明 + env SANDBOX_* 反解；均未声明时 enabled=nil
+	// （前端展示「未声明」，保存仍可显式提交 true/false）
+	sbx := &SandboxForm{}
+	if cfg.Config != nil && cfg.Config.Sandbox != nil {
+		enabled := cfg.Config.Sandbox.Enabled
+		sbx.Enabled = &enabled
+	}
+	envPlain, _, err := c.partitionServiceEnv(svc)
+	if err == nil {
+		if v, ok := envPlain["SANDBOX_IMAGE"]; ok {
+			sbx.Image = v
+		}
+		if v := envInt(envPlain["SANDBOX_TIMEOUT_MINUTES"]); v > 0 {
+			sbx.TimeoutMin = v
+		}
+		if v := envInt(envPlain["SANDBOX_MEMORY_MB"]); v > 0 {
+			sbx.MemoryMB = v
+		}
+		if v := envInt(envPlain["SANDBOX_CPU_COUNT"]); v > 0 {
+			sbx.CPUCount = v
+		}
+		if sbx.Enabled == nil {
+			if v, ok := envPlain["SANDBOX_ENABLED"]; ok {
+				// 存量服务 env 显式设置过开关：回显为表单显式值（保存将落包声明，
+				// env 值保持 sticky——UpdateAgent 只覆盖表单管的键）
+				enabled := v == "true"
+				sbx.Enabled = &enabled
+			}
+		}
+	}
+	view.Sandbox = sbx
 	return view, nil
 }
 

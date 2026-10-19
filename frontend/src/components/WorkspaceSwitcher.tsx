@@ -36,7 +36,7 @@ export default function WorkspaceSwitcher({ me, current, onPick }: {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-3"><path d="m6 9 6 6 6-6" /></svg>
       </button>
       {open && (
-        <div className="absolute left-0 top-[calc(100%+6px)] z-50 min-w-[240px] rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl" data-testid="ws-menu">
+        <div className="absolute left-0 top-[calc(100%+6px)] z-50 max-h-[70vh] min-w-[240px] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl" data-testid="ws-menu">
           {real.map((w) => (
             <button key={w.id} onClick={() => { onPick(w); setOpen(false); }}
               data-testid={`ws-item-${w.slug}`}
