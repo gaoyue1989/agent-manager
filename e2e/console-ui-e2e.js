@@ -283,7 +283,9 @@ async function main() {
     check("技能详情抽屉渲染", !!(await page.$(testid("skill-detail-drawer"))));
     check("技能版本表渲染", !!(await page.$(testid("skill-version-table"))));
     check("技能 1.0.0 版本行存在", !!(await page.$(testid("skill-version-1.0.0"))));
-    await click("drawer-close");
+    // Skill 详情是页面内自定义抽屉（无 drawer-close），点遮罩左上角关闭
+    await page.mouse.click(10, 10);
+    await page.waitForSelector(testid("skill-detail-drawer"), { hidden: true, timeout: 10000 }).catch(() => {});
     await click("skill-tab-market");
     await page.waitForSelector(testid("skills-market"), { timeout: 20000 });
     check("市场 Tab 源选择器渲染", !!(await page.$(testid("skill-market-source"))));
