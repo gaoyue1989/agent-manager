@@ -100,6 +100,25 @@ class StateDataParserTest {
     }
 
     @Test
+    void toolCallsShouldCarrySummaryForHistoryReplay() {
+        // 历史回放与实时流对齐：SSE 的 tool_call_summary 会用「读取 xx」替换原始工具名，
+        // history 的 tool_calls[] 同样携带 summary（MCP 展示名取末段），刷新后不再退回原始名
+        var stateData = """
+            {"context":[{"role":"assistant","content":[
+                {"type":"tool_use","id":"call_mcp","name":"mcp__filesystem__read_file",
+                 "input":{"path":"uploads/a.xlsx"}}
+            ]}]}
+            """;
+        var list = StateDataParser.toRoleContentList(StateDataParser.findMessagesArray(stateData));
+
+        @SuppressWarnings("unchecked")
+        var call = ((java.util.List<Map<String, Object>>) list.get(0).get("tool_calls")).get(0);
+        assertEquals("读取 uploads/a.xlsx", call.get("summary"));
+        // 原始名保持不变（执行/展示语义仍以 name 为准）
+        assertEquals("mcp__filesystem__read_file", call.get("name"));
+    }
+
+    @Test
     void toRoleContentListShouldHandleNull() {
         assertTrue(StateDataParser.toRoleContentList(null).isEmpty());
     }
