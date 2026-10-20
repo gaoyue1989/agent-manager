@@ -17,7 +17,8 @@ func newMigrateDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(&OafPackage{}, &ServiceEntity{}, &ServiceEvent{},
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},
-		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{}); err != nil {
+		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{},
+		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -187,7 +188,7 @@ func TestBackfillNormalizesPackageNullWorkspace(t *testing.T) {
 	if err := db.Exec("INSERT INTO oaf_packages (id, slug, created_at) VALUES (1,'a/b',CURRENT_TIMESTAMP)").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&OafPackage{}); err != nil {
+	if err := db.AutoMigrate(&OafPackage{}, &SkillMarketSource{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := Backfill(db, "admin", "x"); err != nil {

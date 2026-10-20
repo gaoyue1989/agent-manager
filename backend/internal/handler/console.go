@@ -7,12 +7,26 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"agent-manager/backend/internal/service"
+	"agent-manager/backend/internal/store"
 )
+
+// splitTags 逗号分隔标签串 → 数组（zip 上传表单域用；handler 侧归一，service 层不感知表单形态）。
+func splitTags(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
 
 // resolveWorkspace :ws 参数裁决（M2 §2.2）：JWT uid → workspace_members 查询；
 // 未命中 404（不暴露 403/404 差异）；default 空间仅 admin 可解析。
@@ -124,6 +138,328 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 			return
 		}
 		OK(c, list)
+	})
+
+	// ---- Skill 中心（2026-10-19，§6.3/§8.4）：空间技能资产 CRUD + 版本管理 + 市场 + Agent 使用情况 ----
+
+	// 技能资产列表（keyword 过滤名称/描述/标签；refAgentCount = 引用 Agent 数）
+	cg.GET("/workspaces/:ws/skill-center", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ListSkills(wsID, c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
+	// Markdown 定义创建（frontmatter name/description 自动生成；publishNow 直发 published）
+	cg.POST("/workspaces/:ws/skill-center", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		uid := c.GetUint("uid")
+		var in struct {
+			Name        string   `json:"name"`
+			DisplayName string   `json:"displayName"`
+			Description string   `json:"description"`
+			Tags        []string `json:"tags"`
+			Content     string   `json:"content"`
+			PublishNow  bool     `json:"publishNow"`
+		}
+		if err := c.ShouldBindJSON(&in); err != nil {
+			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		skill, err := core.CreateSkillFromMarkdown(wsID, uid, in.Name, in.DisplayName, in.Description, in.Tags, in.Content, in.PublishNow)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, respOK(skill))
+	})
+	// zip 技能包上传（warnings 宽松回显；multipart file + name/description/tags/publishNow 表单域）
+	cg.POST("/workspaces/:ws/skill-center/upload", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		fh, err := c.FormFile("file")
+		if err != nil {
+			Fail(c, http.StatusBadRequest, "multipart field 'file' is required: "+err.Error())
+			return
+		}
+		f, err := fh.Open()
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		defer f.Close()
+		skill, warnings, err := core.CreateSkillFromZip(wsID, c.GetUint("uid"), fh.Filename, f,
+			c.PostForm("name"), c.PostForm("displayName"), c.PostForm("description"),
+			splitTags(c.PostForm("tags")), c.PostForm("publishNow") == "true")
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, respOK(gin.H{"skill": skill, "warnings": warnings}))
+	})
+	// 详情（基本信息 + 版本列表 + 引用 Agent）
+	cg.GET("/workspaces/:ws/skill-center/:id", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		skill, err := core.GetSkill(uint(id))
+		if err != nil || skill.WorkspaceID != wsID {
+			mapError(c, service.ErrNotFound)
+			return
+		}
+		vers, err := core.ListSkillVersions(wsID, uint(id))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		refs := core.SkillRefAgents(wsID, skill.Name)
+		OK(c, gin.H{"skill": skill, "versions": vers, "referencingAgents": refs})
+	})
+	// 编辑（描述/标签/显示名/Markdown 工作区正文）
+	cg.PATCH("/workspaces/:ws/skill-center/:id", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		var in service.UpdateSkillInput
+		if err := c.ShouldBindJSON(&in); err != nil {
+			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		skill, err := core.UpdateSkill(wsID, uint(id), in)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, skill)
+	})
+	// 启用/停用（停用后创建/编辑候选不再出现）
+	cg.POST("/workspaces/:ws/skill-center/:id/:action", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		switch c.Param("action") {
+		case "enable":
+			skill, err := core.SetSkillEnabled(wsID, uint(id), true)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, skill)
+		case "disable":
+			skill, err := core.SetSkillEnabled(wsID, uint(id), false)
+			if err != nil {
+				mapError(c, err)
+				return
+			}
+			OK(c, skill)
+		default:
+			Fail(c, http.StatusNotFound, "unknown action")
+		}
+	})
+	cg.DELETE("/workspaces/:ws/skill-center/:id", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		if err := core.DeleteSkill(wsID, uint(id)); err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, gin.H{"deleted": true})
+	})
+	// 版本列表 / 创建新版本 / 发布 / 下线 / 重新上线 / 下载
+	cg.GET("/workspaces/:ws/skill-center/:id/versions", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		vers, err := core.ListSkillVersions(wsID, uint(id))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, vers)
+	})
+	cg.POST("/workspaces/:ws/skill-center/:id/versions", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		var in struct {
+			BaseVersionID uint   `json:"baseVersionId"`
+			Version       string `json:"version"`
+			Changelog     string `json:"changelog"`
+		}
+		if err := c.ShouldBindJSON(&in); err != nil {
+			Fail(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		ver, err := core.CreateSkillVersion(wsID, uint(id), in.BaseVersionID, in.Version, in.Changelog)
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, respOK(ver))
+	})
+	cg.POST("/workspaces/:ws/skill-center/:id/versions/:vid/:action", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		vid, _ := strconv.ParseUint(c.Param("vid"), 10, 64)
+		var ver *store.SkillVersion
+		switch c.Param("action") {
+		case "publish":
+			ver, err = core.PublishSkillVersion(wsID, uint(id), uint(vid))
+		case "offline":
+			ver, err = core.OfflineSkillVersion(wsID, uint(id), uint(vid))
+		case "reline":
+			ver, err = core.RelineSkillVersion(wsID, uint(id), uint(vid))
+		default:
+			Fail(c, http.StatusNotFound, "unknown action")
+			return
+		}
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, ver)
+	})
+	// 版本 zip 下载（zip 形态 PVC 打包；markdown 形态拼 SKILL.md 结构）
+	cg.GET("/workspaces/:ws/skill-center/:id/versions/:vid/download", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		vid, _ := strconv.ParseUint(c.Param("vid"), 10, 64)
+		filename, data, err := core.SkillVersionDownload(wsID, uint(id), uint(vid))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+		c.Data(http.StatusOK, "application/zip", data)
+	})
+
+	// ---- Skill 广场（市场；多源预留 §6.3 决议 8）----
+	cg.GET("/workspaces/:ws/skill-market/sources", func(c *gin.Context) {
+		list, err := core.ListSkillMarketSources()
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
+	cg.GET("/workspaces/:ws/skill-market", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ListMarketItems(wsID, c.Query("source"), c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
+	cg.POST("/workspaces/:ws/skill-market/:source/:key/install", func(c *gin.Context) {
+		if !requireWsRole(c) {
+			return
+		}
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		skill, err := core.InstallMarketSkill(wsID, c.GetUint("uid"), c.Param("source"), c.Param("key"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, respOK(skill))
+	})
+
+	// Agent 使用情况（第三 Tab）：遍历空间 services 按 last 生成包解析技能清单
+	cg.GET("/workspaces/:ws/skill-usages", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ConsoleSkillUsages(wsID, c.Query("keyword"))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
+	cg.GET("/workspaces/:ws/skill-usages/:id", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
+		detail, err := core.ConsoleSkillUsageDetail(wsID, uint(id))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, detail)
 	})
 
 	// 空间包列表（决议 7：公共包（workspace_id=0）全空间可见 + 本空间包）
