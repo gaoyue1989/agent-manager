@@ -200,12 +200,15 @@ async function main() {
     await goto("/console/agents/create", testid("agent-create"));
     await click("mode-import");
     await page.waitForSelector(testid("import-pkg-select"), { timeout: 20000 });
-    await page.waitForFunction((sel) => {
+    // 必须等目标包 option 真正加载（占位 option 也会让 length>0 提前通过）
+    await page.waitForFunction((sel, id) => {
       const el = document.querySelector(sel);
-      return el && el.options && el.options.length > 0;
-    }, { timeout: 30000 }, testid("import-pkg-select"));
+      return el && el.options && [...el.options].some((o) => o.value === String(id));
+    }, { timeout: 30000 }, testid("import-pkg-select"), ctx.pkgId);
     // import 模式不渲染基础信息区（名称由包派生），只需选包后提交
     await page.select(testid("import-pkg-select"), String(ctx.pkgId));
+    const pickedPkg = await page.$eval(testid("import-pkg-select"), (el) => el.value);
+    check("导入包已选中", pickedPkg === String(ctx.pkgId), pickedPkg);
     // 头部「立即创建」按钮对所有 create 模式可见（import 区块内的提交按钮无 testid）
     await click("agent-submit");
     try {
