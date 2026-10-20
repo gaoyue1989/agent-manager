@@ -553,8 +553,11 @@ func (c *Core) UpdateSkillDraft(workspaceID, skillID uint, content string) error
 		if err := c.DB.Where("skill_id = ?", skillID).Order("id DESC").First(&latest).Error; err != nil {
 			return err
 		}
+		// MySQL JSON 列拒绝空串（sqlite 宽松，单测曾掩盖——E2E 实测 500）：
+		// 新建草稿即落合法 JSON 默认值，随后 Update 覆盖 content_json。
 		draft = store.SkillVersion{SkillID: skillID, Version: nextVersion(latest.Version),
-			Status: SkillVerDraft, Changelog: "工作区草稿", CreatedBy: s.CreatedBy}
+			Status: SkillVerDraft, Changelog: "工作区草稿", CreatedBy: s.CreatedBy,
+			ContentJSON: mustJSON(map[string]string{"content": content}), FilesJSON: "[]"}
 		if err := c.DB.Create(&draft).Error; err != nil {
 			return err
 		}
@@ -665,6 +668,13 @@ func (c *Core) CreateSkillVersion(workspaceID, skillID, baseVersionID uint, vers
 		}
 		sum := sha256.Sum256(data)
 		nv.Checksum = hex.EncodeToString(sum[:])
+	}
+	// 同上：MySQL JSON 列不接受空串（历史/导入包的 base 可能为空）
+	if nv.FilesJSON == "" {
+		nv.FilesJSON = "[]"
+	}
+	if nv.ContentJSON == "" {
+		nv.ContentJSON = "{}"
 	}
 	if err := c.DB.Create(&nv).Error; err != nil {
 		return nil, err

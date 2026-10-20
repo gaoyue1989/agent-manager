@@ -22,7 +22,9 @@ CONN_ID=$(echo "$CONN" | jqr "['data']['id']")
 ensure_verified "$TOKEN" "$WS" "$CONN_ID" >/dev/null
 assert_eq "连接 verified" "$(req GET /console/workspaces/$WS/model-connections "" "$TOKEN" | jqr "['data'][0]['status']")" "verified"
 
-FORM_TPL='{"mode":"harness","name":"NAME","description":"M3 e2e","modelConnections":[{"connectionId":CID,"isDefault":true}],"prompt":"你是 M3 e2e 验证助手。被问候时回答：我是 m3e2e-agent v1。","skills":[],"subAgents":[],"mcpServers":[{"builtin":"platform"}],"spec":"small","replicas":1,"publicEndpoint":true}'
+# 主 Agent 用 2 副本（kind 节点 4 CPU 足够：默认资源 250m/副本），
+# 同时覆盖 replicas 直译；spec 档留给扩展 Agent（1 副本 1 CPU）。
+FORM_TPL='{"mode":"harness","name":"NAME","description":"M3 e2e","modelConnections":[{"connectionId":CID,"isDefault":true}],"prompt":"你是 M3 e2e 验证助手。被问候时回答：我是 m3e2e-agent v1。","skills":[],"subAgents":[],"mcpServers":[{"builtin":"platform"}],"spec":"small","replicas":2,"publicEndpoint":true}'
 
 # ---- 校验矩阵 ----
 BAD=$(echo "$FORM_TPL" | sed 's/NAME//; s/CID/'"$CONN_ID"'/')
@@ -71,6 +73,7 @@ M3_SVC=""
 M3_SVC2=""
 M3_SVC3=""
 M3_SVC4=""
+M3_SVC5=""
 M3_LEGACY=""
 M3_IPKG=""
 M3_TPLPKG=""
@@ -79,6 +82,7 @@ cleanup_m3() {
   [ -n "$M3_SVC2" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC2 "" "$TOKEN" >/dev/null 2>&1
   [ -n "$M3_SVC3" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC3 "" "$TOKEN" >/dev/null 2>&1
   [ -n "$M3_SVC4" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC4 "" "$TOKEN" >/dev/null 2>&1
+  [ -n "$M3_SVC5" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC5 "" "$TOKEN" >/dev/null 2>&1
   [ -n "$M3_LEGACY" ] && legacy_code DELETE /services/$M3_LEGACY >/dev/null 2>&1
   # 导入源包清理（#172 唯一索引：残留会让后续轮次上传撞 slug+version 409）
   [ -n "$M3_IPKG" ] && legacy_code DELETE /packages/$M3_IPKG >/dev/null 2>&1
@@ -122,6 +126,8 @@ if [ "$KUBE_OK" = "1" ]; then
   assert_contains "CM 含 LLM_MODEL（默认连接注入）" "$CMENV" '"LLM_MODEL"'
   assert_not_contains "CM 不含 LLM_API_KEY" "$CMENV" "LLM_API_KEY"
   assert_contains "Secret 含 LLM_API_KEY" "$SECENV" "LLM_API_KEY"
+  assert_eq "主 Agent replicas=2 直译" \
+    "$(kubectl -n $KNS get deploy $K8S -o jsonpath='{.spec.replicas}' 2>/dev/null)" "2"
   RES=$(kubectl -n $KNS get deploy $K8S -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null)
   SPECVA=$(req GET /console/workspaces/$WS/agents/$SVC "" "$TOKEN" | jqr "['data']['spec']")
   if [ -n "$SPECVA" ] && [ "$SPECVA" != "None" ]; then
@@ -144,12 +150,9 @@ import sys,json
 d=json.load(sys.stdin)
 d['name']='m3ext-$TS'
 d['spec']='small'
-d['subAgents']=[
-  {'agent':'remote','role':'peer','delegations':[],'endpoint':'http://remote.invalid:8100'},
-]
-d['remoteAuth']={'http://remote.invalid:8100':'Bearer remote-secret'}
+d['subAgents']=[]
 d['publicEndpoint']=False
-d['replicas']=2
+d['replicas']=1
 print(json.dumps(d))")
 EXTC=$(req POST /console/workspaces/$WS/agents "$EXT" "" "$TOKEN")
 EXT_SVC=$(echo "$EXTC" | jqr "['data']['service']['id']")
@@ -162,30 +165,40 @@ assert_eq "扩展 Agent running" "$EXT_ST" "running"
 EXTMD=$(curl -s "$BASE/packages/$EXT_PKG/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
 import zipfile,sys
 print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
-assert_contains "子 Agent 契约：role 声明" "$EXTMD" "role: peer"
-assert_contains "远程子 Agent endpoint 声明" "$EXTMD" "endpoint: http://remote.invalid:8100"
-assert_not_contains "远程认证值不落包" "$EXTMD" "remote-secret"
 assert_eq "publicEndpoint=false → endpoint 为空" \
   "$(req GET /console/workspaces/$WS/agents/$EXT_SVC "" "$TOKEN" | jqr "['data'].get('endpoint') or ''")" ""
 if [ "$KUBE_OK" = "1" ]; then
-  assert_eq "replicas=2 直译 Deployment" \
-    "$(kubectl -n $KNS get deploy $EXT_K8S -o jsonpath='{.spec.replicas}' 2>/dev/null)" "2"
   assert_eq "spec=small 直译 requests.cpu" \
     "$(kubectl -n $KNS get deploy $EXT_K8S -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null)" "1"
   assert_eq "spec=small 直译 requests.memory" \
     "$(kubectl -n $KNS get deploy $EXT_K8S -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}' 2>/dev/null)" "2Gi"
-  EXT_SEC=$(kubectl -n $KNS get secret $EXT_K8S-env-secret -o jsonpath='{.data}' 2>/dev/null)
-  # 远程认证头只在存在集成关系（M7）时注入；本套件不造协议服务，缺失时显式 skip
-  if echo "$EXT_SEC" | grep -q "AGENT_REMOTE_HEADERS_JSON"; then
-    ok "远程认证头进服务 Secret"
-  else
-    skip "无集成关系（M7），远程认证头未注入——凭证不落包已断言"
-  fi
   k8s_res() { kubectl -n $KNS get "$@" >/dev/null 2>&1; }
   k8s_res ingress $EXT_K8S && bad "publicEndpoint=false 仍创建 Ingress" || ok "publicEndpoint=false 不创建 Ingress"
 else
-  skip "kubectl 不可用，跳过 replicas/Secret/Ingress 断言"
+  skip "kubectl 不可用，跳过 spec/Ingress 断言"
 fi
+
+# ---- 子 Agent 声明（远程 endpoint / 集成凭证不落包）----
+# 只断言生成包契约，不等待运行时（远程 endpoint 无集成关系，运行时不属于本套件）。
+SUB=$(echo "$FORM_TPL" | sed "s/CID/$CONN_ID/" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d['name']='m3sub-$TS'
+d['spec']=''
+d['replicas']=1
+d['subAgents']=[{'agent':'remote','role':'peer','delegations':[],'endpoint':'http://remote.invalid:8100'}]
+d['remoteAuth']={'http://remote.invalid:8100':'Bearer remote-secret'}
+print(json.dumps(d))")
+SUBC=$(req POST /console/workspaces/$WS/agents "$SUB" "" "$TOKEN")
+M3_SVC5=$(echo "$SUBC" | jqr "['data']['service']['id']")
+SUB_PKG=$(echo "$SUBC" | jqr "['data']['package']['id']")
+assert_eq "子 Agent 声明创建 202" "$([ -n "$M3_SVC5" ] && [ "$M3_SVC5" != "None" ] && echo yes || echo no)" "yes"
+SUBMD=$(curl -s "$BASE/packages/$SUB_PKG/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import zipfile,sys
+print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
+assert_contains "子 Agent 契约：role 声明" "$SUBMD" "role: peer"
+assert_contains "远程子 Agent endpoint 声明" "$SUBMD" "endpoint: http://remote.invalid:8100"
+assert_not_contains "远程认证值不落包" "$SUBMD" "remote-secret"
 
 # ---- 导入模式（#161）：无 env 合法包 → 导入 → 平台默认 env 合并 + Pod Ready ----
 # 曾不经 buildPublishEnv：service env 只有隔离键，Pod 用镜像内置账号连库 Access denied
@@ -211,7 +224,7 @@ IPKG=$(echo "$UP" | jqr "['data']['id']")
 M3_IPKG="$IPKG"
 assert_eq "无 env 合法包上传 200" "$([ -n "$IPKG" ] && [ "$IPKG" != "None" ] && echo yes || echo no)" "yes"
 IMPORT=$(req POST /console/workspaces/$WS/agents \
-  "{\"mode\":\"import\",\"name\":\"import-probe-$TS\",\"importPackageId\":$IPKG,\"modelConnections\":[{\"connectionId\":$CONN_ID,\"isDefault\":true}],\"spec\":\"small\",\"replicas\":1,\"publicEndpoint\":true}" "" "$TOKEN")
+  "{\"mode\":\"import\",\"name\":\"import-probe-$TS\",\"importPackageId\":$IPKG,\"modelConnections\":[{\"connectionId\":$CONN_ID,\"isDefault\":true}],\"replicas\":1,\"publicEndpoint\":true}" "" "$TOKEN")
 ISVC=$(echo "$IMPORT" | jqr "['data']['service']['id']")
 M3_SVC2="$ISVC"
 assert_eq "导入 202 返回 service" "$([ -n "$ISVC" ] && [ "$ISVC" != "None" ] && echo yes || echo no)" "yes"

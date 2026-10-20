@@ -54,7 +54,7 @@ assert_eq "列表 keyword 无匹配返回空数组" \
 
 # ---- edit-form 回显（模型连接 / 技能 / 沙箱 / 版本）----
 EDITFORM=$(req GET /console/workspaces/$WS/agents/$TEST_SVC/edit-form "" "$TOKEN")
-assert_contains "edit-form 回显模型连接" "$EDITFORM" "m4-llm-$TS"
+assert_contains "edit-form 回显模型连接（connectionId）" "$EDITFORM" "\"connectionId\":$MC"
 assert_contains "edit-form 含 skills 数组" "$EDITFORM" '"skills":'
 assert_contains "edit-form 含 sandbox" "$EDITFORM" '"sandbox":'
 assert_contains "edit-form 含包版本" "$EDITFORM" '"version":'

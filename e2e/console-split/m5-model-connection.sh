@@ -57,7 +57,7 @@ assert_eq "失败状态回写 failed" "$(req GET /console/workspaces/$WS/model-c
 # ---- PATCH：改字段 → delivery 重置 pending / apiKey 清除语义 ----
 req POST /console/workspaces/$WS/model-connections/$C1_ID/test "" "$TOKEN" >/dev/null
 P=$(req PATCH /console/workspaces/$WS/model-connections/$C1_ID "{\"modelId\":\"$LLM_MODEL\",\"apiKey\":\"\"}" "" "$TOKEN")
-assert_contains "PATCH 清除 apiKey → 掩码为空" "$(echo "$P" | head -c 400)" '"apiKeyMasked":"'
+assert_contains "PATCH 清除 apiKey → 掩码为空" "$P" '"apiKeyMasked":""'
 # 重新写回 key（后续 deliver 需要）
 req PATCH /console/workspaces/$WS/model-connections/$C1_ID "{\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN" >/dev/null
 
