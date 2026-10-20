@@ -66,11 +66,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v$(date -d "${{ steps.date.outputs.date }}" +%Y.%m.%d)"
-          TITLE="更新日志 · ${{ steps.date.outputs.date }}"
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TITLE" --notes-file changelog-body.md
+          VERSION="v$(date -d "${{ steps.date.outputs.date }}" +%Y.%m.%d)"
+          if gh release view "$VERSION" > /dev/null 2>&1; then
+            gh release edit "$VERSION" --title "$VERSION" --notes-file changelog-body.md
           else
-            gh release create "$TAG" --title "$TITLE" --notes-file changelog-body.md \
+            gh release create "$VERSION" --title "$VERSION" --notes-file changelog-body.md \
               --target master --latest=false
           fi
