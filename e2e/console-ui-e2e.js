@@ -208,7 +208,14 @@ async function main() {
     await page.select(testid("import-pkg-select"), String(ctx.pkgId));
     // 头部「立即创建」按钮对所有 create 模式可见（import 区块内的提交按钮无 testid）
     await click("agent-submit");
-    await page.waitForFunction(() => /\/console\/agents\/\d+/.test(location.pathname), { timeout: 60000 });
+    try {
+      await page.waitForFunction(() => /\/console\/agents\/\d+/.test(location.pathname), { timeout: 60000 });
+    } catch (e) {
+      const msg = await text(testid("agent-form-msg"));
+      console.log(`  DBG import form msg: ${msg || "(empty)"}`);
+      console.log(`  DBG url: ${page.url()}`);
+      throw e;
+    }
     const importedId = Number(page.url().match(/\/console\/agents\/(\d+)/)[1]);
     await page.waitForSelector(testid("agent-detail"), { timeout: 30000 });
     check("导入创建后进入详情页", !!importedId, page.url());
