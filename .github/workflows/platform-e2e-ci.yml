@@ -216,7 +216,7 @@ jobs:
           Market skill body.
           EOF
           kubectl -n agent-platform exec deploy/oaf-mysql -- \
-            mysql -uoaf -pOafPlatform2026 oaf_platform -e "
+            mysql -h127.0.0.1 -uoaf -pOafPlatform2026 oaf_platform -e "
               INSERT INTO skill_market_items
                 (source_id, \`key\`, display_name, description, tags_json, downloads, bundle_dir, enabled)
               SELECT id, 'e2e-market-skill', 'E2E Market Skill', 'market install probe', '[\"e2e\"]', 0,
