@@ -76,6 +76,37 @@ class SessionStreamControllerStatusTest {
     }
 
     @Test
+    void completedWhenLatestIsErrorTerminal() {
+        // error 与 AGENT_END 同为 turn 终态：不得落进 idle（否则刷新后前端把
+        // 「本回合已失败结束」当成「无事件可恢复」，与对话流的 error 帧语义分叉）
+        when(turnLeaseStore.isHeld("sid-err")).thenReturn(false);
+        when(eventStore.findLatestStrict("sid-err")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(8, "error",
+                "{\"type\":\"error\",\"error\":\"boom\"}", "rid-err"));
+        when(runtimeService.findPendingConfirm("sid-err")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-err", null).getBody();
+        assertEquals("completed", body.get("state"));
+        assertEquals(8, body.get("latest_event_seq"));
+    }
+
+    @Test
+    void workingTurnWithoutEventsDoesNotExposePreviousTurnReplyId() {
+        // 租约被持有但最新事件是上一 turn 的终态：下一 turn 尚未产出事件。
+        // 不能把旧 replyId 下发——客户端按它过滤续传会永远看不到新 turn 的 delta。
+        when(turnLeaseStore.isHeld("sid-next")).thenReturn(true);
+        when(eventStore.findLatestStrict("sid-next")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(21, "AGENT_END", "{}", "rid-old"));
+        when(runtimeService.findPendingConfirm("sid-next")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-next", null).getBody();
+        assertEquals("working", body.get("state"));
+        assertEquals(21, body.get("latest_event_seq"));
+        assertEquals("", body.get("reply_id"),
+            "新 turn 尚未产出事件时不得回放上一 turn 的 replyId");
+    }
+
+    @Test
     void waitingConfirmTakesPrecedence() {
         when(eventStore.findLatestStrict("sid-4")).thenReturn(
             new SessionEventStore.EnvelopedEvent(5, "permission_ask", "{}", "rid-4"));

@@ -221,7 +221,7 @@ GET /threads/{sessionId}/status
 |------|------|------|
 | `state` | String | `working` / `completed` / `waiting_confirm` / `idle` / `interrupted`（5 态） |
 | `latest_event_seq` | Integer | 最新事件序号（供 `afterSeq` 参数使用） |
-| `reply_id` | String | 当前 turn 的回复 ID |
+| `reply_id` | String | 最新事件所属 turn 的回复 ID；`working` 且新 turn 尚未产出任何事件时为空串（此时客户端应按 `latest_event_seq` 无 `replyId` 过滤续传，否则会一直过滤旧 turn） |
 | `pending_confirm` | String/Object | 待确认上下文（`waiting_confirm` 时非空）；与 `/history` 同口径取 FIFO 头，本地 HITL 行或远程确认行（远程行 additive 附 `confirm_key` / `remote_task`） |
 
 **5 态语义：**
@@ -230,7 +230,7 @@ GET /threads/{sessionId}/status
 |-------|------|----------|
 | `working` | 有活跃租约，正在执行 | 走 `/subscribe?afterSeq={latest_event_seq}` |
 | `waiting_confirm` | 挂起等待人工确认 | 渲染确认卡（用 `pending_confirm` 重建） |
-| `completed` | 正常终态 | 回放历史 |
+| `completed` | turn 终态（`AGENT_END` 或 `error`） | 回放历史（失败原因见 history 的失败留痕） |
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占 | 展示中断态，允许重发 |
 | `idle` | 无事件、无租约、无待确认 | 显示空白输入状态 |
 

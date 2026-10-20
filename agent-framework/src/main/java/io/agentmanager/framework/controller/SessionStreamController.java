@@ -149,7 +149,11 @@ public class SessionStreamController {
             state = "waiting_confirm";
         } else if (probe.running()) {
             state = "working";
-        } else if (latestEvent != null && "AGENT_END".equals(latestEvent.type())) {
+        } else if (latestEvent != null
+                && SessionEventTailer.isTerminalType(latestEvent.type())) {
+            // AGENT_END 与 error 都是 turn 终态（与观察者路径 probe 同口径）：
+            // 只认 AGENT_END 会让以 error 结束的 turn 落进 idle——刷新后前端既不续传，
+            // 也拿不到失败信号，与对话流的 error 帧语义不一致。
             state = "completed";
         } else if (probe.interrupted()) {
             // 有事件、非终态、无租约、无待确认：执行副本崩溃或被抢占
@@ -158,12 +162,21 @@ public class SessionStreamController {
             state = "idle";
         }
 
+        String replyId = latestEvent != null && latestEvent.replyId() != null
+            ? latestEvent.replyId() : "";
+        if ("working".equals(state) && latestEvent != null
+                && SessionEventTailer.isTerminalType(latestEvent.type())) {
+            // 租约被持有、但最新事件仍是上一 turn 的终态 → 持锁的是「尚未产出任何事件」的
+            // 下一 turn。此时把上一 turn 的 replyId 下发出去，客户端续传会按旧 turn 过滤，
+            // 永远收不到新 turn 的事件（刷新卡住）。留空让客户端按 latest_event_seq 无过滤续传。
+            replyId = "";
+        }
+
         return ResponseEntity.ok(Map.of(
             "session_id", sessionId,
             "state", state,
             "latest_event_seq", latestEvent != null ? latestEvent.seq() : 0,
-            "reply_id", latestEvent != null && latestEvent.replyId() != null
-                ? latestEvent.replyId() : "",
+            "reply_id", replyId,
             "pending_confirm", pendingConfirm != null ? pendingConfirm : ""
         ));
     }

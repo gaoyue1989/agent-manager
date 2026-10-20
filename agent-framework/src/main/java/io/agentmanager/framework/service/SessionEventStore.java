@@ -361,40 +361,64 @@ public class SessionEventStore {
     /**
      * 查询 afterSeq 之后的事件（回放用）。
      *
-     * <p>分页读取：每页 materialize 成 List 后再从内存中向外发，避免慢客户端反压时
-     * 把一次查询钉在整个推送期间。
+     * <p>分页读取：每页先 materialize 成 List 再逐条下发；下一页只在本页被下游消费完后
+     * 才查询（{@link Flux#generate} 的拉模式）。这样慢客户端不会让回放把整场会话
+     * （7 天留存，可能十万级事件）一次性读进内存——旧实现用 {@code Flux.create} 主动
+     * 循环 {@code sink.next}，在 Spring MVC 逐帧 request(1) 的下游前会先把全部事件
+     * 堆进 FluxCreate 队列。
+     *
+     * <p>失败必须**可见**：静默 complete 出一个空流，与「没有新事件」无法区分。
      *
      * @param afterSeq 游标：返回 seq &gt; afterSeq 的记录；&lt; 0 表示从头
      * @param replyId  turn 标识（可选）；null 表示不限 turn
      */
     public Flux<EnvelopedEvent> queryAfter(String sessionId, String replyId, int afterSeq) {
-        return Flux.create(sink -> {
-            int cursor = afterSeq;
-            try {
-                while (!sink.isCancelled()) {
-                    var page = queryPage(sessionId, replyId, cursor, QUERY_PAGE_SIZE);
-                    if (page.isEmpty()) break;
-                    for (var e : page) {
-                        if (sink.isCancelled()) return;
-                        sink.next(e);
-                        cursor = e.seq();
+        return Flux.<EnvelopedEvent, PageCursor>generate(PageCursor::new,
+            (state, sink) -> {
+                try {
+                    if (state.buffer.isEmpty()) {
+                        var page = queryPage(sessionId, replyId,
+                            state.initialized ? state.cursor : afterSeq, QUERY_PAGE_SIZE);
+                        if (page.isEmpty()) {
+                            sink.complete();
+                            return state;
+                        }
+                        state.buffer.addAll(page);
+                        state.cursor = page.get(page.size() - 1).seq();
+                        state.shortPage = page.size() < QUERY_PAGE_SIZE;
+                        state.initialized = true;
                     }
-                    if (page.size() < QUERY_PAGE_SIZE) break;
+                    sink.next(state.buffer.poll());
+                    // 短页 = 已到流尾：最后一条下发后同帧收流，避免多发一次空查询
+                    if (state.buffer.isEmpty() && state.shortPage) {
+                        sink.complete();
+                    }
+                    return state;
+                } catch (Exception e) {
+                    log.warn("SessionEventStore: queryAfter failed for {}: {}",
+                        sessionId, e.getMessage());
+                    sink.error(e);
+                    return state;
                 }
-                if (!sink.isCancelled()) sink.complete();
-            } catch (Exception e) {
-                // 回放的失败必须**可见**：静默 complete 出一个空流，与「没有新事件」无法区分
-                log.warn("SessionEventStore: queryAfter failed for {}: {}", sessionId, e.getMessage());
-                sink.error(e);
-            }
-        });
+            });
+    }
+
+    /** {@link #queryAfter} 的单订阅分页状态（仅订阅线程访问）。 */
+    private static final class PageCursor {
+        final java.util.ArrayDeque<EnvelopedEvent> buffer = new java.util.ArrayDeque<>();
+        /** 已下发到的 seq；首次查询用调用方传入的 afterSeq（可为负） */
+        int cursor;
+        boolean initialized;
+        boolean shortPage;
     }
 
     /** 读取一页事件（已 materialize） */
     private List<EnvelopedEvent> queryPage(String sessionId, String replyId, int afterSeq, int limit) {
         // 下界钳到 0：XRANGE 的 ID 不能为负，而 afterSeq = -5 会让 afterSeq+1 = -4 直接报
         // 「Invalid stream ID」（实测）。0-0 是合法最小 ID，等价于「从头开始」。
-        int from = Math.max(0, afterSeq + 1);
+        // 上界防溢出：afterSeq = Integer.MAX_VALUE 时 +1 会回绕成负数，再被 max(0, …)
+        // 钳成 0——即客户端声明「我已经看到最新」反而触发了整场会话重放。
+        int from = afterSeq >= Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, afterSeq + 1);
 
         if (replyId == null || replyId.isBlank()) {
             return toEnveloped(eventLog.range(sessionId, from, null, limit));

@@ -11,7 +11,6 @@ import org.springframework.http.codec.ServerSentEvent;
 import io.agentmanager.framework.controller.AgentEventSseSerializer;
 
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.FluxSink;
 import reactor.core.scheduler.Schedulers;
 
 /**
@@ -30,6 +29,17 @@ public class SessionEventTailer {
 
     /** 终态事件类型：出现即代表 turn 不会再产出新事件 */
     private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error");
+
+    /**
+     * 该事件类型是否为 turn 终态。
+     *
+     * <p>终态判据只允许此一处：{@code /status} 的 completed 判定与 {@link #probe} 收流判定
+     * 必须同口径。否则 turn 以 {@code error} 结束时，{@code /status} 会落进 {@code idle}
+     * （刷新后前端既不续传、也看不到失败），与对话流的「error 帧 + 关流」不一致。
+     */
+    public static boolean isTerminalType(String type) {
+        return type != null && TERMINAL_TYPES.contains(type);
+    }
 
     /** 终止探测的降频间隔：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm（包私有：测试可见） */
     static final long PROBE_INTERVAL_MS = 2000;
@@ -107,7 +117,7 @@ public class SessionEventTailer {
             return TurnProbe.RUNNING;
         }
         var latest = eventStore.findLatest(sessionId);
-        if (latest == null || TERMINAL_TYPES.contains(latest.type())) {
+        if (latest == null || isTerminalType(latest.type())) {
             return TurnProbe.FINISHED;
         }
         // HITL 暂停点：lease 已让出但 turn 未结束。permission_ask 是 turn 边界，
@@ -127,7 +137,7 @@ public class SessionEventTailer {
         if (turnLeaseStore.isHeld(sessionId)) {
             return TurnProbe.RUNNING;
         }
-        if (latest == null || TERMINAL_TYPES.contains(latest.type())) {
+        if (latest == null || isTerminalType(latest.type())) {
             return TurnProbe.FINISHED;
         }
         if (hasPendingConfirm) {
@@ -157,57 +167,75 @@ public class SessionEventTailer {
                 .doOnNext(e -> cursor.set(e.seq()))
                 .map(AgentEventSseSerializer::toSseFrame);
 
-        Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>>create(sink -> {
-            long lastProbeAt = 0;   // 0 → 首轮立即探测，避免对已结束的 turn 空等一轮
-            long lastFrameAt = System.currentTimeMillis();
-            int emptyStreak = 0;    // 连续空页计数（A2 空闲退避）：空页 +1，非空页归零
-            while (!sink.isCancelled()) {
+        // 实时追赶：按下游需求逐帧拉取（Flux.generate 每次请求发一帧）。
+        // 不用 Flux.create 手写死循环：Spring MVC 的 SseEmitterSubscriber 在「发送完成」后
+        // 才在异步线程 request(1)，而 Flux.create 的生成器在另一线程上会先于该 request 把
+        // 整页事件塞进队列——跨线程 request 与生产者暂停叠加时，队列里的待发帧会一直等到
+        // 下一次生产者写入才被 drain（实测：续传只在回放后吐第一帧，后续 delta 要等 turn
+        // 结束才一次性到达）。generate 把「等事件」放在下游请求触发的调用里，天然按需。
+        var liveStateRef = new java.util.concurrent.atomic.AtomicReference<LiveState>();
+        Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>, LiveState>generate(() -> {
+            var st = new LiveState();
+            liveStateRef.set(st);
+            return st;
+        }, (st, sink) -> {
+            while (!st.cancelled) {
+                // 缓冲里仍有事件：先发完（含竞态兜底补发的尾部事件），再收流
+                if (!st.buffer.isEmpty()) {
+                    var e = st.buffer.poll();
+                    sink.next(AgentEventSseSerializer.toSseFrame(e));
+                    cursor.set(e.seq());
+                    st.lastFrameAt = System.currentTimeMillis();
+                    if (isTerminalType(e.type())) {
+                        st.donePending = true;
+                    }
+                    return st;
+                }
+                if (st.donePending) {
+                    sink.next(doneSSE());
+                    sink.complete();
+                    return st;
+                }
+                if (st.interruptedPending) {
+                    sink.next(interruptedSSE());
+                    sink.complete();
+                    return st;
+                }
+
                 var page = eventStore.queryAfter(sessionId, replyId, cursor.get())
                     .collectList().block();
                 if (page == null) page = java.util.List.of();
-                emptyStreak = page.isEmpty() ? emptyStreak + 1 : 0;
-
-                boolean sawTerminal = false;
-                for (var e : page) {
-                    if (sink.isCancelled()) return;
-                    sink.next(AgentEventSseSerializer.toSseFrame(e));
-                    cursor.set(e.seq());
-                    if (TERMINAL_TYPES.contains(e.type())) sawTerminal = true;
-                }
-                if (!page.isEmpty()) lastFrameAt = System.currentTimeMillis();
-
-                if (sawTerminal) {
-                    sink.next(doneSSE());
-                    sink.complete();
-                    return;
+                st.emptyStreak = page.isEmpty() ? st.emptyStreak + 1 : 0;
+                if (!page.isEmpty()) {
+                    st.buffer.addAll(page);
+                    continue;
                 }
 
                 // 终止探测降频：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm
                 long now = System.currentTimeMillis();
-                if (page.isEmpty() && now - lastProbeAt >= PROBE_INTERVAL_MS) {
-                    lastProbeAt = now;
+                if (now - st.lastProbeAt >= PROBE_INTERVAL_MS) {
+                    st.lastProbeAt = now;
                     var probe = probe(sessionId);
                     if (probe.interrupted()) {
-                        sink.next(interruptedSSE());
-                        sink.complete();
-                        return;
+                        st.interruptedPending = true;
+                        continue;
                     }
                     if (probe.finished()) {
                         // 竞态兜底：终止行可能恰好落在上面那次 queryAfter 与本次 probe 之间。
                         // 那时 page 为空、probe 却已判定结束——若不补一次追赶查询，终止事件
                         // 自身（尤其是 error）会被静默丢弃，客户端只会看到一个"正常完成"。
-                        emitRemaining(sink, sessionId, replyId, cursor);
-                        sink.next(doneSSE());
-                        sink.complete();
-                        return;
+                        emitRemainingInto(st.buffer, sessionId, replyId, cursor);
+                        st.donePending = true;
+                        continue;
                     }
                 }
 
                 // 心跳：两次 probe 之间可能有任意长的静默，comment 帧不触发前端 onmessage，
                 // 只用于重置入口代理的读超时计时器（否则长静默的观察者流会被中途切断）。
-                if (now - lastFrameAt >= heartbeatInterval.toMillis()) {
+                if (now - st.lastFrameAt >= heartbeatInterval.toMillis()) {
                     sink.next(heartbeatSSE());
-                    lastFrameAt = now;
+                    st.lastFrameAt = now;
+                    return st;
                 }
 
                 try {
@@ -215,16 +243,36 @@ public class SessionEventTailer {
                     // 有新事件（非空页）streak 已归零、下一轮即回基频。终态判定节奏：
                     // 探测门控原样保留，稳态下空页轮询周期 == 探测周期，与现状一致；
                     // 过渡期第二次探测一次性推迟 ~1.7s（首拍 600/1200ms 均不满足 2s 门控）。
-                    Thread.sleep(pollSleepMs(pollInterval.toMillis(), emptyStreak));
+                    Thread.sleep(pollSleepMs(pollInterval.toMillis(), st.emptyStreak));
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     sink.complete();
-                    return;
+                    return st;
                 }
             }
-        }).subscribeOn(Schedulers.boundedElastic());
+            return st;
+        }).doOnCancel(() -> {
+            var st = liveStateRef.get();
+            if (st != null) st.cancelled = true;
+        });
 
-        return replay.concatWith(live);
+        // 整个观察者流（含 replay 的分页读）都在 boundedElastic 上跑：replay 是阻塞查询，
+        // 留在 servlet 线程会把响应提交前的线程占满（全量回放时尤其明显）。
+        return replay.concatWith(live).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /** 实时追赶的每订阅状态（Flux.generate 的 state，仅订阅线程访问）。 */
+    private static final class LiveState {
+        final java.util.ArrayDeque<SessionEventStore.EnvelopedEvent> buffer = new java.util.ArrayDeque<>();
+        /** 0 → 首轮立即探测，避免对已结束的 turn 空等一轮 */
+        long lastProbeAt;
+        long lastFrameAt = System.currentTimeMillis();
+        /** 连续空页计数（A2 空闲退避）：空页 +1，非空页归零 */
+        int emptyStreak;
+        boolean donePending;
+        boolean interruptedPending;
+        /** 订阅被取消：让阻塞中的轮询在下一拍退出，不再等心跳到期 */
+        volatile boolean cancelled;
     }
 
     /**
@@ -232,15 +280,11 @@ public class SessionEventTailer {
      *
      * <p>不做循环——终止行至多带来一批尾部事件，取一次即可；取不到就正常补 done 帧。
      */
-    private void emitRemaining(FluxSink<ServerSentEvent<String>> sink, String sessionId,
-                               String replyId, AtomicInteger cursor) {
+    private void emitRemainingInto(java.util.Deque<SessionEventStore.EnvelopedEvent> buffer,
+                                   String sessionId, String replyId, AtomicInteger cursor) {
         var page = eventStore.queryAfter(sessionId, replyId, cursor.get()).collectList().block();
         if (page == null) return;
-        for (var e : page) {
-            if (sink.isCancelled()) return;
-            sink.next(AgentEventSseSerializer.toSseFrame(e));
-            cursor.set(e.seq());
-        }
+        buffer.addAll(page);
     }
 
     private static ServerSentEvent<String> heartbeatSSE() {

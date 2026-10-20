@@ -313,6 +313,20 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void queryAfterWithMaxIntCursorDoesNotWrapAroundAndReplayEverything() {
+        // afterSeq = Integer.MAX_VALUE 时 afterSeq + 1 会回绕成负数，旧实现再经 max(0, …)
+        // 钳成 0——客户端声明「已看到最新」，服务端却重放整场会话。
+        when(eventLog.range("sid-max", Integer.MAX_VALUE, null, SessionEventStore.queryPageSize()))
+            .thenReturn(List.of());
+
+        StepVerifier.create(store.queryAfter("sid-max", null, Integer.MAX_VALUE))
+            .verifyComplete();
+
+        verify(eventLog).range("sid-max", Integer.MAX_VALUE, null,
+            SessionEventStore.queryPageSize());
+    }
+
+    @Test
     void queryAfterWithKnownReplyIssuesOneBoundedRangeNotAFullScan() {
         // 已知 replyId 必须走 ZSET 索引：一次**有界**的 range（本 reply 的首个 seq
         // .. 下一个 reply 的首个 seq - 1），而不是把整条流扫一遍再过滤。
