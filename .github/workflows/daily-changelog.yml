@@ -1,0 +1,76 @@
+# 每日更新日志：定时汇总北京时间昨天落地 master 的全部提交，
+# 经 LLM 总结后发布为一条 GitHub Release（changelog-YYYY-MM-DD）。
+# 设计说明见 docs/design/daily-changelog-design.md
+name: daily-changelog
+
+on:
+  schedule:
+    # GitHub cron 为 UTC：16:30 UTC = 北京时间次日 00:30，汇总刚结束的完整一天
+    - cron: '30 16 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '汇总日期 YYYY-MM-DD（北京时间口径，缺省为昨天；用于补跑）'
+        required: false
+        type: string
+
+# gh release create/edit 需要 contents: write
+permissions:
+  contents: write
+
+# 定时与手动补跑不互相取消（现有 CI 的 cancel-in-progress 是为 PR 新旧互斥，场景不同）
+concurrency:
+  group: daily-changelog
+  cancel-in-progress: false
+
+env:
+  LLM_BASE_URL: https://token-plan-cn.xiaomimimo.com/v1
+  LLM_MODEL: mimo-v2.6-flash
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算汇总日期（北京时间）
+        id: date
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            echo "date=${{ github.event.inputs.date }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "date=$(TZ='Asia/Shanghai' date -d '1 day ago' +%F)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 生成更新日志
+        id: gen
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if bash scripts/gen-daily-changelog.sh "${{ steps.date.outputs.date }}" > changelog-body.md; then
+            echo "generated=true" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "北京时间 ${{ steps.date.outputs.date }} master 无提交，跳过发布"
+              echo "generated=false" >> "$GITHUB_OUTPUT"
+            else
+              exit "$rc"
+            fi
+          fi
+
+      - name: 发布 Release（已存在则更新正文，保证重跑幂等）
+        if: steps.gen.outputs.generated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="changelog-${{ steps.date.outputs.date }}"
+          TITLE="更新日志 · ${{ steps.date.outputs.date }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes-file changelog-body.md
+          else
+            gh release create "$TAG" --title "$TITLE" --notes-file changelog-body.md \
+              --target master --latest=false
+          fi
