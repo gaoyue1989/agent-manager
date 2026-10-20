@@ -27,7 +27,7 @@ images:
 # 路由：router（统一域名 /agent/{short}，默认）或 host（每服务独立域名）
 routing:
   mode: router
-  ingressClass: nginx           # 留空 = 业务 Ingress 不写 ingressClassName（集群默认兜底）
+  ingressClass: ""              # 留空 = 业务 Ingress 不写 ingressClassName（集群默认兜底）
   host: "10.0.0.10"              # 集群 ingress controller 对外地址（Endpoint 展示）
   port: 30080
   # hostSuffix: ".region.example.cn"   # mode=host 时必填

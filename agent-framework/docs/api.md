@@ -154,7 +154,7 @@ curl http://localhost:8100/skills
 | GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
 | PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB）。重新写入自动清除禁用标记（恢复启用） |
 | PUT | `/skills/users/{name}/toggle` | **启停个人技能**（仅对有 L4 覆盖的技能可用，无 → 404）：返回 `{userId, name, enabled, message}`；禁用写 `/{name}/.disabled`，禁用后从 `/skills/available`、`@Skill` 合并视图排除且沙箱物化/回写跳过 |
-| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md，技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。**与包内公共技能重名的新建上传 → 409 `name_conflicts_with_package`**（要求改名后重传；想基于公共技能定制走 `/skills/users/{name}/sync-from-package` 再编辑）——该用户已有同名 L4 覆盖时按更新放行。响应 `{name, action, files, version}` |
+| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md（支持扁平或**多层包裹目录**，用户常对整个文件夹压缩），技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。**与包内公共技能重名的新建上传 → 409 `name_conflicts_with_package`**（要求改名后重传；想基于公共技能定制走 `/skills/users/{name}/sync-from-package` 再编辑）——该用户已有同名 L4 覆盖时按更新放行。响应 `{name, action, files, version}` |
 | DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
 | GET | `/debug/user-skills` | **全量用户索引**（运维/调试）；`{count, users:[...], truncated?}`；索引失败 500 |
@@ -466,6 +466,7 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 
 | 字段 | 说明 |
 |------|------|
+| `summary` | 人可读调用摘要（与 SSE `tool_call_summary.summary` 同一文案，如「读取 uploads/a.xlsx」）；前端历史回放优先展示它，缺失时回落 `name` |
 | `state` | 结果状态（`success`/`error`/`denied`/`interrupted`）优先；无结果时回落 ToolCallState（如 `asking`） |
 | `output` | 工具结果文本；**敏感值已遮掩**（密钥键值对 / `tp-` token / Bearer），且已按上限截断 |
 | `output_truncated` | 可选：`true` 表示因超限被截断 |

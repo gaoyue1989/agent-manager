@@ -23,6 +23,8 @@ const TABLES = ['agent_state', 'agent_fs', 'confirm_context', 'turn_lease', 'ses
   'agui_interrupt',
   // V8 的 remote_task_registry 同理（设计 §18.2）：残留同样触发 baseline(5) 跳过 V1
   'remote_task_registry',
+  // V10 的 turn_intent 同理：新表必须一并清，否则复用库第二轮触发 baseline(5) 跳过 V1
+  'turn_intent',
   // Flyway 历史表：不清掉的话，实例重启后 Flyway 认为迁移已应用、不会重建上面被 DROP 的表
   'flyway_schema_history'];
 

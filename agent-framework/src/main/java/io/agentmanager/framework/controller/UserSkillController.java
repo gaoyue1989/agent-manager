@@ -206,7 +206,8 @@ public class UserSkillController {
      * 上传 zip 包作为当前用户的个人技能（L4）：解压 → 定位 SKILL.md → 以包内清单全量替换该技能。
      *
      * <p>技能名取自 SKILL.md frontmatter {@code name}，缺省回落包裹目录名 / zip 文件名；
-     * 同名技能<b>覆盖</b>。zip 支持扁平（根目录含 SKILL.md）与包裹（一层子目录含 SKILL.md）两种结构。
+     * 同名技能<b>覆盖</b>。zip 支持扁平（根目录含 SKILL.md）与包裹（一层或多层子目录含 SKILL.md，
+     * 用户常对整个文件夹压缩）两种结构。
      *
      * <p><b>与包内（L2）公共技能重名的新建上传返回 409</b>（{@code name_conflicts_with_package}）：
      * 同名 L4 会整体覆盖 L2，用户意图是“新增一个自己的技能”而非“改公共技能”，故要求改名后重传

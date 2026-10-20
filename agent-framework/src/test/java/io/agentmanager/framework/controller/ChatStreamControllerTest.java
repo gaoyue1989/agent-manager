@@ -342,6 +342,64 @@ class ChatStreamControllerTest {
         ChatStreamController.ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
     }
 
+    @Test
+    void chatRegistersQueuedIntentAndClearsItAfterLeaseAcquired() {
+        ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofMillis(50);
+        try {
+            var intentStore = mock(io.agentmanager.framework.service.TurnIntentStore.class);
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                controller, "turnIntentStore", intentStore);
+
+            var sessionId = "test-user-intent";
+            // 第一次抢锁失败 → 登记排队意图；下一拍拿到租约 → 清除
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            when(turnLeaseStore.tryAcquire(sessionId)).thenAnswer(inv -> {
+                var n = calls.incrementAndGet();
+                return n == 1 ? null : "tok-i";
+            });
+            when(chatChannel.sendStream(any(ChatUiRequest.class)))
+                .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-i")));
+
+            collect(sessionId, "hello", null);
+
+            var rid = org.mockito.ArgumentCaptor.forClass(String.class);
+            verify(intentStore).register(eq(sessionId), rid.capture(), any(Duration.class));
+            // 排队意图的 turn id 必须与事件信封 id 相同；租约到手即清除（此后以事件 replyId 为准）
+            verify(intentStore).clear(eq(sessionId), eq(rid.getValue()));
+            verify(intentStore, never()).fail(eq(sessionId), anyString(), anyString(), any());
+        } finally {
+            ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
+        }
+    }
+
+    @Test
+    void chatMarksIntentFailedOnQueueTimeout() {
+        ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofMillis(30);
+        ChatStreamController.ACQUIRE_TIMEOUT = Duration.ofMillis(120);
+        try {
+            var intentStore = mock(io.agentmanager.framework.service.TurnIntentStore.class);
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                controller, "turnIntentStore", intentStore);
+
+            var sessionId = "test-user-intent-timeout";
+            when(turnLeaseStore.tryAcquire(sessionId)).thenReturn(null);
+
+            var frames = collect(sessionId, "hello", null);
+            assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_in_progress")),
+                "排队超时应回错误帧: " + frames);
+
+            var rid = org.mockito.ArgumentCaptor.forClass(String.class);
+            verify(intentStore).register(eq(sessionId), rid.capture(), any(Duration.class));
+            verify(intentStore).fail(eq(sessionId), eq(rid.getValue()),
+                org.mockito.ArgumentMatchers.contains("turn_in_progress"), any(Duration.class));
+            // 失败意图保留给刷新后的 /status，不由本请求清除
+            verify(intentStore, never()).clear(eq(sessionId), anyString());
+        } finally {
+            ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
+            ChatStreamController.ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
+        }
+    }
+
     /**
      * 跨层排队 waiting 心跳（issue #87 兜底）：租约到手后 SDK 事件迟迟不来（排队/静默），
      * 心跳每 WAITING_FRAME_INTERVAL 直发一帧 waiting——首事件到达前客户端不得零反馈；

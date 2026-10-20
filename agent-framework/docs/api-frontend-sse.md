@@ -177,7 +177,7 @@ Accept: text/event-stream
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `afterSeq` | Integer | ❌ | 回放游标（回放**严格大于**该 seq 的事件），默认 0 = 从头回放 |
-| `replyId` | String | ❌ | Turn 标识，仅回放/订阅指定 turn 的事件 |
+| `replyId` | String | ❌ | **Turn 信封 id**（= `/status.reply_id` / 帧内 `turnId`），仅回放/订阅指定 turn 的事件。注意与帧内 SDK 事件级 `replyId` 不是同一个值 |
 
 > ⚠️ **本端点不读 `Last-Event-ID` 请求头。** 浏览器原生 `EventSource` 的自动重连对本 API 无效
 > ——必须用 `fetch` + `ReadableStream`（见 §13），或自建 EventSource 并把最后的 `id:` 显式拼进 `afterSeq`。
@@ -213,26 +213,29 @@ GET /threads/{sessionId}/status
   "state": "working",
   "latest_event_seq": 42,
   "reply_id": "r1",
-  "pending_confirm": ""
+  "pending_confirm": "",
+  "error": ""
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `state` | String | `working` / `completed` / `waiting_confirm` / `idle` / `interrupted`（5 态） |
+| `state` | String | `working` / `completed` / `waiting_confirm` / `idle` / `interrupted` / `failed`（6 态；`failed` 为 additive） |
 | `latest_event_seq` | Integer | 最新事件序号（供 `afterSeq` 参数使用） |
-| `reply_id` | String | 当前 turn 的回复 ID |
+| `reply_id` | String | 最新事件所属 turn 的回复 ID；`working` 且新 turn 尚未产出任何事件时为空串（此时客户端应按 `latest_event_seq` 无 `replyId` 过滤续传，否则会一直过滤旧 turn） |
 | `pending_confirm` | String/Object | 待确认上下文（`waiting_confirm` 时非空）；与 `/history` 同口径取 FIFO 头，本地 HITL 行或远程确认行（远程行 additive 附 `confirm_key` / `remote_task`） |
+| `error` | String | additive：`failed` 态时的失败原因（排队超时 / 建立失败），其余状态为空串 |
 
-**5 态语义：**
+**状态语义：**
 
 | state | 含义 | 前端动作 |
 |-------|------|----------|
-| `working` | 有活跃租约，正在执行 | 走 `/subscribe?afterSeq={latest_event_seq}` |
+| `working` | 有活跃租约，或本会话有排队中的 turn（意图行存在），正在执行 | 走 `/subscribe?afterSeq={latest_event_seq}&replyId={reply_id}`（排队中 `reply_id` 即本轮 turn id） |
 | `waiting_confirm` | 挂起等待人工确认 | 渲染确认卡（用 `pending_confirm` 重建） |
-| `completed` | 正常终态 | 回放历史 |
+| `completed` | turn 终态（`AGENT_END` 或 `error`） | 回放历史（失败原因见 history 的失败留痕） |
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占 | 展示中断态，允许重发 |
 | `idle` | 无事件、无租约、无待确认 | 显示空白输入状态 |
+| `failed` | 排队的 turn 超时或建立失败（无事件可回放；`error` 给原因） | 展示失败提示，不订阅 |
 
 **503 分支（事件存储不可用）：**
 
@@ -1159,6 +1162,7 @@ GET /skills/manage
 |------|---------|---------|
 | `session_created` | `POST /threads/chat` 未传 sessionId 时自动生成（**仅此端点**） | `session_id` |
 | `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role` |
+| （通用） | 非 delta 事件（里程碑/合成帧） | additive `turnId`：**turn 信封 id**，`GET /subscribe?replyId=` 的过滤口径；delta 帧不注入（token 热路径），可从任一里程碑帧或 `/status.reply_id` 获取 |
 | `AGENT_END` | Agent 执行完成（**流关闭信号**） | `replyId` |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 在结果返回时发出，snake_case） | `subagent_id`, `agent_id`, `session_id`, `label` |
 

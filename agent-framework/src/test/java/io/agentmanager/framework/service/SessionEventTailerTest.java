@@ -1,6 +1,13 @@
 package io.agentmanager.framework.service;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.lettuce.core.RedisConnectionException;
 
@@ -9,6 +16,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import org.springframework.http.codec.ServerSentEvent;
 
 import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
@@ -375,5 +385,123 @@ class SessionEventTailerTest {
         assertTrue(probes >= 2, "4.5s 窗口内至少 2 次探测（首轮立即 + 一次门控），实际 " + probes);
         assertTrue(polls > probes + 1,
             "探测必须保持降频门控（轮询次数明显多于探测次数）: polls=" + polls + " probes=" + probes);
+    }
+
+    // ===== 排队意图（turn_intent）与探测降频 =====
+
+    @Test
+    void failedTurnIntentEmitsErrorFrameAndCloses() {
+        var intents = mock(TurnIntentStore.class);
+        when(intents.find("sid-ifail")).thenReturn(
+            new TurnIntentStore.Intent("rid-ifail", true, "turn_in_progress: queue timeout"));
+        when(eventStore.queryAfter("sid-ifail", "rid-ifail", 0, false)).thenReturn(Flux.empty());
+
+        var t = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
+            Duration.ofMillis(20), Duration.ofSeconds(10), intents);
+        var frames = t.tail("sid-ifail", "rid-ifail", 0).collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(frames);
+        assertEquals(1, frames.size(), "失败意图应只补一帧 error 后收流: " + frames);
+        assertTrue(frames.get(0).data() != null
+                && frames.get(0).data().contains("\"type\":\"error\"")
+                && frames.get(0).data().contains("turn_in_progress"),
+            "error 帧必须携带失败原因: " + frames.get(0).data());
+    }
+
+    @Test
+    void queuedTurnIntentIsNotClassifiedAsInterruptedWhileWaiting() {
+        var intents = mock(TurnIntentStore.class);
+        when(intents.find("sid-iqueue")).thenReturn(
+            new TurnIntentStore.Intent("rid-iqueue", false, null));
+        when(eventStore.queryAfter("sid-iqueue", "rid-iqueue", 0, false)).thenReturn(Flux.empty());
+
+        var t = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
+            Duration.ofMillis(20), Duration.ofSeconds(10), intents);
+        var frames = t.tail("sid-iqueue", "rid-iqueue", 0)
+            .take(Duration.ofMillis(250))
+            .collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(frames);
+        assertTrue(frames.stream().noneMatch(f -> f.data() != null && f.data().contains("interrupted")),
+            "排队中的 turn 不能被判成 interrupted（租约可能还在上一轮手上）: " + frames);
+    }
+
+    @Test
+    void probeSlowsDownOnlyAfterLongBusinessIdle() {
+        assertEquals(SessionEventTailer.PROBE_INTERVAL_MS, SessionEventTailer.probeIntervalMs(0));
+        assertEquals(SessionEventTailer.PROBE_INTERVAL_MS,
+            SessionEventTailer.probeIntervalMs(SessionEventTailer.IDLE_PROBE_AFTER_MS - 1));
+        assertEquals(SessionEventTailer.IDLE_PROBE_INTERVAL_MS,
+            SessionEventTailer.probeIntervalMs(SessionEventTailer.IDLE_PROBE_AFTER_MS));
+        assertEquals(SessionEventTailer.IDLE_PROBE_INTERVAL_MS,
+            SessionEventTailer.probeIntervalMs(600_000));
+    }
+
+    // ===== 背压形态回归：Spring MVC SseEmitterSubscriber 的跨线程 request(1) =====
+
+    /**
+     * 复现 spring-webmvc 6.1 {@code AbstractEmitterSubscriber} 的消费方式：
+     * 初始 request(1)，每次 {@code send} 完成后才在**另一个线程**上 request(1)。
+     *
+     * <p>旧实现（{@code Flux.create} + 生产者死循环）在第一页有多个事件时，会把除首帧外的
+     * 其余帧留在 FluxCreate 队列里——跨线程 request 与生产者暂停叠加时不会被 drain，
+     * 要等生成器下一次 {@code sink.next}（往往就是 turn 结束）才一次性吐出。表现即
+     * 「刷新续传只回放已生成内容，之后不再流式输出」。
+     *
+     * <p>本用例只回放一页两帧、之后查询永远为空（turn 未结束），断言第二帧仍能按背压
+     * 节奏送达。旧实现下第二帧会一直滞留到超时。
+     */
+    @Test
+    void tailDeliversQueuedFrameWithDeferredCrossThreadDemand() throws Exception {
+        // 可能在被取消前就完成断言，探测次数不固定——用 lenient 避免 UnnecessaryStubbing
+        lenient().when(turnLeaseStore.isHeld("sid-defer")).thenReturn(true);
+        List<SessionEventStore.EnvelopedEvent> page = List.of(
+            new SessionEventStore.EnvelopedEvent(1, "TEXT_BLOCK_DELTA",
+                "{\"type\":\"TEXT_BLOCK_DELTA\",\"delta\":\"a\"}", "rid"),
+            new SessionEventStore.EnvelopedEvent(2, "TEXT_BLOCK_DELTA",
+                "{\"type\":\"TEXT_BLOCK_DELTA\",\"delta\":\"b\"}", "rid"));
+        when(eventStore.queryAfter(eq("sid-defer"), eq("rid"), anyInt())).thenAnswer(inv -> {
+            int cursor = inv.getArgument(2);
+            return cursor < 2 ? Flux.fromIterable(page.stream()
+                .filter(e -> e.seq() > cursor).toList()) : Flux.empty();
+        });
+
+        var received = new CopyOnWriteArrayList<Integer>();
+        var latch = new CountDownLatch(2);
+        var subscriptionRef = new AtomicReference<Subscription>();
+        ExecutorService demandExecutor = Executors.newSingleThreadExecutor();
+
+        try {
+            tailer.tail("sid-defer", "rid", 0).subscribe(new Subscriber<>() {
+                @Override
+                public void onSubscribe(Subscription s) {
+                    subscriptionRef.set(s);
+                    s.request(1);
+                }
+
+                @Override
+                public void onNext(ServerSentEvent<String> frame) {
+                    received.add(Integer.parseInt(frame.id()));
+                    latch.countDown();
+                    // 模拟 SseEmitterSubscriber：send 完成后在异步线程继续要下一帧
+                    demandExecutor.execute(() -> subscriptionRef.get().request(1));
+                }
+
+                @Override
+                public void onError(Throwable t) { /* 本用例不断言 */ }
+
+                @Override
+                public void onComplete() { /* 本用例不断言 */ }
+            });
+
+            assertTrue(latch.await(3, TimeUnit.SECONDS),
+                "第二帧必须在首帧发送完成、跨线程 request(1) 后立即送达，"
+                    + "不能等 turn 结束（实际收到 " + received + "）");
+            assertEquals(List.of(1, 2), received);
+        } finally {
+            var s = subscriptionRef.get();
+            if (s != null) s.cancel();
+            demandExecutor.shutdownNow();
+        }
     }
 }

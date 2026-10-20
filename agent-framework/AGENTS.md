@@ -449,7 +449,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/skills/users/{name}/download` | 下载该技能整目录为 zip（`{name}.zip`，Content-Disposition filename* 支持中文；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
 | PUT | `/skills/users/{name}` | 新建/覆盖当前用户 SKILL.md（个人覆盖；单文件 ≤1MB）。**生效范围分档（务必看）**：非沙箱档（SANDBOX_ENABLED=false）下轮会话生效；沙箱档写 agent_fs KV 并由「会话开始物化 L4」在该用户下一个 turn 投影进容器 `/workspace/skills` 生效。写入同时置写侧栅栏 `/{name}/.admin-override`：同代容器内旧副本在下次 call 结束时**不会**把该 KV 写入改回容器版本；代价是该技能在容器内用 skill_manage 的后续修改也不再回写落库（删除该技能可清除栅栏）。重新写入/下发自动清除禁用标记（恢复启用） |
 | PUT | `/skills/users/{name}/toggle` | **启停个人技能**（仅对有 L4 个人覆盖的技能可用，无覆盖 → 404）：禁用写 `/{name}/.disabled` 元数据标记，启用清除之；返回 `{userId, name, enabled, message}`。禁用后该技能对外不可用：`/skills/available`、`@Skill` 合并视图排除（连同包内同名基线）、沙箱物化与回写跳过；**模型侧 SDK 自动技能清单**（`<available_skills>`）与 `load_skill_through_path` 亦排除——`SkillDisabledFilterMiddleware` 把 L2 包内 + L4 个人禁用名以 per-call `SkillFilter` overlay 注入 RuntimeContext（SDK `effectiveFilter = builderFilter.overlay(ctx.filter)`） |
-| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压→定位 SKILL.md→技能名取 frontmatter `name`（回落包裹目录名/文件名）→同名**覆盖**（全量替换 + 失败回滚）；含二进制/非 UTF-8 文件**拒绝整个包**（400，与 sync-from-package 的「跳过」语义相反）；**与包内公共技能重名的新建上传 409 `name_conflicts_with_package`**（改名后重传；已有同名 L4 覆盖时按更新放行）；响应 `{name, action, files, version}`；同样置写侧栅栏 |
+| POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压→定位 SKILL.md（支持扁平或**多层包裹目录**，用户常对整个文件夹压缩）→技能名取 frontmatter `name`（回落包裹目录名/文件名）→同名**覆盖**（全量替换 + 失败回滚）；含二进制/非 UTF-8 文件**拒绝整个包**（400，与 sync-from-package 的「跳过」语义相反）；**与包内公共技能重名的新建上传 409 `name_conflicts_with_package`**（改名后重传；已有同名 L4 覆盖时按更新放行）；响应 `{name, action, files, version}`；同样置写侧栅栏 |
 | DELETE | `/skills/users/{name}` | 删除当前用户个人覆盖（全部文件，写 KV 删除标记 `/{name}/.deleted` 防回写复活，并清除写侧栅栏；响应带 `tombstone`=标记名+清除方式）→ 有包内同名技能则回落基线，否则该技能消失。**标记无 TTL**：该用户此后在同代（及后续）容器内用 skill_manage 重建同名技能不会被回写落库，需管理面重新写入或从包内下发才清除标记。沙箱档下删除作用于 KV + tombstone：会话开始物化时不再写回容器，但容器内旧副本在容器换代前仍可能对该用户可见 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内同名技能以包内清单为准**全量替换**为当前用户个人版本（含 scripts/ 等资源；差集清理多余旧文件、失败回滚）；非 UTF-8/二进制文件显式跳过并列入响应 `skipped`；同样置写侧栅栏 `/{name}/.admin-override` |
 | GET | `/debug/user-skills` | **全量用户索引**（运维/调试用途，仅此入口；与 `UserSkillService.listUsers` 同源；触顶截断带 `truncated=true`；索引查询失败 500） |
@@ -467,6 +467,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
+| GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
+| GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END 或 error）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
 | POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复） |

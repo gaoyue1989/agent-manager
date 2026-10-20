@@ -59,7 +59,7 @@ class SessionStreamControllerTest {
         var tailer = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
             Duration.ofMillis(300));
         controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer,
-            sessionUserStore);
+            sessionUserStore, mock(io.agentmanager.framework.service.TurnIntentStore.class));
     }
 
     // ===== GET /subscribe 测试 =====

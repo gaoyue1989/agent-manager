@@ -153,7 +153,9 @@ export default function ChatPane({
             // 含 HITL 批准后的恢复段；无 state 的调用（未批准）渲染中性态，不臆造成败
             for (const tc of (m.tool_calls ?? [])) {
               msgs.push({
-                role: "tool", content: `${tc.name}`, pending: false,
+                // summary 与实时流 tool_call_summary 同文案（后端按工具名+参数生成），
+                // 缺失时回落原始工具名
+                role: "tool", content: `${tc.summary || tc.name}`, pending: false,
                 // 工具调用 id：刷新续传时实时 TOOL_RESULT_END 据此认领对应步骤写入终态
                 ...(tc.id ? { toolCallId: String(tc.id) } : {}),
                 ...(tc.state ? { state: String(tc.state) } : {}),
@@ -381,6 +383,16 @@ export default function ChatPane({
       if (!resp.ok) return; // 状态查询失败（如事件存储暂不可用 503）：跳过恢复，不重置任何状态
       status = await resp.json();
     } catch { return; }
+    // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因（不打开订阅）
+    if (status && status.state === "failed") {
+      setMessages((prev) => [...prev, {
+        role: "system",
+        content: `⚠️ 本次执行失败：${status.error || "unknown"}`,
+      }]);
+      setBusy(false);
+      loadThreads();
+      return;
+    }
     // interrupted 也订阅：服务端回放已落库事件后补发 interrupted 帧收流，由下方渲染为中断提示
     if (!status || (status.state !== "working" && status.state !== "interrupted")) return;
 

@@ -25,6 +25,7 @@ class SessionStreamControllerStatusTest {
     @Mock private AgentRuntimeService runtimeService;
     @Mock private SessionEventStore eventStore;
     @Mock private io.agentmanager.framework.service.SessionUserStore sessionUserStore;
+    @Mock private io.agentmanager.framework.service.TurnIntentStore turnIntentStore;
 
     private SessionEventTailer tailer;
     private SessionStreamController controller;
@@ -36,7 +37,7 @@ class SessionStreamControllerStatusTest {
         // 无映射行（findUserIdBySession → null）= 存量会话，归属校验放行
         when(sessionUserStore.findUserIdBySession(anyString())).thenReturn(null);
         controller = new SessionStreamController(runtimeService, turnLeaseStore, eventStore, tailer,
-            sessionUserStore);
+            sessionUserStore, turnIntentStore);
     }
 
     @Test
@@ -73,6 +74,70 @@ class SessionStreamControllerStatusTest {
         Map<String, Object> body = controller.status("sid-3", null).getBody();
         assertEquals("completed", body.get("state"));
         assertEquals(12, body.get("latest_event_seq"));
+    }
+
+    @Test
+    void completedWhenLatestIsErrorTerminal() {
+        // error 与 AGENT_END 同为 turn 终态：不得落进 idle（否则刷新后前端把
+        // 「本回合已失败结束」当成「无事件可恢复」，与对话流的 error 帧语义分叉）
+        when(turnLeaseStore.isHeld("sid-err")).thenReturn(false);
+        when(eventStore.findLatestStrict("sid-err")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(8, "error",
+                "{\"type\":\"error\",\"error\":\"boom\"}", "rid-err"));
+        when(runtimeService.findPendingConfirm("sid-err")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-err", null).getBody();
+        assertEquals("completed", body.get("state"));
+        assertEquals(8, body.get("latest_event_seq"));
+    }
+
+    @Test
+    void workingTurnWithoutEventsDoesNotExposePreviousTurnReplyId() {
+        // 租约被持有但最新事件是上一 turn 的终态：下一 turn 尚未产出事件。
+        // 不能把旧 replyId 下发——客户端按它过滤续传会永远看不到新 turn 的 delta。
+        when(turnLeaseStore.isHeld("sid-next")).thenReturn(true);
+        when(eventStore.findLatestStrict("sid-next")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(21, "AGENT_END", "{}", "rid-old"));
+        when(runtimeService.findPendingConfirm("sid-next")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-next", null).getBody();
+        assertEquals("working", body.get("state"));
+        assertEquals(21, body.get("latest_event_seq"));
+        assertEquals("", body.get("reply_id"),
+            "新 turn 尚未产出事件时不得回放上一 turn 的 replyId");
+    }
+
+    @Test
+    void queuedTurnIntentExposesItsReplyIdAsWorking() {
+        // 同会话并发：新请求还在等租约、尚无任何事件；意图行让刷新能拿到本轮 turn id
+        when(turnIntentStore.find("sid-queued")).thenReturn(
+            new io.agentmanager.framework.service.TurnIntentStore.Intent("rid-queued", false, null));
+        when(turnLeaseStore.isHeld("sid-queued")).thenReturn(true);
+        when(eventStore.findLatestStrict("sid-queued")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(30, "AGENT_END", "{}", "rid-running"));
+        when(runtimeService.findPendingConfirm("sid-queued")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-queued", null).getBody();
+        assertEquals("working", body.get("state"));
+        assertEquals("rid-queued", body.get("reply_id"),
+            "排队中的 turn 必须回自己的 replyId，而不是正在跑的上一轮");
+        assertEquals("", body.get("error"));
+    }
+
+    @Test
+    void failedTurnIntentExposesFailureWithoutSubscription() {
+        when(turnIntentStore.find("sid-failed")).thenReturn(
+            new io.agentmanager.framework.service.TurnIntentStore.Intent(
+                "rid-failed", true, "turn_in_progress: queue timeout"));
+        when(turnLeaseStore.isHeld("sid-failed")).thenReturn(false);
+        when(eventStore.findLatestStrict("sid-failed")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(5, "AGENT_END", "{}", "rid-old"));
+        when(runtimeService.findPendingConfirm("sid-failed")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-failed", null).getBody();
+        assertEquals("failed", body.get("state"));
+        assertEquals("rid-failed", body.get("reply_id"));
+        assertEquals("turn_in_progress: queue timeout", body.get("error"));
     }
 
     @Test
