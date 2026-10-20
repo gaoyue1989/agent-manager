@@ -696,9 +696,9 @@ public class UserSkillService {
     /**
      * zip 上传用户个人技能（覆盖同名 L4）。
      *
-     * <p>流程：解压 zip 到临时目录 → 定位 SKILL.md（扁平：根目录；包裹：一层子目录）→
-     * 取技能名（frontmatter {@code name} 优先，回落包裹目录名 / zip 文件名）→ 以目录清单
-     * <b>全量替换</b>该用户的 L4 版本（差集清理 + 失败 best-effort 回滚）。
+     * <p>流程：解压 zip 到临时目录 → 定位 SKILL.md（扁平：根目录；包裹：一层或多层子目录，
+     * 用户常对整个文件夹压缩）→ 取技能名（frontmatter {@code name} 优先，回落包裹目录名 / zip 文件名）
+     * → 以目录清单 <b>全量替换</b>该用户的 L4 版本（差集清理 + 失败 best-effort 回滚）。
      *
      * <p>与「从包内下发」({@link #syncFromPackage}) 的差异（产品决策）：
      * <ul>

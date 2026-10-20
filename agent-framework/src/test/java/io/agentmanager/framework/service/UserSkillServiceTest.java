@@ -626,6 +626,35 @@ class UserSkillServiceTest {
             service().uploadSkillZip(USER, bais(flatNoName), "my-skill.zip").name());
     }
 
+    /** 多层包裹（用户对整个文件夹压缩，zip 内含多级父目录）：仍能定位 SKILL.md 并物化资源 */
+    @Test
+    void uploadZipShouldSupportMultiLevelWrappedLayout() throws IOException {
+        var wrapped = zipText("outer/inner/" + WorkspaceReader.SKILL_FILE, USER_SKILL_MD,
+            "outer/inner/scripts/run.sh", "echo run");
+
+        var outcome = service().uploadSkillZip(USER, bais(wrapped), "ignored.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertEquals(List.of("SKILL.md", "scripts/run.sh"), outcome.files());
+        assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"));
+        assertEquals("echo run", store.get(skillNs(USER), "/demo-a/scripts/run.sh").value().get("content"));
+        // 相对路径以技能根（inner）为基准，不含包裹层前缀
+        assertNull(store.get(skillNs(USER), "/demo-a/outer/inner/SKILL.md"));
+    }
+
+    /** 定位取最浅：技能根含 SKILL.md、其子目录也有示例 SKILL.md 时，取技能根而非深层示例 */
+    @Test
+    void uploadZipShouldPreferShallowestSkillRoot() throws IOException {
+        var zip = zipText(WorkspaceReader.SKILL_FILE, USER_SKILL_MD,
+            "examples/demo/SKILL.md", "---\nname: demo-a\n---\nexample");
+
+        var outcome = service().uploadSkillZip(USER, bais(zip), "demo-a.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"),
+            "应取技能根的 SKILL.md，而非 examples 下的示例");
+    }
+
     /** 同名覆盖 = 全量替换：旧版本多余的资源文件必须差集清理，action=updated */
     @Test
     void uploadZipShouldOverwriteAndRemoveStaleFiles() throws IOException {

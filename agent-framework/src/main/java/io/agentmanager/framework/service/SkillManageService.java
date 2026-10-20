@@ -62,11 +62,11 @@ public class SkillManageService {
      * <p>zip 结构支持两种形态：
      * <ul>
      *   <li>扁平：zip 根目录直接包含 SKILL.md</li>
-     *   <li>包裹：zip 内一层子目录包含 SKILL.md</li>
+     *   <li>包裹：zip 内一层或多层子目录包含 SKILL.md（用户常对整个文件夹压缩）</li>
      * </ul>
      *
      * <p>skill 名称优先取 SKILL.md frontmatter 中的 name 字段，
-     * 缺省取包裹目录名或 zip 文件名（去扩展名）。
+     * 缺省取包裹目录名（最深一层）或 zip 文件名（去扩展名）。
      *
      * @return 解压后的 skill 名称
      * @throws IllegalArgumentException 校验失败
@@ -202,7 +202,12 @@ public class SkillManageService {
         if (!dir.normalize().startsWith(skillsDir.normalize())) {
             throw new IllegalArgumentException("路径遍历攻击防护");
         }
-        SkillZipSupport.deleteRecursive(dir);
+        if (!SkillZipSupport.deleteRecursive(dir)) {
+            // 目录未删净（如 /config 为 PVC 只读挂载、权限不足）：必须显式失败——
+            // 此前吞掉 IOException 后无条件返回 true，接口谎报 200 而已删，文件其实还在。
+            // 文案不重复「删除失败」前缀：上层（控制器/前端）已自行加前缀。
+            throw new IOException("目录仍存在（" + dir + "），可能是挂载点只读或无删除权限");
+        }
         // 同时清除禁用状态
         removeDisabledState(name);
         log.info("Skill '{}' deleted", name);

@@ -7,8 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -78,6 +81,29 @@ class SkillManageServiceTest {
     }
 
     @Test
+    void uploadMultiLevelWrappedZipShouldExtractCorrectly() throws IOException {
+        // 多层包裹：用户对整个文件夹压缩，zip 内含多级父目录（outer/inner/SKILL.md）
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("outer/"));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("outer/inner/SKILL.md"));
+            zos.write("---\nname: deep-skill\n---\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new ZipEntry("outer/inner/scripts/a.sh"));
+            zos.write("echo a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        var service = createService();
+        var name = service.uploadSkill(new ByteArrayInputStream(baos.toByteArray()), "deep.zip");
+
+        assertEquals("deep-skill", name);
+        assertTrue(Files.isRegularFile(skillsDir.resolve("deep-skill").resolve("SKILL.md")));
+        assertTrue(Files.isRegularFile(skillsDir.resolve("deep-skill").resolve("scripts").resolve("a.sh")),
+            "多层包裹下的资源文件也要落到技能根");
+    }
+
+    @Test
     void uploadZipWithoutSkillMdShouldFail() throws IOException {
         // 没有 SKILL.md → 报错
         var zipBytes = createZipWithoutSkillMd();
@@ -139,6 +165,33 @@ class SkillManageServiceTest {
     void deleteNonexistentSkillShouldReturnFalse() throws IOException {
         var service = createService();
         assertFalse(service.deleteSkill("ghost"));
+    }
+
+    /**
+     * 删除失败（如 /config 为只读挂载、权限不足）必须显式抛 IOException，
+     * 不得静默吞掉后谎报成功（止血方案：调用方须能区分「真删了」与「没删掉」）。
+     */
+    @Test
+    void deleteShouldThrowWhenDirectoryCannotBeRemoved() throws IOException {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+            FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+            "需要 POSIX 权限支持才能模拟不可删除目录");
+        var service = createService();
+        service.uploadSkill(new ByteArrayInputStream(createFlatZip("locked", "x", "1.0.0")), "locked.zip");
+
+        var dir = skillsDir.resolve("locked");
+        var original = Files.getPosixFilePermissions(dir);
+        // 去掉目录写权限：其下文件删除失败，目录因非空也无法删除
+        Files.setPosixFilePermissions(dir,
+            EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_EXECUTE));
+        try {
+            var ex = org.junit.jupiter.api.Assertions.assertThrows(
+                IOException.class, () -> service.deleteSkill("locked"));
+            assertTrue(ex.getMessage().contains("仍存在"), ex.getMessage());
+            assertTrue(Files.exists(dir), "删除失败时目录必须保留，不得谎报已删");
+        } finally {
+            Files.setPosixFilePermissions(dir, original);
+        }
     }
 
     // ========== 启停测试 ==========
