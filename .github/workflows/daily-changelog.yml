@@ -1,5 +1,5 @@
 # 每日更新日志：定时汇总北京时间昨天落地 master 的全部提交，
-# 经 LLM 总结后发布为一条 GitHub Release（changelog-YYYY-MM-DD）。
+# 经 LLM 总结后发布为一条 GitHub Release（日期版本 tag vYYYY.MM.DD）。
 # 设计说明见 docs/design/daily-changelog-design.md
 name: daily-changelog
 
@@ -66,7 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="changelog-${{ steps.date.outputs.date }}"
+          TAG="v$(date -d "${{ steps.date.outputs.date }}" +%Y.%m.%d)"
           TITLE="更新日志 · ${{ steps.date.outputs.date }}"
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --title "$TITLE" --notes-file changelog-body.md
