@@ -21,7 +21,7 @@ LLM 走 OpenAI 兼容接口（小米托管 `mimo-v2.6-flash`，`https://token-pl
 
 ## 4. 发布与幂等
 
-- Release tag：日期版本号 `vYYYY.MM.DD`（如 `v2026.10.19`）；标题：`更新日志 · YYYY-MM-DD`；`--target master` 让 tag 落在 master。
+- Release tag 与标题（Releases 列表展示名）统一用日期版本号 `vYYYY.MM.DD`（如 `v2026.10.19`）；`--target master` 让 tag 落在 master。
 - 重跑/补跑幂等：tag 已存在则 `gh release edit` 只更新正文，不重复建。
 - 不标记 `--latest`（`--latest=false`）：这是文档型 Release，不伪装成代码发布。
 
