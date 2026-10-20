@@ -80,6 +80,9 @@ public class RedisEventLog {
     /** 到顶时的报错原文（noeviction 下的写入失败） */
     private static final String ERR_OOM = "OOM command not allowed";
 
+    /** 索引重建时的扫描页大小（索引丢失属罕见路径，页大小与回放分页保持一致） */
+    private static final int REBUILD_PAGE_SIZE = 500;
+
     /** 带序号的一条事件（ID 由 seq 决定） */
     public record Entry(int seq, String type, String replyId, String payload) {}
 
@@ -393,6 +396,47 @@ public class RedisEventLog {
             out.add(new ReplyBoundary(sv.getValue(), (int) sv.getScore()));
         }
         return out;
+    }
+
+    /**
+     * 重建 reply 索引（ZSET 丢失/被逐出而事件流仍在时的自愈）。
+     *
+     * <p>扫描整条流，按 replyId 取最小 seq 后 {@code ZADD} 补齐，并重置索引 TTL。
+     * 同一 reply 的首个 seq 永不变化，重复执行结果相同（幂等），多副本并发重建也安全。
+     * 只在读路径发现「索引缺该 reply」时按冷却周期调用，避免每次轮询全流扫描。
+     *
+     * @return 补齐（或确认已存在）的 boundary 数；流为空返回 0
+     * @throws RuntimeException Redis 读/写失败（由调用方决定降级）
+     */
+    public int rebuildReplyIndex(String sessionId, int ttlSeconds) {
+        var firstSeq = new LinkedHashMap<String, Integer>();
+        int from = 0;
+        while (true) {
+            var page = range(sessionId, from, null, REBUILD_PAGE_SIZE);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (var e : page) {
+                if (e.replyId() != null && !e.replyId().isBlank()) {
+                    firstSeq.merge(e.replyId(), e.seq(), Math::min);
+                }
+            }
+            int last = page.get(page.size() - 1).seq();
+            if (page.size() < REBUILD_PAGE_SIZE || last == Integer.MAX_VALUE) {
+                break;
+            }
+            from = last + 1;
+        }
+        if (firstSeq.isEmpty()) {
+            return 0;
+        }
+        var sync = facade.sync();
+        var replies = repliesKey(sessionId);
+        for (var e : firstSeq.entrySet()) {
+            sync.zadd(replies, e.getValue().doubleValue(), e.getKey());
+        }
+        sync.expire(replies, ttlSeconds);
+        return firstSeq.size();
     }
 
     /**

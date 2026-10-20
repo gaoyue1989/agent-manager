@@ -467,6 +467,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
+| GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
+| GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END 或 error）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
 | POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复） |

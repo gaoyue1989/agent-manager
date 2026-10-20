@@ -33,7 +33,7 @@ class SessionCleanupServiceProtocolScanTest {
         return new SessionCleanupService(mock(DataSource.class), mock(SessionManager.class),
             mock(TurnLeaseStore.class), mock(ConfirmContextStore.class), mock(ToolAuditStore.class),
             mock(SessionUserStore.class), holder, props, mock(FileStorage.class),
-            mock(RemoteTaskRegistryStore.class));
+            mock(RemoteTaskRegistryStore.class), mock(TurnIntentStore.class));
     }
 
     private static A2aAgentRefHolder holderOf(HarnessAgent agent) {

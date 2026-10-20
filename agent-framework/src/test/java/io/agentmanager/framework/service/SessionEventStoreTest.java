@@ -327,6 +327,38 @@ class SessionEventStoreTest {
     }
 
     @Test
+    void queryAfterWithQueuedReplySkipsIndexRepairAndFullScan() {
+        // 排队中的 turn 尚无事件：replyId 不在索引里是正常状态，不能每拍都重建索引/全流扫描
+        when(eventLog.replies("sid-queued")).thenReturn(List.of());
+
+        StepVerifier.create(store.queryAfter("sid-queued", "rid-queued", 5, false))
+            .verifyComplete();
+
+        verify(eventLog, never()).rebuildReplyIndex(anyString(), anyInt());
+        verify(eventLog, never()).range(anyString(), anyInt(), isNull(), anyInt());
+    }
+
+    @Test
+    void queryAfterRepairsMissingReplyIndexThenUsesBoundedRange() {
+        // 索引丢失（ZSET 被逐出而 stream 还在）：先重建索引，重建命中后走 O(log N) 有界
+        // range，而不是每轮轮询都全流扫描。
+        when(eventLog.replies("sid-repair"))
+            .thenReturn(List.of())
+            .thenReturn(List.of(new RedisEventLog.ReplyBoundary("rid-r", 1)));
+        when(eventLog.rebuildReplyIndex(eq("sid-repair"), anyInt())).thenReturn(1);
+        when(eventLog.range("sid-repair", 6, Integer.MAX_VALUE, SessionEventStore.queryPageSize()))
+            .thenReturn(List.of(
+                new RedisEventLog.Event(6, "TEXT_BLOCK_DELTA", "{}", "rid-r")));
+
+        StepVerifier.create(store.queryAfter("sid-repair", "rid-r", 5))
+            .expectNextMatches(e -> e.seq() == 6)
+            .verifyComplete();
+
+        verify(eventLog).rebuildReplyIndex(eq("sid-repair"), anyInt());
+        verify(eventLog, never()).range(eq("sid-repair"), anyInt(), isNull(), anyInt());
+    }
+
+    @Test
     void queryAfterWithKnownReplyIssuesOneBoundedRangeNotAFullScan() {
         // 已知 replyId 必须走 ZSET 索引：一次**有界**的 range（本 reply 的首个 seq
         // .. 下一个 reply 的首个 seq - 1），而不是把整条流扫一遍再过滤。

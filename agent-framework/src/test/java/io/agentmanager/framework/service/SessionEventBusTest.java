@@ -11,6 +11,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import io.agentmanager.framework.controller.AgentEventSseSerializer;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
+import io.agentscope.core.event.ToolCallStartEvent;
 import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
 
@@ -210,6 +211,23 @@ class SessionEventBusTest {
             .verifyComplete();
     }
 
+    @Test
+    void turnIdIsInjectedOnMilestonesButNotDeltas() {
+        var payloads = org.mockito.ArgumentCaptor.forClass(String.class);
+        eventBus.emit("sid-t", mockAgentEvent("hi"), "turn-1");
+        eventBus.emit("sid-t", new ToolCallStartEvent("sdk-rid", "call-1", "echo"), "turn-1");
+
+        verify(eventStore, times(2)).append(eq("sid-t"), eq("turn-1"), anyString(), payloads.capture());
+        var deltaPayload = payloads.getAllValues().get(0);
+        var milestonePayload = payloads.getAllValues().get(1);
+        assertFalse(deltaPayload.contains("\"turnId\""),
+            "delta 是 token 热路径，不应重写 JSON 注入 turnId: " + deltaPayload);
+        assertTrue(milestonePayload.contains("\"turnId\":\"turn-1\""),
+            "里程碑帧必须携带 turnId（subscribe?replyId= 的过滤口径）: " + milestonePayload);
+        assertTrue(milestonePayload.contains("\"replyId\":\"sdk-rid\""),
+            "SDK 事件级 replyId 必须保留: " + milestonePayload);
+    }
+
     // ===== 辅助方法 =====
 
     private static AgentEvent mockAgentEvent(String delta) {
@@ -267,10 +285,12 @@ class SessionEventBusTest {
         StepVerifier.create(flux)
             .then(() -> eventBus.emitSynthetic("sid-a2", "rid-a2", "file_ready", raw))
             .expectNextMatches(sse -> {
-                String expected = AgentEventSseSerializer.withReplyId(raw, "rid-a2");
+                // 合成帧是里程碑：落库/广播的 payload 同时带 replyId 与 turnId
+                String expected = AgentEventSseSerializer.withReplyId(raw, "rid-a2", true);
                 return sse.data().equals(appended.get(0))
                     && sse.data().equals(expected)
-                    && sse.data().endsWith("\"replyId\":\"rid-a2\"}");
+                    && sse.data().contains("\"replyId\":\"rid-a2\"")
+                    && sse.data().contains("\"turnId\":\"rid-a2\"");
             })
             .verifyComplete();
     }

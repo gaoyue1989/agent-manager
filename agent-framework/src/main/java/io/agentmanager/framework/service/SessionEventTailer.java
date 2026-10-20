@@ -41,8 +41,26 @@ public class SessionEventTailer {
         return type != null && TERMINAL_TYPES.contains(type);
     }
 
-    /** 终止探测的降频间隔：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm（包私有：测试可见） */
+    /** 终止探测的基准间隔：空页时 ~2s 一次，避免每轮轮询都查 lease + confirm（持续空闲后降为 10s） */
     static final long PROBE_INTERVAL_MS = 2000;
+
+    /** 持续无业务事件超过该时长后，终止探测降为 {@link #IDLE_PROBE_INTERVAL_MS} */
+    static final long IDLE_PROBE_AFTER_MS = 60_000;
+
+    /**
+     * 长静默期的终止探测间隔。
+     *
+     * <p>每个空闲订阅者每拍都要查一次 MySQL（lease）与 confirm：2s 节奏在大量长连接下是
+     * N/2s 的库压力。长工具调用/长推理期间事件本来就不来，而租约由执行方 20s 续租、
+     * 崩溃最迟 60s 过期——把探测放宽到 10s 只把「中断/接管」的发现延迟从 2s 提到 10s，
+     * 仍在崩溃检测窗口内；事件拉取节奏（300ms→2s 退避）不变，正常输出到达仍是实时的。
+     */
+    static final long IDLE_PROBE_INTERVAL_MS = 10_000;
+
+    /** 按「距最后一个业务事件」的时长选择探测间隔（包私有：表驱动测试） */
+    static long probeIntervalMs(long idleMs) {
+        return idleMs >= IDLE_PROBE_AFTER_MS ? IDLE_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
+    }
 
     /**
      * 连续 emptyStreak 次空页后，本轮循环应 sleep 的毫秒数（A2 空闲退避）。
@@ -68,6 +86,8 @@ public class SessionEventTailer {
     private final SessionEventStore eventStore;
     private final TurnLeaseStore turnLeaseStore;
     private final AgentRuntimeService runtimeService;
+    /** 排队意图（可空：单测/嵌入式无该存储时退回纯租约探测） */
+    private final TurnIntentStore turnIntentStore;
 
     /** 轮询间隔：无新事件时的查询节奏 */
     private final Duration pollInterval;
@@ -85,7 +105,7 @@ public class SessionEventTailer {
                               TurnLeaseStore turnLeaseStore,
                               AgentRuntimeService runtimeService,
                               Duration pollInterval) {
-        this(eventStore, turnLeaseStore, runtimeService, pollInterval, Duration.ofSeconds(20));
+        this(eventStore, turnLeaseStore, runtimeService, pollInterval, Duration.ofSeconds(20), null);
     }
 
     public SessionEventTailer(SessionEventStore eventStore,
@@ -93,11 +113,21 @@ public class SessionEventTailer {
                               AgentRuntimeService runtimeService,
                               Duration pollInterval,
                               Duration heartbeatInterval) {
+        this(eventStore, turnLeaseStore, runtimeService, pollInterval, heartbeatInterval, null);
+    }
+
+    public SessionEventTailer(SessionEventStore eventStore,
+                              TurnLeaseStore turnLeaseStore,
+                              AgentRuntimeService runtimeService,
+                              Duration pollInterval,
+                              Duration heartbeatInterval,
+                              TurnIntentStore turnIntentStore) {
         this.eventStore = eventStore;
         this.turnLeaseStore = turnLeaseStore;
         this.runtimeService = runtimeService;
         this.pollInterval = pollInterval;
         this.heartbeatInterval = heartbeatInterval;
+        this.turnIntentStore = turnIntentStore;
     }
 
     /** turn 状态探测结果 */
@@ -160,10 +190,23 @@ public class SessionEventTailer {
     public Flux<ServerSentEvent<String>> tail(String sessionId, String replyId, int afterSeq) {
         var cursor = new AtomicInteger(Math.max(afterSeq, -1));
 
+        // 订阅建立时先看一次排队意图：排队中的 turn 尚无事件，replyId 不在索引里是正常状态，
+        // 不能让 replay/live 的 missing-index 兜底把长会话全量扫描一遍（排队期间每拍都会发生）。
+        var startIntent = turnIntentStore != null ? turnIntentStore.find(sessionId) : null;
+        boolean intentMatches = startIntent != null && replyId != null
+            && replyId.equals(startIntent.replyId());
+        boolean startQueued = intentMatches && !startIntent.failed();
+        String startError = intentMatches && startIntent.failed()
+            ? (startIntent.error() != null && !startIntent.error().isBlank()
+                ? startIntent.error() : "turn_failed")
+            : null;
+
         // afterSeq < 0 表示不回放（与 SessionEventBus.subscribe 的既有语义一致）
         Flux<ServerSentEvent<String>> replay = afterSeq < 0
             ? Flux.empty()
-            : eventStore.queryAfter(sessionId, replyId, afterSeq)
+            : (startQueued || startError != null
+                ? eventStore.queryAfter(sessionId, replyId, afterSeq, false)
+                : eventStore.queryAfter(sessionId, replyId, afterSeq))
                 .doOnNext(e -> cursor.set(e.seq()))
                 .map(AgentEventSseSerializer::toSseFrame);
 
@@ -176,6 +219,8 @@ public class SessionEventTailer {
         var liveStateRef = new java.util.concurrent.atomic.AtomicReference<LiveState>();
         Flux<ServerSentEvent<String>> live = Flux.<ServerSentEvent<String>, LiveState>generate(() -> {
             var st = new LiveState();
+            st.queuedReply = startQueued;
+            st.errorPending = startError;
             liveStateRef.set(st);
             return st;
         }, (st, sink) -> {
@@ -186,9 +231,16 @@ public class SessionEventTailer {
                     sink.next(AgentEventSseSerializer.toSseFrame(e));
                     cursor.set(e.seq());
                     st.lastFrameAt = System.currentTimeMillis();
+                    st.lastDataAt = st.lastFrameAt;
                     if (isTerminalType(e.type())) {
                         st.donePending = true;
                     }
+                    return st;
+                }
+                if (st.errorPending != null) {
+                    // 排队 turn 失败（超时/建立失败）：与对话流的 error 帧同词表，收流
+                    sink.next(errorSSE(st.errorPending));
+                    sink.complete();
                     return st;
                 }
                 if (st.donePending) {
@@ -202,7 +254,10 @@ public class SessionEventTailer {
                     return st;
                 }
 
-                var page = eventStore.queryAfter(sessionId, replyId, cursor.get())
+                // 排队中的 replyId 允许「索引里还没有」：不触发重建/全流扫描，安静等待 turn 启动
+                var page = (st.queuedReply
+                    ? eventStore.queryAfter(sessionId, replyId, cursor.get(), false)
+                    : eventStore.queryAfter(sessionId, replyId, cursor.get()))
                     .collectList().block();
                 if (page == null) page = java.util.List.of();
                 st.emptyStreak = page.isEmpty() ? st.emptyStreak + 1 : 0;
@@ -213,9 +268,22 @@ public class SessionEventTailer {
 
                 // 终止探测降频：空闲时 ~2s 一次，避免每轮轮询都查 lease + confirm
                 long now = System.currentTimeMillis();
-                if (now - st.lastProbeAt >= PROBE_INTERVAL_MS) {
+                if (now - st.lastProbeAt >= probeIntervalMs(now - st.lastDataAt)) {
                     st.lastProbeAt = now;
-                    var probe = probe(sessionId);
+                    // 排队意图优先：本轮 turn 还没产出事件，租约可能被上一轮持有（或刚释放）。
+                    //  - QUEUED：本轮确定会开跑 → 按 RUNNING 处理，跳过通用 probe（否则会被
+                    //    误判 interrupted/finished）；
+                    //  - FAILED：直接补 error 帧收流，不必等上一轮结束。
+                    var intent = turnIntentStore != null ? turnIntentStore.find(sessionId) : null;
+                    boolean matches = intent != null && replyId != null
+                        && replyId.equals(intent.replyId());
+                    st.queuedReply = matches && !intent.failed();
+                    if (matches && intent.failed()) {
+                        st.errorPending = intent.error() != null && !intent.error().isBlank()
+                            ? intent.error() : "turn_failed";
+                        continue;
+                    }
+                    var probe = st.queuedReply ? TurnProbe.RUNNING : probe(sessionId);
                     if (probe.interrupted()) {
                         st.interruptedPending = true;
                         continue;
@@ -267,10 +335,16 @@ public class SessionEventTailer {
         /** 0 → 首轮立即探测，避免对已结束的 turn 空等一轮 */
         long lastProbeAt;
         long lastFrameAt = System.currentTimeMillis();
+        /** 最后一个业务事件时刻（心跳不算）：长静默判定，决定探测是否降频 */
+        long lastDataAt = System.currentTimeMillis();
         /** 连续空页计数（A2 空闲退避）：空页 +1，非空页归零 */
         int emptyStreak;
         boolean donePending;
         boolean interruptedPending;
+        /** 请求的 replyId 对应一个排队中的 turn（尚无事件；查询不做 missing-index 兜底） */
+        boolean queuedReply;
+        /** 非空时先补一帧 error 再收流（排队 turn 失败） */
+        String errorPending;
         /** 订阅被取消：让阻塞中的轮询在下一拍退出，不再等心跳到期 */
         volatile boolean cancelled;
     }
@@ -298,6 +372,13 @@ public class SessionEventTailer {
     private static ServerSentEvent<String> interruptedSSE() {
         return ServerSentEvent.<String>builder()
             .data("{\"type\":\"interrupted\",\"reason\":\"turn_interrupted\"}")
+            .build();
+    }
+
+    private static ServerSentEvent<String> errorSSE(String error) {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"error\",\"error\":"
+                + AgentEventSseSerializer.jsonEsc(error) + "}")
             .build();
     }
 }

@@ -387,6 +387,56 @@ class SessionEventTailerTest {
             "探测必须保持降频门控（轮询次数明显多于探测次数）: polls=" + polls + " probes=" + probes);
     }
 
+    // ===== 排队意图（turn_intent）与探测降频 =====
+
+    @Test
+    void failedTurnIntentEmitsErrorFrameAndCloses() {
+        var intents = mock(TurnIntentStore.class);
+        when(intents.find("sid-ifail")).thenReturn(
+            new TurnIntentStore.Intent("rid-ifail", true, "turn_in_progress: queue timeout"));
+        when(eventStore.queryAfter("sid-ifail", "rid-ifail", 0, false)).thenReturn(Flux.empty());
+
+        var t = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
+            Duration.ofMillis(20), Duration.ofSeconds(10), intents);
+        var frames = t.tail("sid-ifail", "rid-ifail", 0).collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(frames);
+        assertEquals(1, frames.size(), "失败意图应只补一帧 error 后收流: " + frames);
+        assertTrue(frames.get(0).data() != null
+                && frames.get(0).data().contains("\"type\":\"error\"")
+                && frames.get(0).data().contains("turn_in_progress"),
+            "error 帧必须携带失败原因: " + frames.get(0).data());
+    }
+
+    @Test
+    void queuedTurnIntentIsNotClassifiedAsInterruptedWhileWaiting() {
+        var intents = mock(TurnIntentStore.class);
+        when(intents.find("sid-iqueue")).thenReturn(
+            new TurnIntentStore.Intent("rid-iqueue", false, null));
+        when(eventStore.queryAfter("sid-iqueue", "rid-iqueue", 0, false)).thenReturn(Flux.empty());
+
+        var t = new SessionEventTailer(eventStore, turnLeaseStore, runtimeService,
+            Duration.ofMillis(20), Duration.ofSeconds(10), intents);
+        var frames = t.tail("sid-iqueue", "rid-iqueue", 0)
+            .take(Duration.ofMillis(250))
+            .collectList().block(Duration.ofSeconds(5));
+
+        assertNotNull(frames);
+        assertTrue(frames.stream().noneMatch(f -> f.data() != null && f.data().contains("interrupted")),
+            "排队中的 turn 不能被判成 interrupted（租约可能还在上一轮手上）: " + frames);
+    }
+
+    @Test
+    void probeSlowsDownOnlyAfterLongBusinessIdle() {
+        assertEquals(SessionEventTailer.PROBE_INTERVAL_MS, SessionEventTailer.probeIntervalMs(0));
+        assertEquals(SessionEventTailer.PROBE_INTERVAL_MS,
+            SessionEventTailer.probeIntervalMs(SessionEventTailer.IDLE_PROBE_AFTER_MS - 1));
+        assertEquals(SessionEventTailer.IDLE_PROBE_INTERVAL_MS,
+            SessionEventTailer.probeIntervalMs(SessionEventTailer.IDLE_PROBE_AFTER_MS));
+        assertEquals(SessionEventTailer.IDLE_PROBE_INTERVAL_MS,
+            SessionEventTailer.probeIntervalMs(600_000));
+    }
+
     // ===== 背压形态回归：Spring MVC SseEmitterSubscriber 的跨线程 request(1) =====
 
     /**

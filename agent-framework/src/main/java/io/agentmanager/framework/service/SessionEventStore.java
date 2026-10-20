@@ -111,6 +111,12 @@ public class SessionEventStore {
      */
     private final Map<String, Buffer> pending = new LinkedHashMap<>();
 
+    /** session_id → 上次索引重建尝试时刻（毫秒；冷却用，防止索引持续缺失时每轮全流扫描重建） */
+    private final Map<String, Long> lastIndexRepairAt = new ConcurrentHashMap<>();
+
+    /** 索引重建冷却：同一 session 最快每 60s 重建一次 */
+    private static final long INDEX_REPAIR_COOLDOWN_MS = 60_000;
+
     /** 攒批缓冲中的一行（尚未落库） */
     private record PendingRow(int seq, String replyId, String eventType, String payload) {}
 
@@ -373,12 +379,25 @@ public class SessionEventStore {
      * @param replyId  turn 标识（可选）；null 表示不限 turn
      */
     public Flux<EnvelopedEvent> queryAfter(String sessionId, String replyId, int afterSeq) {
+        return queryAfter(sessionId, replyId, afterSeq, true);
+    }
+
+    /**
+     * 同上；{@code allowFallbackScan=false} 用于「replyId 可能尚未写入事件」的排队轮次：
+     * 索引缺失时不触发重建/全流扫描，直接返回空（等 turn 启动后索引自然出现）。
+     *
+     * <p>该开关是给观察者路径的排队意图用的：否则排队期间每拍轮询都会把 missing reply
+     * 当成「索引丢失」，在长会话上反复全流扫描。
+     */
+    public Flux<EnvelopedEvent> queryAfter(String sessionId, String replyId, int afterSeq,
+                                           boolean allowFallbackScan) {
         return Flux.<EnvelopedEvent, PageCursor>generate(PageCursor::new,
             (state, sink) -> {
                 try {
                     if (state.buffer.isEmpty()) {
                         var page = queryPage(sessionId, replyId,
-                            state.initialized ? state.cursor : afterSeq, QUERY_PAGE_SIZE);
+                            state.initialized ? state.cursor : afterSeq, QUERY_PAGE_SIZE,
+                            allowFallbackScan);
                         if (page.isEmpty()) {
                             sink.complete();
                             return state;
@@ -413,7 +432,8 @@ public class SessionEventStore {
     }
 
     /** 读取一页事件（已 materialize） */
-    private List<EnvelopedEvent> queryPage(String sessionId, String replyId, int afterSeq, int limit) {
+    private List<EnvelopedEvent> queryPage(String sessionId, String replyId, int afterSeq, int limit,
+                                           boolean allowFallbackScan) {
         // 下界钳到 0：XRANGE 的 ID 不能为负，而 afterSeq = -5 会让 afterSeq+1 = -4 直接报
         // 「Invalid stream ID」（实测）。0-0 是合法最小 ID，等价于「从头开始」。
         // 上界防溢出：afterSeq = Integer.MAX_VALUE 时 +1 会回绕成负数，再被 max(0, …)
@@ -431,13 +451,22 @@ public class SessionEventStore {
             //  - afterSeq <= 0：全新 turn 刚生成 replyId、还没写入任何事件。**空是正解**，
             //    而且这条路径是热路径（每来一次 POST /threads/chat 都会走），必须 O(turns)。
             //  - afterSeq > 0：客户端正在续传一个**已经开始过**的 reply，索引里却没有它——
-            //    只能是索引丢了。这时宁可慢（退化成全流扫描）也不能返回空：空是**静默内容丢失**。
-            if (afterSeq <= 0) {
+            //    只能是索引丢了。先尝试按冷却周期重建索引（按扫描到的首个 seq 补齐，幂等），重建成功即回到
+            //    O(log N) 快路径；重建失败/冷却中才退化为全流扫描（宁可慢也不能静默丢内容）。
+            if (afterSeq <= 0 || !allowFallbackScan) {
                 return List.of();
             }
             log.warn("SessionEventStore: reply {} 不在索引中但 afterSeq={} > 0（索引可能丢失），"
-                + "本次回放退化为全流扫描。session={}", replyId, afterSeq, sessionId);
-            return scanFilteredByReply(sessionId, replyId, from, limit);
+                + "尝试重建索引。session={}", replyId, afterSeq, sessionId);
+            if (tryRepairReplyIndex(sessionId)) {
+                boundaries = eventLog.replies(sessionId);
+                idx = indexOfReply(boundaries, replyId);
+            }
+            if (idx < 0) {
+                log.warn("SessionEventStore: 索引重建后仍未命中 reply {}，本次回放退化为全流扫描。session={}",
+                    replyId, sessionId);
+                return scanFilteredByReply(sessionId, replyId, from, limit);
+            }
         }
 
         int start = Math.max(boundaries.get(idx).firstSeq(), from);
@@ -448,6 +477,34 @@ public class SessionEventStore {
             return List.of();
         }
         return toEnveloped(eventLog.range(sessionId, start, end, limit));
+    }
+
+    /**
+     * 尝试重建该 session 的 reply 索引（同一 Pod 内按 {@value #INDEX_REPAIR_COOLDOWN_MS}ms 冷却）。
+     *
+     * <p>索引与事件流同 TTL、同管道写入，正常不会单独丢失；只有 Redis 逐出（如 allkeys-lru）
+     * 或人为删除才会出现。重建是一次全流扫描，若失败/仍缺失则本次退回扫描路径，但冷却期内
+     * 不再重复扫描重建——避免每 300ms~2s 的轮询把 Redis/CPU 打满。
+     */
+    private boolean tryRepairReplyIndex(String sessionId) {
+        long now = System.currentTimeMillis();
+        var prev = lastIndexRepairAt.putIfAbsent(sessionId, now);
+        if (prev != null) {
+            if (now - prev < INDEX_REPAIR_COOLDOWN_MS) {
+                return false;
+            }
+            lastIndexRepairAt.put(sessionId, now);
+        }
+        try {
+            int n = eventLog.rebuildReplyIndex(sessionId, (int) ttlSeconds());
+            log.warn("SessionEventStore: reply 索引缺失，已重建 {} 条 boundary（session={}）",
+                n, sessionId);
+            return n > 0;
+        } catch (Exception e) {
+            log.warn("SessionEventStore: reply 索引重建失败（session={}）: {}",
+                sessionId, e.getMessage());
+            return false;
+        }
     }
 
     /** 仅在索引丢失时走的兜底路径：按页扫流、客户端过滤，直到攒够 limit 条或流结束。 */
