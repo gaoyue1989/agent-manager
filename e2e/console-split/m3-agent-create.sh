@@ -296,6 +296,13 @@ assert_eq "纳管存量服务 200" "$([ -n "$ADOPT_ID" ] && [ "$ADOPT_ID" != "No
 assert_contains "纳管后出现在空间列表" \
   "$(req GET "/console/workspaces/$WS/agents?keyword=$LEGACY_K8S" "" "$TOKEN")" "$LEGACY_K8S"
 
+# ---- 释放辅助 Agent：kind 节点仅 4 CPU，编辑滚动时新旧副本并存会因 requests 超额 Pending ----
+[ -n "$EXT_SVC" ] && code DELETE /console/workspaces/$WS/agents/$EXT_SVC "" "$TOKEN" >/dev/null 2>&1 && M3_SVC3=""
+[ -n "$ISVC" ] && code DELETE /console/workspaces/$WS/agents/$ISVC "" "$TOKEN" >/dev/null 2>&1 && M3_SVC2=""
+[ -n "$M3_SVC5" ] && code DELETE /console/workspaces/$WS/agents/$M3_SVC5 "" "$TOKEN" >/dev/null 2>&1 && M3_SVC5=""
+[ -n "$M3_SVC4" ] && code DELETE /console/workspaces/$WS/agents/$M3_SVC4 "" "$TOKEN" >/dev/null 2>&1 && M3_SVC4=""
+[ -n "$M3_LEGACY" ] && legacy_code DELETE /services/$M3_LEGACY >/dev/null 2>&1 && M3_LEGACY=""
+
 # ---- 编辑链路：copy-on-write v1.0.1 + republish + 提示词热生效 ----
 EDIT=$(echo "$FORM" | python3 -c "import sys,json;d=json.load(sys.stdin);d['name']='部署验证-$TS';d['prompt']='你是 M3 e2e 验证助手。被问候时回答：我是 m3e2e-agent v2 版本。';print(json.dumps(d))")
 EDITED=$(req PUT /console/workspaces/$WS/agents/$SVC "$EDIT" "" "$TOKEN")
