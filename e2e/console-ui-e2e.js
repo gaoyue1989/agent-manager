@@ -206,7 +206,8 @@ async function main() {
     }, { timeout: 30000 }, testid("import-pkg-select"));
     // import 模式不渲染基础信息区（名称由包派生），只需选包后提交
     await page.select(testid("import-pkg-select"), String(ctx.pkgId));
-    await click("agent-submit-foot");
+    // 头部「立即创建」按钮对所有 create 模式可见（import 区块内的提交按钮无 testid）
+    await click("agent-submit");
     await page.waitForFunction(() => /\/console\/agents\/\d+/.test(location.pathname), { timeout: 60000 });
     const importedId = Number(page.url().match(/\/console\/agents\/(\d+)/)[1]);
     await page.waitForSelector(testid("agent-detail"), { timeout: 30000 });
