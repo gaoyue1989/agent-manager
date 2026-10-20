@@ -32,7 +32,6 @@ const WS_NAME = `ui-ws-${TS}`;
 const SKILL = `ui-skill-${TS}`;
 const CONN = `ui-conn-${TS}`;
 const TOOL = `ui-tool-${TS}`;
-const IMPORT_NAME = `ui-import-${TS}`;
 const SANDBOX_NAME = `ui-sandbox-${TS}`;
 
 let pass = 0;
@@ -205,7 +204,7 @@ async function main() {
       const el = document.querySelector(sel);
       return el && el.options && el.options.length > 0;
     }, { timeout: 30000 }, testid("import-pkg-select"));
-    await page.type(testid("agent-name"), IMPORT_NAME);
+    // import 模式不渲染基础信息区（名称由包派生），只需选包后提交
     await page.select(testid("import-pkg-select"), String(ctx.pkgId));
     await click("agent-submit-foot");
     await page.waitForFunction(() => /\/console\/agents\/\d+/.test(location.pathname), { timeout: 60000 });
