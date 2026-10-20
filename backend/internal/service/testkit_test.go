@@ -21,7 +21,8 @@ func newTestCore(t *testing.T) (*Core, *k8sfake.FakeK8s, func()) {
 	}
 	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{},
 		&store.User{}, &store.Workspace{}, &store.WorkspaceMember{}, &store.ApiKey{},
-		&store.ModelConnection{}, &store.ModelDelivery{}, &store.McpConnector{}, &store.AgentIntegration{}); err != nil {
+		&store.ModelConnection{}, &store.ModelDelivery{}, &store.McpConnector{}, &store.AgentIntegration{},
+		&store.Skill{}, &store.SkillVersion{}, &store.SkillRelease{}, &store.SkillMarketSource{}, &store.SkillMarketItem{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, _ := db.DB()

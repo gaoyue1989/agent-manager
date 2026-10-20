@@ -125,7 +125,7 @@ export interface AgentFormPayload {
   mode?: string; name: string; description?: string; image?: string;
   modelConnections: { connectionId: number; isDefault: boolean }[];
   prompt: string;
-  skills: { name: string; source: string; packageId?: number; version?: string }[];
+  skills: SkillRefPayload[];
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
   sandbox?: SandboxFormPayload | null;
@@ -144,13 +144,54 @@ export interface SandboxItem {
 export interface EditFormView {
   name: string; k8sName: string; description: string; image: string;
   modelConnections: { connectionId: number; isDefault: boolean }[];
-  prompt: string; skills: { name: string; source: string; packageId?: number; version?: string }[];
+  prompt: string; skills: SkillRefPayload[];
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
   sandbox?: SandboxFormPayload | null;
   spec: string; replicas: number; publicEndpoint: boolean; version: string; packageId: number;
 }
 export interface AuditItem { time: string; actor: string; action: string; object: string; detail: string; }
+
+// ---- Skill 中心（2026-10-19，设计 §6.3/§8.4）----
+export interface SkillRec {
+  id: number; workspaceId: number; name: string; displayName?: string; description: string;
+  tagsJson: string; source: "market" | "zip" | "markdown"; sourceName?: string;
+  latestVersionId: number; enabled: boolean; status: string; createdAt: string; updatedAt: string;
+  refAgentCount?: number;
+  latestPublish?: { versionId: number; version: string; publishedAt?: string | null } | null;
+}
+export interface SkillVersionRec {
+  id: number; skillId: number; version: string; status: string; changelog?: string;
+  createdAt: string;
+}
+export interface SkillDetail {
+  skill: SkillRec; versions: SkillVersionRec[];
+  referencingAgents: { id: number; displayName: string; k8sName?: string; status: string; packageVersion?: string; lockedVersion?: string }[];
+}
+export interface MarketSourceRec { id: number; key: string; name: string; type: string; enabled: boolean; sort: number; items: number; }
+export interface MarketItemRec {
+  id: number; sourceId: number; key: string; displayName: string; description: string;
+  tagsJson: string; downloads: number; enabled: boolean;
+  sourceKey: string; installedSkillId?: number; installedVersion?: string;
+}
+// SkillRefPayload 表单 Skill 勾选：source=skill（技能资产，skillId 必填）| package（历史：OAF 包）| l4
+export interface SkillRefPayload {
+  name: string; source: "skill" | "package" | "l4";
+  skillId?: number; version?: string; packageId?: number;
+}
+export interface SkillUsageRef {
+  name: string; declared: boolean; declaredVersion?: string;
+  matchedSkillId?: number; matchedVersion?: string; matchedSource?: string; matchedAssetName?: string;
+}
+export interface SkillUsageItem {
+  agentId: number; agentName: string; k8sName: string; status: string;
+  packageId: number; packageVersion: string; skillCount: number; skills: SkillUsageRef[];
+  packageGeneratedAt?: string | null;
+}
+export interface SkillUsageDetailItem extends SkillUsageRef {
+  packagePath: string; description: string; issues: string[];
+}
+export interface SkillUsageDetail { agent: SkillUsageItem; items: SkillUsageDetailItem[]; }
 
 export const api = {
   // 包
@@ -278,6 +319,55 @@ export const api = {
     spaceSkills: (ws: number | string, keyword = "") =>
       request<{ name: string; description: string; packageId: number; packageSlug: string; packageVersion: string; workspaceId: number; declared: boolean; issues?: string[]; usedBy: string[] }[]>(
         `/console/workspaces/${ws}/skills?keyword=${encodeURIComponent(keyword)}`),
+    // ---- Skill 中心（2026-10-19）：技能资产 CRUD + 版本管理 + 市场 + Agent 使用情况 ----
+    skillCenter: {
+      list: (ws: number | string, keyword = "") =>
+        request<SkillRec[]>(`/console/workspaces/${ws}/skill-center?keyword=${encodeURIComponent(keyword)}`),
+      createMarkdown: (ws: number | string, body: { name: string; displayName?: string; description: string; tags?: string[]; content: string; publishNow?: boolean }) =>
+        requestRaw<SkillRec>(`/console/workspaces/${ws}/skill-center`, { method: "POST", body: JSON.stringify(body) }),
+      uploadZip: (ws: number | string, file: File, meta?: { name?: string; displayName?: string; description?: string; tags?: string; publishNow?: boolean }) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        if (meta?.name) fd.append("name", meta.name);
+        if (meta?.displayName) fd.append("displayName", meta.displayName);
+        if (meta?.description) fd.append("description", meta.description);
+        if (meta?.tags) fd.append("tags", meta.tags);
+        fd.append("publishNow", String(meta?.publishNow ?? false));
+        return fetch(`${BASE}/console/workspaces/${ws}/skill-center/upload`, { method: "POST", body: fd })
+          .then(async (res) => {
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body?.message || `HTTP ${res.status}`);
+            return body?.data as { skill: SkillRec; warnings: string[] };
+          });
+      },
+      detail: (ws: number | string, id: number) => request<SkillDetail>(`/console/workspaces/${ws}/skill-center/${id}`),
+      patch: (ws: number | string, id: number, body: { displayName?: string; description?: string; tags?: string[]; content?: string }) =>
+        request<SkillRec>(`/console/workspaces/${ws}/skill-center/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+      enable: (ws: number | string, id: number, on: boolean) =>
+        request<SkillRec>(`/console/workspaces/${ws}/skill-center/${id}/${on ? "enable" : "disable"}`, { method: "POST" }),
+      remove: (ws: number | string, id: number) => request(`/console/workspaces/${ws}/skill-center/${id}`, { method: "DELETE" }),
+      versions: (ws: number | string, id: number) =>
+        request<SkillVersionRec[]>(`/console/workspaces/${ws}/skill-center/${id}/versions`),
+      createVersion: (ws: number | string, id: number, body: { baseVersionId: number; version?: string; changelog?: string }) =>
+        requestRaw<SkillVersionRec>(`/console/workspaces/${ws}/skill-center/${id}/versions`, { method: "POST", body: JSON.stringify(body) }),
+      versionAction: (ws: number | string, id: number, vid: number, action: "publish" | "offline" | "reline") =>
+        request<SkillVersionRec>(`/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/${action}`, { method: "POST" }),
+      versionDownload: (ws: number | string, id: number, vid: number) =>
+        `${BASE}/console/workspaces/${ws}/skill-center/${id}/versions/${vid}/download`,
+    },
+    skillMarket: {
+      sources: (ws: number | string) => request<MarketSourceRec[]>(`/console/workspaces/${ws}/skill-market/sources`),
+      items: (ws: number | string, source = "", keyword = "") =>
+        request<MarketItemRec[]>(`/console/workspaces/${ws}/skill-market?source=${encodeURIComponent(source)}&keyword=${encodeURIComponent(keyword)}`),
+      install: (ws: number | string, source: string, key: string) =>
+        requestRaw<SkillRec>(`/console/workspaces/${ws}/skill-market/${encodeURIComponent(source)}/${encodeURIComponent(key)}/install`, { method: "POST" }),
+    },
+    skillUsages: {
+      list: (ws: number | string, keyword = "") =>
+        request<SkillUsageItem[]>(`/console/workspaces/${ws}/skill-usages?keyword=${encodeURIComponent(keyword)}`),
+      detail: (ws: number | string, agentId: number) =>
+        request<SkillUsageDetail>(`/console/workspaces/${ws}/skill-usages/${agentId}`),
+    },
     // 空间包（import 模式数据源：公共包 + 本空间包，决议 7）
     packages: (ws: number | string, keyword = "") =>
       request<PackageRec[]>(`/console/workspaces/${ws}/packages?keyword=${encodeURIComponent(keyword)}`),

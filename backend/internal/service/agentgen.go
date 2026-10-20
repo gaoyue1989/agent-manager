@@ -8,6 +8,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
@@ -40,12 +41,16 @@ type ModelConnRef struct {
 	IsDefault    bool `json:"isDefault"`
 }
 
-// SkillRef 创建表单的 Skill 勾选（source: "package"（带 packageId，进包）| "l4"（运行时注入，不进包））。
+// SkillRef 创建表单的 Skill 勾选。Skill 中心（2026-10-19）后主形态 = 技能资产引用：
+// source="skill"（SkillID 必填；Version 可选 = 空 取该资产最新发布版）→ 生成包复制
+// 技能版本 PVC 目录（skills/{skillID}/{version}/，随包自包含）。兼容形态保留：
+// source="package"（历史：从 OAF 包勾选，PackageID 定位）| "l4"（运行时注入，不进包）。
 type SkillRef struct {
 	Name      string `json:"name"`
 	Source    string `json:"source"`
-	PackageID uint   `json:"packageId"`
-	Version   string `json:"version"`
+	SkillID   uint   `json:"skillId,omitempty"`   // source=skill：技能资产 id
+	Version   string `json:"version,omitempty"`   // source=skill：锁定版本（空=最新发布版）
+	PackageID uint   `json:"packageId,omitempty"` // source=package（历史形态）
 }
 
 // SubAgentRef 创建表单的 SubAgent 行（远程形态带 endpoint）。
@@ -356,8 +361,9 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 	}
 	files["AGENTS.md"] = []byte(agentsMD)
 
-	// skills：source=package 的勾选从被引用包复制目录进生成包（copy-on-write 自包含）；
-	// source=l4 不进包（运行时注入，frontmatter 不写）
+	// skills：按勾选来源复制目录进生成包（copy-on-write 自包含）；
+	// source=skill 从技能版本 PVC 目录复制（Skill 中心，2026-10-19）；source=package（历史）
+	// 从被引用包复制；source=l4 不进包（运行时注入，frontmatter 不写）。
 	// 清掉 base 里旧的 skills 目录（按新勾选重建）
 	for p := range files {
 		if strings.HasPrefix(p, "skills/") {
@@ -366,21 +372,37 @@ func (c *Core) buildAgentFiles(fm fmRoot, form *AgentForm, base map[string][]byt
 	}
 	copiedSkill := map[string]bool{} // 同名技能只复制首个勾选的源目录（issue #173）
 	for _, s := range form.Skills {
-		if s.Source != "package" || s.PackageID == 0 || s.Name == "" {
+		if s.Source == "l4" || s.Name == "" {
 			continue
 		}
 		if copiedSkill[s.Name] {
-			continue // 同名技能后勾选的源包不再覆盖（与 frontmatter 去重同口径）
+			continue // 同名技能后勾选的源不再覆盖（与 frontmatter 去重同口径）
+		}
+		var copied map[string][]byte
+		switch s.Source {
+		case "skill":
+			src, err := c.copySkillAssetDir(s.SkillID, s.Version, s.Name)
+			if err != nil {
+				return nil, err
+			}
+			copied = src
+		case "package":
+			if s.PackageID == 0 {
+				continue
+			}
+			srcPkg, err := c.Packages.Get(s.PackageID)
+			if err != nil {
+				return nil, fmt.Errorf("%w: skill source package %d not found", ErrInvalidForm, s.PackageID)
+			}
+			src, err := c.copySkillDir(srcPkg, s.Name)
+			if err != nil {
+				return nil, err
+			}
+			copied = src
+		default:
+			continue
 		}
 		copiedSkill[s.Name] = true
-		src, err := c.Packages.Get(s.PackageID)
-		if err != nil {
-			return nil, fmt.Errorf("%w: skill source package %d not found", ErrInvalidForm, s.PackageID)
-		}
-		copied, err := c.copySkillDir(src, s.Name)
-		if err != nil {
-			return nil, err
-		}
 		for p, content := range copied {
 			files[p] = content
 		}
@@ -478,7 +500,17 @@ func (c *Core) deriveFrontmatter(form *AgentForm, agentKey, version string) fmRo
 		seenSkill[s.Name] = true
 		v := s.Version
 		if v == "" {
-			v = "1.0.0"
+			if s.Source == "skill" && s.SkillID > 0 {
+				// 技能资产引用未锁版本：frontmatter 记最新发布版（与复制目录取同版，快照一致）
+				var latest store.SkillVersion
+				if err := c.DB.Where("skill_id = ? AND status = ?", s.SkillID, SkillVerPublished).
+					Order("id DESC").First(&latest).Error; err == nil {
+					v = latest.Version
+				}
+			}
+			if v == "" {
+				v = "1.0.0"
+			}
 		}
 		fm.Skills = append(fm.Skills, fmSkill{Name: s.Name, Source: "local", Version: v})
 	}
@@ -880,8 +912,30 @@ func (c *Core) EditForm(workspaceID, serviceID uint) (*EditFormView, error) {
 		PublicEndpoint: svc.EndpointPublic(), Version: pkg.Version, PackageID: pkg.ID,
 	}
 	view.Prompt = cfg.Instructions
+	// 空间技能资产按名索引（回显 source=skill；停用资产也回显——已勾选状态是事实，
+	// 保存时 copySkillAssetDir 会拒绝停用资产并提示）
+	var wsSkills []store.Skill
+	c.DB.Where("workspace_id = ?", workspaceID).Find(&wsSkills)
+	skillAssets := map[string]store.Skill{}
+	for _, s := range wsSkills {
+		skillAssets[s.Name] = s
+	}
 	for _, s := range cfg.Skills {
-		// frontmatter 声明来自创建链路 source=local（进包）；L4 技能不在包 frontmatter
+		// frontmatter 声明来自创建链路（进包）。Skill 中心（2026-10-19）：包内技能名命中
+		// 空间技能资产 → 回显 source=skill（编辑页版本下拉可换绑）；未命中（导入/存量包
+		// 自带技能）回显 source=package 保持既有形态。
+		if asset, ok := skillAssets[s.Name]; ok {
+			hint := s.Version
+			if hint == "" {
+				var latest store.SkillVersion
+				if err := c.DB.Where("skill_id = ? AND status = ?", asset.ID, SkillVerPublished).
+					Order("id DESC").First(&latest).Error; err == nil {
+					hint = latest.Version
+				}
+			}
+			view.Skills = append(view.Skills, SkillRef{Name: s.Name, Source: "skill", SkillID: asset.ID, Version: hint})
+			continue
+		}
 		view.Skills = append(view.Skills, SkillRef{Name: s.Name, Source: "package", PackageID: pkg.ID, Version: s.Version})
 	}
 	for _, a := range cfg.Agents {
@@ -1069,3 +1123,79 @@ func filesChanged(base, next map[string][]byte) (bool, error) {
 }
 
 func intPtr(v int) *int32 { x := int32(v); return &x }
+
+// copySkillAssetDir 从技能版本 PVC 目录复制 skills/<name>/（Skill 中心 source=skill 勾选；
+// 2026-10-19）。skillID+version 定位 skills/{skillID}/{version}；version 为空取最新发布版。
+// 目录名与资产名一致性由创建链路保证（zip 目录名即资产名；markdown 生成同名目录）。
+func (c *Core) copySkillAssetDir(skillID uint, version, name string) (map[string][]byte, error) {
+	skill, err := c.GetSkill(skillID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: skill %d not found", ErrInvalidForm, skillID)
+	}
+	if skill.Name != name {
+		return nil, fmt.Errorf("%w: skill ref name %q does not match asset %q", ErrInvalidForm, name, skill.Name)
+	}
+	if !skill.Enabled {
+		return nil, fmt.Errorf("%w: skill %q is disabled", ErrInvalidForm, skill.Name)
+	}
+	if version == "" {
+		var latest store.SkillVersion
+		if err := c.DB.Where("skill_id = ? AND status = ?", skillID, SkillVerPublished).
+			Order("id DESC").First(&latest).Error; err != nil {
+			return nil, fmt.Errorf("%w: skill %q has no published version", ErrInvalidForm, skill.Name)
+		}
+		version = latest.Version
+	}
+	rel := fmt.Sprintf("skills/%d/%s", skillID, version)
+	// 校验锁定版本存在且为正式版本（draft 不可被 Agent 引用——对标「正式版本才对外可用」）
+	var sv store.SkillVersion
+	if err := c.DB.Where("skill_id = ? AND version = ?", skillID, version).First(&sv).Error; err != nil {
+		return nil, fmt.Errorf("%w: skill %q version %s not found", ErrInvalidForm, skill.Name, version)
+	}
+	if sv.Status != SkillVerPublished {
+		return nil, fmt.Errorf("%w: skill %q version %s is %s (only published usable)", ErrInvalidForm, skill.Name, version, sv.Status)
+	}
+	out := map[string][]byte{}
+	// Markdown 形态（StorageDir 空）：内容在 ContentJSON，直接生成 skills/<name>/SKILL.md，
+	// 不走 PVC 目录（zip 形态才有解包目录——先 Tree 会对 markdown 技能误报 content missing）
+	if sv.StorageDir == "" {
+		var content struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal([]byte(sv.ContentJSON), &content) == nil && content.Content != "" {
+			out["skills/"+name+"/SKILL.md"] = []byte(content.Content)
+			return out, nil
+		}
+		return nil, fmt.Errorf("%w: skill %q version %s has no content", ErrInvalidForm, skill.Name, version)
+	}
+	tree, err := c.FS.Tree(rel)
+	if err != nil {
+		return nil, fmt.Errorf("%w: skill %q version %s content missing", ErrInvalidForm, skill.Name, version)
+	}
+	var walk func(ents []store.FileEntry) error
+	walk = func(ents []store.FileEntry) error {
+		for _, e := range ents {
+			if e.IsDir {
+				if err := walk(e.Children); err != nil {
+					return err
+				}
+				continue
+			}
+			// zip 目录结构 = skills/<name>/…；直接以包内相对路径写入生成包
+			data, err := c.FS.ReadFile(rel, e.Path)
+			if err != nil {
+				return err
+			}
+			out[e.Path] = data
+		}
+		return nil
+	}
+	if err := walk(tree); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		// 宽松：版本无内容（异常运营数据）→ 只写 frontmatter（包校验 warnings 会提示）
+		return out, nil
+	}
+	return out, nil
+}

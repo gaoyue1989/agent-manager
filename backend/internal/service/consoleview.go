@@ -5,6 +5,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -490,4 +491,280 @@ func parseSkillDescription(content string) string {
 		return line
 	}
 	return ""
+}
+
+// ---- Skill 中心 · Agent 使用情况（§8.4 第三 Tab；2026-10-19）----
+// 数据源 = 每个 Agent 最后生成的 OAF 包（services.package_id 当前指向版本）实时解析：
+// 包内 skills/ 目录扫描（事实来源）+ frontmatter skills 声明（意图与版本）。
+// 与沙箱总览（ConsoleSandbox）同构：无新表、无后台任务、请求期解析包文件。
+
+// SkillUsageItem Agent 使用情况条目（第三 Tab 列表行）。
+type SkillUsageItem struct {
+	AgentID    uint   `json:"agentId"`
+	AgentName  string `json:"agentName"`
+	K8sName    string `json:"k8sName"`
+	Status     string `json:"status"` // services 行状态
+	// PackageID/PackageVersion 最后生成包（引用快照载体）
+	PackageID      uint   `json:"packageId"`
+	PackageVersion string `json:"packageVersion"`
+	SkillCount     int    `json:"skillCount"`
+	Skills         []SkillUsageRef `json:"skills"`
+	// PackageGeneratedAt 包登记时间（oaf_packages.created_at）
+	PackageGeneratedAt *time.Time `json:"packageGeneratedAt,omitempty"`
+}
+
+// SkillUsageRef 包内技能条目（声明/目录扫描合并；角标语义见设计 §8.4）。
+type SkillUsageRef struct {
+	Name        string `json:"name"`
+	// Declared frontmatter skills 声明（true）| 仅目录扫描（false）
+	Declared bool `json:"declared"`
+	// DeclaredVersion frontmatter skills 声明的版本号（仅声明条目）
+	DeclaredVersion string `json:"declaredVersion,omitempty"`
+	// MatchedSkillID/MatchedVersion 匹配的空间技能资产与锁定版本（包内自带/无资产 = 0）
+	MatchedSkillID   uint   `json:"matchedSkillId,omitempty"`
+	MatchedVersion   string `json:"matchedVersion,omitempty"`
+	MatchedSource    string `json:"matchedSource,omitempty"` // market | zip | markdown
+	MatchedAssetName string `json:"matchedAssetName,omitempty"` // 匹配资产的版本行展示名（资产名）
+}
+
+// ConsoleSkillUsages 工作空间内全部 Agent 的技能使用总览（keyword 过滤 Agent 名/技能名）。
+func (c *Core) ConsoleSkillUsages(workspaceID uint, keyword string) ([]SkillUsageItem, error) {
+	// keyword 只做内存过滤（同时命中 Agent 名与技能名，SQL LIKE 会把技能名命中先行排除）
+	var rows []store.ServiceEntity
+	if err := c.DB.Model(&store.ServiceEntity{}).Where("workspace_id = ?", workspaceID).
+		Order("id DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	// 空间技能资产一次载入（按名匹配）
+	assets := map[string]store.Skill{}
+	var skills []store.Skill
+	if err := c.DB.Where("workspace_id = ?", workspaceID).Find(&skills).Error; err != nil {
+		return nil, err
+	}
+	for _, s := range skills {
+		assets[s.Name] = s
+	}
+	// 资产最新 published 版本（latest 语义）
+	latestPub := map[uint]store.SkillVersion{}
+	if len(skills) > 0 {
+		var vers []store.SkillVersion
+		if err := c.DB.Where("skill_id IN ? AND status = ?", skillIDs(skills), SkillVerPublished).
+			Order("id ASC").Find(&vers).Error; err != nil {
+			return nil, err
+		}
+		for _, v := range vers {
+			latestPub[v.SkillID] = v // id ASC：后写覆盖 = 最新
+		}
+	}
+	out := make([]SkillUsageItem, 0, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		item := SkillUsageItem{AgentID: r.ID, AgentName: r.DisplayName, K8sName: r.K8sName, Status: r.Status}
+		if r.PackageID > 0 {
+			if pkg, err := c.Packages.Get(r.PackageID); err == nil {
+				item.PackageID = pkg.ID
+				item.PackageVersion = pkg.Version
+				t := pkg.CreatedAt
+				item.PackageGeneratedAt = &t
+				item.Skills = c.parsePackageSkills(workspaceID, pkg, assets, latestPub)
+				item.SkillCount = len(item.Skills)
+			}
+		}
+		if item.Skills == nil {
+			item.Skills = []SkillUsageRef{}
+		}
+		if keyword != "" && !strings.Contains(r.DisplayName, keyword) && !strings.Contains(r.K8sName, keyword) {
+			// Agent 名不匹配时看技能名是否命中
+			hit := false
+			for _, s := range item.Skills {
+				if strings.Contains(s.Name, keyword) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+// parsePackageSkills 解析单包技能清单：目录扫描（事实来源）∪ frontmatter 声明（意图/版本），
+// 同名合并（声明优先带版本；仅目录 = Declared=false）；匹配技能资产回填锁定版本。
+func (c *Core) parsePackageSkills(workspaceID uint, pkg *store.OafPackage, assets map[string]store.Skill, latestPub map[uint]store.SkillVersion) []SkillUsageRef {
+	var cfg struct {
+		Skills []struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"skills"`
+	}
+	_ = json.Unmarshal([]byte(pkg.ManifestJSON), &cfg)
+	declared := map[string]string{}
+	for _, s := range cfg.Skills {
+		if s.Name != "" {
+			declared[s.Name] = s.Version
+		}
+	}
+	// 目录扫描（skills/ 一级目录，目录是事实来源——未声明也列出）
+	tree, err := c.Packages.Tree(pkg)
+	if err != nil {
+		return nil
+	}
+	dirNames := []string{}
+	var walk func(ents []store.FileEntry)
+	walk = func(ents []store.FileEntry) {
+		for _, e := range ents {
+			if e.IsDir {
+				if strings.HasPrefix(e.Path, "skills/") && strings.Count(strings.Trim(e.Path, "/"), "/") == 1 {
+					n := strings.TrimPrefix(strings.Trim(e.Path, "/"), "skills/")
+					if n != "" && n != "SKILL.md" {
+						dirNames = append(dirNames, n)
+					}
+				}
+				walk(e.Children)
+			}
+		}
+	}
+	walk(tree)
+	sort.Strings(dirNames)
+	// 合并：声明条目 ∪ 目录条目（同名去重）
+	merged := map[string]bool{}
+	refs := []SkillUsageRef{}
+	for _, s := range cfg.Skills {
+		if s.Name == "" || merged[s.Name] {
+			continue
+		}
+		merged[s.Name] = true
+		refs = append(refs, c.matchUsageRef(workspaceID, s.Name, true, s.Version, assets, latestPub))
+	}
+	for _, n := range dirNames {
+		if merged[n] {
+			continue
+		}
+		merged[n] = true
+		refs = append(refs, c.matchUsageRef(workspaceID, n, false, "", assets, latestPub))
+	}
+	return refs
+}
+
+// matchUsageRef 单条目组装 + 技能资产匹配（锁定版本 = 声明版本优先，否则资产最新发布版）。
+func (c *Core) matchUsageRef(_ uint, name string, declared bool, declaredVersion string, assets map[string]store.Skill, latestPub map[uint]store.SkillVersion) SkillUsageRef {
+	ref := SkillUsageRef{Name: name, Declared: declared, DeclaredVersion: declaredVersion}
+	if a, ok := assets[name]; ok {
+		ref.MatchedSkillID = a.ID
+		ref.MatchedSource = a.Source
+		ref.MatchedAssetName = a.DisplayName
+		if declaredVersion != "" {
+			// 锁定版本以声明为准；资产存在即回填资产名（版本无法反查版本行 id——快照语义）
+			ref.MatchedVersion = declaredVersion
+		} else if lv, ok := latestPub[a.ID]; ok {
+			ref.MatchedVersion = lv.Version
+		}
+	}
+	return ref
+}
+
+// ConsoleSkillUsageDetail 单 Agent 详情（skill-usages/:agentId）：当前包技能完整清单
+//（含 SKILL.md 描述与合规 issues，与 SpaceSkills 同口径）+ 包版本链信息。
+type SkillUsageDetail struct {
+	Agent SkillUsageItem `json:"agent"`
+	// Items 完整清单（比列表行多 description/issues）
+	Items []SkillUsageDetailItem `json:"items"`
+}
+
+// SkillUsageDetailItem 详情条目。
+type SkillUsageDetailItem struct {
+	SkillUsageRef
+	// PackagePath 包内目录
+	PackagePath string   `json:"packagePath"`
+	Description string   `json:"description"`
+	Issues      []string `json:"issues"`
+}
+
+// ConsoleSkillUsageDetail 组装单 Agent 技能使用详情。
+func (c *Core) ConsoleSkillUsageDetail(workspaceID, agentID uint) (*SkillUsageDetail, error) {
+	var svc store.ServiceEntity
+	if err := c.DB.Where("id = ? AND workspace_id = ?", agentID, workspaceID).First(&svc).Error; err != nil {
+		return nil, ErrNotFound
+	}
+	assets := map[string]store.Skill{}
+	var skills []store.Skill
+	if err := c.DB.Where("workspace_id = ?", workspaceID).Find(&skills).Error; err != nil {
+		return nil, err
+	}
+	for _, s := range skills {
+		assets[s.Name] = s
+	}
+	latestPub := map[uint]store.SkillVersion{}
+	if len(skills) > 0 {
+		var vers []store.SkillVersion
+		if err := c.DB.Where("skill_id IN ? AND status = ?", skillIDs(skills), SkillVerPublished).
+			Order("id ASC").Find(&vers).Error; err != nil {
+			return nil, err
+		}
+		for _, v := range vers {
+			latestPub[v.SkillID] = v
+		}
+	}
+	detail := &SkillUsageDetail{}
+	item := SkillUsageItem{AgentID: svc.ID, AgentName: svc.DisplayName, K8sName: svc.K8sName, Status: svc.Status}
+	if svc.PackageID > 0 {
+		pkg, err := c.Packages.Get(svc.PackageID)
+		if err != nil {
+			return nil, err
+		}
+		item.PackageID = pkg.ID
+		item.PackageVersion = pkg.Version
+		t := pkg.CreatedAt
+		item.PackageGeneratedAt = &t
+		refs := c.parsePackageSkills(workspaceID, pkg, assets, latestPub)
+		item.Skills = refs
+		item.SkillCount = len(refs)
+		// 详情条目：回读 SKILL.md 描述 + 合规 issues（SpaceSkills 同口径 checkSkillDirs）
+		tree, err := c.Packages.Tree(pkg)
+		if err == nil {
+			var filePaths []string
+			var walk func(ents []store.FileEntry)
+			walk = func(ents []store.FileEntry) {
+				for _, e := range ents {
+					if e.IsDir {
+						walk(e.Children)
+						continue
+					}
+					filePaths = append(filePaths, e.Path)
+				}
+			}
+			walk(tree)
+			issuesBySkill := map[string][]string{}
+			for _, it := range checkSkillDirs(func(name string) ([]byte, error) {
+				return c.Packages.ReadFile(pkg, name)
+			}, filePaths) {
+				issuesBySkill[it.Name] = it.Issues
+			}
+			for _, ref := range refs {
+				di := SkillUsageDetailItem{SkillUsageRef: ref, PackagePath: "skills/" + ref.Name + "/"}
+				if data, err := c.Packages.ReadFile(pkg, "skills/"+ref.Name+"/SKILL.md"); err == nil {
+					di.Description = parseSkillDescription(string(data))
+				} else if a, ok := assets[ref.Name]; ok && a.Description != "" {
+					// 声明了但包内目录缺失（仅声明）：回落技能资产描述（版本快照缺目录属不合规，提示在 issues）
+					di.Description = a.Description
+				}
+				di.Issues = issuesBySkill[ref.Name]
+				if di.Issues == nil {
+					di.Issues = []string{}
+				}
+				detail.Items = append(detail.Items, di)
+			}
+		}
+	}
+	if item.Skills == nil {
+		item.Skills = []SkillUsageRef{}
+	}
+	detail.Agent = item
+	if detail.Items == nil {
+		detail.Items = []SkillUsageDetailItem{}
+	}
+	return detail, nil
 }
