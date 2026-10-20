@@ -466,6 +466,7 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 
 | 字段 | 说明 |
 |------|------|
+| `summary` | 人可读调用摘要（与 SSE `tool_call_summary.summary` 同一文案，如「读取 uploads/a.xlsx」）；前端历史回放优先展示它，缺失时回落 `name` |
 | `state` | 结果状态（`success`/`error`/`denied`/`interrupted`）优先；无结果时回落 ToolCallState（如 `asking`） |
 | `output` | 工具结果文本；**敏感值已遮掩**（密钥键值对 / `tp-` token / Bearer），且已按上限截断 |
 | `output_truncated` | 可选：`true` 表示因超限被截断 |
