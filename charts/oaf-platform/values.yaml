@@ -26,7 +26,7 @@ images:
 routing:
   mode: router            # router（默认，chart 部署 platform-router）| host（每服务独立域名）
   # 业务 Ingress 的 IngressClass；留空 = 后端不写 ingressClassName（集群默认兜底）
-  ingressClass: nginx
+  ingressClass: ""
   # 集群 ingress controller 的对外入口地址（Endpoint 展示拼装用，如 172.20.0.3 / 域名）
   host: ""
   port: 30080
@@ -82,6 +82,7 @@ backend:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 2Gi }
   # KUBECONFIG 两模式（设计 §6.2）；synthesized = 部署期合成（专用 SA + token Secret + kubeconfig）
+  # provided = 使用外部 kubeconfig 凭据，不创建 SA/RBAC（避免部署账号权限不足导致安装失败）
   kubeconfig:
     mode: synthesized            # synthesized | provided
     server: ""                   # synthesized：空 = https://kubernetes.default.svc（可覆写为 Service IP）
