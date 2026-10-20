@@ -71,6 +71,20 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 		// 5) oaf_packages：(slug, version) 唯一索引的存量重复行归一（issue #172）
 		// 已前移到 Open（AutoMigrate 之前，见 dedupPackageVersions）——重复行会让
 		// 唯一索引创建失败启动即挂
+
+		// 6) Skill 中心：内置市场源种子（多源预留 §6.3 决议 8——一期仅 builtin 一行，
+		// registry 外部源只建模型不开放；按 key 幂等，二次启动零写入）
+		var mktSrc int64
+		if err := tx.Model(&SkillMarketSource{}).Where("`key` = ?", "builtin").Count(&mktSrc).Error; err != nil {
+			return err
+		}
+		if mktSrc == 0 {
+			if err := tx.Create(&SkillMarketSource{Key: "builtin", Name: "平台精选",
+				Type: "builtin", Enabled: true, Sort: 0}).Error; err != nil {
+				return err
+			}
+			log.Printf("[migrate] seeded builtin skill market source")
+		}
 		return nil
 	})
 }

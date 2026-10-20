@@ -102,11 +102,11 @@ AGENT 协作
 | 纳管 Agent | 存量服务挂 workspace 归属 | 无归属字段 | 运维/管理员把无主服务纳管进工作空间 |
 | Agent 模板 | 精选 OAF 包（打 `template` 标记） | 包体系已有 | **不作为创建入口**；模板页保留为公共包浏览，复用其资产走「导入 OAF 包」方式派生（copy-on-write） |
 | 模型连接 | 工作空间级模型连接配置（backend 自有表）→ 下发至 Agent 的 `/models` 接口（model_config，见 agent-framework/docs/session-model-switch-design.md） | 框架侧 CRUD+test+会话级切换已实施；连接配置/下发/使用展示为新建 | 用户侧模型连接页 = 连接 CRUD + 连通性测试 + **下发**（配置同步到 Agent 的 `POST/PATCH /models`，幂等）+ **Agent 使用情况展示**（每 Agent 已同步连接/默认模型/同步状态）；调试对话模型切换走 `POST /threads/chat {model}`（数据源 = 该 Agent 自己的 `/models`） |
-| Skill 管理 | **平台 Skill 中心（工作空间技能资产，独立于 OAF 包）**：`skills` / `skill_versions` / `skill_releases` / `skill_market_items` 四表（§6.3）——创建入口两种（zip 技能包上传 / Markdown 定义，对标 AgentCore create-skill）+ Skill 广场市场导入（skill-market 精选目录），版本管理（工作区草稿可续改 + 正式版本不可变快照 + 最新发布版承担 latest 语义，对标 AgentCore skill-version-management），列表管理（详情/启用停用/删除/下载） | 包内 skills/ 目录有完整链路；无独立技能资产实体 | 用户侧 Skill 页 = **我的 Skill（空间技能资产 CRUD + 版本管理）+ Skill 广场（市场目录一键导入）**；创建/编辑 Agent 时从本空间技能资产勾选（写入生成包 frontmatter `skills` 声明 + 复制 `skills/<name>/` 目录，随包自包含）；**按 Agent 查询引用**（Agent→技能 与 技能→Agent 双向视图）。**不做运行时分级（L1-L4）管理**——分级是 Agent 运行时概念（2026-10-17 口径修订）；包内 skills/ 目录仍按 2026-10-17 口径只读展示（由生成包/包编辑器维护） |
+| Skill 管理 | **平台 Skill 中心（工作空间技能资产，独立于 OAF 包）**：`skills` / `skill_versions` / `skill_releases` / `skill_market_items` 四表（§6.3）——创建入口两种（zip 技能包上传 / Markdown 定义，对标 AgentCore create-skill）+ Skill 广场市场导入（skill-market 精选目录），版本管理（工作区草稿可续改 + 正式版本不可变快照 + 最新发布版承担 latest 语义，对标 AgentCore skill-version-management），列表管理（详情/启用停用/删除/下载） | 包内 skills/ 目录有完整链路；无独立技能资产实体 | 用户侧 Skill 页 = **我的 Skill（空间技能资产 CRUD + 版本管理）+ Skill 广场（多源市场预留，一期内置源一键导入）+ Agent 使用情况（按最后生成 OAF 包解析的引用总览与单 Agent 详情）**；创建/编辑 Agent 时从本空间技能资产勾选（写入生成包 frontmatter `skills` 声明 + 复制 `skills/<name>/` 目录，随包自包含）；**按 Agent 查询引用**（Agent→技能 与 技能→Agent 双向视图）。**不做运行时分级（L1-L4）管理**——分级是 Agent 运行时概念（2026-10-17 口径修订）；包内 skills/ 目录仍按 2026-10-17 口径只读展示（由生成包/包编辑器维护） |
 | 工具管理（MCP） | 工作空间级 MCP 连接器配置（backend 自有表）→ Agent 创建/更新时勾选，发布时注入生成包（`mcpServers`/`mcp-configs`） | 包声明已有；连接器配置为新建 | 用户侧工具页 = MCP 配置创建/维护（对标 AgentCore tools/create）；已发布 Agent 的运行时枚举（`/tools` `/mcp`）与三态权限只读展示 |
 | 集成其它 Agent（远程子 agent） | Agent Protocol 远程 SubAgent（`SubagentDeclaration.url` → 对端 `POST /tasks`，见 travel-fulfillment-agent-protocol-design.md） | M1 已实施（双服务实测 + e2e 协议多副本门禁） | 用户侧「集成 Agent」页：登记可集成的 Agent 端点与 lead→member 集成关系；创建页资产配置区勾选 → 写入生成包 `subAgents[].endpoint` |
 | 知识库 | —— | 无 | 仅占位入口，标注「规划中」（经 MCP 接入同 AgentCore 思路） |
-| 记忆空间 | agent-framework 记忆/会话（session_user / debug memory） | 调试面已有 | 一期只读：按会话查看记忆摘要；写管理远期 |
+| 记忆空间 | **不新建实体——每个运行中 Agent 即一个记忆空间**：长期记忆 = agent-framework `agent_fs` KV（MEMORY.md + memory/ 按日文件，SDK flush/consolidation 自动沉淀，`agents/{agent}/users/{uid}` 隔离）；会话历史 = session_user + session_message 归档（2026-10-19 重设计，对标 AgentCore 列表页 + 详情页三 Tab，§8.4） | 记忆文件/会话查询调试面已有（`/debug/memory`、`/threads`、`/threads/{sid}/history`） | 一期**纯只读展示**：记忆空间页 = 空间列表（空间内 Agent 卡片）+ 详情页三 Tab（概览 / 长期记忆 / 会话历史），前端直连业务 Pod，不经 backend；写管理/语义检索/独立空间实体远期（§8.4） |
 | 凭证管理 | API Key（调用 agent 的凭证）+ 敏感 env Secret 化 | Secret 路由已有、API Key 无 | 新建 `api_keys` 实体与签发/吊销页 |
 | 调试对话（Playground） | `/threads/chat` SSE + HITL | 发布助手页已打通全链 | 复用为 Agent 详情「调试」Tab（按 agent 直连） |
 | 会话管理 | `/threads` + `/subscribe` + history | 已有 | Agent 详情「会话」Tab（userId=当前用户） |
@@ -225,8 +225,8 @@ WorkspaceID uint index（0 = 平台公共包，双侧可见）
 ### 6.3 Skill 中心四表（2026-10-19 新增，对标 AgentCore Skill 管理 + 版本管理）
 
 技能从「OAF 包附属」升级为**工作空间级独立资产**：用户可经市场/zip 上传/Markdown 定义创建，
-创建/编辑 Agent 时勾选注入生成包；支持版本管理（工作区 HEAD + 正式版本 + latest 别名）与
-引用追溯（按 Agent 查询）。四张表全为平台自有表（原则一：不碰业务 K8s 资源；AutoMigrate 同步建表）。
+创建/编辑 Agent 时勾选注入生成包；支持版本管理（工作区草稿可续改 + 正式版本不可变快照 +
+最新发布版承担 latest 语义）与引用追溯（按 Agent / 按技能双向查询）。四张表全为平台自有表（原则一：不碰业务 K8s 资源；AutoMigrate 同步建表）。
 
 ```go
 // skills 技能资产主表（name 空间内唯一；语义对齐 AgentCore Skill）
@@ -234,13 +234,14 @@ ID uint; WorkspaceID uint index; Name string; // 技能名（skillNameRe 口径�
 DisplayName string; Description string（≤1024，SKILL.md frontmatter 同源）;
 TagsJSON string; // ["客服","工单"] 展示用标签
 Source string; // market | zip | markdown  创建方式
-LatestVersionID uint; // 指向 skill_versions 当前工作区/最新版本行（发布后=latest 别名目标）
+SourceName string; // market 来源市场名（如「平台精选」；多源预留，内置源写入「平台精选」）
+LatestVersionID uint; // 指向 skill_versions 最新版本行（发布后=「最新发布版」展示目标）
 Enabled bool; // 启用/停用（对标 AgentCore 状态开关：停用后引用它的 Agent 不再注入该技能）
 Status string; // active | disabled
 CreatedBy uint; CreatedAt/UpdatedAt
 // UniqueIndex(workspace_id, name)
 
-// skill_versions 版本行（对标 AgentCore：工作区版本 HEAD + 正式版本不可变快照）
+// skill_versions 版本行（对标 AgentCore：工作区草稿 HEAD 可续改 + 正式版本不可变快照）
 ID uint; SkillID uint index; Version string; // 语义化版本 major.minor.patch（发布路径生成）
 Status string; // draft（工作区，可续改）| review（审核中，预留）| pending（待发布）| published | offline
 Changelog string; // 变更说明
@@ -255,26 +256,47 @@ CreatedBy uint; CreatedAt/UpdatedAt
 ID uint; SkillID uint; VersionID uint; Action string; // publish | offline | reline
 Note string; CreatedBy uint; CreatedAt
 
-// skill_market_items Skill 广场目录（平台内置/运营维护，只读表；安装=按目录项建 skill 资产）
-ID uint; Key string; // 市场键（如 ticket-escalation）
+// skill_market_items Skill 广场条目（只读表；安装=按条目建 skill 资产）；多源预留见 skill_market_sources
+ID uint; SourceID uint index; // 所属市场源（一期恒为内置源 1）
+Key string; // 市场键，源内唯一（如 ticket-escalation）
 Name; DisplayName; Description; TagsJSON; Downloads int;
-BundleDir string; // 内置 zip 在镜像/PVC 的只读路径
+BundleDir string; // 内置 zip 的只读路径（镜像/PVC）；外部源为远端 zip URL（远期）
 Enabled bool
+// UniqueIndex(source_id, key)
+
+// skill_market_sources 市场源注册表（2026-10-19 多源预留；一期仅一行内置源，不开放 UI 维护）
+ID uint; Key string; // builtin | 外部源自定义键
+Name string; // 展示名（如「平台精选」「团队市场」）
+Type string; // builtin | registry  registry=远端目录源（预留，远期开放）
+Endpoint string; // registry 源的目录 JSON 地址（返回条目数组 + zip 下载 URL）
+Enabled bool; Sort int
 ```
 
+**多源市场预留（2026-10-19）**：广场按「市场源」聚合，导入/安装语义与源解耦——`GET
+skills/market?source=` 按源过滤条目，`POST skills/market/:source/:key/install` 按源安装
+（内置源=复制镜像内 zip；registry 源=远期经 HTTP 拉取 zip，落盘与合规检查同管线）。一期仅
+实现内置源（`skill_market_sources` 种子一行 `builtin`），registry 源只建模型与 API 形参、
+不开放：外部目录协议（认证方式/条目 schema/zip 校验）待接入真实市场时单独评审。
+
 存储复用：zip 技能包落共享 PVC（`skills/{skillID}/{version}/`，与 `packages/{id}` 同盘、
-同 `MaxZipSize 20MB / MaxEntries 2000 / MaxExtracted 100MB` 护栏）；zip 结构要求与包内
-skills/ 目录一致——`skills/<name>/SKILL.md`（frontmatter name/description）为技能主文件，
-可选 `scripts/`、`references/`、`assets/` 子目录；上传即跑 `checkSkillDirs` 合规检查
+同 `MaxZipSize 20MB / MaxEntries 2000 / MaxExtracted 100MB` 护栏）；zip 布局支持三种并**归一化为** `skills/<name>/SKILL.md` 存储——A) `skills/<name>/SKILL.md`
+（OAF 包内技能目录风格）；B) 根目录 `SKILL.md`（标准技能包，如 Claude/AgentCore 技能包，
+可带 `_meta.json`）；C) 单层目录 `<dir>/SKILL.md`（压缩整个技能文件夹）。技能名优先级：
+表单 name > 布局目录名 > SKILL.md frontmatter name > zip 文件名净化（2026-10-20 部署实测修订：
+原实现只认 A，用户上传标准技能包报 `zip must contain skills/<name>/SKILL.md`）；上传即跑
+`checkSkillDirs` 合规检查
 （skillcheck.go 同一实现，warnings 宽松不阻断、明细回显）。
 
 与 OAF 包的关系（沿用 copy-on-write 自包含语义，**运行时零改动**）：
 - 创建/编辑 Agent 勾选技能资产 → 生成包 frontmatter `skills` 声明 + 把该技能**当前发布版**
   的目录复制进包内 `skills/<name>/`（agentgen.go copySkillDir 既有机制，来源从「包」换
   「技能版本 PVC 目录」）——包仍自包含，业务 Pod 直挂 PVC 运行，不经 backend；
-- **Agent 引用记快照**：`services.skills_json` 既有字段记录 `{name, skillId, version}`——
-  升级技能版本必须经编辑页重新勾选/重新生成包，已发布 Agent 的包内容不随技能中心变化
-  （对标 AgentCore「按具体版本号引用始终不变」；技能中心的版本演进不影响已生成包）；
+- **版本快照即生成包本身**：勾选的技能版本复制进包内 `skills/<name>/`，frontmatter `skills`
+  声明记录 `{name, source, version}`——**最后生成的 OAF 包就是引用快照的事实来源**，不新增
+  services 列（`services.skills_json` 已被 A2A agent-card 注册占用，register.go 写卡片 skills，
+  语义不同不混用）。升级技能版本必须经编辑页重新勾选/重新生成包，已发布 Agent 的包内容不随
+  技能中心变化（对标 AgentCore「按具体版本号引用始终不变」）；「Agent 使用情况」视图按
+  services.package_id 解析当前包聚合（与沙箱总览同构，无新表、无后台任务）；
 - 运行时技能分级（L1-L4）仍由 agent-framework 维护，零改动。
 
 ### 6.4 回填策略（migrate.go，幂等）
@@ -324,14 +346,16 @@ GET  /api/v1/console/workspaces/:ws/skills/:id/versions       版本列表（状
 POST /api/v1/console/workspaces/:ws/skills/:id/versions       创建新版本（基于指定版本 + 变更说明）
 POST /api/v1/console/workspaces/:ws/skills/:id/versions/:vid/{publish,offline}  发布/下线版本（published↔offline）
 GET  /api/v1/console/workspaces/:ws/skills/:id/versions/:vid/download          下载版本 zip
-GET  /api/v1/console/workspaces/:ws/skills/market   Skill 广场目录（skill_market_items + 已安装标记 + 下载量排序）
-POST /api/v1/console/workspaces/:ws/skills/market/:key/install                 安装市场技能（复制内置 zip → 本空间 skill 资产 v1.0.0 published）
-GET  /api/v1/console/workspaces/:ws/skill-usages   按 Agent 查询技能引用（Agent → 已勾选技能[{name, skillId, version, 来源:生成包}]）
-GET  /api/v1/console/workspaces/:ws/skills/:id/usages         按技能查询引用 Agent（技能 → Agent 列表 + 各自锁定版本）
+GET  /api/v1/console/workspaces/:ws/skills/market?source=   Skill 广场目录（skill_market_items 按 source 过滤 + 已安装标记 + 下载量排序；sources 一并返回，多源预留见 §6.3）
+GET  /api/v1/console/workspaces/:ws/skills/market/sources   市场源列表（一期仅内置源 builtin；registry 源远期开放）
+POST /api/v1/console/workspaces/:ws/skills/market/:source/:key/install         安装市场技能（内置源=复制 zip → 本空间 skill 资产 v1.0.0 published；registry 源远期经 HTTP 拉取）
+GET  /api/v1/console/workspaces/:ws/skill-usages   **Agent 使用情况**（第三 Tab 数据源）：遍历空间内 services，按各自**最后生成的 OAF 包**（services.package_id 当前指向版本）解析——包内 skills/ 目录扫描（事实来源）+ frontmatter `skills` 声明（意图与版本），聚合 `AgentUsageItem[]`（agentId/agentName/status/packageId/packageVersion/skills[{name,declared,version,matchedSkillId,matchedVersion}]/skillCount）；与沙箱总览（consoleview.go ConsoleSandbox）同构：无新表、无后台任务，请求期实时解析包文件
+GET  /api/v1/console/workspaces/:ws/skill-usages/:agentId      单 Agent 详情：该 Agent 当前包的技能完整清单（声明+目录扫描逐条，含 SKILL.md 描述与合规 issues）+ 包版本链信息（版本号/生成时间）——列表行「查看详情」抽屉数据源
+GET  /api/v1/console/workspaces/:ws/skills/:id/usages          按技能查询引用 Agent（技能 → Agent 列表 + 各自锁定版本；反向 = 遍历同上聚合，按 matchedSkillId 过滤）
 GET  /api/v1/console/workspaces/:ws/skill-refs     创建/编辑页候选数据源（空间技能资产 + 公共只读技能，Enabled 仅 active）
 GET/POST/PATCH/DELETE /api/v1/console/workspaces/:ws/tools    MCP 连接器配置 CRUD（保存为空间级配置，创建/更新 Agent 时注入生成包）
 GET/POST/DELETE /api/v1/console/workspaces/:ws/integrations   集成 Agent：可集成端点注册与 lead→member 集成关系（Agent Protocol）
-GET  /api/v1/console/workspaces/:ws/memory/:agent  记忆/会话摘要只读（一期）
+（不新增列表端点）记忆空间列表复用 `GET /console/workspaces/:ws/agents`（Agent 即记忆空间，§8.4）；卡片上的记忆文件数/会话数为前端直连各 Agent 数据面（`/debug/memory`、`/threads`）聚合
 GET  /api/v1/console/workspaces/:ws/api-keys       签发/列表/吊销
 POST /api/v1/console/workspaces/:ws/api-keys
 DELETE /api/v1/console/workspaces/:ws/api-keys/:id
@@ -390,7 +414,7 @@ GET  /api/v1/admin/audit-logs              审计（一期仅 service_events + p
 | 名称 / 描述 | frontmatter `name` / `description`；`vendorKey` 固定平台命名空间（如 `agentmanager`）；`agentKey`/`slug` 由名称 slugify 自动派生（小写 + 连字符），与服务 short 名、K8s `k8s_name` 同源生成，重名校验复用发布链路（空间内包名唯一 + 集群 k8s_name 唯一） |
 | 系统提示词 | AGENTS.md 正文（标准段落骨架：Agent Purpose / Core Responsibilities / Capabilities / Communication Style） |
 | 模型连接 / 模型 | **不进包**：默认连接经发布 env 注入（`LLM_BASE_URL/LLM_MODEL/LLM_API_KEY`，key 路由服务 Secret）；全部勾选连接经下发接口写入 Agent `model_config`；frontmatter `model` 段仅写默认模型名（展示语义，key 永不落包） |
-| Skill 勾选 | frontmatter `skills` 声明（name/source/version）+ **复制所选技能版本的 `skills/<name>/` 目录进包**（copy-on-write 自包含）；`services.skills_json` 记 `{name, skillId, version}` 快照（按 Agent 查询数据源）；技能中心后续发版不影响已生成包，升级经编辑页重新勾选 |
+| Skill 勾选 | frontmatter `skills` 声明（name/source/version）+ **复制所选技能版本的 `skills/<name>/` 目录进包**（copy-on-write 自包含）；**生成包本身即引用快照**（「Agent 使用情况」按 services.package_id 解析，§8.4.1 决议 7）；技能中心后续发版不影响已生成包，升级经编辑页重新勾选 |
 | SubAgent 添加 | frontmatter `subAgents`（vendor/agent/role/delegations；从「集成 Agent」勾选的端点写入 `endpoint`，认证头经 env 不落包） |
 | 工具/MCP 勾选 | frontmatter `mcpServers`（vendor/server/version/configDir）+ `mcp-configs/<server>/config.yaml`（内容由「工具管理」连接器配置注入生成） |
 | 沙箱开关 | frontmatter `config.sandbox.enabled`（不落包时运行时三层裁决回退：env 显式 > 包声明 > 默认 false）；SANDBOX_IMAGE / SANDBOX_TIMEOUT_MINUTES / SANDBOX_MEMORY_MB / SANDBOX_CPU_COUNT 作为发布 env 注入（不进包） |
@@ -422,23 +446,34 @@ GET  /api/v1/admin/audit-logs              审计（一期仅 service_events + p
 - **集成其它 Agent**（AGENT 构建 → 集成 Agent）：管理本空间可作为远程子 agent 的集成关系（Agent Protocol：对端开启 `agentscope.agent-protocol.enabled` 暴露 `POST /tasks` 等端点）；登记 lead→member 关系、端点 URL、流式/ask 策略与认证（`X-Agent-Protocol-Token` 经 env 注入，不落包）；创建页资产配置区勾选后写入生成包 `subAgents[].endpoint`，运行时 `agent_spawn` 调度、子事件回流父流（travel-fulfillment-agent-protocol-design.md）；
 - **模型连接**（对标 AgentCore 模型管理 add-connection，与 MCP 连接器同构的「先配置、后下发」模式）：**工作空间级连接 CRUD**（backend 自有表：name/modelId/provider/baseUrl/apiKey/temperature/maxTokens/timeout；apiKey 落库内网明文、接口掩码回显）+ **连通性测试**（backend 直连 baseUrl 最小 completion）+ **下发**（发布时勾选的默认连接注入 `LLM_*` env；就绪后全部勾选连接异步同步到 Agent 的 `POST/PATCH /models`，幂等、状态可查）+ **Agent 使用情况展示**（每 Agent：已同步哪些连接 / 默认模型 / 同步状态：pending·synced·failed）；调试对话模型切换数据源 = 该 Agent 自己的 `/models`（含下发连接 + 系统默认）；
 - **Skill 管理（2026-10-19 重设计：空间技能资产中心，对标 AgentCore Skill 管理 + Skill 广场 + 版本管理）**：
-  - **页面双 Tab**：
+  - **页面三 Tab**：
     - **我的 Skill**（空间技能资产列表）：表格/卡片（技能名 mono / 描述 / 标签 / 来源徽标 market·zip·markdown / 最新版本 + 发布状态徽标 / 启用状态 / 被 N 个 Agent 引用 / 更新时间）；行操作「详情 / 编辑 / 停用·启用 / 删除（无引用时）」；顶部「创建 Skill」按钮 → 创建抽屉；搜索按名称/描述/标签过滤；
-    - **Skill 广场**（对标 AgentCore Skill 广场）：市场技能卡片（名称/描述/标签/下载量）+「详情 / 导入」——导入 = 一键复制为本空间技能资产（v1.0.0 published，`POST skills/market/:key/install`），导入后出现在「我的 Skill」可勾选；
+    - **Skill 广场**（对标 AgentCore Skill 广场，**多源市场预留**）：顶部市场源切换（一期仅「平台精选」内置源；`skills/market/sources` 返回，registry 外部源远期开放——目录协议/认证/zip 校验待接入真实市场时单独评审，导入安装语义与源解耦）；市场技能卡片（名称/描述/标签/下载量/**来源徽标**）+「详情 / 导入」——导入 = 一键复制为本空间技能资产（v1.0.0 published，`POST skills/market/:source/:key/install`），导入后出现在「我的 Skill」可勾选；
+    - **Agent 使用情况**（2026-10-19 新增第三 Tab）：工作空间内**全部 Agent 的技能使用总览**，数据源 = 每个 Agent **最后生成的 OAF 包**（services.package_id 当前指向版本）——包内 skills/ 目录扫描（事实来源）+ frontmatter `skills` 声明（意图/版本），与沙箱配置页同构（请求期解析、无新表无后台任务）；表格列：Agent（名称+运行状态徽标）/ 当前包版本 / 技能数 / 技能清单（`name · version` 标签流，声明与目录扫描差异条目带「仅声明/仅目录」角标）/ 包生成时间 / 行操作「查看详情」；筛选：仅看有技能引用 / 关键字（Agent 名、技能名）；行「查看详情」→ 单 Agent 抽屉（`skill-usages/:agentId`）：包版本链信息（当前版本/派生自/生成时间）+ 该包技能完整清单表（技能名/包内路径/SKILL.md 描述/声明状态/匹配的技能资产与版本/合规 issues——与 SpaceSkills issues 同口径）+「换绑技能版本」入口（跳编辑页资产配置区）；存量/导入包（无技能资产对应）正常列出，matchedSkillId 为空显示「包内自带」；
   - **创建 Skill（抽屉，两种方式对标 AgentCore 创建页）**：
-    - **上传技能包**：zip 文件（结构要求：`skills/<name>/SKILL.md` 为主文件，可选 `scripts/`、`references/`、`assets/`；≤20MB / ≤2000 条目，与 OAF 包上传同护栏）；上传即跑 `checkSkillDirs` 合规检查，warnings 明细回显（宽松不阻断）；解析 SKILL.md frontmatter 自动回填 name/description（可改）+ 标签；
+    - **上传技能包**：zip 文件（布局三种均支持并归一化存储：根 `SKILL.md`（标准技能包 + 可选 `_meta.json`）/ 单层目录 `<dir>/SKILL.md` / `skills/<name>/SKILL.md`；可选 `scripts/`、`references/`、`assets/`；≤20MB / ≤2000 条目，与 OAF 包上传同护栏）；上传即跑 `checkSkillDirs` 合规检查，warnings 明细回显（宽松不阻断）；解析 SKILL.md frontmatter 自动回填 name/description（可改）+ 标签；
     - **通过 Markdown 定义**：技能名（`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`、≤64 字符）+ 描述（≤1000）+ Markdown 正文（SKILL.md 内容，frontmatter name/description 自动生成）+ 标签；
     - 两种方式都落 v1.0.0 工作区草稿 →「保存并发布」直接 published（一期不接安全护栏审核，状态机预留 review 槽位，见 §6.3）；
   - **详情抽屉（版本管理）**：基本信息区（名称/描述/标签/启用开关/来源/创建时间）+ **版本列表**（版本号/状态徽标 draft·published·offline/变更说明/创建时间/操作：发布·下线·下载 zip·基于此版本创建新版本）+ **引用 Agent 列表**（每个 Agent 的名称/状态/锁定的版本——按 Agent 查询技能使用的入口）+「下载」按钮（当前发布版 zip 导出）；
   - **启用/停用**（对标 AgentCore 状态开关）：停用后创建/编辑 Agent 的候选列表不再出现该技能（已发布 Agent 的包内容不回变——包自包含）；
   - **版本机制**（对标 AgentCore skill-version-management，一期裁剪）：版本号语义化（major/minor/patch 手填，创建新版本默认 patch+1）；**正式版本不可变**，修正走「基于此版本创建新版本」；latest 语义由「最新 published 版」承担（勾选候选默认选中项）；版本下线前详情页校验引用（有 Agent 引用锁定该版本时提示迁移后再下线）；
-  - **按 Agent 查询**：独立视图 `skill-usages`（Agent → 技能）与技能详情页引用列表（技能 → Agent）双向可查；Agent 详情「技能」Tab 同源展示；
+  - **按 Agent 查询**：Skill 管理页第三 Tab「Agent 使用情况」（本页内聚，替代早先独立视图 c/skill-usages）+ 技能详情页引用列表（技能 → Agent）双向可查；Agent 详情「技能」Tab 同源展示（同一包解析聚合）；
   - 修改口径沿用 2026-10-17 决议：页面直接管理**技能资产**（新增/版本/启停/删除）；**包内 skills/ 目录**仍只读展示（包自包含副本，由生成包/包编辑器维护）；运行时分级（L1-L4）不在此页管理；
 - **工具管理（MCP）**：MCP 连接器配置的创建与维护（对标 AgentCore tools/create：名称/传输/Endpoint/认证/工具范围，保存为工作空间级配置，backend 自有表）；Agent 创建或更新时在资产配置步勾选，发布时注入生成包（`mcpServers` + `mcp-configs/`）；已发布 Agent 的运行时工具枚举与三态权限（allow/ask/deny）只读展示；
 - **沙箱配置**：空间内 Agent 的 OpenSandbox 沙箱启用状态**只读总览**（Agent / 沙箱状态 / 生效来源：发布 env `SANDBOX_ENABLED` 或包声明 `config.sandbox.enabled` 或默认关闭 / 资源规格：镜像·内存·CPU / 服务状态）+ 平台沙箱资源默认值掩码回显（OPENSANDBOX_SERVER_URL / SANDBOX_TIMEOUT_MINUTES 等，运维侧「默认配置」页维护）。修改不在此页：跳转对应 Agent 编辑页的「沙箱配置」区块（§8.2 / §8.2.1）。生效裁决为 agent-framework SandboxRuntime 三层：部署 env 显式设置 > 包 frontmatter `config.sandbox.enabled` > 默认关闭；
   - **实装口径（2026-10-19）**：`GET /console/workspaces/:ws/sandbox?keyword=` 返回 `SandboxItem[]`（serviceId/displayName/k8sName/status/enabled/source(env|package|default)/packageDeclared/envExplicit/image/timeoutMinutes/memoryMb/cpuCount），按 services 行 env_json + 当前包 AGENTS.md frontmatter 聚合，无新表；创建/编辑表单 `sandbox` 字段：开关写包 frontmatter（显式关必须落 `enabled: false`——copy-on-write 沿用底包时不落声明会回退旧 true），SANDBOX_IMAGE/TIMEOUT/MEMORY/CPU 作发布 env（负值护栏归零不注入），`SANDBOX_ENABLED` 恒不经 env 注入（env 显式值会永久压过包声明，与 platformconfig 模板排除该键同因）；存量服务 env 已有的 `SANDBOX_ENABLED` 显式值在编辑页回显为表单显式值，保持 sticky 不自动迁移。
 - **知识库**：占位页（空态 + 「规划中」说明，对标 AgentCore「知识库经 MCP 接入」）；
-- **记忆空间**：按 Agent×会话只读查看记忆/摘要；编辑与清除策略远期；
+- **记忆空间（2026-10-19 重设计，对标 AgentCore 记忆空间「列表页 + 详情页三 Tab」）**：
+  - **概念映射**：AgentCore 的记忆空间（MemoryStore）是承载长期记忆与会话历史的独立资源；本平台**不新建实体——每个运行中 Agent 即一个记忆空间**。长期记忆 = agent-framework `agent_fs` KV（`MEMORY.md` 索引 + `memory/YYYY-MM-DD.md` 按日文件，SDK Memory flush（对话事实抽取）/ consolidation（合并进 MEMORY.md）自动沉淀，业务面零改动）；会话历史 = `session_user` + `session_message` 归档（`AGENT_HISTORY_ARCHIVE_ENABLED` 默认开启，压缩摘要以 compaction_summary 条目出现在历史中）。两者均按 `agents/{agent}/users/{uid}` 隔离（记忆文件），会话按 userId 过滤；
+  - **页面结构（一期纯只读，前端直连业务 Pod，不经 backend）**：
+    - **列表页** `assets/memory/page.tsx`：空间卡片网格（对标 AgentCore 记忆空间列表）——卡片 = 空间内运行中 Agent（名称/运行状态徽标/描述/更新时间），数据源 `GET /console/workspaces/:ws/agents`（既有端点聚合，无新表）；卡片「查看记忆」→ 详情页；空态提示「会话沉淀后展示记忆」；
+    - **详情页**（Agent 维度，`assets/memory/[id]/page.tsx`）**三 Tab**（对标 AgentCore 详情页「概览/长期记忆/会话历史」）：
+      - **概览**：基本信息（Agent 名称/运行状态/记忆启用状态——`AGENT_MEMORY_ENABLED` 默认 true、存储位置说明）+ 记忆文件清单（MEMORY.md + memory/*.md，路径/大小/更新时间，数据源 `GET /agent/{short}/debug/memory`）；
+      - **长期记忆**：按用户分组的记忆内容只读展示——MEMORY.md 正文（Markdown 渲染）+ memory/ 按日文件内容；用户切换（当前登录用户默认选中，仅可见 `X-User-Id` 自己的会话数据面返回的分组）；**不做编辑/删除/语义检索**（远期，检索需 AgentCore SearchMemories 类语义索引，当前 `memory_search` 为 SDK 内置关键词级）；
+      - **会话历史**：会话列表（标题/最近活跃/消息数，`GET /agent/{short}/threads?userId=u-{me}`）→ 点击展开会话消息（角色+内容，`GET /agent/{short}/threads/{sid}/history`，压缩摘要渲染为「上下文已压缩」分隔条）；
+  - **数据通路与红线**：全部直连 `/agent/{short}/*` 数据面（proxy 注入 `X-User-Id`，与调试对话同构），backend 不代理、不落库——记忆数据不进控制面（原则一）；`/debug/memory` 无用户过滤（调试面端点，返回全部分组），前端仅渲染当前用户分组 + 全部用户仅显示分组名（脱敏口径，后端代理过滤列二期）；
+  - **保留期如实标注**：会话清理（每日 3 点，`SessionCleanupService`）按 `updated_at` 保留 7 天且对 `agent_fs` **无 namespace 豁免**——记忆文件 7 天不活跃同样会被清理；页面以提示条标注（「记忆文件随会话数据按保留期清理（默认 7 天不活跃）；延长保留期属运行时配置，远期提供」）；
+  - **不做**（对标 AgentCore 未开放的能力一并裁剪）：记忆写入/编辑/删除、语义检索（SearchMemories）、Scope/Metadata 业务标签、空间 CRUD/配额、记忆 MCP 服务部署（挂载语义不适用——本平台记忆随 Agent 生而启用，`AGENT_MEMORY_ENABLED` 控制）、多空间挂载路由；
 - **凭证管理**：API Key 签发（明文仅展示一次）/列表（前缀识别）/吊销/过期时间；
 - **包可见性**（评审决议 7）：公共包（workspace_id=0）所有空间可见；各工作空间的包按空间隔离，空间包仅本空间可见，导入/派生在本空间包列表内进行。
 
@@ -448,10 +483,12 @@ GET  /api/v1/admin/audit-logs              审计（一期仅 service_events + p
 |---|---|---|
 | 1 | 技能资产的独立实体化 | 新建 `skills/skill_versions/skill_releases/skill_market_items` 四表（§6.3）；技能不再是 OAF 包附属清单的只读投影——「无法上传技能，业务无法闭环」的缺口即在此：此前技能只能经包生成间接产生 |
 | 2 | 创建方式 | 两种（对标 AgentCore 创建页裁剪）：**上传技能包（zip）** 与 **通过 Markdown 定义**；Nacos CLI 不适用本平台不做；市场技能经「Skill 广场 → 导入」获得（等同安装） |
-| 3 | 版本与 Agent 绑定 | Agent 引用记**版本快照**（`services.skills_json`），生成包复制技能版本目录自包含；技能中心发版不自动影响已发布 Agent（对标「按具体版本号引用始终不变」），升级经编辑页重新勾选；不实现 latest 别名实体（「最新 published 版」承担默认勾选语义）与自定义别名（AgentCore 也未开放） |
+| 3 | 版本与 Agent 绑定 | **最后生成的 OAF 包即引用快照**（frontmatter `skills` 声明 + 复制的版本目录），生成包自包含；技能中心发版不自动影响已发布 Agent（对标「按具体版本号引用始终不变」），升级经编辑页重新勾选；不实现 latest 别名实体（「最新 published 版」承担默认勾选语义）与自定义别名（AgentCore 也未开放） |
 | 4 | 审核流 | 一期不接 AI 安全护栏（独立产品），发布直接 published；状态机预留 review/pending 槽位 |
 | 5 | 引用查询 | 双向：`skill-usages`（按 Agent 列技能）+ `skills/:id/usages`（按技能列 Agent）；删除技能前校验引用（有引用 409） |
 | 6 | 可见性 | 一期技能随工作空间隔离（空间内可见可用），不做 AgentCore 的私有/公开开关；跨空间共享经 Skill 广场（市场目录平台运营维护） |
+| 7 | Agent 使用情况数据源 | **解析每个 Agent 最后生成的 OAF 包**（services.package_id 当前版本：skills/ 目录扫描 + frontmatter skills 声明），与沙箱总览同构（无新表、无后台任务、请求期实时）；`services.skills_json` 是 A2A agent-card 注册产物（register.go），语义不同不混用；独立视图 c/skill-usages 收敛为 Skill 管理页第三 Tab |
+| 8 | Skill 广场多源 | `skill_market_sources` 源注册表 + 条目 `source_id` 归属；API 带 `:source` 段与 `?source=` 形参；一期仅内置源（builtin，镜像内 zip）；registry 外部源只建模型不开放——目录协议（认证/条目 schema/zip 校验/下载配额）待接真实市场时单独评审；导入后技能资产 `source` 恒记 market，另有 `sourceName` 展示来源名 |
 
 ### 8.5 观测大盘（一期不做）
 
@@ -567,14 +604,14 @@ src/app/
 ## 14. 前端设计 Demo
 
 配套可交互原型（单文件 HTML、零外部依赖、双击浏览器直接打开；hash 路由切换页面）：
-[docs/design/demo/console-user-workspace-demo.html](demo/console-user-workspace-demo.html) —— 覆盖登录页（开发者/管理员两种角色入口）、用户侧（概览 / Agent 列表 / 创建页（单页分区表单：选择创建方式卡片 + 六个编号区块——基本信息 / 文件配置 / 资产配置（Skill 勾选 = 空间技能资产 + 版本下拉 + 版本快照语义）/ 资源配置 / **沙箱配置（启用开关 + 镜像/超时/内存/CPU，未启用时置灰）** / 网络配置，右上/底部「立即创建」→ 生成 OAF 包并发布；导入/纳管为次要方式）/ **编辑页（创建页同构表单预填，沙箱开关预填包声明状态，保存 = copy-on-write 新版本 + republish）** / Agent 详情六 Tab（含 SSE 调试对话与 HITL 确认卡示例）/ 模板 / 集成 Agent（Agent Protocol 远程子 agent）/ 工具管理（MCP 配置创建与注入）/ **沙箱配置（空间内 Agent 沙箱启用状态只读总览 + 生效来源三层裁决展示）** / **Skill 管理（2026-10-19 重设计：我的 Skill + Skill 广场双 Tab，创建抽屉两方式「上传技能包 zip / Markdown 定义」，详情抽屉含版本管理与引用 Agent 列表；独立视图 c/skill-usages 按 Agent 查看技能引用与锁定版本）** / 模型连接（配置/下发/使用展示）/ 资产管理其余页 / 成员管理 / 观测大盘占位（一期不做））、运维侧（平台概览 / 服务列表（现状风格 + 工作空间列）/ 配置包 / 工作空间管理 / 用户管理 / 审计 / 默认配置），左侧导航分组与 AgentCore 控制台存档同构。
+[docs/design/demo/console-user-workspace-demo.html](demo/console-user-workspace-demo.html) —— 覆盖登录页（开发者/管理员两种角色入口）、用户侧（概览 / Agent 列表 / 创建页（单页分区表单：选择创建方式卡片 + 六个编号区块——基本信息 / 文件配置 / 资产配置（Skill 勾选 = 空间技能资产 + 版本下拉 + 版本快照语义）/ 资源配置 / **沙箱配置（启用开关 + 镜像/超时/内存/CPU，未启用时置灰）** / 网络配置，右上/底部「立即创建」→ 生成 OAF 包并发布；导入/纳管为次要方式）/ **编辑页（创建页同构表单预填，沙箱开关预填包声明状态，保存 = copy-on-write 新版本 + republish）** / Agent 详情六 Tab（含 SSE 调试对话与 HITL 确认卡示例）/ 模板 / 集成 Agent（Agent Protocol 远程子 agent）/ 工具管理（MCP 配置创建与注入）/ **沙箱配置（空间内 Agent 沙箱启用状态只读总览 + 生效来源三层裁决展示）** / **Skill 管理（2026-10-19 重设计：三 Tab——我的 Skill / Skill 广场（多源市场预留：源切换器 + 来源徽标）/ Agent 使用情况（按各 Agent 最后生成 OAF 包解析的技能使用总览，行「查看详情」抽屉展示包版本与技能完整清单）**，创建抽屉两方式「上传技能包 zip / Markdown 定义」，技能详情抽屉含版本管理与引用 Agent 列表）** / 模型连接（配置/下发/使用展示）/ 资产管理其余页（**记忆空间（2026-10-19 重设计，对标 AgentCore）：空间列表（Agent 卡片）+ 详情页三 Tab 概览/长期记忆/会话历史，纯只读直连数据面**）/ 成员管理 / 观测大盘占位（一期不做））、运维侧（平台概览 / 服务列表（现状风格 + 工作空间列）/ 配置包 / 工作空间管理 / 用户管理 / 审计 / 默认配置），左侧导航分组与 AgentCore 控制台存档同构。
 
 > Demo 为视觉与交互定稿用；实现以本文 §10 的 Next.js 工程结构为准。
 
 ### 14.1 实装截图（2026-10-17 部署验证实拍）
 
 实施完成后按 demo 对照逐页实装，实拍截图见 **[../screenshots/console-split/README.md](../screenshots/console-split/README.md)**（24 张，1440×900，kind 集群 backend v14 / frontend v11）：
-登录页（01）→ 用户侧骨架与概览（02）→ Agent 列表（03）→ 创建页单页分区表单（04，对照本节 §8.2 五区块）→ 模板（05）→ 集成 Agent（06）→ 模型连接列表与右侧抽屉（07/08）、工具管理连接器表与新建抽屉（09/09-assets-tools-drawer）（**交互演进：新建/编辑类表单从 demo 右栏常驻改为 slide-over 抽屉**）→ Skill（10，口径修订：包配置技能清单，去 L4）→ 记忆（11）→ 凭证（12）→ 成员（13）→ 观测/知识库占位（14/15）→ Agent 详情六 Tab（16–19）→ 运维侧服务列表/工作空间/用户/审计/概览（20–24）。
+登录页（01）→ 用户侧骨架与概览（02）→ Agent 列表（03）→ 创建页单页分区表单（04，对照本节 §8.2 五区块）→ 模板（05）→ 集成 Agent（06）→ 模型连接列表与右侧抽屉（07/08）、工具管理连接器表与新建抽屉（09/09-assets-tools-drawer）（**交互演进：新建/编辑类表单从 demo 右栏常驻改为 slide-over 抽屉**）→ Skill（10，口径修订：包配置技能清单，去 L4）→ 记忆空间（11，2026-10-19 重设计：空间列表 + 详情三 Tab，对标 AgentCore）→ 凭证（12）→ 成员（13）→ 观测/知识库占位（14/15）→ Agent 详情六 Tab（16–19）→ 运维侧服务列表/工作空间/用户/审计/概览（20–24）。
 
 ---
 
@@ -592,5 +629,5 @@ src/app/
 | M5 | [06-model-connection.md](../implementation/06-model-connection.md) | 模型连接配置/测试/下发/使用展示 + 会话级切换 |
 | M6 | [07-mcp-connectors.md](../implementation/07-mcp-connectors.md) | MCP 连接器 CRUD 与发布注入 |
 | M7 | [08-agent-integration.md](../implementation/08-agent-integration.md) | 集成 Agent（Agent Protocol 声明管理） |
-| M8 | [09-workspace-assets.md](../implementation/09-workspace-assets.md) | Skill 中心（市场/上传/版本/引用查询）/ 记忆 / API Key / 模板 / 成员 / 占位页 |
+| M8 | [09-workspace-assets.md](../implementation/09-workspace-assets.md) | Skill 中心（市场/上传/版本/引用查询）/ 记忆空间（Agent 即空间：列表 + 详情三 Tab 只读）/ API Key / 模板 / 成员 / 占位页 |
 | M9 | [10-gateway-auth.md](../implementation/10-gateway-auth.md) | P2 网关鉴权（auth_request + introspect + API Key 生效） |

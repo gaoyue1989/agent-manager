@@ -240,3 +240,90 @@ type AgentIntegration struct {
 }
 
 func (AgentIntegration) TableName() string { return "agent_integrations" }
+
+// ---- Skill 中心（2026-10-19，docs/design/console-user-workspace-split-design.md §6.3）----
+// 工作空间级独立技能资产：市场导入 / zip 上传 / Markdown 定义创建，版本管理 + Agent 引用
+// （生成包自包含，最后生成的 OAF 包即引用快照）。全为平台自有表，AutoMigrate 同步建表。
+
+// Skill 技能资产主表（name 空间内唯一；语义对齐 AgentCore Skill）。
+type Skill struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	WorkspaceID uint      `gorm:"uniqueIndex:uk_skill_ws_name;index" json:"workspaceId"`
+	Name        string    `gorm:"size:64;uniqueIndex:uk_skill_ws_name" json:"name"` // skillNameRe 口径
+	DisplayName string    `gorm:"size:128" json:"displayName"`
+	Description string    `gorm:"size:1024" json:"description"`
+	TagsJSON    string    `gorm:"type:json" json:"tagsJson"` // ["客服","工单"]
+	Source      string    `gorm:"size:16" json:"source"`     // market | zip | markdown
+	SourceName  string    `gorm:"size:64" json:"sourceName"` // market 来源市场名（多源预留）
+	// LatestVersionID 最新 skill_versions 行（发布后=「最新发布版」展示目标）
+	LatestVersionID uint      `json:"latestVersionId"`
+	Enabled         bool      `json:"enabled"` // 停用后创建/编辑候选不再出现；已生成包不回变
+	Status          string    `gorm:"size:16" json:"status"` // active | disabled
+	CreatedBy       uint      `json:"createdBy"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+func (Skill) TableName() string { return "skills" }
+
+// SkillVersion 版本行（对标 AgentCore：工作区草稿可续改 + 正式版本不可变快照）。
+type SkillVersion struct {
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	SkillID  uint   `gorm:"uniqueIndex:uk_skillver;index" json:"skillId"`
+	Version  string `gorm:"size:32;uniqueIndex:uk_skillver" json:"version"` // major.minor.patch
+	Status   string `gorm:"size:16;index" json:"status"` // draft | review(预留) | pending(预留) | published | offline
+	Changelog string `gorm:"size:512" json:"changelog"`
+	// ContentJSON Markdown 定义形态的正文（zip 形态为空）；FilesJSON zip 文件清单
+	ContentJSON string `gorm:"type:json" json:"contentJson"`
+	FilesJSON   string `gorm:"type:json" json:"filesJson"` // [{path,size,sha256}]
+	// StorageDir PVC 相对路径 skills/{skillID}/{version}（zip 解包内容；markdown 形态为空，
+	// 内容在 ContentJSON——读取侧两种数据源都支持）
+	StorageDir string    `gorm:"size:256" json:"storageDir"`
+	Checksum   string    `gorm:"size:64" json:"checksum"`
+	CreatedBy  uint      `json:"createdBy"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+func (SkillVersion) TableName() string { return "skill_versions" }
+
+// SkillRelease 发布记录（版本生命周期审计：publish | offline | reline）。
+type SkillRelease struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	SkillID   uint      `gorm:"index" json:"skillId"`
+	VersionID uint      `gorm:"index" json:"versionId"`
+	Action    string    `gorm:"size:16" json:"action"`
+	Note      string    `gorm:"size:512" json:"note"`
+	CreatedBy uint      `json:"createdBy"`
+	CreatedAt time.Time `gorm:"index" json:"createdAt"`
+}
+
+func (SkillRelease) TableName() string { return "skill_releases" }
+
+// SkillMarketSource 市场源注册表（多源预留，2026-10-19 §6.3 决议 8；一期仅内置源一行种子）。
+type SkillMarketSource struct {
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	Key      string `gorm:"size:32;uniqueIndex" json:"key"` // builtin | 外部源自定义键
+	Name     string `gorm:"size:64" json:"name"`
+	Type     string `gorm:"size:16" json:"type"` // builtin | registry（registry 远期开放）
+	Endpoint string `gorm:"size:512" json:"endpoint"` // registry 源目录 JSON 地址（预留）
+	Enabled  bool   `json:"enabled"`
+	Sort     int    `json:"sort"`
+}
+
+func (SkillMarketSource) TableName() string { return "skill_market_sources" }
+
+// SkillMarketItem Skill 广场条目（只读；安装=按条目建 skill 资产 v1.0.0 published）。
+type SkillMarketItem struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	SourceID    uint   `gorm:"uniqueIndex:uk_mktitem;index" json:"sourceId"`
+	Key         string `gorm:"size:64;uniqueIndex:uk_mktitem" json:"key"`
+	DisplayName string `gorm:"size:128" json:"displayName"`
+	Description string `gorm:"size:1024" json:"description"`
+	TagsJSON    string `gorm:"type:json" json:"tagsJson"`
+	Downloads   int    `json:"downloads"`
+	// BundleDir 内置 zip 的只读路径（镜像/PVC）；registry 源为远端 URL（远期）
+	BundleDir string `gorm:"size:512" json:"bundleDir"`
+	Enabled   bool   `json:"enabled"`
+}
+
+func (SkillMarketItem) TableName() string { return "skill_market_items" }

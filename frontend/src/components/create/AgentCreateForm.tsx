@@ -4,7 +4,7 @@
 // 编辑模式：无方式卡片、名称锁定、标题/按钮换「保存」、提交 PUT（copy-on-write 新版本 + republish）。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type SandboxFormPayload } from "@/lib/api";
+import { api, type EditFormView, type ImageOption, type McpConnectorView, type ModelConnectionView, type IntegrationView, type PackageRec, type SandboxFormPayload, type SkillRefPayload, type SkillRec } from "@/lib/api";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import { PERM_STYLE } from "@/lib/status";
 
@@ -13,7 +13,7 @@ export interface AgentFormState {
   name: string; description: string; image: string;
   modelConnections: { connectionId: number; isDefault: boolean }[];
   prompt: string;
-  skills: { name: string; source: string; packageId?: number; version?: string }[];
+  skills: SkillRefPayload[];
   subAgents: { agent: string; role?: string; delegations?: string[]; endpoint?: string }[];
   mcpServers: { connectorId?: number; builtin?: string }[];
   sandbox: SandboxFormPayload;
@@ -21,13 +21,15 @@ export interface AgentFormState {
   importPackageId?: number; adoptServiceId?: number;
 }
 
-// SkillOption Skill 候选池条目（GET /console/workspaces/:ws/skills 的合规子集，issue #162）
-interface SkillOption {
+// SkillCandidate Skill 候选池条目（Skill 中心 2026-10-19）：空间技能资产 + 其发布版本列表。
+// 停用资产与草稿版本不出现在候选（source=skill 引用要求 published）。
+interface SkillCandidate {
+  id: number;
   name: string;
   description: string;
-  packageId: number;
-  packageSlug: string;
-  packageVersion: string;
+  source: string;
+  enabled: boolean;
+  versions: { version: string; id: number }[]; // 已发布版本（latest 在前）
 }
 
 export const SPEC_CARDS = [
@@ -78,9 +80,9 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
   const [connectors, setConnectors] = useState<McpConnectorView[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationView[]>([]);
   const [packages, setPackages] = useState<PackageRec[]>([]);
-  // Skill 候选池（issue #162：创建/编辑页此前无添加入口，与「从可用列表添加」文案不符）：
-  // 空间内 OAF 包技能清单，过滤不合规条目（issues，issue #163）
-  const [skillPool, setSkillPool] = useState<SkillOption[]>([]);
+  // Skill 候选池（Skill 中心 2026-10-19）：空间技能资产（启用中）+ 各自已发布版本列表；
+  // 旧 OAF 包技能清单（spaceSkills）不再作为候选——技能资产是唯一勾选入口
+  const [skillPool, setSkillPool] = useState<SkillCandidate[]>([]);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<{ agentKey: string; slug: string; k8sName: string; conflict: boolean } | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -95,7 +97,19 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     api.console.tools.list(ws).then(setConnectors).catch(() => {});
     api.console.integrations.list(ws).then((r) => setIntegrations(r.relations.filter((x) => x.enabled))).catch(() => {});
     api.console.packages(ws).then(setPackages).catch(() => {});
-    api.console.spaceSkills(ws).then((list) => setSkillPool(list.filter((s) => !(s.issues ?? []).length))).catch(() => {});
+    api.console.skillCenter.list(ws).then(async (list) => {
+      const active = list.filter((s: SkillRec) => s.enabled);
+      const withVers = await Promise.all(active.map(async (s) => {
+        let versions: { version: string; id: number }[] = [];
+        try {
+          versions = (await api.console.skillCenter.versions(ws, s.id))
+            .filter((v) => v.status === "published")
+            .map((v) => ({ version: v.version, id: v.id }));
+        } catch { /* 版本拉取失败按无版本处理 */ }
+        return { id: s.id, name: s.name, description: s.description, source: s.source, enabled: s.enabled, versions };
+      }));
+      setSkillPool(withVers.filter((s) => s.versions.length > 0));
+    }).catch(() => {});
   }, [ws]);
   useEffect(() => {
     if (!state.image && images.length > 0) setState((s) => ({ ...s, image: images[0].Image }));
@@ -124,22 +138,28 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
     return idx === 0 ? "默认（注入 LLM_* env）" : "就绪后下发 /models";
   };
 
-  // Skill 勾选/取消：按 包id+技能名 定位（同名技能可来自不同包），加入即写入
-  // 生成包 skills 声明（source=package，提交时复制 skills/ 目录进包）。
-  // 同名技能互斥（issue #173）：勾选同名另一来源时自动替换（后勾选生效），
-  // 生成包 skills 声明与 skills/ 目录均只保留一份，避免重复声明静默覆盖。
-  const toggleSkill = (sk: SkillOption) => {
+  // Skill 勾选/取消（Skill 中心）：按技能资产 id 定位，加入即写入生成包 skills 声明
+  // （source=skill + 锁定版本，提交时复制该版本 PVC 目录进包，随包自包含）。
+  // 同名技能互斥（issue #173 延续）：同名另一来源勾选即替换。
+  const toggleSkillAsset = (sk: SkillCandidate) => {
     setState((s) => {
-      const has = s.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
+      const has = s.skills.some((x) => x.name === sk.name && x.skillId === sk.id);
       if (has) {
-        return { ...s, skills: s.skills.filter((x) => !(x.name === sk.name && x.packageId === sk.packageId)) };
+        return { ...s, skills: s.skills.filter((x) => !(x.name === sk.name && x.skillId === sk.id)) };
       }
       const replaced = s.skills.filter((x) => x.name !== sk.name);
       return {
         ...s,
-        skills: [...replaced, { name: sk.name, source: "package", packageId: sk.packageId, version: sk.packageVersion }],
+        skills: [...replaced, { name: sk.name, source: "skill", skillId: sk.id, version: sk.versions[0]?.version }],
       };
     });
+  };
+  // 版本换绑：更新已勾选技能资产的锁定版本（版本快照语义——保存后生成包固定该版本）
+  const setSkillVersion = (skillId: number, version: string) => {
+    setState((s) => ({
+      ...s,
+      skills: s.skills.map((x) => (x.skillId === skillId ? { ...x, version } : x)),
+    }));
   };
 
   const selectedCount = {
@@ -333,50 +353,50 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
             <Note>勾选的资产将写入生成的 OAF 包（frontmatter skills / agents / mcpServers + mcp-configs/）：MCP 配置取自「工具管理」、远程 SubAgent 端点取自「集成 Agent」；运行时三层裁决不变。</Note>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div>
-                <div className="mb-2 text-xs text-gray-400">Skill（从可用列表勾选添加）</div>
+                <div className="mb-2 flex items-center gap-2 text-xs text-gray-400">Skill（从「Skill 管理」空间技能资产勾选）
+                  <a href="/console/assets/skills" className="rounded border border-gray-300 px-1.5 py-0.5 text-[11px] text-gray-500 hover:border-blue-200 hover:text-blue-600">管理技能</a>
+                </div>
                 <table className="w-full rounded-lg border border-gray-200 text-sm" data-testid="skill-table">
-                  <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500"><th className="w-9 p-2"></th><th className="p-2">技能</th><th className="p-2">来源</th></tr></thead>
+                  <thead><tr className="border-b bg-gray-50 text-left text-xs text-gray-500"><th className="w-9 p-2"></th><th className="p-2">技能</th><th className="p-2">版本</th><th className="p-2">来源</th></tr></thead>
                   <tbody>
-                    {state.skills.map((sk, i) => (
-                      <tr key={`${sk.packageId ?? 0}-${sk.name}`} className="border-b last:border-0">
-                        <td className="p-2"><input type="checkbox" checked className="accent-blue-600"
-                          onChange={() => setState((s) => ({ ...s, skills: s.skills.filter((_, j) => j !== i) }))} /></td>
-                        <td className="p-2 font-medium">{sk.name}</td>
-                        <td className="p-2"><Tag>{sk.source === "l4" ? "用户级 · L4（运行时注入）" : "OAF 包技能（进包）"}</Tag></td>
-                      </tr>
-                    ))}
-                    {state.skills.length === 0 && <tr><td colSpan={3} className="p-3 text-xs text-gray-400">尚未勾选技能 —— 从下方可用列表勾选（一期可留空）</td></tr>}
+                    {state.skills.map((sk, i) => {
+                      const cand = skillPool.find((x) => x.id === sk.skillId);
+                      return (
+                        <tr key={`${sk.skillId ?? 0}-${sk.name}`} className="border-b last:border-0">
+                          <td className="p-2"><input type="checkbox" checked className="accent-blue-600"
+                            onChange={() => setState((s) => ({ ...s, skills: s.skills.filter((_, j) => j !== i) }))} /></td>
+                          <td className="p-2 font-mono text-xs font-medium">{sk.name}</td>
+                          <td className="p-2">
+                            {sk.source === "skill" && cand && cand.versions.length > 0 ? (
+                              <select value={sk.version ?? cand.versions[0].version} onChange={(e) => setSkillVersion(sk.skillId!, e.target.value)}
+                                data-testid={`skill-version-${sk.name}`} className="rounded border border-gray-300 px-1.5 py-0.5 text-[11px]">
+                                {cand.versions.map((v) => <option key={v.version} value={v.version}>{v.version}{v.version === cand.versions[0].version ? "（最新发布）" : ""}</option>)}
+                              </select>
+                            ) : <span className="font-mono text-[11px] text-gray-500">{sk.version || "—"}</span>}
+                          </td>
+                          <td className="p-2"><Tag>{sk.source === "skill" ? "技能资产（进包）" : sk.source === "l4" ? "用户级 · L4（运行时注入）" : "包内自带（随底包沿用）"}</Tag></td>
+                        </tr>
+                      );
+                    })}
+                    {state.skills.length === 0 && <tr><td colSpan={4} className="p-3 text-xs text-gray-400">尚未勾选技能 —— 从下方可用列表勾选（一期可留空）</td></tr>}
                   </tbody>
                 </table>
                 <div className="mt-2 rounded-lg border border-gray-200" data-testid="skill-pool">
-                  <div className="border-b border-gray-100 bg-gray-50/60 px-3 py-1.5 text-[11px] text-gray-500">可用技能（空间内 OAF 包 · 同名技能取其一，切换来源即替换）</div>
+                  <div className="border-b border-gray-100 bg-gray-50/60 px-3 py-1.5 text-[11px] text-gray-500">可用技能（空间技能资产 · 仅已发布版本 · 同名取其一，勾选即选此条）</div>
                   <div className="max-h-44 overflow-y-auto">
                     {(() => {
-                      // 候选池同名去重（issue #173）：同名技能只展示一条（优先已勾选来源），
-                      // 避免「同名两条可同时勾选 → 生成包重复声明并静默覆盖」
-                      const byName = new Map<string, SkillOption>();
-                      for (const sk of skillPool) {
-                        const picked = state.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
-                        const cur = byName.get(sk.name);
-                        if (!cur || (picked && !state.skills.some((x) => x.name === cur.name && x.packageId === cur.packageId))) {
-                          if (!cur || picked) byName.set(sk.name, sk);
-                        }
+                      if (skillPool.length === 0) {
+                        return <div className="px-3 py-2.5 text-[11px] text-gray-400">暂无可用技能 —— 到「资产管理 → Skill 管理」创建（zip 上传 / Markdown 定义 / 广场导入）后出现在此</div>;
                       }
-                      const pool = [...byName.values()];
-                      if (pool.length === 0) {
-                        return <div className="px-3 py-2.5 text-[11px] text-gray-400">暂无可用技能 —— 上传包含 skills/ 目录的 OAF 包后出现在此（全量清单见「资产管理 → Skill 管理」）</div>;
-                      }
-                      return pool.map((sk) => {
-                        const checked = state.skills.some((x) => x.name === sk.name && x.packageId === sk.packageId);
-                        const dupCount = skillPool.filter((x) => x.name === sk.name).length;
+                      return skillPool.map((sk) => {
+                        const checked = state.skills.some((x) => x.name === sk.name && x.skillId === sk.id);
                         return (
-                          <label key={`${sk.packageId}-${sk.name}`} className="flex cursor-pointer items-start gap-2 border-b border-gray-100 px-3 py-1.5 text-xs last:border-0">
+                          <label key={sk.id} className="flex cursor-pointer items-start gap-2 border-b border-gray-100 px-3 py-1.5 text-xs last:border-0">
                             <input type="checkbox" checked={checked} className="mt-0.5 accent-blue-600"
-                              data-testid={`skill-opt-${sk.name}`} onChange={() => toggleSkill(sk)} />
+                              data-testid={`skill-opt-${sk.name}`} onChange={() => toggleSkillAsset(sk)} />
                             <span className="min-w-0">
-                              <b className="font-medium">{sk.name}</b>
-                              <span className="ml-1.5 font-mono text-[10.5px] text-gray-400">{sk.packageSlug}@{sk.packageVersion}</span>
-                              {dupCount > 1 && <span className="ml-1.5 text-[10.5px] text-amber-600">{checked ? `（已选来源；另有 ${dupCount - 1} 个同名来源，切换即替换）` : `（另有 ${dupCount - 1} 个同名来源，勾选即选此条）`}</span>}
+                              <b className="font-mono font-medium">{sk.name}</b>
+                              <span className="ml-1.5 text-[10.5px] text-gray-400">{sk.versions.map((v) => v.version).join(" / ")}{sk.source === "market" ? " · 市场导入" : sk.source === "zip" ? " · zip 上传" : " · Markdown"}</span>
                               <small className="block truncate text-gray-400">{sk.description || "（无描述）"}</small>
                             </span>
                           </label>
@@ -385,6 +405,7 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
                     })()}
                   </div>
                 </div>
+                <div className="mt-1.5 text-[11px] text-gray-400">勾选后写入生成包 frontmatter skills 声明 + 复制所选版本目录进包 skills/&lt;name&gt;/（随包自包含）；引用记版本快照——技能中心后续发版不影响本 Agent，升级经编辑页重新勾选。已停用技能不出现在候选；草稿版本需先在 Skill 管理页发布。</div>
 
                 <div className="mb-2 mt-4 text-xs text-gray-400">SubAgent（名称 + 职责，或从「集成 Agent」勾选远程端点）</div>
                 <table className="w-full rounded-lg border border-gray-200 text-sm" data-testid="subagent-table">

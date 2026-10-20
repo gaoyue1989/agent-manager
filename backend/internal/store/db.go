@@ -24,7 +24,8 @@ func Open(dsn string) (*gorm.DB, error) {
 	if err := db.AutoMigrate(&OafPackage{}, &ServiceEntity{}, &ServiceEvent{},
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},
 		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{},
-		&ModelConnection{}, &ModelDelivery{}, &McpConnector{}, &AgentIntegration{}); err != nil {
+		&ModelConnection{}, &ModelDelivery{}, &McpConnector{}, &AgentIntegration{},
+		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{}); err != nil {
 		return nil, err
 	}
 	return db, nil

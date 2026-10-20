@@ -61,8 +61,8 @@ export function Note({ children, tone = "info" }: { children: React.ReactNode; t
   return <div className={`mb-3 block break-words rounded-lg border px-3 py-2 text-xs [&_code]:break-all ${cls}`}>{children}</div>;
 }
 
-export function Btn({ children, onClick, kind = "default", sm, disabled, testid, type = "button" }: {
-  children: React.ReactNode; onClick?: () => void; kind?: "default" | "pri" | "danger"; sm?: boolean; disabled?: boolean; testid?: string; type?: "button" | "submit";
+export function Btn({ children, onClick, kind = "default", sm, disabled, testid, "data-testid": dataTestid, type = "button" }: {
+  children: React.ReactNode; onClick?: () => void; kind?: "default" | "pri" | "danger"; sm?: boolean; disabled?: boolean; testid?: string; "data-testid"?: string; type?: "button" | "submit";
 }) {
   const base = "inline-flex items-center gap-1.5 rounded-md border whitespace-nowrap transition disabled:opacity-50";
   const kindCls = kind === "pri"
@@ -71,7 +71,7 @@ export function Btn({ children, onClick, kind = "default", sm, disabled, testid,
       ? "border-gray-300 text-red-600 hover:border-red-200 hover:bg-red-50"
       : "border-gray-300 bg-white text-gray-600 hover:border-blue-200 hover:text-blue-600";
   return (
-    <button type={type} onClick={onClick} disabled={disabled} data-testid={testid}
+    <button type={type} onClick={onClick} disabled={disabled} data-testid={testid ?? dataTestid}
       className={`${base} ${kindCls} ${sm ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-[13px]"}`}>
       {children}
     </button>

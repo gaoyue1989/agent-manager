@@ -40,6 +40,12 @@ func mapError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrDuplicateName), errors.Is(err, service.ErrInvalidForm),
 		errors.Is(err, service.ErrInvalidCredentials):
 		Fail(c, http.StatusBadRequest, err.Error())
+	case errors.Is(err, service.ErrSkillReferenced):
+		// 技能被 Agent 引用：删除/下线冲突（设计 §8.4.1 决议 5，曾因未映射落 500）
+		Fail(c, http.StatusConflict, err.Error())
+	case errors.Is(err, service.ErrSkillVersionImmutable):
+		// 正式版本不可变 / 版本状态不允许该动作（发布已发布版、下线草稿等）
+		Fail(c, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrChecksumMismatch),
 		errors.Is(err, service.ErrVersionConflict):
 		// 乐观锁/版本冲突：基础包已被并发修改或版本号被并发保存占用（issue #172）

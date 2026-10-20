@@ -2248,6 +2248,7 @@ html&gt;body{padding:0}&lt;/style&gt;
       &lt;div class=&quot;oa-tabs&quot; role=&quot;tablist&quot; aria-label=&quot;Skill 管理视图&quot;&gt;
         &lt;button class=&quot;oa-tab on&quot; role=&quot;tab&quot; aria-selected=&quot;true&quot; data-skilltab=&quot;mine&quot; type=&quot;button&quot;&gt;我的 Skill（4）&lt;/button&gt;
         &lt;button class=&quot;oa-tab&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; data-skilltab=&quot;market&quot; type=&quot;button&quot;&gt;Skill 广场&lt;/button&gt;
+        &lt;button class=&quot;oa-tab&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; data-skilltab=&quot;usage&quot; type=&quot;button&quot;&gt;Agent 使用情况&lt;/button&gt;
       &lt;/div&gt;
 
       &lt;!-- Tab 1: 我的 Skill --&gt;
@@ -2266,7 +2267,7 @@ html&gt;body{padding:0}&lt;/style&gt;
               &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;市场导入&lt;/span&gt;&lt;/td&gt;
               &lt;td&gt;&lt;b&gt;1.2.0&lt;/b&gt; &lt;span class=&quot;oa-badge run&quot;&gt;已发布&lt;/span&gt;&lt;/td&gt;
               &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;已启用&lt;/span&gt;&lt;/td&gt;
-              &lt;td&gt;&lt;a href=&quot;#/c/skill-usages&quot; style=&quot;color:var(--oa-brand);text-decoration:none&quot;&gt;2 个 Agent&lt;/a&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;a href=&quot;#/c/skills&quot; data-skillgoto=&quot;usage&quot; style=&quot;color:var(--oa-brand);text-decoration:none&quot;&gt;2 个 Agent&lt;/a&gt;&lt;/td&gt;
               &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;今天 11:20&lt;/td&gt;
               &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; id=&quot;oaSkillDetailBtn&quot;&gt;详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;编辑&lt;/button&gt;&lt;button class=&quot;oa-btn sm danger&quot; type=&quot;button&quot;&gt;停用&lt;/button&gt;&lt;/td&gt;
             &lt;/tr&gt;
@@ -2276,7 +2277,7 @@ html&gt;body{padding:0}&lt;/style&gt;
               &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;zip 上传&lt;/span&gt;&lt;/td&gt;
               &lt;td&gt;&lt;b&gt;1.0.1&lt;/b&gt; &lt;span class=&quot;oa-badge run&quot;&gt;已发布&lt;/span&gt;&lt;/td&gt;
               &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;已启用&lt;/span&gt;&lt;/td&gt;
-              &lt;td&gt;&lt;a href=&quot;#/c/skill-usages&quot; style=&quot;color:var(--oa-brand);text-decoration:none&quot;&gt;1 个 Agent&lt;/a&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;a href=&quot;#/c/skills&quot; data-skillgoto=&quot;usage&quot; style=&quot;color:var(--oa-brand);text-decoration:none&quot;&gt;1 个 Agent&lt;/a&gt;&lt;/td&gt;
               &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;昨天 16:42&lt;/td&gt;
               &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;编辑&lt;/button&gt;&lt;button class=&quot;oa-btn sm danger&quot; type=&quot;button&quot;&gt;停用&lt;/button&gt;&lt;/td&gt;
             &lt;/tr&gt;
@@ -2308,72 +2309,100 @@ html&gt;body{padding:0}&lt;/style&gt;
       &lt;!-- Tab 2: Skill 广场 --&gt;
       &lt;div data-skillpanel=&quot;market&quot; hidden&gt;
         &lt;div class=&quot;oa-toolbar&quot;&gt;
-          &lt;input class=&quot;oa-input&quot; style=&quot;width:220px&quot; placeholder=&quot;搜索市场技能&quot;&gt;
+          &lt;select style=&quot;width:170px&quot; title=&quot;市场源（多源预留，一期仅内置源）&quot;&gt;&lt;option&gt;平台精选（内置源）&lt;/option&gt;&lt;option disabled&gt;团队市场（registry · 远期）&lt;/option&gt;&lt;option disabled&gt;外部市场（registry · 远期）&lt;/option&gt;&lt;/select&gt;
+          &lt;input class=&quot;oa-input&quot; style=&quot;width:200px&quot; placeholder=&quot;搜索市场技能&quot;&gt;
           &lt;select style=&quot;width:140px&quot;&gt;&lt;option&gt;下载量降序&lt;/option&gt;&lt;option&gt;最新上架&lt;/option&gt;&lt;option&gt;名称升序&lt;/option&gt;&lt;/select&gt;
+          &lt;span style=&quot;color:var(--oa-text3);font-size:11.5px&quot;&gt;多源预留：安装语义与源解耦（skill_market_sources 源注册表，§6.3）；registry 外部源待接入真实市场后开放&lt;/span&gt;
         &lt;/div&gt;
         &lt;div class=&quot;oa-grid&quot;&gt;
           &lt;div class=&quot;oa-acard&quot;&gt;
             &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;div class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#1668dc,#4c8df6)&quot;&gt;tk&lt;/div&gt;&lt;b class=&quot;oa-mono&quot;&gt;ticket-escalation&lt;/b&gt;&lt;span class=&quot;oa-badge run&quot;&gt;已导入&lt;/span&gt;&lt;/div&gt;
             &lt;p&gt;工单升级流转规约：P0-P3 严重度判定、二线升级 ask 确认、升级话术模板。&lt;/p&gt;
-            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;客服&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;工单&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v1.2.0&lt;/span&gt;&lt;/div&gt;
+            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;平台精选&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;客服&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;工单&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v1.2.0&lt;/span&gt;&lt;/div&gt;
             &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;▾ 328 下载&lt;/time&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;详情&lt;/button&gt;&lt;/div&gt;
           &lt;/div&gt;
           &lt;div class=&quot;oa-acard&quot;&gt;
             &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;div class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#12b76a,#47cd89)&quot;&gt;cd&lt;/div&gt;&lt;b class=&quot;oa-mono&quot;&gt;code-review&lt;/b&gt;&lt;/div&gt;
             &lt;p&gt;代码评审规约：差异摘要、风险分级（阻塞/建议）、常见反模式清单与修复建议。&lt;/p&gt;
-            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;研发&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;评审&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v2.0.1&lt;/span&gt;&lt;/div&gt;
+            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;平台精选&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;研发&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;评审&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v2.0.1&lt;/span&gt;&lt;/div&gt;
             &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;▾ 1,024 下载&lt;/time&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot;&gt;导入&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;详情&lt;/button&gt;&lt;/div&gt;
           &lt;/div&gt;
           &lt;div class=&quot;oa-acard&quot;&gt;
             &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;div class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#f79009,#fdb022)&quot;&gt;sql&lt;/div&gt;&lt;b class=&quot;oa-mono&quot;&gt;sql-optimizer&lt;/b&gt;&lt;/div&gt;
             &lt;p&gt;SQL 优化建议：执行计划解读、索引缺失诊断、慢查询改写示例（scripts/explain.sh）。&lt;/p&gt;
-            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;数据库&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v1.1.0&lt;/span&gt;&lt;/div&gt;
+            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;平台精选&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;数据库&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v1.1.0&lt;/span&gt;&lt;/div&gt;
             &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;▾ 766 下载&lt;/time&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot;&gt;导入&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;详情&lt;/button&gt;&lt;/div&gt;
           &lt;/div&gt;
           &lt;div class=&quot;oa-acard&quot;&gt;
             &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;div class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#6172f3,#875bf7)&quot;&gt;tr&lt;/div&gt;&lt;b class=&quot;oa-mono&quot;&gt;travel-planning&lt;/b&gt;&lt;/div&gt;
             &lt;p&gt;差旅行程规划：行程模板、预算估算与审批材料清单（对接差旅 fulfilled 示例）。&lt;/p&gt;
-            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;差旅&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v0.9.0&lt;/span&gt;&lt;/div&gt;
+            &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;平台精选&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;差旅&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;v0.9.0&lt;/span&gt;&lt;/div&gt;
             &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;▾ 154 下载&lt;/time&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot;&gt;导入&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;详情&lt;/button&gt;&lt;/div&gt;
           &lt;/div&gt;
         &lt;/div&gt;
-        &lt;div class=&quot;oa-note&quot; style=&quot;margin-top:14px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;Skill 广场为平台运营维护的市场目录（skill_market_items，只读）：点「导入」一键复制为本空间技能资产（v1.0.0 · 已发布），导入后出现在「我的 Skill」列表，可编辑可发版；广场条目本空间不可直接修改。&lt;/span&gt;&lt;/div&gt;
+        &lt;div class=&quot;oa-note&quot; style=&quot;margin-top:14px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;Skill 广场按&lt;b&gt;市场源&lt;/b&gt;聚合（skill_market_sources 源注册表 + skill_market_items 条目，均只读）：点「导入」一键复制为本空间技能资产（v1.0.0 · 已发布，&lt;code&gt;POST skills/market/:source/:key/install&lt;/code&gt;，导入后出现在「我的 Skill」可编辑可发版，来源市场名记入技能资产的 sourceName）。&lt;b&gt;多源预留&lt;/b&gt;：一期仅内置源（镜像内 zip）；registry 外部源（远端目录 JSON + zip 拉取）只建模型与 API 形参，接入真实市场时单独评审目录协议（认证/条目 schema/zip 校验）。&lt;/span&gt;&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;!-- Tab 3: Agent 使用情况（数据源 = 各 Agent 最后生成的 OAF 包解析） --&gt;
+      &lt;div data-skillpanel=&quot;usage&quot; hidden&gt;
+        &lt;div class=&quot;oa-toolbar&quot;&gt;
+          &lt;input class=&quot;oa-input&quot; style=&quot;width:220px&quot; placeholder=&quot;搜索 Agent 名称 / 技能名&quot;&gt;
+          &lt;select style=&quot;width:170px&quot;&gt;&lt;option&gt;全部 Agent&lt;/option&gt;&lt;option&gt;仅看有技能引用&lt;/option&gt;&lt;option&gt;仅看未引用&lt;/option&gt;&lt;/select&gt;
+          &lt;span style=&quot;margin-left:auto;color:var(--oa-text3);font-size:12px&quot;&gt;数据源：每个 Agent &lt;b&gt;最后生成的 OAF 包&lt;/b&gt;（当前版本包内 skills/ 目录 + frontmatter skills 声明），请求期实时解析&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;table class=&quot;oa-table&quot;&gt;
+          &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Agent&lt;/th&gt;&lt;th&gt;状态&lt;/th&gt;&lt;th&gt;当前包版本&lt;/th&gt;&lt;th&gt;技能数&lt;/th&gt;&lt;th&gt;技能清单（包内实际内容）&lt;/th&gt;&lt;th&gt;包生成时间&lt;/th&gt;&lt;th class=&quot;ops&quot; style=&quot;text-align:right&quot;&gt;操作&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+          &lt;tbody&gt;
+            &lt;tr&gt;
+              &lt;td&gt;&lt;b&gt;客服工单助手-压测版&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;v3&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;3&lt;/b&gt;&lt;/td&gt;
+              &lt;td style=&quot;max-width:340px&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;ticket-escalation · 1.2.0&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;cs-glossary · 1.0.1&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;ticket-faq · 1.0.0 &lt;i style=&quot;font-style:normal;color:var(--oa-text3)&quot;&gt;(仅目录)&lt;/i&gt;&lt;/span&gt;&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;今天 14:32&lt;/td&gt;
+              &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot; id=&quot;oaUsageDetailBtn&quot;&gt;查看详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑版本&lt;/button&gt;&lt;/td&gt;
+            &lt;/tr&gt;
+            &lt;tr&gt;
+              &lt;td&gt;&lt;b&gt;代码评审助手&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;v2&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;1&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;code-review · 2.0.1&lt;/span&gt;&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;今天 10:05&lt;/td&gt;
+              &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;查看详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑版本&lt;/button&gt;&lt;/td&gt;
+            &lt;/tr&gt;
+            &lt;tr&gt;
+              &lt;td&gt;&lt;b&gt;数据周报 Agent&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-badge err&quot;&gt;注册失败&lt;/span&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;v2&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;2&lt;/b&gt;&lt;/td&gt;
+              &lt;td style=&quot;max-width:340px&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;sql-optimizer · 1.1.0&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;weekly-template &lt;i style=&quot;font-style:normal;color:var(--oa-text3)&quot;&gt;(仅声明)&lt;/i&gt;&lt;/span&gt;&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;昨天 18:47&lt;/td&gt;
+              &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;查看详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑版本&lt;/button&gt;&lt;/td&gt;
+            &lt;/tr&gt;
+            &lt;tr&gt;
+              &lt;td&gt;&lt;b&gt;通用问答助手&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;v1&lt;/b&gt;&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;0&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;—（包内无技能）&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;10-12 09:00&lt;/td&gt;
+              &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;查看详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;添加技能&lt;/button&gt;&lt;/td&gt;
+            &lt;/tr&gt;
+            &lt;tr&gt;
+              &lt;td&gt;&lt;b&gt;差旅行程助手&lt;/b&gt; &lt;span class=&quot;oa-tag&quot;&gt;导入包&lt;/span&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-badge off&quot;&gt;已下线&lt;/span&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;v1&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;b&gt;1&lt;/b&gt;&lt;/td&gt;
+              &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;travel-planning &lt;i style=&quot;font-style:normal;color:var(--oa-text3)&quot;&gt;(包内自带)&lt;/i&gt;&lt;/span&gt;&lt;/td&gt;
+              &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;10-08 16:20&lt;/td&gt;
+              &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot;&gt;查看详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑版本&lt;/button&gt;&lt;/td&gt;
+            &lt;/tr&gt;
+          &lt;/tbody&gt;
+        &lt;/table&gt;
+        &lt;div class=&quot;oa-note&quot; style=&quot;margin-top:14px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;口径：本 Tab 按 &lt;b&gt;services.package_id 当前指向的最后生成包&lt;/b&gt;实时解析（skills/ 目录扫描 = 事实来源，frontmatter skills 声明 = 意图与版本），与「沙箱配置」总览同构（无新表、无后台任务）。角标说明：&lt;b&gt;仅声明&lt;/b&gt; = frontmatter 声明了但包内目录缺失（不合规，SpaceSkills issues 同口径）；&lt;b&gt;仅目录&lt;/b&gt; = 目录存在但未声明；&lt;b&gt;包内自带&lt;/b&gt; = 导入/存量包的技能，无对应技能资产（matchedSkillId 为空）。技能中心发版不影响已生成包——换绑需经编辑页重新勾选生成新版本。&lt;/span&gt;&lt;/div&gt;
       &lt;/div&gt;
     &lt;/section&gt;
 
-    &lt;!-- ===== 用户侧 · Skill 引用查询（按 Agent / 按技能双向） ===== --&gt;
-    &lt;section class=&quot;oa-view&quot; data-view=&quot;c/skill-usages&quot; hidden&gt;
-      &lt;div class=&quot;oa-head&quot;&gt;&lt;div&gt;&lt;div class=&quot;oa-h1&quot;&gt;Skill 引用查询&lt;/div&gt;&lt;div class=&quot;oa-sub&quot;&gt;按 Agent 查看其使用的技能（含锁定版本）；反向查询见 Skill 详情抽屉「引用 Agent」——双向数据源均为生成包版本快照（services.skills_json）&lt;/div&gt;&lt;/div&gt;
-        &lt;div class=&quot;oa-hactions&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/skills&quot;&gt;← 返回 Skill 管理&lt;/button&gt;&lt;/div&gt;
-      &lt;/div&gt;
-      &lt;table class=&quot;oa-table&quot;&gt;
-        &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Agent&lt;/th&gt;&lt;th&gt;状态&lt;/th&gt;&lt;th&gt;使用技能（锁定版本）&lt;/th&gt;&lt;th&gt;当前包版本&lt;/th&gt;&lt;th class=&quot;ops&quot; style=&quot;text-align:right&quot;&gt;操作&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
-        &lt;tbody&gt;
-          &lt;tr&gt;
-            &lt;td&gt;&lt;b&gt;客服工单助手-压测版&lt;/b&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;ticket-escalation · 1.2.0&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;cs-glossary · 1.0.1&lt;/span&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;b&gt;v3&lt;/b&gt;&lt;/td&gt;
-            &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/detail&quot;&gt;详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑技能版本&lt;/button&gt;&lt;/td&gt;
-          &lt;/tr&gt;
-          &lt;tr&gt;
-            &lt;td&gt;&lt;b&gt;代码评审助手&lt;/b&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;code-review · 2.0.1（市场导入）&lt;/span&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;b&gt;v2&lt;/b&gt;&lt;/td&gt;
-            &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/detail&quot;&gt;详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑技能版本&lt;/button&gt;&lt;/td&gt;
-          &lt;/tr&gt;
-          &lt;tr&gt;
-            &lt;td&gt;&lt;b&gt;通用问答助手&lt;/b&gt;&lt;/td&gt;
-            &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/td&gt;
-            &lt;td style=&quot;color:var(--oa-text3)&quot;&gt;—（未勾选技能）&lt;/td&gt;
-            &lt;td&gt;&lt;b&gt;v1&lt;/b&gt;&lt;/td&gt;
-            &lt;td class=&quot;ops&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/detail&quot;&gt;详情&lt;/button&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;添加技能&lt;/button&gt;&lt;/td&gt;
-          &lt;/tr&gt;
-        &lt;/tbody&gt;
-      &lt;/table&gt;
-      &lt;div class=&quot;oa-note&quot; style=&quot;margin-top:14px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;「换绑技能版本」= 进入 Agent 编辑页资产配置区重新勾选（选其它发布版本或新增技能），保存后生成新版本包并重发布，技能变更经 OAF reload 热生效。&lt;/span&gt;&lt;/div&gt;
-    &lt;/section&gt;
 
     &lt;!-- ===== Skill 创建抽屉（zip 上传 / Markdown 定义） ===== --&gt;
     &lt;div id=&quot;oaSkillCreate&quot; hidden style=&quot;position:fixed;inset:0;z-index:70;background:rgba(16,24,40,.45)&quot;&gt;
@@ -2466,6 +2495,61 @@ description: 发布前检查清单与回滚步骤（六项必填校验）
       &lt;/div&gt;
     &lt;/div&gt;
 
+    &lt;!-- ===== Agent 使用情况详情抽屉（数据源 = 该 Agent 最后生成的 OAF 包解析） ===== --&gt;
+    &lt;div id=&quot;oaUsageDetail&quot; hidden style=&quot;position:fixed;inset:0;z-index:70;background:rgba(16,24,40,.45)&quot;&gt;
+      &lt;div style=&quot;position:absolute;top:0;right:0;bottom:0;width:600px;max-width:94vw;background:var(--oa-surface);box-shadow:-12px 0 32px rgba(16,24,40,.18);display:flex;flex-direction:column;overflow-y:auto&quot;&gt;
+        &lt;div style=&quot;display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--oa-border)&quot;&gt;
+          &lt;b style=&quot;font-size:14px&quot;&gt;Agent 技能使用详情 · 客服工单助手-压测版&lt;/b&gt;
+          &lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-close-usagedetail&gt;关闭&lt;/button&gt;
+        &lt;/div&gt;
+        &lt;div style=&quot;padding:16px 18px 24px&quot;&gt;
+          &lt;div class=&quot;oa-kv&quot; style=&quot;margin-bottom:14px&quot;&gt;
+            &lt;div&gt;&lt;dt&gt;运行状态&lt;/dt&gt;&lt;dd&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/dd&gt;&lt;/div&gt;
+            &lt;div&gt;&lt;dt&gt;当前包&lt;/dt&gt;&lt;dd&gt;&lt;b&gt;v3&lt;/b&gt;（copy-on-write 派生自 v2）&lt;/dd&gt;&lt;/div&gt;
+            &lt;div&gt;&lt;dt&gt;包生成时间&lt;/dt&gt;&lt;dd&gt;今天 14:32 · 由 张工 保存生成&lt;/dd&gt;&lt;/div&gt;
+            &lt;div&gt;&lt;dt&gt;数据来源&lt;/dt&gt;&lt;dd style=&quot;color:var(--oa-text2)&quot;&gt;最后生成的 OAF 包实时解析（skills/ 目录扫描 + frontmatter skills 声明）&lt;/dd&gt;&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div class=&quot;oa-sub&quot; style=&quot;margin-bottom:8px&quot;&gt;当前包内技能完整清单&lt;/div&gt;
+          &lt;table class=&quot;oa-table&quot;&gt;
+            &lt;thead&gt;&lt;tr&gt;&lt;th&gt;技能&lt;/th&gt;&lt;th&gt;包内路径&lt;/th&gt;&lt;th&gt;SKILL.md 描述&lt;/th&gt;&lt;th&gt;声明&lt;/th&gt;&lt;th&gt;匹配技能资产&lt;/th&gt;&lt;th&gt;合规&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+            &lt;tbody&gt;
+              &lt;tr&gt;
+                &lt;td&gt;&lt;b class=&quot;oa-mono&quot;&gt;ticket-escalation&lt;/b&gt;&lt;/td&gt;
+                &lt;td class=&quot;oa-mono&quot; style=&quot;font-size:11px&quot;&gt;skills/ticket-escalation/&lt;/td&gt;
+                &lt;td style=&quot;color:var(--oa-text2);font-size:11.5px&quot;&gt;工单升级流转规约（P0-P3 判定与二线升级 ask 权限）&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;frontmatter 声明 · 1.2.0&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;ticket-escalation 1.2.0 · 市场导入&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;通过&lt;/span&gt;&lt;/td&gt;
+              &lt;/tr&gt;
+              &lt;tr&gt;
+                &lt;td&gt;&lt;b class=&quot;oa-mono&quot;&gt;cs-glossary&lt;/b&gt;&lt;/td&gt;
+                &lt;td class=&quot;oa-mono&quot; style=&quot;font-size:11px&quot;&gt;skills/cs-glossary/&lt;/td&gt;
+                &lt;td style=&quot;color:var(--oa-text2);font-size:11.5px&quot;&gt;客服术语表与缩写释义（含产品线黑话）&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;frontmatter 声明 · 1.0.1&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;cs-glossary 1.0.1 · zip 上传&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-badge run&quot;&gt;通过&lt;/span&gt;&lt;/td&gt;
+              &lt;/tr&gt;
+              &lt;tr&gt;
+                &lt;td&gt;&lt;b class=&quot;oa-mono&quot;&gt;ticket-faq&lt;/b&gt;&lt;/td&gt;
+                &lt;td class=&quot;oa-mono&quot; style=&quot;font-size:11px&quot;&gt;skills/ticket-faq/&lt;/td&gt;
+                &lt;td style=&quot;color:var(--oa-text2);font-size:11.5px&quot;&gt;高频工单 FAQ 检索（Top-50 问答对）&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-badge off&quot;&gt;仅目录（未声明）&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-tag&quot;&gt;ticket-faq 1.0.0 · Markdown 定义&lt;/span&gt;&lt;/td&gt;
+                &lt;td&gt;&lt;span class=&quot;oa-badge warn&quot;&gt;缺 frontmatter description&lt;/span&gt;&lt;/td&gt;
+              &lt;/tr&gt;
+            &lt;/tbody&gt;
+          &lt;/table&gt;
+          &lt;div class=&quot;hint&quot; style=&quot;margin:10px 0 14px&quot;&gt;合规列与 SpaceSkills issues 同口径（skillcheck.go：缺 SKILL.md / 无 frontmatter / name 不一致 / 非法名称等）；「仅目录」= 目录存在但 frontmatter 未声明——运行时按目录加载不受影响，建议补声明。&lt;/div&gt;
+          &lt;div class=&quot;oa-sub&quot; style=&quot;margin-bottom:8px&quot;&gt;与技能中心的关系&lt;/div&gt;
+          &lt;div class=&quot;oa-keyrow&quot; style=&quot;flex-wrap:wrap;row-gap:4px&quot;&gt;包内快照 = 生成时复制的技能版本目录，&lt;b&gt;技能中心后续发版不影响本包&lt;/b&gt;；版本迁移（如 1.2.0 → 新版本）经编辑页资产配置区重新勾选&lt;/div&gt;
+          &lt;div class=&quot;oa-foot&quot; style=&quot;border-top:1px dashed var(--oa-border);margin-top:14px&quot;&gt;
+            &lt;button class=&quot;oa-btn&quot; type=&quot;button&quot; data-go=&quot;#/c/detail&quot;&gt;打开 Agent 详情&lt;/button&gt;
+            &lt;button class=&quot;oa-btn pri&quot; type=&quot;button&quot; data-go=&quot;#/c/edit&quot;&gt;换绑技能版本&lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
 &lt;!-- ===== 用户侧 · 工具管理（MCP 配置创建与注入） ===== --&gt;
     &lt;section class=&quot;oa-view&quot; data-view=&quot;c/tools&quot; hidden&gt;
       &lt;div class=&quot;oa-head&quot;&gt;&lt;div&gt;&lt;div class=&quot;oa-h1&quot;&gt;工具管理&lt;/div&gt;&lt;div class=&quot;oa-sub&quot;&gt;创建并维护 MCP 连接器配置（对标 AgentCore tools/create）；Agent 创建/更新时在资产配置步勾选，发布时注入生成包（mcpServers / mcp-configs/）&lt;/div&gt;&lt;/div&gt;
@@ -2543,27 +2627,168 @@ description: 发布前检查清单与回滚步骤（六项必填校验）
 
     &lt;!-- ===== 用户侧 · 记忆空间 ===== --&gt;
     &lt;section class=&quot;oa-view&quot; data-view=&quot;c/memory&quot; hidden&gt;
-      &lt;div class=&quot;oa-head&quot;&gt;&lt;div&gt;&lt;div class=&quot;oa-h1&quot;&gt;记忆空间&lt;/div&gt;&lt;div class=&quot;oa-sub&quot;&gt;会话记忆随 checkpoint 持久化，按「Agent × 用户」隔离；一期只读&lt;/div&gt;&lt;/div&gt;
-        &lt;div class=&quot;oa-hactions&quot;&gt;&lt;select style=&quot;width:200px&quot;&gt;&lt;option&gt;客服工单助手&lt;/option&gt;&lt;option&gt;通用问答助手&lt;/option&gt;&lt;option&gt;代码评审助手&lt;/option&gt;&lt;/select&gt;&lt;/div&gt;
+      &lt;div class=&quot;oa-head&quot;&gt;&lt;div&gt;&lt;div class=&quot;oa-h1&quot;&gt;记忆空间&lt;/div&gt;&lt;div class=&quot;oa-sub&quot;&gt;每个运行中 Agent 即一个记忆空间：长期记忆（MEMORY.md + memory/ 按日文件，SDK flush/consolidation 自动沉淀）+ 会话历史；一期纯只读，直连业务运行时不经控制面后端（2026-10-19 重设计，对标 AgentCore）&lt;/div&gt;&lt;/div&gt;
+        &lt;div class=&quot;oa-hactions&quot;&gt;&lt;input style=&quot;width:220px&quot; placeholder=&quot;搜索 Agent 名称&quot;&gt;&lt;/div&gt;
       &lt;/div&gt;
-      &lt;div class=&quot;oa-flex2&quot;&gt;
-        &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;用户 u-10086（张工）· 会话记忆&lt;/h3&gt;
-          &lt;div class=&quot;oa-note plain&quot; style=&quot;margin-bottom:10px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;以下为会话摘要自动沉淀（只读）；记忆编辑与清除策略在后续版本开放。&lt;/span&gt;&lt;/div&gt;
-          &lt;ul class=&quot;oa-tl&quot;&gt;
-            &lt;li class=&quot;ok&quot;&gt;偏好在工单升级前先同步拉群通知&lt;small&gt;源自会话「工单 #8821 升级咨询」· 今天&lt;/small&gt;&lt;/li&gt;
-            &lt;li class=&quot;ok&quot;&gt;常查工单队列：P0 / 超 2h 未响应&lt;small&gt;近 7 日 12 次会话聚合&lt;/small&gt;&lt;/li&gt;
-          &lt;/ul&gt;
+      &lt;div class=&quot;oa-note plain&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;保留期提示：记忆文件随会话数据按保留期清理（每日 3 点，默认 7 天不活跃即清理，&lt;b&gt;记忆文件无豁免&lt;/b&gt;）；延长保留期属运行时配置，远期提供。存储位置 = 服务 checkpoint 库（agent_fs / session_message / session_user），每服务独立库名，跨空间不共享。&lt;/span&gt;&lt;/div&gt;
+      &lt;div class=&quot;oa-stats&quot;&gt;
+        &lt;div class=&quot;oa-stat&quot;&gt;&lt;small&gt;记忆空间&lt;/small&gt;&lt;b&gt;3&lt;em&gt;= 运行中 Agent&lt;/em&gt;&lt;/b&gt;&lt;/div&gt;
+        &lt;div class=&quot;oa-stat&quot;&gt;&lt;small&gt;长期记忆文件&lt;/small&gt;&lt;b&gt;9&lt;em&gt;MEMORY.md + memory/&#x27;*&#x27;&lt;/em&gt;&lt;/b&gt;&lt;/div&gt;
+        &lt;div class=&quot;oa-stat&quot;&gt;&lt;small&gt;近 7 日会话&lt;/small&gt;&lt;b&gt;26&lt;/b&gt;&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;oa-grid&quot;&gt;
+        &lt;div class=&quot;oa-acard&quot;&gt;
+          &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;span class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#1668dc,#4c8df6)&quot;&gt;客&lt;/span&gt;&lt;b&gt;客服工单助手-压测版&lt;/b&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/div&gt;
+          &lt;p&gt;处理客服工单分类、查询与升级流转；记忆随会话自动沉淀。&lt;/p&gt;
+          &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;MEMORY.md + 5 个按日文件&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;12 会话&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;今天 14:32 更新&lt;/time&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot; data-go=&quot;#/c/memory-detail&quot;&gt;查看记忆&lt;/button&gt;&lt;/div&gt;
         &lt;/div&gt;
-        &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;API 调用身份 u-20041（ak-cs-gateway）&lt;/h3&gt;
-          &lt;ul class=&quot;oa-tl&quot;&gt;
-            &lt;li class=&quot;ok&quot;&gt;批量分类任务模板：工单号列表 + 分类口径 v2&lt;small&gt;源自 API 会话 · 昨天&lt;/small&gt;&lt;/li&gt;
-          &lt;/ul&gt;
-          &lt;div class=&quot;oa-sub&quot; style=&quot;margin-top:8px&quot;&gt;存储位置：服务 checkpoint 库（session_user / agent_state）· 每服务独立库名，跨空间不共享&lt;/div&gt;
+        &lt;div class=&quot;oa-acard&quot;&gt;
+          &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;span class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#7a5af8,#9b8afb)&quot;&gt;码&lt;/span&gt;&lt;b&gt;代码评审助手&lt;/b&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/div&gt;
+          &lt;p&gt;拉取 MR diff 生成评审意见，沉淀团队评审规范。&lt;/p&gt;
+          &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;MEMORY.md + 2 个按日文件&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;8 会话&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;今天 11:03 更新&lt;/time&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot; data-go=&quot;#/c/memory-detail&quot;&gt;查看记忆&lt;/button&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class=&quot;oa-acard&quot;&gt;
+          &lt;div class=&quot;oa-acard-h&quot;&gt;&lt;span class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#f79009,#fdb022)&quot;&gt;问&lt;/span&gt;&lt;b&gt;通用问答助手&lt;/b&gt;&lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;/div&gt;
+          &lt;p&gt;基于平台知识沉淀的通用问答入口，支持文档上传。&lt;/p&gt;
+          &lt;div class=&quot;oa-acard-meta&quot;&gt;&lt;span class=&quot;oa-tag&quot;&gt;暂无记忆文件&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;6 会话&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;oa-acard-f&quot;&gt;&lt;time&gt;昨天 16:40 更新&lt;/time&gt;&lt;button class=&quot;oa-btn sm pri&quot; type=&quot;button&quot; data-go=&quot;#/c/memory-detail&quot;&gt;查看记忆&lt;/button&gt;&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;oa-note&quot; style=&quot;margin-top:14px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;口径：&lt;b&gt;不新建记忆空间实体&lt;/b&gt;——Agent 创建后记忆随会话自动沉淀（AGENT_MEMORY_ENABLED 默认开启）；一期只读展示，记忆写入/编辑/语义检索（对标 AgentCore SearchMemories）/空间 CRUD 为远期能力。&lt;/span&gt;&lt;/div&gt;
+    &lt;/section&gt;
+
+    &lt;!-- ===== 用户侧 · 记忆空间详情（三 Tab：概览 / 长期记忆 / 会话历史，纯只读） ===== --&gt;
+    &lt;section class=&quot;oa-view&quot; data-view=&quot;c/memory-detail&quot; hidden&gt;
+      &lt;div class=&quot;oa-head&quot;&gt;
+        &lt;div&gt;
+          &lt;div class=&quot;oa-h1&quot;&gt;&lt;button class=&quot;oa-btn sm&quot; type=&quot;button&quot; data-go=&quot;#/c/memory&quot; style=&quot;padding:3px 8px&quot;&gt;&lt;i data-lucide=&quot;arrow-left&quot;&gt;&lt;/i&gt;&lt;/button&gt;&lt;span class=&quot;oa-acard-ava&quot; style=&quot;background:linear-gradient(135deg,#1668dc,#4c8df6);width:30px;height:30px;font-size:13px&quot;&gt;客&lt;/span&gt;客服工单助手-压测版 &lt;span class=&quot;oa-badge run&quot;&gt;运行中&lt;/span&gt;&lt;span class=&quot;oa-tag&quot;&gt;记忆空间 · cs-ticket-stress&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;oa-sub oa-mono&quot;&gt;数据源：GET /agent/cs-ticket-stress/debug/memory · /threads · /threads/{sid}/history（X-User-Id: u-10086，直连业务运行时）&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;oa-tabs&quot; role=&quot;tablist&quot; aria-label=&quot;记忆空间详情&quot;&gt;
+        &lt;button class=&quot;oa-tab on&quot; role=&quot;tab&quot; aria-selected=&quot;true&quot; data-memtab=&quot;overview&quot; type=&quot;button&quot;&gt;概览&lt;/button&gt;
+        &lt;button class=&quot;oa-tab&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; data-memtab=&quot;memory&quot; type=&quot;button&quot;&gt;长期记忆&lt;/button&gt;
+        &lt;button class=&quot;oa-tab&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; data-memtab=&quot;sessions&quot; type=&quot;button&quot;&gt;会话历史&lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Tab 1: 概览 --&gt;
+      &lt;div data-mempanel=&quot;overview&quot;&gt;
+        &lt;div class=&quot;oa-flex2&quot;&gt;
+          &lt;div style=&quot;display:flex;flex-direction:column;gap:14px&quot;&gt;
+            &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;基本信息&lt;/h3&gt;
+              &lt;dl class=&quot;oa-kv&quot;&gt;
+                &lt;div&gt;&lt;dt&gt;记忆启用状态&lt;/dt&gt;&lt;dd&gt;&lt;span class=&quot;oa-badge run&quot;&gt;已启用&lt;/span&gt; &lt;span style=&quot;color:var(--oa-text3);font-size:11px&quot;&gt;AGENT_MEMORY_ENABLED（默认 true）&lt;/span&gt;&lt;/dd&gt;&lt;/div&gt;
+                &lt;div&gt;&lt;dt&gt;沉淀方式&lt;/dt&gt;&lt;dd&gt;SDK 自动 flush（对话事实抽取 → memory/ 按日文件）+ consolidation（合并进 MEMORY.md）&lt;/dd&gt;&lt;/div&gt;
+                &lt;div&gt;&lt;dt&gt;隔离维度&lt;/dt&gt;&lt;dd&gt;Agent × 用户（namespace agents/{agent}/users/{uid}）&lt;/dd&gt;&lt;/div&gt;
+                &lt;div&gt;&lt;dt&gt;存储位置&lt;/dt&gt;&lt;dd&gt;服务 checkpoint 库 · agent_fs KV&lt;/dd&gt;&lt;/div&gt;
+                &lt;div&gt;&lt;dt&gt;保留期&lt;/dt&gt;&lt;dd&gt;7 天不活跃清理（每日 3 点，无 namespace 豁免）&lt;/dd&gt;&lt;/div&gt;
+              &lt;/dl&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;记忆文件清单（当前用户 u-10086）&lt;/h3&gt;
+              &lt;table class=&quot;oa-table&quot; style=&quot;border:none&quot;&gt;
+                &lt;thead&gt;&lt;tr&gt;&lt;th&gt;文件路径&lt;/th&gt;&lt;th&gt;大小&lt;/th&gt;&lt;th&gt;更新时间&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+                &lt;tbody&gt;
+                  &lt;tr&gt;&lt;td class=&quot;oa-mono&quot;&gt;MEMORY.md&lt;/td&gt;&lt;td&gt;1.9 KB&lt;/td&gt;&lt;td&gt;今天 14:32&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;td class=&quot;oa-mono&quot;&gt;memory/2026-10-19.md&lt;/td&gt;&lt;td&gt;412 B&lt;/td&gt;&lt;td&gt;今天 14:32&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;td class=&quot;oa-mono&quot;&gt;memory/2026-10-18.md&lt;/td&gt;&lt;td&gt;386 B&lt;/td&gt;&lt;td&gt;昨天 18:47&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;td class=&quot;oa-mono&quot;&gt;memory/2026-10-15.md&lt;/td&gt;&lt;td&gt;298 B&lt;/td&gt;&lt;td&gt;10-15 11:20&lt;/td&gt;&lt;/tr&gt;
+                  &lt;tr&gt;&lt;td class=&quot;oa-mono&quot;&gt;memory/2026-10-14.md&lt;/td&gt;&lt;td&gt;355 B&lt;/td&gt;&lt;td&gt;10-14 09:52&lt;/td&gt;&lt;/tr&gt;
+                &lt;/tbody&gt;
+              &lt;/table&gt;
+              &lt;div class=&quot;hint&quot; style=&quot;margin-top:8px&quot;&gt;数据源 GET /agent/{short}/debug/memory → users[u-10086].files[]（只读；写管理远期）&lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div&gt;
+            &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;沉淀链路&lt;/h3&gt;
+              &lt;ul class=&quot;oa-tl&quot;&gt;
+                &lt;li class=&quot;ok&quot;&gt;会话进行中：turn 输入/输出实时归档（session_message）&lt;small&gt;会话历史轨&lt;/small&gt;&lt;/li&gt;
+                &lt;li class=&quot;ok&quot;&gt;记忆 flush：对话事实抽取 → memory/YYYY-MM-DD.md&lt;small&gt;节流 10 分钟 / 压缩前强制触发&lt;/small&gt;&lt;/li&gt;
+                &lt;li class=&quot;ok&quot;&gt;consolidation：memory/ 合并 → MEMORY.md 索引&lt;small&gt;间隔 ≥60 分钟 / 上限 8000 tokens&lt;/small&gt;&lt;/li&gt;
+                &lt;li class=&quot;ok&quot;&gt;上下文压缩：超 30 条触发，摘要入历史（compaction 条目）&lt;small&gt;keepMessages=10&lt;/small&gt;&lt;/li&gt;
+              &lt;/ul&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;oa-note plain&quot; style=&quot;margin-top:14px&quot;&gt;&lt;i data-lucide=&quot;info&quot;&gt;&lt;/i&gt;&lt;span&gt;记忆检索：Agent 运行时内置 memory_search（关键词级，MEMORY.md + memory/*.md）；语义检索（对标 AgentCore SearchMemories）远期提供，控制台一期不做检索入口。&lt;/span&gt;&lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Tab 2: 长期记忆 --&gt;
+      &lt;div data-mempanel=&quot;memory&quot; hidden&gt;
+        &lt;div class=&quot;oa-toolbar&quot;&gt;
+          &lt;select style=&quot;width:230px&quot; title=&quot;记忆按 Agent×用户隔离；/debug/memory 返回全部分组，一期仅渲染当前用户，其余分组名脱敏展示&quot;&gt;&lt;option&gt;用户：u-10086（张工 · 我）&lt;/option&gt;&lt;option disabled&gt;u-20041（其余用户 · 仅显示分组名）&lt;/option&gt;&lt;/select&gt;
+          &lt;span style=&quot;color:var(--oa-text3);font-size:11.5px&quot;&gt;只读 · 仅渲染当前登录用户分组（脱敏口径，后端代理过滤列二期）&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class=&quot;oa-flex2&quot;&gt;
+          &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;MEMORY.md（索引 · 今天 14:32）&lt;/h3&gt;
+            &lt;div class=&quot;oa-pre&quot; style=&quot;white-space:pre-wrap&quot;&gt;# 张工（u-10086）· 长期记忆
+
+## 偏好
+- 工单升级前先同步拉群通知，再走二线流转
+- 回复使用中文；技术结论附一句话依据
+
+## 常用操作
+- 常查工单队列：P0 优先 / 超 2h 未响应
+- 升级目标默认二线组（level=2），升级单号需回显
+
+## 近期事实（2026-10-19）
+- 工单 #8821 已升级（ESC-2093），预计 30 分钟内响应
+- 确认过 P0 判定口径：SLA 剩余 &amp;lt; 0.5h 视同 P0&lt;/div&gt;
+            &lt;div class=&quot;hint&quot; style=&quot;margin-top:8px&quot;&gt;consolidation 产物：memory/ 按日事实合并去重后的稳定索引（上限 8000 tokens）&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div style=&quot;display:flex;flex-direction:column;gap:14px&quot;&gt;
+            &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;memory/2026-10-19.md（今日 flush）&lt;/h3&gt;
+              &lt;div class=&quot;oa-pre&quot; style=&quot;white-space:pre-wrap&quot;&gt;- 用户确认工单 #8821 卡单超 2h，执行 ticket_escalate(level=2)
+- 升级后追问群通知：已在升级话术中附带群链接
+- 新偏好：升级完成后要求回显预计响应时长&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;memory/2026-10-18.md&lt;/h3&gt;
+              &lt;div class=&quot;oa-pre&quot; style=&quot;white-space:pre-wrap&quot;&gt;- P0 判定口径确认：等待超 2h 或 SLA 剩余 &amp;lt; 0.5h
+- 用户习惯先查队列再逐单处理（P0 → 超 2h → 其余）&lt;/div&gt;
+            &lt;/div&gt;
+            &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;更早文件&lt;/h3&gt;
+              &lt;div class=&quot;oa-keyrow oa-mono&quot; style=&quot;flex-wrap:wrap;row-gap:4px&quot;&gt;memory/2026-10-15.md · 298B&lt;span style=&quot;color:var(--oa-text3)&quot;&gt;·&lt;/span&gt;memory/2026-10-14.md · 355B&lt;/div&gt;
+              &lt;div class=&quot;hint&quot; style=&quot;margin-top:6px&quot;&gt;点击展开查看（演示省略）；7 天外的文件已被保留期清理&lt;/div&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;!-- Tab 3: 会话历史 --&gt;
+      &lt;div data-mempanel=&quot;sessions&quot; hidden&gt;
+        &lt;div class=&quot;oa-toolbar&quot;&gt;
+          &lt;input style=&quot;width:220px&quot; placeholder=&quot;搜索会话标题&quot;&gt;
+          &lt;span style=&quot;color:var(--oa-text3);font-size:11.5px&quot;&gt;GET /threads?userId=u-10086 · 保留 7 天&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;div class=&quot;oa-flex2&quot;&gt;
+          &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;会话列表（按最近活跃排序）&lt;/h3&gt;
+              &lt;button class=&quot;cs-item on&quot; type=&quot;button&quot; style=&quot;display:block;width:100%;text-align:left;margin-bottom:6px&quot;&gt;工单 #8821 升级咨询&lt;small&gt;今天 14:32 · 12 条消息 · qwen-plus&lt;/small&gt;&lt;/button&gt;
+              &lt;button class=&quot;cs-item&quot; type=&quot;button&quot; style=&quot;display:block;width:100%;text-align:left;margin-bottom:6px&quot;&gt;P0 工单判定规则&lt;small&gt;今天 11:03 · 5 条消息 · qwen-plus&lt;/small&gt;&lt;/button&gt;
+              &lt;button class=&quot;cs-item&quot; type=&quot;button&quot; style=&quot;display:block;width:100%;text-align:left;margin-bottom:6px&quot;&gt;回归：escalate 确认卡&lt;small&gt;昨天 18:47 · 9 条消息 · deepseek-v3&lt;/small&gt;&lt;/button&gt;
+              &lt;button class=&quot;cs-item&quot; type=&quot;button&quot; style=&quot;display:block;width:100%;text-align:left&quot;&gt;批量分类口径 v2&lt;small&gt;10-16 09:15 · 4 条消息 · qwen-plus&lt;/small&gt;&lt;/button&gt;
+            &lt;div class=&quot;hint&quot; style=&quot;margin-top:10px&quot;&gt;点击会话 → 右侧加载消息历史（GET /threads/{sid}/history，beforeId 游标分页）&lt;/div&gt;
+          &lt;/div&gt;
+          &lt;div class=&quot;oa-card&quot;&gt;&lt;h3&gt;工单 #8821 升级咨询 · 消息历史（12 条，含压缩分隔条）&lt;/h3&gt;
+              &lt;div class=&quot;oa-bubble user&quot; style=&quot;margin-bottom:10px&quot;&gt;帮我看下工单 8821 现在的状态，如果卡了超过 2 小时就帮我升级。&lt;/div&gt;
+              &lt;div class=&quot;oa-toolstep&quot; style=&quot;margin-bottom:10px&quot;&gt;
+                &lt;div class=&quot;ts-h&quot;&gt;&lt;i data-lucide=&quot;wrench&quot;&gt;&lt;/i&gt;&lt;span&gt;ticket_query · allow&lt;/span&gt;&lt;span class=&quot;oa-badge run&quot; style=&quot;margin-left:auto&quot;&gt;完成 · 1.2s&lt;/span&gt;&lt;/div&gt;
+                &lt;div class=&quot;ts-r&quot;&gt;入参 {&quot;ticket_id&quot;:&quot;8821&quot;} → 状态 Processing · 已等待 2.4h（SLA 剩余 0.6h）&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div class=&quot;oa-hitl&quot; style=&quot;margin-bottom:10px&quot;&gt;
+                &lt;b&gt;&lt;i data-lucide=&quot;shield-alert&quot;&gt;&lt;/i&gt;权限确认（ask）· ticket_escalate&lt;/b&gt;
+                &lt;div style=&quot;margin-top:6px;color:var(--oa-text2)&quot;&gt;工单 8821 等待超 2 小时，拟升级至二线组。执行 &lt;code&gt;ticket_escalate(ticket_id=&quot;8821&quot;, level=2)&lt;/code&gt;？&lt;/div&gt;
+              &lt;/div&gt;
+              &lt;div style=&quot;text-align:center;margin:4px 0 12px&quot;&gt;&lt;span class=&quot;oa-tag&quot; style=&quot;background:var(--oa-amber-bg);color:var(--oa-amber)&quot;&gt;⌃ 上下文已压缩（compaction · 早期 20 条合并为摘要）&lt;/span&gt;&lt;/div&gt;
+              &lt;div class=&quot;oa-bubble bot&quot; style=&quot;margin-bottom:10px&quot;&gt;工单 8821 已升级至二线组（单号 ESC-2093），预计 30 分钟内响应。需要我同步拉起群聊通知吗？&lt;/div&gt;
+              &lt;div class=&quot;oa-bubble user&quot; style=&quot;margin-bottom:10px&quot;&gt;好，拉群。另外以后升级完都把预计响应时长带上。&lt;/div&gt;
+              &lt;div class=&quot;oa-bubble bot&quot;&gt;已拉群（工单-8821-升级群）并把「升级完成回显预计响应时长」记入长期记忆。&lt;/div&gt;
+            &lt;div class=&quot;hint&quot; style=&quot;margin-top:12px&quot;&gt;compaction_summary 条目渲染为分隔条；turn 失败留痕（__turn_error__）渲染为红色系统条目（演示省略）&lt;/div&gt;
+          &lt;/div&gt;
         &lt;/div&gt;
       &lt;/div&gt;
     &lt;/section&gt;
 
-    &lt;!-- ===== 用户侧 · 凭证管理 ===== --&gt;
     &lt;section class=&quot;oa-view&quot; data-view=&quot;c/credentials&quot; hidden&gt;
       &lt;div class=&quot;oa-head&quot;&gt;&lt;div&gt;&lt;div class=&quot;oa-h1&quot;&gt;凭证管理&lt;/div&gt;&lt;div class=&quot;oa-sub&quot;&gt;工作空间级 API Key，用于对外调用 Agent（A2A / HTTP）；明文仅签发时展示一次&lt;/div&gt;&lt;/div&gt;
         &lt;div class=&quot;oa-hactions&quot;&gt;&lt;button class=&quot;oa-btn pri&quot; type=&quot;button&quot;&gt;&lt;i data-lucide=&quot;plus&quot;&gt;&lt;/i&gt;签发凭证&lt;/button&gt;&lt;/div&gt;
@@ -2946,6 +3171,21 @@ description: 发布前检查清单与回滚步骤（六项必填校验）
     });
   };
   bindSkillTabs();
+  // ---- 记忆空间详情（三 Tab：概览 / 长期记忆 / 会话历史，纯只读） ----
+  $$(&#x27;[data-memtab]&#x27;).forEach(function(tab){
+    tab.addEventListener(&#x27;click&#x27;, function(){
+      $$(&#x27;[data-memtab]&#x27;).forEach(function(x){ x.classList.remove(&#x27;on&#x27;); x.setAttribute(&#x27;aria-selected&#x27;,&#x27;false&#x27;); });
+      tab.classList.add(&#x27;on&#x27;); tab.setAttribute(&#x27;aria-selected&#x27;,&#x27;true&#x27;);
+      $$(&#x27;[data-mempanel]&#x27;).forEach(function(p){ p.hidden = (p.getAttribute(&#x27;data-mempanel&#x27;) !== tab.getAttribute(&#x27;data-memtab&#x27;)); });
+    });
+  });
+  // 会话列表点击切换选中（演示：右侧历史为静态示例）
+  $$(&#x27;[data-mempanel=&quot;sessions&quot;] .cs-item&#x27;).forEach(function(item){
+    item.addEventListener(&#x27;click&#x27;, function(){
+      $$(&#x27;[data-mempanel=&quot;sessions&quot;] .cs-item&#x27;).forEach(function(x){ x.classList.remove(&#x27;on&#x27;); });
+      item.classList.add(&#x27;on&#x27;);
+    });
+  });
   // 创建方式切换（zip / Markdown）
   $$(&#x27;#oaSkillMode button&#x27;).forEach(function(b){
     b.addEventListener(&#x27;click&#x27;, function(){
@@ -2958,6 +3198,27 @@ description: 发布前检查清单与回滚步骤（六项必填校验）
   $(&#x27;#oaSkillCreateGo&#x27;).addEventListener(&#x27;click&#x27;, function(){
     skillCreate.hidden = true;
     toast(&#x27;已创建技能 ticket-escalation v1.0.0（已发布）——可在创建/编辑 Agent 资产配置区勾选&#x27;);
+  });
+
+  // ---- Agent 使用情况：行详情抽屉 + 「被引用」跳 Tab ----
+  var usageDetail = $(&#x27;#oaUsageDetail&#x27;);
+  var ub = $(&#x27;#oaUsageDetailBtn&#x27;);
+  if (ub) ub.addEventListener(&#x27;click&#x27;, function(){ usageDetail.hidden = false; });
+  $$(&#x27;[data-close-usagedetail]&#x27;).forEach(function(b){ b.addEventListener(&#x27;click&#x27;, function(){ usageDetail.hidden = true; }); });
+  usageDetail.addEventListener(&#x27;click&#x27;, function(ev){ if (ev.target === usageDetail) usageDetail.hidden = true; });
+  $$(&#x27;[data-skillgoto]&#x27;).forEach(function(a){
+    a.addEventListener(&#x27;click&#x27;, function(ev){
+      ev.preventDefault();
+      var target = a.getAttribute(&#x27;data-skillgoto&#x27;);
+      var tab = document.querySelector(&#x27;[data-skilltab=&quot;&#x27; + target + &#x27;&quot;]&#x27;);
+      if (tab) tab.click();
+    });
+  });
+  // 使用情况 Tab 内其余行「查看详情」按钮（同一抽屉演示）
+  $$(&#x27;[data-skillpanel=&quot;usage&quot;] .oa-btn&#x27;).forEach(function(b){
+    if (b.textContent.trim() === &#x27;查看详情&#x27; &amp;&amp; b.id !== &#x27;oaUsageDetailBtn&#x27;) {
+      b.addEventListener(&#x27;click&#x27;, function(){ usageDetail.hidden = false; });
+    }
   });
 
   // ---- 详情 Tabs ----

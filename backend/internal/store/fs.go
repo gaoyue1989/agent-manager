@@ -110,6 +110,42 @@ func (f *FS) InspectZip(r io.Reader) (*ZipInfo, error) {
 	return info, nil
 }
 
+// InspectSkillZip 技能 zip 校验（Skill 中心 2026-10-19）：同 InspectZip 的安全护栏
+//（大小/条目数/zip-slip/符号链接），但不要求根级 AGENTS.md——技能包只需 skills/<name>/。
+func (f *FS) InspectSkillZip(r io.Reader) (*ZipInfo, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxZipSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxZipSize {
+		return nil, ErrZipTooLarge
+	}
+	sum := sha256.Sum256(data)
+	zr, err := zip.NewReader(strings.NewReader(string(data)), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("invalid zip: %w", err)
+	}
+	if len(zr.File) > MaxEntries {
+		return nil, ErrTooManyFiles
+	}
+	info := &ZipInfo{Reader: zr, Checksum: hex.EncodeToString(sum[:])}
+	var total int64
+	for _, zf := range zr.File {
+		if err := validateEntry(zf); err != nil {
+			return nil, err
+		}
+		total += int64(zf.UncompressedSize64)
+		if total > MaxExtracted {
+			return nil, ErrExtractTooLarge
+		}
+		if !zf.FileInfo().IsDir() {
+			info.FileCount++
+		}
+	}
+	info.TotalSize = total
+	return info, nil
+}
+
 // validateEntry 单条目路径与类型校验。
 func validateEntry(zf *zip.File) error {
 	name := zf.Name
