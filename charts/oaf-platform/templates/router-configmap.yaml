@@ -44,6 +44,9 @@ data:
 
     server {
       listen 8080;
+      # 动态 upstream（$short）必须显式 resolver；默认 kube-dns ClusterIP，
+      # 非默认 Service CIDR 的集群用 routing.dnsResolver 覆盖。
+      resolver {{ .Values.routing.dnsResolver | default "10.96.0.10" }} valid=10s ipv6=off;
       # 与文件上传（POST /files/upload）对齐：入口层不设更严于历史的体量限制，
       # 上限由应用层裁决
       client_max_body_size {{ .Values.router.nginx.clientMaxBodySize }};
