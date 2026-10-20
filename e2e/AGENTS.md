@@ -1,60 +1,89 @@
 # E2E Testing — OAF 发布平台
 
-## 场景矩阵（对应 docs/design/REDESIGN.md §10）
+## 场景矩阵
 
-| 脚本 | 场景 | 内容 |
-|------|------|------|
-| platform-e2e.sh | A+B | REST 主链路 50 断言：上传→发布→A2A 注册→env 更新（含全量覆盖清除旧键）→republish→上下线→异常路径（deploying/stopped 改 env 拒绝、被引用包删除 400）→零残留清理（增量对齐基线，保护 release-agent）；镜像经 GET /images 动态选取不写死 |
-| package-edit-e2e.sh | A+ | 包在线预览/编辑 34 断言：单文件预览（文本/路径穿越/不存在）/整包与单文件下载→在线编辑生成新版本（派生溯源 sourcePackageId、基础包零修改、增删改生效、同 slug 过滤）→异常路径（无变更 400、删 AGENTS.md 400、乐观锁 409、非法 frontmatter 400）→发布→republish 换版（subPath 切换、引用计数 0→1、注册版本 1.0.0→1.1.0）→按包过滤服务→零残留清理 |
-| mcpclient/ (go run .) | C | MCP client 经 streamableHttp 走完整发布链路 27 断言（含 list_images/list_packages/get_package_detail/register_service 与两步确认删除） |
-| ui-e2e.js | D | Puppeteer UI 流程 10 断言（发布向导三步/详情轮询/重发布/删除） |
-| agent-e2e.sh | E | release-agent 自然语言驱动第三方发布+删除全链路 8 断言；变更类走 /threads/chat + confirm-stream HITL 确认流（需 release-agent ≥ HITL 20260917 部署）；A2A 通道仅查询探针（HITL 后 A2A ask 挂起不落 confirm_context，变更无法批准——待运行时修复） |
-| debug-console-e2e.js | 附 | Debug Console 子路径渲染（经 :30080） |
-| chat-ui-e2e.js | 附 | /assistant 对话真实 LLM 流式回复（经 :8911） |
-| file-support-e2e.sh | 附 | 文件上传下载：S1 上传文档/S2 上传图片(视觉)/S3 输出文档/S4 输出图片/X 异常/S8 生成 OAF 部署包（非沙箱 21 断言）；SANDBOX=1 启用沙箱专项 S-S1~S-S7（22 断言）+ S-S8/S-S9 生成包与发布全链路（合计 29 断言） |
-| file-support-ui-e2e.js | 附 | /assistant 对话 UI 15 用例：附件上传/读文件/present_file 卡片/下载（U1~U10）+ 生成 OAF 包对话（U11~U13）+ 历史会话展示/切换回放/继续对话（U14~U16） |
-| s3-file-e2e.sh | 附 | S3 存储档：切 release-agent 为 S3 后端（凭据读 .env.secrets）→ 跑非沙箱档全链路落 S3 → 自动恢复 local |
-| skills-dynamic-e2e.sh | 附 | OAF skills 目录动态加载：发布带 skills 的包 → 基线/对话读技能 → 宿主直写 PVC 动态新增/修改/删除（**不重启**）→ L4 用户覆盖隔离（非沙箱 20 断言）；SANDBOX=1 加沙箱档 .skills-cache 物化+投影+容器内脚本执行（23 断言） |
-| user-skill-admin-e2e.sh | 附 | 用户技能 L4 管理面：自建包/服务（P）→ PUT 个人覆盖 → 明细 GET（source/hasUserOverride）→ 索引（/skills/users 与 /debug/user-skills）→ **非沙箱档** A2A 生效性 + 用户隔离 → DELETE 回落包内基线（逐字节比对）→ sync-from-package（含 scripts/ 资源）→ 负例（非法 userId/name 400、不存在 404、>100KB 413），非沙箱合计 37 断言；SANDBOX=1 跑管理面（KV 读写/回落）并加 E8 沙箱回写（容器内 skill_manage → agent_fs 落 `agents/{agent}/users/{uid}/skills`，8.1~8.6）与 **E9 回写仲裁**（9.1~9.12：同 uid 连续 call 下 DELETE 的 tombstone 防「删除被复活」、PUT 的 admin-override 栅栏防「管理面写入被容器内旧副本改回」，含删除响应 tombstone 字段断言），**A2A 生效性断言在沙箱档不成立**（会话读容器内副本，见下节档位说明） |
-| S3FileStorageIT（Java） | 附 | S3FileStorage 集成测试 3 用例（写入/哨兵回读/删除幂等/不存在语义）；`S3_IT=1 S3_IT_ENDPOINT=... S3_IT_ACCESS_KEY=... S3_IT_SECRET_KEY=... S3_IT_BUCKET=... mvn test -Dtest=S3FileStorageIT`，无 env 自动 skip |
+### 平台控制面（`console-split/`，PR 门禁套件）
+
+| 脚本 | 覆盖 |
+|------|------|
+| `console-split/lib.sh` | 公共断言/登录/空间种子/`wait_status`/legacy `AUTH_TOKEN` 通道/`resolve_llm_env`/`runtime_is_real` |
+| `m0-auth.sh` | 登录三分支、cookie 属性、me 双通道、路由分层、introspect、logout、权限撤销即时生效（#148） |
+| `m1-governance.sh` | 用户/工作空间 CRUD、成员矩阵、bind 三态、删除保护、审计、owner 转移（#157）、长度上限（#149） |
+| `m2-console-foundation.sh` | `resolveWorkspace` 矩阵、summary/agents 视图、templates/packages/images、proxy 身份注入 |
+| `m3-agent-create.sh` | Agent 创建校验矩阵、preview-name、创建→running→A2A、包契约、env 分级、导入模式（#161）、模板导入、纳管（adopt）、子 Agent/远程凭证、多副本/非公开入口、编辑 copy-on-write、member 403 |
+| `m4-agent-detail.sh` | 详情聚合（pods/events/envSecretKeys）、列表过滤、edit-form 回显、生命周期状态机、版本链/升级、非成员 404、member 只读矩阵、删除副作用（包保留/refCount=0/K8s 清理） |
+| `m5-model-connection.sh` | CRUD/掩码/唯一性/校验、test 成功与失败、PATCH→pending→重新下发 synced、跨空间同名、usage、`/models` 回读、会话级模型切换（真实运行时）、默认连接删除保护 |
+| `m6-mcp-connector.sh` | CRUD/长度/缺字段校验、平台 `/mcp` verify、坏端点 failed、toolScope 快照、PATCH timeout/permissions、sse 创建、member 403、bearer token 不落包/不回显→Secret、被引用删除 409 |
+| `m7-integration.sh` | 集成候选三态、登记/重复 409/跨空间 400、askPolicy/enabled patch、引用保护（需 `AGENT_PROTOCOL_ENABLED=true` 服务） |
+| `m8-workspace-assets.sh` | API Key 签发/作用域/吊销、邀请成员矩阵、模板开关、L4 端点可达、包技能 warnings/issues（#163/#164） |
+| `m9-skill-center.sh` | Skill 中心：Markdown 创建/校验、版本状态机（draft→published→offline→reline）、zip 上传/下载、市场源/安装、Agent 引用 `source=skill`（同名去重 #173）、draft/停用引用 400、删除保护 409、skill-usages、member 403 |
+| `m10-sandbox.sh` | 沙箱配置：enabled true/false/未声明、资源注入与空/负值归一、`SANDBOX_ENABLED` 不落 env、总览三层来源（env > package > default）、edit-form 回显、keyword/member/404 |
+| `run-all.sh` | 顺序执行；子脚本 `exit 2` 记为 SKIP，FAIL 汇总后非零退出 |
+
+> `console-split-e2e.sh` 已删除：其 22 条断言是 M0/M1/M2/M8 的子集。
+> 旧的 `ui-e2e.js`（匿名 legacy 管理面）已由 `console-ui-e2e.js` 取代。
+
+### 浏览器 UI（`console-ui-e2e.js`）
+
+登录 → 工作空间 → Agent 列表/创建（import 模式）/详情/编辑 → 模型连接新建 → MCP 连接器新建/权限表 →
+技能中心（我的/广场/使用情况）→ 沙箱配置总览。数据准备走 API（含沙箱 Agent + 技能引用），
+浏览器只驱动 UI；`E2E_AGENT_RUNTIME=mock` 时跳过会话/调试类断言。
+
+### 平台发布链路 / 业务运行时
+
+| 脚本 | 内容 |
+|------|------|
+| `platform-e2e.sh` | legacy REST 主链路：上传→发布→A2A 注册→env 更新（全量覆盖）→republish→上下线→异常路径→零残留；镜像经 `GET /images` 动态选取 |
+| `package-edit-e2e.sh` | 包在线预览/编辑/新版本→republish 换版→引用计数→零残留 |
+| `mcpclient/` (go run .) | MCP client 经 streamableHttp 走完整发布链路 |
+| `platform-config-secret-e2e.sh` | 平台默认配置 schema/掩码/defaults、env 隔离、默认填入发布、改配置不影响存量服务 |
+| `agent-e2e.sh` | release-agent 自然语言驱动发布+删除（HITL confirm-stream；A2A 仅查询探针） |
+| `file-support-e2e.sh` | 文件上传下载/视觉/`present_file`/生成 OAF 包；`SANDBOX=1` 加沙箱专项 |
+| `file-support-ui-e2e.js` | `/assistant` 对话 UI：附件/读文件/present_file/下载/生成包/历史回放 |
+| `skills-dynamic-e2e.sh` | OAF `skills/` 动态加载与 L4 覆盖；`SANDBOX=1` 加沙箱投影/脚本执行 |
+| `user-skill-admin-e2e.sh` | 用户技能 L4 管理面 + 非沙箱 A2A 生效性 + 沙箱回写 E8/仲裁 E9 |
+| `s3-file-e2e.sh` | S3 存储档：切 release-agent 为 S3 → 跑 file-support → 恢复 local |
+| `debug-console-e2e.js` / `debug-markdown-e2e.js` | Debug Console 子路径渲染 / markdown 渲染 |
+| `chat-ui-e2e.js` | `/assistant` 真实 LLM 流式回复 |
+| `S3FileStorageIT`（Java） | S3 集成测试；`S3_IT=1 ... mvn test -Dtest=S3FileStorageIT`，无 env 自动 skip |
 
 ## 运行前置
 
-- 集群内 platform-backend/frontend/release-agent 全部 running
-- fixtures/demo-agent-v{1,2}.zip、release-agent.zip、bad-no-agentsmd.zip
-- `.env.secrets` 提供 LLM_API_KEY/LLM_MODEL/LLM_ENDPOINT（场景 C/D/E 需要）
-- 涉及 L4/沙箱的场景（user-skill-admin-e2e.sh、skills-dynamic-e2e.sh SANDBOX=1）需**新 agent-framework 镜像已导入 kind 节点并在服务上生效**
+- 平台集群：platform-backend/frontend running；`console-split` 需要 `JWT_SECRET` + `ADMIN_INIT_*`
+- 业务镜像：真实 agent-framework（推荐）或 CI 的 `mock-agent`（仅 A2A 面）
+- LLM：`console-split` 的 Agent 创建/模型连接链路需要 verified 连接；CI 用集群内 mock LLM，
+  本地可显式传 `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`，或从 release-agent Secret 回落
+- `fixtures/demo-agent-v{1,2}.zip`、`bad-no-agentsmd.zip`
+- 涉及 L4/沙箱的场景需新 agent-framework 镜像已导入节点并在服务上生效
 
 ```bash
-./platform-e2e.sh                       # BASE 默认 http://localhost:30080/api/v1
-./package-edit-e2e.sh                   # 包在线预览/编辑/换版发布 34 断言
-cd mcpclient && go run . -base http://localhost:30080/mcp -zip ../fixtures/demo-agent-v1.zip
-FRONTEND=http://172.20.0.3:30881 node ui-e2e.js
-node chat-ui-e2e.js                      # 默认 http://100.66.1.5:8911
-node debug-markdown-e2e.js               # Debug 页 markdown 渲染
-./file-support-e2e.sh                    # 非沙箱档（release-agent 默认部署）
-SANDBOX=1 ./file-support-e2e.sh          # 沙箱档（release-agent env 含 SANDBOX_ENABLED=true，跑完恢复）
-FRONTEND=http://100.66.1.5:8911 node file-support-ui-e2e.js   # UI 档（随 release-agent 当前模式）
-./s3-file-e2e.sh                         # S3 存储档（凭据在 .env.secrets，跑完自动恢复 local）
-./skills-dynamic-e2e.sh                  # skills 动态加载（非沙箱）；SANDBOX=1 加沙箱档
-./user-skill-admin-e2e.sh                # 用户技能 L4 管理面 + 非沙箱档 A2A 生效性（自建包/服务，脚本自清理）
-SANDBOX=1 ./user-skill-admin-e2e.sh      # 沙箱档：管理面 + E8 沙箱回写 + E9 回写仲裁（tombstone/admin-override）
-                                         # （A2A 生效性断言跳过，见档位说明；E9 需同 uid 连续 call，约多 3 次 A2A）
-                                         # 前置：新 agent-framework:latest 已导入节点
-                                         # （agent-framework: make docker-build && docker save | docker exec -i agent-manager-control-plane ctr --namespace k8s.io images import -）
+# 平台控制面（API）
+BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:30881 \
+  bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m8 m9 m10
+
+# 浏览器 UI
+cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost:30881 \
+  E2E_LLM_BASE_URL=http://<mock-llm>/v1 E2E_LLM_API_KEY=e2e-dummy E2E_LLM_MODEL=e2e-mock \
+  node console-ui-e2e.js
+
+# 发布主链路 / 包编辑
+./platform-e2e.sh
+./package-edit-e2e.sh
 ```
 
-### 档位说明（沙箱 vs 非沙箱的 L4 生效范围）
+## CI（`.github/workflows/platform-e2e-ci.yml`）
 
-`user-skill-admin-e2e.sh` 默认（非沙箱）档推理直接读 agent_fs 的 L4，管理面写入/删除下轮会话即生效；
-`SANDBOX=1` 档会话读的是容器内 `/workspace/skills` 副本（容器不物化 L4，会话看到的就是容器内那份），
-管理面写入的 L4 需「会话开始物化 L4」能力（尚未实现）才对会话生效，故 A2A 生效性断言仅在非沙箱档成立；
-反向（会话内 skill_manage 写入 → 回写 agent_fs）由 E8 断言；**回写仲裁**由 E9 断言——管理面写入/删除会在
-KV 留标记（`/{name}/.admin-override` / `/{name}/.deleted`），回写命中即跳过同名技能，使「管理面内容被同代
-容器内旧副本改回」「删除被容器内副本复活」都不再发生；代价是该技能在容器内的 skill_manage 修改在标记清除
-前不落库（清除方式见接口响应与调试页提示）。同档位口径见 agent-framework/AGENTS.md 端点表与
-[docs/design/user-skill-admin-design.md](../docs/design/user-skill-admin-design.md)。
+- 触发：指向 master 的 PR + master push；路径过滤 `backend/**`、`frontend/**`、`manifests/**`、`e2e/**`
+- 运行环境：`ubuntu-latest` + `kind` 单节点（NodePort 30080/30880/30881 映射到 localhost）+
+  `manifests/ci` overlay（本地构建镜像、mock LLM、`oaf-platform-backend` 别名 Service）
+- 业务镜像解析顺序：`E2E_AGENT_IMAGE` → Docker Hub `gaoyue1989/agent-framework` 最新
+  `agentscope-*` tag（拉取/导入各 300s 超时）→ 失败回落 `mock-agent:ci`（`E2E_AGENT_RUNTIME=mock`，
+  跳过会话类断言）
+- 执行：`platform-e2e.sh` → `console-split/run-all.sh m0..m10` → `console-ui-e2e.js`；
+  失败上传集群状态与 UI 截图
+- **当前为非必需检查**：稳定 2-3 个 PR 后由管理员加入 master 分支保护
 
 ## 断言原则
 
-每场景结束断言 DB 记录 / K8s 资源 / PVC 目录三方一致；E2E 会话用运行级唯一 userId（防 HITL 暂停态复放）；LLM 相关超时窗口 ≥300s。
+每场景结束断言 DB 记录 / K8s 资源 / PVC 目录三方一致；E2E 会话用运行级唯一 userId（防 HITL 暂停态复放）；
+LLM 相关超时窗口 ≥300s；子脚本缺前置时 `exit 2`（SKIP），不得以 exit 0 伪装 PASS。

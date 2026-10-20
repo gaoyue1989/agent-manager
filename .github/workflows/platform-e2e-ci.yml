@@ -1,0 +1,298 @@
+name: platform-e2e-ci
+
+# 平台（backend + frontend）真实 K8s E2E 门禁：kind 单节点集群 + 仓库自举清单 +
+# 控制台全功能套件（Agent 创建/管理、模型连接、技能、工具、沙箱）。
+#
+# 当前定位：**非必需检查**（先观察 2-3 个 PR 的稳定性，再由管理员加入 master 分支保护）。
+# 触发：指向 master 的 PR + master push；按目录过滤，不相关变更显示 Skipped。
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: 变更目录检测
+    runs-on: ubuntu-latest
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            e2e:
+              - 'backend/**'
+              - 'frontend/**'
+              - 'manifests/**'
+              - 'e2e/**'
+              - '.github/workflows/platform-e2e-ci.yml'
+
+  platform-e2e:
+    name: E2E 平台（kind + 控制台全功能）
+    needs: changes
+    # fork PR 拿不到 secrets（Docker Hub 限流风险高），先只跑同仓 PR / master push；
+    # 需要覆盖 fork 时去掉第二个条件并接受匿名拉取。
+    if: needs.changes.outputs.e2e == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 释放 runner 磁盘
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - name: 登录 Docker Hub（fork PR 无 secrets，匿名拉取）
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 创建 kind 集群
+        uses: helm/kind-action@v1
+        with:
+          version: v0.27.0
+          cluster_name: agent-manager
+          config: e2e/ci/kind-config.yaml
+          wait: 5m
+
+      - name: 预拉集群基础镜像（规避 Docker Hub 匿名限流）
+        run: |
+          set -uo pipefail
+          for img in nginx:1.27.1-alpine mysql:8.0 redis:7.2-alpine; do
+            if timeout 180 docker pull "$img"; then
+              timeout 180 kind load docker-image "$img" --name agent-manager || true
+            else
+              echo "::warning::预拉 $img 失败，交给集群内拉取"
+            fi
+          done
+
+      - name: 安装 ingress-nginx（kind provider）并暴露 NodePort 30080/30443
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/kind/deploy.yaml
+          kubectl -n ingress-nginx wait --for=condition=ready pod \
+            -l app.kubernetes.io/component=controller --timeout=240s
+          # provider 清单默认 hostPort 80/443；仓库脚本统一用 localhost:30080
+          kubectl -n ingress-nginx patch svc ingress-nginx-controller --type merge -p '{"spec":{"type":"NodePort","ports":[{"name":"http","port":80,"targetPort":"http","nodePort":30080},{"name":"https","port":443,"targetPort":"https","nodePort":30443}]}}'
+
+      - name: 解析业务镜像（优先拉取真实 agent-framework，超时/失败回落 mock）
+        id: agent-image
+        shell: bash
+        env:
+          # 可选仓库变量：固定业务镜像（如 gaoyue1989/agent-framework:agentscope-2.1.0-v20261018）
+          E2E_AGENT_IMAGE: ${{ vars.E2E_AGENT_IMAGE }}
+        run: |
+          set -uo pipefail
+          IMAGE=""
+          RUNTIME="mock"
+
+          if [ -n "${E2E_AGENT_IMAGE:-}" ] && [ "${E2E_AGENT_IMAGE}" != "mock-agent:ci" ]; then
+            echo "尝试仓库变量 E2E_AGENT_IMAGE=${E2E_AGENT_IMAGE}"
+            if timeout 300 docker pull "${E2E_AGENT_IMAGE}"; then
+              IMAGE="${E2E_AGENT_IMAGE}"
+            fi
+          fi
+
+          if [ -z "$IMAGE" ]; then
+            echo "查询 Docker Hub 上 gaoyue1989/agent-framework 的最新 agentscope-* tag ..."
+            TAGS=$(curl -fsS --max-time 30 \
+              "https://hub.docker.com/v2/repositories/gaoyue1989/agent-framework/tags?page_size=100&ordering=last_updated" \
+              2>/dev/null | jq -r '.results[]?.name' || true)
+            for TAG in $TAGS; do
+              case "$TAG" in
+                agentscope-*) ;;
+                *) continue ;;
+              esac
+              echo "尝试 gaoyue1989/agent-framework:$TAG"
+              if timeout 300 docker pull "gaoyue1989/agent-framework:$TAG"; then
+                IMAGE="gaoyue1989/agent-framework:$TAG"
+                break
+              fi
+            done
+          fi
+
+          if [ -n "$IMAGE" ]; then
+            if timeout 300 kind load docker-image "$IMAGE" --name agent-manager; then
+              RUNTIME="real"
+            else
+              echo "::warning::镜像 $IMAGE 导入 kind 超时/失败，回落 mock-agent"
+              IMAGE=""
+            fi
+          fi
+
+          if [ -z "$IMAGE" ]; then
+            IMAGE="mock-agent:ci"
+            echo "::warning::真实 agent-framework 镜像不可用，使用 mock-agent；运行时会话类断言将跳过"
+          else
+            echo "✅ 使用真实 agent-framework 镜像：$IMAGE"
+          fi
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
+          echo "resolved=$IMAGE runtime=$RUNTIME"
+
+      - name: 构建镜像
+        run: |
+          set -euo pipefail
+          docker build --build-arg GOPROXY=https://proxy.golang.org,direct -t platform-backend:ci backend
+          docker build -t platform-frontend:ci frontend
+          docker build -t mock-llm:ci e2e/ci/mock-llm
+          docker build -t mock-sandbox:ci e2e/ci/mock-sandbox
+          docker build -t mock-agent:ci e2e/ci/mock-agent
+
+      - name: 导入本地镜像到 kind
+        run: |
+          set -euo pipefail
+          for img in platform-backend:ci platform-frontend:ci mock-llm:ci mock-sandbox:ci mock-agent:ci; do
+            kind load docker-image "$img" --name agent-manager
+          done
+
+      - name: 渲染 CI 清单（注入业务镜像）
+        run: |
+          sed -i "s|__AGENT_IMAGE__|${{ steps.agent-image.outputs.image }}|g" manifests/ci/patch-backend-env.yaml
+          grep -n "AVAILABLE_IMAGES\|DEFAULT_IMAGE" -A1 manifests/ci/patch-backend-env.yaml
+
+      - name: 部署平台
+        run: |
+          set -euo pipefail
+          kubectl kustomize --load-restrictor=LoadRestrictionsNone manifests/ci | kubectl apply -f -
+          kubectl -n agent-platform wait --for=condition=ready pod -l app=oaf-mysql --timeout=300s
+          kubectl -n agent-platform rollout status deploy/platform-router --timeout=180s
+          kubectl -n agent-platform rollout status deploy/mock-llm --timeout=120s
+          kubectl -n agent-platform rollout status deploy/mock-sandbox --timeout=120s
+          kubectl -n agent-platform rollout status deploy/platform-backend --timeout=300s
+          kubectl -n agent-platform rollout status deploy/platform-frontend --timeout=300s
+          kubectl -n agent-platform get pods -o wide
+
+      - name: 初始化平台默认配置（mock LLM / 集群内 MySQL+Redis）
+        run: |
+          set -euo pipefail
+          BASE=http://localhost:30080/api/v1
+          for i in $(seq 1 30); do
+            if curl -fsS "$BASE/../../healthz" >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS -X PUT "$BASE/platform-config" -H 'Content-Type: application/json' -d '{
+            "values": {
+              "LLM_BASE_URL": "http://mock-llm.agent-platform.svc.cluster.local:8080/v1",
+              "LLM_MODEL_ID": "e2e-mock",
+              "LLM_API_KEY": "e2e-dummy-key",
+              "CHECKPOINT_JDBC_URL": "jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
+              "CHECKPOINT_USERNAME": "oaf",
+              "CHECKPOINT_PASSWORD": "OafPlatform2026",
+              "AGENT_REDIS_URL": "redis://oaf-redis.agent-platform.svc.cluster.local:6379",
+              "OPENSANDBOX_SERVER_URL": "mock-sandbox.agent-platform.svc.cluster.local:8090",
+              "OPENSANDBOX_API_KEY": "e2e-placeholder"
+            }
+          }' >/dev/null
+          echo "平台默认配置已写入"
+
+      - name: 播种 Skill 市场条目（M9 安装成功路径）
+        run: |
+          set -euo pipefail
+          kubectl -n agent-platform exec -i deploy/platform-backend -- \
+            sh -c 'mkdir -p /data/market/builtin/e2e-market-skill && cat > /data/market/builtin/e2e-market-skill/SKILL.md' <<'EOF'
+          ---
+          name: e2e-market-skill
+          description: E2E market install probe
+          ---
+
+          Market skill body.
+          EOF
+          kubectl -n agent-platform exec deploy/oaf-mysql -- \
+            mysql -uoaf -pOafPlatform2026 oaf_platform -e "
+              INSERT INTO skill_market_items
+                (source_id, \`key\`, display_name, description, tags_json, downloads, bundle_dir, enabled)
+              SELECT id, 'e2e-market-skill', 'E2E Market Skill', 'market install probe', '[\"e2e\"]', 0,
+                     'market/builtin/e2e-market-skill', 1
+              FROM skill_market_sources WHERE \`key\`='builtin'
+              ON DUPLICATE KEY UPDATE bundle_dir=VALUES(bundle_dir), enabled=1;"
+          kubectl -n agent-platform exec deploy/platform-backend -- ls -l /data/market/builtin/e2e-market-skill
+
+      - name: 准备 e2e 环境变量文件
+        run: |
+          cat > .env.secrets <<'EOF'
+          LLM_API_KEY=e2e-dummy-key
+          LLM_MODEL=e2e-mock
+          LLM_ENDPOINT=http://mock-llm.agent-platform.svc.cluster.local:8080/v1
+          EOF
+
+      - name: 平台发布主链路 E2E（legacy REST + K8s 对象 + 零残留）
+        env:
+          BASE: http://localhost:30080/api/v1
+          FRONTEND_BASE: http://localhost:30881
+          LLM_API_KEY: e2e-dummy-key
+          LLM_MODEL: e2e-mock
+          LLM_BASE_URL: http://mock-llm.agent-platform.svc.cluster.local:8080/v1
+          E2E_AGENT_RUNTIME: ${{ steps.agent-image.outputs.runtime }}
+        run: bash e2e/platform-e2e.sh
+
+      - name: 控制台全功能 E2E（API 套件）
+        env:
+          BASE: http://localhost:30080/api/v1
+          FRONTEND_BASE: http://localhost:30881
+          LLM_API_KEY: e2e-dummy-key
+          LLM_MODEL: e2e-mock
+          LLM_BASE_URL: http://mock-llm.agent-platform.svc.cluster.local:8080/v1
+          E2E_AGENT_RUNTIME: ${{ steps.agent-image.outputs.runtime }}
+        run: |
+          bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m8 m9 m10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: 控制台全功能 E2E（浏览器 UI）
+        env:
+          BASE: http://localhost:30080/api/v1
+          FRONTEND: http://localhost:30881
+          ADMIN_USER: admin
+          ADMIN_PASS: OafConsole2026
+          E2E_LLM_BASE_URL: http://mock-llm.agent-platform.svc.cluster.local:8080/v1
+          E2E_LLM_API_KEY: e2e-dummy-key
+          E2E_LLM_MODEL: e2e-mock
+          E2E_AGENT_RUNTIME: ${{ steps.agent-image.outputs.runtime }}
+        run: |
+          cd e2e
+          npm ci --no-audit --no-fund
+          node console-ui-e2e.js
+
+      - name: 采集集群状态（失败取证）
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-artifacts
+          kubectl -n agent-platform get all,pvc,cm -o wide > /tmp/e2e-artifacts/k8s-all.txt 2>&1 || true
+          kubectl -n agent-platform describe pods > /tmp/e2e-artifacts/k8s-describe.txt 2>&1 || true
+          kubectl -n agent-platform logs deploy/platform-backend --tail=800 > /tmp/e2e-artifacts/backend.log 2>&1 || true
+          kubectl -n agent-platform logs deploy/platform-frontend --tail=300 > /tmp/e2e-artifacts/frontend.log 2>&1 || true
+          kubectl -n agent-platform logs deploy/mock-llm --tail=300 > /tmp/e2e-artifacts/mock-llm.log 2>&1 || true
+          kubectl -n agent-platform logs deploy/platform-router --tail=300 > /tmp/e2e-artifacts/router.log 2>&1 || true
+
+      - name: 上传失败取证
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-e2e-logs
+          if-no-files-found: ignore
+          path: |
+            /tmp/e2e-artifacts/
+            e2e/ci-artifacts/
+          retention-days: 5

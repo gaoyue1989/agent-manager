@@ -1,0 +1,60 @@
+# CI 专用 mock OpenSandbox Server：沙箱配置类 Agent 在真实 agent-framework 镜像下
+# 启动/首次沙箱调用有可用靶点。仅 CI overlay 引用，生产清单不含此对象。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-sandbox
+  namespace: agent-platform
+  labels:
+    app: mock-sandbox
+    app.kubernetes.io/managed-by: oaf-ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-sandbox
+  template:
+    metadata:
+      labels:
+        app: mock-sandbox
+    spec:
+      containers:
+        - name: mock-sandbox
+          image: mock-sandbox:ci
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8090
+          env:
+            - name: MOCK_SANDBOX_PORT
+              value: "8090"
+            - name: MOCK_SANDBOX_ROOT
+              value: /tmp/sandboxes
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 256Mi
+              cpu: 500m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-sandbox
+  namespace: agent-platform
+  labels:
+    app: mock-sandbox
+    app.kubernetes.io/managed-by: oaf-ci
+spec:
+  selector:
+    app: mock-sandbox
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090

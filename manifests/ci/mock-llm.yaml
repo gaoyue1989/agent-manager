@@ -1,0 +1,55 @@
+# CI 专用 OpenAI 兼容 mock LLM：让模型连接 test/verify、harness 创建与下发链路
+# 在零密钥、零外联的前提下走通。仅 CI overlay 引用，生产清单不含此对象。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm
+  namespace: agent-platform
+  labels:
+    app: mock-llm
+    app.kubernetes.io/managed-by: oaf-ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-llm
+  template:
+    metadata:
+      labels:
+        app: mock-llm
+    spec:
+      containers:
+        - name: mock-llm
+          image: mock-llm:ci
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 10m
+            limits:
+              memory: 128Mi
+              cpu: 200m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm
+  namespace: agent-platform
+  labels:
+    app: mock-llm
+    app.kubernetes.io/managed-by: oaf-ci
+spec:
+  selector:
+    app: mock-llm
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

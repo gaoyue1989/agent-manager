@@ -17,32 +17,54 @@ req POST /admin/workspaces/$WS/members "{\"userId\":$U1,\"role\":\"member\"}" ""
 MT=$(req POST /auth/login "{\"username\":\"m4-member-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
 assert_eq "member 登录" "$([ -n "$MT" ] && echo yes || echo no)" "yes"
 
-# 前置：LLM 连接 + 测试 Agent（无 LLM 时降级：借用 default 空间服务做只读断言）
-LLM_BASE="${LLM_BASE_URL:-}"; LLM_KEY="${LLM_API_KEY:-}"; LLM_MODEL="${LLM_MODEL:-}"
-if [ -z "$LLM_KEY" ] && [ "$KUBE_OK" = "1" ]; then
-  LLM_KEY=$(kubectl -n $KNS get secret oaf-release-agent-env-secret -o jsonpath='{.data.LLM_API_KEY}' 2>/dev/null | base64 -d || true)
-  LLM_BASE=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_BASE_URL}' 2>/dev/null || true)
-  LLM_MODEL=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_MODEL_ID}' 2>/dev/null || true)
+# 前置：LLM 连接 + 测试 Agent（CI 用 mock LLM）
+resolve_llm_env
+if [ -z "$LLM_KEY" ] || [ -z "$LLM_BASE" ]; then
+  skip "LLM 凭据不可得，M4 生命周期链路需 verified 连接"; finish "M4-agent-detail"; exit 2
 fi
-TEST_SVC=""
-if [ -n "$LLM_KEY" ] && [ -n "$LLM_BASE" ]; then
-  MC=$(req POST /console/workspaces/$WS/model-connections \
-    "{\"name\":\"m4-llm-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN" | jqr "['data']['id']")
-  req POST /console/workspaces/$WS/model-connections/$MC/test "" "$TOKEN" >/dev/null
-  TEST_SVC=$(req POST /console/workspaces/$WS/agents \
-    "{\"mode\":\"harness\",\"name\":\"m4lifecycle-$TS\",\"description\":\"M4 lifecycle e2e\",\"modelConnections\":[{\"connectionId\":$MC,\"isDefault\":true}],\"prompt\":\"你是 M4 e2e 助手。\",\"skills\":[],\"subAgents\":[],\"mcpServers\":[],\"replicas\":1}" \
-    "" "$TOKEN" | jqr "['data']['service']['id']")
-  ST=$(wait_status "$TOKEN" "$WS" "$TEST_SVC" 240 running register_failed deploy_failed)
-  assert_eq "测试 Agent running" "$ST" "running"
-fi
+MC=$(req POST /console/workspaces/$WS/model-connections \
+  "{\"name\":\"m4-llm-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN" | jqr "['data']['id']")
+ensure_verified "$TOKEN" "$WS" "$MC" >/dev/null
+CREATE4=$(req POST /console/workspaces/$WS/agents \
+  "{\"mode\":\"harness\",\"name\":\"m4lifecycle-$TS\",\"description\":\"M4 lifecycle e2e\",\"modelConnections\":[{\"connectionId\":$MC,\"isDefault\":true}],\"prompt\":\"你是 M4 e2e 助手。\",\"skills\":[],\"subAgents\":[],\"mcpServers\":[],\"replicas\":1}" \
+  "" "$TOKEN")
+TEST_SVC=$(echo "$CREATE4" | jqr "['data']['service']['id']")
+TEST_PKG=$(echo "$CREATE4" | jqr "['data']['package']['id']")
+TEST_K8S=$(echo "$CREATE4" | jqr "['data']['service']['k8sName']")
+assert_eq "测试 Agent 创建 202" "$([ -n "$TEST_SVC" ] && echo yes || echo no)" "yes"
+ST=$(wait_status "$TOKEN" "$WS" "$TEST_SVC" 240 running register_failed deploy_failed)
+assert_eq "测试 Agent running" "$ST" "running"
 
 # ---- 详情聚合 ----
 DETAIL=$(req GET /console/workspaces/$WS/agents/$TEST_SVC "" "$TOKEN")
 assert_contains "详情含 pods 数组" "$DETAIL" '"pods"'
 assert_contains "详情含 events 时间线" "$DETAIL" '"events"'
 assert_contains "详情含 envSecretKeys 掩码视图" "$DETAIL" '"envSecretKeys"'
+assert_contains "详情含注册版本" "$DETAIL" '"registeredVersion"'
 assert_eq "跨空间访问 404" "$(code GET /console/workspaces/999999/agents/$TEST_SVC "" "$TOKEN")" "404"
 assert_eq "跨空间版本 404" "$(code GET /console/workspaces/999999/agents/$TEST_SVC/versions "" "$TOKEN")" "404"
+
+# ---- 列表过滤（status / keyword）----
+assert_contains "列表 status=running 命中" \
+  "$(req GET "/console/workspaces/$WS/agents?status=running" "" "$TOKEN")" "$TEST_K8S"
+assert_contains "列表 keyword 命中 displayName" \
+  "$(req GET "/console/workspaces/$WS/agents?keyword=m4lifecycle-$TS" "" "$TOKEN")" "m4lifecycle-$TS"
+assert_eq "列表 keyword 无匹配返回空数组" \
+  "$(req GET "/console/workspaces/$WS/agents?keyword=no-such-$TS" "" "$TOKEN" | jqr "['data']")" "[]"
+
+# ---- edit-form 回显（模型连接 / 技能 / 沙箱 / 版本）----
+EDITFORM=$(req GET /console/workspaces/$WS/agents/$TEST_SVC/edit-form "" "$TOKEN")
+assert_contains "edit-form 回显模型连接" "$EDITFORM" "m4-llm-$TS"
+assert_contains "edit-form 含 skills 数组" "$EDITFORM" '"skills":'
+assert_contains "edit-form 含 sandbox" "$EDITFORM" '"sandbox":'
+assert_contains "edit-form 含包版本" "$EDITFORM" '"version":'
+
+# ---- 非成员普通用户：详情/版本 404（不是 403）----
+OUTSIDER=$(seed_user "$TOKEN" "m4-outsider-$TS" "Pass12345!")
+OT=$(req POST /auth/login "{\"username\":\"m4-outsider-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
+assert_eq "非成员详情 404" "$(code GET /console/workspaces/$WS/agents/$TEST_SVC "" "$OT")" "404"
+assert_eq "非成员版本 404" "$(code GET /console/workspaces/$WS/agents/$TEST_SVC/versions "" "$OT")" "404"
+assert_eq "非成员 edit-form 404" "$(code GET /console/workspaces/$WS/agents/$TEST_SVC/edit-form "" "$OT")" "404"
 
 # ---- 生命周期动作状态机闭环 ----
 assert_eq "unpublish → stopped" \
@@ -57,6 +79,13 @@ ST=$(wait_status "$TOKEN" "$WS" "$TEST_SVC" 240 running register_failed deploy_f
 assert_eq "republish 回 running" "$ST" "running"
 assert_eq "register 动作受理" "$(code POST /console/workspaces/$WS/agents/$TEST_SVC/register "" "$TOKEN")" "200"
 
+# ---- 先编辑生成 v1.0.1，制造可升级的历史版本 ----
+FORM4="{\"mode\":\"harness\",\"name\":\"m4lifecycle-$TS\",\"description\":\"M4 lifecycle e2e v2\",\"modelConnections\":[{\"connectionId\":$MC,\"isDefault\":true}],\"prompt\":\"你是 M4 e2e 助手 v2。\",\"skills\":[],\"subAgents\":[],\"mcpServers\":[],\"replicas\":1}"
+assert_eq "编辑生成 v1.0.1" \
+  "$(req PUT /console/workspaces/$WS/agents/$TEST_SVC "$FORM4" "" "$TOKEN" | jqr "['data']['package']['version']")" "1.0.1"
+ST=$(wait_status "$TOKEN" "$WS" "$TEST_SVC" 240 running register_failed deploy_failed)
+assert_eq "编辑后回 running" "$ST" "running"
+
 # ---- 版本 Tab ----
 VERSIONS=$(req GET /console/workspaces/$WS/agents/$TEST_SVC/versions "" "$TOKEN")
 assert_contains "版本列表含 current 标注" "$VERSIONS" '"current":true'
@@ -64,7 +93,7 @@ assert_contains "版本列表含 sourcePackageId（溯源）" "$VERSIONS" '"sour
 CUR=$(echo "$VERSIONS" | python3 -c "import sys,json;print([p['id'] for p in json.load(sys.stdin)['data'] if p['current']][0])")
 OTHER=$(echo "$VERSIONS" | python3 -c "import sys,json;print([p['id'] for p in json.load(sys.stdin)['data'] if not p['current']][0])" 2>/dev/null || true)
 if [ -n "$OTHER" ] && [ "$OTHER" != "None" ]; then
-  assert_eq "升级到历史版本 202" "$(code POST /console/workspaces/$WS/agents/$TEST_SVC/versions/$OTHER/upgrade "" "$TOKEN")" "202"
+  assert_eq "升级到历史版本 200" "$(code POST /console/workspaces/$WS/agents/$TEST_SVC/versions/$OTHER/upgrade "" "$TOKEN")" "200"
   wait_status "$TOKEN" "$WS" "$TEST_SVC" 240 running register_failed deploy_failed >/dev/null
   CUR2=$(req GET /console/workspaces/$WS/agents/$TEST_SVC/versions "" "$TOKEN" | python3 -c "import sys,json;print([p['id'] for p in json.load(sys.stdin)['data'] if p['current']][0])")
   assert_eq "升级后 current 切换到历史包" "$CUR2" "$OTHER"
@@ -80,7 +109,16 @@ assert_eq "member register 403" "$(code POST /console/workspaces/$WS/agents/$TES
 assert_eq "member 版本升级 403" "$(code POST /console/workspaces/$WS/agents/$TEST_SVC/versions/$CUR/upgrade "" "$MT")" "403"
 assert_eq "member DELETE 403" "$(code DELETE /console/workspaces/$WS/agents/$TEST_SVC "" "$MT")" "403"
 
-# ---- 清理 ----
-code DELETE /console/workspaces/$WS/agents/$TEST_SVC "" "$TOKEN" >/dev/null
+# ---- 删除副作用：Agent 记录消失、包保留、引用计数回落 ----
+assert_eq "删除 Agent 200" "$(code DELETE /console/workspaces/$WS/agents/$TEST_SVC "" "$TOKEN")" "200"
+assert_eq "删除后详情 404" "$(code GET /console/workspaces/$WS/agents/$TEST_SVC "" "$TOKEN")" "404"
+assert_eq "删除后包保留 200" "$(legacy_code GET /packages/$TEST_PKG)" "200"
+assert_eq "删除后包 refCount=0" "$(legacy_req GET /packages/$TEST_PKG | jqr "['data']['package']['refCount']")" "0"
+if [ "$KUBE_OK" = "1" ]; then
+  kubectl -n $KNS get deploy $TEST_K8S >/dev/null 2>&1 && bad "删除后 Deployment 残留" || ok "删除后 Deployment 清理"
+  kubectl -n $KNS get cm $TEST_K8S-env >/dev/null 2>&1 && bad "删除后 ConfigMap 残留" || ok "删除后 ConfigMap 清理"
+else
+  skip "kubectl 不可用，跳过删除后 K8s 对象清理断言"
+fi
 
 finish "M4-agent-detail"

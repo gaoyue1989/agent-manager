@@ -11,15 +11,10 @@ TOKEN=$(admin_login)
 say "-- M3 创建/编辑 Agent"
 
 WS=$(seed_ws "$TOKEN" "m3-ws-$TS")
-# 前置：verified 模型连接（真实 LLM；环境变量提供或从 kind 集群 release-agent Secret 读取）
-LLM_BASE="${LLM_BASE_URL:-}"; LLM_KEY="${LLM_API_KEY:-}"; LLM_MODEL="${LLM_MODEL:-}"
-if [ -z "$LLM_KEY" ] && [ "$KUBE_OK" = "1" ]; then
-  LLM_KEY=$(kubectl -n $KNS get secret oaf-release-agent-env-secret -o jsonpath='{.data.LLM_API_KEY}' 2>/dev/null | base64 -d || true)
-  LLM_BASE=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_BASE_URL}' 2>/dev/null || true)
-  LLM_MODEL=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_MODEL_ID}' 2>/dev/null || true)
-fi
+# 前置：verified 模型连接（CI 用 mock LLM；本地可显式 env 或回落 release-agent）
+resolve_llm_env
 if [ -z "$LLM_KEY" ] || [ -z "$LLM_BASE" ]; then
-  skip "LLM 凭据不可得，M3 主链路需真实模型连接——置 LLM_API_KEY/LLM_BASE_URL/LLM_MODEL 后重跑"; finish "M3-agent-create"; exit 0
+  skip "LLM 凭据不可得，M3 主链路需真实模型连接——置 LLM_API_KEY/LLM_BASE_URL/LLM_MODEL 后重跑"; finish "M3-agent-create"; exit 2
 fi
 CONN=$(req POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"llm-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN")
@@ -48,6 +43,18 @@ LONGNAME=$(echo "$FORM_TPL" | sed "s/CID/$CONN_ID/" | python3 -c "import sys,jso
 assert_eq "200 字符名称 400（#149，原 502 Data too long）" "$(code POST /console/workspaces/$WS/agents "$LONGNAME" "" "$TOKEN")" "400"
 SLUG63=$(echo "$FORM_TPL" | sed "s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['name']='b'*63;print(json.dumps(d))")
 assert_eq "slug 63 字符名称 400（#149，oaf- 前缀预算 59）" "$(code POST /console/workspaces/$WS/agents "$SLUG63" "" "$TOKEN")" "400"
+TWODEF=$(echo "$FORM_TPL" | sed "s/NAME/name-$TS/; s/CID/$CONN_ID/" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d['modelConnections']=[{'connectionId':$CONN_ID,'isDefault':True},{'connectionId':$CONN_ID,'isDefault':True}]
+print(json.dumps(d))")
+assert_eq "两个默认模型连接 400" "$(code POST /console/workspaces/$WS/agents "$TWODEF" "" "$TOKEN")" "400"
+BADMCP=$(echo "$FORM_TPL" | sed "s/NAME/name-$TS/; s/CID/$CONN_ID/" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d['mcpServers']=[{'connectorId':999999}]
+print(json.dumps(d))")
+assert_eq "不存在的 MCP 连接器 400" "$(code POST /console/workspaces/$WS/agents "$BADMCP" "" "$TOKEN")" "400"
 
 # ---- preview-name：确定性 + 重名预检（与创建同名——agentKey 是名字的派生）----
 NAME="部署验证-$TS"
@@ -61,12 +68,21 @@ assert_contains "slug = agentmanager/agentKey" "$(echo "$P1" | jqr "['data']['sl
 # ---- 创建 → running ----
 FORM=$(echo "$FORM_TPL" | sed "s/NAME/$NAME/; s/CID/$CONN_ID/" | python3 -c "import sys,json;d=json.load(sys.stdin);d['spec']='';print(json.dumps(d))")
 M3_SVC=""
+M3_SVC2=""
+M3_SVC3=""
+M3_SVC4=""
+M3_LEGACY=""
 M3_IPKG=""
+M3_TPLPKG=""
 cleanup_m3() {
   [ -n "$M3_SVC" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC "" "$TOKEN" >/dev/null 2>&1
   [ -n "$M3_SVC2" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC2 "" "$TOKEN" >/dev/null 2>&1
+  [ -n "$M3_SVC3" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC3 "" "$TOKEN" >/dev/null 2>&1
+  [ -n "$M3_SVC4" ] && code DELETE /console/workspaces/$M3_WS/agents/$M3_SVC4 "" "$TOKEN" >/dev/null 2>&1
+  [ -n "$M3_LEGACY" ] && legacy_code DELETE /services/$M3_LEGACY >/dev/null 2>&1
   # 导入源包清理（#172 唯一索引：残留会让后续轮次上传撞 slug+version 409）
-  [ -n "$M3_IPKG" ] && code DELETE /packages/$M3_IPKG "" "$TOKEN" >/dev/null 2>&1
+  [ -n "$M3_IPKG" ] && legacy_code DELETE /packages/$M3_IPKG >/dev/null 2>&1
+  [ -n "$M3_TPLPKG" ] && legacy_code DELETE /packages/$M3_TPLPKG >/dev/null 2>&1
 }
 trap cleanup_m3 EXIT
 M3_WS="$WS"
@@ -117,8 +133,59 @@ else
   skip "kubectl 不可用，跳过 env 分级/spec 档断言"
 fi
 
-# ---- 重名 409（空间内 slug 唯一）----
+# ---- 重名 409（空间内 slug 唯一）+ preview 冲突预检 ----
 assert_eq "同 slug 再建 409" "$(code POST /console/workspaces/$WS/agents "$FORM" "" "$TOKEN")" "409"
+assert_eq "preview-name 对已存在 Agent 返回 conflict=true" \
+  "$(req GET "/console/workspaces/$WS/agents/preview-name?name=$NAME" "" "$TOKEN" | jqr "['data']['conflict']")" "True"
+
+# ---- 扩展创建：子 Agent / 远程凭证 / 非公开入口 / 多副本 ----
+EXT=$(echo "$FORM_TPL" | sed "s/CID/$CONN_ID/" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+d['name']='m3ext-$TS'
+d['spec']='small'
+d['subAgents']=[
+  {'agent':'remote','role':'peer','delegations':[],'endpoint':'http://remote.invalid:8100'},
+]
+d['remoteAuth']={'http://remote.invalid:8100':'Bearer remote-secret'}
+d['publicEndpoint']=False
+d['replicas']=2
+print(json.dumps(d))")
+EXTC=$(req POST /console/workspaces/$WS/agents "$EXT" "" "$TOKEN")
+EXT_SVC=$(echo "$EXTC" | jqr "['data']['service']['id']")
+M3_SVC3="$EXT_SVC"
+EXT_PKG=$(echo "$EXTC" | jqr "['data']['package']['id']")
+EXT_K8S=$(echo "$EXTC" | jqr "['data']['service']['k8sName']")
+assert_eq "扩展创建 202" "$([ -n "$EXT_SVC" ] && [ "$EXT_SVC" != "None" ] && echo yes || echo no)" "yes"
+EXT_ST=$(wait_status "$TOKEN" "$WS" "$EXT_SVC" 180 running register_failed deploy_failed)
+assert_eq "扩展 Agent running" "$EXT_ST" "running"
+EXTMD=$(curl -s "$BASE/packages/$EXT_PKG/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
+import zipfile,sys
+print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
+assert_contains "子 Agent 契约：role 声明" "$EXTMD" "role: peer"
+assert_contains "远程子 Agent endpoint 声明" "$EXTMD" "endpoint: http://remote.invalid:8100"
+assert_not_contains "远程认证值不落包" "$EXTMD" "remote-secret"
+assert_eq "publicEndpoint=false → endpoint 为空" \
+  "$(req GET /console/workspaces/$WS/agents/$EXT_SVC "" "$TOKEN" | jqr "['data'].get('endpoint') or ''")" ""
+if [ "$KUBE_OK" = "1" ]; then
+  assert_eq "replicas=2 直译 Deployment" \
+    "$(kubectl -n $KNS get deploy $EXT_K8S -o jsonpath='{.spec.replicas}' 2>/dev/null)" "2"
+  assert_eq "spec=small 直译 requests.cpu" \
+    "$(kubectl -n $KNS get deploy $EXT_K8S -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}' 2>/dev/null)" "1"
+  assert_eq "spec=small 直译 requests.memory" \
+    "$(kubectl -n $KNS get deploy $EXT_K8S -o jsonpath='{.spec.template.spec.containers[0].resources.requests.memory}' 2>/dev/null)" "2Gi"
+  EXT_SEC=$(kubectl -n $KNS get secret $EXT_K8S-env-secret -o jsonpath='{.data}' 2>/dev/null)
+  # 远程认证头只在存在集成关系（M7）时注入；本套件不造协议服务，缺失时显式 skip
+  if echo "$EXT_SEC" | grep -q "AGENT_REMOTE_HEADERS_JSON"; then
+    ok "远程认证头进服务 Secret"
+  else
+    skip "无集成关系（M7），远程认证头未注入——凭证不落包已断言"
+  fi
+  k8s_res() { kubectl -n $KNS get "$@" >/dev/null 2>&1; }
+  k8s_res ingress $EXT_K8S && bad "publicEndpoint=false 仍创建 Ingress" || ok "publicEndpoint=false 不创建 Ingress"
+else
+  skip "kubectl 不可用，跳过 replicas/Secret/Ingress 断言"
+fi
 
 # ---- 导入模式（#161）：无 env 合法包 → 导入 → 平台默认 env 合并 + Pod Ready ----
 # 曾不经 buildPublishEnv：service env 只有隔离键，Pod 用镜像内置账号连库 Access denied
@@ -163,6 +230,59 @@ else
   skip "kubectl 不可用或未 running，跳过导入 env 分级断言"
 fi
 
+# ---- 模板导入：公共包标记 isTemplate → templates 列表 → 从模板创建 ----
+# 模板列表只含公共包（workspaceId=0），因此这里走 legacy 上传（控制台上传是空间私有包）。
+AUTH_ARGS=()
+[ -n "${AUTH_TOKEN:-}" ] && AUTH_ARGS=(-H "Authorization: Bearer $AUTH_TOKEN")
+python3 - <<PYEOF
+import zipfile
+md = """---
+name: Tpl Probe
+vendorKey: acme
+agentKey: tpl-probe-$TS
+version: 1.0.0
+slug: acme/tpl-probe-$TS
+description: template import probe
+author: "@e2e"
+license: MIT
+---
+模板探针。"""
+with zipfile.ZipFile("/tmp/m3-tpl-$TS.zip", "w") as z:
+    z.writestr("AGENTS.md", md)
+PYEOF
+TPLUP=$(curl -s -X POST "$BASE/packages" "${AUTH_ARGS[@]}" -F "file=@/tmp/m3-tpl-$TS.zip")
+M3_TPLPKG=$(echo "$TPLUP" | jqr "['data']['id']")
+assert_eq "公共模板包上传" "$([ -n "$M3_TPLPKG" ] && [ "$M3_TPLPKG" != "None" ] && echo yes || echo no)" "yes"
+TPL_HTTP=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/packages/$M3_TPLPKG/template" \
+  "${AUTH_ARGS[@]}" -H 'Content-Type: application/json' -d '{"isTemplate":true}')
+assert_eq "包标记为模板 200" "$TPL_HTTP" "200"
+assert_contains "模板列表含该包" \
+  "$(req GET /console/workspaces/$WS/templates "" "$TOKEN")" "tpl-probe-$TS"
+TPLIMPORT=$(req POST /console/workspaces/$WS/agents \
+  "{\"mode\":\"import\",\"name\":\"tpl-import-$TS\",\"importPackageId\":$M3_TPLPKG,\"modelConnections\":[{\"connectionId\":$CONN_ID,\"isDefault\":true}],\"replicas\":1}" "" "$TOKEN")
+M3_SVC4=$(echo "$TPLIMPORT" | jqr "['data']['service']['id']")
+assert_eq "从模板导入 202" "$([ -n "$M3_SVC4" ] && [ "$M3_SVC4" != "None" ] && echo yes || echo no)" "yes"
+
+# ---- 纳管模式（adopt）：legacy 存量服务 → 绑定到当前空间 ----
+LEGACY=$(curl -s -X POST "$BASE/services" "${AUTH_ARGS[@]}" -H 'Content-Type: application/json' -d "{
+  \"packageId\": $IPKG,
+  \"name\": \"m3-adopt-$TS\",
+  \"env\": {
+    \"CHECKPOINT_JDBC_URL\": \"jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC\",
+    \"CHECKPOINT_USERNAME\": \"oaf\",
+    \"CHECKPOINT_PASSWORD\": \"OafPlatform2026\",
+    \"AGENT_REDIS_URL\": \"redis://oaf-redis.agent-platform.svc.cluster.local:6379\"
+  }
+}")
+M3_LEGACY=$(echo "$LEGACY" | jqr "['data']['id']")
+LEGACY_K8S=$(echo "$LEGACY" | jqr "['data']['k8sName']")
+assert_eq "legacy 存量服务创建" "$([ -n "$M3_LEGACY" ] && [ "$M3_LEGACY" != "None" ] && echo yes || echo no)" "yes"
+ADOPT=$(req POST /console/workspaces/$WS/agents "{\"mode\":\"adopt\",\"adoptServiceId\":$M3_LEGACY}" "" "$TOKEN")
+ADOPT_ID=$(echo "$ADOPT" | jqr "['data']['service']['id']")
+assert_eq "纳管存量服务 200" "$([ -n "$ADOPT_ID" ] && [ "$ADOPT_ID" != "None" ] && echo yes || echo no)" "yes"
+assert_contains "纳管后出现在空间列表" \
+  "$(req GET "/console/workspaces/$WS/agents?keyword=$LEGACY_K8S" "" "$TOKEN")" "$LEGACY_K8S"
+
 # ---- 编辑链路：copy-on-write v1.0.1 + republish + 提示词热生效 ----
 EDIT=$(echo "$FORM" | python3 -c "import sys,json;d=json.load(sys.stdin);d['name']='部署验证-$TS';d['prompt']='你是 M3 e2e 验证助手。被问候时回答：我是 m3e2e-agent v2 版本。';print(json.dumps(d))")
 EDITED=$(req PUT /console/workspaces/$WS/agents/$SVC "$EDIT" "" "$TOKEN")
@@ -185,17 +305,25 @@ if [ "$CURFLAG" != "True" ]; then
   say "  DBG VERSIONS[:300]=${VERSIONS:0:300}"
 fi
 assert_eq "当前版本标注（v1.0.1 且仅它 current）" "$CURFLAG" "True"
-# SSE 对话断言新提示词（经 frontend proxy 身份注入）
-E2EUID=$(echo "$TOKEN" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")
-FE="${FRONTEND_BASE:-http://localhost:8911}"
-REPLY=$(curl -s -N -m 60 "$FE/agent/$(req GET /console/workspaces/$WS/agents/$SVC "" "$TOKEN" | jqr "['data']['shortName']")/threads/chat" \
-  -H "Cookie: oaf_session=x" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
-  -d "{\"message\":\"你好\",\"userId\":\"u-$E2EUID\",\"sessionId\":\"m3-edit-$TS\"}" 2>/dev/null)
-if [ -n "${DEBUG:-}" ]; then say "DBG REPLY[:240]=${REPLY:0:240}"; fi
-if echo "$REPLY" | grep -q "TEXT_BLOCK_DELTA"; then
-  assert_contains "新提示词热生效（回答含 v2）" "$REPLY" "v2"
+EDITFORM=$(req GET /console/workspaces/$WS/agents/$SVC/edit-form "" "$TOKEN")
+assert_contains "edit-form 回显新提示词" "$EDITFORM" "m3e2e-agent v2 版本"
+assert_contains "edit-form 含 modelConnections" "$EDITFORM" '"modelConnections":'
+assert_contains "edit-form 含 sandbox 字段" "$EDITFORM" '"sandbox":'
+# SSE 对话断言新提示词（经 frontend proxy 身份注入；mock 兜底镜像无会话面）
+if runtime_is_real; then
+  E2EUID=$(echo "$TOKEN" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")
+  FE="${FRONTEND_BASE:-http://localhost:8911}"
+  REPLY=$(curl -s -N -m 60 "$FE/agent/$(req GET /console/workspaces/$WS/agents/$SVC "" "$TOKEN" | jqr "['data']['shortName']")/threads/chat" \
+    -H "Cookie: oaf_session=x" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+    -d "{\"message\":\"你好\",\"userId\":\"u-$E2EUID\",\"sessionId\":\"m3-edit-$TS\"}" 2>/dev/null)
+  if [ -n "${DEBUG:-}" ]; then say "DBG REPLY[:240]=${REPLY:0:240}"; fi
+  if echo "$REPLY" | grep -q "TEXT_BLOCK_DELTA"; then
+    assert_contains "新提示词热生效（回答含 v2）" "$REPLY" "v2"
+  else
+    skip "SSE 对话（frontend $FE 不可达或 LLM 流式失败）"
+  fi
 else
-  skip "SSE 对话（frontend $FE 不可达或 LLM 流式失败）"
+  skip "E2E_AGENT_RUNTIME=mock：跳过会话级提示词热生效断言"
 fi
 
 # ---- member 403 ----
@@ -204,48 +332,6 @@ req POST /admin/workspaces/$WS/members "{\"userId\":$U1,\"role\":\"member\"}" ""
 MT=$(req POST /auth/login "{\"username\":\"m3-member-$TS\",\"password\":\"Pass12345!\"}" | jqr "['data']['token']")
 assert_eq "member PUT 403" "$(code PUT /console/workspaces/$WS/agents/$SVC "$EDIT" "" "$MT")" "403"
 assert_eq "member DELETE 403" "$(code DELETE /console/workspaces/$WS/agents/$SVC "" "$MT")" "403"
-
-# ---- 沙箱配置（demo §5）：创建带 sandbox → 包声明 + SANDBOX_* env → 总览三层 → 编辑回显 ----
-SBXON=$(echo "$FORM_TPL" | sed "s/NAME/sbx-on-$TS/; s/CID/$CONN_ID/" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-d['spec']=''
-d['sandbox']={'enabled':True,'image':'opensandbox/code-interpreter:v1.1.0','timeoutMinutes':90,'memoryMb':2048,'cpuCount':2}
-print(json.dumps(d))")
-SBXC=$(req POST /console/workspaces/$WS/agents "$SBXON" "" "$TOKEN")
-SBXSVC=$(echo "$SBXC" | jqr "['data']['service']['id']")
-SBXPKG=$(echo "$SBXC" | jqr "['data']['package']['id']")
-cleanup_m3_add() { [ -n "$SBXSVC" ] && code DELETE /console/workspaces/$WS/agents/$SBXSVC "" "$TOKEN" >/dev/null 2>&1; }
-trap 'cleanup_m3; cleanup_m3_add' EXIT
-assert_eq "沙箱创建 202" "$([ -n "$SBXSVC" ] && [ "$SBXSVC" != "None" ] && echo yes || echo no)" "yes"
-SBXMD=$(curl -s "$BASE/packages/$SBXPKG/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
-import zipfile,sys
-print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
-assert_contains "沙箱包声明 config.sandbox.enabled" "$SBXMD" "enabled: true"
-SBXENV=$(req GET /console/workspaces/$WS/agents/$SBXSVC "" "$TOKEN")
-echo "$SBXENV" | grep -q 'SANDBOX_IMAGE' && SBXIMG=found || SBXIMG=missing
-assert_contains "SANDBOX_* 资源 env 注入" "$SBXIMG" "found"
-echo "$SBXENV" | grep -q 'SANDBOX_ENABLED' && SBXSW=injected || SBXSW=absent
-assert_eq "SANDBOX_ENABLED 不经 env 注入（包声明承载）" "$SBXSW" "absent"
-SBXROW=$(req GET "/console/workspaces/$WS/sandbox?keyword=sbx-on-$TS" "" "$TOKEN")
-assert_contains "总览：生效来源=package" "$SBXROW" '"source":"package"'
-assert_contains "总览：资源规格回显" "$SBXROW" '"memoryMb":2048'
-SBXEDIT=$(echo "$SBXON" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-d['name']='sbx-on-$TS'
-d['sandbox']={'enabled':False,'image':'','timeoutMinutes':0,'memoryMb':0,'cpuCount':0}
-print(json.dumps(d))")
-SBXE=$(req PUT /console/workspaces/$WS/agents/$SBXSVC "$SBXEDIT" "" "$TOKEN")
-assert_contains "编辑显式关 → 新版本包声明 false" "$(echo "$SBXE" | jqr "['data']['package']['version']")" "1.0.1"
-SBXPKG2=$(echo "$SBXE" | jqr "['data']['package']['id']")
-SBXMD2=$(curl -s "$BASE/packages/$SBXPKG2/download" -H "Authorization: Bearer $TOKEN" | python3 -c "
-import zipfile,sys
-print(zipfile.ZipFile(__import__('io').BytesIO(sys.stdin.buffer.read())).read('AGENTS.md').decode())")
-assert_contains "显式关落包（copy-on-write 不沿用旧 true）" "$SBXMD2" "enabled: false"
-SBXEF=$(req GET "/console/workspaces/$WS/sandbox?keyword=sbx-on-$TS" "" "$TOKEN")
-assert_contains "总览刷新：包声明 false 生效" "$SBXEF" '"enabled":false'
-code DELETE /console/workspaces/$WS/agents/$SBXSVC "" "$TOKEN" >/dev/null 2>&1
 
 # ---- 清理（顺带覆盖 DELETE）----
 assert_eq "删除 Agent 200" "$(code DELETE /console/workspaces/$WS/agents/$SVC "" "$TOKEN")" "200"

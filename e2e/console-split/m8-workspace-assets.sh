@@ -136,12 +136,9 @@ m={x['name']:x for x in d}
 iss=(m.get('My Skill!') or {}).get('issues') or []
 print(';'.join(iss))")
   assert_contains "非法名称标注 issues" "$BADNAME" "invalid characters"
-  code DELETE /packages/$SPKG "" "$TOKEN" >/dev/null 2>&1
+  legacy_code DELETE /packages/$SPKG >/dev/null 2>&1
 else
   skip "技能探针包上传失败，跳过 #163/#164 断言"
 fi
-
-# ---- 记忆空间数据真实性（threads 按 uid 过滤；无会话=空数组不造假）----
-assert_contains "成员管理页脚权限口径（member 只读）已在 M1/M4 覆盖" "ok" "ok"
 
 finish "M8-workspace-assets"
