@@ -61,11 +61,16 @@ if [ -n "$SVC_ID" ] && [ "$SVC_ID" != "None" ]; then
   assert_eq "bind default→业务空间 200" "$(code POST /admin/workspaces/$WS/bind "{\"serviceId\":$SVC_ID}" "" "$TOKEN")" "200"
   assert_eq "跨空间 bind 409" "$(code POST /admin/workspaces/$DEF_WS/bind "{\"serviceId\":$SVC_ID}" "" "$TOKEN" >/dev/null; code POST /admin/workspaces/$(seed_ws "$TOKEN" "m1-ws2-$TS")/bind "{\"serviceId\":$SVC_ID}" "" "$TOKEN")" "409"
   req POST /admin/workspaces/$DEF_WS/bind "{\"serviceId\":$SVC_ID}" "" "$TOKEN" >/dev/null # 还原
+  assert_contains "审计含 workspace.bind" "$(req GET "/admin/audit-logs?page=1&size=100" "" "$TOKEN")" "workspace.bind"
 else
-  skip "无存量服务，跳过 bind 三态"
+  skip "无存量服务，跳过 bind 三态（含 workspace.bind 审计）"
 fi
 
 # ---- 删除保护 / 审计 ----
+# 删除保护语义（governance.go AdminDeleteWorkspace）：有 Agent 或成员 >1 才拒绝；
+# 仅剩 owner 时允许级联删除（#157 死锁修复）。因此先加一个普通成员造「非空」。
+U_DEL=$(seed_user "$TOKEN" "m1-del-$TS" "Pass12345!")
+req POST /admin/workspaces/$WS/members "{\"userId\":$U_DEL,\"role\":\"member\"}" "" "$TOKEN" >/dev/null
 assert_eq "非空空间删除 409" "$(code DELETE /admin/workspaces/$WS "" "$TOKEN")" "409"
 EMPTY_WS=$(seed_ws "$TOKEN" "m1-empty-$TS")
 assert_eq "空空间删除 200" "$(code DELETE /admin/workspaces/$EMPTY_WS "" "$TOKEN")" "200"
@@ -73,7 +78,6 @@ AUDIT=$(req GET "/admin/audit-logs?page=1&size=100" "" "$TOKEN")
 assert_contains "审计含 workspace.create" "$AUDIT" "workspace.create"
 assert_contains "审计含 user.create" "$AUDIT" "user.create"
 assert_contains "审计含 member.update" "$AUDIT" "member.update"
-assert_contains "审计含 workspace.bind" "$AUDIT" "workspace.bind"
 
 # ---- owner 转移与仅剩 owner 删除（issue #157：转移未实现 + 删除死锁）----
 U4=$(seed_user "$TOKEN" "m1-newowner-$TS" "Pass12345!")

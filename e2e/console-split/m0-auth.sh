@@ -40,7 +40,7 @@ else
   assert_eq "legacy services 匿名可达（环境未配 AUTH_TOKEN = 现状行为）" "$(code GET /services)" "200"
   assert_eq "admin 面 匿名 401" "$(code GET /admin/users)" "401"
 fi
-assert_eq "admin 面普通用户 403" "$(code GET /admin/users "" "$(req POST /auth/login "{\"username\":\"u-$TS\",\"password\":\"Pp123456\"}" | jqr "['data']['token']" || true)")" "401"
+assert_eq "未建号用户登录失败 → admin 面 401" "$(code GET /admin/users "" "$(req POST /auth/login "{\"username\":\"u-$TS\",\"password\":\"Pp123456\"}" | jqr "['data']['token']" || true)")" "401"
 # （上面普通用户未建号 → 401 即登录拦截；建号后 403 的断言在 M1）
 
 # 5) introspect：JWT 通道 200 + X-User-Id；无凭据 401；坏 token 401

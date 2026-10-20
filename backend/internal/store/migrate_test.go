@@ -259,3 +259,18 @@ func TestDedupPackageVersions(t *testing.T) {
 		t.Fatalf("unique index should apply after dedup: %v", err)
 	}
 }
+
+// TestDedupPackageVersionsFreshDB 全新库（表尚未创建）不得报错：
+// CI / 新环境首次启动时 dedup 先于 AutoMigrate 执行，必须跳过而非 SQL 报错。
+func TestDedupPackageVersionsFreshDB(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dedupPackageVersions(db); err != nil {
+		t.Fatalf("fresh db dedup should be a no-op: %v", err)
+	}
+	if err := db.AutoMigrate(&OafPackage{}); err != nil {
+		t.Fatalf("auto migrate after fresh dedup: %v", err)
+	}
+}

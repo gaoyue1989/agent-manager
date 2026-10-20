@@ -95,6 +95,11 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 // 后缀让位——历史黑盒测试产生的重复节点按 id 先后可区分。
 // 幂等：正常库无重复行，二次启动零写入。仅写平台自有表。
 func dedupPackageVersions(db *gorm.DB) error {
+	// 全新库（CI / 新环境）尚未建表：直接跳过，交给随后的 AutoMigrate 建表。
+	// 存量库仍需在 AutoMigrate 前归一重复行，否则唯一索引创建失败启动即挂。
+	if !db.Migrator().HasTable(&OafPackage{}) {
+		return nil
+	}
 	type dupRow struct {
 		ID   uint
 		Slug string

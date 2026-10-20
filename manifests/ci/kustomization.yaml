@@ -1,0 +1,31 @@
+# CI（kind）覆盖层：在仓库自举清单之上替换本地构建镜像、注入业务镜像白名单与
+# mock LLM / Service 别名。仅供 GitHub Actions 平台 E2E 使用，不影响生产部署。
+#
+# 渲染命令（overlay 引用上级目录，需放开 kustomize 加载限制）：
+#   kubectl kustomize --load-restrictor=LoadRestrictionsNone manifests/ci | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agent-platform
+resources:
+  - ../platform.yaml
+  - ../platform-ingress.yaml
+  - ../platform-router.yaml
+  - ../frontend.yaml
+  - alias-services.yaml
+  - mock-llm.yaml
+  - mock-sandbox.yaml
+images:
+  - name: platform-backend
+    newTag: ci
+  - name: 172.20.0.1:5001/platform-frontend
+    newName: platform-frontend
+    newTag: ci
+patches:
+  - path: patch-backend-env.yaml
+    target:
+      kind: Deployment
+      name: platform-backend
+  - path: patch-frontend.yaml
+    target:
+      kind: Deployment
+      name: platform-frontend

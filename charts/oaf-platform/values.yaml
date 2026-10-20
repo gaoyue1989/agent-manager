@@ -35,6 +35,9 @@ routing:
   #   off     不鉴权（历史行为，默认）；report 只记日志放行（灰度观察）；enforce fail-closed
   # 转档 = 改本值 + helm upgrade（router Pod 滚动重启；与裸清单 set env + rollout 等价）
   authMode: "off"
+  # 动态 upstream（/agent/{short} → oaf-{short}-svc）的 DNS resolver；
+  # 默认 kube-dns ClusterIP（kind/常见集群 10.96.0.10），非默认 Service CIDR 时覆盖
+  dnsResolver: "10.96.0.10"
 
 # ---------- 对外暴露（仅 Ingress；不提供 NodePort，已决议） ----------
 ingress:

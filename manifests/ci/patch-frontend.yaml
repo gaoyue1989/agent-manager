@@ -1,0 +1,12 @@
+# 前端镜像由 kustomize images 替换为本地 platform-frontend:ci，必须同时改拉取策略，
+# 否则 Always 会尝试访问清单里的 172.20.0.1:5001。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-frontend
+spec:
+  template:
+    spec:
+      containers:
+        - name: frontend
+          imagePullPolicy: IfNotPresent

@@ -11,14 +11,10 @@ TOKEN=$(admin_login)
 say "-- M5 模型连接"
 
 WS=$(seed_ws "$TOKEN" "m5-ws-$TS")
-LLM_BASE="${LLM_BASE_URL:-}"; LLM_KEY="${LLM_API_KEY:-}"; LLM_MODEL="${LLM_MODEL:-}"
-if [ -z "$LLM_KEY" ] && [ "$KUBE_OK" = "1" ]; then
-  LLM_KEY=$(kubectl -n $KNS get secret oaf-release-agent-env-secret -o jsonpath='{.data.LLM_API_KEY}' 2>/dev/null | base64 -d || true)
-  LLM_BASE=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_BASE_URL}' 2>/dev/null || true)
-  LLM_MODEL=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_MODEL_ID}' 2>/dev/null || true)
-fi
+WS2=$(seed_ws "$TOKEN" "m5-ws2-$TS")
+resolve_llm_env
 if [ -z "$LLM_KEY" ] || [ -z "$LLM_BASE" ]; then
-  say "  ⏭️ LLM 凭据不可得——跳过（置 LLM_API_KEY/LLM_BASE_URL/LLM_MODEL 后重跑）"; finish "M5-model-connection"; exit 0
+  skip "LLM 凭据不可得——跳过（置 LLM_API_KEY/LLM_BASE_URL/LLM_MODEL 后重跑）"; finish "M5-model-connection"; exit 2
 fi
 
 # ---- CRUD / 掩码 / 唯一性 ----
@@ -41,14 +37,16 @@ assert_eq "https:// 无主机同样 400（#156）" "$(code POST /console/workspa
   "{\"name\":\"hostless2-$TS\",\"modelId\":\"m\",\"baseUrl\":\"https://\"}" "" "$TOKEN")" "400"
 assert_eq "超长连接名 400（#149，原 500）" "$(code POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"$(printf 'x%.0s' $(seq 200))-$TS\",\"modelId\":\"m\",\"baseUrl\":\"http://x/v1\"}" "" "$TOKEN")" "400"
-assert_eq "跨空间隔离（他空间列表不含）" "$(req GET /console/workspaces/$(seed_ws "$TOKEN" "m5-ws2-$TS")/model-connections "" "$TOKEN" | grep -c "conn-a-$TS")" "0"
+assert_eq "跨空间隔离（他空间列表不含）" "$(req GET /console/workspaces/$WS2/model-connections "" "$TOKEN" | grep -c "conn-a-$TS")" "0"
+assert_eq "跨空间同名连接允许（唯一性按空间）" "$(code POST /console/workspaces/$WS2/model-connections \
+  "{\"name\":\"conn-a-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"$LLM_BASE\",\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN")" "201"
 
 # ---- test 三分支 ----
 TR=$(req POST /console/workspaces/$WS/model-connections/$C1_ID/test "" "$TOKEN")
 assert_contains "真实端点 ok=true" "$TR" '"ok":true'
 assert_contains "延迟毫秒返回" "$TR" '"latencyMs"'
 if ! echo "$TR" | grep -q '"ok":true'; then
-  say "  ⏭️ LLM 供应商连续 3 次不可达，跳过本模块（网络恢复后重跑）"; finish "M5-model-connection"; exit 0
+  skip "LLM 供应商连续 3 次不可达，跳过本模块（网络恢复后重跑）"; finish "M5-model-connection"; exit 2
 fi
 C2=$(req POST /console/workspaces/$WS/model-connections \
   "{\"name\":\"conn-bad-$TS\",\"modelId\":\"$LLM_MODEL\",\"baseUrl\":\"https://invalid.m5test.invalid/v1\",\"apiKey\":\"k\"}" "" "$TOKEN" | jqr "['data']['id']")
@@ -59,7 +57,7 @@ assert_eq "失败状态回写 failed" "$(req GET /console/workspaces/$WS/model-c
 # ---- PATCH：改字段 → delivery 重置 pending / apiKey 清除语义 ----
 req POST /console/workspaces/$WS/model-connections/$C1_ID/test "" "$TOKEN" >/dev/null
 P=$(req PATCH /console/workspaces/$WS/model-connections/$C1_ID "{\"modelId\":\"$LLM_MODEL\",\"apiKey\":\"\"}" "" "$TOKEN")
-assert_contains "PATCH 清除 apiKey → 掩码为空" "$(echo "$P" | head -c 400)" '"apiKeyMasked":"'
+assert_contains "PATCH 清除 apiKey → 掩码为空" "$P" '"apiKeyMasked":""'
 # 重新写回 key（后续 deliver 需要）
 req PATCH /console/workspaces/$WS/model-connections/$C1_ID "{\"apiKey\":\"$LLM_KEY\"}" "" "$TOKEN" >/dev/null
 
@@ -74,6 +72,23 @@ assert_contains "usage 含该 Agent" "$USAGE" "m5agent-$TS"
 assert_contains "usage 状态 synced" "$USAGE" '"status":"synced"'
 assert_contains "usage connections 为数组（非 null）" "$USAGE" '"connections":['
 
+# ---- PATCH 任一字段 → delivery 回 pending；重新 test/deliver → synced ----
+req PATCH /console/workspaces/$WS/model-connections/$C1_ID '{"timeoutSeconds":121}' "" "$TOKEN" >/dev/null
+PENDING=$(req GET /console/workspaces/$WS/model-connections/usage "" "$TOKEN" | python3 -c "
+import sys,json
+rows=json.load(sys.stdin)['data']
+row=[r for r in rows if r['serviceId']==$SVC][0]
+print(row['connections'][0]['status'])")
+assert_eq "PATCH 后 delivery 回 pending" "$PENDING" "pending"
+ensure_verified "$TOKEN" "$WS" "$C1_ID" >/dev/null
+req POST /console/workspaces/$WS/model-connections/$C1_ID/deliver "{\"serviceId\":$SVC}" "" "$TOKEN" >/dev/null
+RESYNC=$(req GET /console/workspaces/$WS/model-connections/usage "" "$TOKEN" | python3 -c "
+import sys,json
+rows=json.load(sys.stdin)['data']
+row=[r for r in rows if r['serviceId']==$SVC][0]
+print(row['connections'][0]['status'])")
+assert_eq "重新下发回 synced" "$RESYNC" "synced"
+
 # ---- deliver 幂等：重复下发 200 且 usage 仍 synced 单条 ----
 req POST /console/workspaces/$WS/model-connections/$C1_ID/deliver "{\"serviceId\":$SVC}" "" "$TOKEN" >/dev/null
 D2=$(req POST /console/workspaces/$WS/model-connections/$C1_ID/deliver "{\"serviceId\":$SVC}" "" "$TOKEN")
@@ -85,7 +100,10 @@ assert_eq "usage 连接条数=1（无重复）" \
 MODELS=$(req GET "/console/workspaces/$WS/model-connections/models?serviceId=$SVC" "" "$TOKEN")
 assert_contains "Agent models 含下发连接名" "$MODELS" "conn-a-$TS"
 
-# ---- 会话级切换两轮断言 model（DoD：model-switch）----
+# ---- 会话级切换两轮断言 model（DoD：model-switch；mock 兜底镜像无会话面）----
+if ! runtime_is_real; then
+  skip "E2E_AGENT_RUNTIME=mock：跳过会话级模型切换断言"
+else
 UID=$(echo "$TOKEN" | python3 -c "import sys,json,base64;print(json.loads(base64.b64decode(sys.stdin.read().split('.')[1]+'==').decode())['uid'])")
 FE="${FRONTEND_BASE:-http://localhost:8911}"
 SHORT=$(req GET /console/workspaces/$WS/agents/$SVC "" "$TOKEN" | jqr "['data']['shortName']")
@@ -105,13 +123,13 @@ if [ -n "$REMOTE_ID" ] && [ "$REMOTE_ID" != "None" ]; then
 else
   skip "Agent /models 未枚举到下发连接（deliver 未 synced？），跳过会话切换"
 fi
+fi
 
-# ---- 删除保护：默认连接 409；下发连接可删 ----
-assert_contains "默认连接删除 409" "$(code DELETE /console/workspaces/$WS/model-connections/$C1_ID "" "$TOKEN"; true)" "409"
-assert_eq "默认连接删除状态码确认" "$(code DELETE /console/workspaces/$WS/model-connections/$C1_ID "" "$TOKEN")" "409"
+# ---- 删除保护：默认连接 409；非默认连接可删 ----
+assert_eq "默认连接删除 409" "$(code DELETE /console/workspaces/$WS/model-connections/$C1_ID "" "$TOKEN")" "409"
+assert_eq "非默认连接删除 200" "$(code DELETE /console/workspaces/$WS/model-connections/$C2 "" "$TOKEN")" "200"
 
 # ---- 清理 ----
 code DELETE /console/workspaces/$WS/agents/$SVC "" "$TOKEN" >/dev/null
-code DELETE /console/workspaces/$WS/model-connections/$C2 "" "$TOKEN" >/dev/null
 
 finish "M5-model-connection"
