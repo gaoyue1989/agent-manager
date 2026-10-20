@@ -28,6 +28,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const PORT = Number(process.env.MOCK_SANDBOX_PORT ?? 8090);
+// 容器内需绑定 0.0.0.0；endpoint 返回集群可达地址（本地默认 127.0.0.1）
+const PUBLIC_HOST = process.env.MOCK_SANDBOX_PUBLIC_HOST || '127.0.0.1';
 const ROOT = process.env.MOCK_SANDBOX_ROOT ?? path.join(process.cwd(), '.runtime', 'sandboxes');
 fs.mkdirSync(ROOT, { recursive: true });
 
@@ -178,7 +180,7 @@ const server = http.createServer((req, res) => {
       if (mEp && req.method === 'GET') {
         if (!getSb(id)) return json(404, { message: 'sandbox not found' });
         // 对齐录制件形态：server 代理路径，端口不变
-        return json(200, { endpoint: `127.0.0.1:${PORT}/v1/sandboxes/${id}/proxy/${mEp[1]}` });
+        return json(200, { endpoint: `${PUBLIC_HOST}:${PORT}/v1/sandboxes/${id}/proxy/${mEp[1]}` });
       }
       const mProxy = /^\/proxy\/\d+(\/.*)$/.exec(rest);
       if (mProxy) {
@@ -237,4 +239,4 @@ const server = http.createServer((req, res) => {
 
 process.on('uncaughtException', e => console.error('[mock-sandbox] uncaught:', e.message));
 process.on('unhandledRejection', e => console.error('[mock-sandbox] unhandled:', String(e).slice(0, 200)));
-server.listen(PORT, '127.0.0.1', () => console.log(`[mock-sandbox] :${PORT} root=${ROOT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`[mock-sandbox] :${PORT} root=${ROOT} public=${PUBLIC_HOST}`));

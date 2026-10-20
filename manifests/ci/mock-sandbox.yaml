@@ -29,6 +29,8 @@ spec:
               value: "8090"
             - name: MOCK_SANDBOX_ROOT
               value: /tmp/sandboxes
+            - name: MOCK_SANDBOX_PUBLIC_HOST
+              value: mock-sandbox.agent-platform.svc.cluster.local
           readinessProbe:
             httpGet:
               path: /health

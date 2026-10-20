@@ -284,6 +284,7 @@ jobs:
           kubectl -n agent-platform logs deploy/platform-backend --tail=800 > /tmp/e2e-artifacts/backend.log 2>&1 || true
           kubectl -n agent-platform logs deploy/platform-frontend --tail=300 > /tmp/e2e-artifacts/frontend.log 2>&1 || true
           kubectl -n agent-platform logs deploy/mock-llm --tail=300 > /tmp/e2e-artifacts/mock-llm.log 2>&1 || true
+          kubectl -n agent-platform logs deploy/mock-sandbox --tail=300 > /tmp/e2e-artifacts/mock-sandbox.log 2>&1 || true
           kubectl -n agent-platform logs deploy/platform-router --tail=300 > /tmp/e2e-artifacts/router.log 2>&1 || true
 
       - name: 上传失败取证
