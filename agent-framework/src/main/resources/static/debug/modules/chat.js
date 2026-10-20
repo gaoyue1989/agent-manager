@@ -795,6 +795,7 @@ function addAssistantHistory(content, toolCalls, blocks) {
   const callOf = (tc) => ({
     type: 'tool_call',
     name: tc.name,
+    summary: tc.summary,
     argsText: tc.input && typeof tc.input === 'object' ? JSON.stringify(tc.input, null, 2) : String(tc.input || ''),
     resultText: null,
     state: 'success'

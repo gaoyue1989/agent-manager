@@ -536,8 +536,15 @@ public final class StateDataParser {
             var call = new java.util.LinkedHashMap<String, Object>();
             var id = c.path("id").asText("");
             call.put("id", id);
-            call.put("name", c.path("name").asText(""));
-            call.put("input", c.path("input"));
+            var name = c.path("name").asText("");
+            call.put("name", name);
+            var input = c.path("input");
+            call.put("input", input);
+            // 与 SSE 的 tool_call_summary 同一套人可读文案（前端实时流用它替换原始工具名），
+            // 历史回放直接携带该字段，避免刷新后工具行退回 write_file / mcp__x__y 这类原始名
+            if (!name.isBlank()) {
+                call.put("summary", ToolSummaryGenerator.callSummary(name, input.toString()));
+            }
 
             var useState = c.path("state").asText("");
             var outcome = resultsByCallId.get(id);
