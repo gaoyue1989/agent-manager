@@ -48,6 +48,7 @@ public class SessionCleanupService {
     private final io.agentmanager.framework.config.AgentManagerProperties props;
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
     private final RemoteTaskRegistryStore remoteTaskRegistryStore;
+    private final TurnIntentStore turnIntentStore;
 
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
@@ -58,7 +59,8 @@ public class SessionCleanupService {
                                  A2aAgentRefHolder agentRefHolder,
                                  io.agentmanager.framework.config.AgentManagerProperties props,
                                  io.agentmanager.framework.service.storage.FileStorage fileStorage,
-                                 RemoteTaskRegistryStore remoteTaskRegistryStore) {
+                                 RemoteTaskRegistryStore remoteTaskRegistryStore,
+                                 TurnIntentStore turnIntentStore) {
         this.dataSource = dataSource;
         this.sessionManager = sessionManager;
         this.turnLeaseStore = turnLeaseStore;
@@ -69,6 +71,7 @@ public class SessionCleanupService {
         this.props = props;
         this.fileStorage = fileStorage;
         this.remoteTaskRegistryStore = remoteTaskRegistryStore;
+        this.turnIntentStore = turnIntentStore;
     }
 
     /**
@@ -85,6 +88,7 @@ public class SessionCleanupService {
         //    （session_event 已迁 Redis，留存由 key TTL 承担，不在这里清）
         turnLeaseStore.cleanupExpired();
         confirmContextStore.deleteExpired();
+        turnIntentStore.deleteExpired();
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
         // 在途登记终态行保留 7 天（设计 §18.2；与 TaskRecord 清理节奏一致）
         remoteTaskRegistryStore.deleteTerminalBefore(

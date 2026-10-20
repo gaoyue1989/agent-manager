@@ -381,6 +381,16 @@ export default function ChatPane({
       if (!resp.ok) return; // 状态查询失败（如事件存储暂不可用 503）：跳过恢复，不重置任何状态
       status = await resp.json();
     } catch { return; }
+    // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因（不打开订阅）
+    if (status && status.state === "failed") {
+      setMessages((prev) => [...prev, {
+        role: "system",
+        content: `⚠️ 本次执行失败：${status.error || "unknown"}`,
+      }]);
+      setBusy(false);
+      loadThreads();
+      return;
+    }
     // interrupted 也订阅：服务端回放已落库事件后补发 interrupted 帧收流，由下方渲染为中断提示
     if (!status || (status.state !== "working" && status.state !== "interrupted")) return;
 

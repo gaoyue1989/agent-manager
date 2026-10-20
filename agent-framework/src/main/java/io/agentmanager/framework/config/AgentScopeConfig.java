@@ -449,6 +449,7 @@ public class AgentScopeConfig {
             io.agentmanager.framework.service.SessionEventStore sessionEventStore,
             io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore,
             io.agentmanager.framework.service.AgentRuntimeService agentRuntimeService,
+            io.agentmanager.framework.service.TurnIntentStore turnIntentStore,
             AgentManagerProperties props) {
         var sse = props.sse();
         var poll = sse != null ? java.time.Duration.ofMillis(sse.tailPollMs())
@@ -457,7 +458,7 @@ public class AgentScopeConfig {
         var heartbeat = sse != null ? java.time.Duration.ofSeconds(sse.heartbeatSeconds())
                                     : java.time.Duration.ofSeconds(20);
         return new io.agentmanager.framework.service.SessionEventTailer(
-            sessionEventStore, turnLeaseStore, agentRuntimeService, poll, heartbeat);
+            sessionEventStore, turnLeaseStore, agentRuntimeService, poll, heartbeat, turnIntentStore);
     }
 
     @Bean

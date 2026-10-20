@@ -83,16 +83,27 @@ public class SessionEventBus {
     }
 
     /**
+     * 是否为流式增量事件（与 {@link SessionEventStore} 同一后缀规则）。
+     *
+     * <p>仅用于决定是否注入 {@code turnId}：delta 是 token 热路径，不值得为每个 token
+     * 重写 JSON；客户端可从任一非 delta 帧或 {@code /status.reply_id} 获得 turn id。
+     */
+    private static boolean isDelta(String eventType) {
+        return eventType != null && eventType.endsWith("_DELTA");
+    }
+
+    /**
      * 同上，但允许事件发源地覆写序列化结果——MCP Apps 的 TOOL_CALL_START 由此携带
      * ui 元数据（mcp-apps-extension-plan §4：发源地查 McpToolRegistrar 后传入）。
      * payloadOverride 为 null 时按原词表序列化，行为与 3 参版本完全一致。
      */
     public int emit(String sessionId, AgentEvent event, String replyId, String payloadOverride) {
         String payload = payloadOverride != null ? payloadOverride : AgentEventSseSerializer.payload(event);
-        // replyId 注入前移到写路径（A1）：落库 p 字段与广播 data 从此同源（同一份字符串），
-        // 读端对存量行（p 内无 replyId）兜底注入即可，不再逐帧重序列化
-        payload = AgentEventSseSerializer.withReplyId(payload, replyId);
         String type = event.getType().name();
+        // replyId 注入前移到写路径（A1）：落库 p 字段与广播 data 从此同源（同一份字符串），
+        // 读端对存量行（p 内无 replyId）兜底注入即可，不再逐帧重序列化。
+        // 非 delta 事件额外注入 turnId（订阅过滤用，见 withReplyId 3 参重载）；delta 保持零重写。
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId, !isDelta(type));
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
         if (log.isDebugEnabled()) {
@@ -126,8 +137,8 @@ public class SessionEventBus {
      * 同上流程，但不来自 AgentEvent。
      */
     public int emitSynthetic(String sessionId, String replyId, String type, String payload) {
-        // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）
-        payload = AgentEventSseSerializer.withReplyId(payload, replyId);
+        // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）；合成帧均为里程碑
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId, true);
         int seq = eventStore.append(sessionId, replyId, type, payload);
 
         log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);

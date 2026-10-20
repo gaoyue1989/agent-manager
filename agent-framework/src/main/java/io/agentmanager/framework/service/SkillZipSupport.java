@@ -29,6 +29,13 @@ public final class SkillZipSupport {
     public static final int MAX_ENTRIES = 1000;
     /** 解压后总大小上限（防 zip 炸弹；上传的压缩包本体大小由调用方另行限制） */
     public static final long MAX_EXTRACTED_BYTES = 50L * 1024 * 1024;
+    /**
+     * 定位 SKILL.md 时允许的最大包裹层级（相对于 zip 根）。
+     *
+     * <p>用户常「对整个文件夹压缩」，zip 内会带一层或多层父目录；层级越大误取深层示例
+     * SKILL.md 的风险越高，故设上限（扁平=0，一层包裹=1）。
+     */
+    public static final int MAX_WRAP_DEPTH = 4;
 
     private SkillZipSupport() {}
 
@@ -81,25 +88,37 @@ public final class SkillZipSupport {
     }
 
     /**
-     * 定位技能根目录：支持扁平（zip 根即含 SKILL.md）与包裹（一层子目录含 SKILL.md）两种形态。
-     * 找不到返回 null。
+     * 定位技能根目录：支持扁平（zip 根即含 SKILL.md）与包裹（一层或多层子目录含 SKILL.md）两种形态。
+     *
+     * <p>用户常「对整个文件夹压缩」，zip 内会带上一层甚至多层父目录（如 {@code skills/my-skill/SKILL.md}），
+     * 故按层级自上而下（BFS）查找，返回<b>最浅</b>的含 SKILL.md 的目录（扁平优先），最多下探
+     * {@link #MAX_WRAP_DEPTH} 层；找不到返回 null。同一目录下的子目录按路径排序，保证结果确定性。
      */
     public static LocatedSkill locateSkillRoot(Path tmpDir) throws IOException {
-        // 情况1：zip 根目录直接包含 SKILL.md
-        var rootSkillMd = tmpDir.resolve("SKILL.md");
-        if (Files.isRegularFile(rootSkillMd)) {
-            return new LocatedSkill(tmpDir, rootSkillMd);
-        }
-
-        // 情况2：zip 内一层子目录包含 SKILL.md
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(tmpDir)) {
-            for (var entry : stream) {
-                if (Files.isDirectory(entry) && !entry.getFileName().toString().startsWith(".")) {
-                    var subSkillMd = entry.resolve("SKILL.md");
-                    if (Files.isRegularFile(subSkillMd)) {
-                        return new LocatedSkill(entry, subSkillMd);
+        var queue = new java.util.ArrayDeque<Path>();
+        queue.add(tmpDir);
+        for (int depth = 0; depth <= MAX_WRAP_DEPTH && !queue.isEmpty(); depth++) {
+            int levelSize = queue.size();
+            for (int i = 0; i < levelSize; i++) {
+                var dir = queue.poll();
+                var skillMd = dir.resolve("SKILL.md");
+                if (Files.isRegularFile(skillMd)) {
+                    return new LocatedSkill(dir, skillMd);
+                }
+                if (depth == MAX_WRAP_DEPTH) {
+                    continue; // 已达上限：不再入队更深层的子目录
+                }
+                var subDirs = new java.util.ArrayList<Path>();
+                try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+                    for (var entry : stream) {
+                        if (Files.isDirectory(entry)
+                                && !entry.getFileName().toString().startsWith(".")) {
+                            subDirs.add(entry);
+                        }
                     }
                 }
+                subDirs.sort(java.util.Comparator.comparing(Path::toString));
+                queue.addAll(subDirs);
             }
         }
         return null;
@@ -176,10 +195,21 @@ public final class SkillZipSupport {
         return name.isBlank() ? "unnamed-skill" : name;
     }
 
-    /** 递归删除目录（best-effort，不抛异常） */
-    public static void deleteRecursive(Path dir) {
-        if (dir == null || !Files.exists(dir)) {
-            return;
+    /**
+     * 递归删除目录（best-effort，不抛异常）。
+     *
+     * <p>逐个条目删除，单个条目失败只告警不中断（临时目录清理等场景无需感知失败）。
+     * 调用方若需区分「是否真的删干净」，必须检查返回值——删除类接口据此对
+     * 「只读挂载 / 权限不足」显式报错，不得吞掉失败后谎报成功。
+     *
+     * @return true = 目录已不存在（删除成功或本就不存在）；false = 目录仍存在（删除未完全成功）
+     */
+    public static boolean deleteRecursive(Path dir) {
+        if (dir == null) {
+            return true;
+        }
+        if (!Files.exists(dir)) {
+            return true;
         }
         try {
             try (var stream = Files.walk(dir)) {
@@ -195,6 +225,11 @@ public final class SkillZipSupport {
         } catch (IOException e) {
             log.warn("Failed to delete {}: {}", dir, e.getMessage());
         }
+        boolean gone = !Files.exists(dir);
+        if (!gone) {
+            log.warn("deleteRecursive: {} 仍存在（只读挂载/权限不足？删除未成功，调用方须显式报错）", dir);
+        }
+        return gone;
     }
 
     /** 递归复制目录（跨文件系统回退方案） */

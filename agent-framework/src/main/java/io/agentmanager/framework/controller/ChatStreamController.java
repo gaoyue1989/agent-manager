@@ -86,6 +86,10 @@ public class ChatStreamController {
 
     static Duration WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
     static Duration ACQUIRE_TIMEOUT = Duration.ofSeconds(120);
+    /** 排队意图有效期：覆盖整个租约等待窗口 + 余量（崩溃遗留行由过期过滤兜底） */
+    static Duration TURN_INTENT_TTL = ACQUIRE_TIMEOUT.plusSeconds(60);
+    /** 失败意图保留期：刷新后仍能看到失败原因；新 turn 登记会覆盖 */
+    static Duration TURN_INTENT_FAILED_TTL = Duration.ofMinutes(10);
 
     /** 首事件延迟告警阈值（issue #87）：超过即 WARN（排队/静默类问题的直接日志证据） */
     static final long FIRST_EVENT_WARN_MS = 10_000;
@@ -130,6 +134,13 @@ public class ChatStreamController {
      */
     @Autowired(required = false)
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
+
+    /**
+     * 排队 turn 意图存储（字段注入，同 sessionMessageStore：避免改动全部构造调用点）。
+     * 排队期间把本轮 turn id 提前暴露给 /status，使「排队中刷新」仍能续传。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.service.TurnIntentStore turnIntentStore;
 
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
@@ -357,8 +368,16 @@ public class ChatStreamController {
         sessionTitleService.generateAsync(finalSessionId, message, finalUserId);
 
         var stream = Flux.<ServerSentEvent<String>>create(sink -> {
-            // ===== 1. 抢 Turn 租约 =====
+            // 本轮 turn id 在排队前就确定（事件统一使用同一个信封 id）。每轮都先登记意图再
+            // 抢锁：既覆盖「排队中刷新」，也顺手清掉上一轮遗留的 FAILED 行（后到的 turn 必须
+            // 让 /status 从旧失败态恢复）；租约到手立即清除。两次都是 PK 级轻量写。
+            String replyId = UUID.randomUUID().toString();
+            if (turnIntentStore != null) {
+                turnIntentStore.register(finalSessionId, replyId, TURN_INTENT_TTL);
+            }
             var token = turnLeaseStore.tryAcquire(finalSessionId);
+
+            // ===== 1. 抢 Turn 租约 =====
             long deadline = System.currentTimeMillis() + ACQUIRE_TIMEOUT.toMillis();
             while (token == null && System.currentTimeMillis() < deadline) {
                 sink.next(waitingSSE());
@@ -366,18 +385,24 @@ public class ChatStreamController {
                     Thread.sleep(WAITING_FRAME_INTERVAL.toMillis());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    clearTurnIntent(finalSessionId, replyId);
                     sink.complete();
                     return;
                 }
                 token = turnLeaseStore.tryAcquire(finalSessionId);
             }
             if (token == null) {
+                String err = "turn_in_progress: session '" + finalSessionId
+                    + "' has an active turn and queue timeout reached";
+                failTurnIntent(finalSessionId, replyId, err);
                 log.warn("[chat] turn_in_progress: sessionId={}, waiting timeout", finalSessionId);
-                sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
-                    + "' has an active turn and queue timeout reached"));
+                sink.next(errorSSE(err));
                 sink.complete();
                 return;
             }
+
+            // 租约到手：意图使命结束（此后 turn id 由 session_event 的 reply_id 承担）
+            clearTurnIntent(finalSessionId, replyId);
 
             // ===== 1.5 ASKING 预检（issue #47/#48）：挂起会话不接受新 turn =====
             // ASKING 态下的普通消息会被 SDK 在 turn 入口拒绝（doCallInner 抛 "ASKING state
@@ -407,8 +432,10 @@ public class ChatStreamController {
                 log.error("[chat] failed to start lease renewer, releasing lease (sid={}): {}",
                     finalSessionId, e.getMessage());
                 turnLeaseStore.release(finalSessionId, token);
-                sink.next(errorSSE("turn_setup_failed: "
-                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
+                var err = "turn_setup_failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                failTurnIntent(finalSessionId, replyId, err);
+                sink.next(errorSSE(err));
                 sink.complete();
                 return;
             }
@@ -431,7 +458,6 @@ public class ChatStreamController {
             var firstEventLogged = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // ===== 3. 准备 EventBus Sinks =====
-            String replyId = UUID.randomUUID().toString();
             // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -546,9 +572,10 @@ public class ChatStreamController {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
                 cancelHeartbeat(heartbeat);
-                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
-                    errorSSE("turn_setup_failed: "
-                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
+                var err = "turn_setup_failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                failTurnIntent(finalSessionId, replyId, err);
+                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId, errorSSE(err));
                 return;
             }
 
@@ -726,6 +753,20 @@ public class ChatStreamController {
             toolCallNames.remove(toolCallId);
             presentFileBuffers.remove(toolCallId);
             writeFileInputBuffers.remove(toolCallId);
+        }
+    }
+
+    /** 清除本轮排队意图（租约到手/正常放弃；store 不可用时为 no-op）。 */
+    private void clearTurnIntent(String sessionId, String replyId) {
+        if (turnIntentStore != null) {
+            turnIntentStore.clear(sessionId, replyId);
+        }
+    }
+
+    /** 标记本轮失败（排队超时/建立失败），让刷新后的客户端仍能从 /status 看到原因。 */
+    private void failTurnIntent(String sessionId, String replyId, String error) {
+        if (turnIntentStore != null) {
+            turnIntentStore.fail(sessionId, replyId, error, TURN_INTENT_FAILED_TTL);
         }
     }
 

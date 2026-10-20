@@ -102,7 +102,7 @@ public class SkillManageController {
      * <p>zip 结构要求：
      * <ul>
      *   <li>根目录直接包含 SKILL.md（扁平结构），或</li>
-     *   <li>一级子目录包含 SKILL.md（包裹结构）</li>
+     *   <li>一层或多层子目录包含 SKILL.md（包裹结构，用户常对整个文件夹压缩）</li>
      * </ul>
      *
      * <p>skill 名称优先取 SKILL.md frontmatter 的 name 字段。

@@ -252,16 +252,44 @@ public final class AgentEventSseSerializer {
      * @return 注入后的字符串；无法注入时返回原串
      */
     public static String withReplyId(String payload, String replyId) {
+        return withReplyId(payload, replyId, false);
+    }
+
+    /**
+     * 同上，并可同时注入 turn 级标识 {@code turnId}（订阅接口 {@code ?replyId=} 过滤用它）。
+     *
+     * <p>为什么要区分：帧内已有的 {@code replyId} 来自 SDK 事件（agent 级 / model 调用级 /
+     * block 级，同一 turn 内可能各不相同），而 {@code GET /threads/{sid}/subscribe?replyId=}
+     * 过滤的是 **turn 信封 id**（ChatStreamController 每轮生成的 UUID，也是落库的
+     * session_event.r 字段）。客户端拿帧内 {@code replyId} 去续传会一条也匹配不到。
+     * 因此写路径对**非 delta** 事件追加一个明确的 {@code turnId}；delta 保持零重写
+     * （token 热路径，turnId 可从任一里程碑帧或 {@code /status.reply_id} 获得）。
+     *
+     * @param payload       SSE data 的 JSON 字符串
+     * @param replyId       turn 标识；null/blank 不注入
+     * @param includeTurnId 是否注入 {@code turnId}（建议仅非 delta 事件为 true）
+     * @return 注入后的字符串；无法注入时返回原串
+     */
+    public static String withReplyId(String payload, String replyId, boolean includeTurnId) {
         if (payload == null || replyId == null || replyId.isBlank()) {
             return payload;
         }
         try {
             var node = MAPPER.readTree(payload);
-            if (node != null && node.isObject() && !node.has("replyId")) {
-                ((com.fasterxml.jackson.databind.node.ObjectNode) node).put("replyId", replyId);
-                return MAPPER.writeValueAsString(node);
+            if (node == null || !node.isObject()) {
+                return payload;
             }
-            return payload;
+            boolean changed = false;
+            var obj = (com.fasterxml.jackson.databind.node.ObjectNode) node;
+            if (!obj.has("replyId")) {
+                obj.put("replyId", replyId);
+                changed = true;
+            }
+            if (includeTurnId && !obj.has("turnId")) {
+                obj.put("turnId", replyId);
+                changed = true;
+            }
+            return changed ? MAPPER.writeValueAsString(obj) : payload;
         } catch (Exception e) {
             // 注入失败不阻塞主链路，使用原始 payload
             return payload;

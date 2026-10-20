@@ -501,6 +501,13 @@ async function tryResumeSSE(sessionId) {
   const uid = ctx.state.getState('ui.userId') || 'debug-user';
   try {
     const status = await ctx.api.getStatus(sessionId, uid);
+    // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因（不打开订阅）
+    if (status.state === 'failed') {
+      ensureReply('failed-' + Date.now());
+      handleEvent({ type: 'error', error: status.error || 'turn failed' });
+      loadThreads();
+      return;
+    }
     // ★ interrupted 也走订阅（与 startReconnect 的分支保持一致）：观察者路径会先回放已落库的
     // 部分输出，再由服务端补发 interrupted 帧收流，该帧由 handleEvent 渲染为中断提示。
     // 若落入不订阅的分支，刷新/切换线程后既看不到中断提示，服务端的 interrupted 帧
@@ -542,8 +549,11 @@ async function tryResumeSSE(sessionId) {
         userId: uid,
         onEvent: (evt) => {
           reconnectAttempts = 0;
-          if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
-          if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
+          // turnId 是服务端信封 id（subscribe?replyId= 的过滤口径）；帧内 replyId 是 SDK
+          // 事件级 id，两者不同。仅有 turnId 时才用它更新续传游标。
+          if (evt.turnId) currentReplyId = evt.turnId;
+          else if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
+          else if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
           handleEvent(evt);
         },
         onError: (e) => {
@@ -2111,6 +2121,11 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
         if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
           currentReplyId = status.reply_id || currentReplyId;
           subscribeWithReconnect(sid, lastEventId, currentReplyId);
+        } else if (status.state === 'failed') {
+          // 排队超时/建立失败：本轮没有事件可回放，直接展示失败原因
+          currentReply = currentReply || ensureReply('failed-' + Date.now());
+          handleEvent({ type: 'error', error: status.error || 'turn failed' });
+          finishStream();
         } else if (status.state === 'completed') {
           // turn 已完成，回放剩余事件后结束
           replayAndClose(sid, lastEventId, currentReplyId);
@@ -2178,9 +2193,11 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
     onEvent: (evt) => {
       reconnectAttempts = 0;
       hideWaiting();
-      // 追踪 replyId（从 AGENT_START 或 permission_ask 中获取）
-      if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
-      if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
+      // 追踪续传用的 turn id：优先服务端信封 turnId（subscribe?replyId= 的过滤口径），
+      // 老服务端无该字段时退回 AGENT_START 的 SDK replyId。
+      if (evt.turnId) currentReplyId = evt.turnId;
+      else if (evt.type === 'AGENT_START' && evt.replyId) currentReplyId = evt.replyId;
+      else if (evt.type === 'permission_ask' && evt.reply_id) currentReplyId = evt.reply_id;
       handleEvent(evt);
     },
     onError: (e) => {
