@@ -117,11 +117,12 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 
 - **push 仅 master**（跑测试 + 发布镜像）；**其余分支只在 PR 时触发**（避免双事件重复跑，门禁只认 PR run）
 - **concurrency 组含 workflow 维度**（`ci-${{ github.workflow }}-<分支名>`，PR #10）：同工作流内同分支新旧 run 互斥（双事件仍只保留最新一次），**跨工作流互不取消**——修复前共享组名导致 master push 三工作流互相取消（无关 job 显示 cancelled 而非 skipped、镜像推送可能被静默取消丢失）
-- **PR / master push** 都会启动三个工作流，但 **job 按改动目录过滤**：
+- **PR / master push** 都会启动各工作流，但 **job 按改动目录过滤**：
   - `backend/**` → backend-ci 的单测
   - `frontend/**` → frontend-ci 的单测
-  - `agent-framework/**` → agent-framework-ci 的单测 + 三个 E2E
-  - 根目录工作流/脚本变更（`.github/**`）→ 三个工作流全跑
+  - `agent-framework/**` → agent-framework-ci 的单测 + E2E 矩阵（核心/多副本/沙箱/协议多副本为必需，其余非必需）
+  - `charts/**` → charts-ci 的 Helm lint + template
+  - 根目录工作流/脚本变更（`.github/**`）→ 相关 job 全跑
   - **不相关目录的 job 显示 Skipped，门禁视为通过**——这是刻意设计：PR 上工作流必须照常触发，否则必需检查会 pending 卡死 PR；不能在工作流层面用 `paths` 过滤
 - 触发映射：`.github/workflows/<name>.yml` 自身变更也会触发对应工作流（保证 CI 配置改动被验证）
 - master push 的测试 job 同样按目录过滤（无关目录 Skipped），镜像推送仅在相关目录有变更时执行
@@ -130,8 +131,9 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 | 工作流 | 单测 | E2E | 镜像推送（仅 master push） |
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
-| frontend-ci | `npm run lint` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（2026-09-26 实跑 1026 用例 / 0 失败 / 4 跳过，101 个实跑测试类）+ `eval-selftest`（评测飞轮离线自检） | 核心/多副本/沙箱/工具插件四 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| frontend-ci | `npm run lint` + `npm run test` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
+| agent-framework-ci | `mvn test`（2026-10-21 实跑 1573 用例 / 0 失败 / 5 跳过）+ `eval-selftest`（评测飞轮离线自检） | 核心/多副本/沙箱/工具插件四 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
+| charts-ci | `helm lint` + `helm template`（CI 占位必填值渲染全量对象） | — | — |
 
 ### 日常提交流程（必须走 PR 门禁）
 
@@ -147,8 +149,8 @@ git push origin feat/xxx
 #    → 必需检查自动执行：
 #      单测 (mvn test) / 单测 (go vet + go test) / 单测 (lint + build)
 #      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）/ E2E 协议多副本（P 组）
-#    另有两个非必需 job 同步跑（红只告警不挡合并，但应一并修）：
-#      E2E 工具插件（SPI+三态权限）/ 评测自检（flywheel selftest）
+#    另有一批非必需 job 同步跑（红只告警不挡合并，但应一并修）：
+#      评测自检 / 评测离线回放 / E2E 工具插件 / E2E 路由模式 / E2E 协议（T 组）/ E2E 平台（kind）
 
 # 4. 全绿后合并（网页 Merge 按钮）
 #    红了就修：提交会自动重跑检查

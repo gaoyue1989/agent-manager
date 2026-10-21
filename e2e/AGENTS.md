@@ -15,7 +15,7 @@
 | `m5-model-connection.sh` | CRUD/掩码/唯一性/校验、test 成功与失败、PATCH→pending→重新下发 synced、跨空间同名、usage、`/models` 回读、会话级模型切换（真实运行时）、默认连接删除保护 |
 | `m6-mcp-connector.sh` | CRUD/长度/缺字段校验、平台 `/mcp` verify、坏端点 failed、toolScope 快照、PATCH timeout/permissions、sse 创建、member 403、bearer token 不落包/不回显→Secret、被引用删除 409 |
 | `m7-integration.sh` | 集成候选三态、登记/重复 409/跨空间 400、askPolicy/enabled patch、引用保护（需 `AGENT_PROTOCOL_ENABLED=true` 服务） |
-| `m8-workspace-assets.sh` | API Key 签发/作用域/吊销、邀请成员矩阵、模板开关、L4 端点可达、包技能 warnings/issues（#163/#164） |
+| `m8-workspace-assets.sh` | API Key 签发/作用域/吊销、邀请成员矩阵、模板开关、包技能 warnings/issues（#163/#164） |
 | `m9-skill-center.sh` | Skill 中心：Markdown 创建/校验、版本状态机（draft→published→offline→reline）、zip 上传/下载、市场源/安装、Agent 引用 `source=skill`（同名去重 #173）、draft/停用引用 400、删除保护 409、skill-usages、member 403 |
 | `m10-sandbox.sh` | 沙箱配置：enabled true/false/未声明、资源注入与空/负值归一、`SANDBOX_ENABLED` 不落 env、总览三层来源（env > package > default）、edit-form 回显、keyword/member/404 |
 | `run-all.sh` | 顺序执行；子脚本 `exit 2` 记为 SKIP，FAIL 汇总后非零退出 |
@@ -59,7 +59,7 @@
 ```bash
 # 平台控制面（API）
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:30881 \
-  bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m8 m9 m10
+  bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10
 
 # 浏览器 UI
 cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost:30881 \
