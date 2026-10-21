@@ -1,0 +1,54 @@
+name: charts-ci
+
+# Helm chart 门禁：charts/** 此前无任何 CI 覆盖（近 7 天两次 chart 变更仅靠人工验证）。
+# lint 校验模板语法/values schema，template 用 CI 占位值渲染全部对象（必填值缺失会在此红）。
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: 变更目录检测
+    runs-on: ubuntu-latest
+    outputs:
+      charts: ${{ steps.filter.outputs.charts }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            charts:
+              - 'charts/**'
+            workflows:
+              - '.github/workflows/charts-ci.yml'
+
+  lint:
+    name: Chart 校验 (helm lint + template)
+    needs: changes
+    if: needs.changes.outputs.charts == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint
+        run: helm lint charts/oaf-platform
+      - name: helm template（CI 占位必填值，渲染全量对象）
+        run: |
+          helm template oaf charts/oaf-platform \
+            --set 'images.business[0].image=example/agent-framework:ci' \
+            --set 'images.business[0].label=Agent Framework CI' \
+            --set external.mysql.host=mysql \
+            --set external.mysql.password=ci \
+            --set backend.jwtSecret=ci-secret \
+            --set platformDefaults.seed.enabled=false > /tmp/chart-rendered.yaml
+          test -s /tmp/chart-rendered.yaml

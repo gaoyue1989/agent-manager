@@ -22,8 +22,8 @@ CONN_ID=$(echo "$CONN" | jqr "['data']['id']")
 ensure_verified "$TOKEN" "$WS" "$CONN_ID" >/dev/null
 assert_eq "连接 verified" "$(req GET /console/workspaces/$WS/model-connections "" "$TOKEN" | jqr "['data'][0]['status']")" "verified"
 
-# 主 Agent 用 2 副本（kind 节点 4 CPU 足够：默认资源 250m/副本），
-# 同时覆盖 replicas 直译；spec 档留给扩展 Agent（1 副本 1 CPU）。
+# 主 Agent 用 2 副本（kind 节点 4 CPU 足够：spec=small 1 CPU/2Gi ×2），
+# 同时覆盖 replicas 直译；spec 档留给扩展 Agent。
 FORM_TPL='{"mode":"harness","name":"NAME","description":"M3 e2e","modelConnections":[{"connectionId":CID,"isDefault":true}],"prompt":"你是 M3 e2e 验证助手。被问候时回答：我是 m3e2e-agent v1。","skills":[],"subAgents":[],"mcpServers":[{"builtin":"platform"}],"spec":"small","replicas":2,"publicEndpoint":true}'
 
 # ---- 校验矩阵 ----
