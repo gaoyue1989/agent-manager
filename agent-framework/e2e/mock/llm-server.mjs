@@ -30,6 +30,7 @@ const MARKER_MAP = {
   'file:deliver': 'file-deliver', 'oaf:package': 'oaf-package', 'tool:mcp_echo': 'tool-mcp-echo',
   'hitl:submit': 'hitl-submit', 'mcpapp:form': 'mcpapp-form',
   'execute': 'execute', 'execute:fail': 'execute-fail',
+  'execute:sleep': 'execute-sleep',   // 并发探针（X20）：execute 真实 sleep {{secs}} 秒
   'tool:write:sb': 'sandbox-write', 'tool:read:sb': 'sandbox-read',
   'plugin:echo': 'plugin-echo',   // 工具插件冒烟（plugin-smoke.sh）：调插件工具 echo_query
   'proto:lead-spawn': 'proto-lead-spawn',     // 协议多副本 P 组（api-protocol-multi）：lead 调 agent_spawn

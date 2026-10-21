@@ -155,7 +155,7 @@ const server = http.createServer((req, res) => {
 
     if (p === '/v1/sandboxes' && req.method === 'POST') {
       const id = crypto.randomUUID();
-      const sb = { root: path.join(ROOT, id), destroyed: false, createdAt: now() };
+      const sb = { id, root: path.join(ROOT, id), destroyed: false, createdAt: now() };
       fs.mkdirSync(sb.root, { recursive: true });
       sandboxes.set(id, sb);
       stats.creates.push({ id, at: Date.now() });
