@@ -3,12 +3,16 @@ package io.agentmanager.framework.sandbox.opensandbox;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.jupiter.api.Test;
+
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError;
 
 import io.agentmanager.framework.TracingTestBase;
 import io.agentscope.harness.agent.sandbox.Sandbox;
@@ -79,6 +83,69 @@ class TracingSandboxClientTest extends TracingTestBase {
         assertEquals(1, spans.size());
         assertEquals(StatusCode.OK, spans.get(0).getStatus().getStatusCode());
         assertEquals("sbx-2", spans.get(0).getAttributes().get(AttributeKey.stringKey("sandbox.id")));
+    }
+
+    @Test
+    void shouldMarkExpiredInsteadOfErrorWhenResume404() {
+        var delegate = mock(OpenSandboxClient.class);
+        when(delegate.resume(any())).thenThrow(sandboxNotFound());
+        var state = new OpenSandboxState();
+        state.setSandboxId("sbx-4");
+
+        var client = new TracingSandboxClient(delegate);
+        assertThrows(SandboxApiException.class, () -> client.resume(state));
+
+        var spans = findSpans("sandbox.resume");
+        assertEquals(1, spans.size());
+        // 404 = 沙箱被 TTL 回收，acquire 降级 create 是预期路径 → span 正常而非 ERROR
+        assertEquals(StatusCode.OK, spans.get(0).getStatus().getStatusCode());
+        assertTrue(spans.get(0).getAttributes()
+                .get(AttributeKey.booleanKey("sandbox.resume.expired")));
+        assertEquals(1, spans.get(0).getEvents().size());
+        assertEquals("sandbox not found (expired/GC), acquire falls back to create",
+                spans.get(0).getEvents().get(0).getName());
+    }
+
+    @Test
+    void shouldDetect404WrappedInCauseChain() {
+        var delegate = mock(OpenSandboxClient.class);
+        when(delegate.resume(any()))
+                .thenThrow(new IllegalStateException("connect failed", sandboxNotFound()));
+        var state = new OpenSandboxState();
+        state.setSandboxId("sbx-5");
+
+        var client = new TracingSandboxClient(delegate);
+        assertThrows(IllegalStateException.class, () -> client.resume(state));
+
+        var spans = findSpans("sandbox.resume");
+        assertEquals(1, spans.size());
+        assertEquals(StatusCode.OK, spans.get(0).getStatus().getStatusCode());
+        assertTrue(spans.get(0).getAttributes()
+                .get(AttributeKey.booleanKey("sandbox.resume.expired")));
+    }
+
+    @Test
+    void shouldRecordErrorWhenResumeFailsNon404() {
+        var delegate = mock(OpenSandboxClient.class);
+        when(delegate.resume(any())).thenThrow(new SandboxApiException("boom", null, 500,
+                new SandboxError("INTERNAL", "boom"), null, null, false));
+        var state = new OpenSandboxState();
+        state.setSandboxId("sbx-6");
+
+        var client = new TracingSandboxClient(delegate);
+        assertThrows(SandboxApiException.class, () -> client.resume(state));
+
+        var spans = findSpans("sandbox.resume");
+        assertEquals(1, spans.size());
+        // 非 404 错误维持 ERROR + recordException，不被"过期重建正常化"掩盖
+        assertEquals(StatusCode.ERROR, spans.get(0).getStatus().getStatusCode());
+        assertEquals(1, spans.get(0).getEvents().size());
+    }
+
+    /** 构造「沙箱 id 不存在」异常（error 参数为 SDK 唯一非空校验项） */
+    private static SandboxApiException sandboxNotFound() {
+        return new SandboxApiException("sandbox not found", null, 404,
+                new SandboxError("NOT_FOUND", "sandbox not found"), null, null, false);
     }
 
     @Test

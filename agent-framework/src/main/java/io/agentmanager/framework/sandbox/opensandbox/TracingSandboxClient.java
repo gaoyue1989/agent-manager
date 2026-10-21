@@ -1,5 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
+
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxClient;
 import io.agentscope.harness.agent.sandbox.SandboxState;
@@ -65,12 +67,33 @@ public class TracingSandboxClient implements SandboxClient<OpenSandboxClientOpti
             span.setStatus(StatusCode.OK);
             return result;
         } catch (Exception e) {
-            span.setStatus(StatusCode.ERROR, e.getMessage());
-            span.recordException(e);
+            if (isSandboxGone(e)) {
+                // 沙箱已被 OpenSandbox Server 按 TTL 回收（或 Server 重启丢容器）：
+                // connect() 打到已销毁 id 返回 404，SandboxManager.acquire() 捕获后
+                // 降级 create 重建（预期路径，e2e「GC 降级」场景钉死）。标记为正常，
+                // 避免过期重建污染错误率信号；非 404 错误仍按 ERROR 记录。
+                span.setAttribute("sandbox.resume.expired", true);
+                span.addEvent("sandbox not found (expired/GC), acquire falls back to create");
+                span.setStatus(StatusCode.OK);
+            } else {
+                span.setStatus(StatusCode.ERROR, e.getMessage());
+                span.recordException(e);
+            }
             throw e;
         } finally {
             span.end();
         }
+    }
+
+    /** 沿 cause chain 识别「沙箱 id 已不存在」（OpenSandbox 404，SDK 经 ExceptionConverter 保留 HTTP 状态码） */
+    private static boolean isSandboxGone(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause() == t ? null : t.getCause()) {
+            if (t instanceof SandboxApiException api
+                    && api.getStatusCode() != null && api.getStatusCode() == 404) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
