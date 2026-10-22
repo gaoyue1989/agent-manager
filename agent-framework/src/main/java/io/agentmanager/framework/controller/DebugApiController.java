@@ -263,7 +263,8 @@ public class DebugApiController {
      * （{@code message_count}）与问题标记（{@code error_count} / {@code has_error} /
      * {@code pending_confirm}，见 {@link #loadMonitorProblems}）。
      * 时间过滤作用于 {@code session_user.updated_at}（每次 chat/confirm 刷新），
-     * 展示的 {@code updated_at} 取 agent_state 与 created_at 的较大者。
+     * 展示/排序的 {@code updated_at} 取 {@code session_user.updated_at} 与 agent_state
+     * 更新时间的较大者（续聊会话即时靠前，A2A 槽位 JOIN 不命中时也不退化成创建时间）。
      *
      * <p>分页：{@code onlyProblem=true} 时先在内存按问题标记过滤（异常数通常远小于总量，
      * 扫描上限 {@value #MONITOR_PROBLEM_SCAN_LIMIT}），随后统一在内存分页，保证
@@ -291,7 +292,7 @@ public class DebugApiController {
 
             var sql = new StringBuilder(
                 "SELECT su.session_id, su.user_id, su.remark, su.model, su.created_at, "
-                    + "MAX(a.updated_at) AS updated_at "
+                    + "GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) AS updated_at "
                     + "FROM session_user su LEFT JOIN agent_state a "
                     + AGENT_STATE_JOIN_MONITOR
                     + "WHERE 1=1 ");
@@ -314,8 +315,8 @@ public class DebugApiController {
                 sql.append("AND su.updated_at <= ? ");
                 params.add(to.trim());
             }
-            sql.append("GROUP BY su.session_id, su.user_id, su.remark, su.model, su.created_at ");
-            sql.append("ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC ");
+            sql.append("GROUP BY su.session_id, su.user_id, su.remark, su.model, su.created_at, su.updated_at ");
+            sql.append("ORDER BY GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) DESC ");
             sql.append("LIMIT ?");
 
             // 扫描窗口：仅异常需放宽到问题扫描上限后内存过滤；否则取到目标页 +1 即可
