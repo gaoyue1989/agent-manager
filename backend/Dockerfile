@@ -1,6 +1,8 @@
 # 多阶段构建：golang 编译 → 运行镜像
 FROM golang:1.26 AS builder
-ENV GOPROXY=https://goproxy.cn,direct
+# 默认国内代理；CI（境外 runner）可用 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

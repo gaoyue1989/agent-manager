@@ -1,0 +1,20 @@
+# Helm chart 的 Service 名为 oaf-platform-backend，而内置 platform MCP 连接器
+# （backend/internal/service/agentgen.go builtinPlatformMCPConfig）与
+# e2e/console-split/lib.sh 的 KUBE_OK 探测都使用该名字。裸清单部署时补一个别名
+# Service，保证 M6 的 platform /mcp 验证靶与内置连接器在 CI 中可用。
+apiVersion: v1
+kind: Service
+metadata:
+  name: oaf-platform-backend
+  namespace: agent-platform
+  labels:
+    app.kubernetes.io/name: oaf-platform
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/managed-by: oaf-ci
+spec:
+  selector:
+    app: platform-backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

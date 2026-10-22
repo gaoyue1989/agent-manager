@@ -26,7 +26,7 @@ images:
 routing:
   mode: router            # router（默认，chart 部署 platform-router）| host（每服务独立域名）
   # 业务 Ingress 的 IngressClass；留空 = 后端不写 ingressClassName（集群默认兜底）
-  ingressClass: nginx
+  ingressClass: ""
   # 集群 ingress controller 的对外入口地址（Endpoint 展示拼装用，如 172.20.0.3 / 域名）
   host: ""
   port: 30080
@@ -35,6 +35,9 @@ routing:
   #   off     不鉴权（历史行为，默认）；report 只记日志放行（灰度观察）；enforce fail-closed
   # 转档 = 改本值 + helm upgrade（router Pod 滚动重启；与裸清单 set env + rollout 等价）
   authMode: "off"
+  # 动态 upstream（/agent/{short} → oaf-{short}-svc）的 DNS resolver；
+  # 默认 kube-dns ClusterIP（kind/常见集群 10.96.0.10），非默认 Service CIDR 时覆盖
+  dnsResolver: "10.96.0.10"
 
 # ---------- 对外暴露（仅 Ingress；不提供 NodePort，已决议） ----------
 ingress:
@@ -82,6 +85,7 @@ backend:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 2Gi }
   # KUBECONFIG 两模式（设计 §6.2）；synthesized = 部署期合成（专用 SA + token Secret + kubeconfig）
+  # provided = 使用外部 kubeconfig 凭据，不创建 SA/RBAC（避免部署账号权限不足导致安装失败）
   kubeconfig:
     mode: synthesized            # synthesized | provided
     server: ""                   # synthesized：空 = https://kubernetes.default.svc（可覆写为 Service IP）

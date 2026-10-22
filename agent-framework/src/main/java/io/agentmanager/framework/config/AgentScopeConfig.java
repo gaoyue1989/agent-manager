@@ -91,13 +91,16 @@ public class AgentScopeConfig {
         // 的沙箱获取，消解并发 hydrate 互踩与端口竞态的触发面；Redis 不可用时守卫内部 fail-open。
         // 锁键经 session_user 反查真实用户（Channel 链路 key.value 是网关 peer=前端 sessionId，
         // 直接组键会让 USER 串行化退化为每会话一把，2026-10-16 实测确认）；无 store 时回退原值
+        // 2026-10-21：per-session agent 隔离开启后 slot 已按会话分（Channel=前端 sid），锁粒度
+        // 跟随 slot（sessionGranularLocks=true），否则同用户多会话在各自独立 slot 上互相排队
         if (sandboxRuntime.guardEnabled()) {
             var redisFacade = redisFacadeProvider.getIfAvailable();
             if (redisFacade != null) {
+                var sessionGranular = sandboxRuntime.sessionAgentIsolationEnabled();
                 spec.executionGuard(new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
-                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore));
-                log.info("SandboxExecutionGuard enabled (scope=USER serialized by real userId, leaseTtl={}s)",
-                    sandboxRuntime.guardLeaseSeconds());
+                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular));
+                log.info("SandboxExecutionGuard enabled (scope=USER, lockGranularity={}, leaseTtl={}s)",
+                    sessionGranular ? "per-session(slot-aligned)" : "per-real-user", sandboxRuntime.guardLeaseSeconds());
             } else {
                 log.warn("SandboxExecutionGuard requested (SANDBOX_GUARD_ENABLED) but no RedisConnectionFacade bean — running unguarded");
             }

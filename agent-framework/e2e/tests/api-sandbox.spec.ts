@@ -515,3 +515,49 @@ test('X19 双会话并发沙箱 turn 互不干扰（#2849 单槽互踩回归）'
   const stats = await sandboxStats();
   expect(stats.creates.length).toBeGreaterThanOrEqual(2);
 });
+
+// 同用户两会话并发长任务（用户反馈回归：2026-10-21 守卫锁粒度修复）。
+// per-session agent 隔离（SANDBOX_SESSION_AGENT_ISOLATION=true）下 slot 按前端 sid 分片，
+// 守卫锁粒度跟随 slot（sessionGranularLocks）→ 同用户两会话的沙箱执行窗口必须重叠；
+// 修复前锁反查真实用户（每用户一把），B 会话整回合排队到 A 回合结束。
+test('X20 同用户两会话并发沙箱执行（锁粒度回归）', async () => {
+  const uid = U();
+  const sidA = sessionIdFor(`x20a-${uniq()}`);
+  const sidB = sessionIdFor(`x20b-${uniq()}`);
+  const secs = 10;
+  const t0 = Date.now();
+  // A 先发起并进入沙箱执行（sleep 10），3s 后同用户 B 会话发起同样的长任务
+  const streamA = chat({ message: `[E2E:execute:sleep](${secs})`, userId: uid, sessionId: sidA, timeoutMs: 120_000 });
+  await new Promise(r => setTimeout(r, 3_000));
+  const streamB = chat({ message: `[E2E:execute:sleep](${secs})`, userId: uid, sessionId: sidB, timeoutMs: 120_000 });
+  await Promise.all([waitTerminal(streamA), waitTerminal(streamB)]);
+  const wall = Date.now() - t0;
+
+  expect(streamA.terminal?.type, `A 终态异常: ${JSON.stringify(streamA.terminal)}`).toBe('done');
+  expect(streamB.terminal?.type, `B 终态异常: ${JSON.stringify(streamB.terminal)}`).toBe('done');
+
+  // 从各自 TOOL_RESULT 的 echo 时间戳还原执行窗口（mock 沙箱真实 bash 执行）
+  // 工具输出在 TOOL_RESULT_TEXT_DELTA.delta（textOf 只拼 LLM 文本帧，不适用）
+  const windowOf = (frames: Array<Record<string, unknown> & { type: string }>) => {
+    const text = frames.filter(f => f.type === 'TOOL_RESULT_TEXT_DELTA')
+      .map(f => String(f.delta ?? '')).join('');
+    const s = /conc-start-(\d{13})/.exec(text)?.[1];
+    const e = /conc-end-(\d{13})/.exec(text)?.[1];
+    return s && e ? { start: Number(s), end: Number(e) } : null;
+  };
+  const wa = windowOf(streamA.frames);
+  const wb = windowOf(streamB.frames);
+  expect(wa, 'A 执行窗口缺失').toBeTruthy();
+  expect(wb, 'B 执行窗口缺失').toBeTruthy();
+  // 并行判据：执行窗口重叠（串行时 B 的 start 必然晚于 A 的 end）
+  expect(wb!.start, `B 开始(${wb!.start}) 应早于 A 结束(${wa!.end})——出现串行排队`).toBeLessThan(wa!.end);
+  expect(wa!.start, `A 开始(${wa!.start}) 应早于 B 结束(${wb!.end})`).toBeLessThan(wb!.end);
+  // 粗判据：总耗时显著小于串行值（3s 错峰 + 2×10s ≈ 23s）
+  expect(wall, `总耗时 ${wall}ms 接近串行水位，疑似未并发`).toBeLessThan(22_000);
+
+  // 结构判据：两会话各自持有独立沙箱（create 流水 ≥ 2 且命令落在不同 sandboxId）
+  const stats = await sandboxStats();
+  const sleepSandboxes = new Set(
+    stats.commands.filter(c => c.cmd.includes('sleep')).map(c => c.sandboxId));
+  expect(sleepSandboxes.size).toBeGreaterThanOrEqual(2);
+});

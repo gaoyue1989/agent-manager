@@ -1,0 +1,26 @@
+# CI 单节点 kind 集群：NodePort 30080/30443 映射到 runner localhost，
+# 与仓库 e2e 脚本默认的 http://localhost:30080 对齐。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+      - containerPort: 30443
+        hostPort: 30443
+        protocol: TCP
+      # 控制台直连 NodePort（UI E2E 走 30881；30880 供直连 API 排障）
+      - containerPort: 30880
+        hostPort: 30880
+        protocol: TCP
+      - containerPort: 30881
+        hostPort: 30881
+        protocol: TCP

@@ -36,7 +36,7 @@ air-gapped 无 helm 时：`helm template oaf ./charts/oaf-platform -f values-off
 | `persistence.existingClaim` | **必填**，指向环境已有 PVC（渲染 `PLATFORM_PVC_NAME`；chart 不创建） |
 | `external.mysql.*` | 平台元数据库（外部）。DSN 经 Secret 注入，不落 Deployment 明文 |
 | `external.redis.url` | 业务侧 Redis（用于默认配置种子；平台自身不用 Redis） |
-| `backend.kubeconfig.mode` | `synthesized`（默认，部署期合成：专用 SA + token Secret + kubeconfig）或 `provided`（跨集群，给 `existingSecret`/`content`） |
+| `backend.kubeconfig.mode` | `synthesized`（默认，部署期合成：专用 SA + token Secret + kubeconfig + RBAC）或 `provided`（跨集群，给 `existingSecret`/`content`；**不创建 SA/RBAC**） |
 | `backend.authToken` | REST/MCP Bearer（生产必填；建议 `backend.existingSecret`，key `auth-token`） |
 | `business.resources` | 业务 Pod 资源四元组（渲染 `RESOURCE_*`，影响每个发布的服务） |
 | `business.deploymentOverlay` | `DEPLOYMENT_TEMPLATE`（SMP，作用于每个业务 Deployment）：三选一 `patch`（结构化，推荐）/ `raw`（原文）/ `existingConfigMap`（运维自管）。OTel 暂不考虑，如需经此注入 `OTEL_*` |

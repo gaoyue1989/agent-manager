@@ -266,6 +266,80 @@ func TestModelUsageAggregation(t *testing.T) {
 	}
 }
 
+// TestModelUsageRuntimeModels issue c3095ee：usage 行补运行时 /models 真实清单。
+// 断言映射（默认标记 / 本空间下发标记）与拉取失败语义（nil=业务面不可达，非空数组）。
+func TestModelUsageRuntimeModels(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	ws := seedWs(t, c, "ws-1000aaa6", "runtime-models空间")
+
+	models := []map[string]interface{}{
+		{"id": "remote-default", "name": "系统默认", "source": "system",
+			"model_id": "m1", "base_url": "http://b1/v1"},
+		{"id": "remote-delivered", "name": "下发模型", "source": "managed",
+			"model_id": "m2", "base_url": "http://b2/v1"},
+	}
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"default_model": "remote-default",
+			"models":        models,
+		})
+	}))
+	defer agent.Close()
+
+	svc := &store.ServiceEntity{K8sName: "oaf-usage-rt", DisplayName: "usage-rt",
+		WorkspaceID: ws.ID, Status: store.StatusRunning, ClusterURL: agent.URL}
+	c.DB.Create(svc)
+	conn := seedVerifiedConn(t, c, ws.ID, "c-rt", "m2", "http://b2/v1")
+	c.DB.Create(&store.ModelDelivery{ConnectionID: conn.ID, ServiceID: svc.ID,
+		RemoteModelID: "remote-delivered", Status: "synced"})
+
+	usage, err := c.ModelConnectionUsage(ws.ID)
+	if err != nil || len(usage) != 1 {
+		t.Fatalf("usage: %v n=%d", err, len(usage))
+	}
+	byID := map[string]RuntimeModel{}
+	for _, m := range usage[0].RuntimeModels {
+		byID[m.ID] = m
+	}
+	if len(byID) != 2 {
+		t.Fatalf("runtime models: %+v", usage[0].RuntimeModels)
+	}
+	if !byID["remote-default"].IsDefault || byID["remote-default"].Delivered {
+		t.Fatalf("default mapping: %+v", byID["remote-default"])
+	}
+	if byID["remote-delivered"].IsDefault || !byID["remote-delivered"].Delivered {
+		t.Fatalf("delivered mapping: %+v", byID["remote-delivered"])
+	}
+	if byID["remote-delivered"].ModelID != "m2" || byID["remote-delivered"].BaseURL != "http://b2/v1" {
+		t.Fatalf("field mapping: %+v", byID["remote-delivered"])
+	}
+
+	// 拉取成功但清单为空：必须是 []（非 nil），前端显示「0 个模型」而非拉取失败
+	models = []map[string]interface{}{}
+	usage, err = c.ModelConnectionUsage(ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage[0].RuntimeModels == nil || len(usage[0].RuntimeModels) != 0 {
+		t.Fatalf("empty runtime must be []: %+v", usage[0].RuntimeModels)
+	}
+
+	// 业务面不可达：保持 nil（JSON null），前端据此显示拉取失败而非空清单
+	agent.Close()
+	usage, err = c.ModelConnectionUsage(ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage[0].RuntimeModels != nil {
+		t.Fatalf("unreachable runtime must be nil: %+v", usage[0].RuntimeModels)
+	}
+}
+
 // ---- M6 MCP 连接器 ----
 
 // fakeMCP 假 MCP server：initialize → tools/list 两步（streamable HTTP JSON 形态）。

@@ -176,6 +176,11 @@ class SkillManageServiceTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
             FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
             "需要 POSIX 权限支持才能模拟不可删除目录");
+        // root 不受 POSIX 权限位约束（仍可删除只读目录内容），无法构造删除失败场景；
+        // 非 root 的 CI runner 正常执行本用例。
+        org.junit.jupiter.api.Assumptions.assumeFalse(
+            "root".equals(System.getProperty("user.name")),
+            "root 绕过 POSIX 权限，无法模拟不可删除目录");
         var service = createService();
         service.uploadSkill(new ByteArrayInputStream(createFlatZip("locked", "x", "1.0.0")), "locked.zip");
 

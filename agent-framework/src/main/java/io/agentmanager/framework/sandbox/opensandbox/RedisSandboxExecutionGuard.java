@@ -30,8 +30,15 @@ import io.lettuce.core.ScriptOutputType;
  * 会让锁退化为"每会话一把"（实测 sbx:guard:user:{sa2-main}/{sb2-sbx} 两锁并存，同用户
  * 两个会话并行复用同一 slot）。本类在组键前经 {@link SessionKeyResolver#realUserId} 反查
  * session_user 表还原真实用户；反查不可用/未命中时回退原值（A2A / invoke 链路 ctx.userId
- * 本就是真实用户，回退保持其行为不变）。注意这修复的是"同用户串行化"；跨用户并行仍会
- * 竞态 harness 单槽文件系统（上游 #2849），由 per-session agent 隔离另行解决。
+ * 本就是真实用户，回退保持其行为不变）。
+ *
+ * <p><b>锁粒度跟随 slot 粒度（2026-10-21）</b>：per-session agent 隔离
+ * （{@code SANDBOX_SESSION_AGENT_ISOLATION}）落地后，隔离键值本身就是 slot 粒度——
+ * Channel 链路 = 前端 sid（每会话一个 slot/容器），A2A 链路 = 真实用户（每用户一个）。
+ * 此时再反查真实用户组键会让同用户多个会话在"各自独立 slot"上互相排队（过度串行，
+ * 即用户反馈的同用户两会话无法并发）。{@code sessionGranularLocks=true} 时锁键直接用
+ * 隔离键原值（与 slot 严格同粒度，同会话互斥由 turn_lease 裁决）；false（共享单例
+ * agent，单槽 FS 仍跨会话互踩）保持反查真实用户的旧行为。
  *
  * <p><b>实现</b>：SET NX PX + Lua 比较删除（与 turn_lease 同款互斥语义）。同一隔离键
  * （USER → 真实用户）串行进入；租约 TTL 为崩溃自愈兜底（进程被杀时锁到期自动释放）。
@@ -61,6 +68,12 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
     private final RedisConnectionFacade facade;
     private final long leaseTtlMs;
     private final SessionUserStore sessionUserStore;
+    /**
+     * 锁粒度跟随 slot 粒度（per-session agent 隔离开启时为 true）：
+     * true = 锁键用隔离键原值（Channel=前端 sid 每会话一把，A2A=真实用户每用户一把）；
+     * false = 反查真实用户（共享单例 agent 时代的旧行为，同用户串行保护单槽 FS）。
+     */
+    private final boolean sessionGranularLocks;
 
     /** fail-open 限流：上次告警时间戳，60s 内不重复刷屏 */
     private volatile long lastFailOpenWarnAt = 0L;
@@ -77,9 +90,15 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
 
     public RedisSandboxExecutionGuard(RedisConnectionFacade facade, long leaseTtlMs,
                                       SessionUserStore sessionUserStore) {
+        this(facade, leaseTtlMs, sessionUserStore, false);
+    }
+
+    public RedisSandboxExecutionGuard(RedisConnectionFacade facade, long leaseTtlMs,
+                                      SessionUserStore sessionUserStore, boolean sessionGranularLocks) {
         this.facade = facade;
         this.leaseTtlMs = leaseTtlMs;
         this.sessionUserStore = sessionUserStore;
+        this.sessionGranularLocks = sessionGranularLocks;
     }
 
     @Override
@@ -106,13 +125,18 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
     }
 
     /**
-     * 锁键值翻译：USER 范围经 session_user 反查真实 userId（Channel 链路 key.value 是
-     * 网关 peer=前端 sessionId）；SESSION/AGENT/GLOBAL 范围值本就是规范键，原样返回。
+     * 锁键值翻译：USER 范围下 sessionGranularLocks=true 时直接用隔离键原值
+     * （与 slot 严格同粒度，跳过反查——自旋路径连 DB 都不打）；否则经 session_user
+     * 反查真实用户（Channel 链路 key.value 是网关 peer=前端 sessionId）。
+     * SESSION/AGENT/GLOBAL 范围值本就是规范键，原样返回。
      * 反查不可用/未命中回退原值（A2A / invoke 链路行为不变）。结果短缓存挡自旋查库。
      */
     private String resolveLockValue(SandboxIsolationKey key) {
         if (sessionUserStore == null
                 || key.getScope() != io.agentscope.harness.agent.IsolationScope.USER) {
+            return key.getValue();
+        }
+        if (sessionGranularLocks) {
             return key.getValue();
         }
         return resolveUserLockValue(key.getValue());

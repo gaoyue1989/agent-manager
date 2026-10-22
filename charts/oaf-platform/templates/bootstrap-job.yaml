@@ -53,7 +53,9 @@ spec:
         app.kubernetes.io/component: bootstrap
     spec:
       restartPolicy: Never
+      {{- if eq .Values.backend.kubeconfig.mode "synthesized" }}
       serviceAccountName: {{ $sa }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
