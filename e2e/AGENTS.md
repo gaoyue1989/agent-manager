@@ -81,7 +81,7 @@ cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost
   跳过会话类断言）
 - 执行：`platform-e2e.sh` → `console-split/run-all.sh m0..m10` → `console-ui-e2e.js`；
   失败上传集群状态与 UI 截图
-- **当前为非必需检查**：稳定 2-3 个 PR 后由管理员加入 master 分支保护
+- **必需检查**（2026-10-22 起）：按目录过滤，不相关变更 Skipped 视为通过
 
 ## 断言原则
 

@@ -273,6 +273,12 @@ func TestModelUsageRuntimeModels(t *testing.T) {
 	defer done()
 	ws := seedWs(t, c, "ws-1000aaa6", "runtime-models空间")
 
+	models := []map[string]interface{}{
+		{"id": "remote-default", "name": "系统默认", "source": "system",
+			"model_id": "m1", "base_url": "http://b1/v1"},
+		{"id": "remote-delivered", "name": "下发模型", "source": "managed",
+			"model_id": "m2", "base_url": "http://b2/v1"},
+	}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			w.WriteHeader(http.StatusNotFound)
@@ -280,12 +286,7 @@ func TestModelUsageRuntimeModels(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"default_model": "remote-default",
-			"models": []map[string]interface{}{
-				{"id": "remote-default", "name": "系统默认", "source": "system",
-					"model_id": "m1", "base_url": "http://b1/v1"},
-				{"id": "remote-delivered", "name": "下发模型", "source": "managed",
-					"model_id": "m2", "base_url": "http://b2/v1"},
-			},
+			"models":        models,
 		})
 	}))
 	defer agent.Close()
@@ -316,6 +317,16 @@ func TestModelUsageRuntimeModels(t *testing.T) {
 	}
 	if byID["remote-delivered"].ModelID != "m2" || byID["remote-delivered"].BaseURL != "http://b2/v1" {
 		t.Fatalf("field mapping: %+v", byID["remote-delivered"])
+	}
+
+	// 拉取成功但清单为空：必须是 []（非 nil），前端显示「0 个模型」而非拉取失败
+	models = []map[string]interface{}{}
+	usage, err = c.ModelConnectionUsage(ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage[0].RuntimeModels == nil || len(usage[0].RuntimeModels) != 0 {
+		t.Fatalf("empty runtime must be []: %+v", usage[0].RuntimeModels)
 	}
 
 	// 业务面不可达：保持 nil（JSON null），前端据此显示拉取失败而非空清单
