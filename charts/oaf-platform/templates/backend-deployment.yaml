@@ -29,7 +29,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- if eq .Values.backend.kubeconfig.mode "synthesized" }}
       serviceAccountName: {{ $sa }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

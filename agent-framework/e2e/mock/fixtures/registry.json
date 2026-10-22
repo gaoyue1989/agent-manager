@@ -59,6 +59,10 @@
       "marker": "[E2E:execute:fail]",
       "calls": 2
     },
+    "execute-sleep": {
+      "marker": "[E2E:execute:sleep]",
+      "calls": 2
+    },
     "sandbox-write": {
       "marker": "[E2E:tool:write:sb]",
       "calls": 2

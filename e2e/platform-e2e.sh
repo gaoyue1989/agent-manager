@@ -99,11 +99,19 @@ assert_eq "A9 注册版本" "$(echo "$DETAIL" | jq -r '.data.registeredVersion')
 
 k8s_res deploy $K8S_NAME      && ok "A10 Deployment 存在"     || bad "A10 Deployment 缺失"
 k8s_res svc $K8S_NAME-svc     && ok "A11 Service 存在"        || bad "A11 Service 缺失"
-k8s_res ingress $K8S_NAME     && ok "A12 Ingress 存在"        || bad "A12 Ingress 缺失"
+# 路由双模式：router 模式（默认）无 per-service Ingress，host 模式才有
+EP=$(api GET "/services/$SVC_ID" | jq -r '.data.endpoint')
+case "$EP" in
+  *"/agent/"*)
+    k8s_res ingress $K8S_NAME && bad "A12 router 模式不应创建 per-service Ingress" \
+      || ok "A12 router 模式无 per-service Ingress" ;;
+  *)
+    k8s_res ingress $K8S_NAME && ok "A12 Ingress 存在" || bad "A12 Ingress 缺失" ;;
+esac
 k8s_res cm $K8S_NAME-env      && ok "A13 env ConfigMap 存在"  || bad "A13 ConfigMap 缺失"
 
-EXT=$(curl -s http://localhost:30080/agent/e2e-demo/.well-known/agent-card.json)
-assert_contains "A14 外部经 Ingress 拉取 agent-card" "$EXT" '"name"'
+EXT=$(curl -s "${EP%/}/.well-known/agent-card.json")
+assert_contains "A14 外部经 Ingress/路由拉取 agent-card" "$EXT" '"name"'
 POD_DIR=$(kubectl -n $NS exec deployment/platform-backend -- ls /data/packages 2>/dev/null | grep -c "^$PKG_ID$")
 assert_eq "A15 PVC 内包目录存在" "$POD_DIR" "1"
 

@@ -44,6 +44,9 @@ data:
 
     server {
       listen 8080;
+      # 动态 upstream（$short）必须显式 resolver；默认 kube-dns ClusterIP，
+      # 非默认 Service CIDR 的集群用 DNS_RESOLVER 覆盖（kind 默认 10.96.0.10）。
+      resolver ${DNS_RESOLVER} valid=10s ipv6=off;
       # 与文件上传（POST /files/upload）对齐：入口层不设更严于历史的体量限制，
       # 上限由应用层裁决
       client_max_body_size 200m;
@@ -130,6 +133,8 @@ spec:
           env:
             - name: ROUTER_AUTH_MODE          # off | report | enforce（灰度三态，见模板头注释）
               value: "off"
+            - name: DNS_RESOLVER              # 动态 upstream 解析（kube-dns ClusterIP）
+              value: "10.96.0.10"
           volumeMounts:
             - name: conf
               mountPath: /etc/nginx/templates   # nginx 官方 entrypoint envsubst 渲染到 conf.d/

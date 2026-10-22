@@ -56,6 +56,8 @@ spec:
             # 官方镜像 entrypoint envsubst 渲染，改档 = 改 values + helm upgrade
             - name: ROUTER_AUTH_MODE
               value: {{ .Values.routing.authMode | quote }}
+            - name: DNS_RESOLVER
+              value: {{ .Values.routing.dnsResolver | default "10.96.0.10" | quote }}
           volumeMounts:
             - name: conf
               mountPath: /etc/nginx/templates   # nginx 官方 entrypoint envsubst 渲染到 conf.d/

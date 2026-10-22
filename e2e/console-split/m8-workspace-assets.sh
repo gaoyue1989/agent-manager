@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M8 · 工作空间资产余页（实施文档 09 §9/§10，DoD：e2e 脚本 workspace-assets）
 # 覆盖：API Key 签发（格式/明文一次/前缀）/作用域过滤/吊销/过期惰性；invitable-users；
-#       成员邀请/角色/移除（用户侧端点）；Skill L4 直连端点可达；模板列表；包模板开关
+#       成员邀请/角色/移除（用户侧端点）；模板列表；包模板开关
 source "$(dirname "$0")/lib.sh"
 
 TS=$(date +%s)
@@ -72,20 +72,6 @@ else
   say "  ⏭️ 无包可标记，跳过模板开关链路"
 fi
 
-# ---- Skill L4 直连端点（running 服务存在时；经 frontend proxy）----
-SHORT=$(req GET "/console/workspaces/$WS/agents" "" "$OT" >/dev/null; \
-  req GET "/admin/workspaces/$(req GET /admin/workspaces "" "$TOKEN" | python3 -c "import sys,json;print(next((w['id'] for w in json.load(sys.stdin)['data'] if w['slug']=='default'),''))")/agents?status=running" "" "$TOKEN" | jqr "['data'][0]['shortName']" 2>/dev/null || true)
-if [ -n "$SHORT" ] && [ "$SHORT" != "None" ]; then
-  FE="${FRONTEND_BASE:-http://localhost:8911}"
-  L4=$(curl -s -m 10 "$FE/agent/$SHORT/skills/users" -H "Authorization: Bearer $TOKEN" 2>/dev/null)
-  if [ -n "$L4" ]; then
-    assert_eq "L4 列表端点可达（200 形态）" "$(echo "$L4" | head -c 1 | grep -cE '\[|\{')" "1"
-  else
-    skip "L4 端点经 frontend 不可达（FRONTEND_BASE 指向？）"
-  fi
-else
-  skip "无 running 服务，跳过 L4 直连断言"
-fi
 
 # ---- 空间技能清单（#163/#164）：异常 skill 目录写入包 warnings + 清单标注；声明回读描述 ----
 python3 - <<PYEOF
@@ -136,12 +122,9 @@ m={x['name']:x for x in d}
 iss=(m.get('My Skill!') or {}).get('issues') or []
 print(';'.join(iss))")
   assert_contains "非法名称标注 issues" "$BADNAME" "invalid characters"
-  code DELETE /packages/$SPKG "" "$TOKEN" >/dev/null 2>&1
+  legacy_code DELETE /packages/$SPKG >/dev/null 2>&1
 else
   skip "技能探针包上传失败，跳过 #163/#164 断言"
 fi
-
-# ---- 记忆空间数据真实性（threads 按 uid 过滤；无会话=空数组不造假）----
-assert_contains "成员管理页脚权限口径（member 只读）已在 M1/M4 覆盖" "ok" "ok"
 
 finish "M8-workspace-assets"

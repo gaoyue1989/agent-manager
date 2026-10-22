@@ -54,6 +54,27 @@ code() { # code 同 req 形态，只取状态码
     curl -s -o /dev/null -w '%{http_code}' -X "$m" "$BASE$p"
   fi
 }
+# legacy 面（/packages、/services 等）只认 AUTH_TOKEN（未配置时匿名可用），不认 JWT。
+# 这两个 helper 让套件在「配了 AUTH_TOKEN」的环境也能读包/服务。
+legacy_req() { # legacy_req <method> <path> [body]
+  local m="$1" p="$2" b="${3:-}" args=()
+  [ -n "${AUTH_TOKEN:-}" ] && args=(-H "Authorization: Bearer $AUTH_TOKEN")
+  if [ -n "$b" ]; then
+    curl -s -X "$m" "${args[@]}" -H 'Content-Type: application/json' -d "$b" "$BASE$p"
+  else
+    curl -s -X "$m" "${args[@]}" "$BASE$p"
+  fi
+}
+legacy_code() { # legacy_code <method> <path> [body]
+  local m="$1" p="$2" b="${3:-}" args=()
+  [ -n "${AUTH_TOKEN:-}" ] && args=(-H "Authorization: Bearer $AUTH_TOKEN")
+  if [ -n "$b" ]; then
+    curl -s -o /dev/null -w '%{http_code}' -X "$m" "${args[@]}" -H 'Content-Type: application/json' -d "$b" "$BASE$p"
+  else
+    curl -s -o /dev/null -w '%{http_code}' -X "$m" "${args[@]}" "$BASE$p"
+  fi
+}
+
 jqr() { # 从首个 '{' 起解析（容忍偶发响应体前缀噪声——单节点 kind 高负载下 ingress 偶发拼接双文档）
   python3 -c "
 import sys,json
@@ -84,12 +105,31 @@ wait_status() {
   done
   echo "$st"
 }
-# 集群工具可用性（pod env / secret 断言用；不可用则相关用例 skip）
-if command -v kubectl >/dev/null 2>&1 && kubectl -n agent-platform get deploy oaf-platform-backend >/dev/null 2>&1; then
+# 集群工具可用性（pod env / secret 断言用；不可用则相关用例 skip）。
+# 兼容两种部署形态：Helm（oaf-platform-backend）与仓库裸清单（platform-backend）。
+if command -v kubectl >/dev/null 2>&1 \
+   && { kubectl -n agent-platform get deploy oaf-platform-backend >/dev/null 2>&1 \
+        || kubectl -n agent-platform get deploy platform-backend >/dev/null 2>&1; }; then
   KUBE_OK=1; KNS=agent-platform
 else
   KUBE_OK=0; KNS=""
 fi
+
+# 解析 LLM 凭据：优先显式 env（CI 的 mock LLM），否则回落到已部署 release-agent 的
+# Secret/ConfigMap。调用后设置 LLM_BASE / LLM_KEY / LLM_MODEL。
+resolve_llm_env() {
+  LLM_BASE="${LLM_BASE_URL:-}"; LLM_KEY="${LLM_API_KEY:-}"; LLM_MODEL="${LLM_MODEL:-}"
+  if [ -z "$LLM_KEY" ] && [ "$KUBE_OK" = "1" ]; then
+    LLM_KEY=$(kubectl -n $KNS get secret oaf-release-agent-env-secret -o jsonpath='{.data.LLM_API_KEY}' 2>/dev/null | base64 -d || true)
+    LLM_BASE=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_BASE_URL}' 2>/dev/null || true)
+    LLM_MODEL=$(kubectl -n $KNS get cm oaf-release-agent-env -o jsonpath='{.data.LLM_MODEL_ID}' 2>/dev/null || true)
+  fi
+}
+
+# 运行时会话类断言门控：真实 agent-framework 才跑（mock 兜底镜像只提供 A2A 面）。
+runtime_is_real() {
+  [ "${E2E_AGENT_RUNTIME:-real}" = "real" ]
+}
 
 # ensure_verified <token> <ws> <connId>：连通性测试重试至多 3 次（LLM 供应商偶发 5xx/限流）
 ensure_verified() {
