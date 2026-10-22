@@ -1,8 +1,9 @@
 // 模型连接（M5）：工作空间级配置 CRUD + 连通性测试 + 下发至 Agent /models（幂等）+
 // 使用情况聚合。下发的业务面契约 = agent-framework ModelController（已实施，零改动）：
-//   GET  /models → {default_model, models:[{id,name,model_id,base_url,...}]}
-//   POST /models {name,provider,modelId,baseUrl,apiKey,temperature,maxTokens,timeoutSeconds,enabled}
-//   PATCH /models/{id}（字段缺省=不变；重试命中 duplicate_name 时转 PATCH）
+//
+//	GET  /models → {default_model, models:[{id,name,model_id,base_url,...}]}
+//	POST /models {name,provider,modelId,baseUrl,apiKey,temperature,maxTokens,timeoutSeconds,enabled}
+//	PATCH /models/{id}（字段缺省=不变；重试命中 duplicate_name 时转 PATCH）
 package service
 
 import (
@@ -540,12 +541,12 @@ type UsageRow struct {
 
 // RuntimeModel 运行时 /models 单条（Agent 侧 model_config，全部模型来源的真实清单）。
 type RuntimeModel struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Source   string `json:"source"` // system | managed
-	ModelID  string `json:"modelId"`
-	BaseURL  string `json:"baseUrl"`
-	IsDefault bool  `json:"isDefault"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Source    string `json:"source"` // system | managed
+	ModelID   string `json:"modelId"`
+	BaseURL   string `json:"baseUrl"`
+	IsDefault bool   `json:"isDefault"`
 	// Delivered 由本空间连接下发而来（与 model_deliveries.remote_model_id 对得上）
 	Delivered bool `json:"delivered"`
 }
@@ -602,6 +603,9 @@ func (c *Core) ModelConnectionUsage(workspaceID uint) ([]UsageRow, error) {
 					} `json:"models"`
 				}
 				if json.Unmarshal(resp, &rm) == nil {
+					// 拉取成功：即使清单为空也落 []（nil 留给「业务面不可达」，
+					// 前端据此区分「0 个模型」与「拉取失败」）。
+					row.RuntimeModels = []RuntimeModel{}
 					deliveredIDs := map[string]bool{}
 					for _, d := range deliveries {
 						if d.RemoteModelID != "" {
