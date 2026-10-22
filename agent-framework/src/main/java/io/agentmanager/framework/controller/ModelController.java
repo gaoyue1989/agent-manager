@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -34,6 +35,8 @@ import io.agentscope.core.model.GenerateOptions;
  *   <li>{@code GET /models} —— 可选模型列表（前端 picker / debug 管理页数据源）</li>
  *   <li>{@code GET /models/{id}} —— 详情（api_key 掩码）</li>
  *   <li>{@code POST /models} / {@code PATCH /models/{id}} / {@code DELETE /models/{id}} —— 托管模型 CRUD</li>
+ *   <li>{@code PUT /models/{id}/default} —— 设置全局默认对话模型（id=system 回落系统模型）</li>
+ *   <li>{@code PUT /models/{id}/fallback} —— 设置备用模型（id=system 清除 DB 覆盖，回落 env）</li>
  *   <li>{@code POST /models/{id}/test} —— 连接测试（真实发起一次最小 completion）</li>
  * </ul>
  *
@@ -84,8 +87,13 @@ public class ModelController {
     @GetMapping
     public Map<String, Object> listModels(
             @RequestParam(value = "all", required = false, defaultValue = "false") boolean all) {
+        var defaultModel = catalog.defaultModelId();
+        var fallback = catalog.fallbackSelection();
         return Map.of(
-            "default_model", ModelCatalog.SYSTEM_MODEL_ID,
+            "default_model", ModelCatalog.isSystemSelection(defaultModel)
+                ? ModelCatalog.SYSTEM_MODEL_ID : defaultModel,
+            "fallback_model", fallback != null ? fallback.id() : "",
+            "fallback_source", fallback != null ? fallback.source() : "none",
             "models", catalog.options(all));
     }
 
@@ -221,6 +229,61 @@ public class ModelController {
         return ResponseEntity.ok(Map.of("id", id, "deleted", true));
     }
 
+    /**
+     * 设置默认对话模型：未显式绑定模型的会话走它。
+     * id = {@code system} 表示清除托管默认、回落系统模型（LLM_* 环境变量）；
+     * 托管模型必须存在且 enabled。写入为单语句原子替换（多副本并发最终仍只有一行默认）。
+     */
+    @PutMapping("/{id}/default")
+    public ResponseEntity<Map<String, Object>> setDefaultModel(@PathVariable String id) {
+        if (ModelCatalog.isSystemSelection(id)) {
+            store.clearDefault();
+            return ResponseEntity.ok(Map.of("default_model", ModelCatalog.SYSTEM_MODEL_ID));
+        }
+        var cfg = store.findById(id);
+        if (cfg.isEmpty()) {
+            return notFound(id);
+        }
+        if (!cfg.get().enabled()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "model_disabled",
+                "message", "disabled model cannot be set as default: " + id));
+        }
+        store.setDefault(cfg.get().id());
+        return ResponseEntity.ok(Map.of("default_model", cfg.get().id()));
+    }
+
+    /**
+     * 设置备用模型（主模型重试预算耗尽、首个信号失败后切换）。
+     * id = {@code system} 表示清除数据库备用覆盖（运行时回退 LLM_FALLBACK_MODEL_ID）；
+     * 备用只允许启用的托管模型，不可为系统模型。
+     */
+    @PutMapping("/{id}/fallback")
+    public ResponseEntity<Map<String, Object>> setFallbackModel(@PathVariable String id) {
+        if (ModelCatalog.isSystemSelection(id)) {
+            store.clearFallback();
+            var selection = catalog.fallbackSelection();
+            var result = new LinkedHashMap<String, Object>();
+            result.put("fallback_model", selection != null ? selection.id() : "");
+            result.put("fallback_source", selection != null ? selection.source() : "none");
+            return ResponseEntity.ok(result);
+        }
+        var cfg = store.findById(id);
+        if (cfg.isEmpty()) {
+            return notFound(id);
+        }
+        if (!cfg.get().enabled()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "model_disabled",
+                "message", "disabled model cannot be set as fallback: " + id));
+        }
+        store.setFallback(cfg.get().id());
+        var result = new LinkedHashMap<String, Object>();
+        result.put("fallback_model", cfg.get().id());
+        result.put("fallback_source", "db");
+        return ResponseEntity.ok(result);
+    }
+
     /** 连接测试：真实发起一次最小 completion（max_tokens=16），返回时延与响应摘要 */
     @PostMapping("/{id}/test")
     public ResponseEntity<Map<String, Object>> testModel(@PathVariable String id) {
@@ -279,7 +342,8 @@ public class ModelController {
         m.put("frequency_penalty", llm.frequencyPenalty());
         m.put("context_length", llm.contextLength());
         m.put("enabled", true);
-        m.put("is_default", true);
+        m.put("is_default", ModelCatalog.isSystemSelection(catalog.defaultModelId()));
+        m.put("is_fallback", false);
         m.put("source", "system");
         m.put("read_only", true);
         return m;
@@ -302,7 +366,9 @@ public class ModelController {
         m.put("frequency_penalty", cfg.frequencyPenalty());
         m.put("context_length", cfg.contextLength());
         m.put("enabled", cfg.enabled());
-        m.put("is_default", false);
+        m.put("is_default", cfg.id().equals(catalog.defaultModelId()));
+        var fallback = catalog.fallbackSelection();
+        m.put("is_fallback", fallback != null && cfg.id().equals(fallback.id()));
         m.put("source", "managed");
         m.put("read_only", false);
         m.put("created_at", cfg.createdAt() != null ? cfg.createdAt().toString() : "");

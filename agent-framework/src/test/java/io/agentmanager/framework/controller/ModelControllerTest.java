@@ -69,6 +69,18 @@ class ModelControllerTest {
     }
 
     @Test
+    void listShouldExposeFallbackSelection() {
+        when(catalog.options(true)).thenReturn(List.of());
+        when(catalog.fallbackSelection())
+            .thenReturn(new ModelCatalog.FallbackSelection("fb", "db"));
+
+        var body = controller.listModels(true);
+
+        assertEquals("fb", body.get("fallback_model"));
+        assertEquals("db", body.get("fallback_source"));
+    }
+
+    @Test
     void getShouldMaskApiKeyForManagedModel() {
         when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", "sk-1234567890abcd", true)));
 
@@ -230,6 +242,83 @@ class ModelControllerTest {
         assertEquals(200, resp.getStatusCode().value());
         assertEquals(true, resp.getBody().get("deleted"));
         verify(catalog).invalidate("m1");
+    }
+
+    // ===== default（默认模型） =====
+
+    @Test
+    void setDefaultShouldSwitchToEnabledManagedModel() {
+        when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", null, true)));
+
+        var resp = controller.setDefaultModel("m1");
+
+        assertEquals(200, resp.getStatusCode().value());
+        assertEquals("m1", resp.getBody().get("default_model"));
+        verify(store).setDefault("m1");
+    }
+
+    @Test
+    void setDefaultShouldResetToSystemModel() {
+        var resp = controller.setDefaultModel("system");
+
+        assertEquals(200, resp.getStatusCode().value());
+        assertEquals("system", resp.getBody().get("default_model"));
+        verify(store).clearDefault();
+    }
+
+    @Test
+    void setDefaultShouldRejectUnknownOrDisabledModel() {
+        when(store.findById("gone")).thenReturn(Optional.empty());
+        when(store.findById("off")).thenReturn(Optional.of(cfg("off", "Off", null, false)));
+
+        var missing = controller.setDefaultModel("gone");
+        assertEquals(404, missing.getStatusCode().value());
+
+        var disabled = controller.setDefaultModel("off");
+        assertEquals(400, disabled.getStatusCode().value());
+        assertEquals("model_disabled", disabled.getBody().get("error"));
+        verify(store, never()).setDefault(any());
+    }
+
+    // ===== fallback（备用模型） =====
+
+    @Test
+    void setFallbackShouldSwitchToEnabledManagedModel() {
+        when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", null, true)));
+
+        var resp = controller.setFallbackModel("m1");
+
+        assertEquals(200, resp.getStatusCode().value());
+        assertEquals("m1", resp.getBody().get("fallback_model"));
+        assertEquals("db", resp.getBody().get("fallback_source"));
+        verify(store).setFallback("m1");
+    }
+
+    @Test
+    void setFallbackSystemShouldClearDbAndReportEffectiveSource() {
+        when(catalog.fallbackSelection())
+            .thenReturn(new ModelCatalog.FallbackSelection("env-model", "env"));
+
+        var resp = controller.setFallbackModel("system");
+
+        assertEquals(200, resp.getStatusCode().value());
+        assertEquals("env-model", resp.getBody().get("fallback_model"));
+        assertEquals("env", resp.getBody().get("fallback_source"));
+        verify(store).clearFallback();
+    }
+
+    @Test
+    void setFallbackShouldRejectUnknownOrDisabledModel() {
+        when(store.findById("gone")).thenReturn(Optional.empty());
+        when(store.findById("off")).thenReturn(Optional.of(cfg("off", "Off", null, false)));
+
+        var missing = controller.setFallbackModel("gone");
+        assertEquals(404, missing.getStatusCode().value());
+
+        var disabled = controller.setFallbackModel("off");
+        assertEquals(400, disabled.getStatusCode().value());
+        assertEquals("model_disabled", disabled.getBody().get("error"));
+        verify(store, never()).setFallback(any());
     }
 
     // ===== test（连接测试） =====

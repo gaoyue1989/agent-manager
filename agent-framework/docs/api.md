@@ -805,9 +805,11 @@ Redis 故障（fail-closed）。详见 [travel-fulfillment-agent-protocol-design
 
 ## 模型 API（会话可切换）
 
-系统模型（`LLM_*` 环境变量，只读，即默认模型）+ 托管模型（`model_config` 表，CRUD）统一暴露；
+系统模型（`LLM_*` 环境变量，只读）+ 托管模型（`model_config` 表，CRUD）统一暴露；
 会话模型切换的完整设计见 [session-model-switch-design.md](session-model-switch-design.md)。
-debug 页「🤖 Models」模块为管理界面。
+debug 页「🤖 Models」模块为管理界面，可将任一启用的托管模型设为**默认对话模型**
+（未显式绑定模型的会话走它；未设置时回落系统模型）。设置默认不影响标题生成/记忆压缩
+（二者固定使用系统模型）。
 
 ### GET /models
 
@@ -822,11 +824,13 @@ curl "http://localhost:8100/models"
 ```json
 {
   "default_model": "system",
+  "fallback_model": "",
+  "fallback_source": "none",
   "models": [
     {"id": "system", "name": "qwen3-32b（系统）", "provider": "openai", "model_id": "qwen3-32b",
-     "is_default": true, "source": "system", "enabled": true},
+     "is_default": true, "is_fallback": false, "source": "system", "enabled": true},
     {"id": "3f1c...", "name": "DeepSeek-V3", "provider": "openai", "model_id": "deepseek-v3",
-     "is_default": false, "source": "managed", "enabled": true}
+     "is_default": false, "is_fallback": false, "source": "managed", "enabled": true}
   ]
 }
 ```
@@ -834,6 +838,10 @@ curl "http://localhost:8100/models"
 > 上例为节选；完整视图另含 `base_url` / `api_key_masked` / `temperature` / `max_tokens` /
 > `timeout_seconds` / `enable_thinking` / `reasoning_effort` / `frequency_penalty` /
 > `context_length` / `read_only`（系统模型 true）等字段（V4 起含采样参数两列）。
+> `default_model` 为当前默认对话模型 id：`system` = 系统模型，否则为托管模型 id；
+> 对应列表项的 `is_default=true`。`fallback_model` 为有效备用模型 id（空 = 未启用），
+> `fallback_source` ∈ `db` / `env` / `none`（DB 配置优先于 `LLM_FALLBACK_MODEL_ID`）；
+> 对应列表项的 `is_fallback=true`。
 
 ### GET /models/{id}
 
@@ -860,7 +868,38 @@ curl -X POST http://localhost:8100/models -H 'Content-Type: application/json' -d
 ### DELETE /models/{id}
 
 删除托管模型。引用它的会话在下次模型调用时**回落默认模型**（上下文/历史不受影响），后续新请求可切换到其他模型。
-系统模型 → 400；不存在 → 404。
+系统模型 → 400；不存在 → 404。若删除的是当前默认/备用模型，对应配置自动回落
+（默认 → 系统模型；备用 → `LLM_FALLBACK_MODEL_ID` 或关闭）。
+
+### PUT /models/{id}/default
+
+设置默认对话模型（未显式绑定模型的会话使用）。`id` 为启用的托管模型 id，或 `system`
+（清除托管默认、回落 `LLM_*` 系统模型）。语义与 `POST /threads/chat`/`PATCH /threads/{sid}`
+的 `model` 不同：后两者绑定单个会话，本接口修改全局默认。
+
+```bash
+curl -X PUT http://localhost:8100/models/3f1c.../default
+curl -X PUT http://localhost:8100/models/system/default   # 回落系统模型
+```
+
+**响应:** `{"default_model": "3f1c..."}`（或 `"system"`）。错误：`404 model_not_found` /
+`400 model_disabled`（禁用模型不可设为默认；禁用当前默认模型会自动清除标记）。
+生效：下一次模型调用（多副本实时读库，无 TTL 延迟）。
+
+### PUT /models/{id}/fallback
+
+设置备用模型：主模型重试预算耗尽（429/5xx/超时/网络）后、首个信号失败时自动切换。
+`id` 必须为启用的托管模型；`id=system` 表示清除数据库备用覆盖，运行时回退
+`LLM_FALLBACK_MODEL_ID`（若部署未配置则关闭备用）。
+
+```bash
+curl -X PUT http://localhost:8100/models/3f1c.../fallback
+curl -X PUT http://localhost:8100/models/system/fallback   # 清除 DB 覆盖，回落 env
+```
+
+**响应:** `{"fallback_model": "3f1c...", "fallback_source": "db"}`
+（清除后可能为 `{"fallback_model":"env-model","fallback_source":"env"}` 或 `""`/`none`）。
+错误：`404 model_not_found` / `400 model_disabled`。生效：下一次模型调用，无需 reload。
 
 ### POST /models/{id}/test
 

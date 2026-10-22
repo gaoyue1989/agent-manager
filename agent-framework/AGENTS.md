@@ -203,7 +203,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 | 子 Agent | ✅ | subagents/*.md |
 | 沙箱 | ✅ | OpenSandbox 集成（SANDBOX_ENABLED=true，USER 级复用 + 记忆/用户技能回写 KV） |
 | Agent 状态存储 | ✅ | MysqlDistributedStore (agent_state + agent_fs) |
-| 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 备用模型（`LLM_FALLBACK_MODEL_ID`，见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
+| 模型集成 | ✅ | OpenAI 兼容 API；多托管模型（`/models`）+ 会话级切换 + 全局默认模型（`PUT /models/{id}/default`）+ 可配置备用模型（`PUT /models/{id}/fallback`，DB 优先于 `LLM_FALLBACK_MODEL_ID`；见 [docs/model-fallback-design.md](docs/model-fallback-design.md)） |
 | MCP 集成 | ✅ | McpToolRegistrar (config.yaml permissions.read_only) |
 | MCP 启动容错 | ✅ | 默认 fail-soft：server 不可达仅告警跳过不阻断启动；config.yaml `startup.required: true` 可声明严格失败 |
 | A2A 协议 | ✅ | AgentScopeA2aServer + HarnessAgentRunner |
@@ -334,7 +334,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `LLM_REASONING_EFFORT` | — | | 推理强度（如 low/medium/high）；空 = 不下发，值集因端点而异 |
 | `LLM_FREQUENCY_PENALTY` | — | | 频率惩罚 [-2.0, 2.0]；空 = 不下发 |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置，不传给模型） |
-| `LLM_FALLBACK_MODEL_ID` | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络，SDK 默认）后自动切换；空 = 不启用。默认模型走 SDK 原生 `.fallbackModel()`，会话自选模型由 `SessionModelMiddleware` + `FallbackModelWrapper` 补齐（仅首信号失败切换） |
+| `LLM_FALLBACK_MODEL_ID` | — | | 部署级备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络）后首个信号失败即切换；空 = 不启用。**DB `is_fallback`（`PUT /models/{id}/fallback`）优先**，未配置时使用本项；两者均由 `SessionModelMiddleware` 每次调用动态解析（无需 reload；仅托管模型，不支持 system） |
 | `AGENT_CONFIG_DIR` | `/config` | | Agent 配置目录 |
 | `SERVER_HOST` | `0.0.0.0` | | 监听地址 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
@@ -388,17 +388,23 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活，失联按 reload swap-on-success 语义原地重建（修 biz-mcp 重启后长连接静默失效 → ConnectException 永久失败）；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
 
-> **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24）**：`LLM_*` 是**系统模型**——未显式选择模型的会话的对话模型，
-> 同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**（后两者直调 model.stream 不经 onModelCall 链，不受会话切换影响）。
+> **`LLM_*` 的语义 = 系统模型（会话模型切换，2026-09-24；默认模型可配置，2026-10-22）**：`LLM_*` 是**系统模型**——
+> 未显式选择模型且未配置默认对话模型时的会话模型，同时固定用于**会话标题生成**与**记忆 flush/整合、上下文压缩**
+> （后两者直调 model.stream 不经 onModelCall 链，不受会话切换/默认模型影响）。
 > 托管模型存 `model_config` 表（`/models` REST CRUD，debug 页「Models」模块可管理），会话经 `model` 字段按会话选择，
-> 仅影响该会话的对话调用；详见 [docs/session-model-switch-design.md](docs/session-model-switch-design.md)。
+> 仅影响该会话的对话调用。`model_config.is_default=1` 的托管模型是全局**默认对话模型**
+> （`PUT /models/{id}/default`，id=system 回落系统模型）——未绑定模型的会话经 `SessionModelMiddleware`
+> 实时读库路由（多副本立即生效，读库失败 fail-soft 回落系统模型）；详见
+> [docs/session-model-switch-design.md](docs/session-model-switch-design.md) §8.1。
 > **HTTP 传输口径（2026-10-11，issue #114）**：LLM 专用 HttpClient 固定 **HTTP/1.1**（`ChatModelFactory.buildHttpClient`，
 > 系统模型/托管模型/标题生成全部装配的单一收口）——JDK 默认 HTTP_2 协商对 http:// 明文端点会发 `Upgrade: h2c` 升级头，
 > 不处理 h2c 的 OpenAI 兼容网关把请求体判非法（实测 400「请求体不是合法 JSON」）；https 端点走 ALPN 不受影响。
-> **模型备用切换（2026-09-28）**：`LLM_FALLBACK_MODEL_ID` 引用托管模型作为备用，主模型重试耗尽
-> （429/5xx/超时/网络）后首个信号失败即切换——默认模型走 SDK 原生 `.fallbackModel()`，会话自选模型由
-> `SessionModelMiddleware` + `FallbackModelWrapper` 补齐；构建期解析，改备用模型需 `/admin/reload` 生效。
-> 详见 [docs/model-fallback-design.md](docs/model-fallback-design.md)。
+> **模型备用切换（2026-09-28；运行期可配 2026-10-22）**：主模型重试耗尽（429/5xx/超时/网络）后
+> 首个信号失败即切换备用。来源优先级 **DB `model_config.is_fallback`（`PUT /models/{id}/fallback`）>
+> `LLM_FALLBACK_MODEL_ID`**；`PUT /models/system/fallback` 清除 DB 覆盖（回落 env）。
+> 主模型/备用模型统一由 `SessionModelMiddleware` + `FallbackModelWrapper` 每次调用动态解析包裹，
+> **无需 `/admin/reload`**，多副本实时生效；agent 构建期不再使用 SDK 原生 `.fallbackModel()`
+> （避免双重包裹）。详见 [docs/model-fallback-design.md](docs/model-fallback-design.md)。
 > **采样参数方言（2026-09-27）**：思考开关/推理强度的下发位置由 `provider` 方言决定（`openai` 顶层 effort；
 > `vllm`/`sglang` 合并走 `chat_template_kwargs`；`glm` 走 `thinking.type`+顶层；`deepseek` 不下发），
 > NULL/空 = 不下发；详见 [docs/model-params-design.md](docs/model-params-design.md)。
@@ -471,11 +477,13 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END 或 error）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
 | POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
-| GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复） |
+| GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复；`default_model`=默认对话模型 id，`fallback_model`/`fallback_source`=有效备用模型与来源 db/env/none） |
 | GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
 | POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；采样参数可空：`reasoningEffort` 格式 `^[a-z0-9_]{1,16}$`、`frequencyPenalty` ∈[-2,2]、`provider` ∈方言枚举；重复 name 400） |
 | PATCH | `/models/{id}` | 更新托管模型（字段缺省=不变；`apiKey=""`=清空回落系统密钥；`reasoningEffort=""`=清除不下发） |
 | DELETE | `/models/{id}` | 删除托管模型（引用会话自动回落默认模型） |
+| PUT | `/models/{id}/default` | 设置全局默认对话模型（id=system 回落系统模型；禁用模型 400 `model_disabled`；未绑定模型的会话实时生效） |
+| PUT | `/models/{id}/fallback` | 设置备用模型（id=system 清除 DB 覆盖回落 `LLM_FALLBACK_MODEL_ID`；禁用模型 400；下一次模型调用生效） |
 | POST | `/models/{id}/test` | 模型连接测试（真实发一次最小 completion，返回 ok/latency_ms/reply） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
 | POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |

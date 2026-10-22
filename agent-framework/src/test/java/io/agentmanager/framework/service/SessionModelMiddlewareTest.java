@@ -74,6 +74,18 @@ class SessionModelMiddlewareTest {
         verify(catalog, never()).resolve(anyString());
     }
 
+    /** 会话未绑定模型：使用全局默认对话模型（debug 页可设置为托管模型） */
+    @Test
+    void shouldRouteToConfiguredDefaultWhenNoSessionMapping() {
+        var target = mock(Model.class);
+        when(store.findModelBySession(anyString())).thenReturn("");
+        when(catalog.resolveDefault()).thenReturn(Optional.of(target));
+
+        var used = invoke(ctx("sess-1", "user-1"));
+
+        assertSame(target, used);
+    }
+
     /** 模型被删除/禁用/未知：回落默认模型，且不抛错 */
     @Test
     void shouldFallBackToDefaultWhenModelUnavailable() {
@@ -103,15 +115,15 @@ class SessionModelMiddlewareTest {
 
     /** 配置了备用模型：会话自选模型被 FallbackModelWrapper 包裹，主模型失败时切备用 */
     @Test
-    void shouldWrapSessionModelWithFallbackWhenConfigured() {
+    void shouldWrapSessionModelWithDynamicFallback() {
         var target = mock(Model.class);
         var fallback = mock(Model.class);
         when(store.findModelBySession("sess-1")).thenReturn("m2");
         when(catalog.resolve("m2")).thenReturn(Optional.of(target));
+        when(catalog.resolveFallback()).thenReturn(Optional.of(fallback));
 
         var captured = new AtomicReference<ModelCallInput>();
-        new SessionModelMiddleware(store, catalog, fallback)
-            .onModelCall(null, ctx("sess-1", "user-1"),
+        middleware.onModelCall(null, ctx("sess-1", "user-1"),
                 new ModelCallInput(List.of(), List.of(), null, defaultModel),
                 in -> {
                     captured.set(in);
@@ -123,6 +135,33 @@ class SessionModelMiddlewareTest {
         assertNotSame(target, used);
 
         when(target.stream(any(), any(), any())).thenReturn(Flux.error(new RuntimeException("boom")));
+        when(fallback.stream(any(), any(), any())).thenReturn(Flux.empty());
+        used.stream(List.of(), List.of(), null).blockLast();
+
+        verify(fallback).stream(any(), any(), any());
+    }
+
+    /** 无会话绑定/默认模型时，系统主模型同样套用动态备用 */
+    @Test
+    void shouldWrapSystemModelWithDynamicFallback() {
+        var fallback = mock(Model.class);
+        when(store.findModelBySession(anyString())).thenReturn("");
+        when(catalog.resolveDefault()).thenReturn(Optional.empty());
+        when(catalog.resolveFallback()).thenReturn(Optional.of(fallback));
+
+        var captured = new AtomicReference<ModelCallInput>();
+        middleware.onModelCall(null, ctx("sess-1", "user-1"),
+                new ModelCallInput(List.of(), List.of(), null, defaultModel),
+                in -> {
+                    captured.set(in);
+                    return Flux.empty();
+                })
+            .blockLast();
+
+        var used = captured.get().model();
+        assertNotSame(defaultModel, used);
+
+        when(defaultModel.stream(any(), any(), any())).thenReturn(Flux.error(new RuntimeException("boom")));
         when(fallback.stream(any(), any(), any())).thenReturn(Flux.empty());
         used.stream(List.of(), List.of(), null).blockLast();
 

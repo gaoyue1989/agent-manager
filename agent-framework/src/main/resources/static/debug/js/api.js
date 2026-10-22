@@ -110,6 +110,8 @@ export const api = {
   createModel: (body) => post('/models', body),
   updateModel: (id, body) => patch('/models/' + encodeURIComponent(id), body),
   deleteModel: (id) => del('/models/' + encodeURIComponent(id)),
+  setDefaultModel: (id) => put('/models/' + encodeURIComponent(id) + '/default', {}),
+  setFallbackModel: (id) => put('/models/' + encodeURIComponent(id) + '/fallback', {}),
   testModel: (id) => post('/models/' + encodeURIComponent(id) + '/test', {}),
 
   // 用户技能（L4 个人覆盖，agent_fs KV：agents/{agent}/users/{uid}/skills）

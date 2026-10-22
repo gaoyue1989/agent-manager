@@ -604,9 +604,15 @@ async function loadModels() {
   try {
     const data = await ctx.api.getModels(false);
     const list = (data && data.models) || [];
-    // 保留 system 默认项 + 启用的托管模型
+    // 保留 system 默认项 + 启用的托管模型；默认模型可能是托管模型（debug 页 Models 可设置），
+    // value 仍用 "system" 表示「不绑定、跟随默认」，仅标签展示实际默认模型名。
     const enabled = list.filter((m) => m.enabled !== false);
-    modelSelect.innerHTML = '<option value="system">System Default</option>'
+    const defaultId = (data && data.default_model) || 'system';
+    const defaultModel = list.find((m) => m.id === defaultId);
+    const defaultLabel = defaultId === 'system'
+      ? 'System Default'
+      : 'Default（' + (defaultModel ? defaultModel.name : defaultId) + '）';
+    modelSelect.innerHTML = '<option value="system">' + ctx.utils.esc(defaultLabel) + '</option>'
       + enabled.filter((m) => m.id !== 'system').map((m) =>
         '<option value="' + ctx.utils.esc(m.id) + '">' + ctx.utils.esc(m.name) + '</option>'
       ).join('');
