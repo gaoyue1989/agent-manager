@@ -217,7 +217,8 @@ public record AgentManagerProperties(
          * 与 application.yml 的 FILE_UPLOAD_ALLOWED_MIME env 默认值保持同步。
          */
         public static final String DEFAULT_UPLOAD_ALLOWED_MIME =
-            "image/*,text/plain,text/markdown,text/csv,application/pdf,"
+            "image/*,text/plain,text/markdown,text/csv,text/html,"
+                + "multipart/related,application/x-mimearchive,application/pdf,"
                 + "application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,"
                 + "application/msword,application/zip,application/x-zip-compressed";
 
