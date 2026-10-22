@@ -113,13 +113,16 @@ class ThreadControllerTest {
         // verify SQL uses LEFT JOIN matching both slot forms（agent_state 的 slot 有
         // "{peer}:{key}" 老 Channel 形态与 "{userId}:{sid}" 规范形态，前/后段各匹配一次）
         // 并回显会话模型列 su.model（会话模型切换，见 docs/session-model-switch-design.md）
-        verify(conn).prepareStatement("SELECT su.session_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
+        // 排序/展示时间以 session_user.updated_at（每轮 chat 刷新）为准，续聊会话靠前；
+        // A2A 槽位 "{tenant}__{sid}" 无冒号、JOIN 不命中时也不退化成创建时间
+        verify(conn).prepareStatement("SELECT su.session_id, su.remark, su.model, "
+            + "GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) AS updated_at "
             + "FROM session_user su LEFT JOIN agent_state a "
             + "ON SUBSTRING_INDEX(a.session_id, ':', 1) = su.session_id "
             + "OR SUBSTRING_INDEX(a.session_id, ':', -1) = su.session_id "
             + "WHERE su.user_id = ? "
-            + "GROUP BY su.session_id, su.remark, su.model "
-            + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC");
+            + "GROUP BY su.session_id, su.remark, su.model, su.updated_at, su.created_at "
+            + "ORDER BY GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) DESC");
         verify(ps).setString(1, "alice");
 
         assertEquals(2, result.size());

@@ -470,6 +470,8 @@ export default function AgentCreateForm({ ws, mode, initial, serviceId, deepImpo
               <div className="flex flex-wrap gap-2.5" data-testid="spec-cards">
                 {SPEC_CARDS.map((sp) => (
                   <button key={sp.id} type="button" data-testid={`spec-${sp.id}`}
+                    data-selected={state.spec === sp.id ? "true" : "false"}
+                    aria-pressed={state.spec === sp.id}
                     onClick={() => setState((s) => ({ ...s, spec: sp.id }))}
                     className={`min-w-[108px] rounded-lg border px-4 py-2.5 text-left ${state.spec === sp.id ? "border-blue-600 shadow-[0_0_0_2px_rgba(22,104,220,.14)]" : "border-gray-300"}`}>
                     <b className="block text-[13px]">{sp.title}</b>

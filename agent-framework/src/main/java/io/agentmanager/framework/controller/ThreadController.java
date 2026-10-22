@@ -156,13 +156,17 @@ public class ThreadController {
         try (var conn = dataSource.getConnection()) {
             if (userId != null && !userId.isBlank()) {
                 // 指定 userId：session_user 过滤，agent_state 只取 updated_at（双形态匹配见 AGENT_STATE_JOIN）
+                // 排序/展示时间取 su.updated_at（每次 chat/confirm/A2A 消息都会刷新）与 agent_state
+                // 更新时间中的较大者：会话续聊后立即靠前；A2A 槽位为 "{tenant}__{sid}"（无冒号），
+                // JOIN 臂命中不了时仍能靠 su.updated_at 反映最新活动，而不是退化成创建时间。
                 try (var ps = conn.prepareStatement(
-                        "SELECT su.session_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
+                        "SELECT su.session_id, su.remark, su.model, "
+                            + "GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) AS updated_at "
                             + "FROM session_user su LEFT JOIN agent_state a "
                             + AGENT_STATE_JOIN
                             + "WHERE su.user_id = ? "
-                            + "GROUP BY su.session_id, su.remark, su.model "
-                            + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
+                            + "GROUP BY su.session_id, su.remark, su.model, su.updated_at, su.created_at "
+                            + "ORDER BY GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) DESC")) {
                     ps.setString(1, userId);
                     var rs = ps.executeQuery();
                     while (rs.next()) {
@@ -184,11 +188,12 @@ public class ThreadController {
                 // 无 userId 过滤：返回全部会话，附带 user_id + title（从 session_user 表查）
                 try (var stmt = conn.createStatement();
                      var rs = stmt.executeQuery(
-                         "SELECT su.session_id, su.user_id, su.remark, su.model, MAX(a.updated_at) AS updated_at "
+                         "SELECT su.session_id, su.user_id, su.remark, su.model, "
+                             + "GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) AS updated_at "
                              + "FROM session_user su LEFT JOIN agent_state a "
                              + AGENT_STATE_JOIN
-                             + "GROUP BY su.session_id, su.user_id, su.remark, su.model "
-                             + "ORDER BY COALESCE(MAX(a.updated_at), su.created_at) DESC")) {
+                             + "GROUP BY su.session_id, su.user_id, su.remark, su.model, su.updated_at, su.created_at "
+                             + "ORDER BY GREATEST(su.updated_at, COALESCE(MAX(a.updated_at), su.created_at)) DESC")) {
                     while (rs.next()) {
                         var sid = rs.getString("session_id");
                         var remark = rs.getString("remark");

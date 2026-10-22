@@ -198,6 +198,12 @@ async function main() {
     // ---- 创建 Agent（import 模式，无需 LLM）----
     console.log("== UI：创建 Agent（导入模式）==");
     await goto("/console/agents/create", testid("agent-create"));
+    // #136：默认规格必须是 small（micro 的 256Mi limits 会 OOMKilled 托管 Java 运行时）
+    await page.waitForSelector(testid("spec-small"), { timeout: 20000 });
+    const selectedSpec = await page.$$eval(`${testid("spec-cards")} button[data-selected="true"]`,
+      (els) => els.map((el) => el.dataset.testid));
+    check("创建页默认规格 small（micro 非默认）",
+      selectedSpec.length === 1 && selectedSpec[0] === "spec-small", selectedSpec.join(","));
     await click("mode-import");
     await page.waitForSelector(testid("import-pkg-select"), { timeout: 20000 });
     // 必须等目标包 option 真正加载（占位 option 也会让 length>0 提前通过）

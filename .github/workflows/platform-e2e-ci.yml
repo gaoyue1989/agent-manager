@@ -3,7 +3,8 @@ name: platform-e2e-ci
 # 平台（backend + frontend）真实 K8s E2E 门禁：kind 单节点集群 + 仓库自举清单 +
 # 控制台全功能套件（Agent 创建/管理、模型连接、技能、工具、沙箱）。
 #
-# 当前定位：**非必需检查**（先观察 2-3 个 PR 的稳定性，再由管理员加入 master 分支保护）。
+# 当前定位：**必需检查**（2026-10-22 起纳入 master 分支保护；按目录过滤，不相关变更
+# 的 job 显示 Skipped，门禁视为通过）。
 # 触发：指向 master 的 PR + master push；按目录过滤，不相关变更显示 Skipped。
 on:
   push:
@@ -252,7 +253,7 @@ jobs:
           LLM_BASE_URL: http://mock-llm.agent-platform.svc.cluster.local:8080/v1
           E2E_AGENT_RUNTIME: ${{ steps.agent-image.outputs.runtime }}
         run: |
-          bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m8 m9 m10
+          bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10
 
       - uses: actions/setup-node@v4
         with:

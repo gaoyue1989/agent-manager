@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { evalCollectorTarget } from "./lib/eval-session";
+import { isValidAgentShortName } from "./lib/agent-short";
+import { RELEASE_AGENT_PREFIX, isReleaseAgentPath } from "./lib/agent-route";
 
 // 同源反代默认目标(集群内固定地址)。取值在请求期读取环境变量(Next 16 proxy
 // 默认 Node.js runtime,process.env 不被构建期烘焙),部署时通过 Deployment env
@@ -14,11 +16,6 @@ const DEFAULT_RELEASE_AGENT = "http://oaf-release-agent-svc.agent-platform.svc.c
 // oaf-assistant-sid 派生，assistant 页 localStorage/cookie 双写）做强会话关联。
 // 开关开启但目标未设置：console.error 告警并退回普通代理（不注入），不打流量到未定义地址；
 // 采集结束删除/置 0 开关即还原。其余取值（含未设置）均视为关闭，行为与普通代理完全一致。
-
-const RELEASE_AGENT_PREFIX = "/agent/release-agent";
-
-// 业务 short 名白名单（防注入；与 backend k8s.ShortName 派生同形态）
-const SHORT_NAME_RE = /^[a-z0-9](-[a-z0-9])*$/;
 
 // 拼接目标 URL:base 允许携带子路径(如经 ingress 的 /agent/release-agent 或 collector 的 /{ns})。
 // 必须字符串拼接而非 new URL(path, base)——绝对 path 会整体覆盖 base 的路径部分。
@@ -93,7 +90,7 @@ export function proxy(request: NextRequest) {
 
   // 发布助手对话:无状态单次流(POST /threads/chat 与 /threads/{sid}/confirm-stream)。
   // 去除 /agent/release-agent 前缀后转发到 release-agent 根路径（专属规则在前，注入逻辑不动）
-  if (pathname.startsWith(RELEASE_AGENT_PREFIX)) {
+  if (isReleaseAgentPath(pathname)) {
     const rest = pathname.slice(RELEASE_AGENT_PREFIX.length) || "/";
     const releaseAgent = process.env.AGENT_INTERNAL_URL || DEFAULT_RELEASE_AGENT;
     const headers = new Headers(request.headers);
@@ -122,7 +119,7 @@ export function proxy(request: NextRequest) {
   if (pathname.startsWith("/agent/")) {
     const rest = pathname.slice("/agent/".length);
     const short = rest.split("/")[0];
-    if (SHORT_NAME_RE.test(short)) {
+    if (isValidAgentShortName(short)) {
       const headers = new Headers(request.headers);
       const session = request.cookies.get("oaf_session")?.value;
       const uid = readUidFromJwtCookie(request);
