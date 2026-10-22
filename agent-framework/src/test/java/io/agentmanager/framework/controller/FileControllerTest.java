@@ -82,6 +82,37 @@ public class FileControllerTest {
     }
 
     @Test
+    void uploadShouldAcceptHtmlAndMhtml() {
+        // html：text/html 已入白名单
+        var html = new MockMultipartFile("file", "page.html", "text/html",
+            "<html><body>hi</body></html>".getBytes(StandardCharsets.UTF_8));
+        var resp = controller.upload(html, "alice", null, null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        assertEquals("text/html", resp.getBody().get("mime_type"));
+        // mhtml：Chrome 走 RFC 2557 注册类型 multipart/related
+        var mhtml = new MockMultipartFile("file", "page.mhtml", "multipart/related",
+            new byte[]{1});
+        resp = controller.upload(mhtml, "alice", null, null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        assertEquals("multipart/related", resp.getBody().get("mime_type"));
+        // mht：Firefox/WebKit 别名 application/x-mimearchive
+        var mht = new MockMultipartFile("file", "page.mht", "application/x-mimearchive",
+            new byte[]{1});
+        resp = controller.upload(mht, "alice", null, null);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        assertEquals("application/x-mimearchive", resp.getBody().get("mime_type"));
+    }
+
+    @Test
+    void uploadShouldRejectHtmlFakingPlainTextMime() {
+        // 伪造 Content-Type: text/plain 绕白名单 → 扩展名交叉校验拒绝
+        var file = new MockMultipartFile("file", "page.html", "text/plain", new byte[]{1});
+        var resp = controller.upload(file, "alice", null, null);
+        assertEquals(HttpStatus.BAD_REQUEST, resp.getStatusCode());
+        assertEquals("extension_mime_mismatch", resp.getBody().get("error"));
+    }
+
+    @Test
     void uploadShouldRejectOversize() {
         var big = new byte[21 * 1024 * 1024];
         var file = new MockMultipartFile("file", "big.csv", "text/csv", big);
@@ -240,6 +271,22 @@ public class FileControllerTest {
         // 非标准别名保持兼容
         assertTrue(FileController.mimeAllowed("application/vnd.ms-word", def));
         assertTrue(FileController.extensionConsistentWithMime("report.doc", "application/vnd.ms-word"));
+    }
+
+    /** html/mhtml 单文件网页：默认白名单与扩展名交叉校验都须放行 */
+    @Test
+    void defaultUploadMimeShouldAllowHtmlAndMhtml() {
+        var def = AgentManagerProperties.FileConfig.DEFAULT_UPLOAD_ALLOWED_MIME;
+        assertTrue(FileController.mimeAllowed("text/html", def), "text/html 应在默认白名单内");
+        assertTrue(FileController.extensionConsistentWithMime("page.html", "text/html"));
+        assertTrue(FileController.extensionConsistentWithMime("page.htm", "text/html"));
+        // MHTML 两个 MIME 变体（RFC 2557 注册类型 + 浏览器别名）
+        assertTrue(FileController.mimeAllowed("multipart/related", def),
+            "multipart/related 应在默认白名单内");
+        assertTrue(FileController.mimeAllowed("application/x-mimearchive", def),
+            "application/x-mimearchive 应在默认白名单内");
+        assertTrue(FileController.extensionConsistentWithMime("page.mhtml", "multipart/related"));
+        assertTrue(FileController.extensionConsistentWithMime("page.mht", "application/x-mimearchive"));
     }
 
     @Test
