@@ -85,8 +85,10 @@ agent:
     skill-revision-gate-enabled: ${SANDBOX_SKILL_REVISION_GATE:true}
     sync-snapshot-diff-enabled: ${SANDBOX_SYNC_SNAPSHOT_DIFF:true}
     # per-session agent 隔离（上游 #2849 workaround）：每会话独立 HarnessAgent/SandboxBackedFilesystem，
-    # 消解并行 turn 互踩单槽沙箱指针（跨用户 "No active sandbox"/串扰）。开启前确认 MCP 复用层生效
-    session-agent-isolation: ${SANDBOX_SESSION_AGENT_ISOLATION:false}
+    # 消解并行 turn 互踩单槽沙箱指针（跨用户 "No active sandbox"/串扰）。MCP 连接经
+    # McpToolRegistrar.sharedWrappers 复用（PR #134），连接数不随会话数放大。
+    # 2026-10-21 默认开启：与守卫锁粒度（sessionGranularLocks）同源联动，同用户两会话可并发
+    session-agent-isolation: ${SANDBOX_SESSION_AGENT_ISOLATION:true}
     session-agent-cache-max: ${SANDBOX_SESSION_AGENT_CACHE_MAX:500}
     session-agent-cache-ttl-minutes: ${SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES:30}
     opensandbox:
