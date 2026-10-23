@@ -30,7 +30,18 @@ test('S1 元数据端点全量暴露', async ({ request }) => {
     const res = await request.get(path);
     expect(res.status(), path).toBe(200);
   }
-  const tools = await (await request.get('/tools')).json();
+  // MCP 启动是 fail-soft（外部依赖暂不可达仅告警跳过），且看门狗会周期补偿未注册 server；
+  // 启动瞬间的连接抖动不应直接判元数据契约红——轮询到完整注册集（≤45s）。若真失败，
+  // pollUntil 超时消息会带上最后观测，仍保留故障信号。
+  const tools = await pollUntil(
+    async () => (await request.get('/tools')).json() as Record<string, unknown>,
+    (t) => {
+      const s = JSON.stringify(t);
+      return s.includes('bench_echo') && s.includes('show_application_form')
+        && s.includes('confirm_application') && s.includes('appOnly');
+    },
+    45_000,
+  );
   const toolStr = JSON.stringify(tools);
   // 默认视图仅列 MCP 工具；内置/自定义工具需显式 includeInternal=true（issue #28）
   expect(toolStr).toContain('bench_echo');           // bench MCP（read_only）
@@ -987,13 +998,13 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
       const rows = await (await fetch(`${FW_BASE}/threads?userId=${encodeURIComponent(uid)}`)).json() as Array<Record<string, unknown>>;
       expect(rows.find(x => x.session_id === sidShared), `共享桶 ${uid} 不得回填（V6:51）`).toBeUndefined();
     }
-    // 升级路径契约钉：历史表恰为 baseline(5)+V6..V10——baseline-version 被抬高会在此红（V6 静默跳过形态）；
-    // 新增迁移（V11+）时同步扩展本期望列表，且新迁移必须像 V6..V10 一样幂等（本场景会在已应用库上重放）
+    // 升级路径契约钉：历史表恰为 baseline(5)+V6..V12——baseline-version 被抬高会在此红（V6 静默跳过形态）；
+    // 新增迁移（V13+）时同步扩展本期望列表，且新迁移必须像 V6..V12 一样幂等（本场景会在已应用库上重放）
     const conn = await openDb();
     try {
       const [hist] = await conn.query('SELECT version, success FROM flyway_schema_history ORDER BY installed_rank');
       const rows = hist as Array<{ version: string; success: number }>;
-      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10']);
+      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12']);
       expect(rows.every(x => x.success === 1), '迁移历史必须全 success').toBe(true);
     } finally { await conn.end(); }
   });
