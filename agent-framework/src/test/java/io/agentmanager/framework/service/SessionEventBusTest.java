@@ -43,7 +43,7 @@ class SessionEventBusTest {
     @BeforeEach
     void setUp() {
         lenient().when(eventStore.queryAfter(any(), any(), anyInt())).thenReturn(Flux.empty());
-        lenient().when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        lenient().when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
 
         eventBus = new SessionEventBus(eventStore,
             Duration.ofMillis(100),  // 心跳 100ms
@@ -70,7 +70,7 @@ class SessionEventBusTest {
 
     @Test
     void emitBroadcastsToSubscribers() {
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
 
         var flux = eventBus.subscribe("sid-1", 0, "rid-1")
             .filter(sse -> sse.data() != null)
@@ -86,7 +86,7 @@ class SessionEventBusTest {
 
     @Test
     void emitSyntheticBroadcastsSynthEvents() {
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
 
         var flux = eventBus.subscribe("sid-2", 0, "rid-2")
             .filter(sse -> sse.data() != null)
@@ -107,7 +107,7 @@ class SessionEventBusTest {
             "{\"type\":\"TEXT_BLOCK_DELTA\",\"delta\":\"past\"}", "rid-3");
         when(eventStore.queryAfter("sid-3", "rid-3", 0))
             .thenReturn(Flux.just(historical));
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(2);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(2);
 
         var flux = eventBus.subscribe("sid-3", 0, "rid-3")
             .filter(sse -> sse.data() != null)
@@ -150,7 +150,7 @@ class SessionEventBusTest {
             Duration.ofMillis(50),
             64);
 
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
         eventBus.ensureSink("sid-9");
         eventBus.emitSynthetic("sid-9", "rid-9", "ping", "{}");
 
@@ -194,7 +194,7 @@ class SessionEventBusTest {
     void closeSessionAfterEmitStillDeliversEventToSubscriber() {
         // HITL 时序契约：先 emit(permission_ask) 再 closeSession，
         // 订阅者必须收到该事件，然后才收到 onComplete。
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
 
         var flux = eventBus.subscribe("sid-hitl", 0, "rid-h")
             .filter(sse -> sse.data() != null)
@@ -217,7 +217,7 @@ class SessionEventBusTest {
         eventBus.emit("sid-t", mockAgentEvent("hi"), "turn-1");
         eventBus.emit("sid-t", new ToolCallStartEvent("sdk-rid", "call-1", "echo"), "turn-1");
 
-        verify(eventStore, times(2)).append(eq("sid-t"), eq("turn-1"), anyString(), payloads.capture());
+        verify(eventStore, times(2)).append(eq("sid-t"), eq("turn-1"), anyString(), payloads.capture(), isNull());
         var deltaPayload = payloads.getAllValues().get(0);
         var milestonePayload = payloads.getAllValues().get(1);
         assertFalse(deltaPayload.contains("\"turnId\""),
@@ -242,7 +242,7 @@ class SessionEventBusTest {
         // TextBlockDeltaEvent 的 payload 自带 replyId（extractReplyId 覆盖）→ 注入短路，
         // 期望值 = serializer 原样输出
         var appended = new java.util.ArrayList<String>();
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString()))
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull()))
             .thenAnswer(inv -> {
                 appended.add(inv.getArgument(3));
                 return 7;
@@ -270,7 +270,7 @@ class SessionEventBusTest {
         // 合成帧（file_ready 等 extractReplyId 未覆盖的类型）收口前落库无 replyId、读端现场注入；
         // A1 后注入发生在写路径：落库 p 与广播 data 均为注入后形态，replyId 在 JSON 末尾
         var appended = new java.util.ArrayList<String>();
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString()))
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull()))
             .thenAnswer(inv -> {
                 appended.add(inv.getArgument(3));
                 return 3;
@@ -350,7 +350,7 @@ class SessionEventBusTest {
         // 补不出来的实时帧。心跳间隔放大到 60s，让 expectNoEvent 只盯业务帧
         var quietBus = new SessionEventBus(eventStore,
             Duration.ofSeconds(60), Duration.ofMinutes(5), 64);
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(-1);
 
         var flux = quietBus.subscribe("sid-f1", 0, "rid-f1")
             .filter(sse -> sse.data() != null);
@@ -366,7 +366,7 @@ class SessionEventBusTest {
     void emitSyntheticDoesNotBroadcastWhenPersistFails() {
         var quietBus = new SessionEventBus(eventStore,
             Duration.ofSeconds(60), Duration.ofMinutes(5), 64);
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(-1);
 
         var flux = quietBus.subscribe("sid-f2", 0, "rid-f2")
             .filter(sse -> sse.data() != null);
@@ -384,7 +384,7 @@ class SessionEventBusTest {
         // touch 经 evictStaleSinks 间接断言——没 touch 过的 session 不会被清理
         var bus = new SessionEventBus(eventStore,
             Duration.ofSeconds(60), Duration.ZERO, 64);   // eviction 立即到期
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(-1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(-1);
 
         var sub = bus.subscribe("sid-touch", 0, "rid-touch").subscribe();
         int rc = bus.emit("sid-touch", mockAgentEvent("lost"), "rid-touch");

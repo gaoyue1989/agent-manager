@@ -88,7 +88,7 @@ class RemoteConfirmBridgeMultiReplicaTest {
             .thenReturn(Flux.empty());
         when(eventStore.findLatest(anyString())).thenReturn(null);
         when(eventStore.findMaxSeq(anyString())).thenReturn(0);
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
         eventBus = new SessionEventBus(eventStore);
         sessionUserStore = mock(SessionUserStore.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
@@ -195,7 +195,7 @@ class RemoteConfirmBridgeMultiReplicaTest {
         // 认领即收口（tryClaimWake 单语句 IN_FLIGHT→TERMINAL，无独立 markTerminal 步）
         verify(registryStore, never()).markTerminal(anyString(), anyString(), eq(false));
         verify(turnLeaseStore, timeout(3000)).tryAcquire(SID);
-        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString());
+        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString(), isNull());
     }
 
     @Test

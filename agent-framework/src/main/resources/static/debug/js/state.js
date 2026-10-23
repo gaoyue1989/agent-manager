@@ -16,6 +16,9 @@ const state = {
     streamMode: 'channel', // a2a | channel —— 默认 Channel：唯一对话入口，支持 durable SSE 刷新续传
     isStreaming: false,
     theme: null, // 'light' | 'dark' | null(跟随系统)
+    // 对话协议：native（/threads/* 自研词表，默认）| agui（/agui/* 官方 AG-UI 事件，
+    // 见 agui-native-parity-design §12.2；仅 debug 页提供，产品前端不暴露）
+    protocol: (() => { try { return sessionStorage.getItem('debug-proto') || 'native'; } catch (e) { return 'native'; } })(),
     userId: (() => { try { return localStorage.getItem('debug-uid') || 'debug-user'; } catch (e) { return 'debug-user'; } })()
   }
 };
@@ -41,6 +44,10 @@ export function setState(path, value) {
   // userId 持久化到 localStorage
   if (path === 'ui.userId') {
     try { value ? localStorage.setItem('debug-uid', value) : localStorage.removeItem('debug-uid'); } catch (e) { /* ignore */ }
+  }
+  // 对话协议持久化到 sessionStorage（按页签记忆；刷新保持，新页签回 native）
+  if (path === 'ui.protocol') {
+    try { value ? sessionStorage.setItem('debug-proto', value) : sessionStorage.removeItem('debug-proto'); } catch (e) { /* ignore */ }
   }
   notify(path, value);
 }

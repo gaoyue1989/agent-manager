@@ -45,6 +45,7 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
@@ -123,7 +124,7 @@ class ChatStreamControllerTest {
             }
             return blocks;
         });
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
         when(eventStore.findMaxSeq(anyString())).thenReturn(0);
         when(eventStore.findLatest(anyString())).thenReturn(null);
         when(eventStore.queryAfter(anyString(), anyString(), anyInt())).thenReturn(Flux.empty());
@@ -227,7 +228,7 @@ class ChatStreamControllerTest {
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("lease_lost")), frames.toString());
         // 用 any() 而非 anyString()：后者不匹配 null，而 emitSynthetic 传 null replyId 时
         // 会把"终态帧被落库"这条漏检
-        verify(eventStore, never()).append(any(), any(), any(), any());
+        verify(eventStore, never()).append(any(), any(), any(), any(), isNull());
         // 两次调用是设计使然：stopIfLeaseLost 先拆一次让客户端立刻收流，
         // 源流跑完后 endTurn 再来一次（幂等空转）
         verify(eventStore, atLeastOnce()).abandonTurn(sessionId);
@@ -290,7 +291,7 @@ class ChatStreamControllerTest {
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("turn_setup_failed")),
             "sendStream 同步失败应回错误帧: " + frames);
         verify(turnLeaseStore, org.mockito.Mockito.timeout(2_000)).release(sessionId, "tok-5");
-        verify(eventStore, never()).append(any(), any(), any(), any());
+        verify(eventStore, never()).append(any(), any(), any(), any(), isNull());
     }
 
     @Test
@@ -433,7 +434,7 @@ class ChatStreamControllerTest {
                     .reduce((a, b) -> b).orElse(null)),
                 "首个事件帧应晚于最后一个 waiting 帧（首事件即停心跳）: " + frames);
             // 不落库：EventBus 的 append 第三参为 eventType，心跳帧不得出现
-            verify(eventStore, never()).append(eq(sessionId), anyString(), eq("waiting"), anyString());
+            verify(eventStore, never()).append(eq(sessionId), anyString(), eq("waiting"), anyString(), isNull());
         } finally {
             ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
         }
@@ -463,7 +464,7 @@ class ChatStreamControllerTest {
             "挂起会话应回含 ASKING 的 error 帧: " + frames);
         // SDK 路径不得触达，预检拒绝不产生任何 agent 事件落库
         verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
-        verify(eventStore, never()).append(any(), any(), any(), any());
+        verify(eventStore, never()).append(any(), any(), any(), any(), isNull());
         // 租约必须放回（拒绝与释放同在订阅回调线程上先行于 complete，无需 timeout 等待）
         verify(turnLeaseStore).release(sessionId, "tok-pc1");
     }
@@ -1359,7 +1360,7 @@ class ChatStreamControllerTest {
 
         events.tryEmitNext((AgentEvent) new AgentEndEvent("reply-r").withSource("gw-1/order-agent"));
         // 等该事件真的走到 handleEventAndEmit（落库即证明事件处理已过 guard 那一行）
-        verify(eventStore, timeout(2000)).append(eq(sessionId), any(), eq("AGENT_END"), any());
+        verify(eventStore, timeout(2000)).append(eq(sessionId), any(), eq("AGENT_END"), any(), isNull());
         sleep(200);
 
         verify(turnLeaseStore, never()).release(anyString(), anyString());
@@ -1394,7 +1395,7 @@ class ChatStreamControllerTest {
                 .id("call-1").name("get_weather").input(java.util.Map.of("city", "beijing")).build()));
         events.tryEmitNext(ask);
         verify(eventStore, timeout(2000))
-            .append(eq(sessionId), any(), eq("REQUIRE_USER_CONFIRM"), any());
+            .append(eq(sessionId), any(), eq("REQUIRE_USER_CONFIRM"), any(), isNull());
         sleep(200);
 
         // 帧已广播、确认上下文已落库，但租约一动不动

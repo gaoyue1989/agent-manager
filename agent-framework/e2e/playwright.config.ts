@@ -21,6 +21,8 @@ export default defineConfig({
   },
   projects: [
     { name: 'api-core', testMatch: /tests\/api-core\.spec\.ts/, use: { ...devicesDesktop() } },
+    // AG 组（agui-native-parity-design §12.4 API 级）：依赖 core 组实例的 AGENT_AGUI_ENABLED=true
+    { name: 'api-agui', testMatch: /tests\/api-agui\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-models', testMatch: /tests\/api-models\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-reload', testMatch: /tests\/api-reload\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi', testMatch: /tests\/api-multi\.spec\.ts/, use: { ...devicesDesktop() } },

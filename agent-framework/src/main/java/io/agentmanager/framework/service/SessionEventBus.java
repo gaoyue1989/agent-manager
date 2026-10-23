@@ -98,13 +98,30 @@ public class SessionEventBus {
      * payloadOverride 为 null 时按原词表序列化，行为与 3 参版本完全一致。
      */
     public int emit(String sessionId, AgentEvent event, String replyId, String payloadOverride) {
+        return emitCore(sessionId, event, replyId, payloadOverride, null);
+    }
+
+    /**
+     * 双编码发射（agui-native-parity-design §4 D2）：native payload（p）之外同 seq 追加
+     * AG-UI 帧数组（pa）。仅 AG-UI 轮调用——native 轮走 {@link #emit}，pa 恒为 null。
+     *
+     * <p>pa 由调用方（AguiRunController）经 SDK converter registry 预先算好传入：与响应流
+     * 同源同序（实时与回放零漂移），失败降级为 native-only（R8：调用方传 null 即降级）。
+     */
+    public int emitAgui(String sessionId, AgentEvent event, String replyId,
+                        String payloadOverride, String aguiPayload) {
+        return emitCore(sessionId, event, replyId, payloadOverride, aguiPayload);
+    }
+
+    private int emitCore(String sessionId, AgentEvent event, String replyId,
+                         String payloadOverride, String aguiPayload) {
         String payload = payloadOverride != null ? payloadOverride : AgentEventSseSerializer.payload(event);
         String type = event.getType().name();
         // replyId 注入前移到写路径（A1）：落库 p 字段与广播 data 从此同源（同一份字符串），
         // 读端对存量行（p 内无 replyId）兜底注入即可，不再逐帧重序列化。
         // 非 delta 事件额外注入 turnId（订阅过滤用，见 withReplyId 3 参重载）；delta 保持零重写。
         payload = AgentEventSseSerializer.withReplyId(payload, replyId, !isDelta(type));
-        int seq = eventStore.append(sessionId, replyId, type, payload);
+        int seq = eventStore.append(sessionId, replyId, type, payload, aguiPayload);
 
         if (log.isDebugEnabled()) {
             log.debug("[EventBus] emit: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
@@ -113,7 +130,7 @@ public class SessionEventBus {
         if (seq >= 1) {
             var sink = sinks.get(sessionId);
             if (sink != null) {
-                var enveloped = new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId);
+                var enveloped = new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId, aguiPayload);
                 var result = sink.tryEmitNext(enveloped);
                 if (result.isFailure()) {
                     log.debug("SessionEventBus: emit to sink failed (sid={}, result={})",
@@ -139,7 +156,7 @@ public class SessionEventBus {
     public int emitSynthetic(String sessionId, String replyId, String type, String payload) {
         // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）；合成帧均为里程碑
         payload = AgentEventSseSerializer.withReplyId(payload, replyId, true);
-        int seq = eventStore.append(sessionId, replyId, type, payload);
+        int seq = eventStore.append(sessionId, replyId, type, payload, null);
 
         log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
 
@@ -155,6 +172,30 @@ public class SessionEventBus {
                 sessionId, type, replyId);
         }
 
+        touchActive(sessionId);
+        return seq;
+    }
+
+    /**
+     * 双编码合成帧（agui-native-parity-design §4 D7）：AG-UI 轮的合成帧
+     * （tool_call_summary / tool_result_preview / file_ready）在 native 词表之外同步携带
+     * AG-UI CUSTOM 帧（pa）。{@code aguiPayload} 为 CUSTOM 事件 JSON 数组（可空 =
+     * native-only 降级）。
+     */
+    public int emitSyntheticAgui(String sessionId, String replyId, String type, String payload,
+                                 String aguiPayload) {
+        payload = AgentEventSseSerializer.withReplyId(payload, replyId, true);
+        int seq = eventStore.append(sessionId, replyId, type, payload, aguiPayload);
+
+        log.debug("[EventBus] emitSyntheticAgui: sid={}, seq={}, type={}, replyId={}",
+            sessionId, seq, type, replyId);
+
+        if (seq >= 1) {
+            var sink = sinks.get(sessionId);
+            if (sink != null) {
+                sink.tryEmitNext(new SessionEventStore.EnvelopedEvent(seq, type, payload, replyId, aguiPayload));
+            }
+        }
         touchActive(sessionId);
         return seq;
     }
@@ -199,6 +240,42 @@ public class SessionEventBus {
             .doOnCancel(() -> log.debug("SessionEventBus: subscription cancelled (sid={})", sessionId))
             .doOnError(e -> log.debug("SessionEventBus: subscription error (sid={}): {}",
                 sessionId, e.getMessage()));
+    }
+
+    /**
+     * 裸信封订阅结果：事件流 + 完成信号分离——完成信号供调用方终止自己合并的心跳流
+     * （完成信号是热 sink 的第二订阅，不重放回放段；与 {@link #subscribe} 内部的
+     * completionSignal 同一模式）。
+     */
+    public record EnvelopedSubscription(Flux<SessionEventStore.EnvelopedEvent> events,
+                                        Mono<Void> completion) {}
+
+    /**
+     * 裸信封订阅（agui-native-parity-design §3）：与 {@link #subscribe} 同构
+     * （回放 + 实时 + 终态收流），但不做 native 帧渲染——由调用方按协议渲染
+     * （AG-UI 控制器把 pa 拆成多帧、native-only 行降级）。心跳由调用方经
+     * {@code completion} 终止后自行合并。
+     *
+     * <p>仅供 AG-UI 面使用；native 词表收口（toSseFrame）不经此路径。
+     */
+    public EnvelopedSubscription subscribeEnveloped(String sessionId, int afterSeq,
+                                                    String replyId) {
+        var sink = ensureSink(sessionId);
+
+        Flux<SessionEventStore.EnvelopedEvent> replay = Flux.defer(() -> {
+            if (afterSeq < 0) return Flux.empty();
+            return eventStore.queryAfter(sessionId, replyId, afterSeq);
+        });
+
+        Flux<SessionEventStore.EnvelopedEvent> live = sink.asFlux()
+            .filter(e -> replyId == null || replyId.isBlank() || replyId.equals(e.replyId()));
+
+        Mono<Void> completionSignal = sink.asFlux().then();
+
+        var events = replay.concatWith(live.takeUntilOther(completionSignal))
+            .doOnSubscribe(s -> touchActive(sessionId))
+            .doOnCancel(() -> log.debug("SessionEventBus: enveloped subscription cancelled (sid={})", sessionId));
+        return new EnvelopedSubscription(events, completionSignal);
     }
 
     /**

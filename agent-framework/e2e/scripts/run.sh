@@ -19,6 +19,7 @@ if [ "$FAILED" -eq 0 ]; then
     core)    PROJECTS="--project=api-core --project=api-models --project=api-reload --project=ui" ;;
     multi)   PROJECTS="--project=api-multi --project=ui-multi --project=api-multi-kill" ;;
     sandbox) PROJECTS="--project=api-sandbox" ;;
+    agui)    PROJECTS="--project=api-agui" ;;
     protocol) PROJECTS="--project=api-protocol" ;;
     protocol-multi) PROJECTS="--project=api-protocol-multi" ;;
     router)  PROJECTS="--project=api-router" ;;

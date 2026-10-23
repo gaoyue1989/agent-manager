@@ -46,6 +46,7 @@ export class Router {
       const module = route.module;
       module.mount(this.container, {
         api: window.App.api,
+        agui: window.App.agui,
         state: window.App.state,
         utils: window.App.utils,
         modal: window.App.modal
