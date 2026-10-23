@@ -149,6 +149,70 @@ jobs:
             agent-framework/e2e/playwright-report/
           retention-days: 5
 
+  # AG-UI 协议输出面 e2e（agui-native-parity-design §12.4 API 级：帧序/跨面可见/HITL
+  # interrupt+resume/断联续传）。独立组单实例（AGENT_AGUI_ENABLED=true）。
+  # 非必需检查（红了只告警，不挡合并），稳定后按设计 §12.5 再评估转必需。
+  e2e-agui:
+    name: E2E AG-UI 协议面（AG 组）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      E2E_GROUP: agui
+      E2E_BASE_PORT: "8100"
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
+      - name: 构建被测 jar
+        working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 安装 Playwright chromium
+        working-directory: agent-framework/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: 录制件校验
+        working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - name: 起环境并执行 agui 组
+        working-directory: agent-framework/e2e
+        run: ./scripts/run.sh agui
+      - name: 失败取证
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-agui
+          path: |
+            agent-framework/e2e/.runtime/
+            agent-framework/e2e/playwright-report/
+          retention-days: 5
+
   e2e-multi:
     name: E2E 多副本（R 组 + U9）
     needs: [changes]

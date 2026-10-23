@@ -104,7 +104,7 @@ class RemoteConfirmBridgeTest {
             .thenReturn(Flux.empty());
         when(eventStore.findLatest(anyString())).thenReturn(null);
         when(eventStore.findMaxSeq(anyString())).thenReturn(0);
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
         eventBus = new SessionEventBus(eventStore);
         sessionUserStore = mock(SessionUserStore.class);
         turnLeaseStore = mock(TurnLeaseStore.class);
@@ -511,7 +511,7 @@ class RemoteConfirmBridgeTest {
 
         // 唤醒 turn：acquire 租约 → invokeStream → 事件写 durable SSE → 收尾释放
         verify(turnLeaseStore, timeout(3000)).tryAcquire(SID);
-        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString());
+        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString(), isNull());
         verify(eventStore, timeout(3000)).finishTurn(SID);
         verify(turnLeaseStore, timeout(3000)).release(SID, "tok-1");
     }
@@ -567,7 +567,7 @@ class RemoteConfirmBridgeTest {
             List.of(Map.of("tool_call_id", "call-1", "confirmed", true)));
 
         verify(turnLeaseStore, timeout(3000)).tryAcquire(SID);
-        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString());
+        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString(), isNull());
         verify(turnLeaseStore, timeout(3000)).release(SID, "tok-1");
     }
 
@@ -693,7 +693,7 @@ class RemoteConfirmBridgeTest {
         bridge.pollOnce();
 
         verify(turnLeaseStore, timeout(3000)).tryAcquire(SID);
-        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString());
+        verify(eventStore, timeout(3000)).append(eq(SID), anyString(), eq("done"), anyString(), isNull());
         verify(turnLeaseStore, timeout(3000)).release(SID, "tok-1");
         // 收割话术：提示先 task_output 取结果（确定性收割，不靠模型自觉）
         var messageCap = ArgumentCaptor.forClass(String.class);

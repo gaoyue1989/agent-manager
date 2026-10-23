@@ -121,6 +121,15 @@ agent:
     heartbeat-seconds: ${AGENT_SSE_HEARTBEAT_SECONDS:20}
     sinks-eviction-minutes: ${AGENT_SSE_SINKS_EVICTION_MINUTES:5}
     sinks-buffer-size: ${AGENT_SSE_SINKS_BUFFER_SIZE:256}
+  # AG-UI 协议输出面（agui-native-parity-design §10，env 前缀 AGENT_AGUI_*）。
+  # 默认关闭（零装配）；开启后暴露 POST /agui/runs + GET /agui/threads/{id}/events，
+  # 事件与 native 面同流双编码（Redis 信封可选 pa 字段），断联续传/HITL/turn 仲裁全复用。
+  agui:
+    enabled: ${AGENT_AGUI_ENABLED:false}
+    emit-token-usage: ${AGENT_AGUI_EMIT_TOKEN_USAGE:true}
+    emit-tool-call-args: ${AGENT_AGUI_EMIT_TOOL_CALL_ARGS:true}
+    enable-reasoning: ${AGENT_AGUI_ENABLE_REASONING:true}
+    emit-subagent-events-as-native: ${AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE:false}
   # session_event 事件流存储（Redis Streams，见 AgentRedisProperties record）
   # 键名与 AgentRedisProperties 字段一一对应；每个叶子在代码里都有 @DefaultValue，
   # 所以本段缺失也能起来 —— 但**别**依赖那些默认值：它们指向 127.0.0.1:6379。

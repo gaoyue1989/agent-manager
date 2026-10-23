@@ -2,6 +2,7 @@
 
 import { Router } from './router.js';
 import { api } from './api.js';
+import { agui } from './agui.js';
 import * as state from './state.js';
 import * as utils from './utils.js';
 
@@ -42,7 +43,7 @@ const modal = {
 };
 
 // 全局暴露（供内联 onclick 使用）
-window.App = { api, state, utils, modal };
+window.App = { api, agui, state, utils, modal };
 
 // 工具分组折叠切换（供模块内联 onclick 使用）
 window.App.toolGroupToggle = (el) => {

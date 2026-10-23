@@ -44,6 +44,7 @@
 12. [错误处理](#12-错误处理)
 13. [前端对接指南](#13-前端对接指南)
 14. [数据表参考](#14-数据表参考)
+15. [AG-UI 协议输出面](#15-ag-ui-协议输出面)
 
 ---
 
@@ -1711,6 +1712,74 @@ Stream 字段：
 **索引:** `idx_user_status (user_key, status)`、`idx_session (session_id, created_at)`、`uk_storage (storage_type, storage_key)`
 
 **保留期:** upload 文件 7 天（P2 定时清理）
+
+---
+
+
+---
+
+## 15. AG-UI 协议输出面
+
+> 设计权威：[agui-native-parity-design.md](agui-native-parity-design.md)（2026-10-24 实施）。
+> 默认关闭（`AGENT_AGUI_ENABLED=false`，端点 404）；开启后与 native 面**并存**，本节词表仅作用于 `/agui/*`。
+
+### 15.1 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/agui/runs` | POST（SSE） | 标准 AG-UI run：`RunAgentInput` 投影 `{threadId, runId, messages[], resume[]}` → SSE AguiEvent 流 |
+| `/agui/threads/{threadId}/events?afterSeq=&runId=` | GET（SSE） | 平台扩展续传端点：复用 Tailer 回放/追赶/终态探测，pa 拆帧 + native-only 段降级 |
+| `/threads/{sessionId}/status`、`/confirm(/-stream)`、`history`、`/files/*`、`/mcp/*` | — | 协议无关，双面共用（零改动） |
+
+- `threadId` 即平台 sessionId（跨面同源；归属校验同 `/chat`、`/subscribe`）；`runId` 省略时服务端生成。
+- `messages` 只取**最后一条 user 消息**的文本（服务端自带历史，官方 `extractLatestUserMessage` 同语义）；
+  `tools/state/context/forwardedProps` 暂不消费。
+- SSE `id:` 行 = 信封 seq（与 native 面同一游标空间）；`:hb` 心跳为 comment 帧。
+- 断连不杀 run（与 native 面一致），客户端经 events 端点按 `afterSeq` 续传。
+
+### 15.2 AG-UI 事件词表（服务端产出）
+
+| AgentEvent / 平台事件 | AG-UI 事件 | 说明 |
+|------|------|------|
+| AGENT_START | RUN_STARTED | run 起点 |
+| TEXT_BLOCK_START/DELTA/END | TEXT_MESSAGE_START/CONTENT/END | SDK 对空 START 延迟发帧（首个 DELTA 成对产出） |
+| THINKING_BLOCK_* | REASONING_MESSAGE_* | `AGENT_AGUI_ENABLE_REASONING` |
+| TOOL_CALL_START/DELTA/END | TOOL_CALL_START/ARGS/END | |
+| TOOL_RESULT_START/TEXT_DELTA/DATA/END | TOOL_CALL_RESULT | 恢复段的孤儿结果由平台预播种解锁（设计 D4） |
+| ModelCallEnd | CUSTOM(name=token_usage) | `value.delta/cumulative` |
+| RequireUserConfirmEvent | RUN_FINISHED(outcome=interrupt) | interruptId=`{runId}:{toolCallId}`，metadata 含 `agentscope.interruptKind=permission_confirm`/toolName/toolInput；responseSchema=approved |
+| 子 agent 转发事件 | CUSTOM(name=subagent.*) | `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE=false` |
+| tool_call_summary / tool_result_preview / file_ready | CUSTOM(name=同帧名，value=帧原文) | 平台合成帧对等承载 |
+| DATA_BLOCK_* 等未映射事件 | RAW | SDK 官方回退语义 |
+
+一个 native 事件可对应多个 AG-UI 事件（同一 seq 的 pa 数组），拆帧后共享 `id:` 游标。
+
+### 15.3 HITL resume[]（与 native confirm 双面互认）
+
+```json
+POST /agui/runs
+{ "threadId": "sess-1", "runId": "run-2", "messages": [],
+  "resume": [{ "interruptId": "run-1:call-1", "status": "resolved",
+               "payload": { "approved": true, "acceptRule": false } }] }
+```
+
+- `approved` 严格布尔（仅 `true` 放行）；`status=cancelled` 或 `approved=false` = 拒绝。
+- `acceptRule` 为**平台扩展**（官方客户端不传即无规则），透传 native `accept_rule` 能力。
+- 确认上下文与 native 面**同表同 CAS**：任一面确认后另一面重复提交报
+  `confirm_already_consumed`（AG-UI 侧为 RUN_ERROR，native 侧 409）。
+- 挂起会话的新 run 预检：`turn_pending_confirm`（RUN_ERROR），须先 resume。
+
+### 15.4 续传端点降级语义
+
+native-only 段（存量轮次/合成帧降级行）对 AG-UI 订阅者渲染为
+`CUSTOM(name=platform.native_event, value=<p 原文>)`；turn 中断（执行副本崩溃）补
+`CUSTOM(name=platform.control, value={kind:"interrupted"})`；排队失败为 RUN_ERROR。
+正常完成不补帧（RUN_FINISHED 已是数据事件，避免双终态）。
+
+### 15.5 配置
+
+`agent.agui.*`（env `AGENT_AGUI_*`，AguiProperties）：`enabled`（默认 false）/ `emit-token-usage` /
+`emit-tool-call-args` / `enable-reasoning` / `emit-subagent-events-as-native`。
 
 ---
 

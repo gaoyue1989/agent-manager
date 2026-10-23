@@ -159,6 +159,18 @@
             <version>${agentscope.version}</version>
         </dependency>
 
+        <!-- AG-UI 协议输出面（agui-native-parity-design §4 D1）：只引扩展 jar，
+             不引 agentscope-agui-spring-boot-starter——starter 的 AguiResumeCoordinator
+             （interrupt 登记 + 单 run 仲裁）为进程内存 ConcurrentMap，多副本失效，
+             违反「任意请求落任意副本」原则二。pa 编码复用其 converter registry /
+             AguiEvent 模型 / AguiEventEncoder；请求处理链（turn_lease / confirm_context /
+             Durable SSE）由平台自建（AguiRunController）。 -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-agui</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+
         <!-- MySQL State Store -->
         <dependency>
             <groupId>io.agentscope</groupId>

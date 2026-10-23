@@ -13,7 +13,8 @@ let fileInput = null;
 let uploadPreview = null;
 let uploadFiles = null;
 let uidInput = null;
-let modelSelect = null;     // 模型切换下拉框
+let modelSelect = null;
+let protoSelect = null;     // 模型切换下拉框
 
 // @Skill 提及状态
 let mentionDropdown = null;
@@ -28,6 +29,13 @@ let pendingFiles = [];       // 待上传的文件列表 [{file, fileId, status}
 let isStreaming = false;
 let activeAbort = null;      // 单次流/A2A 的 abort 控制器
 let activeChatHandle = null; // sendChat 返回的 handle（含 close/lastEventId）
+
+// 对话协议分流（agui-native-parity-design §12.2 L2）：native=api.js（/threads/* 自研词表），
+// agui=js/agui.js（/agui/* 官方事件，翻译为 native 词表喂同一渲染器）。签名同构，
+// 调用点仅此一行差别；开关默认 native，仅 debug 页提供。
+function transport() {
+  return (ctx && ctx.agui && ctx.state.getState('ui.protocol') === 'agui') ? ctx.agui : ctx.api;
+}
 let activeSubHandle = null;  // subscribe 返回的 handle（重连时使用）
 
 // ★ durable-sse-plan：SSE 断连自动重连
@@ -93,6 +101,10 @@ function render() {
           <button id="modeA2A">A2A</button>
           <button id="modeChannel" class="active">Channel</button>
         </div>
+        <label class="uid-label" title="对话协议：native=/threads 自研词表；agui=官方 AG-UI 事件（/agui/*）">Proto&nbsp;<select id="protoSelect" class="input uid-input" style="cursor:pointer">
+          <option value="native">native</option>
+          <option value="agui">AG-UI</option>
+        </select></label>
         <button id="btnLlmCalls" class="btn small" disabled>LLM Calls</button>
         <button id="btnSysPrompt" class="btn small">System Prompt</button>
         <button id="btnCard" class="btn small">Card</button>
@@ -134,6 +146,12 @@ export default {
     uidInput.value = ctx.state.getState('ui.userId') || 'debug-user';
     modelSelect = document.getElementById('modelSelect');
     modelSelect.addEventListener('change', onModelChange);
+    protoSelect = document.getElementById('protoSelect');
+    protoSelect.value = ctx.state.getState('ui.protocol') || 'native';
+    protoSelect.addEventListener('change', () => {
+      ctx.state.setState('ui.protocol', protoSelect.value);
+      ctx.utils.toast('对话协议: ' + protoSelect.value + '（下一轮发送生效）', 'info');
+    });
     updateConnBadge();
 
     // @Skill 提及
@@ -543,7 +561,7 @@ async function tryResumeSSE(sessionId) {
       }
 
       // 订阅续传
-      activeSubHandle = ctx.api.subscribe(sessionId, {
+      activeSubHandle = transport().subscribe(sessionId, {
         afterSeq: lastEventId,
         replyId: currentReplyId,
         userId: uid,
@@ -1548,7 +1566,7 @@ function consumeConfirmStream(sid, results, render) {
       ensureReply(replyId);
     }
 
-    ctx.api.confirmStream(sid, results, {
+    transport().confirmStream(sid, results, {
       userId: ctx.state.getState('ui.userId') || 'debug-user',
       onEvent: (data) => {
         if (render) handleEvent(data);
@@ -2151,7 +2169,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
   // ★ 通过 GET /subscribe 重连续传
   const subscribeWithReconnect = (sessionId, afterSeq, replyId) => {
     if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } }
-    activeSubHandle = ctx.api.subscribe(sessionId, {
+    activeSubHandle = transport().subscribe(sessionId, {
       afterSeq,
       replyId,
       userId: ctx.state.getState('ui.userId') || 'debug-user',
@@ -2173,7 +2191,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
 
   // ★ 回放历史 + done 帧后关闭（turn 已完成场景）
   const replayAndClose = (sessionId, afterSeq, replyId) => {
-    activeSubHandle = ctx.api.subscribe(sessionId, {
+    activeSubHandle = transport().subscribe(sessionId, {
       afterSeq,
       replyId,
       userId: ctx.state.getState('ui.userId') || 'debug-user',
@@ -2191,7 +2209,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
   // ★ 发起 POST /chat
   reconnectAttempts = 0;
   const uid = ctx.state.getState('ui.userId') || 'debug-user';
-  activeChatHandle = ctx.api.sendChat(sid, text, uid, fileIds, {
+  activeChatHandle = transport().sendChat(sid, text, uid, fileIds, {
     model,
     onWaiting: () => {
       if (!waitingSince) waitingSince = Date.now();

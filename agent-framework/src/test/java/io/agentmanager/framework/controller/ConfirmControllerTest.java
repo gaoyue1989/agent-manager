@@ -35,6 +35,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
@@ -292,7 +293,7 @@ class ConfirmControllerTest {
         assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("lease_lost")),
             frames.toString());
         // 用 any() 而非 anyString()：后者不匹配 null，会漏检「终态帧被落库」
-        verify(eventStore, never()).append(any(), any(), any(), any());
+        verify(eventStore, never()).append(any(), any(), any(), any(), isNull());
         // 两次调用是设计使然（先拆流、后幂等空转）
         verify(eventStore, atLeastOnce()).abandonTurn("t1");
         verify(eventStore, never()).finishTurn("t1");
@@ -307,7 +308,7 @@ class ConfirmControllerTest {
         when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-c1");
         // 持久化成功返回合法 seq（append 真实语义从 1 起；mock 默认 0 在 A3 后不广播——
         // 那正是本应被消除的「永不落库却实时可见」瑕疵帧）
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var frame = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
@@ -327,7 +328,7 @@ class ConfirmControllerTest {
         when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
             .thenReturn(reactor.core.publisher.Flux.just(ask));
         when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-ask1");
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
 
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
@@ -361,7 +362,7 @@ class ConfirmControllerTest {
         when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
         when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-c2");
-        when(eventStore.append(anyString(), anyString(), anyString(), anyString())).thenReturn(1);
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
 
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
@@ -375,7 +376,7 @@ class ConfirmControllerTest {
         events.tryEmitNext((io.agentscope.core.event.AgentEvent)
             new io.agentscope.core.event.AgentEndEvent("reply-3").withSource("gw-1/order-agent"));
         verify(eventStore, org.mockito.Mockito.timeout(2000))
-            .append(eq("t1"), any(), eq("AGENT_END"), any());
+            .append(eq("t1"), any(), eq("AGENT_END"), any(), isNull());
         sleep(200);
 
         verify(eventStore, never()).finishTurn("t1");
