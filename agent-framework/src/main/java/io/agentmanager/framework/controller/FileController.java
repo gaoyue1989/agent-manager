@@ -340,6 +340,9 @@ public class FileController {
         java.util.Map.entry("text/csv", java.util.Set.of("csv", "tsv")),
         java.util.Map.entry("text/html", java.util.Set.of("html", "htm")),
         java.util.Map.entry("text/css", java.util.Set.of("css")),
+        // MHTML 单文件网页：multipart/related 为 RFC 2557 注册类型，x-mimearchive 为浏览器惯用别名
+        java.util.Map.entry("multipart/related", java.util.Set.of("mht", "mhtml")),
+        java.util.Map.entry("application/x-mimearchive", java.util.Set.of("mht", "mhtml")),
         // application/*
         java.util.Map.entry("application/pdf", java.util.Set.of("pdf")),
         java.util.Map.entry("application/json", java.util.Set.of("json")),

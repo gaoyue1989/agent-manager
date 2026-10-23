@@ -102,7 +102,7 @@ public class SandboxRuntime {
         return config.syncSnapshotDiffEnabled();
     }
 
-    /** per-session agent 隔离（{@code SANDBOX_SESSION_AGENT_ISOLATION}，默认 false；上游 #2849 workaround） */
+    /** per-session agent 隔离（{@code SANDBOX_SESSION_AGENT_ISOLATION}，默认 true；#2849 workaround，兼定守卫锁粒度） */
     public boolean sessionAgentIsolationEnabled() {
         return config.sessionAgentIsolation();
     }
