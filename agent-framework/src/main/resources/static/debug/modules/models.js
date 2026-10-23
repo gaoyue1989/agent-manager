@@ -1,10 +1,13 @@
 /* ===== Models 模块：会话可切换模型管理 =====
-   系统模型（LLM_* 环境变量，只读，默认模型）+ 托管模型（model_config 表 CRUD + 连接测试）。
-   接口契约见 docs/session-model-switch-design.md §4.1（GET /models?all=true 为管理视图）。 */
+   系统模型（LLM_* 环境变量，只读）+ 托管模型（model_config 表 CRUD + 连接测试）；
+   支持设置全局默认模型与备用模型（DB 配置优先于 env）。
+   接口契约见 docs/session-model-switch-design.md §4.1 与 docs/model-fallback-design.md
+   （GET /models?all=true 为管理视图）。 */
 
 let ctx = null;
 let models = [];
 let fallbackId = '';
+let fallbackSource = 'none';
 
 export default {
   mount(container, c) {
@@ -17,9 +20,10 @@ export default {
           <button class="btn small primary" id="btnAddModel">Add Model</button>
         </span></div>
       <div class="empty" style="text-align:left;padding:0 0 10px">
-        会话可切换模型：系统模型来自 LLM_* 环境变量（只读，未显式选择的会话走它）；
-        托管模型存 model_config 表，保存即生效。删除被会话引用的模型后，该会话自动回落默认模型。
-        备用模型由 LLM_FALLBACK_MODEL_ID 指定（下方标注 fallback），主模型重试耗尽（429/5xx/超时/网络）后自动切换。
+        会话可切换模型：系统模型来自 LLM_* 环境变量（只读）；托管模型存 model_config 表，保存即生效。
+        未显式选择模型的会话走「默认模型」——点任意模型行的 Set Default 设置，点系统模型行可回落系统默认。
+        删除被会话引用的模型后，该会话自动回落默认模型。
+        备用模型点托管模型行的 Set Fallback 设置（主模型重试耗尽后自动切换）；数据库未设置时回退 LLM_FALLBACK_MODEL_ID。
       </div>
       <div class="module-scroll" id="modelsBody"><div class="empty">Loading...</div></div>
     </div>`;
@@ -31,18 +35,17 @@ export default {
     ctx = null;
     models = [];
     fallbackId = '';
+    fallbackSource = 'none';
   }
 };
 
 async function loadModels() {
   const body = document.getElementById('modelsBody');
   try {
-    const [data, env] = await Promise.all([
-      ctx.api.getModels(true),
-      ctx.api.getEnvConfig().catch(() => null) // 备用配置读取失败不阻断模型列表
-    ]);
+    const data = await ctx.api.getModels(true);
     models = (data && data.models) || [];
-    fallbackId = (env && env.llm && env.llm.fallback_model_id) || '';
+    fallbackId = (data && data.fallback_model) || '';
+    fallbackSource = (data && data.fallback_source) || 'none';
   } catch (e) {
     if (!ctx) return; // 已切走：丢弃过期渲染
     body.innerHTML = '<div class="empty error-text">Failed to load models: ' + ctx.utils.esc(e.message) + '</div>';
@@ -58,24 +61,27 @@ function renderTable(body) {
     return;
   }
   let html = '';
-  // 备用模型提示（LLM_FALLBACK_MODEL_ID）：命中列表则标注「fallback」，未命中说明配置无效
-  if (fallbackId) {
-    const matched = models.some((m) => m.id === fallbackId);
-    html += '<div class="empty" style="text-align:left;padding:0 0 8px">备用模型：'
-      + '<span class="mono">' + ctx.utils.esc(fallbackId) + '</span>'
-      + (matched ? '' : '（不在列表中：可能已删除/禁用，备用不生效）') + '</div>';
+  // 备用模型提示：区分数据库配置与部署级 env；DB 配置可清除后回落 env
+  html += '<div class="empty" style="text-align:left;padding:0 0 8px">备用模型：';
+  if (!fallbackId) {
+    html += '未启用（点托管模型行的 Set Fallback 设置）';
+  } else {
+    html += '<span class="mono">' + ctx.utils.esc(fallbackId) + '</span>'
+      + (fallbackSource === 'env'
+          ? '（来自 LLM_FALLBACK_MODEL_ID；设置备用可覆盖）'
+          : '（来源 db） <button class="btn small" data-act="clear-fallback">Clear</button>');
   }
+  html += '</div>';
   html += '<table class="data-table"><thead><tr>'
     + '<th>Name</th><th>Model ID</th><th>Base URL</th><th>API Key</th>'
     + '<th>Sampling</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
   for (const m of models) {
     const isSystem = m.source === 'system';
-    const isFallback = !!fallbackId && m.id === fallbackId;
     html += '<tr>'
       + '<td>' + ctx.utils.esc(m.name)
         + (isSystem ? ' <span class="badge dim">system</span>' : '')
         + (m.is_default ? ' <span class="badge green">default</span>' : '')
-        + (isFallback ? ' <span class="badge yellow">fallback</span>' : '') + '</td>'
+        + (m.is_fallback ? ' <span class="badge yellow">fallback</span>' : '') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.model_id) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.base_url || '—') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.api_key_masked || (isSystem ? '（env）' : '（系统密钥）')) + '</td>'
@@ -85,6 +91,12 @@ function renderTable(body) {
           : '<span class="badge green">enabled</span>') + '</td>'
       + '<td>'
       + '<button class="btn small" data-act="test" data-id="' + ctx.utils.esc(m.id) + '">Test</button> '
+      + (!m.is_default && (isSystem || m.enabled !== false)
+          ? '<button class="btn small primary" data-act="default" data-id="' + ctx.utils.esc(m.id) + '">Set Default</button> '
+          : '')
+      + (!isSystem && !m.is_fallback && m.enabled !== false
+          ? '<button class="btn small" data-act="fallback" data-id="' + ctx.utils.esc(m.id) + '">Set Fallback</button> '
+          : '')
       + (isSystem ? ''
           : '<button class="btn small" data-act="edit" data-id="' + ctx.utils.esc(m.id) + '">Edit</button> '
             + '<button class="btn small danger" data-act="del" data-id="' + ctx.utils.esc(m.id) + '">Delete</button>')
@@ -95,13 +107,59 @@ function renderTable(body) {
 
   body.querySelectorAll('button[data-act]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (btn.dataset.act === 'clear-fallback') {
+        clearFallback();
+        return;
+      }
       const model = models.find((x) => x.id === btn.dataset.id);
       if (!model) return;
       if (btn.dataset.act === 'test') testModel(model, btn);
+      else if (btn.dataset.act === 'default') setDefaultModel(model);
+      else if (btn.dataset.act === 'fallback') setFallbackModel(model);
       else if (btn.dataset.act === 'edit') openForm(model);
       else if (btn.dataset.act === 'del') deleteModel(model);
     });
   });
+}
+
+/** 设为默认对话模型（系统模型行 = 清除托管默认，回落 LLM_* 系统模型） */
+async function setDefaultModel(model) {
+  const isSystem = model.source === 'system';
+  try {
+    const r = await ctx.api.setDefaultModel(model.id);
+    const name = isSystem ? '系统模型' : model.name;
+    ctx.utils.toast('已将 ' + name + ' 设为默认模型'
+      + (r && r.default_model ? '（' + r.default_model + '）' : ''), 'success');
+    loadModels();
+  } catch (e) {
+    ctx.utils.toast('设置默认模型失败: ' + e.message, 'error');
+  }
+}
+
+/** 设为备用模型（DB 配置优先于 LLM_FALLBACK_MODEL_ID） */
+async function setFallbackModel(model) {
+  try {
+    const r = await ctx.api.setFallbackModel(model.id);
+    ctx.utils.toast('已将 ' + model.name + ' 设为备用模型'
+      + (r && r.fallback_model ? '（' + r.fallback_model + '）' : ''), 'success');
+    loadModels();
+  } catch (e) {
+    ctx.utils.toast('设置备用模型失败: ' + e.message, 'error');
+  }
+}
+
+/** 清除数据库备用覆盖；若部署配置了 LLM_FALLBACK_MODEL_ID 则自动回落该模型 */
+async function clearFallback() {
+  try {
+    const r = await ctx.api.setFallbackModel('system');
+    const msg = (r && r.fallback_model)
+      ? '已清除 DB 备用，当前回落 ' + r.fallback_model + '（来源 ' + r.fallback_source + '）'
+      : '已清除备用模型';
+    ctx.utils.toast(msg, 'success');
+    loadModels();
+  } catch (e) {
+    ctx.utils.toast('清除备用模型失败: ' + e.message, 'error');
+  }
 }
 
 function samplingText(m) {
@@ -156,7 +214,7 @@ function openForm(existing) {
   window.App.modal.open(
     '<h2>' + (isEdit ? 'Edit Model' : 'Add Model') + '</h2>'
     + '<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px">'
-    + '托管模型存 model_config 表，保存即生效（多副本 ≤30s 收敛）。未显式选择的会话走系统模型。</p>'
+    + '托管模型存 model_config 表，保存即生效（多副本 ≤30s 收敛）。未显式选择的会话走列表中的默认模型。</p>'
     + field('Name *', 'mfName', m.name, 'placeholder="展示名（唯一）"')
     + field('Provider', 'mfProvider', m.provider || 'openai', 'placeholder="openai"')
     + field('Model ID *', 'mfModelId', m.model_id, 'placeholder="推理端点模型名，如 deepseek-v3"')

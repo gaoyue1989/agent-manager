@@ -99,6 +99,94 @@ public class ModelConfigStore {
         }
     }
 
+    /**
+     * 当前默认对话模型 id（仅 enabled）；empty = 未配置/已不可用（回落系统模型 LLM_*）。
+     * 读库异常直接抛出，由 {@link ModelCatalog} 对会话链路 fail-soft。
+     */
+    public Optional<String> findDefaultId() {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT id FROM model_config WHERE is_default = 1 AND enabled = 1 "
+                     + "ORDER BY updated_at DESC LIMIT 1");
+             var rs = ps.executeQuery()) {
+            return rs.next() ? Optional.of(rs.getString("id")) : Optional.empty();
+        } catch (Exception e) {
+            throw new IllegalStateException("model_config default lookup failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 设为默认（单语句原子：目标行置 1、其余置 0，多副本并发下最终仍只有一行默认）。
+     * 调用方需预检目标存在且 enabled（否则语义上不允许成为默认）。
+     */
+    public void setDefault(String id) {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "UPDATE model_config SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END")) {
+            ps.setString(1, id);
+            ps.executeUpdate();
+            log.info("model_config default updated: id={}", id);
+        } catch (Exception e) {
+            throw new IllegalStateException("model_config set default failed (id=" + id + "): "
+                + e.getMessage(), e);
+        }
+    }
+
+    /** 清除默认（回落系统模型） */
+    public void clearDefault() {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement("UPDATE model_config SET is_default = 0 WHERE is_default = 1")) {
+            ps.executeUpdate();
+            log.info("model_config default cleared (fallback to system model)");
+        } catch (Exception e) {
+            throw new IllegalStateException("model_config clear default failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 当前数据库配置的备用模型 id（仅 enabled）；empty = 未配置/已不可用
+     * （运行时回退 LLM_FALLBACK_MODEL_ID）。读库异常直接抛出，由 {@link ModelCatalog} fail-soft。
+     */
+    public Optional<String> findFallbackId() {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "SELECT id FROM model_config WHERE is_fallback = 1 AND enabled = 1 "
+                     + "ORDER BY updated_at DESC LIMIT 1");
+             var rs = ps.executeQuery()) {
+            return rs.next() ? Optional.of(rs.getString("id")) : Optional.empty();
+        } catch (Exception e) {
+            throw new IllegalStateException("model_config fallback lookup failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 设为备用（单语句原子：目标行置 1、其余置 0，多副本并发下最终仍只有一行备用）。
+     * 调用方需预检目标存在且 enabled。
+     */
+    public void setFallback(String id) {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement(
+                 "UPDATE model_config SET is_fallback = CASE WHEN id = ? THEN 1 ELSE 0 END")) {
+            ps.setString(1, id);
+            ps.executeUpdate();
+            log.info("model_config fallback updated: id={}", id);
+        } catch (Exception e) {
+            throw new IllegalStateException("model_config set fallback failed (id=" + id + "): "
+                + e.getMessage(), e);
+        }
+    }
+
+    /** 清除数据库备用覆盖（运行时可能回退到 LLM_FALLBACK_MODEL_ID） */
+    public void clearFallback() {
+        try (var conn = dataSource.getConnection();
+             var ps = conn.prepareStatement("UPDATE model_config SET is_fallback = 0 WHERE is_fallback = 1")) {
+            ps.executeUpdate();
+            log.info("model_config fallback cleared (may fall back to LLM_FALLBACK_MODEL_ID)");
+        } catch (Exception e) {
+            throw new IllegalStateException("model_config clear fallback failed: " + e.getMessage(), e);
+        }
+    }
+
     /** 按展示名查（唯一性预检）：新建/改名时判重 */
     public Optional<ModelConfig> findByName(String name) {
         if (name == null || name.isBlank()) {
@@ -156,6 +244,8 @@ public class ModelConfigStore {
                  UPDATE model_config SET name = ?, provider = ?, model_id = ?, base_url = ?, api_key = ?,
                      temperature = ?, max_tokens = ?, timeout_seconds = ?, enable_thinking = ?,
                      reasoning_effort = ?, frequency_penalty = ?, context_length = ?, enabled = ?,
+                     is_default = CASE WHEN ? = 1 THEN is_default ELSE 0 END,
+                     is_fallback = CASE WHEN ? = 1 THEN is_fallback ELSE 0 END,
                      updated_at = NOW(3)
                  WHERE id = ?
                  """)) {
@@ -177,7 +267,10 @@ public class ModelConfigStore {
             }
             ps.setInt(12, cfg.contextLength());
             ps.setBoolean(13, cfg.enabled());
-            ps.setString(14, cfg.id());
+            // 禁用即失去默认/备用资格；启用时保留原标记
+            ps.setBoolean(14, cfg.enabled());
+            ps.setBoolean(15, cfg.enabled());
+            ps.setString(16, cfg.id());
             var n = ps.executeUpdate() > 0;
             if (n) {
                 log.info("model_config updated: id={}, name={}", cfg.id(), cfg.name());

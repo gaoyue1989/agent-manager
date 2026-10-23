@@ -57,6 +57,110 @@ class ModelCatalogTest {
     }
 
     @Test
+    void optionsShouldMarkConfiguredManagedDefault() {
+        when(store.findDefaultId()).thenReturn(Optional.of("m1"));
+        when(store.listEnabled()).thenReturn(List.of(cfg("m1", "DeepSeek-V3", true)));
+
+        var options = catalog.options();
+
+        assertFalse(options.get(0).isDefault());
+        assertTrue(options.get(1).isDefault());
+        assertEquals("m1", catalog.defaultModelId());
+    }
+
+    @Test
+    void defaultShouldFallBackToSystemWhenNotConfigured() {
+        when(store.findDefaultId()).thenReturn(Optional.empty());
+
+        assertEquals(ModelCatalog.SYSTEM_MODEL_ID, catalog.defaultModelId());
+        assertTrue(catalog.resolveDefault().isEmpty());
+    }
+
+    @Test
+    void resolveDefaultShouldBuildManagedModel() {
+        when(store.findDefaultId()).thenReturn(Optional.of("m1"));
+        when(store.findById("m1")).thenReturn(Optional.of(cfg("m1", "M1", true)));
+
+        var resolved = catalog.resolveDefault();
+
+        assertTrue(resolved.isPresent());
+        assertEquals("model-m1", resolved.get().getModelName());
+    }
+
+    @Test
+    void resolveDefaultShouldFailSoftToSystemWhenLookupFails() {
+        when(store.findDefaultId()).thenThrow(new IllegalStateException("db down"));
+
+        assertEquals(ModelCatalog.SYSTEM_MODEL_ID, catalog.defaultModelId());
+        assertTrue(catalog.resolveDefault().isEmpty());
+    }
+
+    // ===== fallback（备用模型：DB > env） =====
+
+    @Test
+    void fallbackShouldPreferDbOverEnv() {
+        var envCatalog = new ModelCatalog(store, props("qwen3-32b"), 30_000L, "env-model");
+        when(store.findFallbackId()).thenReturn(Optional.of("db-model"));
+
+        assertEquals("db-model", envCatalog.fallbackModelId());
+        assertEquals("db", envCatalog.fallbackSource());
+    }
+
+    @Test
+    void fallbackShouldUseEnvWhenDbNotConfigured() {
+        var envCatalog = new ModelCatalog(store, props("qwen3-32b"), 30_000L, "env-model");
+        when(store.findFallbackId()).thenReturn(Optional.empty());
+        when(store.findById("env-model")).thenReturn(Optional.of(cfg("env-model", "Env", true)));
+
+        assertEquals("env-model", envCatalog.fallbackModelId());
+        assertEquals("env", envCatalog.fallbackSource());
+    }
+
+    @Test
+    void fallbackShouldDisableUnavailableEnvModel() {
+        var envCatalog = new ModelCatalog(store, props("qwen3-32b"), 30_000L, "env-model");
+        when(store.findFallbackId()).thenReturn(Optional.empty());
+        when(store.findById("env-model")).thenReturn(Optional.empty());
+
+        assertEquals("", envCatalog.fallbackModelId());
+        assertEquals("none", envCatalog.fallbackSource());
+        assertTrue(envCatalog.resolveFallback().isEmpty());
+    }
+
+    @Test
+    void fallbackShouldFailSoftWhenDbLookupFails() {
+        var envCatalog = new ModelCatalog(store, props("qwen3-32b"), 30_000L, "env-model");
+        when(store.findFallbackId()).thenThrow(new IllegalStateException("db down"));
+        when(store.findById("env-model")).thenReturn(Optional.of(cfg("env-model", "Env", true)));
+
+        // DB 抖动时回落 env，不阻断对话
+        assertEquals("env-model", envCatalog.fallbackModelId());
+        assertEquals("env", envCatalog.fallbackSource());
+    }
+
+    @Test
+    void resolveFallbackShouldBuildManagedModel() {
+        when(store.findFallbackId()).thenReturn(Optional.of("fb"));
+        when(store.findById("fb")).thenReturn(Optional.of(cfg("fb", "FB", true)));
+
+        var resolved = catalog.resolveFallback();
+
+        assertTrue(resolved.isPresent());
+        assertEquals("model-fb", resolved.get().getModelName());
+    }
+
+    @Test
+    void optionsShouldMarkEffectiveFallback() {
+        when(store.findFallbackId()).thenReturn(Optional.of("m1"));
+        when(store.listEnabled()).thenReturn(List.of(cfg("m1", "DeepSeek-V3", true)));
+
+        var options = catalog.options();
+
+        assertFalse(options.get(0).isFallback());
+        assertTrue(options.get(1).isFallback());
+    }
+
+    @Test
     void optionsShouldIncludeDisabledForManagementView() {
         when(store.listAll()).thenReturn(List.of(
             cfg("on", "On", true), cfg("off", "Off", false)));

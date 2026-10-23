@@ -21,6 +21,8 @@ import io.agentscope.core.model.Model;
  *   <li>{@link #options()} —— GET /models 可选模型列表（前端 picker / debug 管理页数据源）；</li>
  *   <li>{@link #validateSelectable(String)} —— 会话切换校验（unknown_model / model_disabled）；</li>
  *   <li>{@link #resolve(String)} —— 会话路由解析模型实例（供 SessionModelMiddleware）；</li>
+ *   <li>{@link #resolveDefault()} —— 未显式绑定模型的会话使用的默认模型（托管默认缺失时回落系统模型）；</li>
+ *   <li>{@link #resolveFallback()} —— 主模型首信号失败后切换的备用模型（DB 配置优先于 env）；</li>
  *   <li>{@link #systemModel()} —— 系统模型实例（标题生成 / 连接测试）。</li>
  * </ul>
  *
@@ -45,6 +47,11 @@ public class ModelCatalog {
     private static final String SOURCE_SYSTEM = "system";
     private static final String SOURCE_MANAGED = "managed";
 
+    /** 备用模型来源：数据库显式配置 / LLM_FALLBACK_MODEL_ID / 未启用 */
+    private static final String FALLBACK_SOURCE_DB = "db";
+    private static final String FALLBACK_SOURCE_ENV = "env";
+    private static final String FALLBACK_SOURCE_NONE = "none";
+
     /**
      * 可选模型项（GET /models 返回；不暴露 apiKey 等连接细节）。
      * 字段名显式转 snake_case：响应体风格与本工程其余接口一致（会话/文件接口均为 snake_case）。
@@ -55,14 +62,35 @@ public class ModelCatalog {
         String provider,
         @com.fasterxml.jackson.annotation.JsonProperty("model_id") String modelId,
         @com.fasterxml.jackson.annotation.JsonProperty("is_default") boolean isDefault,
+        @com.fasterxml.jackson.annotation.JsonProperty("is_fallback") boolean isFallback,
         String source,
         boolean enabled
-    ) {}
+    ) {
+        /** 兼容旧调用（既有测试 7 参签名）：备用标记缺省 false */
+        public ModelOption(String id, String name, String provider, String modelId,
+                           boolean isDefault, String source, boolean enabled) {
+            this(id, name, provider, modelId, isDefault, false, source, enabled);
+        }
+    }
+
+    /** 有效备用模型选择：id + 来源（db/env/none）；id 空 = 未启用 */
+    public record FallbackSelection(String id, String source) {
+        public boolean enabled() {
+            return id != null && !id.isBlank();
+        }
+    }
 
     private final ModelConfigStore store;
     private final AgentManagerProperties.LLMConfig systemLlm;
     private final AgentManagerProperties.HarnessConfig harness;
     private final long cacheTtlMillis;
+
+    /**
+     * 部署级备用模型（LLM_FALLBACK_MODEL_ID）；DB is_fallback 优先于它。
+     * 字段注入（同 HarnessAgentFactory 先例）：本类另有测试用包级构造，避免改动全部构造调用点。
+     */
+    @org.springframework.beans.factory.annotation.Value("${agent.llm.fallback-model-id:}")
+    private String envFallbackModelId;
 
     /** id → 已构建实例（含加载时间，TTL 过期后重查库） */
     private final ConcurrentHashMap<String, CachedModel> cache = new ConcurrentHashMap<>();
@@ -77,18 +105,26 @@ public class ModelCatalog {
      */
     @org.springframework.beans.factory.annotation.Autowired
     public ModelCatalog(ModelConfigStore store, AgentManagerProperties props) {
-        this(store, props, DEFAULT_CACHE_TTL_MILLIS);
+        this(store, props, DEFAULT_CACHE_TTL_MILLIS, null);
     }
 
     /** 测试可指定 TTL（生产用 {@link #DEFAULT_CACHE_TTL_MILLIS}） */
     ModelCatalog(ModelConfigStore store, AgentManagerProperties props, long cacheTtlMillis) {
+        this(store, props, cacheTtlMillis, null);
+    }
+
+    /** 测试可指定 TTL 与部署级备用模型 id（生产由 Spring 字段注入设置） */
+    ModelCatalog(ModelConfigStore store, AgentManagerProperties props, long cacheTtlMillis,
+                 String envFallbackModelId) {
         this.store = store;
         this.systemLlm = props.llm() != null ? props.llm()
             : new AgentManagerProperties.LLMConfig("", "", "", "openai", 0.7, 4096, 120, true, 0, "", null);
         this.harness = props.harness() != null ? props.harness()
             : AgentManagerProperties.HarnessConfig.defaults();
         this.cacheTtlMillis = cacheTtlMillis;
-        log.info("ModelCatalog ready: system model='{}', cache TTL={}ms", systemModelId(), cacheTtlMillis);
+        this.envFallbackModelId = envFallbackModelId;
+        log.info("ModelCatalog ready: system model='{}', cache TTL={}ms, env fallback='{}'",
+            systemModelId(), cacheTtlMillis, envFallbackModelId == null ? "" : envFallbackModelId);
     }
 
     /** 系统模型名（LLM_MODEL_ID；未配置为空串） */
@@ -124,7 +160,96 @@ public class ModelCatalog {
         return current;
     }
 
-    /** 会话可选模型列表：系统模型（默认，首位）+ 启用的托管模型 */
+    /**
+     * 默认对话模型 id：托管模型 id，或 {@link #SYSTEM_MODEL_ID}（未配置/读取失败/模型已不可用）。
+     *
+     * <p>不做进程内缓存：管理页设置默认后本副本与其它副本都应在下一次模型调用立即生效
+     * （model_config 行数极少，单次查询代价可忽略）。读库异常 fail-soft 回落系统模型。
+     */
+    public String defaultModelId() {
+        try {
+            return store.findDefaultId().orElse(SYSTEM_MODEL_ID);
+        } catch (Exception e) {
+            log.warn("ModelCatalog: default model lookup failed, fall back to system model: {}", e.getMessage());
+            return SYSTEM_MODEL_ID;
+        }
+    }
+
+    /**
+     * 解析默认对话模型实例（SessionModelMiddleware 在会话未绑定模型时调用）。
+     * empty = 使用系统模型（agent 构建时的默认模型）。
+     */
+    public Optional<Model> resolveDefault() {
+        var id = defaultModelId();
+        if (isSystemSelection(id)) {
+            return Optional.empty();
+        }
+        var resolved = resolve(id);
+        if (resolved.isEmpty()) {
+            log.warn("ModelCatalog: default model '{}' unavailable (deleted/disabled), "
+                + "fall back to system model", id);
+        }
+        return resolved;
+    }
+
+    /**
+     * 有效备用模型选择（DB is_fallback 优先，其次 LLM_FALLBACK_MODEL_ID，最后未启用）。
+     *
+     * <p>实时读库（不缓存）：管理页设置后下一次模型调用立即生效，多副本无收敛延迟。
+     * DB/环境变量指向的模型不存在或已禁用时自动跳过（fail-soft，不阻断对话）。
+     */
+    public FallbackSelection fallbackSelection() {
+        try {
+            var dbFallback = store.findFallbackId();
+            if (dbFallback.isPresent()) {
+                return new FallbackSelection(dbFallback.get(), FALLBACK_SOURCE_DB);
+            }
+        } catch (Exception e) {
+            log.warn("ModelCatalog: DB fallback lookup failed, trying env fallback: {}", e.getMessage());
+        }
+        var envId = envFallbackModelId == null ? "" : envFallbackModelId.trim();
+        if (!envId.isEmpty() && !isSystemSelection(envId)) {
+            try {
+                var cfg = store.findById(envId);
+                if (cfg.isPresent() && cfg.get().enabled()) {
+                    return new FallbackSelection(envId, FALLBACK_SOURCE_ENV);
+                }
+                log.warn("ModelCatalog: LLM_FALLBACK_MODEL_ID '{}' not found/enabled in model_config; "
+                    + "fallback disabled", envId);
+            } catch (Exception e) {
+                log.warn("ModelCatalog: env fallback lookup failed for '{}': {}", envId, e.getMessage());
+            }
+        }
+        return new FallbackSelection("", FALLBACK_SOURCE_NONE);
+    }
+
+    /** 有效备用模型 id；空串 = 未启用 */
+    public String fallbackModelId() {
+        return fallbackSelection().id();
+    }
+
+    /** 有效备用模型来源：db / env / none */
+    public String fallbackSource() {
+        return fallbackSelection().source();
+    }
+
+    /**
+     * 解析有效备用模型实例（SessionModelMiddleware 每次模型调用动态包裹）。
+     * empty = 未启用或已不可用。
+     */
+    public Optional<Model> resolveFallback() {
+        var selection = fallbackSelection();
+        if (!selection.enabled()) {
+            return Optional.empty();
+        }
+        var resolved = resolve(selection.id());
+        if (resolved.isEmpty()) {
+            log.warn("ModelCatalog: fallback model '{}' unavailable, fallback disabled", selection.id());
+        }
+        return resolved;
+    }
+
+    /** 会话可选模型列表：系统模型（首位）+ 启用的托管模型 */
     public List<ModelOption> options() {
         return options(false);
     }
@@ -137,11 +262,14 @@ public class ModelCatalog {
      */
     public List<ModelOption> options(boolean includeDisabled) {
         var list = new ArrayList<ModelOption>();
+        var defaultId = defaultModelId();
+        var fallbackId = fallbackSelection().id();
         list.add(new ModelOption(SYSTEM_MODEL_ID, systemModelId() + "（系统）", systemLlm.provider(),
-            systemModelId(), true, SOURCE_SYSTEM, true));
+            systemModelId(), isSystemSelection(defaultId), false, SOURCE_SYSTEM, true));
         for (var cfg : includeDisabled ? store.listAll() : store.listEnabled()) {
             list.add(new ModelOption(cfg.id(), cfg.name(), cfg.provider(), cfg.modelId(),
-                false, SOURCE_MANAGED, cfg.enabled()));
+                cfg.id().equals(defaultId), cfg.id().equals(fallbackId),
+                SOURCE_MANAGED, cfg.enabled()));
         }
         return list;
     }

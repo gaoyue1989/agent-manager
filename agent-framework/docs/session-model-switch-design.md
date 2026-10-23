@@ -25,8 +25,8 @@
 
 | 层 | 来源 | 用途 | 变更方式 |
 |----|------|------|----------|
-| **系统模型** | `LLM_*` 环境变量（**保留现状**） | 会话标题生成、记忆 flush/整合、上下文压缩 | env，重启生效 |
-| **默认对话模型** | 同系统模型 | 未显式选模型的会话 | 同上 |
+| **系统模型** | `LLM_*` 环境变量（**保留现状**） | 会话标题生成、记忆 flush/整合、上下文压缩；未配置默认对话模型时兼作默认 | env，重启生效 |
+| **默认对话模型** | 系统模型，或 `model_config.is_default=1` 的托管模型 | 未显式选模型的会话 | `PUT /models/{id}/default`，热生效（实时读库） |
 | **托管模型（可切换）** | `model_config` 表（新增） | 会话对话，按会话选择 | REST CRUD，热生效 |
 
 ## 3. 模型配置保存
@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS model_config (
 | `POST` | `/models` | 新增托管模型 |
 | `PATCH` | `/models/{id}` | 局部更新（字段缺失=不变；`apiKey=""`=清除回落系统 key；改 `id` 不允许） |
 | `DELETE` | `/models/{id}` | 删除（系统模型 → 400；引用会话自动回落默认） |
+| `PUT` | `/models/{id}/default` | 设置全局默认对话模型（id=`system` 回落系统模型；V11 新增，见 §8.1） |
 | `POST` | `/models/{id}/test` | 测试连接：1 次最小 completion（max_tokens≈16），返回 `{ok, latency_ms, error}` |
 
 **`GET /models` 响应**（snake_case）：
@@ -238,6 +239,21 @@ CREATE TABLE IF NOT EXISTS model_config (
     `CALL_TIMEOUT=20s`）；标题固定走系统模型，不受会话级 model 切换影响；
   - 写入：`session_user.remark`（**已有标题不覆盖**——手动重命名优先）；单线程守护 executor，fail-soft；
   - 展示：前端侧栏 `title || sessionId`（决策#3 配套）。
+
+### 8.1 默认对话模型（2026-10-22 扩展，V11）
+
+- **存储**：`model_config.is_default`（V11 迁移）。应用层单语句原子维护
+  `UPDATE ... SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END`，并发下最终只有一行默认；
+  `system` = 清除所有标记（回落 env 系统模型）。禁用当前默认模型时 `update()` 同语句清除标记。
+- **解析**：`ModelCatalog.defaultModelId()` / `resolveDefault()` **实时读库**（不缓存），
+  多副本设置后下一次模型调用即生效；读库失败 fail-soft 回落系统模型。
+- **路由**：`SessionModelMiddleware` 在会话未绑定（或绑定模型已删/禁用）时使用
+  `resolveDefault()`；仍为 empty 则沿用 agent 构建时的系统模型。备用模型
+  （`ModelCatalog.resolveFallback()`：DB `is_fallback` 优先于 `LLM_FALLBACK_MODEL_ID`）
+  同样动态包裹默认模型，详见 [model-fallback-design.md](model-fallback-design.md)。
+- **边界**：默认模型只作用于对话链路（onModelCall）；标题生成/记忆 flush/压缩继续固定系统模型（§8）。
+- **接口/UI**：`PUT /models/{id}/default`（id=system 清除默认）；debug 页 Models 列表每行
+  `Set Default`，默认项高亮 `default` 徽章；对话页 picker 的「默认」项标签展示实际默认模型名。
 
 ## 9. 前端
 
