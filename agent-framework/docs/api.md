@@ -1,9 +1,10 @@
 # Agent Framework — API 文档
 
 **版本:** v2.1.0 (Java) — 无状态单次流架构
-**复核日期:** 2026-10-08（分支 docs/code-review-2026-10-01）— 增量重核：Flyway V9（#87 PER_PEER 会话重键）、
-llm-calls 记录键 gw-hash 形态订正
-（上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
+**复核日期:** 2026-10-25（master @ `e729a67`）— 增量重核：新增 §AG-UI 协议 API（`/agui/*`，
+b2946ca，默认关闭；事件词表权威见 [api-frontend-sse.md](api-frontend-sse.md) §15）
+（上一轮 2026-10-08：Flyway V9（#87 PER_PEER 会话重键）、llm-calls 记录键 gw-hash 形态订正；
+上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
 `/a2a/jobs`、ASKING 入口预检、远程转发事件标注；
 2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
 
@@ -734,6 +735,30 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/status
 **503 语义：** 事件存储不可用时返回 `503 {"error":"event_store_unavailable"}`。
 **前端必须保留本地游标、不得重置为 0**——否则会触发整场重放。MySQL / Redis 任一不可用都会显式报错，
 而不是假装 idle。
+
+---
+
+## AG-UI 协议 API（默认关闭）
+
+> 2026-10-24 新增（b2946ca，设计见 [agui-native-parity-design.md](agui-native-parity-design.md)）。
+> `AGENT_AGUI_ENABLED=false`（默认）时零装配——两个端点都 404；开启后与 native 面共享同一
+> ChatUiChannel 网关路径、turn_lease 仲裁与 confirm_context（双面互认），事件同流双编码。
+> 身份只认 `X-User-Id` 请求头（网关注入；与 /subscribe 归属校验同口径）。
+> 事件词表与帧形权威见 [api-frontend-sse.md](api-frontend-sse.md) §15。
+
+### POST /agui/runs
+
+标准 AG-UI run（SSE，`text/event-stream`）。请求体为官方 RunAgentInput 平台侧子集：
+`threadId` / `runId` / `messages`（只取最后一条 user 消息作增量，服务端自带历史）/ `resume[]`
+（非空走 HITL 恢复，镜像 confirm-stream；`interruptId` 形如 `<runId>:<toolCallId>`，
+`payload.approved===true` 严格布尔判定，`payload.acceptRule` 为平台扩展透传）。
+挂起会话（ASKING）必须经 `resume[]` 恢复，直接 run 返回 `turn_pending_confirm` 错误帧；
+排队超限返回 `turn_in_progress`；SSE 断连不杀 run（事件照常落库，经续传端点补齐）。
+
+### GET /agui/threads/{threadId}/events
+
+平台扩展续传端点（SSE）：`afterSeq` 游标回放/追赶/终态探测 + AG-UI 渲染，可选 `runId`
+过滤单 run。归属校验失败与 /subscribe 同口径返回 404。
 
 ---
 

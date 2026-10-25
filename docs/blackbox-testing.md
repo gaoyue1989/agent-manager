@@ -1,6 +1,6 @@
 # 黑盒测试配置文档（控制台拆分版本）
 
-> 适用分支：`feat/console-user-workspace-split`（控制面拆分：用户侧 console + 运维侧 admin + 存量 legacy 面不变）。
+> 适用分支：已合入 master（PR #167，2026-10-20；控制面拆分：用户侧 console + 运维侧 admin + 存量 legacy 面不变）。
 > 面向黑盒测试人员：只描述外部可见行为（入口/账号/端点/预期状态码），不涉及内部实现。
 > 端点与凭据均经 2026-10-17 kind 集群实测核对；如环境重建后值有变，以 `manifests/platform.yaml` 为准。
 
