@@ -1,13 +1,15 @@
 -- =============================================================================
 -- agent-framework 全量建表语句（MySQL 8.0）
 -- =============================================================================
--- 来源：源码内 CREATE TABLE 定义（应用启动期自建，仓库内无独立迁移脚本）
--- 生成日期：2026-09-28（对应 commit 60dd006）
+-- 来源：db/migration/V1..V12 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
+--       存量库自动 baseline；本文件为快照式全量参考，以迁移脚本为权威）
+-- 生成日期：2026-09-28（对应 commit 60dd006）；2026-10-25 增补 V10 turn_intent、
+--           V11/V12 model_config.is_default/is_fallback（对应 commit e729a67）
 --
 -- 数据库：CHECKPOINT_JDBC_URL 指向的库（默认 agent_manager_test）
 --         CHECKPOINT_DB_NAME 可显式指定 agent_state 所在库名（未设时从 JDBC URL 解析）
 --
--- 表清单（9 张本工程表 + 2 张 SDK 表）：
+-- 表清单（10 张本工程表 + 2 张 SDK 表）：
 --   ① agent_state      SDK MysqlAgentStateStore   —— AgentState（会话状态，权威）
 --   ② agent_fs         SDK JdbcStore              —— 分布式文件系统（工作区文件）
 --   ③ session_user     会话→用户映射 + 标题(remark) + 会话模型(model)
@@ -17,8 +19,9 @@
 --   ⑦ tool_audit_log   工具调用审计日志
 --   ⑧ file_asset       上传/交付文件元数据
 --   ⑨ kv_sync_key      agent_fs key → user_key 反查表
---   ⑩ model_config     托管模型配置
+--   ⑩ model_config     托管模型配置（V11/V12 增默认/备用标记）
 --   ⑪ ui_context       MCP Apps 4.7 UI 上下文
+--   ⑫ turn_intent      排队 turn 意图（多副本可续传，V10）
 --
 -- 非 MySQL：session_event（会话事件）已整体迁至 Redis Streams，不再建表。
 -- 未使用：agentscope-extensions-mysql 的 JdbcRemoteSnapshotClient 快照表
@@ -188,10 +191,7 @@ CREATE TABLE IF NOT EXISTS kv_sync_key (
 
 -- -----------------------------------------------------------------------------
 -- ⑩ model_config —— 托管模型配置（/models CRUD）
--- 来源：service/ModelConfigStore.java
--- 存量库迁移（代码内幂等 ensureColumn，2026-09-27 新增两列）：
---   ALTER TABLE model_config ADD COLUMN reasoning_effort   VARCHAR(16) DEFAULT NULL AFTER enable_thinking;
---   ALTER TABLE model_config ADD COLUMN frequency_penalty  DOUBLE     DEFAULT NULL AFTER reasoning_effort;
+-- 来源：service/ModelConfigStore.java + V3/V4/V11/V12 迁移
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS model_config (
     id                VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -208,9 +208,13 @@ CREATE TABLE IF NOT EXISTS model_config (
     frequency_penalty DOUBLE       DEFAULT NULL,
     context_length    INT          NOT NULL DEFAULT 0,
     enabled           TINYINT(1)   NOT NULL DEFAULT 1,
+    is_default        TINYINT(1)   NOT NULL DEFAULT 0,
+    is_fallback       TINYINT(1)   NOT NULL DEFAULT 0,
     created_at        DATETIME(3)  NOT NULL,
     updated_at        DATETIME(3)  NOT NULL,
-    UNIQUE KEY uk_model_name (name)
+    UNIQUE KEY uk_model_name (name),
+    KEY idx_model_is_default (is_default),
+    KEY idx_model_is_fallback (is_fallback)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
@@ -227,14 +231,34 @@ CREATE TABLE IF NOT EXISTS ui_context (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
+-- -----------------------------------------------------------------------------
+-- ⑫ turn_intent —— 排队 turn 意图（多副本可续传，V10）
+-- 来源：db/migration/V10__turn_intent.sql（SessionIntentStore）
+-- POST /threads/chat 抢 turn_lease 前登记本轮 turn id，排队等待期间刷新的客户端
+-- 经 GET /status 拿到 turn id 后用 GET /subscribe?replyId= 续传。
+-- 生命周期：QUEUED 在租约到手后立即删除；排队超时/建立失败改写 FAILED+error_text；
+-- 崩溃遗留行由 expires_at 读时过滤 + SessionCleanupService 每日清理兜底。
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS turn_intent (
+    session_id  VARCHAR(255)   NOT NULL,
+    reply_id    VARCHAR(64)    NOT NULL,
+    state       VARCHAR(16)    NOT NULL,
+    error_text  VARCHAR(1024)  DEFAULT NULL,
+    created_at  DATETIME(3)    NOT NULL,
+    expires_at  DATETIME(3)    NOT NULL,
+    PRIMARY KEY (session_id),
+    KEY idx_turn_intent_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
 -- =============================================================================
 -- 部署注意
 -- =============================================================================
--- 1. 所有表均为应用启动期自建（CREATE TABLE IF NOT EXISTS），**无独立迁移脚本**；
---    新建库无需手动执行，存量库由下列代码内幂等迁移补列：
---      - session_user：ensureColumn(remark) / ensureColumn(model)
---      - model_config：ensureColumn(reasoning_effort) / ensureColumn(frequency_penalty)
---    （二者都先查 information_schema.COLUMNS 再 ALTER；MySQL 8.0 无 ADD COLUMN IF NOT EXISTS）
+-- 1. 表结构演进一律走 Flyway（db/migration/V1..V12，启动自动执行；存量库自动
+--    baseline，多副本历史表锁互斥，失败即启动失败——纪律见
+--    docs/design/db-migration-flyway-design.md）：新建库无需手动执行本文件；
+--    **禁止**在 Store 构造器或请求路径手工 DDL，禁止修改已合并的 V 文件
+--    （checksum 校验会拒绝启动）。
 -- 2. session_message 为新表且默认开启归档，升级后会持续写入并按 7 天保留滚动清理；
 --    磁盘/行数敏感可设 AGENT_HISTORY_ARCHIVE_ENABLED=false 关闭。
 -- 3. session_event 表已于 2026-09-16 起迁至 Redis Streams（AGENT_REDIS_URL），

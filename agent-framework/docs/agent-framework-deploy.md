@@ -4,7 +4,9 @@
 **日期:** 2026-08-06
 **复核日期:** 2026-09-26（master @ `a263b92`）；2026-10-01 复核补录窗口内新增变量
 （`LLM_REASONING_EFFORT` / `LLM_FREQUENCY_PENALTY`、`AGENT_REDIS_MODE/_CLUSTER_NODES/_PREFIX`、
-`AGENT_HISTORY_ARCHIVE_ENABLED`、Agent Protocol 与 A2A 幂等 Job 两段）并订正 Flyway 问答
+`AGENT_HISTORY_ARCHIVE_ENABLED`、Agent Protocol 与 A2A 幂等 Job 两段）并订正 Flyway 问答；
+2026-10-25 补录 `AGENT_AGUI_ENABLED`（§4.1.14）、`SANDBOX_SESSION_AGENT_ISOLATION`（默认 true）、
+`FILE_UPLOAD_ALLOWED_MIME` 默认值放行 html/mhtml（2026-10-22，6c7df12）
 
 > **现状核对（2026-09-26）**：本版按 `application.yml` + 各 `@ConfigurationProperties` 重核并**补齐缺失变量**
 > （原 §4.1 缺约 30 个，含全部 `AGENT_REACT_*` / `AGENT_HTTP_*` / `AGENT_MEMORY_*` / `AGENT_COMPACTION_*` /
@@ -200,6 +202,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `SANDBOX_SKILL_REVISION_GATE` | bool | `true` | | L4 物化 revision 门控（`agent.sandbox.skill-revision-gate-enabled`）；关闭=每 acquire 全量物化 |
 | `SANDBOX_SYNC_SNAPSHOT_DIFF` | bool | `true` | | 沙箱回写快照差分（`agent.sandbox.sync-snapshot-diff-enabled`）；关闭=每次 call 全量读容器 skills/ |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | duration | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x；绑 `agent.sandbox.execd-grace-shutdown`） |
+| `SANDBOX_SESSION_AGENT_ISOLATION` | bool | `true` | per-session agent 隔离（每会话独立 Agent 实例，消解同用户两会话的沙箱单槽互踩，上游 #2849 workaround；2026-10-22 d3e02d0 起默认 true。绑 `agent.sandbox.session-agent-isolation`） |
 | `OPENSANDBOX_SERVER_URL` | string | `192.168.31.155:8090` | | OpenSandbox Server 地址（绑 `agent.sandbox.opensandbox.server-url`） |
 | `OPENSANDBOX_API_KEY` | string | — | ✓(沙箱模式) | OpenSandbox API 密钥（绑 `agent.sandbox.opensandbox.api-key`） |
 
@@ -212,7 +215,7 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `FILE_UPLOAD_ENABLED` | bool | `true` | | 上传开关（绑 `agent.file.upload-enabled`） |
 | `FILE_UPLOAD_MAX_MB` | int | `20` | | 单文件大小上限（绑 `agent.file.upload-max-mb`） |
 | `FILE_UPLOAD_MAX_PENDING` | int | `20` | | 用户维度待注入文件数软上限（绑 `agent.file.upload-max-pending`） |
-| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；`application/msword` 放行旧版 `.doc`；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
+| `FILE_UPLOAD_ALLOWED_MIME` | string (csv) | `image/*,text/plain,text/markdown,text/csv,text/html,multipart/related,application/x-mimearchive,application/pdf,application/vnd.openxmlformats-officedocument.*,application/vnd.ms-*,application/msword,application/zip,application/x-zip-compressed` | | MIME 白名单（逗号分隔；支持 `*` 通配，如 `image/*`、`application/vnd.openxmlformats-officedocument.*`；`application/msword` 放行旧版 `.doc`；`text/html`/`multipart/related`/`application/x-mimearchive` 放行网页归档 .html/.mht/.mhtml（2026-10-22，下载默认 attachment；`?inline=1` 对 `text/*` 会强制 inline，浏览器打开即以本域 origin 执行——对不受信 HTML 谨慎使用）；zip 供 📎 上传 OAF 配置包；绑 `agent.file.upload-allowed-mime`） |
 | `FILE_IMAGE_MAX_MB` | int | `5` | | 图片大小上限（绑 `agent.file.image-max-mb`） |
 | `FILE_IMAGE_INLINE_TOTAL_MB` | int | `15` | | 单次请求图片内联总大小上限（绑 `agent.file.image-inline-total-mb`） |
 | `FILE_PRESENT_MAX_MB` | int | `50` | | `present_file` 工具产物大小上限（绑 `agent.file.present-max-mb`） |
@@ -356,6 +359,21 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS` | int | `300` | loopback `message/send`（blocking）发送超时（秒） |
 | `AGENT_A2A_JOB_RETENTION_HOURS` | int | `24` | 完成态映射保留小时（幂等窗口） |
 | `AGENT_A2A_JOB_MAX_CONCURRENT` | int | `32` | 并发准入上限（每 Job 占 2 个 Tomcat 线程，防自环死锁） |
+
+#### 4.1.14 AG-UI 协议输出面（`agent.agui.*`，默认关闭）
+
+> 2026-10-24 新增（[agui-native-parity-design.md](agui-native-parity-design.md)）。enabled=false 时
+> 零装配（端点 404、无 codec bean、无存储行为变化）；true 时暴露 `POST /agui/runs` +
+> `GET /agui/threads/{id}/events`，事件与 native 面同流双编码，断联续传/HITL/turn 仲裁全复用。
+> 事件词表权威见 [api-frontend-sse.md](api-frontend-sse.md) §15。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_AGUI_ENABLED` | bool | `false` | 总开关（绑 `agent.agui.enabled`；`@ConditionalOnProperty` 控制装配） |
+| `AGENT_AGUI_EMIT_TOKEN_USAGE` | bool | `true` | RUN_FINISHED 携带 token 用量（绑 `agent.agui.emit-token-usage`） |
+| `AGENT_AGUI_EMIT_TOOL_CALL_ARGS` | bool | `true` | TOOL_CALL 帧携带参数增量（绑 `agent.agui.emit-tool-call-args`） |
+| `AGENT_AGUI_ENABLE_REASONING` | bool | `true` | THINKING 增量下发（绑 `agent.agui.enable-reasoning`） |
+| `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE` | bool | `false` | 子 agent 事件按 native 词表透出（绑 `agent.agui.emit-subagent-events-as-native`） |
 
 ### 4.2 AGENTS.md 配置字段
 
