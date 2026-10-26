@@ -49,6 +49,13 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
 `tool_result.{name}.ok`（state==SUCCESS）、`final_text_contains`、`final_text_min_len`、
 `error_contains`、`no_error`。`ground_truth` 供语义 judge。
 
+## 导出（deepeval / langfuse，详见 [exporters/README.md](exporters/README.md)）
+
+`export --target deepeval|langfuse` 把库内用例 / evalpack 会话 / run 轨迹导出为开源评测生态兼容格式：
+deepeval 金标 JSONL（单轮/多轮分文件）与 testcases；langfuse dataset items（本地 JSONL +
+`--push` 幂等 upsert，id 确定性）。零新依赖，凭据只走环境变量，导出物零密钥；
+契约由 selftest + `tests/export_loop.py`（mock langfuse）守护。
+
 ## 关键事实（实测确认，勿凭文档想当然）
 
 - **帧词表**：31 个 SDK 枚举（`AgentEventType`）+ 9 个合成帧，权威清单在
