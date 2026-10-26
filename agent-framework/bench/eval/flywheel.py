@@ -15,6 +15,10 @@
   python3 bench/eval/flywheel.py verify [--task-id ID] [--base-url URL]
   python3 bench/eval/flywheel.py selftest
   python3 bench/eval/flywheel.py status
+  python3 bench/eval/flywheel.py export --target deepeval|langfuse
+                                       [--cases | --pack DIR | --run DIR]
+                                       [--kind goldens|testcases] [--dataset NAME]
+                                       [--out DIR] [--push] [--id-prefix PFX]
 
 环境变量：
   EVAL_AGENT_BASE_URL            被测服务地址（默认 http://127.0.0.1:8100）
@@ -478,6 +482,64 @@ async def cmd_live(args: argparse.Namespace) -> int:
         judge_cfg=judge_cfg, timeout_s=args.timeout)
 
 
+# ---------------------------------------------------------------------------
+# 导出（评测数据 → 开源评测生态）：deepeval JSONL / langfuse dataset items。
+# 分工：数据收集归本平台，评测执行交外部工具；导出物零密钥，id 确定性保证幂等。
+# ---------------------------------------------------------------------------
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from exporters import deepeval as deepeval_exp, langfuse_client, sources
+
+    if args.kind == "testcases" and not args.run:
+        print("[export] --kind testcases 需要 --run <run 产物目录>（traces 对齐库内用例取输入）")
+        return 2
+    if args.run and args.kind != "testcases":
+        print("[export] --run 来源仅支持 --kind testcases（run 轨迹的导出语义是已执行用例）")
+        return 2
+
+    if args.pack:
+        items = sources.load_from_pack(args.pack)
+        with open(Path(args.pack) / "manifest.json", encoding="utf-8") as f:
+            pack_id = json.load(f).get("pack_id") or Path(args.pack).name
+        id_prefix = args.id_prefix or pack_id  # 跨包同 sid 不撞 langfuse 项目级唯一 id
+    elif args.run:
+        items = sources.load_from_run(args.run, CASES_DIR)
+        id_prefix = args.id_prefix
+    else:
+        items = sources.load_from_cases(CASES_DIR)
+        id_prefix = args.id_prefix
+    if not items:
+        print("[export] 来源无可用条目（pack 会话须含用户输入；run 须有能对上库内用例的 traces）")
+        return 2
+
+    out = Path(args.out)
+    if args.target == "deepeval":
+        produced = deepeval_exp.export(items, out, kind=args.kind)
+        for p in produced:
+            with open(p, encoding="utf-8") as f:
+                n = sum(1 for line in f if line.strip())
+            print(f"[export] deepeval {p.name}: {n} 行")
+        if produced:
+            print("[export] 加载：EvaluationDataset().add_goldens_from_jsonl_file(file_path=...)"
+                  "（多轮行带 scenario，deepeval 自动识别为 conversational）")
+    else:
+        if not args.dataset:
+            print("[export] --target langfuse 需要 --dataset <名称>")
+            return 2
+        summary = langfuse_client.export(items, out, args.dataset,
+                                         id_prefix=id_prefix, do_push=args.push)
+        print(f"[export] langfuse 本地: {summary['local']}（{summary['items']} 条）")
+        if args.push:
+            pushed = summary["push"]
+            print(f"[export] langfuse push: upserted={pushed['upserted']}/{pushed['total']}"
+                  f" → {args.dataset}")
+            for f in pushed["failed"]:
+                print(f"  [FAIL] {f['id']}: {f['detail']}")
+            if pushed["failed"]:
+                return 1
+    return 0
+
+
 def cmd_selftest(_: argparse.Namespace) -> int:
     """离线自检：帧映射解析 + 确定性检查器，不依赖网络与被测服务。"""
     mapping = sse_client.MAPPING
@@ -797,9 +859,65 @@ def cmd_selftest(_: argparse.Namespace) -> int:
     assert parse_judge_verdict('{"score": Infinity}')['score'] == 1.0
     assert parse_judge_verdict('{"score": -Infinity}')['score'] == 0.0
 
+    # ---- 导出器契约（dataset hub M1）：schema/单多轮拆分/确定性 id/凭据零泄漏 ----
+    from exporters import deepeval as exp_deepeval, langfuse_client as exp_lf, sources
+
+    lib_items = sources.load_from_cases(CASES_DIR)
+    assert lib_items and len({i["id"] for i in lib_items}) == len(lib_items)
+    assert all(i["input_message"] for i in lib_items), "库内用例不应出现空输入"
+    assert all(i["metadata"].get("category") for i in lib_items)
+
+    synth_multi = {"id": "case_replay_sessdemo", "input_message": "第一轮问询",
+                   "turns": [{"input": "第一轮问询"}, {"input": "追问"}],
+                   "ground_truth": "录制终答", "expected_tools": ["echo"],
+                   "final_output": "录制终答", "actual_output": None,
+                   "metadata": {"case_id": "case_replay_sessdemo", "source_kind": "pack"}}
+    single, conv = exp_deepeval.render_goldens(lib_items + [synth_multi])
+    assert single and all("input" in l and "scenario" not in l and "expected_output" in l
+                          for l in single), "单轮行 schema 被破坏"
+    assert conv and all("scenario" in l and "input" not in l for l in conv), "多轮行 schema 被破坏"
+    # 不脑补：无金标的条目不得造 null 键
+    bare_single, _ = exp_deepeval.render_goldens([{"id": "c0", "input_message": "q",
+                                                   "turns": None, "ground_truth": None,
+                                                   "expected_tools": None, "final_output": None,
+                                                   "actual_output": None, "metadata": {}}])
+    assert "expected_output" not in bare_single[0] and "expected_tools" not in bare_single[0]
+    tc = exp_deepeval.render_testcases([
+        {"id": "c1", "input_message": "q", "actual_output": "a", "ground_truth": "g",
+         "expected_tools": None, "final_tools_called": ["echo"], "turns": None,
+         "final_output": None, "metadata": {}},
+        {"id": "c2", "input_message": "q2", "actual_output": None, "ground_truth": None,
+         "expected_tools": None, "final_tools_called": None, "turns": None,
+         "final_output": None, "metadata": {}}])
+    assert len(tc) == 1 and tc[0]["actual_output"] == "a" \
+        and tc[0]["tools_called"] == [{"name": "echo"}], tc  # deepeval ToolCall 映射形态
+
+    lf_item = {"id": "case_x", "input_message": "hi", "turns": None, "ground_truth": "g",
+               "expected_tools": None, "final_output": None, "actual_output": None,
+               "metadata": {"case_id": "case_x", "category": "function", "title": None}}
+    p1 = exp_lf.build_item(lf_item, "ds-a")
+    assert p1 == exp_lf.build_item(lf_item, "ds-a"), "langfuse id 必须确定性（upsert 幂等前提）"
+    assert p1["id"] == "case_x" and p1["datasetName"] == "ds-a"
+    assert exp_lf.build_item(lf_item, "ds-a", id_prefix="pk-p")["id"] == "pk-p_case_x"
+    assert p1["expectedOutput"] == {"answer": "g"}
+    assert "title" not in p1["metadata"], "None 值溯源键不应透传"
+    blob = json.dumps(p1)
+    assert "sk-" not in blob and "LANGFUSE_" not in blob, "导出物不得携带密钥形态字段"
+    with tempfile.TemporaryDirectory() as td:
+        assert exp_lf.write_items(Path(td) / "items.jsonl", [p1]) == 1
+
+    # mock langfuse 契约（鉴权/upsert 幂等/5xx 退避/4xx 快速失败）：localhost 零外联
+    try:
+        r = subprocess.run(["python3", str(EVAL_DIR / "tests" / "export_loop.py")],
+                           capture_output=True, text=True, timeout=120)
+    except FileNotFoundError as e:
+        raise AssertionError("export 契约 e2e 需要 python3") from e
+    assert r.returncode == 0, f"export_loop 契约失败:\n{r.stdout[-800:]}\n{r.stderr[-800:]}"
+
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
           f" + 归一化规则/轨迹等价（M2） + usage_frame 口径（全量 prompt 恒等式）"
-          f" + collector YAML 加载断言（issue #97）+ judge 降级解析（issue #117），"
+          f" + collector YAML 加载断言（issue #97）+ judge 降级解析（issue #117）"
+          f" + 导出器契约（deepeval/langfuse schema·确定性 id·凭据零泄漏·mock 推送幂等）,"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
@@ -889,6 +1007,21 @@ def main() -> int:
     plv.add_argument("--judge", action="store_true", help="启用语义打分（需 EVAL_LLM_*）")
     plv.add_argument("--timeout", type=float, default=120.0, help="单轮 SSE 超时秒数")
     plv.set_defaults(func=cmd_live)
+
+    pex = sub.add_parser("export", help="评测数据导出为 deepeval / langfuse 兼容格式（零新依赖）")
+    pex.add_argument("--target", choices=["deepeval", "langfuse"], required=True,
+                     help="导出目标（exporters.TARGETS）")
+    pex.add_argument("--kind", choices=["goldens", "testcases"], default="goldens",
+                     help="deepeval 导出形态：goldens=金标集（默认）；testcases=已执行用例（需 --run）")
+    pex.add_argument("--cases", action="store_true", help="来源=库内 cases/*.json（缺省来源）")
+    pex.add_argument("--pack", default=None, help="来源 evalpack 目录（多轮会话，id 前缀默认 pack_id）")
+    pex.add_argument("--run", default=None, help="来源 flywheel run 产物目录（traces/*.json）")
+    pex.add_argument("--dataset", default=None, help="langfuse 数据集名（--target langfuse 必填）")
+    pex.add_argument("--out", required=True, help="导出输出目录")
+    pex.add_argument("--push", action="store_true",
+                     help="langfuse：推送远端（需 LANGFUSE_HOST/_PUBLIC_KEY/_SECRET_KEY 环境变量）")
+    pex.add_argument("--id-prefix", default=None, help="langfuse item id 前缀（缺省：pack 用 pack_id，cases 无前缀）")
+    pex.set_defaults(func=cmd_export)
 
     args = p.parse_args()
     result = args.func(args)
