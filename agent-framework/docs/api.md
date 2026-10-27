@@ -444,8 +444,9 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
     "hasMore": false,
     "nextBeforeId": null,
     "files": [
-        {"file_id": "…", "file_name": "report.pdf", "mime_type": "application/pdf",
-         "size": 102400, "reply_id": "reply-001", "download_url": "/files/…"}
+        {"type": "file_ready", "file_id": "…", "file_name": "report.pdf",
+         "mime_type": "application/pdf", "size": 102400,
+         "download_url": "/files/…", "reply_id": "reply-001"}
     ]
 }
 ```
@@ -460,8 +461,15 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 | `reply_id` | 仅 assistant 携带；来自 Redis 顺序回填（按首个事件 seq 逐轮分配）。归档不盖戳——实测 `AgentState.getReplyId()` 为会话级而非逐轮（见 session-history-archive-design.md §15） |
 | `hasMore` / `nextBeforeId` | 归档分页游标；`nextBeforeId` 传回 `beforeId` 取更早一页 |
 
-> **`files[]` 是本轮新增同步的字段**：产出文件（`present_file` / `present_url`）在历史回放时经
-> `file_asset` 表关联本会话，供前端补渲染下载卡片。
+> **`files[]`（顶层）**：产出文件（`present_file` / `present_url`）在历史回放时经 `file_asset` 表
+> 关联本会话，供前端补渲染下载卡片。卡片字段与 SSE `file_ready` 帧**逐字段对齐**：
+> `type`（固定 `file_ready`）/ `file_id` / `file_name` / `mime_type` / `size` / `download_url`
+> 同名同义；`reply_id` 是历史回放独有的挂载键（= SSE 帧信封的 `replyId`），前端据此把卡片挂回该轮气泡。
+> `download_url` 口径与 SSE 一致：直连为服务根相对路径 `/files/{id}`，经代理（`X-Forwarded-Prefix`）
+> 访问时为从域名根解析的完整路径（客户端免拼前缀）。
+>
+> **`messages[].files[]`（用户上传附件）**：字段为 `file_id` / `file_name` / `mime_type` / `size` /
+> `download_url` / `origin=upload`（无 `type`、无 `reply_id`），由消息 metadata 的 `file_ids` 关联回填。
 
 **工具结果字段**（`tool_calls[]`）：
 

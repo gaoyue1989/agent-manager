@@ -528,6 +528,10 @@ public class ThreadController {
      * 会话产出文件（origin=generated）：present_file/present_url 登记时
      * session_id = ctx.getSessionId()（即前端 peer / sessionId），按此精确过滤。
      * 同时兼容旧数据（session_id 为 null 时按 user_key 回退）。
+     *
+     * <p>卡片字段与 SSE {@code file_ready} 帧对齐（docs/api.md「files[]」）：
+     * {@code type/file_id/file_name/mime_type/size/download_url} 同构；{@code reply_id}
+     * 是历史回放独有的挂载键（对应 SSE 帧信封的 {@code replyId}），供前端把卡片挂回该轮气泡。
      */
     private List<Map<String, Object>> generatedFiles(String sessionId) {
         var files = new ArrayList<Map<String, Object>>();
@@ -538,11 +542,14 @@ public class ThreadController {
             ps.setString(1, sessionId);
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    var fileId = rs.getString("id");
                     var m = new LinkedHashMap<String, Object>();
-                    m.put("file_id", rs.getString("id"));
+                    m.put("type", "file_ready");
+                    m.put("file_id", fileId);
                     m.put("file_name", rs.getString("file_name"));
                     m.put("mime_type", rs.getString("mime_type"));
                     m.put("size", rs.getLong("size"));
+                    m.put("download_url", fileDownloadUrl(fileId));
                     var replyId = rs.getString("reply_id");
                     if (replyId != null && !replyId.isBlank()) {
                         m.put("reply_id", replyId);
@@ -554,6 +561,22 @@ public class ThreadController {
             log.warn("generated files lookup failed for {}: {}", sessionId, e.getMessage());
         }
         return files;
+    }
+
+    /**
+     * 历史回放文件卡片的下载地址：与 SSE {@code file_ready} 同一口径（subpath-routing-design §3.1）。
+     *
+     * <p>经代理访问（{@code X-Forwarded-Prefix}）时下发从域名根解析的完整路径，直连维持
+     * {@code /files/{id}} 服务根相对路径（前端拼 AGENT_BASE）。同步 MVC 请求内取当前请求；
+     * 无请求上下文（单测直调）按直连处理。
+     */
+    private static String fileDownloadUrl(String fileId) {
+        String prefix = null;
+        var attrs = org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if (attrs instanceof org.springframework.web.context.request.ServletRequestAttributes sra) {
+            prefix = io.agentmanager.framework.util.ExternalUrlSupport.forwardedPrefix(sra.getRequest());
+        }
+        return (prefix == null ? "" : prefix) + "/files/" + fileId;
     }
 
     // ===== 删除会话辅助方法 =====
@@ -686,14 +709,17 @@ public class ThreadController {
             }
             try (var rs = ps.executeQuery()) {
                 while (rs.next()) {
+                    var fileId = rs.getString("id");
                     var card = new LinkedHashMap<String, Object>();
-                    card.put("file_id", rs.getString("id"));
+                    card.put("file_id", fileId);
                     card.put("file_name", rs.getString("file_name"));
                     card.put("mime_type", rs.getString("mime_type"));
                     card.put("size", rs.getLong("size"));
+                    // 下载地址与产出文件/SSE file_ready 同口径（直连为 /files/{id}，代理下带前缀）
+                    card.put("download_url", fileDownloadUrl(fileId));
                     // 前端据此区分"上传"与"产出"卡片（样式/文案）
                     card.put("origin", "upload");
-                    byId.put(rs.getString("id"), card);
+                    byId.put(fileId, card);
                 }
             }
         } catch (Exception e) {

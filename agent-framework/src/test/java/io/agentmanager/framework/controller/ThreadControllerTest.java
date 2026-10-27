@@ -484,8 +484,82 @@ class ThreadControllerTest {
         assertEquals("f1", files.get(0).get("file_id"));
         assertEquals("report.pdf", files.get(0).get("file_name"));
         assertEquals("upload", files.get(0).get("origin"));
+        // 下载地址与产出文件 / SSE file_ready 同口径（直连为服务根相对路径）
+        assertEquals("/files/f1", files.get(0).get("download_url"));
         // file_ids 是内部关联键，展开为 files 后不再外泄
         assertTrue(messages.get(0).get("file_ids") == null);
+    }
+
+    /** 产出文件卡片字段与 SSE file_ready 对齐（type/download_url/reply_id） */
+    @Test
+    void threadHistoryGeneratedFilesShouldMatchFileReadyPayload() throws Exception {
+        var stateConn = mock(Connection.class);
+        var statePs = mock(PreparedStatement.class);
+        var stateRs = mock(ResultSet.class);
+        when(stateConn.prepareStatement(anyString())).thenReturn(statePs);
+        when(statePs.executeQuery()).thenReturn(stateRs);
+        when(stateRs.next()).thenReturn(false);
+
+        var fileConn = mock(Connection.class);
+        var filePs = mock(PreparedStatement.class);
+        var fileRs = mock(ResultSet.class);
+        when(fileConn.prepareStatement(anyString())).thenReturn(filePs);
+        when(filePs.executeQuery()).thenReturn(fileRs);
+        when(fileRs.next()).thenReturn(true, false);
+        when(fileRs.getString("id")).thenReturn("f9");
+        when(fileRs.getString("file_name")).thenReturn("report.pdf");
+        when(fileRs.getString("mime_type")).thenReturn("application/pdf");
+        when(fileRs.getLong("size")).thenReturn(1024L);
+        when(fileRs.getString("reply_id")).thenReturn("r1");
+
+        when(dataSource.getConnection()).thenReturn(stateConn).thenReturn(fileConn);
+
+        var result = controller.threadHistory("acme:g1", null, true, 200, null).getBody();
+        @SuppressWarnings("unchecked")
+        var files = (List<Map<String, Object>>) result.get("files");
+        assertEquals(1, files.size());
+        assertEquals("file_ready", files.get(0).get("type"));
+        assertEquals("f9", files.get(0).get("file_id"));
+        assertEquals("report.pdf", files.get(0).get("file_name"));
+        assertEquals("application/pdf", files.get(0).get("mime_type"));
+        assertEquals(1024L, files.get(0).get("size"));
+        assertEquals("/files/f9", files.get(0).get("download_url"));
+        assertEquals("r1", files.get(0).get("reply_id"));
+    }
+
+    /** 经代理（X-Forwarded-Prefix）访问：历史文件 download_url 与 SSE 一样带外部前缀 */
+    @Test
+    void threadHistoryGeneratedFilesShouldCarryForwardedPrefix() throws Exception {
+        var stateConn = mock(Connection.class);
+        var statePs = mock(PreparedStatement.class);
+        var stateRs = mock(ResultSet.class);
+        when(stateConn.prepareStatement(anyString())).thenReturn(statePs);
+        when(statePs.executeQuery()).thenReturn(stateRs);
+        when(stateRs.next()).thenReturn(false);
+
+        var fileConn = mock(Connection.class);
+        var filePs = mock(PreparedStatement.class);
+        var fileRs = mock(ResultSet.class);
+        when(fileConn.prepareStatement(anyString())).thenReturn(filePs);
+        when(filePs.executeQuery()).thenReturn(fileRs);
+        when(fileRs.next()).thenReturn(true, false);
+        when(fileRs.getString("id")).thenReturn("f10");
+        when(fileRs.getString("file_name")).thenReturn("a.zip");
+        when(fileRs.getLong("size")).thenReturn(1L);
+        when(dataSource.getConnection()).thenReturn(stateConn).thenReturn(fileConn);
+
+        var request = new org.springframework.mock.web.MockHttpServletRequest();
+        request.addHeader("X-Forwarded-Prefix", "/agent/demo/");
+        org.springframework.web.context.request.RequestContextHolder.setRequestAttributes(
+            new org.springframework.web.context.request.ServletRequestAttributes(request));
+        try {
+            var result = controller.threadHistory("acme:g2", null, true, 200, null).getBody();
+            @SuppressWarnings("unchecked")
+            var files = (List<Map<String, Object>>) result.get("files");
+            assertEquals("/agent/demo/files/f10", files.get(0).get("download_url"));
+        } finally {
+            org.springframework.web.context.request.RequestContextHolder.resetRequestAttributes();
+        }
     }
 
     @Test

@@ -251,7 +251,9 @@ MySQL / Redis 任一不可用都会显式报错，而不是假装 idle。**客�
   "model": "",
   "pendingConfirm": null,
   "files": [
-    {"file_id": "f-1", "file_name": "report.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "size": 12345}
+    {"type": "file_ready", "file_id": "f-1", "file_name": "report.xlsx",
+     "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+     "size": 12345, "download_url": "/files/f-1", "reply_id": "reply-001"}
   ],
   "messages": [
     {"role": "user", "content": "帮我分析一下销售数据"},

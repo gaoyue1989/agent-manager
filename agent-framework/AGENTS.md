@@ -491,7 +491,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/monitor` | **运营监控独立页**（从调试页独立出来的只读页面，仅挂载 Monitor 模块，不暴露 Chat/Config/Database 等调试功能；`/monitor/` 入口由 MonitorPageController 托管，静态资源复用 `/debug` 的样式与 vendor） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表（含 `title` 与 `model`=会话绑定模型，空串=默认） |
-| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
+| GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐；顶层 `files[]` 与 SSE `file_ready` 同构：`type/file_id/file_name/mime_type/size/download_url` + 挂载键 `reply_id`，`download_url` 同口径带 `X-Forwarded-Prefix`；用户上传卡片另带 `origin=upload`）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
 | GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
