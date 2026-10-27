@@ -495,6 +495,97 @@ def api_case_promote(body: dict[str, Any]):
     return {"case": case}
 
 
+# ---- DatasetHub（设计 agent-framework-eval-dataset-hub-design.md M2）----
+# 数据集文件在 STUDIO_BENCH_DIR/eval/datasets（挂卷覆盖），人审状态机与导出复用 eval 引擎
+
+@app.get("/api/datasets")
+def api_datasets():
+    from dataset import list_datasets
+    return {"datasets": list_datasets()}
+
+
+@app.get("/api/datasets/items")
+def api_dataset_items(service: str, name: str, status: str | None = None):
+    from dataset import load_items
+    try:
+        validate_id("dataset service", service)
+        validate_id("dataset name", name)
+    except InvalidIdentifierError as e:
+        raise HTTPException(400, str(e))
+    items = load_items(service, name, status)
+    return {"items": [{"id": it["id"], "status": it["status"],
+                       "input": it.get("input") or {},
+                       "ground_truth": it.get("ground_truth"),
+                       "metadata": it.get("metadata") or {}} for it in items]}
+
+
+@app.post("/api/datasets/item/status")
+def api_dataset_item_status(body: dict[str, Any]):
+    from dataset import DatasetError, load_items, set_status
+    service, name, item_id, status = (body.get("service"), body.get("name"),
+                                      body.get("item_id"), body.get("status"))
+    if status not in ("reviewed", "active", "archived"):
+        raise HTTPException(400, "status 只允许 reviewed/active/archived")
+    try:
+        validate_id("dataset service", service or "")
+        validate_id("dataset name", name or "")
+        validate_id("dataset item id", item_id or "")
+    except InvalidIdentifierError as e:
+        raise HTTPException(400, str(e))
+    if not any(it["id"] == item_id for it in load_items(service, name, None)):
+        raise HTTPException(404, "item 不存在")
+    try:
+        item = set_status(service, name, item_id, status)
+    except DatasetError as e:
+        raise HTTPException(409, str(e))
+    return {"item": {"id": item["id"], "status": item["status"]}}
+
+
+@app.post("/api/datasets/export")
+def api_dataset_export(body: dict[str, Any]):
+    """数据集 → deepeval / langfuse（本地 JSONL；do_push=true 才推 langfuse 远端）。"""
+    from dataset import load_items
+    from exporters import deepeval as deepeval_exp, langfuse_client
+
+    target = body.get("target")
+    if target not in ("deepeval", "langfuse"):
+        raise HTTPException(400, "target 只允许 deepeval/langfuse")
+    service, name = body.get("service"), body.get("name")
+    items = []
+    for it in load_items(service, name, "active"):
+        meta = dict(it.get("metadata") or {})
+        meta["case_id"] = it["id"]
+        msg = (it.get("input") or {}).get("message", "")
+        if not msg:
+            continue
+        items.append({"id": it["id"], "input_message": msg, "turns": it.get("turns"),
+                      "ground_truth": it.get("ground_truth"),
+                      "expected_tools": meta.get("requires_tools"),
+                      "final_output": None, "actual_output": None, "metadata": meta})
+    if not items:
+        raise HTTPException(404, "数据集无 active 且含输入的条目")
+    out_dir = DATA_DIR / "exports" / f"ds-{time.strftime('%Y%m%d-%H%M%S')}"
+    result: dict[str, Any] = {"items": len(items)}
+    try:
+        if target == "deepeval":
+            produced = deepeval_exp.export(items, out_dir, kind="goldens")
+            result["files"] = [str(p) for p in produced]
+        else:
+            dataset_name = body.get("dataset_name") or f"{name or 'studio'}-export"
+            summary = langfuse_client.export(
+                items, out_dir, dataset_name,
+                id_prefix=body.get("id_prefix"),
+                do_push=bool(body.get("do_push")))
+            result["local"] = summary["local"]
+            if body.get("do_push"):
+                result["push"] = summary["push"]
+                if summary["push"]["failed"]:
+                    raise HTTPException(502, f"推送存在失败项: {summary['push']['failed'][:3]}")
+    except langfuse_client.LangfuseError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
 # ---- runs ----
 
 @app.post("/api/runs")

@@ -15,14 +15,20 @@
   python3 bench/eval/flywheel.py verify [--task-id ID] [--base-url URL]
   python3 bench/eval/flywheel.py selftest
   python3 bench/eval/flywheel.py status
-  python3 bench/eval/flywheel.py export --target deepeval|langfuse
+  python3 bench/eval/flywheel.py export --target deepeval|langfuse|cases-legacy
                                        [--cases | --pack DIR | --run DIR]
                                        [--kind goldens|testcases] [--dataset NAME]
                                        [--out DIR] [--push] [--id-prefix PFX]
+  python3 bench/eval/flywheel.py dataset (--list | --import-cases | --import-files GLOB
+                                       | --import-skeleton DIR) [--service S] [--name N]
+                                       [--status ST] [--limit N] [--item-id ID]
+  python3 bench/eval/flywheel.py skeleton --db-name oaf_checkpoint --out DIR
+                                       [--db-host H] [--db-port P] [--db-user U] [--since TS]
 
 环境变量：
   EVAL_AGENT_BASE_URL            被测服务地址（默认 http://127.0.0.1:8100）
   EVAL_LLM_BASE_URL/_API_KEY/_MODEL  gen/judge/rca-llm 所需（与被测 Agent 的 LLM 无关）
+  MYSQL_PWD                      skeleton 导出密码（只走环境变量，不落 argv/文件）
 """
 
 import argparse
@@ -62,6 +68,16 @@ def _append_history(line: dict[str, Any]) -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     with open(HISTORY, "a", encoding="utf-8") as f:
         f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+
+def _load_library() -> list[dict[str, Any]]:
+    """执行链路唯一用例入口（收编统一）：DatasetHub active items → 用例字典。
+
+    bench/eval/cases/ 自 PR2 起仅为兼容投影（export --target cases-legacy 再生），
+    改用例请改 datasets/*/items/ 或走人审流程，勿手改投影。
+    """
+    from dataset import load_active_cases
+    return load_active_cases()
 
 
 def _case_passed(traces: list[dict[str, Any]]) -> bool:
@@ -155,7 +171,7 @@ async def cmd_run(args: argparse.Namespace) -> int:
             print("[gen] 跳过（需要 EVAL_LLM_* 配置与变更分析结果）")
         else:
             capabilities = await suite_runner.fetch_capabilities(base_url)
-            library = suite_runner.load_cases(CASES_DIR)
+            library = _load_library()
             candidates = await generate_candidates(
                 analysis, capabilities, [c["input"]["message"] for c in library],
                 cfg, args.with_gen, library)
@@ -171,9 +187,19 @@ async def cmd_run(args: argparse.Namespace) -> int:
                 else:
                     print(f"[gen] 冒烟淘汰 {c['case_id']}: {t['status']} {t['error_info'] or ''}")
             print(f"[gen] 候选 {len(candidates)} 条，冒烟存活 {len(gen_cases)} 条")
+            # 闸门收编：冒烟存活候选 → DatasetHub draft（人审/PR 转正后才进执行链路）
+            if gen_cases:
+                from dataset import DEFAULT_SERVICE, item_from_case, upsert_item
+                for c in gen_cases:
+                    try:
+                        upsert_item(DEFAULT_SERVICE, "gen-drafts",
+                                    item_from_case(c, source="g1_diff", status="draft"),
+                                    changelog_note=f"gen {task_id}")
+                    except Exception as e:  # 产物落库失败不阻断本轮评测（artifacts 已在 gen_cases/）
+                        print(f"[gen][WARN] {c['case_id']} 入库失败: {e}")
 
     # ---- ③ 评测执行 + 确定性断言 ----
-    library = suite_runner.load_cases(CASES_DIR)
+    library = _load_library()
     if args.only:
         pat = args.only.lower()
         library = [c for c in library if pat in c["case_id"].lower()]
@@ -343,7 +369,7 @@ async def cmd_verify(args: argparse.Namespace) -> int:
     if (prev_dir / "task.json").exists():
         with open(prev_dir / "task.json", encoding="utf-8") as f:
             failed_ids = {a["case_id"] for a in json.load(f).get("analyses", [])}
-    library = suite_runner.load_cases(CASES_DIR)
+    library = _load_library()
     targets = [c for c in library
                if c["case_id"] in failed_ids or c.get("category") == "core"]
     if not targets:
@@ -477,7 +503,7 @@ async def cmd_live(args: argparse.Namespace) -> int:
             print("[judge] 跳过（未配置 EVAL_LLM_*）")
     return await runner.run_live(
         base_url=args.base_url or _default_base_url(), out_dir=args.out,
-        pack_dir=args.pack, cases_dir=str(CASES_DIR) if args.cases else None,
+        pack_dir=args.pack, cases=_load_library() if args.cases else None,
         case_ids=(args.only.split(",") if args.only else None),
         judge_cfg=judge_cfg, timeout_s=args.timeout)
 
@@ -497,6 +523,30 @@ def cmd_export(args: argparse.Namespace) -> int:
         print("[export] --run 来源仅支持 --kind testcases（run 轨迹的导出语义是已执行用例）")
         return 2
 
+    if args.target == "cases-legacy":
+        # cases/ 兼容投影再生：DatasetHub active items → legacy 用例文件（收编后唯一合法更新方式）
+        out = Path(args.out or CASES_DIR)
+        out.mkdir(parents=True, exist_ok=True)
+        cases = _load_library()
+        n = 0
+        for case in cases:
+            clean = {k: v for k, v in case.items() if not k.startswith("_") and k != "turns"}
+            with open(out / f"{case['case_id']}.json", "w", encoding="utf-8") as f:
+                json.dump(clean, f, ensure_ascii=False, indent=1)
+            n += 1
+        note = out / "README.md"
+        if not note.exists():
+            note.write_text("# 兼容投影（勿手改）\n\n"
+                            "本目录为 DatasetHub（bench/eval/datasets/）的 cases-legacy 投影，"
+                            "由 `flywheel.py export --target cases-legacy` 再生。\n"
+                            "改用例请改数据集 item 或走人审流程。\n", encoding="utf-8")
+        print(f"[export] cases-legacy 投影: {n} 条 → {out}")
+        return 0
+
+    if not args.out:
+        print("[export] --out 必填（仅 cases-legacy 可缺省投影回 bench/eval/cases）")
+        return 2
+
     if args.pack:
         items = sources.load_from_pack(args.pack)
         with open(Path(args.pack) / "manifest.json", encoding="utf-8") as f:
@@ -506,7 +556,24 @@ def cmd_export(args: argparse.Namespace) -> int:
         items = sources.load_from_run(args.run, CASES_DIR)
         id_prefix = args.id_prefix
     else:
-        items = sources.load_from_cases(CASES_DIR)
+        # 缺省来源 = DatasetHub active items（收编统一后 cases/ 仅为投影）
+        from dataset import load_items
+        items = []
+        for it in load_items(args.hub_service, args.hub_name, "active"):
+            meta = dict(it.get("metadata") or {})
+            meta["case_id"] = it["id"]  # 外部格式按 metadata.case_id 溯源（deepeval 白名单）
+            entry = {
+                "id": it["id"],
+                "input_message": (it.get("input") or {}).get("message", ""),
+                "turns": it.get("turns"),
+                "ground_truth": it.get("ground_truth"),
+                "expected_tools": meta.get("requires_tools"),
+                "final_output": None,
+                "actual_output": None,
+                "metadata": meta,
+            }
+            if entry["input_message"]:
+                items.append(entry)
         id_prefix = args.id_prefix
     if not items:
         print("[export] 来源无可用条目（pack 会话须含用户输入；run 须有能对上库内用例的 traces）")
@@ -537,6 +604,152 @@ def cmd_export(args: argparse.Namespace) -> int:
                 print(f"  [FAIL] {f['id']}: {f['detail']}")
             if pushed["failed"]:
                 return 1
+    return 0
+
+
+def _locate_dataset(args: argparse.Namespace) -> tuple[str, str]:
+    """按 --service/--name/--promote(或 --archive) 的 item id 定位所属数据集。"""
+    from dataset import load_items
+    item_id = args.promote or args.archive
+    for it in load_items(args.service, args.name, None):
+        if it["id"] == item_id:
+            svc, name = it["metadata"]["_dataset"].split("/", 1)
+            return svc, name
+    raise SystemExit(f"[dataset] 未找到 item: {item_id}")
+
+
+def cmd_dataset(args: argparse.Namespace) -> int:
+    import glob as _glob
+    from dataset import (DatasetError, item_from_case, item_from_skeleton,
+                         list_datasets, load_items, set_status, upsert_item)
+
+    try:
+        if args.list:
+            for m in list_datasets():
+                stats = " ".join(f"{k}={v}" for k, v in m.get("stats", {}).items())
+                print(f"{m['_dir']:46s} {stats}")
+            return 0
+        if args.import_cases:
+            # 一次性迁移：legacy cases → 种子数据集（source=manual，status=active）
+            name = args.name or "regression"
+            n = 0
+            for case in suite_runner.load_cases(CASES_DIR):
+                upsert_item(args.service, name,
+                            item_from_case(case, source="manual",
+                                           status=args.status or "active"),
+                            changelog_note=f"import-cases {case['case_id']}")
+                n += 1
+            print(f"[dataset] cases 导入 {n} 条 → {args.service}/{name}（{args.status or 'active'}）")
+            return 0
+        if args.import_files:
+            name = args.name or "imports"
+            n = 0
+            for p in sorted(_glob.glob(args.import_files)):
+                data = json.loads(Path(p).read_text(encoding="utf-8"))
+                if "case_id" not in data:
+                    print(f"[dataset][WARN] 跳过非用例形态文件: {p}")
+                    continue
+                upsert_item(args.service, name,
+                            item_from_case(data, source="import",
+                                           status=args.status or "draft"),
+                            changelog_note=f"import-files {data['case_id']}")
+                n += 1
+            print(f"[dataset] 文件导入 {n} 条 → {args.service}/{name}（{args.status or 'draft'}）")
+            return 0
+        if args.import_skeleton:
+            # T2 骨架 → 采样转 draft：指纹去重 + limit 上限（sample 语义内置）
+            from replay import normalize as nz
+            name = args.name or "skeleton"
+            status = args.status or "draft"
+            seen: set[str] = set()
+            n = 0
+            for p in sorted(Path(args.import_skeleton).glob("*.json")):
+                session = json.loads(p.read_text(encoding="utf-8"))
+                first = (session.get("turns") or [{}])[0].get("input", "")
+                if not first:
+                    continue
+                fp = nz.normalize_text(first)
+                if fp in seen:
+                    continue
+                if n >= args.limit:
+                    break
+                seen.add(fp)
+                upsert_item(args.service, name, item_from_skeleton(session, status=status),
+                            changelog_note=f"import-skeleton {session['sid'][:32]}")
+                n += 1
+            print(f"[dataset] 骨架导入 {n} 条 → {args.service}/{name}（{status}，去重后）")
+            return 0
+        # promote / archive
+        svc, name = _locate_dataset(args)
+        item_id = args.promote or args.archive
+        target = "active" if args.promote else "archived"
+        set_status(svc, name, item_id, target)
+        print(f"[dataset] {svc}/{name}/{item_id}: → {target}")
+        return 0
+    except DatasetError as e:
+        print(f"[dataset][FAIL] {e}")
+        return 1
+
+
+def cmd_skeleton(args: argparse.Namespace) -> int:
+    from skeleton import SkeletonError, export_skeleton
+    try:
+        produced = export_skeleton(
+            args.db_host, args.db_port, args.db_user, args.db_name, args.out,
+            since=args.since,
+            kubectl_resource=(args.kubectl_resource if args.via == "kubectl" else None),
+            kubectl_ns=args.kubectl_ns, kubectl_user=args.kubectl_user,
+            kubectl_password_env=args.kubectl_password_env)
+    except SkeletonError as e:
+        print(f"[skeleton][FAIL] {e}")
+        return 2
+    print(f"[skeleton] 导出 {len(produced)} 个会话骨架 → {args.out}")
+    if produced:
+        print("[skeleton] 下一步: dataset --import-skeleton <out> --status draft（人审转正后进执行链路）")
+    return 0
+
+
+async def cmd_synth(args: argparse.Namespace) -> int:
+    """G3 轨迹合成 golden：骨架素材 → LLM 蒸馏 → 四道闸门 → DatasetHub draft。"""
+    from casegen.synthesizer import build_material, synthesize_goldens
+    from dataset import DEFAULT_SERVICE, item_from_case, load_active_cases, upsert_item
+
+    cfg = None
+    from graders.correctness import judge_from_env
+    cfg = judge_from_env()
+    if cfg is None:
+        print("[synth] 跳过（需要 EVAL_LLM_*）")
+        return 2
+    sessions = []
+    for p in sorted(Path(args.skeleton).glob("*.json")):
+        sessions.append(json.loads(p.read_text(encoding="utf-8")))
+    material = build_material(sessions, args.limit)
+    if not material:
+        print("[synth] 素材为空（会话需含用户输入与终答）")
+        return 2
+    existing = [c["input"]["message"] for c in load_active_cases()]
+    try:
+        candidates = await synthesize_goldens(material, existing, cfg)
+    except RuntimeError as e:
+        print(f"[synth][FAIL] {e}")
+        return 1
+    # 闸门③：动态冒烟（可选）——跑不通的候选淘汰
+    if args.base_url:
+        capabilities = await suite_runner.fetch_capabilities(args.base_url)
+        survivors = []
+        for c in candidates:
+            t = await suite_runner.execute_once(c, args.base_url, repeat_no=1)
+            if t["status"] == "success":
+                survivors.append(c)
+            else:
+                print(f"[synth] 冒烟淘汰 {c['case_id']}: {t['status']}")
+        candidates = survivors
+    # 闸门④：draft 落库（人审转正才进执行链路）
+    for c in candidates:
+        upsert_item(DEFAULT_SERVICE, args.name, item_from_case(c, source="g3_synth",
+                                                              status="draft"),
+                    changelog_note=f"synth origin={c['origin']['source_session'][:32]}")
+    print(f"[synth] 合成 {len(candidates)} 条 golden → {DEFAULT_SERVICE}/{args.name}（draft）")
     return 0
 
 
@@ -914,10 +1127,93 @@ def cmd_selftest(_: argparse.Namespace) -> int:
         raise AssertionError("export 契约 e2e 需要 python3") from e
     assert r.returncode == 0, f"export_loop 契约失败:\n{r.stdout[-800:]}\n{r.stderr[-800:]}"
 
+    # ---- DatasetHub（M2）：落盘/状态机/CHECKSUMS/投影等价/骨架解析/收编一致性 ----
+    from dataset import (DatasetError, item_from_case, item_from_skeleton,
+                         load_active_cases, load_items, set_status, to_case, upsert_item)
+    from replay.packager import verify_checksums
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        it = {"id": "case_hub_demo", "input": {"message": "hi", "userId": "u"},
+              "ground_truth": "g", "expected": {"no_error": True}, "status": "draft",
+              "metadata": {"title": "t", "category": "core",
+                           "requires_tools": ["echo"], "timeout_s": 60}}
+        upsert_item("svc-demo", "ds-demo", it, datasets_dir=base, changelog_note="seed")
+        for bad in ({**it, "id": "../x"}, {**it, "status": "bogus"},
+                    {k: v for k, v in it.items() if k != "input"}):
+            try:
+                upsert_item("svc-demo", "ds-demo", bad, datasets_dir=base)
+                raise AssertionError(f"非法 item 应被拒绝: {bad.get('id', bad)}")
+            except DatasetError:
+                pass
+        set_status("svc-demo", "ds-demo", "case_hub_demo", "active", datasets_dir=base)
+        try:
+            set_status("svc-demo", "ds-demo", "case_hub_demo", "draft", datasets_dir=base)
+            raise AssertionError("状态回退应被拒绝")
+        except DatasetError:
+            pass
+        # 投影等价：active item → runner 兼容用例字典（requires_tools/ground_truth 透传）
+        case = to_case(load_items("svc-demo", "ds-demo", None, datasets_dir=base)[0])
+        assert case["case_id"] == "case_hub_demo" and case["requires_tools"] == ["echo"]
+        assert case["ground_truth"] == "g" and case["expected"] == {"no_error": True}
+        # item_from_case 往返：用例字典 → item → 用例字典 关键字段不丢
+        rt = to_case(item_from_case(case, source="manual", status="active"))
+        assert rt["case_id"] == case["case_id"] and rt["requires_tools"] == ["echo"]
+        # CHECKSUMS 篡改检测（复用 packager 三重校验）
+        ddir = base / "svc-demo" / "ds-demo"
+        assert verify_checksums(ddir) is True
+        (ddir / "items" / "case_hub_demo.json").write_text("{}", encoding="utf-8")
+        assert verify_checksums(ddir) is False
+
+    # 骨架解析：user/assistant/tool 聚合、final 取末段助手文本、thinking 全程剔除
+    from skeleton import sessions_from_rows
+
+    rows = [
+        ("s1:gw-a", "USER",
+         json.dumps({"role": "USER", "content": [{"type": "text", "text": "你好"}]}),
+         "2026-10-26 10:00:00"),
+        ("s1:gw-a", "ASSISTANT",
+         json.dumps({"role": "ASSISTANT", "content": [
+             {"type": "thinking", "thinking": "内心戏不应外泄"},
+             {"type": "tool_use", "id": "t1", "name": "echo"}]}),
+         "2026-10-26 10:00:05"),
+        ("s1:gw-a", "TOOL",
+         json.dumps({"role": "TOOL", "content": [{"type": "tool_result", "name": "echo"}]}),
+         "2026-10-26 10:00:06"),
+        ("s1:gw-a", "ASSISTANT",
+         json.dumps({"role": "ASSISTANT", "content": [{"type": "text", "text": "答复"}]}),
+         "2026-10-26 10:00:07"),
+    ]
+    sess = sessions_from_rows(rows)["s1:gw-a"]
+    assert sess["turns"] == [{"input": "你好", "ts": "2026-10-26 10:00:00"}], sess["turns"]
+    assert sess["tool_names"] == ["echo"] and sess["final_output"] == "答复"
+    assert sess["message_count"] == 4 and sess["ts_start"] == "2026-10-26 10:00:00"
+    assert "内心戏" not in json.dumps(sess, ensure_ascii=False)
+    sk_item = item_from_skeleton(sess, case_id="case_t2_demo")
+    assert sk_item["status"] == "draft" and sk_item["input"]["message"] == "你好"
+    assert sk_item["metadata"]["source"] == "t2_skeleton"
+    assert sk_item["expected"]["tool_calls"] == {"required": ["echo"]}
+
+    # 收编一致性（漂移即红）：git 已跟踪的 active 数据集条目 == cases/ 投影。
+    # 对比口径刻意限定「git 已跟踪」——运行态数据集（gen-drafts/skeleton/imports，
+    # .gitignore 忽略）自由流转不参与；投影滞后于已提交资产才算漂移。
+    tracked = subprocess.run(["git", "ls-files", "bench/eval/datasets"],
+                             cwd=REPO_DIR, capture_output=True, text=True, timeout=15)
+    tracked_ids: set[str] = set()
+    if tracked.returncode == 0:
+        for f in tracked.stdout.splitlines():
+            if "/items/" in f and f.endswith(".json"):
+                data = json.loads((REPO_DIR / f).read_text(encoding="utf-8"))
+                if data.get("status") == "active":
+                    tracked_ids.add(data["id"])
+    proj_ids = {c["case_id"] for c in suite_runner.load_cases(CASES_DIR)}
+    assert tracked_ids == proj_ids, f"cases/ 投影与 DatasetHub 漂移: {tracked_ids ^ proj_ids}"
+
     print(f"selftest PASS（帧映射 + 检查器 + HITL 新旧双序挂起判定 + 启动排队分类 + 错误断言 + 跳过分类"
           f" + 归一化规则/轨迹等价（M2） + usage_frame 口径（全量 prompt 恒等式）"
           f" + collector YAML 加载断言（issue #97）+ judge 降级解析（issue #117）"
-          f" + 导出器契约（deepeval/langfuse schema·确定性 id·凭据零泄漏·mock 推送幂等）,"
+          f" + 导出器契约（deepeval/langfuse schema·确定性 id·凭据零泄漏·mock 推送幂等）"
+          f" + DatasetHub（落盘/状态机/校验和/投影等价/骨架解析/收编一致性），"
           f"{len(mapping['sdk_frames'])} 枚举 + {len(mapping['synthetic_frames'])} 合成帧，契约 v{mapping['version']}）")
     return 0
 
@@ -1008,20 +1304,64 @@ def main() -> int:
     plv.add_argument("--timeout", type=float, default=120.0, help="单轮 SSE 超时秒数")
     plv.set_defaults(func=cmd_live)
 
-    pex = sub.add_parser("export", help="评测数据导出为 deepeval / langfuse 兼容格式（零新依赖）")
-    pex.add_argument("--target", choices=["deepeval", "langfuse"], required=True,
-                     help="导出目标（exporters.TARGETS）")
+    pex = sub.add_parser("export", help="评测数据导出为 deepeval / langfuse / cases-legacy（零新依赖）")
+    pex.add_argument("--target", choices=["deepeval", "langfuse", "cases-legacy"], required=True,
+                     help="导出目标（exporters.TARGETS + 投影再生）")
     pex.add_argument("--kind", choices=["goldens", "testcases"], default="goldens",
                      help="deepeval 导出形态：goldens=金标集（默认）；testcases=已执行用例（需 --run）")
-    pex.add_argument("--cases", action="store_true", help="来源=库内 cases/*.json（缺省来源）")
+    pex.add_argument("--cases", action="store_true", help="来源=DatasetHub active items（缺省来源，保留兼容）")
+    pex.add_argument("--hub-service", default=None, help="缺省来源限定 service 段（默认全部）")
+    pex.add_argument("--hub-name", default=None, help="缺省来源限定数据集名（默认全部）")
     pex.add_argument("--pack", default=None, help="来源 evalpack 目录（多轮会话，id 前缀默认 pack_id）")
     pex.add_argument("--run", default=None, help="来源 flywheel run 产物目录（traces/*.json）")
     pex.add_argument("--dataset", default=None, help="langfuse 数据集名（--target langfuse 必填）")
-    pex.add_argument("--out", required=True, help="导出输出目录")
+    pex.add_argument("--out", default=None,
+                     help="导出输出目录（cases-legacy 缺省 bench/eval/cases，其余必填）")
     pex.add_argument("--push", action="store_true",
                      help="langfuse：推送远端（需 LANGFUSE_HOST/_PUBLIC_KEY/_SECRET_KEY 环境变量）")
     pex.add_argument("--id-prefix", default=None, help="langfuse item id 前缀（缺省：pack 用 pack_id，cases 无前缀）")
     pex.set_defaults(func=cmd_export)
+
+    pd = sub.add_parser("dataset", help="DatasetHub：清单/导入/人审状态机（唯一事实源）")
+    dg = pd.add_mutually_exclusive_group(required=True)
+    dg.add_argument("--list", action="store_true", help="数据集清单与状态统计")
+    dg.add_argument("--import-cases", action="store_true", help="cases/ → 种子数据集（一次性迁移）")
+    dg.add_argument("--import-files", metavar="GLOB", help="用例形态 JSON 文件 → 数据集")
+    dg.add_argument("--import-skeleton", metavar="DIR",
+                    help="skeleton 导出目录 → 指纹去重采样转 draft（sample 语义内置）")
+    dg.add_argument("--promote", metavar="ITEM_ID", help="item 状态 → active（人审转正）")
+    dg.add_argument("--archive", metavar="ITEM_ID", help="item 状态 → archived")
+    pd.add_argument("--service", default="agent-framework", help="数据集 service 段（默认 agent-framework）")
+    pd.add_argument("--name", default=None,
+                    help="数据集名（import-cases 缺省 regression，import 缺省 imports/skeleton；"
+                         "promote/archive 缺省按 item id 全局定位）")
+    pd.add_argument("--status", default=None,
+                    help="导入状态（import-cases 缺省 active，import-files/skeleton 缺省 draft）")
+    pd.add_argument("--limit", type=int, default=20, help="import-skeleton 采样上限（默认 20）")
+    pd.set_defaults(func=cmd_dataset)
+
+    psk = sub.add_parser("skeleton", help="T2 checkpoint 只读导出会话骨架")
+    psk.add_argument("--via", choices=["kubectl", "direct"], default="kubectl",
+                     help="kubectl=exec 进 DB 容器（默认，凭据不出 pod）；direct=mysql CLI（密码走 MYSQL_PWD）")
+    psk.add_argument("--kubectl-resource", default="deploy/oaf-mysql", help="kubectl exec 目标")
+    psk.add_argument("--kubectl-ns", default="agent-platform")
+    psk.add_argument("--kubectl-user", default="root", help="容器内 mysql 用户")
+    psk.add_argument("--kubectl-password-env", default="MYSQL_ROOT_PASSWORD",
+                     help="容器内保存密码的环境变量名")
+    psk.add_argument("--db-name", default="oaf_checkpoint", help="checkpoint 库名")
+    psk.add_argument("--db-host", default="127.0.0.1", help="MySQL 地址（direct 模式用）")
+    psk.add_argument("--db-port", type=int, default=3307)
+    psk.add_argument("--db-user", default="oaf")
+    psk.add_argument("--out", required=True, help="骨架输出目录")
+    psk.add_argument("--since", default=None, help="只导该时间之后的会话（YYYY-MM-DD[ hh:mm[:ss]]）")
+    psk.set_defaults(func=cmd_skeleton)
+
+    psy = sub.add_parser("synth", help="G3 LLM 从骨架素材合成 golden（四道闸门产 draft）")
+    psy.add_argument("--skeleton", required=True, help="skeleton 导出目录（素材）")
+    psy.add_argument("--base-url", default=None, help="冒烟目标（可选；不配则只过静态闸门）")
+    psy.add_argument("--limit", type=int, default=10, help="素材会话上限（默认 10）")
+    psy.add_argument("--name", default="gen-drafts", help="draft 落库数据集名（默认 gen-drafts）")
+    psy.set_defaults(func=cmd_synth)
 
     args = p.parse_args()
     result = args.func(args)

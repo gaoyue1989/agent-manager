@@ -62,7 +62,8 @@ ds.add_goldens_from_jsonl_file(file_path="reports/exports/deepeval/conversationa
 - `tests/export_loop.py`：mock langfuse（localhost 零外联）验证鉴权/upsert 幂等/重试矩阵，
   由 selftest 子进程调用，CI `评测自检` job 覆盖。
 
-## 边界（PR1）
+## 边界
 
-- langfuse `sourceTraceId` 关联、scores 回流 → PR3。
-- cases 仍是事实源；DatasetHub 统一后 exporters 只换数据来源、格式投影不变 → PR2。
+- langfuse `sourceTraceId` 关联、scores 回流 → M3（设计 §7）。
+- 缺省来源 = DatasetHub active items（收编统一后唯一事实源）；`--pack`/`--run` 保留为
+  快捷旁路。cases/ 为兼容投影，`export --target cases-legacy` 再生。
