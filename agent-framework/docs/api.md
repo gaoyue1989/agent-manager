@@ -612,6 +612,7 @@ data: {"type":"AGENT_END","replyId":"..."}
 | `error` | 错误（如 `turn_in_progress` 排队超时、`turn_pending_confirm`、`unknown_model`） |
 | `done` | **仅由 `/threads/{sid}/subscribe` 补发**——`POST /threads/chat` 不发此帧 |
 | `interrupted` | **仅由 `/subscribe` 补发**：`{"type":"interrupted","reason":"turn_interrupted"}` |
+| `cancelled` | **用户停止的合成终态帧**（`POST /threads/{sid}/stop` 生效后、`AGENT_END` 之前）：`{"type":"cancelled","reason":"user_stopped"}`；排队 turn 被停止时直接发本连接（不落库） |
 
 > **`data` 里没有 `seq` 字段。** 游标在 SSE `id:` 行上（`EnvelopedEvent.seq()`）；
 > `data.id` 是 SDK 事件 ID，两者不是一回事。控制帧与心跳 `:hb` 没有 `id:` 行。
@@ -696,7 +697,38 @@ curl -sN -G "http://localhost:8100/threads/acme-test-agent:thread-1/subscribe" \
 **SSE 帧：** 每帧 `id:` = seq；空闲时发 `:hb` 心跳 comment（间隔 `AGENT_SSE_HEARTBEAT_SECONDS`，默认 20s）；
 追到终态后补 `{"type":"done"}`；执行副本崩溃时补 `{"type":"interrupted","reason":"turn_interrupted"}` 后关闭流。
 
-**终态类型：** `AGENT_END` / `error`（以及 `permission_ask`——挂起等确认也算本轮结束）。
+**终态类型：** `AGENT_END` / `error` / `cancelled`（以及 `permission_ask`——挂起等确认也算本轮结束）。
+
+---
+
+### POST /threads/{sessionId}/stop
+
+停止当前运行中的 turn（**协作式中断**，设计见 [turn-stop-design.md](turn-stop-design.md)）。
+请求经共享存储 `turn_stop` 投递，由持有该 turn 的副本调用 SDK 按会话 interrupt；
+可在任意副本发起（无会话粘性）。停止只终止当前 turn，**不删除会话、不撤销已执行工具的副作用**。
+
+```bash
+curl -X POST "http://localhost:8100/threads/acme-test-agent:thread-1/stop" \
+  -H 'X-User-Id: alice'
+```
+
+| 状态码 | 响应 | 含义 |
+|---|---|---|
+| `202` | `{"session_id","reply_id","state":"stopping"}` | 已受理（等待 `cancelled` 终态帧） |
+| `404` | `{"error":"nothing_to_stop"}` | 没有运行中的 turn |
+| `404` | `{"error":"thread_not_found"}` | 归属不符 |
+| `409` | `{"error":"turn_waiting_confirm"}` | HITL 挂起中——改用 `confirm` 拒绝 |
+| `409` | `{"error":"turn_not_ready","retryable":true}` | 租约在但本轮尚无事件，客户端短重试 |
+| `503` | `{"error":"turn_stop_unavailable"}` | 能力关闭或存储不可用（fail-closed） |
+
+**语义边界：**
+- SDK 检查点在模型流 chunk 之间与每轮 reasoning/acting 前；**正在阻塞执行的工具不会被强杀**，
+  工具返回后才生效（超过 `AGENT_TURN_STOP_GRACE_MS` 仅打 WARN）。
+- `agent_spawn` 子任务 / Agent Protocol 远程任务不递归取消。
+- 生效后事件流依次出现 `cancelled` → `AGENT_END`；`/status` 归一为终态 `completed`；
+  `/subscribe` 回放一致；history 中出现一条 `stopped: true` 的「（本次回复已被用户停止）」。
+- 开关：`AGENT_TURN_STOP_ENABLED`（默认 `true`）、`AGENT_TURN_STOP_POLL_MS`（默认 1000）、
+  `AGENT_TURN_STOP_GRACE_MS`（默认 15000）。
 
 ---
 
@@ -731,6 +763,8 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/status
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占 | 展示中断态并允许重发 |
 
 > **`interrupted` 是 2026-09 起新增的第 5 态**（此前文档只写 4 态）。
+> **用户主动停止**（`POST /threads/{sid}/stop`）不新增状态位：事件流以 `cancelled` 收尾，
+> `/status` 归为 `completed`，history 中对应消息带 `stopped: true`。
 
 **503 语义：** 事件存储不可用时返回 `503 {"error":"event_store_unavailable"}`。
 **前端必须保留本地游标、不得重置为 0**——否则会触发整场重放。MySQL / Redis 任一不可用都会显式报错，

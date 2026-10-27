@@ -401,6 +401,14 @@ public final class StateDataParser {
                 ? UploadWorkspaceInjector.stripUploadHints(
                     SkillInjectionService.stripInjectedSkills(extractContentText(m)))
                 : extractContentText(m);
+            // 用户主动停止后的 SDK 恢复消息（generateReason=INTERRUPTED，文案固定为
+            // "I noticed that you have interrupted me…"）：不是模型输出，history 展示层
+            // 换成本地化提示并打 stopped 标记，与实时流的 cancelled 终态帧对齐。
+            var stopped = m.path("metadata").path("agentscope_generate_reason")
+                .asText("").equals("INTERRUPTED");
+            if (stopped) {
+                content = "（本次回复已被用户停止）";
+            }
             // 用户上传文件 id（写入侧 UploadWorkspaceInjector.METADATA_FILE_IDS）：供 history
             // 层把上传卡片挂回本用户消息。纯文件轮（无文本）也借此保留，不被下面的"空消息"剪掉
             var fileIds = "user".equals(role) ? extractFileIds(m) : List.<String>of();
@@ -412,6 +420,10 @@ public final class StateDataParser {
             var msg = new java.util.LinkedHashMap<String, Object>();
             msg.put("role", role);
             msg.put("content", content);
+            if (stopped) {
+                // 附加字段（只增不改）：history 客户端可据此渲染「已停止」徽标
+                msg.put("stopped", true);
+            }
             if (!fileIds.isEmpty()) {
                 msg.put("file_ids", fileIds);
             }

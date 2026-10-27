@@ -1,15 +1,16 @@
 -- =============================================================================
 -- agent-framework 全量建表语句（MySQL 8.0）
 -- =============================================================================
--- 来源：db/migration/V1..V12 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
+-- 来源：db/migration/V1..V13 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
 --       存量库自动 baseline；本文件为快照式全量参考，以迁移脚本为权威）
 -- 生成日期：2026-09-28（对应 commit 60dd006）；2026-10-25 增补 V10 turn_intent、
---           V11/V12 model_config.is_default/is_fallback（对应 commit e729a67）
+--           V11/V12 model_config.is_default/is_fallback（对应 commit e729a67）；
+--           2026-10-27 增补 V13 turn_stop（单轮停止请求）
 --
 -- 数据库：CHECKPOINT_JDBC_URL 指向的库（默认 agent_manager_test）
 --         CHECKPOINT_DB_NAME 可显式指定 agent_state 所在库名（未设时从 JDBC URL 解析）
 --
--- 表清单（10 张本工程表 + 2 张 SDK 表）：
+-- 表清单（11 张本工程表 + 2 张 SDK 表）：
 --   ① agent_state      SDK MysqlAgentStateStore   —— AgentState（会话状态，权威）
 --   ② agent_fs         SDK JdbcStore              —— 分布式文件系统（工作区文件）
 --   ③ session_user     会话→用户映射 + 标题(remark) + 会话模型(model)
@@ -22,6 +23,7 @@
 --   ⑩ model_config     托管模型配置（V11/V12 增默认/备用标记）
 --   ⑪ ui_context       MCP Apps 4.7 UI 上下文
 --   ⑫ turn_intent      排队 turn 意图（多副本可续传，V10）
+--   ⑬ turn_stop        单轮停止请求（跨副本投递，V13）
 --
 -- 非 MySQL：session_event（会话事件）已整体迁至 Redis Streams，不再建表。
 -- 未使用：agentscope-extensions-mysql 的 JdbcRemoteSnapshotClient 快照表
@@ -251,10 +253,30 @@ CREATE TABLE IF NOT EXISTS turn_intent (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
+-- -----------------------------------------------------------------------------
+-- ⑬ turn_stop —— 单轮停止请求（跨副本投递，V13）
+-- 来源：db/migration/V13__turn_stop.sql（TurnStopStore）
+-- POST /threads/{sessionId}/stop 写行；持有该 turn 的副本每秒全量读取并按
+-- reply_id 匹配本地活跃 turn，再调 SDK 按会话 interrupt。reply_id 是栅栏：
+-- 新 turn 的 reply_id 不同，陈旧行不会误杀下一轮。
+-- 生命周期：turn 收尾即删；崩溃遗留行由 requested_at 读窗（1h）过滤 +
+-- SessionCleanupService 每日清理兜底。
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS turn_stop (
+    session_id   VARCHAR(255)  NOT NULL,
+    reply_id     VARCHAR(64)   NOT NULL,
+    requested_by VARCHAR(255)  DEFAULT NULL,
+    requested_at DATETIME(3)   NOT NULL,
+    PRIMARY KEY (session_id),
+    KEY idx_turn_stop_reply (reply_id),
+    KEY idx_turn_stop_requested (requested_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+
 -- =============================================================================
 -- 部署注意
 -- =============================================================================
--- 1. 表结构演进一律走 Flyway（db/migration/V1..V12，启动自动执行；存量库自动
+-- 1. 表结构演进一律走 Flyway（db/migration/V1..V13，启动自动执行；存量库自动
 --    baseline，多副本历史表锁互斥，失败即启动失败——纪律见
 --    docs/design/db-migration-flyway-design.md）：新建库无需手动执行本文件；
 --    **禁止**在 Store 构造器或请求路径手工 DDL，禁止修改已合并的 V 文件

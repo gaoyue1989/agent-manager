@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 50 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 51 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -58,6 +58,7 @@
 | [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md) | OAF 包动态加载 + MCP 动态 reload，**M1/M2 已实施，部署环境 E2E 验证通过**（2026-09-25；含实施差异记录：CustomTool 标记接口消环、ObjectProvider 惰性注入、scope=mcp 重解析 frontmatter；SIGHUP/定时扫描 M4 未实施）。**2026-09-26 由 ③ 档移入本档**——此前索引归类与文档自身状态矛盾 |
 | [change-execution-order.md](change-execution-order.md) | v2.0→v2.1 整体升级执行顺序与结果记录（MysqlDistributedStore/HarnessAgent/Workspace/五功能/多租户，2026-08-06，头部含 2026-09-07 现状核对） |
 | [session-history-archive-design.md](session-history-archive-design.md) | 压缩后会话历史可查（session_message 消息轨 + AgentStateStore 归档装饰器 write-through + history 双源合并渲染压缩分隔条），**已实施**（2026-09-27；含 agentscope-java/deer-flow/QwenPaw 三机制调研结论、§13 评审核对记录 R1–R9 与 §15 实施记录；API 契约见 api.md history 节） |
+| [turn-stop-design.md](turn-stop-design.md) | 单轮停止（`POST /threads/{sid}/stop`）：turn_stop 共享投递 + reply_id 栅栏 + 属主副本全局轮询 + SDK 按会话 interrupt + `cancelled` 终态帧；**已实施**（2026-10-27；含协作式语义边界、不硬停的理由 R12 收口、测试与手工验证清单） |
 | [model-params-design.md](model-params-design.md) | 模型采样参数扩展（推理强度/思考开关/温度/最大输出/频率惩罚 + provider 列作推理引擎方言选择器），**已实施**（2026-09-27；session-model-switch 的增量设计，model_config 新列随 V4 迁移） |
 | [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md) | Redis Cluster 与 key 前缀隔离（`agent.redis.mode` / `cluster-nodes` / `prefix` 三个配置叶子 + `RedisConnectionFacade` 连接门面；默认配置下行为与存量部署逐字节一致），**已实施**（2026-09-28） |
 | [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) | E2E 覆盖缺口分析第一轮（近 7 天变更 → 25 条补充用例设计稿；其中 19 条已由 bc235c4 落地） |

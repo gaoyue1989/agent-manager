@@ -664,4 +664,40 @@ class StateDataParserTest {
         assertFalse(out.contains("tp-abcdefghijklmnop"), "截断后的内容不得含明文 token");
         assertTrue(out.contains(StateDataParser.MASKED));
     }
+
+    // ========== 用户停止（POST /threads/{sid}/stop）的历史展示 ==========
+
+    @Test
+    void interruptedRecoveryMessageShouldBeLocalizedAndMarkedStopped() {
+        // SDK 的 interrupt 恢复消息：generateReason=INTERRUPTED（metadata 持久化在 state_data）
+        var stateData = """
+            {"context":[
+               {"id":"u1","role":"USER","content":[{"type":"text","text":"跑个长任务"}]},
+               {"id":"a1","role":"ASSISTANT",
+                "metadata":{"agentscope_generate_reason":"INTERRUPTED"},
+                "content":[{"type":"text","text":"I noticed that you have interrupted me. What can I do for you?"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(2, list.size());
+        assertEquals(Boolean.TRUE, list.get(1).get("stopped"));
+        assertTrue(((String) list.get(1).get("content")).contains("已被用户停止"),
+            "恢复话术被本地化，不把 SDK 提示直接上屏");
+    }
+
+    @Test
+    void normalAssistantMessageShouldNotBeMarkedStopped() {
+        var stateData = """
+            {"context":[
+               {"id":"a1","role":"ASSISTANT","content":[{"type":"text","text":"正常完成"}]}
+             ]}
+            """;
+        var list = StateDataParser.toRoleContentList(
+            StateDataParser.findMessagesArray(stateData));
+
+        assertEquals(1, list.size());
+        assertFalse(list.get(0).containsKey("stopped"));
+    }
 }

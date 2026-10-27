@@ -75,7 +75,7 @@ status / confirm / confirm-stream / chat 续聊）先查 `session_user` 归属�
 {"type":"error","error":"turn_in_progress: session 'xxx' has an active turn and queue timeout reached"}
 ```
 
-**前端必须等本轮终态后再发下一条消息。**（终态是 `AGENT_END` / `error` / `permission_ask`；
+**前端必须等本轮终态后再发下一条消息。**（终态是 `AGENT_END` / `error` / `permission_ask` / `cancelled`；
 `POST /threads/chat` 收到 `AGENT_END` 后流直接关闭，**不发 `done` 帧**，`done` 只由 `/subscribe` 补发。）
 
 **ASKING 挂起期限制（e2e 缺陷 D4 的契约澄清）：**
@@ -223,6 +223,7 @@ GET /threads/my-session-001/subscribe?afterSeq=13
 | `waiting_confirm` | 等待人工确认（`pending_confirm` 非空） |
 | `idle` | 空闲，等待用户输入 |
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占（2026-09 起新增的第 5 态） |
+| （不新增态） | 用户停止的 turn 以 `cancelled` 收尾，`/status` 归为 `completed`；history 对应消息带 `stopped: true` |
 
 > `pending_confirm`：与 `/history` 同口径取 FIFO 头，本地 HITL 行或远程确认行
 > （远程行 additive 附 `confirm_key` / `remote_task` 字段，2026-09-29 起）。
@@ -380,6 +381,7 @@ GET /threads?userId=user-123
 | `error` | S→C | `error` | 错误（如 `turn_in_progress` 排队超时、`unknown_model`） |
 | `done` | S→C | — | **仅 `/subscribe` 追到终态时补发**；`POST /threads/chat` **不发** `done` 帧（收到 `AGENT_END` 后流直接关闭） |
 | `interrupted` | S→C | `reason:"turn_interrupted"` | **仅 `/subscribe` 补发**：执行副本崩溃，本 turn 无法继续 |
+| `cancelled` | S→C | `reason:"user_stopped"` | **用户停止**（`POST /threads/{sid}/stop` 生效）：排在 `AGENT_END` 之前；排队 turn 被停止时直接收流（不落库） |
 | `subagent_exposed` | S→C | `subagent_id`, `agent_id`, `session_id`, `label` | 子 agent 调用收口（`AgentSpawnTool` 结果返回时发出，snake_case，2026-09-30 起） |
 
 > 合成帧（`tool_call_summary` / `tool_result_preview` / `file_ready`）经 `emitSynthetic` 落库后广播，

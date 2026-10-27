@@ -102,6 +102,18 @@ class SessionEventTailerTest {
     }
 
     @Test
+    void cancelledIsTerminalAndFinishesTurn() {
+        assertTrue(SessionEventTailer.isTerminalType("cancelled"),
+            "用户停止的合成终态帧必须参与收流判定");
+        when(turnLeaseStore.isHeld("sid-cancel")).thenReturn(false);
+        when(eventStore.findLatest("sid-cancel")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(11, "cancelled", "{}", "rid"));
+        var probe = tailer.probe("sid-cancel");
+        assertTrue(probe.finished());
+        assertFalse(probe.interrupted());
+    }
+
+    @Test
     void finishedWhenNoEventsAtAll() {
         when(turnLeaseStore.isHeld("sid-5")).thenReturn(false);
         when(eventStore.findLatest("sid-5")).thenReturn(null);

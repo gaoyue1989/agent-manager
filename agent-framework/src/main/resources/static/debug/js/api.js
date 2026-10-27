@@ -162,6 +162,13 @@ export const api = {
     get('/threads/' + encodeURIComponent(sessionId) + '/history', userHeader(userId)),
   getLlmCalls: (sessionId, userId) =>
     get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls', userHeader(userId)),
+  /**
+   * 停止当前运行中的 turn（协作式中断，docs/turn-stop-design.md）。
+   * 202 = 已受理（等待 cancelled 终态帧）；404 = 无运行中 turn；409 = HITL 挂起/尚未
+   * 产出事件（后者的 retryable=true）；503 = 停止能力不可用。
+   */
+  stopThread: (sessionId, userId) =>
+    post('/threads/' + encodeURIComponent(sessionId) + '/stop', {}, userHeader(userId)),
 
   // 运营监控（跨用户会话列表 + 使用概览，供调试页 Monitor 面板）
   getMonitorOverview: () => get('/debug/monitor/overview'),

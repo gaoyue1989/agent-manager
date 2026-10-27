@@ -1459,4 +1459,61 @@ class ChatStreamControllerTest {
         assertNotNull(frames);
         verify(sessionUserStore).upsert(sessionId, "alice");
     }
+
+    // ===== 单轮停止（POST /threads/{sid}/stop）=====
+
+    @Test
+    void stopRequestedShouldEmitCancelledBeforeAgentEndAndSuppressRecoveryMessage() {
+        var sessionId = "test-user-stop";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-stop");
+
+        var watcher = mock(io.agentmanager.framework.service.TurnStopWatcher.class);
+        when(watcher.isStopRequested(anyString())).thenReturn(true);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+            controller, "turnStopWatcher", watcher);
+
+        var recovery = io.agentscope.core.message.AssistantMessage.builder()
+            .name("agent")
+            .textContent("I noticed that you have interrupted me. What can I do for you?")
+            .generateReason(io.agentscope.core.message.GenerateReason.INTERRUPTED)
+            .build();
+        var result = new io.agentscope.core.event.AgentResultEvent(recovery);
+        var end = new AgentEndEvent("reply-1");
+        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            .thenReturn(Flux.just((AgentEvent) result, (AgentEvent) end));
+
+        var frames = collect(sessionId, "run long task", "alice");
+
+        int cancelledIdx = -1;
+        int agentEndIdx = -1;
+        for (int i = 0; i < frames.size(); i++) {
+            var f = frames.get(i);
+            if (f != null && f.contains("\"type\":\"cancelled\"")) cancelledIdx = i;
+            if (f != null && f.contains("AGENT_END")) agentEndIdx = i;
+        }
+        assertTrue(cancelledIdx >= 0, "应发出 cancelled 终态帧: " + frames);
+        assertTrue(agentEndIdx > cancelledIdx, "cancelled 必须排在 AGENT_END 之前: " + frames);
+        assertTrue(frames.stream().noneMatch(f -> f != null && f.contains("I noticed")),
+            "SDK 中断恢复话术不得上屏: " + frames);
+        verify(watcher, atLeastOnce()).unregister(eq(sessionId), anyString());
+    }
+
+    @Test
+    void queuedTurnShouldBeCancellableBeforeLease() {
+        var sessionId = "test-user-queued-stop";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn(null);
+
+        var stopService = mock(io.agentmanager.framework.service.TurnStopService.class);
+        when(stopService.matches(eq(sessionId), anyString())).thenReturn(true);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+            controller, "turnStopService", stopService);
+
+        var frames = collect(sessionId, "hello", "alice");
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("\"type\":\"cancelled\"")),
+            "排队 turn 被停止时直接以 cancelled 帧收流: " + frames);
+        assertTrue(frames.stream().noneMatch(f -> f != null && f.contains("\"type\":\"error\"")),
+            "停止不是错误: " + frames);
+        verify(turnLeaseStore, never()).release(eq(sessionId), anyString());
+    }
 }

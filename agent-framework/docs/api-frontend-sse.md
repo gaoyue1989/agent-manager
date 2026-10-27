@@ -233,7 +233,7 @@ GET /threads/{sessionId}/status
 |-------|------|----------|
 | `working` | 有活跃租约，或本会话有排队中的 turn（意图行存在），正在执行 | 走 `/subscribe?afterSeq={latest_event_seq}&replyId={reply_id}`（排队中 `reply_id` 即本轮 turn id） |
 | `waiting_confirm` | 挂起等待人工确认 | 渲染确认卡（用 `pending_confirm` 重建） |
-| `completed` | turn 终态（`AGENT_END` 或 `error`） | 回放历史（失败原因见 history 的失败留痕） |
+| `completed` | turn 终态（`AGENT_END` / `error` / `cancelled`） | 回放历史（失败原因见 history 的失败留痕；用户停止见 `stopped: true`） |
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占 | 展示中断态，允许重发 |
 | `idle` | 无事件、无租约、无待确认 | 显示空白输入状态 |
 | `failed` | 排队的 turn 超时或建立失败（无事件可回放；`error` 给原因） | 展示失败提示，不订阅 |
@@ -1165,6 +1165,7 @@ GET /skills/manage
 | `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role` |
 | （通用） | 非 delta 事件（里程碑/合成帧） | additive `turnId`：**turn 信封 id**，`GET /subscribe?replyId=` 的过滤口径；delta 帧不注入（token 热路径），可从任一里程碑帧或 `/status.reply_id` 获取 |
 | `AGENT_END` | Agent 执行完成（**流关闭信号**） | `replyId` |
+| `cancelled` | 用户停止（`POST /threads/{sid}/stop` 生效，排在 `AGENT_END` 前） | `reason:"user_stopped"` |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 在结果返回时发出，snake_case） | `subagent_id`, `agent_id`, `session_id`, `label` |
 
 > **远程转发标注（2026-09-30 新增）：** 远程子 agent 的事件经 SDK 回流 lead 的 SSE 时，
