@@ -8,7 +8,7 @@ Agent Framework 是基于 **AgentScope Java 2.0 HarnessAgent** 的独立可运�
 
 **每个业务 agent 服务的 Pod 必须无状态、可横向扩展多副本；不同业务 agent 服务之间数据必须隔离。** 以下为强制红线，改动触碰任意一条必须先评审：
 
-- **正确性状态只存共享存储**：影响请求裁决的状态（会话历史 `agent_state`/`session_message`、HITL `confirm_context`、turn 互斥 `turn_lease`、事件流 `sess:*`/`proto:task:*`、幂等 Job `a2ajob:*`）只允许落 MySQL / Redis。Pod 本地（内存 Map、emptyDir `/workspace`、`/applog`）只允许可丢弃或可从共享存储重建的缓存/簿记（如 `SessionManager` 映射、`RemoteConfirmBridge.inFlight` 需可经 `remote_task_registry` 重建）
+- **正确性状态只存共享存储**：影响请求裁决的状态（会话历史 `agent_state`/`session_message`、HITL `confirm_context`、turn 互斥 `turn_lease`、单轮停止请求 `turn_stop`、事件流 `sess:*`/`proto:task:*`、幂等 Job `a2ajob:*`）只允许落 MySQL / Redis。Pod 本地（内存 Map、emptyDir `/workspace`、`/applog`）只允许可丢弃或可从共享存储重建的缓存/簿记（如 `SessionManager` 映射、`RemoteConfirmBridge.inFlight` 需可经 `remote_task_registry` 重建）
 - **多副本协调只靠共享存储原子操作**：互斥/CAS 一律用 MySQL PK 冲突、version CAS、Redis `SET NX`/Lua，禁止本地文件锁/内存锁/单机 leader 假设；@Scheduled 任务天然每副本都会跑，必须幂等或 CAS 恰好一次
 - **禁止会话粘性**：不得为 Service/Ingress 引入 `sessionAffinity` 或等价粘性路由；`/threads/{sid}/subscribe|status|confirm*` 必须在"本 Pod 未执行过该 session"时依旧正确（durable SSE 续传语义）。e2e-multi（R 组）与 e2e-protocol-multi（P 组）双副本门禁是本约束的回归保障，不得弱化拓扑（双副本 + 无粘性 LB）
 - **服务间隔离靠部署配置（当前形态）**：表结构与 Redis key 均无 agent 维度，**多服务共享同一 MySQL/Redis 时必须各配独立 `CHECKPOINT_JDBC_URL` 库名与 `AGENT_REDIS_PREFIX`**——共库时 `session_user` 会按 user_id 跨服务串列、`/threads` 列表互相可见；共 Redis 空 prefix 时 `sbx:guard:user:{uid}` 跨服务互锁。平台 Publish 新建服务时已自动派生独立库与前缀（issue #142），**存量服务与显式配置仍是部署侧责任**（平台不校验显式配的共享值）
@@ -300,6 +300,22 @@ OAF `deniedTools` 字段控制排除列表。
 - **两个静默坑（详见 [../docs/design/db-migration-flyway-design.md](../docs/design/db-migration-flyway-design.md) §6.1）**：① 不引 starter-jdbc 的工程必须显式补 `spring-jdbc`，否则 `FlywayConfiguration` 因 `@ConditionalOnClass(JdbcUtils)` 不满足而**静默不装配**——启动零报错、迁移零执行；② SDK `distributedStore` bean 构造期会建 `agent_state/agent_fs`，必须 `@DependsOn("flywayInitializer")`（bean 名是 `flywayInitializer`），否则全新库上 Flyway 因 schema 非空走 baseline 路径跳过 V1..V5。
 - 真实 MySQL 的 `*MySqlIT` 经 `TestSchemaMigrator`（test 下）执行同一批迁移文件，测试 schema 与生产同源；`e2e/scripts/reset-data.mjs` 需同时清理 `flyway_schema_history`（已含）。
 
+**升级注意：V11/V12 checksum mismatch（dd9f353，2026-10-23）**：这两个已合并迁移后来被改为
+`INFORMATION_SCHEMA` 守卫（幂等化，最终 schema 不变）。**在 dd9f353 之前已应用 V11/V12 的库**
+启动会报 `Migration checksum mismatch for migration version 11/12`——这不是缺少 Flyway 配置，
+而是「已应用内容」与「当前仓库内容」的校验值不一致。处置（一次性，按库执行）：
+
+```sql
+-- 先确认两行是 success；checksum 应等于报错里的 Applied to database 值
+SELECT version, success, checksum FROM flyway_schema_history WHERE version IN ('11','12');
+-- 对齐为当前仓库内容（等价于 flyway repair；值取报错里的 Resolved locally）
+UPDATE flyway_schema_history SET checksum = -817287384 WHERE version = '11' AND success = 1;
+UPDATE flyway_schema_history SET checksum = -11211995 WHERE version = '12' AND success = 1;
+```
+
+有 Flyway CLI 时直接 `flyway ... repair` 亦可；重启后从 V13 正常增量。**禁止**用
+`validate-on-migrate=false` 长期屏蔽校验。全新库/e2e（`reset-data.mjs` 清历史表）不受影响。
+
 ---
 
 ## 性能观察项（已知、暂缓——触发条件后处理，2026-10-01 评审④归类）
@@ -368,6 +384,9 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
+| `AGENT_TURN_STOP_ENABLED` | `true` | | 单轮停止总开关（`POST /threads/{sid}/stop`，docs/turn-stop-design.md）：false = 端点 503、属主不轮询，行为回退「只能断流」 |
+| `AGENT_TURN_STOP_POLL_MS` | `1000` | | 属主副本停止派发轮询周期（ms，下限 100）：所有活跃 turn 共用一次 `turn_stop` 查询，成本与并发 turn 数解耦 |
+| `AGENT_TURN_STOP_GRACE_MS` | `15000` | | 协作式停止告警阈值（ms）：超时仍无终态只打 WARN（通常是阻塞中的工具调用，SDK 检查点在步骤之间），不做破坏性收尾 |
 | `AGENT_MEMORY_ENABLED` | `true` | | 记忆总开关：`false` = 完全关闭记忆——不注册 `memory_*` 工具 + 不执行 flush/整合（`disableMemoryHooks` + `disableMemoryTools`）；沙箱不再注入/回写记忆文件（技能回写不受影响） |
 | `AGENT_PROTOCOL_ENABLED` | `false` | | Agent Protocol（远程子 agent 服务端）总开关：true 时注册 `/tasks*` 端点 + 认证 filter + TaskRepository agent_fs bean override；false 存量零影响（/tasks 404）。设计见 docs/design/travel-fulfillment-agent-protocol-design.md |
 | `AGENT_PROTOCOL_AUTH_TOKEN` | — | ✓（协议启用时） | 服务间认证 token（Header `X-Agent-Protocol-Token`）：`AGENT_PROTOCOL_ENABLED=true` 时**必填**，缺失启动即失败（fail-fast）；无/错 token 一律 401（AgentProtocolAuthFilter）。敏感值经平台 Secret 路由，不落 ConfigMap |
@@ -475,7 +494,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐）；归档开启时为双源合并视图（压缩前历史 + `role=compaction` 分隔条），参数 includeArchived/limit/beforeId，响应附 hasMore/nextBeforeId |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录（记录键 = 规范 sid，由 `SessionKeyResolver` 从 RuntimeContext 反查——Channel 链路的 ctx.sessionId 是全进程共享的网关 gw-hash，见 issue #44） |
 | GET | `/threads/{sid}/subscribe` | SSE 断连续传：`afterSeq` 回放 + 按需拉取实时追赶（`Flux.generate`），支持 `replyId`（turn 信封 id）过滤；终态补 `done`、被抢占补 `interrupted`；排队 turn 由 `turn_intent` 暴露 turn id；索引丢失时单次重建 ZSET |
-| GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END 或 error）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
+| GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
+| POST | `/threads/{sid}/stop` | **单轮停止**（协作式中断，[docs/turn-stop-design.md](docs/turn-stop-design.md)）：写 `turn_stop`（reply_id 栅栏）→ 属主副本 1s 轮询 → `agent.interrupt(effectiveUserId, effectiveSessionId)`；202 已受理 / 404 无运行中 turn / 409 HITL 挂起或尚无事件（retryable）/ 503 关闭或存储不可用。终态帧 `cancelled`（排在 AGENT_END 前），history 标注 `stopped`；不撤销工具副作用、不强杀阻塞中的工具 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
 | POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复；`default_model`=默认对话模型 id，`fallback_model`/`fallback_source`=有效备用模型与来源 db/env/none） |

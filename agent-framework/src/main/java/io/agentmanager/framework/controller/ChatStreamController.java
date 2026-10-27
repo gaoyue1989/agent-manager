@@ -142,6 +142,19 @@ public class ChatStreamController {
     @Autowired(required = false)
     private io.agentmanager.framework.service.TurnIntentStore turnIntentStore;
 
+    /**
+     * 单轮停止（POST /threads/{sid}/stop）：字段注入（required=false）避免改动全部
+     * 构造调用点（单测直接 new）。null = 停止能力不装配（与旧行为一致：只能断流）。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.service.TurnStopService turnStopService;
+
+    @Autowired(required = false)
+    private io.agentmanager.framework.service.TurnStopWatcher turnStopWatcher;
+
+    @Autowired(required = false)
+    private io.agentmanager.framework.config.TurnStopSettings turnStopSettings;
+
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
 
@@ -375,16 +388,47 @@ public class ChatStreamController {
             if (turnIntentStore != null) {
                 turnIntentStore.register(finalSessionId, replyId, TURN_INTENT_TTL);
             }
+            // 排队态的停止登记：与执行态共用属主副本的全局轮询（排队期间不额外打 DB）
+            if (turnStopWatcher != null
+                    && (turnStopSettings == null || turnStopSettings.enabled())) {
+                turnStopWatcher.registerQueued(finalSessionId, replyId);
+            }
             var token = turnLeaseStore.tryAcquire(finalSessionId);
 
             // ===== 1. 抢 Turn 租约 =====
+            // 等待期内每拍（默认 1s）检查一次停止标记：排队 turn 登记在 TurnStopWatcher 的
+            // queued 态，命中停止行后 watcher 置标记（并消费行），这里读到即直接收流。
             long deadline = System.currentTimeMillis() + ACQUIRE_TIMEOUT.toMillis();
+            long nextWaitingFrameAt = System.currentTimeMillis();
             while (token == null && System.currentTimeMillis() < deadline) {
-                sink.next(waitingSSE());
+                long now = System.currentTimeMillis();
+                if (now >= nextWaitingFrameAt) {
+                    sink.next(waitingSSE());
+                    nextWaitingFrameAt = now + WAITING_FRAME_INTERVAL.toMillis();
+                }
+                boolean queuedStop = turnStopWatcher != null
+                    ? turnStopWatcher.isStopRequested(replyId)
+                    : (turnStopService != null && turnStopService.matches(finalSessionId, replyId));
+                if (queuedStop) {
+                    if (turnStopWatcher != null) {
+                        turnStopWatcher.unregister(finalSessionId, replyId);
+                    } else {
+                        turnStopService.clear(finalSessionId, replyId);
+                    }
+                    clearTurnIntent(finalSessionId, replyId);
+                    log.info("[chat] queued turn cancelled by user (sid={}, rid={})",
+                        finalSessionId, replyId);
+                    sink.next(cancelledSSE("user_stopped"));
+                    sink.complete();
+                    return;
+                }
                 try {
-                    Thread.sleep(WAITING_FRAME_INTERVAL.toMillis());
+                    Thread.sleep(stopPollIntervalMs());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    if (turnStopWatcher != null) {
+                        turnStopWatcher.unregister(finalSessionId, replyId);
+                    }
                     clearTurnIntent(finalSessionId, replyId);
                     sink.complete();
                     return;
@@ -395,6 +439,9 @@ public class ChatStreamController {
                 String err = "turn_in_progress: session '" + finalSessionId
                     + "' has an active turn and queue timeout reached";
                 failTurnIntent(finalSessionId, replyId, err);
+                if (turnStopWatcher != null) {
+                    turnStopWatcher.unregister(finalSessionId, replyId);
+                }
                 log.warn("[chat] turn_in_progress: sessionId={}, waiting timeout", finalSessionId);
                 sink.next(errorSSE(err));
                 sink.complete();
@@ -403,6 +450,11 @@ public class ChatStreamController {
 
             // 租约到手：意图使命结束（此后 turn id 由 session_event 的 reply_id 承担）
             clearTurnIntent(finalSessionId, replyId);
+            // 排队 → 执行交接：只移除排队登记，不动停止行（若停止请求恰好在此刻到达，
+            // 留给执行态的全局轮询派发，避免丢请求）
+            if (turnStopWatcher != null) {
+                turnStopWatcher.unregisterRegistrationOnly(replyId);
+            }
 
             // ===== 1.5 ASKING 预检（issue #47/#48）：挂起会话不接受新 turn =====
             // ASKING 态下的普通消息会被 SDK 在 turn 入口拒绝（doCallInner 抛 "ASKING state
@@ -438,6 +490,14 @@ public class ChatStreamController {
                 sink.next(errorSSE(err));
                 sink.complete();
                 return;
+            }
+
+            // ===== 2.4 登记停止监视 =====
+            // 进入执行段（租约已到手）后，属主副本的全局轮询按 replyId 命中本 turn 时
+            // 调用 SDK 按会话 interrupt；收尾时注销并清理本轮停止行。
+            if (turnStopWatcher != null
+                    && (turnStopSettings == null || turnStopSettings.enabled())) {
+                turnStopWatcher.register(finalSessionId, replyId);
             }
 
             // ===== 2.5 跨层排队 waiting 心跳（issue #87）=====
@@ -562,11 +622,11 @@ public class ChatStreamController {
                                     "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(errText) + "}");
                                 recordTurnError(finalSessionId, replyId, errText);
                             }
-                            endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
                         },
                         () -> {
                             cancelHeartbeat(heartbeat);
-                            endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
                         });
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
@@ -575,6 +635,9 @@ public class ChatStreamController {
                 var err = "turn_setup_failed: "
                     + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
                 failTurnIntent(finalSessionId, replyId, err);
+                if (turnStopWatcher != null) {
+                    turnStopWatcher.unregister(finalSessionId, replyId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId, errorSSE(err));
                 return;
             }
@@ -596,7 +659,7 @@ public class ChatStreamController {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
                             + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
                             OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
-                        endTurnAndCleanupBuckets(lease, finalSessionId, turnEnded, turnBucketKeys);
+                        endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
                     }
                 }, finalSessionId, replyId);
             });
@@ -641,6 +704,26 @@ public class ChatStreamController {
                                     String forwardedPrefix) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
+            if (turnStopWatcher != null) {
+                turnStopWatcher.unregister(sessionId, replyId);
+            }
+            return;
+        }
+
+        // 用户停止（POST /threads/{sid}/stop）：
+        // ① SDK 的 interrupt 恢复消息（"I noticed that you have interrupted me…"，
+        //    generateReason=INTERRUPTED）不上屏——它不是模型输出，只是 SDK 的恢复话术；
+        // ② AGENT_END 之前落一条 cancelled 终态帧，客户端据此展示「已停止」。
+        // 该帧是合成帧（进 Redis 事件流，可回放），也是 SessionEventTailer 的终态之一。
+        boolean stopRequested = turnStopWatcher != null
+            && turnStopWatcher.isStopRequested(replyId);
+        if (stopRequested
+                && event instanceof io.agentscope.core.event.AgentResultEvent resultEvent
+                && resultEvent.getResult() != null
+                && resultEvent.getResult().getGenerateReason()
+                    == io.agentscope.core.message.GenerateReason.INTERRUPTED) {
+            log.info("[chat] suppress SDK interrupt recovery message (sid={}, rid={})",
+                sessionId, replyId);
             return;
         }
 
@@ -699,6 +782,14 @@ public class ChatStreamController {
             runtimeService.storeConfirmContext(sessionId, event);
         }
 
+        // 停止终态帧：排在 AGENT_END 之前（同一 turn 内 seq 有序），客户端看到
+        // cancelled 即可展示「已停止」；AGENT_END 紧随其后完成既有收尾。
+        if (stopRequested && event.getType() == AgentEventType.AGENT_END
+                && !AgentEventSseSerializer.isRemoteForwarded(event)) {
+            eventBus.emitSynthetic(sessionId, replyId, "cancelled",
+                "{\"type\":\"cancelled\",\"reason\":\"user_stopped\"}");
+        }
+
         eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
 
         // ★ 工具摘要帧（可观测性）：参数/结果到齐后追加人可读摘要，让轻量客户端无需
@@ -724,7 +815,7 @@ public class ChatStreamController {
         if (event.getType() == AgentEventType.AGENT_END
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            endTurnAndCleanupBuckets(lease, sessionId, turnEnded, turnBucketKeys);
+            endTurnAndCleanupBuckets(lease, sessionId, replyId, turnEnded, turnBucketKeys);
         }
     }
 
@@ -743,9 +834,14 @@ public class ChatStreamController {
      * 抢到锁时恢复要素必然齐备（见 handleEventAndEmit 的 HITL 注释）。终态后理论上仍可能
      * 有极晚事件回调 re-put（既有边界，桶上限 64KB/2MB 兜底）。
      */
-    private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId,
+    private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId, String replyId,
                                           java.util.concurrent.atomic.AtomicBoolean turnEnded,
                                           java.util.Set<String> turnBucketKeys) {
+        // 停止监视必须先注销：播发/收尾期间可能仍有轮询 tick（注销后不再 dispatch），
+        // 同时清理本轮遗留的 turn_stop 行（replyId 栅栏，误删不了下一轮）
+        if (turnStopWatcher != null) {
+            turnStopWatcher.unregister(sessionId, replyId);
+        }
         if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
@@ -1027,6 +1123,18 @@ public class ChatStreamController {
     private static ServerSentEvent<String> errorSSE(String msg) {
         String payload = "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(msg) + "}";
         return ServerSentEvent.<String>builder().data(payload).build();
+    }
+
+    /** 用户停止终态帧（排队 turn 取消直接发本连接；执行中的 turn 经 EventBus 落库广播）。 */
+    private static ServerSentEvent<String> cancelledSSE(String reason) {
+        return ServerSentEvent.<String>builder()
+            .data("{\"type\":\"cancelled\",\"reason\":\"" + reason + "\"}")
+            .build();
+    }
+
+    /** 停止请求检查周期（排队等待 loop 用）；未装配 TurnStopSettings 时取 1s。 */
+    private long stopPollIntervalMs() {
+        return turnStopSettings != null ? turnStopSettings.pollIntervalMs() : 1_000L;
     }
 
     private static boolean isTrailingSandboxTeardownError(Throwable e) {

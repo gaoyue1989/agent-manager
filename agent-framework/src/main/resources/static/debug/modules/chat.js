@@ -29,6 +29,7 @@ let pendingFiles = [];       // 待上传的文件列表 [{file, fileId, status}
 let isStreaming = false;
 let activeAbort = null;      // 单次流/A2A 的 abort 控制器
 let activeChatHandle = null; // sendChat 返回的 handle（含 close/lastEventId）
+let stopSlowTimer = null;    // 服务端停止「已受理但仍未终态」的提示定时器
 
 // 对话协议分流（agui-native-parity-design §12.2 L2）：native=api.js（/threads/* 自研词表），
 // agui=js/agui.js（/agui/* 官方事件，翻译为 native 词表喂同一渲染器）。签名同构，
@@ -533,7 +534,7 @@ async function tryResumeSSE(sessionId) {
     if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
       console.log('[durable-sse] resuming SSE for working session:', sessionId);
       isStreaming = true;
-      sendBtn.disabled = true;
+      sendBtn.disabled = false;
       sendBtn.textContent = 'Stop';
       sendBtn.classList.add('danger');
       currentReplyId = status.reply_id || null;
@@ -711,6 +712,9 @@ async function loadThreadHistory(sessionId) {
         const refs = addAssistantHistory(m.content || '', m.tool_calls || [], m.blocks);
         lastAssistantEl = refs.msgEl;
         lastAssistantContentEl = refs.contentEl;
+        // 用户主动停止的轮次（POST /threads/{sid}/stop）：history 带 stopped 标记，
+        // 内容已被后端本地化为「（本次回复已被用户停止）」，这里补一个状态徽标
+        if (m.stopped) refs.msgEl.appendChild(renderStoppedBadge());
         if (m.reply_id) {
           replyToContent.set(m.reply_id, refs.contentEl);
         }
@@ -750,6 +754,15 @@ async function loadThreadHistory(sessionId) {
 }
 
 // ---------- 消息渲染（官方对齐） ----------
+
+/** 已停止徽标：用户主动停止的轮次（history 的 stopped 字段），与实时 cancelled 帧同语义 */
+function renderStoppedBadge() {
+  const el = document.createElement('div');
+  el.className = 'msg-stopped';
+  el.textContent = '已停止';
+  el.title = '本次回复由用户主动停止（已执行的工具调用不会回滚）';
+  return el;
+}
 
 /** 压缩分隔条：role=compaction 的合成项（docs/session-history-archive-design.md §7.3），
  *  折叠卡样式——摘要正文 Markdown 渲染，默认收起不打断回放流 */
@@ -1707,7 +1720,7 @@ function handleEvent(data) {
     Object.keys(remoteToolOwner).forEach((k) => delete remoteToolOwner[k]);
     setConnecting('chatTitle', true);
     isStreaming = true;
-    sendBtn.disabled = true;
+    sendBtn.disabled = false;
     sendBtn.textContent = 'Stop';
     sendBtn.classList.add('danger');
     usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
@@ -1726,6 +1739,8 @@ function handleEvent(data) {
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
     sendBtn.classList.remove('danger');
+    delete sendBtn.dataset.stopping;
+    clearTimeout(stopSlowTimer);
     setConnecting('chatTitle', false);
     scrollToBottom(true);
     loadThreads();
@@ -1887,6 +1902,8 @@ function handleEvent(data) {
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
       sendBtn.classList.remove('danger');
+      delete sendBtn.dataset.stopping;
+      clearTimeout(stopSlowTimer);
       if (r) {
         const err = document.createElement('div');
         err.className = 'msg system';
@@ -1902,13 +1919,38 @@ function handleEvent(data) {
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
       sendBtn.classList.remove('danger');
+      delete sendBtn.dataset.stopping;
+      clearTimeout(stopSlowTimer);
       if (r) {
+        finishReply(r.replyId);
         const itr = document.createElement('div');
         itr.className = 'msg system';
         itr.style.color = 'var(--red)';
         itr.textContent = '执行已中断：执行该任务的副本失去响应，本次回复可能不完整。可刷新页面查看最新状态，或重新发送消息。';
         messagesEl.appendChild(itr);
       }
+      break;
+    }
+    case 'cancelled': {
+      // 用户主动停止（POST /threads/{sid}/stop → 服务端协作式中断后的合成终态帧）。
+      // AGENT_END 紧随其后，这里只负责及时复位按钮与提示，避免等收尾帧。
+      isStreaming = false;
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send';
+      sendBtn.classList.remove('danger');
+      delete sendBtn.dataset.stopping;
+      clearTimeout(stopSlowTimer);
+      if (r) {
+        // 观察者路径可能在 cancelled（终态）后直接收流、不补 AGENT_END：主动关掉文本光标
+        finishReply(r.replyId);
+      }
+      // 排队 turn 被停止时还没有回复气泡（无 AGENT_START），提示同样要显示
+      const st = document.createElement('div');
+      st.className = 'msg system';
+      st.style.color = 'var(--yellow)';
+      st.textContent = '已停止本次回复（已执行的工具调用不会回滚）。';
+      messagesEl.appendChild(st);
+      scrollToBottom(true);
       break;
     }
     default:
@@ -2079,18 +2121,75 @@ async function bindSessionModel(sid, modelId) {
   }
 }
 
+/**
+ * Stop 按钮：Channel 链路（native 协议）先请求服务端协作式中止
+ * （POST /threads/{sid}/stop），保持 SSE 打开等待 cancelled 终态帧；
+ * A2A / AG-UI 链路或服务端明确不可停止时才退回本地断流。
+ * 断流本身不杀任务（durable-sse 不变量），仅服务端停止才会真正中止后续推理/工具调度。
+ */
 function stop() {
-  // ★ durable-sse-plan：stop 关闭所有连接
+  const sid = currentSessionId();
+  const mode = ctx.state.getState('ui.streamMode');
+  const protocol = ctx.state.getState('ui.protocol');
+  if (isStreaming && sid && mode === 'channel' && protocol !== 'agui') {
+    if (sendBtn.dataset.stopping === '1') return; // 已在停止中（幂等）
+    sendBtn.dataset.stopping = '1';
+    // 立即反馈（不等服务端往返）；失败路径由 localStop() 复位
+    sendBtn.textContent = 'Stopping...';
+    sendBtn.disabled = true;
+    const uid = ctx.state.getState('ui.userId') || 'debug-user';
+    requestServerStop(sid, uid).then(() => {
+      clearTimeout(stopSlowTimer);
+      stopSlowTimer = setTimeout(() => {
+        if (isStreaming) {
+          ctx.utils.toast('停止请求已受理；正在执行的工具调用不会被强制中断，返回后即停止', 'warn');
+        }
+      }, 10000);
+    }).catch((err) => {
+      delete sendBtn.dataset.stopping;
+      if (err && err.status === 503) {
+        ctx.utils.toast('服务端停止能力不可用，已仅断开本地连接（任务仍会在后台继续）', 'warn');
+      } else if (err && err.status === 409) {
+        ctx.utils.toast(err.message || '当前状态无法停止（请先处理待确认操作）', 'warn');
+      } else if (!err || err.status !== 404) {
+        // 404 = 没有运行中的 turn（可能刚好结束）：静默退回断流
+        ctx.utils.toast('停止请求失败: ' + ((err && err.message) || '未知错误'), 'error');
+      }
+      localStop();
+    });
+    return;
+  }
+  if (isStreaming && mode === 'channel' && protocol === 'agui') {
+    ctx.utils.toast('AG-UI 模式暂不支持服务端停止，已仅断开本地连接（任务会在后台继续）', 'warn');
+  } else if (isStreaming && mode !== 'channel') {
+    ctx.utils.toast('A2A 模式暂不支持服务端停止，已仅断开本地连接（任务会在后台继续）', 'warn');
+  }
+  localStop();
+}
+
+/** 服务端停止（409 turn_not_ready：本轮尚无事件 → 短重试） */
+async function requestServerStop(sid, uid, attempt = 0) {
+  try {
+    await ctx.api.stopThread(sid, uid);
+  } catch (e) {
+    if (e && e.status === 409 && attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return requestServerStop(sid, uid, attempt + 1);
+    }
+    throw e;
+  }
+}
+
+/** 仅断开本地连接（旧行为：agent 后台继续，可用 /subscribe 续传） */
+function localStop() {
   if (activeChatHandle) { try { activeChatHandle.close(); } catch (e) { /* ignore */ } }
   if (activeSubHandle) { try { activeSubHandle.close(); } catch (e) { /* ignore */ } }
   if (activeAbort) {
-    activeAbort.abort();
-    return;
+    try { activeAbort.abort(); } catch (e) { /* ignore */ }
   }
-  isStreaming = false;
-  sendBtn.disabled = false;
-  sendBtn.textContent = 'Send';
-  sendBtn.classList.remove('danger');
+  // 无条件复位：服务端拒绝停止（4xx/5xx）时按钮文案已先改成 Stopping...
+  activeAbort = null;
+  resetStreamingState();
 }
 
 // ★ durable-sse-plan：重置流式状态
@@ -2099,6 +2198,8 @@ function resetStreamingState() {
   sendBtn.disabled = false;
   sendBtn.textContent = 'Send';
   sendBtn.classList.remove('danger');
+  delete sendBtn.dataset.stopping;
+  clearTimeout(stopSlowTimer);
   activeChatHandle = null;
   activeSubHandle = null;
 }
@@ -2109,7 +2210,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
   // 2. SSE 断连后自动通过 GET /subscribe 重连续传
   // 3. 全程心跳（EventBus），防 Nginx/CDN 超时
   isStreaming = true;
-  sendBtn.disabled = true;
+  sendBtn.disabled = false;
   sendBtn.textContent = 'Stop';
   sendBtn.classList.add('danger');
 
@@ -2271,7 +2372,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
 // A2A message/stream（标准帧，工具仅工具名，无回填）
 async function sendA2AStream(text, sid) {
   isStreaming = true;
-  sendBtn.disabled = true;
+  sendBtn.disabled = false;
   sendBtn.textContent = 'Stop';
   sendBtn.classList.add('danger');
   const abortController = new AbortController();

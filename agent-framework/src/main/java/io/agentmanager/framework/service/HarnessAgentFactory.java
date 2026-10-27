@@ -96,6 +96,14 @@ public class HarnessAgentFactory {
     @Autowired(required = false)
     private io.agentmanager.framework.config.HistoryConfig historyConfig;
 
+    /**
+     * 停止信号投递路由（POST /threads/{sessionId}/stop）：字段注入而非构造参数——
+     * 避免改动 build(...) 的全部调用点与既有按位构造测试。未注入（单测/嵌入式）时
+     * 不装配中间件，停止能力退化为不可用（端点仍可用，只是无法投递）。
+     */
+    @Autowired(required = false)
+    private TurnControlRegistry turnControlRegistry;
+
     public HarnessAgentFactory(
         AgentManagerProperties props,
         WorkspaceInitializer workspaceInitializer,
@@ -249,6 +257,11 @@ public class HarnessAgentFactory {
                     props.agentProtocol() == null || props.agentProtocol().remoteSpawnSyncWait(),
                     props.agentProtocol() != null ? props.agentProtocol().remoteSpawnSyncWaitSeconds() : 120,
                     remoteSpawnTargetNames(oafConfig)))
+                // 单轮停止投递路由（POST /threads/{sid}/stop）：把网关改写后的
+                // (agent 实例, userId, sessionId) 登记到 TurnControlRegistry，供属主副本
+                // 的 TurnStopWatcher 调用 SDK 按会话 interrupt。order=3（最外层），
+                // 保证任何可能短路的中间件之前完成登记
+                .middleware(new TurnInterruptMiddleware(turnControlRegistry, sessionKeyResolver))
                 // 空完成恢复（思维模型 thinking 耗尽 max_tokens 后只产出 ThinkingBlock 无实际输出时自动重试）
                 .hook(new EmptyCompletionRecoveryHook())
                 // UI 交互上下文注入（4.7）：PreCall 时按会话 metadata 注入 ui_context（失败不阻断）

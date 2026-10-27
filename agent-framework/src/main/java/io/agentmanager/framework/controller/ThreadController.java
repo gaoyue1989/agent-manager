@@ -74,6 +74,13 @@ public class ThreadController {
     /** history 默认返回条数（归档合并视图分页；<=0 不分页） */
     static final int DEFAULT_HISTORY_LIMIT = 200;
 
+    /** 单轮停止（POST /threads/{sid}/stop）：字段注入避免改动既有构造调用点（单测直接 new）。 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.service.TurnStopService turnStopService;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.config.TurnStopSettings turnStopSettings;
+
     /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限，不启用归档合并） */
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
@@ -254,6 +261,55 @@ public class ThreadController {
         return ResponseEntity.status(404).body(Map.of(
             "error", "thread_not_found",
             "message", "Session '" + sessionId + "' not found"));
+    }
+
+    /**
+     * 停止当前运行中的 turn（协作式中断）。
+     *
+     * <p>语义：投递一个跨副本停止请求（turn_stop 表，reply_id 栅栏），由持有该 turn 的
+     * 副本调 SDK 的按会话 interrupt；SDK 在下一个检查点（模型流 chunk 之间 / 下一轮
+     * reasoning 前）中止，已执行的工具副作用不撤销，正在阻塞中的工具调用不会被强杀。
+     * 终态帧为 {@code cancelled}，随后是正常的 AGENT_END 收尾。
+     *
+     * <p>202 = 已受理（尚未保证已中止）；404 = 没有运行中的 turn；409 = HITL 挂起中
+     * （请用 confirm 拒绝）或本轮尚无事件可定位（retryable，客户端短重试）；503 = 停止
+     * 能力未装配或存储不可用（fail-closed，不谎称已停止）。
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/{sessionId}/stop")
+    public ResponseEntity<Map<String, Object>> stopThread(
+            @PathVariable String sessionId,
+            @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+        if (!io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
+                sessionUserStore, sessionId, headerUserId)) {
+            return threadNotFound(sessionId);
+        }
+        if (turnStopService == null || turnStopSettings == null || !turnStopSettings.enabled()) {
+            return ResponseEntity.status(503).body(Map.of(
+                "error", "turn_stop_unavailable",
+                "message", "Turn stop is not enabled on this deployment"));
+        }
+        var result = turnStopService.request(sessionId, headerUserId);
+        return switch (result.outcome()) {
+            case REQUESTED -> ResponseEntity.status(202).body(Map.of(
+                "session_id", sessionId,
+                "reply_id", result.replyId(),
+                "state", "stopping"));
+            case NOTHING_TO_STOP -> ResponseEntity.status(404).body(Map.of(
+                "error", "nothing_to_stop",
+                "message", "Session '" + sessionId + "' has no running turn"));
+            case WAITING_CONFIRM -> ResponseEntity.status(409).body(Map.of(
+                "error", "turn_waiting_confirm",
+                "message", "Session is waiting for tool approval; deny the pending "
+                    + "confirmation instead of stopping"));
+            case TURN_NOT_READY -> ResponseEntity.status(409).body(Map.of(
+                "error", "turn_not_ready",
+                "message", "Turn is starting but has not produced any event yet; retry shortly",
+                "retryable", true));
+            case UNAVAILABLE -> ResponseEntity.status(503).body(Map.of(
+                "error", "turn_stop_unavailable",
+                "message", "Stop request store is temporarily unavailable; retry later"));
+        };
     }
 
     /** Thread 详情：返回会话元信息 + 历史消息 + pendingConfirm + 产出文件 */

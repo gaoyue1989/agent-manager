@@ -79,8 +79,15 @@ public class SessionEventTailer {
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventTailer.class);
 
-    /** 终态事件类型：出现即代表 turn 不会再产出新事件 */
-    private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error");
+    /**
+     * 终态事件类型：出现即代表 turn 不会再产出新事件。
+     *
+     * <p>{@code cancelled} 为用户主动停止的合成终态帧（POST /threads/{sid}/stop）：
+     * 排在 AGENT_END 之前发出，observer 见到它即可判定本轮结束（AGENT_END 紧随其后，
+     * 不会再有业务事件）。执行副本崩溃/被抢占仍走 {@code interrupted}（仅观察者补发，
+     * 不落库）。
+     */
+    private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error", "cancelled");
 
     /**
      * 该事件类型是否为 turn 终态。

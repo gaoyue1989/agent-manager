@@ -50,6 +50,10 @@ public class SessionCleanupService {
     private final RemoteTaskRegistryStore remoteTaskRegistryStore;
     private final TurnIntentStore turnIntentStore;
 
+    /** 停止请求孤儿行清理（字段注入：避免改动既有构造调用点/测试） */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private TurnStopStore turnStopStore;
+
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
                                  TurnLeaseStore turnLeaseStore,
@@ -89,6 +93,10 @@ public class SessionCleanupService {
         turnLeaseStore.cleanupExpired();
         confirmContextStore.deleteExpired();
         turnIntentStore.deleteExpired();
+        // 停止请求孤儿行（属主崩溃未收尾）：正常路径 turn 收尾即删，这里只兜底
+        if (turnStopStore != null) {
+            turnStopStore.deleteBefore(Instant.now().minus(1, ChronoUnit.DAYS));
+        }
         toolAuditStore.deleteBefore(Instant.now().minus(toolAuditStore.retentionDays(), ChronoUnit.DAYS));
         // 在途登记终态行保留 7 天（设计 §18.2；与 TaskRecord 清理节奏一致）
         remoteTaskRegistryStore.deleteTerminalBefore(

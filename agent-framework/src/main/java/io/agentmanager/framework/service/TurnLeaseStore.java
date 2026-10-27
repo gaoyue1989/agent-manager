@@ -196,6 +196,24 @@ public class TurnLeaseStore {
         }
     }
 
+    /**
+     * 严格版活跃租约探测：存储失败**抛出**而非回落 false。
+     *
+     * <p>停止请求裁决用：把 DB 抖动判成「无活跃 turn」会让端点返回 404（谎称没有可停的
+     * 任务），应按「暂时不可判定」返回 503（见存储层错误分型纪律）。
+     */
+    public boolean isHeldStrict(String sessionId) {
+        try (var conn = dataSource.getConnection();
+             var stmt = conn.prepareStatement(
+                 "SELECT 1 FROM turn_lease WHERE session_id = ? AND expires_at > NOW(3)")) {
+            stmt.setString(1, sessionId);
+            var rs = stmt.executeQuery();
+            return rs.next();
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException("turn lease probe failed: " + e.getMessage(), e);
+        }
+    }
+
     /** 检查 session 当前是否有活跃租约（status 端点使用） */
     public boolean isHeld(String sessionId) {
         try (var conn = dataSource.getConnection();

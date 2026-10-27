@@ -67,6 +67,14 @@ agent:
   # false = 完全回退现状（不写归档表、history 仅读 agent_state）
   history:
     archive-enabled: ${AGENT_HISTORY_ARCHIVE_ENABLED:true}
+  # 单轮停止（POST /threads/{sessionId}/stop，docs/turn-stop-design.md）
+  # enabled=false 时端点 503、属主不轮询（行为回退「只能断流」）；
+  # poll-interval-ms 为属主副本的全局轮询周期（所有活跃 turn 共用一次查询）；
+  # grace-ms 为协作式停止的告警阈值（超时仍无终态通常是阻塞中的工具调用，仅 WARN）。
+  turn-stop:
+    enabled: ${AGENT_TURN_STOP_ENABLED:true}
+    poll-interval-ms: ${AGENT_TURN_STOP_POLL_MS:1000}
+    grace-ms: ${AGENT_TURN_STOP_GRACE_MS:15000}
   # 宿主 .skills-cache 过期 scope 目录 GC（SDK 只回收当前 scope 内孤儿，跨 scope 目录需按龄清扫；
   # 工作区为 Pod 本地缓存，可安全回收、下轮重新 stage）。其余 cleanup.* 键缺省见 CleanupConfig 的 @DefaultValue
   cleanup:
