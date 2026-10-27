@@ -1,6 +1,7 @@
 """用例执行编排：能力匹配跳过、单次执行（含 HITL 自动确认）、套件并发调度。"""
 
 import asyncio
+import os
 import json
 import time
 from pathlib import Path
@@ -80,10 +81,15 @@ async def execute_once(
     session_id: str | None = None
     status = "failed"
     error_info: str | None = None
+    # W3C traceparent 注入（M3 观测关联）：被测侧 OTel agent 提取上游 context，
+    # langfuse traceId 即此 id——scores 回流按 id 直挂，无需服务端查询
+    otel_trace_id = os.urandom(16).hex()
+    traceparent = f"00-{otel_trace_id}-{os.urandom(8).hex()}-01"
 
     try:
         got_sid, main_events = await asyncio.wait_for(
-            sse_client.stream_chat(base_url, payload, timeout_s),
+            sse_client.stream_chat(base_url, payload, timeout_s,
+                                   extra_headers={"traceparent": traceparent}),
             timeout=timeout_s + 5,
         )
         session_id = got_sid
@@ -129,6 +135,7 @@ async def execute_once(
         "case_id": case["case_id"],
         "repeat_no": repeat_no,
         "session_id": session_id,
+        "langfuse_trace_id": otel_trace_id,
         "status": status,
         "duration_ms": duration_ms,
         "events": events,
