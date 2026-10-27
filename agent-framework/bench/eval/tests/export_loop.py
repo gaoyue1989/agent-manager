@@ -23,11 +23,23 @@ _RETRY_PROBE_ID = "probe_case_retry"
 
 
 class MockLangfuse(BaseHTTPRequestHandler):
-    """类属性即服务端状态：items 按 id upsert，posts 记录全部请求供断言。"""
+    """类属性即服务端状态：items/scores 按 id upsert，posts 记录全部请求供断言。"""
     items: dict[str, dict] = {}
+    scores: dict[str, dict] = {}
     datasets: set[str] = set()
     posts: list[tuple[str, dict]] = []
     fail_once_seen: set[str] = set()
+    traces_fixture: list[dict] = []  # GET /api/public/traces 返回的固定数据
+
+    def do_GET(self):
+        if self.path.startswith("/api/public/traces"):
+            if self.headers.get("Authorization") != "Basic " + base64.b64encode(
+                    f"{PK}:{SK}".encode()).decode():
+                self._json(401, {"error": "unauthorized"})
+                return
+            self._json(200, {"data": type(self).traces_fixture})
+            return
+        self._json(404, {"error": "not found"})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -45,6 +57,15 @@ class MockLangfuse(BaseHTTPRequestHandler):
             else:
                 type(self).datasets.add(name)
                 self._json(201, {"name": name})
+            return
+        if self.path == "/api/public/scores":
+            pid = body.get("id")
+            if pid == "probe_score_retry" and pid not in type(self).fail_once_seen:
+                type(self).fail_once_seen.add(pid)  # 首次 500，逼客户端走退避重试
+                self._json(500, {"error": "transient"})
+                return
+            type(self).scores[pid] = body  # upsert：同 id 覆盖
+            self._json(200, {"id": pid})
             return
         assert self.path == "/api/public/dataset-items", self.path
         pid = body.get("id")
@@ -143,8 +164,39 @@ def main() -> int:
         os.environ.update({k: v for k, v in saved.items() if v is not None})
     assert len(MockLangfuse.posts) == posts_before + 1
 
+    # ⑥ M3 观测回流：find_traces 双路径过滤（原生 sessionId / metadata agentscope.session.id）
+    MockLangfuse.traces_fixture = [
+        {"id": "tr-native", "sessionId": "sess-x"},                      # 原生映射
+        {"id": "tr-meta", "sessionId": None,
+         "metadata": {"agentscope.session.id": "sess-x"}},               # metadata 平铺兜底
+        {"id": "tr-other", "sessionId": "sess-other"},                    # 不匹配应被滤掉
+    ]
+    traces = langfuse_client.find_traces(base, PK, SK, "sess-x")
+    assert [t["id"] for t in traces] == ["tr-native", "tr-meta"], traces
+
+    # ⑦ scores：确定性 id + upsert 幂等 + 重试探针（500 一次后成功）
+    s1 = langfuse_client.build_score("tr-native", "eval-checks/c1", 1.0,
+                                     comment="PASS", metadata={"case_id": "c1"})
+    s2 = langfuse_client.build_score("tr-native", "eval-checks/c1", 0.0)
+    assert s1["id"] == s2["id"] and s1["id"] != langfuse_client.build_score(
+        "tr-other", "eval-checks/c1", 1.0)["id"], "score id 必须按 traceId+name 确定性"
+    assert s1["dataType"] == "NUMERIC" and s1["value"] == 1.0
+    probe = langfuse_client.build_score("tr-native", "probe_score_retry", 0.5)
+    probe["id"] = "probe_score_retry"  # 与 mock 的 fail_once 字面量比对对齐（同 items 探针手法）
+    rs = langfuse_client.push_scores(base, PK, SK, [s1, probe, s2], sleep=nosleep)
+    assert rs == {"total": 3, "upserted": 3, "failed": []}, rs
+    assert len(MockLangfuse.scores) == 2, sorted(MockLangfuse.scores)  # s1/s2 同 id 覆盖
+    assert MockLangfuse.scores[s1["id"]]["value"] == 0.0  # 后写覆盖前写
+    posts_scores = [p for p in MockLangfuse.posts if p[1].get("name") == "probe_score_retry"]
+    assert len(posts_scores) == 2, f"scores 重试探针应 2 次到达: {len(posts_scores)}"
+    posts_before_scores = len(MockLangfuse.posts)
+    rs_bad = langfuse_client.push_scores(base, PK, "wrong-sk", [s1], sleep=nosleep)
+    assert rs_bad["upserted"] == 0 and len(rs_bad["failed"]) == 1, rs_bad  # 401 快速失败
+    assert len(MockLangfuse.posts) - posts_before_scores == 1, "401 不应触发重试"
+
     srv.shutdown()
-    print("export_loop PASS（pack 加载/Basic 鉴权/建集幂等/upsert 幂等/5xx 退避重试/401 快速失败/缺凭据终止）")
+    print("export_loop PASS（pack 加载/Basic 鉴权/建集幂等/upsert 幂等/5xx 退避重试/401 快速失败/"
+          "缺凭据终止/traces 双路径过滤/scores 确定性幂等回流）")
     return 0
 
 

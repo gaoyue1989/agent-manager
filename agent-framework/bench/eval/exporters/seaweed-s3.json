@@ -1,0 +1,8 @@
+{
+  "identities": [
+    { "name": "anon", "actions": [] },
+    { "name": "langfuse",
+      "credentials": [ { "accessKey": "minio", "secretKey": "changeme-minio" } ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"] }
+  ]
+}
