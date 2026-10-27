@@ -1,41 +1,149 @@
-# 自建 langfuse（导出联调 / OTel 观测，PR3 起复用）：v2 镜像 + Postgres，端口沿用评测段 18500。
-# 凭据一律占位符，真实值只放 .env.secrets（gitignored）：
-#   export LANGFUSE_DB_PASSWORD=$(openssl rand -hex 16)
-#   export LANGFUSE_NEXTAUTH_SECRET=$(openssl rand -base64 32)
-#   export LANGFUSE_SALT=$(openssl rand -base64 32)
+# 自建 langfuse v3（导出联调 / OTel 观测 / scores 回流）：web + worker + clickhouse + seaweedfs(S3) + redis + postgres。
+# v2 无 OTel ingest 路由（实测 /api/public/otel 404），v3 原生支持；v3 的 LANGFUSE_INIT_* 播种可用。
+# 结构取自官方 v3 docker-compose.yml（github.com/langfuse/langfuse/v3），端口沿用评测段 18500。
+# 凭据一律经环境变量/.env.secrets 注入（占位符默认值仅供本机冒烟）：
+#   export LF_DB_PW=$(openssl rand -hex 16) LF_SALT=$(openssl rand -base64 32) \
+#          LF_ENCRYPTION_KEY=$(openssl rand -hex 32) LF_NEXTAUTH_SECRET=$(openssl rand -base64 32) \
+#          LF_CLICKHOUSE_PW=$(openssl rand -hex 16) LF_MINIO_PW=$(openssl rand -hex 16) \
+#          LF_REDIS_PW=$(openssl rand -hex 16)
+# 首启播种（v3 生效）：项目 eval-export 固定 pk/sk（写 .env.secrets，不入库）：
+#   LANGFUSE_INIT_USER_EMAIL=eval@local.test  LANGFUSE_INIT_USER_PASSWORD=<自设>
+#   LANGFUSE_INIT_PROJECT_PUBLIC_KEY=pk-lf-xxx  LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-xxx
 # 启动：docker compose -p eval-langfuse -f docker-compose.langfuse.yml up -d
-# 初始账号在 Web UI（http://localhost:18500）注册；pk/sk 于项目设置页生成后写入 .env.secrets：
-#   LANGFUSE_HOST=http://localhost:18500
-#   LANGFUSE_PUBLIC_KEY=pk-lf-...
-#   LANGFUSE_SECRET_KEY=sk-lf-...
+# 业务侧 OTel 对接（env 三键经平台 PATCH env 注入，endpoint 指向宿主机 IP）：
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://<宿主机IP>:18500/api/public/otel
+#   OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64(pk:sk)>
+#   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 services:
   langfuse-db:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:?请在环境/.env.secrets 提供占位值}
+      POSTGRES_PASSWORD: ${LF_DB_PW:-changeme-db}
       POSTGRES_DB: langfuse
     volumes:
-      - langfuse-db-data:/var/lib/postgresql/data
+      - langfuse_pg_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U langfuse"]
       interval: 5s
       timeout: 5s
       retries: 12
 
-  langfuse:
-    image: langfuse/langfuse:2
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LF_CLICKHOUSE_PW:-changeme-ch}
+    volumes:
+      - langfuse_ch_data:/var/lib/clickhouse
+      - langfuse_ch_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # S3 兼容对象存储：官方 compose 用 minio，但本环境镜像代理对 minio 仓库 403（实测），
+  # 改用 seaweedfs（S3 网关同语义）。凭据与 seaweed-s3.json 配套（本机冒烟弱值，生产必须改）。
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    command: >-
+      server -ip.bind=0.0.0.0 -dir=/data -volume -volume.max=16 -master.port=9333 -master.port.grpc=19333 -volume.port=8080 -volume.port.grpc=18080 -filer.port=8888 -filer.port.grpc=18888
+      -s3 -s3.port=9000 -s3.config=/etc/sw/s3.json
+    volumes:
+      - ./seaweed-s3.json:/etc/sw/s3.json:ro
+      - langfuse_s3_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9333/cluster/status | grep -q IsLeader"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 3s
+
+  # 预建 langfuse 桶（S3 PutBucket 一次性动作，成功即退出）
+  s3-init:
+    image: chrislusf/seaweedfs:latest
     depends_on:
-      langfuse-db:
-        condition: service_healthy
+      seaweedfs: {condition: service_healthy}
+    entrypoint: sh
+    command: -c 'for i in 1 2 3 4 5; do weed shell -master=seaweedfs:9333 s3.bucket.create -name langfuse && exit 0; sleep 2; done; exit 1'
+
+  redis:
+    image: redis:7
+    command: --requirepass ${LF_REDIS_PW:-changeme-redis} --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LF_REDIS_PW:-changeme-redis}", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    depends_on:
+      langfuse-db: {condition: service_healthy}
+      s3-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+    environment: &lf-env
+      NEXTAUTH_URL: http://localhost:18500
+      DATABASE_URL: postgresql://langfuse:${LF_DB_PW:-changeme-db}@langfuse-db:5432/langfuse
+      SALT: ${LF_SALT:-changeme-salt}
+      ENCRYPTION_KEY: ${LF_ENCRYPTION_KEY:-changeme-encryption-key-000000000000000000000000}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LF_CLICKHOUSE_PW:-changeme-ch}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: changeme-minio
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://seaweedfs:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: changeme-minio
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://seaweedfs:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LF_REDIS_PW:-changeme-redis}
+      LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: "true"
+
+  langfuse:
+    image: langfuse/langfuse:3
+    restart: always
+    depends_on:
+      langfuse-db: {condition: service_healthy}
+      s3-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
     ports:
       - "18500:3000"
     environment:
-      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
-      NEXTAUTH_URL: http://localhost:18500
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?openssl rand -base64 32}
-      SALT: ${LANGFUSE_SALT:?openssl rand -base64 32}
-      TELEMETRY_ENABLED: "false"
+      <<: *lf-env
+      NEXTAUTH_SECRET: ${LF_NEXTAUTH_SECRET:-changeme-nextauth}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-eval@local.test}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-eval}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-local-org}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-eval-export}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
 
 volumes:
-  langfuse-db-data:
+  langfuse_pg_data:
+  langfuse_ch_data:
+  langfuse_ch_logs:
+  langfuse_s3_data:
+  langfuse_redis_data:

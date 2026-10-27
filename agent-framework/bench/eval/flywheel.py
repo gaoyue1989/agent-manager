@@ -298,6 +298,8 @@ async def cmd_run(args: argparse.Namespace) -> int:
                        "total_score": (sum(judge_scores) / len(judge_scores))
                                       if judge_scores else None,
                        "judge_model": judge_model,
+                       # judge_results 单列（M3 scores 回流的机器可读来源）
+                       "judge_results": judge_results,
                        "gen_case_count": len(gen_cases),
                        "analyses": analyses}, f, ensure_ascii=False, indent=1)
         _append_history({"task_id": task_id, "commit": commit, "track": "trend",
@@ -516,6 +518,9 @@ async def cmd_live(args: argparse.Namespace) -> int:
 def cmd_export(args: argparse.Namespace) -> int:
     from exporters import deepeval as deepeval_exp, langfuse_client, sources
 
+    if args.target == "langfuse-scores":
+        return _export_langfuse_scores(args, langfuse_client)
+
     if args.kind == "testcases" and not args.run:
         print("[export] --kind testcases 需要 --run <run 产物目录>（traces 对齐库内用例取输入）")
         return 2
@@ -616,6 +621,95 @@ def _locate_dataset(args: argparse.Namespace) -> tuple[str, str]:
             svc, name = it["metadata"]["_dataset"].split("/", 1)
             return svc, name
     raise SystemExit(f"[dataset] 未找到 item: {item_id}")
+
+
+def _export_langfuse_scores(args: argparse.Namespace, langfuse_client: Any) -> int:
+    """M3 scores 回流：run 产物（traces + task.json judge_results）→ langfuse scores。
+
+    checks 结论与 judge 分数按 traceId 挂分（一个评测会话可能对应多条 langfuse trace，
+    全部同分）；trace 定位 = 评测 session_id ↔ OTel attribute agentscope.session.id
+    （或 langfuse 原生 sessionId）。id 确定性 → 重跑同项覆盖旧分。
+    """
+    if not args.run:
+        print("[export] langfuse-scores 需要 --run <run 产物目录>")
+        return 2
+    run_dir = Path(args.run)
+    with open(run_dir / "task.json", encoding="utf-8") as f:
+        task = json.load(f)
+    judge_results = task.get("judge_results") or {}
+    judge_model = task.get("judge_model")
+
+    # 每用例取 repeat#1 轨迹（session_id / checks_passed / langfuse_trace_id）
+    per_case: dict[str, dict[str, Any]] = {}
+    for p in sorted((run_dir / "traces").glob("*.json")):
+        t = json.loads(p.read_text(encoding="utf-8"))
+        if t.get("repeat_no") != 1 or t["case_id"] in per_case:
+            continue
+        per_case[t["case_id"]] = {"session_id": t.get("session_id"),
+                                  "checks": t.get("checks_passed"),
+                                  "langfuse_trace_id": t.get("langfuse_trace_id")}
+    if not per_case:
+        print("[export] run 无 traces")
+        return 2
+
+    payloads: list[dict[str, Any]] = []
+    for case_id, info in sorted(per_case.items()):
+        if info["checks"] is None:
+            continue
+        payloads.append({"case_id": case_id, "session_id": info["session_id"],
+                         "langfuse_trace_id": info.get("langfuse_trace_id"),
+                         "name": f"eval-checks/{case_id}",
+                         "value": 1.0 if info["checks"] else 0.0,
+                         "comment": f"确定性断言 {'PASS' if info['checks'] else 'FAIL'}",
+                         "meta": {"case_id": case_id, "session_id": info["session_id"],
+                                  "commit": task.get("commit"), "kind": "checks"}})
+        jr = judge_results.get(case_id) or {}
+        if jr.get("score") is not None:
+            payloads.append({"case_id": case_id, "session_id": info["session_id"],
+                             "name": f"eval-judge/{case_id}", "value": jr["score"],
+                             "comment": (jr.get("reason") or "")[:500],
+                             "meta": {"case_id": case_id, "kind": "judge",
+                                      "judge_model": judge_model,
+                                      "commit": task.get("commit")}})
+    out = Path(args.out or str(run_dir))
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "langfuse-scores.jsonl", "w", encoding="utf-8") as f:
+        for p in payloads:
+            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+    print(f"[export] langfuse-scores 本地: {out / 'langfuse-scores.jsonl'}（{len(payloads)} 条）")
+    if not args.push:
+        return 0
+
+    base, pk, sk = langfuse_client.resolve_creds()
+    upserted, failed, unmatched = 0, [], []
+    for p in payloads:
+        # 首选 traceparent 关联（评测请求注入，traceId 客户端确定性）；无则回退
+        # 按 sessionId 查询（OTel attribute 兜底路径）
+        if p.get("langfuse_trace_id"):
+            trace_ids = [p["langfuse_trace_id"]]
+        else:
+            try:
+                traces = langfuse_client.find_traces(base, pk, sk, p["session_id"])
+            except langfuse_client.LangfuseError as e:
+                print(f"[export][FAIL] trace 查询失败: {e}")
+                return 1
+            trace_ids = [t["id"] for t in traces]
+        if not trace_ids:
+            unmatched.append(f"{p['case_id']}({p['session_id'][:20]}…)")
+            continue
+        result = langfuse_client.push_scores(base, pk, sk, [
+            langfuse_client.build_score(tid, p["name"], p["value"],
+                                        comment=p["comment"], metadata=p["meta"])
+            for tid in trace_ids])
+        upserted += result["upserted"]
+        failed.extend(result["failed"])
+    print(f"[export] scores 回流: upserted={upserted} failed={len(failed)}"
+          f" unmatched_sessions={len(unmatched)}")
+    for f_ in failed[:5]:
+        print(f"  [FAIL] {f_['name']}: {f_['detail']}")
+    for u in unmatched[:5]:
+        print(f"  [WARN] 无匹配 trace（OTel 未上报或不在时间窗）: {u}")
+    return 1 if failed else 0
 
 
 def cmd_dataset(args: argparse.Namespace) -> int:
@@ -1305,8 +1399,9 @@ def main() -> int:
     plv.set_defaults(func=cmd_live)
 
     pex = sub.add_parser("export", help="评测数据导出为 deepeval / langfuse / cases-legacy（零新依赖）")
-    pex.add_argument("--target", choices=["deepeval", "langfuse", "cases-legacy"], required=True,
-                     help="导出目标（exporters.TARGETS + 投影再生）")
+    pex.add_argument("--target",
+                     choices=["deepeval", "langfuse", "cases-legacy", "langfuse-scores"],
+                     required=True, help="导出目标（langfuse-scores = M3 观测回流，需 --run）")
     pex.add_argument("--kind", choices=["goldens", "testcases"], default="goldens",
                      help="deepeval 导出形态：goldens=金标集（默认）；testcases=已执行用例（需 --run）")
     pex.add_argument("--cases", action="store_true", help="来源=DatasetHub active items（缺省来源，保留兼容）")

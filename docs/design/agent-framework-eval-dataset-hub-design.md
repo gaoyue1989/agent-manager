@@ -1,6 +1,6 @@
 # agent-framework 评测数据集层（DatasetHub）与开源生态兼容设计
 
-> 状态：M1/M2 已实施（2026-10-26/27）· M3（OTel→langfuse 观测 + scores 回流）待实施
+> 状态：M1/M2/M3 已实施（2026-10-26/27，PR #200/#201/#202）
 > 前置设计：[双轨评测](agent-framework-eval-dual-track-design.md) · [离线录制回放](agent-framework-eval-offline-record-replay-design.md)
 > 背景需求：① agent 离线/在线评测数据的生成与获取统一化；② 评测数据包兼容 deepeval/langfuse
 > 等开源评测软件——本平台解决数据收集，评测执行交给外部生态。
@@ -78,13 +78,28 @@ API：`GET /api/datasets`、`GET /api/datasets/items`、`POST /api/datasets/item
 镜像已打包 `eval/`（dataset/exporters 可直接 import）；数据集目录挂卷
 `-v $PWD/datasets:/srv/eval/datasets`。
 
-## 7. M3 待实施（下一 PR）
+## 7. M3 实施（OTel→langfuse 观测 + scores 回流，2026-10-27）
 
-1. OTel→langfuse：release-agent 测试环境 env 注入 `OTEL_EXPORTER_OTLP_ENDPOINT=<langfuse>/api/public/otel`
-   （OtelConfig 已支持自定义 Authorization header），切流前做连通性预检（kubectl exec curl）。
-2. `sourceTraceId` 关联：skeleton/dataset item 的 sessionId ↔ langfuse trace。
-3. scores 回流：flywheel run 的 checks 结论 + judge 分数（带 judge_model 元数据）→
-   `POST /api/public/scores`，langfuse 看板并排内部指标与 deepeval 指标；分数只展示永不阻断。
+1. **langfuse 升级 v3**：v2 无 OTel ingest 路由（实测 /api/public/otel 404）→
+   compose 升级 v3 套件（web/worker/clickhouse/seaweedfs/redis/postgres，§8 实施记录）；
+   OTLP 真实路径 = `/api/public/otel/v1/traces`（javaagent 默认拼接恰好吻合），需
+   `Authorization: Basic <pk:sk>` 头。
+2. **切流**（走平台 `PATCH /services/:id/env`，UpdateEnv 合并语义 + 自动滚动重启）：
+   release-agent 注入三键 `OTEL_EXPORTER_OTLP_ENDPOINT`（指向宿主机 :18500）、
+   `OTEL_EXPORTER_OTLP_HEADERS`（Basic 认证）、`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`；
+   密钥只进 env（Secret 侧不动）。回滚 = PATCH 移除三键再重启。
+3. **关联机制（traceparent 注入）**：FrameworkTracingMiddleware 的 `agentscope.session.id`
+   attribute 未出现在 langfuse trace（SDK 行为，零侵入不查）→ 改客户端关联：flywheel
+   `execute_once` 每用例生成 W3C traceparent 注入请求头，被测 OTel agent 提取上游 context，
+   **langfuse traceId == 评测客户端生成的 id**；轨迹落盘 `langfuse_trace_id` 字段，
+   scores 按 id 直挂（`find_traces` 按 sessionId 查询保留为兜底）。
+4. **scores 回流**：`export --target langfuse-scores --run DIR [--push]`——checks 结论
+   （1/0）与 judge 分数（0~1，带 judge_model）按 traceId 挂分；score id 确定性
+   （sha1(traceId+name)）→ 重跑覆盖（upsert 幂等）；分数只展示永不阻断。
+5. **验收（真实环境）**：release-agent 切流后评测产流量 → langfuse trace（134 observations：
+   HTTP/SQL/GENERATION 全链路）→ traceId 与评测生成 id 完全一致 → score
+   `eval-checks/case_chat_basic_001=1` 挂载同一 traceId → dataset release-regression 11 条
+   在 v3 UI 可见；trace 页 span 树/Add to datasets/Scores tab 三向跳转元素齐备。
 
 ## 8. 实施记录与验收
 

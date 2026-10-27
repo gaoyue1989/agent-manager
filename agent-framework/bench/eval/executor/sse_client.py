@@ -38,11 +38,14 @@ async def stream_chat(
     payload: dict[str, Any],
     timeout_s: float = 120.0,
     on_frame: Any = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """执行一次 SSE 对话，返回 (session_id, 事件列表)。
 
     事件元素: {"t_ms": 相对起始毫秒, "type": 帧类型, "raw": 原始 payload}。
     on_frame(event_dict) 可选回调（用于 HITL 过程中实时感知 permission_ask）。
+    extra_headers：附加请求头（评测注入 W3C traceparent，被测侧 OTel agent 提取上游
+    context 后 langfuse traceId 即评测客户端生成的 id，M3 关联机制）。
     传输层失败抛 SSEError；业务层 error 帧不算传输错误（留给 checks 判定）。
     """
     url = f"{base_url.rstrip('/')}/threads/chat"
@@ -52,7 +55,8 @@ async def stream_chat(
     timeout = httpx.Timeout(connect=10.0, write=30.0, read=max(timeout_s, 5.0), pool=10.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, json=payload) as resp:
+            async with client.stream("POST", url, json=payload,
+                                     headers=extra_headers or {}) as resp:
                 if resp.status_code != 200:
                     body = (await resp.aread()).decode("utf-8", errors="replace")
                     raise SSEError(

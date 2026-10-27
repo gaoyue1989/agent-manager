@@ -56,6 +56,19 @@ ds.add_goldens_from_jsonl_file(file_path="reports/exports/deepeval/conversationa
   429/5xx 退避重试，4xx 快速失败；单条失败不阻断批量，退出码 1。
 - 实验执行（跑评测）走 langfuse SDK/UI——dataset-run-items REST 已弃用，本模块不碰。
 
+## 观测回流（M3：OTel→langfuse + scores）
+
+- 自建实例需 **langfuse v3**（v2 无 OTel ingest 路由，实测 404）——compose 已升级 v3 套件，
+  OTLP 真实路径 `/api/public/otel/v1/traces`，需 Basic 认证头。
+- 业务侧切流 = 平台 `PATCH /services/:id/env` 注入三键：
+  `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_HEADERS`（Basic pk:sk）/
+  `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`；回滚即移除三键再滚动。
+- **关联机制**：评测请求注入 W3C traceparent（`execute_once` 生成，轨迹记
+  `langfuse_trace_id`），被测 OTel agent 提取后 langfuse traceId == 评测侧 id，
+  scores 按 id 直挂（`find_traces` sessionId 查询为兜底）。
+- 回流：`flywheel.py export --target langfuse-scores --run <run产物> [--push]`——
+  checks（1/0）与 judge 分数按 traceId 挂分，score id 确定性幂等，永不阻断。
+
 ## 契约守护
 
 - `flywheel.py selftest` 内含导出器断言段（schema/单多轮拆分/确定性 id/凭据零泄漏）。

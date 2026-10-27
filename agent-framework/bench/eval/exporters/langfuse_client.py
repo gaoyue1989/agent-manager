@@ -147,3 +147,74 @@ def export(items: list[dict[str, Any]], out_dir: str | Path, dataset_name: str,
         base, pk, sk = resolve_creds()
         summary["push"] = push(base, pk, sk, payloads)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# 观测回流（M3）：trace 查询 + scores 回写
+# ---------------------------------------------------------------------------
+
+def find_traces(base_url: str, public_key: str, secret_key: str,
+                session_id: str, from_start_time: str | None = None,
+                limit: int = 100) -> list[dict[str, Any]]:
+    """按会话查 trace：优先原生 sessionId（langfuse 映射 session.id attribute），
+    兜底过滤 metadata['agentscope.session.id']（agent-framework FrameworkTracingMiddleware
+    的实际 attribute 键，langfuse 未映射时平铺进 metadata）。"""
+    with httpx.Client(timeout=httpx.Timeout(30.0),
+                      headers={"Authorization": _auth_header(public_key, secret_key)}) as client:
+        params: dict[str, Any] = {"limit": limit}
+        if from_start_time:
+            params["fromStartTime"] = from_start_time
+        resp = client.get(f"{base_url}/api/public/traces", params=params)
+        if not resp.is_success:
+            raise LangfuseError(f"traces 查询失败 http {resp.status_code}: {resp.text[:200]}")
+        data = resp.json().get("data") or []
+    return [t for t in data
+            if t.get("sessionId") == session_id
+            or (t.get("metadata") or {}).get("agentscope.session.id") == session_id]
+
+
+def build_score(trace_id: str, name: str, value: float,
+                comment: str = "", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """score 请求体。id 确定性（traceId+name 摘要）→ 重跑同项覆盖旧分（upsert 幂等）。"""
+    import hashlib
+    sid = hashlib.sha1(f"{trace_id}:{name}".encode()).hexdigest()[:32]
+    payload: dict[str, Any] = {"id": sid, "traceId": trace_id, "name": name,
+                               "value": round(float(value), 4), "dataType": "NUMERIC"}
+    if comment:
+        payload["comment"] = comment
+    if metadata:
+        payload["metadata"] = metadata
+    return payload
+
+
+def push_scores(base_url: str, public_key: str, secret_key: str,
+                payloads: list[dict[str, Any]], max_retries: int = 3,
+                sleep: Any = time.sleep) -> dict[str, Any]:
+    """批量回写 scores（同 push 语义：单条失败不阻断，429/5xx 退避，4xx 快速失败）。"""
+    result: dict[str, Any] = {"total": len(payloads), "upserted": 0, "failed": []}
+    with httpx.Client(timeout=httpx.Timeout(30.0),
+                      headers={"Authorization": _auth_header(public_key, secret_key)}) as client:
+        for p in payloads:
+            ok, detail = False, ""
+            for attempt in range(max_retries):
+                try:
+                    resp = client.post(f"{base_url}/api/public/scores", json=p)
+                except httpx.TransportError as e:
+                    detail = f"transport: {e}"
+                    sleep(0.5 * (2 ** attempt))
+                    continue
+                if resp.status_code in _RETRYABLE_STATUS:
+                    detail = f"http {resp.status_code}"
+                    sleep(0.5 * (2 ** attempt))
+                    continue
+                if resp.is_success:
+                    ok = True
+                else:
+                    detail = f"http {resp.status_code}: {resp.text[:200]}"
+                break
+            if ok:
+                result["upserted"] += 1
+            else:
+                result["failed"].append({"id": p.get("id"), "name": p.get("name"),
+                                         "detail": detail or "retries exhausted"})
+    return result
