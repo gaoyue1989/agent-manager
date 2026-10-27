@@ -6,6 +6,7 @@ let ctx = null;
 let messagesEl = null;       // msg 容器（居中列）
 let inputEl = null;
 let sendBtn = null;
+let stopBtn = null;   // 独立停止按钮：流式期间显示；sendBtn 保持禁用（e2e U2 契约）
 let sidebarListEl = null;
 let connBadgeEl = null;
 let uploadBtn = null;
@@ -120,6 +121,7 @@ function render() {
           <input type="file" id="fileInput" multiple accept="image/*,text/plain,text/markdown,text/csv,application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt" style="display: none">
           <textarea id="chatInput" rows="1" placeholder="Type your message... (@ 提及 Skill，Enter 发送，Shift+Enter 换行)"></textarea>
           <button id="sendBtn" class="btn primary">Send</button>
+          <button id="stopBtn" class="btn danger" style="display:none">Stop</button>
           <div id="skillMentionDropdown" class="skill-mention-dropdown"></div>
         </div>
         <div id="uploadPreview" class="upload-preview" style="display: none;">
@@ -137,6 +139,8 @@ export default {
     messagesEl = document.getElementById('chatInner');
     inputEl = document.getElementById('chatInput');
     sendBtn = document.getElementById('sendBtn');
+    stopBtn = document.getElementById('stopBtn');
+    stopBtn.addEventListener('click', () => stop());
     sidebarListEl = document.getElementById('threadList');
     connBadgeEl = document.getElementById('connBadge');
     uploadBtn = document.getElementById('uploadBtn');
@@ -533,10 +537,7 @@ async function tryResumeSSE(sessionId) {
     // 也永远到不了前端——Task 10 的提示文案「可刷新页面查看最新状态」就成了空头承诺。
     if (status.state === 'working' || status.state === 'waiting_confirm' || status.state === 'interrupted') {
       console.log('[durable-sse] resuming SSE for working session:', sessionId);
-      isStreaming = true;
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Stop';
-      sendBtn.classList.add('danger');
+      enterStreamingUi();
       currentReplyId = status.reply_id || null;
       // 刻意**不**把游标重置为 latest_event_seq：刷新后客户端从 0 开始，
       // 应从头回放当前 turn 的全部事件（replyId 过滤保证只回放本 turn，不重复历史）；
@@ -1719,10 +1720,7 @@ function handleEvent(data) {
     activeRemotePanel = null;
     Object.keys(remoteToolOwner).forEach((k) => delete remoteToolOwner[k]);
     setConnecting('chatTitle', true);
-    isStreaming = true;
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Stop';
-    sendBtn.classList.add('danger');
+    enterStreamingUi();
     usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
     // MCP Apps：新回合开始 → 清理上一回合卡片（保留当前回合可交互）
     teardownAllAppHosts();
@@ -1739,7 +1737,7 @@ function handleEvent(data) {
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
     sendBtn.classList.remove('danger');
-    delete sendBtn.dataset.stopping;
+    hideStopButton();
     clearTimeout(stopSlowTimer);
     setConnecting('chatTitle', false);
     scrollToBottom(true);
@@ -1902,8 +1900,8 @@ function handleEvent(data) {
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
       sendBtn.classList.remove('danger');
-      delete sendBtn.dataset.stopping;
-      clearTimeout(stopSlowTimer);
+      hideStopButton();
+        clearTimeout(stopSlowTimer);
       if (r) {
         const err = document.createElement('div');
         err.className = 'msg system';
@@ -1919,8 +1917,8 @@ function handleEvent(data) {
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
       sendBtn.classList.remove('danger');
-      delete sendBtn.dataset.stopping;
-      clearTimeout(stopSlowTimer);
+      hideStopButton();
+        clearTimeout(stopSlowTimer);
       if (r) {
         finishReply(r.replyId);
         const itr = document.createElement('div');
@@ -1938,8 +1936,8 @@ function handleEvent(data) {
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
       sendBtn.classList.remove('danger');
-      delete sendBtn.dataset.stopping;
-      clearTimeout(stopSlowTimer);
+      hideStopButton();
+        clearTimeout(stopSlowTimer);
       if (r) {
         // 观察者路径可能在 cancelled（终态）后直接收流、不补 AGENT_END：主动关掉文本光标
         finishReply(r.replyId);
@@ -2132,11 +2130,12 @@ function stop() {
   const mode = ctx.state.getState('ui.streamMode');
   const protocol = ctx.state.getState('ui.protocol');
   if (isStreaming && sid && mode === 'channel' && protocol !== 'agui') {
-    if (sendBtn.dataset.stopping === '1') return; // 已在停止中（幂等）
-    sendBtn.dataset.stopping = '1';
+    if (!stopBtn) { localStop(); return; }
+    if (stopBtn.dataset.stopping === '1') return; // 已在停止中（幂等）
+    stopBtn.dataset.stopping = '1';
     // 立即反馈（不等服务端往返）；失败路径由 localStop() 复位
-    sendBtn.textContent = 'Stopping...';
-    sendBtn.disabled = true;
+    stopBtn.textContent = 'Stopping...';
+    stopBtn.disabled = true;
     const uid = ctx.state.getState('ui.userId') || 'debug-user';
     requestServerStop(sid, uid).then(() => {
       clearTimeout(stopSlowTimer);
@@ -2146,7 +2145,7 @@ function stop() {
         }
       }, 10000);
     }).catch((err) => {
-      delete sendBtn.dataset.stopping;
+      delete stopBtn.dataset.stopping;
       if (err && err.status === 503) {
         ctx.utils.toast('服务端停止能力不可用，已仅断开本地连接（任务仍会在后台继续）', 'warn');
       } else if (err && err.status === 409) {
@@ -2192,13 +2191,40 @@ function localStop() {
   resetStreamingState();
 }
 
+/** 进入流式态：sendBtn 禁用（保持既有门禁契约），单独显示可点击的 Stop 按钮 */
+function enterStreamingUi() {
+  isStreaming = true;
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Send';
+  sendBtn.classList.remove('danger');
+  showStopButton();
+}
+
+/** 显示 Stop 按钮（每次进入流式/重连恢复时复位为可点） */
+function showStopButton() {
+  if (!stopBtn) return;
+  stopBtn.style.display = '';
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Stop';
+  delete stopBtn.dataset.stopping;
+}
+
+/** 隐藏 Stop 按钮（终态/停止失败/重置时；隐藏后 sendBtn 恢复可点） */
+function hideStopButton() {
+  if (!stopBtn) return;
+  stopBtn.style.display = 'none';
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Stop';
+  delete stopBtn.dataset.stopping;
+}
+
 // ★ durable-sse-plan：重置流式状态
 function resetStreamingState() {
   isStreaming = false;
   sendBtn.disabled = false;
   sendBtn.textContent = 'Send';
   sendBtn.classList.remove('danger');
-  delete sendBtn.dataset.stopping;
+  hideStopButton();
   clearTimeout(stopSlowTimer);
   activeChatHandle = null;
   activeSubHandle = null;
@@ -2209,10 +2235,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
   // 1. POST /chat → 事件经 EventBus 广播，SSE 断连不影响 agent 执行
   // 2. SSE 断连后自动通过 GET /subscribe 重连续传
   // 3. 全程心跳（EventBus），防 Nginx/CDN 超时
-  isStreaming = true;
-  sendBtn.disabled = false;
-  sendBtn.textContent = 'Stop';
-  sendBtn.classList.add('danger');
+  enterStreamingUi();
 
   let waitingSince = null;
   let waitingEl = null;
@@ -2371,10 +2394,7 @@ async function sendChannelSingleStream(text, sid, fileIds, model) {
 }
 // A2A message/stream（标准帧，工具仅工具名，无回填）
 async function sendA2AStream(text, sid) {
-  isStreaming = true;
-  sendBtn.disabled = false;
-  sendBtn.textContent = 'Stop';
-  sendBtn.classList.add('danger');
+  enterStreamingUi();
   const abortController = new AbortController();
   activeAbort = abortController;
 
@@ -2423,6 +2443,7 @@ async function sendA2AStream(text, sid) {
     sendBtn.disabled = false;
     sendBtn.textContent = 'Send';
     sendBtn.classList.remove('danger');
+    hideStopButton();
     activeAbort = null;
     finishReply(replyId);
     loadThreads();
