@@ -1,0 +1,6 @@
+# DatasetHub 落盘规则：人审资产进 git，运行态缓冲不进
+# - regression / 人工维护的命名数据集：入库（走 PR 人审）
+# - gen-drafts / skeleton / imports：运行态缓冲（含未审真实会话内容），本地留存不入库
+agent-framework/gen-drafts/
+agent-framework/skeleton/
+agent-framework/imports/

@@ -97,7 +97,11 @@ python3 bench/eval/flywheel.py status     # 趋势账本一览：每轮通过率
 
 ### 2.4 用例的增删改
 
-用例即 `cases/*.json` 文件（[格式见 README](README.md#用例格式casesjson入库走-pr-人审)）。**所有变更走 PR**——这是飞轮的人工闸门：生成用例最常见错误是 expected 本身写错（实测 6 条候选错 1 条），人审是质量底线。改 `frame-mapping.json` 或解析代码后先跑 `selftest`。
+用例的唯一事实源是 DatasetHub（`datasets/*/items/`，M2 收编）：CLI 走 `dataset --import-*
+/promote/archive`（见 README「数据集层」），studio 走「数据集」页人审；`cases/` 目录为兼容
+投影（勿手改，`export --target cases-legacy` 再生）。**所有入库变更走人审**——这是飞轮的
+人工闸门：生成用例最常见错误是 expected 本身写错（实测 6 条候选错 1 条），人审是质量底线。
+改 `frame-mapping.json` 或解析代码后先跑 `selftest`。
 
 ---
 

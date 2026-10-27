@@ -394,11 +394,19 @@ async def run_replay(pack_dir: str, out_dir: str, base_url: str,
 async def run_live(base_url: str, out_dir: str, pack_dir: str | None = None,
                    cases_dir: str | None = None, case_ids: list[str] | None = None,
                    judge_cfg: dict[str, str] | None = None,
-                   timeout_s: float = 120.0) -> int:
-    """联机链路评测：用例输入直打真实服务（档案 live.base_url），A1 断言 + judge。"""
+                   timeout_s: float = 120.0,
+                   cases: list[dict[str, Any]] | None = None) -> int:
+    """联机链路评测：用例输入直打真实服务（档案 live.base_url），A1 断言 + judge。
+
+    cases 直传列表优先（DatasetHub 投影，收编统一后 flywheel --cases 走此路径）；
+    其次 cases_dir 目录扫描（兼容外部脚本）；pack 优先级最高。
+    """
     if pack_dir:
         load_pack(pack_dir)
         cases = load_pack_cases(pack_dir, case_ids)
+    elif cases is not None:
+        if case_ids:
+            cases = [c for c in cases if c["case_id"] in set(case_ids)]
     elif cases_dir:
         cases = []
         for p in sorted(Path(cases_dir).glob("*.json")):

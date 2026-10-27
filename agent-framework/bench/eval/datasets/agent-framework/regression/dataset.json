@@ -1,0 +1,49 @@
+{
+ "format_version": 1,
+ "name": "regression",
+ "service": "agent-framework",
+ "description": "",
+ "updated_at": "2026-10-26T16:57:34+0800",
+ "created_at": "2026-10-26T16:57:34+0800",
+ "changelog": [
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_chat_basic_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_hitl_publish_confirm_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_model_switch_default_002"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_model_switch_unknown_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_present_url_whitelist_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_tool_echo_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_tool_list_services_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_tool_plugin_echo_001"
+  },
+  {
+   "ts": "2026-10-26T16:57:34+0800",
+   "note": "import-cases case_tool_time_001"
+  }
+ ],
+ "stats": {
+  "active": 9
+ }
+}
