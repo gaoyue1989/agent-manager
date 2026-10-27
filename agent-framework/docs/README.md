@@ -1,6 +1,6 @@
 # agent-framework 文档索引（docs/）
 
-本目录 49 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
+本目录 50 篇文档分四档维护。**凡与本索引同级的 `*-plan.md` / `*-design.md` 均为编制时点快照**，
 结论是否仍然成立以其头部「现状核对」声明与本表状态列为准；系统当前状态以
 [../AGENTS.md](../AGENTS.md)、[api.md](api.md)、[api-frontend-sse.md](api-frontend-sse.md) 为权威。
 
@@ -62,6 +62,7 @@
 | [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md) | Redis Cluster 与 key 前缀隔离（`agent.redis.mode` / `cluster-nodes` / `prefix` 三个配置叶子 + `RedisConnectionFacade` 连接门面；默认配置下行为与存量部署逐字节一致），**已实施**（2026-09-28） |
 | [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) | E2E 覆盖缺口分析第一轮（近 7 天变更 → 25 条补充用例设计稿；其中 19 条已由 bc235c4 落地） |
 | [e2e-coverage-gap-analysis-20260929.md](e2e-coverage-gap-analysis-20260929.md) | E2E 覆盖缺口分析第二轮（近 3 天变更 → FW1-FW3 / RD1-RD3 六条已落地进 api-core.spec.ts；含与上轮文档及 bc235c4 的用例数对账） |
+| [agui-native-parity-design.md](agui-native-parity-design.md) | AG-UI 官方协议原生暴露·生产对等设计与实施记录（2026-10-24 **已实施**，§17 有实施记录与偏差；自建 `AguiRunController` 组合 SDK registry 编码（不引 starter——其 resume 协调器为进程内存态）、Redis 单流双编码 p/pa、turn_lease 仲裁、confirm_context 双面 HITL（resume[] acceptRule 扩展）、Tailer 渲染器参数化的 afterSeq 续传端点；单测 1603 全绿 + e2e AG1–AG6 独立非必需 job；api-frontend-sse.md §15 为词表权威） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
 

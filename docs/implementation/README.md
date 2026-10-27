@@ -27,7 +27,7 @@
 | M6 | 连接器 verify→创建勾选→包 config.yaml 断言→Secret 含 MCP_TOKEN、包内无 token | e2e 脚本（mcp-connector） |
 | M7 | 集成登记→创建 lead→spawn 一轮子任务回流 | 协议多副本 job 扩展（运行时既有覆盖）+ 声明链路断言 |
 | M8 | API Key 签发/作用域/吊销；成员角色变化即时生效 | e2e 脚本（workspace-assets） |
-| M9 | enforce 三态（无凭据 401 / 带凭据 200 / 跨作用域 403）+ 四必需带凭据回归 | 独立 e2e 环境配置（二期立项时定） |
+| M9 | enforce 三态（无凭据 401 / 带凭据 200 / 跨作用域 403）+ 四必需带凭据回归 | 平台 E2E 门禁（2026-10-20 0f59d51 落地，run-all m0–m10 含 M9 带 env 场景） |
 
 > 手工项（集群形态依赖）：host 模式 publicEndpoint、release-agent 停机降级、router 灰度 report 模式观察——PR 附操作记录，不阻塞 CI。
 

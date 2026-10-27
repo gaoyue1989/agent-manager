@@ -296,6 +296,7 @@ OAF `deniedTools` 字段控制排除列表。
 
 - **存量库**（有表、无历史表）首启自动基线到 V5，仅执行之后的增量；**全新库**（CI E2E/新环境）从 V1 完整重建；多副本同时启动由历史表锁互斥；迁移失败即启动失败（fail-fast）。
 - **纪律**：演进一律新增 V 文件；禁止修改已合并的 V 文件（checksum 校验拒绝启动）；禁止在 Store 构造器/请求路径手工 DDL（`initSchema/ensureColumn` 模式已移除）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（V6 `session_user` 回填即范例：自洽规范槽位 + unknown/共享 gw-hash 桶守卫 + INSERT IGNORE 幂等）。
+- **迁移必须幂等（FW3 门禁）**：`api-core` 的 FW3 会清空 `flyway_schema_history` 后在**已升级库**上按 baseline(5) 重放 V6→最新。新增迁移的 DDL 一律用 `INFORMATION_SCHEMA` 探测守卫（V7/V11/V12 先例，MySQL 8 无 `ADD COLUMN IF NOT EXISTS`），新表用 `CREATE TABLE IF NOT EXISTS`，数据迁移用 `INSERT IGNORE`/可重复 UPDATE；否则 FW3 及后续复用同库的侧实例会启动失败。
 - **两个静默坑（详见 [../docs/design/db-migration-flyway-design.md](../docs/design/db-migration-flyway-design.md) §6.1）**：① 不引 starter-jdbc 的工程必须显式补 `spring-jdbc`，否则 `FlywayConfiguration` 因 `@ConditionalOnClass(JdbcUtils)` 不满足而**静默不装配**——启动零报错、迁移零执行；② SDK `distributedStore` bean 构造期会建 `agent_state/agent_fs`，必须 `@DependsOn("flywayInitializer")`（bean 名是 `flywayInitializer`），否则全新库上 Flyway 因 schema 非空走 baseline 路径跳过 V1..V5。
 - 真实 MySQL 的 `*MySqlIT` 经 `TestSchemaMigrator`（test 下）执行同一批迁移文件，测试 schema 与生产同源；`e2e/scripts/reset-data.mjs` 需同时清理 `flyway_schema_history`（已含）。
 

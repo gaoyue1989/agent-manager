@@ -46,6 +46,7 @@
   <button data-tab="profiles">目标配置</button>
   <button data-tab="packs">数据包</button>
   <button data-tab="cases">用例库</button>
+  <button data-tab="datasets">数据集</button>
   <button data-tab="runs">评测任务</button>
   <button data-tab="compare">对比</button>
   <button data-tab="trends">趋势</button>
@@ -136,6 +137,19 @@ const views={
     <td>${c.status==='draft'?`<button class="btn pri" data-act="promote-case" data-pack-id="${esc(c.pack_id)}" data-case-id="${esc(c.case_id)}">转正</button>`:''}</td></tr>`).join('')
     ||'<tr><td colspan=5 class="dim">暂无用例（先上传数据包）</td></tr>'}</table></div>`;},
 
+ async datasets(){ const ds=await api('/api/datasets');
+  $('#main').innerHTML=`<div class="card"><h2>DatasetHub 数据集 <span class="hint">唯一事实源；draft→reviewed→active→archived 人审状态机，active 才进执行链路与导出</span></h2>
+   <table><tr><th>数据集</th><th>状态统计</th><th>更新时间</th><th>操作</th></tr>
+   ${ds.datasets.map(d=>`<tr><td class="mono">${esc(d._dir)}</td>
+    <td>${Object.entries(d.stats||{}).map(([k,v])=>`<span class="tag ${k==='active'?'ok':'dim'}">${esc(k)} ${v}</span>`).join(' ')}</td>
+    <td class="mono dim">${esc((d.updated_at||'').slice(0,19))}</td>
+    <td class="row"><button class="btn" data-act="show-dataset" data-id="${esc(d._dir)}">明细</button>
+    <button class="btn" data-act="export-ds-deepeval" data-id="${esc(d._dir)}">导出 deepeval</button>
+    <button class="btn" data-act="export-ds-langfuse" data-id="${esc(d._dir)}">推送 langfuse</button></td></tr>`).join('')
+    ||'<tr><td colspan=4 class="dim">暂无数据集（flywheel dataset --import-cases 生成种子）</td></tr>'}
+   </table></div><div class="card" id="ds-detail" style="display:none"></div>
+   <div class="card" id="ds-export" style="display:none"></div>`;},
+
  async runs(){ const rs=await api('/api/runs');
   $('#main').innerHTML=`<div class="card"><h2>新建评测任务 <span class="hint">replay=离线回放（内置沙盒开箱即用）；live=联机打档案 base_url</span></h2>
    <div class="grid">
@@ -221,6 +235,34 @@ async function showPack(id){const d=await api(`/api/packages/${id}`);const box=$
 async function delPack(id){if(!confirm('删除数据包？'))return;await api(`/api/packages/${id}`,{method:'DELETE'});load();}
 async function promoteCase(pid,cid){await api('/api/cases/promote',{method:'POST',body:JSON.stringify({pack_id:pid,case_id:cid})});
  toast('已转正');views.cases();}
+async function showDataset(dir){const [service,name]=dir.split('/');
+ const d=await api(`/api/datasets/items?service=${encodeURIComponent(service)}&name=${encodeURIComponent(name)}`);
+ const box=$('#ds-detail');box.style.display='block';
+ const badge=s=>({'draft':'dim','reviewed':'run','active':'ok','archived':'dim'}[s]||'dim');
+ box.innerHTML=`<h2>${esc(dir)} 条目（${d.items.length}）</h2><table><tr><th>item</th><th>状态</th><th>来源</th><th>输入</th><th>金标</th><th>操作</th></tr>
+  ${d.items.map(i=>`<tr><td class="mono">${esc(i.id)}</td>
+   <td><span class="tag ${badge(i.status)}">${esc(i.status)}</span></td>
+   <td class="mono dim">${esc((i.metadata||{}).source||'')}</td>
+   <td class="mono">${esc((i.input||{}).message||'').slice(0,44)}</td>
+   <td class="mono dim">${esc(i.ground_truth||'').slice(0,44)}</td>
+   <td class="row">${i.status!=='active'?`<button class="btn pri" data-act="promote-ds-item" data-service="${esc(service)}" data-name="${esc(name)}" data-item-id="${esc(i.id)}">转正</button>`:''}
+   ${i.status!=='archived'?`<button class="btn" data-act="archive-ds-item" data-service="${esc(service)}" data-name="${esc(name)}" data-item-id="${esc(i.id)}">归档</button>`:''}</td></tr>`).join('')}
+  </table>`;}
+async function setStatusOf(dir,itemId,status){const [service,name]=dir.split('/');
+ try{await api('/api/datasets/item/status',{method:'POST',body:JSON.stringify({service,name,item_id:itemId,status})});}
+ catch(e){return toast(e.message,false);}
+ toast(status==='active'?'已转正（active）':'已归档');showDataset(dir);views.datasets();}
+async function exportDataset(dir,target){const [service,name]=dir.split('/');
+ const doPush=target==='langfuse';
+ const box=$('#ds-export');box.style.display='block';box.innerHTML='<span class="dim">导出中…</span>';
+ try{const r=await api('/api/datasets/export',{method:'POST',
+   body:JSON.stringify({service,name,target,dataset_name:`${name}-export`,do_push:doPush})});
+  box.innerHTML=`<h2>导出结果（${esc(target)}，${r.items} 条）</h2>
+   ${r.files?`<p class="mono dim">${r.files.map(esc).join('<br>')}</p>`:''}
+   ${r.local?`<p class="mono dim">本地: ${esc(r.local)}</p>`:''}
+   ${r.push?`<p>推送 upserted=${r.push.upserted}/${r.push.total}（id 确定性幂等）</p>`:''}
+   <p class="dim">deepeval 加载：EvaluationDataset().add_goldens_from_jsonl_file(file_path=…)</p>`;}
+ catch(e){box.innerHTML=`<span class="err">${esc(e.message)}</span>`;}}
 async function doCompare(){const a=$('#cmp-a').value,b=$('#cmp-b').value;
  if(a===b) return toast('请选择两个不同的 run',false);
  let r; try{ r=await api(`/api/compare?run_a=${a}&run_b=${b}`);}catch(e){ return toast(e.message,false); }
@@ -277,6 +319,11 @@ document.addEventListener('click',e=>{
   case 'show-pack': showPack(packId); break;
   case 'del-pack': delPack(packId); break;
   case 'promote-case': promoteCase(packId, caseId); break;
+  case 'show-dataset': showDataset(id); break;
+  case 'promote-ds-item': setStatusOf(id, b.dataset.itemId, 'active'); break;
+  case 'archive-ds-item': setStatusOf(id, b.dataset.itemId, 'archived'); break;
+  case 'export-ds-deepeval': exportDataset(id, 'deepeval'); break;
+  case 'export-ds-langfuse': exportDataset(id, 'langfuse'); break;
   case 'create-run': createRun(); break;
   case 'do-compare': doCompare(); break;
  }});

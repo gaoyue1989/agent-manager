@@ -22,6 +22,10 @@ SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
 # start-agent.sh（R4 retry 重建副本）复用同组变量，export 透传子进程保持覆盖语义一致
 export LLM_MOCK_PORT MYSQL_URL MYSQL_USER MYSQL_PASS REDIS_URL SANDBOX_ENABLED SANDBOX_MOCK_PORT
 [ "$E2E_GROUP" = "sandbox" ] && SANDBOX_ENABLED=true
+# AG 组（agui-native-parity-design §12.4）：api-agui 项目独立组（e2e-agui job，先非必需），
+# 单实例 + AGENT_AGUI_ENABLED=true；core/sandbox 组不开（关闭时 /agui/* 404，存量组不受影响）
+[ "$E2E_GROUP" = "agui" ] && export AGENT_AGUI_ENABLED=true
+
 
 RUNTIME="$ROOT/.runtime"
 LOGS="$RUNTIME/logs"
@@ -152,7 +156,7 @@ start_lb() { # $1=对外端口 $2/$3=upstream 副本端口 $4=容器名（protoc
 }
 
 case "$E2E_GROUP" in
-  core|sandbox)
+  core|sandbox|agui)
     start_jar "$E2E_BASE_PORT" "a"
     ;;
   router)

@@ -117,8 +117,14 @@ public class SessionEventStore {
     /** 索引重建冷却：同一 session 最快每 60s 重建一次 */
     private static final long INDEX_REPAIR_COOLDOWN_MS = 60_000;
 
-    /** 攒批缓冲中的一行（尚未落库） */
-    private record PendingRow(int seq, String replyId, String eventType, String payload) {}
+    /** 攒批缓冲中的一行（尚未落库）；aguiPayload 为 AG-UI 帧数组 JSON（native 轮为 null） */
+    private record PendingRow(int seq, String replyId, String eventType, String payload,
+                              String aguiPayload) {
+        /** 兼容 4 参构造（native-only 行） */
+        PendingRow(int seq, String replyId, String eventType, String payload) {
+            this(seq, replyId, eventType, payload, null);
+        }
+    }
 
     public SessionEventStore(RedisEventLog eventLog) {
         this(eventLog, 7, DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_MS);
@@ -267,8 +273,23 @@ public class SessionEventStore {
      * @return 分配的 seq（从 1 开始递增）；-1 表示刷出失败
      */
     public int append(String sessionId, String replyId, String eventType, String payload) {
+        return append(sessionId, replyId, eventType, payload, null);
+    }
+
+    /**
+     * 同上，可携带 AG-UI 协议帧（pa，agui-native-parity-design §4 D2）。
+     *
+     * <p>双编码与攒批的关系：攒批/里程碑/终态判定仍只看 {@code eventType}（native 词表名，
+     * 信封 {@code t} 字段）——AG-UI 帧只是 payload 的第二编码，与刷出时机同进同出，
+     * 不产生额外的写放大或刷出点。
+     *
+     * @param aguiPayload 该事件的 AG-UI 事件 JSON 数组（如 {@code [{"type":"TEXT_MESSAGE_START",…}]}）；
+     *                    null 表示 native-only 行（native 轮、或该事件无可映射的 AG-UI 帧）
+     */
+    public int append(String sessionId, String replyId, String eventType, String payload,
+                      String aguiPayload) {
         int seq = nextSeq(sessionId);
-        var row = new PendingRow(seq, replyId, eventType, payload);
+        var row = new PendingRow(seq, replyId, eventType, payload, aguiPayload);
 
         List<PendingRow> toFlush = null;
         synchronized (pending) {
@@ -357,7 +378,8 @@ public class SessionEventStore {
         }
         var entries = new ArrayList<RedisEventLog.Entry>(rows.size());
         for (var r : rows) {
-            entries.add(new RedisEventLog.Entry(r.seq(), r.eventType(), r.replyId(), r.payload()));
+            entries.add(new RedisEventLog.Entry(r.seq(), r.eventType(), r.replyId(), r.payload(),
+                r.aguiPayload()));
         }
         return eventLog.appendBatch(sessionId, entries, (int) ttlSeconds());
     }
@@ -551,7 +573,7 @@ public class SessionEventStore {
     }
 
     private static EnvelopedEvent toEnveloped(RedisEventLog.Event e) {
-        return new EnvelopedEvent(e.seq(), e.type(), e.payload(), e.replyId());
+        return new EnvelopedEvent(e.seq(), e.type(), e.payload(), e.replyId(), e.aguiPayload());
     }
 
     /**
@@ -651,10 +673,18 @@ public class SessionEventStore {
     /**
      * 带序号的包装事件（对应 durable-sse-plan §3.2 EnvelopedEvent）。
      *
-     * @param seq       事件序号（session 内递增，回放游标用）
-     * @param type      事件类型（AGENT_END / TEXT_BLOCK_DELTA / permission_ask / ...）
-     * @param payload   SSE data 字段的 JSON（与实时推送词表一致）
-     * @param replyId   turn 标识（区分 HITL 恢复等多 run）
+     * @param seq         事件序号（session 内递增，回放游标用）
+     * @param type        事件类型（AGENT_END / TEXT_BLOCK_DELTA / permission_ask / ...）
+     * @param payload     SSE data 字段的 JSON（与实时推送词表一致）
+     * @param replyId     turn 标识（区分 HITL 恢复等多 run）
+     * @param aguiPayload AG-UI 帧数组 JSON（仅 AG-UI 轮；native 轮为 null，读侧降级见
+     *                    agui-native-parity-design §6.3）
      */
-    public record EnvelopedEvent(int seq, String type, String payload, String replyId) {}
+    public record EnvelopedEvent(int seq, String type, String payload, String replyId,
+                                 String aguiPayload) {
+        /** 兼容 4 参构造（存量调用点与测试：native-only 事件） */
+        public EnvelopedEvent(int seq, String type, String payload, String replyId) {
+            this(seq, type, payload, replyId, null);
+        }
+    }
 }

@@ -1,6 +1,7 @@
 package io.agentmanager.framework.service;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -24,6 +25,57 @@ import reactor.core.scheduler.Schedulers;
  * 保证首 token 延迟不受影响。这条分工即设计文档的不变量 I4。
  */
 public class SessionEventTailer {
+
+    /**
+     * 观察者帧渲染器（agui-native-parity-design §4 D5）：把存储信封渲染为具体协议的
+     * SSE 帧。native 词表渲染是缺省实现（toSseFrame 收口）；AG-UI 端点提供 pa 拆帧 +
+     * CUSTOM 降级实现——tail() 的回放/追赶/终态探测/心跳骨架对协议无感知。
+     *
+     * <p>终态/错误帧返回**列表**：AG-UI 的 done 终态由数据事件（RUN_FINISHED）承担，
+     * 不需要补帧（返回空列表即「只收流」）；native 返回单帧（现有词表）。
+     */
+    public interface TailFrameRenderer {
+        /** 存储事件 → 协议帧（可能 0..N 帧：AG-UI 单 seq 可拆多事件） */
+        List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e);
+
+        /** turn 正常结束的收流帧（空列表 = 不补帧直接 complete） */
+        List<ServerSentEvent<String>> doneFrames();
+
+        /** turn 中断（执行副本崩溃/被抢占）的收流帧 */
+        List<ServerSentEvent<String>> interruptedFrames();
+
+        /** 排队 turn 失败的收流帧 */
+        List<ServerSentEvent<String>> errorFrames(String error);
+    }
+
+    /** native 词表渲染器（现有行为原样收口，杜绝双份拷贝漂移） */
+    public static TailFrameRenderer nativeRenderer() {
+        return new TailFrameRenderer() {
+            @Override
+            public List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e) {
+                return List.of(AgentEventSseSerializer.toSseFrame(e));
+            }
+
+            @Override
+            public List<ServerSentEvent<String>> doneFrames() {
+                return List.of(ServerSentEvent.<String>builder().data("{\"type\":\"done\"}").build());
+            }
+
+            @Override
+            public List<ServerSentEvent<String>> interruptedFrames() {
+                return List.of(ServerSentEvent.<String>builder()
+                    .data("{\"type\":\"interrupted\",\"reason\":\"turn_interrupted\"}").build());
+            }
+
+            @Override
+            public List<ServerSentEvent<String>> errorFrames(String error) {
+                return List.of(ServerSentEvent.<String>builder()
+                    .data("{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(error) + "}")
+                    .build());
+            }
+        };
+    }
+
 
     private static final Logger log = LoggerFactory.getLogger(SessionEventTailer.class);
 
@@ -188,6 +240,15 @@ public class SessionEventTailer {
      * 执行副本崩溃/被抢占补 interrupted 帧。
      */
     public Flux<ServerSentEvent<String>> tail(String sessionId, String replyId, int afterSeq) {
+        return tail(sessionId, replyId, afterSeq, nativeRenderer());
+    }
+
+    /**
+     * 同上，按 {@code renderer} 渲染协议帧（AG-UI 续传端点复用同一追赶骨架，
+     * agui-native-parity-design §4 D5；native 调用方走缺省渲染器，行为不变）。
+     */
+    public Flux<ServerSentEvent<String>> tail(String sessionId, String replyId, int afterSeq,
+                                              TailFrameRenderer renderer) {
         var cursor = new AtomicInteger(Math.max(afterSeq, -1));
 
         // 订阅建立时先看一次排队意图：排队中的 turn 尚无事件，replyId 不在索引里是正常状态，
@@ -208,7 +269,7 @@ public class SessionEventTailer {
                 ? eventStore.queryAfter(sessionId, replyId, afterSeq, false)
                 : eventStore.queryAfter(sessionId, replyId, afterSeq))
                 .doOnNext(e -> cursor.set(e.seq()))
-                .map(AgentEventSseSerializer::toSseFrame);
+                .flatMapIterable(renderer::render);
 
         // 实时追赶：按下游需求逐帧拉取（Flux.generate 每次请求发一帧）。
         // 不用 Flux.create 手写死循环：Spring MVC 的 SseEmitterSubscriber 在「发送完成」后
@@ -225,31 +286,40 @@ public class SessionEventTailer {
             return st;
         }, (st, sink) -> {
             while (!st.cancelled) {
-                // 缓冲里仍有事件：先发完（含竞态兜底补发的尾部事件），再收流
+                // 上一步拆出的协议帧尚未发完：每次 generate 调用只允许一次 onNext
+                //（Flux.generate 契约），多帧事件（如 AG-UI pa 拆帧）逐帧跨调用下发
+                if (!st.frameQueue.isEmpty()) {
+                    sink.next(st.frameQueue.poll());
+                    return st;
+                }
+                // 缓冲里仍有事件：先发完（含竞态兜底补发的尾部事件），再收流。
+                // render 可能返回空帧列表（如空 pa 数组），此时必须落回循环走后续分支——
+                // generate 契约要求每次调用恰好一个 sink 方法，直接 return 会抛
+                // "The generator didn't call any of the SynchronousSink method"
                 if (!st.buffer.isEmpty()) {
                     var e = st.buffer.poll();
-                    sink.next(AgentEventSseSerializer.toSseFrame(e));
+                    st.frameQueue.addAll(renderer.render(e));
                     cursor.set(e.seq());
                     st.lastFrameAt = System.currentTimeMillis();
                     st.lastDataAt = st.lastFrameAt;
                     if (isTerminalType(e.type())) {
                         st.donePending = true;
                     }
-                    return st;
+                    continue;
                 }
                 if (st.errorPending != null) {
                     // 排队 turn 失败（超时/建立失败）：与对话流的 error 帧同词表，收流
-                    sink.next(errorSSE(st.errorPending));
+                    renderer.errorFrames(st.errorPending).forEach(sink::next);
                     sink.complete();
                     return st;
                 }
                 if (st.donePending) {
-                    sink.next(doneSSE());
+                    renderer.doneFrames().forEach(sink::next);
                     sink.complete();
                     return st;
                 }
                 if (st.interruptedPending) {
-                    sink.next(interruptedSSE());
+                    renderer.interruptedFrames().forEach(sink::next);
                     sink.complete();
                     return st;
                 }
@@ -318,6 +388,8 @@ public class SessionEventTailer {
                     return st;
                 }
             }
+            // cancelled 退出：generate 契约仍要求一个终止信号（complete 在已取消的下游上是 no-op）
+            sink.complete();
             return st;
         }).doOnCancel(() -> {
             var st = liveStateRef.get();
@@ -332,6 +404,8 @@ public class SessionEventTailer {
     /** 实时追赶的每订阅状态（Flux.generate 的 state，仅订阅线程访问）。 */
     private static final class LiveState {
         final java.util.ArrayDeque<SessionEventStore.EnvelopedEvent> buffer = new java.util.ArrayDeque<>();
+        /** 当前事件拆出的待发协议帧（generate 每次 onNext 一帧，跨调用消化） */
+        final java.util.ArrayDeque<ServerSentEvent<String>> frameQueue = new java.util.ArrayDeque<>();
         /** 0 → 首轮立即探测，避免对已结束的 turn 空等一轮 */
         long lastProbeAt;
         long lastFrameAt = System.currentTimeMillis();
@@ -363,22 +437,5 @@ public class SessionEventTailer {
 
     private static ServerSentEvent<String> heartbeatSSE() {
         return ServerSentEvent.<String>builder().comment("hb").build();
-    }
-
-    private static ServerSentEvent<String> doneSSE() {
-        return ServerSentEvent.<String>builder().data("{\"type\":\"done\"}").build();
-    }
-
-    private static ServerSentEvent<String> interruptedSSE() {
-        return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"interrupted\",\"reason\":\"turn_interrupted\"}")
-            .build();
-    }
-
-    private static ServerSentEvent<String> errorSSE(String error) {
-        return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"error\",\"error\":"
-                + AgentEventSseSerializer.jsonEsc(error) + "}")
-            .build();
     }
 }

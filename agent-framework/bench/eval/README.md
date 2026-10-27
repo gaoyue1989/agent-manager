@@ -49,6 +49,31 @@ EVAL_LLM_BASE_URL=... EVAL_LLM_API_KEY=... EVAL_LLM_MODEL=... \
 `tool_result.{name}.ok`（state==SUCCESS）、`final_text_contains`、`final_text_min_len`、
 `error_contains`、`no_error`。`ground_truth` 供语义 judge。
 
+## 数据集层（DatasetHub，唯一事实源，详见 [设计](../../../docs/design/agent-framework-eval-dataset-hub-design.md)）
+
+`datasets/{service}/{name}/`（dataset.json + items/*.json + CHECKSUMS）是评测用例的唯一事实源：
+run/verify/live/export 全部消费 active 条目（`dataset.py to_case` 投影，executor 零改动）；
+`cases/` 自 M2 起为兼容投影（勿手改，`export --target cases-legacy` 再生，freshness 守护在 selftest）。
+
+```bash
+python3 bench/eval/flywheel.py dataset --list                       # 清单与状态统计
+python3 bench/eval/flywheel.py dataset --import-cases               # cases→种子（一次性迁移）
+python3 bench/eval/flywheel.py skeleton --out /tmp/skel --since 2026-10-01   # T2 checkpoint 只读骨架（kubectl exec 模式，凭据不出 pod）
+python3 bench/eval/flywheel.py dataset --import-skeleton /tmp/skel --limit 8 # 指纹去重采样→draft
+python3 bench/eval/flywheel.py synth --skeleton /tmp/skel --base-url http://… # G3 LLM 合成 golden（四道闸门→draft）
+python3 bench/eval/flywheel.py dataset --promote <item_id>          # 人审转正（active 才进执行链路）
+```
+
+状态机 `draft→reviewed→active→archived` 只进不退；运行态数据集（gen-drafts/skeleton/imports）
+gitignored 不入库，人工维护的数据集走 PR 人审。
+
+## 导出（deepeval / langfuse，详见 [exporters/README.md](exporters/README.md)）
+
+`export --target deepeval|langfuse` 把库内用例 / evalpack 会话 / run 轨迹导出为开源评测生态兼容格式：
+deepeval 金标 JSONL（单轮/多轮分文件）与 testcases；langfuse dataset items（本地 JSONL +
+`--push` 幂等 upsert，id 确定性）。零新依赖，凭据只走环境变量，导出物零密钥；
+契约由 selftest + `tests/export_loop.py`（mock langfuse）守护。
+
 ## 关键事实（实测确认，勿凭文档想当然）
 
 - **帧词表**：31 个 SDK 枚举（`AgentEventType`）+ 9 个合成帧，权威清单在

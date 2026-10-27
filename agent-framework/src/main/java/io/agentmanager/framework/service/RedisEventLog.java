@@ -72,6 +72,15 @@ public class RedisEventLog {
     static final String FIELD_TYPE = "t";
     static final String FIELD_REPLY = "r";
     static final String FIELD_PAYLOAD = "p";
+    /**
+     * 可选字段：AG-UI 协议帧（pa = protocol agui，agui-native-parity-design §4 D2）。
+     *
+     * <p>仅 AG-UI 轮写入（native 轮恒无此字段）：值为该事件的 AG-UI 事件 JSON **数组**——
+     * 一个 native AgentEvent 经 converter registry 可能产出多个 AG-UI 事件（如
+     * RequireUserConfirmEvent 的 RUN_FINISHED 携带 interrupts[]），同一 seq 下按序下发。
+     * 放在字段表**末尾**且可选：省略时不写该字段，读取侧 get 到 null 即回退 native-only。
+     */
+    static final String FIELD_AGUI = "pa";
 
     /** Redis 对「ID 不大于流顶端」的报错原文（用于把「丢租约」与「容量问题」分开） */
     private static final String ERR_NON_INCREASING_ID =
@@ -83,11 +92,21 @@ public class RedisEventLog {
     /** 索引重建时的扫描页大小（索引丢失属罕见路径，页大小与回放分页保持一致） */
     private static final int REBUILD_PAGE_SIZE = 500;
 
-    /** 带序号的一条事件（ID 由 seq 决定） */
-    public record Entry(int seq, String type, String replyId, String payload) {}
+    /** 带序号的一条事件（ID 由 seq 决定）；aguiPayload 为 AG-UI 帧数组 JSON（native 轮为 null） */
+    public record Entry(int seq, String type, String replyId, String payload, String aguiPayload) {
+        /** 兼容 4 参构造（native-only 行，无 AG-UI 帧） */
+        public Entry(int seq, String type, String replyId, String payload) {
+            this(seq, type, replyId, payload, null);
+        }
+    }
 
     /** 读回来的一条事件 */
-    public record Event(int seq, String type, String payload, String replyId) {}
+    public record Event(int seq, String type, String payload, String replyId, String aguiPayload) {
+        /** 兼容 4 参构造（native-only 行） */
+        public Event(int seq, String type, String payload, String replyId) {
+            this(seq, type, payload, replyId, null);
+        }
+    }
 
     /** 一个 reply 的首个 seq（ZSET 索引项） */
     public record ReplyBoundary(String replyId, int firstSeq) {}
@@ -232,6 +251,11 @@ public class RedisEventLog {
                 // 压缩在有无 replyId 的条目之间错位，且读取侧要多一个判空分支
                 body.put(FIELD_REPLY, e.replyId() != null ? e.replyId() : "");
                 body.put(FIELD_PAYLOAD, e.payload());
+                // pa 可选（仅 AG-UI 轮）：与 replyId 不同，这里接受字段有无错位——pa 只被
+                // AG-UI 订阅端读取，native 读取侧不感知；列表尾部追加不破坏既有 t/r/p 顺序
+                if (e.aguiPayload() != null && !e.aguiPayload().isEmpty()) {
+                    body.put(FIELD_AGUI, e.aguiPayload());
+                }
                 var args = new XAddArgs()
                     .id(e.seq() + "-0")
                     .maxlen(maxLenPerStream)
@@ -468,11 +492,13 @@ public class RedisEventLog {
     private static Event toEvent(io.lettuce.core.StreamMessage<String, String> m) {
         var body = m.getBody();
         var reply = body.get(FIELD_REPLY);
+        var agui = body.get(FIELD_AGUI);
         return new Event(
             parseSeq(m.getId()),
             body.get(FIELD_TYPE),
             body.get(FIELD_PAYLOAD),
-            reply == null || reply.isEmpty() ? null : reply);
+            reply == null || reply.isEmpty() ? null : reply,
+            agui == null || agui.isEmpty() ? null : agui);
     }
 
     /** 解析 Stream ID 的 seq 部分（{@code "123-0"} → {@code 123}） */

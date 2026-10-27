@@ -1,0 +1,41 @@
+# 自建 langfuse（导出联调 / OTel 观测，PR3 起复用）：v2 镜像 + Postgres，端口沿用评测段 18500。
+# 凭据一律占位符，真实值只放 .env.secrets（gitignored）：
+#   export LANGFUSE_DB_PASSWORD=$(openssl rand -hex 16)
+#   export LANGFUSE_NEXTAUTH_SECRET=$(openssl rand -base64 32)
+#   export LANGFUSE_SALT=$(openssl rand -base64 32)
+# 启动：docker compose -p eval-langfuse -f docker-compose.langfuse.yml up -d
+# 初始账号在 Web UI（http://localhost:18500）注册；pk/sk 于项目设置页生成后写入 .env.secrets：
+#   LANGFUSE_HOST=http://localhost:18500
+#   LANGFUSE_PUBLIC_KEY=pk-lf-...
+#   LANGFUSE_SECRET_KEY=sk-lf-...
+services:
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:?请在环境/.env.secrets 提供占位值}
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  langfuse:
+    image: langfuse/langfuse:2
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "18500:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:18500
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?openssl rand -base64 32}
+      SALT: ${LANGFUSE_SALT:?openssl rand -base64 32}
+      TELEMETRY_ENABLED: "false"
+
+volumes:
+  langfuse-db-data:
