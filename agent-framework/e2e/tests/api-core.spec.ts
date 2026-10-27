@@ -396,6 +396,9 @@ test('F12 OAF 打包交付（MCP create_oaf_zip + present_url + 代理下载 + �
   const hit = files.find(f => f.file_id === ready!.file_id);
   expect(hit, '历史回放未按会话返回产出文件（file_asset.session_id 绑定断裂）').toBeTruthy();
   expect(hit!.file_name).toBe('e2e-oaf-agent.zip');
+  // 历史卡片与实时 file_ready 帧同构（type/download_url 对齐门禁）
+  expect(hit!.type).toBe('file_ready');
+  expect(hit!.download_url).toBe(ready!.download_url);
 });
 
 test('F6 inline 预览规则', async ({ request }) => {

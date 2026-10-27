@@ -436,10 +436,13 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1
   },
   "files": [
     {
+      "type": "file_ready",
       "file_id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890",
       "file_name": "report.xlsx",
       "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "size": 12345
+      "size": 12345,
+      "download_url": "/files/f1e2d3c4-b5a6-7890-abcd-ef1234567890",
+      "reply_id": "reply-001"
     }
   ],
   "messages": [
@@ -477,10 +480,13 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
   },
   "files": [
     {
+      "type": "file_ready",
       "file_id": "f1e2d3c4-b5a6-7890-abcd-ef1234567890",
       "file_name": "report.xlsx",
       "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "size": 12345
+      "size": 12345,
+      "download_url": "/files/f1e2d3c4-b5a6-7890-abcd-ef1234567890",
+      "reply_id": "reply-001"
     }
   ],
   "messages": [
@@ -491,7 +497,9 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 ```
 
 > `pendingConfirm` 仅为待确认状态时存在，无待确认时为 `null`。  
-> `files` 为 Agent 产出的文件列表（origin=generated），前端据此渲染下载卡片。  
+> `files` 为 Agent 产出的文件列表（origin=generated），前端据此渲染下载卡片。卡片字段与 SSE
+> `file_ready` 帧对齐（`type`/`file_id`/`file_name`/`mime_type`/`size`/`download_url`），
+> 另带 `reply_id` 用于挂回对应轮次气泡；`download_url` 与 SSE 同口径（代理下带 `X-Forwarded-Prefix`）。  
 > `messages` 为双源合并时间线（2026-09-27 起）：归档消息轨 `session_message`（压缩前原文）为基底，
 > agent_state 当前上下文的独有消息（存量会话/未归档尾部）在首页末尾合入；摘要消息带
 > `type: "compaction_summary"`——压缩后的会话历史仍可完整回查。  
