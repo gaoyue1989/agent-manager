@@ -511,7 +511,9 @@ config:
 | `AGENT_PLUGINS_DIR` | `{AGENT_CONFIG_DIR}/plugins` | 工具插件目录 |
 | `AGENT_MEMORY_ENABLED` | `true` | `false` = 完全关闭记忆（不注册 `memory_*` 工具、不 flush / 整合、沙箱不注入回写） |
 | `AGENT_REACT_MAX_ITERS` | `20` | ReAct 最大轮数，长流程需放宽 |
-| `AGENT_COMPACTION_TRIGGER_MESSAGES` | `30` | 压缩触发条数 |
+| `AGENT_COMPACTION_TRIGGER_MESSAGES` | `30` | 压缩触发条数（与 token 阈值任一命中即压缩） |
+| `AGENT_COMPACTION_TRIGGER_TOKENS` | `80000` | 压缩 token 阈值（`0` = 按模型上下文窗口动态计算） |
+| `AGENT_COMPACTION_RESERVED_TOKENS` | `20000` | 动态模式的预留窗口（仅 `TRIGGER_TOKENS=0` 生效） |
 | `AGENT_COMPACTION_KEEP_MESSAGES` | `10` | 压缩保留条数 |
 | `FILE_STORAGE_LOCAL_DIR` | `/data/files` | 本地文件存储目录 |
 | `FILE_EXTERNAL_URL_PREFIXES` | 空（禁用） | `present_url` 外部交付白名单，防 SSRF |

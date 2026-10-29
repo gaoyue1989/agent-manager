@@ -158,8 +158,10 @@ export const api = {
   // 会话读取走归属用户身份（issue #158：/threads/{sid} 端点按 X-User-Id 校验归属，
   // 调试页以选中 userId 填充该头，与网关注入行为一致）
   getThreads: (userId) => get('/threads' + (userId ? '?userId=' + encodeURIComponent(userId) : ''), userHeader(userId)),
-  getThreadHistory: (sessionId, userId) =>
-    get('/threads/' + encodeURIComponent(sessionId) + '/history', userHeader(userId)),
+  getThreadHistory: (sessionId, userId, opts = {}) => {
+    const qs = opts && opts.limit ? '?limit=' + encodeURIComponent(opts.limit) : '';
+    return get('/threads/' + encodeURIComponent(sessionId) + '/history' + qs, userHeader(userId));
+  },
   getLlmCalls: (sessionId, userId) =>
     get('/threads/' + encodeURIComponent(sessionId) + '/llm-calls', userHeader(userId)),
   /**
@@ -178,6 +180,14 @@ export const api = {
       .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
       .join('&');
     return get('/debug/monitor/sessions' + (qs ? '?' + qs : ''));
+  },
+  // 对话日志（消息粒度 + 正文模糊检索，issue #206）
+  getMonitorMessages: (params = {}) => {
+    const qs = Object.entries(params)
+      .filter(([, v]) => v !== undefined && v !== null && v !== '')
+      .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+      .join('&');
+    return get('/debug/monitor/messages' + (qs ? '?' + qs : ''));
   },
 
   // 单次流对话（durable-sse-plan 改造版：POST /chat 事件经 EventBus 广播）

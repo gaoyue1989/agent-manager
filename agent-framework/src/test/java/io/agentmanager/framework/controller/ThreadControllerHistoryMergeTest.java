@@ -69,7 +69,13 @@ class ThreadControllerHistoryMergeTest {
 
     private static SessionMessageStore.ArchivedRow row(long id, String msgId, String kind,
                                                        String role, String replyId, String msgJson) {
-        return new SessionMessageStore.ArchivedRow(id, msgId, kind, role, replyId, msgJson, TS);
+        return new SessionMessageStore.ArchivedRow(id, msgId, kind, role, replyId, null, msgJson, TS);
+    }
+
+    private static SessionMessageStore.ArchivedRow rowWithTrace(long id, String msgId, String kind,
+                                                                String role, String replyId,
+                                                                String traceId, String msgJson) {
+        return new SessionMessageStore.ArchivedRow(id, msgId, kind, role, replyId, traceId, msgJson, TS);
     }
 
     private static final String MSG_M1 =
@@ -129,6 +135,24 @@ class ThreadControllerHistoryMergeTest {
         assertFalse((Boolean) result.getBody().get("hasMore"));
         assertNull(result.getBody().get("nextBeforeId"));
         verify(sessionEventStore).findReplyIds("s1");
+    }
+
+    @Test
+    void mergedViewShouldExposeArchivedTraceIdOnly() {
+        when(agentStateReader.loadStateData("s1")).thenReturn(STATE_DATA);
+        when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of("m1", "m3"));
+        when(sessionMessageStore.findPage(eq("s1"), eq(null), anyInt())).thenReturn(List.of(
+            rowWithTrace(1, "m1", "message", "USER", null, "trace-user-turn", MSG_M1),
+            rowWithTrace(2, "m3", "message", "ASSISTANT", null, "trace-assistant-turn", MSG_M3)));
+        when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r-turn-1"));
+
+        var messages = messagesOf(controller.threadHistory("s1", null, true, 200, null));
+
+        // 归档行携带 trace_id（issue #205：消息 ↔ Jaeger 入口）
+        assertEquals("trace-user-turn", messages.get(0).get("trace_id"));
+        assertEquals("trace-assistant-turn", messages.get(1).get("trace_id"));
+        // state-only 尾部消息没有归档 trace，不写键（前端按 "-" 展示）
+        assertFalse(messages.get(2).containsKey("trace_id"));
     }
 
     @Test

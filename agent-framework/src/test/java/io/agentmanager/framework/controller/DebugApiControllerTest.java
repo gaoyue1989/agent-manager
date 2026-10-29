@@ -28,10 +28,12 @@ import io.agentmanager.framework.service.LogCollector;
 import io.agentmanager.framework.service.SkillCatalogService;
 import io.agentmanager.framework.service.UserSkillService;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -499,6 +501,92 @@ class DebugApiControllerTest {
         mockMvc.perform(get("/debug/monitor/sessions"))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.sessions").isEmpty())
+            .andExpect(jsonPath("$.error").value("db down"));
+    }
+
+    // ---------- monitor messages（对话日志 + 正文检索，issue #206） ----------
+
+    @Test
+    void monitorMessagesShouldFilterByConversationText() throws Exception {
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        // 两行都命中 SQL 粗筛（msg_data LIKE），但第二行正文不含关键词（命中 JSON 字段名）→ 精确过滤丢弃
+        when(rs.next()).thenReturn(true, true, false);
+        when(rs.getLong("id")).thenReturn(11L, 12L);
+        when(rs.getString("session_id")).thenReturn("u1:s1", "u1:s1");
+        when(rs.getString("business_sid")).thenReturn("s1", "s1");
+        when(rs.getString("user_id")).thenReturn("alice", "alice");
+        when(rs.getString("remark")).thenReturn("退款咨询", "退款咨询");
+        when(rs.getString("role")).thenReturn("USER", "ASSISTANT");
+        when(rs.getString("msg_id")).thenReturn("m1", "m2");
+        when(rs.getString("trace_id")).thenReturn("4bf92f3577b34da6a3ce929d0e0e4736", null);
+        when(rs.getString("msg_data")).thenReturn(
+            "{\"id\":\"m1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"我要退款\"}]}",
+            "{\"id\":\"m2\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"无关回答\"}]}");
+        when(rs.getTimestamp("created_at")).thenReturn(
+            java.sql.Timestamp.valueOf("2026-10-29 10:00:00"));
+
+        mockMvc.perform(get("/debug/monitor/messages").param("keyword", "退款"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.count").value(1))
+            .andExpect(jsonPath("$.messages[0].session_id").value("s1"))
+            .andExpect(jsonPath("$.messages[0].user_id").value("alice"))
+            .andExpect(jsonPath("$.messages[0].title").value("退款咨询"))
+            .andExpect(jsonPath("$.messages[0].role").value("user"))
+            .andExpect(jsonPath("$.messages[0].content").value("我要退款"))
+            .andExpect(jsonPath("$.messages[0].msg_id").value("m1"))
+            .andExpect(jsonPath("$.messages[0].trace_id").value("4bf92f3577b34da6a3ce929d0e0e4736"))
+            .andExpect(jsonPath("$.messages[0].content_truncated").value(false))
+            .andExpect(jsonPath("$.scan_capped").value(false));
+
+        var sqlCap = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(conn).prepareStatement(sqlCap.capture());
+        var sql = sqlCap.getValue();
+        assertTrue(sql.contains("JOIN session_user su"), "slot 归属经 session_user 解析");
+        assertTrue(sql.contains("sm.role IN ('USER', 'ASSISTANT')"), "只出真实问答消息");
+        assertTrue(sql.endsWith("ORDER BY sm.id DESC LIMIT ?"));
+    }
+
+    @Test
+    void monitorMessagesShouldPaginateInMemory() throws Exception {
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true, true, false);
+        when(rs.getLong("id")).thenReturn(1L, 2L);
+        when(rs.getString("session_id")).thenReturn("u1:s1", "u1:s1");
+        when(rs.getString("business_sid")).thenReturn("s1", "s1");
+        when(rs.getString("user_id")).thenReturn("alice", "alice");
+        when(rs.getString("remark")).thenReturn("", "");
+        when(rs.getString("role")).thenReturn("USER", "ASSISTANT");
+        when(rs.getString("msg_id")).thenReturn("m1", "m2");
+        when(rs.getString("msg_data")).thenReturn(
+            "{\"id\":\"m1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}",
+            "{\"id\":\"m2\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}");
+
+        mockMvc.perform(get("/debug/monitor/messages")
+                .param("limit", "1").param("offset", "0"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.count").value(1))
+            .andExpect(jsonPath("$.total").value(2))
+            .andExpect(jsonPath("$.hasMore").value(true))
+            .andExpect(jsonPath("$.messages[0].content").value("first"));
+    }
+
+    @Test
+    void monitorMessagesShouldReportError() throws Exception {
+        when(dataSource.getConnection()).thenThrow(new RuntimeException("db down"));
+
+        mockMvc.perform(get("/debug/monitor/messages").param("keyword", "退款"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.messages").isEmpty())
             .andExpect(jsonPath("$.error").value("db down"));
     }
 

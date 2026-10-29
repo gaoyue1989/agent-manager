@@ -208,6 +208,9 @@ agent:
     memory-consolidation-min-gap-minutes: ${AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES:60}
     # Compaction
     compaction-trigger-messages: ${AGENT_COMPACTION_TRIGGER_MESSAGES:30}
+    # token 触发阈值（与消息数任一命中即压缩）：>0 固定阈值；0 = 动态（模型上下文窗口 - reserved）
+    compaction-trigger-tokens: ${AGENT_COMPACTION_TRIGGER_TOKENS:80000}
+    compaction-reserved-tokens: ${AGENT_COMPACTION_RESERVED_TOKENS:20000}
     compaction-keep-messages: ${AGENT_COMPACTION_KEEP_MESSAGES:10}
     # 压缩前先刷写记忆（记忆 hooks 关闭时此项失效）
     compaction-flush-before-compact: ${AGENT_COMPACTION_FLUSH_BEFORE_COMPACT:true}

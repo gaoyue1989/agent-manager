@@ -269,8 +269,16 @@ public record AgentManagerProperties(
         /** 记忆整合最小间隔（分钟） */
         @DefaultValue("60") int memoryConsolidationMinGapMinutes,
         // Compaction
-        /** 触发压缩的消息数阈值 */
+        /** 触发压缩的消息数阈值（与 token 阈值任一命中即压缩，0 = 关闭消息数触发） */
         @DefaultValue("30") int compactionTriggerMessages,
+        /**
+         * 触发压缩的 token 估算阈值（0 = 动态模式：模型上下文窗口 - reserved，
+         * 模型未上报窗口时回退 SDK 默认 160k；>0 = 固定阈值）。
+         * 用于 MCP 等单次返回大量内容的场景，避免 1~2 次调用就撑爆上下文。
+         */
+        @DefaultValue("80000") int compactionTriggerTokens,
+        /** 动态 token 触发时预留给压缩请求（摘要 prompt + 输出）的窗口，仅 triggerTokens=0 生效 */
+        @DefaultValue("20000") int compactionReservedTokens,
         /** 压缩后保留的消息数 */
         @DefaultValue("10") int compactionKeepMessages,
         /** 压缩前先刷写记忆 */
@@ -292,7 +300,7 @@ public record AgentManagerProperties(
         /** 代码默认值兜底：配置节缺失（如测试直接构造 props）时使用 */
         public static HarnessConfig defaults() {
             return new HarnessConfig(20, 30, 180, 30, true, 10, 8000, 60,
-                30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+                30, 80000, 20000, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
         }
     }
 

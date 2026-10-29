@@ -124,7 +124,7 @@ class ChatModelFactoryTest {
     void httpClientShouldBePinnedToHttp11() {
         var harness = new AgentManagerProperties.HarnessConfig(
             20, 30, 180, 30, true, 10, 8000, 60,
-            30, 10, true, true, 7, 1, 5000L, 60000L, 900000L);
+            30, 80000, 20000, 10, true, true, 7, 1, 5000L, 60000L, 900000L);
 
         var client = ChatModelFactory.buildHttpClient(harness);
 

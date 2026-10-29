@@ -20,6 +20,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import io.opentelemetry.api.trace.Span;
+
 /**
  * session_message 表（会话消息轨）：压缩后会话历史可查设计的消息级归档存储。
  * 设计文档：docs/session-history-archive-design.md。
@@ -50,7 +52,7 @@ public class SessionMessageStore {
 
     /** 归档行（读侧 DTO） */
     public record ArchivedRow(long id, String msgId, String kind, String role, String replyId,
-                              String msgJson, Timestamp createdAt) {}
+                              String traceId, String msgJson, Timestamp createdAt) {}
 
     private final DataSource dataSource;
 
@@ -59,10 +61,33 @@ public class SessionMessageStore {
     }
 
     /**
+     * 当前 OTel traceId（32 位十六进制）；无活跃 span / no-op tracer 时返回 null。
+     *
+     * <p>归档批次内只取一次：同一批消息都属于当前 turn，不应出现同批不同 trace。
+     */
+    private static String currentTraceId() {
+        var spanContext = Span.current().getSpanContext();
+        if (spanContext == null || !spanContext.isValid()) {
+            return null;
+        }
+        var traceId = spanContext.getTraceId();
+        // 全零是 OTel 的非法 traceId（valid=false 已拦，双保险防 SDK 实现差异）
+        if (traceId == null || traceId.isBlank() || traceId.chars().allMatch(c -> c == '0')) {
+            return null;
+        }
+        return traceId;
+    }
+
+    /**
      * 读-合并-写批量归档（幂等，fail-soft：失败仅告警不影响对话主链路）。
      *
      * <p>同 (session_id, msg_id) 已有行时按 {@link #mergeMsgJson} 合并后整体覆盖 msg_data；
-     * reply_id 保持首个非空值（首轮盖戳不被后续轮次的 save 覆盖）。
+     * reply_id / trace_id 均保持首个非空值（首轮盖戳不被后续轮次的 save 覆盖）。
+     *
+     * <p>trace_id 取调用线程当前 OTel span：归档链路（TurnInputArchiveMiddleware 的
+     * turn 起始归档、SessionMessageArchiveStateStore 的 write-through）都位于
+     * OtelTracingMiddleware 的 span 作用域内。无活跃 span（OTEL_TRACES_EXPORTER=none、
+     * turn 失败收尾等）时落 NULL，history 按「-」展示，绝不伪造。
      *
      * @param sessionKey slot 复合键（与 agent_state.session_id 同值，见归档装饰器 slotKey）
      */
@@ -98,14 +123,17 @@ public class SessionMessageStore {
                 }
             }
 
-            // 2. 合并 + 3. 批量 upsert
+            // 2. 合并 + 3. 批量 upsert（trace_id 一次取当前 span，整批同轮）
+            var traceId = currentTraceId();
             var upsertSql = """
-                INSERT INTO session_message (session_id, msg_id, kind, role, reply_id, msg_data, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, NOW(3), NOW(3))
+                INSERT INTO session_message
+                  (session_id, msg_id, kind, role, reply_id, trace_id, msg_data, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))
                 ON DUPLICATE KEY UPDATE
                   kind = VALUES(kind),
                   role = VALUES(role),
                   reply_id = IF(reply_id IS NULL OR reply_id = '', VALUES(reply_id), reply_id),
+                  trace_id = IF(trace_id IS NULL OR trace_id = '', VALUES(trace_id), trace_id),
                   msg_data = VALUES(msg_data),
                   updated_at = NOW(3)
                 """;
@@ -121,7 +149,8 @@ public class SessionMessageStore {
                     ps.setString(3, r.kind() != null ? r.kind() : KIND_MESSAGE);
                     ps.setString(4, r.role());
                     ps.setString(5, r.replyId());
-                    ps.setString(6, mergeMsgJson(existing.get(r.msgId()), r.msgJson()));
+                    ps.setString(6, traceId);
+                    ps.setString(7, mergeMsgJson(existing.get(r.msgId()), r.msgJson()));
                     ps.addBatch();
                     batch++;
                 }
@@ -182,7 +211,7 @@ public class SessionMessageStore {
         if (sessionId == null || sessionId.isBlank()) {
             return result;
         }
-        var sql = "SELECT id, msg_id, kind, role, reply_id, msg_data, created_at FROM session_message "
+        var sql = "SELECT id, msg_id, kind, role, reply_id, trace_id, msg_data, created_at FROM session_message "
             + "WHERE (session_id = ? "
             +   "OR session_id LIKE CONCAT(?, ':%') "
             +   "OR session_id LIKE CONCAT(?, '__%') "
@@ -209,7 +238,7 @@ public class SessionMessageStore {
                 while (rs.next()) {
                     result.add(new ArchivedRow(rs.getLong("id"), rs.getString("msg_id"),
                         rs.getString("kind"), rs.getString("role"), rs.getString("reply_id"),
-                        rs.getString("msg_data"), rs.getTimestamp("created_at")));
+                        rs.getString("trace_id"), rs.getString("msg_data"), rs.getTimestamp("created_at")));
                 }
             }
         } catch (Exception e) {

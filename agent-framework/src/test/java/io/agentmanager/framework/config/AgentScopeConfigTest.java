@@ -124,7 +124,7 @@ class AgentScopeConfigTest {
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
             new AgentManagerProperties.HarnessConfig(
                 20, 30, 180, 30, true, 10, 8000, 60,
-                30, 10, true, true, 7, 1, 5000L, 60000L, 900000L));
+                30, 80000, 20000, 10, true, true, 7, 1, 5000L, 60000L, 900000L));
 
         var ds = config.dataSource(props);
         assertEquals(7, ((HikariDataSource) ds).getMaximumPoolSize());
@@ -376,7 +376,7 @@ class AgentScopeConfigTest {
         // memoryEnabled=false：完全关闭 = 不注册 memory_search / memory_get / memory_save
         var harness = new AgentManagerProperties.HarnessConfig(
             20, 30, 180, 30, false, 10, 8000, 60,
-            30, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+            30, 80000, 20000, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
         var names = buildAgentToolNames(harness);
 
         assertFalse(names.contains("memory_search"), "memory 关闭时不应注册 memory_search");
