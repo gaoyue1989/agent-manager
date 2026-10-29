@@ -20,6 +20,8 @@ import io.agentscope.core.ReActAgent;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.harness.agent.DistributedStore;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
+import io.agentscope.harness.agent.middleware.CompactionMiddleware;
 
 /**
  * HarnessAgentFactory 装配级测试：RemoteSpawnCaptureMiddleware 必须注册进 builder 链
@@ -124,6 +126,13 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
 
     /** 组装与首条用例同口径的 factory（WorkspaceInitializer / McpToolRegistrar / DistributedStore 打桩） */
     private HarnessAgentFactory assemblyFactory(String remoteHeadersJson) throws Exception {
+        return assemblyFactory(remoteHeadersJson, AgentManagerProperties.HarnessConfig.defaults());
+    }
+
+    /** 同口径工厂，但 Harness 运行时参数可指定（用于断言 compaction 等配置真的进了构建产物） */
+    private HarnessAgentFactory assemblyFactory(String remoteHeadersJson,
+                                                AgentManagerProperties.HarnessConfig harness)
+            throws Exception {
         var props = new AgentManagerProperties(
             new AgentManagerProperties.LLMConfig(
                 "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
@@ -136,7 +145,7 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
                 "image/*,text/plain,text/markdown,text/csv,application/pdf",
                 5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
             new AgentManagerProperties.SseConfig(20, 5, 256, 300),
-            AgentManagerProperties.HarnessConfig.defaults(),
+            harness,
             new AgentManagerProperties.AgentProtocolSettings(
                 true, "tok", "", 7, 24, 5, remoteHeadersJson, true, 120, "memory"));
         var ws = mock(WorkspaceInitializer.class);
@@ -191,5 +200,35 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
 
         assertTrue(agent.getSubagentAgentManager().getDeclaration("booking").isEmpty(),
             "endpoint 为空者不应被注册为远程声明");
+    }
+
+    /**
+     * token 触发阈值必须真的进入构建产物（MCP 大量返回场景的回归锚点）：
+     * 装配层漏调 {@code triggerTokens()} 时 SDK 会退回动态模式/默认值，消息数仍是唯一有效阈值。
+     */
+    @Test
+    void compactionShouldBeWiredWithTokenThresholdFromHarnessSettings() throws Exception {
+        var harness = new AgentManagerProperties.HarnessConfig(
+            20, 30, 180, 30, true, 10, 8000, 60,
+            30, 12345, 4321, 10, true, true, 10, 2, 30000L, 600000L, 1800000L);
+        var store = mock(DistributedStore.class);
+        when(store.baseStore())
+            .thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var agent = assemblyFactory(null, harness)
+            .build(oafWithEndpoint(""), store, new LLMLogger(), null, null,
+                mock(ModelCatalog.class), null);
+
+        var compaction = agent.getCompactionHook();
+        assertNotNull(compaction, "compaction 已配置时必须产出 CompactionMiddleware");
+
+        Field configField = CompactionMiddleware.class.getDeclaredField("config");
+        configField.setAccessible(true);
+        var cfg = (CompactionConfig) configField.get(compaction);
+        assertEquals(12345, cfg.getTriggerTokens(), "AGENT_COMPACTION_TRIGGER_TOKENS 必须接线");
+        assertEquals(4321, cfg.getReserved(), "AGENT_COMPACTION_RESERVED_TOKENS 必须接线");
+        assertEquals(30, cfg.getTriggerMessages(), "消息数阈值保持并存（二者任一命中即压缩）");
     }
 }

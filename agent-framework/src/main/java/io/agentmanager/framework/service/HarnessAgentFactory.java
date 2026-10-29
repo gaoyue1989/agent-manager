@@ -343,6 +343,10 @@ public class HarnessAgentFactory {
                 // 上下文压缩（AGENT_COMPACTION_* 可调）
                 .compaction(CompactionConfig.builder()
                     .triggerMessages(harness.compactionTriggerMessages())
+                    // token 触发：MCP 单次返回大量内容时不必等消息数攒够（二者任一命中即压缩）；
+                    // 0 = 交回 SDK 动态模式（模型上下文窗口 - reserved）
+                    .triggerTokens(harness.compactionTriggerTokens())
+                    .reserved(harness.compactionReservedTokens())
                     .keepMessages(harness.compactionKeepMessages())
                     // 记忆总开关关闭时强制不刷写：SDK 2.0.3 的压缩前 flush 走 CompactionMiddleware
                     // 内部自建的 MemoryFlushManager（仅判 CompactionConfig.isFlushBeforeCompact()），

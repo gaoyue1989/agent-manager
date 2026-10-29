@@ -296,7 +296,9 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `AGENT_MEMORY_FLUSH_THROTTLE_MINUTES` | int | `10` | 记忆 flush 节流（分钟） |
 | `AGENT_MEMORY_CONSOLIDATION_MAX_TOKENS` | int | `8000` | 记忆整合单次处理上限（tokens） |
 | `AGENT_MEMORY_CONSOLIDATION_MIN_GAP_MINUTES` | int | `60` | 两次整合最小间隔（分钟） |
-| `AGENT_COMPACTION_TRIGGER_MESSAGES` | int | `30` | 上下文压缩触发条数 |
+| `AGENT_COMPACTION_TRIGGER_MESSAGES` | int | `30` | 上下文压缩触发条数（与 token 阈值任一命中即压缩，0 = 关闭消息数触发） |
+| `AGENT_COMPACTION_TRIGGER_TOKENS` | int | `80000` | 上下文压缩 token 估算阈值：`>0` 固定阈值；`0` = 动态（模型上下文窗口 - `AGENT_COMPACTION_RESERVED_TOKENS`，模型未上报窗口时回退 160k） |
+| `AGENT_COMPACTION_RESERVED_TOKENS` | int | `20000` | 动态 token 触发时预留给压缩请求（摘要 prompt + 输出）的窗口，仅 `AGENT_COMPACTION_TRIGGER_TOKENS=0` 生效 |
 | `AGENT_COMPACTION_KEEP_MESSAGES` | int | `10` | 压缩后保留条数 |
 | `AGENT_COMPACTION_FLUSH_BEFORE_COMPACT` | bool | `true` | 压缩前先刷写记忆（记忆关闭时失效） |
 | `AGENT_COMPACTION_OFFLOAD_BEFORE_COMPACT` | bool | `true` | 压缩前先落盘会话 |
