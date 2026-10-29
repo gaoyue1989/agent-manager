@@ -28,6 +28,7 @@ const NAV: { group?: string; items: { href: string; label: string; soon?: boolea
       { href: "/console/assets/knowledge", label: "知识库", soon: true },
       { href: "/console/assets/memory", label: "记忆空间" },
       { href: "/console/assets/credentials", label: "凭证管理" },
+      { href: "/console/workspace-config", label: "空间配置" },
     ],
   },
   { group: "AGENT 协作", items: [{ href: "#", label: "Team 协作", soon: true }] },
@@ -46,6 +47,7 @@ function NavIcon({ label }: { label: string }) {
     记忆空间: "M9 4a5 5 0 0 1 5 5v1a5 5 0 0 1 0 8 5 5 0 0 1-9-3 5 5 0 0 1 0-8 5 5 0 0 1 4-3Z",
     凭证管理: "M15 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM3 5h18v14H3zM7 9h4",
     "成员管理": "M16 14a4 4 0 1 0-8 0M12 4a3 3 0 1 1 0 6 3 3 0 0 1 0-6ZM4 20a8 8 0 0 1 16 0",
+    空间配置: "M5 5h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1ZM8 9h8M8 13h5M8 17h3",
     观测大盘: "M4 19h16M7 16V9m5 7V5m5 11v-5",
   };
   return (

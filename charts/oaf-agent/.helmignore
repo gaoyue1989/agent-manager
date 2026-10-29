@@ -1,0 +1,12 @@
+# Patterns to ignore when building the chart (常规默认，同 helm create 生成内容)。
+# .helmignore 不支持绝对路径与父目录引用。
+
+.git/
+.gitignore
+.swp
+.swp.*
+*.swp
+*.tmp
+/tmp/
+/.ci/
+.DS_Store

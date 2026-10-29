@@ -193,6 +193,41 @@ export interface SkillUsageDetailItem extends SkillUsageRef {
 }
 export interface SkillUsageDetail { agent: SkillUsageItem; items: SkillUsageDetailItem[]; }
 
+// ---- 跨集群导出（设计 §9；实际路由挂 /api/v1/console 前缀，契约 §4-D3）----
+// 发布标记（export_package_marks 行视图；marker = {包版本}-e{序号}；后端另含 id/serviceId/createdBy，此处取展示子集）
+export interface ExportMark { marker: string; checksum: string; packageVersion: string; fileCount: number; status: string; createdAt: string; }
+// 包文件行（backend ExportPackageFileView：binary=true 时 content 缺省，引导走既有下载端点）
+export interface ExportPackageFileInfo { path: string; size?: number; binary?: boolean; readOnly?: boolean; encoding?: string; content?: string; }
+// 导出包编辑器数据（backend ExportPackageView：源包 + 草稿叠加后的有效文件视图；draft = 未冻结草稿标记）
+export interface ExportPackagePreview {
+  package: { packageId?: number; slug?: string; version?: string; checksum?: string };
+  files: ExportPackageFileInfo[];
+  draft?: ExportMark | null;
+}
+// 导出预填（backend service.ExportPreview，契约 §4.1：源包、现 env 掩码视图、空间默认值掩码、
+// 镜像白名单、派生键预览、L1 锁定键）
+// 注意：baseImageWhitelist 为 service.ImageOption（小写 image/label），与 legacy /images 端点的
+// ImageOption（大写 Image/Label）字段名不同——同形异构，勿混用
+export interface ExportPreview {
+  service: { id: number; displayName?: string; k8sName?: string; shortName?: string; replicas?: number };
+  package: { packageId?: number; slug?: string; version?: string; checksum?: string };
+  marks: ExportMark[];
+  // serviceEnv：现 env 掩码视图（仅 hasValue/sensitive，值永不回传）
+  serviceEnv?: Record<string, { hasValue: boolean; sensitive: boolean }>;
+  runtimeDefaults?: Record<string, RuntimeDefaultEntry>;
+  baseImageWhitelist: { image: string; label?: string }[];
+  derivedPreview?: { checkpointDB: string; redisPrefix: string; oafImageRef?: string };
+  lockedKeys: string[];
+}
+// 导出单状态视图（values/manifest 明文永不回显，仅下载端点交付——契约 §4.3）
+export interface ExportOrderView {
+  id: number; status: string; oafImageRef?: string; oafImageDigest?: string;
+  error?: string; itsmTicketId?: string; createdAt: string; updatedAt: string;
+}
+// 运行时默认单条视图（backend RuntimeDefaultEntry：非敏感键回 value；敏感键 value 恒缺省，
+// hasValue 标记是否已配置——三态保存与「已配置」占位以此为准）
+export interface RuntimeDefaultEntry { value?: string; hasValue?: boolean; sensitive: boolean; category: string; }
+
 export const api = {
   // 包
   listPackages: (keyword = "", slug = "") =>
@@ -388,6 +423,37 @@ export const api = {
     },
     // 镜像列表（console 用户不可调 legacy /images——AUTH_TOKEN 组；console 端点 JWT 可读）
     images: () => request<ImageOption[]>(`/console/images`),
+  },
+
+  // ---- 跨集群导出（2026-10，设计 §9；/console 前缀见契约 §4）----
+  workspaceConfig: {
+    // 运行时默认（敏感键掩码视图；PUT 三态：非空=设置、空串=删除、缺失=不变）
+    runtimeDefaults: (ws: number | string) =>
+      request<Record<string, RuntimeDefaultEntry>>(`/console/workspaces/${ws}/config/runtime-defaults`),
+    updateRuntimeDefaults: (ws: number | string, values: Record<string, string>) =>
+      request(`/console/workspaces/${ws}/config/runtime-defaults`, { method: "PUT", body: JSON.stringify({ values }) }),
+  },
+  exportOrders: {
+    // 导出预填（锁定键/白名单/派生键/现 env 掩码）
+    preview: (ws: number | string, id: number) =>
+      request<ExportPreview>(`/console/workspaces/${ws}/agents/${id}/export/preview`),
+    packageTree: (ws: number | string, id: number) =>
+      request<ExportPackagePreview>(`/console/workspaces/${ws}/agents/${id}/export/package`),
+    saveFile: (ws: number | string, id: number, body: { path: string; content: string }) =>
+      request(`/console/workspaces/${ws}/agents/${id}/export/package/file`, { method: "PUT", body: JSON.stringify(body) }),
+    mark: (ws: number | string, id: number) =>
+      request<ExportMark>(`/console/workspaces/${ws}/agents/${id}/export/package/mark`, { method: "POST" }),
+    marks: (ws: number | string, id: number) =>
+      request<ExportMark[]>(`/console/workspaces/${ws}/agents/${id}/export/package/marks`),
+    create: (ws: number | string, id: number, body: { marker: string; baseImage: string; chartVersion?: string; env?: Record<string, string>; secretKeys?: string[]; replicas?: number }) =>
+      request<ExportOrderView>(`/console/workspaces/${ws}/agents/${id}/export`, { method: "POST", body: JSON.stringify(body) }),
+    get: (orderId: number) => request<ExportOrderView>(`/console/exports/${orderId}`),
+    // 下载走 <a href> 直链：JWT 经 httpOnly cookie oaf_session，与 downloadPackage 同模式
+    downloadValues: (orderId: number) => `${BASE}/console/exports/${orderId}/values.yaml`,
+    downloadManifest: (orderId: number) => `${BASE}/console/exports/${orderId}/manifest.json`,
+    // 人工推进状态（v1：built→approving→approved→deploying→deployed + 非终态→failed/cancelled）
+    advance: (orderId: number, body: { status: string; itsmTicketId?: string }) =>
+      request(`/console/exports/${orderId}/status`, { method: "POST", body: JSON.stringify(body) }),
   },
 
   // ---- 运维侧 admin（M1；JWT-admin 或 AUTH_TOKEN）----

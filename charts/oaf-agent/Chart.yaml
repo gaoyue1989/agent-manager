@@ -1,0 +1,10 @@
+apiVersion: v2
+name: oaf-agent
+description: OAF 业务 Agent（业务面：单个 agent-framework 运行时 + OAF 配置镜像注入）。
+  与控制面 chart oaf-platform 完全独立、自包含（无子 chart）；生产跨集群交付 4 件套之一，
+  MySQL/Redis/OTel 地址、镜像与路由 host 全部来自 values。
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [oaf, agent, a2a, cross-cluster]
+home: https://github.com/gaoyue1989/agent-manager

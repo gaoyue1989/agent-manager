@@ -1,0 +1,17 @@
+{{- $fullname := include "oaf-agent.fullname" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  # 命名规则与单集群一致：{fullname}-svc（objects.go:242-249；oaf- 前缀语义由 fullname 承担）
+  name: {{ $fullname }}-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "oaf-agent.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 8100
+      targetPort: 8100
+  # 无 sessionAffinity：任意请求可落任意副本，多副本横向扩展语义与单集群一致（设计 §6）

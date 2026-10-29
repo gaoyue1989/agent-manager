@@ -53,3 +53,26 @@ jobs:
             --set backend.jwtSecret=ci-secret \
             --set platformDefaults.seed.enabled=false > /tmp/chart-rendered.yaml
           test -s /tmp/chart-rendered.yaml
+
+  # 业务面 chart（跨集群导出交付物，契约 §6.5）：与控制面 lint 并列的独立 job，
+  # 未来转必需检查时单独勾选（新增 job 默认非必需，见根 AGENTS.md「分支保护」）
+  lint-oaf-agent:
+    name: oaf-agent Chart 校验 (helm lint + template)
+    needs: changes
+    if: needs.changes.outputs.charts == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: helm lint
+        run: helm lint charts/oaf-agent
+      - name: helm template（CI 占位必填值，渲染全量对象）
+        run: |
+          helm template ci-export charts/oaf-agent -f charts/oaf-agent/ci-values.yaml > /tmp/oaf-agent-rendered.yaml
+          test -s /tmp/oaf-agent-rendered.yaml
+          grep -q 'kind: Deployment' /tmp/oaf-agent-rendered.yaml
+          grep -q 'kind: Job' /tmp/oaf-agent-rendered.yaml     # hook Job 必须渲染
+          grep -q 'kind: Ingress' /tmp/oaf-agent-rendered.yaml
+          grep -q 'kind: Secret' /tmp/oaf-agent-rendered.yaml

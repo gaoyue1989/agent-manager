@@ -25,7 +25,8 @@ func Open(dsn string) (*gorm.DB, error) {
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},
 		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{},
 		&ModelConnection{}, &ModelDelivery{}, &McpConnector{}, &AgentIntegration{},
-		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{}); err != nil {
+		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{},
+		&ExportOrderEntity{}, &ExportPackageMarkEntity{}, &WorkspaceRuntimeDefaultEntity{}); err != nil {
 		return nil, err
 	}
 	return db, nil

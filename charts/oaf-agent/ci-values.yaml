@@ -1,0 +1,25 @@
+# CI 渲染全量对象用的占位必填值（契约 §6.4）：charts-ci 的 helm template 以本文件渲染，
+# 校验 Deployment/Service/Ingress/ConfigMap/Secret/ServiceAccount/hook Job 全部可渲染。
+fullnameOverride: ci-export-agent
+image:
+  base: example.invalid/agent-framework:ci
+  oaf: example.invalid/oaf-ci-export-agent:1.0.0-e1
+imagePullSecrets: []
+env:
+  AGENT_CONFIG_DIR: /config
+  AGENT_WORKSPACE_DIR: /workspace
+  SERVER_HOST: 0.0.0.0
+  SERVER_PORT: "8100"
+  CHECKPOINT_JDBC_URL: jdbc:mysql://mysql:3306/oaf_checkpoint_ci
+  AGENT_REDIS_PREFIX: "ci-export-agent:"
+secretEnv:
+  LLM_API_KEY: ci-sk
+  CHECKPOINT_PASSWORD: ci-pw
+  AGENT_REDIS_URL: redis://redis:6379/0
+ingress:
+  mode: host
+  hostSuffix: .ci.example.invalid
+  className: nginx
+mysql:
+  createDatabase: true
+  jobImage: mysql:8.0

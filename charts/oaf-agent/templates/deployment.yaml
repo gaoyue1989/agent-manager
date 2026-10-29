@@ -1,0 +1,93 @@
+{{- $fullname := include "oaf-agent.fullname" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "oaf-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "oaf-agent.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # initContainer 注入 OAF 配置（设计 §6）：OAF 配置镜像 = busybox 基底 + tar 层（条目前缀
+      # /oaf/），把包内容拷进共享 emptyDir 替代单集群的 PVC subPath 只读挂载——生产无共享 PVC
+      # 依赖，配置随镜像分发；Pod 重建即重拷（可丢弃/可重建，原则二）。
+      initContainers:
+        - name: inject-oaf
+          image: {{ include "oaf-agent.imageOaf" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c", "cp -a /oaf/. {{ .Values.configInjection.dir }}/"]
+          volumeMounts:
+            - name: config
+              mountPath: {{ .Values.configInjection.dir }}
+      containers:
+        - name: agent
+          image: {{ include "oaf-agent.imageBase" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8100
+          # envFrom 两源（K8s 多源同键后引用者覆盖先引用者）：敏感 Secret 在前、非敏感 CM 在后
+          # 可覆盖同名键——对齐平台业务 Deployment 顺序（objects.go:179-182）
+          envFrom:
+            - secretRef:
+                name: {{ $fullname }}-env-secret
+            - configMapRef:
+                name: {{ $fullname }}-env
+          env:
+            # 日志规范：HOST_NAME=Pod Name（downward API），logback 据此拼日志路径 /applog/${HOST_NAME}
+            # 与日志内容 [HOST_NAME] 字段（平台保留键注入，objects.go:154-156 同款；其余保留键经 env 下发）
+            - name: HOST_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            # OAF 包只读挂载（initContainer 已拷入）；工作区/文件存储/日志目录为 Pod 本地 emptyDir
+            # （可丢弃/可重建；跨副本文件不共享为 v1 已知边界，见 chart README）
+            - name: config
+              mountPath: {{ .Values.configInjection.dir }}
+              readOnly: true
+            - name: agent-workspace
+              mountPath: /workspace
+            - name: agent-files
+              mountPath: /data/files
+            - name: agent-applog
+              mountPath: /applog
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8100
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8100
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          emptyDir: {}
+        - name: agent-workspace
+          emptyDir: {}
+        - name: agent-files
+          emptyDir: {}
+        - name: agent-applog
+          emptyDir: {}
