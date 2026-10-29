@@ -2,7 +2,7 @@
 
 **日期**：2026-10-29　**状态**：设计定稿（评审决议齐备，未实施）
 
-> 本文档记录 2026-10-29 评审定稿的跨集群导出发布方案。四项关键决议见 §0，正文按决议编写；被否决的备选路径（独立镜像同步服务、values 占位符脱敏）仅在 §0 与 §13 v2 演进中留痕。可交互原型稿（流程图 + 导出页/运维页 Demo）随评审会话产出，未入库。
+> 本文档记录 2026-10-29 评审定稿的跨集群导出发布方案。四项关键决议见 §0，正文按决议编写；被否决的备选路径（独立镜像同步服务、values 占位符脱敏）仅在 §0 与 §13 v2 演进中留痕。配套可交互原型 [demo/cross-cluster-export-demo.html](demo/cross-cluster-export-demo.html)（单文件离线可开：导出发布页 / 运维默认配置 / 生产部署 / 交付包与 DoD）。
 
 ## 0. 决议记录（2026-10-29）
 
@@ -25,7 +25,11 @@
 
 ### 2.1 目标
 
-1. **用户侧导出发布页**（测试环境 Console）：从服务详情进入，提供配置包更新（MCP 等改生产地址）、版本查看、生产环境变量、模型配置、沙箱配置的编辑能力；工作空间运行时默认配置自动预填。确认后由 backend 生成 2 类交付物：OAF 配置镜像（构建后直推指定镜像仓库）+ values 文件（随 manifest 提交 ITSM）。
+1. **用户侧导出发布页**（测试环境 Console）：从服务详情进入，提供配置包更新、版本查看、生产环境变量、模型配置、沙箱配置能力：
+   - 配置包更新 = 文本直改：包文件树（AGENTS.md / skills 只读）+ 纯文本编辑器（复用 package-online-edit 的在线编辑思路）；保存即打**发布标记**（`{包版本}-e{序号}`）并把文件快照（path → content + checksum）写入发布标记表，确认导出时按该标记内容固化进 OAF 镜像；
+   - 生产环境变量：可添加 / 编辑 / 删除服务专属键；**来自运行时默认的行锁定不可修改**，只能由运维在配置管理改默认；
+   - 模型 / 沙箱配置按模板展示全量参数（LLM 10 键 / Sandbox 6 键，与 `platformconfig/template.go` 同源），默认锁定。
+   确认后由 backend 生成 2 类交付物：OAF 配置镜像（构建后直推指定镜像仓库）+ values 文件（随 manifest 提交 ITSM）。
 2. **运维侧工作空间运行时默认配置**：按工作空间维护 agent-framework 运行时所需的 MySQL / Redis / OTel / 沙箱 / 镜像仓库 / 路由等默认值，作为导出页预填与 values 组装来源。
 3. **审批与部署**：values + manifest 作为 ITSM 工单附件审批；审批通过后调用生产侧已有 HTTP Helm 部署接口，用 4 件套（chart / 基础镜像 / OAF 镜像 / values）完成跨集群部署。
 4. **测试集群零改动**：现有发布链路（PVC 直挂、backend 构造业务资源）不变，导出是新增旁路能力。
@@ -66,7 +70,7 @@
 
 - 泳道 2 的镜像构建与推送发生在 backend 进程 + 镜像仓库侧，**不写测试业务集群任何 K8s 资源**；
 - 泳道 4 的部署完全不经平台 backend 进程，与生产已有部署体系对接；
-- 「包配置更新」在导出页完成后即固化：改完的包版本直接构建进 OAF 镜像，values 不携带 MCP 覆盖段。
+- 「配置包更新」以发布标记冻结：保存即写入发布标记表（快照 + checksum），构建 OAF 镜像只认标记（无标记不可构建），标记不可修改——改动会生成新标记；values 不携带 MCP 覆盖段。
 
 ## 4. 交付物规范（生产侧 4 件套）
 
@@ -81,6 +85,7 @@
 
 - **内容**：OAF 包目录（`AGENTS.md` / `mcp-configs/` / `skills/` / `versions/`…）打 tar 层，包内挂载点 `/oaf`；基底 `busybox:1.36`，保证 initContainer 在镜像内执行 `sh -c "cp -a /oaf/. /config/"` 可用。
 - **构建与推送**：backend 内用 `google/go-containerregistry` 的 `remote.Write` 直推指定镜像仓库。OAF 镜像是纯数据镜像（KB~MB 级），该方式无 docker 依赖、无特权、同 tag 内容寻址可幂等重推，适合 backend 进程内完成；不引入 Kaniko（需特权与 RBAC，收益不匹配）。
+- **构建输入**：导出单当前生效的发布标记（`export_package_marks` 快照，含文件树 JSON 与 checksum）；无标记不可构建，标记不可修改（改则生成新标记）。
 - **tag 规则**：`{指定registry}/{namespace}/oaf-{k8s名}:{包版本}-e{导出序号}`；构建完成后 digest 记录进导出单，部署前可按 digest 校验镜像就绪。
 - **推送凭证**：来自工作空间运行时默认配置的 registry 组（§10），凭证存平台 Secret，不进任何导出产物。
 
@@ -137,8 +142,8 @@ volumes:
 | 层 | 来源 | 典型内容 | 覆盖关系 |
 |----|------|----------|----------|
 | L0 chart 默认 | chart 内置 values.yaml | 资源模板默认值、健康检查 | 被上层覆盖 |
-| L1 工作空间运行时默认 | `workspace_runtime_defaults`（运维维护，§10） | MySQL/Redis/OTel/沙箱地址、registry、路由模式 | 可被 L2 覆盖 |
-| L2 用户导出覆盖 | 导出发布页表单 | MCP 生产地址（进包）、生产 env、模型/沙箱密钥 | 可被 L3 覆盖 |
+| L1 工作空间运行时默认 | 工作空间配置管理（`/config/*`，运维维护，§10） | MySQL/Redis/OTel/沙箱/模型全量参数、registry、路由模式 | 导出页锁定（仅运维可改默认） |
+| L2 用户导出覆盖 | 导出发布页表单 | 包内 MCP 生产地址改写（进包）、服务专属新增 env 键（如 MCP token）、部署参数 | 仅新增，不覆盖 L1 键 |
 | L3 平台生成 | 导出单 | 镜像引用与 digest、保留键（`AGENT_CONFIG_DIR` 等）、派生键（JDBC 库名/Redis 前缀）、版本与审计标签 | **不可覆盖** |
 
 ### 7.2 敏感值规则（决议 ①：文件代入）
@@ -173,9 +178,20 @@ env:                              # 渲染为 ConfigMap envFrom
   CHECKPOINT_USERNAME: oaf_writer
   AGENT_REDIS_PREFIX: travel-agent:
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.prod.svc:4318
+  # 模型组（模板全量 10 键，空值不下发；此处列示例非空项）
   LLM_BASE_URL: https://llm-gw.prod.example.com/v1
   LLM_MODEL_ID: glm-4.7
-  OPENSANDBOX_API_URL: https://sandbox.prod.example.com
+  LLM_PROVIDER: openai
+  LLM_TEMPERATURE: "0.3"
+  LLM_MAX_TOKENS: "16384"
+  LLM_ENABLE_THINKING: "true"
+  LLM_CONTEXT_LENGTH: "128000"
+  # 沙箱组（模板全量 6 键）
+  OPENSANDBOX_SERVER_URL: sandbox.prod.example.com:8090
+  SANDBOX_IMAGE: opensandbox/code-interpreter:v1.1.0
+  SANDBOX_TIMEOUT_MINUTES: "60"
+  SANDBOX_MEMORY_MB: "1024"
+  SANDBOX_CPU_COUNT: "1"
 
 secretEnv:                        # 渲染为 Secret envFrom（明文，文件代入）
   LLM_API_KEY: "sk-prod-9f8e7d6c"
@@ -235,6 +251,22 @@ type ExportOrderEntity struct {
 }
 // 索引：(workspace_id, status)
 
+// 发布标记：导出级包编辑的快照（文本直改 → 打标记 → 落表 → 构建固化）
+type ExportPackageMarkEntity struct {
+    ID             uint64
+    ServiceID      uint64 `gorm:"index"`
+    WorkspaceID    uint64 `gorm:"index"`
+    ExportOrderID  uint64 `gorm:"index"` // 0 = 尚未挂到导出单（草稿标记）
+    Marker         string `gorm:"size:64;uniqueIndex"` // {包版本}-e{序号}，与 OAF 镜像 tag 对应
+    PackageVersion string
+    FilesJSON      string `gorm:"type:mediumtext"` // 文件树快照：path → content
+    FileCount      int
+    Checksum       string // 快照内容 sha256
+    Status         string // frozen（已冻结，可构建）
+    CreatedBy      string
+    CreatedAt      time.Time
+}
+
 // 工作空间运行时默认配置（运维侧维护，导出页预填来源）
 type WorkspaceRuntimeDefaultEntity struct {
     ID          uint64
@@ -249,6 +281,8 @@ type WorkspaceRuntimeDefaultEntity struct {
 }
 ```
 
+发布标记是 OAF 镜像构建的唯一输入：保存即冻结快照（`FilesJSON` + checksum），不可修改（改动生成新标记）；导出单创建必须携带 marker。
+
 状态机：
 
 ```text
@@ -262,18 +296,27 @@ v1 中 `approving → approved → deploying` 由运维在平台人工推进（�
 
 | Method · Path | 说明 |
 |---------------|------|
+| `GET /api/v1/services/:id/export/package` | 包文件树与文本内容（AGENTS.md / skills 只读项标注） |
+| `PUT /api/v1/services/:id/export/package/file` | 保存单文件文本修改（写编辑草稿，不冻结） |
+| `POST /api/v1/services/:id/export/package/mark` | 打发布标记：冻结当前快照写入 `export_package_marks`，返回 marker 与 checksum |
+| `GET /api/v1/services/:id/export/package/marks` | 发布标记列表（marker / checksum / 时间 / 状态） |
 | `GET /api/v1/services/:id/export/preview` | 预填：源包结构与版本、现 env、工作空间默认值、镜像白名单、派生键预览 |
-| `POST /api/v1/services/:id/export` | 创建导出单（包覆盖 → 派生新包版本 + env/model/sandbox/部署参数）→ 异步构建 |
+| `POST /api/v1/services/:id/export` | 创建导出单（携带发布标记 marker + env/model/sandbox/部署参数）→ 异步构建 |
 | `GET /api/v1/exports/:id` | 导出单状态与详情（构建进度） |
 | `GET /api/v1/exports/:id/values.yaml` · `/manifest.json` | 下载交付文本（values 含真实敏感值，下载记录审计） |
 | `POST /api/v1/exports/:id/status` | 人工推进状态（v1：approving/approved/deploying），记录操作人与 ITSM 单号 |
-| `GET|PUT /api/v1/workspaces/:id/runtime-defaults` | 运维侧工作空间运行时默认配置（workspace owner 或平台 admin） |
+| `GET|PUT /api/v1/workspaces/:id/config/runtime-defaults` | 运行时默认 env（分类键值，敏感掩码；导出页锁定来源） |
+| `GET|PUT /api/v1/workspaces/:id/config/mcp-connectors` | MCP 连接器模板（connection / auth / permissions / 工具子集） |
+| `GET|PUT /api/v1/workspaces/:id/config/templates/:group` | 模型 / 沙箱参数模板（`llm` / `sandbox`，复用 platformconfig 模板驱动） |
+| `GET|PUT /api/v1/workspaces/:id/config/registry` | 仓库 / 拉取凭证 / 路由 / 镜像白名单 |
 
 权限口径：导出发起要求 workspace 成员（与 services 归属校验同模式）；runtime-defaults 仅 workspace owner 与平台 admin；导出单可见性跟随 workspace。生产部署不新增平台能力：审批通过后由运维/流程调用**已有 HTTP Helm 部署接口**提交 4 件套（chart + values 文件，镜像按 values 引用从指定仓库拉取）。
 
-## 10. 运维侧：工作空间运行时默认配置
+## 10. 运维侧：工作空间配置管理（API + 页面重设计）
 
-页面：控制台（运维视角）→ 工作空间 → 运行时默认配置。与 `platform_config`（平台级、全服务表单默认）的区别：本表 **per-workspace、面向生产导出**，测试集群的平台默认配置不经 envFrom 注入的语义不变。字段分组：
+页面：控制台（运维视角）→ 工作空间 → 配置管理，页签 = 运行时默认 / MCP 连接器模板 / 模型参数 / 沙箱参数 / 仓库与路由 / API。统一入口管理导出所需的全部默认值；**导出发布页全部继承本页，且默认值在导出页锁定**——单次导出不能悄悄改基线，要改只能由运维在此修改（留审计）。与 `platform_config`（平台级、全服务表单默认）的区别：本模块 **per-workspace、面向生产导出**，测试集群「平台默认配置不经 envFrom 注入、仅表单预填」的语义不变。
+
+参数模板与 `backend/internal/service/platformconfig/template.go` 同源（模板驱动表单 / 敏感路由 / 掩码输出）：LLM 组 10 键（API_KEY / BASE_URL / MODEL_ID / PROVIDER / TEMPERATURE / MAX_TOKENS / ENABLE_THINKING / CONTEXT_LENGTH / REASONING_EFFORT / FREQUENCY_PENALTY）、Sandbox 组 6 键（OPENSANDBOX_SERVER_URL / API_KEY / SANDBOX_IMAGE / TIMEOUT_MINUTES / MEMORY_MB / CPU_COUNT）；`SANDBOX_ENABLED` 刻意排除（agent-framework 三层裁决：env 显式存在 > OAF 包 frontmatter > 默认 false，进默认配置会让包级沙箱声明永久失效）。变更审计复用 `platform_config_events` 思路；导出页对新增键与 MCP 改写留痕，默认值本身不可在导出页修改。字段分组：
 
 | 分类 | 键 / 配置 | 敏感 | 说明 |
 |------|-----------|------|------|
@@ -282,13 +325,13 @@ v1 中 `approving → approved → deploying` 由运维在平台人工推进（�
 | redis | `AGENT_REDIS_URL` | ★ | |
 | redis | `AGENT_REDIS_PREFIX` 规则 | 否 | 平台派生 `{k8s名}:`，防跨服务串写 |
 | otel | `OTEL_EXPORTER_OTLP_ENDPOINT` | 否 | |
-| sandbox | `OPENSANDBOX_API_URL`（`OPENSANDBOX_API_KEY` 走导出页敏感键） | 否 | |
+| llm | LLM 组模板全量 10 键（API_KEY / BASE_URL / MODEL_ID / PROVIDER / TEMPERATURE / MAX_TOKENS / ENABLE_THINKING / CONTEXT_LENGTH / REASONING_EFFORT / FREQUENCY_PENALTY） | API Key ★ | 与 `platformconfig/template.go` 同源，空值不下发 |
+| sandbox | `OPENSANDBOX_SERVER_URL` / `OPENSANDBOX_API_KEY` / `SANDBOX_IMAGE` / `SANDBOX_TIMEOUT_MINUTES` / `SANDBOX_MEMORY_MB` / `SANDBOX_CPU_COUNT`（模板全量 6 键） | API Key ★ | `SANDBOX_ENABLED` 不进模板（包 frontmatter 三层裁决） |
+| protocol | `AGENT_PROTOCOL_AUTH_TOKEN` / `AGENT_REMOTE_HEADERS_JSON` / `AGENT_A2A_JOB_TOKEN` | ★ | 敏感键走模板 Secret 路由；开关类键刻意不进默认 |
 | registry | 指定镜像仓库地址 / `imagePullSecrets` | 否 | backend 直推目标，生产侧自己拉取生产同步镜像 |
 | registry | 推送凭证 | ★ | 存平台 Secret，不进导出产物 |
 | routing | ingress.mode / hostSuffix | 否 | 对齐 `INGRESS_HOST_SUFFIX` 语义 |
 | runtime | 基础镜像白名单 | 否 | 导出页只允许白名单内版本 |
-
-变更审计复用 `platform_config_events` 思路记录操作人/时间/键清单；导出页对默认值的逐字段覆盖在导出单 manifest 中留痕。
 
 ## 11. 架构强约束核对
 
@@ -337,7 +380,7 @@ v1 中 `approving → approved → deploying` 由运维在平台人工推进（�
 ## 14. 关联文档
 
 - [helm-offline-deploy-design.md](helm-offline-deploy-design.md) — 控制面 chart 形态先例，`oaf-agent` 交付格式与其保持衔接；
-- [package-online-edit-design.md](package-online-edit-design.md) — 导出时「包配置更新 → 派生新版本」复用其 copy-on-write 派生链（SourcePackageID）；
+- [package-online-edit-design.md](package-online-edit-design.md) — 配置包文本编辑复用其在线编辑交互与安全校验思路；导出快照落 `export_package_marks` 表（不派生 oaf_packages 记录）；
 - [platform-default-config-secret-design.md](platform-default-config-secret-design.md) — sensitiveKeys 清单与「普通键 CM / 敏感键 Secret」路由模式同源；
 - [console-user-workspace-split-design.md](console-user-workspace-split-design.md) — workspaces 实体与角色模型（owner/admin/member）；
 - [subpath-routing-design.md](subpath-routing-design.md) — router/host 双模式路由语义，chart ingress 段对齐。

@@ -66,7 +66,11 @@ li { margin: 3px 0; }
 <h2>2. 目标与非目标</h2>
 <p><b>目标</b>：</p>
 <ul>
-<li><b>用户侧导出发布页</b>（测试 Console）：服务详情进入，编辑配置包更新（MCP 等改生产地址）、版本查看、生产 env、模型配置、沙箱配置；工作空间运行时默认自动预填。确认后 backend 生成 2 类交付物：<b>OAF 配置镜像</b>（构建后直推指定仓库）+ <b>values 文件</b>（随 manifest 提交 ITSM）。</li>
+<li><b>用户侧导出发布页</b>（测试 Console）：服务详情进入，提供配置包更新、版本查看、生产 env、模型/沙箱配置：<br>
+① 配置包更新 = 文本直改——包文件树（AGENTS.md / skills 只读）+ 纯文本编辑器（复用 package-online-edit 思路），保存即打<b>发布标记</b>（<code>{包版本}-e{序号}</code>）并把文件快照（path → content + checksum）写入发布标记表，构建 OAF 镜像只认该标记；<br>
+② 生产 env 可添加 / 编辑 / 删除服务专属键，<b>运行时默认来源的行锁定</b>（只能由运维在配置管理改默认）；<br>
+③ 模型 / 沙箱按模板展示全量参数（LLM 10 键 / Sandbox 6 键，与 <code>platformconfig/template.go</code> 同源），默认锁定。<br>
+确认后 backend 生成 2 类交付物：<b>OAF 配置镜像</b>（构建后直推指定仓库）+ <b>values 文件</b>（随 manifest 提交 ITSM）。</li>
 <li><b>运维侧工作空间运行时默认配置</b>：按工作空间维护 MySQL / Redis / OTel / 沙箱 / 镜像仓库 / 路由默认值，作为导出页预填与 values 组装来源。</li>
 <li><b>审批与部署</b>：values + manifest 作 ITSM 附件审批；通过后调用已有 HTTP 部署接口，用 4 件套完成跨集群部署。</li>
 <li><b>测试集群零改动</b>：现有发布链路（PVC 直挂、backend 构造业务资源）不变，导出是新增旁路能力。</li>
@@ -104,8 +108,8 @@ li { margin: 3px 0; }
 
   <rect x="35" y="182" width="250" height="72" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
   <text x="160" y="203" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">② 导出发布页</text>
-  <text x="160" y="221" text-anchor="middle" font-size="11.5" fill="#475569">MCP 改生产地址（进包）· env/模型/沙箱</text>
-  <text x="160" y="238" text-anchor="middle" font-size="11.5" fill="#475569">工作空间运行时默认预填</text>
+  <text x="160" y="221" text-anchor="middle" font-size="11.5" fill="#475569">文本编辑包文件 · 保存打发布标记（落表）</text>
+  <text x="160" y="238" text-anchor="middle" font-size="11.5" fill="#475569">env/模型/沙箱继承默认（锁定）</text>
 
   <rect x="35" y="284" width="250" height="56" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
   <text x="160" y="305" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">③ 确认导出 → 创建导出单</text>
@@ -118,8 +122,8 @@ li { margin: 3px 0; }
 
   <rect x="335" y="206" width="250" height="64" rx="8" fill="#d1fae5" stroke="#059669" stroke-width="1.5"/>
   <text x="460" y="227" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">④ 构建 OAF 配置镜像</text>
-  <text x="460" y="245" text-anchor="middle" font-size="11.5" fill="#475569">busybox 基底 · go-containerregistry</text>
-  <text x="460" y="261" text-anchor="middle" font-size="11.5" fill="#475569">无 docker / 无特权 · 幂等重推</text>
+  <text x="460" y="245" text-anchor="middle" font-size="11.5" fill="#475569">按发布标记快照固化 · busybox 基底</text>
+  <text x="460" y="261" text-anchor="middle" font-size="11.5" fill="#475569">go-containerregistry 直推 · 幂等</text>
 
   <rect x="335" y="330" width="250" height="64" rx="8" fill="#d1fae5" stroke="#059669" stroke-width="1.5"/>
   <text x="460" y="351" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">⑤ 组装 values + manifest</text>
@@ -177,7 +181,7 @@ li { margin: 3px 0; }
 </svg>
 <div class="legend">
   <span>要点：构建与直推不写测试集群任何 K8s 资源；生产部署不经平台 backend 进程</span>
-  <span>「包配置更新」在导出页完成后即固化进 OAF 镜像，values 不携带 MCP 覆盖段</span>
+  <span>「配置包更新」以发布标记冻结（快照落表），构建 OAF 镜像只认标记；values 不携带 MCP 覆盖段</span>
 </div>
 
 <h2>4. 交付物规范（生产侧 4 件套）</h2>
@@ -198,6 +202,7 @@ li { margin: 3px 0; }
 <tr><td>Kaniko Job（否决）</td><td>集群内 Job + RBAC</td><td>需要特权运行时</td><td>通用镜像构建，对配置镜像过重</td></tr>
 </table>
 <ul>
+<li><b>构建输入</b>：导出单当前生效的发布标记（<code>export_package_marks</code> 快照，含文件树 JSON 与 checksum）；无标记不可构建，标记不可修改（改则生成新标记）。</li>
 <li><b>tag 规则</b>：<code>{指定registry}/{namespace}/oaf-{k8s名}:{包版本}-e{导出序号}</code>；构建完成后 digest 记录进导出单，部署前可按 digest 校验镜像就绪。</li>
 <li><b>推送凭证</b>：来自工作空间运行时默认配置的 registry 组（§10），凭证存平台 Secret，不进任何导出产物。</li>
 </ul>
@@ -233,8 +238,8 @@ volumes:
 <table>
 <tr><th style="width:16%">层</th><th style="width:30%">来源</th><th>典型内容</th><th style="width:14%">覆盖关系</th></tr>
 <tr><td>L0 chart 默认</td><td>chart 内置 values.yaml</td><td>资源模板默认值、健康检查</td><td>被上层覆盖</td></tr>
-<tr><td>L1 工作空间运行时默认</td><td><code>workspace_runtime_defaults</code>（运维维护，§10）</td><td>MySQL/Redis/OTel/沙箱地址、registry、路由模式</td><td>可被 L2 覆盖</td></tr>
-<tr><td>L2 用户导出覆盖</td><td>导出发布页表单</td><td>MCP 生产地址（进包）、生产 env、模型/沙箱密钥</td><td>可被 L3 覆盖</td></tr>
+<tr><td>L1 工作空间运行时默认</td><td>工作空间配置管理（<code>/config/*</code>，运维维护，§10）</td><td>MySQL/Redis/OTel/沙箱/模型全量参数、registry、路由模式</td><td>导出页锁定（仅运维可改默认）</td></tr>
+<tr><td>L2 用户导出覆盖</td><td>导出发布页表单</td><td>包内 MCP 生产地址改写（进包）、服务专属新增 env 键（如 MCP token）、部署参数</td><td>仅新增，不覆盖 L1 键</td></tr>
 <tr><td>L3 平台生成</td><td>导出单</td><td>镜像引用与 digest、保留键（<code>AGENT_CONFIG_DIR</code> 等）、派生键（JDBC 库名 / Redis 前缀）、版本与审计标签</td><td><b>不可覆盖</b></td></tr>
 </table>
 
@@ -268,9 +273,20 @@ env:                              # 渲染为 ConfigMap envFrom
   CHECKPOINT_USERNAME: oaf_writer
   AGENT_REDIS_PREFIX: travel-agent:
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.prod.svc:4318
+  # 模型组（模板全量 10 键，空值不下发；此处列示例非空项）
   LLM_BASE_URL: https://llm-gw.prod.example.com/v1
   LLM_MODEL_ID: glm-4.7
-  OPENSANDBOX_API_URL: https://sandbox.prod.example.com
+  LLM_PROVIDER: openai
+  LLM_TEMPERATURE: "0.3"
+  LLM_MAX_TOKENS: "16384"
+  LLM_ENABLE_THINKING: "true"
+  LLM_CONTEXT_LENGTH: "128000"
+  # 沙箱组（模板全量 6 键）
+  OPENSANDBOX_SERVER_URL: sandbox.prod.example.com:8090
+  SANDBOX_IMAGE: opensandbox/code-interpreter:v1.1.0
+  SANDBOX_TIMEOUT_MINUTES: "60"
+  SANDBOX_MEMORY_MB: "1024"
+  SANDBOX_CPU_COUNT: "1"
 
 secretEnv:                        # 渲染为 Secret envFrom（明文，文件代入）
   LLM_API_KEY: "sk-prod-9f8e7d6c"
@@ -325,6 +341,22 @@ type ExportOrderEntity struct {
 }
 // 索引：(workspace_id, status)
 
+// 发布标记：导出级包编辑的快照（文本直改 → 打标记 → 落表 → 构建固化）
+type ExportPackageMarkEntity struct {
+    ID             uint64
+    ServiceID      uint64 `gorm:"index"`
+    WorkspaceID    uint64 `gorm:"index"`
+    ExportOrderID  uint64 `gorm:"index"` // 0 = 尚未挂到导出单（草稿标记）
+    Marker         string `gorm:"size:64;uniqueIndex"` // {包版本}-e{序号}，与 OAF 镜像 tag 对应
+    PackageVersion string
+    FilesJSON      string `gorm:"type:mediumtext"` // 文件树快照：path → content
+    FileCount      int
+    Checksum       string // 快照内容 sha256
+    Status         string // frozen（已冻结，可构建）
+    CreatedBy      string
+    CreatedAt      time.Time
+}
+
 // 工作空间运行时默认配置（运维侧维护，导出页预填来源）
 type WorkspaceRuntimeDefaultEntity struct {
     ID          uint64
@@ -339,23 +371,32 @@ type WorkspaceRuntimeDefaultEntity struct {
 }</code></pre>
 <pre><code>draft → building → built → approving(ITSM) → approved → deploying → deployed
 任意态可入 failed / cancelled</code></pre>
+<p>发布标记是 OAF 镜像构建的唯一输入：保存即冻结快照（<code>FilesJSON</code> + checksum），不可修改（改动生成新标记）；导出单创建必须携带 marker。</p>
 <p>v1 中 <code>approving → approved → deploying</code> 由运维在平台人工推进（或脚本回填），v2 接 ITSM / 部署回调自动化。</p>
 
 <h2>9. API 设计（console JWT 之下）</h2>
 <table>
 <tr><th style="width:44%">Method · Path</th><th>说明</th></tr>
+<tr><td><code>GET /api/v1/services/:id/export/package</code></td><td>包文件树与文本内容（AGENTS.md / skills 只读项标注）</td></tr>
+<tr><td><code>PUT /api/v1/services/:id/export/package/file</code></td><td>保存单文件文本修改（写编辑草稿，不冻结）</td></tr>
+<tr><td><code>POST /api/v1/services/:id/export/package/mark</code></td><td>打发布标记：冻结当前快照写入 <code>export_package_marks</code>，返回 marker 与 checksum</td></tr>
+<tr><td><code>GET /api/v1/services/:id/export/package/marks</code></td><td>发布标记列表（marker / checksum / 时间 / 状态）</td></tr>
 <tr><td><code>GET /api/v1/services/:id/export/preview</code></td><td>预填：源包结构与版本、现 env、工作空间默认值、镜像白名单、派生键预览</td></tr>
-<tr><td><code>POST /api/v1/services/:id/export</code></td><td>创建导出单（包覆盖 → 派生新包版本 + env/model/sandbox/部署参数）→ 异步构建</td></tr>
+<tr><td><code>POST /api/v1/services/:id/export</code></td><td>创建导出单（携带发布标记 marker + env/model/sandbox/部署参数）→ 异步构建</td></tr>
 <tr><td><code>GET /api/v1/exports/:id</code></td><td>导出单状态与详情（构建进度）</td></tr>
 <tr><td><code>GET /api/v1/exports/:id/values.yaml</code> · <code>/manifest.json</code></td><td>下载交付文本（values 含真实敏感值，下载记录审计）</td></tr>
 <tr><td><code>POST /api/v1/exports/:id/status</code></td><td>人工推进状态（v1：approving / approved / deploying），记录操作人与 ITSM 单号</td></tr>
-<tr><td><code>GET|PUT /api/v1/workspaces/:id/runtime-defaults</code></td><td>运维侧工作空间运行时默认配置（workspace owner 或平台 admin）</td></tr>
+<tr><td><code>GET|PUT /api/v1/workspaces/:id/config/runtime-defaults</code></td><td>运行时默认 env（分类键值，敏感掩码；导出页锁定来源）</td></tr>
+<tr><td><code>GET|PUT /api/v1/workspaces/:id/config/mcp-connectors</code></td><td>MCP 连接器模板（connection / auth / permissions / 工具子集）</td></tr>
+<tr><td><code>GET|PUT /api/v1/workspaces/:id/config/templates/:group</code></td><td>模型 / 沙箱参数模板（<code>llm</code> / <code>sandbox</code>，复用 platformconfig 模板驱动）</td></tr>
+<tr><td><code>GET|PUT /api/v1/workspaces/:id/config/registry</code></td><td>仓库 / 拉取凭证 / 路由 / 镜像白名单</td></tr>
 </table>
 <p>权限口径：导出发起要求 workspace 成员（与 services 归属校验同模式）；runtime-defaults 仅 workspace owner 与平台 admin；导出单可见性跟随 workspace。</p>
 <div class="callout">生产部署不新增平台能力：审批通过后由运维/流程调用<b>已有 HTTP Helm 部署接口</b>提交 4 件套（chart + values 文件，镜像按 values 引用从指定仓库拉取）。镜像拉取前可按 digest 校验就绪。</div>
 
-<h2>10. 运维侧：工作空间运行时默认配置</h2>
-<p>页面：控制台（运维视角）→ 工作空间 → 运行时默认配置。与 <code>platform_config</code>（平台级、全服务表单默认）的区别：本表 <b>per-workspace、面向生产导出</b>；测试集群「平台默认配置不经 envFrom 注入、仅表单预填」的语义不变。变更审计复用 <code>platform_config_events</code> 思路；导出页对默认值的逐字段覆盖在导出单 manifest 中留痕。</p>
+<h2>10. 运维侧：工作空间配置管理（API + 页面重设计）</h2>
+<p>页面：控制台（运维视角）→ 工作空间 → 配置管理，页签 = 运行时默认 / MCP 连接器模板 / 模型参数 / 沙箱参数 / 仓库与路由 / API。统一入口管理导出所需的全部默认值；<b>导出发布页全部继承本页，且默认值在导出页锁定</b>——单次导出不能悄悄改基线，要改只能由运维在此修改（留审计）。与 <code>platform_config</code>（平台级、全服务表单默认）的区别：本模块 <b>per-workspace、面向生产导出</b>；测试集群「平台默认配置不经 envFrom 注入、仅表单预填」的语义不变。变更审计复用 <code>platform_config_events</code> 思路；导出页对新增键与 MCP 改写留痕，默认值本身不可在导出页修改。</p>
+<p>参数模板与 <code>backend/internal/service/platformconfig/template.go</code> 同源（模板驱动表单 / 敏感路由 / 掩码输出）：LLM 组 10 键、Sandbox 组 6 键；<code>SANDBOX_ENABLED</code> 刻意排除（agent-framework 三层裁决：env 显式存在 &gt; OAF 包 frontmatter &gt; 默认 false，进默认配置会让包级沙箱声明永久失效）。字段分组：</p>
 <table>
 <tr><th style="width:12%">分类</th><th style="width:38%">键 / 配置</th><th style="width:10%">敏感</th><th>说明</th></tr>
 <tr><td>mysql</td><td><code>CHECKPOINT_JDBC_BASE</code>（如 <code>jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint</code>）</td><td>—</td><td>平台按 <code>{基库}_{k8s名}</code> 派生实际库</td></tr>
@@ -363,7 +404,9 @@ type WorkspaceRuntimeDefaultEntity struct {
 <tr><td>redis</td><td><code>AGENT_REDIS_URL</code></td><td><span class="tag t-red">★</span></td><td></td></tr>
 <tr><td>redis</td><td><code>AGENT_REDIS_PREFIX</code> 规则</td><td>—</td><td>平台派生 <code>{k8s名}:</code>，防跨服务串写</td></tr>
 <tr><td>otel</td><td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></td><td>—</td><td></td></tr>
-<tr><td>sandbox</td><td><code>OPENSANDBOX_API_URL</code>（<code>OPENSANDBOX_API_KEY</code> 走导出页敏感键）</td><td>—</td><td></td></tr>
+<tr><td>llm</td><td>LLM 组模板全量 10 键（API_KEY / BASE_URL / MODEL_ID / PROVIDER / TEMPERATURE / MAX_TOKENS / ENABLE_THINKING / CONTEXT_LENGTH / REASONING_EFFORT / FREQUENCY_PENALTY）</td><td><span class="tag t-red">API Key ★</span></td><td>与 <code>platformconfig/template.go</code> 同源，空值不下发</td></tr>
+<tr><td>sandbox</td><td><code>OPENSANDBOX_SERVER_URL</code> / <code>OPENSANDBOX_API_KEY</code> / <code>SANDBOX_IMAGE</code> / <code>SANDBOX_TIMEOUT_MINUTES</code> / <code>SANDBOX_MEMORY_MB</code> / <code>SANDBOX_CPU_COUNT</code>（模板全量 6 键）</td><td><span class="tag t-red">API Key ★</span></td><td><code>SANDBOX_ENABLED</code> 不进模板（包 frontmatter 三层裁决）</td></tr>
+<tr><td>protocol</td><td><code>AGENT_PROTOCOL_AUTH_TOKEN</code> / <code>AGENT_REMOTE_HEADERS_JSON</code> / <code>AGENT_A2A_JOB_TOKEN</code></td><td><span class="tag t-red">★</span></td><td>敏感键走模板 Secret 路由；开关类键刻意不进默认</td></tr>
 <tr><td>registry</td><td>指定镜像仓库地址 / <code>imagePullSecrets</code></td><td>—</td><td>backend 直推目标，生产侧自己拉取生产同步镜像</td></tr>
 <tr><td>registry</td><td>推送凭证</td><td><span class="tag t-red">★</span></td><td>存平台 Secret，不进导出产物</td></tr>
 <tr><td>routing</td><td>ingress.mode / hostSuffix</td><td>—</td><td>对齐 <code>INGRESS_HOST_SUFFIX</code> 语义</td></tr>
@@ -404,10 +447,11 @@ type WorkspaceRuntimeDefaultEntity struct {
 <h2>14. 关联文档</h2>
 <ul>
 <li><a href="helm-offline-deploy-design.md">helm-offline-deploy-design.md</a> — 控制面 chart 形态先例，<code>oaf-agent</code> 交付格式与其保持衔接；</li>
-<li><a href="package-online-edit-design.md">package-online-edit-design.md</a> — 导出时「包配置更新 → 派生新版本」复用其 copy-on-write 派生链（SourcePackageID）；</li>
+<li><a href="package-online-edit-design.md">package-online-edit-design.md</a> — 配置包文本编辑复用其在线编辑交互与安全校验思路；导出快照落 <code>export_package_marks</code> 表（不派生 oaf_packages 记录）；</li>
 <li><a href="platform-default-config-secret-design.md">platform-default-config-secret-design.md</a> — sensitiveKeys 清单与「普通键 CM / 敏感键 Secret」路由模式同源；</li>
 <li><a href="console-user-workspace-split-design.md">console-user-workspace-split-design.md</a> — workspaces 实体与角色模型（owner/admin/member）；</li>
 <li><a href="subpath-routing-design.md">subpath-routing-design.md</a> — router/host 双模式路由语义，chart ingress 段对齐。</li>
+<li><a href="demo/cross-cluster-export-demo.html">demo/cross-cluster-export-demo.html</a> — 可交互原型（单文件离线可开）：导出发布页 / 运维默认配置 / 生产部署 / 交付包与 DoD。</li>
 </ul>
 
 <div class="meta" style="margin-top:36px;border-bottom:none;border-top:2px solid var(--ink);padding-top:12px">
