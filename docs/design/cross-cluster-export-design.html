@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OAF 跨集群导出发布设计 — 交付包导出 + 镜像直推 + 生产 Helm 部署</title>
+<style>
+:root { --ink: #1e293b; --muted: #64748b; --line: #e2e8f0; --blue: #2563eb; --blue-bg: #dbeafe; --green: #059669; --green-bg: #d1fae5; --amber: #d97706; --amber-bg: #fef3c7; --indigo: #4f46e5; --indigo-bg: #e0e7ff; --red: #dc2626; }
+* { box-sizing: border-box; }
+body { padding: 32px 40px; max-width: 1280px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--ink); line-height: 1.65; background: #fff; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 14px; margin-bottom: 6px; }
+.meta { font-size: 13px; color: var(--muted); border-bottom: 2px solid var(--ink); padding-bottom: 14px; margin-bottom: 24px; }
+h2 { font-size: 19px; margin: 36px 0 12px; padding-left: 10px; border-left: 4px solid var(--blue); }
+h3 { font-size: 16px; margin: 22px 0 8px; }
+p { margin: 8px 0; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; }
+th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: #f1f5f9; font-weight: 600; white-space: nowrap; }
+code { background: #f1f5f9; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+pre { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+pre code { background: none; padding: 0; color: inherit; }
+.tag { display: inline-block; border-radius: 999px; font-size: 11.5px; padding: 1px 9px; font-weight: 600; white-space: nowrap; }
+.t-blue { background: var(--blue-bg); color: var(--blue); }
+.t-green { background: var(--green-bg); color: var(--green); }
+.t-amber { background: var(--amber-bg); color: var(--amber); }
+.t-indigo { background: var(--indigo-bg); color: var(--indigo); }
+.t-gray { background: #e2e8f0; color: #475569; }
+.t-red { background: #fee2e2; color: var(--red); }
+.callout { border-left: 4px solid var(--blue); background: #f8fafc; border-radius: 6px; padding: 10px 14px; margin: 12px 0; font-size: 13.5px; }
+.callout.warn { border-left-color: var(--amber); }
+svg { width: 100%; height: auto; display: block; margin: 8px 0; }
+.legend { display: flex; gap: 22px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin: 4px 0 0; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { display: inline-block; width: 22px; height: 13px; border-radius: 3px; }
+ul { margin: 6px 0; padding-left: 22px; }
+ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 3px 0; }
+@media print {
+  body { padding: 8mm 10mm; max-width: none; }
+  h2 { break-after: avoid; }
+  table, pre, svg { break-inside: avoid; }
+  @page { size: a4; margin: 12mm; }
+}
+</style>
+</head>
+<body>
+
+<h1>OAF 跨集群导出发布设计</h1>
+<div class="sub">测试环境导出交付包 + 镜像直推指定仓库 · ITSM 审批 · 生产 Helm 部署</div>
+<div class="meta">
+  状态：<b>设计定稿 v1（2026-10-29，评审决议齐备，未实施）</b> · 改动落点：<b>backend 新增导出链路 + 新业务 chart <code>oaf-agent</code> + 运维侧默认配置页</b>，测试集群发布链路零改动<br>
+  正文（事实源）：<code>docs/design/cross-cluster-export-design.md</code> · 样例服务：差旅助手 travel-agent（工作空间 ws-3f9a21c4）
+</div>
+
+<h2>1. 决议记录（2026-10-29）</h2>
+<table>
+<tr><th style="width:6%">#</th><th style="width:24%">议题</th><th>决议</th></tr>
+<tr><td>①</td><td>生产密钥注入通道</td><td>暂不做占位符脱敏：<b>敏感值明文写入 values 文件、经文件代入部署</b>；values 随 ITSM 工单按密级流转 <span class="tag t-red">敏感</span></td></tr>
+<tr><td>②</td><td>生产 Helm 部署接口形态</td><td><b>复用生产侧已有 HTTP Helm 部署接口</b>，平台不重建部署能力 <span class="tag t-gray">外部已有</span></td></tr>
+<tr><td>③</td><td>镜像同步方式</td><td>不引入镜像同步服务：<b>backend 构建后直推指定镜像仓库</b>，生产侧自己拉取生产同步镜像 <span class="tag t-green">直推</span></td></tr>
+<tr><td>④</td><td>生产 A2A 服务目录登记</td><td>走另外流程处理，本期不涉及 <span class="tag t-gray">范围外</span></td></tr>
+</table>
+<p>背景：现发布链路隐含「backend 与业务集群同处一个 K8s」——配置包存共享 PVC、backend 直构 Deployment/Service/Ingress、包 subPath 挂 <code>/config</code>。测试环境定稿的 agent 无法交付到另一个 K8s 集群；生产环境没有平台 backend，配置、镜像、运行时环境必须随交付物自带；且 MCP 地址、模型网关、密钥等跨环境天然不同，需要一次受控的「导出时重配置」。</p>
+
+<h2>2. 目标与非目标</h2>
+<p><b>目标</b>：</p>
+<ul>
+<li><b>用户侧导出发布页</b>（测试 Console）：服务详情进入，编辑配置包更新（MCP 等改生产地址）、版本查看、生产 env、模型配置、沙箱配置；工作空间运行时默认自动预填。确认后 backend 生成 2 类交付物：<b>OAF 配置镜像</b>（构建后直推指定仓库）+ <b>values 文件</b>（随 manifest 提交 ITSM）。</li>
+<li><b>运维侧工作空间运行时默认配置</b>：按工作空间维护 MySQL / Redis / OTel / 沙箱 / 镜像仓库 / 路由默认值，作为导出页预填与 values 组装来源。</li>
+<li><b>审批与部署</b>：values + manifest 作 ITSM 附件审批；通过后调用已有 HTTP 部署接口，用 4 件套完成跨集群部署。</li>
+<li><b>测试集群零改动</b>：现有发布链路（PVC 直挂、backend 构造业务资源）不变，导出是新增旁路能力。</li>
+</ul>
+<p><b>非目标（本期不做）</b>：生产侧平台 backend 与服务目录登记（决议 ④）；values 占位符脱敏（决议 ①，v2 视合规要求）；单集群发布链路与 PVC 挂载方式的任何变更；MCP <code>export_service</code> 对话式导出（v2）；ITSM / 部署回调自动化（v2）。</p>
+
+<h2>3. 总体流程</h2>
+<svg viewBox="0 0 1240 716" xmlns="http://www.w3.org/2000/svg" font-family="inherit" role="img" aria-label="跨集群导出发布四泳道流程图：用户侧、平台 backend、外部 ITSM、生产环境">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#059669"/>
+    </marker>
+  </defs>
+
+  <!-- 泳道底板 -->
+  <rect x="20" y="64" width="280" height="600" fill="#eff6ff" rx="10"/>
+  <rect x="320" y="64" width="280" height="600" fill="#ecfdf5" rx="10"/>
+  <rect x="620" y="64" width="280" height="600" fill="#fffbeb" rx="10"/>
+  <rect x="920" y="64" width="300" height="600" fill="#eef2ff" rx="10"/>
+  <text x="160" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">用户侧 · 测试环境 Console</text>
+  <text x="460" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#065f46">平台 backend · 测试集群</text>
+  <text x="760" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#92400e">外部服务 · 审批</text>
+  <text x="1070" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#3730a3">生产环境 · 另一 K8s 集群</text>
+
+  <!-- 泳道1：用户侧 -->
+  <rect x="35" y="96" width="250" height="56" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="160" y="117" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">① 服务详情 → 导出发布</text>
+  <text x="160" y="136" text-anchor="middle" font-size="11.5" fill="#475569">入口：详情页操作区</text>
+
+  <rect x="35" y="182" width="250" height="72" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="160" y="203" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">② 导出发布页</text>
+  <text x="160" y="221" text-anchor="middle" font-size="11.5" fill="#475569">MCP 改生产地址（进包）· env/模型/沙箱</text>
+  <text x="160" y="238" text-anchor="middle" font-size="11.5" fill="#475569">工作空间运行时默认预填</text>
+
+  <rect x="35" y="284" width="250" height="56" rx="8" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="160" y="305" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">③ 确认导出 → 创建导出单</text>
+  <text x="160" y="324" text-anchor="middle" font-size="11.5" fill="#475569">EXP-xxxx（draft → building）</text>
+
+  <!-- 泳道2：backend -->
+  <rect x="335" y="96" width="250" height="56" rx="8" fill="#ffffff" stroke="#059669" stroke-width="1.5"/>
+  <text x="460" y="117" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">指定镜像仓库（运维配置）</text>
+  <text x="460" y="136" text-anchor="middle" font-size="11.5" fill="#475569">oaf-{name}:{ver}-e{n} · sha256:digest</text>
+
+  <rect x="335" y="206" width="250" height="64" rx="8" fill="#d1fae5" stroke="#059669" stroke-width="1.5"/>
+  <text x="460" y="227" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">④ 构建 OAF 配置镜像</text>
+  <text x="460" y="245" text-anchor="middle" font-size="11.5" fill="#475569">busybox 基底 · go-containerregistry</text>
+  <text x="460" y="261" text-anchor="middle" font-size="11.5" fill="#475569">无 docker / 无特权 · 幂等重推</text>
+
+  <rect x="335" y="330" width="250" height="64" rx="8" fill="#d1fae5" stroke="#059669" stroke-width="1.5"/>
+  <text x="460" y="351" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">⑤ 组装 values + manifest</text>
+  <text x="460" y="369" text-anchor="middle" font-size="11.5" fill="#475569">四层合并 · 敏感键落 secretEnv</text>
+  <text x="460" y="385" text-anchor="middle" font-size="11.5" fill="#475569">敏感值明文 · 文件代入</text>
+
+  <!-- 泳道3：ITSM -->
+  <rect x="635" y="330" width="250" height="64" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="760" y="351" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">⑥ ITSM 审批</text>
+  <text x="760" y="369" text-anchor="middle" font-size="11.5" fill="#475569">附件：values.yaml + manifest.json</text>
+  <text x="760" y="385" text-anchor="middle" font-size="11.5" fill="#475569">values 含敏感值 · 按密级流转</text>
+
+  <!-- 泳道4：生产 -->
+  <rect x="945" y="330" width="260" height="64" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="1075" y="351" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">⑦ 领取 4 件套</text>
+  <text x="1075" y="369" text-anchor="middle" font-size="11.5" fill="#475569">chart（固定版本）· 基础镜像</text>
+  <text x="1075" y="385" text-anchor="middle" font-size="11.5" fill="#475569">OAF 镜像 · values 文件</text>
+
+  <rect x="945" y="446" width="260" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="1075" y="467" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">⑧ 已有 HTTP 部署接口</text>
+  <text x="1075" y="486" text-anchor="middle" font-size="11.5" fill="#475569">helm upgrade --install（幂等）</text>
+
+  <rect x="945" y="542" width="260" height="56" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="1075" y="563" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">⑨ 就绪验证</text>
+  <text x="1075" y="582" text-anchor="middle" font-size="11.5" fill="#475569">Pod Ready + /.well-known/agent-card.json</text>
+
+  <!-- 连线 -->
+  <line x1="160" y1="152" x2="160" y2="180" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+  <line x1="160" y1="254" x2="160" y2="282" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M 285,312 H 312 V 238 H 333" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="298" y="296" font-size="11" fill="#475569">导出单（异步）</text>
+
+  <line x1="460" y1="204" x2="460" y2="156" stroke="#059669" stroke-width="1.6" marker-end="url(#arrG)"/>
+  <text x="470" y="184" font-size="11" fill="#059669">直推（决议 ③）</text>
+
+  <line x1="585" y1="362" x2="633" y2="362" stroke="#dc2626" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arrR)"/>
+  <text x="609" y="352" text-anchor="middle" font-size="11" fill="#dc2626">交付文本</text>
+
+  <line x1="885" y1="362" x2="943" y2="362" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="914" y="352" text-anchor="middle" font-size="11" fill="#475569">审批通过</text>
+
+  <line x1="1075" y1="394" x2="1075" y2="444" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+  <line x1="1075" y1="502" x2="1075" y2="540" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+
+  <path d="M 585,124 H 1075 V 328" fill="none" stroke="#475569" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="830" y="116" text-anchor="middle" font-size="11" fill="#475569">镜像按 values 引用拉取（部署前 digest 校验）</text>
+
+  <!-- 图例 -->
+  <rect x="35" y="686" width="24" height="14" rx="3" fill="#d1fae5" stroke="#059669" stroke-width="1.5"/>
+  <text x="66" y="697" font-size="12" fill="#475569">实底 = 平台产出（镜像 / 交付文本）</text>
+  <rect x="250" y="686" width="24" height="14" rx="3" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="281" y="697" font-size="12" fill="#475569">虚框 = 外部流程 / 生产侧动作（决议 ②，平台不重建）</text>
+  <line x1="560" y1="693" x2="590" y2="693" stroke="#dc2626" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <text x="596" y="697" font-size="12" fill="#475569">含敏感值的文本流转（密级约束）</text>
+</svg>
+<div class="legend">
+  <span>要点：构建与直推不写测试集群任何 K8s 资源；生产部署不经平台 backend 进程</span>
+  <span>「包配置更新」在导出页完成后即固化进 OAF 镜像，values 不携带 MCP 覆盖段</span>
+</div>
+
+<h2>4. 交付物规范（生产侧 4 件套）</h2>
+<table>
+<tr><th style="width:30%">交付物</th><th style="width:20%">版本来源</th><th style="width:18%">流转通道</th><th>说明</th></tr>
+<tr><td><code>oaf-agent</code> chart</td><td>固定版本（随平台迭代，如 0.1.0）</td><td><span class="tag t-gray">制品库 / 离线包</span></td><td>新业务 chart，与控制面 chart <code>oaf-platform</code> 分离，只描述单个业务 agent 运行时（§6）</td></tr>
+<tr><td>基础镜像 <code>agent-framework:agentscope-X</code></td><td>values 指定（运维白名单内选择）</td><td><span class="tag t-blue">backend 直推指定仓库</span></td><td>Java 运行时，<code>/config</code> 为配置挂载点（镜像已定义 VOLUME）</td></tr>
+<tr><td>OAF 配置镜像 <code>oaf-{k8s名}:{包版本}-e{导出序号}</code></td><td>本次导出构建，digest 固定</td><td><span class="tag t-blue">backend 构建后直推</span></td><td>busybox 基底 + 配置层，labels 记录 slug/version/checksum/export-id（§5）</td></tr>
+<tr><td><code>values.yaml</code> + <code>manifest.json</code></td><td>导出单生成</td><td><span class="tag t-red">ITSM 审批附件</span></td><td>敏感值明文写入 values（决议 ①），按密级随工单流转；manifest 用于审计与一致性校验（§7、§12）</td></tr>
+</table>
+
+<h2>5. OAF 镜像构建方案</h2>
+<p><b>内容</b>：OAF 包目录（<code>AGENTS.md</code> / <code>mcp-configs/</code> / <code>skills/</code> / <code>versions/</code>…）打 tar 层，包内挂载点 <code>/oaf</code>；基底 <code>busybox:1.36</code>，保证 initContainer 在镜像内执行 <code>sh -c "cp -a /oaf/. /config/"</code> 可用。</p>
+<p>构建与推送在 backend 进程内用 <code>google/go-containerregistry</code> 的 <code>remote.Write</code> 完成：OAF 镜像是纯数据镜像（KB~MB 级），该方式无 docker 依赖、无特权、同 tag 内容寻址可幂等重推；不引入 Kaniko（需特权与 RBAC，对配置镜像过重）。</p>
+<table>
+<tr><th style="width:34%">方式</th><th style="width:26%">依赖</th><th style="width:12%">特权</th><th>适用性</th></tr>
+<tr><td><b>go-containerregistry remote.Write（选定）</b></td><td>backend 引入一个 Go 库</td><td>无</td><td>纯数据镜像直推，进程内完成，幂等</td></tr>
+<tr><td>Kaniko Job（否决）</td><td>集群内 Job + RBAC</td><td>需要特权运行时</td><td>通用镜像构建，对配置镜像过重</td></tr>
+</table>
+<ul>
+<li><b>tag 规则</b>：<code>{指定registry}/{namespace}/oaf-{k8s名}:{包版本}-e{导出序号}</code>；构建完成后 digest 记录进导出单，部署前可按 digest 校验镜像就绪。</li>
+<li><b>推送凭证</b>：来自工作空间运行时默认配置的 registry 组（§10），凭证存平台 Secret，不进任何导出产物。</li>
+</ul>
+
+<h2>6. 业务 chart：<code>oaf-agent</code></h2>
+<p>与控制面 chart <code>charts/oaf-platform</code>（backend/frontend/router 自举）完全分离，新增 <code>charts/oaf-agent</code>，只渲染单个业务 agent 运行时，交付时固定版本。模板清单：deployment（initContainer + probes）、service、ingress（router/host 双模式，语义对齐 <code>INGRESS_HOST_SUFFIX</code>）、configmap / secret（envFrom 两源，对齐平台既有 per-service CM + Secret 模式）、mysql 建库 hook Job（可选）、serviceaccount。</p>
+<pre><code>initContainers:
+  - name: inject-oaf
+    image: {{ .Values.image.oaf }}            # busybox 基底的 OAF 配置镜像
+    command: ["sh", "-c", "cp -a /oaf/. /config/"]
+    volumeMounts:
+      - { name: config, mountPath: /config }
+containers:
+  - name: agent
+    image: {{ .Values.image.base }}           # agent-framework 基础镜像
+    envFrom:
+      - configMapRef: { name: {{ include "oaf-agent.fullname" . }}-env }
+      - secretRef:    { name: {{ include "oaf-agent.fullname" . }}-env-secret }
+    volumeMounts:
+      - { name: config, mountPath: /config, readOnly: true }
+volumes:
+  - name: config
+    emptyDir: {}    # 只读配置副本，Pod 重建即恢复，符合原则二（可丢弃/可重建）</code></pre>
+<ul>
+<li>initContainer 替代单集群的 PVC subPath 挂载——生产环境无共享 PVC 依赖，配置随镜像分发；</li>
+<li>checkpoint 库名沿用 issue #142 派生规则 <code>{基库}_{k8s名}</code>（如 <code>oaf_checkpoint_travel_agent</code>），由 hook Job 幂等建库（<code>CREATE DATABASE IF NOT EXISTS</code>）或运维预建；</li>
+<li>默认 <code>replicas &gt;= 2</code>、无 <code>sessionAffinity</code>，多副本横向扩展语义与单集群一致；</li>
+<li><b>自包含性（4 件套可独立部署，v1 验收前提）</b>：chart 不硬编码 namespace（release 名与 <code>-n</code> 由部署方指定）、不引用平台任何对象（共享 PVC <code>platform-data</code> / platform-router / platform backend / platform_config）；MySQL/Redis/OTel/沙箱地址、<code>imagePullSecrets</code>、路由 host 全部来自 values——满足后在任一全新 namespace 仅凭 4 件套即可部署成功（见 §13 DoD）。</li>
+</ul>
+
+<h2>7. values 组装</h2>
+<h3>7.1 四层合并（优先级从低到高）</h3>
+<table>
+<tr><th style="width:16%">层</th><th style="width:30%">来源</th><th>典型内容</th><th style="width:14%">覆盖关系</th></tr>
+<tr><td>L0 chart 默认</td><td>chart 内置 values.yaml</td><td>资源模板默认值、健康检查</td><td>被上层覆盖</td></tr>
+<tr><td>L1 工作空间运行时默认</td><td><code>workspace_runtime_defaults</code>（运维维护，§10）</td><td>MySQL/Redis/OTel/沙箱地址、registry、路由模式</td><td>可被 L2 覆盖</td></tr>
+<tr><td>L2 用户导出覆盖</td><td>导出发布页表单</td><td>MCP 生产地址（进包）、生产 env、模型/沙箱密钥</td><td>可被 L3 覆盖</td></tr>
+<tr><td>L3 平台生成</td><td>导出单</td><td>镜像引用与 digest、保留键（<code>AGENT_CONFIG_DIR</code> 等）、派生键（JDBC 库名 / Redis 前缀）、版本与审计标签</td><td><b>不可覆盖</b></td></tr>
+</table>
+
+<h3>7.2 敏感值规则（决议 ①：文件代入）</h3>
+<div class="callout warn">
+敏感键清单与平台既有 sensitiveKeys 一致（<code>LLM_API_KEY</code> / <code>CHECKPOINT_PASSWORD</code> / <code>AGENT_REDIS_URL</code> / <code>OPENSANDBOX_API_KEY</code> 等），渲染进 values 的 <code>secretEnv</code> 段，由 chart 渲染为服务 Secret。<b>v1 不做占位符脱敏</b>：敏感值明文写入 values 文件、经文件代入部署；values 随 ITSM 工单按密级流转，文件保管由审批流程约束，平台侧下载记录审计（§12）。如后续合规提出脱敏要求，v2 在渲染层引入占位符机制，不改 API 形状。
+</div>
+<p>包内敏感值统一以 <code>${ENV_VAR}</code> 占位引用（如 MCP <code>auth.token: ${MCP_FLIGHT_TOKEN}</code>），跨环境只改 connection.url 等非敏感项——改完的包直接固化为 OAF 镜像，敏感值经 env/Secret 注入。</p>
+
+<h3>7.3 values.yaml 完整示例</h3>
+<pre><code># oaf-agent values.yaml — 由导出单 EXP-20261029-0007 自动生成
+# 服务: 差旅助手 travel-agent · 工作空间 ws-3f9a21c4
+# 源包: agentmanager/travel-agent@1.4.1 → 导出版本 1.4.2
+# chart: oaf-agent-0.1.0（固定版本）· 基础镜像 agentscope-2.1.0-v20260907
+# 敏感值明文写入本文件（文件代入）：随 ITSM 工单按密级流转
+fullnameOverride: travel-agent
+
+image:
+  base: registry.prod.example.com/oaf/agent-framework:agentscope-2.1.0-v20260907
+  oaf: registry.prod.example.com/oaf/oaf-travel-agent:1.4.2-e7
+  oafDigest: sha256:3f8ac1d2…    # 构建后回填，部署前可校验
+imagePullSecrets:
+  - prod-registry-secret
+
+env:                              # 渲染为 ConfigMap envFrom
+  AGENT_CONFIG_DIR: /config
+  AGENT_WORKSPACE_DIR: /workspace
+  SERVER_HOST: 0.0.0.0
+  SERVER_PORT: "8100"
+  CHECKPOINT_JDBC_URL: jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint_travel_agent
+  CHECKPOINT_USERNAME: oaf_writer
+  AGENT_REDIS_PREFIX: travel-agent:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.prod.svc:4318
+  LLM_BASE_URL: https://llm-gw.prod.example.com/v1
+  LLM_MODEL_ID: glm-4.7
+  OPENSANDBOX_API_URL: https://sandbox.prod.example.com
+
+secretEnv:                        # 渲染为 Secret envFrom（明文，文件代入）
+  LLM_API_KEY: "sk-prod-9f8e7d6c"
+  CHECKPOINT_PASSWORD: "Prod#2026Mysql"
+  AGENT_REDIS_URL: "redis://redis.prod.svc:6379/0"
+  OPENSANDBOX_API_KEY: "sbx-prod-5a5a"
+  MCP_FLIGHT_TOKEN: "flt-prod-xxxx"
+  MCP_HOTEL_TOKEN: "htl-prod-xxxx"
+
+configInjection:
+  mode: initContainer             # initContainer 拷贝 /oaf → 共享卷 /config
+  dir: /config
+
+replicas: 2
+resources:
+  requests: {cpu: 500m, memory: 1Gi}
+  limits: {cpu: "2", memory: 2Gi}
+
+ingress:
+  mode: router                    # router | host，对齐 INGRESS_HOST_SUFFIX 语义
+  tls: false                      # host 模式时由平台生成 host: {k8s名}{hostSuffix}
+
+mysql:
+  createDatabase: true            # pre-install hook Job 幂等建库
+
+podAnnotations:
+  oaf.platform/export-id: EXP-20261029-0007
+  oaf.platform/package-checksum: sha256:ab73f20c9e…8d41</code></pre>
+<p><code>manifest.json</code> 与 values 配套提交 ITSM，记录：导出单号、服务与工作空间、包版本链（sourcePackageId 派生）、4 件套引用与 digest、覆盖摘要（改动的 MCP server / env 键数 / 敏感键数 / 应用的工作空间默认数）、ITSM 工单号、操作人与时间——用于生产侧一致性校验与审计追溯。</p>
+
+<h2>8. 数据模型与状态机（backend 新增）</h2>
+<p>新表随 backend 现有 GORM AutoMigrate 机制创建（与 users/workspaces 同模式）；agent-framework 零改动，不涉及 Flyway。</p>
+<pre><code>// 导出单：一次跨集群交付的载体
+type ExportOrderEntity struct {
+    ID               uint64
+    ServiceID        uint64 `gorm:"index"`
+    WorkspaceID      uint64 `gorm:"index"`
+    SourcePackageID  uint64 // 导出时的源包
+    ExportPackageID  uint64 // 在线编辑派生的新包（复用 package-online-edit 的 copy-on-write 链）
+    ChartVersion     string
+    BaseImage        string
+    OafImageRef      string
+    OafImageDigest   string
+    ValuesYAML       string `gorm:"type:mediumtext"` // 渲染产物（含明文敏感值，接口层不做明文回显，仅文件下载）
+    ManifestJSON     string `gorm:"type:json"`
+    Status           string // draft/building/built/approving/approved/deploying/deployed/failed/cancelled
+    ItsmTicketID     string
+    Error            string
+    CreatedBy        string
+    CreatedAt        time.Time
+    UpdatedAt        time.Time
+}
+// 索引：(workspace_id, status)
+
+// 工作空间运行时默认配置（运维侧维护，导出页预填来源）
+type WorkspaceRuntimeDefaultEntity struct {
+    ID          uint64
+    WorkspaceID uint64 `gorm:"uniqueIndex:uk_ws_runtime_default"`
+    EnvKey      string `gorm:"size:128;uniqueIndex:uk_ws_runtime_default"`
+    Value       string `gorm:"type:text"`
+    Sensitive   bool   // 敏感键：接口回显掩码，仅渲染进 values secretEnv
+    Category    string // mysql|redis|otel|sandbox|llm|registry|routing
+    UpdatedBy   string
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+}</code></pre>
+<pre><code>draft → building → built → approving(ITSM) → approved → deploying → deployed
+任意态可入 failed / cancelled</code></pre>
+<p>v1 中 <code>approving → approved → deploying</code> 由运维在平台人工推进（或脚本回填），v2 接 ITSM / 部署回调自动化。</p>
+
+<h2>9. API 设计（console JWT 之下）</h2>
+<table>
+<tr><th style="width:44%">Method · Path</th><th>说明</th></tr>
+<tr><td><code>GET /api/v1/services/:id/export/preview</code></td><td>预填：源包结构与版本、现 env、工作空间默认值、镜像白名单、派生键预览</td></tr>
+<tr><td><code>POST /api/v1/services/:id/export</code></td><td>创建导出单（包覆盖 → 派生新包版本 + env/model/sandbox/部署参数）→ 异步构建</td></tr>
+<tr><td><code>GET /api/v1/exports/:id</code></td><td>导出单状态与详情（构建进度）</td></tr>
+<tr><td><code>GET /api/v1/exports/:id/values.yaml</code> · <code>/manifest.json</code></td><td>下载交付文本（values 含真实敏感值，下载记录审计）</td></tr>
+<tr><td><code>POST /api/v1/exports/:id/status</code></td><td>人工推进状态（v1：approving / approved / deploying），记录操作人与 ITSM 单号</td></tr>
+<tr><td><code>GET|PUT /api/v1/workspaces/:id/runtime-defaults</code></td><td>运维侧工作空间运行时默认配置（workspace owner 或平台 admin）</td></tr>
+</table>
+<p>权限口径：导出发起要求 workspace 成员（与 services 归属校验同模式）；runtime-defaults 仅 workspace owner 与平台 admin；导出单可见性跟随 workspace。</p>
+<div class="callout">生产部署不新增平台能力：审批通过后由运维/流程调用<b>已有 HTTP Helm 部署接口</b>提交 4 件套（chart + values 文件，镜像按 values 引用从指定仓库拉取）。镜像拉取前可按 digest 校验就绪。</div>
+
+<h2>10. 运维侧：工作空间运行时默认配置</h2>
+<p>页面：控制台（运维视角）→ 工作空间 → 运行时默认配置。与 <code>platform_config</code>（平台级、全服务表单默认）的区别：本表 <b>per-workspace、面向生产导出</b>；测试集群「平台默认配置不经 envFrom 注入、仅表单预填」的语义不变。变更审计复用 <code>platform_config_events</code> 思路；导出页对默认值的逐字段覆盖在导出单 manifest 中留痕。</p>
+<table>
+<tr><th style="width:12%">分类</th><th style="width:38%">键 / 配置</th><th style="width:10%">敏感</th><th>说明</th></tr>
+<tr><td>mysql</td><td><code>CHECKPOINT_JDBC_BASE</code>（如 <code>jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint</code>）</td><td>—</td><td>平台按 <code>{基库}_{k8s名}</code> 派生实际库</td></tr>
+<tr><td>mysql</td><td><code>CHECKPOINT_USERNAME</code> / <code>CHECKPOINT_PASSWORD</code></td><td><span class="tag t-red">密码 ★</span></td><td></td></tr>
+<tr><td>redis</td><td><code>AGENT_REDIS_URL</code></td><td><span class="tag t-red">★</span></td><td></td></tr>
+<tr><td>redis</td><td><code>AGENT_REDIS_PREFIX</code> 规则</td><td>—</td><td>平台派生 <code>{k8s名}:</code>，防跨服务串写</td></tr>
+<tr><td>otel</td><td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></td><td>—</td><td></td></tr>
+<tr><td>sandbox</td><td><code>OPENSANDBOX_API_URL</code>（<code>OPENSANDBOX_API_KEY</code> 走导出页敏感键）</td><td>—</td><td></td></tr>
+<tr><td>registry</td><td>指定镜像仓库地址 / <code>imagePullSecrets</code></td><td>—</td><td>backend 直推目标，生产侧自己拉取生产同步镜像</td></tr>
+<tr><td>registry</td><td>推送凭证</td><td><span class="tag t-red">★</span></td><td>存平台 Secret，不进导出产物</td></tr>
+<tr><td>routing</td><td>ingress.mode / hostSuffix</td><td>—</td><td>对齐 <code>INGRESS_HOST_SUFFIX</code> 语义</td></tr>
+<tr><td>runtime</td><td>基础镜像白名单</td><td>—</td><td>导出页只允许白名单内版本</td></tr>
+</table>
+
+<h2>11. 架构强约束核对</h2>
+<h3>原则一（backend 是控制面）</h3>
+<ul>
+<li>导出链路对测试业务集群<b>只读</b>（读包/env），构建与直推指定镜像仓库发生在 backend 进程 + 仓库侧，不写任何业务 K8s 资源；</li>
+<li>无启动期 reconcile、无后台批量迁移、无 ownerReferences / finalizer；</li>
+<li>生产部署走已有 HTTP 部署接口，不经平台 backend 进程；生产业务运行时不依赖 backend（env 经 chart 渲染的 CM/Secret envFrom 常驻、配置经镜像 + initContainer 自带、流量经 Ingress 直连）。</li>
+</ul>
+<h3>原则二（agent-framework 是业务面）</h3>
+<ul>
+<li>chart 无本地有状态：<code>/config</code> 为 emptyDir 只读副本（每次 Pod 重建即恢复，可丢弃/可重建）；checkpoint / Redis / OTel 全部指向生产共享存储；</li>
+<li>默认 replicas ≥ 2、无 <code>sessionAffinity</code>，任意请求可落任意副本；</li>
+<li>多服务隔离沿用 per-service 派生：checkpoint 库 <code>{基库}_{k8s名}</code>（幂等建库 hook）、Redis 前缀 <code>{k8s名}:</code>，与 issue #142 规则一致。</li>
+</ul>
+
+<h2>12. 安全与审计</h2>
+<ol>
+<li><b>敏感键路由</b>：沿用 platformconfig 模板 sensitiveKeys 清单，values 中落 <code>secretEnv</code> 段（渲染为服务 Secret），普通键落 <code>env</code> 段（ConfigMap）；</li>
+<li><b>明文 values 的边界</b>（决议 ① 接受的代价）：values 含明文敏感值，仅经 ITSM 密级流转与平台下载（下载写审计日志：操作人 / 时间 / 导出单号）；导出单详情接口对 <code>values_yaml</code> 不做明文回显，只提供文件下载；</li>
+<li><b>推送凭证</b>：registry 推送凭证存平台 Secret，注入 backend 进程 env，不进导出单、values、manifest 任何产物；</li>
+<li><b>包内密钥</b>：OAF 包配置文件一律 <code>${ENV_VAR}</code> 占位引用密钥，包本身可入库、可构建镜像、不携带明文；</li>
+<li><b>manifest 审计链</b>：导出单号 ↔ 包 checksum ↔ 镜像 digest ↔ ITSM 工单号四方关联，生产侧可校验「部署的 values 就是审批的那份」。</li>
+</ol>
+
+<h2>13. 实施分期</h2>
+<table>
+<tr><th style="width:14%">阶段</th><th>内容</th></tr>
+<tr><td><span class="tag t-blue">v1 MVP</span></td><td>① <code>workspace_runtime_defaults</code> 表 + CRUD API + 运维侧页面；② 导出发布页（前端）+ <code>export/preview</code> / <code>POST export</code> API + 导出单状态机；③ go-containerregistry 构建并直推指定镜像仓库；④ values（四层合并 + 明文 secretEnv）/ manifest 渲染与下载；⑤ 新 chart <code>charts/oaf-agent</code>（initContainer / 双模式 ingress / mysql hook）；⑥ 人工状态推进；审批通过后人工调用已有 HTTP 部署接口</td></tr>
+<tr><td><span class="tag t-amber">v2 演进</span></td><td>ITSM 回调自动推进（approving → approved）；部署接口直连（平台提交产物并触发部署、回传 deploying/deployed）；values 脱敏占位符（如合规提出，渲染层引入，不改 API 形状）；MCP <code>export_service</code>（release-agent 对话式驱动导出）；导出单与发布历史/回滚链路打通；多目标环境（workspace_defaults × target 二维化）</td></tr>
+</table>
+<div class="callout"><b>v1 完成定义（DoD）</b>：仅凭 4 件套（chart 固定版本 + 基础镜像 + OAF 镜像 + values）在任一<b>全新 namespace</b> 执行一次 <code>helm upgrade --install</code> 部署成功——建库 hook 执行、initContainer 注入 /config、Pod Ready、<code>/.well-known/agent-card.json</code> 可达，全程不依赖平台 backend / 共享 PVC / platform_config；验证手段为 charts-ci 增加 <code>oaf-agent</code> 的 helm lint + template 渲染矩阵（占位必填值渲染全量对象）+ kind 集群以样例 values 部署冒烟。</div>
+
+<h2>14. 关联文档</h2>
+<ul>
+<li><a href="helm-offline-deploy-design.md">helm-offline-deploy-design.md</a> — 控制面 chart 形态先例，<code>oaf-agent</code> 交付格式与其保持衔接；</li>
+<li><a href="package-online-edit-design.md">package-online-edit-design.md</a> — 导出时「包配置更新 → 派生新版本」复用其 copy-on-write 派生链（SourcePackageID）；</li>
+<li><a href="platform-default-config-secret-design.md">platform-default-config-secret-design.md</a> — sensitiveKeys 清单与「普通键 CM / 敏感键 Secret」路由模式同源；</li>
+<li><a href="console-user-workspace-split-design.md">console-user-workspace-split-design.md</a> — workspaces 实体与角色模型（owner/admin/member）；</li>
+<li><a href="subpath-routing-design.md">subpath-routing-design.md</a> — router/host 双模式路由语义，chart ingress 段对齐。</li>
+</ul>
+
+<div class="meta" style="margin-top:36px;border-bottom:none;border-top:2px solid var(--ink);padding-top:12px">
+  正文（事实源）：<code>docs/design/cross-cluster-export-design.md</code> · 本页为其展示版（同源内容，含流程图与示例）<br>
+  分期：v1 六项见 §13；四项决议 ① 密钥文件代入 ② 复用已有 HTTP 部署接口 ③ 直推指定仓库 ④ A2A 另流程 —— 均已固化进正文
+</div>
+
+</body>
+</html>
