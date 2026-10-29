@@ -5,8 +5,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import javax.sql.DataSource;
@@ -30,7 +32,9 @@ import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.config.OafConfigHolder;
 import io.agentmanager.framework.service.LogCollector;
+import io.agentmanager.framework.service.SessionMessageStore;
 import io.agentmanager.framework.service.SkillCatalogService;
+import io.agentmanager.framework.service.StateDataParser;
 import io.agentmanager.framework.service.UserSkillService;
 
 /**
@@ -47,6 +51,17 @@ public class DebugApiController {
     private static final int MONITOR_SESSION_MAX_LIMIT = 500;
     /** 运营监控「只看异常」时的扫描上限：异常标记需在内存判定，避免无界扫描 */
     private static final int MONITOR_PROBLEM_SCAN_LIMIT = 2000;
+    /** 运营监控：对话日志返回上限（与会话列表同口径） */
+    private static final int MONITOR_MESSAGE_MAX_LIMIT = 500;
+    /**
+     * 对话正文检索的扫描上限：{@code LIKE '%kw%'} 无法走索引，且 JSON 粗筛有误报，
+     * 必须在精确过滤前封顶，避免大库拖垮监控页。超出时响应带 {@code scan_capped=true}。
+     */
+    private static final int MONITOR_MESSAGE_SCAN_LIMIT = 1000;
+    /** 对话日志正文预览长度（无关键词时取前 N 字） */
+    private static final int MONITOR_MESSAGE_PREVIEW_CHARS = 300;
+    /** 关键词命中的上下文窗口（前后各 N 字） */
+    private static final int MONITOR_MESSAGE_SNIPPET_RADIUS = 60;
 
     /**
      * 会话 ↔ agent_state 关联条件（与 {@code ThreadController.AGENT_STATE_JOIN} 同口径）：
@@ -377,6 +392,189 @@ public class DebugApiController {
             log.warn("monitor sessions failed: {}", e.getMessage());
             return Map.of("sessions", rows, "count", rows.size(), "hasMore", false, "error", e.getMessage());
         }
+    }
+
+    /**
+     * 运营监控：对话日志（消息粒度）+ 正文模糊检索（issue #206）。
+     *
+     * <p>数据源为共享存储 {@code session_message}（归档轨）JOIN {@code session_user}，
+     * 只返回有正文的 USER / ASSISTANT 消息（纯工具调用消息、压缩摘要、SDK 合成提醒跳过），
+     * 保证多副本下任意副本可查（架构原则二）。
+     *
+     * <p><b>检索策略</b>：{@code msg_data LIKE '%kw%'} 只是粗筛（无法走索引，且会命中 JSON
+     * 字段名），再用 {@link StateDataParser#extractContentText} 提取正文做精确包含判定；
+     * 扫描窗口封顶 {@value #MONITOR_MESSAGE_SCAN_LIMIT} 行，超出时 {@code scan_capped=true}，
+     * 页面提示缩小时间范围。无关键词时直接按 id 倒序分页，不做全表扫描。
+     *
+     * @param keyword 对话正文关键词（可选；命中用户提问或助手回答）
+     * @param userId  会话归属用户（精确）
+     * @param from    起始时间（session_message.created_at）
+     * @param to      结束时间
+     * @param limit   返回上限（默认 100，钳制在 [1, {@value #MONITOR_MESSAGE_MAX_LIMIT}]）
+     * @param offset  偏移（分页）
+     */
+    @GetMapping("/monitor/messages")
+    public Map<String, Object> monitorMessages(
+            @RequestParam(value = "keyword", required = false) String keyword,
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "from", required = false) String from,
+            @RequestParam(value = "to", required = false) String to,
+            @RequestParam(value = "limit", required = false, defaultValue = "100") int limit,
+            @RequestParam(value = "offset", required = false, defaultValue = "0") int offset) {
+        var cappedLimit = Math.min(Math.max(limit, 1), MONITOR_MESSAGE_MAX_LIMIT);
+        var safeOffset = Math.max(offset, 0);
+        var kw = keyword != null && !keyword.isBlank() ? keyword.trim() : null;
+        var rows = new ArrayList<Map<String, Object>>();
+        try (var conn = dataSource.getConnection()) {
+            var sql = new StringBuilder(
+                "SELECT sm.id, sm.session_id, sm.msg_id, sm.role, sm.msg_data, sm.created_at, sm.trace_id, "
+                    + "su.session_id AS business_sid, su.user_id, su.remark "
+                    + "FROM session_message sm JOIN session_user su "
+                    + "ON SUBSTRING_INDEX(sm.session_id, ':', 1) = su.session_id "
+                    + "OR SUBSTRING_INDEX(sm.session_id, ':', -1) = su.session_id "
+                    + "WHERE sm.kind = ? AND sm.role IN ('USER', 'ASSISTANT') ");
+            var params = new ArrayList<String>();
+            params.add(SessionMessageStore.KIND_MESSAGE);
+            if (userId != null && !userId.isBlank()) {
+                sql.append("AND su.user_id = ? ");
+                params.add(userId.trim());
+            }
+            if (from != null && !from.isBlank()) {
+                sql.append("AND sm.created_at >= ? ");
+                params.add(from.trim());
+            }
+            if (to != null && !to.isBlank()) {
+                sql.append("AND sm.created_at <= ? ");
+                params.add(to.trim());
+            }
+            if (kw != null) {
+                // 正文在 JSON 中可能被转义（引号/反斜杠）：原样与 JSON 转义两种形态都粗筛，
+                // 最终命中由下方正文精确包含判定，LIKE 只负责缩小扫描面。
+                // 两种形态相同（绝大多数关键词）时只绑一个参数，避免重复扫描。
+                var jsonKw = jsonEscaped(kw);
+                sql.append("AND (sm.msg_data LIKE ?");
+                params.add("%" + kw + "%");
+                if (!jsonKw.equals(kw)) {
+                    sql.append(" OR sm.msg_data LIKE ?");
+                    params.add("%" + jsonKw + "%");
+                }
+                sql.append(") ");
+            }
+            sql.append("ORDER BY sm.id DESC LIMIT ?");
+
+            // 关键词路径多取一条用于判定 scan_capped；无关键词直接取到目标页 +1
+            int scanLimit = kw != null ? MONITOR_MESSAGE_SCAN_LIMIT + 1 : safeOffset + cappedLimit + 1;
+            boolean scanCapped = false;
+            try (var ps = conn.prepareStatement(sql.toString())) {
+                int idx = 1;
+                for (var p : params) {
+                    ps.setString(idx++, p);
+                }
+                ps.setInt(idx, scanLimit);
+                try (var rs = ps.executeQuery()) {
+                    var seen = new HashSet<Long>();
+                    int scanned = 0;
+                    while (rs.next()) {
+                        scanned++;
+                        if (kw != null && scanned > MONITOR_MESSAGE_SCAN_LIMIT) {
+                            scanCapped = true;
+                            break;
+                        }
+                        // slot 双形态可能同时命中同一归档行（罕见）：按归档行 id 去重
+                        if (!seen.add(rs.getLong("id"))) {
+                            continue;
+                        }
+                        var node = parseMonitorMessage(rs.getString("msg_data"));
+                        if (node == null || StateDataParser.isSyntheticReminder(node)
+                                || SessionMessageStore.SUMMARY_MESSAGE_NAME
+                                    .equals(node.path("name").asText(""))) {
+                            continue; // 合成提醒 / 压缩摘要不是真实问答
+                        }
+                        var content = normalizeMessageText(StateDataParser.extractContentText(node));
+                        if (content.isEmpty()) {
+                            continue; // 纯工具调用消息：对话日志只列有正文的问答
+                        }
+                        if (kw != null && !content.toLowerCase(Locale.ROOT)
+                                .contains(kw.toLowerCase(Locale.ROOT))) {
+                            continue; // JSON 结构误报（如命中字段名 "text"）
+                        }
+                        var snippet = messageSnippet(content, kw);
+                        var m = new LinkedHashMap<String, Object>();
+                        m.put("session_id", rs.getString("business_sid"));
+                        m.put("user_id", rs.getString("user_id"));
+                        var remark = rs.getString("remark");
+                        m.put("title", remark != null ? remark : "");
+                        var role = rs.getString("role");
+                        m.put("role", role != null ? role.toLowerCase(Locale.ROOT) : "");
+                        m.put("content", snippet);
+                        m.put("content_truncated", !snippet.equals(content));
+                        m.put("content_length", content.length());
+                        var createdAt = rs.getTimestamp("created_at");
+                        m.put("created_at", createdAt != null ? createdAt.toString() : "");
+                        m.put("msg_id", rs.getString("msg_id"));
+                        var traceId = rs.getString("trace_id");
+                        m.put("trace_id", traceId != null ? traceId : "");
+                        rows.add(m);
+                    }
+                }
+            }
+            int total = rows.size();
+            int fromIdx = Math.min(safeOffset, total);
+            int toIdx = Math.min(fromIdx + cappedLimit, total);
+            var page = new ArrayList<>(rows.subList(fromIdx, toIdx));
+            var body = new LinkedHashMap<String, Object>();
+            body.put("messages", page);
+            body.put("count", page.size());
+            body.put("total", total);
+            body.put("hasMore", toIdx < total);
+            body.put("limit", cappedLimit);
+            body.put("offset", safeOffset);
+            body.put("keyword", kw != null ? kw : "");
+            body.put("scan_capped", scanCapped);
+            return body;
+        } catch (Exception e) {
+            log.warn("monitor messages failed: {}", e.getMessage());
+            return Map.of("messages", rows, "count", rows.size(), "hasMore", false, "error", e.getMessage());
+        }
+    }
+
+    /** 单条归档消息 JSON → 消息节点；解析失败返回 null（跳过，fail-soft） */
+    private static com.fasterxml.jackson.databind.JsonNode parseMonitorMessage(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return MAPPER.readTree(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 正文归一：折叠空白（日志列表单行展示），保留语义 */
+    private static String normalizeMessageText(String text) {
+        return text == null ? "" : text.replaceAll("\\s+", " ").trim();
+    }
+
+    /** JSON 字符串转义形态（仅用于 SQL 粗筛，精确判定在 Java 侧） */
+    private static String jsonEscaped(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    /** 正文片段：有关键词取命中窗口，否则取前 N 字；超长加省略号 */
+    private static String messageSnippet(String content, String keyword) {
+        if (keyword != null) {
+            int hit = content.toLowerCase(Locale.ROOT).indexOf(keyword.toLowerCase(Locale.ROOT));
+            if (hit >= 0) {
+                int start = Math.max(0, hit - MONITOR_MESSAGE_SNIPPET_RADIUS);
+                int end = Math.min(content.length(),
+                    hit + keyword.length() + MONITOR_MESSAGE_SNIPPET_RADIUS * 2);
+                return (start > 0 ? "…" : "") + content.substring(start, end)
+                    + (end < content.length() ? "…" : "");
+            }
+        }
+        return content.length() > MONITOR_MESSAGE_PREVIEW_CHARS
+            ? content.substring(0, MONITOR_MESSAGE_PREVIEW_CHARS) + "…"
+            : content;
     }
 
     /** 运营监控问题标记：每会话消息/轮次/工具失败计数 + 待确认会话集合 */
