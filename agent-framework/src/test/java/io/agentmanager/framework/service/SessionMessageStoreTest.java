@@ -174,6 +174,17 @@ class SessionMessageStoreTest {
     }
 
     @Test
+    void traceIdMigrationShouldAddColumn() throws Exception {
+        // 表结构演进由 Flyway 接管（issue #205）：锁定 V14 迁移的列定义
+        try (var in = getClass().getResourceAsStream(
+                "/db/migration/V14__session_message_trace_id.sql")) {
+            var ddl = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(ddl.contains("ALTER TABLE session_message"));
+            assertTrue(ddl.contains("ADD COLUMN trace_id VARCHAR(32)"));
+        }
+    }
+
+    @Test
     void findPageShouldUseFiveFormSessionPredicate() throws Exception {
         // 与 AgentStateReader.loadFragments 同款 5 形 LIKE（评审 R8：勿收窄为 2 形）
         new SessionMessageStore(dataSource).findPage("sid-1", 99L, 10);
@@ -213,12 +224,32 @@ class SessionMessageStoreTest {
         assertTrue(sql.contains("ON DUPLICATE KEY UPDATE"));
         assertTrue(sql.contains("reply_id = IF(reply_id IS NULL OR reply_id = '', VALUES(reply_id), reply_id)"),
             "reply_id 保持首个非空盖戳");
+        assertTrue(sql.contains("trace_id = IF(trace_id IS NULL OR trace_id = '', VALUES(trace_id), trace_id)"),
+            "trace_id 同样首个非空盖戳");
         // 读旧值（SELECT）与批量 upsert（INSERT）共用 ps mock：sessionKey→参数1、msg_id→参数2 各绑定两次
         verify(ps, times(2)).setString(1, "u:s1");
         verify(ps, times(2)).setString(2, "m1");
         verify(ps).setString(3, "message");
         verify(ps).setString(4, "USER");
         verify(ps).setString(5, "reply-1");
+        // 无活跃 span（单测环境）→ trace_id 落 NULL，绝不伪造
+        verify(ps).setString(6, (String) null);
+    }
+
+    @Test
+    void archiveBatchShouldStampCurrentSpanTraceId() throws Exception {
+        var traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        var spanContext = io.opentelemetry.api.trace.SpanContext.create(
+            traceId, "00f067aa0ba902b7",
+            io.opentelemetry.api.trace.TraceFlags.getDefault(),
+            io.opentelemetry.api.trace.TraceState.getDefault());
+        try (var scope = io.opentelemetry.api.trace.Span.wrap(spanContext).makeCurrent()) {
+            new SessionMessageStore(dataSource).archiveBatch("u:s1", List.of(
+                new SessionMessageStore.MessageRecord("m1", "message", "USER", null,
+                    "{\"id\":\"m1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}")));
+        }
+        // 归档发生在 turn 的 span 作用域内 → trace_id 与 Jaeger 链路一致
+        verify(ps).setString(6, traceId);
     }
 
     @Test

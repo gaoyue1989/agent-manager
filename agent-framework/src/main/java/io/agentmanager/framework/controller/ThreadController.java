@@ -782,6 +782,8 @@ public class ThreadController {
             var archivedIds = new java.util.HashSet<String>();
             var replyByMsgId = new java.util.HashMap<String, String>();
             var createdAtByMsgId = new java.util.HashMap<String, String>();
+            // trace_id：归档时按轮盖戳（首个非空优先），供 Monitor 回放展示 trace 入口
+            var traceIdByMsgId = new java.util.HashMap<String, String>();
             for (var row : rows) {
                 var node = parseMsgNode(row.msgJson());
                 if (node == null) {
@@ -798,6 +800,9 @@ public class ThreadController {
                     }
                     if (row.createdAt() != null) {
                         createdAtByMsgId.put(id, row.createdAt().toString());
+                    }
+                    if (row.traceId() != null && !row.traceId().isBlank()) {
+                        traceIdByMsgId.put(id, row.traceId());
                     }
                 }
             }
@@ -821,7 +826,7 @@ public class ThreadController {
             }
 
             var dtos = io.agentmanager.framework.service.StateDataParser.toRoleContentList(merged, toolOutputMaxChars);
-            var messages = postProcessMerged(dtos, archivedIds, replyByMsgId, createdAtByMsgId);
+            var messages = postProcessMerged(dtos, archivedIds, replyByMsgId, createdAtByMsgId, traceIdByMsgId);
             fillReplyIds(sessionId, messages);
             return new HistoryView(messages, hasMore, nextBeforeId);
         } catch (Exception e) {
@@ -830,10 +835,10 @@ public class ThreadController {
         }
     }
 
-    /** 归档合并后处理：摘要消息 → 压缩分隔条合成项；其余补 origin 与 reply_id（仅 assistant，最终以 fillReplyIds 回填为准） */
+    /** 归档合并后处理：摘要消息 → 压缩分隔条合成项；其余补 origin、reply_id（仅 assistant，最终以 fillReplyIds 回填为准）与 trace_id */
     private List<Map<String, Object>> postProcessMerged(List<Map<String, Object>> dtos,
             java.util.Set<String> archivedIds, Map<String, String> replyByMsgId,
-            Map<String, String> createdAtByMsgId) {
+            Map<String, String> createdAtByMsgId, Map<String, String> traceIdByMsgId) {
         var out = new ArrayList<Map<String, Object>>(dtos.size());
         for (var dto : dtos) {
             var msgId = dto.get("msg_id") instanceof String s && !s.isBlank() ? s : null;
@@ -849,11 +854,22 @@ public class ThreadController {
                     if (createdAt != null) {
                         item.put("created_at", createdAt);
                     }
+                    var traceId = traceIdByMsgId.get(msgId);
+                    if (traceId != null && !traceId.isBlank()) {
+                        item.put("trace_id", traceId);
+                    }
                 }
                 out.add(item);
                 continue;
             }
             dto.put("origin", msgId != null && archivedIds.contains(msgId) ? "archive" : "state");
+            // trace_id 仅归档行携带（state-only 尾部消息无 trace，前端显示 "-"）
+            if (msgId != null) {
+                var traceId = traceIdByMsgId.get(msgId);
+                if (traceId != null && !traceId.isBlank()) {
+                    dto.put("trace_id", traceId);
+                }
+            }
             // reply_id 仅 assistant 携带（前端按它关联 turn 的文件卡片）；最终值以
             // fillReplyIds 的 Redis 顺序回填为准
             if ("assistant".equals(dto.get("role")) && msgId != null) {

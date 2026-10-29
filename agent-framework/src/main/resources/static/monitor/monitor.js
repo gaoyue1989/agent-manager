@@ -3,7 +3,9 @@
  * 面向运营/管理视角的只读面板：
  *   - 顶部指标卡：用户数 / 会话数 / 提问数 / 回答数 / 今日会话与消息（GET /debug/monitor/overview）
  *   - 会话列表：跨全部用户，按 user / 标题关键词 / 时间范围过滤（GET /debug/monitor/sessions）
- *   - 问答回放：选中会话后复用 GET /threads/{sid}/history 渲染完整问答（用户提问 + 助手回答 + 工具调用）
+ *   - 对话日志：消息粒度浏览 + 正文关键词模糊检索（GET /debug/monitor/messages，issue #206）
+ *   - 问答回放：选中会话后复用 GET /threads/{sid}/history 渲染完整问答
+ *     （用户提问 + 助手回答 + 工具调用 + 每轮 OTel traceId，issue #205）
  *
  * 数据来源均为共享存储（session_user / agent_state / session_message），
  * 页面本身无本地状态依赖，多副本部署下任意副本均可正确展示。
@@ -12,7 +14,9 @@
 let ctx = null;
 let refreshTimer = null;
 let autoRefresh = true;
+let mode = 'sessions';      // sessions = 会话列表；messages = 对话日志
 let sessions = [];
+let messages = [];
 let selectedSid = null;
 let detailSeq = 0;          // 详情请求序号：丢弃过期响应（快速切换会话时）
 let filterDebounce = null;
@@ -25,11 +29,11 @@ export default {
     container.innerHTML = render();
     bindEvents();
     loadOverview();
-    loadSessions();
+    loadActiveList();
     refreshTimer = setInterval(() => {
       if (!autoRefresh) return;
       loadOverview();
-      loadSessions();
+      loadActiveList();
     }, REFRESH_MS);
   },
 
@@ -37,7 +41,9 @@ export default {
     if (refreshTimer) clearInterval(refreshTimer);
     if (filterDebounce) clearTimeout(filterDebounce);
     ctx = null;
+    mode = 'sessions';
     sessions = [];
+    messages = [];
     selectedSid = null;
   }
 };
@@ -51,8 +57,14 @@ function render() {
     </div>
     <div class="monitor-stats" id="monitorStats"></div>
     <div class="monitor-toolbar">
+      <div class="monitor-modes" role="group" aria-label="监控视图">
+        <button id="monModeSessions" type="button" class="monitor-mode active">会话列表</button>
+        <button id="monModeMessages" type="button" class="monitor-mode">对话日志</button>
+      </div>
       <input id="monUser" class="input" type="text" spellcheck="false" placeholder="user_id（精确）">
       <input id="monKeyword" class="input" type="text" spellcheck="false" placeholder="标题 / 会话 id 关键词">
+      <input id="monContent" class="input" type="text" spellcheck="false"
+             placeholder="对话内容关键词（模糊匹配）" style="display:none">
       <label class="mon-time">从&nbsp;<input id="monFrom" class="input" type="datetime-local"></label>
       <label class="mon-time">到&nbsp;<input id="monTo" class="input" type="datetime-local"></label>
       <select id="monLimit" class="input">
@@ -63,7 +75,7 @@ function render() {
       </select>
       <button id="monSearch" class="btn small">查询</button>
       <button id="monReset" class="btn small">重置</button>
-      <label class="mon-auto"><input type="checkbox" id="monProblem"> 只看异常</label>
+      <label class="mon-auto" id="monProblemLabel"><input type="checkbox" id="monProblem"> 只看异常</label>
       <label class="mon-auto"><input type="checkbox" id="monAuto" checked> 自动刷新</label>
     </div>
     <div class="monitor-body">
@@ -74,31 +86,58 @@ function render() {
 }
 
 function bindEvents() {
-  document.getElementById('monSearch').addEventListener('click', loadSessions);
+  document.getElementById('monModeSessions').addEventListener('click', () => setMode('sessions'));
+  document.getElementById('monModeMessages').addEventListener('click', () => setMode('messages'));
+  document.getElementById('monSearch').addEventListener('click', loadActiveList);
   document.getElementById('monReset').addEventListener('click', () => {
     document.getElementById('monUser').value = '';
     document.getElementById('monKeyword').value = '';
+    document.getElementById('monContent').value = '';
     document.getElementById('monFrom').value = '';
     document.getElementById('monTo').value = '';
     document.getElementById('monLimit').value = '100';
     document.getElementById('monProblem').checked = false;
-    loadSessions();
+    if (mode !== 'sessions') {
+      setMode('sessions');
+    } else {
+      loadSessions();
+    }
   });
   document.getElementById('monAuto').addEventListener('change', (e) => {
     autoRefresh = e.target.checked;
   });
-  document.getElementById('monProblem').addEventListener('change', loadSessions);
+  document.getElementById('monProblem').addEventListener('change', loadActiveList);
   // 文本过滤输入：防抖后查询（避免每键入一次触发一次全量扫描）
-  for (const id of ['monUser', 'monKeyword']) {
+  for (const id of ['monUser', 'monKeyword', 'monContent']) {
     document.getElementById(id).addEventListener('input', () => {
       if (filterDebounce) clearTimeout(filterDebounce);
-      filterDebounce = setTimeout(loadSessions, 350);
+      filterDebounce = setTimeout(loadActiveList, 350);
     });
   }
   for (const id of ['monFrom', 'monTo']) {
-    document.getElementById(id).addEventListener('change', loadSessions);
+    document.getElementById(id).addEventListener('change', loadActiveList);
   }
-  document.getElementById('monLimit').addEventListener('change', loadSessions);
+  document.getElementById('monLimit').addEventListener('change', loadActiveList);
+}
+
+/** 切换视图：会话列表 / 对话日志（issue #206） */
+function setMode(next) {
+  mode = next === 'messages' ? 'messages' : 'sessions';
+  document.getElementById('monModeSessions').classList.toggle('active', mode === 'sessions');
+  document.getElementById('monModeMessages').classList.toggle('active', mode === 'messages');
+  document.getElementById('monKeyword').style.display = mode === 'sessions' ? '' : 'none';
+  document.getElementById('monContent').style.display = mode === 'messages' ? '' : 'none';
+  document.getElementById('monProblemLabel').style.display = mode === 'sessions' ? '' : 'none';
+  loadActiveList();
+}
+
+/** 当前视图的数据加载入口（自动刷新 / 查询按钮共用） */
+function loadActiveList() {
+  if (mode === 'messages') {
+    loadMessages();
+  } else {
+    loadSessions();
+  }
 }
 
 /** 读取过滤条件（空值省略，交由后端按缺省处理） */
@@ -114,6 +153,20 @@ function currentFilters() {
   if (from) params.from = from.replace('T', ' ') + (from.length === 16 ? ':00' : '');
   if (to) params.to = to.replace('T', ' ') + (to.length === 16 ? ':59' : '');
   if (document.getElementById('monProblem').checked) params.onlyProblem = 'true';
+  return params;
+}
+
+/** 对话日志过滤条件（正文关键词 + user / 时间 / 条数；不含标题关键词与只看异常） */
+function currentMessageFilters() {
+  const user = document.getElementById('monUser').value.trim();
+  const content = document.getElementById('monContent').value.trim();
+  const from = document.getElementById('monFrom').value;
+  const to = document.getElementById('monTo').value;
+  const params = { limit: document.getElementById('monLimit').value };
+  if (user) params.userId = user;
+  if (content) params.keyword = content;
+  if (from) params.from = from.replace('T', ' ') + (from.length === 16 ? ':00' : '');
+  if (to) params.to = to.replace('T', ' ') + (to.length === 16 ? ':59' : '');
   return params;
 }
 
@@ -211,14 +264,112 @@ function sessionRow(s) {
 }
 
 function markSelected() {
-  document.querySelectorAll('.monitor-session').forEach((el) => {
+  document.querySelectorAll('.monitor-session, .monitor-msg').forEach((el) => {
     el.classList.toggle('active', el.dataset.sid === selectedSid);
+  });
+  document.querySelectorAll('.mm-group-head').forEach((el) => {
+    el.classList.toggle('active', el.dataset.sid === selectedSid);
+  });
+}
+
+// ---------- 对话日志（消息粒度 + 正文检索，issue #206） ----------
+
+async function loadMessages() {
+  const listEl = document.getElementById('monitorList');
+  if (!listEl) return;
+  try {
+    const data = await ctx.api.getMonitorMessages(currentMessageFilters());
+    if (!ctx) return;
+    if (data.error) {
+      listEl.innerHTML = '<div class="empty error-text">对话日志加载失败：'
+        + ctx.utils.esc(data.error) + '</div>';
+      return;
+    }
+    messages = data.messages || [];
+    const stamp = document.getElementById('monitorUpdated');
+    if (stamp) {
+      const total = data.total != null ? data.total : messages.length;
+      stamp.textContent = '全部用户 · 对话日志 · 共 ' + total + ' 条'
+        + (data.scan_capped ? '（扫描已达上限，请缩小时间范围）' : '')
+        + (data.hasMore ? '（显示前 ' + messages.length + ' 条）' : '')
+        + ' · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    }
+    if (messages.length === 0) {
+      listEl.innerHTML = '<div class="empty">没有匹配的对话消息</div>';
+      return;
+    }
+    listEl.innerHTML = renderMessageGroups(messages);
+    bindMessageRows(listEl);
+    markSelected();
+  } catch (e) {
+    if (!ctx) return;
+    listEl.innerHTML = '<div class="empty error-text">对话日志加载失败：' + ctx.utils.esc(e.message) + '</div>';
+  }
+}
+
+/** 命中消息按会话分组：组头是会话（标题 + 用户 + 命中条数），组内是消息行 */
+function renderMessageGroups(rows) {
+  const groups = new Map();
+  for (const m of rows) {
+    const sid = m.session_id || '';
+    if (!groups.has(sid)) {
+      groups.set(sid, { sid, meta: m, items: [] });
+    }
+    groups.get(sid).items.push(m);
+  }
+  return [...groups.values()].map((g) => {
+    const title = (g.meta.title || '').trim() || g.sid;
+    const head = '<div class="mm-group-head" data-sid="' + ctx.utils.esc(g.sid) + '">'
+      + '<span class="mm-group-title" title="' + ctx.utils.esc(title) + '">' + ctx.utils.esc(title) + '</span>'
+      + '<span class="mm-group-meta">' + ctx.utils.esc(g.meta.user_id || 'unknown')
+      + ' · ' + g.items.length + ' 条</span></div>';
+    return '<div class="monitor-msg-group">' + head + g.items.map(messageRowHtml).join('') + '</div>';
+  }).join('');
+}
+
+/** 单条对话日志行（点击跳转会话回放并定位到该消息） */
+function messageRowHtml(m) {
+  const isUser = m.role === 'user';
+  const trace = (m.trace_id || '').trim();
+  const traceShort = trace ? (trace.length > 8 ? trace.substring(0, 8) + '…' : trace) : '-';
+  const keyword = document.getElementById('monContent').value.trim();
+  return '<div class="monitor-msg" data-sid="' + ctx.utils.esc(m.session_id || '')
+    + '" data-msg-id="' + ctx.utils.esc(m.msg_id || '') + '">'
+    + '<span class="mm-role ' + (isUser ? 'user' : 'assistant') + '">' + (isUser ? '用户' : '助手') + '</span>'
+    + '<span class="mm-content">' + highlightKeyword(m.content || '', keyword) + '</span>'
+    + '<span class="mm-time">' + ctx.utils.esc((m.created_at || '').substring(0, 19).replace('T', ' ')) + '</span>'
+    + '<span class="mm-trace" title="' + ctx.utils.esc(trace || '无 trace') + '">'
+    + ctx.utils.esc(traceShort) + '</span></div>';
+}
+
+/** 关键词高亮：先按原文切段再逐段转义，避免把 HTML 注入进 mark */
+function highlightKeyword(text, keyword) {
+  if (!keyword) return ctx.utils.esc(text);
+  const lower = String(text).toLowerCase();
+  const target = keyword.toLowerCase();
+  let out = '';
+  let pos = 0;
+  let idx;
+  while ((idx = lower.indexOf(target, pos)) >= 0) {
+    out += ctx.utils.esc(text.substring(pos, idx));
+    out += '<mark>' + ctx.utils.esc(text.substring(idx, idx + keyword.length)) + '</mark>';
+    pos = idx + keyword.length;
+  }
+  return out + ctx.utils.esc(text.substring(pos));
+}
+
+function bindMessageRows(root) {
+  root.querySelectorAll('.monitor-msg').forEach((el) => {
+    el.addEventListener('click', () => selectSession(el.dataset.sid, el.dataset.msgId));
+  });
+  root.querySelectorAll('.mm-group-head').forEach((el) => {
+    el.addEventListener('click', () => selectSession(el.dataset.sid));
   });
 }
 
 // ---------- 问答回放 ----------
 
-async function selectSession(sid) {
+async function selectSession(sid, jumpMsgId) {
   if (!sid) return;
   selectedSid = sid;
   markSelected();
@@ -227,17 +378,35 @@ async function selectSession(sid) {
   if (!detailEl) return;
   detailEl.innerHTML = '<div class="empty">Loading conversation...</div>';
   // 归属校验（issue #158）：回放以会话归属者身份读取（监控页跨用户，取列表行 user_id）
-  const session = sessions.find((x) => x.session_id === sid) || {};
+  const session = sessions.find((x) => x.session_id === sid)
+    || messages.find((x) => x.session_id === sid) || {};
   try {
-    const data = await ctx.api.getThreadHistory(sid, session.user_id);
+    // 从对话日志跳转时放大首页条数，尽量让目标消息落在返回范围内
+    const data = await ctx.api.getThreadHistory(sid, session.user_id, jumpMsgId ? { limit: 500 } : {});
     // 丢弃过期响应：等待期间用户可能已切到别的会话
     if (!ctx || seq !== detailSeq) return;
     detailEl.innerHTML = renderConversation(sid, session, data);
     highlightCode(detailEl);
+    bindTraceCopy(detailEl);
+    if (jumpMsgId) {
+      scrollToMessage(detailEl, jumpMsgId);
+    }
   } catch (e) {
     if (!ctx || seq !== detailSeq) return;
     detailEl.innerHTML = '<div class="empty error-text">会话详情加载失败：' + ctx.utils.esc(e.message) + '</div>';
   }
+}
+
+/** 从对话日志跳转：滚动到目标消息并短暂高亮 */
+function scrollToMessage(root, msgId) {
+  const el = [...root.querySelectorAll('[data-msg-id]')].find((x) => x.dataset.msgId === msgId);
+  if (!el) {
+    ctx.utils.toast('该消息不在最近 500 条历史中，请缩小时间范围后重试', 'warn');
+    return;
+  }
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.classList.add('msg-jump-flash');
+  setTimeout(() => el.classList.remove('msg-jump-flash'), 2000);
 }
 
 function renderConversation(sid, session, data) {
@@ -338,17 +507,69 @@ function pendingToolsLabel(pc) {
 
 /** 单条消息 → HTML（role: user / assistant / agent / compaction） */
 function messageHtml(m) {
+  // data-msg-id：对话日志跳转的定位锚点（issue #206）
+  const msgId = m.msg_id ? ' data-msg-id="' + ctx.utils.esc(m.msg_id) + '"' : '';
   if (m.role === 'compaction') {
-    return '<div class="monitor-compaction">— ' + ctx.utils.esc(m.content || '上下文已压缩') + ' —</div>';
+    return '<div class="monitor-compaction"' + msgId + '>— '
+      + ctx.utils.esc(m.content || '上下文已压缩') + ' —</div>';
   }
   if (m.role === 'user') {
-    return '<div class="msg user"><div class="msg-bubble">' + userText(m.content || '') + '</div></div>';
+    return '<div class="msg user"' + msgId + '><div class="msg-bubble">' + userText(m.content || '') + '</div>'
+      + traceChip(m.trace_id) + '</div>';
   }
   if (m.role === 'assistant' || m.role === 'agent') {
-    return '<div class="msg assistant">' + assistantBlocks(m) + '</div>';
+    return '<div class="msg assistant"' + msgId + '>' + assistantBlocks(m) + traceChip(m.trace_id) + '</div>';
   }
   // tool / 其它角色：直接展示内容
-  return '<div class="msg system">' + ctx.utils.esc(m.content || '') + '</div>';
+  return '<div class="msg system"' + msgId + '>' + ctx.utils.esc(m.content || '') + traceChip(m.trace_id) + '</div>';
+}
+
+/**
+ * 每轮 OTel traceId 短码（issue #205）：前 8 位 + 复制按钮，完整值在 title 中；
+ * 无 trace（OTEL 未开启 / state-only 消息）显示 "-"，与日志 pattern 无活跃 span 同口径。
+ */
+function traceChip(traceId) {
+  const v = (traceId || '').trim();
+  if (!v) {
+    return '<div class="msg-trace"><span class="trace-label">trace</span>'
+      + '<span class="trace-none">-</span></div>';
+  }
+  const short = v.length > 8 ? v.substring(0, 8) + '…' : v;
+  return '<div class="msg-trace"><span class="trace-label">trace</span>'
+    + '<span class="trace-id" title="' + ctx.utils.esc(v) + '">' + ctx.utils.esc(short) + '</span>'
+    + '<button type="button" class="trace-copy" data-trace="' + ctx.utils.esc(v) + '">复制</button></div>';
+}
+
+/** 绑定 trace 复制按钮（详情渲染后调用） */
+function bindTraceCopy(root) {
+  root.querySelectorAll('.trace-copy').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyTrace(btn.dataset.trace);
+    });
+  });
+}
+
+/** 复制 traceId：优先 Clipboard API，非安全上下文降级为 textarea + execCommand */
+async function copyTrace(text) {
+  if (!text) return;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    ctx.utils.toast('traceId 已复制', 'success');
+  } catch (e) {
+    ctx.utils.toast('复制失败：' + (e.message || e), 'error');
+  }
 }
 
 /** 用户消息：转义 + 高亮 @Skill 引用（与 Chat 页一致） */
