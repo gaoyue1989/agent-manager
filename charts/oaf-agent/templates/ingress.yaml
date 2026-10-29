@@ -1,0 +1,72 @@
+{{- $fullname := include "oaf-agent.fullname" . -}}
+{{- if eq .Values.ingress.mode "host" }}
+{{- $host := printf "%s%s" .Values.fullnameOverride .Values.ingress.hostSuffix -}}
+# host 模式（默认）：per-service 域名根路径直出，语义对齐平台 INGRESS_HOST_SUFFIX 非空形态——
+# 仅 ssl-redirect=false 与 proxy-read/send-timeout=3600（A2A blocking/SSE 长对话必需），
+# 无任何 rewrite 注解（objects.go:287-315 同款不变量）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-svc
+                port:
+                  number: 8100
+{{- else }}
+# router 模式：子路径由生产环境共享路由器（ingress-nginx）承接——rewrite-target/$2 + use-regex
+# 剥前缀、x-forwarded-prefix 注入（nginx 原生 rewrite + X-Forwarded-Prefix，与平台共享路由器语义一致）；
+# 与平台「已删除注解 rewrite 模式」不冲突（契约 §9-D9：该决议针对平台自举 router 形态，
+# 此处为生产环境自担的共享路由器接线）。path 正则捕获组保证 /agent/{name} 前缀剥离后余段透传。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: "/$2"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: {{ .Values.ingress.pathPrefix | quote }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - http:
+        paths:
+          - path: {{ printf "%s(/|$)(.*)" .Values.ingress.pathPrefix | quote }}
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ $fullname }}-svc
+                port:
+                  number: 8100
+{{- end }}

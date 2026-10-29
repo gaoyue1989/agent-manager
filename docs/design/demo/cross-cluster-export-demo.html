@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跨集群导出发布 · 可交互原型 v1.2</title>
+<style>
+:root { --ink: #1e293b; --muted: #64748b; --line: #e2e8f0; --blue: #2563eb; --blue-bg: #dbeafe; --green: #059669; --green-bg: #d1fae5; --amber: #d97706; --amber-bg: #fef3c7; --indigo: #4f46e5; --indigo-bg: #e0e7ff; --red: #dc2626; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { padding: 26px 32px 60px; max-width: 1320px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--ink); line-height: 1.6; background: #fff; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 13.5px; }
+.tag { display: inline-block; border-radius: 999px; font-size: 11.5px; padding: 1px 9px; font-weight: 600; white-space: nowrap; }
+.t-blue { background: var(--blue-bg); color: var(--blue); }
+.t-green { background: var(--green-bg); color: var(--green); }
+.t-amber { background: var(--amber-bg); color: var(--amber); }
+.t-gray { background: #e2e8f0; color: #475569; }
+.t-red { background: #fee2e2; color: var(--red); }
+.t-indigo { background: var(--indigo-bg); color: var(--indigo); }
+.callout { border-left: 4px solid var(--blue); background: #f8fafc; border-radius: 6px; padding: 9px 13px; margin: 10px 0; font-size: 13px; }
+.callout.warn { border-left-color: var(--amber); }
+code { background: #f1f5f9; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+pre { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 12px; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 8px 0; }
+pre code { background: none; padding: 0; color: inherit; }
+
+.top { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--ink); }
+.brand { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.views { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.vbtn { border: 1px solid var(--line); background: #fff; color: var(--muted); border-radius: 999px; padding: 4px 13px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+.vbtn:hover { border-color: var(--muted); color: var(--ink); }
+.vbtn.active { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+
+.win { border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,.05); }
+.win-top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 9px 16px; border-bottom: 1px solid var(--line); background: #f8fafc; font-size: 12.5px; color: var(--muted); }
+.win-top b { color: var(--ink); font-weight: 600; }
+.win-top .sep { opacity: .5; }
+.win-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.win-body { display: grid; grid-template-columns: minmax(0,1fr) 430px; gap: 14px; padding: 14px 16px 18px; align-items: start; }
+@media (max-width: 980px) { .win-body { grid-template-columns: 1fr; } .side { position: static !important; } }
+.side { position: sticky; top: 10px; }
+
+.panel { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+.panel-h { padding: 8px 12px; border-bottom: 1px solid var(--line); background: #f8fafc; font-size: 12.5px; font-weight: 600; }
+.panel-h .psub { display: block; font-weight: 400; color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+.panel-b { padding: 11px 12px; }
+
+table.tbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+table.tbl th, table.tbl td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: middle; }
+table.tbl th { background: #f8fafc; font-weight: 600; white-space: nowrap; }
+.note { color: var(--muted); font-size: 11.5px; }
+.err { color: var(--red); font-size: 12px; min-height: 16px; margin-top: 4px; }
+
+.in, .sel { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12.5px; font-family: inherit; color: var(--ink); background: #fff; }
+.in:focus, .sel:focus { outline: 2px solid #dbeafe; border-color: var(--blue); }
+.in:disabled { background: #f8fafc; color: var(--muted); }
+.in-xs { width: 64px; }
+.field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.field .lab { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+@media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+.check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+.row-add { display: grid; grid-template-columns: 1fr 1.4fr auto auto; gap: 7px; align-items: center; }
+@media (max-width: 640px) { .row-add { grid-template-columns: 1fr; } }
+
+.btn { border: 1px solid var(--line); background: #fff; border-radius: 7px; padding: 4px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; color: var(--ink); }
+.btn:hover { border-color: var(--muted); }
+.btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
+.btn-primary:hover { filter: brightness(1.05); }
+.badge { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--blue-bg); color: var(--blue); font-weight: 600; }
+.kv { display: flex; gap: 8px; font-size: 12px; color: var(--muted); margin: 4px 0; align-items: baseline; }
+.kv > span:first-child { flex: 0 0 58px; }
+.kv code { word-break: break-all; }
+.steps { list-style: none; margin: 0; padding: 0; }
+.step { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); padding: 3px 0; }
+.step .dot { flex: 0 0 16px; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 10px; }
+.step.doing { color: var(--ink); }
+.step.doing .dot { border-color: var(--blue); background: var(--blue-bg); }
+.step.done { color: var(--ink); }
+.step.done .dot { border-color: var(--green); color: var(--green); background: var(--green-bg); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: 11.5px; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted); }
+.chip b { color: var(--ink); }
+details summary { font-size: 12px; color: var(--muted); cursor: pointer; margin: 6px 0; }
+.toast { font-size: 12px; color: var(--green); opacity: 0; transition: opacity .25s; margin-left: 8px; }
+.toast.show { opacity: 1; }
+.artifact { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 10px; background: #f8fafc; font-size: 12px; }
+.artifact .t { font-weight: 600; margin-bottom: 4px; }
+.tree { font-size: 12px; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.flow .node { border: 1px solid var(--line); background: #f8fafc; border-radius: 7px; padding: 3px 10px; }
+.flow .arr { color: var(--muted); }
+.flow .node.cur { border-color: var(--blue); background: var(--blue-bg); color: var(--blue); font-weight: 600; }
+.checklist { list-style: none; margin: 4px 0; padding: 0; font-size: 13px; }
+.checklist li { display: flex; gap: 8px; align-items: flex-start; margin: 5px 0; }
+.checklist .ok { color: var(--green); font-weight: 700; }
+
+/* 配置包文本编辑器 */
+.cfg { display: grid; grid-template-columns: 210px minmax(0,1fr); gap: 10px; }
+@media (max-width: 640px) { .cfg { grid-template-columns: 1fr; } }
+.ftree { border-right: 1px solid var(--line); padding-right: 8px; font-size: 12px; }
+.ftree button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; color: var(--ink); }
+.ftree button:hover { background: #f1f5f9; }
+.ftree button.active { background: var(--blue-bg); color: var(--blue); font-weight: 600; }
+.ftree .ro { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.ftree .dir { color: var(--muted); font-size: 11.5px; padding: 6px 8px 2px; }
+.editor { width: 100%; min-height: 320px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #fbfcfe; color: var(--ink); resize: vertical; }
+.editor:focus { outline: 2px solid #dbeafe; border-color: var(--blue); }
+.editor:disabled { background: #f8fafc; color: var(--muted); }
+
+/* 运维子标签 */
+.otabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.otab { border: 1px solid var(--line); background: #fff; color: var(--muted); border-radius: 7px; padding: 4px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+.otab.active { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+h2 { font-size: 18px; margin: 26px 0 10px; padding-left: 10px; border-left: 4px solid var(--blue); }
+ul { margin: 6px 0; padding-left: 20px; }
+li { margin: 3px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<h1>跨集群导出发布 · 可交互原型 <span class="tag t-blue">v1.2</span></h1>
+<div class="sub">配置包文本直改 + 发布标记落表 · env 增删改（运行时默认锁定）· 模型/沙箱参数全量 · 演示原型（样例数据，交互为前端模拟，无后端）· 对应设计正文 <code>docs/design/cross-cluster-export-design.md</code></div>
+
+<div class="top">
+  <div class="brand">OAF 控制台 <span class="tag t-blue">跨集群导出发布</span></div>
+  <div class="views" role="tablist" aria-label="原型视图">
+    <button class="vbtn active" data-view="export" role="tab" aria-selected="true" type="button">① 导出发布页（用户侧）</button>
+    <button class="vbtn" data-view="ops" role="tab" aria-selected="false" type="button">② 运维配置管理</button>
+    <button class="vbtn" data-view="deploy" role="tab" aria-selected="false" type="button">③ 生产部署</button>
+    <button class="vbtn" data-view="bundle" role="tab" aria-selected="false" type="button">④ 交付包与 DoD</button>
+  </div>
+</div>
+
+<!-- ==================== 视图1：导出发布页 ==================== -->
+<section id="view-export" class="view">
+  <div class="win">
+    <div class="win-top">
+      <b>OAF 控制台</b><span class="sep">/</span>服务<span class="sep">/</span>travel-agent<span class="sep">/</span><b>导出发布</b>
+      <div class="win-right"><span class="chip">ws-3f9a21c4</span><span class="chip">zhang.san</span></div>
+    </div>
+    <div class="win-body">
+      <div>
+        <div class="panel">
+          <div class="panel-h">导出信息
+            <span class="psub">源包版本自动派生（copy-on-write，SourcePackageID 可追溯）</span>
+          </div>
+          <div class="panel-b">
+            <div class="chips">
+              <span class="chip">源包 agentmanager/travel-agent <b>1.4.1</b></span>
+              <span class="chip"><b style="color:var(--green)">导出版本 1.4.2</b>（自动派生）</span>
+              <span class="chip">chart <b>oaf-agent 0.1.0</b>（固定版本）</span>
+              <span class="chip">基础镜像 <b>agentscope-2.1.0-v20260907</b></span>
+              <span class="chip">指定仓库 <b>registry.prod.example.com/oaf</b></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 配置包更新：文本直改 → 打发布标记落表 → 构建固化 -->
+        <div class="panel">
+          <div class="panel-h">配置包更新
+            <span class="psub">直接文本编辑包内文件；保存即打发布标记并写入发布标记表（快照冻结）；确认导出时按该标记内容固化进 OAF 镜像</span>
+          </div>
+          <div class="panel-b">
+            <div class="cfg">
+              <div class="ftree" id="ftree">
+                <div class="dir">travel-agent/</div>
+                <button data-file="agents" class="active">AGENTS.md</button>
+                <button data-file="flight">mcp-configs/flight/config.yaml</button>
+                <button data-file="tools">mcp-configs/flight/ActiveMCP.json</button>
+                <button data-file="hotel">mcp-configs/hotel/config.yaml</button>
+                <div class="dir">skills/</div>
+                <button data-file="skills">…<span class="ro">只读</span></button>
+              </div>
+              <div>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+                  <code id="curPath">AGENTS.md</code>
+                  <span id="dirty" class="tag t-amber" hidden>未保存修改</span>
+                </div>
+                <textarea id="editor" class="editor" spellcheck="false" aria-label="包文件内容"></textarea>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+                  <button class="btn btn-primary" id="markBtn" type="button">保存并打发布标记</button>
+                  <span class="note" id="markHint">保存后冻结为快照（写入发布标记表），构建 OAF 镜像时按该标记固化</span>
+                  <span class="toast" id="markToast">已保存并打标（demo）</span>
+                </div>
+                <div class="note" style="margin-top:8px">skills/ 与 versions/ 只读；AGENTS.md 的版本号由发布标记派生，不建议手改。</div>
+              </div>
+            </div>
+            <table class="tbl" style="margin-top:10px">
+              <thead><tr><th style="width:14%">发布标记</th><th style="width:10%">包版本</th><th style="width:8%">文件数</th><th>checksum</th><th style="width:10%">操作人</th><th style="width:18%">时间</th><th style="width:10%">状态</th></tr></thead>
+              <tbody id="markBody">
+                <tr><td colspan="7" class="note">尚未保存发布标记——保存后在此生成记录（构建 OAF 镜像的唯一输入）</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 生产环境变量：增删改 + 默认锁定 -->
+        <div class="panel">
+          <div class="panel-h">生产环境变量
+            <span class="psub">运行时默认来源的行锁定（🔒 由运维配置管理维护）；可添加服务专属键、编辑/删除自己添加的行；敏感键自动落 secretEnv</span>
+          </div>
+          <div class="panel-b">
+            <table class="tbl">
+              <thead><tr><th style="width:36%">env 键</th><th>值（生产）</th><th style="width:14%">来源</th><th style="width:16%">操作</th></tr></thead>
+              <tbody id="envBody"></tbody>
+            </table>
+            <div class="row-add" style="margin-top:9px">
+              <input class="in" id="newKey" placeholder="新键名，如 MCP_FLIGHT_TOKEN">
+              <input class="in" id="newVal" placeholder="值（敏感键会落 secretEnv）">
+              <label class="check" style="margin:0"><input type="checkbox" id="newSec"> 敏感</label>
+              <button class="btn btn-primary" id="envAdd" type="button">添加变量</button>
+            </div>
+            <div class="err" id="envErr"></div>
+            <div class="note">保留键（<code>AGENT_CONFIG_DIR</code> / <code>AGENT_WORKSPACE_DIR</code> / <code>SERVER_HOST</code> / <code>SERVER_PORT</code>）与运行时默认键不可重复添加。</div>
+          </div>
+        </div>
+
+        <!-- 模型配置：全量参数，来自运行时默认，锁定 -->
+        <div class="panel">
+          <div class="panel-h">模型配置（全量参数）
+            <span class="psub">来自运行时默认（运维配置管理维护），导出页锁定不可修改；空值参数不下发</span>
+          </div>
+          <div class="panel-b">
+            <div class="grid2" id="grid-llm"></div>
+          </div>
+        </div>
+
+        <!-- 沙箱配置：全量参数，来自运行时默认，锁定 -->
+        <div class="panel">
+          <div class="panel-h">沙箱配置（全量参数）
+            <span class="psub">来自运行时默认（运维配置管理维护），导出页锁定不可修改</span>
+          </div>
+          <div class="panel-b">
+            <div class="grid2" id="grid-sbx"></div>
+            <div class="note" style="margin-top:8px"><code>SANDBOX_ENABLED</code> 刻意不进运行时默认：它在 agent-framework 是三层裁决（env 显式存在 &gt; OAF 包 frontmatter &gt; 默认 false），由包自身声明。</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">部署参数</div>
+          <div class="panel-b">
+            <div class="grid2">
+              <label class="field"><span>replicas</span>
+                <select class="sel" data-f="replicas"><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select>
+              </label>
+              <label class="field"><span>ingress.mode</span>
+                <select class="sel" data-f="ingress_mode"><option value="router" selected>router</option><option value="host">host</option></select>
+              </label>
+            </div>
+            <label class="field" style="margin-top:9px"><span>host 后缀（host 模式）</span><input class="in" data-f="host_suffix" value=".prod.example.com" disabled></label>
+            <label class="check"><input type="checkbox" data-f="mysql_create_db" checked> 部署时自动建库（pre-install hook，幂等）</label>
+          </div>
+        </div>
+
+        <div class="callout">运行时默认（env / 模型 / 沙箱）在导出页<b>只读</b>：需调整时由运维在「配置管理」修改工作空间默认（留审计），导出页只允许<b>新增服务专属键</b>。包内配置以<b>发布标记</b>冻结：保存即写发布标记表（快照 + checksum），构建 OAF 镜像只认标记，标记不可改（改则生成新标记）。</div>
+      </div>
+
+      <div class="side">
+        <div class="panel">
+          <div class="panel-h">导出单 <span class="badge" id="status">草稿</span></div>
+          <div class="panel-b">
+            <div class="kv"><span>导出单号</span><code>EXP-20261029-0007</code></div>
+            <div class="kv"><span>发布标记</span><code id="mk">未保存</code></div>
+            <div class="kv"><span>交付镜像</span><code>oaf-travel-agent:1.4.2-e7</code></div>
+            <button class="btn btn-primary" id="confirm" type="button">确认导出并构建</button>
+            <span class="note">构建后：双镜像直推指定仓库 → values + manifest 提交 ITSM</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">构建进度</div>
+          <div class="panel-b">
+            <div id="build-idle" class="note">确认后依次执行：创建导出单 → 按发布标记构建 OAF 镜像 → 直推指定镜像仓库 → 渲染 values / manifest</div>
+            <ul class="steps" id="build-steps" hidden></ul>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">交付物预览 <span class="psub">values 随表单实时联动（敏感值明文，文件代入）</span></div>
+          <div class="panel-b">
+            <div class="note">values.yaml</div>
+            <pre><code id="values"></code></pre>
+            <details>
+              <summary>manifest.json（随 values 交 ITSM）</summary>
+              <pre><code id="manifest"></code></pre>
+            </details>
+            <div id="artifact" class="artifact" hidden></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 视图2：运维配置管理 ==================== -->
+<section id="view-ops" class="view" hidden>
+  <div class="win">
+    <div class="win-top">
+      <b>OAF 控制台 · 运维侧</b><span class="sep">/</span>工作空间 ws-3f9a21c4<span class="sep">/</span><b>配置管理</b>
+      <div class="win-right"><span class="chip">角色：运维管理员</span></div>
+    </div>
+    <div class="win-body" style="grid-template-columns:1fr">
+      <div>
+        <div class="callout">配置管理（API + 页面重设计）：统一维护<b>运行时默认 / MCP 连接器模板 / 模型参数 / 沙箱参数 / 仓库与路由</b>。导出发布页继承本页默认值（导出页锁定）；MCP 连接器模板供导出页文本编辑预填与校验（不强制结构化）。</div>
+        <div class="otabs" id="otabs">
+          <button class="otab active" data-pane="runtime" type="button">运行时默认</button>
+          <button class="otab" data-pane="mcp" type="button">MCP 连接器模板</button>
+          <button class="otab" data-pane="llm" type="button">模型参数</button>
+          <button class="otab" data-pane="sbx" type="button">沙箱参数</button>
+          <button class="otab" data-pane="reg" type="button">仓库与路由</button>
+          <button class="otab" data-pane="api" type="button">API</button>
+        </div>
+
+        <div class="opane" id="pane-op-runtime">
+          <table class="tbl" id="opsTable">
+            <thead><tr><th style="width:12%">分类</th><th style="width:34%">env 键</th><th>默认值（生产）</th><th style="width:10%">敏感</th><th style="width:10%">操作</th></tr></thead>
+            <tbody>
+              <tr><td>mysql</td><td><input class="in" value="CHECKPOINT_JDBC_BASE"></td><td><input class="in" value="jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint"></td><td>—</td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+              <tr><td>mysql</td><td><input class="in" value="CHECKPOINT_USERNAME"></td><td><input class="in" value="oaf_writer"></td><td>—</td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+              <tr><td>mysql</td><td><input class="in" value="CHECKPOINT_PASSWORD"></td><td><input class="in" type="password" value="Prod#2026Mysql"></td><td><span class="tag t-red">★</span></td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+              <tr><td>redis</td><td><input class="in" value="AGENT_REDIS_URL"></td><td><input class="in" value="redis://redis.prod.svc:6379/0"></td><td><span class="tag t-red">★</span></td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+              <tr><td>redis</td><td><input class="in" value="AGENT_REDIS_COMMAND_TIMEOUT_MS"></td><td><input class="in" value="2000"></td><td>—</td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+              <tr><td>otel</td><td><input class="in" value="OTEL_EXPORTER_OTLP_ENDPOINT"></td><td><input class="in" value="http://otel-collector.prod.svc:4318"></td><td>—</td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+              <tr><td>protocol</td><td><input class="in" value="AGENT_PROTOCOL_AUTH_TOKEN"></td><td><input class="in" type="password" value="proto-prod-xxxx"></td><td><span class="tag t-red">★</span></td><td><button class="btn" data-opsdel type="button">删除</button></td></tr>
+            </tbody>
+          </table>
+          <div style="margin-top:10px"><button class="btn" id="opsAdd" type="button">添加变量</button> <button class="btn btn-primary" id="ops-save" type="button">保存</button><span class="toast" id="ops-toast">已保存（demo）</span></div>
+          <div class="note" style="margin-top:6px">模型参数与沙箱参数在各自页签维护；此处只放环境级键（mysql / redis / otel / protocol）。</div>
+        </div>
+
+        <div class="opane" id="pane-op-mcp" hidden>
+          <table class="tbl">
+            <thead><tr><th>server</th><th>vendor / version</th><th>connection</th><th>auth</th><th>权限</th><th>工具</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr><td><code>flight-mcp</code></td><td>agentmanager / 1.0.0</td><td>streamableHttp · timeout 30</td><td>bearer · <code>${MCP_FLIGHT_TOKEN}</code></td><td>allow 2 / deny 1 / 非只读</td><td>3 / 4</td><td><button class="btn" type="button">编辑</button></td></tr>
+              <tr><td><code>hotel-mcp</code></td><td>agentmanager / 1.0.0</td><td>streamableHttp · timeout 30</td><td>bearer · <code>${MCP_HOTEL_TOKEN}</code></td><td>allow 2 / deny 1 / 非只读</td><td>2 / 3</td><td><button class="btn" type="button">编辑</button></td></tr>
+            </tbody>
+          </table>
+          <div class="note" style="margin-top:6px">模板供导出页文本编辑预填与校验；导出页直接改包内文本，保存后以发布标记冻结快照（不改模板）。</div>
+        </div>
+
+        <div class="opane" id="pane-op-llm" hidden>
+          <div class="grid2" id="ogrid-llm"></div>
+          <div style="margin-top:10px"><button class="btn btn-primary" id="llm-save" type="button">保存</button><span class="toast" id="llm-toast">已保存（demo）</span></div>
+          <div class="note" style="margin-top:6px">字段模板与平台 <code>platformconfig/template.go</code> 同源（LLM 组 10 键），页面表单、敏感路由、掩码输出由模板驱动。</div>
+        </div>
+
+        <div class="opane" id="pane-op-sbx" hidden>
+          <div class="grid2" id="ogrid-sbx"></div>
+          <div class="callout warn" style="margin-top:10px"><code>SANDBOX_ENABLED</code> 不进本模板：agent-framework 三层裁决（env 显式存在 &gt; OAF 包 frontmatter &gt; 默认 false），进默认配置会让包级沙箱声明永久失效。</div>
+          <div><button class="btn btn-primary" id="sbx-save" type="button">保存</button><span class="toast" id="sbx-toast">已保存（demo）</span></div>
+        </div>
+
+        <div class="opane" id="pane-op-reg" hidden>
+          <table class="tbl">
+            <tr><th style="width:26%">配置</th><th>值</th><th style="width:30%">说明</th></tr>
+            <tr><td>指定镜像仓库</td><td><input class="in" value="registry.prod.example.com/oaf"></td><td class="note">backend 构建后直推目标；生产侧自己拉取生产同步镜像</td></tr>
+            <tr><td>imagePullSecrets</td><td><input class="in" value="prod-registry-secret"></td><td class="note">写入 values</td></tr>
+            <tr><td>推送凭证</td><td><input class="in" type="password" value="harbor-push-xxxx"></td><td class="note">存平台 Secret，不进导出产物</td></tr>
+            <tr><td>ingress.mode / hostSuffix</td><td><input class="in" value="router / .prod.example.com"></td><td class="note">对齐 INGRESS_HOST_SUFFIX 语义</td></tr>
+            <tr><td>基础镜像白名单</td><td><input class="in" value="agent-framework:agentscope-2.1.0-v20260907"></td><td class="note">导出页只允许白名单内版本</td></tr>
+          </table>
+          <div style="margin-top:10px"><button class="btn btn-primary" id="reg-save" type="button">保存</button><span class="toast" id="reg-toast">已保存（demo）</span></div>
+        </div>
+
+        <div class="opane" id="pane-op-api" hidden>
+          <pre><code># 配置管理（工作空间级）
+GET  /api/v1/workspaces/:id/config/runtime-defaults      # 运行时默认 env（分类键值，敏感掩码）
+PUT  /api/v1/workspaces/:id/config/runtime-defaults
+GET  /api/v1/workspaces/:id/config/mcp-connectors        # MCP 连接器模板（供导出页预填/校验）
+PUT  /api/v1/workspaces/:id/config/mcp-connectors
+GET  /api/v1/workspaces/:id/config/templates/:group      # llm | sandbox（模板驱动 schema）
+PUT  /api/v1/workspaces/:id/config/templates/:group
+GET  /api/v1/workspaces/:id/config/registry              # 仓库 / 拉取凭证 / 路由 / 镜像白名单
+PUT  /api/v1/workspaces/:id/config/registry
+
+# 导出（服务级）
+GET  /api/v1/services/:id/export/package                 # 包文件树 + 文本内容（只读项标注）
+PUT  /api/v1/services/:id/export/package/file            # 保存单文件文本修改（草稿）
+POST /api/v1/services/:id/export/package/mark            # 打发布标记：冻结快照写入标记表
+GET  /api/v1/services/:id/export/package/marks           # 发布标记列表
+GET  /api/v1/services/:id/export/preview                 # 预填：默认值 / 锁定项 / 可新增键
+POST /api/v1/services/:id/export                         # 创建导出单（携带 marker）→ 异步构建
+GET  /api/v1/exports/:id                                 # 状态与详情
+GET  /api/v1/exports/:id/values.yaml | /manifest.json     # 交付文本下载（含敏感值，记审计）
+POST /api/v1/exports/:id/status                          # 人工推进状态</code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 视图3：生产部署 ==================== -->
+<section id="view-deploy" class="view" hidden>
+  <div class="win">
+    <div class="win-top">
+      <b>生产环境 · 部署</b><span class="sep">/</span>另一 K8s 集群<span class="sep">/</span><b>travel-agent</b>
+      <div class="win-right"><span class="chip">ITSM-2026-0451 已批准</span></div>
+    </div>
+    <div class="win-body" style="grid-template-columns:1fr">
+      <div>
+        <div class="panel">
+          <div class="panel-h">4 件套 <span class="psub">审批通过后领取；镜像由生产侧自己拉取生产同步镜像</span></div>
+          <div class="panel-b">
+            <div class="chips">
+              <span class="chip">chart <b>oaf-agent-0.1.0.tgz</b>（固定版本）</span>
+              <span class="chip">基础镜像 <b>agent-framework:agentscope-2.1.0-v20260907</b></span>
+              <span class="chip">OAF 镜像 <b>oaf-travel-agent:1.4.2-e7</b> <span class="tag t-green">digest 固定</span></span>
+              <span class="chip">values <b>values-travel-agent.yaml</b>（ITSM 批准版，含明文敏感值）</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="callout">生产部署不新增平台能力：调用<b>已有 HTTP Helm 部署接口</b>提交 chart + values 文件（镜像按 values 引用拉取）；平台只产出并交付 4 件套。</div>
+
+        <div class="panel">
+          <div class="panel-h">部署到 namespace</div>
+          <div class="panel-b">
+            <div class="grid2" style="max-width:520px">
+              <label class="field"><span>目标 namespace（任意全新 ns）</span><input class="in" id="ns" value="oaf-prod"></label>
+              <label class="field"><span>release 名</span><input class="in" value="travel-agent" disabled></label>
+            </div>
+            <pre><code id="cmd"></code></pre>
+            <div class="note">敏感值随 values 文件代入（决议 ①），无需 <code>--set</code> 合并；部署前可按 digest 校验镜像就绪。</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">就绪验证（v1 DoD）</div>
+          <div class="panel-b">
+            <ul class="checklist">
+              <li><span class="ok">✓</span>全新 namespace 仅凭 4 件套部署，无平台对象依赖（无 platform-data PVC / backend / platform_config）</li>
+              <li><span class="ok">✓</span><code>helm upgrade --install</code> 一次成功，建库 hook 幂等执行</li>
+              <li><span class="ok">✓</span>initContainer 注入 <code>/oaf → /config</code> 成功</li>
+              <li><span class="ok">✓</span>replicas=2 全部 Ready</li>
+              <li><span class="ok">✓</span><code>/.well-known/agent-card.json</code> 可达</li>
+              <li><span class="ok">✓</span>values / manifest / ITSM 审批版三方一致（digest + checksum）</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ==================== 视图4：交付包与 DoD ==================== -->
+<section id="view-bundle" class="view" hidden>
+  <div class="win">
+    <div class="win-top"><b>交付包</b><span class="sep">/</span>travel-agent-release-1.4.2<span class="sep">/</span><b>结构与状态机</b></div>
+    <div class="win-body" style="grid-template-columns:1fr">
+      <div>
+        <div class="panel">
+          <div class="panel-h">交付包结构 <span class="psub">随 ITSM 工单流转（values 含明文敏感值，按密级）</span></div>
+          <div class="panel-b">
+            <pre><code class="tree">travel-agent-release-1.4.2/
+├── oaf-agent-0.1.0.tgz          # chart（固定版本，4 件套之一）
+├── values-travel-agent.yaml     # 四层合并产物（chart ⊕ 工作空间默认 ⊕ 用户新增键 ⊕ 平台生成）
+├── manifest.json                # 导出单号 / 发布标记 / 包版本链 / 镜像 digest / ITSM 单号
+├── images/
+│   ├── base.txt                 # agent-framework:agentscope-2.1.0-v20260907
+│   └── oaf.txt                  # oaf-travel-agent:1.4.2-e7 @ sha256:…（按发布标记固化）
+└── CHECKSUMS.sha256             # 交付包完整性校验</code></pre>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">导出单状态机</div>
+          <div class="panel-b">
+            <div class="flow">
+              <span class="node">draft</span><span class="arr">→</span>
+              <span class="node">building</span><span class="arr">→</span>
+              <span class="node">built</span><span class="arr">→</span>
+              <span class="node cur">approving（ITSM）</span><span class="arr">→</span>
+              <span class="node">approved</span><span class="arr">→</span>
+              <span class="node">deploying</span><span class="arr">→</span>
+              <span class="node">deployed</span>
+            </div>
+            <div class="note" style="margin-top:8px">任意态可入 failed / cancelled；v1 中 approving → approved → deploying 人工推进，v2 接 ITSM / 部署回调自动化。</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">v1 完成定义（DoD）</div>
+          <div class="panel-b" style="font-size:13px">
+            仅凭 4 件套在任一<b>全新 namespace</b> 执行一次 <code>helm upgrade --install</code> 部署成功：建库 hook 执行、initContainer 注入 /config、Pod Ready、<code>/.well-known/agent-card.json</code> 可达，全程不依赖平台 backend / 共享 PVC / platform_config。验证手段：charts-ci 增加 <code>oaf-agent</code> lint + template 渲染矩阵；kind 集群以样例 values 实装冒烟。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+(function () {
+  function $(s) { return document.querySelector(s); }
+  function $$(s) { return Array.prototype.slice.call(document.querySelectorAll(s)); }
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function now() {
+    var d = new Date();
+    function p(n) { return ('0' + n).slice(-2); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  /* ---------- 顶层视图切换 ---------- */
+  $$('.vbtn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('.vbtn').forEach(function (x) { x.classList.remove('active'); x.setAttribute('aria-selected', 'false'); });
+      b.classList.add('active'); b.setAttribute('aria-selected', 'true');
+      $$('.view').forEach(function (v) { v.hidden = true; });
+      $('#view-' + b.dataset.view).hidden = false;
+    });
+  });
+  var initialView = (location.hash || '').replace('#', '');
+  if (initialView) { var ib = document.querySelector('.vbtn[data-view="' + initialView + '"]'); if (ib) ib.click(); }
+
+  /* ---------- 运维子标签 ---------- */
+  $$('.otab').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('.otab').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      $$('.opane').forEach(function (p) { p.hidden = true; });
+      $('#pane-op-' + b.dataset.pane).hidden = false;
+    });
+  });
+
+  /* ---------- 配置包：文本编辑 → 打发布标记 ---------- */
+  var PKG = {
+    agents: { path: 'AGENTS.md', ro: false, text: '---\nname: 差旅助手\nversion: 1.4.1\nmodel: default\nmcpServers:\n  - { vendor: agentmanager, server: flight-mcp, version: 1.0.0, configDir: mcp-configs/flight }\n  - { vendor: agentmanager, server: hotel-mcp,  version: 1.0.0, configDir: mcp-configs/hotel }\n---\n' },
+    flight: { path: 'mcp-configs/flight/config.yaml', ro: false, text: 'vendor: agentmanager\nserver: flight-mcp\nversion: 1.0.0\nconnection:\n  type: streamableHttp\n  url: https://mcp-flight.prod.example.com/sse\n  timeout: 30\nauth:\n  type: bearer\n  token: ${MCP_FLIGHT_TOKEN}\npermissions:\n  allow_paths: [/flight/search, /flight/book]\n  deny_paths: [/admin/*]\n  read_only: false\n' },
+    tools: { path: 'mcp-configs/flight/ActiveMCP.json', ro: false, text: '{\n  "vendor": "agentmanager",\n  "server": "flight-mcp",\n  "version": "1.0.0",\n  "selectedTools": [\n    { "name": "flight_search", "enabled": true },\n    { "name": "flight_detail", "enabled": true },\n    { "name": "flight_book",   "enabled": true },\n    { "name": "flight_cancel", "enabled": false }\n  ],\n  "contextStrategy": "subset"\n}\n' },
+    hotel: { path: 'mcp-configs/hotel/config.yaml', ro: false, text: 'vendor: agentmanager\nserver: hotel-mcp\nversion: 1.0.0\nconnection:\n  type: streamableHttp\n  url: https://mcp-hotel.prod.example.com/sse\n  timeout: 30\nauth:\n  type: bearer\n  token: ${MCP_HOTEL_TOKEN}\npermissions:\n  allow_paths: [/hotel/search, /hotel/book]\n  deny_paths: [/admin/*]\n  read_only: false\n' },
+    skills: { path: 'skills/', ro: true, text: '（技能资产只读，导出不修改）' }
+  };
+  var saved = { agents: PKG.agents.text, flight: PKG.flight.text, tools: PKG.tools.text, hotel: PKG.hotel.text, skills: PKG.skills.text };
+  var curFile = 'agents';
+  var marker = null;
+  var markSeq = 7;
+
+  function loadFile(k) {
+    curFile = k;
+    var f = PKG[k];
+    $('#curPath').textContent = f.path;
+    var ed = $('#editor');
+    ed.value = saved[k];
+    ed.disabled = !!f.ro;
+    $('#markBtn').disabled = !!f.ro;
+    $('#dirty').hidden = true;
+  }
+  $$('#ftree button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#ftree button').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      loadFile(b.dataset.file);
+    });
+  });
+  $('#editor').addEventListener('input', function () {
+    $('#dirty').hidden = $('#editor').value === saved[curFile];
+  });
+  $('#markBtn').addEventListener('click', function () {
+    var content = $('#editor').value;
+    if (!content.trim()) { $('#markHint').textContent = '内容为空，无法打标'; $('#markHint').style.color = 'var(--red)'; return; }
+    saved[curFile] = content;
+    PKG[curFile].text = content;
+    $('#dirty').hidden = true;
+    var a = new Uint8Array(4);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(a);
+    var hex = Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    var checksum = 'sha256:' + hex + '…';
+    marker = '1.4.2-e' + (markSeq++);
+    $('#mk').textContent = marker;
+    $('#markHint').textContent = '已冻结：' + marker + '（快照 ' + checksum + '），构建 OAF 镜像按此固化';
+    $('#markHint').style.color = 'var(--green)';
+    var tb = $('#markBody');
+    var placeholder = tb.querySelector('td[colspan]');
+    if (placeholder) tb.innerHTML = '';
+    tb.insertAdjacentHTML('afterbegin',
+      '<tr><td><span class="tag t-green">' + marker + '</span></td><td>1.4.2</td><td>4</td>' +
+      '<td><code>' + checksum + '</code></td><td>zhang.san</td><td>' + now() + '</td>' +
+      '<td><span class="tag t-blue">已冻结</span></td></tr>');
+    var t = $('#markToast');
+    t.classList.add('show');
+    setTimeout(function () { t.classList.remove('show'); }, 1600);
+    renderValues();
+  });
+
+  /* ---------- 数据模型 ---------- */
+  var RESERVED = ['AGENT_CONFIG_DIR', 'AGENT_WORKSPACE_DIR', 'SERVER_HOST', 'SERVER_PORT'];
+
+  var envRows = [
+    { k: 'CHECKPOINT_JDBC_URL', v: 'jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint_travel_agent', src: 'derived' },
+    { k: 'CHECKPOINT_USERNAME', v: 'oaf_writer', src: 'default' },
+    { k: 'CHECKPOINT_PASSWORD', v: 'Prod#2026Mysql', src: 'default', sec: true },
+    { k: 'AGENT_REDIS_URL', v: 'redis://redis.prod.svc:6379/0', src: 'default', sec: true },
+    { k: 'AGENT_REDIS_PREFIX', v: 'travel-agent:', src: 'derived' },
+    { k: 'AGENT_REDIS_COMMAND_TIMEOUT_MS', v: '2000', src: 'default' },
+    { k: 'AGENT_REDIS_CONNECT_TIMEOUT_MS', v: '2000', src: 'default' },
+    { k: 'OTEL_EXPORTER_OTLP_ENDPOINT', v: 'http://otel-collector.prod.svc:4318', src: 'default' },
+    { k: 'MCP_FLIGHT_TOKEN', v: 'flt-prod-xxxx', src: 'user', sec: true },
+    { k: 'MCP_HOTEL_TOKEN', v: 'htl-prod-xxxx', src: 'user', sec: true }
+  ];
+
+  var llm = [
+    { k: 'LLM_API_KEY', label: 'API Key', v: 'sk-prod-9f8e7d6c', sec: true, req: true },
+    { k: 'LLM_BASE_URL', label: 'Base URL', v: 'https://llm-gw.prod.example.com/v1', req: true },
+    { k: 'LLM_MODEL_ID', label: '模型 ID', v: 'glm-4.7', req: true },
+    { k: 'LLM_PROVIDER', label: '推理方言', v: 'openai' },
+    { k: 'LLM_TEMPERATURE', label: '温度', v: '0.3' },
+    { k: 'LLM_MAX_TOKENS', label: '最大 token', v: '16384' },
+    { k: 'LLM_ENABLE_THINKING', label: '思考开关', v: 'true' },
+    { k: 'LLM_CONTEXT_LENGTH', label: '上下文窗口', v: '128000' },
+    { k: 'LLM_REASONING_EFFORT', label: '推理强度', v: '' },
+    { k: 'LLM_FREQUENCY_PENALTY', label: '频率惩罚', v: '' }
+  ];
+
+  var sbx = [
+    { k: 'OPENSANDBOX_SERVER_URL', label: 'Server 地址', v: 'sandbox.prod.example.com:8090', req: true },
+    { k: 'OPENSANDBOX_API_KEY', label: 'API Key', v: 'sbx-prod-5a5a', sec: true },
+    { k: 'SANDBOX_IMAGE', label: '沙箱镜像', v: 'opensandbox/code-interpreter:v1.1.0' },
+    { k: 'SANDBOX_TIMEOUT_MINUTES', label: '超时(分钟)', v: '60' },
+    { k: 'SANDBOX_MEMORY_MB', label: '内存上限(MB)', v: '1024' },
+    { k: 'SANDBOX_CPU_COUNT', label: 'CPU 核数', v: '1' }
+  ];
+
+  function templateKeys() {
+    return llm.map(function (x) { return x.k; })
+      .concat(sbx.map(function (x) { return x.k; }))
+      .concat(['CHECKPOINT_JDBC_URL', 'CHECKPOINT_USERNAME', 'CHECKPOINT_PASSWORD', 'AGENT_REDIS_URL', 'AGENT_REDIS_PREFIX', 'AGENT_REDIS_COMMAND_TIMEOUT_MS', 'AGENT_REDIS_CONNECT_TIMEOUT_MS', 'OTEL_EXPORTER_OTLP_ENDPOINT']);
+  }
+
+  /* ---------- env 表渲染 ---------- */
+  function renderEnvTable() {
+    var tb = $('#envBody');
+    tb.innerHTML = envRows.map(function (r, i) {
+      var srcTag = r.src === 'derived' ? '<span class="tag t-gray">派生</span>'
+        : r.src === 'default' ? '<span class="tag t-blue">运行时默认</span>'
+        : '<span class="tag t-green">用户新增</span>';
+      var locked = r.src !== 'user';
+      var input = '<input class="in" data-idx="' + i + '" value="' + esc(r.v) + '"' + (r.sec ? ' type="password"' : '') + (locked ? ' disabled title="来自运行时默认/派生，导出页不可修改"' : '') + '>';
+      var ops = locked
+        ? '<span class="note">🔒 不可修改</span>'
+        : '<button class="btn" data-del="' + i + '" type="button">删除</button>';
+      return '<tr><td><code>' + esc(r.k) + '</code>' + (r.sec ? ' <span class="tag t-red">敏感</span>' : '') + '</td><td>' + input + '</td><td>' + srcTag + '</td><td>' + ops + '</td></tr>';
+    }).join('');
+
+    $$('#envBody [data-idx]').forEach(function (el) {
+      el.addEventListener('input', function () {
+        envRows[Number(el.dataset.idx)].v = el.value;
+        renderValues();
+      });
+    });
+    $$('#envBody [data-del]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        envRows.splice(Number(el.dataset.del), 1);
+        renderEnvTable(); renderValues();
+      });
+    });
+  }
+
+  /* ---------- 模型/沙箱参数渲染（导出页锁定 + 运维页可编辑） ---------- */
+  function paramField(p, editable, group) {
+    var tags = (p.req ? '<span class="tag t-amber">必填</span>' : '') + (p.sec ? '<span class="tag t-red">敏感</span>' : '');
+    var attrs = ' data-p="' + group + '" data-k="' + p.k + '"';
+    return '<label class="field"><span class="lab">' + p.k + ' ' + tags + '</span>' +
+      '<input class="in" value="' + esc(p.v) + '"' + (p.sec ? ' type="password"' : '') +
+      (editable ? attrs : ' disabled') + '></label>';
+  }
+  function renderParams() {
+    $('#grid-llm').innerHTML = llm.map(function (p) { return paramField(p, false, 'llm'); }).join('');
+    $('#grid-sbx').innerHTML = sbx.map(function (p) { return paramField(p, false, 'sbx'); }).join('');
+    $('#ogrid-llm').innerHTML = llm.map(function (p) { return paramField(p, true, 'llm'); }).join('');
+    $('#ogrid-sbx').innerHTML = sbx.map(function (p) { return paramField(p, true, 'sbx'); }).join('');
+    $$('#ogrid-llm [data-p], #ogrid-sbx [data-p]').forEach(function (el) {
+      el.addEventListener('input', function () {
+        var arr = el.dataset.p === 'llm' ? llm : sbx;
+        arr.forEach(function (p) { if (p.k === el.dataset.k) p.v = el.value; });
+        renderParams(); renderValues();
+      });
+    });
+  }
+
+  /* ---------- values / manifest 生成 ---------- */
+  function q(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '\\"') + '"'; }
+  function f(k) { var el = document.querySelector('[data-f="' + k + '"]'); return el ? String(el.value).trim() : ''; }
+  function checked(k) { var el = document.querySelector('[data-f="' + k + '"]'); return el ? el.checked : false; }
+  var digest = null;
+
+  function buildValues() {
+    var name = 'travel-agent';
+    var mode = f('ingress_mode') || 'router';
+    var suffix = f('host_suffix') || '.prod.example.com';
+    var hostLine = mode === 'host'
+      ? '  host: travel-agent' + suffix
+      : '  # host 模式时由平台生成 host 键（{k8s名}{hostSuffix}）';
+    var envLines = [
+      '  AGENT_CONFIG_DIR: /config',
+      '  AGENT_WORKSPACE_DIR: /workspace',
+      '  SERVER_HOST: 0.0.0.0',
+      '  SERVER_PORT: "8100"'
+    ];
+    envRows.filter(function (r) { return !r.sec; }).forEach(function (r) {
+      envLines.push('  ' + r.k + ': ' + q(r.v));
+    });
+    llm.concat(sbx).filter(function (p) { return !p.sec && p.v !== ''; }).forEach(function (p) {
+      envLines.push('  ' + p.k + ': ' + q(p.v));
+    });
+    var secretLines = [];
+    envRows.filter(function (r) { return r.sec; }).forEach(function (r) {
+      secretLines.push('  ' + r.k + ': ' + q(r.v));
+    });
+    llm.concat(sbx).filter(function (p) { return p.sec && p.v !== ''; }).forEach(function (p) {
+      secretLines.push('  ' + p.k + ': ' + q(p.v));
+    });
+    var lines = [
+      '# oaf-agent values.yaml — 由导出单 EXP-20261029-0007 自动生成',
+      '# 服务: 差旅助手 travel-agent · 工作空间 ws-3f9a21c4',
+      '# 源包: agentmanager/travel-agent@1.4.1 → 导出版本 1.4.2',
+      '# 发布标记: ' + (marker || 'pending') + (marker ? '（快照已冻结，构建 OAF 镜像按此固化）' : '（未打标，构建前必须先保存发布标记）'),
+      '# chart: oaf-agent-0.1.0（固定版本）· 基础镜像 agentscope-2.1.0-v20260907',
+      '# 运行时默认（env/模型/沙箱）来自工作空间配置管理；导出页仅新增服务专属键',
+      '# 敏感值明文写入本文件（文件代入）：随 ITSM 工单按密级流转',
+      'fullnameOverride: ' + name,
+      '',
+      'image:',
+      '  base: registry.prod.example.com/oaf/agent-framework:agentscope-2.1.0-v20260907',
+      '  oaf: registry.prod.example.com/oaf/oaf-' + name + ':1.4.2-e7',
+      '  oafDigest: ' + (digest || 'sha256:pending   # 构建完成后回填'),
+      'imagePullSecrets:',
+      '  - prod-registry-secret',
+      '',
+      'env:                              # 渲染为 ConfigMap envFrom'
+    ].concat(envLines).concat([
+      '',
+      'secretEnv:                        # 渲染为 Secret envFrom（明文，文件代入）'
+    ]).concat(secretLines).concat([
+      '',
+      'configInjection:',
+      '  mode: initContainer             # initContainer 拷贝 /oaf → 共享卷 /config',
+      '  dir: /config',
+      '',
+      'replicas: ' + (f('replicas') || '2'),
+      'resources:',
+      '  requests: {cpu: 500m, memory: 1Gi}',
+      '  limits: {cpu: "2", memory: 2Gi}',
+      '',
+      'ingress:',
+      '  mode: ' + mode,
+      hostLine,
+      '  tls: false',
+      '',
+      'mysql:',
+      '  createDatabase: ' + (checked('mysql_create_db') ? 'true' : 'false') + '                  # pre-install hook Job 幂等建库',
+      '',
+      'podAnnotations:',
+      '  oaf.platform/export-id: EXP-20261029-0007',
+      '  oaf.platform/release-marker: ' + (marker || 'pending'),
+      '  oaf.platform/package-checksum: sha256:ab73f20c9e…8d41'
+    ]);
+    return lines.join('\n');
+  }
+
+  function buildManifest() {
+    return JSON.stringify({
+      exportId: 'EXP-20261029-0007',
+      status: digest ? 'built' : 'draft',
+      service: { k8sName: 'travel-agent', displayName: '差旅助手', workspace: 'ws-3f9a21c4' },
+      package: {
+        slug: 'agentmanager/travel-agent',
+        sourceVersion: '1.4.1',
+        exportVersion: '1.4.2',
+        sourcePackageId: 412,
+        releaseMarker: marker || null,
+        checksum: 'sha256:ab73f20c9e…8d41'
+      },
+      artifacts: {
+        chart: { name: 'oaf-agent', version: '0.1.0' },
+        baseImage: { ref: 'registry.prod.example.com/oaf/agent-framework:agentscope-2.1.0-v20260907', pushedBy: 'backend 直推指定仓库' },
+        oafImage: { ref: 'registry.prod.example.com/oaf/oaf-travel-agent:1.4.2-e7', digest: digest || null }
+      },
+      overrides: {
+        envUserKeys: envRows.filter(function (r) { return r.src === 'user'; }).map(function (r) { return r.k; }),
+        envLockedKeys: envRows.filter(function (r) { return r.src !== 'user'; }).length,
+        configDefaultsFrom: 'workspace config management'
+      },
+      approval: { channel: 'ITSM', ticket: 'ITSM-2026-0451', attachments: ['values.yaml', 'manifest.json'] },
+      createdBy: 'zhang.san',
+      createdAt: '2026-10-29T10:20:00+08:00'
+    }, null, 2);
+  }
+
+  function renderValues() {
+    $('#values').textContent = buildValues();
+    $('#manifest').textContent = buildManifest();
+  }
+
+  /* ---------- 添加 env 变量 ---------- */
+  $('#envAdd').addEventListener('click', function () {
+    var k = $('#newKey').value.trim().toUpperCase();
+    var v = $('#newVal').value;
+    var sec = $('#newSec').checked;
+    var err = $('#envErr');
+    if (!k) { err.textContent = 'env 键不能为空'; return; }
+    if (!/^[A-Z][A-Z0-9_]*$/.test(k)) { err.textContent = '键名需为大写字母/数字/下划线，且以字母开头'; return; }
+    if (RESERVED.indexOf(k) >= 0) { err.textContent = '保留键不可覆盖：' + k; return; }
+    if (templateKeys().indexOf(k) >= 0) { err.textContent = '该键来自运行时默认/派生，导出页不可新增同名键：' + k; return; }
+    if (envRows.some(function (r) { return r.k === k; })) { err.textContent = '键已存在：' + k; return; }
+    err.textContent = '';
+    envRows.push({ k: k, v: v, src: 'user', sec: sec });
+    $('#newKey').value = ''; $('#newVal').value = ''; $('#newSec').checked = false;
+    renderEnvTable(); renderValues();
+  });
+
+  /* ---------- ingress mode 联动 ---------- */
+  var modeSel = document.querySelector('[data-f="ingress_mode"]');
+  var suffixIn = document.querySelector('[data-f="host_suffix"]');
+  function syncMode() { if (modeSel && suffixIn) suffixIn.disabled = modeSel.value !== 'host'; }
+  $$('[data-f]').forEach(function (el) {
+    var evt = el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input';
+    el.addEventListener(evt, function () { syncMode(); renderValues(); });
+  });
+
+  /* ---------- 构建模拟（必须已有发布标记） ---------- */
+  function genDigest() {
+    var a = new Uint8Array(4);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(a);
+    else for (var i = 0; i < 4; i++) a[i] = Math.floor(Math.random() * 256);
+    var hex = Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    return 'sha256:' + hex + 'a41c7fe2d90b3f56';
+  }
+  var building = false;
+  $('#confirm').addEventListener('click', function () {
+    if (building) return;
+    if (!marker) {
+      $('#markHint').textContent = '请先保存发布标记——构建 OAF 镜像只认发布标记（快照）';
+      $('#markHint').style.color = 'var(--red)';
+      return;
+    }
+    building = true;
+    var steps = ['创建导出单（draft → building）', '按发布标记 ' + marker + ' 构建 OAF 镜像（快照 → busybox 基底）', '直推指定镜像仓库', '渲染 values.yaml + manifest.json'];
+    var wrap = $('#build-steps');
+    $('#build-idle').hidden = true;
+    wrap.hidden = false;
+    wrap.innerHTML = steps.map(function (s) { return '<li class="step"><span class="dot"></span>' + s + '</li>'; }).join('');
+    var items = $$('#build-steps .step');
+    var i = 0;
+    $('#status').textContent = '构建中';
+    (function next() {
+      if (i > 0) { items[i - 1].classList.add('done'); items[i - 1].querySelector('.dot').textContent = '✓'; }
+      if (i >= items.length) {
+        digest = genDigest();
+        $('#status').textContent = '已构建（待 ITSM 审批）';
+        $('#confirm').textContent = '重新构建';
+        $('#artifact').hidden = false;
+        $('#artifact').innerHTML =
+          '<div class="t">交付产物已生成（发布标记 ' + marker + '）</div>' +
+          '<div class="kv"><span>OAF 镜像</span><code>registry.prod.example.com/oaf/oaf-travel-agent:1.4.2-e7</code></div>' +
+          '<div class="kv"><span>digest</span><code>' + digest + '</code></div>' +
+          '<div class="kv"><span>下一步</span><span>双镜像已直推指定仓库 → values + manifest 提交 ITSM 工单 ITSM-2026-0451 → 审批通过后调用已有 HTTP 部署接口</span></div>';
+        renderValues();
+        building = false;
+        return;
+      }
+      items[i].classList.add('doing');
+      i++;
+      setTimeout(next, 620);
+    })();
+  });
+
+  /* ---------- 生产部署命令 ---------- */
+  function renderCmd() {
+    var ns = ($('#ns').value || 'oaf-prod').trim();
+    $('#cmd').textContent = [
+      '# 1) 可选：校验直推镜像已在指定仓库就绪',
+      'crane digest registry.prod.example.com/oaf/oaf-travel-agent:1.4.2-e7',
+      '',
+      '# 2) 幂等部署（复用已有 HTTP Helm 部署接口；敏感值随 values 文件代入，无需 --set）',
+      'helm upgrade --install travel-agent ./oaf-agent-0.1.0.tgz \\',
+      '  -n ' + ns + ' --create-namespace \\',
+      '  -f values-travel-agent.yaml',
+      '',
+      '# 3) 验证',
+      'kubectl -n ' + ns + ' get pods -l app.kubernetes.io/instance=travel-agent',
+      'curl -fsS https://gateway.prod.example.com/agent/travel-agent/.well-known/agent-card.json'
+    ].join('\n');
+  }
+  $('#ns').addEventListener('input', renderCmd);
+
+  /* ---------- 运维页交互（demo） ---------- */
+  $('#opsTable').addEventListener('click', function (e) {
+    if (e.target.hasAttribute && e.target.hasAttribute('data-opsdel')) e.target.closest('tr').remove();
+  });
+  $('#opsAdd').addEventListener('click', function () {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td><select class="sel"><option>mysql</option><option>redis</option><option>otel</option><option>sandbox</option><option>llm</option><option>registry</option><option>routing</option></select></td>' +
+      '<td><input class="in" placeholder="ENV_KEY"></td>' +
+      '<td><input class="in" placeholder="值"></td>' +
+      '<td>—</td>' +
+      '<td><button class="btn" data-opsdel type="button">删除</button></td>';
+    $('#opsTable tbody').appendChild(tr);
+  });
+  function bindToast(btn, toast) {
+    var el = document.getElementById(toast), t = null;
+    document.getElementById(btn).addEventListener('click', function () {
+      el.classList.add('show');
+      clearTimeout(t);
+      t = setTimeout(function () { el.classList.remove('show'); }, 1600);
+    });
+  }
+  bindToast('ops-save', 'ops-toast');
+  bindToast('llm-save', 'llm-toast');
+  bindToast('sbx-save', 'sbx-toast');
+  bindToast('reg-save', 'reg-toast');
+
+  /* ---------- 初始化 ---------- */
+  syncMode();
+  loadFile('agents');
+  renderEnvTable();
+  renderParams();
+  renderValues();
+  renderCmd();
+})();
+</script>
+</body>
+</html>

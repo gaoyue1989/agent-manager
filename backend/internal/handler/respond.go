@@ -59,6 +59,7 @@ func mapError(c *gin.Context, err error) {
 		errors.Is(err, service.ErrUnknownConfigKey),
 		errors.Is(err, service.ErrRequiredConfigKey),
 		errors.Is(err, service.ErrEmptyConfigValues),
+		errors.Is(err, service.ErrMarkNotBuildable), // 无可用 frozen 标记（创建导出单前置校验，表单类 400）
 		errors.Is(err, store.ErrNoAgentsMD),
 		errors.Is(err, store.ErrZipTooLarge),
 		errors.Is(err, store.ErrTooManyFiles),

@@ -11,6 +11,7 @@ import (
 
 	"agent-manager/backend/config"
 	"agent-manager/backend/internal/handler"
+	"agent-manager/backend/internal/imagebuilder"
 	k8sclient "agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/mcpsrv"
 	"agent-manager/backend/internal/service"
@@ -85,6 +86,9 @@ func main() {
 	// 身份与模型下发装配：introspect JWT 校验密钥 + running 后模型连接异步下发（M5）
 	core.JWTSecret = cfg.JWTSecret
 	core.OnServiceRunning = core.DeliverPendingForService
+	// 跨集群导出装配（契约 §2.2）：OAF 配置镜像直推构建器（基底/凭证经 env 注入，
+	// 设计 §12.3）；未配置 EXPORT_BASE_IMAGE 时 config.Load 已兜底 busybox:1.36
+	core.Images = imagebuilder.NewRemoteBuilder(cfg.ExportBaseImage, cfg.ExportRegistryUsername, cfg.ExportRegistryPassword)
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()

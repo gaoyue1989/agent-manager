@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 	networkingv1 "k8s.io/api/networking/v1"
 
+	"agent-manager/backend/internal/imagebuilder"
 	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/store"
 )
@@ -25,6 +26,11 @@ type Core struct {
 	Cfg ConfigView
 
 	Packages *PackageService
+
+	// Images 导出 OAF 配置镜像构建器（跨集群导出链路，设计 §5；契约 §3.3）：
+	// nil = 未配置镜像构建（main.go 集成阶段装配 imagebuilder.NewRemoteBuilder），
+	// 创建导出单返回 400，不 panic、不降级假成功
+	Images imagebuilder.Builder
 
 	// JWTSecret 登录 token 校验密钥（introspect 数据面用；签发在 handler 层）
 	JWTSecret string

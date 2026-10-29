@@ -1,0 +1,18 @@
+{{- $fullname := include "oaf-agent.fullname" . -}}
+# 非敏感 env（envFrom 第二源）；空 map 也渲染对象本身，保 Deployment envFrom 引用不悬空（契约 §6.2）。
+# 空值键剔除：对齐平台 EnvSecret「空值不进入」语义，防 Spring 占位符 ${VAR:default} 遇空串不回落默认值。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+{{- if .Values.env }}
+data:
+  {{- range $k, $v := .Values.env }}
+  {{- if ne ($v | toString) "" }}
+  {{ $k }}: {{ $v | toString | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}

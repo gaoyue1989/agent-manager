@@ -811,6 +811,8 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 	registerConsoleIntegrations(cg, core)
 	registerConsoleApiKeys(cg, core)
 	registerConsoleMembers(cg, core)
+	registerWorkspaceConfig(cg, core)
+	registerWorkspaceExport(cg, core)
 }
 
 // registerConsoleModels M5：模型连接端点。

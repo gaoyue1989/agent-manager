@@ -1,0 +1,46 @@
+OAF 业务 Agent 已部署（release {{ .Release.Name }}，namespace {{ .Release.Namespace }}）。
+
+## 入口
+{{- if eq .Values.ingress.mode "host" }}
+- host 模式: http(s)://{{ .Values.fullnameOverride }}{{ .Values.ingress.hostSuffix }}/
+    - A2A 卡片: /.well-known/agent-card.json
+{{- else }}
+- router 模式（共享路由器子路径）: http(s)://<共享入口>{{ .Values.ingress.pathPrefix }}/
+    - A2A 卡片: {{ .Values.ingress.pathPrefix }}/.well-known/agent-card.json
+{{- end }}
+{{- if .Values.ingress.tls.enabled }}（TLS: {{ .Values.ingress.tls.secretName }}）
+{{- end }}
+
+## 装后自检
+
+1) 工作负载就绪（replicas={{ .Values.replicas }}）
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "oaf-agent.fullname" . }}
+{{- if .Values.mysql.createDatabase }}
+2) 建库 hook Job 执行完成（幂等 CREATE DATABASE IF NOT EXISTS）
+   kubectl -n {{ .Release.Namespace }} wait --for=condition=complete job/{{ include "oaf-agent.fullname" . }}-mysql-init --timeout=120s
+{{- end }}
+3) 集群内 agent-card 可达（busybox wget 探针 Pod）
+   kubectl -n {{ .Release.Namespace }} run probe-card --rm -i --restart=Never \
+     --image=<内网 busybox 引用> -- \
+     wget -qO- http://{{ include "oaf-agent.fullname" . }}-svc:8100/.well-known/agent-card.json | head -c 200
+{{- if eq .Values.ingress.mode "host" }}
+4) 经 ingress 入口 + Host 头验证（host 模式 Ingress）
+   curl -s -H 'Host: {{ .Values.fullnameOverride }}{{ .Values.ingress.hostSuffix }}' \
+     http://<ingress 入口 IP:端口>/.well-known/agent-card.json | head -c 200
+{{- else }}
+4) 经共享入口子路径验证
+   curl -s http://<共享入口>{{ .Values.ingress.pathPrefix }}/.well-known/agent-card.json | head -c 200
+{{- end }}
+
+## 运维说明
+
+- **配置注入**：/config 为 emptyDir 只读副本，由 initContainer 从 image.oaf 拷入（OAF 配置随镜像
+  分发，无共享 PVC 依赖）；Pod 重建自动重拷恢复。
+- **可丢弃卷**：/workspace、/data/files、/applog 为 Pod 本地 emptyDir（可丢弃/可重建）；正确性状态
+  落 MySQL checkpoint / Redis，跨副本文件不共享为 v1 已知边界。
+- **imagePullPolicy=IfNotPresent**：同 tag 覆盖推送不会在已缓存节点生效——请使用新 tag。
+{{- if .Values.mysql.createDatabase }}
+- **建库 Job**：{{ include "oaf-agent.fullname" . }}-mysql-init 为 pre-install hook（成功后保留对象供
+  自检）；其 env 内嵌明文数据库凭据（pre-install 阶段服务 Secret 尚未创建），确认无误后可手动
+  `kubectl -n {{ .Release.Namespace }} delete job/{{ include "oaf-agent.fullname" . }}-mysql-init` 清理。
+{{- end }}

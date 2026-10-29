@@ -1,0 +1,77 @@
+{{- $fullname := include "oaf-agent.fullname" . -}}
+{{- $jdbc := include "oaf-agent.envValue" (dict "key" "CHECKPOINT_JDBC_URL" "env" .Values.env "secretEnv" .Values.secretEnv) -}}
+{{- $user := include "oaf-agent.envValue" (dict "key" "CHECKPOINT_USERNAME" "env" .Values.env "secretEnv" .Values.secretEnv) -}}
+{{- $pwd := include "oaf-agent.envValue" (dict "key" "CHECKPOINT_PASSWORD" "env" .Values.env "secretEnv" .Values.secretEnv) -}}
+{{- if .Values.mysql.createDatabase }}
+# MySQL 建库双保险（设计 §6）：pre-install hook Job 幂等建库（CREATE DATABASE IF NOT EXISTS），
+# 与 JDBC URL 的 createDatabaseIfNotExist=true 参数互为兜底。建库目标（host/库名）从 env/secretEnv
+# 的 CHECKPOINT_JDBC_URL 解析——导出渲染时它是 L3 派生 URL，库名即 {基库}_{short}（publishisolation.go
+# checkpointDBNameFor 产物），Job 不重复实现派生逻辑。
+# 凭据内嵌于 Job env：pre-install 阶段服务 Secret 尚未创建（helm hook 先于其余资源装出），无法 secretKeyRef。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-mysql-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "oaf-agent.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "10"
+    # before-hook-creation：重装前清理旧 Job；成功后保留对象供装后自检 kubectl wait --for=condition=complete
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "oaf-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mysql-init
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mysql-init
+          image: {{ .Values.mysql.jobImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              # 解析 JDBC URL：jdbc:mysql://host[:port]/db?query → host / port / db
+              url="$CHECKPOINT_JDBC_URL"
+              case "$url" in
+                *://*) rest="${url#*://}" ;;
+                *) echo "[mysql-init] 非法 CHECKPOINT_JDBC_URL（缺少 ://）: $url"; exit 1 ;;
+              esac
+              case "$rest" in
+                */*) authority="${rest%%/*}"; pathq="${rest#*/}" ;;
+                *) echo "[mysql-init] 非法 CHECKPOINT_JDBC_URL（缺少库路径段）: $url"; exit 1 ;;
+              esac
+              db="${pathq%%\?*}"   # 去掉 ?query
+              case "$authority" in
+                *:*) host="${authority%%:*}"; port="${authority##*:}" ;;
+                *)   host="$authority"; port="3306" ;;
+              esac
+              # 边界校验：host/库名非空；库名仅限字母/数字/下划线（{基库}_{short} 派生规则字符集，防注入）
+              [ -n "$host" ] || { echo "[mysql-init] 无法从 URL 解析主机: $url"; exit 1; }
+              [ -n "$db" ] || { echo "[mysql-init] 无法从 URL 解析库名: $url"; exit 1; }
+              case "$db" in
+                *[!a-zA-Z0-9_]*) echo "[mysql-init] 库名含非法字符（仅限字母/数字/下划线）: $db"; exit 1 ;;
+              esac
+              echo "[mysql-init] create database if not exists: $db @ $host:$port"
+              # 密码经 MYSQL_PWD 环境变量传递（不落命令行，避免 ps 泄露）；utf8mb4 对齐平台 MySQL 约定
+              mysql -h "$host" -P "$port" -u "$MYSQL_USER" \
+                -e 'CREATE DATABASE IF NOT EXISTS `'"$db"'` DEFAULT CHARACTER SET utf8mb4'
+              echo "[mysql-init] done"
+          env:
+            - name: CHECKPOINT_JDBC_URL
+              value: {{ $jdbc | quote }}
+            - name: MYSQL_USER
+              # 生产须用具备 {基库}_% 授权的最小权限账号（缺省 root 仅适配测试环境）
+              value: {{ default "root" $user | quote }}
+            - name: MYSQL_PWD
+              value: {{ $pwd | quote }}
+{{- end }}

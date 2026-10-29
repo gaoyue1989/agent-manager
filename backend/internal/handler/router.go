@@ -35,6 +35,11 @@ func Register(r *gin.Engine, core *service.Core, images []struct{ Image, Label s
 	// 2) console / admin 新面（先建组，后挂 legacy 中间件不影响它们）
 	cg := g.Group("/console", JWTAuth(jwtSecret))
 	registerConsole(cg, core, images)
+	// 跨集群导出单端点（契约 §2.4，U2 独占段）：仅 JWTAuth，无 :ws 段故不挂
+	// resolveWorkspace（挂了会因 c.Param("ws") 为空恒 404）；归属校验在 service 层
+	// 按 order.workspace_id + 成员关系裁决
+	eg := g.Group("/console/exports", JWTAuth(jwtSecret))
+	registerExportOrders(eg, core)
 	ag := g.Group("/admin", RequireAdmin(authToken, jwtSecret, core))
 	registerAdmin(ag, core)
 

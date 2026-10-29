@@ -64,15 +64,24 @@ type Config struct {
 	AdminInitPassword string
 
 	PackageDownloadBase string // create_oaf_zip 返回 download_url 的基地址（集群内可达即可，代理方为业务 Agent Pod）
+
+	// ---- 跨集群导出（设计 §5，契约 §2.3）----
+	// ExportBaseImage 导出 OAF 配置镜像的基底镜像引用；缺省 busybox:1.36 指向 docker.io，
+	// 离线/内网部署必须显式覆盖（契约 §9-D8：构建期 backend 运行环境须可达基底仓库）。
+	ExportBaseImage string
+	// ExportRegistryUsername / ExportRegistryPassword 直推目标仓库的推送凭证（可空=匿名）；
+	// 经 backend 进程 env 注入（设计 §12.3），不进任何导出产物。
+	ExportRegistryUsername string
+	ExportRegistryPassword string
 }
 
 func Load() (*Config, error) {
 	c := &Config{
-		ServerPort:          envInt("SERVER_PORT", 8080),
-		Namespace:           envStr("NAMESPACE", "agent-platform"),
-		DataRoot:            envStr("DATA_ROOT", "/data"),
-		MySQLDSN:            envStr("MYSQL_DSN", ""),
-		PlatformPVCName:     envStr("PLATFORM_PVC_NAME", "platform-data"),
+		ServerPort:      envInt("SERVER_PORT", 8080),
+		Namespace:       envStr("NAMESPACE", "agent-platform"),
+		DataRoot:        envStr("DATA_ROOT", "/data"),
+		MySQLDSN:        envStr("MYSQL_DSN", ""),
+		PlatformPVCName: envStr("PLATFORM_PVC_NAME", "platform-data"),
 		// INGRESS_CLASS 缺省为空 = 业务 Ingress 不写 spec.ingressClassName，
 		// 由 apiserver 落到集群默认 IngressClass（default-class 标注）；显式非空才固定
 		IngressClass:        envStr("INGRESS_CLASS", ""),
@@ -92,6 +101,10 @@ func Load() (*Config, error) {
 		AdminInitUser:       envStr("ADMIN_INIT_USER", ""),
 		AdminInitPassword:   envStr("ADMIN_INIT_PASSWORD", ""),
 		PackageDownloadBase: envStr("PACKAGE_DOWNLOAD_BASE", "http://platform-backend.agent-platform.svc.cluster.local:8080"),
+		// 跨集群导出（设计 §5，契约 §2.3）：基底镜像与直推凭证；凭证可空=匿名推送
+		ExportBaseImage:        envStr("EXPORT_BASE_IMAGE", "busybox:1.36"),
+		ExportRegistryUsername: envStr("EXPORT_REGISTRY_USERNAME", ""),
+		ExportRegistryPassword: envStr("EXPORT_REGISTRY_PASSWORD", ""),
 	}
 	if c.MySQLDSN == "" {
 		return nil, errors.New("MYSQL_DSN is required")

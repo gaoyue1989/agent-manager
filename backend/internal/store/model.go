@@ -37,6 +37,26 @@ const (
 	StatusError          = "error"
 )
 
+// 导出单状态机（设计 §8：draft → building → built → approving → approved → deploying → deployed；
+// 任意非终态可入 failed / cancelled）。
+const (
+	ExportStatusDraft     = "draft" // v1 预留（创建即入 building，见 §4 注）
+	ExportStatusBuilding  = "building"
+	ExportStatusBuilt     = "built"
+	ExportStatusApproving = "approving"
+	ExportStatusApproved  = "approved"
+	ExportStatusDeploying = "deploying"
+	ExportStatusDeployed  = "deployed"
+	ExportStatusFailed    = "failed"
+	ExportStatusCancelled = "cancelled"
+)
+
+// 发布标记状态。
+const (
+	ExportMarkDraft  = "draft"
+	ExportMarkFrozen = "frozen"
+)
+
 // ServiceEntity 已发布的服务实例（表名 services）。
 type ServiceEntity struct {
 	ID          uint   `gorm:"primaryKey" json:"id"`
@@ -327,3 +347,71 @@ type SkillMarketItem struct {
 }
 
 func (SkillMarketItem) TableName() string { return "skill_market_items" }
+
+// ---- 跨集群导出（2026-10，docs/design/cross-cluster-export-design.md §8）----
+// 类型名带 Entity 后缀严格对齐设计 §8 命名（与 ServiceEntity 同款；console 拆分新表
+// User/Workspace 等省后缀属另一惯例，本组按设计文本走）。
+
+// ExportOrderEntity 导出单：一次跨集群交付的载体（表名 export_orders）。
+type ExportOrderEntity struct {
+	ID              uint   `gorm:"primaryKey" json:"id"`
+	ServiceID       uint   `gorm:"index" json:"serviceId"`
+	WorkspaceID     uint   `gorm:"index;index:idx_export_ws_status" json:"workspaceId"`
+	SourcePackageID uint   `json:"sourcePackageId"` // 导出时的源包
+	ExportPackageID uint   `json:"exportPackageId"` // v1 恒 0（快照走 marks，不派生 oaf_packages，见 §9-D6）
+	ChartVersion    string `gorm:"size:32" json:"chartVersion"`
+	BaseImage       string `gorm:"size:256" json:"baseImage"`
+	OafImageRef     string `gorm:"size:256" json:"oafImageRef"`
+	OafImageDigest  string `gorm:"size:128" json:"oafImageDigest"` // sha256:...
+	// ValuesYAML 渲染产物（含明文敏感值）：json:"-" 绝不随详情 JSON 直出，
+	// 仅经下载端点交付（设计 §12.2）——先例：ServiceEntity.EnvSecretJSON（model.go:51）
+	ValuesYAML string `gorm:"type:mediumtext" json:"-"`
+	// ManifestJSON 导出 manifest（审计/一致性校验）；RequestJSON 导出请求快照
+	//（marker/baseImage/env/secretKeys/replicas）：异步构建完成后据此重渲染
+	// values/manifest（回填 digest），保证可复现
+	ManifestJSON string    `gorm:"type:json" json:"manifestJson"`
+	RequestJSON  string    `gorm:"type:json" json:"-"`
+	Status       string    `gorm:"size:24;index:idx_export_ws_status" json:"status"`
+	ItsmTicketID string    `gorm:"size:128" json:"itsmTicketId"`
+	Error        string    `gorm:"size:512" json:"error"`
+	CreatedBy    string    `gorm:"size:64" json:"createdBy"` // username（JWT claims，jwt.go:44 注入）
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+func (ExportOrderEntity) TableName() string { return "export_orders" }
+
+// ExportPackageMarkEntity 发布标记：导出级包编辑的不可变快照（表名 export_package_marks）。
+type ExportPackageMarkEntity struct {
+	ID             uint   `gorm:"primaryKey" json:"id"`
+	ServiceID      uint   `gorm:"uniqueIndex:uk_export_mark_svc;index" json:"serviceId"`
+	WorkspaceID    uint   `gorm:"index" json:"workspaceId"`
+	ExportOrderID  uint   `gorm:"index" json:"exportOrderId"`                           // 0=尚未挂到导出单（草稿标记）
+	Marker         string `gorm:"size:64;uniqueIndex:uk_export_mark_svc" json:"marker"` // {包版本}-e{序号}
+	PackageVersion string `gorm:"size:32" json:"packageVersion"`
+	// FilesJSON 完整文件快照：[{path,encoding(utf8|base64),content}]——自包含（构建不回读源包，
+	// 源包可能已被换版）；文本/二进制以 store.IsTextContent 判定（fs.go:287），二进制 base64
+	FilesJSON string    `gorm:"type:mediumtext" json:"-"`
+	FileCount int       `json:"fileCount"`
+	Checksum  string    `gorm:"size:64" json:"checksum"` // 快照内容 sha256（canonical JSON）
+	Status    string    `gorm:"size:16" json:"status"`   // draft | frozen
+	CreatedBy string    `gorm:"size:64" json:"createdBy"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func (ExportPackageMarkEntity) TableName() string { return "export_package_marks" }
+
+// WorkspaceRuntimeDefaultEntity 工作空间运行时默认配置（运维侧维护，导出页预填与 values L1 层来源）。
+type WorkspaceRuntimeDefaultEntity struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	WorkspaceID uint      `gorm:"uniqueIndex:uk_ws_runtime_default;index" json:"workspaceId"`
+	EnvKey      string    `gorm:"size:128;uniqueIndex:uk_ws_runtime_default" json:"envKey"`
+	Value       string    `gorm:"type:text" json:"-"`
+	Sensitive   bool      `json:"sensitive"`
+	Category    string    `gorm:"size:24;index" json:"category"` // mysql|redis|otel|llm|sandbox|protocol|registry|routing|runtime
+	UpdatedBy   string    `gorm:"size:64" json:"updatedBy"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+func (WorkspaceRuntimeDefaultEntity) TableName() string { return "workspace_runtime_defaults" }

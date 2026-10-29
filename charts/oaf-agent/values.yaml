@@ -1,0 +1,72 @@
+# OAF 业务 Agent Helm values（L0 chart 默认层）
+# 设计依据：docs/design/cross-cluster-export-design.md §6；实施契约：docs/implementation/cross-cluster-export-contract.md §6。
+# 与控制面 chart 完全独立：自包含（不引用平台共享 PVC / 共享路由器 / 平台 backend / 平台默认配置表），
+# 任一全新 namespace 仅凭 4 件套（本 chart + values.yaml +
+# agent-framework 基础镜像 + OAF 配置镜像）即可部署。
+# 导出链路（backend exportvalues 渲染）会以 L1∪L2∪L3 合并结果覆盖本文件的对应键（设计 §7）。
+
+# ---------- 命名 ----------
+# ★ 必填：生产侧对象名基底（导出渲染恒写入，= 服务 short 名）。Deployment/Ingress 名、
+#   {name}-svc、{name}-env、{name}-env-secret、{name}-sa、{name}-mysql-init 均由它派生；
+#   须为 DNS-1123 兼容小写串且 ≤52 字符（保证 {name}-mysql-init ≤63），渲染期 validate 校验。
+fullnameOverride: ""
+
+# ---------- 镜像 ----------
+image:
+  # ★ 必填：agent-framework 基础镜像完整引用（业务运行时，须含非 root appuser + /config /applog 预建目录）
+  base: ""
+  # ★ 必填：OAF 配置镜像完整引用（busybox 基底 + tar 层挂载点 /oaf/，由导出链路构建直推；
+  #   内容寻址，同 tag 内容同 digest，重推幂等）
+  oaf: ""
+  pullPolicy: IfNotPresent   # 同 tag 覆盖推送不会在已缓存节点生效——请使用新 tag
+
+# 内网镜像仓库凭据（透传业务 Pod 与 mysql-init Job）
+imagePullSecrets: []
+
+# ---------- 副本与资源 ----------
+# 设计 §6：默认 ≥2、无 sessionAffinity（Service 不写 affinity 字段），多副本横向扩展语义与单集群一致
+replicas: 2
+resources:
+  requests: { cpu: 250m, memory: 256Mi }
+  limits:   { cpu: "1", memory: 1Gi }
+
+# Pod 模板注解（导出渲染写入审计注解：oaf.platform/export-id、oaf.platform/package-checksum）
+podAnnotations: {}
+
+# ---------- 配置注入（设计 §6：initContainer 替代单集群共享 PVC subPath 挂载） ----------
+configInjection:
+  mode: initContainer   # v1 仅支持 initContainer（validate 校验）
+  dir: /config          # 包内容挂载目录；须与 env.AGENT_CONFIG_DIR 一致（validate 校验）
+
+# ---------- 运行时 env（L1 工作空间默认 ∪ L2 导出覆盖 ∪ L3 平台派生，见设计 §7） ----------
+# 非敏感键写 env（渲染进 {fullname}-env ConfigMap），敏感键写 secretEnv（渲染进 {fullname}-env-secret
+# Secret.stringData）；渲染时空值键剔除（对齐平台 EnvSecret「空值不进入」语义，防 Spring 占位符
+# ${VAR:default} 遇空串不回落默认值）。平台保留键 AGENT_CONFIG_DIR/AGENT_WORKSPACE_DIR/SERVER_HOST/
+# SERVER_PORT 由导出渲染恒写入；手写 values 时必须自带。
+env: {}
+secretEnv: {}
+
+# ---------- 路由（语义对齐 INGRESS_HOST_SUFFIX 双模式） ----------
+ingress:
+  mode: host            # host（默认，本工作流 E2E 验证面）| router
+  className: ""         # 空 = 不写 ingressClassName，落集群默认 IngressClass
+  # host 模式必填：域名后缀，以 "." 开头且逐段为合法 DNS-1123 label（validate 校验，
+  # 口径同 backend config.go INGRESS_HOST_SUFFIX）；host = {fullnameOverride}{hostSuffix}
+  hostSuffix: ""
+  # router 模式必填：子路径前缀（如 /agent/travel-agent；渲染 ingress-nginx rewrite-target /
+  # use-regex / x-forwarded-prefix 三注解剥前缀——生产集群无平台共享路由器，该语义由环境自担）
+  pathPrefix: ""
+  tls:
+    enabled: false
+    secretName: ""      # enabled=true 必填（host 模式 TLS 证书 Secret）
+
+# ---------- MySQL 建库（可选，设计 §6 双保险） ----------
+mysql:
+  # true 时启用 pre-install hook Job 幂等建库（CREATE DATABASE IF NOT EXISTS）；
+  # 导出渲染规则：L1 配置了 CHECKPOINT_JDBC_BASE 即 true。
+  createDatabase: false
+  # hook Job 用的 mysql 客户端镜像（agent-framework Java 基底不含 mysql CLI）；内网/离线环境改为内网仓库引用
+  jobImage: mysql:8.0
+  # 建库目标库与连接参数从 env/secretEnv 提取（ConfigMap 值优先，对齐 envFrom「后引用者覆盖」顺序）：
+  #   库名/host/port ← CHECKPOINT_JDBC_URL（导出渲染为 L3 派生 URL：{基库}_{short}，如 oaf_checkpoint_travel_agent）
+  #   账号 ← CHECKPOINT_USERNAME / CHECKPOINT_PASSWORD（缺省 root；生产须用具备 {基库}_% 授权的最小权限账号）
