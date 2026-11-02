@@ -31,9 +31,47 @@ const PORT = Number(process.env.MOCK_SANDBOX_PORT ?? 8090);
 const ROOT = process.env.MOCK_SANDBOX_ROOT ?? path.join(process.cwd(), '.runtime', 'sandboxes');
 fs.mkdirSync(ROOT, { recursive: true });
 
-const EXEC_WHITELIST = /^(\|\s*)?(echo|ls|cat|mkdir|tar|base64|rm|printf|test|wc|stat|find|sort|head|tail|grep|sed|sh|true|false)\b/;
-const sandboxes = new Map(); // id → {root, destroyed, createdAt}
+const EXEC_WHITELIST = /^(\|\s*)?(echo|ls|cat|mkdir|tar|base64|rm|mv|printf|test|wc|stat|find|sort|head|tail|grep|sed|sh|true|false)\b/;
+const sandboxes = new Map(); // id → {id, root, env, execdEnvsPath, destroyed, createdAt}
 const stats = { creates: [], connects: [], commands: [], fileOps: [], errors: [] };
+
+/** 模拟 execd bootstrap（components/execd/bootstrap.sh:492-503）：默认并 touch EXECD_ENVS 文件 */
+function initExecdEnvs(id, createEnv) {
+  const env = createEnv ?? {};
+  const envPath = env.EXECD_ENVS || '/opt/opensandbox/.env';
+  const mapped = sandboxPath(id, envPath);
+  if (mapped) {
+    fs.mkdirSync(path.dirname(mapped), { recursive: true });
+    // 模拟 code-interpreter.sh:154-156 向 EXECD_ENVS 追加 PATH（语言环境行）
+    fs.writeFileSync(mapped, 'PATH=/usr/local/bin:/usr/bin:/bin\n');
+  }
+  return { env, execdEnvsPath: envPath };
+}
+
+/**
+ * 模拟 execd UserEnvOverlay（components/execd/pkg/runtime/env.go）：
+ * 每条命令执行前重新读取 EXECD_ENVS 文件并合并进命令 env。
+ * 行格式：KEY=value / KEY='value'（单行；单引号内 $ 等字面量处理，不展开）。
+ */
+function execdEnvOverlay(sb) {
+  const envPath = sb.execdEnvsPath || '/opt/opensandbox/.env';
+  const mapped = sandboxPath(sb.id, envPath);
+  const merged = { EXECD_ENVS: envPath }; // execd 进程自身 env 含 EXECD_ENVS（路径发现命令依赖）
+  if (!mapped || !fs.existsSync(mapped)) return merged;
+  for (const raw of fs.readFileSync(mapped, 'utf8').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+      value = value.slice(1, -1); // 单引号字面量（$ 等不展开）
+    }
+    if (key) merged[key] = value;
+  }
+  return merged;
+}
 
 const now = () => new Date().toISOString();
 function sandboxPath(id, rel) {
@@ -88,8 +126,9 @@ function runCommand(sb, command, onEvent, onEnd) {
   }
   // 绝对路径映射：容器内 /workspace、/tmp ↔ 沙箱根。单遍替换 + 负向前瞻，
   // 避免 /tmp/workspace.tar.b64 里 '/workspace' 子串被误替换（两遍 replace 会互相踩）。
-  const mapped = cmd.replace(/\/(tmp|workspace)(?![.\w])/g, (m, kind) => (kind === 'tmp' ? sb.root + '/tmp' : sb.root));
-  const p = spawn('bash', ['-c', mapped], { cwd: sb.root, timeout: 15_000 });
+  const mapped = cmd.replace(/\/(tmp|workspace|opt\/opensandbox)(?![.\w])/g,
+    (m, kind) => (kind === 'tmp' ? sb.root + '/tmp' : kind === 'workspace' ? sb.root : sb.root + '/opt/opensandbox'));
+  const p = spawn('bash', ['-c', mapped], { cwd: sb.root, timeout: 15_000, env: { ...process.env, ...execdEnvOverlay(sb) } });
   let stdout = '', stderr = '';
   p.stdout.on('data', d => { stdout += d; });
   p.stderr.on('data', d => { stderr += d; });
@@ -154,8 +193,10 @@ const server = http.createServer((req, res) => {
     if (p === '/v1/metrics/events') { res.writeHead(204); return res.end(); }
 
     if (p === '/v1/sandboxes' && req.method === 'POST') {
+      let createEnv = {};
+      try { createEnv = JSON.parse(body.toString())?.env ?? {}; } catch { /* 空 */ }
       const id = crypto.randomUUID();
-      const sb = { id, root: path.join(ROOT, id), destroyed: false, createdAt: now() };
+      const sb = { id, root: path.join(ROOT, id), destroyed: false, createdAt: now(), ...initExecdEnvs(id, createEnv) };
       fs.mkdirSync(sb.root, { recursive: true });
       sandboxes.set(id, sb);
       stats.creates.push({ id, at: Date.now() });

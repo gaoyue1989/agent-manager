@@ -268,6 +268,18 @@ public class AgentScopeConfig {
         return new io.agentmanager.framework.tool.BusinessTools();
     }
 
+    /**
+     * 沙箱状态读取（PUT /sandbox/env 定位容器用，docs/sandbox-env-update-design.md §5.1）：
+     * 与 HarnessAgent 内部同源——同一 AgentStateStore + 同一 agentId（OafConfig.name()），
+     * 保证按同一槽位键读到 harness 持久化的 SandboxState。
+     */
+    @Bean
+    public io.agentscope.harness.agent.sandbox.SessionSandboxStateStore sessionSandboxStateStore(
+            DistributedStore distributedStore, OafConfig oafConfig) {
+        return new io.agentscope.harness.agent.sandbox.SessionSandboxStateStore(
+            distributedStore.agentStateStore(), oafConfig.name());
+    }
+
     @Bean
     public io.agentmanager.framework.tool.FileTools fileTools(
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,

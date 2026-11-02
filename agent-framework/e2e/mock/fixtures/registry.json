@@ -1,5 +1,9 @@
 {
   "llm": {
+    "sandbox-env": {
+      "marker": "[E2E:sbx-env]",
+      "calls": 2
+    },
     "plain": {
       "marker": "[E2E:plain]",
       "calls": 1
