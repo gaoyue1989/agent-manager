@@ -1,0 +1,78 @@
+{
+ "scenario": "sandbox-env",
+ "model": "mimo",
+ "recordedAt": "2026-11-02T00:00:00.000Z",
+ "rewrites": [
+  "",
+  ""
+ ],
+ "calls": [
+  {
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "# E2E 测试助手\n\n你是端到端测试专用 agent。收到明确指令时直接调用对应工具完成操作并简洁回复。"
+     },
+     {
+      "role": "user",
+      "content": "请在沙箱中执行命令：echo $SANDBOX_E2E_TOKEN $SANDBOX_E2E_KEEP，并告诉我完整输出。",
+      "name": "e2e-recorder"
+     }
+    ]
+   },
+   "chunks": [
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null, \"role\": null, \"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\", \"name\": \"execute\"}, \"type\": \"function\", \"id\": \"call-sbxenv-a\"}], \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null, \"role\": null, \"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{\\\"command\\\": \"}, \"type\": \"function\"}], \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null, \"role\": null, \"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"\\\"echo $SANDBOX_E2E_TOKEN $SANDBOX_E2E_KEEP\\\"\"}, \"type\": \"function\"}], \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null, \"role\": null, \"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"}\"}, \"type\": \"function\"}], \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": null, \"role\": null, \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": \"tool_calls\"}]}",
+    "{\"id\": \"chatcmpl-sbxenv-a\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [], \"usage\": {\"completion_tokens\": 20, \"prompt_tokens\": 100, \"total_tokens\": 120}}",
+    "[DONE]"
+   ]
+  },
+  {
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "# E2E 测试助手"
+     },
+     {
+      "role": "user",
+      "content": "请在沙箱中执行命令：echo $SANDBOX_E2E_TOKEN $SANDBOX_E2E_KEEP，并告诉我完整输出。"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "call-sbxenv-a",
+        "function": {
+         "arguments": "{\"command\": \"echo $SANDBOX_E2E_TOKEN $SANDBOX_E2E_KEEP\"}",
+         "name": "execute"
+        },
+        "type": "function"
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call-sbxenv-a",
+      "content": "one keep"
+     }
+    ]
+   },
+   "chunks": [
+    "{\"id\": \"chatcmpl-sbxenv-b\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-b\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"env-e2e-done\", \"role\": null, \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": null}]}",
+    "{\"id\": \"chatcmpl-sbxenv-b\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \"\", \"role\": null, \"tool_calls\": null, \"reasoning_content\": null}, \"finish_reason\": \"stop\"}]}",
+    "{\"id\": \"chatcmpl-sbxenv-b\", \"object\": \"chat.completion.chunk\", \"created\": 1767000000, \"model\": \"e2e-mock-model\", \"choices\": [], \"usage\": {\"completion_tokens\": 5, \"prompt_tokens\": 200, \"total_tokens\": 205}}",
+    "[DONE]"
+   ]
+  }
+ ]
+}

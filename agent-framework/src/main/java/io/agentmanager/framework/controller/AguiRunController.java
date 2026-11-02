@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -48,8 +49,8 @@ import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
+import io.agentscope.harness.agent.gateway.channel.InboundMessage;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
-import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 
@@ -149,7 +150,8 @@ public class AguiRunController {
 
     @PostMapping(value = "/runs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> runs(@RequestBody AguiRunRequest body,
-                                              @RequestHeader(value = "X-User-Id", required = false) String headerUserId) {
+                                              @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+                                              @RequestHeader(required = false) HttpHeaders requestHeaders) {
         var threadId = PathSafe.sanitize(body.threadId() == null || body.threadId().isBlank()
             ? UUID.randomUUID().toString() : body.threadId());
         var runId = PathSafe.sanitize(body.runId() == null || body.runId().isBlank()
@@ -168,9 +170,14 @@ public class AguiRunController {
                 "thread_not_found: session '" + threadId + "' not found"));
         }
 
+        // MCP 请求级透传头（mcp-chat-header-forward-design §6.2）：配置驱动捕获，
+        // run 与 resume 两条链路共用同一份（新对话与恢复轮都属于本次 HTTP 请求）
+        var forwardHeaders = io.agentmanager.framework.mcp.ChatRequestHeaders.capture(
+            requestHeaders, mcpToolRegistrar != null ? mcpToolRegistrar.getForwardHeaderNames() : null);
+
         // 恢复链路：resume[] 非空 → HITL 恢复 turn（镜像 ConfirmController.confirm-stream）
         if (body.resume() != null && !body.resume().isEmpty()) {
-            return resumeRun(threadId, runId, body.resume());
+            return resumeRun(threadId, runId, body.resume(), forwardHeaders);
         }
 
         // 新对话轮：提取最后一条 user 消息（官方 AguiRequestProcessor.extractLatestUserMessage
@@ -179,7 +186,7 @@ public class AguiRunController {
         if (text == null || text.isBlank()) {
             return Flux.just(runErrorSSE(threadId, runId, "invalid_input_error: no user message"));
         }
-        return newRun(threadId, runId, userId, text);
+        return newRun(threadId, runId, userId, text, forwardHeaders);
     }
 
     /** 最后一条 user 消息的文本（content 为 string 或 [{type:"text",text:…}]） */
@@ -213,7 +220,8 @@ public class AguiRunController {
     // ===== 新对话轮（镜像 ChatStreamController.chat） =====
 
     private Flux<ServerSentEvent<String>> newRun(String threadId, String runId, String userId,
-                                                 String text) {
+                                                 String text,
+                                                 io.agentmanager.framework.mcp.ChatRequestHeaders forwardHeaders) {
         sessionUserStore.upsert(threadId, userId);
         return Flux.<ServerSentEvent<String>>create(sink -> {
             var token = turnLeaseStore.tryAcquire(threadId);
@@ -304,7 +312,12 @@ public class AguiRunController {
                     throw new IllegalStateException("no active agent");
                 }
                 var channel = agent.channel(ChatUiChannel.perPeer());
-                channel.sendStream(ChatUiRequest.withPeer(threadId, List.of(msg)))
+                // 与 /chat 同款 in-band 上下文随行（mcp-chat-header-forward-design §6.2）：
+                // dispatchStream(InboundMessage.dm(...)) 与 sendStream(ChatUiRequest.withPeer)
+                // 同一条路由路径，仅多带 runtimeContext（透传头 typed attribute 随行）
+                var inbound = InboundMessage.dm(channel.channelId(), threadId, List.of(msg))
+                    .withRuntimeContext(forwardHeaders.toRuntimeContext());
+                channel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, threadId, runId, lease, sink,
                             turnEnded, toolSummary, codecCtx, turnBucketKeys),
@@ -337,7 +350,8 @@ public class AguiRunController {
     // ===== HITL 恢复轮（镜像 ConfirmController.confirm-stream） =====
 
     private Flux<ServerSentEvent<String>> resumeRun(String threadId, String runId,
-                                                    List<AguiResumeDTO> resumes) {
+                                                    List<AguiResumeDTO> resumes,
+                                                    io.agentmanager.framework.mcp.ChatRequestHeaders forwardHeaders) {
         return Flux.<ServerSentEvent<String>>create(sink -> {
             // ===== 1. resume[] → native ConfirmRequest results（acceptRule 平台扩展透传） =====
             List<Map<String, Object>> results;
@@ -400,8 +414,9 @@ public class AguiRunController {
             Flux<AgentEvent> resumeFlux;
             try {
                 eventBus.beginTurn(threadId);
-                // 冷流：CAS 消费确认上下文（confirm_already_consumed → RUN_ERROR）在此发生
-                resumeFlux = runtimeService.resumeWithConfirmEvents(threadId, null, results);
+                // 冷流：CAS 消费确认上下文（confirm_already_consumed → RUN_ERROR）在此发生；
+                // 透传头随恢复上下文进 RuntimeContext（恢复轮同样按声明注入 MCP）
+                resumeFlux = runtimeService.resumeWithConfirmEvents(threadId, null, results, forwardHeaders);
             } catch (Exception e) {
                 log.warn("[agui] resume setup failed, rolling back (sid={}): {}", threadId, e.getMessage());
                 TurnFinalizer.abortSetup(eventBus, lease, sink, threadId,

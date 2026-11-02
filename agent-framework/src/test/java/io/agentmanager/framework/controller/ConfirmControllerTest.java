@@ -248,7 +248,7 @@ class ConfirmControllerTest {
         doThrow(new AgentRuntimeService.ConfirmContextNotFoundException("nope"))
             .when(confirmContextStore).checkAvailable(anyString());
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frame = controller.confirmStream("nope", null, new ConfirmController.ConfirmRequest(List.of()))
+        var frame = controller.confirmStream("nope", null, null, new ConfirmController.ConfirmRequest(List.of()))
             .blockFirst();
         assertNotNull(frame, "should emit error SSE frame");
         assertTrue(frame.data().contains("confirm_context_not_found"),
@@ -274,7 +274,7 @@ class ConfirmControllerTest {
 
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
-            controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
+            controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
                     Map.of("tool_call_id", "call-1", "confirmed", true))))
                 .collectList().block(Duration.ofSeconds(10)));
         assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS), "未订阅 agent 事件流");
@@ -310,9 +310,38 @@ class ConfirmControllerTest {
         // 那正是本应被消除的「永不落库却实时可见」瑕疵帧）
         when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frame = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
+        var frame = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
             Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
         assertNotNull(frame, "should emit SSE frame");
+    }
+
+    @Test
+    void confirmStreamShouldCaptureForwardHeadersIntoResumeContext() {
+        // mcp-chat-header-forward-design §6.5：confirm 是新在线请求，捕获的透传头
+        // 经 buildResumeContext 进恢复 RuntimeContext（恢复轮的 MCP 调用同样按声明注入）
+        stubPendingStoreRow();
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(reactor.core.publisher.Flux.just(
+                (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-2")));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-fwd");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
+        when(mcpToolRegistrar.getForwardHeaderNames()).thenReturn(java.util.Set.of("authorization"));
+
+        var requestHeaders = new org.springframework.http.HttpHeaders();
+        requestHeaders.add("Authorization", "Bearer tok-123");
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        var frame = controller.confirmStream("t1", null, requestHeaders,
+            new ConfirmController.ConfirmRequest(List.of(
+                Map.of("tool_call_id", "call-1", "confirmed", true)))).blockFirst();
+        assertNotNull(frame, "should emit SSE frame");
+
+        // stubPendingStoreRow 播种确认上下文也走一次 streamEvents——捕获全部，取恢复轮的 ctx
+        var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.agent.RuntimeContext.class);
+        verify(agent, atLeastOnce()).streamEvents(anyList(), captor.capture());
+        var carried = captor.getValue().get(io.agentmanager.framework.mcp.ChatRequestHeaders.class);
+        assertNotNull(carried, "透传头应随恢复上下文进 RuntimeContext");
+        assertEquals(Map.of("authorization", "Bearer tok-123"), carried.headers());
     }
 
     @Test
@@ -332,7 +361,7 @@ class ConfirmControllerTest {
 
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frames = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
+        var frames = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
                 Map.of("tool_call_id", "call-1", "confirmed", true))))
             .collectList().block(Duration.ofSeconds(10));
 
@@ -367,7 +396,7 @@ class ConfirmControllerTest {
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
             sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
         var framesFuture = java.util.concurrent.CompletableFuture.supplyAsync(() ->
-            controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(List.of(
+            controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
                     Map.of("tool_call_id", "call-1", "confirmed", true))))
                 .collectList().block(java.time.Duration.ofSeconds(10)));
         assertTrue(subscribed.await(3, java.util.concurrent.TimeUnit.SECONDS),
@@ -431,7 +460,7 @@ class ConfirmControllerTest {
             .thenReturn(Map.of("routed", "remote", "confirm_key", "task:t-123",
                 "task_id", "t-123", "decision", "DENY"));
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frames = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(
+        var frames = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(
             List.of(Map.of("tool_call_id", "call-1", "confirmed", false)), "task:t-123"))
             .collectList().block(java.time.Duration.ofSeconds(5));
         assertNotNull(frames);
@@ -448,7 +477,7 @@ class ConfirmControllerTest {
         when(remoteConfirmBridge.routeDecision(anyString(), anyString(), anyList()))
             .thenThrow(new AgentRuntimeService.ConfirmAlreadyConsumedException("t1"));
         var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
-        var frame = controller.confirmStream("t1", null, new ConfirmController.ConfirmRequest(
+        var frame = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(
             List.of(), "task:t-123")).blockFirst();
         assertNotNull(frame);
         assertTrue(frame.data().contains("error"), frame.data());
@@ -477,7 +506,7 @@ class ConfirmControllerTest {
 
         // 404 以同步 throw 返回（先于 SSE 响应提交；Flux.error 会让 MVC 落 500）
         var ex = assertThrows(org.springframework.web.server.ResponseStatusException.class,
-            () -> ctrl.confirmStream("foreign-sid", "bob",
+            () -> ctrl.confirmStream("foreign-sid", "bob", null,
                 new ConfirmController.ConfirmRequest(List.of(), "local")));
         assertEquals(404, ex.getStatusCode().value());
         verify(turnLeaseStore, never()).acquire(anyString(), any());

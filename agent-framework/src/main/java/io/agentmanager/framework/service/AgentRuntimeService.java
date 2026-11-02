@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.agentmanager.framework.mcp.ChatRequestHeaders;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
@@ -584,11 +585,22 @@ public class AgentRuntimeService {
      */
     public Map<String, Object> resumeWithConfirm(
             String threadId, String userId, List<Map<String, Object>> results) {
+        return resumeWithConfirm(threadId, userId, results, null);
+    }
+
+    /**
+     * 同步版（带请求级透传头）：confirm 是新的在线请求，捕获的透传头经
+     * {@link ChatRequestHeaders} 随恢复上下文进 RuntimeContext（不存历史，见
+     * mcp-chat-header-forward-design §6.5）；null = 无透传（A2A 等链路行为不变）。
+     */
+    public Map<String, Object> resumeWithConfirm(
+            String threadId, String userId, List<Map<String, Object>> results,
+            ChatRequestHeaders forwardHeaders) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
         log.info("[resume-confirm] start: threadId={}, userId={}, results={}", fullThreadId, userId, results.size());
         var confirmCtx = resolveConfirmContext(fullThreadId);   // 优先 state（无 TTL），回落 confirm_context
-        var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
+        var ctx = buildResumeContext(confirmCtx, fullThreadId, userId, forwardHeaders);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
 
         var result = getAgent(fullThreadId).call(List.of(resumeMsg), ctx).block();
@@ -614,7 +626,7 @@ public class AgentRuntimeService {
         return Flux.create(sink -> {
             try {
                 var confirmCtx = resolveConfirmContext(fullThreadId);   // 优先 state（无 TTL），回落 confirm_context
-                var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
+                var ctx = buildResumeContext(confirmCtx, fullThreadId, userId, null);
                 var resumeMsg = buildResumeMsg(confirmCtx, results);
                 getAgent(fullThreadId).streamEvents(List.of(resumeMsg), ctx)
                     .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
@@ -657,6 +669,16 @@ public class AgentRuntimeService {
      */
     public Flux<AgentEvent> resumeWithConfirmEvents(
             String threadId, String userId, List<Map<String, Object>> results) {
+        return resumeWithConfirmEvents(threadId, userId, results, null);
+    }
+
+    /**
+     * 原始事件流版（带请求级透传头）：透传头经 {@link ChatRequestHeaders} 随恢复上下文进
+     * RuntimeContext（mcp-chat-header-forward-design §6.5）；null = 无透传（行为不变）。
+     */
+    public Flux<AgentEvent> resumeWithConfirmEvents(
+            String threadId, String userId, List<Map<String, Object>> results,
+            ChatRequestHeaders forwardHeaders) {
         var tid = threadId != null && !threadId.isEmpty() ? threadId : UUID.randomUUID().toString();
         var fullThreadId = makeThreadId(tid);
 
@@ -664,7 +686,7 @@ public class AgentRuntimeService {
 
         // 先消费确认上下文（CAS 防重复），再构建恢复消息
         var confirmCtx = resolveConfirmContext(fullThreadId);
-        var ctx = buildResumeContext(confirmCtx, fullThreadId, userId);
+        var ctx = buildResumeContext(confirmCtx, fullThreadId, userId, forwardHeaders);
         var resumeMsg = buildResumeMsg(confirmCtx, results);
         return getAgent(fullThreadId).streamEvents(List.of(resumeMsg), ctx);
     }
@@ -720,19 +742,28 @@ public class AgentRuntimeService {
      * A2A/invoke 流程（forwardEvent 直接 putConfirmContext，无网关路由）无此信息，
      * 回落 makeThreadId + 显式 userId（与触发侧一致）。
      */
-    private RuntimeContext buildResumeContext(ConfirmContext confirmCtx, String fullThreadId, String userId) {
+    private RuntimeContext buildResumeContext(ConfirmContext confirmCtx, String fullThreadId,
+                                              String userId, ChatRequestHeaders forwardHeaders) {
+        RuntimeContext ctx;
         if (confirmCtx.runtimeSessionId() != null && confirmCtx.runtimeUserId() != null) {
             var runtimeSessionId = confirmCtx.runtimeSessionId();
             if (LEGACY_SHARED_GW_SESSION_ID.equals(runtimeSessionId)) {
                 runtimeSessionId = channelGatewaySessionId(confirmCtx.runtimeUserId());
             }
-            return RuntimeContext.builder()
+            ctx = RuntimeContext.builder()
                 .sessionId(runtimeSessionId)
                 .userId(io.agentmanager.framework.util.PathSafe.sanitize(confirmCtx.runtimeUserId()))
                 .build();
+        } else {
+            ctx = RuntimeContext.builder().sessionId(fullThreadId)
+                .userId(io.agentmanager.framework.util.PathSafe.sanitize(resolveUserId(userId))).build();
         }
-        return RuntimeContext.builder().sessionId(fullThreadId)
-            .userId(io.agentmanager.framework.util.PathSafe.sanitize(resolveUserId(userId))).build();
+        // 请求级透传头随行（mcp-chat-header-forward-design §6.5）：confirm 是新 HTTP 请求
+        // 重新捕获的，仅本轮存活、不持久化；null/空集 = 行为与现状一致
+        if (forwardHeaders != null && !forwardHeaders.headers().isEmpty()) {
+            ctx = RuntimeContext.builder(ctx).put(ChatRequestHeaders.class, forwardHeaders).build();
+        }
+        return ctx;
     }
 
     // ===== 确认上下文（6.3.1；落库 ConfirmContextStore，跨副本可见）=====

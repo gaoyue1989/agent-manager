@@ -61,7 +61,7 @@ agent-framework/
 │   │   │   │   ├── SkillZipSupport.java         # 技能 zip 解压/定位/命名工具（全局上传与 L4 zip 上传共用）
 │   │   │   │   ├── McpToolRegistrar.java        # MCP 原生注册 (config.yaml → McpClientBuilder, 含 UI 元数据 + userHeaders 解析/装饰)
 │   │   │   │   ├── McpManager.java              # MCP 配置加载
-│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: UserScopedMcpClientWrapper (per-call header 注入) / McpUserContextMiddleware (userId→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule
+│   │   │   │   ├── mcp/                         # MCP 多租户按用户调用: UserScopedMcpClientWrapper (per-call header 注入 + reqHeader:* 出站剥离) / McpUserContextMiddleware (userId+reqHeader→McpMeta) / McpUserHeaderCustomizer / UserHeaderRule / ChatRequestHeaders (chat 请求透传头捕获)
 │   │   │   │   ├── UiContextStore.java          # MCP Apps: ui_context 持久化 (静默更新模型上下文, 4.7)
 │   │   │   │   ├── UiContextInjectionHook.java  # MCP Apps: PreCallEvent Hook 注入 UI 上下文 (appendSystemContent)
 │   │   │   │   ├── McpResourceProxy.java        # MCP Apps: 拉取/代理 MCP 服务器资源 (HtmlResource)
@@ -162,6 +162,7 @@ invokeStream(message, threadId, userId) → Flux<Map>
 - **工具注册名**: 使用远端裸名（`tool.name()`），确保 `McpTool.callAsync` 正确执行；`mcp__{server}__{tool}` 前缀名仅用于 API 展示和注册缓存（因 `McpTool.getName()` 是 `final` 字段，无法分离 LLM 暴露名和执行名）
 - **MCP Apps (阶段一/二)**: config.yaml 支持 `ui.tools.{tool}.resource_uri`（`ui://xxx` 静态声明）与 `ui.app_only: true`（仅卡片展示、不入 LLM 工具集）；`resolveUiRef(toolName)` 供 SSE 序列化携带 `ui` 元数据；`/tools`、`/mcp` 接口输出 `uiResourceUri`/`appOnly`/`has_ui`；Manifest 动态发现（`tool.meta()` 的 `_meta`）用于 resourceUri 预检
 - **多租户按用户调用（userHeaders + `_meta` 双通道，PR #9）**: config.yaml `userHeaders.headers` 声明 `header 名 ← McpMeta key`（如 `X-User-Id: userId`）+ `on-missing`（缺省 deny，fail-closed）；`McpUserContextMiddleware`（唯一注入点，覆盖 Channel/invoke/A2A/confirm 全链路）把生效 userId 写入 `McpMeta` —— Channel 链路 `RuntimeContext.userId` 为网关 peer（=会话 id），按 `session_user` 表反查真实用户；业务调用经 `UserScopedMcpClientWrapper` 注入下游 HTTP header（静态 `auth.token` 仅用于连接初始化与 tools/list 发现），meta 同时随 `CallToolRequest._meta` 下传；stdio 传输告警忽略；设计详见 [docs/mcp-user-scoped-headers-plan.md](docs/mcp-user-scoped-headers-plan.md)
+- **请求级透传（userHeaders 取值源 `reqHeader:<小写头名>`，2026-11）**: chat/confirm/AGUI 请求携带的同名 header 原值透传到该 server 工具调用的 HTTP header（**仅 header 单通道**——wrapper 对 HTTP 传输常驻装饰并在出站把 `reqHeader:*` 从 `_meta` 剥离；userId 的 `_meta` 双通道不变）。捕获名单 = 各 server 声明并集（`getForwardHeaderNames()`，规则缓存随 registerOne/registerBuiltClient 装载、clearServer 移除——禁放 buildClient，会被 reload swap-on-success 的 clearServer 抹掉），未声明不捕获；平台 denylist（cookie/x-forwarded-*/sec-*/hop-by-hop）解析期剔除+捕获期二道防线；confirm 恢复按确认请求重新捕获（不存历史，双入口 ConfirmController+AGUI resumeRun）；A2A/invoke/子 agent turn 无透传头（deny 可达，配 passthrough 规避）。设计 [docs/mcp-chat-header-forward-design.md](docs/mcp-chat-header-forward-design.md)
 
 ### 3.5 MCP Apps 运行链路（Debug 页卡片 + 4.7 静默更新）
 
@@ -249,7 +250,7 @@ deniedTools 过滤、HITL、/tools、OAF reload 整包重建全部自动生效�
 通过 `McpToolRegistrar` 从 `mcp-configs/{server}/config.yaml` 注册。
 - 传输: `sse` / `streamableHttp` / `stdio`
 - 认证: `auth.token` 支持 `${ENV_VAR}` 语法（静态凭据，仅用于连接初始化与 tools/list 发现）
-- 多租户: `userHeaders.headers`（header 名 ← McpMeta key）+ `on-missing: deny|passthrough`（缺省 deny）；userId 经 `McpUserContextMiddleware` 写入 McpMeta，双通道生效（HTTP header + `_meta`）
+- 多租户: `userHeaders.headers`（header 名 ← McpMeta key；取值源 `userId` 内建身份 或 `reqHeader:<小写头名>` = chat 请求透传头）+ `on-missing: deny|passthrough`（缺省 deny）；userId 经 `McpUserContextMiddleware` 写入 McpMeta，双通道生效（HTTP header + `_meta`）；`reqHeader:*` 仅 HTTP header 单通道（出站剥离）
 - 权限: `permissions.read_only: true` 强制只读
 - 子集: `mcp-configs/{server}/ActiveMCP.json` 的 `selectedTools.enabled` 控制注册子集
 - 命名: Toolkit 注册用远端裸名；`/tools`、`/mcp` API 用 `mcp__{server}__{tool}` 展示名
