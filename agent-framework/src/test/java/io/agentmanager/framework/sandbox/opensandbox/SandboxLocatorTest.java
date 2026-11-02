@@ -1,5 +1,6 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -208,5 +209,18 @@ class SandboxLocatorTest {
         } finally {
             sdk.close();
         }
+    }
+
+    @Test
+    void constructorShouldNotFailWhenApiKeyBlank() {
+        // 回归（E2E 工具插件冒烟）：沙箱未启用的部署没有 OPENSANDBOX_API_KEY，
+        // SDK ConnectionConfig.Builder 拒绝空 apiKey——构造器急切构建会导致 Bean 创建失败、
+        // 整服务起不来。惰性构建后构造必须成功，仅在真正 locate() 连接时才校验。
+        OafConfig oafConfig = new OafConfig(AGENT, null, null, null, null, null, null, null, null,
+            null, null, null, null, null, null, null, null, null, null);
+        SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
+            Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
+            new SandboxConfig.OpenSandboxConfig("server:8090", ""));
+        assertDoesNotThrow(() -> new SandboxLocator(stateStore, oafConfig, config));
     }
 }

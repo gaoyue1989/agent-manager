@@ -38,19 +38,36 @@ public class SandboxLocator {
 
     private final SessionSandboxStateStore stateStore;
     private final String agentId;
-    private final ConnectionConfig connectionConfig;
+    private final SandboxConfig sandboxConfig;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * SDK 连接配置惰性构建（volatile + 单次重检）：apiKey 为空时 SDK {@code ConnectionConfig.Builder}
+     * 直接拒绝——若在构造器急切构建，沙箱未启用（无需 apiKey）的部署（如工具插件冒烟环境）
+     * 会因 Bean 创建失败而整服务起不来。控制器在 {@code sandboxRuntime.enabled()} 为假时先返回 409，
+     * 永不触发本构建；真正调用 {@link #locate} 时 apiKey 必然已配置。
+     */
+    private volatile ConnectionConfig connectionConfig;
 
     public SandboxLocator(SessionSandboxStateStore stateStore, OafConfig oafConfig, SandboxConfig sandboxConfig) {
         this.stateStore = stateStore;
         this.agentId = oafConfig.name();
-        this.connectionConfig = ConnectionConfig.builder()
-            .domain(sandboxConfig.opensandbox().serverUrl())
-            .apiKey(sandboxConfig.opensandbox().apiKey())
-            .protocol("http")
-            // 经 Server 代理转发 execd 请求（与 OpenSandboxClient 同模式）
-            .useServerProxy(true)
-            .build();
+        this.sandboxConfig = sandboxConfig;
+    }
+
+    private ConnectionConfig connectionConfig() {
+        ConnectionConfig config = this.connectionConfig;
+        if (config == null) {
+            config = ConnectionConfig.builder()
+                .domain(sandboxConfig.opensandbox().serverUrl())
+                .apiKey(sandboxConfig.opensandbox().apiKey())
+                .protocol("http")
+                // 经 Server 代理转发 execd 请求（与 OpenSandboxClient 同模式）
+                .useServerProxy(true)
+                .build();
+            this.connectionConfig = config;
+        }
+        return config;
     }
 
     /**
@@ -76,7 +93,7 @@ public class SandboxLocator {
             try {
                 Sandbox sandbox = Sandbox.connector()
                     .sandboxId(sandboxId)
-                    .connectionConfig(connectionConfig)
+                    .connectionConfig(connectionConfig())
                     .skipHealthCheck(true)
                     .connect();
                 return new LocatedSandbox(sandboxId, sandbox);
