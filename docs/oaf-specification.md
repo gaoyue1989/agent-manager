@@ -388,7 +388,24 @@ permissions:
   allow_paths: ["/workspace", "/tmp"]
   deny_paths: ["/system", "/etc"]
   read_only: false
+
+userHeaders:
+  headers:
+    X-User-Id: userId
+    Authorization: reqHeader:authorization
+  on-missing: deny
 ```
+
+**userHeaders（per-call 用户级 header 注入）**：`headers` 声明 `header 名 ← McpMeta key`
+映射，每次工具调用按值注入下游 HTTP 请求（替换同名静态 header）。取值源两种：
+
+- `userId`（内建）：本次调用生效用户（middleware 解析，随 `_meta` 双通道下发）；
+- `reqHeader:<小写头名>`：调用方对话请求（`/threads/chat` / confirm / AG-UI run）携带的
+  同名 header 原值透传——**仅 HTTP header 单通道，不进 `_meta`**；平台 denylist
+  （`cookie`/hop-by-hop/`x-forwarded-*`/`sec-*` 等）声明即剔除；未声明不捕获。
+  `on-missing: deny`（缺省，缺值拒绝调用，fail-closed）| `passthrough`（缺值跳过该头）。
+  仅 HTTP 传输（sse/streamableHttp）生效，stdio 声明告警忽略。详见
+  agent-framework/docs/mcp-user-scoped-headers-plan.md 与 mcp-chat-header-forward-design.md。
 
 ---
 

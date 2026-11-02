@@ -49,7 +49,6 @@ import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
-import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 
@@ -302,7 +301,8 @@ public class ChatStreamController {
     @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<String>> chat(@RequestBody ChatRequest body,
                                               @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
-                                              @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader) {
+                                              @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader,
+                                              @RequestHeader(required = false) org.springframework.http.HttpHeaders requestHeaders) {
         var message = body.message();
         if ((message == null || message.isBlank()) && (body.fileIds() == null || body.fileIds().isEmpty())) {
             return Flux.just(errorSSE("message or fileIds is required"));
@@ -335,6 +335,12 @@ public class ChatStreamController {
         // RequestContextHolder 不可靠——入口解析一次，经闭包/参数显式传到合成点；
         // 直连（无该头）为 null，download_url 维持服务根相对路径（契约不变）
         var forwardedPrefix = io.agentmanager.framework.util.ExternalUrlSupport.normalizePrefix(forwardedPrefixHeader);
+
+        // MCP 请求级透传头（mcp-chat-header-forward-design §6.2）：配置驱动捕获（未声明不捕获），
+        // 入口解析一次经闭包随行；名单来自 registrar 内存缓存（reload 语义=下一轮对话），
+        // registrar 为 null（单测桩）时按空名单
+        var forwardHeaders = io.agentmanager.framework.mcp.ChatRequestHeaders.capture(
+            requestHeaders, mcpToolRegistrar != null ? mcpToolRegistrar.getForwardHeaderNames() : null);
 
         // 新会话的首帧 session_created（issue #87 二级症状兜底）：不再在 create 回调里发——
         // 该回调经 subscribeOn(boundedElastic) 执行，排队 waiter 占满线程池时首帧被推迟
@@ -605,7 +611,15 @@ public class ChatStreamController {
                 if (currentChatChannel == null) {
                     throw new IllegalStateException("no active agent channel");
                 }
-                currentChatChannel.sendStream(ChatUiRequest.withPeer(finalSessionId, messages))
+                // in-band 上下文随行（mcp-chat-header-forward-design §6.2）：SDK 2.0.3 的
+                // sendStream(ChatUiRequest) 内部即 dispatchStream(buildInbound(request))，对
+                // withPeer 产出的正是 InboundMessage.dm(channelId, peerId.trim(), messages)——
+                // 同一条路由路径，仅多带 runtimeContext（网关身份字段仍由网关覆盖生效）。
+                // 透传头经 typed attribute 随行（turn 级存活、不持久化），middleware 合并进 McpMeta
+                var inbound = io.agentscope.harness.agent.gateway.channel.InboundMessage
+                    .dm(currentChatChannel.channelId(), finalSessionId, messages)
+                    .withRuntimeContext(forwardHeaders.toRuntimeContext());
+                currentChatChannel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
                             finalUserId, sink, turnEnded, turnBucketKeys, toolSummary, forwardedPrefix),

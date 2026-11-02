@@ -3,6 +3,8 @@ package io.agentmanager.framework.controller;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -31,7 +33,7 @@ import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiChannel;
-import io.agentscope.harness.agent.gateway.channel.chatui.ChatUiRequest;
+import io.agentscope.harness.agent.gateway.channel.InboundMessage;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
@@ -111,6 +113,9 @@ class ChatStreamControllerTest {
 
         // 默认间隔；个别用例会重新打桩成亚秒值来逼出丢锁，故 lenient
         lenient().when(turnLeaseStore.renewInterval()).thenReturn(Duration.ofSeconds(20));
+        // dispatchStream(InboundMessage) 路径要求 channelId 非空（InboundMessage 构造校验），
+        // mock channel 默认返回 null——打桩为 ChatUiChannel 的 CHANNEL_ID 语义值
+        lenient().when(chatChannel.channelId()).thenReturn("chatui");
         // TurnLeaseGuard 构造时就要算「到必须停手」的时长，ttl() 缺了会 NPE
         lenient().when(turnLeaseStore.ttl()).thenReturn(Duration.ofSeconds(60));
         when(sandboxConfig.enabled()).thenReturn(false);
@@ -167,7 +172,7 @@ class ChatStreamControllerTest {
 
     private List<String> collect(String sessionId, String message, String userId, List<String> fileIds) {
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null), null, null)
+                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -178,7 +183,7 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
         var delta = new TextBlockDeltaEvent("reply-1", "block-1", "Hi");
         var end = new AgentEndEvent("reply-1");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) delta, (AgentEvent) end));
 
         var frames = collect(sessionId, "hello", "alice");
@@ -188,6 +193,55 @@ class ChatStreamControllerTest {
         verify(turnLeaseStore).tryAcquire(sessionId);
         // endTurn 先 closeSession 再放锁：流一结束 collect() 就返回了，而 release 还在 boundedElastic 线程上，必须等待
         verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-1");
+    }
+
+    @Test
+    void chatShouldCarryForwardHeadersIntoInboundMessage() {
+        // mcp-chat-header-forward-design §6.2：配置驱动捕获的透传头随 InboundMessage 的
+        // runtimeContext 进 agent turn（typed attribute），denylist 头不捕获
+        var sessionId = "test-user-fwd";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        when(mcpToolRegistrar.getForwardHeaderNames()).thenReturn(Set.of("authorization"));
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-1")));
+
+        var requestHeaders = new org.springframework.http.HttpHeaders();
+        requestHeaders.add("Authorization", "Bearer tok-abc");
+        requestHeaders.add("Cookie", "sid=secret");
+        var frames = controller.chat(
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null),
+                null, null, requestHeaders)
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames);
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        var carried = captor.getValue().runtimeContext().get(
+            io.agentmanager.framework.mcp.ChatRequestHeaders.class);
+        assertNotNull(carried, "声明的透传头应随 InboundMessage 随行");
+        assertEquals(Map.of("authorization", "Bearer tok-abc"), carried.headers(),
+            "denylist 头（cookie）不得被捕获");
+    }
+
+    @Test
+    void chatShouldNotCarryHeadersWhenNothingDeclared() {
+        // 零声明服务：capture 空集 → runtimeContext 无 ChatRequestHeaders attribute（行为不变）
+        var sessionId = "test-user-nofwd";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-1")));
+
+        var requestHeaders = new org.springframework.http.HttpHeaders();
+        requestHeaders.add("Authorization", "Bearer tok-abc");
+        controller.chat(
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null),
+                null, null, requestHeaders)
+            .collectList().block(Duration.ofSeconds(10));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        verify(chatChannel).dispatchStream(captor.capture());
+        assertNull(captor.getValue().runtimeContext().get(
+            io.agentmanager.framework.mcp.ChatRequestHeaders.class));
     }
 
     @Test
@@ -208,7 +262,7 @@ class ChatStreamControllerTest {
         // （MUT-J/MUT-L 实测正是如此）。multicast sink 是同步投递的，tryEmitNext 返回即处理完。
         var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
         var subscribed = new CountDownLatch(1);
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
         var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
@@ -242,7 +296,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-s2";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-2");
         var end = new AgentEndEvent("reply-2");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) end));
 
         var frames = collect(sessionId, "hello", null);
@@ -266,7 +320,7 @@ class ChatStreamControllerTest {
             "准备失败应回错误帧: " + frames);
         verify(turnLeaseStore, org.mockito.Mockito.timeout(2_000)).release(sessionId, "tok-4");
         verify(eventStore).finishTurn(sessionId);
-        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+        verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
     }
 
     @Test
@@ -276,7 +330,7 @@ class ChatStreamControllerTest {
         // 里兜住，续租线程就会带着这个 token 一直续期，该 session 再也无法执行。
         var sessionId = "test-user-s5";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-5");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenThrow(new IllegalStateException("channel not ready"));
 
         // 同步异常若逃到订阅者，说明准备段的 try 没兜住它 —— 显式转成断言失败，
@@ -315,7 +369,7 @@ class ChatStreamControllerTest {
         // 连 turn 都没开始，不该动到 EventBus 的会话状态
         verify(eventStore, never()).finishTurn(any());
         verify(eventStore, never()).abandonTurn(any());
-        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+        verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
     }
 
     @Test
@@ -331,7 +385,7 @@ class ChatStreamControllerTest {
             return n == 1 ? null : "tok-3";
         });
         var end = new AgentEndEvent("reply-3");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) end));
 
         var frames = collect(sessionId, "hello", null);
@@ -358,7 +412,7 @@ class ChatStreamControllerTest {
                 var n = calls.incrementAndGet();
                 return n == 1 ? null : "tok-i";
             });
-            when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            when(chatChannel.dispatchStream(any(InboundMessage.class)))
                 .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("reply-i")));
 
             collect(sessionId, "hello", null);
@@ -414,7 +468,7 @@ class ChatStreamControllerTest {
             when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-hb");
             var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
             var subscribed = new CountDownLatch(1);
-            when(chatChannel.sendStream(any(ChatUiRequest.class)))
+            when(chatChannel.dispatchStream(any(InboundMessage.class)))
                 .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
             var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
@@ -463,7 +517,7 @@ class ChatStreamControllerTest {
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("ASKING")),
             "挂起会话应回含 ASKING 的 error 帧: " + frames);
         // SDK 路径不得触达，预检拒绝不产生任何 agent 事件落库
-        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+        verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
         verify(eventStore, never()).append(any(), any(), any(), any(), isNull());
         // 租约必须放回（拒绝与释放同在订阅回调线程上先行于 complete，无需 timeout 等待）
         verify(turnLeaseStore).release(sessionId, "tok-pc1");
@@ -474,12 +528,12 @@ class ChatStreamControllerTest {
         // 非挂起会话不受预检影响（hasPendingConfirm 缺省 mock 为 false），照常走 SDK
         var sessionId = "test-user-pc2";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-pc2");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-pc2")));
 
         var frames = collect(sessionId, "hello", "alice");
 
-        verify(chatChannel).sendStream(any(ChatUiRequest.class));
+        verify(chatChannel).dispatchStream(any(InboundMessage.class));
         verify(turnLeaseStore, timeout(2000)).release(sessionId, "tok-pc2");
         assertTrue(frames.stream().noneMatch(f -> f != null && f.contains("turn_pending_confirm")),
             "非挂起会话不应出现预检拒绝帧: " + frames);
@@ -490,12 +544,12 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-s7"; // 不与 chatShouldReleaseLeaseWhenSendStreamThrowsSynchronously 复用：JUnit 方法顺序在 JDK 间有差异，复用会话 ID 会让前者的收尾与后者的租约验证交错
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-5");
         var end = new AgentEndEvent("reply-5");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) end));
 
-        var captor = org.mockito.ArgumentCaptor.forClass(ChatUiRequest.class);
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         collect(sessionId, "hi", "alice");
-        verify(chatChannel).sendStream(captor.capture());
+        verify(chatChannel).dispatchStream(captor.capture());
         var messages = captor.getValue().messages();
         assertEquals(1, messages.size());
         assertEquals(MsgRole.USER, messages.get(0).getRole());
@@ -510,7 +564,7 @@ class ChatStreamControllerTest {
     void chatShouldGenerateUuidAndEmitSessionCreatedWhenSessionIdAbsent() {
         when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-new");
         var end = new AgentEndEvent("reply-new");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) end));
 
         // sessionId 传 null → 应自动生成
@@ -538,7 +592,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-s9"; // 不与 chatShouldReleaseLeaseWhenGuardConstructionFails 复用（同上）
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-6");
         var end = new AgentEndEvent("reply-6");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) end));
 
         var frames = collect(sessionId, "hello", "alice");
@@ -578,11 +632,11 @@ class ChatStreamControllerTest {
             io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent("r-sum1");
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) d1, (AgentEvent) callEnd,
                 (AgentEvent) rDelta, (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -623,11 +677,11 @@ class ChatStreamControllerTest {
             io.agentscope.core.message.ToolResultState.ERROR);
         var agentEnd = new AgentEndEvent("r-sum2");
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd,
                 (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -665,10 +719,10 @@ class ChatStreamControllerTest {
             "present_file", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -706,11 +760,11 @@ class ChatStreamControllerTest {
             "present_file", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
         ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null),
-                null, "/agent/demo/")
+                null, "/agent/demo/", null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -746,10 +800,10 @@ class ChatStreamControllerTest {
             "present_url", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -792,10 +846,10 @@ class ChatStreamControllerTest {
             "present_url", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -845,10 +899,10 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui1");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui1", "c-ui1", "show_form");
         var agentEnd = new AgentEndEvent("r-ui1");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -877,10 +931,10 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-ui2");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-ui2", "c-ui2", "echo");
         var agentEnd = new AgentEndEvent("r-ui2");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null), null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -895,7 +949,7 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-a1");
         var end = new AgentEndEvent("r-a1");
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-a1", "c-a1", "get_weather");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) end));
 
         collect(sessionId, "go", null);
@@ -921,7 +975,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "write_file");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -957,7 +1011,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "__fragment__");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -985,7 +1039,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "write_file");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -1014,7 +1068,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "write_file");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -1043,7 +1097,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "write_file");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -1072,7 +1126,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "write_file");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -1105,7 +1159,7 @@ class ChatStreamControllerTest {
         var tcEnd = new io.agentscope.core.event.ToolCallEndEvent(replyId, callId, "write_file");
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart,
                 (AgentEvent) tcDelta,
@@ -1144,7 +1198,7 @@ class ChatStreamControllerTest {
             "present_file", io.agentscope.core.message.ToolResultState.SUCCESS);
         var agentEnd = new AgentEndEvent(replyId);
 
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just(
                 (AgentEvent) tcStart, (AgentEvent) tcDelta, (AgentEvent) tcEnd,
                 (AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
@@ -1169,7 +1223,7 @@ class ChatStreamControllerTest {
         var tcStart = new io.agentscope.core.event.ToolCallStartEvent("r-bk2", callA, "write_file");
         var tcDelta = new io.agentscope.core.event.ToolCallDeltaEvent(
             "r-bk2", callA, "write_file", "{\"path\":\"a.txt\",\"content\":\"a\"}");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) tcDelta)
                 .concatWith(Flux.error(new IllegalStateException("boom"))));
 
@@ -1197,7 +1251,7 @@ class ChatStreamControllerTest {
         var tcStartA = new io.agentscope.core.event.ToolCallStartEvent("r-A", callA, "write_file");
         var tcDeltaA = new io.agentscope.core.event.ToolCallDeltaEvent(
             "r-A", callA, "write_file", "{\"path\":\"a.txt\",\"content\":\"a\"}");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStartA, (AgentEvent) tcDeltaA)
                 .concatWith(Flux.error(new IllegalStateException("boom"))));
 
@@ -1209,7 +1263,7 @@ class ChatStreamControllerTest {
         // ---- turn B：手动 sink 编排，观察「B 进行中」的桶状态 ----
         var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
         var subscribed = new CountDownLatch(1);
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
         var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "turn B", "alice"));
@@ -1243,7 +1297,7 @@ class ChatStreamControllerTest {
         // 纯文本对话：turnBucketKeys 为空，收尾清桶零操作、无异常
         var sessionId = "test-user-bk5";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-bk5");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-bk5")));
 
         collect(sessionId, "hello", null);
@@ -1268,25 +1322,25 @@ class ChatStreamControllerTest {
         when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope"), null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope"), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("unknown_model: nope")),
             "应返回 unknown_model error 帧: " + frames);
         // 校验失败不得启动 turn、不得改变会话绑定
-        verify(chatChannel, never()).sendStream(any(ChatUiRequest.class));
+        verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
         verify(sessionUserStore, never()).upsertModel(anyString(), anyString());
     }
 
     @Test
     void chatShouldPersistSelectedModelAndGenerateTitleForNewSession() {
         when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-m2");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m2")));
 
         // sessionId 缺省（新会话）+ model 显式指定
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2"), null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2"), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1299,11 +1353,11 @@ class ChatStreamControllerTest {
     @Test
     void chatShouldClearModelBindingOnSystemSelection() {
         when(turnLeaseStore.tryAcquire(anyString())).thenReturn("tok-m3");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m3")));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system"), null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system"), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1317,7 +1371,7 @@ class ChatStreamControllerTest {
         // 前端首条消息自带 sessionId（webui-xxx）；master 版服务每条消息触发，内部按已有标题跳过
         var sessionId = "webui-m5";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-m5");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m5")));
 
         collect(sessionId, "hello", "webui");
@@ -1329,7 +1383,7 @@ class ChatStreamControllerTest {
     void chatShouldNotTouchModelBindingWhenFieldAbsent() {
         var sessionId = "test-user-m4";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-m4");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m4")));
         when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice"); // 老会话
 
@@ -1352,7 +1406,7 @@ class ChatStreamControllerTest {
 
         var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
         var subscribed = new CountDownLatch(1);
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
         var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
@@ -1383,7 +1437,7 @@ class ChatStreamControllerTest {
 
         var events = Sinks.many().multicast().<AgentEvent>onBackpressureBuffer();
         var subscribed = new CountDownLatch(1);
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(events.asFlux().doOnSubscribe(s -> subscribed.countDown()));
 
         var framesFuture = CompletableFuture.supplyAsync(() -> collect(sessionId, "hello", "alice"));
@@ -1431,7 +1485,7 @@ class ChatStreamControllerTest {
         when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null), null, null)
+                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1449,11 +1503,11 @@ class ChatStreamControllerTest {
         when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
         var end = new AgentEndEvent("reply-1");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(reactor.core.publisher.Flux.just(end));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null), null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1479,7 +1533,7 @@ class ChatStreamControllerTest {
             .build();
         var result = new io.agentscope.core.event.AgentResultEvent(recovery);
         var end = new AgentEndEvent("reply-1");
-        when(chatChannel.sendStream(any(ChatUiRequest.class)))
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) result, (AgentEvent) end));
 
         var frames = collect(sessionId, "run long task", "alice");

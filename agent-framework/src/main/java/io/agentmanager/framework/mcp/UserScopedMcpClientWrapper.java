@@ -21,8 +21,10 @@ import reactor.core.publisher.Mono;
  *   <li>值无法作为 HTTP header（换行 / 首尾空白 / 非 ASCII）时一律拒绝，错误只含 key 名。</li>
  * </ul>
  *
- * <p>meta 原样下传：agentscope McpTool 会将其写入 CallToolRequest._meta（协议通道），
- * 用户身份因此在"HTTP header + _meta"两条通道同时生效。
+ * <p>meta 出站处理：userId 等既有 entries 原样下传（agentscope McpTool 写入
+ * CallToolRequest._meta，协议通道）；{@code reqHeader:*}（chat 请求透传头原始值）
+ * 在出站前剥离——透传值只走 HTTP header 单通道，不随 _meta 下发到任何 server
+ * （McpMeta 是 per-turn 全 server 共享的）。
  */
 public class UserScopedMcpClientWrapper extends McpClientWrapper {
 
@@ -63,13 +65,38 @@ public class UserScopedMcpClientWrapper extends McpClientWrapper {
         } catch (McpUserHeaderException e) {
             return Mono.error(e);
         }
+        var outboundMeta = stripForwardKeys(meta);
         if (resolved.isEmpty()) {
             // 全部 passthrough 跳过：静态 header 生效
-            return delegate.callTool(toolName, arguments, meta);
+            return delegate.callTool(toolName, arguments, outboundMeta);
         }
         var transportContext = McpTransportContext.create(Map.of(HEADER_KEY, resolved));
-        return delegate.callTool(toolName, arguments, meta)
+        return delegate.callTool(toolName, arguments, outboundMeta)
                 .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
+    }
+
+    /**
+     * 剥离 McpMeta 中的 {@code reqHeader:*} 键（chat 请求透传头的原始值）后再转交 delegate：
+     * 透传值只走 HTTP header 单通道，不随 {@code CallToolRequest._meta} 下发到任何 server。
+     * McpMeta 是 per-turn 全 server 共享的——不剥离会让 A server 声明的透传值漏进
+     * B server（含未配置 userHeaders 的 server）的 _meta。
+     */
+    private static Map<String, Object> stripForwardKeys(Map<String, Object> meta) {
+        if (meta == null || meta.isEmpty()) {
+            return meta;
+        }
+        boolean hasForwardKey = meta.keySet().stream()
+            .anyMatch(k -> String.valueOf(k).startsWith(ChatRequestHeaders.META_KEY_PREFIX));
+        if (!hasForwardKey) {
+            return meta;   // 热路径无透传键：原引用透传，零拷贝
+        }
+        var filtered = new LinkedHashMap<String, Object>(meta.size());
+        meta.forEach((k, v) -> {
+            if (!String.valueOf(k).startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
+                filtered.put(k, v);
+            }
+        });
+        return filtered;
     }
 
     @Override

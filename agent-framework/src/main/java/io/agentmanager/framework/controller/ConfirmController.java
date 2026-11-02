@@ -124,6 +124,8 @@ public class ConfirmController {
     public ResponseEntity<Map<String, Object>> confirm(
             @PathVariable String sessionId,
             @org.springframework.web.bind.annotation.RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+            @org.springframework.web.bind.annotation.RequestHeader(required = false)
+            org.springframework.http.HttpHeaders requestHeaders,
             @RequestBody ConfirmRequest body) {
         // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
@@ -134,6 +136,11 @@ public class ConfirmController {
                 "error", "thread_not_found",
                 "message", "Session '" + sessionId + "' not found"));
         }
+
+        // MCP 请求级透传头（mcp-chat-header-forward-design §6.5）：confirm 是新的在线请求，
+        // 重新捕获、不存历史；远程键路由不经本地恢复，捕获值只作用于本地恢复段
+        var forwardHeaders = io.agentmanager.framework.mcp.ChatRequestHeaders.capture(
+            requestHeaders, mcpToolRegistrar != null ? mcpToolRegistrar.getForwardHeaderNames() : null);
 
         // 多行消费路由：显式远程键（task:{task_id}）→ Bridge 调 /resume，不走父 state 恢复、
         // 不抢本会话 turn 租约（唤醒汇总 turn 由 Bridge 自行抢租约驱动）
@@ -178,7 +185,7 @@ public class ConfirmController {
         var lease = new TurnLeaseGuard(turnLeaseStore, sessionId, token);
 
         try {
-            var result = runtimeService.resumeWithConfirm(sessionId, null, body.results());
+            var result = runtimeService.resumeWithConfirm(sessionId, null, body.results(), forwardHeaders);
             return ResponseEntity.ok(result);
         } catch (AgentRuntimeService.ConfirmContextNotFoundException e) {
             return ResponseEntity.status(404).body(Map.of(
@@ -211,6 +218,8 @@ public class ConfirmController {
     public Flux<ServerSentEvent<String>> confirmStream(
             @PathVariable String sessionId,
             @org.springframework.web.bind.annotation.RequestHeader(value = "X-User-Id", required = false) String headerUserId,
+            @org.springframework.web.bind.annotation.RequestHeader(required = false)
+            org.springframework.http.HttpHeaders requestHeaders,
             @RequestBody ConfirmRequest body) {
         // ★ Windows 路径安全化：与 ChatStreamController 保持一致
         sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
@@ -224,6 +233,11 @@ public class ConfirmController {
                 org.springframework.http.HttpStatus.NOT_FOUND,
                 "Session '" + sessionId + "' not found");
         }
+
+        // MCP 请求级透传头（mcp-chat-header-forward-design §6.5）：confirm 是新的在线请求，
+        // 重新捕获、不存历史；远程键路由不经本地恢复，捕获值只作用于本地恢复段
+        var forwardHeaders = io.agentmanager.framework.mcp.ChatRequestHeaders.capture(
+            requestHeaders, mcpToolRegistrar != null ? mcpToolRegistrar.getForwardHeaderNames() : null);
 
         // 多行消费路由：远程键 → Bridge 路由（resume + 异步终态唤醒），本流只回执
         // confirm_routed/done 两帧——后续汇总 turn 事件经 EventBus durable 落库，
@@ -293,9 +307,9 @@ public class ConfirmController {
             Flux<io.agentscope.core.event.AgentEvent> resumeFlux;
             try {
                 eventBus.beginTurn(finalSessionId);
-                // 冷流：此处只做上下文消费与消息构建，尚未开始执行
+                // 冷流：此处只做上下文消费与消息构建，尚未开始执行；透传头随恢复上下文进 RuntimeContext
                 resumeFlux = runtimeService.resumeWithConfirmEvents(
-                    finalSessionId, null, body.results());
+                    finalSessionId, null, body.results(), forwardHeaders);
             } catch (Exception e) {
                 log.warn("confirm-stream setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());

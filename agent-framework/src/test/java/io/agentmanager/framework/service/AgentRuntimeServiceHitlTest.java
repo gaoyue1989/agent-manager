@@ -133,6 +133,41 @@ class AgentRuntimeServiceHitlTest {
             () -> service.checkConfirmAvailable(SID));
     }
 
+    // ---------- 6.3.1b resume 透传头随行（mcp-chat-header-forward-design §6.5）----------
+
+    @Test
+    void resumeWithConfirmEventsShouldCarryForwardHeadersInRuntimeContext() {
+        stubStoreRow();
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.empty());
+
+        var forwardHeaders = new io.agentmanager.framework.mcp.ChatRequestHeaders(
+            Map.of("authorization", "Bearer r-1"));
+        service.resumeWithConfirmEvents(SID, null,
+            List.of(Map.of("tool_call_id", "call-1", "confirmed", true)), forwardHeaders)
+            .collectList().block();
+
+        var captor = org.mockito.ArgumentCaptor.forClass(RuntimeContext.class);
+        verify(agent).streamEvents(anyList(), captor.capture());
+        var carried = captor.getValue().get(io.agentmanager.framework.mcp.ChatRequestHeaders.class);
+        assertNotNull(carried, "透传头应随恢复上下文进 RuntimeContext");
+        assertEquals(Map.of("authorization", "Bearer r-1"), carried.headers());
+    }
+
+    @Test
+    void resumeWithConfirmEventsShouldNotCarryHeadersWhenNull() {
+        // null（A2A 等无透传链路）：ctx 无 ChatRequestHeaders attribute，行为与现状一致
+        stubStoreRow();
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(Flux.empty());
+
+        service.resumeWithConfirmEvents(SID, null,
+            List.of(Map.of("tool_call_id", "call-1", "confirmed", true)), null)
+            .collectList().block();
+
+        var captor = org.mockito.ArgumentCaptor.forClass(RuntimeContext.class);
+        verify(agent).streamEvents(anyList(), captor.capture());
+        assertNull(captor.getValue().get(io.agentmanager.framework.mcp.ChatRequestHeaders.class));
+    }
+
     // ---------- 6.3 resumeWithConfirm（同步） ----------
 
     @Test

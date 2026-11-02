@@ -3,6 +3,7 @@ package io.agentmanager.framework.service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Set;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,8 +13,11 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.mcp.McpUserContextMiddleware;
 import io.agentmanager.framework.mcp.UserScopedMcpClientWrapper;
 import io.agentmanager.framework.model.OafConfig;
+import io.agentscope.core.tool.Toolkit;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * userHeaders 配置解析与 buildClient 装饰分支测试（T1/T3）。
@@ -101,6 +105,74 @@ class McpToolRegistrarUserHeadersTest {
         assertEquals(1, rule.headers().size());
     }
 
+    // ===== reqHeader: 取值源（mcp-chat-header-forward-design §5）=====
+
+    @Test
+    void shouldNormalizeReqHeaderValueToLowercase() {
+        // 作者写大写也归一为小写，保证与捕获键（小写）确定匹配
+        var rule = registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of("headers", Map.of(
+                "Authorization", "reqHeader:Authorization",
+                "X-Request-Id", "reqheader:x-request-id"))),
+            "srv");
+
+        assertNotNull(rule);
+        assertEquals("reqHeader:authorization", rule.headers().get("Authorization"));
+        // 前缀本身大小写敏感：reqheader: 不是保留命名空间，按普通 meta key 处理
+        assertEquals("reqheader:x-request-id", rule.headers().get("X-Request-Id"));
+    }
+
+    @Test
+    void shouldDropDeniedReqHeaderMapping() {
+        // 平台 denylist（cookie / x-forwarded-*）在解析期剔除；全部被剔 → null
+        var partial = registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of("headers", Map.of(
+                "Authorization", "reqHeader:authorization",
+                "Cookie", "reqHeader:cookie",
+                "X-Tenant", "reqHeader:x-forwarded-tenant"))),
+            "srv");
+        assertNotNull(partial);
+        assertEquals(Map.of("Authorization", "reqHeader:authorization"), partial.headers());
+
+        assertNull(registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of("headers", Map.of("Cookie", "reqHeader:cookie"))), "srv"));
+    }
+
+    @Test
+    void forwardHeaderNamesShouldUnionDeclaredReqHeadersAndFollowClearServer() throws Exception {
+        // 预置规则缓存（registerOneForTest 模拟 registerOne 装载，读 tempDir 下 config.yaml）
+        writeConfigYaml("srv-a", """
+            connection:
+              type: streamableHttp
+              url: https://mcp.example.com/mcp
+            userHeaders:
+              headers:
+                Authorization: reqHeader:authorization
+                X-User-Id: userId
+            """);
+        writeConfigYaml("srv-b", """
+            connection:
+              type: sse
+              url: http://localhost:8811/sse
+            userHeaders:
+              headers:
+                X-Request-Id: reqHeader:x-request-id
+                Authorization: reqHeader:AUTHORIZATION
+            """);
+
+        registrar.registerOneForTest(new Toolkit(), mcp("srv-a", "srv-a"));
+        registrar.registerOneForTest(new Toolkit(), mcp("srv-b", "srv-b"));
+
+        // 并集去重；reqHeader:AUTHORIZATION 归一为小写
+        assertEquals(Set.of("authorization", "x-request-id"), registrar.getForwardHeaderNames());
+
+        // clearServer 移除该 server 的规则，名单随之收缩（srv-b 摘除后仅剩 srv-a 的 authorization）
+        var toolkit = mock(Toolkit.class);
+        when(toolkit.removeMcpClient("srv-b")).thenReturn(reactor.core.publisher.Mono.empty());
+        assertTrue(registrar.clearServer(toolkit, "srv-b"));
+        assertEquals(Set.of("authorization"), registrar.getForwardHeaderNames());
+    }
+
     // ===== buildClient 装饰分支 =====
 
     @Test
@@ -142,7 +214,9 @@ class McpToolRegistrarUserHeadersTest {
     }
 
     @Test
-    void shouldNotWrapWhenUserHeadersAbsent() throws Exception {
+    void shouldWrapPlainHttpTooForMetaStripResidency() throws Exception {
+        // 常驻装饰（mcp-chat-header-forward-design §6.4）：未配置 userHeaders 的 HTTP server
+        // 也装饰——剥离是全 server 的 _meta 卫生行为；空 rule 时行为与旧版纯透传一致
         writeConfigYaml("plain-mcp", """
             connection:
               type: sse
@@ -151,7 +225,7 @@ class McpToolRegistrarUserHeadersTest {
 
         var wrapper = registrar.buildClient(mcp("plain-mcp", "plain-mcp"));
         assertNotNull(wrapper);
-        assertFalse(wrapper instanceof UserScopedMcpClientWrapper);
+        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper);
     }
 
     @Test

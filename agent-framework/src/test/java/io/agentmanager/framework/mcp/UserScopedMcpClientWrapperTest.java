@@ -182,6 +182,59 @@ class UserScopedMcpClientWrapperTest {
     }
 
     @Test
+    void shouldStripReqHeaderKeysFromOutboundMetaWhenInjected() {
+        // 透传值只走 HTTP header 单通道：注入的同时必须从转交 delegate 的 meta 里剥掉
+        // reqHeader:*（否则随 _meta 下发到下游——McpMeta 是 per-turn 全 server 共享的）
+        var delegate = new RecordingClient();
+        var scoped = wrapper(delegate, Map.of("X-Auth", "reqHeader:x-auth"), true);
+        var meta = Map.<String, Object>of(
+            "userId", "alice", "reqHeader:x-auth", "Bearer token-1", "traceId", "t-1");
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), meta))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("userId", "alice", "traceId", "t-1"), delegate.seenMeta.get(),
+            "reqHeader:* 不得进入 _meta 通道");
+        var tc = delegate.seenTransportContext.get();
+        assertNotNull(tc);
+        assertEquals(Map.of("X-Auth", "Bearer token-1"), tc.get(UserScopedMcpClientWrapper.HEADER_KEY));
+    }
+
+    @Test
+    void shouldStripReqHeaderKeysEvenWhenNotDeclared() {
+        // A server 未声明该透传头也要剥离——防 B server 声明的值漏进 A 的 _meta
+        var delegate = new RecordingClient();
+        var scoped = wrapper(delegate, Map.of("X-User-Id", "userId"), true);
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(),
+                Map.of("userId", "alice", "reqHeader:x-auth", "Bearer token-1")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("userId", "alice"), delegate.seenMeta.get());
+        // 本 server 自己声明的 X-User-Id 正常注入；x-auth 未声明故不注入
+        var tc = delegate.seenTransportContext.get();
+        assertNotNull(tc);
+        assertEquals(Map.of("X-User-Id", "alice"), tc.get(UserScopedMcpClientWrapper.HEADER_KEY));
+    }
+
+    @Test
+    void shouldFailClosedOnMissingReqHeaderValueUnderDeny() {
+        // reqHeader: 取值源沿用 on-missing 语义：deny（缺省）下请求未带头 → 拒绝调用
+        var delegate = new RecordingClient();
+        var scoped = wrapper(delegate, Map.of("Authorization", "reqHeader:authorization"), true);
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of("userId", "alice")))
+            .expectErrorSatisfies(e -> {
+                assertInstanceOf(McpUserHeaderException.class, e);
+                assertTrue(e.getMessage().contains("reqHeader:authorization"), e.getMessage());
+            })
+            .verify();
+        assertNull(delegate.seenMeta.get(), "delegate 不应被调用");
+    }
+
+    @Test
     void shouldDelegateLifecycleMethods() {
         var delegate = mock(McpClientWrapper.class);
         when(delegate.getName()).thenReturn("srv");

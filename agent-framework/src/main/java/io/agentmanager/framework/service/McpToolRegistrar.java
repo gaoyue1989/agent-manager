@@ -19,6 +19,7 @@ import org.yaml.snakeyaml.Yaml;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.agentmanager.framework.mcp.ChatRequestHeaders;
 import io.agentmanager.framework.mcp.McpUserHeaderCustomizer;
 import io.agentmanager.framework.mcp.UserHeaderRule;
 import io.agentmanager.framework.mcp.UserScopedMcpClientWrapper;
@@ -77,6 +78,14 @@ public class McpToolRegistrar {
     private final Map<String, Boolean> readOnlyServers = new ConcurrentHashMap<>();
     /** 启动严格模式缓存: serverName -> required（config.yaml startup.required，默认 false=容错跳过） */
     private final Map<String, Boolean> startupRequired = new ConcurrentHashMap<>();
+
+    /**
+     * userHeaders 规则缓存: serverName -> UserHeaderRule（捕获名单来源，mcp-chat-header-forward-design §6.1）。
+     * 装载点与 uiMappings 等同生命周期：registerOne / registerBuiltClient 各自独立重读
+     * config.yaml 装载，clearServer 移除。不得在 buildClient 里登记——reload swap-on-success
+     * 顺序是 build→clear→register，build 时放入会被紧跟的 clearServer 抹掉且不再重装。
+     */
+    private final Map<String, UserHeaderRule> userHeaderRules = new ConcurrentHashMap<>();
 
     /** destructiveHint 缓存: serverName:toolName -> destructiveHint（buildToolInfo 时记录） */
     private final Map<String, Boolean> destructiveHints = new ConcurrentHashMap<>();
@@ -142,6 +151,7 @@ public class McpToolRegistrar {
         toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
         readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
         startupRequired.put(mcp.server(), isStartupRequired(mcp));
+        userHeaderRules.put(mcp.server(), loadUserHeaderRule(mcp));
         try {
             var activeMcpConfig = loadActiveMcpConfig(mcp);
             boolean forceReadOnly = Boolean.TRUE.equals(readOnlyServers.get(mcp.server()));
@@ -211,6 +221,7 @@ public class McpToolRegistrar {
         toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
         readOnlyServers.put(mcp.server(), isReadOnlyConfigured(mcp));
         startupRequired.put(mcp.server(), isStartupRequired(mcp));
+        userHeaderRules.put(mcp.server(), loadUserHeaderRule(mcp));
         var wrapper = sharedClient(mcp);
         if (wrapper == null) {
             log.warn("[MCP] skipped server '{}': client build failed", mcp.server());
@@ -304,7 +315,38 @@ public class McpToolRegistrar {
         toolPermissions.remove(serverName);
         readOnlyServers.remove(serverName);
         startupRequired.remove(serverName);
+        userHeaderRules.remove(serverName);
         return had;
+    }
+
+    /**
+     * 装载并登记 userHeaders 规则（捕获名单来源；无 config.yaml / 无 userHeaders 节时为
+     * EMPTY，与 uiMappings 等既有 server 级缓存同生命周期）。
+     */
+    private UserHeaderRule loadUserHeaderRule(OafConfig.McpServerConfig mcp) {
+        var data = loadConfigYaml(mcp);
+        if (data == null) {
+            return UserHeaderRule.EMPTY;
+        }
+        var rule = parseUserHeaders(data, mcp.server());
+        return rule != null ? rule : UserHeaderRule.EMPTY;
+    }
+
+    /**
+     * 全部已注册 server 声明的透传头名并集（config.yaml userHeaders 的 reqHeader: 取值源；
+     * 已 lowercase、已过解析期 denylist）。chat / confirm / AGUI 入口捕获名单的唯一来源。
+     * 必须从本缓存取——禁止每请求重读 config.yaml（文件 IO + YAML 解析才是真开销）。
+     */
+    public Set<String> getForwardHeaderNames() {
+        var names = new LinkedHashSet<String>();
+        for (var rule : userHeaderRules.values()) {
+            for (var metaKey : rule.headers().values()) {
+                if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
+                    names.add(metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length()));
+                }
+            }
+        }
+        return names;
     }
 
     /** 解析 config.yaml 的 startup.required（缺省 false=容错） */
@@ -828,6 +870,7 @@ public class McpToolRegistrar {
     void registerOneForTest(Toolkit toolkit, OafConfig.McpServerConfig mcp) {
         uiMappings.put(mcp.server(), loadUiMapping(mcp));
         toolPermissions.put(mcp.server(), loadToolPermissions(mcp));
+        userHeaderRules.put(mcp.server(), loadUserHeaderRule(mcp));
         registeredWrappers.put(mcp.server(), dummyWrapper(mcp.server()));
     }
 
@@ -949,7 +992,9 @@ public class McpToolRegistrar {
                 }
             }
 
-            // 用户级 header 注入（userHeaders 节）：per-call 按调用方 McpMeta 映射覆盖
+            // 用户级 header 注入（userHeaders 节）+ reqHeader: 透传剥离：HTTP 类传输一律装饰
+            // （常驻化，mcp-chat-header-forward-design §6.4——剥离是全 server 的 _meta 卫生行为，
+            // 不依赖 userHeaders 是否声明；判据是传输类型而非 rule 非空）
             UserHeaderRule userHeaderRule = null;
             if ("stdio".equals(type)) {
                 if (data.containsKey("userHeaders")) {
@@ -958,9 +1003,7 @@ public class McpToolRegistrar {
                 }
             } else {
                 userHeaderRule = parseUserHeaders(data, mcp.server());
-                if (userHeaderRule != null) {
-                    builder.httpRequestCustomizer(McpUserHeaderCustomizer.userHeader());
-                }
+                builder.httpRequestCustomizer(McpUserHeaderCustomizer.userHeader());
             }
 
             // buildAsync：per-call header 依赖 Reactor Context 传播（sync 客户端 block() 桥接会断链）
@@ -969,13 +1012,16 @@ public class McpToolRegistrar {
                 log.warn("MCP client build returned empty for {}", mcp.server());
                 return null;
             }
-            if (userHeaderRule == null) {
+            if ("stdio".equals(type)) {
                 return wrapper;
             }
-            log.info("MCP {} user-scoped headers enabled: {} header(s), on-missing={}",
-                mcp.server(), userHeaderRule.headers().size(),
-                userHeaderRule.denyOnMissing() ? "deny" : "passthrough");
-            return new UserScopedMcpClientWrapper(wrapper, userHeaderRule);
+            if (userHeaderRule != null) {
+                log.info("MCP {} user-scoped headers enabled: {} header(s), on-missing={}",
+                    mcp.server(), userHeaderRule.headers().size(),
+                    userHeaderRule.denyOnMissing() ? "deny" : "passthrough");
+            }
+            return new UserScopedMcpClientWrapper(wrapper,
+                userHeaderRule != null ? userHeaderRule : UserHeaderRule.EMPTY);
         } catch (Exception e) {
             log.error("Failed to build MCP client for {}: {}", mcp.server(), e.getMessage());
             return null;
@@ -1005,13 +1051,35 @@ public class McpToolRegistrar {
         }
         var headers = new LinkedHashMap<String, String>();
         for (var entry : rawHeaders.entrySet()) {
-            if (entry.getKey() instanceof String header && !header.isBlank()
-                && entry.getValue() instanceof String metaKey && !metaKey.isBlank()) {
-                headers.put(header, metaKey);
-            } else {
+            if (!(entry.getKey() instanceof String header) || header.isBlank()
+                || !(entry.getValue() instanceof String metaKey) || metaKey.isBlank()) {
                 log.warn("MCP {}: invalid userHeaders.headers entry ignored: {}={}",
                     serverName, entry.getKey(), entry.getValue());
+                continue;
             }
+            // reqHeader: 取值源（chat 请求透传头，mcp-chat-header-forward-design §5）：
+            // 前缀后段强制 lowercase 归一（保证与捕获键确定匹配）；空名按 invalid entry
+            // 丢弃（恒 deny 的坏映射 + 名单混入空串）；平台 denylist 命中即剔除
+            if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
+                var declared = metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length());
+                if (declared.isBlank()) {
+                    log.warn("MCP {}: invalid userHeaders.headers entry ignored: {}={}",
+                        serverName, header, metaKey);
+                    continue;
+                }
+                var name = declared.toLowerCase();
+                if (!name.equals(declared)) {
+                    log.info("MCP {}: reqHeader value '{}' normalized to lowercase '{}'",
+                        serverName, metaKey, ChatRequestHeaders.META_KEY_PREFIX + name);
+                }
+                if (ChatRequestHeaders.isDenied(name)) {
+                    log.warn("MCP {}: forwarded header '{}' is denied by platform policy, mapping ignored",
+                        serverName, name);
+                    continue;
+                }
+                metaKey = ChatRequestHeaders.META_KEY_PREFIX + name;
+            }
+            headers.put(header, metaKey);
         }
         if (headers.isEmpty()) {
             return null;
