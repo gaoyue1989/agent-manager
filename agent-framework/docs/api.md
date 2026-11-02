@@ -589,6 +589,13 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
 | `model` | String | | 会话模型（`GET /models` 的 id；**缺省=不改变绑定**，传值即绑定本会话并本 turn 生效，`""`/`system`=回到默认模型；未知/禁用返回 error 帧 `unknown_model: xxx`） |
 
+> **请求级透传头（mcp-chat-header-forward-design）**：请求携带的 HTTP header 可按 OAF 包
+> `mcp-configs/{server}/config.yaml` 的 `userHeaders.headers` 声明（取值源
+> `reqHeader:<小写头名>`）透传到该 MCP server 的工具调用 HTTP 请求上。**未声明不捕获**；
+> 平台 denylist（`cookie`/`x-forwarded-*`/`sec-*`/hop-by-hop 等）永不透传；透传值仅走
+> HTTP header 单通道、不进 `_meta`、不落盘不进日志，时效由调用方保证（排队 turn 不重取）。
+> confirm 恢复（`/confirm`、`/confirm-stream`）与 AG-UI run（含 `resume[]`）同规则。
+
 **响应 (SSE):**
 
 ```

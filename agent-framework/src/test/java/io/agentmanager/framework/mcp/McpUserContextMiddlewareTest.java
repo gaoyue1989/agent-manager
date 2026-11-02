@@ -90,6 +90,62 @@ class McpUserContextMiddlewareTest {
         assertNull(context.get(McpMeta.class));
     }
 
+    // ===== 请求级透传头合并（mcp-chat-header-forward-design §6.3）=====
+
+    @Test
+    void shouldMergeForwardHeadersIntoMcpMetaWithReservedPrefix() {
+        var mw = new McpUserContextMiddleware(null);
+        var context = ctx("alice");
+        context.put(ChatRequestHeaders.class, new ChatRequestHeaders(Map.of("authorization", "Bearer t-1")));
+
+        run(mw, context);
+
+        var entries = context.get(McpMeta.class).entries();
+        assertEquals("Bearer t-1", entries.get("reqHeader:authorization"), "透传头以保留命名空间写入");
+        assertEquals("alice", entries.get("userId"), "与 userId 合并共存");
+    }
+
+    @Test
+    void shouldMergeForwardHeadersEvenWhenUserIdBlank() {
+        var mw = new McpUserContextMiddleware(null);
+        var context = ctx("   ");
+        context.put(ChatRequestHeaders.class, new ChatRequestHeaders(Map.of("x-request-id", "r-1")));
+
+        run(mw, context);
+
+        var entries = context.get(McpMeta.class).entries();
+        assertEquals("r-1", entries.get("reqHeader:x-request-id"));
+        assertFalse(entries.containsKey("userId"));
+    }
+
+    @Test
+    void shouldKeepExistingEntriesWhenMergingForwardHeaders() {
+        var mw = new McpUserContextMiddleware(null);
+        var context = ctx("alice");
+        context.put(McpMeta.class, new McpMeta(Map.of("traceId", "t-1")));
+        context.put(ChatRequestHeaders.class, new ChatRequestHeaders(Map.of("x-tenant", "acme")));
+
+        run(mw, context);
+
+        var entries = context.get(McpMeta.class).entries();
+        assertEquals("t-1", entries.get("traceId"), "已有 entries 不能被覆盖");
+        assertEquals("acme", entries.get("reqHeader:x-tenant"));
+    }
+
+    @Test
+    void shouldNoOpWhenForwardHeadersEmpty() {
+        var mw = new McpUserContextMiddleware(null);
+        var context = ctx("alice");
+        context.put(ChatRequestHeaders.class, ChatRequestHeaders.EMPTY);
+
+        run(mw, context);
+
+        // 空透传集不产生 reqHeader 键；userId 正常写入
+        var entries = context.get(McpMeta.class).entries();
+        assertEquals("alice", entries.get("userId"));
+        assertTrue(entries.keySet().stream().noneMatch(k -> k.startsWith("reqHeader:")));
+    }
+
     @Test
     void shouldTolerateNullContext() {
         var mw = new McpUserContextMiddleware(null);

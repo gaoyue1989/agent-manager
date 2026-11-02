@@ -46,6 +46,7 @@
 | [multi-tenancy-improvement-plan.md](multi-tenancy-improvement-plan.md) | 多租户隔离（IsolationScope.USER），已落地 |
 | [tool-system-improvement-plan.md](tool-system-improvement-plan.md) | 工具体系改进（McpToolRegistrar 原生化），已改进 |
 | [mcp-user-scoped-headers-plan.md](mcp-user-scoped-headers-plan.md) | MCP 多租户按用户调用（userHeaders 声明式配置 + `_meta` 双通道、middleware 单点注入、X-User-Token 延后），**已实施**（PR #9，2026-09-21；含 Q1–Q6 评审决议与 Q4 实施期结论：Channel 链路经 session_user 反查真实 userId） |
+| [mcp-chat-header-forward-design.md](mcp-chat-header-forward-design.md) | Chat 请求 Header 按声明透传至 MCP（`userHeaders.headers` 新增 `reqHeader:<头名>` 取值源；SDK 2.0.3 `InboundMessage.withRuntimeContext` in-band 随行 + middleware 单点合并 + wrapper 常驻化 `_meta` 剥离；捕获名单由包配置驱动），**已实施**（2026-11-02；含 SDK 源码核实 R1–R5、被否方案记录与 §12 实施记录；kind 部署冒烟全链路验证通过） |
 | [agentscope-features-enable-plan.md](agentscope-features-enable-plan.md) | AgentScope 2.0 五大 Harness 功能启用，已完成 |
 | [debug-page-refactor-plan.md](debug-page-refactor-plan.md) | Debug 页拆分架构重构，已完成 |
 | [event-system-upgrade-plan.md](event-system-upgrade-plan.md) | 事件体系升级（含逐条作废声明），历史快照 |

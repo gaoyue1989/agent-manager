@@ -151,6 +151,33 @@ test('S5 MCP 只读工具 bench_echo + 用户级 header/_meta 注入', async () 
   expect(last.meta?.userId).toBe(U);
 });
 
+test('S5b chat 请求级透传头注入 MCP（reqHeader: 取值源 + _meta 剥离）', async () => {
+  // mcp-chat-header-forward-design：/threads/chat 携带 Authorization → 本次 turn 的
+  // bench 工具调用按声明原值透传（HTTP header）；透传值不进 _meta（wrapper 出站剥离）
+  const sid = sessionIdFor(`s5b-${uniq()}`);
+  const token = `e2e-tok-${uniq()}`;
+  const stream = chat({
+    message: `[E2E:tool:mcp_echo](s5b)`,
+    userId: U,
+    sessionId: sid,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  await waitTerminal(stream);
+  expect(toolNames(stream.frames)).toContain('bench_echo');
+  expect(stream.terminal?.type).toBe('done');
+
+  type LastCall = { xUserId?: string | null; authorization?: string | null; meta?: Record<string, unknown> | null };
+  const last = await pollUntil<LastCall>(
+    async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
+    v => v.authorization === `Bearer ${token}`,
+  );
+  // 透传头应原值到达下游 MCP；既有 userId 注入不受影响
+  expect(last.authorization).toBe(`Bearer ${token}`);
+  expect(last.xUserId).toBe(U);
+  expect(last.meta?.userId).toBe(U);
+  expect(JSON.stringify(last.meta ?? {})).not.toContain('reqHeader');
+});
+
 test('S6 参数校验负例', async ({ request }) => {
   const res = await request.post('/threads/chat', { data: { userId: U } });
   // 无 message/fileIds：SSE error 帧（200 流内 error）或 400，按实现固化

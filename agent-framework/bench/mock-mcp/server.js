@@ -228,11 +228,12 @@ function writeRpc(req, res, sessionId, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
-  // e2e 观测：记录本次 tools/call 收到的用户级 header 与 _meta（协议字段）
+  // e2e 观测：记录本次 tools/call 收到的用户级 header、请求级透传头与 _meta（协议字段）
   if (payload.method === 'tools/call') {
     lastCall = {
       at: Date.now(),
       xUserId: req.headers['x-user-id'] ?? null,
+      authorization: req.headers['authorization'] ?? null,
       meta: payload.params ? payload.params._meta ?? null : null,
     };
   }
