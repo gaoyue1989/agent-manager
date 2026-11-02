@@ -32,6 +32,7 @@ const MARKER_MAP = {
   'execute': 'execute', 'execute:fail': 'execute-fail',
   'execute:sleep': 'execute-sleep',   // 并发探针（X20）：execute 真实 sleep {{secs}} 秒
   'tool:write:sb': 'sandbox-write', 'tool:read:sb': 'sandbox-read',
+  'sbx-env': 'sandbox-env',   // 沙箱环境变量接口（X-ENV 组）：execute 读 $EXECD_ENVS 注入变量
   'plugin:echo': 'plugin-echo',   // 工具插件冒烟（plugin-smoke.sh）：调插件工具 echo_query
   'proto:lead-spawn': 'proto-lead-spawn',     // 协议多副本 P 组（api-protocol-multi）：lead 调 agent_spawn
   'proto:member-echo': 'proto-member-echo',   // 协议多副本 P 组：member 调 bench_echo 回显

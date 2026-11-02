@@ -561,3 +561,103 @@ test('X20 同用户两会话并发沙箱执行（锁粒度回归）', async () =
     stats.commands.filter(c => c.cmd.includes('sleep')).map(c => c.sandboxId));
   expect(sleepSandboxes.size).toBeGreaterThanOrEqual(2);
 });
+
+// ==================== X-ENV 组：沙箱环境变量接口（docs/sandbox-env-update-design.md） ====================
+// 生效机制 = execd EXECD_ENVS 文件：接口按 userId/sessionId 定位沙箱后直接写文件，
+// execd 每条命令自动重读；断言面 = TOOL_RESULT_TEXT_DELTA（真实 bash stdout）+ 文件内容。
+
+const putSandboxEnv = async (userId: string, sessionId: string, env: Record<string, string>) => {
+  const r = await fetch(`${BASE}/sandbox/env`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId, sessionId, env }),
+  });
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, unknown> };
+};
+
+/** 首轮 plain 对话：创建沙箱并让 harness 持久化沙箱状态（接口定位依赖） */
+async function bootSandbox(uid: string, sid: string) {
+  const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+}
+
+/** PUT 重试：harness 在轮次结束后才持久化沙箱状态，吸收 CI 时序抖动 */
+async function putEnvWithRetry(userId: string, sessionId: string, env: Record<string, string>) {
+  let last = { status: 0, body: {} as Record<string, unknown> };
+  for (let i = 0; i < 5; i++) {
+    last = await putSandboxEnv(userId, sessionId, env);
+    if (last.status !== 404) return last;
+    await new Promise(r => setTimeout(r, 1_000));
+  }
+  return last;
+}
+
+/** 拼接某轮工具结果文本（TOOL_RESULT_TEXT_DELTA = 真实 bash stdout，textOf 只拼 LLM 文本帧） */
+const toolOutputOf = (frames: Array<Record<string, unknown> & { type: string }>) =>
+  frames.filter(f => f.type === 'TOOL_RESULT_TEXT_DELTA')
+    .map(f => String(f.delta ?? '')).join('');
+
+test('X-ENV-1 接口写入 → 后续命令自动加载（execd 每条命令重读）', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv1-${uniq()}`);
+  await bootSandbox(uid, sid);
+
+  const put = await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'one', SANDBOX_E2E_KEEP: 'keep' });
+  expect(put.status, `PUT 失败: ${JSON.stringify(put.body)}`).toBe(200);
+  expect(put.body.applied).toBe('next_exec');
+  expect(put.body.sandboxId).toBeTruthy();
+
+  const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const envText = toolOutputOf(stream.frames);
+  expect(envText).toContain('one');
+  expect(envText).toContain('keep');
+  const preview = stream.frames.find(f => f.type === 'tool_result_preview') as Record<string, unknown> | undefined;
+  expect(String(preview?.preview ?? '')).toContain('one');
+});
+
+test('X-ENV-2 合并更新：未修改的键保持生效', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv2-${uniq()}`);
+  await bootSandbox(uid, sid);
+  expect((await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'one', SANDBOX_E2E_KEEP: 'keep' })).status).toBe(200);
+  expect((await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'two' })).status).toBe(200);
+
+  const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  const envText = toolOutputOf(stream.frames);
+  expect(envText).toContain('two');   // 更新的键生效（追加行覆盖旧行）
+  expect(envText).toContain('keep');  // 未修改的键保持生效
+});
+
+test('X-ENV-3 镜像脚本写入的 PATH 行保留（不整文件覆盖）', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv3-${uniq()}`);
+  await bootSandbox(uid, sid);
+  expect((await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'one' })).status).toBe(200);
+
+  const stats = await sandboxStats();
+  const id = stats.creates[stats.creates.length - 1].id;
+  const dl = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${id}/proxy/44772/files/download?path=${encodeURIComponent('/opt/opensandbox/.env')}`);
+  const envFileText = await dl.text();
+  expect(envFileText).toContain('PATH=/usr/local/bin:/usr/bin:/bin'); // 镜像脚本启动追加行
+  expect(envFileText).toContain("SANDBOX_E2E_TOKEN='one'");           // 接口追加行
+});
+
+test('X-ENV-4 值含单引号 → 400 unsupported_env_value', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv4-${uniq()}`);
+  await bootSandbox(uid, sid);
+  const put = await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: "it's" });
+  expect(put.status).toBe(400);
+  expect(put.body.error).toBe('unsupported_env_value');
+});
+
+test('X-ENV-5 沙箱不存在 → 404（不做兜底）', async () => {
+  const put = await putSandboxEnv(`nobody-${uniq()}`, sessionIdFor(`xenv5-${uniq()}`), { A: '1' });
+  expect(put.status).toBe(404);
+  expect(put.body.error).toBe('sandbox_not_found');
+});
