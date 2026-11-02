@@ -364,8 +364,8 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 | 测试类 | 覆盖 |
 |--------|------|
-| `SandboxEnvFileTest` | 路径发现（非空/空/非法/命令失败 502）；读取 `.json` 不存在返回空；合并覆盖/新增；保留键/键名/64 键/32KiB 校验；值含 `'` → `unsupported_env_value`；`renderEnvFile` 格式（`KEY='value'`，`$`/换行字面量）；**已有 `PATH=...`/`JAVA_HOME=...` 行在写入后原样保留**；同名键追加后后者覆盖；临时文件+`mv -f` 原子发布（mv 失败 502）；`.json` 损坏 fail-soft |
-| `SandboxLocatorTest` | 按配置 scope 生成候选：`USER` → `USER(sessionId)`/`USER(userId)`；`SESSION` → `SESSION(sessionId)`；`AGENT`/`GLOBAL` → 409；状态缺失 → 404；状态有 id 但 connect 失败 → 404/502；两个候选命中取第一个可用 |
+| `SandboxEnvFileTest` | 路径发现（非空/空白/非法/命令失败 502）；`.json` 与原文缺失时从空开始；追加变更键且**保留镜像写入的 `PATH=...`/`JAVA_HOME=...` 行**；同名键追加新行覆盖旧值；无变化跳过发布；`.json` 损坏 fail-soft；校验拒绝：保留键（`EXECD_API_GRACE_SHUTDOWN`/`EXECD_ENVS`）、非法键名、值含 `'` → `unsupported_env_value`、`NUL` 值、单值超 8KiB、超 64 键、合并后总量超 32KiB；发布：临时文件+`mv -f` 原子写入（mv 失败 502）、原文读取失败 502；行格式 `KEY='value'` 由 `renderLines`/`appendLines` 在合并用例内断言（无独立格式测试） |
+| `SandboxLocatorTest` | 按配置 scope 生成候选：`USER` → 先 `USER(sessionId)` 后 `USER(userId)` 回退；`SESSION` → `SESSION(sessionId)`；`AGENT`/`GLOBAL` → 409；全候选未命中 → 404；connect 失败落到下一候选；状态加载 IO 失败 → 500；状态记录无 `sandboxId` 时跳过 |
 | `SandboxEnvControllerTest` | 200/400/404/409/502；字段缺失；响应不含值；`sandbox_disabled` / `unsupported_isolation_scope` / `execd_env_file_unsupported` / `unsupported_env_value`；`LocatedSandbox` 句柄 close |
 | 回归保障 | `doExec` 零改动 → 无需专门测试；既有 `OpenSandboxTest` / `SandboxUserKeyMiddlewareTest` / mock e2e X1-X20 全组回归即覆盖 |
 
