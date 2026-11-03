@@ -47,7 +47,7 @@
 | D4 | **`doExec` 零改动** | 不加 source 前缀、不读文件、不解析 JSON、不调文件 API |
 | D5 | **持久化**：只在容器 `/tmp` 文件 | 不落库、不落盘（宿主侧）；容器销毁即失效 |
 | D6 | **沙箱不存在**：直接报错 | 状态缺失/connect 404 → 404；不做 pending/自动创建 |
-| D7 | **值约束**：不能含单引号 `'` | execd `EXECD_ENVS` 解析不支持单引号转义；命中 400 |
+| D7 | **值格式与约束**：裸 `KEY=value`（不包引号），禁止 `$`、换行/回车、首尾空白、首字符引号 | 已发布 execd 不解析引号（`KEY='v'` → `'v'`）；两版裸值都走 `os.ExpandEnv` 且无转义语法；首字符引号在新版会被当引号值、旧版按字面 → 语义分叉；命中 400 |
 | D8 | **鉴权**：沿用集群内网信任 | 只允许平台后端/可信调用方；不新增 token |
 
 ## 3. 现状核对与关键依据
@@ -68,7 +68,7 @@
 | E0 | execd bootstrap 在 `EXECD_ENVS` 未设置时默认使用 `/opt/opensandbox/.env`，并 `mkdir -p` + `touch` 后 `export EXECD_ENVS` | `components/execd/bootstrap.sh:492-503` |
 | E1 | execd 每条命令执行前都会调用 `UserEnvOverlay`，其中 `loadExtraEnvFromFile()` 重新读取 `EXECD_ENVS` 指向的文件 | `components/execd/pkg/runtime/env.go`：`UserEnvOverlay` 内调用 `loadExtraEnvFromFile` |
 | E2 | 合并顺序：沙箱 binding env `<` `EXECD_ENVS` 文件 `<` 请求 envs；文件可覆盖容器内的同名变量 | 同上 `UserEnvOverlay` 层叠逻辑 |
-| E3 | 文件格式为 `KEY=VALUE`；支持单引号字面量、双引号转义、多行值；**单引号值内不能再含单引号**（无转义规则） | `parseEnvFile`/`parseQuotedEntry` |
+| E3 | 文件格式为 `KEY=VALUE`。**版本分叉**：2026-09-17 commit `017952fc` 起（`release-1.1.0+`/main）支持 dotenv 引号（单引号字面量、双引号转义、多行）；**此前构建（含 server/v0.2.x 发布线）不解析引号**，`KEY='v'` 原样读成 `'v'` | `parseEnvFile`/`parseQuotedEntry`；旧版 `loadExtraEnvFromFile` |
 | E4 | 文件不存在时 execd 每条命令打 WARN 并跳过 | `loadExtraEnvFromFile` 的 `os.ReadFile` 失败分支 |
 | E5 | OpenSandbox Server 1.0.18 没有修改运行中容器 env 的 API | `SandboxesApi` 反编译无 env update/patch；`Sandbox` 类无 env setter |
 
@@ -152,7 +152,8 @@ Content-Type: application/json
 | `env` | 非空对象 | `invalid_env` / 400 |
 | 键名 | `^[A-Za-z_][A-Za-z0-9_]{0,127}$` | `invalid_env_key` / 400 |
 | 值 | 字符串、≤8192 字节、无 `NUL` | `invalid_env_value` / 400 |
-| 值含单引号 | `EXECD_ENVS` 解析不支持，禁止 | `unsupported_env_value` / 400 |
+| 值含 `$` / 首字符引号 | 旧/新版 execd 语义不一致或无法无损表达，禁止 | `unsupported_env_value` / 400 |
+| 值含换行/回车、首尾空白 | 行式格式截断 / TrimSpace 口径不一致，禁止 | `invalid_env_value` / 400 |
 | 合并后键数 | ≤64 | `env_limit_exceeded` / 400 |
 | 合并后总字节 | key+value UTF-8 合计 ≤32 KiB | `env_limit_exceeded` / 400 |
 | 保留键 | 禁止 `EXECD_API_GRACE_SHUTDOWN`、`EXECD_ENVS` | `reserved_env_key` / 400 |
@@ -246,9 +247,9 @@ execd 的 `bootstrap.sh` 在 `EXECD_ENVS` 未设置时默认使用 `/opt/opensan
 ```
 ① 读取已有 <envPath> 原文（files().readFile；404/空 → ""）
 ② 读取 /tmp/.agent-env.json，合并请求 env（同名覆盖）
-③ 校验合并结果（键名/保留键/单引号/64 键/32KiB）
+③ 校验合并结果（键名/保留键/`$`/换行/首尾空白/首字符引号/64 键/32KiB）
 ④ files().write(/tmp/.agent-env.json)                 # 仅记录接口管理的键
-⑤ 生成变更行：每行 KEY='value'
+⑤ 生成变更行：每行裸 `KEY=value`（不包引号，跨 execd 版本兼容）
 ⑥ 追加到原文末尾（保证原文件以换行结尾）
 ⑦ 原子发布：
    files().write(<envPath>.tmp.<uuid>)                 # 原文 + 新行
@@ -260,7 +261,7 @@ execd 的 `bootstrap.sh` 在 `EXECD_ENVS` 未设置时默认使用 `/opt/opensan
 - 同名键重复出现时，execd 顺序解析、**后面的行覆盖前面的行**，所以更新一个键 = 追加一行新值；未更新的键不受影响；
 - 文件会随 PUT 次数增长；沙箱生命周期有限（默认 60 分钟），增长可接受；后续可做压缩；
 - 写入前完成全部校验，失败不产生部分写入；
-- 值用单引号包裹，值内禁止单引号（D7）；`$`、反引号、换行在单引号内按字面量处理；
+- 值按裸 `KEY=value` 渲染（不包裹引号）：旧版 execd 不剥引号、新版支持 dotenv 引号，裸值在两者下语义一致；值内禁止 `$`（两版裸值都做 `os.ExpandEnv` 且无转义语法）、换行/回车（行式格式会截断）、首尾空白（两版 TrimSpace 口径不一）、首字符引号（新版按引号值解析、旧版按字面保留）；
 - 通过临时文件 + `mv -f` 原子替换：execd 读取时要么看到旧文件、要么看到新文件；
 - `.json` 只被接口读取，可直接覆盖；生效文件写失败返回 500，调用方重试（合并幂等）；
 - `mode(600)` 降低容器内其他进程读取面（Agent 本身仍可通过命令读取，属功能语义）。
@@ -340,7 +341,7 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 - 值只写到沙箱容器内的 `EXECD_ENVS` 文件，宿主侧不落盘、不落库、不打日志、不出现在响应；
 - 沙箱内 Agent 及其命令本来就能读取注入的 env——这是功能语义；不要把“仅平台可见”的凭据放进来；
 - 保留键禁止覆盖，防止改坏 execd 自身行为；
-- 键名严格正则，值禁止 NUL；值禁止单引号；单引号包裹后 `$`/反引号/换行均按字面量处理，不经过 shell 拼接，无命令注入面；
+- 键名严格正则，值禁止 NUL；裸值渲染下禁止 `$`（`os.ExpandEnv` 展开且无转义）、换行/回车、首尾空白、首字符引号；值内单引号（非首字符）按字面保留；不经过 shell 拼接，无命令注入面；
 - 建议平台在把用户消息发给模型前剥离敏感字段，仅通过本接口下发，避免敏感值进入 Prompt/历史。
 
 ### 8.3 生命周期
@@ -364,7 +365,7 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 | 测试类 | 覆盖 |
 |--------|------|
-| `SandboxEnvFileTest` | 路径发现（非空/空白/非法/命令失败 502）；`.json` 与原文缺失时从空开始；追加变更键且**保留镜像写入的 `PATH=...`/`JAVA_HOME=...` 行**；同名键追加新行覆盖旧值；无变化跳过发布；`.json` 损坏 fail-soft；校验拒绝：保留键（`EXECD_API_GRACE_SHUTDOWN`/`EXECD_ENVS`）、非法键名、值含 `'` → `unsupported_env_value`、`NUL` 值、单值超 8KiB、超 64 键、合并后总量超 32KiB；发布：临时文件+`mv -f` 原子写入（mv 失败 502）、原文读取失败 502；行格式 `KEY='value'` 由 `renderLines`/`appendLines` 在合并用例内断言（无独立格式测试） |
+| `SandboxEnvFileTest` | 路径发现（非空/空白/非法/命令失败 502）；`.json` 与原文缺失时从空开始；追加变更键且**保留镜像写入的 `PATH=...`/`JAVA_HOME=...` 行**；同名键追加新行覆盖旧值；无变化跳过发布；`.json` 损坏 fail-soft；校验拒绝：保留键（`EXECD_API_GRACE_SHUTDOWN`/`EXECD_ENVS`）、非法键名、值含 `$`/换行/回车/首尾空白/首字符引号、`NUL` 值、单值超 8KiB、超 64 键、合并后总量超 32KiB；值内单引号（非首字符）允许；发布：临时文件+`mv -f` 原子写入（mv 失败 502）、原文读取失败 502；行格式为裸 `KEY=value`（跨 execd 版本兼容）由 `renderLines`/`appendLines` 在合并用例内断言 |
 | `SandboxLocatorTest` | 按配置 scope 生成候选：`USER` → 先 `USER(sessionId)` 后 `USER(userId)` 回退；`SESSION` → `SESSION(sessionId)`；`AGENT`/`GLOBAL` → 409；全候选未命中 → 404；connect 失败落到下一候选；状态加载 IO 失败 → 500；状态记录无 `sandboxId` 时跳过 |
 | `SandboxEnvControllerTest` | 200/400/404/409/502；字段缺失；响应不含值；`sandbox_disabled` / `unsupported_isolation_scope` / `execd_env_file_unsupported` / `unsupported_env_value`；`LocatedSandbox` 句柄 close |
 | 回归保障 | `doExec` 零改动 → 无需专门测试；既有 `OpenSandboxTest` / `SandboxUserKeyMiddlewareTest` / mock e2e X1-X20 全组回归即覆盖 |
@@ -373,7 +374,7 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 1. 扩展 `e2e/mock/sandbox-server.mjs`：
    - `POST /v1/sandboxes` 记录 create env；未提供 `EXECD_ENVS` 时按 bootstrap 规则默认 `/opt/opensandbox/.env` 并 `touch`（模拟 E0）；
-   - `runCommand` 每次执行前读取 `env.EXECD_ENVS` 指向的文件（映射到 `sb.root/tmp` 或 `sb.root/opt/opensandbox/.env`），按 `KEY='value'` 解析并合并进 `spawn` 的 env，模拟 execd `UserEnvOverlay`；
+   - `runCommand` 每次执行前读取 `env.EXECD_ENVS` 指向的文件（映射到 `sb.root/tmp` 或 `sb.root/opt/opensandbox/.env`），按**旧版 execd** 语义解析（`SplitN("=",2)` + `os.ExpandEnv`、**不解析引号**）并合并进 `spawn` 的 env，模拟已发布 execd 的 `UserEnvOverlay`——若接口回退到引号包裹，X-ENV 字节断言立即失败；
    - `files/upload`/`files/download` 已支持 absolute 路径映射，可承载 `.json`/`EXECD_ENVS` 文件写入与读取；
    - `stats.commands` 记录 env 键数量（不记录值）。
 2. 新增 X 组用例：
@@ -409,7 +410,7 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 - [ ] 本次 PUT 未出现的键（之前接口设置/镜像写入/容器原有）保持原值、继续生效；
 - [ ] 下一条命令由 execd 自动加载；
 - [ ] `doExec` 无改动（命令串与今天一致）；无每命令文件读取/解析/API 调用；`OpenSandbox` 构造器/`doSetupWorkspace` 无改动；
-- [ ] 值含 `'` → 400；保留键/非法键/超限校验生效，失败无部分写入；
+- [ ] 值含 `$`/换行/首尾空白/首字符引号 → 400；值内单引号（非首字符）允许；保留键/非法键/超限校验生效，失败无部分写入；
 - [ ] 存量沙箱 `$EXECD_ENVS` 为空 → 409 `execd_env_file_unsupported`；
 - [ ] 跨 Pod 可写/可读（状态 MySQL + 文件在容器）；
 - [ ] 日志和响应不出现 env 值；

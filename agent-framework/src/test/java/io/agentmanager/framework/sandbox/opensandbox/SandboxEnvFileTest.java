@@ -30,8 +30,9 @@ import com.alibaba.opensandbox.sandbox.domain.services.Commands;
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem;
 
 /**
- * {@link SandboxEnvFile} 单元测试：EXECD_ENVS 路径发现、合并式 upsert、值约束
- * （禁单引号/保留键/64 键/32KiB）、原子发布与「保留镜像写入的 PATH 等行」。
+ * {@link SandboxEnvFile} 单元测试：EXECD_ENVS 路径发现、合并式 upsert、跨 execd 版本兼容的
+ * 裸值格式（不包引号）、值约束（禁 $ / 换行 / 首尾空白 / 首字符引号 / 保留键 / 64 键 / 32KiB）、
+ * 原子发布与「保留镜像写入的 PATH 等行」。
  */
 class SandboxEnvFileTest {
 
@@ -173,7 +174,7 @@ class SandboxEnvFileTest {
         String content = textOf(publish);
         assertTrue(content.contains("PATH=/usr/local/bin:/usr/bin:/bin\n"), "镜像写入的 PATH 行必须保留");
         assertTrue(content.contains("JAVA_HOME=/usr/lib/jvm\n"), "镜像写入的 JAVA_HOME 行必须保留");
-        assertTrue(content.endsWith("B='2'\n"));
+        assertTrue(content.endsWith("B=2\n"), "裸 KEY=value（不包引号）");
         // mv 命令
         verify(commands).run("mv -f '" + publish.getPath() + "' '" + ENV_PATH + "'");
     }
@@ -182,16 +183,16 @@ class SandboxEnvFileTest {
     void mergeShouldUpdateExistingKeyByAppend() throws Exception {
         commandReturns("");
         jsonSidecarReturns("{\"A\":\"old\",\"B\":\"keep\"}");
-        originalEnvReturns("A='old'\nB='keep'\n");
+        originalEnvReturns("A=old\nB=keep\n");
 
         SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("A", "new"));
 
         assertEquals(List.of("A"), result.updatedKeys());
         String content = textOf(writeOf(writtenBatches().get(1)));
         // 原有行保留，新行追加在末尾（execd 顺序解析、后面的行覆盖前面的行）
-        assertTrue(content.contains("A='old'\n"));
-        assertTrue(content.contains("B='keep'\n"));
-        assertTrue(content.endsWith("A='new'\n"));
+        assertTrue(content.contains("A=old\n"));
+        assertTrue(content.contains("B=keep\n"));
+        assertTrue(content.endsWith("A=new\n"));
     }
 
     @Test
@@ -204,7 +205,7 @@ class SandboxEnvFileTest {
 
         assertEquals(Map.of("FOO", "bar"), result.managed());
         String content = textOf(writeOf(writtenBatches().get(1)));
-        assertEquals("FOO='bar'\n", content);
+        assertEquals("FOO=bar\n", content);
     }
 
     @Test
@@ -219,17 +220,60 @@ class SandboxEnvFileTest {
         assertEquals(Map.of("FOO", "bar"), result.managed());
         String content = textOf(writeOf(writtenBatches().get(1)));
         assertTrue(content.contains("PATH=/bin\n"));
-        assertTrue(content.endsWith("FOO='bar'\n"));
+        assertTrue(content.endsWith("FOO=bar\n"));
     }
 
     // ---------- 校验 ----------
 
     @Test
-    void mergeShouldRejectSingleQuoteValue() {
+    void mergeShouldAllowEmbeddedSingleQuote() throws Exception {
+        // 裸值格式下，值内单引号（非首字符）旧/新 execd 都按字面保留
+        commandReturns("");
+        jsonSidecarMissing();
+        originalEnvMissing();
+        envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("PASS", "it's"));
+        String content = textOf(writeOf(writtenBatches().get(1)));
+        assertEquals("PASS=it's\n", content);
+    }
+
+    @Test
+    void mergeShouldRejectDollarValue() {
+        // 旧/新 execd 都对裸值做 os.ExpandEnv，且无转义语法 → 无法无损表达
         SandboxEnvException e = assertThrows(SandboxEnvException.class,
-            () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("PASS", "it's")));
+            () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("PASS", "sk-$HOME")));
         assertEquals("unsupported_env_value", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
+        verify(files, never()).write(any());
+    }
+
+    @Test
+    void mergeShouldRejectNewlineAndCarriageReturn() {
+        for (String value : List.of("a\nb", "a\rb")) {
+            SandboxEnvException e = assertThrows(SandboxEnvException.class,
+                () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("OK", value)));
+            assertEquals("invalid_env_value", e.getErrorCode());
+        }
+        verify(files, never()).write(any());
+    }
+
+    @Test
+    void mergeShouldRejectLeadingOrTrailingWhitespace() {
+        for (String value : List.of(" v", "v ")) {
+            SandboxEnvException e = assertThrows(SandboxEnvException.class,
+                () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("OK", value)));
+            assertEquals("invalid_env_value", e.getErrorCode());
+        }
+        verify(files, never()).write(any());
+    }
+
+    @Test
+    void mergeShouldRejectQuoteLeadingValue() {
+        // 新版 execd 以首个字符判定引号值（剥引号），旧版保留字面 → 语义分叉
+        for (String value : List.of("'abc'", "\"abc\"")) {
+            SandboxEnvException e = assertThrows(SandboxEnvException.class,
+                () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("OK", value)));
+            assertEquals("unsupported_env_value", e.getErrorCode());
+        }
         verify(files, never()).write(any());
     }
 
@@ -295,7 +339,7 @@ class SandboxEnvFileTest {
     void mergeShouldSkipPublishWhenNothingChanged() throws Exception {
         commandReturns("");
         jsonSidecarReturns("{\"A\":\"1\"}");
-        originalEnvReturns("A='1'\n");
+        originalEnvReturns("A=1\n");
 
         SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("A", "1"));
 
