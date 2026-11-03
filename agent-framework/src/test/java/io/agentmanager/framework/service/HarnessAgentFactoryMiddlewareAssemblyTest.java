@@ -232,6 +232,104 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
         assertEquals(30, cfg.getTriggerMessages(), "消息数阈值保持并存（二者任一命中即压缩）");
     }
 
+    /**
+     * 停止链路装配守卫（turn-stop-design §4）：{@link TurnInterruptMiddleware} 是把停止信号
+     * 登记进 {@link TurnControlRegistry} 的唯一入口（registry.register 唯一调用点），缺失即
+     * stop 静默 no-op（端点仍返 202，watcher 轮询落空）——「类存在但从未注册」的断链形态
+     * 本仓库已发生过一次（见类注释 RemoteSpawnCaptureMiddleware 先例）。
+     *
+     * <p>接线断言为什么不可省：build() 注册点对 turnControlRegistry 字段无 null 守卫（字段为
+     * null 时中间件照样进链，运行期 onAgent 判空跳过），仅断言「链上存在实例」防不住接线退化；
+     * registry 字段是 @Autowired(required=false) 字段注入（非构造参数），单测直接 new 时恒 null，
+     * 须反射置入后再 build。
+     */
+    @Test
+    void buildShouldRegisterTurnInterruptMiddlewareWiredToInjectedRegistry() throws Exception {
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("turn-interrupt-assembly"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf))
+            .thenReturn(new PermissionRuleResult(
+                io.agentscope.core.permission.PermissionMode.DEFAULT,
+                java.util.Map.of(), java.util.Set.of()));
+
+        var store = mock(DistributedStore.class);
+        when(store.baseStore())
+            .thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig(
+                "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "agent_manager_test"),
+            java.nio.file.Files.createTempDirectory("turn-interrupt-config").toString(),
+            "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.FileConfig(true, 20, 20,
+                "image/*,text/plain,text/markdown,text/csv,application/pdf",
+                5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+            AgentManagerProperties.HarnessConfig.defaults(),
+            AgentManagerProperties.AgentProtocolSettings.defaults());
+
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
+            mock(RemoteConfirmBridge.class), null, null);
+        // turnControlRegistry 是字段注入（@Autowired(required=false)），单测直接 new 恒 null；
+        // 反射置入真实 registry 后 build，才能断言接线（中间件持有的就是注入实例）
+        var registry = new TurnControlRegistry();
+        Field factoryRegistryField = HarnessAgentFactory.class.getDeclaredField("turnControlRegistry");
+        factoryRegistryField.setAccessible(true);
+        factoryRegistryField.set(factory, registry);
+
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        var middlewares = middlewaresOf(agent);
+        var turnInterrupt = middlewares.stream()
+            .filter(TurnInterruptMiddleware.class::isInstance)
+            .map(TurnInterruptMiddleware.class::cast)
+            .findFirst().orElse(null);
+        assertNotNull(turnInterrupt,
+            "TurnInterruptMiddleware 必须注册进 builder 链（停止信号登记唯一入口，"
+                + "缺失即 POST /threads/{sid}/stop 静默 no-op）");
+
+        // 核心接线断言：中间件持有的必须是注入的 registry 实例（注册点无 null 守卫，
+        // 「链上存在实例」不接线也能绿——assertSame 才防得住退化）
+        Field registryField = TurnInterruptMiddleware.class.getDeclaredField("registry");
+        registryField.setAccessible(true);
+        assertSame(registry, registryField.get(turnInterrupt),
+            "TurnInterruptMiddleware 必须接线到注入的 TurnControlRegistry（断链即 watcher 轮询落空）");
+
+        // 同链 sessionKeyResolver 共享（build() 内部 new 的同一实例）：turn 级 memo 共享不变量——
+        // 若 TurnInterruptMiddleware 拿到独立 resolver，Channel 链路键改写解析分叉会误杀其他会话
+        Field skrField = TurnInterruptMiddleware.class.getDeclaredField("sessionKeyResolver");
+        skrField.setAccessible(true);
+        var skrInTurnInterrupt = skrField.get(turnInterrupt);
+        assertNotNull(skrInTurnInterrupt, "sessionKeyResolver 必须接线（缺省回退 ctx.getSessionId() 误杀）");
+        var capture = middlewares.stream()
+            .filter(RemoteSpawnCaptureMiddleware.class::isInstance)
+            .map(RemoteSpawnCaptureMiddleware.class::cast)
+            .findFirst().orElse(null);
+        if (capture != null) {
+            Field captureSkrField = RemoteSpawnCaptureMiddleware.class.getDeclaredField("sessionKeyResolver");
+            captureSkrField.setAccessible(true);
+            assertSame(skrInTurnInterrupt, captureSkrField.get(capture),
+                "同链中间件必须共享同一 SessionKeyResolver 实例（turn 级 memo 共享）");
+        }
+
+        // order=3：最外层先于任何可能短路的中间件完成登记
+        assertEquals(3, turnInterrupt.order());
+    }
+
     @Test
     void skillFilterMiddlewareMustComeBeforeDisabledMiddleware() throws Exception {
         // session-skill-list-design §4 顺序约束：本轮白名单先立，禁用中间件再以

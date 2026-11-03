@@ -806,6 +806,75 @@ test('A7 llm-calls 未知会话恒空（查询契约）', async ({ request }) =>
   expect(body.calls).toEqual([]);
 });
 
+// ---------- SKL-L 组：会话级技能白名单收敛进模型提示（59dcbf7 #212，session-skill-list-design §3） ----------
+// 此前该契约只有脱离门禁的手工脚本（e2e/session-skills-e2e.sh，需 kind 集群 + 真实 LLM）验证过，
+// CI 内零守卫。观测通道与 A5 同源：GET /threads/{sid}/llm-calls 的 request.messages 里
+// 框架真实生成的 SYSTEM 消息（= 模型实际收到的提示词）。CI 环境模型侧技能全集只有
+// demo-skill 一个（fixtures/agent-config/skills/），「白名单轮 ↔ 恢复轮」互为镜像不可区分，
+// 故用「[] 收敛轮 ↔ 缺省恢复轮」承载收敛/恢复契约（SkillFilterMiddleware 语义：
+// metadata 无键 = 全部；显式空数组 = 无技能；仅本轮生效）。
+// 定位方式：每轮 user 消息带唯一 token（A6 同款），按 token 找到该轮调用、取其 SYSTEM 内容，
+// 不受背景调用（记忆提取等）插入顺序影响。
+
+type SklLlmCall = {
+  call_id: string;
+  request: { messages: Array<{ role: string; content: string }> };
+};
+
+/** 按本轮 user token 定位调用并取 SYSTEM 提示词全文（未命中在 pollUntil 超时里带观测值） */
+async function systemContentOfRound(
+  request: APIRequestContext, sid: string, token: string,
+): Promise<string> {
+  const body = await pollUntil(
+    async () => (await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': U } })).json() as { calls: SklLlmCall[] },
+    b => (b.calls ?? []).some(c => c.request?.messages?.some(m => m.role === 'USER' && m.content.includes(token))),
+  );
+  const call = body.calls.find(c => c.request?.messages?.some(m => m.role === 'USER' && m.content.includes(token)));
+  const sys = call!.request.messages.find(m => m.role === 'SYSTEM');
+  expect(sys, `token=${token} 的调用缺 SYSTEM 消息`).toBeTruthy();
+  return String(sys!.content ?? '');
+}
+
+test('SKL-L1 会话级技能白名单收敛进 <available_skills>，下一轮恢复全部', async ({ request }) => {
+  const sid = sessionIdFor(`skl1-${uniq()}`);
+  const tokenA = `SKL1-A-${uniq()}`;
+  const tokenB = `SKL1-B-${uniq()}`;
+  const tokenC = `SKL1-C-${uniq()}`;
+  const skillBlockOf = (sys: string) => /<available_skills>[\s\S]*?<\/available_skills>/.exec(sys)?.[0] ?? '';
+
+  // 轮1 缺省（不传 skills）→ 全集基线：模型侧 <available_skills> 含 demo-skill
+  const r1 = chat({ message: `[E2E:plain] ${tokenA}`, userId: U, sessionId: sid });
+  await waitTerminal(r1);
+  expect(r1.terminal?.type).toBe('done');
+  const sys1 = await systemContentOfRound(request, sid, tokenA);
+  expect(skillBlockOf(sys1), '缺省轮 <available_skills> 块缺失').toContain('<available_skills>');
+  expect(skillBlockOf(sys1)).toContain('demo-skill');
+
+  // 轮2 显式空数组 → 无技能：<available_skills> 不再含 demo-skill（本轮收敛）
+  const r2 = chat({ message: `[E2E:plain] ${tokenB}`, userId: U, sessionId: sid, skills: [] });
+  await waitTerminal(r2);
+  expect(r2.terminal?.type).toBe('done');
+  const sys2 = await systemContentOfRound(request, sid, tokenB);
+  expect(skillBlockOf(sys2), 'skills:[] 轮仍向模型暴露 demo-skill（白名单未收敛）').not.toContain('demo-skill');
+
+  // 轮3 缺省 → 恢复全部：轮2 收敛未跨轮（「仅本轮生效、下一轮恢复全部」核心契约）
+  const r3 = chat({ message: `[E2E:plain] ${tokenC}`, userId: U, sessionId: sid });
+  await waitTerminal(r3);
+  expect(r3.terminal?.type).toBe('done');
+  const sys3 = await systemContentOfRound(request, sid, tokenC);
+  expect(skillBlockOf(sys3), '缺省恢复轮未恢复 demo-skill（收敛跨轮泄漏）').toContain('demo-skill');
+});
+
+// SKL-L2（负例·无 LLM，MOD 组风格）：/agui 默认关闭（AGENT_AGUI_ENABLED 缺省 false，
+// core 组实例不注入该 flag）——装配态守卫在 AguiConfigTest（ApplicationContextRunner），
+// 此处钉黑盒面：未开启实例的 /agui/runs 不得被服务（404/500，与 T8 未启用协议 /tasks
+// 同款宽容词表——关闭态路径未映射，GlobalExceptionHandler catch-all 吞 NoResourceFound
+// 呈 500；装配守卫回归时控制器复活，这里拿到 2xx/SSE 即红），挡「新增无守卫 agui 端点」类回归。
+test('SKL-L2 /agui 未开启实例不被服务（缺省关闭装配）', async ({ request }) => {
+  const res = await request.post('/agui/runs', { data: { threadId: 't', messages: [] } });
+  expect([404, 500]).toContain(res.status());
+});
+
 // ---------- FW 组：/threads slot 双形态匹配 + Flyway（76e0e74/512a6b3，e2e-ci-plan §5.10） ----------
 // 契约权威：ThreadController#AGENT_STATE_JOIN（SUBSTRING_INDEX 冒号前/后段双向匹配，
 // ThreadController.java:58-60）与 db/migration/V6__backfill_session_user_from_agent_state.sql。
