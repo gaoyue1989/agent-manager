@@ -1,7 +1,7 @@
 # OAF 跨集群导出发布 · 文件级实施契约
 
 上游设计：[../design/cross-cluster-export-design.md](../design/cross-cluster-export-design.md)（下文引用为「设计 §N」）
-日期：2026-10-29　状态：契约定稿（未实施）
+日期：2026-10-29　状态：契约定稿（2026-10-29）；已实施（2026-10-30 PR #209，偏差记录见 §9）
 
 本文档把设计拆解为 5 个可独立开工/验收的施工单元，给出**到文件级**的改动清单与签名契约。所有签名/路径均已对照当前代码核实（引用 `file:line`）；与设计的偏差集中记录于 §9。
 
@@ -262,6 +262,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 | `GET /api/v1/services/:id/export/package/marks` | `GET .../export/package/marks` | export.go | `Core.ListExportMarks(svcID)` | 成员 |
 | `GET /api/v1/services/:id/export/preview` | `GET .../export/preview` | export.go | `Core.ExportPreview(...)`：源包结构与版本链、现 env（敏感掩码）、空间默认值（掩码）、镜像白名单、派生键预览 | 成员 |
 | `POST /api/v1/services/:id/export` | `POST .../export` | export.go | `Core.CreateExportOrder(...)` | 成员 |
+| —（设计 §9 无此端点，#216 新增） | `GET .../export/orders` | export.go | `Core.ListServiceExportOrders(wsID, svcID)`：id 倒序，不含 values/manifest 明文（marker 自请求快照解析） | 成员（服务须属本空间；导出记录区） |
 
 `:ws` 取值沿用 console 约定（`me` / 数字 id / slug，identity.go:150-181）。无 body 的 POST（打标记）沿用 republish 的可选 body 语义（router.go:247-253：ContentLength > 0 才 ShouldBindJSON）。
 
@@ -476,6 +477,7 @@ export interface ExportPreview { service: {...}; package: {...}; marks: ExportMa
   baseImageWhitelist: ImageOption[]; derivedPreview: { checkpointDB: string; redisPrefix: string }; lockedKeys: string[] }
 export interface ExportMark { marker: string; checksum: string; packageVersion: string; fileCount: number; status: string; createdAt: string }
 export interface ExportOrderView { id: number; status: string; oafImageRef: string; oafImageDigest: string; error: string; itsmTicketId: string; createdAt: string; updatedAt: string }
+export interface ExportOrderListItem { id: number; orderNo: string; status: string; marker: string; baseImage?: string; oafImageRef?: string; oafImageDigest?: string; itsmTicketId?: string; error?: string; createdBy: string; createdAt: string; updatedAt: string }
 
 // api 对象内：
 workspaceConfig: {
@@ -488,6 +490,7 @@ exportOrders: {
   saveFile: (ws, id, body) => request(`/console/workspaces/${ws}/agents/${id}/export/package/file`, { method: "PUT", body: JSON.stringify(body) }),
   mark: (ws, id) => request<ExportMark>(`/console/workspaces/${ws}/agents/${id}/export/package/mark`, { method: "POST" }),
   marks: (ws, id) => request<ExportMark[]>(`/console/workspaces/${ws}/agents/${id}/export/package/marks`),
+  list: (ws, id) => request<ExportOrderListItem[]>(`/console/workspaces/${ws}/agents/${id}/export/orders`),
   create: (ws, id, body) => request<ExportOrderView>(`/console/workspaces/${ws}/agents/${id}/export`, { method: "POST", body: JSON.stringify(body) }),
   get: (orderId) => request<ExportOrderView>(`/console/exports/${orderId}`),
   downloadValues: (orderId) => `${BASE}/console/exports/${orderId}/values.yaml`,     // <a href> 直下：JWT 走 oaf_session cookie（jwt.go:14 httpOnly），与 downloadPackage 同模式（api.ts downloadPackage）
