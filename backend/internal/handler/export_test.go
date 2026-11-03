@@ -209,6 +209,36 @@ func TestExportRoutesAndMask(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("illegal transition: %d (want 400)", w.Code)
 	}
+	// 导出单列表（issue #216 导出记录区）：member 可见、marker 从快照解析、状态跟随推进、
+	// EXP 单号生成；values/manifest 大列与敏感值不回显（掩码红线同详情）
+	w, out = authJSON(t, r, http.MethodGet, svcPath+"/orders", memberTok, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("orders list: %d %s", w.Code, w.Body.String())
+	}
+	listRaw := w.Body.String()
+	for _, leak := range []string{"e2e-token-123", "prod-pw", "values_yaml", "valuesYaml"} {
+		if strings.Contains(listRaw, leak) {
+			t.Fatalf("orders list leaks %q: %s", leak, listRaw)
+		}
+	}
+	rows, ok := out["data"].([]interface{})
+	if !ok || len(rows) != 1 {
+		t.Fatalf("orders list shape wrong: %s", listRaw)
+	}
+	row := rows[0].(map[string]interface{})
+	if row["marker"] != marker {
+		t.Fatalf("orders list marker = %v", row["marker"])
+	}
+	if row["status"] != "approving" || row["itsmTicketId"] != "ITSM-1" {
+		t.Fatalf("orders list status/itsm = %v/%v", row["status"], row["itsmTicketId"])
+	}
+	if !strings.HasPrefix(row["orderNo"].(string), "EXP-") || row["createdBy"] != "exp-member" {
+		t.Fatalf("orders list orderNo/createdBy = %v/%v", row["orderNo"], row["createdBy"])
+	}
+	// 匿名 → 401（workspace 作用域组同鉴权分层）
+	if w, _ = authJSON(t, r, http.MethodGet, svcPath+"/orders", "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous orders list: %d", w.Code)
+	}
 }
 
 // TestExportOrderScopeForeign 导出单归属：非本空间成员不可见（service 层 404 裁决，

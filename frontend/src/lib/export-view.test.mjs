@@ -4,7 +4,7 @@ import {
   isLockedRow, isReadonlyPkgPath, classifyEnvLayer, validateEnvKey, validateEnvValue,
   validateEnvRowCount, markerIssue, parseImageWhitelist, routingSuffixIssue,
   buildRuntimeDefaultPayload, groupFieldsByCategory, RUNTIME_DEFAULT_FIELDS, WS_CONFIG_TABS, MAX_ENV_KEYS,
-  RESERVED_ENV_KEYS, EXPORT_META_ENV_KEYS,
+  RESERVED_ENV_KEYS, EXPORT_META_ENV_KEYS, prefillEnvRows, validateEnvRows, buildPackageTree, ADVANCE_NEXT,
 } from "./export-view.ts";
 
 test("isLockedRow：命中运行时默认键锁定，空列表不锁", () => {
@@ -131,4 +131,94 @@ test("RUNTIME_DEFAULT_FIELDS：24 模板键 + 8 导出键 = 32 键，键无重�
   // 每键恰属一个配置页页签
   const tabCats = WS_CONFIG_TABS.flatMap((t) => t.categories);
   for (const f of RUNTIME_DEFAULT_FIELDS) assert.equal(tabCats.filter((c) => c === f.category).length, 1, f.envKey);
+});
+
+test("prefillEnvRows：过滤 L3 保留/派生键，值留空占位，敏感标注透传", () => {
+  const rows = prefillEnvRows({
+    MCP_E2E_TOKEN: { hasValue: true, sensitive: false },
+    LLM_API_KEY: { hasValue: true, sensitive: true },
+    CHECKPOINT_JDBC_URL: { hasValue: true },                 // L3 派生键 → 不预填（预填后必被 validateEnvKey 拦截，阻塞首次导出）
+    AGENT_REDIS_PREFIX: { hasValue: true },                  // L3 派生键
+    SERVER_PORT: { hasValue: true },                         // 平台保留键
+    AGENT_CONFIG_DIR: { hasValue: true },                    // 平台保留键
+  });
+  assert.deepEqual(rows, [
+    { key: "MCP_E2E_TOKEN", value: "", secret: false },
+    { key: "LLM_API_KEY", value: "", secret: true },
+  ]);
+  // 全部保留键也 → 空列表；null/undefined 容错
+  assert.deepEqual(prefillEnvRows({ CHECKPOINT_JDBC_URL: { hasValue: true } }), []);
+  assert.deepEqual(prefillEnvRows(null), []);
+  assert.deepEqual(prefillEnvRows(undefined), []);
+  // 预填行在空值下必须能通过 validateEnvRows（否则阻塞首次导出，issue #215 回归点）
+  const errs = validateEnvRows(rows, []);
+  for (const k of Object.keys(errs)) assert.fail(`预填行 ${k} 不应有错: ${errs[k]}`);
+});
+
+test("validateEnvRows：空占位行不报错，已填行跑键/值校验，锁定行跳过", () => {
+  const locked = ["LLM_BASE_URL"];
+  const rows = [
+    { key: "MCP_E2E_TOKEN", value: "" },          // 占位行（服务现 env）→ 不报错
+    { key: "LLM_API_KEY", value: "   " },         // 纯空白 = 占位 → 不报错
+    { key: "LLM_BASE_URL", value: "https://x" },  // 锁定行 → 锁标呈现，不报错
+    { key: "1BAD", value: "v" },                  // 已填 + 格式非法 → 报错
+    { key: "CHECKPOINT_JDBC_URL", value: "jdbc:x" }, // 已填 + 保留键 → 报错
+    { key: "REGISTRY_ADDRESS", value: "1.2.3.4:5" }, // 已填 + 导出参数键 → 报错
+    { key: "BIG", value: "x".repeat(32 * 1024 + 1) }, // 已填 + 超 32KB → 报错
+    { key: "DUP", value: "a" },                   // 已填 + 重复键 → 报错
+    { key: "DUP", value: "b" },
+  ];
+  const errs = validateEnvRows(rows, locked);
+  assert.deepEqual(Object.keys(errs).map(Number).sort((a, b) => a - b), [3, 4, 5, 6, 7, 8]);
+  assert.match(errs[3], /格式非法/);
+  assert.match(errs[4], /保留/);
+  assert.match(errs[5], /导出参数键/);
+  assert.match(errs[6], /32KB/);
+  assert.match(errs[7], /重复/);
+  assert.match(errs[8], /重复/);
+  // 全占位 + 锁定行 → 零错误（首次导出不阻塞）
+  assert.deepEqual(validateEnvRows([{ key: "MCP_E2E_TOKEN", value: "" }, { key: "LLM_BASE_URL", value: "" }], locked), {});
+});
+
+test("ADVANCE_NEXT：前向链逐段可达（built→…→deployed），终态无下一跳", () => {
+  assert.deepEqual(ADVANCE_NEXT, { built: "approving", approving: "approved", approved: "deploying", deploying: "deployed" });
+  // 从 built 沿链走 4 步到 deployed，链上无环无缺口
+  let cur = "built";
+  for (let i = 0; i < 4; i++) cur = ADVANCE_NEXT[cur];
+  assert.equal(cur, "deployed");
+  assert.equal(ADVANCE_NEXT.deployed, undefined);
+  assert.equal(ADVANCE_NEXT.failed, undefined);
+});
+
+test("buildPackageTree：拍平路径构建嵌套树，目录在前文件在后，readOnly/size 透传", () => {
+  const tree = buildPackageTree([
+    { path: "skills/weather/SKILL.md", size: 3, readOnly: true },
+    { path: "config.yaml", size: 1 },
+    { path: "AGENTS.md", size: 2, readOnly: true },
+    { path: "skills/x.py", size: 4 },
+    { path: "a/b/c.yaml", size: 5, readOnly: true },
+    { path: "a/b/d.yaml" },
+  ]);
+  // 顶层：目录（a, skills）在前，文件（AGENTS.md, config.yaml）在后，各按字典序
+  assert.deepEqual(tree.map((n) => `${n.isDir ? "d" : "f"}:${n.path}`),
+    ["d:a", "d:skills", "f:AGENTS.md", "f:config.yaml"]);
+  // 目录节点去重合并（skills 下两个文件挂在同一 children）
+  const skills = tree.find((n) => n.path === "skills");
+  assert.deepEqual(skills.children.map((c) => c.path), ["skills/weather", "skills/x.py"]); // 目录再在前
+  assert.equal(skills.children[0].children[0].path, "skills/weather/SKILL.md");
+  assert.equal(skills.children[0].children[0].readOnly, true);
+  assert.equal(skills.children[1].readOnly, undefined);
+  // 深层嵌套 leaf 属性完整
+  const a = tree.find((n) => n.path === "a");
+  assert.equal(a.children[0].path, "a/b");
+  assert.deepEqual(a.children[0].children.map((c) => `${c.path}|${c.readOnly ? "ro" : "rw"}`),
+    ["a/b/c.yaml|ro", "a/b/d.yaml|rw"]);
+  assert.equal(a.children[0].children[0].size, 5);
+});
+
+test("buildPackageTree：空输入与仅文件输入", () => {
+  assert.deepEqual(buildPackageTree([]), []);
+  const flat = buildPackageTree([{ path: "b.yaml" }, { path: "a.yaml" }]);
+  assert.equal(flat.every((n) => !n.isDir), true);
+  assert.deepEqual(flat.map((n) => n.path), ["a.yaml", "b.yaml"]); // 同级按字典序
 });

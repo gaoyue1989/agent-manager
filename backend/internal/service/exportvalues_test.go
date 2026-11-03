@@ -52,6 +52,7 @@ func renderFixtureInput(t *testing.T, core *Core, ws *store.Workspace, svc *stor
 		Merged:       merged,
 		Req:          req,
 		CreatedBy:    "export-owner",
+		CreatedAt:    time.Date(2026, 10, 30, 8, 0, 0, 0, time.UTC), // manifest audit.createdAt（issue #214）
 		OafImageRef:  buildOafImageRef(merged["REGISTRY_ADDRESS"], merged["REGISTRY_NAMESPACE"], "e2e-export-agent", mark.Marker),
 		ChartVersion: defaultExportChartVersion,
 	}
@@ -291,6 +292,10 @@ func TestRenderExportManifestShape(t *testing.T) {
 	summary := m["overrideSummary"].(map[string]interface{})
 	if summary["mcpServersRewritten"].(float64) != 0 || summary["runtimeDefaultsApplied"].(float64) == 0 {
 		t.Fatalf("summary wrong: %v", summary)
+	}
+	// audit.createdAt 取渲染输入（issue #214：非零值，随导出单创建时间）
+	if m["audit"].(map[string]interface{})["createdAt"] != "2026-10-30T08:00:00Z" {
+		t.Fatalf("audit.createdAt wrong: %v", m["audit"])
 	}
 	// itsm 段经推进更新
 	updated, err := manifestWithItsm(raw, "ITSM-9", "export-owner", time.Now())
