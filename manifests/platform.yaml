@@ -285,6 +285,10 @@ spec:
             - { name: JWT_SECRET, value: "oaf-console-jwt-secret-CHANGE-ME" }
             - { name: ADMIN_INIT_USER, value: "admin" }
             - { name: ADMIN_INIT_PASSWORD, value: "OafConsole2026" }
+            # 跨集群导出（导出单异步构建的基底镜像，issue #218）：缺省 busybox:1.36 走 Docker
+            # Hub，离线/内网环境构建必失败——清单固定指向本地 registry 的 busybox（预置步骤见
+            # docs/deployment.md §二），手工 kubectl set env 后重新 apply 不再丢失
+            - { name: EXPORT_BASE_IMAGE, value: "172.20.0.1:5001/busybox:1.36" }
           volumeMounts:
             - { name: data, mountPath: /data }
           readinessProbe:

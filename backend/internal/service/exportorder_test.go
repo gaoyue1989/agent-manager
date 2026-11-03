@@ -209,6 +209,19 @@ func TestCreateExportOrderBuildSuccess(t *testing.T) {
 	if summary["envKeysAdded"].(float64) != 1 || summary["secretKeys"].(float64) != 3 {
 		t.Fatalf("overrideSummary wrong: %v", summary)
 	}
+	// manifest audit：createdAt 非零且与导出单 createdAt 同源（issue #214——构建完成重渲染
+	// 取 DB 行 CreatedAt，审计链时间锚点不得为零值 0001-01-01，秒级精度比对容忍时钟截断）
+	audit := m["audit"].(map[string]interface{})
+	if audit["createdBy"] != "export-owner" {
+		t.Fatalf("audit.createdBy = %v", audit["createdBy"])
+	}
+	manifestCreatedAt, err := time.Parse(time.RFC3339, audit["createdAt"].(string))
+	if err != nil || manifestCreatedAt.IsZero() {
+		t.Fatalf("audit.createdAt zero/unparseable: %v", audit["createdAt"])
+	}
+	if diff := manifestCreatedAt.Sub(built.CreatedAt); diff > time.Second || diff < -time.Second {
+		t.Fatalf("audit.createdAt = %v drifts from order createdAt %v", manifestCreatedAt, built.CreatedAt)
+	}
 }
 
 // TestCreateExportOrderBuildFailure 构建失败 → failed 带原因。
@@ -294,6 +307,54 @@ func TestCreateExportOrderValidation(t *testing.T) {
 	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: "1.0.0-e99"})
 	if err == nil || !errors.Is(err, ErrMarkNotBuildable) {
 		t.Fatalf("unknown marker: err = %v", err)
+	}
+}
+
+// TestListServiceExportOrders 服务导出单列表（issue #216 导出记录区）：id 倒序、marker 从
+// 请求快照解析、EXP 单号生成、创建人透出；他空间/不存在服务统一 404 语义。
+func TestListServiceExportOrders(t *testing.T) {
+	core, _, ws, svc, _, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	first, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID,
+		&ExportOrderRequest{Marker: mark.Marker, Env: map[string]string{"MCP_E2E_TOKEN": "tok"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForExportStatus(t, core, first.ID, store.ExportStatusBuilt)
+	second, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 构建是异步 goroutine（CreateExportOrder 落库即 building），列表断言前需等两单都到 built
+	waitForExportStatus(t, core, second.ID, store.ExportStatusBuilt)
+	list, err := core.ListServiceExportOrders(ws.ID, svc.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("list len = %d, want 2", len(list))
+	}
+	if list[0].ID != second.ID || list[1].ID != first.ID {
+		t.Fatalf("list not id-desc: %d, %d", list[0].ID, list[1].ID)
+	}
+	for _, item := range list {
+		if item.Marker != mark.Marker {
+			t.Fatalf("marker not parsed from request snapshot: %+v", item)
+		}
+		if !strings.HasPrefix(item.OrderNo, "EXP-") {
+			t.Fatalf("orderNo = %q", item.OrderNo)
+		}
+		if item.Status != store.ExportStatusBuilt || item.CreatedBy != "export-owner" {
+			t.Fatalf("status/createdBy wrong: %+v", item)
+		}
+		if item.OafImageDigest == "" {
+			t.Fatalf("digest not surfaced: %+v", item)
+		}
+	}
+	// 服务不存在 / 不属于本空间 → 404（loadServiceForExport 同口径）
+	if _, err := core.ListServiceExportOrders(ws.ID, svc.ID+999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown service: err = %v", err)
 	}
 }
 
