@@ -9,6 +9,9 @@ let models = [];
 let fallbackId = '';
 let fallbackSource = 'none';
 
+/** Provider 方言值域（与 ModelController.PROVIDER_DIALECTS 对齐）：决定思考开关/推理强度的下发位置 */
+const PROVIDER_DIALECTS = ['openai', 'vllm', 'sglang', 'glm', 'deepseek'];
+
 export default {
   mount(container, c) {
     ctx = c;
@@ -46,6 +49,16 @@ async function loadModels() {
     models = (data && data.models) || [];
     fallbackId = (data && data.fallback_model) || '';
     fallbackSource = (data && data.fallback_source) || 'none';
+    // 列表项是轻量视图（不含采样参数），管理页并行拉详情补全（失败保持列表项，不阻塞渲染）
+    await Promise.all(models.map(async (m) => {
+      if (!ctx) return;
+      try {
+        const detail = await ctx.api.getModel(m.id);
+        if (detail && detail.id === m.id) Object.assign(m, detail);
+      } catch (e) {
+        // 详情拉取失败不影响列表展示；编辑时会再次拉取
+      }
+    }));
   } catch (e) {
     if (!ctx) return; // 已切走：丢弃过期渲染
     body.innerHTML = '<div class="empty error-text">Failed to load models: ' + ctx.utils.esc(e.message) + '</div>';
@@ -73,7 +86,7 @@ function renderTable(body) {
   }
   html += '</div>';
   html += '<table class="data-table"><thead><tr>'
-    + '<th>Name</th><th>Model ID</th><th>Base URL</th><th>API Key</th>'
+    + '<th>Name</th><th>Provider</th><th>Model ID</th><th>Base URL</th><th>API Key</th>'
     + '<th>Sampling</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
   for (const m of models) {
     const isSystem = m.source === 'system';
@@ -82,6 +95,7 @@ function renderTable(body) {
         + (isSystem ? ' <span class="badge dim">system</span>' : '')
         + (m.is_default ? ' <span class="badge green">default</span>' : '')
         + (m.is_fallback ? ' <span class="badge yellow">fallback</span>' : '') + '</td>'
+      + '<td><span class="badge dim">' + ctx.utils.esc(m.provider || 'openai') + '</span></td>'
       + '<td class="mono">' + ctx.utils.esc(m.model_id) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.base_url || '—') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.api_key_masked || (isSystem ? '（env）' : '（系统密钥）')) + '</td>'
@@ -166,7 +180,11 @@ function samplingText(m) {
   const parts = [];
   if (m.temperature != null) parts.push('T=' + m.temperature);
   if (m.max_tokens != null) parts.push('max=' + m.max_tokens);
+  if (m.frequency_penalty != null) parts.push('freq=' + m.frequency_penalty);
+  if (m.reasoning_effort) parts.push('effort=' + m.reasoning_effort);
   if (m.enable_thinking) parts.push('thinking');
+  if (m.timeout_seconds != null) parts.push('timeout=' + m.timeout_seconds + 's');
+  if (m.context_length != null) parts.push('ctx=' + m.context_length);
   return parts.length ? parts.join(', ') : '—';
 }
 
@@ -203,20 +221,48 @@ async function deleteModel(model) {
 }
 
 /** 新增/编辑弹窗（existing=null 为新增；apiKey 三态：留空=不修改、输入=覆盖、勾选清空=回落系统密钥） */
-function openForm(existing) {
-  const m = existing || {};
+async function openForm(existing) {
+  if (!ctx) return;
+  // 列表项是轻量视图：编辑前拉详情拿到完整采样参数（失败回落列表项）
+  let m = existing || {};
+  if (existing) {
+    try {
+      const detail = await ctx.api.getModel(existing.id);
+      if (detail && detail.id === existing.id) m = detail;
+    } catch (e) {
+      // 详情失败不阻塞编辑，用列表项已有字段
+    }
+    if (!ctx) return; // await 期间可能已 unmount
+  }
   const isEdit = !!existing;
   const field = (label, id, value, attrs) =>
     '<div style="margin-bottom:8px"><div style="font-size:11px;color:var(--text-dim);margin-bottom:3px">'
     + label + '</div><input class="input" style="width:100%" id="' + id + '" '
     + (attrs || '') + ' value="' + ctx.utils.esc(value != null ? value : '') + '"></div>';
+  const selectField = (label, id, options, value) =>
+    '<div style="margin-bottom:8px"><div style="font-size:11px;color:var(--text-dim);margin-bottom:3px">'
+    + label + '</div><select class="input" style="width:100%" id="' + id + '">'
+    + options.map((o) => '<option value="' + ctx.utils.esc(o) + '"'
+        + (o === value ? ' selected' : '') + '>' + ctx.utils.esc(o) + '</option>').join('')
+    + '</select></div>';
+  // 两列并排（采样参数字段较多，减少弹窗高度）
+  const row = (a, b) => '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' + a + b + '</div>';
+  const section = (title) => '<div style="font-size:11px;font-weight:600;color:var(--text-h);'
+    + 'margin:10px 0 6px;padding-top:8px;border-top:1px solid var(--border-subtle)">' + title + '</div>';
+  // 新增时预填后端默认值（与 ModelController createModel 的 defaultIfNull 一致）；编辑时原样回填，不用默认值兜底
+  const prefill = (v, d) => (isEdit ? v : (v != null && v !== '' ? v : d));
+  // 存量未知 provider 值保留为可选项，避免编辑时被静默改成 openai
+  const provider = m.provider || 'openai';
+  const providerOptions = PROVIDER_DIALECTS.includes(provider)
+    ? PROVIDER_DIALECTS : PROVIDER_DIALECTS.concat([provider]);
 
   window.App.modal.open(
     '<h2>' + (isEdit ? 'Edit Model' : 'Add Model') + '</h2>'
     + '<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px">'
     + '托管模型存 model_config 表，保存即生效（多副本 ≤30s 收敛）。未显式选择的会话走列表中的默认模型。</p>'
+    + section('连接')
     + field('Name *', 'mfName', m.name, 'placeholder="展示名（唯一）"')
-    + field('Provider', 'mfProvider', m.provider || 'openai', 'placeholder="openai"')
+    + selectField('Provider（推理引擎方言）', 'mfProvider', providerOptions, provider)
     + field('Model ID *', 'mfModelId', m.model_id, 'placeholder="推理端点模型名，如 deepseek-v3"')
     + field('Base URL *', 'mfBaseUrl', m.base_url, 'placeholder="https://api.example.com/v1"')
     + field('API Key', 'mfApiKey', '', 'type="password" autocomplete="new-password" placeholder="'
@@ -225,16 +271,33 @@ function openForm(existing) {
         ? '<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);margin:-4px 0 8px">'
           + '<input type="checkbox" id="mfClearKey"> 清空已存密钥（回落系统 LLM_API_KEY）</label>'
         : '')
-    + field('Temperature', 'mfTemp', m.temperature, 'type="number" step="0.1" min="0" max="2"')
-    + field('Max Tokens', 'mfMaxTokens', m.max_tokens, 'type="number" min="1"')
-    + field('Timeout (s)', 'mfTimeout', m.timeout_seconds, 'type="number" min="1"')
-    + field('Context Length', 'mfCtxLen', m.context_length, 'type="number" min="0" placeholder="0 = 不传给模型"')
-    + '<div style="display:flex;gap:14px;font-size:12px;margin:4px 0 10px">'
+    + section('采样参数')
+    + row(field('Temperature', 'mfTemp', prefill(m.temperature, 0.3), 'type="number" step="0.1" min="0" max="2"'),
+          field('Max Tokens', 'mfMaxTokens', prefill(m.max_tokens, 16384), 'type="number" min="1"'))
+    + row(field('Reasoning Effort（推理强度）', 'mfReasoningEffort', m.reasoning_effort,
+            'placeholder="如 low / medium / high；留空 = 不下发（清空即清除）"'),
+          field('Frequency Penalty', 'mfFreqPenalty', m.frequency_penalty,
+            'type="number" step="0.1" min="-2" max="2" placeholder="[-2, 2]；留空 = 不下发（已设置只能改值，0 与不传等价）"'))
+    + row(field('Timeout (s)', 'mfTimeout', prefill(m.timeout_seconds, 120), 'type="number" min="1"'),
+          field('Context Length', 'mfCtxLen', prefill(m.context_length, 0), 'type="number" min="0" placeholder="0 = 不传给模型"'))
+    + section('开关')
+    + '<div style="display:flex;gap:14px;font-size:12px;margin:4px 0 6px">'
     + '<label style="display:flex;align-items:center;gap:6px">'
     + '<input type="checkbox" id="mfThinking" ' + (m.enable_thinking ? 'checked' : '') + '> 深度思考</label>'
     + '<label style="display:flex;align-items:center;gap:6px">'
     + '<input type="checkbox" id="mfEnabled" ' + (m.enabled === false ? '' : 'checked') + '> 启用（会话可选）</label>'
     + '</div>'
+    + '<div style="color:var(--text-dim);font-size:11px;margin:0 0 10px;line-height:1.5">'
+    + '思考开关与推理强度的下发位置由 Provider 决定：vllm/sglang → chat_template_kwargs；'
+    + 'glm → thinking.type（仅关闭时下发）；openai → 顶层 reasoning_effort；deepseek → 均不下发。'
+    + '深度思考勾选（true）表示走端点默认行为。</div>'
+    + (isEdit
+        ? '<div style="color:var(--text-dim);font-size:11px;margin:0 0 10px;line-height:1.6;font-family:var(--mono)">'
+          + 'ID: ' + ctx.utils.esc(m.id || '—')
+          + (m.is_default ? ' · default' : '') + (m.is_fallback ? ' · fallback' : '') + '<br>'
+          + 'Created: ' + ctx.utils.esc(m.created_at || '—') + '<br>'
+          + 'Updated: ' + ctx.utils.esc(m.updated_at || '—') + '</div>'
+        : '')
     + '<div style="display:flex;justify-content:flex-end;gap:8px">'
     + '<button class="btn" id="mfCancel">取消</button>'
     + '<button class="btn primary" id="mfSave">' + (isEdit ? '保存' : '创建') + '</button>'
@@ -262,6 +325,17 @@ async function saveForm(existing) {
     ctx.utils.toast('name / modelId / baseUrl 均为必填', 'error');
     return;
   }
+  // reasoningEffort：格式与后端一致（^[a-z0-9_]{1,16}$）；编辑时留空 = 清除（PATCH 空串语义）
+  const reasoningEffort = val('mfReasoningEffort').toLowerCase();
+  if (reasoningEffort && !/^[a-z0-9_]{1,16}$/.test(reasoningEffort)) {
+    ctx.utils.toast('Reasoning Effort 仅支持小写字母/数字/下划线，最长 16 位', 'error');
+    return;
+  }
+  const frequencyPenalty = num('mfFreqPenalty');
+  if (frequencyPenalty != null && (frequencyPenalty < -2 || frequencyPenalty > 2)) {
+    ctx.utils.toast('Frequency Penalty 必须在 [-2, 2] 区间', 'error');
+    return;
+  }
   const body = {
     name,
     provider: val('mfProvider') || undefined,
@@ -269,6 +343,8 @@ async function saveForm(existing) {
     baseUrl,
     temperature: num('mfTemp'),
     maxTokens: num('mfMaxTokens'),
+    reasoningEffort,
+    frequencyPenalty,
     timeoutSeconds: num('mfTimeout'),
     contextLength: num('mfCtxLen'),
     enableThinking: document.getElementById('mfThinking').checked,
