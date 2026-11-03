@@ -13,6 +13,8 @@ export interface ChatOpts {
   userId?: string;
   fileIds?: string[];
   model?: string;
+  /** 本轮可用技能白名单（仅本轮生效；缺省 = 全部；[] = 无技能，session-skill-list-design §3） */
+  skills?: string[];
   timeoutMs?: number;
   base?: string;
   /** 附加请求头（X 组前缀感知用例：注入 X-Forwarded-* 直证服务端自感知契约） */
@@ -31,6 +33,7 @@ export function chat(opts: ChatOpts): Collected {
       userId: opts.userId,
       fileIds: opts.fileIds,
       model: opts.model,
+      skills: opts.skills,
     }),
   });
   return collectStream(p, (opts.timeoutMs ?? 45_000));
@@ -85,6 +88,16 @@ export async function threads(base = BASE, userId?: string): Promise<unknown[]> 
   const res = await fetch(`${base}/threads`, { headers: userHeaders(userId) });
   const j = await res.json();
   return Array.isArray(j) ? j : (j.threads ?? j.items ?? []);
+}
+
+/** 单轮停止（POST /threads/{sid}/stop）：202=受理（尚未保证中止）、404=无运行中 turn、409=HITL/未就绪、503=停止能力未装配 */
+export async function stop(sessionId: string, base = BASE, userId?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${base}/threads/${encodeURIComponent(sessionId)}/stop`, {
+    method: 'POST', headers: userHeaders(userId),
+  });
+  let body: Record<string, unknown> = {};
+  try { body = await res.json(); } catch { /* 空体 */ }
+  return { status: res.status, body };
 }
 
 export async function deleteThread(sessionId: string, base = BASE, userId?: string): Promise<number> {
