@@ -274,4 +274,68 @@ class A2AControllerTest {
             "tasks/resubscribe 必须原样透传: " + bodyCap.getValue());
     }
 
+    // ---------- 本轮 skills 列表（session-skill-list-design §6） ----------
+
+    private java.util.Map<String, Object> forwardedRequest(String body) throws Exception {
+        mockWrapper();
+        when(wrapper.handleRequest(anyString(), anyMap(), any())).thenReturn(java.util.Map.of());
+        mockMvc.perform(post("/").contentType(MediaType.APPLICATION_JSON).content(body))
+            .andExpect(status().isOk());
+        var captor = org.mockito.ArgumentCaptor.forClass(String.class);
+        // 同一用例内可多次调用：取最后一次转发的请求体
+        verify(wrapper, org.mockito.Mockito.atLeastOnce()).handleRequest(captor.capture(), anyMap(), any());
+        var forwarded = captor.getAllValues().get(captor.getAllValues().size() - 1);
+        return (java.util.Map<String, Object>) new com.fasterxml.jackson.databind.ObjectMapper()
+            .readValue(forwarded, java.util.Map.class);
+    }
+
+    @Test
+    void messageSendShouldTranslateSkillsIntoGroupedMetadata() throws Exception {
+        // SDK 的 A2A→Msg 转换只认「按 msg id 分组」的 metadata：
+        // metadata[msgId] 必须是 Map，part 以 _agentscope_msg_id 标组
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"20","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-sk1","userId":"alice","skills":["a","b"]}}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("a", "b"), grouped.get("skills"),
+            "skills 按 msg id 分组（SDK 读取约定）");
+        org.junit.jupiter.api.Assertions.assertFalse(meta.containsKey("skills"),
+            "顶层 skills 键被移除（避免与分组键混淆）");
+        var parts = (java.util.List<?>) message.get("parts");
+        var partMeta = (java.util.Map<String, Object>) ((java.util.Map<String, Object>) parts.get(0)).get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals(msgId, partMeta.get("_agentscope_msg_id"));
+    }
+
+    @Test
+    void messageSendShouldNormalizeTopLevelAndEmptySkills() throws Exception {
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"21","method":"message/send",
+             "params":{"sessionId":"a2a-sk2","userId":"alice","skills":["x"],
+               "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var grouped = (java.util.Map<String, Object>) meta.get(String.valueOf(message.get("messageId")));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("x"), grouped.get("skills"));
+
+        // 显式空列表：同样分组（空数组 = 无技能）
+        var emptyReq = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"22","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-sk3","userId":"alice","skills":[]}}}}
+            """);
+        var emptyParams = (java.util.Map<String, Object>) emptyReq.get("params");
+        var emptyMessage = (java.util.Map<String, Object>) emptyParams.get("message");
+        var emptyMeta = (java.util.Map<String, Object>) emptyMessage.get("metadata");
+        var emptyGrouped = (java.util.Map<String, Object>) emptyMeta.get(
+            String.valueOf(emptyMessage.get("messageId")));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(), emptyGrouped.get("skills"));
+    }
 }

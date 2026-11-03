@@ -238,6 +238,11 @@ public class HarnessAgentFactory {
                 // （设计 §5.6）。置于 McpUserContextMiddleware 之后：后者按 peer 直接反查
                 // 写入 McpMeta 的生产行为保持不变
                 .middleware(new RemoteUserIdMiddleware(sessionUserStore))
+                // 会话级技能过滤（本轮 skills 声明，session-skill-list-design §4）：按最后一条
+                // USER 消息 metadata 的白名单收敛 <available_skills> / load_skill_through_path。
+                // 必须排在下方禁用过滤之前——先立白名单（only/none），禁用中间件再以
+                // existing.overlay(disable(...)) 从中剔除禁用集；未传 skills 时零开销直通
+                .middleware(new SkillFilterMiddleware())
                 // 技能禁用过滤（SDK per-call SkillFilter overlay）：被禁用的技能不再出现在
                 // 模型侧 <available_skills>，也无法经 load_skill_through_path 加载——覆盖
                 // L2 包内 + L4 个人（此前禁用只作用于框架自有视图，SDK 技能仓库不认识标记）

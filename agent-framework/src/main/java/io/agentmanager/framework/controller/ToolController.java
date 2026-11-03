@@ -44,10 +44,29 @@ public class ToolController {
     /**
      * 技能列表：动态数据源（frontmatter 声明 ∪ /config/skills 目录实际内容，
      * 冲突以目录为准），技能目录运行中变化即时可见。
+     *
+     * <p>本轮可用技能列表（session-skill-list-design §6）：{@code ?skills=a,b} 可选；
+     * 缺省/空串 = 不过滤（全部启用技能）；逗号分隔名单 = 白名单视图（未知名忽略）。
      */
     @GetMapping("/skills")
-    public List<Map<String, Object>> listSkills() {
-        return skillCatalog.list();
+    public List<Map<String, Object>> listSkills(
+            @RequestParam(value = "skills", required = false) String skills) {
+        return skillCatalog.list(parseSkillNames(skills));
+    }
+
+    /** 逗号分隔名单 → 列表；缺省/空串返回 null（= 不限制，存量语义） */
+    static List<String> parseSkillNames(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return null;
+        }
+        var names = new ArrayList<String>();
+        for (var part : csv.split(",")) {
+            var trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                names.add(trimmed);
+            }
+        }
+        return names;
     }
 
     @GetMapping("/mcp")
