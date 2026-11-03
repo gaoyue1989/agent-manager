@@ -291,9 +291,14 @@ public class ChatStreamController {
      *   "userId": "user-123",          // 可选
      *   "sessionId": "my-session-1",   // 可选，不传则自动生成
      *   "fileIds": [],                 // 可选
-     *   "model": "01J8XK..."           // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
+     *   "model": "01J8XK...",          // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
+     *   "skills": ["refund", "order"]  // 可选，本轮可用技能列表（缺省 = 全部；[] = 无技能）
      * }
      * }</pre>
+     *
+     * <p>{@code skills} 仅对本轮生效（不落库、不跨轮沿用），白名单外的技能不出现在模型侧
+     * {@code <available_skills>}、不可经 {@code load_skill_through_path} 加载、{@code @Skill}
+     * 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 docs/design/session-skill-list-design.md。
      *
      * <p>不传 sessionId 时，首个 SSE 事件为：
      * <pre>{@code {"type":"session_created","session_id":"uuid-xxx"}}</pre>
@@ -326,6 +331,11 @@ public class ChatStreamController {
             sessionId, userId, isNewSession,
             message != null ? message.length() : 0,
             body.fileIds() != null ? body.fileIds().size() : 0);
+        // 本轮可用技能列表（仅本轮生效，不落库）：缺省 = 全部；[] = 无技能（§3）
+        if (body.skills() != null) {
+            log.info("[chat] skills: sid={}, count={}, names={}",
+                sessionId, body.skills().size(), body.skills());
+        }
 
         String finalSessionId = sessionId;
         String finalUserId = userId;
@@ -545,8 +555,9 @@ public class ChatStreamController {
                 eventBus.beginTurn(finalSessionId);
 
                 // ===== 4. 构造消息 =====
-                // 注入 @Skill 引用（按 session userId 合并该用户 L4 个人技能）
-                var processedMessage = skillInjectionService.injectSkillReferences(message, finalUserId);
+                // 注入 @Skill 引用（按 session userId 合并该用户 L4 个人技能；本轮白名单裁剪）
+                var processedMessage = skillInjectionService.injectSkillReferences(
+                    message, finalUserId, body.skills());
 
                 if (body.fileIds() != null && !(sandboxConfig != null && sandboxConfig.enabled())) {
                     for (var fileId : body.fileIds()) {
@@ -557,6 +568,12 @@ public class ChatStreamController {
                 // 记录本轮上传文件 id（随消息持久化），history 读取时据此把上传卡片挂回本用户消息
                 var msgMeta = new java.util.HashMap<String, Object>();
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, finalSessionId);
+                // 本轮技能白名单随本条用户消息下传（SkillFilterMiddleware 读取；仅本轮生效）。
+                // 显式空列表也要写入（= 无技能），因此只判 null 不判空
+                if (body.skills() != null) {
+                    msgMeta.put(io.agentmanager.framework.service.SkillFilterMiddleware.METADATA_SKILLS_KEY,
+                        body.skills());
+                }
                 if (body.fileIds() != null && !body.fileIds().isEmpty()) {
                     msgMeta.put(UploadWorkspaceInjector.METADATA_FILE_IDS, body.fileIds());
                 }
@@ -1159,8 +1176,8 @@ public class ChatStreamController {
         return false;
     }
 
-    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model 可选 */
+    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model、skills 可选 */
     public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds,
-                              String model) {
+                              String model, List<String> skills) {
     }
 }

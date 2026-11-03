@@ -56,8 +56,13 @@ public class SkillDisabledFilterMiddleware implements MiddlewareBase {
             try {
                 var names = disabledSkillNames(ctx);
                 if (!names.isEmpty()) {
-                    // overlay 与 builder 级 filter 叠加（默认 all），仅禁用这些名字
-                    ctx.put(SkillFilter.class, SkillFilter.disable(names.toArray(new String[0])));
+                    // 叠加而非覆盖：ctx 里的 existing 可能是 SkillFilterMiddleware 先立的
+                    // 本轮技能白名单（only），直接覆盖会把白名单冲掉。existing.overlay(disable)：
+                    // 禁用名以 disable 判定为准（从白名单中剔除），其余名字沿用 existing；
+                    // existing=null（未传 skills）时退化为原有行为（builder 级 all + disable overlay）
+                    var disabled = SkillFilter.disable(names.toArray(new String[0]));
+                    var existing = ctx.get(SkillFilter.class);
+                    ctx.put(SkillFilter.class, existing != null ? existing.overlay(disabled) : disabled);
                 }
             } catch (Exception e) {
                 log.warn("[skill-filter] resolve disabled skills failed: {}", e.getMessage());

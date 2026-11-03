@@ -69,10 +69,12 @@ public class SkillManageController {
     @GetMapping("/available")
     public List<Map<String, String>> listAvailable(
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
-            @RequestParam(value = "userId", required = false) String userId) {
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "skills", required = false) String skills) {
         // 网关注入的 X-User-Id 优先（登录态真实用户）；无则回落查询参数（调试/测试）
         var effective = effectiveUserId(headerUserId, userId);
-        return catalogService.availableSkills(effective);
+        // 本轮可用技能列表（session-skill-list-design §6）：缺省/空串 = 不过滤
+        return catalogService.availableSkills(effective, ToolController.parseSkillNames(skills));
     }
 
     /**
@@ -86,8 +88,10 @@ public class SkillManageController {
     public ResponseEntity<Map<String, Object>> parseReferences(
             @RequestParam("message") String message,
             @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
-            @RequestParam(value = "userId", required = false) String userId) {
-        var refs = skillInjectionService.parseSkillReferences(message, effectiveUserId(headerUserId, userId));
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "skills", required = false) String skills) {
+        var refs = skillInjectionService.parseSkillReferences(
+            message, effectiveUserId(headerUserId, userId), ToolController.parseSkillNames(skills));
         return ResponseEntity.ok(Map.of("skills", refs, "count", refs.size()));
     }
 

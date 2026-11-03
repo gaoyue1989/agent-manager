@@ -37,6 +37,7 @@ import io.agentscope.harness.agent.gateway.channel.InboundMessage;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -136,7 +137,7 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.isHeld(anyString())).thenReturn(false);
 
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         controller = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -172,7 +173,7 @@ class ChatStreamControllerTest {
 
     private List<String> collect(String sessionId, String message, String userId, List<String> fileIds) {
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null), null, null, null)
+                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -209,7 +210,7 @@ class ChatStreamControllerTest {
         requestHeaders.add("Authorization", "Bearer tok-abc");
         requestHeaders.add("Cookie", "sid=secret");
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null),
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null),
                 null, null, requestHeaders)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -234,7 +235,7 @@ class ChatStreamControllerTest {
         var requestHeaders = new org.springframework.http.HttpHeaders();
         requestHeaders.add("Authorization", "Bearer tok-abc");
         controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null),
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null),
                 null, null, requestHeaders)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -614,7 +615,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-sum1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -636,7 +637,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) d1, (AgentEvent) callEnd,
                 (AgentEvent) rDelta, (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -664,7 +665,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-sum2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -681,7 +682,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd,
                 (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -702,7 +703,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-fr1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -722,7 +723,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -743,7 +744,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-fr2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -763,7 +764,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null),
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null),
                 null, "/agent/demo/", null)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -782,7 +783,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-zip1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var fileAssetStore = mock(io.agentmanager.framework.service.FileAssetStore.class);
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
@@ -803,7 +804,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -826,7 +827,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-zip2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -849,7 +850,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -887,7 +888,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-ui1";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var registrar = mock(McpToolRegistrar.class);
         when(registrar.resolveUiRef("show_form"))
             .thenReturn(new McpToolRegistrar.UiRef("ui://approval/form.html", "approval"));
@@ -902,7 +903,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -921,7 +922,7 @@ class ChatStreamControllerTest {
         var sessionId = "test-user-ui2";
         var spyBus = org.mockito.Mockito.spy(eventBus);
         var skillInjectionService = mock(SkillInjectionService.class);
-        when(skillInjectionService.injectSkillReferences(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(skillInjectionService.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
         var ctrl = new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
             toolAuditStore, workspaceInjector, sandboxConfig, spyBus, eventStore,
             sessionUserStore, workspaceReader, props, skillInjectionService,
@@ -934,7 +935,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1322,7 +1323,7 @@ class ChatStreamControllerTest {
         when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope"), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope", null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("unknown_model: nope")),
@@ -1340,7 +1341,7 @@ class ChatStreamControllerTest {
 
         // sessionId 缺省（新会话）+ model 显式指定
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2"), null, null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2", null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1357,7 +1358,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m3")));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system"), null, null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system", null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1485,7 +1486,7 @@ class ChatStreamControllerTest {
         when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1507,7 +1508,7 @@ class ChatStreamControllerTest {
             .thenReturn(reactor.core.publisher.Flux.just(end));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1569,5 +1570,75 @@ class ChatStreamControllerTest {
         assertTrue(frames.stream().noneMatch(f -> f != null && f.contains("\"type\":\"error\"")),
             "停止不是错误: " + frames);
         verify(turnLeaseStore, never()).release(eq(sessionId), anyString());
+    }
+
+    // ========== 本轮 skills 列表（session-skill-list-design §6） ==========
+
+    /** 以显式注入服务构建独立控制器（复用 @BeforeEach 的字段 mock） */
+    private ChatStreamController controllerWithInjection(SkillInjectionService injection) {
+        return new ChatStreamController(chatChannel, runtimeService, turnLeaseStore,
+            toolAuditStore, workspaceInjector, sandboxConfig, eventBus, eventStore,
+            sessionUserStore, workspaceReader, props, injection,
+            mock(io.agentmanager.framework.service.FileAssetStore.class), mcpToolRegistrar,
+            modelCatalog, sessionTitleService);
+    }
+
+    @Test
+    void chatWithSkillsShouldPutWhitelistIntoMessageMetadataAndInjection() {
+        var sessionId = "test-skills-1";
+        var injection = mock(SkillInjectionService.class);
+        when(injection.injectSkillReferences(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        var ctrl = controllerWithInjection(injection);
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-sk-1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-sk-1")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, List.of("a", "b")), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        var metadata = captor.getValue().messages().get(0).getMetadata();
+        assertEquals(List.of("a", "b"), metadata.get("skills"),
+            "本轮白名单随用户消息 metadata 下传（中间件读取）");
+        verify(injection).injectSkillReferences(eq("hi"), eq("alice"), eq(List.of("a", "b")));
+    }
+
+    @Test
+    void chatWithEmptySkillsShouldKeepEmptyListInMetadata() {
+        var sessionId = "test-skills-2";
+        var ctrl = controllerWithInjection(mock(SkillInjectionService.class));
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-sk-2");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-sk-2")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, List.of()), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        var metadata = captor.getValue().messages().get(0).getMetadata();
+        assertTrue(metadata.containsKey("skills"), "显式空列表必须写入（= 无技能，不能退化为缺省）");
+        assertTrue(((java.util.List<?>) metadata.get("skills")).isEmpty());
+    }
+
+    @Test
+    void chatWithoutSkillsShouldNotPutKey() {
+        var sessionId = "test-skills-3";
+        var ctrl = controllerWithInjection(mock(SkillInjectionService.class));
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-sk-3");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-sk-3")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, null), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        assertFalse(captor.getValue().messages().get(0).getMetadata().containsKey("skills"),
+            "未传 skills 不写入 metadata（全部技能）");
     }
 }

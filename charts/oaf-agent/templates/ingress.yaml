@@ -19,11 +19,11 @@ spec:
   {{- with .Values.ingress.className }}
   ingressClassName: {{ . | quote }}
   {{- end }}
-  {{- if .Values.ingress.tls.enabled }}
+  {{- if eq (include "oaf-agent.tlsEnabled" . | trim) "true" }}
   tls:
     - hosts:
         - {{ $host | quote }}
-      secretName: {{ .Values.ingress.tls.secretName | quote }}
+      secretName: {{ include "oaf-agent.tlsSecret" . | quote }}
   {{- end }}
   rules:
     - host: {{ $host | quote }}
