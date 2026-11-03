@@ -82,7 +82,7 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 
 ### 控制台拆分按功能 e2e（e2e/console-split/）
 
-部署后一键回归（180+ 断言，M0–M8 九模块；M9 enforce 三态需独立环境）：
+部署后一键回归（M0–M10 十一模块；M9=技能中心、M10=沙箱配置；enforce 三态需独立网关环境，不在本套件）：
 
 ```bash
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_API_KEY=.. LLM_BASE_URL=.. LLM_MODEL=..]   # 缺省自动从 release-agent env 读取
@@ -101,7 +101,7 @@ BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_AP
 > 缺省值指向 `127.0.0.1`（Pod 自身），session_event 事件不落 Redis、SSE 断线回放/续传全挂——部署必配。
 
 > **DB schema 迁移（Flyway，2026-09-28 起）**：agent-framework 启动时自动执行
-> `db/migration` 版本化迁移——存量库首次启动自动基线（V1..V9 已就位，仅跑增量）、
+> `db/migration` 版本化迁移——存量库首次启动按 flyway_schema_history 自动基线、仅跑增量、
 > 全新库从 V1 完整重建，发版无需人工干预；多副本同时启动由历史表锁互斥。
 > 此后表结构/数据演进只新增 V 文件（见 docs/design/db-migration-flyway-design.md），不再手工改库。
 

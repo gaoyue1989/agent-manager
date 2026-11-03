@@ -126,7 +126,7 @@ ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
 
 ### 4.3 后端/前端配置全集 ↔ values 映射（2026-10-10 配置面 review 补全）
 
-> 来源：`backend/config/config.go`（envStr/envInt 全集 21 项）+ `cmd/server/main.go`（KUBECONFIG）
+> 来源：`backend/config/config.go`（envStr/envInt 全集 27 项）+ `cmd/server/main.go`（KUBECONFIG）
 > + 前端 `process.env` 5 项。**「本次补」= 首版设计遗漏，review 修正**；实现时以本表为验收清单
 > （chart 渲染产物逐项可对号，防再次漏配）。
 
@@ -147,6 +147,9 @@ ingress: { className: nginx, host: "", tls: { enabled: false, secretName: "" } }
 | 21 | `KUBECONFIG` | main.go | `backend.kubeconfig`（两模式 provided / synthesized，**默认 synthesized 部署期创建**，见 §6.2） | **本次补（评审点名，已决议）** |
 | 22 | `JWT_SECRET` | config.go（控制台拆分 M0，**必填 fail-fast**） | `backend.jwtSecret`（经 Secret 注入；空且未用 existingSecret → 渲染期 fail） | 2026-10-18 补 |
 | 23-24 | `ADMIN_INIT_USER` / `ADMIN_INIT_PASSWORD` | config.go（首个 admin 种子，仅 users 表空时生效） | `backend.adminInitUser` / `backend.adminInitPassword`（密码经 Secret） | 2026-10-18 补 |
+| 25 | `EXPORT_BASE_IMAGE` | config.go（跨集群导出 v1，PR #209；缺省 `busybox:1.36` 指 docker.io——**离线部署必改**，否则导出构建拉 Docker Hub 失败） | —（chart 现未渲染，v1 缺口；需补 values 键如 `backend.exportBaseImage`） | **本次补（v1 缺口，chart 待跟进）** |
+| 26-27 | `EXPORT_REGISTRY_USERNAME` / `EXPORT_REGISTRY_PASSWORD` | config.go（跨集群导出 v1，PR #209；直推镜像仓库凭据，可空=匿名） | —（chart 现未渲染，v1 缺口） | **本次补（v1 缺口，chart 待跟进）** |
+| 28 | `PLATFORM_PVC_NAME` | config.go | `persistence.existingClaim`（backend-deployment.yaml:66 已渲染，values 默认 `platform-data`） | 已有（本次补记） |
 | F1 | `BACKEND_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.backendInternalUrl` | 已有 |
 | F2 | `AGENT_INTERNAL_URL` | 前端 proxy.ts | `frontend.env.agentInternalUrl` | 已有 |
 | F2b | `AGENT_INTERNAL_URL_TEMPLATE` | 前端 proxy.ts（console 拆分：`/agent/{short}` 数据面） | `frontend.env.agentInternalUrlTemplate`（空 = 按 namespace 渲染） | 2026-10-18 补 |

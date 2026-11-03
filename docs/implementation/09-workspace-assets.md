@@ -40,9 +40,10 @@ Agent 详情 Tab6（M4 留位）：过滤 `agentId=当前` 的列表 + curl 示�
 
 ## 3. Skill 管理（口径修订 2026-10-17：OAF 包配置技能清单）
 
-> **口径修订**：页面不再涉及 L4 用户技能/运行时分级概念——技能分级是 Agent 运行时的加载概念，
-> 本页只做 **OAF 包配置技能**的展示与查询。技能的新增/修改/删除 = Agent 编辑页（copy-on-write
-> 生成新版本包）或包编辑器，页面提供入口而非直接操作。
+> **口径再修订（2026-10-20，0550107「feat(console/skill): Skill 中心」）**：本页（assets/skills/page.tsx）已重写为 **Skill 中心**（技能资产库）——Markdown 创建与校验、zip 技能包上传/版本下载、版本状态机 draft→published→offline（reline 动作回到 published）、市场源安装（Skill 广场）、Agent 创建/编辑页勾选引用（source=skill + 锁定版本，仅已发布版本，被引用技能删除受保护）；后端为 `/console/workspaces/:ws/skill-center` 端点族（console.go:146 起共 11 条路由，service/skillcenter.go），e2e 落位 `e2e/console-split/m9-skill-center.sh`（「M9 · Skill 中心」）。**下述 2026-10-17「只做 OAF 包配置技能展示与查询」的口径整体作废，并非「仅适用于 SpaceSkills 聚合视图」**：§3.1 描述的「按包分组展示 /『经 Agent 编辑添加技能』入口」页面形态已随重写消失；SpaceSkills 聚合端点（GET /console/workspaces/:ws/skills，consoleview.go）后端保留但前端已无消费（AgentCreateForm.tsx:84 注明「旧 OAF 包技能清单（spaceSkills）不再作为候选——技能资产是唯一勾选入口」）。
+
+> **口径修订（2026-10-17）**：页面不再涉及 L4 用户技能/运行时分级概念——技能分级是 Agent 运行时的加载概念，
+> 本页只做 **OAF 包配置技能**的展示与查询。技能的新增/修改/删除 = Skill 中心（本页）；Agent 创建/编辑页仅做技能资产勾选引用（source=skill），不提供技能 CRUD——不是两个 CRUD 入口并存。
 
 ### 3.1 页面（assets/skills/page.tsx 重写）
 
@@ -127,4 +128,4 @@ Agent 详情 Tab6（M4 留位）：过滤 `agentId=当前` 的列表 + curl 示�
 
 - `apikey_test.go`：签发格式与前缀、sha256 落库、明文不回读（列表无 hash 字段）、吊销/过期状态惰性判定、作用域过滤。
 - 手工：双账号验证成员权限变化即时生效（role 查询为请求期裁决）。
-- ~~Skill L4 增删对调试即时生效~~（口径修订后作废：本页只做包配置技能展示，无 L4 操作）。
+- ~~Skill L4 增删对调试即时生效~~（口径修订后作废：本页已升级为 Skill 中心，无 L4 操作；运行时技能分级（L1-L4）仍由 agent-framework 维护）。

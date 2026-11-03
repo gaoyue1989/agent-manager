@@ -113,7 +113,7 @@ agent-framework/
 │   │       │   ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │       │   └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/models/sandbox/skills/workspace)
 │   │       └── static/monitor/                  # 运营监控独立页 (index.html + app.js 入口 + monitor.js 模块，复用 ../debug 的样式与 vendor)
-│   └── test/                                  # 101 个实跑测试类 / 1026 个用例（2026-09-26 实跑，0 失败 4 跳过）
+│   └── test/                                  # 155 个测试文件（2026-11-03 实跑 162 类 / 1752 用例，0 失败 9 跳过）
 ├── docs/                                     # 设计与改进方案文档 (38 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
@@ -378,6 +378,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x） |
+| `SANDBOX_SESSION_AGENT_ISOLATION` | `true` | | 同用户两会话沙箱代理隔离（与守卫锁粒度 `sessionGranularLocks` 同源联动，2026-10-21 默认开启）；关联 `SANDBOX_SESSION_AGENT_CACHE_MAX`(500)/`SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES`(30) |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
@@ -406,6 +407,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `AGENT_A2A_JOB_SEND_TIMEOUT_SECONDS` | `300` | | loopback message/send blocking 发送超时秒；租期 = 2×该值+60s（认领残留的接管窗口） |
 | `AGENT_A2A_JOB_RETENTION_HOURS` | `24` | | 完成态幂等映射保留小时（Redis TTL）；窗口外同键重试 = 新任务（标准幂等窗口语义） |
 | `AGENT_A2A_JOB_MAX_CONCURRENT` | `32` | | 并发准入（Semaphore tryAcquire(0)）：loopback 自环每 Job 占 2 Tomcat 线程，防自环死锁（Issue §2.5）；饱和返回 503 + Retry-After |
+| `AGENT_AGUI_*` | 见左 | | AG-UI 协议面（`/agui/runs` + 续传端点，`@ConditionalOnProperty` 装配）：`AGENT_AGUI_ENABLED`=`false` 总开关 / `AGENT_AGUI_EMIT_TOKEN_USAGE`=`true` / `AGENT_AGUI_EMIT_TOOL_CALL_ARGS`=`true` / `AGENT_AGUI_ENABLE_REASONING`=`true` / `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE`=`false`（application.yml `agent.agui` 段） |
 | `AGENT_MCP_HEALTH_INTERVAL_SECONDS` | `30` | | MCP 连接看门狗探测周期秒（McpConnectionWatchdog）：listTools 短超时探活，失联按 reload swap-on-success 语义原地重建（修 biz-mcp 重启后长连接静默失效 → ConnectException 永久失败）；≤0 关闭；OAF reload 进行中让位 |
 | `AGENT_MCP_HEALTH_TIMEOUT_SECONDS` | `5` | | 单次 listTools 探活超时秒 |
 
@@ -498,7 +500,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | POST | `/threads/{sid}/stop` | **单轮停止**（协作式中断，[docs/turn-stop-design.md](docs/turn-stop-design.md)）：写 `turn_stop`（reply_id 栅栏）→ 属主副本 1s 轮询 → `agent.interrupt(effectiveUserId, effectiveSessionId)`；202 已受理 / 404 无运行中 turn / 409 HITL 挂起或尚无事件（retryable）/ 503 关闭或存储不可用。终态帧 `cancelled`（排在 AGENT_END 前），history 标注 `stopped`；不撤销工具副作用、不强杀阻塞中的工具 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
-| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效） |
+| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效不落库，per-call SkillFilter overlay；A2A `message.metadata.skills` 同口径）） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复；`default_model`=默认对话模型 id，`fallback_model`/`fallback_source`=有效备用模型与来源 db/env/none） |
 | GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
 | POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；采样参数可空：`reasoningEffort` 格式 `^[a-z0-9_]{1,16}$`、`frequencyPenalty` ∈[-2,2]、`provider` ∈方言枚举；重复 name 400） |
@@ -580,7 +582,7 @@ docker run -d --name agent-framework -p 8100:8100 \
 make docker-build-dev  # 或 docker build -f Dockerfile.dev -t gaoyue1989/agent-framework:java-dev .
 make docker-save       # 导出 tar.gz 传输到内网机器
 make offline           # 进入离线容器 (挂载当前工作目录)
-mvn -o test            # 容器内离线测试 (825 用例 / 跳过 4)
+mvn -o test            # 容器内离线测试 (2026-11-03 实跑 1752 用例 / 跳过 9)
 ```
 
 Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](docs/offline-dev-image.md)。
@@ -590,12 +592,15 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 ## 测试
 
 ```bash
-mvn test     # 2026-09-26 实跑：1026 用例、0 失败、0 错误、4 跳过、BUILD SUCCESS（~55s，JDK 21）
-             # 实跑 101 个测试类。静态注解清点为 106 文件 / 1047 个 @Test，差额 21 全部来自
-             # 5 支按命名不参与 surefire 的 *IT（RedisEventLogIT 10 / SessionEventStoreCrossReplicaIT 6 /
-             # S3FileStorageIT 3 / SessionUserStoreMySqlIT 1 / ThreadHistoryConfirmIT 1），需 -Dtest= 显式跑
-             # 跳过的 4 例全部来自 OpenSandboxApiIntegrationTest（需真实 OpenSandbox Server 可达）
-mvn -o test  # 离线模式 (离线开发镜像内)
+mvn test     # 2026-11-03 实跑：1752 用例、0 失败、0 错误、9 跳过、BUILD SUCCESS（~2min，JDK 21）
+             # 实跑 162 个测试类。静态注解清点为 165 文件 / 1777 个 @Test，差额 28 全部来自
+             # 9 支按命名不参与 surefire 的 *IT（RedisEventLogIT 10 / SessionEventStoreCrossReplicaIT 6 /
+             # S3FileStorageIT 3 / ModelConfigStoreMySqlIT 2 / A2aJobRedisStoreIT 2 / ProtocolRedisEventBusIT 2 /
+             # ThreadHistoryConfirmIT 1 / SessionUserStoreMySqlIT 1 / TurnStopStoreMySqlIT 1），需 -Dtest= 显式跑
+             # 跳过的 9 例 = OpenSandboxApiIntegrationTest 4（需真实 OpenSandbox Server 可达）+
+             #   RedisSandboxExecutionGuardConcurrencyVerifyTest 4（e2e-redis :16379 不可达时跳过）+
+             #   SkillManageServiceTest 1（root 绕过 POSIX 权限，无法模拟不可删除目录）
+mvn -o test  # 离线模式 (离线开发镜像内；2026-11-03 实跑同为 1752 用例 / 跳过 9)
 ```
 
 ### E2E（GitHub Actions 实测 + 本地可复现）
