@@ -114,7 +114,7 @@ agent-framework/
 │   │       │   └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/models/sandbox/skills/workspace)
 │   │       └── static/monitor/                  # 运营监控独立页 (index.html + app.js 入口 + monitor.js 模块，复用 ../debug 的样式与 vendor)
 │   └── test/                                  # 155 个测试文件（2026-11-03 实跑 162 类 / 1752 用例，0 失败 9 跳过）
-├── docs/                                     # 设计与改进方案文档 (38 份, 索引见 docs/README.md)
+├── docs/                                     # 设计与改进方案文档 (52 份, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
@@ -368,7 +368,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_TIMEOUT_MINUTES` | `60` | | 沙箱超时（分钟） |
 | `SANDBOX_PROJECTION_ENABLED` | `true` | | 工作区投影开关（issue #27）：关闭后每次 sandbox start 不再 hydrate 投影目录（AGENTS.md/skills 等），降低每轮对话沙箱同步开销；skills 依赖强的包不要关 |
-| `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 userId 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；Redis 不可用时 fail-open |
+| `SANDBOX_GUARD_ENABLED` | `true` | | 沙箱并发执行守卫（issue #27，官方 §9 对 USER 范围的建议）：Redis SET NX 串行化同 slot 的沙箱获取，消解并发 hydrate 互踩/端口竞态触发面；锁粒度跟随 slot（2026-10-21，`sessionGranularLocks` 与 `SANDBOX_SESSION_AGENT_ISOLATION` 同源联动）：隔离开启（默认）时锁键=隔离键原值（Channel=每会话一个 slot，同会话互斥由 turn_lease 裁决），关闭时经 session_user 反查真实 userId 组键；Redis 不可用时 fail-open |
 | `SANDBOX_GUARD_LEASE_SECONDS` | `900` | | 守卫租约 TTL（崩溃自愈） |
 | `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | `true` | | 投影新鲜度检查 stat 指纹缓存：指纹未变跳过 `WorkspaceProjectionApplier.build()`（省每次 call 全量读+sha256+堆内 tar，实测 4.5MB 工作区 17.9ms→3.2ms）；关闭=逐次全量 build（sandbox-skill-sync-optimization-design ①） |
 | `SANDBOX_SKILL_REVISION_GATE` | `true` | | L4 物化 revision 门控：KV 技能集 `/.revision` 未变且本沙箱代已物化 → 跳过全量物化（1 次 get 替代 list+glob+逐文件读，实测 36.5ms→0.3ms）；关闭=每 acquire 全量（设计 ③） |
@@ -483,7 +483,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/skills/users/{name}/sync-from-package` | 把包内同名技能以包内清单为准**全量替换**为当前用户个人版本（含 scripts/ 等资源；差集清理多余旧文件、失败回滚）；非 UTF-8/二进制文件显式跳过并列入响应 `skipped`；同样置写侧栅栏 `/{name}/.admin-override` |
 | GET | `/debug/user-skills` | **全量用户索引**（运维/调试用途，仅此入口；与 `UserSkillService.listUsers` 同源；触顶截断带 `truncated=true`；索引查询失败 500） |
 | GET | `/debug/monitor/overview` | **运营监控概览**（跨用户汇总，供调试页 Monitor 面板指标卡）：用户数/会话数/**轮次数**（`session_message` 中 `role='USER'` 条数，一条 USER 消息 = 一轮）/回答数/今日新增会话/今日活跃会话/今日消息，另含异常会话 `sessions_with_error`（工具失败）、`sessions_pending_confirm`（HITL 待确认）与并集 `sessions_with_problem`；会话用户维度取 `session_user`，消息维度取 `session_message` 归档轨（归档关闭时消息类指标为 0；归档 role 存 `MsgRole` 枚举名大写），异常判定见下 |
-| GET | `/debug/monitor/sessions` | **运营监控会话列表**（跨全部用户，可按 `userId` 精确 / `keyword`（标题或会话 id）/ `from`+`to` 时间范围 / `onlyProblem=true`（仅工具失败或 HITL 待确认）/ `limit`(≤500)+`offset` 过滤）：`session_user` 驱动 + `agent_state` 双形态 slot 关联取活跃时间，附 `turn_count`（轮次数 = `role='USER'` 消息数）、`message_count` 与问题标记 `error_count`/`has_error`/`pending_confirm`（工具失败判据 = `session_message` 中 `tool_result` 终态 error/denied/interrupted；待确认判据 = `confirm_context` 未消费且未过期，TTL 分档同 `ConfirmContextStore`）；归档聚合按 session_id **slot 双形态**（前缀=Channel 形态业务会话、后缀=规范形态业务会话）归属到 `session_user` 已登记会话，非登记键（网关键/已清理）跳过，避免「概览有、列表无」幽灵计数；`onlyProblem` 时扫描上限 2000 后内存过滤分页。调试页 Monitor 面板数据源，选中会话经 `GET /threads/{sid}/history` 回放问答 |
+| GET | `/debug/monitor/sessions` | **运营监控会话列表**（跨全部用户，可按 `userId` 精确 / `keyword`（标题或会话 id）/ `from`+`to` 时间范围 / `onlyProblem=true`（仅工具失败或 HITL 待确认）/ `limit`(≤500)+`offset` 过滤）：`session_user` 驱动 + `agent_state` 双形态 slot 关联取活跃时间，附 `turn_count`（轮次数 = `role='USER'` 消息数）、`message_count` 与问题标记 `error_count`/`has_error`/`pending_confirm`（工具失败判据 = `session_message` 中 `tool_result` 终态 error/denied/interrupted；待确认判据 = `confirm_context` 未消费且未过期，TTL 分档同 `ConfirmContextStore`）；归档聚合按 session_id **slot 双形态**（前缀=Channel 形态业务会话、后缀=规范形态业务会话）归属到 `session_user` 已登记会话，非登记键（网关键/已清理）跳过，避免「概览有、列表无」幽灵计数；`onlyProblem` 时扫描上限 2000 后内存过滤分页。调试页 Monitor 面板数据源，选中会话经 `GET /threads/{sid}/history` 回放问答（回放消息按轮带 `trace_id`——归档时首个非空盖戳，供 Monitor 展示 trace 入口） |
+| GET | `/debug/monitor/messages` | **运营监控正文检索**（跨全部用户检索 `session_message` 归档轨 USER/ASSISTANT 消息正文，供 Monitor 页按内容定位会话）：`keyword`（正文包含判定，命中用户提问或助手回答）/ `userId` / `from`+`to` / `limit`(≤500)+`offset`；带关键词时扫描窗口封顶 1000 行（超出 `scan_capped=true` 提示缩小时间范围），无关键词按 id 倒序分页；每条返回 `session_id`/`role`/`created_at`/`content`（命中 ±60 字片段）/`content_truncated`/`trace_id` |
 
 > 个人技能管理面用户身份一律取网关注入的 `X-User-Id` 头（不再走 URL 路径 userId）；跨用户越权由网关层负责。名称恰为 `content`/`toggle` 的窄边界见 `UserSkillController` 类注释。
 | GET | `/mcp` | MCP 服务器列表 |
@@ -519,6 +520,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/mcp/ui-context` | MCP Apps (4.7): 静默更新模型上下文（ui_context 表持久化，Hook 下次调用注入） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/tasks*` | **Agent Protocol 远程子 agent 服务端（默认关闭）**：`AGENT_PROTOCOL_ENABLED=true` 才由 SDK 扩展注册——`POST /tasks` 提交、`GET /tasks/{id}` 快照（确认源，F15）、`/{id}/wait`、`/{id}/cancel`、`/{id}/events`(SSE)、`/{id}/resume`；全部经 AgentProtocolAuthFilter 前置校验 `X-Agent-Protocol-Token`，无/错 token 一律 401。关闭时 404、行为与现状完全一致 |
+| PUT | `/sandbox/env` | **沙箱环境变量设置**（[docs/sandbox-env-update-design.md](docs/sandbox-env-update-design.md)）：按 `userId+sessionId` 定位当前沙箱容器，把 env 合并写入 execd `EXECD_ENVS` 指向的文件（bootstrap 默认 `/opt/opensandbox/.env`），后续命令由 execd 自动加载；未开沙箱 409、容器不存在直接报错不兜底；鉴权与 `/admin/*` 同级，值不落盘、不落日志、不出现在响应 |
+| POST/GET | `/agui/*` | **AG-UI 官方协议输出面（默认关闭）**：`AGENT_AGUI_ENABLED=true` 才装配（关闭 404）——`POST /agui/runs`（RunAgentInput 投影 → SSE AguiEvent 流，resume[] 走 HITL 恢复）+ `GET /agui/threads/{threadId}/events?afterSeq=&runId=`（平台扩展续传端点，SessionEventTailer 骨架 + AguiTailRenderer）；与 native 面同一 Channel/turn_lease/confirm_context（双面互认），身份只认 `X-User-Id` 头 |
 
 ### 子路径部署的前缀感知（X-Forwarded-Prefix 契约，2026-10-10）
 
@@ -605,16 +608,20 @@ mvn -o test  # 离线模式 (离线开发镜像内；2026-11-03 实跑同为 175
 
 ### E2E（GitHub Actions 实测 + 本地可复现）
 
-`e2e/` 目录承载 CI 级黑盒 E2E（设计文档 [docs/e2e-ci-plan.md](docs/e2e-ci-plan.md)），随 agent-framework-ci 推送 master 触发，四个 job 并行：
+`e2e/` 目录承载 CI 级黑盒 E2E（Playwright，设计文档 [docs/e2e-ci-plan.md](docs/e2e-ci-plan.md)），随 agent-framework-ci 触发，八个 E2E job 并行（API/UI 组经 `./scripts/run.sh <组>` 分派）：
 
 | job | 内容 |
 |-----|------|
-| e2e-core | S 基础 / F 文件上传下载 / H HITL / M MCP Apps / A A2A + U Debug 页 UI |
-| e2e-multi | R 组多副本（双实例 + nginx 轮询：断连续传/kill 接管/并发 confirm 互斥/事件对账）+ U9 |
-| e2e-sandbox | X 组沙箱（mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流） |
-| e2e-plugin | P 组工具插件（`scripts/plugin-smoke.sh`，非 Playwright：现场编译插件 jar + 自起进程，断言 SPI 注册链路 / `/tools?includeInternal` 运行时注册集 / OAF reload 存活 / deniedTools 剔除 / 自定义工具三态权限） |
+| e2e-core | api-core + api-models + api-reload + ui：S 基础 / SEC 会话隔离 / F 文件上传下载 / H HITL / M MCP Apps / A A2A / SKL 会话技能白名单 / SK 用户技能 / FW 槽位 + MOD 模型管理 + RL OAF reload + U Debug 页 UI（必需检查） |
+| e2e-multi | R 组多副本（api-multi + ui-multi + api-multi-kill：双实例 + nginx 轮询，断连续传/kill 接管/并发 confirm 互斥/事件对账）+ U9（必需检查） |
+| e2e-sandbox | X 组沙箱（api-sandbox，mock OpenSandbox Server：Shell/文件/USER 隔离/GC 降级/pending 限流）（必需检查） |
+| e2e-protocol-multi | P 组协议多副本（api-protocol-multi：lead×2 + member×2 共享 MySQL/Redis，委派链路跨副本正确性 + EventBus 跨副本对账 + A2A Job 同键收敛）（必需检查） |
+| e2e-agui | AG 组 AG-UI 协议面（api-agui，单实例 `AGENT_AGUI_ENABLED=true`：帧序/跨面可见/HITL interrupt+resume/断联续传；非必需） |
+| e2e-router | RT 组路由模式（api-router，nginx 子路径 router 全链路：前缀剥除 + X-Forwarded-Prefix 端到端/SSE 续传/上传/Debug Console 302 与负向语义，纯 HTTP 断言；非必需） |
+| e2e-protocol | T 组先行（api-protocol，双实例=存量+协议开启：`/tasks` 强制 token/存量零影响/卡片 agent_protocol 透出 + J 组 A2A Job，纯 HTTP 断言；非必需） |
+| e2e-plugin | 工具插件部署冒烟（`scripts/plugin-smoke.sh`，非 Playwright：现场编译插件 jar + 自起进程，断言 SPI 注册链路 / `/tools?includeInternal` 运行时注册集 / OAF reload 存活 / deniedTools 剔除 / 自定义工具三态权限；非必需） |
 
-另有 `eval-selftest` job 跑评测飞轮离线自检（`bench/eval/flywheel.py selftest`，零网络零 LLM）——联机 `run/verify` 需真实 LLM 与共享实例，仍不进门禁。
+另有 `eval-selftest`（`bench/eval/flywheel.py selftest`，零网络零 LLM）与 `eval-offline-replay`（`bench/eval/tests/e2e_offline_loop.py --offline`）两个评测 job——联机 `run/verify` 需真实 LLM 与共享实例，仍不进门禁。
 
 - **mock 架构 = 真实服务录制回放**：LLM 响应来自真实 LLM 录制件（`e2e/mock/fixtures/llm/`），沙箱协议来自本机真实 OpenSandbox Server 录制件（`e2e/mock/fixtures/sandbox/`）；场景标记 `[E2E:*]` 只做路由。录制脚本 `scripts/record-*.mjs` 仅开发机使用（密钥走 .env.secrets），CI 纯回放零密钥
 - 环境编排 `scripts/env-up.sh / env-down.sh / run.sh`，CI 与本地同路径；`npm run check:fixtures` 校验录制件覆盖与脱敏。`plugin-smoke.sh` 自带编排，基础设施端口由 `MYSQL_URL`/`REDIS_URL` 推导（CI 3306/6379、本地 3307/16379 同路径）

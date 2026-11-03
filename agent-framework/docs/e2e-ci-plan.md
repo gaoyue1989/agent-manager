@@ -1,6 +1,6 @@
 # agent-framework GitHub Actions E2E 验证体系设计（e2e-ci-plan）
 
-> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **六个** Playwright e2e job 运行，另有评测侧 `eval-selftest` / `eval-replay-offline`；实施记录与缺陷清单见 §11）
+> 状态：**已实施**（v3 录制回放架构，随 agent-framework-ci **八个** Playwright e2e job 运行，另有评测侧 `eval-selftest` / `eval-replay-offline`；实施记录与缺陷清单见 §11）
 > 复核日期：2026-09-26 —— 本版把全文「三个 e2e job」统一为四个，§7 草案替换为「已实施 + 现状指向」，
 > §5 补 P 组用例定义，§11 补 2026-09-25/26 的实施记录。
 > 增补（2026-10-01）—— 协议门禁扩为两个 job：`e2e-protocol`（T 组先行 + J0/J 组 /a2a/jobs HTTP 面，非必需）
@@ -111,9 +111,11 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
 | `e2e-protocol-multi`（P 组，2026-09-30） | lead×2 + member×2 + 双 nginx LB（8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本；`AGENT_PROTOCOL_EVENT_BUS=redis`，共享 MySQL/Redis） | P1-P7 跨副本委派（travel-fulfillment 设计 §18.4/§18.10）：spawn 随机路由→收割汇总、lead kill 接管、member 事件跨副本对账、TTL 恰好一次、无粘性冒烟、存量零影响、A2A Job 同键收敛（用例定义见 §5.12） | needs: changes（**必需检查**） | timeout 30min |
 | `e2e-plugin` | 1 | 插件组（原「P 组」，2026-10-01 改称以消歧——协议多副本 job 亦称「P 组」，见 §5.12；修 #38 low）：工具插件 SPI 加载 + `/tools?includeInternal` 运行时注册集 + OAF reload 存活 + deniedTools 剔除 + 自定义工具三态权限 | needs: changes（与单测并行） | ~5min |
+| `e2e-agui`（AG 组，2026-10-24） | 1（`AGENT_AGUI_ENABLED=true`） | AG 组 API 级（[agui-native-parity-design.md](agui-native-parity-design.md) §12.4）：AG-UI 协议输出面帧序/跨面可见/HITL interrupt+resume/断联续传 | needs: changes（非必需检查） | timeout 30min |
+| `e2e-router`（RT 组，2026-10-10） | 1 + platform-router nginx（fixtures/nginx-router.conf.template） | RT 组 subpath 路由（subpath-routing-design §9.3 本地变体）：`/agent/{short}` 前缀剥离 + X-Forwarded-Prefix 注入端到端（agent-card url / file_ready download_url / endpoints+base_url）、SSE 续传、上传、Debug Console 302 与负向语义；纯 HTTP 断言，不装浏览器 | needs: changes（非必需检查） | timeout 20min |
 | `build-push`（已有） | — | 镜像推送 | needs: changes（与单测并行） | 不变 |
 
-六个 Playwright e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
+八个 Playwright e2e job、单测与 `build-push` 并行（e2e 是独立黑盒门禁，与单测互不依赖、反馈更快；单测仍是必需检查，红则挡合并）。用工作流自带的 `concurrency.group = ci-${{ github.workflow }}-${{ github.ref_name }}` + `cancel-in-progress` 抑制同分支重复跑
 （组名含 workflow 维度，跨工作流互不取消——见根 `AGENTS.md` CI 章节）。沙箱走 mock 后无外拉镜像与 continue-on-error 门槛；核心/多副本/沙箱/协议多副本四个 job 为必需硬门禁（`e2e-protocol` T 组切片、`e2e-plugin` 与 `eval-selftest` 非必需，红了只告警不挡合并）。
 
 > 评测侧 job（不在本文档范围，属离线评测链路）：`eval-selftest`（`bench/eval/flywheel.py selftest`，零网络）、`eval-replay-offline`（`bench/eval/tests/e2e_offline_loop.py --offline` 全链路）、`images-eval`（master push 时构建推送 eval-collector / eval-studio 镜像）。
