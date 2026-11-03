@@ -95,14 +95,14 @@ function renderTable(body) {
         + (isSystem ? ' <span class="badge dim">system</span>' : '')
         + (m.is_default ? ' <span class="badge green">default</span>' : '')
         + (m.is_fallback ? ' <span class="badge yellow">fallback</span>' : '') + '</td>'
-      + '<td><span class="badge dim">' + ctx.utils.esc(m.provider || 'openai') + '</span></td>'
+      + '<td><span class="badge dim" style="white-space:nowrap">' + ctx.utils.esc(m.provider || 'openai') + '</span></td>'
       + '<td class="mono">' + ctx.utils.esc(m.model_id) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.base_url || '—') + '</td>'
       + '<td class="mono">' + ctx.utils.esc(m.api_key_masked || (isSystem ? '（env）' : '（系统密钥）')) + '</td>'
       + '<td class="mono">' + ctx.utils.esc(samplingText(m)) + '</td>'
       + '<td>' + (m.enabled === false
-          ? '<span class="badge red">disabled</span>'
-          : '<span class="badge green">enabled</span>') + '</td>'
+          ? '<span class="badge red" style="white-space:nowrap">disabled</span>'
+          : '<span class="badge green" style="white-space:nowrap">enabled</span>') + '</td>'
       + '<td>'
       + '<button class="btn small" data-act="test" data-id="' + ctx.utils.esc(m.id) + '">Test</button> '
       + (!m.is_default && (isSystem || m.enabled !== false)
