@@ -79,7 +79,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else -}}
 {{- fail "ingress.mode 只能是 host 或 router" -}}
 {{- end -}}
-{{- if and .Values.ingress.tls.enabled (not .Values.ingress.tls.secretName) -}}
+{{- if and (eq (include "oaf-agent.tlsEnabled" . | trim) "true") (not (include "oaf-agent.tlsSecret" .)) -}}
 {{- fail "ingress.tls.enabled=true 时 ingress.tls.secretName 必填（TLS 证书 Secret）" -}}
 {{- end -}}
 {{/* mysql 建库双保险：Job 从 env/secretEnv 的 CHECKPOINT_JDBC_URL 解析建库目标，缺失即拒绝 */}}
@@ -91,5 +91,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if not $jdbc -}}
 {{- fail "mysql.createDatabase=true 时 env/secretEnv 须提供 CHECKPOINT_JDBC_URL（Job 据此解析建库 host/库名）" -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{/*
+ingress TLS 开关归一：导出渲染按设计 §7.3 输出布尔 `tls: false`，同时兼容表形态
+`tls: {enabled, secretName}`（chart 默认/手写 values），避免两种形状互斥导致导出产物不可直接部署。
+*/}}
+{{- define "oaf-agent.tlsEnabled" -}}
+{{- if kindIs "bool" .Values.ingress.tls -}}
+{{- .Values.ingress.tls -}}
+{{- else if .Values.ingress.tls -}}
+{{- .Values.ingress.tls.enabled -}}
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+{{- define "oaf-agent.tlsSecret" -}}
+{{- if and .Values.ingress.tls (not (kindIs "bool" .Values.ingress.tls)) -}}
+{{- .Values.ingress.tls.secretName -}}
 {{- end -}}
 {{- end -}}
