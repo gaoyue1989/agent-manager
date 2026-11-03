@@ -98,6 +98,20 @@ func registerWorkspaceExport(cg *gin.RouterGroup, core *service.Core) {
 		}
 		OK(c, view)
 	})
+	// 导出单列表（导出记录区，issue #216——刷新后可找回导出单/下载交付物/推进状态）
+	ex.GET("/orders", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ListServiceExportOrders(wsID, parseUint(c.Param("id")))
+		if err != nil {
+			mapError(c, err)
+			return
+		}
+		OK(c, list)
+	})
 	// 创建导出单（异步构建）
 	ex.POST("", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)

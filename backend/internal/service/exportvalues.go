@@ -190,6 +190,8 @@ type exportRenderInput struct {
 	Merged       map[string]string   // L1∪L2 已裁决合并结果（空值已剔除）
 	Req          *ExportOrderRequest // L2 原始请求（EnvKeysAdded 计数 / replicas / baseImage）
 	CreatedBy    string              // 导出发起人 username（manifest audit）
+	CreatedAt    time.Time           // 导出单创建时间（manifest audit.createdAt；issue #214——
+	// 首渲传落库回填的 order.CreatedAt，构建后重渲染传 DB 行同字段，重渲染保持不变）
 	OafImageRef  string
 	OafDigest    string // 构建回填前为空
 	ChartVersion string
@@ -376,6 +378,7 @@ func renderExportManifest(in *exportRenderInput, secretKeysCount int) *ExportMan
 		}
 	}
 	m.Audit.CreatedBy = in.CreatedBy
+	m.Audit.CreatedAt = in.CreatedAt // 审计链时间锚点（§12.5 四方关联，issue #214：不得为零值）
 	return m
 }
 

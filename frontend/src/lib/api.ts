@@ -32,7 +32,7 @@ async function upload<T = any>(path: string, file: File): Promise<T> {
 
 export interface PackageRec { id: number; name: string; slug: string; version: string; description: string; refCount: number; fileCount: number; totalSize?: number; sourcePackageId?: number; checksum?: string; workspaceId?: number; isTemplate?: boolean; createdAt: string; }
 export interface PackageDetail { package: PackageRec; tree: any[]; agentsMd: string; }
-export interface FileEntry { name: string; path: string; isDir: boolean; size?: number; children?: FileEntry[]; }
+export interface FileEntry { name: string; path: string; isDir: boolean; size?: number; readOnly?: boolean; children?: FileEntry[]; }
 export interface PackageFileContent { path: string; size: number; binary: boolean; content?: string; }
 export interface VersionUpsert { path: string; content: string; encoding?: string; }
 export interface CreateVersionResult { package: PackageRec; warnings: string[]; }
@@ -223,6 +223,12 @@ export interface ExportPreview {
 export interface ExportOrderView {
   id: number; status: string; oafImageRef?: string; oafImageDigest?: string;
   error?: string; itsmTicketId?: string; createdAt: string; updatedAt: string;
+}
+// 导出单列表行（backend ExportOrderListItem，issue #216 导出记录区；marker 自请求快照解析）
+export interface ExportOrderListItem {
+  id: number; orderNo: string; status: string; marker: string; baseImage?: string;
+  oafImageRef?: string; oafImageDigest?: string; itsmTicketId?: string; error?: string;
+  createdBy: string; createdAt: string; updatedAt: string;
 }
 // 运行时默认单条视图（backend RuntimeDefaultEntry：非敏感键回 value；敏感键 value 恒缺省，
 // hasValue 标记是否已配置——三态保存与「已配置」占位以此为准）
@@ -447,6 +453,9 @@ export const api = {
       request<ExportMark[]>(`/console/workspaces/${ws}/agents/${id}/export/package/marks`),
     create: (ws: number | string, id: number, body: { marker: string; baseImage: string; chartVersion?: string; env?: Record<string, string>; secretKeys?: string[]; replicas?: number }) =>
       request<ExportOrderView>(`/console/workspaces/${ws}/agents/${id}/export`, { method: "POST", body: JSON.stringify(body) }),
+    // 导出单列表（本服务全部导出单，id 倒序——导出记录区，issue #216）
+    list: (ws: number | string, id: number) =>
+      request<ExportOrderListItem[]>(`/console/workspaces/${ws}/agents/${id}/export/orders`),
     get: (orderId: number) => request<ExportOrderView>(`/console/exports/${orderId}`),
     // 下载走 <a href> 直链：JWT 经 httpOnly cookie oaf_session，与 downloadPackage 同模式
     downloadValues: (orderId: number) => `${BASE}/console/exports/${orderId}/values.yaml`,

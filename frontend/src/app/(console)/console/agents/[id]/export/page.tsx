@@ -11,12 +11,13 @@ import CodeMirror from "@uiw/react-codemirror";
 import { yaml as cmYaml } from "@codemirror/lang-yaml";
 import { json as cmJson } from "@codemirror/lang-json";
 import { markdown as cmMarkdown } from "@codemirror/lang-markdown";
-import { api, type ExportOrderView, type ExportPreview, type FileEntry } from "@/lib/api";
-import { useConsoleWs } from "@/lib/useMe";
+import { api, type ExportOrderListItem, type ExportOrderView, type ExportPreview, type FileEntry } from "@/lib/api";
+import { useConsoleWs, useConsoleWsRole } from "@/lib/useMe";
 import { Badge, Btn, Card, Note, PageHead, Tag } from "@/components/ui";
 import { FileTreeView } from "@/lib/file-tree";
 import {
-  classifyEnvLayer, isReadonlyPkgPath, markerIssue, validateEnvKey, validateEnvRowCount, validateEnvValue,
+  classifyEnvLayer, isReadonlyPkgPath, markerIssue, validateEnvRowCount,
+  prefillEnvRows, validateEnvRows, buildPackageTree, ADVANCE_NEXT,
   RUNTIME_DEFAULT_FIELDS,
 } from "@/lib/export-view";
 
@@ -47,6 +48,8 @@ export default function AgentExportPage() {
   const { id } = useParams<{ id: string }>();
   const sid = Number(id);
   const ws = useConsoleWs();
+  const role = useConsoleWsRole();
+  const writable = role === "owner" || role === "admin"; // 推进属运维动作，member 只读（契约 §4.2）
   const invalidId = !Number.isInteger(sid) || sid <= 0;
 
   const [preview, setPreview] = useState<ExportPreview | null>(null);
@@ -58,6 +61,9 @@ export default function AgentExportPage() {
   const [chartVersion, setChartVersion] = useState("0.1.0");
   const [replicas, setReplicas] = useState(2);
   const [order, setOrder] = useState<ExportOrderView | null>(null);
+  const [orders, setOrders] = useState<ExportOrderListItem[]>([]);
+  const [itsmDrafts, setItsmDrafts] = useState<Record<number, string>>({});
+  const [advancingId, setAdvancingId] = useState(0);
   const [creating, setCreating] = useState(false);
   const [msg, setMsg] = useState("");
   const loadIdRef = useRef(0); // 竞态防护：只有最新一次 load 允许 setState（先例 admin/packages/[id]/edit）
@@ -76,29 +82,39 @@ export default function AgentExportPage() {
       setPreview(p);
       if (pkgView) {
         // 组装编辑态：服务端 files[] 为准（binary 文件不内联内容；readOnly 为服务端只读标注，
-        // 与 isReadonlyPkgPath 本地判定双重兜底）；文件树由 files 拍平派生（backend 无独立 tree 字段）
+        // 与 isReadonlyPkgPath 本地判定双重兜底）；目录树由合并草稿叠加后的 files[].path 构建
+        // （草稿可新增嵌套文件，必须从有效视图派生，issue #213）
         const entries: Record<string, EditFile> = {};
-        const treeList: FileEntry[] = [];
+        const treeInput: { path: string; size?: number; readOnly: boolean }[] = [];
         for (const f of pkgView.files ?? []) {
           const ro = !!f.readOnly || isReadonlyPkgPath(f.path);
           entries[f.path] = { path: f.path, original: f.content ?? "", current: f.content ?? "", readonly: ro, binary: !!f.binary };
-          treeList.push({ name: f.path.split("/").pop() || f.path, path: f.path, isDir: false, size: f.size });
+          treeInput.push({ path: f.path, size: f.size, readOnly: ro });
         }
         setFiles(entries);
-        setTreeEntries(treeList);
+        setTreeEntries(buildPackageTree(treeInput));
         // 默认选中 AGENTS.md（函数式更新只在首载兜底，不覆盖用户已选项）
         setActive((cur) => cur || (entries["AGENTS.md"] ? "AGENTS.md" : (Object.keys(entries)[0] ?? "")));
       }
       // 白名单缺省取首项（契约 §4.3，模式同 config.go DEFAULT_IMAGE）
       setBaseImage((cur) => cur || p.baseImageWhitelist?.[0]?.image || "");
       // 现 env 键预填生产环境变量行：后端仅回 hasValue/sensitive 掩码视图（值永不回传），
-      // 行值留空待填；仅首次预填，用户编辑后重载不覆盖输入
-      setEnvRows((cur) => (cur.length ? cur : Object.entries(p.serviceEnv ?? {}).map(([key, e]) => ({ key, value: "", secret: !!e?.sensitive }))));
+      // 行值留空待填；过滤 L3 保留/派生键（CHECKPOINT_JDBC_URL 等由 values 自动生成，
+      // 预填成可编辑行会命中校验拦截、阻塞首次导出，issue #215）；仅首次预填，用户编辑后重载不覆盖输入
+      setEnvRows((cur) => (cur.length ? cur : prefillEnvRows(p.serviceEnv ?? {})));
     } catch (e: any) {
       if (loadIdRef.current === myLoad) setMsg(`加载失败: ${e.message}`);
     }
   }, [ws, sid]);
   useEffect(() => { if (!invalidId && ws) load(); }, [ws, sid, load, invalidId]);
+
+  // ---- 导出记录（issue #216）----
+  const loadOrders = useCallback(async () => {
+    try {
+      setOrders(await api.exportOrders.list(ws, sid));
+    } catch (e: any) { setMsg(`导出记录加载失败: ${e.message}`); }
+  }, [ws, sid]);
+  useEffect(() => { if (!invalidId && ws) loadOrders(); }, [ws, sid, loadOrders, invalidId]);
 
   // ---- ① 配置包编辑 ----
   const dirtyFiles = useMemo(() => Object.values(files).filter((f) => !f.readonly && !f.binary && f.current !== f.original), [files]);
@@ -131,16 +147,10 @@ export default function AgentExportPage() {
   const removeRow = (i: number) => setEnvRows((rows) => rows.filter((_, idx) => idx !== i));
   const patchRow = (i: number, patch: Partial<EnvRow>) => setEnvRows((rows) => rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
-  // 行级校验：L3 保留/派生键、锁定键、重复、格式、值大小；锁定行只读不参与校验
-  const envErrors = useMemo(() => {
-    const errs: Record<number, string> = {};
-    const keys = envRows.map((r) => r.key);
-    envRows.forEach((r, i) => {
-      if (classifyEnvLayer(r.key, lockedKeys) === "L1") return; // 锁定行由锁标呈现，不报错
-      errs[i] = validateEnvKey(r.key, lockedKeys, keys) || validateEnvValue(r.key, r.value);
-    });
-    return errs;
-  }, [envRows, lockedKeys]);
+  // 行级校验：锁定行由锁标呈现不报错；空值占位行不校验（提交按 filledRows 过滤，
+  // 服务现 env 含导出参数键等场景不再空拦截，issue #215）；已填值行跑 L3 保留键/
+  // 导出参数键/锁定键/重复/格式/值大小校验
+  const envErrors = useMemo(() => validateEnvRows(envRows, lockedKeys), [envRows, lockedKeys]);
   const rowCountError = validateEnvRowCount(envRows.length);
 
   // L2 提交集：非锁定行（L3 键已在 validateEnvKey 拦截，不会通过提交）
@@ -170,9 +180,21 @@ export default function AgentExportPage() {
       const secretKeys = filledRows.filter((r) => r.secret).map((r) => r.key);
       const o = await api.exportOrders.create(ws, sid, { marker, baseImage, chartVersion, env, secretKeys, replicas });
       setOrder(o);
-      setMsg(`导出单 EXP 单 #${o.id} 已创建，构建进行中…`);
+      setMsg(`导出单 EXP 单 #${o.id} 已创建，构建进行中…（导出记录区同步可见）`);
+      await loadOrders();
     } catch (e: any) { setMsg(`创建导出单失败: ${e.message}`); }
     finally { setCreating(false); }
+  };
+
+  // 人工推进（owner/admin）：逐段前向（ADVANCE_NEXT），ITSM 单号可空；409/400 错误文案透出
+  const advanceOrder = async (o: ExportOrderListItem, status: string) => {
+    setAdvancingId(o.id);
+    try {
+      await api.exportOrders.advance(o.id, { status, itsmTicketId: (itsmDrafts[o.id] ?? "").trim() || undefined });
+      setMsg(`导出单 ${o.orderNo} 已推进至 ${status}`);
+      await loadOrders();
+    } catch (e: any) { setMsg(`推进失败（${o.orderNo}）: ${e.message}`); }
+    finally { setAdvancingId(0); }
   };
 
   // 导出单状态轮询（3s；非终态 draft/building 才续，先例 PodTable alive 标志）
@@ -189,6 +211,11 @@ export default function AgentExportPage() {
     const t = setInterval(async () => { if (!(await tick())) clearInterval(t); }, 3000);
     return () => { alive = false; clearInterval(t); };
   }, [order?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 轮询中的导出单离开 draft/building（built/failed…）时刷新导出记录列表（状态卡与列表对齐）
+  useEffect(() => {
+    if (order && !POLLING_STATUSES.has(order.status)) void loadOrders();
+  }, [order?.status, loadOrders]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (invalidId && !preview) return (
     <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">Agent 不存在：非法 ID（{String(id)}）</div>
@@ -374,7 +401,7 @@ export default function AgentExportPage() {
           </label>
         </div>
         <p className="mt-2 text-xs text-gray-500">
-          将提交 L2 覆盖 <b>{submittableRows.length}</b> 键（Secret <b>{submittableRows.filter((r) => r.secret).length}</b>）；L1 运行时默认 {lockedKeys.length} 键随 values 组装、不随本表单提交；L3 派生键由平台自动生成。
+          将提交 L2 覆盖 <b>{filledRows.length}</b> 键（Secret <b>{filledRows.filter((r) => r.secret).length}</b>，未填值占位行不计入——issue #215 口径对齐）；L1 运行时默认 {lockedKeys.length} 键随 values 组装、不随本表单提交；L3 派生键由平台自动生成。
         </p>
         <div className="mt-3"><Btn kind="pri" disabled={creating} onClick={submitExport} testid="export-create-btn">{creating ? "创建中…" : "确认导出"}</Btn></div>
 
@@ -404,6 +431,64 @@ export default function AgentExportPage() {
                 <span className="self-center text-xs text-gray-400">values 含明文敏感值，下载写审计日志；随 ITSM 按密级流转</span>
               </div>
             )}
+          </div>
+        )}
+      </Card>
+
+      {/* ⑤ 导出记录（issue #216：导出单跨刷新可找回——重复下载交付物、UI 推进状态） */}
+      <Card title="⑤ 导出记录（本服务全部导出单）">
+        <Note tone="plain">刷新/离开页面后可在此找回全部导出单：交付物可重复下载（每次写审计）；状态推进为 v1 人工逐段操作，仅 owner/admin 可见推进按钮，member 只读。构建中的单可稍后点「刷新列表」。</Note>
+        <div className="mt-2 mb-2"><Btn sm onClick={() => loadOrders()} testid="export-orders-refresh">刷新列表</Btn></div>
+        {orders.length === 0 ? <p className="text-sm text-gray-400">暂无导出单（「确认导出」成功后在此出现）</p> : (
+          <div className="overflow-x-auto" data-testid="export-orders-table">
+            <table className="w-full text-sm">
+              <thead><tr className="border-b text-left text-xs text-gray-500">
+                <th className="p-2">单号</th><th className="p-2">状态</th><th className="p-2">marker</th>
+                <th className="p-2">创建时间</th><th className="p-2">创建人</th><th className="p-2">ITSM 单号</th><th className="p-2">操作</th>
+              </tr></thead>
+              <tbody>
+                {orders.map((o) => {
+                  const next = ADVANCE_NEXT[o.status];
+                  const downloadable = ["built", "approving", "approved", "deploying", "deployed"].includes(o.status);
+                  return (
+                    <tr key={o.id} data-testid={`export-order-row-${o.id}`} className="border-b last:border-0 align-top">
+                      <td className="p-2 font-mono text-xs">{o.orderNo}</td>
+                      <td className="p-2">
+                        <span data-testid={`export-order-status-${o.id}`} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] ${EXPORT_STATUS_STYLE[o.status] ?? "bg-gray-100 text-gray-600"}`}>
+                          <span className="size-1.5 rounded-full bg-current" />{o.status}
+                        </span>
+                        {o.error && <p className="mt-1 max-w-[240px] break-all text-xs text-red-600">{o.error}</p>}
+                      </td>
+                      <td className="p-2 font-mono text-xs">{o.marker || "—"}</td>
+                      <td className="p-2 text-xs text-gray-500">{fmt(o.createdAt)}</td>
+                      <td className="p-2 text-xs">{o.createdBy}</td>
+                      <td className="p-2 text-xs">{o.itsmTicketId || "—"}</td>
+                      <td className="p-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {downloadable && <>
+                            <a href={api.exportOrders.downloadValues(o.id)} data-testid={`order-download-values-${o.id}`}
+                              className="rounded border border-blue-600 px-2 py-1 text-xs text-blue-600 hover:bg-blue-50">values.yaml</a>
+                            <a href={api.exportOrders.downloadManifest(o.id)} data-testid={`order-download-manifest-${o.id}`}
+                              className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:border-blue-200 hover:text-blue-600">manifest.json</a>
+                          </>}
+                          {writable && next && (
+                            <span className="inline-flex items-center gap-1" data-testid={`order-advance-${o.id}`}>
+                              <input value={itsmDrafts[o.id] ?? o.itsmTicketId ?? ""} placeholder="ITSM 单号（可空）"
+                                onChange={(e) => setItsmDrafts((m) => ({ ...m, [o.id]: e.target.value }))}
+                                data-testid={`order-itsm-${o.id}`}
+                                className="w-28 rounded border border-gray-300 px-1.5 py-1 text-xs" />
+                              <Btn sm disabled={advancingId === o.id} onClick={() => advanceOrder(o, next)} testid={`order-advance-btn-${o.id}`}>
+                                {advancingId === o.id ? "推进中…" : `推进→${next}`}
+                              </Btn>
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </Card>

@@ -12,6 +12,7 @@
 | v2 | 明确内网自托管引擎（vLLM/SGLang）为第一优先；两引擎方言合并为同一实现；provider 列启用为方言选择器；修正 enable_thinking 无差别注入的兼容缺陷 |
 | v2.1 | 评审修订：provider 空串语义明确为"不变/默认 openai"（与 name/modelId 一致）；§6 补系统模型 runbook；§7 补真实 MySQL IT |
 | v2.2 | 后续演进同步（2026-09-28）：DB 演进全仓迁入 Flyway，两列落 `V4__3dad588_model_config_sampling.sql`，D6 的 `ensureColumn` 代码内迁移被取代（Store 手工 DDL 模式已移除，见 docs/design/db-migration-flyway-design.md）；§3/§7 对应表述以 V4 迁移为准 |
+| v2.3 | Debug 页「Models」表单跟进（2026-11-03）：表单与 `model_config` 全字段 1:1（连接/采样/开关分区，新增时预填后端默认值，编辑展示 id/created_at/updated_at/is_default/is_fallback）；Provider 改方言下拉，补齐 Reasoning Effort / Frequency Penalty；编辑前拉 `GET /models/{id}` 详情回填（列表项为轻量视图不含采样参数，原实现编辑会把 `enable_thinking` 覆盖为 false） |
 
 ## 0. 决策记录
 
@@ -172,7 +173,7 @@ switch (llm.provider()) {
 | 老客户端 PATCH（不带新字段） | 缺省 = 不变，契约向后兼容 |
 | 新旧版本混跑（滚动发布） | 新列对旧代码透明；旧 Pod 写行新列 NULL，语义正确 |
 | `GET /models/{id}` 响应 | 纯新增键，宽松解析无影响 |
-| Debug 页「Models」表单 | 后端先行，前端表单可后续跟进（非本期阻塞项） |
+| Debug 页「Models」表单 | **已跟进（2026-11-03，v2.3）**：与 `model_config` 全字段 1:1（name/provider/modelId/baseUrl/apiKey/temperature/maxTokens/reasoningEffort/frequencyPenalty/timeoutSeconds/contextLength/enableThinking/enabled + 编辑态 meta）；新增预填后端默认值，编辑时拉 `GET /models/{id}` 详情回填（列表项保持轻量） |
 
 **上线顺序**：部署新版本 → 对内网模型逐一 `PATCH provider`（vllm/sglang）→ 逐模型跑 `/models/{id}/test` 验证。
 

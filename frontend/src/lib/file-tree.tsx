@@ -22,7 +22,7 @@ export function FileTreeView({ entries, selected, onSelect }: {
             style={{ paddingLeft: depth * 14 + 6 }}
             title={e.path}
           >
-            📄 {e.name}
+            📄 {e.name}{e.readOnly ? " 🔒" : ""}
           </button>
         )}
         {e.children?.length ? render(e.children, depth + 1) : null}

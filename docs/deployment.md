@@ -42,6 +42,14 @@ done
 # platform-frontend 是带 registry 前缀的 tag 且 imagePullPolicy: Always
 # → 节点必须能访问 172.20.0.1:5001，先 push 到该registry（不能靠 ctr 导入）
 docker push 172.20.0.1:5001/platform-frontend:v7
+
+# 导出功能基底镜像预置（EXPORT_BASE_IMAGE，issue #218）：导出单异步构建以 busybox 为
+# base 直推镜像仓库，backend 缺省 busybox:1.36 会拉 Docker Hub——离线/内网环境必须预置到
+# 本地 registry（platform.yaml 的 EXPORT_BASE_IMAGE 已固定指向 172.20.0.1:5001/busybox:1.36，
+# 不预置则创建导出单后构建失败入 failed，报 pull base image i/o timeout）
+docker pull busybox:1.36
+docker tag busybox:1.36 172.20.0.1:5001/busybox:1.36
+docker push 172.20.0.1:5001/busybox:1.36
 ```
 
 ## 三、部署平台

@@ -143,6 +143,81 @@ export function validateEnvRowCount(total: number): string {
   return "";
 }
 
+/** 导出页现 env 预填行（issue #215）：过滤 L3 平台保留/派生键（CHECKPOINT_JDBC_URL /
+ * AGENT_REDIS_PREFIX 等由 values 自动生成，本就不应有 UI 行——预填后必被 validateEnvKey
+ * 拦截「平台保留/派生键」，阻塞首次导出）；值留空占位，敏感标注透传。 */
+export function prefillEnvRows(
+  serviceEnv: Record<string, { hasValue?: boolean; sensitive?: boolean } | undefined>,
+): { key: string; value: string; secret: boolean }[] {
+  return Object.entries(serviceEnv ?? {})
+    .filter(([key]) => !RESERVED_ENV_KEYS.includes(key))
+    .map(([key, e]) => ({ key, value: "", secret: !!e?.sensitive }));
+}
+
+/** 导出页行级校验（issue #215）：空值占位行不报错——提交按 filledRows 过滤，占位行本就
+ * 不参与导出（服务现 env 含导出参数键等历史场景下不再空拦截）；已填值行跑键/值校验，
+ * 锁定行（L1）由锁标呈现不报错。返回 行索引 → 错误文案。 */
+export function validateEnvRows(
+  rows: { key: string; value: string }[],
+  lockedKeys: string[],
+): Record<number, string> {
+  const errs: Record<number, string> = {};
+  const keys = rows.map((r) => r.key);
+  rows.forEach((r, i) => {
+    if (isLockedRow(r.key, lockedKeys)) return;
+    if (r.value.trim() === "") return;
+    errs[i] = validateEnvKey(r.key, lockedKeys, keys) || validateEnvValue(r.key, r.value);
+  });
+  return errs;
+}
+
+// 人工推进前向链（设计 §9 v1：逐段推进；failed/cancelled 入口不做 UI 按钮，走 API/脚本）
+export const ADVANCE_NEXT: Record<string, string> = {
+  built: "approving", approving: "approved", approved: "deploying", deploying: "deployed",
+};
+
+// 树节点（与 api.ts FileEntry 结构兼容，页面直传 FileTreeView；readOnly 为只读标识）
+export interface ExportTreeEntry {
+  name: string; path: string; isDir: boolean; size?: number; readOnly?: boolean;
+  children?: ExportTreeEntry[];
+}
+
+/** 配置包目录树构建（issue #213）：由拍平 files[].path（后端 ExportPackageView 为源包 +
+ * 草稿叠加后的有效文件视图，含草稿新增文件）按 / 分段构建**嵌套**层级（FileTreeView 按
+ * children 递归渲染）——目录节点去重合并、同级目录在前文件在后（按 path 字典序），
+ * 叶子节点带只读标识。 */
+export function buildPackageTree(files: { path: string; size?: number; readOnly?: boolean }[]): ExportTreeEntry[] {
+  type TreeNode = ExportTreeEntry & { childrenMap: Map<string, TreeNode> };
+  const root: TreeNode = { name: "", path: "", isDir: true, childrenMap: new Map() };
+  for (const f of files) {
+    const segs = f.path.split("/").filter(Boolean);
+    let cur = root;
+    for (let i = 0; i < segs.length - 1; i++) {
+      const dirPath = segs.slice(0, i + 1).join("/");
+      let next = cur.childrenMap.get(dirPath);
+      if (!next) {
+        next = { name: segs[i], path: dirPath, isDir: true, childrenMap: new Map() };
+        cur.childrenMap.set(dirPath, next);
+      }
+      cur = next;
+    }
+    const leafName = segs[segs.length - 1] || f.path;
+    // 叶子也带空 childrenMap 以统一 TreeNode 类型（toEntry 仅对 isDir 读取它）
+    cur.childrenMap.set(f.path, { name: leafName, path: f.path, isDir: false, size: f.size, readOnly: f.readOnly, childrenMap: new Map() });
+  }
+  // Map → children 数组：同级目录在前文件在后，各按 path 字典序
+  const toEntry = (n: TreeNode): ExportTreeEntry => {
+    if (!n.isDir) return { name: n.name, path: n.path, isDir: false, size: n.size, readOnly: n.readOnly };
+    const all = [...n.childrenMap.values()].sort((a, b) => a.path.localeCompare(b.path));
+    return {
+      name: n.name, path: n.path, isDir: true,
+      children: [...all.filter((c) => c.isDir), ...all.filter((c) => !c.isDir)].map(toEntry),
+    };
+  };
+  const top = [...root.childrenMap.values()].sort((a, b) => a.path.localeCompare(b.path));
+  return [...top.filter((c) => c.isDir), ...top.filter((c) => !c.isDir)].map(toEntry);
+}
+
 /** marker 格式提示（{包版本}-e{序号}，如 1.2.0-e1）；空串 = 合法。 */
 export function markerIssue(marker: string): string {
   if (!marker.trim()) return "请选择发布标记（先在「配置包」区块打发布标记）";
