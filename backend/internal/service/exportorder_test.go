@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -542,6 +543,104 @@ func TestExportOrderSameMarkerStableBuildInputs(t *testing.T) {
 	}
 	if len(calls[1].Labels) != len(calls[0].Labels) {
 		t.Fatalf("label set size drift: %d vs %d", len(calls[0].Labels), len(calls[1].Labels))
+	}
+}
+
+// TestExportPreviewMaskAndDerived 导出页预填视图（契约 §4.1）：敏感值绝不回显
+// （服务 secret env / L1 敏感键 / 源服务 env 明文三路都不进 JSON）、敏感键条目仅
+// hasValue/sensitive 两键、派生键预览三字段形状、lockedKeys 升序且剔除空值键。
+func TestExportPreviewMaskAndDerived(t *testing.T) {
+	core, _, ws, svc, _, done := newExportFixture(t)
+	defer done()
+	// 空值键行（模拟历史残留）：lockedKeys 过滤器必须剔除（exportorder.go :587-593 只收非空值）
+	if err := core.DB.Create(&store.WorkspaceRuntimeDefaultEntity{
+		WorkspaceID: ws.ID, EnvKey: "REGISTRY_NAMESPACE", Value: "", Category: "registry",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	preview, err := core.ExportPreview(ws.ID, svc.ID)
+	if err != nil {
+		t.Fatalf("ExportPreview: %v", err)
+	}
+	// ① 整体 JSON 泄漏扫描：L1 敏感值 / 源服务 secret env 值 / 源服务 plain env 值均不出现
+	raw, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, leak := range []string{"prod-pw", "sk-source", "https://src.example.com/v1"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("preview JSON leaks %q: %s", leak, body)
+		}
+	}
+	// ② 敏感键条目仅 hasValue/sensitive 两键（ExportPreviewEnvEntry 无 value 字段，
+	// 结构性掩码——该断言钉住红线，防止后续加便捷字段无感穿透）
+	for key, wantSensitive := range map[string]bool{"LLM_API_KEY": true, "LLM_BASE_URL": false} {
+		entry, ok := preview.ServiceEnv[key]
+		if !ok {
+			t.Fatalf("ServiceEnv missing %q: %v", key, preview.ServiceEnv)
+		}
+		eraw, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var emap map[string]json.RawMessage
+		if err := json.Unmarshal(eraw, &emap); err != nil {
+			t.Fatal(err)
+		}
+		if len(emap) != 2 {
+			t.Fatalf("env entry %q must carry exactly hasValue/sensitive, got %s", key, eraw)
+		}
+		if entry.HasValue != true || entry.Sensitive != wantSensitive {
+			t.Fatalf("env entry %q = %+v, want hasValue=true sensitive=%v", key, entry, wantSensitive)
+		}
+	}
+	// L1 敏感键掩码：HasValue 不回填 Value（workspaceruntime.go GetRuntimeDefaults）
+	if pw, ok := preview.RuntimeDefaults["CHECKPOINT_PASSWORD"]; !ok || !pw.HasValue || pw.Value != "" || !pw.Sensitive {
+		t.Fatalf("L1 sensitive entry wrong: %+v", pw)
+	}
+	// ③ 派生键预览三字段：{基库}_{short}（- 转 _）/ {short}: / {registry}/oaf-{short}:{marker 占位}
+	short := preview.Service.ShortName
+	if short != "e2e-export-agent" {
+		t.Fatalf("shortName = %q", short)
+	}
+	dp := preview.DerivedPreview
+	if dp.CheckpointDB != "oaf_checkpoint_e2e_export_agent" {
+		t.Fatalf("derivedPreview.checkpointDB = %q", dp.CheckpointDB)
+	}
+	if dp.RedisPrefix != "e2e-export-agent:" {
+		t.Fatalf("derivedPreview.redisPrefix = %q", dp.RedisPrefix)
+	}
+	wantRef := "172.20.0.1:5001/oaf-e2e-export-agent:{marker}"
+	if dp.OafImageRef != wantRef {
+		t.Fatalf("derivedPreview.oafImageRef = %q, want %q", dp.OafImageRef, wantRef)
+	}
+	// ④ lockedKeys：升序、剔除空值键、与非空 L1 事实源一致
+	l1, err := core.loadRuntimeDefaultValues(ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, 0, len(l1))
+	for k, v := range l1 {
+		if v != "" {
+			want = append(want, k)
+		}
+	}
+	sort.Strings(want)
+	got := preview.LockedKeys
+	if !sort.StringsAreSorted(got) {
+		t.Fatalf("lockedKeys not ascending: %v", got)
+	}
+	if strings.Contains(strings.Join(got, ","), "REGISTRY_NAMESPACE") {
+		t.Fatalf("lockedKeys must exclude empty-valued key: %v", got)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("lockedKeys = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("lockedKeys[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

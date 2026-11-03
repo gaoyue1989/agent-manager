@@ -312,6 +312,21 @@ async function main() {
     check("沙箱总览表格渲染", !!(await page.$(testid("sandbox-table"))));
     check("沙箱总览含沙箱 Agent", (await text(testid("sandbox-table"))).includes(SANDBOX_NAME), await text(testid("sandbox-table")));
 
+    // ---- 工作空间配置（跨集群导出 §10：runtime-defaults 单端点，掩码 + 三态）----
+    console.log("== UI：工作空间配置 ==");
+    await goto("/console/workspace-config", testid("ws-config-page"));
+    check("空间配置页渲染", !!(await page.$(testid("ws-config-page"))));
+    check("空间配置页签栏渲染", !!(await page.$(testid("ws-config-tabs"))));
+
+    // ---- 导出发布页（跨集群导出 §9：源包编辑/标记/env 锁定行/派生键预览）----
+    console.log("== UI：导出发布页 ==");
+    await goto(`/console/agents/${ctx.svcId}/export`, testid("export-page"));
+    check("导出页渲染", !!(await page.$(testid("export-page"))));
+    // marks-table / env-table 为无条件渲染区块（preview 拉取后即出现）
+    await page.waitForSelector(testid("marks-table"), { timeout: 30000 }).catch(() => {});
+    check("发布标记列表区块渲染", !!(await page.$(testid("marks-table"))));
+    check("生产环境变量表渲染", !!(await page.$(testid("env-table"))));
+
     if (RUNTIME === "mock") {
       console.log("  ⏭️  E2E_AGENT_RUNTIME=mock：跳过会话/调试类 UI 断言");
     }
