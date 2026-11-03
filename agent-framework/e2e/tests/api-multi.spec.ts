@@ -5,7 +5,7 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import { BASE, REPLICA_A, REPLICA_B, sessionIdFor } from '../lib/env.js';
-import { chat, status, subscribe, history, confirmSync } from '../lib/client.js';
+import { chat, status, subscribe, history, confirmSync, stop } from '../lib/client.js';
 import { waitTerminal, textOf, pollUntil } from '../lib/matchers.js';
 import { seqMonotonic, type Frame } from '../lib/sse.js';
 import { createApprovalApp } from '../lib/client.js';
@@ -100,4 +100,44 @@ test('R6 跨副本事件完整性对账', async () => {
   // 观察者（B）观测到终态完成（done）。注：tailer 追赶存在交付缺口（见 D2），
   // 早期事件（AGENT_START 等）在竞态下可能不送达观察者，不在此断言。
   expect(observer.frames.some(f => f.type === 'AGENT_END' || f.type === 'done')).toBe(true);
+});
+
+// ---------- STP2：停止请求跨副本投递（turn-stop-design §9 建议 1，PR #203） ----------
+// 架构强约束 2 的核心语义：任意请求可落任意副本裁决。停止写 turn_stop 表后由**属主副本**
+// 轮询派发——B 直发的 stop 必须让 A 上的流中断。此链路此前在必需门禁 e2e-multi 零覆盖
+// （静默失效形态：stop 返 202 但流跑完，全部单测照绿）。必须 REPLICA_B 精确寻址：
+// 经 LB 随机路由可能落回 A 自身，失去跨副本证明力。
+test('STP2 跨副本停止：B 直发 stop → A 流收到 cancelled → status/回放收敛', async () => {
+  const sid = sessionIdFor(`stp2-${uniq()}`);
+  const slow = chat({ message: `[E2E:slow](x,400,12)`, userId: U, sessionId: sid, base: REPLICA_A, timeoutMs: 90_000 });
+  await pollUntil(async () => slow.frames, fs => fs.some(f => f.type === 'TEXT_BLOCK_DELTA'), 30_000, 100);
+
+  // 停止请求精确寻址 REPLICA_B（非属主副本）：202 = 已受理（投递 turn_stop 表）
+  const stopped = await stop(sid, REPLICA_B, U);
+  expect(stopped.status, JSON.stringify(stopped.body)).toBe(202);
+  expect(stopped.body.state).toBe('stopping');
+  expect(String(stopped.body.reply_id ?? '')).toBeTruthy();
+
+  // 属主 A 的流在下一中断检查点收敛：cancelled（user_stopped）先于 AGENT_END
+  await waitTerminal(slow);
+  const cancelledIdx = slow.frames.findIndex(f => f.type === 'cancelled');
+  expect(cancelledIdx, `A 流未收到 cancelled 帧，实际帧序 [${slow.frames.map(f => f.type).join(',')}]`).toBeGreaterThanOrEqual(0);
+  expect((slow.frames[cancelledIdx] as Record<string, unknown>).reason).toBe('user_stopped');
+  const agentEndIdx = slow.frames.findIndex(f => f.type === 'AGENT_END');
+  expect(agentEndIdx, 'AGENT_END 缺失（停止轮未正常收尾）').toBeGreaterThan(cancelledIdx);
+  expect(slow.terminal?.type).toBe('done');
+
+  // B 上 /status 归 completed（cancelled 属 Tailer 终态词表）
+  await pollUntil(async () => status(sid, REPLICA_B, U), s => s.state === 'completed', 30_000);
+  // B 上订阅回放：cancelled 可回放且 seq 单调（跨副本事件流完整）
+  const replay = subscribe(sid, 0, REPLICA_B, undefined, U);
+  await replay.closed;
+  expect(replay.frames.some(f => f.type === 'cancelled'), 'B 回放缺少 cancelled 帧').toBe(true);
+  expect(replay.frames[replay.frames.length - 1].type).toBe('done');
+  seqMonotonic(replay.frames);
+
+  // 停止后租约已释放：同会话经 LB 正常发起新 turn
+  const next = chat({ message: `[E2E:plain]`, userId: U, sessionId: sid, timeoutMs: 60_000 });
+  await waitTerminal(next);
+  expect(next.terminal?.type, `停止后新 turn 终态异常: ${JSON.stringify(next.terminal)}`).toBe('done');
 });

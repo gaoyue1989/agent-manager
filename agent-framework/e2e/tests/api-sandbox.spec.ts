@@ -6,8 +6,8 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BASE, sessionIdFor } from '../lib/env.js';
-import { chat, history, a2a } from '../lib/client.js';
-import { waitTerminal, textOf, toolNames, toolResults } from '../lib/matchers.js';
+import { chat, history, a2a, status, stop } from '../lib/client.js';
+import { waitTerminal, textOf, toolNames, toolResults, pollUntil } from '../lib/matchers.js';
 import { upload, textBytes } from '../lib/files.js';
 import type { UploadResult } from '../lib/files.js';
 
@@ -694,4 +694,47 @@ test('X-ENV-5 沙箱不存在 → 404（不做兜底）', async () => {
   const put = await putSandboxEnv(`nobody-${uniq()}`, sessionIdFor(`xenv5-${uniq()}`), { A: '1' });
   expect(put.status).toBe(404);
   expect(put.body.error).toBe('sandbox_not_found');
+});
+
+// ---------- STP 组：单轮停止全链路（turn-stop-design §9 建议 3，PR #203） ----------
+// 此前整条真实链路（stop 写表 → 属主副本轮询 → registry 派发 → SDK interrupt →
+// cancelled 帧落 SSE → /status 归 completed → history 标注 stopped）只有互 mock 的
+// 单测、零 e2e 黑盒。语义注意（design §5.1）：协作式中断不杀阻塞中的工具——stop 后
+// cancelled 要等 sleep 返回、到达下一中断检查点才出现，故不断言 stop→cancelled 立即性，
+// 只断言顺序（cancelled 先于 AGENT_END/done）与终态收敛。
+test('STP1 运行中 turn 停止全链路：202 受理 → cancelled 终态 → status/history 归档', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`stp1-${uniq()}`);
+  // sleep 20s 给 stop 留窗口（工具阻塞中，中断在工具返回后的检查点生效）
+  const stream = chat({ message: `[E2E:execute:sleep](20)`, userId: uid, sessionId: sid, timeoutMs: 120_000 });
+
+  // 工具开始后（turn 已产出事件、租约在持）投递停止
+  await pollUntil(async () => stream.frames, fs => toolNames(fs).includes('execute'), 30_000, 100);
+  const stopped = await stop(sid, BASE, uid);
+  expect(stopped.status, JSON.stringify(stopped.body)).toBe(202);
+  expect(stopped.body.state).toBe('stopping');
+  expect(String(stopped.body.reply_id ?? '')).toBeTruthy();
+
+  // 流收敛：cancelled（reason=user_stopped）出现且先于 AGENT_END / done 终态
+  await waitTerminal(stream);
+  const cancelledIdx = stream.frames.findIndex(f => f.type === 'cancelled');
+  expect(cancelledIdx, `未收到 cancelled 帧，实际帧序 [${stream.frames.map(f => f.type).join(',')}]`).toBeGreaterThanOrEqual(0);
+  expect((stream.frames[cancelledIdx] as Record<string, unknown>).reason).toBe('user_stopped');
+  const agentEndIdx = stream.frames.findIndex(f => f.type === 'AGENT_END');
+  expect(agentEndIdx, 'AGENT_END 缺失（停止轮未正常收尾）').toBeGreaterThan(cancelledIdx);
+  expect(stream.terminal?.type).toBe('done');
+
+  // SDK 恢复话术不上屏（ChatStreamController 抑制 INTERRUPTED 恢复消息）
+  expect(textOf(stream.frames)).not.toContain('I noticed that you have interrupted');
+
+  // /status：cancelled 属终态（SessionEventTailer.TERMINAL_TYPES）→ 归 completed
+  await pollUntil(async () => status(sid, BASE, uid), s => s.state === 'completed', 30_000);
+
+  // history：末轮助手消息换成本地化文案 + stopped 标注（StateDataParser INTERRUPTED 分支）
+  const h = await history(sid, BASE, uid);
+  const msgs = h.messages as Array<Record<string, unknown>>;
+  const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant');
+  expect(lastAssistant, 'history 缺少末轮助手消息').toBeTruthy();
+  expect(lastAssistant!.stopped).toBe(true);
+  expect(String(lastAssistant!.content)).toBe('（本次回复已被用户停止）');
 });
