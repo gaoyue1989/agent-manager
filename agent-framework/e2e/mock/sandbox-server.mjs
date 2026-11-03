@@ -49,9 +49,11 @@ function initExecdEnvs(id, createEnv) {
 }
 
 /**
- * 模拟 execd UserEnvOverlay（components/execd/pkg/runtime/env.go）：
- * 每条命令执行前重新读取 EXECD_ENVS 文件并合并进命令 env。
- * 行格式：KEY=value / KEY='value'（单行；单引号内 $ 等字面量处理，不展开）。
+ * 模拟**已发布 execd**（server/v0.2.x 线、2026-09-17 前构建）的 UserEnvOverlay：
+ * 逐行 `SplitN("=", 2)` + `os.ExpandEnv`，**不解析引号**——`KEY='v'` 会原样读成 `'v'`。
+ * 新版 execd 才支持 dotenv 引号（parseQuotedEntry）；框架按裸 `KEY=value` 写入，
+ * 两版语义一致（SandboxEnvFile 值约束据此禁止 $、换行、首尾空白、首字符引号）。
+ * 本 mock 故意保留旧版语义：若接口回退到引号包裹，X-ENV 字节断言会立即失败。
  */
 function execdEnvOverlay(sb) {
   const envPath = sb.execdEnvsPath || '/opt/opensandbox/.env';
@@ -64,13 +66,20 @@ function execdEnvOverlay(sb) {
     const eq = line.indexOf('=');
     if (eq <= 0) continue;
     const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1).trim();
-    if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-      value = value.slice(1, -1); // 单引号字面量（$ 等不展开）
-    }
+    // 旧版行为：不 TrimSpace 值、不剥引号，仅 os.ExpandEnv
+    const value = expandEnvLikeGo(line.slice(eq + 1));
     if (key) merged[key] = value;
   }
   return merged;
+}
+
+/** 复刻 Go os.ExpandEnv：$VAR / ${VAR} 按 execd 进程 env 展开，未定义→空串；$$ → env["$"]（空） */
+function expandEnvLikeGo(value) {
+  return value.replace(/\$(\$|\{[^}]*\}|[A-Za-z0-9_]+)/g, (_m, name) => {
+    const key = name.startsWith('{') ? name.slice(1, -1) : name;
+    const v = process.env[key];
+    return v === undefined ? '' : String(v);
+  });
 }
 
 const now = () => new Date().toISOString();

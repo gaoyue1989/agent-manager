@@ -35,8 +35,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *   <li>接口管理的键记录在 {@code /tmp/.agent-env.json}（仅用于合并与响应，不参与 execd 读取）。</li>
  * </ul>
  *
- * <p>值约束：execd 的 env 文件解析不支持单引号转义，因此值内禁止 {@code '\''}；
- * 单引号包裹后 {@code $}、反引号、换行均按字面量处理。
+ * <p><b>值格式（跨 execd 版本兼容）</b>：按裸 {@code KEY=value} 渲染，<b>不包裹引号</b>。
+ * 已发布的 execd（server/v0.2.x 线、2026-09-17 前构建）<b>不解析引号</b>，{@code KEY='v'}
+ * 会被原样读成 {@code 'v'}（实测：值含引号且 {@code $} 仍被展开）；新版 execd 才支持
+ * dotenv 引号语义。裸渲染在旧/新版本下语义一致，因此值内禁止：
+ * <ul>
+ *   <li>{@code $}：两版裸值分支都走 {@code os.ExpandEnv}，且无转义语法（{@code $$} 也不是转义），
+ *       无法无损表达；</li>
+ *   <li>换行/回车：按行解析会截断条目；</li>
+ *   <li>首尾空白：旧版逐行 {@code TrimSpace}、新版 {@code TrimSpace(值)}，口径不一；</li>
+ *   <li>首字符 {@code '} / {@code "}：新版按引号值解析（剥引号）、旧版按字面保留，语义分叉。</li>
+ * </ul>
+ * 值内的单引号（非首字符）两版均按字面保留，允许。
  */
 @Component
 public class SandboxEnvFile {
@@ -169,9 +179,23 @@ public class SandboxEnvFile {
         if (value.indexOf('\0') >= 0) {
             throw invalid("invalid_env_value", "env value must not contain NUL");
         }
-        if (value.indexOf('\'') >= 0) {
+        // 行式格式：值内换行会截断条目并注入后续行
+        if (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
+            throw invalid("invalid_env_value", "env value must not contain newline");
+        }
+        // 旧/新 execd 的裸值分支都做 os.ExpandEnv，且无转义语法（$$ 会被解析为空）
+        if (value.indexOf('$') >= 0) {
             throw new SandboxEnvException("unsupported_env_value", 400,
-                "env value must not contain single quote (EXECD_ENVS parser limitation)");
+                "env value must not contain '$' (EXECD_ENVS expands $VARS with no escape syntax)");
+        }
+        // 首尾空白在旧版（逐行 TrimSpace）与新版（TrimSpace(值)）口径不一致
+        if (!value.equals(value.strip())) {
+            throw invalid("invalid_env_value", "env value must not have leading/trailing whitespace");
+        }
+        // 新版 execd 以首个非空白字符判定引号值并剥引号；旧版按字面保留 → 语义分叉
+        if (!value.isEmpty() && (value.charAt(0) == '\'' || value.charAt(0) == '"')) {
+            throw new SandboxEnvException("unsupported_env_value", 400,
+                "env value must not start with a quote (EXECD_ENVS quote semantics differ across versions)");
         }
     }
 
@@ -189,11 +213,14 @@ public class SandboxEnvFile {
 
     // ==================== 渲染与发布 ====================
 
-    /** 渲染变更行：每行 {@code KEY='value'}（值已禁单引号，无需转义） */
+    /**
+     * 渲染变更行：每行裸 {@code KEY=value}（不包裹引号）——旧版 execd 不剥引号、新版支持
+     * dotenv 引号，裸值在两者下语义一致（见类注释「值格式」）。
+     */
     static String renderLines(Map<String, String> incoming) {
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> entry : incoming.entrySet()) {
-            sb.append(entry.getKey()).append('=').append('\'').append(entry.getValue()).append('\'').append('\n');
+            sb.append(entry.getKey()).append('=').append(entry.getValue()).append('\n');
         }
         return sb.toString();
     }

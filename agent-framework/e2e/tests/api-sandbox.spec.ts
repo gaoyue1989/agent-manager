@@ -593,10 +593,24 @@ async function putEnvWithRetry(userId: string, sessionId: string, env: Record<st
   return last;
 }
 
-/** 拼接某轮工具结果文本（TOOL_RESULT_TEXT_DELTA = 真实 bash stdout，textOf 只拼 LLM 文本帧） */
-const toolOutputOf = (frames: Array<Record<string, unknown> & { type: string }>) =>
-  frames.filter(f => f.type === 'TOOL_RESULT_TEXT_DELTA')
+/**
+ * 拼接某轮工具结果文本（TOOL_RESULT_TEXT_DELTA = 真实 bash stdout，textOf 只拼 LLM 文本帧）。
+ * execute 工具结果按 JSON 字符串编码（delta 形如 `"Exit code: 0\n\n<stdout>"`），此处解码。
+ */
+const toolOutputOf = (frames: Array<Record<string, unknown> & { type: string }>) => {
+  const raw = frames.filter(f => f.type === 'TOOL_RESULT_TEXT_DELTA')
     .map(f => String(f.delta ?? '')).join('');
+  try {
+    const decoded = JSON.parse(raw);
+    return typeof decoded === 'string' ? decoded : raw;
+  } catch {
+    return raw;
+  }
+};
+
+/** 工具结果去掉 execute 包装的 "Exit code: N" 前缀，得到沙箱命令 stdout */
+const toolStdoutOf = (frames: Array<Record<string, unknown> & { type: string }>) =>
+  toolOutputOf(frames).replace(/^Exit code: -?\d+\n\n?/, '').trim();
 
 test('X-ENV-1 接口写入 → 后续命令自动加载（execd 每条命令重读）', async () => {
   const uid = U();
@@ -611,9 +625,9 @@ test('X-ENV-1 接口写入 → 后续命令自动加载（execd 每条命令重�
   const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
   await waitTerminal(stream);
   expect(stream.terminal?.type).toBe('done');
-  const envText = toolOutputOf(stream.frames);
-  expect(envText).toContain('one');
-  expect(envText).toContain('keep');
+  // 字节级精确断言：旧版 execd 不剥引号，若接口写 KEY='one' 这里会是 "'one' 'keep'"
+  const envText = toolStdoutOf(stream.frames);
+  expect(envText).toBe('one keep');
   const preview = stream.frames.find(f => f.type === 'tool_result_preview') as Record<string, unknown> | undefined;
   expect(String(preview?.preview ?? '')).toContain('one');
 });
@@ -628,9 +642,8 @@ test('X-ENV-2 合并更新：未修改的键保持生效', async () => {
   const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
   await waitTerminal(stream);
   expect(stream.terminal?.type).toBe('done');
-  const envText = toolOutputOf(stream.frames);
-  expect(envText).toContain('two');   // 更新的键生效（追加行覆盖旧行）
-  expect(envText).toContain('keep');  // 未修改的键保持生效
+  const envText = toolStdoutOf(stream.frames);
+  expect(envText).toBe('two keep');   // 更新的键生效（追加行覆盖旧行）、未修改键保持生效
 });
 
 test('X-ENV-3 镜像脚本写入的 PATH 行保留（不整文件覆盖）', async () => {
@@ -644,16 +657,37 @@ test('X-ENV-3 镜像脚本写入的 PATH 行保留（不整文件覆盖）', asy
   const dl = await fetch(`${SANDBOX_MOCK}/v1/sandboxes/${id}/proxy/44772/files/download?path=${encodeURIComponent('/opt/opensandbox/.env')}`);
   const envFileText = await dl.text();
   expect(envFileText).toContain('PATH=/usr/local/bin:/usr/bin:/bin'); // 镜像脚本启动追加行
-  expect(envFileText).toContain("SANDBOX_E2E_TOKEN='one'");           // 接口追加行
+  expect(envFileText).toContain('SANDBOX_E2E_TOKEN=one');             // 接口追加行（裸值，跨 execd 版本兼容）
 });
 
-test('X-ENV-4 值含单引号 → 400 unsupported_env_value', async () => {
+test('X-ENV-4 值含单引号（非首字符）→ 允许且字面保留', async () => {
   const uid = U();
   const sid = sessionIdFor(`xenv4-${uniq()}`);
   await bootSandbox(uid, sid);
-  const put = await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: "it's" });
-  expect(put.status).toBe(400);
-  expect(put.body.error).toBe('unsupported_env_value');
+  expect((await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: "it's" })).status).toBe(200);
+
+  const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  expect(toolStdoutOf(stream.frames)).toBe("it's");  // 裸值不剥引号也不加引号
+});
+
+test('X-ENV-6 旧/新版 execd 均无法无损表达的值 → 400', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv6-${uniq()}`);
+  await bootSandbox(uid, sid);
+  // $ 会被 os.ExpandEnv 展开（无转义语法）；换行会截断行式格式；首字符引号在新版会被当引号值
+  const cases: Array<[Record<string, string>, string]> = [
+    [{ SANDBOX_E2E_TOKEN: 'sk-$HOME' }, 'unsupported_env_value'],
+    [{ SANDBOX_E2E_TOKEN: 'a\nb' }, 'invalid_env_value'],
+    [{ SANDBOX_E2E_TOKEN: "'quoted'" }, 'unsupported_env_value'],
+  ];
+  for (const [env, code] of cases) {
+    // 沙箱状态在 turn 收尾异步落库：404 重试（400 立即返回），与其余 X-ENV 用例一致
+    const put = await putEnvWithRetry(uid, sid, env);
+    expect(put.status, JSON.stringify(env)).toBe(400);
+    expect(put.body.error).toBe(code);
+  }
 });
 
 test('X-ENV-5 沙箱不存在 → 404（不做兜底）', async () => {
