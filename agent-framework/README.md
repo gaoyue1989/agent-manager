@@ -5,7 +5,7 @@
 
 - 版本：v2.1.0（Spring Boot 3.3.5 / JDK 21 / Maven 3.9+）
 - 默认端口：`8100`
-- 测试：76 个测试类 / 679 个 `@Test`（含 4 个沙箱集成测试默认跳过）
+- 测试：1752 个用例 / 0 失败 / 9 跳过（2026-11-03 `mvn test` 实跑；跳过 = 4 个 `SANDBOX_IT` 门控沙箱 API 集成用例 + 4 个真实 Redis 并发实测用例（e2e-redis :16379 不可达时跳过）+ 1 个 root 环境文件权限用例）
 - 部署形态：单 Agent 多副本无状态水平扩展
 
 ---
@@ -33,9 +33,9 @@ agent-framework/
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
 │   │       └── static/debug/                    # 调试页面（拆分架构：index.html + css/js/modules）
-│   └── test/                                    # 76 个测试类
+│   └── test/                                    # 155 个测试文件（2026-11-03 实跑 162 类 / 1752 用例 / 9 跳过）
 ├── example/                                     # 示例包（审批 Demo：HITL + MCP App 卡片）
-├── docs/                                        # 设计与改进方案（36 份，索引见 docs/README.md）
+├── docs/                                        # 设计与改进方案（54 份：53 篇 Markdown + schema-full.sql，索引见 docs/README.md）
 └── README.md                                    # 本文件
 ```
 
@@ -138,23 +138,38 @@ config/                                  # AGENT_CONFIG_DIR（默认 /config）
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
 | GET | `/skills` | 技能列表（frontmatter 声明 ∪ `/config/skills` 目录事实合并） |
+| GET/POST/PUT/DELETE | `/skills/users/*` | 个人技能（L4）管理面：列表 / 内容（`{name}`、`?file=`）/ 下载 zip / 新建覆盖（PUT）/ 启停（`/toggle`）/ zip 上传（`/upload`）/ 包内同步（`/sync-from-package`）/ 删除；身份取 `X-User-Id` 头（缺失/非法 400），详见 AGENTS.md §服务端点 |
 | GET | `/mcp` | MCP 服务器列表 |
 | GET | `/tools` | 工具列表 |
 | GET | `/debug` | 调试页面（302 → `/debug/`） |
+| GET | `/debug/user-skills` | 全量用户技能索引（运维/调试；触顶截断带 `truncated=true`） |
+| GET | `/debug/monitor/overview` 、`/debug/monitor/sessions`、`/debug/monitor/messages` | 运营监控数据（调试页 Monitor 面板：跨用户汇总 / 会话列表（keyword/时间范围/onlyProblem 过滤）/ 消息检索） |
+| GET | `/monitor` | 运营监控独立页（只读，仅挂载 Monitor 模块，静态资源复用 `/debug`） |
+| POST/GET | `/admin/reload` | OAF 配置动态 reload（`?scope=auto\|mcp\|agent`；失败保持旧配置 500；GET 为只读状态：已注册 MCP server） |
 | GET | `/system-prompt` | 系统提示词 |
 | GET | `/threads` | Thread 列表 |
 | GET | `/threads/{sid}/history` | 历史消息 + pendingConfirm（含文件下载卡片补齐） |
 | GET | `/threads/{sid}/llm-calls` | LLM 调用记录 |
-| POST | `/threads/chat` | **主对话入口** 单次流 SSE（`{message?, userId?, sessionId?, fileIds?}`；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧） |
+| GET | `/threads/{sid}/subscribe` | SSE 断连续传（`afterSeq` 回放 + 实时追赶，支持 `replyId` 过滤；终态补 `done`、被抢占补 `interrupted`） |
+| GET | `/threads/{sid}/status` | Turn 状态（`working` / `waiting_confirm` / `completed` / `interrupted` / `idle` / `failed`） |
+| POST | `/threads/{sid}/stop` | 单轮停止（协作式中断：写 `turn_stop` 栅栏 → 属主副本中断 agent；202 受理 / 404 无运行中 turn / 409 HITL 挂起 / 503 关闭；终态帧 `cancelled`） |
+| PATCH | `/threads/{sid}` | 更新会话（`title` 重命名 + `model` 会话模型切换） |
+| POST | `/threads/chat` | **主对话入口** 单次流 SSE（`{message?, userId?, sessionId?, fileIds?, model?, skills?}`；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model=绑定会话模型本 turn 生效、skills=本轮技能白名单（缺省全部、`[]`=无技能、未知名忽略，仅本轮生效不落库）） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
 | POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
+| GET/POST | `/models`；GET/PATCH/DELETE `/models/{id}` | 会话模型管理（系统模型 + 托管模型 CRUD；`?all=true` 含禁用；采样参数与方言见 AGENTS.md） |
+| PUT | `/models/{id}/default`、`/models/{id}/fallback` | 设置全局默认 / 备用对话模型（id=system 回落系统模型 / 清除 DB 覆盖回落 `LLM_FALLBACK_MODEL_ID`） |
+| POST | `/models/{id}/test` | 模型连接测试（真实发一次最小 completion，返回 ok/latency_ms/reply） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（`?inline=1` 内联） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps：拉取工具 UI 资源（HtmlResource，CSP 注入） |
 | GET | `/mcp/{server}/resources` | MCP Apps：列出服务器资源 |
 | POST | `/mcp/{server}/tools/{tool}` | MCP Apps：卡片工具调用代理（ask 工具 403 → 走确认流） |
 | POST | `/mcp/ui-context` | MCP Apps (4.7)：静默更新模型上下文 |
+| PUT | `/sandbox/env` | 写沙箱容器 execd env 文件（userId+sessionId 定位；平台后端内网调用；值不落盘/不落日志/不出现于响应） |
 | POST | `/` | A2A JSON-RPC（message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe） |
+| POST/GET | `/tasks*` | Agent Protocol 远程子 agent 服务端（**默认关闭**：`AGENT_PROTOCOL_ENABLED=true` 才注册；`X-Agent-Protocol-Token` 认证；提交/快照/wait/cancel/events/resume） |
+| POST/GET | `/agui/runs`、`/agui/threads/{id}/events` | AG-UI 协议面（RunAgentInput → SSE AguiEvent 流 + 续传端点；**默认关闭**：`AGENT_AGUI_ENABLED=true` 启用） |
 
 ---
 
@@ -218,20 +233,26 @@ TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超
 | `LLM_MAX_TOKENS` | `4096` | | 最大输出 token |
 | `LLM_TIMEOUT` | `120` | | API 超时（秒） |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置，不传给模型） |
+| `LLM_FALLBACK_MODEL_ID` | — | | 部署级备用模型（引用 `model_config` 托管模型 id，主模型重试耗尽后切换；DB `is_fallback` 优先，空 = 不启用） |
 | `AGENT_CONFIG_DIR` | `/config` | | OAF 配置目录 |
 | `SERVER_PORT` | `8100` | | 服务端口 |
 | `CHECKPOINT_JDBC_URL` | `jdbc:mysql://127.0.0.1:3307/agent_manager_test` | | MySQL JDBC URL |
 | `CHECKPOINT_DB_NAME` | — | | agent_state 所在库名（可选，未设时自动从 URL 解析） |
 | `CHECKPOINT_USERNAME` | `agent_manager` | | MySQL 用户 |
 | `CHECKPOINT_PASSWORD` | `Agent@Manager2026` | | MySQL 密码 |
+| `AGENT_REDIS_URL` | `redis://127.0.0.1:6379` | | session_event 事件流存储（Redis Streams）；集群内必配 `redis://oaf-redis.agent-platform.svc.cluster.local:6379`（缺省指向 Pod 自身，事件不落地） |
+| `AGENT_REDIS_PREFIX` | 空 | | key 统一前缀（多 Agent 共用 Redis 的隔离切分；平台发布新服务自动派生 `{k8s 名}:`） |
+| `AGENT_TURN_STOP_ENABLED` / `_POLL_MS` / `_GRACE_MS` | `true` / `1000` / `15000` | | 单轮停止三参数（总开关 false=端点 503 / 属主停止派发轮询周期 / 协作式停止告警阈值） |
 | `SANDBOX_ENABLED` | `false` | | 沙箱模式开关（true 时文件/Shell 在 OpenSandbox 隔离执行） |
 | `SANDBOX_IMAGE` | `opensandbox/code-interpreter:v1.1.0` | | 沙箱镜像 |
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | | execd 命令 SSE 尾窗保持（注入容器 `EXECD_API_GRACE_SHUTDOWN`） |
+| `SANDBOX_SESSION_AGENT_ISOLATION` | `true` | | 同用户两会话沙箱代理隔离（与守卫锁粒度同源联动；关联 `SANDBOX_SESSION_AGENT_CACHE_MAX/TTL_MINUTES`） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | ✓(沙箱) | OpenSandbox API 密钥 |
 | `FILE_*` | 见 file-upload-download-plan | | 文件上传/下载/存储后端（`FILE_STORAGE_TYPE=local/s3`，上传上限 20MB 等） |
 | `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 / 审计与会话保留期 |
+| `AGENT_AGUI_*` | `false`/`true`/`true`/`true`/`false` | | AG-UI 协议面（`AGENT_AGUI_ENABLED` 总开关 / `EMIT_TOKEN_USAGE` / `EMIT_TOOL_CALL_ARGS` / `ENABLE_REASONING` / `EMIT_SUBAGENT_EVENTS_AS_NATIVE`） |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | | 设即启用 OTel Java Agent 追踪（**勿**设 `OTEL_TRACES_EXPORTER`） |
 
 ---
@@ -239,7 +260,8 @@ TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超
 ## 测试
 
 ```bash
-mvn test                                  # 76 个测试类 / 679 个 @Test（默认跳过 4 个沙箱集成测试）
+mvn test                                  # 2026-11-03 实跑：162 类 / 1752 用例 / 0 失败 / 9 跳过
+                                          # （跳过 4 SANDBOX_IT 沙箱集成 + 4 真实 Redis 并发实测 + 1 root 环境权限用例）
 mvn -o test                               # 离线模式（离线开发镜像内）
 ```
 
@@ -283,7 +305,7 @@ curl http://localhost:8100/debug/workspace
 
 ## 维护约定
 
-- 任何对端点、控制器、表结构、测试数（76/679）、环境变量默认值、`/config/skills` L2 仓库行为等已落地事项的修改，需同步更新：
+- 任何对端点、控制器、表结构、测试数（2026-11-03 实跑 1752 用例 / 9 跳过）、环境变量默认值、`/config/skills` L2 仓库行为等已落地事项的修改，需同步更新：
   1. 涉及的具体方案文档（[docs/](docs/)）
   2. [docs/api.md](docs/api.md) / [docs/agent-framework-design.md](docs/agent-framework-design.md) / [docs/agent-framework-deploy.md](docs/agent-framework-deploy.md) / [docs/agent-framework-test.md](docs/agent-framework-test.md) / [docs/checkpoint-design.md](docs/checkpoint-design.md) 对应章节
   3. [AGENTS.md](AGENTS.md) 目录树、端点表、AgentScope 功能表、环境变量表、测试统计
