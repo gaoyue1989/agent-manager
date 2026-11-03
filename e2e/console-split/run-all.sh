@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 控制台拆分按功能 e2e 套件 runner（M0–M8 + M9 技能中心 + M10 沙箱配置；
+# 控制台拆分按功能 e2e 套件 runner（M0–M8 + M9 技能中心 + M10 沙箱配置 + M11 空间配置/导出；
 # 原「M9 enforce 三态」属独立网关环境，见 10-gateway-auth.md，不在本 runner）。
 # 用法：
 #   BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911 \
@@ -9,7 +9,7 @@
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 MODULES=("$@")
-[ ${#MODULES[@]} -eq 0 ] && MODULES=(m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10)
+[ ${#MODULES[@]} -eq 0 ] && MODULES=(m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11)
 
 declare -A RESULT
 for M in "${MODULES[@]}"; do

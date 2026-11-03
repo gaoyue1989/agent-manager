@@ -145,6 +145,10 @@ func TestExportRoutesAndMask(t *testing.T) {
 	if _, ok := preview["baseImageWhitelist"].([]interface{}); !ok {
 		t.Fatalf("preview missing baseImageWhitelist: %v", preview)
 	}
+	// preview 段泄漏扫描（掩码红线同详情/列表段）：L1 敏感值 prod-pw 绝不回显
+	if strings.Contains(w.Body.String(), "prod-pw") {
+		t.Fatalf("preview leaks L1 sensitive value: %s", w.Body.String())
+	}
 	// 创建导出单：L2 敏感键经 secretKeys 进 values secretEnv
 	body := map[string]interface{}{
 		"marker":     marker,
