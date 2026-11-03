@@ -104,12 +104,25 @@ public class SkillInjectionService {
      * @return 处理后的消息（含 Skill 注入），若无 @ 标记则返回原消息
      */
     public String injectSkillReferences(String message, String userId) {
+        return injectSkillReferences(message, userId, (List<String>) null);
+    }
+
+    /**
+     * 注入 @Skill 引用（本轮可用技能列表，session-skill-list-design §5）：
+     * 仅注入「白名单内且已启用」的技能；白名单外（含未知名）保留原文，不报错、不提示。
+     *
+     * @param message    原始用户消息
+     * @param userId     会话生效的 userId（可为 null，此时仅全局目录）
+     * @param skillNames 本轮可用技能列表；null = 不限制（全部启用技能）
+     * @return 处理后的消息（含 Skill 注入），若无 @ 标记则返回原消息
+     */
+    public String injectSkillReferences(String message, String userId, List<String> skillNames) {
         if (message == null || message.isBlank() || !message.contains("@")) {
             return message;
         }
 
-        // 1. 获取所有已启用 Skill 的 name 集合（全局目录 ∪ 该用户 L4）
-        var enabledSkills = enabledSkillNames(userId);
+        // 1. 获取本轮可用的已启用 Skill name 集合（全局目录 ∪ 该用户 L4，再按白名单裁剪）
+        var enabledSkills = enabledSkillNames(userId, skillNames);
 
         if (enabledSkills.isEmpty()) {
             return message;
@@ -195,11 +208,24 @@ public class SkillInjectionService {
      * @return 匹配到的 Skill 名称列表（去重，保持顺序）
      */
     public List<String> parseSkillReferences(String message, String userId) {
+        return parseSkillReferences(message, userId, (List<String>) null);
+    }
+
+    /**
+     * 解析消息中的 @SkillName 标记（本轮可用技能列表，§5）：仅返回白名单内技能，
+     * 与 {@code @Skill} 注入同口径。
+     *
+     * @param message    用户消息
+     * @param userId     会话生效的 userId（可为 null，此时仅全局目录）
+     * @param skillNames 本轮可用技能列表；null = 不限制
+     * @return 匹配到的 Skill 名称列表（去重，保持顺序）
+     */
+    public List<String> parseSkillReferences(String message, String userId, List<String> skillNames) {
         if (message == null || message.isBlank() || !message.contains("@")) {
             return List.of();
         }
 
-        var enabledSkills = enabledSkillNames(userId);
+        var enabledSkills = enabledSkillNames(userId, skillNames);
 
         var result = new ArrayList<String>();
         var seen = new java.util.LinkedHashSet<String>();
@@ -217,10 +243,11 @@ public class SkillInjectionService {
     }
 
     /**
-     * 已启用技能名集合：全局目录（已启用）∪ 该用户 L4 个人技能。
+     * 已启用技能名集合：全局目录（已启用）∪ 该用户 L4 个人技能，再按本轮白名单裁剪
+     * （§5——白名单为 null 不裁剪；空列表 = 空集）。
      * L4 合并失败降级为全局目录，不阻断 @ 注入。
      */
-    private java.util.Set<String> enabledSkillNames(String userId) {
+    private java.util.Set<String> enabledSkillNames(String userId, List<String> skillNames) {
         var names = new java.util.LinkedHashSet<String>();
         catalogService.list().stream()
             .filter(m -> Boolean.TRUE.equals(m.get("enabled")))
@@ -244,7 +271,23 @@ public class SkillInjectionService {
                 log.warn("enabledSkillNames: merge L4 failed for user {}: {}", userId, e.getMessage());
             }
         }
-        return names;
+        if (skillNames == null) {
+            return names;
+        }
+        var allow = new java.util.LinkedHashSet<String>();
+        for (var name : skillNames) {
+            var trimmed = name == null ? "" : name.trim();
+            if (!trimmed.isEmpty()) {
+                allow.add(trimmed);
+            }
+        }
+        var out = new java.util.LinkedHashSet<String>();
+        for (var n : names) {
+            if (allow.contains(n)) {
+                out.add(n);
+            }
+        }
+        return out;
     }
 
     /**

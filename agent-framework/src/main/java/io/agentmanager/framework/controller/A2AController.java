@@ -80,8 +80,8 @@ public class A2AController {
      * 2. message.messageId 必填（缺失则 -32602）
      * 3. parts 中每个 part 需带 kind 类型标识（如 {"kind":"text","text":"..."}，缺失则 -32602）
      * 4. configuration.blocking=true（仅 message/send 同步场景）
-     * 5. 顶层 userId/sessionId → message.metadata（SDK 从 message.metadata 读取）
-     * 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId
+     * 5. 顶层 userId/sessionId/skills → message.metadata（SDK 从 message.metadata 读取）
+     * 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId；params.metadata.skills 归一
      */
     private String normalizeMessageSendBody(String body) {
         try {
@@ -141,6 +141,40 @@ public class A2AController {
             if (topLevelSessionId != null && !topLevelSessionId.toString().isBlank()) {
                 meta.put("sessionId", topLevelSessionId.toString());
             }
+            // 5.1 本轮可用技能列表（session-skill-list-design §6）：对外契约是
+            // message.metadata.skills（顶层 params.skills 同义），但 SDK 的 A2A→Msg 转换
+            // 只认「按 msg id 分组」的 metadata（getMsgMetadata: metadata[part.msgId] 且值必须
+            // 是 Map；part 以 _agentscope_msg_id 标组）。此处归一为该约定，调用方无感：
+            //   message.metadata = {sessionId, userId, <msgId>: {skills: [...]}}
+            //   parts[*].metadata._agentscope_msg_id = <msgId>
+            // 显式空列表同样归一（Map 内保留空数组 = 无技能）。
+            Object requestedSkills = meta.remove("skills");
+            if (requestedSkills == null) {
+                requestedSkills = params.get("skills");
+            }
+            if (requestedSkills instanceof List<?> skillsList) {
+                var msgId = String.valueOf(message.get("messageId"));
+                if (message.get("parts") instanceof List<?> skillsParts) {
+                    for (var p : skillsParts) {
+                        if (p instanceof Map<?, ?> partMap) {
+                            @SuppressWarnings("unchecked")
+                            var part = (Map<String, Object>) partMap;
+                            var partMeta = part.get("metadata") instanceof Map<?, ?> pm
+                                ? new java.util.LinkedHashMap<String, Object>((Map<String, Object>) pm)
+                                : new java.util.LinkedHashMap<String, Object>();
+                            // 强制同一 msg id：多 part 归并为同一条 Msg，白名单对所有 part 生效
+                            partMeta.put("_agentscope_msg_id", msgId);
+                            part.put("metadata", partMeta);
+                        }
+                    }
+                }
+                var nested = new java.util.LinkedHashMap<String, Object>();
+                if (meta.get(msgId) instanceof Map<?, ?> existingNested) {
+                    nested.putAll((Map<String, Object>) existingNested);
+                }
+                nested.put("skills", skillsList);
+                meta.put(msgId, nested);
+            }
             // 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId
             @SuppressWarnings("unchecked")
             var legacyMeta = (Map<String, Object>) params.get("metadata");
@@ -152,6 +186,10 @@ public class A2AController {
                 var uid = legacyMeta.get("userId");
                 if (uid != null && !meta.containsKey("userId")) {
                     meta.put("userId", uid.toString());
+                }
+                var legacySkills = legacyMeta.get("skills");
+                if (legacySkills instanceof List<?> && !meta.containsKey("skills")) {
+                    meta.put("skills", legacySkills);
                 }
             }
             message.put("metadata", meta);

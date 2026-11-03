@@ -56,9 +56,9 @@ ingress:
   # router 模式必填：子路径前缀（如 /agent/travel-agent；渲染 ingress-nginx rewrite-target /
   # use-regex / x-forwarded-prefix 三注解剥前缀——生产集群无平台共享路由器，该语义由环境自担）
   pathPrefix: ""
-  tls:
-    enabled: false
-    secretName: ""      # enabled=true 必填（host 模式 TLS 证书 Secret）
+  # TLS：导出渲染按设计 §7.3 输出布尔 `tls: false`；表形态 {enabled: true, secretName: xxx}
+  # 仍兼容（templates/_helpers.tpl 归一）。enabled=true 时 secretName 必填（validate 校验）。
+  tls: false
 
 # ---------- MySQL 建库（可选，设计 §6 双保险） ----------
 mysql:

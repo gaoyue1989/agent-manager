@@ -8,7 +8,7 @@ OAF 业务 Agent 已部署（release {{ .Release.Name }}，namespace {{ .Release
 - router 模式（共享路由器子路径）: http(s)://<共享入口>{{ .Values.ingress.pathPrefix }}/
     - A2A 卡片: {{ .Values.ingress.pathPrefix }}/.well-known/agent-card.json
 {{- end }}
-{{- if .Values.ingress.tls.enabled }}（TLS: {{ .Values.ingress.tls.secretName }}）
+{{- if eq (include "oaf-agent.tlsEnabled" . | trim) "true" }}（TLS: {{ include "oaf-agent.tlsSecret" . }}）
 {{- end }}
 
 ## 装后自检

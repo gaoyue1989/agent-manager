@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -108,5 +109,48 @@ class SkillDisabledFilterMiddlewareTest {
         var mw = new SkillDisabledFilterMiddleware(null, null, null);
         var ctx = RuntimeContext.builder().sessionId("gw-x").userId("peer-y").build();
         assertTrue(mw.disabledSkillNames(ctx).isEmpty());
+    }
+
+    @Test
+    void disabledSetShouldOverlayExistingSkillListWhitelist() {
+        // session-skill-list-design §4：先由 SkillFilterMiddleware 立本轮白名单，禁用集再 overlay 剔除
+        var l2 = mock(SkillManageService.class);
+        when(l2.getDisabledSet()).thenReturn(Set.of("pkgA"));
+        var l4 = mock(UserSkillService.class);
+        when(l4.listSkills(any())).thenReturn(List.of());
+        var resolver = mock(SessionKeyResolver.class);
+        when(resolver.realUserId(any())).thenReturn("alice");
+
+        var mw = new SkillDisabledFilterMiddleware(l2, l4, resolver);
+        var ctx = RuntimeContext.builder().sessionId("gw-x").userId("peer-y").build();
+        ctx.put(SkillFilter.class, SkillFilter.only("pkgA", "pkgB"));
+
+        mw.onAgent(mock(io.agentscope.core.agent.Agent.class), ctx,
+            mock(AgentInput.class), in -> Flux.empty()).blockLast();
+
+        var filter = ctx.get(SkillFilter.class);
+        assertFalse(filter.isAllowed("pkgA"), "禁用技能必须从本轮白名单中剔除");
+        assertTrue(filter.isAllowed("pkgB"), "白名单内未禁用技能保留");
+        assertFalse(filter.isAllowed("pkgC"), "白名单外技能仍不可见（白名单未被冲掉）");
+    }
+
+    @Test
+    void noDisabledNamesShouldKeepExistingWhitelist() {
+        var l2 = mock(SkillManageService.class);
+        when(l2.getDisabledSet()).thenReturn(Set.of());
+        var l4 = mock(UserSkillService.class);
+        when(l4.listSkills(any())).thenReturn(List.of());
+        var resolver = mock(SessionKeyResolver.class);
+        when(resolver.realUserId(any())).thenReturn("alice");
+
+        var mw = new SkillDisabledFilterMiddleware(l2, l4, resolver);
+        var ctx = RuntimeContext.builder().sessionId("gw-x").userId("peer-y").build();
+        var whitelist = SkillFilter.only("pkgA");
+        ctx.put(SkillFilter.class, whitelist);
+
+        mw.onAgent(mock(io.agentscope.core.agent.Agent.class), ctx,
+            mock(AgentInput.class), in -> Flux.empty()).blockLast();
+
+        assertSame(whitelist, ctx.get(SkillFilter.class), "无禁用名时白名单原样保留");
     }
 }
