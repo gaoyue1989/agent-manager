@@ -124,6 +124,8 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | 集成（Agent Protocol） | `GET/POST/PATCH/DELETE .../workspaces/:ws/integrations(/:id)` |
 | API Key（凭证） | `GET .../workspaces/:ws/api-keys`（支持 `?agentId=` 过滤）；`POST`（body `{name, agentId?, expiresInDays?}`）签发**明文仅返回一次**，格式 `ak-{8hex}-{24hex}`，列表只见 `keyPrefix`；`DELETE .../:id` 吊销 |
 | 成员 | `GET/POST .../workspaces/:ws/members`；`PATCH/DELETE .../members/:uid`；`GET .../invitable-users` |
+| 导出（跨集群） | Agent 侧：`GET/PUT .../agents/:id/export/package(/file)`、`POST .../export/package/mark`、`GET .../export/package/marks`、`GET .../export/preview`、`GET .../export/orders`（导出记录，#216）、`POST .../agents/:id/export`（创建导出单，201）；导出单侧（挂 `/console/exports`，仅 JWT 不需空间段）：`GET /console/exports/:id`、`GET /:id/values.yaml` 与 `/:id/manifest.json`（下载交付物）、`POST /:id/status`（owner/admin 人工推进 built→approving→approved→deploying→deployed） |
+| Skill 中心 | `GET/POST .../workspaces/:ws/skill-center`；`POST .../skill-center/upload`；`GET/PATCH/DELETE .../skill-center/:id`；`POST .../skill-center/:id/:action`（启用/停用等）；`GET/POST .../skill-center/:id/versions`；`POST .../skill-center/:id/versions/:vid/:action`；`GET .../skill-center/:id/versions/:vid/download` |
 
 ### 4.4 legacy 存量面（语义与拆分前一致）
 
@@ -137,12 +139,14 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 |------|------|
 | `/console` | 概览（工作空间摘要） |
 | `/console/agents` | Agent 列表；`/console/agents/create` 创建页；`/console/agents/[id]` 详情（六 Tab）；`/console/agents/[id]/edit` 编辑页 |
+| `/console/agents/[id]/export` | 导出发布页（预填与锁定/发布标记冻结/确认导出/导出单状态轮询与交付物下载） |
 | `/console/agents/templates` | 模板 |
 | `/console/assets/models` | 模型连接（右侧抽屉新建/编辑） |
 | `/console/assets/tools` | 工具管理（MCP 连接器，右侧抽屉） |
 | `/console/assets/skills` / `assets/memory` / `assets/knowledge` / `assets/credentials` | 技能 / 记忆 / 知识库 / 凭证（API Key 签发一次性明文弹窗） |
 | `/console/integrations` | 集成登记 |
 | `/console/settings` | 用户侧设置 |
+| `/console/workspace-config` | 空间配置管理（页签：运行时默认 / MCP 连接器模板 / 模型参数 / 沙箱参数 / 仓库与路由；导出发布页预填来源） |
 
 ### 运维侧（(admin) 布局，仅 admin 角色可达；user 访问预期 403/重定向）
 
@@ -219,20 +223,20 @@ curl -s -X POST $BASE/console/workspaces/<ws-id>/api-keys -H "Authorization: Bea
 
 ## 7. 现成 e2e 套件（回归优先跑这些）
 
-套件位置 `e2e/console-split/`（按模块 m0–m8 一个脚本 + `run-all.sh` 聚合，180+ 断言，2026-10-17 九模块全 PASS 实跑记录见 `docs/implementation/README.md`）：
+套件位置 `e2e/console-split/`（按模块 m0–m10 一个脚本 + `run-all.sh` 聚合，静态清点 398 处 `assert_*` 断言调用，实跑总数以 `run-all.sh` 全跑输出为准；2026-10-17 初版九模块全 PASS 实跑记录见 `docs/implementation/README.md`，2026-10-20 起扩至 11 模块）：
 
 ```bash
-# 全量（顺序 m0→m8）
+# 全量（顺序 m0→m10）
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911 ./e2e/console-split/run-all.sh
 
 # 只跑指定模块（如登录与治理）
 BASE=http://localhost:30080/api/v1 ./e2e/console-split/run-all.sh m0 m1
 
-# 单发冒烟（21 断言：登录三分支/路由分层/治理链/API Key/introspect）
-BASE=http://localhost:30080/api/v1 ./e2e/console-split-e2e.sh
+# 单发冒烟（m0：登录三分支/路由分层/治理链/API Key/introspect）
+BASE=http://localhost:30080/api/v1 ./e2e/console-split/run-all.sh m0
 ```
 
-模块与被测面对照：m0 认证与路由分层、m1 运维治理、m2 console 基础（概览/列表/切换器）、m3 创建/编辑主链路（含包契约与 SSE 热生效）、m4 详情六 Tab 与生命周期、m5 模型连接、m6 MCP 连接器、m7 集成、m8 API Key 与成员。M9（enforce 三态）需要独立环境改 `ROUTER_AUTH_MODE`，默认 off 档不在常规套件内。
+模块与被测面对照：m0 认证与路由分层、m1 运维治理、m2 console 基础（概览/列表/切换器）、m3 创建/编辑主链路（含包契约与 SSE 热生效）、m4 详情六 Tab 与生命周期、m5 模型连接、m6 MCP 连接器、m7 集成、m8 API Key 与成员、m9 技能中心（技能资产/市场/版本管理）、m10 沙箱配置。原 M9 enforce 三态需独立网关环境改 `ROUTER_AUTH_MODE`、不在本套件（见 10-gateway-auth.md）。
 
 依赖：`curl`、`jq`、`python3`；m3/m4 涉及真实对话的断言需 LLM 可用（可选传 `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`，缺省自动从 release-agent env 读取）。
 
