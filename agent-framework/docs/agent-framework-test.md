@@ -12,6 +12,9 @@
 > **2026-10-08 三核**：同环境实跑 `mvn -B test` 得 **1353 例 / 0 失败 / 4 跳过（61s，BUILD SUCCESS）**，
 > §8 对账表与各分类数字已对齐（窗口内 #87 排队闸门 / #72 看门狗自愈 / 确认卡复活守卫等补测，§8.4 增
 > `A2aJobRedisStoreClaimRaceTest` / `TestSchemaMigratorVersionOrderTest`）。
+> **2026-11-04 四核**：同环境实跑 `mvn -B test` 得 **1752 例 / 0 失败 / 9 跳过（BUILD SUCCESS）**，口径与
+> [../AGENTS.md](../AGENTS.md)「单测」行一致；静态清点 @Test 1780 注解 / 166 含 @Test 源文件 /
+> 9 支 `*IT` 共 28 注解（1780−28=1752，surefire 默认不跑 `*IT`），§8 对账表已同步更新。
 
 ---
 
@@ -329,22 +332,20 @@ src/test/resources/fixtures/test-agent/
 
 ## 8. 测试统计
 
-> **2026-10-08 实跑**（JDK 21.0.12 / Maven 3.8.7，`mvn -B test`，61s）：
-> **`Tests run: 1353, Failures: 0, Errors: 0, Skipped: 4` — BUILD SUCCESS**。
-> 跳过的 4 例全部来自 `OpenSandboxApiIntegrationTest`（需真实 OpenSandbox Server 可达）。
-> 前一次基线：2026-10-01 实跑 1310 例 / 129 类（55.8s）。
+> **2026-11-03 实跑**（JDK 21，`mvn -B test`）：**`Tests run: 1752, Failures: 0, Errors: 0, Skipped: 9` — BUILD SUCCESS**（口径同 [../AGENTS.md](../AGENTS.md)「单测」行；跳过明细以实跑日志为准）。
+> 前一次基线：2026-10-08 实跑 1353 例 / 132 类（61s）。
 >
 > **与静态清点的对账**（两条口径差异都能解释清楚，可复算）：
 >
 > | 口径 | 数值 | 说明 |
 > |------|------|------|
-> | `grep -rE '@Test\b'` 注解总数 | **1380** | 全量注解 |
-> | 其中 `*IT` 类的注解数 | 27 | `RedisEventLogIT` 10 / `SessionEventStoreCrossReplicaIT` 6 / `S3FileStorageIT` 3 / `SessionUserStoreMySqlIT` 1 / `ThreadHistoryConfirmIT` 1 / `A2aJobRedisStoreIT` 2 / `ProtocolRedisEventBusIT` 2 / `ModelConfigStoreMySqlIT` 2 |
-> | **实跑用例数** | **1353** | 1380 − 27；surefire 默认 include 不匹配 `*IT` |
-> | 含 `@Test` 的源文件 | 140 | 其中 8 个是 `*IT` |
-> | **实跑类数** | **132** | 140 − 8（含 `EmptyCompletionRecoveryHookTest` / `ToolCallValidationMiddlewareTest` 两个 `@Nested` 内嵌类） |
+> | `grep -rE '@Test\b'` 注解总数 | **1780** | 全量注解（2026-11-04 静态清点） |
+> | 其中 `*IT` 类的注解数 | 28 | 9 支 `*IT`（surefire 默认 include 不匹配 `*IT`，需环境变量门控不跑） |
+> | **实跑用例数** | **1752** | 1780 − 28（2026-11-03 实跑） |
+> | 含 `@Test` 的源文件 | 166 | 其中 9 个是 `*IT` |
+> | **实跑类数** | **162** | 2026-11-03 实跑（同 [../AGENTS.md](../AGENTS.md) 目录树注记口径） |
 >
-> 即：`mvn test` **不跑那 8 支 `*IT`**，需显式 `-Dtest=`（见 §8.2）。真实 S3 集成 `S3FileStorageIT` 亦需环境变量启用。
+> 即：`mvn test` **不跑那 9 支 `*IT`**，需显式 `-Dtest=`（见 §8.2）。真实 S3 集成 `S3FileStorageIT` 亦需环境变量启用。
 
 下表**逐类取自 2026-10-08 surefire 实跑输出**（`-- in <FQCN>` 行），基线列是 2026-09-17 的旧值：
 
@@ -450,7 +451,7 @@ src/test/resources/fixtures/test-agent/
 
 ### 8.2 真 Redis 集成测试（`session_event` 迁 Redis Streams 后新增，2026-09-16）
 
-四支真 Redis 的 `*IT` 由环境变量门控（`REDIS_IT=1`；§8 对账口径下 `*IT` 共 8 支 27 例，本节表列
+四支真 Redis 的 `*IT` 由环境变量门控（`REDIS_IT=1`；§8 对账口径下 `*IT` 共 9 支 28 例，本节表列
 Redis 四支 + 表末 MySQL 一支，另有 `S3_IT` / `HITL_MYSQL_IT` 门控的三支见 §8 对账，此处不列）；
 **surefire 默认 include 是
 `*Test`/`Test*`/`*Tests`/`*TestCase`，不匹配 `*IT`**，所以 `mvn test` 不会捡到它们，必须显式 `-Dtest=`：

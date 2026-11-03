@@ -103,7 +103,8 @@ E2E 的 H6 场景按此真实行为断言，不按「排队后成功」断言。
   "userId": "user-123",                 // 可选，X-User-Id 优先
   "sessionId": "my-session-1",          // 可选，省略则自动生成 UUID 并首发 session_created
   "fileIds": ["file-abc", "file-def"],  // 可选，上传文件 ID
-  "model": "3f1c..."                    // 可选，会话模型（GET /models 的 id，见 §3.8；缺省=不改变绑定）
+  "model": "3f1c...",                   // 可选，会话模型（GET /models 的 id，见 §3.8；缺省=不改变绑定）
+  "skills": ["refund", "order"]         // 可选，本轮可用技能白名单（缺省=全部；[] = 无技能；仅本轮生效，不落库不跨轮沿用）
 }
 ```
 

@@ -3,7 +3,8 @@
 **版本:** v2.1.0 (Java) — 无状态单次流架构
 **复核日期:** 2026-10-25（master @ `e729a67`）— 增量重核：新增 §AG-UI 协议 API（`/agui/*`，
 b2946ca，默认关闭；事件词表权威见 [api-frontend-sse.md](api-frontend-sse.md) §15）
-（上一轮 2026-10-08：Flyway V9（#87 PER_PEER 会话重键）、llm-calls 记录键 gw-hash 形态订正；
+（最新 2026-11-04：增补 PUT /sandbox/env 与 /debug/monitor 三端点、skills 请求体字段（对应 PR #223 后 HEAD）；
+上一轮 2026-10-08：Flyway V9（#87 PER_PEER 会话重键）、llm-calls 记录键 gw-hash 形态订正；
 上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
 `/a2a/jobs`、ASKING 入口预检、远程转发事件标注；
 2026-09-26 @ `a263b92` 已按源码重核端点清单、`/tools` 契约、数据表与事件类型）
@@ -588,6 +589,7 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `sessionId` | String | | 会话 ID；**省略时自动生成 UUID** |
 | `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
 | `model` | String | | 会话模型（`GET /models` 的 id；**缺省=不改变绑定**，传值即绑定本会话并本 turn 生效，`""`/`system`=回到默认模型；未知/禁用返回 error 帧 `unknown_model: xxx`） |
+| `skills` | List\<String\> | | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进模型侧 `<available_skills>`、不可经 `load_skill_through_path` 加载、`@Skill` 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 [session-skill-list-design.md](../../docs/design/session-skill-list-design.md)） |
 
 > **请求级透传头（mcp-chat-header-forward-design）**：请求携带的 HTTP header 可按 OAF 包
 > `mcp-configs/{server}/config.yaml` 的 `userHeaders.headers` 声明（取值源
@@ -842,6 +844,32 @@ curl -X POST "http://localhost:8100/files/upload" \
 
 ---
 
+## 沙箱 API
+
+### PUT /sandbox/env
+
+设置当前会话沙箱的环境变量（设计见 [sandbox-env-update-design.md](sandbox-env-update-design.md)）。按 `userId + sessionId` 定位当前沙箱容器，把 env 合并写入 execd `EXECD_ENVS` 指向的文件（bootstrap 默认 `/opt/opensandbox/.env`）；后续命令由 execd 自动加载，`doExec` 零改动，响应 `applied: "next_exec"`。沙箱不存在直接报错，不做兜底创建。鉴权与 `/admin/*` 同级（集群内网入口后），值不落盘、不落日志、不出现在响应。旧 execd 兼容：env 文件为裸值（无 `KEY=VALUE` 形态）时按裸值渲染写入，不加引号包裹。
+
+```bash
+curl -X PUT "http://localhost:8100/sandbox/env" \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"alice","sessionId":"acme-test-agent:thread-1","env":{"FOO":"bar"}}'
+```
+
+**请求体:** `userId`/`sessionId` 必填（≤256 字符、无控制字符），`env` 至少一个键。
+
+| 状态码 | error | 说明 |
+|--------|-------|------|
+| 400 | `invalid_user_id` / `invalid_session_id` / `invalid_env` | 身份缺失/超长/含控制字符，或 env 为空 |
+| 400 | `unsupported_env_value` / `env_limit_exceeded` | 值含换行等非法字符 / 键数超限 |
+| 404 | `sandbox_not_found` | 会话无活跃沙箱 |
+| 409 | `sandbox_disabled` / `execd_env_file_unsupported` / `unsupported_isolation_scope` | 未启用沙箱 / EXECD_ENVS 文件形态不支持 / 隔离范围非 USER |
+| 500 / 502 | `state_unavailable` / `sandbox_unavailable` | 会话状态或沙箱访问失败 |
+
+**响应:** `{"userId","sessionId","sandboxId","updatedKeys":[],"keys":[],"count","applied":"next_exec"}`
+
+---
+
 ## A2A JSON-RPC
 
 所有 A2A 请求发送到 `POST /`。
@@ -992,6 +1020,9 @@ curl -X PUT http://localhost:8100/models/system/fallback   # 清除 DB 覆盖，
 | GET | `/debug/config/env` | 生效环境变量（脱敏）。`llm.fallback_model_id` = 备用模型配置（`LLM_FALLBACK_MODEL_ID`，空串 = 未启用） |
 | GET | `/debug/config/oaf` | OAF 配置 + 技能合并视图（dynamic/declaredButMissing 标记） |
 | GET | `/debug/database/status` | 数据库连接健康状态 |
+| GET | `/debug/monitor/overview` | 运营监控总览：会话/轮次/回答/消息总数与今日增量、问题会话数（工具失败 + HITL 待确认）；DB 不可用返回 `{"connected":false}` |
+| GET | `/debug/monitor/sessions` | 跨用户会话列表（query `userId`、`keyword`（标题/会话 ID LIKE）、`from`/`to`、`onlyProblem`、`limit`（默认 100）/`offset`；行内附 `turn_count`/`message_count`/`error_count`/`pending_confirm`） |
+| GET | `/debug/monitor/messages` | 对话日志检索：仅 USER/ASSISTANT 有正文消息；`keyword` 正文模糊检索（LIKE 粗筛 + 提取正文精确包含，扫描窗口封顶 `scan_capped:true`）、`userId`/`from`/`to`/`limit`/`offset`；每条附 `trace_id`（V14，Monitor 回放「消息 ↔ Jaeger trace」入口） |
 | GET | `/debug/memory` | MEMORY.md / memory/ 内容查看 |
 | GET | `/debug/sandbox` | 沙箱状态（沙箱模式） |
 | GET | `/debug/workspace` | 工作区文件浏览 |
@@ -1016,10 +1047,11 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-自建 10 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V9，启动自动执行，
+自建 12 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V14，启动自动执行，
 存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
 `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
-`session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）。
+`session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）/
+`turn_intent`（V10，排队 turn 意图）/ `turn_stop`（V13，单轮停止请求）。
 设计与规范见 [db-migration-flyway-design.md](../../docs/design/db-migration-flyway-design.md)。
 
 事件流（`session_event`）已整体迁至 Redis Streams，见本节末。SDK 侧的
