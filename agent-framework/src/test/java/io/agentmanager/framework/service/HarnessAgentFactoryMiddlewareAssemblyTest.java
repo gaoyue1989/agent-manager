@@ -231,4 +231,64 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
         assertEquals(4321, cfg.getReserved(), "AGENT_COMPACTION_RESERVED_TOKENS 必须接线");
         assertEquals(30, cfg.getTriggerMessages(), "消息数阈值保持并存（二者任一命中即压缩）");
     }
+
+    @Test
+    void skillFilterMiddlewareMustComeBeforeDisabledMiddleware() throws Exception {
+        // session-skill-list-design §4 顺序约束：本轮白名单先立，禁用中间件再以
+        // existing.overlay(disable(...)) 从中剔除——顺序颠倒会让禁用集丢失或白名单被冲掉
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("skill-filter-assembly"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf))
+            .thenReturn(new PermissionRuleResult(
+                io.agentscope.core.permission.PermissionMode.DEFAULT,
+                java.util.Map.of(), java.util.Set.of()));
+
+        var store = mock(DistributedStore.class);
+        when(store.baseStore())
+            .thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig(
+                "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "agent_manager_test"),
+            java.nio.file.Files.createTempDirectory("skill-filter-config").toString(),
+            "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.FileConfig(true, 20, 20,
+                "image/*,text/plain,text/markdown,text/csv,application/pdf",
+                5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+            AgentManagerProperties.HarnessConfig.defaults(),
+            AgentManagerProperties.AgentProtocolSettings.defaults());
+
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
+            mock(RemoteConfirmBridge.class), mock(UserSkillService.class),
+            mock(SkillManageService.class));
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        var middlewares = middlewaresOf(agent);
+        int filterIdx = -1;
+        int disabledIdx = -1;
+        for (int i = 0; i < middlewares.size(); i++) {
+            var mw = middlewares.get(i);
+            if (mw instanceof SkillFilterMiddleware) filterIdx = i;
+            if (mw instanceof SkillDisabledFilterMiddleware) disabledIdx = i;
+        }
+        assertTrue(filterIdx >= 0, "SkillFilterMiddleware 必须注册进 builder 链");
+        assertTrue(disabledIdx >= 0, "SkillDisabledFilterMiddleware 必须注册进 builder 链");
+        assertTrue(filterIdx < disabledIdx,
+            "技能白名单中间件必须排在禁用中间件之前（实际 " + filterIdx + " vs " + disabledIdx + "）");
+    }
 }

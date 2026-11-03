@@ -325,4 +325,42 @@ class SkillInjectionServiceTest {
         }
         return count;
     }
+
+    // ========== 本轮技能列表（session-skill-list-design §5） ==========
+
+    @org.junit.jupiter.api.Test
+    void injectionShouldRespectSkillList() throws Exception {
+        writeSkill("a", "A skill", "A BODY");
+        writeSkill("b", "B skill", "B BODY");
+        var service = injectionService();
+
+        var injected = service.injectSkillReferences("查 @a 与 @b", "u1", List.of("a"));
+        assertTrue(injected.contains("### Skill: a"));
+        assertTrue(injected.contains("A BODY"));
+        assertFalse(injected.contains("### Skill: b"), "白名单外 @Skill 不注入");
+        assertTrue(injected.contains("@b"), "白名单外 @Skill 保留原文");
+
+        var empty = service.injectSkillReferences("查 @a", "u1", List.of());
+        assertFalse(empty.contains("### Skill: a"), "空列表 = 无技能可注入");
+        assertEquals("查 @a", empty);
+    }
+
+    @org.junit.jupiter.api.Test
+    void parseReferencesShouldRespectSkillList() throws Exception {
+        writeSkill("a", "A skill", "A BODY");
+        writeSkill("b", "B skill", "B BODY");
+        var service = injectionService();
+        assertEquals(List.of("a"), service.parseSkillReferences("@a @b", "u1", List.of("a")));
+        assertEquals(List.of(), service.parseSkillReferences("@a @b", "u1", List.of()));
+        assertEquals(List.of("a", "b"), service.parseSkillReferences("@a @b", "u1", (List<String>) null));
+    }
+
+    @org.junit.jupiter.api.Test
+    void unknownSkillInListShouldBeIgnored() throws Exception {
+        writeSkill("a", "A skill", "A BODY");
+        var service = injectionService();
+        var injected = service.injectSkillReferences("查 @a 与 @ghost", "u1", List.of("a", "ghost"));
+        assertTrue(injected.contains("### Skill: a"));
+        assertFalse(injected.contains("### Skill: ghost"), "未知名忽略（不注入、不报错）");
+    }
 }

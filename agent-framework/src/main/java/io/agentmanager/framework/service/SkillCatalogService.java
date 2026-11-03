@@ -152,6 +152,35 @@ public class SkillCatalogService {
     }
 
     /**
+     * 按本轮可用技能列表过滤的合并视图（docs/design/session-skill-list-design.md §5）：
+     * 先走现有合并视图（目录 ∪ 声明 − 禁用），再按白名单裁剪（禁用优先）。
+     *
+     * @param skillNamesOrNull null = 不做过滤（存量语义）；空列表 = 无技能；非空 = 白名单
+     */
+    public List<Map<String, Object>> list(List<String> skillNamesOrNull) {
+        var base = list();
+        if (skillNamesOrNull == null) {
+            return base;
+        }
+        var allow = normalizeSkillNames(skillNamesOrNull);
+        return base.stream()
+            .filter(m -> allow.contains(m.get("name")))
+            .toList();
+    }
+
+    /** 白名单归一：去空白、去重（未知技能名自然匹配不到任何条目） */
+    private static java.util.Set<String> normalizeSkillNames(List<String> skillNames) {
+        var out = new java.util.LinkedHashSet<String>();
+        for (var name : skillNames) {
+            var trimmed = name == null ? "" : name.trim();
+            if (!trimmed.isEmpty()) {
+                out.add(trimmed);
+            }
+        }
+        return out;
+    }
+
+    /**
      * 目录中实际可见的技能名集合（只读快速视图，供健康检查/诊断用）。
      */
     public List<String> dynamicSkillNames() {
@@ -181,6 +210,29 @@ public class SkillCatalogService {
             return availableSkills();
         }
         return toNameDesc(collectAvailable(userId));
+    }
+
+    /**
+     * 按本轮可用技能列表过滤的可用 Skill 摘要（L4 合并后再裁剪，§5）：角色未列出的
+     * L4 独有技能不出现（白名单语义）。
+     *
+     * @param skillNamesOrNull null = 不做过滤（存量语义）；空列表 = 无技能；非空 = 白名单
+     */
+    public List<Map<String, String>> availableSkills(String userId, List<String> skillNamesOrNull) {
+        if (skillNamesOrNull == null) {
+            return availableSkills(userId);
+        }
+        var allow = normalizeSkillNames(skillNamesOrNull);
+        var merged = collectAvailable(userId);
+        var out = new ArrayList<Map<String, String>>();
+        for (var e : merged.entrySet()) {
+            if (e.getKey() != null && allow.contains(e.getKey())) {
+                out.add(Map.of(
+                    "name", e.getKey(),
+                    "description", e.getValue() != null ? e.getValue() : ""));
+            }
+        }
+        return out;
     }
 
     /** name → description 合并视图：全局目录为底，L4 个人技能覆盖同名描述（并补入独有技能） */

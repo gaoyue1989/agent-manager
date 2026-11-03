@@ -63,7 +63,8 @@ class ToolControllerTest {
 
     @Test
     void listSkillsShouldReturnOafSkills() throws Exception {
-        when(skillCatalog.list()).thenReturn(List.of(
+        // 无 ?skills= 时控制器调 list(null)（等价存量 list() 语义）
+        when(skillCatalog.list(org.mockito.ArgumentMatchers.isNull())).thenReturn(List.of(
             Map.of("name", "bash-tool", "description", "Execute bash commands",
                 "version", "1.0.0", "source", "local", "required", false,
                 "dynamic", true, "declaredButMissing", false)
@@ -177,5 +178,29 @@ class ToolControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.sdkInternal").isEmpty())
             .andExpect(jsonPath("$.sdkInternalCount").value(0));
+    }
+
+    // ========== /skills?skills= 本轮可用技能列表（session-skill-list-design §6） ==========
+
+    @Test
+    void listSkillsWithSkillListShouldPassWhitelist() throws Exception {
+        when(skillCatalog.list(List.of("a", "b"))).thenReturn(List.of(
+            Map.of("name", "a", "description", "A"),
+            Map.of("name", "b", "description", "B")));
+
+        mockMvc.perform(get("/skills").param("skills", "a,b"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$[0].name").value("a"))
+            .andExpect(jsonPath("$[1].name").value("b"));
+    }
+
+    @Test
+    void listSkillsWithBlankSkillListShouldNotFilter() throws Exception {
+        when(skillCatalog.list(org.mockito.ArgumentMatchers.isNull())).thenReturn(List.of(
+            Map.of("name", "everything", "description", "E")));
+
+        mockMvc.perform(get("/skills").param("skills", " "))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$[0].name").value("everything"));
     }
 }

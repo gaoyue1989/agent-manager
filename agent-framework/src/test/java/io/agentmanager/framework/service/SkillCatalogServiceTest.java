@@ -252,4 +252,50 @@ class SkillCatalogServiceTest {
             }
         }
     }
+
+    // ========== 本轮技能列表视图（session-skill-list-design §5） ==========
+
+    @Test
+    void listWithSkillListShouldFilterToWhitelist() throws IOException {
+        writeSkill("a", "A", null);
+        writeSkill("b", "B", null);
+        writeSkill("c", "C", null);
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService(), userSkillService());
+
+        var filtered = service.list(List.of("a", "c", "ghost")).stream()
+            .map(m -> (String) m.get("name")).toList();
+        assertTrue(filtered.containsAll(List.of("a", "c")));
+        assertEquals(2, filtered.size(), "未知名忽略、白名单外技能不出现");
+        assertTrue(service.list(List.of()).isEmpty(), "显式空列表 = 无技能");
+        assertEquals(3, service.list((List<String>) null).size(), "null = 不过滤（存量语义）");
+    }
+
+    @Test
+    void disabledSkillShouldStayExcludedUnderSkillList() throws IOException {
+        writeSkill("a", "A", null);
+        writeSkill("b", "B", null);
+        var manage = new SkillManageService(props());
+        manage.toggleSkill("a"); // a 禁用
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manage, userSkillService());
+        var names = service.list(List.of("a", "b")).stream().map(m -> (String) m.get("name")).toList();
+        assertEquals(List.of("b"), names, "禁用优先：禁用技能即使在本轮白名单内也不出现");
+    }
+
+    @Test
+    void availableSkillsWithSkillListShouldIntersectL4() throws IOException {
+        writeSkill("pkg-a", "pkg a", null);
+        var userService = org.mockito.Mockito.mock(UserSkillService.class);
+        org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
+            new UserSkillService.UserSkillSummary("pkg-a", List.of("SKILL.md"), 20, 1, false, false,
+                "l4 desc", true, ""),
+            new UserSkillService.UserSkillSummary("personal-extra", List.of("SKILL.md"), 21, 1, false, false,
+                "extra", true, "")));
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manageService(), userService);
+
+        var names = service.availableSkills("u1", List.of("pkg-a")).stream()
+            .map(m -> m.get("name")).toList();
+        assertEquals(List.of("pkg-a"), names, "白名单外的 L4 独有技能不出现");
+        assertTrue(service.availableSkills("u1", List.of()).isEmpty());
+        assertEquals(2, service.availableSkills("u1", (List<String>) null).size());
+    }
 }

@@ -41,6 +41,7 @@
 | `file-support-e2e.sh` | 文件上传下载/视觉/`present_file`/生成 OAF 包；`SANDBOX=1` 加沙箱专项 |
 | `file-support-ui-e2e.js` | `/assistant` 对话 UI：附件/读文件/present_file/下载/生成包/历史回放 |
 | `skills-dynamic-e2e.sh` | OAF `skills/` 动态加载与 L4 覆盖；`SANDBOX=1` 加沙箱投影/脚本执行 |
+| `session-skills-e2e.sh` | 会话级技能列表（POST /threads/chat `skills`）：按轮白名单收敛 `<available_skills>`/`@Skill`、缺省=全部/`[]`=无技能、未知名忽略、禁用优先、A2A metadata.skills、双副本一致；`SANDBOX=1` 加沙箱档 |
 | `user-skill-admin-e2e.sh` | 用户技能 L4 管理面 + 非沙箱 A2A 生效性 + 沙箱回写 E8/仲裁 E9 |
 | `s3-file-e2e.sh` | S3 存储档：切 release-agent 为 S3 → 跑 file-support → 恢复 local |
 | `debug-console-e2e.js` / `debug-markdown-e2e.js` | Debug Console 子路径渲染 / markdown 渲染 |
