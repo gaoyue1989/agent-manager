@@ -683,7 +683,8 @@ test('X-ENV-6 旧/新版 execd 均无法无损表达的值 → 400', async () =>
     [{ SANDBOX_E2E_TOKEN: "'quoted'" }, 'unsupported_env_value'],
   ];
   for (const [env, code] of cases) {
-    const put = await putSandboxEnv(uid, sid, env);
+    // 沙箱状态在 turn 收尾异步落库：404 重试（400 立即返回），与其余 X-ENV 用例一致
+    const put = await putEnvWithRetry(uid, sid, env);
     expect(put.status, JSON.stringify(env)).toBe(400);
     expect(put.body.error).toBe(code);
   }
