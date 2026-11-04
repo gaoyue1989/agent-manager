@@ -22,6 +22,7 @@ interface SandboxStats {
   commands: Array<{ sandboxId: string; cmd: string; exitCode?: number; whitelisted?: boolean }>;
   fileOps: Array<Record<string, unknown>>;
   errors: Array<Record<string, unknown>>;
+  faultHits?: number;
 }
 
 async function sandboxStats(): Promise<SandboxStats> {
@@ -694,6 +695,64 @@ test('X-ENV-5 沙箱不存在 → 404（不做兜底）', async () => {
   const put = await putSandboxEnv(`nobody-${uniq()}`, sessionIdFor(`xenv5-${uniq()}`), { A: '1' });
   expect(put.status).toBe(404);
   expect(put.body.error).toBe('sandbox_not_found');
+});
+
+// 一致性（issue #230）：合并基于「读沙箱原文 + sidecar」快照——无锁时并发 PUT 各自
+// 「读旧 → mv 发布」，后 mv 者覆盖先 mv 者的键（整键丢失）；修复 = 先 publish 后
+// writeManaged（失败重试收敛）+ per-sandbox Redis 写租约（并发串行化）。
+test('X-ENV-7 并发一致性：同沙箱并发 PUT 两键都生效（per-sandbox 写租约）', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv7-${uniq()}`);
+  await bootSandbox(uid, sid);
+  // 两个 PUT 各设一个键并发竞争（fixture echo 的正是这两键；丢失任一键即失败）
+  const [a, b] = await Promise.all([
+    putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'one' }),
+    putEnvWithRetry(uid, sid, { SANDBOX_E2E_KEEP: 'keep' }),
+  ]);
+  expect(a.status, `PUT A 失败: ${JSON.stringify(a.body)}`).toBe(200);
+  expect(b.status, `PUT B 失败: ${JSON.stringify(b.body)}`).toBe(200);
+
+  const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  expect(toolStdoutOf(stream.frames), '并发 PUT 后两键必须并存（后 mv 者胜 = 整键丢失回归）').toBe('one keep');
+});
+
+test('X-ENV-8 发布失败 → 502 → sidecar 未推进 → 调用方重试收敛', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`xenv8-${uniq()}`);
+  await bootSandbox(uid, sid);
+  // 故障注入：发布用临时文件（path 含 .tmp.）的 files/upload 返回 500（mock /admin/fault）
+  const inject = await fetch(`${SANDBOX_MOCK}/admin/fault`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ mvFail: true }),
+  });
+  expect(inject.status).toBe(200);
+  try {
+    const failed = await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'eight' });
+    expect(failed.status, JSON.stringify(failed.body)).toBe(502);
+    expect(failed.body.error).toBe('sandbox_unavailable');
+    const stats = await sandboxStats();
+    expect(stats.faultHits ?? 0, '故障注入未命中（PUT 失败与注入无关）').toBeGreaterThanOrEqual(1);
+  } finally {
+    // 清除注入（失败也要清，防污染后续用例；/reset 亦会清）
+    await fetch(`${SANDBOX_MOCK}/admin/fault`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+  }
+  // 重试：sidecar 未推进（调序修复）→ 变更重新检出 → 收敛；
+  // 修复前 sidecar 已先行写入 → 重试静默 no-op（updatedKeys 空）→ 命令读不到值
+  const retried = await putEnvWithRetry(uid, sid, { SANDBOX_E2E_TOKEN: 'eight' });
+  expect(retried.status, JSON.stringify(retried.body)).toBe(200);
+  expect(retried.body.updatedKeys, '重试必须重新检出变更（非静默 no-op）').toContain('SANDBOX_E2E_TOKEN');
+
+  const stream = chat({ message: `[E2E:sbx-env]`, userId: uid, sessionId: sid });
+  await waitTerminal(stream);
+  expect(stream.terminal?.type).toBe('done');
+  expect(toolStdoutOf(stream.frames)).toBe('eight'); // KEEP 未设置 → 空展开被 word-split 去除
 });
 
 // ---------- STP 组：单轮停止全链路（turn-stop-design §9 建议 3，PR #203） ----------

@@ -112,6 +112,23 @@ public class AgentScopeConfig {
     }
 
     /**
+     * 沙箱 env 写入租约（issue #230）：PUT /sandbox/env 按 sandboxId 串行化合并写入临界区，
+     * 消解并发 PUT 的「读旧写新」整键丢失。正确性修复常开、无配置开关（与
+     * SANDBOX_GUARD_ENABLED 的「可选增强」定位区分）；RedisConnectionFacade 缺席时
+     * noop 实例（acquire fail-open 放行），锁不得成为可用性单点。
+     */
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.RedisSandboxEnvLock sandboxEnvLock(
+            org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider) {
+        var facade = redisFacadeProvider.getIfAvailable();
+        if (facade == null) {
+            log.info("RedisConnectionFacade absent — SandboxEnvLock running fail-open (noop lease)");
+            return io.agentmanager.framework.sandbox.opensandbox.RedisSandboxEnvLock.noop();
+        }
+        return new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxEnvLock(facade);
+    }
+
+    /**
      * 沙箱回写服务：依赖 WorkspaceReader（而非裸 BaseStore），保证回写命名空间与读取侧一致
      * ——{@code agents/{agent}/users/{uid}}（运行时文件）与
      * {@code agents/{agent}/users/{uid}/skills}（用户技能 L4，key={@code /{技能名}/{路径}}）。

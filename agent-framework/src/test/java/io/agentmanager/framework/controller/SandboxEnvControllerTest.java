@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -25,6 +26,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import com.alibaba.opensandbox.sandbox.Sandbox;
 
 import io.agentmanager.framework.sandbox.opensandbox.LocatedSandbox;
+import io.agentmanager.framework.sandbox.opensandbox.RedisSandboxEnvLock;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxEnvException;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxEnvFile;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxLocator;
@@ -35,7 +37,8 @@ import io.agentscope.harness.agent.IsolationScope;
 /**
  * {@link SandboxEnvController} 契约测试（MockMvc standalone）：身份/入参校验（400）、
  * 沙箱未启用/隔离范围不支持/EXECD_ENVS 不可用（409）、定位失败（404）、沙箱不可达（502）、
- * 成功响应形状（含 applied=next_exec、响应不含 env 值）与 {@link LocatedSandbox} 句柄关闭。
+ * 写租约等待超时（503 env_update_busy，issue #230）、成功响应形状（含 applied=next_exec、
+ * 响应不含 env 值）与 {@link LocatedSandbox} 句柄关闭。
  */
 class SandboxEnvControllerTest {
 
@@ -46,6 +49,8 @@ class SandboxEnvControllerTest {
     private SandboxRuntime runtime;
     private SandboxLocator locator;
     private SandboxEnvFile envFile;
+    private RedisSandboxEnvLock envLock;
+    private RedisSandboxEnvLock.Lease lease;
     private Sandbox handle;
     private MockMvc mvc;
 
@@ -57,6 +62,9 @@ class SandboxEnvControllerTest {
         locator = mock(SandboxLocator.class);
         envFile = mock(SandboxEnvFile.class);
         handle = mock(Sandbox.class);
+        envLock = mock(RedisSandboxEnvLock.class);
+        lease = mock(RedisSandboxEnvLock.Lease.class);
+        when(envLock.acquire(anyString())).thenReturn(lease);
 
         OpenSandboxFilesystemSpec spec = mock(OpenSandboxFilesystemSpec.class);
         when(spec.getIsolationScope()).thenReturn(IsolationScope.USER);
@@ -64,7 +72,7 @@ class SandboxEnvControllerTest {
         when(provider.getIfAvailable()).thenReturn(spec);
 
         mvc = MockMvcBuilders.standaloneSetup(
-            new SandboxEnvController(runtime, locator, envFile, provider)).build();
+            new SandboxEnvController(runtime, locator, envFile, provider, envLock)).build();
     }
 
     private void locatedAt(String sandboxId) {
@@ -194,5 +202,56 @@ class SandboxEnvControllerTest {
             """))
             .andExpect(status().isBadRequest())
             .andExpect(jsonPath("$.error").value("unsupported_env_value"));
+    }
+
+    // ---------- 写租约（issue #230）----------
+
+    @Test
+    void updateShouldReturn503WhenEnvLeaseBusy() throws Exception {
+        locatedAt("sbx-1");
+        when(envLock.acquire("sbx-1"))
+            .thenThrow(new SandboxEnvException("env_update_busy", 503, "lease held by another update"));
+        mvc.perform(put("/sandbox/env").contentType(MediaType.APPLICATION_JSON).content("""
+            {"userId":"u-1","sessionId":"sess-1","env":{"A":"1"}}
+            """))
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("env_update_busy"));
+    }
+
+    @Test
+    void updateShouldHoldLeaseAcrossMergeAndReleaseAfterwards() throws Exception {
+        // 临界区覆盖断言：acquire 先于 discover/mergeAndWrite，close 在合并完成（或失败）后
+        locatedAt("sbx-1");
+        when(envFile.discoverEnvPath(handle)).thenReturn(ENV_PATH);
+        when(envFile.mergeAndWrite(any(), anyString(), anyMap()))
+            .thenReturn(new SandboxEnvFile.MergeResult(Map.of("A", "1"), List.of("A")));
+
+        mvc.perform(put("/sandbox/env").contentType(MediaType.APPLICATION_JSON).content("""
+            {"userId":"u-1","sessionId":"sess-1","env":{"A":"1"}}
+            """))
+            .andExpect(status().isOk());
+
+        var order = inOrder(envLock, lease, envFile);
+        order.verify(envLock).acquire("sbx-1");
+        order.verify(envFile).discoverEnvPath(handle);
+        order.verify(envFile).mergeAndWrite(any(), anyString(), anyMap());
+        order.verify(lease).close();
+    }
+
+    @Test
+    void updateShouldReleaseLeaseWhenMergeFails() throws Exception {
+        // 合并抛错也必须释放租约（try-with-resources），否则 15s TTL 内同沙箱写入全部 busy
+        locatedAt("sbx-1");
+        when(envFile.discoverEnvPath(handle)).thenReturn(ENV_PATH);
+        when(envFile.mergeAndWrite(any(), anyString(), anyMap()))
+            .thenThrow(new SandboxEnvException("sandbox_unavailable", 502, "mv failed"));
+
+        mvc.perform(put("/sandbox/env").contentType(MediaType.APPLICATION_JSON).content("""
+            {"userId":"u-1","sessionId":"sess-1","env":{"A":"1"}}
+            """))
+            .andExpect(status().isBadGateway())
+            .andExpect(jsonPath("$.error").value("sandbox_unavailable"));
+
+        verify(lease).close();
     }
 }

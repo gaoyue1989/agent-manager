@@ -3,12 +3,14 @@
 | 项 | 值 |
 |----|----|
 | 编制时点 | 2026-11-02 |
-| 状态 | **设计评审稿（未实施）** |
+| 状态 | **已实施**（2026-11-02 实施、2026-11-03 修复旧 execd 兼容；2026-11-05 一致性修订 issue #230：写入调序 publish→writeManaged + per-sandbox Redis 写租约，见修订记录） |
 | 需求 | 对话过程中，用户输入的敏感信息需要以环境变量形式进入沙箱；提供一个接口按 `userId + sessionId` 直接修改沙箱 env；沙箱不存在直接报错；后续 `doExec` 自动加载，**不增加每命令操作** |
 | 现状核对 | SDK 能力基于 `com.alibaba.opensandbox:sandbox:1.0.18`（`javap` 反编译）；harness 行为基于 `agentscope-harness:2.0.3` 源码；execd `EXECD_ENVS` 行为基于 OpenSandbox 上游 `components/execd` 源码 |
 | 关联文档 | [opensandbox-integration-plan.md](opensandbox-integration-plan.md)、[sandbox-skill-sync-optimization-design.md](../../docs/design/sandbox-skill-sync-optimization-design.md) |
 
 > **方案结论**：execd 的 bootstrap 默认设置 `EXECD_ENVS=/opt/opensandbox/.env` 并 `touch` 该文件；`PUT /sandbox/env` 在沙箱内读取实际 `$EXECD_ENVS` 路径，直接写该文件；execd 每条命令自动重新读取。**`doExec` 零改动**，无进程内 profile、无宿主状态、无每命令新增操作；**默认不需要新增 agent-framework 配置**。
+>
+> **修订记录（2026-11-05，issue #230）**：修复两类一致性缺陷——① 写入调序：原「先写 sidecar 后发布」在发布失败后，重试的变更判定只比对 sidecar 会静默 no-op（生效文件永久缺键），调序为先发布生效文件后写 sidecar，失败矩阵收敛（§6.3）；② 同一沙箱并发 PUT 无锁导致整键丢失，新增 per-sandbox Redis 写租约（`sbx:env:{sandboxId}`，有限等待，超时 503 `env_update_busy`，Redis 不可用 fail-open，§7.3）。
 
 ---
 
@@ -162,6 +164,7 @@ Content-Type: application/json
 | 沙箱未启用 | `SandboxRuntime.enabled()==false` | `sandbox_disabled` / 409 |
 | 隔离范围不支持 | 配置为 `AGENT`/`GLOBAL` | `unsupported_isolation_scope` / 409 |
 | EXECD_ENVS 不可用 | 沙箱内 `printf %s "$EXECD_ENVS"` 为空/非法 | `execd_env_file_unsupported` / 409 |
+| 写租约等待超时 | 同一沙箱并发 PUT，per-sandbox Redis 租约有限等待（10s）耗尽（issue #230，§7.3） | `env_update_busy` / 503 |
 | 状态读取失败 | DB/序列化异常 | `state_unavailable` / 500 |
 
 错误响应：
@@ -248,13 +251,18 @@ execd 的 `bootstrap.sh` 在 `EXECD_ENVS` 未设置时默认使用 `/opt/opensan
 ① 读取已有 <envPath> 原文（files().readFile；404/空 → ""）
 ② 读取 /tmp/.agent-env.json，合并请求 env（同名覆盖）
 ③ 校验合并结果（键名/保留键/`$`/换行/首尾空白/首字符引号/64 键/32KiB）
-④ files().write(/tmp/.agent-env.json)                 # 仅记录接口管理的键
-⑤ 生成变更行：每行裸 `KEY=value`（不包引号，跨 execd 版本兼容）
-⑥ 追加到原文末尾（保证原文件以换行结尾）
-⑦ 原子发布：
+④ 生成变更行：每行裸 `KEY=value`（不包引号，跨 execd 版本兼容）
+⑤ 追加到原文末尾（保证原文件以换行结尾）
+⑥ 原子发布（先发布生效文件）：
    files().write(<envPath>.tmp.<uuid>)                 # 原文 + 新行
    commands().run("mv -f <tmp> <envPath>")
+⑦ files().write(/tmp/.agent-env.json)                 # 后写 sidecar（仅记录接口管理的键）
 ```
+
+- **写序（issue #230 修订，原 ④ 与 ⑦ 对调）**：变更判定只比对 sidecar（旧值 equals 新值），若 sidecar 先写而发布失败，调用方按本文档重试时判定为「无变化」静默 no-op，生效文件永久缺键。调序后失败矩阵收敛：
+  - 发布失败 → sidecar 未推进 → 重试时变更判定重新命中、重新发布；
+  - 发布成功而 sidecar 写失败 → 重试重复追加一行 `K=V`（execd 顺序解析取最后出现的行，幂等收敛）；
+  - 无变化的 PUT（updatedKeys 为空）仍只写 sidecar、跳过发布，语义不变。
 
 - **保留镜像行**：PATH/JAVA_HOME/GOROOT 等由镜像脚本追加，接口只追加自己的键，绝不覆盖；
 - **保留未修改的键**：本次 PUT 未出现的键（之前接口设置的 + 镜像写入的 + 容器原有的）都不动；execd 按文件顺序取最后一次出现的值，因此旧键继续生效；
@@ -263,7 +271,7 @@ execd 的 `bootstrap.sh` 在 `EXECD_ENVS` 未设置时默认使用 `/opt/opensan
 - 写入前完成全部校验，失败不产生部分写入；
 - 值按裸 `KEY=value` 渲染（不包裹引号）：旧版 execd 不剥引号、新版支持 dotenv 引号，裸值在两者下语义一致；值内禁止 `$`（两版裸值都做 `os.ExpandEnv` 且无转义语法）、换行/回车（行式格式会截断）、首尾空白（两版 TrimSpace 口径不一）、首字符引号（新版按引号值解析、旧版按字面保留）；
 - 通过临时文件 + `mv -f` 原子替换：execd 读取时要么看到旧文件、要么看到新文件；
-- `.json` 只被接口读取，可直接覆盖；生效文件写失败返回 500，调用方重试（合并幂等）；
+- `.json` 只被接口读取，可直接覆盖；发布（生效文件写）失败返回 502，调用方重试收敛——写序修订（issue #230）后该承诺成立：发布失败时 sidecar 未推进，重试重新检出变化；发布成功而 sidecar 写失败亦返回 502，重试重复追加一行（execd 取最后行，幂等）；
 - `mode(600)` 降低容器内其他进程读取面（Agent 本身仍可通过命令读取，属功能语义）。
 
 ### 6.4 自动加载（`doExec` 零改动）
@@ -295,8 +303,9 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 | 类 | 职责 |
 |----|------|
-| `sandbox/opensandbox/SandboxEnvFile` | `discoverEnvPath(osbSandbox)`（`printf %s "$EXECD_ENVS"`）；`mergeAndWrite(osbSandbox, envPath, env)` 读 `/tmp/.agent-env.json`→合并→校验→写 `.json`→读 `<envPath>` 原文→追加变更行→临时文件+`mv -f` 原子发布（**保留镜像写入的 PATH/JAVA_HOME/GOROOT 行**）；`validate(Map)` |
-| `controller/SandboxEnvController` | `PUT /sandbox/env`：参数校验、沙箱定位、`EXECD_ENVS` 路径发现/校验、错误映射、响应 |
+| `sandbox/opensandbox/SandboxEnvFile` | `discoverEnvPath(osbSandbox)`（`printf %s "$EXECD_ENVS"`）；`mergeAndWrite(osbSandbox, envPath, env)` 读 `/tmp/.agent-env.json`→合并→校验→读 `<envPath>` 原文→追加变更行→临时文件+`mv -f` 原子发布→写 `.json`（**先发布后写 sidecar，issue #230；保留镜像写入的 PATH/JAVA_HOME/GOROOT 行**）；`validate(Map)` |
+| `controller/SandboxEnvController` | `PUT /sandbox/env`：参数校验、沙箱定位、`EXECD_ENVS` 路径发现/校验、错误映射、响应；定位成功后获取 per-sandbox 写租约（issue #230） |
+| `sandbox/opensandbox/SandboxEnvLock`（`RedisSandboxEnvLock`，issue #230） | per-sandbox 写租约：SET NX PX + Lua 比较删除（与 `RedisSandboxExecutionGuard` 同款互斥语义）；键 `sbx:env:{sandboxId}` 经 `RedisConnectionFacade.key()` 前缀隔离；有限等待超时 503 `env_update_busy`；Redis 不可用 fail-open（noop 租约） |
 | `sandbox/opensandbox/SandboxLocator` | 读取配置 `IsolationScope` 生成候选 `SandboxIsolationKey`；`SessionSandboxStateStore.load`；从 JSON 取 `sandboxId`；`Sandbox.connector().connect()`；错误分类（404/409/502） |
 
 ### 7.2 装配
@@ -310,6 +319,7 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 | `OpenSandboxFilesystemSpec` | 既有 Bean（`getIsolationScope()` 作为候选键生成的唯一配置来源；未启用时为 null） |
 | `SandboxEnvFile` | Controller 注入（写文件） |
 | `SandboxLocator` | Controller 注入 |
+| `RedisSandboxEnvLock` | `AgentScopeConfig` 装配 `sandboxEnvLock` Bean（issue #230）：facade 存在 → 真实例；缺席 → `noop()`（fail-open）。正确性修复常开，无配置开关 |
 
 `OpenSandbox`：
 
@@ -317,7 +327,12 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 ### 7.3 并发
 
-- 多个 PUT 并发写同一 `.json`：最后写入者生效；生效文件由各自基于所读 `.json` + 原文生成，最终以最后一次原子 `mv` 为准；
+- **per-sandbox 写租约（issue #230）**：同一沙箱的并发 PUT 由 Redis 租约 `sbx:env:{sandboxId}` 串行化（`SET NX PX 15s` + Lua 按 token 比较删除，与 `RedisSandboxExecutionGuard` 同款互斥语义）。实现要点：
+  - 键经 `RedisConnectionFacade.key()` 组装（多服务共享 oaf-redis 时裸键会跨服务互锁，与 `sbx:guard` 同源问题）；多副本部署天然生效（锁在共享 Redis）；
+  - 有限等待 10s（200ms 自旋），超时 503 `env_update_busy`（调用方稍后重试）；租约 TTL（15s）必须大于临界区最坏耗时（discover + 2 读 + 2 写 + mv 共 5 次沙箱 API 往返），仅兜底持有者崩溃，正常路径 close 即时释放；
+  - **fail-open**：Redis 不可用/缺席时放行（noop 租约，常开、无配置开关，对齐守卫哲学——锁不得成为可用性单点）；此时并发窗口回到无锁状态，但写序修复独立成立（发布失败后重试仍收敛）；
+  - 无租约时（修复前）的缺陷：两个并发 PUT 各自基于「读旧原文 + 旧 sidecar」快照合并，后 `mv` 者覆盖先 `mv` 者的键（整键丢失）；
+- 租约内的合并写序（调序后）：多个 PUT 串行进入，各自「读最新原文 + 最新 sidecar」→ 追加变更行 → 原子 `mv` → 写 sidecar，先写入方的键不再被覆盖；
 - execd 读 `<envPath>` 与 PUT 写并发：`mv -f` 原子替换，读侧要么看到旧文件、要么看到新文件；
 - 命令执行期间文件被替换：当前命令已加载旧值，下一条命令使用新值。
 
@@ -365,9 +380,10 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 | 测试类 | 覆盖 |
 |--------|------|
-| `SandboxEnvFileTest` | 路径发现（非空/空白/非法/命令失败 502）；`.json` 与原文缺失时从空开始；追加变更键且**保留镜像写入的 `PATH=...`/`JAVA_HOME=...` 行**；同名键追加新行覆盖旧值；无变化跳过发布；`.json` 损坏 fail-soft；校验拒绝：保留键（`EXECD_API_GRACE_SHUTDOWN`/`EXECD_ENVS`）、非法键名、值含 `$`/换行/回车/首尾空白/首字符引号、`NUL` 值、单值超 8KiB、超 64 键、合并后总量超 32KiB；值内单引号（非首字符）允许；发布：临时文件+`mv -f` 原子写入（mv 失败 502）、原文读取失败 502；行格式为裸 `KEY=value`（跨 execd 版本兼容）由 `renderLines`/`appendLines` 在合并用例内断言 |
+| `SandboxEnvFileTest` | 路径发现（非空/空白/非法/命令失败 502）；`.json` 与原文缺失时从空开始；追加变更键且**保留镜像写入的 `PATH=...`/`JAVA_HOME=...` 行**；同名键追加新行覆盖旧值；无变化跳过发布；`.json` 损坏 fail-soft；校验拒绝：保留键（`EXECD_API_GRACE_SHUTDOWN`/`EXECD_ENVS`）、非法键名、值含 `$`/换行/回车/首尾空白/首字符引号、`NUL` 值、单值超 8KiB、超 64 键、合并后总量超 32KiB；值内单引号（非首字符）允许；发布：临时文件+`mv -f` 原子写入（mv 失败 502）、原文读取失败 502；行格式为裸 `KEY=value`（跨 execd 版本兼容）由 `renderLines`/`appendLines` 在合并用例内断言；**写批次顺序（issue #230）**：第一批=发布临时文件、第二批=sidecar；**失败收敛两用例**：mv 失败 → 502 且仅 1 次写（sidecar 未推进）→ 重试重新检出变化收敛；发布成功 + sidecar 写失败 → 502 → 重试追加第二行 K=V（execd 取最后行幂等） |
 | `SandboxLocatorTest` | 按配置 scope 生成候选：`USER` → 先 `USER(sessionId)` 后 `USER(userId)` 回退；`SESSION` → `SESSION(sessionId)`；`AGENT`/`GLOBAL` → 409；全候选未命中 → 404；connect 失败落到下一候选；状态加载 IO 失败 → 500；状态记录无 `sandboxId` 时跳过 |
-| `SandboxEnvControllerTest` | 200/400/404/409/502；字段缺失；响应不含值；`sandbox_disabled` / `unsupported_isolation_scope` / `execd_env_file_unsupported` / `unsupported_env_value`；`LocatedSandbox` 句柄 close |
+| `RedisSandboxEnvLockTest`（issue #230） | SET NX 成功获租约（键经 `facade.key()` 前缀隔离）；占用自旋重试后获租约；有限等待超时 → 503 `env_update_busy`（注入短等待窗口验证有界性）；Redis 异常 fail-open → noop 租约；释放按 token 比较删除（RELEASE_LUA）、释放失败吞噬（TTL 自愈）；空 sandboxId 防御 fail-open；`noop()` 兜底实例 |
+| `SandboxEnvControllerTest` | 200/400/404/409/502；字段缺失；响应不含值；`sandbox_disabled` / `unsupported_isolation_scope` / `execd_env_file_unsupported` / `unsupported_env_value`；`LocatedSandbox` 句柄 close；**租约（issue #230）**：等待超时 503 `env_update_busy`、acquire 先于合并且 close 在合并完成后（InOrder）、合并抛错仍释放租约 |
 | 回归保障 | `doExec` 零改动 → 无需专门测试；既有 `OpenSandboxTest` / `SandboxUserKeyMiddlewareTest` / mock e2e X1-X20 全组回归即覆盖 |
 
 ### 9.2 E2E（mock sandbox）
@@ -385,7 +401,9 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
    - 值含 `'` → 400 `unsupported_env_value`；
    - 沙箱不存在（未开始会话/已 destroy）→ 404；
    - 模拟 `$EXECD_ENVS` 为空（mock 不设置默认值）→ 409 `execd_env_file_unsupported`；
-   - 非法键/保留键 → 400，且命令侧不受影响。
+   - 非法键/保留键 → 400，且命令侧不受影响；
+   - **X-ENV-7 并发一致性（issue #230）**：同一沙箱并发两个 PUT 各设一键（fixture echo 的两键）→ 均 200 → 一轮对话 echo → 断言两键并存（无锁时后 `mv` 者胜会丢一键）；
+   - **X-ENV-8 发布失败收敛（issue #230）**：mock 故障注入 `POST /admin/fault {mvFail:true}`（发布临时文件写入 500）→ PUT 得 502 `sandbox_unavailable` 且 `stats.faultHits` 命中 → 清除注入 → 重试 PUT 得 200 且 `updatedKeys` 重新检出变更（非静默 no-op）→ 命令读到值（黑盒验证 §6.3 调序后的重试承诺）。
 
 ### 9.3 回归
 

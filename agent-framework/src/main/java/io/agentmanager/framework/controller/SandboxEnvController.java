@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import io.agentmanager.framework.sandbox.opensandbox.LocatedSandbox;
+import io.agentmanager.framework.sandbox.opensandbox.RedisSandboxEnvLock;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxEnvException;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxEnvFile;
 import io.agentmanager.framework.sandbox.opensandbox.SandboxLocator;
@@ -26,6 +27,11 @@ import io.agentscope.harness.agent.IsolationScope;
  * 写入 execd {@code EXECD_ENVS} 指向的文件（bootstrap 默认 {@code /opt/opensandbox/.env}）；
  * 后续命令由 execd 自动加载，{@code doExec} 零改动。沙箱不存在直接返回错误，不做兜底。
  *
+ * <p>并发（issue #230）：定位成功后按 {@code sandboxId} 获取 Redis 写租约，把
+ * {@code discoverEnvPath + mergeAndWrite} 的整个合并临界区串行化，消解并发 PUT 的
+ * 「读旧写新」整键丢失；等待超时 503 {@code env_update_busy}（既有 {@code @ExceptionHandler}
+ * 统一映射）。Redis 不可用时租约内部 fail-open，不阻断写入。
+ *
  * <p>鉴权：与 {@code /admin/*} 同级（集群内网入口后），仅允许平台后端/可信调用方调用；
  * 值不落盘、不落日志、不出现在响应。
  */
@@ -36,15 +42,18 @@ public class SandboxEnvController {
     private final SandboxLocator locator;
     private final SandboxEnvFile envFile;
     private final ObjectProvider<OpenSandboxFilesystemSpec> specProvider;
+    private final RedisSandboxEnvLock envLock;
 
     public SandboxEnvController(SandboxRuntime sandboxRuntime,
                                 SandboxLocator locator,
                                 SandboxEnvFile envFile,
-                                ObjectProvider<OpenSandboxFilesystemSpec> specProvider) {
+                                ObjectProvider<OpenSandboxFilesystemSpec> specProvider,
+                                RedisSandboxEnvLock envLock) {
         this.sandboxRuntime = sandboxRuntime;
         this.locator = locator;
         this.envFile = envFile;
         this.specProvider = specProvider;
+        this.envLock = envLock;
     }
 
     /** PUT /sandbox/env 请求体：userId/sessionId 必填，env 至少一个键 */
@@ -57,7 +66,8 @@ public class SandboxEnvController {
         if (!sandboxRuntime.enabled()) {
             throw new SandboxEnvException("sandbox_disabled", 409, "sandbox is not enabled for this agent");
         }
-        try (LocatedSandbox located = locator.locate(request.userId(), request.sessionId(), resolveScope())) {
+        try (LocatedSandbox located = locator.locate(request.userId(), request.sessionId(), resolveScope());
+             RedisSandboxEnvLock.Lease lease = envLock.acquire(located.sandboxId())) {
             String envPath = envFile.discoverEnvPath(located.sandbox());
             SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(located.sandbox(), envPath, request.env());
             return ResponseEntity.ok(response(request, located.sandboxId(), result));

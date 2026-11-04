@@ -65,7 +65,7 @@
 | [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) | E2E 覆盖缺口分析第一轮（近 7 天变更 → 25 条补充用例设计稿；其中 19 条已由 bc235c4 落地） |
 | [e2e-coverage-gap-analysis-20260929.md](e2e-coverage-gap-analysis-20260929.md) | E2E 覆盖缺口分析第二轮（近 3 天变更 → FW1-FW3 / RD1-RD3 六条已落地进 api-core.spec.ts；含与上轮文档及 bc235c4 的用例数对账） |
 | [agui-native-parity-design.md](agui-native-parity-design.md) | AG-UI 官方协议原生暴露·生产对等设计与实施记录（2026-10-24 **已实施**，§17 有实施记录与偏差；自建 `AguiRunController` 组合 SDK registry 编码（不引 starter——其 resume 协调器为进程内存态）、Redis 单流双编码 p/pa、turn_lease 仲裁、confirm_context 双面 HITL（resume[] acceptRule 扩展）、Tailer 渲染器参数化的 afterSeq 续传端点；单测 1603 全绿 + e2e AG1–AG6 独立非必需 job；api-frontend-sse.md §15 为词表权威） |
-| [sandbox-env-update-design.md](sandbox-env-update-design.md) | 沙箱环境变量热更新（`PUT /sandbox/env`：按 `userId+sessionId` 定位当前沙箱容器，env 合并写入 execd `EXECD_ENVS` 指向文件、后续命令由 execd 自动加载；未开沙箱 409、容器不存在直接报错不兜底；鉴权与 `/admin/*` 同级，值不落盘不落日志不出现在响应），**已实施**（2026-11-02 实施、2026-11-03 修复旧 execd 兼容；注：文档自身头部状态行仍写「设计评审稿」，待自更） |
+| [sandbox-env-update-design.md](sandbox-env-update-design.md) | 沙箱环境变量热更新（`PUT /sandbox/env`：按 `userId+sessionId` 定位当前沙箱容器，env 合并写入 execd `EXECD_ENVS` 指向文件、后续命令由 execd 自动加载；未开沙箱 409、容器不存在直接报错不兜底；鉴权与 `/admin/*` 同级，值不落盘不落日志不出现在响应），**已实施**（2026-11-02 实施、2026-11-03 修复旧 execd 兼容；2026-11-05 一致性修订 issue #230：写入调序 publish→writeManaged 使失败重试收敛 + per-sandbox Redis 写租约 `sbx:env:{sandboxId}` 串行化并发 PUT，e2e X-ENV-7/8） |
 
 ## ③ 未实施提案（仅作参考，勿按已实现理解）
 
