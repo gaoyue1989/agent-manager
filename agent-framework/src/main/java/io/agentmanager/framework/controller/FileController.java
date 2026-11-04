@@ -192,6 +192,10 @@ public class FileController {
         headers.set(HttpHeaders.CONTENT_DISPOSITION, disposition
             + "; filename*=UTF-8''" + urlEncode(asset.fileName()));
         headers.set("X-Content-Type-Options", "nosniff");
+        if (forceInline && needsCspSandbox(asset.mimeType())) {
+            // 存储型 XSS 阻断（issue #224）：可执行文档内联时隔离为不透明源并禁脚本
+            headers.set("Content-Security-Policy", "sandbox");
+        }
 
         var key = asset.storageKey();
         StreamingResponseBody body = out -> {
@@ -200,6 +204,20 @@ public class FileController {
             }
         };
         return ResponseEntity.ok().headers(headers).body(body);
+    }
+
+    /**
+     * 可执行/可嵌脚本文档类型（issue #224）：即使 {@code ?inline=1} 预览，也必须以
+     * CSP sandbox 交付——不透明源 + 禁脚本，保留无脚本渲染能力（html/mhtml 归档件
+     * 与 SVG 的预览需求）。text/html 与 mhtml 两别名为 2026-10-22 上传白名单新放行；
+     * image/svg+xml 为存量同类暴露（SVG 顶层导航即执行脚本），一并纳入。
+     */
+    private static boolean needsCspSandbox(String mime) {
+        String m = mime.toLowerCase();
+        return m.startsWith("text/html")
+            || m.startsWith("multipart/related")
+            || m.equals("application/x-mimearchive")
+            || m.startsWith("image/svg");
     }
 
     /** 外部交付物代理下载客户端（连接池共享；超时收敛防慢端点拖死容器线程） */
@@ -255,6 +273,10 @@ public class FileController {
         headers.set(HttpHeaders.CONTENT_DISPOSITION, (forceInline ? "inline" : "attachment")
             + "; filename*=UTF-8''" + urlEncode(asset.fileName()));
         headers.set("X-Content-Type-Options", "nosniff");
+        if (forceInline && needsCspSandbox(contentType)) {
+            // 与本地存储路径同款：可执行文档内联时隔离为不透明源并禁脚本（issue #224）
+            headers.set("Content-Security-Policy", "sandbox");
+        }
         var body = upstream.body();
         StreamingResponseBody stream = out -> {
             try (InputStream in = body) {
