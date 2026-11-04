@@ -1,6 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -30,6 +31,7 @@ import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
  * {@link RedisSandboxEnvLock} 单元测试（mock 门面，模式对齐 A2aJobRedisStoreClaimRaceTest）：
  * SET NX 获租约、键经 {@code facade.key()} 前缀隔离（多服务共享 Redis 防跨服务互锁）、
  * 释放按 token 比较删除、有限等待超时 503 {@code env_update_busy}、Redis 异常 fail-open、
+ * token 续租 Lua 三分支（评审 g1：持有期间续租保证互斥，TTL 退化为纯崩溃自愈窗口）、
  * noop 兜底实例与空 sandboxId 防御。
  */
 class RedisSandboxEnvLockTest {
@@ -108,7 +110,34 @@ class RedisSandboxEnvLockTest {
         when(sync.eval(anyString(), any(ScriptOutputType.class), any(String[].class), anyString()))
             .thenThrow(new RedisException("connection gone"));
 
-        lock.acquire("sbx-1").close(); // 释放失败不抛：TTL 到期自愈
+        lock.acquire("sbx-1").close(); // 释放失败不抛：不再续租，TTL 到期自愈
+    }
+
+    // ---------- 续租（评审 g1：持有期间周期续租，互斥不依赖 TTL 覆盖临界区耗时）----------
+
+    @Test
+    void renewShouldPexpireByTokenAndReportHeld() {
+        // token 匹配 → pexpire 成功返回 1 → 仍在持有
+        when(sync.eval(eq(RedisSandboxEnvLock.RENEW_LUA), eq(ScriptOutputType.INTEGER),
+            aryEq(new String[]{"pfx:sbx:env:sbx-1"}), eq("tok"), eq(String.valueOf(RedisSandboxEnvLock.LEASE_TTL_MS))))
+            .thenReturn(1L);
+        assertTrue(lock.renew("pfx:sbx:env:sbx-1", "tok"));
+    }
+
+    @Test
+    void renewShouldReportLostWhenTokenMismatchOrKeyGone() {
+        // token 不匹配 / 键已过期删除（Lua 返回 0）→ 报告未持有（不抛、不复活他人租约）
+        when(sync.eval(eq(RedisSandboxEnvLock.RENEW_LUA), eq(ScriptOutputType.INTEGER),
+            any(String[].class), anyString(), anyString())).thenReturn(0L);
+        assertFalse(lock.renew("pfx:sbx:env:sbx-1", "tok"));
+    }
+
+    @Test
+    void renewShouldNotThrowWhenRedisErrors() {
+        // 续租失败按未持有处理（调度线程内不能外溢异常），TTL 内下轮重试
+        when(sync.eval(anyString(), any(ScriptOutputType.class), any(String[].class), anyString(), anyString()))
+            .thenThrow(new RedisException("connection gone"));
+        assertFalse(lock.renew("pfx:sbx:env:sbx-1", "tok"));
     }
 
     @Test

@@ -240,7 +240,7 @@ class SandboxEnvControllerTest {
 
     @Test
     void updateShouldReleaseLeaseWhenMergeFails() throws Exception {
-        // 合并抛错也必须释放租约（try-with-resources），否则 15s TTL 内同沙箱写入全部 busy
+        // 合并抛错也必须释放租约（try-with-resources），否则 30s TTL（崩溃自愈窗口）内同沙箱写入全部 busy
         locatedAt("sbx-1");
         when(envFile.discoverEnvPath(handle)).thenReturn(ENV_PATH);
         when(envFile.mergeAndWrite(any(), anyString(), anyMap()))

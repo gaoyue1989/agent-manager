@@ -10,7 +10,7 @@
 
 > **方案结论**：execd 的 bootstrap 默认设置 `EXECD_ENVS=/opt/opensandbox/.env` 并 `touch` 该文件；`PUT /sandbox/env` 在沙箱内读取实际 `$EXECD_ENVS` 路径，直接写该文件；execd 每条命令自动重新读取。**`doExec` 零改动**，无进程内 profile、无宿主状态、无每命令新增操作；**默认不需要新增 agent-framework 配置**。
 >
-> **修订记录（2026-11-05，issue #230）**：修复两类一致性缺陷——① 写入调序：原「先写 sidecar 后发布」在发布失败后，重试的变更判定只比对 sidecar 会静默 no-op（生效文件永久缺键），调序为先发布生效文件后写 sidecar，失败矩阵收敛（§6.3）；② 同一沙箱并发 PUT 无锁导致整键丢失，新增 per-sandbox Redis 写租约（`sbx:env:{sandboxId}`，有限等待，超时 503 `env_update_busy`，Redis 不可用 fail-open，§7.3）。
+> **修订记录（2026-11-05，issue #230）**：修复两类一致性缺陷——① 写入调序：原「先写 sidecar 后发布」在发布失败后，重试的变更判定只比对 sidecar 会静默 no-op（生效文件永久缺键），调序为先发布生效文件后写 sidecar，失败矩阵收敛（§6.3）；② 同一沙箱并发 PUT 无锁导致整键丢失，新增 per-sandbox Redis 写租约（`sbx:env:{sandboxId}`，有限等待，超时 503 `env_update_busy`，Redis 不可用 fail-open，§7.3）；评审修订：持有期间 Lua 周期续租（临界区 6 次调用 × SDK callTimeout 30s + 默认重试 3 次，静态 TTL 无法诚实覆盖），TTL 30s 退化为纯崩溃自愈窗口。
 
 ---
 
@@ -327,10 +327,11 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 
 ### 7.3 并发
 
-- **per-sandbox 写租约（issue #230）**：同一沙箱的并发 PUT 由 Redis 租约 `sbx:env:{sandboxId}` 串行化（`SET NX PX 15s` + Lua 按 token 比较删除，与 `RedisSandboxExecutionGuard` 同款互斥语义）。实现要点：
+- **per-sandbox 写租约（issue #230）**：同一沙箱的并发 PUT 由 Redis 租约 `sbx:env:{sandboxId}` 串行化（`SET NX PX` 获租约 + Lua 按 token 比较删除，与 `RedisSandboxExecutionGuard` 同款互斥语义）。实现要点：
   - 键经 `RedisConnectionFacade.key()` 组装（多服务共享 oaf-redis 时裸键会跨服务互锁，与 `sbx:guard` 同源问题）；多副本部署天然生效（锁在共享 Redis）；
-  - 有限等待 10s（200ms 自旋），超时 503 `env_update_busy`（调用方稍后重试）；租约 TTL（15s）必须大于临界区最坏耗时（discover + 2 读 + 2 写 + mv 共 5 次沙箱 API 往返），仅兜底持有者崩溃，正常路径 close 即时释放；
-  - **fail-open**：Redis 不可用/缺席时放行（noop 租约，常开、无配置开关，对齐守卫哲学——锁不得成为可用性单点）；此时并发窗口回到无锁状态，但写序修复独立成立（发布失败后重试仍收敛）；
+  - 有限等待 10s（200ms 自旋），超时 503 `env_update_busy`（调用方稍后重试）；
+  - **持有期间周期续租（评审 g1 修订）**：临界区含 6 次沙箱调用（discover、readOriginal、readManaged、publish 写临时文件、mv、writeManaged——discover 在 `acquire` 之后，计入临界区）；SDK 1.0.18 把 `requestTimeout`（默认 30s）统一设为 connect/read/write/call 超时且默认重试 3 次（`RetryPolicy.DEFAULT_MAX_RETRIES=3`），单个逻辑调用最坏可达分钟级，任何「静态 TTL 覆盖临界区最坏耗时」的论证要么失真、要么把崩溃窗口拖到不可接受——故租约持有期间按 `TTL/3`（10s）周期 Lua 续租（token 匹配才 `pexpire`），**互斥由「持有者存活即续租」保证**；TTL（30s）退化为纯崩溃自愈窗口：持有者被杀（停止续租）后其他写者最长 30s `env_update_busy` 即恢复；正常路径 close 先停续租再即时释放；
+  - **fail-open**：Redis 不可用/缺席时放行（noop 租约，常开、无配置开关，对齐守卫哲学——锁不得成为可用性单点）；续租连续失败至 TTL 过期同样互斥退化，仅记录日志；此时并发窗口回到无锁状态，但写序修复独立成立（发布失败后重试仍收敛）；
   - 无租约时（修复前）的缺陷：两个并发 PUT 各自基于「读旧原文 + 旧 sidecar」快照合并，后 `mv` 者覆盖先 `mv` 者的键（整键丢失）；
 - 租约内的合并写序（调序后）：多个 PUT 串行进入，各自「读最新原文 + 最新 sidecar」→ 追加变更行 → 原子 `mv` → 写 sidecar，先写入方的键不再被覆盖；
 - execd 读 `<envPath>` 与 PUT 写并发：`mv -f` 原子替换，读侧要么看到旧文件、要么看到新文件；
@@ -382,7 +383,7 @@ execd 每条命令执行前由 `UserEnvOverlay` 重新读取 `EXECD_ENVS` 文件
 |--------|------|
 | `SandboxEnvFileTest` | 路径发现（非空/空白/非法/命令失败 502）；`.json` 与原文缺失时从空开始；追加变更键且**保留镜像写入的 `PATH=...`/`JAVA_HOME=...` 行**；同名键追加新行覆盖旧值；无变化跳过发布；`.json` 损坏 fail-soft；校验拒绝：保留键（`EXECD_API_GRACE_SHUTDOWN`/`EXECD_ENVS`）、非法键名、值含 `$`/换行/回车/首尾空白/首字符引号、`NUL` 值、单值超 8KiB、超 64 键、合并后总量超 32KiB；值内单引号（非首字符）允许；发布：临时文件+`mv -f` 原子写入（mv 失败 502）、原文读取失败 502；行格式为裸 `KEY=value`（跨 execd 版本兼容）由 `renderLines`/`appendLines` 在合并用例内断言；**写批次顺序（issue #230）**：第一批=发布临时文件、第二批=sidecar；**失败收敛两用例**：mv 失败 → 502 且仅 1 次写（sidecar 未推进）→ 重试重新检出变化收敛；发布成功 + sidecar 写失败 → 502 → 重试追加第二行 K=V（execd 取最后行幂等） |
 | `SandboxLocatorTest` | 按配置 scope 生成候选：`USER` → 先 `USER(sessionId)` 后 `USER(userId)` 回退；`SESSION` → `SESSION(sessionId)`；`AGENT`/`GLOBAL` → 409；全候选未命中 → 404；connect 失败落到下一候选；状态加载 IO 失败 → 500；状态记录无 `sandboxId` 时跳过 |
-| `RedisSandboxEnvLockTest`（issue #230） | SET NX 成功获租约（键经 `facade.key()` 前缀隔离）；占用自旋重试后获租约；有限等待超时 → 503 `env_update_busy`（注入短等待窗口验证有界性）；Redis 异常 fail-open → noop 租约；释放按 token 比较删除（RELEASE_LUA）、释放失败吞噬（TTL 自愈）；空 sandboxId 防御 fail-open；`noop()` 兜底实例 |
+| `RedisSandboxEnvLockTest`（issue #230） | SET NX 成功获租约（键经 `facade.key()` 前缀隔离）；占用自旋重试后获租约；有限等待超时 → 503 `env_update_busy`（注入短等待窗口验证有界性）；Redis 异常 fail-open → noop 租约；释放按 token 比较删除（RELEASE_LUA）、释放失败吞噬（TTL 自愈）；**续租 Lua 三分支（评审 g1）**：token 匹配 `pexpire` 报告持有、token 不匹配/键过期报告未持有不复活、Redis 异常不外溢；空 sandboxId 防御 fail-open；`noop()` 兜底实例 |
 | `SandboxEnvControllerTest` | 200/400/404/409/502；字段缺失；响应不含值；`sandbox_disabled` / `unsupported_isolation_scope` / `execd_env_file_unsupported` / `unsupported_env_value`；`LocatedSandbox` 句柄 close；**租约（issue #230）**：等待超时 503 `env_update_busy`、acquire 先于合并且 close 在合并完成后（InOrder）、合并抛错仍释放租约 |
 | 回归保障 | `doExec` 零改动 → 无需专门测试；既有 `OpenSandboxTest` / `SandboxUserKeyMiddlewareTest` / mock e2e X1-X20 全组回归即覆盖 |
 
