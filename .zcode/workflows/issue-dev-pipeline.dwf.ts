@@ -1,19 +1,18 @@
 /* zcode-workflow
-description: 标准开发流水线：认领 Issue → 需求分析＋独立评审＋用户确认方案 → 独立 worktree 开发 →
+description: 标准开发流水线（无方案人工关卡）：认领 Issue → 需求分析＋独立评审（通过即开工）→ 独立 worktree 开发 →
   本地单测门禁（失败自动修复回炉）→ 本地真实部署验证（kind 集群构建镜像+发布 demo 服务，真实沙箱/LLM 凭据，A2A 注册与真实调用）→
   流程黑盒验证（用户视角全生命周期：发布→真实对话→env 变更→republish→异常路径→删除，失败自动修复重验）→
-  代码评审（按模块并行＋分诊＋逐条独立复核＋修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E 矩阵，失败自动修复≤2 轮）→ 用户确认后 gh
-  pr merge --merge 合并 → 闭环归档（关闭 Issue、清理 worktree、输出流水线报告）。
+  代码评审（按模块并行＋分诊＋逐条独立复核＋修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E 矩阵，失败自动修复≤2 轮）→ 人工确认后 gh
+  pr merge --merge 合并（auto_merge=true 可跳过）→ 闭环归档（关闭 Issue、清理 worktree、输出流水线报告）。
 whenToUse: 认领一个 GitHub issue
-  并端到端完成「评审→开发→自测→本地真实部署验证→黑盒验证→CodeReview→PR→CI→合并→归档」全流程时使用。参数 issue
-  必填（纯数字编号）；auto_merge 默认 false（合并前等用户确认）；deploy_verify
+  并端到端完成「评审→开发→自测→本地真实部署验证→黑盒验证→CodeReview→PR→CI→合并→归档」全流程时使用。方案经独立评审通过即自动开工（无方案确认关卡）；唯一人工关卡是
+  PR 合并前的确认（auto_merge=true 可跳过）。参数 issue 必填（纯数字）；deploy_verify
   选本地验证模式（scoped/full/off，默认 scoped）；proxy 配置 git 代理（默认
-  127.0.0.1:7890，直连机器传空串）。施工在 /tmp 独立 worktree；方案确认与合并确认两处会暂停等待用户答复。gh
-  需已登录（账号动态探测）。
+  127.0.0.1:7890，直连机器传空串）。施工在 /tmp 独立 worktree；gh 需已登录（账号动态探测）。
 args:
   auto_merge:
     type: boolean
-    description: CI 全绿且评审完成后是否跳过人工确认直接合并（默认 false）
+    description: CI 全绿且评审完成后是否跳过人工确认直接合并（默认 false，即合并前等用户确认）
     default: false
   deploy_verify:
     type: string
@@ -30,10 +29,11 @@ args:
     description: git push/fetch 走的本地代理地址；留空字符串表示直连（适配不同机器的网络环境）
     default: http://127.0.0.1:7890
 */
-// ===== 标准开发流水线（可保存复用）v2 =====
-// 认领 → 需求评审（分析+独立评审+用户确认）→ 开发 → 本地单测门禁 → 本地真实部署验证（kind+沙箱+LLM）
+// ===== 标准开发流水线（可保存复用）v3 =====
+// 认领 → 需求评审（分析+独立评审，评审通过即开工，无人工关卡）→ 开发 → 本地单测门禁
+// → 本地真实部署验证（kind+沙箱+LLM）→ 流程黑盒验证（用户视角全生命周期）
 // → 代码评审（并行+独立复核+修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E）
-// → 确认合并（--merge，仓库规则禁 --auto/--squash/--rebase）→ 闭环归档。
+// → 人工确认合并（--merge，仓库规则禁 --auto/--squash/--rebase；auto_merge=true 可跳过）→ 闭环归档。
 // 施工在独立 git worktree（基于最新 origin/master）；部署验证直接用本机 kind 集群真实拉起业务服务。
 
 // ---------- 参数 ----------
@@ -108,11 +108,6 @@ interface Critique {
   problems: string[];
   /** 评审员用自己的话复述方案，检验理解 */
   restatement: string;
-}
-interface GateDecision {
-  approved: boolean;
-  /** 用户调整意见（approved=false 且非空 → 回炉修订） */
-  adjustments: string;
 }
 interface MergeDecision {
   merge: boolean;
@@ -504,44 +499,19 @@ for (let r = 2; r <= PLAN_ROUNDS && !critique.approved; r++) {
   critique = await critic.ask<Critique>(`修订后的方案再评一次（只读 ${WT}）：\n${JSON.stringify(currentPlan)}`);
 }
 
-// ========== 用户关卡 1：确认实施方案 ==========
-const gate1 = await hole<GateDecision>(
-  "请确认实施方案",
-  `Issue #${ISSUE}「${issueTitle}」实施方案${critique.approved ? "已通过独立评审" : `独立评审仍有保留意见：${critique.problems.join("；")}`}。方案（JSON）：\n${JSON.stringify(currentPlan)}\n\n` +
-    `工作区 ${WT}，分支 ${curBranch}；本流水线${DEPLOY_MODE === "off" ? "不做本地部署验证（CI 兜底）" : `将在合并前做本地真实部署验证（kind 集群${kindCluster ?? ""}，模式 ${DEPLOY_MODE}${DEPLOY_MODE === "full" ? "，会清理平台上除 release-agent 外的遗留业务服务" : "，只创建/清理验证自己的服务"}）`}。\n` +
-    `请把方案要点转述给用户并确认是否开工：用户有修改意见 → approved=false 且把意见写进 adjustments（会回炉修订并再次请你确认）；用户明确放弃 → approved=false 且 adjustments 留空（流水线停止，Issue 保持认领）。`,
+// ========== 方案评审通过即开工（无人工关卡；仅 PR 合并前保留人工确认） ==========
+mark(
+  "需求评审",
+  `方案已通过独立评审即开工${critique.approved ? "" : `（评审保留 ${critique.problems.length} 条，已交施工规避）`}：${currentPlan.goal}`,
 );
-if (!gate1.approved && gate1.adjustments.trim() === "") {
-  return stopReport("用户未确认方案，流水线停止", ["开发及之后所有阶段未执行"]);
-}
-if (!gate1.approved) {
-  phase("按确认意见修订方案");
-  currentPlan = await analyst.ask<Plan>(
-    `用户对方案的意见（必须逐条吸收）：${gate1.adjustments}\n当前方案：${JSON.stringify(currentPlan)}`,
-  );
-  const recheck = await critic.ask<Critique>(
-    `按用户意见修订后的方案快速复核（只读 ${WT}）：\n${JSON.stringify(currentPlan)}`,
-  );
-  const gate2 = await hole<GateDecision>(
-    "请再次确认修订后的方案",
-    `按用户意见修订后的方案（独立评审${recheck.approved ? "通过" : `仍有保留：${recheck.problems.join("；")}`}）：\n${JSON.stringify(currentPlan)}\n请再次向用户确认开工（规则同上次：修改意见写 adjustments；明确放弃则 adjustments 留空）。`,
-  );
-  if (!gate2.approved) {
-    return stopReport(
-      gate2.adjustments.trim() === ""
-        ? "用户最终未确认方案，流水线停止"
-        : `用户两轮仍未认可方案（最新意见：${gate2.adjustments}），停止以免空跑`,
-      ["开发及之后所有阶段未执行"],
-    );
-  }
-}
-mark("需求评审", `方案已确认：${currentPlan.goal}`);
+log(`方案开工：${currentPlan.goal}`);
 
 // ========== 4. 开发实现与提交 ==========
 phase("开发实现与提交");
 const dev = agent("开发工程师", DEV_PERSONA);
 const devResult = await dev.ask<DevResult>(
   `按已确认方案在 worktree ${WT}（分支 ${curBranch}）施工：\n${JSON.stringify(currentPlan)}\n` +
+    (critique.approved ? "" : `评审员遗留意见（未阻断开工，施工时注意规避）：\n${JSON.stringify(critique.problems)}\n`) +
     `要求：先读 ${WT} 根与涉及模块的 AGENTS.md 并严守；只改方案范围内必要文件；完成后提交，提交信息 ${currentPlan.commitType}(<模块>): <一句话中文描述> (#${ISSUE})；` +
     `只 stage 你创建/修改的路径（严禁 git add -A / git add .）；不要 push。若无法施工返回 blocked=true 并在 notes 说明。返回 DevResult。`,
 );
