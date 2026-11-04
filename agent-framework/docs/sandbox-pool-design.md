@@ -3,10 +3,11 @@
 | 项 | 值 |
 |----|----|
 | 编制时点 | 2026-11-04 |
-| 状态 | **设计评审稿（未实施）** |
+| 状态 | **评审已通过（2026-11-04）· 实施暂缓**（实施启动时以本文档为设计基线，测试与验收见 §8/§10） |
 | 需求 | agent 启动后按配置预初始化一定数量的沙箱池；创建 session 时从池中借一个沙箱；session 使用完成断开后沙箱**销毁重建**回池；池无可用沙箱时 session **等待** |
 | 现状核对 | harness 行为基于 `agentscope-harness:2.0.3`（`javap` 反编译 `SandboxManager`/`SandboxLifecycleMiddleware`/`AbstractBaseSandbox` 字节码）；本仓链路核对至 `OpenSandboxClient`/`OpenSandboxFilesystemSpec`/`AgentScopeConfig` 源码；二次复核补充核对 `TurnLeaseGuard` 续约（`ChatStreamController.java:497`）、issue #87 等待心跳（`ChatStreamController.java:518`）、`confirm_context TTL=30min`（`AgentManagerProperties` `@DefaultValue("30")`）、网关超时 3600s（`platform-router.yaml`） |
 | 关联文档 | [opensandbox-integration-plan.md](opensandbox-integration-plan.md)、[sandbox-env-update-design.md](sandbox-env-update-design.md)、[sandbox-skill-sync-optimization-design.md](../../docs/design/sandbox-skill-sync-optimization-design.md) |
+| 关联 Issue | [gaoyue1989/agent-manager#241](https://github.com/gaoyue1989/agent-manager/issues/241) |
 
 > **方案结论**：池做在 `OpenSandboxClient`（SDK `SandboxClient` 契约层）——`create()` 从池借出预创建容器并绑定 userKey，`resume()` 保持现状（connect 已借出容器），归还由**空闲租约**触发（kill 旧容器 + 异步重建补位）。`SandboxManager` 四级 acquire 优先级、守卫、KV 回写等 SDK 语义**零改动**；总开关 `SANDBOX_POOL_ENABLED` 默认 false，关闭即完全现状。
 
