@@ -1,20 +1,15 @@
 /* zcode-workflow
-description: 标准开发流水线：认领 Issue → 需求分析＋独立评审＋用户确认方案 → 独立 worktree 开发 →
-  本地单测门禁（失败自动修复回炉）→ 本地真实部署验证（kind 集群构建镜像+发布 demo 服务，真实沙箱/LLM 凭据，A2A 注册与真实调用）→
+description: "标准开发流水线（全自动，到提交 PR 为止）：认领 Issue → 需求分析＋独立评审（通过即开工）→ 独立 worktree 开发
+  → 本地单测门禁（失败自动修复回炉）→ 本地真实部署验证（kind 集群构建镜像+发布 demo 服务，真实沙箱/LLM 凭据，A2A 注册与真实调用）→
   流程黑盒验证（用户视角全生命周期：发布→真实对话→env 变更→republish→异常路径→删除，失败自动修复重验）→
-  代码评审（按模块并行＋分诊＋逐条独立复核＋修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E 矩阵，失败自动修复≤2 轮）→ 用户确认后 gh
-  pr merge --merge 合并 → 闭环归档（关闭 Issue、清理 worktree、输出流水线报告）。
+  代码评审（按模块并行＋分诊＋逐条独立复核＋修复回归）→ 推送建 PR（正文含 Closes #N）→ 收尾归档（清理
+  worktree、输出流水线报告）。PR CI（含必需 E2E 矩阵）与合并由人工盯守，无任何人工确认关卡。"
 whenToUse: 认领一个 GitHub issue
-  并端到端完成「评审→开发→自测→本地真实部署验证→黑盒验证→CodeReview→PR→CI→合并→归档」全流程时使用。参数 issue
-  必填（纯数字编号）；auto_merge 默认 false（合并前等用户确认）；deploy_verify
+  并端到端完成「评审→开发→自测→本地真实部署验证→黑盒验证→CodeReview→提交PR」全流程时使用。全自动无人工确认关卡：方案经独立评审通过即开工，PR
+  提交后流水线即结束（CI 结果与合并由人工盯守）。参数 issue 必填（纯数字）；deploy_verify
   选本地验证模式（scoped/full/off，默认 scoped）；proxy 配置 git 代理（默认
-  127.0.0.1:7890，直连机器传空串）。施工在 /tmp 独立 worktree；方案确认与合并确认两处会暂停等待用户答复。gh
-  需已登录（账号动态探测）。
+  127.0.0.1:7890，直连机器传空串）。施工在 /tmp 独立 worktree；gh 需已登录（账号动态探测）。
 args:
-  auto_merge:
-    type: boolean
-    description: CI 全绿且评审完成后是否跳过人工确认直接合并（默认 false）
-    default: false
   deploy_verify:
     type: string
     description: 本地验证模式：scoped=部署验证＋流程黑盒验证（只创建/清理验证自己的服务，默认）；full=仓库标准
@@ -30,15 +25,15 @@ args:
     description: git push/fetch 走的本地代理地址；留空字符串表示直连（适配不同机器的网络环境）
     default: http://127.0.0.1:7890
 */
-// ===== 标准开发流水线（可保存复用）v2 =====
-// 认领 → 需求评审（分析+独立评审+用户确认）→ 开发 → 本地单测门禁 → 本地真实部署验证（kind+沙箱+LLM）
-// → 代码评审（并行+独立复核+修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E）
-// → 确认合并（--merge，仓库规则禁 --auto/--squash/--rebase）→ 闭环归档。
+// ===== 标准开发流水线（可保存复用）v4 =====
+// 认领 → 需求评审（分析+独立评审，评审通过即开工，无人工关卡）→ 开发 → 本地单测门禁
+// → 本地真实部署验证（kind+沙箱+LLM）→ 流程黑盒验证（用户视角全生命周期）
+// → 代码评审（并行+独立复核+修复回归）→ 推送建 PR → 收尾归档（到此结束）。
+// PR CI（含必需 E2E 矩阵）与合并由人工盯守；PR 正文含 Closes #N，合并后 Issue 自动关闭。
 // 施工在独立 git worktree（基于最新 origin/master）；部署验证直接用本机 kind 集群真实拉起业务服务。
 
 // ---------- 参数 ----------
 const ISSUE = String(args.issue ?? "").trim();
-const AUTO_MERGE = args.auto_merge === true;
 const RAW_MODE = typeof args.deploy_verify === "string" ? args.deploy_verify.trim().toLowerCase() : "scoped";
 const DEPLOY_MODE: "scoped" | "full" | "off" = RAW_MODE === "full" || RAW_MODE === "off" ? RAW_MODE : "scoped";
 const PROXY = typeof args.proxy === "string" ? args.proxy.trim() : "http://127.0.0.1:7890";
@@ -61,8 +56,6 @@ const NET =
 const PLAN_ROUNDS = 3;
 const UNIT_ROUNDS = 3;
 const VERIFY_ROUNDS = 2;
-const CI_FIX_ROUNDS = 2;
-const POLL_ROUNDS = 70;
 
 // ---------- 结果类型 ----------
 interface Finding {
@@ -108,16 +101,6 @@ interface Critique {
   problems: string[];
   /** 评审员用自己的话复述方案，检验理解 */
   restatement: string;
-}
-interface GateDecision {
-  approved: boolean;
-  /** 用户调整意见（approved=false 且非空 → 回炉修订） */
-  adjustments: string;
-}
-interface MergeDecision {
-  merge: boolean;
-  /** 用户附加指示 */
-  note: string;
 }
 interface DevResult {
   /** true=无法施工（notes 说明原因） */
@@ -174,11 +157,6 @@ interface PrMaterial {
   commitSubject: string;
   changedFiles: string[];
 }
-interface CiFixOut {
-  /** 是否已修复并提交（push 由脚本统一执行） */
-  committed: boolean;
-  notes: string;
-}
 interface GhIssue {
   state: string;
   title: string;
@@ -224,12 +202,6 @@ function parsePrNumber(s: string): string {
   const m = /pulls?\/(\d+)/.exec(s);
   return m?.[1] ?? "";
 }
-function classifyChecks(exitCode: number, out: string): "green" | "pending" | "fail" {
-  if (exitCode === 0) return "green";
-  if (/no checks/i.test(out) || /pending/i.test(out)) return "pending";
-  if (/fail/i.test(out)) return "fail";
-  return exitCode === 8 ? "pending" : "fail";
-}
 function topDir(p: string): string {
   const i = p.indexOf("/");
   return i === -1 ? p : p.slice(0, i);
@@ -268,7 +240,7 @@ artifact.board("pipeline-board", {
   title: "开发流水线进度",
   key: "issue",
   status: "stage",
-  columns: ["认领", "需求评审", "开发", "自测", "部署验证", "黑盒验证", "CodeReview", "PR·CI", "待合并", "已合并", "已归档", "受阻"],
+  columns: ["认领", "需求评审", "开发", "自测", "部署验证", "黑盒验证", "CodeReview", "PR·CI", "已归档", "受阻"],
   cardTitle: "title",
   detail: [{ field: "note" }, { field: "branch" }, { field: "pr" }],
 });
@@ -504,44 +476,19 @@ for (let r = 2; r <= PLAN_ROUNDS && !critique.approved; r++) {
   critique = await critic.ask<Critique>(`修订后的方案再评一次（只读 ${WT}）：\n${JSON.stringify(currentPlan)}`);
 }
 
-// ========== 用户关卡 1：确认实施方案 ==========
-const gate1 = await hole<GateDecision>(
-  "请确认实施方案",
-  `Issue #${ISSUE}「${issueTitle}」实施方案${critique.approved ? "已通过独立评审" : `独立评审仍有保留意见：${critique.problems.join("；")}`}。方案（JSON）：\n${JSON.stringify(currentPlan)}\n\n` +
-    `工作区 ${WT}，分支 ${curBranch}；本流水线${DEPLOY_MODE === "off" ? "不做本地部署验证（CI 兜底）" : `将在合并前做本地真实部署验证（kind 集群${kindCluster ?? ""}，模式 ${DEPLOY_MODE}${DEPLOY_MODE === "full" ? "，会清理平台上除 release-agent 外的遗留业务服务" : "，只创建/清理验证自己的服务"}）`}。\n` +
-    `请把方案要点转述给用户并确认是否开工：用户有修改意见 → approved=false 且把意见写进 adjustments（会回炉修订并再次请你确认）；用户明确放弃 → approved=false 且 adjustments 留空（流水线停止，Issue 保持认领）。`,
+// ========== 方案评审通过即开工（无人工关卡；仅 PR 合并前保留人工确认） ==========
+mark(
+  "需求评审",
+  `方案已通过独立评审即开工${critique.approved ? "" : `（评审保留 ${critique.problems.length} 条，已交施工规避）`}：${currentPlan.goal}`,
 );
-if (!gate1.approved && gate1.adjustments.trim() === "") {
-  return stopReport("用户未确认方案，流水线停止", ["开发及之后所有阶段未执行"]);
-}
-if (!gate1.approved) {
-  phase("按确认意见修订方案");
-  currentPlan = await analyst.ask<Plan>(
-    `用户对方案的意见（必须逐条吸收）：${gate1.adjustments}\n当前方案：${JSON.stringify(currentPlan)}`,
-  );
-  const recheck = await critic.ask<Critique>(
-    `按用户意见修订后的方案快速复核（只读 ${WT}）：\n${JSON.stringify(currentPlan)}`,
-  );
-  const gate2 = await hole<GateDecision>(
-    "请再次确认修订后的方案",
-    `按用户意见修订后的方案（独立评审${recheck.approved ? "通过" : `仍有保留：${recheck.problems.join("；")}`}）：\n${JSON.stringify(currentPlan)}\n请再次向用户确认开工（规则同上次：修改意见写 adjustments；明确放弃则 adjustments 留空）。`,
-  );
-  if (!gate2.approved) {
-    return stopReport(
-      gate2.adjustments.trim() === ""
-        ? "用户最终未确认方案，流水线停止"
-        : `用户两轮仍未认可方案（最新意见：${gate2.adjustments}），停止以免空跑`,
-      ["开发及之后所有阶段未执行"],
-    );
-  }
-}
-mark("需求评审", `方案已确认：${currentPlan.goal}`);
+log(`方案开工：${currentPlan.goal}`);
 
 // ========== 4. 开发实现与提交 ==========
 phase("开发实现与提交");
 const dev = agent("开发工程师", DEV_PERSONA);
 const devResult = await dev.ask<DevResult>(
   `按已确认方案在 worktree ${WT}（分支 ${curBranch}）施工：\n${JSON.stringify(currentPlan)}\n` +
+    (critique.approved ? "" : `评审员遗留意见（未阻断开工，施工时注意规避）：\n${JSON.stringify(critique.problems)}\n`) +
     `要求：先读 ${WT} 根与涉及模块的 AGENTS.md 并严守；只改方案范围内必要文件；完成后提交，提交信息 ${currentPlan.commitType}(<模块>): <一句话中文描述> (#${ISSUE})；` +
     `只 stage 你创建/修改的路径（严禁 git add -A / git add .）；不要 push。若无法施工返回 blocked=true 并在 notes 说明。返回 DevResult。`,
 );
@@ -958,128 +905,17 @@ prRef = `#${prNumber}`;
 mark("PR·CI", `PR ${prRef} 已创建，等待 CI`);
 log(`PR ${prRef} 已创建：${prMat.prTitle}`);
 
-// ========== 10. 盯守 CI 全量检查（含 E2E） ==========
-phase("盯守 CI 全量检查（含 E2E）");
-let ciOutcome = "";
-let lastChecks = "";
-for (let attempt = 0; attempt <= CI_FIX_ROUNDS; attempt++) {
-  let status: "green" | "pending" | "fail" = "pending";
-  for (let r = 0; r < POLL_ROUNDS; r++) {
-    const c = await world.run("gh", ["pr", "checks", prNumber, "-R", REPO], {
-      timeoutMs: 120_000,
-      output: { tail: 16_384 },
-    });
-    lastChecks = `${c.stdout}\n${c.stderr}`;
-    status = classifyChecks(c.exitCode, lastChecks);
-    if (status !== "pending") break;
-    await world.run("sleep", ["60"]);
-  }
-  if (status === "green") {
-    ciOutcome = "green";
-    break;
-  }
-  if (status === "pending") {
-    ciOutcome = "timeout";
-    break;
-  }
-  if (attempt >= CI_FIX_ROUNDS) {
-    ciOutcome = "fail";
-    break;
-  }
-  log(`CI 第 ${attempt + 1} 次失败，交开发工程师修复`);
-  const ciFix = await dev.ask<CiFixOut>(
-    `CI 必需检查未过。失败检查：\n${lastChecks.slice(0, 4000)}\n` +
-      `可用 gh run view <run-id> -R ${REPO} --log-failed 只读查失败日志。在 ${WT} 修复并提交，不要 push（脚本统一推送）。确实无法修复则 committed=false 并说明。${NET}`,
-  );
-  if (!ciFix.committed) {
-    ciOutcome = "giveup";
-    break;
-  }
-  const repush = await world.run("git", ["-C", WT, ...GIT_PROXY, "push", "origin", curBranch]);
-  if (repush.exitCode !== 0) {
-    ciOutcome = "push-fail";
-    break;
-  }
-}
-if (ciOutcome !== "green") {
-  const why =
-    ciOutcome === "timeout"
-      ? `CI 在盯守窗口内未跑完，最后状态：\n${lastChecks.slice(0, 2000)}`
-      : ciOutcome === "giveup"
-        ? `开发工程师无法修复 CI 失败，最后状态：\n${lastChecks.slice(0, 2000)}`
-        : ciOutcome === "push-fail"
-          ? "修复提交推送失败"
-          : `CI 必需检查未全绿，最后状态：\n${lastChecks.slice(0, 2000)}`;
-  return stopReport(`${why}\n——PR ${prRef} 保持打开待人工处理`, ["合并与归档未执行"]);
-}
-gateResults.push("CI 全量检查（gh pr checks，含必需 E2E 矩阵）全绿");
-
-// ========== 用户关卡 2：确认合并 ==========
-mark("待合并", "CI 全绿，等待合并确认");
-let mergeGo = AUTO_MERGE;
-let mergeNote = "auto_merge=true：按参数跳过人工确认";
-if (!AUTO_MERGE) {
-  const md = await hole<MergeDecision>(
-    "请确认合并 PR",
-    `PR ${prRef}（${prMat.prTitle}）CI 已全绿。${leftover.length > 0 ? `遗留未修评审项 ${leftover.length} 条（详见运行 findings 与报告）。` : "评审无遗留问题。"}\n` +
-      `请向用户确认：是否执行 gh pr merge --merge 合并到 master？用户拒绝或另有指示时 merge=false 并把指示写入 note。`,
-  );
-  mergeGo = md.merge;
-  mergeNote = md.note;
-}
-if (!mergeGo) {
-  mark("待合并", `按用户指示暂不合并：${mergeNote}`);
-  return {
-    conclusion: `按用户指示未合并：${mergeNote}\nPR ${prRef} 保持打开（CI 已全绿），分支 ${curBranch}、worktree ${WT} 保留。`,
-    findings: buildFindings(),
-    verified: [...gateResults, "方案经独立评审与用户确认"],
-    notCovered: [...localGaps, "合并与归档未执行"],
-  };
-}
-
-// ========== 11. 合并 PR 并验证 ==========
-phase("合并 PR 并验证");
-const mv = await world.run("gh", ["pr", "view", prNumber, "-R", REPO, "--json", "state,mergeable"]);
-if (mv.exitCode !== 0) return stopReport(`PR 状态查询失败：${mv.stderr.slice(0, 500)}`, ["归档未执行"]);
-const mvJson = JSON.parse(mv.stdout) as { state: string; mergeable: string };
-if (mvJson.state !== "OPEN" || /CONFLICT/i.test(mvJson.mergeable))
-  return stopReport(`PR 状态异常（state=${mvJson.state}, mergeable=${mvJson.mergeable}），需人工处理`, ["归档未执行"]);
-const mergeCmd = await world.run("gh", ["pr", "merge", prNumber, "-R", REPO, "--merge"]);
-if (mergeCmd.exitCode !== 0)
-  return stopReport(`合并命令失败：${mergeCmd.stderr.slice(0, 500)}`, ["归档未执行"]);
-const verify = await world.run("gh", ["pr", "view", prNumber, "-R", REPO, "--json", "state,mergeCommit"]);
-const vJson = verify.exitCode === 0 ? (JSON.parse(verify.stdout) as { state: string; mergeCommit?: { oid: string } }) : undefined;
-if (!vJson || vJson.state !== "MERGED")
-  return stopReport(`合并后校验状态异常：${vJson?.state ?? verify.stderr.slice(0, 200)}`, ["归档未执行"]);
-const mergeOid = vJson.mergeCommit?.oid.slice(0, 10) ?? "?";
-mark("已合并", `merge commit ${mergeOid}`);
-log(`PR ${prRef} 已合并（${mergeOid}）`);
-
-// ========== 12. 闭环归档与总结报告 ==========
-phase("闭环归档与总结报告");
-const isState = await world.run("gh", ["issue", "view", ISSUE, "-R", REPO, "--json", "state"]);
-let issueClosed = /"state":\s*"CLOSED"/.test(isState.stdout);
-if (!issueClosed && isState.exitCode === 0 && /"state":\s*"OPEN"/.test(isState.stdout)) {
-  const closeIt = await world.run("gh", [
-    "issue",
-    "close",
-    ISSUE,
-    "-R",
-    REPO,
-    "--comment",
-    `已由 PR ${prRef} 合并关闭（标准开发流水线交付）`,
-  ]);
-  issueClosed = closeIt.exitCode === 0;
-}
+// ========== 10. PR 提交后收尾归档（CI 结果与合并交由人工，流水线到此结束） ==========
+phase("PR 提交后收尾归档");
 const rmWt = await world.run("git", ["worktree", "remove", WT]);
 if (rmWt.exitCode !== 0) await world.run("git", ["worktree", "remove", "--force", WT]);
-await world.run("git", [...GIT_PROXY, "fetch", "origin", "master"]);
-mark("已归档", `Issue ${issueClosed ? "已关闭" : "关闭状态待确认"}；worktree 已清理；本地分支 ${curBranch} 保留`);
+mark("PR·CI", `PR ${prRef} 已提交，等待 CI 与人工合并`);
+log(`流水线结束：PR ${prRef} 已提交（${prMat.prTitle}）；本地验证已全部通过，CI 结果与合并由人工盯守`);
 
 const reportMd = [
   `# Issue #${ISSUE} 开发流水线报告`,
   ``,
-  `> 运行标识 ${run.id} · 分支 \`${curBranch}\` · PR ${prRef}（已合并 ${mergeOid}）`,
+  `> 运行标识 ${run.id} · 分支 \`${curBranch}\` · PR ${prRef}（已提交，待 CI 与人工合并）`,
   ``,
   `## 目标与方案`,
   `- Issue：${issueTitle}`,
@@ -1108,29 +944,28 @@ const reportMd = [
     ? leftover.map((f) => `- [${f.severity}/${f.status}] ${f.line ? `${f.path}:${f.line}` : f.path} ${f.problem}`)
     : []),
   ``,
-  `## 交付与归档`,
-  `- PR：https://github.com/${REPO}/pull/${prNumber}（merge commit ${mergeOid}）`,
-  `- Issue：${issueClosed ? "已关闭，闭环完成" : "关闭动作已发起，状态待确认"}`,
+  `## 交付`,
+  `- PR：https://github.com/${REPO}/pull/${prNumber}（正文含 Closes #${ISSUE}，合并后 Issue 自动关闭）`,
+  `- CI：PR 必需检查（含 E2E 矩阵）由 GitHub Actions 自动执行，结果与合并由人工盯守`,
   `- worktree 已清理；本地分支 ${curBranch} 保留（仓库惯例远端分支不删）`,
 ].join("\n");
 await artifact.markdown("pipeline-report", reportMd, {
   title: `Issue #${ISSUE} 开发流水线报告`,
-  description: "认领→评审→开发→自测→真实部署验证→黑盒验证→CodeReview→PR→CI→合并→归档 全程记录与验证证据",
+  description: "认领→评审→开发→自测→真实部署验证→黑盒验证→CodeReview→提交PR 全程记录与验证证据",
   primary: true,
 });
 
 return {
-  conclusion: `Issue #${ISSUE}「${issueTitle}」已完成端到端流水线：方案（独立评审+用户确认）→ 开发 → 本地自测 → ${DEPLOY_MODE !== "off" && CAN_DEPLOY ? "本地 kind 真实部署验证（沙箱+LLM 凭据、A2A 注册与真实调用）→ " : ""}${bboxPassed ? "流程黑盒验证（用户视角全生命周期）→ " : ""}代码评审（独立复核）→ PR ${prRef} → CI 全绿 → 合并 master（${mergeOid}）→ Issue ${issueClosed ? "已关闭" : "关闭待确认"}。${leftover.length + lows.length > 0 ? `遗留项 ${leftover.length + lows.length} 条详见 findings 与报告。` : ""}`,
+  conclusion: `Issue #${ISSUE}「${issueTitle}」流水线完成至提交 PR：方案（独立评审通过即开工）→ 开发 → 本地自测 → ${DEPLOY_MODE !== "off" && CAN_DEPLOY ? "本地 kind 真实部署验证（沙箱+LLM 凭据、A2A 注册与真实调用）→ " : ""}${bboxPassed ? "流程黑盒验证（用户视角全生命周期）→ " : ""}代码评审（独立复核）→ PR ${prRef} 已提交（https://github.com/${REPO}/pull/${prNumber}）。本地验证全部通过；PR CI（含必需 E2E 矩阵）与合并由人工盯守，正文含 Closes #${ISSUE}（合并后 Issue 自动关闭）。${leftover.length + lows.length > 0 ? `遗留项 ${leftover.length + lows.length} 条详见 findings 与报告。` : ""}`,
   findings: buildFindings(),
   verified: [
     ...gateResults,
-    "方案经独立评审员评审并经用户确认后开工",
-    `合并经用户${AUTO_MERGE ? "以 auto_merge 参数授权" : "确认"}后执行`,
-    ...(issueClosed ? ["Issue 已关闭，闭环完成"] : []),
+    "方案经独立评审员评审通过后自动开工",
   ],
   notCovered: [
     ...localGaps,
-    ...(issueClosed ? [] : ["Issue 关闭状态需人工确认"]),
+    "PR CI 门禁结果与合并由人工盯守（流水线到提交 PR 为止）",
+    "Issue 关闭依赖 PR 合并（Closes #N 由 GitHub 自动执行）",
     ...(leftover.some((f) => f.status === "unconfirmed") ? ["复审新发现项未做二次独立确认"] : []),
   ],
 };
