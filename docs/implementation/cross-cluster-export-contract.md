@@ -279,7 +279,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 
 ### 4.3 请求/响应要点
 
-- `POST .../export` 请求体：`{ "marker": "1.2.0-e1", "baseImage": "…", "chartVersion": "0.1.0", "env": {"MCP_FLIGHT_TOKEN": "…"}, "secretKeys": ["MCP_FLIGHT_TOKEN"], "replicas": 2 }`；`marker` 必填且须为该服务 frozen 标记；`baseImage` 必须命中 L1 `BASE_IMAGE_WHITELIST`（缺省取白名单首项，模式同 config.go:122-124）；`env` 走 `service.ValidateEnv`（env.go:17-36）+ 导出保留键校验（§5.4）；`chartVersion` 缺省常量 `defaultExportChartVersion = "0.1.0"`。
+- `POST .../export` 请求体：`{ "marker": "1.2.0-e1", "baseImage": "…", "chartVersion": "0.1.0", "env": {"MCP_FLIGHT_TOKEN": "…"}, "secretKeys": ["MCP_FLIGHT_TOKEN"], "replicas": 2 }`；`marker` 必填且须为该服务 frozen 标记；`baseImage` 必须命中 L1 `BASE_IMAGE_WHITELIST`（缺省取白名单首项，模式同 config.go:122-124）；`env` 走 `service.ValidateEnv`（env.go:17-36）+ 导出保留键校验（§5.4）；`chartVersion` 缺省常量 `defaultExportChartVersion = "0.1.0"`，且须为 semver 形态（`^\d+\.\d+\.\d+[-.0-9A-Za-z]*$`，≤32——对齐 `ChartVersion` 列宽），非法创建 400（issue #226）；values 注释头全部插值字段另经 `sanitizeHeaderLine` 单行化兜底（yaml.v3 全部行终止符 LF/CR/NEL/LS/PS → 空格——只拦 CR/LF 时 NEL/LS/PS 可经 DisplayName 复活注入，覆盖重渲染读 DB 存量值等残余向量）。
 - 响应统一 `OK(c, …)` 包装（respond.go）；错误经 `mapError`（401/400/403/404/409 语义沿用）。
 - `GET .../exports/:id` 详情对 `ValuesYAML`/`RequestJSON` 永不回显（模型 json:"-"，§1.1）。
 

@@ -226,6 +226,31 @@ func splitExportEnv(in *exportRenderInput) (plain, secret map[string]string, err
 	return plain, secret, nil
 }
 
+// headerLineTerminators sanitizeHeaderLine 专用替换表：yaml.v3（v3.0.1）认定的全部行
+// 终止符 → 空格。评审复核（独立 harness 实测）：只拦 CR/LF 不够——扫描器把 NEL(U+0085)/
+// LS(U+2028)/PS(U+2029) 同样当行终止符（终止注释行、随行内容照常解析），可经 DisplayName
+// 复活注入顶出任意顶层键；C0 控制字符则被 yaml 直接拒绝（"control characters are not
+// allowed"，fail-closed 不构成注入面），故剥离范围精确到五终止符。
+var headerLineTerminators = strings.NewReplacer(
+	"\n", " ", "\r", " ",
+	"\u0085", " ", "\u2028", " ", "\u2029", " ",
+)
+
+// sanitizeHeaderLine values 注释头插值单行化（issue #226 兜底）：把 yaml.v3 认定的全部
+// 行终止符 LF/CR/NEL/LS/PS 替换为空格，注入内容只能留在注释行内。插值字段中 DisplayName
+// 是活向量：发布仅「非空 + ≤128 rune」校验（agentgen.go:692-696、publish.go:176-179，
+// 多字节终止符是合法 rune 可过），经 publish.go:234 orStr(req.Name, pkg.Name) 落
+// services.display_name 后由 renderExportValues 直入注释头——完整链路：LS 进 DisplayName
+// → 创建导出单（chartVersion 合法）→ values 注释头顶出 resources → charts/oaf-agent
+// 模板消费生效。其余插值字段均为受限形态（marker={包版本}-e{N}、pkg/ws slug kebab、
+// pkg.version 走 oaf semverRe oaf.go:108、BaseImage 走 L1 白名单、OrderNo 平台生成、
+// chartVersion 走创建期 chartVersionRe），但 rebuildExportArtifacts 重渲染读 DB 存量
+// order.ChartVersion（创建后无法再校验），仍需此处兜底。values 本体经 yaml.Marshal
+// 序列化天然安全，无需处理。
+func sanitizeHeaderLine(s string) string {
+	return headerLineTerminators.Replace(s)
+}
+
 // renderExportValues values.yaml 产物（契约 §5.5 形状；map 键序为 yaml.v3 字典序，可接受）。
 func renderExportValues(in *exportRenderInput) (string, error) {
 	short := k8s.ShortName(in.Svc.K8sName)
@@ -270,15 +295,18 @@ func renderExportValues(in *exportRenderInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// 注释头部（拼接字符串，契约 §5.5；敏感值明文警示行照设计 §7.3）
+	// 注释头部（拼接字符串，契约 §5.5；敏感值明文警示行照设计 §7.3）。
+	// 全部插值参数逐一套 sanitizeHeaderLine（issue #226）：yaml 行终止符全集
+	// （LF/CR/NEL/LS/PS）替换为空格，杜绝注入内容顶成独立 YAML 行
 	header := fmt.Sprintf(`# oaf-agent values.yaml — 由导出单 %s 自动生成
 # 服务: %s %s · 工作空间 %s
 # 源包: %s@%s → 发布标记 %s
 # chart: oaf-agent-%s · 基础镜像 %s
 # 敏感值明文写入本文件（文件代入）：随 ITSM 工单按密级流转
 `,
-		in.OrderNo, in.Svc.DisplayName, short, in.Workspace.Slug,
-		in.Pkg.Slug, in.Pkg.Version, in.Mark.Marker, in.ChartVersion, in.Req.BaseImage)
+		sanitizeHeaderLine(in.OrderNo), sanitizeHeaderLine(in.Svc.DisplayName), sanitizeHeaderLine(short),
+		sanitizeHeaderLine(in.Workspace.Slug), sanitizeHeaderLine(in.Pkg.Slug), sanitizeHeaderLine(in.Pkg.Version),
+		sanitizeHeaderLine(in.Mark.Marker), sanitizeHeaderLine(in.ChartVersion), sanitizeHeaderLine(in.Req.BaseImage))
 	return header + string(raw), nil
 }
 

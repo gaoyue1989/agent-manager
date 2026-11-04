@@ -15,6 +15,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,25 @@ import (
 
 // exportBuildTimeout 异步构建超时（remote.Write 直推 KB~MB 级纯数据镜像，10min 足够宽裕）。
 const exportBuildTimeout = 10 * time.Minute
+
+// chartVersionRe chartVersion 合法形态（issue #226）：semver 形态主版本号 + 宽松尾缀
+// （prerelease 段，如 0.1.0-rc1、0.2.0-0.1.0；'+' 不在字符类 [-.0-9A-Za-z]，semver build
+// metadata 如 1.2.3+build.5 会被 400——与 issue #226 建议正则一致的刻意取舍，非实现缺陷）。
+// 不复用 internal/oaf 的 semverRe
+// （oaf.go:108，OAF 包版本语义更严且无 build metadata）——chart 版本语义与包版本解耦，
+// 独立正则避免误拒。正则本身不限长，长度由 validateChartVersion 单独拦截。
+var chartVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+[-.0-9A-Za-z]*$`)
+
+// validateChartVersion 导出单 chartVersion 强校验（issue #226）：非法值直接 400，杜绝
+// CR/LF 注入 values 注释头顶出任意顶层 YAML 键（如 chart 消费的 resources）。长度上限 32
+// 对齐 ExportOrderEntity.ChartVersion 列宽（model.go:362 gorm size:32）——无长度校验时
+// 超长值撞 MySQL 严格模式 1406，经 translateStorageError 以 500 直出。
+func validateChartVersion(v string) error {
+	if len(v) > 32 || !chartVersionRe.MatchString(v) {
+		return fmt.Errorf("%w: chartVersion must be semver-like (e.g. 0.1.0), got %q", ErrInvalidForm, v)
+	}
+	return nil
+}
 
 // ExportOrderRequest POST .../export 请求体（契约 §4.3）：
 // marker 必填且须为该服务 frozen 标记；baseImage 必须命中 L1 BASE_IMAGE_WHITELIST
@@ -97,6 +117,13 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 		return nil, err
 	}
 	chartVersion := orStr(req.ChartVersion, defaultExportChartVersion)
+	// chartVersion 强校验（issue #226）：非法 400，与 marker 必填/ValidateEnv/L1 锁定裁决
+	// 同层（落库前拦截，零垃圾 building 行）；放在 orStr 之后——空值走 defaultExportChartVersion
+	// 恒合法，不破坏现有前端默认值。rebuildExportArtifacts 重渲染读 DB 存量值（创建后无法
+	// 再校验），由 exportvalues.go sanitizeHeaderLine 注释头单行化兜底
+	if err := validateChartVersion(chartVersion); err != nil {
+		return nil, err
+	}
 	short := k8s.ShortName(svc.K8sName)
 	oafRef := buildOafImageRef(merged["REGISTRY_ADDRESS"], merged["REGISTRY_NAMESPACE"], short, mark.Marker)
 	// L3 派生键试算前置（坏 BASE 等渲染期错误在落库前 400，不产生 building 垃圾行）
