@@ -210,14 +210,17 @@ if (reqHeaders != null && !reqHeaders.headers().isEmpty()) {
 
 ### 6.4 wrapper：常驻化 + 注入 + `_meta` 剥离（`UserScopedMcpClientWrapper` / `McpToolRegistrar.buildClient`）
 
-1. **常驻化**：`buildClient` 对 sse/streamableHttp **一律**装饰 wrapper（rule 允许为空）。
+1. **常驻化**：`buildClient` 对**全部传输**（sse/streamableHttp/stdio）**一律**装饰
+   wrapper（rule 允许为空；stdio 用 EMPTY rule，仅做 `_meta` 剥离、无 header 注入，
+   issue #225——HTTP server 声明的透传凭据随 per-turn 全 server 共享 McpMeta 同样会
+   漏进 stdio 子进程的 `CallToolRequest._meta`）。
    原因：McpMeta 是 per-turn 全 server 共享——A server 声明的透传值若不剥离，会经
    `McpTool` 进 **B server**（含未配 userHeaders 的 server）的 `CallToolRequest._meta`
    （§2 出口侧事实）。常驻装饰让剥离成为统一卫生行为；空 rule 时 resolve 为空 → 纯
    passthrough，行为与今天完全一致。**判据必须是传输类型而非「rule 非空」**：现有
    `parseUserHeaders` 对「无 userHeaders 节」返回 null（`McpToolRegistrar.java:999`），
-   该语义保留（null ≠ 空 rule），buildClient 据传输类型决定是否装饰、null 归一为空
-   rule 传入——实现时若沿用「rule != null 才装饰」的旧判据，剥离会漏未配置 server；
+   该语义保留（null ≠ 空 rule），buildClient 将 null 归一为空 rule 传入——实现时若
+   沿用「rule != null 才装饰」的旧判据，剥离会漏未配置 server；
 2. **剥离**：callTool 转交 delegate 前，对 meta 做过滤拷贝移除全部 `reqHeader:*` 键——
    透传值只走 HTTP header 单通道（userId 的 `_meta` 双通道语义**不变**）；
 3. **注入**：resolve() 逻辑零改动（`reqHeader:*` 本就是普通 meta key 查找），值合法性
@@ -342,6 +345,14 @@ oaf-mysql Flyway 14 迁移 + oaf-redis）经 port-forward 发起携带
    同步装载保持保真；
 5. **文档**：`docs/oaf-specification.md` 一并补齐 PR #9 未入平台规范的 `userHeaders` 节
    （含 reqHeader 取值源）；`api.md` 增补 chat 请求级透传契约；`AGENTS.md` 同步。
+
+**issue #225 追记（2026-11-04）**：`buildClient` 的 stdio 早退分支漏装饰——HTTP server
+声明的透传凭据随 per-turn 全 server 共享 McpMeta 漏进 stdio 子进程的
+`CallToolRequest._meta`，违背 §6.4「剥离是全 server 卫生行为」的既定口径。修复：删除
+早退分支，stdio 与 HTTP 传输同样常驻装饰（`UserHeaderRule.EMPTY`，仅 `_meta` 剥离、
+无 header 注入，initialize/listTools/getCachedTool/isInitialized/close 全部委托透传，
+stdio 连接生命周期零变化）；§6.4 第 1 条同步改为「全部传输一律装饰」。Q2 决议不变：
+仍 header-only（剥离），`userHeaders.forward-meta: true` 后门未启用。
 
 ### 11.1 被否方案记录（决策依据）
 
