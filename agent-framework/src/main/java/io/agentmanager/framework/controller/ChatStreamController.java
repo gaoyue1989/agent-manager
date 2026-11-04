@@ -413,7 +413,8 @@ public class ChatStreamController {
 
             // ===== 1. 抢 Turn 租约 =====
             // 等待期内每拍（默认 1s）检查一次停止标记：排队 turn 登记在 TurnStopWatcher 的
-            // queued 态，命中停止行后 watcher 置标记（并消费行），这里读到即直接收流。
+            // queued 态，命中停止行后 watcher 只置内存标记（行 = 唯一权威，留给取消动作
+            // 消费，issue #228），这里读到标记即直接收流。
             long deadline = System.currentTimeMillis() + ACQUIRE_TIMEOUT.toMillis();
             long nextWaitingFrameAt = System.currentTimeMillis();
             while (token == null && System.currentTimeMillis() < deadline) {
@@ -466,10 +467,23 @@ public class ChatStreamController {
 
             // 租约到手：意图使命结束（此后 turn id 由 session_event 的 reply_id 承担）
             clearTurnIntent(finalSessionId, replyId);
-            // 排队 → 执行交接：只移除排队登记，不动停止行（若停止请求恰好在此刻到达，
-            // 留给执行态的全局轮询派发，避免丢请求）
-            if (turnStopWatcher != null) {
-                turnStopWatcher.unregisterRegistrationOnly(replyId);
+            // ===== 1.2 停止状态收敛（租约交接点，issue #228）=====
+            // 原子取回排队期停止标记：置位 = 停止请求落在「末次 loop 检查之后～本拍
+            // tryAcquire 得手」的竞态窗口内——此处不取消，turn 就会在用户已点停止的
+            // 情况下照常跑完（无人再兜底投递）。取消收尾与排队 loop 命中路径（上方
+            // queuedStop 分支）同构：unregister 消费 turn_stop 行 → release 刚到手的
+            // 租约（必须用 tryAcquire 同一 token；此时无续租线程，先例 = 下方 ASKING
+            // 预检拒绝路径；release 失败由租约 TTL 自然过期自愈，不锁死）→ cancelled
+            // 帧收流，turn 不起跑、零副作用。未置位 = 行留表，交给执行态派发（register
+            // 之后的全局轮询 ≤1 个周期内 interrupt，AGENT_END 前补 cancelled 帧）。
+            if (turnStopWatcher != null && turnStopWatcher.unregisterRegistrationOnly(replyId)) {
+                turnStopWatcher.unregister(finalSessionId, replyId);
+                turnLeaseStore.release(finalSessionId, token);
+                log.info("[chat] queued turn cancelled at lease handoff (sid={}, rid={})",
+                    finalSessionId, replyId);
+                sink.next(cancelledSSE("user_stopped"));
+                sink.complete();
+                return;
             }
 
             // ===== 1.5 ASKING 预检（issue #47/#48）：挂起会话不接受新 turn =====

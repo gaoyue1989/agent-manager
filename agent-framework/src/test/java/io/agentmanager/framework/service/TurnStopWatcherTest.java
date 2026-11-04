@@ -88,16 +88,35 @@ class TurnStopWatcherTest {
     }
 
     @Test
-    void queuedRegistrationShouldMarkAndConsumeWithoutInterrupt() {
+    void queuedRegistrationShouldMarkWithoutConsumingRowOrInterrupt() {
+        // issue #228：turn_stop 行 = 唯一权威。queued 派发只置内存标记、不消费行——
+        // 消费权归租约交接点（unregisterRegistrationOnly 置位 → unregister）与 turn 收尾；
+        // 若在此提前消费，「loop 末次检查已过 + 本拍 tryAcquire 得手」的竞态会静默丢请求。
         when(stopStore.findAll()).thenReturn(List.of(
             new TurnStopStore.StopRequest("s1", "rid-q")));
-        when(stopStore.consume("s1", "rid-q")).thenReturn(true);
 
         watcher.registerQueued("s1", "rid-q");
+        watcher.poll();
         watcher.poll();
 
         assertTrue(watcher.isStopRequested("rid-q"));
         verify(registry, never()).interrupt(anyString(), anyString());
-        verify(stopStore).consume("s1", "rid-q");
+        verify(stopStore, never()).consume(anyString(), anyString());
+    }
+
+    @Test
+    void unregisterRegistrationOnlyShouldReportQueuedStopFlagAtomically() {
+        // 派发命中排队登记后，原子取回 → true（调用方须当场取消：消费行 + cancelled 收流）
+        when(stopStore.findAll()).thenReturn(List.of(
+            new TurnStopStore.StopRequest("s1", "rid-h")));
+        watcher.registerQueued("s1", "rid-h");
+        watcher.poll();
+
+        assertTrue(watcher.unregisterRegistrationOnly("rid-h"));
+        assertEquals(0, watcher.activeCount());
+
+        // 交接后的新登记（执行态）：未命中停止 → false，turn_stop 行留执行态派发
+        watcher.register("s1", "rid-h");
+        assertFalse(watcher.unregisterRegistrationOnly("rid-h"));
     }
 }
