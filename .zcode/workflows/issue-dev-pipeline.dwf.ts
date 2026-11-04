@@ -1,13 +1,13 @@
 /* zcode-workflow
 description: 标准开发流水线：认领 Issue → 需求分析＋独立评审＋用户确认方案 → 独立 worktree 开发 →
-  本地单测门禁（失败自动修复回炉）→ 本地真实部署验证（kind 集群构建镜像+发布 demo 服务，真实沙箱/LLM 凭据，A2A
-  注册与真实调用，失败自动修复重验）→ 代码评审（按模块并行＋分诊＋逐条独立复核＋修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E
-  矩阵，失败自动修复≤2 轮）→ 用户确认后 gh pr merge --merge 合并 → 闭环归档（关闭 Issue、清理
-  worktree、输出流水线报告）。
+  本地单测门禁（失败自动修复回炉）→ 本地真实部署验证（kind 集群构建镜像+发布 demo 服务，真实沙箱/LLM 凭据，A2A 注册与真实调用）→
+  流程黑盒验证（用户视角全生命周期：发布→真实对话→env 变更→republish→异常路径→删除，失败自动修复重验）→
+  代码评审（按模块并行＋分诊＋逐条独立复核＋修复回归）→ 推送建 PR → 盯守 CI 全量检查（含 E2E 矩阵，失败自动修复≤2 轮）→ 用户确认后 gh
+  pr merge --merge 合并 → 闭环归档（关闭 Issue、清理 worktree、输出流水线报告）。
 whenToUse: 认领一个 GitHub issue
-  并端到端完成「评审→开发→自测→本地真实部署验证→CodeReview→PR→CI→合并→归档」全流程时使用。参数 issue
+  并端到端完成「评审→开发→自测→本地真实部署验证→黑盒验证→CodeReview→PR→CI→合并→归档」全流程时使用。参数 issue
   必填（纯数字编号）；auto_merge 默认 false（合并前等用户确认）；deploy_verify
-  选本地部署验证模式（scoped/full/off，默认 scoped）；proxy 配置 git 代理（默认
+  选本地验证模式（scoped/full/off，默认 scoped）；proxy 配置 git 代理（默认
   127.0.0.1:7890，直连机器传空串）。施工在 /tmp 独立 worktree；方案确认与合并确认两处会暂停等待用户答复。gh
   需已登录（账号动态探测）。
 args:
@@ -17,9 +17,9 @@ args:
     default: false
   deploy_verify:
     type: string
-    description: 本地真实部署验证模式：scoped=只创建/清理验证自己的服务（默认）；full=跑仓库标准 platform-e2e.sh
-      全矩阵（会清理平台上除 release-agent 外的遗留业务服务）；off=跳过本地部署（CI 兜底）。环境缺 docker/kind
-      时自动降级为跳过并如实记录
+    description: 本地验证模式：scoped=部署验证＋流程黑盒验证（只创建/清理验证自己的服务，默认）；full=仓库标准
+      platform-e2e.sh 全矩阵（含场景 B 黑盒，会清理 release-agent 外的遗留业务服务）；off=跳过本地验证（CI
+      兜底）。环境缺 docker/kind 时自动降级为跳过并如实记录
     default: scoped
   issue:
     type: string
@@ -200,6 +200,23 @@ interface DeployVerify {
   gaps: string[];
   notes: string;
 }
+interface BlackBoxVerify {
+  /** 用户视角全流程是否通过 */
+  passed: boolean;
+  /** 每步证据：命令与关键输出 */
+  evidence: string[];
+  /** 本轮创建过哪些资源 */
+  created: string[];
+  /** 已清理的资源 */
+  deleted: string[];
+  /** 异常路径观测：请求 → 实际状态码 → 是否符合预期 */
+  errorPaths: string[];
+  /** 真实 LLM 对话结果摘要 */
+  llmCheck: string;
+  /** 接口上不可见/未覆盖的说明 */
+  gaps: string[];
+  notes: string;
+}
 type Leftover = TriagedFinding & { evidence: string; status: "verified" | "unconfirmed" };
 
 // ---------- 纯逻辑辅助 ----------
@@ -251,7 +268,7 @@ artifact.board("pipeline-board", {
   title: "开发流水线进度",
   key: "issue",
   status: "stage",
-  columns: ["认领", "需求评审", "开发", "自测", "部署验证", "CodeReview", "PR·CI", "待合并", "已合并", "已归档", "受阻"],
+  columns: ["认领", "需求评审", "开发", "自测", "部署验证", "黑盒验证", "CodeReview", "PR·CI", "待合并", "已合并", "已归档", "受阻"],
   cardTitle: "title",
   detail: [{ field: "note" }, { field: "branch" }, { field: "pr" }],
 });
@@ -262,6 +279,7 @@ let prRef = "";
 const gateResults: string[] = [];
 const localGaps: string[] = [];
 let deployEvidence: string[] = [];
+let bboxEvidence: string[] = [];
 let leftover: Leftover[] = [];
 let lows: TriagedFinding[] = [];
 
@@ -323,6 +341,12 @@ const DEPLOYER_PERSONA =
   "只清理你自己创建的资源；绝不动 oaf-release-agent、platform-*、oaf-mysql、oaf-redis 等平台组件与任何发布前已存在的业务服务；" +
   "凭据只从 .env.secrets 读入 shell 变量使用，严禁把密钥明文写进返回结果（只写「已注入」）。" +
   "每一步都要留下命令与关键输出作为证据；验证不了的就如实说，绝不伪造通过。若指令矛盾或环境不允许，如实说明而不是硬凑。";
+const BBX_PERSONA =
+  "你是黑盒验证工程师，完全站在平台用户视角验证发布与使用流程：执行验证时只能通过对外 HTTP 接口观测行为，" +
+  "集群资源、容器、代码内部、服务端日志对你一律不可见（可以读仓库 e2e 脚本学习 API 契约，但结论只来自接口观测）。红线：" +
+  "只创建/清理你自己创建的资源；绝不动 oaf-release-agent、platform-*、oaf-mysql、oaf-redis 等平台组件与任何验证前已存在的业务服务；" +
+  "凭据只从 .env.secrets 读入 shell 变量，严禁把密钥明文写进返回结果。每一步都留命令与关键输出作证据；" +
+  "行为不符合预期就如实判不通过并记录差异，绝不伪造通过；环境不允许时如实说明而不是硬凑。";
 
 // ========== 探测工具链与部署前提 ==========
 phase("探测工具链与部署前提");
@@ -754,6 +778,55 @@ if (DEPLOY_MODE !== "off" && CAN_DEPLOY) {
   mark("自测", "本地部署验证跳过");
 }
 
+// ========== 6.5 流程黑盒验证（用户视角全生命周期） ==========
+let bboxPassed = false;
+if (DEPLOY_MODE === "scoped" && CAN_DEPLOY) {
+  phase("流程黑盒验证（用户视角全生命周期）");
+  const bbx = agent("黑盒验证工程师", BBX_PERSONA);
+  const runBlackBox = async (): Promise<BlackBoxVerify> =>
+    bbx.ask<BlackBoxVerify>(
+      `黑盒流程验证（Issue #${ISSUE}）。平台 API http://localhost:30080/api/v1；执行验证只准用 curl/HTTP 调平台 REST API 与业务服务公开 endpoint（source 工作区根 .env.secrets 注入真实 LLM 凭据做真实对话）；禁止 kubectl/docker/exec 等一切集群内部观测。\n` +
+        `红线：只创建/清理本轮自己的资源（服务名用 e2e-demo-bbox），绝不动 oaf-release-agent、platform-*、oaf-mysql、oaf-redis 与任何已存在业务服务；密钥不明文。\n` +
+        `用户旅程（每步留命令+输出证据）：\n` +
+        `1) GET /services 记录基线；\n` +
+        `2) 上传 ${WT}/e2e/fixtures/demo-agent-v1.zip → POST /services 发布（image：agent-framework 有改动用 ${AF_TAG}，否则 GET /images 挑 ${REGISTRY} 开头的；env 同部署验证：LLM 三键 + CHECKPOINT_JDBC_URL(jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC)/CHECKPOINT_USERNAME/CHECKPOINT_PASSWORD/LOG_LEVEL=info/OPENSANDBOX_API_KEY）→ 轮询等 running（≤300s）；\n` +
+        `3) 真实对话：经 endpoint 按 A2A 协议 message/send 发两次独立请求（如「1+1=?」「用一句话自我介绍」），--max-time 120，记录真实 LLM 回复摘要（失败如实记录，最多重试 2 次）；\n` +
+        `4) 动作矩阵（只看接口可见行为）：PATCH env 新增 TEMP_BB_KEY=1 → 受理 deploying；deploying 中再 PATCH → 应 400；等 running；PATCH env 全量覆盖移除 TEMP_BB_KEY → 受理 → running；GET /services/{id} 的状态/版本/endpoint 自洽；\n` +
+        `5) republish：上传 demo-agent-v2.zip → POST /services/{id}/republish → deploying → running；\n` +
+        `6) 异常路径：GET /services/does-not-exist、POST /services 带 packageId=999999、POST /services env 带保留键（如 SERVER_PORT）、非法 JSON body——各记录状态码，期望优雅 4xx/明确错误，出现 5xx 或挂死即不通过；\n` +
+        `7) 清理：DELETE /services/{id}、DELETE /packages/{pkgId}，确认基线恢复。\n` +
+        `不要求多副本验证（CI 矩阵覆盖）。任何一步与预期不符 → passed=false 并把差异写进 evidence。返回 BlackBoxVerify。${NET}`,
+    );
+  let bx = await runBlackBox();
+  bboxEvidence = bx.evidence;
+  let bxRound = 1;
+  while (!bx.passed && bxRound <= VERIFY_ROUNDS) {
+    log(`黑盒验证第 ${bxRound} 轮未通过，交开发工程师修复后重验`);
+    await dev.ask(
+      `流程黑盒验证未通过（第 ${bxRound} 轮）。失败证据：\n${JSON.stringify(bx)}\n在 ${WT} 修复并提交（不要 push；若涉及镜像改动需说明，脚本会重新构建部署后重验）。`,
+    );
+    const reb = await buildAndDeployModules();
+    if (reb) {
+      bx = { passed: false, evidence: [reb], created: [], deleted: [], errorPaths: [], llmCheck: "", gaps: [], notes: "修复后镜像重建失败" };
+    } else {
+      bx = await runBlackBox();
+    }
+    bboxEvidence = [...bboxEvidence, ...bx.evidence];
+    bxRound++;
+  }
+  if (!bx.passed) return stopReport(`流程黑盒验证多轮未通过：\n${bx.evidence.join("\n")}`, ["PR 及之后阶段未执行"]);
+  bboxPassed = true;
+  gateResults.push("流程黑盒验证通过：发布→真实对话(LLM)→env 变更→republish→异常路径→删除 全生命周期符合预期");
+  if (bx.gaps.length > 0) localGaps.push(...bx.gaps.map((g) => `黑盒验证缺口：${g}`));
+  mark("黑盒验证", `用户视角全生命周期通过；异常路径观测 ${bx.errorPaths.length} 项`);
+  log(`黑盒验证通过：自建资源已清理（${bx.deleted.length} 项）`);
+} else if (DEPLOY_MODE === "full") {
+  localGaps.push("流程黑盒验证：full 模式下已由 platform-e2e.sh 场景 B（全动作矩阵+异常路径）覆盖，未单独重跑");
+  mark("部署验证", "黑盒验证由场景 B 覆盖");
+} else {
+  localGaps.push("流程黑盒验证：deploy_verify=off 或环境不具备，未执行（由 PR CI E2E 门禁兜底）");
+}
+
 // ========== 7. 代码评审与独立复核 ==========
 phase("代码评审与独立复核");
 const reviewFiles = changed.filter((p) => !/(package-lock\.json|go\.sum|pnpm-lock\.yaml)$/.test(p));
@@ -1024,6 +1097,9 @@ const reportMd = [
   ...(deployEvidence.length > 0
     ? [``, `**部署验证证据（kind + 沙箱 + LLM）**`, ...deployEvidence.slice(0, 10).map((e) => `- ${e.slice(0, 300)}`)]
     : []),
+  ...(bboxEvidence.length > 0
+    ? [``, `**黑盒验证证据（用户视角全生命周期）**`, ...bboxEvidence.slice(0, 10).map((e) => `- ${e.slice(0, 300)}`)]
+    : []),
   ...(localGaps.length > 0 ? [``, `**本地未覆盖（由 CI 门禁兜底）**`, ...localGaps.map((g) => `- ⚠️ ${g}`)] : []),
   ``,
   `## 代码评审`,
@@ -1039,12 +1115,12 @@ const reportMd = [
 ].join("\n");
 await artifact.markdown("pipeline-report", reportMd, {
   title: `Issue #${ISSUE} 开发流水线报告`,
-  description: "认领→评审→开发→自测→真实部署验证→CodeReview→PR→CI→合并→归档 全程记录与验证证据",
+  description: "认领→评审→开发→自测→真实部署验证→黑盒验证→CodeReview→PR→CI→合并→归档 全程记录与验证证据",
   primary: true,
 });
 
 return {
-  conclusion: `Issue #${ISSUE}「${issueTitle}」已完成端到端流水线：方案（独立评审+用户确认）→ 开发 → 本地自测 → ${DEPLOY_MODE !== "off" && CAN_DEPLOY ? "本地 kind 真实部署验证（沙箱+LLM 凭据、A2A 注册与真实调用）→ " : ""}代码评审（独立复核）→ PR ${prRef} → CI 全绿 → 合并 master（${mergeOid}）→ Issue ${issueClosed ? "已关闭" : "关闭待确认"}。${leftover.length + lows.length > 0 ? `遗留项 ${leftover.length + lows.length} 条详见 findings 与报告。` : ""}`,
+  conclusion: `Issue #${ISSUE}「${issueTitle}」已完成端到端流水线：方案（独立评审+用户确认）→ 开发 → 本地自测 → ${DEPLOY_MODE !== "off" && CAN_DEPLOY ? "本地 kind 真实部署验证（沙箱+LLM 凭据、A2A 注册与真实调用）→ " : ""}${bboxPassed ? "流程黑盒验证（用户视角全生命周期）→ " : ""}代码评审（独立复核）→ PR ${prRef} → CI 全绿 → 合并 master（${mergeOid}）→ Issue ${issueClosed ? "已关闭" : "关闭待确认"}。${leftover.length + lows.length > 0 ? `遗留项 ${leftover.length + lows.length} 条详见 findings 与报告。` : ""}`,
   findings: buildFindings(),
   verified: [
     ...gateResults,
