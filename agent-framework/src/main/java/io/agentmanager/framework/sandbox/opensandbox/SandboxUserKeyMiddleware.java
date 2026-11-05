@@ -51,6 +51,10 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
         if (ctx != null) {
             var userKey = resolveUserKey(ctx);
             spec.setPendingUserKey(userKey);
+            // 池化 D14 查询键（尽力而为）：Channel 链路 ctx.userId=网关 peer=前端 sid（=turn_lease 键）；
+            // A2A 链路 ctx.userId=真实用户（turn_lease 查询 miss → 回退纯租约判定，正确性不受影响）
+            spec.setPendingSessionId(ctx.getUserId() != null && !ctx.getUserId().isBlank()
+                ? ctx.getUserId() : ctx.getSessionId());
             // SDK 技能缓存 scope（.skills-cache/<scope>）：与 HarnessSkillMiddleware.scopeKeyFor 同源，
             // 用于沙箱投影只投放当前会话的 scope 目录（否则整棵 .skills-cache 历史 scope 全灌进容器）
             var skillScope = SkillCacheScope.scopeSegment(ctx);
@@ -93,6 +97,7 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
             // materializeUserSkills 置位实例 flag → 正确 uid 的物化被静默跳过）
             spec.clearPendingUserKey();
             spec.clearPendingSkillScope();
+            spec.takePendingSessionId();   // 同款清理：残留 sid 会污染下个 turn 的池借出记录
         }
         return next.apply(input);
     }

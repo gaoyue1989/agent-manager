@@ -134,8 +134,20 @@ public record AgentManagerProperties(
      * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）
      */
     public record CleanupConfig(
-        /** confirm_context 有效时长（分钟），默认 30 */
-        @DefaultValue("30") int confirmTtlMinutes,
+        /**
+         * confirm_context 兜底行有效时长（分钟），默认 10（sandbox-pool-design D16 决议，原 30）。
+         * 确认可用性是双源设计（AgentState ASKING 无 TTL 权威源 + 本行兜底），行过期后确认仍可
+         * 从 state 恢复——本值收窄只影响"行寿命"，不影响恢复能力；与确认硬截止同值即恰好覆盖
+         * 有效窗口（行删除 ⇔ 确认必已超截止，超截止判定可无歧义地落到 state 时间戳）。
+         */
+        @DefaultValue("10") int confirmTtlMinutes,
+        /**
+         * HITL 确认硬截止（分钟），默认 10（{@code AGENT_CONFIRM_DEADLINE_MINUTES}，
+         * sandbox-pool-design D16）：ASKING 挂起超此时长后——迟到确认 410 confirm_expired
+         * 并按拒绝自动收尾；迟到普通消息懒收尾后放行新 turn；永不交互则无害挂起（零后台任务）。
+         * 池开启时 {@code SANDBOX_POOL_IDLE_RETURN_SECONDS} 必须 ≥ 本值（D15 不变量，启动 fail-fast）。
+         */
+        @DefaultValue("10") int confirmDeadlineMinutes,
         /** turn_lease 租约 TTL（秒），默认 60 */
         @DefaultValue("60") int turnLeaseTtlSeconds,
         /** turn 续租间隔（秒），默认 20 */
@@ -153,10 +165,10 @@ public record AgentManagerProperties(
         /** 宿主 {@code .skills-cache} scope 目录保留天数（默认 2；≤0 视为关闭） */
         @DefaultValue("2") int skillCacheRetentionDays
     ) {
-        /** 兼容构造器（旧 5 参调用方）：技能缓存 GC 取默认（启用 / 保留 2 天）。 */
+        /** 兼容构造器（旧 5 参调用方）：确认截止取默认 10min，技能缓存 GC 取默认（启用 / 保留 2 天）。 */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {
-            this(confirmTtlMinutes, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,
+            this(confirmTtlMinutes, 10, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,
                 sessionRetentionDays, true, 2);
         }
     }

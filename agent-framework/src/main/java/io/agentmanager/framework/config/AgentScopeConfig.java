@@ -48,14 +48,15 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         SessionUserStore sessionUserStore,
-        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager> sandboxPoolProvider
     ) {
         if (!sandboxRuntime.enabled()) {
             log.info("Sandbox disabled (SandboxRuntime), using RemoteFilesystemSpec mode");
             return null;
         }
-        log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={})",
-            config.opensandbox().serverUrl(), config.image());
+        log.info("Sandbox enabled, assembling OpenSandboxFilesystemSpec (server={}, image={}, pool={})",
+            config.opensandbox().serverUrl(), config.image(), sandboxRuntime.poolEnabled() ? "on" : "off");
         // 业务规范键解析（issue #52）：Channel 链路 ctx.userId 是网关 peer（=前端 sessionId），
         // 沙箱 userKey 须经 session_user 反查真实用户，否则 per-user 技能物化/回写退化为
         // per-session 命名空间。与 HarnessAgentFactory 的 LLM 记录/span 翻译同一实现（memo 共享）。
@@ -79,6 +80,12 @@ public class AgentScopeConfig {
             .fileStorage(fileStorage)
             .isolationScope(IsolationScope.USER);
         spec.setSessionKeyResolver(sessionKeyResolver);
+        // 沙箱池（sandbox-pool-design D1，SANDBOX_POOL_ENABLED，默认 false）：池管理器经 spec
+        // 注入 OpenSandboxClient——create 借出/resume 续约/delete 路由进池；null = 现状路径
+        var sandboxPool = sandboxPoolProvider.getIfAvailable();
+        if (sandboxPool != null) {
+            spec.sandboxPoolManager(sandboxPool);
+        }
         // 工作区投影开关（issue #27 缓解项）：SANDBOX_PROJECTION_ENABLED=false 时 sandbox start
         // 不再 hydrate 投影目录，降低每轮对话的沙箱同步开销（skills 依赖强的包不要关）
         spec.workspaceProjectionEnabled(sandboxRuntime.projectionEnabled());
@@ -217,6 +224,38 @@ public class AgentScopeConfig {
     public io.agentmanager.framework.redis.RedisConnectionFacade redisConnectionFacade(
             AgentRedisProperties redis) {
         return io.agentmanager.framework.redis.RedisConnectionFacade.create(redis);
+    }
+
+    /**
+     * 沙箱池管理器（sandbox-pool-design §5，SANDBOX_POOL_ENABLED，默认 false）。
+     * 关闭（或沙箱未启用 / Redis 门面缺失）返回 null（NullBean）——池消费方
+     * （spec/OpenSandboxClient/ConfirmController）按 null 判定走现状路径。
+     * D15 不变量（idleReturnSeconds ≥ 确认截止）在管理器构造器 fail-fast 校验，
+     * 违反配置直接启动失败。
+     */
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager sandboxPoolManager(
+        SandboxConfig sandboxConfig,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.TurnLeaseStore> turnLeaseStoreProvider,
+        org.springframework.beans.factory.ObjectProvider<AgentManagerProperties> propsProvider
+    ) {
+        if (!sandboxRuntime.enabled() || !sandboxRuntime.poolEnabled()) {
+            log.info("Sandbox pool disabled (SANDBOX_POOL_ENABLED=false) — per-session containers as before");
+            return null;
+        }
+        var facade = redisFacadeProvider.getIfAvailable();
+        if (facade == null) {
+            log.warn("Sandbox pool requested (SANDBOX_POOL_ENABLED=true) but no RedisConnectionFacade bean — pool disabled");
+            return null;
+        }
+        var props = propsProvider.getIfAvailable();
+        int deadlineMinutes = props != null && props.cleanup() != null
+            ? props.cleanup().confirmDeadlineMinutes() : 10;
+        return new io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager(
+            facade, sandboxConfig.pool(), deadlineMinutes, sandboxConfig,
+            turnLeaseStoreProvider.getIfAvailable());
     }
 
     /**
@@ -488,7 +527,8 @@ public class AgentScopeConfig {
         UiContextStore uiContextStore,
         SessionUserStore sessionUserStore,
         io.agentmanager.framework.service.ModelCatalog modelCatalog,
-        org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
+        org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider,
+        org.springframework.beans.factory.ObjectProvider<AgentManagerProperties> propsProvider
     ) {
         var sandboxRuntime = sandboxRuntimeProvider.getIfAvailable();
         boolean isolation = sandboxRuntime != null && sandboxRuntime.sessionAgentIsolationEnabled();
@@ -498,6 +538,15 @@ public class AgentScopeConfig {
             : new AgentRuntimeService(oafConfig, harnessAgent, mcpConfigs, llmLogger, confirmContextStore);
         // HITL 恢复优先走 AgentState（无 TTL）：官方 SDK 把 ASKING 工具连同 replyId 持久化在 state 里
         service.setAgentStateReader(agentStateReader);
+        // D16 确认硬截止（AGENT_CONFIRM_DEADLINE_MINUTES，默认 10；≤0 关闭）：
+        // 挂起超截止后确认 410 作废 + 自动按拒绝收尾，迟到消息懒收尾放行（ConfirmDeadlineService）
+        var props = propsProvider.getIfAvailable();
+        if (props != null && props.cleanup() != null) {
+            service.setConfirmDeadlineMinutes(props.cleanup().confirmDeadlineMinutes());
+            // SSE permission_ask 帧同步透出 expires_at（前端确认卡倒计时数据源）
+            io.agentmanager.framework.controller.AgentEventSseSerializer
+                .configureConfirmDeadline(props.cleanup().confirmDeadlineMinutes());
+        }
         if (isolation) {
             // 会话级工厂与 OafReloadService 的 B 路径同参（build 入参完全一致）；
             // reload 时 OafReloadService 会更新此工厂并清缓存（世代失效）

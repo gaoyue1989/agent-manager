@@ -9,7 +9,7 @@
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
 import { completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
-import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+import { classifyConfirmFailure, createConfirmCard, expireDueConfirmCards, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import MessageItem from "./MessageItem";
 import PermissionCard from "./PermissionCard";
 import type { AttachItem, ChatMsg, FileCard, ModelOption, ThreadItem } from "./types";
@@ -103,6 +103,20 @@ export default function ChatPane({
   // 欢迎态：只有系统提示、没有实际对话内容时展示 Hero + 快捷建议
   const welcome = !historyLoading && messages.every((m) => m.role === "system");
 
+  // D16 确认硬截止倒计时：每秒驱动一次（仅存在带 expires_at 的 pending 卡时），到点置 expired
+  // ——禁用提交（后端此时确认也会 410 confirm_expired 并按拒绝自动收尾），徽标切「已失效」。
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const hasCountdown = messages.some((m) => m.confirm?.status === "pending" && m.confirm.expiresAt);
+  useEffect(() => {
+    if (!hasCountdown) return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setNowTick(now);
+      setMessages((prev) => expireDueConfirmCards(prev, now));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [hasCountdown]);
+
   const loadThreads = useCallback(async () => {
     try {
       const resp = await fetch(`${agentBase}/threads`);
@@ -182,10 +196,11 @@ export default function ChatPane({
             msgs.push({ role: "assistant", content: "", files });
           }
         }
-        // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）
+        // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）；
+        // expires_at 为 D16 硬截止时刻（后端未启用时缺省，不显示倒计时）
         if (data.pendingConfirm?.tools?.length) {
           try {
-            msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools) });
+            msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools, data.pendingConfirm.expires_at) });
           } catch { /* 工具格式异常忽略 */ }
         }
       }
@@ -284,7 +299,8 @@ export default function ChatPane({
           // 该批工具进入等待人工确认：不再是「执行中」（没在执行，在等人）
           setMessages((prev) => markAwaitingConfirm(prev,
             (Array.isArray(ev.tool_calls) ? ev.tool_calls : []).map((tc: any) => tc?.tool_call_id).filter(Boolean)));
-          onAsk(createConfirmCard(ev.tool_calls));
+          // ev.expires_at = D16 硬截止时刻（ISO-8601；后端未启用时缺省 → 无倒计时，现状行为）
+          onAsk(createConfirmCard(ev.tool_calls, ev.expires_at));
           break;
         case "file_ready":
           // Agent 产出文件 → 渲染下载卡片（挂到最后一条 assistant 气泡）
@@ -752,7 +768,7 @@ export default function ChatPane({
                     <MessageItem msg={m} />
                     {m.confirm && (
                       <div className="pl-10">
-                        <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />
+                        <PermissionCard card={m.confirm} disabled={sessionLocked} now={nowTick} onSubmit={(results) => sendConfirm(m.confirm!, results)} />
                       </div>
                     )}
                   </div>

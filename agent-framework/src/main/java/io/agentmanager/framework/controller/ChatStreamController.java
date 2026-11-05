@@ -135,6 +135,14 @@ public class ChatStreamController {
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
     /**
+     * D16 确认硬截止自动收尾（sandbox-pool-design D16 ②）：chat 入口预检发现挂起超截止时
+     * 同步懒收尾后放行新 turn。字段注入（required=false）——单测直接 new 时为 null，
+     * 截止语义不启用，行为与 D16 落地前一致。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.service.ConfirmDeadlineService confirmDeadlineService;
+
+    /**
      * 排队 turn 意图存储（字段注入，同 sessionMessageStore：避免改动全部构造调用点）。
      * 排队期间把本轮 turn id 提前暴露给 /status，使「排队中刷新」仍能续传。
      */
@@ -494,13 +502,38 @@ public class ChatStreamController {
             // SDK 路径不再触达，error 帧恒达。预检放在抢到租约之后：与 confirm 恢复 turn
             // 互斥——恢复完成前本 turn 排队等待，恢复后 state 已更新，不会误拒。
             if (runtimeService.hasPendingConfirm(finalSessionId)) {
-                log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
-                turnLeaseStore.release(finalSessionId, token);
-                sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
-                    + "' is in ASKING state (waiting for tool approval); approve or deny the "
-                    + "pending tool call before sending new messages"));
-                sink.complete();
-                return;
+                // D16 ② 懒收尾放行：挂起已超硬截止（AGENT_CONFIRM_DEADLINE_MINUTES）→ 同步自动按
+                // 拒绝收尾（ASKING 解除），随后放行本条新消息。收尾内部要抢同一把 turn 租约——
+                // 本 turn 已持有 token，必须先释放做租约交接，收尾完成后再排队重抢；重抢失败
+                //（并发对话插队）按「有活跃执行段」拒绝。未超截止/收尾失败 → 维持现有拒绝
+                //（ASKING 态新 turn 会被 SDK 拒绝，error 帧恒达）。
+                boolean expiredFinalized = false;
+                if (confirmDeadlineService != null && confirmDeadlineService.isExpired(finalSessionId)) {
+                    turnLeaseStore.release(finalSessionId, token);   // 租约交接给收尾段
+                    expiredFinalized = confirmDeadlineService.finalizeByDeny(finalSessionId);
+                    if (expiredFinalized) {
+                        // 收尾 turn 已释放租约：重抢（排队覆盖收尾回复尾部时延）
+                        var regained = turnLeaseStore.acquire(finalSessionId, ACQUIRE_TIMEOUT);
+                        if (regained == null) {
+                            log.info("[chat] lease busy after expired-confirm finalize (sid={})", finalSessionId);
+                            sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
+                                + "' has an active turn"));
+                            sink.complete();
+                            return;
+                        }
+                        token = regained;
+                    }
+                }
+                if (!expiredFinalized) {
+                    log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
+                    turnLeaseStore.release(finalSessionId, token);
+                    sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
+                        + "' is in ASKING state (waiting for tool approval); approve or deny the "
+                        + "pending tool call before sending new messages"));
+                    sink.complete();
+                    return;
+                }
+                log.info("[chat] expired confirm lazily finalized, new turn proceeds (sid={})", finalSessionId);
             }
 
             // ===== 2. 启动续租 =====

@@ -171,6 +171,8 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
    未派生的存量默认值（共享 `oaf_checkpoint` 库 + 空 Redis 前缀）多服务沿用仍会互相串数据。
 5. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
 6. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
+7. **沙箱池化容量公式（issue #241，`SANDBOX_POOL_ENABLED=true` 时）**：`MAX_SIZE ≥ 预期并发会话峰值`（每会话借出独占一个 1C/{memory}Mi 容器），且 **`MAX_SIZE × Σ池容器资源` ≤ OpenSandbox Server 容量预算**——池容量是**集群级**账本（Redis `{prefix}sbx:pool:ledger`），与业务服务副本数**解耦**：扩业务副本不动池容量，只对齐 Server 面。`MIN_IDLE`（默认 2）= 常备免冷启动容器；`IDLE_RETURN_SECONDS`（默认 600s）= 会话失活后容器滞留上限（**D15 硬不变量：≥ `AGENT_CONFIRM_DEADLINE_MINUTES`**，违反拒绝启动；需要更长工作区窗口的业务同步调大两者）。`MAX_WAIT_SECONDS`（默认 120）= 池满借出等待上限，**须 < 守卫租约 900s 与 a2a-job send-timeout 300s**。Redis 故障期 fail-open：容量上限失效、账本外容器由 Server TTL（≤60min）兜底消亡（接受降级，与守卫 fail-open 同级取舍）。池状态观测：业务端点 `GET /debug/sandbox-pool`（idle/busy/creating 明细 + 流转事件）。关联设计 [agent-framework/docs/sandbox-pool-design.md](../agent-framework/docs/sandbox-pool-design.md)。
+8. **HITL 确认卡语义变化（`AGENT_CONFIRM_DEADLINE_MINUTES`，默认 10，独立于池化生效）**：确认卡从「无限期可确认」变为 10 分钟硬截止——超时确认返回 `410 confirm_expired` 并**自动按拒绝收尾**（turn 拒绝终态、会话解锁，前端确认卡倒计时到点置「已失效」）；迟到普通消息懒收尾后放行新 turn。存量部署显式 env 已固化的不受默认值影响；`AGENT_CLEANUP_CONFIRM_TTL_MINUTES` 默认 30→10（兜底行寿命收窄，state 权威源恢复能力不变）。前后端需同一发布窗口上线（单独合后端会把旧前端确认卡变静默失效）。
 
 ## 六、业务 Deployment 环境模板（DEPLOYMENT_TEMPLATE，可选）
 

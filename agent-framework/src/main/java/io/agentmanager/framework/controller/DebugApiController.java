@@ -808,6 +808,41 @@ public class DebugApiController {
     }
 
     /**
+     * 沙箱池管理器（字段注入 required=false：池关闭/单测直接 new 时为 null）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager sandboxPoolManager;
+
+    /**
+     * 沙箱池状态（sandbox-pool-design §5.7 可观测性；池关闭时返回 enabled=false）：
+     * 集群级 idle/busy/creating 明细（Redis 单 ledger）+ 本副本 waiters + 最近流转事件
+     * （进程内存环形缓冲，最多 100 条——排障「我的会话在哪个容器/为什么在等」一处可查）。
+     */
+    @GetMapping("/sandbox-pool")
+    public Map<String, Object> sandboxPool(@org.springframework.web.bind.annotation.RequestParam(
+        defaultValue = "50") int eventsLimit) {
+        var m = new LinkedHashMap<String, Object>();
+        m.put("enabled", sandboxRuntime.enabled() && sandboxRuntime.poolEnabled());
+        var pool = sandboxPoolManager;
+        if (pool == null) {
+            m.put("reason", sandboxRuntime.enabled()
+                ? "SANDBOX_POOL_ENABLED=false (default, legacy per-session containers)"
+                : "sandbox disabled");
+            return m;
+        }
+        m.putAll(pool.snapshot());
+        m.put("config", Map.of(
+            "minIdle", sandboxConfig.pool().minIdle(),
+            "maxSize", sandboxConfig.pool().maxSize(),
+            "maxWaitSeconds", sandboxConfig.pool().maxWaitSeconds(),
+            "idleReturnSeconds", sandboxConfig.pool().idleReturnSeconds(),
+            "scanIntervalSeconds", sandboxConfig.pool().scanIntervalSeconds(),
+            "rebuildConcurrency", sandboxConfig.pool().rebuildConcurrency()));
+        m.put("recent_events", pool.recentEvents(Math.max(1, Math.min(eventsLimit, 100))));
+        return m;
+    }
+
+    /**
      * 工作区文件列表（本地 .agentscope/workspace 目录）。
      * 沙箱模式下该目录为静态模板层（投影源），运行时文件（MEMORY.md/memory/）在 KV 中。
      */

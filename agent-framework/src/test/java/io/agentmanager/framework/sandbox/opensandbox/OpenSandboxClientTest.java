@@ -184,4 +184,121 @@ class OpenSandboxClientTest {
         assertThrows(io.agentscope.harness.agent.sandbox.SandboxException.class,
             () -> client.deserializeState("{bad"));
     }
+
+    // ---------------------------------------------------------------- 池化分支（sandbox-pool-design D1/D2/D13，§8 开关对照）
+
+    /** 构造池管理器 stub：borrow 返回指定容器 */
+    private static SandboxPoolManager poolStub(String borrowId) {
+        var pool = mock(SandboxPoolManager.class);
+        var osb = mockOsbSandbox(borrowId);
+        when(pool.borrow(any())).thenReturn(new SandboxPoolManager.Borrowed(borrowId, osb));   // poolSid 可为 null
+        return pool;
+    }
+
+    @Test
+    void createWithPoolShouldBorrowAndInjectCurrentWorkspaceSpec() {
+        var pool = poolStub("sb-pooled-1");
+        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
+        client.setSandboxPoolManager(pool);
+
+        var spec = new WorkspaceSpec();
+        spec.setRoot("/workspace");
+        var sandbox = (OpenSandbox) client.create(spec, null, options());
+
+        // D2：sandboxId = 借出容器 id；workspaceSpec = 当次传入（start 投影 hydrate 依赖）
+        assertEquals("sb-pooled-1", sandbox.getOsbState().getSandboxId());
+        assertEquals("/workspace", sandbox.getOsbState().getWorkspaceSpec().getRoot());
+        verify(pool).borrow(any());   // poolSid 可为 null（无 middleware ThreadLocal 时）
+        verify(pool, never()).release(anyString());
+    }
+
+    @Test
+    void createWithoutPoolShouldKeepLegacyPath() {
+        // 开关关闭（默认）：不触池，行为与 master 逐分支一致（现状 create 真建容器）
+        var osb = mockOsbSandbox("sb-legacy");
+        var pool = mock(SandboxPoolManager.class);
+        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var builder = mock(Sandbox.Builder.class);
+            when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
+            when(builder.timeout(any())).thenReturn(builder);
+            when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.env(anyMap())).thenReturn(builder);
+            when(builder.build()).thenReturn(osb);
+            mocked.when(Sandbox::builder).thenReturn(builder);
+            var sandbox = (OpenSandbox) client.create(state().getWorkspaceSpec(), null, options());
+            assertEquals("sb-legacy", sandbox.getOsbState().getSandboxId());
+        }
+        verify(pool, never()).borrow(any());
+    }
+
+    @Test
+    void resumeWithPoolShouldRenewLease() {
+        var pool = poolStub("sb-pooled-1");
+        var osb = mockOsbSandbox("sb-pooled-1");
+        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
+        client.setSandboxPoolManager(pool);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var resumeState = state();
+            resumeState.setSandboxId("sb-pooled-1");
+            client.resume(resumeState);
+            // 续约②：P3 命中、connect 成功后跨副本全局键保活
+            verify(pool).renew("sb-pooled-1");
+        }
+    }
+
+    @Test
+    void resumeWithoutPoolShouldNotTouchPool() {
+        var osb = mockOsbSandbox("sb-r2");
+        var pool = mock(SandboxPoolManager.class);
+        var client = new OpenSandboxClient(options(), null, null);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+            var resumeState = state();
+            resumeState.setSandboxId("sb-r2");
+            client.resume(resumeState);
+        }
+        verify(pool, never()).renew(anyString());
+    }
+
+    @Test
+    void deleteWithPoolShouldRouteIntoPool_d13() {
+        // D13：delete 路由进池（kill + 认领 + 异步补位），不直杀句柄
+        var pool = mock(SandboxPoolManager.class);
+        var osb = mockOsbSandbox("sb-pooled-1");
+        var client = new OpenSandboxClient(options(), null, null);
+        client.setSandboxPoolManager(pool);
+        var st = state();
+        st.setSandboxId("sb-pooled-1");
+        var sandbox = new OpenSandbox(st, osb, options(), null, null);
+
+        client.delete(sandbox);
+
+        verify(pool).release("sb-pooled-1");
+        verify(osb, never()).kill();   // kill 由池统一执行（含认领/补位），不走现状直杀
+    }
+
+    @Test
+    void deleteWithoutPoolShouldKillDirectly() {
+        // 开关关闭：现状直杀（回归对照）
+        var osb = mockOsbSandbox("sb-del2");
+        var client = new OpenSandboxClient(options(), null, null);
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+        client.delete(sandbox);
+        verify(osb).kill();
+        verify(osb).close();
+    }
 }

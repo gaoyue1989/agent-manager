@@ -80,6 +80,12 @@ public class OpenSandbox extends AbstractBaseSandbox
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
     private final FileStorage fileStorage;
+    /**
+     * 沙箱池管理器（池化续约③④，sandbox-pool-design §5.4；null = 池关闭，no-op）：
+     * doExec 每次命令执行（③）与 stop turn 收尾（④）续全局租约键——跨副本有效。
+     * 由 OpenSandboxClient.create/resume 构造实例后注入。
+     */
+    private volatile SandboxPoolManager sandboxPool;
 
     public OpenSandbox(OpenSandboxState state,
                        com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
@@ -175,6 +181,19 @@ public class OpenSandbox extends AbstractBaseSandbox
         log.info("[sandbox-open] skillCacheScope bound: {}", skillCacheScope);
     }
 
+    /** 池管理器注入（OpenSandboxClient.create/resume 构造后调用；null = 池关闭，续约 no-op） */
+    public void setSandboxPoolManager(SandboxPoolManager poolManager) {
+        this.sandboxPool = poolManager;
+    }
+
+    /** 池租约续约（③ doExec / ④ stop 共用；fail-soft——续约失败由 D14 双保险兜底） */
+    private void renewPoolLease() {
+        var pool = sandboxPool;
+        if (pool != null && state != null && state.getSandboxId() != null) {
+            pool.renew(state.getSandboxId());
+        }
+    }
+
     // ---- SandboxFileTransfer：单文件直传 execd，替代「单文件 tar → 全量 hydrate」退化 ----
 
     /**
@@ -218,6 +237,7 @@ public class OpenSandbox extends AbstractBaseSandbox
         // 每次 call 结束回写 KV（不阻塞：失败仅告警，沙箱内数据保留）
         // 并发场景 ThreadLocal 注入可能竞态失败（onAgent 与 acquire 线程切换），
         // 兜底：从 filesystemSpec 的 pendingUserKey 再读一次
+        renewPoolLease();   // 池化续约④：turn 结束（回写窗口）保活
         if (userKey == null && filesystemSpec != null) {
             var pending = filesystemSpec.takePendingUserKey();
             if (pending != null && !pending.isBlank()) {
@@ -248,6 +268,7 @@ public class OpenSandbox extends AbstractBaseSandbox
     @Override
     protected ExecResult doExec(RuntimeContext ctx, String command, int timeoutSeconds) throws Exception {
         log.info("[sandbox-open] doExec invoked: userKey={}, ctx={}", userKey, ctx != null ? ctx.getUserId() : null);
+        renewPoolLease();   // 池化续约③：命令执行即活跃（长 turn 中途高频续约）
         // ④ 会话水合协调器：userKey 一次解析 + 四步幂等注入的唯一 doExec 侧入口
         hydrateForCall(ctx);
         var execution = osbSandbox.commands().run(command);

@@ -27,6 +27,8 @@ export default defineConfig({
     { name: 'api-reload', testMatch: /tests\/api-reload\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-multi', testMatch: /tests\/api-multi\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-sandbox', testMatch: /tests\/api-sandbox\.spec\.ts/, use: { ...devicesDesktop() } },
+    // 池化组（sandbox-pool-design §8）：池开启实例（SANDBOX_POOL_ENABLED=true + 加速回收参数）
+    { name: 'api-sandbox-pool', testMatch: /tests\/api-sandbox-pool\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'api-protocol', testMatch: /tests\/api-protocol\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui', testMatch: /tests\/ui\.spec\.ts/, use: { ...devicesDesktop() } },
     { name: 'ui-multi', testMatch: /tests\/ui-multi\.spec\.ts/, use: { ...devicesDesktop() } },

@@ -21,7 +21,23 @@ REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
 # start-agent.sh（R4 retry 重建副本）复用同组变量，export 透传子进程保持覆盖语义一致
 export LLM_MOCK_PORT MYSQL_URL MYSQL_USER MYSQL_PASS REDIS_URL SANDBOX_ENABLED SANDBOX_MOCK_PORT
+# 池参数透传 start-agent.sh（未设置时 start-agent 取自身默认，关闭路径零影响）
+export SANDBOX_POOL_ENABLED SANDBOX_POOL_MIN_IDLE SANDBOX_POOL_MAX_SIZE SANDBOX_POOL_MAX_WAIT_SECONDS SANDBOX_POOL_IDLE_RETURN_SECONDS SANDBOX_POOL_SCAN_INTERVAL_SECONDS SANDBOX_POOL_REBUILD_CONCURRENCY AGENT_CONFIRM_DEADLINE_MINUTES
 [ "$E2E_GROUP" = "sandbox" ] && SANDBOX_ENABLED=true
+# sandbox-pool 组：沙箱开启 + 池开启（sandbox-pool-design §8 E2E）。
+# AGENT_CONFIRM_DEADLINE_MINUTES=0 豁免 D15 不变量校验（池关闭时截止语义与池无关），
+# 从而 IDLE_RETURN 可取 8s 加速失活回收用例；deadline 语义由 api-core H 组（池关闭默认 10min）覆盖。
+if [ "$E2E_GROUP" = "sandbox-pool" ]; then
+  SANDBOX_ENABLED=true
+  SANDBOX_POOL_ENABLED=true
+  SANDBOX_POOL_MIN_IDLE=1
+  SANDBOX_POOL_MAX_SIZE=2
+  SANDBOX_POOL_MAX_WAIT_SECONDS=6
+  SANDBOX_POOL_IDLE_RETURN_SECONDS=8
+  SANDBOX_POOL_SCAN_INTERVAL_SECONDS=2
+  SANDBOX_POOL_REBUILD_CONCURRENCY=1
+  AGENT_CONFIRM_DEADLINE_MINUTES=0
+fi
 # AG 组（agui-native-parity-design §12.4）：api-agui 项目独立组（e2e-agui job，先非必需），
 # 单实例 + AGENT_AGUI_ENABLED=true；core/sandbox 组不开（关闭时 /agui/* 404，存量组不受影响）
 [ "$E2E_GROUP" = "agui" ] && export AGENT_AGUI_ENABLED=true
@@ -217,7 +233,11 @@ case "$E2E_GROUP" in
     start_lb "$((E2E_BASE_PORT + 0))" "$((E2E_BASE_PORT + 5))" "$((E2E_BASE_PORT + 6))" leadlb
     start_lb "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 3))" "$((E2E_BASE_PORT + 4))" memberlb
     ;;
-  *) echo "E2E_GROUP 必须是 core|multi|sandbox|protocol|protocol-multi|router"; exit 1;;
+  sandbox-pool)
+    # 池开启单实例（同 sandbox 组拓扑；池参数见文件头 sandbox-pool 分支）
+    start_jar "$E2E_BASE_PORT" "a"
+    ;;
+  *) echo "E2E_GROUP 必须是 core|multi|sandbox|sandbox-pool|protocol|protocol-multi|router"; exit 1;;
 esac
 
 # ---------- 4. env.json ----------
@@ -243,6 +263,7 @@ cat > "$RUNTIME/env.json" <<EOF
   "approvalMcp": "http://127.0.0.1:${APPROVAL_MCP_PORT}",
   "sandboxMock": "http://127.0.0.1:${SANDBOX_MOCK_PORT}",
   "sandboxEnabled": $SANDBOX_ENABLED,
+  "sandboxPoolEnabled": ${SANDBOX_POOL_ENABLED:-false},
   "mysqlUrl": "$MYSQL_URL",
   "mysqlUser": "$MYSQL_USER",
   "mysqlPass": "$MYSQL_PASS",

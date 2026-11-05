@@ -41,6 +41,13 @@ public class AgentRuntimeService {
      */
     private AgentStateReader agentStateReader;
 
+    /**
+     * HITL 确认硬截止（分钟，D16：{@code AGENT_CONFIRM_DEADLINE_MINUTES}，默认 10）。
+     * ≤0 = 关闭截止语义（确认卡维持现状无限期可确认）。Bean 装配期经 setter 注入，
+     * 测试直接构造不注入时为 0（截止判定关闭，存量行为零回归）。
+     */
+    private volatile int confirmDeadlineMinutes = 0;
+
     private volatile io.agentscope.harness.agent.HarnessAgent agent;
     private final List<Map<String, Object>> mcpConfigs;
 
@@ -91,6 +98,19 @@ public class AgentRuntimeService {
     /** 注入 AgentState 读取器（Bean 装配时调用；测试可不注入，回落 confirm_context） */
     public void setAgentStateReader(AgentStateReader agentStateReader) {
         this.agentStateReader = agentStateReader;
+    }
+
+    /** 注入确认硬截止分钟数（Bean 装配时调用；≤0 关闭截止语义，测试缺省即现状） */
+    public void setConfirmDeadlineMinutes(int confirmDeadlineMinutes) {
+        this.confirmDeadlineMinutes = confirmDeadlineMinutes;
+        if (confirmDeadlineMinutes > 0) {
+            log.info("[HITL] confirm deadline enabled: {} minutes (D16)", confirmDeadlineMinutes);
+        }
+    }
+
+    /** 确认硬截止分钟数（池化 D15 启动校验与前端 deadline 透出共用） */
+    public int confirmDeadlineMinutes() {
+        return confirmDeadlineMinutes;
     }
 
     /** per-session 隔离是否生效（观测/日志判断用） */
@@ -946,9 +966,55 @@ public class AgentRuntimeService {
         log.debug("[HITL] checkConfirmAvailable: sessionId={}, fullThreadId={}", sessionId, fullThreadId);
         if (agentStateReader != null && loadConfirmContextFromState(fullThreadId) != null) {
             log.debug("[HITL] checkConfirmAvailable: satisfied by agent_state for {}", fullThreadId);
+            checkConfirmDeadline(sessionId);
             return;
         }
         confirmContextStore.checkAvailable(fullThreadId);
+        checkConfirmDeadline(sessionId);
+    }
+
+    /**
+     * D16 确认硬截止判定：挂起时刻距今超过 {@code AGENT_CONFIRM_DEADLINE_MINUTES} 即超截止。
+     *
+     * <p>时钟源双档（sandbox-pool-design D16）：confirm_context 行 created_at（行在 TTL 内时，
+     * findPending 的 SQL 过滤保证行存在 ⇔ 未超行 TTL；行 TTL 与 deadline 同值时行存在 ⇔ 未超截止）；
+     * 行已被 TTL 清理 → AgentState 行 MAX(updated_at) 兜底（挂起后 state 不再写入，该值 ≈ 挂起时刻）。
+     * 两源都不可判定（读失败/无时间戳）→ 保守放行，交由原有 404/CAS 路径兜底。
+     *
+     * @throws ConfirmDeadlineExpiredException 挂起已超截止（调用方按 410 confirm_expired 处置）
+     */
+    public void checkConfirmDeadline(String sessionId) {
+        if (confirmDeadlineMinutes <= 0) {
+            return;   // 截止语义关闭（默认 10；测试/存量部署显式关闭时为现状行为）
+        }
+        var fullThreadId = makeThreadId(sessionId);
+        Instant askedAt = confirmContextStore.findPending(fullThreadId)
+            .map(io.agentmanager.framework.service.ConfirmContextStore.PendingConfirm::createdAt)
+            .orElse(null);
+        if (askedAt == null && agentStateReader != null) {
+            askedAt = agentStateReader.loadAskingUpdatedAt(fullThreadId, stripTenantPrefix(fullThreadId));
+        }
+        if (askedAt == null) {
+            return;   // 双源都不可判定：保守放行（宁可晚收尾不可误作废）
+        }
+        var deadline = askedAt.plusSeconds(confirmDeadlineMinutes * 60L);
+        if (Instant.now().isAfter(deadline)) {
+            log.info("[HITL] confirm deadline exceeded (sid={}, askedAt={}, deadline={}m)",
+                sessionId, askedAt, confirmDeadlineMinutes);
+            throw new ConfirmDeadlineExpiredException(sessionId, askedAt, deadline);
+        }
+    }
+
+    /** 挂起时刻解析（截止判定与前端 expires_at 透出共用）：行 created_at 优先，state updated_at 兜底；不可判定返回 null */
+    public Instant resolveConfirmAskedAt(String sessionId) {
+        var fullThreadId = makeThreadId(sessionId);
+        var askedAt = confirmContextStore.findPending(fullThreadId)
+            .map(io.agentmanager.framework.service.ConfirmContextStore.PendingConfirm::createdAt)
+            .orElse(null);
+        if (askedAt == null && agentStateReader != null) {
+            askedAt = agentStateReader.loadAskingUpdatedAt(fullThreadId, stripTenantPrefix(fullThreadId));
+        }
+        return askedAt;
     }
 
     /**
@@ -1148,6 +1214,10 @@ public class AgentRuntimeService {
                 m.put("reply_id", p.replyId() != null ? p.replyId() : "");
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
+                // D16 确认硬截止：绝对失效时刻，前端历史回放重建确认卡时渲染倒计时/过期态
+                if (confirmDeadlineMinutes > 0 && p.createdAt() != null) {
+                    m.put("expires_at", p.createdAt().plusSeconds(confirmDeadlineMinutes * 60L).toString());
+                }
                 if (p.isRemote()) {
                     m.put("confirm_key", p.confirmKey());
                     m.put("remote_task", p.remoteTask());
@@ -1162,6 +1232,24 @@ public class AgentRuntimeService {
         public ConfirmContextNotFoundException(String sessionId) {
             super("confirm_context_not_found: session '" + sessionId
                 + "' not found or confirm context expired");
+        }
+    }
+
+    /**
+     * 确认已超硬截止（410 → confirm_expired，sandbox-pool-design D16）：
+     * ASKING 挂起超过 {@code AGENT_CONFIRM_DEADLINE_MINUTES} 后，确认卡作废，
+     * 调用方应复用 reject→DENY 分支自动收尾（turn 拒绝终态、会话从 ASKING 解锁）。
+     */
+    public static class ConfirmDeadlineExpiredException extends RuntimeException {
+        /** 挂起时刻（行 created_at 或 state updated_at，供调用方日志与响应透出） */
+        public final Instant askedAt;
+        /** 截止时刻（askedAt + deadline） */
+        public final Instant deadline;
+
+        public ConfirmDeadlineExpiredException(String sessionId, Instant askedAt, Instant deadline) {
+            super("confirm_expired: session '" + sessionId + "' pending confirm expired at " + deadline);
+            this.askedAt = askedAt;
+            this.deadline = deadline;
         }
     }
 

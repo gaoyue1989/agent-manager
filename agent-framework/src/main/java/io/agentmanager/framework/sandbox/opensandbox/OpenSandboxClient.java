@@ -17,6 +17,15 @@ import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
 /**
  * OpenSandbox 沙箱客户端：实现 AgentScope SandboxClient 契约。
  * create() 创建沙箱并注入 KV 运行时文件；resume() 按 sandboxId 恢复。
+ *
+ * <p>池化（sandbox-pool-design D1/D2，SANDBOX_POOL_ENABLED=true 时启用）：
+ * <ul>
+ *   <li>{@link #create} 走池借出（{@link SandboxPoolManager#borrow}：idle 直取/按需建/池空等待），
+ *       借出后 SET 租约（续约①）再走既有 bind/reset/inject/start 链——SDK acquire 语义零改动；</li>
+ *   <li>{@link #resume} connect 成功后续约（续约②，跨副本全局键——会话存续期保活）；</li>
+ *   <li>{@link #delete} 路由进池（D13：kill + 认领 + 异步补位，防池容量静默缩水）。</li>
+ * </ul>
+ * 池管理器为 null（默认 SANDBOX_POOL_ENABLED=false）时全部走现状路径，行为逐分支一致。
  */
 public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions> {
 
@@ -28,6 +37,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
     private final io.agentmanager.framework.service.storage.FileStorage fileStorage;
     private final com.alibaba.opensandbox.sandbox.config.ConnectionConfig connectionConfig;
     private final ObjectMapper objectMapper;
+    /** 沙箱池管理器（null = 池关闭，现状路径；由 OpenSandboxFilesystemSpec.createClient 注入） */
+    private volatile SandboxPoolManager sandboxPool;
 
     public OpenSandboxClient(OpenSandboxClientOptions options) {
         this(options, null, null, null, null, null);
@@ -69,9 +80,18 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .build();
     }
 
+    /** 池管理器注入（OpenSandboxFilesystemSpec.createClient 装配时调用；null = 池关闭） */
+    public void setSandboxPoolManager(SandboxPoolManager poolManager) {
+        this.sandboxPool = poolManager;
+    }
+
     @Override
     public Sandbox create(WorkspaceSpec workspaceSpec, SandboxSnapshotSpec snapshotSpec,
                           OpenSandboxClientOptions options) {
+        // 池开启（D2 借出点）：借出预创建容器并绑定当次 spec——SDK acquire P4 语义不变
+        if (sandboxPool != null) {
+            return createFromPool(workspaceSpec, options);
+        }
         // 1. 通过 OpenSandbox SDK 创建沙箱
         var builder = com.alibaba.opensandbox.sandbox.Sandbox.builder()
             .connectionConfig(connectionConfig)
@@ -137,6 +157,58 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         }
     }
 
+    /**
+     * 池借出路径（sandbox-pool-design §5.2，SANDBOX_POOL_ENABLED=true）：
+     * pool.borrow（idle 直取/按需建/池空等待）→ SET 租约（续约①，借出时已 SET）→ 注入当次
+     * workspaceSpec（借出容器预创建时无 spec，start 投影 hydrate 依赖它）→ 照现状执行
+     * bindUserKey/reset/inject/start 链——SDK acquire 四级优先级语义零改动。
+     *
+     * <p>Redis 不可达 → fail-open（D8）：借出降级为直接建容器（账本外，Server TTL 兜底消亡），
+     * 对话可用性不劣于现状。
+     */
+    private Sandbox createFromPool(WorkspaceSpec workspaceSpec, OpenSandboxClientOptions options) {
+        // ThreadLocal 消费型：提前取出（借出 sid 用 pendingSessionId；绑定仍按现状 bindUserKey 语义）
+        String poolSid = filesystemSpec != null ? filesystemSpec.takePendingSessionId() : null;
+        SandboxPoolManager.Borrowed borrowed;
+        try {
+            borrowed = sandboxPool.borrow(poolSid);
+        } catch (io.lettuce.core.RedisException e) {
+            // D8 fail-open：Redis 故障期借出直接建容器（限流告警在 manager 内）
+            borrowed = sandboxPool.borrowFailOpen(poolSid);
+        }
+        var osbSandbox = borrowed.osbSandbox();
+
+        // 构建状态：sandboxId = 借出容器 id；workspaceSpec = 当次调用传入（§5.2 步骤 4）
+        OpenSandboxState state = new OpenSandboxState();
+        state.setSandboxId(borrowed.sandboxId());
+        try {
+            state.setSandboxEndpoint(osbSandbox.getEndpoint(44772).getEndpoint());
+        } catch (Exception e) {
+            state.setSandboxEndpoint(null);
+        }
+        state.setWorkspaceSpec(workspaceSpec);
+        state.setImage(options.getImage());
+        state.setCreatedAt(System.currentTimeMillis());
+
+        // 包装 + 照现状链执行（bind/reset/inject/start；借出容器未 start，
+        // create 内 start 一次 + acquireForCall 再 start 一次依赖 running CAS 幂等）
+        OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage);
+        sandbox.setSandboxPoolManager(sandboxPool);
+        bindUserKey(sandbox);
+        if (sandbox.getUserKey() != null && fileAssetStore != null) {
+            fileAssetStore.resetInjectedToPending(sandbox.getUserKey());
+        }
+        sandbox.injectPendingUploads();
+        try {
+            sandbox.start();
+        } catch (Exception e) {
+            throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR,
+                "create", "Failed to start pooled OpenSandbox: " + e.getMessage(), e);
+        }
+        return sandbox;
+    }
+
     @Override
     public Sandbox resume(SandboxState state) {
         OpenSandboxState osbState = (OpenSandboxState) state;
@@ -151,8 +223,15 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .skipHealthCheck(true)
             .connect();
 
+        // 池化续约②（设计 §5.4）：P3 命中、connect 成功后保活——覆盖"活跃会话 turn 间空闲"，
+        // 跨副本有效（租约键是全局的，busy 归属账本才是本地的）
+        if (sandboxPool != null) {
+            sandboxPool.renew(osbState.getSandboxId());
+        }
+
         var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage);
+        sandbox.setSandboxPoolManager(sandboxPool);
         bindUserKey(sandbox);
         // 上传文件注入：恢复会话后立即执行（同 create）
         sandbox.injectPendingUploads();
@@ -172,6 +251,12 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         }
         if (key != null && !key.isBlank() && fileAssetStore != null) {
             fileAssetStore.resetInjectedToPending(key, key);
+        }
+        // 池开启（D13）：delete 路由进池——kill + Lua 认领移除 busy + 异步补位，
+        // 防 SDK 内部/未来调用方直杀容器导致池容量静默缩水
+        if (sandboxPool != null) {
+            sandboxPool.release(osb.getOsbState().getSandboxId());
+            return;
         }
         try {
             osb.getOsbSandbox().kill();
