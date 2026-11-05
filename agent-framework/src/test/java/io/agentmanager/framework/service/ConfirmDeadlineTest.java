@@ -154,7 +154,7 @@ class ConfirmDeadlineTest {
             List.of("/entry.sh"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("server:8090", "k"));
         var pool = new io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager(facade,
-            new io.agentmanager.framework.config.SandboxConfig.PoolConfig(true, 2, 8, 120, 600, 60, 2),
+            new io.agentmanager.framework.config.SandboxConfig.PoolConfig(true, 2, 8, 120, 600, 60, 2, 5, 600, 5),
             10, sandboxConfig, null);
         assertDoesNotThrow(() -> pool.touchSessionOrThrow(SID), "未借出会话的确认预检必须放行");
         // deadline 判定与池 touch 是确认入口的两道独立预检：池放行后 deadline 内确认照常通过

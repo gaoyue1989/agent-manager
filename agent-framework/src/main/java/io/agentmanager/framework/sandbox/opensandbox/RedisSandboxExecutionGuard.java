@@ -165,7 +165,10 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
             }
             String value = key.getValue();
             spec.setPendingSessionId(value != null ? value : "");
-            spec.setPendingUserKey(resolveLockValue(key));
+            // userKey 总是反查真实用户（与锁键的 sessionGranular 优化无关）——D17 配额按真实用户
+            // 计数：chat 链路 key.value=网关 peer（前端 sid）→ session_user 反查 uid（30s 缓存挡频）；
+            // A2A 链路 key.value=真实用户 → 反查 miss 回退原值，语义不变
+            spec.setPendingUserKey(resolveUserLockValue(value));
         } catch (Exception e) {
             log.debug("Pool identity inject skipped (fail-soft): {}", e.getMessage());
         }

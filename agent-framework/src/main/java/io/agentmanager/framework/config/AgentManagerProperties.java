@@ -131,7 +131,11 @@ public record AgentManagerProperties(
 
     /**
      * 清理与租约配置（无状态单次流架构，见 stateless-single-stream-plan O2/O3）。
-     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）
+     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）。
+     * 下方 compact 构造的 {@code @ConstructorBinding} 必须保留：存在 5 参兼容构造时嵌套 record
+     * 双构造让 Binder 无法选择绑定入口，会静默回退全默认值——{@code AGENT_CONFIRM_DEADLINE_MINUTES}
+     * 等该组 env 全部永不生效（D16 截止恒 10min、e2e 池组 deadline=0 豁免失效 → D15 fail-fast
+     * 误杀加速参数，2026-11-06 实测）。
      */
     public record CleanupConfig(
         /**
@@ -165,6 +169,11 @@ public record AgentManagerProperties(
         /** 宿主 {@code .skills-cache} scope 目录保留天数（默认 2；≤0 视为关闭） */
         @DefaultValue("2") int skillCacheRetentionDays
     ) {
+        /** 绑定入口消歧（见 record javadoc）：嵌套 record 双构造必须以 @ConstructorBinding 指定 */
+        @ConstructorBinding
+        public CleanupConfig {
+        }
+
         /** 兼容构造器（旧 5 参调用方）：确认截止取默认 10min，技能缓存 GC 取默认（启用 / 保留 2 天）。 */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {

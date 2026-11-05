@@ -66,20 +66,67 @@ public class SandboxPoolManager {
     static final String LEASE_PREFIX = "sbx:pool:lease:";
 
     /**
-     * borrow Lua（单 key）：取一个 idle（i: 前缀字段）原子转 busy（并发借出各得唯一容器），
-     * 并写 {@code s:{sid}} 反查字段（touch 判活与 resume 校正的 D14 查询入口；sid 空串不写）；
-     * 无 idle 返回空串。ARGV[1]=busyJson（含 sid/userKey/podId/borrowedAt），ARGV[2]=sid。
+     * borrow 决策树 Lua（单 key，D17）：全部判定在 ledger 单 key 内完成（cluster 无 CROSSSLOT）。
+     * 配额判定 {@code held(user) = Σ(i:owner=user) + Σ(b:userKey=user) + Σ(c:userKey=user)}：
+     * <ul>
+     *   <li>held ≥ userMax 且该用户有粘滞空闲 → <b>LRU 继承</b>（returnedAt 最旧，单 key 原子换绑：
+     *       HDEL i: + HSET b:{id,新sid,新userKey} + s: 反查换绑）→ 返回 {@code 'I:{id}'}；</li>
+     *   <li>held ≥ userMax 无粘滞空闲 → 返回 {@code 'Q'}（调用方抛 user_quota_exhausted，
+     *       与池满可区分、立即报错不等待）；</li>
+     *   <li>配额内 → 仅借 <b>通用空闲</b>（owner 为空串；旧值 "0" 解析失败容忍视作通用）→
+     *       {@code 'B:{id}'}；无通用 idle → {@code ''}（调用方走按需建/等待）。</li>
+     * </ul>
+     * ARGV[1]=sid，ARGV[2]=userKey，ARGV[3]=busyJson（含 sid/userKey/podId/borrowedAt），ARGV[4]=userMax。
+     * userKey 为空串（守卫被禁用组合）时不做配额判定（held=0），配额语义退化为不限——文档约束面。
      */
     static final String BORROW_LUA = """
+        local userMax = tonumber(ARGV[4])
+        local userKey = ARGV[2]
         local fields = redis.call('HKEYS', KEYS[1])
+        local held = 0
+        local stickyF, stickyAt
+        local genericF
         for _, f in ipairs(fields) do
-          if string.sub(f, 1, 2) == 'i:' then
-            local id = string.sub(f, 3)
-            redis.call('HDEL', KEYS[1], f)
-            redis.call('HSET', KEYS[1], 'b:' .. id, ARGV[1])
-            if ARGV[2] ~= '' then redis.call('HSET', KEYS[1], 's:' .. ARGV[2], id) end
-            return id
+          local p = string.sub(f, 1, 2)
+          if p == 'i:' then
+            local ok, rec = pcall(cjson.decode, redis.call('HGET', KEYS[1], f))
+            local owner = (ok and rec.owner) or ''
+            if owner ~= '' then
+              if userKey ~= '' and owner == userKey then
+                held = held + 1
+                local at = (ok and tonumber(rec.returnedAt)) or 0
+                if stickyF == nil or at < stickyAt then stickyF, stickyAt = f, at end
+              end
+            elseif genericF == nil then
+              genericF = f
+            end
+          elseif p == 'b:' and userKey ~= '' then
+            local ok, rec = pcall(cjson.decode, redis.call('HGET', KEYS[1], f))
+            if ok and rec.userKey == userKey then held = held + 1 end
+          elseif p == 'c:' and userKey ~= '' then
+            local ok, rec = pcall(cjson.decode, redis.call('HGET', KEYS[1], f))
+            if ok and rec.userKey == userKey then held = held + 1 end
           end
+        end
+        if userKey == '' then held = 0 end
+        if held >= userMax then
+          if stickyF then
+            local id = string.sub(stickyF, 3)
+            local ok, rec = pcall(cjson.decode, redis.call('HGET', KEYS[1], stickyF))
+            if ok and rec.sid ~= nil and rec.sid ~= '' then redis.call('HDEL', KEYS[1], 's:' .. rec.sid) end
+            redis.call('HDEL', KEYS[1], stickyF)
+            redis.call('HSET', KEYS[1], 'b:' .. id, ARGV[3])
+            if ARGV[1] ~= '' then redis.call('HSET', KEYS[1], 's:' .. ARGV[1], id) end
+            return 'I:' .. id
+          end
+          return 'Q'
+        end
+        if genericF then
+          local id = string.sub(genericF, 3)
+          redis.call('HDEL', KEYS[1], genericF)
+          redis.call('HSET', KEYS[1], 'b:' .. id, ARGV[3])
+          if ARGV[1] ~= '' then redis.call('HSET', KEYS[1], 's:' .. ARGV[1], id) end
+          return 'B:' .. id
         end
         return ''
         """;
@@ -144,9 +191,19 @@ public class SandboxPoolManager {
     static final String RELEASE_CREATING_LUA =
         "redis.call('HDEL', KEYS[1], 'c:' .. ARGV[1]) return 1";
 
-    /** idle 认领移除 Lua（单 key）：保活探测失效时原子认领（并发只有一个赢家） */
-    static final String CLAIM_IDLE_LUA =
-        "if redis.call('HDEL', KEYS[1], 'i:' .. ARGV[1]) == 1 then return ARGV[1] end return ''";
+    /**
+     * idle 认领移除 Lua（单 key）：保活探测失效/粘滞到期/水位回缩时原子认领（并发只有一个赢家），
+     * 并原子清理 {@code s:{sid}} 反查字段（粘滞条目携带原会话 sid；旧值解析失败跳过）。
+     */
+    static final String CLAIM_IDLE_LUA = """
+        local f = 'i:' .. ARGV[1]
+        local v = redis.call('HGET', KEYS[1], f)
+        if not v then return '' end
+        redis.call('HDEL', KEYS[1], f)
+        local ok, rec = pcall(cjson.decode, v)
+        if ok and rec.sid ~= nil and rec.sid ~= '' then redis.call('HDEL', KEYS[1], 's:' .. rec.sid) end
+        return ARGV[1]
+        """;
 
     /** creating 剪枝 Lua（单 key）：删除年龄 > maxAge 秒的 c: 条目（崩溃 mid-create 自愈），返回删除数 */
     static final String PRUNE_CREATING_LUA = """
@@ -244,6 +301,111 @@ public class SandboxPoolManager {
         return 'G'
         """;
 
+    /**
+     * 弹性水位 Lua（单 key，D18）：脚本内自算 |b:|/T 并裁决抬升/回缩，<b>两个方向同脚本同规则
+     * 受冷却约束</b>（任一 T 变更先校验 now-lastAdjustAt ≥ 2×扫描间隔、变更即原子写 lastAdjustAt
+     * ——否则 N 副本同窗口并发扫描对 T 连加 N×step）；多副本并发扫描单赢家、免选主。
+     * 返回：'U:{t}:{deficit}'（scale-out：补建通用 idle 缺口数）/ 'D:{t}|{id1,id2…}'（scale-in：
+     * 超额通用 idle 按 returnedAt LRU 列表，粘滞不参与）/ 'K:{t}'（保持，含冷却窗内被拒）。
+     * ARGV[1]=maxSize，ARGV[2]=minIdle，ARGV[3]=growStep，ARGV[4]=cooldownSeconds，ARGV[5]=nowSec。
+     * 高低水位（80%/50%）、滞回周期（3）为内置常量（设计 §5.6 注）。
+     */
+    static final String SCALE_LUA = """
+        local maxSize, minIdle, step = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+        local cooldown, now = tonumber(ARGV[4]), tonumber(ARGV[5])
+        local busyN = 0
+        local generic = {}
+        local fields = redis.call('HKEYS', KEYS[1])
+        for _, f in ipairs(fields) do
+          local p = string.sub(f, 1, 2)
+          if p == 'b:' then busyN = busyN + 1
+          elseif p == 'i:' then
+            local ok, rec = pcall(cjson.decode, redis.call('HGET', KEYS[1], f))
+            local owner = (ok and rec.owner) or ''
+            if owner == '' then generic[#generic + 1] = {f = f, at = (ok and tonumber(rec.returnedAt)) or 0} end
+          end
+        end
+        local t = minIdle
+        local last = 0
+        local tv = redis.call('HGET', KEYS[1], 't:target')
+        if tv then
+          local ok, rec = pcall(cjson.decode, tv)
+          if ok then
+            if tonumber(rec.value) then t = tonumber(rec.value) end
+            if tonumber(rec.lastAdjustAt) then last = tonumber(rec.lastAdjustAt) end
+          end
+        end
+        local util = (t > 0) and (busyN / t) or 0
+        if util >= 0.8 then
+          redis.call('HSET', KEYS[1], 't:lowStreak', '0')
+          if t < maxSize and (now - last) >= cooldown then
+            t = math.min(t + step, maxSize)
+            redis.call('HSET', KEYS[1], 't:target', cjson.encode({value = t, lastAdjustAt = now}))
+            local deficit = t - busyN - #generic
+            if deficit < 0 then deficit = 0 end
+            return 'U:' .. t .. ':' .. deficit
+          end
+          return 'K:' .. t
+        end
+        if util < 0.5 then
+          local streak = tonumber(redis.call('HGET', KEYS[1], 't:lowStreak') or '0') + 1
+          redis.call('HSET', KEYS[1], 't:lowStreak', tostring(streak))
+          if streak >= 3 and t > minIdle and (now - last) >= cooldown then
+            t = math.max(t - step, minIdle)
+            redis.call('HSET', KEYS[1], 't:target', cjson.encode({value = t, lastAdjustAt = now}))
+            redis.call('HSET', KEYS[1], 't:lowStreak', '0')
+            local keep = t - busyN
+            if keep < 0 then keep = 0 end
+            local excess = #generic - keep
+            if excess > 0 then
+              table.sort(generic, function(a, b) return a.at < b.at end)
+              local ids = {}
+              for i = 1, excess do ids[#ids + 1] = string.sub(generic[i].f, 3) end
+              return 'D:' .. t .. '|' .. table.concat(ids, ',')
+            end
+            return 'D:' .. t
+          end
+          return 'K:' .. t
+        end
+        return 'K:' .. t
+        """;
+
+    /**
+     * 归还转粘滞 Lua（单 key，D17）：busy 认领后容器转入粘滞空闲区（不 kill，工作区/env 保留），
+     * 并原子重建 {@code s:{sid}} 反查（原会话复活窗口）。stickyJson = {owner=userKey, returnedAt, sid}。
+     * ARGV[1]=sandboxId，ARGV[2]=stickyJson。
+     */
+    static final String RETURN_STICKY_LUA = """
+        redis.call('HSET', KEYS[1], 'i:' .. ARGV[1], ARGV[2])
+        local ok, rec = pcall(cjson.decode, ARGV[2])
+        if ok and rec.sid ~= nil and rec.sid ~= '' then redis.call('HSET', KEYS[1], 's:' .. rec.sid, ARGV[1]) end
+        return 1
+        """;
+
+    /**
+     * busy 身份回填 Lua（单 key，D17）：{@code b:{id}} 存在<b>且</b> userKey/sid 为空串才 HSET
+     * 合并后 JSON——<b>禁止先 HGET 再 HSET 两步</b>（与扫描认领并发会重建已被 CLAIM_RECYCLE
+     * 删除的 busy 条目，产生占用容量/配额的幻影 busy）；b:{id} 不存在时 no-op（不重建）。
+     * 字段非空不覆写（守卫钩子主路径已注入时为幂等空操作）。回填同时补写 {@code s:{sid}} 反查。
+     * ARGV[1]=sandboxId，ARGV[2]=sid，ARGV[3]=userKey。
+     */
+    static final String BACKFILL_BUSY_LUA = """
+        local f = 'b:' .. ARGV[1]
+        local v = redis.call('HGET', KEYS[1], f)
+        if not v then return 0 end
+        local ok, rec = pcall(cjson.decode, v)
+        if not ok then return 0 end
+        local changed = false
+        if (rec.sid or '') == '' and ARGV[2] ~= '' then rec.sid = ARGV[2]; changed = true end
+        if (rec.userKey or '') == '' and ARGV[3] ~= '' then rec.userKey = ARGV[3]; changed = true end
+        if changed then
+          redis.call('HSET', KEYS[1], f, cjson.encode(rec))
+          if rec.sid ~= '' then redis.call('HSET', KEYS[1], 's:' .. rec.sid, ARGV[1]) end
+        end
+        if changed then return 1 end
+        return 0
+        """;
+
     /** borrowedAt 宽限窗口（秒）：borrow「ledger 入账 → SET 租约」两步缺口的兜底（§5.3） */
     static final long BORROW_GRACE_SECONDS = 60;
     /** creating 剪枝年龄（秒）：副本崩溃 mid-create 的自愈上限 */
@@ -254,8 +416,20 @@ public class SandboxPoolManager {
     static final int FULL_WARN_CYCLES = 2;
     /** fail-open / Redis 异常限流告警间隔（ms） */
     private static final long FAIL_OPEN_WARN_INTERVAL_MS = 60_000;
+    /** 借出剩余寿命下限（D19）：getInfo.expiresAt 距 now < 5min 弃用换新（吸收 SDK 池 acquireMinRemainingTtl） */
+    static final long BORROW_MIN_REMAINING_TTL_MS = 5 * 60 * 1000L;
     /** 池空轮询间隔（ms，设计 §5.2 步骤 1） */
     private static final long BORROW_POLL_INTERVAL_MS = 1000;
+
+    /**
+     * 归还回收兜底回写钩子（D17 §5.3-4b）：幂等调 {@code sandbox.stop()}（KV/记忆回写，
+     * 覆盖崩溃 turn 未经 stop 的容器）。实现须自带 fail-soft 语义之外的异常上抛由调用方
+     * 告警吞掉（回写失败不阻塞回收——容器数据保留到粘滞窗口）。
+     */
+    @FunctionalInterface
+    public interface RecycleStopper {
+        void stop(String sandboxId, String userKey) throws Exception;
+    }
 
     private final RedisConnectionFacade facade;
     private final SandboxConfig.PoolConfig pool;
@@ -263,11 +437,15 @@ public class SandboxPoolManager {
     private final int confirmDeadlineMinutes;
     /** D14 双保险：绑定 sid 的 turn_lease 活跃即不回收（null = 未装配，按租约判定） */
     private final io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore;
+    /** 归还兜底回写钩子（D17 转粘滞路径；null = 不回写直接转粘滞/kill） */
+    private final RecycleStopper recycleStopper;
     private final ConnectionConfig connectionConfig;
     private final String image;
     private final Duration timeout;
     private final List<String> entrypoint;
     private final Map<String, String> resource;
+    /** Pod requests（D19 资源双档，{@code SANDBOX_CPU_REQUEST}/{@code SANDBOX_MEMORY_REQUEST}） */
+    private final Map<String, String> resourceRequests;
     private final Map<String, String> environment;
     private final ObjectMapper mapper = new ObjectMapper();
     private final String podId = UUID.randomUUID().toString().substring(0, 8);
@@ -297,6 +475,19 @@ public class SandboxPoolManager {
                               int confirmDeadlineMinutes,
                               SandboxConfig sandbox,
                               io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore) {
+        this(facade, pool, confirmDeadlineMinutes, sandbox, turnLeaseStore, null);
+    }
+
+    /**
+     * @param recycleStopper 归还兜底回写钩子（D17 转粘滞路径的 {@code sandbox.stop()} 兜底；
+     *                       null = 不回写——装配处经 ObjectProvider 惰性构造，缺失时容器数据保留到粘滞窗口）
+     */
+    public SandboxPoolManager(RedisConnectionFacade facade,
+                              SandboxConfig.PoolConfig pool,
+                              int confirmDeadlineMinutes,
+                              SandboxConfig sandbox,
+                              io.agentmanager.framework.service.TurnLeaseStore turnLeaseStore,
+                              RecycleStopper recycleStopper) {
         // D15 硬不变量（启动 fail-fast）：IDLE_RETURN_SECONDS ≥ AGENT_CONFIRM_DEADLINE_MINUTES——
         // 截止内的每一刻容器必活（确认入口预检续约兜住边界竞态）；违反即配置错误，拒绝启动
         this.confirmDeadlineMinutes = confirmDeadlineMinutes;
@@ -310,12 +501,17 @@ public class SandboxPoolManager {
         this.facade = facade;
         this.pool = pool;
         this.turnLeaseStore = turnLeaseStore;
+        this.recycleStopper = recycleStopper;
         this.image = sandbox.image();
         this.timeout = Duration.ofMinutes(sandbox.timeoutMinutes());
         this.entrypoint = sandbox.entrypoint();
         this.resource = Map.of(
             "cpu", String.valueOf(sandbox.cpuCount()),
             "memory", sandbox.memoryMb() + "Mi");
+        // D19 资源双档：Pod requests（缺省默认 100m/128Mi，由 SandboxConfig @DefaultValue 兜底）
+        this.resourceRequests = Map.of(
+            "cpu", sandbox.cpuRequest(),
+            "memory", sandbox.memoryRequest());
         this.environment = Map.of(
             "EXECD_API_GRACE_SHUTDOWN", sandbox.execdGraceShutdown().toMillis() + "ms");
         this.connectionConfig = ConnectionConfig.builder()
@@ -325,9 +521,11 @@ public class SandboxPoolManager {
             .useServerProxy(true)
             .build();
         log.info("[sandbox-pool] enabled: maxSize={} minIdle={} idleReturn={}s maxWait={}s scan={}s rebuild={}"
-                + " deadline={}m podId={}",
+                + " userMax={} stickyTtl={}s growStep={} requests={}/{} deadline={}m podId={}",
             pool.maxSize(), pool.minIdle(), pool.idleReturnSeconds(), pool.maxWaitSeconds(),
-            pool.scanIntervalSeconds(), pool.rebuildConcurrency(), confirmDeadlineMinutes, podId);
+            pool.scanIntervalSeconds(), pool.rebuildConcurrency(), pool.userMaxContainers(),
+            pool.stickyTtlSeconds(), pool.growStep(), sandbox.cpuRequest(), sandbox.memoryRequest(),
+            confirmDeadlineMinutes, podId);
     }
 
     // ---------------------------------------------------------------- 借出（OpenSandboxClient.create 池分支）
@@ -343,21 +541,18 @@ public class SandboxPoolManager {
      * @throws SandboxException CONFIGURATION_ERROR：池满等待超时 / 连续探测失败 / 按需建容器失败
      */
     public Borrowed borrow(String sid, String userKey) {
-        String busyJson = busyJsonOf(sid, userKey);
-        // 1. 非阻塞直取 idle
-        String id = luaBorrow(busyJson, sid);
-        if (id != null && !id.isEmpty()) {
-            Borrowed b = attachLeaseAndProbe(sid, userKey, id);
-            if (b != null) {
-                return b;
-            }
+        // 1. 决策树借出（D17）：配额内借通用 idle / 配额满 LRU 继承粘滞空闲 / 配额满无粘滞报错
+        Borrowed direct = borrowViaDecision(sid, userKey);
+        if (direct != null) {
+            return direct;
         }
-        // 2. idle 空：容量未满则按需同步建（直接给本次借出）
-        Borrowed created = createOnDemand(sid, userKey, busyJson);
+        // 2. 通用 idle 空（配额内）：容量未满则按需同步建（直接给本次借出）
+        Borrowed created = createOnDemand(sid, userKey, busyJsonOf(sid, userKey));
         if (created != null) {
             return created;
         }
-        // 3. 池满：轮询等待归还/补位（1s 间隔，≤ maxWait；0 = 无限等，不推荐）
+        // 3. 池满：轮询等待归还/补位（1s 间隔，≤ maxWait；0 = 无限等，不推荐）——
+        //    每轮重跑决策树（继承/配额判定随之刷新，归还入粘滞区即可被同用户继承）
         long maxWaitMs = pool.maxWaitSeconds() > 0 ? pool.maxWaitSeconds() * 1000L : Long.MAX_VALUE;
         long deadline = System.currentTimeMillis() + maxWaitMs;
         waiters.incrementAndGet();
@@ -372,14 +567,11 @@ public class SandboxPoolManager {
                     Thread.currentThread().interrupt();
                     break;
                 }
-                id = luaBorrow(busyJson, sid);
-                if (id != null && !id.isEmpty()) {
-                    Borrowed b = attachLeaseAndProbe(sid, userKey, id);
-                    if (b != null) {
-                        return b;
-                    }
+                direct = borrowViaDecision(sid, userKey);
+                if (direct != null) {
+                    return direct;
                 }
-                created = createOnDemand(sid, userKey, busyJson);
+                created = createOnDemand(sid, userKey, busyJsonOf(sid, userKey));
                 if (created != null) {
                     return created;
                 }
@@ -395,12 +587,43 @@ public class SandboxPoolManager {
                 + "s); 沙箱繁忙请稍后重试", null);
     }
 
+    /**
+     * 决策树借出一跳（D17）：luaBorrow 决策树 → {@code 'B:{id}'} 借通用 idle /
+     * {@code 'I:{id}'} LRU 继承粘滞空闲（均进入租约+探测后置）；
+     * {@code 'Q'} → user_quota_exhausted（与池满可区分、立即报错不等待）；
+     * {@code ''} → 返回 null（调用方走按需建/等待）。
+     */
+    private Borrowed borrowViaDecision(String sid, String userKey) {
+        String verdict = luaBorrowDecision(sid, userKey, busyJsonOf(sid, userKey));
+        if (verdict == null || verdict.isEmpty()) {
+            return null;
+        }
+        char kind = verdict.charAt(0);
+        if (kind == 'Q') {
+            recordEvent("quota-exhausted", sid, null);
+            log.warn("[sandbox-pool] user quota exhausted: user={}, max={}, sid={}, snapshot={}",
+                userKey, pool.userMaxContainers(), sid, snapshotString());
+            throw new SandboxException(SandboxErrorCode.CONFIGURATION_ERROR, "borrow",
+                "sandbox pool user quota exhausted (user=" + userKey + ", max="
+                    + pool.userMaxContainers() + "); 并发沙箱已达上限，请结束其他会话", null);
+        }
+        if (kind != 'B' && kind != 'I') {
+            return null;
+        }
+        if (kind == 'I') {
+            recordEvent("inherit", sid, verdict.substring(2));
+            log.info("[sandbox-pool] inherited sticky container (LRU): sid={}, userKey={}, sandboxId={}",
+                sid, userKey, verdict.substring(2));
+        }
+        return attachLeaseAndProbe(sid, userKey, verdict.substring(2));
+    }
+
     /** 借出后置：SET 租约（续约①）→ 探测；探测失败 kill 换新（≤PROBE_MAX_RETRY 次），全败报错 */
     private Borrowed attachLeaseAndProbe(String sid, String userKey, String firstId) {
         String id = firstId;
         for (int attempt = 1; attempt <= PROBE_MAX_RETRY + 1; attempt++) {
             setLease(id, sid != null && !sid.isBlank() ? sid : podId);   // 续约①：借出即受保护
-            if (probeAlive(id)) {
+            if (probeBorrowable(id)) {
                 recordEvent("borrow", sid, id);
                 log.info("[sandbox-pool] borrowed: sid={}, userKey={}, sandboxId={}, attempt={}, snapshot={}",
                     sid, userKey, id, attempt, snapshotString());
@@ -418,24 +641,30 @@ public class SandboxPoolManager {
             if (attempt > PROBE_MAX_RETRY) {
                 break;
             }
-            // 换新：优先按需建（容量允许），否则再取 idle
+            // 换新：重走 D17 借出决策树（按需建优先由 createOnDemand 兜；决策树给通用 idle/继承）
             Borrowed created = createOnDemand(sid, userKey, busyJsonOf(sid, userKey));
             if (created != null) {
                 return created;
             }
-            String next = luaBorrow(busyJsonOf(sid, userKey), sid);
-            if (next == null || next.isEmpty()) {
+            String next = luaBorrowDecision(sid, userKey, busyJsonOf(sid, userKey));
+            if (next == null || next.length() < 2
+                    || (next.charAt(0) != 'B' && next.charAt(0) != 'I')) {
+                if (next != null && !next.isEmpty() && next.charAt(0) == 'Q') {
+                    throw new SandboxException(SandboxErrorCode.CONFIGURATION_ERROR, "borrow",
+                        "sandbox pool user quota exhausted (user=" + userKey + ", max="
+                            + pool.userMaxContainers() + "); 并发沙箱已达上限，请结束其他会话", null);
+                }
                 break;
             }
-            id = next;
+            id = next.substring(2);
         }
         // 换新失败：不抛（调用方回落池空等待路径）——返回 null 让 borrow 走等待/报错分支
         return null;
     }
 
-    /** 按需同步建容器（容量未满时）：cap 占位 → 建 → 直接转 busy 给本次借出；容量满/Redis 不可达返回 null */
+    /** 按需同步建容器（容量未满时）：cap 占位（c: 值携带 userKey 供 D17 配额计数）→ 建 → 直接转 busy 给本次借出；容量满/Redis 不可达返回 null */
     private Borrowed createOnDemand(String sid, String userKey, String busyJson) {
-        String entry = luaCap();
+        String entry = luaCap(userKey);
         if (entry == null || entry.isEmpty()) {
             return null;
         }
@@ -619,6 +848,26 @@ public class SandboxPoolManager {
         }
     }
 
+    /**
+     * busy 身份回填（D17 兜底）：{@link SandboxUserKeyMiddleware#onAgent} 在 sandbox.setUserKey
+     * 后调用——单 key Lua 原子合并 userKey/sid 双字段（b: 不存在时 no-op，不重建幻影 busy；
+     * 字段非空不覆写——守卫钩子主路径生效时为幂等空操作）。兜底 A2A 链路 pendingSessionId
+     * 与守卫被禁用组合下的身份缺口（配额计数/粘滞转移/D14 查询键）。
+     */
+    public void backfillBusyIdentity(String sandboxId, String sid, String userKey) {
+        if (sandboxId == null || sandboxId.isBlank()) {
+            return;
+        }
+        try {
+            evalLuaKeyed(BACKFILL_BUSY_LUA, ScriptOutputType.INTEGER,
+                new String[]{facade.key(LEDGER_KEY)},
+                new String[]{sandboxId, sid != null ? sid : "", userKey != null ? userKey : ""});
+        } catch (Exception e) {
+            log.debug("[sandbox-pool] busy identity backfill skipped (fail-soft): sandboxId={}: {}",
+                sandboxId, e.getMessage());
+        }
+    }
+
     // ---------------------------------------------------------------- 归还（D13：delete() 路由进池）
 
     /**
@@ -700,7 +949,7 @@ public class SandboxPoolManager {
         }
     }
 
-    /** 单轮扫描（§5.3）：busy 失活回收（D14 双保险 + 认领 + 复核撤销）→ creating 剪枝 → idle 保活 → 水位告警 */
+    /** 单轮扫描（§5.3 + D17/D18）：busy 失活回收（转粘滞）→ creating 剪枝 → idle 保活/粘滞到期 → 弹性水位 → 水位告警 */
     void scan() {
         Map<String, String> ledger = facade.sync().hgetall(facade.key(LEDGER_KEY));
         int busy = 0;
@@ -711,7 +960,7 @@ public class SandboxPoolManager {
                 scanBusyEntry(en.getKey().substring(2), en.getValue());
             } else if (en.getKey().startsWith("i:")) {
                 idle++;
-                scanIdleEntry(en.getKey().substring(2));
+                scanIdleEntry(en.getKey().substring(2), en.getValue());
             }
         }
         // creating 剪枝（崩溃 mid-create 自愈，容量不泄漏）
@@ -720,6 +969,8 @@ public class SandboxPoolManager {
         if (pruned != null && pruned > 0) {
             log.info("[sandbox-pool] pruned {} stale creating entr{}", pruned, pruned == 1 ? "y" : "ies");
         }
+        // D18 弹性水位（单 key Lua 单赢家）：80% 抬升补建 / <50%×3 周期+冷却回缩 LRU kill
+        applyScaling(idle);
         // 水位告警：busy==maxSize 连续 FULL_WARN_CYCLES 个周期 → 容量该扩信号
         if (busy >= pool.maxSize()) {
             if (fullCycles.incrementAndGet() == FULL_WARN_CYCLES) {
@@ -738,9 +989,14 @@ public class SandboxPoolManager {
             return;
         }
         var rec = parseBusy(busyJson);
-        // 2. borrowedAt 宽限规则：借出方在「ledger 入账 → SET 租约」两步间的窗口（崩溃遗留 60s 后进入正常判定）
+        // 2. borrowedAt 宽限规则：借出方在「ledger 入账 → SET 租约」两步间的窗口（崩溃遗留后进入正常判定）。
+        //    宽限取 min(60s, idleReturn)：生产（idleReturn≥600s）恒为 60s 不变；加速 e2e（idleReturn=8s）
+        //    下 60s 固定宽限会压制回收窗口（P3 20s 断言永远等不到 busy 清空，2026-11-06 实测）——
+        //    宽限至多覆盖一个租约 TTL，语义不变（两步间隙崩溃的遗留条目至多一个 TTL 后进入正常判定，
+        //    活跃借出方由租约续约与 D14 turn_lease 双保险继续保护）
+        long graceSeconds = Math.min(BORROW_GRACE_SECONDS, pool.idleReturnSeconds());
         if (rec != null && rec.borrowedAt() > 0
-                && System.currentTimeMillis() / 1000 - rec.borrowedAt() < BORROW_GRACE_SECONDS) {
+                && System.currentTimeMillis() / 1000 - rec.borrowedAt() < graceSeconds) {
             return;
         }
         // 3. D14 双保险：绑定 sid 的 turn_lease 活跃（跨副本可见的"turn 进行中"）→ 重置租约跳过。
@@ -780,17 +1036,63 @@ public class SandboxPoolManager {
             }
             return;
         }
-        // 4b. kill + DEL 租约（卫生操作）+ 异步补位；kill 失败（容器已被 Server GC/已死）照常继续
-        killQuietly(sandboxId);
+        // 4b. D17 归还转粘滞：stop() 兜底（KV/记忆回写，覆盖崩溃 turn）→ DEL 租约 → 转粘滞空闲
+        //     （不 kill 不补位，等同用户继承/原会话复活或 STICKY_TTL 到期回收）。
+        //     顺序严格：stop 内部 renewPoolLease() 会重建刚 DEL 的租约，故 DEL 必须在 stop 之后。
+        //     owner 未知（busy.userKey 空串，守卫被禁用组合）→ 不转粘滞，维持 kill+rebuild 旧行为
+        //     （防携用户 /workspace 数据的容器落通用池被他人借走——跨用户暴露防线）。
+        boolean sticky = rec != null && rec.userKey() != null && !rec.userKey().isBlank();
+        if (sticky && recycleStopper != null) {
+            try {
+                recycleStopper.stop(sandboxId, rec.userKey());
+            } catch (Exception e) {
+                // fail-soft：KV 回写失败不阻塞回收（容器数据保留到粘滞窗口）
+                log.warn("[sandbox-pool] recycle stop (KV sync-back) failed, continue to sticky: sandboxId={}: {}",
+                    sandboxId, e.getMessage());
+            }
+        } else if (sticky) {
+            log.debug("[sandbox-pool] recycle stopper absent, skip KV sync-back: sandboxId={}", sandboxId);
+        }
         delLease(sandboxId);
+        if (sticky) {
+            evalQuiet(RETURN_STICKY_LUA, ScriptOutputType.INTEGER,
+                new String[]{sandboxId, stickyJsonOf(rec.userKey(), rec.sid())});
+            recordEvent("return-sticky", rec.sid(), sandboxId);
+            log.info("[sandbox-pool] returned to sticky idle (no kill): sandboxId={} (sid={}, userKey={}), snapshot={}",
+                sandboxId, rec.sid(), rec.userKey(), snapshotString());
+            return;
+        }
+        killQuietly(sandboxId);
         recordEvent("scan-kill", rec != null ? rec.sid() : null, sandboxId);
         log.info("[sandbox-pool] scanned idle-return: kill sandboxId={} (sid={}), snapshot={}",
             sandboxId, rec != null ? rec.sid() : "?", snapshotString());
         rebuildAsync();
     }
 
-    /** idle 保活（§5.4）：getInfo 失效 → 原子认领 + kill + 补位（兜底 Server 空闲 GC） */
-    private void scanIdleEntry(String sandboxId) {
+    /**
+     * idle 条目扫描（§5.4 + D17）：粘滞空闲先判 STICKY_TTL 到期（到期认领 kill 回收、释放配额，
+     * 粘滞不参与通用水面）；通用与粘滞统一做保活检查（getInfo 失效 → 原子认领 + kill + 补位）。
+     */
+    private void scanIdleEntry(String sandboxId, String idleJson) {
+        var rec = parseIdle(idleJson);
+        boolean sticky = rec.owner() != null && !rec.owner().isBlank();
+        if (sticky && rec.returnedAt() > 0
+                && System.currentTimeMillis() / 1000 - rec.returnedAt() >= pool.stickyTtlSeconds()) {
+            try {
+                String claimed = eval(CLAIM_IDLE_LUA, ScriptOutputType.VALUE, new String[]{sandboxId});
+                if (claimed != null && !claimed.isEmpty()) {
+                    killQuietly(sandboxId);
+                    recordEvent("sticky-expire", rec.sid(), sandboxId);
+                    log.info("[sandbox-pool] sticky idle expired, killed: sandboxId={} (sid={}, owner={}), snapshot={}",
+                        sandboxId, rec.sid(), rec.owner(), snapshotString());
+                    rebuildAsync();   // 通用池水面核算补位
+                }
+            } catch (RedisException e) {
+                throw e;
+            }
+            return;
+        }
+        // 保活（通用与粘滞同查）：getInfo 失效 → 原子认领 + kill + 补位（兜底 Server 空闲 GC）
         if (probeAlive(sandboxId)) {
             return;
         }
@@ -798,13 +1100,83 @@ public class SandboxPoolManager {
             String claimed = eval(CLAIM_IDLE_LUA, ScriptOutputType.VALUE, new String[]{sandboxId});
             if (claimed != null && !claimed.isEmpty()) {
                 killQuietly(sandboxId);
-                recordEvent("idle-reap", null, sandboxId);
-                log.warn("[sandbox-pool] idle container dead (Server GC?), reaping: sandboxId={}", sandboxId);
+                recordEvent("idle-reap", rec.sid(), sandboxId);
+                log.warn("[sandbox-pool] idle container dead (Server GC?), reaping: sandboxId={} (owner={})",
+                    sandboxId, rec.owner());
                 rebuildAsync();
             }
         } catch (RedisException e) {
             throw e;
         }
+    }
+
+    /**
+     * D18 弹性水位接线：SCALE_LUA（单 key 单赢家）→ 抬升 = 异步补建通用 idle 至 T（缺口数由
+     * Lua 返回，rebuildOnce 内 Lua cap 兜底不超额）；回缩 = 对返回 id 逐个 CLAIM_IDLE 认领 +
+     * kill（Java 面；粘滞不参与强制回缩）。T 只管预备、借出永不因 T 等待（createOnDemand 仍以
+     * MAX_SIZE 经 CAP_LUA 裁决）。
+     */
+    private void applyScaling(int currentIdle) {
+        String verdict;
+        try {
+            verdict = evalLuaKeyed(SCALE_LUA, ScriptOutputType.VALUE,
+                new String[]{facade.key(LEDGER_KEY)},
+                new String[]{String.valueOf(pool.maxSize()), String.valueOf(pool.minIdle()),
+                    String.valueOf(pool.growStep()),
+                    String.valueOf(2L * pool.scanIntervalSeconds()),
+                    String.valueOf(System.currentTimeMillis() / 1000)});
+        } catch (Exception e) {
+            log.debug("[sandbox-pool] scaling skipped (redis unavailable?): {}", e.getMessage());
+            return;
+        }
+        if (verdict == null || verdict.length() < 2) {
+            return;
+        }
+        char kind = verdict.charAt(0);
+        if (kind == 'U') {
+            // 'U:{t}:{deficit}'
+            int def = 0;
+            int sep = verdict.lastIndexOf(':');
+            if (sep > 0) {
+                try {
+                    def = Integer.parseInt(verdict.substring(sep + 1));
+                } catch (NumberFormatException nfe) {
+                    def = 0;
+                }
+            }
+            recordEvent("scale-out", null, null);
+            log.info("[sandbox-pool] scale-out: target increased, verdict={}, deficit={}, snapshot={}",
+                verdict, def, snapshotString());
+            var exec = rebuildExecutor;
+            if (exec != null && !exec.isShutdown()) {
+                for (int i = 0; i < def; i++) {
+                    exec.submit(() -> rebuildOnce("scale-out"));
+                }
+            }
+        } else if (kind == 'D') {
+            // 'D:{t}|{id1,id2…}'：LRU kill 超额通用 idle（粘滞不参与）
+            recordEvent("scale-in", null, null);
+            log.info("[sandbox-pool] scale-in: target decreased, verdict={}, snapshot={}",
+                verdict, snapshotString());
+            int bar = verdict.indexOf('|');
+            if (bar > 0) {
+                for (String id : verdict.substring(bar + 1).split(",")) {
+                    if (id.isBlank()) {
+                        continue;
+                    }
+                    try {
+                        String claimed = eval(CLAIM_IDLE_LUA, ScriptOutputType.VALUE, new String[]{id});
+                        if (claimed != null && !claimed.isEmpty()) {
+                            killQuietly(id);
+                            recordEvent("scale-in-kill", null, id);
+                        }
+                    } catch (RedisException e) {
+                        throw e;
+                    }
+                }
+            }
+        }
+        // 'K'：无变更（含冷却窗内被拒——§8「冷却窗二次变更被拒/单赢家」语义）
     }
 
     /** 异步补位：Lua cap（集群级 + rebuildConcurrency 经线程池上限裁决）→ 建 → 探测 → 入 idle 池 */
@@ -819,7 +1191,7 @@ public class SandboxPoolManager {
     /** 单次补位；返回 false = 未补位（容量满 / Redis 不可达 / 建容器失败——告警后由下轮扫描重试） */
     private boolean rebuildOnce(String reason) {
         try {
-            String entry = luaCap();
+            String entry = luaCap(null);   // 通用补位：owner 为空（不占任何用户配额）
             if (entry == null || entry.isEmpty()) {
                 return false;
             }
@@ -834,7 +1206,7 @@ public class SandboxPoolManager {
                     return false;
                 }
                 eval(PROMOTE_IDLE_LUA, ScriptOutputType.INTEGER,
-                    new String[]{entry, id, String.valueOf(System.currentTimeMillis() / 1000)});
+                    new String[]{entry, id, idleJsonOf("")});   // 通用空闲（owner=空串）
                 recordEvent(reason, null, id);
                 log.info("[sandbox-pool] {} done: sandboxId={}, snapshot={}", reason, id, snapshotString());
                 return true;
@@ -854,27 +1226,41 @@ public class SandboxPoolManager {
 
     // ---------------------------------------------------------------- 可观测性
 
-    /** 池状态快照（Debug 端点用）：idle/busy/creating 明细 + waiters + 水位计数 */
+    /** 池状态快照（Debug 端点用）：水位 T、通用/粘滞 idle 明细、busy（含 userKey 归属）、creating 明细 + waiters */
     public Map<String, Object> snapshot() {
         var m = new java.util.LinkedHashMap<String, Object>();
         m.put("enabled", true);
         m.put("podId", podId);
         m.put("maxSize", pool.maxSize());
+        m.put("minIdle", pool.minIdle());
         m.put("waiters", waiters.get());
         m.put("fullCycles", fullCycles.get());
-        var idle = new ArrayList<String>();
+        m.put("target", readTarget());
+        var genericIdle = new ArrayList<String>();
+        var stickyIdle = new ArrayList<Map<String, Object>>();
         var busy = new ArrayList<Map<String, Object>>();
         var creating = new ArrayList<String>();
         try {
             for (var en : facade.sync().hgetall(facade.key(LEDGER_KEY)).entrySet()) {
                 if (en.getKey().startsWith("i:")) {
-                    idle.add(en.getKey().substring(2));
+                    var rec = parseIdle(en.getValue());
+                    if (rec.owner() == null || rec.owner().isBlank()) {
+                        genericIdle.add(en.getKey().substring(2));
+                    } else {
+                        var s = new java.util.LinkedHashMap<String, Object>();
+                        s.put("sandboxId", en.getKey().substring(2));
+                        s.put("owner", rec.owner());
+                        s.put("sid", rec.sid());
+                        s.put("returnedAt", rec.returnedAt());
+                        stickyIdle.add(s);
+                    }
                 } else if (en.getKey().startsWith("b:")) {
                     var rec = parseBusy(en.getValue());
                     var b = new java.util.LinkedHashMap<String, Object>();
                     b.put("sandboxId", en.getKey().substring(2));
                     if (rec != null) {
                         b.put("sid", rec.sid());
+                        b.put("userKey", rec.userKey());
                         b.put("podId", rec.podId());
                         b.put("borrowedAt", rec.borrowedAt());
                     }
@@ -886,10 +1272,26 @@ public class SandboxPoolManager {
         } catch (Exception e) {
             m.put("error", String.valueOf(e.getMessage()));
         }
-        m.put("idle", idle);
+        m.put("idle", genericIdle);
+        m.put("stickyIdle", stickyIdle);
         m.put("busy", busy);
         m.put("creating", creating);
         return m;
+    }
+
+    /** 读水位 T（D18；t:target 缺失/解析失败回退 minIdle——初始/保底水位） */
+    private int readTarget() {
+        try {
+            var v = facade.sync().hget(facade.key(LEDGER_KEY), "t:target");
+            if (v != null && !v.isBlank()) {
+                var n = mapper.readTree(v);
+                int t = n.path("value").asInt(pool.minIdle());
+                return Math.max(pool.minIdle(), Math.min(pool.maxSize(), t));
+            }
+        } catch (Exception ignored) {
+            // fall-through
+        }
+        return pool.minIdle();
     }
 
     /** 最近流转事件（Debug 端点用；环形缓冲按事件时间倒序，最多 100 条） */
@@ -965,15 +1367,17 @@ public class SandboxPoolManager {
         }
     }
 
-    private String luaBorrow(String busyJson, String sid) {
-        String id = eval(BORROW_LUA, ScriptOutputType.VALUE,
-            new String[]{busyJson, sid != null ? sid : ""});
-        return id == null ? "" : id;
+    /** D17 决策树借出（单 key Lua）：'B:{id}' 借通用 idle / 'I:{id}' LRU 继承粘滞 / 'Q' 配额满 / '' 无通用 idle */
+    private String luaBorrowDecision(String sid, String userKey, String busyJson) {
+        String verdict = eval(BORROW_LUA, ScriptOutputType.VALUE,
+            new String[]{sid != null ? sid : "", userKey != null ? userKey : "",
+                busyJson, String.valueOf(pool.userMaxContainers())});
+        return verdict == null ? "" : verdict;
     }
 
-    private String luaCap() {
+    private String luaCap(String userKey) {
         return eval(CAP_LUA, ScriptOutputType.VALUE,
-            new String[]{String.valueOf(pool.maxSize()), podId, podId});
+            new String[]{String.valueOf(pool.maxSize()), podId, creatingJsonOf(userKey)});
     }
 
     private String luaClaimRecycle(String sandboxId) {
@@ -1022,7 +1426,7 @@ public class SandboxPoolManager {
 
     // ---------------------------------------------------------------- OpenSandbox Server 面（connect/建/探/杀）
 
-    /** 建新容器（按需建/预热/补位；protected = 测试子类可覆写脱离真实 Server） */
+    /** 建新容器（按需建/预热/补位；protected = 测试子类可覆写脱离真实 Server）；D19：Pod requests 透传 */
     protected Sandbox buildSandbox() {
         var builder = Sandbox.builder()
             .connectionConfig(connectionConfig)
@@ -1030,6 +1434,9 @@ public class SandboxPoolManager {
             .timeout(timeout)
             .resource(resource)
             .env(environment);
+        if (resourceRequests != null && !resourceRequests.isEmpty()) {
+            builder.resourceRequests(resourceRequests);
+        }
         if (entrypoint != null && !entrypoint.isEmpty()) {
             builder.entrypoint(entrypoint);
         }
@@ -1053,6 +1460,35 @@ public class SandboxPoolManager {
         try (var osb = connect(sandboxId)) {
             var info = osb.getInfo();
             return info != null && info.getId() != null && !info.getId().isBlank();
+        } catch (Exception e) {
+            log.debug("[sandbox-pool] probe dead: sandboxId={}: {}", sandboxId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 借出可借探测（D9 + D19）：存活探测 + <b>剩余寿命校验</b>——getInfo 的 expiresAt 距 now
+     * &lt; 5min 视同探测失败走 kill 换新（attachLeaseAndProbe 既有重试路径复用），防
+     * "借出即临期、turn 中途被 Server GC"（吸收 SDK 池模块 acquireMinRemainingTtl 语义）。
+     * expiresAt 缺失（mock/旧 Server）按存活处理。idle 保活扫描仍用 {@link #probeAlive}
+     * （只判存活，不因临期杀容器——容器到点由 Server TTL 自亡，扫描下轮 reap）。
+     */
+    boolean probeBorrowable(String sandboxId) {
+        try (var osb = connect(sandboxId)) {
+            var info = osb.getInfo();
+            if (info == null || info.getId() == null || info.getId().isBlank()) {
+                return false;
+            }
+            var expiresAt = info.getExpiresAt();
+            if (expiresAt != null) {
+                long remainingMs = expiresAt.toInstant().toEpochMilli() - System.currentTimeMillis();
+                if (remainingMs < BORROW_MIN_REMAINING_TTL_MS) {
+                    log.debug("[sandbox-pool] borrow probe skipped (near expiry, {}s left): sandboxId={}",
+                        remainingMs / 1000, sandboxId);
+                    return false;
+                }
+            }
+            return true;
         } catch (Exception e) {
             log.debug("[sandbox-pool] probe dead: sandboxId={}: {}", sandboxId, e.getMessage());
             return false;
@@ -1084,11 +1520,50 @@ public class SandboxPoolManager {
         }
     }
 
+    /** 粘滞空闲条目 JSON（D17 账本 v2）：{owner=userKey, returnedAt(秒), sid}——owner 空=通用空闲 */
+    private String stickyJsonOf(String userKey, String sid) {
+        var m = new java.util.LinkedHashMap<String, Object>();
+        m.put("owner", userKey != null ? userKey : "");
+        m.put("returnedAt", System.currentTimeMillis() / 1000);
+        m.put("sid", sid != null ? sid : "");
+        try {
+            return mapper.writeValueAsString(m);
+        } catch (Exception e) {
+            return "{\"owner\":\"\",\"returnedAt\":0,\"sid\":\"\"}";
+        }
+    }
+
+    /** 通用空闲条目 JSON（D17 账本 v2）：{owner:"", returnedAt(秒), sid:""}（预热/补位容器无会话归属） */
+    private String idleJsonOf(String owner) {
+        var m = new java.util.LinkedHashMap<String, Object>();
+        m.put("owner", owner != null ? owner : "");
+        m.put("returnedAt", System.currentTimeMillis() / 1000);
+        m.put("sid", "");
+        try {
+            return mapper.writeValueAsString(m);
+        } catch (Exception e) {
+            return "{\"owner\":\"\",\"returnedAt\":0,\"sid\":\"\"}";
+        }
+    }
+
+    /** creating 条目 JSON（D17）：{userKey, podId}——c: 名额携带配额键（held 计数含 c:） */
+    private String creatingJsonOf(String userKey) {
+        var m = new java.util.LinkedHashMap<String, Object>();
+        m.put("userKey", userKey != null ? userKey : "");
+        m.put("podId", podId);
+        try {
+            return mapper.writeValueAsString(m);
+        } catch (Exception e) {
+            return "{\"userKey\":\"\",\"podId\":\"\"}";
+        }
+    }
+
     private BusyRecord parseBusy(String json) {
         try {
             var n = mapper.readTree(json);
             return new BusyRecord(
                 n.path("sid").asText(""),
+                n.path("userKey").asText(""),
                 n.path("podId").asText(""),
                 n.path("borrowedAt").asLong(0));
         } catch (Exception e) {
@@ -1096,7 +1571,29 @@ public class SandboxPoolManager {
         }
     }
 
-    record BusyRecord(String sid, String podId, long borrowedAt) {}
+    record BusyRecord(String sid, String userKey, String podId, long borrowedAt) {}
+
+    /**
+     * idle 条目解析（D17 账本 v2：{owner, returnedAt, sid}）；<b>对旧值容忍</b>——v1 账本
+     * i: 值为数字串（"0"），cjson/Jackson 解析失败按通用空闲（owner=""）处理，
+     * 粘滞语义不误触（rollout 期账本跨重启存活，禁破坏性清理）。
+     */
+    private IdleRecord parseIdle(String json) {
+        try {
+            var n = mapper.readTree(json);
+            if (n.isObject()) {
+                return new IdleRecord(
+                    n.path("owner").asText(""),
+                    n.path("returnedAt").asLong(0),
+                    n.path("sid").asText(""));
+            }
+        } catch (Exception ignored) {
+            // fall-through：旧值数字串 → 通用空闲
+        }
+        return new IdleRecord("", 0L, "");
+    }
+
+    record IdleRecord(String owner, long returnedAt, String sid) {}
 
     // ---------------------------------------------------------------- 生命周期（D12：优雅停机不杀容器）
 

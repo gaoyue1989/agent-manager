@@ -25,6 +25,8 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private Duration timeout = Duration.ofMinutes(60);
     private List<String> entrypoint = List.of("/opt/code-interpreter/code-interpreter.sh");
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
+    /** Pod requests（D19 资源双档）：null = 不传；低 request 启动独立于池开关生效（sandbox-pool-design） */
+    private Map<String, String> resourceRequests;
     private Map<String, String> environment = new HashMap<>();
     private String workspaceRoot = "/workspace";
     private WorkspaceReader workspaceReader;
@@ -214,6 +216,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .timeout(timeout)
             .entrypoint(entrypoint)
             .resource(resource)
+            .resourceRequests(resourceRequests)
             .environment(environment)
             .workspaceRoot(workspaceRoot);
     }
@@ -243,6 +246,7 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public OpenSandboxFilesystemSpec timeout(Duration timeout) { this.timeout = timeout; return this; }
     public OpenSandboxFilesystemSpec entrypoint(List<String> entrypoint) { this.entrypoint = entrypoint; return this; }
     public OpenSandboxFilesystemSpec resource(Map<String, String> resource) { this.resource = resource; return this; }
+    public OpenSandboxFilesystemSpec resourceRequests(Map<String, String> resourceRequests) { this.resourceRequests = resourceRequests; return this; }
     public OpenSandboxFilesystemSpec environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxFilesystemSpec workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
     public OpenSandboxFilesystemSpec workspaceReader(WorkspaceReader workspaceReader) {

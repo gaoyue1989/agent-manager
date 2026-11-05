@@ -71,6 +71,12 @@ public class AgentScopeConfig {
                 "cpu", String.valueOf(config.cpuCount()),
                 "memory", config.memoryMb() + "Mi"
             ))
+            // D19 资源双档（sandbox-pool-design）：Pod requests 透传（独立于池开关生效，
+            // 非池路径同样低 request 启动；limit 沿用上方 cpuCount/memoryMb）
+            .resourceRequests(Map.of(
+                "cpu", config.cpuRequest(),
+                "memory", config.memoryRequest()
+            ))
             .environment(Map.of(
                 "EXECD_API_GRACE_SHUTDOWN", config.execdGraceShutdown().toMillis() + "ms"
             ))
@@ -240,6 +246,12 @@ public class AgentScopeConfig {
      * （spec/OpenSandboxClient/ConfirmController）按 null 判定走现状路径。
      * D15 不变量（idleReturnSeconds ≥ 确认截止）在管理器构造器 fail-fast 校验，
      * 违反配置直接启动失败。
+     *
+     * <p>D17 归还兜底回写钩子（RecycleStopper）：扫描转粘滞前幂等 {@code sandbox.stop()}
+     * （KV/记忆回写，覆盖崩溃 turn 未经 stop 的容器）。依赖经 ObjectProvider 惰性解析
+     * （回收时才取 bean——装配期零循环依赖），任一缺失 → 不回写直接转粘滞（fail-soft，
+     * 容器数据保留到粘滞窗口）。每容器每次 recycle 多一次 connect RTT（仅扫描路径，
+     * 频度受 idleReturn 约束，可接受）。
      */
     @Bean
     public io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager sandboxPoolManager(
@@ -247,7 +259,12 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.TurnLeaseStore> turnLeaseStoreProvider,
-        org.springframework.beans.factory.ObjectProvider<AgentManagerProperties> propsProvider
+        org.springframework.beans.factory.ObjectProvider<AgentManagerProperties> propsProvider,
+        org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> fsSpecProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.WorkspaceReader> workspaceReaderProvider,
+        org.springframework.beans.factory.ObjectProvider<WorkspaceSyncService> workspaceSyncServiceProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.FileAssetStore> fileAssetStoreProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.storage.FileStorage> fileStorageProvider
     ) {
         if (!sandboxRuntime.enabled() || !sandboxRuntime.poolEnabled()) {
             log.info("Sandbox pool disabled (SANDBOX_POOL_ENABLED=false) — per-session containers as before");
@@ -261,9 +278,66 @@ public class AgentScopeConfig {
         var props = propsProvider.getIfAvailable();
         int deadlineMinutes = props != null && props.cleanup() != null
             ? props.cleanup().confirmDeadlineMinutes() : 10;
+        // 归还兜底回写（D17 §5.3-4b）：用与 OpenSandboxClient 相同的 beans 构造临时 OpenSandbox
+        // 调 stop()（幂等 KV/记忆回写）。依赖在 stop() 调用时经 ObjectProvider 惰性解析——
+        // 装配期解析会触发 sandboxFilesystemSpec 创建，与 spec 的 pool ObjectProvider 形成
+        // 循环依赖（sandboxFilesystemSpec ⇄ sandboxPoolManager，2026-11-06 实测启动即崩）；
+        // 任一依赖缺失 → 本次回写跳过（fail-soft，容器数据保留到粘滞窗口）
+        io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager.RecycleStopper recycleStopper =
+            (sandboxId, userKey) -> {
+                var reader = workspaceReaderProvider.getIfAvailable();
+                var sync = workspaceSyncServiceProvider.getIfAvailable();
+                if (reader == null || sync == null) {
+                    log.warn("[sandbox-pool] recycle KV sync-back skipped (workspace beans unavailable): sandboxId={}",
+                        sandboxId);
+                    return;
+                }
+                var assetStore = fileAssetStoreProvider.getIfAvailable();
+                var storage = fileStorageProvider.getIfAvailable();
+                var fsSpec = fsSpecProvider.getIfAvailable();
+                var osb = com.alibaba.opensandbox.sandbox.Sandbox.connector()
+                    .sandboxId(sandboxId)
+                    .connectionConfig(com.alibaba.opensandbox.sandbox.config.ConnectionConfig.builder()
+                        .domain(sandboxConfig.opensandbox().serverUrl())
+                        .apiKey(sandboxConfig.opensandbox().apiKey())
+                        .protocol("http")
+                        .useServerProxy(true)
+                        .build())
+                    .skipHealthCheck(true)
+                    .connect();
+                try {
+                    var st = new io.agentmanager.framework.sandbox.opensandbox.OpenSandboxState();
+                    st.setSandboxId(sandboxId);
+                    var ws = new io.agentscope.harness.agent.sandbox.WorkspaceSpec();
+                    ws.setRoot("/workspace");
+                    st.setWorkspaceSpec(ws);
+                    var opts = new io.agentmanager.framework.sandbox.opensandbox.OpenSandboxClientOptions()
+                        .serverUrl(sandboxConfig.opensandbox().serverUrl())
+                        .apiKey(sandboxConfig.opensandbox().apiKey())
+                        .image(sandboxConfig.image())
+                        .timeout(Duration.ofMinutes(sandboxConfig.timeoutMinutes()))
+                        .entrypoint(sandboxConfig.entrypoint())
+                        .resource(Map.of("cpu", String.valueOf(sandboxConfig.cpuCount()),
+                            "memory", sandboxConfig.memoryMb() + "Mi"))
+                        .resourceRequests(Map.of("cpu", sandboxConfig.cpuRequest(),
+                            "memory", sandboxConfig.memoryRequest()))
+                        .environment(Map.of("EXECD_API_GRACE_SHUTDOWN",
+                            sandboxConfig.execdGraceShutdown().toMillis() + "ms"));
+                    var tmp = new io.agentmanager.framework.sandbox.opensandbox.OpenSandbox(
+                        st, osb, opts, reader, sync, fsSpec, assetStore, storage);
+                    tmp.setUserKey(userKey);
+                    tmp.stop();
+                } finally {
+                    try {
+                        osb.close();
+                    } catch (Exception ignore) {
+                        // 句柄卫生关闭
+                    }
+                }
+            };
         var poolManager = new io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager(
             facade, sandboxConfig.pool(), deadlineMinutes, sandboxConfig,
-            turnLeaseStoreProvider.getIfAvailable());
+            turnLeaseStoreProvider.getIfAvailable(), recycleStopper);
         // 扫描线程 + 预热显式启动（后台 daemon 线程，不阻塞装配）——池关闭分支返回 null 时不注册
         // ApplicationListener（NullBean 强转会崩所有业务服务，见 SandboxPoolManager.start javadoc）
         poolManager.start();

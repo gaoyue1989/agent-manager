@@ -101,6 +101,12 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .timeout(options.getTimeout())
             .resource(options.getResource())
             .env(options.getEnvironment());
+        // D19 资源双档（sandbox-pool-design，独立于池开关生效）：Pod requests 透传——
+        // 缺省时上游 server 把 resourceLimits 同时作 limits/requests（每容器全额保障的根因）；
+        // null（未配置）保持现状不传
+        if (options.getResourceRequests() != null && !options.getResourceRequests().isEmpty()) {
+            builder.resourceRequests(options.getResourceRequests());
+        }
         // entrypoint 仅在配置非空时设置，避免覆盖镜像默认启动命令
         if (options.getEntrypoint() != null && !options.getEntrypoint().isEmpty()) {
             builder.entrypoint(options.getEntrypoint());

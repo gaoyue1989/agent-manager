@@ -837,7 +837,10 @@ public class DebugApiController {
             "maxWaitSeconds", sandboxConfig.pool().maxWaitSeconds(),
             "idleReturnSeconds", sandboxConfig.pool().idleReturnSeconds(),
             "scanIntervalSeconds", sandboxConfig.pool().scanIntervalSeconds(),
-            "rebuildConcurrency", sandboxConfig.pool().rebuildConcurrency()));
+            "rebuildConcurrency", sandboxConfig.pool().rebuildConcurrency(),
+            "userMaxContainers", sandboxConfig.pool().userMaxContainers(),
+            "stickyTtlSeconds", sandboxConfig.pool().stickyTtlSeconds(),
+            "growStep", sandboxConfig.pool().growStep()));
         m.put("recent_events", pool.recentEvents(Math.max(1, Math.min(eventsLimit, 100))));
         return m;
     }

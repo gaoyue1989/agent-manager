@@ -9,12 +9,12 @@
 import { test, expect } from '@playwright/test';
 import { sessionIdFor } from '../lib/env.js';
 import { chat } from '../lib/client.js';
-import { waitTerminal, textOf } from '../lib/matchers.js';
+import { waitTerminal, textOf, pollUntil } from '../lib/matchers.js';
 
 const BASE = process.env.E2E_BASE ?? 'http://127.0.0.1:8100';
 const SANDBOX_MOCK = process.env.E2E_SANDBOX_MOCK ?? 'http://127.0.0.1:8090';
 const POOL = {
-  maxSize: 2,
+  maxSize: 4,
   idleReturnSeconds: 8,
   scanIntervalSeconds: 2,
 };
@@ -23,7 +23,7 @@ const uniq = () => `${Date.now().toString(36)}${(uniqueSeq++).toString(36)}`;
 const U = () => `e2e-pool-${Math.random().toString(36).slice(2, 8)}`;
 
 interface PoolStats {
-  creates: Array<{ id: string }>;
+  creates: Array<{ id: string; resourceRequests?: Record<string, string> }>;
   connects: Array<Record<string, unknown>>;
   errors: Array<Record<string, unknown>>;
 }
@@ -40,9 +40,11 @@ async function resetMockStats(): Promise<void> {
 interface PoolDebug {
   enabled: boolean;
   idle: string[];
-  busy: Array<{ sandboxId: string; sid: string; podId: string }>;
+  stickyIdle: Array<{ sandboxId: string; owner: string; sid: string }>;
+  busy: Array<{ sandboxId: string; sid: string; userKey?: string; podId: string }>;
   creating: string[];
   maxSize: number;
+  target?: number;
   waiters: number;
   recent_events: Array<{ event: string; sid?: string; sandboxId?: string }>;
   config?: Record<string, number>;
@@ -91,8 +93,12 @@ test('P2 debug 端点透出集群级池状态', async () => {
 });
 
 test('P3 失活回收：IDLE_RETURN+SCAN 后容器归还并补位', async () => {
+  test.setTimeout(60_000);
+  // 前后两段同 uid：归还转粘滞（D17）后同用户新会话经继承路径借出（不依赖通用 idle——
+  // 粘滞空闲占集群容量，随机用户在 MAX_SIZE 内可能无容器可借）
+  const uid = U();
   const sid = sessionIdFor(`p3-${uniq()}`);
-  const stream = chat({ message: `[E2E:execute]`, userId: U(), sessionId: sid });
+  const stream = chat({ message: `[E2E:execute]`, userId: uid, sessionId: sid });
   await waitTerminal(stream);
   expect(stream.terminal?.type).toBe('done');
   expect(textOf(stream.frames)).toContain('hello-e2a');
@@ -103,20 +109,26 @@ test('P3 失活回收：IDLE_RETURN+SCAN 后容器归还并补位', async () => 
   while (Date.now() < deadline && !reclaimed) {
     await sleep(1000);
     const pool = await poolDebug();
-    // 回收证据：busy 归零（借出条目被认领移除）且出现 scan-kill / rebuild 流转事件
+    // 回收证据：busy 归零（借出条目被认领移除）且出现回收流转事件
+    // （D17 归还转粘滞：owner 已知 → return-sticky 不 kill；owner 未知/探测失败仍 scan-kill/rebuild）
     const busyEmpty = pool.busy.length === 0;
-    const killSeen = pool.recent_events.some((e) => e.event === 'scan-kill' || e.event === 'rebuild');
+    const killSeen = pool.recent_events.some(
+      (e) => e.event === 'scan-kill' || e.event === 'rebuild' || e.event === 'return-sticky');
     reclaimed = busyEmpty && killSeen;
   }
   expect(reclaimed, `失活容器应在 IDLE_RETURN+SCAN 内归还（busy 清空 + scan-kill 事件）`).toBe(true);
-  // 补位后新会话可继续借出（重建容器入池，会话无感）
+  // 归还后同用户新会话可继续借出（转粘滞容器经继承路径复用，会话无感）
   const sid2 = sessionIdFor(`p3b-${uniq()}`);
-  const stream2 = chat({ message: `[E2E:plain]`, userId: U(), sessionId: sid2 });
+  const stream2 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid2 });
   await waitTerminal(stream2);
   expect(stream2.terminal?.type).toBe('done');
 });
 
 test('P4 resume 404 降级：容器被外部 GC 后同会话复活借新容器', async () => {
+  test.setTimeout(90_000);
+  // 前序用例的粘滞容器占集群容量（D17）：等待释放出可借空间
+  await pollUntil(async () => await poolDebug(),
+    (p) => p.busy.length + p.stickyIdle.length < p.maxSize, 40_000, 2000);
   const uid = U();
   const sid = sessionIdFor(`p4-${uniq()}`);
   const stream = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
@@ -130,6 +142,10 @@ test('P4 resume 404 降级：容器被外部 GC 后同会话复活借新容器',
     ?? pool.busy.find((b) => b.sandboxId);
   if (busy) {
     await fetch(`${SANDBOX_MOCK}/admin/destroy/${busy.sandboxId}`, { method: 'POST' });
+    // 等 busy 记录自愈清空（租约 IDLE_RETURN 过期 + 扫描认领）：死容器条目短存期间仍计 D17 配额
+    // （held 含死容器 busy 记录），USER_MAX=1 下立即重借会报 user_quota_exhausted
+    await pollUntil(async () => await poolDebug(),
+      (p) => !p.busy.some((b) => b.sandboxId === busy.sandboxId), 30_000, 2000);
     // 同会话下个 turn：slot 指向已销毁容器 → resume 404 → 降级 create（重借/重建，D5）
     const next = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid });
     await waitTerminal(next);
@@ -145,4 +161,50 @@ test('P5 池开启下池关闭语义对照：/debug/sandbox-pool 配置正确', 
   expect(pool.config).toBeTruthy();
   expect(pool.config?.maxSize).toBe(POOL.maxSize);
   expect(pool.config?.idleReturnSeconds).toBe(POOL.idleReturnSeconds);
+});
+
+test('P6 同用户配额：user_quota_exhausted 可感知 + 粘滞窗口内继承同容器（D17）', async () => {
+  test.setTimeout(90_000);
+  const uid = U();
+  const sid1 = sessionIdFor(`p6a-${uniq()}`);
+  const stream1 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid1 });
+  await waitTerminal(stream1);
+  expect(stream1.terminal?.type).toBe('done');
+  // 守卫钩子（P1/P2）：chat 主链路借出身份真实可得——busy.sid=前端 sid（turn_lease 键）、busy.userKey=真实用户
+  const pool1 = await poolDebug();
+  const busy1 = pool1.busy.find((b) => b.sid && sid1.includes(b.sid));
+  expect(busy1, '借出身份应经守卫钩子写入 busy 账本').toBeTruthy();
+  // 配额满且无粘滞空闲（会话 1 仍 busy，USER_MAX=1）→ 第二会话 user_quota_exhausted 可感知报错
+  const sid2 = sessionIdFor(`p6b-${uniq()}`);
+  const stream2 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid2, timeoutMs: 30_000 });
+  await waitTerminal(stream2);
+  const errText = JSON.stringify(stream2.frames);
+  expect(stream2.terminal?.type === 'error' || errText.includes('user quota exhausted'),
+    `配额满应可感知报错，实际终态=${stream2.terminal?.type}`).toBe(true);
+  // 会话 1 失活：IDLE_RETURN(8s)+SCAN(2s) → 归还转粘滞（owner=uid）。
+  // 谓词必须锚定本会话容器（stickyIdle 出现 busy1.sandboxId）——前序用例的 return-sticky 事件会误触发
+  await pollUntil(async () => await poolDebug(),
+    (p) => p.stickyIdle.some((st) => st.sandboxId === busy1!.sandboxId), 30_000, 2000);
+  // 同用户新会话：held(uid) ≥ USER_MAX(1) → LRU 继承粘滞容器——同 sandboxId、容器数 ≤ 配额
+  const sid3 = sessionIdFor(`p6c-${uniq()}`);
+  const stream3 = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid3 });
+  await waitTerminal(stream3);
+  expect(stream3.terminal?.type).toBe('done');
+  const pool3 = await poolDebug();
+  const busy3 = pool3.busy.find((b) => b.sid && sid3.includes(b.sid));
+  expect(busy3, '会话 3 应借出成功').toBeTruthy();
+  expect(busy3!.sandboxId, '配额满应继承粘滞容器（同 sandboxId）').toBe(busy1!.sandboxId);
+  const mine = pool3.busy.filter((b) => b.userKey === uid).length
+    + pool3.stickyIdle.filter((s) => s.owner === uid).length;
+  expect(mine).toBeLessThanOrEqual(1); // USER_MAX=1（含粘滞空闲与使用中）
+});
+
+test('P7 create 请求体携带 resourceRequests（D19 资源双档）', async () => {
+  test.setTimeout(90_000);
+  const stats = await sandboxStats();
+  // 池预热/按需建的 create 请求体应带 D19 resourceRequests（默认 CPU 100m / memory 128Mi）。
+  // 断言全量 creates（不 reset：借出可能命中既有 idle 不触发新 create，预热 create 在应用启动时已发生）
+  const withReq = stats.creates.find(
+    (c) => c.resourceRequests?.cpu === '100m' && c.resourceRequests?.memory === '128Mi');
+  expect(withReq, '至少一个 create 应携带 resourceRequests（独立于池开关生效）').toBeTruthy();
 });

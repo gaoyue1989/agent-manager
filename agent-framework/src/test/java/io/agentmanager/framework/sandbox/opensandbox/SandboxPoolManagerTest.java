@@ -2,9 +2,11 @@ package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -14,6 +16,7 @@ import java.util.Map;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo;
@@ -88,6 +91,9 @@ class SandboxPoolManagerTest {
         if (SandboxPoolManager.TOUCH_LEASE_LUA.equals(script)) return "touchLease";
         if (SandboxPoolManager.TOUCH_PROBE_LUA.equals(script)) return "touchProbe";
         if (SandboxPoolManager.RESUME_RECONCILE_LUA.equals(script)) return "resumeReconcile";
+        if (SandboxPoolManager.SCALE_LUA.equals(script)) return "scale";
+        if (SandboxPoolManager.RETURN_STICKY_LUA.equals(script)) return "returnSticky";
+        if (SandboxPoolManager.BACKFILL_BUSY_LUA.equals(script)) return "backfill";
         return "unknown";
     }
 
@@ -109,7 +115,12 @@ class SandboxPoolManagerTest {
         final java.util.List<String[]> borrowArgs = new java.util.ArrayList<>();
 
         TestablePool(SandboxConfig.PoolConfig pool, int deadlineMinutes, TurnLeaseStore leaseStore) {
-            super(facade, pool, deadlineMinutes, sandboxConfig(), leaseStore);
+            this(pool, deadlineMinutes, leaseStore, null);
+        }
+
+        TestablePool(SandboxConfig.PoolConfig pool, int deadlineMinutes, TurnLeaseStore leaseStore,
+                     SandboxPoolManager.RecycleStopper stopper) {
+            super(facade, pool, deadlineMinutes, sandboxConfig(), leaseStore, stopper);
         }
 
         @Override
@@ -176,13 +187,12 @@ class SandboxPoolManagerTest {
         return new SandboxConfig(true, "img", 60, 1024, 1,
             java.util.List.of("/entry.sh"), java.time.Duration.ofMillis(100),
             true, true, 900, true, true, true, true, 500, 30,
-            SandboxConfig.PoolConfig.defaults(),
             new SandboxConfig.OpenSandboxConfig("server:8090", "k"));
     }
 
     private static SandboxConfig.PoolConfig pool(int maxWaitSeconds) {
-        // 默认池参数：maxWait 可调（超时用例取 1s 加速）
-        return new SandboxConfig.PoolConfig(true, 2, 8, maxWaitSeconds, 600, 60, 2);
+        // 默认池参数：maxWait 可调（超时用例取 1s 加速）；D17 配额 5 / 粘滞 600s / D18 步长 5
+        return new SandboxConfig.PoolConfig(true, 2, 8, maxWaitSeconds, 600, 60, 2, 5, 600, 5);
     }
 
     private static String busyJson(String sid, long borrowedAtSec) {
@@ -198,7 +208,7 @@ class SandboxPoolManagerTest {
 
     @Test
     void d15IdleReturnBelowDeadlineShouldFailStartup() {
-        var tooSmall = new SandboxConfig.PoolConfig(true, 2, 8, 120, 300, 60, 2); // 300s < 10min
+        var tooSmall = new SandboxConfig.PoolConfig(true, 2, 8, 120, 300, 60, 2, 5, 600, 5); // 300s < 10min
         assertThrows(IllegalStateException.class, () -> new TestablePool(tooSmall, 10, null));
     }
 
@@ -210,7 +220,7 @@ class SandboxPoolManagerTest {
     @Test
     void d15DeadlineDisabledShouldExemptValidation() {
         // 截止关闭（≤0）时池校验豁免（D16 独立于池化先行落地的兼容面）
-        var tooSmall = new SandboxConfig.PoolConfig(true, 2, 8, 120, 60, 60, 2);
+        var tooSmall = new SandboxConfig.PoolConfig(true, 2, 8, 120, 60, 60, 2, 5, 600, 5);
         assertDoesNotThrow(() -> new TestablePool(tooSmall, 0, null));
     }
 
@@ -219,7 +229,7 @@ class SandboxPoolManagerTest {
     @Test
     void borrowFromIdleShouldSetLeaseAndReturnContainer() {
         var pool = new TestablePool(pool(1), 10, null);
-        reply(SandboxPoolManager.BORROW_LUA, "sbx-1");
+        reply(SandboxPoolManager.BORROW_LUA, "B:sbx-1"); // 决策树：配额内借通用 idle
         var borrowed = pool.borrow("webui-1", "u1");
         assertEquals("sbx-1", borrowed.sandboxId());
         // 续约①：借出即 SET 租约（TTL=idleReturnSeconds）
@@ -228,26 +238,55 @@ class SandboxPoolManagerTest {
 
     @Test
     void borrowShouldCarrySidAndUserKeyIntoLedgerArgs() {
-        // P1 userKey 贯穿（D17 配额键）：借出 Lua 的 busyJson 携带 sid + userKey
+        // P1 userKey 贯穿（D17 配额键）：决策树 ARGV 携带 sid + userKey + userMax
         var pool = new TestablePool(pool(1), 10, null);
-        reply(SandboxPoolManager.BORROW_LUA, "sbx-1");
+        reply(SandboxPoolManager.BORROW_LUA, "B:sbx-1");
         pool.borrow("webui-9", "alice");
         assertEquals(1, pool.borrowArgs.size());
         var args = pool.borrowArgs.get(0);
-        assertEquals(2, args.length);
-        assertTrue(args[0].contains("\"sid\":\"webui-9\""), "busyJson 应含 D14 查询键 sid: " + args[0]);
-        assertTrue(args[0].contains("\"userKey\":\"alice\""), "busyJson 应含 D17 配额键 userKey: " + args[0]);
-        assertEquals("webui-9", args[1], "ARGV[2] 应为 s:{sid} 反查键写入值");
+        assertEquals(4, args.length);
+        assertEquals("webui-9", args[0], "ARGV[1] 应为 s:{sid} 反查键写入值");
+        assertEquals("alice", args[1], "ARGV[2] 应为 D17 配额键 userKey");
+        assertTrue(args[2].contains("\"sid\":\"webui-9\""), "busyJson 应含 D14 查询键 sid: " + args[2]);
+        assertTrue(args[2].contains("\"userKey\":\"alice\""), "busyJson 应含 D17 配额键 userKey: " + args[2]);
+        assertEquals("5", args[3], "ARGV[4] 应为 userMaxContainers");
     }
 
     @Test
     void borrowShouldWaitAndFailWithPoolExhaustedWhenFull() {
         var pool = new TestablePool(pool(1), 10, null);
-        reply(SandboxPoolManager.BORROW_LUA, "", "", "", "", ""); // 直取与轮询持续为空
+        reply(SandboxPoolManager.BORROW_LUA, "", "", "", "", ""); // 直取与轮询持续为空（配额内）
         reply(SandboxPoolManager.CAP_LUA, "", "", "", "", "");    // 容量已满
         var ex = assertThrows(SandboxException.class, () -> pool.borrow("webui-1", "u1"));
         assertEquals(SandboxErrorCode.CONFIGURATION_ERROR, ex.getErrorCode());
         assertTrue(String.valueOf(ex.getMessage()).contains("sandbox pool exhausted"));
+    }
+
+    @Test
+    void borrowShouldReportUserQuotaExhaustedDistinctly() {
+        // D17：held ≥ userMax 且无粘滞空闲 → user_quota_exhausted（与池满可区分、立即报错不等待）
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.BORROW_LUA, "Q", "Q");
+        var ex = assertThrows(SandboxException.class, () -> pool.borrow("webui-1", "alice"));
+        assertEquals(SandboxErrorCode.CONFIGURATION_ERROR, ex.getErrorCode());
+        String msg = String.valueOf(ex.getMessage());
+        assertTrue(msg.contains("user quota exhausted"), "配额错误应可区分: " + msg);
+        assertTrue(msg.contains("user=alice") && msg.contains("max=5"));
+        // 配额满立即报错：不进入池空等待（wait-start 事件不发）
+        assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "quota-exhausted".equals(e.get("event"))));
+        assertTrue(pool.recentEvents(10).stream().noneMatch(e -> "wait-start".equals(e.get("event"))));
+    }
+
+    @Test
+    void borrowShouldInheritStickyContainerWhenQuotaFull() {
+        // D17：held ≥ userMax → LRU 继承该用户粘滞空闲（Lua 单 key 原子换绑，返回 'I:{id}'）
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.BORROW_LUA, "I:sbx-sticky");
+        var borrowed = pool.borrow("webui-new", "alice");
+        assertEquals("sbx-sticky", borrowed.sandboxId());
+        // 继承即换绑当前 sid：SET 租约（覆盖旧值，续约①）
+        verify(redis).setex(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-sticky"), eq(600L), eq("webui-new"));
+        assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "inherit".equals(e.get("event"))));
     }
 
     @Test
@@ -257,7 +296,7 @@ class SandboxPoolManagerTest {
         reply(SandboxPoolManager.CAP_LUA, "p1:1000"); // 容量未满 → 占 creating 名额
         var borrowed = pool.borrow("webui-2", "u1");
         assertEquals("new-1", borrowed.sandboxId());
-        // 按需建直接转 busy 给本次借出（消除死等）+ SET 租约
+        // 按需建直接转 busy 给本次借出（消除死等）+ SET 租约；T 滞后借出直通（不因 T 等待）
         assertTrue(evalCalls.getOrDefault("promoteBusy", 0) >= 1);
         verify(redis).setex(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "new-1"), eq(600L), eq("webui-2"));
     }
@@ -266,13 +305,39 @@ class SandboxPoolManagerTest {
     void borrowShouldReplaceContainerWhenProbeFails() {
         var pool = new TestablePool(pool(1), 10, null);
         pool.alive.put("sbx-dead", false); // 借出的容器已死（Server GC 等）
-        reply(SandboxPoolManager.BORROW_LUA, "sbx-dead", "sbx-2");
+        reply(SandboxPoolManager.BORROW_LUA, "B:sbx-dead", "B:sbx-2");
         var borrowed = pool.borrow("webui-3", "u1");
         // 探测失败 kill 换新（§5.2 步骤 2），拿到第二个容器
         assertEquals("sbx-2", borrowed.sandboxId());
         assertTrue(pool.killed.contains("sbx-dead"));
         // 死容器认领移除 busy（HDEL b: + s: 清理）
         assertTrue(evalCalls.getOrDefault("claimRecycle", 0) >= 1);
+    }
+
+    @Test
+    void borrowShouldReplaceNearExpiryContainer_d19() {
+        // D19 借出剩余寿命校验：expiresAt 距 now < 5min → 视同探测失败 kill 换新
+        var pool = new TestablePool(pool(1), 10, null) {
+            @Override
+            protected Sandbox connect(String sandboxId) {
+                var osb = mock(Sandbox.class);
+                var info = mock(SandboxInfo.class);
+                if ("sbx-near".equals(sandboxId)) {
+                    when(info.getId()).thenReturn("sbx-near");
+                    // 剩余 2min（< 5min 阈值）→ 弃用
+                    when(info.getExpiresAt()).thenReturn(java.time.OffsetDateTime.now().plusMinutes(2));
+                } else {
+                    when(info.getId()).thenReturn(sandboxId);
+                    when(info.getExpiresAt()).thenReturn(java.time.OffsetDateTime.now().plusHours(1));
+                }
+                when(osb.getInfo()).thenReturn(info);
+                return osb;
+            }
+        };
+        reply(SandboxPoolManager.BORROW_LUA, "B:sbx-near", "B:sbx-fresh");
+        var borrowed = pool.borrow("webui-near", "u1");
+        assertEquals("sbx-fresh", borrowed.sandboxId());
+        assertTrue(pool.killed.contains("sbx-near"), "临期容器应被 kill 换新");
     }
 
     @Test
@@ -289,7 +354,7 @@ class SandboxPoolManagerTest {
         };
         pool.alive.put("sbx-a", false);
         // 借出 + 按需建 + 换新各探测失败（PROBE_MAX_RETRY+1）→ 走池空等待 → 超时报错
-        reply(SandboxPoolManager.BORROW_LUA, "sbx-a", "", "", "", "");
+        reply(SandboxPoolManager.BORROW_LUA, "B:sbx-a", "", "", "", "");
         reply(SandboxPoolManager.CAP_LUA, "p1:1001", "p1:1002", "p1:1003", "p1:1004", "p1:1005");
         var ex = assertThrows(SandboxException.class, () -> pool.borrow("webui-4", "u1"));
         assertTrue(String.valueOf(ex.getMessage()).contains("pool exhausted"));
@@ -371,18 +436,79 @@ class SandboxPoolManagerTest {
     }
 
     @Test
-    void scanShouldReclaimExpiredBusyAndRebuild() {
+    void scanShouldReturnExpiredBusyToStickyIdle_d17() {
+        // D17 归还转粘滞：复核通过 → DEL 租约 → HSET i:（owner=userKey，不 kill 不补位）
         var pool = new TestablePool(pool(1), 10, null);
-        seedBusy(pool, "sbx-1", busyJson("webui-1", System.currentTimeMillis() / 1000 - 3600));
+        seedBusy(pool, "sbx-1", busyJson("webui-1", "alice", System.currentTimeMillis() / 1000 - 3600));
+        when(redis.exists(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"))).thenReturn(0L);
+        pool.startBackgroundExecutors();
+        reply(SandboxPoolManager.CLAIM_RECYCLE_LUA, "sbx-1");
+        reply(SandboxPoolManager.RETURN_STICKY_LUA, 1L);
+        pool.scan();
+        // 转粘滞：不 kill、不补位，回写钩子缺省（stopper=null）直接转粘滞（容器数据保留到粘滞窗口）
+        assertFalse(pool.killed.contains("sbx-1"), "归还容器不 kill（D17 粘滞窗口）");
+        assertEquals(1, evalCalls.getOrDefault("returnSticky", 0));
+        assertEquals(0, evalCalls.getOrDefault("cap", 0), "转粘滞不触发通用池补位");
+        verify(redis).del(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"));
+        assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "return-sticky".equals(e.get("event"))));
+    }
+
+    @Test
+    void scanShouldKillAndRebuildWhenOwnerUnknown() {
+        // D17 跨用户暴露防线：owner 未知（busy.userKey 空串）→ 不转粘滞，维持 kill+rebuild 旧行为
+        // （防携用户 /workspace 数据的容器落通用池被他人借走）
+        var pool = new TestablePool(pool(1), 10, null);
+        seedBusy(pool, "sbx-1", busyJson("webui-1", "", System.currentTimeMillis() / 1000 - 3600));
         when(redis.exists(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"))).thenReturn(0L);
         pool.startBackgroundExecutors();
         reply(SandboxPoolManager.CLAIM_RECYCLE_LUA, "sbx-1");
         reply(SandboxPoolManager.CAP_LUA, "p1:3000");
         pool.scan();
-        assertTrue(pool.killed.contains("sbx-1"));
-        verify(redis).del(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"));
+        assertTrue(pool.killed.contains("sbx-1"), "owner 未知的容器必须 kill（跨用户暴露防线）");
+        assertEquals(0, evalCalls.getOrDefault("returnSticky", 0));
         pool.awaitBuilt(1);
         assertEquals(1, pool.builtIds.size()); // 异步补位入池
+    }
+
+    @Test
+    void scanShouldStopBeforeStickyTransferWhenStopperPresent() {
+        // D17 §5.3-4b 顺序严格：stop() 兜底（KV 回写）→ DEL 租约 → 转粘滞
+        // （stop 内 renewPoolLease 会重建刚 DEL 的租约，故 DEL 必须在 stop 之后）
+        var order = new java.util.ArrayList<String>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            order.add("del");
+            return 1L;
+        }).when(redis).del(anyString());
+        var pool = new TestablePool(pool(1), 10, null,
+            (sandboxId, userKey) -> order.add("stop:" + userKey));
+        seedBusy(pool, "sbx-1", busyJson("webui-1", "alice", System.currentTimeMillis() / 1000 - 3600));
+        when(redis.exists(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"))).thenReturn(0L);
+        pool.startBackgroundExecutors();
+        reply(SandboxPoolManager.CLAIM_RECYCLE_LUA, "sbx-1");
+        reply(SandboxPoolManager.RETURN_STICKY_LUA, 1L);
+        pool.scan();
+        assertFalse(pool.killed.contains("sbx-1"));
+        assertEquals(1, evalCalls.getOrDefault("returnSticky", 0));
+        assertTrue(order.contains("stop:alice") && order.contains("del")
+                && order.indexOf("stop:alice") < order.indexOf("del"),
+            "stop 必须先于 DEL 租约，实际顺序: " + order);
+    }
+
+    @Test
+    void scanShouldContinueStickyTransferWhenStopperThrows() {
+        // fail-soft：stop() 抛异常 → 告警后照常 DEL 租约 + 转粘滞（KV 回写失败不阻塞回收）
+        var pool = new TestablePool(pool(1), 10, null,
+            (sandboxId, userKey) -> {
+                throw new IllegalStateException("kv down");
+            });
+        seedBusy(pool, "sbx-1", busyJson("webui-1", "alice", System.currentTimeMillis() / 1000 - 3600));
+        when(redis.exists(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"))).thenReturn(0L);
+        pool.startBackgroundExecutors();
+        reply(SandboxPoolManager.CLAIM_RECYCLE_LUA, "sbx-1");
+        reply(SandboxPoolManager.RETURN_STICKY_LUA, 1L);
+        assertDoesNotThrow(() -> pool.scan());
+        assertEquals(1, evalCalls.getOrDefault("returnSticky", 0));
+        assertFalse(pool.killed.contains("sbx-1"));
     }
 
     @Test
@@ -422,6 +548,146 @@ class SandboxPoolManagerTest {
         pool.scan();
         // 剪枝脚本执行（删除数由 Redis 端裁决，mock 返回 2）
         assertEquals(1, evalCalls.getOrDefault("prune", 0));
+    }
+
+    // ---------------------------------------------------------------- D17 粘滞空闲生命周期
+
+    private void seedIdle(TestablePool pool, String id, String json) {
+        var ledger = new HashMap<String, String>();
+        ledger.put("i:" + id, json);
+        when(redis.hgetall(eq("pfx:" + SandboxPoolManager.LEDGER_KEY))).thenReturn(ledger);
+    }
+
+    @Test
+    void scanShouldKillExpiredStickyIdleAndFreeQuota_d17() {
+        // 粘滞 TTL 到期 → 认领 + kill（释放配额与容量）+ 通用水面补位核算
+        var pool = new TestablePool(pool(1), 10, null);
+        long old = System.currentTimeMillis() / 1000 - 700; // > STICKY_TTL(600s)
+        seedIdle(pool, "sbx-s", "{\"owner\":\"alice\",\"returnedAt\":" + old + ",\"sid\":\"webui-old\"}");
+        pool.startBackgroundExecutors();
+        reply(SandboxPoolManager.CLAIM_IDLE_LUA, "sbx-s");
+        reply(SandboxPoolManager.CAP_LUA, "p1:5000");
+        reply(SandboxPoolManager.SCALE_LUA, "K:5"); // 水位无变更
+        pool.scan();
+        assertTrue(pool.killed.contains("sbx-s"), "粘滞到期容器应 kill 回收");
+        assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "sticky-expire".equals(e.get("event"))));
+        pool.awaitBuilt(1);
+        assertEquals(1, pool.builtIds.size()); // 通用池按水面补位
+    }
+
+    @Test
+    void scanShouldKeepFreshStickyIdleAlive_d17() {
+        // 粘滞窗口内（未到期）：不 kill，仅保活检查
+        var pool = new TestablePool(pool(1), 10, null);
+        long fresh = System.currentTimeMillis() / 1000 - 30;
+        seedIdle(pool, "sbx-s", "{\"owner\":\"alice\",\"returnedAt\":" + fresh + ",\"sid\":\"webui-old\"}");
+        reply(SandboxPoolManager.SCALE_LUA, "K:5");
+        pool.scan();
+        assertTrue(pool.killed.isEmpty(), "粘滞窗口内容器保留（继承/复活窗口）");
+        assertEquals(0, evalCalls.getOrDefault("claimIdle", 0));
+    }
+
+    @Test
+    void scanShouldTreatLegacyIdleValueAsGeneric() {
+        // 账本 v2 旧值容忍：v1 i: 值为数字串 → 通用空闲（粘滞语义不误触，rollout 期禁破坏性清理）
+        var pool = new TestablePool(pool(1), 10, null);
+        seedIdle(pool, "sbx-legacy", "0");
+        reply(SandboxPoolManager.SCALE_LUA, "K:5");
+        pool.scan();
+        assertTrue(pool.killed.isEmpty());
+        assertEquals(0, evalCalls.getOrDefault("claimIdle", 0), "数字串旧值视作通用空闲，不按粘滞到期处理");
+    }
+
+    @Test
+    void backfillShouldBeNoOpWithoutLedgerEntry() {
+        // D17 回填原子化：b:{id} 不存在 → Lua no-op（不重建幻影 busy）；mock 层验证调用收口与 fail-soft
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.BACKFILL_BUSY_LUA, 0L);
+        pool.backfillBusyIdentity("sbx-1", "sid-1", "alice");
+        assertEquals(1, evalCalls.getOrDefault("backfill", 0));
+        assertTrue(keyCalls.stream().anyMatch(k -> k.startsWith("backfill pfx:" + SandboxPoolManager.LEDGER_KEY)),
+            "回填是 ledger 单 key Lua");
+    }
+
+    @Test
+    void backfillShouldSwallowRedisFailure() {
+        var pool = new TestablePool(pool(1), 10, null) {
+            @Override
+            protected <T> T evalLuaKeyed(String script, ScriptOutputType type, String[] keys, String[] args) {
+                throw new RedisException("down");
+            }
+        };
+        assertDoesNotThrow(() -> pool.backfillBusyIdentity("sbx-1", "sid-1", "alice"));
+    }
+
+    // ---------------------------------------------------------------- D18 弹性水位
+
+    private void replyScaleUpDeficit(int deficit) {
+        reply(SandboxPoolManager.SCALE_LUA, "U:10:" + deficit);
+    }
+
+    @Test
+    void scaleOutShouldRebuildGenericIdleToTarget_d18() {
+        // 80% 抬升 → 异步补建通用 idle 至 T（缺口数由 Lua 返回，rebuildOnce 内 Lua cap 兜底不超额）
+        var pool = new TestablePool(pool(1), 10, null);
+        replyScaleUpDeficit(3);
+        reply(SandboxPoolManager.CAP_LUA, "p1:6001", "p1:6002", "p1:6003");
+        pool.startBackgroundExecutors();
+        pool.scan();
+        pool.awaitBuilt(3);
+        assertEquals(3, pool.builtIds.size(), "按 Lua 缺口数补建通用 idle");
+        assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "scale-out".equals(e.get("event"))));
+    }
+
+    @Test
+    void scaleInShouldLruKillOnlyGenericIdle_d18() {
+        // <50%×3 周期+冷却回缩 → 对 Lua 返回的 LRU id 逐个认领 kill（粘滞不参与——id 列表只含通用）
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.SCALE_LUA, "D:5|sbx-g1,sbx-g2");
+        reply(SandboxPoolManager.CLAIM_IDLE_LUA, "sbx-g1", "sbx-g2"); // 认领先到先得
+        pool.startBackgroundExecutors();
+        pool.scan();
+        assertTrue(pool.killed.contains("sbx-g1") && pool.killed.contains("sbx-g2"));
+        assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "scale-in".equals(e.get("event"))));
+    }
+
+    @Test
+    void scaleKeepShouldNotTriggerRebuildOrKill_d18() {
+        // 'K'（含冷却窗内被拒）：无补建无 kill（§8「冷却窗二次变更被拒」mock 层语义）
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.SCALE_LUA, "K:5");
+        pool.startBackgroundExecutors();
+        pool.scan();
+        pool.awaitBuilt(0);
+        assertEquals(0, pool.builtIds.size());
+        assertTrue(pool.killed.isEmpty());
+    }
+
+    // ---------------------------------------------------------------- D19 资源双档
+
+    @Test
+    void buildSandboxShouldCarryResourceRequests_d19() {
+        // D19：池路径 buildSandbox 透传 resourceRequests（CPU request=100m / memory=128Mi 默认）
+        var osb = mock(Sandbox.class);
+        var info = mock(SandboxInfo.class);
+        when(info.getId()).thenReturn("sb-req");
+        when(osb.getInfo()).thenReturn(info);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var builder = mock(Sandbox.Builder.class);
+            when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
+            when(builder.timeout(any())).thenReturn(builder);
+            when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.resourceRequests(anyMap())).thenReturn(builder);
+            when(builder.env(anyMap())).thenReturn(builder);
+            when(builder.build()).thenReturn(osb);
+            mocked.when(Sandbox::builder).thenReturn(builder);
+
+            // 直接实例（不经 TestablePool 的 buildSandbox 覆写）
+            var manager = new SandboxPoolManager(facade, pool(1), 10, sandboxConfig(), null);
+            manager.buildSandbox();
+            verify(builder).resourceRequests(eq(Map.of("cpu", "100m", "memory", "128Mi")));
+        }
     }
 
     // ---------------------------------------------------------------- 确认入口 touch（D16-④ + P3 sid 防线）

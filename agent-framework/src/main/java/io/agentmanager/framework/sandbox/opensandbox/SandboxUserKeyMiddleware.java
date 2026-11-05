@@ -77,6 +77,16 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
                 if (skillScope != null) {
                     sandbox.setSkillCacheScope(skillScope);
                 }
+                // 池账本身份回填（D17 原子 Lua 兜底）：b:{id} 存在且 userKey/sid 空才合并——
+                // 兜底守卫钩子被禁用组合下的首借身份空窗（配额计数/粘滞转移/D14 查询键）；
+                // 守卫钩子生效时 ThreadLocal 已在借出时注入，此处为幂等空操作
+                var pool = spec.sandboxPoolManager();
+                if (pool != null) {
+                    var backfillSid = ctx.getUserId() != null && !ctx.getUserId().isBlank()
+                        ? ctx.getUserId() : ctx.getSessionId();
+                    pool.backfillBusyIdentity(sandbox.getOsbState().getSandboxId(),
+                        backfillSid, userKey);
+                }
                 var store = spec.getFileAssetStore();
                 var sandboxId = sandbox.getOsbState().getSandboxId();
                 if (store != null && userKey != null && !userKey.isBlank()) {

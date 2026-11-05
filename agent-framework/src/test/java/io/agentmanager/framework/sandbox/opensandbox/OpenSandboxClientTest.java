@@ -41,7 +41,8 @@ class OpenSandboxClientTest {
             .apiKey("k")
             .image("opensandbox/code-interpreter:v1.1.0")
             .timeout(Duration.ofMinutes(60))
-            .resource(Map.of("cpu", "1", "memory", "1024Mi"));
+            .resource(Map.of("cpu", "1", "memory", "1024Mi"))
+            .resourceRequests(Map.of("cpu", "100m", "memory", "128Mi"));
     }
 
     /** AbstractBaseSandbox 构造要求 state.workspaceSpec 非空 */
@@ -88,6 +89,7 @@ class OpenSandboxClientTest {
             when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.resourceRequests(anyMap())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.build()).thenReturn(osb);
             mocked.when(Sandbox::builder).thenReturn(builder);
@@ -95,6 +97,8 @@ class OpenSandboxClientTest {
             var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
             var sandbox = client.create(new WorkspaceSpec(), null, options());
 
+            // D19（独立于池开关生效）：池关闭路径同样透传 Pod requests
+            verify(builder).resourceRequests(eq(Map.of("cpu", "100m", "memory", "128Mi")));
             assertInstanceOf(OpenSandbox.class, sandbox);
             var state = ((OpenSandbox) sandbox).getOsbState();
             assertEquals("sb-created-1", state.getSandboxId());
@@ -114,6 +118,7 @@ class OpenSandboxClientTest {
             when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.resourceRequests(anyMap())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.build()).thenReturn(osb);
             mocked.when(Sandbox::builder).thenReturn(builder);
@@ -243,6 +248,7 @@ class OpenSandboxClientTest {
             when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.resourceRequests(anyMap())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.build()).thenReturn(osb);
             mocked.when(Sandbox::builder).thenReturn(builder);
