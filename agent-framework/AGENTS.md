@@ -520,7 +520,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | POST | `/mcp/ui-context` | MCP Apps (4.7): 静默更新模型上下文（ui_context 表持久化，Hook 下次调用注入） |
 | POST | `/` | A2A JSON-RPC (message/send, message/stream, tasks/get, tasks/cancel, tasks/resubscribe) |
 | POST/GET | `/tasks*` | **Agent Protocol 远程子 agent 服务端（默认关闭）**：`AGENT_PROTOCOL_ENABLED=true` 才由 SDK 扩展注册——`POST /tasks` 提交、`GET /tasks/{id}` 快照（确认源，F15）、`/{id}/wait`、`/{id}/cancel`、`/{id}/events`(SSE)、`/{id}/resume`；全部经 AgentProtocolAuthFilter 前置校验 `X-Agent-Protocol-Token`，无/错 token 一律 401。关闭时 404、行为与现状完全一致 |
-| PUT | `/sandbox/env` | **沙箱环境变量设置**（[docs/sandbox-env-update-design.md](docs/sandbox-env-update-design.md)）：按 `userId+sessionId` 定位当前沙箱容器，把 env 合并写入 execd `EXECD_ENVS` 指向的文件（bootstrap 默认 `/opt/opensandbox/.env`），后续命令由 execd 自动加载；未开沙箱 409、容器不存在直接报错不兜底；鉴权与 `/admin/*` 同级，值不落盘、不落日志、不出现在响应 |
+| PUT | `/sandbox/env` | **沙箱环境变量设置**（[docs/sandbox-env-update-design.md](docs/sandbox-env-update-design.md)）：按 `userId+sessionId` 定位当前沙箱容器，把 env 合并写入 execd `EXECD_ENVS` 指向的文件（bootstrap 默认 `/opt/opensandbox/.env`），后续命令由 execd 自动加载；未开沙箱 409、容器不存在直接报错不兜底；鉴权与 `/admin/*` 同级，值不落盘、不落日志、不出现在响应。写入以 publish→writeManaged 顺序（发布失败重试可收敛，issue #230）；并发 PUT 为 last-writer-wins（低频人工敏感输入，调用方不应并发提交同一沙箱的 env） |
 | POST/GET | `/agui/*` | **AG-UI 官方协议输出面（默认关闭）**：`AGENT_AGUI_ENABLED=true` 才装配（关闭 404）——`POST /agui/runs`（RunAgentInput 投影 → SSE AguiEvent 流，resume[] 走 HITL 恢复）+ `GET /agui/threads/{threadId}/events?afterSeq=&runId=`（平台扩展续传端点，SessionEventTailer 骨架 + AguiTailRenderer）；与 native 面同一 Channel/turn_lease/confirm_context（双面互认），身份只认 `X-User-Id` 头 |
 
 ### 子路径部署的前缀感知（X-Forwarded-Prefix 契约，2026-10-10）
