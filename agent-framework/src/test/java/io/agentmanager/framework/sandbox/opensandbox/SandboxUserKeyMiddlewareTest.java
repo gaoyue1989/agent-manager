@@ -19,7 +19,8 @@ import static org.mockito.Mockito.*;
  * {@link SandboxUserKeyMiddleware} 单元测试：userKey 经 SessionKeyResolver 反查真实用户
  * （Channel 链路 ctx.userId 是网关 peer=前端 sessionId，issue #52）、反查未命中回落
  * RuntimeContext 原值（A2A / invoke）、空值降级 sessionId、注入 reset 每沙箱代一次、
- * ThreadLocal 用后即清（防跨 turn 泄漏污染下个 create 的 bindUserKey）。
+ * ThreadLocal 用后即清（防跨 turn 泄漏污染下个 create 的 bindUserKey）、
+ * 本 turn 沙箱从 RuntimeContext 的 SandboxAcquireResult 寻址（并发下不串他人沙箱）。
  */
 class SandboxUserKeyMiddlewareTest {
 
@@ -27,14 +28,23 @@ class SandboxUserKeyMiddlewareTest {
         return RuntimeContext.builder().sessionId(sessionId).userId(userId).build();
     }
 
-    /** 装配 mock 沙箱实例并注册为 spec.latestSandbox（onAgent 直接绑定的观察点） */
-    private static OpenSandbox latestSandbox(OpenSandboxFilesystemSpec spec, String sandboxId) {
+    /** 装配 mock 沙箱实例（getOsbState 供日志取 sandboxId） */
+    private static OpenSandbox mockSandbox(String sandboxId) {
         var sandbox = mock(OpenSandbox.class);
         var state = new OpenSandboxState();
         state.setSandboxId(sandboxId);
         when(sandbox.getOsbState()).thenReturn(state);
-        spec.registerSandbox(sandbox);
         return sandbox;
+    }
+
+    /** 模拟 HarnessAgent.acquireForCall 预置：本 turn 沙箱放入 RuntimeContext（SandboxAcquireResult） */
+    private static RuntimeContext turnCtx(String sessionId, String userId, OpenSandbox sandbox) {
+        var c = ctx(sessionId, userId);
+        if (sandbox != null) {
+            c.put(io.agentscope.harness.agent.sandbox.SandboxAcquireResult.class,
+                io.agentscope.harness.agent.sandbox.SandboxAcquireResult.userManaged(sandbox));
+        }
+        return c;
     }
 
     private static void run(SandboxUserKeyMiddleware mw, RuntimeContext ctx) {
@@ -46,13 +56,13 @@ class SandboxUserKeyMiddlewareTest {
     void shouldResolveRealUserViaSessionLookup() {
         // Channel 链路：ctx.sessionId=共享 gw-hash、ctx.userId=前端 sessionId（peer）
         var spec = new OpenSandboxFilesystemSpec();
-        var sandbox = latestSandbox(spec, "sbx-1");
+        var sandbox = mockSandbox("sbx-1");
         var store = mock(SessionUserStore.class);
         when(store.findUserIdBySession("gw-hash")).thenReturn(null);
         when(store.findUserIdBySession("front-sid")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(store));
 
-        run(mw, ctx("gw-hash", "front-sid"));
+        run(mw, turnCtx("gw-hash", "front-sid", sandbox));
 
         verify(sandbox).setUserKey("alice");
         // per-user L4 物化与上传注入均按真实用户命名空间执行
@@ -66,12 +76,12 @@ class SandboxUserKeyMiddlewareTest {
     void shouldFallbackToRawUserIdWhenSessionUnmapped() {
         // A2A / invoke 链路：反查未命中 → 原值（userId 优先）
         var spec = new OpenSandboxFilesystemSpec();
-        var sandbox = latestSandbox(spec, "sbx-1");
+        var sandbox = mockSandbox("sbx-1");
         var store = mock(SessionUserStore.class);
         when(store.findUserIdBySession(anyString())).thenReturn(null);
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(store));
 
-        run(mw, ctx("s-1", "u-42"));
+        run(mw, turnCtx("s-1", "u-42", sandbox));
 
         verify(sandbox).setUserKey("u-42");
     }
@@ -80,12 +90,12 @@ class SandboxUserKeyMiddlewareTest {
     void shouldResolveBySessionIdWhenUserIdBlank() {
         // issue #52 修复点：userKey 取空时按 sessionId 反查，反查到即用真实用户
         var spec = new OpenSandboxFilesystemSpec();
-        var sandbox = latestSandbox(spec, "sbx-1");
+        var sandbox = mockSandbox("sbx-1");
         var store = mock(SessionUserStore.class);
         when(store.findUserIdBySession("s-1")).thenReturn("alice");
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(store));
 
-        run(mw, ctx("s-1", " "));
+        run(mw, turnCtx("s-1", " ", sandbox));
 
         verify(sandbox).setUserKey("alice");
     }
@@ -94,12 +104,12 @@ class SandboxUserKeyMiddlewareTest {
     void shouldDegradeToSessionIdWhenNothingResolves() {
         // 未登记会话（debug 页面等）：保持旧行为降级 sessionId
         var spec = new OpenSandboxFilesystemSpec();
-        var sandbox = latestSandbox(spec, "sbx-1");
+        var sandbox = mockSandbox("sbx-1");
         var store = mock(SessionUserStore.class);
         when(store.findUserIdBySession(anyString())).thenReturn(null);
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(store));
 
-        run(mw, ctx("s-1", null));
+        run(mw, turnCtx("s-1", null, sandbox));
 
         verify(sandbox).setUserKey("s-1");
     }
@@ -108,13 +118,13 @@ class SandboxUserKeyMiddlewareTest {
     void shouldFallBackToLegacyResolutionWithoutResolver() {
         // 未装配 resolver（旧构造）：userId 优先，空则 sessionId（行为不变）
         var spec = new OpenSandboxFilesystemSpec();
-        var sandbox = latestSandbox(spec, "sbx-1");
+        var sandbox = mockSandbox("sbx-1");
         var mw = new SandboxUserKeyMiddleware(spec);
 
-        run(mw, ctx("s-1", "u-42"));
+        run(mw, turnCtx("s-1", "u-42", sandbox));
         verify(sandbox).setUserKey("u-42");
 
-        run(mw, ctx("s-1", " "));
+        run(mw, turnCtx("s-1", " ", sandbox));
         verify(sandbox).setUserKey("s-1");
     }
 
@@ -131,16 +141,49 @@ class SandboxUserKeyMiddlewareTest {
     void shouldResetInjectedStateOncePerSandboxGeneration() {
         // 新沙箱代首次 onAgent：回滚注入状态并标记；同代重复 onAgent 不再 reset（防循环）
         var spec = new OpenSandboxFilesystemSpec();
-        var sandbox = latestSandbox(spec, "sbx-1");
+        var sandbox = mockSandbox("sbx-1");
         var store = mock(io.agentmanager.framework.service.FileAssetStore.class);
         spec.fileAssetStore(store);
         var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(mock(SessionUserStore.class)));
 
-        run(mw, ctx("s-1", "alice"));
+        run(mw, turnCtx("s-1", "alice", sandbox));
         verify(store, times(1)).resetInjectedToPending("alice");
 
-        run(mw, ctx("s-1", "alice"));
+        run(mw, turnCtx("s-1", "alice", sandbox));
         verify(store, times(1)).resetInjectedToPending("alice");
         verify(sandbox, times(2)).setUserKey("alice");
+    }
+
+    @Test
+    void shouldBindOnlyItsOwnTurnSandboxUnderConcurrency() {
+        // 并发串沙箱回归：两个并发 turn 各自 ctx 持有自己的沙箱，onAgent 只重绑本 turn 的沙箱
+        // （历史上 spec.latestSandbox 进程级指针会被其他用户 create/resume 覆盖 → 误绑他人沙箱）
+        var spec = new OpenSandboxFilesystemSpec();
+        var sandboxA = mockSandbox("sbx-a");
+        var sandboxB = mockSandbox("sbx-b");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(mock(SessionUserStore.class)));
+
+        run(mw, turnCtx("s-a", "alice", sandboxA));
+        run(mw, turnCtx("s-b", "bob", sandboxB));
+
+        verify(sandboxA, never()).setUserKey("bob");
+        verify(sandboxB, never()).setUserKey("alice");
+        verify(sandboxA).setUserKey("alice");
+        verify(sandboxB).setUserKey("bob");
+    }
+
+    @Test
+    void shouldNotTouchSandboxWhenTurnHasNoAcquireResult() {
+        // 本 turn ctx 无 SandboxAcquireResult（acquire 失败/非沙箱部署）时，
+        // middleware 不得回退任何全局指针去重绑/注入他人沙箱
+        var spec = new OpenSandboxFilesystemSpec();
+        var foreignSandbox = mockSandbox("sbx-other");
+        var mw = new SandboxUserKeyMiddleware(spec, new SessionKeyResolver(mock(SessionUserStore.class)));
+
+        run(mw, ctx("s-1", "alice"));
+
+        verify(foreignSandbox, never()).setUserKey(anyString());
+        verify(foreignSandbox, never()).injectPendingUploads();
+        verify(foreignSandbox, never()).materializeUserSkills();
     }
 }

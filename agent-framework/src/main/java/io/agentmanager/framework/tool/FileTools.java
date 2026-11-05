@@ -9,11 +9,12 @@ import org.slf4j.LoggerFactory;
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.service.SandboxRuntime;
 import io.agentmanager.framework.service.SessionKeyResolver;
-import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
+import io.agentmanager.framework.sandbox.opensandbox.OpenSandbox;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.WorkspaceReader;
 import io.agentmanager.framework.service.storage.FileStorage;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.harness.agent.sandbox.SandboxAcquireResult;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 
@@ -42,7 +43,6 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
     private final AgentManagerProperties props;
     private final SandboxRuntime sandboxRuntime;
     private final WorkspaceReader workspaceReader;
-    private final OpenSandboxFilesystemSpec sandboxFilesystemSpec;
     /** 业务规范键解析（issue #52）：沙箱归属校验须与 SandboxUserKeyMiddleware 同源反查真实用户 */
     private final SessionKeyResolver sessionKeyResolver;
 
@@ -51,7 +51,7 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
                      AgentManagerProperties props,
                      SandboxRuntime sandboxRuntime,
                      WorkspaceReader workspaceReader) {
-        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, null, null);
+        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, null);
     }
 
     public FileTools(FileAssetStore fileAssetStore,
@@ -59,23 +59,12 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
                      AgentManagerProperties props,
                      SandboxRuntime sandboxRuntime,
                      WorkspaceReader workspaceReader,
-                     OpenSandboxFilesystemSpec sandboxFilesystemSpec) {
-        this(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, sandboxFilesystemSpec, null);
-    }
-
-    public FileTools(FileAssetStore fileAssetStore,
-                     FileStorage fileStorage,
-                     AgentManagerProperties props,
-                     SandboxRuntime sandboxRuntime,
-                     WorkspaceReader workspaceReader,
-                     OpenSandboxFilesystemSpec sandboxFilesystemSpec,
                      SessionKeyResolver sessionKeyResolver) {
         this.fileAssetStore = fileAssetStore;
         this.fileStorage = fileStorage;
         this.props = props;
         this.sandboxRuntime = sandboxRuntime;
         this.workspaceReader = workspaceReader;
-        this.sandboxFilesystemSpec = sandboxFilesystemSpec;
         this.sessionKeyResolver = sessionKeyResolver;
     }
 
@@ -135,10 +124,12 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
                 return err("file_content_base64 is not valid base64");
             }
         } else if (sandboxRuntime.enabled()) {
-            // 沙箱直读：取当前会话沙箱（acquire 时注册到 spec），校验归属 userKey 防并发串沙箱
-            // （沙箱部署的注册形态是 SandboxAwareFileTools：schema 无 base64 参数，
-            //  此分支仅为防御直读兜底——例如手工反射调用）
-            var sandbox = sandboxFilesystemSpec != null ? sandboxFilesystemSpec.getLatestSandbox() : null;
+            // 沙箱直读：取本 turn acquire 的沙箱（HarnessAgent 在 agent 调用前经
+            // SandboxLifecycleMiddleware.acquireForCall 预置 RuntimeContext，失败路径置 null）。
+            // 归属 userKey 校验保留作纵深防御；禁止回退进程级「最近沙箱」指针——多用户并发下
+            // 指针会被其他用户的 create/resume 覆盖，指向他人沙箱 → 归属校验误拒、file_ready 丢失
+            var acquire = ctx != null ? ctx.get(SandboxAcquireResult.class) : null;
+            var sandbox = acquire != null && acquire.getSandbox() instanceof OpenSandbox osb ? osb : null;
             var boundKey = sandbox != null ? sandbox.getUserKey() : null;
             if (sandbox != null && (boundKey == null || boundKey.isBlank() || boundKey.equals(userKey))) {
                 bytes = sandbox.readWorkspaceFile(norm);
@@ -390,10 +381,9 @@ public class FileTools implements io.agentmanager.framework.tool.CustomTool {
                                             AgentManagerProperties props,
                                             SandboxRuntime sandboxRuntime,
                                             WorkspaceReader workspaceReader,
-                                            OpenSandboxFilesystemSpec sandboxFilesystemSpec,
                                             SessionKeyResolver sessionKeyResolver) {
             super(fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader,
-                sandboxFilesystemSpec, sessionKeyResolver);
+                sessionKeyResolver);
         }
 
         @Tool(
