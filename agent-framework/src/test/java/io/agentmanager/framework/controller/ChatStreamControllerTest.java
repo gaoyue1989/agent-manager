@@ -1572,6 +1572,32 @@ class ChatStreamControllerTest {
         verify(turnLeaseStore, never()).release(eq(sessionId), anyString());
     }
 
+    @Test
+    void queuedStopAtLeaseHandoffShouldCancelTurnBeforeItStarts() {
+        // issue #228 竞态重放：停止请求在「排队 loop 末次检查之后～本拍 tryAcquire 得手」
+        // 的窗口内到达——watcher 已置排队标记（loop 本拍已过检查点没读到 isStopRequested），
+        // 租约交接点原子取回标记 → turn 不得起跑：消费停止行 + 释放刚到手的租约 +
+        // cancelled 帧收流（零副作用，不 dispatchStream）。
+        var sessionId = "test-user-handoff-stop";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-handoff");
+
+        var watcher = mock(io.agentmanager.framework.service.TurnStopWatcher.class);
+        when(watcher.isStopRequested(anyString())).thenReturn(false);
+        when(watcher.unregisterRegistrationOnly(anyString())).thenReturn(true);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+            controller, "turnStopWatcher", watcher);
+
+        var frames = collect(sessionId, "run long task", "alice");
+
+        assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("\"type\":\"cancelled\"")),
+            "交接点取消必须以 cancelled 帧收流: " + frames);
+        assertTrue(frames.stream().noneMatch(f -> f != null && f.contains("\"type\":\"error\"")),
+            "停止不是错误: " + frames);
+        verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
+        verify(turnLeaseStore).release(sessionId, "tok-handoff");
+        verify(watcher).unregister(eq(sessionId), anyString());
+    }
+
     // ========== 本轮 skills 列表（session-skill-list-design §6） ==========
 
     /** 以显式注入服务构建独立控制器（复用 @BeforeEach 的字段 mock） */
