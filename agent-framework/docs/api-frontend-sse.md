@@ -845,6 +845,8 @@ A2A Agent Card 发现端点。
 
 技能列表（只读，动态数据源：frontmatter 声明 ∪ 配置目录实际内容，冲突以目录为准）。
 
+**查询参数：** 可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212）。
+
 **响应示例：**
 
 ```json
@@ -1046,6 +1048,8 @@ Agent 实际接收到的消息：
 GET /skills/available
 ```
 
+**查询参数：** 可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212）。
+
 **响应示例：**
 
 ```json
@@ -1071,6 +1075,7 @@ GET /skills/parse-refs?message=帮我用@ppt生成大师做PPT
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `message` | String | ✅ | 用户输入的消息片段 |
+| `skills` | String | ❌ | 可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 
 **响应示例：**
 
