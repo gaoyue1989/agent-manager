@@ -131,7 +131,7 @@ public class SandboxPoolManager {
         return ''
         """;
 
-    /** cap Lua（单 key）：i+b+c 计数 < maxSize 时占一个 creating 名额（集群级容量裁决）；已满返回空串 */
+    /** cap Lua（单 key）：i+b+c 计数 < maxSize 时占一个 creating 名额（集群级容量裁决，<b>仅借出按需建用</b>）；已满返回空串 */
     static final String CAP_LUA = """
         local n = 0
         local fields = redis.call('HKEYS', KEYS[1])
@@ -140,6 +140,37 @@ public class SandboxPoolManager {
           if p == 'i:' or p == 'b:' or p == 'c:' then n = n + 1 end
         end
         if n < tonumber(ARGV[1]) then
+          local entry = ARGV[2] .. ':' .. tostring(redis.call('TIME')[1])
+          redis.call('HSET', KEYS[1], 'c:' .. entry, ARGV[3])
+          return entry
+        end
+        return ''
+        """;
+
+    /**
+     * 通用水面 cap Lua（单 key，D10 集群级水面裁决——双副本预热超发缺陷修复，2026-11-06 部署验证 10e）：
+     * 通用 idle（owner 为空串；旧值数字串容忍视作通用）+ 在途 creating 计数 &lt; target 时才占一个
+     * creating 名额，否则返回空串。多副本并发预热/补位在同一 ledger key 上原子计数——N 副本合力
+     * 补齐至 target <b>不超额</b>（设计 §5.4「多副本同时启动经 Lua cap 合力补齐不超额」/§5.3-4c
+     * 「通用池按 MIN_IDLE 水面（只数 owner=null）决定补位」）。c: 在途条目一并计入（含借出按需建
+     * 的占位——保守方向，宁可少补不超发，下轮扫描/借出自然纠偏）。预热/补位专用；
+     * <b>借出按需建走 CAP_LUA（MAX_SIZE 总容量）不受水面约束</b>——T 只管预备、借出永不因水面等待。
+     * ARGV[1]=targetGeneric（目标通用 idle 数），ARGV[2]=entryId，ARGV[3]=creatingJson。
+     */
+    static final String WATERMARK_CAP_LUA = """
+        local target = tonumber(ARGV[1])
+        local generic, creating = 0, 0
+        local fields = redis.call('HKEYS', KEYS[1])
+        for _, f in ipairs(fields) do
+          local p = string.sub(f, 1, 2)
+          if p == 'i:' then
+            local ok, rec = pcall(cjson.decode, redis.call('HGET', KEYS[1], f))
+            local owner = (ok and rec.owner) or ''
+            if owner == '' then generic = generic + 1 end
+          elseif p == 'c:' then creating = creating + 1
+          end
+        end
+        if generic + creating < target then
           local entry = ARGV[2] .. ':' .. tostring(redis.call('TIME')[1])
           redis.call('HSET', KEYS[1], 'c:' .. entry, ARGV[3])
           return entry
@@ -305,7 +336,8 @@ public class SandboxPoolManager {
      * 弹性水位 Lua（单 key，D18）：脚本内自算 |b:|/T 并裁决抬升/回缩，<b>两个方向同脚本同规则
      * 受冷却约束</b>（任一 T 变更先校验 now-lastAdjustAt ≥ 2×扫描间隔、变更即原子写 lastAdjustAt
      * ——否则 N 副本同窗口并发扫描对 T 连加 N×step）；多副本并发扫描单赢家、免选主。
-     * 返回：'U:{t}:{deficit}'（scale-out：补建通用 idle 缺口数）/ 'D:{t}|{id1,id2…}'（scale-in：
+     * 返回：'U:{t}:{targetGeneric}'（scale-out：目标通用水面 = t−busyN，补位经 WATERMARK_CAP_LUA
+     * 集群级判定合力补至水面不超额）/ 'D:{t}|{id1,id2…}'（scale-in：
      * 超额通用 idle 按 returnedAt LRU 列表，粘滞不参与）/ 'K:{t}'（保持，含冷却窗内被拒）。
      * ARGV[1]=maxSize，ARGV[2]=minIdle，ARGV[3]=growStep，ARGV[4]=cooldownSeconds，ARGV[5]=nowSec。
      * 高低水位（80%/50%）、滞回周期（3）为内置常量（设计 §5.6 注）。
@@ -341,9 +373,11 @@ public class SandboxPoolManager {
           if t < maxSize and (now - last) >= cooldown then
             t = math.min(t + step, maxSize)
             redis.call('HSET', KEYS[1], 't:target', cjson.encode({value = t, lastAdjustAt = now}))
-            local deficit = t - busyN - #generic
-            if deficit < 0 then deficit = 0 end
-            return 'U:' .. t .. ':' .. deficit
+            -- 返回目标通用水面（t - busyN）：补位由 Java 侧 WATERMARK_CAP_LUA 逐次判定
+            -- generic+creating < target，多副本合力补至水面不超额（10e 修复，2026-11-06）
+            local targetGeneric = t - busyN
+            if targetGeneric < 0 then targetGeneric = 0 end
+            return 'U:' .. t .. ':' .. targetGeneric
           end
           return 'K:' .. t
         end
@@ -886,14 +920,16 @@ public class SandboxPoolManager {
         killQuietly(sandboxId);
         delLease(sandboxId);
         if (claimed) {
-            rebuildAsync();
+            rebuildAsync(pool.minIdle());
         }
     }
 
     // ---------------------------------------------------------------- 后台扫描（回收/剪枝/保活/水位）
 
     /**
-     * 启动扫描线程 + 异步预热（集群级水位：多副本同时启动经 Lua cap 合力补齐不超额）。
+     * 启动扫描线程 + 异步预热（集群级<b>通用水面</b>：多副本同时启动经 WATERMARK_CAP_LUA
+     * 合力补齐至 MIN_IDLE 不超额——部署验证 10e 修复前 CAP_LUA 只判总容量，N 副本各补
+     * minIdle 个导致 2×MIN_IDLE 超发）。
      *
      * <p>由装配处（AgentScopeConfig）在池开启分支构造完成后<b>显式调用</b>——不实现
      * {@code ApplicationListener}：@Bean 方法在池关闭分支返回 null（NullBean）时，容器按
@@ -906,15 +942,16 @@ public class SandboxPoolManager {
      */
     public void start() {
         startBackgroundExecutors();
-        // 预热：异步补齐 minIdle
+        // 预热：异步补齐 MIN_IDLE 个通用 idle（集群级水面裁决，另一副本已补足时 WATERMARK
+        // 返回空串 → 停止本轮预热，不超额）
         var exec = rebuildExecutor;
         if (exec == null) {
             return;
         }
         exec.submit(() -> {
             for (int i = 0; i < pool.minIdle(); i++) {
-                if (!rebuildOnce("prewarm")) {
-                    break;   // 容量已满/Redis 不可达：停止本轮预热
+                if (!rebuildOnce("prewarm", pool.minIdle())) {
+                    break;   // 通用水面已满/容量已满/Redis 不可达：停止本轮预热
                 }
             }
         });
@@ -1066,7 +1103,7 @@ public class SandboxPoolManager {
         recordEvent("scan-kill", rec != null ? rec.sid() : null, sandboxId);
         log.info("[sandbox-pool] scanned idle-return: kill sandboxId={} (sid={}), snapshot={}",
             sandboxId, rec != null ? rec.sid() : "?", snapshotString());
-        rebuildAsync();
+        rebuildAsync(pool.minIdle());
     }
 
     /**
@@ -1085,7 +1122,7 @@ public class SandboxPoolManager {
                     recordEvent("sticky-expire", rec.sid(), sandboxId);
                     log.info("[sandbox-pool] sticky idle expired, killed: sandboxId={} (sid={}, owner={}), snapshot={}",
                         sandboxId, rec.sid(), rec.owner(), snapshotString());
-                    rebuildAsync();   // 通用池水面核算补位
+                    rebuildAsync(pool.minIdle());   // 通用池按 MIN_IDLE 水面（只数 owner=null）核算补位
                 }
             } catch (RedisException e) {
                 throw e;
@@ -1103,7 +1140,7 @@ public class SandboxPoolManager {
                 recordEvent("idle-reap", rec.sid(), sandboxId);
                 log.warn("[sandbox-pool] idle container dead (Server GC?), reaping: sandboxId={} (owner={})",
                     sandboxId, rec.owner());
-                rebuildAsync();
+                rebuildAsync(pool.minIdle());
             }
         } catch (RedisException e) {
             throw e;
@@ -1111,10 +1148,10 @@ public class SandboxPoolManager {
     }
 
     /**
-     * D18 弹性水位接线：SCALE_LUA（单 key 单赢家）→ 抬升 = 异步补建通用 idle 至 T（缺口数由
-     * Lua 返回，rebuildOnce 内 Lua cap 兜底不超额）；回缩 = 对返回 id 逐个 CLAIM_IDLE 认领 +
-     * kill（Java 面；粘滞不参与强制回缩）。T 只管预备、借出永不因 T 等待（createOnDemand 仍以
-     * MAX_SIZE 经 CAP_LUA 裁决）。
+     * D18 弹性水位接线：SCALE_LUA（单 key 单赢家）→ 抬升 = 异步补建通用 idle 至目标水面
+     * （t−busyN，由 SCALE_LUA 返回；补位经 WATERMARK_CAP_LUA 集群级判定，多副本合力补至
+     * 水面不超额）；回缩 = 对返回 id 逐个 CLAIM_IDLE 认领 + kill（Java 面；粘滞不参与强制回缩）。
+     * T 只管预备、借出永不因水面等待（createOnDemand 仍以 MAX_SIZE 经 CAP_LUA 裁决）。
      */
     private void applyScaling(int currentIdle) {
         String verdict;
@@ -1134,23 +1171,24 @@ public class SandboxPoolManager {
         }
         char kind = verdict.charAt(0);
         if (kind == 'U') {
-            // 'U:{t}:{deficit}'
-            int def = 0;
+            // 'U:{t}:{targetGeneric}'：目标通用水面（t−busyN），补位由 WATERMARK_CAP_LUA 判满即停
+            int target = 0;
             int sep = verdict.lastIndexOf(':');
             if (sep > 0) {
                 try {
-                    def = Integer.parseInt(verdict.substring(sep + 1));
+                    target = Integer.parseInt(verdict.substring(sep + 1));
                 } catch (NumberFormatException nfe) {
-                    def = 0;
+                    target = 0;
                 }
             }
             recordEvent("scale-out", null, null);
-            log.info("[sandbox-pool] scale-out: target increased, verdict={}, deficit={}, snapshot={}",
-                verdict, def, snapshotString());
+            log.info("[sandbox-pool] scale-out: target increased, verdict={}, targetGeneric={}, snapshot={}",
+                verdict, target, snapshotString());
             var exec = rebuildExecutor;
             if (exec != null && !exec.isShutdown()) {
-                for (int i = 0; i < def; i++) {
-                    exec.submit(() -> rebuildOnce("scale-out"));
+                final int targetGeneric = Math.max(0, target);
+                for (int i = 0; i < targetGeneric; i++) {
+                    exec.submit(() -> rebuildOnce("scale-out", targetGeneric));
                 }
             }
         } else if (kind == 'D') {
@@ -1179,19 +1217,27 @@ public class SandboxPoolManager {
         // 'K'：无变更（含冷却窗内被拒——§8「冷却窗二次变更被拒/单赢家」语义）
     }
 
-    /** 异步补位：Lua cap（集群级 + rebuildConcurrency 经线程池上限裁决）→ 建 → 探测 → 入 idle 池 */
-    private void rebuildAsync() {
+    /**
+     * 异步补位（水面参数化）：targetGeneric = 目标通用 idle 数——MIN_IDLE（预热/kill 补位路径）
+     * 或 t−busyN（D18 scale-out）。占位经 WATERMARK_CAP_LUA 集群级判定（generic+creating < target），
+     * 多副本合力补至水面不超额（部署验证 10e 修复：原 CAP_LUA 只判 MAX_SIZE 总容量，N 副本各补
+     * minIdle 个导致超发）。
+     */
+    private void rebuildAsync(int targetGeneric) {
         var exec = rebuildExecutor;
         if (exec == null || exec.isShutdown()) {
             return;
         }
-        exec.submit(() -> rebuildOnce("rebuild"));
+        exec.submit(() -> rebuildOnce("rebuild", targetGeneric));
     }
 
-    /** 单次补位；返回 false = 未补位（容量满 / Redis 不可达 / 建容器失败——告警后由下轮扫描重试） */
-    private boolean rebuildOnce(String reason) {
+    /**
+     * 单次补位；返回 false = 未补位（通用水面已满 / 容量满 / Redis 不可达 / 建容器失败——
+     * 告警后由下轮扫描重试）。
+     */
+    private boolean rebuildOnce(String reason, int targetGeneric) {
         try {
-            String entry = luaCap(null);   // 通用补位：owner 为空（不占任何用户配额）
+            String entry = luaWatermarkCap(targetGeneric);   // 通用水面占位（owner 为空，不占用户配额）
             if (entry == null || entry.isEmpty()) {
                 return false;
             }
@@ -1378,6 +1424,12 @@ public class SandboxPoolManager {
     private String luaCap(String userKey) {
         return eval(CAP_LUA, ScriptOutputType.VALUE,
             new String[]{String.valueOf(pool.maxSize()), podId, creatingJsonOf(userKey)});
+    }
+
+    /** 通用水面占位（预热/补位专用，集群级裁决见 WATERMARK_CAP_LUA）；借出按需建不走此路径 */
+    private String luaWatermarkCap(int targetGeneric) {
+        return eval(WATERMARK_CAP_LUA, ScriptOutputType.VALUE,
+            new String[]{String.valueOf(Math.max(0, targetGeneric)), podId, creatingJsonOf(null)});
     }
 
     private String luaClaimRecycle(String sandboxId) {

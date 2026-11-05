@@ -80,6 +80,7 @@ class SandboxPoolManagerTest {
     private static String luaKey(String script) {
         if (SandboxPoolManager.BORROW_LUA.equals(script)) return "borrow";
         if (SandboxPoolManager.CAP_LUA.equals(script)) return "cap";
+        if (SandboxPoolManager.WATERMARK_CAP_LUA.equals(script)) return "watermarkCap";
         if (SandboxPoolManager.CLAIM_RECYCLE_LUA.equals(script)) return "claimRecycle";
         if (SandboxPoolManager.UNCLAIM_LUA.equals(script)) return "unclaim";
         if (SandboxPoolManager.PROMOTE_IDLE_LUA.equals(script)) return "promoteIdle";
@@ -378,12 +379,12 @@ class SandboxPoolManagerTest {
         var pool = new TestablePool(pool(1), 10, null);
         pool.startBackgroundExecutors();
         reply(SandboxPoolManager.CLAIM_RECYCLE_LUA, "sbx-1");
-        reply(SandboxPoolManager.CAP_LUA, "p1:2000");
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:2000");
         pool.release("sbx-1");
         assertTrue(pool.killed.contains("sbx-1"));
         verify(redis).del(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"));
-        pool.awaitBuilt(1); // 异步补位：kill + 认领后应补一个新容器入池
-        assertTrue(evalCalls.getOrDefault("cap", 0) >= 1); // 补位占容量
+        pool.awaitBuilt(1); // 异步补位：kill + 认领后应补一个新容器入池（通用水面判定占位）
+        assertTrue(evalCalls.getOrDefault("watermarkCap", 0) >= 1); // 补位占通用水面名额
         assertEquals(1, pool.builtIds.size());
     }
 
@@ -462,7 +463,7 @@ class SandboxPoolManagerTest {
         when(redis.exists(eq("pfx:" + SandboxPoolManager.LEASE_PREFIX + "sbx-1"))).thenReturn(0L);
         pool.startBackgroundExecutors();
         reply(SandboxPoolManager.CLAIM_RECYCLE_LUA, "sbx-1");
-        reply(SandboxPoolManager.CAP_LUA, "p1:3000");
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:3000");
         pool.scan();
         assertTrue(pool.killed.contains("sbx-1"), "owner 未知的容器必须 kill（跨用户暴露防线）");
         assertEquals(0, evalCalls.getOrDefault("returnSticky", 0));
@@ -534,7 +535,7 @@ class SandboxPoolManagerTest {
         pool.alive.put("sbx-9", false); // Server 空闲 GC 兜底失效
         pool.startBackgroundExecutors();
         reply(SandboxPoolManager.CLAIM_IDLE_LUA, "sbx-9");
-        reply(SandboxPoolManager.CAP_LUA, "p1:4000");
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:4000");
         pool.scan();
         assertTrue(pool.killed.contains("sbx-9"));
         pool.awaitBuilt(1);
@@ -566,7 +567,7 @@ class SandboxPoolManagerTest {
         seedIdle(pool, "sbx-s", "{\"owner\":\"alice\",\"returnedAt\":" + old + ",\"sid\":\"webui-old\"}");
         pool.startBackgroundExecutors();
         reply(SandboxPoolManager.CLAIM_IDLE_LUA, "sbx-s");
-        reply(SandboxPoolManager.CAP_LUA, "p1:5000");
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:5000");
         reply(SandboxPoolManager.SCALE_LUA, "K:5"); // 水位无变更
         pool.scan();
         assertTrue(pool.killed.contains("sbx-s"), "粘滞到期容器应 kill 回收");
@@ -622,21 +623,46 @@ class SandboxPoolManagerTest {
 
     // ---------------------------------------------------------------- D18 弹性水位
 
-    private void replyScaleUpDeficit(int deficit) {
-        reply(SandboxPoolManager.SCALE_LUA, "U:10:" + deficit);
+    private void replyScaleUpTarget(int targetGeneric) {
+        reply(SandboxPoolManager.SCALE_LUA, "U:10:" + targetGeneric);
     }
 
     @Test
     void scaleOutShouldRebuildGenericIdleToTarget_d18() {
-        // 80% 抬升 → 异步补建通用 idle 至 T（缺口数由 Lua 返回，rebuildOnce 内 Lua cap 兜底不超额）
+        // 80% 抬升 → 异步补建通用 idle 至目标水面（t−busyN 由 Lua 返回；占位经通用水面 Lua
+        // 集群级判定，补到水面即停不超额）
         var pool = new TestablePool(pool(1), 10, null);
-        replyScaleUpDeficit(3);
-        reply(SandboxPoolManager.CAP_LUA, "p1:6001", "p1:6002", "p1:6003");
+        replyScaleUpTarget(3);
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:6001", "p1:6002", "p1:6003");
         pool.startBackgroundExecutors();
         pool.scan();
         pool.awaitBuilt(3);
-        assertEquals(3, pool.builtIds.size(), "按 Lua 缺口数补建通用 idle");
+        assertEquals(3, pool.builtIds.size(), "按目标通用水面补建通用 idle");
         assertTrue(pool.recentEvents(10).stream().anyMatch(e -> "scale-out".equals(e.get("event"))));
+    }
+
+    @Test
+    void prewarmShouldNotOversubscribeAcrossReplicas_d10() {
+        // 部署验证 10e 修复回归：多副本同时预热经通用水面 Lua 合力补齐至 MIN_IDLE 不超额——
+        // 另一副本已补足（第 2 次占位被拒）时，本副本至多补 1 个
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:7001", "", ""); // 第 2 次起水面已满
+        pool.start();
+        pool.awaitBuilt(2);
+        assertTrue(pool.builtIds.size() <= 1,
+            "预热不得超出集群级通用水面（另一副本已补足时），实际: " + pool.builtIds);
+        pool.shutdown();
+    }
+
+    @Test
+    void prewarmShouldFillUpToMinIdleWhenWatermarkAvailable_d10() {
+        // 水面未满时预热补齐 minIdle 个通用 idle（默认水面 = MIN_IDLE）
+        var pool = new TestablePool(pool(1), 10, null);
+        reply(SandboxPoolManager.WATERMARK_CAP_LUA, "p1:7101", "p1:7102");
+        pool.start();
+        pool.awaitBuilt(2);
+        assertEquals(2, pool.builtIds.size(), "预热应补齐 minIdle 个通用容器");
+        pool.shutdown();
     }
 
     @Test
