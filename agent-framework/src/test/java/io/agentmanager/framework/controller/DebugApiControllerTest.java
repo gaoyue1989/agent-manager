@@ -590,6 +590,66 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.error").value("db down"));
     }
 
+    @Test
+    void monitorMessagesShouldSetScanCappedWhenScanWindowExceeded() throws Exception {
+        // 关键词检索扫描窗口封顶（issue #206）：SQL 粗筛恰好吐出 SCAN_LIMIT+1 行，
+        // 第 1001 次扫描置位 scan_capped 并停止——护栏静默失效时监控页在大库下退化为无界扫描
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        // rs.next() 恰好 1001 次返回 true（第 1001 次 → scanned=1001 > SCAN_LIMIT → 置位 break）
+        var nextCalls = new java.util.concurrent.atomic.AtomicInteger();
+        when(rs.next()).thenAnswer(inv -> nextCalls.incrementAndGet() <= 1001);
+        // id 必须递增：默认 0 会被 seen 去重全部跳过（rows=0，count/total 断言必失败）
+        var idSeq = new java.util.concurrent.atomic.AtomicInteger();
+        when(rs.getLong("id")).thenAnswer(inv -> (long) idSeq.incrementAndGet());
+        when(rs.getString("business_sid")).thenReturn("s1");
+        when(rs.getString("user_id")).thenReturn("alice");
+        when(rs.getString("remark")).thenReturn("退款咨询");
+        when(rs.getString("role")).thenReturn("USER");
+        when(rs.getString("msg_id")).thenReturn("m1");
+        when(rs.getString("trace_id")).thenReturn(null);
+        when(rs.getString("msg_data")).thenReturn(
+            "{\"id\":\"m1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"我要退款\"}]}");
+        when(rs.getTimestamp("created_at")).thenReturn(java.sql.Timestamp.valueOf("2026-10-29 10:00:00"));
+
+        mockMvc.perform(get("/debug/monitor/messages").param("keyword", "退款"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.scan_capped").value(true))
+            .andExpect(jsonPath("$.count").value(100))
+            .andExpect(jsonPath("$.total").value(1000));
+
+        // 扫描窗口 = SCAN_LIMIT+1（1000 封顶 + 1 行判定截断），与钳制后的 limit 无关
+        verify(ps).setInt(anyInt(), org.mockito.ArgumentMatchers.eq(1001));
+    }
+
+    @Test
+    void monitorMessagesShouldClampLimitBounds() throws Exception {
+        // limit 钳制 [1,500]（对照 logsShouldClampLimitWithinBounds 的下游钳制值写法）：
+        // 0 → 1、9999 → 500；ps.setInt 绑定的是 scanLimit = offset + cappedLimit + 1（2 / 501）
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(false);
+
+        mockMvc.perform(get("/debug/monitor/messages").param("limit", "0"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.limit").value(1))
+            .andExpect(jsonPath("$.messages").isEmpty());
+        mockMvc.perform(get("/debug/monitor/messages").param("limit", "9999"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.limit").value(500));
+
+        verify(ps).setInt(anyInt(), org.mockito.ArgumentMatchers.eq(2));    // limit=0 → cappedLimit=1 → scanLimit=0+1+1
+        verify(ps).setInt(anyInt(), org.mockito.ArgumentMatchers.eq(501));  // limit=9999 → cappedLimit=500 → scanLimit=0+500+1
+    }
+
     // ---------- user skills（L4 个人覆盖索引） ----------
     @Test
     void userSkillsShouldReturnUserIndex() throws Exception {
