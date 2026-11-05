@@ -467,3 +467,15 @@ func manifestAppendDownload(raw, username string, at time.Time) (string, error) 
 	m.Audit.DownloadedBy = append(m.Audit.DownloadedBy, ExportDownloadEvent{User: username, At: at})
 	return marshalExportManifest(m)
 }
+
+// manifestAppendEvents 向 manifest audit.downloadedBy 并入既有审计条目（issue #233：
+// rebuildExportArtifacts 构建回写时把 building 期下载审计并入重渲产物，防整段覆盖丢条目）；
+// manifestAppendDownload 同款 parse→append→marshal 形态，事件由调用方从 DB 现行 manifest 解出。
+func manifestAppendEvents(raw string, evts []ExportDownloadEvent) (string, error) {
+	m, err := parseExportManifest(raw)
+	if err != nil {
+		return "", err
+	}
+	m.Audit.DownloadedBy = append(m.Audit.DownloadedBy, evts...)
+	return marshalExportManifest(m)
+}
