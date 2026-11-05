@@ -114,9 +114,15 @@ reply_id 匹配本 Pod 登记的活跃 turn。代价是**所有副本每秒各�
 每拍都重新投递（interrupt 幂等），保证进入执行段后必然命中。
 
 **排队 turn 复用同一轮询**：排队中的 turn 也登记进 watcher（`registerQueued`，标记
-queued），命中停止行时消费行并置内存标记，由 `/chat` 的排队 loop 下一拍读取后直接收流
-（`cancelled`）——排队期间不额外打 DB。租约到手时 `unregisterRegistrationOnly` 只移除
-排队登记、不消费行（若停止请求恰好在此刻到达，留给执行态派发）。
+queued），命中停止行时**只置内存标记、不消费行**——`turn_stop` 行是唯一权威，必须活到
+「取消动作」发生才消失，由 `/chat` 的排队 loop 下一拍读取标记后直接收流（`cancelled`，
+消费点 = `unregister`）；排队期间不额外打 DB。（issue #228）租约交接点存在竞态窗口：停止
+请求落在「loop 末次检查之后～本拍 `tryAcquire` 得手」之间时，旧实现由 queued 派发提前消费
+行、而 loop 本拍已过检查点——交接之后再无人回头检查，turn 会在用户已点停止的情况下照常
+跑完。修复后 `unregisterRegistrationOnly` 改为**原子移除登记并取回标记**：置位 → 交接点
+当场取消（`unregister` 消费行 + 释放刚到手的租约 + `cancelled` 帧收流，turn 不起跑、零副
+作用）；未置位 → 行留表，交给执行态派发（`register` 之后的全局轮询 ≤1 周期投递 interrupt，
+`AGENT_END` 前补 `cancelled` 帧）。
 
 ### 3.4 本地路由：`TurnControlRegistry` + `TurnInterruptMiddleware`
 

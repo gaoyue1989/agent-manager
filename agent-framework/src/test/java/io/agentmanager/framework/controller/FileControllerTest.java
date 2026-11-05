@@ -13,6 +13,8 @@ import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.storage.FileStorage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -188,6 +190,79 @@ public class FileControllerTest {
         assertEquals(HttpStatus.OK, resp.getStatusCode());
         assertTrue(resp.getHeaders().getFirst("Content-Disposition").contains("inline"),
             "inline=1 且 image/* → inline");
+    }
+
+    @Test
+    void downloadInlineHtmlMustCarryCspSandbox() throws Exception {
+        // issue #224：text/html 已入上传白名单，内联预览必须以 CSP sandbox 交付（不透明源+禁脚本）
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440003", "alice", null, null, "page.html",
+            null, "text/html", 30, "local", "upload/k/page.html", "upload", "injected",
+            java.time.LocalDateTime.now());
+        when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440003")).thenReturn(java.util.Optional.of(asset));
+        when(fileStorage.exists("upload/k/page.html")).thenReturn(true);
+        var resp = controller.download("550e8400-e29b-41d4-a716-446655440003", 1);
+        assertEquals(HttpStatus.OK, resp.getStatusCode());
+        assertTrue(resp.getHeaders().getFirst("Content-Disposition").contains("inline"),
+            "方案 B 保留内联预览能力: " + resp.getHeaders().getFirst("Content-Disposition"));
+        assertEquals("sandbox", resp.getHeaders().getFirst("Content-Security-Policy"),
+            "text/html 内联必须带 CSP sandbox（issue #224）");
+    }
+
+    @Test
+    void downloadInlineMhtmlStaysAttachment() throws Exception {
+        // multipart/related 不在 forceInline 判据内（仅 image/* 与 text/* 内联），保持存量 attachment 行为；
+        // needsCspSandbox 仍预置 mhtml 两别名——未来若放开 mhtml 内联预览，CSP 自动生效
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440004", "alice", null, null, "archive.mhtml",
+            null, "multipart/related", 30, "local", "upload/k/archive.mhtml", "upload", "injected",
+            java.time.LocalDateTime.now());
+        when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440004")).thenReturn(java.util.Optional.of(asset));
+        when(fileStorage.exists("upload/k/archive.mhtml")).thenReturn(true);
+        var resp = controller.download("550e8400-e29b-41d4-a716-446655440004", 1);
+        assertTrue(resp.getHeaders().getFirst("Content-Disposition").contains("attachment"),
+            "mhtml 维持存量 attachment 行为");
+        assertNull(resp.getHeaders().getFirst("Content-Security-Policy"));
+    }
+
+    @Test
+    void downloadInlineSvgMustCarryCspSandbox() throws Exception {
+        // image/svg+xml：存量同类暴露（顶层导航即执行脚本），顺带收紧
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440005", "alice", null, null, "logo.svg",
+            null, "image/svg+xml", 10, "local", "upload/k/logo.svg", "upload", "injected",
+            java.time.LocalDateTime.now());
+        when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440005")).thenReturn(java.util.Optional.of(asset));
+        when(fileStorage.exists("upload/k/logo.svg")).thenReturn(true);
+        var resp = controller.download("550e8400-e29b-41d4-a716-446655440005", 1);
+        assertTrue(resp.getHeaders().getFirst("Content-Disposition").contains("inline"));
+        assertEquals("sandbox", resp.getHeaders().getFirst("Content-Security-Policy"),
+            "image/svg+xml 内联必须带 CSP sandbox（issue #224）");
+    }
+
+    @Test
+    void downloadInlinePlainTextKeepsInlineWithoutCsp() throws Exception {
+        // text/plain 无脚本能力：内联行为不变，且不附加 CSP（最小影响面）
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440006", "alice", null, null, "notes.txt",
+            null, "text/plain", 10, "local", "upload/k/notes.txt", "upload", "injected",
+            java.time.LocalDateTime.now());
+        when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440006")).thenReturn(java.util.Optional.of(asset));
+        when(fileStorage.exists("upload/k/notes.txt")).thenReturn(true);
+        var resp = controller.download("550e8400-e29b-41d4-a716-446655440006", 1);
+        assertTrue(resp.getHeaders().getFirst("Content-Disposition").contains("inline"));
+        assertNull(resp.getHeaders().getFirst("Content-Security-Policy"),
+            "无脚本类型内联不应附加 CSP");
+    }
+
+    @Test
+    void downloadHtmlWithoutInlineStaysAttachment() throws Exception {
+        // 不带 ?inline=1：html 默认 attachment 下载，不渲染不执行
+        var asset = new FileAssetStore.FileAsset("550e8400-e29b-41d4-a716-446655440007", "alice", null, null, "page.html",
+            null, "text/html", 30, "local", "upload/k/page.html", "upload", "injected",
+            java.time.LocalDateTime.now());
+        when(fileAssetStore.get("550e8400-e29b-41d4-a716-446655440007")).thenReturn(java.util.Optional.of(asset));
+        when(fileStorage.exists("upload/k/page.html")).thenReturn(true);
+        var resp = controller.download("550e8400-e29b-41d4-a716-446655440007", 0);
+        assertTrue(resp.getHeaders().getFirst("Content-Disposition").contains("attachment"));
+        assertNull(resp.getHeaders().getFirst("Content-Security-Policy"),
+            "attachment 路径无需 CSP");
     }
 
     @Test

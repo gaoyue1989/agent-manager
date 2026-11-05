@@ -52,7 +52,7 @@ public class TurnStopWatcher {
     private static final class Registration {
         final String sessionId;
         final String replyId;
-        /** true = 排队中（尚无 agent 执行：只置停止标记并消费行，不调 interrupt） */
+        /** true = 排队中（尚无 agent 执行：命中停止行只置内存标记，行由取消动作消费，不调 interrupt） */
         final boolean queued;
         final AtomicBoolean interruptedLogged = new AtomicBoolean(false);
         volatile long firstRequestedAtMs;
@@ -78,9 +78,10 @@ public class TurnStopWatcher {
     }
 
     /**
-     * 登记一个排队中的 turn（尚无事件/agent 实例）。命中停止时只置标记并消费行，
-     * 由 {@code ChatStreamController} 的排队 loop 读到标记后收流——避免排队期每拍一次
-     * DB 查询（全局轮询已经把所有行读回来了）。
+     * 登记一个排队中的 turn（尚无事件/agent 实例）。命中停止行时只置内存标记（**不消费行**，
+     * issue #228：行是唯一权威，必须活到「取消动作」发生才消失），由 {@code ChatStreamController}
+     * 的排队 loop 下一拍读到标记后收流——或由租约交接点（{@link #unregisterRegistrationOnly}）
+     * 原子取回标记后取消。这样避免排队期每拍一次 DB 查询（全局轮询已经把所有行读回来了）。
      */
     public void registerQueued(String sessionId, String replyId) {
         if (sessionId == null || replyId == null || replyId.isBlank()) {
@@ -89,11 +90,23 @@ public class TurnStopWatcher {
         active.put(replyId, new Registration(sessionId, replyId, true));
     }
 
-    /** 仅移除登记、不消费停止行（排队 → 执行的交接；行留给执行态派发）。 */
-    public void unregisterRegistrationOnly(String replyId) {
-        if (replyId != null) {
-            active.remove(replyId);
+    /**
+     * 排队 → 执行的交接点：原子移除排队登记并取回停止标记（issue #228）。
+     *
+     * <p>返回 true = 排队期间已受理停止请求（标记已置位）：调用方必须当场取消本 turn——
+     * 消费 turn_stop 行（{@link #unregister}）并以 cancelled 收流，turn 不得起跑。
+     * 返回 false = 本 turn 无排队期停止请求，turn_stop 行留在表里，交给执行态派发
+     * （{@link #register} 之后的全局轮询 ≤1 个周期内投递 interrupt）。
+     *
+     * <p>原子性：remove 即取回登记，消除「先查标记再移除」两步之间的 TOCTOU——标记在
+     * 两步之间被轮询置位时，true 语义不会丢（issue #228 竞态窗口的收敛点）。
+     */
+    public boolean unregisterRegistrationOnly(String replyId) {
+        if (replyId == null) {
+            return false;
         }
+        var reg = active.remove(replyId);
+        return reg != null && reg.interrupted;
     }
 
     /**
@@ -144,13 +157,15 @@ public class TurnStopWatcher {
 
     private void dispatch(Registration reg) {
         if (reg.queued) {
-            // 排队 turn：没有 agent 实例可中断——消费停止行并置标记，排队 loop 下一拍收流
-            if (stopStore.consume(reg.sessionId, reg.replyId)) {
-                reg.interrupted = true;
-                if (reg.interruptedLogged.compareAndSet(false, true)) {
-                    log.info("[turn-stop] queued turn cancelled: sid={}, rid={}",
-                        reg.sessionId, reg.replyId);
-                }
+            // 排队 turn：没有 agent 实例可中断——只置内存标记，**不消费行**（issue #228）。
+            // turn_stop 行是唯一权威，必须活到「取消动作」发生才消失；若在此提前消费，
+            // 「排队 loop 末次检查已过 + 本拍 tryAcquire 得手」的竞态窗口会静默丢请求
+            // （租约交接之后无人再回头检查标记，turn 照常跑完）。消费权归两个既有收口：
+            // 排队 loop 命中/交接点取消（unregister → consume）与 turn 收尾清理。
+            reg.interrupted = true;
+            if (reg.interruptedLogged.compareAndSet(false, true)) {
+                log.info("[turn-stop] stop requested for queued turn: sid={}, rid={}",
+                    reg.sessionId, reg.replyId);
             }
             return;
         }

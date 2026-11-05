@@ -81,7 +81,7 @@ agent-manager/
 ├── agent-framework/    # 业务 Agent 运行时（Java，A2A/单次流/Debug Console）
 ├── release-agent/      # 智能发布助手的 OAF 包（mcp-configs → 平台 MCP）
 ├── manifests/          # 平台自举清单（ns/PVC/RBAC/MySQL/backend/frontend/router/ingress）
-├── charts/             # oaf-platform Helm Chart（离线部署）
+├── charts/             # Helm Charts：oaf-platform（离线部署）+ oaf-agent（跨集群导出交付）
 ├── e2e/                # 回归脚本（console-split 按功能套件 + 存量 A~E 场景）
 ├── demo/               # order-fulfillment 多 Agent 协同演示（Agent Protocol 远程子 agent）
 └── docs/               # 部署指南 + OAF 规范 + 设计归档（docs/design/）+ 实施记录（docs/implementation/）
@@ -132,14 +132,14 @@ cd frontend && npm run lint && npm run build   # 前端 lint + 构建
 cd agent-framework && mvn test                 # 业务运行时单测
 
 # E2E（需本地 kind 集群且平台已部署）
-cd e2e/console-split && ./run-all.sh           # 控制台九模块（auth/治理/构建/详情/模型/工具/集成/空间资产）
+cd e2e/console-split && ./run-all.sh           # 控制台十二模块（m0-m11：auth/治理/控制台基础/构建/详情/模型/工具/集成/空间资产/技能/沙箱/工作空间配置）
 cd e2e && ./platform-e2e.sh                    # A/B：REST 主链路 + 动作矩阵
 cd e2e/mcpclient && go run . -zip ../fixtures/demo-agent-v1.zip   # C：MCP 全链路
 cd e2e && node ui-e2e.js                       # D：UI 流程
 cd e2e && ./agent-e2e.sh                       # E：发布助手自然语言驱动
 ```
 
-CI（GitHub Actions）按改动目录过滤触发三个工作流（backend / frontend / agent-framework），master 分支强制 PR 门禁，详见 `.github/workflows/`。
+CI（GitHub Actions）按改动目录过滤触发五个工作流（backend / frontend / agent-framework / charts / platform-e2e-ci），master 分支强制 PR 门禁，详见 `.github/workflows/`。
 
 ## 注意事项
 

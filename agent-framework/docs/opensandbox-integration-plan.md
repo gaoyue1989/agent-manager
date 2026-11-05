@@ -1,7 +1,7 @@
 # OpenSandbox 集成设计方案
 
 >
-> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。USER 级复用（`IsolationScope.USER`） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由自研 `RedisSandboxExecutionGuard` 串行化（Redis `SET NX PX` + Lua 释放，`SANDBOX_GUARD_ENABLED` 默认 true；2026-09 起取代初版依赖的框架注入 `JdbcSandboxExecutionGuard`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
+> **现状核对（2026-09-07）**：沙箱集成已落地，**默认关闭**（`SANDBOX_ENABLED=false`）；开启后 `filesystem` 由 `RemoteFilesystemSpec` 切到 `OpenSandboxFilesystemSpec`（`SandboxBackedFilesystem`），文件/Shell 在 OpenSandbox 容器内执行。隔离复用（`SANDBOX_SESSION_AGENT_ISOLATION` 默认 true：Channel 链路每会话一个 slot/容器，A2A 链路每用户一个） + `WorkspaceSyncService` 每次请求后回写 MEMORY.md/memory/ → agent_fs；并发由自研 `RedisSandboxExecutionGuard` 串行化（Redis `SET NX PX` + Lua 释放，`SANDBOX_GUARD_ENABLED` 默认 true，锁粒度跟随 slot；2026-09 起取代初版依赖的框架注入 `JdbcSandboxExecutionGuard`）。`SandboxAwareMysqlAgentStateStore` 放宽 slot ID 校验以容纳沙箱 ID 中的 `/`。运行时环境变量见 [agent-framework-design.md](agent-framework-design.md) §5.3，测试覆盖见 [agent-framework-test.md](agent-framework-test.md) §8.1。
 
 ## 1. 背景与目标
 
@@ -957,7 +957,8 @@ public class WorkspaceSyncService {
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | 覆盖镜像默认启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | 注入沙箱容器 `EXECD_API_GRACE_SHUTDOWN`，execd 每条命令 SSE 结束后的尾窗保持时间 |
 | `SANDBOX_PROJECTION_ENABLED` | `true` | 工作区投影开关（issue #27 缓解项；关闭后每次 sandbox start 不再 hydrate 投影目录） |
-| `SANDBOX_GUARD_ENABLED` | `true` | 并发执行守卫（`RedisSandboxExecutionGuard`，Redis `SET NX` 串行化同 userId 沙箱获取） |
+| `SANDBOX_GUARD_ENABLED` | `true` | 并发执行守卫（`RedisSandboxExecutionGuard`，Redis `SET NX` 串行化同隔离键沙箱获取；锁粒度跟随 slot——`SANDBOX_SESSION_AGENT_ISOLATION` 开启（默认）时 Channel 链路每会话一把、A2A 链路每用户一把，关闭时经 session_user 反查真实用户每用户一把） |
+| `SANDBOX_SESSION_AGENT_ISOLATION` | `true` | per-session agent 隔离：每会话独立 Agent 实例与沙箱 slot/容器（Channel 链路），消解同用户两会话单槽互踩；2026-10-21 起默认 true，兼定守卫锁粒度 |
 | `SANDBOX_GUARD_LEASE_SECONDS` | `900` | 守卫租约 TTL（崩溃自愈） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | API 密钥 |
@@ -1056,7 +1057,7 @@ USER 级别共享时，同一用户的并发请求需要串行化。AgentScope �
 - `RedisSandboxExecutionGuard`（基于 Redis `SET NX PX`）
 - `JdbcSandboxExecutionGuard`（基于 MySQL `GET_LOCK()`）
 
-当前（2026-09 起）由 `AgentScopeConfig` 显式注入自研 `RedisSandboxExecutionGuard`（`SANDBOX_GUARD_ENABLED` 默认 true，Redis `SET NX PX` + Lua 释放，key 前缀 `sbx:guard`，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)）；初版依赖的「`DistributedStore` 配置时框架自动注入 `JdbcSandboxExecutionGuard`」路径已不使用。
+当前（2026-09 起）由 `AgentScopeConfig` 显式注入自研 `RedisSandboxExecutionGuard`（`SANDBOX_GUARD_ENABLED` 默认 true，Redis `SET NX PX` + Lua 释放，key 前缀 `sbx:guard`，见 [redis-cluster-prefix-design.md](redis-cluster-prefix-design.md)）；初版依赖的「`DistributedStore` 配置时框架自动注入 `JdbcSandboxExecutionGuard`」路径已不使用。锁粒度跟随 slot（2026-10-21 起）：ISOLATION 开启（默认）时锁键直接用隔离键原值，Channel=前端 sid、A2A=真实用户；关闭时反查真实用户组键（共享单例 agent 时代旧行为）。
 
 ### 7.4 资源清理
 

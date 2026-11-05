@@ -1,6 +1,6 @@
 # OAF 跨集群导出发布设计（测试环境 → 生产跨集群交付）— 设计文档
 
-**日期**：2026-10-29　**状态**：设计定稿（评审决议齐备，未实施）
+**日期**：2026-10-29　**状态**：设计定稿（2026-10-29）；v1 已实施合入 master（2026-10-30 PR #209，2026-11-03 PR #220 修复迭代），实施偏差见 [docs/implementation/cross-cluster-export-contract.md](../implementation/cross-cluster-export-contract.md) §9（D1-D13）
 
 > 本文档记录 2026-10-29 评审定稿的跨集群导出发布方案。四项关键决议见 §0，正文按决议编写；被否决的备选路径（独立镜像同步服务、values 占位符脱敏）仅在 §0 与 §13 v2 演进中留痕。配套可交互原型 [demo/cross-cluster-export-demo.html](demo/cross-cluster-export-demo.html)（单文件离线可开：导出发布页 / 运维默认配置 / 生产部署 / 交付包与 DoD）。
 
@@ -351,7 +351,7 @@ v1 中 `approving → approved → deploying` 由运维在平台人工推进（�
 
 1. **敏感键路由**：沿用 platformconfig 模板 sensitiveKeys 清单，values 中落 `secretEnv` 段（渲染为服务 Secret），普通键落 `env` 段（ConfigMap）；
 2. **明文 values 的边界**（决议 ① 接受的代价）：values 含明文敏感值，仅经 ITSM 密级流转与平台下载（下载写审计日志：操作人/时间/导出单号）；导出单详情接口对 `values_yaml` 不做明文回显，只提供文件下载；
-3. **推送凭证**：registry 推送凭证存平台 Secret，注入 backend 进程 env，不进导出单、values、manifest 任何产物；
+3. **推送凭证**：registry 推送凭证存平台 Secret，注入 backend 进程 env，不进导出单、values、manifest 任何产物；且仅作用于推送目标 registry——基底拉取对非推送 registry 一律匿名，凭证不送达第三方 registry token 端点（issue #227，契约 §9-D14）；
 4. **包内密钥**：OAF 包配置文件一律 `${ENV_VAR}` 占位引用密钥，包本身可入库、可构建镜像、不携带明文；
 5. **manifest 审计链**：导出单号 ↔ 包 checksum ↔ 镜像 digest ↔ ITSM 工单号四方关联，生产侧可校验「部署的 values 就是审批的那份」。
 

@@ -61,12 +61,15 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 ```
 /root/agent-manager/
 ├── backend/            # Go 管理后端（REST /api/v1 + MCP /mcp 同进程）→ backend/AGENTS.md
-├── frontend/           # Next.js 前端（服务列表/发布向导/详情/发布助手对话）
+├── frontend/           # Next.js 控制台（JWT 登录/用户侧工作空间/运维侧治理/发布助手对话）
 ├── agent-framework/    # 业务 Agent 运行时（Java）→ agent-framework/AGENTS.md
 ├── release-agent/      # 智能发布助手 OAF 包源文件
-├── manifests/          # 平台自举清单（platform/platform-ingress/frontend.yaml）
-├── e2e/                # 全流程回归脚本 → e2e 内 package.json
-└── docs/               # 部署指南(deployment.md) + 规范参考(oaf-specification.md) + 设计归档(design/，索引见 design/README.md)
+├── manifests/          # 平台自举清单（platform/platform-router/platform-ingress/frontend.yaml + ci/ CI overlay）
+├── charts/             # Helm Charts：oaf-platform（离线部署）+ oaf-agent（跨集群导出交付）
+├── e2e/                # 全流程回归脚本（console-split 按模块套件 + 存量 A~E 场景）→ e2e 内 package.json
+├── demo/               # order-fulfillment 多 Agent 协同演示（Agent Protocol 远程子 agent）
+├── scripts/            # 辅助脚本（每日更新日志 gen-daily-changelog.sh）
+└── docs/               # 部署指南(deployment.md) + 规范参考(oaf-specification.md) + 设计归档(design/，索引见 design/README.md) + 实施记录(implementation/)
 ```
 
 ---
@@ -132,8 +135,9 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run test` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（2026-10-21 实跑 1573 用例 / 0 失败 / 5 跳过）+ `eval-selftest`（评测飞轮离线自检） | 核心/多副本/沙箱/工具插件四 job（见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907） |
-| charts-ci | `helm lint` + `helm template`（CI 占位必填值渲染全量对象） | — | — |
+| agent-framework-ci | `mvn test`（2026-10-21 实跑 1573 用例 / 0 失败 / 5 跳过）+ `eval-selftest`（评测飞轮离线自检） | E2E 矩阵八 job：核心/多副本/沙箱/协议多副本 P 组（必需）+ AG-UI/路由 RT/协议 T 组/工具插件（非必需；见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907）；另推评测镜像 `gaoyue1989/eval-collector`、`gaoyue1989/eval-studio`:{vYYYYMMDD, latest} |
+| charts-ci | `helm lint` + `helm template` ×2（oaf-platform 与 oaf-agent 两 chart，CI 占位必填值渲染全量对象） | — | — |
+| platform-e2e-ci | — | `E2E 平台（kind + 控制台全功能）`：kind 集群 + 仓库清单自举 + `platform-e2e.sh`（A/B）+ console-split m0-m11 + `console-ui-e2e.js`（2026-10-22 起纳入必需检查） | — |
 
 ### 日常提交流程（必须走 PR 门禁）
 
@@ -151,7 +155,7 @@ git push origin feat/xxx
 #      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）/ E2E 协议多副本（P 组）
 #      E2E 平台（kind + 控制台全功能）/ Chart 校验 (helm lint + template)
 #    另有一批非必需 job 同步跑（红只告警不挡合并，但应一并修）：
-#      评测自检 / 评测离线回放 / E2E 工具插件 / E2E 路由模式 / E2E 协议（T 组）
+#      评测自检 / 评测离线回放 / E2E 工具插件 / E2E 路由模式 / E2E 协议（T 组）/ E2E AG-UI 协议面（AG 组）/ oaf-agent Chart 校验
 
 # 4. 全绿后合并（网页 Merge 按钮）
 #    红了就修：提交会自动重跑检查
@@ -160,7 +164,7 @@ git push origin feat/xxx
 ### 分支保护（master，强制）
 
 - **九项必需状态检查**：上表三个单测 + agent-framework 四个 E2E job（核心/多副本/沙箱/协议多副本 P 组，§18.4）+ `E2E 平台（kind + 控制台全功能）` + `Chart 校验 (helm lint + template)`；未全绿合并请求被拒（`blocked`）
-- **新增 job 默认不是必需检查**：`E2E 工具插件`、`E2E 路由模式`、`E2E 协议（T 组）`、`评测自检`、`评测离线回放` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
+- **新增 job 默认不是必需检查**：`E2E 工具插件`、`E2E 路由模式`、`E2E 协议（T 组）`、`E2E AG-UI 协议面（AG 组）`、`oaf-agent Chart 校验`、`评测自检`、`评测离线回放` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
 - **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
 - **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR
 - **禁止 force push / 删除分支**

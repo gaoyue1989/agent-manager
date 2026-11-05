@@ -112,7 +112,8 @@ Accept: text/event-stream
   "message": "你好",
   "userId": "alice",
   "sessionId": "my-session-1",
-  "fileIds": []
+  "fileIds": [],
+  "skills": ["refund"]
 }
 ```
 
@@ -123,6 +124,7 @@ Accept: text/event-stream
 | `sessionId` | String | ❌ | 会话 ID（不传则自动生成 UUID） |
 | `model` | String | ❌ | 会话级模型选择（`model_config.id`）。`""`/`"system"` 清除覆盖回默认；未知或已停用 → error 帧 `unknown_model` / `model_disabled` |
 | `fileIds` | Array\<String\> | ⚠️ | 上传文件 ID 列表 |
+| `skills` | Array\<String\> | ❌ | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进 `<available_skills>`、不可 `load_skill_through_path` 加载、`@Skill` 不注入；未知技能名忽略、已禁用技能剔除） |
 
 **新会话 SSE 响应示例：**
 

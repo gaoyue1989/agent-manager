@@ -1,11 +1,12 @@
 -- =============================================================================
 -- agent-framework 全量建表语句（MySQL 8.0）
 -- =============================================================================
--- 来源：db/migration/V1..V13 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
+-- 来源：db/migration/V1..V14 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
 --       存量库自动 baseline；本文件为快照式全量参考，以迁移脚本为权威）
 -- 生成日期：2026-09-28（对应 commit 60dd006）；2026-10-25 增补 V10 turn_intent、
 --           V11/V12 model_config.is_default/is_fallback（对应 commit e729a67）；
---           2026-10-27 增补 V13 turn_stop（单轮停止请求）
+--           2026-10-27 增补 V13 turn_stop（单轮停止请求）；2026-10-29 增补
+--           V14 session_message.trace_id（Monitor 回放 ↔ Jaeger trace，issue #205）
 --
 -- 数据库：CHECKPOINT_JDBC_URL 指向的库（默认 agent_manager_test）
 --         CHECKPOINT_DB_NAME 可显式指定 agent_state 所在库名（未设时从 JDBC URL 解析）
@@ -89,6 +90,7 @@ CREATE TABLE IF NOT EXISTS session_user (
 -- 开关：AGENT_HISTORY_ARCHIVE_ENABLED（默认 true；false = 不写不查）
 -- 清理：SessionCleanupService 按 updated_at 保留期删除（与 agent_state 同 7 天）
 -- 幂等：唯一键 (session_id, msg_id)，重复归档按 mergeMsgJson 合并
+-- trace_id：V14 增，OTel traceId（首非空值优先，历史行 NULL），Monitor 回放「消息 ↔ Jaeger trace」入口
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS session_message (
     id         BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -97,6 +99,7 @@ CREATE TABLE IF NOT EXISTS session_message (
     kind       VARCHAR(32)  NOT NULL DEFAULT 'message',
     role       VARCHAR(32)  DEFAULT NULL,
     reply_id   VARCHAR(64)  DEFAULT NULL,
+    trace_id   VARCHAR(32)  DEFAULT NULL,
     msg_data   LONGTEXT     NOT NULL,
     created_at DATETIME(3)  NOT NULL,
     updated_at DATETIME(3)  NOT NULL,
@@ -276,7 +279,7 @@ CREATE TABLE IF NOT EXISTS turn_stop (
 -- =============================================================================
 -- 部署注意
 -- =============================================================================
--- 1. 表结构演进一律走 Flyway（db/migration/V1..V13，启动自动执行；存量库自动
+-- 1. 表结构演进一律走 Flyway（db/migration/V1..V14，启动自动执行；存量库自动
 --    baseline，多副本历史表锁互斥，失败即启动失败——纪律见
 --    docs/design/db-migration-flyway-design.md）：新建库无需手动执行本文件；
 --    **禁止**在 Store 构造器或请求路径手工 DDL，禁止修改已合并的 V 文件

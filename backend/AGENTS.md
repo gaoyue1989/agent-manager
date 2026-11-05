@@ -23,21 +23,22 @@ backend 是控制面，业务服务数据面不经 backend 进程。以下为强
 
 ```
 backend/
-├── cmd/server/main.go          # 入口：装配 REST + MCP + K8s + DB
-├── config/config.go            # 环境变量（MYSQL_DSN 必填无默认）
+├── cmd/server/main.go          # 入口：装配 REST + MCP + K8s + DB（含导出镜像构建器 imagebuilder 注入）
+├── config/config.go            # 环境变量（MYSQL_DSN、JWT_SECRET 必填无默认）
 ├── Dockerfile                  # golang:1.26 多阶段构建
 ├── templates/                  # deployment-overlay.example.yaml / ingress-overlay.example.yaml（overlay 示例）
 ├── internal/
-│   ├── handler/                # Gin 薄层（respond/middleware/router）
+│   ├── handler/                # Gin 薄层（respond/middleware/router + auth/console/admin/export/workspaceconfig）
 │   ├── mcpsrv/server.go        # MCP 工具门面（go-sdk v1.3.1 streamableHttp）
-│   ├── service/                # 业务层：package/publish/register/status/env/envroute/platformconfig
+│   ├── service/                # 业务层：package/publish/register/status/env/envroute/platformconfig + console 域（identity/governance/modelconn/mcpconnector/skillcenter 等）+ 导出域（exportorder/exportpackage/exportvalues/workspaceruntime）
 │   │   ├── platformconfig/     # 平台默认配置字段模板（全仓唯一字段定义源）
 │   │   └── package_version.go  # 包在线预览/编辑派生（FileContent/Zip/CreateVersion）
 │   ├── k8s/                    # client-go typed 封装 + 对象构造（纯函数可测）
 │   │   ├── template.go         # DeploymentBuilder/IngressBuilder：内置构造 + overlay(SMP) + 不变量校验
 │   │   └── k8sfake/            # 测试用 fake Client 实现
-│   ├── store/                  # GORM 模型（oaf_packages/services/service_events/platform_config）+ PVC 文件操作
-│   └── oaf/oaf.go              # OAG v0.8.0 frontmatter 解析校验（宽松模式 warnings）
+│   ├── imagebuilder/           # 导出配置镜像构建器（busybox 基底 + 包 tar 层挂 /oaf，go-containerregistry remote.Write 直推）
+│   ├── store/                  # GORM 模型（packages/services/platform_config + 控制台 users/workspaces/技能/导出 export_orders 各域）+ PVC 文件操作
+│   └── oaf/oaf.go              # OAF v0.8.0 frontmatter 解析校验（宽松模式 warnings）
 ```
 
 ## 启动
@@ -60,6 +61,17 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
 - zip 安全校验：20MB/2000 条目/100MB 解压上限、zip-slip 与符号链接拒绝、文件最低 0644（业务 Pod 非 root 需可读）；超限类错误（ErrZipTooLarge/ErrTooManyFiles/ErrExtractTooLarge）统一 400 JSON（issue #165）——入口链路（宿主机 nginx / ingress-nginx `proxy-body-size: 200m` / platform-router `client_max_body_size`）须宽于应用 20MB 上限，超限由 backend 出 JSON
 - skills/ 目录合规检查（issue #163）：`service/skillcheck.go` `checkSkillDirs` 宽松模式——上传登记写包 `warningsJson`、`SpaceSkills` 产条目 `issues`；规则对齐运行时 OafConfigLoader 降级验证（SKILL.md 存在性 / frontmatter name/description / 名称正则与 64 长度 / 描述 1024），只提示不阻断
 - 导入模式 env（issue #161）：`CreateAgentImport` 与 harness 同走 `buildPublishEnv`——平台默认恒合并、模型连接可选（勾选则校验+注入+下发登记）；派生副本发布失败回删，本空间已上传包保留
+
+## 控制台与跨集群导出（auth/console/admin + export/workspaceconfig + imagebuilder）
+
+- **控制台三面**（2026-10 console-user-workspace-split）：`/api/v1/auth/*`（login/me/introspect）、`/api/v1/console/*`（JWT，用户侧工作空间：agents/assets/integrations/workspace-config/exports 等）、`/api/v1/admin/*`（JWT-admin 或 AUTH_TOKEN，治理面）；`JWT_SECRET` 必填（缺失启动 fail-fast），`ADMIN_INIT_USER/PASSWORD` 仅 users 空表时种子首个 admin；存量 `{services,packages,images,platform-config}` 与 `/mcp` 语义不变
+- **跨集群导出发布 v1**（2026-10-30，设计 [../docs/design/cross-cluster-export-design.md](../docs/design/cross-cluster-export-design.md)、契约 [../docs/implementation/cross-cluster-export-contract.md](../docs/implementation/cross-cluster-export-contract.md)）：新表 `export_package_marks`/`export_orders`/`workspace_runtime_defaults`；**导出链路对业务 K8s 集群零写入**（不触碰控制面红线）
+  - 发布标记冻结（`exportpackage.go`）：每服务至多一条 draft，打标记冻结为自包含快照（全文件 base64 + checksum，不回读源包——源包可能已被换版/删除），marker `{包版本}-e{N}` 复合唯一 (service_id, marker)；标记不可修改，是镜像构建唯一输入
+  - 导出单（`exportorder.go`）：状态机 draft→building→built→approving→approved→deploying→deployed（非终态可入 failed/cancelled），v1 由运维人工推进（记录操作人 + ITSM 单号）；异步构建 goroutine 与 `asyncWaitAndRegister` 同属进程内后台推进——backend 重启丢 in-flight 停留 building，靠重建导出单解救（同 marker 幂等重推，内容寻址 digest 不变）
+  - values/manifest 渲染（`exportvalues.go`）：四层合并 L0 chart 默认 < L1 工作空间运行时默认 < L2 用户导出覆盖（仅新增，撞 L1 已配置键/L3 保留键 400）< L3 平台生成；敏感键（platformconfig.SensitiveKeys() ∪ 请求 secretKeys）路由 values `secretEnv` 段（chart 渲染为服务 Secret）
+  - OAF 配置镜像直推（`internal/imagebuilder`）：busybox 基底（`EXPORT_BASE_IMAGE`，默认 busybox:1.36）+ 包目录 tar 层挂 /oaf，go-containerregistry `remote.Write` 直推目标仓库（仓库名 `oaf-{short}`）——纯数据镜像、无 docker 依赖、无特权；`EXPORT_REGISTRY_USERNAME/PASSWORD` 为仓库凭据，仅作用于推送目标 registry（基底拉取对非推送 registry 一律匿名，凭证不送达第三方 token 端点，issue #227）；`core.Images` 未装配时创建导出单 400 不降级假成功
+  - 交付物：charts/oaf-agent Helm chart + `values.yaml`/`manifest.json`（ValuesYAML 不进 JSON 响应，仅 `/console/exports/:id` 文件端点下载并写审计）；人工推进 `POST /console/exports/:id/status`（归属与 owner/admin 权限由 service 层裁决）
+- **工作空间配置**（`workspaceconfig.go` + `workspaceruntime.go`）：`/console/workspaces/:ws/config/*`——runtime-defaults 读写（GET=成员，PUT=owner/admin）+ templates/:group、registry、mcp-connectors 骨架端点；runtime-defaults 键空间 = 24 模板键（KnownKeys − CHECKPOINT_JDBC_URL）+ 8 导出键，三态语义对齐 UpdatePlatformConfig（非空=设置、空串=删除、缺失=不变）
 
 ## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
 

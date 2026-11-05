@@ -6,7 +6,8 @@
 （`LLM_REASONING_EFFORT` / `LLM_FREQUENCY_PENALTY`、`AGENT_REDIS_MODE/_CLUSTER_NODES/_PREFIX`、
 `AGENT_HISTORY_ARCHIVE_ENABLED`、Agent Protocol 与 A2A 幂等 Job 两段）并订正 Flyway 问答；
 2026-10-25 补录 `AGENT_AGUI_ENABLED`（§4.1.14）、`SANDBOX_SESSION_AGENT_ISOLATION`（默认 true）、
-`FILE_UPLOAD_ALLOWED_MIME` 默认值放行 html/mhtml（2026-10-22，6c7df12）
+`FILE_UPLOAD_ALLOWED_MIME` 默认值放行 html/mhtml（2026-10-22，6c7df12）；
+2026-11-04 补录单轮停止 `AGENT_TURN_STOP_ENABLED/_POLL_MS/_GRACE_MS`（§4.1.15，turn-stop-design V13）
 
 > **现状核对（2026-09-26）**：本版按 `application.yml` + 各 `@ConfigurationProperties` 重核并**补齐缺失变量**
 > （原 §4.1 缺约 30 个，含全部 `AGENT_REACT_*` / `AGENT_HTTP_*` / `AGENT_MEMORY_*` / `AGENT_COMPACTION_*` /
@@ -159,7 +160,7 @@ Tomcat started on port 8100
 | `LLM_CONTEXT_LENGTH` | int | `0` | | 模型上下文窗口大小（tokens，≤0 不传给模型，绑 `agent.llm.context-length`） |
 | `LLM_REASONING_EFFORT` | string | 空 | | 推理强度（如 `minimal`/`medium`/`high`；空 = 不传，2026-09-27 新增，绑 `agent.llm.reasoning-effort`） |
 | `LLM_FREQUENCY_PENALTY` | float | 空 | | 频率惩罚（空 = 不传，2026-09-27 新增，绑 `agent.llm.frequency-penalty`） |
-| `LLM_FALLBACK_MODEL_ID` | string | — | | 备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络）后自动切换；空 = 不启用（绑 `agent.llm.fallback-model-id`）。默认模型走 SDK 原生 fallback，会话自选模型由 `SessionModelMiddleware` 补齐；改动需 `POST /admin/reload` 生效（详见 [model-fallback-design.md](model-fallback-design.md)） |
+| `LLM_FALLBACK_MODEL_ID` | string | — | | 部署级备用模型：引用 `model_config` 托管模型 id，主模型重试耗尽（429/5xx/超时/网络，由 `ExecutionConfig` 先耗尽）后自动切换；空 = 不启用 env 备用（DB 侧 `model_config.is_fallback` 仍可生效且优先于本变量）（绑 `agent.llm.fallback-model-id`）。主/备用/默认模型均由 `SessionModelMiddleware` 每次模型调用动态解析包裹（agent 构建期不再调用 SDK 原生 fallbackModel，避免双重包裹；默认模型即 DB `model_config.is_default`，未配置回落系统模型）——DB 侧改动下一次模型调用即生效，本环境变量为启动期注入、改动需重启进程（详见 [model-fallback-design.md](model-fallback-design.md)） |
 
 #### 4.1.2 服务 / Spring
 
@@ -377,6 +378,16 @@ K8s Pod 内连接容器外 MySQL 需使用 Docker 网关 IP `172.20.0.1` 代替 
 | `AGENT_AGUI_ENABLE_REASONING` | bool | `true` | THINKING 增量下发（绑 `agent.agui.enable-reasoning`） |
 | `AGENT_AGUI_EMIT_SUBAGENT_EVENTS_AS_NATIVE` | bool | `false` | 子 agent 事件按 native 词表透出（绑 `agent.agui.emit-subagent-events-as-native`） |
 
+#### 4.1.15 单轮停止（`agent.turn-stop.*`）
+
+> 2026-10-27 新增（[turn-stop-design.md](turn-stop-design.md)）：`POST /threads/{sid}/stop` 的跨副本协作式中断。停止请求写共享存储 `turn_stop` 表（V13），属主副本全局轮询消费后调 SDK 按会话 interrupt，以 `cancelled` 终态帧收口。
+
+| 变量 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AGENT_TURN_STOP_ENABLED` | bool | `true` | 总开关；`false` 时端点返回 404、属主不轮询，行为回退「只能断流」（绑 `agent.turn-stop.enabled`） |
+| `AGENT_TURN_STOP_POLL_MS` | int | `1000` | 属主副本对 `turn_stop` 表的全局轮询周期（毫秒；所有活跃 turn 共用一次查询，成本与并发 turn 数无关，下限 100；绑 `agent.turn-stop.poll-interval-ms`） |
+| `AGENT_TURN_STOP_GRACE_MS` | int | `15000` | 协作式停止告警阈值：超时仍无终态打 WARN（通常是阻塞中的工具调用，SDK 检查点在工具返回后）（绑 `agent.turn-stop.grace-ms`） |
+
 ### 4.2 AGENTS.md 配置字段
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -473,6 +484,7 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/threads/{sid}/status` | **刷新恢复判态**（5 态；存储不可用返回 503） |
 | POST | `/threads/chat` | 单次流 SSE 对话（唯一对话入口，sessionId 在 body，支持 fileIds / model） |
 | POST | `/threads/{sid}/confirm` / `/confirm-stream` | HITL 人工确认（同步 / 流式） |
+| POST | `/threads/{sid}/stop` | 跨副本协作式单轮停止（写 `turn_stop` 表由属主副本消费 interrupt，以 `cancelled` 终态帧收口；202/404/409/503，`AGENT_TURN_STOP_ENABLED=false` 时 404） |
 | POST | `/files/upload` | 文件上传 |
 | GET | `/files/{fileId}` | 文件下载/预览（`?inline=1` 内联） |
 | GET/POST | `/models` | 托管模型列表 / 新建（会话模型选择器的数据源） |
