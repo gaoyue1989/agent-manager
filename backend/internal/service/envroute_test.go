@@ -1,7 +1,10 @@
 package service
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -84,4 +87,54 @@ func TestResolveEnvMergeDropsEmptyPlainKeys(t *testing.T) {
 	if secret["LLM_API_KEY"] != "sk-old" {
 		t.Fatalf("sticky secret must stay: %+v", secret)
 	}
+}
+
+// validateSecretKeys 输入规模校验（issue #234）：数量上限对齐 MaxEnvKeys、重复键显式拒绝，
+// 新错误均 %w wrap ErrInvalidForm 保证 handler 400；既有格式/保留键校验不回归。
+func TestValidateSecretKeys(t *testing.T) {
+	// 边界正例：恰好 64 键通过
+	keys64 := make([]string, 0, MaxEnvKeys)
+	for i := 0; i < MaxEnvKeys; i++ {
+		keys64 = append(keys64, fmt.Sprintf("MY_KEY_%d", i))
+	}
+	if err := validateSecretKeys(keys64); err != nil {
+		t.Fatalf("64 keys must pass: %v", err)
+	}
+	// 65 键 → ErrInvalidForm（数量上限）
+	keys65 := append(append([]string{}, keys64...), "MY_KEY_EXTRA")
+	err := validateSecretKeys(keys65)
+	if err == nil || !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("65 keys must wrap ErrInvalidForm: %v", err)
+	}
+	if !containsAll(err.Error(), "too many secret keys") {
+		t.Fatalf("65 keys message = %q, want 'too many secret keys'", err.Error())
+	}
+	// 重复键 → ErrInvalidForm（显式拒绝，不静默去重）
+	err = validateSecretKeys([]string{"MY_TOKEN", "MY_TOKEN"})
+	if err == nil || !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("duplicate keys must wrap ErrInvalidForm: %v", err)
+	}
+	if !containsAll(err.Error(), "duplicate secret key") {
+		t.Fatalf("duplicate message = %q, want 'duplicate secret key'", err.Error())
+	}
+	// 既有校验不回归：非法格式（不带 ErrInvalidForm 包装，靠 respond.go "env key" 子串 400）
+	err = validateSecretKeys([]string{"illegal-key"})
+	if err == nil || errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("illegal key: err = %v", err)
+	}
+	// 保留键（平台保留键出现在 secretKeys 同样拒绝）
+	err = validateSecretKeys([]string{"AGENT_CONFIG_DIR"})
+	if err == nil || errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("reserved key: err = %v", err)
+	}
+}
+
+// containsAll 断言消息包含全部子串（测试辅助）。
+func containsAll(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			return false
+		}
+	}
+	return true
 }

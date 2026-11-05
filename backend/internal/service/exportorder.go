@@ -148,8 +148,11 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 		ChartVersion:    chartVersion,
 		BaseImage:       req.BaseImage,
 		OafImageRef:     oafRef,
-		Status:          store.ExportStatusBuilding,
-		RequestJSON:     mustJSON(req),
+		// Marker 落库单一事实源（issue #234 列表小列）：mark 已由 loadFrozenMark 校验为
+		// frozen 且与 req.Marker 相等；存量行由 store.Backfill 从 request_json 回填
+		Marker:      mark.Marker,
+		Status:      store.ExportStatusBuilding,
+		RequestJSON: mustJSON(req),
 		// ManifestJSON 先置合法 JSON 占位：列声明 gorm type:json（model.go:372），MySQL 8
 		// 拒绝空串入库（Error 3140 Invalid JSON text）；单号依赖自增 ID（exportOrderNo），
 		// 渲染只能在落库后进行，紧随其后的 renderExportArtifacts 落库即覆盖占位
@@ -402,7 +405,8 @@ func (c *Core) GetExportOrder(uid, orderID uint) (*store.ExportOrderEntity, erro
 }
 
 // ExportOrderListItem 导出单列表行（导出记录区，issue #216）：单号/marker/创建人等展示字段，
-// 不含 values/manifest 明文（values 模型 json:"-" 同红线；marker 从请求快照解析，快照损坏容忍留空）。
+// 不含 values/manifest 明文（values 模型 json:"-" 同红线）；marker 为落库独立小列
+// （issue #234，存量行经启动回填），异常行容忍留空——不再逐行解析 request_json 快照。
 type ExportOrderListItem struct {
 	ID             uint      `json:"id"`
 	OrderNo        string    `json:"orderNo"`
@@ -420,28 +424,27 @@ type ExportOrderListItem struct {
 
 // ListServiceExportOrders 服务导出单列表（导出记录区，issue #216——刷新后可找回导出单）：
 // 按 id 倒序全量；可见性 = 空间成员（cg 组 resolveWorkspace 已裁决，同导出页其余端点），
-// 推进权限仍由 AdvanceExportOrder 按 owner/admin 裁决。Select 排除 values_yaml/manifest_json
-// 大列（mediumtext/json 逐行拖拽无消费方）。
+// 推进权限仍由 AdvanceExportOrder 按 owner/admin 裁决。Select 排除 values_yaml/manifest_json/
+// request_json 大列（mediumtext/json 逐行拖拽无消费方，request_json 快照仅构建/重渲染链路读取）；
+// marker 取独立小列（issue #234，存量行经启动回填，异常行容忍留空）。
 func (c *Core) ListServiceExportOrders(wsID, svcID uint) ([]ExportOrderListItem, error) {
 	if _, err := c.loadServiceForExport(wsID, svcID); err != nil {
 		return nil, err
 	}
 	var orders []store.ExportOrderEntity
 	if err := c.DB.Where("service_id = ?", svcID).
-		Select("id, service_id, workspace_id, base_image, oaf_image_ref, oaf_image_digest, request_json, status, itsm_ticket_id, error, created_by, created_at, updated_at").
+		Select("id, service_id, workspace_id, base_image, oaf_image_ref, oaf_image_digest, marker, status, itsm_ticket_id, error, created_by, created_at, updated_at").
 		Order("id DESC").Find(&orders).Error; err != nil {
 		return nil, err
 	}
 	out := make([]ExportOrderListItem, 0, len(orders))
 	for i := range orders {
 		o := &orders[i]
-		var snap ExportOrderRequest
-		_ = jsonUnmarshalStrict(o.RequestJSON, &snap) // 历史行快照损坏容忍：marker 留空
 		out = append(out, ExportOrderListItem{
 			ID:             o.ID,
 			OrderNo:        exportOrderNo(o),
 			Status:         o.Status,
-			Marker:         snap.Marker,
+			Marker:         o.Marker,
 			BaseImage:      o.BaseImage,
 			OafImageRef:    o.OafImageRef,
 			OafImageDigest: o.OafImageDigest,

@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -85,8 +86,37 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			}
 			log.Printf("[migrate] seeded builtin skill market source")
 		}
+
+		// 7) export_orders：marker 独立小列存量回填（issue #234）。新行由 CreateExportOrder
+		// 落列，存量行从 request_json 快照解析 marker 回填。仅 SELECT id+request_json 两列
+		// （不拖 values_yaml/manifest_json mediumtext/json 大列，避免启动回填把存量每行大
+		// 产物拉进内存）；仅对解析出非空 marker 的行 UPDATE——解析失败/快照为空不报错不落写
+		// （与旧列表「快照损坏容忍留空」语义一致）。幂等：已回填行不再命中 Where 条件，
+		// 坏快照行零 UPDATE（仅重扫，写副作用严格为零）；仅写平台自有表（原则一）。
+		var stale []ExportOrderEntity
+		if err := tx.Model(&ExportOrderEntity{}).
+			Where("marker IS NULL OR marker = ''").
+			Select("id, request_json").Find(&stale).Error; err != nil {
+			return err
+		}
+		for i := range stale {
+			var snap exportOrderMarkerOnly
+			if err := json.Unmarshal([]byte(stale[i].RequestJSON), &snap); err != nil || snap.Marker == "" {
+				continue // 坏快照/空 marker 行容忍：留空，不报错不落写
+			}
+			if err := tx.Model(&ExportOrderEntity{}).Where("id = ?", stale[i].ID).
+				Update("marker", snap.Marker).Error; err != nil {
+				return err
+			}
+		}
 		return nil
 	})
+}
+
+// exportOrderMarkerOnly request_json 快照的最小解析结构（Backfill 第 7 步专用）：
+// 只取 marker 字段，env/secretKeys 等其余键忽略。
+type exportOrderMarkerOnly struct {
+	Marker string `json:"marker"`
 }
 
 // dedupPackageVersions (slug, version) 唯一索引的存量重复行归一（issue #172）。

@@ -19,9 +19,21 @@ func splitUserEnv(env map[string]string, secretKeys []string) (plain, secret map
 	return platformconfig.Split(env, force)
 }
 
-// validateSecretKeys 校验显式 secretKeys：键名格式与保留键（值合法性随 env 一并校验）。
+// validateSecretKeys 校验显式 secretKeys：数量上限（对齐 env 的 MaxEnvKeys，issue #234）、
+// 重复键、键名格式与保留键（值合法性随 env 一并校验）。上限/重复错误 %w wrap
+// ErrInvalidForm 保证 handler 400（对齐 validateChartVersion 先例，exportorder.go:47）；
+// 既有两条「illegal env key」/「reserved」错误保持原措辞（依赖 respond.go default 分支
+// 的 "env key" 子串映射，不可改写）。
 func validateSecretKeys(keys []string) error {
+	if len(keys) > MaxEnvKeys {
+		return fmt.Errorf("%w: too many secret keys: %d (max %d)", ErrInvalidForm, len(keys), MaxEnvKeys)
+	}
+	seen := make(map[string]bool, len(keys))
 	for _, k := range keys {
+		if seen[k] {
+			return fmt.Errorf("%w: duplicate secret key %q", ErrInvalidForm, k)
+		}
+		seen[k] = true
 		if !envKeyRe.MatchString(k) {
 			return fmt.Errorf("illegal env key %q", k)
 		}
