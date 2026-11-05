@@ -13,6 +13,13 @@ args:
   since:
     type: string
     description: 可选：显式指定窗口起始日期（YYYY-MM-DD），填写后覆盖 days
+  proxy:
+    type: string
+    description: git/gh 走的代理地址（如 http://127.0.0.1:7890）；本机可直连 GitHub 时传空字符串
+    default: http://127.0.0.1:7890
+  startAt:
+    type: string
+    description: 可选：定时启动时刻（24 小时制 HH:MM，本机时区），填写后先等待到该时刻再开始评审；留空立即开始
 */
 // ===== 近 N 天变更评审工作流（可保存复用）=====
 // 三轨并行：A 代码评审→独立复核→建 GitHub Issues；B 文档时效→独立核实→文档 PR；
@@ -151,14 +158,34 @@ artifact.board("deliverables", {
 // ---------- 参数 ----------
 const days = typeof args.days === "number" && args.days > 0 ? args.days : 14;
 const sinceArg = typeof args.since === "string" && args.since.trim() !== "" ? args.since.trim() : `-${days} days`;
+const proxy = typeof args.proxy === "string" ? args.proxy.trim() : "http://127.0.0.1:7890";
+const startAt = typeof args.startAt === "string" ? args.startAt.trim() : "";
 
 // ---------- 公共上下文 ----------
-const PROXY = "GitHub 网络操作必须走本地代理（本机直连 GitHub 不通）：git 命令加 -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890；gh 命令前缀 HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890";
+const GIT_PROXY = proxy === "" ? "" : ` -c http.proxy=${proxy} -c https.proxy=${proxy}`;
+const GH_PROXY = proxy === "" ? "" : `HTTPS_PROXY=${proxy} HTTP_PROXY=${proxy}`;
+const PROXY = proxy === ""
+  ? "GitHub 网络操作本机可直连：git 与 gh 命令一律不要加代理参数（不加 -c http.proxy/https.proxy，不设 HTTPS_PROXY/HTTP_PROXY）"
+  : `GitHub 网络操作必须走本地代理 ${proxy}（本机直连 GitHub 不通）：git 命令加${GIT_PROXY}；gh 命令前缀 ${GH_PROXY}`;
 const REPO_NOTES = `仓库背景：/root/agent-manager = OAF 服务发布平台。backend/（Go 控制面：REST /api/v1 + MCP /mcp、client-go）；agent-framework/（Java 业务面运行时：A2A、单次流、MCP 注册、HITL、MySQL checkpoint/Redis）；frontend/（Next.js 控制台）；charts/oaf-agent/（业务 Helm 图表）；e2e/ 与 agent-framework/e2e/（回归脚本）。
 架构强约束（违反即 high）：
 1) backend 是控制面：禁止启动路径 reconcile/sync-all/后台批量迁移业务 K8s 资源；禁止 ownerReferences/finalizer 把业务资源生命周期绑到平台对象；业务运行时不得依赖 backend 可用性。
 2) agent-framework 是业务面：影响正确性的状态只允许存 MySQL checkpoint/Redis 共享存储；Pod 本地内存/emptyDir 只放可丢弃缓存；禁止 sessionAffinity；多服务隔离靠 per-service checkpoint 库名与 Redis 前缀。
 3) 表结构演进只允许新增 Flyway 迁移文件；禁止修改已合并的 V 文件；禁止请求路径手工 DDL。`;
+
+// ---------- 可选：定时启动（等待到指定时刻再开始评审） ----------
+if (startAt !== "") {
+  phase("等待定时启动");
+  const waitSecRaw = (await world.run("sh", ["-c", `echo $(( $(date -d "today ${startAt}" +%s) - $(date +%s) ))`])).stdout.trim();
+  const waitSec = Number(waitSecRaw);
+  if (Number.isFinite(waitSec) && waitSec > 0) {
+    log(`定时启动：先等待 ${waitSec} 秒，到本地时间 ${startAt} 后自动开始评审`);
+    await world.run("sleep", [String(waitSec)], { timeoutMs: waitSec * 1000 + 60000, output: "discard" });
+    log(`已到 ${startAt}，开始评审`);
+  } else {
+    log(`startAt=${startAt} 已过或无效，立即开始评审`);
+  }
+}
 
 // ---------- 阶段一：盘点变更窗口 ----------
 phase("盘点变更窗口");
@@ -302,8 +329,8 @@ const trackA = future(async () => {
     issueOut = await agent("Issue提交员", { system: "你是 GitHub Issue 提交员：只依据清单创建真实、可执行的 issue，一切以 gh 命令的真实输出为准，绝不伪造创建结果；被阻塞时如实上报，不要绕过。" }).ask<IssueOutcome>(
       `为以下经独立复核成立的评审发现创建 GitHub Issues（仓库 gaoyue1989/agent-manager）。\n${PROXY}\n\n` +
       `步骤：\n` +
-      `1) 查重：HTTPS_PROXY=http://127.0.0.1:7890 gh issue list -R gaoyue1989/agent-manager --state open --limit 200 --json number,title，必要时再 --search 关键词；与已有 open issue 重复的跳过并记入 skipped（注明原因）\n` +
-      `2) HTTPS_PROXY=http://127.0.0.1:7890 gh label list -R gaoyue1989/agent-manager 看现有标签，选贴切的（如 bug/enhancement/security），没有贴切就不加\n` +
+      `1) 查重：${GH_PROXY} gh issue list -R gaoyue1989/agent-manager --state open --limit 200 --json number,title，必要时再 --search 关键词；与已有 open issue 重复的跳过并记入 skipped（注明原因）\n` +
+      `2) ${GH_PROXY} gh label list -R gaoyue1989/agent-manager 看现有标签，选贴切的（如 bug/enhancement/security），没有贴切就不加\n` +
       `3) 逐条创建：gh issue create -R gaoyue1989/agent-manager --title "<标题>" --body <正文>（多行正文建议写临时文件放 /tmp 再 --body-file）；标题用中文、不加 emoji；正文直接用清单中给出的 body\n` +
       `4) 创建后用 gh issue view 确认编号与 URL，输出 created（必须带回对应 findingId）/skipped\n` +
       `只依据下方清单创建，不添加清单外内容。\n【待建 Issue 清单】\n${JSON.stringify(issuesToFile, null, 1)}`,
@@ -378,8 +405,8 @@ const trackB = future(async () => {
       `   git -C /root/agent-manager worktree add /tmp/wt-docs-${since} -b docs/review-align-${since} master\n` +
       `2) 在 /tmp/wt-docs-${since} 内按清单逐条修改文档；update 为主，delete 仅当整篇/整节确实废弃；修改克制、聚焦清单内的问题\n` +
       `3) 提交：git -C /tmp/wt-docs-${since} add -A && git -C /tmp/wt-docs-${since} commit -m "docs: 对齐近 ${days} 天变更的文档滞后项"\n` +
-      `4) 推送：git -C /tmp/wt-docs-${since} -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push -u origin docs/review-align-${since}\n` +
-      `5) 建 PR：HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 gh pr create -R gaoyue1989/agent-manager --base master --head docs/review-align-${since} --title "docs: 对齐近 ${days} 天变更的文档滞后项" --body <逐条修改说明 + 来源：近 ${days} 天变更自动评审>\n` +
+      `4) 推送：git -C /tmp/wt-docs-${since}${GIT_PROXY} push -u origin docs/review-align-${since}\n` +
+      `5) 建 PR：${GH_PROXY} gh pr create -R gaoyue1989/agent-manager --base master --head docs/review-align-${since} --title "docs: 对齐近 ${days} 天变更的文档滞后项" --body <逐条修改说明 + 来源：近 ${days} 天变更自动评审>\n` +
       `   （若分支已存在导致 push 被拒，改用 docs/review-align-${since}-2 并同步调整后续命令）\n` +
       `6) 不要尝试合并（盯守员负责合并）；不要删除 worktree（失败修复时复用）\n\n` +
       `返回 PrOutcome：done/prNumber/prUrl/branch/worktree/summary（逐条改动）/localChecks（如用 grep 自检过引用一致性）/notHandled（未落实项+原因）。任何一步失败要如实返回，不要伪造。\n` +
@@ -483,8 +510,8 @@ const trackC = future(async () => {
     `3) 只新增/修改测试；若补测试必须改生产代码才能通过，说明这是缺陷——放弃该条并记入 notHandled；不要修改 AGENTS.md 或任何文档（文档由另一 PR 处理）\n` +
     `4) 本地验证（在 worktree 内）：agent-framework 用 mvn -f agent-framework/pom.xml test -Dtest=<类名>；backend 用 cd backend && go test ./internal/... -run <TestName>；frontend 需先在 worktree 的 frontend/ 内 npm install 再 npm test。失败就修到通过（最多迭代 3 轮；修不动就撤销该用例并记入 notHandled）\n` +
     `5) git add 相关测试文件 && commit -m "test(${scope}): 补齐近 ${days} 天变更的测试覆盖缺口"\n` +
-    `6) 推送：git -C /tmp/wt-test-${bucketKey} -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push -u origin ${branchName}\n` +
-    `7) 建 PR：HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 gh pr create -R gaoyue1989/agent-manager --base master --head ${branchName} --title "test(${scope}): 补齐近 ${days} 天变更的测试覆盖缺口" --body <逐条缺口与本地验证方式>\n` +
+    `6) 推送：git -C /tmp/wt-test-${bucketKey}${GIT_PROXY} push -u origin ${branchName}\n` +
+    `7) 建 PR：${GH_PROXY} gh pr create -R gaoyue1989/agent-manager --base master --head ${branchName} --title "test(${scope}): 补齐近 ${days} 天变更的测试覆盖缺口" --body <逐条缺口与本地验证方式>\n` +
     `   （若分支已存在导致 push 被拒，改用 ${branchName}-2 并同步调整）\n` +
     `8) 不要尝试合并（盯守员负责）；保留 worktree（失败修复时复用）\n\n` +
     `返回 PrOutcome：done/prNumber/prUrl/branch/worktree/summary（补了哪些）/localChecks（命令与结果）/notHandled（未补项+原因）。如实返回，不要伪造。\n` +
@@ -574,10 +601,10 @@ if (prList.length > 0) {
     await agent(`修复员-${repairs}`, { system: "你是谨慎的工程师：只修 CI 暴露的最小问题，一切以命令真实输出为准，绝不伪造成功；被阻塞时如实上报。" }).ask<PrOutcome>(
       `PR #${target.pr} 的必需检查失败：${target.note}\n\n${PROXY}\n\n` +
       `请在对应 worktree 中修复并推送（分支 ${ref.branch}，worktree ${ref.worktree}）：\n` +
-      `1) HTTPS_PROXY=http://127.0.0.1:7890 gh pr checks ${target.pr} -R gaoyue1989/agent-manager 找到失败 job；HTTPS_PROXY=http://127.0.0.1:7890 gh run view <run-id> -R gaoyue1989/agent-manager --log-failed 看失败日志（只读）\n` +
+      `1) ${GH_PROXY} gh pr checks ${target.pr} -R gaoyue1989/agent-manager 找到失败 job；${GH_PROXY} gh run view <run-id> -R gaoyue1989/agent-manager --log-failed 看失败日志（只读）\n` +
       `2) 在 ${ref.worktree} 内修最小必要的问题（只修 CI 暴露的问题，不扩大范围）\n` +
       `3) 本地跑对应的最小验证（定向测试/构建）\n` +
-      `4) commit（fix: ...）并 git -C ${ref.worktree} -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin ${ref.branch}，CI 自动重跑\n` +
+      `4) commit（fix: ...）并 git -C ${ref.worktree}${GIT_PROXY} push origin ${ref.branch}，CI 自动重跑\n` +
       `5) 不要合并，不要动主工作区\n` +
       `返回 PrOutcome（done=推送成功；summary=修了什么；localChecks）。失败要如实说。`,
     );
