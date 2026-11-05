@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.service.SandboxRuntime;
-import io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec;
 import io.agentmanager.framework.service.FileAssetStore;
 import io.agentmanager.framework.service.WorkspaceReader;
 import io.agentmanager.framework.service.storage.FileStorage;
@@ -46,6 +45,14 @@ class FileToolsTest {
 
     private RuntimeContext ctx() {
         return RuntimeContext.builder().userId("alice").sessionId("s1").build();
+    }
+
+    /** 模拟 HarnessAgent.acquireForCall 预置：本 turn 沙箱放入 ctx（present_file 的寻址来源） */
+    private RuntimeContext turnCtx(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox sandbox) {
+        var c = ctx();
+        c.put(io.agentscope.harness.agent.sandbox.SandboxAcquireResult.class,
+            io.agentscope.harness.agent.sandbox.SandboxAcquireResult.userManaged(sandbox));
+        return c;
     }
 
     // ===== present_url（外部交付物登记，docs/design/oaf-tools-extraction-design.md）=====
@@ -180,10 +187,9 @@ class FileToolsTest {
         // 沙箱注册形态：present_file 仅 file_path 单参数（无 file_content_base64），
         // present_url 透传保留（Toolkit.registerTool 只扫 getDeclaredMethods，必须子类重声明）
         when(sandboxRuntime.enabled()).thenReturn(true);
-        var spec = mock(OpenSandboxFilesystemSpec.class);
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         var t = new FileTools.SandboxAwareFileTools(fileAssetStore, fileStorage, props,
-            sandboxRuntime, mock(WorkspaceReader.class), spec, null);
+            sandboxRuntime, mock(WorkspaceReader.class), null);
 
         var presentFileParams = new java.util.HashSet<String>();
         for (var p : t.getClass().getDeclaredMethod("presentFile",
@@ -208,17 +214,15 @@ class FileToolsTest {
     void sandboxSubclassPresentFileReadsDirectlyFromSandbox() throws Exception {
         // 沙箱形态单参数调用 → 走沙箱直读并登记成功（大文件链路的实际入口）
         when(sandboxRuntime.enabled()).thenReturn(true);
-        var spec = mock(OpenSandboxFilesystemSpec.class);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
-        when(spec.getLatestSandbox()).thenReturn(sandbox);
         when(sandbox.getUserKey()).thenReturn("alice");
         when(sandbox.readWorkspaceFile("outputs/big.pptx")).thenReturn(
             new byte[2 * 1024 * 1024]);
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         var t = new FileTools.SandboxAwareFileTools(fileAssetStore, fileStorage, props,
-            sandboxRuntime, mock(WorkspaceReader.class), spec, null);
+            sandboxRuntime, mock(WorkspaceReader.class), null);
 
-        var result = t.presentFile(ctx(), "/workspace/outputs/big.pptx");
+        var result = t.presentFile(turnCtx(sandbox), "/workspace/outputs/big.pptx");
         assertTrue(result.contains("\"file_id\""), "沙箱直读应登记成功: " + result);
         assertTrue(result.contains("\"size\":2097152"), "2MB 文件应完整登记: " + result);
         verify(sandbox).readWorkspaceFile("outputs/big.pptx");
@@ -257,47 +261,57 @@ class FileToolsTest {
 
     @Test
     void presentFileSandboxReadsFromSandboxWorkspace() throws Exception {
-        // 沙箱模式：无 base64 时经 spec.latestSandbox.readWorkspaceFile 直读（同 userKey 校验通过）
+        // 沙箱模式：无 base64 时经本 turn 沙箱（ctx 的 SandboxAcquireResult）readWorkspaceFile 直读
         when(sandboxRuntime.enabled()).thenReturn(true);
-        var spec = mock(OpenSandboxFilesystemSpec.class);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
-        when(spec.getLatestSandbox()).thenReturn(sandbox);
         when(sandbox.getUserKey()).thenReturn("alice");
         when(sandbox.readWorkspaceFile("outputs/pkg.zip")).thenReturn(
             "PK\u0003\u0004fake-zip".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1));
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
-            mock(WorkspaceReader.class), spec);
+            mock(WorkspaceReader.class));
 
-        var result = t.presentFile(ctx(), "/workspace/outputs/pkg.zip", null);
+        var result = t.presentFile(turnCtx(sandbox), "/workspace/outputs/pkg.zip", null);
         assertTrue(result.contains("\"file_id\""), "沙箱直读应登记成功: " + result);
         verify(sandbox).readWorkspaceFile("outputs/pkg.zip");
     }
 
     @Test
     void presentFileSandboxRejectsForeignUserSandbox() throws Exception {
-        // userKey 不匹配（并发串沙箱防护）：不应读取，报错提示
+        // userKey 不匹配（纵深防御）：本 turn 沙箱绑定键异常时不应读取，报错提示
         when(sandboxRuntime.enabled()).thenReturn(true);
-        var spec = mock(OpenSandboxFilesystemSpec.class);
         var sandbox = mock(io.agentmanager.framework.sandbox.opensandbox.OpenSandbox.class);
-        when(spec.getLatestSandbox()).thenReturn(sandbox);
         when(sandbox.getUserKey()).thenReturn("other-user");
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
-            mock(WorkspaceReader.class), spec);
+            mock(WorkspaceReader.class));
 
-        var result = t.presentFile(ctx(), "outputs/x.txt", null);
+        var result = t.presentFile(turnCtx(sandbox), "outputs/x.txt", null);
         assertTrue(result.contains("not readable"), "userKey 不匹配应拒绝读取: " + result);
         verify(sandbox, org.mockito.Mockito.never()).readWorkspaceFile(anyString());
     }
 
+    @Test
+    void presentFileSandboxWithoutTurnAcquireResultErrors() throws Exception {
+        // 并发串沙箱回归：本 turn ctx 无 SandboxAcquireResult（acquire 失败/非 harness 链路）时
+        // 不得回退读任何进程级「最近沙箱」——直接报 not readable（历史上 latestSandbox 指针
+        // 会被并发用户的 create/resume 覆盖，指错沙箱导致归属校验误拒）
+        when(sandboxRuntime.enabled()).thenReturn(true);
+        var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
+        var t = new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
+            mock(WorkspaceReader.class), null);
+
+        var result = t.presentFile(ctx(), "outputs/x.txt", null);
+        assertTrue(result.contains("not readable"), "无本 turn 沙箱应报错而非读旧指针: " + result);
+    }
+
     // ===== SessionKeyResolver 反查（issue #52：归属校验须用规范用户键）=====
 
-    /** 7 参构造器 + 真实 SessionKeyResolver（生产装配形态） */
+    /** 6 参构造器 + 真实 SessionKeyResolver（生产装配形态） */
     private FileTools toolsWithResolver(io.agentmanager.framework.service.SessionUserStore store) {
         var props = io.agentmanager.framework.controller.FileControllerTest.testProps();
         return new FileTools(fileAssetStore, fileStorage, props, sandboxRuntime,
-            mock(WorkspaceReader.class), null,
+            mock(WorkspaceReader.class),
             new io.agentmanager.framework.service.SessionKeyResolver(store));
     }
 

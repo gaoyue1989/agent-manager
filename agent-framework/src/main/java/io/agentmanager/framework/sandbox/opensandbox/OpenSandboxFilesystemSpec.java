@@ -41,10 +41,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /** 请求级技能缓存 scope 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取并绑定到沙箱实例 */
     private final ThreadLocal<String> pendingSkillScope = new ThreadLocal<>();
 
-    /** 最近创建/恢复的沙箱实例（middleware.onAgent 注入兜底，见 SandboxUserKeyMiddleware） */
-    private final java.util.concurrent.atomic.AtomicReference<OpenSandbox> latestSandbox =
-        new java.util.concurrent.atomic.AtomicReference<>();
-
     /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject） */
     private final java.util.concurrent.ConcurrentHashMap<String, String> userInjectedSandbox =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -87,16 +83,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         if (userKey != null && sandboxId != null) {
             userInjectedSandbox.put(userKey, sandboxId);
         }
-    }
-
-    /** 注册沙箱实例（OpenSandboxClient.create/resume 调用） */
-    public void registerSandbox(OpenSandbox sandbox) {
-        latestSandbox.set(sandbox);
-    }
-
-    /** 最近沙箱实例（middleware 注入用；可能为 null） */
-    public OpenSandbox getLatestSandbox() {
-        return latestSandbox.get();
     }
 
     /** 上传文件元数据存储（middleware 注入回滚状态用） */

@@ -106,9 +106,6 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         OpenSandbox sandbox = new OpenSandbox(state, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
-        if (filesystemSpec != null) {
-            filesystemSpec.registerSandbox(sandbox);
-        }
         // 被动兜底（§6.2.4 双保险）：新容器启动时，该用户 injected 上传文件回滚 pending
         // → 本 turn 注入。防 delete 崩溃导致状态 stuck 在新容器漏注入。
         if (sandbox.getUserKey() != null && fileAssetStore != null) {
@@ -157,9 +154,6 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         var sandbox = new OpenSandbox(osbState, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage);
         bindUserKey(sandbox);
-        if (filesystemSpec != null) {
-            filesystemSpec.registerSandbox(sandbox);
-        }
         // 上传文件注入：恢复会话后立即执行（同 create）
         sandbox.injectPendingUploads();
         return sandbox;

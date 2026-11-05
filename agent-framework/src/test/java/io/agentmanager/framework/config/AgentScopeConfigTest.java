@@ -63,38 +63,7 @@ class AgentScopeConfigTest {
             mock(io.agentmanager.framework.service.storage.FileStorage.class), propsForLlm(),
             mock(io.agentmanager.framework.service.SandboxRuntime.class),
             mock(io.agentmanager.framework.service.WorkspaceReader.class),
-            mock(io.agentmanager.framework.service.SessionUserStore.class),
-            new org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec>() {
-                @Override
-                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getIfAvailable()
-                        throws org.springframework.beans.BeansException {
-                    return null;
-                }
-
-                @Override
-                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getObject() {
-                    return null;
-                }
-
-                @Override
-                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getObject(Object... args) {
-                    return null;
-                }
-
-                @Override
-                public void ifAvailable(java.util.function.Consumer<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec> consumer) {
-                }
-
-                @Override
-                public java.util.stream.Stream<io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec> stream() {
-                    return java.util.stream.Stream.empty();
-                }
-
-                @Override
-                public io.agentmanager.framework.sandbox.opensandbox.OpenSandboxFilesystemSpec getIfUnique() {
-                    return null;
-                }
-            });
+            mock(io.agentmanager.framework.service.SessionUserStore.class));
         // OafPackageTools 已迁移至 backend MCP（check_oaf_package/create_oaf_zip），
         // 自定义工具只剩框架通用能力（BusinessTools + FileTools）
         assertEquals(java.util.Arrays.asList(tool, fileTools),

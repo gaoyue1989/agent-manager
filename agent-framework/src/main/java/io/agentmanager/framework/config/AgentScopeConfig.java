@@ -287,8 +287,7 @@ public class AgentScopeConfig {
         io.agentmanager.framework.config.AgentManagerProperties props,
         io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
-        SessionUserStore sessionUserStore,
-        org.springframework.beans.factory.ObjectProvider<OpenSandboxFilesystemSpec> sandboxSpecProvider
+        SessionUserStore sessionUserStore
     ) {
         // 规范键解析（issue #52）：present_file 沙箱归属校验须与 SandboxUserKeyMiddleware
         // 同源反查真实用户，否则 Channel 链路 ctx.userId（网关 peer）与沙箱绑定键不等 → 直读被误拒
@@ -297,11 +296,10 @@ public class AgentScopeConfig {
         // 参数里复述文件全文，大文件必超输出上限被截断 → 工具报错 → file_ready 静默丢失
         if (sandboxRuntime.enabled()) {
             return new io.agentmanager.framework.tool.FileTools.SandboxAwareFileTools(
-                fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader,
-                sandboxSpecProvider.getIfAvailable(), sessionKeyResolver);
+                fileAssetStore, fileStorage, props, sandboxRuntime, workspaceReader, sessionKeyResolver);
         }
         return new io.agentmanager.framework.tool.FileTools(fileAssetStore, fileStorage, props,
-            sandboxRuntime, workspaceReader, sandboxSpecProvider.getIfAvailable(), sessionKeyResolver);
+            sandboxRuntime, workspaceReader, sessionKeyResolver);
     }
 
     /**

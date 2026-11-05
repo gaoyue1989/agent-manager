@@ -59,8 +59,13 @@ public class SandboxUserKeyMiddleware implements MiddlewareBase {
             }
             // 注入兜底：acquire（create/resume）可能先于本 middleware 且拿不到 userKey，
             // 此处沙箱实例已就绪 + userKey 已确定 → 绑定并注入（幂等，见 file-upload-download-plan §6.2）
-            var sandbox = spec.getLatestSandbox();
-            log.info("[sandbox-userkey] onAgent: key={}, latestSandbox={}", userKey, sandbox != null ? "present" : "null");
+            // 本 turn 沙箱由 HarnessAgent.wrappedCall/wrappedStream 的 acquireForCall 预置在
+            // RuntimeContext（SandboxAcquireResult，失败路径置 null）——禁止回退进程级
+            // 「最近沙箱」指针：多用户并发下会指向他人沙箱，造成误重绑/误注入/present_file 误拒
+            var acquire = ctx.get(io.agentscope.harness.agent.sandbox.SandboxAcquireResult.class);
+            var sandbox = acquire != null && acquire.getSandbox() instanceof OpenSandbox osb ? osb : null;
+            log.info("[sandbox-userkey] onAgent: key={}, turnSandbox={}", userKey,
+                sandbox != null ? sandbox.getOsbState().getSandboxId() : "null");
             if (sandbox != null) {
                 if (userKey != null && !userKey.isBlank()) {
                     sandbox.setUserKey(userKey);
