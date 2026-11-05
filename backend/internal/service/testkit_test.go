@@ -22,7 +22,9 @@ func newTestCore(t *testing.T) (*Core, *k8sfake.FakeK8s, func()) {
 	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{},
 		&store.User{}, &store.Workspace{}, &store.WorkspaceMember{}, &store.ApiKey{},
 		&store.ModelConnection{}, &store.ModelDelivery{}, &store.McpConnector{}, &store.AgentIntegration{},
-		&store.Skill{}, &store.SkillVersion{}, &store.SkillRelease{}, &store.SkillMarketSource{}, &store.SkillMarketItem{}); err != nil {
+		&store.Skill{}, &store.SkillVersion{}, &store.SkillRelease{}, &store.SkillMarketSource{}, &store.SkillMarketItem{},
+		// 导出三表（issue #235：storeBackfill 走 Backfill 全步骤，对齐 store.Open 的表清单）
+		&store.ExportOrderEntity{}, &store.ExportPackageMarkEntity{}, &store.WorkspaceRuntimeDefaultEntity{}); err != nil {
 		t.Fatal(err)
 	}
 	sqlDB, _ := db.DB()

@@ -85,6 +85,35 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			}
 			log.Printf("[migrate] seeded builtin skill market source")
 		}
+
+		// 7) 导出资产归属对齐（issue #235）：只迁 services.workspace_id 的历史纳管在
+		// export_package_marks / export_orders 留下旧空间残留（NULL 形态同上：AutoMigrate
+		// 加列旧行填 NULL），表现为「标记可见可选但创建导出单恒归属不匹配」的死路。按
+		// service_id JOIN 对齐为服务当前归属；幂等——已一致行零写入。BindService 修复只管
+		// 未来操作，存量死路数据靠本步收敛
+		alignExportToService := func(tbl interface{}, name string) error {
+			// 服务当前归属子查询（WHERE 比对与 SET 赋值各建独立实例，规避 GORM 子查询对象复用）
+			subAt := func() *gorm.DB {
+				return tx.Model(&ServiceEntity{}).Select("services.workspace_id").
+					Where("services.id = " + name + ".service_id")
+			}
+			res := tx.Model(tbl).
+				Where("workspace_id IS NULL OR workspace_id != (?)", subAt()).
+				Update("workspace_id", gorm.Expr("(?)", subAt()))
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected > 0 {
+				log.Printf("[migrate] aligned %d rows in %s to owning service workspace", res.RowsAffected, name)
+			}
+			return nil
+		}
+		if err := alignExportToService(&ExportPackageMarkEntity{}, "export_package_marks"); err != nil {
+			return err
+		}
+		if err := alignExportToService(&ExportOrderEntity{}, "export_orders"); err != nil {
+			return err
+		}
 		return nil
 	})
 }

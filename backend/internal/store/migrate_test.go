@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -18,7 +19,8 @@ func newMigrateDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(&OafPackage{}, &ServiceEntity{}, &ServiceEvent{},
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},
 		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{},
-		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{}); err != nil {
+		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{},
+		&ExportOrderEntity{}, &ExportPackageMarkEntity{}, &WorkspaceRuntimeDefaultEntity{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -116,6 +118,141 @@ func TestBackfillAssignsDefaultWorkspace(t *testing.T) {
 	db.First(&gotPkg, pkg.ID)
 	if gotPkg.WorkspaceID != 0 {
 		t.Fatal("public packages must keep workspace_id=0")
+	}
+}
+
+// TestBackfillAlignsExportAssetsToServiceWorkspace issue #235 存量死路回填：历史纳管只迁
+// services.workspace_id，在 export_package_marks / export_orders 留下旧空间残留——Backfill
+// 按 service_id 对齐为服务当前归属；二次调用零写入（幂等）。
+func TestBackfillAlignsExportAssetsToServiceWorkspace(t *testing.T) {
+	db := newMigrateDB(t)
+	if err := db.AutoMigrate(&ExportPackageMarkEntity{}, &ExportOrderEntity{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+	var def Workspace
+	db.Where("slug = ?", "default").First(&def)
+	// 业务空间（模拟已纳管目标）+ 服务 + 修复前残留：marks/orders 仍指 default
+	biz := Workspace{Slug: "ws-biz0999", Name: "业务空间", Status: "active", QuotaJSON: "{}"}
+	if err := db.Create(&biz).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := ServiceEntity{K8sName: "oaf-exp-align", DisplayName: "exp-align", WorkspaceID: biz.ID}
+	if err := db.Create(&svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&ExportPackageMarkEntity{ServiceID: svc.ID, WorkspaceID: def.ID,
+		Marker: "1.0.0-e1", PackageVersion: "1.0.0", Status: "frozen", FilesJSON: "[]"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&ExportOrderEntity{ServiceID: svc.ID, WorkspaceID: def.ID,
+		Status: "built", ManifestJSON: "{}"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+	var mark ExportPackageMarkEntity
+	db.Where("service_id = ?", svc.ID).First(&mark)
+	if mark.WorkspaceID != biz.ID {
+		t.Fatalf("stale mark not aligned: workspace_id=%d want %d", mark.WorkspaceID, biz.ID)
+	}
+	var order ExportOrderEntity
+	db.Where("service_id = ?", svc.ID).First(&order)
+	if order.WorkspaceID != biz.ID {
+		t.Fatalf("stale order not aligned: workspace_id=%d want %d", order.WorkspaceID, biz.ID)
+	}
+	// 幂等：再次 Backfill 零写入（行内容逐字段一致）
+	snapshot := func() string {
+		var ms []ExportPackageMarkEntity
+		var os []ExportOrderEntity
+		db.Order("id").Find(&ms)
+		db.Order("id").Find(&os)
+		b1, _ := json.Marshal(ms)
+		b2, _ := json.Marshal(os)
+		return string(b1) + "|" + string(b2)
+	}
+	before := snapshot()
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshot(); after != before {
+		t.Fatalf("second backfill must be a no-op: before=%s after=%s", before, after)
+	}
+}
+
+// TestBackfillAlignsExportAssetsNullWorkspace marks/orders 的 NULL 形态（AutoMigrate 对既有
+// 表加列旧行填 NULL，同 services 坑，migrate.go 步骤 3 注释）也必须对齐为服务当前归属。
+// 裸库自建 legacy 表（newMigrateDB 已含导出全表，无法复现「先建行后加列」的 NULL 形态）。
+func TestBackfillAlignsExportAssetsNullWorkspace(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := ServiceEntity{K8sName: "oaf-exp-null", DisplayName: "exp-null"}
+	if err := db.AutoMigrate(&ServiceEntity{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 模拟存量库：先建旧 schema 行（无 workspace_id 列）再补列（旧行 → NULL）
+	type legacyMark struct {
+		ID        uint   `gorm:"primaryKey"`
+		ServiceID uint   `gorm:"index"`
+		Marker    string `gorm:"size:64"`
+		Status    string `gorm:"size:16"`
+		CreatedAt time.Time
+	}
+	if err := db.Table("export_package_marks").AutoMigrate(&legacyMark{}); err != nil {
+		t.Fatal(err)
+	}
+	type legacyOrder struct {
+		ID        uint   `gorm:"primaryKey"`
+		ServiceID uint   `gorm:"index"`
+		Status    string `gorm:"size:24"`
+		CreatedAt time.Time
+		UpdatedAt time.Time
+	}
+	if err := db.Table("export_orders").AutoMigrate(&legacyOrder{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO export_package_marks (id, service_id, marker, status, created_at) VALUES (1, ?, '1.0.0-e1', 'frozen', CURRENT_TIMESTAMP)", svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO export_orders (id, service_id, status, created_at, updated_at) VALUES (1, ?, 'built', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", svc.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&ExportPackageMarkEntity{}, &ExportOrderEntity{}, // 加列，旧行 workspace_id=NULL
+		&User{}, &Workspace{}, &WorkspaceMember{}, &OafPackage{}, &SkillMarketSource{}); err != nil {
+		t.Fatal(err)
+	}
+	var nullMarks, nullOrders int64
+	db.Table("export_package_marks").Where("workspace_id IS NULL").Count(&nullMarks)
+	db.Table("export_orders").Where("workspace_id IS NULL").Count(&nullOrders)
+	if nullMarks != 1 || nullOrders != 1 {
+		t.Fatalf("precondition: expect 1 NULL row per table, got marks=%d orders=%d", nullMarks, nullOrders)
+	}
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
+	}
+	var def Workspace
+	db.Where("slug = ?", "default").First(&def)
+	var mark ExportPackageMarkEntity
+	db.First(&mark, 1)
+	if mark.WorkspaceID != def.ID {
+		t.Fatalf("NULL mark not aligned: workspace_id=%d want %d", mark.WorkspaceID, def.ID)
+	}
+	var order ExportOrderEntity
+	db.First(&order, 1)
+	if order.WorkspaceID != def.ID {
+		t.Fatalf("NULL order not aligned: workspace_id=%d want %d", order.WorkspaceID, def.ID)
+	}
+	// 二跑幂等
+	if err := Backfill(db, "admin", "x"); err != nil {
+		t.Fatal(err)
 	}
 }
 
