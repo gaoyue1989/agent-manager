@@ -231,9 +231,9 @@ func NewRemoteBuilder(baseImage, username, password string) *RemoteBuilder
 
 1. 输入校验：PackageDir 存在且含根级 `AGENTS.md`（`os.Stat`，缺失即错——构建输入必须是合法 OAF 包）；TargetRef 非空；Labels 键值非空校验。
 2. tar 层：`tarlayer.go` 遍历 PackageDir（跳过符号链接，防 zip-slip 同类逃逸）打 tar，所有条目前缀 `/oaf/`；经 `tarball.LayerFromReader` 生成 `v1.Layer`。
-3. 基底：`remote.Image(name.ParseReference(baseImage), remote.WithAuth(...), remote.WithContext(ctx))` 拉取基底（busybox KB 级；**构建期需要 backend 运行环境可达基底镜像仓库**，离线部署必须把 `EXPORT_BASE_IMAGE` 指到内网仓库——记录 §9-D8）。
+3. 基底：`remote.Image(name.ParseReference(baseImage), remote.WithAuthFromKeychain(kc), remote.WithContext(ctx))` 拉取基底（busybox KB 级；**构建期需要 backend 运行环境可达基底镜像仓库**，离线部署必须把 `EXPORT_BASE_IMAGE` 指到内网仓库——记录 §9-D8）。`kc` 为按 registry 分发凭证的 keychain（issue #227）：仅推送目标 registry 命中推送凭证，其余 registry（含缺省基底所在的 docker.io）一律匿名拉取——推送凭证不送达第三方 token 端点（私有基底需 `EXPORT_BASE_IMAGE` 指向与推送同 registry 或匿名可达的仓库，§9-D8/§9-D14）。
 4. 组装：`mutate.Config(img, v1.Config{Labels: in.Labels})` 后 `mutate.AppendLayers(img, layer)`。
-5. 推送：`remote.Write(targetRef, img, remote.WithAuth(...), remote.WithContext(ctx))`——幂等（同内容同 digest 重推 no-op）。
+5. 推送：`remote.Write(targetRef, img, remote.WithAuthFromKeychain(kc), remote.WithContext(ctx))`——幂等（同内容同 digest 重推 no-op）；该动作唯一 registry 即推送目标，keychain 必命中推送凭证（与原 `remote.WithAuth(Basic)` 等价，issue #227）。
 6. 返回 `img.Digest()` 字符串。
 
 ### 3.3 服务层依赖方式（U2）
@@ -279,7 +279,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 
 ### 4.3 请求/响应要点
 
-- `POST .../export` 请求体：`{ "marker": "1.2.0-e1", "baseImage": "…", "chartVersion": "0.1.0", "env": {"MCP_FLIGHT_TOKEN": "…"}, "secretKeys": ["MCP_FLIGHT_TOKEN"], "replicas": 2 }`；`marker` 必填且须为该服务 frozen 标记；`baseImage` 必须命中 L1 `BASE_IMAGE_WHITELIST`（缺省取白名单首项，模式同 config.go:122-124）；`env` 走 `service.ValidateEnv`（env.go:17-36）+ 导出保留键校验（§5.4）；`chartVersion` 缺省常量 `defaultExportChartVersion = "0.1.0"`。
+- `POST .../export` 请求体：`{ "marker": "1.2.0-e1", "baseImage": "…", "chartVersion": "0.1.0", "env": {"MCP_FLIGHT_TOKEN": "…"}, "secretKeys": ["MCP_FLIGHT_TOKEN"], "replicas": 2 }`；`marker` 必填且须为该服务 frozen 标记；`baseImage` 必须命中 L1 `BASE_IMAGE_WHITELIST`（缺省取白名单首项，模式同 config.go:122-124）；`env` 走 `service.ValidateEnv`（env.go:17-36）+ 导出保留键校验（§5.4）；`chartVersion` 缺省常量 `defaultExportChartVersion = "0.1.0"`，且须为 semver 形态（`^\d+\.\d+\.\d+[-.0-9A-Za-z]*$`，≤32——对齐 `ChartVersion` 列宽），非法创建 400（issue #226）；values 注释头全部插值字段另经 `sanitizeHeaderLine` 单行化兜底（yaml.v3 全部行终止符 LF/CR/NEL/LS/PS → 空格——只拦 CR/LF 时 NEL/LS/PS 可经 DisplayName 复活注入，覆盖重渲染读 DB 存量值等残余向量）。
 - 响应统一 `OK(c, …)` 包装（respond.go）；错误经 `mapError`（401/400/403/404/409 语义沿用）。
 - `GET .../exports/:id` 详情对 `ValuesYAML`/`RequestJSON` 永不回显（模型 json:"-"，§1.1）。
 
@@ -657,3 +657,4 @@ kill %1   # 停 backend 与 port-forward；/tmp/oaf-data、/tmp/e2e-*.yaml 删�
 | R3 | 风险 | busybox 基底本地 registry 仅 `latest` 一个 tag 且未入节点镜像缓存（环境核验 warning）：e2e 首次部署依赖节点 mirror 现拉（已就绪）；镜像构建期 backend（宿主机）直连 172.20.0.1:5001 无缓存问题。 |
 | R4 | 风险 | values 含明文敏感值且存 DB（ValuesYAML mediumtext）：接口层 `json:"-"` 全遮挡 + 下载鉴权（跟随 workspace）+ 下载审计（§5.8）；DB 备份密级需与 ITSM 附件对齐——运维须知，非代码可控面。 |
 | D13 | 安全修正（评审修订） | 运行时默认键空间**排除 `CHECKPOINT_JDBC_URL`**：`KnownKeys()`（template.go:108-116）实测含它（template.go:46），若「全量复用」会让 L1 合法持有源集群 JDBC URL（可能内嵌凭据）并与 L3 派生同名键冲突、经 values 明文流入生产。修订为 24 模板键（= KnownKeys − CHECKPOINT_JDBC_URL）+ 8 导出键，L1/L3 撞键结构性不可能（§1.4、§5.4）；与设计 §10 mysql 分类只定义 `CHECKPOINT_JDBC_BASE` 一致。同期修正 §5.3 渲染取值语义为 L1∪L2 并集（评审修订 2）：L2 撞 L1/L3 在 CreateExportOrder 校验期 400，渲染层不丢 L2 新增键（否则 e2e §8.7 校验 7 的 `MCP_E2E_TOKEN` 会从 secretEnv 消失）。 |
+| D14 | 安全修正（issue #227） | ImageBuilder 凭证**按 registry 分发**：v1 单一全局推送凭证（D8）原本对拉基底与直推共用（两处 `remote.WithAuth`），基底在第三方 registry（如缺省 `busybox:1.36` 所在 docker.io）时推送凭证会被送达其 token 端点——坏凭证请求 `auth.docker.io` 对公共 pull scope 也返回 401，故「缺省 docker.io 基底 + 已配推送凭证」组合下 pullBase 必 401、导出构建必失败（匿名 token 实测 200，凭证请求实测 401）。修订为 `pushScopedKeychain`（`Resolve`：registry == 推送目标 → 推送凭证，否则 `authn.Anonymous`；`remote.WithAuthFromKeychain` 消费），基底拉取对非推送 registry 一律匿名；同仓私有基底仍复用推送凭证，第三方私有基底需显式覆盖 `EXPORT_BASE_IMAGE` 指向可达仓库（§9-D8）。行为变化：基底在推送 registry 之外的私有仓库时由「送错凭证后 401」变为「匿名 401」——不再泄凭证但仍拉不到。TargetRef 解析前移至 Build 早期（`parse target reference`，不触网）。 |

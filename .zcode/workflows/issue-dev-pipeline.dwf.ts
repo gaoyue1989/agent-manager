@@ -630,8 +630,15 @@ async function buildAndDeployModules(): Promise<string> {
       output: { tail: 8_192 },
     });
     if (l.exitCode !== 0) errs.push(`backend 镜像导入 kind 失败：\n${l.stderr.slice(-1000)}`);
-    const s = await world.run("kubectl", ["-n", "agent-platform", "set", "image", "deployment/platform-backend", `platform-backend=${BE_TAG}`]);
+    const s = await world.run("kubectl", ["-n", "agent-platform", "set", "image", "deployment/platform-backend", `backend=${BE_TAG}`]);
     if (s.exitCode !== 0) errs.push(`backend set image 失败：\n${s.stderr.slice(-1000)}`);
+    // 同 issue 恒定 tag（BE_TAG）重部署时 set image 同值为 no-op：spec 不变不产生新
+    // ReplicaSet，rollout status 立即通过，回炉重验跑的仍是旧镜像——无条件 rollout
+    // restart 强制滚动换代（对齐仓库 AGENTS.md「更新镜像后的固定动作：rollout restart
+    // 对应 deployment」）；kind load 已重新导入镜像，IfNotPresent 新 Pod 按 tag 解析到
+    // 最新 digest
+    const rs = await world.run("kubectl", ["-n", "agent-platform", "rollout", "restart", "deployment/platform-backend"]);
+    if (rs.exitCode !== 0) errs.push(`backend rollout restart 失败：\n${rs.stderr.slice(-1000)}`);
     const r = await world.run("kubectl", ["-n", "agent-platform", "rollout", "status", "deployment/platform-backend", "--timeout=300s"], {
       timeoutMs: 330_000,
       output: { tail: 8_192 },

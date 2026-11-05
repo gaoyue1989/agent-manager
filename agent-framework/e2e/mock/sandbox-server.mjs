@@ -11,6 +11,9 @@
  *   DELETE /v1/sandboxes/{id}                         → 204
  *   POST   /v1/metrics/events                         → 204（吞掉 SDK 埋点）
  *   POST   /admin/destroy/{id}                        → 模拟容器 GC（之后 GET/connect 全 404）
+ *   POST   /admin/fault {mvFail:true}                 → 故障注入：files/upload 对 path 含
+ *                                                       '.tmp.' 的写入返回 500（X-ENV-8 发布
+ *                                                       失败收敛路径）；{} 清除
  *   GET    /stats  POST /reset                        → 观测（X 组断言：creates/connects/commands/fileOps）
  *
  * execd 代理（同端口 /v1/sandboxes/{id}/proxy/{port}/...）：
@@ -33,7 +36,10 @@ fs.mkdirSync(ROOT, { recursive: true });
 
 const EXEC_WHITELIST = /^(\|\s*)?(echo|ls|cat|mkdir|tar|base64|rm|mv|printf|test|wc|stat|find|sort|head|tail|grep|sed|sh|true|false)\b/;
 const sandboxes = new Map(); // id → {id, root, env, execdEnvsPath, destroyed, createdAt}
-const stats = { creates: [], connects: [], commands: [], fileOps: [], errors: [] };
+const stats = { creates: [], connects: [], commands: [], fileOps: [], errors: [], faultHits: 0 };
+// 故障注入开关（/admin/fault）：mvFail = 发布用临时文件（path 含 '.tmp.'）写入返回 500，
+// 黑盒验证 PUT /sandbox/env 发布失败 → 502 → sidecar 未推进 → 调用方重试收敛（issue #230）
+const faults = { mvFail: false };
 
 /** 模拟 execd bootstrap（components/execd/bootstrap.sh:492-503）：默认并 touch EXECD_ENVS 文件 */
 function initExecdEnvs(id, createEnv) {
@@ -192,12 +198,22 @@ const server = http.createServer((req, res) => {
     // 观测/管理
     if (p === '/health') return json(200, { status: 'healthy' });
     if (p === '/stats') return json(200, stats);
-    if (p === '/reset') { stats.creates = []; stats.connects = []; stats.commands = []; stats.fileOps = []; stats.errors = []; return json(200, { status: 'reset' }); }
+    if (p === '/reset') {
+      stats.creates = []; stats.connects = []; stats.commands = []; stats.fileOps = []; stats.errors = []; stats.faultHits = 0;
+      faults.mvFail = false; // 重置同步清故障注入，防单用例失败污染后续测试
+      return json(200, { status: 'reset' });
+    }
     if (p.startsWith('/admin/destroy/')) {
       const id = p.split('/')[3];
       const sb = sandboxes.get(id);
       if (sb) sb.destroyed = true;
       return json(sb ? 200 : 404, { destroyed: !!sb });
+    }
+    if (p === '/admin/fault' && req.method === 'POST') {
+      let requested = {};
+      try { requested = JSON.parse(body.toString()) ?? {}; } catch { /* 空体 = 清除 */ }
+      faults.mvFail = requested.mvFail === true;
+      return json(200, { faults });
     }
     if (p === '/v1/metrics/events') { res.writeHead(204); return res.end(); }
 
@@ -255,6 +271,12 @@ const server = http.createServer((req, res) => {
             } catch { /* 元数据坏包 */ }
           }
           if (!target) { stats.errors.push({ op: 'files/upload', at: Date.now() }); res.writeHead(400); return res.end(); }
+          // 故障注入（X-ENV-8）：发布用临时文件写入失败（仅命中 .env.tmp.<uuid> 形态，
+          // 不影响 .json sidecar / 工作区 tar 等其他上传）
+          if (faults.mvFail && target.includes('.tmp.')) {
+            stats.faultHits += 1;
+            res.writeHead(500); return res.end();
+          }
           fs.mkdirSync(path.dirname(target), { recursive: true });
           // 对齐真实 execd：part body 原样落盘（base64 文本文件保持文本，供后续命令解码）
           const bytes = file?.body ?? Buffer.alloc(0);
