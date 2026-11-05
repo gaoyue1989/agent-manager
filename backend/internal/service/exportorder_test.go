@@ -304,11 +304,46 @@ func TestCreateExportOrderValidation(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrImageNotAllowed) {
 		t.Fatalf("baseImage off whitelist: err = %v", err)
 	}
+	// chartVersion 注入（issue #226）：换行试图顶出顶层 YAML 键 resources，len=32 恰好卡
+	// ChartVersion 列宽（model.go:362 size:32，无校验时撞 MySQL 1406 → 500 或注入生效），
+	// 须 ErrInvalidForm 400
+	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
+		Marker: mark.Marker, ChartVersion: "\nresources: {limits: {cpu: 9}} #",
+	})
+	if err == nil || !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("chartVersion injection: err = %v", err)
+	}
+	// 超长 chartVersion（>32 撞列宽 → 1406/500）同样 400 拦截
+	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
+		Marker: mark.Marker, ChartVersion: "0.1.0" + strings.Repeat(".0", 15),
+	})
+	if err == nil || !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("chartVersion overlong: err = %v", err)
+	}
 	// 无 marker 冻结标记的陌生 marker
 	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: "1.0.0-e99"})
 	if err == nil || !errors.Is(err, ErrMarkNotBuildable) {
 		t.Fatalf("unknown marker: err = %v", err)
 	}
+	// chartVersion 正例不回归：显式合法 semver 与缺省（默认 0.1.0）均可创建并走完构建
+	good, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
+		Marker: mark.Marker, ChartVersion: "1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("legal chartVersion: %v", err)
+	}
+	if good.ChartVersion != "1.2.3" {
+		t.Fatalf("chartVersion = %q, want 1.2.3", good.ChartVersion)
+	}
+	def, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker})
+	if err != nil {
+		t.Fatalf("default chartVersion: %v", err)
+	}
+	if def.ChartVersion != defaultExportChartVersion {
+		t.Fatalf("default chartVersion = %q, want %q", def.ChartVersion, defaultExportChartVersion)
+	}
+	waitForExportStatus(t, core, good.ID, store.ExportStatusBuilt)
+	waitForExportStatus(t, core, def.ID, store.ExportStatusBuilt)
 }
 
 // TestListServiceExportOrders 服务导出单列表（issue #216 导出记录区）：id 倒序、marker 从
