@@ -168,6 +168,11 @@ func Deployment(p ObjectParams) *appsv1.Deployment {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels(p.K8sName)},
 				Spec: corev1.PodSpec{
+					// 最小暴露面（issue #232，与 oaf-agent chart 同款）：业务 Pod 无 K8s API
+					// 依赖，显式禁用 SA token 自动投影——pod 级优先于 SA 级，不依赖集群
+					// default SA 的配置。仅影响新发布/republish 的 Deployment，存量不迁移
+					// （原则一：无 reconcile/批量同步）。
+					AutomountServiceAccountToken: boolPtr(false),
 					Containers: []corev1.Container{{
 						Name:            "agent",
 						Image:           p.Image,
@@ -268,6 +273,10 @@ const (
 
 // pathTypePtr 取 PathType 指针（networkingv1.PathType 为值类型，v1 要求非空）。
 func pathTypePtr(t networkingv1.PathType) *networkingv1.PathType { return &t }
+
+// boolPtr 取 bool 指针（PodSpec.AutomountServiceAccountToken 为 *bool 三态字段：
+// nil=按 SA/kubelet 默认投影，false=显式禁用投影）。
+func boolPtr(b bool) *bool { return &b }
 
 // ingressBackend 业务 backend 引用：{K8sName}-svc:8100（Ingress 对象与服务一一对应，
 // 两种模式与 overlay 合并后的不变量校验共用）。

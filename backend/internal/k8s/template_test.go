@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -30,7 +31,10 @@ func TestBuilderNilOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Deployment(p)
-	if got.String() != want.String() {
+	// 值语义比较（DeepEqual）：String() 对指针字段（如 *bool
+	// AutomountServiceAccountToken）打印指针地址，两次独立构造各自分配，逐字符串
+	// 比较必不等；构造形状仍必须逐字段一致（历史行为回归锁）。
+	if !reflect.DeepEqual(got, want) {
 		t.Fatal("nil overlay must be identical to built-in construction")
 	}
 }
@@ -296,7 +300,9 @@ func TestBuilderEmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.String() != Deployment(p).String() {
+	// 值语义比较（DeepEqual），同 TestBuilderNilOverlay：String() 对指针字段打印地址，
+	// 两次独立构造必不等；空 overlay 不得改变构造形状（历史行为回归锁）。
+	if !reflect.DeepEqual(d, Deployment(p)) {
 		t.Fatal("empty overlay must not change construction")
 	}
 }
