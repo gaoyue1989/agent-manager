@@ -253,9 +253,13 @@ public class AgentScopeConfig {
         var props = propsProvider.getIfAvailable();
         int deadlineMinutes = props != null && props.cleanup() != null
             ? props.cleanup().confirmDeadlineMinutes() : 10;
-        return new io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager(
+        var poolManager = new io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager(
             facade, sandboxConfig.pool(), deadlineMinutes, sandboxConfig,
             turnLeaseStoreProvider.getIfAvailable());
+        // 扫描线程 + 预热显式启动（后台 daemon 线程，不阻塞装配）——池关闭分支返回 null 时不注册
+        // ApplicationListener（NullBean 强转会崩所有业务服务，见 SandboxPoolManager.start javadoc）
+        poolManager.start();
+        return poolManager;
     }
 
     /**

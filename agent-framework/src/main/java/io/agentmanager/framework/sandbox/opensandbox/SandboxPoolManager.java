@@ -16,8 +16,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.ApplicationListener;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig;
@@ -57,7 +55,7 @@ import io.lettuce.core.ScriptOutputType;
  * <p><b>零后台写业务面</b>（原则一）：扫描只碰 OpenSandbox Server 容器面与共享存储读取，
  * 不写任何 K8s 资源；任一副本可扫、免选主（回收认领经 Lua HDEL 先到先得）。
  */
-public class SandboxPoolManager implements ApplicationListener<ApplicationReadyEvent> {
+public class SandboxPoolManager {
 
     private static final Logger log = LoggerFactory.getLogger(SandboxPoolManager.class);
 
@@ -490,11 +488,21 @@ public class SandboxPoolManager implements ApplicationListener<ApplicationReadyE
 
     // ---------------------------------------------------------------- 后台扫描（回收/剪枝/保活/水位）
 
-    /** ApplicationReadyEvent 后启动扫描线程 + 预热（集群级水位：多副本同时启动经 Lua cap 合力补齐不超额） */
-    @Override
-    public void onApplicationEvent(ApplicationReadyEvent event) {
+    /**
+     * 启动扫描线程 + 异步预热（集群级水位：多副本同时启动经 Lua cap 合力补齐不超额）。
+     *
+     * <p>由装配处（AgentScopeConfig）在池开启分支构造完成后<b>显式调用</b>——不实现
+     * {@code ApplicationListener}：@Bean 方法在池关闭分支返回 null（NullBean）时，容器按
+     * 声明类型把该 bean 名收集进 ApplicationListener 并在 registerListeners 阶段强转，
+     * NullBean 会抛 {@code BeanNotOfRequiredTypeException} 使<b>所有业务服务启动即崩</b>
+     * （2026-11-05 黑盒重验实测）。池关闭时本类不被装配，无需监听器语义。
+     *
+     * <p>预热/扫描全部在 daemon 后台线程，不阻塞启动；OpenSandbox Server 不可达只告警
+     * （借出时按需创建兜底）。幂等：重复调用只启动一次。
+     */
+    public void start() {
         startBackgroundExecutors();
-        // 预热：异步补齐 minIdle（OpenSandbox Server 不可用只告警——借出时按需创建兜底）
+        // 预热：异步补齐 minIdle
         var exec = rebuildExecutor;
         if (exec == null) {
             return;
