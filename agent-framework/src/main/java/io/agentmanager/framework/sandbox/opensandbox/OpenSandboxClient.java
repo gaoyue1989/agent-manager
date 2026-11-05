@@ -29,6 +29,8 @@ import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
  */
 public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions> {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OpenSandboxClient.class);
+
     private final OpenSandboxClientOptions options;
     private final WorkspaceReader workspaceReader;
     private final WorkspaceSyncService workspaceSyncService;
@@ -163,18 +165,20 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
      * workspaceSpec（借出容器预创建时无 spec，start 投影 hydrate 依赖它）→ 照现状执行
      * bindUserKey/reset/inject/start 链——SDK acquire 四级优先级语义零改动。
      *
-     * <p>Redis 不可达 → fail-open（D8）：借出降级为直接建容器（账本外，Server TTL 兜底消亡），
+     * <p>借出身份（D17 P1）：sid 取 pendingSessionId（守卫钩子/middleware 注入的 turn_lease 键），
+     * userKey <b>peek</b>（不清除——{@link #bindUserKey} 随后 take 消费并绑定实例，供 stop 回写）。
+     * Redis 不可达 → fail-open（D8）：借出降级为直接建容器（账本外，Server TTL 兜底消亡），
      * 对话可用性不劣于现状。
      */
     private Sandbox createFromPool(WorkspaceSpec workspaceSpec, OpenSandboxClientOptions options) {
-        // ThreadLocal 消费型：提前取出（借出 sid 用 pendingSessionId；绑定仍按现状 bindUserKey 语义）
         String poolSid = filesystemSpec != null ? filesystemSpec.takePendingSessionId() : null;
+        String poolUserKey = filesystemSpec != null ? filesystemSpec.peekPendingUserKey() : null;
         SandboxPoolManager.Borrowed borrowed;
         try {
-            borrowed = sandboxPool.borrow(poolSid);
+            borrowed = sandboxPool.borrow(poolSid, poolUserKey);
         } catch (io.lettuce.core.RedisException e) {
             // D8 fail-open：Redis 故障期借出直接建容器（限流告警在 manager 内）
-            borrowed = sandboxPool.borrowFailOpen(poolSid);
+            borrowed = sandboxPool.borrowFailOpen(poolSid, poolUserKey);
         }
         var osbSandbox = borrowed.osbSandbox();
 
@@ -223,9 +227,24 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             .skipHealthCheck(true)
             .connect();
 
-        // 池化续约②（设计 §5.4）：P3 命中、connect 成功后保活——覆盖"活跃会话 turn 间空闲"，
-        // 跨副本有效（租约键是全局的，busy 归属账本才是本地的）
+        // 池化续约② + 账本校正（D2 D17 扩展）：connect 成功后校正——busy 且 sid==本会话仅续约；
+        // 粘滞且 sid/owner==本会话原子复活回 busy；被继承给他人/已回收 → close 句柄后抛异常
+        // 触发 SDK P3→P4 降级走借出决策树（不在 connect 前写账本，杜绝幻影 busy）。
         if (sandboxPool != null) {
+            // 借出身份 peek（不清除——bindUserKey 随后 take 消费绑定实例）
+            String sid = filesystemSpec != null ? filesystemSpec.peekPendingSessionId() : null;
+            String userKey = filesystemSpec != null ? filesystemSpec.peekPendingUserKey() : null;
+            if (!sandboxPool.reconcileResume(osbState.getSandboxId(), sid, userKey)) {
+                try {
+                    osbSandbox.close();   // SDK Sandbox AutoCloseable：降级前释放已 connect 句柄
+                } catch (Exception ce) {
+                    log.warn("[sandbox-pool] close on reconcile-downgrade failed: sandboxId={}: {}",
+                        osbState.getSandboxId(), ce.getMessage());
+                }
+                throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR, "resume",
+                    "sandbox pool reconcile failed for container " + osbState.getSandboxId()
+                        + " (reclaimed or reassigned; downgrading to borrow)", null);
+            }
             sandboxPool.renew(osbState.getSandboxId());
         }
 

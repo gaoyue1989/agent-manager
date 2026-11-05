@@ -104,8 +104,16 @@ public class AgentScopeConfig {
             var redisFacade = redisFacadeProvider.getIfAvailable();
             if (redisFacade != null) {
                 var sessionGranular = sandboxRuntime.sessionAgentIsolationEnabled();
-                spec.executionGuard(new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
-                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular));
+                var guard = new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
+                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular);
+                // 池化借出身份捕获（sandbox-pool-design P1/P2）：仅池开启时注入——守卫 tryEnter 与
+                // SDK acquire P4 借出同线程直调，其 ThreadLocal 写入是唯一落在正确线程的注入点
+                // （控制器侧注入会被 HarnessGateway defer+boundedElastic 挪到错误线程，全链路失效）
+                if (sandboxPool != null) {
+                    guard.setPoolIdentitySpec(spec);
+                    log.info("Sandbox pool identity hook attached to SandboxExecutionGuard (borrow identity capture)");
+                }
+                spec.executionGuard(guard);
                 log.info("SandboxExecutionGuard enabled (scope=USER, lockGranularity={}, leaseTtl={}s)",
                     sessionGranular ? "per-session(slot-aligned)" : "per-real-user", sandboxRuntime.guardLeaseSeconds());
             } else {

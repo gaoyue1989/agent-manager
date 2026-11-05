@@ -139,6 +139,29 @@ class ConfirmDeadlineTest {
         assertDoesNotThrow(() -> service.checkConfirmDeadline(SID));
     }
 
+    @Test
+    void confirmShouldPassWhenPoolEnabledButSessionNeverBorrowed() {
+        // D16-④ + 缺陷②回归锁定（sandbox-pool-design）：池开启 + 会话从未经池借出
+        // （s: 无映射——fail-open 容器/池刚开启/未知映射）→ 确认预检续约放行（200 流程），绝不误 410
+        var redis = mock(io.lettuce.core.cluster.api.sync.RedisClusterCommands.class);
+        var facade = mock(io.agentmanager.framework.redis.RedisConnectionFacade.class);
+        when(facade.key(anyString())).thenAnswer(inv -> "pfx:" + inv.getArgument(0));
+        when(facade.sync()).thenReturn(redis);
+        // 真实 TOUCH_PROBE_LUA 对无 s: 映射的会话返回空串（HGET s:{sid} = nil → return ''）
+        when(redis.eval(anyString(), any(io.lettuce.core.ScriptOutputType.class),
+            any(String[].class), any(String[].class))).thenReturn("");
+        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(true, "img", 60, 1024, 1,
+            List.of("/entry.sh"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
+            new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("server:8090", "k"));
+        var pool = new io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager(facade,
+            new io.agentmanager.framework.config.SandboxConfig.PoolConfig(true, 2, 8, 120, 600, 60, 2),
+            10, sandboxConfig, null);
+        assertDoesNotThrow(() -> pool.touchSessionOrThrow(SID), "未借出会话的确认预检必须放行");
+        // deadline 判定与池 touch 是确认入口的两道独立预检：池放行后 deadline 内确认照常通过
+        stubFreshRow();
+        assertDoesNotThrow(() -> service.checkConfirmDeadline(SID));
+    }
+
     // ---------------------------------------------------------------- 自动收尾（finalizeByDeny）
 
     @Test

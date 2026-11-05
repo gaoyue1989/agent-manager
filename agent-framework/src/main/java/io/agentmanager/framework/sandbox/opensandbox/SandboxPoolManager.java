@@ -35,7 +35,9 @@ import io.lettuce.core.ScriptOutputType;
  * <p><b>状态账本（单 ledger HASH，骑 {@code AGENT_REDIS_PREFIX}，per-service 天然隔离）</b>：
  * <ul>
  *   <li>{@code {prefix}sbx:pool:ledger} — HASH：{@code i:{sandboxId}}（idle 就绪）/
- *       {@code b:{sandboxId}} = JSON {@code {sid,podId,borrowedAt}}（busy，sid 为 D14 双保险查询键）/
+ *       {@code b:{sandboxId}} = JSON {@code {sid,userKey,podId,borrowedAt}}（busy，sid 为 D14 双保险
+ *       查询键、userKey 为 D17 配额键）/{@code s:{sid}} → sandboxId（会话反查，touch/resume 校正入口，
+ *       清理并入各单 key Lua 原子完成）/
  *       {@code c:{entryId}:{createdAt}}（creating，&gt;5min 扫描剪枝自愈）</li>
  *   <li>{@code {prefix}sbx:pool:lease:{sandboxId}} — STRING（TTL=idleReturnSeconds）：
  *       失活判定<b>唯一真相</b>（借出/续约五点写，D14 双保险与确认 touch 读）</li>
@@ -63,7 +65,11 @@ public class SandboxPoolManager {
     static final String LEDGER_KEY = "sbx:pool:ledger";
     static final String LEASE_PREFIX = "sbx:pool:lease:";
 
-    /** borrow Lua（单 key）：取一个 idle（i: 前缀字段）原子转 busy（并发借出各得唯一容器）；无 idle 返回空串 */
+    /**
+     * borrow Lua（单 key）：取一个 idle（i: 前缀字段）原子转 busy（并发借出各得唯一容器），
+     * 并写 {@code s:{sid}} 反查字段（touch 判活与 resume 校正的 D14 查询入口；sid 空串不写）；
+     * 无 idle 返回空串。ARGV[1]=busyJson（含 sid/userKey/podId/borrowedAt），ARGV[2]=sid。
+     */
     static final String BORROW_LUA = """
         local fields = redis.call('HKEYS', KEYS[1])
         for _, f in ipairs(fields) do
@@ -71,6 +77,7 @@ public class SandboxPoolManager {
             local id = string.sub(f, 3)
             redis.call('HDEL', KEYS[1], f)
             redis.call('HSET', KEYS[1], 'b:' .. id, ARGV[1])
+            if ARGV[2] ~= '' then redis.call('HSET', KEYS[1], 's:' .. ARGV[2], id) end
             return id
           end
         end
@@ -93,13 +100,31 @@ public class SandboxPoolManager {
         return ''
         """;
 
-    /** 回收认领 Lua（单 key）：HDEL busy 先到先得（多副本并发扫描唯一赢家，免选主） */
-    static final String CLAIM_RECYCLE_LUA =
-        "if redis.call('HDEL', KEYS[1], 'b:' .. ARGV[1]) == 1 then return ARGV[1] end return ''";
+    /**
+     * 回收认领 Lua（单 key）：HDEL busy 先到先得（多副本并发扫描唯一赢家，免选主），
+     * 并原子清理 {@code s:{sid}} 反查字段（经 cjson 解析 b: 值取 sid；旧值/解析失败跳过——
+     * 残余反查由 touch 的 sid 匹配防线兜底，安全方向 410）。
+     */
+    static final String CLAIM_RECYCLE_LUA = """
+        local f = 'b:' .. ARGV[1]
+        local v = redis.call('HGET', KEYS[1], f)
+        if not v then return '' end
+        redis.call('HDEL', KEYS[1], f)
+        local ok, rec = pcall(cjson.decode, v)
+        if ok and rec.sid ~= nil and rec.sid ~= '' then redis.call('HDEL', KEYS[1], 's:' .. rec.sid) end
+        return ARGV[1]
+        """;
 
-    /** 认领撤销 Lua（单 key）：kill 前复核发现租约被续约 → busy 记录原样还原（认领期间容器不在 i:，无借出方可拿走，撤销安全） */
-    static final String UNCLAIM_LUA =
-        "redis.call('HSET', KEYS[1], 'b:' .. ARGV[1], ARGV[2]) return 1";
+    /**
+     * 认领撤销 Lua（单 key）：kill 前复核发现租约被续约 → busy 记录与 {@code s:{sid}} 反查
+     * 字段一并原样还原（认领期间容器不在 i:，无借出方可拿走，撤销安全）。
+     * ARGV[1]=sandboxId，ARGV[2]=busyJson，ARGV[3]=sid。
+     */
+    static final String UNCLAIM_LUA = """
+        redis.call('HSET', KEYS[1], 'b:' .. ARGV[1], ARGV[2])
+        if ARGV[3] ~= '' then redis.call('HSET', KEYS[1], 's:' .. ARGV[3], ARGV[1]) end
+        return 1
+        """;
 
     /** creating → idle 晋升 Lua（单 key）：预热/补位完成后入池 */
     static final String PROMOTE_IDLE_LUA = """
@@ -146,6 +171,78 @@ public class SandboxPoolManager {
     /** 租约续约 Lua（单 key）：保留原值的幂等 upsert（值仅诊断用途；过期后重建自愈，真失活由 D14 兜底） */
     static final String RENEW_LEASE_LUA =
         "local v = redis.call('GET', KEYS[1]) redis.call('SET', KEYS[1], v or ARGV[1], 'EX', ARGV[2]) return 1";
+
+    /**
+     * 租约判活 Lua（单 key=租约键，缺陷③原子化）：EXISTS → EXPIRE 同脚本原子执行，
+     * 关闭「exists=1 后、expire 前租约过期」的误放行窗口；返回 1=活（已续约）/0=确死。
+     */
+    static final String TOUCH_LEASE_LUA =
+        "if redis.call('EXISTS', KEYS[1]) == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) return 1 end return 0";
+
+    /**
+     * 确认 touch 账本探查 Lua（单 key=ledger，D16-④ + P3 sid 匹配防线）：按 {@code s:{sid}}
+     * 反查容器并校验条目内 sid 归属——防「陈旧 s: 指向已被他人借走/继承的容器」误放行
+     * （resume 校正的 sid≠S 分支会抛异常导致 SDK P4 中途借新容器丢产物）。
+     * ARGV[1]=sid。返回：''（s: 缺失=从未经池借出，放行）/ 'B:{id}'（busy 且 sid 匹配，判活续约）/
+     * 'R:{id}'（粘滞且 sid 匹配，已原子复活回 busy——D17 粘滞窗口内确认继续跑，挡住「继承 vs 复活」竞态）/
+     * 'N'（条目已回收，410）/ 'X'（条目存在但 sid 不匹配=陈旧反查，410）。
+     */
+    static final String TOUCH_PROBE_LUA = """
+        local id = redis.call('HGET', KEYS[1], 's:' .. ARGV[1])
+        if not id then return '' end
+        local bv = redis.call('HGET', KEYS[1], 'b:' .. id)
+        if bv then
+          local ok, rec = pcall(cjson.decode, bv)
+          if ok and rec.sid ~= nil and rec.sid ~= '' and rec.sid == ARGV[1] then return 'B:' .. id end
+          return 'X'
+        end
+        local iv = redis.call('HGET', KEYS[1], 'i:' .. id)
+        if iv then
+          local ok, rec = pcall(cjson.decode, iv)
+          if ok and rec.sid ~= nil and rec.sid ~= '' and rec.sid == ARGV[1] then
+            redis.call('HDEL', KEYS[1], 'i:' .. id)
+            redis.call('HSET', KEYS[1], 'b:' .. id,
+              cjson.encode({sid = ARGV[1], userKey = (rec.owner or ''), podId = '',
+                            borrowedAt = tonumber(redis.call('TIME')[1])}))
+            redis.call('HSET', KEYS[1], 's:' .. ARGV[1], id)
+            return 'R:' .. id
+          end
+          return 'X'
+        end
+        return 'N'
+        """;
+
+    /**
+     * resume 账本校正 Lua（单 key=ledger，D2 D17 扩展 + P4 顺序修正）：connect 成功后执行，
+     * <b>不在 connect 前写账本</b>（杜绝 connect 404 时幻影 busy 被扫描 turn_lease 重置双重保活、
+     * 占容量与配额至 turn 结束）。纵深校验与继承-复活竞态单赢家裁决：
+     * ARGV[1]=sandboxId，ARGV[2]=sid，ARGV[3]=userKey，ARGV[4]=busyJson。
+     * 返回：'B'（busy 且 sid==本会话，仅续约）/ 'R'（粘滞且 sid 或 owner==本会话 userKey，
+     * 已原子换绑复活）/ 'X'（被他人借走/继承且校验不过）/ 'G'（账本无条目=已被回收）。
+     */
+    static final String RESUME_RECONCILE_LUA = """
+        local id = ARGV[1]
+        local bv = redis.call('HGET', KEYS[1], 'b:' .. id)
+        if bv then
+          local ok, rec = pcall(cjson.decode, bv)
+          if ok and rec.sid ~= nil and rec.sid ~= '' and rec.sid == ARGV[2] then return 'B' end
+          return 'X'
+        end
+        local iv = redis.call('HGET', KEYS[1], 'i:' .. id)
+        if iv then
+          local ok, rec = pcall(cjson.decode, iv)
+          local sidOk = ok and rec.sid ~= nil and rec.sid ~= '' and rec.sid == ARGV[2]
+          local ownerOk = ok and rec.owner ~= nil and rec.owner ~= '' and rec.owner == ARGV[3]
+          if sidOk or ownerOk then
+            redis.call('HDEL', KEYS[1], 'i:' .. id)
+            redis.call('HSET', KEYS[1], 'b:' .. id, ARGV[4])
+            if ARGV[2] ~= '' then redis.call('HSET', KEYS[1], 's:' .. ARGV[2], id) end
+            return 'R'
+          end
+          return 'X'
+        end
+        return 'G'
+        """;
 
     /** borrowedAt 宽限窗口（秒）：borrow「ledger 入账 → SET 租约」两步缺口的兜底（§5.3） */
     static final long BORROW_GRACE_SECONDS = 60;
@@ -241,21 +338,22 @@ public class SandboxPoolManager {
     /**
      * 借出一个就绪容器（§5.2）：idle 直取 → 按需建 → 池空轮询 ≤ maxWait（超时报错）→ Redis 不可达 fail-open 直建。
      *
-     * @param sid 会话隔离键（busy 记录的 D14 查询键；可 null——此时 D14 双保险按租约判定）
+     * @param sid     会话隔离键（busy 记录的 D14 查询键 + {@code s:{sid}} 反查键；可 null/空——D14 回退纯租约判定）
+     * @param userKey 业务用户键（D17 配额计数键；可 null/空——守卫钩子失效组合下由 middleware 回填兜底）
      * @throws SandboxException CONFIGURATION_ERROR：池满等待超时 / 连续探测失败 / 按需建容器失败
      */
-    public Borrowed borrow(String sid) {
-        String busyJson = busyJsonOf(sid);
+    public Borrowed borrow(String sid, String userKey) {
+        String busyJson = busyJsonOf(sid, userKey);
         // 1. 非阻塞直取 idle
-        String id = luaBorrow(busyJson);
+        String id = luaBorrow(busyJson, sid);
         if (id != null && !id.isEmpty()) {
-            Borrowed b = attachLeaseAndProbe(sid, id);
+            Borrowed b = attachLeaseAndProbe(sid, userKey, id);
             if (b != null) {
                 return b;
             }
         }
         // 2. idle 空：容量未满则按需同步建（直接给本次借出）
-        Borrowed created = createOnDemand(sid, busyJson);
+        Borrowed created = createOnDemand(sid, userKey, busyJson);
         if (created != null) {
             return created;
         }
@@ -264,8 +362,8 @@ public class SandboxPoolManager {
         long deadline = System.currentTimeMillis() + maxWaitMs;
         waiters.incrementAndGet();
         recordEvent("wait-start", sid, null);
-        log.info("[sandbox-pool] borrow waiting: sid={}, waiters={}, maxWait={}s, snapshot={}",
-            sid, waiters.get(), pool.maxWaitSeconds(), snapshotString());
+        log.info("[sandbox-pool] borrow waiting: sid={}, userKey={}, waiters={}, maxWait={}s, snapshot={}",
+            sid, userKey, waiters.get(), pool.maxWaitSeconds(), snapshotString());
         try {
             while (System.currentTimeMillis() < deadline) {
                 try {
@@ -274,14 +372,14 @@ public class SandboxPoolManager {
                     Thread.currentThread().interrupt();
                     break;
                 }
-                id = luaBorrow(busyJson);
+                id = luaBorrow(busyJson, sid);
                 if (id != null && !id.isEmpty()) {
-                    Borrowed b = attachLeaseAndProbe(sid, id);
+                    Borrowed b = attachLeaseAndProbe(sid, userKey, id);
                     if (b != null) {
                         return b;
                     }
                 }
-                created = createOnDemand(sid, busyJson);
+                created = createOnDemand(sid, userKey, busyJson);
                 if (created != null) {
                     return created;
                 }
@@ -298,14 +396,14 @@ public class SandboxPoolManager {
     }
 
     /** 借出后置：SET 租约（续约①）→ 探测；探测失败 kill 换新（≤PROBE_MAX_RETRY 次），全败报错 */
-    private Borrowed attachLeaseAndProbe(String sid, String firstId) {
+    private Borrowed attachLeaseAndProbe(String sid, String userKey, String firstId) {
         String id = firstId;
         for (int attempt = 1; attempt <= PROBE_MAX_RETRY + 1; attempt++) {
-            setLease(id, sid != null ? sid : podId);   // 续约①：借出即受保护
+            setLease(id, sid != null && !sid.isBlank() ? sid : podId);   // 续约①：借出即受保护
             if (probeAlive(id)) {
                 recordEvent("borrow", sid, id);
-                log.info("[sandbox-pool] borrowed: sid={}, sandboxId={}, attempt={}, snapshot={}",
-                    sid, id, attempt, snapshotString());
+                log.info("[sandbox-pool] borrowed: sid={}, userKey={}, sandboxId={}, attempt={}, snapshot={}",
+                    sid, userKey, id, attempt, snapshotString());
                 return new Borrowed(id, connect(id));
             }
             // 探测失败：容器已被 Server GC/异常 → kill 换新
@@ -321,11 +419,11 @@ public class SandboxPoolManager {
                 break;
             }
             // 换新：优先按需建（容量允许），否则再取 idle
-            Borrowed created = createOnDemand(sid, busyJsonOf(sid));
+            Borrowed created = createOnDemand(sid, userKey, busyJsonOf(sid, userKey));
             if (created != null) {
                 return created;
             }
-            String next = luaBorrow(busyJsonOf(sid));
+            String next = luaBorrow(busyJsonOf(sid, userKey), sid);
             if (next == null || next.isEmpty()) {
                 break;
             }
@@ -336,7 +434,7 @@ public class SandboxPoolManager {
     }
 
     /** 按需同步建容器（容量未满时）：cap 占位 → 建 → 直接转 busy 给本次借出；容量满/Redis 不可达返回 null */
-    private Borrowed createOnDemand(String sid, String busyJson) {
+    private Borrowed createOnDemand(String sid, String userKey, String busyJson) {
         String entry = luaCap();
         if (entry == null || entry.isEmpty()) {
             return null;
@@ -347,7 +445,7 @@ public class SandboxPoolManager {
             String id = osb.getInfo().getId();
             eval(PROMOTE_BUSY_LUA, ScriptOutputType.INTEGER,
                 new String[]{entry, id, busyJson});
-            setLease(id, sid != null ? sid : podId);
+            setLease(id, sid != null && !sid.isBlank() ? sid : podId);
             if (probeAlive(id)) {
                 recordEvent("create-on-demand", sid, id);
                 log.info("[sandbox-pool] created on demand: sid={}, sandboxId={}, snapshot={}",
@@ -373,12 +471,13 @@ public class SandboxPoolManager {
     }
 
     /** Redis 故障期 fail-open 借出：跳过账本直接建容器（不计数、限流告警；账本外容器由 Server TTL 兜底消亡） */
-    public Borrowed borrowFailOpen(String sid) {
+    public Borrowed borrowFailOpen(String sid, String userKey) {
         warnFailOpen("borrow fail-open: redis unavailable, creating unmanaged container (sid=" + sid + ")");
         Sandbox osb = buildSandbox();
         String id = osb.getInfo().getId();
         recordEvent("borrow-fail-open", sid, id);
-        log.warn("[sandbox-pool] fail-open borrow: sid={}, sandboxId={} (unmanaged, Server TTL will reap)", sid, id);
+        log.warn("[sandbox-pool] fail-open borrow: sid={}, userKey={}, sandboxId={} (unmanaged, Server TTL will reap)",
+            sid, userKey, id);
         return new Borrowed(id, osb);
     }
 
@@ -388,13 +487,19 @@ public class SandboxPoolManager {
      * 租约续约（② resume / ③ doExec / ④ stop 共用）：保留原值的幂等 upsert（设计 §5.4——
      * 不用 EXPIRE：租约在扫描间隙过期时 upsert 直接重建自愈；真失活由 D14 双保险兜底）。
      * fail-soft：Redis 异常仅告警（续约失败 → 租约到期 → 扫描 D14 判定，活跃 turn 有 turn_lease 保命）。
+     *
+     * <p><b>缺陷①修复（2026-11-05）</b>：RENEW_LEASE_LUA 的 KEYS[1] 必须是<b>租约键</b>
+     * {@code sbx:pool:lease:{sandboxId}}（脚本内 GET/SET 均作用其上）——此前误传 ledger 键，
+     * 对 HASH 键执行 GET 触发 WRONGTYPE 静默失效（续约永不生效，租约 600s 必过期），
+     * 且 Lua 的 {@code SET} 在 Redis 7+ 会先失效脚本前序错误，把 ledger 键覆写成 STRING 污染账本。
      */
     public void renew(String sandboxId) {
         if (sandboxId == null || sandboxId.isBlank()) {
             return;
         }
         try {
-            eval(RENEW_LEASE_LUA, ScriptOutputType.INTEGER,
+            evalLuaKeyed(RENEW_LEASE_LUA, ScriptOutputType.INTEGER,
+                new String[]{facade.key(LEASE_PREFIX + sandboxId)},
                 new String[]{sandboxId, String.valueOf(pool.idleReturnSeconds())});
         } catch (Exception e) {
             log.debug("[sandbox-pool] lease renew failed (redis unavailable?): sandboxId={}: {}",
@@ -403,48 +508,98 @@ public class SandboxPoolManager {
     }
 
     /**
-     * D16-④ 确认入口预检续约：按 sid 反查 busy 记录 → 租约键 EXISTS → EXPIRE 续约放行；
-     * 键缺失（容器已被回收/不在账本）→ 抛 {@link PoolLeaseGoneException}（调用方 410 confirm_expired，
-     * 不进入 resume——杜绝"通过预检却中途 404 借新容器丢产物"）。
+     * resume 账本校正（D2 D17 扩展 + P4 顺序修正）：connect 成功后调用——
+     * <ul>
+     *   <li>'B'（busy 且 sid==本会话）→ 仅续约放行；</li>
+     *   <li>'R'（粘滞且 sid 或 owner==本会话）→ Lua 已原子换绑复活（HDEL i: + HSET b:），
+     *       Java 侧 SET 租约（复活即续约①）放行；</li>
+     *   <li>其余（被继承给他人/已被回收/校验不过）→ 调用方 <b>close 已 connect 句柄</b> 后抛
+     *       SandboxException 触发 SDK P3→P4 降级走借出决策树——不写账本（无幻影 busy）。</li>
+     * </ul>
+     * Redis 异常 fail-open 放行（校正失败退化为现状纯续约语义，D14 兜底不丢正确性）。
      *
-     * <p>判活只看租约键不看 busy 归属账本（租约是活性真相）；Redis 异常 fail-open 放行
-     * （不能因 Redis 故障阻断确认——对齐守卫哲学）。
+     * @return true=放行（账本已校正/续约），false=降级 P4（调用方须 close 句柄并抛异常）
+     */
+    public boolean reconcileResume(String sandboxId, String sid, String userKey) {
+        try {
+            String verdict = evalLuaKeyed(RESUME_RECONCILE_LUA, ScriptOutputType.VALUE,
+                new String[]{facade.key(LEDGER_KEY)},
+                new String[]{sandboxId,
+                    sid != null ? sid : "",
+                    userKey != null ? userKey : "",
+                    busyJsonOf(sid, userKey)});
+            if ("B".equals(verdict) || "R".equals(verdict)) {
+                if ("R".equals(verdict)) {
+                    recordEvent("resume-revive", sid, sandboxId);
+                    log.info("[sandbox-pool] resume revived sticky container: sid={}, userKey={}, sandboxId={}",
+                        sid, userKey, sandboxId);
+                }
+                setLease(sandboxId, sid != null && !sid.isBlank() ? sid : podId);
+                return true;
+            }
+            log.info("[sandbox-pool] resume reconcile downgrade to borrow: sid={}, userKey={}, sandboxId={}, verdict={}",
+                sid, userKey, sandboxId, verdict);
+            return false;
+        } catch (Exception e) {
+            log.debug("[sandbox-pool] resume reconcile skipped (redis unavailable?): sandboxId={}: {}",
+                sandboxId, e.getMessage());
+            return true;   // fail-open：退化为现状纯续约语义
+        }
+    }
+
+    /**
+     * D16-④ 确认入口预检续约（P3 sid 匹配防线版）：{@code s:{sid}} 反查 → 单 key 账本探查 Lua
+     * 校验条目内 sid 归属 → 租约键 EXISTS→EXPIRE 同脚本原子判活（缺陷③）。
+     * <ul>
+     *   <li>{@code s:} 缺失（从未经池借出/fail-open 容器/池刚开启）→ <b>放行</b>（不误伤合法确认——
+     *       现状「无 busy 归属即 410」会作废此类会话的确认，为缺陷②误伤面）；</li>
+     *   <li>条目 sid 不匹配（陈旧反查指向他人容器）/ 条目已回收 → 410（干净拒绝，绝不放行——
+     *       放行后 resume 校正会因 sid 不匹配抛异常触发 P4 中途借新容器丢产物）；</li>
+     *   <li>粘滞且 sid 匹配 → Lua 已原子复活回 busy（D17 粘滞窗口内确认续跑，与继承竞态单赢家裁决），
+     *       SET 租约放行；</li>
+     *   <li>busy 且 sid 匹配 → TOUCH_LEASE_LUA 原子判活续约；返回 0（租约确死）→ 410。</li>
+     * </ul>
+     * Redis 异常维持 fail-open 放行（不能因 Redis 故障阻断确认——对齐守卫哲学）。
      */
     public void touchSessionOrThrow(String sid) {
         if (sid == null || sid.isBlank()) {
             throw new PoolLeaseGoneException(sid, "no session id for pool touch");
         }
-        Map<String, String> ledger;
+        String verdict;
         try {
-            ledger = facade.sync().hgetall(facade.key(LEDGER_KEY));
+            verdict = evalLuaKeyed(TOUCH_PROBE_LUA, ScriptOutputType.VALUE,
+                new String[]{facade.key(LEDGER_KEY)}, new String[]{sid});
         } catch (RedisException e) {
             warnFailOpen("confirm touch fail-open (redis unavailable, sid=" + sid + ")");
             return;   // fail-open：放行（Redis 故障期确认可用性优先）
         } catch (Exception e) {
-            log.warn("[sandbox-pool] touch ledger read failed (sid={}): {}", sid, e.getMessage());
+            log.warn("[sandbox-pool] touch ledger probe failed (sid={}): {}", sid, e.getMessage());
             return;   // 不可判定 → 放行（宁可漏收不可误作废）
         }
-        String target = null;
-        String busyValue = null;
-        for (var en : ledger.entrySet()) {
-            if (en.getKey().startsWith("b:")) {
-                var rec = parseBusy(en.getValue());
-                if (rec != null && sid.equals(rec.sid())) {
-                    target = en.getKey().substring(2);
-                    busyValue = en.getValue();
-                    break;
-                }
-            }
+        if (verdict == null || verdict.isEmpty()) {
+            // s: 缺失：会话从未经池借出（fail-open 容器/池刚开启/未知映射）→ 放行（修缺陷②误伤）
+            log.debug("[sandbox-pool] confirm touch passed (no pool mapping): sid={}", sid);
+            return;
         }
-        if (target == null) {
-            // 无 busy 归属：容器已被回收或从未经池借出（fail-open 容器/池刚开启）
-            throw new PoolLeaseGoneException(sid, "no busy ledger entry for session");
+        if ("X".equals(verdict) || "N".equals(verdict)) {
+            // 陈旧反查（指向已被他人借走/继承的容器）或容器已回收 → 干净 410，绝不放行（P3 防线）
+            throw new PoolLeaseGoneException(sid, "pool ledger stale for session (verdict=" + verdict + ")");
         }
-        String leaseKey = facade.key(LEASE_PREFIX + target);
+        // 'B:{id}' / 'R:{id}'
+        char kind = verdict.charAt(0);
+        String target = verdict.length() > 2 ? verdict.substring(2) : "";
+        if (kind == 'R') {
+            setLease(target, sid);   // 复活：粘滞态租约已死，upsert 重建（复活即续约①）
+            recordEvent("touch-revive", sid, target);
+            log.info("[sandbox-pool] confirm touch revived sticky container: sid={}, sandboxId={}", sid, target);
+            return;
+        }
+        // kind == 'B'：单 key 原子判活续约（EXISTS→EXPIRE 同脚本，缺陷③窗口关闭）
         try {
-            Long exists = facade.sync().exists(leaseKey);   // Lettuce exists → Long
-            if (exists != null && exists > 0) {
-                facade.sync().expire(leaseKey, pool.idleReturnSeconds());
+            Long ok = evalLuaKeyed(TOUCH_LEASE_LUA, ScriptOutputType.INTEGER,
+                new String[]{facade.key(LEASE_PREFIX + target)},
+                new String[]{String.valueOf(pool.idleReturnSeconds())});
+            if (ok != null && ok == 1L) {
                 log.debug("[sandbox-pool] confirm touch renewed lease: sid={}, sandboxId={}", sid, target);
                 return;
             }
@@ -614,10 +769,11 @@ public class SandboxPoolManager {
         if (claimed.isEmpty()) {
             return;   // 已被其他副本认领
         }
-        // 4a. 认领后复核 + 撤销：kill 前租约若被 resume 续约重建（判定到 kill 的窗口内有新 turn）→ 还原 busy
+        // 4a. 认领后复核 + 撤销：kill 前租约若被 resume 续约重建（判定到 kill 的窗口内有新 turn）→ 还原 busy 与 s: 反查
         if (leaseAlive(sandboxId)) {
             try {
-                eval(UNCLAIM_LUA, ScriptOutputType.INTEGER, new String[]{sandboxId, busyJson});
+                eval(UNCLAIM_LUA, ScriptOutputType.INTEGER,
+                    new String[]{sandboxId, busyJson, rec != null && rec.sid() != null ? rec.sid() : ""});
                 log.info("[sandbox-pool] claim reverted (lease renewed during scan): sandboxId={}", sandboxId);
             } catch (RedisException e) {
                 warnFailOpen("unclaim failed, container will be killed with stale claim: " + e.getMessage());
@@ -779,11 +935,22 @@ public class SandboxPoolManager {
     // ---------------------------------------------------------------- Redis 原语（全部 try 包裹，RedisException 上抛由调用方分型）
 
     /**
-     * ledger 单 key Lua 执行收口（protected = 测试子类覆写脱离真实 Redis；
-     * 单 key 脚本在 cluster 下天然合法，无 CROSSSLOT 面）。
+     * ledger 单 key Lua 执行收口（protected = 测试子类覆写脱离真实 Redis）——
+     * 委托 {@link #evalLuaKeyed}（KEYS 显式传入）并固定 KEYS[1]=ledger。
      */
     protected <T> T evalLua(String script, ScriptOutputType type, String[] args) {
-        return facade.sync().eval(script, type, new String[]{facade.key(LEDGER_KEY)}, args);
+        return evalLuaKeyed(script, type, new String[]{facade.key(LEDGER_KEY)}, args);
+    }
+
+    /**
+     * 单 key Lua 执行收口（protected = 测试子类覆写脱离真实 Redis；KEYS 显式传入）。
+     * <b>缺陷①修复的根因收口</b>：所有 Lua 的 KEYS[1] 由调用点显式给键——ledger 单 key 脚本传
+     * ledger 键、租约键脚本（RENEW/TOUCH_LEASE）传租约键，杜绝「脚本 KEYS[1] 语义与传入键错位」
+     * 再发（此前 renew 硬编码 ledger 键导致 WRONGTYPE 静默失效）。单 key 脚本在 cluster 下
+     * 天然合法，无 CROSSSLOT 面。
+     */
+    protected <T> T evalLuaKeyed(String script, ScriptOutputType type, String[] keys, String[] args) {
+        return facade.sync().eval(script, type, keys, args);
     }
 
     private <T> T eval(String script, ScriptOutputType type, String[] args) {
@@ -798,8 +965,9 @@ public class SandboxPoolManager {
         }
     }
 
-    private String luaBorrow(String busyJson) {
-        String id = eval(BORROW_LUA, ScriptOutputType.VALUE, new String[]{busyJson});
+    private String luaBorrow(String busyJson, String sid) {
+        String id = eval(BORROW_LUA, ScriptOutputType.VALUE,
+            new String[]{busyJson, sid != null ? sid : ""});
         return id == null ? "" : id;
     }
 
@@ -902,16 +1070,17 @@ public class SandboxPoolManager {
 
     // ---------------------------------------------------------------- busy 记录
 
-    /** busy 条目 JSON：{sid, podId, borrowedAt(秒)}——sid 升格为 D14 双保险查询键（设计 D14） */
-    private String busyJsonOf(String sid) {
+    /** busy 条目 JSON：{sid, userKey, podId, borrowedAt(秒)}——sid 为 D14 双保险查询键（设计 D14），userKey 为 D17 配额键 */
+    private String busyJsonOf(String sid, String userKey) {
         var m = new java.util.LinkedHashMap<String, Object>();
         m.put("sid", sid != null ? sid : "");
+        m.put("userKey", userKey != null ? userKey : "");
         m.put("podId", podId);
         m.put("borrowedAt", System.currentTimeMillis() / 1000);
         try {
             return mapper.writeValueAsString(m);
         } catch (Exception e) {
-            return "{\"sid\":\"\",\"podId\":\"\",\"borrowedAt\":0}";
+            return "{\"sid\":\"\",\"userKey\":\"\",\"podId\":\"\",\"borrowedAt\":0}";
         }
     }
 

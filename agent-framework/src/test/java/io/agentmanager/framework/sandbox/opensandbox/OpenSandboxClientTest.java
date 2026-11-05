@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
@@ -187,11 +188,12 @@ class OpenSandboxClientTest {
 
     // ---------------------------------------------------------------- 池化分支（sandbox-pool-design D1/D2/D13，§8 开关对照）
 
-    /** 构造池管理器 stub：borrow 返回指定容器 */
+    /** 构造池管理器 stub：borrow 返回指定容器、resume 校正放行 */
     private static SandboxPoolManager poolStub(String borrowId) {
         var pool = mock(SandboxPoolManager.class);
         var osb = mockOsbSandbox(borrowId);
-        when(pool.borrow(any())).thenReturn(new SandboxPoolManager.Borrowed(borrowId, osb));   // poolSid 可为 null
+        when(pool.borrow(any(), any())).thenReturn(new SandboxPoolManager.Borrowed(borrowId, osb));   // poolSid/userKey 可为 null
+        when(pool.reconcileResume(anyString(), any(), any())).thenReturn(true);
         return pool;
     }
 
@@ -208,8 +210,25 @@ class OpenSandboxClientTest {
         // D2：sandboxId = 借出容器 id；workspaceSpec = 当次传入（start 投影 hydrate 依赖）
         assertEquals("sb-pooled-1", sandbox.getOsbState().getSandboxId());
         assertEquals("/workspace", sandbox.getOsbState().getWorkspaceSpec().getRoot());
-        verify(pool).borrow(any());   // poolSid 可为 null（无 middleware ThreadLocal 时）
+        verify(pool).borrow(any(), any());   // poolSid/userKey 可为 null（无 middleware/守卫 ThreadLocal 时）
         verify(pool, never()).release(anyString());
+    }
+
+    @Test
+    void createWithPoolShouldPassSessionIdAndUserKeyFromThreadLocal() {
+        // D17 P1：借出身份（sid=turn_lease 键、userKey=真实用户）从 spec ThreadLocal 传入 borrow
+        var pool = poolStub("sb-pooled-2");
+        var fsSpec = new OpenSandboxFilesystemSpec();
+        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, fsSpec);
+        client.setSandboxPoolManager(pool);
+        fsSpec.setPendingSessionId("sid-abc");
+        fsSpec.setPendingUserKey("alice");
+
+        var spec = new WorkspaceSpec();
+        spec.setRoot("/workspace");
+        client.create(spec, null, options());
+
+        verify(pool).borrow("sid-abc", "alice");
     }
 
     @Test
@@ -230,11 +249,11 @@ class OpenSandboxClientTest {
             var sandbox = (OpenSandbox) client.create(state().getWorkspaceSpec(), null, options());
             assertEquals("sb-legacy", sandbox.getOsbState().getSandboxId());
         }
-        verify(pool, never()).borrow(any());
+        verify(pool, never()).borrow(any(), any());
     }
 
     @Test
-    void resumeWithPoolShouldRenewLease() {
+    void resumeWithPoolShouldReconcileAndRenewLease() {
         var pool = poolStub("sb-pooled-1");
         var osb = mockOsbSandbox("sb-pooled-1");
         var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
@@ -250,8 +269,35 @@ class OpenSandboxClientTest {
             var resumeState = state();
             resumeState.setSandboxId("sb-pooled-1");
             client.resume(resumeState);
-            // 续约②：P3 命中、connect 成功后跨副本全局键保活
+            // 续约②：connect 成功 → 账本校正放行 → 跨副本全局键保活
+            verify(pool).reconcileResume(eq("sb-pooled-1"), any(), any());
             verify(pool).renew("sb-pooled-1");
+        }
+    }
+
+    @Test
+    void resumeWithPoolShouldDowngradeWhenReconcileFails() {
+        // P4 顺序修正：校正不过（被继承给他人/已回收）→ close 句柄 + 抛异常触发 SDK P3→P4 降级
+        var pool = mock(SandboxPoolManager.class);
+        when(pool.reconcileResume(anyString(), any(), any())).thenReturn(false);
+        var osb = mockOsbSandbox("sb-stolen");
+        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
+        client.setSandboxPoolManager(pool);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenReturn(osb);
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var resumeState = state();
+            resumeState.setSandboxId("sb-stolen");
+            assertThrows(io.agentscope.harness.agent.sandbox.SandboxException.class,
+                () -> client.resume(resumeState));
+            // 降级前必须 close 已 connect 句柄（SDK Sandbox AutoCloseable），且不续约不写账本
+            verify(osb).close();
+            verify(pool, never()).renew(anyString());
         }
     }
 

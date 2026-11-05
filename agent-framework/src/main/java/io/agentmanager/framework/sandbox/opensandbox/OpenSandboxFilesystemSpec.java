@@ -189,6 +189,12 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         return sid;
     }
 
+    /** 读取但不清除请求级会话键（OpenSandboxClient.resume 池账本校正用——后续 bindUserKey/middleware 仍需消费 ThreadLocal） */
+    public String peekPendingSessionId() {
+        var sid = pendingSessionId.get();
+        return (sid == null || sid.isBlank()) ? null : sid;
+    }
+
     /** 沙箱池管理器（AgentScopeConfig 装配注入；null = 池关闭） */
     public OpenSandboxFilesystemSpec sandboxPoolManager(SandboxPoolManager poolManager) {
         this.sandboxPoolManager = poolManager;
