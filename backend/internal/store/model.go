@@ -7,19 +7,19 @@ import (
 
 // OafPackage 上传的 OAF 配置包。
 type OafPackage struct {
-	ID              uint      `gorm:"primaryKey" json:"id"`
-	Name            string    `gorm:"size:128" json:"name"`
-	Slug            string    `gorm:"size:200;uniqueIndex:uk_pkg_slug_version" json:"slug"`
-	Version         string    `gorm:"size:32;uniqueIndex:uk_pkg_slug_version" json:"version"`
-	Description     string    `gorm:"type:text" json:"description"`
-	ManifestJSON    string    `gorm:"type:json" json:"manifestJson"` // frontmatter 原文
-	WarningsJSON    string    `gorm:"type:json" json:"warningsJson"` // 宽松模式 warnings
-	DirPath         string    `gorm:"size:256" json:"dirPath"`       // PVC 内相对路径 packages/{id}
-	FileCount       int       `json:"fileCount"`
-	TotalSize       int64     `json:"totalSize"`
-	Checksum        string    `gorm:"size:64" json:"checksum"`      // zip sha256
-	SourcePackageID uint      `gorm:"index" json:"sourcePackageId"` // 0=上传原始包；>0=由该包编辑派生
-	RefCount        int       `json:"refCount"`
+	ID              uint   `gorm:"primaryKey" json:"id"`
+	Name            string `gorm:"size:128" json:"name"`
+	Slug            string `gorm:"size:200;uniqueIndex:uk_pkg_slug_version" json:"slug"`
+	Version         string `gorm:"size:32;uniqueIndex:uk_pkg_slug_version" json:"version"`
+	Description     string `gorm:"type:text" json:"description"`
+	ManifestJSON    string `gorm:"type:json" json:"manifestJson"` // frontmatter 原文
+	WarningsJSON    string `gorm:"type:json" json:"warningsJson"` // 宽松模式 warnings
+	DirPath         string `gorm:"size:256" json:"dirPath"`       // PVC 内相对路径 packages/{id}
+	FileCount       int    `json:"fileCount"`
+	TotalSize       int64  `json:"totalSize"`
+	Checksum        string `gorm:"size:64" json:"checksum"`      // zip sha256
+	SourcePackageID uint   `gorm:"index" json:"sourcePackageId"` // 0=上传原始包；>0=由该包编辑派生
+	RefCount        int    `json:"refCount"`
 	// WorkspaceID 归属工作空间：0=平台公共包（所有空间可见，决议 7）；>0=仅本空间可见
 	WorkspaceID uint      `gorm:"index" json:"workspaceId"`
 	IsTemplate  bool      `gorm:"index" json:"isTemplate"` // 模板标记（用户侧模板页数据源）
@@ -149,13 +149,13 @@ func (User) TableName() string { return "users" }
 
 // Workspace 工作空间：用户侧资源隔离与协作单元（slug 形如 ws-{8 hex}）。
 type Workspace struct {
-	ID          uint   `gorm:"primaryKey" json:"id"`
-	Slug        string `gorm:"size:32;uniqueIndex" json:"slug"`
-	Name        string `gorm:"size:128" json:"name"`
-	Description string `gorm:"size:256" json:"description"`
-	OwnerUserID uint   `gorm:"index" json:"ownerUserId"`
-	Status      string `gorm:"size:16" json:"status"`      // active | disabled
-	QuotaJSON   string `gorm:"type:json" json:"quotaJson"` // {"maxAgents":N}，一期仅记录
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Slug        string    `gorm:"size:32;uniqueIndex" json:"slug"`
+	Name        string    `gorm:"size:128" json:"name"`
+	Description string    `gorm:"size:256" json:"description"`
+	OwnerUserID uint      `gorm:"index" json:"ownerUserId"`
+	Status      string    `gorm:"size:16" json:"status"`      // active | disabled
+	QuotaJSON   string    `gorm:"type:json" json:"quotaJson"` // {"maxAgents":N}，一期仅记录
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -192,20 +192,20 @@ func (ApiKey) TableName() string { return "api_keys" }
 
 // ModelConnection 工作空间级模型连接（对标 AgentCore 模型管理；内网库明文先例=model_config）。
 type ModelConnection struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	WorkspaceID uint       `gorm:"uniqueIndex:uk_mc_ws_name;index" json:"workspaceId"`
-	Name        string     `gorm:"size:128;uniqueIndex:uk_mc_ws_name" json:"name"`
-	Provider    string     `gorm:"size:32" json:"provider"` // 一期仅 openai（OpenAI 兼容）
-	ModelID     string     `gorm:"size:128" json:"modelId"`
-	BaseURL     string     `gorm:"size:512" json:"baseUrl"`
-	APIKey      string     `gorm:"size:512" json:"-"` // 接口一律掩码回显
-	Temperature float64    `json:"temperature"`
-	MaxTokens   int        `json:"maxTokens"`
-	TimeoutSec  int        `json:"timeoutSeconds"`
-	Status      string     `gorm:"size:16" json:"status"` // verified | unverified | failed
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	WorkspaceID  uint       `gorm:"uniqueIndex:uk_mc_ws_name;index" json:"workspaceId"`
+	Name         string     `gorm:"size:128;uniqueIndex:uk_mc_ws_name" json:"name"`
+	Provider     string     `gorm:"size:32" json:"provider"` // 一期仅 openai（OpenAI 兼容）
+	ModelID      string     `gorm:"size:128" json:"modelId"`
+	BaseURL      string     `gorm:"size:512" json:"baseUrl"`
+	APIKey       string     `gorm:"size:512" json:"-"` // 接口一律掩码回显
+	Temperature  float64    `json:"temperature"`
+	MaxTokens    int        `json:"maxTokens"`
+	TimeoutSec   int        `json:"timeoutSeconds"`
+	Status       string     `gorm:"size:16" json:"status"` // verified | unverified | failed
 	LastTestedAt *time.Time `json:"lastTestedAt"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 
 func (ModelConnection) TableName() string { return "model_connections" }
@@ -267,17 +267,17 @@ func (AgentIntegration) TableName() string { return "agent_integrations" }
 
 // Skill 技能资产主表（name 空间内唯一；语义对齐 AgentCore Skill）。
 type Skill struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	WorkspaceID uint      `gorm:"uniqueIndex:uk_skill_ws_name;index" json:"workspaceId"`
-	Name        string    `gorm:"size:64;uniqueIndex:uk_skill_ws_name" json:"name"` // skillNameRe 口径
-	DisplayName string    `gorm:"size:128" json:"displayName"`
-	Description string    `gorm:"size:1024" json:"description"`
-	TagsJSON    string    `gorm:"type:json" json:"tagsJson"` // ["客服","工单"]
-	Source      string    `gorm:"size:16" json:"source"`     // market | zip | markdown
-	SourceName  string    `gorm:"size:64" json:"sourceName"` // market 来源市场名（多源预留）
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	WorkspaceID uint   `gorm:"uniqueIndex:uk_skill_ws_name;index" json:"workspaceId"`
+	Name        string `gorm:"size:64;uniqueIndex:uk_skill_ws_name" json:"name"` // skillNameRe 口径
+	DisplayName string `gorm:"size:128" json:"displayName"`
+	Description string `gorm:"size:1024" json:"description"`
+	TagsJSON    string `gorm:"type:json" json:"tagsJson"` // ["客服","工单"]
+	Source      string `gorm:"size:16" json:"source"`     // market | zip | markdown
+	SourceName  string `gorm:"size:64" json:"sourceName"` // market 来源市场名（多源预留）
 	// LatestVersionID 最新 skill_versions 行（发布后=「最新发布版」展示目标）
 	LatestVersionID uint      `json:"latestVersionId"`
-	Enabled         bool      `json:"enabled"` // 停用后创建/编辑候选不再出现；已生成包不回变
+	Enabled         bool      `json:"enabled"`               // 停用后创建/编辑候选不再出现；已生成包不回变
 	Status          string    `gorm:"size:16" json:"status"` // active | disabled
 	CreatedBy       uint      `json:"createdBy"`
 	CreatedAt       time.Time `json:"createdAt"`
@@ -288,10 +288,10 @@ func (Skill) TableName() string { return "skills" }
 
 // SkillVersion 版本行（对标 AgentCore：工作区草稿可续改 + 正式版本不可变快照）。
 type SkillVersion struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	SkillID  uint   `gorm:"uniqueIndex:uk_skillver;index" json:"skillId"`
-	Version  string `gorm:"size:32;uniqueIndex:uk_skillver" json:"version"` // major.minor.patch
-	Status   string `gorm:"size:16;index" json:"status"` // draft | review(预留) | pending(预留) | published | offline
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	SkillID   uint   `gorm:"uniqueIndex:uk_skillver;index" json:"skillId"`
+	Version   string `gorm:"size:32;uniqueIndex:uk_skillver" json:"version"` // major.minor.patch
+	Status    string `gorm:"size:16;index" json:"status"`                    // draft | review(预留) | pending(预留) | published | offline
 	Changelog string `gorm:"size:512" json:"changelog"`
 	// ContentJSON Markdown 定义形态的正文（zip 形态为空）；FilesJSON zip 文件清单
 	ContentJSON string `gorm:"type:json" json:"contentJson"`
@@ -324,7 +324,7 @@ type SkillMarketSource struct {
 	ID       uint   `gorm:"primaryKey" json:"id"`
 	Key      string `gorm:"size:32;uniqueIndex" json:"key"` // builtin | 外部源自定义键
 	Name     string `gorm:"size:64" json:"name"`
-	Type     string `gorm:"size:16" json:"type"` // builtin | registry（registry 远期开放）
+	Type     string `gorm:"size:16" json:"type"`      // builtin | registry（registry 远期开放）
 	Endpoint string `gorm:"size:512" json:"endpoint"` // registry 源目录 JSON 地址（预留）
 	Enabled  bool   `json:"enabled"`
 	Sort     int    `json:"sort"`
@@ -369,8 +369,14 @@ type ExportOrderEntity struct {
 	// ManifestJSON 导出 manifest（审计/一致性校验）；RequestJSON 导出请求快照
 	//（marker/baseImage/env/secretKeys/replicas）：异步构建完成后据此重渲染
 	// values/manifest（回填 digest），保证可复现
-	ManifestJSON string    `gorm:"type:json" json:"manifestJson"`
-	RequestJSON  string    `gorm:"type:json" json:"-"`
+	ManifestJSON string `gorm:"type:json" json:"manifestJson"`
+	// ManifestVersion manifest 乐观锁版本号（issue #233）：manifest_json 列有三个并发写者
+	//（人工推进 itsm 写回 / 下载审计追加 / 构建完成回写），仅按 (id,status) 条件整段覆盖
+	// 会丢并发方刚写入的条目——写者 bump +1、CAS compare (id, status, manifest_version)
+	// 整数比较（规避 MySQL JSON 列 vs 字符串参数同值比较永不命中的方言缺陷，两方言一致）；
+	// json:"-" 不进任何 API 响应/列表
+	ManifestVersion int    `gorm:"default:0" json:"-"`
+	RequestJSON     string `gorm:"type:json" json:"-"`
 	// Marker 列表展示列（issue #234）：创建导出单时从 frozen mark 落库，导出记录区
 	// 直接读本列，避免列表逐行拖拽 request_json 快照大列（随历史行数线性放大响应体积）。
 	// 宽度对齐 ExportPackageMarkEntity.Marker size:64（marker 形状 {包版本}-e{N}）；

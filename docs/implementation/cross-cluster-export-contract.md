@@ -353,9 +353,13 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 
 导出单号规则：`EXP-YYYYMMDD-%04d`（%04d = export_orders 自增 id，创建行后回填）。人工推进 status 时同步更新 manifest 的 `itsm` 段。
 
+manifest 的全部并发更新（创建首渲落库 / itsm 写回 / `downloadedBy` 追加 / 构建完成回写）均为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：写者 bump 版本 +1，CAS 不命中即重读重试或放弃（首渲不命中放弃留痕；其余 ≤2 次重读，耗尽 400 / 留痕放弃），杜绝 stale 快照整段覆盖丢并发方条目。
+
 ### 5.8 下载审计（v1）
 
 values/manifest 下载成功 → `log.Printf("[export_download] order=%d user=%s file=values.yaml ts=%s", …)` 结构化访问日志 + manifest `audit.downloadedBy` 追加。独立下载审计表留 v2（§9-D5）。
+
+下载审计写入同为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：并发下载×下载 / 下载×人工推进丢失更新时重读重试（≤2 次，耗尽 400）；building 期下载的审计条目由构建完成回写保留（并入重渲产物，不整段覆盖）。
 
 ---
 

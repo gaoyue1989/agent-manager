@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"agent-manager/backend/internal/imagebuilder"
+	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/store"
 	"gorm.io/gorm"
 )
@@ -770,5 +771,346 @@ func TestExportOrderFailAfterCancel(t *testing.T) {
 	}
 	if final.Error != "" {
 		t.Fatalf("error must stay empty on cancelled order: %q", final.Error)
+	}
+}
+
+// exportManifestHeads 断言用：manifest itsm 段 + audit.downloadedBy 条目数。
+type exportManifestHeads struct {
+	Itsm struct {
+		TicketID string `json:"ticketId"`
+	} `json:"itsm"`
+	Audit struct {
+		DownloadedBy []struct {
+			User string `json:"user"`
+		} `json:"downloadedBy"`
+	} `json:"audit"`
+}
+
+// TestAdvanceExportOrderVsDownloadRace issue #233 核心竞态回归：人工推进持 stale 快照
+// CAS（下载审计已先落库并 bump manifest_version）→ CAS 不命中重读重试，最终 manifest
+// 同时保留 downloadedBy 条目与 itsm 段，互不覆盖（修复前 advance 以 (id,status) 条件
+// 整段覆盖 manifest，静默丢下载审计条目）。
+func TestAdvanceExportOrderVsDownloadRace(t *testing.T) {
+	core, _, ws, svc, _, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	order, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForExportStatus(t, core, order.ID, store.ExportStatusBuilt)
+	// stale 快照（此刻与库内一致）
+	var snap store.ExportOrderEntity
+	if err := core.DB.First(&snap, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 并发写者先落：下载审计追加（manifest_version bump）→ stale 快照 CAS 必不命中。
+	// 基线先取值：CAS 函数重读时会刷新传入快照（含 version），断言不能事后引用
+	wantVersion := snap.ManifestVersion + 2
+	if _, err := core.ExportOrderDownload(1, order.ID, "export-owner", "values.yaml"); err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	got, err := core.advanceExportOrderCAS(&snap, "owner", "export-owner",
+		&ExportAdvanceInput{Status: store.ExportStatusApproving, ItsmTicketID: "ITSM-233"})
+	if err != nil {
+		t.Fatalf("advance with stale snapshot: %v", err)
+	}
+	if got.Status != store.ExportStatusApproving {
+		t.Fatalf("status = %q, want approving", got.Status)
+	}
+	var fresh store.ExportOrderEntity
+	if err := core.DB.First(&fresh, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ManifestVersion != wantVersion {
+		t.Fatalf("manifest_version = %d, want %d (download + advance each bump once)",
+			fresh.ManifestVersion, wantVersion)
+	}
+	var heads exportManifestHeads
+	if err := json.Unmarshal([]byte(fresh.ManifestJSON), &heads); err != nil {
+		t.Fatal(err)
+	}
+	if heads.Itsm.TicketID != "ITSM-233" {
+		t.Fatalf("itsm segment lost: %+v", heads.Itsm)
+	}
+	if len(heads.Audit.DownloadedBy) != 1 || heads.Audit.DownloadedBy[0].User != "export-owner" {
+		t.Fatalf("downloadedBy lost/incorrect: %+v", heads.Audit.DownloadedBy)
+	}
+}
+
+// TestAdvanceExportOrderConcurrentStatusChange 并发推进语义两分支（issue #233）：
+// ① stale built + 库内已被推进至 approving + 目标 approving → 非法迁移 ErrBadState，
+// DB 状态不被改写（现语义保持）；② stale built + 目标 failed + 库内已 approving →
+// approving→failed 属 exportAdvanceAllow 合法迁移，重读后继续落库成功（效果等价客户端
+// 刷新重试），itsm 单号随目标落库。
+func TestAdvanceExportOrderConcurrentStatusChange(t *testing.T) {
+	core, _, ws, svc, _, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	order, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForExportStatus(t, core, order.ID, store.ExportStatusBuilt)
+	// stale 快照（built）；随后库内被并发推进 built→approving（manifest_version 随之 bump）
+	var snap store.ExportOrderEntity
+	if err := core.DB.First(&snap, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.AdvanceExportOrder(1, order.ID, "export-owner",
+		&ExportAdvanceInput{Status: store.ExportStatusApproving, ItsmTicketID: "ITSM-FIRST"}); err != nil {
+		t.Fatalf("concurrent advance: %v", err)
+	}
+
+	// ① 目标 approving：重读后发现库内已 approving（非合法迁移起点）→ ErrBadState，不改写
+	if _, err := core.advanceExportOrderCAS(&snap, "owner", "export-owner",
+		&ExportAdvanceInput{Status: store.ExportStatusApproving}); !errors.Is(err, ErrBadState) {
+		t.Fatalf("stale advance to approving: err = %v, want ErrBadState", err)
+	}
+	var mid store.ExportOrderEntity
+	if err := core.DB.First(&mid, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if mid.Status != store.ExportStatusApproving || mid.ItsmTicketID != "ITSM-FIRST" {
+		t.Fatalf("DB must keep concurrent writer's state: status=%q ticket=%q", mid.Status, mid.ItsmTicketID)
+	}
+
+	// ② 目标 failed：approving→failed 合法迁移，重读后继续落库成功
+	got, err := core.advanceExportOrderCAS(&snap, "owner", "export-owner",
+		&ExportAdvanceInput{Status: store.ExportStatusFailed, ItsmTicketID: "ITSM-SECOND"})
+	if err != nil {
+		t.Fatalf("stale advance to failed: %v", err)
+	}
+	if got.Status != store.ExportStatusFailed || got.ItsmTicketID != "ITSM-SECOND" {
+		t.Fatalf("got status=%q ticket=%q, want failed/ITSM-SECOND", got.Status, got.ItsmTicketID)
+	}
+	var fin store.ExportOrderEntity
+	if err := core.DB.First(&fin, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fin.Status != store.ExportStatusFailed || fin.ItsmTicketID != "ITSM-SECOND" {
+		t.Fatalf("final DB status=%q ticket=%q, want failed/ITSM-SECOND", fin.Status, fin.ItsmTicketID)
+	}
+	var heads exportManifestHeads
+	if err := json.Unmarshal([]byte(fin.ManifestJSON), &heads); err != nil {
+		t.Fatal(err)
+	}
+	if heads.Itsm.TicketID != "ITSM-SECOND" {
+		t.Fatalf("manifest itsm = %+v, want ITSM-SECOND (重渲基于重读后的最新 manifest)", heads.Itsm)
+	}
+}
+
+// TestDownloadAuditConcurrentAppend 下载×下载并发闭合（issue #233）：两个同基线独立
+// 快照各自下载（等价并发请求各自 resolveExportOrderAccess）——第二次 CAS 不命中（首次
+// 已 bump manifest_version）触发重读重试，manifest.downloadedBy 两条条目共存不丢
+// （修复前第二次按 (id,status) 整段覆盖丢首条）。
+func TestDownloadAuditConcurrentAppend(t *testing.T) {
+	core, _, ws, svc, _, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	order, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForExportStatus(t, core, order.ID, store.ExportStatusBuilt)
+	// 两个独立快照必须在下载 #1 落库前各自读出：快照 #2 若在 #1 之后才读，version 已
+	// bump、第二次 CAS 首次尝试即命中、重试分支不执行（回归无效——评审 g2 实证）。
+	// downloadExportArtifactCAS 成功会回写传入快照的 ManifestJSON/ManifestVersion，
+	// 共用同一快照同样会使第二次首试即命中
+	var snap1, snap2 store.ExportOrderEntity
+	if err := core.DB.First(&snap1, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := core.DB.First(&snap2, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	wantVersion := snap1.ManifestVersion + 2
+	if _, err := core.downloadExportArtifactCAS(&snap1, "dl-one", "values.yaml"); err != nil {
+		t.Fatalf("download #1: %v", err)
+	}
+	// 下载 #2 持同基线 stale 快照进入 CAS：首次尝试必 MISS（version 已被 #1 bump）→
+	// 重读最新行再追加 → HIT。err==nil 且两条条目共存，只有经重试分支才可达
+	// （重试分支损坏时 #2 三次 MISS 耗尽返 ErrBadState，本用例即失败）
+	got, err := core.downloadExportArtifactCAS(&snap2, "dl-two", "manifest.json")
+	if err != nil {
+		t.Fatalf("download #2 with stale snapshot: %v", err)
+	}
+	if got.ManifestVersion != wantVersion {
+		t.Fatalf("manifest_version = %d, want %d (second download retried once)",
+			got.ManifestVersion, wantVersion)
+	}
+	var fresh store.ExportOrderEntity
+	if err := core.DB.First(&fresh, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var heads exportManifestHeads
+	if err := json.Unmarshal([]byte(fresh.ManifestJSON), &heads); err != nil {
+		t.Fatal(err)
+	}
+	if len(heads.Audit.DownloadedBy) != 2 ||
+		heads.Audit.DownloadedBy[0].User != "dl-one" || heads.Audit.DownloadedBy[1].User != "dl-two" {
+		t.Fatalf("downloadedBy = %+v, want [dl-one dl-two] both retained", heads.Audit.DownloadedBy)
+	}
+}
+
+// TestRebuildPreservesDownloadAudit building 期下载被构建回写覆盖的残余通道闭合（issue #233）：
+// 手工造 building 行（不启异步 goroutine）→ building 期下载追加审计 → 直调包内私有
+// rebuildExportArtifacts（以构建开始前的 stale 快照，manifest_version 必已漂移）→
+// seedBuildingOrder 手工造 building 行（不启异步 goroutine，时序确定性）：同
+// CreateExportOrder 形态——占位 manifest 落库 → 首渲产物返回（不落库，由用例决定
+// 经 saveFirstRenderArtifacts 或并发交错写入），version=0。返回行、请求快照（rebuild
+// 重渲复用）与首渲 values/manifest。
+func seedBuildingOrder(t *testing.T, core *Core, ws *store.Workspace, svc *store.ServiceEntity,
+	pkg *store.OafPackage, mark *ExportMarkView) (*store.ExportOrderEntity, *ExportOrderRequest, string, string) {
+	t.Helper()
+	req := &ExportOrderRequest{Marker: mark.Marker}
+	l1, merged, _, err := core.resolveExportLayers(ws.ID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markEntity, err := core.loadFrozenMark(svc.ID, mark.Marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := &store.ExportOrderEntity{
+		ServiceID:       svc.ID,
+		WorkspaceID:     ws.ID,
+		SourcePackageID: pkg.ID,
+		ChartVersion:    defaultExportChartVersion,
+		BaseImage:       req.BaseImage,
+		OafImageRef:     buildOafImageRef(merged["REGISTRY_ADDRESS"], merged["REGISTRY_NAMESPACE"], k8s.ShortName(svc.K8sName), mark.Marker),
+		Status:          store.ExportStatusBuilding,
+		RequestJSON:     mustJSON(req),
+		ManifestJSON:    "{}",
+		CreatedBy:       "export-owner",
+	}
+	if err := core.DB.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	var wsr store.Workspace
+	if err := core.DB.First(&wsr, ws.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	in := &exportRenderInput{
+		OrderNo:      exportOrderNo(order),
+		Svc:          svc,
+		Workspace:    &wsr,
+		Pkg:          pkg,
+		Mark:         markEntity,
+		L1:           l1,
+		Merged:       merged,
+		Req:          req,
+		CreatedBy:    order.CreatedBy,
+		CreatedAt:    order.CreatedAt,
+		OafImageRef:  order.OafImageRef,
+		ChartVersion: order.ChartVersion,
+	}
+	values, manifest, err := renderExportArtifacts(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return order, req, values, manifest
+}
+
+// TestRebuildPreservesDownloadAudit building 期下载被构建回写覆盖的残余通道闭合（issue #233）：
+// 手工造 building 行（不启异步 goroutine）→ building 期下载追加审计 → 直调包内私有
+// rebuildExportArtifacts（以构建开始前的 stale 快照，manifest_version 必已漂移）→
+// downloadedBy 条目保留 + digest 回填 + status=built（修复前整段覆盖重渲产物丢条目）。
+func TestRebuildPreservesDownloadAudit(t *testing.T) {
+	core, builder, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	order, req, values, manifest := seedBuildingOrder(t, core, ws, svc, pkg, mark)
+	// 首渲落库（无并发写者，CAS 命中：version 0→1）
+	if err := core.saveFirstRenderArtifacts(order, values, manifest); err != nil {
+		t.Fatal(err)
+	}
+	// 构建开始前快照（version=1）
+	stale := *order
+	// building 期下载：manifest_version 1→2，manifest 增 downloadedBy 条目——快照就此
+	// 漂移（正是被修复的「构建窗口内 version 必已漂移」场景；compare 基准为每轮现行值）
+	if _, err := core.downloadExportArtifactCAS(order, "dl-during-build", "values.yaml"); err != nil {
+		t.Fatalf("download during building: %v", err)
+	}
+	if err := core.rebuildExportArtifacts(&stale, req, builder.digest); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	var fresh store.ExportOrderEntity
+	if err := core.DB.First(&fresh, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Status != store.ExportStatusBuilt {
+		t.Fatalf("status = %q, want built", fresh.Status)
+	}
+	if fresh.OafImageDigest != builder.digest {
+		t.Fatalf("digest = %q, want %q", fresh.OafImageDigest, builder.digest)
+	}
+	var heads exportManifestHeads
+	if err := json.Unmarshal([]byte(fresh.ManifestJSON), &heads); err != nil {
+		t.Fatal(err)
+	}
+	if len(heads.Audit.DownloadedBy) != 1 || heads.Audit.DownloadedBy[0].User != "dl-during-build" {
+		t.Fatalf("downloadedBy lost during rebuild: %+v", heads.Audit.DownloadedBy)
+	}
+	// 重渲产物 digest 同步进 manifest bundle 段（下载条目并入不破坏构建回写内容）
+	if !strings.Contains(fresh.ManifestJSON, builder.digest) {
+		t.Fatalf("digest missing in rebuilt manifest: %s", fresh.ManifestJSON)
+	}
+}
+
+// TestCreateFirstRenderVsDownloadRace 创建窗口首渲 vs 下载竞态（issue #233 评审 g1）：
+// DB.Create（version=0）与首渲落库之间的窗口是 manifest 第四写者——并发下载可 CAS 0→1
+// 追加审计条目，原全行 Save 会整段覆盖并把 manifest_version 复位 0。修复后首渲同为
+// 乐观锁 CAS：① 并发下载先行 → 首渲 CAS 不命中放弃，审计条目保留、version 不复位、
+// values 不落（留痕，构建回写仍会补全产物）；② 无并发写者 → 首渲正常落库 version 0→1
+// （building 期 values.yaml 下载依赖首渲产物）。
+func TestCreateFirstRenderVsDownloadRace(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+
+	// ② 命中分支：无并发写者 → 首渲正常落库
+	orderHit, _, values, manifest := seedBuildingOrder(t, core, ws, svc, pkg, mark)
+	if err := core.saveFirstRenderArtifacts(orderHit, values, manifest); err != nil {
+		t.Fatalf("first render (no race): %v", err)
+	}
+	var hit store.ExportOrderEntity
+	if err := core.DB.First(&hit, orderHit.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if hit.ManifestVersion != 1 {
+		t.Fatalf("version = %d, want 1 (first render bumps once)", hit.ManifestVersion)
+	}
+	if hit.ValuesYAML != values || !strings.Contains(hit.ManifestJSON, "EXP-") {
+		t.Fatalf("first render must land values/manifest: values empty=%v manifest prefix ok=%v",
+			hit.ValuesYAML == "", strings.Contains(hit.ManifestJSON, "EXP-"))
+	}
+
+	// ① 竞态分支：并发下载走独立实体（等价并发请求各自 resolveExportOrderAccess 的独立
+	// 读；downloadExportArtifactCAS 会回写传入实体，复用创建方实体会使首渲从已 bump 的
+	// version 合法命中、反而覆盖条目——非真实交错形态）→ 首渲 CAS（version=0）不命中
+	orderMiss, _, missValues, missManifest := seedBuildingOrder(t, core, ws, svc, pkg, mark)
+	var concurrent store.ExportOrderEntity
+	if err := core.DB.First(&concurrent, orderMiss.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.downloadExportArtifactCAS(&concurrent, "dl-in-create-window", "values.yaml"); err != nil {
+		t.Fatalf("download in create window: %v", err)
+	}
+	if err := core.saveFirstRenderArtifacts(orderMiss, missValues, missManifest); err != nil {
+		t.Fatalf("first render after concurrent download: %v", err)
+	}
+	var missed store.ExportOrderEntity
+	if err := core.DB.First(&missed, orderMiss.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if missed.ManifestVersion != 1 {
+		t.Fatalf("version = %d, want 1 (download's bump must survive create-window race)", missed.ManifestVersion)
+	}
+	if !strings.Contains(missed.ManifestJSON, `"user": "dl-in-create-window"`) {
+		t.Fatalf("downloadedBy lost to first-render overwrite: %s", missed.ManifestJSON)
+	}
+	if missed.ValuesYAML != "" {
+		t.Fatal("first render must be abandoned on CAS miss (values_yaml must stay empty)")
 	}
 }
