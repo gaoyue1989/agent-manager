@@ -27,7 +27,7 @@
 | M6 | 连接器 verify→创建勾选→包 config.yaml 断言→Secret 含 MCP_TOKEN、包内无 token | e2e 脚本（mcp-connector） |
 | M7 | 集成登记→创建 lead→spawn 一轮子任务回流 | 协议多副本 job 扩展（运行时既有覆盖）+ 声明链路断言 |
 | M8 | API Key 签发/作用域/吊销；成员角色变化即时生效 | e2e 脚本（workspace-assets） |
-| M9 | enforce 三态（无凭据 401 / 带凭据 200 / 跨作用域 403）+ 四必需带凭据回归 | 平台 E2E 门禁（2026-10-20 0f59d51 落地 run-all m0–m10，其中 m9=技能中心、m10=沙箱配置；M9 enforce 三态不在该套件，需独立网关环境另行验收） |
+| M9 | enforce 三态（无凭据 401 / 带凭据 200 / 跨作用域 403）+ 四必需带凭据回归 | 平台 E2E 门禁（2026-10-20 0f59d51 落地 run-all m0–m10（后续扩至 m0–m11），其中 m9=技能中心、m10=沙箱配置、m11=空间配置/跨集群导出；M9 enforce 三态不在该套件，需独立网关环境另行验收） |
 
 > 手工项（集群形态依赖）：host 模式 publicEndpoint、release-agent 停机降级、router 灰度 report 模式观察——PR 附操作记录，不阻塞 CI。
 
@@ -114,8 +114,8 @@ M0 ──▶ M1 ─┐
 > **实装截图画廊**：[../screenshots/console-split/README.md](../screenshots/console-split/README.md)——24 张 kind 集群实拍
 > （登录/用户侧全页群/详情六 Tab/模型连接抽屉/运维侧治理页），与各模块文档「demo 对照」锚点一一对应。
 >
-> **2026-10-17 按功能 e2e 套件（e2e/console-split/，初版九模块全 PASS；2026-10-20 起扩至 11 模块）**：
-> lib.sh 公共断言库 + m0-auth～m8-workspace-assets 八个模块脚本（2026-10-20 0f59d51 起新增 m9-skill-center、m10-sandbox，共 11 模块）+ run-all.sh 聚合 runner，180+ 断言，
+> **2026-10-17 按功能 e2e 套件（e2e/console-split/，初版九模块全 PASS；2026-10-20 起扩至 11 模块、2026-11-04 起扩至 12 模块）**：
+> lib.sh 公共断言库 + m0-auth～m8-workspace-assets 八个模块脚本（2026-10-20 0f59d51 起新增 m9-skill-center、m10-sandbox，共 11 模块；2026-11-04 0cb6287 起新增 m11-workspace-config，共 12 模块）+ run-all.sh 聚合 runner，180+ 断言，
 > 覆盖实施文档各模块「测试要点」的可自动化部分（登录三分支/路由分层矩阵/治理全链/resolveWorkspace
 > 矩阵/创建编辑全链含包契约与 SSE 热生效/生命周期状态机/模型连接 CRUD-测试-下发-usage-会话切换/
 > MCP 连接器 verify 三分支与注入断言/集成探测与引用保护/API Key 与成员矩阵）。kind 集群实跑

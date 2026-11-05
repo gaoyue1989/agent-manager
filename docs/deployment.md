@@ -11,8 +11,8 @@
 ## 一、构建镜像
 
 > tag 必须与 `manifests/*.yaml` 中 `image:` 字段一致，否则 apply 后 Pod 拉不到镜像（ImagePullBackOff）。
-> 当前值：`platform-backend:v4`（platform.yaml:267）、`172.20.0.1:5001/platform-frontend:v7`（frontend.yaml:17）、
-> `172.20.0.1:5001/agent-framework:latest`（platform.yaml:275-276 的 AVAILABLE_IMAGES/DEFAULT_IMAGE）。
+> 当前值：`platform-backend:v4`（platform.yaml:270）、`172.20.0.1:5001/platform-frontend:v7`（frontend.yaml:17）、
+> `172.20.0.1:5001/agent-framework:latest`（platform.yaml:278-279 的 AVAILABLE_IMAGES/DEFAULT_IMAGE）。
 
 ```bash
 # 1) agent-framework（业务运行时，Java）——发布助手/业务 Agent 的业务镜像
@@ -82,7 +82,7 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 
 ### 控制台拆分按功能 e2e（e2e/console-split/）
 
-部署后一键回归（M0–M10 十一模块；M9=技能中心、M10=沙箱配置；enforce 三态需独立网关环境，不在本套件）：
+部署后一键回归（M0–M11 十二模块；M9=技能中心、M10=沙箱配置、M11=空间配置/跨集群导出；enforce 三态需独立网关环境，不在本套件）：
 
 ```bash
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_API_KEY=.. LLM_BASE_URL=.. LLM_MODEL=..]   # 缺省自动从 release-agent env 读取

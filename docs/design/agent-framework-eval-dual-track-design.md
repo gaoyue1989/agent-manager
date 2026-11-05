@@ -98,7 +98,7 @@
 - `SubagentExposedEvent` 序列化时 **type 覆写为 `subagent_exposed`**（`AgentEventSseSerializer.java:129`，携带 `subagent_id/agent_id/session_id/label`）——远程子 agent 调用收口帧。
 - `MODEL_CALL_END` 携带 usage：`inputTokens / outputTokens / totalTokens`（`AgentEventSseSerializer.java:108-112`）。
 
-控制器/服务层另有 9 个合成帧（不经 SDK 枚举；`permission_ask` 双路径：序列化覆写 + invokeStream 链路 emitSynthetic）：`session_created`（`ChatStreamController.java:900`，`POST /threads/chat` 映射在 `:254`）、`file_ready`（`:762`，present_file/present_url 返回后合成）、`tool_call_summary` / `tool_result_preview`（`TurnToolSummaryTracker.java:108,142`，多副本续传同样可回放）、`task_update`（`AgentRuntimeService.java:164`）、`waiting`、`done`、`error`、`permission_ask`。
+控制器/服务层另有 9 个合成帧（不经 SDK 枚举；`permission_ask` 双路径：序列化覆写 + invokeStream 链路 emitSynthetic；行号为 2026-11-06 HEAD 8461ea4 核对，后续可能漂移）：`session_created`（`ChatStreamController.java:1155`，`POST /threads/chat` 映射在 `:306`）、`file_ready`（`:1025`，present_file/present_url 返回后合成）、`tool_call_summary` / `tool_result_preview`（`TurnToolSummaryTracker.java:108,142`，多副本续传同样可回放）、`task_update`（`AgentRuntimeService.java:208`）、`waiting`、`done`、`error`、`permission_ask`。
 
 **评测关注点 → 真实帧映射**（v1 方案错误词条一并对照，作为历史教训）：
 
