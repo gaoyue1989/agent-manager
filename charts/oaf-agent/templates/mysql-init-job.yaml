@@ -29,6 +29,10 @@ spec:
         app.kubernetes.io/component: mysql-init
     spec:
       restartPolicy: Never
+      # 未引用 {fullname}-sa（无 serviceAccountName，落 namespace default SA），SA 级的
+      # token 禁用设置覆盖不到本 Pod，须显式禁用；脚本纯 mysql CLI，
+      # 无任何 K8s API 调用，禁用安全。
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

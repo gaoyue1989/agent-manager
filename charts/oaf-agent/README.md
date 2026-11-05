@@ -17,7 +17,7 @@ OAF 服务发布平台**跨集群导出发布**的生产侧交付 chart（设计
 | `configmap.yaml` | `{fullname}-env` | values.env（非敏感 env，空值剔除） |
 | `secret.yaml` | `{fullname}-env-secret` | values.secretEnv（敏感 env，stringData） |
 | `mysql-init-job.yaml` | `{fullname}-mysql-init` | `mysql.createDatabase=true` 时启用；pre-install hook 幂等建库 |
-| `serviceaccount.yaml` | `{fullname}-sa` | 最小 SA，无 RBAC（业务 Pod 无 K8s API 依赖） |
+| `serviceaccount.yaml` | `{fullname}-sa` | 最小 SA，无 RBAC（业务 Pod 无 K8s API 依赖），automountServiceAccountToken: false（不投影 token；Deployment pod 级与 mysql-init Job 同款禁用） |
 
 envFrom 两源与平台发布链路同序：**服务 Secret `{fullname}-env-secret` 在前、CM `{fullname}-env` 在后**（后引用者覆盖同名键）。
 

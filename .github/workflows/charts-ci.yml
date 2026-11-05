@@ -76,3 +76,11 @@ jobs:
           grep -q 'kind: Job' /tmp/oaf-agent-rendered.yaml     # hook Job 必须渲染
           grep -q 'kind: Ingress' /tmp/oaf-agent-rendered.yaml
           grep -q 'kind: Secret' /tmp/oaf-agent-rendered.yaml
+      - name: 最小 SA 断言（SA/Deployment/hook Job 三处禁自动挂载 token）
+        run: |
+          # 行首锚定匹配：注释行以 # 开头不命中，防回归锁被模板注释里的字面量喂饱失效
+          helm template ci-export charts/oaf-agent -f charts/oaf-agent/ci-values.yaml --show-only templates/serviceaccount.yaml | grep -qE '^automountServiceAccountToken: false$'
+          helm template ci-export charts/oaf-agent -f charts/oaf-agent/ci-values.yaml --show-only templates/deployment.yaml | grep -qE '^[[:space:]]*automountServiceAccountToken: false$'
+          # Job 渲染整体被 mysql-init-job.yaml 的 {{- if .Values.mysql.createDatabase }} 包裹
+          # （ci-values.yaml 恒为 true）：该值翻 false 则 Job 不渲染、此断言自会红（预期失败面，非误报）
+          helm template ci-export charts/oaf-agent -f charts/oaf-agent/ci-values.yaml --show-only templates/mysql-init-job.yaml | grep -qE '^[[:space:]]*automountServiceAccountToken: false$'

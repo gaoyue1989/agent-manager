@@ -21,6 +21,9 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ $fullname }}-sa
+      # pod 级禁用 SA token 自动挂载，与 SA 级（serviceaccount.yaml）双保险：pod 级
+      # 优先于 SA 级——即使日后 SA 被替换或其字段被移除，业务 Pod 仍不投影 token。
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

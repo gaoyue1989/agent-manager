@@ -98,6 +98,11 @@ func TestDeploymentConstruction(t *testing.T) {
 	if *d.Spec.Replicas != 1 {
 		t.Fatal("default replicas should be 1")
 	}
+	// 最小暴露面（issue #232）：业务 Pod 显式禁用 SA token 自动挂载（nil 或 true
+	// 都会按 SA/kubelet 默认投影 token）
+	if d.Spec.Template.Spec.AutomountServiceAccountToken == nil || *d.Spec.Template.Spec.AutomountServiceAccountToken {
+		t.Fatal("business pod must set automountServiceAccountToken: false")
+	}
 	if cs.Image != "agent-framework:latest" || cs.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Fatalf("image: %v", cs.Image)
 	}
