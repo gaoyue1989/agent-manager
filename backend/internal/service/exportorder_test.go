@@ -1135,3 +1135,78 @@ func TestCreateFirstRenderVsDownloadRace(t *testing.T) {
 		t.Fatal("first render must be abandoned on CAS miss (values_yaml must stay empty)")
 	}
 }
+
+// TestAsyncBuildCorruptInputFailsOrder asyncBuildExportOrder 输入损坏失败分支（契约 §2.2/§8
+// 失败语义）：corrupt request snapshot / mark load（标记未冻结）/ unknown snapshot encoding
+// 三类输入损坏均须经 failExportOrder 落 failed 带原因、且不触达 Images.Build。goroutine 带
+// defer recover()（exportorder.go:228）——任一分支回归成 panic 会被静默吞掉、导出单停留
+// building 且 error 空，v1「看 failed 原因后重建」的解救路径失效，waitForExportStatus 3s
+// 超时即拦截。三例均以 seedBuildingOrder 手工造 building 行（不启异步 goroutine）→ 破坏
+// 落库 → 直调 asyncBuildExportOrder：损坏先于 goroutine 启动，时序确定无竞态。
+func TestAsyncBuildCorruptInputFailsOrder(t *testing.T) {
+	core, builder, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	// 连续冻结三份独立快照（序号递增语义已由 TestFreezeExportMarkSequence 覆盖）
+	m1 := freezeMark(t, core, ws.ID, svc.ID)
+	m2 := freezeMark(t, core, ws.ID, svc.ID)
+	m3 := freezeMark(t, core, ws.ID, svc.ID)
+
+	// ① corrupt request snapshot：请求快照列损坏（非 JSON）→ failed 带 "corrupt request snapshot"
+	o1, _, _, _ := seedBuildingOrder(t, core, ws, svc, pkg, m1)
+	if err := core.DB.Model(&store.ExportOrderEntity{}).Where("id = ?", o1.ID).
+		Update("request_json", "not json").Error; err != nil {
+		t.Fatal(err)
+	}
+	core.asyncBuildExportOrder(o1.ID)
+	got1 := waitForExportStatus(t, core, o1.ID, store.ExportStatusFailed)
+	if !strings.Contains(got1.Error, "corrupt request snapshot") {
+		t.Fatalf("corrupt request snapshot: error = %q", got1.Error)
+	}
+	if got1.OafImageDigest != "" {
+		t.Fatalf("failed order must not carry digest: %q", got1.OafImageDigest)
+	}
+
+	// ② unknown snapshot encoding：frozen 快照携带未知编码条目（decodeExportEntries default
+	// 分支）→ failed 带原因；mark 行本身仍 frozen（loadFrozenMark 通过，损坏在解码层）
+	o2, _, _, _ := seedBuildingOrder(t, core, ws, svc, pkg, m2)
+	if err := core.DB.Model(&store.ExportPackageMarkEntity{}).Where("id = ?", m2.ID).
+		Update("files_json", `[{"path":"mcp-configs/fs/config.yaml","encoding":"unknown","content":"x"}]`).Error; err != nil {
+		t.Fatal(err)
+	}
+	core.asyncBuildExportOrder(o2.ID)
+	got2 := waitForExportStatus(t, core, o2.ID, store.ExportStatusFailed)
+	if !strings.Contains(got2.Error, "unknown snapshot encoding") {
+		t.Fatalf("unknown snapshot encoding: error = %q", got2.Error)
+	}
+	var m2row store.ExportPackageMarkEntity
+	if err := core.DB.First(&m2row, m2.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if m2row.Status != store.ExportMarkFrozen {
+		t.Fatalf("mark status must stay frozen: %q", m2row.Status)
+	}
+	if got2.OafImageDigest != "" {
+		t.Fatalf("failed order must not carry digest: %q", got2.OafImageDigest)
+	}
+
+	// ③ mark load：frozen 标记被改回 draft → loadFrozenMark 不命中 → failed 带
+	// "mark load" 前缀 + "not found or not frozen"（ErrMarkNotBuildable 文案）
+	o3, _, _, _ := seedBuildingOrder(t, core, ws, svc, pkg, m3)
+	if err := core.DB.Model(&store.ExportPackageMarkEntity{}).Where("id = ?", m3.ID).
+		Update("status", store.ExportMarkDraft).Error; err != nil {
+		t.Fatal(err)
+	}
+	core.asyncBuildExportOrder(o3.ID)
+	got3 := waitForExportStatus(t, core, o3.ID, store.ExportStatusFailed)
+	if !strings.Contains(got3.Error, "mark load") || !strings.Contains(got3.Error, "not found or not frozen") {
+		t.Fatalf("mark load: error = %q", got3.Error)
+	}
+	if got3.OafImageDigest != "" {
+		t.Fatalf("failed order must not carry digest: %q", got3.OafImageDigest)
+	}
+
+	// 三例均在快照物化/构建之前失败：fake builder 零调用
+	if calls := builder.calls(); len(calls) != 0 {
+		t.Fatalf("builder must not be called on corrupt input, got %d calls", len(calls))
+	}
+}
