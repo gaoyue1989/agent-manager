@@ -348,7 +348,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 
 导出单号规则：`EXP-YYYYMMDD-%04d`（%04d = export_orders 自增 id，创建行后回填）。人工推进 status 时同步更新 manifest 的 `itsm` 段。
 
-manifest 的并发更新（itsm 写回 / `downloadedBy` 追加 / 构建完成回写）均为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：写者 bump 版本 +1，CAS 不命中即重读重试（≤2 次重读，耗尽 400 / 留痕放弃），杜绝 stale 快照整段覆盖丢并发方条目。
+manifest 的全部并发更新（创建首渲落库 / itsm 写回 / `downloadedBy` 追加 / 构建完成回写）均为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：写者 bump 版本 +1，CAS 不命中即重读重试或放弃（首渲不命中放弃留痕；其余 ≤2 次重读，耗尽 400 / 留痕放弃），杜绝 stale 快照整段覆盖丢并发方条目。
 
 ### 5.8 下载审计（v1）
 

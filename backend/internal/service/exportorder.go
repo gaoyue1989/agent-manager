@@ -181,11 +181,37 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 	}
 	order.ValuesYAML = values
 	order.ManifestJSON = manifest
-	if err := c.DB.Save(order).Error; err != nil {
+	if err := c.saveFirstRenderArtifacts(order, values, manifest); err != nil {
 		return nil, err
 	}
 	c.asyncBuildExportOrder(order.ID)
 	return order, nil
+}
+
+// saveFirstRenderArtifacts 首渲产物落库（快照可注入，issue #233 评审）：创建窗口是
+// manifest 的第四个写者——DB.Create（version=0）到本落库之间，并发下载可按
+// (id, building, version=0) CAS 追加下载审计条目，原全行 Save（gorm Save 全字段落库）
+// 会整段覆盖窗口内并入的条目并把 manifest_version 复位 0——与其余三写者（人工推进/
+// 下载审计/构建回写）同款乐观锁 CAS，仅更新首渲在 Create 之后新增的三列（其余字段
+// Create 已落库）。CAS 不命中（并发写者已持有该行）放弃首渲并留痕：现行 manifest 为
+// 并发方合法产物（含其审计条目），构建回写仍会补全完整产物，下载审计不受损。
+func (c *Core) saveFirstRenderArtifacts(order *store.ExportOrderEntity, values, manifest string) error {
+	res := c.DB.Model(&store.ExportOrderEntity{}).
+		Where("id = ? AND status = ? AND manifest_version = ?", order.ID, store.ExportStatusBuilding, order.ManifestVersion).
+		Updates(map[string]interface{}{
+			"values_yaml":      values,
+			"manifest_json":    manifest,
+			"manifest_version": order.ManifestVersion + 1,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		log.Printf("[export_create] order=%d first render discarded (concurrent manifest write won the create window)", order.ID)
+		return nil
+	}
+	order.ManifestVersion = order.ManifestVersion + 1
+	return nil
 }
 
 // asyncBuildExportOrder 后台推进：物化 mark 快照 → Images.Build 直推 → 回填 digest 并重渲染 → built。
