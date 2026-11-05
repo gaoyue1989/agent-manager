@@ -1,6 +1,6 @@
 # OAF 跨集群导出发布设计（测试环境 → 生产跨集群交付）— 设计文档
 
-**日期**：2026-10-29　**状态**：设计定稿（2026-10-29）；v1 已实施合入 master（2026-10-30 PR #209，2026-11-03 PR #220 修复迭代），实施偏差见 [docs/implementation/cross-cluster-export-contract.md](../implementation/cross-cluster-export-contract.md) §9（D1-D13）
+**日期**：2026-10-29　**状态**：设计定稿（2026-10-29）；v1 已实施合入 master（2026-10-30 PR #209，2026-11-03 PR #220 修复迭代），实施偏差见 [docs/implementation/cross-cluster-export-contract.md](../implementation/cross-cluster-export-contract.md) §9（D1-D14）
 
 > 本文档记录 2026-10-29 评审定稿的跨集群导出发布方案。四项关键决议见 §0，正文按决议编写；被否决的备选路径（独立镜像同步服务、values 占位符脱敏）仅在 §0 与 §13 v2 演进中留痕。配套可交互原型 [demo/cross-cluster-export-demo.html](demo/cross-cluster-export-demo.html)（单文件离线可开：导出发布页 / 运维默认配置 / 生产部署 / 交付包与 DoD）。
 
