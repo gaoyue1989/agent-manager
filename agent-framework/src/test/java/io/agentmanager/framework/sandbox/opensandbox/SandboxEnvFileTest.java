@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -15,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -89,7 +91,7 @@ class SandboxEnvFileTest {
         when(files.readFile(ENV_PATH)).thenThrow(notFound);
     }
 
-    /** 捕获 files().write 的全部批次（.json 与临时文件） */
+    /** 捕获 files().write 的全部批次（写序 issue #230：第一批=生效文件临时发布、第二批=.json sidecar） */
     @SuppressWarnings("unchecked")
     private List<List<WriteEntry>> writtenBatches() {
         ArgumentCaptor<List<WriteEntry>> captor = ArgumentCaptor.forClass(List.class);
@@ -99,6 +101,20 @@ class SandboxEnvFileTest {
 
     private static WriteEntry writeOf(List<WriteEntry> batch) {
         return batch.get(0);
+    }
+
+    /** 重试收敛用例：按累计次数捕获全部写批次（与 writtenBatches 的定长 2 次区分） */
+    @SuppressWarnings("unchecked")
+    private List<List<WriteEntry>> writesSoFar(int expectedCount) {
+        ArgumentCaptor<List<WriteEntry>> captor = ArgumentCaptor.forClass(List.class);
+        verify(files, times(expectedCount)).write(captor.capture());
+        return captor.getAllValues();
+    }
+
+    private static Execution executionWithExit(int code) {
+        Execution execution = mock(Execution.class);
+        when(execution.getExitCode()).thenReturn(code);
+        return execution;
     }
 
     /** SDK 异常类构造器参数非空，用 mock 构造指定状态码 */
@@ -164,17 +180,17 @@ class SandboxEnvFileTest {
         assertEquals(List.of("B"), result.updatedKeys());
 
         List<List<WriteEntry>> batches = writtenBatches();
-        // 第一批：.json 管理键（含合并结果）
-        assertEquals(SandboxEnvFile.MANAGED_JSON_PATH, writeOf(batches.get(0)).getPath());
-        assertEquals("{\"A\":\"1\",\"B\":\"2\"}", textOf(writeOf(batches.get(0))));
-        // 第二批：原子发布（原文 + 追加行）
-        WriteEntry publish = writeOf(batches.get(1));
+        // 第一批：原子发布（原文 + 追加行）——写序 issue #230：先发布生效文件、后写 sidecar
+        WriteEntry publish = writeOf(batches.get(0));
         assertTrue(publish.getPath().startsWith(ENV_PATH + ".tmp."));
         assertEquals(600, publish.getMode());
         String content = textOf(publish);
         assertTrue(content.contains("PATH=/usr/local/bin:/usr/bin:/bin\n"), "镜像写入的 PATH 行必须保留");
         assertTrue(content.contains("JAVA_HOME=/usr/lib/jvm\n"), "镜像写入的 JAVA_HOME 行必须保留");
         assertTrue(content.endsWith("B=2\n"), "裸 KEY=value（不包引号）");
+        // 第二批：.json 管理键（含合并结果）
+        assertEquals(SandboxEnvFile.MANAGED_JSON_PATH, writeOf(batches.get(1)).getPath());
+        assertEquals("{\"A\":\"1\",\"B\":\"2\"}", textOf(writeOf(batches.get(1))));
         // mv 命令
         verify(commands).run("mv -f '" + publish.getPath() + "' '" + ENV_PATH + "'");
     }
@@ -188,7 +204,7 @@ class SandboxEnvFileTest {
         SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("A", "new"));
 
         assertEquals(List.of("A"), result.updatedKeys());
-        String content = textOf(writeOf(writtenBatches().get(1)));
+        String content = textOf(writeOf(writtenBatches().get(0)));
         // 原有行保留，新行追加在末尾（execd 顺序解析、后面的行覆盖前面的行）
         assertTrue(content.contains("A=old\n"));
         assertTrue(content.contains("B=keep\n"));
@@ -204,7 +220,7 @@ class SandboxEnvFileTest {
         SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("FOO", "bar"));
 
         assertEquals(Map.of("FOO", "bar"), result.managed());
-        String content = textOf(writeOf(writtenBatches().get(1)));
+        String content = textOf(writeOf(writtenBatches().get(0)));
         assertEquals("FOO=bar\n", content);
     }
 
@@ -218,7 +234,7 @@ class SandboxEnvFileTest {
 
         // 损坏 JSON fail-soft 从空开始；原文件行仍保留，不丢 env
         assertEquals(Map.of("FOO", "bar"), result.managed());
-        String content = textOf(writeOf(writtenBatches().get(1)));
+        String content = textOf(writeOf(writtenBatches().get(0)));
         assertTrue(content.contains("PATH=/bin\n"));
         assertTrue(content.endsWith("FOO=bar\n"));
     }
@@ -232,7 +248,7 @@ class SandboxEnvFileTest {
         jsonSidecarMissing();
         originalEnvMissing();
         envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("PASS", "it's"));
-        String content = textOf(writeOf(writtenBatches().get(1)));
+        String content = textOf(writeOf(writtenBatches().get(0)));
         assertEquals("PASS=it's\n", content);
     }
 
@@ -380,5 +396,73 @@ class SandboxEnvFileTest {
             () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("FOO", "bar")));
         assertEquals("sandbox_unavailable", e.getErrorCode());
         assertEquals(502, e.getHttpStatus());
+    }
+
+    // ---------- 失败收敛（写序 issue #230：先 publish 后 writeManaged）----------
+
+    @Test
+    void mergeShouldRetryAfterPublishFailureBecauseSidecarNotAdvanced() throws Exception {
+        jsonSidecarMissing();
+        originalEnvMissing();
+        // 第一次：mv 失败（exit 1）→ 502，且仅 1 次写（发布批）——sidecar 未推进
+        // （Execution mock 须在 when() 链外构造，链内 stub 另一 mock 会触发 UnfinishedStubbing）
+        Execution mvFailed = executionWithExit(1);
+        when(commands.run(anyString())).thenReturn(mvFailed);
+        SandboxEnvException e = assertThrows(SandboxEnvException.class,
+            () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("K", "v")));
+        assertEquals("sandbox_unavailable", e.getErrorCode());
+        assertEquals(502, e.getHttpStatus());
+        List<List<WriteEntry>> afterFirst = writesSoFar(1);
+        assertTrue(writeOf(afterFirst.get(0)).getPath().startsWith(ENV_PATH + ".tmp."),
+            "失败时只应有发布临时文件写，sidecar 未推进");
+
+        // 桩修复后重试：变更判定重新命中（sidecar 仍缺 K）→ 重新发布收敛
+        Execution mvOk = executionWithExit(0);
+        when(commands.run(anyString())).thenReturn(mvOk);
+        SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("K", "v"));
+        assertEquals(List.of("K"), result.updatedKeys(), "sidecar 未推进 → 重试必须重新检出变化（非静默 no-op）");
+        List<List<WriteEntry>> all = writesSoFar(3);
+        assertTrue(textOf(writeOf(all.get(1))).endsWith("K=v\n"), "重试重新发布含 K=V");
+        assertEquals(SandboxEnvFile.MANAGED_JSON_PATH, writeOf(all.get(2)).getPath());
+    }
+
+    @Test
+    void mergeShouldRetryAfterSidecarWriteFailureIdempotently() throws Exception {
+        // 模拟沙箱文件系统：files().write 落盘、mv 真改名、readFile 回读——
+        // 才能断言「重试读到已含 K=v 的原文 → 追加第二行 → execd 取最后行幂等」
+        Map<String, byte[]> fs = new java.util.HashMap<>();
+        java.util.regex.Pattern mv = java.util.regex.Pattern.compile("^mv -f '(.+)' '(.+)'$");
+        AtomicBoolean failSidecarWrite = new AtomicBoolean(true);
+        // Filesystem.write 返回 void：打桩用 doAnswer（files().write 落盘模拟）
+        doAnswer(invocation -> {
+            WriteEntry entry = writeOf(invocation.getArgument(0));
+            if (failSidecarWrite.get() && SandboxEnvFile.MANAGED_JSON_PATH.equals(entry.getPath())) {
+                throw apiException(500);
+            }
+            fs.put(entry.getPath(), (byte[]) entry.getData());
+            return null;
+        }).when(files).write(any());
+        when(files.readFile(ENV_PATH)).thenAnswer(
+            invocation -> new String(fs.getOrDefault(ENV_PATH, new byte[0]), StandardCharsets.UTF_8));
+        when(commands.run(anyString())).thenAnswer(invocation -> {
+            java.util.regex.Matcher m = mv.matcher((String) invocation.getArgument(0));
+            assertTrue(m.matches(), "unexpected command: " + invocation.getArgument(0));
+            fs.put(m.group(2), fs.remove(m.group(1)));
+            return executionWithExit(0);
+        });
+
+        // 第一次：发布成功（mv 改名生效）但 sidecar 写失败 → 502
+        SandboxEnvException e = assertThrows(SandboxEnvException.class,
+            () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("K", "v")));
+        assertEquals("sandbox_unavailable", e.getErrorCode());
+        assertEquals(502, e.getHttpStatus());
+        assertEquals("K=v\n", new String(fs.get(ENV_PATH), StandardCharsets.UTF_8), "生效文件已含 K=V");
+
+        // 重试：sidecar 仍缺 K → 变更重新检出 → 追加第二行 K=V（execd 顺序解析取最后行，幂等收敛）
+        failSidecarWrite.set(false);
+        SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("K", "v"));
+        assertEquals(List.of("K"), result.updatedKeys(), "sidecar 未推进 → 重试重新检出变化");
+        assertEquals("K=v\nK=v\n", new String(fs.get(ENV_PATH), StandardCharsets.UTF_8),
+            "生效文件出现两行 K=V（最后一行生效，重复追加无害）");
     }
 }

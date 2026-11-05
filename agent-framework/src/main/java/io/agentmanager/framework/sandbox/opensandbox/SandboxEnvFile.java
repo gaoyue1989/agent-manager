@@ -101,8 +101,17 @@ public class SandboxEnvFile {
     }
 
     /**
-     * 合并式写入：读 `.json` 管理键 → 合并 → 校验 → 写 `.json` → 读 `<envPath>` 原文 →
-     * 追加变更行 → 临时文件 + {@code mv -f} 原子发布。返回合并结果供响应组装。
+     * 合并式写入：读 `.json` 管理键 → 合并 → 校验 → 读 `<envPath>` 原文 → 追加变更行 →
+     * 临时文件 + {@code mv -f} 原子发布 → 写 `.json`。返回合并结果供响应组装。
+     *
+     * <p><b>写序（issue #230）</b>：先发布生效文件、后写管理键 sidecar——变更判定只比对
+     * sidecar，若 sidecar 先写而发布失败，调用方按设计文档重试时判定为「无变化」静默
+     * no-op，生效文件永久缺键。调序后失败矩阵收敛：
+     * <ul>
+     *   <li>发布失败 → sidecar 未推进 → 重试重新检出变化、重新发布；</li>
+     *   <li>发布成功而 sidecar 写失败 → 重试重复追加一行 {@code K=V}
+     *       （execd 顺序解析取最后出现的行，幂等收敛）。</li>
+     * </ul>
      */
     public MergeResult mergeAndWrite(Sandbox sandbox, String envPath, Map<String, String> incoming) {
         validate(incoming);
@@ -117,15 +126,16 @@ public class SandboxEnvFile {
             managed.put(entry.getKey(), entry.getValue());
         }
         validate(managed);
-        writeManaged(sandbox, managed);
         if (!updatedKeys.isEmpty()) {
             // 只追加实际变化的键：无变化的 PUT 不重复追加行（未修改键原样保留、execd 取最后出现的行）
             Map<String, String> changed = new LinkedHashMap<>();
             for (String key : updatedKeys) {
                 changed.put(key, incoming.get(key));
             }
+            // 先发布生效文件再写 sidecar（issue #230）：发布失败时 sidecar 未推进，重试可重新检出变化
             publish(sandbox, envPath, appendLines(original, renderLines(changed)));
         }
+        writeManaged(sandbox, managed);
         return new MergeResult(managed, List.copyOf(updatedKeys));
     }
 
