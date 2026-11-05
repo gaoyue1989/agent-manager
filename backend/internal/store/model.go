@@ -370,13 +370,19 @@ type ExportOrderEntity struct {
 	//（marker/baseImage/env/secretKeys/replicas）：异步构建完成后据此重渲染
 	// values/manifest（回填 digest），保证可复现
 	ManifestJSON string    `gorm:"type:json" json:"manifestJson"`
-	RequestJSON  string    `gorm:"type:json" json:"-"`
-	Status       string    `gorm:"size:24;index:idx_export_ws_status" json:"status"`
-	ItsmTicketID string    `gorm:"size:128" json:"itsmTicketId"`
-	Error        string    `gorm:"size:512" json:"error"`
-	CreatedBy    string    `gorm:"size:64" json:"createdBy"` // username（JWT claims，jwt.go:44 注入）
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	// ManifestVersion manifest 乐观锁版本号（issue #233）：manifest_json 列有三个并发写者
+	//（人工推进 itsm 写回 / 下载审计追加 / 构建完成回写），仅按 (id,status) 条件整段覆盖
+	// 会丢并发方刚写入的条目——写者 bump +1、CAS compare (id, status, manifest_version)
+	// 整数比较（规避 MySQL JSON 列 vs 字符串参数同值比较永不命中的方言缺陷，两方言一致）；
+	// json:"-" 不进任何 API 响应/列表
+	ManifestVersion int       `gorm:"default:0" json:"-"`
+	RequestJSON     string    `gorm:"type:json" json:"-"`
+	Status          string    `gorm:"size:24;index:idx_export_ws_status" json:"status"`
+	ItsmTicketID    string    `gorm:"size:128" json:"itsmTicketId"`
+	Error           string    `gorm:"size:512" json:"error"`
+	CreatedBy       string    `gorm:"size:64" json:"createdBy"` // username（JWT claims，jwt.go:44 注入）
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 func (ExportOrderEntity) TableName() string { return "export_orders" }
