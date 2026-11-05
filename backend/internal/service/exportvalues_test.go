@@ -245,6 +245,72 @@ func TestRenderExportValuesShape(t *testing.T) {
 	}
 }
 
+// TestRenderExportValuesHeaderSingleLine 注释头单行化兜底（issue #226）：插值字段携带
+// yaml.v3（v3.0.1）认定的全部行终止符——LF/CR/NEL(U+0085)/LS(U+2028)/PS(U+2029)——时，
+// 注释头不得把注入内容顶成独立 YAML 行：渲染产物仍是合法 YAML、顶层键集恰为预期键
+// （不含注入的 resources）、注释头无独立成行的注入内容（终止符已单行化为空格，载荷行内保留）。
+// 覆盖两条残余向量：rebuildExportArtifacts 重渲染读 DB 存量 chartVersion（创建后无法
+// 再校验）；DisplayName 本就允许携带任意多字节终止符（仅「非空 + ≤128 rune」校验，
+// agentgen.go:692-696、publish.go:176-179，无创建期校验）。
+func TestRenderExportValuesHeaderSingleLine(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	for _, tc := range []struct {
+		name string
+		br   string
+	}{
+		{"LF", "\n"}, {"CR", "\r"},
+		{"NEL", "\u0085"}, {"LS", "\u2028"}, {"PS", "\u2029"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// DisplayName 终止符注入（源服务名，非请求体字段——复制夹具行内改写）
+			svcInject := *svc
+			svcInject.DisplayName = "注入服务" + tc.br + "resources: {limits: {cpu: 9}} #"
+			in := renderFixtureInput(t, core, ws, &svcInject, pkg, mark, &ExportOrderRequest{
+				Marker: mark.Marker,
+			})
+			// chartVersion 终止符注入：renderFixtureInput 固定 ChartVersion=
+			// defaultExportChartVersion，此处直接覆盖渲染输入——精确模拟
+			// rebuildExportArtifacts 重渲染读 DB 存量 order.ChartVersion
+			// （exportorder.go:299，创建后无法再校验）的兜底向量
+			in.ChartVersion = "0.1.0" + tc.br + "resources: {} #"
+			raw, err := renderExportValues(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]interface{}
+			if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+				t.Fatalf("rendered values not valid yaml: %v\n%s", err, raw)
+			}
+			// 顶层键集仅含预期键：注入内容不得成为独立顶层键（chart 消费的 resources 等）
+			wantKeys := []string{"fullnameOverride", "image", "imagePullSecrets", "env", "secretEnv",
+				"configInjection", "ingress", "mysql", "podAnnotations"}
+			if len(doc) != len(wantKeys) {
+				t.Fatalf("top-level keys = %v, want exactly %v", doc, wantKeys)
+			}
+			for _, k := range wantKeys {
+				if _, ok := doc[k]; !ok {
+					t.Fatalf("top-level key %q missing: %v", k, doc)
+				}
+			}
+			if _, ok := doc["resources"]; ok {
+				t.Fatalf("injected top-level key 'resources' present: %v", doc)
+			}
+			// 注释头无独立成行的注入内容：终止符已被单行化为空格（行内保留可读）
+			for _, line := range strings.Split(raw, "\n") {
+				if strings.HasPrefix(line, "resources") {
+					t.Fatalf("injected content became a standalone YAML line:\n%s", raw)
+				}
+			}
+			if !strings.Contains(raw, "# 服务: 注入服务 resources: {limits: {cpu: 9}} # e2e-export-agent") ||
+				!strings.Contains(raw, "# chart: oaf-agent-0.1.0 resources: {} # ·") {
+				t.Fatalf("injected text must stay inline (terminator → space) in header:\n%s", raw)
+			}
+		})
+	}
+}
+
 // TestDerivedExportEnvBadBase 非法 CHECKPOINT_JDBC_BASE（非 jdbc: URL）→ 创建期 400。
 func TestDerivedExportEnvBadBase(t *testing.T) {
 	if _, err := derivedExportEnv(map[string]string{"CHECKPOINT_JDBC_BASE": "not-a-jdbc-url"}, "x"); err == nil {
