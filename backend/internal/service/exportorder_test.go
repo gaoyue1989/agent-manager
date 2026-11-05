@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -347,6 +348,26 @@ func TestCreateExportOrderValidation(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrMarkNotBuildable) {
 		t.Fatalf("unknown marker: err = %v", err)
 	}
+	// 归属不匹配（issue #235 防御纵深）：手工把 frozen mark 的 workspace_id 改成旧空间值
+	//（模拟未跑 Backfill 回填的存量死路态）——修复前为裸 ErrNotFound（404 not found）无
+	// 诊断；修复后 ErrConflict（409）带双侧归属文案，运维可直接看到「标记归属旧空间」
+	oldWS := &store.Workspace{Slug: "ws-old9999", Name: "旧空间", Status: "active"}
+	if err := core.DB.Create(oldWS).Error; err != nil {
+		t.Fatal(err)
+	}
+	core.DB.Model(&store.ExportPackageMarkEntity{}).Where("id = ?", mark.ID).
+		Update("workspace_id", oldWS.ID)
+	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker})
+	if err == nil || !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale mark workspace: err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "belongs to workspace "+strconv.FormatUint(uint64(oldWS.ID), 10)) ||
+		!strings.Contains(err.Error(), "is in workspace "+strconv.FormatUint(uint64(ws.ID), 10)) {
+		t.Fatalf("conflict text must carry both workspace ids: %v", err)
+	}
+	// 还原标记归属，不污染后续正例分支
+	core.DB.Model(&store.ExportPackageMarkEntity{}).Where("id = ?", mark.ID).
+		Update("workspace_id", ws.ID)
 	// chartVersion 正例不回归：显式合法 semver 与缺省（默认 0.1.0）均可创建并走完构建
 	good, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
 		Marker: mark.Marker, ChartVersion: "1.2.3",

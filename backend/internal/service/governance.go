@@ -525,7 +525,23 @@ func (c *Core) BindService(actor, workspaceID, serviceID uint) (*store.ServiceEn
 			return nil, fmt.Errorf("%w: already_bound to workspace %s", ErrConflict, cur.Slug)
 		}
 	}
-	if err := c.DB.Model(svc).Update("workspace_id", workspaceID).Error; err != nil {
+	// 纳管 = 服务及其导出资产整体迁入目标空间（issue #235）：发布标记/导出单若仍留在
+	// 旧空间，导出链路会出现「标记可见可选但创建导出单恒归属不匹配」的死路。事务保证
+	// services 与 marks/orders 归属原子一致（三条 Update 全走事务内 tx，避免半提交）
+	if err := c.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(svc).Update("workspace_id", workspaceID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&store.ExportPackageMarkEntity{}).Where("service_id = ?", serviceID).
+			Update("workspace_id", workspaceID).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&store.ExportOrderEntity{}).Where("service_id = ?", serviceID).
+			Update("workspace_id", workspaceID).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	svc.WorkspaceID = workspaceID

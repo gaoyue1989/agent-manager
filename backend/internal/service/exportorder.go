@@ -110,7 +110,11 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 		return nil, err // 无标记不可构建（设计 §3 要点）；draft 标记同拒
 	}
 	if mark.WorkspaceID != wsID {
-		return nil, ErrNotFound
+		// 防御纵深（issue #235）：BindService 联动迁移 + Backfill 对齐落地后该分支理论不可达
+		// （marks 恒随服务同空间 + loadServiceForExport 已保证服务属于请求空间）；万一如量出现
+		// （如未重启跑 Backfill 的存量库），运维可直接看到「标记归属旧空间」而非裸 404 not found
+		return nil, fmt.Errorf("%w: mark %q belongs to workspace %d but service is in workspace %d",
+			ErrConflict, req.Marker, mark.WorkspaceID, wsID)
 	}
 	l1, merged, _, err := c.resolveExportLayers(wsID, req)
 	if err != nil {
