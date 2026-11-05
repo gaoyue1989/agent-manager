@@ -147,7 +147,7 @@
   - 容量约束（**集群级**）：`|i:| + |b:| + |c:| ≤ MAX_SIZE`。
 - **进程内仅存**：creating 句柄（本副本正在建的容器引用）与池状态只读缓存（可观测性用），无正确性状态——Pod 本地状态全部可丢弃（原则二）。
 
-> **上游核对与下沉评估（2026-11-05，opensandbox-group/OpenSandbox）**：① `resourceRequests` 服务端原生透传（见 D19 验证降级）；② 上游 K8s 运行时已有 BatchSandbox 服务端池（`extensions.poolRef`，预热 Pod + 亚秒分配，另有 pool-auto-assign 提案）——**通用 idle 池（owner=null）可评估二阶段下沉给服务端 pool**，客户端账本收敛为只管粘滞/配额/租约（D1 决议不变，属实施减负路径；用户粘滞/配额语义服务端不感知，必须留在账本层）；③ **不采用**上游 `pause()/resume()` 与 `lifecycle.idlePolicy`（OSEP-0024 wake-on-access）——依赖 checkpoint 链路，部分 K8s 集群不支持，违背跨集群导出（oaf-agent chart）的可移植性要求，粘滞空闲一律保持 running。
+> **上游核对与接入评估（2026-11-05，opensandbox-group/OpenSandbox，二次核实修订）**：① `resourceRequests` 服务端原生透传（见 D19 验证降级）；② BatchSandbox 服务端池（`extensions.poolRef`，pool-auto-assign **已 implemented**）经实现核实为 **Pod 级预热**——`POST /pools`（PodTemplateSpec + `capacitySpec.bufferMin/Max` warm Pod 缓冲）预热的是基础设施 Pod，`poolRef` 创建的仍是**全新容器**（per-sandbox env/entrypoint/resourceRequests 照传；省 Pod 调度/镜像拉取，留 K8s API write + watch + 容器启动 + execd boot）——**不能替代本池的「现成容器秒级认领」语义**，定位为**按需新建路径提速**（D18 弹性扩容 + 非池现状冷启动优化）；接入前提与降级：server `runtime.type=kubernetes`（docker 部署 Pool API 501）、部署侧预建 Pool、经 `SANDBOX_POOL_REF` 可选 env 传入（缺省不传 = 完全现状，防 pool 缺失/不可用时 create 全败；Java SDK 1.0.18 `Sandbox.Builder.extensions()` 原生支持，无升级需求）；③ **不采用**上游 `pause()/resume()` 与 `lifecycle.idlePolicy`（OSEP-0024 wake-on-access）——依赖 checkpoint 链路，部分 K8s 集群不支持，违背跨集群导出（oaf-agent chart）的可移植性要求，粘滞空闲一律保持 running。
 
 ### 5.2 借出流程（`OpenSandboxClient.create()`，池开启分支）
 
