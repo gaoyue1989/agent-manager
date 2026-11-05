@@ -71,8 +71,13 @@ A2A `message/send` / `message/stream`：
     "metadata":{"sessionId":"abc","userId":"u1","skills":["a","b"]}}}}
 ```
 
-兼容：顶层 `params.skills` 与旧格式 `params.metadata.skills` 由 `normalizeMessageSendBody`
-归一进 `message.metadata.skills`（与 userId/sessionId 同处理）。
+兼容与归一（`normalizeMessageSendBody`）：取值源链 first-non-null-wins——
+`message.metadata.skills` → `params.skills` → `params.metadata.skills`（旧格式同义），
+显式空列表同样归一。归一目标是 SDK A2A→Msg 转换唯一消费的「按 msg id 分组」形态：
+`message.metadata[<msgId>]`（值须为 Map，内含 `skills`）+ `parts[*].metadata._agentscope_msg_id`
+标组——顶层 `skills` 键 SDK 从不读取（issue #231 修复：旧格式不再顶层回填，统一走分组归一，
+否则白名单静默失效）。userId/sessionId 顶层参数与旧格式 `params.metadata.thread_id`
+兼容语义不变。
 
 只读视图（均支持逗号分隔，缺省/空串 = 不过滤）：
 
@@ -181,7 +186,7 @@ ctx.put(SkillFilter.class, existing != null ? existing.overlay(filter) : filter)
 | `SkillCatalogServiceTest` | `list(名单)` / `availableSkills(uid, 名单)`；`null`/`[]` 语义；禁用优先；L4 交集 |
 | `SkillInjectionServiceTest` | 名单内注入、名单外保留原文、空列表、未知名忽略、旧重载回归 |
 | `ChatStreamControllerTest` | skills 写入消息 metadata（含空列表）、注入参数、未传不写键 |
-| `A2AControllerTest` | message.metadata.skills 透传；顶层/旧格式归一 |
+| `A2AControllerTest` | message.metadata.skills / 顶层 / 旧格式 `params.metadata.skills` 归一（分组形态、显式空列表、sessionId 共存不被门控、取值源链优先级） |
 | `ToolControllerTest` | `?skills=` 白名单与空串缺省 |
 | `HarnessAgentFactoryMiddlewareAssemblyTest` | 技能名单中间件排在禁用中间件之前 |
 
@@ -209,7 +214,7 @@ e2e（`e2e/session-skills-e2e.sh`，kind 部署验证）：
 | `service/SkillCatalogService.java` | `list(List)` / `availableSkills(userId, List)` |
 | `service/SkillInjectionService.java` | `inject/parse` 的名单重载 + `enabledSkillNames` 裁剪 |
 | `controller/ChatStreamController.java` | `ChatRequest.skills`、metadata 下传、注入传名单 |
-| `controller/A2AController.java` | `params.skills` / 旧格式归一进 `message.metadata` |
+| `controller/A2AController.java` | `params.skills` / 旧格式 `params.metadata.skills` 归一为 `metadata[<msgId>].skills` 分组形态 |
 | `controller/ToolController.java` | `/skills?skills=` |
 | `controller/SkillManageController.java` | `/available`、`/parse-refs` 的 `?skills=` |
 | 对应测试类 | 见 §7 |

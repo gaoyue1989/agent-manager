@@ -338,4 +338,81 @@ class A2AControllerTest {
             String.valueOf(emptyMessage.get("messageId")));
         org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(), emptyGrouped.get("skills"));
     }
+
+    @Test
+    void messageSendShouldNormalizeLegacyMetadataSkills() throws Exception {
+        // 旧格式：skills 藏在 params.metadata（与 thread_id 同层），须归一为
+        // 「按 msg id 分组」形态 SDK 才消费（修复前顶层回填永不被读取 → 白名单静默失效）
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"23","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
+               "metadata":{"thread_id":"a2a-sk4","skills":["a","b"]}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("a", "b"), grouped.get("skills"),
+            "旧格式 params.metadata.skills 归一为分组形态");
+        org.junit.jupiter.api.Assertions.assertFalse(meta.containsKey("skills"),
+            "顶层不得残留 skills 键（SDK 不消费顶层键）");
+        var parts = (java.util.List<?>) message.get("parts");
+        var partMeta = (java.util.Map<String, Object>) ((java.util.Map<String, Object>) parts.get(0)).get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals(msgId, partMeta.get("_agentscope_msg_id"));
+        org.junit.jupiter.api.Assertions.assertEquals("a2a-sk4", meta.get("sessionId"),
+            "第 6 步 thread_id 兼容仍生效");
+
+        // 显式空列表同样归一（分组空数组 = 无技能）
+        var emptyReq = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"24","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
+               "metadata":{"thread_id":"a2a-sk5","skills":[]}}}
+            """);
+        var emptyParams = (java.util.Map<String, Object>) emptyReq.get("params");
+        var emptyMessage = (java.util.Map<String, Object>) emptyParams.get("message");
+        var emptyMeta = (java.util.Map<String, Object>) emptyMessage.get("metadata");
+        var emptyGrouped = (java.util.Map<String, Object>) emptyMeta.get(
+            String.valueOf(emptyMessage.get("messageId")));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(), emptyGrouped.get("skills"));
+    }
+
+    @Test
+    void messageSendShouldNormalizeLegacySkillsEvenWhenSessionIdPresent() throws Exception {
+        // 混用：message.metadata 已含 sessionId 时，旧顶层回填受第 6 步
+        // 「!meta.containsKey(sessionId)」门控阻断（缺陷下 skills 完全读不到）；
+        // 归一取值在 5.1 步完成，不再受该门控影响
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"25","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-sk6"}},
+               "metadata":{"thread_id":"a2a-ignored","skills":["legacy-skill"]}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("legacy-skill"), grouped.get("skills"));
+        org.junit.jupiter.api.Assertions.assertEquals("a2a-sk6", meta.get("sessionId"),
+            "sessionId 仍取 message.metadata，thread_id 不覆盖");
+    }
+
+    @Test
+    void messageSendShouldPreferMessageMetadataSkillsOverLegacyParams() throws Exception {
+        // 优先级：message.metadata.skills > params.metadata.skills（first-non-null-wins 链）
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"26","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-sk7","skills":["from-message"]}},
+               "metadata":{"thread_id":"a2a-sk7","skills":["from-legacy"]}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("from-message"), grouped.get("skills"),
+            "message.metadata.skills 优先于旧格式 params.metadata.skills");
+    }
 }
