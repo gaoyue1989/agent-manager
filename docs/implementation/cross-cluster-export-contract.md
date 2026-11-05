@@ -266,7 +266,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 | `GET /api/v1/services/:id/export/package/marks` | `GET .../export/package/marks` | export.go | `Core.ListExportMarks(svcID)` | 成员 |
 | `GET /api/v1/services/:id/export/preview` | `GET .../export/preview` | export.go | `Core.ExportPreview(...)`：源包结构与版本链、现 env（敏感掩码）、空间默认值（掩码）、镜像白名单、派生键预览 | 成员 |
 | `POST /api/v1/services/:id/export` | `POST .../export` | export.go | `Core.CreateExportOrder(...)` | 成员 |
-| —（设计 §9 无此端点，#216 新增） | `GET .../export/orders` | export.go | `Core.ListServiceExportOrders(wsID, svcID)`：id 倒序，不含 values/manifest 明文（marker 自请求快照解析） | 成员（服务须属本空间；导出记录区） |
+| —（设计 §9 无此端点，#216 新增） | `GET .../export/orders` | export.go | `Core.ListServiceExportOrders(wsID, svcID)`：id 倒序，不含 values/manifest 明文（marker 取独立落库小列，issue #234：创建导出单时从 frozen mark 落列、存量行经启动回填，不解析 request_json 快照） | 成员（服务须属本空间；导出记录区） |
 
 `:ws` 取值沿用 console 约定（`me` / 数字 id / slug，identity.go:150-181）。无 body 的 POST（打标记）沿用 republish 的可选 body 语义（router.go:247-253：ContentLength > 0 才 ShouldBindJSON）。
 

@@ -104,8 +104,12 @@ func Backfill(db *gorm.DB, adminUser, adminPassword string) error {
 			if err := json.Unmarshal([]byte(stale[i].RequestJSON), &snap); err != nil || snap.Marker == "" {
 				continue // 坏快照/空 marker 行容忍：留空，不报错不落写
 			}
+			// UpdateColumn 而非 Update：Update 经 callbacks 按 AutoUpdateTime 自动回写
+			// updated_at，会把存量行「更新时间」一次性改写为启动时刻（详情 JSON updatedAt
+			// 与前端状态卡可见）；回填只补展示列，不得篡改状态变更时间痕迹（先例
+			// exportorder.go ExportOrderDownload UpdateColumn("manifest_json", …)）
 			if err := tx.Model(&ExportOrderEntity{}).Where("id = ?", stale[i].ID).
-				Update("marker", snap.Marker).Error; err != nil {
+				UpdateColumn("marker", snap.Marker).Error; err != nil {
 				return err
 			}
 		}
