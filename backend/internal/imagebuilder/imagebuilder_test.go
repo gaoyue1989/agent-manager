@@ -203,24 +203,25 @@ func TestPackageTarLayerDeterministic(t *testing.T) {
 	}
 }
 
-// fakeRemoteOps 假 remote 实现（remoteOps 缝隙）：记录拉取/推送参数并捕获推送镜像，
-// 使 Build 组装逻辑可离线验证。
+// fakeRemoteOps 假 remote 实现（remoteOps 缝隙）：记录拉取/推送参数与各自拿到的
+// keychain 并捕获推送镜像，使 Build 组装逻辑可离线验证（含凭证按 registry 分发，issue #227）。
 type fakeRemoteOps struct {
-	base        v1.Image
-	pulledRef   string
-	writtenRef  string
-	writtenImg  v1.Image
-	writtenAuth authn.Authenticator
-	writeErr    error
+	base       v1.Image
+	pulledRef  string
+	pulledKc   authn.Keychain
+	writtenRef string
+	writtenImg v1.Image
+	writtenKc  authn.Keychain
+	writeErr   error
 }
 
-func (f *fakeRemoteOps) pullBase(ctx context.Context, baseImage string, auth authn.Authenticator) (v1.Image, error) {
-	f.pulledRef = baseImage
+func (f *fakeRemoteOps) pullBase(ctx context.Context, baseImage string, kc authn.Keychain) (v1.Image, error) {
+	f.pulledRef, f.pulledKc = baseImage, kc
 	return f.base, nil
 }
 
-func (f *fakeRemoteOps) write(ctx context.Context, targetRef string, img v1.Image, auth authn.Authenticator) error {
-	f.writtenRef, f.writtenImg, f.writtenAuth = targetRef, img, auth
+func (f *fakeRemoteOps) write(ctx context.Context, targetRef string, img v1.Image, kc authn.Keychain) error {
+	f.writtenRef, f.writtenImg, f.writtenKc = targetRef, img, kc
 	return f.writeErr
 }
 
@@ -235,13 +236,24 @@ func deterministicBaseImage(t *testing.T) v1.Image {
 	return img
 }
 
+// mustResource 把镜像引用解析为 authn.Resource（name.Repository，供 keychain Resolve 断言）。
+// v0.22.1 的 MustParseReference 只接受编译期常量（ref.go stringConst），变量一律走本 helper。
+func mustResource(t *testing.T, ref string) authn.Resource {
+	t.Helper()
+	r, err := name.ParseReference(ref, name.Insecure)
+	if err != nil {
+		t.Fatalf("parse reference %q: %v", ref, err)
+	}
+	return r.Context()
+}
+
 // TestBuildInjectsLabelsAndReturnsDigest：离线走通完整 Build 组装链（假 remote），
-// 验证基底引用 / 推送引用 / labels 注入 / digest 返回 / 凭证透传。
+// 验证基底引用 / 推送引用 / labels 注入 / digest 返回 / 凭证按 registry 分发。
 func TestBuildInjectsLabelsAndReturnsDigest(t *testing.T) {
 	pkgDir := writeTestPackage(t)
 	base := deterministicBaseImage(t)
 	fake := &fakeRemoteOps{base: base}
-	b := &RemoteBuilder{baseImage: "registry.internal/base:9", auth: authenticatorFor("pusher", "secret"), ops: fake}
+	b := &RemoteBuilder{baseImage: "registry.internal/base:9", pushAuth: authenticatorFor("pusher", "secret"), ops: fake}
 	labels := buildTestLabels()
 	out, err := b.Build(context.Background(), BuildInput{
 		PackageDir: pkgDir,
@@ -275,10 +287,25 @@ func TestBuildInjectsLabelsAndReturnsDigest(t *testing.T) {
 	if !strings.HasPrefix(out.Digest, "sha256:") {
 		t.Errorf("digest %q lacks sha256: prefix", out.Digest)
 	}
-	// 推送凭证透传（Basic）
-	ba, ok := fake.writtenAuth.(*authn.Basic)
-	if !ok || ba.Username != "pusher" || ba.Password != "secret" {
-		t.Errorf("push auth = %#v, want Basic{pusher,secret}", fake.writtenAuth)
+	// 推送与拉基底拿到同一把 keychain（单实例同传两个 remote 动作）
+	if fake.pulledKc == nil || fake.pulledKc != fake.writtenKc {
+		t.Fatalf("pullBase and write must share one keychain instance, got %#v / %#v", fake.pulledKc, fake.writtenKc)
+	}
+	// 凭证按 registry 分发（issue #227）：推送 registry 的 Resource Resolve 得 Basic
+	ba, err := fake.writtenKc.Resolve(mustResource(t, "172.20.0.1:5001/oaf-e2e-export-agent:1.2.0-e1"))
+	if err != nil {
+		t.Fatalf("Resolve push registry: %v", err)
+	}
+	if basic, ok := ba.(*authn.Basic); !ok || basic.Username != "pusher" || basic.Password != "secret" {
+		t.Errorf("push registry auth = %#v, want Basic{pusher,secret}", ba)
+	}
+	// 其余 registry（name.Repository 内嵌 Registry 实现 authn.Resource）Resolve 得匿名
+	anon, err := fake.writtenKc.Resolve(mustResource(t, "busybox:1.36"))
+	if err != nil {
+		t.Fatalf("Resolve docker.io: %v", err)
+	}
+	if anon != authn.Anonymous {
+		t.Errorf("docker.io auth = %#v, want anonymous", anon)
 	}
 }
 
@@ -289,7 +316,7 @@ func TestBuildDigestStableForSameInput(t *testing.T) {
 	build := func() (string, error) {
 		base := deterministicBaseImage(t)
 		fake := &fakeRemoteOps{base: base}
-		b := &RemoteBuilder{baseImage: "busybox:1.36", auth: authn.Anonymous, ops: fake}
+		b := &RemoteBuilder{baseImage: "busybox:1.36", pushAuth: authn.Anonymous, ops: fake}
 		out, err := b.Build(context.Background(), BuildInput{
 			PackageDir: pkgDir,
 			TargetRef:  "172.20.0.1:5001/ns/oaf-demo:1.0.0-e1",
@@ -319,7 +346,7 @@ func TestBuildInputValidation(t *testing.T) {
 	emptyDir := t.TempDir() // 合法目录但无根级 AGENTS.md
 	base := deterministicBaseImage(t)
 	fake := &fakeRemoteOps{base: base}
-	b := &RemoteBuilder{baseImage: "busybox:1.36", auth: authn.Anonymous, ops: fake}
+	b := &RemoteBuilder{baseImage: "busybox:1.36", pushAuth: authn.Anonymous, ops: fake}
 	okRef := "172.20.0.1:5001/oaf-demo:1.0.0-e1"
 
 	cases := []struct {
@@ -352,7 +379,7 @@ func TestBuildPushErrorPropagates(t *testing.T) {
 	pkgDir := writeTestPackage(t)
 	base := deterministicBaseImage(t)
 	fake := &fakeRemoteOps{base: base, writeErr: errors.New("registry unavailable")}
-	b := &RemoteBuilder{baseImage: "busybox:1.36", auth: authn.Anonymous, ops: fake}
+	b := &RemoteBuilder{baseImage: "busybox:1.36", pushAuth: authn.Anonymous, ops: fake}
 	out, err := b.Build(context.Background(), BuildInput{
 		PackageDir: pkgDir,
 		TargetRef:  "172.20.0.1:5001/oaf-demo:1.0.0-e1",
@@ -403,18 +430,116 @@ func TestNewRemoteBuilder(t *testing.T) {
 	if b.baseImage != defaultBaseImage {
 		t.Errorf("baseImage = %q, want default %q", b.baseImage, defaultBaseImage)
 	}
-	if b.auth != authn.Anonymous {
-		t.Errorf("empty credentials must map to anonymous, got %#v", b.auth)
+	if b.pushAuth != authn.Anonymous {
+		t.Errorf("empty credentials must map to anonymous, got %#v", b.pushAuth)
 	}
 	b2 := NewRemoteBuilder("reg.internal/base:1", "u", "p")
 	if b2.baseImage != "reg.internal/base:1" {
 		t.Errorf("baseImage = %q, want %q", b2.baseImage, "reg.internal/base:1")
 	}
-	ba, ok := b2.auth.(*authn.Basic)
+	ba, ok := b2.pushAuth.(*authn.Basic)
 	if !ok || ba.Username != "u" || ba.Password != "p" {
-		t.Errorf("auth = %#v, want Basic{u,p}", b2.auth)
+		t.Errorf("pushAuth = %#v, want Basic{u,p}", b2.pushAuth)
 	}
 	if _, ok := b2.ops.(realRemoteOps); !ok {
 		t.Errorf("ops = %#v, want realRemoteOps", b2.ops)
+	}
+}
+
+// TestBuildScopesPushCredentialToPushRegistry（issue #227 主回归）：缺省 docker.io 基底 +
+// 已配推送凭证的组合下，基底拉取一律匿名——推送凭证不送达 docker.io token 端点
+// （坏凭证请求该端点会 401，匿名拉公共镜像反而可行）；推送动作仍持推送凭证。
+func TestBuildScopesPushCredentialToPushRegistry(t *testing.T) {
+	pkgDir := writeTestPackage(t)
+	fake := &fakeRemoteOps{base: deterministicBaseImage(t)}
+	b := &RemoteBuilder{baseImage: "busybox:1.36", pushAuth: authenticatorFor("pusher", "secret"), ops: fake}
+	target := "172.20.0.1:5001/oaf-demo:1.0.0-e1"
+	if _, err := b.Build(context.Background(), BuildInput{PackageDir: pkgDir, TargetRef: target, Labels: buildTestLabels()}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// 基底 registry（busybox → index.docker.io）Resolve 得匿名
+	anon, err := fake.pulledKc.Resolve(mustResource(t, fake.pulledRef))
+	if err != nil {
+		t.Fatalf("Resolve base registry: %v", err)
+	}
+	if anon != authn.Anonymous {
+		t.Errorf("base registry auth = %#v, want anonymous (issue #227)", anon)
+	}
+	// 推送 registry Resolve 得 Basic{pusher,secret}
+	ba, err := fake.writtenKc.Resolve(mustResource(t, target))
+	if err != nil {
+		t.Fatalf("Resolve push registry: %v", err)
+	}
+	if basic, ok := ba.(*authn.Basic); !ok || basic.Username != "pusher" || basic.Password != "secret" {
+		t.Errorf("push registry auth = %#v, want Basic{pusher,secret}", ba)
+	}
+}
+
+// TestBuildUsesPushCredentialWhenBaseInSameRegistry：基底与推送目标同 registry 时，
+// 基底拉取复用推送凭证——同仓私有基底仍可用（契约 §9-D8 的显式覆盖场景）。
+func TestBuildUsesPushCredentialWhenBaseInSameRegistry(t *testing.T) {
+	pkgDir := writeTestPackage(t)
+	fake := &fakeRemoteOps{base: deterministicBaseImage(t)}
+	b := &RemoteBuilder{baseImage: "172.20.0.1:5001/base/busybox:1.36", pushAuth: authenticatorFor("pusher", "secret"), ops: fake}
+	if _, err := b.Build(context.Background(), BuildInput{
+		PackageDir: pkgDir,
+		TargetRef:  "172.20.0.1:5001/oaf-demo:1.0.0-e1",
+		Labels:     buildTestLabels(),
+	}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	baseRes := mustResource(t, fake.pulledRef)
+	ba, err := fake.pulledKc.Resolve(baseRes)
+	if err != nil {
+		t.Fatalf("Resolve base registry: %v", err)
+	}
+	if basic, ok := ba.(*authn.Basic); !ok || basic.Username != "pusher" || basic.Password != "secret" {
+		t.Errorf("base registry auth = %#v, want Basic{pusher,secret}", ba)
+	}
+}
+
+// TestPushScopedKeychainResolve：keychain 三态单测——命中推送 registry 返回推送凭证、
+// 未命中（如 index.docker.io）返回匿名、推送凭证本身为 Anonymous 时命中也匿名。
+func TestPushScopedKeychainResolve(t *testing.T) {
+	pushRes := mustResource(t, "172.20.0.1:5001/ns/oaf-demo:1.0.0-e1")
+	otherRes := mustResource(t, "busybox:1.36") // index.docker.io
+	basic := &authn.Basic{Username: "pusher", Password: "secret"}
+
+	kc := &pushScopedKeychain{pushRegistry: pushRes.RegistryStr(), pushAuth: basic}
+	if got, err := kc.Resolve(pushRes); err != nil || got != authn.Authenticator(basic) {
+		t.Errorf("push registry Resolve = %#v (err %v), want basic", got, err)
+	}
+	if got, err := kc.Resolve(otherRes); err != nil || got != authn.Anonymous {
+		t.Errorf("docker.io Resolve = %#v (err %v), want anonymous", got, err)
+	}
+
+	anonKc := &pushScopedKeychain{pushRegistry: pushRes.RegistryStr(), pushAuth: authn.Anonymous}
+	if got, err := anonKc.Resolve(pushRes); err != nil || got != authn.Anonymous {
+		t.Errorf("anonymous pushAuth hit Resolve = %#v (err %v), want anonymous", got, err)
+	}
+}
+
+// TestBuildRejectsUnparsableTargetRef（issue #227 错误路径前移）：TargetRef 不可解析时
+// 在 Build 早期失败（错误不含 push image 前缀），不触网、不拉基底。
+func TestBuildRejectsUnparsableTargetRef(t *testing.T) {
+	pkgDir := writeTestPackage(t)
+	fake := &fakeRemoteOps{base: deterministicBaseImage(t)}
+	b := &RemoteBuilder{baseImage: "busybox:1.36", pushAuth: authn.Anonymous, ops: fake}
+	out, err := b.Build(context.Background(), BuildInput{
+		PackageDir: pkgDir,
+		TargetRef:  "172.20.0.1:5001/oaf-demo:1.0.0-e1!",
+		Labels:     buildTestLabels(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "parse target reference") {
+		t.Fatalf("Build error = %v, want parse target reference failure", err)
+	}
+	if strings.Contains(err.Error(), "push image") {
+		t.Errorf("error %v must fail before the push step", err)
+	}
+	if out.Digest != "" {
+		t.Errorf("digest %q must be empty on failure", out.Digest)
+	}
+	if fake.pulledRef != "" || fake.writtenRef != "" {
+		t.Error("remote ops must not run when target ref does not parse")
 	}
 }

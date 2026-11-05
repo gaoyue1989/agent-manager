@@ -992,8 +992,10 @@ public class McpToolRegistrar {
                 }
             }
 
-            // 用户级 header 注入（userHeaders 节）+ reqHeader: 透传剥离：HTTP 类传输一律装饰
-            // （常驻化，mcp-chat-header-forward-design §6.4——剥离是全 server 的 _meta 卫生行为，
+            // 用户级 header 注入（userHeaders 节）+ reqHeader: 透传剥离：所有传输一律装饰
+            // （含 stdio：EMPTY rule 仅做 _meta 剥离、无 header 注入，issue #225——HTTP server
+            // 声明的透传凭据随 per-turn 全 server 共享 McpMeta 同样会漏进 stdio 的 _meta。
+            // 常驻化，mcp-chat-header-forward-design §6.4——剥离是全 server 的 _meta 卫生行为，
             // 不依赖 userHeaders 是否声明；判据是传输类型而非 rule 非空）
             UserHeaderRule userHeaderRule = null;
             if ("stdio".equals(type)) {
@@ -1011,9 +1013,6 @@ public class McpToolRegistrar {
             if (wrapper == null) {
                 log.warn("MCP client build returned empty for {}", mcp.server());
                 return null;
-            }
-            if ("stdio".equals(type)) {
-                return wrapper;
             }
             if (userHeaderRule != null) {
                 log.info("MCP {} user-scoped headers enabled: {} header(s), on-missing={}",

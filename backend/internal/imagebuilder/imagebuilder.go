@@ -51,10 +51,11 @@ const oafRepoPrefix = "oaf-"
 
 // remoteOps 网络缝隙：抽象「拉基底 / 推镜像」两个 remote 动作，单测注入假实现即可
 // 离线验证输入校验、tar 层构建、labels 注入与 digest 返回；生产由 realRemoteOps 走
-// go-containerregistry（remote 推送链路本身靠 E2E 契约 §8 验证）。
+// go-containerregistry（remote 推送链路本身靠 E2E 契约 §8 验证）。两动作均以
+// authn.Keychain 取凭证——凭证按 registry 分发（issue #227）。
 type remoteOps interface {
-	pullBase(ctx context.Context, baseImage string, auth authn.Authenticator) (v1.Image, error)
-	write(ctx context.Context, targetRef string, img v1.Image, auth authn.Authenticator) error
+	pullBase(ctx context.Context, baseImage string, kc authn.Keychain) (v1.Image, error)
+	write(ctx context.Context, targetRef string, img v1.Image, kc authn.Keychain) error
 }
 
 // realRemoteOps 生产实现（契约 §3.2 步骤 3/5）。
@@ -63,41 +64,63 @@ type realRemoteOps struct{}
 // pullBase 拉取基底镜像。引用统一按 name.Insecure 解析：transport 层对 insecure
 // registry 先试 https、失败并行回退 plain-http（remote/transport/ping.go 双 scheme 试探）——
 // 导出直推目标多为内网 http 仓库（如 172.20.0.1:5001），https 仓库行为不变。
-func (realRemoteOps) pullBase(ctx context.Context, baseImage string, auth authn.Authenticator) (v1.Image, error) {
+// 凭证经 keychain 按 registry 分发（issue #227）：非推送 registry（如缺省基底所在的
+// docker.io）一律匿名拉取——坏凭证送达第三方 token 端点会被 401（匿名拉公共镜像反而失败）。
+func (realRemoteOps) pullBase(ctx context.Context, baseImage string, kc authn.Keychain) (v1.Image, error) {
 	ref, err := name.ParseReference(baseImage, name.Insecure)
 	if err != nil {
 		return nil, fmt.Errorf("parse base image reference %q: %w", baseImage, err)
 	}
-	return remote.Image(ref, remote.WithContext(ctx), remote.WithAuth(auth))
+	return remote.Image(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(kc))
 }
 
 // write 直推目标仓库。remote.Write 按 manifest/layer digest 分层上传：
 // 同 tag 同内容重推时 blob/manifest 已存在即 no-op——内容寻址幂等（设计 §5）。
-func (realRemoteOps) write(ctx context.Context, targetRef string, img v1.Image, auth authn.Authenticator) error {
+// 凭证经 keychain 按 registry 分发（issue #227）：本动作唯一 registry 即推送目标，
+// keychain 必命中推送凭证，与原 remote.WithAuth(Basic) 行为等价。
+func (realRemoteOps) write(ctx context.Context, targetRef string, img v1.Image, kc authn.Keychain) error {
 	ref, err := name.ParseReference(targetRef, name.Insecure)
 	if err != nil {
 		return fmt.Errorf("parse target reference %q: %w", targetRef, err)
 	}
-	return remote.Write(ref, img, remote.WithContext(ctx), remote.WithAuth(auth))
+	return remote.Write(ref, img, remote.WithContext(ctx), remote.WithAuthFromKeychain(kc))
+}
+
+// pushScopedKeychain 按 registry 分发凭证的 keychain（issue #227）：仅推送目标 registry
+// 拿到推送凭证，其余 registry（含基底镜像仓库）一律匿名——消除推送凭证送达第三方
+// registry token 端点的缺口；私有基底需 EXPORT_BASE_IMAGE 指向与推送同 registry（可复用
+// 推送凭证）或匿名可达的仓库（契约 §9-D8）。
+type pushScopedKeychain struct {
+	pushRegistry string              // 推送目标 registry（name 包规范化口径，docker.io → index.docker.io）
+	pushAuth     authn.Authenticator // 推送凭证（可空装配时已兜底为 authn.Anonymous）
+}
+
+// Resolve 实现 authn.Keychain：资源 registry 与推送目标一致时返回推送凭证，否则匿名。
+func (k *pushScopedKeychain) Resolve(resource authn.Resource) (authn.Authenticator, error) {
+	if resource.RegistryStr() == k.pushRegistry {
+		return k.pushAuth, nil
+	}
+	return authn.Anonymous, nil
 }
 
 // RemoteBuilder 直推实现（Builder 的生产实现）。
 type RemoteBuilder struct {
 	baseImage string
-	auth      authn.Authenticator
+	pushAuth  authn.Authenticator // 推送凭证，仅作用于推送目标 registry（issue #227）；基底拉取对非推送 registry 一律匿名
 	ops       remoteOps
 }
 
 // NewRemoteBuilder 直推实现。baseImage 为基底镜像引用（config EXPORT_BASE_IMAGE，缺省
 // busybox:1.36）；username/password 为推送凭证（可空=匿名；生产经平台 Secret 注入 backend
-// 进程 env，设计 §12.3，不进任何导出产物）。
+// 进程 env，设计 §12.3，不进任何导出产物），仅作用于推送目标 registry，基底拉取对非
+// 推送 registry 一律匿名（issue #227）。
 func NewRemoteBuilder(baseImage, username, password string) *RemoteBuilder {
 	if strings.TrimSpace(baseImage) == "" {
 		baseImage = defaultBaseImage
 	}
 	return &RemoteBuilder{
 		baseImage: baseImage,
-		auth:      authenticatorFor(username, password),
+		pushAuth:  authenticatorFor(username, password),
 		ops:       realRemoteOps{},
 	}
 }
@@ -111,7 +134,8 @@ func authenticatorFor(username, password string) authn.Authenticator {
 }
 
 // Build 构建并直推 OAF 配置镜像（契约 §3.2 实现要点）：
-// 输入校验 → 包目录 tar 层 → 拉基底 → 注入 labels + 追加配置层 → 直推 → 返回 digest。
+// 输入校验 → 包目录 tar 层 → 解析推送 registry（构造按 registry 分发的 keychain）→
+// 拉基底 → 注入 labels + 追加配置层 → 直推 → 返回 digest。
 func (b *RemoteBuilder) Build(ctx context.Context, in BuildInput) (BuildOutput, error) {
 	if err := validateInput(in); err != nil {
 		return BuildOutput{}, err
@@ -120,7 +144,18 @@ func (b *RemoteBuilder) Build(ctx context.Context, in BuildInput) (BuildOutput, 
 	if err != nil {
 		return BuildOutput{}, fmt.Errorf("build package tar layer: %w", err)
 	}
-	base, err := b.ops.pullBase(ctx, b.baseImage, b.auth)
+	// 前置解析推送 registry 构造 keychain（issue #227）：TargetRef 不可解析时在 Build
+	// 早期失败（不触网），比 realRemoteOps.write 内的解析更早暴露；两侧均出自同一 name
+	// 包解析，registry 规范化口径一致（docker.io → index.docker.io），无归一化偏差。
+	pushRef, err := name.ParseReference(in.TargetRef, name.Insecure)
+	if err != nil {
+		return BuildOutput{}, fmt.Errorf("parse target reference %q: %w", in.TargetRef, err)
+	}
+	kc := &pushScopedKeychain{
+		pushRegistry: pushRef.Context().RegistryStr(),
+		pushAuth:     b.pushAuth,
+	}
+	base, err := b.ops.pullBase(ctx, b.baseImage, kc)
 	if err != nil {
 		return BuildOutput{}, fmt.Errorf("pull base image %q: %w", b.baseImage, err)
 	}
@@ -134,7 +169,7 @@ func (b *RemoteBuilder) Build(ctx context.Context, in BuildInput) (BuildOutput, 
 	if img, err = mutate.AppendLayers(img, layer); err != nil {
 		return BuildOutput{}, fmt.Errorf("append package layer: %w", err)
 	}
-	if err := b.ops.write(ctx, in.TargetRef, img, b.auth); err != nil {
+	if err := b.ops.write(ctx, in.TargetRef, img, kc); err != nil {
 		return BuildOutput{}, fmt.Errorf("push image %q: %w", in.TargetRef, err)
 	}
 	digest, err := img.Digest()

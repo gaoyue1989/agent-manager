@@ -4,7 +4,7 @@
 // 页签 = 运行时默认 / MCP 连接器模板(soon) / 模型参数 / 沙箱参数 / 仓库与路由 / API(soon)；
 // 运行时默认 GET 掩码视图 + PUT 三态保存（非空=设置、空串=删除、缺失=不变，敏感键留空=不变）。
 // 权限：GET = workspace 成员；PUT = owner/admin（后端 requireWsRole，前端同口径禁用输入）。
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api, type RuntimeDefaultEntry } from "@/lib/api";
@@ -27,23 +27,37 @@ function WorkspaceConfigInner() {
   const [secret, setSecret] = useState<Record<string, string>>({}); // 敏感键新输入（空 = 不变）
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
+  // loadedFor：当前 ws 视图已加载完成时 = 该 ws id；null = 未加载/加载中/加载失败。
+  // 保存前置条件（issue #229）：视图未就绪绝不能以空视图为事实源组装三态负载（空串 = 删除会静默清掉已配置键）
+  const [loadedFor, setLoadedFor] = useState<number | null>(null);
+  const [reloadTick, setReloadTick] = useState(0); // 保存成功后触发重载；加载失败后「重新加载」重试入口
 
-  const load = useCallback(async () => {
+  // 单一加载 effect（deps [ws, reloadTick]）：起始先置 loadedFor=null，切换/重载间隙即禁保存，
+  // 关闭「切换工作空间间隙把旧空间配置复制进新空间」的第二触发面；alive 标志丢弃切换后晚到的旧 ws
+  // 响应（先例 agents/[id] PodTable、export 页轮询）。起始不清 msg、成功时清，与原 load() 语义一致
+  useEffect(() => {
     if (!ws) return;
-    try {
-      const data = await api.workspaceConfig.runtimeDefaults(ws);
-      setEntries(data ?? {});
-      // 非敏感键以服务端当前值预填；敏感键保持空输入（留空 = 不变）
-      const p: Record<string, string> = {};
-      for (const f of RUNTIME_DEFAULT_FIELDS) {
-        if (!f.sensitive) p[f.envKey] = data?.[f.envKey]?.value ?? "";
-      }
-      setPlain(p);
-      setSecret({});
-      setMsg("");
-    } catch (e: any) { setMsg(`加载失败: ${e.message}`); }
-  }, [ws]);
-  useEffect(() => { load(); }, [load]);
+    let alive = true;
+    setLoadedFor(null);
+    const run = async () => {
+      try {
+        const data = await api.workspaceConfig.runtimeDefaults(ws);
+        if (!alive) return;
+        setEntries(data ?? {});
+        // 非敏感键以服务端当前值预填；敏感键保持空输入（留空 = 不变）
+        const p: Record<string, string> = {};
+        for (const f of RUNTIME_DEFAULT_FIELDS) {
+          if (!f.sensitive) p[f.envKey] = data?.[f.envKey]?.value ?? "";
+        }
+        setPlain(p);
+        setSecret({});
+        setLoadedFor(ws);
+        setMsg("");
+      } catch (e: any) { if (alive) setMsg(`加载失败: ${e.message}`); }
+    };
+    run();
+    return () => { alive = false; };
+  }, [ws, reloadTick]);
 
   // 当前页签涵盖的字段，按分类分组（每键恰属一个页签，见 WS_CONFIG_TABS）
   const tabDef = WS_CONFIG_TABS.find((t) => t.id === tab) ?? WS_CONFIG_TABS[0];
@@ -58,6 +72,12 @@ function WorkspaceConfigInner() {
     : "";
 
   const save = async () => {
+    // 纵深防御（独立于按钮禁用）：视图未就绪时拒绝提交——空视图会让 buildRuntimeDefaultPayload
+    // 把全部非敏感键按「空串 = 删除」组装进负载，静默清掉同页签全部已配置默认值（issue #229）
+    if (loadedFor === null || loadedFor !== ws) {
+      setMsg("保存失败：配置尚未加载完成，已阻止提交（空视图会按三态语义删除已配置键）");
+      return;
+    }
     if (suffixError) { setMsg(`保存失败：${suffixError}`); return; }
     // 三态组装（仅当前页签字段；未涵盖键缺失 = 不变）+「有值 → 清空」确认
     const { values, clearing } = buildRuntimeDefaultPayload(tabFields, plain, secret, entries);
@@ -66,7 +86,7 @@ function WorkspaceConfigInner() {
     try {
       await api.workspaceConfig.updateRuntimeDefaults(ws, values);
       setMsg("已保存。默认值作为导出页预填与 values L1 层来源；不影响任何已发布服务");
-      await load();
+      setReloadTick((t) => t + 1); // 触发加载 effect 重载（成功后清 msg，与原 await load() 表现一致）
     } catch (e: any) { setMsg(`保存失败: ${e.message}`); }
     finally { setSaving(false); }
   };
@@ -144,7 +164,11 @@ function WorkspaceConfigInner() {
           {suffixError && <p className="text-xs text-red-600">ROUTING_HOST_SUFFIX：{suffixError}</p>}
           {writable && (
             <div className="flex items-center gap-3">
-              <Btn kind="pri" disabled={saving} onClick={save} testid="ws-config-save">{saving ? "保存中…" : `保存（${tabDef.label}）`}</Btn>
+              <Btn kind="pri" disabled={saving || loadedFor !== ws} onClick={save} testid="ws-config-save">
+                {saving ? "保存中…" : loadedFor !== ws ? "加载中…" : `保存（${tabDef.label}）`}
+              </Btn>
+              {/* 加载失败/在途禁保存后的自恢复入口（否则瞬时 GET 失败只能导航离开再回来重挂载恢复） */}
+              {loadedFor === null && <Btn onClick={() => setReloadTick((t) => t + 1)} testid="ws-config-reload">重新加载</Btn>}
               <span className="text-xs text-gray-400">变更记 UpdatedBy 留痕；导出页对默认值只读。</span>
             </div>
           )}

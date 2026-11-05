@@ -2,8 +2,10 @@ package io.agentmanager.framework.service;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -11,9 +13,14 @@ import org.junit.jupiter.api.io.TempDir;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.mcp.McpUserContextMiddleware;
+import io.agentmanager.framework.mcp.UserHeaderRule;
 import io.agentmanager.framework.mcp.UserScopedMcpClientWrapper;
 import io.agentmanager.framework.model.OafConfig;
 import io.agentscope.core.tool.Toolkit;
+import io.agentscope.core.tool.mcp.McpClientWrapper;
+import io.modelcontextprotocol.common.McpTransportContext;
+import io.modelcontextprotocol.spec.McpSchema;
+import reactor.core.publisher.Mono;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -197,7 +204,10 @@ class McpToolRegistrarUserHeadersTest {
     }
 
     @Test
-    void shouldNotWrapForStdioEvenWithUserHeaders() throws Exception {
+    void shouldWrapStdioForMetaStripOnly() throws Exception {
+        // issue #225：stdio 也常驻装饰（EMPTY rule 仅做 _meta 剥离、无 header 注入）——
+        // HTTP server 声明的透传凭据随 per-turn 全 server 共享 McpMeta 会漏进 stdio
+        // 子进程的 CallToolRequest._meta，剥离必须对全部传输类型生效
         writeConfigYaml("stdio-mcp", """
             connection:
               type: stdio
@@ -210,7 +220,24 @@ class McpToolRegistrarUserHeadersTest {
 
         var wrapper = registrar.buildClient(mcp("stdio-mcp", "stdio-mcp"));
         assertNotNull(wrapper);
-        assertFalse(wrapper instanceof UserScopedMcpClientWrapper, "stdio 无 HTTP header,不装饰");
+        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper, "stdio 常驻装饰，仅剥离不注入");
+
+        // EMPTY rule（stdio 时 buildClient 固定传入）无 header 注入语义：delegate 收到的
+        // meta 剥离 reqHeader:*、不写 McpTransportContext（复用 RecordingClient 模式）
+        var delegate = new RecordingClient();
+        var scoped = new UserScopedMcpClientWrapper(delegate, UserHeaderRule.EMPTY);
+        var result = scoped.callTool("echo", Map.of(), Map.of(
+                "userId", "alice",
+                "reqHeader:authorization", "secret")).block();
+
+        assertNotNull(result);
+        assertFalse(result.isError());
+        var seen = delegate.seenMeta.get();
+        assertNotNull(seen);
+        assertEquals("alice", seen.get("userId"), "userId _meta 双通道不变");
+        assertTrue(seen.keySet().stream().noneMatch(k -> String.valueOf(k).startsWith("reqHeader:")),
+            "reqHeader:* 必须剥离，不随 _meta 下发");
+        assertNull(delegate.seenTransportContext.get(), "EMPTY rule 无 header 注入");
     }
 
     @Test
@@ -232,5 +259,48 @@ class McpToolRegistrarUserHeadersTest {
     void middlewareKeyConstantAligned() {
         // config.yaml 映射目标 key 与 middleware 写入 key 必须一致（文档契约）
         assertEquals("userId", McpUserContextMiddleware.KEY_USER_ID);
+    }
+
+    /** 记录 delegate 收到的 meta 与 McpTransportContext（复用 UserScopedMcpClientWrapperTest 模式） */
+    private static class RecordingClient extends McpClientWrapper {
+        static final McpSchema.CallToolResult OK = McpSchema.CallToolResult.builder()
+            .content(List.of(new McpSchema.TextContent("ok")))
+            .isError(false)
+            .build();
+        final AtomicReference<Map<String, Object>> seenMeta = new AtomicReference<>();
+        final AtomicReference<McpTransportContext> seenTransportContext = new AtomicReference<>();
+
+        RecordingClient() {
+            super("test-server");
+        }
+
+        @Override
+        public Mono<Void> initialize() {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<List<McpSchema.Tool>> listTools() {
+            return Mono.just(List.of());
+        }
+
+        @Override
+        public Mono<McpSchema.CallToolResult> callTool(String toolName, Map<String, Object> arguments) {
+            return callTool(toolName, arguments, null);
+        }
+
+        @Override
+        public Mono<McpSchema.CallToolResult> callTool(
+                String toolName, Map<String, Object> arguments, Map<String, Object> meta) {
+            seenMeta.set(meta);
+            return Mono.deferContextual(cv -> {
+                seenTransportContext.set(cv.getOrDefault(McpTransportContext.KEY, null));
+                return Mono.just(OK);
+            });
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }
