@@ -112,6 +112,8 @@ curl http://localhost:8100/.well-known/agent-card.json
 curl http://localhost:8100/skills
 ```
 
+可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212）。
+
 **响应：** `[{name, description, version, source, required, dynamic, declaredButMissing}]`
 
 > `dynamic: true` 表示该技能由 `/config/skills` 目录发现（每轮重扫，**新增后下一轮对话即生效**）；
@@ -130,8 +132,8 @@ curl http://localhost:8100/skills
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/skills/manage` | 全部技能（含禁用项，多一个 `enabled` 字段） |
-| GET | `/skills/available` | `@` 补全候选。按 `X-User-Id`（或 `?userId=`）合并该用户的 L4 技能 |
-| GET | `/skills/parse-refs?message=` | 预览消息中的 `@Skill` 解析结果：`{skills:[...], count}` |
+| GET | `/skills/available` | `@` 补全候选。按 `X-User-Id`（或 `?userId=`）合并该用户的 L4 技能；可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/parse-refs?message=` | 预览消息中的 `@Skill` 解析结果：`{skills:[...], count}`；可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | POST | `/skills/upload` | multipart `file`（.zip，≤20MB），返回 `{name, message, skill?}` |
 | DELETE | `/skills/{name}` | 删除（校验无 `..` / `/` / `\` 开头 `.`） |
 | PUT | `/skills/{name}/toggle` | 启停切换：`{name, enabled, message}` |

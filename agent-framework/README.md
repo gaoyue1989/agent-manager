@@ -5,7 +5,7 @@
 
 - 版本：v2.1.0（Spring Boot 3.3.5 / JDK 21 / Maven 3.9+）
 - 默认端口：`8100`
-- 测试：1752 个用例 / 0 失败 / 9 跳过（2026-11-03 `mvn test` 实跑；跳过 = 4 个 `SANDBOX_IT` 门控沙箱 API 集成用例 + 4 个真实 Redis 并发实测用例（e2e-redis :16379 不可达时跳过）+ 1 个 root 环境文件权限用例）
+- 测试：1752 个用例 / 0 失败 / 9 跳过（2026-11-03 `mvn test` 实跑；跳过 = 4 个 `SANDBOX_IT` 门控沙箱 API 集成用例 + 4 个真实 Redis 并发实测用例（e2e-redis :16379 不可达时跳过）+ 1 个 root 环境文件权限用例）；截至 HEAD（8461ea4）静态清点 1795 个 @Test / 166 个含 @Test 文件，其中 28 个属 9 支 *IT（不参与 surefire），较实跑快照净增 15 个 @Test，实跑需重测
 - 部署形态：单 Agent 多副本无状态水平扩展
 
 ---
@@ -33,7 +33,7 @@ agent-framework/
 │   │   └── resources/
 │   │       ├── application.yml                  # Spring Boot 配置
 │   │       └── static/debug/                    # 调试页面（拆分架构：index.html + css/js/modules）
-│   └── test/                                    # 155 个测试文件（2026-11-03 实跑 162 类 / 1752 用例 / 9 跳过）
+│   └── test/                                    # 165 个测试文件（*Test 156 + *IT 9；2026-11-03 实跑 162 类 / 1752 用例 / 9 跳过）
 ├── example/                                     # 示例包（审批 Demo：HITL + MCP App 卡片）
 ├── docs/                                        # 设计与改进方案（54 份：53 篇 Markdown + schema-full.sql，索引见 docs/README.md）
 └── README.md                                    # 本文件
@@ -229,8 +229,8 @@ TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超
 | `LLM_MODEL_ID` | — | ✓ | 模型 ID |
 | `LLM_BASE_URL` | — | ✓ | LLM API 端点 |
 | `LLM_PROVIDER` | `openai` | | 提供商标识 |
-| `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
-| `LLM_MAX_TOKENS` | `4096` | | 最大输出 token |
+| `LLM_TEMPERATURE` | `0.3` | | 生成温度 |
+| `LLM_MAX_TOKENS` | `16384` | | 最大输出 token |
 | `LLM_TIMEOUT` | `120` | | API 超时（秒） |
 | `LLM_CONTEXT_LENGTH` | `0` | | 模型上下文窗口大小（tokens，≤0 视为未配置，不传给模型） |
 | `LLM_FALLBACK_MODEL_ID` | — | | 部署级备用模型（引用 `model_config` 托管模型 id，主模型重试耗尽后切换；DB `is_fallback` 优先，空 = 不启用） |
@@ -262,6 +262,7 @@ TurnLeaseStore.acquire()  ── 抢租约（wait 15s 发 waiting 帧，120s 超
 ```bash
 mvn test                                  # 2026-11-03 实跑：162 类 / 1752 用例 / 0 失败 / 9 跳过
                                           # （跳过 4 SANDBOX_IT 沙箱集成 + 4 真实 Redis 并发实测 + 1 root 环境权限用例）
+                                          # （截至 HEAD 8461ea4 静态清点 1795 个 @Test / 166 个含 @Test 文件，其中 28 个属 9 支 *IT 不参与 surefire，实跑需重测）
 mvn -o test                               # 离线模式（离线开发镜像内）
 ```
 
