@@ -238,3 +238,230 @@ func TestMarkSnapshotChecksumStability(t *testing.T) {
 		t.Fatalf("entry json shape wrong: %s", raw)
 	}
 }
+
+// uploadPkgVersion 上传同 slug 指定版本的新包（换版 rebase 用例的 2.0.0 包构造）。
+func uploadPkgVersion(t *testing.T, core *Core, slugSuffix, version string) *store.OafPackage {
+	t.Helper()
+	md := strings.ReplaceAll(replaceSlug(testAgentsMD, slugSuffix), "version: 1.0.0", "version: "+version)
+	pkg, err := core.Packages.Upload("demo.zip", bytesReader(buildTestZip(map[string]string{
+		"AGENTS.md":                  md,
+		"mcp-configs/fs/config.yaml": "connection:\n  type: sse\n",
+		"versions/" + version + "-only.txt": "v" + version,
+	})))
+	if err != nil {
+		t.Fatalf("upload pkg version %s: %v", version, err)
+	}
+	if pkg.Version != version {
+		t.Fatalf("pkg version = %q, want %q", pkg.Version, version)
+	}
+	return pkg
+}
+
+// markPathsByRow 读标记行快照并展开为 path→content 映射。
+func markPathsByRow(t *testing.T, core *Core, markID uint) map[string]string {
+	t.Helper()
+	var row store.ExportPackageMarkEntity
+	if err := core.DB.First(&row, markID).Error; err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, e := range markEntries(t, row.FilesJSON) {
+		out[e.Path] = e.Content
+	}
+	return out
+}
+
+// TestExportDraftRebaseOnSourcePackageVersionChange 源包换版 rebase 分支（seedExportEntries，
+// 契约 §5.6）：最近 frozen 快照与当前源包版本不一致时，新草稿必须重新取源包快照——
+// 旧版本文件不得带进新版本导出镜像（回归成恒续用旧快照则旧包文件静默混入新版本构建
+// 输入，checksum 照常落库、错误不可见）；本次编辑叠加在新版本基线之上；marker 序号
+// 跨包版本连续递增。
+func TestExportDraftRebaseOnSourcePackageVersionChange(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+
+	// 1. e1 独有改动先落进 frozen 快照（钉住旧血脉供对照）；冻结消费 draft，换版前无残留
+	if _, err := core.SaveExportPackageFile(ws.ID, svc.ID, "export-owner", "e1-only.txt", "e1 edit"); err != nil {
+		t.Fatal(err)
+	}
+	m1 := freezeMark(t, core, ws.ID, svc.ID)
+	if m1.Marker != pkg.Version+"-e1" || m1.PackageVersion != pkg.Version {
+		t.Fatalf("e1 marker = %q version = %q", m1.Marker, m1.PackageVersion)
+	}
+	if _, ok := markPathsByRow(t, core, m1.ID)["e1-only.txt"]; !ok {
+		t.Fatal("precondition: e1 snapshot must contain the e1 edit")
+	}
+
+	// 2. 构造 2.0.0 新包（同 slug 不同 version，不撞 uk_pkg_slug_version）并换版
+	pkg2 := uploadPkgVersion(t, core, "export", "2.0.0")
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("package_id", pkg2.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. 换版后首次 Save（draft==nil）：seedExportEntries 走 rebase（last frozen 1.0.0 ≠ 2.0.0）
+	d2, err := core.SaveExportPackageFile(ws.ID, svc.ID, "export-owner", "new-edit.txt", "new edit")
+	if err != nil {
+		t.Fatalf("save after version change: %v", err)
+	}
+	if d2.PackageVersion != "2.0.0" {
+		t.Fatalf("draft packageVersion = %q, want 2.0.0 (must rebase, not resume 1.0.0 snapshot)", d2.PackageVersion)
+	}
+	d2Paths := markPathsByRow(t, core, d2.ID)
+	if _, ok := d2Paths["e1-only.txt"]; ok {
+		t.Fatal("rebased draft must drop old-version snapshot file e1-only.txt")
+	}
+	if c := d2Paths["versions/2.0.0-only.txt"]; c != "v2.0.0" {
+		t.Fatalf("rebased draft must carry new package file: %q", d2Paths["versions/2.0.0-only.txt"])
+	}
+	if c := d2Paths["new-edit.txt"]; c != "new edit" {
+		t.Fatalf("rebased draft must carry the new edit on top of the 2.0.0 baseline: %q", d2Paths["new-edit.txt"])
+	}
+
+	// 4. 冻结 rebase 草稿：marker 序号跨包版本连续（e1 → e2），版本跟随新包
+	m2 := freezeMark(t, core, ws.ID, svc.ID)
+	if m2.Marker != "2.0.0-e2" || m2.PackageVersion != "2.0.0" {
+		t.Fatalf("rebased marker = %q version = %q, want 2.0.0-e2 / 2.0.0", m2.Marker, m2.PackageVersion)
+	}
+	m2Paths := markPathsByRow(t, core, m2.ID)
+	if _, ok := m2Paths["e1-only.txt"]; ok {
+		t.Fatal("frozen rebased snapshot must not contain e1-only.txt")
+	}
+	if _, ok := m2Paths["versions/2.0.0-only.txt"]; !ok {
+		t.Fatal("frozen rebased snapshot must contain 2.0.0-only.txt")
+	}
+	if _, ok := m2Paths["new-edit.txt"]; !ok {
+		t.Fatal("frozen rebased snapshot must contain new-edit.txt")
+	}
+}
+
+// TestExportRebaseFreezeWithoutDraft 换版后无草稿直接冻结（FreezeExportMark 无 draft seed
+// 路径）：与 Save 路径正交的另一条 rebase 入口——直接冻结同样必须取新版本源包快照，
+// 不得续用旧版本 frozen 快照。
+func TestExportRebaseFreezeWithoutDraft(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+
+	// e1 带独有改动冻结（draft 被消费），换版后无任何草稿
+	if _, err := core.SaveExportPackageFile(ws.ID, svc.ID, "export-owner", "e1-only.txt", "e1 edit"); err != nil {
+		t.Fatal(err)
+	}
+	m1 := freezeMark(t, core, ws.ID, svc.ID)
+	if m1.Marker != pkg.Version+"-e1" {
+		t.Fatalf("e1 marker = %q", m1.Marker)
+	}
+	pkg2 := uploadPkgVersion(t, core, "export", "2.0.0")
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("package_id", pkg2.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	m2 := freezeMark(t, core, ws.ID, svc.ID)
+	if m2.Marker != "2.0.0-e2" || m2.PackageVersion != "2.0.0" {
+		t.Fatalf("direct-freeze marker = %q version = %q, want 2.0.0-e2 / 2.0.0", m2.Marker, m2.PackageVersion)
+	}
+	m2Paths := markPathsByRow(t, core, m2.ID)
+	if _, ok := m2Paths["e1-only.txt"]; ok {
+		t.Fatal("rebased direct-freeze snapshot must not contain e1-only.txt")
+	}
+	if _, ok := m2Paths["versions/2.0.0-only.txt"]; !ok {
+		t.Fatal("rebased direct-freeze snapshot must contain 2.0.0-only.txt")
+	}
+}
+
+// TestExportDraftResumeAfterVersionRevert 版本回退方向的 rebase + 回退后的同版本续用
+// （seedExportEntries 两分支交界）：① 换回旧版本包再编辑同样触发 rebase（续用判定只看
+// 版本相等，不区分前进/回退），回退基线不得携带 2.0.0 期间文件；② 回退版本冻结后再编辑
+// 恢复同版本续用（rebase 改动不得误伤续用语义）。
+func TestExportDraftResumeAfterVersionRevert(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+
+	// 前进到 2.0.0 并冻结（无草稿直接冻结 = rebase 取 2.0.0 源包）
+	m1 := freezeMark(t, core, ws.ID, svc.ID)
+	if m1.Marker != pkg.Version+"-e1" {
+		t.Fatalf("e1 marker = %q", m1.Marker)
+	}
+	pkg2 := uploadPkgVersion(t, core, "export", "2.0.0")
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("package_id", pkg2.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	m2 := freezeMark(t, core, ws.ID, svc.ID)
+	if m2.Marker != "2.0.0-e2" {
+		t.Fatalf("e2 marker = %q", m2.Marker)
+	}
+
+	// ① 回退到 1.0.0 再编辑：last frozen（2.0.0）≠ 1.0.0 → rebase，回退基线纯净
+	if err := core.DB.Model(&store.ServiceEntity{}).Where("id = ?", svc.ID).
+		Update("package_id", pkg.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	d3, err := core.SaveExportPackageFile(ws.ID, svc.ID, "export-owner", "back-edit.txt", "back")
+	if err != nil {
+		t.Fatalf("save after version revert: %v", err)
+	}
+	if d3.PackageVersion != "1.0.0" {
+		t.Fatalf("draft after revert packageVersion = %q, want 1.0.0 (rebase)", d3.PackageVersion)
+	}
+	d3Paths := markPathsByRow(t, core, d3.ID)
+	if _, ok := d3Paths["versions/2.0.0-only.txt"]; ok {
+		t.Fatal("rebased draft after revert must drop 2.0.0-only.txt")
+	}
+	if c := d3Paths["back-edit.txt"]; c != "back" {
+		t.Fatalf("rebased draft after revert must carry the edit: %q", d3Paths["back-edit.txt"])
+	}
+	m3 := freezeMark(t, core, ws.ID, svc.ID)
+	if m3.Marker != "1.0.0-e3" {
+		t.Fatalf("marker after revert = %q, want 1.0.0-e3", m3.Marker)
+	}
+
+	// ② 回退版本冻结后再编辑：同版本续用恢复（草稿含 1.0.0-e3 快照内容 + 新改动）
+	d4, err := core.SaveExportPackageFile(ws.ID, svc.ID, "export-owner", "again.txt", "again")
+	if err != nil {
+		t.Fatalf("save after revert freeze: %v", err)
+	}
+	d4Paths := markPathsByRow(t, core, d4.ID)
+	if c := d4Paths["back-edit.txt"]; c != "back" {
+		t.Fatalf("resume must keep last frozen snapshot content: %q", d4Paths["back-edit.txt"])
+	}
+	if c := d4Paths["again.txt"]; c != "again" {
+		t.Fatalf("resume must carry the new edit: %q", d4Paths["again.txt"])
+	}
+}
+
+// TestMarshalMarkFilesSizeLimit 16MB 快照上限（marshalMarkFiles，契约 §9-D7）：超限拒绝
+// 返回 ErrInvalidForm 且提示 snapshot exceeds（改用更小包）；base64 二进制条目同样计入
+// 上限（编码后 ≈ 原始体积 ×1.33）；边界内正常序列化并经 parseMarkFiles round-trip 一致。
+func TestMarshalMarkFilesSizeLimit(t *testing.T) {
+	// 超限拒绝：17MB utf8 内容（json.Marshal 纯 ASCII 不转义，len 确定超 16,777,216）
+	huge := []exportFileEntry{{Path: "data/large.txt", Encoding: "utf8", Content: strings.Repeat("a", 17<<20)}}
+	_, err := marshalMarkFiles(huge)
+	if !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("oversize snapshot must be ErrInvalidForm: %v", err)
+	}
+	if !strings.Contains(err.Error(), "snapshot exceeds") {
+		t.Fatalf("oversize error must mention snapshot exceeds: %v", err)
+	}
+
+	// base64 条目同样计入上限：12MB 原始字节 base64 编码后恰 16MB，JSON 包装必然超限
+	encoded := base64.StdEncoding.EncodeToString(make([]byte, 12<<20))
+	b64 := []exportFileEntry{{Path: "data/blob.bin", Encoding: "base64", Content: encoded}}
+	if _, err := marshalMarkFiles(b64); !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("oversize base64 snapshot must be ErrInvalidForm: %v", err)
+	}
+
+	// 边界内正常：1KB 内容序列化成功且 round-trip 一致
+	small := []exportFileEntry{{Path: "mcp-configs/fs/config.yaml", Encoding: "utf8", Content: strings.Repeat("a", 1024)}}
+	raw, err := marshalMarkFiles(small)
+	if err != nil || raw == "" {
+		t.Fatalf("small snapshot must marshal: err=%v raw-empty=%v", err, raw == "")
+	}
+	back, err := parseMarkFiles(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back) != 1 || back[0].Path != small[0].Path || back[0].Content != small[0].Content {
+		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+}

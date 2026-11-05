@@ -220,3 +220,47 @@ func TestLoadPlatformPVCName(t *testing.T) {
 		t.Fatalf("override must win, got %q", c.PlatformPVCName)
 	}
 }
+
+// TestLoadExportImageDefaults EXPORT_BASE_IMAGE / EXPORT_REGISTRY_USERNAME / EXPORT_REGISTRY_PASSWORD
+// 三键（跨集群导出契约 §2.3/§9-D8）：缺省基底镜像 busybox:1.36 必须钉住——该缺省指向
+// docker.io，是契约点名的离线/内网部署红旗值（缺省值漂移会静默改变每个部署环境构建期
+// 拉取目标，且 main.go 构造 RemoteBuilder 无第二道防线拦截缺省值漂移）；凭证缺省空
+// （匿名推送，不进任何导出产物）；显式覆盖逐键读回生效（内网必改场景）。
+func TestLoadExportImageDefaults(t *testing.T) {
+	t.Setenv("MYSQL_DSN", "u:p@tcp(localhost:3306)/oaf_platform")
+	t.Setenv("AVAILABLE_IMAGES", "img1|A")
+	t.Setenv("DEFAULT_IMAGE", "")
+	t.Setenv("INGRESS_TEMPLATE", "")
+	t.Setenv("INGRESS_HOST_SUFFIX", "")
+
+	// 缺省段：三键显式置空（envStr 空串回落默认，等价 unset 且中和外部环境残留）
+	t.Setenv("EXPORT_BASE_IMAGE", "")
+	t.Setenv("EXPORT_REGISTRY_USERNAME", "")
+	t.Setenv("EXPORT_REGISTRY_PASSWORD", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ExportBaseImage != "busybox:1.36" {
+		t.Fatalf("default export base image = %q, want busybox:1.36", c.ExportBaseImage)
+	}
+	if c.ExportRegistryUsername != "" || c.ExportRegistryPassword != "" {
+		t.Fatalf("default registry credentials must be empty (anonymous push): %q/%q",
+			c.ExportRegistryUsername, c.ExportRegistryPassword)
+	}
+
+	// 覆盖段：内网显式覆盖三键逐键生效
+	t.Setenv("EXPORT_BASE_IMAGE", "registry.internal:5000/base/busybox:1.36")
+	t.Setenv("EXPORT_REGISTRY_USERNAME", "u1")
+	t.Setenv("EXPORT_REGISTRY_PASSWORD", "p1")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ExportBaseImage != "registry.internal:5000/base/busybox:1.36" {
+		t.Fatalf("override export base image = %q", c.ExportBaseImage)
+	}
+	if c.ExportRegistryUsername != "u1" || c.ExportRegistryPassword != "p1" {
+		t.Fatalf("override credentials = %q/%q, want u1/p1", c.ExportRegistryUsername, c.ExportRegistryPassword)
+	}
+}
