@@ -371,6 +371,12 @@ type ExportOrderEntity struct {
 	// values/manifest（回填 digest），保证可复现
 	ManifestJSON string    `gorm:"type:json" json:"manifestJson"`
 	RequestJSON  string    `gorm:"type:json" json:"-"`
+	// Marker 列表展示列（issue #234）：创建导出单时从 frozen mark 落库，导出记录区
+	// 直接读本列，避免列表逐行拖拽 request_json 快照大列（随历史行数线性放大响应体积）。
+	// 宽度对齐 ExportPackageMarkEntity.Marker size:64（marker 形状 {包版本}-e{N}）；
+	// json:"-" 保持详情响应形状不变，marker 对外仍只经 ExportOrderListItem 暴露；
+	// 存量行由 store.Backfill 第 7 步从 request_json 幂等回填，坏快照行容忍留空
+	Marker       string    `gorm:"size:64" json:"-"`
 	Status       string    `gorm:"size:24;index:idx_export_ws_status" json:"status"`
 	ItsmTicketID string    `gorm:"size:128" json:"itsmTicketId"`
 	Error        string    `gorm:"size:512" json:"error"`

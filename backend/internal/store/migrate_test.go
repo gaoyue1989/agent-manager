@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,7 +9,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// newMigrateDB 内存库 + 全表迁移（与 store.Open 相同的 AutoMigrate 列表）。
+// newMigrateDB 内存库 + Backfill 触及的表迁移（store.Open AutoMigrate 列表的子集：
+// 本文件用例涉及的实体，不含未回填的控制台域等表）。
 func newMigrateDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -18,7 +20,8 @@ func newMigrateDB(t *testing.T) *gorm.DB {
 	if err := db.AutoMigrate(&OafPackage{}, &ServiceEntity{}, &ServiceEvent{},
 		&PlatformConfigEntity{}, &PlatformConfigEvent{},
 		&User{}, &Workspace{}, &WorkspaceMember{}, &ApiKey{},
-		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{}); err != nil {
+		&Skill{}, &SkillVersion{}, &SkillRelease{}, &SkillMarketSource{}, &SkillMarketItem{},
+		&ExportOrderEntity{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -116,6 +119,67 @@ func TestBackfillAssignsDefaultWorkspace(t *testing.T) {
 	db.First(&gotPkg, pkg.ID)
 	if gotPkg.WorkspaceID != 0 {
 		t.Fatal("public packages must keep workspace_id=0")
+	}
+}
+
+// TestBackfillExportOrderMarkers issue #234：export_orders.marker 独立小列存量回填——
+// 合法快照行回填 marker；坏 JSON 快照行容忍留空（不报错不落写）；连续两次 Backfill
+// 第二次零写入（幂等，对写副作用严格成立）。
+func TestBackfillExportOrderMarkers(t *testing.T) {
+	db := newMigrateDB(t)
+	good := ExportOrderEntity{ServiceID: 1, WorkspaceID: 1,
+		Status: "built", RequestJSON: `{"marker":"1.0.0-e1","baseImage":"busybox:1.36"}`}
+	bad := ExportOrderEntity{ServiceID: 1, WorkspaceID: 1,
+		Status: "built", RequestJSON: `{"marker": 123, broken`}
+	empty := ExportOrderEntity{ServiceID: 1, WorkspaceID: 1,
+		Status: "built", RequestJSON: `{"baseImage":"busybox:1.36"}`}
+	filled := ExportOrderEntity{ServiceID: 1, WorkspaceID: 1,
+		Status: "built", Marker: "2.0.0-e2", RequestJSON: `{"marker":"2.0.0-e2"}`}
+	for _, o := range []*ExportOrderEntity{&good, &bad, &empty, &filled} {
+		if err := db.Create(o).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	var gotGood, gotBad, gotEmpty, gotFilled ExportOrderEntity
+	db.First(&gotGood, good.ID)
+	db.First(&gotBad, bad.ID)
+	db.First(&gotEmpty, empty.ID)
+	db.First(&gotFilled, filled.ID)
+	if gotGood.Marker != "1.0.0-e1" {
+		t.Fatalf("good row marker = %q, want 1.0.0-e1", gotGood.Marker)
+	}
+	if gotBad.Marker != "" {
+		t.Fatalf("bad snapshot row must tolerate empty marker, got %q", gotBad.Marker)
+	}
+	if gotEmpty.Marker != "" {
+		t.Fatalf("empty-marker snapshot row must stay empty, got %q", gotEmpty.Marker)
+	}
+	if gotFilled.Marker != "2.0.0-e2" {
+		t.Fatalf("already-filled row must keep its marker, got %q", gotFilled.Marker)
+	}
+
+	// 二跑幂等：捕获 export_orders 的 UPDATE 语句，坏快照行允许重扫但必须零 UPDATE
+	// （已回填行不命中 Where，坏行解析失败不落写——幂等对写副作用严格成立）
+	var markerUpdates int
+	db.Callback().Update().After("gorm:update").Register("test_count_export_marker_updates",
+		func(tx *gorm.DB) {
+			if strings.Contains(tx.Statement.SQL.String(), "export_orders") {
+				markerUpdates++
+			}
+		})
+	if err := Backfill(db, "", ""); err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if markerUpdates != 0 {
+		t.Fatalf("second backfill must issue zero export_orders UPDATE, got %d", markerUpdates)
+	}
+	var again ExportOrderEntity
+	db.First(&again, good.ID)
+	if again.Marker != "1.0.0-e1" {
+		t.Fatalf("second backfill changed marker: %q", again.Marker)
 	}
 }
 

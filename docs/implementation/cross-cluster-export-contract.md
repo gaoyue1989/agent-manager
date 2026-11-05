@@ -37,6 +37,10 @@ type ExportOrderEntity struct {
 	// RequestJSON 导出请求快照（marker/baseImage/env/secretKeys/replicas）：
 	// 异步构建完成后据此重渲染 values/manifest（回填 digest），保证可复现
 	RequestJSON  string `gorm:"type:json" json:"-"`
+	// Marker 列表展示列（issue #234）：创建导出单时从 frozen mark 落列，导出记录区
+	// 直接读本列（列表 Select 不拖 request_json 大列）；存量行由 store.Backfill
+	// 从 request_json 幂等回填，坏快照行容忍留空。json:"-" 不进详情 JSON
+	Marker       string `gorm:"size:64" json:"-"`
 	Status       string `gorm:"size:24;index:idx_export_ws_status" json:"status"`
 	ItsmTicketID string `gorm:"size:128" json:"itsmTicketId"`
 	Error        string `gorm:"size:512" json:"error"`
@@ -262,7 +266,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 | `GET /api/v1/services/:id/export/package/marks` | `GET .../export/package/marks` | export.go | `Core.ListExportMarks(svcID)` | 成员 |
 | `GET /api/v1/services/:id/export/preview` | `GET .../export/preview` | export.go | `Core.ExportPreview(...)`：源包结构与版本链、现 env（敏感掩码）、空间默认值（掩码）、镜像白名单、派生键预览 | 成员 |
 | `POST /api/v1/services/:id/export` | `POST .../export` | export.go | `Core.CreateExportOrder(...)` | 成员 |
-| —（设计 §9 无此端点，#216 新增） | `GET .../export/orders` | export.go | `Core.ListServiceExportOrders(wsID, svcID)`：id 倒序，不含 values/manifest 明文（marker 自请求快照解析） | 成员（服务须属本空间；导出记录区） |
+| —（设计 §9 无此端点，#216 新增） | `GET .../export/orders` | export.go | `Core.ListServiceExportOrders(wsID, svcID)`：id 倒序，不含 values/manifest 明文（marker 取独立落库小列，issue #234：创建导出单时从 frozen mark 落列、存量行经启动回填，不解析 request_json 快照） | 成员（服务须属本空间；导出记录区） |
 
 `:ws` 取值沿用 console 约定（`me` / 数字 id / slug，identity.go:150-181）。无 body 的 POST（打标记）沿用 republish 的可选 body 语义（router.go:247-253：ContentLength > 0 才 ShouldBindJSON）。
 
@@ -282,6 +286,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 - `POST .../export` 请求体：`{ "marker": "1.2.0-e1", "baseImage": "…", "chartVersion": "0.1.0", "env": {"MCP_FLIGHT_TOKEN": "…"}, "secretKeys": ["MCP_FLIGHT_TOKEN"], "replicas": 2 }`；`marker` 必填且须为该服务 frozen 标记；`baseImage` 必须命中 L1 `BASE_IMAGE_WHITELIST`（缺省取白名单首项，模式同 config.go:122-124）；`env` 走 `service.ValidateEnv`（env.go:17-36）+ 导出保留键校验（§5.4）；`chartVersion` 缺省常量 `defaultExportChartVersion = "0.1.0"`，且须为 semver 形态（`^\d+\.\d+\.\d+[-.0-9A-Za-z]*$`，≤32——对齐 `ChartVersion` 列宽），非法创建 400（issue #226）；values 注释头全部插值字段另经 `sanitizeHeaderLine` 单行化兜底（yaml.v3 全部行终止符 LF/CR/NEL/LS/PS → 空格——只拦 CR/LF 时 NEL/LS/PS 可经 DisplayName 复活注入，覆盖重渲染读 DB 存量值等残余向量）。
 - 响应统一 `OK(c, …)` 包装（respond.go）；错误经 `mapError`（401/400/403/404/409 语义沿用）。
 - `GET .../exports/:id` 详情对 `ValuesYAML`/`RequestJSON` 永不回显（模型 json:"-"，§1.1）。
+- 列表 `GET .../orders` 的 `marker` 取独立落库小列（issue #234，创建导出单时从 frozen mark 落列、存量行经启动回填），不解析 request_json 快照——列表 Select 排除 `values_yaml`/`manifest_json`/`request_json` 大列，响应体积不随历史行快照线性放大；异常行 marker 容忍留空。`secretKeys` 输入规模与 env 同口径：数量 ≤64（MaxEnvKeys）、重复键显式拒绝，越界 400。
 
 ---
 

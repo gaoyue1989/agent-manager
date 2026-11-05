@@ -22,7 +22,8 @@ func newTestCore(t *testing.T) (*Core, *k8sfake.FakeK8s, func()) {
 	if err := db.AutoMigrate(&store.OafPackage{}, &store.ServiceEntity{}, &store.ServiceEvent{}, &store.PlatformConfigEntity{}, &store.PlatformConfigEvent{},
 		&store.User{}, &store.Workspace{}, &store.WorkspaceMember{}, &store.ApiKey{},
 		&store.ModelConnection{}, &store.ModelDelivery{}, &store.McpConnector{}, &store.AgentIntegration{},
-		&store.Skill{}, &store.SkillVersion{}, &store.SkillRelease{}, &store.SkillMarketSource{}, &store.SkillMarketItem{}); err != nil {
+		&store.Skill{}, &store.SkillVersion{}, &store.SkillRelease{}, &store.SkillMarketSource{}, &store.SkillMarketItem{},
+		&store.ExportOrderEntity{}); err != nil { // Backfill 第 7 步（marker 回填）查该表，governance 测试经 store.Backfill 间接触发
 		t.Fatal(err)
 	}
 	sqlDB, _ := db.DB()

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"agent-manager/backend/internal/imagebuilder"
 	"agent-manager/backend/internal/store"
+	"gorm.io/gorm"
 )
 
 // fakeBuilder 内存假实现（契约 §3.3 形态）：记录构建输入，可注入 digest/错误/延迟。
@@ -297,6 +299,25 @@ func TestCreateExportOrderValidation(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrInvalidForm) {
 		t.Fatalf("L2 export meta key via secretKeys: err = %v", err)
 	}
+	// secretKeys 65 键 → ErrInvalidForm（issue #234 数量上限对齐 MaxEnvKeys；此前仅 env
+	// 有限量，secretKeys 超量可经创建导出单撑大 request_json 快照）
+	many := make([]string, 0, 65)
+	for i := 0; i < 65; i++ {
+		many = append(many, fmt.Sprintf("EXPORT_KEY_%d", i))
+	}
+	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
+		Marker: mark.Marker, SecretKeys: many,
+	})
+	if err == nil || !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("65 secret keys: err = %v", err)
+	}
+	// 重复 secretKeys → ErrInvalidForm（issue #234 显式拒绝，不静默去重）
+	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
+		Marker: mark.Marker, SecretKeys: []string{"MCP_FLIGHT_TOKEN", "MCP_FLIGHT_TOKEN"},
+	})
+	if err == nil || !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("duplicate secret keys: err = %v", err)
+	}
 	// baseImage 越白名单
 	_, err = core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{
 		Marker: mark.Marker, BaseImage: "docker.io/evil:1",
@@ -376,7 +397,7 @@ func TestListServiceExportOrders(t *testing.T) {
 	}
 	for _, item := range list {
 		if item.Marker != mark.Marker {
-			t.Fatalf("marker not parsed from request snapshot: %+v", item)
+			t.Fatalf("marker not from dedicated column: %+v", item)
 		}
 		if !strings.HasPrefix(item.OrderNo, "EXP-") {
 			t.Fatalf("orderNo = %q", item.OrderNo)
@@ -386,6 +407,46 @@ func TestListServiceExportOrders(t *testing.T) {
 		}
 		if item.OafImageDigest == "" {
 			t.Fatalf("digest not surfaced: %+v", item)
+		}
+	}
+	// issue #234：列表 Select 不再拖 request_json 大列——经 GORM 回调捕获本次列表查询
+	// 实际执行的 SQL 断言（前提：行内快照确实存在，仅靠列表语句不带该列）
+	var captured []string
+	core.DB.Callback().Query().After("gorm:query").Register("test_capture_export_list_sql",
+		func(tx *gorm.DB) {
+			if s := tx.Statement.SQL.String(); s != "" {
+				captured = append(captured, s)
+			}
+		})
+	if _, err := core.ListServiceExportOrders(ws.ID, svc.ID); err != nil {
+		t.Fatalf("list for sql capture: %v", err)
+	}
+	joined := strings.Join(captured, "\n")
+	var snapProbe store.ExportOrderEntity
+	if err := core.DB.Select("request_json").First(&snapProbe, first.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if snapProbe.RequestJSON == "" {
+		t.Fatal("precondition: request snapshot must exist on the row")
+	}
+	if strings.Contains(joined, "request_json") {
+		t.Fatalf("list query must not drag request_json big column: %s", joined)
+	}
+	if !strings.Contains(joined, "marker") {
+		t.Fatalf("list query should read the marker column: %s", joined)
+	}
+	// 容忍语义：存量坏快照行（marker 列为空）列表照常返回、该行 marker 留空不报错
+	if err := core.DB.Model(&store.ExportOrderEntity{}).Where("id = ?", first.ID).
+		Update("marker", "").Error; err != nil {
+		t.Fatal(err)
+	}
+	tolerant, err := core.ListServiceExportOrders(ws.ID, svc.ID)
+	if err != nil {
+		t.Fatalf("list with empty-marker row: %v", err)
+	}
+	for _, item := range tolerant {
+		if item.ID == first.ID && item.Marker != "" {
+			t.Fatalf("empty-marker row must surface empty marker, got %q", item.Marker)
 		}
 	}
 	// 服务不存在 / 不属于本空间 → 404（loadServiceForExport 同口径）

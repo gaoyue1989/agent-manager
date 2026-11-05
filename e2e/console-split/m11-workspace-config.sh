@@ -167,7 +167,7 @@ fi
 # ---- export 面：导出记录区（issue #216）/ 详情 / values.yaml 下载 / 终态推进 ----
 ORDERS=$(req GET $EXP/orders "" "$OT")
 assert_contains "导出记录区含该单" "$ORDERS" "\"id\":$ORDER"
-assert_contains "记录区 marker 从快照解析" "$ORDERS" '"marker":"1.0.0-e1"'
+assert_contains "记录区 marker 独立列" "$ORDERS" '"marker":"1.0.0-e1"'
 assert_contains "记录区状态跟随 failed" "$ORDERS" '"status":"failed"'
 DETAIL=$(req GET /console/exports/$ORDER "" "$OT")
 assert_contains "详情状态 failed" "$DETAIL" '"status":"failed"'
