@@ -80,8 +80,8 @@ public class A2AController {
      * 2. message.messageId 必填（缺失则 -32602）
      * 3. parts 中每个 part 需带 kind 类型标识（如 {"kind":"text","text":"..."}，缺失则 -32602）
      * 4. configuration.blocking=true（仅 message/send 同步场景）
-     * 5. 顶层 userId/sessionId/skills → message.metadata（SDK 从 message.metadata 读取）
-     * 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId；params.metadata.skills 归一
+     * 5. 顶层 userId/sessionId/skills → message.metadata（SDK 从 message.metadata 读取；skills 取值源链见 5.1）
+     * 6. 兼容旧格式 params.metadata.thread_id/userId → message.metadata.sessionId/userId
      */
     private String normalizeMessageSendBody(String body) {
         try {
@@ -141,16 +141,21 @@ public class A2AController {
             if (topLevelSessionId != null && !topLevelSessionId.toString().isBlank()) {
                 meta.put("sessionId", topLevelSessionId.toString());
             }
-            // 5.1 本轮可用技能列表（session-skill-list-design §6）：对外契约是
-            // message.metadata.skills（顶层 params.skills 同义），但 SDK 的 A2A→Msg 转换
-            // 只认「按 msg id 分组」的 metadata（getMsgMetadata: metadata[part.msgId] 且值必须
-            // 是 Map；part 以 _agentscope_msg_id 标组）。此处归一为该约定，调用方无感：
+            // 5.1 本轮可用技能列表（session-skill-list-design §6）：取值源链 first-non-null-wins——
+            // message.metadata.skills → params.skills → params.metadata.skills（旧格式同义）。
+            // 但 SDK 的 A2A→Msg 转换只认「按 msg id 分组」的 metadata（getMsgMetadata:
+            // metadata[part.msgId] 且值必须是 Map；part 以 _agentscope_msg_id 标组）。
+            // 此处归一为该约定，调用方无感：
             //   message.metadata = {sessionId, userId, <msgId>: {skills: [...]}}
             //   parts[*].metadata._agentscope_msg_id = <msgId>
             // 显式空列表同样归一（Map 内保留空数组 = 无技能）。
             Object requestedSkills = meta.remove("skills");
             if (requestedSkills == null) {
                 requestedSkills = params.get("skills");
+            }
+            if (requestedSkills == null
+                    && params.get("metadata") instanceof Map<?, ?> legacySkillMeta) {
+                requestedSkills = legacySkillMeta.get("skills");
             }
             if (requestedSkills instanceof List<?> skillsList) {
                 var msgId = String.valueOf(message.get("messageId"));
@@ -186,10 +191,6 @@ public class A2AController {
                 var uid = legacyMeta.get("userId");
                 if (uid != null && !meta.containsKey("userId")) {
                     meta.put("userId", uid.toString());
-                }
-                var legacySkills = legacyMeta.get("skills");
-                if (legacySkills instanceof List<?> && !meta.containsKey("skills")) {
-                    meta.put("skills", legacySkills);
                 }
             }
             message.put("metadata", meta);
