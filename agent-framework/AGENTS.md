@@ -388,7 +388,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_POOL_MAX_WAIT_SECONDS` | `120` | | 借出等待上限（池空轮询 1s 间隔）；须 < 守卫租约 900s 与 a2a-job send-timeout 300s；0=无限等（不推荐） |
 | `SANDBOX_POOL_IDLE_RETURN_SECONDS` | `600` | | busy 容器空闲租约 TTL = session 失活判定阈值（续约五点：borrow/resume/doExec/stop/confirm touch）。**D15 硬不变量：≥ AGENT_CONFIRM_DEADLINE_MINUTES**，违反拒绝启动；调小必须同步下调 deadline |
 | `SANDBOX_POOL_SCAN_INTERVAL_SECONDS` | `60` | | 回收（租约过期 + D14 turn_lease 双保险才回收；owner 已知转粘滞不 kill）/creating 剪枝（>5min）/idle 保活/粘滞到期/水位扫描周期；任一副本可扫、免选主（Lua HDEL 先到先得）；优雅停机不杀任何容器（D12） |
-| `SANDBOX_POOL_REBUILD_CONCURRENCY` | `2` | | 补位创建并发上限（集群级）；`GET /debug/sandbox-pool` 透出通用/粘滞 idle、busy（含 userKey 归属）、creating、水位 T 明细 + 流转事件环形缓冲 |
+| `SANDBOX_POOL_REBUILD_CONCURRENCY` | `2` | | 补位创建并发上限（集群级）；`GET /debug/sandbox-pool` 透出通用/粘滞 idle、busy（含 userKey 归属）、creating、水位 T 明细 + 流转事件环形缓冲；调试页 Sandbox 模块渲染该端点——池化配置 9 项 + D18 水位条（通用 idle+creating / target，80% 抬升线，≥80% 黄/池满红）+ 集群级明细与 waiters（端点不可用 fail-soft 只提示） |
 | `SANDBOX_CPU_REQUEST` | `100m` | | 沙箱 Pod CPU request（D19 资源双档，K8s quantity 字符串）：透传 SDK `resourceRequests`，**独立于池开关生效**（缺省时上游 Server 把 resourceLimits 同时作 limits/requests=全额保障的根因）；idle 容器只占 request 水位、借出工作时 burst 到 limit（limit 沿用 `SANDBOX_CPU_COUNT`/`SANDBOX_MEMORY_MB`） |
 | `SANDBOX_MEMORY_REQUEST` | `128Mi` | | 沙箱 Pod 内存 request（D19 资源双档，同上） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
