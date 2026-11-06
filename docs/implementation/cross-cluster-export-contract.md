@@ -34,6 +34,10 @@ type ExportOrderEntity struct {
 	// 仅经下载端点交付（设计 §12.2）——先例：ServiceEntity.EnvSecretJSON（model.go:51）
 	ValuesYAML  string `gorm:"type:mediumtext" json:"-"`
 	ManifestJSON string `gorm:"type:json" json:"manifestJson"`
+	// ManifestVersion manifest 乐观锁版本号（issue #233）：manifest_json 三个并发写者
+	// 经 (id,status,manifest_version) CAS 整数比较，写者 bump +1；
+	// json:"-" 不进任何 API 响应/列表（model.go:373-378）
+	ManifestVersion int `gorm:"default:0" json:"-"`
 	// RequestJSON 导出请求快照（marker/baseImage/env/secretKeys/replicas）：
 	// 异步构建完成后据此重渲染 values/manifest（回填 digest），保证可复现
 	RequestJSON  string `gorm:"type:json" json:"-"`
@@ -353,9 +357,13 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 
 导出单号规则：`EXP-YYYYMMDD-%04d`（%04d = export_orders 自增 id，创建行后回填）。人工推进 status 时同步更新 manifest 的 `itsm` 段。
 
+manifest 的全部并发更新（创建首渲落库 / itsm 写回 / `downloadedBy` 追加 / 构建完成回写）均为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：写者 bump 版本 +1，CAS 不命中即重读重试或放弃（首渲不命中放弃留痕；其余 ≤2 次重读，耗尽 400 / 留痕放弃），杜绝 stale 快照整段覆盖丢并发方条目。
+
 ### 5.8 下载审计（v1）
 
 values/manifest 下载成功 → `log.Printf("[export_download] order=%d user=%s file=values.yaml ts=%s", …)` 结构化访问日志 + manifest `audit.downloadedBy` 追加。独立下载审计表留 v2（§9-D5）。
+
+下载审计写入同为 `(id + status + manifest_version)` 乐观锁 CAS（issue #233）：并发下载×下载 / 下载×人工推进丢失更新时重读重试（≤2 次，耗尽 400）；building 期下载的审计条目由构建完成回写保留（并入重渲产物，不整段覆盖）。
 
 ---
 
@@ -371,13 +379,13 @@ charts/oaf-agent/
 ├── .helmignore              # 常规
 ├── templates/
 │   ├── _helpers.tpl         # oaf-agent.fullname / .labels / .selectorLabels / .imageBase / .imageOaf / oaf-agent.validate（required 守卫，先例 _helpers.tpl:15-40 的 oaf.fullname/oaf.labels 与 :84 起的 oaf.validate）
-│   ├── deployment.yaml      # initContainer inject-oaf（image.oaf，command sh -c "cp -a /oaf/. /config/"，emptyDir /config）+ 主容器 agent（image.base，envFrom 两源：secret 在前 CM 在后，对齐平台 envFrom 顺序 backend/AGENTS.md）+ /health 探针（AgentPort 8100）+ HOST_NAME 注入
+│   ├── deployment.yaml      # initContainer inject-oaf（image.oaf，command sh -c "cp -a /oaf/. /config/"，emptyDir /config）+ 主容器 agent（image.base，envFrom 两源：secret 在前 CM 在后，对齐平台 envFrom 顺序 backend/AGENTS.md）+ /health 探针（AgentPort 8100）+ HOST_NAME 注入；automountServiceAccountToken: false（issue #232 最小 SA，与单集群业务 Deployment objects.go 同款；charts-ci 有渲染断言锁）
 │   ├── service.yaml         # {fullname}-svc:8100（命名规则与单集群一致：objects.go:27-28 前缀语义由 fullname 承担）
 │   ├── ingress.yaml         # 双模式（§6.3）
 │   ├── configmap.yaml       # {fullname}-env：values.env（非敏感）
 │   ├── secret.yaml          # {fullname}-env-secret：values.secretEnv（stringData）
-│   ├── mysql-init-job.yaml  # {{- if .Values.mysql.createDatabase }}：pre-install hook Job（命名 {fullname}-mysql-init；镜像用独立值 mysql.jobImage 缺省 mysql:8.0——agent-framework Java 基底不含 mysql CLI），CREATE DATABASE IF NOT EXISTS `{基库}_{short}`；helm.sh/hook: pre-install + hook-weight + hook-delete-policy
-│   ├── serviceaccount.yaml  # {fullname}-sa（最小；业务 Pod 无 K8s API 依赖）
+│   ├── mysql-init-job.yaml  # {{- if .Values.mysql.createDatabase }}：pre-install hook Job（命名 {fullname}-mysql-init；镜像用独立值 mysql.jobImage 缺省 mysql:8.0——agent-framework Java 基底不含 mysql CLI），CREATE DATABASE IF NOT EXISTS `{基库}_{short}`；helm.sh/hook: pre-install + hook-weight + hook-delete-policy；automountServiceAccountToken: false（issue #232 最小 SA，与单集群业务 Deployment objects.go 同款；charts-ci 有渲染断言锁）
+│   ├── serviceaccount.yaml  # {fullname}-sa（最小；业务 Pod 无 K8s API 依赖）；automountServiceAccountToken: false（issue #232 最小 SA，与单集群业务 Deployment objects.go 同款；charts-ci 有渲染断言锁）
 │   └── NOTES.txt            # 就绪自检：rollout status / kubectl wait job / agent-card curl 示例（风格对齐 oaf-platform NOTES.txt）
 └── README.md                # values 契约与 4 件套部署步骤
 ```
@@ -458,6 +466,8 @@ changes 过滤（charts-ci.yml:27-32 的 `charts: 'charts/**'`）已覆盖新目
 ```
 
 新增 job 默认非必需检查（根 AGENTS.md「分支保护」节）；转必需需仓库管理员在分支保护加勾。
+
+issue #232（2026-11-05）在此基础上追加「最小 SA 断言」步（charts-ci.yml:82-86）：`helm template --show-only` 逐对象 grep `automountServiceAccountToken: false`，锁定 serviceaccount.yaml/deployment.yaml/mysql-init-job.yaml 三处禁自动挂载（与单集群业务 Deployment objects.go:175 同款）。
 
 ---
 

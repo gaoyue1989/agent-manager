@@ -113,8 +113,8 @@ agent-framework/
 │   │       │   ├── js/                          # 脚本 (api/app/router/state/utils), mcp-app-host.js (MCP App 卡片宿主)
 │   │       │   └── modules/                     # 功能模块 (chat/tools/config/database/logs/mcp/memory/models/sandbox/skills/workspace)
 │   │       └── static/monitor/                  # 运营监控独立页 (index.html + app.js 入口 + monitor.js 模块，复用 ../debug 的样式与 vendor)
-│   └── test/                                  # 155 个测试文件（2026-11-03 实跑 162 类 / 1752 用例，0 失败 9 跳过）
-├── docs/                                     # 设计与改进方案文档 (52 份, 索引见 docs/README.md)
+│   └── test/                                  # 165 个 *Test/*IT 测试文件（2026-11-03 实跑 162 类 / 1752 用例，0 失败 9 跳过；2026-11-04 四核确认）
+├── docs/                                     # 设计与改进方案文档 (54 份：53 篇 Markdown + schema-full.sql, 索引见 docs/README.md)
 ├── Dockerfile                                # 镜像构建 (多阶段: Maven 构建 → JRE 21 运行)
 ├── Dockerfile.dev                            # 离线开发镜像 (JDK 21 + Maven + 全量依赖缓存)
 ├── Makefile                                  # Maven 封装 (build/test/docker-build/offline 等)
@@ -346,8 +346,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `LLM_MODEL_ID` | — | ✓ | 模型 ID |
 | `LLM_BASE_URL` | — | ✓ | LLM API 端点 |
 | `LLM_PROVIDER` | `openai` | | 推理引擎方言（`openai`/`vllm`/`sglang`/`glm`/`deepseek`），决定思考/推理参数下发位置（见 ChatModelFactory.applyDialect） |
-| `LLM_TEMPERATURE` | `0.7` | | 生成温度 |
-| `LLM_MAX_TOKENS` | `4096` | | 最大 token |
+| `LLM_TEMPERATURE` | `0.3` | | 生成温度 |
+| `LLM_MAX_TOKENS` | `16384` | | 最大 token |
 | `LLM_TIMEOUT` | `120` | | 超时(秒) |
 | `LLM_REASONING_EFFORT` | — | | 推理强度（如 low/medium/high）；空 = 不下发，值集因端点而异 |
 | `LLM_FREQUENCY_PENALTY` | — | | 频率惩罚 [-2.0, 2.0]；空 = 不下发 |
@@ -483,9 +483,9 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/metadata` | 完整 Agent 元数据（skills 对象数组，?includeDetails=true 含 tools/subAgents/model） |
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card |
-| GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记） |
-| GET | `/skills/available` | 可用技能摘要（name+description，供 @Skill 提示）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 描述为准），无则仅全局目录 |
-| GET | `/skills/parse-refs` | 解析消息中的 @Skill 引用（`?message=`；同样按 `X-User-Id`/`?userId=` 合并 L4 校验） |
+| GET | `/skills` | 技能列表（动态：frontmatter 声明 ∪ /config/skills 目录事实，冲突以目录为准；字段含 dynamic/declaredButMissing 标记）。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/available` | 可用技能摘要（name+description，供 @Skill 提示）。**按用户合并 L4**：`X-User-Id`（网关注入）或 `?userId=` 时并集该用户个人技能（同名以 L4 描述为准），无则仅全局目录。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/parse-refs` | 解析消息中的 @Skill 引用（`?message=`；同样按 `X-User-Id`/`?userId=` 合并 L4 校验）。可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | GET | `/skills/users` | **当前用户**（`X-User-Id` 头，缺失 400 `missing_user_id` / 非法 400 `invalid_user_id`）的个人技能列表：每项含 `description`（SKILL.md frontmatter）、`enabled`（启停状态）、`createdAt`（该技能最早 KV 写入时间，近似创建时间）、`hasPackageBaseline`（删除后回落该包内技能）、`adminOverride`（带管理面写入栅栏）；另含 `tombstones`（已删除但标记仍在的技能）；枚举/标记读取失败 500，不降级为空 |
 | GET | `/skills/users/{name}` | 技能文件内容（?file= 相对路径，默认 SKILL.md；L4 优先，无覆盖回落包内基线，source=user/package；`files`/`version`/`hasUserOverride` 与 source 同源，`userOverrideExists` 表示该用户另有个人覆盖） |
 | GET | `/skills/users/{name}/download` | 下载该技能整目录为 zip（`{name}.zip`，Content-Disposition filename* 支持中文；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
@@ -609,7 +609,9 @@ Nexus 私有源接入、离线开发完整说明见 [docs/offline-dev-image.md](
 
 ```bash
 mvn test     # 2026-11-03 实跑：1752 用例、0 失败、0 错误、9 跳过、BUILD SUCCESS（~2min，JDK 21）
-             # 实跑 162 个测试类。静态注解清点为 165 文件 / 1777 个 @Test，差额 28 全部来自
+             # （2026-11-03 快照；按当前注解数静态推算 surefire 可跑约 1795−28=1767，未实跑）
+             # 实跑 162 个测试类。静态注解清点为 166 文件 / 1795 个 @Test（2026-11-06 静态清点，HEAD
+             # 8461ea4；较 2026-11-04 对齐时点 785cc64 的 1780 净增 15），差额 28 全部来自
              # 9 支按命名不参与 surefire 的 *IT（RedisEventLogIT 10 / SessionEventStoreCrossReplicaIT 6 /
              # S3FileStorageIT 3 / ModelConfigStoreMySqlIT 2 / A2aJobRedisStoreIT 2 / ProtocolRedisEventBusIT 2 /
              # ThreadHistoryConfirmIT 1 / SessionUserStoreMySqlIT 1 / TurnStopStoreMySqlIT 1），需 -Dtest= 显式跑

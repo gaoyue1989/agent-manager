@@ -229,6 +229,96 @@ func TestBindServiceThreeStates(t *testing.T) {
 	}
 }
 
+// TestBindServiceMigratesExportAssets 纳管联动迁移导出资产（issue #235）：default 空间服务
+// 带 draft+frozen 发布标记与既有导出单，BindService 后 marks/orders.workspace_id 与服务
+// 一同迁入目标空间（修复前只迁 services.workspace_id → 标记可见可选但创建导出单恒归属
+// 不匹配的死路）；already_bound 409 分支零写入（换绑前后行内容逐字段一致）。
+func TestBindServiceMigratesExportAssets(t *testing.T) {
+	c, _, done := newTestCore(t)
+	defer done()
+	// 导出三表（newTestCore 的 AutoMigrate 清单不含，对齐 newExportFixture 的补迁移先例）
+	if err := c.DB.AutoMigrate(&store.ExportOrderEntity{}, &store.ExportPackageMarkEntity{},
+		&store.WorkspaceRuntimeDefaultEntity{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeBackfill(c); err != nil {
+		t.Fatal(err)
+	}
+	var def store.Workspace
+	if err := c.DB.Where("slug = ?", "default").First(&def).Error; err != nil {
+		t.Fatal(err)
+	}
+	ws := seedWs(t, c, "ws-mig0006", "迁移空间")
+	other := seedWs(t, c, "ws-oth0007", "其他空间")
+
+	// default 空间存量服务 + 直接落库一条 draft 与一条 frozen 标记 + 一条既有导出单
+	//（workspace_id 指向 default，即修复前 BindService 只迁服务后的残留形态）
+	svc := &store.ServiceEntity{K8sName: "oaf-legacy-mig", DisplayName: "legacy-mig", WorkspaceID: def.ID}
+	if err := c.DB.Create(svc).Error; err != nil {
+		t.Fatal(err)
+	}
+	draft := &store.ExportPackageMarkEntity{ServiceID: svc.ID, WorkspaceID: def.ID,
+		Marker: "1.0.0-e1", PackageVersion: "1.0.0", Status: "draft", FilesJSON: "[]"}
+	frozen := &store.ExportPackageMarkEntity{ServiceID: svc.ID, WorkspaceID: def.ID,
+		Marker: "1.0.0-e2", PackageVersion: "1.0.0", Status: "frozen", FilesJSON: "[]"}
+	for _, m := range []*store.ExportPackageMarkEntity{draft, frozen} {
+		if err := c.DB.Create(m).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	order := &store.ExportOrderEntity{ServiceID: svc.ID, WorkspaceID: def.ID,
+		Status: store.ExportStatusBuilt, ManifestJSON: "{}"}
+	if err := c.DB.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 纳管 default → 目标空间：marks/orders 随服务整体迁移
+	if _, err := c.BindService(42, ws.ID, svc.ID); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	var marks []store.ExportPackageMarkEntity
+	if err := c.DB.Where("service_id = ?", svc.ID).Find(&marks).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(marks) != 2 {
+		t.Fatalf("marks len = %d, want 2", len(marks))
+	}
+	for _, m := range marks {
+		if m.WorkspaceID != ws.ID {
+			t.Fatalf("mark %s workspace_id = %d, want %d (must migrate with service)", m.Marker, m.WorkspaceID, ws.ID)
+		}
+	}
+	var gotOrder store.ExportOrderEntity
+	if err := c.DB.First(&gotOrder, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotOrder.WorkspaceID != ws.ID {
+		t.Fatalf("order workspace_id = %d, want %d", gotOrder.WorkspaceID, ws.ID)
+	}
+
+	// already_bound 409 分支零写入：换绑前后 marks/orders 行内容一致
+	snapshot := func() string {
+		var ms []store.ExportPackageMarkEntity
+		var os []store.ExportOrderEntity
+		if err := c.DB.Where("service_id = ?", svc.ID).Order("id").Find(&ms).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := c.DB.Where("service_id = ?", svc.ID).Order("id").Find(&os).Error; err != nil {
+			t.Fatal(err)
+		}
+		b1, _ := json.Marshal(ms)
+		b2, _ := json.Marshal(os)
+		return string(b1) + "|" + string(b2)
+	}
+	before := snapshot()
+	if _, err := c.BindService(42, other.ID, svc.ID); err == nil {
+		t.Fatal("bind bound service should 409")
+	}
+	if after := snapshot(); after != before {
+		t.Fatalf("409 branch must not write anything: before=%s after=%s", before, after)
+	}
+}
+
 func TestMemberRoleMatrix(t *testing.T) {
 	c, _, done := newTestCore(t)
 	defer done()

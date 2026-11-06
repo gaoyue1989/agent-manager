@@ -64,5 +64,5 @@
 
 ## e2e 用例
 
-按功能 e2e 套件：[../../e2e/console-split/](../../e2e/console-split/)（lib.sh + m0-auth～m8-workspace-assets + run-all.sh，
-180+ 断言，kind 集群实跑九模块全 PASS；运行方式见 [run-all.sh](../../e2e/console-split/run-all.sh) 头注释）。
+按功能 e2e 套件：[../../e2e/console-split/](../../e2e/console-split/)（lib.sh + m0-auth～m11-workspace-config 十二个模块脚本 + run-all.sh 聚合，
+m9 技能中心/m10 沙箱 2026-10-20 增、m11 空间配置与跨集群导出 2026-11-04 增，实跑断言数以 run-all.sh 全跑输出为准；运行方式见 [run-all.sh](../../e2e/console-split/run-all.sh) 头注释）。

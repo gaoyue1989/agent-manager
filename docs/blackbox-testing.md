@@ -223,10 +223,10 @@ curl -s -X POST $BASE/console/workspaces/<ws-id>/api-keys -H "Authorization: Bea
 
 ## 7. 现成 e2e 套件（回归优先跑这些）
 
-套件位置 `e2e/console-split/`（按模块 m0–m10 一个脚本 + `run-all.sh` 聚合，静态清点 398 处 `assert_*` 断言调用，实跑总数以 `run-all.sh` 全跑输出为准；2026-10-17 初版九模块全 PASS 实跑记录见 `docs/implementation/README.md`，2026-10-20 起扩至 11 模块）：
+套件位置 `e2e/console-split/`（按模块 m0–m11 一个脚本 + `run-all.sh` 聚合，静态清点 460 处 `assert_*` 断言调用，实跑总数以 `run-all.sh` 全跑输出为准；2026-10-17 初版九模块全 PASS 实跑记录见 `docs/implementation/README.md`，2026-10-20 起扩至 11 模块、2026-11-04 起扩至 12 模块（m11 空间配置/跨集群导出））：
 
 ```bash
-# 全量（顺序 m0→m10）
+# 全量（顺序 m0→m11）
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911 ./e2e/console-split/run-all.sh
 
 # 只跑指定模块（如登录与治理）
@@ -236,7 +236,7 @@ BASE=http://localhost:30080/api/v1 ./e2e/console-split/run-all.sh m0 m1
 BASE=http://localhost:30080/api/v1 ./e2e/console-split/run-all.sh m0
 ```
 
-模块与被测面对照：m0 认证与路由分层、m1 运维治理、m2 console 基础（概览/列表/切换器）、m3 创建/编辑主链路（含包契约与 SSE 热生效）、m4 详情六 Tab 与生命周期、m5 模型连接、m6 MCP 连接器、m7 集成、m8 API Key 与成员、m9 技能中心（技能资产/市场/版本管理）、m10 沙箱配置。原 M9 enforce 三态需独立网关环境改 `ROUTER_AUTH_MODE`、不在本套件（见 10-gateway-auth.md）。
+模块与被测面对照：m0 认证与路由分层、m1 运维治理、m2 console 基础（概览/列表/切换器）、m3 创建/编辑主链路（含包契约与 SSE 热生效）、m4 详情六 Tab 与生命周期、m5 模型连接、m6 MCP 连接器、m7 集成、m8 API Key 与成员、m9 技能中心（技能资产/市场/版本管理）、m10 沙箱配置、m11 空间配置与跨集群导出（runtime-defaults 权限矩阵/掩码/导出单创建与失败闭环/交付物下载头）。原 M9 enforce 三态需独立网关环境改 `ROUTER_AUTH_MODE`、不在本套件（见 10-gateway-auth.md）。
 
 依赖：`curl`、`jq`、`python3`；m3/m4 涉及真实对话的断言需 LLM 可用（可选传 `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`，缺省自动从 release-agent env 读取）。
 

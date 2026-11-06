@@ -345,6 +345,36 @@ class ConfirmControllerTest {
     }
 
     @Test
+    void confirmShouldCaptureForwardHeadersIntoResumeContext() throws Exception {
+        // mcp-chat-header-forward-design §6.5：同步 confirm 与 confirm-stream 同语义——
+        // 捕获的透传头经 resumeWithConfirm 4 参重载进恢复 RuntimeContext（恢复轮的
+        // MCP 调用同样按声明注入），误调 3 参旧重载或漏捕获在此暴露
+        stubPendingStoreRow();
+        var msg = mock(Msg.class);
+        when(msg.getTextContent()).thenReturn("weather done");
+        when(agent.call(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(Mono.just(msg));
+        when(mcpToolRegistrar.getForwardHeaderNames()).thenReturn(java.util.Set.of("authorization"));
+
+        var requestHeaders = new org.springframework.http.HttpHeaders();
+        requestHeaders.add("Authorization", "Bearer tok-123");
+
+        mvc.perform(post("/threads/t1/confirm")
+                .header("Authorization", "Bearer tok-123")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(MAPPER.writeValueAsString(Map.of("results", List.of(
+                    Map.of("tool_call_id", "call-1", "confirmed", true))))))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.response").value("weather done"));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.agent.RuntimeContext.class);
+        verify(agent).call(anyList(), captor.capture());
+        var carried = captor.getValue().get(io.agentmanager.framework.mcp.ChatRequestHeaders.class);
+        assertNotNull(carried, "透传头应随恢复上下文进 RuntimeContext");
+        assertEquals(Map.of("authorization", "Bearer tok-123"), carried.headers());
+    }
+
+    @Test
     void confirmStreamShouldReleaseLeaseAndCloseOnPermissionAsk() {
         // HITL ask 段收尾接线（ConfirmController 侧，与 ChatStreamController 相反的契约）：
         // permission_ask → 确认上下文落库 + 立即 lease.release() 让出执行段 + closeSession

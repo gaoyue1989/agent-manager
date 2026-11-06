@@ -110,7 +110,11 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 		return nil, err // 无标记不可构建（设计 §3 要点）；draft 标记同拒
 	}
 	if mark.WorkspaceID != wsID {
-		return nil, ErrNotFound
+		// 防御纵深（issue #235）：BindService 联动迁移 + Backfill 对齐落地后该分支理论不可达
+		// （marks 恒随服务同空间 + loadServiceForExport 已保证服务属于请求空间）；万一如量出现
+		// （如未重启跑 Backfill 的存量库），运维可直接看到「标记归属旧空间」而非裸 404 not found
+		return nil, fmt.Errorf("%w: mark %q belongs to workspace %d but service is in workspace %d",
+			ErrConflict, req.Marker, mark.WorkspaceID, wsID)
 	}
 	l1, merged, _, err := c.resolveExportLayers(wsID, req)
 	if err != nil {
@@ -184,11 +188,37 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 	}
 	order.ValuesYAML = values
 	order.ManifestJSON = manifest
-	if err := c.DB.Save(order).Error; err != nil {
+	if err := c.saveFirstRenderArtifacts(order, values, manifest); err != nil {
 		return nil, err
 	}
 	c.asyncBuildExportOrder(order.ID)
 	return order, nil
+}
+
+// saveFirstRenderArtifacts 首渲产物落库（快照可注入，issue #233 评审）：创建窗口是
+// manifest 的第四个写者——DB.Create（version=0）到本落库之间，并发下载可按
+// (id, building, version=0) CAS 追加下载审计条目，原全行 Save（gorm Save 全字段落库）
+// 会整段覆盖窗口内并入的条目并把 manifest_version 复位 0——与其余三写者（人工推进/
+// 下载审计/构建回写）同款乐观锁 CAS，仅更新首渲在 Create 之后新增的三列（其余字段
+// Create 已落库）。CAS 不命中（并发写者已持有该行）放弃首渲并留痕：现行 manifest 为
+// 并发方合法产物（含其审计条目），构建回写仍会补全完整产物，下载审计不受损。
+func (c *Core) saveFirstRenderArtifacts(order *store.ExportOrderEntity, values, manifest string) error {
+	res := c.DB.Model(&store.ExportOrderEntity{}).
+		Where("id = ? AND status = ? AND manifest_version = ?", order.ID, store.ExportStatusBuilding, order.ManifestVersion).
+		Updates(map[string]interface{}{
+			"values_yaml":      values,
+			"manifest_json":    manifest,
+			"manifest_version": order.ManifestVersion + 1,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		log.Printf("[export_create] order=%d first render discarded (concurrent manifest write won the create window)", order.ID)
+		return nil
+	}
+	order.ManifestVersion = order.ManifestVersion + 1
+	return nil
 }
 
 // asyncBuildExportOrder 后台推进：物化 mark 快照 → Images.Build 直推 → 回填 digest 并重渲染 → built。
@@ -332,29 +362,52 @@ func (c *Core) rebuildExportArtifacts(order *store.ExportOrderEntity, req *Expor
 	if err != nil {
 		return err
 	}
-	// 状态守卫：构建期间被人工推进/取消（building→failed/cancelled，exportAdvanceAllow）
-	// 则丢弃构建结果，不把终态拉回 built（条件更新，RowsAffected=0 即静默放弃）
-	order.OafImageDigest = digest
-	order.ValuesYAML = values
-	order.ManifestJSON = manifest
-	order.Status = store.ExportStatusBuilt
-	order.Error = ""
-	res := c.DB.Model(&store.ExportOrderEntity{}).
-		Where("id = ? AND status = ?", order.ID, store.ExportStatusBuilding).
-		Updates(map[string]interface{}{
-			"oaf_image_digest": order.OafImageDigest,
-			"values_yaml":      order.ValuesYAML,
-			"manifest_json":    order.ManifestJSON,
-			"status":           order.Status,
-			"error":            "",
-		})
-	if res.Error != nil {
-		return res.Error
+	// 状态守卫 + 下载审计保留（issue #233）：构建期间被人工推进/取消（building→failed/
+	// cancelled，exportAdvanceAllow）则丢弃构建结果，不把终态拉回 built；building 期下载
+	// 审计条目在 DB 现行 manifest 中，整段覆盖重渲产物会丢条目——每轮重读现行行，把
+	// audit.downloadedBy 并入重渲产物后按 (id + status + manifest_version) 乐观锁 CAS 落盘。
+	// compare 基准用每轮现行值而非构建开始快照（快照 version 在 10min 构建窗口内必已漂移，
+	// 恒不命中恒重试是错误设计）；CAS 不命中重读重试（≤2 次），耗尽保持现语义：留痕日志
+	// 放弃、不 failExportOrder——status 已离开 building 即构建作废（人工推进/取消优先）
+	for attempt := 0; ; attempt++ {
+		var cur store.ExportOrderEntity
+		if err := c.DB.First(&cur, order.ID).Error; err != nil {
+			return err
+		}
+		if cur.Status != store.ExportStatusBuilding {
+			log.Printf("[export_build] order=%d build result discarded (status left building during build)", order.ID)
+			return nil
+		}
+		// building 期下载审计条目并入（issue #233）：现行 manifest 解析失败则跳过并入——
+		// 下载写入路径 parse 先行（manifestAppendDownload 失败不落库），损坏行不可能含
+		// 经正常链路追加的审计条目，直接落重渲产物与历史行为一致
+		merged := manifest
+		if m, perr := parseExportManifest(cur.ManifestJSON); perr == nil && len(m.Audit.DownloadedBy) > 0 {
+			if merged, perr = manifestAppendEvents(manifest, m.Audit.DownloadedBy); perr != nil {
+				return perr
+			}
+		}
+		res := c.DB.Model(&store.ExportOrderEntity{}).
+			Where("id = ? AND status = ? AND manifest_version = ?", order.ID, store.ExportStatusBuilding, cur.ManifestVersion).
+			Updates(map[string]interface{}{
+				"oaf_image_digest": digest,
+				"values_yaml":      values,
+				"manifest_json":    merged,
+				"status":           store.ExportStatusBuilt,
+				"error":            "",
+				"manifest_version": cur.ManifestVersion + 1,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected > 0 {
+			return nil
+		}
+		if attempt >= 2 {
+			log.Printf("[export_build] order=%d build result discarded (concurrent manifest writes, retries exhausted)", order.ID)
+			return nil
+		}
 	}
-	if res.RowsAffected == 0 {
-		log.Printf("[export_build] order=%d build result discarded (status left building during build)", order.ID)
-	}
-	return nil
 }
 
 // failExportOrder 构建失败：入 failed 带原因（Error 截断到列宽 512）。
@@ -460,52 +513,81 @@ func (c *Core) ListServiceExportOrders(wsID, svcID uint) ([]ExportOrderListItem,
 
 // AdvanceExportOrder 人工推进（owner/admin，推进属运维动作）：合法迁移见 exportAdvanceAllow；
 // 记录操作人与 ITSM 单号（写 ItsmTicketID / ManifestJSON.itsm）。
-// 条件更新（读到的 status 未变化才落）：防与异步构建回写/并发推进的丢失更新竞态——
-// 全行 Save 会把 stale 快照（digest 为空的读入值）整体覆盖回去（rebuildExportArtifacts
-// 同款守卫，评审修复）；状态已变化时拒绝，客户端刷新后重试。
+// manifest 落库为 (id + status + manifest_version) 乐观锁 CAS（issue #233）：advance 与
+// 下载审计、异步构建回写三个并发写者共用同一 manifest_json 列，stale 快照整段覆盖会丢
+// 对方刚写入的审计/itsm 条目——CAS 不命中即重读重试（≤2 次），耗尽拒绝，客户端刷新后重试。
 func (c *Core) AdvanceExportOrder(uid, orderID uint, username string, in *ExportAdvanceInput) (*store.ExportOrderEntity, error) {
 	order, role, err := c.resolveExportOrderAccess(uid, orderID)
 	if err != nil {
 		return nil, err
 	}
+	return c.advanceExportOrderCAS(order, role, username, in)
+}
+
+// advanceExportOrderCAS 人工推进内部写路径（快照可注入，issue #233 竞态回归用）：
+// 每轮以当前快照的 (status, manifest_version) 做 CAS——manifest_version 与 status 任一
+// 漂移（下载审计追加 / 并发推进 / 构建回写）即拒绝写入；不命中重读最新行（manifest 与
+// version 随之刷新）后再验迁移合法性并重试。重读后的状态可能已合法变化（如 stale 快照
+// built、目标 failed、库内已被并发推进至 approving——approving→failed 属 exportAdvanceAllow
+// 合法迁移，继续落库，效果等价客户端刷新重试）；非法迁移（如库内已 approving 而目标
+// 仍 approving）维持 ErrBadState 拒绝、DB 状态不被改写。
+func (c *Core) advanceExportOrderCAS(order *store.ExportOrderEntity, role, username string, in *ExportAdvanceInput) (*store.ExportOrderEntity, error) {
 	if err := RequireWsRole(role); err != nil {
 		return nil, err
 	}
-	if !exportAdvanceAllow[order.Status][in.Status] {
-		return nil, fmt.Errorf("%w: export status %s -> %s", ErrBadState, order.Status, in.Status)
+	for attempt := 0; ; attempt++ {
+		if !exportAdvanceAllow[order.Status][in.Status] {
+			return nil, fmt.Errorf("%w: export status %s -> %s", ErrBadState, order.Status, in.Status)
+		}
+		manifest, err := manifestWithItsm(order.ManifestJSON, orStr(in.ItsmTicketID, order.ItsmTicketID), username, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		nextStatus, nextTicket := in.Status, orStr(in.ItsmTicketID, order.ItsmTicketID)
+		res := c.DB.Model(&store.ExportOrderEntity{}).
+			Where("id = ? AND status = ? AND manifest_version = ?", order.ID, order.Status, order.ManifestVersion).
+			Updates(map[string]interface{}{
+				"status":           nextStatus,
+				"itsm_ticket_id":   nextTicket,
+				"manifest_json":    manifest,
+				"manifest_version": order.ManifestVersion + 1,
+			})
+		if res.Error != nil {
+			return nil, res.Error
+		}
+		if res.RowsAffected > 0 {
+			order.Status, order.ItsmTicketID, order.ManifestJSON = nextStatus, nextTicket, manifest
+			order.ManifestVersion = order.ManifestVersion + 1
+			return order, nil
+		}
+		if attempt >= 2 {
+			return nil, fmt.Errorf("%w: export order state changed concurrently, refresh and retry", ErrBadState)
+		}
+		// 丢失更新：重读最新行（含并发方写入的 manifest 与最新 manifest_version）再 CAS
+		if err := c.DB.First(&order, order.ID).Error; err != nil {
+			return nil, ErrNotFound
+		}
 	}
-	now := time.Now()
-	manifest, err := manifestWithItsm(order.ManifestJSON, orStr(in.ItsmTicketID, order.ItsmTicketID), username, now)
-	if err != nil {
-		return nil, err
-	}
-	nextStatus, nextTicket := in.Status, orStr(in.ItsmTicketID, order.ItsmTicketID)
-	res := c.DB.Model(&store.ExportOrderEntity{}).
-		Where("id = ? AND status = ?", order.ID, order.Status).
-		Updates(map[string]interface{}{
-			"status":         nextStatus,
-			"itsm_ticket_id": nextTicket,
-			"manifest_json":  manifest,
-		})
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return nil, fmt.Errorf("%w: export order state changed concurrently, refresh and retry", ErrBadState)
-	}
-	order.Status, order.ItsmTicketID, order.ManifestJSON = nextStatus, nextTicket, manifest
-	return order, nil
 }
 
 // ExportOrderDownload 取交付物文本并落下载审计（§5.8）：结构化访问日志 +
 // manifest audit.downloadedBy 追加。values 不经任何 JSON 响应回显，仅本端点文件交付。
-// 审计为 manifest 读-改-写，仅条件更新 manifest_json 单列（不整行 Save——防 stale 快照
-// 覆盖并发构建回写的 digest/重渲染产物）；丢失更新时重读重试，耗尽则 400。
+// 审计为 manifest 读-改-写，仅条件更新 manifest_json/manifest_version 两列（不整行
+// Save——防 stale 快照覆盖并发构建回写的 digest/重渲染产物）；丢失更新时重读重试，耗尽则 400。
 func (c *Core) ExportOrderDownload(uid, orderID uint, username, file string) (*store.ExportOrderEntity, error) {
 	order, _, err := c.resolveExportOrderAccess(uid, orderID)
 	if err != nil {
 		return nil, err
 	}
+	return c.downloadExportArtifactCAS(order, username, file)
+}
+
+// downloadExportArtifactCAS 下载审计内部写路径（快照可注入，issue #233 竞态回归用）：
+// (id + status + manifest_version) 乐观锁 CAS——并发下载×下载 / 下载×人工推进同列
+// 读-改-写，仅按 (id,status) 条件更新会整段覆盖对方刚追加的审计条目；版本不匹配即拒绝
+// 写入，重读最新行（含并发方写入的 manifest 与最新 manifest_version）再追加一次。
+// UpdateColumns 不触发 autoUpdateTime，保持下载不碰 updated_at 的现行为。
+func (c *Core) downloadExportArtifactCAS(order *store.ExportOrderEntity, username, file string) (*store.ExportOrderEntity, error) {
 	switch file {
 	case "values.yaml", "manifest.json":
 	default:
@@ -517,21 +599,25 @@ func (c *Core) ExportOrderDownload(uid, orderID uint, username, file string) (*s
 			return nil, err
 		}
 		res := c.DB.Model(&store.ExportOrderEntity{}).
-			Where("id = ? AND status = ?", order.ID, order.Status).
-			UpdateColumn("manifest_json", manifest)
+			Where("id = ? AND status = ? AND manifest_version = ?", order.ID, order.Status, order.ManifestVersion).
+			UpdateColumns(map[string]interface{}{
+				"manifest_json":    manifest,
+				"manifest_version": order.ManifestVersion + 1,
+			})
 		if res.Error != nil {
 			return nil, res.Error
 		}
 		if res.RowsAffected > 0 {
 			order.ManifestJSON = manifest
+			order.ManifestVersion = order.ManifestVersion + 1
 			log.Printf("[export_download] order=%d user=%s file=%s ts=%s", order.ID, username, file, time.Now().UTC().Format(time.RFC3339))
 			return order, nil
 		}
 		if attempt >= 2 {
 			return nil, fmt.Errorf("%w: export order state changed concurrently, retry", ErrBadState)
 		}
-		// 丢失更新：重读最新行（含并发方写入的 manifest）再追加一次
-		if err := c.DB.First(&order, orderID).Error; err != nil {
+		// 丢失更新：重读最新行（含并发方写入的 manifest 与最新 manifest_version）再追加一次
+		if err := c.DB.First(&order, order.ID).Error; err != nil {
 			return nil, ErrNotFound
 		}
 	}
