@@ -1,8 +1,9 @@
 "use client";
 // HITL 确认卡片渲染：纯逻辑在 lib/confirm-card.ts（createConfirmCard/maskInput 等，node:test 覆盖）
 // 视觉：琥珀警示卡 + 状态徽标；批准/拒绝为胶囊选择；语义结构（fieldset/radio/data-testid）保持不变
+// D16 硬截止：card.expiresAt 存在时展示倒计时（剩余 mm:ss），到点由 ChatPane 的 expireDueConfirmCards 置 expired
 import { useState } from "react";
-import { hasEnv, maskInput, parseInput, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+import { confirmRemainingSeconds, hasEnv, maskInput, parseInput, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
 import { IconAlert, IconCheck, IconLoader, IconShieldCheck, IconX } from "./icons";
 
 export type { ConfirmCard, ConfirmResult } from "@/lib/confirm-card";
@@ -66,14 +67,20 @@ function StatusBadge({ status }: { status: ConfirmCard["status"] }) {
   );
 }
 
-export default function PermissionCard({ card, disabled, onSubmit }: {
+export default function PermissionCard({ card, disabled, onSubmit, now }: {
   card: ConfirmCard;
   disabled: boolean;
   onSubmit: (results: ConfirmResult[]) => void;
+  /** 当前时刻（ms）：倒计时展示用；缺省取 Date.now()（无 expiresAt 时无影响） */
+  now?: number;
 }) {
   const [choices, setChoices] = useState<Record<string, boolean>>({});
   const locked = disabled || card.status !== "pending";
   const complete = card.toolCalls.length > 0 && card.toolCalls.every((tool) => typeof choices[tool.tool_call_id] === "boolean");
+  const remaining = card.status === "pending" ? confirmRemainingSeconds(card.expiresAt, now) : null;
+  const countdown = remaining != null
+    ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`
+    : null;
   return (
     <div data-testid="confirm-card" data-status={card.status}
       className="space-y-3 rounded-2xl border border-amber-200/80 bg-gradient-to-b from-amber-50/80 to-white p-4 text-sm shadow-sm">
@@ -83,7 +90,14 @@ export default function PermissionCard({ card, disabled, onSubmit }: {
         </p>
         <StatusBadge status={card.status} />
       </div>
-      <p className="text-xs leading-relaxed text-gray-500">每个工具须明确选择批准或拒绝，再一次性提交全部结果。未选择不会默认为批准。</p>
+      <p className="text-xs leading-relaxed text-gray-500">
+        每个工具须明确选择批准或拒绝，再一次性提交全部结果。未选择不会默认为批准。
+        {countdown != null && (
+          <span className={`ml-1 font-medium ${remaining != null && remaining <= 60 ? "text-red-600" : "text-amber-700"}`}>
+            剩余 {countdown}，超时将自动作废并按拒绝处理。
+          </span>
+        )}
+      </p>
       {card.toolCalls.map((tool, index) => {
         const selected = card.results?.find((result) => result.tool_call_id === tool.tool_call_id)?.confirmed ?? choices[tool.tool_call_id];
         return (

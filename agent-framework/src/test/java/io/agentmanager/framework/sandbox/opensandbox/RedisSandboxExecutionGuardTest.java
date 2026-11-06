@@ -10,6 +10,7 @@ import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
 import io.agentscope.harness.agent.sandbox.SandboxLease;
 import io.agentmanager.framework.config.AgentRedisProperties;
 import io.agentmanager.framework.redis.RedisConnectionFacade;
+import io.agentmanager.framework.service.SessionUserStore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -135,5 +136,66 @@ class RedisSandboxExecutionGuardTest {
         assertNull(guard.resolveUserLockValue(null));
         assertEquals("", guard.resolveUserLockValue(""));
         org.mockito.Mockito.verifyNoInteractions(store);
+    }
+
+    // ===== 池身份注入钩子（sandbox-pool-design P1/P2 借出身份捕获，全 fail-soft）=====
+
+    /** 会话粒度守卫（per-session agent 隔离默认开启的 chat 链路形态） */
+    private static RedisSandboxExecutionGuard sessionGranularGuard(
+            io.agentmanager.framework.service.SessionUserStore store) {
+        return new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store, true);
+    }
+
+    @Test
+    void tryEnterShouldInjectPendingSessionIdAndUserKeyWhenPoolAttached() throws InterruptedException {
+        // chat 链路（sessionGranular=true）：key.value=前端 sid（=turn_lease 键）→
+        // pendingSessionId=原值；pendingUserKey=反查真实用户（此处 sessionGranular 跳过反查=原值）
+        var store = org.mockito.Mockito.mock(SessionUserStore.class);
+        var spec = org.mockito.Mockito.mock(OpenSandboxFilesystemSpec.class);
+        var guard = sessionGranularGuard(store);
+        guard.setPoolIdentitySpec(spec);
+        var ctx = RuntimeContext.builder().userId("peer-sid-3").sessionId("s3").build();
+        var key = SandboxIsolationKey.resolve(IsolationScope.USER, ctx, "test-agent").orElseThrow();
+        SandboxLease lease = guard.tryEnter(key);
+        assertNotNull(lease);
+        org.mockito.Mockito.verify(spec).setPendingSessionId("peer-sid-3");
+        org.mockito.Mockito.verify(spec).setPendingUserKey("peer-sid-3");
+    }
+
+    @Test
+    void tryEnterShouldResolveRealUserForSharedGranularityGuard() throws InterruptedException {
+        // 共享单例 agent（sessionGranular=false）：pendingUserKey=反查真实用户
+        var store = org.mockito.Mockito.mock(SessionUserStore.class);
+        org.mockito.Mockito.when(store.findUserIdBySession("peer-sid-4")).thenReturn("carol");
+        var spec = org.mockito.Mockito.mock(OpenSandboxFilesystemSpec.class);
+        var guard = new RedisSandboxExecutionGuard(unreachableFacade(), 60_000L, store, false);
+        guard.setPoolIdentitySpec(spec);
+        var ctx = RuntimeContext.builder().userId("peer-sid-4").sessionId("s4").build();
+        var key = SandboxIsolationKey.resolve(IsolationScope.USER, ctx, "test-agent").orElseThrow();
+        guard.tryEnter(key);
+        org.mockito.Mockito.verify(spec).setPendingUserKey("carol");
+    }
+
+    @Test
+    void tryEnterShouldSkipIdentityInjectWhenPoolNotAttached() throws InterruptedException {
+        // 未注入 spec（池关闭/存量构造）→ 零行为变化：不写 ThreadLocal、不抛
+        var store = org.mockito.Mockito.mock(SessionUserStore.class);
+        var guard = sessionGranularGuard(store);
+        var ctx = RuntimeContext.builder().userId("peer-sid-5").sessionId("s5").build();
+        var key = SandboxIsolationKey.resolve(IsolationScope.USER, ctx, "test-agent").orElseThrow();
+        assertNotNull(guard.tryEnter(key)); // 正常走守卫（fail-open lease）
+    }
+
+    @Test
+    void tryEnterShouldSwallowIdentityInjectFailure() throws InterruptedException {
+        // 全 fail-soft：注入异常只告警，不影响守卫原语义（lease 照常返回）
+        var spec = org.mockito.Mockito.mock(OpenSandboxFilesystemSpec.class);
+        org.mockito.Mockito.doThrow(new IllegalStateException("threadlocal boom"))
+            .when(spec).setPendingSessionId(org.mockito.ArgumentMatchers.anyString());
+        var guard = sessionGranularGuard(org.mockito.Mockito.mock(SessionUserStore.class));
+        guard.setPoolIdentitySpec(spec);
+        var ctx = RuntimeContext.builder().userId("peer-sid-6").sessionId("s6").build();
+        var key = SandboxIsolationKey.resolve(IsolationScope.USER, ctx, "test-agent").orElseThrow();
+        assertNotNull(guard.tryEnter(key));
     }
 }

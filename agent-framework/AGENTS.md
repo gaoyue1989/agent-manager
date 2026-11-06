@@ -379,11 +379,24 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_ENTRYPOINT` | `/opt/code-interpreter/code-interpreter.sh` | | 沙箱启动命令（逗号分隔，如 `python,main.py`；默认即镜像启动脚本） |
 | `SANDBOX_EXECD_GRACE_SHUTDOWN` | `100ms` | | execd 命令 SSE 尾窗保持时间，注入容器 `EXECD_API_GRACE_SHUTDOWN`（默认 1s 拖慢每条命令 ~1s，配 100ms 提速 ~10x） |
 | `SANDBOX_SESSION_AGENT_ISOLATION` | `true` | | 同用户两会话沙箱代理隔离（与守卫锁粒度 `sessionGranularLocks` 同源联动，2026-10-21 默认开启）；关联 `SANDBOX_SESSION_AGENT_CACHE_MAX`(500)/`SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES`(30) |
+| `SANDBOX_POOL_ENABLED` | `false` | | **沙箱池化总开关**（issue #241，[sandbox-pool-design.md](docs/sandbox-pool-design.md)）：true 时 OpenSandboxClient.create 走池借出（Redis 单 ledger 共享池，集群级容量上限 + session 级借出/归还 + 预热免冷启动 + **D17 用户粘滞/配额**：归还转 owner=userKey 粘滞空闲、同用户新会话配额满 LRU 继承粘滞容器、`held ≥ USER_MAX` 无粘滞即报 `user_quota_exhausted`）；false（默认）= 现状（容器按会话建、滞留至 60min 被 Server GC），逐分支一致。**池开启要求 SANDBOX_GUARD_ENABLED=true（默认）**——守卫钩子是借出身份（sid/userKey）的捕获点，禁守卫+开池组合退化为 middleware 回填（首借条目身份空窗：配额不计数、不转粘滞走 kill+rebuild、D14 退化为纯租约判定） |
+| `SANDBOX_POOL_MIN_IDLE` | `5`（D18 调整，原 2） | | 初始/保底水位（**集群级**，多副本启动经 Lua cap 合力补齐不超额；D18 回缩下限；D19 调度保障底线 = MIN_IDLE×request；`{prefix}sbx:pool:ledger` HASH 账本，账本/租约全在 Redis——Pod 本地仅 creating 句柄） |
+| `SANDBOX_POOL_MAX_SIZE` | `20`（D18 调整，原 8） | | **集群级**总上限 `|idle|+|busy|+|creating| ≤ MAX_SIZE`（与 OpenSandbox Server 容量对齐，与副本数解耦——扩副本不动池容量）；D19 峰值竞争 = MAX_SIZE×limit；池满借出等待超时抛 SandboxException「沙箱繁忙」 |
+| `SANDBOX_POOL_GROW_STEP` | `5` | | 弹性水位扩/缩步长（D18）：利用率 ≥80% 抬升（补建通用 idle 至 T）、<50%×3 周期+冷却（2×扫描间隔，双向受约束）回缩 LRU kill 超额**通用** idle（粘滞不参与）；T 只管预备、借出永不因 T 等待 |
+| `SANDBOX_POOL_USER_MAX_CONTAINERS` | `5` | | 单用户容器配额（D17，**含粘滞空闲与使用中**，集群级 ledger 计数）：配额满 → LRU 继承该用户粘滞空闲（单 key Lua 原子换绑，继承=新会话可见上一会话工作区残留，显式规则）；无粘滞空闲 → `user_quota_exhausted` 可感知报错；建议 `MAX_SIZE ≥ 2×USER_MAX` 并按并发用户数规划 |
+| `SANDBOX_POOL_STICKY_TTL_SECONDS` | `600` | | 粘滞空闲保留窗口（D17）：归还容器不 kill，owner=userKey 转粘滞空闲等待同用户继承/原会话复活，到期 kill 释放配额与容量；与 IDLE_RETURN 同值默认（"10 分钟无动静 = 会话结束"语义统一） |
+| `SANDBOX_POOL_MAX_WAIT_SECONDS` | `120` | | 借出等待上限（池空轮询 1s 间隔）；须 < 守卫租约 900s 与 a2a-job send-timeout 300s；0=无限等（不推荐） |
+| `SANDBOX_POOL_IDLE_RETURN_SECONDS` | `600` | | busy 容器空闲租约 TTL = session 失活判定阈值（续约五点：borrow/resume/doExec/stop/confirm touch）。**D15 硬不变量：≥ AGENT_CONFIRM_DEADLINE_MINUTES**，违反拒绝启动；调小必须同步下调 deadline |
+| `SANDBOX_POOL_SCAN_INTERVAL_SECONDS` | `60` | | 回收（租约过期 + D14 turn_lease 双保险才回收；owner 已知转粘滞不 kill）/creating 剪枝（>5min）/idle 保活/粘滞到期/水位扫描周期；任一副本可扫、免选主（Lua HDEL 先到先得）；优雅停机不杀任何容器（D12） |
+| `SANDBOX_POOL_REBUILD_CONCURRENCY` | `2` | | 补位创建并发上限（集群级）；`GET /debug/sandbox-pool` 透出通用/粘滞 idle、busy（含 userKey 归属）、creating、水位 T 明细 + 流转事件环形缓冲；调试页 Sandbox 模块渲染该端点——池化配置 9 项 + D18 水位条（通用 idle+creating / target，80% 抬升线，≥80% 黄/池满红）+ 集群级明细与 waiters（端点不可用 fail-soft 只提示） |
+| `SANDBOX_CPU_REQUEST` | `100m` | | 沙箱 Pod CPU request（D19 资源双档，K8s quantity 字符串）：透传 SDK `resourceRequests`，**独立于池开关生效**（缺省时上游 Server 把 resourceLimits 同时作 limits/requests=全额保障的根因）；idle 容器只占 request 水位、借出工作时 burst 到 limit（limit 沿用 `SANDBOX_CPU_COUNT`/`SANDBOX_MEMORY_MB`） |
+| `SANDBOX_MEMORY_REQUEST` | `128Mi` | | 沙箱 Pod 内存 request（D19 资源双档，同上） |
 | `OPENSANDBOX_SERVER_URL` | `192.168.31.155:8090` | | OpenSandbox Server 地址 |
 | `OPENSANDBOX_API_KEY` | — | | OpenSandbox API 密钥 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
 | `FILE_EXTERNAL_URL_PREFIXES` | 空(禁用) | | present_url 外部交付物与 /files/{id} 代理下载共用的 URL 前缀白名单（逗号分隔）；发布助手集群内必配 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名） |
-| `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL / turn 租约 TTL / 审计与会话保留期 |
+| `AGENT_CONFIRM_DEADLINE_MINUTES` | `10` | | **HITL 确认硬截止**（sandbox-pool-design D16，独立于池化生效）：ASKING 挂起超此时长后——迟到确认 `410 confirm_expired` + 自动按拒绝收尾（复用 reject→DENY，turn 拒绝终态、会话解锁）；迟到普通消息懒收尾后放行新 turn；永不交互无害挂起（零后台任务）。**确认卡语义变化：超时=作废**（现状=无限期可确认），前端倒计时/过期态随 permission_ask 帧 `expires_at` 与 history pendingConfirm 透出；≤0 关闭（现状行为） |
+| `AGENT_CLEANUP_*` | 见 api.md | | confirm TTL（**默认 30→10，D16 决议**：兜底行寿命恰好覆盖确认有效窗口，state 仍是无 TTL 权威源、恢复能力不变）/ turn 租约 TTL / 审计与会话保留期 |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | | history 工具结果文本（tool_result.output）截断上限，≤0 不截断（见 docs/history-agentstate-design.md） |
 | `AGENT_HISTORY_ARCHIVE_ENABLED` | `true` | | 会话消息轨归档开关：AgentState 落库时把 context 消息 write-through 归档到 session_message，history 返回双源合并视图（压缩后历史可查）；false 完全回退现状（见 docs/session-history-archive-design.md） |
 | `AGENT_TURN_STOP_ENABLED` | `true` | | 单轮停止总开关（`POST /threads/{sid}/stop`，docs/turn-stop-design.md）：false = 端点 503、属主不轮询，行为回退「只能断流」 |

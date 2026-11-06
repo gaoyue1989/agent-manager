@@ -63,25 +63,58 @@ public class ConfirmController {
     private final SessionUserStore sessionUserStore;
     private final McpToolRegistrar mcpToolRegistrar;
     private final RemoteConfirmBridge remoteConfirmBridge;
+    /** D16 硬截止自动收尾（null = 未装配：跳过截止判定，测试兼容构造走此路径） */
+    private final io.agentmanager.framework.service.ConfirmDeadlineService confirmDeadlineService;
 
     /** 会话消息轨存储：confirm 恢复 turn 失败留痕（字段注入 required=false，单测直接 new 时为 null） */
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
-    /** Spring 装配入口（含远程确认桥） */
+    /**
+     * 沙箱池管理器（D16-④ 确认入口预检续约，字段注入 required=false：池关闭/单测直接 new 时为 null，
+     * touch 跳过——保证 D16 硬截止可独立于池化先行落地）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager sandboxPool;
+
+    /**
+     * D16-④ 池租约预检续约（deadline 判定通过后调用）：租约键 EXISTS → EXPIRE 放行；
+     * 键失（容器已被回收）→ 抛 PoolLeaseGoneException，调用方按 410 处置（不进入 resume，
+     * 杜绝"通过预检却中途 404 借新容器丢产物"）。池关闭时为 no-op。
+     */
+    private void touchPoolLeaseOrThrow(String sessionId) {
+        if (sandboxPool != null) {
+            sandboxPool.touchSessionOrThrow(sessionId);
+        }
+    }
+
+    /** Spring 装配入口（含远程确认桥 + D16 截止收尾） */
     @org.springframework.beans.factory.annotation.Autowired
     public ConfirmController(AgentRuntimeService runtimeService,
                              TurnLeaseStore turnLeaseStore,
                              SessionEventBus eventBus,
                              SessionUserStore sessionUserStore,
                              McpToolRegistrar mcpToolRegistrar,
-                             RemoteConfirmBridge remoteConfirmBridge) {
+                             RemoteConfirmBridge remoteConfirmBridge,
+                             io.agentmanager.framework.service.ConfirmDeadlineService confirmDeadlineService) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.eventBus = eventBus;
         this.sessionUserStore = sessionUserStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.remoteConfirmBridge = remoteConfirmBridge;
+        this.confirmDeadlineService = confirmDeadlineService;
+    }
+
+    /** 兼容构造（存量测试 6 参）：截止收尾未装配——判定跳过，行为与 D16 落地前一致 */
+    public ConfirmController(AgentRuntimeService runtimeService,
+                             TurnLeaseStore turnLeaseStore,
+                             SessionEventBus eventBus,
+                             SessionUserStore sessionUserStore,
+                             McpToolRegistrar mcpToolRegistrar,
+                             RemoteConfirmBridge remoteConfirmBridge) {
+        this(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar,
+            remoteConfirmBridge, null);
     }
 
     /** 本地行 confirmKey 的判定（多行消费路由：非 local 即远程键） */
@@ -163,6 +196,34 @@ public class ConfirmController {
                     "error", "remote_route_failed",
                     "message", String.valueOf(e.getMessage())));
             }
+        }
+
+        // D16 硬截止预检（仅本地键；远程行有独立 TTL 治理，Bridge 超时自动 DENY）：
+        // 挂起超 AGENT_CONFIRM_DEADLINE_MINUTES → 410 confirm_expired + 异步自动按拒绝收尾
+        //（复用 reject→DENY 分支：turn 拒绝终态、会话从 ASKING 解锁；零后台任务，懒触发）
+        if (confirmDeadlineService != null) {
+            try {
+                confirmDeadlineService.checkDeadline(sessionId);
+            } catch (AgentRuntimeService.ConfirmDeadlineExpiredException e) {
+                log.info("[confirm] deadline exceeded, auto-deny finalize (sid={})", sessionId);
+                fireAndForgetFinalize(sessionId);
+                return ResponseEntity.status(410).body(Map.of(
+                    "error", "confirm_expired",
+                    "message", "确认已超时作废（超过 " + runtimeService.confirmDeadlineMinutes()
+                        + " 分钟未处理）。本次未执行任何变更；该工具已按拒绝自动收尾。",
+                    "deadline", String.valueOf(e.deadline)));
+            }
+        }
+        // D16-④ 池租约预检续约（deadline 内的确认保容器必活）：键在 → 续约放行；键失 → 容器已被
+        // 回收，410 作废（不进入 resume——避免中途 404 借新容器丢产物），收尾同上自动按拒绝处理
+        try {
+            touchPoolLeaseOrThrow(sessionId);
+        } catch (io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager.PoolLeaseGoneException e) {
+            log.info("[confirm] pool lease gone, auto-deny finalize (sid={})", sessionId);
+            fireAndForgetFinalize(sessionId);
+            return ResponseEntity.status(410).body(Map.of(
+                "error", "confirm_expired",
+                "message", "确认已失效（会话沙箱容器已被回收）。本次未执行任何变更；该工具已按拒绝自动收尾。"));
         }
 
         // 恢复确认时刷新会话-用户映射（确认恢复可能是新的入口，确保映射存在）
@@ -271,9 +332,19 @@ public class ConfirmController {
         }
 
         return Flux.<ServerSentEvent<String>>create(sink -> {
-            // ===== 1. 预检查确认可用性 =====
+            // ===== 1. 预检查确认可用性（含 D16 硬截止 + 池租约续约：过期/失活 → error 帧 confirm_expired + 异步收尾）=====
             try {
                 runtimeService.checkConfirmAvailable(finalSessionId);
+                touchPoolLeaseOrThrow(finalSessionId);
+            } catch (AgentRuntimeService.ConfirmDeadlineExpiredException
+                     | io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager.PoolLeaseGoneException e) {
+                log.info("[confirm-stream] confirm expired (deadline/pool-lease), auto-deny finalize (sid={})",
+                    finalSessionId);
+                fireAndForgetFinalize(finalSessionId);
+                sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
+                    : AgentRuntimeService.ConfirmDeadlineExpiredException.class.getSimpleName()));
+                sink.complete();
+                return;
             } catch (Exception e) {
                 sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
                     : e.getClass().getSimpleName()));
@@ -437,6 +508,20 @@ public class ConfirmController {
         return ServerSentEvent.<String>builder()
             .data(AgentEventSseSerializer.payload(Map.of("type", "error", "error", msg)))
             .build();
+    }
+
+    /** D16 迟到确认的异步收尾（fire-and-forget）：不拖慢 410 响应；失败仅告警，state 兜底懒收尾 */
+    private void fireAndForgetFinalize(String sessionId) {
+        if (confirmDeadlineService == null) {
+            return;
+        }
+        reactor.core.scheduler.Schedulers.boundedElastic().schedule(() -> {
+            try {
+                confirmDeadlineService.finalizeByDeny(sessionId);
+            } catch (Exception e) {
+                log.warn("[confirm] async finalize failed (sid={}): {}", sessionId, e.getMessage());
+            }
+        });
     }
 
     /** 请求体：results 必带；confirmKey 可选（缺省 'local'——本地行现状语义；'task:{task_id}' 走远程路由） */

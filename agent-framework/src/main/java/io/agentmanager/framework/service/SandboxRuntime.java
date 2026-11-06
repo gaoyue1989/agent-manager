@@ -116,4 +116,16 @@ public class SandboxRuntime {
     public int sessionAgentCacheTtlMinutes() {
         return config.sessionAgentCacheTtlMinutes();
     }
+
+    // ---- 沙箱池化（sandbox-pool-design §5.6，SANDBOX_POOL_* 全组只读访问器）----
+
+    /** 池化总开关（{@code SANDBOX_POOL_ENABLED}，默认 false；false = 现状行为逐分支一致） */
+    public boolean poolEnabled() {
+        return config.pool().enabled();
+    }
+
+    /** 池参数只读视图（{@code agent.sandbox.pool.*}；null 已在绑定层归一为全默认） */
+    public io.agentmanager.framework.config.SandboxConfig.PoolConfig pool() {
+        return config.pool();
+    }
 }
