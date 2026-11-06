@@ -211,10 +211,18 @@ public class SandboxPoolManager {
         return 1
         """;
 
-    /** creating → busy 直接借出 Lua（单 key）：按需同步建的容器直接给本次借出（消除"有容量却干等归还"） */
+    /**
+     * creating → busy 直接借出 Lua（单 key）：按需同步建的容器直接给本次借出（消除"有容量却干等归还"），
+     * 并同步写 {@code s:{sid}} 反查（g2，与 BORROW_LUA 两分支对齐；sid 取自 busyJson）。
+     */
     static final String PROMOTE_BUSY_LUA = """
         redis.call('HDEL', KEYS[1], 'c:' .. ARGV[1])
         redis.call('HSET', KEYS[1], 'b:' .. ARGV[2], ARGV[3])
+        -- g2：同步写 s:{sid} 反查（与 BORROW_LUA 两分支对齐）——否则按需建借出的会话在
+        -- confirm 入口 TOUCH_PROBE 查 s:{sid} 落空 fail-open 放行，D16-④ 预检续约对该借出
+        -- 子集失效（deadline 边界 kill-vs-confirm 竞态窗口敞开）
+        local ok, rec = pcall(cjson.decode, ARGV[3])
+        if ok and rec.sid ~= nil and rec.sid ~= '' then redis.call('HSET', KEYS[1], 's:' .. rec.sid, ARGV[2]) end
         return 1
         """;
 
@@ -483,6 +491,14 @@ public class SandboxPoolManager {
     private final Map<String, String> environment;
     private final ObjectMapper mapper = new ObjectMapper();
     private final String podId = UUID.randomUUID().toString().substring(0, 8);
+    /**
+     * creating 条目序号（g3）：entry id = podId + 序号——CAP_LUA/WATERMARK_CAP_LUA 原用
+     * {@code podId + ':' + Redis TIME 秒}，podId 进程内固定，同副本同秒并发占位（burst 多会话
+     * 同时按需建、双 rebuild 线程）会生成同名字段被第二次 HSET 覆盖——账本 creating 计数少计 →
+     * 容量闸门多放行真实容器突破 MAX_SIZE，且 localCreating 以 entry 为键互相覆盖导致 @PreDestroy
+     * 漏删在途条目。序号保证进程内 entry 唯一（跨副本由 podId 区分）。
+     */
+    private final java.util.concurrent.atomic.AtomicLong creatingSeq = new java.util.concurrent.atomic.AtomicLong();
 
     /** 本副本 in-flight creating 句柄（entryId → 建容器线程内标记）；@PreDestroy 仅清此表 + HDEL creating（D12） */
     private final ConcurrentHashMap<String, Boolean> localCreating = new ConcurrentHashMap<>();
@@ -1423,13 +1439,20 @@ public class SandboxPoolManager {
 
     private String luaCap(String userKey) {
         return eval(CAP_LUA, ScriptOutputType.VALUE,
-            new String[]{String.valueOf(pool.maxSize()), podId, creatingJsonOf(userKey)});
+            new String[]{String.valueOf(pool.maxSize()), nextCreatingEntryId(),
+                creatingJsonOf(userKey)});
+    }
+
+    /** creating 条目唯一 id（g3）：podId + 进程内自增序号，防同副本同秒并发占位同名字段互相覆盖 */
+    private String nextCreatingEntryId() {
+        return podId + "-" + creatingSeq.incrementAndGet();
     }
 
     /** 通用水面占位（预热/补位专用，集群级裁决见 WATERMARK_CAP_LUA）；借出按需建不走此路径 */
     private String luaWatermarkCap(int targetGeneric) {
         return eval(WATERMARK_CAP_LUA, ScriptOutputType.VALUE,
-            new String[]{String.valueOf(Math.max(0, targetGeneric)), podId, creatingJsonOf(null)});
+            new String[]{String.valueOf(Math.max(0, targetGeneric)), nextCreatingEntryId(),
+                creatingJsonOf(null)});
     }
 
     private String luaClaimRecycle(String sandboxId) {

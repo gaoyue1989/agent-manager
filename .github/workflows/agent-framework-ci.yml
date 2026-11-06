@@ -332,7 +332,8 @@ jobs:
 
   # P 组池化（sandbox-pool-design §8「CI 新增非必需 job」）：沙箱开启 + 池开启
   # （SANDBOX_POOL_ENABLED=true，加速回收参数 + USER_MAX=1 配额用例），mock OpenSandbox。
-  # 覆盖借出/回收/池满等待、D17 用户配额与粘滞继承、D19 resourceRequests 透传；
+  # 覆盖借出/回收/池满等待（P8 waiters>0 + pool_exhausted 可感知）、D17 用户配额与粘滞继承、
+  # D19 resourceRequests 透传；
   # 池默认关闭路径（X 组）由 e2e-sandbox 回归。初期非必需（同 E2E 路由模式先例），
   # 稳定后由管理员转必需检查（分支保护不在本 issue 范围）。
   e2e-sandbox-pool:

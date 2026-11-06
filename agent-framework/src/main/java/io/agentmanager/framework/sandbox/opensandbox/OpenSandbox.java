@@ -8,6 +8,10 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -86,6 +90,28 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 由 OpenSandboxClient.create/resume 构造实例后注入。
      */
     private volatile SandboxPoolManager sandboxPool;
+
+    /**
+     * 在途续约周期（ms，g1）：doExec 命令执行期间周期续约 Redis 池租约的间隔——与 turn_lease
+     * 续约节奏（20s）对齐；包级可写供单测加速（生产默认 20s）。
+     */
+    long inFlightLeaseRenewMs = 20_000L;
+
+    /**
+     * 在途租约续约调度器（g1，全实例共享单线程 daemon）：doExec 的 {@code commands().run()}
+     * 是阻塞调用——入口单次续约后长命令执行期间租约无任何续约点，IDLE_RETURN（默认 600s）+
+     * turn_lease 硬寿命（默认 10min）双保险在「单条长命令 > ~10min」场景双双失活，下轮扫描
+     * 认领回收：容器转粘滞可被同用户其它会话 LRU 继承（继承到仍在执行命令的容器→跨会话
+     * 工作区/env 互踩）或粘滞到期 killQuietly 中途杀死命令（在途产物丢失）。设计 D14
+     * 「doExec 在途流式续约」即关闭此窗口。共享单线程足够：续约是一次 Redis SET（亚毫秒），
+     * 不随命令数放大。
+     */
+    private static final ScheduledExecutorService IN_FLIGHT_LEASE_SCHEDULER =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            var t = new Thread(r, "sandbox-inflight-lease");
+            t.setDaemon(true);
+            return t;
+        });
 
     public OpenSandbox(OpenSandboxState state,
                        com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
@@ -271,6 +297,38 @@ public class OpenSandbox extends AbstractBaseSandbox
         renewPoolLease();   // 池化续约③：命令执行即活跃（长 turn 中途高频续约）
         // ④ 会话水合协调器：userKey 一次解析 + 四步幂等注入的唯一 doExec 侧入口
         hydrateForCall(ctx);
+        // 池化续约③在途流式续约（g1/D14 复核补）：commands().run 阻塞执行期间周期续约租约，
+        // 关闭「单条长命令 > IDLE_RETURN + turn_lease 硬寿命」被扫描回收/粘滞继承互踩/中途 kill
+        // 的窗口；命令结束（含异常/超时）即取消。池关闭（sandboxPool=null）时返回 null 纯直通。
+        var leaseHandle = startInFlightLeaseRenewal();
+        try {
+            return doExecInternal(command);
+        } finally {
+            if (leaseHandle != null) {
+                leaseHandle.cancel(false);
+            }
+        }
+    }
+
+    /** 在途续约句柄（g1）：周期续约 Redis 池租约直至取消；池关闭/无 sandboxId 返回 null（直通） */
+    private ScheduledFuture<?> startInFlightLeaseRenewal() {
+        var pool = sandboxPool;
+        if (pool == null || state == null || state.getSandboxId() == null) {
+            return null;
+        }
+        var sandboxId = state.getSandboxId();
+        return IN_FLIGHT_LEASE_SCHEDULER.scheduleAtFixedRate(() -> {
+            try {
+                pool.renew(sandboxId);   // renew 内部 fail-soft
+            } catch (Exception e) {
+                log.debug("[sandbox-open] in-flight lease renew skipped: sandboxId={}: {}",
+                    sandboxId, e.getMessage());
+            }
+        }, inFlightLeaseRenewMs, inFlightLeaseRenewMs, TimeUnit.MILLISECONDS);
+    }
+
+    /** doExec 主体（g1 拆出：在途续约包装层不包裹执行语义） */
+    private ExecResult doExecInternal(String command) throws Exception {
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null

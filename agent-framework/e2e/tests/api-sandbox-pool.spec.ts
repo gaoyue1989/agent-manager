@@ -1,6 +1,6 @@
 /**
  * e2e-sandbox-pool API 组（sandbox-pool-design §8 E2E）：池开启（SANDBOX_POOL_ENABLED=true，
- * 加速回收参数 IDLE_RETURN=8s / SCAN=2s / MAX_SIZE=2 / MIN_IDLE=1）+ mock OpenSandbox。
+ * 加速回收参数 IDLE_RETURN=8s / SCAN=2s / MAX_SIZE=4 / MIN_IDLE=1）+ mock OpenSandbox。
  *
  * 断言面 = agent 行为（turn 终态）+ mock /stats（creates 数受 MAX_SIZE 约束）
  * + /debug/sandbox-pool（集群级 idle/busy/creating 账本 + 流转事件）。
@@ -197,6 +197,45 @@ test('P6 同用户配额：user_quota_exhausted 可感知 + 粘滞窗口内继�
   const mine = pool3.busy.filter((b) => b.userKey === uid).length
     + pool3.stickyIdle.filter((s) => s.owner === uid).length;
   expect(mine).toBeLessThanOrEqual(1); // USER_MAX=1（含粘滞空闲与使用中）
+});
+
+test('P8 池满等待：waiters 可观测、超时报错可感知（设计 §8 E2E / §10 验收）', async () => {
+  test.setTimeout(120_000);
+  // 等前序用例的粘滞容器到期释放（MAX_SIZE=4 需要干净池做占满）
+  await pollUntil(async () => await poolDebug(),
+    (p) => p.busy.length === 0 && p.stickyIdle.length <= 1, 60_000, 2000);
+  await resetMockStats();
+  // 并发 5 个会话（MAX_SIZE=4）：4 个占满容量，第 5 个进入池空轮询等待（MAX_WAIT=6s）
+  const streams: Array<ReturnType<typeof chat>> = [];
+  for (let i = 0; i < 4; i++) {
+    streams.push(chat({ message: `[E2E:plain]`, userId: U(), sessionId: sessionIdFor(`p8-${i}-${uniq()}`) }));
+  }
+  // 池满证据 1：无可借容量占满（busy+粘滞+creating = MAX_SIZE）。4 个并行 turn 数秒内 done
+  // 归还转粘滞（D17 粘滞占集群容量），busy 峰值采样窗口窄——以「无可借容量」为占满判定更稳
+  await pollUntil(async () => await poolDebug(),
+    (p) => p.busy.length + p.stickyIdle.length + p.creating.length >= POOL.maxSize, 40_000, 500);
+  const fifth = chat({ message: `[E2E:plain]`, userId: U(), sessionId: sessionIdFor(`p8f-${uniq()}`), timeoutMs: 60_000 });
+  // 池满证据 2：等待期间 /debug/sandbox-pool waiters > 0（池空轮询进行中）
+  await pollUntil(async () => await poolDebug(),
+    (p) => p.waiters > 0, 15_000, 500);
+  await waitTerminal(fifth);
+  // 超时可感知：第 5 个会话以 error 终态收敛且报文含 pool exhausted（既不悬挂也不静默重试）；
+  // 若 4 个 turn 在 MAX_WAIT 内全部归还释放出可借容器，done 亦为合法终态（等待后借出成功）
+  const terminal = fifth.terminal?.type;
+  const errText = JSON.stringify(fifth.frames);
+  expect(terminal === 'error' || terminal === 'done', `第 5 个会话必须收敛到终态，实际=${terminal}`).toBe(true);
+  if (terminal === 'error') {
+    expect(errText.includes('pool exhausted'), `超时报错应含 pool exhausted: ${errText.slice(0, 300)}`).toBe(true);
+  }
+  // 收敛前 4 个并发会话（各自独立用户，互不受配额约束）。5 个会话竞争 4 个容器：
+  // MAX_WAIT 内借到=done、未借到=pool exhausted error——两者都是设计内可感知终态
+  // （「池满等待不悬挂、超时可感知」正是本用例的验收语义）
+  for (const st of streams) {
+    await waitTerminal(st);
+    const t = st.terminal?.type;
+    expect(t === 'done' || (t === 'error' && JSON.stringify(st.frames).includes('pool exhausted')),
+      `并发会话必须收敛到 done 或 pool exhausted，实际=${t}`).toBe(true);
+  }
 });
 
 test('P7 create 请求体携带 resourceRequests（D19 资源双档）', async () => {
