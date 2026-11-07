@@ -503,6 +503,17 @@ HTTP 409
 
 ### 8.2 kind 联调全场景（V6~V8，PR-E 验收）
 
+> **V6⑧ 换代提示帧 live 编排配方（第 2 轮后钉死）**：帧的确定性触达路径 = 「绑定行已删 +
+> 沙箱已 GC」的 confirm 恢复（P3 resume connect 404 → markSandboxRebuilt 登记 → 降级 create
+> → 流内 emit）。编排步骤：① 会话 A 执行一轮并记 sandboxId S；② 触发 S 的 GC——`/admin/destroy`
+> 不可用（Destroy 后 P3 resume 会走 connect 404 同路径 ✓ 可用），或等 TTL 过期 + renew-404 sweep
+> 懒剔除（轮询 /debug/sandbox-bindings 直到 bindingOf(A) 消失）；③ A 发起 confirm-stream（或普通
+> chat 续轮）→ P3 connect 404 → 降级 create → 流首事件前 emit `sandbox_rebuilt` 帧；④ 观测：SSE
+> 帧直接断言，或轮询 /debug/sandbox-bindings events 看 `sandbox_rebuilt_registered`（登记先行事件，
+> 第 2 轮新增——帧在流内一次性消费、时序敏感不可轮询，登记事件让 live 编排可先确认「已登记」再看流）。
+> 不应选用的路径：「行在但归属他会话」需精确的双会话抢跑时序，不可靠；「confirm 期间配额满」会让
+> confirm 直接 error（⑤ 重建失败，无帧可言——先释放配额再 confirm）。
+
 前置：§8.1 上游五项全过。发布 demo agent 两套参数：标准（`QUOTA=5/TTL=30min/HOLD=20min`）与加速变体（`QUOTA=3/TTL=5min/HOLD=2min`，缩短等待类步骤）。
 
 | # | 场景 | 步骤 | 通过标准 |

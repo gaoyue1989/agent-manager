@@ -560,5 +560,9 @@ class SandboxLifecycleManagerTest {
         assertFalse(manager.popSandboxRebuiltSince(SID, 0));
         // 未登记 sid 恒 false
         assertFalse(manager.popSandboxRebuiltSince("other-sid", 0));
+        // 登记即落事件（V6⑧ live 排障：/debug/sandbox-bindings 直接可查，不依赖流内帧时序）
+        assertTrue(manager.recentEvents().stream()
+            .anyMatch(e -> "sandbox_rebuilt_registered".equals(e.get("type"))
+                && String.valueOf(e.get("detail")).contains(SID)), "缺登记事件: " + manager.recentEvents());
     }
 }

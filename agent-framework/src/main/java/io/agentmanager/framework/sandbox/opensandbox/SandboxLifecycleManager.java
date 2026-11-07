@@ -510,6 +510,9 @@ public class SandboxLifecycleManager {
             ownershipLostAt.clear();   // 上界兜底：清空重来（提示帧是体验增强，丢失无害）
         }
         ownershipLostAt.put(sessionId, System.currentTimeMillis());
+        // 事件透出（V6⑧ live 排障）：帧在流内一次性消费、时序敏感不可轮询；此登记事件让
+        // live 编排者经 /debug/sandbox-bindings 直接确认「换代已登记、帧将随后发出」
+        emit("sandbox_rebuilt_registered", null, "sid=" + sessionId);
     }
 
     /**
