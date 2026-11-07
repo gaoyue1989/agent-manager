@@ -415,6 +415,35 @@ class OpenSandboxClientTest {
     }
 
     @Test
+    void resumeConnect404RegistersRebuildNoticeAndKeepsIdentity() throws Exception {
+        // V6⑧ live 实锤缺失路径：绑定行被 renew-404 sweep 懒剔除后沙箱 GC，confirm/chat
+        // 恢复 P3 connect 404 → 不经归属拦截 → 设计 §4.4「① miss → 重建 + 换代提示帧」
+        // 分支此前漏发。修复：connect 404/410 时登记换代（异常原样重抛，降级 create 语义不变）
+        var manager = mock(SandboxLifecycleManager.class);
+        var spec = lifecycleSpec(manager);   // ThreadLocal sid 已置
+        var osb = mock(Sandbox.class);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenThrow(new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException(
+                "gone", null, 404, mock(com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.class)));
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, spec);
+            var resumeState = state();
+            resumeState.setSandboxId("sb-gc");
+            assertThrows(com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException.class,
+                () -> client.resume(resumeState));   // 基线降级语义不变（原样上抛，harness 捕获降级）
+            verify(manager).markSandboxRebuilt(SID);   // 换代登记
+            // ThreadLocal sid 未被 take：harness 降级 create 的生命周期记账仍拿得到 sid
+            assertEquals(SID, spec.peekPendingSessionId());
+            verify(manager, never()).onResumeAcquired(anyString(), anyString(), any());
+        }
+    }
+
+    @Test
     void resumeOwnershipCheckUnavailableFailsOpen() throws Exception {
         // U4 三分支之三：校验写异常（DataAccessException）→ 放行 + WARN（fail-open）
         var store = mock(SandboxBindingStore.class);

@@ -82,9 +82,12 @@ public class SandboxLifecycleManager {
     private final Deque<Map<String, Object>> eventRing = new ArrayDeque<>();
 
     /**
-     * P3 resume 归属失效登记（sid → 时刻，容量有界）：LRU 改绑/懒剔除后旧会话重入被
-     * 归属校验拦截降级重建时登记；chat/confirm 流的换代提示帧（§4.4 T4「沙箱已重建，
-     * 未保存的工作区文件可能丢失」）据此一次性弹出（popOwnershipLostSince）。
+     * 会话沙箱换代登记（sid → 时刻，容量有界）：两种换代路径均登记——
+     * ① P3 resume 归属校验拦截（行在但归属他会话，OpenSandboxClient 归属块）；
+     * ② P3 resume 命中已销毁沙箱（404/410，行被懒剔除/renew-404 sweep 后沙箱 GC——
+     *    设计 §4.4「① miss → 重建 + 换代提示帧」分支，V6⑧ live 实锤此前漏发）。
+     * chat/confirm 流的换代提示帧（「沙箱已重建，未保存的工作区文件可能丢失」）
+     * 据此一次性弹出（popSandboxRebuiltSince）。
      */
     private final java.util.concurrent.ConcurrentHashMap<String, Long> ownershipLostAt =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -496,10 +499,10 @@ public class SandboxLifecycleManager {
     }
 
     /**
-     * P3 归属失效登记（{@code OpenSandboxClient.resume} 归属校验 affected=0 时调用）：
-     * 供流侧换代提示帧一次性弹出（§4.4 T4 恢复路径）。
+     * P3 沙箱换代登记（{@code OpenSandboxClient.resume} 归属校验 affected=0 或 connect
+     * 命中已销毁沙箱 404/410 时调用）：供流侧换代提示帧一次性弹出（§4.4 T4 恢复路径）。
      */
-    public void markOwnershipLost(String sessionId) {
+    public void markSandboxRebuilt(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
             return;
         }
@@ -510,11 +513,11 @@ public class SandboxLifecycleManager {
     }
 
     /**
-     * 弹出 sid 在 {@code sinceEpochMs} 之后的归属失效登记（一次性；无/早于 since 则 false
+     * 弹出 sid 在 {@code sinceEpochMs} 之后的沙箱换代登记（一次性；无/早于 since 则 false
      * 且<b>不消费</b>——旧 turn 的迟到探测不得吃掉留给新 turn 的提示）。
      * chat/confirm 流在 turn 开始时取时刻、逐事件探测，命中即发换代提示帧。
      */
-    public boolean popOwnershipLostSince(String sessionId, long sinceEpochMs) {
+    public boolean popSandboxRebuiltSince(String sessionId, long sinceEpochMs) {
         if (sessionId == null) {
             return false;
         }

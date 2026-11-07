@@ -666,10 +666,14 @@ test('L9 到期重建：/admin/destroy 模拟 GC → 下 turn 重建 + 新绑定
   // 「renew_404 剔除」属预期（两条路径都收敛到行删 + 配额释放）
   await pollUntil(async () => (await bindingOf(sid)) === undefined, v => v === true, 15_000, 1_000)
     .catch(() => undefined);
-  // 同会话下 turn：① miss（绑定已清）→ ② 重建（对 turn 透明）
+  // 同会话下 turn：P3 resume connect 404（沙箱已 GC）→ 降级 create 重建（对 turn 透明）；
+  // 换代提示帧 sandbox_rebuilt（§4.4 T4 / V6⑧ live 修复回归：行被懒剔除+沙箱 GC 的重建
+  // 此前漏发帧——connect 404 登记路径已补）
   const t = chat({ message: `[E2E:plain]`, userId: uid, sessionId: sid, timeoutMs: 120_000 });
   await waitTerminal(t);
   expect(t.terminal?.type).toBe('done');
+  expect(t.frames.some(f => f.type === 'sandbox_rebuilt'),
+    `缺换代提示帧（connect-404 登记路径）: ${JSON.stringify(t.frames.slice(0, 3))}`).toBe(true);
   const nb = await bindingOf(sid);
   expect(nb?.sandbox_id, '重建后无绑定').toBeTruthy();
   expect(nb!.sandbox_id, '重建复用了已销毁沙箱').not.toBe(old);

@@ -408,7 +408,7 @@ public class ConfirmController {
         // 沙箱换代提示帧（§4.4 T4 恢复路径，同 ChatStreamController）：归属失效降级重建后
         // 在首个事件前一次性提示，前端据此展示「未保存的工作区文件可能丢失」
         if (!sandboxRebuildNotified.get() && sandboxLifecycle != null
-                && sandboxLifecycle.popOwnershipLostSince(sessionId, turnStartedAt.get())) {
+                && sandboxLifecycle.popSandboxRebuiltSince(sessionId, turnStartedAt.get())) {
             sandboxRebuildNotified.set(true);
             eventBus.emitSynthetic(sessionId, replyId, "sandbox_rebuilt",
                 "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");

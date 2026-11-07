@@ -803,7 +803,7 @@ public class ChatStreamController {
         // 沙箱换代提示帧（§4.4 T4 恢复路径）：LRU 改绑/懒剔除后本会话重入被归属校验拦截
         // 降级重建时，在首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
         if (!sandboxRebuildNotified.get() && sandboxLifecycle != null
-                && sandboxLifecycle.popOwnershipLostSince(sessionId, turnStartedAt.get())) {
+                && sandboxLifecycle.popSandboxRebuiltSince(sessionId, turnStartedAt.get())) {
             sandboxRebuildNotified.set(true);
             eventBus.emitSynthetic(sessionId, replyId, "sandbox_rebuilt",
                 "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");

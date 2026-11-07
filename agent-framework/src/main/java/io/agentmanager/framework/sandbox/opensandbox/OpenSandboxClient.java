@@ -321,11 +321,31 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         // SandboxManager.acquire() 捕获后降级 create（框架行为）。
         // 注意：用 connector().connect() 而非 resumer().resume()——
         // resume 端点仅对 Paused 沙箱有效，Running 沙箱会 409 Conflict。
-        var osbSandbox = com.alibaba.opensandbox.sandbox.Sandbox.connector()
-            .sandboxId(osbState.getSandboxId())
-            .connectionConfig(connectionConfig)
-            .skipHealthCheck(true)
-            .connect();
+        var lifecycle = filesystemSpec != null ? filesystemSpec.getLifecycleManager() : null;
+        final com.alibaba.opensandbox.sandbox.Sandbox osbSandbox;
+        try {
+            osbSandbox = com.alibaba.opensandbox.sandbox.Sandbox.connector()
+                .sandboxId(osbState.getSandboxId())
+                .connectionConfig(connectionConfig)
+                .skipHealthCheck(true)
+                .connect();
+        } catch (com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException gone) {
+            // 沙箱已被服务端 GC/删除（404/410）：P3 无法恢复，harness 将降级 create 重建。
+            // 登记换代（V6⑧ live 实锤缺失路径：绑定行被 renew-404 sweep 懒剔除后，confirm/
+            // chat 恢复不经归属拦截直接 connect 404 → 设计 §4.4「① miss → 重建 + 换代提示帧」
+            // 的分支此前漏发）。ThreadLocal sid 未被 take（归属块在 connect 之后），降级
+            // create 的 peekIdentity 仍能拿到 → 重建记账不受影响。
+            int sc = gone.getStatusCode() != null ? gone.getStatusCode() : 0;
+            if ((sc == 404 || sc == 410) && lifecycle != null) {
+                String lostSid = filesystemSpec != null ? filesystemSpec.peekPendingSessionId() : null;
+                if (lostSid != null && !lostSid.isBlank()) {
+                    log.info("[sandbox-open] resume hit destroyed sandbox, register rebuild notice (sid={}, sandbox={})",
+                        lostSid, osbState.getSandboxId());
+                    lifecycle.markSandboxRebuilt(lostSid);
+                }
+            }
+            throw gone;
+        }
 
         // ===== 归属校验+占位（终审 d1/cold-R1-1，§4.2 两道防线第 2 条）=====
         // connect 仅建立句柄（skipHealthCheck(true) 下无探活也无副作用）、句柄返回供 exec
@@ -333,7 +353,6 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         // 续期前」的 grace 空窗（A2A 闲置重入的互踩窗口）。affected=0 → 无行/已改绑他
         // 会话/slot↔binding 漂移 → close 句柄 + 抛降级异常 → harness 降级 create →
         // OpenSandboxClient.create 路由本决策重新记账/决策。
-        var lifecycle = filesystemSpec != null ? filesystemSpec.getLifecycleManager() : null;
         if (lifecycle != null) {
             // 捕获的记账会话键在此一次消费：先校验+占位，通过后 call 引用计数 +1
             String sid = filesystemSpec != null ? filesystemSpec.takePendingSessionId() : null;
@@ -345,7 +364,7 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                         //（先例：被回滚 PR #276 reconcileResume「resume 后校验归属 → close + 降级」）
                         log.info("[sandbox-open] resume ownership check failed, close + degrade (sid={}, sandbox={})",
                             sid, osbState.getSandboxId());
-                        lifecycle.markOwnershipLost(sid);   // 换代提示帧登记（§4.4 T4 恢复路径）
+                        lifecycle.markSandboxRebuilt(sid);   // 换代提示帧登记（§4.4 T4：归属被抢或沙箱销毁均为换代）
                         // 归还身份 ThreadLocal：harness 捕获本异常后降级 create 重走决策（同线程），
                         // 此刻身份已被上方 take 消费——不还回去，create 的生命周期记账拿不到 sid，
                         // 重建沙箱将脱簿记（2026-11-08 lifecycle 组本地实跑实锤：L18b 重建无绑定行）

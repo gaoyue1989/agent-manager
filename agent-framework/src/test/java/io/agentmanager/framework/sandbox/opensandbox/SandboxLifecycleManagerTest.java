@@ -551,14 +551,14 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void ownershipLostNoticePopsOnceAndHonoursSince() {
-        manager.markOwnershipLost(SID);
+        manager.markSandboxRebuilt(SID);
         // since 晚于登记时刻 → 不弹（旧 turn 不吃新登记）；+1s 恒大于 mark 时刻
         long future = System.currentTimeMillis() + 1_000;
-        assertFalse(manager.popOwnershipLostSince(SID, future));
+        assertFalse(manager.popSandboxRebuiltSince(SID, future));
         // 一次性弹出后不再重复（换代提示帧只发一次）
-        assertTrue(manager.popOwnershipLostSince(SID, 0));
-        assertFalse(manager.popOwnershipLostSince(SID, 0));
+        assertTrue(manager.popSandboxRebuiltSince(SID, 0));
+        assertFalse(manager.popSandboxRebuiltSince(SID, 0));
         // 未登记 sid 恒 false
-        assertFalse(manager.popOwnershipLostSince("other-sid", 0));
+        assertFalse(manager.popSandboxRebuiltSince("other-sid", 0));
     }
 }
