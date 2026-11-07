@@ -28,8 +28,9 @@ import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
  *   <li><b>create</b>：lifecycle 开启且身份捕获齐备时改走 {@link SandboxLifecycleManager#acquire}
  *       （① 复用/② 占额/③ create/⑤ LRU 全忙异常）；create 透传 {@code extensions.poolRef} /
  *       {@code metadata}（service+session_id，§5.3 console 过滤口径）+ {@code timeout=TTL}；
- *       poolRef 非空时抑制 image/resourceLimits（评审 d17：由 Pool 模板定义，上游对组合不定义），
- *       entrypoint/env 保留供 taskTemplate 下发。</li>
+ *       poolRef 非空时抑制 resourceLimits（评审 d17：由 Pool 模板定义；image 受 SDK 客户端
+ *       「image XOR snapshotId」强约束必须传，上游实测忽略），entrypoint/env 保留供
+ *       taskTemplate 下发。</li>
  *   <li><b>resume</b>：connect 成功后执行「归属校验+占位」合一条件写（终审 d1/cold-R1-1，
  *       取代 v4 槽位墓碑——SessionSandboxStateStore 底层 MysqlAgentStateStore 自管连接
  *       无法并入锚行事务、slot 键为 harness 私有格式）；affected=0 → close 句柄 + 抛降级
@@ -173,18 +174,20 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                                                              String capturedSessionId)
             throws Exception {
         // 1. 通过 OpenSandbox SDK 创建沙箱
-        //    poolRef 非空：认领 warm Pod，image/resourceLimits 抑制（由 Pool 模板定义，评审 d17）；
-        //    entrypoint/env 保留（taskTemplate 下发通路，§2.2）
+        //    poolRef 非空：认领 warm Pod。image 必传——SDK Sandbox.Builder.build() 客户端强约束
+        //    「image XOR snapshotId」（1.0.18 实证），无法在 poolRef 路径抑制；上游对 image+poolRef
+        //    组合不校验（实测忽略，镜像以 Pool 模板为准）。resourceLimits 抑制（评审 d17 部分保留：
+        //    由 Pool 模板定义，传了无效果且掩盖配置语义）；entrypoint/env 保留（taskTemplate 下发通路 §2.2）
         boolean pooled = lifecyclePoolRef() != null;
         var builder = com.alibaba.opensandbox.sandbox.Sandbox.builder()
             .connectionConfig(connectionConfig)
             .timeout(options.getTimeout())
+            .image(options.getImage())
             .env(options.getEnvironment());
         if (pooled) {
             builder.extensions(Map.of("poolRef", lifecyclePoolRef()));
         } else {
-            builder.image(options.getImage())
-                .resource(options.getResource());
+            builder.resource(options.getResource());
         }
         // entrypoint 仅在配置非空时设置，避免覆盖镜像默认启动命令
         if (options.getEntrypoint() != null && !options.getEntrypoint().isEmpty()) {
@@ -342,6 +345,11 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                         //（先例：被回滚 PR #276 reconcileResume「resume 后校验归属 → close + 降级」）
                         log.info("[sandbox-open] resume ownership check failed, close + degrade (sid={}, sandbox={})",
                             sid, osbState.getSandboxId());
+                        lifecycle.markOwnershipLost(sid);   // 换代提示帧登记（§4.4 T4 恢复路径）
+                        // 归还身份 ThreadLocal：harness 捕获本异常后降级 create 重走决策（同线程），
+                        // 此刻身份已被上方 take 消费——不还回去，create 的生命周期记账拿不到 sid，
+                        // 重建沙箱将脱簿记（2026-11-08 lifecycle 组本地实跑实锤：L18b 重建无绑定行）
+                        filesystemSpec.setPendingSessionId(sid);
                         try {
                             osbSandbox.close();   // 仅释放 HTTP 客户端，未执行任何命令，无实害
                         } catch (Exception ignored) {
@@ -351,7 +359,9 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                             "sandbox ownership lost (sid=" + sid + ", sandbox=" + osbState.getSandboxId() + ")", null);
                     }
                 } catch (SandboxBindingStore.DataAccessException e) {
-                    // 校验写异常 fail-open：放行 + WARN（互踩窗口仅存在于存储故障期）
+                    // 校验写异常 fail-open：放行 + WARN（互踩窗口仅存在于存储故障期）；
+                    // 身份归还（与上方失效路径同理：后续可能的降级 create 仍可记账）
+                    filesystemSpec.setPendingSessionId(sid);
                     lifecycle.recordOwnershipFailOpen(osbState.getSandboxId(), sid, e);
                 }
                 lifecycle.onResumeAcquired(osbState.getSandboxId(), sid, osbSandbox);

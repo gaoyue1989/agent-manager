@@ -48,11 +48,9 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         SessionUserStore sessionUserStore,
-        DataSource dataSource,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
         org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
-        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.TurnLeaseStore> turnLeaseStoreProvider,
-        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.ConfirmContextStore> confirmContextStoreProvider
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager> lifecycleManagerProvider
     ) {
         if (!sandboxRuntime.enabled()) {
             log.info("Sandbox disabled (SandboxRuntime), using RemoteFilesystemSpec mode");
@@ -130,23 +128,83 @@ public class AgentScopeConfig {
                         + "every acquire misses ① and quota fills with orphan bindings). Either enable the guard or set "
                         + "SANDBOX_LIFECYCLE_ENABLED=false.");
             }
-            var bindingStore = new io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore(dataSource);
-            // Registry 事件汇初值 null，Manager 建好后桥接（emit→Manager 环形缓冲统一落事件）
-            var registry = new io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry(
-                bindingStore, lifecycle.renewIntervalSeconds(), lifecycle.confirmHoldMinutes(), null);
-            var manager = new io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager(
-                bindingStore, registry, lifecycle, config.timeoutMinutes(),
-                turnLeaseStoreProvider.getIfAvailable(),
-                confirmContextStoreProvider.getIfAvailable());
-            registry.setEventSink(manager::recordLifecycleEvent);
+            // 三件套为独立 @Bean（控制器/debug 端点/清理任务按类型注入，普通 new 的对象 Spring 不可见）：
+            // manager 缺失即装配自洽被破坏，fail-fast 拒绝静默降级
+            var manager = lifecycleManagerProvider.getIfAvailable();
+            if (manager == null) {
+                throw new IllegalStateException(
+                    "SandboxLifecycle enabled but SandboxLifecycleManager bean missing (assembly broken; "
+                        + "check sandboxBindingStore/sandboxRenewalRegistry bean conditions)");
+            }
             spec.setLifecycleManager(manager);
             guard.setLifecycleIdentitySpec(spec);   // 守卫 tryEnter 同线程注入捕获点（§4.2）
-            registry.start();   // daemon 守护线程（JVM 退出自然终止；sweep 异常自捕获不影响主流程）
             log.info("SandboxLifecycle enabled (quota={}, ttlMinutes={}, renewInterval={}s, holdMinutes={}m, poolRef={})",
                 lifecycle.userQuota(), config.timeoutMinutes(), lifecycle.renewIntervalSeconds(),
                 lifecycle.confirmHoldMinutes(), lifecycle.poolRef());
         }
         return spec;
+    }
+
+    /**
+     * 沙箱生命周期三件套 @Bean（须为 Spring bean——DebugApiController/ChatStreamController/
+     * ConfirmController/AguiRunController/SessionCleanupService/SandboxLocator 均按类型注入；
+     * 普通对象 Spring 不可见，注入点全部静默落空，2026-11-08 本地 lifecycle 组冒烟实锤）。
+     * 条件与 sandboxFilesystemSpec 同源：sandboxRuntime.enabled() && lifecycle.enabled()，
+     * 不满足返回 null（NullBean——注入点 required=false 落 null，生命周期旁路）。
+     */
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore sandboxBindingStore(
+        DataSource dataSource,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider
+    ) {
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (!sandboxRuntime.enabled() || !lifecycle.enabled()) {
+            return null;
+        }
+        return new io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore(dataSource);
+    }
+
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry sandboxRenewalRegistry(
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore> storeProvider,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider
+    ) {
+        var store = storeProvider.getIfAvailable();
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (store == null || !sandboxRuntime.enabled() || !lifecycle.enabled()) {
+            return null;
+        }
+        // 事件汇初值 null，Manager bean 建好后桥接（emit→Manager 环形缓冲统一落事件）；
+        // daemon 守护线程在此启动（JVM 退出自然终止；sweep 异常自捕获不影响主流程）
+        var registry = new io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry(
+            store, lifecycle.renewIntervalSeconds(), lifecycle.confirmHoldMinutes(), null);
+        registry.start();
+        return registry;
+    }
+
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycleManager(
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore> storeProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry> registryProvider,
+        SandboxConfig config,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.TurnLeaseStore> turnLeaseStoreProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.ConfirmContextStore> confirmContextStoreProvider,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime
+    ) {
+        var store = storeProvider.getIfAvailable();
+        var registry = registryProvider.getIfAvailable();
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (store == null || registry == null || !sandboxRuntime.enabled() || !lifecycle.enabled()) {
+            return null;
+        }
+        var manager = new io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager(
+            store, registry, lifecycle, config.timeoutMinutes(),
+            turnLeaseStoreProvider.getIfAvailable(), confirmContextStoreProvider.getIfAvailable());
+        registry.setEventSink(manager::recordLifecycleEvent);
+        return manager;
     }
 
     /** 生命周期配置取值（独立 properties bean；无 provider/bean 时回落默认构造，与 §4.7 默认一致） */

@@ -314,6 +314,10 @@ public class ConfirmController {
             // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 沙箱换代提示（§4.4 T4）：confirm 恢复段保留窗过期后被改绑 → 归属校验拦截降级重建
+            // → 首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
+            var turnStartedAt = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+            var sandboxRebuildNotified = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
             // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
@@ -348,7 +352,7 @@ public class ConfirmController {
             resumeFlux
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
-                        turnEnded, toolSummary),
+                        turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -393,10 +397,21 @@ public class ConfirmController {
                                     String sessionId, String replyId, TurnLeaseGuard lease,
                                     reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.concurrent.atomic.AtomicLong turnStartedAt,
+                                    java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     TurnToolSummaryTracker toolSummary) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
+        }
+
+        // 沙箱换代提示帧（§4.4 T4 恢复路径，同 ChatStreamController）：归属失效降级重建后
+        // 在首个事件前一次性提示，前端据此展示「未保存的工作区文件可能丢失」
+        if (!sandboxRebuildNotified.get() && sandboxLifecycle != null
+                && sandboxLifecycle.popOwnershipLostSince(sessionId, turnStartedAt.get())) {
+            sandboxRebuildNotified.set(true);
+            eventBus.emitSynthetic(sessionId, replyId, "sandbox_rebuilt",
+                "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");
         }
 
         // 工具名登记 + 参数/结果累积（ToolCallStartEvent 是唯一携带真实工具名的事件）

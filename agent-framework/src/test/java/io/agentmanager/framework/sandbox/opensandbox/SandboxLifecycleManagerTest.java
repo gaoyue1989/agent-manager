@@ -1,6 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -546,5 +547,18 @@ class SandboxLifecycleManagerTest {
         assertEquals(entries, manager.registryDebugEntries());
         // grace 下限（评审轮一 P1：> 续期间隔）：60s 间隔 → max(180, 120) = 180
         assertEquals(180, manager.graceSeconds());
+    }
+
+    @Test
+    void ownershipLostNoticePopsOnceAndHonoursSince() {
+        manager.markOwnershipLost(SID);
+        // since 晚于登记时刻 → 不弹（旧 turn 不吃新登记）；+1s 恒大于 mark 时刻
+        long future = System.currentTimeMillis() + 1_000;
+        assertFalse(manager.popOwnershipLostSince(SID, future));
+        // 一次性弹出后不再重复（换代提示帧只发一次）
+        assertTrue(manager.popOwnershipLostSince(SID, 0));
+        assertFalse(manager.popOwnershipLostSince(SID, 0));
+        // 未登记 sid 恒 false
+        assertFalse(manager.popOwnershipLostSince("other-sid", 0));
     }
 }

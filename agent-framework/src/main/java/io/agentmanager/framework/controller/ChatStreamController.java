@@ -582,6 +582,9 @@ public class ChatStreamController {
             // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 沙箱换代提示（§4.4 T4）：turn 起始时刻 + 一次性已提示标记（逐事件探测归属失效登记）
+            var turnStartedAt = new java.util.concurrent.atomic.AtomicLong(turnStartMs);
+            var sandboxRebuildNotified = new java.util.concurrent.atomic.AtomicBoolean(false);
             // 本 turn 触及过的桶 key（toolCallId）；turn 收尾时统一清桶，防异常路径残留。
             // 按 turn 粒度隔离：清理只删本 turn 登记过的 key，toolCallId 跨 session 不可能
             // 撞 key，并行 turn 的桶不受影响（A4）
@@ -684,7 +687,8 @@ public class ChatStreamController {
                 currentChatChannel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
-                            finalUserId, sink, turnEnded, turnBucketKeys, toolSummary, forwardedPrefix),
+                            finalUserId, sink, turnEnded, turnStartedAt, sandboxRebuildNotified,
+                            turnBucketKeys, toolSummary, forwardedPrefix),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
@@ -783,6 +787,8 @@ public class ChatStreamController {
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.concurrent.atomic.AtomicLong turnStartedAt,
+                                    java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     java.util.Set<String> turnBucketKeys,
                                     TurnToolSummaryTracker toolSummary,
                                     String forwardedPrefix) {
@@ -792,6 +798,15 @@ public class ChatStreamController {
                 turnStopWatcher.unregister(sessionId, replyId);
             }
             return;
+        }
+
+        // 沙箱换代提示帧（§4.4 T4 恢复路径）：LRU 改绑/懒剔除后本会话重入被归属校验拦截
+        // 降级重建时，在首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
+        if (!sandboxRebuildNotified.get() && sandboxLifecycle != null
+                && sandboxLifecycle.popOwnershipLostSince(sessionId, turnStartedAt.get())) {
+            sandboxRebuildNotified.set(true);
+            eventBus.emitSynthetic(sessionId, replyId, "sandbox_rebuilt",
+                "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");
         }
 
         // 用户停止（POST /threads/{sid}/stop）：

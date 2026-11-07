@@ -229,9 +229,11 @@ class OpenSandboxClientTest {
     }
 
     @Test
-    void createWithPoolRefSuppressesImageAndResourceAndInjectsExtensions() throws Exception {
-        // §4.2 ③ + 评审 d17：poolRef 非空 → extensions.poolRef 透传、image/resourceLimits 抑制、
-        // entrypoint/env 保留（taskTemplate 下发通路）、timeout=TTL
+    void createWithPoolRefInjectsExtensionsAndSuppressesResource() throws Exception {
+        // §4.2 ③ + 评审 d17：poolRef 非空 → extensions.poolRef 透传、resourceLimits 抑制、
+        // entrypoint/env 保留（taskTemplate 下发通路）、timeout=TTL。image 必传：SDK
+        // Sandbox.Builder.build() 客户端强约束 image XOR snapshotId（1.0.18 实证），
+        // poolRef 路径无法抑制（上游对组合实测忽略，镜像以 Pool 模板为准）
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
             true, "pool-e2e", 5, 60, 20));
@@ -249,6 +251,7 @@ class OpenSandboxClientTest {
         try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
             var builder = mock(Sandbox.Builder.class);
             when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.entrypoint(any(java.util.List.class))).thenReturn(builder);
@@ -261,7 +264,7 @@ class OpenSandboxClientTest {
             client.create(new WorkspaceSpec(), null, options());
 
             verify(builder).extensions(eq(Map.of("poolRef", "pool-e2e")));
-            verify(builder, never()).image(anyString());
+            verify(builder).image(anyString());   // SDK 客户端强约束必传（上游忽略）
             verify(builder, never()).resource(anyMap());
             verify(builder).entrypoint(any(java.util.List.class));   // env/entrypoint 保留
             verify(builder).timeout(any(java.time.Duration.class));
@@ -405,6 +408,9 @@ class OpenSandboxClientTest {
                 () -> client.resume(resumeState));
             verify(osb).close();   // 受害降级路径 close（未执行任何命令，无实害）
             verify(manager, never()).onResumeAcquired(anyString(), anyString(), any());
+            // 身份归还：harness 降级 create 重走决策时生命周期记账仍拿得到 sid
+            //（不还回去 = 重建沙箱脱簿记，2026-11-08 lifecycle 组本地实跑实锤）
+            assertEquals(SID, spec.peekPendingSessionId());
         }
     }
 

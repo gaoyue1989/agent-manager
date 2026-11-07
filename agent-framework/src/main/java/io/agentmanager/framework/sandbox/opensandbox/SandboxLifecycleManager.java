@@ -50,8 +50,13 @@ public class SandboxLifecycleManager {
 
     private static final Logger log = LoggerFactory.getLogger(SandboxLifecycleManager.class);
 
-    /** grace 下限（评审轮一 P1：必须 > 续期间隔，60s 宽限与 60s 续期同值会拍间抖动） */
-    private static final long GRACE_FLOOR_SECONDS = 120;
+    /**
+     * grace 下限（评审轮一 P1：必须 > 续期间隔，60s 宽限与 60s 续期同值会拍间抖动）。
+     * 生产默认 120s；e2e 经系统属性 {@code -Dagent.sandbox.lifecycle.grace-floor-seconds=6}
+     * 压低加速 idle 判定（先例同 turn-lease lifetime 的 JVM 参数压低，设计 §9.3）。
+     */
+    private static final long GRACE_FLOOR_SECONDS = Long.getLong(
+        "agent.sandbox.lifecycle.grace-floor-seconds", 120L);
     /** ⑤ 整体重试上限（改绑 affected=0：他副本抢先或受害在途 touch 先行） */
     private static final int QUOTA_FULL_ROUNDS = 3;
     /** fail-open 告警限流窗（ms） */
@@ -60,6 +65,8 @@ public class SandboxLifecycleManager {
     private static final int ACQUIRE_ROUNDS = 3;
     /** 事件环形缓冲容量（§4.8） */
     private static final int EVENT_RING_SIZE = 100;
+    /** 换代提示登记表上界（进程内可丢弃缓存，防泄漏） */
+    private static final int OWNERSHIP_LOST_MAX = 256;
 
     private final SandboxBindingStore bindingStore;
     private final SandboxRenewalRegistry registry;
@@ -73,6 +80,14 @@ public class SandboxLifecycleManager {
 
     /** 事件环形缓冲（100 条，§4.8） */
     private final Deque<Map<String, Object>> eventRing = new ArrayDeque<>();
+
+    /**
+     * P3 resume 归属失效登记（sid → 时刻，容量有界）：LRU 改绑/懒剔除后旧会话重入被
+     * 归属校验拦截降级重建时登记；chat/confirm 流的换代提示帧（§4.4 T4「沙箱已重建，
+     * 未保存的工作区文件可能丢失」）据此一次性弹出（popOwnershipLostSince）。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> ownershipLostAt =
+        new java.util.concurrent.ConcurrentHashMap<>();
 
     public SandboxLifecycleManager(SandboxBindingStore bindingStore,
                                    SandboxRenewalRegistry registry,
@@ -475,9 +490,39 @@ public class SandboxLifecycleManager {
         }
     }
 
-    /** grace = max(3×RENEW_INTERVAL, 120s)（必须 > 续期间隔，评审轮一 P1） */
+    /** grace = max(3×RENEW_INTERVAL, 下限)（下限默认 120s，e2e 经系统属性压低；必须 > 续期间隔） */
     public int graceSeconds() {
         return (int) Math.max(GRACE_FLOOR_SECONDS, 3L * config.renewIntervalSeconds());
+    }
+
+    /**
+     * P3 归属失效登记（{@code OpenSandboxClient.resume} 归属校验 affected=0 时调用）：
+     * 供流侧换代提示帧一次性弹出（§4.4 T4 恢复路径）。
+     */
+    public void markOwnershipLost(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        if (ownershipLostAt.size() >= OWNERSHIP_LOST_MAX) {
+            ownershipLostAt.clear();   // 上界兜底：清空重来（提示帧是体验增强，丢失无害）
+        }
+        ownershipLostAt.put(sessionId, System.currentTimeMillis());
+    }
+
+    /**
+     * 弹出 sid 在 {@code sinceEpochMs} 之后的归属失效登记（一次性；无/早于 since 则 false
+     * 且<b>不消费</b>——旧 turn 的迟到探测不得吃掉留给新 turn 的提示）。
+     * chat/confirm 流在 turn 开始时取时刻、逐事件探测，命中即发换代提示帧。
+     */
+    public boolean popOwnershipLostSince(String sessionId, long sinceEpochMs) {
+        if (sessionId == null) {
+            return false;
+        }
+        Long at = ownershipLostAt.get(sessionId);
+        if (at == null || at < sinceEpochMs) {
+            return false;
+        }
+        return ownershipLostAt.remove(sessionId, at);   // 条件删除：并发探测恰一方弹出
     }
 
     private long ttlSeconds() {

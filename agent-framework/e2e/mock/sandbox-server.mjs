@@ -5,16 +5,30 @@
  *
  * 管理 API（:SANDBOX_MOCK_PORT）：
  *   GET    /health                                    → {"status":"healthy"}
- *   POST   /v1/sandboxes                              → 202 创建（根目录 .runtime/sandboxes/{id}/）
+ *   POST   /v1/sandboxes                              → 202 创建（根目录 .runtime/sandboxes/{id}/）；
+ *                                                        extensions.poolRef = 池认领（warm Pod 分配 + status
+ *                                                        变动 + 补位，L6）；expiresAt 按 body.timeout（秒，
+ *                                                        sandbox-pool-opensandbox-design §2.3）计算；请求体
+ *                                                        全量记录进 /stats.creates（poolRef/metadata/timeout
+ *                                                        断言源，L6/L7）
  *   GET    /v1/sandboxes/{id}                         → 200 / 404（destroyed → 404 触发 SDK 降级 create）
  *   GET    /v1/sandboxes/{id}/endpoints/{port}        → {"endpoint":"127.0.0.1:<port>/v1/sandboxes/<id>/proxy/<port>"}
- *   DELETE /v1/sandboxes/{id}                         → 204
+ *   DELETE /v1/sandboxes/{id}                         → 204（池认领沙箱回收：allocated-1，补位 warm Pod 维持 available）
+ *   POST   /v1/sandboxes/{id}/renew-expiration        → 200 {expiresAt}（更新内存值 + 计入 /stats.renews，
+ *                                                        L4/L5 断言源；renew404 故障或沙箱已删 → 404，L17）
  *   POST   /v1/metrics/events                         → 204（吞掉 SDK 埋点）
+ *   POST   /v1/pools                                  → 201 创建池（name/capacitySpec；同名 409）
+ *   GET    /v1/pools · /v1/pools/{name}              → 池列表/详情（status{total,allocated,available,revision}）
+ *   PUT    /v1/pools/{name}                           → 200（仅 capacitySpec）
+ *   DELETE /v1/pools/{name}                           → 204
  *   POST   /admin/destroy/{id}                        → 模拟容器 GC（之后 GET/connect 全 404）
- *   POST   /admin/fault {mvFail:true}                 → 故障注入：files/upload 对 path 含
- *                                                       '.tmp.' 的写入返回 500（X-ENV-8 发布
- *                                                       失败收敛路径）；{} 清除
- *   GET    /stats  POST /reset                        → 观测（X 组断言：creates/connects/commands/fileOps）
+ *   POST   /admin/fault {mvFail,renew404,poolExhausted,slowCommandMs} → 故障注入（{} 清除）：
+ *                                                       mvFail：files/upload 对 '.tmp.' 路径 500（X-ENV-8）；
+ *                                                       renew404：renew-expiration 一律 404（L17）；
+ *                                                       poolExhausted：create(poolRef) 一律 429
+ *                                                       KUBERNETES::POOL_CAPACITY_EXHAUSTED（池耗尽面，
+ *                                                       报文对齐上游 §11 V5 实测）；slowCommandMs：命令事件流首包延迟
+ *   GET    /stats  POST /reset                        → 观测（creates[带请求体]/renews/connects/commands/fileOps/pools）
  *
  * execd 代理（同端口 /v1/sandboxes/{id}/proxy/{port}/...）：
  *   GET  /ping            → 200 空体
@@ -35,11 +49,76 @@ const ROOT = process.env.MOCK_SANDBOX_ROOT ?? path.join(process.cwd(), '.runtime
 fs.mkdirSync(ROOT, { recursive: true });
 
 const EXEC_WHITELIST = /^(\|\s*)?(echo|ls|cat|mkdir|tar|base64|rm|mv|printf|test|wc|stat|find|sort|head|tail|grep|sed|sh|true|false)\b/;
-const sandboxes = new Map(); // id → {id, root, env, execdEnvsPath, destroyed, createdAt}
-const stats = { creates: [], connects: [], commands: [], fileOps: [], errors: [], faultHits: 0 };
-// 故障注入开关（/admin/fault）：mvFail = 发布用临时文件（path 含 '.tmp.'）写入返回 500，
-// 黑盒验证 PUT /sandbox/env 发布失败 → 502 → sidecar 未推进 → 调用方重试收敛（issue #230）
-const faults = { mvFail: false };
+const sandboxes = new Map(); // id → {id, root, env, execdEnvsPath, destroyed, createdAt, expiresAt, poolRef}
+const pools = new Map();     // name → {name, capacitySpec, warmPods[], allocated{sandboxId→podId}, revision}
+const stats = { creates: [], renews: [], connects: [], commands: [], fileOps: [], errors: [], faultHits: 0 };
+// 故障注入开关（/admin/fault）：
+//   mvFail = 发布用临时文件（path 含 '.tmp.'）写入返回 500，黑盒验证 PUT /sandbox/env 发布失败
+//            → 502 → sidecar 未推进 → 调用方重试收敛（issue #230）
+//   renew404 / poolExhausted / slowCommandMs = 沙箱生命周期 L 组故障面（§9.2）
+const faults = { mvFail: false, renew404: false, poolExhausted: false, slowCommandMs: 0 };
+
+// ---- 池语义（sandbox-pool-opensandbox-design §2.1/§2.2，e2e 断言源）----
+
+let poolRevisionSeq = 0;
+
+/** 建 warm Pod 占位（纯簿记 id，语义层复用沙箱目录——池预热在本 mock 里不落真实容器） */
+function warmPodId(poolName) {
+  return `${poolName}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+function createPool(name, capacitySpec) {
+  const pool = {
+    name,
+    capacitySpec: { bufferMin: 1, bufferMax: 2, poolMin: 1, poolMax: 3, ...capacitySpec },
+    warmPods: [],
+    allocated: {},   // sandboxId → podId
+    revision: (++poolRevisionSeq).toString(16),
+  };
+  for (let i = 0; i < pool.capacitySpec.bufferMin; i++) pool.warmPods.push(warmPodId(name));
+  pools.set(name, pool);
+  return pool;
+}
+
+function poolStatus(pool) {
+  return {
+    total: Object.keys(pool.allocated).length + pool.warmPods.length,
+    allocated: Object.keys(pool.allocated).length,
+    available: pool.warmPods.length,
+    revision: pool.revision,
+  };
+}
+
+/** 池认领：分配 warm Pod + 补位（recycleStrategy=Delete 归还换新语义，§11 V4/V5 实测口径） */
+function poolClaim(poolName, sandboxId) {
+  const pool = pools.get(poolName);
+  if (!pool) return { error: `pool ${poolName} not found`, status: 404 };
+  if (pool.warmPods.length === 0) {
+    return { error: 'No Pool capacity became available before the acquisition timeout.' };
+  }
+  const podId = pool.warmPods.shift();
+  pool.allocated[sandboxId] = podId;
+  pool.warmPods.push(warmPodId(poolName));   // controller 补位（认领即补，维持 bufferMin 水位）
+  return { podId };
+}
+
+/** 池回收（DELETE 沙箱）：allocated-1；available 由认领时补位维持（total-1） */
+function poolRelease(sandboxId) {
+  for (const pool of pools.values()) {
+    if (pool.allocated[sandboxId]) {
+      delete pool.allocated[sandboxId];
+      return pool.name;
+    }
+  }
+  return null;
+}
+
+function poolOfSandbox(sandboxId) {
+  for (const pool of pools.values()) {
+    if (pool.allocated[sandboxId]) return pool;
+  }
+  return null;
+}
 
 /** 模拟 execd bootstrap（components/execd/bootstrap.sh:492-503）：默认并 touch EXECD_ENVS 文件 */
 function initExecdEnvs(id, createEnv) {
@@ -108,14 +187,19 @@ function sandboxObj(id) {
     image: { uri: 'opensandbox/code-interpreter:v1.1.0' },
     status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container is running.', lastTransitionAt: now() },
     entrypoint: ['/opt/code-interpreter/code-interpreter.sh'],
-    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    expiresAt: sandboxes.get(id)?.expiresAt ?? new Date(Date.now() + 3600_000).toISOString(),
     createdAt: sandboxes.get(id)?.createdAt ?? now(),
   };
 }
 
-function runCommand(sb, command, onEvent, onEnd) {
+async function runCommand(sb, command, onEvent, onEnd) {
   const execId = crypto.randomBytes(16).toString('hex');
   const send = obj => onEvent(JSON.stringify({ ...obj, timestamp: Date.now() }));
+  // slowCommand 故障注入（§9.2）：命令事件流首包延迟，配合 mock-llm 的 slow/hang 标记
+  // 驱动「长执行期间在途续期」类用例（L5b 的另一种驱动方式）
+  if (faults.slowCommandMs > 0) {
+    await new Promise(r => setTimeout(r, faults.slowCommandMs));
+  }
   send({ type: 'init', text: execId });
   send({ type: 'ping', text: 'pong' });
   if (!EXEC_WHITELIST.test(command.trim())) {
@@ -147,15 +231,13 @@ function runCommand(sb, command, onEvent, onEnd) {
   let stdout = '', stderr = '';
   p.stdout.on('data', d => { stdout += d; });
   p.stderr.on('data', d => { stderr += d; });
-  const code = new Promise(resolve => p.on('close', resolve).on('error', () => resolve(127)));
-  code.then(c => {
-    if (stdout) send({ type: 'stdout', text: stdout.replace(/\n$/, '') });
-    if (stderr) send({ type: 'stderr', text: stderr.replace(/\n$/, '') });
-    stats.commands.push({ sandboxId: sb.id, cmd: command, mappedCmd: mapped, exitCode: c, at: Date.now() });
-    if (c === 0) send({ type: 'execution_complete', execution_time: 1 });
-    else send({ type: 'error', error: { ename: 'CommandExecError', evalue: String(c), traceback: [`exit status ${c}`] } });
-    onEnd();
-  });
+  const code = await new Promise(resolve => p.on('close', resolve).on('error', () => resolve(127)));
+  if (stdout) send({ type: 'stdout', text: stdout.replace(/\n$/, '') });
+  if (stderr) send({ type: 'stderr', text: stderr.replace(/\n$/, '') });
+  stats.commands.push({ sandboxId: sb.id, cmd: command, mappedCmd: mapped, exitCode: code, at: Date.now() });
+  if (code === 0) send({ type: 'execution_complete', execution_time: 1 });
+  else send({ type: 'error', error: { ename: 'CommandExecError', evalue: String(code), traceback: [`exit status ${code}`] } });
+  onEnd();
 }
 
 /** 最小 multipart 解析：返回 [{name, filename, body(Buffer)}] */
@@ -193,14 +275,20 @@ const server = http.createServer((req, res) => {
     const body = Buffer.concat(chunks);
     const u = new URL(req.url, `http://127.0.0.1:${PORT}`);
     const p = u.pathname;
-    const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)) };
+    // 请求日志（排障）：管理面 + 生命周期路由全记，execd 代理/埋点噪音不记
+    if (!p.includes('/proxy/') && p !== '/v1/metrics/events') {
+      console.log(`[mock-sandbox] ${req.method} ${p}${body.length ? ` body=${body.toString().slice(0, 200)}` : ''} -> started`);
+    }
 
     // 观测/管理
     if (p === '/health') return json(200, { status: 'healthy' });
     if (p === '/stats') return json(200, stats);
     if (p === '/reset') {
-      stats.creates = []; stats.connects = []; stats.commands = []; stats.fileOps = []; stats.errors = []; stats.faultHits = 0;
-      faults.mvFail = false; // 重置同步清故障注入，防单用例失败污染后续测试
+      stats.creates = []; stats.renews = []; stats.connects = []; stats.commands = []; stats.fileOps = []; stats.errors = []; stats.faultHits = 0;
+      pools.clear();
+      faults.mvFail = false; faults.renew404 = false; faults.poolExhausted = false; faults.slowCommandMs = 0;
+      // 重置同步清故障注入与池账本，防单用例失败污染后续测试
       return json(200, { status: 'reset' });
     }
     if (p.startsWith('/admin/destroy/')) {
@@ -213,19 +301,82 @@ const server = http.createServer((req, res) => {
       let requested = {};
       try { requested = JSON.parse(body.toString()) ?? {}; } catch { /* 空体 = 清除 */ }
       faults.mvFail = requested.mvFail === true;
+      faults.renew404 = requested.renew404 === true;             // L17：renew 一律 404
+      faults.poolExhausted = requested.poolExhausted === true;   // L 池耗尽：create(poolRef) 429
+      faults.slowCommandMs = Number(requested.slowCommandMs) || 0;
       return json(200, { faults });
+    }
+
+    // ---- /v1/pools（§9.2：内存 CRUD + status 变动，L6/池耗尽断言源）----
+    if (p === '/v1/pools' && req.method === 'POST') {
+      let req_ = {};
+      try { req_ = JSON.parse(body.toString()) ?? {}; } catch { /* 空体 */ }
+      const name = String(req_.name ?? '');
+      if (!name) return json(400, { message: 'name is required' });
+      if (pools.has(name)) return json(409, { message: `pool ${name} already exists` });
+      const pool = createPool(name, req_.capacitySpec ?? {});
+      return json(201, { name: pool.name, capacitySpec: pool.capacitySpec, status: poolStatus(pool), createdAt: now() });
+    }
+    if (p === '/v1/pools' && req.method === 'GET') {
+      return json(200, [...pools.values()].map(pl => ({ name: pl.name, capacitySpec: pl.capacitySpec, status: poolStatus(pl) })));
+    }
+    {
+      const mPool = /^\/v1\/pools\/([^/]+)$/.exec(p);
+      if (mPool) {
+        const name = decodeURIComponent(mPool[1]);
+        const pool = pools.get(name);
+        if (!pool) return json(404, { message: `pool ${name} not found` });
+        if (req.method === 'GET') return json(200, { name: pool.name, capacitySpec: pool.capacitySpec, status: poolStatus(pool), createdAt: now() });
+        if (req.method === 'PUT') {
+          // 上游 PUT /v1/pools/{name} 仅收 capacitySpec（§12-1 已落定）
+          let req_ = {};
+          try { req_ = JSON.parse(body.toString()) ?? {}; } catch { /* 空 */ }
+          if (req_.capacitySpec) pool.capacitySpec = { ...pool.capacitySpec, ...req_.capacitySpec };
+          pool.revision = (++poolRevisionSeq).toString(16);
+          return json(200, { name: pool.name, capacitySpec: pool.capacitySpec, status: poolStatus(pool) });
+        }
+        if (req.method === 'DELETE') {
+          pools.delete(name);
+          res.writeHead(204); return res.end();
+        }
+      }
     }
     if (p === '/v1/metrics/events') { res.writeHead(204); return res.end(); }
 
     if (p === '/v1/sandboxes' && req.method === 'POST') {
-      let createEnv = {};
-      try { createEnv = JSON.parse(body.toString())?.env ?? {}; } catch { /* 空 */ }
+      let createReq = {};
+      try { createReq = JSON.parse(body.toString()) ?? {}; } catch { /* 空 */ }
+      let createEnv = createReq.env ?? {};
       const id = crypto.randomUUID();
       const sb = { id, root: path.join(ROOT, id), destroyed: false, createdAt: now(), ...initExecdEnvs(id, createEnv) };
+      // 池认领（extensions.poolRef，L6）与池耗尽故障注入（报文对齐上游 §11 V5 实测）
+      const poolRef = createReq.extensions?.poolRef;
+      if (poolRef != null && poolRef !== '') {
+        if (faults.poolExhausted) {
+          stats.faultHits += 1;
+          return json(429, { code: 'KUBERNETES::POOL_CAPACITY_EXHAUSTED',
+            message: 'No Pool capacity became available before the acquisition timeout.' });
+        }
+        const claim = poolClaim(String(poolRef), id);
+        if (claim.error) {
+          // 池不存在 → 404（配置错误）；池耗尽 → 429（对齐上游 §11 V5 报文）
+          if (claim.status === 404) return json(404, { message: claim.error });
+          return json(429, { code: 'KUBERNETES::POOL_CAPACITY_EXHAUSTED', message: claim.error });
+        }
+        sb.poolRef = String(poolRef);
+      }
+      // TTL 语义（§2.3）：expiresAt 按 body.timeout（秒）计算，默认 3600s——L4/L5 的
+      // expiresAt 后移断言与 GET /v1/sandboxes/{id} 读数同源
+      const timeoutSec = Number(createReq.timeout) > 0 ? Number(createReq.timeout) : 3600;
+      sb.expiresAt = new Date(Date.now() + timeoutSec * 1000).toISOString();
       fs.mkdirSync(sb.root, { recursive: true });
       sandboxes.set(id, sb);
-      stats.creates.push({ id, at: Date.now() });
-      return json(202, { id, status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container started successfully.', lastTransitionAt: now() }, metadata: {}, expiresAt: new Date(Date.now() + 3600_000).toISOString(), createdAt: sb.createdAt, entrypoint: ['/opt/code-interpreter/code-interpreter.sh'] });
+      // 请求体全量记录（L6 poolRef / L7 metadata.session_id / timeout 断言源）
+      stats.creates.push({ id, at: Date.now(),
+        body: { extensions: createReq.extensions ?? null, metadata: createReq.metadata ?? null,
+                timeout: createReq.timeout ?? null, image: createReq.image ?? null,
+                resource: createReq.resource ?? null, entrypoint: createReq.entrypoint ?? null } });
+      return json(202, { id, status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container started successfully.', lastTransitionAt: now() }, metadata: createReq.metadata ?? {}, extensions: createReq.extensions ?? {}, expiresAt: sb.expiresAt, createdAt: sb.createdAt, entrypoint: createReq.entrypoint ?? ['/opt/code-interpreter/code-interpreter.sh'] });
     }
 
     const mSb = /^\/v1\/sandboxes\/([0-9a-f-]+)(\/.*)?$/.exec(p);
@@ -233,8 +384,23 @@ const server = http.createServer((req, res) => {
       const id = mSb[1];
       const rest = mSb[2] ?? '/';
       if (req.method === 'DELETE' && rest === '/') {
+        poolRelease(id);   // 池认领沙箱回收（allocated-1；available 由认领补位维持）
         sandboxes.delete(id);
         res.writeHead(204); return res.end();
+      }
+      // renew-expiration（§2.3 上游契约）：更新内存 expiresAt + 计入 /stats.renews（L4/L5/L17 断言源）
+      if (rest === '/renew-expiration' && req.method === 'POST') {
+        const sb = getSb(id);
+        let req_ = {};
+        try { req_ = JSON.parse(body.toString()) ?? {}; } catch { /* 空体 */ }
+        const target = String(req_.expiresAt ?? '');
+        if (faults.renew404 || !sb) {
+          if (faults.renew404) stats.faultHits += 1;
+          return json(404, { message: 'sandbox not found' });
+        }
+        sb.expiresAt = target || sb.expiresAt;
+        stats.renews.push({ sandboxId: id, expiresAt: sb.expiresAt, at: Date.now() });
+        return json(200, { expiresAt: sb.expiresAt });
       }
       if (rest === '/' && req.method === 'GET') {
         const sb = getSb(id);

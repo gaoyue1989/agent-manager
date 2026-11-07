@@ -385,8 +385,10 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_USER_QUOTA` | `5` | | 单用户沙箱配额（per-service，checkpoint 库隔离天然分服务）；0 = 不限（仍记账不判满）；配额满且全忙 → chat 预检 409 / exec 时 SSE `user_quota_exhausted` |
 | `SANDBOX_RENEW_INTERVAL_SECONDS` | `60` | | T3 在途续期间隔（守护线程扫注册表：call refcount + turn 注册 + hold 三信号）；启动校验 `< TTL×60/2`；busy 判定 grace = max(3×间隔, 120s) |
 | `SANDBOX_CONFIRM_HOLD_MINUTES` | `20` | | T4 HITL 挂起保留窗：ask 挂起后沙箱持续续期、不可被 LRU 调度（同沙箱恢复保文件），过期停续可调度/自然 GC；每次 ask 重新计窗 |
-| `SANDBOX_POOL_REF` | 空 | | OpenSandbox 服务端池 Pool 名；空 = 不用池（create 不带 extensions.poolRef）；非空时 create 抑制 image/resourceLimits（由池模板定义） |
+| `SANDBOX_POOL_REF` | 空 | | OpenSandbox 服务端池 Pool 名；空 = 不用池（create 不带 extensions.poolRef）；非空时 create 抑制 resourceLimits（由池模板定义；image 受 SDK 客户端强约束必传、上游实测忽略） |
 | `AGENT_SERVICE_K8S_NAME` | 空 | | 本服务 k8s 名（create 注入 metadata.service，console 只读页过滤口径 §5.3 = 含 oaf- 前缀）；缺省由 HOST_NAME（Pod 名）剥 `{rs-hash}-{suffix}` 后缀推导，均不可得则不注入 |
+| （JVM 属性）`agent.sandbox.lifecycle.grace-floor-seconds` | `120` | | busy 判定 grace 下限（grace = max(3×RENEW_INTERVAL, 下限)）；e2e 压至 6s 加速 idle 判定（§9.3 环境参数） |
+| （JVM 属性）`agent.sandbox.lifecycle.registry-overage-minutes` | `120` | | 续期注册表 bornAt 超龄剔除下限（剔除阈值 = max(TTL×2, 下限)）；e2e 压至 2min 使 L16 分钟级可测 |
 | `AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS` | `7` | | 绑定行保留天数（SessionCleanupService 定时清理 §4.1.2）：过期超窗行删 + 计数锚行锁内重算 + 空锚行删 |
 | `FILE_UPLOAD_ENABLED` | `true` | | 文件上传开关（其余 FILE_* 见 application.yml / file-upload-download-plan.md：上限 20MB、pending 20、MIME 白名单、存储后端 FILE_STORAGE_TYPE=local/s3） |
 | `FILE_EXTERNAL_URL_PREFIXES` | 空(禁用) | | present_url 外部交付物与 /files/{id} 代理下载共用的 URL 前缀白名单（逗号分隔）；发布助手集群内必配 `http://oaf-platform-backend.agent-platform.svc.cluster.local:8080`（Helm 部署的后端 Service 名） |

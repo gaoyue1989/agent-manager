@@ -17,8 +17,9 @@ fi
 if [ "$FAILED" -eq 0 ]; then
   case "$GROUP" in
     core)    PROJECTS="--project=api-core --project=api-models --project=api-reload --project=ui" ;;
-    multi)   PROJECTS="--project=api-multi --project=ui-multi --project=api-multi-kill" ;;
+    multi)   PROJECTS="--project=api-multi --project=ui-multi --project=api-multi-kill --project=api-sandbox-lifecycle-multi" ;;
     sandbox) PROJECTS="--project=api-sandbox" ;;
+    lifecycle) PROJECTS="--project=api-sandbox-lifecycle" ;;
     agui)    PROJECTS="--project=api-agui" ;;
     protocol) PROJECTS="--project=api-protocol" ;;
     protocol-multi) PROJECTS="--project=api-protocol-multi" ;;

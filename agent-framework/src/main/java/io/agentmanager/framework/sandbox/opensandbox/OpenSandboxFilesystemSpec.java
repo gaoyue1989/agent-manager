@@ -190,6 +190,12 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         return key;
     }
 
+    /** 读取但不清除待记账会话键（测试断言/兜底路径用） */
+    public String peekPendingSessionId() {
+        var key = pendingSessionId.get();
+        return key == null || key.isBlank() ? null : key;
+    }
+
     /** 清除待记账会话键（middleware 消费后调用；reactor 线程池复用，残留会污染下个 turn） */
     public void clearPendingSessionId() {
         pendingSessionId.remove();

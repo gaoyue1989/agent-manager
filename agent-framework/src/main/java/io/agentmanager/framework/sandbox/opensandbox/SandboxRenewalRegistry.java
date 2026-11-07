@@ -50,8 +50,13 @@ public class SandboxRenewalRegistry implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(SandboxRenewalRegistry.class);
 
-    /** bornAt 超龄下限（max(TTL×2, 2h) 的下限项） */
-    private static final Duration MIN_OVERAGE = Duration.ofHours(2);
+    /**
+     * bornAt 超龄下限（max(TTL×2, 2h) 的下限项；设计 §4.4「可配」）：生产默认 2h，
+     * e2e 经系统属性 {@code -Dagent.sandbox.lifecycle.registry-overage-minutes=2} 压低，
+     * 使 L16（挂死 turn 超龄剔除）在分钟级可测。
+     */
+    private static final Duration MIN_OVERAGE = Duration.ofMinutes(
+        Long.getLong("agent.sandbox.lifecycle.registry-overage-minutes", 120L));
     /** 连续失败告警阈值（§4.4：连续 N 次失败 → 事件告警） */
     private static final int RENEW_ALERT_THRESHOLD = 3;
 
