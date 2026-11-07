@@ -43,6 +43,7 @@ const BRANCH_BASE = `feat/issue-${ISSUE}`;
 const PR_BODY_FILE = `/tmp/pr-body-${ISSUE}.md`;
 const REGISTRY = "172.20.0.1:5001";
 const BE_TAG = `platform-backend:pipeline-issue-${ISSUE}`;
+const FE_TAG = `platform-frontend:pipeline-issue-${ISSUE}`;
 const AF_TAG = `${REGISTRY}/agent-framework:pipeline-issue-${ISSUE}`;
 const GIT_PROXY = PROXY ? ["-c", `http.proxy=${PROXY}`, "-c", `https.proxy=${PROXY}`] : [];
 const NET =
@@ -644,6 +645,31 @@ async function buildAndDeployModules(): Promise<string> {
       output: { tail: 8_192 },
     });
     if (r.exitCode !== 0) errs.push(`platform-backend 滚动更新未就绪：\n${r.stdout.slice(-1000)}${r.stderr.slice(-500)}`);
+  }
+  // frontend 部署验证分支（与 backend 同构）：裸 tag + IfNotPresent（manifests/frontend.yaml，
+  // 与 backend 语义对齐）——Always 会让 containerd 对裸 tag 强制回源 docker.io 解析，kind 环境
+  // 必然 i/o timeout（2026-11-08 第 1 轮部署实锤 ImagePullBackOff）
+  if (dirSet.has("frontend")) {
+    const b = await world.run("docker", ["build", "-t", FE_TAG, `${WT}/frontend`], {
+      timeoutMs: 900_000,
+      output: { tail: 16_384 },
+    });
+    if (b.exitCode !== 0) errs.push(`frontend 镜像构建失败：\n${(b.stdout + b.stderr).slice(-2500)}`);
+    const l = await world.run("kind", ["load", "docker-image", FE_TAG, "--name", String(kindCluster)], {
+      timeoutMs: 300_000,
+      output: { tail: 8_192 },
+    });
+    if (l.exitCode !== 0) errs.push(`frontend 镜像导入 kind 失败：\n${l.stderr.slice(-1000)}`);
+    const s2 = await world.run("kubectl", ["-n", "agent-platform", "set", "image", "deployment/platform-frontend", `frontend=${FE_TAG}`]);
+    if (s2.exitCode !== 0) errs.push(`frontend set image 失败：\n${s2.stderr.slice(-1000)}`);
+    // 同 BE_TAG 语义：恒定 tag 重部署 set image 为 no-op，无条件 rollout restart 强制换代
+    const rs2 = await world.run("kubectl", ["-n", "agent-platform", "rollout", "restart", "deployment/platform-frontend"]);
+    if (rs2.exitCode !== 0) errs.push(`frontend rollout restart 失败：\n${rs2.stderr.slice(-1000)}`);
+    const r2 = await world.run("kubectl", ["-n", "agent-platform", "rollout", "status", "deployment/platform-frontend", "--timeout=300s"], {
+      timeoutMs: 330_000,
+      output: { tail: 8_192 },
+    });
+    if (r2.exitCode !== 0) errs.push(`platform-frontend 滚动更新未就绪：\n${r2.stdout.slice(-1000)}${r2.stderr.slice(-500)}`);
   }
   if (dirSet.has("agent-framework")) {
     const cp = await world.run(
