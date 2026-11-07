@@ -20,8 +20,6 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private Duration timeout = Duration.ofMinutes(60);
     private List<String> entrypoint = List.of("/opt/code-interpreter/code-interpreter.sh");
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
-    /** Pod requests（D19 资源双档，sandbox-pool-design）：null = 不传（上游 server 缺省把 limits 同时作 requests）；低 request 启动独立于池开关生效 */
-    private Map<String, String> resourceRequests;
     private Map<String, String> environment = new HashMap<>();
     private String workspaceRoot = "/workspace";
 
@@ -47,7 +45,6 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public Duration getTimeout() { return timeout; }
     public List<String> getEntrypoint() { return entrypoint; }
     public Map<String, String> getResource() { return resource; }
-    public Map<String, String> getResourceRequests() { return resourceRequests; }
     public Map<String, String> getEnvironment() { return environment; }
 
     // ---- fluent builder methods ----
@@ -57,7 +54,6 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions timeout(Duration timeout) { this.timeout = timeout; return this; }
     public OpenSandboxClientOptions entrypoint(List<String> entrypoint) { this.entrypoint = entrypoint; return this; }
     public OpenSandboxClientOptions resource(Map<String, String> resource) { this.resource = resource; return this; }
-    public OpenSandboxClientOptions resourceRequests(Map<String, String> resourceRequests) { this.resourceRequests = resourceRequests; return this; }
     public OpenSandboxClientOptions environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxClientOptions workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
 }

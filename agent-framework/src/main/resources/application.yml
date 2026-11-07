@@ -80,8 +80,6 @@ agent:
   cleanup:
     skill-cache-gc-enabled: ${AGENT_CLEANUP_SKILL_CACHE_GC_ENABLED:true}
     skill-cache-retention-days: ${AGENT_CLEANUP_SKILL_CACHE_RETENTION_DAYS:2}
-    # D16 确认硬截止（sandbox-pool-design；占位符映射是 env 直传的唯一通路，与同文件其他键同款）
-    confirm-deadline-minutes: ${AGENT_CONFIRM_DEADLINE_MINUTES:10}
   sandbox:
     enabled: ${SANDBOX_ENABLED:false}
     image: ${SANDBOX_IMAGE:opensandbox/code-interpreter:v1.1.0}
@@ -102,25 +100,6 @@ agent:
     session-agent-isolation: ${SANDBOX_SESSION_AGENT_ISOLATION:true}
     session-agent-cache-max: ${SANDBOX_SESSION_AGENT_CACHE_MAX:500}
     session-agent-cache-ttl-minutes: ${SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES:30}
-    # D19 资源双档（sandbox-pool-design）：Pod requests 透传 SDK resourceRequests，
-    # 独立于池开关生效（非池路径同样低 request 启动；limit 沿用 cpu-count/memory-mb）
-    cpu-request: ${SANDBOX_CPU_REQUEST:100m}
-    memory-request: ${SANDBOX_MEMORY_REQUEST:128Mi}
-    # 沙箱池化（sandbox-pool-design §5.6，D1；键名平铺与 PoolConfig record 字段一一对应）。
-    # 占位符映射是 env 直传的唯一通路：SystemEnvironmentPropertyMapper 只把 SANDBOX_POOL_ENABLED
-    # 映射到 sandbox.pool.enabled（无 agent. 前缀），Binder 查询 agent.sandbox.pool.enabled
-    # 命中的是本段——缺段时嵌套 record 绑定 null 归一 defaults()（enabled=false），env 永不生效
-    pool:
-      enabled: ${SANDBOX_POOL_ENABLED:false}
-      min-idle: ${SANDBOX_POOL_MIN_IDLE:5}
-      max-size: ${SANDBOX_POOL_MAX_SIZE:20}
-      max-wait-seconds: ${SANDBOX_POOL_MAX_WAIT_SECONDS:120}
-      idle-return-seconds: ${SANDBOX_POOL_IDLE_RETURN_SECONDS:600}
-      scan-interval-seconds: ${SANDBOX_POOL_SCAN_INTERVAL_SECONDS:60}
-      rebuild-concurrency: ${SANDBOX_POOL_REBUILD_CONCURRENCY:2}
-      user-max-containers: ${SANDBOX_POOL_USER_MAX_CONTAINERS:5}
-      sticky-ttl-seconds: ${SANDBOX_POOL_STICKY_TTL_SECONDS:600}
-      grow-step: ${SANDBOX_POOL_GROW_STEP:5}
     opensandbox:
       server-url: ${OPENSANDBOX_SERVER_URL:192.168.31.155:8090}
       api-key: ${OPENSANDBOX_API_KEY:}

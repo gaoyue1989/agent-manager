@@ -611,46 +611,6 @@ class ThreadControllerTest {
     }
 
     @Test
-    void threadHistoryShouldExposeExpiresAtWhenDeadlineEnabled_g5() throws Exception {
-        // g5/D16：/history pendingConfirm（confirm_context 分支）透出 expires_at=created_at+deadline——
-        // 此前仅 status 端点透出，刷新/切会话重建的确认卡永远无倒计时
-        var pending = new ConfirmContextStore.PendingConfirm("reply-x", List.of(
-            ToolUseBlock.builder().id("call-x").name("get_weather").input(java.util.Map.of()).build()),
-            java.time.Instant.parse("2026-11-06T00:00:00Z"), null, null);
-        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(pending));
-        when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
-
-        var props = org.mockito.Mockito.mock(io.agentmanager.framework.config.AgentManagerProperties.class);
-        // deadline=10（第 2 参 confirmDeadlineMinutes）
-        org.mockito.Mockito.when(props.cleanup()).thenReturn(new io.agentmanager.framework.config.AgentManagerProperties.CleanupConfig(
-            10, 10, 60, 20, 30, 7, true, 2));
-        var field = ThreadController.class.getDeclaredField("agentProps");
-        field.setAccessible(true);
-        field.set(controller, props);
-
-        var result = controller.threadHistory("acme:g5", null, true, 200, null).getBody();
-        @SuppressWarnings("unchecked")
-        var payload = (java.util.Map<String, Object>) result.get("pendingConfirm");
-        assertNotNull(payload.get("expires_at"), "deadline 开启时 history pendingConfirm 必须透出 expires_at");
-        assertEquals("2026-11-06T00:10:00Z", payload.get("expires_at"),
-            "expires_at = created_at + confirmDeadlineMinutes");
-    }
-
-    @Test
-    void threadHistoryShouldOmitExpiresAtWhenPropsMissing() throws Exception {
-        // agentProps 未装配（存量测试直接 new）→ 不透出（与截止关闭 ≤0 同口径），additive 无回归
-        var pending = new ConfirmContextStore.PendingConfirm("reply-y", List.of(
-            ToolUseBlock.builder().id("call-y").name("t").input(java.util.Map.of()).build()),
-            java.time.Instant.now(), null, null);
-        when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.of(pending));
-        when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));
-        var result = controller.threadHistory("acme:g5b", null, true, 200, null).getBody();
-        @SuppressWarnings("unchecked")
-        var payload = (java.util.Map<String, Object>) result.get("pendingConfirm");
-        assertTrue(!payload.containsKey("expires_at"));
-    }
-
-    @Test
     void threadHistoryShouldReturnNullPendingConfirmWhenNone() throws Exception {
         when(confirmContextStore.findHeadPending(anyString())).thenReturn(Optional.empty());
         when(dataSource.getConnection()).thenThrow(new RuntimeException("skip both"));

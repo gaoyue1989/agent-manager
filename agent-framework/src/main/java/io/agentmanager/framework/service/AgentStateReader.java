@@ -107,56 +107,6 @@ public class AgentStateReader {
     }
 
     /**
-     * ASKING 挂起的近似时刻（D16 确认硬截止的兜底时钟源）：{@code agent_state} 行的
-     * {@code MAX(updated_at)}（列存在且 ON UPDATE CURRENT_TIMESTAMP，V1 基线核实）。
-     *
-     * <p>挂起后 state 不再写入（ASKING 态新 turn 被入口预检拒绝、confirm 恢复才更新），
-     * 因此该值 ≈ 挂起落库时刻；confirm_context 行已被 TTL 清理时以此判定是否超截止
-     * （sandbox-pool-design D16：主时钟源 = 行 created_at，本方法为行不在时的兜底）。
-     * 仅在挂起已确认存在后调用（调用方先经 hasPendingConfirm/loadAskingSnapshot 判定）。
-     *
-     * @param sessionIds key 候选（与 {@link #loadAskingSnapshot} 同序）
-     * @return 挂起近似时刻；无行或读失败返回 null（调用方按「不可判定」保守放行）
-     */
-    public java.time.Instant loadAskingUpdatedAt(String... sessionIds) {
-        for (var sid : sessionIds) {
-            if (sid == null || sid.isBlank()) {
-                continue;
-            }
-            try (var conn = dataSource.getConnection();
-                 var stmt = conn.prepareStatement(
-                     "SELECT MAX(updated_at) AS ask_time FROM agent_state "
-                         + "WHERE (session_id = ? "
-                         +   "OR session_id LIKE CONCAT(?, ':%') "
-                         +   "OR session_id LIKE CONCAT(?, '__%') "
-                         +   "OR session_id LIKE CONCAT('%:', ?) "
-                         +   "OR session_id LIKE CONCAT('%__', ?)) "
-                         + "AND state_key = 'agent_state'")) {
-                stmt.setString(1, sid);
-                stmt.setString(2, sid);
-                stmt.setString(3, sid);
-                stmt.setString(4, sid);
-                stmt.setString(5, sid);
-                var rs = stmt.executeQuery();
-                if (rs.next()) {
-                    var ts = rs.getTimestamp("ask_time");
-                    if (ts != null) {
-                        return ts.toInstant();
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("AgentStateReader: load updated_at failed for {}: {}", sessionId0(sid), e.getMessage());
-            }
-        }
-        return null;
-    }
-
-    /** 截断会话 id 供日志（防超长 key 刷屏） */
-    private static String sessionId0(String sid) {
-        return sid.length() > 64 ? sid.substring(0, 64) + "…" : sid;
-    }
-
-    /**
      * HITL 挂起快照：一次 DB 读取派生恢复所需的全部要素。
      *
      * @param asking       挂起工具（前端词表形态，含 reply_id）

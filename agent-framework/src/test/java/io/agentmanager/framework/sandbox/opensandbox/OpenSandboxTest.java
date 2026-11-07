@@ -32,54 +32,6 @@ import io.agentscope.core.agent.RuntimeContext;
 
 class OpenSandboxTest {
 
-    /**
-     * g1（D14 在途流式续约）：doExec 长命令阻塞执行期间必须周期续约池租约——
-     * 入口单次续约 + 命令执行无续约点的窗口会让「单条长命令 > IDLE_RETURN + turn_lease 硬寿命」
-     * 场景下双保险双双失活、容器被扫描回收（粘滞继承互踩 / 粘滞到期中途 kill 命令）。
-     */
-    @Test
-    void doExecShouldRenewLeasePeriodicallyDuringLongCommand() throws Exception {
-        var osb = mock(Sandbox.class);
-        var commands = mock(Commands.class);
-        // 模拟长命令：阻塞 300ms（周期 50ms → 期间应续约多次）
-        when(commands.run(anyString())).thenAnswer(inv -> {
-            Thread.sleep(300);
-            return mockExecution(0, "ok", null);
-        });
-        when(osb.commands()).thenReturn(commands);
-        var pool = mock(SandboxPoolManager.class);
-        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
-        sandbox.setSandboxPoolManager(pool);
-        sandbox.getOsbState().setSandboxId("sb-inflight");
-        sandbox.inFlightLeaseRenewMs = 50;   // 测试加速（生产默认 20s）
-
-        var result = sandbox.doExec(RuntimeContext.builder().build(), "sleep 0.3", 10);
-        assertEquals(0, result.exitCode());
-        // 命令执行期间至少 2 次周期续约（入口 renewPoolLease 之外）+ 结束后取消
-        verify(pool, atLeast(2)).renew("sb-inflight");
-        Thread.sleep(150);   // 超过续约周期：取消后不得再有续约
-        int callsAfterCancel = org.mockito.Mockito.mockingDetails(pool).getInvocations().size();
-        Thread.sleep(150);
-        assertEquals(callsAfterCancel,
-            org.mockito.Mockito.mockingDetails(pool).getInvocations().size(),
-            "命令结束后在途续约必须停止");
-    }
-
-    @Test
-    void doExecShouldNotRenewWhenPoolDisabled() throws Exception {
-        var osb = mock(Sandbox.class);
-        var commands = mock(Commands.class);
-        var exec = mockExecution(0, "ok", null);   // 预构建：嵌套 when 会触发 UnfinishedStubbing
-        when(commands.run(anyString())).thenReturn(exec);
-        when(osb.commands()).thenReturn(commands);
-        var pool = mock(SandboxPoolManager.class);
-        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
-        sandbox.setSandboxPoolManager(pool);   // pool 注入但 sandboxId 缺失 → 续约直通
-        // 不设 sandboxId（null）→ startInFlightLeaseRenewal 返回 null
-        sandbox.doExec(RuntimeContext.builder().build(), "echo hi", 5);
-        verify(pool, never()).renew(anyString());
-    }
-
     private static OpenSandboxClientOptions options() {
         return new OpenSandboxClientOptions()
             .serverUrl("s").apiKey("k")
