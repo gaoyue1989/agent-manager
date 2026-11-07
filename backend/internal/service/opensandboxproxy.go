@@ -76,10 +76,24 @@ func (s SandboxCapacitySpec) validate() error {
 // CreateSandboxPoolInput 创建池入参。评审 d7：recycleStrategy 不是上游 POST /v1/pools 的
 // 请求字段（CreatePoolRequest 仅 name/template/capacitySpec，release-1.1.0 schema.py
 // 实证），收了会被 FastAPI 静默忽略——契约不收，回收策略取 CRD 默认 Delete（V4 语义不变）。
+// 但设计 §5.2 承诺枚举校验（黑盒第 1 轮实锤：recycleStrategy:"Bogus" → 201 静默丢弃），
+// 故入口侧仍做白名单校验（合法值接受但不透传，非法值 400 拒绝）。
 type CreateSandboxPoolInput struct {
-	Name         string              `json:"name"`
-	Image        string              `json:"image,omitempty"`
-	CapacitySpec SandboxCapacitySpec `json:"capacitySpec"`
+	Name            string              `json:"name"`
+	Image           string              `json:"image,omitempty"`
+	CapacitySpec    SandboxCapacitySpec `json:"capacitySpec"`
+	RecycleStrategy string              `json:"recycleStrategy,omitempty"`
+}
+
+// validateRecycleStrategy 设计 §5.2 枚举校验：空（缺省）或 Delete/Restart/Noop 合法，
+// 其余 400。字段不透传上游（d7），上游按 CRD 默认 Delete。
+func validateRecycleStrategy(v string) error {
+	switch v {
+	case "", "Delete", "Restart", "Noop":
+		return nil
+	default:
+		return fmt.Errorf("%w: recycleStrategy 非法值 %q（合法：Delete / Restart / Noop）", ErrInvalidForm, v)
+	}
 }
 
 // sandboxConfig 代理出所需的平台配置切片。
@@ -208,6 +222,9 @@ func (c *Core) AdminCreateSandboxPool(in CreateSandboxPoolInput, actor uint) (js
 		return nil, err
 	}
 	if err := in.CapacitySpec.validate(); err != nil {
+		return nil, err
+	}
+	if err := validateRecycleStrategy(in.RecycleStrategy); err != nil {
 		return nil, err
 	}
 	image := strings.TrimSpace(in.Image)
