@@ -5,13 +5,26 @@
  *
  * 管理 API（:SANDBOX_MOCK_PORT）：
  *   GET    /health                                    → {"status":"healthy"}
- *   POST   /v1/sandboxes                              → 202 创建（根目录 .runtime/sandboxes/{id}/）
+ *   POST   /v1/sandboxes                              → 202 创建（根目录 .runtime/sandboxes/{id}/；
+ *                                                        记录 metadata/extensions.poolRef/timeout）
+ *   GET    /v1/sandboxes                              → 200 分页列表（state/metadata 过滤 + page/pageSize，
+ *                                                        m12 沙箱管理面数据源；release-1.1.0 语法）
  *   GET    /v1/sandboxes/{id}                         → 200 / 404（destroyed → 404 触发 SDK 降级 create）
  *   GET    /v1/sandboxes/{id}/endpoints/{port}        → {"endpoint":"127.0.0.1:<port>/v1/sandboxes/<id>/proxy/<port>"}
- *   DELETE /v1/sandboxes/{id}                         → 204
+ *   POST   /v1/sandboxes/{id}/renew-expiration        → 200 {expiresAt}（TTL 续期）
+ *   DELETE /v1/sandboxes/{id}                         → 204（poolRef 认领的归还池 available）
+ *   POST   /v1/pools                                  → 201 建池（name/template/capacitySpec；
+ *                                                        409 同名；模板/容量原样记账 stats.pools）
+ *   GET    /v1/pools | /v1/pools/{name}               → 200 列表/详情（status{total,allocated,available}）
+ *   PUT    /v1/pools/{name}                           → 200 仅 capacitySpec
+ *   DELETE /v1/pools/{name}                           → 204
  *   POST   /v1/metrics/events                         → 204（吞掉 SDK 埋点）
  *   POST   /admin/destroy/{id}                        → 模拟容器 GC（之后 GET/connect 全 404）
- *   GET    /stats  POST /reset                        → 观测（X 组断言：creates/connects/commands/fileOps）
+ *   POST   /admin/fault                               → 故障注入开关（m12 上游故障分支）：
+ *                                                        {"mode":"pools501"|"unauthorized"|"poolExhausted"|"renew404","on":true|false}
+ *                                                        / {"reset":true} 全清；GET /admin/fault 查看当前
+ *   GET    /stats  POST /reset                        → 观测（X 组断言：creates/connects/commands/fileOps；
+ *                                                        pools 记录建池载荷供 m12 断言）
  *
  * execd 代理（同端口 /v1/sandboxes/{id}/proxy/{port}/...）：
  *   GET  /ping            → 200 空体
@@ -34,8 +47,10 @@ const ROOT = process.env.MOCK_SANDBOX_ROOT ?? path.join(process.cwd(), '.runtime
 fs.mkdirSync(ROOT, { recursive: true });
 
 const EXEC_WHITELIST = /^(\|\s*)?(echo|ls|cat|mkdir|tar|base64|rm|printf|test|wc|stat|find|sort|head|tail|grep|sed|sh|true|false)\b/;
-const sandboxes = new Map(); // id → {root, destroyed, createdAt}
-const stats = { creates: [], connects: [], commands: [], fileOps: [], errors: [] };
+const sandboxes = new Map(); // id → {root, destroyed, createdAt, metadata, poolRef, expiresAt}
+const pools = new Map();     // name → {name, template, capacitySpec, allocated, createdAt}
+const stats = { creates: [], connects: [], commands: [], fileOps: [], errors: [], pools: [] };
+const faults = { pools501: false, unauthorized: false, poolExhausted: false, renew404: false }; // m12 故障注入
 
 const now = () => new Date().toISOString();
 function sandboxPath(id, rel) {
@@ -52,13 +67,28 @@ function getSb(id) {
   return sb;
 }
 function sandboxObj(id) {
+  const sb = sandboxes.get(id);
   return {
     id,
     image: { uri: 'opensandbox/code-interpreter:v1.1.0' },
     status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container is running.', lastTransitionAt: now() },
     entrypoint: ['/opt/code-interpreter/code-interpreter.sh'],
-    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-    createdAt: sandboxes.get(id)?.createdAt ?? now(),
+    expiresAt: sb?.expiresAt ?? new Date(Date.now() + 3600_000).toISOString(),
+    metadata: sb?.metadata ?? {},
+    createdAt: sb?.createdAt ?? now(),
+  };
+}
+
+function poolObj(name) {
+  const p = pools.get(name);
+  if (!p) return null;
+  const total = Number(p.capacitySpec?.poolMin ?? 0) + 1; // 确定性水位：warm Pod = poolMin，1 个可被认领
+  const allocated = p.allocated ?? 0;
+  return {
+    name: p.name,
+    capacitySpec: p.capacitySpec,
+    status: { total, allocated, available: Math.max(0, total - allocated), revision: 'mock-rev-1' },
+    createdAt: p.createdAt,
   };
 }
 
@@ -146,7 +176,18 @@ const server = http.createServer((req, res) => {
     // 观测/管理
     if (p === '/health') return json(200, { status: 'healthy' });
     if (p === '/stats') return json(200, stats);
-    if (p === '/reset') { stats.creates = []; stats.connects = []; stats.commands = []; stats.fileOps = []; stats.errors = []; return json(200, { status: 'reset' }); }
+    if (p === '/reset') { stats.creates = []; stats.connects = []; stats.commands = []; stats.fileOps = []; stats.errors = []; stats.pools = []; return json(200, { status: 'reset' }); }
+    if (p === '/admin/fault' && req.method === 'GET') return json(200, faults);
+    if (p === '/admin/fault' && req.method === 'POST') {
+      let f = {};
+      try { f = JSON.parse(body.toString() || '{}'); } catch { /* 空体 */ }
+      if (f.reset) { for (const k of Object.keys(faults)) faults[k] = false; return json(200, faults); }
+      if (typeof f.mode === 'string' && f.mode in faults) {
+        faults[f.mode] = f.on !== false;
+        return json(200, faults);
+      }
+      return json(400, { message: 'mode must be one of ' + Object.keys(faults).join('|') + ' (or {"reset":true})' });
+    }
     if (p.startsWith('/admin/destroy/')) {
       const id = p.split('/')[3];
       const sb = sandboxes.get(id);
@@ -155,13 +196,82 @@ const server = http.createServer((req, res) => {
     }
     if (p === '/v1/metrics/events') { res.writeHead(204); return res.end(); }
 
+    // ---- 池管理（m12：/v1/pools 内存 CRUD；faults.pools501/unauthorized 注入上游故障分支）----
+    if (p === '/v1/pools' || p.startsWith('/v1/pools/')) {
+      if (faults.pools501) return json(501, { code: 'K8S_POOL_NOT_SUPPORTED', message: 'mock fault: pools501' });
+      if (faults.unauthorized) return json(401, { message: 'mock fault: unauthorized' });
+      const poolName = p.startsWith('/v1/pools/') ? p.slice('/v1/pools/'.length) : '';
+      if (req.method === 'POST' && p === '/v1/pools') {
+        let req2 = {};
+        try { req2 = JSON.parse(body.toString() || '{}'); } catch { /* 空体 */ }
+        if (!req2.name || !req2.capacitySpec) return json(400, { message: 'name and capacitySpec are required' });
+        if (pools.has(req2.name)) return json(409, { code: 'POOL_ALREADY_EXISTS', message: `pool ${req2.name} already exists` });
+        pools.set(req2.name, { name: req2.name, template: req2.template ?? null, capacitySpec: req2.capacitySpec, allocated: 0, createdAt: now() });
+        stats.pools.push({ name: req2.name, template: req2.template ?? null, capacitySpec: req2.capacitySpec, at: Date.now() });
+        return json(201, poolObj(req2.name));
+      }
+      if (req.method === 'GET' && p === '/v1/pools') return json(200, { items: [...pools.keys()].map(poolObj) });
+      if (poolName && req.method === 'GET') {
+        const po = poolObj(poolName);
+        return po ? json(200, po) : json(404, { message: `pool ${poolName} not found` });
+      }
+      if (poolName && req.method === 'PUT') {
+        const po = pools.get(poolName);
+        if (!po) return json(404, { message: `pool ${poolName} not found` });
+        let req2 = {};
+        try { req2 = JSON.parse(body.toString() || '{}'); } catch { /* 空体 */ }
+        if (!req2.capacitySpec) return json(400, { message: 'capacitySpec is required' });
+        po.capacitySpec = req2.capacitySpec; // 仅容量（release-1.1.0 UpdatePoolRequest）
+        return json(200, poolObj(poolName));
+      }
+      if (poolName && req.method === 'DELETE') {
+        if (!pools.delete(poolName)) return json(404, { message: `pool ${poolName} not found` });
+        res.writeHead(204); return res.end();
+      }
+    }
+
+    if (p === '/v1/sandboxes' && req.method === 'GET') {
+      // 分页列表（release-1.1.0 语法：state 可重复 OR、metadata=k%3Dv、page/pageSize≤200）
+      const states = u.searchParams.getAll('state');
+      let items = [...sandboxes.entries()].filter(([, sb]) => !sb.destroyed).map(([id]) => sandboxObj(id));
+      if (states.length) items = items.filter(it => states.includes(it.status.state));
+      const rawMeta = u.searchParams.get('metadata');
+      if (rawMeta) {
+        let kv = {};
+        try { kv = Object.fromEntries(new URLSearchParams(rawMeta)); } catch { return json(400, { message: 'invalid metadata format' }); }
+        items = items.filter(it => Object.entries(kv).every(([k, v]) => it.metadata?.[k] === v));
+      }
+      const page = Math.max(1, Number(u.searchParams.get('page') ?? 1));
+      const pageSize = Math.min(200, Math.max(1, Number(u.searchParams.get('pageSize') ?? 20)));
+      const totalItems = items.length;
+      const totalPages = Math.ceil(totalItems / pageSize);
+      items = items.slice((page - 1) * pageSize, page * pageSize);
+      return json(200, { items, pagination: { page, pageSize, totalItems, totalPages, hasNextPage: page < totalPages } });
+    }
+
     if (p === '/v1/sandboxes' && req.method === 'POST') {
+      if (faults.unauthorized) return json(401, { message: 'mock fault: unauthorized' });
+      let req2 = {};
+      try { req2 = JSON.parse(body.toString() || '{}'); } catch { /* 空体 */ }
+      if (faults.poolExhausted && req2?.extensions?.poolRef) {
+        return json(429, { code: 'KUBERNETES::POOL_CAPACITY_EXHAUSTED', message: 'No Pool capacity became available before the acquisition timeout.' });
+      }
       const id = crypto.randomUUID();
-      const sb = { root: path.join(ROOT, id), destroyed: false, createdAt: now() };
+      const poolRef = req2?.extensions?.poolRef ?? null;
+      const ttlSec = Number(req2?.timeout ?? 3600);
+      const sb = {
+        root: path.join(ROOT, id), destroyed: false, createdAt: now(),
+        metadata: req2?.metadata ?? {}, poolRef,
+        expiresAt: new Date(Date.now() + ttlSec * 1000).toISOString(),
+      };
       fs.mkdirSync(sb.root, { recursive: true });
       sandboxes.set(id, sb);
-      stats.creates.push({ id, at: Date.now() });
-      return json(202, { id, status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container started successfully.', lastTransitionAt: now() }, metadata: {}, expiresAt: new Date(Date.now() + 3600_000).toISOString(), createdAt: sb.createdAt, entrypoint: ['/opt/code-interpreter/code-interpreter.sh'] });
+      if (poolRef && pools.has(poolRef)) {
+        const po = pools.get(poolRef);
+        po.allocated += 1; // 认领占坑（简化模型：删除时归还）
+      }
+      stats.creates.push({ id, at: Date.now(), poolRef, metadata: sb.metadata });
+      return json(202, { id, status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container started successfully.', lastTransitionAt: now() }, metadata: sb.metadata, expiresAt: sb.expiresAt, createdAt: sb.createdAt, entrypoint: ['/opt/code-interpreter/code-interpreter.sh'] });
     }
 
     const mSb = /^\/v1\/sandboxes\/([0-9a-f-]+)(\/.*)?$/.exec(p);
@@ -169,12 +279,26 @@ const server = http.createServer((req, res) => {
       const id = mSb[1];
       const rest = mSb[2] ?? '/';
       if (req.method === 'DELETE' && rest === '/') {
+        const sb = sandboxes.get(id);
+        if (sb?.poolRef && pools.has(sb.poolRef)) {
+          const po = pools.get(sb.poolRef);
+          po.allocated = Math.max(0, (po.allocated ?? 0) - 1); // 归还坑位（recycleStrategy=Delete 语义简化）
+        }
         sandboxes.delete(id);
         res.writeHead(204); return res.end();
       }
       if (rest === '/' && req.method === 'GET') {
         const sb = getSb(id);
         return sb ? json(200, sandboxObj(id)) : json(404, { message: 'sandbox not found' });
+      }
+      if (rest === '/renew-expiration' && req.method === 'POST') {
+        if (faults.renew404) return json(404, { message: 'mock fault: renew404' });
+        if (!getSb(id)) return json(404, { message: 'sandbox not found' });
+        let req2 = {};
+        try { req2 = JSON.parse(body.toString() || '{}'); } catch { /* 空体 */ }
+        const next = req2?.expiresAt ?? new Date(Date.now() + 3600_000).toISOString();
+        sandboxes.get(id).expiresAt = next;
+        return json(200, { expiresAt: next });
       }
       const mEp = /^\/endpoints\/(\d+)$/.exec(rest);
       if (mEp && req.method === 'GET') {

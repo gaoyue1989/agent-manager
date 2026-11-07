@@ -12,6 +12,7 @@ const LINKS = [
   { href: "/admin/packages", label: "配置包" },
   { href: "/admin/workspaces", label: "工作空间管理" },
   { href: "/admin/users", label: "用户管理" },
+  { href: "/admin/sandboxes", label: "沙箱管理" },
   { href: "/admin/audit", label: "审计日志" },
   { href: "/admin/overview", label: "平台概览" },
   { href: "/admin/settings", label: "平台配置" },

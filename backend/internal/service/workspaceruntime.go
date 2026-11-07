@@ -46,7 +46,8 @@ type runtimeKeyMeta struct {
 }
 
 // buildRuntimeDefaultKeys 运行时默认键空间：模板全键（剔除 L3 派生键）+ 导出专用键。
-// 有效规模 = 24 模板键 + 8 导出键 = 32（单测锁定）。
+// 有效规模 = 27 模板键 + 8 导出键 = 35（单测锁定；sandbox-pool-opensandbox-design §7
+// 沙箱池化 3 键 SANDBOX_POOL_REF/SANDBOX_USER_QUOTA/SANDBOX_RENEW_INTERVAL_SECONDS 入组）。
 func buildRuntimeDefaultKeys() map[string]runtimeKeyMeta {
 	out := map[string]runtimeKeyMeta{}
 	for _, g := range platformconfig.Template() {

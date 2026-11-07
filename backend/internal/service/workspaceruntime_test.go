@@ -23,14 +23,15 @@ func newRuntimeCore(t *testing.T) (*Core, func()) {
 	return core, done
 }
 
-// TestRuntimeDefaultsKeySpace 键空间：32 键（24 模板键 − CHECKPOINT_JDBC_URL + 8 导出键，契约 §1.4）；
+// TestRuntimeDefaultsKeySpace 键空间：35 键（27 模板键 − CHECKPOINT_JDBC_URL + 8 导出键，契约 §1.4；
+// sandbox-pool-opensandbox-design §7 沙箱池化 3 键入组）；
 // L3 派生键 / 平台保留键 PUT 均 400 且错误信息点名键名。
 func TestRuntimeDefaultsKeySpace(t *testing.T) {
 	core, done := newRuntimeCore(t)
 	defer done()
 
-	if got := len(runtimeDefaultKeys); got != 32 {
-		t.Fatalf("runtime default key space = %d, want 32 (24 template + 8 export)", got)
+	if got := len(runtimeDefaultKeys); got != 35 {
+		t.Fatalf("runtime default key space = %d, want 35 (27 template + 8 export)", got)
 	}
 	for _, k := range []string{"CHECKPOINT_JDBC_URL", "AGENT_REDIS_PREFIX"} {
 		if _, ok := runtimeDefaultKeys[k]; ok {
@@ -234,8 +235,8 @@ func TestRuntimeTemplateGroup(t *testing.T) {
 		t.Fatalf("llm fields = %d, want 10", len(llm))
 	}
 	sbx, err := core.GetRuntimeTemplateGroup(1, "sandbox")
-	if err != nil || len(sbx) != 6 {
-		t.Fatalf("sandbox fields = %d err=%v, want 6", len(sbx), err)
+	if err != nil || len(sbx) != 9 {
+		t.Fatalf("sandbox fields = %d err=%v, want 9", len(sbx), err)
 	}
 	if _, err := core.UpdateRuntimeTemplateGroup(1, "ops", "llm", map[string]string{
 		"LLM_BASE_URL": "https://llm.example.com/v1",

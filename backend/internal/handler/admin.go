@@ -3,6 +3,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -202,6 +203,109 @@ func registerAdmin(g *gin.RouterGroup, core *service.Core) {
 		}
 		OK(c, gin.H{"items": items, "total": total})
 	})
+
+	registerAdminSandboxes(ad, core)
+}
+
+// registerAdminSandboxes 沙箱管理面端点（sandbox-pool-opensandbox-design §5.2）：
+// 代理转发 opensandbox /v1/pools、/v1/sandboxes（只读拉取 + 显式管理操作）；
+// 错误映射见 mapSandboxError（未配置 503 / 上游 501→503、401→502、429/5xx 透传）。
+func registerAdminSandboxes(ad *gin.RouterGroup, core *service.Core) {
+	sb := ad.Group("/sandboxes")
+	{
+		sb.GET("/summary", func(c *gin.Context) {
+			out, err := core.AdminSandboxSummary()
+			if err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, out)
+		})
+		sb.GET("/pools", func(c *gin.Context) {
+			out, err := core.AdminSandboxPools()
+			if err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, out)
+		})
+		sb.POST("/pools", func(c *gin.Context) {
+			var in service.CreateSandboxPoolInput
+			if err := c.ShouldBindJSON(&in); err != nil {
+				Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			out, err := core.AdminCreateSandboxPool(in, c.GetUint("uid"))
+			if err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			c.JSON(http.StatusCreated, respOK(out))
+		})
+		sb.GET("/pools/:name", func(c *gin.Context) {
+			out, err := core.AdminGetSandboxPool(c.Param("name"))
+			if err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, out)
+		})
+		sb.PUT("/pools/:name", func(c *gin.Context) {
+			var body struct {
+				CapacitySpec service.SandboxCapacitySpec `json:"capacitySpec"`
+			}
+			if err := c.ShouldBindJSON(&body); err != nil {
+				Fail(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			out, err := core.AdminUpdateSandboxPool(c.Param("name"), body.CapacitySpec, c.GetUint("uid"))
+			if err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, out)
+		})
+		sb.DELETE("/pools/:name", func(c *gin.Context) {
+			if err := core.AdminDeleteSandboxPool(c.Param("name"), c.GetUint("uid")); err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, nil)
+		})
+		sb.GET("", func(c *gin.Context) {
+			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+			pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+			out, err := core.AdminListSandboxes(c.Query("state"), page, pageSize)
+			if err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, out)
+		})
+		sb.DELETE("/:id", func(c *gin.Context) {
+			if err := core.AdminDeleteSandbox(c.Param("id"), c.GetUint("uid")); err != nil {
+				mapSandboxError(c, err)
+				return
+			}
+			OK(c, nil)
+		})
+	}
+}
+
+// mapSandboxError 沙箱代理错误 → HTTP（§5.1）：未配置 503（提示 /settings）、
+// 上游映射错误按 SandboxUpstreamError.Status、入参校验 400、其余走通用映射。
+func mapSandboxError(c *gin.Context, err error) {
+	var ue *service.SandboxUpstreamError
+	switch {
+	case errors.Is(err, service.ErrSandboxNotConfigured):
+		Fail(c, http.StatusServiceUnavailable, err.Error())
+	case errors.As(err, &ue):
+		Fail(c, ue.Status, ue.Msg)
+	case errors.Is(err, service.ErrInvalidForm):
+		Fail(c, http.StatusBadRequest, err.Error())
+	default:
+		mapError(c, err)
+	}
 }
 
 // respOK 201 响应体（统一包络）。

@@ -59,6 +59,25 @@ export interface PlatformConfigField {
 export interface PlatformConfigGroup { name: string; title: string; fields: PlatformConfigField[]; }
 export interface PlatformConfigView { groups: PlatformConfigGroup[]; updatedAt?: string; }
 
+// ---- 沙箱管理面（sandbox-pool-opensandbox-design §5/§6）----
+// 池容量四键（上游 capacitySpec，int32 全必填；校验链 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax）
+export interface SandboxCapacitySpec { bufferMin: number; bufferMax: number; poolMin: number; poolMax: number; }
+// 池运行状态（上游 PoolResponse.status 仅 total/allocated/available/revision——d19：无 updated；
+// 未 reconcile 时 status 缺失）
+export interface SandboxPoolStatus { total?: number; allocated?: number; available?: number; revision?: string; }
+export interface SandboxPool {
+  name: string; capacitySpec: SandboxCapacitySpec;
+  status?: SandboxPoolStatus | null; createdAt?: string;
+}
+export interface SandboxSummary { pools: number; warmAvailable: number; allocated: number; runningSandboxes: number; }
+// 上游 GET /v1/sandboxes 分页响应（d15：page/pageSize 语法）
+export interface SandboxListPage {
+  items: { id: string; status: { state: string }; metadata?: Record<string, string>; expiresAt?: string; createdAt?: string }[];
+  pagination: { page: number; pageSize: number; totalItems: number; totalPages: number; hasNextPage: boolean };
+}
+// console 只读视图（§5.3 投影，无任何操作端点）
+export interface SandboxInstance { id: string; state: string; service?: string; sessionId?: string; expiresAt?: string; createdAt?: string; }
+
 // ---- 控制面拆分新增类型（M0–M8）----
 export interface UserView { id: number; username: string; displayName: string; email?: string; role: "admin" | "user"; status: string; lastLoginAt?: string | null; workspaces?: WorkspaceBrief[]; }
 export interface WorkspaceBrief { id: number; slug: string; name: string; role: string; }
@@ -286,6 +305,10 @@ export const api = {
     // 沙箱配置总览（只读；修改入口在 Agent 编辑页沙箱区块）
     sandbox: (ws: number | string, keyword = "") =>
       request<SandboxItem[]>(`/console/workspaces/${ws}/sandbox?keyword=${encodeURIComponent(keyword)}`),
+    // 沙箱实例（只读，§6.2）：本工作空间各服务在 opensandbox 的沙箱实例（metadata.service 过滤）
+    sandboxes: {
+      list: (ws: number | string) => request<SandboxInstance[]>(`/console/workspaces/${ws}/sandboxes`),
+    },
     agents: (ws: number | string, status = "", keyword = "") =>
       request<AgentListItem[]>(`/console/workspaces/${ws}/agents?status=${encodeURIComponent(status)}&keyword=${encodeURIComponent(keyword)}`),
     agentDetail: (ws: number | string, id: number) => request<ServiceDetail>(`/console/workspaces/${ws}/agents/${id}`),
@@ -485,5 +508,19 @@ export const api = {
       request<UserView>(`/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     auditLogs: (page = 1, size = 50) =>
       request<{ items: AuditItem[]; total: number }>(`/admin/audit-logs?page=${page}&size=${size}`),
+    // ---- 沙箱管理面（§6.1；错误映射：未配置 503 / 501→503 / 401→502 / 429、5xx 透传）----
+    sandboxes: {
+      summary: () => request<SandboxSummary>(`/admin/sandboxes/summary`),
+      listPools: () => request<{ items: SandboxPool[] }>(`/admin/sandboxes/pools`),
+      createPool: (body: { name: string; image?: string; capacitySpec: SandboxCapacitySpec }) =>
+        requestRaw<{ name: string }>(`/admin/sandboxes/pools`, { method: "POST", body: JSON.stringify(body) }),
+      getPool: (name: string) => request<SandboxPool>(`/admin/sandboxes/pools/${encodeURIComponent(name)}`),
+      updatePool: (name: string, capacitySpec: SandboxCapacitySpec) =>
+        request(`/admin/sandboxes/pools/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ capacitySpec }) }),
+      deletePool: (name: string) => request(`/admin/sandboxes/pools/${encodeURIComponent(name)}`, { method: "DELETE" }),
+      listSandboxes: (state = "", page = 1, pageSize = 20) =>
+        request<SandboxListPage>(`/admin/sandboxes?state=${encodeURIComponent(state)}&page=${page}&pageSize=${pageSize}`),
+      deleteSandbox: (id: string) => request(`/admin/sandboxes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    },
   },
 };

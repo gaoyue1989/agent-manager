@@ -130,6 +130,80 @@ BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_AP
 2. 生产容器云接入日志采集时，由运维将 `/applog` 改挂 hostPath `/var/log/mounts/${namespace}/${app-name}` 并配置 Kibana 索引模板（hostName / app-name 字段映射，按 `app-name` 检索）；平台构造逻辑不变。
 3. 内容约束：单条日志 ≤ 4KB（超长会被日志云截断）、避免大量特殊字符、禁止输出密码/密钥等敏感信息；非应用日志（GC 等）不要以 `.log` 结尾（建议 `.txt`），避免与应用日志混淆。
 
+## 五之二、OpenSandbox 部署与池初始化（沙箱池化，可选）
+
+业务 Agent 的 OpenSandbox 沙箱池化（docs/design/sandbox-pool-opensandbox-design.md）依赖集群内 OpenSandbox
+release-1.1.0（base CRD/RBAC + controller + ingress-gateway + server；workload ns `opensandbox`）。
+幂等部署脚本一步到位（kind；可任意重跑，实测完整重跑 exit=0，不扰动已建池的 warm Pod）：
+
+```bash
+./scripts/deploy-opensandbox.sh
+# 产出: ns opensandbox-system 四个 release + ns opensandbox（workload）
+#       集群内地址 http://opensandbox-server.opensandbox-system.svc:80
+#       本机自检 http://127.0.0.1:18600/health（port-forward 保持后台；端口冲突换 PF_PORT 重跑）
+```
+
+前置：docker/kind/kubectl 已装（helm 未装时脚本会经 127.0.0.1:7890 代理自动安装）；
+`.env.secrets` 含 `OPENSANDBOX_API_KEY`（脚本读入 shell 变量注入 secret，不回显不落盘）。
+
+### 1. 平台接入（运维侧 /settings）
+
+| 键 | 值 |
+|----|----|
+| `OPENSANDBOX_SERVER_URL` | `opensandbox-server.opensandbox-system.svc:80`（backend 代理的事实源，改默认配置不影响已发布服务） |
+| `OPENSANDBOX_API_KEY` | 同 `.env.secrets` 的 `OPENSANDBOX_API_KEY` |
+| `SANDBOX_IMAGE` | 池主容器镜像缺省（创建池「镜像」留空时使用），如 `opensandbox/code-interpreter:v1.1.0` |
+| `SANDBOX_TIMEOUT_MINUTES` | 生命周期 TTL（新默认 30，随 turn 续期刷新） |
+| `SANDBOX_POOL_REF` / `SANDBOX_USER_QUOTA` / `SANDBOX_RENEW_INTERVAL_SECONDS` | 发布表单预填默认（空 / 5 / 60） |
+
+错误对照（沙箱管理页 / admin API）：**503** = URL/APIKey 未配置（先来 /settings）；
+**502** = API Key 校验失败（/settings 修正）；**503 + "kubernetes runtime"** = 上游 runtime 非
+kubernetes（脚本部署形态不会出现）；**429/5xx** = 上游原样透传。
+
+### 2. 创建首个池
+
+页面路径：运维侧 → **沙箱管理**（/admin/sandboxes）→ 创建池。Pod 模板由平台预设（官方 sample
+形状：initContainers 装 execd/task-executor + 主容器跑 task-executor 常驻，镜像参数只替换主容器），
+只需填池名与容量四值（校验链 `0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax`）。
+
+curl 等价（走平台管理代理，admin JWT 或 AUTH_TOKEN）：
+
+```bash
+TOKEN=<admin JWT>
+curl -X POST http://localhost:30080/api/v1/admin/sandboxes/pools \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"oaf-pool-v1","capacitySpec":{"bufferMin":1,"bufferMax":2,"poolMin":1,"poolMax":3}}'
+# 轮询预热就绪（kind V1 实测：创建后首轮询 status.available ≥ 1，warm Pod Running/Ready）：
+curl -H "Authorization: Bearer $TOKEN" http://localhost:30080/api/v1/admin/sandboxes/pools/oaf-pool-v1
+```
+
+直连上游等价路径（绕过平台代理）：`POST http://127.0.0.1:18600/v1/pools`，header
+`OPEN-SANDBOX-API-KEY`，模板逐字段取上游 sample `kubernetes/config/samples/sandbox_v1alpha1_pool.yaml`
+（release-1.1.0 源码）。日常治理（水位调整/删除池/销毁沙箱）在沙箱管理页完成，均记入审计日志。
+
+### 3. 业务服务接入（env 示例）
+
+发布向导 / 编辑 env 表单填入（/settings 已配则自动预填）：
+
+```dotenv
+SANDBOX_ENABLED=true
+SANDBOX_POOL_REF=oaf-pool-v1          # 空 = 不用池（配额与 TTL 行为不受影响，兼容未部署池的集群）
+SANDBOX_USER_QUOTA=5                  # 单用户沙箱配额（0 = 不限）
+SANDBOX_TIMEOUT_MINUTES=30            # 生命周期 TTL（随 turn 续期刷新）
+SANDBOX_RENEW_INTERVAL_SECONDS=60     # 在途续期间隔
+```
+
+注意事项：
+
+1. **语义升级公告**：显式固化 `SANDBOX_TIMEOUT_MINUTES=60` 的存量服务，从「创建时一次性 60min 超时」
+   变为「60min TTL 随 turn 持续刷新」（活跃沙箱最长存活不再有界）；保持旧行为设 `SANDBOX_LIFECYCLE_ENABLED=false`。
+2. **池耗尽**：poolMax 占满后 create 报 429（PoolCapacityExhausted），不做静默降级直建——在沙箱管理页
+   「调整容量」扩 buffer/pool 后自动恢复。
+3. **kind 联调容量偏紧**（宿主 15G 内存平台栈已占约 10G）：`bufferMin ≤ 1~2`，勿按生产水位配池；
+   联调前可 `docker image prune` 清理。
+4. 池/沙箱的 TTL 与 GC 真相在 opensandbox 服务端（expiresAt / ttl_expiry），平台侧仅代理转发与簿记；
+   backend 重启不影响任何沙箱与池。
+
 ## 关键端点
 
 | 入口 | 地址 |
