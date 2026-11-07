@@ -219,18 +219,12 @@ const server = http.createServer((req, res) => {
 
     if (p === '/v1/sandboxes' && req.method === 'POST') {
       let createEnv = {};
-      let createRequests;
-      try {
-        const parsed = JSON.parse(body.toString());
-        createEnv = parsed?.env ?? {};
-        // D19 观测（P7 断言）：create 请求体 resourceRequests（未传时 undefined → JSON 序列化丢弃该字段）
-        createRequests = parsed?.resourceRequests;
-      } catch { /* 空 */ }
+      try { createEnv = JSON.parse(body.toString())?.env ?? {}; } catch { /* 空 */ }
       const id = crypto.randomUUID();
       const sb = { id, root: path.join(ROOT, id), destroyed: false, createdAt: now(), ...initExecdEnvs(id, createEnv) };
       fs.mkdirSync(sb.root, { recursive: true });
       sandboxes.set(id, sb);
-      stats.creates.push({ id, at: Date.now(), resourceRequests: createRequests });
+      stats.creates.push({ id, at: Date.now() });
       return json(202, { id, status: { state: 'Running', reason: 'CONTAINER_RUNNING', message: 'Sandbox container started successfully.', lastTransitionAt: now() }, metadata: {}, expiresAt: new Date(Date.now() + 3600_000).toISOString(), createdAt: sb.createdAt, entrypoint: ['/opt/code-interpreter/code-interpreter.sh'] });
     }
 

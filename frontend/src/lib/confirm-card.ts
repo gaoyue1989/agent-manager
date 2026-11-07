@@ -3,23 +3,19 @@ export type ConfirmResult = { tool_call_id: string; confirmed: boolean };
 export type ConfirmCard = {
   id: string;
   toolCalls: { tool_call_id: string; name: string; input: unknown }[];
-  // expired：后端确认上下文不存在/已过期（confirm-stream 预检 404/410）——HITL 未批准故工具未执行，可安全重新发起
+  // expired：后端确认上下文不存在/已过期（confirm-stream 预检 404）——HITL 未批准故工具未执行，可安全重新发起
   status: "pending" | "submitting" | "resolved" | "unknown" | "expired";
   results?: ConfirmResult[];
-  // D16 确认硬截止：后端透出的绝对失效时刻（ISO-8601，permission_ask.expires_at / history pendingConfirm.expires_at）；
-  // 缺省 = 后端未启用截止（无限期可确认，现状行为）
-  expiresAt?: string;
 };
 
-// 确认流失败归类：confirm_context_not_found（上下文过期，从未获批准）与 confirm_expired（D16 硬截止，按拒绝自动收尾）
-// 均可断定「未执行该批准」；其余（含 409 confirm_already_consumed、网络中断）一律 unknown，无法排除已执行，禁重试。
+// 确认流失败归类：仅 404 confirm_context_not_found 可断定「未执行」（上下文过期，工具从未获批准）；
+// 其余（含 409 confirm_already_consumed、网络中断）一律 unknown，无法排除已执行，禁重试。
 export function classifyConfirmFailure(message: unknown): "expired" | "unknown" {
-  return typeof message === "string"
-    && (message.includes("confirm_context_not_found") || message.includes("confirm_expired")) ? "expired" : "unknown";
+  return typeof message === "string" && message.includes("confirm_context_not_found") ? "expired" : "unknown";
 }
 
 // 工具调用缺失 tool_call_id/名称或重复 id 时不构成可确认卡片 → unknown（禁提交防误批）
-export function createConfirmCard(tools: unknown, expiresAt?: unknown): ConfirmCard {
+export function createConfirmCard(tools: unknown): ConfirmCard {
   const toolCalls = Array.isArray(tools) ? tools.map((tool: any) => ({
     tool_call_id: typeof tool?.tool_call_id === "string" ? tool.tool_call_id : "",
     name: typeof tool?.name === "string" ? tool.name : "未知工具",
@@ -31,37 +27,7 @@ export function createConfirmCard(tools: unknown, expiresAt?: unknown): ConfirmC
     id: JSON.stringify(toolCalls.map((tool) => tool.tool_call_id).sort()),
     toolCalls,
     status: valid ? "pending" : "unknown",
-    ...(typeof expiresAt === "string" && expiresAt ? { expiresAt } : {}),
   };
-}
-
-// D16 截止判定：已超失效时刻 → expired（禁提交；后端此时确认也会得到 410 confirm_expired 并按拒绝收尾）
-export function isConfirmExpired(expiresAt: string | undefined, now: number = Date.now()): boolean {
-  if (!expiresAt) return false;
-  const t = Date.parse(expiresAt);
-  return Number.isFinite(t) && now >= t;
-}
-
-// 剩余秒数（倒计时展示）；无截止时刻/解析失败返回 null（不显示倒计时）
-export function confirmRemainingSeconds(expiresAt: string | undefined, now: number = Date.now()): number | null {
-  if (!expiresAt) return null;
-  const t = Date.parse(expiresAt);
-  if (!Number.isFinite(t)) return null;
-  return Math.max(0, Math.ceil((t - now) / 1000));
-}
-
-// 倒计时到点批处理：把 pending 且已超截止的卡片置 expired（其余卡片原样保留，返回原引用若无需变更）
-export function expireDueConfirmCards<T extends { confirm?: ConfirmCard }>(messages: T[], now: number = Date.now()): T[] {
-  let changed = false;
-  const next = messages.map((m) => {
-    const card = m.confirm;
-    if (card && card.status === "pending" && isConfirmExpired(card.expiresAt, now)) {
-      changed = true;
-      return { ...m, confirm: { ...card, status: "expired" as const } };
-    }
-    return m;
-  });
-  return changed ? next : messages;
 }
 
 export function parseInput(input: unknown): unknown {
