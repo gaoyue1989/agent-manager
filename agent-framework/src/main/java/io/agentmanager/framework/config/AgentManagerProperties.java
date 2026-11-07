@@ -151,13 +151,19 @@ public record AgentManagerProperties(
          */
         @DefaultValue("true") boolean skillCacheGcEnabled,
         /** 宿主 {@code .skills-cache} scope 目录保留天数（默认 2；≤0 视为关闭） */
-        @DefaultValue("2") int skillCacheRetentionDays
+        @DefaultValue("2") int skillCacheRetentionDays,
+        /**
+         * 沙箱绑定行保留天数（{@code AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS}，默认 7，
+         * sandbox-pool-opensandbox-design §4.1.2）：expires_at 过期超窗的绑定行必然已被服务端
+         * GC，删除无需 probe；受影响用户 binding_count 锚行锁内重算，空锚行一并删除
+         */
+        @DefaultValue("7") int sandboxBindingRetentionDays
     ) {
-        /** 兼容构造器（旧 5 参调用方）：技能缓存 GC 取默认（启用 / 保留 2 天）。 */
+        /** 兼容构造器（旧 5 参调用方）：技能缓存 GC 取默认（启用 / 保留 2 天），绑定保留 7 天 */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {
             this(confirmTtlMinutes, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,
-                sessionRetentionDays, true, 2);
+                sessionRetentionDays, true, 2, 7);
         }
     }
 

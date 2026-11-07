@@ -242,6 +242,20 @@ public class OpenSandbox extends AbstractBaseSandbox
                 log.warn("Workspace sync back failed: {}", e.getMessage());
             }
         }
+        // 沙箱生命周期 per-call 收尾（§4.4 T2/T3，终审 R2 统一口径）：call 引用计数 -1 +
+        // 顺手终刷（renew + binding.expires_at 回填）——stop() 是 SDK per-call 通用收尾路径
+        // （chat/A2A/AG-UI/background spawn 全链路必经），A2A 等不经 TurnFinalizer 链路的
+        // expires_at 回填全靠它；不承担 turn 注销（一个 turn 可能多 call，注销只挂终态）。
+        // 失败不阻塞收尾（KV 回写已完成，续期由守护线程兜底）。
+        if (filesystemSpec != null && filesystemSpec.getLifecycleManager() != null
+                && state != null && state.getSandboxId() != null) {
+            try {
+                filesystemSpec.getLifecycleManager().onCallStop(state.getSandboxId());
+            } catch (Exception e) {
+                log.warn("[sandbox-open] lifecycle stop flush failed (sandbox={}): {}",
+                    state.getSandboxId(), e.getMessage());
+            }
+        }
         super.stop();
     }
 

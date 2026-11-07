@@ -154,6 +154,7 @@ export const api = {
   getMemory: () => get('/debug/memory'),
   getWorkspace: () => get('/debug/workspace'),
   getSandbox: () => get('/debug/sandbox'),
+  getSandboxBindings: () => get('/debug/sandbox-bindings'),
   getLogs: (level = 'all', limit = 100) => get('/debug/logs?level=' + level + '&limit=' + limit),
   // 会话读取走归属用户身份（issue #158：/threads/{sid} 端点按 X-User-Id 校验归属，
   // 调试页以选中 userId 填充该头，与网关注入行为一致）

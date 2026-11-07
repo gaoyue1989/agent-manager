@@ -38,8 +38,23 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
 
+    /**
+     * 请求级会话/身份键传递（sandbox-pool-opensandbox-design §4.2）：守卫 {@code tryEnter}
+     * 同线程覆盖写（唯一落在 acquire 正确线程的注入点，PR #276 injectPoolIdentity 同款验证）、
+     * SandboxUserKeyMiddleware 尽力兜底，OpenSandboxClient.create/resume 读取后即清。
+     * 语义：chat 链路 = 前端 sid（=turn_lease 键）；A2A/invoke 链路 = 真实用户
+     * （非 turn_lease 键，busy 判定回退纯租约+updated_at 双事实源，正确性不受影响）。
+     */
+    private final ThreadLocal<String> pendingSessionId = new ThreadLocal<>();
+
     /** 请求级技能缓存 scope 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取并绑定到沙箱实例 */
     private final ThreadLocal<String> pendingSkillScope = new ThreadLocal<>();
+
+    /**
+     * 沙箱生命周期管理器（§4.2/§4.9，lifecycle 开启时由 AgentScopeConfig 装配注入；
+     * null = 生命周期旁路）。stop() 经此回调 per-call 收尾（refcount-1 + 终刷）。
+     */
+    private volatile SandboxLifecycleManager lifecycleManager;
 
     /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject） */
     private final java.util.concurrent.ConcurrentHashMap<String, String> userInjectedSandbox =
@@ -161,6 +176,32 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /** 清除待绑定 scope（SandboxUserKeyMiddleware.onAgent 消费后调用，防线程池复用残留污染下个 turn） */
     public void clearPendingSkillScope() {
         pendingSkillScope.remove();
+    }
+
+    /** 设置待记账会话键（守卫 tryEnter 同线程覆盖写 / SandboxUserKeyMiddleware 兜底） */
+    public void setPendingSessionId(String sessionId) {
+        pendingSessionId.set(sessionId);
+    }
+
+    /** 读取并清除待记账会话键（OpenSandboxClient.create/resume 时调用，用后即清） */
+    public String takePendingSessionId() {
+        var key = pendingSessionId.get();
+        pendingSessionId.remove();
+        return key;
+    }
+
+    /** 清除待记账会话键（middleware 消费后调用；reactor 线程池复用，残留会污染下个 turn） */
+    public void clearPendingSessionId() {
+        pendingSessionId.remove();
+    }
+
+    /** 生命周期管理器（lifecycle 开启时注入；null = 旁路） */
+    public SandboxLifecycleManager getLifecycleManager() {
+        return lifecycleManager;
+    }
+
+    public void setLifecycleManager(SandboxLifecycleManager manager) {
+        this.lifecycleManager = manager;
     }
 
     @Override

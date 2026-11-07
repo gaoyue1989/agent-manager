@@ -75,6 +75,19 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(e.getStatusCode()).body(body);
     }
 
+    /**
+     * 沙箱配额满（sandbox-pool-opensandbox-design §4.3 chat 预检，PR-D）：HTTP 409 +
+     * 结构化载荷（code/quota/bindings，bindings 带 state=executing|confirm_holding）——
+     * 前端 ChatPane 专属错误卡渲染占用明细（评审轮二 P0：409 body 不得丢弃）。
+     */
+    @ExceptionHandler(io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException.class)
+    public ResponseEntity<Map<String, Object>> handleUserQuotaExhausted(
+            io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException e) {
+        log.warn("[ExceptionHandler] user_quota_exhausted: quota={}, bindings={}",
+            e.quota(), e.bindings().size());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(e.payload409());
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleUnhandledException(Exception e) {
         log.error("[ExceptionHandler] unhandled exception: {} - {}", e.getClass().getSimpleName(), e.getMessage(), e);

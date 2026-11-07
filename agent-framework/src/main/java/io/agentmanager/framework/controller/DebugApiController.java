@@ -105,6 +105,13 @@ public class DebugApiController {
     @Value("${agent.llm.fallback-model-id:}")
     private String fallbackModelId;
 
+    /**
+     * 沙箱生命周期管理器（§4.8 配额与绑定区块；字段注入 required=false 避免改动构造调用点）。
+     * null = lifecycle 未装配（端点返回 enabled=false 与启用方式提示，fail-soft）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
+
     public DebugApiController(
         AgentManagerProperties props,
         OafConfigHolder oafConfigHolder,
@@ -805,6 +812,66 @@ public class DebugApiController {
         m.put("api_key_configured", sandboxConfig.opensandbox().apiKey() != null
             && !sandboxConfig.opensandbox().apiKey().isBlank());
         return m;
+    }
+
+    /**
+     * 沙箱配额与绑定（sandbox-pool-opensandbox-design §4.8，PR-D 调试页「配额与绑定」区块数据源）：
+     * 配置回显 + 绑定表（跨副本聚合，读共享库 sandbox_binding；turn_running 由 turn_lease JOIN +
+     * updated_at 新鲜度双事实源派生）+ 本副本续期注册表健康 + 事件环形缓冲（含续期失败/fail-open，
+     * 排障盲区必须可观测）。端点不可用时 fail-soft（lifecycle 未装配返回 enabled=false）。
+     */
+    @GetMapping("/sandbox-bindings")
+    public Map<String, Object> sandboxBindings() {
+        var m = new LinkedHashMap<String, Object>();
+        var lifecycle = sandboxLifecycle;
+        if (lifecycle == null) {
+            m.put("enabled", false);
+            m.put("reason", "SANDBOX_LIFECYCLE_ENABLED=false 或沙箱未启用（SANDBOX_ENABLED）");
+            return m;
+        }
+        var cfg = lifecycle.config();
+        m.put("enabled", true);
+        m.put("config", Map.of(
+            "lifecycle_enabled", cfg.enabled(),
+            "pool_ref", cfg.poolRef() == null ? "" : cfg.poolRef(),
+            "user_quota", cfg.userQuota(),
+            "ttl_minutes", sandboxConfig.timeoutMinutes(),
+            "renew_interval_seconds", cfg.renewIntervalSeconds(),
+            "confirm_hold_minutes", cfg.confirmHoldMinutes(),
+            "grace_seconds", lifecycle.graceSeconds()));
+        try {
+            var store = lifecycle.bindingStore();
+            var rows = store.listAll(lifecycle.graceSeconds(), 200);
+            m.put("bindings", rows.stream().<Map<String, Object>>map(r -> Map.of(
+                "user_key", maskUserKey(r.userKey()),
+                "session_id", r.sessionId() == null ? "" : r.sessionId(),
+                "sandbox_id", r.sandboxId() == null ? "" : r.sandboxId(),
+                "expires_at", r.expiresAt() == null ? "" : r.expiresAt(),
+                "updated_at", r.updatedAt() == null ? "" : r.updatedAt(),
+                "turn_running", r.fresh()))        // fresh = 双事实源派生（lease JOIN OR updated_at 新鲜）
+                .toList());
+            m.put("binding_count", rows.size());
+        } catch (Exception e) {
+            m.put("bindings_error", e.getMessage());   // fail-soft：簿记不可读不阻塞配置/注册表区块
+        }
+        // 续期注册表健康（本副本）：注册数/最老条目年龄/循环滞后——「沙箱到期重建类」问题第一排障入口
+        m.put("registry", Map.of(
+            "size", lifecycle.registrySize(),
+            "active_turns", lifecycle.registryActiveTurnCount(),
+            "oldest_entry_age_ms", lifecycle.registryOldestEntryAgeMs(),
+            "loop_lag_ms", lifecycle.registryLoopLagMs(),
+            "last_sweep_at", lifecycle.registryLastSweepAt() == null ? "" : lifecycle.registryLastSweepAt().toString(),
+            "entries", lifecycle.registryDebugEntries()));
+        m.put("events", sandboxLifecycle.recentEvents());
+        return m;
+    }
+
+    /** user_key 脱敏（debug 页展示：保留前 4 位 + ***） */
+    private static String maskUserKey(String key) {
+        if (key == null || key.isBlank()) {
+            return "";
+        }
+        return key.length() <= 4 ? "***" : key.substring(0, 4) + "***";
     }
 
     /**

@@ -78,6 +78,14 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
     /** fail-open 限流：上次告警时间戳，60s 内不重复刷屏 */
     private volatile long lastFailOpenWarnAt = 0L;
 
+    /**
+     * 生命周期身份注入目标 spec（sandbox-pool-opensandbox-design §4.2 捕获点；null = 未装配，
+     * 零行为变化）。仅 lifecycle 开启时由装配处（AgentScopeConfig）注入——guard 关闭即
+     * Noop 守卫、注入点消失，装配处对此 fail-fast（评审 d3：SANDBOX_GUARD_ENABLED=true
+     * 是生命周期的前置条件）。
+     */
+    private volatile OpenSandboxFilesystemSpec lifecycleIdentitySpec;
+
     /** key.value → 解析结果（真实 userId 或 null=回退原值）+ 时间戳。容量有界（活跃会话数），过期条目惰性清理 */
     private final ConcurrentHashMap<String, CachedLookup> lookupCache = new ConcurrentHashMap<>();
 
@@ -103,6 +111,7 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
 
     @Override
     public SandboxLease tryEnter(SandboxIsolationKey key) throws InterruptedException {
+        injectLifecycleIdentity(key);
         // 多 Agent 共用 oaf-redis 时 sbx:guard:user:{uid} 会跨服务互锁——agent.redis.prefix
         // 经 facade.key() 统一切分（本类的旧构造器注入 keyPrefix 的职责已并入门面）
         String redisKey = facade.key(GUARD_PREFIX + ":"
@@ -121,6 +130,43 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
                 failOpen(redisKey, e);
                 return SandboxLease.noop();
             }
+        }
+    }
+
+    /** 生命周期身份注入目标（仅 lifecycle 开启时由 AgentScopeConfig 装配处调用；null = 未装配） */
+    public void setLifecycleIdentitySpec(OpenSandboxFilesystemSpec spec) {
+        this.lifecycleIdentitySpec = spec;
+    }
+
+    /**
+     * 借出身份捕获（sandbox-pool-opensandbox-design §4.2 捕获点，全 fail-soft）：守卫
+     * {@code tryEnter} 与 {@code SandboxManager.acquire} 的 create/resume 在<b>同一线程</b>内
+     * 直调（acquire 字节码内无线程跳变，PR #276 injectPoolIdentity 同款实证）——此处写
+     * {@link OpenSandboxFilesystemSpec} 的请求级 ThreadLocal 是唯一落在正确线程的注入点。
+     * 控制器侧注入（http-nio 线程或 create-lambda 订阅线程）会被
+     * {@code HarnessGateway.withGatedStream} 的 defer+subscribeOn(boundedElastic) 挪线程失效。
+     *
+     * <p>写法为<b>无条件覆盖写</b>：boundedElastic worker 复用时残留的 ThreadLocal 值在每次
+     * acquire 前被刷新（takePending* 的 remove 语义保证用后即清）。sid 语义：chat 链路
+     * key.value=网关 peer（=前端 sid，=turn_lease 键）；A2A/invoke 链路 key.value=真实用户
+     * （binding 的 session_id 随之为真实用户，同用户 A2A 任务共享一条绑定——配额按真实用户计数）。
+     *
+     * <p>任何异常只告警不抛——注入是生命周期增强，守卫锁才是本职，不得反成对话可用性单点。
+     */
+    private void injectLifecycleIdentity(SandboxIsolationKey key) {
+        var spec = lifecycleIdentitySpec;
+        if (spec == null || key == null) {
+            return;
+        }
+        try {
+            if (key.getScope() != io.agentscope.harness.agent.IsolationScope.USER) {
+                return;
+            }
+            String value = key.getValue();
+            spec.setPendingSessionId(value != null ? value : "");
+            spec.setPendingUserKey(resolveUserLockValue(value));
+        } catch (Exception e) {
+            log.debug("Lifecycle identity inject skipped (fail-soft): {}", e.getMessage());
         }
     }
 

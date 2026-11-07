@@ -68,6 +68,14 @@ public class ConfirmController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
+    /**
+     * 沙箱生命周期管理器（sandbox-pool-opensandbox-design §4.4 turn 挂钩；字段注入
+     * required=false 避免改动构造调用点，单测直接 new 时为 null）。null = lifecycle 旁路。
+     * confirm 恢复段是 turn 边界：开始重注册（清 holdUntil）、终态注销+终刷、ask 挂起重新计窗。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
+
     /** Spring 装配入口（含远程确认桥） */
     @org.springframework.beans.factory.annotation.Autowired
     public ConfirmController(AgentRuntimeService runtimeService,
@@ -291,6 +299,12 @@ public class ConfirmController {
             }
             TurnLeaseGuard lease = new TurnLeaseGuard(turnLeaseStore, finalSessionId, token);
 
+            // ===== 2.5 沙箱生命周期 turn 重注册（§4.4 confirm 恢复）：清除挂起保留窗、
+            // 恢复期间续期继续；终态注销挂 endTurn（T2）=====
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onTurnStart(finalSessionId);
+            }
+
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
             // 工具摘要累积器（turn 级）：HITL 批准后的恢复执行段同样要输出「执行 …」人可读摘要，
@@ -358,10 +372,10 @@ public class ConfirmController {
                                 }
                             }
                         }
-                        TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
+                        endTurnAndLifecycle(eventBus, lease, finalSessionId, turnEnded);
                     },
                     // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
-                    () -> TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded));
+                    () -> endTurnAndLifecycle(eventBus, lease, finalSessionId, turnEnded));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -399,6 +413,10 @@ public class ConfirmController {
             runtimeService.storeConfirmContext(sessionId, event);
             lease.release();
             // HITL 暂停点：锁已让出、状态已持久化
+            // T4 挂起保留窗（§4.4）：恢复段 ask 挂起同样保留沙箱续期，每次 ask 重新计窗
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onConfirmHold(sessionId);
+            }
         }
 
         // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）；
@@ -427,7 +445,22 @@ public class ConfirmController {
         // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
-            TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
+            endTurnAndLifecycle(eventBus, lease, sessionId, turnEnded);
+        }
+    }
+
+    /**
+     * turn 收尾 + 沙箱生命周期终态注销（§4.4 T2）：endTurn CAS 首胜才注销——
+     * 注销只挂 turn 终态（错误回调/正常完成/AGENT_END 三入口经此汇聚），不挂 per-call stop()。
+     */
+    private void endTurnAndLifecycle(SessionEventBus eventBus, TurnLeaseGuard lease,
+                                     String sessionId,
+                                     java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
+            return;
+        }
+        if (sandboxLifecycle != null) {
+            sandboxLifecycle.onTurnEnd(sessionId);
         }
     }
 

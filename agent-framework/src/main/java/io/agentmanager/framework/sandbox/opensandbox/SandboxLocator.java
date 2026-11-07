@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
@@ -36,10 +38,18 @@ import io.agentscope.harness.agent.sandbox.SessionSandboxStateStore;
 @Component
 public class SandboxLocator {
 
+    private static final Logger log = LoggerFactory.getLogger(SandboxLocator.class);
+
     private final SessionSandboxStateStore stateStore;
     private final String agentId;
     private final SandboxConfig sandboxConfig;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    /**
+     * 沙箱生命周期簿记（§4.9，lifecycle 开启时装配；可空=旁路）：locate 直连后的
+     * 「归属校验+占位」合一条件写入口（终审 d1/cold-R1-1，与 OpenSandboxClient.resume 同规则）。
+     */
+    private final org.springframework.beans.factory.ObjectProvider<SandboxBindingStore> bindingStoreProvider;
+    private final org.springframework.beans.factory.ObjectProvider<SandboxLifecycleManager> lifecycleProvider;
 
     /**
      * SDK 连接配置惰性构建（volatile + 单次重检）：apiKey 为空时 SDK {@code ConnectionConfig.Builder}
@@ -49,10 +59,14 @@ public class SandboxLocator {
      */
     private volatile ConnectionConfig connectionConfig;
 
-    public SandboxLocator(SessionSandboxStateStore stateStore, OafConfig oafConfig, SandboxConfig sandboxConfig) {
+    public SandboxLocator(SessionSandboxStateStore stateStore, OafConfig oafConfig, SandboxConfig sandboxConfig,
+                          org.springframework.beans.factory.ObjectProvider<SandboxBindingStore> bindingStoreProvider,
+                          org.springframework.beans.factory.ObjectProvider<SandboxLifecycleManager> lifecycleProvider) {
         this.stateStore = stateStore;
         this.agentId = oafConfig.name();
         this.sandboxConfig = sandboxConfig;
+        this.bindingStoreProvider = bindingStoreProvider;
+        this.lifecycleProvider = lifecycleProvider;
     }
 
     private ConnectionConfig connectionConfig() {
@@ -96,6 +110,19 @@ public class SandboxLocator {
                     .connectionConfig(connectionConfig())
                     .skipHealthCheck(true)
                     .connect();
+                // 归属校验+占位（§4.2 两道防线第 2 条，终审 d1/cold-R1-1）：env-update 链路与
+                // P3 resume 同规则——connect 仅建句柄，句柄交付前条件写占位；affected=0（无行/
+                // 已改绑/漂移）→ close + 视同候选失败（尝试下一候选 / 最终 404）
+                if (!occupyOwnership(sandboxId, userId, sessionId)) {
+                    log.info("[sandbox-locator] ownership check failed, skip candidate (user={}, session={}, sandbox={})",
+                        userId, sessionId, sandboxId);
+                    try {
+                        sandbox.close();
+                    } catch (Exception ignored) {
+                        // 仅释放 HTTP 客户端
+                    }
+                    continue;
+                }
                 return new LocatedSandbox(sandboxId, sandbox);
             } catch (Exception e) {
                 // 当前候选不可用（TTL 已销毁/被回收）→ 尝试下一候选
@@ -103,6 +130,36 @@ public class SandboxLocator {
         }
         throw new SandboxEnvException("sandbox_not_found", 404,
             "no live sandbox for this user/session");
+    }
+
+    /**
+     * locate 直连后的「归属校验+占位」：候选会话键 = 本方法两个候选原值（Channel 的
+     * USER(sessionId) 与 A2A 的 USER(userId)，binding.session_id 与守卫捕获点同源）。
+     * lifecycle 未装配（旁路）→ 直接放行（基线行为）；校验写异常 → fail-open 放行 + WARN
+     * （互踩窗口仅存在于存储故障期，不因校验失败打断 env-update 链路）。
+     */
+    private boolean occupyOwnership(String sandboxId, String userId, String sessionId) {
+        var lifecycle = lifecycleProvider != null ? lifecycleProvider.getIfAvailable() : null;
+        var store = bindingStoreProvider != null ? bindingStoreProvider.getIfAvailable() : null;
+        if (lifecycle == null || store == null) {
+            return true;
+        }
+        List<String> candidates = new ArrayList<>();
+        if (sessionId != null && !sessionId.isBlank()) {
+            candidates.add(sessionId);
+        }
+        if (userId != null && !userId.isBlank() && !candidates.contains(userId)) {
+            candidates.add(userId);
+        }
+        if (candidates.isEmpty()) {
+            return true;
+        }
+        try {
+            return store.occupyWrite(sandboxId, candidates);
+        } catch (SandboxBindingStore.DataAccessException e) {
+            lifecycle.recordOwnershipFailOpen(sandboxId, candidates.get(0), e);
+            return true;
+        }
     }
 
     /** 按配置的隔离范围生成固定候选键（docs/sandbox-env-update-design.md §5.2） */
