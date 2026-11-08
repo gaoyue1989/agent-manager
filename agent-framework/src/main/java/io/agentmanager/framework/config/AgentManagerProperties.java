@@ -131,7 +131,13 @@ public record AgentManagerProperties(
 
     /**
      * 清理与租约配置（无状态单次流架构，见 stateless-single-stream-plan O2/O3）。
-     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）
+     * 环境变量前缀：AGENT_CLEANUP_*（如 AGENT_CLEANUP_CONFIRM_TTL_MINUTES）。
+     * 下方 canonical 构造的 {@code @ConstructorBinding} 必须保留：存在 5 参兼容构造时
+     * 嵌套 record 双构造让 Binder 无法选择绑定入口，会静默回退全默认值——本组 env
+     * （confirm TTL、turn 租约 TTL/续租、audit/session retention、skillCacheGc、
+     * sandboxBindingRetentionDays，即 AGENT_CLEANUP_* 与
+     * AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS 全家）全部永不生效
+     * （与顶层 record 同因，2026-11-06 实测先例）。
      */
     public record CleanupConfig(
         /** confirm_context 有效时长（分钟），默认 30 */
@@ -159,6 +165,11 @@ public record AgentManagerProperties(
          */
         @DefaultValue("7") int sandboxBindingRetentionDays
     ) {
+        /** 绑定入口消歧（见 record javadoc）：嵌套 record 双构造必须以 @ConstructorBinding 指定 */
+        @ConstructorBinding
+        public CleanupConfig {
+        }
+
         /** 兼容构造器（旧 5 参调用方）：技能缓存 GC 取默认（启用 / 保留 2 天），绑定保留 7 天 */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {
