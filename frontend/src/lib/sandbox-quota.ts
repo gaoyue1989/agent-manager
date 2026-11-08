@@ -177,3 +177,13 @@ export function validatePoolName(name: string): string | null {
   }
   return null;
 }
+
+/** expiresAt 倒计时（admin/console 两页共用，5s 轮询粒度；已过期/缺失返回占位） */
+export function countdown(expiresAt?: string): string {
+  if (!expiresAt) return "—";
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return "—";
+  if (ms <= 0) return "已过期";
+  const m = Math.floor(ms / 60000);
+  return m >= 60 ? `${Math.floor(m / 60)}h${m % 60}m` : `${m}m`;
+}

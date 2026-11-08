@@ -4,18 +4,9 @@
 // 不提供任何操作（用户侧只读，治理动作走运维侧 /admin/sandboxes 与资源自身生命周期）。
 import { useCallback, useEffect, useState } from "react";
 import { api, type SandboxInstance } from "@/lib/api";
+import { countdown } from "@/lib/sandbox-quota";
 import { useConsoleWs } from "@/lib/useMe";
 import { Badge, Card, Note, PageHead } from "@/components/ui";
-
-// expiresAt 倒计时（与运维侧同口径的轻量展示；数据随轮询刷新）
-function countdown(expiresAt?: string): string {
-  if (!expiresAt) return "—";
-  const ms = new Date(expiresAt).getTime() - Date.now();
-  if (!Number.isFinite(ms)) return "—";
-  if (ms <= 0) return "已过期";
-  const m = Math.floor(ms / 60000);
-  return m >= 60 ? `${Math.floor(m / 60)}h${m % 60}m` : `${m}m`;
-}
 
 export default function SandboxInstancesPage() {
   const ws = useConsoleWs();
