@@ -157,7 +157,9 @@ release-1.1.0（base CRD/RBAC + controller + ingress-gateway + server；workload
 | `SANDBOX_POOL_REF` / `SANDBOX_USER_QUOTA` / `SANDBOX_RENEW_INTERVAL_SECONDS` | 发布表单预填默认（空 / 5 / 60） |
 
 错误对照（沙箱管理页 / admin API）：**503** = URL/APIKey 未配置（先来 /settings）；
-**502** = API Key 校验失败（/settings 修正）；**503 + "kubernetes runtime"** = 上游 runtime 非
+**502** = API Key 校验失败（/settings 修正）**或上游不可达/超时**（提示语带 "opensandbox 不可达"
+——核对 `OPENSANDBOX_SERVER_URL` 与 opensandbox server 存活：server 未部署 / port-forward 断开
+等联调常见故障同样返回 502）；**503 + "kubernetes runtime"** = 上游 runtime 非
 kubernetes（脚本部署形态不会出现）；**429/5xx** = 上游原样透传。
 
 ### 2. 创建首个池
