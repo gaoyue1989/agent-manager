@@ -74,8 +74,8 @@ CR=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"b
 assert_eq "创建池 → 201（预设模板由后端生成）" "$CR" "201"
 CR2=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL-2\",\"image\":\"img-x:1\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "创建池（显式镜像）→ 201" "$CR2" "201"
-BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":3,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":4}}" "" "$TOKEN")
-assert_eq "同名创建池 → 409 透传" "$BAD" "409"
+BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"$POOL\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
+assert_eq "同名创建池 → 409 透传（容量合法，仅 name 重复；容量链破坏是另一条断言）" "$BAD" "409"
 BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"Bad_Name\",\"capacitySpec\":{\"bufferMin\":1,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":3}}" "" "$TOKEN")
 assert_eq "非法池名 → 400" "$BAD" "400"
 BAD=$(code POST /admin/sandboxes/pools "{\"name\":\"p-$TS\",\"capacitySpec\":{\"bufferMin\":3,\"bufferMax\":2,\"poolMin\":1,\"poolMax\":4}}" "" "$TOKEN")

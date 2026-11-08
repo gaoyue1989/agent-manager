@@ -59,6 +59,7 @@ func newSandboxAdminEngine(core *service.Core) *gin.Engine {
 func TestAdminSandboxesHTTPMapping(t *testing.T) {
 	var mu sync.Mutex
 	var lastAuth string
+	var seenPoolCreate bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		lastAuth = r.Header.Get("OPEN-SANDBOX-API-KEY")
@@ -66,6 +67,16 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/pools":
 			if r.Method == http.MethodPost {
+				mu.Lock()
+				dup := seenPoolCreate
+				seenPoolCreate = true
+				mu.Unlock()
+				if dup {
+					// 同名创建 → 上游 409，backend 原样透传（m12 同款断言）
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte(`{"code":"POOL_ALREADY_EXISTS"}`))
+					return
+				}
 				w.WriteHeader(http.StatusCreated)
 				_, _ = w.Write([]byte(`{"name":"p1"}`))
 				return
@@ -101,6 +112,15 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 		t.Fatalf("upstream api key header = %q", lastAuth)
 	}
 	mu.Unlock()
+
+	// 同名创建 → 上游 409 原样透传（载荷容量合法，仅 name 重复；设计 §5.2「409 = 同名已存在」）
+	dupBody := map[string]interface{}{
+		"name":         "p1",
+		"capacitySpec": map[string]int32{"bufferMin": 1, "bufferMax": 2, "poolMin": 1, "poolMax": 3},
+	}
+	if w, _ := doJSON(t, r, http.MethodPost, "/api/v1/admin/sandboxes/pools", dupBody); w.Code != http.StatusConflict {
+		t.Fatalf("duplicate name passthrough = %d, want 409: %s", w.Code, w.Body.String())
+	}
 
 	// name 非法 → 400；capacitySpec 链破坏 → 400
 	for _, body := range []map[string]interface{}{
