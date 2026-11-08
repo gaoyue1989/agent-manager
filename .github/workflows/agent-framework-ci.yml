@@ -330,6 +330,70 @@ jobs:
             agent-framework/e2e/playwright-report/
           retention-days: 5
 
+  # L 组（sandbox-pool-opensandbox-design §9.3，PR-D）：沙箱生命周期 e2e——配额仲裁/TTL 续期/
+  # LRU 复用/挂起保留窗/故障注入/可观测，双实例（lifecycle on + off 基线对照，§9.3 环境参数：
+  # QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / HOLD=1min / POOL_REF=pool-e2e / grace 6s / 超龄 2min /
+  # turn-lease 硬寿命 1min，经 start-agent.sh 的 AGENT_JVM_OPTS 注入）。
+  # 结构同 e2e-sandbox（mock OpenSandbox，纯 HTTP 断言不装浏览器）。
+  # 初期非必需检查（§9.5：合并后先非必需跑 ≥3 个 PR 观察稳定，再由管理员转必需——九项→十项预案）。
+  e2e-sandbox-lifecycle:
+    name: E2E 沙箱生命周期（L 组）
+    needs: [changes]
+    if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: e2e-root
+          MYSQL_DATABASE: agent_framework_e2e
+          MYSQL_USER: e2e
+          MYSQL_PASSWORD: e2e-pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      E2E_GROUP: lifecycle
+      E2E_BASE_PORT: "8100"
+      E2E_LIFECYCLE_OFF_BASE: http://127.0.0.1:8101
+      MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
+      MYSQL_USER: e2e
+      MYSQL_PASS: e2e-pass
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21', cache: maven }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
+      - working-directory: agent-framework
+        run: mvn -B -q -DskipTests package
+      - name: 安装 Playwright 依赖（L 组无 UI 用例，不装浏览器）
+        working-directory: agent-framework/e2e
+        run: npm ci --no-audit --no-fund
+      - working-directory: agent-framework/e2e
+        run: node scripts/check-fixtures.mjs
+      - working-directory: agent-framework/e2e
+        run: ./scripts/run.sh lifecycle
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-sandbox-lifecycle
+          # .runtime 是隐藏目录（.开头），默认被跳过——失败排障必须拿到应用/沙箱日志
+          include-hidden-files: true
+          path: |
+            agent-framework/e2e/.runtime/
+            agent-framework/e2e/playwright-report/
+          retention-days: 5
+
   # RT 组（subpath-routing-design §9.3 本地变体）：单实例 + platform-router nginx
   # （fixtures/nginx-router.conf.template，与 manifests/platform-router.yaml 语义同源）
   # ——/agent/{short} 前缀路由剥前缀、X-Forwarded-Prefix 注入（方案 A 端到端：

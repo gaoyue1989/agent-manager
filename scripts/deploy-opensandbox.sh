@@ -92,6 +92,8 @@ log "上游源码 OK: $SRC_DIR（BOM 1.1.0，chart 目录 manifests/charts/{base
 
 # ---------------------------------------------------------------------------
 # 3. 镜像补拉 → kind load（最小集：server/controller/ingress + code-interpreter/execd/task-executor，
+#    另预载 egress——create 带 networkPolicy 时 server 注入 egress sidecar（§2.2 合法用法），
+#    离线 kind 节点拉不到即 ImagePullBackOff，预防性载入；
 #    tag 以 BOM docs/releases/1.1.0.yaml 为准，全部 release-1.1.0；code-interpreter 上游示例用 v1.1.0）
 # ---------------------------------------------------------------------------
 IMAGES=(
@@ -101,6 +103,7 @@ IMAGES=(
   "opensandbox/execd:${TAG}"
   "opensandbox/code-interpreter:${CODE_INTERPRETER_TAG}"
   "opensandbox/task-executor:${TAG}"
+  "opensandbox/egress:${TAG}"
 )
 
 pull_one() {
@@ -243,7 +246,9 @@ batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yam
 sandbox_create_timeout_seconds = 60
 
 [egress]
-image = "opensandbox/egress:v1.1.7"
+# tag 以 release-1.1.0 BOM 为准（docs/releases/1.1.0.yaml）；v1.1.7 仅是上游
+# example.config.toml 的示例值，不采（chart 默认同为 release-1.1.0）
+image = "opensandbox/egress:release-1.1.0"
 mode = "dns+nft"
 TOML
 )

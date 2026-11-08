@@ -7,6 +7,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -242,6 +243,34 @@ func TestSandboxProxySevenEndpoints(t *testing.T) {
 
 // TestSandboxProxyPresetTemplate 预设模板生成（d18：官方 sample 全量复刻，image 参数只换主容器镜像）。
 func TestSandboxProxyPresetTemplate(t *testing.T) {
+	// recycleStrategy 枚举校验（设计 §5.2，黑盒第 1 轮实锤契约偏差）：
+	// 合法值（Delete/Restart/Noop/缺省）接受但不透传上游；非法值 400
+	{
+		core, h, done := newProxyCore(t, nil)
+		defer done()
+		h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"name":"p-r"}`))
+		})
+		for _, strategy := range []string{"", "Delete", "Restart", "Noop"} {
+			if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
+				Name: "p-r", RecycleStrategy: strategy,
+				CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+			}, 0); err != nil {
+				t.Fatalf("recycleStrategy %q 应合法: %v", strategy, err)
+			}
+		}
+		// 合法值不透传上游：转发 body 不含 recycleStrategy 键（d7：上游 CreatePoolRequest 不收）
+		if strings.Contains(h.Reqs[0].Body, "recycleStrategy") {
+			t.Fatalf("合法 recycleStrategy 不应透传上游: %s", h.Reqs[0].Body)
+		}
+		if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
+			Name: "p-r", RecycleStrategy: "Bogus",
+			CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		}, 0); !errors.Is(err, ErrInvalidForm) {
+			t.Fatalf("recycleStrategy Bogus 应 400 ErrInvalidForm, got %v", err)
+		}
+	}
 	// image 缺省 → 取平台默认 SANDBOX_IMAGE
 	core, h, done := newProxyCore(t, map[string]string{"SANDBOX_IMAGE": "reg.example.com/ci:v9"})
 	defer done()

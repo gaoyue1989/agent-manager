@@ -106,7 +106,8 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `test`（已有） | — | mvn test | — | ~6min |
 | `eval-selftest` | — | 评测飞轮离线自检（`bench/eval/flywheel.py selftest`：帧映射/检查器/HITL 视图/错误断言/失败分类，零网络零 LLM） | needs: changes（与单测并行） | <1min |
 | `e2e-core` | 1 | S/F/H/M/A/FW/RD/X/CG/Q86 组 API + U 组 UI（§5.1-5.5、§5.7-5.8、§5.10-5.13；SK/MEM/HA 组无 §5 小节，用例定义见 [e2e-coverage-gap-analysis-20260927.md](e2e-coverage-gap-analysis-20260927.md) §4，同落 api-core 项目） | needs: changes（与单测并行） | ~12-15min |
-| `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7） | needs: changes（与单测并行） | ~10-15min |
+| `e2e-multi` | 2 + nginx | R 组（刷新续传跨副本、kill 接管、并发互斥、跨副本 confirm）+ U9（§5.6/§5.7）+ L 组多副本并发（§5.14 M1-M3：双副本 acquire/改绑竞态/P3 闲置重入互斥；副本 env 增开沙箱+生命周期，sandbox-pool-opensandbox-design §9.3） | needs: changes（与单测并行） | ~12-18min |
+| `e2e-sandbox-lifecycle`（L 组，2026-11-08，sandbox-pool-opensandbox-design PR-D §9.3） | 2（lifecycle on + off 基线对照，8100/8101）+ mock 沙箱（池/renew-expiration/故障注入 §9.2） | L1-L20：配额仲裁/预检 409/PENDING 不变量/假 409 修正/总开关回退/T2-T4 续期/A2A 不被抢/超龄剔除/renew404/LRU 复用/被抢重建/租约硬释放/同 user 残留/挂起保留窗/到期重建/debug 端点/定时清理 | needs: changes（非必需检查；§9.5：≥3 个 PR 观察稳定后由管理员转必需，九项→十项） | ~15-20min |
 | `e2e-sandbox` | 1 + mock 沙箱 | X 组（Shell、沙箱文件、USER 复用、容器重建降级、上传注入，§5.6） | needs: changes（与单测并行） | ~8-12min |
 | `e2e-protocol`（T 组先行 + J 组，2026-09-30/10-01） | 2（存量 a + 协议实例 p，env-up `protocol` 分支） | T 组确定性 HTTP 契约切片：T7 /tasks 强制 token（验收断言 11）、T8 存量零影响（验收断言 8）、卡片 agent_protocol 透出；J0/J 组 `/a2a/jobs` 幂等 Job HTTP 面（401/400/同键同 taskId/GET 404、卡片 metadata 透出）；spawn/父崩溃/超时已由 protocol-multi P1/P2/P4 承接，确认/拒绝两场景仍待二期 | needs: changes（非必需检查） | ~5min |
 | `e2e-protocol-multi`（P 组，2026-09-30） | lead×2 + member×2 + 双 nginx LB（8100 lead LB / 8101 member LB / 8102 存量对照 / 8103-8104 member 副本 / 8105-8106 lead 副本；`AGENT_PROTOCOL_EVENT_BUS=redis`，共享 MySQL/Redis） | P1-P7 跨副本委派（travel-fulfillment 设计 §18.4/§18.10）：spawn 随机路由→收割汇总、lead kill 接管、member 事件跨副本对账、TTL 恰好一次、无粘性冒烟、存量零影响、A2A Job 同键收敛（用例定义见 §5.12） | needs: changes（**必需检查**） | timeout 30min |
@@ -161,6 +162,10 @@ e2e-sandbox job 在上述基础上**追加一个 node 进程** `e2e/mock/sandbox
 | `OPENSANDBOX_SERVER_URL` | `127.0.0.1:8090` | 指向 mock（仅 sandbox job） |
 | `OPENSANDBOX_API_KEY` | `e2e-placeholder` | 占位符（与 bench 做法一致；mock 校验可关） |
 | `SANDBOX_IMAGE` | 默认值原样（`opensandbox/code-interpreter:v1.1.0`） | 仅作为 create 请求字段传给 mock，**从不拉取** |
+| `SANDBOX_LIFECYCLE_ENABLED` / `SANDBOX_USER_QUOTA` / `SANDBOX_TIMEOUT_MINUTES` / `SANDBOX_RENEW_INTERVAL_SECONDS` / `SANDBOX_CONFIRM_HOLD_MINUTES` / `SANDBOX_POOL_REF` | lifecycle 组：true / 2 / 1 / 3 / 1 / pool-e2e；multi 组：true / 2 / 30 / 3 / 1 / 空 | §5.14 L 组加速参数（§9.3）；start-agent.sh 透传 |
+| `AGENT_JVM_OPTS` | `-Dagent.sandbox.lifecycle.grace-floor-seconds=6 -Dagent.sandbox.lifecycle.registry-overage-minutes=2`（multi/lifecycle 组）；lifecycle 组追加 `-Dagent.cleanup.turn-lease-max-lifetime-minutes=1` | L 组 JVM 系统属性：grace 下限/注册表超龄下限压低（生产 120s/2h）+ turn_lease 硬寿命 1min（L12） |
+| `SANDBOX_GUARD_LEASE_SECONDS` | 20（multi 组；默认 900） | R4 kill 场景：被 kill 副本的守卫锁无法主动释放，900s 泄漏锁死同会话接管后的下一次 acquire（本地实跑实锤）——20s 自愈；先例同 turn-lease TTL 压低 |
+| （测试约定）api-multi/api-multi-kill 用户 | `const U = () => \`e2e-multi-<用例标题>\`` | 每用例一稳定用户（原固定 `e2e-multi` 在 QUOTA=2 下第 3 会话起被预检 409，本地实跑实锤）；R 组「同用户跨会话」断言在单用例内保持 |
 
 > 多副本两实例**共享同一 MySQL 库与同一 Redis**（这是多副本语义的前提：状态/租约在 MySQL，事件流在 Redis，路由无粘性）。
 
@@ -567,6 +572,45 @@ agent-config/
 > 间接证实 waiting 帧到达客户端）；#86 的挂起判定与 auto_confirm 全链路由 flywheel
 > selftest 新旧双序钉子 + 全量评测用例（case_hitl_publish_confirm_001）看守，e2e 侧
 > Q86 只钉帧序这一层。
+
+### 5.14 L 组 — 沙箱生命周期（e2e-sandbox-lifecycle job，2026-11-08；sandbox-pool-opensandbox-design §9.3 PR-D）
+
+环境参数（env-up `lifecycle` 分支）：`QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / POOL_REF=pool-e2e / CONFIRM_HOLD=1min`；
+JVM 注入 `-Dagent.sandbox.lifecycle.grace-floor-seconds=6`（生产 120s）、`-Dagent.sandbox.lifecycle.registry-overage-minutes=2`
+（生产 2h）、`-Dagent.cleanup.turn-lease-max-lifetime-minutes=1`（L12）；实例 a=lifecycle on（8100 主断言）+
+实例 off=SANDBOX_LIFECYCLE_ENABLED=false（8101，L8 基线对照）。mock OpenSandbox 扩展（§9.2）：
+`/v1/pools` 内存 CRUD（status 变动/补位）、`renew-expiration`（计入 /stats.renews）、create 请求体记录
+（poolRef/metadata/timeout 断言源）、`/admin/fault` 扩展 `renew404/poolExhausted/slowCommandMs`
+（slowLLM 由 mock-llm 既有 `[E2E:slow]`/`[E2E:hang]` 时序包装承担，§4.1.3）。
+
+| # | 场景 | 步骤 | 断言要点 |
+|---|------|------|---------|
+| L1 | 配额上限可感知 | 同 user 2 个在途 turn（sleep 15s 重叠）→ 第 3 会话 | user_quota_exhausted 任一面可感知：预检 HTTP 409（{code,quota,bindings}）或 SSE error 帧 code |
+| L2 | chat 预检 409 明细 | 同场景直发 /threads/chat | 409 + body.bindings=2 条（session_id/expires_at/state∈{executing,confirm_holding}） |
+| L3 | LRU 复用 | 2 空闲绑定占满 → grace 过 → 新会话 | 继承既有 sandboxId + 该沙箱 renew 计数 +1（⑤c renew 顶 TTL） |
+| L4 | T2 收尾刷新 | 一轮正常对话 | turn done 后 mock renew-expiration 对该沙箱 ≥1 次 |
+| L5a | T3 LLM-only 长轮次 | plain turn 建条目 → 同会话 `[E2E:slow](x,4000,4)`（≈12-16s 无工具调用） | 轮次进行中 renew 计数增加（turn 注册信号兜住 call 间隙） |
+| L5b | T3 长 exec | `[E2E:execute:sleep](12)`（> 2×RENEW） | 执行全程 renew ≥1 |
+| L6 | poolRef 透传 | 建池 pool-e2e → 对话 | create 请求体 extensions.poolRef=pool-e2e + resourceLimits 抑制（d17 部分保留；image 受 SDK「image XOR snapshotId」客户端强约束必传、上游实测忽略）+ 池 status 变动（allocated/available） |
+| L7 | metadata 注入 | 同上 | create 请求体 metadata.session_id = 前端 sid（console 只读页过滤口径）+ timeout=60 |
+| L8 | 总开关回退 | OFF 实例（SANDBOX_LIFECYCLE_ENABLED=false）同 user 3 会话 | 全部 done（超配额不拒）+ 该实例沙箱 renew 零调用（TTL 旁路） |
+| L9 | 到期重建 | /admin/destroy + SQL 拨 expires_at → 下 turn | ① probe 404 → 懒剔除事件 + 新 sandboxId |
+| L10 | debug 端点 | 在途 turn + 终态后各查 /debug/sandbox-bindings | config 回显（quota/ttl/renew/hold）+ turn_running true→false（双事实源派生）+ registry/events 结构 |
+| L11 | 定时清理 | SQL 注入过期行+虚高计数+老化锚行 → POST /debug/sandbox-cleanup（测试钩子，同 SessionCleanupService 语义） | 过期行删 + count 重算 + 空锚行删 + 重跑幂等 |
+| L12 | 租约硬释放不误判 | sleep 70s（>1min 硬寿命，turn_lease 已消失）+ 同 user 第 2 空闲行 → 新会话触发 ⑤ | 长命令会话不被改绑（updated_at 在途续期判 busy）+ 长命令 turn 正常完成 |
+| L13 | 幽灵占额修正 | SQL 注入 binding_count=9 + 陈旧 PENDING 行（>10min）→ 新会话 acquire | 必须成功（⑤b 重算 + PENDING 回收）+ 计数回归==行数 |
+| L14 | 被抢会话不重连易主沙箱 | L3 之后原会话（同 uid）再发 turn | P3 归属校验拦截 → 降级重建：绑定换新 sandboxId + `sandbox_rebuilt` 换代提示帧（§4.4 T4） |
+| L15 | A2A 长任务不被抢 | A2A message/send sleep 15（binding.session_id=真实用户）+ 空闲行占满 → 新 chat 触发 ⑤ | A2A 绑定不变（无 turn_lease 靠 updated_at）+ A2A 结束后 renew 停止（防泄漏） |
+| L16 | 注册表超龄剔除 | sleep 140s 长 turn + SSE 断连 → 等 bornAt+2min | `registry_overage` ERROR 事件 + 注册表清空 + 续期停止（不被无限续期） |
+| L17 | renew 404 剔除 | /admin/fault renew404 + 长 turn | `renew_404` 事件 + 绑定行懒剔除（配额即时释放）+ 同 user 新会话 create 成功 |
+| L18a | 挂起保留窗 | ask 挂起（植入文件）→ 保留窗内同 user 新会话触发 ⑤ → confirm | ask 行不被改绑（hold 续期保 busy）+ confirm 同 sandboxId + 植入文件仍在 |
+| L18b | 保留窗过期 | 保留窗（1min）+ grace 过 → ⑤ 抢占 → A 过期 confirm | 换新 sandboxId + `sandbox_rebuilt` 换代提示帧（卡片仍可点、无硬拒） |
+| L19 | 同 user 继承残留 | 植入文件 → busy 行占位 → 新会话 ⑤ 继承 → 读文件 | 继承沙箱内 `data/out.txt` 可读（§4.5 明示接受的行为钉进契约） |
+| L20 | 假 409 修正 | 死绑定（destroy + SQL 拨 expires_at）→ 预检 + exec | 预检放行（200 非 409）+ exec 懒剔除后成功 |
+
+> L 组 SQL 钩子（L11/L13/L20）经 mysql2 直连 checkpoint 库注入/对账——binding 表即共享真相，
+> 与 U1 真库 IT（SandboxBindingStoreMySqlIT）同一断言口径。
+
 
 ---
 

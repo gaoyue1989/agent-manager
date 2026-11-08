@@ -54,6 +54,15 @@ public class SessionCleanupService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private TurnStopStore turnStopStore;
 
+    /**
+     * 沙箱绑定簿记（sandbox-pool-opensandbox-design §4.1.2，字段注入 required=false）：
+     * 绑定行/锚表定时清理 + 计数锚行锁内重算。null = lifecycle 未装配（旁路，跳过）。
+     * 与懒剔除分工：懒剔除保正确性（配额判定前清死绑定），定时清理保容量
+     * （再也不来的用户留下的行）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore sandboxBindingStore;
+
     public SessionCleanupService(DataSource dataSource,
                                  SessionManager sessionManager,
                                  TurnLeaseStore turnLeaseStore,
@@ -116,8 +125,34 @@ public class SessionCleanupService {
         // 5. Agent Protocol 终态 TaskRecord 保留期扫描（协议关闭时为 no-op）
         scanExpiredProtocolTaskRecords();
 
+        // 6. 沙箱绑定簿记清理（sandbox-pool-opensandbox-design §4.1.2，lifecycle 未装配时跳过）：
+        //    删 expires_at 过期超保留窗的绑定行（服务端必已 GC，无需 probe）+ 受影响用户
+        //    binding_count 锚行锁内重算 + 空锚行删除。重跑幂等（第二次删 0 行）。
+        cleanupSandboxBindings();
+
         log.info("Session cleanup done: memory={}, agent_state={}, agent_fs={}, session_message={}, session_user={}",
             memCleaned, stateCleaned, fsCleaned, messageCleaned, userMappingCleaned);
+    }
+
+    /** 沙箱绑定/锚表定时清理（§4.1.2；lifecycle 未装配为 no-op；失败不阻断主流程） */
+    private void cleanupSandboxBindings() {
+        if (sandboxBindingStore == null) {
+            return;
+        }
+        try {
+            int retentionDays = props.cleanup() != null
+                ? props.cleanup().sandboxBindingRetentionDays() : 7;
+            Instant cutoff = Instant.now().minus(retentionDays, ChronoUnit.DAYS);
+            int bindingDeleted = sandboxBindingStore.cleanupExpired(cutoff);
+            int anchorDeleted = sandboxBindingStore.cleanupEmptyAnchors(
+                Instant.now().minus(retentionDays, ChronoUnit.DAYS));
+            if (bindingDeleted > 0 || anchorDeleted > 0) {
+                log.info("cleanup: sandbox bindings={} anchors={} (retentionDays={})",
+                    bindingDeleted, anchorDeleted, retentionDays);
+            }
+        } catch (Exception e) {
+            log.warn("cleanup: sandbox binding cleanup failed: {}", e.getMessage());
+        }
     }
 
     /** 过期上传文件清理：删 DB 行 + 删存储对象（先删行后删对象，对象删除失败仅告警可重试） */

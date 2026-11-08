@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  bindingAdvice, capacityFromForm, deriveBindingState, isQuotaError, makeQuotaError,
+  bindingAdvice, capacityFromForm, confirmHoldText, deriveBindingState, isQuotaError, makeQuotaError,
   parseQuota409, poolLevel, quotaFromSseError, quotaHeadline, stopThreadUrl,
   validateCapacityForm, validatePoolName,
 } from "./sandbox-quota.ts";
@@ -20,7 +20,8 @@ test("409 body with user_quota_exhausted parses to payload (precheck entry)", ()
     quota: 5,
     bindings: [
       { session_id: "s1", expires_at: "2026-11-07T15:00:00Z", state: "executing" },
-      { session_id: "s2", expires_at: "2026-11-07T15:10:00Z", state: "confirm_holding" },
+      { session_id: "s2", expires_at: "2026-11-07T15:10:00Z", state: "confirm_holding",
+        confirm_hold_expires_at: "2026-11-07T15:08:00Z" },
     ],
   };
   const p = parseQuota409(409, body);
@@ -84,6 +85,16 @@ test("confirm_holding binding: no stop button, guide to reject/hold-window (d5)"
   assert.equal(adv.canStop, false); // 后端 WAITING_CONFIRM 停止必 409 —— 不得提供停止按钮
   assert.equal(adv.label, "确认等待中");
   assert.match(adv.advice, /保留窗|拒绝该确认/);
+});
+
+test("confirm_holding hold window deadline surfaces (confirm_hold_expires_at, §4.3/§6.3)", () => {
+  // 预检 409 携带保留窗截止（payload409 透出）→ 展示「保留窗至 …」
+  assert.equal(confirmHoldText({ state: "confirm_holding", confirm_hold_expires_at: "2026-11-07T15:10:00Z" }),
+    "保留窗至 2026-11-07 15:10");
+  // SSE 帧无该字段 / 缺失 / 空载 → 空串不渲染
+  assert.equal(confirmHoldText({ state: "confirm_holding" }), "");
+  assert.equal(confirmHoldText({ turn_running: true }), "");
+  assert.equal(confirmHoldText(null), "");
 });
 
 test("stop endpoint URL reuses POST /threads/{sid}/stop", () => {

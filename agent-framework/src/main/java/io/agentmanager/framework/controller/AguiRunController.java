@@ -99,6 +99,13 @@ public class AguiRunController {
     private final AguiEventCodec codec;
     private final Duration heartbeatInterval;
 
+    /**
+     * 沙箱生命周期管理器（sandbox-pool-opensandbox-design §4.4 turn 挂钩；字段注入
+     * required=false 避免改动构造调用点，单测直接 new 时为 null）。null = lifecycle 旁路。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
+
     /** toolCallId → 真实工具名（turn 内有效；ToolCallStartEvent 是唯一带真实名的事件） */
     private final java.util.concurrent.ConcurrentHashMap<String, String> toolCallNames =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -271,6 +278,11 @@ public class AguiRunController {
                 return;
             }
 
+            // ===== 3.5 沙箱生命周期 turn 注册（§4.4 T3 双信号之一，AG-UI 链路）=====
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onTurnStart(threadId);
+            }
+
             var turnEnded = new AtomicBoolean(false);
             var toolSummary = new TurnToolSummaryTracker(threadId, runId,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
@@ -335,6 +347,11 @@ public class AguiRunController {
                         () -> endTurnAndCleanup(lease, threadId, turnEnded, turnBucketKeys));
             } catch (Exception e) {
                 log.warn("[agui] run setup failed, rolling back (sid={}): {}", threadId, e.getMessage());
+                // 沙箱生命周期 turn 注销：onTurnStart 已在本段注册（§4.4 T3），回滚同样必须
+                // 注销——防 activeTurns 条目泄漏持续续期（与 endTurnAndCleanup「终态必注销」对称）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(threadId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, threadId,
                     runErrorSSE(threadId, runId, "turn_setup_failed: "
                         + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
@@ -383,6 +400,11 @@ public class AguiRunController {
             }
             var lease = new TurnLeaseGuard(turnLeaseStore, threadId, token);
 
+            // 沙箱生命周期 turn 重注册（§4.4：AG-UI 恢复段同 confirm-stream，清 holdUntil）
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onTurnStart(threadId);
+            }
+
             var turnEnded = new AtomicBoolean(false);
             var toolSummary = new TurnToolSummaryTracker(threadId, runId,
                 (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
@@ -419,6 +441,11 @@ public class AguiRunController {
                 resumeFlux = runtimeService.resumeWithConfirmEvents(threadId, null, results, forwardHeaders);
             } catch (Exception e) {
                 log.warn("[agui] resume setup failed, rolling back (sid={}): {}", threadId, e.getMessage());
+                // 沙箱生命周期 turn 注销：onTurnStart（恢复段重注册）已在本段落位，回滚同样
+                // 必须注销，防 activeTurns 条目泄漏持续续期（§4.4 T2 终态必注销）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(threadId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, threadId,
                     runErrorSSE(threadId, runId, e.getMessage() != null
                         ? e.getMessage() : e.getClass().getSimpleName()));
@@ -451,9 +478,9 @@ public class AguiRunController {
                             "{\"type\":\"error\",\"error\":"
                                 + AgentEventSseSerializer.jsonEsc(errText) + "}");
                     }
-                    TurnFinalizer.endTurn(eventBus, lease, threadId, turnEnded);
+                    endTurnWithLifecycle(lease, threadId, turnEnded);
                 },
-                () -> TurnFinalizer.endTurn(eventBus, lease, threadId, turnEnded));
+                () -> endTurnWithLifecycle(lease, threadId, turnEnded));
 
             sink.onCancel(() -> log.info(
                 "[agui] SSE disconnected on resume, agent continues (sid={}, rid={})",
@@ -559,6 +586,10 @@ public class AguiRunController {
             log.info("[agui] HITL permission_ask: sessionId={}, tools={}", sessionId,
                 ((RequireUserConfirmEvent) event).getToolCalls().stream().map(tc -> tc.getName()).toList());
             runtimeService.storeConfirmContext(sessionId, event);
+            // T4 挂起保留窗（§4.4）：AG-UI 挂起同样保留沙箱续期，每次 ask 重新计窗
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onConfirmHold(sessionId);
+            }
         }
 
         // 双编码发射：p=native 词表；pa=AG-UI 帧（codec 失败降级 null → §6.3）
@@ -588,11 +619,25 @@ public class AguiRunController {
         }
     }
 
+    /** turn 收尾（CAS 首胜）+ 沙箱生命周期终态注销（§4.4 T2；AG-UI resume 路径共用） */
+    private void endTurnWithLifecycle(TurnLeaseGuard lease, String sessionId, AtomicBoolean turnEnded) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
+            return;
+        }
+        if (sandboxLifecycle != null) {
+            sandboxLifecycle.onTurnEnd(sessionId);
+        }
+    }
+
     /** turn 收尾 + 本 turn 桶清理（A4：首胜才清桶；与 ChatStreamController 同模式） */
     private void endTurnAndCleanup(TurnLeaseGuard lease, String sessionId,
                                    AtomicBoolean turnEnded, java.util.Set<String> turnBucketKeys) {
         if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
+        }
+        // 沙箱生命周期 turn 终态注销 + 终刷（§4.4 T2，AG-UI 链路）
+        if (sandboxLifecycle != null) {
+            sandboxLifecycle.onTurnEnd(sessionId);
         }
         for (String toolCallId : turnBucketKeys) {
             toolCallNames.remove(toolCallId);

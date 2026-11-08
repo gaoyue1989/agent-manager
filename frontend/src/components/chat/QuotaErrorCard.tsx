@@ -6,7 +6,7 @@
 // 引导等保留窗到期或在该会话拒绝确认。两入口复用本卡：chat 预检 409 响应体 + SSE error 帧
 // code=user_quota_exhausted。
 import { useState } from "react";
-import { bindingAdvice, quotaHeadline, type QuotaPayload } from "@/lib/sandbox-quota";
+import { bindingAdvice, confirmHoldText, quotaHeadline, type QuotaPayload } from "@/lib/sandbox-quota";
 
 export default function QuotaErrorCard(props: {
   payload: QuotaPayload;
@@ -52,6 +52,8 @@ export default function QuotaErrorCard(props: {
             const known = b.session_id && resolveTitle ? resolveTitle(b.session_id) : undefined;
             const visible = known !== undefined && known !== "";
             const expires = b.expires_at ? b.expires_at.replace("T", " ").slice(0, 16) : "";
+            // confirm_holding 行透出保留窗截止（§4.3/§6.3）：用户不必盲目等——知何时可重试
+            const hold = confirmHoldText(b);
             return (
               <li key={b.session_id ?? i}
                 className="rounded-lg border border-amber-200 bg-white/80 px-2.5 py-1.5">
@@ -65,6 +67,11 @@ export default function QuotaErrorCard(props: {
                   ) : !visible ? (
                     <span className="text-[11px] text-gray-400">（会话不可见）</span>
                   ) : null}
+                  {hold && (
+                    <span className="text-[11px] text-amber-600" data-testid={`quota-binding-hold-${i}`}>
+                      {hold}
+                    </span>
+                  )}
                   {adv.canStop && b.session_id && onStop && (
                     <button
                       onClick={() => stop(b.session_id!)}

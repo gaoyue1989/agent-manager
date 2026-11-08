@@ -19,9 +19,27 @@ MYSQL_USER="${MYSQL_USER:-e2e}"
 MYSQL_PASS="${MYSQL_PASS:-e2e-pass}"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
+# 沙箱生命周期组参数（sandbox-pool-opensandbox-design §9.3 环境参数：加速变体）
+SANDBOX_USER_QUOTA="${SANDBOX_USER_QUOTA:-5}"
+SANDBOX_TIMEOUT_MINUTES="${SANDBOX_TIMEOUT_MINUTES:-1}"
+SANDBOX_RENEW_INTERVAL_SECONDS="${SANDBOX_RENEW_INTERVAL_SECONDS:-3}"
+SANDBOX_CONFIRM_HOLD_MINUTES="${SANDBOX_CONFIRM_HOLD_MINUTES:-1}"
+SANDBOX_POOL_REF="${SANDBOX_POOL_REF:-}"
+# JVM 系统属性：grace 下限压至 6s（生产 120s）、注册表超龄下限压至 2min（生产 2h）——
+# 仅生命周期链路读取，对非 lifecycle 组无行为影响；lifecycle 组追加 turn_lease 硬寿命 1min
+# （L12 租约硬释放场景，属性已存在于 TurnLeaseGuard.java:70，默认 10min）；先例同 turn-lease TTL 压低
+AGENT_JVM_OPTS="${AGENT_JVM_OPTS:--Dagent.sandbox.lifecycle.grace-floor-seconds=6 -Dagent.sandbox.lifecycle.registry-overage-minutes=2}"
+[ "$E2E_GROUP" = "lifecycle" ] && AGENT_JVM_OPTS="$AGENT_JVM_OPTS -Dagent.cleanup.turn-lease-max-lifetime-minutes=1"
 # start-agent.sh（R4 retry 重建副本）复用同组变量，export 透传子进程保持覆盖语义一致
 export LLM_MOCK_PORT MYSQL_URL MYSQL_USER MYSQL_PASS REDIS_URL SANDBOX_ENABLED SANDBOX_MOCK_PORT
+export SANDBOX_USER_QUOTA SANDBOX_TIMEOUT_MINUTES SANDBOX_RENEW_INTERVAL_SECONDS SANDBOX_CONFIRM_HOLD_MINUTES SANDBOX_POOL_REF AGENT_JVM_OPTS SANDBOX_GUARD_LEASE_SECONDS
 [ "$E2E_GROUP" = "sandbox" ] && SANDBOX_ENABLED=true
+# lifecycle 组（§9.3）：沙箱开 + 生命周期加速参数（QUOTA=2/TTL=1min/RENEW=3s/HOLD=1min/POOL_REF=pool-e2e）
+[ "$E2E_GROUP" = "lifecycle" ] && SANDBOX_ENABLED=true && SANDBOX_USER_QUOTA=2 && SANDBOX_POOL_REF="pool-e2e"
+[ "$E2E_GROUP" = "multi" ] && SANDBOX_ENABLED=true && SANDBOX_USER_QUOTA=2 && SANDBOX_TIMEOUT_MINUTES=30 && SANDBOX_POOL_REF=""
+# multi 组守卫租约压低（默认 900s）：R4 kill 场景下被 kill 副本的守卫锁无法主动释放，
+# 900s 泄漏会锁死同会话接管后的下一次 acquire——20s 自愈，先例同 turn-lease TTL 压低
+[ "$E2E_GROUP" = "multi" ] && SANDBOX_GUARD_LEASE_SECONDS=20
 # AG 组（agui-native-parity-design §12.4）：api-agui 项目独立组（e2e-agui job，先非必需），
 # 单实例 + AGENT_AGUI_ENABLED=true；core/sandbox 组不开（关闭时 /agui/* 404，存量组不受影响）
 [ "$E2E_GROUP" = "agui" ] && export AGENT_AGUI_ENABLED=true
@@ -159,6 +177,12 @@ case "$E2E_GROUP" in
   core|sandbox|agui)
     start_jar "$E2E_BASE_PORT" "a"
     ;;
+  lifecycle)
+    # L 组（sandbox-pool-opensandbox-design §9.3）：a = 生命周期开（E2E_BASE 主断言实例）；
+    # off = SANDBOX_LIFECYCLE_ENABLED=false 基线对照（L8 总开关回退，同参沙箱环境）
+    start_jar "$E2E_BASE_PORT" "a"
+    SANDBOX_LIFECYCLE_ENABLED=false start_jar "$((E2E_BASE_PORT + 1))" "off"
+    ;;
   router)
     # RT 组（subpath-routing-design §9.3 本地变体）：单实例 + platform-router nginx
     # （fixtures/nginx-router.conf.template，与 manifests/platform-router.yaml 语义同源）。
@@ -217,7 +241,7 @@ case "$E2E_GROUP" in
     start_lb "$((E2E_BASE_PORT + 0))" "$((E2E_BASE_PORT + 5))" "$((E2E_BASE_PORT + 6))" leadlb
     start_lb "$((E2E_BASE_PORT + 1))" "$((E2E_BASE_PORT + 3))" "$((E2E_BASE_PORT + 4))" memberlb
     ;;
-  *) echo "E2E_GROUP 必须是 core|multi|sandbox|protocol|protocol-multi|router"; exit 1;;
+  *) echo "E2E_GROUP 必须是 core|multi|sandbox|lifecycle|protocol|protocol-multi|router"; exit 1;;
 esac
 
 # ---------- 4. env.json ----------
@@ -242,6 +266,7 @@ cat > "$RUNTIME/env.json" <<EOF
   "benchMcp": "http://127.0.0.1:${BENCH_MCP_PORT}",
   "approvalMcp": "http://127.0.0.1:${APPROVAL_MCP_PORT}",
   "sandboxMock": "http://127.0.0.1:${SANDBOX_MOCK_PORT}",
+  "lifecycleOffBase": "http://127.0.0.1:$((E2E_BASE_PORT + 1))",
   "sandboxEnabled": $SANDBOX_ENABLED,
   "mysqlUrl": "$MYSQL_URL",
   "mysqlUser": "$MYSQL_USER",

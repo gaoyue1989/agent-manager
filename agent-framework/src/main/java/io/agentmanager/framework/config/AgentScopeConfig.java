@@ -48,7 +48,9 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         SessionUserStore sessionUserStore,
-        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager> lifecycleManagerProvider
     ) {
         if (!sandboxRuntime.enabled()) {
             log.info("Sandbox disabled (SandboxRuntime), using RemoteFilesystemSpec mode");
@@ -93,12 +95,15 @@ public class AgentScopeConfig {
         // 直接组键会让 USER 串行化退化为每会话一把，2026-10-16 实测确认）；无 store 时回退原值
         // 2026-10-21：per-session agent 隔离开启后 slot 已按会话分（Channel=前端 sid），锁粒度
         // 跟随 slot（sessionGranularLocks=true），否则同用户多会话在各自独立 slot 上互相排队
-        if (sandboxRuntime.guardEnabled()) {
+        var guardEnabled = sandboxRuntime.guardEnabled();
+        io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard guard = null;
+        if (guardEnabled) {
             var redisFacade = redisFacadeProvider.getIfAvailable();
             if (redisFacade != null) {
                 var sessionGranular = sandboxRuntime.sessionAgentIsolationEnabled();
-                spec.executionGuard(new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
-                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular));
+                guard = new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
+                    redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular);
+                spec.executionGuard(guard);
                 log.info("SandboxExecutionGuard enabled (scope=USER, lockGranularity={}, leaseTtl={}s)",
                     sessionGranular ? "per-session(slot-aligned)" : "per-real-user", sandboxRuntime.guardLeaseSeconds());
             } else {
@@ -108,7 +113,122 @@ public class AgentScopeConfig {
         // 请求级 userId 注入：middleware 与 acquire 同一订阅链，顺序执行
         spec.setUserKeyMiddleware(new io.agentmanager.framework.sandbox.opensandbox.SandboxUserKeyMiddleware(
             spec, sessionKeyResolver));
+        // 沙箱生命周期装配（sandbox-pool-opensandbox-design §4.7/§4.9，PR-D）：
+        // lifecycle 开启时构建 Store/Registry/Manager 三件套并注入 spec（client/stop()/guard
+        // 经 spec 取用）；guard 是生命周期身份捕获的前置条件（评审 d3）：guard 关闭=Noop 守卫
+        // → tryEnter 注入点消失 → acquire 时 sid 为空 → ① 恒 miss 每轮新建 → 配额被孤儿
+        // 绑定占满出假 409——此处 fail-fast 早失败早发现，不接受静默退化。
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (lifecycle.enabled()) {
+            validateLifecycle(config, lifecycle);
+            if (guard == null) {
+                throw new IllegalStateException(
+                    "SANDBOX_LIFECYCLE_ENABLED=true requires SANDBOX_GUARD_ENABLED=true with a usable RedisConnectionFacade "
+                        + "(lifecycle identity capture runs on guard tryEnter thread; guard off = capture point gone = "
+                        + "every acquire misses ① and quota fills with orphan bindings). Either enable the guard or set "
+                        + "SANDBOX_LIFECYCLE_ENABLED=false.");
+            }
+            // 三件套为独立 @Bean（控制器/debug 端点/清理任务按类型注入，普通 new 的对象 Spring 不可见）：
+            // manager 缺失即装配自洽被破坏，fail-fast 拒绝静默降级
+            var manager = lifecycleManagerProvider.getIfAvailable();
+            if (manager == null) {
+                throw new IllegalStateException(
+                    "SandboxLifecycle enabled but SandboxLifecycleManager bean missing (assembly broken; "
+                        + "check sandboxBindingStore/sandboxRenewalRegistry bean conditions)");
+            }
+            spec.setLifecycleManager(manager);
+            guard.setLifecycleIdentitySpec(spec);   // 守卫 tryEnter 同线程注入捕获点（§4.2）
+            log.info("SandboxLifecycle enabled (quota={}, ttlMinutes={}, renewInterval={}s, holdMinutes={}m, poolRef={})",
+                lifecycle.userQuota(), config.timeoutMinutes(), lifecycle.renewIntervalSeconds(),
+                lifecycle.confirmHoldMinutes(), lifecycle.poolRef());
+        }
         return spec;
+    }
+
+    /**
+     * 沙箱生命周期三件套 @Bean（须为 Spring bean——DebugApiController/ChatStreamController/
+     * ConfirmController/AguiRunController/SessionCleanupService/SandboxLocator 均按类型注入；
+     * 普通对象 Spring 不可见，注入点全部静默落空，2026-11-08 本地 lifecycle 组冒烟实锤）。
+     * 条件与 sandboxFilesystemSpec 同源：sandboxRuntime.enabled() && lifecycle.enabled()，
+     * 不满足返回 null（NullBean——注入点 required=false 落 null，生命周期旁路）。
+     */
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore sandboxBindingStore(
+        DataSource dataSource,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider
+    ) {
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (!sandboxRuntime.enabled() || !lifecycle.enabled()) {
+            return null;
+        }
+        return new io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore(dataSource);
+    }
+
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry sandboxRenewalRegistry(
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore> storeProvider,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider
+    ) {
+        var store = storeProvider.getIfAvailable();
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (store == null || !sandboxRuntime.enabled() || !lifecycle.enabled()) {
+            return null;
+        }
+        // 事件汇初值 null，Manager bean 建好后桥接（emit→Manager 环形缓冲统一落事件）；
+        // daemon 守护线程在此启动（JVM 退出自然终止；sweep 异常自捕获不影响主流程）
+        var registry = new io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry(
+            store, lifecycle.renewIntervalSeconds(), lifecycle.confirmHoldMinutes(), null);
+        registry.start();
+        return registry;
+    }
+
+    @Bean
+    public io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycleManager(
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore> storeProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.sandbox.opensandbox.SandboxRenewalRegistry> registryProvider,
+        SandboxConfig config,
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> lifecycleConfigProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.TurnLeaseStore> turnLeaseStoreProvider,
+        org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.service.ConfirmContextStore> confirmContextStoreProvider,
+        io.agentmanager.framework.service.SandboxRuntime sandboxRuntime
+    ) {
+        var store = storeProvider.getIfAvailable();
+        var registry = registryProvider.getIfAvailable();
+        var lifecycle = lifecycleConfig(lifecycleConfigProvider);
+        if (store == null || registry == null || !sandboxRuntime.enabled() || !lifecycle.enabled()) {
+            return null;
+        }
+        var manager = new io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager(
+            store, registry, lifecycle, config.timeoutMinutes(),
+            turnLeaseStoreProvider.getIfAvailable(), confirmContextStoreProvider.getIfAvailable());
+        registry.setEventSink(manager::recordLifecycleEvent);
+        return manager;
+    }
+
+    /** 生命周期配置取值（独立 properties bean；无 provider/bean 时回落默认构造，与 §4.7 默认一致） */
+    private static io.agentmanager.framework.config.SandboxLifecycleConfig lifecycleConfig(
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> provider) {
+        var cfg = provider != null ? provider.getIfAvailable() : null;
+        return cfg != null ? cfg : new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20);
+    }
+
+    /**
+     * §4.7 启动校验（U3）：{@code TTL_MINUTES ≥ 1}（上游 create timeout 下限 60s）与
+     * {@code RENEW_INTERVAL < TTL×60/2}（续期间隔必须显著小于 TTL，一半即失效）——
+     * 违规 fail-fast，不接受静默生效。public 供 U3 单测直调。
+     */
+    public static void validateLifecycle(SandboxConfig config, SandboxLifecycleConfig lifecycle) {
+        if (config.timeoutMinutes() < 1) {
+            throw new IllegalStateException("SANDBOX_TIMEOUT_MINUTES must be >= 1 (upstream create timeout lower "
+                + "bound is 60s), got " + config.timeoutMinutes());
+        }
+        if (lifecycle.renewIntervalSeconds() * 2 >= config.timeoutMinutes() * 60L) {
+            throw new IllegalStateException("SANDBOX_RENEW_INTERVAL_SECONDS must be < SANDBOX_TIMEOUT_MINUTES*60/2 "
+                + "(renew interval must be well under TTL), got interval=" + lifecycle.renewIntervalSeconds()
+                + "s ttl=" + config.timeoutMinutes() + "min");
+        }
     }
 
     /**

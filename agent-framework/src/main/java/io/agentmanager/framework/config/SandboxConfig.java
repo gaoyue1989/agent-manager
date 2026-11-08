@@ -28,7 +28,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 public record SandboxConfig(
     @DefaultValue("false") boolean enabled,
     @DefaultValue("opensandbox/code-interpreter:v1.1.0") String image,
-    @DefaultValue("60") int timeoutMinutes,
+    // 语义升级（sandbox-pool-opensandbox-design §4.7）：生命周期 TTL，默认 60→30
+    // （application.yml 占位符为权威默认；本 @DefaultValue 供 yml 段缺失时兜底）
+    @DefaultValue("30") int timeoutMinutes,
     @DefaultValue("1024") int memoryMb,
     @DefaultValue("1") int cpuCount,
     @DefaultValue("/opt/code-interpreter/code-interpreter.sh") List<String> entrypoint,
