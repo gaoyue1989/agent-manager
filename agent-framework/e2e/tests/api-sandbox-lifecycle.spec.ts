@@ -253,6 +253,16 @@ test('L2 chat 预检 409 + bindings 明细（state 字段区分执行中）', as
     expect(b.expires_at).toBeTruthy();
     expect(['executing', 'confirm_holding']).toContain(b.state);
   }
+  // 黑盒第 2 轮唯一 5xx 回归钉：真实浏览器 chat 发 Accept: text/event-stream（ChatPane.tsx:366）——
+  // handler Map body 走 Jackson（仅 application/json）协商失败 → 500；String body 修复后必须仍 409
+  const sse = await fetch(`${BASE}/threads/chat`, {
+    method: 'POST', headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+    signal: AbortSignal.timeout(120_000),
+    body: JSON.stringify({ message: `[E2E:plain]`, userId: uid, sessionId: sessionIdFor(`l2d-${uniq()}`) }),
+  });
+  expect(sse.status, 'Accept: text/event-stream 下预检 409 退化（内容协商回归）').toBe(409);
+  const sseBody = await sse.json();
+  expect(sseBody.code).toBe('user_quota_exhausted');
   await Promise.all([waitTerminal(t1), waitTerminal(t2)]);
 });
 

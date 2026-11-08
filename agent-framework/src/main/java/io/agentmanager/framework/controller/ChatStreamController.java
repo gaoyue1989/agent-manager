@@ -311,7 +311,12 @@ public class ChatStreamController {
      * <p>不传 sessionId 时，首个 SSE 事件为：
      * <pre>{@code {"type":"session_created","session_id":"uuid-xxx"}}</pre>
      */
-    @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    // 无 produces 声明（SSE 输出由 Flux<ServerSentEvent> 元素类型驱动，Accept: text/event-stream
+    // 仍得 SSE 流）：预检配额满时全局异常处理器的 409 JSON 需经内容协商——produces 声明会把
+    // PRODUCIBLE_MEDIA_TYPES 钉死为 [text/event-stream]，任何 JSON body（Map/String 均）在
+    // 「acceptable×producible 交集」下无可写 converter → HttpMediaTypeNotAcceptableException →
+    // 500（黑盒第 2 轮实锤，栈 AbstractMessageConverterMethodProcessor:256 producibleTypes.isEmpty）
+    @PostMapping("/chat")
     public Flux<ServerSentEvent<String>> chat(@RequestBody ChatRequest body,
                                               @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
                                               @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader,

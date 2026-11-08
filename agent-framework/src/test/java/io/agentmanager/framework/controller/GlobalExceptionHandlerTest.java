@@ -58,8 +58,8 @@ class GlobalExceptionHandlerTest {
     /** 最小端点：复刻 ChatStreamController#chat 的 produces 声明与预检抛出路径 */
     @org.springframework.web.bind.annotation.RestController
     static class QuotaThrowingController {
-        @org.springframework.web.bind.annotation.PostMapping(
-            value = "/chat", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
+        // 与 ChatStreamController 修复对齐：无 produces 声明
+        @org.springframework.web.bind.annotation.PostMapping("/chat")
         public reactor.core.publisher.Flux<org.springframework.http.codec.ServerSentEvent<String>> chat() {
             throw new io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException(3,
                 java.util.List.of(new io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException.BindingView(
