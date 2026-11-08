@@ -348,17 +348,6 @@
 .info-row .label { color: var(--text-dim); flex-shrink: 0; }
 .info-row .value { color: var(--text-h); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 
-/* --- 沙箱池水位条（debug Sandbox 模块，D18 弹性水位） --- */
-.pool-section-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin: 10px 0 6px; }
-.pool-level-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; gap: 10px; }
-.pool-level-head .label { color: var(--text-dim); flex-shrink: 0; }
-.pool-meter { position: relative; height: 10px; background: var(--muted); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; margin: 6px 0 4px; }
-.pool-meter-fill { height: 100%; background: var(--green); transition: width 0.3s ease; }
-.pool-meter-fill.warn { background: var(--yellow); }
-.pool-meter-fill.full { background: var(--red); }
-.pool-meter-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text-dim); opacity: 0.45; }
-.pool-level-note { color: var(--text-dim); font-size: 10px; }
-
 /* --- 空状态 / 错误 --- */
 .empty { color: var(--text-dim); font-size: 12px; padding: 12px; text-align: center; }
 .error-text { color: var(--red); font-size: 12px; }

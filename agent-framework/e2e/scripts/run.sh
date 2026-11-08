@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # e2e 入口（e2e-ci-plan §3.4）：env-up → playwright → 总是 env-down → 退出码透传。
-# 用法：E2E_GROUP=core|multi|sandbox|sandbox-pool ./scripts/run.sh
+# 用法：E2E_GROUP=core|multi|sandbox ./scripts/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
 GROUP="${1:-${E2E_GROUP:-core}}"
@@ -19,7 +19,6 @@ if [ "$FAILED" -eq 0 ]; then
     core)    PROJECTS="--project=api-core --project=api-models --project=api-reload --project=ui" ;;
     multi)   PROJECTS="--project=api-multi --project=ui-multi --project=api-multi-kill" ;;
     sandbox) PROJECTS="--project=api-sandbox" ;;
-    sandbox-pool) PROJECTS="--project=api-sandbox-pool" ;;
     agui)    PROJECTS="--project=api-agui" ;;
     protocol) PROJECTS="--project=api-protocol" ;;
     protocol-multi) PROJECTS="--project=api-protocol-multi" ;;

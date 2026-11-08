@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyConfirmFailure, confirmRemainingSeconds, createConfirmCard, expireDueConfirmCards, hasEnv, isConfirmExpired, maskInput, parseInput } from "./confirm-card.ts";
+import { classifyConfirmFailure, createConfirmCard, hasEnv, maskInput, parseInput } from "./confirm-card.ts";
 
 test("valid tool calls produce a pending card with sorted-id identity", () => {
   const card = createConfirmCard([
@@ -76,58 +76,4 @@ test("confirm failure classification: only 404 expired is provably unexecuted", 
   assert.equal(classifyConfirmFailure("turn_in_progress: session 'x' has an active turn"), "unknown");
   assert.equal(classifyConfirmFailure(undefined), "unknown");
   assert.equal(classifyConfirmFailure({ message: "confirm_context_not_found" }), "unknown");
-});
-
-test("D16: expiresAt carried on card, absent when backend omits it", () => {
-  const card = createConfirmCard([{ tool_call_id: "c1", name: "t" }], "2026-11-05T10:00:00Z");
-  assert.equal(card.expiresAt, "2026-11-05T10:00:00Z");
-  assert.equal(card.status, "pending");
-  // 后端未启用截止（permission_ask 无 expires_at / history 无该字段）→ 不带，现状行为
-  assert.equal(createConfirmCard([{ tool_call_id: "c1", name: "t" }]).expiresAt, undefined);
-  assert.equal(createConfirmCard([{ tool_call_id: "c1", name: "t" }], undefined).expiresAt, undefined);
-  assert.equal(createConfirmCard([{ tool_call_id: "c1", name: "t" }], 42).expiresAt, undefined);
-});
-
-test("D16: isConfirmExpired judges by absolute deadline", () => {
-  const now = 1000000000000;
-  assert.equal(isConfirmExpired(new Date(now + 5000).toISOString(), now), false);
-  assert.equal(isConfirmExpired(new Date(now).toISOString(), now), true);
-  assert.equal(isConfirmExpired(new Date(now - 1).toISOString(), now), true);
-  // 无截止/非法值 → 永不超时（现状行为）
-  assert.equal(isConfirmExpired(undefined, now), false);
-  assert.equal(isConfirmExpired("not-a-date", now), false);
-});
-
-test("D16: confirmRemainingSeconds counts down, null without deadline", () => {
-  const now = 1000000000000;
-  assert.equal(confirmRemainingSeconds(new Date(now + 6500).toISOString(), now), 7);
-  assert.equal(confirmRemainingSeconds(new Date(now + 1000).toISOString(), now), 1);
-  assert.equal(confirmRemainingSeconds(new Date(now - 5000).toISOString(), now), 0);
-  assert.equal(confirmRemainingSeconds(undefined, now), null);
-  assert.equal(confirmRemainingSeconds("garbage", now), null);
-});
-
-test("D16: expireDueConfirmCards flips only due pending cards", () => {
-  const due = createConfirmCard([{ tool_call_id: "a", name: "t" }], new Date(1000).toISOString());
-  const fresh = createConfirmCard([{ tool_call_id: "b", name: "t" }], new Date(9999999999999).toISOString());
-  const noDeadline = createConfirmCard([{ tool_call_id: "c", name: "t" }]);
-  const submitted = { ...createConfirmCard([{ tool_call_id: "d", name: "t" }], new Date(1000).toISOString()), status: "resolved" };
-  const msgs = [
-    { role: "assistant", content: "", confirm: due },
-    { role: "assistant", content: "", confirm: fresh },
-    { role: "assistant", content: "", confirm: noDeadline },
-    { role: "assistant", content: "", confirm: submitted },
-  ];
-  const next = expireDueConfirmCards(msgs, 2000);
-  assert.equal(next[0].confirm.status, "expired");
-  assert.equal(next[1].confirm.status, "pending");
-  assert.equal(next[2].confirm.status, "pending");
-  assert.equal(next[3].confirm.status, "resolved");
-  // 无到期卡（now=500 < 所有 expiresAt）→ 返回原引用（React 状态零扰动）
-  assert.equal(expireDueConfirmCards(msgs, 500), msgs);
-});
-
-test("D16: confirm_expired (410 hard deadline) classifies as expired", () => {
-  assert.equal(classifyConfirmFailure(
-    "confirm_expired: session 'webui-x' pending confirm expired at 2026-11-05T10:00:00Z"), "expired");
 });

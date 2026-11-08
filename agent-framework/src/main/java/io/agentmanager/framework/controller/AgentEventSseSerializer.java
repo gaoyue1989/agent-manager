@@ -30,19 +30,6 @@ public final class AgentEventSseSerializer {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /**
-     * HITL 确认硬截止分钟数（{@code AGENT_CONFIRM_DEADLINE_MINUTES}，D16）。
-     * 0 = 未启用（permission_ask 帧不带 expires_at，存量行为零变化）。
-     * Bean 装配期由 AgentScopeConfig 写入一次；serializer 是静态工具类，
-     * 无 Spring 上下文，经此静态槽位获得配置（只写一次、运行期只读）。
-     */
-    private static volatile int confirmDeadlineMinutes = 0;
-
-    /** 装配期注入确认截止分钟数（≤0 = 不透出 expires_at） */
-    public static void configureConfirmDeadline(int minutes) {
-        confirmDeadlineMinutes = minutes;
-    }
-
     private AgentEventSseSerializer() {
     }
 
@@ -136,12 +123,6 @@ public final class AgentEventSseSerializer {
             payload.put("type", "permission_ask");
             payload.put("tool_calls", calls);
             payload.put("reply_id", confirm.getReplyId());
-            // D16 确认硬截止：绝对失效时刻（ISO-8601 UTC），前端据此渲染倒计时/过期态；
-            // 未启用（minutes≤0）不带该字段，存量前端行为零变化
-            if (confirmDeadlineMinutes > 0) {
-                payload.put("expires_at",
-                    java.time.Instant.now().plusSeconds(confirmDeadlineMinutes * 60L).toString());
-            }
         } else if (event instanceof io.agentscope.core.event.SubagentExposedEvent sub) {
             // 子 agent 调用收口帧（AgentSpawnTool 在结果返回时发出）：snake_case 与
             // permission_ask 同风格，字段供前端「远程调用面板」展示收口标记
