@@ -533,6 +533,22 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		}
 		OK(c, list)
 	})
+	// 沙箱实例（只读，sandbox-pool-opensandbox-design §5.3）：本工作空间各服务在
+	// opensandbox 的沙箱实例视图（按 metadata.service ∈ ws 服务 k8s 名集合过滤）；
+	// 用户侧不提供任何操作端点，治理动作走运维侧 /admin/sandboxes 与资源自身生命周期
+	cg.GET("/workspaces/:ws/sandboxes", func(c *gin.Context) {
+		wsID, _, err := wsCtx(c)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		list, err := core.ConsoleSandboxInstances(wsID)
+		if err != nil {
+			mapSandboxError(c, err)
+			return
+		}
+		OK(c, list)
+	})
 	cg.GET("/workspaces/:ws/agents", func(c *gin.Context) {
 		wsID, _, err := wsCtx(c)
 		if err != nil {
