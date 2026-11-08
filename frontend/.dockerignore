@@ -1,0 +1,8 @@
+# 依赖与构建产物一律不进 build context（docker build 由流水线以宿主 worktree 为 context，
+# 宿主 node_modules 来自单测门禁的 npm ci——glibc 变体原生模块）：
+# node_modules 若进 context，会在 builder 阶段覆盖 deps 阶段装好的容器内依赖
+# （Dockerfile 的 COPY --from=deps 先于 COPY . .），宿主 glibc 原生模块（如
+# @img/sharp-linux-x64）混入 standalone 产物，musl runner 容器运行期存在不确定故障风险；
+# .next 同理排除，保证构建只依赖容器内产物、可重复
+node_modules
+.next

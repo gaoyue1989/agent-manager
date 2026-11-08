@@ -870,7 +870,7 @@ if (confirmed.length > 0) {
   if (fixedFindings.length > 0) {
     const fixedPaths = [...new Set(fixedFindings.map((f) => f.path))];
     const reDirs = new Set(fixedPaths.map(topDir));
-    if (CAN_DEPLOY && (reDirs.has("backend") || reDirs.has("agent-framework"))) {
+    if (CAN_DEPLOY && (reDirs.has("backend") || reDirs.has("agent-framework") || reDirs.has("frontend"))) {
       const reb = await buildAndDeployModules();
       if (reb) return stopReport(`评审修复后镜像重建失败：\n${reb}`, ["PR 及之后阶段未执行"]);
     }
