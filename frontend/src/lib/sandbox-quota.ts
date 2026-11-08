@@ -8,6 +8,8 @@
 export type QuotaBinding = {
   session_id?: string;
   expires_at?: string;
+  /** confirm_holding 行的保留窗截止（后端 payload409 透出；仅预检 409 携带，SSE 帧无） */
+  confirm_hold_expires_at?: string;
   /** chat 预检 409 携带 state；SSE error 帧携带 turn_running 布尔 */
   state?: string;
   turn_running?: boolean;
@@ -60,6 +62,12 @@ export function bindingAdvice(b: QuotaBinding | null | undefined): {
     advice: "可停止该会话；停止后需等 TTL 宽限期过后才会被复用/释放（非即时）",
     canStop: true,
   };
+}
+
+/** confirm_holding 行的保留窗截止展示（§4.3/§6.3「含保留窗剩余时间」）：无值返回空串不渲染 */
+export function confirmHoldText(b: QuotaBinding | null | undefined): string {
+  const t = b?.confirm_hold_expires_at;
+  return t ? `保留窗至 ${t.replace("T", " ").slice(0, 16)}` : "";
 }
 
 /** 错误卡标题：quota 缺失时退化为通用文案（载荷异常不阻塞渲染） */
