@@ -347,6 +347,11 @@ public class AguiRunController {
                         () -> endTurnAndCleanup(lease, threadId, turnEnded, turnBucketKeys));
             } catch (Exception e) {
                 log.warn("[agui] run setup failed, rolling back (sid={}): {}", threadId, e.getMessage());
+                // 沙箱生命周期 turn 注销：onTurnStart 已在本段注册（§4.4 T3），回滚同样必须
+                // 注销——防 activeTurns 条目泄漏持续续期（与 endTurnAndCleanup「终态必注销」对称）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(threadId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, threadId,
                     runErrorSSE(threadId, runId, "turn_setup_failed: "
                         + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
@@ -436,6 +441,11 @@ public class AguiRunController {
                 resumeFlux = runtimeService.resumeWithConfirmEvents(threadId, null, results, forwardHeaders);
             } catch (Exception e) {
                 log.warn("[agui] resume setup failed, rolling back (sid={}): {}", threadId, e.getMessage());
+                // 沙箱生命周期 turn 注销：onTurnStart（恢复段重注册）已在本段落位，回滚同样
+                // 必须注销，防 activeTurns 条目泄漏持续续期（§4.4 T2 终态必注销）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(threadId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, threadId,
                     runErrorSSE(threadId, runId, e.getMessage() != null
                         ? e.getMessage() : e.getClass().getSimpleName()));

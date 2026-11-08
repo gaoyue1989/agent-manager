@@ -331,6 +331,11 @@ public class ConfirmController {
             } catch (Exception e) {
                 log.warn("confirm-stream setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
+                // 沙箱生命周期 turn 注销：onTurnStart（confirm 恢复重注册）已在本段落位，
+                // 回滚同样必须注销，防 activeTurns 条目泄漏持续续期（§4.4 T2 终态必注销）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(finalSessionId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
                     errorSSE(e.getMessage() != null ? e.getMessage()
                         : e.getClass().getSimpleName()));

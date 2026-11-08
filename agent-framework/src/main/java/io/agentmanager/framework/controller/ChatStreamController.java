@@ -731,6 +731,12 @@ public class ChatStreamController {
                 if (turnStopWatcher != null) {
                     turnStopWatcher.unregister(finalSessionId, replyId);
                 }
+                // 沙箱生命周期 turn 注销：onTurnStart 已在本段注册（§4.4 T3），回滚同样必须
+                // 注销——否则 activeTurns 条目无 TTL 泄漏，sweep 持续按 turn 注册续期
+                // （与 endTurnAndCleanupBuckets 的「终态必注销」对称）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(finalSessionId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId, errorSSE(err));
                 return;
             }
