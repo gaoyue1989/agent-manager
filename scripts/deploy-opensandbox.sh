@@ -158,22 +158,28 @@ done
 log "镜像最小集已全部载入 kind"
 
 # ---------------------------------------------------------------------------
-# 4. 命名空间 + API key secret（值只进 shell 变量，不回显不落盘）
+# 4. 命名空间 + API key secret（值只进 shell 变量与 0600 临时文件，不回显不落盘常驻；
+#    不走 -p / --from-literal 内联——那会把明文暴露进子进程 argv，/proc/<pid>/cmdline 经 ps 可见）
 # ---------------------------------------------------------------------------
 kubectl get ns "$NS_SYS" >/dev/null 2>&1 || kubectl create ns "$NS_SYS" >/dev/null
 kubectl get ns "$NS_WORK" >/dev/null 2>&1 || kubectl create ns "$NS_WORK" >/dev/null
 [ -f "$SECRETS_FILE" ] || die "未找到 $SECRETS_FILE"
 OPENSANDBOX_API_KEY="$(grep -E '^OPENSANDBOX_API_KEY=' "$SECRETS_FILE" | head -1 | cut -d= -f2- | tr -d '\"')"
 [ -n "$OPENSANDBOX_API_KEY" ] || die ".env.secrets 缺 OPENSANDBOX_API_KEY"
+SECRET_KEY_FILE="$(mktemp /tmp/opensandbox-api-key.XXXXXX)" && chmod 600 "$SECRET_KEY_FILE"
+printf '%s' "$OPENSANDBOX_API_KEY" > "$SECRET_KEY_FILE"
 if kubectl -n "$NS_SYS" get secret opensandbox-api-key >/dev/null 2>&1; then
-  kubectl -n "$NS_SYS" patch secret opensandbox-api-key \
-    -p "{\"stringData\":{\"api-key\":\"$OPENSANDBOX_API_KEY\"}}" >/dev/null
+  PATCH_FILE="$(mktemp /tmp/opensandbox-patch.XXXXXX)" && chmod 600 "$PATCH_FILE"
+  printf '{"stringData":{"api-key":"%s"}}' "$OPENSANDBOX_API_KEY" > "$PATCH_FILE"
+  kubectl -n "$NS_SYS" patch secret opensandbox-api-key --patch-file="$PATCH_FILE" >/dev/null
+  rm -f "$PATCH_FILE"
 else
   kubectl -n "$NS_SYS" create secret generic opensandbox-api-key \
-    --from-literal=api-key="$OPENSANDBOX_API_KEY" >/dev/null
+    --from-file=api-key="$SECRET_KEY_FILE" >/dev/null
 fi
+rm -f "$SECRET_KEY_FILE"
 unset OPENSANDBOX_API_KEY
-log "ns/$NS_WORK 就绪; secret opensandbox-api-key 已注入（值不回显）"
+log "ns/$NS_WORK 就绪; secret opensandbox-api-key 已注入（值不回显、不进 argv）"
 
 # ---------------------------------------------------------------------------
 # 5. helm install（幂等 upgrade --install）: base → controller → ingress-gateway → server
