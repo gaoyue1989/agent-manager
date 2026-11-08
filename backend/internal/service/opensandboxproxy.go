@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -318,7 +319,9 @@ func (c *Core) AdminListSandboxes(state string, page, pageSize int) (json.RawMes
 	}
 	q := fmt.Sprintf("/v1/sandboxes?page=%d&pageSize=%d", page, pageSize)
 	if state != "" {
-		q += "&state=" + state
+		// state 来自客户端 query，必须 QueryEscape 再拼上游串（评审遗留：含 &/空格的值
+		// 原样透出会注入额外过滤参数或产生畸形请求行）
+		q += "&state=" + url.QueryEscape(state)
 	}
 	status, body, err := cfg.do(http.MethodGet, q, nil, sandboxGetTimeout)
 	if err := mapSandboxUpstream(status, body, err); err != nil {

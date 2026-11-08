@@ -6,6 +6,7 @@ package handler
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -59,10 +60,12 @@ func newSandboxAdminEngine(core *service.Core) *gin.Engine {
 func TestAdminSandboxesHTTPMapping(t *testing.T) {
 	var mu sync.Mutex
 	var lastAuth string
+	var lastState string
 	var seenPoolCreate bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		lastAuth = r.Header.Get("OPEN-SANDBOX-API-KEY")
+		lastState = r.URL.Query().Get("state")
 		mu.Unlock()
 		switch r.URL.Path {
 		case "/v1/pools":
@@ -136,6 +139,18 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 	if w, _ := doJSON(t, r, http.MethodGet, "/api/v1/admin/sandboxes", nil); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("429 passthrough = %d", w.Code)
 	}
+
+	// state 过滤透传须 QueryEscape（评审遗留：含 & 的值不得在上游注入第二个过滤参数）
+	esc := url.QueryEscape("Running&x=1")
+	if w, _ := doJSON(t, r, http.MethodGet, "/api/v1/admin/sandboxes?state="+esc, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("state filter passthrough = %d", w.Code)
+	}
+	mu.Lock()
+	if lastState != "Running&x=1" {
+		mu.Unlock()
+		t.Fatalf("upstream state = %q, want decoded single value（& 已被转义）", lastState)
+	}
+	mu.Unlock()
 
 	// 未配置 → 503 + 提示 /settings（Required 键走 API 清不掉，直删 DB 行模拟）
 	core := newSandboxAdminCore(t, strings.TrimPrefix(up.URL, "http://"))

@@ -1,7 +1,8 @@
 // 工作空间运行时默认配置（跨集群导出 L1 层）：runtime-defaults 读写与 config 组骨架端点的业务层。
 // 设计见 docs/design/cross-cluster-export-design.md §8/§10；文件级契约见
 // docs/implementation/cross-cluster-export-contract.md §1.4/§2.1。
-// 键空间（契约 §1.4）：24 模板键（platformconfig.KnownKeys − CHECKPOINT_JDBC_URL）+ 8 导出键，
+// 键空间（契约 §1.4）：27 模板键（platformconfig.KnownKeys − CHECKPOINT_JDBC_URL；2026-11-08
+// sandbox-pool 新增 3 键后由 24 演进，workspaceruntime_test 锁定 35=27+8）+ 8 导出键，
 // L3 派生键与平台保留键结构性排除——L1 不可能与其撞键，撞键裁决只存在于导出链路 L2 对 L1/L3。
 // 三态语义对齐 UpdatePlatformConfig（platformconfig.go:120-165）：非空=设置、空串=删除、缺失=不变。
 package service
