@@ -8,10 +8,12 @@
  *   POST   /v1/sandboxes                              → 202 创建（根目录 .runtime/sandboxes/{id}/；
  *                                                        记录 metadata/extensions.poolRef/timeout）
  *   GET    /v1/sandboxes                              → 200 分页列表（state/metadata 过滤 + page/pageSize，
- *                                                        m12 沙箱管理面数据源；release-1.1.0 语法）
+ *                                                        m12 沙箱管理面数据源；release-1.1.0 语法；
+ *                                                        metadata 非法编码 → 400，对齐上游）
  *   GET    /v1/sandboxes/{id}                         → 200 / 404（destroyed → 404 触发 SDK 降级 create）
  *   GET    /v1/sandboxes/{id}/endpoints/{port}        → {"endpoint":"127.0.0.1:<port>/v1/sandboxes/<id>/proxy/<port>"}
- *   POST   /v1/sandboxes/{id}/renew-expiration        → 200 {expiresAt}（TTL 续期）
+ *   POST   /v1/sandboxes/{id}/renew-expiration        → 200 {expiresAt}（TTL 续期；expiresAt 非严格
+ *                                                        更晚 → 409，对齐上游）
  *   DELETE /v1/sandboxes/{id}                         → 204（poolRef 认领的归还池 available）
  *   POST   /v1/pools                                  → 201 建池（name/template/capacitySpec；
  *                                                        409 同名；模板/容量原样记账 stats.pools）
@@ -237,8 +239,13 @@ const server = http.createServer((req, res) => {
       if (states.length) items = items.filter(it => states.includes(it.status.state));
       const rawMeta = u.searchParams.get('metadata');
       if (rawMeta) {
-        let kv = {};
-        try { kv = Object.fromEntries(new URLSearchParams(rawMeta)); } catch { return json(400, { message: 'invalid metadata format' }); }
+        // 上游契约（release-1.1.0 实测）：metadata 为 URL 编码 k=v 串，非法编码 → 400。
+        // URLSearchParams 对任意串都不抛错，必须显式校验段形态——否则 garbage 静默滤空
+        // 返回 200 空列表，与真实上游脱节（保真度修订，评审遗留）
+        if (!/^[^=&]+=[^=&]*(&[^=&]+=[^=&]*)*$/.test(rawMeta)) {
+          return json(400, { message: 'invalid metadata format' });
+        }
+        const kv = Object.fromEntries(new URLSearchParams(rawMeta));
         items = items.filter(it => Object.entries(kv).every(([k, v]) => it.metadata?.[k] === v));
       }
       const page = Math.max(1, Number(u.searchParams.get('page') ?? 1));
@@ -293,11 +300,17 @@ const server = http.createServer((req, res) => {
       }
       if (rest === '/renew-expiration' && req.method === 'POST') {
         if (faults.renew404) return json(404, { message: 'mock fault: renew404' });
-        if (!getSb(id)) return json(404, { message: 'sandbox not found' });
+        const sb = getSb(id);
+        if (!sb) return json(404, { message: 'sandbox not found' });
         let req2 = {};
         try { req2 = JSON.parse(body.toString() || '{}'); } catch { /* 空体 */ }
         const next = req2?.expiresAt ?? new Date(Date.now() + 3600_000).toISOString();
-        sandboxes.get(id).expiresAt = next;
+        // 上游契约（release-1.1.0）：expiresAt 必须严格晚于当前值，否则 409
+        //（防时钟回拨/同值重复续期；保真度修订，评审遗留）
+        if (new Date(next).getTime() <= new Date(sb.expiresAt ?? 0).getTime()) {
+          return json(409, { message: 'expiresAt must be strictly later than the current expiration' });
+        }
+        sb.expiresAt = next;
         return json(200, { expiresAt: next });
       }
       const mEp = /^\/endpoints\/(\d+)$/.exec(rest);

@@ -15,6 +15,14 @@ TOKEN=$(admin_login)
 [ -n "$TOKEN" ] || { say "❌ admin 登录失败"; exit 1; }
 say "-- M12 沙箱管理面"
 
+# 前置门控（评审遗留，套件纪律「缺前置 exit 2 = SKIP」）：mock-sandbox 上游仅存在于
+# CI overlay（manifests/ci/mock-sandbox.yaml）——本地集群无该 svc 时，所有上游载荷断言
+# 与 admin CRUD（经 backend → mock）必然 FAIL 且 2>/dev/null 静默难排查；显式 SKIP 并提示
+if [ "$KUBE_OK" = "1" ] && ! kubectl -n agent-platform get svc mock-sandbox >/dev/null 2>&1; then
+  say "⏭️ SKIP：集群内无 mock-sandbox svc（仅 CI overlay 部署）——本地先 kubectl apply -f manifests/ci/mock-sandbox.yaml"
+  exit 2
+fi
+
 WS=$(seed_ws "$TOKEN" "m12-ws-$TS")
 POOL="m12-pool-$TS"
 SVC="oaf-m12-svc-$TS"
