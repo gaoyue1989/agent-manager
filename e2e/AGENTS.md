@@ -18,6 +18,8 @@
 | `m8-workspace-assets.sh` | API Key 签发/作用域/吊销、邀请成员矩阵、模板开关、包技能 warnings/issues（#163/#164） |
 | `m9-skill-center.sh` | Skill 中心：Markdown 创建/校验、版本状态机（draft→published→offline→reline）、zip 上传/下载、市场源/安装、Agent 引用 `source=skill`（同名去重 #173）、draft/停用引用 400、删除保护 409、skill-usages、member 403 |
 | `m10-sandbox.sh` | 沙箱配置：enabled true/false/未声明、资源注入与空/负值归一、`SANDBOX_ENABLED` 不落 env、总览三层来源（env > package > default）、edit-form 回显、keyword/member/404 |
+| `m11-workspace-config.sh` | 工作空间配置：runtime-defaults 读写（27 模板键 + 8 导出键，三态语义）、templates 分组/registry/mcp-connectors 骨架端点、成员/owner 权限矩阵 |
+| `m12-sandbox-admin.sh` | 沙箱管理面（sandbox-pool-opensandbox-design §9.4）：settings 沙箱组 3 新键 + `SANDBOX_TIMEOUT_MINUTES` placeholder 30、admin 代理八端点（含同名创建池 409 透传/非法名与容量链 400）、mock 载荷断言（预设 Pod 模板）、console 只读过滤（含 mysql 造数正向断言）、故障注入 501→503/401→502、未配置 503 引导；上游用集群内 mock-sandbox（仅 CI overlay，缺 svc 时 exit 2 SKIP），API 级断言（页面级由黑盒走查承载） |
 | `run-all.sh` | 顺序执行；子脚本 `exit 2` 记为 SKIP，FAIL 汇总后非零退出 |
 
 > `console-split-e2e.sh` 已删除：其 22 条断言是 M0/M1/M2/M8 的子集。
@@ -60,7 +62,7 @@
 ```bash
 # 平台控制面（API）
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:30881 \
-  bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10
+  bash e2e/console-split/run-all.sh m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12
 
 # 浏览器 UI
 cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost:30881 \
@@ -80,7 +82,7 @@ cd e2e && npm ci && BASE=http://localhost:30080/api/v1 FRONTEND=http://localhost
 - 业务镜像解析顺序：`E2E_AGENT_IMAGE` → Docker Hub `gaoyue1989/agent-framework` 最新
   `agentscope-*` tag（拉取/导入各 300s 超时）→ 失败回落 `mock-agent:ci`（`E2E_AGENT_RUNTIME=mock`，
   跳过会话类断言）
-- 执行：`platform-e2e.sh` → `console-split/run-all.sh m0..m10` → `console-ui-e2e.js`；
+- 执行：`platform-e2e.sh` → `console-split/run-all.sh m0..m12` → `console-ui-e2e.js`；
   失败上传集群状态与 UI 截图
 - **必需检查**（2026-10-22 起）：按目录过滤，不相关变更 Skipped 视为通过
 

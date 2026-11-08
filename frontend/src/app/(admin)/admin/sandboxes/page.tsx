@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { api, type SandboxListPage, type SandboxPool, type SandboxSummary } from "@/lib/api";
-import { capacityFromForm, poolLevel, POOL_LEVEL_TEXT, validateCapacityForm, validatePoolName,
+import { capacityFromForm, countdown, poolLevel, POOL_LEVEL_TEXT, validateCapacityForm, validatePoolName,
   type CapacityForm } from "@/lib/sandbox-quota";
 import { Card, Note, PageHead, StatCard } from "@/components/ui";
 
@@ -26,16 +26,6 @@ const LEVEL_TEXT_STYLE: Record<string, string> = {
   unknown: "text-gray-400",
   normal: "text-emerald-600",
 };
-
-// expiresAt 倒计时（5s 轮询粒度；已过期/缺失返回占位）
-function countdown(expiresAt?: string): string {
-  if (!expiresAt) return "—";
-  const ms = new Date(expiresAt).getTime() - Date.now();
-  if (!Number.isFinite(ms)) return "—";
-  if (ms <= 0) return "已过期";
-  const m = Math.floor(ms / 60000);
-  return m >= 60 ? `${Math.floor(m / 60)}h${m % 60}m` : `${m}m`;
-}
 
 const EMPTY_FORM: CapacityForm = { bufferMin: "", bufferMax: "", poolMin: "", poolMax: "" };
 
@@ -290,6 +280,9 @@ export default function AdminSandboxesPage() {
           <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} data-testid="sandbox-state-filter"
             className="rounded-md border border-gray-300 px-2 py-1 text-[13px]">
             <option value="">全部状态</option>
+            {/* 上游状态枚举（release-1.1.0 server/opensandbox_server/api/schema.py:428）：
+                Pending/Running/Pausing/Paused/Resuming/Stopping/Terminated/Failed——
+                常用三态供快捷筛选，其余经「全部状态」覆盖 */}
             <option value="Running">Running</option>
             <option value="Pending">Pending</option>
             <option value="Paused">Paused</option>

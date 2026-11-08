@@ -165,12 +165,14 @@ public record AgentManagerProperties(
          */
         @DefaultValue("7") int sandboxBindingRetentionDays
     ) {
-        /** 绑定入口消歧（见 record javadoc）：嵌套 record 双构造必须以 @ConstructorBinding 指定 */
+        /** 绑定入口消歧（见 record javadoc）：嵌套 record 双构造必须以 @ConstructorBinding 指定
+         * （2026-11-06 丢失绑定事故的根因形状；Binder 回归测试兜底。评审曾提议移除本构造器，
+         * 但 src/test 存在 16 处调用方——非死代码，维持现状） */
         @ConstructorBinding
         public CleanupConfig {
         }
 
-        /** 兼容构造器（旧 5 参调用方）：技能缓存 GC 取默认（启用 / 保留 2 天），绑定保留 7 天 */
+        /** 兼容构造器（测试侧 5 参简写调用方）：技能缓存 GC 取默认（启用 / 保留 2 天） */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {
             this(confirmTtlMinutes, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,

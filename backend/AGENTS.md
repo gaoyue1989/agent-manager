@@ -71,7 +71,7 @@ kubectl apply -f manifests/platform.yaml manifests/platform-ingress.yaml manifes
   - values/manifest 渲染（`exportvalues.go`）：四层合并 L0 chart 默认 < L1 工作空间运行时默认 < L2 用户导出覆盖（仅新增，撞 L1 已配置键/L3 保留键 400）< L3 平台生成；敏感键（platformconfig.SensitiveKeys() ∪ 请求 secretKeys）路由 values `secretEnv` 段（chart 渲染为服务 Secret）
   - OAF 配置镜像直推（`internal/imagebuilder`）：busybox 基底（`EXPORT_BASE_IMAGE`，默认 busybox:1.36）+ 包目录 tar 层挂 /oaf，go-containerregistry `remote.Write` 直推目标仓库（仓库名 `oaf-{short}`）——纯数据镜像、无 docker 依赖、无特权；`EXPORT_REGISTRY_USERNAME/PASSWORD` 为仓库凭据，仅作用于推送目标 registry（基底拉取对非推送 registry 一律匿名，凭证不送达第三方 token 端点，issue #227）；`core.Images` 未装配时创建导出单 400 不降级假成功
   - 交付物：charts/oaf-agent Helm chart + `values.yaml`/`manifest.json`（ValuesYAML 不进 JSON 响应，仅 `/console/exports/:id` 文件端点下载并写审计）；人工推进 `POST /console/exports/:id/status`（归属与 owner/admin 权限由 service 层裁决）
-- **工作空间配置**（`workspaceconfig.go` + `workspaceruntime.go`）：`/console/workspaces/:ws/config/*`——runtime-defaults 读写（GET=成员，PUT=owner/admin）+ templates/:group、registry、mcp-connectors 骨架端点；runtime-defaults 键空间 = 24 模板键（KnownKeys − CHECKPOINT_JDBC_URL）+ 8 导出键，三态语义对齐 UpdatePlatformConfig（非空=设置、空串=删除、缺失=不变）
+- **工作空间配置**（`workspaceconfig.go` + `workspaceruntime.go`）：`/console/workspaces/:ws/config/*`——runtime-defaults 读写（GET=成员，PUT=owner/admin）+ templates/:group、registry、mcp-connectors 骨架端点；runtime-defaults 键空间 = 27 模板键（KnownKeys − CHECKPOINT_JDBC_URL；sandbox-pool 3 键并入后 24→27，测试锁定 35）+ 8 导出键，三态语义对齐 UpdatePlatformConfig（非空=设置、空串=删除、缺失=不变）
 
 ## 平台默认配置与敏感 env Secret 化（platformconfig + envroute）
 

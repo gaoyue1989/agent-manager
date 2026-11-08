@@ -1,7 +1,7 @@
 # 沙箱池化下沉 OpenSandbox 设计（服务端池 + 单用户配额与生命周期）
 
 - 日期：2026-11-07（v6：v2 两轮子代理评审修订 + v3 用户评审补充 + v4 验证与门禁细化 + v5/v6 实施前终审三条 P0 修订，见 §13）
-- 状态：**实施中（2026-11-07，PR 序列 A/B/C/D）**（§11 已回填 kind 验收 V1~V5；V6~V8 待 PR-E 联调）
+- 状态：**已实施（2026-11-08，PR #277 回滚 + #278 文档 + #279 平台 + #280 框架 合并）**（§11 已回填 V1~V8：V1~V5 全过、V6 部分通过=单节点 kind 内存限制、V7/V8 PASS；唯余缺口 = V6⑧ 换代提示帧的 live SSE 发出面，已由 mock e2e 4/4 实证；遗留收敛见 §13 评审记录与 PR 序列）
 - 前置：整体回滚 PR #276（agent-framework 自研 Redis 沙箱池，merge `9c81437`；其设计文档 `agent-framework/docs/sandbox-pool-design.md` 随回滚移除，git 历史可考）
 - 上游基线：OpenSandbox `release-1.1.0`（umbrella release，全部组件 1.1.0）
 - 范围：backend / frontend / agent-framework / kind 集群 OpenSandbox 部署
@@ -140,11 +140,13 @@ Pool CRD 关键字段 **[确认]**：
 
 ```sql
 -- 用户配额计数表：占额 CAS 锚点（设计意义见下）
+-- 时间列一律 DATETIME(3)（毫秒）：⑤c 改绑的 updated_at 乐观校验依赖毫秒精度，
+-- 同秒内 touch 也要能推进值（实现 V15 与本 DDL 一致）
 CREATE TABLE IF NOT EXISTS sandbox_user (
   user_key       VARCHAR(255) NOT NULL,
   binding_count  INT NOT NULL DEFAULT 0,  -- 该用户当前绑定数；与 COUNT(sandbox_binding) 事务内同增同减
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (user_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -154,9 +156,9 @@ CREATE TABLE IF NOT EXISTS sandbox_binding (
   user_key   VARCHAR(255) NOT NULL,
   session_id VARCHAR(255) NOT NULL,
   sandbox_id VARCHAR(128) NOT NULL,
-  expires_at DATETIME NOT NULL,               -- LRU 排序缓存，真相在服务端 expiresAt
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  expires_at DATETIME(3) NOT NULL,               -- LRU 排序缓存，真相在服务端 expiresAt
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   UNIQUE KEY uk_sandbox (sandbox_id),          -- 一个沙箱至多一条绑定
   UNIQUE KEY uk_session (session_id),          -- 一个会话至多一条绑定（复用=UPDATE 改归属）
@@ -413,7 +415,7 @@ HTTP 409
 |---|---|---|---|
 | GET | `/api/v1/admin/sandboxes/summary` | — | `GET /v1/pools` + `GET /v1/sandboxes?limit=` 聚合 |
 | GET | `/api/v1/admin/sandboxes/pools` | — | `GET /v1/pools` |
-| POST | `/api/v1/admin/sandboxes/pools` | `{name, image?, capacitySpec{bufferMin,bufferMax,poolMin,poolMax}, recycleStrategy?}` | `POST /v1/pools` |
+| POST | `/api/v1/admin/sandboxes/pools` | `{name, image?, capacitySpec{bufferMin,bufferMax,poolMin,poolMax}}`（`recycleStrategy` 收而**不转发**：上游 CreatePoolRequest 仅 name/template/capacitySpec（schema.py 实证），入口仅做 Delete/Restart/Noop 白名单校验、池行为取 CRD 默认 Delete） | `POST /v1/pools` |
 | GET | `/api/v1/admin/sandboxes/pools/:name` | — | `GET /v1/pools/{name}` |
 | PUT | `/api/v1/admin/sandboxes/pools/:name` | `{capacitySpec{...}}` | `PUT /v1/pools/{name}`（仅容量） |
 | DELETE | `/api/v1/admin/sandboxes/pools/:name` | — | `DELETE /v1/pools/{name}` |
@@ -421,7 +423,7 @@ HTTP 409
 | DELETE | `/api/v1/admin/sandboxes/:id` | — | `DELETE /v1/sandboxes/{id}` |
 
 - 创建池的 **Pod 模板由后端预设常量生成**（从上游官方 Pool sample 派生：initContainers 装 execd/task-executor + 主容器 code-interpreter），`image` 缺省取平台默认 `SANDBOX_IMAGE`（platform_config），不接收自由 PodTemplateSpec JSON（避免任意 Pod spec 注入面）；
-- 参数校验：name 合法 DNS label、capacitySpec 四值 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax、recycleStrategy ∈ {Delete, Restart, Noop}；
+- 参数校验：name 合法 DNS label、capacitySpec 四值 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax、recycleStrategy ∈ {Delete, Restart, Noop}（收而不转发，见上表）；
 - 单测：httptest 模拟上游（含 501/401/429 分支）。
 
 ### 5.3 console 只读（用户侧）
@@ -444,7 +446,7 @@ HTTP 409
 - 导航：`(admin)/layout.tsx` LINKS 增「沙箱管理」；
 - 页面 `src/app/(admin)/admin/sandboxes/page.tsx`（样板：`admin/page.tsx` 轮询 + `admin/settings/page.tsx` 对话框 + `console/assets/sandbox/page.tsx` 表格）：
   - 顶部 StatCard：池总数 / warm available / allocated / Running 沙箱数（`/summary`）；
-  - **池卡片区**：每池 `capacitySpec` vs `status` 水位条（`available` < `bufferMin` 标黄 = 预热不足，`allocated` = `poolMax` 标红 = 池满）+ 操作：调整容量（PUT，四值表单）、删除（确认对话，提示会终止 warm Pod）、创建池（名称/镜像（预填平台 SANDBOX_IMAGE）/容量四值/recycleStrategy）；
+  - **池卡片区**：每池 `capacitySpec` vs `status` 水位条（`available` < `bufferMin` 标黄 = 预热不足，`allocated` = `poolMax` 标红 = 池满）+ 操作：调整容量（PUT，四值表单）、删除（确认对话，提示会终止 warm Pod）、创建池（名称/镜像（预填平台 SANDBOX_IMAGE）/容量四值；recycleStrategy 不暴露——非上游 API 字段，见 §5.2）；
   - **沙箱表格**：id / state / metadata.service / metadata.session_id / expiresAt 倒计时 / createdAt / 操作：销毁（确认对话）；
   - 5s 轮询 + 手动刷新；
 - API client：`frontend/src/lib/api.ts` 增 `api.admin.sandboxes.{summary,listPools,createPool,getPool,updatePool,deletePool,listSandboxes,deleteSandbox}`。
@@ -506,7 +508,7 @@ HTTP 409
 > **V6⑧ 换代提示帧 live 编排配方（第 2 轮后钉死）**：帧的确定性触达路径 = 「绑定行已删 +
 > 沙箱已 GC」的 confirm 恢复（P3 resume connect 404 → markSandboxRebuilt 登记 → 降级 create
 > → 流内 emit）。编排步骤：① 会话 A 执行一轮并记 sandboxId S；② 触发 S 的 GC——`/admin/destroy`
-> 不可用（Destroy 后 P3 resume 会走 connect 404 同路径 ✓ 可用），或等 TTL 过期 + renew-404 sweep
+> 可用（Destroy 后 P3 resume 会走 connect 404 同路径），或等 TTL 过期 + renew-404 sweep
 > 懒剔除（轮询 /debug/sandbox-bindings 直到 bindingOf(A) 消失）；③ A 发起 confirm-stream（或普通
 > chat 续轮）→ P3 connect 404 → 降级 create → 流首事件前 emit `sandbox_rebuilt` 帧；④ 观测：SSE
 > 帧直接断言，或轮询 /debug/sandbox-bindings events 看 `sandbox_rebuilt_registered`（登记先行事件，
@@ -523,6 +525,11 @@ HTTP 409
 | V8 | 存量影响冒烟 | 集群内既有已发布服务（无新 env）对话一轮正常；显式 `SANDBOX_TIMEOUT_MINUTES=60` 的服务核对 TTL 语义变化并出公告 | 服务全部可用、公告已发 |
 
 证据形式：命令输出/HTTP 响应摘录/页面截图，回填 §11。
+
+> **实施注记（2026-11-08，m12 承载口径）**：m12-sandbox-admin.sh 为 **API 级断言**（本节步骤
+> 1~6 的载荷/状态码/审计），「水位条渲染/页面错误提示/引导文案」等页面级断言不在 m12 承载
+> （console-ui-e2e.js 不访问 /admin/sandboxes）——由部署验证的黑盒走查（puppeteer 截图）与
+> 人工巡检覆盖；后续若纳入 UI e2e 再扩展。
 
 ---
 
@@ -578,7 +585,7 @@ HTTP 409
 - **故障注入开关**（`/admin/fault` 扩展，服务 e2e 分支）：`renew404`（对已删沙箱 renew 返回 404）、`poolExhausted`（create(poolRef) 返回 429 `PoolCapacityExhausted`）、`slowCommand`/`slowLLM`（配合 mock-llm 延时标记）；
 - 既有 `/admin/destroy/{id}` 保留（到期/外部 GC 模拟）。
 
-### 9.3 e2e 场景矩阵：`e2e/tests/api-sandbox-lifecycle.spec.ts`（组名 sandbox-lifecycle）
+### 9.3 e2e 场景矩阵：`e2e/tests/api-sandbox-lifecycle.spec.ts`（E2E 组 **lifecycle**，playwright project `api-sandbox-lifecycle`）
 
 | # | 场景 | 断言要点 |
 |---|---|---|
@@ -602,7 +609,7 @@ HTTP 409
 | L18 | 挂起保留窗（confirm 同沙箱） | a) 会话 A ask 挂起 → 保留窗内同 user 会话 B 触发 ⑤ → **不改绑**（updated_at 持续新鲜）；A confirm 恢复 → **同一 sandboxId**、工作区文件在；b) 保留窗过期后 → B 可改绑，A 过期 confirm → 新 sandboxId + 换代提示帧 |
 | L19 | 同 user 继承残留（契约钉死） | LRU 复用后新会话 `ls` 可见旧会话工作区残留文件（§4.5 明示接受的行为写进断言） |
 | L20 | 假 409 修正 | 预检时存在 `expires_at` 已过期死绑定（`/admin/destroy` + 短 TTL）→ 预检**放行**、exec 懒剔除后成功（§4.3 行龄过滤回归） |
-| L21 | A2A 闲置重入 grace 空窗（cold-R1-1 回归） | A2A 会话 A 闲置 > grace（updated_at 陈旧、无 turn_lease）后重入（P3 直连）→ 与同用户新会话 B 触发 ⑤ 并发：或 B 改绑 affected=0（A 的 P3 占位写在先，updated_at 已新鲜）、或 A 占位 affected=0 降级重走决策（B 改绑在先）——断言沙箱 X 至多一方 exec、debug 绑定表终态一致（A 要么保有 X 要么换新）；多副本真实并发变体进 e2e-multi |
+| L21 | A2A 闲置重入 grace 空窗（cold-R1-1 回归） | A2A 会话 A 闲置 > grace（updated_at 陈旧、无 turn_lease）后重入（P3 直连）→ 与同用户新会话 B 触发 ⑤ 并发：或 B 改绑 affected=0（A 的 P3 占位写在先，updated_at 已新鲜）、或 A 占位 affected=0 降级重走决策（B 改绑在先）——断言沙箱 X 至多一方 exec、debug 绑定表终态一致（A 要么保有 X 要么换新）。**实施注记（2026-11-08）**：单副本变体未落地，当前仅 e2e-multi M2 真实并发变体覆盖（必需门禁）；单副本用例为后续补充项 |
 
 执行分组：**A 借出与配额**（L1/L2/L6/L7/L8/L13/L20）→ **B TTL 与续期**（L4/L5/L15/L16/L17）→ **C 复用与抢占**（L3/L12/L14/L19/L21）→ **D HITL**（L18）→ **E 可观测与清理**（L9/L10/L11），单 spec 内顺序执行（共享 mock 状态，前组产物供后组复用）。
 
@@ -625,7 +632,7 @@ platform e2e 已是必需检查，场景在其内部追加（无需改分支保�
 
 | 项 | 变更 | 说明 |
 |---|---|---|
-| agent-framework-ci.yml | 重建 job **`e2e-sandbox-lifecycle`**（E2E_GROUP=sandbox-lifecycle；结构同被回滚的 e2e-sandbox-pool：`needs: [changes]` 目录过滤、mysql+redis services、mvn package、run.sh、artifact 上传） | PR-D 引入；`e2e-multi` 组内追加双副本并发用例（该 job 已是必需检查，无结构变更） |
+| agent-framework-ci.yml | 重建 job **`e2e-sandbox-lifecycle`**（E2E_GROUP=**lifecycle**，run.sh 据此映射 `--project=api-sandbox-lifecycle`；结构同被回滚的 e2e-sandbox-pool：`needs: [changes]` 目录过滤、mysql+redis services、mvn package、run.sh、artifact 上传） | PR-D 引入；`e2e-multi` 组内追加双副本并发用例（该 job 已是必需检查，无结构变更） |
 | **分支保护（master）** | **PR-D 合并后，管理员将 `E2E 沙箱生命周期（L 组）` 加入必需状态检查**（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`，strict/enforce_admins 维持）——必需检查由九项变**十项**；根目录 AGENTS.md「分支保护」章节与 `agent-framework/docs/e2e-ci-plan.md` 同步更新 | 与原 e2e-sandbox-pool「初期非必需」先例不同：本设计配额/TTL **默认开启**影响所有服务，L 组必须挡合并；转必需前先以非必需跑 ≥3 个 PR 观察稳定性 |
 | platform-e2e-ci | m12-sandbox-admin 场景纳入（该工作流已是必需检查） | §9.4 |
 | backend-ci / frontend-ci | 无结构变更 | U5/U6 用例进入既有 `go test` / `lint+test+build` 必需门禁 |

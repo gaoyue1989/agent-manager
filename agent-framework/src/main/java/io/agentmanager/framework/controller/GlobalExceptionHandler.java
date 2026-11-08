@@ -82,10 +82,11 @@ public class GlobalExceptionHandler {
      * 结构化载荷（code/quota/bindings，bindings 带 state=executing|confirm_holding）——
      * 前端 ChatPane 专属错误卡渲染占用明细（评审轮二 P0：409 body 不得丢弃）。
      *
-     * <p><b>返回 String body 而非 Map（黑盒第 1 轮实锤缺陷）</b>：chat 端点声明
-     * {@code produces = TEXT_EVENT_STREAM}，真实浏览器请求 Accept 只有
-     * {@code text/event-stream}——Map body 走 Jackson converter（仅 application/json）
-     * 内容协商失败 {@code HttpMediaTypeNotAcceptableException} → 500；String body 走
+     * <p><b>返回 String body 而非 Map（黑盒第 1 轮实锤缺陷）</b>：chat 端点<b>无</b>
+     * {@code produces} 声明（修复前曾声明 {@code TEXT_EVENT_STREAM}，已删），但真实浏览器
+     * 请求 Accept 只有 {@code text/event-stream}——Map body 走 Jackson converter（仅
+     * application/json）仍无可写 converter，内容协商失败
+     * {@code HttpMediaTypeNotAcceptableException} → 500；String body 走
      * StringHttpMessageConverter（supportedTypes 含 {@code *}/*}）可写任意 selected
      * media type，配合显式 {@code Content-Type: application/json} 头，前端
      * {@code resp.json()}（不依赖响应头）与 curl {@code *}/* 两路径均得 409 结构化载荷。

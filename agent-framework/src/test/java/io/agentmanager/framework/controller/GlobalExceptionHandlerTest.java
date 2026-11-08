@@ -55,10 +55,9 @@ class GlobalExceptionHandlerTest {
 
     // ===== 配额满 409 × text/event-stream Accept（黑盒第 1 轮实锤缺陷回归）=====
 
-    /** 最小端点：复刻 ChatStreamController#chat 的 produces 声明与预检抛出路径 */
+    /** 最小端点：与 ChatStreamController#chat 对齐——无 produces 声明 + 预检抛出路径 */
     @org.springframework.web.bind.annotation.RestController
     static class QuotaThrowingController {
-        // 与 ChatStreamController 修复对齐：无 produces 声明
         @org.springframework.web.bind.annotation.PostMapping("/chat")
         public reactor.core.publisher.Flux<org.springframework.http.codec.ServerSentEvent<String>> chat() {
             throw new io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException(3,
