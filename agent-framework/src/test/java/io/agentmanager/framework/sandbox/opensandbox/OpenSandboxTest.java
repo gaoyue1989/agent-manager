@@ -532,6 +532,8 @@ class OpenSandboxTest {
         sandbox.setSkillCacheScope("sess-A");
 
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        // 投放延迟语义（first-llm-latency）：exec 命令不含 .skills-cache 时投放推迟到 stop 收尾
+        sandbox.stop();
 
         var entries = capturedHydrateTarEntries(osb);
         assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
@@ -567,9 +569,10 @@ class OpenSandboxTest {
         sandbox.setSkillCacheScope("sess-A");
 
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
-        int after1 = countHydrateTarWrites(osb);
         sandbox.stop();
+        int after1 = countHydrateTarWrites(osb);
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
+        sandbox.stop();
         int after2 = countHydrateTarWrites(osb);
 
         assertEquals(after1, after2, "内容未变时第二次 call 不应重复投放");
@@ -808,6 +811,7 @@ class OpenSandboxTest {
         var call1 = new OpenSandbox(st1, osb, options(), null, null, spec);
         call1.setSkillCacheScope("sess-A");
         call1.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        call1.stop();
         int afterCall1 = countHydrateTarWrites(osb);
         assertTrue(afterCall1 >= 1, "首轮应实际投放");
 
@@ -817,6 +821,7 @@ class OpenSandboxTest {
         var call2 = new OpenSandbox(st2, osb, options(), null, null, spec);
         call2.setSkillCacheScope("sess-A");
         call2.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
+        call2.stop();
         assertEquals(afterCall1, countHydrateTarWrites(osb),
             "指纹未变 + 本代已投放同 scope → 新实例不得重投（P0-1）");
     }
@@ -834,6 +839,7 @@ class OpenSandboxTest {
         var callA = new OpenSandbox(st1, osb, options(), null, null, spec);
         callA.setSkillCacheScope("sess-A");
         callA.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        callA.stop();
 
         // 同 sandboxId 换 scope：A→B 不得命中短路
         var st2 = projectedStateNoSkillCache(host);
@@ -841,6 +847,7 @@ class OpenSandboxTest {
         var callB = new OpenSandbox(st2, osb, options(), null, null, spec);
         callB.setSkillCacheScope("sess-B");
         callB.exec(RuntimeContext.builder().userId("sess-B").build(), "echo 2", 30);
+        callB.stop();
 
         // 两次投放 tar 都在捕获里，任一包含 sess-B 即代表新 scope 走了慢路径投放
         var captor = ArgumentCaptor.forClass(List.class);
@@ -872,6 +879,7 @@ class OpenSandboxTest {
         sandbox.setSkillCacheScope("sess-A");
 
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        sandbox.stop();
 
         // 单条 exec 同时含解包与按 scope 清理；不存在独立的 prune-only exec
         var captor = ArgumentCaptor.forClass(String.class);
