@@ -80,7 +80,8 @@ public class A2AController {
      * 2. message.messageId 必填（缺失则 -32602）
      * 3. parts 中每个 part 需带 kind 类型标识（如 {"kind":"text","text":"..."}，缺失则 -32602）
      * 4. configuration.blocking=true（仅 message/send 同步场景）
-     * 5. 顶层 userId/sessionId/skills → message.metadata（SDK 从 message.metadata 读取；skills 取值源链见 5.1）
+     * 5. 顶层 userId/sessionId → message.metadata + 5.1/5.2 msg 分组字段 skills/tools 归一
+     *    （SDK 从 message.metadata 按 msg id 分组读取；取值源链见 5.1/5.2）
      * 6. 兼容旧格式 params.metadata.thread_id/userId → message.metadata.sessionId/userId
      */
     private String normalizeMessageSendBody(String body) {
@@ -141,45 +142,12 @@ public class A2AController {
             if (topLevelSessionId != null && !topLevelSessionId.toString().isBlank()) {
                 meta.put("sessionId", topLevelSessionId.toString());
             }
-            // 5.1 本轮可用技能列表（session-skill-list-design §6）：取值源链 first-non-null-wins——
+            // 5.1 本轮可用技能列表（session-skill-list-design §6）：
             // message.metadata.skills → params.skills → params.metadata.skills（旧格式同义）。
-            // 但 SDK 的 A2A→Msg 转换只认「按 msg id 分组」的 metadata（getMsgMetadata:
-            // metadata[part.msgId] 且值必须是 Map；part 以 _agentscope_msg_id 标组）。
-            // 此处归一为该约定，调用方无感：
-            //   message.metadata = {sessionId, userId, <msgId>: {skills: [...]}}
-            //   parts[*].metadata._agentscope_msg_id = <msgId>
-            // 显式空列表同样归一（Map 内保留空数组 = 无技能）。
-            Object requestedSkills = meta.remove("skills");
-            if (requestedSkills == null) {
-                requestedSkills = params.get("skills");
-            }
-            if (requestedSkills == null
-                    && params.get("metadata") instanceof Map<?, ?> legacySkillMeta) {
-                requestedSkills = legacySkillMeta.get("skills");
-            }
-            if (requestedSkills instanceof List<?> skillsList) {
-                var msgId = String.valueOf(message.get("messageId"));
-                if (message.get("parts") instanceof List<?> skillsParts) {
-                    for (var p : skillsParts) {
-                        if (p instanceof Map<?, ?> partMap) {
-                            @SuppressWarnings("unchecked")
-                            var part = (Map<String, Object>) partMap;
-                            var partMeta = part.get("metadata") instanceof Map<?, ?> pm
-                                ? new java.util.LinkedHashMap<String, Object>((Map<String, Object>) pm)
-                                : new java.util.LinkedHashMap<String, Object>();
-                            // 强制同一 msg id：多 part 归并为同一条 Msg，白名单对所有 part 生效
-                            partMeta.put("_agentscope_msg_id", msgId);
-                            part.put("metadata", partMeta);
-                        }
-                    }
-                }
-                var nested = new java.util.LinkedHashMap<String, Object>();
-                if (meta.get(msgId) instanceof Map<?, ?> existingNested) {
-                    nested.putAll((Map<String, Object>) existingNested);
-                }
-                nested.put("skills", skillsList);
-                meta.put(msgId, nested);
-            }
+            // 5.2 本轮可用工具列表（session-tool-list-design §2.2）：tools 同一取值源链。
+            // 显式空列表同样归一（分组键内保留空数组：skills=[] = 无技能 / tools=[] = 仅内置）。
+            groupMetaField(meta, params, message, "skills");
+            groupMetaField(meta, params, message, "tools");
             // 6. 兼容旧格式 params.metadata.thread_id → message.metadata.sessionId
             @SuppressWarnings("unchecked")
             var legacyMeta = (Map<String, Object>) params.get("metadata");
@@ -200,6 +168,56 @@ public class A2AController {
             log.warn("normalizeMessageSendBody failed, use original body: {}", e.getMessage());
             return body;
         }
+    }
+
+    /**
+     * msg 分组字段归一（skills/tools 共用，取值源链 first-non-null-wins）：
+     * {@code message.metadata.<key>} → {@code params.<key>} → {@code params.metadata.<key>}
+     * （旧格式同义）。SDK 的 A2A→Msg 转换只认「按 msg id 分组」的 metadata
+     * （getMsgMetadata: metadata[part.msgId] 且值必须是 Map；part 以 _agentscope_msg_id
+     * 标组）——此处归一为该约定，调用方无感：
+     * <pre>
+     *   message.metadata = {sessionId, userId, <msgId>: {skills:[...], tools:[...]}}
+     *   parts[*].metadata._agentscope_msg_id = <msgId>
+     * </pre>
+     * skills 与 tools 并存时共用同一 msg id 分组键（后写者 merge 进既有 nested，幂等）；
+     * 值非 List（畸形/缺省）时不写分组键（= 该字段未传，全量语义）。
+     */
+    private void groupMetaField(Map<String, Object> meta, Map<String, Object> params,
+                                Map<String, Object> message, String key) {
+        Object requested = meta.remove(key);
+        if (requested == null) {
+            requested = params.get(key);
+        }
+        if (requested == null
+                && params.get("metadata") instanceof Map<?, ?> legacyMeta) {
+            requested = legacyMeta.get(key);
+        }
+        if (!(requested instanceof List<?> list)) {
+            return;
+        }
+        var msgId = String.valueOf(message.get("messageId"));
+        if (message.get("parts") instanceof List<?> parts) {
+            for (var p : parts) {
+                if (p instanceof Map<?, ?> partMap) {
+                    @SuppressWarnings("unchecked")
+                    var part = (Map<String, Object>) partMap;
+                    var partMeta = part.get("metadata") instanceof Map<?, ?> pm
+                        ? new java.util.LinkedHashMap<String, Object>((Map<String, Object>) pm)
+                        : new java.util.LinkedHashMap<String, Object>();
+                    // 强制同一 msg id：多 part 归并为同一条 Msg，白名单对所有 part 生效
+                    //（skills/tools 并存时重复打标幂等）
+                    partMeta.put("_agentscope_msg_id", msgId);
+                    part.put("metadata", partMeta);
+                }
+            }
+        }
+        var nested = new java.util.LinkedHashMap<String, Object>();
+        if (meta.get(msgId) instanceof Map<?, ?> existingNested) {
+            nested.putAll((Map<String, Object>) existingNested);
+        }
+        nested.put(key, list);
+        meta.put(msgId, nested);
     }
 
     private JsonRpcTransportWrapper getJsonRpcHandler() {

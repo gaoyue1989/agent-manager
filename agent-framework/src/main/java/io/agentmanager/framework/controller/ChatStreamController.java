@@ -300,13 +300,20 @@ public class ChatStreamController {
      *   "sessionId": "my-session-1",   // 可选，不传则自动生成
      *   "fileIds": [],                 // 可选
      *   "model": "01J8XK...",          // 可选，会话模型（GET /models 的 id；""/system = 回默认模型）
-     *   "skills": ["refund", "order"]  // 可选，本轮可用技能列表（缺省 = 全部；[] = 无技能）
+     *   "skills": ["refund", "order"], // 可选，本轮可用技能列表（缺省 = 全部；[] = 无技能）
+     *   "tools": ["query", "get_order"] // 可选，本轮可用工具列表（缺省 = 全部；[] = 仅内置）
      * }
      * }</pre>
      *
      * <p>{@code skills} 仅对本轮生效（不落库、不跨轮沿用），白名单外的技能不出现在模型侧
      * {@code <available_skills>}、不可经 {@code load_skill_through_path} 加载、{@code @Skill}
      * 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 docs/design/session-skill-list-design.md。
+     *
+     * <p>{@code tools} 仅对本轮生效（不落库、不跨轮沿用），把模型侧 <b>MCP + 自定义</b>工具
+     * 可见集收敛为该列表（内置工具恒可见，不受会话级控制）；白名单外调用在 acting 层兜底
+     * DENY。名单可用裸名（主口径，= GET /tools 的 name/sessionTools.tools）或 MCP 全名
+     * {@code mcp__{server}__{tool}}（别名）。可传清单见 GET /tools 的 {@code sessionTools}。
+     * 见 docs/design/session-tool-list-design.md。
      *
      * <p>不传 sessionId 时，首个 SSE 事件为：
      * <pre>{@code {"type":"session_created","session_id":"uuid-xxx"}}</pre>
@@ -348,6 +355,11 @@ public class ChatStreamController {
         if (body.skills() != null) {
             log.info("[chat] skills: sid={}, count={}, names={}",
                 sessionId, body.skills().size(), body.skills());
+        }
+        // 本轮可用工具列表（仅本轮生效，作用域限 MCP+自定义）：缺省 = 全部；[] = 仅内置
+        if (body.tools() != null) {
+            log.info("[chat] tools: sid={}, count={}, names={}",
+                sessionId, body.tools().size(), body.tools());
         }
 
         String finalSessionId = sessionId;
@@ -626,6 +638,13 @@ public class ChatStreamController {
                 if (body.skills() != null) {
                     msgMeta.put(io.agentmanager.framework.service.SkillFilterMiddleware.METADATA_SKILLS_KEY,
                         body.skills());
+                }
+                // 本轮工具白名单随本条用户消息下传（ToolFilterMiddleware 读取，作用域限
+                // MCP+自定义、内置恒可见；session-tool-list-design §2）。仅本轮生效：
+                // 显式空列表也要写入（= 仅内置），因此只判 null 不判空
+                if (body.tools() != null) {
+                    msgMeta.put(io.agentmanager.framework.service.ToolFilterMiddleware.METADATA_TOOLS_KEY,
+                        body.tools());
                 }
                 if (body.fileIds() != null && !body.fileIds().isEmpty()) {
                     msgMeta.put(UploadWorkspaceInjector.METADATA_FILE_IDS, body.fileIds());
@@ -1279,8 +1298,8 @@ public class ChatStreamController {
         return false;
     }
 
-    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model、skills 可选 */
+    /** POST 请求体：message 或 fileIds 至少一项；userId、sessionId、model、skills、tools 可选 */
     public record ChatRequest(String message, String userId, String sessionId, List<String> fileIds,
-                              String model, List<String> skills) {
+                              String model, List<String> skills, List<String> tools) {
     }
 }
