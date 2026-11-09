@@ -8,7 +8,6 @@
     "test:core": "npx playwright test --project=api-core --project=api-models --project=api-reload --project=ui",
     "test:multi": "npx playwright test --project=api-multi --project=ui-multi",
     "test:sandbox": "npx playwright test --project=api-sandbox",
-    "test:sandbox-pool": "npx playwright test --project=api-sandbox-pool",
     "test:agui": "npx playwright test --project=api-agui"
   },
   "devDependencies": {

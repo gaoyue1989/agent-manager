@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
@@ -41,8 +43,7 @@ class OpenSandboxClientTest {
             .apiKey("k")
             .image("opensandbox/code-interpreter:v1.1.0")
             .timeout(Duration.ofMinutes(60))
-            .resource(Map.of("cpu", "1", "memory", "1024Mi"))
-            .resourceRequests(Map.of("cpu", "100m", "memory", "128Mi"));
+            .resource(Map.of("cpu", "1", "memory", "1024Mi"));
     }
 
     /** AbstractBaseSandbox 构造要求 state.workspaceSpec 非空 */
@@ -89,7 +90,6 @@ class OpenSandboxClientTest {
             when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.resource(anyMap())).thenReturn(builder);
-            when(builder.resourceRequests(anyMap())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.build()).thenReturn(osb);
             mocked.when(Sandbox::builder).thenReturn(builder);
@@ -97,8 +97,6 @@ class OpenSandboxClientTest {
             var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
             var sandbox = client.create(new WorkspaceSpec(), null, options());
 
-            // D19（独立于池开关生效）：池关闭路径同样透传 Pod requests
-            verify(builder).resourceRequests(eq(Map.of("cpu", "100m", "memory", "128Mi")));
             assertInstanceOf(OpenSandbox.class, sandbox);
             var state = ((OpenSandbox) sandbox).getOsbState();
             assertEquals("sb-created-1", state.getSandboxId());
@@ -118,7 +116,6 @@ class OpenSandboxClientTest {
             when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.resource(anyMap())).thenReturn(builder);
-            when(builder.resourceRequests(anyMap())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.build()).thenReturn(osb);
             mocked.when(Sandbox::builder).thenReturn(builder);
@@ -191,79 +188,180 @@ class OpenSandboxClientTest {
             () -> client.deserializeState("{bad"));
     }
 
-    // ---------------------------------------------------------------- 池化分支（sandbox-pool-design D1/D2/D13，§8 开关对照）
+    // ==================== U4（sandbox-pool-opensandbox-design §9.1）====================
 
-    /** 构造池管理器 stub：borrow 返回指定容器、resume 校正放行 */
-    private static SandboxPoolManager poolStub(String borrowId) {
-        var pool = mock(SandboxPoolManager.class);
-        var osb = mockOsbSandbox(borrowId);
-        when(pool.borrow(any(), any())).thenReturn(new SandboxPoolManager.Borrowed(borrowId, osb));   // poolSid/userKey 可为 null
-        when(pool.reconcileResume(anyString(), any(), any())).thenReturn(true);
-        return pool;
+    private static final String SID = "sess-u4";
+    private static final String USER_KEY = "user-u4";
+
+    /** 带生命周期（mock manager）+ 身份捕获的 spec */
+    private OpenSandboxFilesystemSpec lifecycleSpec(SandboxLifecycleManager manager) {
+        var spec = new OpenSandboxFilesystemSpec()
+            .serverUrl("s:8090").apiKey("k").image("img:1")
+            .timeout(Duration.ofMinutes(30));
+        spec.setLifecycleManager(manager);
+        spec.setPendingSessionId(SID);
+        spec.setPendingUserKey(USER_KEY);
+        return spec;
     }
 
     @Test
-    void createWithPoolShouldBorrowAndInjectCurrentWorkspaceSpec() {
-        var pool = poolStub("sb-pooled-1");
-        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
-        client.setSandboxPoolManager(pool);
-
-        var spec = new WorkspaceSpec();
-        spec.setRoot("/workspace");
-        var sandbox = (OpenSandbox) client.create(spec, null, options());
-
-        // D2：sandboxId = 借出容器 id；workspaceSpec = 当次传入（start 投影 hydrate 依赖）
-        assertEquals("sb-pooled-1", sandbox.getOsbState().getSandboxId());
-        assertEquals("/workspace", sandbox.getOsbState().getWorkspaceSpec().getRoot());
-        verify(pool).borrow(any(), any());   // poolSid/userKey 可为 null（无 middleware/守卫 ThreadLocal 时）
-        verify(pool, never()).release(anyString());
-    }
-
-    @Test
-    void createWithPoolShouldPassSessionIdAndUserKeyFromThreadLocal() {
-        // D17 P1：借出身份（sid=turn_lease 键、userKey=真实用户）从 spec ThreadLocal 传入 borrow
-        var pool = poolStub("sb-pooled-2");
-        var fsSpec = new OpenSandboxFilesystemSpec();
-        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, fsSpec);
-        client.setSandboxPoolManager(pool);
-        fsSpec.setPendingSessionId("sid-abc");
-        fsSpec.setPendingUserKey("alice");
-
-        var spec = new WorkspaceSpec();
-        spec.setRoot("/workspace");
-        client.create(spec, null, options());
-
-        verify(pool).borrow("sid-abc", "alice");
-    }
-
-    @Test
-    void createWithoutPoolShouldKeepLegacyPath() {
-        // 开关关闭（默认）：不触池，行为与 master 逐分支一致（现状 create 真建容器）
-        var osb = mockOsbSandbox("sb-legacy");
-        var pool = mock(SandboxPoolManager.class);
-        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
+    void createWithoutLifecycleKeepsBaselineShape() {
+        // lifecycle 旁路：builder 走 image/resource，无 extensions/metadata（基线行为零回归）
+        var osb = mockOsbSandbox("sb-base");
         try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
             var builder = mock(Sandbox.Builder.class);
             when(builder.connectionConfig(any())).thenReturn(builder);
             when(builder.image(anyString())).thenReturn(builder);
             when(builder.timeout(any())).thenReturn(builder);
             when(builder.resource(anyMap())).thenReturn(builder);
-            when(builder.resourceRequests(anyMap())).thenReturn(builder);
             when(builder.env(anyMap())).thenReturn(builder);
             when(builder.build()).thenReturn(osb);
             mocked.when(Sandbox::builder).thenReturn(builder);
-            var sandbox = (OpenSandbox) client.create(state().getWorkspaceSpec(), null, options());
-            assertEquals("sb-legacy", sandbox.getOsbState().getSandboxId());
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
+            client.create(new WorkspaceSpec(), null, options());
+
+            verify(builder).image(anyString());
+            verify(builder).resource(anyMap());
+            verify(builder, never()).extensions(anyMap());
+            verify(builder, never()).metadata(anyMap());
         }
-        verify(pool, never()).borrow(any(), any());
     }
 
     @Test
-    void resumeWithPoolShouldReconcileAndRenewLease() {
-        var pool = poolStub("sb-pooled-1");
-        var osb = mockOsbSandbox("sb-pooled-1");
-        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
-        client.setSandboxPoolManager(pool);
+    void createWithPoolRefInjectsExtensionsAndSuppressesResource() throws Exception {
+        // §4.2 ③ + 评审 d17：poolRef 非空 → extensions.poolRef 透传、resourceLimits 抑制、
+        // entrypoint/env 保留（taskTemplate 下发通路）、timeout=TTL。image 必传：SDK
+        // Sandbox.Builder.build() 客户端强约束 image XOR snapshotId（1.0.18 实证），
+        // poolRef 路径无法抑制（上游对组合实测忽略，镜像以 Pool 模板为准）
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
+            true, "pool-e2e", 5, 60, 20));
+        when(manager.acquire(anyString(), anyString(), any(), any(), any()))
+            .thenAnswer(inv -> {
+                // 直调 create 委托：穿透到 builder 组装逻辑
+                var delegate = inv.getArgument(3, SandboxLifecycleManager.SandboxCreateDelegate.class);
+                return delegate.create().sandbox();
+            });
+        var osb = mockOsbSandbox("sb-pool");
+        var info = mock(com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo.class);
+        when(info.getId()).thenReturn("sb-pool");
+        when(osb.getInfo()).thenReturn(info);
+
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var builder = mock(Sandbox.Builder.class);
+            when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
+            when(builder.timeout(any())).thenReturn(builder);
+            when(builder.env(anyMap())).thenReturn(builder);
+            when(builder.entrypoint(any(java.util.List.class))).thenReturn(builder);
+            when(builder.extensions(anyMap())).thenReturn(builder);
+            when(builder.metadata(anyMap())).thenReturn(builder);
+            when(builder.build()).thenReturn(osb);
+            mocked.when(Sandbox::builder).thenReturn(builder);
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, lifecycleSpec(manager));
+            client.create(new WorkspaceSpec(), null, options());
+
+            verify(builder).extensions(eq(Map.of("poolRef", "pool-e2e")));
+            verify(builder).image(anyString());   // SDK 客户端强约束必传（上游忽略）
+            verify(builder, never()).resource(anyMap());
+            verify(builder).entrypoint(any(java.util.List.class));   // env/entrypoint 保留
+            verify(builder).timeout(any(java.time.Duration.class));
+            var meta = ArgumentCaptor.forClass(Map.class);
+            verify(builder).metadata(meta.capture());
+            @SuppressWarnings("unchecked")
+            Map<String, String> metaMap = (Map<String, String>) meta.getValue();
+            assertEquals(SID, metaMap.get("session_id"), "metadata.session_id = 记账会话键");
+            // metadata.service：env HOST_NAME 无 k8s 形态的测试环境无 service 键；有则必非空
+            if (metaMap.containsKey("service")) {
+                assertFalse(metaMap.get("service").isBlank());
+            }
+            verify(manager).acquire(eq(SID), eq(USER_KEY), any(), any(), any());
+        }
+    }
+
+    @Test
+    void createWithoutPoolRefPassesImageAndResource() throws Exception {
+        // poolRef 空（默认）→ create 不带 extensions.poolRef，走普通创建（§4.5 兼容存量）
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
+            true, "", 5, 60, 20));
+        when(manager.acquire(anyString(), anyString(), any(), any(), any()))
+            .thenAnswer(inv -> {
+                var delegate = inv.getArgument(3, SandboxLifecycleManager.SandboxCreateDelegate.class);
+                return delegate.create().sandbox();
+            });
+        var osb = mockOsbSandbox("sb-nopool");
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var builder = mock(Sandbox.Builder.class);
+            when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
+            when(builder.timeout(any())).thenReturn(builder);
+            when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.env(anyMap())).thenReturn(builder);
+            when(builder.entrypoint(any(java.util.List.class))).thenReturn(builder);
+            when(builder.metadata(anyMap())).thenReturn(builder);
+            when(builder.build()).thenReturn(osb);
+            mocked.when(Sandbox::builder).thenReturn(builder);
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, lifecycleSpec(manager));
+            client.create(new WorkspaceSpec(), null, options());
+
+            verify(builder).image(anyString());
+            verify(builder).resource(anyMap());
+            verify(builder, never()).extensions(anyMap());
+        }
+    }
+
+    @Test
+    void createRoutesQuotaExhaustedThroughToCaller() throws Exception {
+        // §4.6：acquire 全忙异常原样透传（SSE error 帧载荷由控制器错误回调组装）
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.acquire(anyString(), anyString(), any(), any(), any()))
+            .thenThrow(new UserQuotaExhaustedException(5, List.of(
+                new UserQuotaExhaustedException.BindingView(SID, "2026-11-08T00:00:00Z", true, false, null))));
+        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, lifecycleSpec(manager));
+
+        var ex = assertThrows(UserQuotaExhaustedException.class,
+            () -> client.create(new WorkspaceSpec(), null, options()));
+        assertEquals(5, ex.quota());
+    }
+
+    @Test
+    void createIdentityMissingFallsBackToBaseline() throws Exception {
+        // 守卫未装配的防御分支（身份缺失）→ 基线 create，不路由 lifecycle
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
+            true, "", 5, 60, 20));
+        var spec = lifecycleSpec(manager);
+        spec.takePendingSessionId();   // 清空捕获
+        var osb = mockOsbSandbox("sb-noid");
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var builder = mock(Sandbox.Builder.class);
+            when(builder.connectionConfig(any())).thenReturn(builder);
+            when(builder.image(anyString())).thenReturn(builder);
+            when(builder.timeout(any())).thenReturn(builder);
+            when(builder.resource(anyMap())).thenReturn(builder);
+            when(builder.env(anyMap())).thenReturn(builder);
+            when(builder.build()).thenReturn(osb);
+            mocked.when(Sandbox::builder).thenReturn(builder);
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, spec);
+            client.create(new WorkspaceSpec(), null, options());
+            verify(manager, never()).acquire(anyString(), anyString(), any(), any(), any());
+        }
+    }
+
+    @Test
+    void resumeOwnershipOkRegistersCallRef() throws Exception {
+        // U4 三分支之一：归属匹配 → 条件写 affected=1（P3 通过即 touch）→ 放行 + acquireRef
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.bindingStore()).thenReturn(store);
+        when(store.occupyWrite(anyString(), anyList())).thenReturn(true);
+        var spec = lifecycleSpec(manager);
+        var osb = mockOsbSandbox("sb-resume-lc");
         try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
             var connector = mock(Sandbox.Connector.class);
             when(connector.sandboxId(anyString())).thenReturn(connector);
@@ -272,23 +370,29 @@ class OpenSandboxClientTest {
             when(connector.connect()).thenReturn(osb);
             mocked.when(Sandbox::connector).thenReturn(connector);
 
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, spec);
             var resumeState = state();
-            resumeState.setSandboxId("sb-pooled-1");
+            resumeState.setSandboxId("sb-resume-lc");
             client.resume(resumeState);
-            // 续约②：connect 成功 → 账本校正放行 → 跨副本全局键保活
-            verify(pool).reconcileResume(eq("sb-pooled-1"), any(), any());
-            verify(pool).renew("sb-pooled-1");
+
+            var sidCap = ArgumentCaptor.forClass(String.class);
+            var idsCap = ArgumentCaptor.forClass(List.class);
+            verify(store).occupyWrite(sidCap.capture(), idsCap.capture());
+            assertEquals("sb-resume-lc", sidCap.getValue());
+            assertEquals(List.of(SID), idsCap.getValue());   // UPDATE 载荷 WHERE sandbox_id AND session_id
+            verify(manager).onResumeAcquired(eq("sb-resume-lc"), eq(SID), any());
         }
     }
 
     @Test
-    void resumeWithPoolShouldDowngradeWhenReconcileFails() {
-        // P4 顺序修正：校正不过（被继承给他人/已回收）→ close 句柄 + 抛异常触发 SDK P3→P4 降级
-        var pool = mock(SandboxPoolManager.class);
-        when(pool.reconcileResume(anyString(), any(), any())).thenReturn(false);
+    void resumeOwnershipLostClosesAndDegrades() throws Exception {
+        // U4 三分支之二：无行/归他会话/漂移 → 条件写 affected=0 → close 句柄 + 降级异常
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.bindingStore()).thenReturn(store);
+        when(store.occupyWrite(anyString(), anyList())).thenReturn(false);
+        var spec = lifecycleSpec(manager);
         var osb = mockOsbSandbox("sb-stolen");
-        var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null);
-        client.setSandboxPoolManager(pool);
         try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
             var connector = mock(Sandbox.Connector.class);
             when(connector.sandboxId(anyString())).thenReturn(connector);
@@ -297,21 +401,58 @@ class OpenSandboxClientTest {
             when(connector.connect()).thenReturn(osb);
             mocked.when(Sandbox::connector).thenReturn(connector);
 
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, spec);
             var resumeState = state();
             resumeState.setSandboxId("sb-stolen");
             assertThrows(io.agentscope.harness.agent.sandbox.SandboxException.class,
                 () -> client.resume(resumeState));
-            // 降级前必须 close 已 connect 句柄（SDK Sandbox AutoCloseable），且不续约不写账本
-            verify(osb).close();
-            verify(pool, never()).renew(anyString());
+            verify(osb).close();   // 受害降级路径 close（未执行任何命令，无实害）
+            verify(manager, never()).onResumeAcquired(anyString(), anyString(), any());
+            // 身份归还：harness 降级 create 重走决策时生命周期记账仍拿得到 sid
+            //（不还回去 = 重建沙箱脱簿记，2026-11-08 lifecycle 组本地实跑实锤）
+            assertEquals(SID, spec.peekPendingSessionId());
         }
     }
 
     @Test
-    void resumeWithoutPoolShouldNotTouchPool() {
-        var osb = mockOsbSandbox("sb-r2");
-        var pool = mock(SandboxPoolManager.class);
-        var client = new OpenSandboxClient(options(), null, null);
+    void resumeConnect404RegistersRebuildNoticeAndKeepsIdentity() throws Exception {
+        // V6⑧ live 实锤缺失路径：绑定行被 renew-404 sweep 懒剔除后沙箱 GC，confirm/chat
+        // 恢复 P3 connect 404 → 不经归属拦截 → 设计 §4.4「① miss → 重建 + 换代提示帧」
+        // 分支此前漏发。修复：connect 404/410 时登记换代（异常原样重抛，降级 create 语义不变）
+        var manager = mock(SandboxLifecycleManager.class);
+        var spec = lifecycleSpec(manager);   // ThreadLocal sid 已置
+        var osb = mock(Sandbox.class);
+        try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
+            var connector = mock(Sandbox.Connector.class);
+            when(connector.sandboxId(anyString())).thenReturn(connector);
+            when(connector.connectionConfig(any())).thenReturn(connector);
+            when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
+            when(connector.connect()).thenThrow(new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException(
+                "gone", null, 404, mock(com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.class)));
+            mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, spec);
+            var resumeState = state();
+            resumeState.setSandboxId("sb-gc");
+            assertThrows(com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException.class,
+                () -> client.resume(resumeState));   // 基线降级语义不变（原样上抛，harness 捕获降级）
+            verify(manager).markSandboxRebuilt(SID);   // 换代登记
+            // ThreadLocal sid 未被 take：harness 降级 create 的生命周期记账仍拿得到 sid
+            assertEquals(SID, spec.peekPendingSessionId());
+            verify(manager, never()).onResumeAcquired(anyString(), anyString(), any());
+        }
+    }
+
+    @Test
+    void resumeOwnershipCheckUnavailableFailsOpen() throws Exception {
+        // U4 三分支之三：校验写异常（DataAccessException）→ 放行 + WARN（fail-open）
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.bindingStore()).thenReturn(store);
+        when(store.occupyWrite(anyString(), anyList()))
+            .thenThrow(new SandboxBindingStore.DataAccessException("db down", null));
+        var spec = lifecycleSpec(manager);
+        var osb = mockOsbSandbox("sb-resume-fo");
         try (MockedStatic<Sandbox> mocked = mockStatic(Sandbox.class)) {
             var connector = mock(Sandbox.Connector.class);
             when(connector.sandboxId(anyString())).thenReturn(connector);
@@ -319,38 +460,24 @@ class OpenSandboxClientTest {
             when(connector.skipHealthCheck(anyBoolean())).thenReturn(connector);
             when(connector.connect()).thenReturn(osb);
             mocked.when(Sandbox::connector).thenReturn(connector);
+
+            var client = new OpenSandboxClient(options(), mock(WorkspaceReader.class), null, spec);
             var resumeState = state();
-            resumeState.setSandboxId("sb-r2");
-            client.resume(resumeState);
+            resumeState.setSandboxId("sb-resume-fo");
+            var sandbox = client.resume(resumeState);
+            assertInstanceOf(OpenSandbox.class, sandbox);   // 放行
+            verify(manager).recordOwnershipFailOpen(eq("sb-resume-fo"), eq(SID), any());
         }
-        verify(pool, never()).renew(anyString());
     }
 
     @Test
-    void deleteWithPoolShouldRouteIntoPool_d13() {
-        // D13：delete 路由进池（kill + 认领 + 异步补位），不直杀句柄
-        var pool = mock(SandboxPoolManager.class);
-        var osb = mockOsbSandbox("sb-pooled-1");
-        var client = new OpenSandboxClient(options(), null, null);
-        client.setSandboxPoolManager(pool);
-        var st = state();
-        st.setSandboxId("sb-pooled-1");
-        var sandbox = new OpenSandbox(st, osb, options(), null, null);
-
-        client.delete(sandbox);
-
-        verify(pool).release("sb-pooled-1");
-        verify(osb, never()).kill();   // kill 由池统一执行（含认领/补位），不走现状直杀
-    }
-
-    @Test
-    void deleteWithoutPoolShouldKillDirectly() {
-        // 开关关闭：现状直杀（回归对照）
-        var osb = mockOsbSandbox("sb-del2");
-        var client = new OpenSandboxClient(options(), null, null);
-        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
-        client.delete(sandbox);
-        verify(osb).kill();
-        verify(osb).close();
+    void newConfigBindingChainDefaultsAlignWithDesign() {
+        // §4.7 绑定链：env → application.yml 占位符段 → 构造器 null 归一（@DefaultValue 即归一）
+        var cfg = new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20);
+        assertTrue(cfg.enabled());
+        assertEquals("", cfg.poolRef());
+        assertEquals(5, cfg.userQuota());
+        assertEquals(60, cfg.renewIntervalSeconds());
+        assertEquals(20, cfg.confirmHoldMinutes());
     }
 }

@@ -25,8 +25,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private Duration timeout = Duration.ofMinutes(60);
     private List<String> entrypoint = List.of("/opt/code-interpreter/code-interpreter.sh");
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
-    /** Pod requests（D19 资源双档）：null = 不传；低 request 启动独立于池开关生效（sandbox-pool-design） */
-    private Map<String, String> resourceRequests;
     private Map<String, String> environment = new HashMap<>();
     private String workspaceRoot = "/workspace";
     private WorkspaceReader workspaceReader;
@@ -40,19 +38,23 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
 
+    /**
+     * 请求级会话/身份键传递（sandbox-pool-opensandbox-design §4.2）：守卫 {@code tryEnter}
+     * 同线程覆盖写（唯一落在 acquire 正确线程的注入点，PR #276 injectPoolIdentity 同款验证）、
+     * SandboxUserKeyMiddleware 尽力兜底，OpenSandboxClient.create/resume 读取后即清。
+     * 语义：chat 链路 = 前端 sid（=turn_lease 键）；A2A/invoke 链路 = 真实用户
+     * （非 turn_lease 键，busy 判定回退纯租约+updated_at 双事实源，正确性不受影响）。
+     */
+    private final ThreadLocal<String> pendingSessionId = new ThreadLocal<>();
+
     /** 请求级技能缓存 scope 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取并绑定到沙箱实例 */
     private final ThreadLocal<String> pendingSkillScope = new ThreadLocal<>();
 
     /**
-     * 请求级会话键传递（池化 D14 双保险查询键，sandbox-pool-design）：middleware 设置
-     * （Channel=ctx.userId 网关 peer=前端 sid=turn_lease 键；A2A=真实用户），借出时写入
-     * pool busy 记录——扫描回收前按它查 turn_lease（活跃即不回收）。尽力而为：键形不匹配
-     * 时 D14 查询 miss，回退纯租约判定（正确性由租约 TTL 本身保证）。
+     * 沙箱生命周期管理器（§4.2/§4.9，lifecycle 开启时由 AgentScopeConfig 装配注入；
+     * null = 生命周期旁路）。stop() 经此回调 per-call 收尾（refcount-1 + 终刷）。
      */
-    private final ThreadLocal<String> pendingSessionId = new ThreadLocal<>();
-
-    /** 沙箱池管理器（池化 D1：create 借出/resume 续约/delete 路由进池；null = 池关闭，现状路径） */
-    private volatile SandboxPoolManager sandboxPoolManager;
+    private volatile SandboxLifecycleManager lifecycleManager;
 
     /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject）；LRU 有界 */
     private final Map<String, String> userInjectedSandbox = lruMap(256);
@@ -202,12 +204,9 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         // 包装 TracingSandboxClient：沙箱 create/resume/delete 操作创建 OTel span
         // （sandbox 操作在 middleware 链外执行，OtelTracingMiddleware 无法覆盖）。
         // OTEL_TRACES_EXPORTER=none 时 GlobalOpenTelemetry 返回 no-op tracer，零开销。
-        // 池化（sandbox-pool-design D1）：池管理器注入 client——create 借出/resume 续约/delete
-        // 路由进池；null = 池关闭，client 内部走现状路径（逐分支一致）。
-        var client = new OpenSandboxClient(clientOptions(), workspaceReader, workspaceSyncService, this,
-            fileAssetStore, fileStorage);
-        client.setSandboxPoolManager(sandboxPoolManager);
-        return new TracingSandboxClient(client);
+        return new TracingSandboxClient(
+            new OpenSandboxClient(clientOptions(), workspaceReader, workspaceSyncService, this,
+                fileAssetStore, fileStorage));
     }
 
     /** userId 注入 middleware（AgentScopeConfig 注册到 HarnessAgent.Builder.middleware） */
@@ -273,32 +272,36 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         pendingSkillScope.remove();
     }
 
-    /** 设置请求级会话键（池 busy 记录的 D14 查询键；middleware 与 setPendingUserKey 同点设置） */
+    /** 设置待记账会话键（守卫 tryEnter 同线程覆盖写 / SandboxUserKeyMiddleware 兜底） */
     public void setPendingSessionId(String sessionId) {
         pendingSessionId.set(sessionId);
     }
 
-    /** 读取并清除请求级会话键（OpenSandboxClient.create 池借出时消费） */
+    /** 读取并清除待记账会话键（OpenSandboxClient.create/resume 时调用，用后即清） */
     public String takePendingSessionId() {
-        var sid = pendingSessionId.get();
+        var key = pendingSessionId.get();
         pendingSessionId.remove();
-        return sid;
+        return key;
     }
 
-    /** 读取但不清除请求级会话键（OpenSandboxClient.resume 池账本校正用——后续 bindUserKey/middleware 仍需消费 ThreadLocal） */
+    /** 读取但不清除待记账会话键（测试断言/兜底路径用） */
     public String peekPendingSessionId() {
-        var sid = pendingSessionId.get();
-        return (sid == null || sid.isBlank()) ? null : sid;
+        var key = pendingSessionId.get();
+        return key == null || key.isBlank() ? null : key;
     }
 
-    /** 沙箱池管理器（AgentScopeConfig 装配注入；null = 池关闭） */
-    public OpenSandboxFilesystemSpec sandboxPoolManager(SandboxPoolManager poolManager) {
-        this.sandboxPoolManager = poolManager;
-        return this;
+    /** 清除待记账会话键（middleware 消费后调用；reactor 线程池复用，残留会污染下个 turn） */
+    public void clearPendingSessionId() {
+        pendingSessionId.remove();
     }
 
-    public SandboxPoolManager sandboxPoolManager() {
-        return sandboxPoolManager;
+    /** 生命周期管理器（lifecycle 开启时注入；null = 旁路） */
+    public SandboxLifecycleManager getLifecycleManager() {
+        return lifecycleManager;
+    }
+
+    public void setLifecycleManager(SandboxLifecycleManager manager) {
+        this.lifecycleManager = manager;
     }
 
     @Override
@@ -310,7 +313,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .timeout(timeout)
             .entrypoint(entrypoint)
             .resource(resource)
-            .resourceRequests(resourceRequests)
             .environment(environment)
             .workspaceRoot(workspaceRoot);
     }
@@ -340,7 +342,6 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public OpenSandboxFilesystemSpec timeout(Duration timeout) { this.timeout = timeout; return this; }
     public OpenSandboxFilesystemSpec entrypoint(List<String> entrypoint) { this.entrypoint = entrypoint; return this; }
     public OpenSandboxFilesystemSpec resource(Map<String, String> resource) { this.resource = resource; return this; }
-    public OpenSandboxFilesystemSpec resourceRequests(Map<String, String> resourceRequests) { this.resourceRequests = resourceRequests; return this; }
     public OpenSandboxFilesystemSpec environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxFilesystemSpec workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
     public OpenSandboxFilesystemSpec workspaceReader(WorkspaceReader workspaceReader) {

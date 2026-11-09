@@ -63,58 +63,33 @@ public class ConfirmController {
     private final SessionUserStore sessionUserStore;
     private final McpToolRegistrar mcpToolRegistrar;
     private final RemoteConfirmBridge remoteConfirmBridge;
-    /** D16 硬截止自动收尾（null = 未装配：跳过截止判定，测试兼容构造走此路径） */
-    private final io.agentmanager.framework.service.ConfirmDeadlineService confirmDeadlineService;
 
     /** 会话消息轨存储：confirm 恢复 turn 失败留痕（字段注入 required=false，单测直接 new 时为 null） */
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
     /**
-     * 沙箱池管理器（D16-④ 确认入口预检续约，字段注入 required=false：池关闭/单测直接 new 时为 null，
-     * touch 跳过——保证 D16 硬截止可独立于池化先行落地）。
+     * 沙箱生命周期管理器（sandbox-pool-opensandbox-design §4.4 turn 挂钩；字段注入
+     * required=false 避免改动构造调用点，单测直接 new 时为 null）。null = lifecycle 旁路。
+     * confirm 恢复段是 turn 边界：开始重注册（清 holdUntil）、终态注销+终刷、ask 挂起重新计窗。
      */
     @org.springframework.beans.factory.annotation.Autowired(required = false)
-    private io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager sandboxPool;
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
 
-    /**
-     * D16-④ 池租约预检续约（deadline 判定通过后调用）：租约键 EXISTS → EXPIRE 放行；
-     * 键失（容器已被回收）→ 抛 PoolLeaseGoneException，调用方按 410 处置（不进入 resume，
-     * 杜绝"通过预检却中途 404 借新容器丢产物"）。池关闭时为 no-op。
-     */
-    private void touchPoolLeaseOrThrow(String sessionId) {
-        if (sandboxPool != null) {
-            sandboxPool.touchSessionOrThrow(sessionId);
-        }
-    }
-
-    /** Spring 装配入口（含远程确认桥 + D16 截止收尾） */
+    /** Spring 装配入口（含远程确认桥） */
     @org.springframework.beans.factory.annotation.Autowired
     public ConfirmController(AgentRuntimeService runtimeService,
                              TurnLeaseStore turnLeaseStore,
                              SessionEventBus eventBus,
                              SessionUserStore sessionUserStore,
                              McpToolRegistrar mcpToolRegistrar,
-                             RemoteConfirmBridge remoteConfirmBridge,
-                             io.agentmanager.framework.service.ConfirmDeadlineService confirmDeadlineService) {
+                             RemoteConfirmBridge remoteConfirmBridge) {
         this.runtimeService = runtimeService;
         this.turnLeaseStore = turnLeaseStore;
         this.eventBus = eventBus;
         this.sessionUserStore = sessionUserStore;
         this.mcpToolRegistrar = mcpToolRegistrar;
         this.remoteConfirmBridge = remoteConfirmBridge;
-        this.confirmDeadlineService = confirmDeadlineService;
-    }
-
-    /** 兼容构造（存量测试 6 参）：截止收尾未装配——判定跳过，行为与 D16 落地前一致 */
-    public ConfirmController(AgentRuntimeService runtimeService,
-                             TurnLeaseStore turnLeaseStore,
-                             SessionEventBus eventBus,
-                             SessionUserStore sessionUserStore,
-                             McpToolRegistrar mcpToolRegistrar,
-                             RemoteConfirmBridge remoteConfirmBridge) {
-        this(runtimeService, turnLeaseStore, eventBus, sessionUserStore, mcpToolRegistrar,
-            remoteConfirmBridge, null);
     }
 
     /** 本地行 confirmKey 的判定（多行消费路由：非 local 即远程键） */
@@ -196,34 +171,6 @@ public class ConfirmController {
                     "error", "remote_route_failed",
                     "message", String.valueOf(e.getMessage())));
             }
-        }
-
-        // D16 硬截止预检（仅本地键；远程行有独立 TTL 治理，Bridge 超时自动 DENY）：
-        // 挂起超 AGENT_CONFIRM_DEADLINE_MINUTES → 410 confirm_expired + 异步自动按拒绝收尾
-        //（复用 reject→DENY 分支：turn 拒绝终态、会话从 ASKING 解锁；零后台任务，懒触发）
-        if (confirmDeadlineService != null) {
-            try {
-                confirmDeadlineService.checkDeadline(sessionId);
-            } catch (AgentRuntimeService.ConfirmDeadlineExpiredException e) {
-                log.info("[confirm] deadline exceeded, auto-deny finalize (sid={})", sessionId);
-                fireAndForgetFinalize(sessionId);
-                return ResponseEntity.status(410).body(Map.of(
-                    "error", "confirm_expired",
-                    "message", "确认已超时作废（超过 " + runtimeService.confirmDeadlineMinutes()
-                        + " 分钟未处理）。本次未执行任何变更；该工具已按拒绝自动收尾。",
-                    "deadline", String.valueOf(e.deadline)));
-            }
-        }
-        // D16-④ 池租约预检续约（deadline 内的确认保容器必活）：键在 → 续约放行；键失 → 容器已被
-        // 回收，410 作废（不进入 resume——避免中途 404 借新容器丢产物），收尾同上自动按拒绝处理
-        try {
-            touchPoolLeaseOrThrow(sessionId);
-        } catch (io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager.PoolLeaseGoneException e) {
-            log.info("[confirm] pool lease gone, auto-deny finalize (sid={})", sessionId);
-            fireAndForgetFinalize(sessionId);
-            return ResponseEntity.status(410).body(Map.of(
-                "error", "confirm_expired",
-                "message", "确认已失效（会话沙箱容器已被回收）。本次未执行任何变更；该工具已按拒绝自动收尾。"));
         }
 
         // 恢复确认时刷新会话-用户映射（确认恢复可能是新的入口，确保映射存在）
@@ -332,19 +279,9 @@ public class ConfirmController {
         }
 
         return Flux.<ServerSentEvent<String>>create(sink -> {
-            // ===== 1. 预检查确认可用性（含 D16 硬截止 + 池租约续约：过期/失活 → error 帧 confirm_expired + 异步收尾）=====
+            // ===== 1. 预检查确认可用性 =====
             try {
                 runtimeService.checkConfirmAvailable(finalSessionId);
-                touchPoolLeaseOrThrow(finalSessionId);
-            } catch (AgentRuntimeService.ConfirmDeadlineExpiredException
-                     | io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager.PoolLeaseGoneException e) {
-                log.info("[confirm-stream] confirm expired (deadline/pool-lease), auto-deny finalize (sid={})",
-                    finalSessionId);
-                fireAndForgetFinalize(finalSessionId);
-                sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
-                    : AgentRuntimeService.ConfirmDeadlineExpiredException.class.getSimpleName()));
-                sink.complete();
-                return;
             } catch (Exception e) {
                 sink.next(errorSSE(e.getMessage() != null ? e.getMessage()
                     : e.getClass().getSimpleName()));
@@ -362,6 +299,12 @@ public class ConfirmController {
             }
             TurnLeaseGuard lease = new TurnLeaseGuard(turnLeaseStore, finalSessionId, token);
 
+            // ===== 2.5 沙箱生命周期 turn 重注册（§4.4 confirm 恢复）：清除挂起保留窗、
+            // 恢复期间续期继续；终态注销挂 endTurn（T2）=====
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onTurnStart(finalSessionId);
+            }
+
             // ===== 3. 准备 EventBus Sinks =====
             String replyId = UUID.randomUUID().toString();
             // 工具摘要累积器（turn 级）：HITL 批准后的恢复执行段同样要输出「执行 …」人可读摘要，
@@ -371,6 +314,10 @@ public class ConfirmController {
             // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 沙箱换代提示（§4.4 T4）：confirm 恢复段保留窗过期后被改绑 → 归属校验拦截降级重建
+            // → 首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
+            var turnStartedAt = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+            var sandboxRebuildNotified = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
             // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
@@ -384,6 +331,11 @@ public class ConfirmController {
             } catch (Exception e) {
                 log.warn("confirm-stream setup failed, rolling back (sid={}): {}",
                     finalSessionId, e.getMessage());
+                // 沙箱生命周期 turn 注销：onTurnStart（confirm 恢复重注册）已在本段落位，
+                // 回滚同样必须注销，防 activeTurns 条目泄漏持续续期（§4.4 T2 终态必注销）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(finalSessionId);
+                }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
                     errorSSE(e.getMessage() != null ? e.getMessage()
                         : e.getClass().getSimpleName()));
@@ -405,7 +357,7 @@ public class ConfirmController {
             resumeFlux
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
-                        turnEnded, toolSummary),
+                        turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -429,10 +381,10 @@ public class ConfirmController {
                                 }
                             }
                         }
-                        TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded);
+                        endTurnAndLifecycle(eventBus, lease, finalSessionId, turnEnded);
                     },
                     // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
-                    () -> TurnFinalizer.endTurn(eventBus, lease, finalSessionId, turnEnded));
+                    () -> endTurnAndLifecycle(eventBus, lease, finalSessionId, turnEnded));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -450,10 +402,21 @@ public class ConfirmController {
                                     String sessionId, String replyId, TurnLeaseGuard lease,
                                     reactor.core.publisher.FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.concurrent.atomic.AtomicLong turnStartedAt,
+                                    java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     TurnToolSummaryTracker toolSummary) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
+        }
+
+        // 沙箱换代提示帧（§4.4 T4 恢复路径，同 ChatStreamController）：归属失效降级重建后
+        // 在首个事件前一次性提示，前端据此展示「未保存的工作区文件可能丢失」
+        if (!sandboxRebuildNotified.get() && sandboxLifecycle != null
+                && sandboxLifecycle.popSandboxRebuiltSince(sessionId, turnStartedAt.get())) {
+            sandboxRebuildNotified.set(true);
+            eventBus.emitSynthetic(sessionId, replyId, "sandbox_rebuilt",
+                "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");
         }
 
         // 工具名登记 + 参数/结果累积（ToolCallStartEvent 是唯一携带真实工具名的事件）
@@ -470,6 +433,10 @@ public class ConfirmController {
             runtimeService.storeConfirmContext(sessionId, event);
             lease.release();
             // HITL 暂停点：锁已让出、状态已持久化
+            // T4 挂起保留窗（§4.4）：恢复段 ask 挂起同样保留沙箱续期，每次 ask 重新计窗
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onConfirmHold(sessionId);
+            }
         }
 
         // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）；
@@ -498,7 +465,22 @@ public class ConfirmController {
         // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
-            TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded);
+            endTurnAndLifecycle(eventBus, lease, sessionId, turnEnded);
+        }
+    }
+
+    /**
+     * turn 收尾 + 沙箱生命周期终态注销（§4.4 T2）：endTurn CAS 首胜才注销——
+     * 注销只挂 turn 终态（错误回调/正常完成/AGENT_END 三入口经此汇聚），不挂 per-call stop()。
+     */
+    private void endTurnAndLifecycle(SessionEventBus eventBus, TurnLeaseGuard lease,
+                                     String sessionId,
+                                     java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
+            return;
+        }
+        if (sandboxLifecycle != null) {
+            sandboxLifecycle.onTurnEnd(sessionId);
         }
     }
 
@@ -508,20 +490,6 @@ public class ConfirmController {
         return ServerSentEvent.<String>builder()
             .data(AgentEventSseSerializer.payload(Map.of("type", "error", "error", msg)))
             .build();
-    }
-
-    /** D16 迟到确认的异步收尾（fire-and-forget）：不拖慢 410 响应；失败仅告警，state 兜底懒收尾 */
-    private void fireAndForgetFinalize(String sessionId) {
-        if (confirmDeadlineService == null) {
-            return;
-        }
-        reactor.core.scheduler.Schedulers.boundedElastic().schedule(() -> {
-            try {
-                confirmDeadlineService.finalizeByDeny(sessionId);
-            } catch (Exception e) {
-                log.warn("[confirm] async finalize failed (sid={}): {}", sessionId, e.getMessage());
-            }
-        });
     }
 
     /** 请求体：results 必带；confirmKey 可选（缺省 'local'——本地行现状语义；'task:{task_id}' 走远程路由） */

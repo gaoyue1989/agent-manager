@@ -64,9 +64,16 @@ var template = []Group{
 			{EnvKey: "OPENSANDBOX_SERVER_URL", Label: "Server 地址", Required: true, Placeholder: "host:8090"},
 			{EnvKey: "OPENSANDBOX_API_KEY", Label: "API Key", Sensitive: true},
 			{EnvKey: "SANDBOX_IMAGE", Label: "沙箱镜像", Placeholder: "opensandbox/code-interpreter:v1.1.0"},
-			{EnvKey: "SANDBOX_TIMEOUT_MINUTES", Label: "超时(分钟)", Placeholder: "60"},
+			// SANDBOX_TIMEOUT_MINUTES 语义升级（sandbox-pool-opensandbox-design §4.4）：
+			// 「创建时一次性超时」→「生命周期 TTL（随 turn 续期刷新）」，基线默认 60 → 30
+			{EnvKey: "SANDBOX_TIMEOUT_MINUTES", Label: "生命周期 TTL(分钟)", Placeholder: "30"},
 			{EnvKey: "SANDBOX_MEMORY_MB", Label: "内存上限(MB)", Placeholder: "1024"},
 			{EnvKey: "SANDBOX_CPU_COUNT", Label: "CPU 核数", Placeholder: "1"},
+			// 沙箱池化三键（sandbox-pool-opensandbox-design §4.7/§7）：发布向导/编辑 env 表单预填，
+			// 非敏感、不经 envFrom 注入、不影响已发布服务（R3 语义同上）
+			{EnvKey: "SANDBOX_POOL_REF", Label: "服务端池名", Placeholder: "空 = 不用服务端池（create 不带 poolRef）"},
+			{EnvKey: "SANDBOX_USER_QUOTA", Label: "单用户配额", Placeholder: "5（0 = 不限，仅关配额）"},
+			{EnvKey: "SANDBOX_RENEW_INTERVAL_SECONDS", Label: "在途续期间隔(秒)", Placeholder: "60"},
 		},
 	},
 	{

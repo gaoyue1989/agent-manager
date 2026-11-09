@@ -30,5 +30,7 @@ export type ChatMsg = {
   output_truncated?: boolean;
   output_full_length?: number;
   confirm?: import("@/lib/confirm-card").ConfirmCard;
+  /** 配额满错误卡载荷（§6.3：chat 预检 409 / SSE error 帧 code=user_quota_exhausted 两入口） */
+  quota?: import("@/lib/sandbox-quota").QuotaPayload;
   files?: FileCard[];  // file_ready 渲染的下载卡片
 };

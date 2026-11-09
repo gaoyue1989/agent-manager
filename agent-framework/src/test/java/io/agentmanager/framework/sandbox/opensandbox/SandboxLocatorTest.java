@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -53,7 +54,7 @@ class SandboxLocatorTest {
         SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
             Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
             new SandboxConfig.OpenSandboxConfig("server:8090", "key"));
-        locator = new SandboxLocator(stateStore, oafConfig, config);
+        locator = new SandboxLocator(stateStore, oafConfig, config, null, null);
     }
 
     /** 打桩 SDK connector：connect() 返回指定句柄（多个则按调用顺序排队） */
@@ -221,6 +222,84 @@ class SandboxLocatorTest {
         SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
             Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
             new SandboxConfig.OpenSandboxConfig("server:8090", ""));
-        assertDoesNotThrow(() -> new SandboxLocator(stateStore, oafConfig, config));
+        assertDoesNotThrow(() -> new SandboxLocator(stateStore, oafConfig, config, null, null));
+    }
+
+    // ---------- 归属校验+占位（U4，终审 d1/cold-R1-1：locate 直连同 P3 规则） ----------
+
+    /** 带 lifecycle 簿记的 locator（providers 注入 mock） */
+    private SandboxLocator locateWithLifecycle(SandboxBindingStore store,
+                                               SandboxLifecycleManager manager) {
+        OafConfig oafConfig = new OafConfig(AGENT, null, null, null, null, null, null, null, null,
+            null, null, null, null, null, null, null, null, null, null);
+        SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
+            Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
+            new SandboxConfig.OpenSandboxConfig("server:8090", "key"));
+        @SuppressWarnings("unchecked")
+        org.springframework.beans.factory.ObjectProvider<SandboxBindingStore> storeProvider =
+            mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(storeProvider.getIfAvailable()).thenReturn(store);
+        @SuppressWarnings("unchecked")
+        org.springframework.beans.factory.ObjectProvider<SandboxLifecycleManager> lifecycleProvider =
+            mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(lifecycleProvider.getIfAvailable()).thenReturn(manager);
+        return new SandboxLocator(stateStore, oafConfig, config, storeProvider, lifecycleProvider);
+    }
+
+    @Test
+    void locateOwnershipOkReturnsSandbox() throws Exception {
+        // 归属校验+占位 affected=1 → 放行
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.bindingStore()).thenReturn(store);
+        when(store.occupyWrite(anyString(), anyList())).thenReturn(true);
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-own")));
+        var locator = locateWithLifecycle(store, manager);
+        MockedStatic<Sandbox> sdk = connectReturns(List.of(handle()));
+        try {
+            assertEquals("sbx-own", locator.locate(USER, SESSION, IsolationScope.USER).sandboxId());
+            verify(store).occupyWrite("sbx-own", List.of(SESSION, USER));
+        } finally {
+            sdk.close();
+        }
+    }
+
+    @Test
+    void locateOwnershipLostSkipsCandidateAndDegrades() throws Exception {
+        // affected=0（无行/已改绑/漂移）→ close 句柄 + 跳过候选（U4 三分支之二）
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.bindingStore()).thenReturn(store);
+        when(store.occupyWrite(anyString(), anyList())).thenReturn(false);
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-stolen")));
+        var locator = locateWithLifecycle(store, manager);
+        var handle = handle();
+        MockedStatic<Sandbox> sdk = connectReturns(List.of(handle));
+        try {
+            assertThrows(SandboxEnvException.class,
+                () -> locator.locate(USER, SESSION, IsolationScope.USER));
+            // USER 范围两个候选（sessionId/userId）都读到同一状态、都校验失败 → close ×2
+            verify(handle, org.mockito.Mockito.times(2)).close();
+        } finally {
+            sdk.close();
+        }
+    }
+
+    @Test
+    void locateOwnershipCheckFailsOpen() throws Exception {
+        // 校验写异常（MySQL 不可达）→ 放行 + WARN（fail-open 同纪律，U4 三分支之三）
+        var store = mock(SandboxBindingStore.class);
+        var manager = mock(SandboxLifecycleManager.class);
+        when(manager.bindingStore()).thenReturn(store);
+        when(store.occupyWrite(anyString(), anyList()))
+            .thenThrow(new SandboxBindingStore.DataAccessException("db down", null));
+        when(stateStore.load(any())).thenReturn(Optional.of(stateJson("sbx-own")));
+        var locator = locateWithLifecycle(store, manager);
+        MockedStatic<Sandbox> sdk = connectReturns(List.of(handle()));
+        try {
+            assertEquals("sbx-own", locator.locate(USER, SESSION, IsolationScope.USER).sandboxId());
+        } finally {
+            sdk.close();
+        }
     }
 }

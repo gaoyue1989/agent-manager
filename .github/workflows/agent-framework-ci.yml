@@ -330,18 +330,18 @@ jobs:
             agent-framework/e2e/playwright-report/
           retention-days: 5
 
-  # P 组池化（sandbox-pool-design §8「CI 新增非必需 job」）：沙箱开启 + 池开启
-  # （SANDBOX_POOL_ENABLED=true，加速回收参数 + USER_MAX=1 配额用例），mock OpenSandbox。
-  # 覆盖借出/回收/池满等待（P8 waiters>0 + pool_exhausted 可感知）、D17 用户配额与粘滞继承、
-  # D19 resourceRequests 透传；
-  # 池默认关闭路径（X 组）由 e2e-sandbox 回归。初期非必需（同 E2E 路由模式先例），
-  # 稳定后由管理员转必需检查（分支保护不在本 issue 范围）。
-  e2e-sandbox-pool:
-    name: E2E 沙箱池化（P 组）
+  # L 组（sandbox-pool-opensandbox-design §9.3，PR-D）：沙箱生命周期 e2e——配额仲裁/TTL 续期/
+  # LRU 复用/挂起保留窗/故障注入/可观测，双实例（lifecycle on + off 基线对照，§9.3 环境参数：
+  # QUOTA=2 / TTL=1min / RENEW_INTERVAL=3s / HOLD=1min / POOL_REF=pool-e2e / grace 6s / 超龄 2min /
+  # turn-lease 硬寿命 1min，经 start-agent.sh 的 AGENT_JVM_OPTS 注入）。
+  # 结构同 e2e-sandbox（mock OpenSandbox，纯 HTTP 断言不装浏览器）。
+  # 初期非必需检查（§9.5：合并后先非必需跑 ≥3 个 PR 观察稳定，再由管理员转必需——九项→十项预案）。
+  e2e-sandbox-lifecycle:
+    name: E2E 沙箱生命周期（L 组）
     needs: [changes]
     if: needs.changes.outputs.framework == 'true' || needs.changes.outputs.workflows == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     services:
       mysql:
         image: mysql:8.0
@@ -361,8 +361,9 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      E2E_GROUP: sandbox-pool
+      E2E_GROUP: lifecycle
       E2E_BASE_PORT: "8100"
+      E2E_LIFECYCLE_OFF_BASE: http://127.0.0.1:8101
       MYSQL_URL: jdbc:mysql://127.0.0.1:3306/agent_framework_e2e
       MYSQL_USER: e2e
       MYSQL_PASS: e2e-pass
@@ -375,17 +376,18 @@ jobs:
         with: { node-version: '22', cache: npm, cache-dependency-path: agent-framework/e2e/package-lock.json }
       - working-directory: agent-framework
         run: mvn -B -q -DskipTests package
-      - name: 安装 Playwright 依赖（sandbox-pool 组无 UI 用例，不装浏览器）
+      - name: 安装 Playwright 依赖（L 组无 UI 用例，不装浏览器）
         working-directory: agent-framework/e2e
         run: npm ci --no-audit --no-fund
       - working-directory: agent-framework/e2e
         run: node scripts/check-fixtures.mjs
       - working-directory: agent-framework/e2e
-        run: ./scripts/run.sh sandbox-pool
+        run: ./scripts/run.sh lifecycle
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-logs-sandbox-pool
+          name: e2e-logs-sandbox-lifecycle
+          # .runtime 是隐藏目录（.开头），默认被跳过——失败排障必须拿到应用/沙箱日志
           include-hidden-files: true
           path: |
             agent-framework/e2e/.runtime/

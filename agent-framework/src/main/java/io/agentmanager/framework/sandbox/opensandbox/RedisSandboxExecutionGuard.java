@@ -75,14 +75,16 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
      */
     private final boolean sessionGranularLocks;
 
-    /**
-     * 池身份注入目标 spec（sandbox-pool-design P1/P2 借出身份捕获点；null = 池关闭/未装配，零行为变化）。
-     * 仅池开启时由装配处（AgentScopeConfig）注入。
-     */
-    private volatile OpenSandboxFilesystemSpec poolIdentitySpec;
-
     /** fail-open 限流：上次告警时间戳，60s 内不重复刷屏 */
     private volatile long lastFailOpenWarnAt = 0L;
+
+    /**
+     * 生命周期身份注入目标 spec（sandbox-pool-opensandbox-design §4.2 捕获点；null = 未装配，
+     * 零行为变化）。仅 lifecycle 开启时由装配处（AgentScopeConfig）注入——guard 关闭即
+     * Noop 守卫、注入点消失，装配处对此 fail-fast（评审 d3：SANDBOX_GUARD_ENABLED=true
+     * 是生命周期的前置条件）。
+     */
+    private volatile OpenSandboxFilesystemSpec lifecycleIdentitySpec;
 
     /** key.value → 解析结果（真实 userId 或 null=回退原值）+ 时间戳。容量有界（活跃会话数），过期条目惰性清理 */
     private final ConcurrentHashMap<String, CachedLookup> lookupCache = new ConcurrentHashMap<>();
@@ -107,14 +109,9 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
         this.sessionGranularLocks = sessionGranularLocks;
     }
 
-    /** 池身份注入目标（仅池开启时由 AgentScopeConfig 装配处调用；null = 池关闭） */
-    public void setPoolIdentitySpec(OpenSandboxFilesystemSpec spec) {
-        this.poolIdentitySpec = spec;
-    }
-
     @Override
     public SandboxLease tryEnter(SandboxIsolationKey key) throws InterruptedException {
-        injectPoolIdentity(key);
+        injectLifecycleIdentity(key);
         // 多 Agent 共用 oaf-redis 时 sbx:guard:user:{uid} 会跨服务互锁——agent.redis.prefix
         // 经 facade.key() 统一切分（本类的旧构造器注入 keyPrefix 的职责已并入门面）
         String redisKey = facade.key(GUARD_PREFIX + ":"
@@ -136,26 +133,28 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
         }
     }
 
+    /** 生命周期身份注入目标（仅 lifecycle 开启时由 AgentScopeConfig 装配处调用；null = 未装配） */
+    public void setLifecycleIdentitySpec(OpenSandboxFilesystemSpec spec) {
+        this.lifecycleIdentitySpec = spec;
+    }
+
     /**
-     * 借出身份捕获（sandbox-pool-design P1/P2，全 fail-soft）：守卫 {@code tryEnter} 与
-     * {@code SandboxManager.acquire} 的 P4 借出（{@code createFromPool}）在<b>同一线程</b>内直调
-     * （acquire 字节码内无线程跳变，2026-11-05 实证偏移 133/143 先于借出）——此处写
+     * 借出身份捕获（sandbox-pool-opensandbox-design §4.2 捕获点，全 fail-soft）：守卫
+     * {@code tryEnter} 与 {@code SandboxManager.acquire} 的 create/resume 在<b>同一线程</b>内
+     * 直调（acquire 字节码内无线程跳变，PR #276 injectPoolIdentity 同款实证）——此处写
      * {@link OpenSandboxFilesystemSpec} 的请求级 ThreadLocal 是唯一落在正确线程的注入点。
-     * 控制器侧注入（方法体 http-nio 线程或 create-lambda 订阅线程）会被
-     * {@code HarnessGateway.withGatedStream} 的 defer+subscribeOn(boundedElastic) 挪到
-     * 错误线程，全链路失效（实证）。
+     * 控制器侧注入（http-nio 线程或 create-lambda 订阅线程）会被
+     * {@code HarnessGateway.withGatedStream} 的 defer+subscribeOn(boundedElastic) 挪线程失效。
      *
      * <p>写法为<b>无条件覆盖写</b>：boundedElastic worker 复用时残留的 ThreadLocal 值在每次
-     * acquire 前被刷新（takePending* 的 remove 语义保证用后即清）。userKey 语义：
-     * chat 链路 key.value=网关 peer（前端 sid）→ 反查真实用户；A2A/invoke 链路 key.value=
-     * 真实用户 → 原值（resolveLockValue 两种粒度设置下均成立）。sid 语义：chat=前端 sid
-     * （=turn_lease 键，D14 双保险查询命中）；A2A=真实用户（非 turn_lease 键，D14 miss 回退
-     * 纯租约判定，正确性不受影响）。
+     * acquire 前被刷新（takePending* 的 remove 语义保证用后即清）。sid 语义：chat 链路
+     * key.value=网关 peer（=前端 sid，=turn_lease 键）；A2A/invoke 链路 key.value=真实用户
+     * （binding 的 session_id 随之为真实用户，同用户 A2A 任务共享一条绑定——配额按真实用户计数）。
      *
-     * <p>任何异常只告警不抛——注入是池化增强，守卫锁才是本职，不得反成对话可用性单点。
+     * <p>任何异常只告警不抛——注入是生命周期增强，守卫锁才是本职，不得反成对话可用性单点。
      */
-    private void injectPoolIdentity(SandboxIsolationKey key) {
-        var spec = poolIdentitySpec;
+    private void injectLifecycleIdentity(SandboxIsolationKey key) {
+        var spec = lifecycleIdentitySpec;
         if (spec == null || key == null) {
             return;
         }
@@ -165,12 +164,9 @@ public class RedisSandboxExecutionGuard implements SandboxExecutionGuard {
             }
             String value = key.getValue();
             spec.setPendingSessionId(value != null ? value : "");
-            // userKey 总是反查真实用户（与锁键的 sessionGranular 优化无关）——D17 配额按真实用户
-            // 计数：chat 链路 key.value=网关 peer（前端 sid）→ session_user 反查 uid（30s 缓存挡频）；
-            // A2A 链路 key.value=真实用户 → 反查 miss 回退原值，语义不变
             spec.setPendingUserKey(resolveUserLockValue(value));
         } catch (Exception e) {
-            log.debug("Pool identity inject skipped (fail-soft): {}", e.getMessage());
+            log.debug("Lifecycle identity inject skipped (fail-soft): {}", e.getMessage());
         }
     }
 

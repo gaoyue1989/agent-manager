@@ -135,9 +135,9 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 |--------|------|-----|--------------------------|
 | backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
 | frontend-ci | `npm run lint` + `npm run test` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（2026-10-21 实跑 1573 用例 / 0 失败 / 5 跳过）+ `eval-selftest`（评测飞轮离线自检） | E2E 矩阵八 job：核心/多副本/沙箱/协议多副本 P 组（必需）+ AG-UI/路由 RT/协议 T 组/工具插件（非必需；见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907）；另推评测镜像 `gaoyue1989/eval-collector`、`gaoyue1989/eval-studio`:{vYYYYMMDD, latest} |
+| agent-framework-ci | `mvn test`（2026-11-08 实跑 1864 用例 / 0 失败 / 5 跳过）+ `eval-selftest`（评测飞轮离线自检） | E2E 矩阵九 job：核心/多副本/沙箱/协议多副本 P 组（必需）+ 沙箱生命周期 L 组（sandbox-pool-opensandbox-design PR-D，先非必需）/AG-UI/路由 RT/协议 T 组/工具插件（非必需；见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907）；另推评测镜像 `gaoyue1989/eval-collector`、`gaoyue1989/eval-studio`:{vYYYYMMDD, latest} |
 | charts-ci | `helm lint` + `helm template` ×2（oaf-platform 与 oaf-agent 两 chart，CI 占位必填值渲染全量对象） | — | — |
-| platform-e2e-ci | — | `E2E 平台（kind + 控制台全功能）`：kind 集群 + 仓库清单自举 + `platform-e2e.sh`（A/B）+ console-split m0-m11 + `console-ui-e2e.js`（2026-10-22 起纳入必需检查） | — |
+| platform-e2e-ci | — | `E2E 平台（kind + 控制台全功能）`：kind 集群 + 仓库清单自举 + `platform-e2e.sh`（A/B）+ console-split m0-m12 + `console-ui-e2e.js`（2026-10-22 起纳入必需检查） | — |
 
 ### 日常提交流程（必须走 PR 门禁）
 
@@ -155,7 +155,7 @@ git push origin feat/xxx
 #      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）/ E2E 协议多副本（P 组）
 #      E2E 平台（kind + 控制台全功能）/ Chart 校验 (helm lint + template)
 #    另有一批非必需 job 同步跑（红只告警不挡合并，但应一并修）：
-#      评测自检 / 评测离线回放 / E2E 工具插件 / E2E 路由模式 / E2E 协议（T 组）/ E2E AG-UI 协议面（AG 组）/ oaf-agent Chart 校验
+#      评测自检 / 评测离线回放 / E2E 工具插件 / E2E 路由模式 / E2E 协议（T 组）/ E2E AG-UI 协议面（AG 组）/ E2E 沙箱生命周期（L 组）/ oaf-agent Chart 校验
 
 # 4. 全绿后合并（网页 Merge 按钮）
 #    红了就修：提交会自动重跑检查
@@ -164,7 +164,8 @@ git push origin feat/xxx
 ### 分支保护（master，强制）
 
 - **九项必需状态检查**：上表三个单测 + agent-framework 四个 E2E job（核心/多副本/沙箱/协议多副本 P 组，§18.4）+ `E2E 平台（kind + 控制台全功能）` + `Chart 校验 (helm lint + template)`；未全绿合并请求被拒（`blocked`）
-- **新增 job 默认不是必需检查**：`E2E 工具插件`、`E2E 路由模式`、`E2E 协议（T 组）`、`E2E AG-UI 协议面（AG 组）`、`oaf-agent Chart 校验`、`评测自检`、`评测离线回放` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
+- **新增 job 默认不是必需检查**：`E2E 工具插件`、`E2E 路由模式`、`E2E 协议（T 组）`、`E2E AG-UI 协议面（AG 组）`、`E2E 沙箱生命周期（L 组）`、`oaf-agent Chart 校验`、`评测自检`、`评测离线回放` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
+- **十项预案（sandbox-pool-opensandbox-design §9.5）**：`E2E 沙箱生命周期（L 组）`随 PR-D 以非必需跑 **≥3 个 PR 观察稳定**后，由管理员转必需（必需检查九项→十项，job name 与保护规则字符串必须完全一致）；该组覆盖配额/TTL 默认开启影响所有服务的语义，转必需不得跳过观察期
 - **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
 - **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR
 - **禁止 force push / 删除分支**

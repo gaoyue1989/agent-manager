@@ -81,15 +81,6 @@ public class ThreadController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private io.agentmanager.framework.config.TurnStopSettings turnStopSettings;
 
-    /**
-     * D16 确认硬截止分钟数来源（g5，字段注入 required=false：单测直接 new 时为 null →
-     * expires_at 不透出，与截止关闭 ≤0 同口径）。/history 与 /threads/{sid} 详情的
-     * pendingConfirm 载荷透出 expires_at 的数据源——前端历史回放/刷新重建确认卡
-     * 渲染倒计时/过期态依赖它（此前仅 status 端点透出，主恢复路径缺失）。
-     */
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    private io.agentmanager.framework.config.AgentManagerProperties agentProps;
-
     /** 测试用简化构造：不注入 state 读取器配置（用默认截断上限，不启用归档合并） */
     public ThreadController(DataSource dataSource,
                             LLMLogger llmLogger,
@@ -496,7 +487,6 @@ public class ThreadController {
      * 确认端点凭 confirmKey 路由到远程任务。
      */
     private Map<String, Object> pendingConfirmPayload(String sessionId, String stateData) {
-        int deadlineMinutes = confirmDeadlineMinutes();
         var asking = stateData != null
             ? io.agentmanager.framework.service.StateDataParser.extractAskingToolCalls(
                 io.agentmanager.framework.service.StateDataParser.findMessagesArray(stateData))
@@ -507,12 +497,6 @@ public class ThreadController {
             m.put("reply_id", asking.get(0).getOrDefault("reply_id", ""));
             m.put("tools", asking);
             m.put("source", "agent_state");
-            // g5/D16：agent_state 分支的挂起时刻 = state updated_at（与 checkConfirmDeadline
-            // 「行 created_at 主 / state updated_at 兜底」双源口径的兜底档一致），前端倒计时据此推算
-            var askedAt = agentStateReader.loadAskingUpdatedAt(sessionId);
-            if (deadlineMinutes > 0 && askedAt != null) {
-                m.put("expires_at", askedAt.plusSeconds(deadlineMinutes * 60L).toString());
-            }
             return m;
         }
         return confirmContextStore.findHeadPending(sessionId)
@@ -522,11 +506,6 @@ public class ThreadController {
                 m.put("tools", p.toolsJson());
                 m.put("created_at", p.createdAt() != null ? p.createdAt().toString() : "");
                 m.put("source", "confirm_context");
-                // g5/D16：行 created_at + deadline（与 AgentRuntimeService.findPendingConfirm 同口径）——
-                // /history 与详情端点此前不透出，刷新/切会话重建的确认卡永远无倒计时
-                if (deadlineMinutes > 0 && p.createdAt() != null) {
-                    m.put("expires_at", p.createdAt().plusSeconds(deadlineMinutes * 60L).toString());
-                }
                 if (p.isRemote()) {
                     m.put("confirm_key", p.confirmKey());
                     m.put("remote_task", p.remoteTask());
@@ -534,15 +513,6 @@ public class ThreadController {
                 return m;
             })
             .orElse(null);
-    }
-
-    /** D16 确认硬截止分钟数（AgentManagerProperties 未装配/cleanup 缺失 → 0=关闭，不透出 expires_at） */
-    private int confirmDeadlineMinutes() {
-        var props = agentProps;
-        if (props == null || props.cleanup() == null) {
-            return 0;
-        }
-        return props.cleanup().confirmDeadlineMinutes();
     }
 
     /** session_id 格式: "{slug}__{threadId}"，取最后一个 "__" 后的部分作为展示 id */

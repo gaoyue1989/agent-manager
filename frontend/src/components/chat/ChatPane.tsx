@@ -9,9 +9,11 @@
 //     渲染层拆分至 ./components/*（MessageItem/Markdown/PermissionCard/icons/types），本文件只保留状态与流逻辑
 import { useCallback, useEffect, useRef, useState } from "react";
 import { completeToolCall, markAwaitingConfirm, markDeniedWithoutResult, settlePendingToolCalls } from "@/lib/assistant-events";
-import { classifyConfirmFailure, createConfirmCard, expireDueConfirmCards, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+import { classifyConfirmFailure, createConfirmCard, type ConfirmCard, type ConfirmResult } from "@/lib/confirm-card";
+import { isQuotaError, makeQuotaError, parseQuota409, quotaFromSseError, stopThreadUrl } from "@/lib/sandbox-quota";
 import MessageItem from "./MessageItem";
 import PermissionCard from "./PermissionCard";
+import QuotaErrorCard from "./QuotaErrorCard";
 import type { AttachItem, ChatMsg, FileCard, ModelOption, ThreadItem } from "./types";
 import { IconArrowUp, IconHistory, IconLoader, IconPaperclip, IconPlus, IconSparkles, IconX } from "./icons";
 
@@ -103,20 +105,6 @@ export default function ChatPane({
   // 欢迎态：只有系统提示、没有实际对话内容时展示 Hero + 快捷建议
   const welcome = !historyLoading && messages.every((m) => m.role === "system");
 
-  // D16 确认硬截止倒计时：每秒驱动一次（仅存在带 expires_at 的 pending 卡时），到点置 expired
-  // ——禁用提交（后端此时确认也会 410 confirm_expired 并按拒绝自动收尾），徽标切「已失效」。
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const hasCountdown = messages.some((m) => m.confirm?.status === "pending" && m.confirm.expiresAt);
-  useEffect(() => {
-    if (!hasCountdown) return;
-    const timer = setInterval(() => {
-      const now = Date.now();
-      setNowTick(now);
-      setMessages((prev) => expireDueConfirmCards(prev, now));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [hasCountdown]);
-
   const loadThreads = useCallback(async () => {
     try {
       const resp = await fetch(`${agentBase}/threads`);
@@ -196,11 +184,10 @@ export default function ChatPane({
             msgs.push({ role: "assistant", content: "", files });
           }
         }
-        // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）；
-        // expires_at 为 D16 硬截止时刻（后端未启用时缺省，不显示倒计时）
+        // 未消费的确认卡片：重建 HITL 卡片供用户批准/拒绝（confirm-stream 恢复）
         if (data.pendingConfirm?.tools?.length) {
           try {
-            msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools, data.pendingConfirm.expires_at) });
+            msgs.push({ role: "assistant", content: "", confirm: createConfirmCard(data.pendingConfirm.tools) });
           } catch { /* 工具格式异常忽略 */ }
         }
       }
@@ -299,8 +286,7 @@ export default function ChatPane({
           // 该批工具进入等待人工确认：不再是「执行中」（没在执行，在等人）
           setMessages((prev) => markAwaitingConfirm(prev,
             (Array.isArray(ev.tool_calls) ? ev.tool_calls : []).map((tc: any) => tc?.tool_call_id).filter(Boolean)));
-          // ev.expires_at = D16 硬截止时刻（ISO-8601；后端未启用时缺省 → 无倒计时，现状行为）
-          onAsk(createConfirmCard(ev.tool_calls, ev.expires_at));
+          onAsk(createConfirmCard(ev.tool_calls));
           break;
         case "file_ready":
           // Agent 产出文件 → 渲染下载卡片（挂到最后一条 assistant 气泡）
@@ -325,8 +311,13 @@ export default function ChatPane({
             }));
           }
           break;
-        case "error":
+        case "error": {
+          // SSE error 帧撞配额（§6.3 exec/A2A/竞态兜底路径）：code=user_quota_exhausted
+          // 抛结构化错误，由调用方复用配额错误卡渲染 bindings 明细
+          const quota = quotaFromSseError(ev);
+          if (quota) throw makeQuotaError(quota, "exec");
           throw new Error(ev.error || "执行流返回错误");
+        }
         case "interrupted":
           throw new Error(ev.reason || "执行流已中断");
         // AGENT_END / done 等其余事件忽略（流关闭即终态）
@@ -376,6 +367,13 @@ export default function ChatPane({
       body: JSON.stringify(body),
     });
     if (!resp.ok || !resp.body) {
+      // chat 预检 409（§6.3/§4.3）：解析 {code,quota,bindings} 结构化载荷 → 配额错误卡；
+      // 其余非 2xx 保持通用报错（原行为）
+      if (resp.status === 409) {
+        const errBody = await resp.json().catch(() => null);
+        const payload = parseQuota409(resp.status, errBody);
+        if (payload) throw makeQuotaError(payload, "precheck");
+      }
       throw new Error(`HTTP ${resp.status}`);
     }
     const processor = createStreamProcessor(onAsk);
@@ -429,7 +427,11 @@ export default function ChatPane({
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
       await readSseResponse(resp, processor.handlePayload);
     } catch (e: any) {
-      if (!controller.signal.aborted) { // 会话切换/页面卸载的中断不提示
+      if (isQuotaError(e)) {
+        // 续传中撞配额（SSE error 帧）：复用配额错误卡渲染明细（§6.3）
+        updateLastAssistant((m) => ({ ...m, pending: false }));
+        setMessages((prev) => [...prev, { role: "assistant", content: "", quota: e.payload }]);
+      } else if (!controller.signal.aborted) { // 会话切换/页面卸载的中断不提示
         const msg = String(e?.message ?? e);
         setMessages((prev) => [...prev, { role: "system", content: /interrupt/i.test(msg)
           ? "⚠️ 上次执行已中断，可重新发送消息继续。"
@@ -552,10 +554,17 @@ export default function ChatPane({
       });
       mark("resolved");
     } catch (e: any) {
-      // 404 confirm_context_not_found = 上下文已过期/不存在，工具从未获批准 → 未执行，可安全重新发起；
-      // 其余（409 已消费、网络中断）无法排除已执行 → unknown，禁重试，交由历史核实
-      mark(classifyConfirmFailure(e.message));
-      setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${e.message}` }]);
+      if (isQuotaError(e)) {
+        // confirm 续跑撞配额（SSE error 帧）：复用配额错误卡渲染明细（§6.3）；
+        // 卡片状态沿用下方 classifyConfirmFailure 既有保守语义（unknown 禁重试，不新增裁决）
+        mark(classifyConfirmFailure(e.message));
+        setMessages((prev) => [...prev, { role: "assistant", content: "", quota: e.payload }]);
+      } else {
+        // 404 confirm_context_not_found = 上下文已过期/不存在，工具从未获批准 → 未执行，可安全重新发起；
+        // 其余（409 已消费、网络中断）无法排除已执行 → unknown，禁重试，交由历史核实
+        mark(classifyConfirmFailure(e.message));
+        setMessages((prev) => [...prev, { role: "system", content: `⚠️ ${e.message}` }]);
+      }
     } finally {
       updateLastAssistant((m) => ({ ...m, pending: false }));
       confirmInFlight.current = false;
@@ -567,6 +576,7 @@ export default function ChatPane({
     const text = (overrideText ?? input).trim();
     const fileIds = attachments.map((a) => a.fileId);
     if ((!text && fileIds.length === 0) || sessionLocked || awaitingConfirm || sessionLoading.current || confirmInFlight.current) return;
+    const sentAttachments = attachments; // 409 预检回滚时恢复（消息未建流，不得丢附件）
     setInput("");
     setBusy(true);
     const attachNames = attachments.map((a) => a.name);
@@ -585,13 +595,47 @@ export default function ChatPane({
           setMessages((prev) => [...prev, { role: "assistant", content: "", confirm: card }]);
         });
     } catch (e: any) {
-      setMessages((prev) => [...prev, { role: "system", content: `⚠️ 连接中断: ${e.message}` }]);
+      if (isQuotaError(e)) {
+        if (e.source === "precheck") {
+          // 409 预检（§6.3）：消息未建流 → 回滚本轮乐观气泡 + 用户输入保留（不得丢字）
+          setMessages((prev) => {
+            const next = [...prev];
+            while (next.length > 0 && next[next.length - 1].role === "assistant" && next[next.length - 1].pending) next.pop();
+            if (next.length > 0 && next[next.length - 1].role === "user") next.pop();
+            return [...next, { role: "assistant", content: "", quota: e.payload }];
+          });
+          setInput(text);
+          setAttachments(sentAttachments);
+        } else {
+          // exec 时撞配额（A2A/竞态兜底路径）：消息已送达，保留气泡，复用同卡渲染明细
+          updateLastAssistant((m) => ({ ...m, pending: false }));
+          setMessages((prev) => [...prev, { role: "assistant", content: "", quota: e.payload }]);
+        }
+      } else {
+        setMessages((prev) => [...prev, { role: "system", content: `⚠️ 连接中断: ${e.message}` }]);
+      }
     } finally {
       updateLastAssistant((m) => ({ ...m, pending: false }));
       setBusy(false);
       loadThreads(); // 新会话首轮对话后进入历史列表
     }
   }, [sessionLocked, awaitingConfirm, consumeStream, input, attachments, updateLastAssistant, loadThreads, modelId]);
+
+  /** 配额错误卡「停止该会话」：POST /threads/{sid}/stop（仅限本人会话，复用既有端点）后刷新列表 */
+  const stopQuotaSession = useCallback(async (sid: string) => {
+    const resp = await fetch(stopThreadUrl(agentBase, sid), { method: "POST" });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body?.message ?? `HTTP ${resp.status}`);
+    }
+    loadThreads();
+  }, [agentBase, loadThreads]);
+
+  /** 会话标识解析（§6.3）：/threads 列表同源标题；不在列表（已被清理）返回 undefined → 卡片只显示时间与状态 */
+  const resolveThreadTitle = useCallback((sid: string) => {
+    const hit = threads.find((t) => t.peer === sid);
+    return hit ? (hit.title || sid) : undefined;
+  }, [threads]);
 
   const resetSession = () => {
     if (sessionLocked || sessionLoading.current || confirmInFlight.current) return;
@@ -768,7 +812,12 @@ export default function ChatPane({
                     <MessageItem msg={m} />
                     {m.confirm && (
                       <div className="pl-10">
-                        <PermissionCard card={m.confirm} disabled={sessionLocked} now={nowTick} onSubmit={(results) => sendConfirm(m.confirm!, results)} />
+                        <PermissionCard card={m.confirm} disabled={sessionLocked} onSubmit={(results) => sendConfirm(m.confirm!, results)} />
+                      </div>
+                    )}
+                    {m.quota && (
+                      <div className="pl-10">
+                        <QuotaErrorCard payload={m.quota} resolveTitle={resolveThreadTitle} onStop={stopQuotaSession} testId={`quota-error-card-${i}`} />
                       </div>
                     )}
                   </div>

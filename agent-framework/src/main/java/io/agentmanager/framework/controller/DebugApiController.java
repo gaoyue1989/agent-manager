@@ -105,6 +105,13 @@ public class DebugApiController {
     @Value("${agent.llm.fallback-model-id:}")
     private String fallbackModelId;
 
+    /**
+     * 沙箱生命周期管理器（§4.8 配额与绑定区块；字段注入 required=false 避免改动构造调用点）。
+     * null = lifecycle 未装配（端点返回 enabled=false 与启用方式提示，fail-soft）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
+
     public DebugApiController(
         AgentManagerProperties props,
         OafConfigHolder oafConfigHolder,
@@ -808,40 +815,87 @@ public class DebugApiController {
     }
 
     /**
-     * 沙箱池管理器（字段注入 required=false：池关闭/单测直接 new 时为 null）。
+     * 沙箱配额与绑定（sandbox-pool-opensandbox-design §4.8，PR-D 调试页「配额与绑定」区块数据源）：
+     * 配置回显 + 绑定表（跨副本聚合，读共享库 sandbox_binding；turn_running 由 turn_lease JOIN +
+     * updated_at 新鲜度双事实源派生）+ 本副本续期注册表健康 + 事件环形缓冲（含续期失败/fail-open，
+     * 排障盲区必须可观测）。端点不可用时 fail-soft（lifecycle 未装配返回 enabled=false）。
      */
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    private io.agentmanager.framework.sandbox.opensandbox.SandboxPoolManager sandboxPoolManager;
-
-    /**
-     * 沙箱池状态（sandbox-pool-design §5.7 可观测性；池关闭时返回 enabled=false）：
-     * 集群级 idle/busy/creating 明细（Redis 单 ledger）+ 本副本 waiters + 最近流转事件
-     * （进程内存环形缓冲，最多 100 条——排障「我的会话在哪个容器/为什么在等」一处可查）。
-     */
-    @GetMapping("/sandbox-pool")
-    public Map<String, Object> sandboxPool(@org.springframework.web.bind.annotation.RequestParam(
-        defaultValue = "50") int eventsLimit) {
+    @GetMapping("/sandbox-bindings")
+    public Map<String, Object> sandboxBindings() {
         var m = new LinkedHashMap<String, Object>();
-        m.put("enabled", sandboxRuntime.enabled() && sandboxRuntime.poolEnabled());
-        var pool = sandboxPoolManager;
-        if (pool == null) {
-            m.put("reason", sandboxRuntime.enabled()
-                ? "SANDBOX_POOL_ENABLED=false (default, legacy per-session containers)"
-                : "sandbox disabled");
+        var lifecycle = sandboxLifecycle;
+        if (lifecycle == null) {
+            m.put("enabled", false);
+            m.put("reason", "SANDBOX_LIFECYCLE_ENABLED=false 或沙箱未启用（SANDBOX_ENABLED）");
             return m;
         }
-        m.putAll(pool.snapshot());
+        var cfg = lifecycle.config();
+        m.put("enabled", true);
         m.put("config", Map.of(
-            "minIdle", sandboxConfig.pool().minIdle(),
-            "maxSize", sandboxConfig.pool().maxSize(),
-            "maxWaitSeconds", sandboxConfig.pool().maxWaitSeconds(),
-            "idleReturnSeconds", sandboxConfig.pool().idleReturnSeconds(),
-            "scanIntervalSeconds", sandboxConfig.pool().scanIntervalSeconds(),
-            "rebuildConcurrency", sandboxConfig.pool().rebuildConcurrency(),
-            "userMaxContainers", sandboxConfig.pool().userMaxContainers(),
-            "stickyTtlSeconds", sandboxConfig.pool().stickyTtlSeconds(),
-            "growStep", sandboxConfig.pool().growStep()));
-        m.put("recent_events", pool.recentEvents(Math.max(1, Math.min(eventsLimit, 100))));
+            "lifecycle_enabled", cfg.enabled(),
+            "pool_ref", cfg.poolRef() == null ? "" : cfg.poolRef(),
+            "user_quota", cfg.userQuota(),
+            "ttl_minutes", sandboxConfig.timeoutMinutes(),
+            "renew_interval_seconds", cfg.renewIntervalSeconds(),
+            "confirm_hold_minutes", cfg.confirmHoldMinutes(),
+            "grace_seconds", lifecycle.graceSeconds()));
+        try {
+            var store = lifecycle.bindingStore();
+            var rows = store.listAll(lifecycle.graceSeconds(), 200);
+            m.put("bindings", rows.stream().<Map<String, Object>>map(r -> Map.of(
+                "user_key", maskUserKey(r.userKey()),
+                "session_id", r.sessionId() == null ? "" : r.sessionId(),
+                "sandbox_id", r.sandboxId() == null ? "" : r.sandboxId(),
+                "expires_at", r.expiresAt() == null ? "" : r.expiresAt(),
+                "updated_at", r.updatedAt() == null ? "" : r.updatedAt(),
+                "turn_running", r.fresh()))        // fresh = 双事实源派生（lease JOIN OR updated_at 新鲜）
+                .toList());
+            m.put("binding_count", rows.size());
+        } catch (Exception e) {
+            m.put("bindings_error", e.getMessage());   // fail-soft：簿记不可读不阻塞配置/注册表区块
+        }
+        // 续期注册表健康（本副本）：注册数/最老条目年龄/循环滞后——「沙箱到期重建类」问题第一排障入口
+        m.put("registry", Map.of(
+            "size", lifecycle.registrySize(),
+            "active_turns", lifecycle.registryActiveTurnCount(),
+            "oldest_entry_age_ms", lifecycle.registryOldestEntryAgeMs(),
+            "loop_lag_ms", lifecycle.registryLoopLagMs(),
+            "last_sweep_at", lifecycle.registryLastSweepAt() == null ? "" : lifecycle.registryLastSweepAt().toString(),
+            "entries", lifecycle.registryDebugEntries()));
+        m.put("events", sandboxLifecycle.recentEvents());
+        return m;
+    }
+
+    /** user_key 脱敏（debug 页展示：保留前 4 位 + ***） */
+    private static String maskUserKey(String key) {
+        if (key == null || key.isBlank()) {
+            return "";
+        }
+        return key.length() <= 4 ? "***" : key.substring(0, 4) + "***";
+    }
+
+    /**
+     * 沙箱绑定清理手动触发（e2e L11 测试钩子，sandbox-pool-opensandbox-design §9.3：
+     * 「短保留窗口 + 触发清理任务（测试钩子）」——@Scheduled cron 凌晨 3 点无法在 e2e 等待）。
+     * 语义与 SessionCleanupService.cleanupSandboxBindings 完全一致（retentionDays 取 query 参数，
+     * e2e 传短窗口），lifecycle 未装配时 409。
+     */
+    @org.springframework.web.bind.annotation.PostMapping("/sandbox-cleanup")
+    public java.util.Map<String, Object> sandboxCleanup(
+            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "7") int retentionDays) {
+        var lifecycle = sandboxLifecycle;
+        var m = new LinkedHashMap<String, Object>();
+        if (lifecycle == null) {
+            m.put("enabled", false);
+            return m;
+        }
+        var cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(Math.max(0, retentionDays)));
+        int bindings = lifecycle.bindingStore().cleanupExpired(cutoff);
+        int anchors = lifecycle.bindingStore().cleanupEmptyAnchors(cutoff);
+        m.put("enabled", true);
+        m.put("retention_days", retentionDays);
+        m.put("bindings_deleted", bindings);
+        m.put("anchors_deleted", anchors);
         return m;
     }
 

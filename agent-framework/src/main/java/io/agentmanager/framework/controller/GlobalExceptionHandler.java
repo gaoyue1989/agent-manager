@@ -28,6 +28,8 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<Map<String, Object>> handleMaxUploadSizeExceeded(MaxUploadSizeExceededException e) {
@@ -73,6 +75,37 @@ public class GlobalExceptionHandler {
         body.put("error", "request_rejected");
         body.put("message", e.getReason() != null ? e.getReason() : e.getStatusCode().toString());
         return ResponseEntity.status(e.getStatusCode()).body(body);
+    }
+
+    /**
+     * 沙箱配额满（sandbox-pool-opensandbox-design §4.3 chat 预检，PR-D）：HTTP 409 +
+     * 结构化载荷（code/quota/bindings，bindings 带 state=executing|confirm_holding）——
+     * 前端 ChatPane 专属错误卡渲染占用明细（评审轮二 P0：409 body 不得丢弃）。
+     *
+     * <p><b>返回 String body 而非 Map（黑盒第 1 轮实锤缺陷）</b>：chat 端点<b>无</b>
+     * {@code produces} 声明（修复前曾声明 {@code TEXT_EVENT_STREAM}，已删），但真实浏览器
+     * 请求 Accept 只有 {@code text/event-stream}——Map body 走 Jackson converter（仅
+     * application/json）仍无可写 converter，内容协商失败
+     * {@code HttpMediaTypeNotAcceptableException} → 500；String body 走
+     * StringHttpMessageConverter（supportedTypes 含 {@code *}/*}）可写任意 selected
+     * media type，配合显式 {@code Content-Type: application/json} 头，前端
+     * {@code resp.json()}（不依赖响应头）与 curl {@code *}/* 两路径均得 409 结构化载荷。
+     */
+    @ExceptionHandler(io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException.class)
+    public ResponseEntity<String> handleUserQuotaExhausted(
+            io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException e) {
+        log.warn("[ExceptionHandler] user_quota_exhausted: quota={}, bindings={}",
+            e.quota(), e.bindings().size());
+        String body;
+        try {
+            body = MAPPER.writeValueAsString(e.payload409());
+        } catch (Exception ex) {
+            // 序列化兜底：极简载荷保 409 语义（前端 parseQuota409 依赖 code 字段判定）
+            body = "{\"code\":\"user_quota_exhausted\",\"quota\":" + e.quota() + ",\"bindings\":[]}";
+        }
+        var headers = new org.springframework.http.HttpHeaders();
+        headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+        return new ResponseEntity<>(body, headers, HttpStatus.CONFLICT);
     }
 
     @ExceptionHandler(Exception.class)

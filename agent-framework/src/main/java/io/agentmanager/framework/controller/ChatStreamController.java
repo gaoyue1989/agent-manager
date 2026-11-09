@@ -135,14 +135,6 @@ public class ChatStreamController {
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
     /**
-     * D16 确认硬截止自动收尾（sandbox-pool-design D16 ②）：chat 入口预检发现挂起超截止时
-     * 同步懒收尾后放行新 turn。字段注入（required=false）——单测直接 new 时为 null，
-     * 截止语义不启用，行为与 D16 落地前一致。
-     */
-    @Autowired(required = false)
-    private io.agentmanager.framework.service.ConfirmDeadlineService confirmDeadlineService;
-
-    /**
      * 排队 turn 意图存储（字段注入，同 sessionMessageStore：避免改动全部构造调用点）。
      * 排队期间把本轮 turn id 提前暴露给 /status，使「排队中刷新」仍能续传。
      */
@@ -161,6 +153,14 @@ public class ChatStreamController {
 
     @Autowired(required = false)
     private io.agentmanager.framework.config.TurnStopSettings turnStopSettings;
+
+    /**
+     * 沙箱生命周期管理器（sandbox-pool-opensandbox-design §4.3 预检 + §4.4 turn 挂钩；
+     * 字段注入 required=false 避免改动全部构造调用点，单测直接 new）。null = lifecycle
+     * 旁路（SANDBOX_LIFECYCLE_ENABLED=false 或沙箱未启用），行为完全回滚后基线。
+     */
+    @Autowired(required = false)
+    private io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager sandboxLifecycle;
 
     /** 孤儿 turn 看护（独立调度线程：绝不在 Reactor 回调线程上阻塞） */
     private final OrphanTurnWatchdog orphanTurnWatchdog = new OrphanTurnWatchdog();
@@ -311,7 +311,12 @@ public class ChatStreamController {
      * <p>不传 sessionId 时，首个 SSE 事件为：
      * <pre>{@code {"type":"session_created","session_id":"uuid-xxx"}}</pre>
      */
-    @PostMapping(value = "/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    // 无 produces 声明（SSE 输出由 Flux<ServerSentEvent> 元素类型驱动，Accept: text/event-stream
+    // 仍得 SSE 流）：预检配额满时全局异常处理器的 409 JSON 需经内容协商——produces 声明会把
+    // PRODUCIBLE_MEDIA_TYPES 钉死为 [text/event-stream]，任何 JSON body（Map/String 均）在
+    // 「acceptable×producible 交集」下无可写 converter → HttpMediaTypeNotAcceptableException →
+    // 500（黑盒第 2 轮实锤，栈 AbstractMessageConverterMethodProcessor:256 producibleTypes.isEmpty）
+    @PostMapping("/chat")
     public Flux<ServerSentEvent<String>> chat(@RequestBody ChatRequest body,
                                               @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
                                               @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader,
@@ -393,6 +398,21 @@ public class ChatStreamController {
 
         // 记录会话-用户映射
         sessionUserStore.upsert(finalSessionId, finalUserId);
+
+        // 沙箱配额预检（sandbox-pool-opensandbox-design §4.3）：在 session_user.upsert 之后
+        // 取 userKey（finalUserId = 网关解析后的真实用户，与 binding.user_key 同源）。
+        // 该会话无存活绑定时执行 ②⑤ 的只读版本；配额满且全部绑定有执行中迹象 → 抛
+        // UserQuotaExhaustedException → GlobalExceptionHandler 转 HTTP 409 + 结构化载荷
+        // （前端配额错误卡）。预检 fail-open（存储异常放行）；绑定仍惰性（首次 exec 才
+        // create/复用），exec 时的全量裁决是最终裁决。
+        if (sandboxLifecycle != null) {
+            var quotaReject = sandboxLifecycle.precheck(finalUserId, finalSessionId);
+            if (quotaReject != null) {
+                log.info("[chat] quota exhausted precheck reject: sessionId={}, user={}, bindings={}",
+                    finalSessionId, finalUserId, quotaReject.bindings().size());
+                throw quotaReject;
+            }
+        }
 
         // 会话模型绑定（在用户映射之后写：新会话不产生 user_id=unknown 的过渡行）
         if (modelProvided) {
@@ -502,38 +522,13 @@ public class ChatStreamController {
             // SDK 路径不再触达，error 帧恒达。预检放在抢到租约之后：与 confirm 恢复 turn
             // 互斥——恢复完成前本 turn 排队等待，恢复后 state 已更新，不会误拒。
             if (runtimeService.hasPendingConfirm(finalSessionId)) {
-                // D16 ② 懒收尾放行：挂起已超硬截止（AGENT_CONFIRM_DEADLINE_MINUTES）→ 同步自动按
-                // 拒绝收尾（ASKING 解除），随后放行本条新消息。收尾内部要抢同一把 turn 租约——
-                // 本 turn 已持有 token，必须先释放做租约交接，收尾完成后再排队重抢；重抢失败
-                //（并发对话插队）按「有活跃执行段」拒绝。未超截止/收尾失败 → 维持现有拒绝
-                //（ASKING 态新 turn 会被 SDK 拒绝，error 帧恒达）。
-                boolean expiredFinalized = false;
-                if (confirmDeadlineService != null && confirmDeadlineService.isExpired(finalSessionId)) {
-                    turnLeaseStore.release(finalSessionId, token);   // 租约交接给收尾段
-                    expiredFinalized = confirmDeadlineService.finalizeByDeny(finalSessionId);
-                    if (expiredFinalized) {
-                        // 收尾 turn 已释放租约：重抢（排队覆盖收尾回复尾部时延）
-                        var regained = turnLeaseStore.acquire(finalSessionId, ACQUIRE_TIMEOUT);
-                        if (regained == null) {
-                            log.info("[chat] lease busy after expired-confirm finalize (sid={})", finalSessionId);
-                            sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
-                                + "' has an active turn"));
-                            sink.complete();
-                            return;
-                        }
-                        token = regained;
-                    }
-                }
-                if (!expiredFinalized) {
-                    log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
-                    turnLeaseStore.release(finalSessionId, token);
-                    sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
-                        + "' is in ASKING state (waiting for tool approval); approve or deny the "
-                        + "pending tool call before sending new messages"));
-                    sink.complete();
-                    return;
-                }
-                log.info("[chat] expired confirm lazily finalized, new turn proceeds (sid={})", finalSessionId);
+                log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
+                turnLeaseStore.release(finalSessionId, token);
+                sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
+                    + "' is in ASKING state (waiting for tool approval); approve or deny the "
+                    + "pending tool call before sending new messages"));
+                sink.complete();
+                return;
             }
 
             // ===== 2. 启动续租 =====
@@ -563,6 +558,14 @@ public class ChatStreamController {
                 turnStopWatcher.register(finalSessionId, replyId);
             }
 
+            // ===== 2.45 沙箱生命周期 turn 注册（§4.4 T3 双信号之一）=====
+            // turn 开始注册（守卫线程/续期线程并发安全）：沙箱未 acquire 时注册先行落位，
+            // 覆盖「LLM-only 长轮次在首次 exec 前无 call 引用」的续期盲区；终态注销只挂
+            // endTurnAndCleanupBuckets（TurnFinalizer 终态），不挂 per-call stop()。
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onTurnStart(finalSessionId);
+            }
+
             // ===== 2.5 跨层排队 waiting 心跳（issue #87）=====
             // 租约等待期由上面循环发 waiting；此处覆盖租约**之后**的排队点（SDK turn 闸门/
             // 模型连接池等）：每 15s 向 sink 直发一帧 waiting，首个 SDK 事件或任一终态即停。
@@ -584,6 +587,9 @@ public class ChatStreamController {
             // 为何本 turn 只收尾一次（迟到的 complete/error 不得再拆 sink）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
+            // 沙箱换代提示（§4.4 T4）：turn 起始时刻 + 一次性已提示标记（逐事件探测归属失效登记）
+            var turnStartedAt = new java.util.concurrent.atomic.AtomicLong(turnStartMs);
+            var sandboxRebuildNotified = new java.util.concurrent.atomic.AtomicBoolean(false);
             // 本 turn 触及过的桶 key（toolCallId）；turn 收尾时统一清桶，防异常路径残留。
             // 按 turn 粒度隔离：清理只删本 turn 登记过的 key，toolCallId 跨 session 不可能
             // 撞 key，并行 turn 的桶不受影响（A4）
@@ -686,11 +692,20 @@ public class ChatStreamController {
                 currentChatChannel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
-                            finalUserId, sink, turnEnded, turnBucketKeys, toolSummary, forwardedPrefix),
+                            finalUserId, sink, turnEnded, turnStartedAt, sandboxRebuildNotified,
+                            turnBucketKeys, toolSummary, forwardedPrefix),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
-                            if (isTrailingSandboxTeardownError(e)) {
+                            // 沙箱配额满（§4.6 exec 撞配额：A2A/预检放行后竞态兜底路径）：
+                            // 发结构化 error 帧（code=user_quota_exhausted + bindings 明细，
+                            // 前端 quotaFromSseError 识别 → 配额错误卡），替代纯文本报错
+                            var quotaEx = findQuotaExhausted(e);
+                            if (quotaEx != null && !lease.isLost()) {
+                                eventBus.emitSynthetic(finalSessionId, replyId, "error",
+                                    quotaEx.sseFrameJson());
+                                recordTurnError(finalSessionId, replyId, quotaEx.getMessage());
+                            } else if (isTrailingSandboxTeardownError(e)) {
                                 log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
                             } else if (!lease.isLost()) {
                                 // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
@@ -715,6 +730,12 @@ public class ChatStreamController {
                 failTurnIntent(finalSessionId, replyId, err);
                 if (turnStopWatcher != null) {
                     turnStopWatcher.unregister(finalSessionId, replyId);
+                }
+                // 沙箱生命周期 turn 注销：onTurnStart 已在本段注册（§4.4 T3），回滚同样必须
+                // 注销——否则 activeTurns 条目无 TTL 泄漏，sweep 持续按 turn 注册续期
+                // （与 endTurnAndCleanupBuckets 的「终态必注销」对称）
+                if (sandboxLifecycle != null) {
+                    sandboxLifecycle.onTurnEnd(finalSessionId);
                 }
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId, errorSSE(err));
                 return;
@@ -777,6 +798,8 @@ public class ChatStreamController {
                                     String replyId, TurnLeaseGuard lease, String userId,
                                     FluxSink<ServerSentEvent<String>> sink,
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
+                                    java.util.concurrent.atomic.AtomicLong turnStartedAt,
+                                    java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     java.util.Set<String> turnBucketKeys,
                                     TurnToolSummaryTracker toolSummary,
                                     String forwardedPrefix) {
@@ -786,6 +809,15 @@ public class ChatStreamController {
                 turnStopWatcher.unregister(sessionId, replyId);
             }
             return;
+        }
+
+        // 沙箱换代提示帧（§4.4 T4 恢复路径）：LRU 改绑/懒剔除后本会话重入被归属校验拦截
+        // 降级重建时，在首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
+        if (!sandboxRebuildNotified.get() && sandboxLifecycle != null
+                && sandboxLifecycle.popSandboxRebuiltSince(sessionId, turnStartedAt.get())) {
+            sandboxRebuildNotified.set(true);
+            eventBus.emitSynthetic(sessionId, replyId, "sandbox_rebuilt",
+                "{\"type\":\"sandbox_rebuilt\",\"message\":\"沙箱已重建，未保存的工作区文件可能丢失\"}");
         }
 
         // 用户停止（POST /threads/{sid}/stop）：
@@ -858,6 +890,11 @@ public class ChatStreamController {
                 ((RequireUserConfirmEvent) event).getToolCalls().stream()
                     .map(tc -> tc.getName()).toList());
             runtimeService.storeConfirmContext(sessionId, event);
+            // T4 挂起保留窗（§4.4）：ask 挂起后沙箱持续续期（同沙箱恢复的保障），
+            // 每次 ask 重新计窗；窗口过后停续 → 可被 LRU 调度/自然到期
+            if (sandboxLifecycle != null) {
+                sandboxLifecycle.onConfirmHold(sessionId);
+            }
         }
 
         // 停止终态帧：排在 AGENT_END 之前（同一 turn 内 seq 有序），客户端看到
@@ -923,11 +960,30 @@ public class ChatStreamController {
         if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
+        // 沙箱生命周期 turn 终态注销 + 终刷（§4.4 T2）：只挂 turn 终态（正常收尾/出错/
+        // 被拒三入口经此汇聚），不挂 per-call stop()——一个 turn 可能多 call
+        if (sandboxLifecycle != null) {
+            sandboxLifecycle.onTurnEnd(sessionId);
+        }
         for (String toolCallId : turnBucketKeys) {
             toolCallNames.remove(toolCallId);
             presentFileBuffers.remove(toolCallId);
             writeFileInputBuffers.remove(toolCallId);
         }
+    }
+
+    /** 异常链（含 harness 包装层）中查找沙箱配额满异常（§4.6 结构化 SSE 帧的判定） */
+    private static io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException findQuotaExhausted(
+            Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof io.agentmanager.framework.sandbox.opensandbox.UserQuotaExhaustedException q) {
+                return q;
+            }
+            if (t.getCause() == t) {
+                break;   // 自引用 cause 防环
+            }
+        }
+        return null;
     }
 
     /** 清除本轮排队意图（租约到手/正常放弃；store 不可用时为 no-op）。 */

@@ -15,7 +15,14 @@ spec:
       containers:
         - name: frontend
           image: 172.20.0.1:5001/platform-frontend:v7
-          imagePullPolicy: Always
+          # IfNotPresent（与 platform-backend 及流水线裸 tag 部署语义对齐）：Always 会让
+          # containerd 对裸 tag（无 registry 前缀）强制回源 docker.io 解析，kind 离线环境
+          # 必然 i/o timeout → ImagePullBackOff（2026-11-08 第 1 轮部署实锤）；本地 registry
+          # tag 漂移场景由部署后 rollout restart 强制换代兜底（b09cc73 同款语义）。
+          # ⚠️ 前置：新镜像必须已 kind load 导入节点——IfNotPresent 只查节点镜像存在性、
+          # 不比对 registry digest，仅 push registry 而未导入时 rollout restart 后 Pod
+          # 仍复用旧镜像（换代静默失效）
+          imagePullPolicy: IfNotPresent
           ports: [{ containerPort: 3000 }]
           env:
             # 同源反代目标(src/proxy.ts 请求期读取),按部署环境修改即可,无需重建镜像
