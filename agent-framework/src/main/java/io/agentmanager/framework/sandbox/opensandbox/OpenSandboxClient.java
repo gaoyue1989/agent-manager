@@ -242,6 +242,10 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR,
                 "create", "Failed to start OpenSandbox: " + e.getMessage(), e);
         }
+        // 投影指纹预热（P1 收尾，skill-sync-turn-perf §2.7）：start 已验证「宿主投影 ↔ 容器」
+        // 一致并写入 state hash——播种指纹缓存使本代首个 exec 的投影新鲜度检查直接短路
+        // （省冷 build ≈0.8s）。resume/wrapReused 不播种：state hash 未经验证
+        sandbox.prewarmProjectionFingerprintCache();
 
         // 服务端绝对 expiresAt（§4.2 要点：一律回填服务端响应值，不用本地 now+TTL 推算）
         String expiresAt = info.getExpiresAt() != null ? info.getExpiresAt().toString() : null;

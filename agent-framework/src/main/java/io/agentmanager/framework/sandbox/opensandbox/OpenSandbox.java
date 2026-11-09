@@ -74,9 +74,14 @@ public class OpenSandbox extends AbstractBaseSandbox
     private volatile String skillCacheScope;
     /** 每 call 一次 scoped .skills-cache 投放（stop 复位，下轮首 exec 重查） */
     private final AtomicBoolean skillCacheRefreshed = new AtomicBoolean(false);
-    /** 上次投放的 scoped .skills-cache 内容 hash（跨 call 保留，未变则跳过重投） */
-    private final java.util.concurrent.atomic.AtomicReference<String> lastSkillCacheHash =
+    /**
+     * 实例局部 scoped 投放指纹（P0-1 兜底层，跨 call 保留；生产主层在 spec 的 Pod 级表——
+     * 实例每 call 重建，实例层只服务无 spec 的测试构造）。
+     */
+    private final java.util.concurrent.atomic.AtomicReference<String> lastSkillCacheFingerprint =
         new java.util.concurrent.atomic.AtomicReference<>();
+    /** 实例局部：本实例最近一次投放进容器的 scope（与 Pod 级 hydratedScopedScopes 同语义的兜底层） */
+    private volatile String lastHydratedScope;
     private final OpenSandboxFilesystemSpec filesystemSpec;
     private final FileAssetStore fileAssetStore;
     private final FileStorage fileStorage;
@@ -434,6 +439,12 @@ public class OpenSandbox extends AbstractBaseSandbox
     /**
      * 首次文件操作前注入 KV 运行时文件（MEMORY.md/memory/）。
      * 静态模板（AGENTS.md/skills/ 等）由框架投影在 hydrateWorkspace 时注入。
+     *
+     * <p>注入粒度从「每 call」收敛到「每沙箱代」（P1 收尾）：runtimeInjected 是实例标志，
+     * 实例每 call 重建 → 原实现每 call 重注入；而同代内 turn 结束的回写已把容器记忆同步进
+     * KV，重注入是等值幂等，只白付 memory/ 的 KV 搜索成本（L4 大时 memory 命名空间扫描
+     * 实测 ≈1.5s/call）。代级记忆挂 {@link SkillSyncGate}（userKey|sandboxId，Pod 级）——
+     * 代边界 gate 换新，首 turn 必注入。
      */
     private void injectRuntimeFilesIfNeeded(RuntimeContext ctx) {
         if (workspaceReader == null || runtimeInjected.get()) {
@@ -441,6 +452,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         }
         var userId = resolveUserKey(ctx);
         if (userId == null) {
+            return;
+        }
+        var sandboxId = state != null ? state.getSandboxId() : null;
+        var gate = filesystemSpec != null ? filesystemSpec.skillSyncGate(userId, sandboxId) : null;
+        if (gate != null && gate.lastRuntimeInjected()) {
+            runtimeInjected.set(true);
             return;
         }
         synchronized (runtimeInjected) {
@@ -451,6 +468,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                 var runtimeFiles = workspaceReader.readRuntimeFiles(userId);
                 workspaceReader.injectToSandbox(osbSandbox, runtimeFiles);
                 runtimeInjected.set(true);
+                if (gate != null) {
+                    gate.setLastRuntimeInjected(true);
+                }
             } catch (Exception e) {
                 // 注入失败不阻塞：沙箱内无历史记忆时 agent 仍可运行，下次 exec 重试
                 log.warn("Failed to inject runtime files into sandbox: {}", e.getMessage());
@@ -516,6 +536,32 @@ public class OpenSandbox extends AbstractBaseSandbox
                 // fail-soft：容器内保留 L2 基线/上一代副本，下次 acquire 重试
                 log.warn("[sandbox-open] materialize L4 skills failed for user {}: {}", uid, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * 投影指纹缓存预热（create 后调用一次）：sandbox.start() 的 SDK 投影已把宿主投影内容
+     * hydrate 进容器并把结果 hash 写入 {@code state.workspaceProjectionHash}——此刻「指纹 ↔ hash」
+     * 的对应关系是刚被验证过的真值，直接播种 {@link ProjectionFingerprintCache}，使本代首个
+     * exec 的 {@link #refreshProjectionIfStale} 直接命中短路（省一次冷 build，66MB 实测 ≈0.8s）。
+     * 仅在 start 已验证的前提下播种（resume 不调用：跨 pod 恢复的 state hash 未经验证）。
+     * fail-soft：失败仅回到冷路径（下轮 exec 走 build 慢路径自愈）。
+     */
+    public void prewarmProjectionFingerprintCache() {
+        if (!projectionFingerprintCacheEnabled || state == null) {
+            return;
+        }
+        var hash = state.getWorkspaceProjectionHash();
+        var spec = state.getWorkspaceSpec();
+        if (hash == null || spec == null) {
+            return;
+        }
+        try {
+            ProjectionFingerprintCache.record(spec, hash);
+            log.debug("[sandbox-open] projection fingerprint cache prewarmed (hash={})",
+                hash.substring(0, Math.min(12, hash.length())));
+        } catch (Exception e) {
+            log.debug("[sandbox-open] projection fingerprint prewarm skipped: {}", e.getMessage());
         }
     }
 
@@ -593,6 +639,18 @@ public class OpenSandbox extends AbstractBaseSandbox
      * <p>投放内容仅供 shell 执行技能脚本使用（{@code load_skill_through_path} 走内存资源/
      * lazy 仓储，不读容器），因此 doExec（首个命令前）投放即可覆盖消费路径。
      *
+     * <p><b>稳态短路（P0-1）</b>：宿主 scope 目录的 stat 指纹（relPath|mtime|size，不读内容）
+     * 在 Pod 级缓存比对（{@link OpenSandboxFilesystemSpec#scopedSkillCacheFingerprint}）。指纹未变
+     * 且本沙箱代已投放过当前 scope → 容器内容即最新 → 跳过 build、prune 与 hydrate
+     * （66MB/2000f 实测从每 call ≈4.9s 降到 ≈35ms）。原实现把比对 hash 记在实例字段上，
+     * 而 OpenSandbox 包装实例每次 acquire 重建 → 短路条件每 call 失忆 → 每轮全量重投。
+     * 正确性边界与投影指纹缓存一致：容器内文件被模型删除而宿主未变时漏补投，宿主内容
+     * 下次变化点自愈（设计 §3.3 已接受的盲点，不损坏数据）。
+     *
+     * <p>慢路径（换沙箱代/换 scope/内容变更）：优先复用 Pod 级载荷缓存里的 gz（P1-3，省
+     * build+gzip ≈1.8s），且把 prune 与解包合并进<b>单条 exec</b>（exec 固定 ≈1s，省一次）。
+     * 换 scope 必走慢路径：prune 清掉同代容器内其它 scope 残留（池化借出复用时的跨用户防护）。
+     *
      * <p>fail-soft：失败仅告警并复位标志，下次 exec 重试。
      */
     private void hydrateScopedSkillCache() {
@@ -613,33 +671,52 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return;
             }
             Path scopeDir = Path.of(sourceRoot, SkillCacheScope.CACHE_DIR, scope);
-            var payload = Files.isDirectory(scopeDir)
-                ? buildScopedSkillCachePayload(spec, sourceRoot, scope)
-                : null;
-            String hash = payload != null ? payload.hash() : "";
-            if (hash.equals(lastSkillCacheHash.get())) {
-                // 当前 scope 内容未变：容器内已是最新（stop 复位的下一 call 会重查）
+            String fingerprint = scopedSkillCacheFingerprint(scopeDir, spec, sourceRoot, scope);
+            String sandboxId = state.getSandboxId();
+            // 稳态判定（双层：Pod 级为主、实例级为无 spec 构造兜底）：指纹未变 且 本沙箱代已
+            // 投放过当前 scope → 容器内容即最新
+            String podFp = filesystemSpec != null
+                ? filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope) : null;
+            String podScope = filesystemSpec != null
+                ? filesystemSpec.hydratedScopedScope(sandboxId) : null;
+            boolean steady = (podFp != null && podFp.equals(fingerprint) && scope.equals(podScope))
+                || (fingerprint.equals(lastSkillCacheFingerprint.get()) && scope.equals(lastHydratedScope));
+            if (steady) {
+                log.debug("[sandbox-open] .skills-cache scoped fingerprint unchanged ({}), skipping re-hydrate", scope);
                 return;
             }
-            // 清容器内其它 scope 残留（本代容器可能服务过同用户的其它会话）
-            pruneContainerSkillCache(scope);
-            if (payload != null && payload.fileCount() > 0) {
-                try (var in = new ByteArrayInputStream(payload.tarBytes())) {
-                    doHydrateWorkspace(in);
-                }
+            // 慢路径：gz 载荷（缓存命中或现算）+ 单 exec 投放
+            byte[] gz = scopedPayloadGz(sourceRoot, scope, scopeDir, spec, fingerprint);
+            hydrateScopedArchive(gz, scope);
+            lastSkillCacheFingerprint.set(fingerprint);
+            lastHydratedScope = scope;
+            if (filesystemSpec != null) {
+                filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope, fingerprint);
+                filesystemSpec.markHydratedScopedScope(sandboxId, scope);
             }
-            lastSkillCacheHash.set(hash);
-            log.info("[sandbox-open] .skills-cache scoped to {} ({} files)",
-                scope, payload != null ? payload.fileCount() : 0);
+            log.info("[sandbox-open] .skills-cache scoped to {} ({} payload)",
+                scope, gz != null ? (gz.length / 1024) + "KB gz" : "empty");
         } catch (Exception e) {
             skillCacheRefreshed.set(false);
             log.warn("[sandbox-open] scoped .skills-cache hydrate failed: {}", e.getMessage());
         }
     }
 
-    /** 用当前 scope 构造投影 payload（includeRoots 只含 {@code .skills-cache/<scope>}）。 */
-    private WorkspaceProjectionApplier.ProjectionPayload buildScopedSkillCachePayload(
-            WorkspaceSpec baseSpec, String sourceRoot, String scope) throws Exception {
+    /**
+     * 宿主 scope 目录的 stat 指纹（P0-1）：与投影根指纹同源（relPath|mtime|size 排序摘要），
+     * 目录缺失返回空串（空串也参与比对——空→空即“两侧都无内容”的稳态）。
+     * stat 失败返回空串以外的随机值会破坏幂等，这里直接抛给上层走慢路径。
+     */
+    private String scopedSkillCacheFingerprint(Path scopeDir, WorkspaceSpec spec,
+                                               String sourceRoot, String scope) throws Exception {
+        if (!Files.isDirectory(scopeDir)) {
+            return "";
+        }
+        return ProjectionFingerprintCache.statFingerprint(scopedSkillCacheSpec(spec, sourceRoot, scope));
+    }
+
+    /** 用当前 scope 构造投影 spec（includeRoots 只含 {@code .skills-cache/<scope>}）。 */
+    private WorkspaceSpec scopedSkillCacheSpec(WorkspaceSpec baseSpec, String sourceRoot, String scope) {
         var ws = new WorkspaceSpec();
         ws.setRoot(baseSpec != null ? baseSpec.getRoot() : getWorkspaceRoot());
         var entry = new WorkspaceProjectionEntry();
@@ -648,7 +725,116 @@ public class OpenSandbox extends AbstractBaseSandbox
         Map<String, WorkspaceEntry> entries = new java.util.LinkedHashMap<>();
         entries.put("__scoped_skill_cache__", entry);
         ws.setEntries(entries);
-        return WorkspaceProjectionApplier.build(ws);
+        return ws;
+    }
+
+    /**
+     * 慢路径的 gz 载荷（P1-3）：Pod 级载荷缓存命中（指纹一致）直接复用；未命中现算
+     * （自建 tar + gzip，成功后回填缓存，容量上界由 spec 侧保证，超限自动不缓存）。
+     * scope 目录缺失/空返回 null（只 prune 不投放）。
+     *
+     * <p>不使用 {@link WorkspaceProjectionApplier#build}：它为比对语义附带全量 sha256 与
+     * tar 双份遍历（66MB/2000f 实测 ≈1.03s），而 scoped 通道的变更检测已由 stat 指纹承担
+     * （P0-1），这里只需 tar 字节；gzip 取最快级别（传输量略增、CPU 减半以上）。
+     */
+    private byte[] scopedPayloadGz(String sourceRoot, String scope, Path scopeDir,
+                                   WorkspaceSpec spec, String fingerprint) throws Exception {
+        if (!Files.isDirectory(scopeDir)) {
+            return null;
+        }
+        if (filesystemSpec != null) {
+            var cached = filesystemSpec.scopedPayloadCache(sourceRoot, scope);
+            if (cached != null && cached.statFingerprint().equals(fingerprint)) {
+                return cached.gzPayload();
+            }
+        }
+        byte[] tar = tarScopeDir(Path.of(sourceRoot).toAbsolutePath().normalize(), scopeDir);
+        if (tar.length == 0) {
+            return null;
+        }
+        byte[] gz = gzipFast(tar);
+        if (filesystemSpec != null) {
+            filesystemSpec.recordScopedPayloadCache(sourceRoot, scope, fingerprint, gz);
+        }
+        return gz;
+    }
+
+    /**
+     * 自建 scoped 投影 tar（条目 = 工作区根相对路径，含隐藏文件，不跟随软链），
+     * 语义对齐 WorkspaceProjectionApplier 的归档形态，但不做 sha256（无比对用途）。
+     * 空目录返回空数组。
+     */
+    private static byte[] tarScopeDir(Path wsRoot, Path scopeDir) throws Exception {
+        List<Path> files;
+        try (var walk = Files.walk(scopeDir)) {
+            files = walk.filter(Files::isRegularFile).sorted().toList();
+        }
+        if (files.isEmpty()) {
+            return new byte[0];
+        }
+        var bos = new java.io.ByteArrayOutputStream(1 << 20);
+        try (var tos = new org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bos, 1 << 20)) {
+            tos.setLongFileMode(org.apache.commons.compress.archivers.tar.TarArchiveOutputStream.LONGFILE_POSIX);
+            for (Path f : files) {
+                var entry = new org.apache.commons.compress.archivers.tar.TarArchiveEntry(
+                    wsRoot.relativize(f).toString().replace('\\', '/'));
+                entry.setSize(Files.size(f));
+                entry.setMode(0644);
+                tos.putArchiveEntry(entry);
+                try (var in = Files.newInputStream(f)) {
+                    in.transferTo(tos);
+                }
+                tos.closeArchiveEntry();
+            }
+            tos.finish();
+        }
+        return bos.toByteArray();
+    }
+
+    /** gzip 最快级别（{@link java.util.zip.Deflater#BEST_SPEED}）：scoped 载荷构建热点，传输量换 CPU */
+    private static byte[] gzipFast(byte[] data) throws Exception {
+        var bos = new java.io.ByteArrayOutputStream(Math.max(64, data.length / 2));
+        var deflater = new java.util.zip.Deflater(java.util.zip.Deflater.BEST_SPEED, true);
+        try (var gz = new java.util.zip.GZIPOutputStream(bos, 1 << 16) {
+            {
+                def = deflater;
+            }
+        }) {
+            gz.write(data);
+        }
+        return bos.toByteArray();
+    }
+
+    /**
+     * scoped 载荷投放 + 其它 scope 清理合并为<b>单条 exec</b>（P1-3）：exec 固定 ≈1s，
+     * 原 prune 与 untar 分开两次即 ≈2s 起步。gz 为 null 时只跑 prune（目录缺失分支）。
+     * 命令尾部的 {@code ; true} 吞掉 prune 段退出码——残留清理失败不判定投放失败
+     * （untar 段失败仍按失败上报，下轮重试）。
+     */
+    private void hydrateScopedArchive(byte[] gz, String scope) throws Exception {
+        String wsRoot = getWorkspaceRoot();
+        String pruneCmd = "find " + wsRoot + "/" + SkillCacheScope.CACHE_DIR
+            + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
+        String command;
+        String tmpPath = null;
+        if (gz != null) {
+            tmpPath = "/tmp/workspace." + UUID.randomUUID() + ".tar.gz";
+            osbSandbox.files().write(List.of(
+                com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
+                    .path(tmpPath)
+                    .data(Base64.getEncoder().encodeToString(gz))
+                    .mode(644)
+                    .build()));
+            command = "base64 -d " + tmpPath + " | tar xzf - -C " + wsRoot
+                + " && rm -f " + tmpPath + " && { " + pruneCmd + "; }";
+        } else {
+            command = "{ " + pruneCmd + "; }";
+        }
+        var execution = osbSandbox.commands().run(command);
+        if (execution.getExitCode() != null && execution.getExitCode() != 0) {
+            throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
+                "hydrateScopedArchive", "scoped hydrate failed with exit " + execution.getExitCode(), null);
+        }
     }
 
     /** 取投影 entry 的宿主机工作区根（sourceRoot）；无投影 entry 返回 null。 */

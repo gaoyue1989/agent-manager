@@ -159,6 +159,12 @@ public record AgentManagerProperties(
         /** 宿主 {@code .skills-cache} scope 目录保留天数（默认 2；≤0 视为关闭） */
         @DefaultValue("2") int skillCacheRetentionDays,
         /**
+         * 宿主 {@code .skills-cache} 容量上限（MB，默认 5120=5GB；≤0 视为关闭，P1 护栏）。
+         * 按龄保留期是时间护栏，会话量大时 2 天窗口内仍可能写满宿主盘（66MB/会话 scope）——
+         * 超限时 GC 按「子树最新 mtime 最旧优先」逐目录删除直至回落限内，与保留期规则叠加。
+         */
+        @DefaultValue("5120") int skillCacheMaxTotalMb,
+        /**
          * 沙箱绑定行保留天数（{@code AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS}，默认 7，
          * sandbox-pool-opensandbox-design §4.1.2）：expires_at 过期超窗的绑定行必然已被服务端
          * GC，删除无需 probe；受影响用户 binding_count 锚行锁内重算，空锚行一并删除
@@ -172,11 +178,11 @@ public record AgentManagerProperties(
         public CleanupConfig {
         }
 
-        /** 兼容构造器（测试侧 5 参简写调用方）：技能缓存 GC 取默认（启用 / 保留 2 天） */
+        /** 兼容构造器（测试侧 5 参简写调用方）：技能缓存 GC 取默认（启用 / 保留 2 天 / 上限 5GB），沙箱绑定保留取默认 7 天 */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {
             this(confirmTtlMinutes, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,
-                sessionRetentionDays, true, 2, 7);
+                sessionRetentionDays, true, 2, 5120, 7);
         }
     }
 
