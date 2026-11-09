@@ -52,6 +52,9 @@ class ToolControllerTest {
     @MockBean
     private io.agentmanager.framework.service.InternalToolRegistry internalToolRegistry;
 
+    @MockBean
+    private io.agentmanager.framework.service.SessionToolScopeService sessionToolScope;
+
     @BeforeEach
     void setUp() {
         org.mockito.Mockito.when(oafConfigHolder.get()).thenReturn(oafConfig);
@@ -59,6 +62,9 @@ class ToolControllerTest {
         // InfoController/ToolController 已切动态配置：controller 调 mcpManager.loadConfigs(holder 配置)
         when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
             .thenReturn(java.util.Collections.emptyList());
+        // sessionTools 汇总与 ?tools= 解析的数据源（未 stub 用例按空集=无业务工具）
+        when(sessionToolScope.mcpToolNames()).thenReturn(java.util.Set.of());
+        when(sessionToolScope.customToolNames()).thenReturn(java.util.Set.of());
     }
 
     @Test
@@ -203,4 +209,95 @@ class ToolControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$[0].name").value("everything"));
     }
+    // ---------- 会话级工具查询（session-tool-list-design §5） ----------
+
+    @Test
+    void listToolsShouldExposeFullNameAndSessionControllableOnMcpEntries() throws Exception {
+        when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(List.of(Map.of("server", "weather-service")));
+        when(mcpToolRegistrar.getToolsByServer("weather-service"))
+            .thenReturn(List.of(
+                new McpToolRegistrar.ToolInfo("get_weather", "mcp__weather-service__get_weather",
+                    "Get weather", "weather-service")));
+
+        mockMvc.perform(get("/tools"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.tools[0].name").value("get_weather"))
+            .andExpect(jsonPath("$.tools[0].fullName").value("mcp__weather-service__get_weather"))
+            .andExpect(jsonPath("$.tools[0].sessionControllable").value(true));
+    }
+
+    @Test
+    void listToolsShouldSummarizeSessionToolsFromScopeService() throws Exception {
+        // sessionTools 汇总 = MCP 可控集 ∪ 自定义集（与中间件收敛同源）；sdkInternal 恒 false
+        when(sessionToolScope.mcpToolNames()).thenReturn(java.util.Set.of("query"));
+        when(sessionToolScope.customToolNames()).thenReturn(java.util.Set.of("get_order"));
+        when(internalToolRegistry.listInternalTools()).thenReturn(List.of(
+            Map.of("name", "get_order", "category", "internal", "source", "builtin", "declared", false)
+        ));
+        when(internalToolRegistry.listSdkInternalTools(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any()))
+            .thenReturn(List.of(Map.of("name", "read_file", "category", "sdk", "source", "sdk")));
+
+        mockMvc.perform(get("/tools?includeInternal=true"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.sessionTools.tools.length()").value(2))
+            .andExpect(jsonPath("$.sessionTools.count").value(2))
+            .andExpect(jsonPath("$.sessionTools.hint").isNotEmpty())
+            // 段级标注：internal 段可控、sdkInternal 段恒不可控
+            .andExpect(jsonPath("$.tools[0].name").value("get_order"))
+            .andExpect(jsonPath("$.tools[0].sessionControllable").value(true))
+            .andExpect(jsonPath("$.sdkInternal[0].name").value("read_file"))
+            .andExpect(jsonPath("$.sdkInternal[0].sessionControllable").value(false));
+    }
+
+    @Test
+    void listToolsWhitelistParamShouldTrimBusinessSegmentsOnly() throws Exception {
+        // ?tools=get_weather：MCP 段按白名单裁剪（resolve 归一后按裸名匹配）；
+        // 自定义段同样裁剪；SDK 内置段不受影响（内置恒可见，与模型侧同口径）
+        when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(List.of(Map.of("server", "weather-service")));
+        when(mcpToolRegistrar.getToolsByServer("weather-service"))
+            .thenReturn(List.of(
+                new McpToolRegistrar.ToolInfo("get_weather", "mcp__weather-service__get_weather",
+                    "Get weather", "weather-service"),
+                new McpToolRegistrar.ToolInfo("search", "mcp__weather-service__search",
+                    "Search", "weather-service")));
+        when(sessionToolScope.resolve(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(new io.agentmanager.framework.service.SessionToolScopeService.Resolution(
+                java.util.Set.of("get_weather")));
+        when(internalToolRegistry.listInternalTools()).thenReturn(List.of(
+            Map.of("name", "get_order", "category", "internal", "source", "builtin", "declared", false)
+        ));
+        when(internalToolRegistry.listSdkInternalTools(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any()))
+            .thenReturn(List.of(Map.of("name", "read_file", "category", "sdk", "source", "sdk")));
+
+        mockMvc.perform(get("/tools?includeInternal=true&tools=get_weather"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.tools.length()").value(1))
+            .andExpect(jsonPath("$.tools[0].name").value("get_weather"))
+            .andExpect(jsonPath("$.mcpCount").value(1))
+            .andExpect(jsonPath("$.internalCount").value(0))
+            .andExpect(jsonPath("$.sdkInternalCount").value(1));
+    }
+
+    @Test
+    void listToolsEmptyWhitelistParamShouldMeanNoFilter() throws Exception {
+        // 缺省/空串 = 不过滤（存量语义；查询参数无法表达"显式空列表"）
+        when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(List.of(Map.of("server", "weather-service")));
+        when(mcpToolRegistrar.getToolsByServer("weather-service"))
+            .thenReturn(List.of(
+                new McpToolRegistrar.ToolInfo("search", "mcp__weather-service__search",
+                    "Search", "weather-service")));
+
+        mockMvc.perform(get("/tools?tools="))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.mcpCount").value(1))
+            .andExpect(jsonPath("$.tools[0].name").value("search"));
+    }
+
 }

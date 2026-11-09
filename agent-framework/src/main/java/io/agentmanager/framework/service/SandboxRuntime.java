@@ -102,6 +102,11 @@ public class SandboxRuntime {
         return config.syncSnapshotDiffEnabled();
     }
 
+    /** 包内基线跳过（{@code SANDBOX_SYNC_SKIP_PACKAGE_BASELINE}，默认 true；关闭=容器 skills/ 全量回写 L4） */
+    public boolean syncSkipPackageBaselineEnabled() {
+        return config.syncSkipPackageBaselineEnabled();
+    }
+
     /** per-session agent 隔离（{@code SANDBOX_SESSION_AGENT_ISOLATION}，默认 true；#2849 workaround，兼定守卫锁粒度） */
     public boolean sessionAgentIsolationEnabled() {
         return config.sessionAgentIsolation();

@@ -355,9 +355,22 @@ public class UserSkillService {
 
     // ==================== 技能列表 / 读取 ====================
 
-    /** 列出某用户的 L4 技能（含包内基线标记、管理面写入栅栏、描述、启停状态与创建时间） */
+    /**
+     * 列出某用户的 L4 技能（含包内基线标记、管理面写入栅栏、描述、启停状态与创建时间）。
+     *
+     * <p>枚举失败（KV 搜索不可用）降级为空列表——管理面 /skills 视图的既有语义
+     * （「命名空间不可用即无 L4」，由 UserSkillServiceTest 钉住）；物化/回写等正确性
+     * 关键路径仍由 {@link WorkspaceReader#listUserSkills} 的抛错契约保护。
+     */
     public List<UserSkillSummary> listSkills(String userId) {
-        var skills = workspaceReader.listUserSkills(userId);
+        Map<String, List<String>> skills;
+        try {
+            skills = workspaceReader.listUserSkills(userId);
+        } catch (IllegalStateException e) {
+            log.warn("list_skills: enumerate failed for user {}, degrade to empty ({}): {}",
+                userId, e.getClass().getSimpleName(), e.getMessage());
+            return List.of();
+        }
         var createdAt = skillCreatedAt(userId);
         var result = new ArrayList<UserSkillSummary>(skills.size());
         for (var entry : skills.entrySet()) {

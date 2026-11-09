@@ -532,6 +532,8 @@ class OpenSandboxTest {
         sandbox.setSkillCacheScope("sess-A");
 
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        // 投放延迟语义（first-llm-latency）：exec 命令不含 .skills-cache 时投放推迟到 stop 收尾
+        sandbox.stop();
 
         var entries = capturedHydrateTarEntries(osb);
         assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
@@ -567,9 +569,10 @@ class OpenSandboxTest {
         sandbox.setSkillCacheScope("sess-A");
 
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
-        int after1 = countHydrateTarWrites(osb);
         sandbox.stop();
+        int after1 = countHydrateTarWrites(osb);
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
+        sandbox.stop();
         int after2 = countHydrateTarWrites(osb);
 
         assertEquals(after1, after2, "内容未变时第二次 call 不应重复投放");
@@ -787,5 +790,126 @@ class OpenSandboxTest {
         sandbox2.exec(RuntimeContext.builder().userId("user-bob").build(), "echo x", 30);
         sandbox2.stop();
         verify(sync2).syncBack(eq("user-bob"), eq(osb), isNull());
+    }
+
+    // ---------- P0-1：scoped 投放指纹 Pod 级短路（跨实例） ----------
+
+    /**
+     * 生产 acquire 语义：每 call 新建 OpenSandbox 包装实例。P0-1 把 scoped 指纹/已投放
+     * scope 记在 spec（Pod 级）后，<b>新实例</b>在同容器代、同 scope、宿主内容未变时
+     * 必须命中短路（零 build/prune/hydrate）——历史实现 hash 记在实例字段上，短路条件
+     * 每 call 失忆，66MB/2000f 下每轮重付 ≈4.9s（基准实证）。
+     */
+    @Test
+    void scopedSkillCacheSkipSurvivesInstanceRecreation() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("scoped-pod-cache");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var spec = new OpenSandboxFilesystemSpec();
+        var st1 = projectedStateNoSkillCache(host);
+        st1.setSandboxId("sbx-pod-1");
+        var call1 = new OpenSandbox(st1, osb, options(), null, null, spec);
+        call1.setSkillCacheScope("sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        call1.stop();
+        int afterCall1 = countHydrateTarWrites(osb);
+        assertTrue(afterCall1 >= 1, "首轮应实际投放");
+
+        // 新包装实例（同 sandboxId=同容器代，模拟生产 resume）：
+        var st2 = projectedStateNoSkillCache(host);
+        st2.setSandboxId("sbx-pod-1");
+        var call2 = new OpenSandbox(st2, osb, options(), null, null, spec);
+        call2.setSkillCacheScope("sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
+        call2.stop();
+        assertEquals(afterCall1, countHydrateTarWrites(osb),
+            "指纹未变 + 本代已投放同 scope → 新实例不得重投（P0-1）");
+    }
+
+    /** 同容器代换 scope（池化借出复用/同用户双会话）：必须走慢路径 prune 旧 scope 并投放新 scope */
+    @Test
+    void scopedSkillCacheScopeSwitchOnSameGenerationRehydrates() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("scoped-scope-switch");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-B", "demo-b");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var spec = new OpenSandboxFilesystemSpec();
+        var st1 = projectedStateNoSkillCache(host);
+        st1.setSandboxId("sbx-switch-1");
+        var callA = new OpenSandbox(st1, osb, options(), null, null, spec);
+        callA.setSkillCacheScope("sess-A");
+        callA.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        callA.stop();
+
+        // 同 sandboxId 换 scope：A→B 不得命中短路
+        var st2 = projectedStateNoSkillCache(host);
+        st2.setSandboxId("sbx-switch-1");
+        var callB = new OpenSandbox(st2, osb, options(), null, null, spec);
+        callB.setSkillCacheScope("sess-B");
+        callB.exec(RuntimeContext.builder().userId("sess-B").build(), "echo 2", 30);
+        callB.stop();
+
+        // 两次投放 tar 都在捕获里，任一包含 sess-B 即代表新 scope 走了慢路径投放
+        var captor = ArgumentCaptor.forClass(List.class);
+        verify(osb.files(), atLeastOnce()).write(captor.capture());
+        boolean sessBTarSeen = false;
+        for (var call : captor.getAllValues()) {
+            var w = (WriteEntry) call.get(0);
+            if (w.getPath() != null && w.getPath().startsWith("/tmp/workspace.")) {
+                if (readTarEntryNames((String) w.getData()).stream().anyMatch(e -> e.contains("sess-B"))) {
+                    sessBTarSeen = true;
+                }
+            }
+        }
+        assertTrue(sessBTarSeen, "同代换 scope 必须重新投放新 scope（不得命中 P0-1 短路）");
+        // prune 在合并 exec 中执行且按当前 scope 保留
+        verify(osb.commands(), atLeastOnce()).run(contains("! -name 'sess-B'"));
+    }
+
+    /** 缺口①：downloadFile（SDK SandboxFileTransfer 下载）路径命中 .skills-cache 时触发延迟投放 */
+    @Test
+    void downloadFileReferencingSkillsCacheTriggersDeferredHydration() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("scoped-dl");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var st = projectedStateNoSkillCache(host);
+        st.setSandboxId("sbx-dl-1");
+        var sandbox = new OpenSandbox(st, osb, options(), null, null, new OpenSandboxFilesystemSpec());
+        sandbox.setSkillCacheScope("sess-A");
+
+        // 先 download 非 .skills-cache 路径：不投放（write 零调用）
+        sandbox.downloadFile("outputs/plain.txt");
+        verify(osb.files(), never()).write(anyList());
+
+        // 再 download .skills-cache 路径：投放（延迟语义）后才读
+        sandbox.downloadFile(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md");
+        assertTrue(countHydrateTarWrites(osb) >= 1, ".skills-cache 下载必须先投放再读");
+    }
+
+    /** P1-3：scoped 慢路径把 prune 与解包合并为单条 exec（不再先单独跑一次 prune） */
+    @Test
+    void scopedSkillCacheSlowPathFoldsPruneIntoSingleExec() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("scoped-single-exec");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-B", "demo-b");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var st = projectedStateNoSkillCache(host);
+        st.setSandboxId("sbx-single-1");
+        var sandbox = new OpenSandbox(st, osb, options(), null, null, new OpenSandboxFilesystemSpec());
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        sandbox.stop();
+
+        // 单条 exec 同时含解包与按 scope 清理；不存在独立的 prune-only exec
+        var captor = ArgumentCaptor.forClass(String.class);
+        verify(osb.commands(), atLeastOnce()).run(captor.capture());
+        var hydrateCmds = captor.getAllValues().stream()
+            .filter(c -> c.contains("tar xzf -") && c.contains("find ")).toList();
+        assertEquals(1, hydrateCmds.size(), "解包与 prune 应合并进同一条 exec（P1-3）");
+        assertTrue(hydrateCmds.get(0).contains("! -name 'sess-A'"));
+        assertEquals(0, captor.getAllValues().stream()
+            .filter(c -> c.contains("find ") && !c.contains("tar xzf -")).count(),
+            "不得存在 prune-only 的独立 exec");
     }
 }

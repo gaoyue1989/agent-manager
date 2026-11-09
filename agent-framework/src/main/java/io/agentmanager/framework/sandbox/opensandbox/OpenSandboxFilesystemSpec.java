@@ -56,18 +56,74 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
      */
     private volatile SandboxLifecycleManager lifecycleManager;
 
-    /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject） */
-    private final java.util.concurrent.ConcurrentHashMap<String, String> userInjectedSandbox =
-        new java.util.concurrent.ConcurrentHashMap<>();
+    /** userKey → 已注入沙箱 id（reset 仅在新沙箱代执行，防多实例循环 reset/inject）；LRU 有界 */
+    private final Map<String, String> userInjectedSandbox = lruMap(256);
 
     /**
      * 会话水合门控表（pod 本地缓存，真相在 KV/容器）：userKey|sandboxId → 已知同步状态。
      * ③ revision 门控（物化跳过依据）与 ②′ 快照差分（回写比对基准）共用——见
-     * {@link SkillSyncGate}。容量上界懒清理（超限清空；条目量级=沙箱代数）。
+     * {@link SkillSyncGate}。LRU 有界（超限逐条淘汰最久未用项，<b>不清全表</b>——
+     * 清全表会让全部活跃会话下一 call 回落全量物化/全量回读，多会话并发下形成风暴）。
      */
-    private final java.util.concurrent.ConcurrentHashMap<String, SkillSyncGate> skillSyncGates =
-        new java.util.concurrent.ConcurrentHashMap<>();
-    private static final int MAX_SYNC_GATES = 256;
+    private final Map<String, SkillSyncGate> skillSyncGates = lruMap(256);
+
+    /**
+     * scoped 技能缓存 stat 指纹（pod 本地，P0-1）：sandboxId|scope → 最近一次投放时的
+     * 宿主 scope 目录 stat 指纹。跨 call / 跨 OpenSandbox 包装实例有效——指纹未变即跳过
+     * build+prune+hydrate（原 lastSkillCacheHash 是实例字段，实例每 call 重建导致每轮全量重投）。
+     * Pod 级 miss 时回落 {@link #sharedFingerprintStore}（跨副本共享，缺口④）。
+     */
+    private final Map<String, String> scopedSkillCacheFingerprints = lruMap(256);
+    /** 指纹跨副本共享层（Redis，fail-open；NOOP=未装配，行为回到纯 Pod 级） */
+    private volatile ScopedFingerprintStore sharedFingerprintStore = ScopedFingerprintStore.NOOP;
+
+    /** 包内技能源目录（configDir/skills，生产=PVC 只读同挂载；跨副本指纹一致性的来源，缺口④） */
+    private volatile java.nio.file.Path packageSkillsDir;
+
+    /** 注入包内技能源目录（scoped 指纹源；null=未装配，指纹退化为仅 L4 revision） */
+    public OpenSandboxFilesystemSpec packageSkillsDir(java.nio.file.Path dir) {
+        this.packageSkillsDir = dir;
+        return this;
+    }
+
+    /** 包内技能源目录（可空） */
+    public java.nio.file.Path packageSkillsDir() {
+        return packageSkillsDir;
+    }
+
+    /** 注入跨副本指纹共享层（AgentScopeConfig 装配时调用；null 归一 NOOP） */
+    public OpenSandboxFilesystemSpec sharedFingerprintStore(ScopedFingerprintStore store) {
+        this.sharedFingerprintStore = store != null ? store : ScopedFingerprintStore.NOOP;
+        return this;
+    }
+
+    /**
+     * sandboxId → 当前已投放进容器的 scope（P0-1）：同代容器换会话（池化借出复用/同用户
+     * 双会话）时指纹命中但 scope 不同，必须走慢路径 prune 旧 scope（跨用户残留防护）再投放。
+     */
+    private final Map<String, String> hydratedScopedScopes = lruMap(256);
+
+    /**
+     * scoped 投放载荷缓存（pod 本地，P1-3）：sourceRoot|scope → {指纹, gz 字节}。
+     * 慢路径（换沙箱代/换 scope）复用同内容 gz，省宿主 build+gzip（实测 66MB/2000f ≈1.8s）。
+     * 字节有界：单载荷 ≤32MB 且总量 ≤64MB，超限不缓存（回落每次现算，正确性不变）。
+     */
+    private final Map<String, ScopedPayload> scopedPayloadCache = lruMap(8);
+    private static final int MAX_SCOPED_PAYLOAD_BYTES = 32 * 1024 * 1024;
+    private static final long MAX_SCOPED_PAYLOAD_TOTAL_BYTES = 64L * 1024 * 1024;
+
+    /** scoped 载荷缓存条目 */
+    record ScopedPayload(String statFingerprint, byte[] gzPayload) {}
+
+    /** LRU 有界 map（accessOrder，超限逐条淘汰最久未访问项） */
+    private static <K, V> Map<K, V> lruMap(int maxSize) {
+        return java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+                return size() > maxSize;
+            }
+        });
+    }
 
     /** 读取（无则建空 gate）；键 = userKey + '|' + sandboxId */
     public SkillSyncGate skillSyncGate(String userKey, String sandboxId) {
@@ -75,16 +131,89 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             return null;
         }
         var key = userKey + "|" + sandboxId;
-        if (skillSyncGates.size() >= MAX_SYNC_GATES && !skillSyncGates.containsKey(key)) {
-            skillSyncGates.clear();
+        synchronized (skillSyncGates) {
+            var gate = skillSyncGates.get(key);
+            if (gate == null) {
+                gate = new SkillSyncGate();
+                skillSyncGates.put(key, gate);
+            }
+            return gate;
         }
-        return skillSyncGates.computeIfAbsent(key, k -> new SkillSyncGate());
     }
 
     /** 移除某会话的 gate（沙箱代销毁/测试重置用；null 安全） */
     public void removeSkillSyncGate(String userKey, String sandboxId) {
         if (userKey != null && sandboxId != null) {
             skillSyncGates.remove(userKey + "|" + sandboxId);
+        }
+    }
+
+    /** scoped 缓存指纹读取（P0-1 短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回 null=走慢路径 */
+    public String scopedSkillCacheFingerprint(String sandboxId, String scope) {
+        if (sandboxId == null || sandboxId.isBlank() || scope == null || scope.isBlank()) {
+            return null;
+        }
+        var podLocal = scopedSkillCacheFingerprints.get(sandboxId + "|" + scope);
+        if (podLocal != null) {
+            return podLocal;
+        }
+        // 跨副本：他副本可能已投放过同一沙箱代同 scope（同会话轮转）——共享层命中即免整套慢路径。
+        // 命中同时回填 Pod 级两张表（指纹 + 已投放 scope）：稳态判定要求两表一致命中
+        var shared = sharedFingerprintStore.get(sandboxId, scope);
+        if (shared != null) {
+            scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, shared);
+            hydratedScopedScopes.put(sandboxId, scope);
+        }
+        return shared;
+    }
+
+    /** scoped 缓存指纹回填（投放成功后记录）：Pod 级 + 共享层双写（共享层失败仅告警） */
+    public void recordScopedSkillCacheFingerprint(String sandboxId, String scope, String statFingerprint) {
+        if (sandboxId != null && scope != null && statFingerprint != null) {
+            scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, statFingerprint);
+            sharedFingerprintStore.put(sandboxId, scope, statFingerprint);
+        }
+    }
+
+    /** 本沙箱代当前已投放的 scope（null = 本代尚未投放过任何 scope；跨副本经共享指纹层兜底，无需共享 scope 表） */
+    public String hydratedScopedScope(String sandboxId) {
+        return sandboxId == null ? null : hydratedScopedScopes.get(sandboxId);
+    }
+
+    /** 记录本沙箱代已投放的 scope（投放成功后调用） */
+    public void markHydratedScopedScope(String sandboxId, String scope) {
+        if (sandboxId != null && scope != null) {
+            hydratedScopedScopes.put(sandboxId, scope);
+        }
+    }
+
+    /** scoped 载荷缓存读取（P1-3；指纹一致才可复用，由调用方比对） */
+    public ScopedPayload scopedPayloadCache(String sourceRoot, String scope) {
+        if (sourceRoot == null || sourceRoot.isBlank() || scope == null || scope.isBlank()) {
+            return null;
+        }
+        return scopedPayloadCache.get(sourceRoot + "|" + scope);
+    }
+
+    /**
+     * scoped 载荷回填（构建成功后调用）：单载荷超 {@link #MAX_SCOPED_PAYLOAD_BYTES} 或
+     * 总量超 {@link #MAX_SCOPED_PAYLOAD_TOTAL_BYTES} 时不缓存（LRU 淘汰保证总量上界）。
+     */
+    public void recordScopedPayloadCache(String sourceRoot, String scope, String statFingerprint, byte[] gzPayload) {
+        if (sourceRoot == null || sourceRoot.isBlank() || scope == null || scope.isBlank()
+                || statFingerprint == null || gzPayload == null
+                || gzPayload.length > MAX_SCOPED_PAYLOAD_BYTES) {
+            return;
+        }
+        synchronized (scopedPayloadCache) {
+            long total = scopedPayloadCache.values().stream()
+                .mapToLong(p -> p.gzPayload().length).sum();
+            while (!scopedPayloadCache.isEmpty()
+                    && total + gzPayload.length > MAX_SCOPED_PAYLOAD_TOTAL_BYTES) {
+                var eldest = scopedPayloadCache.keySet().iterator().next();
+                total -= scopedPayloadCache.remove(eldest).gzPayload().length;
+            }
+            scopedPayloadCache.put(sourceRoot + "|" + scope, new ScopedPayload(statFingerprint, gzPayload));
         }
     }
 

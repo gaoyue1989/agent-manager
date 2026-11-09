@@ -377,6 +377,78 @@ class A2AControllerTest {
         org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(), emptyGrouped.get("skills"));
     }
 
+    // ---------- 本轮 tools 列表（session-tool-list-design §2.2） ----------
+
+    @Test
+    void messageSendShouldTranslateToolsIntoGroupedMetadata() throws Exception {
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"30","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-tw1","userId":"alice","tools":["query","get_order"]}}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("query", "get_order"),
+            grouped.get("tools"), "tools 按 msg id 分组（与 skills 同一 SDK 读取约定）");
+        org.junit.jupiter.api.Assertions.assertFalse(meta.containsKey("tools"),
+            "顶层 tools 键被移除（避免与分组键混淆）");
+        var parts = (java.util.List<?>) message.get("parts");
+        var partMeta = (java.util.Map<String, Object>) ((java.util.Map<String, Object>) parts.get(0)).get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals(msgId, partMeta.get("_agentscope_msg_id"));
+    }
+
+    @Test
+    void messageSendShouldNormalizeTopLevelAndEmptyTools() throws Exception {
+        // 顶层 params.tools 归一（取值源链第二优先）
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"31","method":"message/send",
+             "params":{"sessionId":"a2a-tw2","userId":"alice","tools":["query"],
+               "message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var grouped = (java.util.Map<String, Object>) meta.get(String.valueOf(message.get("messageId")));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("query"), grouped.get("tools"));
+
+        // 显式空列表：同样分组（空数组 = 仅内置）
+        var emptyReq = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"32","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
+               "metadata":{"sessionId":"a2a-tw3","userId":"alice","tools":[]}}}
+            """);
+        var emptyParams = (java.util.Map<String, Object>) emptyReq.get("params");
+        var emptyMessage = (java.util.Map<String, Object>) emptyParams.get("message");
+        var emptyMeta = (java.util.Map<String, Object>) emptyMessage.get("metadata");
+        var emptyGrouped = (java.util.Map<String, Object>) emptyMeta.get(
+            String.valueOf(emptyMessage.get("messageId")));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(), emptyGrouped.get("tools"));
+    }
+
+    @Test
+    void messageSendShouldNormalizeLegacyMetadataTools() throws Exception {
+        // 旧格式：tools 藏在 params.metadata（同 thread_id 层）；与 skills 并存时共用同一分组键
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"33","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]},
+               "metadata":{"thread_id":"a2a-tw4","tools":["query"],"skills":["a"]}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("query"), grouped.get("tools"),
+            "旧格式 params.metadata.tools 归一为分组形态");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("a"), grouped.get("skills"),
+            "tools 与 skills 并存时共用同一 msg id 分组键");
+        org.junit.jupiter.api.Assertions.assertEquals("a2a-tw4", meta.get("sessionId"),
+            "thread_id 兼容仍生效");
+    }
+
     @Test
     void messageSendShouldNormalizeLegacySkillsEvenWhenSessionIdPresent() throws Exception {
         // 混用：message.metadata 已含 sessionId 时，旧顶层回填受第 6 步

@@ -46,6 +46,7 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
         WorkspaceSyncService workspaceSyncService,
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+        io.agentmanager.framework.service.SkillManageService skillManageService,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         SessionUserStore sessionUserStore,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
@@ -100,6 +101,12 @@ public class AgentScopeConfig {
         if (guardEnabled) {
             var redisFacade = redisFacadeProvider.getIfAvailable();
             if (redisFacade != null) {
+                // scoped 指纹跨副本共享层（first-llm-latency 缺口④）：sandboxId|scope → 指纹放
+                // Redis，同会话轮转到新副本不再重付 50MB 慢路径；fail-open（不可用回落 Pod 级）
+                spec.sharedFingerprintStore(new io.agentmanager.framework.sandbox.opensandbox.ScopedFingerprintStore(redisFacade));
+                // 指纹源用包内技能目录（PVC 只读同挂载→跨副本一致）：SkillManageService 与
+                // WorkspaceSyncService 同源（configDir/skills）
+                spec.packageSkillsDir(skillManageService.getSkillsDir());
                 var sessionGranular = sandboxRuntime.sessionAgentIsolationEnabled();
                 guard = new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
                     redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular);
@@ -235,13 +242,17 @@ public class AgentScopeConfig {
      * 沙箱回写服务：依赖 WorkspaceReader（而非裸 BaseStore），保证回写命名空间与读取侧一致
      * ——{@code agents/{agent}/users/{uid}}（运行时文件）与
      * {@code agents/{agent}/users/{uid}/skills}（用户技能 L4，key={@code /{技能名}/{路径}}）。
-     * 快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true）经 SandboxRuntime 传入。
+     * 快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true）与包内基线跳过
+     * （SANDBOX_SYNC_SKIP_PACKAGE_BASELINE，默认 true，P1-5：L4 只存用户真实覆盖，不复制
+     * 包内基线副本）经 SandboxRuntime 传入；基线目录取 SkillManageService（L2，/config/skills）。
      */
     @Bean
     public WorkspaceSyncService workspaceSyncService(
             io.agentmanager.framework.service.WorkspaceReader workspaceReader,
-            io.agentmanager.framework.service.SandboxRuntime sandboxRuntime) {
-        return new WorkspaceSyncService(workspaceReader, sandboxRuntime.syncSnapshotDiffEnabled());
+            io.agentmanager.framework.service.SandboxRuntime sandboxRuntime,
+            io.agentmanager.framework.service.SkillManageService skillManageService) {
+        return new WorkspaceSyncService(workspaceReader, sandboxRuntime.syncSnapshotDiffEnabled(),
+            skillManageService.getSkillsDir(), sandboxRuntime.syncSkipPackageBaselineEnabled());
     }
 
     /**
@@ -336,7 +347,18 @@ public class AgentScopeConfig {
     @Bean(destroyMethod = "close")
     public io.agentmanager.framework.redis.RedisConnectionFacade redisConnectionFacade(
             AgentRedisProperties redis) {
-        return io.agentmanager.framework.redis.RedisConnectionFacade.create(redis);
+        var facade = io.agentmanager.framework.redis.RedisConnectionFacade.create(redis);
+        // 首连预热（first-llm-latency P0）：facade 惰性建连——不预热时首次建连（lettuce 握手 +
+        // 首连钩子，实测 ≈0.8s）落在首个会话的 session-agent 创建路径上，计入首推理前延迟。
+        // 后台线程提前建连，不阻塞启动；失败静默（惰性重试语义不变）
+        Thread.ofPlatform().name("redis-warmup").daemon(true).start(() -> {
+            try {
+                facade.sync().ping();
+            } catch (Exception e) {
+                // 预热失败不影响启动：首用时惰性建连（含退避）语义不变
+            }
+        });
+        return facade;
     }
 
     /**

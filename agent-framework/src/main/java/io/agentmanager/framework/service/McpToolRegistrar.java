@@ -781,6 +781,45 @@ public class McpToolRegistrar {
     ) {}
 
     /**
+     * 会话级可控（非 app_only）MCP 工具裸名集（session-tool-list-design §4.1）。
+     * registeredTools 派生：两条注册路径同一登记点（标准路径 recordRegisteredTools /
+     * 手动路径 registerFiltered），裸名 = Toolkit 注册名；app_only 工具不注册 Toolkit，
+     * 故排除后与模型侧实际可见 MCP 工具集同口径。reload / clearServer 即时反映。
+     * ToolFilterMiddleware 分类与 /tools sessionTools 汇总共用（单一事实源）。
+     */
+    public Set<String> getSessionControllableToolNames() {
+        var names = new LinkedHashSet<String>();
+        for (var info : registeredTools.values()) {
+            if (!info.appOnly()) {
+                names.add(info.name());
+            }
+        }
+        return names;
+    }
+
+    /**
+     * 按 display 名（{@code mcp__{server}__{tool}}）反查 ToolInfo（session-tool-list-design
+     * §2.1 全名别名解析用）。线性扫描 registeredTools（server/tool 名都可能含下划线，
+     * 按分隔符切分有歧义，比对 displayName 才无歧义）。未注册/被静态摘除的名返回 null。
+     */
+    public ToolInfo findByDisplayName(String displayName) {
+        if (displayName == null || displayName.isBlank()) {
+            return null;
+        }
+        for (var info : registeredTools.values()) {
+            if (displayName.equals(info.displayName())) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    /** 包内测试桥接：直接登记 ToolInfo（SessionToolScopeServiceTest 用，免起 MCP 连接） */
+    void putToolInfoForTest(ToolInfo info) {
+        registeredTools.put(info.serverName() + ":" + info.name(), info);
+    }
+
+    /**
      * 强制只读注册：服务端未标注 readOnlyHint 时，通过 config.yaml 兜底。
      * 遍历 MCP 工具，手动构造 readOnly=true 的 McpTool 注册到 Toolkit。
      * 支持 ActiveMCP.json 子集过滤：enabled=false 的工具不注册。

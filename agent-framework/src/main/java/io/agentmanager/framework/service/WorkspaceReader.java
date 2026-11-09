@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -379,12 +380,17 @@ public class WorkspaceReader {
     /**
      * 列出某用户 L4 技能：技能名 → 该技能下文件相对路径（含 SKILL.md，字典序）。
      *
-     * <p>命名空间为空时 {@code ls} 返回失败而非空集（框架语义），此处按“无技能”处理，
-     * 否则新用户会 500。仅保留含 SKILL.md 的目录（与 SDK 技能判定一致），
-     * 并过滤 {@code .archive}/{@code _drafts} 等元数据目录。
+     * <p>命名空间为空时按“无技能”处理，否则新用户会 500。仅保留含 SKILL.md 的目录
+     * （与 SDK 技能判定一致），并过滤 {@code .archive}/{@code _drafts} 等元数据目录。
      *
-     * <p>单个技能的文件枚举失败（glob 不可信）时抛 {@link IllegalStateException}：
-     * 不得把“枚举失败”当成“该技能只有 SKILL.md”返回，否则列表/字节数会偏小且删除会漏行。
+     * <p><b>单次命名空间枚举（P1-4）</b>：历史实现为 ls + 每技能一次 glob，而 SDK 的 glob
+     * 内部每次都做<b>全命名空间分页扫描</b>（含条目内容，RemoteFilesystem.searchAllItems）——
+     * N 个技能即 N+1 次全量搬运（66MB/2000f 基准实测 20 技能 ≈44.5s，MySQL 流量 1.4GB）。
+     * 本实现直接走一次 {@code baseStore.search} 大页枚举（分页直到取尽）后客户端按顶级
+     * 段分组，与 SDK 同一数据源、同一过滤规则，成本从 O(N×全量) 降为 O(全量)。
+     *
+     * <p>枚举失败（search 抛异常）时抛 {@link IllegalStateException}：不得把“枚举失败”当成
+     * “无技能”或“该技能只有 SKILL.md”返回，否则列表/字节数会偏小且删除会漏行。
      */
     public Map<String, List<String>> listUserSkills(String userId) {
         Map<String, List<String>> skills = new LinkedHashMap<>();
@@ -392,36 +398,62 @@ public class WorkspaceReader {
             return skills;
         }
         var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
-        var ctx = RuntimeContext.builder().userId(safeUserId).build();
-        var fs = new RemoteFilesystem(baseStore, skillNamespaceFor(safeUserId));
-        List<io.agentscope.harness.agent.filesystem.model.FileInfo> entries;
+        // name → 有序文件集（枚举顺序即 KV 顺序，最终按字典序输出）
+        Map<String, LinkedHashSet<String>> grouped = new LinkedHashMap<>();
         try {
-            var ls = fs.ls(ctx, "/");
-            if (!ls.isSuccess()) {
-                return skills;
+            var namespace = skillNamespaceFor(safeUserId);
+            final int pageSize = 500;
+            int offset = 0;
+            while (true) {
+                List<io.agentscope.harness.agent.filesystem.remote.store.StoreItem> page =
+                    baseStore.search(namespace, pageSize, offset);
+                if (page == null || page.isEmpty()) {
+                    break;
+                }
+                for (var item : page) {
+                    collectSkillKey(item.key(), grouped);
+                }
+                if (page.size() < pageSize) {
+                    break;
+                }
+                offset += page.size();
             }
-            entries = ls.entries();
         } catch (Exception e) {
-            // 空命名空间/列举失败按“无技能”处理（框架语义），否则新用户会 500
+            // 枚举失败不得降级：抛出去由调用方显式报错（列表漏文件 / 删除漏行都不可接受）
             log.warn("list_user_skills: failed for user {}: {}", safeUserId, e.getMessage());
-            return skills;
+            throw new IllegalStateException("枚举技能文件失败（KV 搜索不可信）: " + e.getMessage(), e);
         }
-        for (var info : entries) {
-            var name = stripSlash(info.path());
-            if (name == null || name.isBlank() || name.contains("/") || isMetadataSegment(name)) {
-                continue;
-            }
-            var files = listSkillFiles(fs, ctx, name);
-            if (files == null) {
-                // 枚举失败不得降级：抛出去由调用方显式报错（列表漏文件 / 删除漏行都不可接受）
-                throw new IllegalStateException("枚举技能文件失败（KV glob 不可信）: " + name);
-            }
+        for (var entry : grouped.entrySet()) {
+            var files = new ArrayList<>(entry.getValue());
+            Collections.sort(files);
             if (!files.contains(SKILL_FILE)) {
-                continue; // 无 SKILL.md 不算技能
+                continue; // 无 SKILL.md 不算技能（与 SDK 技能判定一致）
             }
-            skills.put(name, files);
+            skills.put(entry.getKey(), files);
         }
         return skills;
+    }
+
+    /**
+     * 把一个 KV key（{@code /{技能名}/{相对路径}}，兼容无前导斜杠）归入技能分组。
+     * 过滤规则与 SDK glob 版一致：元数据段（{@code .} / {@code _} 开头，含 {@code /.revision}）
+     * 不进任何技能；无相对路径的裸键（目录占位）忽略。
+     */
+    private static void collectSkillKey(String key, Map<String, LinkedHashSet<String>> grouped) {
+        if (key == null || key.isBlank()) {
+            return;
+        }
+        var normalized = key.startsWith("/") ? key.substring(1) : key;
+        var slash = normalized.indexOf('/');
+        if (slash <= 0) {
+            return; // 裸键（无技能名/路径段）忽略
+        }
+        var name = normalized.substring(0, slash);
+        var rel = normalized.substring(slash + 1);
+        if (name.isBlank() || isMetadataSegment(name) || rel.isBlank() || isMetadataSegment(rel)) {
+            return;
+        }
+        grouped.computeIfAbsent(name, k -> new LinkedHashSet<>()).add(rel);
     }
 
     /**

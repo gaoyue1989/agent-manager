@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
@@ -42,6 +43,13 @@ public record SandboxConfig(
     @DefaultValue("true") boolean skillRevisionGateEnabled,
     @DefaultValue("true") boolean syncSnapshotDiffEnabled,
     /**
+     * 包内基线跳过（{@code SANDBOX_SYNC_SKIP_PACKAGE_BASELINE}，默认 true，P1-5）：回写侧
+     * 对与包内基线（L2）清单+大小完全一致的容器技能跳过 L4 回写——包内技能经投影进容器后
+     * 若照旧回写，会整份复制进每个用户的 KV（66MB/用户），撑爆 agent_fs 并让新沙箱代首次
+     * 物化付出全量成本。关闭=回到「容器 skills/ 全量回写」现行为。
+     */
+    @DefaultValue("true") boolean syncSkipPackageBaselineEnabled,
+    /**
      * per-session agent 隔离（{@code SANDBOX_SESSION_AGENT_ISOLATION}，默认 true，2026-10-21 起）：
      * 每会话独立 HarnessAgent 实例（含独立 SandboxBackedFilesystem），消解并行 turn 互踩
      * harness 单槽沙箱指针的跨用户竞态（上游 agentscope-java #2849 的 app 级 workaround）。
@@ -57,6 +65,29 @@ public record SandboxConfig(
     @DefaultValue("30") int sessionAgentCacheTtlMinutes,
     OpenSandboxConfig opensandbox
 ) {
+    /** 绑定入口消歧：record 出现双构造器时 Binder 要求显式指定（与 AgentManagerProperties 同款） */
+    @ConstructorBinding
+    public SandboxConfig {
+    }
+
+    /**
+     * 兼容旧 17 参构造（存量测试按位传参，master 形态）：包内基线跳过取默认 true
+     * （skill-sync-turn-perf P1-5 新增组件排在 syncSnapshotDiffEnabled 之后）。
+     */
+    public SandboxConfig(boolean enabled, String image, int timeoutMinutes, int memoryMb, int cpuCount,
+                         List<String> entrypoint, Duration execdGraceShutdown,
+                         boolean projectionEnabled, boolean guardEnabled, int guardLeaseSeconds,
+                         boolean projectionFingerprintCacheEnabled, boolean skillRevisionGateEnabled,
+                         boolean syncSnapshotDiffEnabled, boolean sessionAgentIsolation,
+                         int sessionAgentCacheMax, int sessionAgentCacheTtlMinutes,
+                         OpenSandboxConfig opensandbox) {
+        this(enabled, image, timeoutMinutes, memoryMb, cpuCount, entrypoint, execdGraceShutdown,
+            projectionEnabled, guardEnabled, guardLeaseSeconds,
+            projectionFingerprintCacheEnabled, skillRevisionGateEnabled, syncSnapshotDiffEnabled,
+            true, sessionAgentIsolation, sessionAgentCacheMax, sessionAgentCacheTtlMinutes,
+            opensandbox);
+    }
+
     public record OpenSandboxConfig(
         String serverUrl,
         String apiKey

@@ -82,7 +82,8 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
             AgentManagerProperties.AgentProtocolSettings.defaults());
         var bridge = mock(RemoteConfirmBridge.class);
 
-        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(), bridge, null, null);
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(), bridge, null, null,
+            mock(SessionToolScopeService.class));
         var agent = factory.build(oaf, store, new LLMLogger(), null, null,
             mock(io.agentmanager.framework.service.ModelCatalog.class), null);
 
@@ -157,7 +158,8 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
                 io.agentscope.core.permission.PermissionMode.DEFAULT,
                 java.util.Map.of(), java.util.Set.of()));
         return new HarnessAgentFactory(props, ws, mcp, List.of(),
-            mock(RemoteConfirmBridge.class), null, null);
+            mock(RemoteConfirmBridge.class), null, null,
+            mock(SessionToolScopeService.class));
     }
 
     /**
@@ -282,7 +284,8 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
             AgentManagerProperties.AgentProtocolSettings.defaults());
 
         var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
-            mock(RemoteConfirmBridge.class), null, null);
+            mock(RemoteConfirmBridge.class), null, null,
+            mock(SessionToolScopeService.class));
         // turnControlRegistry 是字段注入（@Autowired(required=false)），单测直接 new 恒 null；
         // 反射置入真实 registry 后 build，才能断言接线（中间件持有的就是注入实例）
         var registry = new TurnControlRegistry();
@@ -372,7 +375,7 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
 
         var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
             mock(RemoteConfirmBridge.class), mock(UserSkillService.class),
-            mock(SkillManageService.class));
+            mock(SkillManageService.class), mock(SessionToolScopeService.class));
         var agent = factory.build(oaf, store, new LLMLogger(), null, null,
             mock(io.agentmanager.framework.service.ModelCatalog.class), null);
 
@@ -388,5 +391,67 @@ class HarnessAgentFactoryMiddlewareAssemblyTest {
         assertTrue(disabledIdx >= 0, "SkillDisabledFilterMiddleware 必须注册进 builder 链");
         assertTrue(filterIdx < disabledIdx,
             "技能白名单中间件必须排在禁用中间件之前（实际 " + filterIdx + " vs " + disabledIdx + "）");
+    }
+
+    @Test
+    void toolFilterMiddlewareMustBeRegisteredIntoBuiltAgent() throws Exception {
+        // session-tool-list-design §6：ToolFilterMiddleware 必须注册进 builder 链
+        //（onReasoning 收敛 + onActing 兜底 DENY；缺失即 tools 白名单静默失效——
+        // 本仓库已发生过两次「类存在但从未注册」的断链形态，此测试为回归锚点）
+        var oaf = mock(OafConfig.class);
+        when(oaf.name()).thenReturn("test-agent");
+        when(oaf.systemPrompt()).thenReturn("prompt");
+        when(oaf.runtimeConfig()).thenReturn(new OafConfig.RuntimeConfig(
+            0.7, 4096, false, "default", java.util.Map.of()));
+
+        var ws = mock(WorkspaceInitializer.class);
+        when(ws.initialize(any(java.nio.file.Path.class), any(OafConfig.class)))
+            .thenReturn(java.nio.file.Files.createTempDirectory("tool-filter-assembly"));
+        var mcp = mock(McpToolRegistrar.class);
+        when(mcp.collectPermissionRules(oaf))
+            .thenReturn(new PermissionRuleResult(
+                io.agentscope.core.permission.PermissionMode.DEFAULT,
+                java.util.Map.of(), java.util.Set.of()));
+
+        var store = mock(DistributedStore.class);
+        when(store.baseStore())
+            .thenReturn(new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore());
+        when(store.agentStateStore())
+            .thenReturn(mock(io.agentscope.core.state.AgentStateStore.class));
+
+        var props = new AgentManagerProperties(
+            new AgentManagerProperties.LLMConfig(
+                "k", "m", "http://localhost", "openai", 0.7, 4096, 120, true, 0, "", null),
+            new AgentManagerProperties.ServerConfig("0.0.0.0", 8100),
+            new AgentManagerProperties.CheckpointConfig(
+                "jdbc:mysql://127.0.0.1:3307/agent_manager_test", "u", "p", "agent_manager_test"),
+            java.nio.file.Files.createTempDirectory("tool-filter-config").toString(),
+            "", new AgentManagerProperties.CleanupConfig(30, 60, 20, 30, 7),
+            new AgentManagerProperties.FileConfig(true, 20, 20,
+                "image/*,text/plain,text/markdown,text/csv,application/pdf",
+                5, 15, 50, true, 7, "local", "/data/files", "", "", "", "agent-files", ""),
+            new AgentManagerProperties.SseConfig(20, 5, 256, 300),
+            AgentManagerProperties.HarnessConfig.defaults(),
+            AgentManagerProperties.AgentProtocolSettings.defaults());
+
+        var factory = new HarnessAgentFactory(props, ws, mcp, List.of(),
+            mock(RemoteConfirmBridge.class), mock(UserSkillService.class),
+            mock(SkillManageService.class), mock(SessionToolScopeService.class));
+        var agent = factory.build(oaf, store, new LLMLogger(), null, null,
+            mock(io.agentmanager.framework.service.ModelCatalog.class), null);
+
+        var middlewares = middlewaresOf(agent);
+        var toolFilter = middlewares.stream()
+            .filter(ToolFilterMiddleware.class::isInstance)
+            .map(ToolFilterMiddleware.class::cast)
+            .findFirst().orElse(null);
+        assertNotNull(toolFilter,
+            "ToolFilterMiddleware 必须注册进 builder 链（tools 白名单收敛唯一执行点）");
+
+        // 接线断言：中间件持有的必须是注入的 SessionToolScopeService 实例（三处同源不变量）
+        Field scopeField = ToolFilterMiddleware.class.getDeclaredField("scopeService");
+        scopeField.setAccessible(true);
+        assertNotNull(scopeField.get(toolFilter),
+            "ToolFilterMiddleware 必须接线到 SessionToolScopeService（与 /tools 查询同源）");
     }
 }
