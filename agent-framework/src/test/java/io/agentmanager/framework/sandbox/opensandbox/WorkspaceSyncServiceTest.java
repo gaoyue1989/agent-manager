@@ -70,6 +70,15 @@ class WorkspaceSyncServiceTest {
         when(files.readByteArray("/workspace/MEMORY.md"))
             .thenReturn(memoryContent.getBytes(StandardCharsets.UTF_8));
         when(files.readFile("/workspace/MEMORY.md")).thenReturn(memoryContent);
+        // P2-6 缺席探测桩：syncBack 先 listDirectory(/workspace) 判断 MEMORY.md/memory/ 是否存在
+        var rootEntries = new java.util.ArrayList<EntryInfo>();
+        if (memoryContent != null) {
+            rootEntries.add(fileEntry("/workspace/MEMORY.md"));
+        }
+        if (dailyLogs != null) {
+            rootEntries.add(dirEntry("/workspace/memory"));
+        }
+        when(files.listDirectory("/workspace")).thenReturn(rootEntries);
         if (dailyLogs == null) {
             when(files.listDirectory("/workspace/memory")).thenThrow(new RuntimeException("not found"));
         } else {
@@ -432,6 +441,11 @@ class WorkspaceSyncServiceTest {
         when(okEntry.getPath()).thenReturn("memory/2026-08-13.md");     // 相对 /workspace
         var badEntry = mock(EntryInfo.class);
         when(badEntry.getPath()).thenReturn("memory/2026-08-14.md");
+        // P2-6 缺席探测桩：根目录列举含 MEMORY.md 与 memory/（条目先构造再桩——Mockito 禁止
+        // 在 when(...) 参数里创建并 stub 另一个 mock）
+        var rootMdEntry = fileEntry("/workspace/MEMORY.md");
+        var rootMemDir = dirEntry("/workspace/memory");
+        when(files.listDirectory("/workspace")).thenReturn(List.of(rootMdEntry, rootMemDir));
         when(files.listDirectory("/workspace/memory")).thenReturn(List.of(badEntry, okEntry));
         when(files.readFile("/workspace/memory/2026-08-13.md")).thenReturn("relative ok");
         when(files.readFile("/workspace/memory/2026-08-14.md"))
@@ -819,5 +833,90 @@ class WorkspaceSyncServiceTest {
         var fs = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
         var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
         assertEquals("echo 22", fs.read(ctx, "/sbx-skill/scripts/run.sh", 0, -1).fileData().content());
+    }
+
+    /**
+     * P0-2 快照键跨技能冲突回归：多技能同布局同大小（包内技能常见结构）时，历史实现
+     * 只存技能内相对路径 → 第 2 个技能的文件命中第 1 个技能的快照条目被当「未变」整技能
+     * 跳过（基准实证 20 技能只回写第 1 个）。快照键加技能名前缀后两者都必须落库。
+     */
+    @Test
+    void syncBackShouldSyncAllSkillsWithIdenticalLayoutsAndSizes() throws Exception {
+        var store = new InMemoryStore();
+        var files = mock(Filesystem.class);
+        var alphaDir = dirEntry("/workspace/skills/alpha");
+        var alphaMd = fileEntry("/workspace/skills/alpha/SKILL.md");
+        var betaDir = dirEntry("/workspace/skills/beta");
+        var betaMd = fileEntry("/workspace/skills/beta/SKILL.md");
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(alphaDir, betaDir));
+        when(files.listDirectory("/workspace/skills/alpha")).thenReturn(List.of(alphaMd));
+        when(files.listDirectory("/workspace/skills/beta")).thenReturn(List.of(betaMd));
+        when(files.readFile("/workspace/skills/alpha/SKILL.md")).thenReturn("---\nname: alpha\n---\nA");
+        when(files.readFile("/workspace/skills/beta/SKILL.md")).thenReturn("---\nname: beta\n---\nB");
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+
+        var gate = new SkillSyncGate();
+        service(store, AGENT).syncBack(USER, osb, gate);
+
+        var fs = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
+        var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
+        assertTrue(fs.read(ctx, "/alpha/SKILL.md", 0, -1).isSuccess(), "alpha 应落库");
+        assertTrue(fs.read(ctx, "/beta/SKILL.md", 0, -1).isSuccess(),
+            "同布局同大小的 beta 不得被 alpha 的快照条目遮蔽（P0-2）");
+        // 快照键带技能名前缀：无冲突地同时记录两个技能
+        assertTrue(gate.manifest().containsKey("alpha/SKILL.md"));
+        assertTrue(gate.manifest().containsKey("beta/SKILL.md"));
+    }
+
+    /**
+     * P1-5 包内基线跳过：容器技能与包内基线（L2）清单+大小完全一致 → 纯基线副本不回写 L4
+     * （否则包内技能被逐用户整份复制进 agent_fs，66MB/用户）；被用户改过的技能照常回写。
+     */
+    @Test
+    void syncBackShouldSkipPurePackageBaselineAndSyncModifiedSkill() throws Exception {
+        var store = new InMemoryStore();
+        var packageDir = java.nio.file.Files.createTempDirectory("sync-baseline");
+        var baselineMd = "---\nname: baseline-skill\n---\nbase";
+        var baselineRef = "ref content";
+        var baselineSkillDir = packageDir.resolve("baseline-skill");
+        java.nio.file.Files.createDirectories(baselineSkillDir);
+        java.nio.file.Files.writeString(baselineSkillDir.resolve("SKILL.md"), baselineMd);
+        java.nio.file.Files.writeString(baselineSkillDir.resolve("ref.txt"), baselineRef);
+        // 修改版技能：同布局，SKILL.md 内容不同（size 不同）
+        var modifiedSkillDir = packageDir.resolve("modified-skill");
+        java.nio.file.Files.createDirectories(modifiedSkillDir);
+        java.nio.file.Files.writeString(modifiedSkillDir.resolve("SKILL.md"), "---\nname: modified-skill\n---\nbase");
+        byte[] modifiedBytes = java.nio.file.Files.readAllBytes(modifiedSkillDir.resolve("SKILL.md"));
+
+        var files = mock(Filesystem.class);
+        var baselineSkillEntry = dirEntry("/workspace/skills/baseline-skill");
+        var baselineMdEntry = fileEntry("/workspace/skills/baseline-skill/SKILL.md",
+            baselineMd.getBytes(StandardCharsets.UTF_8).length);
+        var baselineRefEntry = fileEntry("/workspace/skills/baseline-skill/ref.txt",
+            baselineRef.getBytes(StandardCharsets.UTF_8).length);
+        var modifiedSkillEntry = dirEntry("/workspace/skills/modified-skill");
+        var modifiedMdEntry = fileEntry("/workspace/skills/modified-skill/SKILL.md", modifiedBytes.length);
+        when(files.listDirectory("/workspace/skills"))
+            .thenReturn(List.of(baselineSkillEntry, modifiedSkillEntry));
+        when(files.listDirectory("/workspace/skills/baseline-skill"))
+            .thenReturn(List.of(baselineMdEntry, baselineRefEntry));
+        when(files.listDirectory("/workspace/skills/modified-skill"))
+            .thenReturn(List.of(modifiedMdEntry));
+        when(files.readFile("/workspace/skills/modified-skill/SKILL.md"))
+            .thenReturn(new String(modifiedBytes, StandardCharsets.UTF_8));
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+
+        var svc = new WorkspaceSyncService(new WorkspaceReader(distributedStore(store), AGENT),
+            true, packageDir, true);
+        svc.syncBack(USER, osb);
+
+        var fs = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
+        var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
+        assertFalse(fs.read(ctx, "/baseline-skill/SKILL.md", 0, -1).isSuccess(),
+            "纯基线副本不得回写 L4（P1-5）");
+        assertTrue(fs.read(ctx, "/modified-skill/SKILL.md", 0, -1).isSuccess(),
+            "用户改过的技能必须回写 L4");
     }
 }

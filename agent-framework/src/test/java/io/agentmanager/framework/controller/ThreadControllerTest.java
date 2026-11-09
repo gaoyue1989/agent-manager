@@ -623,7 +623,7 @@ class ThreadControllerTest {
         var props = org.mockito.Mockito.mock(io.agentmanager.framework.config.AgentManagerProperties.class);
         // deadline=10（第 2 参 confirmDeadlineMinutes）
         org.mockito.Mockito.when(props.cleanup()).thenReturn(new io.agentmanager.framework.config.AgentManagerProperties.CleanupConfig(
-            10, 10, 60, 20, 30, 7, true, 2));
+            10, 10, 60, 20, 30, 7, true, 2, 5120));
         var field = ThreadController.class.getDeclaredField("agentProps");
         field.setAccessible(true);
         field.set(controller, props);

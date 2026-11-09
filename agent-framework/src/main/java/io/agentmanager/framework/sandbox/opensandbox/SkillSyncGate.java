@@ -26,6 +26,13 @@ public final class SkillSyncGate {
     private volatile String revision;
     /** 本沙箱代是否至少完整物化过一次（revision 门控的前提：没有基线就没有跳过的资格） */
     private volatile boolean lastMaterialized;
+    /**
+     * 本沙箱代是否已注入过 KV 运行时文件（MEMORY.md/memory/）。注入从「每 call」收敛到
+     * 「每沙箱代」：同代内 turn 结束的回写已把容器记忆同步进 KV，下一 call 的重注入
+     * 是等值幂等（实测 66MB L4 命名空间下 memory/ 的 KV 搜索每 call 白付 ≈1.5s）。
+     * 代边界（容器换代）gate 随 sandboxId 换新，首 turn 必注入。
+     */
+    private volatile boolean lastRuntimeInjected;
     /** 容器 skills/{name}/{relPath} → 字节大小（回写差分快照；只增不删，消失条目由回写遍历收敛） */
     private final ConcurrentHashMap<String, Long> manifest = new ConcurrentHashMap<>();
 
@@ -43,6 +50,14 @@ public final class SkillSyncGate {
 
     public void setLastMaterialized(boolean lastMaterialized) {
         this.lastMaterialized = lastMaterialized;
+    }
+
+    public boolean lastRuntimeInjected() {
+        return lastRuntimeInjected;
+    }
+
+    public void setLastRuntimeInjected(boolean lastRuntimeInjected) {
+        this.lastRuntimeInjected = lastRuntimeInjected;
     }
 
     public Map<String, Long> manifest() {

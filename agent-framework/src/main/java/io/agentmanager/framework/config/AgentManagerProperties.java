@@ -167,18 +167,24 @@ public record AgentManagerProperties(
          */
         @DefaultValue("true") boolean skillCacheGcEnabled,
         /** 宿主 {@code .skills-cache} scope 目录保留天数（默认 2；≤0 视为关闭） */
-        @DefaultValue("2") int skillCacheRetentionDays
+        @DefaultValue("2") int skillCacheRetentionDays,
+        /**
+         * 宿主 {@code .skills-cache} 容量上限（MB，默认 5120=5GB；≤0 视为关闭，P1 护栏）。
+         * 按龄保留期是时间护栏，会话量大时 2 天窗口内仍可能写满宿主盘（66MB/会话 scope）——
+         * 超限时 GC 按「子树最新 mtime 最旧优先」逐目录删除直至回落限内，与保留期规则叠加。
+         */
+        @DefaultValue("5120") int skillCacheMaxTotalMb
     ) {
         /** 绑定入口消歧（见 record javadoc）：嵌套 record 双构造必须以 @ConstructorBinding 指定 */
         @ConstructorBinding
         public CleanupConfig {
         }
 
-        /** 兼容构造器（旧 5 参调用方）：确认截止取默认 10min，技能缓存 GC 取默认（启用 / 保留 2 天）。 */
+        /** 兼容构造器（旧 5 参调用方）：确认截止取默认 10min，技能缓存 GC 取默认（启用 / 保留 2 天 / 上限 5GB）。 */
         public CleanupConfig(int confirmTtlMinutes, int turnLeaseTtlSeconds, int turnLeaseRenewSeconds,
                              int auditRetentionDays, int sessionRetentionDays) {
             this(confirmTtlMinutes, 10, turnLeaseTtlSeconds, turnLeaseRenewSeconds, auditRetentionDays,
-                sessionRetentionDays, true, 2);
+                sessionRetentionDays, true, 2, 5120);
         }
     }
 

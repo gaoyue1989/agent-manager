@@ -80,6 +80,9 @@ agent:
   cleanup:
     skill-cache-gc-enabled: ${AGENT_CLEANUP_SKILL_CACHE_GC_ENABLED:true}
     skill-cache-retention-days: ${AGENT_CLEANUP_SKILL_CACHE_RETENTION_DAYS:2}
+    # 宿主 .skills-cache 容量护栏（P1）：按龄保留是时间护栏，高会话量下 2 天窗口仍可能写满盘
+    # （66MB/会话 scope）；超限按最新 mtime 最旧优先逐目录回收（≤0 关闭）
+    skill-cache-max-total-mb: ${AGENT_CLEANUP_SKILL_CACHE_MAX_TOTAL_MB:5120}
     # D16 确认硬截止（sandbox-pool-design；占位符映射是 env 直传的唯一通路，与同文件其他键同款）
     confirm-deadline-minutes: ${AGENT_CONFIRM_DEADLINE_MINUTES:10}
   sandbox:
@@ -95,6 +98,9 @@ agent:
     projection-fingerprint-cache-enabled: ${SANDBOX_PROJECTION_FINGERPRINT_CACHE:true}
     skill-revision-gate-enabled: ${SANDBOX_SKILL_REVISION_GATE:true}
     sync-snapshot-diff-enabled: ${SANDBOX_SYNC_SNAPSHOT_DIFF:true}
+    # 包内基线跳过（P1-5）：容器技能与包内基线清单+大小一致时不回写 L4——L4 只存用户真实覆盖，
+    # 防 agent_fs 按用户复制整份包内技能（66MB/用户）
+    sync-skip-package-baseline-enabled: ${SANDBOX_SYNC_SKIP_PACKAGE_BASELINE:true}
     # per-session agent 隔离（上游 #2849 workaround）：每会话独立 HarnessAgent/SandboxBackedFilesystem，
     # 消解并行 turn 互踩单槽沙箱指针（跨用户 "No active sandbox"/串扰）。MCP 连接经
     # McpToolRegistrar.sharedWrappers 复用（PR #134），连接数不随会话数放大。

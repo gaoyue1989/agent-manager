@@ -147,6 +147,9 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR,
                 "create", "Failed to start OpenSandbox: " + e.getMessage(), e);
         }
+        // 投影指纹预热（P1 收尾）：start 已验证「宿主投影 ↔ 容器」一致并写入 state hash，
+        // 播种指纹缓存使本代首个 exec 的 refreshProjectionIfStale 直接短路（省冷 build ≈0.8s）
+        sandbox.prewarmProjectionFingerprintCache();
 
         return sandbox;
     }
@@ -216,6 +219,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR,
                 "create", "Failed to start pooled OpenSandbox: " + e.getMessage(), e);
         }
+        // 同 create：start 验证后的指纹预热（池化借出路径）
+        sandbox.prewarmProjectionFingerprintCache();
         return sandbox;
     }
 

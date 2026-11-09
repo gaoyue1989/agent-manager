@@ -1,11 +1,13 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,14 +59,30 @@ public class WorkspaceSyncService {
     private final WorkspaceReader workspaceReader;
     /** 快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true；false=每次全量读容器 skills/） */
     private final boolean snapshotDiffEnabled;
+    /**
+     * 包内技能基线目录（L2，{@code /config/skills}；null=不启用基线跳过）：容器技能与基线
+     * 清单+大小完全一致时不回写 L4（P1-5）——包内技能经投影进容器后被 syncBack 整份复制进
+     * 每个用户的 KV（66MB/用户），既撑爆存储又让新沙箱代首次物化付出全量成本；L4 只应存
+     * 用户真实修改过的覆盖。
+     */
+    private final java.nio.file.Path packageSkillsDir;
+    /** 基线跳过开关（SANDBOX_SYNC_SKIP_PACKAGE_BASELINE，默认 true） */
+    private final boolean skipPackageBaseline;
 
     public WorkspaceSyncService(WorkspaceReader workspaceReader) {
         this(workspaceReader, true);
     }
 
     public WorkspaceSyncService(WorkspaceReader workspaceReader, boolean snapshotDiffEnabled) {
+        this(workspaceReader, snapshotDiffEnabled, null, true);
+    }
+
+    public WorkspaceSyncService(WorkspaceReader workspaceReader, boolean snapshotDiffEnabled,
+                                java.nio.file.Path packageSkillsDir, boolean skipPackageBaseline) {
         this.workspaceReader = workspaceReader;
         this.snapshotDiffEnabled = snapshotDiffEnabled;
+        this.packageSkillsDir = packageSkillsDir;
+        this.skipPackageBaseline = skipPackageBaseline;
     }
 
     /**
@@ -102,6 +120,36 @@ public class WorkspaceSyncService {
     // ==================== 运行时文件（MEMORY.md / memory/） ====================
 
     private void syncRuntimeFiles(String userId, com.alibaba.opensandbox.sandbox.Sandbox osbSandbox, String root) {
+        // 0. 缺席探测（P2-6）：一次 listDirectory 判断 MEMORY.md / memory/ 是否存在，
+        //    两者都不存在（新用户会话常态）直接返回——省掉 readByteArray 与 memory/ 列举
+        //    两次 404 异常路径（SDK 侧会打 ERROR 堆栈，每 call 白付噪声）。
+        //    列举返回 null / 抛异常（适配器不支持、工作区未建）→ 保守回落原逐项路径
+        try {
+            // root 带尾斜杠（/workspace/），探测用无尾斜杠形态（与 memory/ 列举的拼接口径一致）
+            var probeRoot = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
+            var entries = osbSandbox.files().listDirectory(probeRoot);
+            if (entries == null) {
+                log.debug("workspace root probe returned null, fall back to per-file sync");
+            } else {
+                boolean memoryMdExists = false;
+                boolean memoryDirExists = false;
+                for (var entry : entries) {
+                    var leaf = leafName(entry.getPath());
+                    if (WorkspaceReader.MEMORY_FILE.equals(leaf)) {
+                        memoryMdExists = true;
+                    } else if (WorkspaceReader.MEMORY_DIR.equals(leaf)) {
+                        memoryDirExists = true;
+                    }
+                }
+                if (!memoryMdExists && !memoryDirExists) {
+                    log.debug("runtime files absent in {}, sync skipped", root);
+                    return;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("workspace root probe failed, fall back to per-file sync: {}", e.getMessage());
+        }
+
         // 1. MEMORY.md
         try {
             if (osbSandbox.files().readByteArray(root + WorkspaceReader.MEMORY_FILE) != null) {
@@ -218,16 +266,38 @@ public class WorkspaceSyncService {
             log.info("skills/ sync: {} 带管理面写入栅栏（admin-override），跳过回写（保留管理面内容）", name);
             return false;
         }
+        // 容器清单（仅 listDirectory 元数据，不读内容）：仅供 P1-5 基线比对，且只在「本代首次
+        // 见到该技能」时执行——已入快照且未变的技能走下方 collectSkillFiles 的差分自然零读写，
+        // 每轮重复走基线清单是纯开销（20 技能 ≈21 次 listDirectory/call）
+        if (skipPackageBaseline && packageSkillsDir != null) {
+            boolean firstSightOfGeneration = gate == null || gate.manifest().keySet().stream()
+                .noneMatch(key -> key.startsWith(name + "/"));
+            if (firstSightOfGeneration) {
+                Map<String, Long> containerManifest = new LinkedHashMap<>();
+                walkSkillManifest(osbSandbox, skillDir, "", containerManifest, 0);
+                // P1-5 包内基线跳过：容器技能与包内基线（L2）清单+大小完全一致 → 纯基线副本，
+                // 不回写 L4。只在「无栅栏」分支到达（上方三标记已排除），管理面覆盖技能照常走回写路径。
+                if (isPurePackageBaseline(name, containerManifest)) {
+                    if (gate != null) {
+                        // 基线副本同样记入快照（键含技能名前缀，P0-2）：下轮差分命中即零内容读
+                        containerManifest.forEach((rel, size) -> gate.manifest().put(manifestKey(name, rel), size));
+                    }
+                    log.debug("skills/ sync: {} 与包内基线一致，跳过回写（L4 不存纯基线副本）", name);
+                    return false;
+                }
+            }
+        }
         // 相对路径 → 文件内容（差分模式下只读与快照不一致的文件；读取失败/超限的不进入结果集）
         Map<String, String> files = new LinkedHashMap<>();
-        collectSkillFiles(osbSandbox, skillDir, "", files, 0, gate);
+        collectSkillFiles(osbSandbox, skillDir, "", name, files, 0, gate);
         if (files.isEmpty() || !files.containsKey(WorkspaceReader.SKILL_FILE)) {
             // 无 SKILL.md 不算技能（同 SDK / WorkspaceReader.listUserSkills 判定）。
             // 差分模式下 SKILL.md 未变时不进 files：此时快照必然已含它（快照只能来自
             // 一次含 SKILL.md 的全读/物化记录），因此这里只在「快照为空」（= 该技能从未
             // 全读过的异常态，如 KV 行被外部清空）时跳过；快照含 SKILL.md 则按增量继续
             // （只回写真正变化的资源文件，主文件留在 KV 不动）。
-            var snapshotHasSkillFile = gate != null && gate.manifest().containsKey(WorkspaceReader.SKILL_FILE);
+            var snapshotHasSkillFile = gate != null
+                && gate.manifest().containsKey(manifestKey(name, WorkspaceReader.SKILL_FILE));
             if (!snapshotHasSkillFile) {
                 log.debug("skills/ sync: {} 缺少 {}，跳过", name, WorkspaceReader.SKILL_FILE);
                 return false;
@@ -271,8 +341,13 @@ public class WorkspaceSyncService {
                 log.warn("skills/ sync: {}/{} 回写失败，中止该技能本次回写（已写 {} 个文件）",
                     name, WorkspaceReader.SKILL_FILE, written);
                 // 中止前清掉该技能本轮回写涉及的 manifest 记录：KV 未落库的文件若留在快照里，
-                // 下轮差分会按"未变"跳过内容读，容器内数据永远回不去（快照必须只记已落库状态）
-                removeSkillEntriesFromGate(gate, files.keySet());
+                // 下轮差分会按"未变"跳过内容读，容器内数据永远回不去（快照必须只记已落库状态）。
+                // files 键为技能内相对路径，快照键带技能名前缀（P0-2），移除时对齐
+                var prefixed = new java.util.LinkedHashSet<String>();
+                for (var rel : files.keySet()) {
+                    prefixed.add(manifestKey(name, rel));
+                }
+                removeSkillEntriesFromGate(gate, prefixed);
                 return false;
             }
             log.warn("skills/ sync: {}/{} 回写失败，继续其余文件（下次 call 重试）", name, entry.getKey());
@@ -280,13 +355,111 @@ public class WorkspaceSyncService {
         return written > 0;
     }
 
-    /** 从快照移除本轮回写失败的条目（relPath 即 manifest key，不含技能名前缀——collectSkillFiles 以技能目录为根），防止"未落库被当已同步" */
-    private static void removeSkillEntriesFromGate(SkillSyncGate gate, java.util.Set<String> relPaths) {
+    /**
+     * 快照（gate manifest）键：{@code {技能名}/{技能内相对路径}}（P0-2）。
+     *
+     * <p>历史实现只存技能内相对路径——多技能同布局同大小的文件（包内技能常见的
+     * {@code scripts/run.sh}、{@code references/*.md} 结构）跨技能互相遮蔽：
+     * skill-01 的文件命中 skill-00 的快照条目被当「未变」跳过内容读，整技能漏回写
+     * （基准实证 20 技能只回写了第 1 个），用户修改永不落库、容器换代即丢。
+     */
+    private static String manifestKey(String skillName, String relPath) {
+        return skillName + "/" + relPath;
+    }
+
+    /** 从快照移除本轮回写失败的条目（键已带技能名前缀，见 {@link #manifestKey}），防止"未落库被当已同步" */
+    private static void removeSkillEntriesFromGate(SkillSyncGate gate, java.util.Set<String> keys) {
         if (gate == null) {
             return;
         }
-        for (var rel : relPaths) {
-            gate.manifest().remove(rel);
+        for (var key : keys) {
+            gate.manifest().remove(key);
+        }
+    }
+
+    /**
+     * P1-5：容器技能是否为包内基线的纯副本（未启用/无基线目录返回 false）。
+     * 比对口径：文件集合一致且逐文件字节数一致（大小一致的原位内容漂移不感知——
+     * 与快照差分同一已接受边界，见 sandbox-skill-sync-optimization-design §7）。
+     */
+    private boolean isPurePackageBaseline(String name, Map<String, Long> containerManifest) {
+        if (packageSkillsDir == null || containerManifest.isEmpty()) {
+            return false;
+        }
+        var baselineDir = packageSkillsDir.resolve(name);
+        if (!Files.isDirectory(baselineDir.resolve(WorkspaceReader.SKILL_FILE))) {
+            return false;
+        }
+        Map<String, Long> baseline = new LinkedHashMap<>();
+        try (var stream = Files.walk(baselineDir)) {
+            for (var path : stream.filter(Files::isRegularFile).toList()) {
+                var rel = baselineDir.relativize(path).toString().replace('\\', '/');
+                if (isMetadataSegment(rel)) {
+                    continue;
+                }
+                baseline.put(rel, Files.size(path));
+            }
+        } catch (Exception e) {
+            // 基线读不到：按“非纯基线”处理（回写路径行为不变，fail-soft）
+            log.debug("skills/ sync: 基线读取失败 {}，按非基线处理: {}", name, e.getMessage());
+            return false;
+        }
+        if (baseline.equals(containerManifest)) {
+            return true;
+        }
+        // 诊断日志（DEBUG）：首个差异条目，便于现场定位基线比对不命中的原因
+        var onlyBaseline = new java.util.TreeSet<>(baseline.keySet());
+        onlyBaseline.removeAll(containerManifest.keySet());
+        var onlyContainer = new java.util.TreeSet<>(containerManifest.keySet());
+        onlyContainer.removeAll(baseline.keySet());
+        String diff;
+        if (!onlyBaseline.isEmpty() || !onlyContainer.isEmpty()) {
+            diff = "onlyBaseline=" + onlyBaseline.stream().limit(3).toList()
+                + " onlyContainer=" + onlyContainer.stream().limit(3).toList()
+                + " (baseline=" + baseline.size() + ", container=" + containerManifest.size() + ")";
+        } else {
+            diff = baseline.entrySet().stream()
+                .filter(e -> !e.getValue().equals(containerManifest.get(e.getKey())))
+                .limit(3)
+                .map(e -> e.getKey() + ": baseline=" + e.getValue() + " container=" + containerManifest.get(e.getKey()))
+                .toList().toString();
+        }
+        log.info("skills/ sync: {} 非纯基线副本: {}", name, diff);
+        return false;
+    }
+
+    /**
+     * 递归收集容器技能目录的文件清单（相对路径 → 字节大小，仅 listDirectory 元数据、零内容读）。
+     * 供 P1-5 基线比对与快照回填；目录判定/元数据过滤与 {@link #collectSkillFiles} 同规则。
+     */
+    private void walkSkillManifest(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox, String dirPath,
+                                   String relPrefix, Map<String, Long> out, int depth) {
+        if (depth > MAX_SKILL_DEPTH) {
+            return;
+        }
+        List<EntryInfo> entries;
+        try {
+            entries = osbSandbox.files().listDirectory(dirPath);
+        } catch (Exception e) {
+            log.debug("skills/ sync: 列举 {} 失败: {}", dirPath, e.getMessage());
+            return;
+        }
+        if (entries == null) {
+            return;
+        }
+        for (var entry : entries) {
+            var leaf = leafName(entry.getPath());
+            if (leaf == null || isMetadataSegment(leaf)) {
+                continue;
+            }
+            var absPath = dirPath + "/" + leaf;
+            var relPath = relPrefix + leaf;
+            if (isDirectoryEntry(entry)) {
+                walkSkillManifest(osbSandbox, absPath, relPath + "/", out, depth + 1);
+                continue;
+            }
+            // 条目缺 size（口径不一）时记 0——与基线比对必然不等（基线文件 size>0），fail-safe
+            out.put(relPath, Math.max(entry.getSize(), 0L));
         }
     }
 
@@ -299,10 +472,11 @@ public class WorkspaceSyncService {
      *
      * <p>快照差分（gate 非空）：先 listDirectory 拿条目元数据（含 size），与 gate manifest
      * 一致的文件跳过内容读（同时把本次看到的 size 记回快照，含未读文件）；不一致/未知才读。
-     * gate 为 null 时行为与旧版完全一致（全部读内容）。
+     * 快照键带技能名前缀（P0-2，{@link #manifestKey}），gate 为 null 时行为与旧版完全一致（全部读内容）。
      */
     private void collectSkillFiles(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox, String dirPath,
-                                   String relPrefix, Map<String, String> out, int depth, SkillSyncGate gate) {
+                                   String relPrefix, String skillName, Map<String, String> out, int depth,
+                                   SkillSyncGate gate) {
         if (depth > MAX_SKILL_DEPTH) {
             log.warn("skills/ sync: 目录层级超过 {} 层，跳过 {}", MAX_SKILL_DEPTH, dirPath);
             return;
@@ -325,15 +499,15 @@ public class WorkspaceSyncService {
             var absPath = dirPath + "/" + leaf;
             var relPath = relPrefix + leaf;
             if (isDirectoryEntry(entry)) {
-                collectSkillFiles(osbSandbox, absPath, relPath + "/", out, depth + 1, gate);
+                collectSkillFiles(osbSandbox, absPath, relPath + "/", skillName, out, depth + 1, gate);
                 continue;
             }
             long entrySize = entry.getSize();
             if (gate != null) {
-                var known = gate.manifest().get(relPath);
+                var known = gate.manifest().get(manifestKey(skillName, relPath));
                 if (known != null && known.longValue() == entrySize) {
                     // 与快照一致：不读内容（同时刷新快照口径——size 字段以本次列举为准）
-                    gate.manifest().put(relPath, entrySize);
+                    gate.manifest().put(manifestKey(skillName, relPath), entrySize);
                     continue;
                 }
             }
@@ -343,13 +517,13 @@ public class WorkspaceSyncService {
                 if (gate != null) {
                     // 读到内容才记 manifest：读失败回落目录递归的条目不能记——
                     // 若记了 size，下轮差分会把它当"未变文件"跳过内容读，目录内文件漏镜像
-                    gate.manifest().put(relPath, entrySize);
+                    gate.manifest().put(manifestKey(skillName, relPath), entrySize);
                 }
             } else {
                 // 读不到或空内容：可能是目录被判成文件（type 口径差异 / 目录读成空串），
                 // 回落按目录递归；真空文件会被跳过（技能资源里空文件无意义）。
                 // 不记 manifest：下轮仍按未知条目重试读取/递归
-                collectSkillFiles(osbSandbox, absPath, relPath + "/", out, depth + 1, gate);
+                collectSkillFiles(osbSandbox, absPath, relPath + "/", skillName, out, depth + 1, gate);
             }
         }
     }
