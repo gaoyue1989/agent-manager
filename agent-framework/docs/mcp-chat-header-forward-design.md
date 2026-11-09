@@ -225,7 +225,10 @@ if (reqHeaders != null && !reqHeaders.headers().isEmpty()) {
    透传值只走 HTTP header 单通道（userId 的 `_meta` 双通道语义**不变**）；
 3. **注入**：resolve() 逻辑零改动（`reqHeader:*` 本就是普通 meta key 查找），值合法性
    校验（CRLF/控制字符/非 ASCII）与 fail-closed 语义沿用——捕获值源自真实 HTTP 请求，
-   Tomcat 已保证传输层合法性，此处为纵深防御；
+   Tomcat 已保证传输层合法性，此处为纵深防御。唯一补丁（issue #272）：缺值 deny 的报错
+   文案按取值源分叉——`reqHeader:*` 键剥前缀回显头名、指引「chat 请求携带该 HTTP 头」，
+   其余键（userId 等服务端解析值）维持「provide them in McpMeta」原文案；该错误会进入
+   模型可见的 tool 结果，模型无法写 McpMeta、用户不知 McpMeta 为何物，统一文案不可行动；
 4. `McpUserHeaderCustomizer` 零改动；`listTools`/`initialize` 仍走静态凭据（deer-flow
    语义不变）。
 
@@ -259,7 +262,7 @@ if (reqHeaders != null && !reqHeaders.headers().isEmpty()) {
 | 不进日志 | 捕获/注入全链路只记头名；错误信息沿用「只含 key 名不含值」约束（`McpUserHeaderException` 现状） |
 | `_meta` 隔离 | `reqHeader:*` 恒剥离（§6.4）：透传值只走 HTTP header；userId 双通道不变；其他 server（含未配置者）的 `_meta` 不受污染 |
 | 平台凭据防误转 | denylist 挡 `cookie`（平台会话凭据）；**`Authorization` 无法 deny（恰是主用例）**——若部署把平台自身认证放在 `Authorization`（如 ROUTER_AUTH_MODE=enforce 的 auth_request 凭据），声明转发即转发平台凭据。评审点 Q1：网关侧平台认证改独立头，或文档强声明「转发 Authorization = 包作者显式行为」 |
-| fail-closed | `on-missing: deny` 缺省：请求未带声明头 → 该 MCP 调用失败（错误只含头名），绝不静默回退静态发现凭据 |
+| fail-closed | `on-missing: deny` 缺省：请求未带声明头 → 该 MCP 调用失败（错误只含头名，指引必须可行动：`reqHeader:*` 缺值报「chat 请求携带该 HTTP 头」、剥前缀回显头名，不得指向 McpMeta——模型无法写 McpMeta，issue #272），绝不静默回退静态发现凭据 |
 | 限额 | §6.2 三重限额，超限 drop + WARN |
 
 ## 8. 边界与已知限制（文档须明示）
