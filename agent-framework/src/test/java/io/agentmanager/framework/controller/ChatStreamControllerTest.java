@@ -173,7 +173,7 @@ class ChatStreamControllerTest {
 
     private List<String> collect(String sessionId, String message, String userId, List<String> fileIds) {
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null, null), null, null, null)
+                new ChatStreamController.ChatRequest(message, userId, sessionId, fileIds, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
         return frames == null ? List.of() : frames.stream().map(f -> f.data()).toList();
     }
@@ -210,7 +210,7 @@ class ChatStreamControllerTest {
         requestHeaders.add("Authorization", "Bearer tok-abc");
         requestHeaders.add("Cookie", "sid=secret");
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null),
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null, null),
                 null, null, requestHeaders)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -235,7 +235,7 @@ class ChatStreamControllerTest {
         var requestHeaders = new org.springframework.http.HttpHeaders();
         requestHeaders.add("Authorization", "Bearer tok-abc");
         controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null),
+                new ChatStreamController.ChatRequest("hello", "alice", sessionId, null, null, null, null),
                 null, null, requestHeaders)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -637,7 +637,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) d1, (AgentEvent) callEnd,
                 (AgentEvent) rDelta, (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("写文件", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -682,7 +682,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd,
                 (AgentEvent) rEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("跑命令", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var typeCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -723,7 +723,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -764,7 +764,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null),
+        ctrl.chat(new ChatStreamController.ChatRequest("present it", "alice", sessionId, null, null, null, null),
                 null, "/agent/demo/", null)
             .collectList().block(Duration.ofSeconds(10));
 
@@ -804,7 +804,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("make me a package", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -850,7 +850,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) trDelta, (AgentEvent) trEnd, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("big package", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -903,7 +903,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("show it", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -935,7 +935,7 @@ class ChatStreamControllerTest {
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) tcStart, (AgentEvent) agentEnd));
 
-        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null, null), null, null, null)
+        ctrl.chat(new ChatStreamController.ChatRequest("echo it", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
@@ -1323,7 +1323,7 @@ class ChatStreamControllerTest {
         when(modelCatalog.validateSelectable("nope")).thenReturn("unknown_model");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope", null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", "test-user-m1", null, "nope", null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(frames.stream().anyMatch(f -> f != null && f.contains("unknown_model: nope")),
@@ -1341,7 +1341,7 @@ class ChatStreamControllerTest {
 
         // sessionId 缺省（新会话）+ model 显式指定
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2", null), null, null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "m2", null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1358,7 +1358,7 @@ class ChatStreamControllerTest {
             .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-m3")));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system", null), null, null, null)
+                new ChatStreamController.ChatRequest("hello", "alice", null, null, "system", null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10)).stream().map(f -> f.data()).toList();
 
         assertTrue(!frames.isEmpty(), "应有 SSE 帧: " + frames);
@@ -1486,7 +1486,7 @@ class ChatStreamControllerTest {
         when(sessionUserStore.findUserIdBySession(sessionId)).thenReturn("alice");
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "bob", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1508,7 +1508,7 @@ class ChatStreamControllerTest {
             .thenReturn(reactor.core.publisher.Flux.just(end));
 
         var frames = controller.chat(
-                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null, null), null, null, null)
+                new ChatStreamController.ChatRequest("hi", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         assertNotNull(frames);
@@ -1621,7 +1621,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, List.of("a", "b")), null, null, null)
+                "hi", "alice", sessionId, null, null, List.of("a", "b"), null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1641,7 +1641,7 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, List.of()), null, null, null)
+                "hi", "alice", sessionId, null, null, List.of(), null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
@@ -1660,11 +1660,90 @@ class ChatStreamControllerTest {
 
         var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
         ctrl.chat(new ChatStreamController.ChatRequest(
-                "hi", "alice", sessionId, null, null, null), null, null, null)
+                "hi", "alice", sessionId, null, null, null, null), null, null, null)
             .collectList().block(Duration.ofSeconds(10));
 
         verify(chatChannel).dispatchStream(captor.capture());
         assertFalse(captor.getValue().messages().get(0).getMetadata().containsKey("skills"),
             "未传 skills 不写入 metadata（全部技能）");
+    }
+
+    // ========== 本轮 tools 列表（session-tool-list-design §2） ==========
+
+    @Test
+    void chatWithToolsShouldPutWhitelistIntoMessageMetadata() {
+        var sessionId = "test-tools-1";
+        var ctrl = controllerWithInjection(mock(SkillInjectionService.class));
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-tw-1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-tw-1")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, null, List.of("query", "get_order")),
+            null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        var metadata = captor.getValue().messages().get(0).getMetadata();
+        assertEquals(List.of("query", "get_order"), metadata.get("tools"),
+            "本轮工具白名单随用户消息 metadata 下传（ToolFilterMiddleware 读取）");
+    }
+
+    @Test
+    void chatWithEmptyToolsShouldKeepEmptyListInMetadata() {
+        var sessionId = "test-tools-2";
+        var ctrl = controllerWithInjection(mock(SkillInjectionService.class));
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-tw-2");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-tw-2")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, null, List.of()), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        var metadata = captor.getValue().messages().get(0).getMetadata();
+        assertTrue(metadata.containsKey("tools"), "显式空列表必须写入（= 仅内置，不能退化为缺省）");
+        assertTrue(((java.util.List<?>) metadata.get("tools")).isEmpty());
+    }
+
+    @Test
+    void chatWithoutToolsShouldNotPutKey() {
+        var sessionId = "test-tools-3";
+        var ctrl = controllerWithInjection(mock(SkillInjectionService.class));
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-tw-3");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-tw-3")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, null, null), null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        assertFalse(captor.getValue().messages().get(0).getMetadata().containsKey("tools"),
+            "未传 tools 不写入 metadata（全部工具）");
+    }
+
+    @Test
+    void chatWithToolsAndSkillsShouldCarryBothKeys() {
+        var sessionId = "test-tools-4";
+        var ctrl = controllerWithInjection(mock(SkillInjectionService.class));
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-tw-4");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) new AgentEndEvent("r-tw-4")));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(InboundMessage.class);
+        ctrl.chat(new ChatStreamController.ChatRequest(
+                "hi", "alice", sessionId, null, null, List.of("refund"), List.of("query")),
+            null, null, null)
+            .collectList().block(Duration.ofSeconds(10));
+
+        verify(chatChannel).dispatchStream(captor.capture());
+        var metadata = captor.getValue().messages().get(0).getMetadata();
+        assertEquals(List.of("refund"), metadata.get("skills"));
+        assertEquals(List.of("query"), metadata.get("tools"), "skills 与 tools 正交共存");
     }
 }

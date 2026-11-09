@@ -83,6 +83,8 @@ public class HarnessAgentFactory {
     /** 技能禁用过滤中间件依赖（L2 包内禁用集 + L4 个人禁用） */
     private final SkillManageService skillManageService;
     private final UserSkillService userSkillService;
+    /** 会话级工具三分类/名单解析（ToolFilterMiddleware 与 /tools 查询共用，session-tool-list-design §4.1） */
+    private final SessionToolScopeService sessionToolScopeService;
 
     /**
      * 会话消息轨归档存储：装配回合起始用户输入归档中间件（{@link TurnInputArchiveMiddleware}，
@@ -116,7 +118,8 @@ public class HarnessAgentFactory {
         // @Lazy 破环：UserSkillService 依赖 OafConfig bean，直接注入会把 Factory 挂到
         // OafConfig/HarnessAgent 装配链上；代理延迟到运行期解析，启动期零影响
         @Lazy UserSkillService userSkillService,
-        SkillManageService skillManageService
+        SkillManageService skillManageService,
+        SessionToolScopeService sessionToolScopeService
     ) {
         this.props = props;
         this.workspaceInitializer = workspaceInitializer;
@@ -125,6 +128,7 @@ public class HarnessAgentFactory {
         this.remoteConfirmBridge = remoteConfirmBridge;
         this.userSkillService = userSkillService;
         this.skillManageService = skillManageService;
+        this.sessionToolScopeService = sessionToolScopeService;
     }
 
     /**
@@ -223,6 +227,12 @@ public class HarnessAgentFactory {
                 .middleware(new LlmLoggingMiddleware(llmLogger, sessionKeyResolver))
                 // ToolUseBlock 完整性校验（vLLM/Qwen3 流式输出畸形 tool call 防御）
                 .middleware(new ToolCallValidationMiddleware())
+                // 会话级工具过滤（本轮 tools 声明，session-tool-list-design §4）：作用域限
+                // MCP+自定义，内置恒保留（内置启停走包级 deniedTools/tools.json）。
+                // onReasoning 收敛模型侧 schema（主防线），onActing 兜底 DENY 白名单外
+                // 业务工具调用；未传 tools 时零开销直通。三分类/名单解析统一走
+                // SessionToolScopeService（与 /tools 查询接口同源）
+                .middleware(new ToolFilterMiddleware(sessionToolScopeService))
                 // 远程子 agent 动态 DENY（travel-fulfillment F16/§6.1）：协议任务携带的
                 // context.deny_rules 按工具名拦截执行；非协议轮次无该 RuntimeContext 属性，
                 // 零开销直通

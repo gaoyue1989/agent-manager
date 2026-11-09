@@ -3,7 +3,7 @@
 **版本:** v2.1.0 (Java) — 无状态单次流架构
 **复核日期:** 2026-10-25（master @ `e729a67`）— 增量重核：新增 §AG-UI 协议 API（`/agui/*`，
 b2946ca，默认关闭；事件词表权威见 [api-frontend-sse.md](api-frontend-sse.md) §15）
-（最新 2026-11-04：增补 PUT /sandbox/env 与 /debug/monitor 三端点、skills 请求体字段（对应 PR #223 后 HEAD）；
+（最新 2026-11-09：增补 chat `tools` 请求体字段与 `/tools` 的 fullName/sessionControllable/sessionTools/?tools=（session-tool-list-design）；2026-11-04：增补 PUT /sandbox/env 与 /debug/monitor 三端点、skills 请求体字段（对应 PR #223 后 HEAD）；
 上一轮 2026-10-08：Flyway V9（#87 PER_PEER 会话重键）、llm-calls 记录键 gw-hash 形态订正；
 上一轮 2026-10-01 @ `4a4dea8`：数据表迁 Flyway（V1–V8）、模型采样参数、confirm_context 多行化、
 `/a2a/jobs`、ASKING 入口预检、远程转发事件标注；
@@ -210,20 +210,27 @@ curl 'http://localhost:8100/tools?includeInternal=true'
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `includeInternal` | `false` | 是否输出自定义工具段与 SDK 内置段 |
+| `tools` | （空） | 会话级白名单预览（逗号分隔，裸名/全名均可）：只裁剪 MCP 段与 internal 段（与 `POST /threads/chat` 的 `tools` 字段同口径，经 SessionToolScopeService 归一），sdkInternal 段不受影响；缺省/空串 = 不过滤（存量语义）。**闭环用法**：`GET /tools` → 取 `sessionTools.tools` → 逐名传入 chat/A2A `tools` 字段，收敛结果 = 该清单 ∪ 全部内置（查询即所得） |
 
 **响应结构（三段并列）：**
 
 ```json
 {
   "tools": [
-    { "name": "get_weather", "server": "weather", "category": "mcp", "description": "Get weather" },
-    { "name": "echo", "category": "internal", "source": "builtin", "declared": true }
+    { "name": "get_weather", "fullName": "mcp__weather__get_weather", "server": "weather",
+      "category": "mcp", "sessionControllable": true, "description": "Get weather" },
+    { "name": "echo", "category": "internal", "source": "builtin", "declared": true, "sessionControllable": true }
   ],
   "totalCount": 2,
   "mcpCount": 1,
   "internalCount": 1,
-  "sdkInternal": [ { "name": "read_file", "category": "sdk", "source": "sdk" } ],
-  "sdkInternalCount": 1
+  "sdkInternal": [ { "name": "read_file", "category": "sdk", "source": "sdk", "sessionControllable": false } ],
+  "sdkInternalCount": 1,
+  "sessionTools": {
+    "tools": ["get_weather", "echo", "..."],
+    "count": 7,
+    "hint": "Pass these names (bare) in chat/A2A 'tools'; MCP tools also accept full name mcp__{server}__{tool}. Built-in tools are always visible and not session-controllable (disable via package deniedTools)."
+  }
 }
 ```
 
@@ -232,13 +239,15 @@ curl 'http://localhost:8100/tools?includeInternal=true'
 | 字段 | 说明 |
 |------|------|
 | `name` | 工具名（MCP 工具为远端裸名，不带 `mcp__{server}__` 前缀） |
+| `fullName` | **仅 MCP 段有**：`mcp__{server}__{tool}` 展示名，可传入 chat/A2A `tools` 字段的全名别名（session-tool-list-design §5） |
+| `sessionControllable` | 是否受会话级 `tools` 白名单控制：MCP/internal 段恒 `true`，sdkInternal 段恒 `false`（内置恒可见） |
 | `category` | `mcp` / `internal` / `sdk`（**没有 `builtin` 这个取值**） |
 | `server` | **仅 MCP 段有**：来源 server 名 |
 | `source` | **仅内置段有**：`builtin`（`@Tool` 或插件）/ `sdk` |
 | `declared` | **仅 internal 段有**：是否出现在 OAF `tools:` 声明列表中 |
 | `description` | 工具描述 |
 | `uiResourceUri` | MCP Apps（可选）：工具绑定的 `ui://` 资源 URI |
-| `appOnly` | MCP Apps（可选，默认 false）：`ui.app_only: true` 的工具仅卡片展示 |
+| `appOnly` | MCP Apps（可选，默认 false）：`ui.app_only: true` 的工具仅卡片展示（不注册 Toolkit、不在 `sessionTools` 清单内） |
 
 **计数口径（易踩坑）：**
 
@@ -592,6 +601,7 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
 | `model` | String | | 会话模型（`GET /models` 的 id；**缺省=不改变绑定**，传值即绑定本会话并本 turn 生效，`""`/`system`=回到默认模型；未知/禁用返回 error 帧 `unknown_model: xxx`） |
 | `skills` | List\<String\> | | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进模型侧 `<available_skills>`、不可经 `load_skill_through_path` 加载、`@Skill` 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 [session-skill-list-design.md](../../docs/design/session-skill-list-design.md)） |
+| `tools` | List\<String\> | | 本轮可用工具白名单，作用域限 **MCP + 自定义**（**缺省 = 全部**；`[]` = 仅内置——内置工具恒可见、不受会话级控制，关闭走包级 `deniedTools`；仅本轮生效，不落库、不跨轮沿用）。名单外的 MCP/自定义工具不进模型侧请求（省 token），模型幻觉调用在 acting 层兜底 DENY。名单可用裸名（主口径，= `GET /tools` 的 `name` / `sessionTools.tools`）或 MCP 全名 `mcp__{server}__{tool}`（别名）；未知名忽略；内置名写入名单 WARN 且不改变可见性。可传清单见 `GET /tools` 的 `sessionTools`。见 [session-tool-list-design.md](../../docs/design/session-tool-list-design.md) |
 
 > **请求级透传头（mcp-chat-header-forward-design）**：请求携带的 HTTP header 可按 OAF 包
 > `mcp-configs/{server}/config.yaml` 的 `userHeaders.headers` 声明（取值源

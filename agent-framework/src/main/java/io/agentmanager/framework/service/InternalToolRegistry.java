@@ -75,6 +75,15 @@ public class InternalToolRegistry {
     }
 
     /**
+     * 会话级可控的自定义工具运行时名集（session-tool-list-design §4.1）：
+     * {@code runtimeNames} 同口径（deniedTools 剔除后），与 HarnessAgentFactory 注册进
+     * Toolkit 的自定义集一致。ToolFilterMiddleware 分类与 /tools sessionTools 汇总共用。
+     */
+    public Set<String> runtimeCustomToolNames() {
+        return runtimeNames(oafConfigHolder.get());
+    }
+
+    /**
      * /tools?includeInternal=true 的 sdkInternal 段落（issue #39）：SDK（Harness 框架）在
      * HarnessAgent 构建时注册进 Toolkit 的内置工具运行时注册集——文件/记忆/会话/计划/技能/
      * 子 Agent/异步任务/Shell 等。这批工具不在 {@code List<CustomTool>} 体系内，无法从
