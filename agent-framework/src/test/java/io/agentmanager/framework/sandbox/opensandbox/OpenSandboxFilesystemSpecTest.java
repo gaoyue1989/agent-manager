@@ -100,6 +100,43 @@ class OpenSandboxFilesystemSpecTest {
         assertNull(spec.hydratedScopedScope("sbx-2"));
     }
 
+    // ==================== 缺口④：scoped 指纹跨副本共享层 ====================
+
+    @Test
+    void sharedFingerprintHitBackfillsPodTablesAndShortCircuits() {
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        org.mockito.Mockito.when(shared.get("sbx-x", "sess-A")).thenReturn("fp-shared");
+        spec.sharedFingerprintStore(shared);
+
+        // Pod 级 miss → 共享层命中（他副本已投放）
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-x", "zz"), "另一 scope 无记录");
+        assertEquals("fp-shared", spec.scopedSkillCacheFingerprint("sbx-x", "sess-A"),
+            "共享层命中返回他副本记录的指纹");
+        // 命中同时回填 Pod 两表（稳态判定要求两表一致）
+        assertEquals("fp-shared", spec.scopedSkillCacheFingerprint("sbx-x", "sess-A"), "回填后 Pod 级命中");
+        assertEquals("sess-A", spec.hydratedScopedScope("sbx-x"), "已投放 scope 一并回填");
+    }
+
+    @Test
+    void sharedFingerprintWriteGoesToBothLayers() {
+        var spec = new OpenSandboxFilesystemSpec();
+        var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        spec.sharedFingerprintStore(shared);
+
+        spec.recordScopedSkillCacheFingerprint("sbx-y", "sess-B", "fp-1");
+        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-y", "sess-B"), "Pod 级已写");
+        org.mockito.Mockito.verify(shared).put("sbx-y", "sess-B", "fp-1");
+    }
+
+    @Test
+    void noopStoreKeepsPurePodLocalBehavior() {
+        var spec = new OpenSandboxFilesystemSpec(); // 未注入 → NOOP
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-z", "sess-C"), "无共享层时未知=走慢路径");
+        spec.recordScopedSkillCacheFingerprint("sbx-z", "sess-C", "fp-2");
+        assertEquals("fp-2", spec.scopedSkillCacheFingerprint("sbx-z", "sess-C"));
+    }
+
     @Test
     void scopedPayloadCacheShouldRoundTripAndRespectFingerprint() {
         var spec = new OpenSandboxFilesystemSpec();

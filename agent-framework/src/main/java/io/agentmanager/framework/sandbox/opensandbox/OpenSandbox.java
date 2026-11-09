@@ -219,6 +219,12 @@ public class OpenSandbox extends AbstractBaseSandbox
 
     @Override
     public byte[] downloadFile(String path) throws Exception {
+        // scoped 投放延迟触发（first-llm-latency）：SDK SandboxFileTransfer 下载路径命中
+        // .skills-cache 时同步投放（CAS 每 call 一次）——与 doExec/readWorkspaceFile 同口径，
+        // 否则直读未投放目录会 404
+        if (path != null && path.contains(SkillCacheScope.CACHE_DIR)) {
+            hydrateScopedSkillCache();
+        }
         return osbSandbox.files().readByteArray(path);
     }
 
@@ -1026,10 +1032,69 @@ public class OpenSandbox extends AbstractBaseSandbox
      */
     private String scopedSkillCacheFingerprint(Path scopeDir, WorkspaceSpec spec,
                                                String sourceRoot, String scope) throws Exception {
+        // 指纹源（缺口④修正）：stage 副本目录的 mtime 各副本不同（各自 staging 时刻），
+        // 直接对它做 stat 指纹则跨副本指纹天然不等、共享层永不命中。改为<b>内容身份</b>组合：
+        //   指纹 = hash(包内源目录 stat 指纹 + "|" + L4 revision)
+        // - 包内源（configDir/skills）生产为同 PVC 只读挂载——跨副本同文件同 mtime，指纹一致；
+        // - L4 revision 在 KV 共享（用户技能变化自增）——覆盖用户级差异；
+        // - stage 目录是 SDK 对上述两源的确定性物化（writeIfChanged），只用于「有无可投内容」
+        //   的空载荷判定，不参与指纹。
+        // 本地/单副本语义不变：任一源变化 → 指纹变 → 慢路径重投。
         if (!Files.isDirectory(scopeDir)) {
             return "";
         }
-        return ProjectionFingerprintCache.statFingerprint(scopedSkillCacheSpec(spec, sourceRoot, scope));
+        String packageFp = "";
+        var pkgDir = filesystemSpec != null ? filesystemSpec.packageSkillsDir() : null;
+        if (pkgDir != null && Files.isDirectory(pkgDir)) {
+            packageFp = packageSourceFingerprint(pkgDir);
+        }
+        String revision = "";
+        if (workspaceReader != null && userKey != null && !userKey.isBlank()) {
+            var rev = workspaceReader.readUserSkillRevision(userKey);
+            revision = rev == null ? "" : rev;
+        }
+        return packageFp + "|" + revision;
+    }
+
+    /** 包内源目录（configDir/skills）的 stat 指纹：relPath|mtime|size 排序摘要（PVC 同挂载跨副本一致） */
+    private static String packageSourceFingerprint(java.nio.file.Path pkgDir) {
+        try {
+            var lines = new java.util.ArrayList<String>();
+            try (var walk = Files.walk(pkgDir)) {
+                walk.filter(Files::isRegularFile).sorted().forEach(p ->
+                    lines.add(pkgDir.relativize(p) + "|" + mtimeOf(p) + "|" + sizeOf(p)));
+            }
+            lines.sort(String::compareTo);
+            var md = java.security.MessageDigest.getInstance("SHA-256");
+            for (var line : lines) {
+                md.update((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            var digest = md.digest();
+            var sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.substring(0, 16);
+        } catch (Exception e) {
+            // 源指纹算不出（目录不可读等）：退化为「每次都不同」的随机值 → 恒走慢路径（安全侧）
+            return "ERR-" + System.nanoTime();
+        }
+    }
+
+    private static long mtimeOf(java.nio.file.Path p) {
+        try {
+            return Files.getLastModifiedTime(p).toMillis();
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    private static long sizeOf(java.nio.file.Path p) {
+        try {
+            return Files.size(p);
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     /** 用当前 scope 构造投影 spec（includeRoots 只含 {@code .skills-cache/<scope>}）。 */

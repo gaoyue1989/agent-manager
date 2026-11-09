@@ -866,6 +866,26 @@ class OpenSandboxTest {
         verify(osb.commands(), atLeastOnce()).run(contains("! -name 'sess-B'"));
     }
 
+    /** 缺口①：downloadFile（SDK SandboxFileTransfer 下载）路径命中 .skills-cache 时触发延迟投放 */
+    @Test
+    void downloadFileReferencingSkillsCacheTriggersDeferredHydration() throws Exception {
+        var host = java.nio.file.Files.createTempDirectory("scoped-dl");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var st = projectedStateNoSkillCache(host);
+        st.setSandboxId("sbx-dl-1");
+        var sandbox = new OpenSandbox(st, osb, options(), null, null, new OpenSandboxFilesystemSpec());
+        sandbox.setSkillCacheScope("sess-A");
+
+        // 先 download 非 .skills-cache 路径：不投放（write 零调用）
+        sandbox.downloadFile("outputs/plain.txt");
+        verify(osb.files(), never()).write(anyList());
+
+        // 再 download .skills-cache 路径：投放（延迟语义）后才读
+        sandbox.downloadFile(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md");
+        assertTrue(countHydrateTarWrites(osb) >= 1, ".skills-cache 下载必须先投放再读");
+    }
+
     /** P1-3：scoped 慢路径把 prune 与解包合并为单条 exec（不再先单独跑一次 prune） */
     @Test
     void scopedSkillCacheSlowPathFoldsPruneIntoSingleExec() throws Exception {

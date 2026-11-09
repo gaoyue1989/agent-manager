@@ -199,7 +199,7 @@ public class HarnessAgentFactory {
 
             var builder = HarnessAgent.builder()
                 .name(oafConfig.name())
-                .sysPrompt(oafConfig.systemPrompt())
+                .sysPrompt(deduplicatedSysPrompt(oafConfig))
                 .model(loggingModel)
                 .toolkit(toolkit)
                 // ReAct 推理最大轮次：SDK 默认 10 轮不足以支撑"生成 OAF 部署包"等
@@ -622,6 +622,34 @@ public class HarnessAgentFactory {
         } else {
             log.info("Permission coverage verified: {} actual tools, {} with rules",
                 actual.size(), covered.size());
+        }
+    }
+
+    /**
+     * system prompt 去重（first-llm-latency 缺口②）：SDK {@code WorkspaceContextMiddleware} 会把
+     * workspace 的 AGENTS.md（由 {@link WorkspaceInitializer} 自 OAF frontmatter+body 生成）注入
+     * {@code <loaded_context>}——sysPrompt 再带全文则正文进两遍（实测 -832 字符 / -4.5% input tokens）。
+     * 仅当 workspace/AGENTS.md <b>存在</b>时只保留首行标题（标题保留 name 语境）；AGENTS.md 缺失
+     * （workspace 未初始化/历史布局）或正文只有一行时原样返回，防 persona 丢失。
+     */
+    String deduplicatedSysPrompt(io.agentmanager.framework.model.OafConfig oafConfig) {
+        var prompt = oafConfig.systemPrompt();
+        if (prompt == null || prompt.isBlank() || !prompt.contains("\n")) {
+            return prompt;
+        }
+        try {
+            var agentsMd = java.nio.file.Path.of(props.resolvedWorkspaceBaseDir())
+                .resolve(".agentscope").resolve("workspace").resolve("AGENTS.md");
+            if (!java.nio.file.Files.isRegularFile(agentsMd)) {
+                return prompt;
+            }
+            var firstLine = prompt.substring(0, prompt.indexOf('\n')).stripTrailing();
+            log.debug("sysPrompt deduplicated (AGENTS.md injected via loaded_context): {} -> {} chars",
+                prompt.length(), firstLine.length());
+            return firstLine;
+        } catch (Exception e) {
+            // 判定失败按未去重处理（多余正文只多花 token，不改变语义）
+            return prompt;
         }
     }
 }
