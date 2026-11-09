@@ -242,8 +242,14 @@ public class OpenSandbox extends AbstractBaseSandbox
         // 投影新鲜度检查按 call 粒度执行：下轮 call 的 onSystemPrompt 可能再 stage 出新
         // 技能目录（scopeKey 每轮变化），stop 复位后下轮首次 exec 重新比对
         projectionRefreshed.set(false);
-        // scoped .skills-cache 投放同样按 call 粒度复位（下轮 scope 可能变化或新 stage）
+        // scoped .skills-cache 投放同样按 call 粒度复位（下轮 scope 可能变化或新 stage）；
+        // 本 call 从未投放过则收尾补投一次（turn 终态容器必含文件——X18 探针/下轮快照差分
+        // 基准依赖它；CAS 保证「延迟投放」整 call 至多一次）
+        var scopedRanThisCall = skillCacheRefreshed.get();
         skillCacheRefreshed.set(false);
+        if (!scopedRanThisCall) {
+            hydrateScopedSkillCache();
+        }
         if (workspaceSyncService != null && userKey != null) {
             try {
                 // 快照差分（SANDBOX_SYNC_SNAPSHOT_DIFF）：把本会话 gate 传给回写侧，
@@ -285,6 +291,11 @@ public class OpenSandbox extends AbstractBaseSandbox
         log.info("[sandbox-open] doExec invoked: userKey={}, ctx={}", userKey, ctx != null ? ctx.getUserId() : null);
         // ④ 会话水合协调器：userKey 一次解析 + 四步幂等注入的唯一 doExec 侧入口
         hydrateForCall(ctx);
+        // scoped 投放延迟触发（first-llm-latency）：命令真正访问 .skills-cache（技能脚本执行）
+        // 时同步投放（CAS 每 call 一次）；首推理前的探测命令不含 .skills-cache，天然跳过
+        if (command.contains(SkillCacheScope.CACHE_DIR)) {
+            hydrateScopedSkillCache();
+        }
         // P0-12：SDK 探测/读取类命令翻译为 execd files API 直读（免 exec 固定时延与轮询节拍）。
         // 直读容器实时状态 = 与 shell 命令同源，无缓存无失效问题；模板不匹配/翻译异常一律回落真 exec
         if (EXEC_TRANSLATE_ENABLED) {
@@ -338,7 +349,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         injectPendingUploads();
         materializeUserSkills();
         refreshProjectionIfStale();
-        hydrateScopedSkillCache();
+        // scoped .skills-cache 投放【不再在此处跑】（first-llm-latency 首推理关键路径优化）：
+        // 50MB/2000f 实测 build+gzip+hydrate ≈4-6s 挡在首个 main LLM 请求之前。改为「延迟到
+        // 首次真正需要」：①doExec/readWorkspaceFile 命令路径命中 .skills-cache（技能脚本执行/
+        // 资源读取）时同步投放；②stop() 收尾若本 call 从未投放则补投（turn 终态容器必含文件，
+        // X18 断言与下轮快照差分基准不受影响）。首推理前的探测命令不含 .skills-cache，天然跳过。
+        // 同步执行、无线程并发（异步版在 SDK 沙箱句柄上并发访问会挂起，实测 300s 超时）。
     }
 
     // ==================== exec→execd 翻译器（P0-12，skill-sync-turn-perf 续篇） ====================
@@ -1256,6 +1272,10 @@ public class OpenSandbox extends AbstractBaseSandbox
     public byte[] readWorkspaceFile(String relPath) {
         if (relPath == null || relPath.isBlank()) {
             return null;
+        }
+        // scoped 投放延迟触发：技能资源读取路径命中 .skills-cache 时同步投放（CAS 每 call 一次）
+        if (relPath.contains(SkillCacheScope.CACHE_DIR)) {
+            hydrateScopedSkillCache();
         }
         try {
             return osbSandbox.files().readByteArray(relPath);
