@@ -56,6 +56,8 @@ public class OpenSandbox extends AbstractBaseSandbox
     private final WorkspaceSyncService workspaceSyncService;
     private final AtomicBoolean runtimeInjected = new AtomicBoolean(false);
     private final AtomicBoolean uploadsInjected = new AtomicBoolean(false);
+    /** 本 call 已查过且无 pending 上传（call 粒度短路：实例存活期=单 call，防每 doExec 查 file_asset） */
+    private final AtomicBoolean pendingEmptyChecked = new AtomicBoolean(false);
     private final AtomicBoolean userSkillsMaterialized = new AtomicBoolean(false);
     private final AtomicBoolean projectionRefreshed = new AtomicBoolean(false);
     /** 投影 stat 指纹缓存开关（SANDBOX_PROJECTION_FINGERPRINT_CACHE，默认 true；测试构造可关） */
@@ -64,6 +66,13 @@ public class OpenSandbox extends AbstractBaseSandbox
     private final boolean skillRevisionGateEnabled;
     /** 回写快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true；测试构造可关） */
     private final boolean syncSnapshotDiffEnabled;
+    /**
+     * exec 命令打点开关（{@code SANDBOX_EXEC_TRACE}，默认 true；{@code false} 不打命令文本）。
+     * env 直读而非经 SandboxConfig——打点是纯日志行为，不参与配置绑定语义；
+     * 静态而非实例字段——所有实例同一开关（全局诊断工具）。
+     */
+    private static final boolean EXEC_TRACE_ENABLED =
+        !"false".equalsIgnoreCase(System.getenv("SANDBOX_EXEC_TRACE"));
     private volatile String userKey;
     /**
      * 本 call 生效的技能缓存 scope 目录名（.skills-cache/&lt;scope&gt;，对齐 SDK
@@ -266,9 +275,24 @@ public class OpenSandbox extends AbstractBaseSandbox
 
     @Override
     protected ExecResult doExec(RuntimeContext ctx, String command, int timeoutSeconds) throws Exception {
+        // 命令打点（P0-12 诊断前置）：exec 固定 ≈1s（server proxy）/130-200ms（execd 短命令），
+        // 稳态 turn 的 11-15 次 doExec 是首推理延迟与 turn 时长的主要组成——不打命令文本无法归因。
+        // 截断 160 字符（只做归因，不落全量载荷）；开关 SANDBOX_EXEC_TRACE（默认 true，关闭=仅保留旧行）
+        if (EXEC_TRACE_ENABLED) {
+            log.info("[sandbox-open] doExec cmd: {}", command.length() > 160
+                ? command.substring(0, 160) + "…(" + command.length() + "ch)" : command);
+        }
         log.info("[sandbox-open] doExec invoked: userKey={}, ctx={}", userKey, ctx != null ? ctx.getUserId() : null);
         // ④ 会话水合协调器：userKey 一次解析 + 四步幂等注入的唯一 doExec 侧入口
         hydrateForCall(ctx);
+        // P0-12：SDK 探测/读取类命令翻译为 execd files API 直读（免 exec 固定时延与轮询节拍）。
+        // 直读容器实时状态 = 与 shell 命令同源，无缓存无失效问题；模板不匹配/翻译异常一律回落真 exec
+        if (EXEC_TRANSLATE_ENABLED) {
+            ExecResult translated = tryTranslateExec(command);
+            if (translated != null) {
+                return translated;
+            }
+        }
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
@@ -317,6 +341,275 @@ public class OpenSandbox extends AbstractBaseSandbox
         hydrateScopedSkillCache();
     }
 
+    // ==================== exec→execd 翻译器（P0-12，skill-sync-turn-perf 续篇） ====================
+    // SDK BaseSandboxFilesystem 的 ls/read/glob 默认实现是 shell 命令模板，经 doExec 执行——
+    // 每次探测付 exec 固定时延（server proxy ≈1s / execd 直连 130-200ms）。首推理前有 7 次
+    // 探测（AGENTS.md/MEMORY/knowledge/skills 等 workspace 模板读取），稳态 turn 共 11-15 次，
+    // 串行占满整个 turn。本翻译器把确定性模板命令改写为 execd files API 直读（readByteArray/
+    // listDirectory 递归），读的是容器同一份实时状态——无缓存无失效问题，正确性不依赖 revision。
+    // 模板不匹配/翻译异常一律回落真 exec（SDK 版本升级改模板时安全降级）。
+    // 开关 SANDBOX_EXEC_TRANSLATE（默认 true）。
+
+    private static final boolean EXEC_TRANSLATE_ENABLED =
+        !"false".equalsIgnoreCase(System.getenv("SANDBOX_EXEC_TRANSLATE"));
+
+    /** read 探测：if [ ! -f 'P' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'P' ]...sed -n '1,Np' 'P'; fi */
+    private static final java.util.regex.Pattern P_READ = java.util.regex.Pattern.compile(
+        "^if \\[ ! -f '([^']+)' \\]; then echo '__NOT_FOUND__'; elif \\[ ! -s '\\1' \\]; then"
+            + " echo '__EMPTY__'; else sed -n '1,(\\d+)p' '\\1'; fi$");
+    /** glob：find 'ROOT' -type f -name 'PAT' 2>/dev/null | sort | while...printf '%s\t%s\t%s'... */
+    private static final java.util.regex.Pattern P_FIND = java.util.regex.Pattern.compile(
+        "^find '([^']+)' -type f -name '([^']+)' 2>/dev/null \\| sort \\| while IFS= read -r f; do"
+            + "\\s+size=\\$\\(stat -c '%s' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
+            + "\\s+mtime=\\$\\(stat -c '%Y' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
+            + "\\s+printf '%s\\\\t%s\\\\t%s\\\\n' \"\\$f\" \"\\$size\" \"\\$mtime\"; done$");
+    /** ls 目录：if [ ! -e 'D' ]...for f in 'D'/*; do...printf 'DIR:/FILE:...'...done; fi */
+    private static final java.util.regex.Pattern P_LS = java.util.regex.Pattern.compile(
+        "^if \\[ ! -e '([^']+)' \\]; then echo '__NOT_EXISTS__'; elif \\[ ! -d '\\1' \\]; then"
+            + " echo '__NOT_A_DIR__'; else for f in '\\1'/\\*; do\\s+if \\[ -d \"\\$f\" \\]; then\\s+"
+            + "mtime=\\$\\(stat -c '%Y' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
+            + "\\s+printf 'DIR:%s\\\\t%s\\\\n' \"\\$f\" \"\\$mtime\";\\s+elif \\[ -f \"\\$f\" \\]; then\\s+"
+            + "size=\\$\\(stat -c '%s' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
+            + "\\s+mtime=\\$\\(stat -c '%Y' \"\\$f\" 2>/dev/null \\|\\| echo 0\\);"
+            + "\\s+printf 'FILE:%s\\\\t%s\\\\t%s\\\\n' \"\\$f\" \"\\$size\" \"\\$mtime\";\\s+fi; done; fi$");
+    /** bus 轮询：test -e 'P' && echo yes || echo no */
+    private static final java.util.regex.Pattern P_TEST_E = java.util.regex.Pattern.compile(
+        "^test -e '([^']+)' && echo yes \\|\\| echo no$");
+    /** 工作区根探测：test -d /workspace（无引号形态） */
+    private static final java.util.regex.Pattern P_TEST_D = java.util.regex.Pattern.compile(
+        "^test -d (\\S+)$");
+    /** 建目录（doSetupWorkspace）：mkdir -p /workspace */
+    private static final java.util.regex.Pattern P_MKDIR = java.util.regex.Pattern.compile(
+        "^mkdir -p (.+)$");
+
+    /**
+     * 尝试把探测/读取类命令翻译为 execd files API 直读。
+     *
+     * @return null = 模板不匹配（调用方回落真 exec）
+     */
+    private ExecResult tryTranslateExec(String command) {
+        try {
+            var mRead = P_READ.matcher(command);
+            if (mRead.matches()) {
+                return translateRead(mRead.group(1), Integer.parseInt(mRead.group(2)));
+            }
+            var mFind = P_FIND.matcher(command);
+            if (mFind.matches()) {
+                return translateGlob(mFind.group(1), mFind.group(2));
+            }
+            var mLs = P_LS.matcher(command);
+            if (mLs.matches()) {
+                return translateLs(mLs.group(1));
+            }
+            var mTestE = P_TEST_E.matcher(command);
+            if (mTestE.matches()) {
+                return new ExecResult(0, translateExists(mTestE.group(1)) ? "yes" : "no", "", false);
+            }
+            var mTestD = P_TEST_D.matcher(command);
+            if (mTestD.matches()) {
+                return new ExecResult(translateExists(mTestD.group(1)) ? 0 : 1, "", "", false);
+            }
+            var mMkdir = P_MKDIR.matcher(command);
+            if (mMkdir.matches()) {
+                osbSandbox.files().createDirectories(List.of(
+                    com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
+                        .path(mMkdir.group(1)).mode(493).build()));
+                return new ExecResult(0, "", "", false);
+            }
+        } catch (Exception e) {
+            // 翻译失败回落真 exec（fail-soft，行为与不翻译一致）
+            log.debug("[sandbox-open] exec translate missed ({}): {}", e.getMessage(),
+                command.length() > 80 ? command.substring(0, 80) : command);
+            return null;
+        }
+        return null;
+    }
+
+    /** read 翻译：缺文件 → __NOT_FOUND__；空文件 → __EMPTY__；否则按 sed '1,Np' 语义取行 */
+    private ExecResult translateRead(String relPath, int maxLines) throws Exception {
+        byte[] bytes;
+        try {
+            bytes = osbSandbox.files().readByteArray(relPath);
+        } catch (Exception e) {
+            return new ExecResult(0, "__NOT_FOUND__", "", false);
+        }
+        if (bytes == null || bytes.length == 0) {
+            return new ExecResult(0, "__EMPTY__", "", false);
+        }
+        String content = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        // 对齐真实 exec 链路语义：execd 按行切分 stdout 后 joining("\n") 重组——文件末尾的
+        // 单个换行在行切分中丢失，翻译输出必须同样剥掉一个尾随 \n
+        if (content.endsWith("\n")) {
+            content = content.substring(0, content.length() - 1);
+        }
+        if (maxLines >= Integer.MAX_VALUE / 2) {
+            return new ExecResult(0, content, "", false);
+        }
+        // sed '1,Np'：输出前 N 行（每行含换行；末行无换行则原样）
+        var sb = new StringBuilder();
+        int idx = 0, printed = 0;
+        while (printed < maxLines && idx < content.length()) {
+            int nl = content.indexOf('\n', idx);
+            if (nl < 0) {
+                sb.append(content, idx, content.length());
+                break;
+            }
+            sb.append(content, idx, nl + 1);
+            idx = nl + 1;
+            printed++;
+        }
+        return new ExecResult(0, sb.toString(), "", false);
+    }
+
+    /** glob 翻译：递归列 ROOT 下匹配 PAT 的 regular file，按路径排序，输出 path\tsize\tmtime 行 */
+    private ExecResult translateGlob(String root, String pattern) throws Exception {
+        var files = new java.util.TreeSet<FileEntry>((a, b) -> a.rel().compareTo(b.rel()));
+        walkFiles(root, pattern, files, 0);
+        var sb = new StringBuilder();
+        for (FileEntry e : files) {
+            if (!sb.isEmpty()) {
+                sb.append('\n');
+            }
+            sb.append(e.rel()).append('\t').append(e.size()).append('\t').append(e.mtime());
+        }
+        return new ExecResult(0, sb.toString(), "", false);
+    }
+
+    /** ls 目录翻译：__NOT_EXISTS__/__NOT_A_DIR__/DIR:path\tmtime + FILE:path\tsize\tmtime */
+    private ExecResult translateLs(String dir) throws Exception {
+        List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
+        try {
+            entries = osbSandbox.files().listDirectory(dir);
+        } catch (Exception e) {
+            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+        }
+        if (entries == null) {
+            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+        }
+        var sb = new StringBuilder();
+        for (var e : entries) {
+            String p = e.getPath();
+            if (p == null) {
+                continue;
+            }
+            p = normalizeRel(p);
+            boolean isDir = "directory".equalsIgnoreCase(e.getType()) || "dir".equalsIgnoreCase(e.getType());
+            long mtime = epochSeconds(e);
+            if (!sb.isEmpty()) {
+                sb.append('\n');
+            }
+            if (isDir) {
+                sb.append("DIR:").append(p).append('\t').append(mtime);
+            } else {
+                sb.append("FILE:").append(p).append('\t').append(Math.max(e.getSize(), 0)).append('\t').append(mtime);
+            }
+        }
+        return new ExecResult(0, sb.toString(), "", false);
+    }
+
+    /** test -e 翻译：readByteArray（文件）/listDirectory（目录）任一成功即存在 */
+    private boolean translateExists(String relPath) {
+        try {
+            osbSandbox.files().readByteArray(relPath);
+            return true;
+        } catch (Exception ignoreFile) {
+            try {
+                var entries = osbSandbox.files().listDirectory(relPath);
+                return entries != null;
+            } catch (Exception ignoreDir) {
+                return false;
+            }
+        }
+    }
+
+    /** 条目 mtime 秒（对齐 SDK 模板 stat -c '%Y' 口径；entry 自带 modifiedAt，缺失置 0） */
+    private static long epochSeconds(com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo e) {
+        var at = e.getModifiedAt();
+        return at == null ? 0 : at.toEpochSecond();
+    }
+
+    /** 递归收集 relPath 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御） */
+    private void walkFiles(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth) {
+        if (depth > 8 || out.size() > 5000) {
+            return;
+        }
+        List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
+        try {
+            entries = osbSandbox.files().listDirectory(relDir);
+        } catch (Exception e) {
+            return;
+        }
+        if (entries == null) {
+            return;
+        }
+        for (var e : entries) {
+            String p = e.getPath();
+            if (p == null || p.isBlank()) {
+                continue;
+            }
+            String rel = normalizeRel(p);
+            if (rel.isEmpty()) {
+                continue;
+            }
+            if ("directory".equalsIgnoreCase(e.getType()) || "dir".equalsIgnoreCase(e.getType())) {
+                walkFiles(rel, pattern, out, depth + 1);
+            } else if (globMatch(pattern, leaf(rel))) {
+                out.add(new FileEntry(rel, Math.max(e.getSize(), 0), epochSeconds(e)));
+            }
+        }
+    }
+
+    /** glob 命中条目（rel/size/mtime 三元组，排序按 rel） */
+    private record FileEntry(String rel, long size, long mtime) {}
+
+    /** 归一为工作区相对路径（剥 /workspace/ 前缀与前导斜杠） */
+    private String normalizeRel(String p) {
+        String root = getWorkspaceRoot();
+        if (p.startsWith(root + "/")) {
+            p = p.substring(root.length() + 1);
+        } else if (p.startsWith("/")) {
+            p = p.substring(1);
+        }
+        return p;
+    }
+
+    /** 探针入口（基准/契约对照专用，生产不调用）：直通翻译器 */
+    public ExecResult translateForProbe(String command) {
+        return tryTranslateExec(command);
+    }
+
+    private static String leaf(String p) {
+        int i = p.lastIndexOf('/');
+        return i < 0 ? p : p.substring(i + 1);
+    }
+
+    /** shell glob（* ?）→ 精确/后缀/通配匹配 */
+    private static boolean globMatch(String pattern, String name) {
+        if ("*".equals(pattern)) {
+            return true;
+        }
+        if (pattern.startsWith("*") && pattern.indexOf('*', 1) < 0) {
+            return name.endsWith(pattern.substring(1));
+        }
+        if (!pattern.contains("*") && !pattern.contains("?")) {
+            return name.equals(pattern);
+        }
+        var rx = new StringBuilder();
+        for (char c : pattern.toCharArray()) {
+            switch (c) {
+                case '*' -> rx.append(".*");
+                case '?' -> rx.append('.');
+                default -> {
+                    if ("\\.^$|+()[]{}".indexOf(c) >= 0) {
+                        rx.append('\\');
+                    }
+                    rx.append(c);
+                }
+            }
+        }
+        return name.matches(rx.toString());
+    }
+
     /**
      * 解析 KV 隔离 key：经 SessionKeyResolver 反查真实用户（与 SandboxUserKeyMiddleware
      * 同源）。Channel 链路 ctx.userId 是网关 peer（=前端 sessionId）——middleware 已把
@@ -359,6 +652,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         if (fileAssetStore == null || fileStorage == null || uploadsInjected.get()) {
             return;
         }
+        // 本 call 内已查过且无 pending → 跳过（P2-16）：hydrateForCall 每 doExec 都跑，实例
+        // 存活期=单 call，15 次 doExec 原本查 15 次 file_asset（实测 106 次/6 turn）。实例即
+        // call 粒度——下一 call 新实例重查，有上传仍下 call 注入，语义不变
+        if (pendingEmptyChecked.get()) {
+            return;
+        }
         var userId = userKey;
         if ((userId == null || userId.isBlank()) && filesystemSpec != null) {
             // acquire 先于 middleware（实测）：实例未绑定 userKey 时从 spec ThreadLocal 兜底
@@ -376,7 +675,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                 // userKey 绑定的即会话隔离键（Channel peer = sessionId）：同值查 user_key 与 session_id 双维度
                 var pending = fileAssetStore.listPending(userId, userId);
                 if (pending.isEmpty()) {
-                    // 不设 uploadsInjected=true：上传可能尚未完成，下 turn 重试
+                    // 不设 uploadsInjected=true（上传可能尚未完成）；但本 call 内置「已查无 pending」
+                    // 短路，同 call 后续 doExec 不再查——下一 call 新实例自然重查
+                    pendingEmptyChecked.set(true);
                     log.debug("[sandbox-open] no pending uploads yet for user {}", userId);
                     return;
                 }

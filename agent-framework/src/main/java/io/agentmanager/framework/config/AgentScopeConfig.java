@@ -340,7 +340,18 @@ public class AgentScopeConfig {
     @Bean(destroyMethod = "close")
     public io.agentmanager.framework.redis.RedisConnectionFacade redisConnectionFacade(
             AgentRedisProperties redis) {
-        return io.agentmanager.framework.redis.RedisConnectionFacade.create(redis);
+        var facade = io.agentmanager.framework.redis.RedisConnectionFacade.create(redis);
+        // 首连预热（first-llm-latency P0）：facade 惰性建连——不预热时首次建连（lettuce 握手 +
+        // 首连钩子，实测 ≈0.8s）落在首个会话的 session-agent 创建路径上，计入首推理前延迟。
+        // 后台线程提前建连，不阻塞启动；失败静默（惰性重试语义不变）
+        Thread.ofPlatform().name("redis-warmup").daemon(true).start(() -> {
+            try {
+                facade.sync().ping();
+            } catch (Exception e) {
+                // 预热失败不影响启动：首用时惰性建连（含退避）语义不变
+            }
+        });
+        return facade;
     }
 
     /**
