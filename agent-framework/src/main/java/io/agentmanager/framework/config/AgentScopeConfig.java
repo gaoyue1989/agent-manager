@@ -46,6 +46,7 @@ public class AgentScopeConfig {
         io.agentmanager.framework.service.WorkspaceReader workspaceReader,
         WorkspaceSyncService workspaceSyncService,
         io.agentmanager.framework.service.FileAssetStore fileAssetStore,
+        io.agentmanager.framework.service.SkillManageService skillManageService,
         io.agentmanager.framework.service.storage.FileStorage fileStorage,
         SessionUserStore sessionUserStore,
         org.springframework.beans.factory.ObjectProvider<io.agentmanager.framework.redis.RedisConnectionFacade> redisFacadeProvider,
@@ -100,6 +101,12 @@ public class AgentScopeConfig {
         if (guardEnabled) {
             var redisFacade = redisFacadeProvider.getIfAvailable();
             if (redisFacade != null) {
+                // scoped 指纹跨副本共享层（first-llm-latency 缺口④）：sandboxId|scope → 指纹放
+                // Redis，同会话轮转到新副本不再重付 50MB 慢路径；fail-open（不可用回落 Pod 级）
+                spec.sharedFingerprintStore(new io.agentmanager.framework.sandbox.opensandbox.ScopedFingerprintStore(redisFacade));
+                // 指纹源用包内技能目录（PVC 只读同挂载→跨副本一致）：SkillManageService 与
+                // WorkspaceSyncService 同源（configDir/skills）
+                spec.packageSkillsDir(skillManageService.getSkillsDir());
                 var sessionGranular = sandboxRuntime.sessionAgentIsolationEnabled();
                 guard = new io.agentmanager.framework.sandbox.opensandbox.RedisSandboxExecutionGuard(
                     redisFacade, sandboxRuntime.guardLeaseSeconds() * 1000L, sessionUserStore, sessionGranular);

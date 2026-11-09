@@ -71,8 +71,31 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
      * scoped 技能缓存 stat 指纹（pod 本地，P0-1）：sandboxId|scope → 最近一次投放时的
      * 宿主 scope 目录 stat 指纹。跨 call / 跨 OpenSandbox 包装实例有效——指纹未变即跳过
      * build+prune+hydrate（原 lastSkillCacheHash 是实例字段，实例每 call 重建导致每轮全量重投）。
+     * Pod 级 miss 时回落 {@link #sharedFingerprintStore}（跨副本共享，缺口④）。
      */
     private final Map<String, String> scopedSkillCacheFingerprints = lruMap(256);
+    /** 指纹跨副本共享层（Redis，fail-open；NOOP=未装配，行为回到纯 Pod 级） */
+    private volatile ScopedFingerprintStore sharedFingerprintStore = ScopedFingerprintStore.NOOP;
+
+    /** 包内技能源目录（configDir/skills，生产=PVC 只读同挂载；跨副本指纹一致性的来源，缺口④） */
+    private volatile java.nio.file.Path packageSkillsDir;
+
+    /** 注入包内技能源目录（scoped 指纹源；null=未装配，指纹退化为仅 L4 revision） */
+    public OpenSandboxFilesystemSpec packageSkillsDir(java.nio.file.Path dir) {
+        this.packageSkillsDir = dir;
+        return this;
+    }
+
+    /** 包内技能源目录（可空） */
+    public java.nio.file.Path packageSkillsDir() {
+        return packageSkillsDir;
+    }
+
+    /** 注入跨副本指纹共享层（AgentScopeConfig 装配时调用；null 归一 NOOP） */
+    public OpenSandboxFilesystemSpec sharedFingerprintStore(ScopedFingerprintStore store) {
+        this.sharedFingerprintStore = store != null ? store : ScopedFingerprintStore.NOOP;
+        return this;
+    }
 
     /**
      * sandboxId → 当前已投放进容器的 scope（P0-1）：同代容器换会话（池化借出复用/同用户
@@ -125,22 +148,34 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         }
     }
 
-    /** scoped 缓存指纹读取（P0-1 短路比对值；无记录返回 null=未知走慢路径） */
+    /** scoped 缓存指纹读取（P0-1 短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回 null=走慢路径 */
     public String scopedSkillCacheFingerprint(String sandboxId, String scope) {
         if (sandboxId == null || sandboxId.isBlank() || scope == null || scope.isBlank()) {
             return null;
         }
-        return scopedSkillCacheFingerprints.get(sandboxId + "|" + scope);
+        var podLocal = scopedSkillCacheFingerprints.get(sandboxId + "|" + scope);
+        if (podLocal != null) {
+            return podLocal;
+        }
+        // 跨副本：他副本可能已投放过同一沙箱代同 scope（同会话轮转）——共享层命中即免整套慢路径。
+        // 命中同时回填 Pod 级两张表（指纹 + 已投放 scope）：稳态判定要求两表一致命中
+        var shared = sharedFingerprintStore.get(sandboxId, scope);
+        if (shared != null) {
+            scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, shared);
+            hydratedScopedScopes.put(sandboxId, scope);
+        }
+        return shared;
     }
 
-    /** scoped 缓存指纹回填（投放成功后记录） */
+    /** scoped 缓存指纹回填（投放成功后记录）：Pod 级 + 共享层双写（共享层失败仅告警） */
     public void recordScopedSkillCacheFingerprint(String sandboxId, String scope, String statFingerprint) {
         if (sandboxId != null && scope != null && statFingerprint != null) {
             scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, statFingerprint);
+            sharedFingerprintStore.put(sandboxId, scope, statFingerprint);
         }
     }
 
-    /** 本沙箱代当前已投放的 scope（null = 本代尚未投放过任何 scope） */
+    /** 本沙箱代当前已投放的 scope（null = 本代尚未投放过任何 scope；跨副本经共享指纹层兜底，无需共享 scope 表） */
     public String hydratedScopedScope(String sandboxId) {
         return sandboxId == null ? null : hydratedScopedScopes.get(sandboxId);
     }
