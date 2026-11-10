@@ -178,6 +178,51 @@ test('S5b chat 请求级透传头注入 MCP（reqHeader: 取值源 + _meta 剥�
   expect(JSON.stringify(last.meta ?? {})).not.toContain('reqHeader');
 });
 
+test('S5c chat 请求级透传头注入工具参数（arguments 通道）', async () => {
+  // mcp-header-arguments-injection-design：下游 MCP 业务服务的工具参数只从
+  // params.arguments 取值（HTTP header 到不了业务代码）——请求头 taskId 按
+  // userHeaders.arguments 声明合并进 bench_echo 入参；schema 门控与 args-win
+  // 负例由单测覆盖，e2e 断言端到端注入与缺值跳过
+  const taskId = `1001-${uniq()}`;
+  const sid = sessionIdFor(`s5c-${uniq()}`);
+  const stream = chat({
+    message: `[E2E:tool:mcp_echo](s5c)`,
+    userId: U,
+    sessionId: sid,
+    headers: { taskId },
+  });
+  await waitTerminal(stream);
+  expect(toolNames(stream.frames)).toContain('bench_echo');
+  expect(stream.terminal?.type).toBe('done');
+
+  type LastCall = {
+    toolName?: string | null;
+    xUserId?: string | null;
+    arguments?: Record<string, unknown> | null;
+    meta?: Record<string, unknown> | null;
+  };
+  const last = await pollUntil<LastCall>(
+    async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
+    v => v.toolName === 'bench_echo' && v.arguments?.taskId === taskId,
+  );
+  // 注入参数原值到达工具入参；既有 userId header/_meta 双通道不受影响
+  expect(last.arguments?.taskId).toBe(taskId);
+  expect(last.xUserId).toBe(U);
+  expect(last.meta?.userId).toBe(U);
+  expect(JSON.stringify(last.meta ?? {})).not.toContain('reqHeader');
+
+  // 缺值（请求未带 taskId）→ 不注入（参数通道无 fail-closed），工具调用照常
+  const sid2 = sessionIdFor(`s5c-nohdr-${uniq()}`);
+  const plain = chat({ message: `[E2E:tool:mcp_echo](s5c-nohdr)`, userId: U, sessionId: sid2 });
+  await waitTerminal(plain);
+  expect(plain.terminal?.type).toBe('done');
+  const noHeader = await pollUntil<LastCall>(
+    async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
+    v => v.toolName === 'bench_echo' && !!v.arguments && !('taskId' in v.arguments),
+  );
+  expect(noHeader.arguments?.taskId).toBeUndefined();
+});
+
 test('S6 参数校验负例', async ({ request }) => {
   const res = await request.post('/threads/chat', { data: { userId: U } });
   // 无 message/fileIds：SSE error 帧（200 流内 error）或 400，按实现固化
