@@ -655,6 +655,26 @@ class UserSkillServiceTest {
             "应取技能根的 SKILL.md，而非 examples 下的示例");
     }
 
+    /**
+     * 非 UTF-8 条目名（Windows GBK 中文文件名，无 UTF-8 标志）：JDK 会抛
+     * "malformed input off : N, length : 1"，必须转成用户看得懂的中文提示（不是透传 JDK 原文）。
+     */
+    @Test
+    void uploadZipShouldReportFriendlyMessageForNonUtf8EntryName() {
+        // 「技能/SKILL.md」的 GBK 字节
+        var gbkName = new byte[] {(byte) 0xbc, (byte) 0xbc, (byte) 0xc4, (byte) 0xdc,
+            '/', 'S', 'K', 'I', 'L', 'L', '.', 'm', 'd'};
+        var zip = zipWithRawEntryName(gbkName, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+
+        assertTrue(e.getMessage().contains("UTF-8"), "应提示编码问题: " + e.getMessage());
+        assertTrue(e.getMessage().contains("重新压缩"), "应给出可执行建议: " + e.getMessage());
+        assertFalse(e.getMessage().contains("malformed input"),
+            "不应把 JDK 原始消息透给用户: " + e.getMessage());
+    }
+
     /** 同名覆盖 = 全量替换：旧版本多余的资源文件必须差集清理，action=updated */
     @Test
     void uploadZipShouldOverwriteAndRemoveStaleFiles() throws IOException {
@@ -825,6 +845,45 @@ class UserSkillServiceTest {
             }
         }
         return baos.toByteArray();
+    }
+
+    /**
+     * 构造单条目 stored zip，条目名按原始字节写入（不带 UTF-8 标志），
+     * 用于模拟 Windows GBK 中文文件名的压缩包。
+     */
+    private static byte[] zipWithRawEntryName(byte[] rawName, byte[] content) {
+        var crc = new java.util.zip.CRC32();
+        crc.update(content);
+        int crcValue = (int) crc.getValue();
+        int nameLen = rawName.length;
+
+        var local = java.nio.ByteBuffer.allocate(30 + nameLen + content.length)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        local.putInt(0x04034b50).putShort((short) 20).putShort((short) 0)
+            .putShort((short) 0).putShort((short) 0).putShort((short) 0)
+            .putInt(crcValue).putInt(content.length).putInt(content.length)
+            .putShort((short) nameLen).putShort((short) 0)
+            .put(rawName).put(content);
+
+        var central = java.nio.ByteBuffer.allocate(46 + nameLen)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        central.putInt(0x02014b50).putShort((short) 20).putShort((short) 20)
+            .putShort((short) 0).putShort((short) 0).putShort((short) 0)
+            .putShort((short) 0).putInt(crcValue).putInt(content.length)
+            .putInt(content.length).putShort((short) nameLen).putShort((short) 0)
+            .putShort((short) 0).putShort((short) 0).putShort((short) 0)
+            .putInt(0).putInt(0).put(rawName);
+
+        var eocd = java.nio.ByteBuffer.allocate(22).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        eocd.putInt(0x06054b50).putShort((short) 0).putShort((short) 0)
+            .putShort((short) 1).putShort((short) 1)
+            .putInt(central.position()).putInt(local.position()).putShort((short) 0);
+
+        var out = new java.io.ByteArrayOutputStream();
+        out.writeBytes(local.array());
+        out.writeBytes(central.array());
+        out.writeBytes(eocd.array());
+        return out.toByteArray();
     }
 
     // ========== 用户索引（agent_fs 聚合） ==========

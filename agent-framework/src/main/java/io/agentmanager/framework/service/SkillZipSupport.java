@@ -45,7 +45,7 @@ public final class SkillZipSupport {
     /**
      * 解压 zip 到目标目录（调用方负责创建/清理临时目录）。
      *
-     * @throws IllegalArgumentException 条目数/总大小超限、含非法（穿越）路径
+     * @throws IllegalArgumentException 条目数/总大小超限、含非法（穿越）路径、条目名非 UTF-8
      * @throws IOException              解压 IO 失败
      */
     public static void extractZip(InputStream is, Path targetDir) throws IOException {
@@ -53,7 +53,24 @@ public final class SkillZipSupport {
             ZipEntry entry;
             int entryCount = 0;
             long totalSize = 0;
-            while ((entry = zis.getNextEntry()) != null) {
+            while (true) {
+                try {
+                    entry = zis.getNextEntry();
+                } catch (IllegalArgumentException e) {
+                    // JDK 的 ZipInputStream 对条目名一律按 UTF-8 严格解码（不论有无 UTF-8 标志），
+                    // Windows 自带压缩/旧版 WinRAR 的中文文件名是 GBK 字节 → 解出
+                    // "malformed input off : N, length : 1"。转成用户可照做的中文提示。
+                    if (!isEntryNameCodingError(e)) {
+                        throw e;
+                    }
+                    log.warn("zip 条目名不是合法 UTF-8（{}），按非 UTF-8 压缩包拒绝", e.getMessage());
+                    throw new IllegalArgumentException(
+                        "zip 包内文件名不是 UTF-8 编码（常见于 Windows 压缩的中文文件名），"
+                            + "请用 UTF-8 编码重新压缩，或把文件名/目录名改成英文后重试", e);
+                }
+                if (entry == null) {
+                    break;
+                }
                 entryCount++;
                 if (entryCount > MAX_ENTRIES) {
                     throw new IllegalArgumentException(
@@ -85,6 +102,19 @@ public final class SkillZipSupport {
                 zis.closeEntry();
             }
         }
+    }
+
+    /**
+     * 是否为 JDK 严格解码 zip 条目名失败抛出的 IllegalArgumentException。
+     *
+     * <p>特征：{@code String.throwMalformed} 生成的 message（{@code "malformed input off : N, length : M"}）
+     * + cause 为 {@link java.nio.charset.CharacterCodingException}。只识别这一种，避免把路径穿越等
+     * 业务校验抛出的 IllegalArgumentException 也改写成编码提示。
+     */
+    private static boolean isEntryNameCodingError(IllegalArgumentException e) {
+        return e.getCause() instanceof java.nio.charset.CharacterCodingException
+            && e.getMessage() != null
+            && e.getMessage().startsWith("malformed input off");
     }
 
     /**

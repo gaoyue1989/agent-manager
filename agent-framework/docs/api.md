@@ -732,7 +732,7 @@ curl -sN -G "http://localhost:8100/threads/acme-test-agent:thread-1/subscribe" \
 
 ### POST /threads/{sessionId}/stop
 
-停止当前运行中的 turn（**协作式中断**，设计见 [turn-stop-design.md](turn-stop-design.md)）。
+停止当前运行中的 turn（**协作式中断**，完整接口契约见 [thread-stop-api.md](thread-stop-api.md)，设计见 [turn-stop-design.md](turn-stop-design.md)）。
 请求经共享存储 `turn_stop` 投递，由持有该 turn 的副本调用 SDK 按会话 interrupt；
 可在任意副本发起（无会话粘性）。停止只终止当前 turn，**不删除会话、不撤销已执行工具的副作用**。
 
