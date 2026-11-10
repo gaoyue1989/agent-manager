@@ -257,7 +257,7 @@ class UserSkillServiceTest {
     }
 
     @Test
-    void listSkillsShouldExposeCreatedAtFromKvTimestamps() throws Exception {
+    void listSkillsShouldExposeUpdatedAtFromKvTimestamps() throws Exception {
         var svc = service();
         svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
 
@@ -268,12 +268,14 @@ class UserSkillServiceTest {
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         var seq = new java.util.concurrent.atomic.AtomicInteger(0);
-        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() == 0);
-        when(rs.getString("item_key")).thenReturn("/demo-a/scripts/a.sh");
-        when(rs.getLong("updated_at")).thenReturn(1_700_000_000_000L); // 2023-11-14
+        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() < 2);
+        when(rs.getString("item_key"))
+            .thenReturn("/demo-a/scripts/a.sh", "/demo-a/SKILL.md");
+        when(rs.getLong("updated_at"))
+            .thenReturn(1_700_000_000_000L, 1_730_000_000_000L); // 2023-11-14, 2024-10-27
 
         var s = svc.listSkills(USER).get(0);
-        assertTrue(s.createdAt().startsWith("2023"), "创建时间取最早 updated_at: " + s.createdAt());
+        assertTrue(s.updatedAt().startsWith("2024"), "更新时间取最晚 updated_at: " + s.updatedAt());
     }
 
     @Test

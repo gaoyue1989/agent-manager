@@ -1145,7 +1145,7 @@ GET /skills/manage
 
 | 端点 | 方法 | 说明 | 响应 |
 |------|------|------|------|
-| `/skills/users` | GET | 当前用户的 L4 技能（每项含 `description`/`enabled`/`createdAt`） | `{userId, skills, tombstones}` |
+| `/skills/users` | GET | 当前用户的 L4 技能（每项含 `description`/`enabled`/`updatedAt`） | `{userId, skills, tombstones}` |
 | `/skills/users/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
 | `/skills/users/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`） | `application/zip` 附件 |
 | `/skills/users/{name}` | PUT | 写个人技能，body `{content}`（≤1MB；自动清除禁用标记） | `{userId, name, action, version, message}` |

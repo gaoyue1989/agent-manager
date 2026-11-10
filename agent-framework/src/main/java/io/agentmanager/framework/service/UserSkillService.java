@@ -130,12 +130,12 @@ public class UserSkillService {
      * @param adminOverride      带管理面写入栅栏
      * @param description        SKILL.md frontmatter 的 description（解析失败为空串）
      * @param enabled            启停状态（false = 管理面已禁用，对外不可用）
-     * @param createdAt          创建时间（该技能现有 KV 键最早的 {@code updated_at}，近似值；
+     * @param updatedAt          更新时间（该技能现有 KV 键最晚的 {@code updated_at}；
      *                           格式 {@code yyyy-MM-dd HH:mm:ss.SSS}，取不到为空串）
      */
     public record UserSkillSummary(String name, List<String> files, long bytes, long version,
                                    boolean hasPackageBaseline, boolean adminOverride,
-                                   String description, boolean enabled, String createdAt) {}
+                                   String description, boolean enabled, String updatedAt) {}
 
     /** 管理面删除标记（tombstone）视图项：该用户该技能已被管理面删除，但标记仍在 KV 中 */
     public record UserSkillTombstone(String name, String deletedAt) {}
@@ -356,7 +356,7 @@ public class UserSkillService {
     // ==================== 技能列表 / 读取 ====================
 
     /**
-     * 列出某用户的 L4 技能（含包内基线标记、管理面写入栅栏、描述、启停状态与创建时间）。
+     * 列出某用户的 L4 技能（含包内基线标记、管理面写入栅栏、描述、启停状态与更新时间）。
      *
      * <p>枚举失败（KV 搜索不可用）降级为空列表——管理面 /skills 视图的既有语义
      * （「命名空间不可用即无 L4」，由 UserSkillServiceTest 钉住）；物化/回写等正确性
@@ -371,7 +371,7 @@ public class UserSkillService {
                 userId, e.getClass().getSimpleName(), e.getMessage());
             return List.of();
         }
-        var createdAt = skillCreatedAt(userId);
+        var updatedAt = skillUpdatedAt(userId);
         var result = new ArrayList<UserSkillSummary>(skills.size());
         for (var entry : skills.entrySet()) {
             var name = entry.getKey();
@@ -382,7 +382,7 @@ public class UserSkillService {
                 workspaceReader.isUserSkillAdminOverride(userId, name),
                 descriptionOf(userId, name),
                 !workspaceReader.isUserSkillDisabled(userId, name),
-                createdAt.getOrDefault(name, "")));
+                updatedAt.getOrDefault(name, "")));
         }
         return result;
     }
@@ -405,12 +405,12 @@ public class UserSkillService {
     }
 
     /**
-     * 每个技能的创建时间（近似值）：该技能现有 KV 键最早的 {@code updated_at}。
+     * 每个技能的更新时间：该技能现有 KV 键最晚的 {@code updated_at}。
      *
-     * <p>{@code agent_fs} 无 {@code created_at} 列，故以「最早一次写入时间」作为创建时间。
+     * <p>{@code agent_fs} 无 {@code created_at} 列，故以「最后一次写入时间」作为更新时间。
      * 查询失败不阻断列表（返回空 map，时间仅作展示）。
      */
-    private Map<String, String> skillCreatedAt(String userId) {
+    private Map<String, String> skillUpdatedAt(String userId) {
         var result = new LinkedHashMap<String, String>();
         if (agentName == null || agentName.isBlank() || userId == null || userId.isBlank()) {
             return result;
@@ -418,7 +418,7 @@ public class UserSkillService {
         var safeUser = io.agentmanager.framework.util.PathSafe.sanitize(userId);
         var namespace = "agents\u001F" + agentName + "\u001Fusers\u001F" + safeUser + "\u001Fskills";
         var sql = "SELECT item_key, updated_at FROM agent_fs WHERE namespace_path = ?";
-        var minAt = new LinkedHashMap<String, Long>();
+        var maxAt = new LinkedHashMap<String, Long>();
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, namespace);
@@ -428,14 +428,14 @@ public class UserSkillService {
                     if (name == null) {
                         continue;
                     }
-                    minAt.merge(name, rs.getLong("updated_at"), Math::min);
+                    maxAt.merge(name, rs.getLong("updated_at"), Math::max);
                 }
             }
         } catch (Exception e) {
-            log.warn("skill_created_at: query failed for user {}: {}", safeUser, e.getMessage());
+            log.warn("skill_updated_at: query failed for user {}: {}", safeUser, e.getMessage());
             return result;
         }
-        for (var entry : minAt.entrySet()) {
+        for (var entry : maxAt.entrySet()) {
             var ts = entry.getValue();
             result.put(entry.getKey(), ts > 0 ? new java.sql.Timestamp(ts).toString() : "");
         }
