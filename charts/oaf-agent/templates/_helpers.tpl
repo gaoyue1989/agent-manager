@@ -97,17 +97,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 ingress TLS 开关归一：导出渲染按设计 §7.3 输出布尔 `tls: false`，同时兼容表形态
 `tls: {enabled, secretName}`（chart 默认/手写 values），避免两种形状互斥导致导出产物不可直接部署。
 */}}
+{{/* 缺键归一为空串：直接取 .Values.ingress.tls.enabled 遇缺键经 include 渲出 <no value> 占位符（非空串） */}}
 {{- define "oaf-agent.tlsEnabled" -}}
 {{- if kindIs "bool" .Values.ingress.tls -}}
 {{- .Values.ingress.tls -}}
 {{- else if .Values.ingress.tls -}}
-{{- .Values.ingress.tls.enabled -}}
+{{- .Values.ingress.tls.enabled | default false -}}
 {{- else -}}
 false
 {{- end -}}
 {{- end -}}
+{{/* 同上：表形态漏写 secretName 键时 <no value> 占位符会让 validate 的 not (include ...) 判非空失守，
+  最终静默渲染 secretName: "" 的坏 Ingress（issue #291）；归一为空串使 validate 恢复 fail-fast */}}
 {{- define "oaf-agent.tlsSecret" -}}
 {{- if and .Values.ingress.tls (not (kindIs "bool" .Values.ingress.tls)) -}}
-{{- .Values.ingress.tls.secretName -}}
+{{- index .Values.ingress.tls "secretName" | default "" -}}
 {{- end -}}
 {{- end -}}
