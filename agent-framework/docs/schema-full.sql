@@ -1,17 +1,19 @@
 -- =============================================================================
 -- agent-framework 全量建表语句（MySQL 8.0）
 -- =============================================================================
--- 来源：db/migration/V1..V14 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
+-- 来源：db/migration/V1..V15 Flyway 迁移（表结构演进一律走 Flyway，启动自动执行、
 --       存量库自动 baseline；本文件为快照式全量参考，以迁移脚本为权威）
 -- 生成日期：2026-09-28（对应 commit 60dd006）；2026-10-25 增补 V10 turn_intent、
 --           V11/V12 model_config.is_default/is_fallback（对应 commit e729a67）；
 --           2026-10-27 增补 V13 turn_stop（单轮停止请求）；2026-10-29 增补
---           V14 session_message.trace_id（Monitor 回放 ↔ Jaeger trace，issue #205）
+--           V14 session_message.trace_id（Monitor 回放 ↔ Jaeger trace，issue #205）；
+--           2026-11-09 增补 V15 沙箱生命周期簿记两表 sandbox_user/sandbox_binding
+--           （sandbox-pool-opensandbox-design PR-D §4.1，docs/design/ 在仓库根目录）
 --
 -- 数据库：CHECKPOINT_JDBC_URL 指向的库（默认 agent_manager_test）
 --         CHECKPOINT_DB_NAME 可显式指定 agent_state 所在库名（未设时从 JDBC URL 解析）
 --
--- 表清单（11 张本工程表 + 2 张 SDK 表）：
+-- 表清单（13 张本工程表 + 2 张 SDK 表）：
 --   ① agent_state      SDK MysqlAgentStateStore   —— AgentState（会话状态，权威）
 --   ② agent_fs         SDK JdbcStore              —— 分布式文件系统（工作区文件）
 --   ③ session_user     会话→用户映射 + 标题(remark) + 会话模型(model)
@@ -25,6 +27,8 @@
 --   ⑪ ui_context       MCP Apps 4.7 UI 上下文
 --   ⑫ turn_intent      排队 turn 意图（多副本可续传，V10）
 --   ⑬ turn_stop        单轮停止请求（跨副本投递，V13）
+--   ⑭ sandbox_user     单用户沙箱配额计数锚（binding_count 不变量，V15）
+--   ⑮ sandbox_binding  沙箱借出簿记（uk_sandbox/uk_session + PENDING 占额行，V15）
 --
 -- 非 MySQL：session_event（会话事件）已整体迁至 Redis Streams，不再建表。
 -- 未使用：agentscope-extensions-mysql 的 JdbcRemoteSnapshotClient 快照表
@@ -276,10 +280,62 @@ CREATE TABLE IF NOT EXISTS turn_stop (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 
+-- -----------------------------------------------------------------------------
+-- ⑭ sandbox_user —— 用户沙箱配额计数锚（V15）
+-- 来源：db/migration/V15__sandbox_binding.sql（sandbox-pool-opensandbox-design §4.1，PR-D）。
+-- 职责边界：TTL 真相在 OpenSandbox 服务端（expiresAt + 到期 GC），本表仅是
+-- LRU 排序缓存 + 单用户配额仲裁锚点；「执行中 turn」事实源仍是 turn_lease
+-- （§4.1.1 派生，不冗余）。落 per-service checkpoint 库（{原库}_{k8s 名}），配额天然按服务隔离。
+-- 用户配额计数表：占额 CAS 锚点。占额（检查计数 + 占位）必须原子——仅靠绑定表做不到
+-- （0 绑定行时 SELECT ... FOR UPDATE 锁不住空集，并发会话各自 count=quota-1 都去 create 突破配额）。
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sandbox_user (
+  user_key       VARCHAR(255) NOT NULL,
+  -- 该用户当前绑定数；与 COUNT(sandbox_binding WHERE user_key=?) 事务内同增同减
+  -- 不变量（§4.1）：任意时刻 binding_count == COUNT(sandbox_binding.user_key = 本行)
+  binding_count  INT NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (user_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- -----------------------------------------------------------------------------
+-- ⑮ sandbox_binding —— 沙箱借出簿记（V15，同上来源）
+-- 绑定表：user/session ↔ sandbox 簿记。绑定行不会在会话结束时删除（框架无会话结束信号），
+-- 沙箱到期后行仍在，由 acquire 懒剔除（正确性）+ SessionCleanupService 定时清理（容量）双轨回收。
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sandbox_binding (
+  id         BIGINT NOT NULL AUTO_INCREMENT,
+  user_key   VARCHAR(255) NOT NULL,
+  session_id VARCHAR(255) NOT NULL,
+  sandbox_id VARCHAR(128) NOT NULL,
+  -- LRU 排序缓存（服务端绝对 expiresAt 回填，不用本地 now+TTL 推算）；真相在服务端 expiresAt。
+  -- PENDING 占额行固定取 NOW() + 10min（= 陈旧 PENDING 回收窗，§4.2 ②，天然豁免 ⑤a 过期行删除）
+  expires_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sandbox (sandbox_id),          -- 一个沙箱至多一条绑定
+  UNIQUE KEY uk_session (session_id),          -- 一个会话至多一条绑定（LRU 复用 = UPDATE 改归属）
+  KEY idx_user (user_key, expires_at),         -- 配额校验 + LRU 取最小 expires_at
+  KEY idx_expiry (expires_at)                  -- 定时清理扫描（§4.1.2）
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- PENDING 占额不变量（§4.1，评审修订）：占额（sandbox_user CAS）与绑定落库是两个事务，
+-- 若占额提交后进程崩溃（create 前或落绑定前），binding_count +1 却无对应绑定行——幽灵占额。
+-- 修复：占额事务同时 INSERT 一条 PENDING 绑定行（sandbox_id = 'pending:{uuid}'，
+-- session_id 即本会话，expires_at = NOW() + 10min），create 成功后短事务把该行
+-- UPDATE 为真实 sandbox_id + 服务端 expiresAt（转正）；create 失败或唯一键冲突
+-- → 删除 PENDING 行 + 计数递减（补偿一律按自身 pending:{uuid} 的 sandbox_id 定位，
+-- 严禁按 session_id 删——同用户 A2A 链路共享 session_id，会误删他人在途占位）。
+-- 此后任意时刻 binding_count == COUNT(binding 行)，⑤ 的重算/懒剔除在锚行锁下恒安全；
+-- 崩溃残留的 PENDING 行由懒剔除按行龄回收（created_at < NOW() - 10min）。
+
+
 -- =============================================================================
 -- 部署注意
 -- =============================================================================
--- 1. 表结构演进一律走 Flyway（db/migration/V1..V14，启动自动执行；存量库自动
+-- 1. 表结构演进一律走 Flyway（db/migration/V1..V15，启动自动执行；存量库自动
 --    baseline，多副本历史表锁互斥，失败即启动失败——纪律见
 --    docs/design/db-migration-flyway-design.md）：新建库无需手动执行本文件；
 --    **禁止**在 Store 构造器或请求路径手工 DDL，禁止修改已合并的 V 文件

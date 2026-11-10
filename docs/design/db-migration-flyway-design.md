@@ -55,14 +55,14 @@
 > （存量 `agent_state` 槽位重键，1a69c97）。基线点与 `baseline-version` 均不因此变动。
 > V7/V8 因 e2e FW3 场景会清空 `flyway_schema_history` 后以 baseline 重放未应用迁移，均以
 > `INFORMATION_SCHEMA` 探测 / `CREATE TABLE IF NOT EXISTS` 守卫做到重复执行幂等。
-> 截至 2026-11 已演进至 V14（V10 turn_intent / V11-V12 model_config 默认与备用模型 /
-> V13 turn_stop / V14 session_message.trace_id），仍按 §7.1 纪律逐次新增、不回填本表。
+> 截至 2026-11 已演进至 V15（V10 turn_intent / V11-V12 model_config 默认与备用模型 /
+> V13 turn_stop / V14 session_message.trace_id / V15 sandbox_binding+sandbox_user，sandbox-pool-opensandbox-design §4.1），仍按 §7.1 纪律逐次新增、不回填本表。
 
 ### 3.3 升级路径
 
 `application.yml`：`spring.flyway.baseline-on-migrate=true`、`baseline-version=5`。
 
-- **现网存量库**（有表、无 `flyway_schema_history`）：首启自动基线到 V5（V1..V5 的 DDL 均已就位），仅执行 V6 及其后的增量（当前至 V14）；
+- **现网存量库**（有表、无 `flyway_schema_history`）：首启自动基线到 V5（V1..V5 的 DDL 均已就位），仅执行 V6 及其后的增量（当前至 V15）；
 - **全新库**（CI E2E / 新环境）：schema 为空不触发基线，从 V1 完整重建；
 - **多副本同时启动**：Flyway 历史表锁互斥，仅一副本执行迁移，其余等待后校验；
 - **失败语义**：迁移失败即启动失败（fail-fast），替代原先 DDL 失败被 catch 成 warn 静默带病运行。
