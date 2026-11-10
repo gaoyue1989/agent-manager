@@ -51,7 +51,7 @@ class SandboxLocatorTest {
         stateStore = mock(SessionSandboxStateStore.class);
         OafConfig oafConfig = new OafConfig(AGENT, null, null, null, null, null, null, null, null,
             null, null, null, null, null, null, null, null, null, null);
-        SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
+        SandboxConfig config = new SandboxConfig(false, "img", 60, 30, 1024, 1, List.of("/e"),
             Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
             new SandboxConfig.OpenSandboxConfig("server:8090", "key"));
         locator = new SandboxLocator(stateStore, oafConfig, config, null, null);
@@ -219,7 +219,7 @@ class SandboxLocatorTest {
         // 整服务起不来。惰性构建后构造必须成功，仅在真正 locate() 连接时才校验。
         OafConfig oafConfig = new OafConfig(AGENT, null, null, null, null, null, null, null, null,
             null, null, null, null, null, null, null, null, null, null);
-        SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
+        SandboxConfig config = new SandboxConfig(false, "img", 60, 30, 1024, 1, List.of("/e"),
             Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
             new SandboxConfig.OpenSandboxConfig("server:8090", ""));
         assertDoesNotThrow(() -> new SandboxLocator(stateStore, oafConfig, config, null, null));
@@ -232,7 +232,7 @@ class SandboxLocatorTest {
                                                SandboxLifecycleManager manager) {
         OafConfig oafConfig = new OafConfig(AGENT, null, null, null, null, null, null, null, null,
             null, null, null, null, null, null, null, null, null, null);
-        SandboxConfig config = new SandboxConfig(false, "img", 60, 1024, 1, List.of("/e"),
+        SandboxConfig config = new SandboxConfig(false, "img", 60, 30, 1024, 1, List.of("/e"),
             Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
             new SandboxConfig.OpenSandboxConfig("server:8090", "key"));
         @SuppressWarnings("unchecked")

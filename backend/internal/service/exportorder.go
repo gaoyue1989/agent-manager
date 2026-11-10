@@ -188,7 +188,11 @@ func (c *Core) CreateExportOrder(username string, wsID, svcID uint, req *ExportO
 	}
 	order.ValuesYAML = values
 	order.ManifestJSON = manifest
+	// 首渲落库失败与 render 失败分支同构（issue #267）：行已落库（status=building），裸
+	// return 会滞留 building 且构建 goroutine 未启动（asyncBuildExportOrder 在错误分支后
+	// 未达）——自动链路上成孤儿行，仅剩人工推进解救。先带因落 failed 再返回错误
 	if err := c.saveFirstRenderArtifacts(order, values, manifest); err != nil {
+		c.failExportOrder(order.ID, "persist first render: "+err.Error())
 		return nil, err
 	}
 	c.asyncBuildExportOrder(order.ID)
@@ -289,9 +293,15 @@ func (c *Core) asyncBuildExportOrder(orderID uint) {
 				return
 			}
 		}
-		var m *ExportManifest
-		if m, err = parseExportManifest(order.ManifestJSON); err != nil {
-			c.failExportOrder(orderID, err.Error())
+		// slug 取源包行而非 DB manifest（issue #261）：创建窗口下载竞态胜出时首渲 CAS
+		// 放弃，ManifestJSON 可能仍是 "{}" 占位（parseExportManifest 返回零值、Package.Slug
+		// 空串）——空 slug 使 Build 以 "label has an empty value" 失败且文案误导（指向标签
+		// 而非竞态根因）。slug 是 marker 级不变量（order.SourcePackageID 落库自创建时
+		// svc.PackageID，与首渲/重渲 manifest 的 Package.Slug 同源）；源包缺失时后续
+		// rebuildExportArtifacts 重渲同样必败，此处提前带因入 failed 口径一致
+		pkg, perr := c.Packages.Get(order.SourcePackageID)
+		if perr != nil {
+			c.failExportOrder(orderID, "source package load: "+perr.Error())
 			return
 		}
 		out, berr := c.Images.Build(ctx, imagebuilder.BuildInput{
@@ -304,7 +314,7 @@ func (c *Core) asyncBuildExportOrder(orderID uint) {
 			// 审计由 values podAnnotations（exportvalues.go renderExportValues）与
 			// manifest.exportOrder 承载，不入镜像（评审修复）
 			Labels: map[string]string{
-				"oaf.platform/slug":     m.Package.Slug,
+				"oaf.platform/slug":     pkg.Slug,
 				"oaf.platform/version":  mark.PackageVersion,
 				"oaf.platform/checksum": "sha256:" + mark.Checksum,
 			},
@@ -532,6 +542,14 @@ func (c *Core) AdvanceExportOrder(uid, orderID uint, username string, in *Export
 // 合法迁移，继续落库，效果等价客户端刷新重试）；非法迁移（如库内已 approving 而目标
 // 仍 approving）维持 ErrBadState 拒绝、DB 状态不被改写。
 func (c *Core) advanceExportOrderCAS(order *store.ExportOrderEntity, role, username string, in *ExportAdvanceInput) (*store.ExportOrderEntity, error) {
+	// itsmTicketId 长度校验（issue #270）：列宽 128（model.go:387 gorm size:128），超长撞
+	// MySQL 严格模式 1406 后裸驱动错误（含列名）经 mapError default 分支以 500 直出（部署
+	// driver 未开 TranslateError，先例 publish.go translateStorageError 注释）——落库前 400
+	// 拦截，与 validateChartVersion（issue #226 同理由）同款。len() 字节口径对多字节输入偏
+	// 保守（可能拒掉列宽本可容纳的值），但绝不漏放会 1406 的值，与既有 len() 先例一致
+	if len(in.ItsmTicketID) > 128 {
+		return nil, fmt.Errorf("%w: itsmTicketId must be at most 128 bytes, got %d", ErrInvalidForm, len(in.ItsmTicketID))
+	}
 	if err := RequireWsRole(role); err != nil {
 		return nil, err
 	}

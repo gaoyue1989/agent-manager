@@ -465,3 +465,102 @@ func TestMarshalMarkFilesSizeLimit(t *testing.T) {
 		t.Fatalf("round-trip mismatch: %+v", back)
 	}
 }
+
+// TestSaveExportFileConcurrentEditsNoLoss issue #268：B 取基线快照后、写回前，C 先落另一
+// 个文件（draft_version 前移）——B 的 CAS 不命中重读重放，两个编辑同存于最终快照（修复前
+// B 的整份快照写回整段覆盖 C 的修改，无任何报错）。draft_version 每次成功保存恰好 bump 1。
+func TestSaveExportFileConcurrentEditsNoLoss(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	if _, err := core.SaveExportPackageFile(ws.ID, svc.ID, "u-a", "a.txt", "aaa"); err != nil {
+		t.Fatalf("save a: %v", err)
+	}
+	// B 的基线（等价 B 请求刚完成 loadDraftMark）
+	stale, err := core.loadDraftMark(svc.ID)
+	if err != nil || stale == nil {
+		t.Fatalf("load draft: %v", err)
+	}
+	// C 在 B 写回前保存（v1→v2）
+	if _, err := core.SaveExportPackageFile(ws.ID, svc.ID, "u-c", "c.txt", "ccc"); err != nil {
+		t.Fatalf("save c: %v", err)
+	}
+	// B 以 v1 基线走内部写路径 → CAS 不命中 → 重读 v2 重放 b.txt
+	if _, err := core.saveExportFileCAS(ws.ID, svc.ID, pkg, "u-b", "b.txt", "bbb", stale); err != nil {
+		t.Fatalf("save b (stale baseline): %v", err)
+	}
+	var row store.ExportPackageMarkEntity
+	if err := core.DB.First(&row, stale.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]string{}
+	for _, e := range markEntries(t, row.FilesJSON) {
+		paths[e.Path] = e.Content
+	}
+	if paths["a.txt"] != "aaa" || paths["b.txt"] != "bbb" || paths["c.txt"] != "ccc" {
+		t.Fatalf("concurrent edits lost: %v", paths)
+	}
+	// INSERT 建行不 bump（v0）：c 0→1，b miss 重读后 1→2
+	if row.DraftVersion != 2 {
+		t.Fatalf("draft_version = %d, want 2 (insert 不 bump，c/b 各 bump 一次)", row.DraftVersion)
+	}
+}
+
+// TestSaveExportFileFreezeRaceVersionGuard issue #268 冻结侧：既有草稿冻结走
+// (id, status=draft, draft_version) CAS 且不碰 files_json——冻结后保存以 status=draft
+// 守卫拒绝（frozen 快照不可变），不会被保存方改写。
+func TestSaveExportFileFreezeRaceVersionGuard(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	if _, err := core.SaveExportPackageFile(ws.ID, svc.ID, "u-a", "a.txt", "aaa"); err != nil {
+		t.Fatalf("save a: %v", err)
+	}
+	stale, err := core.loadDraftMark(svc.ID)
+	if err != nil || stale == nil {
+		t.Fatalf("load draft: %v", err)
+	}
+	mark, err := core.FreezeExportMark(ws.ID, svc.ID, "u-f")
+	if err != nil {
+		t.Fatalf("freeze: %v", err)
+	}
+	// 保存方以冻结前基线写回 → status=draft 守卫 CAS 不命中 → 重读无 draft → 种子化新建
+	if _, err := core.saveExportFileCAS(ws.ID, svc.ID, pkg, "u-b", "b.txt", "bbb", stale); err != nil {
+		t.Fatalf("save after freeze: %v", err)
+	}
+	var frozen store.ExportPackageMarkEntity
+	if err := core.DB.First(&frozen, mark.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if frozen.Status != store.ExportMarkFrozen {
+		t.Fatalf("frozen mark must stay frozen, got %q", frozen.Status)
+	}
+	paths := map[string]bool{}
+	for _, e := range markEntries(t, frozen.FilesJSON) {
+		paths[e.Path] = true
+	}
+	if paths["b.txt"] {
+		t.Fatal("save after freeze must not mutate the frozen snapshot")
+	}
+	if !paths["a.txt"] {
+		t.Fatal("frozen snapshot must contain the pre-freeze edit")
+	}
+}
+
+// TestSaveExportFileFirstInsertConflict409 issue #269：并发首存竞态败者 INSERT 撞
+// (service_id, marker="") 复合唯一 → translateStorageError → ErrConflict（409），不再以
+// 500 + 裸驱动错误直出（FreezeExportMark 同口径）。以 status=frozen、marker="" 的占位行
+// 模拟「并发方已抢注该服务的唯一 draft 槽位」——loadDraftMark 只认 draft 不会命中该行，
+// 保存路径走 INSERT 冲突分支。
+func TestSaveExportFileFirstInsertConflict409(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	if err := core.DB.Create(&store.ExportPackageMarkEntity{
+		ServiceID: svc.ID, WorkspaceID: ws.ID, PackageVersion: pkg.Version,
+		Status: store.ExportMarkFrozen, CreatedBy: "u-x",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err := core.SaveExportPackageFile(ws.ID, svc.ID, "u-a", "a.txt", "aaa")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict (409, not raw 500)", err)
+	}
+}

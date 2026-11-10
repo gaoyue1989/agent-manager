@@ -283,6 +283,17 @@ public class SkillInjectionService {
                 log.warn("enabledSkillNames: merge L4 failed for user {}: {}", userId, e.getMessage());
             }
         }
+        // L2 禁用优先（oa-1110-repro-fixes-design §2.1b）：同名 L4 enabled 覆盖不得把包级
+        // 禁用技能重新放回（与 SkillDisabledFilterMiddleware 的名字并集禁用口径对齐）；
+        // 禁用集读取失败按空集 fail-soft
+        try {
+            var l2Disabled = manageService.getDisabledSet();
+            if (l2Disabled != null && !l2Disabled.isEmpty()) {
+                names.removeAll(l2Disabled);
+            }
+        } catch (Exception e) {
+            log.warn("enabledSkillNames: read L2 disabled set failed: {}", e.getMessage());
+        }
         if (skillNames == null) {
             return names;
         }

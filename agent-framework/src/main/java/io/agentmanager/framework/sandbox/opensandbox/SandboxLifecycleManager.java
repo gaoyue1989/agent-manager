@@ -237,8 +237,11 @@ public class SandboxLifecycleManager {
                 }
                 case OCCUPIED -> {
                     // ===== ③ create（事务外 HTTP，不持任何锁）=====
+                    // 瞬时类失败重试（oa-1110-repro-fixes-design §2.3a）：并发建箱高峰上游
+                    // 排队放大触发 SDK 建箱超时（实测 1.5s→13.2s）——仅超时/连接/网关不可达类
+                    // 按指数退避重试；pending 行在重试期间保持有效，仅最终失败补偿
                     try {
-                        CreatedSandbox created = createDelegate.create();
+                        CreatedSandbox created = createWithRetry(sessionId, createDelegate);
                         boolean promoted;
                         try {
                             promoted = bindingStore.promotePending(occupy.pendingSandboxId(),
@@ -288,6 +291,39 @@ public class SandboxLifecycleManager {
         CreatedSandbox created = createDelegate.create();
         emit("acquire_create_untracked", created.sandboxId(), "reason=fail_open");
         return created.sandbox();
+    }
+
+    /** create 重试退避上限（毫秒）：退避指数增长封顶，防 attempts 配错拖死 acquire */
+    private static final long CREATE_RETRY_BACKOFF_CAP_MS = 10_000L;
+
+    /**
+     * ③ create 瞬时类失败重试（oa-1110-repro-fixes-design §2.3a）：仅超时/连接/网关不可达类
+     * 失败按指数退避重试（SANDBOX_CREATE_MAX_ATTEMPTS / SANDBOX_CREATE_RETRY_BACKOFF_MS 可配，
+     * attempts=1 即回退原行为）；配额/身份/参数类失败照常直抛。重试发生在同一 pending 占位内，
+     * 不重复占额；抛出时由调用方 compensatePending 补偿一次。
+     */
+    private CreatedSandbox createWithRetry(String sessionId,
+                                           SandboxCreateDelegate createDelegate) throws Exception {
+        int maxAttempts = Math.max(1, config.createMaxAttempts());
+        long backoffMs = Math.max(0, config.createRetryBackoffMs());
+        Exception last = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return createDelegate.create();
+            } catch (Exception e) {
+                last = e;
+                if (attempt >= maxAttempts || !SandboxFailureClassifier.transientForCreate(e)) {
+                    throw e;
+                }
+                long sleepMs = Math.min(backoffMs * (1L << (attempt - 1)), CREATE_RETRY_BACKOFF_CAP_MS);
+                log.warn("[sandbox-lifecycle] transient create failure (attempt {}/{}, sid={}): {}, retrying in {}ms",
+                    attempt, maxAttempts, sessionId, e.getMessage(), sleepMs);
+                emit("create_retry", null, "sid=" + sessionId + " attempt=" + attempt
+                    + " cause=" + e.getClass().getSimpleName());
+                Thread.sleep(sleepMs);
+            }
+        }
+        throw last;   // 不可达（循环内要么 return 要么 throw）
     }
 
     /**

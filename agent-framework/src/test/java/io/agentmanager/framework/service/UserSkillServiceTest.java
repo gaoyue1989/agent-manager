@@ -279,6 +279,35 @@ class UserSkillServiceTest {
     }
 
     @Test
+    void markerKeysMustNotCountIntoSkillUpdatedAt() throws Exception {
+        // oa-1110-repro-fixes-design §2.5：启停/删除/加栅栏等纯标记写入
+        // （/{name}/.disabled、.deleted、.admin-override）不得计入内容 updatedAt——
+        // 否则 toggle 会"刷新"更新时间（复现报告 #25 口径缺陷）
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        var seq = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() < 4);
+        when(rs.getString("item_key")).thenReturn(
+            "/demo-a/SKILL.md",              // 内容写入：2024-10-27（应作为 updatedAt）
+            "/demo-a/.disabled",             // 启停标记：更晚，但不得计入
+            "/demo-a/.deleted",              // 删除标记
+            "/demo-a/scripts/.admin-override"); // 资源目录内标记
+        when(rs.getLong("updated_at"))
+            .thenReturn(1_730_000_000_000L, 1_800_000_000_000L, 1_810_000_000_000L, 1_820_000_000_000L);
+
+        var s = svc.listSkills(USER).get(0);
+        assertEquals(new java.sql.Timestamp(1_730_000_000_000L).toString(), s.updatedAt(),
+            "标记键不得计入 updatedAt，内容键时间应胜出：" + s.updatedAt());
+    }
+
+    @Test
     void readSkillShouldFallBackToPackageBaseline() throws IOException {
         seedPackageSkill("demo-a", PKG_SKILL_MD, null, null);
 

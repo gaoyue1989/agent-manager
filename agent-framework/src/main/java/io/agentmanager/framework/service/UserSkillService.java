@@ -442,18 +442,27 @@ public class UserSkillService {
         return result;
     }
 
-    /** 从 item_key 提取顶层技能名（含资源文件；元数据段 . / _ 开头返回 null） */
+    /**
+     * 从 item_key 提取顶层技能名（含资源文件）；<b>任一</b>路径段为元数据段（. / _ 开头，
+     * 如 {@code /{name}/.disabled}、{@code .deleted}、{@code .admin-override}）返回 null——
+     * 启停/删除/加栅栏等纯标记写入不得计入内容 updatedAt（oa-1110-repro-fixes-design §2.5）。
+     */
     private static String topSkillName(String itemKey) {
         if (itemKey == null || itemKey.isBlank()) {
             return null;
         }
         var key = itemKey.startsWith("/") ? itemKey.substring(1) : itemKey;
-        var slash = key.indexOf('/');
-        var name = slash >= 0 ? key.substring(0, slash) : key;
-        if (name.isBlank() || name.charAt(0) == '.' || name.charAt(0) == '_') {
+        if (key.isBlank()) {
             return null;
         }
-        return name;
+        for (var seg : key.split("/")) {
+            if (seg.isBlank() || seg.charAt(0) == '.' || seg.charAt(0) == '_') {
+                return null;
+            }
+        }
+        var slash = key.indexOf('/');
+        var name = slash >= 0 ? key.substring(0, slash) : key;
+        return name.isBlank() ? null : name;
     }
 
     /**

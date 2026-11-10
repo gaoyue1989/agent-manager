@@ -291,6 +291,13 @@ public class HarnessAgentFactory {
                     && (historyConfig == null || historyConfig.archiveEnabled())) {
                 builder.middleware(new io.agentmanager.framework.service.TurnInputArchiveMiddleware(
                     sessionMessageStore));
+                // 压缩前上下文增量归档（oa-1110-repro-fixes-design §2.2）：SDK 2.0.3 整轮只在
+                // doCall 结束落库，CompactionMiddleware.onReasoning 在 turn 中途就地 clear 上下文
+                // ——长 turn 中途触发压缩时，压缩点之前的 tool_use/tool_result 从未进 session_message
+                // （「历史执行过程缺失」根因）。order=2 外层于压缩中间件（默认 1），每步推理前
+                // 差量幂等归档（session-history-archive-design §12.4 预留后手落地）
+                builder.middleware(new io.agentmanager.framework.service.PreCompactionArchiveMiddleware(
+                    sessionMessageStore));
             }
 
             // 远程子 agent 声明（travel-fulfillment B1，§8 lead-1）：OAF agents[].endpoint

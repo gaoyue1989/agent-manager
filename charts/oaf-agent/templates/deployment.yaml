@@ -60,8 +60,10 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
           volumeMounts:
-            # OAF 包只读挂载（initContainer 已拷入）；工作区/文件存储/日志目录为 Pod 本地 emptyDir
-            # （可丢弃/可重建；跨副本文件不共享为 v1 已知边界，见 chart README）
+            # OAF 包只读挂载（initContainer 已拷入）；工作区/日志目录为 Pod 本地 emptyDir
+            # （可丢弃/可重建；跨副本文件不共享为 v1 已知边界，见 chart README）。
+            # /data/files 与平台侧不同：平台挂共享 PVC 可写 subPath（Pod 重建文件保留），
+            # 本 chart 为 emptyDir、Pod 重建即丢用户上传文件（v1 显式降级披露，见 chart README）
             - name: config
               mountPath: {{ .Values.configInjection.dir }}
               readOnly: true

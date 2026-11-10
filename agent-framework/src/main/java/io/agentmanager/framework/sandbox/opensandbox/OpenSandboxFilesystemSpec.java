@@ -29,6 +29,10 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private String workspaceRoot = "/workspace";
     private WorkspaceReader workspaceReader;
     private WorkspaceSyncService workspaceSyncService;
+    /** 技能禁用判定（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放过滤；null = 不过滤 */
+    private SkillDisabledChecker skillDisabledChecker;
+    /** 建箱/管理面 HTTP 请求超时（oa-1110-repro-fixes-design §2.3b）；null = 走 SDK 默认 */
+    private java.time.Duration requestTimeout;
     private SandboxUserKeyMiddleware userKeyMiddleware;
     private io.agentmanager.framework.service.FileAssetStore fileAssetStore;
     private io.agentmanager.framework.service.storage.FileStorage fileStorage;
@@ -349,7 +353,9 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .entrypoint(entrypoint)
             .resource(resource)
             .environment(environment)
-            .workspaceRoot(workspaceRoot);
+            .workspaceRoot(workspaceRoot)
+            .skillDisabledChecker(skillDisabledChecker)
+            .requestTimeout(requestTimeout);
     }
 
     @Override
@@ -379,6 +385,14 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     public OpenSandboxFilesystemSpec resource(Map<String, String> resource) { this.resource = resource; return this; }
     public OpenSandboxFilesystemSpec environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxFilesystemSpec workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
+    public OpenSandboxFilesystemSpec skillDisabledChecker(SkillDisabledChecker checker) {
+        this.skillDisabledChecker = checker;
+        return this;
+    }
+    public OpenSandboxFilesystemSpec requestTimeout(java.time.Duration requestTimeout) {
+        this.requestTimeout = requestTimeout;
+        return this;
+    }
     public OpenSandboxFilesystemSpec workspaceReader(WorkspaceReader workspaceReader) {
         this.workspaceReader = workspaceReader;
         return this;
