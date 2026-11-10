@@ -927,24 +927,35 @@ test('TL-L1 会话级工具白名单收敛进模型请求，下一轮恢复全�
 });
 
 // TL-L2（onActing 负例）：白名单外 MCP 工具的幻觉调用——mock 按 marker 重放 bench_echo 调用
-//（schema 已把它收敛出模型请求，真实运行面上模型仍可能报出工具名）必须被 onActing 合成
-// DENIED 结果：SSE 流连续（TOOL_RESULT_END state=DENIED + DENY 说明文本）、终态仍收 done。
-// 若 SDK 未把被过滤工具的调用送达 onActing 而是上游报错，红即产品缺陷信号，按实况帧修断言。
-test('TL-L2 白名单外 MCP 工具调用被 onActing 合成 DENIED', async () => {
+//（schema 已把它收敛出模型请求，真实运行面上模型仍可能报出工具名）必须被 onActing 兜底拦下：
+// 不执行（无成功结果帧）、DENIED 结果注入会话归档（history 的 tool_calls.state=denied + deny
+// 文案，即前端会话历史的真实数据源）、对话流连续终态仍收 done。
+// 注：agentscope 2.0.3 的 acting 中间件链在 Mono.then() 语义下执行（OtelTracingMiddleware
+// lambda$onActing$14 实证）——中间件合成的 Tool 事件被收集进引用后吞掉，结构性到不了 SSE，
+// 故「SSE 帧可见 DENIED」不可断言；deny 的用户可见性钉在 history 归档通道。
+test('TL-L2 白名单外 MCP 工具调用不被执行，DENIED 结果注入会话归档', async () => {
   const sid = sessionIdFor(`tll2-${uniq()}`);
   const stream = chat({
     message: `[E2E:tool:mcp_echo](tll2-${uniq()})`,
     userId: U, sessionId: sid, tools: ['echo'],   // bench_echo 在白名单外
   });
   await waitTerminal(stream);
-  const deniedBench = toolResults(stream.frames).find(r => String(r.toolCallName ?? '') === 'bench_echo');
-  expect(deniedBench, '白名单外 bench_echo 调用应有 TOOL_RESULT_END 帧').toBeTruthy();
-  expect(String((deniedBench as Record<string, unknown>).state)).toBe('DENIED');
-  const denyText = stream.frames.find(f =>
-    f.type === 'TOOL_RESULT_TEXT_DELTA'
-    && String(f.delta ?? '').includes("is not in this turn's allowed tools list"));
-  expect(denyText, '缺少 DENY 说明文本（onActing reason 未达 SSE）').toBeTruthy();
+  // 流连续：deny 不打断对话，终态仍 done
   expect(stream.terminal?.type).toBe('done');
+  // 未执行：无终局结果帧（S5 正常执行会发 TOOL_RESULT_END state=SUCCESS；
+  // 容许将来 SDK 把 DENIED 帧送达 SSE——只拦「真实执行/报错」类终局态）
+  const executed = toolResults(stream.frames).find(r =>
+    String(r.toolCallName ?? '') === 'bench_echo'
+    && ['SUCCESS', 'ERROR', 'COMPLETED', 'FAILURE'].includes(String(r.state ?? '')));
+  expect(executed, '白名单外 bench_echo 被真实执行了（兜底防线失效）').toBeUndefined();
+  // DENIED 结果注入会话归档：tool_calls[].state=denied + deny 文案（前端历史渲染数据源）
+  const h = await history(sid, BASE, U);
+  const assistantTcs = ((h.messages as Array<Record<string, unknown>>) ?? [])
+    .flatMap(m => (m.tool_calls as Array<Record<string, unknown>> | undefined) ?? []);
+  const denied = assistantTcs.find(tc => String(tc.name ?? '') === 'bench_echo');
+  expect(denied, 'bench_echo 调用未出现在会话归档').toBeTruthy();
+  expect(String(denied?.state)).toBe('denied');
+  expect(String(denied?.output ?? '')).toContain("is not in this turn's allowed tools list");
 });
 
 // ---------- FW 组：/threads slot 双形态匹配 + Flyway（76e0e74/512a6b3，e2e-ci-plan §5.10） ----------
