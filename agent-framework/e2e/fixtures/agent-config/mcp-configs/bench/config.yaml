@@ -17,8 +17,12 @@ permissions:
 # X-User-Id、按调用方 chat 请求 Authorization 原值透传；mock /last-call 回读校验。
 # on-missing: passthrough——S5 主流程不携带 Authorization，缺值跳过该头（其余映射
 # 仍按值注入）；S5b 携带 Authorization 断言透传与 _meta 剥离
+# arguments 节（mcp-header-arguments-injection-design）：请求头 taskId 注入工具入参
+# （S5c 断言）；参数通道缺值恒跳过，与 on-missing 无关
 userHeaders:
   headers:
     X-User-Id: userId
     Authorization: reqHeader:authorization
+  arguments:
+    taskId: reqHeader:taskid
   on-missing: passthrough

@@ -26,13 +26,19 @@ class UserScopedMcpClientWrapperTest {
         .isError(false)
         .build();
 
-    /** 记录 delegate 收到的 meta 与调用链上可见的 McpTransportContext */
+    /** 记录 delegate 收到的入参/meta 与调用链上可见的 McpTransportContext */
     private static class RecordingClient extends McpClientWrapper {
         final AtomicReference<Map<String, Object>> seenMeta = new AtomicReference<>();
+        final AtomicReference<Map<String, Object>> seenArguments = new AtomicReference<>();
         final AtomicReference<McpTransportContext> seenTransportContext = new AtomicReference<>();
 
         RecordingClient() {
             super("test-server");
+        }
+
+        /** 预置工具 schema（schema 门控测试用；放入基类 cachedTools，getCachedTool 可查） */
+        void cacheTool(McpSchema.Tool tool) {
+            cachedTools.put(tool.name(), tool);
         }
 
         @Override
@@ -53,6 +59,7 @@ class UserScopedMcpClientWrapperTest {
         @Override
         public Mono<McpSchema.CallToolResult> callTool(
                 String toolName, Map<String, Object> arguments, Map<String, Object> meta) {
+            seenArguments.set(arguments);
             seenMeta.set(meta);
             return Mono.deferContextual(cv -> {
                 seenTransportContext.set(cv.getOrDefault(McpTransportContext.KEY, null));
@@ -66,7 +73,7 @@ class UserScopedMcpClientWrapperTest {
     }
 
     private static UserScopedMcpClientWrapper wrapper(McpClientWrapper delegate, Map<String, String> headers, boolean deny) {
-        return new UserScopedMcpClientWrapper(delegate, new UserHeaderRule(headers, deny));
+        return new UserScopedMcpClientWrapper(delegate, new UserHeaderRule(headers, Map.of(), deny));
     }
 
     @Test
@@ -271,5 +278,146 @@ class UserScopedMcpClientWrapperTest {
         verify(delegate).listTools();
         verify(delegate).initialize();
         verify(delegate).close();
+    }
+
+    // ===== arguments 通道（mcp-header-arguments-injection-design）=====
+
+    /** 构造带 inputSchema 的工具定义（schema 门控用） */
+    private static McpSchema.Tool toolWithSchema(String name, Map<String, Object> properties,
+                                                 Boolean additionalProperties) {
+        return new McpSchema.Tool(name, null, "desc",
+            new McpSchema.JsonSchema("object", properties, null, additionalProperties, null, null),
+            null, null, null);
+    }
+
+    /** 仅声明 arguments 映射的 wrapper（参数通道无 fail-closed，deny/passthrough 无关） */
+    private static UserScopedMcpClientWrapper argWrapper(McpClientWrapper delegate,
+                                                         Map<String, String> arguments) {
+        return new UserScopedMcpClientWrapper(delegate, new UserHeaderRule(Map.of(), arguments, false));
+    }
+
+    @Test
+    void shouldInjectArgumentFromReqHeaderIntoToolCallArguments() {
+        var delegate = new RecordingClient();
+        var scoped = argWrapper(delegate, Map.of("taskId", "reqHeader:taskid"));
+        var meta = Map.<String, Object>of("userId", "alice", "reqHeader:taskid", "1001-1757858");
+
+        StepVerifier.create(scoped.callTool("echo", Map.of("q", "hello"), meta))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("q", "hello", "taskId", "1001-1757858"), delegate.seenArguments.get(),
+            "请求头原值应合并进工具入参（含不可变入参的防御性拷贝）");
+        // 透传值与 header 通道同款剥离：不随 _meta 下发
+        assertEquals(Map.of("userId", "alice"), delegate.seenMeta.get());
+        assertNull(delegate.seenTransportContext.get(), "arguments 通道不写 transport context");
+    }
+
+    @Test
+    void shouldSkipArgumentInjectionWhenValueMissing() {
+        // 参数通道无 fail-closed：缺值恒跳过，调用照常
+        var delegate = new RecordingClient();
+        var scoped = argWrapper(delegate, Map.of("taskId", "reqHeader:taskid"));
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of("userId", "alice")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of(), delegate.seenArguments.get(), "缺值不注入，入参原样");
+        assertNull(delegate.seenTransportContext.get());
+    }
+
+    @Test
+    void shouldNotOverrideExplicitArguments() {
+        // args-win：调用方/模型显式给出的参数优先，框架只补缺
+        var delegate = new RecordingClient();
+        var scoped = argWrapper(delegate, Map.of("taskId", "reqHeader:taskid"));
+
+        StepVerifier.create(scoped.callTool("echo", Map.of("taskId", "model-decided"),
+                Map.of("reqHeader:taskid", "1001-1757858")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("taskId", "model-decided"), delegate.seenArguments.get(),
+            "显式参数不得被 header 值覆盖");
+    }
+
+    @Test
+    void shouldGateInjectionByToolInputSchema() {
+        // additionalProperties:false 的严格 schema：仅注入 properties 已声明的参数
+        var delegate = new RecordingClient();
+        delegate.cacheTool(toolWithSchema("echo",
+            Map.of("taskId", Map.of("type", "string")), false));
+        var scoped = argWrapper(delegate, Map.of(
+            "taskId", "reqHeader:taskid",
+            "extra", "reqHeader:extra"));
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(),
+                Map.of("reqHeader:taskid", "1001-1757858", "reqHeader:extra", "x")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("taskId", "1001-1757858"), delegate.seenArguments.get(),
+            "严格 schema 未声明的参数不得注入");
+    }
+
+    @Test
+    void shouldInjectWhenSchemaAllowsAdditionalProperties() {
+        // properties 未声明但 additionalProperties 缺省（null）——JSON Schema 缺省即允许追加
+        var delegate = new RecordingClient();
+        delegate.cacheTool(toolWithSchema("echo",
+            Map.of("q", Map.of("type", "string")), null));
+        var scoped = argWrapper(delegate, Map.of("taskId", "reqHeader:taskid"));
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of("reqHeader:taskid", "1001-1757858")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("taskId", "1001-1757858"), delegate.seenArguments.get());
+    }
+
+    @Test
+    void shouldProceedBestEffortWhenToolSchemaUnavailable() {
+        // 工具未入缓存（schema 不可得）：best-effort 注入，兼容下游 schema 写漏的松散实现
+        var delegate = new RecordingClient();
+        var scoped = argWrapper(delegate, Map.of("taskId", "reqHeader:taskid"));
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of("reqHeader:taskid", "1001-1757858")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("taskId", "1001-1757858"), delegate.seenArguments.get());
+    }
+
+    @Test
+    void shouldInjectArgumentsFromUserIdSource() {
+        // 取值源与 headers 节同款抽象：userId（内建 meta key）可用
+        var delegate = new RecordingClient();
+        var scoped = argWrapper(delegate, Map.of("tenantId", "userId"));
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of("userId", "alice")))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("tenantId", "alice"), delegate.seenArguments.get());
+    }
+
+    @Test
+    void shouldInjectBothChannelsTogether() {
+        // headers + arguments 双通道同调用并发：HTTP header 与工具入参各自生效，_meta 恒剥离
+        var delegate = new RecordingClient();
+        var scoped = new UserScopedMcpClientWrapper(delegate, new UserHeaderRule(
+            Map.of("X-Task-Id", "reqHeader:taskid"), Map.of("taskId", "reqHeader:taskid"), true));
+        var meta = Map.<String, Object>of("userId", "alice", "reqHeader:taskid", "1001-1757858");
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), meta))
+            .expectNextMatches(r -> !r.isError())
+            .verifyComplete();
+
+        assertEquals(Map.of("taskId", "1001-1757858"), delegate.seenArguments.get());
+        var tc = delegate.seenTransportContext.get();
+        assertNotNull(tc);
+        assertEquals(Map.of("X-Task-Id", "1001-1757858"), tc.get(UserScopedMcpClientWrapper.HEADER_KEY));
+        assertEquals(Map.of("userId", "alice"), delegate.seenMeta.get());
     }
 }
