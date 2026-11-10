@@ -1,7 +1,7 @@
 # 会话级技能列表（POST /threads/chat 传 skills）— 设计文档
 
 **日期**：2026-11-03
-**状态**：已实施 + 部署验证
+**状态**：已实施 + 部署验证（2026-11-10 修订：issue #264 HITL 恢复轮继承、#266 A2A 旧客户端字符串归一）
 **范围**：agent-framework 运行时；控制面（backend/frontend）零改动
 **取代**：早前「skill-roles.yaml 角色分组」方案（未实施，已废弃）
 
@@ -17,20 +17,23 @@
 3. **无法按请求收敛**：调用方最清楚"这一轮该用哪些技能"，但运行时没有入口接收。
 
 本设计给 **`POST /threads/chat` 增加 `skills` 字段**：调用方在请求中直接声明本轮可用技能列表，
-运行时把模型侧技能可见集收敛为该列表。列表**仅对本轮生效**（不落库、不跨轮沿用），
-不引入包内声明文件、不引入会话状态、控制面零改动。
+运行时把模型侧技能可见集收敛为该列表。列表**仅对本轮生效**（不写 `session_user`、不跨轮沿用），
+不引入包内声明文件、不引入会话状态、控制面零改动。唯一例外：轮次在 HITL 工具审批处挂起时，
+本轮名单随确认上下文暂存（`confirm_context.skills_json`），批准后的恢复轮原样继承（issue #264）。
 
 ### 1.1 目标
 
 - `POST /threads/chat {skills:[...]}` 与 A2A `message.metadata.skills` 三处（chat/A2A/只读视图）同口径；
 - 模型侧 `<available_skills>`、`load_skill_through_path`、`/Skill` 注入、`/skills*` 视图按列表收敛；
 - 缺省行为与存量完全一致；被禁用技能仍剔除（禁用优先）；
-- 多副本/重启无状态差异（列表随本轮消息传递，不落任何存储）。
+- 多副本/重启无状态差异（列表随本轮消息传递；HITL 挂起轮仅暂存于共享
+  `confirm_context`，供任意副本恢复时继承，不进入会话/进程内状态）。
 
 ### 1.2 非目标
 
 - 不做角色/授权模型：列表是上下文边界，不是安全边界；能调用 chat 的调用方可以传任意技能名；
-- 不做跨轮记忆：本轮未传即恢复全部技能（需要固定清单的调用方每轮都传）；
+- 不做跨轮记忆：本轮未传即恢复全部技能（需要固定清单的调用方每轮都传）。HITL 确认恢复轮
+  例外——它视为同一逻辑任务的延续，继承挂起轮名单（issue #264）；恢复段再次挂起时继续继承；
 - 不做工具 / MCP / 子 Agent 过滤、不做文件物理隔离（沙箱内技能文件仍可见）；
 - 不做控制面 UI（前端/发布向导不感知该字段，属可选高级用法）。
 
@@ -45,11 +48,20 @@
 | 字段缺省 / `null` | 全部启用技能 | 存量行为逐字节不变 |
 | `[]`（显式空数组） | 无 | 模型看不到任何技能；`/Skill` 全部不注入 |
 | `["a","b"]` | 仅 `a`、`b`（存在且未禁用者） | 未知名忽略（WARN 级 debug）；已禁用剔除 |
+| A2A `"a,b"`（逗号分隔字符串） | 仅 `a`、`b` | 旧客户端兼容；归一处 split 为 List 后与数组同语义（issue #266） |
+| HITL confirm 恢复轮 | 继承挂起轮名单 | `confirm_context.skills_json` → 恢复消息 metadata；`null`/`[]` 原样继承（issue #264） |
 
 - **仅本轮生效**：不写 `session_user`、不写消息历史附加状态；下一轮未传即恢复全部。
 - **未知名忽略**：不校验、不报错；白名单中的未知名字在技能仓库中匹配不到任何技能。
 - **禁用优先**：被禁用的技能即使出现在列表里也不可见（由禁用中间件的 overlay 剔除）。
 - **L4 个人技能**：列表按名字匹配；用户在 L4 中存在同名技能时照常可见/注入（内容 L4 优先）。
+- **HITL 恢复继承（issue #264）**：`storeConfirmContext` 把挂起轮名单写入
+  `confirm_context.skills_json`；`buildResumeMsg` 将名单回填到恢复 USER 消息 metadata，
+  `SkillFilterMiddleware` 照常从最后一条 USER 消息读取。恢复段再次触发审批时，controller
+  先读未消费/最近已消费行把名单继续落库，支持多层确认。该继承不改变新轮次语义：
+  新 USER 消息未传 `skills` 仍是全量技能。
+- **A2A 旧客户端字符串（issue #266）**：`groupMetaField` 对 `"a,b"` 形态 split/trim 后
+  归一为 List；空白字符串视为未传，避免把空串误判成显式无技能。
 
 ### 2.2 API
 
@@ -167,8 +179,11 @@ ctx.put(SkillFilter.class, existing != null ? existing.overlay(filter) : filter)
 | 未知技能名 | 忽略（无告警阻断）；`/skills?skills=` 视图同样过滤不到 |
 | 已禁用技能 | 即使列入名单也不可见/不注入（禁用优先） |
 | 包 reload（技能增删） | 名单按名字匹配，下一轮自然生效（无需重启） |
-| 多副本 / 重启 | 列表随本轮消息传递，无状态差异；同一会话两次请求可带不同名单 |
+| 多副本 / 重启 | 列表随本轮消息传递，无状态差异；同一会话两次请求可带不同名单；HITL 挂起期间名单在共享 `confirm_context`，任意副本恢复一致 |
 | 历史轮次 | 不重写、不裁剪；模型仍能看到此前轮次内容（上下文历史与技能可见集是两件事） |
+| HITL confirm 恢复轮 | 继承挂起轮名单（含 `[]`）；恢复段再次挂起继续继承；confirm API 不新增 `skills` 入参 |
+| A2A 旧客户端 `skills:"a,b"` | 归一为 `["a","b"]`；空白字符串 = 未传（全部技能） |
+| `confirm_context` 行被 TTL 清理 / 走 AgentState 重建 | 名单不可恢复 → 恢复轮回落全部技能（与既有 state 兜底路径一致，非阻断） |
 
 **边界**：列表是上下文/行为边界，不是授权或文件隔离边界。沙箱容器内仍投影全部技能文件，
 具备文件/Shell 工具时模型理论上可读取名单外技能；硬隔离需拆服务/拆包（非目标）。
@@ -186,7 +201,9 @@ ctx.put(SkillFilter.class, existing != null ? existing.overlay(filter) : filter)
 | `SkillCatalogServiceTest` | `list(名单)` / `availableSkills(uid, 名单)`；`null`/`[]` 语义；禁用优先；L4 交集 |
 | `SkillInjectionServiceTest` | 名单内注入、名单外保留原文、空列表、未知名忽略、旧重载回归 |
 | `ChatStreamControllerTest` | skills 写入消息 metadata（含空列表）、注入参数、未传不写键 |
-| `A2AControllerTest` | message.metadata.skills / 顶层 / 旧格式 `params.metadata.skills` 归一（分组形态、显式空列表、sessionId 共存不被门控、取值源链优先级） |
+| `A2AControllerTest` | message.metadata.skills / 顶层 / 旧格式 `params.metadata.skills` 归一（分组形态、显式空列表、sessionId 共存不被门控、取值源链优先级、逗号分隔字符串与空白串） |
+| `AgentRuntimeServiceHitlTest` | 恢复消息回填 `metadata.skills`（非空/`[]`/未声明）；恢复段再次挂起沿用名单 |
+| `ConfirmContextStoreMultiKeyTest` | `skills_json` 落库/回读；null 与 `[]` 语义区分 |
 | `ToolControllerTest` | `?skills=` 白名单与空串缺省 |
 | `HarnessAgentFactoryMiddlewareAssemblyTest` | 技能名单中间件排在禁用中间件之前 |
 

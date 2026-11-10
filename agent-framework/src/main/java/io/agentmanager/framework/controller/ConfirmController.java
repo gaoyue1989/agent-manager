@@ -348,6 +348,10 @@ public class ConfirmController {
             var turnStartedAt = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
             var sandboxRebuildNotified = new java.util.concurrent.atomic.AtomicBoolean(false);
 
+            // 恢复流事件里的再次挂起同样继承原轮 skills 白名单（issue #264）：先读未消费行
+            // （或最近已消费行）再交给 resume 消费，避免第二层确认丢失能力边界
+            var turnSkills = runtimeService.pendingTurnSkills(finalSessionId);
+
             // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
             // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
             // 回滚为何必须做（续租线程会令 session 永久锁死）：见 TurnFinalizer#abortSetup
@@ -391,7 +395,7 @@ public class ConfirmController {
             resumeFlux
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
-                        turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary),
+                        turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary, turnSkills),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -438,7 +442,8 @@ public class ConfirmController {
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
                                     java.util.concurrent.atomic.AtomicLong turnStartedAt,
                                     java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
-                                    TurnToolSummaryTracker toolSummary) {
+                                    TurnToolSummaryTracker toolSummary,
+                                    java.util.List<String> turnSkills) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
@@ -464,7 +469,7 @@ public class ConfirmController {
 
         // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
-            runtimeService.storeConfirmContext(sessionId, event);
+            runtimeService.storeConfirmContext(sessionId, event, turnSkills);
             lease.release();
             // HITL 暂停点：锁已让出、状态已持久化
             // T4 挂起保留窗（§4.4）：恢复段 ask 挂起同样保留沙箱续期，每次 ask 重新计窗

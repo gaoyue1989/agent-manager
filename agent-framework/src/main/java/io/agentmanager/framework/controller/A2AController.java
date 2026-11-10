@@ -1,5 +1,6 @@
 package io.agentmanager.framework.controller;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -181,7 +182,8 @@ public class A2AController {
      *   parts[*].metadata._agentscope_msg_id = <msgId>
      * </pre>
      * skills 与 tools 并存时共用同一 msg id 分组键（后写者 merge 进既有 nested，幂等）；
-     * 值非 List（畸形/缺省）时不写分组键（= 该字段未传，全量语义）。
+     * 值支持 List（新客户端）或逗号分隔字符串（A2A 旧客户端，issue #266）——统一归一为
+     * List 后回填；空白字符串按未传处理，畸形值不写分组键（= 全量语义）。
      */
     private void groupMetaField(Map<String, Object> meta, Map<String, Object> params,
                                 Map<String, Object> message, String key) {
@@ -193,7 +195,8 @@ public class A2AController {
                 && params.get("metadata") instanceof Map<?, ?> legacyMeta) {
             requested = legacyMeta.get(key);
         }
-        if (!(requested instanceof List<?> list)) {
+        var list = normalizeMetaList(requested);
+        if (list == null) {
             return;
         }
         var msgId = String.valueOf(message.get("messageId"));
@@ -218,6 +221,40 @@ public class A2AController {
         }
         nested.put(key, list);
         meta.put(msgId, nested);
+    }
+
+    /**
+     * 归一 metadata 值为技能/工具名单：
+     * <ul>
+     *   <li>List：逐项转字符串（显式空列表保留，= 无技能 / 仅内置）；</li>
+     *   <li>String：逗号分隔（A2A 旧客户端，issue #266），去空白/空项；全空 → 视为未传；</li>
+     *   <li>其他/null：视为未传（返回 null，不写分组键）。</li>
+     * </ul>
+     */
+    private static List<String> normalizeMetaList(Object raw) {
+        if (raw instanceof List<?> rawList) {
+            var list = new ArrayList<String>(rawList.size());
+            for (var item : rawList) {
+                if (item != null) {
+                    list.add(String.valueOf(item));
+                }
+            }
+            return list;
+        }
+        if (raw instanceof String s) {
+            if (s.isBlank()) {
+                return null;
+            }
+            var list = new ArrayList<String>();
+            for (var part : s.split(",")) {
+                var trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    list.add(trimmed);
+                }
+            }
+            return list.isEmpty() ? null : list;
+        }
+        return null;
     }
 
     private JsonRpcTransportWrapper getJsonRpcHandler() {

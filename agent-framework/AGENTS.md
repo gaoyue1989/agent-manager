@@ -510,7 +510,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | GET | `/threads/{sid}/status` | Turn 状态：`working` / `waiting_confirm` / `completed`（AGENT_END / error / cancelled）/ `interrupted` / `idle` / `failed`（排队超时或建立失败，附 `error`）；排队中返回意图行的 `reply_id`，使刷新可续传 |
 | POST | `/threads/{sid}/stop` | **单轮停止**（协作式中断，[docs/turn-stop-design.md](docs/turn-stop-design.md)）：写 `turn_stop`（reply_id 栅栏）→ 属主副本 1s 轮询 → `agent.interrupt(effectiveUserId, effectiveSessionId)`；202 已受理 / 404 无运行中 turn / 409 HITL 挂起或尚无事件（retryable）/ 503 关闭或存储不可用。终态帧 `cancelled`（排在 AGENT_END 前），history 标注 `stopped`；不撤销工具副作用、不强杀阻塞中的工具 |
 | PATCH | `/threads/{sid}` | 更新会话：`title` 重命名 + `model` 会话模型切换（""/system=回默认；未知/禁用 400） |
-| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?, tools?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效不落库，per-call SkillFilter overlay；A2A `message.metadata.skills` 同口径）；tools=本轮工具白名单（session-tool-list-design §2：作用域限 MCP+自定义、内置恒可见，缺省=全部、`[]`=仅内置、未知名忽略、内置名 WARN 不生效，仅本轮生效不落库，ToolFilterMiddleware onReasoning 收敛 + onActing 兜底 DENY；裸名/全名 `mcp__{server}__{tool}` 皆可，可传清单见 `GET /tools` 的 `sessionTools`；A2A `message.metadata.tools` 同口径）） |
+| POST | `/threads/chat` | 无状态单次流 SSE 对话（唯一对话入口，{message?, userId?, sessionId?, fileIds?, model?, skills?, tools?}；不传 sessionId 自动生成 UUID 并首发 `session_created`；Turn 租约排队 waiting 帧；model 传值即绑定本会话并本 turn 生效；skills=本轮技能白名单（缺省=全部、`[]`=无技能、未知名忽略，仅本轮生效，per-call SkillFilter overlay；HITL 挂起时暂存 `confirm_context.skills_json`、confirm 恢复轮继承（issue #264）；A2A `message.metadata.skills` 同口径，旧客户端 `"a,b"` 逗号串归一为 List（issue #266））；tools=本轮工具白名单（session-tool-list-design §2：作用域限 MCP+自定义、内置恒可见，缺省=全部、`[]`=仅内置、未知名忽略、内置名 WARN 不生效，仅本轮生效不落库，ToolFilterMiddleware onReasoning 收敛 + onActing 兜底 DENY；裸名/全名 `mcp__{server}__{tool}` 皆可，可传清单见 `GET /tools` 的 `sessionTools`；A2A `message.metadata.tools` 同口径）） |
 | GET | `/models` | 会话可选模型列表（系统模型 + 托管模型；?all=true 含禁用以供管理页恢复；`default_model`=默认对话模型 id，`fallback_model`/`fallback_source`=有效备用模型与来源 db/env/none） |
 | GET | `/models/{id}` | 模型详情（托管模型 key 掩码；系统模型只读视图） |
 | POST | `/models` | 新增托管模型（name/modelId/baseUrl 必填；采样参数可空：`reasoningEffort` 格式 `^[a-z0-9_]{1,16}$`、`frequencyPenalty` ∈[-2,2]、`provider` ∈方言枚举；重复 name 400） |
@@ -520,7 +520,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | PUT | `/models/{id}/fallback` | 设置备用模型（id=system 清除 DB 覆盖回落 `LLM_FALLBACK_MODEL_ID`；禁用模型 400；下一次模型调用生效） |
 | POST | `/models/{id}/test` | 模型连接测试（真实发一次最小 completion，返回 ok/latency_ms/reply） |
 | POST | `/threads/{sid}/confirm` | HITL 同步确认 |
-| POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约） |
+| POST | `/threads/{sid}/confirm-stream` | HITL 流式确认（新执行段重新 acquire 租约；恢复轮继承挂起轮 skills 白名单，issue #264） |
 | POST | `/files/upload` | 文件上传（multipart，MIME/大小/pending 上限校验） |
 | GET | `/files/{fileId}` | 文件下载/预览（?inline=1 内联） |
 | GET | `/mcp/{server}/resources/ui` | MCP Apps: 拉取工具 UI 资源（HtmlResource，经 CSP 注入返回） |

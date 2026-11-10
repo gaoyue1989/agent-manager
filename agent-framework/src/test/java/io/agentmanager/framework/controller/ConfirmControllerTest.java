@@ -430,7 +430,7 @@ class ConfirmControllerTest {
         // 确认上下文落库（fullThreadId 键，恢复时 buildResumeContext 的身份来源）；
         // 用 ask 自身 replyId 区分 setUp 播种的那次 put
         verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(),
-            eq("reply-ask"), any(), any());
+            eq("reply-ask"), any(), any(), any());
         // ask 即执行段结束：租约让出 + 会话关闭（closeSession → finishTurn；
         // 源流 complete 的幂等兜底会再走一次 endTurn，故 finishTurn 用 atLeastOnce）
         verify(turnLeaseStore).release(eq("t1"), eq("tok-ask1"));

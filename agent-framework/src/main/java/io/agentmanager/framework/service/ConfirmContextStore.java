@@ -102,7 +102,22 @@ public class ConfirmContextStore {
     /** 兼容重载：本地行写入（存量调用零改动，等价 confirm_key='local' 的覆盖写） */
     public void put(String sessionId, List<Map<String, Object>> toolCalls,
                     String replyId, String runtimeSessionId, String runtimeUserId) {
-        put(LOCAL_KEY, sessionId, toolCalls, replyId, runtimeSessionId, runtimeUserId, null);
+        put(LOCAL_KEY, sessionId, toolCalls, replyId, runtimeSessionId, runtimeUserId, null, null);
+    }
+
+    /** 本地行写入（带本轮 skills 白名单；null = 未声明，[] = 显式无技能） */
+    public void put(String sessionId, List<Map<String, Object>> toolCalls,
+                    String replyId, String runtimeSessionId, String runtimeUserId,
+                    List<String> skills) {
+        put(LOCAL_KEY, sessionId, toolCalls, replyId, runtimeSessionId, runtimeUserId, null, skills);
+    }
+
+    /** 兼容重载：远程行写入（skills 恒 null——远程确认链路没有本轮技能名单） */
+    public int put(String confirmKey, String sessionId, List<Map<String, Object>> toolCalls,
+                   String replyId, String runtimeSessionId, String runtimeUserId,
+                   String remoteTaskJson) {
+        return put(confirmKey, sessionId, toolCalls, replyId, runtimeSessionId, runtimeUserId,
+            remoteTaskJson, null);
     }
 
     /**
@@ -111,26 +126,28 @@ public class ConfirmContextStore {
      *
      * @param confirmKey     'local' 或 'task:{task_id}'
      * @param remoteTaskJson 远程锚点 JSON（{service, task_id, tool_calls, child_reply_id}）；本地行 null
+     * @param skills         本轮可用技能白名单（issue #264：HITL 恢复轮据此继承；null=未声明，[]=无技能）
      * @return affected rows：1=新插入、2=覆盖更新（多副本并发落卡的去重审计依据，§18.2）
      */
     public int put(String confirmKey, String sessionId, List<Map<String, Object>> toolCalls,
                    String replyId, String runtimeSessionId, String runtimeUserId,
-                   String remoteTaskJson) {
+                   String remoteTaskJson, List<String> skills) {
         var key = normalizedKey(confirmKey);
-        log.debug("[HITL-DB] put: sessionId={}, confirmKey={}, replyId={}, toolCount={}, runtimeSid={}, runtimeUid={}",
-            sessionId, key, replyId, toolCalls.size(), runtimeSessionId, runtimeUserId);
+        log.debug("[HITL-DB] put: sessionId={}, confirmKey={}, replyId={}, toolCount={}, runtimeSid={}, runtimeUid={}, skills={}",
+            sessionId, key, replyId, toolCalls.size(), runtimeSessionId, runtimeUserId, skills);
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  INSERT INTO confirm_context
                    (session_id, confirm_key, tool_calls_json, remote_task, reply_id,
-                    runtime_session_id, runtime_user_id, created_at, consumed)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3), 0)
+                    runtime_session_id, runtime_user_id, skills_json, created_at, consumed)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3), 0)
                  ON DUPLICATE KEY UPDATE
                    tool_calls_json = VALUES(tool_calls_json),
                    remote_task = VALUES(remote_task),
                    reply_id = VALUES(reply_id),
                    runtime_session_id = VALUES(runtime_session_id),
                    runtime_user_id = VALUES(runtime_user_id),
+                   skills_json = VALUES(skills_json),
                    created_at = NOW(3),
                    consumed = 0
                  """)) {
@@ -141,6 +158,7 @@ public class ConfirmContextStore {
             stmt.setString(5, replyId);
             stmt.setString(6, runtimeSessionId);
             stmt.setString(7, runtimeUserId);
+            stmt.setString(8, skillsJson(skills));
             return stmt.executeUpdate();
         } catch (Exception e) {
             log.error("ConfirmContextStore: put failed for {}: {}", sessionId, e.getMessage());
@@ -221,8 +239,9 @@ public class ConfirmContextStore {
         // 消费成功后读取完整行返回
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement(
-                 "SELECT tool_calls_json, remote_task, reply_id, runtime_session_id, runtime_user_id, created_at "
-                     + "FROM confirm_context WHERE session_id = ? AND confirm_key = ?")) {
+                 "SELECT tool_calls_json, remote_task, reply_id, runtime_session_id, runtime_user_id, "
+                     + "skills_json, created_at FROM confirm_context "
+                     + "WHERE session_id = ? AND confirm_key = ?")) {
             stmt.setString(1, sessionId);
             stmt.setString(2, key);
             var rs = stmt.executeQuery();
@@ -234,7 +253,8 @@ public class ConfirmContextStore {
                 rs.getString("reply_id"),
                 createdAt(rs).toInstant(),
                 rs.getString("runtime_session_id"),
-                rs.getString("runtime_user_id"));
+                rs.getString("runtime_user_id"),
+                toSkills(rs.getString("skills_json")));
         } catch (AgentRuntimeService.ConfirmContextNotFoundException e) {
             throw e;
         } catch (Exception e) {
@@ -261,7 +281,7 @@ public class ConfirmContextStore {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT session_id, confirm_key, tool_calls_json, remote_task, reply_id,
-                        runtime_session_id, runtime_user_id, created_at
+                        runtime_session_id, runtime_user_id, skills_json, created_at
                  FROM confirm_context
                  WHERE (session_id = ?
                         OR RIGHT(session_id, CHAR_LENGTH(?) + 1) = CONCAT(':', ?)
@@ -323,7 +343,7 @@ public class ConfirmContextStore {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT session_id, confirm_key, tool_calls_json, remote_task, reply_id,
-                        runtime_session_id, runtime_user_id, created_at
+                        runtime_session_id, runtime_user_id, skills_json, created_at
                  FROM confirm_context
                  WHERE session_id = ? AND confirm_key = ? AND consumed = 1
                  ORDER BY created_at DESC
@@ -342,6 +362,11 @@ public class ConfirmContextStore {
         }
     }
 
+    /** 同键最近一条已消费本地行（恢复段继承原轮 skills 的兜底读，issue #264） */
+    public Optional<PendingConfirm> findLastConsumedLocal(String sessionId) {
+        return findLastConsumedRemote(sessionId, LOCAL_KEY);
+    }
+
     /**
      * 会话 FIFO 头：最早未消费行（任意 confirm_key，TTL 按 local/remote 分档懒过滤）。
      * history 的 pendingConfirm 取本方法（设计 §5.2：单卡 FIFO，前端零改动，
@@ -351,7 +376,7 @@ public class ConfirmContextStore {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT session_id, confirm_key, tool_calls_json, remote_task, reply_id,
-                        runtime_session_id, runtime_user_id, created_at
+                        runtime_session_id, runtime_user_id, skills_json, created_at
                  FROM confirm_context
                  WHERE (session_id = ?
                         OR RIGHT(session_id, CHAR_LENGTH(?) + 1) = CONCAT(':', ?)
@@ -437,7 +462,7 @@ public class ConfirmContextStore {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT session_id, confirm_key, tool_calls_json, remote_task, reply_id,
-                        runtime_session_id, runtime_user_id, created_at
+                        runtime_session_id, runtime_user_id, skills_json, created_at
                  FROM confirm_context
                  WHERE (session_id = ?
                         OR RIGHT(session_id, CHAR_LENGTH(?) + 1) = CONCAT(':', ?)
@@ -472,7 +497,7 @@ public class ConfirmContextStore {
         try (var conn = dataSource.getConnection();
              var stmt = conn.prepareStatement("""
                  SELECT session_id, confirm_key, tool_calls_json, remote_task, reply_id,
-                        runtime_session_id, runtime_user_id, created_at
+                        runtime_session_id, runtime_user_id, skills_json, created_at
                  FROM confirm_context
                  WHERE confirm_key <> 'local'
                    AND consumed = 0
@@ -500,7 +525,8 @@ public class ConfirmContextStore {
             createdAt(rs).toInstant(),
             rs.getString("runtime_session_id"),
             rs.getString("runtime_user_id"),
-            fromRemoteTaskJson(rs.getString("remote_task")));
+            fromRemoteTaskJson(rs.getString("remote_task")),
+            toSkills(rs.getString("skills_json")));
     }
 
     /** confirm_key 规范化：null/空白回落 'local'（兼容重载语义） */
@@ -612,14 +638,45 @@ public class ConfirmContextStore {
         }
     }
 
+    /** 序列化本轮 skills 白名单；null 原样返回（DB NULL = 未声明，与 [] = 无技能区分） */
+    private static String skillsJson(List<String> skills) {
+        if (skills == null) {
+            return null;
+        }
+        try {
+            return MAPPER.writeValueAsString(skills);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("skills is not JSON-serializable: " + e.getMessage(), e);
+        }
+    }
+
+    /** 反序列化 skills_json → List；空/损坏返回 null（fail-soft，按未声明处理） */
+    private static List<String> toSkills(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return MAPPER.readValue(json, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            log.warn("ConfirmContextStore: failed to parse skills_json: {}", e.getMessage());
+            return null;
+        }
+    }
+
     /** 一行确认上下文记录（consume 返回值） */
     public record StoredRow(
         List<ToolUseBlock> toolCalls,
         String replyId,
         Instant createdAt,
         String runtimeSessionId,
-        String runtimeUserId
+        String runtimeUserId,
+        List<String> skills
     ) {
+        /** 兼容构造（存量调用/测试：无 skills 声明） */
+        public StoredRow(List<ToolUseBlock> toolCalls, String replyId, Instant createdAt,
+                         String runtimeSessionId, String runtimeUserId) {
+            this(toolCalls, replyId, createdAt, runtimeSessionId, runtimeUserId, null);
+        }
     }
 
     /**
@@ -638,12 +695,22 @@ public class ConfirmContextStore {
         Instant createdAt,
         String runtimeSessionId,
         String runtimeUserId,
-        Map<String, Object> remoteTask
+        Map<String, Object> remoteTask,
+        List<String> skills
     ) {
         /** 兼容构造（存量调用/测试：本地行形态） */
         public PendingConfirm(String replyId, List<ToolUseBlock> toolCalls, Instant createdAt,
                               String runtimeSessionId, String runtimeUserId) {
-            this(null, LOCAL_KEY, replyId, toolCalls, createdAt, runtimeSessionId, runtimeUserId, null);
+            this(null, LOCAL_KEY, replyId, toolCalls, createdAt, runtimeSessionId, runtimeUserId, null, null);
+        }
+
+        /** 兼容构造（存量调用/测试：无 skills 声明） */
+        public PendingConfirm(String sessionId, String confirmKey, String replyId,
+                              List<ToolUseBlock> toolCalls, Instant createdAt,
+                              String runtimeSessionId, String runtimeUserId,
+                              Map<String, Object> remoteTask) {
+            this(sessionId, confirmKey, replyId, toolCalls, createdAt,
+                runtimeSessionId, runtimeUserId, remoteTask, null);
         }
 
         /** 是否远程确认行（消费路由判据：行含 remote_task 锚点即远程） */
