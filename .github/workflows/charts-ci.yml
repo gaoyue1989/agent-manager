@@ -84,3 +84,20 @@ jobs:
           # Job 渲染整体被 mysql-init-job.yaml 的 {{- if .Values.mysql.createDatabase }} 包裹
           # （ci-values.yaml 恒为 true）：该值翻 false 则 Job 不渲染、此断言自会红（预期失败面，非误报）
           helm template ci-export charts/oaf-agent -f charts/oaf-agent/ci-values.yaml --show-only templates/mysql-init-job.yaml | grep -qE '^[[:space:]]*automountServiceAccountToken: false$'
+      - name: TLS 形态缺键断言（表形态漏 secretName 必须 fail-fast，回归锁 issue #291）
+        run: |
+          # 表形态 enabled=true 漏写 secretName 键 → validate 必须 fail
+          # （修复前 helper 经 include 渲出 <no value> 占位符绕过校验，静默渲染 secretName: "" 的坏 Ingress）
+          if helm template tls-neg charts/oaf-agent -f charts/oaf-agent/ci-values.yaml \
+              --set ingress.tls.enabled=true >/dev/null 2>&1; then
+            echo "::error::表形态漏写 secretName 键未 fail-fast（issue #291 回归）"; exit 1
+          fi
+          # 布尔形态 tls=true 无 secretName 载体 → validate 必须 fail
+          if helm template tls-bool charts/oaf-agent -f charts/oaf-agent/ci-values.yaml \
+              --set ingress.tls=true >/dev/null 2>&1; then
+            echo "::error::布尔形态 tls=true 未 fail-fast（issue #291 回归）"; exit 1
+          fi
+          # 完整表形态 → 正常渲染，secretName 原样透传
+          helm template tls-pos charts/oaf-agent -f charts/oaf-agent/ci-values.yaml \
+              --set ingress.tls.enabled=true --set ingress.tls.secretName=ci-tls-secret \
+              --show-only templates/ingress.yaml | grep -q 'secretName: "ci-tls-secret"'
