@@ -105,6 +105,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | `POST /admin/workspaces/:id/members` | 邀请成员；`GET :id/members` 列表；`PATCH :id/members/:uid` 改角色；`DELETE :id/members/:uid` 移除 |
 | `GET /admin/workspaces/:id/agents` | 空间内 Agent（服务）清单 |
 | `GET /admin/audit-logs` | 审计日志 |
+| `/admin/sandboxes/*` | 沙箱管理面（sandbox-pool PR-C）：summary 聚合 / pools 增删改查（POST 创建池校验 capacitySpec 四值 0≤poolMin≤bufferMin≤bufferMax≤poolMax、recycleStrategy 仅收 Delete/Restart/Noop 校验不转发）/ 沙箱列表（state 过滤+分页）/ 销毁；上游未配置 503、上游 401→502、429/5xx 透传 |
 
 ### 4.3 console（用户侧；JWT，路径携带空间 id）
 
@@ -144,9 +145,11 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | `/console/assets/models` | 模型连接（右侧抽屉新建/编辑） |
 | `/console/assets/tools` | 工具管理（MCP 连接器，右侧抽屉） |
 | `/console/assets/skills` / `assets/memory` / `assets/knowledge` / `assets/credentials` | 技能 / 记忆 / 知识库 / 凭证（API Key 签发一次性明文弹窗） |
+| `/console/assets/sandbox` / `assets/sandbox-instances` | 沙箱配置（各 Agent 沙箱启用状态只读总览） / 沙箱实例（本工作空间沙箱只读视图） |
 | `/console/integrations` | 集成登记 |
 | `/console/settings` | 用户侧设置 |
 | `/console/workspace-config` | 空间配置管理（页签：运行时默认 / MCP 连接器模板 / 模型参数 / 沙箱参数 / 仓库与路由；导出发布页预填来源） |
+| `/console/observability` | 观测大盘（占位；可外链 eval-studio） |
 
 ### 运维侧（(admin) 布局，仅 admin 角色可达；user 访问预期 403/重定向）
 
@@ -155,6 +158,7 @@ curl -s -X POST http://localhost:30080/api/v1/auth/login \
 | `/admin/overview` / `/admin` | 运维概览 |
 | `/admin/workspaces` | 工作空间管理（成员矩阵、纳管） |
 | `/admin/users` | 用户管理（建号/改角色/重置密码） |
+| `/admin/sandboxes` | 沙箱管理（池水位卡/创建池/调整容量/删除池；沙箱列表/销毁） |
 | `/admin/audit` | 审计日志 |
 | `/admin/packages`（+ `/[id]`、`/[id]/edit`） | 包管理（原存量页面迁移） |
 | `/admin/services/[id]` | 存量服务详情 |
@@ -223,10 +227,10 @@ curl -s -X POST $BASE/console/workspaces/<ws-id>/api-keys -H "Authorization: Bea
 
 ## 7. 现成 e2e 套件（回归优先跑这些）
 
-套件位置 `e2e/console-split/`（按模块 m0–m11 一个脚本 + `run-all.sh` 聚合，静态清点 460 处 `assert_*` 断言调用，实跑总数以 `run-all.sh` 全跑输出为准；2026-10-17 初版九模块全 PASS 实跑记录见 `docs/implementation/README.md`，2026-10-20 起扩至 11 模块、2026-11-04 起扩至 12 模块（m11 空间配置/跨集群导出））：
+套件位置 `e2e/console-split/`（按模块 m0–m12 一个脚本 + `run-all.sh` 聚合，静态清点 501 处 `assert_*` 断言调用——2026-11-08 m12 后静态清点、口径同前（模块脚本计数不含 `lib.sh`），实跑总数以 `run-all.sh` 全跑输出为准；2026-10-17 初版九模块全 PASS 实跑记录见 `docs/implementation/README.md`，2026-10-20 起扩至 11 模块、2026-11-04 起扩至 12 模块（m11 空间配置/跨集群导出）、2026-11-08 起扩至 13 模块（m12 沙箱管理面））：
 
 ```bash
-# 全量（顺序 m0→m11）
+# 全量（顺序 m0→m12）
 BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911 ./e2e/console-split/run-all.sh
 
 # 只跑指定模块（如登录与治理）
@@ -236,7 +240,7 @@ BASE=http://localhost:30080/api/v1 ./e2e/console-split/run-all.sh m0 m1
 BASE=http://localhost:30080/api/v1 ./e2e/console-split/run-all.sh m0
 ```
 
-模块与被测面对照：m0 认证与路由分层、m1 运维治理、m2 console 基础（概览/列表/切换器）、m3 创建/编辑主链路（含包契约与 SSE 热生效）、m4 详情六 Tab 与生命周期、m5 模型连接、m6 MCP 连接器、m7 集成、m8 API Key 与成员、m9 技能中心（技能资产/市场/版本管理）、m10 沙箱配置、m11 空间配置与跨集群导出（runtime-defaults 权限矩阵/掩码/导出单创建与失败闭环/交付物下载头）。原 M9 enforce 三态需独立网关环境改 `ROUTER_AUTH_MODE`、不在本套件（见 10-gateway-auth.md）。
+模块与被测面对照：m0 认证与路由分层、m1 运维治理、m2 console 基础（概览/列表/切换器）、m3 创建/编辑主链路（含包契约与 SSE 热生效）、m4 详情六 Tab 与生命周期、m5 模型连接、m6 MCP 连接器、m7 集成、m8 API Key 与成员、m9 技能中心（技能资产/市场/版本管理）、m10 沙箱配置、m11 空间配置与跨集群导出（runtime-defaults 权限矩阵/掩码/导出单创建与失败闭环/交付物下载头）、m12 沙箱管理面（/settings 沙箱组模板 + admin 代理八端点 + console 只读过滤 + 501/401 故障注入 + 未配置 503 引导）。原 M9 enforce 三态需独立网关环境改 `ROUTER_AUTH_MODE`、不在本套件（见 10-gateway-auth.md）。
 
 依赖：`curl`、`jq`、`python3`；m3/m4 涉及真实对话的断言需 LLM 可用（可选传 `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`，缺省自动从 release-agent env 读取）。
 
