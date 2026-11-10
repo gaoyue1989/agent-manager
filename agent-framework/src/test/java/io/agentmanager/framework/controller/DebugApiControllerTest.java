@@ -752,4 +752,115 @@ class DebugApiControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.logs[0]").value("err1"));
     }
+
+    // ---------- sandbox-bindings / sandbox-cleanup（PR-D §4.8 可观测面 + L11 测试钩子） ----------
+
+    @Autowired
+    private DebugApiController debugApiController;
+
+    @org.junit.jupiter.api.AfterEach
+    void resetSandboxLifecycleField() {
+        // lifecycle 经反射注入单例 controller，用后必须复位，避免泄漏进其它用例的上下文
+        org.springframework.test.util.ReflectionTestUtils.setField(
+            debugApiController, "sandboxLifecycle", null);
+    }
+
+    @Test
+    void sandboxBindingsShouldReportDisabledWhenLifecycleMissing() throws Exception {
+        // lifecycle 未装配（SANDBOX_LIFECYCLE_ENABLED=false/沙箱未启用）→ fail-soft：
+        // enabled=false + reason 说明，端点不得 5xx
+        mockMvc.perform(get("/debug/sandbox-bindings"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.enabled").value(false))
+            .andExpect(jsonPath("$.reason").isNotEmpty());
+    }
+
+    @Test
+    void sandboxBindingsShouldMaskUserKeyAndStayFailSoftOnStoreError() throws Exception {
+        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(debugApiController, "sandboxLifecycle", lifecycle);
+        when(lifecycle.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
+            true, "pool-x", 5, 60, 20));
+        when(lifecycle.graceSeconds()).thenReturn(180);
+        when(lifecycle.registrySize()).thenReturn(2);
+        when(lifecycle.registryActiveTurnCount()).thenReturn(1);
+        when(lifecycle.registryOldestEntryAgeMs()).thenReturn(123L);
+        when(lifecycle.registryLoopLagMs()).thenReturn(4L);
+        when(lifecycle.registryLastSweepAt()).thenReturn(java.time.Instant.now());
+        when(lifecycle.registryDebugEntries()).thenReturn(List.of());
+        when(lifecycle.recentEvents()).thenReturn(List.of(Map.of("type", "acquire")));
+        var store = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore.class);
+        when(lifecycle.bindingStore()).thenReturn(store);
+        when(store.listAll(anyInt(), anyInt())).thenReturn(List.of(
+            new io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore.BindingRow(
+                1, "abcdefgh1234", "sid-1", "sbx-1", "2026-11-10 10:00:00.000", "2026-11-10 09:00:00.000", true),
+            new io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore.BindingRow(
+                2, "u2", "sid-2", "sbx-2", null, null, false)));
+
+        var res = mockMvc.perform(get("/debug/sandbox-bindings"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.enabled").value(true))
+            .andExpect(jsonPath("$.bindings[0].user_key").value("abcd***"))
+            .andExpect(jsonPath("$.bindings[1].user_key").value("***"))
+            .andExpect(jsonPath("$.bindings[0].turn_running").value(true))    // fresh 双事实源透传
+            .andExpect(jsonPath("$.bindings[1].turn_running").value(false))
+            .andExpect(jsonPath("$.binding_count").value(2))
+            .andExpect(jsonPath("$.config.pool_ref").value("pool-x"))
+            .andExpect(jsonPath("$.config.user_quota").value(5))
+            .andExpect(jsonPath("$.config.renew_interval_seconds").value(60))
+            .andExpect(jsonPath("$.config.confirm_hold_minutes").value(20))
+            .andExpect(jsonPath("$.config.ttl_minutes").exists())
+            .andExpect(jsonPath("$.config.grace_seconds").value(180))
+            .andExpect(jsonPath("$.registry.size").value(2))
+            .andExpect(jsonPath("$.registry.active_turns").value(1))
+            .andExpect(jsonPath("$.registry.entries").exists())
+            .andExpect(jsonPath("$.events[0].type").value("acquire"))
+            .andReturn();
+        // 脱敏回归钉子：user_key 原值全量透出会在 debug 页静默暴露
+        var body = res.getResponse().getContentAsString();
+        assertTrue(!body.contains("abcdefgh1234"), "user_key 原值不得透出: " + body);
+
+        // 簿记不可读 → bindings_error fail-soft，config/registry/events 区块不阻塞
+        when(store.listAll(anyInt(), anyInt())).thenThrow(new RuntimeException("db down"));
+        mockMvc.perform(get("/debug/sandbox-bindings"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.bindings_error").value("db down"))
+            .andExpect(jsonPath("$.config.pool_ref").value("pool-x"))
+            .andExpect(jsonPath("$.registry.size").value(2))
+            .andExpect(jsonPath("$.events[0].type").value("acquire"));
+    }
+
+    @Test
+    void sandboxCleanupShouldClampNegativeRetentionAndReportDisabledWhenLifecycleMissing() throws Exception {
+        // lifecycle 未装配 → enabled=false（409 语义由 HTTP 层承担前先看 body 契约）
+        org.springframework.test.util.ReflectionTestUtils.setField(
+            debugApiController, "sandboxLifecycle", null);
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/debug/sandbox-cleanup"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.enabled").value(false));
+
+        // retentionDays=-1 → Math.max(0,·) 钳 0：cutoff=now（0 天保留窗，e2e L11 短窗口同款入口）
+        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(debugApiController, "sandboxLifecycle", lifecycle);
+        var store = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore.class);
+        when(lifecycle.bindingStore()).thenReturn(store);
+        when(store.cleanupExpired(org.mockito.ArgumentMatchers.any(java.time.Instant.class))).thenReturn(3);
+        when(store.cleanupEmptyAnchors(org.mockito.ArgumentMatchers.any(java.time.Instant.class))).thenReturn(1);
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/debug/sandbox-cleanup").param("retentionDays", "-1"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.enabled").value(true))
+            .andExpect(jsonPath("$.retention_days").value(-1))
+            .andExpect(jsonPath("$.bindings_deleted").value(3))
+            .andExpect(jsonPath("$.anchors_deleted").value(1));
+
+        var cutoffCap = org.mockito.ArgumentCaptor.forClass(java.time.Instant.class);
+        org.mockito.Mockito.verify(store).cleanupExpired(cutoffCap.capture());
+        var now = java.time.Instant.now();
+        assertTrue(!cutoffCap.getValue().isAfter(now.plusSeconds(60)) && !cutoffCap.getValue().isBefore(now.minusSeconds(60)),
+            "负数 retentionDays 必须钳 0（cutoff≈now），实测 cutoff=" + cutoffCap.getValue());
+        org.mockito.Mockito.verify(store).cleanupEmptyAnchors(cutoffCap.capture());
+    }
 }

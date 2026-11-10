@@ -875,6 +875,78 @@ test('SKL-L2 /agui 未开启实例不被服务（缺省关闭装配）', async (
   expect([404, 500]).toContain(res.status());
 });
 
+// ---------- TL-L 组：会话级工具白名单运行面（session-tool-list-design，ToolFilterMiddleware） ----------
+// 单测三层守卫（ToolFilterMiddlewareTest / ChatStreamControllerTest wiring / 装配测试）钉不住的
+// 真实残余面 = SDK 运行时集成：收敛后的 schema 是否真达模型调用、被过滤工具的幻觉调用是否真达
+// onActing 合成 DENY、SSE 帧形态与跨轮恢复。观测通道与 SKL-L 同源：GET /threads/{sid}/llm-calls
+// 的 request.tools 即过滤后模型可见 schema 名列表（LlmLoggingMiddleware input.tools().map(getName)）。
+// 工具实名注记：MCP 工具叫 bench_echo（[E2E:tool:mcp_echo] 只是场景 marker 键，不是工具名）；
+// 自定义业务工具 echo/get_current_time；白名单传未知名会被「未知名忽略」静默退化——不在此用。
+// 随必需检查「E2E 核心（API+UI）」生效；仓库根 e2e/session-tools-e2e.sh 为手动 kind 脚本不入门禁。
+
+type ToolLlmCall = {
+  call_id: string;
+  request: { messages: Array<{ role: string; content: string }>; tools?: string[] };
+};
+
+/** 按本轮 user token 定位调用并取 request.tools（模型可见 schema 名列表，A6/SKL-L 同款定位） */
+async function visibleToolsOfRound(
+  request: APIRequestContext, sid: string, token: string,
+): Promise<string[]> {
+  const body = await pollUntil(
+    async () => (await request.get(`/threads/${sid}/llm-calls`, { headers: { 'X-User-Id': U } })).json() as { calls: ToolLlmCall[] },
+    b => (b.calls ?? []).some(c => c.request?.messages?.some(m => m.role === 'USER' && m.content.includes(token))),
+  );
+  const call = body.calls.find(c => c.request?.messages?.some(m => m.role === 'USER' && m.content.includes(token)));
+  return call?.request?.tools ?? [];
+}
+
+test('TL-L1 会话级工具白名单收敛进模型请求，下一轮恢复全集', async ({ request }) => {
+  const sid = sessionIdFor(`tll1-${uniq()}`);
+  const tokenA = `TLL1-A-${uniq()}`;
+  const tokenB = `TLL1-B-${uniq()}`;
+
+  // 轮1 tools:['bench_echo']：模型可见 schema 含白名单内 MCP 工具 bench_echo 与恒保留内置，
+  // 不含被收敛的自定义工具（echo/get_current_time）
+  const r1 = chat({ message: `[E2E:plain] ${tokenA}`, userId: U, sessionId: sid, tools: ['bench_echo'] });
+  await waitTerminal(r1);
+  expect(r1.terminal?.type).toBe('done');
+  const tools1 = await visibleToolsOfRound(request, sid, tokenA);
+  expect(tools1, '白名单内 MCP 工具未进模型请求（metadata 传递链路断）').toContain('bench_echo');
+  expect(tools1, '自定义工具 echo 应被白名单收敛（不进模型请求）').not.toContain('echo');
+  expect(tools1, '自定义工具 get_current_time 应被白名单收敛').not.toContain('get_current_time');
+  expect(tools1, '内置工具应恒保留（白名单只收敛 MCP+自定义）').toContain('memory_search');
+
+  // 轮2 同会话缺省（不传 tools）→ 恢复全集：轮1 收敛未跨轮（「仅本轮生效」核心契约）
+  const r2 = chat({ message: `[E2E:plain] ${tokenB}`, userId: U, sessionId: sid });
+  await waitTerminal(r2);
+  expect(r2.terminal?.type).toBe('done');
+  const tools2 = await visibleToolsOfRound(request, sid, tokenB);
+  expect(tools2, '缺省恢复轮未恢复自定义工具 echo（收敛跨轮泄漏）').toContain('echo');
+  expect(tools2, '缺省恢复轮未恢复 MCP 工具 bench_echo').toContain('bench_echo');
+});
+
+// TL-L2（onActing 负例）：白名单外 MCP 工具的幻觉调用——mock 按 marker 重放 bench_echo 调用
+//（schema 已把它收敛出模型请求，真实运行面上模型仍可能报出工具名）必须被 onActing 合成
+// DENIED 结果：SSE 流连续（TOOL_RESULT_END state=DENIED + DENY 说明文本）、终态仍收 done。
+// 若 SDK 未把被过滤工具的调用送达 onActing 而是上游报错，红即产品缺陷信号，按实况帧修断言。
+test('TL-L2 白名单外 MCP 工具调用被 onActing 合成 DENIED', async () => {
+  const sid = sessionIdFor(`tll2-${uniq()}`);
+  const stream = chat({
+    message: `[E2E:tool:mcp_echo](tll2-${uniq()})`,
+    userId: U, sessionId: sid, tools: ['echo'],   // bench_echo 在白名单外
+  });
+  await waitTerminal(stream);
+  const deniedBench = toolResults(stream.frames).find(r => String(r.toolCallName ?? '') === 'bench_echo');
+  expect(deniedBench, '白名单外 bench_echo 调用应有 TOOL_RESULT_END 帧').toBeTruthy();
+  expect(String((deniedBench as Record<string, unknown>).state)).toBe('DENIED');
+  const denyText = stream.frames.find(f =>
+    f.type === 'TOOL_RESULT_TEXT_DELTA'
+    && String(f.delta ?? '').includes("is not in this turn's allowed tools list"));
+  expect(denyText, '缺少 DENY 说明文本（onActing reason 未达 SSE）').toBeTruthy();
+  expect(stream.terminal?.type).toBe('done');
+});
+
 // ---------- FW 组：/threads slot 双形态匹配 + Flyway（76e0e74/512a6b3，e2e-ci-plan §5.10） ----------
 // 契约权威：ThreadController#AGENT_STATE_JOIN（SUBSTRING_INDEX 冒号前/后段双向匹配，
 // ThreadController.java:58-60）与 db/migration/V6__backfill_session_user_from_agent_state.sql。

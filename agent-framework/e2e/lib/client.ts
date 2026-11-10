@@ -15,6 +15,8 @@ export interface ChatOpts {
   model?: string;
   /** 本轮可用技能白名单（仅本轮生效；缺省 = 全部；[] = 无技能，session-skill-list-design §3） */
   skills?: string[];
+  /** 本轮可用工具白名单（仅本轮生效；缺省 = 全部；内置恒可见，session-tool-list-design §2/§3） */
+  tools?: string[];
   timeoutMs?: number;
   base?: string;
   /** 附加请求头（X 组前缀感知用例：注入 X-Forwarded-* 直证服务端自感知契约） */
@@ -34,6 +36,7 @@ export function chat(opts: ChatOpts): Collected {
       fileIds: opts.fileIds,
       model: opts.model,
       skills: opts.skills,
+      tools: opts.tools,
     }),
   });
   return collectStream(p, (opts.timeoutMs ?? 45_000));
