@@ -26,7 +26,7 @@
 >    `/{name}/.deleted` 跳过、admin-override 照写、只写不删。
 > ④ **回写仲裁**：删除写 `/{name}/.deleted`、管理面写入写 `/{name}/.admin-override`；
 >    代价是标记生效期间容器内修改不落库，状态经 `tombstones` 字段下发。
-> ⑤ `/skills/available` 与 `@Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。
+> ⑤ `/skills/available` 与 `/Skill` 注入按网关注入的 `X-User-Id`（或 `?userId=`）合并该用户 L4。
 > ⑥ `sync-from-package` 跳过清单按字典序返回（`6ddf70f`）。
 > ⑦ **MCP 侧已补运行时 reload（2026-09-25）**：`POST /admin/reload?scope=auto|mcp|agent`（`AdminReloadController`）+ `OafReloadService` 原地重建 MCP 连接 / 整包重建 agent（见 [oaf-dynamic-reload-plan.md](oaf-dynamic-reload-plan.md)）——§2.4 对比表中「MCP 运行时生效需重启、reload 端点官方无需自研」的表述已过时；skill「每轮重扫、无需任何触发通道」的差异化结论仍成立。
 >

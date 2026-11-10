@@ -363,7 +363,7 @@ public final class StateDataParser {
      * <p>SDK 注入的合成提醒（后台子任务投递等，见 {@link #isSyntheticReminder}）不属对话轮次，
      * 一律跳过，避免以 {@code role=user} 冒充用户输入上屏。
      *
-     * <p>user 消息的 {@code @Skill} 注入区块（展开的整篇 SKILL.md）在展示层剥离
+     * <p>user 消息的 {@code /Skill} 注入区块（展开的整篇 SKILL.md）在展示层剥离
      * （{@link SkillInjectionService#stripInjectedSkills}）：只显示用户自己敲的内容。
      */
     public static List<Map<String, Object>> toRoleContentList(JsonNode messagesArray) {
@@ -395,7 +395,7 @@ public final class StateDataParser {
             }
             var role = extractRole(m);
             // user 消息的可见文本只保留用户自己敲的内容：
-            //  - @Skill 注入区块（整篇 SKILL.md）为模型上下文，展示层剥离
+            //  - /Skill 注入区块（整篇 SKILL.md）为模型上下文，展示层剥离
             //  - 上传文件的路径提示为框架自动追加，展示层剥离（文件卡片另经 files 字段下发）
             var content = "user".equals(role)
                 ? UploadWorkspaceInjector.stripUploadHints(

@@ -62,9 +62,9 @@ public class SkillManageController {
     }
 
     /**
-     * 列出可用的 Skill 摘要（供前端 @Skill 提示使用）。
+     * 列出可用的 Skill 摘要（供前端 /Skill 提示使用）。
      * 仅返回已启用 Skill 的 name + description，精简字段降低传输开销。
-     * 前端可在输入框中检测 @ 符号后调用此接口展示候选列表。
+     * 前端可在输入框中检测 / 符号后调用此接口展示候选列表。
      */
     @GetMapping("/available")
     public List<Map<String, String>> listAvailable(
@@ -78,7 +78,7 @@ public class SkillManageController {
     }
 
     /**
-     * 解析消息中的 @Skill 引用（预览用）。
+     * 解析消息中的 /Skill 引用（预览用）。
      * 前端在输入过程中可调用此接口实时展示已匹配的 Skill 列表。
      * 按 session userId 合并该用户的 L4 个人技能（X-User-Id 头优先）。
      *

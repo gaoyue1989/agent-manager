@@ -460,7 +460,7 @@ public class UserSkillService {
      * 切换某用户个人技能的启停状态（管理面）。
      *
      * <p>仅对存在 L4 个人覆盖的技能可切换；禁用写 {@code /{name}/.disabled} 元数据标记，启用清除之。
-     * 禁用后该技能对外不可用：管理面合并视图（{@code /skills/available}、{@code @Skill}）排除、沙箱物化与
+     * 禁用后该技能对外不可用：管理面合并视图（{@code /skills/available}、{@code /Skill}）排除、沙箱物化与
      * 回写跳过；重新写入/下发会自动清除该标记（恢复启用）。
      *
      * @return 切换后的状态（true=启用, false=禁用）

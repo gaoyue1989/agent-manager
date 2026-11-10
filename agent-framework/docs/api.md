@@ -132,8 +132,8 @@ curl http://localhost:8100/skills
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/skills/manage` | 全部技能（含禁用项，多一个 `enabled` 字段） |
-| GET | `/skills/available` | `@` 补全候选。按 `X-User-Id`（或 `?userId=`）合并该用户的 L4 技能；可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
-| GET | `/skills/parse-refs?message=` | 预览消息中的 `@Skill` 解析结果：`{skills:[...], count}`；可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/available` | `/` 补全候选。按 `X-User-Id`（或 `?userId=`）合并该用户的 L4 技能；可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
+| GET | `/skills/parse-refs?message=` | 预览消息中的 `/Skill` 解析结果：`{skills:[...], count}`；可选 `?skills=`（逗号分隔）：按本轮可用技能白名单过滤返回，缺省/空=不过滤（session-skill-list-design §6，#212） |
 | POST | `/skills/upload` | multipart `file`（.zip，≤20MB），返回 `{name, message, skill?}` |
 | DELETE | `/skills/{name}` | 删除（校验无 `..` / `/` / `\` 开头 `.`） |
 | PUT | `/skills/{name}/toggle` | 启停切换：`{name, enabled, message}` |
@@ -157,7 +157,7 @@ curl http://localhost:8100/skills
 | GET | `/skills/users/{name}` | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） |
 | GET | `/skills/users/{name}/download` | **下载技能整目录为 zip**（`{name}.zip`；有 L4 覆盖导 L4，否则回落包内基线；两侧都无 → 404） |
 | PUT | `/skills/users/{name}` | 写个人技能，body `{content}`（≤1MB）。重新写入自动清除禁用标记（恢复启用） |
-| PUT | `/skills/users/{name}/toggle` | **启停个人技能**（仅对有 L4 覆盖的技能可用，无 → 404）：返回 `{userId, name, enabled, message}`；禁用写 `/{name}/.disabled`，禁用后从 `/skills/available`、`@Skill` 合并视图排除且沙箱物化/回写跳过 |
+| PUT | `/skills/users/{name}/toggle` | **启停个人技能**（仅对有 L4 覆盖的技能可用，无 → 404）：返回 `{userId, name, enabled, message}`；禁用写 `/{name}/.disabled`，禁用后从 `/skills/available`、`/Skill` 合并视图排除且沙箱物化/回写跳过 |
 | POST | `/skills/users/upload` | **zip 上传个人技能**（multipart `file`，≤10MB；单文件 ≤1MB、单技能总大小 ≤20MB、文件数 ≤200）：解压定位 SKILL.md（支持扁平或**多层包裹目录**，用户常对整个文件夹压缩），技能名取 frontmatter `name`（回落包裹目录名/文件名），同名**覆盖**；含二进制/非 UTF-8 文件**拒绝整个包**（400）。**与包内公共技能重名的新建上传 → 409 `name_conflicts_with_package`**（要求改名后重传；想基于公共技能定制走 `/skills/users/{name}/sync-from-package` 再编辑）——该用户已有同名 L4 覆盖时按更新放行。响应 `{name, action, files, version}` |
 | DELETE | `/skills/users/{name}` | 删个人技能，**写 tombstone**（`/{name}/.deleted`），防沙箱内副本复活 |
 | POST | `/skills/users/{name}/sync-from-package` | 把包内基线下发为个人版：`{files, skipped, message}`（非 UTF-8 文件**跳过**并列入 `skipped`，与 zip 上传的「拒绝」语义不同） |
@@ -408,11 +408,11 @@ Thread 历史消息 + pendingConfirm。
 > slot 键与 turn 结束 write-through 完全同构、`msg_id` 同源，upsert 幂等不产生重复。
 > 归档关闭（`AGENT_HISTORY_ARCHIVE_ENABLED=false`）时不生效（无消费方）。
 
-> **@Skill 注入区块不上屏（2026-10-12）**：用户消息里的 `@SkillName` 会被
+> **/Skill 注入区块不上屏（2026-10-12）**：用户消息里的 `/SkillName` 会被
 > `SkillInjectionService` 展开成引用标记 + 整篇 SKILL.md（模型必须有完整 Skill 上下文）。
 > history 展示层会剥离该注入区块（`SkillInjectionService.stripInjectedSkills`），
 > `messages[].content` 只保留**用户自己敲的内容**——如
-> `[@Skill:pdf] 帮我处理文件`。落库原文仍含注入内容（模型上下文事实不变），仅展示剥离。
+> `[/Skill:pdf] 帮我处理文件`。落库原文仍含注入内容（模型上下文事实不变），仅展示剥离。
 
 > **turn 失败留痕（2026-10-12）**：turn 以 `error` 终态结束（如模型网关 503 重试耗尽）时，
 > 失败原因会以一条 `role=assistant`、`name=__turn_error__` 的消息写入 `session_message`
@@ -600,7 +600,7 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `sessionId` | String | | 会话 ID；**省略时自动生成 UUID** |
 | `fileIds` | List\<String\> | | 随消息上传的文件 ID 列表（先经 `POST /files/upload` 上传；注入会话工作区，图片内联为 ImageBlock，见 [file-upload-download-plan.md](file-upload-download-plan.md)） |
 | `model` | String | | 会话模型（`GET /models` 的 id；**缺省=不改变绑定**，传值即绑定本会话并本 turn 生效，`""`/`system`=回到默认模型；未知/禁用返回 error 帧 `unknown_model: xxx`） |
-| `skills` | List\<String\> | | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进模型侧 `<available_skills>`、不可经 `load_skill_through_path` 加载、`@Skill` 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 [session-skill-list-design.md](../../docs/design/session-skill-list-design.md)） |
+| `skills` | List\<String\> | | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进模型侧 `<available_skills>`、不可经 `load_skill_through_path` 加载、`/Skill` 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 [session-skill-list-design.md](../../docs/design/session-skill-list-design.md)） |
 | `tools` | List\<String\> | | 本轮可用工具白名单，作用域限 **MCP + 自定义**（**缺省 = 全部**；`[]` = 仅内置——内置工具恒可见、不受会话级控制，关闭走包级 `deniedTools`；仅本轮生效，不落库、不跨轮沿用）。名单外的 MCP/自定义工具不进模型侧请求（省 token），模型幻觉调用在 acting 层兜底 DENY。名单可用裸名（主口径，= `GET /tools` 的 `name` / `sessionTools.tools`）或 MCP 全名 `mcp__{server}__{tool}`（别名）；未知名忽略；内置名写入名单 WARN 且不改变可见性。可传清单见 `GET /tools` 的 `sessionTools`。见 [session-tool-list-design.md](../../docs/design/session-tool-list-design.md) |
 
 > **请求级透传头（mcp-chat-header-forward-design）**：请求携带的 HTTP header 可按 OAF 包

@@ -87,7 +87,7 @@
 | C12 | 文件 | 上传/下载（file_asset，local/s3 后端）、`present_file`/`present_url` 工具、`file_ready` 帧、代理下载白名单 |
 | C13 | MCP Apps | `ui://` 资源代理、`ui_context` 静默注入、卡片工具调用代理、app_only/只读语义 |
 | C14 | 模型面 | `/models` CRUD + 连接测试 + 会话级模型切换 + provider 方言（openai/glm/deepseek…） |
-| C15 | 记忆/技能 | MEMORY.md + memory/（按用户）；技能目录（声明∪目录）+ 用户 L4 管理端点 + @Skill 解析 |
+| C15 | 记忆/技能 | MEMORY.md + memory/（按用户）；技能目录（声明∪目录）+ 用户 L4 管理端点 + /Skill 解析 |
 | C16 | 沙箱 | OpenSandbox 远程容器（USER 级复用、工作区投影、记忆/技能回写、守卫租约） |
 | C17 | 运维面 | OTel 追踪、LLM 调用记录（/llm-calls）、工具审计、会话清理、健康检查、调试页 |
 | C18 | 环境变量契约 | `LLM_*`、`CHECKPOINT_*`、`AGENT_REDIS_*`、`SANDBOX_*`、`OPENSANDBOX_*`、`FILE_*`、`AGENT_*`（见 AF AGENTS.md 环境变量表）；平台保留键注入 |
@@ -147,7 +147,7 @@
 │  │   ├─ turn-lease          Redis SET NX 跨副本 turn 互斥（waiting 帧）                            │
 │  │   ├─ user-fs             按 userId 命名空间的文件 provider（→ agent_fs 型 KV 表）               │
 │  │   ├─ memory              MEMORY.md + memory/（section + memory_* 工具，按 userId）             │
-│  │   ├─ skill-admin         /skills/users/* L4 管理 + @Skill 合并                                 │
+│  │   ├─ skill-admin         /skills/users/* L4 管理 + /Skill 合并                                 │
 │  │   ├─ file-asset          上传/下载/present_file/present_url（local/s3）                        │
 │  │   ├─ mcp-bridge          mcp-configs/config.yaml → MCP 连接（含 userHeaders per-call 注入）     │
 │  │   ├─ opensandbox-world   OpenSandbox fs+subprocess provider（投影/回写/守卫）                   │
@@ -235,7 +235,7 @@ AF 已知的 SDK 语义缺陷（HITL 恢复丢工具参数，e2e §11.3 ①）�
 | 会话日志 | 存储键含 userId 前缀（键级兼容 AF）；会话列表按 userId 查询（自有索引表） |
 | 工作区文件 | `user-fs` provider：root = `agent_fs` 型 KV（按 userId 命名空间）或 PVC 子目录 + DB 元数据；所有文件工具经 `ctx.fs`（沙箱启用时整体指向 OpenSandbox，见 §5.6） |
 | 记忆 | memory 插件按 userId 取数；section 注册按 Agent scope（`agent.ctx`）注入对应用户内容 |
-| 技能 L4 | skill-admin 插件按 userId 命名空间（AF `agents/{agent}/users/{uid}/skills` 键格式照搬）；`/skills/available`、@Skill 解析按 `X-User-Id` 合并 |
+| 技能 L4 | skill-admin 插件按 userId 命名空间（AF `agents/{agent}/users/{uid}/skills` 键格式照搬）；`/skills/available`、/Skill 解析按 `X-User-Id` 合并 |
 
 userId 传递：HTTP 层解析（header/参数/metadata，与 AF 三来源对齐）→ Agent meta → 各插件经 Agent 上下文读取；**不依赖 dsh 全局状态**。
 
