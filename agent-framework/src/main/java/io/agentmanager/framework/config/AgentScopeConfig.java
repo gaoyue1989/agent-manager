@@ -82,6 +82,11 @@ public class AgentScopeConfig {
             .fileStorage(fileStorage)
             .isolationScope(IsolationScope.USER);
         spec.setSessionKeyResolver(sessionKeyResolver);
+        // 技能禁用投放过滤（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放前按
+        // L2 禁用集 + L4 用户标记过滤候选目录并清理容器残留——堵「load_skill_through_path
+        // 已拦截、容器内文件仍可 read_file/execute 直读」的旁路；checker 全程 fail-soft
+        spec.skillDisabledChecker(new io.agentmanager.framework.sandbox.opensandbox.ManagedSkillDisabledChecker(
+            skillManageService, workspaceReader));
         // 工作区投影开关（issue #27 缓解项）：SANDBOX_PROJECTION_ENABLED=false 时 sandbox start
         // 不再 hydrate 投影目录，降低每轮对话的沙箱同步开销（skills 依赖强的包不要关）
         spec.workspaceProjectionEnabled(sandboxRuntime.projectionEnabled());

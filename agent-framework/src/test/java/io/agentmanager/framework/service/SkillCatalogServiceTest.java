@@ -244,6 +244,27 @@ class SkillCatalogServiceTest {
                 .noneMatch(m -> "personal-a".equals(m.get("name"))), "禁用的个人技能不应出现（含包内同名基线）");
     }
 
+    @Test
+    void availableSkillsL2DisabledMustNotBeRestoredByL4EnabledOverride() throws IOException {
+        // oa-1110-repro-fixes-design §2.1b：L2 包级禁用 + 同名 L4 enabled 覆盖 → 不得重新放回
+        // （与 SkillDisabledFilterMiddleware 的名字并集禁用口径对齐）
+        writeSkill("pkg-a", "pkg a", null);
+        var manage = new SkillManageService(props());
+        manage.toggleSkill("pkg-a"); // L2 禁用
+        var userService = org.mockito.Mockito.mock(UserSkillService.class);
+        org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
+            new UserSkillService.UserSkillSummary("pkg-a", List.of("SKILL.md"), 20, 1, false, false,
+                "l4 desc", true, "")));
+
+        var service = new SkillCatalogService(oafConfig(List.of()), props(), manage, userService);
+
+        var names = service.availableSkills("u1").stream().map(m -> m.get("name")).toList();
+        assertFalse(names.contains("pkg-a"), "L2 禁用不得被同名 L4 enabled 覆盖放回：" + names);
+        // 白名单路径同样不得放回
+        assertTrue(service.availableSkills("u1", List.of("pkg-a")).isEmpty(),
+            "白名单路径也不得放回 L2 禁用技能");
+    }
+
     private static void deleteRecursively(Path root) throws IOException {
         try (var stream = Files.walk(root)) {
             var all = stream.sorted(java.util.Comparator.reverseOrder()).toList();

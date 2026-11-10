@@ -578,6 +578,72 @@ class OpenSandboxTest {
         assertEquals(after1, after2, "内容未变时第二次 call 不应重复投放");
     }
 
+    @Test
+    void scopedSkillCacheExcludesDisabledSkills() throws Exception {
+        // oa-1110-repro-fixes-design §2.1a：禁用技能（L2 包级 demo-b / L4 用户级 demo-c）
+        // 不得进入投放载荷，且容器内残留目录随投放 exec 一并清理——堵 read_file/execute 直读旁路
+        var host = java.nio.file.Files.createTempDirectory("scoped-disabled");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-A", "demo-b");
+        writeHostSkill(host, "sess-A", "demo-c");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var opts = options().skillDisabledChecker(new SkillDisabledChecker() {
+            @Override
+            public java.util.Set<String> packageDisabled() {
+                return java.util.Set.of("demo-b");
+            }
+
+            @Override
+            public boolean isUserDisabled(String userId, String name) {
+                return "demo-c".equals(name);
+            }
+        });
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, opts, null, null);
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        sandbox.stop();
+
+        var entries = capturedHydrateTarEntries(osb);
+        assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
+        assertTrue(entries.stream().noneMatch(e -> e.contains("demo-b")),
+            "L2 包级禁用技能不得进入容器：" + entries);
+        assertTrue(entries.stream().noneMatch(e -> e.contains("demo-c")),
+            "L4 用户级禁用技能不得进入容器：" + entries);
+
+        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-b'"));
+        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-c'"));
+    }
+
+    @Test
+    void scopedSkillCacheAllDisabledSkipsPayloadButPrunes() throws Exception {
+        // 全部技能被禁用：无 tar 投放（gz=null 分支），但仍执行禁用目录清理
+        var host = java.nio.file.Files.createTempDirectory("scoped-all-disabled");
+        writeHostSkill(host, "sess-A", "demo-b");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var opts = options().skillDisabledChecker(new SkillDisabledChecker() {
+            @Override
+            public java.util.Set<String> packageDisabled() {
+                return java.util.Set.of("demo-b");
+            }
+
+            @Override
+            public boolean isUserDisabled(String userId, String name) {
+                return false;
+            }
+        });
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, opts, null, null);
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        sandbox.stop();
+
+        verify(osb.files(), never()).write(anyList());
+        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-b'"));
+    }
+
     /** 从 files().write 捕获中定位 hydrate 的临时 tar（/tmp/workspace.*），解出 tar 条目名。 */
     private static List<String> capturedHydrateTarEntries(Sandbox osb) throws Exception {
         var captor = ArgumentCaptor.forClass(List.class);

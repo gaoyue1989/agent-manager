@@ -1009,8 +1009,11 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return;
             }
             // 慢路径：gz 载荷（缓存命中或现算）+ 单 exec 投放
-            byte[] gz = scopedPayloadGz(sourceRoot, scope, scopeDir, spec, fingerprint);
-            hydrateScopedArchive(gz, scope);
+            // 禁用过滤（oa-1110-repro-fixes-design §2.1a）：候选目录命中 L2/L4 禁用 → 不进
+            // 载荷，且随投放 exec 清理容器内残留（堵 read_file/execute 直读旁路）
+            var disabledDirs = resolveDisabledSkillDirs(scopeDir);
+            byte[] gz = scopedPayloadGz(sourceRoot, scope, scopeDir, spec, fingerprint, disabledDirs);
+            hydrateScopedArchive(gz, scope, disabledDirs);
             lastSkillCacheFingerprint.set(fingerprint);
             lastHydratedScope = scope;
             if (filesystemSpec != null) {
@@ -1120,7 +1123,8 @@ public class OpenSandbox extends AbstractBaseSandbox
      * （P0-1），这里只需 tar 字节；gzip 取最快级别（传输量略增、CPU 减半以上）。
      */
     private byte[] scopedPayloadGz(String sourceRoot, String scope, Path scopeDir,
-                                   WorkspaceSpec spec, String fingerprint) throws Exception {
+                                   WorkspaceSpec spec, String fingerprint,
+                                   java.util.Set<Path> disabledDirs) throws Exception {
         if (!Files.isDirectory(scopeDir)) {
             return null;
         }
@@ -1130,7 +1134,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return cached.gzPayload();
             }
         }
-        byte[] tar = tarScopeDir(Path.of(sourceRoot).toAbsolutePath().normalize(), scopeDir);
+        byte[] tar = tarScopeDir(Path.of(sourceRoot).toAbsolutePath().normalize(), scopeDir, disabledDirs);
         if (tar.length == 0) {
             return null;
         }
@@ -1144,12 +1148,16 @@ public class OpenSandbox extends AbstractBaseSandbox
     /**
      * 自建 scoped 投影 tar（条目 = 工作区根相对路径，含隐藏文件，不跟随软链），
      * 语义对齐 WorkspaceProjectionApplier 的归档形态，但不做 sha256（无比对用途）。
-     * 空目录返回空数组。
+     * {@code disabledDirs}（相对 scopeDir 的禁用技能目录，oa-1110-repro-fixes-design §2.1a）
+     * 下的文件整体跳过。全被排除时返回空数组（上层退化为 prune-only）。
      */
-    private static byte[] tarScopeDir(Path wsRoot, Path scopeDir) throws Exception {
+    private static byte[] tarScopeDir(Path wsRoot, Path scopeDir,
+                                      java.util.Set<Path> disabledDirs) throws Exception {
         List<Path> files;
         try (var walk = Files.walk(scopeDir)) {
-            files = walk.filter(Files::isRegularFile).sorted().toList();
+            files = walk.filter(Files::isRegularFile)
+                .filter(f -> !isUnderDisabledDir(scopeDir, f, disabledDirs))
+                .sorted().toList();
         }
         if (files.isEmpty()) {
             return new byte[0];
@@ -1188,15 +1196,115 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
+     * 收集 scope 目录内被禁用的技能目录（相对 scopeDir 的路径，如 {@code oaf-package/demo-b}）：
+     * L2 包级禁用集 ∪ L4 用户级标记（oa-1110-repro-fixes-design §2.1a）。checker 未装配、
+     * 目录缺失或枚举失败返回空集（fail-soft：不扩大禁用面、不中断投放）。
+     */
+    private java.util.Set<Path> resolveDisabledSkillDirs(Path scopeDir) {
+        var checker = options != null ? options.getSkillDisabledChecker() : null;
+        if (checker == null || !Files.isDirectory(scopeDir)) {
+            return java.util.Set.of();
+        }
+        var disabled = new java.util.LinkedHashSet<Path>();
+        java.util.Set<String> pkgDisabled;
+        try {
+            pkgDisabled = checker.packageDisabled();
+        } catch (Exception e) {
+            pkgDisabled = java.util.Set.of();
+        }
+        try (var nsStream = Files.list(scopeDir)) {
+            for (var ns : nsStream.toList()) {
+                if (!Files.isDirectory(ns)) {
+                    continue;
+                }
+                try (var skillStream = Files.list(ns)) {
+                    for (var skillDir : skillStream.toList()) {
+                        if (!Files.isDirectory(skillDir)) {
+                            continue;
+                        }
+                        String name = skillDir.getFileName().toString();
+                        if (pkgDisabled.contains(name)) {
+                            disabled.add(scopeDir.relativize(skillDir));
+                            continue;
+                        }
+                        try {
+                            if (checker.isUserDisabled(userKey, name)) {
+                                disabled.add(scopeDir.relativize(skillDir));
+                            }
+                        } catch (Exception e) {
+                            log.warn("[sandbox-open] disabled-check failed for {}: {}", name, e.getMessage());
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[sandbox-open] resolve disabled skill dirs failed: {}", e.getMessage());
+            return java.util.Set.of();
+        }
+        return disabled;
+    }
+
+    /** 文件是否位于任一禁用目录之下（相对 scopeDir 判定，空集时零开销直通） */
+    private static boolean isUnderDisabledDir(Path scopeDir, Path file, java.util.Set<Path> disabledDirs) {
+        if (disabledDirs.isEmpty()) {
+            return false;
+        }
+        var rel = scopeDir.relativize(file);
+        for (var dir : disabledDirs) {
+            if (rel.startsWith(dir)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 容器内禁用技能目录的清理命令段（当前 scope 内；空集返回空串）。路径单引号包裹，
+     * 含单引号/控制字符/{@code ..} 的相对路径直接跳过（防御性：技能名来自 SDK stage 落盘）。
+     */
+    private String disabledRmCmd(String scope, java.util.Set<Path> disabledDirs) {
+        if (disabledDirs.isEmpty()) {
+            return "";
+        }
+        var sb = new StringBuilder();
+        String scopeRoot = getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR + "/" + scope;
+        for (var rel : disabledDirs) {
+            String joined = rel.toString().replace('\\', '/');
+            if (!isShellSafeRelPath(joined)) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" && ");
+            }
+            sb.append("rm -rf '").append(scopeRoot).append("/").append(joined).append("'");
+        }
+        return sb.toString();
+    }
+
+    /** 相对路径是否可安全内插 shell 单引号段：拒绝空白/控制字符/单引号/路径穿越 */
+    private static boolean isShellSafeRelPath(String path) {
+        if (path == null || path.isBlank() || path.startsWith("/")) {
+            return false;
+        }
+        if (path.contains("'") || path.contains("..")) {
+            return false;
+        }
+        return path.chars().allMatch(c -> c > 32);
+    }
+
+    /**
      * scoped 载荷投放 + 其它 scope 清理合并为<b>单条 exec</b>（P1-3）：exec 固定 ≈1s，
      * 原 prune 与 untar 分开两次即 ≈2s 起步。gz 为 null 时只跑 prune（目录缺失分支）。
-     * 命令尾部的 {@code ; true} 吞掉 prune 段退出码——残留清理失败不判定投放失败
+     * {@code disabledDirs} 非空时追加容器内禁用目录清理（oa-1110-repro-fixes-design §2.1a）。
+     * 命令尾部的 {@code ; true} 吞掉 prune/rm 段退出码——残留清理失败不判定投放失败
      * （untar 段失败仍按失败上报，下轮重试）。
      */
-    private void hydrateScopedArchive(byte[] gz, String scope) throws Exception {
+    private void hydrateScopedArchive(byte[] gz, String scope, java.util.Set<Path> disabledDirs) throws Exception {
         String wsRoot = getWorkspaceRoot();
         String pruneCmd = "find " + wsRoot + "/" + SkillCacheScope.CACHE_DIR
             + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
+        String rmCmd = disabledRmCmd(scope, disabledDirs);
+        String cleanup = rmCmd.isEmpty() ? pruneCmd : pruneCmd + "; " + rmCmd;
         String command;
         String tmpPath = null;
         if (gz != null) {
@@ -1208,9 +1316,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                     .mode(644)
                     .build()));
             command = "base64 -d " + tmpPath + " | tar xzf - -C " + wsRoot
-                + " && rm -f " + tmpPath + " && { " + pruneCmd + "; }";
+                + " && rm -f " + tmpPath + " && { " + cleanup + "; }";
         } else {
-            command = "{ " + pruneCmd + "; }";
+            command = "{ " + cleanup + "; }";
         }
         var execution = osbSandbox.commands().run(command);
         if (execution.getExitCode() != null && execution.getExitCode() != 0) {

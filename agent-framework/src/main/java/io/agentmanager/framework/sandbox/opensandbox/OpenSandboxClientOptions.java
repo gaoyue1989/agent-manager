@@ -22,6 +22,8 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
     private Map<String, String> environment = new HashMap<>();
     private String workspaceRoot = "/workspace";
+    /** 技能禁用判定（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放过滤；null = 不过滤 */
+    private SkillDisabledChecker skillDisabledChecker;
 
     @Override
     public String getType() {
@@ -46,6 +48,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public List<String> getEntrypoint() { return entrypoint; }
     public Map<String, String> getResource() { return resource; }
     public Map<String, String> getEnvironment() { return environment; }
+    public SkillDisabledChecker getSkillDisabledChecker() { return skillDisabledChecker; }
 
     // ---- fluent builder methods ----
     public OpenSandboxClientOptions serverUrl(String serverUrl) { this.serverUrl = serverUrl; return this; }
@@ -56,4 +59,5 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions resource(Map<String, String> resource) { this.resource = resource; return this; }
     public OpenSandboxClientOptions environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxClientOptions workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
+    public OpenSandboxClientOptions skillDisabledChecker(SkillDisabledChecker checker) { this.skillDisabledChecker = checker; return this; }
 }
