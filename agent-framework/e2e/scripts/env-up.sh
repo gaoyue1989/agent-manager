@@ -32,10 +32,11 @@ AGENT_JVM_OPTS="${AGENT_JVM_OPTS:--Dagent.sandbox.lifecycle.grace-floor-seconds=
 [ "$E2E_GROUP" = "lifecycle" ] && AGENT_JVM_OPTS="$AGENT_JVM_OPTS -Dagent.cleanup.turn-lease-max-lifetime-minutes=1"
 # start-agent.sh（R4 retry 重建副本）复用同组变量，export 透传子进程保持覆盖语义一致
 export LLM_MOCK_PORT MYSQL_URL MYSQL_USER MYSQL_PASS REDIS_URL SANDBOX_ENABLED SANDBOX_MOCK_PORT
-export SANDBOX_USER_QUOTA SANDBOX_TIMEOUT_MINUTES SANDBOX_RENEW_INTERVAL_SECONDS SANDBOX_CONFIRM_HOLD_MINUTES SANDBOX_POOL_REF AGENT_JVM_OPTS SANDBOX_GUARD_LEASE_SECONDS
+export SANDBOX_USER_QUOTA SANDBOX_TIMEOUT_MINUTES SANDBOX_RENEW_INTERVAL_SECONDS SANDBOX_CONFIRM_HOLD_MINUTES SANDBOX_POOL_REF AGENT_JVM_OPTS SANDBOX_GUARD_LEASE_SECONDS SANDBOX_LIFECYCLE_E2E_HOOKS
 [ "$E2E_GROUP" = "sandbox" ] && SANDBOX_ENABLED=true
 # lifecycle 组（§9.3）：沙箱开 + 生命周期加速参数（QUOTA=2/TTL=1min/RENEW=3s/HOLD=1min/POOL_REF=pool-e2e）
-[ "$E2E_GROUP" = "lifecycle" ] && SANDBOX_ENABLED=true && SANDBOX_USER_QUOTA=2 && SANDBOX_POOL_REF="pool-e2e"
+# + /debug 写钩子门控开（issue #293：POST /debug/sandbox-cleanup 仅显式 env 才注册，L11 依赖）
+[ "$E2E_GROUP" = "lifecycle" ] && SANDBOX_ENABLED=true && SANDBOX_USER_QUOTA=2 && SANDBOX_POOL_REF="pool-e2e" && SANDBOX_LIFECYCLE_E2E_HOOKS=true
 [ "$E2E_GROUP" = "multi" ] && SANDBOX_ENABLED=true && SANDBOX_USER_QUOTA=2 && SANDBOX_TIMEOUT_MINUTES=30 && SANDBOX_POOL_REF=""
 # multi 组守卫租约压低（默认 900s）：R4 kill 场景下被 kill 副本的守卫锁无法主动释放，
 # 900s 泄漏会锁死同会话接管后的下一次 acquire——20s 自愈，先例同 turn-lease TTL 压低
