@@ -658,21 +658,42 @@ class UserSkillServiceTest {
     }
 
     /**
-     * 非 UTF-8 条目名（Windows GBK 中文文件名，无 UTF-8 标志）：JDK 会抛
-     * "malformed input off : N, length : 1"，必须转成用户看得懂的中文提示（不是透传 JDK 原文）。
+     * GBK 条目名（Windows 自带压缩/旧版 WinRAR 的中文文件名，无 UTF-8 标志）：
+     * 首轮 UTF-8 解码失败后整包回退 GBK，文件名/目录名按 GBK 正确落库。
      */
     @Test
-    void uploadZipShouldReportFriendlyMessageForNonUtf8EntryName() {
-        // 「技能/SKILL.md」的 GBK 字节
-        var gbkName = new byte[] {(byte) 0xbc, (byte) 0xbc, (byte) 0xc4, (byte) 0xdc,
-            '/', 'S', 'K', 'I', 'L', 'L', '.', 'm', 'd'};
-        var zip = zipWithRawEntryName(gbkName, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+    void uploadZipShouldSupportGbkEntryNames() throws IOException {
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new java.util.zip.ZipOutputStream(baos, java.nio.charset.Charset.forName("GBK"))) {
+            zos.putNextEntry(new java.util.zip.ZipEntry("技能/SKILL.md"));
+            zos.write(USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("技能/scripts/说明.txt"));
+            zos.write("GBK 名字".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+
+        var outcome = service().uploadSkillZip(USER, bais(baos.toByteArray()), "demo-a.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertEquals(List.of("SKILL.md", "scripts/说明.txt"), outcome.files());
+        assertEquals("GBK 名字", store.get(skillNs(USER), "/demo-a/scripts/说明.txt").value().get("content"));
+    }
+
+    /**
+     * 条目名既非 UTF-8 也非 GBK（0xFF 在两种编码下都是非法字节）：仍须转成
+     * 用户看得懂的中文提示，透传 JDK 原文（malformed input off ...）没有可操作性。
+     */
+    @Test
+    void uploadZipShouldReportFriendlyMessageForUndecodableEntryName() {
+        var badName = new byte[] {(byte) 0xFF, '/', 'S', 'K', 'I', 'L', 'L', '.', 'm', 'd'};
+        var zip = zipWithRawEntryName(badName, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
 
         var e = assertThrows(IllegalArgumentException.class,
             () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
 
-        assertTrue(e.getMessage().contains("UTF-8"), "应提示编码问题: " + e.getMessage());
-        assertTrue(e.getMessage().contains("重新压缩"), "应给出可执行建议: " + e.getMessage());
+        assertTrue(e.getMessage().contains("UTF-8") && e.getMessage().contains("GBK"),
+            "应说明两种编码均不支持: " + e.getMessage());
         assertFalse(e.getMessage().contains("malformed input"),
             "不应把 JDK 原始消息透给用户: " + e.getMessage());
     }
