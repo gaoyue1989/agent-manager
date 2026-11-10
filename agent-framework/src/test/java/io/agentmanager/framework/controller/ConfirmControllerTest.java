@@ -41,6 +41,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -341,9 +342,13 @@ class ConfirmControllerTest {
         var rid = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(intentStore).register(eq("t1"), rid.capture(), any(Duration.class));
         verify(watcher).register(eq("t1"), eq(rid.getValue()));
-        // 终态收尾：注销停止监视 + 清理本轮意图（replyId 栅栏）
-        verify(watcher).unregister(eq("t1"), eq(rid.getValue()));
-        verify(intentStore).clear(eq("t1"), eq(rid.getValue()));
+        // 终态收尾：注销停止监视 + 清理本轮意图（replyId 栅栏）。
+        // 两者跑在 endTurnAndLifecycle 内、closeSession 的 sink.tryEmitComplete()（即
+        // block() 解除阻塞的完成信号）之后——与 ChatStreamControllerTest 的
+        // turn-tail 断言同一竞态（信号唤醒主线程时执行线程还差最后几步），须用
+        // timeout 容忍毫秒级落点，否则全量并发下偶发翻车
+        verify(watcher, timeout(2000)).unregister(eq("t1"), eq(rid.getValue()));
+        verify(intentStore, timeout(2000)).clear(eq("t1"), eq(rid.getValue()));
     }
 
     @Test
