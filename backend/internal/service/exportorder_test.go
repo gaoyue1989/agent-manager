@@ -1210,3 +1210,87 @@ func TestAsyncBuildCorruptInputFailsOrder(t *testing.T) {
 		t.Fatalf("builder must not be called on corrupt input, got %d calls", len(calls))
 	}
 }
+
+// TestAsyncBuildSlugFromSourcePackageNotManifest issue #261：创建窗口下载竞态胜出后
+// ManifestJSON 仍是 "{}" 占位（首渲 CAS 放弃、values 留空），构建审计标签 slug 改取源包行
+// ——修复前 parseExportManifest 零值 Package.Slug 为空串，Build 以 "label has an empty
+// value" 失败、本应「构建回写补全」的导出单永久 failed 且文案误导。
+func TestAsyncBuildSlugFromSourcePackageNotManifest(t *testing.T) {
+	core, builder, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	// 竞态胜出形态：seedBuildingOrder 即 ManifestJSON="{}" 占位（不落首渲）
+	order, _, _, _ := seedBuildingOrder(t, core, ws, svc, pkg, mark)
+	core.asyncBuildExportOrder(order.ID)
+	waitForExportStatus(t, core, order.ID, store.ExportStatusBuilt)
+	calls := builder.calls()
+	if len(calls) != 1 {
+		t.Fatalf("builder called %d times, want 1", len(calls))
+	}
+	if got := calls[0].Labels["oaf.platform/slug"]; got != pkg.Slug {
+		t.Fatalf("slug label = %q, want source package slug %q (empty slug fails build)", got, pkg.Slug)
+	}
+}
+
+// TestCreateOrderFirstRenderPersistErrorFailsOrder issue #267：首渲产物落库失败（DB 层
+// 错误，非 CAS 并发放弃）必须与 render 失败分支同构——先 failExportOrder 带因落 failed
+// 再返回错误；修复前裸 return 使导出单滞留 building 且构建 goroutine 未启动（自动链路
+// 孤儿行）。sqlite 触发器仅拦截「values_yaml 空→非空」的 UPDATE（首渲 CAS 落库），
+// failExportOrder 的 status/error 列更新不受影响，可确定性注入 DB 错误。
+func TestCreateOrderFirstRenderPersistErrorFailsOrder(t *testing.T) {
+	core, _, ws, svc, _, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	if err := core.DB.Exec(`CREATE TRIGGER block_first_render BEFORE UPDATE ON export_orders
+		WHEN OLD.values_yaml = '' AND NEW.values_yaml != ''
+		BEGIN
+			SELECT RAISE(ABORT, 'boom first render persist');
+		END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.CreateExportOrder("export-owner", ws.ID, svc.ID, &ExportOrderRequest{Marker: mark.Marker}); err == nil {
+		t.Fatal("expected persist-first-render error")
+	}
+	var orders []store.ExportOrderEntity
+	if err := core.DB.Find(&orders).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("orders = %d, want 1", len(orders))
+	}
+	if orders[0].Status != store.ExportStatusFailed {
+		t.Fatalf("status = %q, want failed (must not stay building)", orders[0].Status)
+	}
+	if !strings.Contains(orders[0].Error, "persist first render") {
+		t.Fatalf("error = %q, want persist-first-render reason", orders[0].Error)
+	}
+}
+
+// TestAdvanceOrderItsmTicketLength issue #270：itsmTicketId 超 128 字节在落库前以
+// ErrInvalidForm 拒绝（列宽 VARCHAR(128)，超长撞 MySQL 严格模式 1406 后裸驱动错误以
+// 500 直出；单测内存 SQLite 不强制列宽，不会自行暴露）。恰好 128 字节放行。
+func TestAdvanceOrderItsmTicketLength(t *testing.T) {
+	core, _, ws, svc, pkg, done := newExportFixture(t)
+	defer done()
+	mark := freezeMark(t, core, ws.ID, svc.ID)
+	order, _, _, _ := seedBuildingOrder(t, core, ws, svc, pkg, mark)
+
+	_, err := core.advanceExportOrderCAS(order, "owner", "export-owner", &ExportAdvanceInput{
+		Status: store.ExportStatusCancelled, ItsmTicketID: strings.Repeat("a", 129)})
+	if !errors.Is(err, ErrInvalidForm) {
+		t.Fatalf("err = %v, want ErrInvalidForm", err)
+	}
+	// 拒绝路径不落库：状态与工单号列保持原值
+	var got store.ExportOrderEntity
+	if err := core.DB.First(&got, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.ExportStatusBuilding || got.ItsmTicketID != "" {
+		t.Fatalf("rejected advance must not write: status=%q ticket=%q", got.Status, got.ItsmTicketID)
+	}
+	// 恰好 128 字节放行（building → cancelled 合法迁移）
+	if _, err := core.advanceExportOrderCAS(order, "owner", "export-owner", &ExportAdvanceInput{
+		Status: store.ExportStatusCancelled, ItsmTicketID: strings.Repeat("a", 128)}); err != nil {
+		t.Fatalf("advance with 128-byte ticket: %v", err)
+	}
+}

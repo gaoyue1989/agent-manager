@@ -283,6 +283,8 @@ func exportFileReadOnly(p string) bool {
 
 // SaveExportPackageFile 保存单文件文本修改（写编辑草稿，不冻结；设计 §9 PUT file）。
 // 同服务至多一条 draft：无则按 seedExportEntries 种子化，再 upsert 该文件内容。
+// 草稿行写路径为乐观锁 CAS（见 saveExportFileCAS）：按 (id, status=draft, draft_version)
+// 条件更新，不命中重读重放；并发首存 INSERT 冲突 translateStorageError → 409（issue #269）。
 func (c *Core) SaveExportPackageFile(wsID, svcID uint, username, filePath, content string) (*ExportMarkView, error) {
 	svc, err := c.loadServiceForExport(wsID, svcID)
 	if err != nil {
@@ -306,59 +308,102 @@ func (c *Core) SaveExportPackageFile(wsID, svcID uint, username, filePath, conte
 	if len(content) > maxExportUpsertFileBytes {
 		return nil, fmt.Errorf("%w: file content exceeds %d bytes", ErrInvalidForm, maxExportUpsertFileBytes)
 	}
-
 	draft, err := c.loadDraftMark(svcID)
 	if err != nil {
 		return nil, err
 	}
-	if draft == nil {
-		seed, serr := c.seedExportEntries(svcID, pkg)
-		if serr != nil {
-			return nil, serr
+	return c.saveExportFileCAS(wsID, svcID, pkg, username, clean, content, draft)
+}
+
+// saveExportFileCAS 草稿单文件保存内部写路径（快照可注入，issue #268 竞态回归用）：
+// 首轮以传入 draft 为基线重放单文件编辑并按 (id, status=draft, draft_version) 乐观锁 CAS
+// 落库——FilesJSON 是读-改-写整份快照，并发保存不同文件时后写者整段覆盖前写者；不命中
+// 重读最新行重放（export_orders manifest 三写者同模式，issue #233）；status=draft 守卫
+// 并发冻结（frozen 快照不可变）。耗尽重试以 ErrBadState 拒绝，客户端刷新后重试。
+// 新草稿 INSERT（draft.ID==0）冲突经 translateStorageError 落 409（issue #269，
+// (service_id, "") 复合唯一兜底并发首存，FreezeExportMark 同口径）。
+func (c *Core) saveExportFileCAS(wsID, svcID uint, pkg *store.OafPackage, username, clean, content string, draft *store.ExportPackageMarkEntity) (*ExportMarkView, error) {
+	for attempt := 0; ; attempt++ {
+		if draft == nil {
+			seed, serr := c.seedExportEntries(svcID, pkg)
+			if serr != nil {
+				return nil, serr
+			}
+			raw, merr := marshalMarkFiles(seed)
+			if merr != nil {
+				return nil, merr
+			}
+			draft = &store.ExportPackageMarkEntity{
+				ServiceID: svcID, WorkspaceID: wsID, PackageVersion: pkg.Version,
+				Status: store.ExportMarkDraft, CreatedBy: username,
+				FilesJSON: raw, FileCount: len(seed), Checksum: checksumOfEntries(seed),
+			}
 		}
-		raw, merr := marshalMarkFiles(seed)
-		if merr != nil {
-			return nil, merr
+		entries, err := parseMarkFiles(draft.FilesJSON)
+		if err != nil {
+			return nil, err
 		}
-		draft = &store.ExportPackageMarkEntity{
-			ServiceID: svcID, WorkspaceID: wsID, PackageVersion: pkg.Version,
-			Status: store.ExportMarkDraft, CreatedBy: username,
-			FilesJSON: raw, FileCount: len(seed), Checksum: checksumOfEntries(seed),
+		replaced := false
+		for i := range entries {
+			if entries[i].Path == clean {
+				entries[i].Encoding = "utf8"
+				entries[i].Content = content
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			entries = append(entries, exportFileEntry{Path: clean, Encoding: "utf8", Content: content})
+		}
+		raw, err := marshalMarkFiles(entries)
+		if err != nil {
+			return nil, err
+		}
+		draft.FilesJSON = raw
+		draft.FileCount = len(entries)
+		draft.Checksum = checksumOfEntries(entries)
+		draft.CreatedBy = username
+		if draft.ID == 0 {
+			// 新草稿 INSERT（gorm Save 对零值主键即 Create）：并发首存双方均得 nil 后竞争
+			// INSERT (service_id, "")，败者 1062 → 409 duplicate_name（issue #269，不再以
+			// 500 + 裸驱动错误直出）
+			if err := c.DB.Save(draft).Error; err != nil {
+				return nil, translateStorageError(err)
+			}
+			return markView(draft), nil
+		}
+		res := c.DB.Model(&store.ExportPackageMarkEntity{}).
+			Where("id = ? AND status = ? AND draft_version = ?", draft.ID, store.ExportMarkDraft, draft.DraftVersion).
+			Updates(map[string]interface{}{
+				"files_json":    raw,
+				"file_count":    len(entries),
+				"checksum":      draft.Checksum,
+				"created_by":    username,
+				"draft_version": draft.DraftVersion + 1,
+			})
+		if res.Error != nil {
+			return nil, translateStorageError(res.Error)
+		}
+		if res.RowsAffected > 0 {
+			draft.DraftVersion++
+			return markView(draft), nil
+		}
+		if attempt >= 2 {
+			return nil, fmt.Errorf("%w: export draft changed concurrently, refresh and retry", ErrBadState)
+		}
+		// 丢失更新：重读最新草稿（含并发方刚写入的快照与最新 draft_version），下一轮把本次
+		// 编辑重放在其上（并发编辑不同文件互不丢失；重读为 nil 即草稿已被并发冻结——下一轮
+		// 走种子化新建，快照种子含刚冻结的完整内容，本次编辑叠加其上不丢）
+		if draft, err = c.loadDraftMark(svcID); err != nil {
+			return nil, err
 		}
 	}
-	entries, err := parseMarkFiles(draft.FilesJSON)
-	if err != nil {
-		return nil, err
-	}
-	replaced := false
-	for i := range entries {
-		if entries[i].Path == clean {
-			entries[i].Encoding = "utf8"
-			entries[i].Content = content
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		entries = append(entries, exportFileEntry{Path: clean, Encoding: "utf8", Content: content})
-	}
-	raw, err := marshalMarkFiles(entries)
-	if err != nil {
-		return nil, err
-	}
-	draft.FilesJSON = raw
-	draft.FileCount = len(entries)
-	draft.Checksum = checksumOfEntries(entries)
-	draft.CreatedBy = username
-	if err := c.DB.Save(draft).Error; err != nil {
-		return nil, err
-	}
-	return markView(draft), nil
 }
 
 // FreezeExportMark 打发布标记：冻结当前快照（draft 存在则冻结之；否则直接对源包快照冻结），
 // 分配 marker `{包版本}-e{N}`（序号按服务内递增，取现存最大序号 +1）并写 checksum。
-// 冻结后快照不可变；再编辑会生成新草稿、再打标记生成新 marker。
+// 冻结后快照不可变；再编辑会生成新草稿、再打标记生成新 marker。既有草稿冻结走
+// (id, status=draft, draft_version) 乐观锁 CAS（issue #268，仅更新冻结列不碰 files_json）。
 func (c *Core) FreezeExportMark(wsID, svcID uint, username string) (*ExportMarkView, error) {
 	svc, err := c.loadServiceForExport(wsID, svcID)
 	if err != nil {
@@ -393,14 +438,54 @@ func (c *Core) FreezeExportMark(wsID, svcID uint, username string) (*ExportMarkV
 	if err != nil {
 		return nil, err
 	}
-	draft.Marker = fmt.Sprintf("%s-e%d", draft.PackageVersion, seq)
-	draft.Status = store.ExportMarkFrozen
-	draft.CreatedBy = username
-	if err := c.DB.Save(draft).Error; err != nil {
-		// (service_id, marker) 复合唯一（契约 §9-D2）：并发打标记竞态落 409
-		return nil, translateStorageError(err)
+	if draft.ID == 0 {
+		// 新草稿 INSERT（Save 对零值主键即 Create）：(service_id, marker) 复合唯一兜底
+		// 并发打标记竞态（契约 §9-D2，1062 → 409）
+		draft.Marker, draft.Status, draft.CreatedBy = fmt.Sprintf("%s-e%d", draft.PackageVersion, seq), store.ExportMarkFrozen, username
+		if err := c.DB.Save(draft).Error; err != nil {
+			return nil, translateStorageError(err)
+		}
+		return markView(draft), nil
 	}
-	return markView(draft), nil
+	// 既有草稿冻结：乐观锁 CAS（issue #268 同款 draft_version）——仅更新冻结相关列，不整行
+	// Save（stale 快照整行落库会覆盖并发保存刚写入的 files_json 并把 draft_version 复位）；
+	// 不命中重读重试并重算 marker 序号（并发打标记可能已领取同号，撞复合唯一 → 409 兜底）
+	marker := fmt.Sprintf("%s-e%d", draft.PackageVersion, seq)
+	for attempt := 0; ; attempt++ {
+		draft.Marker, draft.Status, draft.CreatedBy = marker, store.ExportMarkFrozen, username
+		res := c.DB.Model(&store.ExportPackageMarkEntity{}).
+			Where("id = ? AND status = ? AND draft_version = ?", draft.ID, store.ExportMarkDraft, draft.DraftVersion).
+			Updates(map[string]interface{}{
+				"marker":        marker,
+				"status":        store.ExportMarkFrozen,
+				"created_by":    username,
+				"draft_version": draft.DraftVersion + 1,
+			})
+		if res.Error != nil {
+			// (service_id, marker) 复合唯一（契约 §9-D2）：并发打标记竞态落 409
+			return nil, translateStorageError(res.Error)
+		}
+		if res.RowsAffected > 0 {
+			draft.DraftVersion++
+			return markView(draft), nil
+		}
+		if attempt >= 2 {
+			return nil, fmt.Errorf("%w: export draft changed concurrently, refresh and retry", ErrBadState)
+		}
+		// 丢失更新：重读最新行再 CAS；已被并发冻结（status≠draft）直接拒绝——快照不可变，
+		// 本次冻结对象已不存在
+		if err := c.DB.First(draft, draft.ID).Error; err != nil {
+			return nil, err
+		}
+		if draft.Status != store.ExportMarkDraft {
+			return nil, fmt.Errorf("%w: export draft was frozen concurrently, refresh and retry", ErrBadState)
+		}
+		seq, err = c.nextExportMarkSeq(svcID)
+		if err != nil {
+			return nil, err
+		}
+		marker = fmt.Sprintf("%s-e%d", draft.PackageVersion, seq)
+	}
 }
 
 // nextExportMarkSeq 服务内标记序号：解析现存全部标记的 `-e{N}` 尾缀取最大值 +1
