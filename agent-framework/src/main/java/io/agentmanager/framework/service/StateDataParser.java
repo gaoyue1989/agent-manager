@@ -172,6 +172,13 @@ public final class StateDataParser {
     /** 官方 SDK 的 HITL 关联 replyId 元数据键（与 Msg.METADATA_CONFIRM_REQUEST_REPLY_ID 一致） */
     private static final String METADATA_CONFIRM_REQUEST_REPLY_ID = "agentscope_confirm_request_reply_id";
 
+    /**
+     * history 逐轮归属锚点：写入侧（/threads/chat、AG-UI run）给本轮 user 消息打上 turn replyId。
+     * 读取侧据此把同一轮的 assistant 消息归到同一个 reply_id——不依赖 Redis 事件索引 TTL，
+     * 也避免「一轮多条 assistant 消息」被逐条分配 reply_id 造成轮次错位。
+     */
+    public static final String METADATA_TURN_REPLY_ID = "agent_turn_reply_id";
+
     /** 把 Map 序列化为 JSON 字符串（ToolUseBlock.content 回填用）；失败返回 null（fail-soft） */
     public static String toJsonString(Map<String, Object> map) {
         if (map == null) {
@@ -259,6 +266,27 @@ public final class StateDataParser {
             }
         }
         return ids;
+    }
+
+    /**
+     * 提取消息的逐轮归属锚点（turn replyId）：优先取写入侧 user 消息 metadata，其次取
+     * 官方 SDK 在 ASKING assistant 消息上记录的 confirm replyId。缺失返回 {@code null}，
+     * 调用方回落到 Redis 事件索引顺序分配。
+     */
+    static String extractTurnReplyId(JsonNode msg) {
+        if (msg == null) {
+            return null;
+        }
+        var metadata = msg.path("metadata");
+        if (!metadata.isObject()) {
+            return null;
+        }
+        var written = metadata.path(METADATA_TURN_REPLY_ID).asText("");
+        if (!written.isBlank()) {
+            return written;
+        }
+        var confirm = metadata.path(METADATA_CONFIRM_REQUEST_REPLY_ID).asText("");
+        return confirm.isBlank() ? null : confirm;
     }
 
     /**
@@ -436,6 +464,14 @@ public final class StateDataParser {
             var name = m.path("name").asText("");
             if (!name.isBlank()) {
                 msg.put("name", name);
+            }
+            // 逐轮归属锚点（内部字段，ThreadController 回填 reply_id 后移除）：
+            // ① 写入侧 user 消息 metadata（本轮 turn replyId）；② 官方 SDK 在 ASKING 的
+            // assistant 消息 metadata 上记录的 confirm replyId。两者都可用于把同轮 assistant
+            // 消息收敛到同一 reply_id，不再依赖「一条 assistant = 一轮」的顺序猜测。
+            var turnReplyId = extractTurnReplyId(m);
+            if (turnReplyId != null) {
+                msg.put("turn_reply_id", turnReplyId);
             }
             if (!tools.isEmpty()) {
                 msg.put("tool_calls", tools);

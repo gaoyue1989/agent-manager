@@ -470,13 +470,14 @@ curl http://localhost:8100/threads/acme-test-agent:thread-1/history
 | `msg_id` | SDK Msg.id（toRoleContentList 透传；tool_calls 内层的 `id` 是工具调用 id，勿混淆） |
 | `origin` | `archive`（来自消息轨归档，压缩前原文）/ `state`（来自 agent_state 当前上下文） |
 | `role=compaction` 项 | 压缩分隔条合成项：`type=compaction_summary`，`content` 为摘要文本；老前端忽略即可 |
-| `reply_id` | 仅 assistant 携带；来自 Redis 顺序回填（按首个事件 seq 逐轮分配）。归档不盖戳——实测 `AgentState.getReplyId()` 为会话级而非逐轮（见 session-history-archive-design.md §15） |
+| `reply_id` | 仅 assistant 携带；**按轮分配**——同一轮的多条 assistant 消息共享同一个 turn replyId（ReAct 一轮可产生多条 assistant）。取值优先级：归档行 > 消息 metadata 锚点（`/threads/chat`、AG-UI 写入的 user 消息 turn id；SDK ASKING 消息的 confirm replyId）> Redis reply 索引顺序兜底（按首个事件 seq，逐轮消费一个 id）。与 `files[].reply_id` 同源，可直接对应 |
 | `hasMore` / `nextBeforeId` | 归档分页游标；`nextBeforeId` 传回 `beforeId` 取更早一页 |
 
 > **`files[]`（顶层）**：产出文件（`present_file` / `present_url`）在历史回放时经 `file_asset` 表
 > 关联本会话，供前端补渲染下载卡片。卡片字段与 SSE `file_ready` 帧**逐字段对齐**：
 > `type`（固定 `file_ready`）/ `file_id` / `file_name` / `mime_type` / `size` / `download_url`
-> 同名同义；`reply_id` 是历史回放独有的挂载键（= SSE 帧信封的 `replyId`），前端据此把卡片挂回该轮气泡。
+> 同名同义；`reply_id` 是历史回放独有的挂载键（= SSE 帧信封的 `replyId`，与 `messages[]` 中该轮
+> assistant 消息的 `reply_id` 同源），前端据此把卡片挂回该轮气泡。
 > `download_url` 口径与 SSE 一致：直连为服务根相对路径 `/files/{id}`，经代理（`X-Forwarded-Prefix`）
 > 访问时为从域名根解析的完整路径（客户端免拼前缀）。
 >

@@ -388,3 +388,16 @@ E2E（可选，建议做）：mock LLM fixtures 增加 30+ 轮场景触发压缩
 
 **P2 未动**（另行立项）：转录取证端点、存量会话归档回填、session_message 全文检索、
 large_tool_results 驱逐文件关联展示。
+
+### 15.1 追加修正：reply_id 按轮归属（2026-11-10）
+
+第 5 条的「fillReplyIds 对 assistant 无条件按序分配」在工具轮次下会错位：ReAct 一轮可产生
+**多条** assistant 消息（每次推理一条），而 reply 索引一轮只有一个 id——逐条分配会让后续轮次
+的 id 整体前移，文件卡片的 `reply_id` 在 `messages[]` 中找不到对应 assistant 或挂到错误气泡。
+
+修正：`fillReplyIds` 改为**按轮分配**（一轮的所有 assistant 共享一个 reply_id），轮次切分 =
+user 消息开启新轮 + ASKING assistant（metadata `agentscope_confirm_request_reply_id`）之后
+另起 HITL 恢复段。取值优先级：归档行 reply_id > 消息 metadata 锚点 > Redis reply 索引顺序。
+锚点由写入侧提供：`/threads/chat` 与 AG-UI 的 user 消息 metadata 打 `agent_turn_reply_id`
+（`StateDataParser.METADATA_TURN_REPLY_ID`），Redis 索引过期时仍可正确归属；未知/存量会话
+仍回落到 Redis 顺序，行为零回归。compaction 分隔条不属于任何轮次，不消耗 reply id。
