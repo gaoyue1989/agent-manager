@@ -22,7 +22,7 @@ import io.agentmanager.framework.config.AgentManagerProperties;
 import io.agentmanager.framework.model.OafConfig;
 
 /**
- * SkillInjectionService 测试：@Skill 引用解析、注入、边界情况。
+ * SkillInjectionService 测试：/Skill 引用解析、注入、边界情况。
  */
 class SkillInjectionServiceTest {
 
@@ -89,7 +89,7 @@ class SkillInjectionServiceTest {
     // ========== parseSkillReferences 测试 ==========
 
     @Test
-    void parseNoAtReturnsEmpty() throws IOException {
+    void parseNoRefReturnsEmpty() throws IOException {
         writeSkill("demo", "Demo skill", "# Demo");
         var service = injectionService();
         var refs = service.parseSkillReferences("hello world");
@@ -97,27 +97,27 @@ class SkillInjectionServiceTest {
     }
 
     @Test
-    void parseSingleAtSkill() throws IOException {
+    void parseSingleRefSkill() throws IOException {
         writeSkill("ppt生成大师", "PPT generation", "# PPT");
         var service = injectionService();
-        var refs = service.parseSkillReferences("用@ppt生成大师 做个PPT");
+        var refs = service.parseSkillReferences("用/ppt生成大师 做个PPT");
         assertEquals(List.of("ppt生成大师"), refs);
     }
 
     @Test
-    void parseMultipleAtSkills() throws IOException {
+    void parseMultipleRefSkills() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF");
         writeSkill("xlsx", "Excel tool", "# XLSX");
         var service = injectionService();
-        var refs = service.parseSkillReferences("用@pdf 和 @xlsx 处理文件");
+        var refs = service.parseSkillReferences("用/pdf 和 /xlsx 处理文件");
         assertEquals(List.of("pdf", "xlsx"), refs);
     }
 
     @Test
-    void parseDuplicateAtOnlyOnce() throws IOException {
+    void parseDuplicateRefOnlyOnce() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF");
         var service = injectionService();
-        var refs = service.parseSkillReferences("@pdf and again @pdf");
+        var refs = service.parseSkillReferences("/pdf and again /pdf");
         assertEquals(List.of("pdf"), refs);
     }
 
@@ -125,7 +125,7 @@ class SkillInjectionServiceTest {
     void parseNonExistentSkillIgnored() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF");
         var service = injectionService();
-        var refs = service.parseSkillReferences("@pdf and @ghost-skill");
+        var refs = service.parseSkillReferences("/pdf and /ghost-skill");
         assertEquals(List.of("pdf"), refs);
     }
 
@@ -135,7 +135,7 @@ class SkillInjectionServiceTest {
         var manage = manageService();
         manage.toggleSkill("disabled-skill"); // disable
         var service = new SkillInjectionService(catalogService(), manage, userSkillService());
-        var refs = service.parseSkillReferences("@disabled-skill help");
+        var refs = service.parseSkillReferences("/disabled-skill help");
         assertTrue(refs.isEmpty());
     }
 
@@ -143,15 +143,27 @@ class SkillInjectionServiceTest {
     void parseDoesNotMatchEmail() throws IOException {
         writeSkill("example", "Example", "# Example");
         var service = injectionService();
-        // user@example.com should NOT match @example
+        // user@example.com 不再是触发符，邮箱不受影响
         var refs = service.parseSkillReferences("Email: user@example.com");
-        assertTrue(refs.isEmpty(), "Email address should not be parsed as @Skill");
+        assertTrue(refs.isEmpty(), "Email address should not be parsed as /Skill");
+    }
+
+    @Test
+    void parseDoesNotMatchUrlOrPathButAllowsChinesePrefix() throws IOException {
+        writeSkill("pdf", "PDF tool", "# PDF");
+        var service = injectionService();
+        // URL / Unix 路径 / 相对路径中的 / 不是技能引用
+        assertTrue(service.parseSkillReferences("见 https://example.com/pdf 文档").isEmpty());
+        assertTrue(service.parseSkillReferences("路径 /usr/pdf/bin").isEmpty());
+        assertTrue(service.parseSkillReferences("相对路径 src/pdf").isEmpty());
+        // 中文紧邻 / 仍是合法用法（与 Java \\w 仅 ASCII 一致）
+        assertEquals(List.of("pdf"), service.parseSkillReferences("用/pdf"));
     }
 
     // ========== injectSkillReferences 测试 ==========
 
     @Test
-    void injectNoAtReturnsOriginal() throws IOException {
+    void injectNoRefReturnsOriginal() throws IOException {
         writeSkill("demo", "Demo", "# Demo");
         var service = injectionService();
         var result = service.injectSkillReferences("plain message");
@@ -162,8 +174,8 @@ class SkillInjectionServiceTest {
     void injectSingleSkill() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF\nRead PDF files.");
         var service = injectionService();
-        var result = service.injectSkillReferences("用@pdf 处理文件");
-        assertTrue(result.contains("[@Skill:pdf]"), "@pdf should be replaced with reference marker");
+        var result = service.injectSkillReferences("用/pdf 处理文件");
+        assertTrue(result.contains("[/Skill:pdf]"), "/pdf should be replaced with reference marker");
         assertTrue(result.contains("## Referenced Skills"), "Should contain Referenced Skills section");
         assertTrue(result.contains("### Skill: pdf"), "Should contain Skill header");
         assertTrue(result.contains("# PDF\nRead PDF files."), "Should contain full SKILL.md content");
@@ -174,9 +186,9 @@ class SkillInjectionServiceTest {
         writeSkill("pdf", "PDF tool", "# PDF content");
         writeSkill("xlsx", "Excel tool", "# XLSX content");
         var service = injectionService();
-        var result = service.injectSkillReferences("用@pdf 和 @xlsx 处理");
-        assertTrue(result.contains("[@Skill:pdf]"));
-        assertTrue(result.contains("[@Skill:xlsx]"));
+        var result = service.injectSkillReferences("用/pdf 和 /xlsx 处理");
+        assertTrue(result.contains("[/Skill:pdf]"));
+        assertTrue(result.contains("[/Skill:xlsx]"));
         assertTrue(result.contains("### Skill: pdf"));
         assertTrue(result.contains("### Skill: xlsx"));
     }
@@ -185,19 +197,19 @@ class SkillInjectionServiceTest {
     void injectDuplicateOnlyOnce() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF content");
         var service = injectionService();
-        var result = service.injectSkillReferences("@pdf and @pdf again");
+        var result = service.injectSkillReferences("/pdf and /pdf again");
         // Should only appear once in Referenced Skills
         var skillHeader = "### Skill: pdf";
-        assertEquals(1, countOccurrences(result, skillHeader), "Duplicate @ should only inject once");
+        assertEquals(1, countOccurrences(result, skillHeader), "Duplicate / should only inject once");
     }
 
     @Test
     void injectNonExistentKeptAsIs() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF");
         var service = injectionService();
-        var result = service.injectSkillReferences("@pdf and @ghost-skill");
-        assertTrue(result.contains("[@Skill:pdf]"), "Existing skill should be replaced");
-        assertTrue(result.contains("@ghost-skill"), "Non-existent skill should remain as-is");
+        var result = service.injectSkillReferences("/pdf and /ghost-skill");
+        assertTrue(result.contains("[/Skill:pdf]"), "Existing skill should be replaced");
+        assertTrue(result.contains("/ghost-skill"), "Non-existent skill should remain as-is");
     }
 
     @Test
@@ -218,8 +230,8 @@ class SkillInjectionServiceTest {
         var manage = manageService();
         manage.toggleSkill("old-skill"); // disable
         var service = new SkillInjectionService(catalogService(), manage, userSkillService());
-        var result = service.injectSkillReferences("用@old-skill 处理");
-        assertTrue(result.contains("@old-skill"), "Disabled skill @ should remain as-is");
+        var result = service.injectSkillReferences("用/old-skill 处理");
+        assertTrue(result.contains("/old-skill"), "Disabled skill / should remain as-is");
         assertFalse(result.contains("## Referenced Skills"), "No skills should be injected");
     }
 
@@ -227,11 +239,11 @@ class SkillInjectionServiceTest {
     void injectDoesNotCorruptEmail() throws IOException {
         writeSkill("example", "Example", "# Example");
         var service = injectionService();
-        var result = service.injectSkillReferences("Contact: user@example.com and use @example");
+        var result = service.injectSkillReferences("Contact: user@example.com and use /example");
         // user@example.com should not be touched
         assertTrue(result.contains("user@example.com"), "Email should remain untouched");
-        // @example at sentence start should be replaced
-        assertTrue(result.contains("[@Skill:example]"), "Standalone @example should be replaced");
+        // /example after whitespace should be replaced
+        assertTrue(result.contains("[/Skill:example]"), "Standalone /example should be replaced");
     }
 
     // ========== availableSkills 测试 ==========
@@ -270,12 +282,12 @@ class SkillInjectionServiceTest {
                 "user", true, 1, List.of("SKILL.md"), true)));
         var service = new SkillInjectionService(catalogService(), manageService(), userService);
 
-        var injected = service.injectSkillReferences("@personal-a 请处理", "u1");
+        var injected = service.injectSkillReferences("/personal-a 请处理", "u1");
         assertTrue(injected.contains("Personal body"), injected);
-        assertEquals(List.of("personal-a"), service.parseSkillReferences("@personal-a", "u1"));
+        assertEquals(List.of("personal-a"), service.parseSkillReferences("/personal-a", "u1"));
 
-        // 无 userId：L4 不参与，@ 引用保留原样（不注入个人技能内容）
-        var noUser = service.injectSkillReferences("@personal-a 请处理");
+        // 无 userId：L4 不参与，/ 引用保留原样（不注入个人技能内容）
+        var noUser = service.injectSkillReferences("/personal-a 请处理");
         assertFalse(noUser.contains("Personal body"), noUser);
     }
 
@@ -285,11 +297,11 @@ class SkillInjectionServiceTest {
     void stripInjectedSkillsShouldRestoreUserTextOnly() throws IOException {
         writeSkill("pdf", "PDF tool", "# PDF\nRead PDF files.\n很长很长的技术文档…");
         var service = injectionService();
-        var injected = service.injectSkillReferences("用@pdf 处理文件");
+        var injected = service.injectSkillReferences("用/pdf 处理文件");
 
         var shown = SkillInjectionService.stripInjectedSkills(injected);
-        // 只剩用户原文（@pdf 已替换为引用标记），注入区块整体消失
-        assertEquals("用[@Skill:pdf] 处理文件", shown, "history 不得拖着整篇 SKILL.md");
+        // 只剩用户原文（/pdf 已替换为引用标记），注入区块整体消失
+        assertEquals("用[/Skill:pdf] 处理文件", shown, "history 不得拖着整篇 SKILL.md");
         assertFalse(shown.contains("## Referenced Skills"));
         assertFalse(shown.contains("Read PDF files."));
         // 剥离不影响注入本身（模型仍需完整 Skill 上下文）
@@ -303,14 +315,14 @@ class SkillInjectionServiceTest {
         var service = injectionService();
 
         var shown = SkillInjectionService.stripInjectedSkills(
-            service.injectSkillReferences("用@pdf 和 @xlsx 处理"));
-        assertEquals("用[@Skill:pdf] 和 [@Skill:xlsx] 处理", shown);
+            service.injectSkillReferences("用/pdf 和 /xlsx 处理"));
+        assertEquals("用[/Skill:pdf] 和 [/Skill:xlsx] 处理", shown);
         assertFalse(shown.contains("### Skill:"));
     }
 
     @Test
     void stripInjectedSkillsWithoutInjectionReturnsOriginal() {
-        var plain = "用 @pdf 处理（未启用该技能，无注入）";
+        var plain = "用 /pdf 处理（未启用该技能，无注入）";
         assertEquals(plain, SkillInjectionService.stripInjectedSkills(plain));
         assertEquals("", SkillInjectionService.stripInjectedSkills(""));
         assertEquals("", SkillInjectionService.stripInjectedSkills(null));
@@ -334,15 +346,15 @@ class SkillInjectionServiceTest {
         writeSkill("b", "B skill", "B BODY");
         var service = injectionService();
 
-        var injected = service.injectSkillReferences("查 @a 与 @b", "u1", List.of("a"));
+        var injected = service.injectSkillReferences("查 /a 与 /b", "u1", List.of("a"));
         assertTrue(injected.contains("### Skill: a"));
         assertTrue(injected.contains("A BODY"));
-        assertFalse(injected.contains("### Skill: b"), "白名单外 @Skill 不注入");
-        assertTrue(injected.contains("@b"), "白名单外 @Skill 保留原文");
+        assertFalse(injected.contains("### Skill: b"), "白名单外 /Skill 不注入");
+        assertTrue(injected.contains("/b"), "白名单外 /Skill 保留原文");
 
-        var empty = service.injectSkillReferences("查 @a", "u1", List.of());
+        var empty = service.injectSkillReferences("查 /a", "u1", List.of());
         assertFalse(empty.contains("### Skill: a"), "空列表 = 无技能可注入");
-        assertEquals("查 @a", empty);
+        assertEquals("查 /a", empty);
     }
 
     @org.junit.jupiter.api.Test
@@ -350,16 +362,16 @@ class SkillInjectionServiceTest {
         writeSkill("a", "A skill", "A BODY");
         writeSkill("b", "B skill", "B BODY");
         var service = injectionService();
-        assertEquals(List.of("a"), service.parseSkillReferences("@a @b", "u1", List.of("a")));
-        assertEquals(List.of(), service.parseSkillReferences("@a @b", "u1", List.of()));
-        assertEquals(List.of("a", "b"), service.parseSkillReferences("@a @b", "u1", (List<String>) null));
+        assertEquals(List.of("a"), service.parseSkillReferences("/a /b", "u1", List.of("a")));
+        assertEquals(List.of(), service.parseSkillReferences("/a /b", "u1", List.of()));
+        assertEquals(List.of("a", "b"), service.parseSkillReferences("/a /b", "u1", (List<String>) null));
     }
 
     @org.junit.jupiter.api.Test
     void unknownSkillInListShouldBeIgnored() throws Exception {
         writeSkill("a", "A skill", "A BODY");
         var service = injectionService();
-        var injected = service.injectSkillReferences("查 @a 与 @ghost", "u1", List.of("a", "ghost"));
+        var injected = service.injectSkillReferences("查 /a 与 /ghost", "u1", List.of("a", "ghost"));
         assertTrue(injected.contains("### Skill: a"));
         assertFalse(injected.contains("### Skill: ghost"), "未知名忽略（不注入、不报错）");
     }

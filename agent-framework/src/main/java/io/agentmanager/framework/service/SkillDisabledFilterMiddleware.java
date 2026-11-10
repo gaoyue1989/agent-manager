@@ -20,7 +20,7 @@ import reactor.core.publisher.Flux;
  * {@link RuntimeContext}，让 SDK 的 HarnessSkillMiddleware 在渲染 {@code <available_skills>}
  * 与 {@code load_skill_through_path} 时排除它们。
  *
- * <p><b>为什么需要它</b>：技能禁用此前只作用于框架自有视图（{@code /skills}、{@code @Skill}
+ * <p><b>为什么需要它</b>：技能禁用此前只作用于框架自有视图（{@code /skills}、{@code /Skill}
  * 注入、沙箱物化/回写），而真正把技能喂给模型的是 SDK 的技能仓库——L2 包内
  * （{@code FileSystemSkillRepository}）与 L4 个人（{@code WorkspaceSkillRepository}）。
  * 仓库层不认识 {@code .skill-states.json} / {@code .disabled} 标记，于是被禁用的技能仍会

@@ -191,7 +191,7 @@ public class SkillCatalogService {
     }
 
     /**
-     * 可用 Skill 摘要列表（供前端 @Skill 提示使用）。
+     * 可用 Skill 摘要列表（供前端 /Skill 提示使用）。
      * 仅返回已启用的 skill 的 name + description。
      * 等价于 list() 的精简视图，去掉 version/source/required 等管理字段。
      */
@@ -203,7 +203,7 @@ public class SkillCatalogService {
      * 按用户合并的可用 Skill 摘要（全局目录 ∪ 该用户 L4 个人技能，同名 L4 覆盖描述）。
      *
      * <p>{@code userId} 为空时等价于 {@link #availableSkills()}。L4 合并失败降级为全局目录
-     * （不阻断 @ 补全）；被 SkillManageService 禁用的包内技能仍不出现。
+     * （不阻断 / 补全）；被 SkillManageService 禁用的包内技能仍不出现。
      */
     public List<Map<String, String>> availableSkills(String userId) {
         if (userId == null || userId.isBlank()) {
@@ -260,7 +260,7 @@ public class SkillCatalogService {
                     merged.put(name, l4Description(userId, name));
                 }
             } catch (Exception e) {
-                // L4 合并失败降级为全局目录，避免 @ 补全整体不可用
+                // L4 合并失败降级为全局目录，避免 / 补全整体不可用
                 log.warn("availableSkills: merge L4 failed for user {}: {}", userId, e.getMessage());
             }
         }

@@ -362,7 +362,7 @@ public class UserSkillController {
      * 切换当前用户某个人技能的启停状态（管理面）。
      *
      * <p>仅对存在 L4 个人覆盖的技能可切换（无个人覆盖 → 404）。禁用后该技能对外不可用
-     * （{@code /skills/available}、{@code @Skill} 合并视图排除，沙箱物化/回写跳过）；
+     * （{@code /skills/available}、{@code /Skill} 合并视图排除，沙箱物化/回写跳过）；
      * 重新写入（PUT）或从包内下发会自动恢复启用。
      */
     @PutMapping("/{name}/toggle")

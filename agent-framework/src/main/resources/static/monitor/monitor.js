@@ -572,9 +572,10 @@ async function copyTrace(text) {
   }
 }
 
-/** 用户消息：转义 + 高亮 @Skill 引用（与 Chat 页一致） */
+/** 用户消息：转义 + 高亮 /Skill 引用（与 Chat 页一致；URL/路径里的 / 不误伤） */
 function userText(content) {
-  return ctx.utils.esc(content).replace(/@(\S+)/g, '<span class="skill-mention-tag">@$1</span>');
+  return ctx.utils.esc(content).replace(/(?<![\w:.\/])\/([\w\u4e00-\u9fff.\-]+)/g,
+    '<span class="skill-mention-tag">/$1</span>');
 }
 
 /**

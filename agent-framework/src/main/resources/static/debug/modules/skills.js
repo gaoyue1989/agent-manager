@@ -430,7 +430,7 @@ async function loadUserSkills() {
       '<td>' + ((s.files || []).length) + '</td>' +
       '<td>' + ctx.utils.formatBytes(s.bytes || 0) + '</td>' +
       '<td>v' + ctx.utils.esc(s.version) + '</td>' +
-      '<td class="mono" style="white-space:nowrap">' + (s.createdAt ? ctx.utils.esc(s.createdAt) : '—') + '</td>' +
+      '<td class="mono" style="white-space:nowrap">' + (s.updatedAt ? ctx.utils.esc(s.updatedAt) : '—') + '</td>' +
       '<td>' + baseline + '</td>' +
       '<td style="white-space:nowrap">' +
         '<button class="btn small us-toggle-btn" data-name="' + ctx.utils.esc(s.name) + '">' +
@@ -445,7 +445,7 @@ async function loadUserSkills() {
   body.innerHTML = (skills.length
     ? '<table class="data-table"><thead><tr>' +
         '<th>Skill</th><th>描述</th><th>状态</th><th>文件</th><th>大小</th><th>版本</th>' +
-        '<th>创建时间</th><th>删除后</th><th></th>' +
+        '<th>更新时间</th><th>删除后</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>'
     : '<div class="empty">该用户暂无个人覆盖（下方为已删除技能的标记）。</div>')
     + tombstonesHtml(tombstones);

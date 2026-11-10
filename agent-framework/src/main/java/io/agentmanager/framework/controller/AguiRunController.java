@@ -296,7 +296,7 @@ public class AguiRunController {
             try {
                 eventBus.beginTurn(threadId);
 
-                // ===== 4. 构造消息（@Skill 注入 + 会话元数据，与 /chat 同构） =====
+                // ===== 4. 构造消息（/Skill 注入 + 会话元数据，与 /chat 同构） =====
                 var processedMessage = skillInjectionService.injectSkillReferences(text, userId);
                 var msgMeta = new java.util.HashMap<String, Object>();
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, threadId);

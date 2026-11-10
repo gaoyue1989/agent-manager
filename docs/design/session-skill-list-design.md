@@ -23,7 +23,7 @@
 ### 1.1 目标
 
 - `POST /threads/chat {skills:[...]}` 与 A2A `message.metadata.skills` 三处（chat/A2A/只读视图）同口径；
-- 模型侧 `<available_skills>`、`load_skill_through_path`、`@Skill` 注入、`/skills*` 视图按列表收敛；
+- 模型侧 `<available_skills>`、`load_skill_through_path`、`/Skill` 注入、`/skills*` 视图按列表收敛；
 - 缺省行为与存量完全一致；被禁用技能仍剔除（禁用优先）；
 - 多副本/重启无状态差异（列表随本轮消息传递，不落任何存储）。
 
@@ -43,7 +43,7 @@
 | 请求值 | 模型侧可见技能 | 说明 |
 |--------|----------------|------|
 | 字段缺省 / `null` | 全部启用技能 | 存量行为逐字节不变 |
-| `[]`（显式空数组） | 无 | 模型看不到任何技能；`@Skill` 全部不注入 |
+| `[]`（显式空数组） | 无 | 模型看不到任何技能；`/Skill` 全部不注入 |
 | `["a","b"]` | 仅 `a`、`b`（存在且未禁用者） | 未知名忽略（WARN 级 debug）；已禁用剔除 |
 
 - **仅本轮生效**：不写 `session_user`、不写消息历史附加状态；下一轮未传即恢复全部。
@@ -85,7 +85,7 @@ A2A `message/send` / `message/stream`：
 |------|------|
 | `GET /skills` | `?skills=a,b` |
 | `GET /skills/available` | `?skills=a,b`（与 `X-User-Id` 合并 L4 后裁剪） |
-| `GET /skills/parse-refs` | `?skills=a,b`（与 `@Skill` 注入同口径） |
+| `GET /skills/parse-refs` | `?skills=a,b`（与 `/Skill` 注入同口径） |
 | `GET /skills/manage` | 无（全量 + 启停状态） |
 
 > 查询参数无法表达"显式空列表"（`?skills=` 视为缺省）；"空 = 无技能"仅存在于 chat 请求体与
@@ -152,7 +152,7 @@ ctx.put(SkillFilter.class, existing != null ? existing.overlay(filter) : filter)
 - `SkillCatalogService.availableSkills(userId, List<String>)`：L4 合并后裁剪（白名单外的 L4 独有技能不出现）。
 - `SkillInjectionService.injectSkillReferences(message, userId, List<String>)` /
   `parseSkillReferences(...)`：`enabledSkillNames = (目录 ∪ L4 − 禁用) ∩ 名单`；
-  名单外 `@Skill` 保留原文（与禁用同语义），未知名自然不在集合内。
+  名单外 `/Skill` 保留原文（与禁用同语义），未知名自然不在集合内。
 - 旧重载（`inject(message)` / `inject(message, userId)` 等）= `null`（不过滤），
   未改造调用方（AguiRunController）行为不变。
 
@@ -196,7 +196,7 @@ e2e（`e2e/session-skills-e2e.sh`，kind 部署验证）：
 2. `skills:["support-only"]` 轮次 available_skills 仅 support-only（llm-calls 证据）；
 3. 下一轮不传 → 恢复全部（仅本轮生效）；
 4. `skills:[]` → 模型无技能；未知名混入 → 忽略且不报错；
-5. `@Skill` 名单外不注入、名单内注入；
+5. `/Skill` 名单外不注入、名单内注入；
 6. 只读视图 `?skills=` 与模型侧同口径；
 7. 禁用技能名单内剔除（PVC 直写 `.skill-states.json`）；
 8. A2A `message.metadata.skills` 生效；

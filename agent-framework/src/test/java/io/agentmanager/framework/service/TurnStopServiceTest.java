@@ -102,6 +102,23 @@ class TurnStopServiceTest {
     }
 
     @Test
+    void leaseHeldWithoutEventsShouldFallBackToIntentReplyId() {
+        when(runtimeService.findPendingConfirm("s1")).thenReturn(null);
+        when(leaseStore.isHeldStrict("s1")).thenReturn(true);
+        when(eventStore.findLatestStrict("s1")).thenReturn(null);
+        // 租约到手后意图行保留到终态：首个事件前用它兜底定位本轮 replyId
+        when(intentStore.find("s1")).thenReturn(new TurnIntentStore.Intent("rid-starting", false, null));
+        when(stopStore.request("s1", "rid-starting", "u1"))
+            .thenReturn(TurnStopStore.RequestOutcome.REQUESTED);
+
+        var result = service.request("s1", "u1");
+
+        assertEquals(TurnStopService.Outcome.REQUESTED, result.outcome());
+        assertEquals("rid-starting", result.replyId());
+        verify(stopStore).request("s1", "rid-starting", "u1");
+    }
+
+    @Test
     void eventStoreFailureShouldBeUnavailable() {
         when(runtimeService.findPendingConfirm("s1")).thenReturn(null);
         when(leaseStore.isHeldStrict("s1")).thenReturn(true);

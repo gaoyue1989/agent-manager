@@ -306,7 +306,7 @@ public class ChatStreamController {
      * }</pre>
      *
      * <p>{@code skills} 仅对本轮生效（不落库、不跨轮沿用），白名单外的技能不出现在模型侧
-     * {@code <available_skills>}、不可经 {@code load_skill_through_path} 加载、{@code @Skill}
+     * {@code <available_skills>}、不可经 {@code load_skill_through_path} 加载、{@code /Skill}
      * 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 docs/design/session-skill-list-design.md。
      *
      * <p>{@code tools} 仅对本轮生效（不落库、不跨轮沿用），把模型侧 <b>MCP + 自定义</b>工具
@@ -505,8 +505,11 @@ public class ChatStreamController {
                 return;
             }
 
-            // 租约到手：意图使命结束（此后 turn id 由 session_event 的 reply_id 承担）
-            clearTurnIntent(finalSessionId, replyId);
+            // 租约到手后意图行**先保留**：本轮首个 session_event 落库前，事件侧还查不到
+            // 本 turn 的 replyId，跨副本 stop 会因此落进 409 turn_not_ready 窗口（租约在、
+            // 无事件可定位）。保留意图行让 TurnStopService 在「held 且无事件」时仍能拿到
+            // 正确 replyId；终态/交接取消/ASKING 预检三处负责清理（replyId 栅栏，误删不了
+            // 下一轮）。长轮次若意图行 TTL 过期也无碍——彼时事件早已落库，走事件路径。
             // ===== 1.2 停止状态收敛（租约交接点，issue #228）=====
             // 原子取回排队期停止标记：置位 = 停止请求落在「末次 loop 检查之后～本拍
             // tryAcquire 得手」的竞态窗口内——此处不取消，turn 就会在用户已点停止的
@@ -519,6 +522,7 @@ public class ChatStreamController {
             if (turnStopWatcher != null && turnStopWatcher.unregisterRegistrationOnly(replyId)) {
                 turnStopWatcher.unregister(finalSessionId, replyId);
                 turnLeaseStore.release(finalSessionId, token);
+                clearTurnIntent(finalSessionId, replyId);
                 log.info("[chat] queued turn cancelled at lease handoff (sid={}, rid={})",
                     finalSessionId, replyId);
                 sink.next(cancelledSSE("user_stopped"));
@@ -536,6 +540,7 @@ public class ChatStreamController {
             if (runtimeService.hasPendingConfirm(finalSessionId)) {
                 log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
                 turnLeaseStore.release(finalSessionId, token);
+                clearTurnIntent(finalSessionId, replyId);
                 sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
                     + "' is in ASKING state (waiting for tool approval); approve or deny the "
                     + "pending tool call before sending new messages"));
@@ -620,7 +625,7 @@ public class ChatStreamController {
                 eventBus.beginTurn(finalSessionId);
 
                 // ===== 4. 构造消息 =====
-                // 注入 @Skill 引用（按 session userId 合并该用户 L4 个人技能；本轮白名单裁剪）
+                // 注入 /Skill 引用（按 session userId 合并该用户 L4 个人技能；本轮白名单裁剪）
                 var processedMessage = skillInjectionService.injectSkillReferences(
                     message, finalUserId, body.skills());
 
@@ -976,9 +981,13 @@ public class ChatStreamController {
         if (turnStopWatcher != null) {
             turnStopWatcher.unregister(sessionId, replyId);
         }
+        // 终态只收尾一次（TurnFinalizer 幂等裁决）：只有真正收尾的这次清理意图行。
+        // 意图行在租约到手后保留到终态，供 stop 在首个事件前解析 replyId；
+        // replyId 栅栏：同会话更新的排队意图不会被误删。
         if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
+        clearTurnIntent(sessionId, replyId);
         // 沙箱生命周期 turn 终态注销 + 终刷（§4.4 T2）：只挂 turn 终态（正常收尾/出错/
         // 被拒三入口经此汇聚），不挂 per-call stop()——一个 turn 可能多 call
         if (sandboxLifecycle != null) {

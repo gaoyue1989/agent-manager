@@ -167,7 +167,7 @@ select replace(namespace_path, 0x1F, '|'), item_key, version
 - `OpenSandbox.materializeUserSkills()`（每实例幂等，失败 fail-soft）；调用点：`SandboxUserKeyMiddleware.onAgent`（acquire 之后、agent 执行前，主路径）与 `OpenSandbox.doExec`（兜底）。
 - 效果：管理面 PUT / 从包内下发在该用户**下一个 turn** 投影进容器生效；DELETE 写 tombstone 后下一次物化不再写回（容器内旧副本仍需容器换代清除，见 §6.2.4）。
 
-### 10.2 /skills/available 与 @Skill 注入按 session userId 合并 L4
+### 10.2 /skills/available 与 /Skill 注入按 session userId 合并 L4
 
 - `SkillCatalogService.availableSkills(userId)`：全局目录（已启用）∪ 该用户 L4（同名 L4 描述覆盖）。
 - `SkillInjectionService.injectSkillReferences(message, userId)` / `parseSkillReferences(message, userId)`：启停集合并入 L4；内容读取 L4 优先、无覆盖回落包内基线。

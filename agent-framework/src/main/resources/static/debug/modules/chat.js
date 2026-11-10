@@ -17,11 +17,11 @@ let uidInput = null;
 let modelSelect = null;
 let protoSelect = null;     // 模型切换下拉框
 
-// @Skill 提及状态
+// /Skill 提及状态
 let mentionDropdown = null;
 let mentionSkills = [];       // 缓存的可用 Skill 列表
 let mentionActiveIdx = -1;    // 当前高亮索引
-let mentionTriggerPos = -1;   // @ 符号在 textarea 中的位置
+let mentionTriggerPos = -1;   // / 符号在 textarea 中的位置
 let mentionVisible = false;
 
 // 文件上传状态
@@ -119,7 +119,7 @@ function render() {
         <div class="chat-input-pill" style="position:relative">
           <button id="uploadBtn" class="btn upload-btn" title="上传文件">📎</button>
           <input type="file" id="fileInput" multiple accept="image/*,text/plain,text/markdown,text/csv,application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt" style="display: none">
-          <textarea id="chatInput" rows="1" placeholder="Type your message... (@ 提及 Skill，Enter 发送，Shift+Enter 换行)"></textarea>
+          <textarea id="chatInput" rows="1" placeholder="Type your message... (/ 提及 Skill，Enter 发送，Shift+Enter 换行)"></textarea>
           <button id="sendBtn" class="btn primary">Send</button>
           <button id="stopBtn" class="btn danger" style="display:none">Stop</button>
           <div id="skillMentionDropdown" class="skill-mention-dropdown"></div>
@@ -159,7 +159,7 @@ export default {
     });
     updateConnBadge();
 
-    // @Skill 提及
+    // /Skill 提及
     mentionDropdown = document.getElementById('skillMentionDropdown');
     loadAvailableSkills();
 
@@ -191,7 +191,7 @@ export default {
 function bindEvents() {
   sendBtn.addEventListener('click', () => sendMessage());
   inputEl.addEventListener('keydown', (e) => {
-    // @Skill 提及：键盘导航
+    // /Skill 提及：键盘导航
     if (mentionVisible) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -252,7 +252,7 @@ function bindEvents() {
     ctx.state.setState('ui.userId', v);
     updateConnBadge();
     loadThreads();
-    loadAvailableSkills();   // userId 变化 → 重新拉取该用户的 @ 候选（含 L4）
+    loadAvailableSkills();   // userId 变化 → 重新拉取该用户的 / 候选（含 L4）
   });
   uidInput.addEventListener('blur', () => {
     // 失焦时确保非空
@@ -265,11 +265,11 @@ function autoGrow() {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
 }
 
-// ---------- @Skill 提及 ----------
+// ---------- /Skill 提及 ----------
 
 async function loadAvailableSkills() {
   try {
-    // 带上当前 userId：后端会合并该用户的 L4 个人技能到 @ 候选（网关场景由 X-User-Id 注入）
+    // 带上当前 userId：后端会合并该用户的 L4 个人技能到 / 候选（网关场景由 X-User-Id 注入）
     const uid = ctx.state.getState('ui.userId') || 'debug-user';
     mentionSkills = (await ctx.api.getAvailableSkills(uid)) || [];
   } catch (e) {
@@ -281,27 +281,27 @@ function handleMentionInput() {
   const val = inputEl.value;
   const cursorPos = inputEl.selectionStart;
 
-  // 查找光标前最近的 @ 符号（同一行内）
+  // 查找光标前最近的 / 符号（同一行内）
   const textBeforeCursor = val.substring(0, cursorPos);
-  const lastAtIdx = textBeforeCursor.lastIndexOf('@');
-  if (lastAtIdx < 0) { hideMentionDropdown(); return; }
+  const lastSlashIdx = textBeforeCursor.lastIndexOf('/');
+  if (lastSlashIdx < 0) { hideMentionDropdown(); return; }
 
-  // @ 前面必须是行首或空白（避免匹配 email 等）
-  if (lastAtIdx > 0 && !/[\s\u00A0]/.test(val[lastAtIdx - 1])) {
+  // / 前面不能是单词字符、":" 或 "/"（避免匹配 URL https://host/path、Unix 路径等；中文允许）
+  if (lastSlashIdx > 0 && /[\w:.\/]/.test(val[lastSlashIdx - 1])) {
     hideMentionDropdown();
     return;
   }
 
-  // 提取 @ 后的查询文本
-  const afterAt = textBeforeCursor.substring(lastAtIdx + 1);
+  // 提取 / 后的查询文本
+  const afterSlash = textBeforeCursor.substring(lastSlashIdx + 1);
   // 查询到空格或换行为止
-  const spaceMatch = afterAt.match(/[\s\u00A0]/);
-  const query = spaceMatch ? afterAt.substring(0, spaceMatch.index) : afterAt;
+  const spaceMatch = afterSlash.match(/[\s\u00A0]/);
+  const query = spaceMatch ? afterSlash.substring(0, spaceMatch.index) : afterSlash;
 
   // 如果已经输入了空格，则关闭下拉（用户已完成输入）
   if (spaceMatch && spaceMatch.index === 0) { hideMentionDropdown(); return; }
 
-  mentionTriggerPos = lastAtIdx;
+  mentionTriggerPos = lastSlashIdx;
 
   // 过滤匹配的 Skill
   const lowerQuery = query.toLowerCase();
@@ -336,7 +336,7 @@ function renderMentionDropdown(query) {
     const isActive = idx === mentionActiveIdx;
     return '<div class="skill-mention-item' + (isActive ? ' active' : '') + '" data-idx="' + idx + '">' +
       '<span class="sm-icon">📚</span>' +
-      '<span class="sm-name"><span class="sm-at">@</span>' + ctx.utils.esc(name) + '</span>' +
+      '<span class="sm-name"><span class="sm-at">/</span>' + ctx.utils.esc(name) + '</span>' +
       '<span class="sm-desc">' + ctx.utils.esc(desc.substring(0, 60)) + '</span>' +
       '</div>';
   }).join('');
@@ -368,18 +368,18 @@ function selectMentionSkill(skill) {
   const val = inputEl.value;
   const cursorPos = inputEl.selectionStart;
 
-  // 找到触发 @ 的位置
+  // 找到触发 / 的位置
   const textBeforeCursor = val.substring(0, cursorPos);
-  const atPos = textBeforeCursor.lastIndexOf('@');
+  const slashPos = textBeforeCursor.lastIndexOf('/');
 
-  // 替换 @query 为 @SkillName + 空格
-  const before = val.substring(0, atPos);
+  // 替换 /query 为 /SkillName + 空格
+  const before = val.substring(0, slashPos);
   const after = val.substring(cursorPos);
-  const insertion = '@' + name + ' ';
+  const insertion = '/' + name + ' ';
   inputEl.value = before + insertion + after;
 
   // 设置光标到插入文本之后
-  const newCursorPos = atPos + insertion.length;
+  const newCursorPos = slashPos + insertion.length;
   inputEl.setSelectionRange(newCursorPos, newCursorPos);
   inputEl.focus();
 
@@ -791,10 +791,11 @@ function addMessage(role, content) {
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
 
-  // 用户消息：高亮 @Skill 引用
+  // 用户消息：高亮 /Skill 引用（前置字符保留；URL/路径里的 / 不误伤）
   if (role === 'user') {
     var displayContent = ctx.utils.esc(content);
-    displayContent = displayContent.replace(/@(\S+)/g, '<span class="skill-mention-tag">@$1</span>');
+    displayContent = displayContent.replace(/(?<![\w:.\/])\/([\w\u4e00-\u9fff.\-]+)/g,
+      '<span class="skill-mention-tag">/$1</span>');
     bubble.innerHTML = displayContent;
   } else {
     writeMarkdown(bubble, renderMarkdown(content));
