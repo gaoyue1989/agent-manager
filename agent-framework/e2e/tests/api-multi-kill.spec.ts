@@ -79,7 +79,13 @@ test('R4 kill 执行副本 → 接管 interrupted', async ({}, testInfo) => {
   try {
     st = await pollUntil(async () => status(sid, REPLICA_B, U()), s => s.state === 'interrupted', 60_000, 1000);
   } catch (e) {
-    const [aStatus, bStatus] = await Promise.all([status(sid, REPLICA_A, U()), status(sid, REPLICA_B, U())]);
+    // A 已被 SIGKILL：证据采集必须容错，否则 ECONNREFUSED 会盖掉真正的接管超时原因
+    const safeStatus = async (base: string) => {
+      try { return await status(sid, base, U()); } catch (err) {
+        return { _error: String((err as Error)?.message ?? err) };
+      }
+    };
+    const [aStatus, bStatus] = await Promise.all([safeStatus(REPLICA_A), safeStatus(REPLICA_B)]);
     throw new Error(
       `接管超时证据：pidAlive(A)=${livePid() !== null} status(A)=${JSON.stringify(aStatus)} ` +
       `status(B)=${JSON.stringify(bStatus)} 原始错误=${(e as Error).message}`,

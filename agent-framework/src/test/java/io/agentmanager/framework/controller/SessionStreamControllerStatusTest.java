@@ -125,6 +125,38 @@ class SessionStreamControllerStatusTest {
     }
 
     @Test
+    void queuedIntentWithoutLeaseStillWorking() {
+        // 租约交接窗口（上一 turn 已释放、排队 turn 尚未拿到）：本 turn 还没有事件，
+        // 意图行在、最近事件是上一 turn 终态 —— 仍是 working，不能误判 interrupted/completed。
+        when(turnIntentStore.find("sid-handoff")).thenReturn(
+            new io.agentmanager.framework.service.TurnIntentStore.Intent("rid-handoff", false, null));
+        when(turnLeaseStore.isHeld("sid-handoff")).thenReturn(false);
+        when(eventStore.findLatestStrict("sid-handoff")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(31, "AGENT_END", "{}", "rid-prev"));
+        when(runtimeService.findPendingConfirm("sid-handoff")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-handoff", null).getBody();
+        assertEquals("working", body.get("state"));
+        assertEquals("rid-handoff", body.get("reply_id"));
+    }
+
+    @Test
+    void interruptedWhenRetainedIntentButLeaseGone() {
+        // issue #228 之后意图行保留到终态：执行副本被 kill 后租约到期但意图行仍在（TTL 180s），
+        // /status 必须仍能判定 interrupted（R4 kill 接管门禁），不能被意图行掩盖成 working。
+        when(turnIntentStore.find("sid-crash")).thenReturn(
+            new io.agentmanager.framework.service.TurnIntentStore.Intent("rid-crash", false, null));
+        when(turnLeaseStore.isHeld("sid-crash")).thenReturn(false);
+        when(eventStore.findLatestStrict("sid-crash")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(40, "TEXT_BLOCK_DELTA", "{}", "rid-crash"));
+        when(runtimeService.findPendingConfirm("sid-crash")).thenReturn(null);
+
+        Map<String, Object> body = controller.status("sid-crash", null).getBody();
+        assertEquals("interrupted", body.get("state"));
+        assertEquals("rid-crash", body.get("reply_id"));
+    }
+
+    @Test
     void failedTurnIntentExposesFailureWithoutSubscription() {
         when(turnIntentStore.find("sid-failed")).thenReturn(
             new io.agentmanager.framework.service.TurnIntentStore.Intent(
