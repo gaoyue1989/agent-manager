@@ -140,11 +140,39 @@ public class UserScopedMcpClientWrapper extends McpClientWrapper {
             resolved.put(entry.getKey(), text);
         }
         if (!missing.isEmpty()) {
-            throw new McpUserHeaderException("MCP server '" + getName()
-                    + "' needs request-scoped value(s) [" + String.join(", ", missing)
-                    + "]; provide them in McpMeta (RuntimeContext)");
+            throw new McpUserHeaderException(missingDenyMessage(missing));
         }
         return resolved;
+    }
+
+    /**
+     * 缺值 deny 报错文案：按取值源分叉，保证错误进入模型可见 tool 结果后仍可行动。
+     *
+     * <p>{@code reqHeader:*} 只能由调用方在 chat 请求头携带——模型无法写 McpMeta、
+     * 用户也不知 McpMeta 为何物，统一报「provide them in McpMeta」会引发无效重试；
+     * 该分支剥前缀回显头名，指引改为「chat 请求携带该 HTTP 头」。其余取值源
+     * （userId 等服务端解析值）维持原 McpMeta 指引不变。
+     */
+    private String missingDenyMessage(List<String> missing) {
+        var forwardHeaders = new ArrayList<String>();
+        var otherKeys = new ArrayList<String>();
+        for (var metaKey : missing) {
+            if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
+                forwardHeaders.add(metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length()));
+            } else {
+                otherKeys.add(metaKey);
+            }
+        }
+        var parts = new ArrayList<String>(2);
+        if (!forwardHeaders.isEmpty()) {
+            parts.add("requires the chat request to carry HTTP header(s) ["
+                    + String.join(", ", forwardHeaders) + "] (userHeaders on-missing: deny)");
+        }
+        if (!otherKeys.isEmpty()) {
+            parts.add("needs request-scoped value(s) [" + String.join(", ", otherKeys)
+                    + "]; provide them in McpMeta (RuntimeContext)");
+        }
+        return "MCP server '" + getName() + "' " + String.join("; ", parts);
     }
 
     /**

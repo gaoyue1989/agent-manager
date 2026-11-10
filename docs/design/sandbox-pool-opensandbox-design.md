@@ -382,7 +382,7 @@ HTTP 409
 | 新增 | `db/migration/V15__sandbox_binding.sql` | §4.1 两表 |
 | 新增 | `sandbox/opensandbox/SandboxBindingStore.java` | 占额 CAS/绑定 CRUD/懒剔除（条件 DELETE 守卫）/LRU 选取（事务模板，改绑含 updated_at 快照乐观校验，§4.2 ⑤c） |
 | 新增 | `sandbox/opensandbox/SandboxRenewalRegistry.java` | 进程内续期注册表（双信号：call refcount + turn 注册 + 挂起 holdUntil 保留窗）+ 守护续期/超龄剔除/滞后指标（§4.4 T3/T4） |
-| 新增 | `sandbox/opensandbox/SandboxLifecycleManager.java` | acquire 决策编排、事件环形缓冲（体量预估 < 400 行，对比被回滚的 1695 行） |
+| 新增 | `sandbox/opensandbox/SandboxLifecycleManager.java` | acquire 决策编排、事件环形缓冲（体量预估 < 400 行，实施实测 655 行——含事件环形缓冲与决策编排注释，仍约为被回滚 1695 行的四成） |
 | 新增 | `sandbox/opensandbox/UserQuotaExhaustedException.java` | 异常 + SSE/409 载荷组装 |
 | 修改 | `OpenSandboxClient.java` | create 透传 extensions.poolRef / metadata / timeout；**resume binding 归属校验+占位**（connect 后条件写 `UPDATE … SET updated_at=NOW(3) WHERE sandbox_id AND session_id`，affected=0 → close + 降级本决策，§4.2 两道防线第 2 条/cold-R1-1）；P4 与校验占位 0 行路由到 LifecycleManager |
 | 修改 | `OpenSandbox.java` | stop() 收尾 refcount-1 + 终刷（per-call 通用路径，chat/A2A 全覆盖）；doExec 不再需要专属续期调度（T3 由注册表覆盖） |
@@ -413,14 +413,16 @@ HTTP 409
 
 | 方法 | 路径 | 请求 | 上游转发 |
 |---|---|---|---|
-| GET | `/api/v1/admin/sandboxes/summary` | — | `GET /v1/pools` + `GET /v1/sandboxes?limit=` 聚合 |
+| GET | `/api/v1/admin/sandboxes/summary` | — | `GET /v1/pools` + `GET /v1/sandboxes?state=Running&page=1&pageSize=1` 聚合（Running 数取 pagination.totalItems，pageSize=1 不拉全量） |
 | GET | `/api/v1/admin/sandboxes/pools` | — | `GET /v1/pools` |
 | POST | `/api/v1/admin/sandboxes/pools` | `{name, image?, capacitySpec{bufferMin,bufferMax,poolMin,poolMax}}`（`recycleStrategy` 收而**不转发**：上游 CreatePoolRequest 仅 name/template/capacitySpec（schema.py 实证），入口仅做 Delete/Restart/Noop 白名单校验、池行为取 CRD 默认 Delete） | `POST /v1/pools` |
 | GET | `/api/v1/admin/sandboxes/pools/:name` | — | `GET /v1/pools/{name}` |
 | PUT | `/api/v1/admin/sandboxes/pools/:name` | `{capacitySpec{...}}` | `PUT /v1/pools/{name}`（仅容量） |
 | DELETE | `/api/v1/admin/sandboxes/pools/:name` | — | `DELETE /v1/pools/{name}` |
-| GET | `/api/v1/admin/sandboxes` | `?state=&limit=&offset=` | `GET /v1/sandboxes` |
+| GET | `/api/v1/admin/sandboxes` | `?state=&page=&pageSize=`（pageSize ≤200；page 缺省 1、pageSize 缺省 20，越界回退 20） | `GET /v1/sandboxes` |
 | DELETE | `/api/v1/admin/sandboxes/:id` | — | `DELETE /v1/sandboxes/{id}` |
+
+- 列表分页语法为 page/pageSize（评审 d15；上游无 limit/offset，§12-4/§11 V5 实测落定）。
 
 - 创建池的 **Pod 模板由后端预设常量生成**（从上游官方 Pool sample 派生：initContainers 装 execd/task-executor + 主容器 code-interpreter），`image` 缺省取平台默认 `SANDBOX_IMAGE`（platform_config），不接收自由 PodTemplateSpec JSON（避免任意 Pod spec 注入面）；
 - 参数校验：name 合法 DNS label、capacitySpec 四值 0 ≤ poolMin ≤ bufferMin ≤ bufferMax ≤ poolMax、recycleStrategy ∈ {Delete, Restart, Noop}（收而不转发，见上表）；

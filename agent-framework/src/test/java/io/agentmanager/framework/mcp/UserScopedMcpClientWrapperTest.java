@@ -221,17 +221,37 @@ class UserScopedMcpClientWrapperTest {
 
     @Test
     void shouldFailClosedOnMissingReqHeaderValueUnderDeny() {
-        // reqHeader: 取值源沿用 on-missing 语义：deny（缺省）下请求未带头 → 拒绝调用
+        // reqHeader: 取值源沿用 on-missing 语义：deny（缺省）下请求未带头 → 拒绝调用；
+        // 文案剥前缀回显头名并指引 chat 请求携带——模型无法写 McpMeta，原指引不可行动
         var delegate = new RecordingClient();
         var scoped = wrapper(delegate, Map.of("Authorization", "reqHeader:authorization"), true);
 
         StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of("userId", "alice")))
             .expectErrorSatisfies(e -> {
                 assertInstanceOf(McpUserHeaderException.class, e);
-                assertTrue(e.getMessage().contains("reqHeader:authorization"), e.getMessage());
+                assertTrue(e.getMessage().contains("authorization"), e.getMessage());
+                assertTrue(e.getMessage().contains("test-server"), e.getMessage());
+                assertFalse(e.getMessage().contains("reqHeader:"), e.getMessage());
+                assertFalse(e.getMessage().contains("McpMeta"), e.getMessage());
             })
             .verify();
         assertNull(delegate.seenMeta.get(), "delegate 不应被调用");
+    }
+
+    @Test
+    void shouldSplitDenyGuidanceBySourceWhenMixedKeysMissing() {
+        // 混合缺失：reqHeader:* 剥前缀给 chat 请求头指引，其余维持 McpMeta 指引
+        var scoped = wrapper(new RecordingClient(),
+            Map.of("Authorization", "reqHeader:authorization", "X-User-Id", "userId"), true);
+
+        StepVerifier.create(scoped.callTool("echo", Map.of(), Map.of()))
+            .expectErrorSatisfies(e -> {
+                assertTrue(e.getMessage().contains("authorization"), e.getMessage());
+                assertTrue(e.getMessage().contains("userId"), e.getMessage());
+                assertTrue(e.getMessage().contains("McpMeta"), e.getMessage());
+                assertFalse(e.getMessage().contains("reqHeader:"), e.getMessage());
+            })
+            .verify();
     }
 
     @Test

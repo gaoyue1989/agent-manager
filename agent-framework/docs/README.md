@@ -19,7 +19,7 @@
 | [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制；2026-10-01 升 v1.2——ASKING 改 `/chat` 入口预检 `turn_pending_confirm`、`/subscribe` 不读 `Last-Event-ID`、补 `subagent_exposed` 远程转发事件标注等） |
 | [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.4.0：Durable SSE + HITL + 文件 + Skill 管理 + 模型 + 热加载 + 事件词表（被多处源码 javadoc 引用；本版修目录死锚与续传游标示例） |
 | [checkpoint-design.md](checkpoint-design.md) | Checkpoint 持久化设计：MysqlDistributedStore、agent_state/agent_fs 表结构（schema 权威；已按 agentscope 2.0.3 订正） |
-| [schema-full.sql](schema-full.sql) | **全量建表语句**（2026-09-28 新增；2026-10-27 增补至 V13 turn_stop、V14 补 session_message.trace_id 列）：本工程 11 张表 + SDK 自建 agent_state/agent_fs（快照未含 V8 remote_task_registry 表，以迁移脚本为权威），含代码内幂等迁移与部署注意；新建库/排障直接照搬 |
+| [schema-full.sql](schema-full.sql) | **全量建表语句**（2026-09-28 新增；2026-10-27 增补至 V13 turn_stop、V14 补 session_message.trace_id 列；2026-11-09 增补 V15 sandbox_user/sandbox_binding 沙箱生命周期簿记两表）：本工程 13 张表 + SDK 自建 agent_state/agent_fs（快照未含 V8 remote_task_registry 表，以迁移脚本为权威），含代码内幂等迁移与部署注意；新建库/排障直接照搬 |
 | [history-agentstate-design.md](history-agentstate-design.md) | History 权威化设计：agent_state 为消息级事实来源（已实施，被源码注释引用） |
 | [tracing-design.md](tracing-design.md) | OTel 链路追踪设计（已实施，被 Makefile/Dockerfile 引用；含 2026-09-26 的模型/工具 IO 内容补录） |
 | [offline-dev-image.md](offline-dev-image.md) | 离线开发镜像 java-dev 手册（被 Dockerfile.dev 引用） |
