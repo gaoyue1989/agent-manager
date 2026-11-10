@@ -236,6 +236,25 @@ class SkillInjectionServiceTest {
     }
 
     @Test
+    void injectL2DisabledMustNotBeRestoredByL4EnabledOverride() throws IOException {
+        // oa-1110-repro-fixes-design §2.1b：L2 包级禁用 + 同名 L4 enabled 覆盖 → 不得重新注入
+        writeSkill("pkg-skill", "Pkg skill", "# Pkg");
+        var manage = manageService();
+        manage.toggleSkill("pkg-skill"); // L2 禁用
+        var userService = org.mockito.Mockito.mock(UserSkillService.class);
+        org.mockito.Mockito.when(userService.listSkills("u1")).thenReturn(List.of(
+            new UserSkillService.UserSkillSummary("pkg-skill", List.of("SKILL.md"), 20, 1, false, false,
+                "", true, "")));
+        var catalog = new SkillCatalogService(oafConfig(), props, manage, userService);
+        var service = new SkillInjectionService(catalog, manage, userService);
+
+        var result = service.injectSkillReferences("用/pkg-skill 处理", "u1");
+        assertTrue(result.contains("/pkg-skill"), "禁用技能引用应保持原样");
+        assertFalse(result.contains("## Referenced Skills"),
+            "L2 禁用技能不得被同名 L4 enabled 覆盖重新注入");
+    }
+
+    @Test
     void injectDoesNotCorruptEmail() throws IOException {
         writeSkill("example", "Example", "# Example");
         var service = injectionService();

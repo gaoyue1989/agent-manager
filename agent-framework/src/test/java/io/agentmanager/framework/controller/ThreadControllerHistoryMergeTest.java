@@ -138,6 +138,64 @@ class ThreadControllerHistoryMergeTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void mergedViewShouldPreservePreCompactionToolCallsFromArchive() throws Exception {
+        // oa-1110-repro-fixes-design §2.2 读侧守卫：state 只剩压缩后窗口，压缩点之前的
+        // tool_use/tool_result 由归档轨补齐时，merged 视图必须渲染出配对完整的 tool_calls
+        // （复现报告：trace 20 次工具调用 vs history 15 次——写入侧修复后数量一致性依赖本守卫）
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        java.util.function.Function<io.agentscope.core.message.Msg,
+                SessionMessageStore.MessageRecord> toRecord = msg -> {
+            try {
+                return new SessionMessageStore.MessageRecord(msg.getId(), "message",
+                    msg.getRole().toString(), null, mapper.writeValueAsString(msg));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        var userRecord = toRecord.apply(io.agentscope.core.message.Msg.builder().id("m1")
+            .role(io.agentscope.core.message.MsgRole.USER).textContent("生成PPT").build());
+        var assistantRecord = toRecord.apply(io.agentscope.core.message.Msg.builder().id("m2")
+            .role(io.agentscope.core.message.MsgRole.ASSISTANT)
+            .content(new io.agentscope.core.message.ToolUseBlock(
+                "call-1", "execute", java.util.Map.of("command", "ls"), null,
+                java.util.Map.of(), io.agentscope.core.message.ToolCallState.FINISHED))
+            .build());
+        var toolRecord = toRecord.apply(io.agentscope.core.message.Msg.builder().id("m3")
+            .role(io.agentscope.core.message.MsgRole.TOOL)
+            .content(new io.agentscope.core.message.ToolResultBlock("call-1", "execute",
+                List.of(io.agentscope.core.message.TextBlock.builder().text("file1\nfile2").build()),
+                java.util.Map.of(), io.agentscope.core.message.ToolResultState.SUCCESS))
+            .build());
+
+        // state：压缩后窗口（摘要 + 尾部），m1/m2/m3 只存在于归档轨
+        when(agentStateReader.loadStateData("s1")).thenReturn(
+            "{\"session_id\":\"s1\",\"context\":["
+                + "{\"id\":\"m9\",\"name\":\"__compaction_summary__\",\"role\":\"USER\","
+                + "\"content\":[{\"type\":\"text\",\"text\":\"summary\"}]},"
+                + "{\"id\":\"m4\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"tail\"}]}]}");
+        when(sessionMessageStore.findAllMsgIds("s1"))
+            .thenReturn(java.util.Set.of("m1", "m2", "m3", "m9"));
+        when(sessionMessageStore.findPage(eq("s1"), eq(null), anyInt())).thenReturn(List.of(
+            row(1, userRecord.msgId(), userRecord.kind(), userRecord.role(), null, userRecord.msgJson()),
+            row(2, assistantRecord.msgId(), assistantRecord.kind(), assistantRecord.role(), null, assistantRecord.msgJson()),
+            row(3, toolRecord.msgId(), toolRecord.kind(), toolRecord.role(), null, toolRecord.msgJson())));
+        when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of());
+
+        var messages = messagesOf(controller.threadHistory("s1", null, true, 200, null));
+
+        var assistantWithCalls = messages.stream()
+            .filter(m -> "assistant".equals(m.get("role")) && m.get("tool_calls") != null)
+            .findFirst();
+        assertTrue(assistantWithCalls.isPresent(),
+            "压缩边界前的工具调用必须从归档轨渲染出 tool_calls：" + messages);
+        var calls = (List<Map<String, Object>>) assistantWithCalls.get().get("tool_calls");
+        assertEquals(1, calls.size());
+        assertEquals("execute", calls.get(0).get("name"));
+        assertEquals("file1\nfile2", calls.get(0).get("output"), "tool_result 必须配对进 output");
+    }
+
+    @Test
     void mergedViewShouldExposeArchivedTraceIdOnly() {
         when(agentStateReader.loadStateData("s1")).thenReturn(STATE_DATA);
         when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of("m1", "m3"));

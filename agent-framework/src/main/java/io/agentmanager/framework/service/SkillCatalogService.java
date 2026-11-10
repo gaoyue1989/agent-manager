@@ -237,6 +237,14 @@ public class SkillCatalogService {
 
     /** name → description 合并视图：全局目录为底，L4 个人技能覆盖同名描述（并补入独有技能） */
     private Map<String, String> collectAvailable(String userId) {
+        // L2 禁用集（oa-1110-repro-fixes-design §2.1b）：list() 已剔除禁用名，但下方 L4 合并
+        // 的 enabled 分支会把同名 L4 覆盖重新放回，须在合并后强制剔除（读取失败按空集 fail-soft）
+        java.util.Set<String> l2Disabled;
+        try {
+            l2Disabled = manageService.getDisabledSet();
+        } catch (Exception e) {
+            l2Disabled = java.util.Set.of();
+        }
         var merged = new LinkedHashMap<String, String>();
         for (var m : list()) {
             var name = (String) m.get("name");
@@ -263,6 +271,9 @@ public class SkillCatalogService {
                 // L4 合并失败降级为全局目录，避免 / 补全整体不可用
                 log.warn("availableSkills: merge L4 failed for user {}: {}", userId, e.getMessage());
             }
+        }
+        if (!l2Disabled.isEmpty()) {
+            merged.keySet().removeAll(l2Disabled);
         }
         return merged;
     }
