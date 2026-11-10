@@ -28,7 +28,7 @@
 1. **用户侧导出发布页**（测试环境 Console）：从服务详情进入，提供配置包更新、版本查看、生产环境变量、模型配置、沙箱配置能力：
    - 配置包更新 = 文本直改：包文件树（AGENTS.md / skills 只读）+ 纯文本编辑器（复用 package-online-edit 的在线编辑思路）；保存即打**发布标记**（`{包版本}-e{序号}`）并把文件快照（path → content + checksum）写入发布标记表，确认导出时按该标记内容固化进 OAF 镜像；
    - 生产环境变量：可添加 / 编辑 / 删除服务专属键；**来自运行时默认的行锁定不可修改**，只能由运维在配置管理改默认；
-   - 模型 / 沙箱配置按模板展示全量参数（LLM 10 键 / Sandbox 6 键，与 `platformconfig/template.go` 同源），默认锁定。
+   - 模型 / 沙箱配置按模板展示全量参数（LLM 10 键 / Sandbox 9 键，与 `platformconfig/template.go` 同源），默认锁定。
    确认后由 backend 生成 2 类交付物：OAF 配置镜像（构建后直推指定镜像仓库）+ values 文件（随 manifest 提交 ITSM）。
 2. **运维侧工作空间运行时默认配置**：按工作空间维护 agent-framework 运行时所需的 MySQL / Redis / OTel / 沙箱 / 镜像仓库 / 路由等默认值，作为导出页预填与 values 组装来源。
 3. **审批与部署**：values + manifest 作为 ITSM 工单附件审批；审批通过后调用生产侧已有 HTTP Helm 部署接口，用 4 件套（chart / 基础镜像 / OAF 镜像 / values）完成跨集群部署。
@@ -186,7 +186,7 @@ env:                              # 渲染为 ConfigMap envFrom
   LLM_MAX_TOKENS: "16384"
   LLM_ENABLE_THINKING: "true"
   LLM_CONTEXT_LENGTH: "128000"
-  # 沙箱组（模板全量 6 键）
+  # 沙箱组（模板全量 9 键，此处列示例非空项）
   OPENSANDBOX_SERVER_URL: sandbox.prod.example.com:8090
   SANDBOX_IMAGE: opensandbox/code-interpreter:v1.1.0
   SANDBOX_TIMEOUT_MINUTES: "60"
@@ -316,7 +316,7 @@ v1 中 `approving → approved → deploying` 由运维在平台人工推进（�
 
 页面：控制台（运维视角）→ 工作空间 → 配置管理，页签 = 运行时默认 / MCP 连接器模板 / 模型参数 / 沙箱参数 / 仓库与路由 / API。统一入口管理导出所需的全部默认值；**导出发布页全部继承本页，且默认值在导出页锁定**——单次导出不能悄悄改基线，要改只能由运维在此修改（留审计）。与 `platform_config`（平台级、全服务表单默认）的区别：本模块 **per-workspace、面向生产导出**，测试集群「平台默认配置不经 envFrom 注入、仅表单预填」的语义不变。
 
-参数模板与 `backend/internal/service/platformconfig/template.go` 同源（模板驱动表单 / 敏感路由 / 掩码输出）：LLM 组 10 键（API_KEY / BASE_URL / MODEL_ID / PROVIDER / TEMPERATURE / MAX_TOKENS / ENABLE_THINKING / CONTEXT_LENGTH / REASONING_EFFORT / FREQUENCY_PENALTY）、Sandbox 组 6 键（OPENSANDBOX_SERVER_URL / API_KEY / SANDBOX_IMAGE / TIMEOUT_MINUTES / MEMORY_MB / CPU_COUNT）；`SANDBOX_ENABLED` 刻意排除（agent-framework 三层裁决：env 显式存在 > OAF 包 frontmatter > 默认 false，进默认配置会让包级沙箱声明永久失效）。变更审计复用 `platform_config_events` 思路；导出页对新增键与 MCP 改写留痕，默认值本身不可在导出页修改。字段分组：
+参数模板与 `backend/internal/service/platformconfig/template.go` 同源（模板驱动表单 / 敏感路由 / 掩码输出）：LLM 组 10 键（API_KEY / BASE_URL / MODEL_ID / PROVIDER / TEMPERATURE / MAX_TOKENS / ENABLE_THINKING / CONTEXT_LENGTH / REASONING_EFFORT / FREQUENCY_PENALTY）、Sandbox 组 9 键（OPENSANDBOX_SERVER_URL / API_KEY / SANDBOX_IMAGE / TIMEOUT_MINUTES / MEMORY_MB / CPU_COUNT / SANDBOX_POOL_REF / SANDBOX_USER_QUOTA / SANDBOX_RENEW_INTERVAL_SECONDS；后三键随 sandbox-pool-opensandbox-design §7 进入模板——发布预填语义、非敏感）；`SANDBOX_ENABLED` 刻意排除（agent-framework 三层裁决：env 显式存在 > OAF 包 frontmatter > 默认 false，进默认配置会让包级沙箱声明永久失效）。变更审计复用 `platform_config_events` 思路；导出页对新增键与 MCP 改写留痕，默认值本身不可在导出页修改。字段分组：
 
 | 分类 | 键 / 配置 | 敏感 | 说明 |
 |------|-----------|------|------|
@@ -326,7 +326,7 @@ v1 中 `approving → approved → deploying` 由运维在平台人工推进（�
 | redis | `AGENT_REDIS_PREFIX` 规则 | 否 | 平台派生 `{k8s名}:`，防跨服务串写 |
 | otel | `OTEL_EXPORTER_OTLP_ENDPOINT` | 否 | |
 | llm | LLM 组模板全量 10 键（API_KEY / BASE_URL / MODEL_ID / PROVIDER / TEMPERATURE / MAX_TOKENS / ENABLE_THINKING / CONTEXT_LENGTH / REASONING_EFFORT / FREQUENCY_PENALTY） | API Key ★ | 与 `platformconfig/template.go` 同源，空值不下发 |
-| sandbox | `OPENSANDBOX_SERVER_URL` / `OPENSANDBOX_API_KEY` / `SANDBOX_IMAGE` / `SANDBOX_TIMEOUT_MINUTES` / `SANDBOX_MEMORY_MB` / `SANDBOX_CPU_COUNT`（模板全量 6 键） | API Key ★ | `SANDBOX_ENABLED` 不进模板（包 frontmatter 三层裁决） |
+| sandbox | `OPENSANDBOX_SERVER_URL` / `OPENSANDBOX_API_KEY` / `SANDBOX_IMAGE` / `SANDBOX_TIMEOUT_MINUTES` / `SANDBOX_MEMORY_MB` / `SANDBOX_CPU_COUNT` / `SANDBOX_POOL_REF` / `SANDBOX_USER_QUOTA` / `SANDBOX_RENEW_INTERVAL_SECONDS`（模板全量 9 键；后三键随 sandbox-pool-opensandbox-design §7 进入模板，发布预填、非敏感） | API Key ★ | `SANDBOX_ENABLED` 不进模板（包 frontmatter 三层裁决） |
 | protocol | `AGENT_PROTOCOL_AUTH_TOKEN` / `AGENT_REMOTE_HEADERS_JSON` / `AGENT_A2A_JOB_TOKEN` | ★ | 敏感键走模板 Secret 路由；开关类键刻意不进默认 |
 | registry | 指定镜像仓库地址 / `imagePullSecrets` | 否 | backend 直推目标，生产侧自己拉取生产同步镜像 |
 | registry | 推送凭证 | ★ | 存平台 Secret，不进导出产物 |

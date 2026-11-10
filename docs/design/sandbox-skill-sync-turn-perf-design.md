@@ -2,6 +2,11 @@
 
 > 状态：**已实施 + 基准验证 + 部署验证（2026-11-09）**。动机：66MB/2000 文件技能目录实测，session 首轮物化 ≈10~68s、第 2/3 轮稳态每 call ≈5.35s（远超 3s 目标）；本轮落地后稳态 ≈0.09s/call、新用户首轮 ≈2.86s。基准方法与原始成本模型见 [sandbox-skill-sync-optimization-design.md](sandbox-skill-sync-optimization-design.md)（上一轮稳态优化的前置：指纹缓存/revision 门控/快照差分，本轮不改动其语义）。
 
+> **后续演进（2026-11-09，PR #285~#287，first-llm-latency）**——本文 §2.1 P0-1 描述的机制在同日后续 PR 中有三点实质演进（下文 §2.1/§3 为演进前时点表述）：
+> ① **指纹源改为「包内技能源目录 stat 指纹 + L4 revision」组合**：stage 副本不参与指纹（stage 是 SDK 对包内源 + L4 的确定性物化，跨副本 mtime 不同会使共享层永不命中）；包内源生产为同 PVC 只读挂载、跨副本指纹天然一致，L4 revision 覆盖用户级差异——这也是跨副本共享层生效的前提（`OpenSandbox.java` 指纹注释，`OpenSandboxFilesystemSpec.java:83` packageSkillsDir 注入、装配点 `AgentScopeConfig.java:109`）。
+> ② **新增跨副本 Redis 共享层 `ScopedFingerprintStore`**（键 `<agentRedisPrefix>sbx:scopedfp:{sandboxId}|{scope}`，TTL 7 天，读/写 fail-open，`ScopedFingerprintStore.java`）：**Pod 级三表仍为主读路径**，Pod miss 才回落共享层、命中时回填 Pod 指纹/scope 两表，投放成功后 Pod 级 + 共享层双写（`OpenSandboxFilesystemSpec.java:152-176`）——并非「Pod 三表降级为回填层」。
+> ③ **scoped 投放移出首推理关键路径**：不再随每 call `hydrateForCall` 同步执行（`OpenSandbox.java:358-363`「不再在此处跑」），改为 doExec/readWorkspaceFile/downloadFile 命中 `.skills-cache` 时同步投放（CAS 每 call 一次；downloadFile 补漏）+ `stop()` 收尾若本 call 从未投放则补投。
+
 ## 1. 问题清单（66MB/2000f 真实环境基准，2026-11-09）
 
 每 call（turn）技能同步链路实测分布（改造前）：
