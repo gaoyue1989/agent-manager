@@ -638,6 +638,9 @@ public class ChatStreamController {
                 // 记录本轮上传文件 id（随消息持久化），history 读取时据此把上传卡片挂回本用户消息
                 var msgMeta = new java.util.HashMap<String, Object>();
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, finalSessionId);
+                // 逐轮归属锚点：history 按此把本轮（可能多条）assistant 消息归到同一 reply_id，
+                // 不依赖 Redis 事件索引 TTL（见 StateDataParser.METADATA_TURN_REPLY_ID）
+                msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, replyId);
                 // 本轮技能白名单随本条用户消息下传（SkillFilterMiddleware 读取；仅本轮生效）。
                 // 显式空列表也要写入（= 无技能），因此只判 null 不判空
                 if (body.skills() != null) {

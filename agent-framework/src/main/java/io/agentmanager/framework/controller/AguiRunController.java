@@ -300,6 +300,8 @@ public class AguiRunController {
                 var processedMessage = skillInjectionService.injectSkillReferences(text, userId);
                 var msgMeta = new java.util.HashMap<String, Object>();
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, threadId);
+                // 逐轮归属锚点（与 /threads/chat 同构）：runId 即本 turn 的 replyId
+                msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, runId);
                 var msg = Msg.builder().role(MsgRole.USER).name(userId)
                     .metadata(msgMeta)
                     .textContent(processedMessage).build();

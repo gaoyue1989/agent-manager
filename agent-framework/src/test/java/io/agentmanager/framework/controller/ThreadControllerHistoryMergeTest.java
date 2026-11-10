@@ -266,4 +266,87 @@ class ThreadControllerHistoryMergeTest {
         assertEquals("hi", messages.get(0).get("content"));
         assertFalse((Boolean) result.getBody().get("hasMore"));
     }
+
+    // ===== reply_id 按轮归属（一轮多条 assistant 不得错位） =====
+
+    @Test
+    void multiAssistantTurnShouldShareOneReplyId() {
+        // ReAct 一轮可产生多条 assistant 消息，reply 索引一轮只有一个 id：
+        // 同一轮的多条 assistant 必须共享 r1，下一轮才是 r2（文件卡片据此挂回）
+        when(agentStateReader.loadStateData("s1")).thenReturn(
+            "{\"session_id\":\"s1\",\"context\":["
+                + "{\"id\":\"u1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"q1\"}]},"
+                + "{\"id\":\"a1\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"step1\"}]},"
+                + "{\"id\":\"a2\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"step2\"}]},"
+                + "{\"id\":\"u2\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"q2\"}]},"
+                + "{\"id\":\"a3\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"answer2\"}]}]}");
+        when(sessionMessageStore.findPage(eq("s1"), eq(null), anyInt())).thenReturn(List.of());
+        when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of());
+        when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r1", "r2"));
+
+        var messages = messagesOf(controller.threadHistory("s1", null, true, 200, null));
+
+        assertEquals("r1", messages.get(1).get("reply_id"));
+        assertEquals("r1", messages.get(2).get("reply_id"));
+        assertEquals("r2", messages.get(4).get("reply_id"));
+    }
+
+    @Test
+    void userMetadataAnchorShouldFillReplyIdWithoutRedis() {
+        // Redis 事件索引过期（findReplyIds 返回空）时，写入侧 user 消息 metadata 的
+        // turn replyId 仍能把同轮 assistant 收敛到正确 reply_id
+        when(agentStateReader.loadStateData("s1")).thenReturn(
+            "{\"session_id\":\"s1\",\"context\":["
+                + "{\"id\":\"u1\",\"role\":\"USER\",\"metadata\":{\"agent_turn_reply_id\":\"r-anchor\"},"
+                + "\"content\":[{\"type\":\"text\",\"text\":\"q1\"}]},"
+                + "{\"id\":\"a1\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}]}");
+        when(sessionMessageStore.findPage(eq("s1"), eq(null), anyInt())).thenReturn(List.of());
+        when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of());
+        when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of());
+
+        var messages = messagesOf(controller.threadHistory("s1", null, true, 200, null));
+
+        assertEquals("r-anchor", messages.get(1).get("reply_id"));
+        assertNull(messages.get(0).get("turn_reply_id"), "内部锚点字段不得外泄");
+    }
+
+    @Test
+    void compactionOnlySegmentShouldNotConsumeReplyId() {
+        // 压缩分隔条不是一轮：不能占用 reply id，否则后续 real turn 的 id 会整体前移
+        when(agentStateReader.loadStateData("s1")).thenReturn("{\"session_id\":\"s1\",\"context\":["
+            + "{\"id\":\"m1\",\"name\":\"__compaction_summary__\",\"role\":\"USER\","
+            + "\"content\":[{\"type\":\"text\",\"text\":\"summary\"}]},"
+            + "{\"id\":\"u1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"q1\"}]},"
+            + "{\"id\":\"a1\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"a1\"}]}]}");
+        when(sessionMessageStore.findPage(eq("s1"), eq(null), anyInt())).thenReturn(List.of());
+        when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of());
+        when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r1"));
+
+        var messages = messagesOf(controller.threadHistory("s1", null, true, 200, null));
+
+        assertEquals("compaction", messages.get(0).get("role"));
+        assertEquals("r1", messages.get(2).get("reply_id"));
+    }
+
+    @Test
+    void askingAssistantShouldEndSegmentSoConfirmResumeGetsNextReplyId() {
+        // HITL 恢复段是本轮的新 reply（无新 user 消息）：ASKING assistant 之后必须切段，
+        // 否则恢复段正文会被错误归到提问段的 reply_id，文件卡片无法对应
+        when(agentStateReader.loadStateData("s1")).thenReturn(
+            "{\"session_id\":\"s1\",\"context\":["
+                + "{\"id\":\"u1\",\"role\":\"USER\",\"content\":[{\"type\":\"text\",\"text\":\"q1\"}]},"
+                + "{\"id\":\"a1\",\"role\":\"ASSISTANT\",\"metadata\":{"
+                + "\"agentscope_confirm_request_reply_id\":\"r-ask\"},"
+                + "\"content\":[{\"type\":\"text\",\"text\":\"请确认\"}]},"
+                + "{\"id\":\"a2\",\"role\":\"ASSISTANT\",\"content\":[{\"type\":\"text\",\"text\":\"已执行\"}]}]}");
+        when(sessionMessageStore.findPage(eq("s1"), eq(null), anyInt())).thenReturn(List.of());
+        when(sessionMessageStore.findAllMsgIds("s1")).thenReturn(java.util.Set.of());
+        when(sessionEventStore.findReplyIds("s1")).thenReturn(List.of("r-ask", "r-resume"));
+
+        var messages = messagesOf(controller.threadHistory("s1", null, true, 200, null));
+
+        assertEquals("r-ask", messages.get(1).get("reply_id"));
+        assertEquals("r-resume", messages.get(2).get("reply_id"));
+        assertNull(messages.get(1).get("turn_reply_id"), "内部锚点字段不得外泄");
+    }
 }
