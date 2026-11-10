@@ -129,7 +129,7 @@ const (
 
 ### 1.4 运行时默认键空间与分类（U1 `workspaceruntime.go` 的事实源）
 
-- 模板键：以 `platformconfig.KnownKeys()`（template.go:108-116，全模板共 25 键：llm 10 + mysql 3 + redis 3 + sandbox 6 + protocol 3）为基底，但**排除 `CHECKPOINT_JDBC_URL`**（template.go:46，KnownKeys 实测含它）→ **有效模板键 24 键**。排除理由：它是 L3 派生键（§5.4 由 `CHECKPOINT_JDBC_BASE` 派生同名键），若允许 L1 合法持有，会与 L3 撞键且最坏把源集群 JDBC URL（可能内嵌凭据）明文导出进生产 values；与设计 §10 一致（mysql 分类只定义 `CHECKPOINT_JDBC_BASE`，未列 `CHECKPOINT_JDBC_URL`）。Sensitive 取 `platformconfig.Lookup(k).Sensitive`（template.go:96-105）。
+- 模板键：以 `platformconfig.KnownKeys()`（template.go:114-123，全模板共 28 键：llm 10 + mysql 3 + redis 3 + sandbox 9 + protocol 3；2026-11-07 sandbox-pool PR-C 新增 SANDBOX_POOL_REF/SANDBOX_USER_QUOTA/SANDBOX_RENEW_INTERVAL_SECONDS 三键）为基底，但**排除 `CHECKPOINT_JDBC_URL`**（template.go:46，KnownKeys 实测含它）→ **有效模板键 27 键**。排除理由：它是 L3 派生键（§5.4 由 `CHECKPOINT_JDBC_BASE` 派生同名键），若允许 L1 合法持有，会与 L3 撞键且最坏把源集群 JDBC URL（可能内嵌凭据）明文导出进生产 values；与设计 §10 一致（mysql 分类只定义 `CHECKPOINT_JDBC_BASE`，未列 `CHECKPOINT_JDBC_URL`）。Sensitive 取 `platformconfig.Lookup(k).Sensitive`（template.go:96-105）。
 - 导出专用键（模板之外，v1 固定 8 键，全部非敏感）：
 
 | EnvKey | Category | 用途（设计 §10） |
@@ -143,7 +143,7 @@ const (
 | `ROUTING_HOST_SUFFIX` | routing | host 模式域名后缀（以 `.` 开头，校验同 config.go:150-172 口径） |
 | `BASE_IMAGE_WHITELIST` | runtime | 基础镜像白名单，格式同 `AVAILABLE_IMAGES`（`ref|label` 逗号分隔，config.go:174-200 同解析） |
 
-- **L1/L3 撞键在键空间层面结构性消除（不靠运行时裁决）**：L1 键空间 = 24 模板键 + 8 导出键，已排除全部 L3 键——`CHECKPOINT_JDBC_URL`、`AGENT_REDIS_PREFIX`（L3 派生键）与 `AGENT_CONFIG_DIR`/`AGENT_WORKSPACE_DIR`/`SERVER_HOST`/`SERVER_PORT`/`HOST_NAME`（平台保留键，objects.go:18-22，本就不在 template）——PUT runtime-defaults 传入任一即 400（错误信息点名键名）；`SANDBOX_ENABLED` 沿用 template 排除理由（template.go:24-26 注释）。因此**撞键裁决只存在于 L2 对 L1/L3**（§5.1），L1 自身不可能与 L3 撞键。
+- **L1/L3 撞键在键空间层面结构性消除（不靠运行时裁决）**：L1 键空间 = 27 模板键 + 8 导出键（共 35 键，workspaceruntime_test 锁定），已排除全部 L3 键——`CHECKPOINT_JDBC_URL`、`AGENT_REDIS_PREFIX`（L3 派生键）与 `AGENT_CONFIG_DIR`/`AGENT_WORKSPACE_DIR`/`SERVER_HOST`/`SERVER_PORT`/`HOST_NAME`（平台保留键，objects.go:18-22，本就不在 template）——PUT runtime-defaults 传入任一即 400（错误信息点名键名）；`SANDBOX_ENABLED` 沿用 template 排除理由（template.go:24-26 注释）。因此**撞键裁决只存在于 L2 对 L1/L3**（§5.1），L1 自身不可能与 L3 撞键。
 
 ---
 
@@ -157,7 +157,7 @@ const (
 |------|------|------|
 | `backend/internal/store/model.go` | 修改（末尾追加） | §1.1 三实体 + 状态常量 |
 | `backend/internal/store/db.go` | 修改（1 行内追加） | AutoMigrate 注册（§1.2） |
-| `backend/internal/service/workspaceruntime.go` | 新建 | GET/PUT runtime-defaults：键白名单校验（24 模板键 = KnownKeys − CHECKPOINT_JDBC_URL + §1.4 导出 8 键；L3 派生/平台保留键传入 400，§1.4）、三态语义（同 platformconfig.go:120-165：出现非空=设置、空串=删除、缺失=不变；未知键 400）、敏感掩码视图、UpdatedBy 记 username |
+| `backend/internal/service/workspaceruntime.go` | 新建 | GET/PUT runtime-defaults：键白名单校验（27 模板键 = KnownKeys − CHECKPOINT_JDBC_URL + §1.4 导出 8 键，35=27+8 workspaceruntime_test.go:33 锁定；L3 派生/平台保留键传入 400，§1.4）、三态语义（同 platformconfig.go:120-165：出现非空=设置、空串=删除、缺失=不变；未知键 400）、敏感掩码视图、UpdatedBy 记 username |
 | `backend/internal/service/workspaceruntime_test.go` | 新建 | 白名单/三态/掩码/分分类用例（sqlite 内存库，先例 testkit_test.go） |
 | `backend/internal/handler/workspaceconfig.go` | 新建 | `registerWorkspaceConfig(cg *gin.RouterGroup, core *service.Core)`：GET/PUT 两端点 |
 | `backend/internal/handler/workspaceconfig_test.go` | 新建 | 路由 + 权限用例（member GET 200 / PUT 403，先例 router_test.go） |
@@ -315,7 +315,7 @@ Handler 文件：`backend/internal/handler/export.go`（U2）；workspaceconfig 
 
 - 渲染循环直接遍历 `platformconfig.Template()` 分组，值取 **L1∪L2 合并结果**（并集语义，对齐 §5.1「L2 仅新增」：L1 已配置的键取 L1 值；L1 未配置而 L2 新增的键取 L2 值——如 e2e §8.5 的 `MCP_E2E_TOKEN` 即此类键，必须进入 secretEnv，交集实现会把它静默丢弃致 §8.7 校验 7 失败）。L2 撞 L1 已配置键在 CreateExportOrder 校验期 400（§5.1），渲染层只面对已裁决通过的并集。导出页表单 schema 同源（设计 §10「模板驱动」）。
 - LLM 组 10 键：`LLM_API_KEY/BASE_URL/MODEL_ID/PROVIDER/TEMPERATURE/MAX_TOKENS/ENABLE_THINKING/CONTEXT_LENGTH/REASONING_EFFORT/FREQUENCY_PENALTY`（template.go:31-40）。
-- Sandbox 组 6 键：`OPENSANDBOX_SERVER_URL/OPENSANDBOX_API_KEY/SANDBOX_IMAGE/SANDBOX_TIMEOUT_MINUTES/SANDBOX_MEMORY_MB/SANDBOX_CPU_COUNT`（template.go:64-69）。
+- Sandbox 组 9 键：`OPENSANDBOX_SERVER_URL/OPENSANDBOX_API_KEY/SANDBOX_IMAGE/SANDBOX_TIMEOUT_MINUTES/SANDBOX_MEMORY_MB/SANDBOX_CPU_COUNT/SANDBOX_POOL_REF/SANDBOX_USER_QUOTA/SANDBOX_RENEW_INTERVAL_SECONDS`（template.go:64-76；后三键随 2026-11-07 sandbox-pool PR-C 进入模板）。
 - `SANDBOX_ENABLED`、`AGENT_PROTOCOL_ENABLED/TASK_STORE/TASK_RETENTION_DAYS`、`AGENT_A2A_JOB_ENABLED` 等开关键不在渲染范围（template.go:24-26、77-89 注释的理由）。
 
 ### 5.4 L3 派生键与保留键（不可覆盖清单）
@@ -671,5 +671,5 @@ kill %1   # 停 backend 与 port-forward；/tmp/oaf-data、/tmp/e2e-*.yaml 删�
 | R2 | 风险 | 本地 e2e 与集群内 backend 同集群双控制器并存：发布/删除动作互相不可见。e2e 全程用独立 schema + 独立命名前缀；不在 e2e 中操作集群内既有服务。 |
 | R3 | 风险 | busybox 基底本地 registry 仅 `latest` 一个 tag 且未入节点镜像缓存（环境核验 warning）：e2e 首次部署依赖节点 mirror 现拉（已就绪）；镜像构建期 backend（宿主机）直连 172.20.0.1:5001 无缓存问题。 |
 | R4 | 风险 | values 含明文敏感值且存 DB（ValuesYAML mediumtext）：接口层 `json:"-"` 全遮挡 + 下载鉴权（跟随 workspace）+ 下载审计（§5.8）；DB 备份密级需与 ITSM 附件对齐——运维须知，非代码可控面。 |
-| D13 | 安全修正（评审修订） | 运行时默认键空间**排除 `CHECKPOINT_JDBC_URL`**：`KnownKeys()`（template.go:108-116）实测含它（template.go:46），若「全量复用」会让 L1 合法持有源集群 JDBC URL（可能内嵌凭据）并与 L3 派生同名键冲突、经 values 明文流入生产。修订为 24 模板键（= KnownKeys − CHECKPOINT_JDBC_URL）+ 8 导出键，L1/L3 撞键结构性不可能（§1.4、§5.4）；与设计 §10 mysql 分类只定义 `CHECKPOINT_JDBC_BASE` 一致。同期修正 §5.3 渲染取值语义为 L1∪L2 并集（评审修订 2）：L2 撞 L1/L3 在 CreateExportOrder 校验期 400，渲染层不丢 L2 新增键（否则 e2e §8.7 校验 7 的 `MCP_E2E_TOKEN` 会从 secretEnv 消失）。 |
+| D13 | 安全修正（评审修订） | 运行时默认键空间**排除 `CHECKPOINT_JDBC_URL`**：`KnownKeys()`（template.go:108-116）实测含它（template.go:46），若「全量复用」会让 L1 合法持有源集群 JDBC URL（可能内嵌凭据）并与 L3 派生同名键冲突、经 values 明文流入生产。修订为 24 模板键（= KnownKeys − CHECKPOINT_JDBC_URL）+ 8 导出键，L1/L3 撞键结构性不可能（§1.4、§5.4）；与设计 §10 mysql 分类只定义 `CHECKPOINT_JDBC_BASE` 一致。（后随 2026-11-08 sandbox-pool 新增 3 键演进为 27 模板键 + 8 导出键，见 §1.4）同期修正 §5.3 渲染取值语义为 L1∪L2 并集（评审修订 2）：L2 撞 L1/L3 在 CreateExportOrder 校验期 400，渲染层不丢 L2 新增键（否则 e2e §8.7 校验 7 的 `MCP_E2E_TOKEN` 会从 secretEnv 消失）。 |
 | D14 | 安全修正（issue #227） | ImageBuilder 凭证**按 registry 分发**：v1 单一全局推送凭证（D8）原本对拉基底与直推共用（两处 `remote.WithAuth`），基底在第三方 registry（如缺省 `busybox:1.36` 所在 docker.io）时推送凭证会被送达其 token 端点——坏凭证请求 `auth.docker.io` 对公共 pull scope 也返回 401，故「缺省 docker.io 基底 + 已配推送凭证」组合下 pullBase 必 401、导出构建必失败（匿名 token 实测 200，凭证请求实测 401）。修订为 `pushScopedKeychain`（`Resolve`：registry == 推送目标 → 推送凭证，否则 `authn.Anonymous`；`remote.WithAuthFromKeychain` 消费），基底拉取对非推送 registry 一律匿名；同仓私有基底仍复用推送凭证，第三方私有基底需显式覆盖 `EXPORT_BASE_IMAGE` 指向可达仓库（§9-D8）。行为变化：基底在推送 registry 之外的私有仓库时由「送错凭证后 401」变为「匿名 401」——不再泄凭证但仍拉不到。TargetRef 解析前移至 Build 早期（`parse target reference`，不触网）。 |

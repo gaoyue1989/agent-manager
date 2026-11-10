@@ -650,6 +650,11 @@ data: {"type":"AGENT_END","replyId":"..."}
 > **远程转发标注：** 远程子 agent 事件回流 lead SSE 时 additive 附 `source` / `taskId` /
 > `parentSessionId`（lead 自身事件无 `source`）；转发的 `AGENT_END` 不终结主 turn。
 
+> **配额预检 409（沙箱配额满）**：`SANDBOX_LIFECYCLE_ENABLED=true`（默认开启，application.yml:123；前置需沙箱启用 `SANDBOX_ENABLED`、启动 fail-fast 需 `SANDBOX_GUARD_ENABLED=true`——lifecycle bean 组装条件见 AgentScopeConfig.java:195-210）且 `SANDBOX_USER_QUOTA>0`（默认 5；0=不限不判满）时，chat 预检（ChatStreamController 经 SandboxLifecycleManager.precheck，ChatStreamController.java:420-427）判配额满且全部占用有执行中迹象 → 直接返回 HTTP 409（非 SSE 帧）+ `Content-Type: application/json` 的 String body（String 型规避内容协商 500，GlobalExceptionHandler.java:94-109）：
+> `{"code":"user_quota_exhausted","message":"...","quota":N,"bindings":[{"session_id":"...","expires_at":"<ISO-8601>","state":"executing|confirm_holding","confirm_hold_expires_at":"..."}]}`——`confirm_hold_expires_at` 仅 confirm_holding 行携带（UserQuotaExhaustedException.payload409，UserQuotaExhaustedException.java:65-81）。
+> 预检放行后 exec 撞配额的竞态兜底改发 **SSE error 帧**（ChatStreamController.java:719-726）：`{"type":"error","code":"user_quota_exhausted","quota":N,"message":"...","bindings":[{"session_id":"...","expires_at":"...","turn_running":true|false}]}`（SSE 帧无 state/confirm_hold_expires_at，改带 `turn_running` 布尔，UserQuotaExhaustedException.java:88-108）。
+> 前端 ChatPane/QuotaErrorCard 经 `parseQuota409` / `quotaFromSseError` 两入口消费该契约（frontend/src/lib/sandbox-quota.ts:82-91）。
+
 **时序约束：**
 - 单次 POST 即发起完整执行段，无需先建立 SSE 订阅
 - 同 session 并发请求自动排队（Turn 租约），排队超时 120s 返回 error 帧
@@ -1038,6 +1043,8 @@ curl -X PUT http://localhost:8100/models/system/fallback   # 清除 DB 覆盖，
 | GET | `/debug/monitor/messages` | 对话日志检索：仅 USER/ASSISTANT 有正文消息；`keyword` 正文模糊检索（LIKE 粗筛 + 提取正文精确包含，扫描窗口封顶 `scan_capped:true`）、`userId`/`from`/`to`/`limit`/`offset`；每条附 `trace_id`（V14，Monitor 回放「消息 ↔ Jaeger trace」入口） |
 | GET | `/debug/memory` | MEMORY.md / memory/ 内容查看 |
 | GET | `/debug/sandbox` | 沙箱状态（沙箱模式） |
+| GET | `/debug/sandbox-bindings` | 沙箱配额与绑定（sandbox-pool-opensandbox-design §4.8，PR-D）：lifecycle 配置回显（7 项）+ sandbox_binding 绑定表（跨副本聚合，user_key 脱敏、turn_running 由 turn_lease JOIN + updated_at 新鲜度双事实源派生）+ 本副本续期注册表健康 + 事件环形缓冲；lifecycle 未装配 fail-soft 返回 enabled=false（调试页「配额与绑定」区块数据源） |
+| POST | `/debug/sandbox-cleanup?retentionDays=7` | 沙箱绑定过期清理手动触发（retentionDays query 参数默认 7，与 SessionCleanupService.cleanupSandboxBindings 同语义；e2e L11 测试钩子；lifecycle 未装配返回 enabled=false） |
 | GET | `/debug/workspace` | 工作区文件浏览 |
 | GET | `/debug/logs` | 运行日志（内存 Appender）。query `level`（默认 all）、`limit`（默认 100，上限 500） |
 | GET | `/debug/user-skills` | 用户个人技能（L4）索引：`{count, users[], truncated?}` |
@@ -1060,11 +1067,13 @@ curl http://localhost:8100/actuator/health
 
 ## 数据库表（无状态单次流架构）
 
-自建 12 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V14，启动自动执行，
+自建 14 张表，表结构由 **Flyway 迁移**管理（`src/main/resources/db/migration/` V1–V15，启动自动执行，
 存量库自动 baseline；演进一律新增迁移文件，代码内不再手工 DDL）：`confirm_context` / `turn_lease` /
 `tool_audit_log` / `ui_context` / `file_asset` / `kv_sync_key` / `model_config` / `session_user` /
 `session_message`（V5，消息轨归档）/ `remote_task_registry`（V8，远程子任务在途登记）/
-`turn_intent`（V10，排队 turn 意图）/ `turn_stop`（V13，单轮停止请求）。
+`turn_intent`（V10，排队 turn 意图）/ `turn_stop`（V13，单轮停止请求）/
+`sandbox_user`（V15，单用户沙箱配额计数锚，binding_count 与绑定行数不变量）/
+`sandbox_binding`（V15，沙箱借出簿记：uk_sandbox/uk_session 唯一键 + PENDING 占额行；见 sandbox-pool-opensandbox-design §4.1）。
 设计与规范见 [db-migration-flyway-design.md](../../docs/design/db-migration-flyway-design.md)。
 
 事件流（`session_event`）已整体迁至 Redis Streams，见本节末。SDK 侧的
@@ -1243,4 +1252,5 @@ TTL 7 天（自最后写入起），`AGENT_REDIS_MAX_LEN_PER_STREAM` 默认 25 �
 | `AGENT_CLEANUP_TURN_LEASE_RENEW_SECONDS` | `20` | turn 续租间隔（秒） |
 | `AGENT_CLEANUP_AUDIT_RETENTION_DAYS` | `30` | tool_audit_log 保留天数 |
 | `AGENT_CLEANUP_SESSION_RETENTION_DAYS` | `7` | agent_state/agent_fs 保留天数 |
+| `AGENT_CLEANUP_SANDBOX_BINDING_RETENTION_DAYS` | `7` | sandbox_binding 过期行与空锚行保留天数（SessionCleanupService 定时清理） |
 | `AGENT_HISTORY_TOOL_OUTPUT_MAX_CHARS` | `8000` | history 工具输出截断上限（`<=0` 不截断） |

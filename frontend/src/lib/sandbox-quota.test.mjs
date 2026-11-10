@@ -2,11 +2,12 @@
 // 模式同 confirm-card.test.mjs；渲染层 QuotaErrorCard/页面消费本模块的判定函数）。
 // 覆盖：两入口（409 body / SSE error code 帧）、两态文案与停止按钮资格（评审 d5）、
 // 停止端点 URL、来源分流（precheck=输入保留+气泡回滚 / exec=保留气泡）、
-// 容量表单校验链、水位条黄/红/未知/正常档。
+// 容量表单校验链、水位条黄/红/未知/正常档、expiresAt 倒计时（admin/console 两页共用展示口径，
+// node:test mock.timers 冻结 Date.now() 做确定性断言）。
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  bindingAdvice, capacityFromForm, confirmHoldText, deriveBindingState, isQuotaError, makeQuotaError,
+  bindingAdvice, capacityFromForm, confirmHoldText, countdown, deriveBindingState, isQuotaError, makeQuotaError,
   parseQuota409, poolLevel, quotaFromSseError, quotaHeadline, stopThreadUrl,
   validateCapacityForm, validatePoolName,
 } from "./sandbox-quota.ts";
@@ -167,4 +168,33 @@ test("pool level: unknown when status not reconciled (d19: status may be absent)
   assert.equal(
     poolLevel({ capacitySpec: { bufferMin: 1, bufferMax: 2, poolMin: 1, poolMax: 3 }, status: { allocated: 1 } }),
     "unknown");
+});
+
+// ---- expiresAt 倒计时（admin /console/assets/sandbox-instances 与 admin /admin/sandboxes 共用；
+//      mock.timers 冻结 Date.now()（now 只接受 epoch 数字），new Date(iso) 带参解析不受 mock 影响----
+
+test("countdown placeholders: missing/empty/invalid expiresAt return dash", () => {
+  assert.equal(countdown(), "—"); // 缺省（!expiresAt）
+  assert.equal(countdown(""), "—"); // 空串
+  assert.equal(countdown("not-a-date"), "—"); // 解析为 NaN（!Number.isFinite）
+});
+
+test("countdown expired: deadline in the past returns 已过期", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-10T12:00:00Z") });
+  try {
+    assert.equal(countdown("2020-01-01T00:00:00Z"), "已过期"); // ms <= 0
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test("countdown formatting: minute/hour bands with frozen clock", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-10T12:00:00Z") });
+  try {
+    assert.equal(countdown("2026-11-10T13:30:00Z"), "1h30m"); // 90m → 1h30m
+    assert.equal(countdown("2026-11-10T12:59:00Z"), "59m"); // <60m → 纯分钟位
+    assert.equal(countdown("2026-11-14T06:00:00Z"), "90h0m"); // 5760m → 恒含分钟位
+  } finally {
+    t.mock.timers.reset();
+  }
 });
