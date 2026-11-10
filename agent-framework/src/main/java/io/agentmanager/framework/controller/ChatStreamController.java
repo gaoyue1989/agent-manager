@@ -720,7 +720,7 @@ public class ChatStreamController {
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
                             finalUserId, sink, turnEnded, turnStartedAt, sandboxRebuildNotified,
-                            turnBucketKeys, toolSummary, forwardedPrefix),
+                            turnBucketKeys, toolSummary, forwardedPrefix, body.skills()),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
@@ -829,7 +829,8 @@ public class ChatStreamController {
                                     java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     java.util.Set<String> turnBucketKeys,
                                     TurnToolSummaryTracker toolSummary,
-                                    String forwardedPrefix) {
+                                    String forwardedPrefix,
+                                    java.util.List<String> turnSkills) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             if (turnStopWatcher != null) {
@@ -916,7 +917,7 @@ public class ChatStreamController {
             log.info("[chat] HITL permission_ask: sessionId={}, tools={}", sessionId,
                 ((RequireUserConfirmEvent) event).getToolCalls().stream()
                     .map(tc -> tc.getName()).toList());
-            runtimeService.storeConfirmContext(sessionId, event);
+            runtimeService.storeConfirmContext(sessionId, event, turnSkills);
             // T4 挂起保留窗（§4.4）：ask 挂起后沙箱持续续期（同沙箱恢复的保障），
             // 每次 ask 重新计窗；窗口过后停续 → 可被 LRU 调度/自然到期
             if (sandboxLifecycle != null) {

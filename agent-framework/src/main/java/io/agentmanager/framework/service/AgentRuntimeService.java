@@ -208,7 +208,7 @@ public class AgentRuntimeService {
             sink.next(Map.of("type", "task_update", "id", tid, "state", "working"));
 
             getAgent(fullThreadId).streamEvents(List.of(userMsg), ctx)
-                .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
+                .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId, null))
                 .doOnError(e -> {
                     log.error("[invokeStream] stream error: threadId={}, error={}", fullThreadId, e.getMessage(), e);
                     sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
@@ -358,8 +358,11 @@ public class AgentRuntimeService {
      * 逐事件转发（invokeStream 与 resumeWithConfirmStream 共用）：
      * AgentScope 事件 → 前端 SSE 词表（含 AGENT_END → task_update completed + done）。
      * HITL：RequireUserConfirmEvent → permission_ask，并缓存 ToolUseBlock 供确认端点恢复（6.2.1）。
+     *
+     * @param turnSkills 本轮技能白名单（恢复段继承原轮名单，issue #264）；null=未声明
      */
-    private void forwardEvent(FluxSink<Map<String, Object>> sink, AgentEvent event, String tid, String fullThreadId) {
+    private void forwardEvent(FluxSink<Map<String, Object>> sink, AgentEvent event, String tid,
+                              String fullThreadId, List<String> turnSkills) {
         var type = event.getType();
 
         // ===== 生命周期事件 =====
@@ -531,7 +534,7 @@ public class AgentRuntimeService {
             m.put("tool_calls", calls);
             putIfNotNull(m, "reply_id", e.getReplyId());    // ✅ javap 确认：getReplyId() 返回 String
             // 缓存 ToolUseBlock 供确认端点回填 ConfirmResult（6.3.1；不 complete，agent 暂停等待恢复）
-            putConfirmContext(fullThreadId, e);
+            putConfirmContext(fullThreadId, e, null, null, turnSkills);
             sink.next(m);
         }
 
@@ -629,7 +632,7 @@ public class AgentRuntimeService {
                 var ctx = buildResumeContext(confirmCtx, fullThreadId, userId, null);
                 var resumeMsg = buildResumeMsg(confirmCtx, results);
                 getAgent(fullThreadId).streamEvents(List.of(resumeMsg), ctx)
-                    .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId))
+                    .doOnNext(event -> forwardEvent(sink, event, tid, fullThreadId, confirmCtx.skills()))
                     .doOnError(e -> {
                         log.error("[resume-confirm-stream] error: threadId={}, error={}", fullThreadId, e.getMessage(), e);
                         sink.next(Map.of("type", "error", "task_id", tid, "error", e.getMessage()));
@@ -713,6 +716,12 @@ public class AgentRuntimeService {
         }
         var meta = new java.util.HashMap<String, Object>();
         meta.put(io.agentscope.core.message.Msg.METADATA_CONFIRM_RESULTS, confirmResults);  // ✅ javap 确认常量
+        // issue #264：恢复轮继承挂起轮的 skills 白名单。SkillFilterMiddleware 只读最后一条
+        // USER 消息的 metadata.skills；恢复消息不回填就会静默回落全量技能。
+        // null = 挂起轮未声明（不设白名单）；[] 同样写入（= 恢复轮仍无技能）。
+        if (ctx.skills() != null) {
+            meta.put(SkillFilterMiddleware.METADATA_SKILLS_KEY, ctx.skills());
+        }
         // 恢复消息文本需给出强终止信号：该工具调用已被人工批准并将立即执行，
         // 模型不得在工具真正返回后又重复调用（否则 HITL 每次批准都触发重试循环）。
         var text = allConfirmed
@@ -770,15 +779,24 @@ public class AgentRuntimeService {
 
     /** 确认上下文：一个 session 可能同时有多个待确认工具（12.1 批量 ASK）
      *  runtimeSessionId/runtimeUserId：Channel 流程经网关路由后的真实会话 key
-     *  （sessionId=gw-hash、userId=peer）；A2A/普通流程为 null，回落 makeThreadId+vendorKey。 */
+     *  （sessionId=gw-hash、userId=peer）；A2A/普通流程为 null，回落 makeThreadId+vendorKey。
+     *  skills：挂起轮的本轮技能白名单（issue #264；null=未声明、[]=无技能），
+     *  恢复消息回填 metadata 供 SkillFilterMiddleware 继续收敛模型可见技能集。 */
     record ConfirmContext(
         Map<String, ToolUseBlock> toolCalls,   // tool_call_id → ToolUseBlock
         String replyId,
         Instant createdAt,
         AtomicBoolean consumed,                 // CAS 防重复确认（DB 版：到达时已消费，恒为 true）
         String runtimeSessionId,                // Channel 网关真实 sessionId（gw-hash），非 Channel 为 null
-        String runtimeUserId                    // Channel 网关 peer（userId），非 Channel 为 null
-    ) {}
+        String runtimeUserId,                   // Channel 网关 peer（userId），非 Channel 为 null
+        List<String> skills                     // 挂起轮技能白名单；null=未声明，[]=无技能
+    ) {
+        /** 兼容构造（无 skills 的存量调用路径，如 AgentState 重建） */
+        ConfirmContext(Map<String, ToolUseBlock> toolCalls, String replyId, Instant createdAt,
+                       AtomicBoolean consumed, String runtimeSessionId, String runtimeUserId) {
+            this(toolCalls, replyId, createdAt, consumed, runtimeSessionId, runtimeUserId, null);
+        }
+    }
 
     /** 序列化 tool_calls → [{id, name, input}] JSON（confirm_context 表存储形态，SPIKE S1） */
     private static List<Map<String, Object>> toolCallsJson(List<ToolUseBlock> calls) {
@@ -803,13 +821,28 @@ public class AgentRuntimeService {
      * HITL 恢复必须复用该组合才能命中 pending 工具调用（见 buildResumeContext）。
      */
     public void storeConfirmContext(String rawSessionId, io.agentscope.core.event.AgentEvent event) {
+        storeConfirmContext(rawSessionId, event, null);
+    }
+
+    /**
+     * Channel 流程存储确认上下文（带本轮 skills 白名单）。
+     *
+     * <p>issue #264：ConfirmContext 落库原轮 skills，恢复段 buildResumeMsg 把名单回填进
+     * 恢复消息 metadata——SkillFilterMiddleware 从最后一条 USER 消息读取，恢复轮因此继承
+     * 挂起轮的能力边界，而不是静默回落全量技能。
+     *
+     * @param skills 本轮可用技能列表；null = 未声明（不设白名单），[] = 显式无技能
+     */
+    public void storeConfirmContext(String rawSessionId,
+                                    io.agentscope.core.event.AgentEvent event,
+                                    List<String> skills) {
         if (event instanceof RequireUserConfirmEvent e) {
             var fullThreadId = makeThreadId(rawSessionId);
             var gwSessionId = channelGatewaySessionId(rawSessionId);
-            log.info("[HITL] storeConfirmContext: rawSessionId={}, fullThreadId={}, gatewaySessionId={}, replyId={}, tools={}",
+            log.info("[HITL] storeConfirmContext: rawSessionId={}, fullThreadId={}, gatewaySessionId={}, replyId={}, tools={}, skills={}",
                 rawSessionId, fullThreadId, gwSessionId, e.getReplyId(),
-                e.getToolCalls().stream().map(tc -> tc.getName()).toList());
-            putConfirmContext(fullThreadId, e, gwSessionId, rawSessionId);
+                e.getToolCalls().stream().map(tc -> tc.getName()).toList(), skills);
+            putConfirmContext(fullThreadId, e, gwSessionId, rawSessionId, skills);
         }
     }
 
@@ -857,6 +890,16 @@ public class AgentRuntimeService {
      */
     void putConfirmContext(String sessionId, RequireUserConfirmEvent event,
                            String runtimeSessionId, String runtimeUserId) {
+        putConfirmContext(sessionId, event, runtimeSessionId, runtimeUserId, null);
+    }
+
+    /**
+     * 落库待确认上下文（可携带 Channel 网关真实会话 key 与本轮 skills；同 session 新 ASK 覆盖旧条目）。
+     *
+     * @param skills 本轮可用技能列表；由恢复段再次挂起时沿用（issue #264），null=未声明
+     */
+    void putConfirmContext(String sessionId, RequireUserConfirmEvent event,
+                           String runtimeSessionId, String runtimeUserId, List<String> skills) {
         if (isPropagatedRemoteAsk(sessionId, event.getToolCalls())) {
             log.info("[HITL] suppress ghost local confirm (PROPAGATE'd remote ask, ids={}) — "
                     + "remote row task:{{task_id}} is the only valid decision route (F20)",
@@ -864,7 +907,8 @@ public class AgentRuntimeService {
             return;
         }
         confirmContextStore.put(sessionId,
-            toolCallsJson(event.getToolCalls()), event.getReplyId(), runtimeSessionId, runtimeUserId);
+            toolCallsJson(event.getToolCalls()), event.getReplyId(), runtimeSessionId, runtimeUserId,
+            skills);
     }
 
     /**
@@ -988,7 +1032,7 @@ public class AgentRuntimeService {
             toolCalls.put(tc.getId(), tc);
         }
         return new ConfirmContext(toolCalls, row.replyId(), Instant.now(),
-            new AtomicBoolean(true), row.runtimeSessionId(), row.runtimeUserId());
+            new AtomicBoolean(true), row.runtimeSessionId(), row.runtimeUserId(), row.skills());
     }
 
     /**
@@ -1089,7 +1133,7 @@ public class AgentRuntimeService {
             log.info("[HITL] resolveConfirmContext: table hit (complete params) for {}, tools={}, replyId={}",
                 fullThreadId, tools.keySet(), replyId);
             return new ConfirmContext(tools, replyId, Instant.now(), new AtomicBoolean(true),
-                runtimeSid, runtimeUid);
+                runtimeSid, runtimeUid, fromTable.skills());
         }
 
         if (fromState != null) {
@@ -1124,6 +1168,24 @@ public class AgentRuntimeService {
     /** 清理确认上下文（供测试/运维使用；恢复完成后不主动清理——保留 consumed 条目以正确返回 409，且同 session 新 ASK 会覆盖） */
     void removeConfirmContext(String sessionId) {
         confirmContextStore.delete(makeThreadId(sessionId));
+    }
+
+    /**
+     * 恢复段沿用挂起轮的技能白名单（issue #264）：优先读本地未消费行；行已被 CAS
+     * 消费时回落同键最近一条已消费本地行。两处都无 → null（不设白名单，存量语义）。
+     *
+     * <p>用途：Channel confirm 恢复段再次触发 permission_ask 时，把原轮名单继续落库，
+     * 避免第二层恢复丢失白名单。仅在 HITL 低频路径调用，不做缓存。
+     */
+    public List<String> pendingTurnSkills(String sessionId) {
+        var fullThreadId = makeThreadId(sessionId);
+        var pending = confirmContextStore.findPending(fullThreadId, ConfirmContextStore.LOCAL_KEY);
+        if (pending.isPresent()) {
+            return pending.get().skills();
+        }
+        return confirmContextStore.findLastConsumedLocal(fullThreadId)
+            .map(ConfirmContextStore.PendingConfirm::skills)
+            .orElse(null);
     }
 
     /**

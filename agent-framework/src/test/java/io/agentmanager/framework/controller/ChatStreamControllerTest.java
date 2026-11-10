@@ -1454,7 +1454,7 @@ class ChatStreamControllerTest {
         sleep(200);
 
         // 帧已广播、确认上下文已落库，但租约一动不动
-        verify(runtimeService, timeout(2000)).storeConfirmContext(eq(sessionId), any());
+        verify(runtimeService, timeout(2000)).storeConfirmContext(eq(sessionId), any(), any());
         verify(turnLeaseStore, never()).release(anyString(), anyString());
         verify(eventStore, never()).finishTurn(anyString());
 
