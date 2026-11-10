@@ -271,7 +271,9 @@ export function entryConfigured(e?: RuntimeDefaultEntry): boolean {
 
 /**
  * 运行时默认 PUT 三态组装（契约 U1：出现非空 = 设置、空串 = 删除、缺失 = 不变）。
- * - 非敏感键：全量上送输入值（空串 = 删除），clearing 收集「原有值 → 将清空」的键供确认提示；
+ * - 非敏感键：统一 trim 后上送（issue #262，与同页 ROUTING_HOST_SUFFIX 预检的 trim 口径
+ *   对齐；后端原样落库不 trim——粘贴/textarea 尾随换行的污染值会在导出链路远处才失败），
+ *   纯空白按空串（三态 = 删除），clearing 收集「原有值 → 将清空」的键供确认提示；
  * - 敏感键：仅上送非空新输入（留空 = 不变，与平台默认配置页同口径）。
  */
 export function buildRuntimeDefaultPayload(
@@ -287,7 +289,7 @@ export function buildRuntimeDefaultPayload(
       const next = (secret[f.envKey] ?? "").trim();
       if (next) values[f.envKey] = next; // 留空 = 不变（缺失语义）
     } else {
-      const next = plain[f.envKey] ?? "";
+      const next = (plain[f.envKey] ?? "").trim();
       values[f.envKey] = next;
       if (entryConfigured(existing[f.envKey]) && next === "") clearing.push(f.envKey);
     }

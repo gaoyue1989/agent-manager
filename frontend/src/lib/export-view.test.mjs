@@ -112,6 +112,35 @@ test("buildRuntimeDefaultPayload：三态语义（非空=设置、空串=删除�
   assert.deepEqual(clearing, ["CHECKPOINT_JDBC_BASE"]); // 仅「有值 → 清空」进确认清单
 });
 
+test("buildRuntimeDefaultPayload：非敏感键 trim 上送（issue #262，与同页后缀预检口径对齐）", () => {
+  const fields = RUNTIME_DEFAULT_FIELDS.filter((f) =>
+    ["CHECKPOINT_JDBC_BASE", "REGISTRY_ADDRESS", "LLM_API_KEY"].includes(f.envKey));
+  const existing = {
+    CHECKPOINT_JDBC_BASE: { value: "jdbc:mysql://old/oaf_checkpoint", sensitive: false, category: "mysql" },
+    REGISTRY_ADDRESS: { hasValue: true, sensitive: false, category: "registry" },
+  };
+  const { values, clearing } = buildRuntimeDefaultPayload(
+    fields,
+    {
+      // textarea 尾随换行 / 粘贴首尾空白：trim 后原样设置，不以污染值落库
+      CHECKPOINT_JDBC_BASE: "  jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint\n",
+      REGISTRY_ADDRESS: "\t 172.20.0.1:5001 ",
+    },
+    {},
+    existing,
+  );
+  assert.deepEqual(values, {
+    CHECKPOINT_JDBC_BASE: "jdbc:mysql://mysql.prod.svc:3306/oaf_checkpoint",
+    REGISTRY_ADDRESS: "172.20.0.1:5001",
+  });
+  // 纯空白 = 空串（三态删除语义）：已配置键进 clearing 确认清单
+  const blank = buildRuntimeDefaultPayload(
+    RUNTIME_DEFAULT_FIELDS.filter((f) => f.envKey === "REGISTRY_ADDRESS"),
+    { REGISTRY_ADDRESS: "   " }, {}, existing);
+  assert.equal(blank.values.REGISTRY_ADDRESS, "");
+  assert.deepEqual(blank.clearing, ["REGISTRY_ADDRESS"]);
+});
+
 test("groupFieldsByCategory：按 schema 顺序分组、标题映射齐全", () => {
   const groups = groupFieldsByCategory(RUNTIME_DEFAULT_FIELDS);
   assert.deepEqual(groups.map((g) => g.category), ["mysql", "redis", "otel", "llm", "sandbox", "protocol", "registry", "routing", "runtime"]);
