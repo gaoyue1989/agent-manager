@@ -68,6 +68,10 @@ public class AgentScopeConfig {
             .apiKey(config.opensandbox().apiKey())
             .image(config.image())
             .timeout(Duration.ofMinutes(config.timeoutMinutes()))
+            // 建箱/管理面 HTTP 请求超时（oa-1110-repro-fixes-design §2.3b）：并发建箱高峰
+            // 上游排队放大（实测 1.5s→13.2s），与 create 重试叠加消化；0/负值 = 走 SDK 默认
+            .requestTimeout(config.requestTimeoutSeconds() > 0
+                ? Duration.ofSeconds(config.requestTimeoutSeconds()) : null)
             .entrypoint(config.entrypoint())
             .resource(Map.of(
                 "cpu", String.valueOf(config.cpuCount()),
@@ -223,7 +227,8 @@ public class AgentScopeConfig {
     private static io.agentmanager.framework.config.SandboxLifecycleConfig lifecycleConfig(
         org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> provider) {
         var cfg = provider != null ? provider.getIfAvailable() : null;
-        return cfg != null ? cfg : new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20);
+        return cfg != null ? cfg
+            : new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
     }
 
     /**

@@ -310,7 +310,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return translated;
             }
         }
-        var execution = osbSandbox.commands().run(command);
+        var execution = runCommandGuarded(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
             ? execution.getLogs().getStdout().stream()
@@ -323,6 +323,60 @@ public class OpenSandbox extends AbstractBaseSandbox
                 .collect(Collectors.joining("\n"))
             : "";
         return new ExecResult(exitCode, stdout, stderr, false);
+    }
+
+    /** exec 数据面连续失败阈值（oa-1110-repro-fixes-design §2.3d；0 = 关闭） */
+    private static final int EXEC_DATAPLANE_FAIL_LIMIT = resolveExecDataplaneFailLimit();
+
+    private static int resolveExecDataplaneFailLimit() {
+        try {
+            String v = System.getenv("SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT");
+            return v == null || v.isBlank() ? 3 : Math.max(0, Integer.parseInt(v.trim()));
+        } catch (Exception e) {
+            return 3;
+        }
+    }
+
+    /** exec 数据面连续失败计数（实例随沙箱代创建；成功即清零） */
+    private final java.util.concurrent.atomic.AtomicInteger dataplaneFailStreak =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    /**
+     * 执行命令并做数据面故障感知（oa-1110-repro-fixes-design §2.3d）：连接类失败
+     * （502/503/504 网关不可达 / 连接异常 / 超时）按沙箱实例计<b>连续</b>失败数——
+     * 达到 {@code SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT}（默认 3）时抛出可读化异常：
+     * harness 会把异常转为 "Internal sandbox error: <msg>" 工具文本回喂 LLM，可读文案
+     * 引导模型停止重试风暴并告知用户（复现中 118 次 502 重试的根治手段）；同时 ERROR
+     * 日志归因。阈值内保持原异常透传（容忍瞬时抖动）；任何情况下不改变 turn 控制流。
+     * 非连接类失败（业务命令非零退出等）不计数、成功即清零。
+     */
+    private com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+            runCommandGuarded(String command) throws Exception {
+        com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution execution;
+        try {
+            execution = osbSandbox.commands().run(command);
+        } catch (Exception e) {
+            var kind = SandboxFailureClassifier.kindOf(e);
+            if (kind == SandboxFailureClassifier.Kind.NONE
+                    || EXEC_DATAPLANE_FAIL_LIMIT <= 0) {
+                throw e;
+            }
+            int streak = dataplaneFailStreak.incrementAndGet();
+            if (streak < EXEC_DATAPLANE_FAIL_LIMIT) {
+                throw e;
+            }
+            log.error("[sandbox-open] sandbox dataplane unreachable after {} consecutive failures "
+                    + "(sandbox={}, endpoint={}, kind={}): {}",
+                streak, state != null ? state.getSandboxId() : "?",
+                state != null ? state.getSandboxEndpoint() : "?", kind, e.getMessage());
+            throw new SandboxException(SandboxErrorCode.WORKSPACE_START_ERROR, "exec",
+                SandboxFailureClassifier.readableMessage(kind)
+                    + "（当前会话沙箱已连续 " + streak + " 次命令失败，请停止重试本操作，"
+                    + "并告知用户该会话沙箱已故障、需要重新发起会话。原始错误: "
+                    + e.getMessage() + "）", e);
+        }
+        dataplaneFailStreak.set(0);
+        return execution;
     }
 
     /**

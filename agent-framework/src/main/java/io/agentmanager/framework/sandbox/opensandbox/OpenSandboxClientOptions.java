@@ -18,6 +18,8 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private String apiKey;
     private String image = "opensandbox/code-interpreter:v1.1.0";
     private Duration timeout = Duration.ofMinutes(60);
+    /** 建箱/管理面 HTTP 请求超时（oa-1110-repro-fixes-design §2.3b）；null = 走 SDK 默认 */
+    private Duration requestTimeout;
     private List<String> entrypoint = List.of("/opt/code-interpreter/code-interpreter.sh");
     private Map<String, String> resource = Map.of("cpu", "1", "memory", "1024Mi");
     private Map<String, String> environment = new HashMap<>();
@@ -45,6 +47,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public String getApiKey() { return apiKey; }
     public String getImage() { return image; }
     public Duration getTimeout() { return timeout; }
+    public Duration getRequestTimeout() { return requestTimeout; }
     public List<String> getEntrypoint() { return entrypoint; }
     public Map<String, String> getResource() { return resource; }
     public Map<String, String> getEnvironment() { return environment; }
@@ -55,6 +58,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions apiKey(String apiKey) { this.apiKey = apiKey; return this; }
     public OpenSandboxClientOptions image(String image) { this.image = image; return this; }
     public OpenSandboxClientOptions timeout(Duration timeout) { this.timeout = timeout; return this; }
+    public OpenSandboxClientOptions requestTimeout(Duration requestTimeout) { this.requestTimeout = requestTimeout; return this; }
     public OpenSandboxClientOptions entrypoint(List<String> entrypoint) { this.entrypoint = entrypoint; return this; }
     public OpenSandboxClientOptions resource(Map<String, String> resource) { this.resource = resource; return this; }
     public OpenSandboxClientOptions environment(Map<String, String> env) { this.environment = env; return this; }

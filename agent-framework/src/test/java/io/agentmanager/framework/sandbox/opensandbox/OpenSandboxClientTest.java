@@ -236,7 +236,7 @@ class OpenSandboxClientTest {
         // poolRef 路径无法抑制（上游对组合实测忽略，镜像以 Pool 模板为准）
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "pool-e2e", 5, 60, 20));
+            true, "pool-e2e", 5, 60, 20, 2, 1000));
         when(manager.acquire(anyString(), anyString(), any(), any(), any()))
             .thenAnswer(inv -> {
                 // 直调 create 委托：穿透到 builder 组装逻辑
@@ -286,7 +286,7 @@ class OpenSandboxClientTest {
         // poolRef 空（默认）→ create 不带 extensions.poolRef，走普通创建（§4.5 兼容存量）
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "", 5, 60, 20));
+            true, "", 5, 60, 20, 2, 1000));
         when(manager.acquire(anyString(), anyString(), any(), any(), any()))
             .thenAnswer(inv -> {
                 var delegate = inv.getArgument(3, SandboxLifecycleManager.SandboxCreateDelegate.class);
@@ -333,7 +333,7 @@ class OpenSandboxClientTest {
         // 守卫未装配的防御分支（身份缺失）→ 基线 create，不路由 lifecycle
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "", 5, 60, 20));
+            true, "", 5, 60, 20, 2, 1000));
         var spec = lifecycleSpec(manager);
         spec.takePendingSessionId();   // 清空捕获
         var osb = mockOsbSandbox("sb-noid");
@@ -473,11 +473,52 @@ class OpenSandboxClientTest {
     @Test
     void newConfigBindingChainDefaultsAlignWithDesign() {
         // §4.7 绑定链：env → application.yml 占位符段 → 构造器 null 归一（@DefaultValue 即归一）
-        var cfg = new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20);
+        var cfg = new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
         assertTrue(cfg.enabled());
         assertEquals("", cfg.poolRef());
         assertEquals(5, cfg.userQuota());
         assertEquals(60, cfg.renewIntervalSeconds());
         assertEquals(20, cfg.confirmHoldMinutes());
+        // oa-1110-repro-fixes-design §2.3a：create 重试默认开启（2 次、1s 退避）
+        assertEquals(2, cfg.createMaxAttempts());
+        assertEquals(1000L, cfg.createRetryBackoffMs());
+    }
+
+    // ---- execd 数据面探活（oa-1110-repro-fixes-design §2.3d：控制/数据面状态不一致兜底） ----
+
+    @Test
+    void execdPingAliveShouldPassWhenCommandRuns() {
+        var client = new OpenSandboxClient(options(), null, null, null);
+        var handle = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(handle.commands()).thenReturn(commands);
+        when(commands.run("true")).thenReturn(mock(Execution.class));
+
+        assertTrue(client.execdPingAlive(handle));
+    }
+
+    @Test
+    void execdPingAliveShouldFailWhenDataplaneUnreachable() {
+        var client = new OpenSandboxClient(options(), null, null, null);
+        var handle = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(handle.commands()).thenReturn(commands);
+        when(commands.run("true")).thenThrow(new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException(
+            "502 Bad Gateway: Could not connect to the backend sandbox", null, 502,
+            new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError(
+                "gateway_unreachable", "Could not connect to the backend sandbox")));
+
+        assertFalse(client.execdPingAlive(handle));
+    }
+
+    @Test
+    void requestTimeoutShouldFlowThroughOptionsPlumbing() {
+        // spec → clientOptions 透传（同包测试直接调用 protected clientOptions；
+        // ConnectionConfig 为 SDK final 类，透传断言到 options 层为止）
+        var spec = new OpenSandboxFilesystemSpec();
+        spec.requestTimeout(Duration.ofSeconds(45));
+        assertEquals(Duration.ofSeconds(45), spec.clientOptions().getRequestTimeout());
+        // 未设置 = null（走 SDK 默认）
+        assertNull(new OpenSandboxFilesystemSpec().clientOptions().getRequestTimeout());
     }
 }

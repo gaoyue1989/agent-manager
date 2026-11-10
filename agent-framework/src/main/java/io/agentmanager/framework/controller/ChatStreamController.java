@@ -735,12 +735,24 @@ public class ChatStreamController {
                             } else if (isTrailingSandboxTeardownError(e)) {
                                 log.info("ignore trailing sandbox teardown error (sid={})", finalSessionId);
                             } else if (!lease.isLost()) {
-                                // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
-                                var errText = e.getMessage() != null
-                                    ? e.getMessage() : e.getClass().getSimpleName();
-                                eventBus.emitSynthetic(finalSessionId, replyId, "error",
-                                    "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(errText) + "}");
-                                recordTurnError(finalSessionId, replyId, errText);
+                                // 沙箱类瞬时故障（建箱超时/连接失败/网关不可达，oa-1110 #1c）：
+                                // 结构化可读 error 帧（code=sandbox_create_failed + retryable +
+                                // 中文文案），替代 "Lifecycle acquire failed: Request timed out:
+                                // timeout" 生硬透出；非沙箱类保持原样透出（后向兼容）
+                                var sandboxFrame = io.agentmanager.framework.sandbox.opensandbox
+                                    .SandboxFailureClassifier.sseErrorFrame(e);
+                                if (sandboxFrame != null) {
+                                    eventBus.emitSynthetic(finalSessionId, replyId, "error", sandboxFrame);
+                                    recordTurnError(finalSessionId, replyId,
+                                        "sandbox_create_failed: " + e.getMessage());
+                                } else {
+                                    // 丢锁后这场 error 多半是丢锁的后果，再落一条只会占用新 owner 的 seq
+                                    var errText = e.getMessage() != null
+                                        ? e.getMessage() : e.getClass().getSimpleName();
+                                    eventBus.emitSynthetic(finalSessionId, replyId, "error",
+                                        "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(errText) + "}");
+                                    recordTurnError(finalSessionId, replyId, errText);
+                                }
                             }
                             endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
                         },

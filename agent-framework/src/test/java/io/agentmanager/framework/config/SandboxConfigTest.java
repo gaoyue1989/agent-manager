@@ -12,7 +12,7 @@ class SandboxConfigTest {
     @Test
     void defaultsShouldMatchDesign() {
         var config = new SandboxConfig(
-            false, "opensandbox/code-interpreter:v1.1.0", 60, 1024, 1,
+            false, "opensandbox/code-interpreter:v1.1.0", 60, 30, 1024, 1,
             List.of("/opt/code-interpreter/code-interpreter.sh"),
             Duration.ofMillis(100),
             true, true, 900,
@@ -31,12 +31,14 @@ class SandboxConfigTest {
         assertTrue(config.syncSnapshotDiffEnabled());
         assertEquals("192.168.31.155:8090", config.opensandbox().serverUrl());
         assertEquals("key", config.opensandbox().apiKey());
+        // oa-1110-repro-fixes-design §2.3b：建箱 HTTP 请求超时默认 30s（≠ timeoutMinutes 的 TTL 语义）
+        assertEquals(30, config.requestTimeoutSeconds());
     }
 
     @Test
     void enabledFlagShouldBeOverridable() {
         var config = new SandboxConfig(
-            true, "ubuntu:24.04", 30, 512, 2, List.of("python", "main.py"),
+            true, "ubuntu:24.04", 30, 30, 512, 2, List.of("python", "main.py"),
             Duration.ofSeconds(1),
             true, true, 900,
             true, true, true, false, 500, 30,

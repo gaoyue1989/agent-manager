@@ -657,6 +657,63 @@ class OpenSandboxTest {
         throw new AssertionError("未捕获到 hydrate tar 写入");
     }
 
+    // ---------- exec 数据面故障感知（oa-1110-repro-fixes-design §2.3d） ----------
+
+    private static RuntimeException gateway502() {
+        return new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException(
+            "502 Bad Gateway {\"message\":\"Could not connect to the backend sandbox\"}",
+            null, 502, new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError(
+                "gateway_unreachable", "Could not connect to the backend sandbox"));
+    }
+
+    @Test
+    void execDataplaneFailuresBelowThresholdPropagateOriginal() {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        when(osb.commands().run(anyString())).thenThrow(gateway502());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var ex = assertThrows(Exception.class,
+            () -> sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo hi", 30));
+
+        assertTrue(ex.getMessage().contains("502 Bad Gateway"),
+            "阈值内保持原始异常透传（容忍瞬时抖动）：" + ex.getMessage());
+        // 连续失败 1 次 < 默认阈值 3：命令未改写、无健康标记日志面之外的副作用
+        verify(osb.commands(), times(1)).run(anyString());
+    }
+
+    @Test
+    void execDataplaneFailuresAtThresholdBecomeReadable() throws Exception {
+        // 链式单次打桩（thenThrow×3 → thenReturn → thenThrow），规避 throwing 桩重打桩触发旧桩
+        var commands = mock(Commands.class);
+        var osb = mock(Sandbox.class);
+        when(osb.commands()).thenReturn(commands);
+        var gw = gateway502();
+        when(commands.run(anyString()))
+            .thenThrow(gw, gw, gw)                    // 连续 3 次（第 3 次达阈值改写）
+            .thenReturn(mockExecution(0, "ok", ""))   // 恢复成功 → 计数清零
+            .thenThrow(gw);                           // 再失败 → 从头计（原样透传）
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var ctx = RuntimeContext.builder().userId("u").build();
+        assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 1", 30));
+        assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 2", 30));
+        var third = assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 3", 30));
+
+        // 达阈值（默认 3）：异常消息可读化，引导模型停止重试风暴并告知用户（复现 118×502 的根治）
+        assertTrue(third.getMessage().contains("已连续 3 次命令失败"),
+            "阈值达限应改写为可读文案：" + third.getMessage());
+        assertTrue(third.getMessage().contains("停止重试"), third.getMessage());
+        assertTrue(third.getMessage().contains("502 Bad Gateway"), "保留原始错误：" + third.getMessage());
+        verify(commands, times(3)).run(anyString());
+
+        // 阈值后恢复成功 → 计数清零，下次失败从头计
+        var ok = sandbox.exec(ctx, "echo ok", 30);
+        assertTrue(ok.ok());
+        var fresh = assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 4", 30));
+        assertTrue(fresh.getMessage().contains("502 Bad Gateway"),
+            "恢复后计数应清零，单次失败不触发改写：" + fresh.getMessage());
+    }
+
     private static int countHydrateTarWrites(Sandbox osb) throws Exception {
         var captor = ArgumentCaptor.forClass(List.class);
         verify(osb.files(), atLeastOnce()).write(captor.capture());
