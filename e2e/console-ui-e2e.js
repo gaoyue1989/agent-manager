@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 控制台浏览器 E2E（Puppeteer）：登录 → 工作空间 → Agent 列表/创建/详情/编辑 →
- * 模型连接 → 工具（MCP）→ 技能中心 → 沙箱配置总览。
+ * 模型连接 → 工具（MCP）→ 技能中心 → 沙箱配置总览 → 沙箱管理（admin）→ 沙箱实例（console）。
  *
  * 设计：
  *  - 数据准备走 API（登录/建空间/模型连接/工具/技能/导入包/沙箱 Agent），浏览器只驱动 UI；
@@ -311,6 +311,23 @@ async function main() {
     check("沙箱总览页渲染", !!(await page.$(testid("console-sandbox"))));
     check("沙箱总览表格渲染", !!(await page.$(testid("sandbox-table"))));
     check("沙箱总览含沙箱 Agent", (await text(testid("sandbox-table"))).includes(SANDBOX_NAME), await text(testid("sandbox-table")));
+
+    // ---- 运维侧沙箱管理（§6.1：汇总 StatCard + 池卡片区 + 沙箱实例表；只冒烟渲染，不做池 CRUD）----
+    console.log("== UI：沙箱管理（admin）==");
+    await goto("/admin/sandboxes", testid("sandbox-admin"));
+    // summary/沙箱列表为接口拉取后渲染；空数据/未配置也应有页面框架（表格无条件渲染，空态行「暂无沙箱」）
+    await page.waitForSelector(testid("sandbox-table"), { timeout: 30000 }).catch(() => {});
+    check("沙箱管理页渲染", !!(await page.$(testid("sandbox-admin"))));
+    check("沙箱管理汇总卡渲染", !!(await page.$(testid("sb-stat-pools"))) && !!(await page.$(testid("sb-stat-running"))));
+    check("沙箱管理池区块渲染", !!(await page.$(testid("pool-create-open"))));
+    check("沙箱管理实例表渲染", !!(await page.$(testid("sandbox-table"))));
+
+    // ---- 用户侧沙箱实例（§6.2：本工作空间只读视图，空态亦渲染表格框架）----
+    console.log("== UI：沙箱实例（console）==");
+    await goto("/console/assets/sandbox-instances", testid("console-sandbox-instances"));
+    await page.waitForSelector(testid("sandbox-instances-table"), { timeout: 30000 }).catch(() => {});
+    check("沙箱实例页渲染", !!(await page.$(testid("console-sandbox-instances"))));
+    check("沙箱实例表渲染", !!(await page.$(testid("sandbox-instances-table"))));
 
     // ---- 工作空间配置（跨集群导出 §10：runtime-defaults 单端点，掩码 + 三态）----
     console.log("== UI：工作空间配置 ==");
