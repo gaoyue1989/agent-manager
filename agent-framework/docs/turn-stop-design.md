@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS turn_stop (
 |---|---|---|---|
 | ① | HITL `waiting_confirm` | — | 409 `turn_waiting_confirm`（改用 confirm 拒绝） |
 | ② | **执行中**（`turn_lease` 在）：最新非终态事件 | 事件 replyId | 202 + 写行 |
-| ③ | 执行中但尚无事件（刚抢到锁/准备段） | 不可判定 | 409 `turn_not_ready`（retryable，客户端短重试） |
+| ③ | 执行中但尚无事件（刚抢到锁/准备段） | 意图行 `turn_intent`（租约到手后保留到终态）的 replyId；不可得（如 confirm 恢复段）则 409 `turn_not_ready`（retryable，客户端短重试） | 202 + 写行 / 409 |
 | ④ | **排队中**（无租约，`turn_intent` 存在） | 意图行 replyId | 202 + 写行（排队 loop 收流） |
 | ⑤ | 以上皆无 | — | 404 `nothing_to_stop` |
 
@@ -136,6 +136,9 @@ queued），命中停止行时**只置内存标记、不消费行**——`turn_s
   代际仍匹配时移除。
 - 陈旧条目无害：SDK 在新 call 开始时 reset 中断标志。
 - 兼容路径：非 HarnessAgent/ReActAgent 实例退化为无参 `interrupt()`（仅测试/嵌入式）。
+- **登记入口（两条执行段都要）**：`/threads/chat` 与 `confirm-stream` 恢复段都在租约到手后
+  `register`、终态 `unregister`；恢复段同样在抢锁前登记 `turn_intent`，使「租约在但首个
+  事件未产出」的 stop 也能解析 replyId（消除 409 `turn_not_ready` 窗口）。
 
 ### 3.5 终态与展示
 
