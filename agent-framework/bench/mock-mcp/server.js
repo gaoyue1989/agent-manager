@@ -160,7 +160,11 @@ function handleRpc(body) {
           description: '回显输入文本（压测专用）',
           inputSchema: {
             type: 'object',
-            properties: { text: { type: 'string', description: '待回显文本' } },
+            properties: {
+              text: { type: 'string', description: '待回显文本' },
+              // 非必需：e2e S5c 断言 arguments 通道注入（框架补缺，模型不产此参数）
+              taskId: { type: 'string', description: '请求级业务参数（e2e 注入断言用）' },
+            },
             required: ['text'],
           },
         }, {
@@ -228,12 +232,14 @@ function writeRpc(req, res, sessionId, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
-  // e2e 观测：记录本次 tools/call 收到的用户级 header、请求级透传头与 _meta（协议字段）
+  // e2e 观测：记录本次 tools/call 收到的用户级 header、请求级透传头、工具入参与 _meta
   if (payload.method === 'tools/call') {
     lastCall = {
       at: Date.now(),
+      toolName: (payload.params && payload.params.name) || null,
       xUserId: req.headers['x-user-id'] ?? null,
       authorization: req.headers['authorization'] ?? null,
+      arguments: (payload.params && payload.params.arguments) || null,
       meta: payload.params ? payload.params._meta ?? null : null,
     };
   }

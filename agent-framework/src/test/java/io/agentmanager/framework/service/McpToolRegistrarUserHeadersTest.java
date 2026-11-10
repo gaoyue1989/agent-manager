@@ -180,6 +180,102 @@ class McpToolRegistrarUserHeadersTest {
         assertEquals(Set.of("authorization"), registrar.getForwardHeaderNames());
     }
 
+    // ===== arguments 节（mcp-header-arguments-injection-design §4/§5.2）=====
+
+    @Test
+    void shouldParseArgumentsSectionOnly() {
+        // headers 与 arguments 可只声明其一：仅 arguments 时 headers 为空映射
+        var rule = registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of(
+                "arguments", Map.of("taskId", "reqHeader:taskid", "tenantId", "userId"))),
+            "srv");
+
+        assertNotNull(rule);
+        assertEquals(Map.of(), rule.headers());
+        assertEquals(Map.of("taskId", "reqHeader:taskid", "tenantId", "userId"), rule.arguments());
+        assertTrue(rule.denyOnMissing());
+    }
+
+    @Test
+    void shouldParseBothSectionsIndependently() {
+        var rule = registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of(
+                "headers", Map.of("X-Task-Id", "reqHeader:taskid"),
+                "arguments", Map.of("taskId", "reqHeader:taskid"),
+                "on-missing", "passthrough")),
+            "srv");
+
+        assertNotNull(rule);
+        assertEquals(Map.of("X-Task-Id", "reqHeader:taskid"), rule.headers());
+        assertEquals(Map.of("taskId", "reqHeader:taskid"), rule.arguments());
+        assertFalse(rule.denyOnMissing());
+    }
+
+    @Test
+    void shouldNormalizeAndDropDeniedInArgumentsSection() {
+        // 与 headers 节同款语义：reqHeader: 后段 lowercase 归一、denylist 解析期剔除；
+        // 参数键（映射键）保留原样大小写——参数名匹配的是下游 schema，大小写敏感
+        var rule = registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of("arguments", Map.of(
+                "TaskId", "reqHeader:TaskId",
+                "bad", "reqHeader:cookie",
+                "evil", "reqHeader:x-forwarded-tenant"))),
+            "srv");
+
+        assertNotNull(rule);
+        assertEquals(Map.of("TaskId", "reqHeader:taskid"), rule.arguments(),
+            "归一作用于取值源头名，参数键原样保留；denylist 命中映射剔除");
+
+        // 全部条目被剔 / 节非法 → 与 headers 节同口径返回 null
+        assertNull(registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of("arguments", Map.of("bad", "reqHeader:cookie"))), "srv"));
+        assertNull(registrar.parseUserHeaders(
+            Map.of("userHeaders", Map.of("arguments", Map.of("k", 42))), "srv"));
+    }
+
+    @Test
+    void forwardHeaderNamesShouldUnionArgumentsSection() throws Exception {
+        // arguments 节的 reqHeader:* 头名并入捕获名单（并集去重）
+        writeConfigYaml("srv-arg", """
+            connection:
+              type: streamableHttp
+              url: https://mcp.example.com/mcp
+            userHeaders:
+              arguments:
+                taskId: reqHeader:x-task-id
+                tenantId: userId
+            """);
+
+        registrar.registerOneForTest(new Toolkit(), mcp("srv-arg", "srv-arg"));
+
+        assertEquals(Set.of("x-task-id"), registrar.getForwardHeaderNames(),
+            "arguments 节 reqHeader:* 头名进捕获名单；userId 取值源不影响名单");
+    }
+
+    @Test
+    void shouldWrapStdioWithArgumentsConfigForMetaStripOnly() throws Exception {
+        // stdio 对 userHeaders 整节（含 arguments）告警忽略：常驻装饰仅做 _meta 剥离
+        writeConfigYaml("stdio-arg", """
+            connection:
+              type: stdio
+              command: python
+              args: ["mcp_server.py"]
+            userHeaders:
+              arguments:
+                taskId: reqHeader:taskid
+            """);
+
+        var wrapper = registrar.buildClient(mcp("stdio-arg", "stdio-arg"));
+        assertNotNull(wrapper);
+        assertInstanceOf(UserScopedMcpClientWrapper.class, wrapper);
+
+        var delegate = new RecordingClient();
+        var scoped = new UserScopedMcpClientWrapper(delegate, UserHeaderRule.EMPTY);
+        scoped.callTool("echo", Map.of(), Map.of("reqHeader:taskid", "1001-1757858")).block();
+        assertEquals(Map.of(), delegate.seenArguments.get(),
+            "stdio 无参数注入语义，入参原样（EMPTY rule）");
+    }
+
     // ===== buildClient 装饰分支 =====
 
     @Test
@@ -268,6 +364,7 @@ class McpToolRegistrarUserHeadersTest {
             .isError(false)
             .build();
         final AtomicReference<Map<String, Object>> seenMeta = new AtomicReference<>();
+        final AtomicReference<Map<String, Object>> seenArguments = new AtomicReference<>();
         final AtomicReference<McpTransportContext> seenTransportContext = new AtomicReference<>();
 
         RecordingClient() {
@@ -292,6 +389,7 @@ class McpToolRegistrarUserHeadersTest {
         @Override
         public Mono<McpSchema.CallToolResult> callTool(
                 String toolName, Map<String, Object> arguments, Map<String, Object> meta) {
+            seenArguments.set(arguments);
             seenMeta.set(meta);
             return Mono.deferContextual(cv -> {
                 seenTransportContext.set(cv.getOrDefault(McpTransportContext.KEY, null));

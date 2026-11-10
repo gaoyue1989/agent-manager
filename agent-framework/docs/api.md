@@ -604,12 +604,15 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 | `skills` | List\<String\> | | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进模型侧 `<available_skills>`、不可经 `load_skill_through_path` 加载、`/Skill` 不注入；未知技能名忽略、已禁用技能剔除（禁用优先）。见 [session-skill-list-design.md](../../docs/design/session-skill-list-design.md)） |
 | `tools` | List\<String\> | | 本轮可用工具白名单，作用域限 **MCP + 自定义**（**缺省 = 全部**；`[]` = 仅内置——内置工具恒可见、不受会话级控制，关闭走包级 `deniedTools`；仅本轮生效，不落库、不跨轮沿用）。名单外的 MCP/自定义工具不进模型侧请求（省 token），模型幻觉调用在 acting 层兜底 DENY。名单可用裸名（主口径，= `GET /tools` 的 `name` / `sessionTools.tools`）或 MCP 全名 `mcp__{server}__{tool}`（别名）；未知名忽略；内置名写入名单 WARN 且不改变可见性。可传清单见 `GET /tools` 的 `sessionTools`。见 [session-tool-list-design.md](../../docs/design/session-tool-list-design.md) |
 
-> **请求级透传头（mcp-chat-header-forward-design）**：请求携带的 HTTP header 可按 OAF 包
-> `mcp-configs/{server}/config.yaml` 的 `userHeaders.headers` 声明（取值源
-> `reqHeader:<小写头名>`）透传到该 MCP server 的工具调用 HTTP 请求上。**未声明不捕获**；
-> 平台 denylist（`cookie`/`x-forwarded-*`/`sec-*`/hop-by-hop 等）永不透传；透传值仅走
-> HTTP header 单通道、不进 `_meta`、不落盘不进日志，时效由调用方保证（排队 turn 不重取）。
-> confirm 恢复（`/confirm`、`/confirm-stream`）与 AG-UI run（含 `resume[]`）同规则。
+> **请求级透传头（mcp-chat-header-forward-design / mcp-header-arguments-injection-design）**：
+> 请求携带的 HTTP header 可按 OAF 包 `mcp-configs/{server}/config.yaml` 的 `userHeaders`
+> 声明（取值源 `reqHeader:<小写头名>`）双通道注入该 MCP server 的工具调用：
+> `headers` 节 → HTTP header（网关鉴权/审计）；`arguments` 节 → 工具入参
+> `params.arguments`（下游业务服务工具参数只从 arguments 取值——schema 门控 + args-win
+> 只补缺，值恒为字符串，缺值恒跳过）。**未声明不捕获**；平台 denylist
+> （`cookie`/`x-forwarded-*`/`sec-*`/hop-by-hop 等）永不透传；透传值不进 `_meta`、不落盘
+> 不进日志，时效由调用方保证（排队 turn 不重取）。confirm 恢复（`/confirm`、
+> `/confirm-stream`）与 AG-UI run（含 `resume[]`）同规则。
 
 **响应 (SSE):**
 
