@@ -1,6 +1,6 @@
 # oa-1110 复现问题批量修复设计（技能禁用闭环 / 压缩前归档 / 沙箱建箱韧性 / stop 回归）
 
-> 状态：实施中（2026-11-10）。来源：2026-11-10 测试环境（`agent-framework-oa.region-c86-test`，镜像基线 f3aba60）复现报告。
+> 状态：**已实施（2026-11-10，fix/oa-1110-repro-issues 分支；单测 1983 例全绿、e2e sandbox 组 24 过 / core 组 98 过、kind 部署冒烟通过，实施记录见 §6）**。来源：2026-11-10 测试环境（`agent-framework-oa.region-c86-test`，镜像基线 f3aba60）复现报告。
 > 分支：`fix/oa-1110-repro-issues`（基线 origin/master a4eae87）。四个问题在基线代码的存在性均已核实，根因位置见 §1。
 
 ## 0. 背景与范围
@@ -153,15 +153,21 @@ context，压缩点之前的明细由归档轨补齐——`loadMessagesMerged` �
   "retryable":true,"detail":"<原始异常信息>"}`；其余异常保持现行为（原文透出），纯增量字段。
 - 文案区分：超时（建箱排队/上游无响应，建议稍后重试）vs 连接失败（数据面不可达，建议联系管理员）。
 
-**d) exec 数据面故障感知**（`OpenSandbox.doExec`）：
+**d) exec 数据面故障感知 + 复用探活 execd ping**（实施版，含设计偏差说明）：
 
-- `osbSandbox.commands().run` 捕获连接类失败（`SandboxApiException` 502/503/504、
-  `SandboxConnectionException`、连接类 IOException），按沙箱实例计**连续**失败数。
-- 连续 ≥ `SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT`（默认 3，0=关闭）时：
-  ① 异常消息改写为可读引导（"沙箱数据面不可达…请停止重试并告知用户重新发起会话"），
-  LLM 收到后停止重试风暴；② best-effort 标记绑定不健康（复用 `markSandboxRebuilt` 语义，
-  下轮 acquire 走重建）；③ ERROR 日志带 sandboxId/endpoint。阈值内保持原文透传（容忍瞬时抖动），
-  任何情况下不改变 turn 控制流（harness 将异常转工具文本的行为不动）。
+- `OpenSandbox.doExec`（`runCommandGuarded`）：`osbSandbox.commands().run` 捕获连接类失败
+  （`SandboxApiException` 502/503/504、`SandboxConnectionException`、连接类 IOException），
+  按沙箱实例计**连续**失败数；连续 ≥ `SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT`（默认 3，0=关闭）时
+  异常消息改写为可读引导（"沙箱服务暂不可达…请停止重试并告知用户重新发起会话"），LLM 收到后
+  停止重试风暴；阈值内保持原文透传（容忍瞬时抖动），任何情况下不改变 turn 控制流
+  （harness 将异常转工具文本的行为不动）。成功即清零。
+- **偏差（较原设计）**：原设计"达阈值时 best-effort 标记绑定不健康、下轮 acquire 走重建"
+  未实施——`OpenSandbox` 实例内拿不到可靠 sessionId（`skillCacheScope` 是 turn 级派生值），
+  `markSandboxRebuilt(sessionId)` 语义不符；改为**更强的等价机制**：`OpenSandboxClient.probeAlive`
+  在 getInfo 之后追加一条 execd ping（`true` 命令，`SANDBOX_PROBE_EXECD_PING` 可关，复用路径
+  一次性成本 ≈100-300ms）——控制面存续但数据面失联的沙箱（复现中 118×502 的根因）在 acquire
+  ① 复用探活即判 DEAD → 懒删绑定 + 重建，跨 turn 循环被根治，且不依赖 OpenSandbox 侧标记。
+  代价权衡：失败的沙箱重建一个是确定正确的结果，保守复用则整轮 502。
 
 ### 2.4 #29 stop 回归
 
@@ -217,3 +223,36 @@ kubectl -n agent-platform set image deploy/oaf-e2e-demo \
 | #1c SSE 新字段 | 前端不识别 code/retryable → 字段为增量，`error` 文案本就可读 | 文案回退原文 |
 | #1d exec 阈值改写 | 误判瞬时故障 → 连续计数阈值（默认 3）+ 0 关闭 | `SANDBOX_EXEC_DATAPLANE_FAIL_LIMIT=0` |
 | #25 updatedAt | 存量标记键时间被忽略 → updatedAt 只降不升（取 max 口径不变） | — |
+
+## 6. 实施记录（2026-11-10）
+
+**提交序列**（fix/oa-1110-repro-issues，基线 a4eae87）：
+
+| 提交 | 内容 |
+|---|---|
+| 32c50c4 | 本设计文档 |
+| 7fc763c | #24 技能禁用闭环（投放过滤 + 容器残留 rm + available/注入 L2 收口；复现用例先红 4/4 后绿） |
+| a7ebead | #7 PreCompactionArchiveMiddleware（中间件 6 例 + 合并视图守卫） |
+| dca0b0d | #1 建箱韧性（分类器/create 重试/execd ping/exec 阈值/SSE 分类） |
+| c426952 | #25 updatedAt 标记键 + #29 回归锚点/e2e STP1b |
+
+**实施偏差**（已回填 §2.3d）：exec 达阈值的"绑定不健康标记"改为 acquire 复用探活追加 execd ping
+（`SANDBOX_PROBE_EXECD_PING`，默认开）——`OpenSandbox` 内拿不到可靠 sessionId，且 ping 方案在
+acquire ① 即根治跨 turn 复用坏沙箱，强于事后标记。
+
+**验证结果**：
+
+| 关卡 | 结果 |
+|---|---|
+| 复现用例（改前红） | #24 投放入载荷 / L4 覆盖放回 available / L4 覆盖重新注入 / 全禁用未 prune：4/4 红 |
+| 单测全量 | `mvn test` **1983 例 / 0 失败 / 5 跳过**（CI 基线 1864） |
+| e2e sandbox 组 | `./scripts/run.sh sandbox`（mock OpenSandbox :18090）：**24 passed / 1 skipped / 0 failed**，含 STP1b（首事件前 stop ≠409）首跑即绿 |
+| e2e core 组 | `./scripts/run.sh core`：**98 passed / 3 skipped / 0 failed**，含 S8/HA1 history 断言、SK4 禁用断言、U15 压缩分隔条回放 |
+| kind 部署 | `172.20.0.1:5001/agent-framework:oa1110-fix` → `deploy/oaf-e2e-demo` 2 副本 Running（启动 23.6s 无异常）；冒烟 `/skills/manage`、`/skills/available`、`POST /threads/{sid}/stop`（空闲 404 nothing_to_stop）、`/threads/{sid}/history` 全部符合预期 |
+
+**边界说明**：真实 LLM 链路的在线验证（建箱重试/ping 在真实 OpenSandbox 压力下的表现）待测试环境
+升级镜像后按 §4 验收命令观察；本地 kind 的 `oaf-e2e-demo` 未配置 LLM env，以 e2e mock 全链路为
+准。池 warm 水位（bufferMin/bufferMax 覆盖并发峰值）属平台/OpenSandbox 侧，另案跟进。
+
+**遗留**：`pruneContainerSkillCache` 死代码清理（本次保留不动，避免扩散 diff）；#25 的
+`writeKvFile` 内容不变短路语义维持现状（无变化即无更新，见 §2.5）。
