@@ -191,7 +191,7 @@ public class SkillCatalogService {
     }
 
     /**
-     * 可用 Skill 摘要列表（供前端 @Skill 提示使用）。
+     * 可用 Skill 摘要列表（供前端 /Skill 提示使用）。
      * 仅返回已启用的 skill 的 name + description。
      * 等价于 list() 的精简视图，去掉 version/source/required 等管理字段。
      */
@@ -203,7 +203,7 @@ public class SkillCatalogService {
      * 按用户合并的可用 Skill 摘要（全局目录 ∪ 该用户 L4 个人技能，同名 L4 覆盖描述）。
      *
      * <p>{@code userId} 为空时等价于 {@link #availableSkills()}。L4 合并失败降级为全局目录
-     * （不阻断 @ 补全）；被 SkillManageService 禁用的包内技能仍不出现。
+     * （不阻断 / 补全）；被 SkillManageService 禁用的包内技能仍不出现。
      */
     public List<Map<String, String>> availableSkills(String userId) {
         if (userId == null || userId.isBlank()) {
@@ -237,6 +237,14 @@ public class SkillCatalogService {
 
     /** name → description 合并视图：全局目录为底，L4 个人技能覆盖同名描述（并补入独有技能） */
     private Map<String, String> collectAvailable(String userId) {
+        // L2 禁用集（oa-1110-repro-fixes-design §2.1b）：list() 已剔除禁用名，但下方 L4 合并
+        // 的 enabled 分支会把同名 L4 覆盖重新放回，须在合并后强制剔除（读取失败按空集 fail-soft）
+        java.util.Set<String> l2Disabled;
+        try {
+            l2Disabled = manageService.getDisabledSet();
+        } catch (Exception e) {
+            l2Disabled = java.util.Set.of();
+        }
         var merged = new LinkedHashMap<String, String>();
         for (var m : list()) {
             var name = (String) m.get("name");
@@ -260,9 +268,12 @@ public class SkillCatalogService {
                     merged.put(name, l4Description(userId, name));
                 }
             } catch (Exception e) {
-                // L4 合并失败降级为全局目录，避免 @ 补全整体不可用
+                // L4 合并失败降级为全局目录，避免 / 补全整体不可用
                 log.warn("availableSkills: merge L4 failed for user {}: {}", userId, e.getMessage());
             }
+        }
+        if (!l2Disabled.isEmpty()) {
+            merged.keySet().removeAll(l2Disabled);
         }
         return merged;
     }

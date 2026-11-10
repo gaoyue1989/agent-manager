@@ -825,7 +825,7 @@ GET  /mcp                            # 已注册的 MCP server 摘要
 
 # 技能
 GET  /skills                         # 已启用技能
-GET  /skills/available               # @ 补全候选（按 X-User-Id 合并个人技能）
+GET  /skills/available               # / 补全候选（按 X-User-Id 合并个人技能）
 
 # 模型
 GET  /models                         # 托管模型列表

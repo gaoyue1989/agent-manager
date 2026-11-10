@@ -37,7 +37,7 @@
    - [GET /files/{fileId}](#52-get-filesfileid)
 6. [Agent 信息接口](#6-agent-信息接口)
 7. [工具与 MCP 接口](#7-工具与-mcp-接口)
-8. [Skill 管理与 @引用接口](#8-skill-管理与-引用接口)
+8. [Skill 管理与 /引用接口](#8-skill-管理与-引用接口)
 9. [SSE 事件词表（完整）](#9-sse-事件词表完整)
 10. [模型管理接口](#10-模型管理接口)
 11. [运维接口（OAF 热加载）](#11-运维接口oaf-热加载)
@@ -124,7 +124,7 @@ Accept: text/event-stream
 | `sessionId` | String | ❌ | 会话 ID（不传则自动生成 UUID） |
 | `model` | String | ❌ | 会话级模型选择（`model_config.id`）。`""`/`"system"` 清除覆盖回默认；未知或已停用 → error 帧 `unknown_model` / `model_disabled` |
 | `fileIds` | Array\<String\> | ⚠️ | 上传文件 ID 列表 |
-| `skills` | Array\<String\> | ❌ | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进 `<available_skills>`、不可 `load_skill_through_path` 加载、`@Skill` 不注入；未知技能名忽略、已禁用技能剔除） |
+| `skills` | Array\<String\> | ❌ | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进 `<available_skills>`、不可 `load_skill_through_path` 加载、`/Skill` 不注入；未知技能名忽略、已禁用技能剔除） |
 
 **新会话 SSE 响应示例：**
 
@@ -1004,30 +1004,30 @@ UI 卡片代发工具调用。
 
 ---
 
-## 8. Skill 管理与 @引用接口
+## 8. Skill 管理与 /引用接口
 
-### 8.1 @Skill 引用机制
+### 8.1 /Skill 引用机制
 
-用户可以在消息中使用 `@Skill名称` 来显式引用一个 Skill，系统会在发送给 Agent 之前自动注入该 Skill 的完整内容。
+用户可以在消息中使用 `/Skill名称` 来显式引用一个 Skill，系统会在发送给 Agent 之前自动注入该 Skill 的完整内容。
 
 **语法规则：**
 
-- 格式：`@Skill名称`，@ 前不能是单词字符（防止匹配邮箱等）
+- 格式：`/Skill名称`，/ 前不能是单词字符、冒号或斜杠（防止匹配 URL、Unix 路径等；中文紧邻合法）
 - Skill 名称支持：中文字符、字母、数字、下划线、连字符、点号
-- 同一 Skill 被 @ 多次时只注入一次
-- 被禁用的 Skill 的 @ 引用会被保留原样，不注入内容
-- 消息中不含 @ 时零开销，直接透传
+- 同一 Skill 被 / 引用多次时只注入一次
+- 被禁用的 Skill 的 / 引用会被保留原样，不注入内容
+- 消息中不含 / 引用时零开销，直接透传
 
 **注入效果：**
 
 用户发送：
 ```
-帮我用@ppt生成大师 生成一个产品介绍PPT
+帮我用/ppt生成大师 生成一个产品介绍PPT
 ```
 
 Agent 实际接收到的消息：
 ```
-帮我用[@Skill:ppt生成大师] 生成一个产品介绍PPT
+帮我用[/Skill:ppt生成大师] 生成一个产品介绍PPT
 
 ---
 ## Referenced Skills
@@ -1042,7 +1042,7 @@ Agent 实际接收到的消息：
 
 ### 8.2 GET /skills/available
 
-**可用 Skill 摘要列表**——前端输入框中检测到 @ 符号时调用，展示候选 Skill 列表。
+**可用 Skill 摘要列表**——前端输入框中检测到 / 符号时调用，展示候选 Skill 列表。
 
 ```
 GET /skills/available
@@ -1064,10 +1064,10 @@ GET /skills/available
 
 ### 8.3 GET /skills/parse-refs
 
-**解析消息中的 @Skill 引用**——前端在输入过程中可实时调用，预览已匹配的 Skill 列表。
+**解析消息中的 /Skill 引用**——前端在输入过程中可实时调用，预览已匹配的 Skill 列表。
 
 ```
-GET /skills/parse-refs?message=帮我用@ppt生成大师做PPT
+GET /skills/parse-refs?message=帮我用/ppt生成大师做PPT
 ```
 
 **查询参数：**
@@ -1133,7 +1133,7 @@ GET /skills/manage
 |------|------|------|------|
 | `/skills/manage` | GET | 全部技能（含禁用项，多一个 `enabled`） | `[{name, description, enabled, ...}]` |
 | `/skills/available` | GET | `@` 补全候选。按 `X-User-Id`（或 `?userId=`）合并该用户 L4 | `[{name, description}]` |
-| `/skills/parse-refs?message=` | GET | 预览消息中的 `@Skill` 解析 | `{skills:[...], count}` |
+| `/skills/parse-refs?message=` | GET | 预览消息中的 `/Skill` 解析 | `{skills:[...], count}` |
 | `/skills/upload` | POST | 上传 zip 格式的 Skill 包（multipart `file`，≤20MB） | `{name, message, skill?}` |
 | `/skills/{name}` | DELETE | 删除指定 Skill（校验无 `..` / `/` / `\` 开头 `.`） | `{name, message}` |
 | `/skills/{name}/toggle` | PUT | 切换启停状态 | `{name, enabled, message}` |
@@ -1145,7 +1145,7 @@ GET /skills/manage
 
 | 端点 | 方法 | 说明 | 响应 |
 |------|------|------|------|
-| `/skills/users` | GET | 当前用户的 L4 技能（每项含 `description`/`enabled`/`createdAt`） | `{userId, skills, tombstones}` |
+| `/skills/users` | GET | 当前用户的 L4 技能（每项含 `description`/`enabled`/`updatedAt`） | `{userId, skills, tombstones}` |
 | `/skills/users/{name}` | GET | 读单个个人技能。query `file` 默认 `SKILL.md`（只读） | `{userId, name, content, source, hasUserOverride, version, files, userOverrideExists}` |
 | `/skills/users/{name}/download` | GET | 下载技能整目录为 zip（`{name}.zip`） | `application/zip` 附件 |
 | `/skills/users/{name}` | PUT | 写个人技能，body `{content}`（≤1MB；自动清除禁用标记） | `{userId, name, action, version, message}` |

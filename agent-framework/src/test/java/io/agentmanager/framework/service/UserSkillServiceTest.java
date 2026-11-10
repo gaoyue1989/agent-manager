@@ -257,7 +257,7 @@ class UserSkillServiceTest {
     }
 
     @Test
-    void listSkillsShouldExposeCreatedAtFromKvTimestamps() throws Exception {
+    void listSkillsShouldExposeUpdatedAtFromKvTimestamps() throws Exception {
         var svc = service();
         svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
 
@@ -268,12 +268,43 @@ class UserSkillServiceTest {
         when(conn.prepareStatement(anyString())).thenReturn(ps);
         when(ps.executeQuery()).thenReturn(rs);
         var seq = new java.util.concurrent.atomic.AtomicInteger(0);
-        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() == 0);
-        when(rs.getString("item_key")).thenReturn("/demo-a/scripts/a.sh");
-        when(rs.getLong("updated_at")).thenReturn(1_700_000_000_000L); // 2023-11-14
+        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() < 2);
+        when(rs.getString("item_key"))
+            .thenReturn("/demo-a/scripts/a.sh", "/demo-a/SKILL.md");
+        when(rs.getLong("updated_at"))
+            .thenReturn(1_700_000_000_000L, 1_730_000_000_000L); // 2023-11-14, 2024-10-27
 
         var s = svc.listSkills(USER).get(0);
-        assertTrue(s.createdAt().startsWith("2023"), "创建时间取最早 updated_at: " + s.createdAt());
+        assertTrue(s.updatedAt().startsWith("2024"), "更新时间取最晚 updated_at: " + s.updatedAt());
+    }
+
+    @Test
+    void markerKeysMustNotCountIntoSkillUpdatedAt() throws Exception {
+        // oa-1110-repro-fixes-design §2.5：启停/删除/加栅栏等纯标记写入
+        // （/{name}/.disabled、.deleted、.admin-override）不得计入内容 updatedAt——
+        // 否则 toggle 会"刷新"更新时间（复现报告 #25 口径缺陷）
+        var svc = service();
+        svc.writeSkill(USER, "demo-a", USER_SKILL_MD);
+
+        var conn = mock(Connection.class);
+        var ps = mock(PreparedStatement.class);
+        var rs = mock(ResultSet.class);
+        when(dataSource.getConnection()).thenReturn(conn);
+        when(conn.prepareStatement(anyString())).thenReturn(ps);
+        when(ps.executeQuery()).thenReturn(rs);
+        var seq = new java.util.concurrent.atomic.AtomicInteger(0);
+        when(rs.next()).thenAnswer(inv -> seq.getAndIncrement() < 4);
+        when(rs.getString("item_key")).thenReturn(
+            "/demo-a/SKILL.md",              // 内容写入：2024-10-27（应作为 updatedAt）
+            "/demo-a/.disabled",             // 启停标记：更晚，但不得计入
+            "/demo-a/.deleted",              // 删除标记
+            "/demo-a/scripts/.admin-override"); // 资源目录内标记
+        when(rs.getLong("updated_at"))
+            .thenReturn(1_730_000_000_000L, 1_800_000_000_000L, 1_810_000_000_000L, 1_820_000_000_000L);
+
+        var s = svc.listSkills(USER).get(0);
+        assertEquals(new java.sql.Timestamp(1_730_000_000_000L).toString(), s.updatedAt(),
+            "标记键不得计入 updatedAt，内容键时间应胜出：" + s.updatedAt());
     }
 
     @Test
@@ -655,6 +686,47 @@ class UserSkillServiceTest {
             "应取技能根的 SKILL.md，而非 examples 下的示例");
     }
 
+    /**
+     * GBK 条目名（Windows 自带压缩/旧版 WinRAR 的中文文件名，无 UTF-8 标志）：
+     * 首轮 UTF-8 解码失败后整包回退 GBK，文件名/目录名按 GBK 正确落库。
+     */
+    @Test
+    void uploadZipShouldSupportGbkEntryNames() throws IOException {
+        var baos = new java.io.ByteArrayOutputStream();
+        try (var zos = new java.util.zip.ZipOutputStream(baos, java.nio.charset.Charset.forName("GBK"))) {
+            zos.putNextEntry(new java.util.zip.ZipEntry("技能/SKILL.md"));
+            zos.write(USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+            zos.putNextEntry(new java.util.zip.ZipEntry("技能/scripts/说明.txt"));
+            zos.write("GBK 名字".getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+
+        var outcome = service().uploadSkillZip(USER, bais(baos.toByteArray()), "demo-a.zip");
+
+        assertEquals("demo-a", outcome.name());
+        assertEquals(List.of("SKILL.md", "scripts/说明.txt"), outcome.files());
+        assertEquals("GBK 名字", store.get(skillNs(USER), "/demo-a/scripts/说明.txt").value().get("content"));
+    }
+
+    /**
+     * 条目名既非 UTF-8 也非 GBK（0xFF 在两种编码下都是非法字节）：仍须转成
+     * 用户看得懂的中文提示，透传 JDK 原文（malformed input off ...）没有可操作性。
+     */
+    @Test
+    void uploadZipShouldReportFriendlyMessageForUndecodableEntryName() {
+        var badName = new byte[] {(byte) 0xFF, '/', 'S', 'K', 'I', 'L', 'L', '.', 'm', 'd'};
+        var zip = zipWithRawEntryName(badName, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
+
+        var e = assertThrows(IllegalArgumentException.class,
+            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+
+        assertTrue(e.getMessage().contains("UTF-8") && e.getMessage().contains("GBK"),
+            "应说明两种编码均不支持: " + e.getMessage());
+        assertFalse(e.getMessage().contains("malformed input"),
+            "不应把 JDK 原始消息透给用户: " + e.getMessage());
+    }
+
     /** 同名覆盖 = 全量替换：旧版本多余的资源文件必须差集清理，action=updated */
     @Test
     void uploadZipShouldOverwriteAndRemoveStaleFiles() throws IOException {
@@ -825,6 +897,45 @@ class UserSkillServiceTest {
             }
         }
         return baos.toByteArray();
+    }
+
+    /**
+     * 构造单条目 stored zip，条目名按原始字节写入（不带 UTF-8 标志），
+     * 用于模拟 Windows GBK 中文文件名的压缩包。
+     */
+    private static byte[] zipWithRawEntryName(byte[] rawName, byte[] content) {
+        var crc = new java.util.zip.CRC32();
+        crc.update(content);
+        int crcValue = (int) crc.getValue();
+        int nameLen = rawName.length;
+
+        var local = java.nio.ByteBuffer.allocate(30 + nameLen + content.length)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        local.putInt(0x04034b50).putShort((short) 20).putShort((short) 0)
+            .putShort((short) 0).putShort((short) 0).putShort((short) 0)
+            .putInt(crcValue).putInt(content.length).putInt(content.length)
+            .putShort((short) nameLen).putShort((short) 0)
+            .put(rawName).put(content);
+
+        var central = java.nio.ByteBuffer.allocate(46 + nameLen)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        central.putInt(0x02014b50).putShort((short) 20).putShort((short) 20)
+            .putShort((short) 0).putShort((short) 0).putShort((short) 0)
+            .putShort((short) 0).putInt(crcValue).putInt(content.length)
+            .putInt(content.length).putShort((short) nameLen).putShort((short) 0)
+            .putShort((short) 0).putShort((short) 0).putShort((short) 0)
+            .putInt(0).putInt(0).put(rawName);
+
+        var eocd = java.nio.ByteBuffer.allocate(22).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        eocd.putInt(0x06054b50).putShort((short) 0).putShort((short) 0)
+            .putShort((short) 1).putShort((short) 1)
+            .putInt(central.position()).putInt(local.position()).putShort((short) 0);
+
+        var out = new java.io.ByteArrayOutputStream();
+        out.writeBytes(local.array());
+        out.writeBytes(central.array());
+        out.writeBytes(eocd.array());
+        return out.toByteArray();
     }
 
     // ========== 用户索引（agent_fs 聚合） ==========

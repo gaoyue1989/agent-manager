@@ -32,6 +32,13 @@ public record SandboxConfig(
     // 语义升级（sandbox-pool-opensandbox-design §4.7）：生命周期 TTL，默认 60→30
     // （application.yml 占位符为权威默认；本 @DefaultValue 供 yml 段缺失时兜底）
     @DefaultValue("30") int timeoutMinutes,
+    /**
+     * 建箱/管理面 HTTP 请求超时（秒，{@code SANDBOX_REQUEST_TIMEOUT_SECONDS}，默认 30 =
+     * SDK 默认）：并发建箱高峰上游排队放大（oa-1110 复现实测 1.5s→13.2s）——单请求超时
+     * 与 create 重试（SANDBOX_CREATE_MAX_ATTEMPTS）叠加消化高峰；语义 ≠
+     * {@link #timeoutMinutes}（生命周期 TTL）。0/负值 = 不设置走 SDK 默认
+     */
+    @DefaultValue("30") int requestTimeoutSeconds,
     @DefaultValue("1024") int memoryMb,
     @DefaultValue("1") int cpuCount,
     @DefaultValue("/opt/code-interpreter/code-interpreter.sh") List<String> entrypoint,
@@ -71,17 +78,20 @@ public record SandboxConfig(
     }
 
     /**
-     * 兼容旧 17 参构造（存量测试按位传参，master 形态）：包内基线跳过取默认 true
-     * （skill-sync-turn-perf P1-5 新增组件排在 syncSnapshotDiffEnabled 之后）。
+     * 兼容旧 18 参构造（存量测试按位传参，master 形态）：包内基线跳过取默认 true
+     * （skill-sync-turn-perf P1-5 新增组件排在 syncSnapshotDiffEnabled 之后）；
+     * requestTimeoutSeconds 排在 timeoutMinutes 之后（oa-1110-repro-fixes-design §2.3b）。
      */
-    public SandboxConfig(boolean enabled, String image, int timeoutMinutes, int memoryMb, int cpuCount,
+    public SandboxConfig(boolean enabled, String image, int timeoutMinutes, int requestTimeoutSeconds,
+                         int memoryMb, int cpuCount,
                          List<String> entrypoint, Duration execdGraceShutdown,
                          boolean projectionEnabled, boolean guardEnabled, int guardLeaseSeconds,
                          boolean projectionFingerprintCacheEnabled, boolean skillRevisionGateEnabled,
                          boolean syncSnapshotDiffEnabled, boolean sessionAgentIsolation,
                          int sessionAgentCacheMax, int sessionAgentCacheTtlMinutes,
                          OpenSandboxConfig opensandbox) {
-        this(enabled, image, timeoutMinutes, memoryMb, cpuCount, entrypoint, execdGraceShutdown,
+        this(enabled, image, timeoutMinutes, requestTimeoutSeconds, memoryMb, cpuCount, entrypoint,
+            execdGraceShutdown,
             projectionEnabled, guardEnabled, guardLeaseSeconds,
             projectionFingerprintCacheEnabled, skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             true, sessionAgentIsolation, sessionAgentCacheMax, sessionAgentCacheTtlMinutes,

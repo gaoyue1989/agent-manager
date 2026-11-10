@@ -73,8 +73,13 @@ class AgentRuntimeServiceHitlTest {
 
     /** 构造 store 回读行（模拟 DB 已存该 session 的确认上下文） */
     private ConfirmContextStore.StoredRow stubStoreRow() {
+        return stubStoreRow(null);
+    }
+
+    /** 构造带本轮 skills 白名单的 store 回读行（issue #264） */
+    private ConfirmContextStore.StoredRow stubStoreRow(List<String> skills) {
         var row = new ConfirmContextStore.StoredRow(
-            List.of(toolUseBlock("call-1")), "reply-1", Instant.now(), null, null);
+            List.of(toolUseBlock("call-1")), "reply-1", Instant.now(), null, null, skills);
         when(confirmContextStore.consume(anyString())).thenReturn(row);
         return row;
     }
@@ -105,7 +110,7 @@ class AgentRuntimeServiceHitlTest {
     void confirmContextShouldBePersistedByAsk() {
         emitAskThenCollect();
         // 落库校验：storeConfirmContext → confirmContextStore.put（session 带 tenant 前缀）
-        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), anyString(), any(), any());
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), anyString(), any(), any(), any());
     }
 
     @Test
@@ -212,6 +217,56 @@ class AgentRuntimeServiceHitlTest {
             var cr = (ConfirmResult) list.get(0);
             return !cr.isConfirmed() && "call-1".equals(cr.getToolCall().getId());
         }), any(RuntimeContext.class));
+    }
+
+    @Test
+    void resumeWithConfirmShouldCarrySkillsWhitelistIntoResumeMessage() {
+        // issue #264：恢复消息必须回填挂起轮 skills，否则 SkillFilterMiddleware 读不到
+        // 最后一条 USER 消息的 metadata.skills，恢复轮静默回落全部技能
+        stubStoreRow(List.of("refund-policy", "order-query"));
+        var reply = mock(Msg.class);
+        when(reply.getTextContent()).thenReturn("done");
+        when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(reply));
+
+        service.resumeWithConfirm(SID, null, List.of(Map.<String, Object>of(
+            "tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent).call(argThat((List<Msg> msgs) ->
+            List.of("refund-policy", "order-query").equals(
+                msgs.get(0).getMetadata().get(SkillFilterMiddleware.METADATA_SKILLS_KEY))),
+            any(RuntimeContext.class));
+    }
+
+    @Test
+    void resumeWithConfirmShouldPreserveExplicitEmptySkills() {
+        // [] = 挂起轮显式无技能：恢复轮必须继续无技能，不能退化为“未声明=全部”
+        stubStoreRow(List.of());
+        var reply = mock(Msg.class);
+        when(reply.getTextContent()).thenReturn("done");
+        when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(reply));
+
+        service.resumeWithConfirm(SID, null, List.of(Map.<String, Object>of(
+            "tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent).call(argThat((List<Msg> msgs) ->
+            List.of().equals(msgs.get(0).getMetadata().get(SkillFilterMiddleware.METADATA_SKILLS_KEY))),
+            any(RuntimeContext.class));
+    }
+
+    @Test
+    void resumeWithConfirmShouldNotCarrySkillsWhenUnset() {
+        // null = 挂起轮未声明：恢复消息不写 skills 键（存量行为逐字节不变）
+        stubStoreRow();
+        var reply = mock(Msg.class);
+        when(reply.getTextContent()).thenReturn("done");
+        when(agent.call(anyList(), any(RuntimeContext.class))).thenReturn(Mono.just(reply));
+
+        service.resumeWithConfirm(SID, null, List.of(Map.<String, Object>of(
+            "tool_call_id", "call-1", "confirmed", true)));
+
+        verify(agent).call(argThat((List<Msg> msgs) ->
+            !msgs.get(0).getMetadata().containsKey(SkillFilterMiddleware.METADATA_SKILLS_KEY)),
+            any(RuntimeContext.class));
     }
 
     @Test
@@ -801,7 +856,7 @@ class AgentRuntimeServiceHitlTest {
         service.putConfirmContext("acme-test-agent__t1",
             askEvent("reply-1", toolUseBlock("call-1")), null, null);
 
-        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any(), any());
     }
 
     /** Channel 链路形态：远程行以 raw sid 存储（比 fullThreadId 短），双形态查询命中抑制 */
@@ -820,7 +875,7 @@ class AgentRuntimeServiceHitlTest {
         service.putConfirmContext("acme-test-agent__t1",
             askEvent("reply-1", toolUseBlock("call-1")), null, null);
 
-        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any());
+        verify(confirmContextStore, never()).put(anyString(), anyList(), any(), any(), any(), any());
         verify(confirmContextStore).findUnconsumedRemote("t1");
     }
 
@@ -832,7 +887,25 @@ class AgentRuntimeServiceHitlTest {
         service.putConfirmContext("acme-test-agent__t1",
             askEvent("reply-1", toolUseBlock("call-1")), null, null);
 
-        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any(), any());
+    }
+
+    /** 恢复段再次挂起时读取原轮名单（issue #264）：优先未消费行，其次最近已消费行 */
+    @Test
+    void pendingTurnSkillsShouldPreferUnconsumedThenFallbackConsumed() {
+        var row = new ConfirmContextStore.PendingConfirm(
+            "acme-test-agent__t1", ConfirmContextStore.LOCAL_KEY, "reply-1",
+            List.of(toolUseBlock("call-1")), Instant.now(), null, null, null,
+            List.of("refund-policy"));
+        when(confirmContextStore.findPending("acme-test-agent__t1", ConfirmContextStore.LOCAL_KEY))
+            .thenReturn(java.util.Optional.of(row));
+        assertEquals(List.of("refund-policy"), service.pendingTurnSkills(SID));
+
+        when(confirmContextStore.findPending("acme-test-agent__t1", ConfirmContextStore.LOCAL_KEY))
+            .thenReturn(java.util.Optional.empty());
+        when(confirmContextStore.findLastConsumedLocal("acme-test-agent__t1"))
+            .thenReturn(java.util.Optional.of(row));
+        assertEquals(List.of("refund-policy"), service.pendingTurnSkills(SID));
     }
 
     /** 远程行锚点损坏/无 tool_calls → fail-open 照常落库（不因去重逻辑阻断真实本地 ask） */
@@ -847,6 +920,6 @@ class AgentRuntimeServiceHitlTest {
         service.putConfirmContext("acme-test-agent__t1",
             askEvent("reply-1", toolUseBlock("call-1")), null, null);
 
-        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any());
+        verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(), any(), any(), any(), any());
     }
 }

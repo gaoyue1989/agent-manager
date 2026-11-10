@@ -71,7 +71,7 @@ class SandboxLifecycleManagerTest {
         registry = mock(SandboxRenewalRegistry.class);
         leaseStore = mock(TurnLeaseStore.class);
         confirmStore = mock(ConfirmContextStore.class);
-        var config = new SandboxLifecycleConfig(true, "pool-e2e", 5, 60, 20);
+        var config = new SandboxLifecycleConfig(true, "pool-e2e", 5, 60, 20, 2, 1000);
         manager = new SandboxLifecycleManager(store, registry, config, 30, leaseStore, confirmStore);
         connector = mock(SandboxLifecycleManager.SandboxConnector.class);
         createDelegate = mock(SandboxLifecycleManager.SandboxCreateDelegate.class);
@@ -448,7 +448,7 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void acquireQuotaZeroStillAccountsButNeverJudgedFull() throws Exception {
-        var config = new SandboxLifecycleConfig(true, "", 0, 60, 20);
+        var config = new SandboxLifecycleConfig(true, "", 0, 60, 20, 2, 1000);
         var m = new SandboxLifecycleManager(store, registry, config, 30, leaseStore, confirmStore);
         when(store.findBySessionId(SID)).thenReturn(Optional.empty());
         when(store.occupyQuota(USER, SID, 0))
@@ -478,8 +478,8 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void startupValidationRejectsTtlBelowOneMinute() {
-        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20);
-        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 0, 1024, 1,
+        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
+        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 0, 30, 1024, 1,
             List.of("/entry"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("u", "k"));
         assertThrows(IllegalStateException.class, () -> AgentScopeValidateHelper.validate(sandboxConfig, config));
@@ -487,8 +487,8 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void startupValidationRejectsRenewIntervalNotUnderHalfTtl() {
-        var config = new SandboxLifecycleConfig(true, "", 5, 900, 20);   // 900s ≥ 30min*60/2=900
-        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 30, 1024, 1,
+        var config = new SandboxLifecycleConfig(true, "", 5, 900, 20, 2, 1000);   // 900s ≥ 30min*60/2=900
+        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 30, 30, 1024, 1,
             List.of("/entry"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("u", "k"));
         assertThrows(IllegalStateException.class, () -> AgentScopeValidateHelper.validate(sandboxConfig, config));
@@ -496,8 +496,8 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void startupValidationAcceptsSaneDefaults() {
-        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20);
-        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 30, 1024, 1,
+        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
+        var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 30, 30, 1024, 1,
             List.of("/entry"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("u", "k"));
         AgentScopeValidateHelper.validate(sandboxConfig, config);   // 不抛即通过
@@ -564,5 +564,64 @@ class SandboxLifecycleManagerTest {
         assertTrue(manager.recentEvents().stream()
             .anyMatch(e -> "sandbox_rebuilt_registered".equals(e.get("type"))
                 && String.valueOf(e.get("detail")).contains(SID)), "缺登记事件: " + manager.recentEvents());
+    }
+
+    // ---- ③ create 瞬时类失败重试（oa-1110-repro-fixes-design §2.3a） ----
+
+    /** 独立 manager：backoff=1ms 避免测试真实退避等待；attempts 可配 */
+    private SandboxLifecycleManager retryManager(int attempts) {
+        return new SandboxLifecycleManager(store, registry,
+            new SandboxLifecycleConfig(true, "", 5, 60, 20, attempts, 1), 30, leaseStore, confirmStore);
+    }
+
+    private static com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxTimeoutException sdkTimeout() {
+        return new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxTimeoutException(
+            "Request timed out: timeout", null, false);
+    }
+
+    @Test
+    void transientCreateFailureShouldRetryThenSucceed() throws Exception {
+        var m = retryManager(2);
+        when(store.occupyQuota(USER, SID, 5))
+            .thenReturn(new SandboxBindingStore.OccupyResult(SandboxBindingStore.OccupyStatus.OCCUPIED, "pending:u1"));
+        when(createDelegate.create()).thenThrow(sdkTimeout()).thenReturn(created(SBX));
+
+        var result = m.acquire(SID, USER, connector, createDelegate, reuseWrapper);
+
+        org.mockito.Mockito.verify(createDelegate, org.mockito.Mockito.times(2)).create();
+        verify(store, never()).compensatePending(anyString(), anyString());
+        verify(store).promotePending(eq("pending:u1"), eq(SBX), anyString());
+        org.junit.jupiter.api.Assertions.assertNotNull(result);
+        // 重试事件留痕
+        assertTrue(m.recentEvents().stream().anyMatch(e -> "create_retry".equals(e.get("type"))));
+    }
+
+    @Test
+    void transientCreateFailureExhaustedShouldThrowAndCompensateOnce() throws Exception {
+        var m = retryManager(2);
+        when(store.occupyQuota(USER, SID, 5))
+            .thenReturn(new SandboxBindingStore.OccupyResult(SandboxBindingStore.OccupyStatus.OCCUPIED, "pending:u1"));
+        when(createDelegate.create()).thenThrow(sdkTimeout());
+
+        var ex = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+            () -> m.acquire(SID, USER, connector, createDelegate, reuseWrapper));
+
+        org.mockito.Mockito.verify(createDelegate, org.mockito.Mockito.times(2)).create();
+        verify(store, org.mockito.Mockito.times(1)).compensatePending("pending:u1", USER);
+        assertEquals("Request timed out: timeout", ex.getMessage());
+    }
+
+    @Test
+    void nonTransientCreateFailureShouldNotRetry() throws Exception {
+        var m = retryManager(3);
+        when(store.occupyQuota(USER, SID, 5))
+            .thenReturn(new SandboxBindingStore.OccupyResult(SandboxBindingStore.OccupyStatus.OCCUPIED, "pending:u1"));
+        when(createDelegate.create()).thenThrow(new IllegalArgumentException("bad image"));
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+            () -> m.acquire(SID, USER, connector, createDelegate, reuseWrapper));
+
+        org.mockito.Mockito.verify(createDelegate, org.mockito.Mockito.times(1)).create();
+        verify(store, org.mockito.Mockito.times(1)).compensatePending("pending:u1", USER);
     }
 }

@@ -70,6 +70,6 @@ CI 渲染全量对象用占位值见 `ci-values.yaml`（charts-ci 的 helm templ
 ## 运维须知
 
 - **配置注入**：`/config` 为 emptyDir 只读副本，由 initContainer 从 image.oaf 拷入（替代单集群共享 PVC subPath 只读挂载）；Pod 重建自动重拷恢复。
-- **Pod 本地卷**：`/workspace`、`/data/files`、`/applog` 为 emptyDir（可丢弃/可重建，对齐平台业务 Pod 形态；基础镜像以非 root `appuser` 运行，不能在容器根创建这些目录）；正确性状态落 MySQL checkpoint / Redis，跨副本文件不共享为 v1 已知边界。
+- **Pod 本地卷**：`/workspace`、`/applog` 为 emptyDir（可丢弃/可重建，对齐平台业务 Pod 形态）；`/data/files` 与平台不同——平台侧挂共享 PVC 可写 subPath（Pod 重建文件保留），chart 侧 v1 为 emptyDir、**Pod 重建（滚动升级/节点驱逐）即丢用户上传文件**（显式持久化降级披露，v2 可加可选 PVC 挂载）。基础镜像以非 root `appuser` 运行，不能在容器根创建这些目录；正确性状态落 MySQL checkpoint / Redis，跨副本文件不共享为 v1 已知边界。
 - **建库 Job**：pre-install hook 在其余资源之前执行，此时尚无服务 Secret，故凭据内嵌于 Job env（明文）；成功后对象保留供 `kubectl wait` 自检，确认后可 `kubectl delete job` 清理。
 - **imagePullPolicy=IfNotPresent**：同 tag 覆盖推送不会在已缓存节点生效——请使用新 tag。

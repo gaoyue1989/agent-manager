@@ -407,8 +407,14 @@ type ExportPackageMarkEntity struct {
 	FileCount int       `json:"fileCount"`
 	Checksum  string    `gorm:"size:64" json:"checksum"` // 快照内容 sha256（canonical JSON）
 	Status    string    `gorm:"size:16" json:"status"`   // draft | frozen
-	CreatedBy string    `gorm:"size:64" json:"createdBy"`
-	CreatedAt time.Time `json:"createdAt"`
+	// DraftVersion 草稿行乐观锁版本号（issue #268）：draft FilesJSON 是读-改-写整份快照，
+	// 并发写者（单文件保存 / 冻结打标记）无版本约束时后写者整段覆盖前写者——写者 bump +1、
+	// CAS compare (id, status=draft, draft_version)（export_orders.manifest_version 同模式，
+	// issue #233）。frozen 行不可变，冻结后版本号恒定；AutoMigrate 存量行 default 0。
+	// json:"-" 不进视图（ExportMarkView 形状不变）
+	DraftVersion int       `gorm:"default:0" json:"-"`
+	CreatedBy    string    `gorm:"size:64" json:"createdBy"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 func (ExportPackageMarkEntity) TableName() string { return "export_package_marks" }

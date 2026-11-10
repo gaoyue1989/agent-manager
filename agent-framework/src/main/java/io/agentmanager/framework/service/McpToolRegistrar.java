@@ -335,18 +335,26 @@ public class McpToolRegistrar {
     /**
      * 全部已注册 server 声明的透传头名并集（config.yaml userHeaders 的 reqHeader: 取值源；
      * 已 lowercase、已过解析期 denylist）。chat / confirm / AGUI 入口捕获名单的唯一来源。
-     * 必须从本缓存取——禁止每请求重读 config.yaml（文件 IO + YAML 解析才是真开销）。
+     * headers 与 arguments 两节均可声明 reqHeader:*（mcp-header-arguments-injection-design
+     * §5.2），取值源同款、求并去重。必须从本缓存取——禁止每请求重读 config.yaml
+     * （文件 IO + YAML 解析才是真开销）。
      */
     public Set<String> getForwardHeaderNames() {
         var names = new LinkedHashSet<String>();
         for (var rule : userHeaderRules.values()) {
-            for (var metaKey : rule.headers().values()) {
-                if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
-                    names.add(metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length()));
-                }
-            }
+            collectForwardNames(rule.headers(), names);
+            collectForwardNames(rule.arguments(), names);
         }
         return names;
+    }
+
+    /** 单节映射的 reqHeader:* 头名收集（headers / arguments 两节共用） */
+    private static void collectForwardNames(Map<String, String> mappings, Set<String> names) {
+        for (var metaKey : mappings.values()) {
+            if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
+                names.add(metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length()));
+            }
+        }
     }
 
     /** 解析 config.yaml 的 startup.required（缺省 false=容错） */
@@ -1040,7 +1048,8 @@ public class McpToolRegistrar {
             if ("stdio".equals(type)) {
                 if (data.containsKey("userHeaders")) {
                     log.warn("MCP {} declares userHeaders but uses 'stdio' transport; "
-                        + "user-scoped headers only apply to HTTP transports - ignored", mcp.server());
+                        + "user-scoped headers/arguments only apply to HTTP transports - ignored",
+                        mcp.server());
                 }
             } else {
                 userHeaderRule = parseUserHeaders(data, mcp.server());
@@ -1054,8 +1063,8 @@ public class McpToolRegistrar {
                 return null;
             }
             if (userHeaderRule != null) {
-                log.info("MCP {} user-scoped headers enabled: {} header(s), on-missing={}",
-                    mcp.server(), userHeaderRule.headers().size(),
+                log.info("MCP {} user-scoped headers enabled: {} header(s), {} argument(s), on-missing={}",
+                    mcp.server(), userHeaderRule.headers().size(), userHeaderRule.arguments().size(),
                     userHeaderRule.denyOnMissing() ? "deny" : "passthrough");
             }
             return new UserScopedMcpClientWrapper(wrapper,
@@ -1071,55 +1080,25 @@ public class McpToolRegistrar {
      *
      * 格式：
      * userHeaders:
-     *   headers: { X-User-Id: userId, ... }   # header 名 → McpMeta entries key
-     *   on-missing: deny | passthrough        # 缺省 deny（fail-closed）
+     *   headers: { X-User-Id: userId, ... }   # header 名 → McpMeta entries key（HTTP header 通道）
+     *   arguments: { taskId: reqHeader:taskid, ... }  # 工具参数名 → McpMeta entries key（参数注入通道）
+     *   on-missing: deny | passthrough        # 缺省 deny（fail-closed），仅作用于 headers 通道
+     *
+     * 两节取值源同款（userId / reqHeader:<小写头名>），可只声明其一
+     * （mcp-header-arguments-injection-design §4）。
      *
      * package-private：不发起连接，便于单元测试。
      *
-     * @return 解析结果；无 userHeaders 节 / headers 为空 / 全部条目非法时返回 null
+     * @return 解析结果；无 userHeaders 节 / 两节均无有效映射时返回 null
      */
-    @SuppressWarnings("unchecked")
     UserHeaderRule parseUserHeaders(Map<String, Object> data, String serverName) {
         if (!(data.get("userHeaders") instanceof Map<?, ?> uh)) {
             return null;
         }
-        if (!(uh.get("headers") instanceof Map<?, ?> rawHeaders)) {
-            log.warn("MCP {}: userHeaders.headers missing or not a map, ignored", serverName);
-            return null;
-        }
-        var headers = new LinkedHashMap<String, String>();
-        for (var entry : rawHeaders.entrySet()) {
-            if (!(entry.getKey() instanceof String header) || header.isBlank()
-                || !(entry.getValue() instanceof String metaKey) || metaKey.isBlank()) {
-                log.warn("MCP {}: invalid userHeaders.headers entry ignored: {}={}",
-                    serverName, entry.getKey(), entry.getValue());
-                continue;
-            }
-            // reqHeader: 取值源（chat 请求透传头，mcp-chat-header-forward-design §5）：
-            // 前缀后段强制 lowercase 归一（保证与捕获键确定匹配）；空名按 invalid entry
-            // 丢弃（恒 deny 的坏映射 + 名单混入空串）；平台 denylist 命中即剔除
-            if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
-                var declared = metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length());
-                if (declared.isBlank()) {
-                    log.warn("MCP {}: invalid userHeaders.headers entry ignored: {}={}",
-                        serverName, header, metaKey);
-                    continue;
-                }
-                var name = declared.toLowerCase();
-                if (!name.equals(declared)) {
-                    log.info("MCP {}: reqHeader value '{}' normalized to lowercase '{}'",
-                        serverName, metaKey, ChatRequestHeaders.META_KEY_PREFIX + name);
-                }
-                if (ChatRequestHeaders.isDenied(name)) {
-                    log.warn("MCP {}: forwarded header '{}' is denied by platform policy, mapping ignored",
-                        serverName, name);
-                    continue;
-                }
-                metaKey = ChatRequestHeaders.META_KEY_PREFIX + name;
-            }
-            headers.put(header, metaKey);
-        }
-        if (headers.isEmpty()) {
+        var headers = parseUserHeaderMappings(uh.get("headers"), "userHeaders.headers", serverName);
+        var arguments = parseUserHeaderMappings(uh.get("arguments"), "userHeaders.arguments", serverName);
+        if (headers == null && arguments == null) {
+            log.warn("MCP {}: userHeaders has no valid headers/arguments mappings, ignored", serverName);
             return null;
         }
         var onMissing = uh.get("on-missing");
@@ -1132,7 +1111,59 @@ public class McpToolRegistrar {
         } else if (onMissing != null) {
             log.warn("MCP {}: invalid userHeaders.on-missing '{}', fallback to deny", serverName, onMissing);
         }
-        return new UserHeaderRule(Map.copyOf(headers), denyOnMissing);
+        return new UserHeaderRule(
+            headers != null ? Map.copyOf(headers) : Map.of(),
+            arguments != null ? Map.copyOf(arguments) : Map.of(),
+            denyOnMissing);
+    }
+
+    /**
+     * 解析 userHeaders 下单个映射节（headers / arguments）。
+     *
+     * <p>键 = header 名 / 工具参数名（原样大小写保留——参数名匹配的是下游 schema，大小写
+     * 敏感）；值 = McpMeta entries key，{@code reqHeader:<头名>} 取值源前缀后段强制
+     * lowercase 归一（保证与捕获键确定匹配）、平台 denylist 命中即剔除
+     * （mcp-chat-header-forward-design §5 同款语义，两节共用）。
+     *
+     * @return 解析结果；节缺省 / 非映射 / 全部条目非法时返回 null
+     */
+    private static Map<String, String> parseUserHeaderMappings(Object section, String sectionName,
+                                                               String serverName) {
+        if (!(section instanceof Map<?, ?> rawMappings)) {
+            return null;
+        }
+        var parsed = new LinkedHashMap<String, String>();
+        for (var entry : rawMappings.entrySet()) {
+            if (!(entry.getKey() instanceof String name) || name.isBlank()
+                || !(entry.getValue() instanceof String metaKey) || metaKey.isBlank()) {
+                log.warn("MCP {}: invalid {} entry ignored: {}={}",
+                    serverName, sectionName, entry.getKey(), entry.getValue());
+                continue;
+            }
+            // reqHeader: 取值源（chat 请求透传头）：空名按 invalid entry 丢弃
+            //（恒 deny 的坏映射 + 名单混入空串）
+            if (metaKey.startsWith(ChatRequestHeaders.META_KEY_PREFIX)) {
+                var declared = metaKey.substring(ChatRequestHeaders.META_KEY_PREFIX.length());
+                if (declared.isBlank()) {
+                    log.warn("MCP {}: invalid {} entry ignored: {}={}",
+                        serverName, sectionName, name, metaKey);
+                    continue;
+                }
+                var lowerName = declared.toLowerCase();
+                if (!lowerName.equals(declared)) {
+                    log.info("MCP {}: reqHeader value '{}' normalized to lowercase '{}'",
+                        serverName, metaKey, ChatRequestHeaders.META_KEY_PREFIX + lowerName);
+                }
+                if (ChatRequestHeaders.isDenied(lowerName)) {
+                    log.warn("MCP {}: forwarded header '{}' is denied by platform policy, mapping ignored",
+                        serverName, lowerName);
+                    continue;
+                }
+                metaKey = ChatRequestHeaders.META_KEY_PREFIX + lowerName;
+            }
+            parsed.put(name, metaKey);
+        }
+        return parsed.isEmpty() ? null : parsed;
     }
 
     /** 支持 ${ENV_VAR} 语法。 */

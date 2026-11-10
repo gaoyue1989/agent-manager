@@ -341,6 +341,37 @@ class ConfirmControllerTest {
     }
 
     @Test
+    void confirmStreamShouldRegisterIntentAndStopWatcher() {
+        // confirm 恢复段是新的执行段：必须像 /threads/chat 一样登记意图（抢锁前）与
+        // 停止监视（抢锁后），并在终态注销/清理——否则该段 stop 会 409 或投递不到中断。
+        stubPendingStoreRow();
+        when(agent.streamEvents(anyList(), any(io.agentscope.core.agent.RuntimeContext.class)))
+            .thenReturn(reactor.core.publisher.Flux.just(
+                (io.agentscope.core.event.AgentEvent) new io.agentscope.core.event.AgentEndEvent("reply-2")));
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-sw1");
+        when(eventStore.append(anyString(), anyString(), anyString(), anyString(), isNull())).thenReturn(1);
+
+        var intentStore = mock(io.agentmanager.framework.service.TurnIntentStore.class);
+        var watcher = mock(io.agentmanager.framework.service.TurnStopWatcher.class);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "turnIntentStore", intentStore);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "turnStopWatcher", watcher);
+
+        var frames = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
+                Map.of("tool_call_id", "call-1", "confirmed", true))))
+            .collectList().block(Duration.ofSeconds(10));
+        assertNotNull(frames, "should emit SSE frames");
+
+        var rid = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(intentStore).register(eq("t1"), rid.capture(), any(Duration.class));
+        verify(watcher).register(eq("t1"), eq(rid.getValue()));
+        // 终态收尾：注销停止监视 + 清理本轮意图（replyId 栅栏）
+        verify(watcher).unregister(eq("t1"), eq(rid.getValue()));
+        verify(intentStore).clear(eq("t1"), eq(rid.getValue()));
+    }
+
+    @Test
     void confirmStreamShouldCaptureForwardHeadersIntoResumeContext() {
         // mcp-chat-header-forward-design §6.5：confirm 是新在线请求，捕获的透传头
         // 经 buildResumeContext 进恢复 RuntimeContext（恢复轮的 MCP 调用同样按声明注入）
@@ -424,7 +455,7 @@ class ConfirmControllerTest {
         // 确认上下文落库（fullThreadId 键，恢复时 buildResumeContext 的身份来源）；
         // 用 ask 自身 replyId 区分 setUp 播种的那次 put
         verify(confirmContextStore).put(eq("acme-test-agent__t1"), anyList(),
-            eq("reply-ask"), any(), any());
+            eq("reply-ask"), any(), any(), any());
         // ask 即执行段结束：租约让出 + 会话关闭（closeSession → finishTurn；
         // 源流 complete 的幂等兜底会再走一次 endTurn，故 finishTurn 用 atLeastOnce）
         verify(turnLeaseStore).release(eq("t1"), eq("tok-ask1"));

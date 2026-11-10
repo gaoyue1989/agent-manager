@@ -240,6 +240,39 @@ class ConfirmContextStoreMultiKeyTest {
         assertFalse(row.isRemote(), "无锚点即不按远程路由（fail-closed 到本地语义）");
     }
 
+    // ===== skills 白名单落库/回读（issue #264） =====
+
+    @Test
+    void putWithSkillsShouldBindSkillsJsonAndConsumeReadBack() throws Exception {
+        store.put("acme__t1",
+            List.of(Map.of("id", "call-1", "name", "t", "input", Map.of())),
+            "reply-1", "gw-1", "peer-1", List.of("refund", "order-query"));
+
+        verify(ps).setString(8, "[\"refund\",\"order-query\"]");
+
+        var rs = rowResultSet();
+        when(rs.getString("skills_json")).thenReturn("[\"refund\",\"order-query\"]");
+        when(ps.executeQuery()).thenReturn(rs);
+        var row = store.consume("acme__t1");
+        assertEquals(List.of("refund", "order-query"), row.skills());
+    }
+
+    @Test
+    void putWithoutSkillsShouldBindNullAndReadBackNull() throws Exception {
+        // null = 未声明（区别于 [] = 显式无技能）
+        store.put("acme__t1",
+            List.of(Map.of("id", "call-1", "name", "t", "input", Map.of())),
+            "reply-1", "gw-1", "peer-1");
+
+        verify(ps).setString(8, (String) null);
+
+        var rs = rowResultSet();
+        when(rs.getString("skills_json")).thenReturn(null);
+        when(ps.executeQuery()).thenReturn(rs);
+        var row = store.consume("acme__t1");
+        assertNull(row.skills());
+    }
+
     // ===== 兼容旧行为 =====
 
     @Test

@@ -14,12 +14,13 @@
 | **[agent-creation-guide.md](agent-creation-guide.md)** | **🆕 面向框架使用者的上手指南（2026-09-26 新增）**：5 分钟快速开始 → OAF 包结构与构建 → 配置说明 → 测试环境部署（三法）→ API 调用完整流程（对话/续传/HITL/文件/技能/A2A）→ 能力地图 → 常见坑。**不知道从哪篇读起就先读这篇** |
 | [agent-framework-design.md](agent-framework-design.md) | v2.1 框架总体设计：架构、模块分层、类/表/端点清单（目录树为 v2.1 快照，最新以 ../AGENTS.md 为准；§6 依赖与 §5.3 默认值已按 pom/application.yml 订正） |
 | [agent-framework-deploy.md](agent-framework-deploy.md) | 部署手册：前置条件、Docker、**全量环境变量表**（含 AGENT_REDIS_URL 必配项；2026-09-26 补齐 Harness/SSE/History 三段；2026-10-01 增补 §4.1.12 Agent Protocol 与 §4.1.13 A2A 幂等 Job 两段） |
-| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计为 2026-11-03 实跑 1752 例 / 0 失败 / 9 跳过） |
-| [api.md](api.md) | REST API 全量参考（无状态单次流架构；2026-09-26 补齐会话三态/观察者端点/技能管理端点/8 张表，`/tools` 三段契约已同步 issue #39；2026-10-01 增量重核：数据表迁 Flyway、模型采样参数、confirm_context 多行化、`/a2a/jobs` 等；截至 HEAD 为自建 12 张表 / V1–V14） |
+| [agent-framework-test.md](agent-framework-test.md) | 测试手册：LLM 测试配置、用例清单、运行方式（§8 统计为 2026-10-08 实跑 1353 例 / 132 类） |
+| [api.md](api.md) | REST API 全量参考（无状态单次流架构；2026-09-26 补齐会话三态/观察者端点/技能管理端点/8 张表，`/tools` 三段契约已同步 issue #39；2026-10-01 增量重核：数据表迁 Flyway（V1–V8）共自建 10 张表、模型采样参数、confirm_context 多行化、`/a2a/jobs` 等） |
+| [thread-stop-api.md](thread-stop-api.md) | **单轮停止接口文档**（2026-10-27 新增）：`POST /threads/{sid}/stop` 请求/响应契约、202/404/409/503 错误码与重试建议、`cancelled` 终态帧、`/status`/`/subscribe`/history 对齐、协作式语义边界与配置开关 |
 | [api-thread-spec.md](api-thread-spec.md) | 会话 API 对接规范（前端↔后端协议契约，E2E 断言权威；v1.1 补 interrupted 态、合成帧、ASKING 挂起限制；2026-10-01 升 v1.2——ASKING 改 `/chat` 入口预检 `turn_pending_confirm`、`/subscribe` 不读 `Last-Event-ID`、补 `subagent_exposed` 远程转发事件标注等） |
 | [api-frontend-sse.md](api-frontend-sse.md) | 前端对接全量文档 v2.4.0：Durable SSE + HITL + 文件 + Skill 管理 + 模型 + 热加载 + 事件词表（被多处源码 javadoc 引用；本版修目录死锚与续传游标示例） |
 | [checkpoint-design.md](checkpoint-design.md) | Checkpoint 持久化设计：MysqlDistributedStore、agent_state/agent_fs 表结构（schema 权威；已按 agentscope 2.0.3 订正） |
-| [schema-full.sql](schema-full.sql) | **全量建表语句**（2026-09-28 新增；2026-10-27 增补至 V13 turn_stop、V14 补 session_message.trace_id 列）：本工程 11 张表 + SDK 自建 agent_state/agent_fs（快照未含 V8 remote_task_registry 表，以迁移脚本为权威），含代码内幂等迁移与部署注意；新建库/排障直接照搬 |
+| [schema-full.sql](schema-full.sql) | **全量建表语句**（2026-09-28 新增；2026-10-27 增补至 V13 turn_stop、V14 补 session_message.trace_id 列；2026-11-09 增补 V15 sandbox_user/sandbox_binding 沙箱生命周期簿记两表）：本工程 13 张表 + SDK 自建 agent_state/agent_fs（快照未含 V8 remote_task_registry 表，以迁移脚本为权威），含代码内幂等迁移与部署注意；新建库/排障直接照搬 |
 | [history-agentstate-design.md](history-agentstate-design.md) | History 权威化设计：agent_state 为消息级事实来源（已实施，被源码注释引用） |
 | [tracing-design.md](tracing-design.md) | OTel 链路追踪设计（已实施，被 Makefile/Dockerfile 引用；含 2026-09-26 的模型/工具 IO 内容补录） |
 | [offline-dev-image.md](offline-dev-image.md) | 离线开发镜像 java-dev 手册（被 Dockerfile.dev 引用） |

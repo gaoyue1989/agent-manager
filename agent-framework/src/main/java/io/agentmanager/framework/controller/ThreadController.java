@@ -896,45 +896,157 @@ public class ThreadController {
     }
 
     /**
-     * reply_id 回填：取该 session 出现过的 reply_id，按**首个事件的 seq** 升序分配给
-     * assistant 消息。数据源是 Redis 的 reply 索引（ZSET，score = 首个 seq），
-     * 与原 SQL 的 GROUP BY reply_id ORDER BY MIN(seq) 等价。
-     * 这是 reply_id 的唯一来源——实测 {@code AgentState.getReplyId()} 为会话级而非逐轮
-     * （设计文档 §15），归档侧不盖戳，本方法对合并视图与 state-only 视图行为一致。
+     * reply_id 回填：把同一 turn 的 assistant 消息收敛到同一个 reply_id。
      *
-     * <p>与原查询有两处刻意的差异：
-     *  - 原查询只认 event_type = 'AGENT_START'；索引覆盖带该 replyId 的**任意**事件。
-     *    AGENT_START 是一个 turn 的首个事件，所以顺序一致；差别只在「AGENT_START 丢了
-     *    的 turn」现在也会出现——那更正确，不是缺陷。
-     *  - 失败时 findReplyIds **返回 null 而不是空列表**：空列表会被下游当成「这个会话没有 reply」，
-     *    而实际是「读不到」。两者对历史的呈现不同，不能在类型上混为一谈。
+     * <p><b>为什么按轮而不是按条</b>：ReAct 一轮可产生多条 assistant 消息（每次推理一条），
+     * 而 reply 索引一轮只有一个 id。原实现「逐条 assistant 顺序分配」在工具轮次下必然错位
+     * （文件卡片的 reply_id 找不到对应消息或挂到错误气泡）。
+     *
+     * <p>轮次切分：user 消息开启新轮；ASKING 的 assistant 消息（metadata 携带 confirm
+     * replyId）之后若仍有 assistant 消息，则视为 HITL 恢复段，开新轮。每轮 reply_id 取值优先级：
+     * ① 归档行已有 reply_id；② 消息 metadata 锚点（写入侧 user 消息 / SDK ASKING 消息）；
+     * ③ Redis reply 索引顺序（兼容存量会话，Redis 不可用时为空）。
+     *
+     * <p>失败时 findReplyIds **返回 null 而不是空列表**：空列表会被下游当成「这个会话没有
+     * reply」，而实际是「读不到」——锚点仍可单独生效，两者不能在类型上混为一谈。
      */
     private void fillReplyIds(String sessionId, List<Map<String, Object>> msgs) {
-        var needs = msgs.stream()
+        if (msgs.isEmpty()) {
+            return;
+        }
+        boolean needs = msgs.stream()
             .anyMatch(m -> "assistant".equals(m.get("role")));
-        if (!needs) {
-            return;
-        }
         List<String> replyIds = null;
-        try {
-            replyIds = sessionEventStore.findReplyIds(sessionId);
-        } catch (Exception e) {
-            // 从 debug 提到 warn：静默缺 reply_id 会让前端的历史消息失去与 turn 的关联，
-            // 这是**内容层面的错误**，不该按调试信息处理
-            log.warn("reply_id lookup failed for {} — 历史消息将缺少 reply_id: {}",
-                sessionId, e.toString());
-        }
-        if (replyIds == null) {
-            return;
-        }
-        // 按 AGENT_START 出现顺序，依次分配 reply_id 给 assistant 消息
-        int idx = 0;
-        for (var m : msgs) {
-            if ("assistant".equals(m.get("role")) && idx < replyIds.size()) {
-                m.put("reply_id", replyIds.get(idx));
-                idx++;
+        if (needs) {
+            try {
+                replyIds = sessionEventStore.findReplyIds(sessionId);
+            } catch (Exception e) {
+                // 从 debug 提到 warn：静默缺 reply_id 会让前端的历史消息失去与 turn 的关联，
+                // 这是**内容层面的错误**，不该按调试信息处理
+                log.warn("reply_id lookup failed for {} — 历史消息将缺少 reply_id: {}",
+                    sessionId, e.toString());
             }
         }
+        var used = new java.util.HashSet<String>();
+        for (var m : msgs) {
+            if ("assistant".equals(m.get("role"))) {
+                var existing = m.get("reply_id");
+                if (existing instanceof String s && !s.isBlank()) {
+                    used.add(s);
+                }
+            }
+        }
+        boolean hasUser = msgs.stream().anyMatch(m -> "user".equals(m.get("role")));
+        if (!hasUser) {
+            // 无用户消息（上下文已被裁剪的存量会话）无法切分轮次：维持逐条顺序分配兜底
+            for (var m : msgs) {
+                var anchor = takeTurnReplyId(m);
+                if (!"assistant".equals(m.get("role"))) {
+                    continue;
+                }
+                var existing = m.get("reply_id");
+                if (existing instanceof String s && !s.isBlank()) {
+                    continue;
+                }
+                var id = anchor != null ? anchor : nextReplyId(replyIds, used);
+                if (id != null) {
+                    m.put("reply_id", id);
+                    used.add(id);
+                }
+            }
+            return;
+        }
+
+        // 按 user 消息 / ASKING 后续段切分轮次
+        int start = 0;
+        String prevRole = null;
+        boolean prevAnchored = false;
+        for (int i = 0; i < msgs.size(); i++) {
+            var role = msgs.get(i).get("role");
+            boolean boundary = i > start && ("user".equals(role)
+                || ("assistant".equals(role) && "assistant".equals(prevRole) && prevAnchored));
+            if (boundary) {
+                assignSegmentReplyId(msgs, start, i, replyIds, used);
+                start = i;
+            }
+            if ("user".equals(role) || "assistant".equals(role)) {
+                prevRole = (String) role;
+                prevAnchored = hasTurnReplyId(msgs.get(i));
+            }
+        }
+        assignSegmentReplyId(msgs, start, msgs.size(), replyIds, used);
+    }
+
+    /** 为 [start, end) 这一轮内的所有 assistant 消息写入同一个 reply_id；并清理内部锚点字段 */
+    private void assignSegmentReplyId(List<Map<String, Object>> msgs, int start, int end,
+                                      List<String> replyIds, java.util.Set<String> used) {
+        String anchor = null;
+        boolean isTurn = false;
+        // ① 归档行已盖戳的 reply_id 优先（将来归档侧恢复盖戳时无需改这里）
+        for (int i = start; i < end && anchor == null; i++) {
+            var m = msgs.get(i);
+            if ("assistant".equals(m.get("role"))) {
+                isTurn = true;
+                var existing = m.get("reply_id");
+                if (existing instanceof String s && !s.isBlank()) {
+                    anchor = s;
+                }
+            } else if ("user".equals(m.get("role"))) {
+                isTurn = true;
+            }
+        }
+        // ② metadata 锚点（user 消息写入侧 / ASKING assistant）；读取即移除，不对外泄露
+        for (int i = start; i < end; i++) {
+            var id = takeTurnReplyId(msgs.get(i));
+            if (anchor == null && id != null) {
+                anchor = id;
+            }
+        }
+        // ③ Redis 顺序兜底：每个 turn 只消费一个 id（无 assistant 的轮次也占位，保持对齐）。
+        //    仅 compaction 分隔条的段不是一轮，不消耗 reply id（否则会挤掉后续轮次的 id）
+        if (anchor == null) {
+            if (!isTurn) {
+                return;
+            }
+            anchor = nextReplyId(replyIds, used);
+        }
+        if (anchor == null) {
+            return;
+        }
+        used.add(anchor);
+        for (int i = start; i < end; i++) {
+            var m = msgs.get(i);
+            if ("assistant".equals(m.get("role"))) {
+                var existing = m.get("reply_id");
+                if (!(existing instanceof String s && !s.isBlank())) {
+                    m.put("reply_id", anchor);
+                }
+            }
+        }
+    }
+
+    /** 取消息 metadata 锚点并移除内部字段 */
+    private static String takeTurnReplyId(Map<String, Object> msg) {
+        var value = msg.remove("turn_reply_id");
+        return value instanceof String s && !s.isBlank() ? s : null;
+    }
+
+    private static boolean hasTurnReplyId(Map<String, Object> msg) {
+        var value = msg.get("turn_reply_id");
+        return value instanceof String s && !s.isBlank();
+    }
+
+    /** Redis reply 索引中下一个未使用的 id（index 已按首个事件 seq 升序） */
+    private static String nextReplyId(List<String> replyIds, java.util.Set<String> used) {
+        if (replyIds == null) {
+            return null;
+        }
+        for (var id : replyIds) {
+            if (id != null && !id.isBlank() && !used.contains(id)) {
+                return id;
+            }
+        }
+        return null;
     }
 
     /** 从 agent_state 加载历史消息（状态 JSON 读取与解析口径见 {@link AgentStateReader}）。

@@ -579,6 +579,72 @@ class OpenSandboxTest {
         assertEquals(after1, after2, "内容未变时第二次 call 不应重复投放");
     }
 
+    @Test
+    void scopedSkillCacheExcludesDisabledSkills() throws Exception {
+        // oa-1110-repro-fixes-design §2.1a：禁用技能（L2 包级 demo-b / L4 用户级 demo-c）
+        // 不得进入投放载荷，且容器内残留目录随投放 exec 一并清理——堵 read_file/execute 直读旁路
+        var host = java.nio.file.Files.createTempDirectory("scoped-disabled");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-A", "demo-b");
+        writeHostSkill(host, "sess-A", "demo-c");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var opts = options().skillDisabledChecker(new SkillDisabledChecker() {
+            @Override
+            public java.util.Set<String> packageDisabled() {
+                return java.util.Set.of("demo-b");
+            }
+
+            @Override
+            public boolean isUserDisabled(String userId, String name) {
+                return "demo-c".equals(name);
+            }
+        });
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, opts, null, null);
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        sandbox.stop();
+
+        var entries = capturedHydrateTarEntries(osb);
+        assertTrue(entries.contains(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"), entries.toString());
+        assertTrue(entries.stream().noneMatch(e -> e.contains("demo-b")),
+            "L2 包级禁用技能不得进入容器：" + entries);
+        assertTrue(entries.stream().noneMatch(e -> e.contains("demo-c")),
+            "L4 用户级禁用技能不得进入容器：" + entries);
+
+        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-b'"));
+        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-c'"));
+    }
+
+    @Test
+    void scopedSkillCacheAllDisabledSkipsPayloadButPrunes() throws Exception {
+        // 全部技能被禁用：无 tar 投放（gz=null 分支），但仍执行禁用目录清理
+        var host = java.nio.file.Files.createTempDirectory("scoped-all-disabled");
+        writeHostSkill(host, "sess-A", "demo-b");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var opts = options().skillDisabledChecker(new SkillDisabledChecker() {
+            @Override
+            public java.util.Set<String> packageDisabled() {
+                return java.util.Set.of("demo-b");
+            }
+
+            @Override
+            public boolean isUserDisabled(String userId, String name) {
+                return false;
+            }
+        });
+        var sandbox = new OpenSandbox(projectedStateNoSkillCache(host), osb, opts, null, null);
+        sandbox.setSkillCacheScope("sess-A");
+
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace", 30);
+        sandbox.stop();
+
+        verify(osb.files(), never()).write(anyList());
+        verify(osb.commands()).run(contains("rm -rf '/workspace/.skills-cache/sess-A/oaf-package/demo-b'"));
+    }
+
     /** 从 files().write 捕获中定位 hydrate 的临时 tar（/tmp/workspace.*），解出 tar 条目名。 */
     private static List<String> capturedHydrateTarEntries(Sandbox osb) throws Exception {
         var captor = ArgumentCaptor.forClass(List.class);
@@ -590,6 +656,63 @@ class OpenSandboxTest {
             }
         }
         throw new AssertionError("未捕获到 hydrate tar 写入");
+    }
+
+    // ---------- exec 数据面故障感知（oa-1110-repro-fixes-design §2.3d） ----------
+
+    private static RuntimeException gateway502() {
+        return new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException(
+            "502 Bad Gateway {\"message\":\"Could not connect to the backend sandbox\"}",
+            null, 502, new com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError(
+                "gateway_unreachable", "Could not connect to the backend sandbox"));
+    }
+
+    @Test
+    void execDataplaneFailuresBelowThresholdPropagateOriginal() {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        when(osb.commands().run(anyString())).thenThrow(gateway502());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var ex = assertThrows(Exception.class,
+            () -> sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo hi", 30));
+
+        assertTrue(ex.getMessage().contains("502 Bad Gateway"),
+            "阈值内保持原始异常透传（容忍瞬时抖动）：" + ex.getMessage());
+        // 连续失败 1 次 < 默认阈值 3：命令未改写、无健康标记日志面之外的副作用
+        verify(osb.commands(), times(1)).run(anyString());
+    }
+
+    @Test
+    void execDataplaneFailuresAtThresholdBecomeReadable() throws Exception {
+        // 链式单次打桩（thenThrow×3 → thenReturn → thenThrow），规避 throwing 桩重打桩触发旧桩
+        var commands = mock(Commands.class);
+        var osb = mock(Sandbox.class);
+        when(osb.commands()).thenReturn(commands);
+        var gw = gateway502();
+        when(commands.run(anyString()))
+            .thenThrow(gw, gw, gw)                    // 连续 3 次（第 3 次达阈值改写）
+            .thenReturn(mockExecution(0, "ok", ""))   // 恢复成功 → 计数清零
+            .thenThrow(gw);                           // 再失败 → 从头计（原样透传）
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var ctx = RuntimeContext.builder().userId("u").build();
+        assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 1", 30));
+        assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 2", 30));
+        var third = assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 3", 30));
+
+        // 达阈值（默认 3）：异常消息可读化，引导模型停止重试风暴并告知用户（复现 118×502 的根治）
+        assertTrue(third.getMessage().contains("已连续 3 次命令失败"),
+            "阈值达限应改写为可读文案：" + third.getMessage());
+        assertTrue(third.getMessage().contains("停止重试"), third.getMessage());
+        assertTrue(third.getMessage().contains("502 Bad Gateway"), "保留原始错误：" + third.getMessage());
+        verify(commands, times(3)).run(anyString());
+
+        // 阈值后恢复成功 → 计数清零，下次失败从头计
+        var ok = sandbox.exec(ctx, "echo ok", 30);
+        assertTrue(ok.ok());
+        var fresh = assertThrows(Exception.class, () -> sandbox.exec(ctx, "echo 4", 30));
+        assertTrue(fresh.getMessage().contains("502 Bad Gateway"),
+            "恢复后计数应清零，单次失败不触发改写：" + fresh.getMessage());
     }
 
     private static int countHydrateTarWrites(Sandbox osb) throws Exception {

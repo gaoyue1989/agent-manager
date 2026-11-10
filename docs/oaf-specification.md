@@ -393,19 +393,35 @@ userHeaders:
   headers:
     X-User-Id: userId
     Authorization: reqHeader:authorization
+  arguments:
+    taskId: reqHeader:taskid
   on-missing: deny
 ```
 
-**userHeaders（per-call 用户级 header 注入）**：`headers` 声明 `header 名 ← McpMeta key`
-映射，每次工具调用按值注入下游 HTTP 请求（替换同名静态 header）。取值源两种：
+**userHeaders（per-call 用户级注入，双通道）**：两个映射节共用取值源抽象
+（`header/参数名 ← McpMeta key`），可只声明其一：
+
+- `headers`：注入下游 **HTTP header**（替换同名静态 header）——到达网关/server 传输层，
+  供按调用方凭据鉴权/审计/路由；
+- `arguments`：callTool 时合并进 JSON-RPC `params.arguments`——**下游 MCP 业务服务的
+  工具参数只从 arguments 取值**（HTTP header 到不了工具业务逻辑），业务参数（taskId/
+  订单号等）走此通道。注入规则：schema 门控（工具 `inputSchema.properties` 已声明该参数、
+  或允许追加（`additionalProperties` 非 `false`）才注入；schema 不可得 best-effort 注入）
+  + args-win（调用方/模型显式参数优先，只补缺）；值恒为字符串（schema 期望 number/boolean
+  的参数勿声明此通道）；缺值恒跳过（无 fail-closed，工具必需参数由下游按 schema 校验报错）；
+  仅 HTTP 传输（sse/streamableHttp）生效，stdio 整节告警忽略。
+
+取值源两种（两节通用）：
 
 - `userId`（内建）：本次调用生效用户（middleware 解析，随 `_meta` 双通道下发）；
 - `reqHeader:<小写头名>`：调用方对话请求（`/threads/chat` / confirm / AG-UI run）携带的
-  同名 header 原值透传——**仅 HTTP header 单通道，不进 `_meta`**；平台 denylist
+  同名 header 原值透传——**headers/arguments 单通道，不进 `_meta`**；平台 denylist
   （`cookie`/hop-by-hop/`x-forwarded-*`/`sec-*` 等）声明即剔除；未声明不捕获。
-  `on-missing: deny`（缺省，缺值拒绝调用，fail-closed）| `passthrough`（缺值跳过该头）。
-  仅 HTTP 传输（sse/streamableHttp）生效，stdio 声明告警忽略。详见
-  agent-framework/docs/mcp-user-scoped-headers-plan.md 与 mcp-chat-header-forward-design.md。
+  `on-missing: deny`（缺省，缺值拒绝调用，fail-closed，仅作用于 headers 通道）|
+  `passthrough`（缺值跳过该头）。凭据类值（如 `Authorization`）只可走 headers 通道——
+  arguments 注入值可能经下游结果/错误回显进模型上下文与 checkpoint。
+  详见 agent-framework/docs/mcp-user-scoped-headers-plan.md、mcp-chat-header-forward-design.md
+  与 mcp-header-arguments-injection-design.md。
 
 ---
 

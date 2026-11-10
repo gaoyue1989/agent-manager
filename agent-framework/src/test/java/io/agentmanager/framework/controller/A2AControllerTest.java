@@ -377,6 +377,43 @@ class A2AControllerTest {
         org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(), emptyGrouped.get("skills"));
     }
 
+    @Test
+    void messageSendShouldNormalizeCommaSeparatedSkillsString() throws Exception {
+        // issue #266：A2A 旧客户端传 metadata.skills="a,b"——归一处必须接受字符串并回填
+        // 分组形态；否则 SkillsFilterMiddleware 的 String 分支不可达，白名单静默 fail-open
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"25","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-sk6","userId":"alice","skills":" refund , order-query "}}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        var grouped = (java.util.Map<String, Object>) meta.get(msgId);
+        org.junit.jupiter.api.Assertions.assertEquals(
+            java.util.List.of("refund", "order-query"), grouped.get("skills"),
+            "逗号分隔字符串归一为 List 并按 msg id 分组");
+        org.junit.jupiter.api.Assertions.assertFalse(meta.containsKey("skills"),
+            "顶层字符串键不得残留");
+    }
+
+    @Test
+    void messageSendShouldIgnoreBlankSkillsString() throws Exception {
+        // 空白字符串 = 未传（与只读视图 ?skills= 空串语义一致），不产生空分组键
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"26","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "metadata":{"sessionId":"a2a-sk7","userId":"alice","skills":"   "}}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        var msgId = String.valueOf(message.get("messageId"));
+        org.junit.jupiter.api.Assertions.assertNull(meta.get(msgId),
+            "空白字符串不写分组键（= 未传，全部技能）");
+    }
+
     // ---------- 本轮 tools 列表（session-tool-list-design §2.2） ----------
 
     @Test

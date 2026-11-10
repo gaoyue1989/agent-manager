@@ -1,6 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -349,6 +350,52 @@ class SandboxEnvFileTest {
         assertEquals("env_limit_exceeded", e.getErrorCode());
         // 校验失败不产生部分写入
         verify(files, never()).write(any());
+    }
+
+    @Test
+    void mergeShouldTolerateLegacySidecarValues() throws Exception {
+        // issue #288：sidecar 存量键（7a43d44 之前旧规则允许 $/换行/首尾空白/前导引号）不按
+        // 新规则回放——升级后改无关键不得被历史值永久 400 阻断；存量值仅存 sidecar、不进
+        // .env 渲染，放行不破坏生效文件语义
+        commandReturns("");
+        jsonSidecarReturns("{\"LEGACY_DOLLAR\":\"sk-$HOME\",\"LEGACY_QUOTE\":\"'quoted'\","
+            + "\"LEGACY_WS\":\" padded \",\"GOOD\":\"ok\"}");
+        originalEnvReturns("PATH=/usr/bin\n");
+
+        SandboxEnvFile.MergeResult result = envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("NEW", "v"));
+        assertEquals(List.of("NEW"), result.updatedKeys());
+        List<List<WriteEntry>> batches = writtenBatches();
+        // 发布批仅追加本次变更行（存量值不得经 .env 发布行重新写入）
+        String env = textOf(writeOf(batches.get(0)));
+        assertTrue(env.endsWith("NEW=v\n"), env);
+        assertFalse(env.contains("$HOME") && env.contains("padded"), env);
+        // sidecar 批原样保留全部历史键
+        String sidecar = textOf(writeOf(batches.get(1)));
+        assertTrue(sidecar.contains("\"LEGACY_DOLLAR\":\"sk-$HOME\""), sidecar);
+        assertTrue(sidecar.contains("\"LEGACY_QUOTE\":\"'quoted'\""), sidecar);
+        assertTrue(sidecar.contains("\"LEGACY_WS\":\" padded \""), sidecar);
+    }
+
+    @Test
+    void mergeShouldStillRejectNewValueViolatingRulesOnLegacyKey() throws Exception {
+        // 更新存量键：新值必须满足新规则（覆盖即自然收敛清洗），legacy 放行不豁免本次写入
+        commandReturns("");
+        jsonSidecarReturns("{\"LEGACY\":\"old\"}");
+        SandboxEnvException e = assertThrows(SandboxEnvException.class,
+            () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("LEGACY", "sk-$HOME")));
+        assertEquals("unsupported_env_value", e.getErrorCode());
+        verify(files, never()).write(any());
+    }
+
+    @Test
+    void mergeShouldIncludeKeyNameInValueErrors() {
+        // issue #288：错误信息带键名定位违规值（历史错误信息无键名，多键场景无法定位）
+        commandReturns("");
+        jsonSidecarMissing();
+        SandboxEnvException e = assertThrows(SandboxEnvException.class,
+            () -> envFile.mergeAndWrite(sandbox, ENV_PATH, Map.of("MY_TOKEN", "sk-$HOME")));
+        assertTrue(e.getMessage() != null && e.getMessage().contains("MY_TOKEN"),
+            "错误信息应含违规键名: " + e.getMessage());
     }
 
     @Test

@@ -92,6 +92,10 @@ agent:
     # 语义升级（sandbox-pool-opensandbox-design §4.4，PR-D）：60→30，从「创建时一次性超时」
     # 变为「生命周期 TTL，随 turn 刷新」（T1 create 起点 / T2 turn 收尾 / T3 在途续期）
     timeout-minutes: ${SANDBOX_TIMEOUT_MINUTES:30}
+    # 建箱/管理面 HTTP 请求超时（秒，oa-1110-repro-fixes-design §2.3b；默认 30 = SDK 默认。
+    # 并发建箱高峰上游排队放大实测 1.5s→13.2s，与 create 重试 SANDBOX_CREATE_MAX_ATTEMPTS
+    # 叠加消化高峰；注意语义 ≠ timeout-minutes（生命周期 TTL））
+    request-timeout-seconds: ${SANDBOX_REQUEST_TIMEOUT_SECONDS:30}
     memory-mb: ${SANDBOX_MEMORY_MB:1024}
     cpu-count: ${SANDBOX_CPU_COUNT:1}
     execd-grace-shutdown: ${SANDBOX_EXECD_GRACE_SHUTDOWN:100ms}
@@ -125,6 +129,10 @@ agent:
       user-quota: ${SANDBOX_USER_QUOTA:5}
       renew-interval-seconds: ${SANDBOX_RENEW_INTERVAL_SECONDS:60}
       confirm-hold-minutes: ${SANDBOX_CONFIRM_HOLD_MINUTES:20}
+      # create 瞬时类失败（超时/连接/网关不可达）重试（oa-1110-repro-fixes-design §2.3a）：
+      # 并发建箱高峰上游排队放大触发 SDK 超时——仅瞬时类按指数退避重试；attempts=1 回退原行为
+      create-max-attempts: ${SANDBOX_CREATE_MAX_ATTEMPTS:2}
+      create-retry-backoff-ms: ${SANDBOX_CREATE_RETRY_BACKOFF_MS:1000}
   file:
     upload-enabled: ${FILE_UPLOAD_ENABLED:true}
     upload-max-mb: ${FILE_UPLOAD_MAX_MB:20}

@@ -296,10 +296,12 @@ public class AguiRunController {
             try {
                 eventBus.beginTurn(threadId);
 
-                // ===== 4. 构造消息（@Skill 注入 + 会话元数据，与 /chat 同构） =====
+                // ===== 4. 构造消息（/Skill 注入 + 会话元数据，与 /chat 同构） =====
                 var processedMessage = skillInjectionService.injectSkillReferences(text, userId);
                 var msgMeta = new java.util.HashMap<String, Object>();
                 msgMeta.put(UiContextStore.METADATA_SESSION_KEY, threadId);
+                // 逐轮归属锚点（与 /threads/chat 同构）：runId 即本 turn 的 replyId
+                msgMeta.put(io.agentmanager.framework.service.StateDataParser.METADATA_TURN_REPLY_ID, runId);
                 var msg = Msg.builder().role(MsgRole.USER).name(userId)
                     .metadata(msgMeta)
                     .textContent(processedMessage).build();
@@ -332,7 +334,7 @@ public class AguiRunController {
                 channel.dispatchStream(inbound)
                     .subscribe(
                         event -> handleEventAndEmit(event, threadId, runId, lease, sink,
-                            turnEnded, toolSummary, codecCtx, turnBucketKeys),
+                            turnEnded, toolSummary, codecCtx, turnBucketKeys, null),
                         e -> {
                             log.warn("[agui] run stream error (sid={}): {}", threadId, e.getMessage());
                             if (!lease.isLost()) {
@@ -433,6 +435,9 @@ public class AguiRunController {
                 }
             }
 
+            // 恢复段事件里的再次挂起继承原轮 skills 白名单（issue #264）
+            var turnSkills = runtimeService.pendingTurnSkills(threadId);
+
             Flux<AgentEvent> resumeFlux;
             try {
                 eventBus.beginTurn(threadId);
@@ -468,7 +473,7 @@ public class AguiRunController {
             resumeFlux.subscribe(
                 event -> handleEventAndEmit(event, threadId, runId, lease, sink,
                     turnEnded, toolSummary, codecCtx,
-                    java.util.concurrent.ConcurrentHashMap.newKeySet()),
+                    java.util.concurrent.ConcurrentHashMap.newKeySet(), turnSkills),
                 e -> {
                     log.warn("[agui] resume stream error (sid={}): {}", threadId, e.getMessage());
                     if (!lease.isLost()) {
@@ -548,7 +553,8 @@ public class AguiRunController {
                                     TurnLeaseGuard lease, FluxSink<ServerSentEvent<String>> sink,
                                     AtomicBoolean turnEnded, TurnToolSummaryTracker toolSummary,
                                     AguiStreamContext codecCtx,
-                                    java.util.Set<String> turnBucketKeys) {
+                                    java.util.Set<String> turnBucketKeys,
+                                    java.util.List<String> turnSkills) {
         // 租约丢失：停写 + 本连接 RUN_ERROR（不走 TurnFinalizer——其终态帧是 native 词表，
         // 本面客户端需要 AG-UI 语义的帧）
         if (stopIfLeaseLost(lease, sessionId, replyId, sink)) {
@@ -585,7 +591,7 @@ public class AguiRunController {
         if (event instanceof RequireUserConfirmEvent) {
             log.info("[agui] HITL permission_ask: sessionId={}, tools={}", sessionId,
                 ((RequireUserConfirmEvent) event).getToolCalls().stream().map(tc -> tc.getName()).toList());
-            runtimeService.storeConfirmContext(sessionId, event);
+            runtimeService.storeConfirmContext(sessionId, event, turnSkills);
             // T4 挂起保留窗（§4.4）：AG-UI 挂起同样保留沙箱续期，每次 ask 重新计窗
             if (sandboxLifecycle != null) {
                 sandboxLifecycle.onConfirmHold(sessionId);

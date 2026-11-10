@@ -6,7 +6,7 @@
 #   2  chat {skills:[support-only]}：模型侧 <available_skills> 仅该技能（llm-calls 证据）
 #   3  下一轮不传 skills：恢复全部技能（仅本轮生效，不落库）
 #   4  chat {skills:[]}：模型无技能；未知名混入：忽略且不报错
-#   5  @Skill：名单外不注入（保留原文），名单内注入
+#   5  /Skill：名单外不注入（保留原文），名单内注入
 #   6  禁用技能：即使列入本轮名单也被剔除（PVC 直写 .skill-states.json）
 #   7  A2A message.metadata.skills 生效（模型侧同口径）
 #   8  双副本：任意副本续聊同口径（无状态）
@@ -115,7 +115,7 @@ for c in calls:
             out += re.findall(r'<available_skills>.*?</available_skills>', txt, re.S)
 print('\\n'.join(out))"
 }
-# 本轮用户消息文本（@Skill 注入落点）：每轮调用中最后一条 USER 消息
+# 本轮用户消息文本（/Skill 注入落点）：每轮调用中最后一条 USER 消息
 turn_user_text() {
   python3 -c "
 import json,sys
@@ -147,7 +147,7 @@ chat_and_assert() { # 可见性断言：<available_skills> 块
   [ -n "$must" ] && assert_contains "$case_name（available_skills 含 $must）" "$avail" "$must"
   [ -n "$not" ] && assert_not_contains "$case_name（available_skills 不含 $not）" "$avail" "$not"
 }
-chat_and_assert_injection() { # @Skill 注入断言：本轮用户消息
+chat_and_assert_injection() { # /Skill 注入断言：本轮用户消息
   local case_name=$1 svc=$2 sid=$3 msg=$4 skills=$5 must=$6 not=$7
   local frames calls before user
   before=$(calls_count "$svc" "$sid")
@@ -277,7 +277,7 @@ assert_eq "1.4 未知名混入被忽略" "$(echo "$UNKNOWN_MIX" | jq -r 'length'
 AVAIL=$(curl -s "$SVC_URL/skills/available?skills=support-only")
 assert_contains "1.5 available 白名单" "$AVAIL" '"name":"support-only"'
 assert_not_contains "1.6 available 不含名单外" "$AVAIL" '"name":"ops-only"'
-PARSE=$(curl -s --get "$SVC_URL/skills/parse-refs" --data-urlencode "message=@support-only @ops-only" --data-urlencode "skills=support-only")
+PARSE=$(curl -s --get "$SVC_URL/skills/parse-refs" --data-urlencode "message=/support-only /ops-only" --data-urlencode "skills=support-only")
 assert_eq "1.7 parse-refs 白名单" "$(echo "$PARSE" | jq -r '.skills | join(",")')" "support-only"
 
 say "E2：chat {skills:[support-only]} 模型侧收敛"
@@ -298,9 +298,9 @@ EMPTY_AVAIL=$(echo "$EMPTY_CALLS" | turn_avail_text)
 assert_not_contains "4.2 [] 轮次 available_skills 为空" "$EMPTY_AVAIL" "<name>"
 chat_and_assert "4.3 未知名混入忽略且不报错" "$SVC_NAME" "$SID" "未知名轮次，简要回答" '["support-only","ghost-skill"]' "support-only" "ops-only"
 
-say "E5：@Skill 注入与名单一致"
-chat_and_assert_injection "5.1 名单外 @ops-only 不注入（保留原文）" "$SVC_NAME" "$SID" "@ops-only 这个技能的内容是什么" '["support-only"]' "" "OPS_ONLY_BODY_9d2c"
-chat_and_assert_injection "5.2 名单内 @ops-only 注入" "$SVC_NAME" "$SID" "@ops-only 这个技能的内容是什么" '["ops-only"]' "OPS_ONLY_BODY_9d2c" ""
+say "E5：/Skill 注入与名单一致"
+chat_and_assert_injection "5.1 名单外 /ops-only 不注入（保留原文）" "$SVC_NAME" "$SID" "/ops-only 这个技能的内容是什么" '["support-only"]' "" "OPS_ONLY_BODY_9d2c"
+chat_and_assert_injection "5.2 名单内 /ops-only 注入" "$SVC_NAME" "$SID" "/ops-only 这个技能的内容是什么" '["ops-only"]' "OPS_ONLY_BODY_9d2c" ""
 
 say "E6：禁用技能即使列入名单也被剔除"
 # /config 为只读 PVC：toggle API 不可写，按 L2 状态文件直写（.skill-states.json = 禁用名 JSON 数组）

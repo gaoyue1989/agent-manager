@@ -145,7 +145,8 @@ class McpUserHeaderInjectionTest {
             .buildAsync().block();
         assertNotNull(inner);
         clients.add(inner);
-        return new UserScopedMcpClientWrapper(inner, new UserHeaderRule(headers, denyOnMissing));
+        return new UserScopedMcpClientWrapper(inner,
+            new UserHeaderRule(headers, Map.of(), denyOnMissing));
     }
 
     private List<Recorded> callsTo(String method) {

@@ -39,8 +39,9 @@ for img in agent-framework:latest platform-backend:v4; do
   docker exec agent-manager-control-plane ctr -n k8s.io images import --all-platforms /var/tmp/img.tar
 done
 
-# platform-frontend 是带 registry 前缀的 tag 且 imagePullPolicy: Always
-# → 节点必须能访问 172.20.0.1:5001，先 push 到该registry（不能靠 ctr 导入）
+# platform-frontend 现为 IfNotPresent（manifests/frontend.yaml:25）：ctr 导入/kind load 导入
+# 节点后 rollout restart 即换代；IfNotPresent 不比 registry digest，仅 push 到 172.20.0.1:5001
+# 而未导入节点时换代静默失效（Pod 仍复用旧镜像）——push 只是可选路径之一，导入节点才是必要动作
 docker push 172.20.0.1:5001/platform-frontend:v7
 
 # 导出功能基底镜像预置（EXPORT_BASE_IMAGE，issue #218）：导出单异步构建以 busybox 为
@@ -82,12 +83,13 @@ kubectl -n agent-platform rollout status deployment --timeout=300s
 
 ### 控制台拆分按功能 e2e（e2e/console-split/）
 
-部署后一键回归（M0–M11 十二模块；M9=技能中心、M10=沙箱配置、M11=空间配置/跨集群导出；enforce 三态需独立网关环境，不在本套件）：
+部署后一键回归（M0–M12 十三模块；M9=技能中心、M10=沙箱配置、M11=空间配置/跨集群导出、M12=沙箱管理面；enforce 三态需独立网关环境，不在本套件）：
 
 ```bash
-BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911   [LLM_API_KEY=.. LLM_BASE_URL=.. LLM_MODEL=..]   # 缺省自动从 release-agent env 读取
-  bash e2e/console-split/run-all.sh               # 全跑；或传模块号 m0 m3 ... 选择性跑
+BASE=http://localhost:30080/api/v1 FRONTEND_BASE=http://localhost:8911 bash e2e/console-split/run-all.sh   # 全跑；或传模块号 m0 m3 ... 选择性跑
 ```
+
+可选在命令前追加合法赋值前缀（不带方括号）`LLM_API_KEY=.. LLM_BASE_URL=.. LLM_MODEL=..` 显式指定模型凭据；缺省自动从 release-agent 部署的 env Secret/ConfigMap 读取（e2e/console-split/lib.sh `resolve_llm_env`），不可得时 M3/M5 跳过。`BASE`/`FRONTEND_BASE` 不传时脚本内缺省值与上文相同。
 
 实装截图画廊：[docs/screenshots/console-split/README.md](screenshots/console-split/README.md)。
 

@@ -45,11 +45,48 @@ public final class SkillZipSupport {
     /**
      * 解压 zip 到目标目录（调用方负责创建/清理临时目录）。
      *
-     * @throws IllegalArgumentException 条目数/总大小超限、含非法（穿越）路径
+     * <p><b>编码兼容</b>：条目名先按 UTF-8 严格解码；失败则整包回退 GBK 重试
+     * （Windows 自带压缩/旧版 WinRAR 的中文文件名是 GBK 字节且不带 UTF-8 标志，
+     * JDK 直接解会抛 "malformed input off : N, length : 1"）。已带 UTF-8 标志的条目
+     * 在 GBK 回退轮仍按 UTF-8 解码（JDK 尊重 EFS 标志），因此两类文件名可共存于同一包。
+     * 两轮都失败才拒绝。包体先读入内存（HTTP 层已有 10/20MB 上限）以支持重试。
+     *
+     * @throws IllegalArgumentException 条目数/总大小超限、含非法（穿越）路径、
+     *                                  条目名既非 UTF-8 也非 GBK
      * @throws IOException              解压 IO 失败
      */
     public static void extractZip(InputStream is, Path targetDir) throws IOException {
-        try (var zis = new ZipInputStream(is)) {
+        var zipBytes = readZipBytes(is);
+        try {
+            extractZipOnce(new java.io.ByteArrayInputStream(zipBytes), targetDir, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            if (!isEntryNameCodingError(e)) {
+                throw e;
+            }
+            // 首轮可能已解出部分文件（其名字是合法 UTF-8），回退前清空避免残留半包
+            log.warn("zip 条目名不是合法 UTF-8（{}），回退 GBK 重新解析", e.getMessage());
+            clearDirectory(targetDir);
+            try {
+                extractZipOnce(new java.io.ByteArrayInputStream(zipBytes), targetDir,
+                    java.nio.charset.Charset.forName("GBK"));
+            } catch (IllegalArgumentException gbkError) {
+                if (!isEntryNameCodingError(gbkError)) {
+                    throw gbkError;
+                }
+                clearDirectory(targetDir);
+                log.warn("zip 条目名 UTF-8/GBK 均解码失败（utf8={}, gbk={}）",
+                    e.getMessage(), gbkError.getMessage());
+                throw new IllegalArgumentException(
+                    "zip 包内文件名既不是 UTF-8 也不是 GBK 编码，请把文件名/目录名改成英文后重试",
+                    gbkError);
+            }
+        }
+    }
+
+    /** 单轮解压（指定条目名字符集）；条目名解码失败抛 IllegalArgumentException 交给外层回退 */
+    private static void extractZipOnce(InputStream is, Path targetDir, java.nio.charset.Charset charset)
+            throws IOException {
+        try (var zis = new ZipInputStream(is, charset)) {
             ZipEntry entry;
             int entryCount = 0;
             long totalSize = 0;
@@ -85,6 +122,49 @@ public final class SkillZipSupport {
                 zis.closeEntry();
             }
         }
+    }
+
+    /** 读取 zip 包体（上限按解压后上限兜底，防止无界内存占用） */
+    private static byte[] readZipBytes(InputStream is) throws IOException {
+        var out = new java.io.ByteArrayOutputStream();
+        var buf = new byte[8192];
+        long total = 0;
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            total += n;
+            if (total > MAX_EXTRACTED_BYTES) {
+                throw new IllegalArgumentException(
+                    "zip 包体超过 " + (MAX_EXTRACTED_BYTES / 1024 / 1024) + "MB，请精简后重试");
+            }
+            out.write(buf, 0, n);
+        }
+        return out.toByteArray();
+    }
+
+    /** 清空目录内容但保留目录本身（编码回退重试前使用） */
+    private static void clearDirectory(Path dir) throws IOException {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return;
+        }
+        try (var stream = Files.walk(dir)) {
+            for (var p : stream.sorted(Comparator.reverseOrder()).toList()) {
+                if (!p.equals(dir)) {
+                    Files.deleteIfExists(p);
+                }
+            }
+        }
+    }
+
+    /**
+     * 是否为 JDK 严格解码 zip 条目名失败抛出的 IllegalArgumentException。
+     *
+     * <p>判据是 cause 为 {@link java.nio.charset.CharacterCodingException}：UTF-8 轮 message 形如
+     * {@code "malformed input off : N, length : M"}，GBK 轮则是
+     * {@code "java.nio.charset.MalformedInputException: Input length = 1"}，不能只按前者匹配。
+     * 业务校验（路径穿越等）抛出的 IllegalArgumentException 没有该 cause，不会被误改写。
+     */
+    private static boolean isEntryNameCodingError(IllegalArgumentException e) {
+        return e.getCause() instanceof java.nio.charset.CharacterCodingException;
     }
 
     /**

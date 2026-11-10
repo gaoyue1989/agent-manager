@@ -451,7 +451,7 @@ select.input { cursor: pointer; }
 }
 .skill-edit-area:focus { border-color: var(--accent); }
 
-/* --- @Skill 提及下拉 --- */
+/* --- /Skill 提及下拉 --- */
 .skill-mention-dropdown {
   position: absolute;
   bottom: 100%;
@@ -630,7 +630,7 @@ select.input { cursor: pointer; }
 }
 .skill-edit-area:focus { border-color: var(--accent); }
 
-/* --- @Skill 提及下拉 --- */
+/* --- /Skill 提及下拉 --- */
 .skill-mention-dropdown {
   position: absolute;
   bottom: 100%;
@@ -808,7 +808,7 @@ select.input { cursor: pointer; }
 }
 .skill-edit-area:focus { border-color: var(--accent); }
 
-/* --- @Skill 提及下拉 --- */
+/* --- /Skill 提及下拉 --- */
 .skill-mention-dropdown {
   position: absolute;
   bottom: 100%;
@@ -928,7 +928,7 @@ select.input { cursor: pointer; }
 }
 .skill-edit-area:focus { border-color: var(--accent); }
 
-/* --- @Skill 提及下拉 --- */
+/* --- /Skill 提及下拉 --- */
 .skill-mention-dropdown {
   position: absolute;
   bottom: 100%;

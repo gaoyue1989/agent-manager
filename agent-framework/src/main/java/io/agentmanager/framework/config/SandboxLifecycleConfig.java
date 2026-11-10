@@ -27,5 +27,13 @@ public record SandboxLifecycleConfig(
     /** T3 在途续期间隔（秒）；启动校验 {@code < TTL×60/2}（§4.7 fail-fast） */
     @DefaultValue("60") int renewIntervalSeconds,
     /** T4 HITL 挂起保留窗（分钟）：窗口内挂起沙箱持续续期、不可被 LRU 调度（§4.4） */
-    @DefaultValue("20") int confirmHoldMinutes
+    @DefaultValue("20") int confirmHoldMinutes,
+    /**
+     * ③ create 瞬时类失败重试次数（含首次，oa-1110-repro-fixes-design §2.3a）：
+     * 并发建箱高峰下上游排队放大（实测 1.5s→13.2s）触发 SDK 建箱超时——仅对
+     * 超时/连接/网关不可达类失败按指数退避重试；1 = 不重试（回退原行为）
+     */
+    @DefaultValue("2") int createMaxAttempts,
+    /** create 重试退避基数（毫秒）：第 n 次重试等待 backoff × 2^(n-1)，上限 10s */
+    @DefaultValue("1000") long createRetryBackoffMs
 ) {}

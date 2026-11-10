@@ -46,7 +46,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *   <li>首尾空白：旧版逐行 {@code TrimSpace}、新版 {@code TrimSpace(值)}，口径不一；</li>
  *   <li>首字符 {@code '} / {@code "}：新版按引号值解析（剥引号）、旧版按字面保留，语义分叉。</li>
  * </ul>
- * 值内的单引号（非首字符）两版均按字面保留，允许。
+ * 值内的单引号（非首字符）两版均按字面保留，允许。新规则仅作用于本次请求写入的值：
+ * sidecar 存量键（7a43d44 之前旧规则写入）按 legacy 口径放行，不阻断升级后的 PUT
+ * （issue #288，见 {@link #validateMerged}）。
  */
 @Component
 public class SandboxEnvFile {
@@ -114,7 +116,7 @@ public class SandboxEnvFile {
      * </ul>
      */
     public MergeResult mergeAndWrite(Sandbox sandbox, String envPath, Map<String, String> incoming) {
-        validate(incoming);
+        validateIncoming(incoming);
         String original = readOriginal(sandbox, envPath);
         Map<String, String> managed = new LinkedHashMap<>(readManaged(sandbox));
         List<String> updatedKeys = new ArrayList<>();
@@ -125,7 +127,7 @@ public class SandboxEnvFile {
             }
             managed.put(entry.getKey(), entry.getValue());
         }
-        validate(managed);
+        validateMerged(managed, incoming.keySet());
         if (!updatedKeys.isEmpty()) {
             // 只追加实际变化的键：无变化的 PUT 不重复追加行（未修改键原样保留、execd 取最后出现的行）
             Map<String, String> changed = new LinkedHashMap<>();
@@ -141,12 +143,12 @@ public class SandboxEnvFile {
 
     // ==================== 校验 ====================
 
-    /** 入参加校验（合并前）；合并结果上限校验见 {@link #validate} */
+    /** 入参加校验（合并前，新规则全量）；合并结果上限校验见 {@link #validateMerged} */
     private void validateIncoming(Map<String, String> incoming) {
         int totalBytes = 0;
         for (Map.Entry<String, String> entry : incoming.entrySet()) {
             validateKey(entry.getKey());
-            validateValue(entry.getValue());
+            validateValue(entry.getKey(), entry.getValue(), true);
             totalBytes += utf8Length(entry.getKey()) + utf8Length(entry.getValue());
         }
         if (totalBytes > MAX_TOTAL_BYTES) {
@@ -154,12 +156,23 @@ public class SandboxEnvFile {
         }
     }
 
-    /** 合并结果校验（键数/总字节/每键），失败不产生部分写入 */
-    private void validate(Map<String, String> merged) {
+    /**
+     * 合并结果校验（键数/总字节/每键），失败不产生部分写入。
+     *
+     * <p><b>存量键 legacy 口径（issue #288）</b>：本次请求未触及的 sidecar 历史键按宽松规则
+     * 回放——7a43d44 之前的旧规则允许 {@code $}/换行/首尾空白/前导引号，这些值已合法持久化；
+     * 若按新规则整体回放，升级后任何一次 PUT（哪怕只改无关键）都会被永久 400/409 阻断，且
+     * mergeAndWrite 无删除键通路、错误信息不带键名无法定位。存量值仅存 sidecar（不参与
+     * {@code .env} 渲染，见 {@link #mergeAndWrite} 只追加 {@code changed} 行），放行不破坏
+     * 生效文件语义；用户更新该键时新值必须满足新规则（自然收敛清洗）。
+     *
+     * @param incomingKeys 本次请求触及的键（其值已按新规则全量校验，替换存量值后仍按新规校验）
+     */
+    private void validateMerged(Map<String, String> merged, Set<String> incomingKeys) {
         int totalBytes = 0;
         for (Map.Entry<String, String> entry : merged.entrySet()) {
             validateKey(entry.getKey());
-            validateValue(entry.getValue());
+            validateValue(entry.getKey(), entry.getValue(), incomingKeys.contains(entry.getKey()));
             totalBytes += utf8Length(entry.getKey()) + utf8Length(entry.getValue());
         }
         if (merged.size() > MAX_KEYS) {
@@ -172,40 +185,50 @@ public class SandboxEnvFile {
 
     private void validateKey(String key) {
         if (key == null || !KEY.matcher(key).matches()) {
-            throw invalid("invalid_env_key", "env key must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$");
+            throw invalid("invalid_env_key", "env key '" + key + "' must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$");
         }
         if (RESERVED_KEYS.contains(key)) {
             throw invalid("reserved_env_key", "env key '" + key + "' is reserved by execd/platform");
         }
     }
 
-    private void validateValue(String value) {
+    /**
+     * 单值校验（错误信息带键名定位违规值，issue #288）。
+     *
+     * @param strictFormat false 仅用于 sidecar 存量键回放：跳过 7a43d44 新增的四条跨版本
+     *                     格式规则（$/换行/首尾空白/前导引号），null/超长/NUL 不变量仍保留
+     *                     （旧规则同款，存量值恒满足）
+     */
+    private void validateValue(String key, String value, boolean strictFormat) {
         if (value == null) {
-            throw invalid("invalid_env_value", "env value must not be null");
+            throw invalid("invalid_env_value", "env value of '" + key + "' must not be null");
         }
         if (utf8Length(value) > MAX_VALUE_BYTES) {
-            throw invalid("invalid_env_value", "env value exceeds " + MAX_VALUE_BYTES + " bytes");
+            throw invalid("invalid_env_value", "env value of '" + key + "' exceeds " + MAX_VALUE_BYTES + " bytes");
         }
         if (value.indexOf('\0') >= 0) {
-            throw invalid("invalid_env_value", "env value must not contain NUL");
+            throw invalid("invalid_env_value", "env value of '" + key + "' must not contain NUL");
+        }
+        if (!strictFormat) {
+            return;
         }
         // 行式格式：值内换行会截断条目并注入后续行
         if (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
-            throw invalid("invalid_env_value", "env value must not contain newline");
+            throw invalid("invalid_env_value", "env value of '" + key + "' must not contain newline");
         }
         // 旧/新 execd 的裸值分支都做 os.ExpandEnv，且无转义语法（$$ 会被解析为空）
         if (value.indexOf('$') >= 0) {
             throw new SandboxEnvException("unsupported_env_value", 400,
-                "env value must not contain '$' (EXECD_ENVS expands $VARS with no escape syntax)");
+                "env value of '" + key + "' must not contain '$' (EXECD_ENVS expands $VARS with no escape syntax)");
         }
         // 首尾空白在旧版（逐行 TrimSpace）与新版（TrimSpace(值)）口径不一致
         if (!value.equals(value.strip())) {
-            throw invalid("invalid_env_value", "env value must not have leading/trailing whitespace");
+            throw invalid("invalid_env_value", "env value of '" + key + "' must not have leading/trailing whitespace");
         }
         // 新版 execd 以首个非空白字符判定引号值并剥引号；旧版按字面保留 → 语义分叉
         if (!value.isEmpty() && (value.charAt(0) == '\'' || value.charAt(0) == '"')) {
             throw new SandboxEnvException("unsupported_env_value", 400,
-                "env value must not start with a quote (EXECD_ENVS quote semantics differ across versions)");
+                "env value of '" + key + "' must not start with a quote (EXECD_ENVS quote semantics differ across versions)");
         }
     }
 

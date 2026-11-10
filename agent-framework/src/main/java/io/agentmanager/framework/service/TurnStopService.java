@@ -13,7 +13,8 @@ import org.springframework.stereotype.Service;
  *       由调用方提示改用确认卡拒绝（拒绝路径本身即干净终止）。</li>
  *   <li>租约在（有 turn 正在执行）：取最新非终态事件的 replyId——同会话
  *       {@code run(A)+queue(B)} 时优先停正在跑的 A，而不是只取消排队的 B。</li>
- *   <li>租约在但尚未产出任何事件：目标暂不可判定，返回 TURN_NOT_READY（客户端短重试）。</li>
+ *   <li>租约在但尚未产出任何事件：先回落到 {@code turn_intent}（租约到手后保留到终态）
+ *       取本轮 replyId；意图也不可得（如 confirm 恢复段）才返回 TURN_NOT_READY（短重试）。</li>
  *   <li>无租约但 {@code turn_intent} 存在（排队中）：用意图行 replyId，排队 loop 收到
  *       标记后直接以 cancelled 收流。</li>
  *   <li>以上皆无：NOTHING_TO_STOP（404，不写任何行）。</li>
@@ -107,7 +108,16 @@ public class TurnStopService {
                     && latest.replyId() != null && !latest.replyId().isBlank()) {
                 target = latest.replyId();
             }
-            // ④ 租约在但事件还没产出（刚抢到锁/准备段）：目标暂不可判定
+            // ④ 租约在但事件还没产出（刚抢到锁/准备段）：事件侧无从定位本轮 replyId。
+            // 意图行在租约到手后仍保留到终态，正是为此窗口兜底——用它的 replyId 定位
+            // 当前 turn（无则说明是 confirm 恢复段等未登记意图的执行，退回 409 短重试）。
+            if (target == null) {
+                var intent = intentStore != null ? intentStore.find(sessionId) : null;
+                if (intent != null && !intent.failed()
+                        && intent.replyId() != null && !intent.replyId().isBlank()) {
+                    target = intent.replyId();
+                }
+            }
             if (target == null) {
                 return Result.of(Outcome.TURN_NOT_READY, null);
             }

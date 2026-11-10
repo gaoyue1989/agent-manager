@@ -780,7 +780,7 @@ class DebugApiControllerTest {
         var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
         org.springframework.test.util.ReflectionTestUtils.setField(debugApiController, "sandboxLifecycle", lifecycle);
         when(lifecycle.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "pool-x", 5, 60, 20));
+            true, "pool-x", 5, 60, 20, 2, 1000));
         when(lifecycle.graceSeconds()).thenReturn(180);
         when(lifecycle.registrySize()).thenReturn(2);
         when(lifecycle.registryActiveTurnCount()).thenReturn(1);

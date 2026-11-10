@@ -414,7 +414,8 @@ class ChatStreamControllerTest {
                 controller, "turnIntentStore", intentStore);
 
             var sessionId = "test-user-intent";
-            // 第一次抢锁失败 → 登记排队意图；下一拍拿到租约 → 清除
+            // 第一次抢锁失败 → 登记排队意图；下一拍拿到租约进入执行，意图行保留到
+            // turn 终态（endTurnAndCleanupBuckets）才清除
             var calls = new java.util.concurrent.atomic.AtomicInteger();
             when(turnLeaseStore.tryAcquire(sessionId)).thenAnswer(inv -> {
                 var n = calls.incrementAndGet();
@@ -427,12 +428,49 @@ class ChatStreamControllerTest {
 
             var rid = org.mockito.ArgumentCaptor.forClass(String.class);
             verify(intentStore).register(eq(sessionId), rid.capture(), any(Duration.class));
-            // 排队意图的 turn id 必须与事件信封 id 相同；租约到手即清除（此后以事件 replyId 为准）
+            // 排队意图的 turn id 必须与事件信封 id 相同；意图行在 turn 终态才清理
+            // （a811c27：租约到手后保留——「租约在但零事件」窗口内 stop 经 turn_intent
+            // 解析 replyId，消除 409 turn_not_ready）
             verify(intentStore).clear(eq(sessionId), eq(rid.getValue()));
             verify(intentStore, never()).fail(eq(sessionId), anyString(), anyString(), any());
         } finally {
             ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);
         }
+    }
+
+    @Test
+    void intentRowMustSurviveBetweenLeaseAcquisitionAndFirstEvent() throws Exception {
+        // oa-1110 #29 回归锚点：租约到手、首个事件尚未产出的窗口内，turn_intent 行必须
+        // 仍可被 TurnStopService 解析（clear 只发生在 turn 终态）——此前该窗口 stop 报
+        // 409 turn_not_ready
+        ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofMillis(50);
+        var intentStore = mock(io.agentmanager.framework.service.TurnIntentStore.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "turnIntentStore", intentStore);
+
+        var sessionId = "test-user-intent-window";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-w");   // 租约立即到手（无排队）
+        var dispatchStarted = new java.util.concurrent.CountDownLatch(1);
+        var firstEventGate = new java.util.concurrent.CompletableFuture<AgentEvent>();
+        when(chatChannel.dispatchStream(any(InboundMessage.class))).thenAnswer(inv -> {
+            dispatchStarted.countDown();
+            // 首个事件由测试放行：卡在「租约已到手、零事件」窗口
+            return Flux.defer(() -> Flux.just(firstEventGate.join()));
+        });
+
+        var runner = new Thread(() -> collect(sessionId, "hello", null));
+        runner.start();
+        try {
+            assertTrue(dispatchStarted.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                "turn 应已进入执行（租约到手、流已订阅）");
+            verify(intentStore).register(eq(sessionId), anyString(), any(Duration.class));
+            // 关键不变量：首事件前意图行不得被清除
+            verify(intentStore, never()).clear(anyString(), anyString());
+        } finally {
+            firstEventGate.complete(new AgentEndEvent("reply-w"));
+            runner.join(10_000);
+        }
+        // 终态才清理
+        verify(intentStore, org.mockito.Mockito.timeout(2000)).clear(eq(sessionId), anyString());
     }
 
     @Test
@@ -1461,7 +1499,7 @@ class ChatStreamControllerTest {
         sleep(200);
 
         // 帧已广播、确认上下文已落库，但租约一动不动
-        verify(runtimeService, timeout(2000)).storeConfirmContext(eq(sessionId), any());
+        verify(runtimeService, timeout(2000)).storeConfirmContext(eq(sessionId), any(), any());
         verify(turnLeaseStore, never()).release(anyString(), anyString());
         verify(eventStore, never()).finishTurn(anyString());
 

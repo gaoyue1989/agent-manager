@@ -178,6 +178,51 @@ test('S5b chat 请求级透传头注入 MCP（reqHeader: 取值源 + _meta 剥�
   expect(JSON.stringify(last.meta ?? {})).not.toContain('reqHeader');
 });
 
+test('S5c chat 请求级透传头注入工具参数（arguments 通道）', async () => {
+  // mcp-header-arguments-injection-design：下游 MCP 业务服务的工具参数只从
+  // params.arguments 取值（HTTP header 到不了业务代码）——请求头 taskId 按
+  // userHeaders.arguments 声明合并进 bench_echo 入参；schema 门控与 args-win
+  // 负例由单测覆盖，e2e 断言端到端注入与缺值跳过
+  const taskId = `1001-${uniq()}`;
+  const sid = sessionIdFor(`s5c-${uniq()}`);
+  const stream = chat({
+    message: `[E2E:tool:mcp_echo](s5c)`,
+    userId: U,
+    sessionId: sid,
+    headers: { taskId },
+  });
+  await waitTerminal(stream);
+  expect(toolNames(stream.frames)).toContain('bench_echo');
+  expect(stream.terminal?.type).toBe('done');
+
+  type LastCall = {
+    toolName?: string | null;
+    xUserId?: string | null;
+    arguments?: Record<string, unknown> | null;
+    meta?: Record<string, unknown> | null;
+  };
+  const last = await pollUntil<LastCall>(
+    async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
+    v => v.toolName === 'bench_echo' && v.arguments?.taskId === taskId,
+  );
+  // 注入参数原值到达工具入参；既有 userId header/_meta 双通道不受影响
+  expect(last.arguments?.taskId).toBe(taskId);
+  expect(last.xUserId).toBe(U);
+  expect(last.meta?.userId).toBe(U);
+  expect(JSON.stringify(last.meta ?? {})).not.toContain('reqHeader');
+
+  // 缺值（请求未带 taskId）→ 不注入（参数通道无 fail-closed），工具调用照常
+  const sid2 = sessionIdFor(`s5c-nohdr-${uniq()}`);
+  const plain = chat({ message: `[E2E:tool:mcp_echo](s5c-nohdr)`, userId: U, sessionId: sid2 });
+  await waitTerminal(plain);
+  expect(plain.terminal?.type).toBe('done');
+  const noHeader = await pollUntil<LastCall>(
+    async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
+    v => v.toolName === 'bench_echo' && !!v.arguments && !('taskId' in v.arguments),
+  );
+  expect(noHeader.arguments?.taskId).toBeUndefined();
+});
+
 test('S6 参数校验负例', async ({ request }) => {
   const res = await request.post('/threads/chat', { data: { userId: U } });
   // 无 message/fileIds：SSE error 帧（200 流内 error）或 400，按实现固化
@@ -1180,13 +1225,13 @@ test.describe('FW3 Flyway V6 存量回填（baseline 升级路径，MEM 组同�
       const rows = await (await fetch(`${FW_BASE}/threads?userId=${encodeURIComponent(uid)}`)).json() as Array<Record<string, unknown>>;
       expect(rows.find(x => x.session_id === sidShared), `共享桶 ${uid} 不得回填（V6:51）`).toBeUndefined();
     }
-    // 升级路径契约钉：历史表恰为 baseline(5)+V6..V15——baseline-version 被抬高会在此红（V6 静默跳过形态）；
-    // 新增迁移（V16+）时同步扩展本期望列表，且新迁移必须像 V6..V15 一样幂等（本场景会在已应用库上重放）
+    // 升级路径契约钉：历史表恰为 baseline(5)+V6..V16——baseline-version 被抬高会在此红（V6 静默跳过形态）；
+    // 新增迁移（V17+）时同步扩展本期望列表，且新迁移必须像 V6..V16 一样幂等（本场景会在已应用库上重放）
     const conn = await openDb();
     try {
       const [hist] = await conn.query('SELECT version, success FROM flyway_schema_history ORDER BY installed_rank');
       const rows = hist as { version: string; success: number }[];
-      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15']);
+      expect(rows.map(x => x.version)).toEqual(['5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16']);
       expect(rows.every(x => x.success === 1), '迁移历史必须全 success').toBe(true);
     } finally { await conn.end(); }
   });
@@ -1257,7 +1302,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
 
   const uidA = ids(`sk2-a-${uniq()}`);
   const uidB = ids(`sk2-b-${uniq()}`);
-  // 无任何 L4 的用户：合并视图与全局目录全等（合并不得让 @ 候选缩水/变形）。
+  // 无任何 L4 的用户：合并视图与全局目录全等（合并不得让 / 候选缩水/变形）。
   // 注：KV 读取失败严格分支黑盒不可注入（WorkspaceReader 把枚举失败按空处理），此处钉其可达降级面
   expect(nameSorted(await (await request.get(`/skills/available?userId=${encodeURIComponent(uidB)}`)).json()))
     .toEqual(nameSorted(baseline));
@@ -1310,7 +1355,7 @@ test('SK2 /skills/available 按用户合并 L4：同名覆盖、独有补入、H
   }, gone => !gone, 15_000);
 });
 
-test('SK3 /skills/parse-refs 按用户合并解析 @Skill 引用', async ({ request }) => {
+test('SK3 /skills/parse-refs 按用户合并解析 /Skill 引用', async ({ request }) => {
   const uid = ids(`sk3-${uniq()}`);
   const l4Name = `e2e-l4-${uniq()}`;
   expect(((await (await putL4(request, uid, l4Name, `L4引用-${uniq()}`)).json()) as Record<string, unknown>).action).toBe('created');
@@ -1324,17 +1369,19 @@ test('SK3 /skills/parse-refs 按用户合并解析 @Skill 引用', async ({ requ
   };
 
   // 全局技能 + L4 技能合并命中；重复引用去重保序；count 与 skills 一致
-  const both = await refs(`@demo-skill 和 @${l4Name} 再 @demo-skill`, uid);
+  const both = await refs(`/demo-skill 和 /${l4Name} 再 /demo-skill`, uid);
   expect(both.skills).toEqual(['demo-skill', l4Name]);
   expect(both.count).toBe(both.skills.length);
 
-  // 不传 userId：L4 个人技能不可见（@ 注入链路的合并依赖生效 userId）
-  expect(await refs(`@${l4Name}`)).toEqual({ skills: [], count: 0 });
-  // 邮箱形态不误匹配（(?<![\w]) lookbehind）；目录外名称被 enabledSkillNames 过滤
+  // 不传 userId：L4 个人技能不可见（/ 注入链路的合并依赖生效 userId）
+  expect(await refs(`/${l4Name}`)).toEqual({ skills: [], count: 0 });
+  // 邮箱形态不受影响（@ 不再是触发符）；URL/路径中的 / 不误匹配；目录外名称被 enabledSkillNames 过滤
   expect(await refs('联系 user@example.com', uid)).toEqual({ skills: [], count: 0 });
-  expect(await refs('@no-such-skill-x', uid)).toEqual({ skills: [], count: 0 });
-  // 中文紧邻 @ 合法（技能名收尾于串尾，避免中文字符类把后续中文吞进名字）
-  expect((await refs(`用@${l4Name}`, uid)).skills).toEqual([l4Name]);
+  expect(await refs('见 https://example.com/demo-skill 文档', uid)).toEqual({ skills: [], count: 0 });
+  expect(await refs('路径 src/demo-skill', uid)).toEqual({ skills: [], count: 0 });
+  expect(await refs('/no-such-skill-x', uid)).toEqual({ skills: [], count: 0 });
+  // 中文紧邻 / 合法（技能名收尾于串尾，避免中文字符类把后续中文吞进名字）
+  expect((await refs(`用/${l4Name}`, uid)).skills).toEqual([l4Name]);
 });
 
 test('SK4 禁用的包内技能不进 /available 与 parse-refs（恢复原状）', async ({ request }) => {
@@ -1353,8 +1400,8 @@ test('SK4 禁用的包内技能不进 /available 与 parse-refs（恢复原状�
     // 带 userId 合并视图同样剔除（该用户无同名 L4 → 不得复活）
     rows = await (await request.get(`/skills/available?userId=${encodeURIComponent(uid)}`)).json() as Array<Record<string, string>>;
     expect(rows.some(e => e.name === 'demo-skill')).toBe(false);
-    // @ 引用解析同源（enabledSkillNames）：禁用技能不再命中
-    const refs = await (await request.get(`/skills/parse-refs?${new URLSearchParams({ message: '@demo-skill 演示一下', userId: uid })}`)).json() as { skills: string[]; count: number };
+    // / 引用解析同源（enabledSkillNames）：禁用技能不再命中
+    const refs = await (await request.get(`/skills/parse-refs?${new URLSearchParams({ message: '/demo-skill 演示一下', userId: uid })}`)).json() as { skills: string[]; count: number };
     expect(refs).toEqual({ skills: [], count: 0 });
   } finally {
     await request.put('/skills/demo-skill/toggle'); // 恢复启用，不污染后续用例/project
@@ -1601,12 +1648,12 @@ test('HA6 回合失败留痕：刷新后 history 可见失败原因（非孤儿�
   await deleteThread(sid, BASE, U).catch(() => undefined);
 });
 
-test('HA7 @Skill 注入区块不上屏：history 只显示用户原文', async () => {
+test('HA7 /Skill 注入区块不上屏：history 只显示用户原文', async () => {
   const sid = sessionIdFor(`ha7-${uniq()}`);
   const own = `ha7-own-${uniq()}`;
-  // @demo-skill 命中夹具技能：注入会把整篇 SKILL.md 追加进用户消息（模型必需），
+  // /demo-skill 命中夹具技能：注入会把整篇 SKILL.md 追加进用户消息（模型必需），
   // 但展示层须剥离——否则提问气泡拖着整篇技能文档
-  const s = chat({ message: `@demo-skill [E2E:plain](${own})`, userId: U, sessionId: sid });
+  const s = chat({ message: `/demo-skill [E2E:plain](${own})`, userId: U, sessionId: sid });
   await waitTerminal(s);
 
   const h = await pollUntil(async () => historyQ(sid), x =>
@@ -1617,8 +1664,8 @@ test('HA7 @Skill 注入区块不上屏：history 只显示用户原文', async (
   expect(mine, '用户提问必须在 history 可见').toBeTruthy();
   expect(String(mine!.content), '提问气泡不得含注入区块').not.toContain('Referenced Skills');
   expect(String(mine!.content), '提问气泡不得拖着整篇 SKILL.md').not.toContain('demo-skill 技能已加载');
-  // 引用标记保留（反映用户所敲的 @demo-skill），正文仍是用户原文
-  expect(String(mine!.content)).toContain('[@Skill:demo-skill]');
+  // 引用标记保留（反映用户所敲的 /demo-skill），正文仍是用户原文
+  expect(String(mine!.content)).toContain('[/Skill:demo-skill]');
   expect(String(mine!.content).length, '只剩用户原文，长度远小于注入后').toBeLessThan(150);
 
   await deleteThread(sid, BASE, U).catch(() => undefined);

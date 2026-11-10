@@ -153,12 +153,17 @@ public class SessionStreamController {
         String state;
         if (pendingConfirm != null) {
             state = "waiting_confirm";
-        } else if (intent != null) {
-            // QUEUED：租约还在别人手上或即将到手，但本轮 turn 已确定——按 working 处理；
+        } else if (intent != null && intent.failed()) {
             // FAILED：排队超时/建立失败，刷新后要能直接看到原因（不再走订阅）。
-            state = intent.failed() ? "failed" : "working";
+            state = "failed";
         } else if (probe.running()) {
             state = "working";
+        } else if (intent != null) {
+            // 意图行在租约到手后保留到终态（issue #228：stop 在首个事件前靠它拿 replyId），
+            // 因此不能再无条件当 working——执行副本崩溃后租约到期、意图行仍在（TTL 180s），
+            // 会把 interrupted 接管窗口掩盖成 working。无租约但有本 turn 非终态事件 =
+            // 执行副本崩溃/被抢占 → interrupted；否则是尚未开跑的排队 turn（无本 turn 事件）→ working。
+            state = probe.interrupted() ? "interrupted" : "working";
         } else if (latestEvent != null
                 && SessionEventTailer.isTerminalType(latestEvent.type())) {
             // AGENT_END 与 error 都是 turn 终态（与观察者路径 probe 同口径）：

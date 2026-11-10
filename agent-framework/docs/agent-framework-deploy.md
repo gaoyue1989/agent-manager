@@ -457,7 +457,7 @@ LLM 推理 → 选择工具 (如 get_weather)
 | GET | `/health` | 健康检查 |
 | GET | `/.well-known/agent-card.json` | Agent Card 发现 |
 | GET | `/skills` | 技能列表（声明 ∪ /config/skills 目录事实合并） |
-| GET | `/skills/manage`、`/skills/available`、`/skills/parse-refs` | 技能管理列表 / `@` 补全候选 / `@Skill` 解析预览 |
+| GET | `/skills/manage`、`/skills/available`、`/skills/parse-refs` | 技能管理列表 / `/` 补全候选 / `/Skill` 解析预览 |
 | POST | `/skills/upload` | 上传 zip 格式 Skill 包 |
 | DELETE | `/skills/{name}` | 删除 Skill |
 | PUT | `/skills/{name}/toggle` | 启停切换 |

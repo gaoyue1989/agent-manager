@@ -778,3 +778,28 @@ test('STP1 运行中 turn 停止全链路：202 受理 → cancelled 终态 → 
   expect(lastAssistant!.stopped).toBe(true);
   expect(String(lastAssistant!.content)).toBe('（本次回复已被用户停止）');
 });
+
+test('STP1b 首事件前停止：不出现 409 turn_not_ready（oa-1110 #29 回归）', async () => {
+  const uid = U();
+  const sid = sessionIdFor(`stp1b-${uniq()}`);
+  // sleep 20s：stop 落点无论在「排队意图 / 租约在持零事件 / 执行中」哪一段，turn 都未终态
+  // ——历史 bug：租约已持有但零事件的窗口内 stop 报 409 turn_not_ready（a811c27 修复）
+  const stream = chat({ message: `[E2E:execute:sleep](20)`, userId: uid, sessionId: sid, timeoutMs: 120_000 });
+  // 不等任何 SSE 事件，立即投递停止
+  const stopped = await stop(sid, BASE, uid);
+  expect([202, 404], JSON.stringify(stopped.body)).toContain(stopped.status);
+  expect(stopped.status,
+    `首事件前 stop 不得报 409 turn_not_ready：${JSON.stringify(stopped.body)}`).not.toBe(409);
+  if (stopped.status === 202) {
+    expect(stopped.body.state).toBe('stopping');
+    // 流收敛：cancelled 出现且 turn 正常收尾
+    await waitTerminal(stream);
+    const cancelledIdx = stream.frames.findIndex(f => f.type === 'cancelled');
+    expect(cancelledIdx,
+      `未收到 cancelled 帧，实际帧序 [${stream.frames.map(f => f.type).join(',')}]`).toBeGreaterThanOrEqual(0);
+  } else {
+    // 404 = stop 先于 chat 处理（无 turn 可停）；等 turn 自然收尾，避免悬挂连接
+    await waitTerminal(stream);
+    expect(stream.terminal?.type).toBe('done');
+  }
+});

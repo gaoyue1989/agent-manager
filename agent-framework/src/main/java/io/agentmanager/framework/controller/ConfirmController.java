@@ -69,6 +69,21 @@ public class ConfirmController {
     private io.agentmanager.framework.service.SessionMessageStore sessionMessageStore;
 
     /**
+     * 单轮停止监视（docs/turn-stop-design.md）：confirm 恢复段是新的执行段，必须与
+     * {@code /threads/chat} 一样登记 turn_intent（租约到手前，供跨副本 stop 在首个事件前
+     * 解析 replyId）与 TurnStopWatcher（租约到手后，供 interrupt 投递）；终态统一注销。
+     * 字段注入 required=false，单测直接 new 时为 null（停止能力旁路，行为同旧版）。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.service.TurnStopWatcher turnStopWatcher;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.service.TurnIntentStore turnIntentStore;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private io.agentmanager.framework.config.TurnStopSettings turnStopSettings;
+
+    /**
      * 沙箱生命周期管理器（sandbox-pool-opensandbox-design §4.4 turn 挂钩；字段注入
      * required=false 避免改动构造调用点，单测直接 new 时为 null）。null = lifecycle 旁路。
      * confirm 恢复段是 turn 边界：开始重注册（清 holdUntil）、终态注销+终刷、ask 挂起重新计窗。
@@ -290,8 +305,15 @@ public class ConfirmController {
             }
 
             // ===== 2. 抢 Turn 租约（带超时排队，桥接 ask 段收尾窗口；超时回 error 帧）=====
+            // 本轮 turn id 提前确定并在抢锁前登记意图：跨副本 stop 在租约到手、首个事件
+            // 落库前也能解析 replyId（与 /threads/chat 同构，消除 409 turn_not_ready 窗口）。
+            String replyId = UUID.randomUUID().toString();
+            if (turnIntentStore != null) {
+                turnIntentStore.register(finalSessionId, replyId, ChatStreamController.TURN_INTENT_TTL);
+            }
             var token = turnLeaseStore.acquire(finalSessionId, ACQUIRE_WAIT);
             if (token == null) {
+                clearTurnIntent(finalSessionId, replyId);
                 sink.next(errorSSE("turn_in_progress: session '" + finalSessionId
                     + "' has an active turn"));
                 sink.complete();
@@ -305,8 +327,15 @@ public class ConfirmController {
                 sandboxLifecycle.onTurnStart(finalSessionId);
             }
 
+            // ===== 2.6 登记停止监视（与 /threads/chat 对齐）=====
+            // 进入执行段后属主副本的全局轮询按 replyId 命中本 turn 时调用 SDK interrupt；
+            // 收尾（endTurnAndLifecycle/回滚）统一注销并清理本轮意图行。
+            if (turnStopWatcher != null
+                    && (turnStopSettings == null || turnStopSettings.enabled())) {
+                turnStopWatcher.register(finalSessionId, replyId);
+            }
+
             // ===== 3. 准备 EventBus Sinks =====
-            String replyId = UUID.randomUUID().toString();
             // 工具摘要累积器（turn 级）：HITL 批准后的恢复执行段同样要输出「执行 …」人可读摘要，
             // 否则用户批准后看到的又是「🔧 execute 完成」
             var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
@@ -318,6 +347,10 @@ public class ConfirmController {
             // → 首个事件前一次性提示「沙箱已重建，未保存的工作区文件可能丢失」
             var turnStartedAt = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
             var sandboxRebuildNotified = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+            // 恢复流事件里的再次挂起同样继承原轮 skills 白名单（issue #264）：先读未消费行
+            // （或最近已消费行）再交给 resume 消费，避免第二层确认丢失能力边界
+            var turnSkills = runtimeService.pendingTurnSkills(finalSessionId);
 
             // 恢复流的**构建**是同步的，且会因用户输入抛异常（未知 tool_call_id →
             // IllegalArgumentException；上下文已被并发消费 → ConfirmContextNotFound）。
@@ -339,6 +372,11 @@ public class ConfirmController {
                 TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId,
                     errorSSE(e.getMessage() != null ? e.getMessage()
                         : e.getClass().getSimpleName()));
+                // 回滚同时注销停止监视并清理本轮意图（本路径不走 endTurnAndLifecycle）
+                if (turnStopWatcher != null) {
+                    turnStopWatcher.unregister(finalSessionId, replyId);
+                }
+                clearTurnIntent(finalSessionId, replyId);
                 return;
             }
 
@@ -357,7 +395,7 @@ public class ConfirmController {
             resumeFlux
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
-                        turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary),
+                        turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary, turnSkills),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -381,10 +419,10 @@ public class ConfirmController {
                                 }
                             }
                         }
-                        endTurnAndLifecycle(eventBus, lease, finalSessionId, turnEnded);
+                        endTurnAndLifecycle(eventBus, lease, finalSessionId, replyId, turnEnded);
                     },
                     // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
-                    () -> endTurnAndLifecycle(eventBus, lease, finalSessionId, turnEnded));
+                    () -> endTurnAndLifecycle(eventBus, lease, finalSessionId, replyId, turnEnded));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -404,7 +442,8 @@ public class ConfirmController {
                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
                                     java.util.concurrent.atomic.AtomicLong turnStartedAt,
                                     java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
-                                    TurnToolSummaryTracker toolSummary) {
+                                    TurnToolSummaryTracker toolSummary,
+                                    java.util.List<String> turnSkills) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
@@ -430,7 +469,7 @@ public class ConfirmController {
 
         // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
-            runtimeService.storeConfirmContext(sessionId, event);
+            runtimeService.storeConfirmContext(sessionId, event, turnSkills);
             lease.release();
             // HITL 暂停点：锁已让出、状态已持久化
             // T4 挂起保留窗（§4.4）：恢复段 ask 挂起同样保留沙箱续期，每次 ask 重新计窗
@@ -465,22 +504,34 @@ public class ConfirmController {
         // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
-            endTurnAndLifecycle(eventBus, lease, sessionId, turnEnded);
+            endTurnAndLifecycle(eventBus, lease, sessionId, replyId, turnEnded);
         }
     }
 
     /**
-     * turn 收尾 + 沙箱生命周期终态注销（§4.4 T2）：endTurn CAS 首胜才注销——
-     * 注销只挂 turn 终态（错误回调/正常完成/AGENT_END 三入口经此汇聚），不挂 per-call stop()。
+     * turn 收尾 + 沙箱生命周期终态注销（§4.4 T2）：endTurn CAS 首胜才注销——注销只挂 turn
+     * 终态（错误回调/正常完成/AGENT_END 三入口经此汇聚），不挂 per-call stop()。
+     * 首胜同时注销停止监视并清理本轮意图行（confirm 恢复段在租约到手前登记意图）。
      */
     private void endTurnAndLifecycle(SessionEventBus eventBus, TurnLeaseGuard lease,
-                                     String sessionId,
+                                     String sessionId, String replyId,
                                      java.util.concurrent.atomic.AtomicBoolean turnEnded) {
         if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
+        if (turnStopWatcher != null) {
+            turnStopWatcher.unregister(sessionId, replyId);
+        }
+        clearTurnIntent(sessionId, replyId);
         if (sandboxLifecycle != null) {
             sandboxLifecycle.onTurnEnd(sessionId);
+        }
+    }
+
+    /** 清理本轮意图行（replyId 栅栏；store 不可用时 no-op，TTL 兜底）。 */
+    private void clearTurnIntent(String sessionId, String replyId) {
+        if (turnIntentStore != null) {
+            turnIntentStore.clear(sessionId, replyId);
         }
     }
 

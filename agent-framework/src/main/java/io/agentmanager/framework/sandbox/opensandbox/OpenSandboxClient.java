@@ -110,13 +110,18 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         this.fileAssetStore = fileAssetStore;
         this.fileStorage = fileStorage;
         this.objectMapper = new ObjectMapper();
-        this.connectionConfig = com.alibaba.opensandbox.sandbox.config.ConnectionConfig.builder()
+        var connectionBuilder = com.alibaba.opensandbox.sandbox.config.ConnectionConfig.builder()
             .domain(options.getServerUrl())
             .apiKey(options.getApiKey())
             .protocol("http")
             // 经 Server 代理转发 execd/endpoint 请求（客户端无需直连沙箱容器）
-            .useServerProxy(true)
-            .build();
+            .useServerProxy(true);
+        if (options.getRequestTimeout() != null) {
+            // 建箱/管理面 HTTP 请求超时（oa-1110-repro-fixes-design §2.3b）：并发建箱高峰
+            // 上游排队放大时调大单请求超时，与仓库侧 create 重试（SANDBOX_CREATE_MAX_ATTEMPTS）兜底
+            connectionBuilder.requestTimeout(options.getRequestTimeout());
+        }
+        this.connectionConfig = connectionBuilder.build();
     }
 
     /** 请求级身份快照（守卫 tryEnter 同线程注入，lifecycle 记账键） */
@@ -282,7 +287,16 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         return sandbox;
     }
 
-    /** ①/⑤a 探活：连接 + getInfo；404/410 → DEAD；网络异常 → UNKNOWN（保守视为活） */
+    /**
+     * ①/⑤a 探活：连接 + getInfo + execd 数据面 ping。404/410 → DEAD；execd ping 失败 → DEAD
+     * （oa-1110 #1：控制面/数据面状态不一致——服务端存续但 execd 端点不可达时 getInfo 仍 200，
+     * 复用即整轮 502 重试风暴；一条 {@code true} 命令兜底判定，DEAD 走懒删重建，
+     * 复用前一次性成本 ≈100-300ms）；其余网络异常 → UNKNOWN（保守视为活）。
+     * 可经 {@code SANDBOX_PROBE_EXECD_PING=false} 关闭（回退 getInfo-only 行为）。
+     */
+    private static final boolean PROBE_EXECD_PING = !"false".equals(
+        System.getenv("SANDBOX_PROBE_EXECD_PING"));
+
     private SandboxLifecycleManager.ProbeResult probeAlive(String sandboxId) {
         try {
             var osbSandbox = com.alibaba.opensandbox.sandbox.Sandbox.connector()
@@ -290,7 +304,10 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                 .connectionConfig(connectionConfig)
                 .skipHealthCheck(true)
                 .connect();
-            osbSandbox.getInfo();   // getInfo 200 = 活（HTTP 404/410 在此抛 SandboxApiException）
+            osbSandbox.getInfo();   // getInfo 200 = 控制面活（HTTP 404/410 在此抛 SandboxApiException）
+            if (PROBE_EXECD_PING && !execdPingAlive(osbSandbox)) {
+                return SandboxLifecycleManager.ProbeResult.dead();
+            }
             return SandboxLifecycleManager.ProbeResult.alive(osbSandbox);
         } catch (com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException api) {
             int status = api.getStatusCode() != null ? api.getStatusCode() : 0;
@@ -300,6 +317,22 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
             return SandboxLifecycleManager.ProbeResult.unknown();
         } catch (Exception e) {
             return SandboxLifecycleManager.ProbeResult.unknown();
+        }
+    }
+
+    /**
+     * execd 数据面 ping（复用探活的兜底判定，包私有供单测）：{@code true} 命令可执行 = 数据面活。
+     * 任何失败（连接/超时/5xx）均视为数据面不可达 → 上层按 DEAD 懒删重建——失败的沙箱
+     * 重建一个新的是确定正确的结果，保守复用则整轮 502。
+     */
+    boolean execdPingAlive(com.alibaba.opensandbox.sandbox.Sandbox connected) {
+        try {
+            connected.commands().run("true");
+            return true;
+        } catch (Exception e) {
+            log.warn("[sandbox-open] probe execd ping failed, treat as dead (control plane alive): {}",
+                e.getMessage());
+            return false;
         }
     }
 
