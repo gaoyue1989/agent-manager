@@ -5,7 +5,8 @@
 #      删除池 / 沙箱列表（state 过滤）/ 销毁；管理操作各产生一条审计记录；
 #   ③ console 只读端点：metadata.service ∈ ws 服务集合过滤（空集合滤空 + mysql 造服务行正向断言）+ 无操作端点；
 #   ④ 上游故障注入：mock 501 → 503（kubernetes runtime 文案）、401 → 502（指向 /settings）；
-#   ⑤ 未配置 URL（platform_config 行直删）→ 503 + /settings 引导文案。
+#   ⑤ 未配置 URL（platform_config 行直删）→ 503 + /settings 引导文案；console 端点同态断言
+#      503 + 成员通用文案（不含 /settings 指引，issue #297）。
 # mock 侧断言 / 故障注入 / platform_config 行级操作需 kubectl（KUBE_OK=0 时相应 skip；
 # 上游用 mock：OPENSANDBOX_SERVER_URL 指向集群内 mock-sandbox svc，CI 由 workflow 预置）。
 source "$(dirname "$0")/lib.sh"
@@ -206,9 +207,17 @@ if [ "$KUBE_OK" = "1" ]; then
   assert_eq "未配置 URL/APIKey → 503" "$R" "503"
   MSG=$(req GET /admin/sandboxes/pools "" "$TOKEN")
   assert_contains "503 引导先在 /settings 配置" "$MSG" "settings"
+  # issue #297：console 侧同态——成员通用文案，不透 /settings 运维指引
+  R=$(code GET /console/workspaces/$WS/sandboxes "" "$TOKEN")
+  assert_eq "console 沙箱实例未配置 → 503（状态码保留）" "$R" "503"
+  MSG=$(req GET /console/workspaces/$WS/sandboxes "" "$TOKEN")
+  assert_contains "console 503 为成员通用文案" "$MSG" "平台管理员"
+  assert_not_contains "console 503 不透 /settings 指引" "$MSG" "settings"
   code PUT /platform-config "{\"values\":{\"OPENSANDBOX_SERVER_URL\":\"$OPENSANDBOX_URL\",\"OPENSANDBOX_API_KEY\":\"$OPENSANDBOX_KEY\"}}" "" "$TOKEN" >/dev/null
   R=$(code GET /admin/sandboxes/pools "" "$TOKEN")
   assert_eq "配置恢复后恢复 200" "$R" "200"
+  R=$(code GET /console/workspaces/$WS/sandboxes "" "$TOKEN")
+  assert_eq "配置恢复后 console 端点恢复 200" "$R" "200"
 else
   skip "未配置分支需 kubectl 直删 platform_config 行（KUBE_OK=0）"
 fi
