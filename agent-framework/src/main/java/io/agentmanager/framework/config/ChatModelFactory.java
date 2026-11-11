@@ -2,12 +2,18 @@ package io.agentmanager.framework.config;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
+import io.agentscope.extensions.model.openai.compat.deepseek.DeepSeekFormatter;
+import io.agentscope.extensions.model.openai.compat.glm.GLMFormatter;
+import io.agentscope.extensions.model.openai.compat.kimi.KimiFormatter;
+import io.agentscope.extensions.model.openai.compat.minimax.MiniMaxFormatter;
+import io.agentscope.extensions.model.openai.formatter.OpenAIChatFormatter;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.transport.HttpTransportConfig;
 import io.agentscope.core.model.transport.JdkHttpTransport;
@@ -37,7 +43,8 @@ public final class ChatModelFactory {
         var modelBuilder = OpenAIChatModel.builder()
             .apiKey(llm.apiKey())
             .modelName(llm.modelId())
-            .baseUrl(llm.baseUrl());
+            .baseUrl(llm.baseUrl())
+            .formatter(compatFormatter(llm));
         // 模型上下文窗口（LLM_CONTEXT_LENGTH / 托管模型 contextLength）：> 0 才传入，未配置保持框架默认行为
         if (llm.contextLength() > 0) {
             modelBuilder.contextWindowSize(llm.contextLength());
@@ -52,6 +59,21 @@ public final class ChatModelFactory {
                     .build())
                 .build())
             .build();
+    }
+
+    static OpenAIChatFormatter compatFormatter(AgentManagerProperties.LLMConfig llm) {
+        return switch (normalizedProvider(llm)) {
+            case "glm" -> new GLMFormatter();
+            case "deepseek" -> new DeepSeekFormatter();
+            case "kimi" -> new KimiFormatter();
+            case "minimax" -> new MiniMaxFormatter();
+            default -> null;
+        };
+    }
+
+    private static String normalizedProvider(AgentManagerProperties.LLMConfig llm) {
+        return llm.provider() != null && !llm.provider().isBlank()
+            ? llm.provider().trim().toLowerCase(Locale.ROOT) : "openai";
     }
 
     /** 模型级 GenerateOptions 装配（包级可见供单测断言请求载荷）：采样三项顶层 + 方言映射 */
@@ -83,8 +105,7 @@ public final class ChatModelFactory {
         var effort = llm.reasoningEffort() != null && !llm.reasoningEffort().isBlank()
             ? llm.reasoningEffort().trim() : null;
         // env 路径（LLM_PROVIDER）无值域校验，归一化大小写防 "VLLM" 静默落错方言
-        var provider = llm.provider() != null && !llm.provider().isBlank()
-            ? llm.provider().trim().toLowerCase(java.util.Locale.ROOT) : "openai";
+        var provider = normalizedProvider(llm);
         switch (provider) {
             case "vllm", "sglang" -> {
                 Map<String, Object> kwargs = new HashMap<>();

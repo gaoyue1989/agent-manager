@@ -1,6 +1,7 @@
 package io.agentmanager.framework.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,6 +10,11 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 import io.agentscope.core.model.GenerateOptions;
+import io.agentscope.extensions.model.openai.compat.deepseek.DeepSeekFormatter;
+import io.agentscope.extensions.model.openai.compat.glm.GLMFormatter;
+import io.agentscope.extensions.model.openai.compat.kimi.KimiFormatter;
+import io.agentscope.extensions.model.openai.compat.minimax.MiniMaxFormatter;
+import io.agentscope.extensions.model.openai.dto.OpenAIRequest;
 
 /**
  * ChatModelFactory 采样参数方言矩阵测试（docs/model-params-design.md §2/§5）：
@@ -124,6 +130,39 @@ class ChatModelFactoryTest {
                                                         String effort, Double frequencyPenalty) {
         return new AgentManagerProperties.LLMConfig("k", "m", "http://x/v1", provider,
             0.3, 16384, 120, enableThinking, 0, effort, frequencyPenalty);
+    }
+
+    // ===== compatFormatter：provider → 上游 compat 请求整形层映射（U3，大小写归一化共享）=====
+
+    @Test
+    void compatFormatterShouldMapProviderToUpstreamCompatFormatter() {
+        assertInstanceOf(GLMFormatter.class, ChatModelFactory.compatFormatter(llm("glm", false, null, null)));
+        assertInstanceOf(GLMFormatter.class, ChatModelFactory.compatFormatter(llm("GLM", false, null, null)));
+        assertInstanceOf(DeepSeekFormatter.class, ChatModelFactory.compatFormatter(llm("deepseek", false, null, null)));
+        assertInstanceOf(KimiFormatter.class, ChatModelFactory.compatFormatter(llm("kimi", false, null, null)));
+        assertInstanceOf(MiniMaxFormatter.class, ChatModelFactory.compatFormatter(llm("minimax", false, null, null)));
+    }
+
+    @Test
+    void compatFormatterShouldBeNullForStockFormatterProviders() {
+        assertNull(ChatModelFactory.compatFormatter(llm("vllm", false, null, null)));
+        assertNull(ChatModelFactory.compatFormatter(llm("sglang", false, null, null)));
+        assertNull(ChatModelFactory.compatFormatter(llm("openai", false, null, null)));
+        assertNull(ChatModelFactory.compatFormatter(llm("unknown-engine", false, null, null)));
+    }
+
+    /** GLMFormatter 请求级剥离 frequency/presence_penalty（上游行为）：GenerateOptions 装配不变，glm 请求整形时被剥 */
+    @Test
+    void glmFormatterShouldStripFrequencyPenaltyAtRequestLevel() {
+        var options = ChatModelFactory.buildOptions(
+            llm("glm", false, "low", 0.5));
+        assertEquals(0.5, options.getFrequencyPenalty());
+
+        var request = new OpenAIRequest();
+        ChatModelFactory.compatFormatter(llm("glm", false, null, null))
+            .applyOptions(request, options, options);
+
+        assertNull(request.getFrequencyPenalty());
     }
 
     private static GenerateOptions dialect(String provider, boolean enableThinking, String effort) {
