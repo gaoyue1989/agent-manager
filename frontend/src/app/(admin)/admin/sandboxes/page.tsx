@@ -12,7 +12,10 @@ import Link from "next/link";
 import { api, type SandboxListPage, type SandboxPool, type SandboxSummary } from "@/lib/api";
 import { capacityFromForm, countdown, poolLevel, POOL_LEVEL_TEXT, validateCapacityForm, validatePoolName,
   type CapacityForm } from "@/lib/sandbox-quota";
-import { Card, Note, PageHead, StatCard } from "@/components/ui";
+import { Btn, Card, Note, PageHead, StatCard } from "@/components/ui";
+
+// 沙箱列表每页条数（上游分页契约 page/pageSize，d15；对齐 audit 页同款常量模式）
+const PAGE_SIZE = 50;
 
 const LEVEL_STYLE: Record<string, string> = {
   red: "bg-red-500",
@@ -34,6 +37,7 @@ export default function AdminSandboxesPage() {
   const [pools, setPools] = useState<SandboxPool[]>([]);
   const [sandboxes, setSandboxes] = useState<SandboxListPage | null>(null);
   const [stateFilter, setStateFilter] = useState("");
+  const [page, setPage] = useState(1);
   const [err, setErr] = useState("");
   const [defaultImage, setDefaultImage] = useState("");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -55,16 +59,20 @@ export default function AdminSandboxesPage() {
       const [s, p, sb] = await Promise.all([
         api.admin.sandboxes.summary(),
         api.admin.sandboxes.listPools(),
-        api.admin.sandboxes.listSandboxes(stateFilter, 1, 50),
+        api.admin.sandboxes.listSandboxes(stateFilter, page, PAGE_SIZE),
       ]);
       setSummary(s);
       setPools(p.items ?? []);
       setSandboxes(sb);
+      // 空尾页兜底：销毁末页最后一行导致当前页被清空时，自动回退到末页重拉
+      // （page 变化重建 load 触发重拉；totalPages=0 时 Math.max 兜底回第 1 页，
+      //   回到第 1 页后 page>1 不再成立，无死循环）
+      if (sb.items.length === 0 && page > 1) setPage(Math.max(1, sb.pagination.totalPages));
       setErr("");
     } catch (e: any) {
       if (!silent) setErr(e?.message ?? String(e));
     }
-  }, [stateFilter]);
+  }, [stateFilter, page]);
 
   useEffect(() => { load(); }, [load]);
   // 5s 静默轮询（失败不打断页面，保留上次数据）
@@ -277,7 +285,8 @@ export default function AdminSandboxesPage() {
       {/* 沙箱表格 */}
       <Card title="沙箱实例">
         <div className="mb-2 flex items-center gap-2">
-          <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} data-testid="sandbox-state-filter"
+          {/* 切换筛选同时重置页码（React 自动批处理：一次重渲染一次请求） */}
+          <select value={stateFilter} onChange={(e) => { setStateFilter(e.target.value); setPage(1); }} data-testid="sandbox-state-filter"
             className="rounded-md border border-gray-300 px-2 py-1 text-[13px]">
             <option value="">全部状态</option>
             {/* 上游状态枚举（release-1.1.0 server/opensandbox_server/api/schema.py:428）：
@@ -319,6 +328,13 @@ export default function AdminSandboxesPage() {
             )}
           </tbody>
         </table>
+        {/* 分页 footer（仿 audit 页）：上一页/下一页随上游 pagination 翻页；
+            表头计数为 totalItems（全量总数），分页后该数字已真实可导航 */}
+        <div className="mt-3 flex items-center justify-end gap-2 text-xs text-gray-500">
+          <Btn sm data-testid="sandbox-page-prev" disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</Btn>
+          <span>{page} / {Math.max(1, sandboxes?.pagination.totalPages ?? 1)}</span>
+          <Btn sm data-testid="sandbox-page-next" disabled={!sandboxes?.pagination.hasNextPage} onClick={() => setPage(page + 1)}>下一页</Btn>
+        </div>
       </Card>
     </div>
   );

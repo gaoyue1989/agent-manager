@@ -11,6 +11,7 @@
 #   E6  白名单外调用兜底 DENY：诱导 search 调用 → mock /stats 执行计数 0（强证据）
 #   E7  自定义工具白名单：tools:[echo] → 含 echo、不含 query
 #   E8  A2A message.metadata.tools 生效
+#   E8B A2A messageId 撞保留键 sessionId（issue #294：分组键前缀化，会话路由不劣化）
 #   E9  双副本：任意副本续聊同口径（无状态）
 # 前置：platform-backend running；新 agent-framework:latest 镜像已导入 kind 节点；
 #       宿主机 8814/8815 端口可被集群 Pod 访问（mock MCP server 本脚本自起自停）
@@ -317,6 +318,23 @@ print(json.dumps({'jsonrpc':'2.0','id':1,'method':'message/send','params':{
 TN=$(llm_calls "$SVC_NAME" "$A2A_SID" | turn_tool_names | tail -1)
 assert_contains "8.1 A2A 轮次模型侧含 query" "$TN" "query"
 assert_not_contains "8.2 A2A 轮次模型侧不含 search" "$TN" "search"
+
+say "E8B：A2A messageId 撞保留键 sessionId（issue #294）"
+# 病态用例：messageId 恰为字面量 "sessionId"。修复前 nested Map 覆盖 metadata.sessionId
+# → SDK 会话 id 劣化为 Map 字符串，本轮调用不落在预期会话；修复后分组键前缀化
+A2A_SID_CLASH="e2e-tw-a2a-clash-$(date +%s)"
+curl -s --max-time 600 -X POST "$SVC_URL/" -H 'Content-Type: application/json' -d "$(python3 -c "
+import json,sys
+print(json.dumps({'jsonrpc':'2.0','id':1,'method':'message/send','params':{
+ 'message':{'role':'user','parts':[{'kind':'text','text':'你好，简要回答'}],'kind':'message',
+ 'messageId':'sessionId',
+ 'metadata':{'userId':'debug-user','sessionId':sys.argv[1],'tools':['query']}},
+ 'configuration':{'blocking':True}}}))" "$A2A_SID_CLASH")" >/dev/null
+assert_eq "8B.1 碰撞轮调用落在预期会话（sessionId 未被覆盖）" \
+  "$(llm_calls "$SVC_NAME" "$A2A_SID_CLASH" | jq -r 'if (.calls|length) >= 1 then "yes" else "no" end')" "yes"
+TN=$(llm_calls "$SVC_NAME" "$A2A_SID_CLASH" | turn_tool_names | tail -1)
+assert_contains "8B.2 碰撞轮模型侧含 query（白名单经前缀分组键生效）" "$TN" "query"
+assert_not_contains "8B.3 碰撞轮模型侧不含 search" "$TN" "search"
 
 say "E9：双副本任意副本同口径（无状态）"
 DEPLOY_NAME="oaf-$SVC_NAME"

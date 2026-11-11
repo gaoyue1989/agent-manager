@@ -9,6 +9,7 @@
 #   5  /Skill：名单外不注入（保留原文），名单内注入
 #   6  禁用技能：即使列入本轮名单也被剔除（PVC 直写 .skill-states.json）
 #   7  A2A message.metadata.skills 生效（模型侧同口径）
+#   7B A2A messageId 撞保留键 sessionId（issue #294：分组键前缀化，会话路由不劣化）
 #   8  双副本：任意副本续聊同口径（无状态）
 #   9  沙箱档（SANDBOX=1）：skills 过滤在沙箱模式成立
 # 前置：platform-backend running；新 agent-framework:latest 镜像已导入 kind 节点
@@ -169,6 +170,18 @@ print(json.dumps({'jsonrpc':'2.0','id':1,'method':'message/send','params':{
  'metadata':{'userId':'debug-user','sessionId':sys.argv[1],'skills':json.loads(sys.argv[2])}},
  'configuration':{'blocking':True}}}))" "$2" "$3")" >/dev/null
 }
+a2a_chat_with_reserved_key_message_id() { # a2a_chat_with_reserved_key_message_id <svc> <sid> <skillsJson>
+  # issue #294 病态用例：messageId 恰为字面量 "sessionId"（保留键键名）。
+  # 修复前 nested Map 覆盖 metadata.sessionId → SDK 会话 id 劣化为 Map 字符串；
+  # 修复后 Controller 分组键前缀化（_agentscope_group_sessionId），会话路由不劣化
+  curl -s --max-time 600 -X POST "$A2A_BASE/$1/" -H 'Content-Type: application/json' -d "$(python3 -c "
+import json,sys
+print(json.dumps({'jsonrpc':'2.0','id':1,'method':'message/send','params':{
+ 'message':{'role':'user','parts':[{'kind':'text','text':'你好，简要回答'}],'kind':'message',
+ 'messageId':'sessionId',
+ 'metadata':{'userId':'debug-user','sessionId':sys.argv[1],'skills':json.loads(sys.argv[2])}},
+ 'configuration':{'blocking':True}}}))" "$2" "$3")" >/dev/null
+}
 
 runtime_env() { # runtime_env [sandbox:true|false]
   local ckpt="jdbc:mysql://oaf-mysql.$NS.svc.cluster.local:3306/oaf_checkpoint?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
@@ -319,6 +332,18 @@ CALLS_A2A=$(new_calls "$SVC_NAME" "$A2A_SID" "$BEFORE_A2A")
 AVAIL_A2A=$(echo "$CALLS_A2A" | turn_avail_text)
 assert_contains "7.1 A2A 轮次 available_skills 含 support-only" "$AVAIL_A2A" "support-only"
 assert_not_contains "7.2 A2A 轮次 available_skills 不含 ops-only" "$AVAIL_A2A" "ops-only"
+
+say "E7B：A2A messageId 撞保留键 sessionId（issue #294）"
+A2A_SID_COLLIDE="e2e-sk-a2a-clash-$(date +%s)"
+BEFORE_COLLIDE=$(calls_count "$SVC_NAME" "$A2A_SID_COLLIDE")
+a2a_chat_with_reserved_key_message_id "$SVC_NAME" "$A2A_SID_COLLIDE" '["support-only"]'
+NEW_COLLIDE=$(new_calls "$SVC_NAME" "$A2A_SID_COLLIDE" "$BEFORE_COLLIDE")
+# 修复前 metadata.sessionId 被分组 Map 覆盖 → SDK 会话 id 劣化，本轮调用不落在预期会话
+assert_eq "7B.1 碰撞轮调用落在预期会话（sessionId 未被覆盖）" \
+  "$(echo "$NEW_COLLIDE" | jq -r 'if length >= 1 then "yes" else "no" end')" "yes"
+AVAIL_COLLIDE=$(echo "$NEW_COLLIDE" | turn_avail_text)
+assert_contains "7B.2 碰撞轮 available_skills 含 support-only（白名单经前缀分组键生效）" "$AVAIL_COLLIDE" "support-only"
+assert_not_contains "7B.3 碰撞轮 available_skills 不含 ops-only" "$AVAIL_COLLIDE" "ops-only"
 
 say "E8：双副本任意副本同口径（无状态）"
 DEPLOY_NAME="oaf-$SVC_NAME"

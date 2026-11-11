@@ -433,7 +433,8 @@ HTTP 409
 `GET /api/v1/console/workspaces/:ws/sandboxes`（JWT + resolveWorkspace）：
 
 - 取该 ws 全部服务的 k8s 名（既有 workspace service 聚合），转发 `GET /v1/sandboxes` 后按 `metadata.service ∈ {服务名集合}` 过滤（框架 create 时注入的 metadata，§4.2 ③）；
-- 只读：id / state / metadata.service / metadata.session_id / expiresAt / createdAt；无任何操作端点。
+- 只读：id / state / metadata.service / metadata.session_id / expiresAt / createdAt；无任何操作端点；
+- 错误文案（issue #297）：console 侧未配置 / 上游错误（`SandboxUpstreamError` 全变体，含 429/5xx body 摘录与不可达 502）折叠为成员通用提示「沙箱管理面暂不可用，请联系平台管理员」（HTTP 状态码保留，运维仍可从网关/日志排障）——成员无 `/settings` 入口且上游细节不应外泄；admin 侧保留 §5.1 映射矩阵的可诊断原文（`/settings` 指引等）。
 
 ### 5.4 合规声明
 
@@ -601,7 +602,7 @@ HTTP 409
 | L8 | 总开关回退 | `SANDBOX_LIFECYCLE_ENABLED=false` → 超配额不抛异常（行为=基线） |
 | L9 | 到期重建 | `/admin/destroy/{id}` 模拟 GC → 下 turn 重建 + 新绑定（debug 端点可见） |
 | L10 | debug 端点 | `/debug/sandbox-bindings` 绑定表 + turn_running（派生）正确 |
-| L11 | 定时清理 | 短保留窗口 + 触发清理任务（测试钩子）→ 过期绑定行删除、`binding_count` 重算、空锚行删除 |
+| L11 | 定时清理 | 短保留窗口 + 触发清理任务（测试钩子）→ 过期绑定行删除、`binding_count` 重算、空锚行删除。**实施注记（2026-11-11，issue #293）**：钩子 `POST /debug/sandbox-cleanup` 已由 `SANDBOX_LIFECYCLE_E2E_HOOKS` 门控，默认不注册（生产 POST 得 404）；retentionDays 限 1~365（超界 400）；lifecycle 未装配返回 enabled=false |
 | L12 | 租约硬释放不误判（P0 修复回归） | JVM 参数 `-Dagent.cleanup.turn-lease-max-lifetime-minutes=1` + TTL=1min：长命令 >1min 执行中（turn_lease 已消失、靠 updated_at 判 busy）→ 同 user 新会话触发 ⑤ **不发生改绑** |
 | L13 | 幽灵占额修正（PENDING 不变量） | 测试钩子注入 `binding_count` 偏大 + 陈旧 PENDING 行 → 新会话 acquire 必须成功（⑤b 重算 + PENDING 回收生效） |
 | L14 | 被抢会话不重连易主沙箱 | L3 之后**原会话**再发 turn / confirm 恢复 → 断言不重连旧 sandboxId（resume 归属校验拦截 → close + 降级，终审 d1）、走新决策 |

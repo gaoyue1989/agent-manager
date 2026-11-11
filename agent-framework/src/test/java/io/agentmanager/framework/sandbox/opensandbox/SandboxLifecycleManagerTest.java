@@ -71,7 +71,7 @@ class SandboxLifecycleManagerTest {
         registry = mock(SandboxRenewalRegistry.class);
         leaseStore = mock(TurnLeaseStore.class);
         confirmStore = mock(ConfirmContextStore.class);
-        var config = new SandboxLifecycleConfig(true, "pool-e2e", 5, 60, 20, 2, 1000);
+        var config = new SandboxLifecycleConfig(true, "pool-e2e", 5, 60, 20, 2, 1000, false);
         manager = new SandboxLifecycleManager(store, registry, config, 30, leaseStore, confirmStore);
         connector = mock(SandboxLifecycleManager.SandboxConnector.class);
         createDelegate = mock(SandboxLifecycleManager.SandboxCreateDelegate.class);
@@ -448,7 +448,7 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void acquireQuotaZeroStillAccountsButNeverJudgedFull() throws Exception {
-        var config = new SandboxLifecycleConfig(true, "", 0, 60, 20, 2, 1000);
+        var config = new SandboxLifecycleConfig(true, "", 0, 60, 20, 2, 1000, false);
         var m = new SandboxLifecycleManager(store, registry, config, 30, leaseStore, confirmStore);
         when(store.findBySessionId(SID)).thenReturn(Optional.empty());
         when(store.occupyQuota(USER, SID, 0))
@@ -478,7 +478,7 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void startupValidationRejectsTtlBelowOneMinute() {
-        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
+        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000, false);
         var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 0, 30, 1024, 1,
             List.of("/entry"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("u", "k"));
@@ -487,7 +487,7 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void startupValidationRejectsRenewIntervalNotUnderHalfTtl() {
-        var config = new SandboxLifecycleConfig(true, "", 5, 900, 20, 2, 1000);   // 900s ≥ 30min*60/2=900
+        var config = new SandboxLifecycleConfig(true, "", 5, 900, 20, 2, 1000, false);   // 900s ≥ 30min*60/2=900
         var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 30, 30, 1024, 1,
             List.of("/entry"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("u", "k"));
@@ -496,7 +496,7 @@ class SandboxLifecycleManagerTest {
 
     @Test
     void startupValidationAcceptsSaneDefaults() {
-        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
+        var config = new SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000, false);
         var sandboxConfig = new io.agentmanager.framework.config.SandboxConfig(false, "img", 30, 30, 1024, 1,
             List.of("/entry"), Duration.ofMillis(100), true, true, 900, true, true, true, true, 500, 30,
             new io.agentmanager.framework.config.SandboxConfig.OpenSandboxConfig("u", "k"));
@@ -571,7 +571,7 @@ class SandboxLifecycleManagerTest {
     /** 独立 manager：backoff=1ms 避免测试真实退避等待；attempts 可配 */
     private SandboxLifecycleManager retryManager(int attempts) {
         return new SandboxLifecycleManager(store, registry,
-            new SandboxLifecycleConfig(true, "", 5, 60, 20, attempts, 1), 30, leaseStore, confirmStore);
+            new SandboxLifecycleConfig(true, "", 5, 60, 20, attempts, 1, false), 30, leaseStore, confirmStore);
     }
 
     private static com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxTimeoutException sdkTimeout() {

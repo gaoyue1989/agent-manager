@@ -524,4 +524,68 @@ class A2AControllerTest {
         org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("from-message"), grouped.get("skills"),
             "message.metadata.skills 优先于旧格式 params.metadata.skills");
     }
+
+    // ---------- messageId 与保留键碰撞（issue #294） ----------
+
+    @Test
+    void messageSendShouldPrefixGroupKeyWhenMessageIdCollidesWithSessionId() throws Exception {
+        // 病态用例：messageId 值恰为字面量 "sessionId"（保留键键名）。修复前 nested Map
+        // 会覆盖 metadata.sessionId 的 String 值，SDK AgentScopeAgentExecutor（containsKey +
+        // String.valueOf 读法）读出的会话 id 劣化为 Map 字符串 → 会话路由被破坏；
+        // 修复后分组键前缀化，保留键值保持 String 不受影响
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"40","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "messageId":"sessionId",
+               "metadata":{"sessionId":"a2a-sid-real","userId":"alice",
+                 "skills":["a","b"],"tools":["query"]}}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        // ① 保留键值保持 String（会话路由/多租户身份不被破坏）
+        org.junit.jupiter.api.Assertions.assertEquals("a2a-sid-real", meta.get("sessionId"),
+            "sessionId 保留键值必须保持 String");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", meta.get("userId"),
+            "userId 保留键值必须保持 String");
+        // ② 分组 Map 落前缀键，且 skills/tools 并存共用同一前缀键 merge
+        var prefixed = "_agentscope_group_sessionId";
+        var grouped = (java.util.Map<String, Object>) meta.get(prefixed);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("a", "b"), grouped.get("skills"),
+            "skills 分组 Map 落前缀键");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("query"), grouped.get("tools"),
+            "tools 与 skills 并存时共用同一前缀分组键");
+        // ③ part 标签与前缀键一致（SDK 按标签取组）
+        var parts = (java.util.List<?>) message.get("parts");
+        var partMeta = (java.util.Map<String, Object>) ((java.util.Map<String, Object>) parts.get(0)).get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals(prefixed, partMeta.get("_agentscope_msg_id"),
+            "part 标签必须指向前缀分组键");
+    }
+
+    @Test
+    void messageSendShouldPrefixGroupKeyWhenMessageIdCollidesWithUserId() throws Exception {
+        // 同类碰撞：messageId 值恰为字面量 "userId"。键名命中即前缀化，与键是否已有值
+        // 无关——否则裸键分组会凭空造出 Map 形态的 userId，被 executor 的 containsKey 读法命中
+        var req = forwardedRequest("""
+            {"jsonrpc":"2.0","id":"41","method":"message/send",
+             "params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}],
+               "messageId":"userId",
+               "metadata":{"sessionId":"a2a-collide-uid","userId":"alice",
+                 "skills":["s1"]}}}}
+            """);
+        var params = (java.util.Map<String, Object>) req.get("params");
+        var message = (java.util.Map<String, Object>) params.get("message");
+        var meta = (java.util.Map<String, Object>) message.get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("alice", meta.get("userId"),
+            "userId 保留键值必须保持 String");
+        org.junit.jupiter.api.Assertions.assertEquals("a2a-collide-uid", meta.get("sessionId"),
+            "sessionId 不受影响");
+        var grouped = (java.util.Map<String, Object>) meta.get("_agentscope_group_userId");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("s1"), grouped.get("skills"),
+            "分组 Map 落前缀键");
+        var parts = (java.util.List<?>) message.get("parts");
+        var partMeta = (java.util.Map<String, Object>) ((java.util.Map<String, Object>) parts.get(0)).get("metadata");
+        org.junit.jupiter.api.Assertions.assertEquals("_agentscope_group_userId", partMeta.get("_agentscope_msg_id"),
+            "part 标签与前缀键一致");
+    }
 }
