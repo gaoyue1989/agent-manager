@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import io.agentmanager.framework.service.SessionEventStore;
+import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.message.Base64Source;
@@ -144,23 +145,25 @@ class AgentEventSseSerializerTest {
 
     @Test
     void toSseFramePassesThroughNewRowsAndSetsSeqAsId() {
-        // 新形态行：写路径已注入 replyId → data 原串透传（零重序列化）
+        // 新形态行：写路径已注入 replyId + session_id → data 原串透传（零重序列化）
         var row = new SessionEventStore.EnvelopedEvent(9, "AGENT_END",
-            "{\"type\":\"AGENT_END\",\"replyId\":\"rid-7\"}", "rid-7");
-        var frame = AgentEventSseSerializer.toSseFrame(row);
+            "{\"type\":\"AGENT_END\",\"replyId\":\"rid-7\",\"session_id\":\"sid-7\"}", "rid-7");
+        var frame = AgentEventSseSerializer.toSseFrame(row, "sid-7");
         assertEquals("9", frame.id());
-        assertEquals("{\"type\":\"AGENT_END\",\"replyId\":\"rid-7\"}", frame.data());
+        assertEquals("{\"type\":\"AGENT_END\",\"replyId\":\"rid-7\",\"session_id\":\"sid-7\"}",
+            frame.data());
     }
 
     @Test
     void toSseFrameInjectsReplyIdForLegacyRows() {
-        // 存量形态行（升级前落库、p 内无 replyId）：读端兜底注入，输出与收口前读端逐字节一致
+        // 存量形态行（升级前落库、p 内无 replyId/session_id）：读端兜底注入
         var row = new SessionEventStore.EnvelopedEvent(3, "file_ready",
             "{\"type\":\"file_ready\",\"file_id\":\"f-1\"}", "rid-8");
-        var frame = AgentEventSseSerializer.toSseFrame(row);
+        var frame = AgentEventSseSerializer.toSseFrame(row, "sid-8");
         assertEquals("3", frame.id());
-        assertEquals(legacyInject(row.payload(), row.replyId()), frame.data());
-        assertTrue(frame.data().endsWith("\"replyId\":\"rid-8\"}"));
+        // withSessionContext 注入序：session_id 先、replyId 后（ObjectNode 插入序）
+        assertTrue(frame.data().endsWith("\"session_id\":\"sid-8\",\"replyId\":\"rid-8\"}"),
+            "存量行同时兜底注入 session_id + replyId: " + frame.data());
     }
 
     // ===== 远端转发事件标注（Agent Protocol 远程委派可视化，2026-09-30） =====
@@ -203,5 +206,69 @@ class AgentEventSseSerializerTest {
         assertTrue(json.contains("\"agent_id\":\"order-agent\""), json);
         assertTrue(json.contains("\"session_id\":\"sess-2\""), json);
         assertTrue(json.contains("\"label\":\"agent:order-agent:uuid\""), json);
+    }
+
+    // ===== session_id 构建期注入 + AGENT_START created_at（chat-trace-observability-design） =====
+
+    @Test
+    void payloadWithSessionIdCarriesTopLevelSessionId() {
+        var delta = new TextBlockDeltaEvent("reply-s1", "block-s1", "hi");
+        String json = AgentEventSseSerializer.payload(delta, "sid-1");
+        assertTrue(json.contains("\"session_id\":\"sid-1\""), "delta 帧也恒带 session_id: " + json);
+    }
+
+    @Test
+    void payloadWithoutSessionIdOmitsField() {
+        // 旁路面（审计留痕）不带会话归属：与既有词表逐字节兼容
+        var delta = new TextBlockDeltaEvent("reply-s2", "block-s2", "hi");
+        String json = AgentEventSseSerializer.payload(delta);
+        assertFalse(json.contains("session_id"), "1 参版本不带 session_id: " + json);
+    }
+
+    @Test
+    void agentStartShouldCarryCreatedAtPassthrough() {
+        // SDK 在事件构造时置 createdAt = Instant.now()（ISO-8601 UTC），原样透传不改写
+        //（3 参构造参数序：sessionId, replyId, name——javap 核实）
+        var start = new io.agentscope.core.event.AgentStartEvent("sid-3", "reply-s3", "assistant");
+        String json = AgentEventSseSerializer.payload(start, "sid-3");
+        String createdAt = start.getCreatedAt();
+        assertTrue(createdAt != null && !createdAt.isBlank(), "SDK 事件应自带 createdAt");
+        assertTrue(json.contains("\"created_at\":\"" + createdAt + "\""),
+            "created_at 原样透传: " + json);
+        // 与 session_id 并存（一帧同时满足需求②时间与需求③归属）
+        assertTrue(json.contains("\"session_id\":\"sid-3\""), json);
+    }
+
+    @Test
+    void withSessionContextInjectsMissingKeysAndShortCircuitsPresentOnes() {
+        // 缺失键补齐（追加在 JSON 末尾）
+        String out = AgentEventSseSerializer.withSessionContext(
+            "{\"type\":\"AGENT_END\"}", "sid-4", "rid-4", true);
+        assertTrue(out.contains("\"session_id\":\"sid-4\""), out);
+        assertTrue(out.contains("\"replyId\":\"rid-4\""), out);
+        assertTrue(out.contains("\"turnId\":\"rid-4\""), out);
+        // 全部键齐备 → 原引用返回（零重序列化，写路径热通道）
+        String full = "{\"type\":\"AGENT_END\",\"session_id\":\"sid-5\",\"replyId\":\"rid-5\",\"turnId\":\"rid-5\"}";
+        assertSame(full, AgentEventSseSerializer.withSessionContext(full, "sid-5", "rid-5", true));
+        // null 双参 → 原串返回
+        assertEquals("{\"type\":\"x\"}", AgentEventSseSerializer.withSessionContext("{\"type\":\"x\"}", null, null, true));
+    }
+
+    @Test
+    void turnFinishedPayloadMapKeepsShape() {
+        // emitTurnFinished 构造的 Map 载荷经 payload(Map) 序列化后字段齐备
+        var map = new java.util.LinkedHashMap<String, Object>();
+        map.put("type", "turn_finished");
+        map.put("state", "completed");
+        var usage = new java.util.LinkedHashMap<String, Object>();
+        usage.put("input_tokens", 1);
+        usage.put("output_tokens", 2);
+        usage.put("total_tokens", 3);
+        usage.put("model_calls", 1);
+        map.put("usage", usage);
+        map.put("elapsed_ms", 100L);
+        String json = AgentEventSseSerializer.payload(map);
+        assertTrue(json.contains("\"turn_finished\"") && json.contains("\"completed\""), json);
+        assertTrue(json.contains("\"input_tokens\":1") && json.contains("\"elapsed_ms\":100"), json);
     }
 }

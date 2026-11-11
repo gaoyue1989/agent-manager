@@ -46,7 +46,7 @@ import static org.mockito.Mockito.when;
 class TurnFinalizerTest {
 
     private static final String INTERRUPTED_FRAME =
-        "{\"type\":\"interrupted\",\"reason\":\"lease_lost\"}";
+        "{\"type\":\"interrupted\",\"reason\":\"lease_lost\",\"session_id\":\"sid\"}";
 
     @Mock private SessionEventBus eventBus;
     @Mock private TurnLeaseGuard lease;
@@ -151,7 +151,7 @@ class TurnFinalizerTest {
 
     @Test
     void interruptedFrameCarriesExactBytesAndNoId() {
-        var frame = TurnFinalizer.interruptedSSE("lease_lost");
+        var frame = TurnFinalizer.interruptedSSE("sid", "lease_lost");
 
         assertEquals(INTERRUPTED_FRAME, frame.data());
         assertNull(frame.id(), "终态帧不落库、不占 seq，不得携带 id 字段");

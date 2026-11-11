@@ -197,15 +197,12 @@ public class ModelIoTracingMiddleware implements MiddlewareBase {
         }
     }
 
-    /** 超长截断，保留前缀并标注原始总长（包内复用：ToolCallTracingMiddleware） */
+    /**
+     * 超长截断，保留前缀并标注原始总长（包内复用：ToolCallTracingMiddleware）。
+     * 实现已提取到 {@link io.agentmanager.framework.util.TraceText#truncate}（mcp 包的
+     * MCP 出站调用追踪共用同一口径，chat-trace-observability-design §1.3），此处委托。
+     */
     static String truncate(String s) {
-        if (s == null) {
-            return "";
-        }
-        if (s.length() <= MAX_CONTENT_CHARS) {
-            return s;
-        }
-        return s.substring(0, MAX_CONTENT_CHARS)
-            + "...(truncated, total " + s.length() + " chars)";
+        return io.agentmanager.framework.util.TraceText.truncate(s);
     }
 }

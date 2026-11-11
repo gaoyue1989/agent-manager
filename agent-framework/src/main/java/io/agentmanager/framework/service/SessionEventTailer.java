@@ -35,8 +35,15 @@ public class SessionEventTailer {
      * 不需要补帧（返回空列表即「只收流」）；native 返回单帧（现有词表）。
      */
     public interface TailFrameRenderer {
-        /** 存储事件 → 协议帧（可能 0..N 帧：AG-UI 单 seq 可拆多事件） */
-        List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e);
+        /**
+         * 存储事件 → 协议帧（可能 0..N 帧：AG-UI 单 seq 可拆多事件）。
+         *
+         * @param e         存储信封事件
+         * @param sessionId 订阅目标会话：native 渲染器据此给存量行兜底补 session_id
+         *                  （chat-trace-observability-design §3.3）；AG-UI 渲染器忽略
+         *                  （AG-UI 帧自带 threadId，非该设计范围）
+         */
+        List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e, String sessionId);
 
         /** turn 正常结束的收流帧（空列表 = 不补帧直接 complete） */
         List<ServerSentEvent<String>> doneFrames();
@@ -52,8 +59,9 @@ public class SessionEventTailer {
     public static TailFrameRenderer nativeRenderer() {
         return new TailFrameRenderer() {
             @Override
-            public List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e) {
-                return List.of(AgentEventSseSerializer.toSseFrame(e));
+            public List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e,
+                                                        String sessionId) {
+                return List.of(AgentEventSseSerializer.toSseFrame(e, sessionId));
             }
 
             @Override
@@ -86,8 +94,13 @@ public class SessionEventTailer {
      * 排在 AGENT_END 之前发出，observer 见到它即可判定本轮结束（AGENT_END 紧随其后，
      * 不会再有业务事件）。执行副本崩溃/被抢占仍走 {@code interrupted}（仅观察者补发，
      * 不落库）。
+     *
+     * <p>{@code turn_finished} 为 turn 收尾汇总帧（chat-trace-observability-design §2）：
+     * 在终态帧之后、closeSession 之前发射，是落库流里的**最后一帧**——不加入终态集合的话，
+     * {@code /status} 会把它当非终态，刷新恢复误判 interrupted/idle。
      */
-    private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error", "cancelled");
+    private static final Set<String> TERMINAL_TYPES =
+        Set.of("AGENT_END", "error", "cancelled", "turn_finished");
 
     /**
      * 该事件类型是否为 turn 终态。
@@ -276,7 +289,7 @@ public class SessionEventTailer {
                 ? eventStore.queryAfter(sessionId, replyId, afterSeq, false)
                 : eventStore.queryAfter(sessionId, replyId, afterSeq))
                 .doOnNext(e -> cursor.set(e.seq()))
-                .flatMapIterable(renderer::render);
+                .flatMapIterable(e -> renderer.render(e, sessionId));
 
         // 实时追赶：按下游需求逐帧拉取（Flux.generate 每次请求发一帧）。
         // 不用 Flux.create 手写死循环：Spring MVC 的 SseEmitterSubscriber 在「发送完成」后
@@ -305,7 +318,7 @@ public class SessionEventTailer {
                 // "The generator didn't call any of the SynchronousSink method"
                 if (!st.buffer.isEmpty()) {
                     var e = st.buffer.poll();
-                    st.frameQueue.addAll(renderer.render(e));
+                    st.frameQueue.addAll(renderer.render(e, sessionId));
                     cursor.set(e.seq());
                     st.lastFrameAt = System.currentTimeMillis();
                     st.lastDataAt = st.lastFrameAt;

@@ -114,6 +114,20 @@ class SessionEventTailerTest {
     }
 
     @Test
+    void turnFinishedIsTerminalAndFinishesTurn() {
+        // chat-trace-observability-design §2.4：turn_finished 是落库流的最后一帧——
+        // 不加入终态集合的话 /status 会把它当非终态，刷新恢复误判 interrupted/idle
+        assertTrue(SessionEventTailer.isTerminalType("turn_finished"),
+            "turn 收尾汇总帧必须参与终态判定");
+        when(turnLeaseStore.isHeld("sid-tf")).thenReturn(false);
+        when(eventStore.findLatest("sid-tf")).thenReturn(
+            new SessionEventStore.EnvelopedEvent(12, "turn_finished", "{}", "rid"));
+        var probe = tailer.probe("sid-tf");
+        assertTrue(probe.finished());
+        assertFalse(probe.interrupted());
+    }
+
+    @Test
     void finishedWhenNoEventsAtAll() {
         when(turnLeaseStore.isHeld("sid-5")).thenReturn(false);
         when(eventStore.findLatest("sid-5")).thenReturn(null);

@@ -60,7 +60,9 @@ export function collectStream(p: Promise<Response>, timeoutMs = 45_000): Collect
       clearTimeout(timer);
       if (!terminal) {
         const last = frames[frames.length - 1];
-        if (last?.type === 'AGENT_END') terminal = { type: 'done' };
+        // turn_finished：turn 收尾汇总帧（chat-trace-observability-design §2），是落库流
+        // 的最后一帧——last-frame 归一须同时认它，否则全部 chat 流判「未收敛到终态」
+        if (last?.type === 'AGENT_END' || last?.type === 'turn_finished') terminal = { type: 'done' };
       }
       resolveClosed();
     }
