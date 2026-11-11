@@ -374,9 +374,6 @@ public class AgentScopeConfig {
     /**
      * 分布式存储：agent_state 表 (AgentState) + agent_fs 表 (工作区文件)。
      * 使用自定义库名/表名与现有基础设施保持一致。
-     * AgentStateStore 使用 SandboxAwareMysqlAgentStateStore：官方 MysqlAgentStateStore
-     * 拒绝含 "/" 的 ID，而沙箱 slot ID 形如 sandbox/user/{agentId}/{userId（框架固定格式），
-     * 需放宽校验以支持沙箱状态持久化。
      *
      * <p><b>@DependsOn("flywayInitializer") 不可省</b>：SDK store 构造期就会建
      * agent_state/agent_fs（CREATE IF NOT EXISTS），若抢在 Flyway 迁移之前执行，全新库上
@@ -390,13 +387,14 @@ public class AgentScopeConfig {
             io.agentmanager.framework.config.HistoryConfig historyConfig) {
         var dbName = props.checkpoint().resolvedDbName();
         // AgentStateStore 装饰链（自内向外，顺序不可换）：
-        //   ① SandboxAwareMysqlAgentStateStore —— 真实 MySQL 存储（放宽沙箱 slot ID 校验）
+        //   ① MysqlAgentStateStore —— 真实 MySQL 存储（官方校验仅拒空/超长，
+        //      沙箱 slot ID sandbox/user/{agentId}/{userId} 含 / 天然放行）
         //   ② SessionMessageArchiveStateStore —— 会话消息轨 write-through 归档（压缩后历史可查，
         //      docs/session-history-archive-design.md）；须在 Backfill 之内才拿得到回填后形态
         //   ③ AskingContentBackfillStateStore —— 持久化前把 ASKING tool_use 块 content 回填为
         //      input 的 JSON 字符串——修复 HITL 恢复时 ToolValidator 抛 'argument "content" is null'
         io.agentscope.core.state.AgentStateStore agentStateStore =
-            new io.agentmanager.framework.sandbox.opensandbox.SandboxAwareMysqlAgentStateStore(
+            new io.agentscope.extensions.mysql.state.MysqlAgentStateStore(
                 dataSource, dbName, "agent_state", true);
         if (historyConfig == null || historyConfig.archiveEnabled()) {
             agentStateStore = new io.agentmanager.framework.service.SessionMessageArchiveStateStore(

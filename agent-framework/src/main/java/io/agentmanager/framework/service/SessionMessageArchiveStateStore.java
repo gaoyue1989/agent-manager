@@ -27,7 +27,7 @@ import io.agentscope.core.state.VersionedState;
  *
  * <p>装配位置须在 {@code AskingContentBackfillStateStore} **之内**（Backfill 先原位 patch
  * 再下传，内层看到的才是回填后的最终形态）：
- * {@code Backfill(Archive(SandboxAwareMysql))}。归档先于 delegate 执行但完全 fail-soft，
+ * {@code Backfill(Archive(MysqlAgentStateStore))}。归档先于 delegate 执行但完全 fail-soft，
  * 任何归档异常只告警，绝不影响 agent_state 落库与对话主链路。
  *
  * <p>拦截全部三条写路径（save×2 + saveIfVersion——2.0.3 版本化 MySQL 的主写入口是
