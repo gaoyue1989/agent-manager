@@ -92,9 +92,11 @@ public class InternalToolRegistry {
      * BUILT_IN_TOOL_NAMES 静态白名单——SDK feature 开关（如 memoryEnabled、plan mode）
      * 会使静态名产生幽灵条目。
      *
-     * <p>excludeNames：本次响应已上报的工具名（MCP 裸名 + 自定义 @Tool 名）——它们与 SDK
-     * 内置工具注册进同一 Toolkit，需先剔除，剩余的才是 SDK 内置；当前 OAF 的 deniedTools
-     * 一并剔除（harness 侧 tools.json deny 隐藏 + 口径对齐「可调用」语义）。
+     * <p>excludeNames：业务工具全量名集（MCP 可控集 ∪ 自定义集，与 ToolFilterMiddleware
+     * 分类同源）——它们与 SDK 内置工具注册进同一 Toolkit，需先剔除，剩余的才是 SDK 内置；
+     * {@code /tools?tools=} 白名单预览只裁剪返回视图、不缩小该剔除集（issue #295）；
+     * 当前 OAF 的 deniedTools 一并剔除（harness 侧 tools.json deny 隐藏 + 口径对齐
+     * 「可调用」语义）。
      *
      * <p>fail-soft：agent 未就绪（null）或枚举异常时返回空列表，不阻断 /tools。
      */
