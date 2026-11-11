@@ -373,6 +373,8 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_PROJECTION_FINGERPRINT_CACHE` | `true` | | 投影新鲜度检查 stat 指纹缓存：指纹未变跳过 `WorkspaceProjectionApplier.build()`（省每次 call 全量读+sha256+堆内 tar，实测 4.5MB 工作区 17.9ms→3.2ms）；关闭=逐次全量 build（sandbox-skill-sync-optimization-design ①） |
 | `SANDBOX_SKILL_REVISION_GATE` | `true` | | L4 物化 revision 门控：KV 技能集 `/.revision` 未变且本沙箱代已物化 → 跳过全量物化（1 次 get 替代 list+glob+逐文件读，实测 36.5ms→0.3ms）；关闭=每 acquire 全量（设计 ③） |
 | `SANDBOX_SYNC_SNAPSHOT_DIFF` | `true` | | 沙箱回写快照差分：回写按 manifest（path+size）只读与快照不一致的容器文件（实测 449ms→64ms）；已知盲点=同字节数原位内容漂移不回写（设计 §7 接受）；关闭=每次全量读（设计 ②′） |
+| `SANDBOX_RUNTIME_READ_THROUGH` | `false` | | 记忆混合读穿（first-reasoning-memory-readthrough-design §3.1）：true 时跳过 KV 运行时文件（MEMORY.md/memory/，≈24MB 级）预热注入——记忆探测由 exec 翻译层回落 KV 点查应答（`baseStore.get`，不走 search 前缀扫描），真实命令访问记忆路径（含 `python3 -c` edit 形态）时先补注入再执行（语义与预热注入等价，防「模型盲写部分内容覆盖 KV 记忆」丢数据链）；容器空文件≠缺失（`__EMPTY__` 不回落 KV）；关闭=预热注入旧行为。**灰度约束：须一次翻完所有副本**——读穿 Pod 会置位 Pod 级 `SkillSyncGate.lastRuntimeInjected`，旧代码 Pod 复用 gate 跳过注入且无 KV 回落（设计 §5.4） |
+| `SANDBOX_SKILL_CACHE_STOP_BACKFILL` | `true` | | turn 收尾 scoped `.skills-cache` 补投开关（first-reasoning-memory-readthrough-design §3.6）：false 时缓存只在命令首次真正访问时投放（首推理收尾不再与下一请求争用，6.8MB gz 级）；代价=turn 终态容器不含 `.skills-cache`，依赖它的 X18 探针/下轮快照差分基准需一并调整后再关 |
 | （env 未设置时）OAF `config.sandbox.enabled` | — | | 包级沙箱开关（issue #27b）：`SANDBOX_ENABLED` 显式设置时优先；env 未设置时读包 frontmatter `config.sandbox.enabled`，均未声明回退 false。生效裁决统一在 SandboxRuntime |
 | `SANDBOX_MEMORY_MB` | `1024` | | 沙箱内存限制（MiB） |
 | `SANDBOX_CPU_COUNT` | `1` | | 沙箱 CPU 限制 |

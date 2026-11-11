@@ -838,11 +838,11 @@ class OpenSandboxTest {
         var reader = mock(WorkspaceReader.class);
         var spec = new OpenSandboxFilesystemSpec();
         when(reader.readUserSkillRevision("alice")).thenReturn("rev-1");
-        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+        when(reader.materializeUserSkills(any(), eq("alice"), any())).thenReturn(2);
 
         // 第一次 acquire：必须全量物化，物化后回填 gate
         gatedInstance(spec, reader, osb, true).materializeUserSkills();
-        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"));
+        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"), any());
         var gate = spec.skillSyncGate("alice", "sbx-gate-1");
         assertNotNull(gate);
         assertTrue(gate.lastMaterialized());
@@ -850,7 +850,7 @@ class OpenSandboxTest {
 
         // 第二次 acquire（新实例，revision 未变）：门控跳过（只多一次 revision get）
         gatedInstance(spec, reader, osb, true).materializeUserSkills();
-        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"));
+        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"), any());
     }
 
     @Test
@@ -859,12 +859,12 @@ class OpenSandboxTest {
         var reader = mock(WorkspaceReader.class);
         var spec = new OpenSandboxFilesystemSpec();
         when(reader.readUserSkillRevision("alice")).thenReturn("rev-1", "rev-2");
-        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+        when(reader.materializeUserSkills(any(), eq("alice"), any())).thenReturn(2);
 
         gatedInstance(spec, reader, osb, true).materializeUserSkills();
         // 管理面写入了新技能（revision 变化）→ 第二次 acquire 必须重新物化
         gatedInstance(spec, reader, osb, true).materializeUserSkills();
-        verify(reader, times(2)).materializeUserSkills(any(), eq("alice"));
+        verify(reader, times(2)).materializeUserSkills(any(), eq("alice"), any());
     }
 
     @Test
@@ -875,10 +875,10 @@ class OpenSandboxTest {
         // revision 读不到（KV 异常/键不存在）→ 门控分支跳过（gate 未置位）、保守走全量物化；
         // 物化后回填读 revision（mock 返回 rev-1），gate 记最新值
         when(reader.readUserSkillRevision("alice")).thenReturn("rev-1");
-        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+        when(reader.materializeUserSkills(any(), eq("alice"), any())).thenReturn(2);
 
         gatedInstance(spec, reader, osb, true).materializeUserSkills();
-        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"));
+        verify(reader, times(1)).materializeUserSkills(any(), eq("alice"), any());
         var gate = spec.skillSyncGate("alice", "sbx-gate-1");
         assertEquals("rev-1", gate.revision(), "物化后应回填最新 revision");
     }
@@ -889,11 +889,11 @@ class OpenSandboxTest {
         var reader = mock(WorkspaceReader.class);
         var spec = new OpenSandboxFilesystemSpec();
         when(reader.readUserSkillRevision("alice")).thenReturn("rev-1");
-        when(reader.materializeUserSkills(any(), eq("alice"))).thenReturn(2);
+        when(reader.materializeUserSkills(any(), eq("alice"), any())).thenReturn(2);
 
         gatedInstance(spec, reader, osb, false).materializeUserSkills();
         gatedInstance(spec, reader, osb, false).materializeUserSkills();
-        verify(reader, times(2)).materializeUserSkills(any(), eq("alice"));
+        verify(reader, times(2)).materializeUserSkills(any(), eq("alice"), any());
     }
 
     @Test
@@ -1545,5 +1545,263 @@ class OpenSandboxTest {
         call2.stop();
         assertTrue(countHydrateTarWrites(osb) > afterCall1,
             "revision rev-1→rev-2 后第二次 call 必须重新投放（不重投即指纹缺 revision 段，技能陈旧）");
+    }
+
+    // ---------- first-reasoning：D1 混合读穿 / D4 探针直供 / D5 探测修正 / D6 补投开关 ----------
+
+    /** 真实 InMemoryStore + WorkspaceReader 的实例构造（读穿/默认两版，13 参构造器） */
+    private static OpenSandbox readerInstance(Sandbox osb, io.agentmanager.framework.service.WorkspaceReader reader,
+                                              boolean readThrough) {
+        var st = state();
+        st.setSandboxId("sbx-fr-1");
+        return new OpenSandbox(st, osb, options(), reader, null, new OpenSandboxFilesystemSpec(),
+            null, null, true, true, true, readThrough, true);
+    }
+
+    /** P_READ 探测模板（SDK 系统提示探针原样形态） */
+    private static String probeRead(String path, int lines) {
+        return "if [ ! -f '" + path + "' ]; then echo '__NOT_FOUND__'; elif [ ! -s '" + path
+            + "' ]; then echo '__EMPTY__'; else sed -n '1," + lines + "p' '" + path + "'; fi";
+    }
+
+    /** D1：读穿开启 → 预热注入跳过，MEMORY.md 探测从 KV 应答（容器 files().write 零调用） */
+    @Test
+    @SuppressWarnings("unchecked")
+    void readThroughShouldSkipEagerInjectionAndServeProbeFromKv() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "MEMORY.md", "# kv memory line1\nline2\n");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        // 容器侧缺失 = 404 异常（真实 execd 语义；空文件≠缺失，不回落 KV）
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var result = sandbox.exec(ctx, probeRead("/workspace/MEMORY.md", 10), 30);
+
+        assertEquals(0, result.exitCode());
+        assertEquals("# kv memory line1\nline2", result.stdout(), "KV 内容必须按 sed '1,Np' 语义应答");
+        verify(osb.files(), never()).write(anyList());
+    }
+
+    /** D1 语义边界：容器存在但为空的 MEMORY.md 必须 __EMPTY__，不得回落 KV 读到旧内容 */
+    @Test
+    void emptyContainerMemoryFileShouldAnswerEmptyNotKvFallback() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "MEMORY.md", "# stale kv content");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var filesMock = osb.files();
+        when(filesMock.readByteArray("/workspace/MEMORY.md")).thenReturn(new byte[0]);
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        var result = sandbox.exec(ctx, probeRead("/workspace/MEMORY.md", 10), 30);
+
+        assertEquals("__EMPTY__", result.stdout(), "容器空文件 ≠ 缺失：不回落 KV");
+    }
+
+    /** D1：SDK edit_file 形态（python3 -c + base64 载荷，路径不可见）的真实 exec 也要触发补注入 */
+    @Test
+    @SuppressWarnings("unchecked")
+    void editStyleRealExecShouldTriggerLazyInjection() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        fs.write(RuntimeContext.builder().userId("u1").build(), "MEMORY.md", "# edit target");
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        // SDK edit 模板形态：路径编进 base64，命令文本不含 MEMORY.md
+        sandbox.exec(RuntimeContext.builder().userId("u1").build(),
+            "python3 -c " + java.util.Base64.getEncoder().encodeToString("edit".getBytes()), 30);
+
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files(), atLeastOnce()).write(captor.capture());
+        var paths = ((java.util.List<WriteEntry>) captor.getAllValues().stream()
+            .flatMap(l -> ((java.util.List<WriteEntry>) l).stream()).toList())
+            .stream().map(WriteEntry::getPath).toList();
+        assertTrue(paths.contains("/workspace/MEMORY.md"), "edit 形态真实 exec 必须先补注入");
+        var inOrder = org.mockito.Mockito.inOrder(osb.files(), osb.commands());
+        inOrder.verify(osb.files(), atLeastOnce()).write(anyList());
+        inOrder.verify(osb.commands()).run(org.mockito.ArgumentMatchers.startsWith("python3 -c"));
+    }
+
+    /** D1：读穿默认关闭保持旧行为——预热注入先于探测（readRuntimeFiles + injectToSandbox 必达） */
+    @Test
+    void eagerInjectionShouldRemainDefaultBehavior() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = org.mockito.Mockito.mock(io.agentmanager.framework.service.WorkspaceReader.class);
+        org.mockito.Mockito.when(reader.readRuntimeFiles("u1")).thenReturn(Map.of());
+
+        readerInstance(osb, reader, false).exec(
+            RuntimeContext.builder().userId("u1").build(), probeRead("/workspace/MEMORY.md", 10), 30);
+
+        org.mockito.Mockito.verify(reader).readRuntimeFiles("u1");
+        org.mockito.Mockito.verify(reader).injectToSandbox(org.mockito.Mockito.any(),
+            org.mockito.Mockito.eq(Map.of()));
+    }
+
+    /** D1 混合触发器：真实 exec 命令含 MEMORY.md → 先补注入（KV→容器）再执行 */
+    @Test
+    @SuppressWarnings("unchecked")
+    void realExecTouchingMemoryShouldTriggerLazyInjection() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, List.of("u1"));
+        var ctx = RuntimeContext.builder().userId("u1").build();
+        fs.write(ctx, "MEMORY.md", "# full memory");
+
+        var osb = mockOsb(mockExecution(0, "cat-output", ""));
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        sandbox.exec(ctx, "cat /workspace/MEMORY.md", 30);
+
+        var captor = ArgumentCaptor.forClass(java.util.List.class);
+        verify(osb.files(), atLeastOnce()).write(captor.capture());
+        var paths = ((java.util.List<WriteEntry>) captor.getAllValues().stream()
+            .flatMap(l -> ((java.util.List<WriteEntry>) l).stream()).toList())
+            .stream().map(WriteEntry::getPath).toList();
+        assertTrue(paths.contains("/workspace/MEMORY.md"), "真实访问记忆前必须补注入全量副本");
+        // 注入必须发生在真实命令执行之前（cat 才能读到刚注入的文件）
+        var inOrder = org.mockito.Mockito.inOrder(osb.files(), osb.commands());
+        inOrder.verify(osb.files(), atLeastOnce()).write(anyList());
+        inOrder.verify(osb.commands()).run("cat /workspace/MEMORY.md");
+    }
+
+    /** D1：翻译命中的探测命令不触发补注入（首推理探测窗口零注入成本） */
+    @Test
+    void translatedProbeShouldNotTriggerLazyInjection() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds);
+        var sandbox = readerInstance(osb, reader, true);
+
+        sandbox.exec(RuntimeContext.builder().userId("u1").build(),
+            probeRead("/workspace/MEMORY.md", 10), 30);
+
+        verify(osb.files(), never()).write(anyList());
+    }
+
+    /** D4：物化回填的 SKILL.md 探测直供缓存应答；真实 exec 后窗口关闭（回落容器读） */
+    @Test
+    void probeCacheShouldServeMaterializedSkillReadUntilRealExec() throws Exception {
+        var store = new io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore();
+        var ds = org.mockito.Mockito.mock(io.agentscope.harness.agent.DistributedStore.class);
+        org.mockito.Mockito.when(ds.baseStore()).thenReturn(store);
+        var fs = new io.agentscope.harness.agent.filesystem.remote.RemoteFilesystem(
+            store, java.util.List.of("agents", "agent-x", "users", "alice", "skills"));
+        var ctx = RuntimeContext.builder().userId("alice").build();
+        fs.write(ctx, "/pdf/SKILL.md", "# cached skill body\n");
+
+        var reader = new io.agentmanager.framework.service.WorkspaceReader(ds, "agent-x");
+        var osb = mockOsb(mockExecution(0, "ok", ""));
+        // 容器侧该路径桩定为 404（抛异常）：缓存命中则不触达；窗口关闭后走容器读 → __NOT_FOUND__
+        var filesMock = osb.files();
+        org.mockito.Mockito.doThrow(sandboxApi404())
+            .when(filesMock).readByteArray("/workspace/skills/pdf/SKILL.md");
+        var sandbox = readerInstance(osb, reader, false);
+        sandbox.setUserKey("alice");
+
+        sandbox.materializeUserSkills();
+        var probe = sandbox.exec(RuntimeContext.builder().userId("alice").build(),
+            probeRead("/workspace/skills/pdf/SKILL.md", 50), 30);
+
+        assertEquals("# cached skill body", probe.stdout(), "物化写入的内容必须由直供缓存应答");
+        verify(osb.files(), never()).readByteArray("/workspace/skills/pdf/SKILL.md");
+
+        // 真实 exec → 窗口关闭：同一条探测改为容器读（未桩定 → __NOT_FOUND__，证明不再走缓存）
+        sandbox.exec(RuntimeContext.builder().userId("alice").build(), "echo real", 30);
+        var after = sandbox.exec(RuntimeContext.builder().userId("alice").build(),
+            probeRead("/workspace/skills/pdf/SKILL.md", 50), 30);
+        assertEquals("__NOT_FOUND__", after.stdout(), "真实 exec 后直供窗口必须关闭");
+        verify(osb.files(), atLeastOnce()).readByteArray("/workspace/skills/pdf/SKILL.md");
+    }
+
+    /** D5：test -d 目录直查——不经 readByteArray（杜绝目录 500 异常路径） */
+    @Test
+    void testDashDShouldUseDirectoryListingOnly() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var files = mock(Filesystem.class);
+        when(osb.files()).thenReturn(files);
+        when(files.listDirectory("/workspace")).thenReturn(List.of());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), "test -d /workspace", 30);
+
+        assertEquals(0, result.exitCode());
+        verify(files, never()).readByteArray(org.mockito.ArgumentMatchers.anyString());
+        verify(files, atLeastOnce()).listDirectory("/workspace");
+    }
+
+    /** D5：test -e 父目录列举判存在（文件/目录通吃，单次 200/404） */
+    @Test
+    void testDashEShouldCheckViaParentListing() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var files = mock(Filesystem.class);
+        when(osb.files()).thenReturn(files);
+        var entry = mock(com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo.class);
+        when(entry.getPath()).thenReturn("/workspace/memory/diary.md");
+        when(files.listDirectory("/workspace/memory")).thenReturn(List.of(entry));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var hit = sandbox.exec(RuntimeContext.builder().userId("u").build(),
+            "test -e '/workspace/memory/diary.md' && echo yes || echo no", 30);
+        assertEquals("yes", hit.stdout(), "父目录列举命中叶名即存在");
+
+        var miss = sandbox.exec(RuntimeContext.builder().userId("u").build(),
+            "test -e '/workspace/memory/absent.md' && echo yes || echo no", 30);
+        assertEquals("no", miss.stdout(), "父目录列举无叶名 → 不存在（一次 200/404 语义）");
+    }
+
+    /** D6：补投开关关闭时 stop() 不再收尾投放 .skills-cache */
+    @Test
+    void stopShouldSkipScopedBackfillWhenFlagDisabled() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var st = state();
+        st.setSandboxId("sbx-backfill-1");
+        var sandbox = org.mockito.Mockito.spy(new OpenSandbox(st, osb, options(), null, null,
+            new OpenSandboxFilesystemSpec(), null, null, true, true, true, false, false));
+
+        sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo x", 30);
+        sandbox.stop();
+
+        org.mockito.Mockito.verify(sandbox, never()).hydrateScopedSkillCache();
+    }
+
+    /** D6：默认（开关 true）保持旧行为——stop 收尾补投仍在 */
+    @Test
+    void stopShouldKeepScopedBackfillByDefault() throws Exception {
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var st = state();
+        st.setSandboxId("sbx-backfill-2");
+        var sandbox = org.mockito.Mockito.spy(new OpenSandbox(st, osb, options(), null, null,
+            new OpenSandboxFilesystemSpec(), null, null, true, true, true, false, true));
+
+        sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo x", 30);
+        sandbox.stop();
+
+        org.mockito.Mockito.verify(sandbox, atLeastOnce()).hydrateScopedSkillCache();
     }
 }
