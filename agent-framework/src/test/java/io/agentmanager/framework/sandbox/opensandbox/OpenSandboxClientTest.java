@@ -236,7 +236,7 @@ class OpenSandboxClientTest {
         // poolRef 路径无法抑制（上游对组合实测忽略，镜像以 Pool 模板为准）
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "pool-e2e", 5, 60, 20, 2, 1000));
+            true, "pool-e2e", 5, 60, 20, 2, 1000, false));
         when(manager.acquire(anyString(), anyString(), any(), any(), any()))
             .thenAnswer(inv -> {
                 // 直调 create 委托：穿透到 builder 组装逻辑
@@ -286,7 +286,7 @@ class OpenSandboxClientTest {
         // poolRef 空（默认）→ create 不带 extensions.poolRef，走普通创建（§4.5 兼容存量）
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "", 5, 60, 20, 2, 1000));
+            true, "", 5, 60, 20, 2, 1000, false));
         when(manager.acquire(anyString(), anyString(), any(), any(), any()))
             .thenAnswer(inv -> {
                 var delegate = inv.getArgument(3, SandboxLifecycleManager.SandboxCreateDelegate.class);
@@ -333,7 +333,7 @@ class OpenSandboxClientTest {
         // 守卫未装配的防御分支（身份缺失）→ 基线 create，不路由 lifecycle
         var manager = mock(SandboxLifecycleManager.class);
         when(manager.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "", 5, 60, 20, 2, 1000));
+            true, "", 5, 60, 20, 2, 1000, false));
         var spec = lifecycleSpec(manager);
         spec.takePendingSessionId();   // 清空捕获
         var osb = mockOsbSandbox("sb-noid");
@@ -473,7 +473,7 @@ class OpenSandboxClientTest {
     @Test
     void newConfigBindingChainDefaultsAlignWithDesign() {
         // §4.7 绑定链：env → application.yml 占位符段 → 构造器 null 归一（@DefaultValue 即归一）
-        var cfg = new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
+        var cfg = new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000, false);
         assertTrue(cfg.enabled());
         assertEquals("", cfg.poolRef());
         assertEquals(5, cfg.userQuota());
