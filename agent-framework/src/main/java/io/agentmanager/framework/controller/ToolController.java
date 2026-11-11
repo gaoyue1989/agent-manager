@@ -96,7 +96,8 @@ public class ToolController {
      *       OAF reload（deniedTools 变更）即时反映。</li>
      *   <li>{@code sdkInternal} 段——SDK（Harness 框架）注册进 Toolkit 的内置工具
      *       实际注册集（文件/记忆/会话/计划/技能/子 Agent/异步任务/Shell 等），
-     *       取自运行中 agent，减去已上报的 MCP/自定义同名项与 deniedTools。</li>
+     *       取自运行中 agent，减去业务工具全量名集（MCP 可控集 ∪ 自定义集）与
+     *       deniedTools（issue #295：剔除集取未过滤全量，不随 ?tools= 白名单缩小）。</li>
      * </ul>
      * totalCount/internalCount 仍只统计 MCP + CustomTool 段（保持既有口径不破坏消费方），
      * SDK 段规模看 sdkInternalCount。
@@ -110,8 +111,9 @@ public class ToolController {
      *   <li>顶层 {@code sessionTools} 汇总：可传入 tools 字段的清单（MCP 可控集 ∪
      *       自定义集，与 ToolFilterMiddleware 收敛同源 {@link SessionToolScopeService}
      *       ——查询即所得）。</li>
-     *   <li>{@code ?tools=a,b}（可选）：白名单预览——只裁剪 MCP 段与自定义段（裸名或
-     *       全名均可命中），SDK 内置段不受影响；缺省/空串 = 不过滤（存量语义）。</li>
+     *   <li>{@code ?tools=a,b}（可选）：白名单预览——只裁剪 MCP 段与自定义段的展示
+     *       视图（裸名或全名均可命中），不缩小 sdkInternal 段的剔除集（剔除集恒为
+     *       全量业务名集，issue #295）；缺省/空串 = 不过滤（存量语义）。</li>
      * </ul>
      */
     @GetMapping("/tools")
@@ -156,12 +158,16 @@ public class ToolController {
             toolEntries.addAll(internalTools);
             internalCount = internalTools.size();
 
-            // 3. SDK 内置工具（可选，独立段落）：Toolkit 实际注册集减去已上报名
-            //    （MCP 与自定义工具也注册进同一 Toolkit 且以裸名登记，需先剔除）；
-            //    不受 ?tools= 白名单影响（内置恒可见，与模型侧同口径）
-            var reportedNames = new java.util.HashSet<String>();
-            mcpTools.forEach(t -> reportedNames.add(String.valueOf(t.get("name"))));
-            internalTools.forEach(t -> reportedNames.add(String.valueOf(t.get("name"))));
+            // 3. SDK 内置工具（可选，独立段落）：Toolkit 实际注册集减去业务工具全量名集
+            //    （MCP 与自定义工具也注册进同一 Toolkit 且以裸名登记，需先剔除）。
+            //    剔除集取 mcpToolNames ∪ customToolNames（未过滤全量业务名，与
+            //    ToolFilterMiddleware 业务分类边界同源）而非上方被 ?tools= 白名单裁剪后的
+            //    展示视图——白名单只裁剪返回视图、不缩小剔除集，否则被滤掉的 MCP/自定义
+            //    工具会漏进 sdkInternal 段并被误标 sessionControllable=false（issue #295）；
+            //    无 ?tools= 时剔除集与展示视图在 Toolkit 维度等价（appOnly 工具不注册
+            //    Toolkit，剔除为 no-op），输出不变。内置恒可见（与模型侧同口径）
+            var reportedNames = new java.util.HashSet<String>(sessionToolScope.mcpToolNames());
+            reportedNames.addAll(sessionToolScope.customToolNames());
             sdkInternal = internalToolRegistry.listSdkInternalTools(agentRuntime.getAgent(), reportedNames)
                 .stream()
                 .map(t -> {
