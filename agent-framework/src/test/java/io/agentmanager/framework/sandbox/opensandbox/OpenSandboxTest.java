@@ -3,6 +3,7 @@ package io.agentmanager.framework.sandbox.opensandbox;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -1435,5 +1436,114 @@ class OpenSandboxTest {
 
         assertEquals(0, sandbox.translateForProbe("test -d /workspace").exitCode());
         assertEquals(1, sandbox.translateForProbe("test -d /workspace").exitCode());
+    }
+
+    // ---------- scoped 指纹源（缺口④，9d77505）：包内源 stat + L4 revision，stage 目录不参与 ----------
+
+    /** 内存 map 假 Redis：ScopedFingerprintStore 的 get/setex 落到共享 HashMap（模拟跨副本共享层） */
+    @SuppressWarnings("unchecked")
+    private static io.agentmanager.framework.redis.RedisConnectionFacade fakeScopedFpFacade(
+            java.util.Map<String, String> data) {
+        var sync = mock(io.lettuce.core.cluster.api.sync.RedisClusterCommands.class);
+        when(sync.get(anyString())).thenAnswer(inv -> data.get((String) inv.getArgument(0)));
+        doAnswer(inv -> {
+            data.put((String) inv.getArgument(0), (String) inv.getArgument(2));
+            return "OK";
+        }).when(sync).setex(anyString(), anyLong(), anyString());
+        var facade = mock(io.agentmanager.framework.redis.RedisConnectionFacade.class);
+        when(facade.sync()).thenReturn(sync);
+        return facade;
+    }
+
+    @Test
+    void scopedSkillCacheFingerprintShouldUsePackageSourceNotStageStat() throws Exception {
+        // 回归钉子（9d77505 缺口④①）：stage 副本目录的 mtime 各副本不同（各自 staging 时刻），
+        // 若指纹退化回 stage 目录 stat，跨副本指纹永不等、共享层永不命中、每副本重复付 4-6s 慢路径。
+        // 正确指纹源 = 包内源目录 stat（PVC 同挂载跨副本一致）+ L4 revision（KV 共享）。
+        var pkg = java.nio.file.Files.createTempDirectory("scoped-fp-pkg");
+        java.nio.file.Files.writeString(pkg.resolve("SKILL.md"), "---\nname: pkg\n---\n");
+
+        // 两个 mtime 不同的 stage 目录（显式拉开，模拟不同副本各自 staging）
+        var hostA = java.nio.file.Files.createTempDirectory("scoped-fp-a");
+        writeHostSkill(hostA, "sess-A", "demo-a");
+        var hostB = java.nio.file.Files.createTempDirectory("scoped-fp-b");
+        writeHostSkill(hostB, "sess-A", "demo-a");
+        java.nio.file.Files.setLastModifiedTime(
+            hostA.resolve(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"),
+            java.nio.file.attribute.FileTime.fromMillis(1700000000000L));
+        java.nio.file.Files.setLastModifiedTime(
+            hostB.resolve(".skills-cache/sess-A/oaf-package/demo-a/SKILL.md"),
+            java.nio.file.attribute.FileTime.fromMillis(1777777777777L));
+
+        var data = new java.util.HashMap<String, String>();
+        var store = new ScopedFingerprintStore(fakeScopedFpFacade(data));
+        var osb = mockOsb(mockExecution(0, "", ""));
+
+        // 副本1：全新 spec（Pod 级表空）→ 慢路径投放 → 指纹经共享层 setex 落地
+        var spec1 = new OpenSandboxFilesystemSpec();
+        spec1.packageSkillsDir(pkg);
+        spec1.sharedFingerprintStore(store);
+        var st1 = projectedStateNoSkillCache(hostA);
+        st1.setSandboxId("sbx-fp-1");
+        var call1 = new OpenSandbox(st1, osb, options(), null, null, spec1);
+        call1.setSkillCacheScope("sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 1", 30);
+        call1.stop();
+        int afterCall1 = countHydrateTarWrites(osb);
+        assertTrue(afterCall1 >= 1, "副本1 首轮应实际投放");
+        assertFalse(data.isEmpty(), "投放成功后指纹必须写入共享层（recordScopedSkillCacheFingerprint 双写）");
+
+        // 副本2：全新 spec（Pod 级表空 → 强制走共享层读回）+ mtime 不同的 stage 目录
+        // → 指纹仍一致（源自包内源而非 stage stat）→ 命中稳态短路，不重投
+        var spec2 = new OpenSandboxFilesystemSpec();
+        spec2.packageSkillsDir(pkg);
+        spec2.sharedFingerprintStore(store);
+        var st2 = projectedStateNoSkillCache(hostB);
+        st2.setSandboxId("sbx-fp-1");
+        var call2 = new OpenSandbox(st2, osb, options(), null, null, spec2);
+        call2.setSkillCacheScope("sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "echo 2", 30);
+        call2.stop();
+        assertEquals(afterCall1, countHydrateTarWrites(osb),
+            "同包源+同 revision（stage mtime 不同）→ 共享层指纹命中 → 副本2 不得重投（重投即指纹源退化为 stage stat）");
+    }
+
+    @Test
+    void scopedSkillCacheShouldRehydrateWhenRevisionChanges() throws Exception {
+        // 回归钉子（9d77505 缺口④②）：指纹必须含 L4 revision 段——revision 是 KV 共享的用户级
+        // 技能差异信号，变化后同容器代同 scope 的下一 call 必须重新投放（缺失该段=陈旧技能=正确性）
+        var host = java.nio.file.Files.createTempDirectory("scoped-rev");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var reader = mock(WorkspaceReader.class);
+        var rev = new java.util.concurrent.atomic.AtomicReference<>("rev-1");
+        when(reader.readUserSkillRevision(anyString())).thenAnswer(inv -> rev.get());
+
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var spec = new OpenSandboxFilesystemSpec();
+
+        // call1（实例1，生产 acquire 语义）：rev-1 → 投放并记录指纹
+        var st1 = projectedStateNoSkillCache(host);
+        st1.setSandboxId("sbx-rev-1");
+        var call1 = new OpenSandbox(st1, osb, options(), reader, null, spec);
+        call1.setUserKey("alice");
+        call1.setSkillCacheScope("sess-A");
+        call1.exec(RuntimeContext.builder().userId("alice").build(), "echo 1", 30);
+        call1.stop();
+        int afterCall1 = countHydrateTarWrites(osb);
+        assertTrue(afterCall1 >= 1, "首轮应实际投放");
+
+        // 用户技能变更：KV revision rev-1 → rev-2（跨实例可见，生产=任意副本）
+        rev.set("rev-2");
+
+        // call2（实例2，同容器代同 scope）：revision 变化 → 指纹变化 → 必须重新投放
+        var st2 = projectedStateNoSkillCache(host);
+        st2.setSandboxId("sbx-rev-1");
+        var call2 = new OpenSandbox(st2, osb, options(), reader, null, spec);
+        call2.setUserKey("alice");
+        call2.setSkillCacheScope("sess-A");
+        call2.exec(RuntimeContext.builder().userId("alice").build(), "echo 2", 30);
+        call2.stop();
+        assertTrue(countHydrateTarWrites(osb) > afterCall1,
+            "revision rev-1→rev-2 后第二次 call 必须重新投放（不重投即指纹缺 revision 段，技能陈旧）");
     }
 }

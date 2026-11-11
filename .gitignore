@@ -32,7 +32,7 @@ backend/server
 # Node
 node_modules/
 e2e/node_modules/
-**/node_modules/
+**/node_modules
 
 # IDE
 .idea/
@@ -104,7 +104,7 @@ e2e/fixtures/e2e-frontend-test.csv
 backend/cover.out
 
 # agent-framework E2E 运行产物（e2e-ci-plan §6.2）
-agent-framework/e2e/.runtime/
+agent-framework/e2e/.runtime
 agent-framework/e2e/.runtime-plugin/
 agent-framework/e2e/playwright-report/
 agent-framework/e2e/test-results/

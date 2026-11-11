@@ -31,12 +31,14 @@ import reactor.core.publisher.Flux;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -189,5 +191,55 @@ class AguiRunControllerTest {
         verify(chatChannel).dispatchStream(captor.capture());
         assertNull(captor.getValue().runtimeContext().get(ChatRequestHeaders.class),
             "零声明服务不得携带透传头 attribute");
+    }
+
+    @Test
+    void runsShouldUnregisterLifecycleOnSetupFailure() {
+        // 4a34a41 回滚回归钉子（run 形态）：租约到手后 onTurnStart 已注册（§4.4 T3 双信号），
+        // run 准备段同步抛（getAgent 异常）走 catch 回滚——漏一行 onTurnEnd 即 activeTurns
+        // 条目无 TTL 泄漏，sweep 持续按 turn 注册续期把应回收沙箱多续到超龄
+        var threadId = "agui-setupfail-t1";
+        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sandboxLifecycle", lifecycle);
+        when(turnLeaseStore.tryAcquire(threadId)).thenReturn("tok-f1");
+        when(runtimeService.getAgent(threadId))
+            .thenThrow(new IllegalStateException("agent gone"));
+
+        var frames = controller.runs(
+                new AguiRunController.AguiRunRequest(threadId, null,
+                    List.of(new AguiRunController.AguiMessageDTO("m1", "user", "hello")), null),
+                null, requestHeadersWithAuth())
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames, "准备失败也应收流（abortSetup 回错误帧）");
+        assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("turn_setup_failed")),
+            "run 准备失败应回 turn_setup_failed 帧: " + frames);
+        verify(lifecycle).onTurnStart(threadId);
+        verify(lifecycle).onTurnEnd(threadId);
+    }
+
+    @Test
+    void resumeRunsShouldUnregisterLifecycleOnSetupFailure() {
+        // 4a34a41 回滚回归钉子（resume 形态）：恢复段重注册 onTurnStart 后，
+        // resumeWithConfirmEvents 同步抛 → catch 回滚注销，与 confirm-stream 同语义
+        var threadId = "agui-resumefail-t1";
+        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sandboxLifecycle", lifecycle);
+        when(turnLeaseStore.acquire(eq(threadId), any())).thenReturn("tok-r1");
+        doThrow(new IllegalStateException("confirm consumed"))
+            .when(runtimeService).resumeWithConfirmEvents(eq(threadId), isNull(), anyList(), any());
+
+        var frames = controller.runs(
+                new AguiRunController.AguiRunRequest(threadId, null, null,
+                    List.of(new AguiRunController.AguiResumeDTO("run-1:call-1", "resolved",
+                        Map.of("approved", true)))),
+                null, requestHeadersWithAuth())
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames, "恢复准备失败也应收流（abortSetup 回错误帧）");
+        assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("confirm consumed")),
+            "resume 准备失败应回错误帧: " + frames);
+        verify(lifecycle).onTurnStart(threadId);
+        verify(lifecycle).onTurnEnd(threadId);
     }
 }

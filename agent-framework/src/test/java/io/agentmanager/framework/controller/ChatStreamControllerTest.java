@@ -314,6 +314,11 @@ class ChatStreamControllerTest {
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-4");
         when(workspaceInjector.injectToWorkspace(anyString(), anyString()))
             .thenThrow(new IllegalStateException("file not found"));
+        // lifecycle 注入（4a34a41 回滚回归钉子）：onTurnStart 已在准备段注册（租约到手后），
+        // catch 段必须对称注销——漏一行 onTurnEnd 即 activeTurns 条目无 TTL 泄漏，
+        // sweep 持续按 turn 注册续期把应回收沙箱多续到超龄
+        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sandboxLifecycle", lifecycle);
 
         var frames = collect(sessionId, "hello", null, List.of("f-missing"));
 
@@ -322,6 +327,8 @@ class ChatStreamControllerTest {
         verify(turnLeaseStore, org.mockito.Mockito.timeout(2_000)).release(sessionId, "tok-4");
         verify(eventStore).finishTurn(sessionId);
         verify(chatChannel, never()).dispatchStream(any(InboundMessage.class));
+        verify(lifecycle).onTurnStart(sessionId);
+        verify(lifecycle, org.mockito.Mockito.timeout(2_000)).onTurnEnd(sessionId);
     }
 
     @Test
