@@ -29,7 +29,7 @@ class AguiTailRendererTest {
         var e = new EnvelopedEvent(42, "TEXT_BLOCK_DELTA", "{\"type\":\"TEXT_BLOCK_DELTA\"}",
             "run-1", "[{\"type\":\"TEXT_MESSAGE_START\",\"threadId\":\"sess-1\"},"
                    + "{\"type\":\"TEXT_MESSAGE_CONTENT\",\"delta\":\"你好\"}]");
-        var frames = renderer.render(e);
+        var frames = renderer.render(e, "sess-1");
         assertEquals(2, frames.size());
         assertEquals("42", frames.get(0).id());
         assertEquals("42", frames.get(1).id());
@@ -40,7 +40,7 @@ class AguiTailRendererTest {
     @Test
     void degradesNativeOnlyRowsToCustomNativeEvent() throws Exception {
         var e = new EnvelopedEvent(7, "AGENT_START", "{\"type\":\"AGENT_START\"}", "run-1");
-        var frames = renderer.render(e);
+        var frames = renderer.render(e, "sess-1");
         assertEquals(1, frames.size());
         assertEquals("7", frames.get(0).id());
         var node = JSON.readTree(frames.get(0).data());

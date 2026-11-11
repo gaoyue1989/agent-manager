@@ -27,6 +27,10 @@ const TABLES = ['agent_state', 'agent_fs', 'confirm_context', 'turn_lease', 'ses
   'turn_intent',
   // V13 的 turn_stop 同理（单轮停止请求）
   'turn_stop',
+  // V15 的 sandbox_user/sandbox_binding 同理（沙箱池簿记）：残留同样触发 baseline(5)
+  // 跳过 V1-V5 → V6 因 session_user 被 DROP 而失败（本地复用库二轮起必踩）
+  'sandbox_user',
+  'sandbox_binding',
   // Flyway 历史表：不清掉的话，实例重启后 Flyway 认为迁移已应用、不会重建上面被 DROP 的表
   'flyway_schema_history'];
 

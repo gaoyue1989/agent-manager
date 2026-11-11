@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.agentmanager.framework.service.SessionEventStore;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentStartEvent;
 import io.agentscope.core.event.DataBlockDeltaEvent;
 import io.agentscope.core.event.DataBlockStartEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
@@ -33,9 +34,24 @@ public final class AgentEventSseSerializer {
     private AgentEventSseSerializer() {
     }
 
-    /** 将 AgentEvent 序列化为 SSE data 的 JSON 字符串（词表前后端一致） */
+    /** 将 AgentEvent 序列化为 SSE data 的 JSON 字符串（不带会话归属；审计留痕等旁路面使用） */
     public static String payload(AgentEvent event) {
-        return payload(event, null, null);
+        return payload(event, null, null, null);
+    }
+
+    /**
+     * 将 AgentEvent 序列化为 SSE data 的 JSON 字符串，顶层携带 session_id
+     * （chat-trace-observability-design §3.2 构建期注入：LinkedHashMap 直接 put，不做
+     * readTree 重写——delta 帧 token 热路径零额外成本）。sessionId 为 null 时与 1 参
+     * 版本逐字节一致。
+     */
+    public static String payload(AgentEvent event, String sessionId) {
+        return payload(event, sessionId, null, null);
+    }
+
+    /** 不带会话归属的 ui 元数据覆写（向后兼容保留；对话链路请用 4 参版本） */
+    public static String payload(AgentEvent event, String uiResourceUri, String uiServer) {
+        return payload(event, null, uiResourceUri, uiServer);
     }
 
     /**
@@ -45,15 +61,25 @@ public final class AgentEventSseSerializer {
      * （见 ChatStreamController.payloadForEvent，2026-09-17 经 approval-forms e2e 钉住）；
      * 无 UI 的工具传 null 保持原词表（向后兼容）。
      *
+     * @param sessionId     会话归属（chat-trace-observability-design §3：每帧顶层恒带
+     *                      session_id）；null 表示不携带（审计等旁路面）
      * @param uiResourceUri ui:// 资源 URI；null 表示不带 UI 元数据
      * @param uiServer      资源所属 MCP server 名（供前端调代理端点）
      */
-    public static String payload(AgentEvent event, String uiResourceUri, String uiServer) {
+    public static String payload(AgentEvent event, String sessionId,
+                                 String uiResourceUri, String uiServer) {
         var payload = new LinkedHashMap<String, Object>();
         payload.put("type", event.getType().name());
         payload.put("id", event.getId());
+        // 会话归属（§3 构建期注入）：紧跟 type/id；客户端按键名读、不依赖键序
+        putIfNotBlank(payload, "session_id", sessionId);
 
-        if (event instanceof TextBlockDeltaEvent delta) {
+        if (event instanceof AgentStartEvent) {
+            // agent 开始处理本 turn 的墙钟时刻（追加需求④）：SDK 在事件构造时即置
+            // createdAt = Instant.now()（ISO-8601 UTC），原样透传不改写；远程转发事件
+            // 携带的是远端子 agent 真实开始时刻，如实记录
+            putIfNotBlank(payload, "created_at", event.getCreatedAt());
+        } else if (event instanceof TextBlockDeltaEvent delta) {
             payload.put("delta", delta.getDelta());
         } else if (event instanceof ThinkingBlockDeltaEvent delta) {
             payload.put("delta", delta.getDelta());
@@ -252,7 +278,7 @@ public final class AgentEventSseSerializer {
      * @return 注入后的字符串；无法注入时返回原串
      */
     public static String withReplyId(String payload, String replyId) {
-        return withReplyId(payload, replyId, false);
+        return withSessionContext(payload, null, replyId, false);
     }
 
     /**
@@ -271,7 +297,29 @@ public final class AgentEventSseSerializer {
      * @return 注入后的字符串；无法注入时返回原串
      */
     public static String withReplyId(String payload, String replyId, boolean includeTurnId) {
-        if (payload == null || replyId == null || replyId.isBlank()) {
+        return withSessionContext(payload, null, replyId, includeTurnId);
+    }
+
+    /**
+     * 上下文注入收口（chat-trace-observability-design §3.2 写路径兜底）：把
+     * {@code session_id}（会话归属，构建期未带的帧在此补齐）/ {@code replyId} /
+     * {@code turnId} 注入 payload JSON 顶层。三个键各自独立做 {@code has} 顶层键短路——
+     * 构建期已带的键零重写，缺失的键追加在 JSON 末尾（ObjectNode 插入序）。
+     *
+     * <p>读取成本说明：readTree 对每个经过本方法的帧都会发生（与 withReplyId 现状一致），
+     * 新增的只是内存内 has 判定；重序列化仅发生在「确有键缺失」时——新数据构建期已带
+     * session_id + replyId，恒走原引用返回。
+     *
+     * @param payload       SSE data 的 JSON 字符串；null 或非 JSON object 原串返回
+     * @param sessionId     会话归属；null/blank 不注入
+     * @param replyId       turn 标识；null/blank 不注入
+     * @param includeTurnId 是否注入 {@code turnId}
+     * @return 注入后的字符串；无法注入时返回原串
+     */
+    public static String withSessionContext(String payload, String sessionId,
+                                            String replyId, boolean includeTurnId) {
+        if (payload == null
+                || isBlank(sessionId) && isBlank(replyId)) {
             return payload;
         }
         try {
@@ -281,11 +329,15 @@ public final class AgentEventSseSerializer {
             }
             boolean changed = false;
             var obj = (com.fasterxml.jackson.databind.node.ObjectNode) node;
-            if (!obj.has("replyId")) {
+            if (!isBlank(sessionId) && !obj.has("session_id")) {
+                obj.put("session_id", sessionId);
+                changed = true;
+            }
+            if (!isBlank(replyId) && !obj.has("replyId")) {
                 obj.put("replyId", replyId);
                 changed = true;
             }
-            if (includeTurnId && !obj.has("turnId")) {
+            if (includeTurnId && !isBlank(replyId) && !obj.has("turnId")) {
                 obj.put("turnId", replyId);
                 changed = true;
             }
@@ -296,17 +348,25 @@ public final class AgentEventSseSerializer {
         }
     }
 
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
     /**
      * EnvelopedEvent &rarr; SSE 帧（A1：SessionEventBus 与 SessionEventTailer 的私有 toSSE
      * 收口于此，两条路径必然同构，杜绝双份拷贝漂移）。
      *
-     * <p>data 不是直通透传：新数据（写路径已注入 replyId）经 {@link #withReplyId} 短路原串
-     * 返回；存量行（p 内无 replyId）由同一实现兜底注入——与收口前读端输出逐字节一致。
-     * id 仍为回放游标 seq。
+     * <p>data 不是直通透传：新数据（写路径已注入 replyId + session_id）经
+     * {@link #withSessionContext} 顶层键短路原串返回；存量行（升级前落库、p 内缺
+     * session_id/replyId）由同一实现兜底注入。id 仍为回放游标 seq。
+     *
+     * @param sessionId 订阅目标会话（回放端点路径参数，必非空）；用于给存量行兜底补
+     *                  session_id（chat-trace-observability-design §3.3）
      */
-    public static ServerSentEvent<String> toSseFrame(SessionEventStore.EnvelopedEvent e) {
+    public static ServerSentEvent<String> toSseFrame(SessionEventStore.EnvelopedEvent e,
+                                                     String sessionId) {
         return ServerSentEvent.<String>builder()
-            .data(withReplyId(e.payload(), e.replyId()))
+            .data(withSessionContext(e.payload(), sessionId, e.replyId(), false))
             .id(String.valueOf(e.seq()))
             .build();
     }

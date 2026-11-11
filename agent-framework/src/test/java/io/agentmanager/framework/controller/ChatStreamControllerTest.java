@@ -179,6 +179,83 @@ class ChatStreamControllerTest {
     }
 
     @Test
+    void chatShouldEmitTurnFinishedWithUsageSummary() {
+        // chat-trace-observability-design §2：turn 收尾汇总帧——token 求和 + model_calls +
+        // elapsed_ms，排在 AGENT_END 之后（终态帧之后、closeSession 之前发射，seq 有序）
+        var sessionId = "test-user-usage";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        var start = new io.agentscope.core.event.AgentStartEvent(sessionId, "reply-u1", "assistant");
+        var callEnd1 = new io.agentscope.core.event.ModelCallEndEvent("reply-u1",
+            new io.agentscope.core.model.ChatUsage(100, 10, 110, 0.0));
+        var callEnd2 = new io.agentscope.core.event.ModelCallEndEvent("reply-u1",
+            new io.agentscope.core.model.ChatUsage(200, 20, 220, 0.0));
+        var end = new AgentEndEvent("reply-u1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd1,
+                (AgentEvent) callEnd2, (AgentEvent) end));
+
+        var frames = collect(sessionId, "hello", "alice");
+        var last = frames.get(frames.size() - 1);
+        assertTrue(last.contains("\"type\":\"turn_finished\""),
+            "turn_finished 应为最后一帧: " + frames);
+        assertTrue(last.contains("\"state\":\"completed\""), last);
+        assertTrue(last.contains("\"input_tokens\":300"), "两次模型调用求和: " + last);
+        assertTrue(last.contains("\"output_tokens\":30"), last);
+        assertTrue(last.contains("\"total_tokens\":330"), last);
+        assertTrue(last.contains("\"model_calls\":2"), last);
+        assertTrue(last.contains("\"elapsed_ms\":"), last);
+        assertTrue(last.contains("\"session_id\":\"" + sessionId + "\""), last);
+        int endIdx = -1, finishedIdx = -1;
+        for (int i = 0; i < frames.size(); i++) {
+            String f = frames.get(i);
+            if (f == null) continue;
+            if (f.contains("AGENT_END") && endIdx < 0) endIdx = i;
+            if (f.contains("turn_finished")) finishedIdx = i;
+        }
+        assertTrue(endIdx >= 0 && finishedIdx > endIdx,
+            "turn_finished 必须排在 AGENT_END 之后: " + frames);
+    }
+
+    @Test
+    void chatFramesShouldCarrySessionIdOnEveryDataFrame() {
+        // chat-trace-observability-design §3：经 EventBus 的每一条帧（含 delta 热路径）顶层
+        // 恒带 session_id
+        var sessionId = "test-user-sid";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        var delta = new TextBlockDeltaEvent("reply-d1", "block-d1", "Hi");
+        var end = new AgentEndEvent("reply-d1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) delta, (AgentEvent) end));
+
+        var frames = collect(sessionId, "hello", "alice");
+        int dataFrames = 0;
+        for (String f : frames) {
+            if (f == null) continue;   // EventBus comment 心跳帧 data=null
+            dataFrames++;
+            assertTrue(f.contains("\"session_id\":\"" + sessionId + "\""),
+                "每帧恒带 session_id: " + f);
+        }
+        assertTrue(dataFrames >= 3, "至少覆盖 delta/AGENT_END/turn_finished 三类帧: " + frames);
+    }
+
+    @Test
+    void agentStartFrameShouldCarryCreatedAt() {
+        // 追加需求④：AGENT_START 帧透传 SDK 自带的 created_at（agent 开始处理墙钟时刻）
+        var sessionId = "test-user-startat";
+        when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
+        var start = new io.agentscope.core.event.AgentStartEvent(sessionId, "reply-st1", "assistant");
+        var end = new AgentEndEvent("reply-st1");
+        when(chatChannel.dispatchStream(any(InboundMessage.class)))
+            .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) end));
+
+        var frames = collect(sessionId, "hello", "alice");
+        var startFrame = frames.stream()
+            .filter(f -> f != null && f.contains("AGENT_START")).findFirst().orElseThrow();
+        assertTrue(startFrame.contains("\"created_at\":\"" + start.getCreatedAt() + "\""),
+            "created_at 原样透传: " + startFrame);
+    }
+
+    @Test
     void chatShouldEmitEventsViaEventBus() {
         var sessionId = "test-user-s1";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
@@ -430,8 +507,10 @@ class ChatStreamControllerTest {
             verify(intentStore).register(eq(sessionId), rid.capture(), any(Duration.class));
             // 排队意图的 turn id 必须与事件信封 id 相同；意图行在 turn 终态才清理
             // （a811c27：租约到手后保留——「租约在但零事件」窗口内 stop 经 turn_intent
-            // 解析 replyId，消除 409 turn_not_ready）
-            verify(intentStore).clear(eq(sessionId), eq(rid.getValue()));
+            // 解析 replyId，消除 409 turn_not_ready）。
+            // clear 发生在 closeSession（流完成信号）之后的 boundedElastic 线程上，与
+            // collectList 返回存在竞态——同文件 release 验证的 timeout 等待同款先例
+            verify(intentStore, timeout(2000)).clear(eq(sessionId), eq(rid.getValue()));
             verify(intentStore, never()).fail(eq(sessionId), anyString(), anyString(), any());
         } finally {
             ChatStreamController.WAITING_FRAME_INTERVAL = Duration.ofSeconds(15);

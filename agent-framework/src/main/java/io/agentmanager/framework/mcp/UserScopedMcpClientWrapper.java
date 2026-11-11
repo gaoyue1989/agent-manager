@@ -78,13 +78,19 @@ import reactor.core.publisher.Mono;
         }
         var outboundArguments = injectArguments(toolName, arguments, meta);
         var outboundMeta = stripForwardKeys(meta);
-        if (resolved.isEmpty()) {
-            // 全部 passthrough 跳过：静态 header 生效
-            return delegate.callTool(toolName, outboundArguments, outboundMeta);
-        }
-        var transportContext = McpTransportContext.create(Map.of(HEADER_KEY, resolved));
-        return delegate.callTool(toolName, outboundArguments, outboundMeta)
-                .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
+        // MCP 出站调用追踪（chat-trace-observability-design §1）：本方法已是最内层装饰器、
+        // 唯一同时知道 server 名/最终出站参数/注入头清单的地方，span 在此创建（execute_tool
+        // 之下的 mcp.call_tool 子 span；OTel 关闭或父 span 无效时零开销放行）
+        return McpCallTracing.callTool(getName(), toolName, outboundArguments, outboundMeta,
+            resolved.keySet(), () -> {
+                if (resolved.isEmpty()) {
+                    // 全部 passthrough 跳过：静态 header 生效
+                    return delegate.callTool(toolName, outboundArguments, outboundMeta);
+                }
+                var transportContext = McpTransportContext.create(Map.of(HEADER_KEY, resolved));
+                return delegate.callTool(toolName, outboundArguments, outboundMeta)
+                        .contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext));
+            });
     }
 
     /**

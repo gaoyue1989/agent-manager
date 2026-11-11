@@ -115,12 +115,16 @@ public class SessionEventBus {
 
     private int emitCore(String sessionId, AgentEvent event, String replyId,
                          String payloadOverride, String aguiPayload) {
-        String payload = payloadOverride != null ? payloadOverride : AgentEventSseSerializer.payload(event);
+        // session_id 构建期注入（chat-trace-observability-design §3.2）：事件发源地经
+        // payload(event, sessionId) 构建的帧已携带，此处 has 短路；payloadOverride/旧调用方
+        // 构建的帧由写路径兜底补齐
+        String payload = payloadOverride != null ? payloadOverride
+            : AgentEventSseSerializer.payload(event, sessionId);
         String type = event.getType().name();
-        // replyId 注入前移到写路径（A1）：落库 p 字段与广播 data 从此同源（同一份字符串），
-        // 读端对存量行（p 内无 replyId）兜底注入即可，不再逐帧重序列化。
-        // 非 delta 事件额外注入 turnId（订阅过滤用，见 withReplyId 3 参重载）；delta 保持零重写。
-        payload = AgentEventSseSerializer.withReplyId(payload, replyId, !isDelta(type));
+        // replyId/session_id 注入前移到写路径（A1 + §3.2）：落库 p 字段与广播 data 从此同源
+        // （同一份字符串），读端对存量行兜底注入即可，不再逐帧重序列化。
+        // 非 delta 事件额外注入 turnId（订阅过滤用）；delta 保持零重写。
+        payload = AgentEventSseSerializer.withSessionContext(payload, sessionId, replyId, !isDelta(type));
         int seq = eventStore.append(sessionId, replyId, type, payload, aguiPayload);
 
         if (log.isDebugEnabled()) {
@@ -154,8 +158,9 @@ public class SessionEventBus {
      * 同上流程，但不来自 AgentEvent。
      */
     public int emitSynthetic(String sessionId, String replyId, String type, String payload) {
-        // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）；合成帧均为里程碑
-        payload = AgentEventSseSerializer.withReplyId(payload, replyId, true);
+        // 同 emit：注入前移到写路径，落库与广播共用同一份字符串（A1）；合成帧均为里程碑，
+        // 并在此兜底补 session_id（手拼字符串帧构建期不带，§3.2）
+        payload = AgentEventSseSerializer.withSessionContext(payload, sessionId, replyId, true);
         int seq = eventStore.append(sessionId, replyId, type, payload, null);
 
         log.debug("[EventBus] emitSynthetic: sid={}, seq={}, type={}, replyId={}", sessionId, seq, type, replyId);
@@ -184,7 +189,7 @@ public class SessionEventBus {
      */
     public int emitSyntheticAgui(String sessionId, String replyId, String type, String payload,
                                  String aguiPayload) {
-        payload = AgentEventSseSerializer.withReplyId(payload, replyId, true);
+        payload = AgentEventSseSerializer.withSessionContext(payload, sessionId, replyId, true);
         int seq = eventStore.append(sessionId, replyId, type, payload, aguiPayload);
 
         log.debug("[EventBus] emitSyntheticAgui: sid={}, seq={}, type={}, replyId={}",
@@ -217,13 +222,13 @@ public class SessionEventBus {
         Flux<ServerSentEvent<String>> replay = Flux.defer(() -> {
             if (afterSeq < 0) return Flux.empty();
             return eventStore.queryAfter(sessionId, replyId, afterSeq)
-                .map(AgentEventSseSerializer::toSseFrame);
+                .map(e -> AgentEventSseSerializer.toSseFrame(e, sessionId));
         });
 
         // 2. 实时事件流（过滤 replyId）
         Flux<ServerSentEvent<String>> live = sink.asFlux()
             .filter(e -> replyId == null || replyId.isBlank() || replyId.equals(e.replyId()))
-            .map(AgentEventSseSerializer::toSseFrame);
+            .map(e -> AgentEventSseSerializer.toSseFrame(e, sessionId));
 
         // 3. 心跳流：SSE comment 帧，不触发前端 onmessage，但重置 Nginx 超时计时器
         Flux<ServerSentEvent<String>> heartbeat = Flux.interval(heartbeatInterval)

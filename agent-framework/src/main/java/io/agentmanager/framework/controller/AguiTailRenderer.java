@@ -47,7 +47,15 @@ public final class AguiTailRenderer implements TailFrameRenderer {
     }
 
     @Override
-    public List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e) {
+    public List<ServerSentEvent<String>> render(SessionEventStore.EnvelopedEvent e,
+                                                String sessionId) {
+        // sessionId 不使用：AG-UI 帧自带 threadId；native-only 降级 CUSTOM 帧原样包裹
+        // p 载荷（AG-UI 面非 chat-trace-observability-design §3 范围）
+        return renderEnveloped(e);
+    }
+
+    /** 原渲染入口（接口增传 sessionId 前的签名；AG-UI 语义不消费会话归属） */
+    private List<ServerSentEvent<String>> renderEnveloped(SessionEventStore.EnvelopedEvent e) {
         var frames = new ArrayList<ServerSentEvent<String>>();
         String id = String.valueOf(e.seq());
         if (e.aguiPayload() != null && !e.aguiPayload().isEmpty()) {

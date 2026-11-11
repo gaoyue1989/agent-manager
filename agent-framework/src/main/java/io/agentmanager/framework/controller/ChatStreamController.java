@@ -328,23 +328,25 @@ public class ChatStreamController {
                                               @RequestHeader(value = "X-User-Id", required = false) String headerUserId,
                                               @RequestHeader(value = "X-Forwarded-Prefix", required = false) String forwardedPrefixHeader,
                                               @RequestHeader(required = false) org.springframework.http.HttpHeaders requestHeaders) {
+        // ★ 核心：sessionId 在请求体中，可选；不传则自动生成 UUID。
+        // 生成提前到入口校验之前（chat-trace-observability-design §3.2）：message 校验失败、
+        // model_reject、thread_not_found 等前置 error 帧也带 session_id——调用方拿到的任何
+        // 一帧都能归属会话。UUID 生成为纯内存操作，无副作用、不影响后续语义。
+        boolean isNewSession = body.sessionId() == null || body.sessionId().isBlank();
+        var sessionId = isNewSession
+            ? UUID.randomUUID().toString()
+            : body.sessionId();
+        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
+
         var message = body.message();
         if ((message == null || message.isBlank()) && (body.fileIds() == null || body.fileIds().isEmpty())) {
-            return Flux.just(errorSSE("message or fileIds is required"));
+            return Flux.just(errorSSE(sessionId, "message or fileIds is required"));
         }
 
         // 网关 Header 优先 > 请求体 userId > 默认 debug-user
         var userId = (headerUserId != null && !headerUserId.isBlank())
             ? headerUserId
             : (body.userId() != null && !body.userId().isBlank()) ? body.userId() : "debug-user";
-
-        // ★ 核心：sessionId 在请求体中，可选；不传则自动生成 UUID
-        boolean isNewSession = body.sessionId() == null || body.sessionId().isBlank();
-        var sessionId = isNewSession
-            ? UUID.randomUUID().toString()
-            : body.sessionId();
-
-        sessionId = io.agentmanager.framework.util.PathSafe.sanitize(sessionId);
         userId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
 
         log.info("[chat] start: sessionId={}, userId={}, isNew={}, messageLen={}, fileCount={}",
@@ -393,7 +395,7 @@ public class ChatStreamController {
             if (reject != null) {
                 log.info("[chat] reject model selection: sessionId={}, model={}, reason={}",
                     finalSessionId, requestedModel, reject);
-                return Flux.just(errorSSE(reject + ": " + requestedModel));
+                return Flux.just(errorSSE(finalSessionId, reject + ": " + requestedModel));
             }
         }
 
@@ -404,7 +406,7 @@ public class ChatStreamController {
         if (!isNewSession && !io.agentmanager.framework.service.SessionAccessGuard.ownedBy(
                 sessionUserStore, finalSessionId, finalUserId)) {
             log.info("[chat] reject foreign session: sessionId={}, userId={}", finalSessionId, finalUserId);
-            return Flux.just(errorSSE("thread_not_found: session '" + finalSessionId
+            return Flux.just(errorSSE(finalSessionId, "thread_not_found: session '" + finalSessionId
                 + "' not found"));
         }
 
@@ -460,7 +462,7 @@ public class ChatStreamController {
             while (token == null && System.currentTimeMillis() < deadline) {
                 long now = System.currentTimeMillis();
                 if (now >= nextWaitingFrameAt) {
-                    sink.next(waitingSSE());
+                    sink.next(waitingSSE(finalSessionId));
                     nextWaitingFrameAt = now + WAITING_FRAME_INTERVAL.toMillis();
                 }
                 boolean queuedStop = turnStopWatcher != null
@@ -475,7 +477,7 @@ public class ChatStreamController {
                     clearTurnIntent(finalSessionId, replyId);
                     log.info("[chat] queued turn cancelled by user (sid={}, rid={})",
                         finalSessionId, replyId);
-                    sink.next(cancelledSSE("user_stopped"));
+                    sink.next(cancelledSSE(finalSessionId, "user_stopped"));
                     sink.complete();
                     return;
                 }
@@ -500,7 +502,7 @@ public class ChatStreamController {
                     turnStopWatcher.unregister(finalSessionId, replyId);
                 }
                 log.warn("[chat] turn_in_progress: sessionId={}, waiting timeout", finalSessionId);
-                sink.next(errorSSE(err));
+                sink.next(errorSSE(finalSessionId, err));
                 sink.complete();
                 return;
             }
@@ -525,7 +527,7 @@ public class ChatStreamController {
                 clearTurnIntent(finalSessionId, replyId);
                 log.info("[chat] queued turn cancelled at lease handoff (sid={}, rid={})",
                     finalSessionId, replyId);
-                sink.next(cancelledSSE("user_stopped"));
+                sink.next(cancelledSSE(finalSessionId, "user_stopped"));
                 sink.complete();
                 return;
             }
@@ -541,7 +543,7 @@ public class ChatStreamController {
                 log.info("[chat] reject new turn: session pending confirmation (sid={})", finalSessionId);
                 turnLeaseStore.release(finalSessionId, token);
                 clearTurnIntent(finalSessionId, replyId);
-                sink.next(errorSSE("turn_pending_confirm: session '" + finalSessionId
+                sink.next(errorSSE(finalSessionId, "turn_pending_confirm: session '" + finalSessionId
                     + "' is in ASKING state (waiting for tool approval); approve or deny the "
                     + "pending tool call before sending new messages"));
                 sink.complete();
@@ -562,7 +564,7 @@ public class ChatStreamController {
                 var err = "turn_setup_failed: "
                     + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
                 failTurnIntent(finalSessionId, replyId, err);
-                sink.next(errorSSE(err));
+                sink.next(errorSSE(finalSessionId, err));
                 sink.complete();
                 return;
             }
@@ -591,7 +593,7 @@ public class ChatStreamController {
             var heartbeat = new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>>(
                 WAIT_HEARTBEAT.scheduleAtFixedRate(() -> {
                     if (!firstFeedbackSeen.get()) {
-                        sink.next(waitingSSE());
+                        sink.next(waitingSSE(finalSessionId));
                     }
                 }, WAITING_FRAME_INTERVAL.toMillis(), WAITING_FRAME_INTERVAL.toMillis(),
                    java.util.concurrent.TimeUnit.MILLISECONDS));
@@ -616,6 +618,13 @@ public class ChatStreamController {
             // 与 turn 同生命周期——放在订阅回调之外创建，避免被 Reactor 的取消回调连带清理。
             var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
                 (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
+
+            // 本轮模型用量累积器（chat-trace-observability-design §2.3）：MODEL_CALL_END 逐次
+            // 累加，turn 收尾合成 turn_finished 汇总帧。turn 闭包局部对象，随 turn 丢弃。
+            var usage = new io.agentmanager.framework.service.TurnUsageTracker();
+            // 本轮是否见过 HITL 挂起：AGENT_END 收尾时据此把 turn_finished 分叉为
+            // waiting_confirm（确认恢复轮是独立 turn、另发自己的帧）
+            var confirmAsked = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             // 准备段异常的回滚（error 帧 → closeSession → release → complete）为何必须做：
             // 见 TurnFinalizer#abortSetup 的教训注释。
@@ -720,7 +729,8 @@ public class ChatStreamController {
                     .subscribe(
                         event -> handleEventAndEmit(event, finalSessionId, replyId, lease,
                             finalUserId, sink, turnEnded, turnStartedAt, sandboxRebuildNotified,
-                            turnBucketKeys, toolSummary, forwardedPrefix, body.skills()),
+                            turnBucketKeys, toolSummary, forwardedPrefix, body.skills(),
+                            usage, confirmAsked),
                         e -> {
                             log.warn("session chat stream error (sid={}): {}", finalSessionId, e.getMessage());
                             cancelHeartbeat(heartbeat);
@@ -754,11 +764,15 @@ public class ChatStreamController {
                                     recordTurnError(finalSessionId, replyId, errText);
                                 }
                             }
-                            endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
+                            endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded,
+                                turnBucketKeys, usage, turnStartedAt, TurnFinalizer.TurnOutcome.ERROR);
                         },
                         () -> {
                             cancelHeartbeat(heartbeat);
-                            endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
+                            // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）；
+                            // 源流无 AGENT_END 直接收尾的旁路也在此拿到 turn_finished
+                            endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded,
+                                turnBucketKeys, usage, turnStartedAt, TurnFinalizer.TurnOutcome.COMPLETED);
                         });
             } catch (Exception e) {
                 log.warn("[chat] turn setup failed, rolling back (sid={}): {}",
@@ -776,7 +790,7 @@ public class ChatStreamController {
                 if (sandboxLifecycle != null) {
                     sandboxLifecycle.onTurnEnd(finalSessionId);
                 }
-                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId, errorSSE(err));
+                TurnFinalizer.abortSetup(eventBus, lease, sink, finalSessionId, errorSSE(finalSessionId, err));
                 return;
             }
 
@@ -797,7 +811,8 @@ public class ChatStreamController {
                         log.warn("[chat] orphan turn grace expired ({}ms), force-releasing lease "
                             + "(sid={}, rid={}) —— 防租约/闸门许可泄漏",
                             OrphanTurnWatchdog.GRACE_MS, finalSessionId, replyId);
-                        endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded, turnBucketKeys);
+                        endTurnAndCleanupBuckets(lease, finalSessionId, replyId, turnEnded,
+                            turnBucketKeys, usage, turnStartedAt, TurnFinalizer.TurnOutcome.INTERRUPTED);
                     }
                 }, finalSessionId, replyId);
             });
@@ -823,11 +838,12 @@ public class ChatStreamController {
      * 前端 chat.js 据此把工具行渲染为 iframe 内嵌的 MCP App 卡片）。
      * 非 ui 工具（含内置工具）返回 null，payload 保持原词表。
      */
-    private String payloadForEvent(AgentEvent event) {
+    private String payloadForEvent(AgentEvent event, String sessionId) {
         if (event instanceof ToolCallStartEvent tc) {
             var uiRef = mcpToolRegistrar.resolveUiRef(tc.getToolCallName());
             if (uiRef != null) {
-                return AgentEventSseSerializer.payload(event, uiRef.resourceUri(), uiRef.serverName());
+                return AgentEventSseSerializer.payload(event, sessionId,
+                    uiRef.resourceUri(), uiRef.serverName());
             }
         }
         return null;
@@ -842,7 +858,9 @@ public class ChatStreamController {
                                     java.util.Set<String> turnBucketKeys,
                                     TurnToolSummaryTracker toolSummary,
                                     String forwardedPrefix,
-                                    java.util.List<String> turnSkills) {
+                                    java.util.List<String> turnSkills,
+                                    io.agentmanager.framework.service.TurnUsageTracker usage,
+                                    java.util.concurrent.atomic.AtomicBoolean confirmAsked) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[chat]")) {
             if (turnStopWatcher != null) {
@@ -920,6 +938,12 @@ public class ChatStreamController {
             toolSummary.onToolResultDelta(trd);
         }
 
+        // 本轮模型用量累积（chat-trace-observability-design §2.3）：ReAct 多轮 = 多次
+        // MODEL_CALL_END，收尾时 turn_finished 汇总
+        if (event instanceof io.agentscope.core.event.ModelCallEndEvent mce) {
+            usage.onModelCallEnd(mce);
+        }
+
         // HITL：挂起点只落确认上下文与广播 permission_ask 帧，**不在这里释放租约/关流**。
         // SDK 的 AgentState（ASKING 快照，跨副本恢复的依据）在 turn 收尾（AGENT_END 处理）才落库，
         // 此处提前 release 会让 confirm 在快照落地前抢到锁：恢复侧读不到 state 身份 →
@@ -930,6 +954,8 @@ public class ChatStreamController {
                 ((RequireUserConfirmEvent) event).getToolCalls().stream()
                     .map(tc -> tc.getName()).toList());
             runtimeService.storeConfirmContext(sessionId, event, turnSkills);
+            // turn_finished.state 分叉依据（§2.2）：本轮以 waiting_confirm 收尾
+            confirmAsked.set(true);
             // T4 挂起保留窗（§4.4）：ask 挂起后沙箱持续续期（同沙箱恢复的保障），
             // 每次 ask 重新计窗；窗口过后停续 → 可被 LRU 调度/自然到期
             if (sandboxLifecycle != null) {
@@ -945,7 +971,7 @@ public class ChatStreamController {
                 "{\"type\":\"cancelled\",\"reason\":\"user_stopped\"}");
         }
 
-        eventBus.emit(sessionId, event, replyId, payloadForEvent(event));
+        eventBus.emit(sessionId, event, replyId, payloadForEvent(event, sessionId));
 
         // ★ 工具摘要帧（可观测性）：参数/结果到齐后追加人可读摘要，让轻量客户端无需
         // 自己拼 delta、解析工具参数即可展示「创建 create-ai-ppt.js 408行」。
@@ -970,7 +996,12 @@ public class ChatStreamController {
         if (event.getType() == AgentEventType.AGENT_END
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
             log.info("[chat] agent completed: sessionId={}", sessionId);
-            endTurnAndCleanupBuckets(lease, sessionId, replyId, turnEnded, turnBucketKeys);
+            // HITL 挂起轮同样以 AGENT_END 收尾（ASKING 快照随收尾落库后租约才让出）：
+            // turn_finished.state 分叉为 waiting_confirm，客户端据此区分「完成」与「等确认」
+            endTurnAndCleanupBuckets(lease, sessionId, replyId, turnEnded, turnBucketKeys,
+                usage, turnStartedAt,
+                confirmAsked.get() ? TurnFinalizer.TurnOutcome.WAITING_CONFIRM
+                    : TurnFinalizer.TurnOutcome.COMPLETED);
         }
     }
 
@@ -991,18 +1022,29 @@ public class ChatStreamController {
      */
     private void endTurnAndCleanupBuckets(TurnLeaseGuard lease, String sessionId, String replyId,
                                           java.util.concurrent.atomic.AtomicBoolean turnEnded,
-                                          java.util.Set<String> turnBucketKeys) {
+                                          java.util.Set<String> turnBucketKeys,
+                                          io.agentmanager.framework.service.TurnUsageTracker usage,
+                                          java.util.concurrent.atomic.AtomicLong turnStartedAt,
+                                          TurnFinalizer.TurnOutcome outcome) {
         // 停止监视必须先注销：播发/收尾期间可能仍有轮询 tick（注销后不再 dispatch），
         // 同时清理本轮遗留的 turn_stop 行（replyId 栅栏，误删不了下一轮）
         if (turnStopWatcher != null) {
             turnStopWatcher.unregister(sessionId, replyId);
         }
-        // 终态只收尾一次（TurnFinalizer 幂等裁决）：只有真正收尾的这次清理意图行。
-        // 意图行在租约到手后保留到终态，供 stop 在首个事件前解析 replyId；
-        // replyId 栅栏：同会话更新的排队意图不会被误删。
-        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
+        // 终态只收尾一次（与 TurnFinalizer.endTurn 4 参的 CAS 语义相同，此处前移以便在
+        // closeSession 刷缓冲**之前**发射 turn_finished——拿到紧邻终态帧的 seq 且落库可回放）。
+        // 只有真正收尾的这次清理意图行：意图行在租约到手后保留到终态，供 stop 在首个
+        // 事件前解析 replyId；replyId 栅栏：同会话更新的排队意图不会被误删。
+        if (!turnEnded.compareAndSet(false, true)) {
             return;
         }
+        // turn 收尾汇总帧（chat-trace-observability-design §2.2）：丢锁路径跳过——
+        // abandon 语义禁止再写行（此刻任何 append 都会占用可能与新 owner 重叠的 seq）
+        if (!lease.isLost()) {
+            TurnFinalizer.emitTurnFinished(eventBus, sessionId, replyId, usage,
+                turnStartedAt.get(), outcome);
+        }
+        TurnFinalizer.endTurn(eventBus, lease, sessionId);
         clearTurnIntent(sessionId, replyId);
         // 沙箱生命周期 turn 终态注销 + 终刷（§4.4 T2）：只挂 turn 终态（正常收尾/出错/
         // 被拒三入口经此汇聚），不挂 per-call stop()——一个 turn 可能多 call
@@ -1292,21 +1334,29 @@ public class ChatStreamController {
             .build();
     }
 
-    private static ServerSentEvent<String> waitingSSE() {
+    /** 排队心跳帧（不进 EventBus、不落库）；带会话归属保证连接内任何一帧可归属（§3.2） */
+    private static ServerSentEvent<String> waitingSSE(String sessionId) {
         return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"waiting\"}")
+            .data("{\"type\":\"waiting\",\"session_id\":"
+                + AgentEventSseSerializer.jsonEsc(sessionId) + "}")
             .build();
     }
 
-    private static ServerSentEvent<String> errorSSE(String msg) {
-        String payload = "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(msg) + "}";
+    /** 错误帧（手工恒定键序，TurnFinalizer#abortSetup javadoc 的字节兼容约定）；带会话归属 */
+    private static ServerSentEvent<String> errorSSE(String sessionId, String msg) {
+        String payload = "{\"type\":\"error\",\"error\":" + AgentEventSseSerializer.jsonEsc(msg)
+            + ",\"session_id\":" + AgentEventSseSerializer.jsonEsc(sessionId) + "}";
         return ServerSentEvent.<String>builder().data(payload).build();
     }
 
-    /** 用户停止终态帧（排队 turn 取消直接发本连接；执行中的 turn 经 EventBus 落库广播）。 */
-    private static ServerSentEvent<String> cancelledSSE(String reason) {
+    /**
+     * 用户停止终态帧（排队 turn 取消直接发本连接；执行中的 turn 经 EventBus 落库广播，
+     * 该路径由写路径注入 session_id，直发路径在此手工带上）。
+     */
+    private static ServerSentEvent<String> cancelledSSE(String sessionId, String reason) {
         return ServerSentEvent.<String>builder()
-            .data("{\"type\":\"cancelled\",\"reason\":\"" + reason + "\"}")
+            .data("{\"type\":\"cancelled\",\"reason\":\"" + reason + "\",\"session_id\":"
+                + AgentEventSseSerializer.jsonEsc(sessionId) + "}")
             .build();
     }
 

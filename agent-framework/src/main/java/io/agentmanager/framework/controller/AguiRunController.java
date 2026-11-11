@@ -309,7 +309,7 @@ public class AguiRunController {
                 // ===== 5. 先订阅 EventBus（响应流 = 存储流的渲染，实时/回放零漂移） =====
                 var sub = eventBus.subscribeEnveloped(threadId, 0, runId);
                 sub.events()
-                    .flatMapIterable(renderer::render)
+                    .flatMapIterable(e -> renderer.render(e, threadId))
                     .mergeWith(heartbeatFlux().takeUntilOther(sub.completion()))
                     .subscribe(
                         sink::next,
@@ -459,7 +459,7 @@ public class AguiRunController {
 
             var sub = eventBus.subscribeEnveloped(threadId, 0, runId);
             sub.events()
-                .flatMapIterable(renderer::render)
+                .flatMapIterable(e -> renderer.render(e, threadId))
                 .mergeWith(heartbeatFlux().takeUntilOther(sub.completion()))
                 .subscribe(
                     sink::next,

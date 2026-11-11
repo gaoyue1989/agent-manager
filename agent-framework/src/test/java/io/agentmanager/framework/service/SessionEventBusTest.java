@@ -254,8 +254,9 @@ class SessionEventBusTest {
             .timeout(Duration.ofSeconds(3));
 
         var event = mockAgentEvent("hi");
-        String expected = AgentEventSseSerializer.withReplyId(
-            AgentEventSseSerializer.payload(event), "rid-a1");
+        // 写路径现在同时注入 session_id（chat-trace-observability-design §3.2）
+        String expected = AgentEventSseSerializer.withSessionContext(
+            AgentEventSseSerializer.payload(event, "sid-a1"), "sid-a1", "rid-a1", false);
         StepVerifier.create(flux)
             .then(() -> eventBus.emit("sid-a1", event, "rid-a1"))
             .expectNextMatches(sse ->
@@ -285,18 +286,20 @@ class SessionEventBusTest {
         StepVerifier.create(flux)
             .then(() -> eventBus.emitSynthetic("sid-a2", "rid-a2", "file_ready", raw))
             .expectNextMatches(sse -> {
-                // 合成帧是里程碑：落库/广播的 payload 同时带 replyId 与 turnId
-                String expected = AgentEventSseSerializer.withReplyId(raw, "rid-a2", true);
+                // 合成帧是里程碑：落库/广播的 payload 同时带 replyId/turnId/session_id
+                String expected = AgentEventSseSerializer.withSessionContext(
+                    raw, "sid-a2", "rid-a2", true);
                 return sse.data().equals(appended.get(0))
                     && sse.data().equals(expected)
                     && sse.data().contains("\"replyId\":\"rid-a2\"")
-                    && sse.data().contains("\"turnId\":\"rid-a2\"");
+                    && sse.data().contains("\"turnId\":\"rid-a2\"")
+                    && sse.data().contains("\"session_id\":\"sid-a2\"");
             })
             .verifyComplete();
     }
 
     @Test
-    void subscribeServesLegacyAndNewRowsWithIdenticalBytes() {
+    void subscribeServesLegacyAndNewRowsWithIdenticalBytes() throws Exception {
         // 升级前落库的行（p 内无 replyId）与升级后的行（p 已含 replyId）可能混在同一个
         // Stream 里（同一 session 跨升级回放）：读端按「有无 replyId」各自走对应分支，
         // 输出都必须与收口前读端算法一致
@@ -314,10 +317,21 @@ class SessionEventBusTest {
             .block(Duration.ofSeconds(3));
 
         assertEquals(2, frames.size());
-        assertEquals(legacyInject(legacyRow.payload(), legacyRow.replyId()), frames.get(0).data(),
-            "存量行：读端兜底注入，输出与收口前读端算法逐字节一致");
-        assertEquals(legacyInject(newRow.payload(), newRow.replyId()), frames.get(1).data(),
-            "新形态行：has(replyId) 短路透传");
+        // 双键 oracle：readTree → put session_id → put replyId（与 withSessionContext 单遍
+        // 注入序一致）；replyId 的 has 短路语义仍由 legacyInject 钉住（新形态行不含 replyId 键）
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var legacyNode = (com.fasterxml.jackson.databind.node.ObjectNode)
+            mapper.readTree(legacyRow.payload());
+        legacyNode.put("session_id", "sid-mix");
+        if (!legacyNode.has("replyId")) legacyNode.put("replyId", legacyRow.replyId());
+        assertEquals(mapper.writeValueAsString(legacyNode), frames.get(0).data(),
+            "存量行：读端兜底注入 session_id + replyId");
+        var newNode = (com.fasterxml.jackson.databind.node.ObjectNode)
+            mapper.readTree(newRow.payload());
+        newNode.put("session_id", "sid-mix");
+        if (!newNode.has("replyId")) newNode.put("replyId", newRow.replyId());
+        assertEquals(mapper.writeValueAsString(newNode), frames.get(1).data(),
+            "新形态行：has(replyId) 短路透传 + session_id 兜底补齐");
         assertEquals("1", frames.get(0).id());
         assertEquals("2", frames.get(1).id());
     }
