@@ -1303,6 +1303,7 @@ class OpenSandboxTest {
         assertTrue(result.ok());
         assertEquals("tree/x.md\t3\t0", result.stdout(), "死沙箱代理 404 必须回落真 find，不得假空");
         verify(osb.commands()).run(FIND_PROBE);
+    }
 
     // ---------- exec→execd 翻译器（P0-12，issue #290 收窄回归） ----------
 
