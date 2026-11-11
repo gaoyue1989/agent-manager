@@ -719,9 +719,13 @@ test('L11 定时清理：短保留窗口 + 测试钩子触发 → 过期行删 +
     await q('INSERT IGNORE INTO sandbox_user (user_key) VALUES (?)', [uid]);
     await q('UPDATE sandbox_user SET binding_count = 5, updated_at = DATE_SUB(NOW(3), INTERVAL 9 DAY) WHERE user_key = ?', [uid]);
   });
-  // 测试钩子：POST /debug/sandbox-cleanup?retentionDays=7（与 SessionCleanupService 同语义）
-  const call = async () => (await (await fetch(`${BASE}/debug/sandbox-cleanup?retentionDays=7`, { method: 'POST' })).json()) as {
-    enabled: boolean; bindings_deleted: number; anchors_deleted: number;
+  // 测试钩子：POST /debug/sandbox-cleanup?retentionDays=7（与 SessionCleanupService 同语义；
+  // 钩子仅在 lifecycle 组 SANDBOX_LIFECYCLE_E2E_HOOKS=true 时注册——状态码必须先于 json() 断言，
+  // 否则 404/400 空体或错误体会被静默当成功解析）
+  const call = async () => {
+    const res = await fetch(`${BASE}/debug/sandbox-cleanup?retentionDays=7`, { method: 'POST' });
+    expect(res.status, 'sandbox-cleanup 测试钩子应已注册（SANDBOX_LIFECYCLE_E2E_HOOKS=true）且返回 200').toBe(200);
+    return (await res.json()) as { enabled: boolean; bindings_deleted: number; anchors_deleted: number };
   };
   const body = await call();
   expect(body.enabled).toBe(true);

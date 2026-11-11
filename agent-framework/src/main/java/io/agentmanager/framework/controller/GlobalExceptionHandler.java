@@ -78,6 +78,22 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 未匹配路径/静态资源缺失（Spring 6.1+ 无 handler URL 经 ResourceHttpRequestHandler 抛出）→ 404。
+     * 若无此精确映射，下方 catch-all 会把它吞成 500——条件注册端点关闭时「默认 404」契约
+     * （@ConditionalOnProperty：/agui/*、/a2a/jobs、/debug/sandbox-cleanup，issue #293）
+     * 才能真实成立；e2e T8 的 {@code [404,500]} 放宽断言自此可统一收敛到 404。
+     */
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleNoResourceFound(
+            org.springframework.web.servlet.resource.NoResourceFoundException e) {
+        log.warn("[ExceptionHandler] not_found: {}", e.getResourcePath());
+        var body = new LinkedHashMap<String, Object>();
+        body.put("error", "not_found");
+        body.put("message", "请求的资源不存在: " + e.getResourcePath());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body);
+    }
+
+    /**
      * 沙箱配额满（sandbox-pool-opensandbox-design §4.3 chat 预检，PR-D）：HTTP 409 +
      * 结构化载荷（code/quota/bindings，bindings 带 state=executing|confirm_holding）——
      * 前端 ChatPane 专属错误卡渲染占用明细（评审轮二 P0：409 body 不得丢弃）。

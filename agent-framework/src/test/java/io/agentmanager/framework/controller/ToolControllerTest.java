@@ -158,6 +158,8 @@ class ToolControllerTest {
         when(agentRuntime.getAgent()).thenReturn(agent);
         when(agent.getToolkit()).thenReturn(toolkit);
         when(toolkit.getToolNames()).thenReturn(java.util.Set.of("echo", "read_file", "plan_enter"));
+        // 剔除集数据源（issue #295）：customToolNames 纳入全量业务名集
+        when(sessionToolScope.customToolNames()).thenReturn(java.util.Set.of("echo"));
 
         mockMvc.perform(get("/tools?includeInternal=true"))
             .andExpect(status().isOk())
@@ -170,7 +172,7 @@ class ToolControllerTest {
             .andExpect(jsonPath("$.totalCount").value(1))
             .andExpect(jsonPath("$.internalCount").value(1));
 
-        // 控制器传给 registry 的排除集 = 已上报名（MCP 裸名 + 自定义 @Tool 名），不含 SDK 名
+        // 控制器传给 registry 的剔除集 = 全量业务名集（MCP 可控集 ∪ 自定义集），不含 SDK 名
         var captor = org.mockito.ArgumentCaptor.forClass(java.util.Set.class);
         org.mockito.Mockito.verify(internalToolRegistry).listSdkInternalTools(
             org.mockito.ArgumentMatchers.same(agent), captor.capture());
@@ -184,6 +186,71 @@ class ToolControllerTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.sdkInternal").isEmpty())
             .andExpect(jsonPath("$.sdkInternalCount").value(0));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void listToolsWhitelistShouldNotLeakFilteredBusinessToolsIntoSdkInternal() throws Exception {
+        // issue #295 回归：?tools= 白名单预览只裁剪返回视图、不缩小 sdkInternal 剔除集。
+        // 修复前剔除集取白名单过滤后的 mcpTools+internalTools 展示视图名（{get_weather}），
+        // 被滤掉的 search/get_order 漏进 sdkInternal 段并被误标 sessionControllable=false；
+        // 修复后剔除集取 mcpToolNames ∪ customToolNames 全量业务名集（与
+        // ToolFilterMiddleware 业务分类同源），sdkInternal 只剩真 SDK 内置。
+        when(mcpManager.loadConfigs(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(List.of(Map.of("server", "weather-service")));
+        when(mcpToolRegistrar.getToolsByServer("weather-service"))
+            .thenReturn(List.of(
+                new McpToolRegistrar.ToolInfo("get_weather", "mcp__weather-service__get_weather",
+                    "Get weather", "weather-service"),
+                new McpToolRegistrar.ToolInfo("search", "mcp__weather-service__search",
+                    "Search", "weather-service")));
+        when(sessionToolScope.mcpToolNames())
+            .thenReturn(java.util.Set.of("get_weather", "search"));
+        when(sessionToolScope.customToolNames()).thenReturn(java.util.Set.of("get_order"));
+        when(sessionToolScope.resolve(org.mockito.ArgumentMatchers.anyList()))
+            .thenReturn(new io.agentmanager.framework.service.SessionToolScopeService.Resolution(
+                java.util.Set.of("get_weather")));
+        when(internalToolRegistry.listInternalTools()).thenReturn(List.of(
+            Map.of("name", "get_order", "category", "internal", "source", "builtin", "declared", false)
+        ));
+        // registry 减法镜像（InternalToolRegistry.listSdkInternalTools 同逻辑）：
+        // 用捕获到的剔除集对 Toolkit 实际注册集做真实减法，替代固定 stub
+        var toolkitNames = java.util.Set.of(
+            "get_weather", "search", "get_order", "read_file", "plan_enter");
+        when(internalToolRegistry.listSdkInternalTools(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anySet()))
+            .thenAnswer(inv -> {
+                var excluded = (java.util.Set<String>) inv.getArgument(1);
+                return toolkitNames.stream()
+                    .filter(n -> !excluded.contains(n))
+                    .sorted()
+                    .map(n -> Map.<String, Object>of("name", n, "category", "sdk", "source", "sdk"))
+                    .toList();
+            });
+
+        mockMvc.perform(get("/tools?includeInternal=true&tools=get_weather"))
+            .andExpect(status().isOk())
+            // tools 段只剩白名单命中的 get_weather（search/get_order 被裁剪）
+            .andExpect(jsonPath("$.tools.length()").value(1))
+            .andExpect(jsonPath("$.tools[0].name").value("get_weather"))
+            .andExpect(jsonPath("$.mcpCount").value(1))
+            .andExpect(jsonPath("$.internalCount").value(0))
+            // sdkInternal 恰为真 SDK 内置（被滤掉的 search/get_order 不再漏入），
+            // 此时 sessionControllable=false 标注为真（内置恒可见）
+            .andExpect(jsonPath("$.sdkInternal.length()").value(2))
+            .andExpect(jsonPath("$.sdkInternal[0].name").value("plan_enter"))
+            .andExpect(jsonPath("$.sdkInternal[0].sessionControllable").value(false))
+            .andExpect(jsonPath("$.sdkInternal[1].name").value("read_file"))
+            .andExpect(jsonPath("$.sdkInternal[1].sessionControllable").value(false))
+            .andExpect(jsonPath("$.sdkInternalCount").value(2));
+
+        // 传给 registry 的剔除集 = 全量业务名集（MCP 可控集 ∪ 自定义集），而非裁剪视图
+        var captor = org.mockito.ArgumentCaptor.forClass(java.util.Set.class);
+        org.mockito.Mockito.verify(internalToolRegistry).listSdkInternalTools(
+            org.mockito.ArgumentMatchers.any(), captor.capture());
+        org.junit.jupiter.api.Assertions.assertEquals(
+            java.util.Set.of("get_weather", "search", "get_order"), captor.getValue());
     }
 
     // ========== /skills?skills= 本轮可用技能列表（session-skill-list-design §6） ==========
