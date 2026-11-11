@@ -875,31 +875,6 @@ public class DebugApiController {
     }
 
     /**
-     * 沙箱绑定清理手动触发（e2e L11 测试钩子，sandbox-pool-opensandbox-design §9.3：
-     * 「短保留窗口 + 触发清理任务（测试钩子）」——@Scheduled cron 凌晨 3 点无法在 e2e 等待）。
-     * 语义与 SessionCleanupService.cleanupSandboxBindings 完全一致（retentionDays 取 query 参数，
-     * e2e 传短窗口），lifecycle 未装配时 409。
-     */
-    @org.springframework.web.bind.annotation.PostMapping("/sandbox-cleanup")
-    public java.util.Map<String, Object> sandboxCleanup(
-            @org.springframework.web.bind.annotation.RequestParam(defaultValue = "7") int retentionDays) {
-        var lifecycle = sandboxLifecycle;
-        var m = new LinkedHashMap<String, Object>();
-        if (lifecycle == null) {
-            m.put("enabled", false);
-            return m;
-        }
-        var cutoff = java.time.Instant.now().minus(java.time.Duration.ofDays(Math.max(0, retentionDays)));
-        int bindings = lifecycle.bindingStore().cleanupExpired(cutoff);
-        int anchors = lifecycle.bindingStore().cleanupEmptyAnchors(cutoff);
-        m.put("enabled", true);
-        m.put("retention_days", retentionDays);
-        m.put("bindings_deleted", bindings);
-        m.put("anchors_deleted", anchors);
-        return m;
-    }
-
-    /**
      * 工作区文件列表（本地 .agentscope/workspace 目录）。
      * 沙箱模式下该目录为静态模板层（投影源），运行时文件（MEMORY.md/memory/）在 KV 中。
      */

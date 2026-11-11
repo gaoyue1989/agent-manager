@@ -228,7 +228,7 @@ public class AgentScopeConfig {
         org.springframework.beans.factory.ObjectProvider<SandboxLifecycleConfig> provider) {
         var cfg = provider != null ? provider.getIfAvailable() : null;
         return cfg != null ? cfg
-            : new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000);
+            : new io.agentmanager.framework.config.SandboxLifecycleConfig(true, "", 5, 60, 20, 2, 1000, false);
     }
 
     /**

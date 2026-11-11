@@ -115,6 +115,27 @@ func mapCreateError(c *gin.Context, err error) {
 	}
 }
 
+// sandboxUnavailableMsg console 用户侧沙箱端点的成员通用提示（issue #297）：面向工作空间
+// 成员，不透出 /settings 运维指引与上游细节；admin 面保留可诊断原文（admin.go mapSandboxError）。
+const sandboxUnavailableMsg = "沙箱管理面暂不可用，请联系平台管理员"
+
+// mapConsoleSandboxError console 用户侧沙箱错误映射（issue #297）：成员无 /settings 入口，
+// 未配置与 SandboxUpstreamError 全变体折叠（含 429/5xx 上游 body 摘录与不可达 502，评审拍板）
+// 为成员通用提示——上游内部细节对成员均不可操作且不应外泄；HTTP 状态码保留
+// （503 / ue.Status），运维仍可从网关/日志排障；其余错误（workspace 404 / DB 500）
+// 走通用映射不变。风格对齐同文件 mapCreateError。
+func mapConsoleSandboxError(c *gin.Context, err error) {
+	var ue *service.SandboxUpstreamError
+	switch {
+	case errors.Is(err, service.ErrSandboxNotConfigured):
+		Fail(c, http.StatusServiceUnavailable, sandboxUnavailableMsg)
+	case errors.As(err, &ue):
+		Fail(c, ue.Status, sandboxUnavailableMsg)
+	default:
+		mapError(c, err)
+	}
+}
+
 // registerConsole 挂载 console 端点（g 已是 /console 组，带 JWTAuth 中间件）。
 func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Image, Label string }) {
 	cg := g
@@ -544,7 +565,9 @@ func registerConsole(g *gin.RouterGroup, core *service.Core, images []struct{ Im
 		}
 		list, err := core.ConsoleSandboxInstances(wsID)
 		if err != nil {
-			mapSandboxError(c, err)
+			// issue #297：成员无 /settings 入口，运维向文案（未配置 503 原文、上游
+			// 401→502 改 API Key 提示、429/5xx 上游摘录）仅在 admin 面透出（mapSandboxError）
+			mapConsoleSandboxError(c, err)
 			return
 		}
 		OK(c, list)

@@ -596,7 +596,7 @@ JVM 注入 `-Dagent.sandbox.lifecycle.grace-floor-seconds=6`（生产 120s）、
 | L8 | 总开关回退 | OFF 实例（SANDBOX_LIFECYCLE_ENABLED=false）同 user 3 会话 | 全部 done（超配额不拒）+ 该实例沙箱 renew 零调用（TTL 旁路） |
 | L9 | 到期重建 | /admin/destroy + SQL 拨 expires_at → 下 turn | ① probe 404 → 懒剔除事件 + 新 sandboxId |
 | L10 | debug 端点 | 在途 turn + 终态后各查 /debug/sandbox-bindings | config 回显（quota/ttl/renew/hold）+ turn_running true→false（双事实源派生）+ registry/events 结构 |
-| L11 | 定时清理 | SQL 注入过期行+虚高计数+老化锚行 → POST /debug/sandbox-cleanup（测试钩子，同 SessionCleanupService 语义） | 过期行删 + count 重算 + 空锚行删 + 重跑幂等 |
+| L11 | 定时清理 | SQL 注入过期行+虚高计数+老化锚行 → POST /debug/sandbox-cleanup（测试钩子，同 SessionCleanupService 语义；仅本组 env-up.sh 注入 `SANDBOX_LIFECYCLE_E2E_HOOKS=true` 注册，其他组/生产默认 404；retentionDays=7 在合法区间 1~365，超界 400） | 过期行删 + count 重算 + 空锚行删 + 重跑幂等 |
 | L12 | 租约硬释放不误判 | sleep 70s（>1min 硬寿命，turn_lease 已消失）+ 同 user 第 2 空闲行 → 新会话触发 ⑤ | 长命令会话不被改绑（updated_at 在途续期判 busy）+ 长命令 turn 正常完成 |
 | L13 | 幽灵占额修正 | SQL 注入 binding_count=9 + 陈旧 PENDING 行（>10min）→ 新会话 acquire | 必须成功（⑤b 重算 + PENDING 回收）+ 计数回归==行数 |
 | L14 | 被抢会话不重连易主沙箱 | L3 之后原会话（同 uid）再发 turn | P3 归属校验拦截 → 降级重建：绑定换新 sandboxId + `sandbox_rebuilt` 换代提示帧（§4.4 T4） |

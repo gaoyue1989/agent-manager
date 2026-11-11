@@ -1,6 +1,7 @@
 package io.agentmanager.framework.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.*;
 
 import java.nio.charset.StandardCharsets;
@@ -11,25 +12,27 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionLogs;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.OutputMessage;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo;
-import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry;
 import com.alibaba.opensandbox.sandbox.domain.services.Commands;
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem;
+
 
 /**
  * tryTranslateExec 输出契约回归（P0-12）：SDK BaseSandboxFilesystem 的探测/读取类 shell
  * 命令模板被确定性翻译为 execd files API 直读。输出是手工对齐的哨兵/格式协议——
  * 错一处即 workspace 模板重复注入/文件误判缺失且全部静默失败，故逐字节钉死：
  * <ul>
- *   <li>read：尾随 \n 剥离 + sed '1,Np' 行截断语义 + __NOT_FOUND__/__EMPTY__ 哨兵（exitCode 0）</li>
+ *   <li>read：尾随 \n 剥离 + sed '1,Np' 行截断语义 + __NOT_FOUND__/__EMPTY__ 哨兵（exitCode 0；
+ *       仅 files API 404 判缺失，其余异常上抛回落——issue #296 收窄）</li>
  *   <li>ls：DIR:/FILE: 行格式、顺序=listDirectory 返回顺序、__NOT_EXISTS__ fail-soft（exitCode 0）</li>
- *   <li>test -e / test -d / mkdir -p 与非模板命令回落真 exec</li>
+ *   <li>test -e / test -d（仅工作区根精确等值，issue #290）/ mkdir -p 与非模板命令回落真 exec</li>
  * </ul>
  * 入口统一走 {@link OpenSandbox#translateForProbe}（生产不调用的公开探针），绕开 exec() 的
  * hydrateForCall 副作用，verify 计数干净。EXEC_TRANSLATE_ENABLED 默认 true，无需额外开关。
@@ -112,8 +115,10 @@ class OpenSandboxExecTranslateTest {
         assertEquals(0, head.exitCode());
         assertEquals("a\n", head.stdout(), "行截断保留行尾换行——错成 \"a\" 即下游逐行解析错位");
 
-        // 读异常（execd 404 等）→ __NOT_FOUND__ 哨兵，exitCode 0（SDK 靠哨兵判断缺失）
-        when(files.readByteArray("missing.md")).thenThrow(new RuntimeException("execd 404"));
+        // 读 404（files API 缺失形态）→ __NOT_FOUND__ 哨兵，exitCode 0（SDK 靠哨兵判断缺失）；
+        // 非 404 异常已由 issue #296 收窄为上抛回落真 exec（OpenSandboxTest X 组覆盖）
+        when(files.readByteArray("missing.md")).thenThrow(new SandboxApiException("HTTP 404 Not Found",
+            null, 404, new SandboxError("UNEXPECTED_RESPONSE", "")));
         var notFound = sandbox.translateForProbe(readTemplate("missing.md", 100));
         assertNotNull(notFound);
         assertEquals(0, notFound.exitCode());
@@ -151,8 +156,10 @@ class OpenSandboxExecTranslateTest {
         // /workspace/ 前缀按工作区相对路径归一
         assertEquals("DIR:notes\t1730000000\nFILE:a.txt\t7\t1730000000", r.stdout());
 
-        // listDirectory 异常 → __NOT_EXISTS__ fail-soft（exitCode 0，SDK 靠哨兵判断目录缺失）
-        when(files.listDirectory("/gone")).thenThrow(new RuntimeException("execd 404"));
+        // listDirectory 404 → __NOT_EXISTS__ fail-soft（exitCode 0，SDK 靠哨兵判断目录缺失）；
+        // 非 404 异常上抛回落真 exec（issue #296 收窄，OpenSandboxTest X 组覆盖）
+        when(files.listDirectory("/gone")).thenThrow(new SandboxApiException("HTTP 404 Not Found",
+            null, 404, new SandboxError("UNEXPECTED_RESPONSE", "")));
         var missing = sandbox.translateForProbe(lsTemplate("/gone"));
         assertNotNull(missing);
         assertEquals(0, missing.exitCode());
@@ -198,19 +205,17 @@ class OpenSandboxExecTranslateTest {
     }
 
     @Test
-    void mkdirTemplateShouldTranslateToCreateDirectories() throws Exception {
+    void mkdirCommandShouldFallBackToRealExec() throws Exception {
+        // issue #290：P_MKDIR 宽匹配（^mkdir -p (.+)$）已删除——"mkdir -p a b" 多目录语义
+        // 与 harness move 模板（mkdir -p $(dirname 'x') && mv 'x' 'y'）会被误翻译成
+        // createDirectories 且虚报 exit 0，故 mkdir 一律回落真 exec
         var osb = mock(Sandbox.class);
         var files = mockOsb(osb);
         var sandbox = new OpenSandbox(state(), osb, options(), null, null);
 
-        var r = sandbox.translateForProbe("mkdir -p /workspace");
-
-        assertNotNull(r, "mkdir -p 模板必须命中翻译");
-        assertEquals(0, r.exitCode());
-        var captor = ArgumentCaptor.forClass(List.class);
-        verify(files).createDirectories(captor.capture());
-        var entry = (WriteEntry) captor.getValue().get(0);
-        assertEquals("/workspace", entry.getPath());
-        assertEquals(493, entry.getMode(), "目录 mode 须为 0755=493（对齐 shell mkdir -p 默认权限）");
+        assertNull(sandbox.translateForProbe("mkdir -p /workspace"), "mkdir -p 必须回落真 exec（返回 null）");
+        assertNull(sandbox.translateForProbe("mkdir -p a b"));
+        verify(files, never()).createDirectories(anyList());
+        verify(osb.commands(), never()).run(anyString());
     }
 }

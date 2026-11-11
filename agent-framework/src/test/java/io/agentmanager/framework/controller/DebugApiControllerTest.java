@@ -753,7 +753,8 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.logs[0]").value("err1"));
     }
 
-    // ---------- sandbox-bindings / sandbox-cleanup（PR-D §4.8 可观测面 + L11 测试钩子） ----------
+    // ---------- sandbox-bindings（PR-D §4.8 可观测面；写钩子 /debug/sandbox-cleanup 已改
+    // SandboxCleanupHookController 条件注册（issue #293），契约由其专项测试覆盖 ----------
 
     @Autowired
     private DebugApiController debugApiController;
@@ -780,7 +781,7 @@ class DebugApiControllerTest {
         var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
         org.springframework.test.util.ReflectionTestUtils.setField(debugApiController, "sandboxLifecycle", lifecycle);
         when(lifecycle.config()).thenReturn(new io.agentmanager.framework.config.SandboxLifecycleConfig(
-            true, "pool-x", 5, 60, 20, 2, 1000));
+            true, "pool-x", 5, 60, 20, 2, 1000, false));
         when(lifecycle.graceSeconds()).thenReturn(180);
         when(lifecycle.registrySize()).thenReturn(2);
         when(lifecycle.registryActiveTurnCount()).thenReturn(1);
@@ -830,37 +831,7 @@ class DebugApiControllerTest {
             .andExpect(jsonPath("$.events[0].type").value("acquire"));
     }
 
-    @Test
-    void sandboxCleanupShouldClampNegativeRetentionAndReportDisabledWhenLifecycleMissing() throws Exception {
-        // lifecycle 未装配 → enabled=false（409 语义由 HTTP 层承担前先看 body 契约）
-        org.springframework.test.util.ReflectionTestUtils.setField(
-            debugApiController, "sandboxLifecycle", null);
-        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
-                .post("/debug/sandbox-cleanup"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.enabled").value(false));
-
-        // retentionDays=-1 → Math.max(0,·) 钳 0：cutoff=now（0 天保留窗，e2e L11 短窗口同款入口）
-        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(debugApiController, "sandboxLifecycle", lifecycle);
-        var store = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxBindingStore.class);
-        when(lifecycle.bindingStore()).thenReturn(store);
-        when(store.cleanupExpired(org.mockito.ArgumentMatchers.any(java.time.Instant.class))).thenReturn(3);
-        when(store.cleanupEmptyAnchors(org.mockito.ArgumentMatchers.any(java.time.Instant.class))).thenReturn(1);
-
-        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
-                .post("/debug/sandbox-cleanup").param("retentionDays", "-1"))
-            .andExpect(status().isOk())
-            .andExpect(jsonPath("$.enabled").value(true))
-            .andExpect(jsonPath("$.retention_days").value(-1))
-            .andExpect(jsonPath("$.bindings_deleted").value(3))
-            .andExpect(jsonPath("$.anchors_deleted").value(1));
-
-        var cutoffCap = org.mockito.ArgumentCaptor.forClass(java.time.Instant.class);
-        org.mockito.Mockito.verify(store).cleanupExpired(cutoffCap.capture());
-        var now = java.time.Instant.now();
-        assertTrue(!cutoffCap.getValue().isAfter(now.plusSeconds(60)) && !cutoffCap.getValue().isBefore(now.minusSeconds(60)),
-            "负数 retentionDays 必须钳 0（cutoff≈now），实测 cutoff=" + cutoffCap.getValue());
-        org.mockito.Mockito.verify(store).cleanupEmptyAnchors(cutoffCap.capture());
-    }
+    // POST /debug/sandbox-cleanup 用例已随 issue #293 端点迁移删除：
+    // 404 默认不注册钉在 SandboxCleanupHookControllerNotRegisteredTest，越界 400/enabled=false
+    // 契约钉在 SandboxCleanupHookControllerTest
 }
