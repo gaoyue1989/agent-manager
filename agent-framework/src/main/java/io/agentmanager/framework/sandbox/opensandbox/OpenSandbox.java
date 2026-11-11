@@ -27,6 +27,8 @@ import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.layout.WorkspaceEntry;
 import io.agentscope.harness.agent.sandbox.layout.WorkspaceProjectionEntry;
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
+
 /**
  * OpenSandbox 沙箱运行时：包装 SDK Sandbox 句柄，
  * 实现 AgentScope AbstractBaseSandbox 的文件/命令执行契约。
@@ -424,6 +426,7 @@ public class OpenSandbox extends AbstractBaseSandbox
     // 串行占满整个 turn。本翻译器把确定性模板命令改写为 execd files API 直读（readByteArray/
     // listDirectory 递归），读的是容器同一份实时状态——无缓存无失效问题，正确性不依赖 revision。
     // 模板不匹配/翻译异常一律回落真 exec（SDK 版本升级改模板时安全降级）。
+    // 翻译中非 404 异常同样回落（2026-11 issue #296：此前 translate* 内部吞异常致回落对 API 错误从不生效）。
     // 开关 SANDBOX_EXEC_TRANSLATE（默认 true）。
 
     private static final boolean EXEC_TRANSLATE_ENABLED =
@@ -490,12 +493,65 @@ public class OpenSandbox extends AbstractBaseSandbox
             // createDirectories——mv 永不执行、目录名成垃圾字面量、还虚报 exit 0。
             // 删除后 "mkdir -p ..." 一律回落真 exec，恢复 shell 原生语义
         } catch (Exception e) {
-            // 翻译失败回落真 exec（fail-soft，行为与不翻译一致）
-            log.debug("[sandbox-open] exec translate missed ({}): {}", e.getMessage(),
+            // 翻译层仅将 execd files API 404 判定为缺失（isPathMissing）；其余异常
+            // （瞬时故障/连接失败/超时）回落真 exec = 既定 fail-soft——issue #296 修复后
+            // 本 catch 从「永不触发的死路径」变为真实异常回落路径，WARN 便于归因
+            log.warn("[sandbox-open] exec translate failed, falling back to real exec ({}: kind={}, msg={}): {}",
+                e.getClass().getSimpleName(), SandboxFailureClassifier.kindOf(e), e.getMessage(),
                 command.length() > 80 ? command.substring(0, 80) : command);
             return null;
         }
         return null;
+    }
+
+    /**
+     * execd files API「路径缺失」判据（2026-11 issue #296；评审 g1 修正拓扑表述）：
+     * HTTP 404 且响应体非 sandbox-not-found 形态才映射为缺失哨兵
+     * （__NOT_FOUND__/__NOT_EXISTS__），其余异常向上抛、交 {@link #tryTranslateExec}
+     * 外层 catch 回落真 exec。评选依据：
+     * <ul>
+     *   <li>① files 请求的实际拓扑：客户端 useServerProxy(true)（OpenSandboxClient.java
+     *       :116-117），经 server 代理转发（/v1/sandboxes/{id}/proxy/{n}/...，e2e mock
+     *       server.mjs:322-326 对齐录制件形态），并非 execd 容器直连。因此 404 有两个来源，
+     *       需按响应体区分：(a) 代理转发至 execd 的路径判定（活沙箱路径缺失；mock 对
+     *       files/download 与 directories/list 缺失返回<b>空 body</b> 404，
+     *       server.mjs:356/:363）→ 判缺失；(b) 代理自身死沙箱分支（body
+     *       {@code {"message":"sandbox not found"}}，server.mjs:325-326）→ <b>不判缺失</b>，
+     *       向上抛回落真 exec——否则死沙箱（TTL 过期/故障态）的探测被吞成假缺失，且与
+     *       同 turn 真 exec 回落路径的「沙箱不可达」报错矛盾；回落后由 runCommandGuarded
+     *       连续失败熔断收口为一致的故障信号；</li>
+     *   <li>② 仍不采用 SDK ExceptionConverterKt.isFileNotFound（error.code==FILE_NOT_FOUND，
+     *       依赖响应体解析）——空 body 下 code 为 UNEXPECTED_RESPONSE、该判据失配会令
+     *       X 组路径缺失探测回落真 exec，而 read 探测模板 {@code if [ ! -f ...} 不在 mock
+     *       EXEC_WHITELIST（server.mjs:47）→ CommandExecError 126，e2e 回归；</li>
+     *   <li>③ 与 SandboxEnvFile.notFound 同型（sandbox 生命周期 404/410 惯例）——其中的 410
+     *       是控制面 sandbox 资源态，不纳入。</li>
+     * </ul>
+     *
+     * <p>残留风险（形态匹配局限）：sandbox-not-found 字样取自 mock 对真实 server 录制件的
+     * 对齐声明（server.mjs:322-326 注释），未在真实 server 上实证。若真实死沙箱 404 的
+     * body 不含该字样，判据退化为「404 即缺失」= 评审前行为（影响有界：下轮 probeAlive
+     * 404/410 → DEAD 重建，OpenSandboxClient.java:312-314）；反向误伤（execd 路径缺失的
+     * 404 body 恰含该字样）仅导致多回落一次真 exec（活沙箱上结果仍正确，只多付一次 exec
+     * 时延）——两个方向的失败模式均安全。
+     */
+    private static boolean isPathMissing(Throwable e) {
+        if (!(e instanceof SandboxApiException api)) {
+            return false;
+        }
+        Integer status = api.getStatusCode();
+        if (status == null || status != 404) {
+            return false;
+        }
+        // server 代理层死沙箱 404（body 命中 "sandbox not found"）不是路径缺失：
+        // 交调用方向上抛回落真 exec（runCommandGuarded 熔断给出一致故障信号）
+        return !isSandboxNotFoundBody(api.getResponseBody());
+    }
+
+    /** 404 响应体是否为 server 代理死沙箱形态（{@code {"message":"sandbox not found"}}，大小写不敏感） */
+    private static boolean isSandboxNotFoundBody(String responseBody) {
+        return responseBody != null
+            && responseBody.toLowerCase(java.util.Locale.ROOT).contains("sandbox not found");
     }
 
     /** read 翻译：缺文件 → __NOT_FOUND__；空文件 → __EMPTY__；否则按 sed '1,Np' 语义取行 */
@@ -503,8 +559,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         byte[] bytes;
         try {
             bytes = osbSandbox.files().readByteArray(relPath);
-        } catch (Exception e) {
-            return new ExecResult(0, "__NOT_FOUND__", "", false);
+        } catch (SandboxApiException e) {
+            // 仅 404 判定为确定缺失；其余异常向上抛，交外层回落真 exec（fail-soft，issue #296）
+            if (isPathMissing(e)) {
+                return new ExecResult(0, "__NOT_FOUND__", "", false);
+            }
+            throw e;
         }
         if (bytes == null || bytes.length == 0) {
             return new ExecResult(0, "__EMPTY__", "", false);
@@ -537,7 +597,13 @@ public class OpenSandbox extends AbstractBaseSandbox
     /** glob 翻译：递归列 ROOT 下匹配 PAT 的 regular file，按路径排序，输出 path\tsize\tmtime 行 */
     private ExecResult translateGlob(String root, String pattern) throws Exception {
         var files = new java.util.TreeSet<FileEntry>((a, b) -> a.rel().compareTo(b.rel()));
-        walkFiles(root, pattern, files, 0);
+        var truncated = new AtomicBoolean(false);
+        walkFiles(root, pattern, files, 0, truncated);
+        // 截断可观测性（issue #296）：每次 translateGlob 仅一条 WARN，避免深树逐分支刷屏
+        if (truncated.get()) {
+            log.warn("[sandbox-open] glob translate truncated (root={}, depthLimit=8, entryLimit=5000, collected={})",
+                root, files.size());
+        }
         var sb = new StringBuilder();
         for (FileEntry e : files) {
             if (!sb.isEmpty()) {
@@ -553,8 +619,12 @@ public class OpenSandbox extends AbstractBaseSandbox
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
         try {
             entries = osbSandbox.files().listDirectory(dir);
-        } catch (Exception e) {
-            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+        } catch (SandboxApiException e) {
+            // 仅 404 判定为确定缺失；其余异常向上抛，交外层回落真 exec（fail-soft，issue #296）
+            if (isPathMissing(e)) {
+                return new ExecResult(0, "__NOT_EXISTS__", "", false);
+            }
+            throw e;
         }
         if (entries == null) {
             return new ExecResult(0, "__NOT_EXISTS__", "", false);
@@ -581,17 +651,25 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /** test -e 翻译：readByteArray（文件）/listDirectory（目录）任一成功即存在 */
-    private boolean translateExists(String relPath) {
+    private boolean translateExists(String relPath) throws Exception {
         try {
             osbSandbox.files().readByteArray(relPath);
             return true;
-        } catch (Exception ignoreFile) {
-            try {
-                var entries = osbSandbox.files().listDirectory(relPath);
-                return entries != null;
-            } catch (Exception ignoreDir) {
+        } catch (SandboxApiException e) {
+            // 404 = 确定不是文件 → 继续目录探测；其余异常向上抛，交外层回落真 exec（issue #296）
+            if (!isPathMissing(e)) {
+                throw e;
+            }
+        }
+        try {
+            var entries = osbSandbox.files().listDirectory(relPath);
+            return entries != null;
+        } catch (SandboxApiException e) {
+            // 两层均 404 = 确定缺失（false）；其余异常向上抛回落真 exec（test -e / test -d）
+            if (isPathMissing(e)) {
                 return false;
             }
+            throw e;
         }
     }
 
@@ -601,16 +679,29 @@ public class OpenSandbox extends AbstractBaseSandbox
         return at == null ? 0 : at.toEpochSecond();
     }
 
-    /** 递归收集 relPath 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御） */
-    private void walkFiles(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth) {
+    /**
+     * 递归收集 relPath 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御）。
+     * 截断经 {@code truncated} 出参上报，由 translateGlob 统一告警。
+     *
+     * <p>异常语义（issue #296）：listDirectory 404 = 子树在遍历期间不存在，视作空目录
+     * （正常边界，与真 find 对缺失目录的「静默空输出」一致）；其余异常向上抛、交
+     * tryTranslateExec 回落真 exec——瞬时故障下不得让 glob_files 拿到假空结果
+     * （真 find 无上界，故障轮回落恰好消解「翻译上界 vs find 无上界」的静默不一致）。
+     */
+    private void walkFiles(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth,
+                           AtomicBoolean truncated) throws Exception {
         if (depth > 8 || out.size() > 5000) {
+            truncated.set(true);
             return;
         }
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
         try {
             entries = osbSandbox.files().listDirectory(relDir);
-        } catch (Exception e) {
-            return;
+        } catch (SandboxApiException e) {
+            if (isPathMissing(e)) {
+                return;
+            }
+            throw e;
         }
         if (entries == null) {
             return;
@@ -625,7 +716,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                 continue;
             }
             if ("directory".equalsIgnoreCase(e.getType()) || "dir".equalsIgnoreCase(e.getType())) {
-                walkFiles(rel, pattern, out, depth + 1);
+                walkFiles(rel, pattern, out, depth + 1, truncated);
             } else if (globMatch(pattern, leaf(rel))) {
                 out.add(new FileEntry(rel, Math.max(e.getSize(), 0), epochSeconds(e)));
             }
