@@ -16,8 +16,7 @@ export default function SandboxInstancesPage() {
 
   const load = useCallback(async (silent = false) => {
     if (!ws) return;
-    if (!silent) setErr("");
-    setLoading(true);
+    if (!silent) { setErr(""); setLoading(true); }
     try {
       setRows(await api.console.sandboxes.list(ws));
       setErr("");

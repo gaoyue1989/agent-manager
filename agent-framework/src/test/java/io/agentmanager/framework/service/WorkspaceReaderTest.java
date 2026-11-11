@@ -490,6 +490,176 @@ class WorkspaceReaderTest {
         assertNull(store.get(skillNs(USER), "/off/.disabled"));
     }
 
+    // ===== first-reasoning（D1 读穿辅助 / D2 单次枚举 / D3 bundle+合并写） =====
+
+    /**
+     * D2 单次枚举 + 客户端过滤：search 前缀会把 skills 子命名空间行一并带出，
+     * 只有 MEMORY.md / memory/一级.md 进入结果；非 .md、子目录、元数据段全部过滤。
+     */
+    @Test
+    void readRuntimeFilesShouldFilterOutNonRuntimeKeysInSingleEnum() {
+        var store = store();
+        seedMemory(store, USER, "# MEMORY\n- long term");
+        var fs = new RemoteFilesystem(store, List.of(USER));
+        var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
+        // 噪声行：skills 子命名空间 / 非 .md / memory 子目录 / 元数据段（生产 search 均会返回）
+        fs.write(ctx, "skills/pdf/SKILL.md", "# skill");
+        fs.write(ctx, "memory/notes.txt", "not markdown");
+        fs.write(ctx, "memory/sub/deep.md", "nested");
+
+        var files = new WorkspaceReader(distributedStore(store)).readRuntimeFiles(USER);
+
+        assertEquals(java.util.Set.of("MEMORY.md", "memory/2026-08-12.md"), files.keySet(),
+            "只保留 MEMORY.md 与 memory/ 一级 .md（其余为 search 前缀噪声）");
+    }
+
+    /** D1 点查：readMemoryFile 命中/未命中/记忆关闭三态（seed 写裸 userId 命名空间，reader 同构） */
+    @Test
+    void readMemoryFileShouldPointQueryAndRespectMemorySwitch() {
+        var store = store();
+        seedMemory(store, USER, "# MEMORY\n- long term");
+        var reader = new WorkspaceReader(distributedStore(store));
+
+        assertEquals("# MEMORY\n- long term", reader.readMemoryFile(USER, "MEMORY.md"));
+        assertEquals("## 2026-08-12\n- fact one", reader.readMemoryFile(USER, "memory/2026-08-12.md"));
+        assertNull(reader.readMemoryFile(USER, "memory/absent.md"), "不存在的记忆文件返回 null");
+        assertNull(reader.readMemoryFile(USER, "skills/pdf/SKILL.md"), "非记忆路径必须拒绝（防越权点查）");
+
+        var disabled = new WorkspaceReader(distributedStore(store), AGENT, false);
+        assertNull(disabled.readMemoryFile(USER, "MEMORY.md"), "记忆关闭时读穿回落必须短路");
+    }
+
+    /** D1 清单列举：ls/glob 回落用的 path→size 映射 */
+    @Test
+    void listRuntimeFilesShouldExposePathAndSizeOnly() {
+        var store = store();
+        seedMemory(store, USER, "# MEMORY");
+        var reader = new WorkspaceReader(distributedStore(store));
+
+        var listing = reader.listRuntimeFiles(USER);
+
+        assertTrue(listing.containsKey("MEMORY.md"));
+        assertEquals("# MEMORY".getBytes(StandardCharsets.UTF_8).length,
+            listing.get("MEMORY.md").intValue());
+        assertTrue(new WorkspaceReader(distributedStore(store), null, false)
+            .listRuntimeFiles(USER).isEmpty(), "记忆关闭时清单为空");
+    }
+
+    /** D3 bundle：栅栏键（.deleted/.disabled）与技能文件同枚举归类，内容随行取回 */
+    @Test
+    void readUserSkillBundleShouldClassifyFilesAndFencesInOneEnum() {
+        var store = store();
+        var reader = readerWithAgent(store);
+        reader.writeUserSkillFile(USER, "demo-a", "SKILL.md", "# a");
+        reader.writeUserSkillFile(USER, "demo-a", "scripts/hello.sh", "echo hi");
+        reader.writeUserSkillFile(USER, "gone", "SKILL.md", "# gone");
+        reader.markUserSkillDeleted(USER, "gone");
+        reader.writeUserSkillFile(USER, "off", "SKILL.md", "# off");
+        reader.markUserSkillDisabled(USER, "off");
+
+        var bundles = reader.readUserSkillBundle(USER);
+
+        assertEquals(java.util.Set.of("demo-a", "gone", "off"), bundles.keySet());
+        assertTrue(bundles.get("demo-a").files().containsKey("SKILL.md"));
+        assertFalse(bundles.get("demo-a").deleted());
+        assertTrue(bundles.get("gone").deleted(), "删除标记必须归类为 tombstone");
+        assertTrue(bundles.get("off").disabled(), "禁用标记必须归类为 disabled");
+        // 栅栏键是元数据段：不得混进技能文件集
+        assertFalse(bundles.get("gone").files().containsKey(".deleted"));
+    }
+
+    /** D3 合并单批写：两个技能合并为一次 files().write，contentSink 回填全部写入路径 */
+    @Test
+    @SuppressWarnings("unchecked")
+    void materializeUserSkillsShouldBatchWriteAllSkillsInOneCall() {
+        var store = store();
+        var reader = readerWithAgent(store);
+        reader.writeUserSkillFile(USER, "pdf", "SKILL.md", "# pdf");
+        reader.writeUserSkillFile(USER, "xlsx", "SKILL.md", "# xlsx");
+
+        var sandbox = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        var files = org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class);
+        org.mockito.Mockito.when(sandbox.files()).thenReturn(files);
+        var cap = org.mockito.ArgumentCaptor.forClass(java.util.List.class);
+        org.mockito.Mockito.doNothing().when(files).write(cap.capture());
+        var sinkPaths = new java.util.ArrayList<String>();
+
+        int materialized = reader.materializeUserSkills(sandbox, USER, (path, content) -> sinkPaths.add(path));
+
+        assertEquals(2, materialized);
+        org.mockito.Mockito.verify(files, org.mockito.Mockito.times(1))
+            .write(org.mockito.ArgumentMatchers.anyList());
+        var paths = ((java.util.List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>)
+            cap.getValue()).stream().map(e -> e.getPath()).toList();
+        assertEquals(java.util.Set.of(
+                "/workspace/skills/pdf/SKILL.md", "/workspace/skills/xlsx/SKILL.md"),
+            new java.util.HashSet<>(paths), "两个技能必须合并进同一次 write");
+        assertEquals(java.util.Set.of("/workspace/skills/pdf/SKILL.md", "/workspace/skills/xlsx/SKILL.md"),
+            new java.util.HashSet<>(sinkPaths), "contentSink 必须回填全部写入路径（探针直供）");
+    }
+
+    /** D3 失败回落：合并写抛异常时逐技能重试，成功者计数、失败者告警不中断 */
+    @Test
+    @SuppressWarnings("unchecked")
+    void materializeUserSkillsShouldFallBackPerSkillWhenBatchWriteFails() {
+        var store = store();
+        var reader = readerWithAgent(store);
+        reader.writeUserSkillFile(USER, "ok-a", "SKILL.md", "# a");
+        reader.writeUserSkillFile(USER, "ok-b", "SKILL.md", "# b");
+
+        var sandbox = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        var files = org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class);
+        org.mockito.Mockito.when(sandbox.files()).thenReturn(files);
+        // 第一次（合并全量）失败，其后（逐技能）成功
+        org.mockito.Mockito.doThrow(new RuntimeException("execd payload too large"))
+            .doNothing().when(files).write(org.mockito.ArgumentMatchers.anyList());
+
+        int materialized = reader.materializeUserSkills(sandbox, USER);
+
+        assertEquals(2, materialized, "回落逐技能写后两技能都应物化成功");
+        org.mockito.Mockito.verify(files, org.mockito.Mockito.times(3))
+            .write(org.mockito.ArgumentMatchers.anyList());
+    }
+
+    /** D3 门控：无 SKILL.md 的纯资源目录不算技能，不得物化进容器（对齐旧枚举路径语义） */
+    @Test
+    void materializeUserSkillsShouldSkipResourceOnlyDirs() {
+        var store = store();
+        var reader = readerWithAgent(store);
+        reader.writeUserSkillFile(USER, "real", "SKILL.md", "# real");
+        reader.writeUserSkillFile(USER, "resource-only", "scripts/x.sh", "echo x");
+
+        var bundles = reader.readUserSkillBundle(USER);
+        assertTrue(bundles.get("resource-only").files().containsKey("scripts/x.sh"),
+            "bundle 枚举仍带出资源文件（供管理面读取），门控在物化侧");
+
+        var sandbox = org.mockito.Mockito.mock(com.alibaba.opensandbox.sandbox.Sandbox.class);
+        var files = org.mockito.Mockito.mock(
+            com.alibaba.opensandbox.sandbox.domain.services.Filesystem.class);
+        org.mockito.Mockito.when(sandbox.files()).thenReturn(files);
+        var cap = org.mockito.ArgumentCaptor.forClass(java.util.List.class);
+        org.mockito.Mockito.doNothing().when(files).write(cap.capture());
+
+        assertEquals(1, reader.materializeUserSkills(sandbox, USER));
+        var paths = ((java.util.List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>)
+            cap.getValue()).stream().map(e -> e.getPath()).toList();
+        assertTrue(paths.stream().noneMatch(p -> p.contains("resource-only")),
+            "无 SKILL.md 的目录不得物化进容器");
+    }
+
+    /**
+     * bundle 枚举失败必须显式抛（与 listUserSkills 同口径）：栅栏漏读会把已删技能
+     * 重新物化进容器，「枚举失败」不得降级成「无技能」。
+     */
+    @Test
+    void readUserSkillBundleShouldThrowWhenEnumerationFails() {
+        var store = new SearchFailingStore(1);
+        var reader = readerWithAgent(store);
+        assertThrows(IllegalStateException.class, () -> reader.readUserSkillBundle(USER));
+    }
+
     /** delete 委托真实 InMemoryStore，但 delete 抛异常（store 故障） */
     private static final class DeleteFailingStore
             implements io.agentscope.harness.agent.filesystem.remote.store.BaseStore {

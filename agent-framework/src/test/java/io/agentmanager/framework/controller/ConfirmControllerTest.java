@@ -317,6 +317,31 @@ class ConfirmControllerTest {
     }
 
     @Test
+    void confirmStreamShouldUnregisterLifecycleOnSetupFailure() {
+        // 4a34a41 回滚回归钉子（confirm 形态）：恢复流构建是同步的且会因用户输入抛
+        // （未知 tool_call_id → buildResumeMsg IllegalArgumentException；对 confirmContextStore
+        // consume 打桩无效——resolveConfirmContext 内部 catch 吞掉不外抛）。
+        // catch 段必须注销 onTurnStart（恢复段重注册）——漏一行 onTurnEnd 即 activeTurns
+        // 条目无 TTL 泄漏，sweep 持续按 turn 注册续期把应回收沙箱多续到超龄
+        stubPendingStoreRow();
+        when(turnLeaseStore.acquire(eq("t1"), any())).thenReturn("tok-cf");
+        var lifecycle = mock(io.agentmanager.framework.sandbox.opensandbox.SandboxLifecycleManager.class);
+        var controller = new ConfirmController(runtimeService, turnLeaseStore, eventBus,
+            sessionUserStore, mcpToolRegistrar, remoteConfirmBridge);
+        org.springframework.test.util.ReflectionTestUtils.setField(controller, "sandboxLifecycle", lifecycle);
+
+        var frames = controller.confirmStream("t1", null, null, new ConfirmController.ConfirmRequest(List.of(
+                Map.of("tool_call_id", "call-unknown", "confirmed", true))))
+            .collectList().block(Duration.ofSeconds(10));
+
+        assertNotNull(frames, "恢复流构建失败也应收流（abortSetup 回错误帧）");
+        assertTrue(frames.stream().anyMatch(f -> f.data() != null && f.data().contains("Unknown tool_call_id")),
+            "未知 tool_call_id 应同步抛并回 error 帧: " + frames);
+        verify(lifecycle).onTurnStart("t1");
+        verify(lifecycle).onTurnEnd("t1");
+    }
+
+    @Test
     void confirmStreamShouldRegisterIntentAndStopWatcher() {
         // confirm 恢复段是新的执行段：必须像 /threads/chat 一样登记意图（抢锁前）与
         // 停止监视（抢锁后），并在终态注销/清理——否则该段 stop 会 409 或投递不到中断。

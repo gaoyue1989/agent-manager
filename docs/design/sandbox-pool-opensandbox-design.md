@@ -433,7 +433,8 @@ HTTP 409
 `GET /api/v1/console/workspaces/:ws/sandboxes`（JWT + resolveWorkspace）：
 
 - 取该 ws 全部服务的 k8s 名（既有 workspace service 聚合），转发 `GET /v1/sandboxes` 后按 `metadata.service ∈ {服务名集合}` 过滤（框架 create 时注入的 metadata，§4.2 ③）；
-- 只读：id / state / metadata.service / metadata.session_id / expiresAt / createdAt；无任何操作端点。
+- 只读：id / state / metadata.service / metadata.session_id / expiresAt / createdAt；无任何操作端点；
+- 错误文案（issue #297）：console 侧未配置 / 上游错误（`SandboxUpstreamError` 全变体，含 429/5xx body 摘录与不可达 502）折叠为成员通用提示「沙箱管理面暂不可用，请联系平台管理员」（HTTP 状态码保留，运维仍可从网关/日志排障）——成员无 `/settings` 入口且上游细节不应外泄；admin 侧保留 §5.1 映射矩阵的可诊断原文（`/settings` 指引等）。
 
 ### 5.4 合规声明
 

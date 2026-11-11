@@ -148,6 +148,13 @@ public class WorkspaceReader {
     /**
      * 从 KV 读取某用户的运行时文件（MEMORY.md + memory/*.md）。
      * 返回相对路径 → 内容字节。
+     *
+     * <p><b>单次命名空间枚举（first-reasoning D2）</b>：历史实现为 1 read + 1 ls + 每文件
+     * 1 read（26 文件 = 27 次往返，≈24MB），其中 ls 内部已是全命名空间扫描。本实现直接走
+     * 一次 {@code baseStore.search} 大页枚举（分页直到取尽，内容随行返回），客户端按
+     * {@code MEMORY.md} 精确 / {@code memory/一级.md} 前缀过滤——search 的
+     * {@code namespace_path LIKE 'ns%'} 前缀会把 {@code /skills} 子命名空间行一并带出，
+     * 必须过滤（枚举失败仍按旧行为 warn 后返回已读部分，不阻塞注入）。
      */
     public Map<String, byte[]> readRuntimeFiles(String userId) {
         // 记忆总开关关闭：直接返回空文件集（调用方 OpenSandbox.injectRuntimeFilesIfNeeded
@@ -158,33 +165,146 @@ public class WorkspaceReader {
         }
         Map<String, byte[]> files = new LinkedHashMap<>();
         var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
-        var ctx = RuntimeContext.builder().userId(safeUserId).build();
         try {
-            var fs = new RemoteFilesystem(baseStore, namespaceFor(safeUserId));
-
-            // 直接 read 判断存在（exists() 对相对路径返回 false，不可靠）
-            var memoryRead = fs.read(ctx, MEMORY_FILE, 0, -1);
-            if (memoryRead.isSuccess() && memoryRead.fileData() != null && memoryRead.fileData().content() != null) {
-                files.put(MEMORY_FILE, memoryRead.fileData().content().getBytes(StandardCharsets.UTF_8));
-            }
-
-            var ls = fs.ls(ctx, "/" + MEMORY_DIR);
-            if (ls.isSuccess()) {
-                for (var info : ls.entries()) {
-                    // RemoteFilesystem.ls 返回前导 "/" 的完整相对路径，read 需去掉
-                    var rel = info.path().startsWith("/") ? info.path().substring(1) : info.path();
-                    if (rel.endsWith(".md")) {
-                        var read = fs.read(ctx, rel, 0, -1);
-                        if (read.isSuccess() && read.fileData() != null && read.fileData().content() != null) {
-                            files.put(rel, read.fileData().content().getBytes(StandardCharsets.UTF_8));
-                        }
-                    }
+            for (var item : searchRuntimeItems(safeUserId)) {
+                var rel = normalizeItemKey(item.key());
+                // 不做元数据段过滤：旧 ls+read 路径对 memory/.hidden.md 等隐藏键照常注入，
+                // isRuntimeFileKey 的形态判定已足够（skills 前缀噪声在 key 形态上被排除）
+                if (!isRuntimeFileKey(rel)) {
+                    continue;
+                }
+                var content = contentOf(item);
+                if (content != null) {
+                    files.put(rel, content.getBytes(StandardCharsets.UTF_8));
                 }
             }
         } catch (Exception e) {
             log.warn("Failed to read runtime files for user {}: {}", userId, e.getMessage());
         }
         return files;
+    }
+
+    /**
+     * 点查单个记忆文件（first-reasoning D1 读穿回落专用）。
+     *
+     * <p>必须用 {@code baseStore.get} 主键点查而非 search：search 是
+     * {@code namespace_path LIKE 'ns%'} 前缀扫描，会把 {@code /skills} 子命名空间整族行
+     * （含内容）拖过 JDBC——读穿模式下每次记忆探针回落都走这里，扫描成本不可接受
+     * （{@code OpenSandbox} 注释记载的「L4 大时 memory 命名空间扫描 ≈1.5s/call」即同源）。
+     *
+     * @param relPath 归一化相对路径（{@code MEMORY.md} 或 {@code memory/x.md}）
+     * @return 内容；记忆关闭 / 用户未绑 / 文件不存在 / 读取异常返回 null
+     */
+    public String readMemoryFile(String userId, String relPath) {
+        if (!memoryEnabled || userId == null || userId.isBlank()
+                || relPath == null || relPath.isBlank() || !isRuntimeFileKey(relPath)) {
+            return null;
+        }
+        var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+        var namespace = namespaceFor(safeUserId);
+        // key 形态防御：框架 write 原样落 key，历史数据可能带/不带前导斜杠，两种形态都试
+        for (var key : new String[]{"/" + relPath, relPath}) {
+            try {
+                var item = baseStore.get(namespace, key);
+                var content = item == null ? null : contentOf(item);
+                if (content != null) {
+                    return content;
+                }
+            } catch (Exception e) {
+                log.warn("read_memory_file: failed for user {} path {}: {}", safeUserId, relPath, e.getMessage());
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 列举某用户的运行时文件清单（first-reasoning D1 读穿 ls/glob 回落专用）。
+     *
+     * @return 相对路径 → 字节大小（仅 MEMORY.md 与 memory/ 一级 .md）
+     */
+    public Map<String, Integer> listRuntimeFiles(String userId) {
+        Map<String, Integer> listing = new LinkedHashMap<>();
+        if (!memoryEnabled || userId == null || userId.isBlank()) {
+            return listing;
+        }
+        var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+        try {
+            for (var item : searchRuntimeItems(safeUserId)) {
+                var rel = normalizeItemKey(item.key());
+                if (!isRuntimeFileKey(rel)) {
+                    continue;
+                }
+                var content = contentOf(item);
+                listing.put(rel, content == null ? 0 : content.getBytes(StandardCharsets.UTF_8).length);
+            }
+        } catch (Exception e) {
+            log.warn("list_runtime_files: failed for user {}: {}", safeUserId, e.getMessage());
+        }
+        return listing;
+    }
+
+    /** 运行时命名空间全量分页枚举（search 内容随行返回；调用方自行过滤 skills 子命名空间行） */
+    private List<io.agentscope.harness.agent.filesystem.remote.store.StoreItem> searchRuntimeItems(
+            String safeUserId) {
+        var namespace = namespaceFor(safeUserId);
+        var items = new ArrayList<io.agentscope.harness.agent.filesystem.remote.store.StoreItem>();
+        final int pageSize = 500;
+        int offset = 0;
+        while (true) {
+            var page = baseStore.search(namespace, pageSize, offset);
+            if (page == null || page.isEmpty()) {
+                break;
+            }
+            items.addAll(page);
+            if (page.size() < pageSize) {
+                break;
+            }
+            offset += page.size();
+        }
+        return items;
+    }
+
+    /** 运行时文件键判定：{@code MEMORY.md} 精确 或 {@code memory/<leaf>.md}（一级，无子目录） */
+    private static boolean isRuntimeFileKey(String rel) {
+        if (rel == null || rel.isEmpty()) {
+            return false;
+        }
+        if (MEMORY_FILE.equals(rel)) {
+            return true;
+        }
+        return rel.startsWith(MEMORY_DIR + "/") && rel.endsWith(".md")
+            && rel.indexOf('/', MEMORY_DIR.length() + 1) < 0;
+    }
+
+    /** KV key 归一化：去前导 "/"（search 返回 {@code /MEMORY.md} 形态，读侧统一相对形态） */
+    private static String normalizeItemKey(String key) {
+        if (key == null) {
+            return "";
+        }
+        var normalized = key;
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
+    }
+
+    /** StoreItem 内容提取（value.content 字符串；缺失/非字符串返回 null） */
+    private static String contentOf(io.agentscope.harness.agent.filesystem.remote.store.StoreItem item) {
+        if (item == null || item.value() == null) {
+            return null;
+        }
+        var content = item.value().get("content");
+        return content instanceof String s ? s : null;
+    }
+
+    /** 取路径末段（{@code memory/x.md} → {@code x.md}；无斜杠原样返回） */
+    private static String leafName(String path) {
+        if (path == null) {
+            return "";
+        }
+        int slash = path.lastIndexOf('/');
+        return slash < 0 ? path : path.substring(slash + 1);
     }
 
     /**
@@ -853,54 +973,73 @@ public class WorkspaceReader {
      * @return 实际物化的技能数
      */
     public int materializeUserSkills(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox, String userId) {
+        return materializeUserSkills(osbSandbox, userId, null);
+    }
+
+    /**
+     * 沙箱档「会话开始物化 L4」——合并单批写形态（first-reasoning D3）：
+     * 全部技能合并为<b>一次</b> {@code files().write(entries)}（N 技能 N 次 execd 往返 → 1 次），
+     * 合并失败回落逐技能写（保持旧行为的失败粒度：单技能失败不影响其余技能）。
+     *
+     * @param contentSink 写入成功后的内容回填（容器绝对路径 → 内容），供探针直供缓存使用；
+     *                    可为 null（2 参版语义）。仅在对应 entries 真正写入成功后回调
+     * @return 实际物化的技能数
+     */
+    public int materializeUserSkills(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox, String userId,
+                                     java.util.function.BiConsumer<String, String> contentSink) {
         if (osbSandbox == null || userId == null || userId.isBlank()) {
             return 0;
         }
-        Map<String, List<String>> skills;
+        Map<String, SkillBundle> bundles;
         try {
-            skills = listUserSkills(userId);
+            bundles = readUserSkillBundle(userId);
         } catch (Exception e) {
             // 列举失败不阻塞会话：容器内保留上一代副本或 L2 基线
             log.warn("materialize_user_skills: list failed for user {}: {}", userId, e.getMessage());
             return 0;
         }
-        if (skills.isEmpty()) {
+        if (bundles.isEmpty()) {
             return 0;
         }
-        int materialized = 0;
-        for (var skill : skills.entrySet()) {
-            var name = skill.getKey();
-            var relFiles = skill.getValue();
-            if (name == null || relFiles == null || relFiles.isEmpty()) {
+        // 技能名排序保证 entries 顺序稳定（KV 枚举顺序不承诺字典序）
+        var names = bundles.keySet().stream().sorted().toList();
+        var entriesBySkill = new LinkedHashMap<String,
+            List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>>();
+        for (var name : names) {
+            var bundle = bundles.get(name);
+            if (name == null || name.isBlank() || bundle == null || bundle.files().isEmpty()) {
+                continue;
+            }
+            // SKILL.md 门控（与 listUserSkills/SDK 技能判定一致）：无主文件的目录不算技能，
+            // 纯资源目录不得物化进容器（对齐旧「枚举后逐技能物化」路径的过滤语义）
+            if (!bundle.files().containsKey(SKILL_FILE)) {
                 continue;
             }
             if (!UserSkillService.isValidSkillName(name)) {
                 continue;
             }
-            if (isUserSkillDeleted(userId, name)) {
+            if (bundle.deleted()) {
                 // 管理面已删除：不物化（容器内旧副本的清除留给容器换代，见设计文档 §6.2.4）
                 log.debug("materialize_user_skills: {} has tombstone, skip", name);
                 continue;
             }
-            if (isUserSkillDisabled(userId, name)) {
+            if (bundle.disabled()) {
                 // 管理面已禁用：不物化进容器（技能对该用户整体不可用）
                 log.debug("materialize_user_skills: {} disabled, skip", name);
                 continue;
             }
-            if (relFiles.size() > MATERIALIZE_MAX_FILES) {
+            if (bundle.files().size() > MATERIALIZE_MAX_FILES) {
                 log.warn("materialize_user_skills: {} 文件数 {} 超过上限 {}，跳过", name,
-                    relFiles.size(), MATERIALIZE_MAX_FILES);
+                    bundle.files().size(), MATERIALIZE_MAX_FILES);
                 continue;
             }
             var entries = new ArrayList<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>();
             long totalBytes = 0;
             boolean tooLarge = false;
-            for (var relPath : relFiles) {
-                if (relPath == null || relPath.isBlank()) {
-                    continue;
-                }
-                var content = readUserSkillFile(userId, name, relPath);
-                if (content == null) {
+            for (var file : bundle.files().entrySet()) {
+                var relPath = file.getKey();
+                var content = file.getValue();
+                if (relPath == null || relPath.isBlank() || content == null) {
                     continue;
                 }
                 var fileBytes = content.getBytes(StandardCharsets.UTF_8).length;
@@ -925,16 +1064,166 @@ public class WorkspaceReader {
             if (tooLarge || entries.isEmpty()) {
                 continue;
             }
+            entriesBySkill.put(name, entries);
+        }
+        if (entriesBySkill.isEmpty()) {
+            return 0;
+        }
+        var allEntries = new ArrayList<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry>();
+        entriesBySkill.values().forEach(allEntries::addAll);
+        try {
+            osbSandbox.files().write(allEntries);
+            reportMaterialized(contentSink, allEntries);
+            log.info("materialize_user_skills: {} ({} files, 1 batch write) materialized for user {}",
+                entriesBySkill.keySet(), allEntries.size(), userId);
+            return entriesBySkill.size();
+        } catch (Exception e) {
+            // 合并写失败回落逐技能写（失败粒度对齐旧行为；典型诱因：execd 单请求超限）
+            log.warn("materialize_user_skills: batch write failed ({} files), falling back per skill: {}",
+                allEntries.size(), e.getMessage());
+        }
+        int materialized = 0;
+        for (var skillEntries : entriesBySkill.entrySet()) {
             try {
-                osbSandbox.files().write(entries);
+                osbSandbox.files().write(skillEntries.getValue());
+                reportMaterialized(contentSink, skillEntries.getValue());
                 materialized++;
-                log.info("materialize_user_skills: {} ({} files) materialized for user {}",
-                    name, entries.size(), userId);
             } catch (Exception e) {
-                log.warn("materialize_user_skills: write {}/{} failed: {}", userId, name, e.getMessage());
+                log.warn("materialize_user_skills: write {}/{} failed: {}",
+                    userId, skillEntries.getKey(), e.getMessage());
             }
         }
         return materialized;
+    }
+
+    /** 物化写成功后的内容回填（探针直供缓存；sink 为 null 时 no-op） */
+    private static void reportMaterialized(java.util.function.BiConsumer<String, String> contentSink,
+                                           List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry> entries) {
+        if (contentSink == null) {
+            return;
+        }
+        for (var entry : entries) {
+            if (entry.getPath() != null && entry.getData() instanceof String s) {
+                contentSink.accept(entry.getPath(), s);
+            }
+        }
+    }
+
+    /**
+     * 单次枚举读取某用户全部 L4 技能束：技能文件内容 + {@code .deleted}/​{@code .disabled} 栅栏
+     * （first-reasoning D3）。历史路径为「1 次枚举 + 每技能 2 次栅栏 get + 每文件 1 次 read」
+     * （4 技能/46 文件 = 55 次跨网往返），本实现一次 {@code baseStore.search} 全拿。
+     *
+     * <p><b>栅栏键不能走 {@code collectSkillKey} 的 {@code isMetadataSegment} 过滤</b>：
+     * {@code .deleted}/{@code .disabled} 以 {@code .} 开头恰是被滤掉的元数据段，必须按
+     * 「rel 段精确等于栅栏名」单独归类；其余 {@code .}/{@code _} 段（{@code .admin-override}、
+     * {@code /.revision} 等）照常过滤。
+     *
+     * <p>枚举失败（search 抛异常）抛 {@link IllegalStateException}：与 {@link #listUserSkills}
+     * 同口径，不得把「枚举失败」当成「无技能」（栅栏漏读会把已删技能重新物化进容器）。
+     */
+    public Map<String, SkillBundle> readUserSkillBundle(String userId) {
+        Map<String, SkillBundle> bundles = new LinkedHashMap<>();
+        if (userId == null || userId.isBlank()) {
+            return bundles;
+        }
+        var safeUserId = io.agentmanager.framework.util.PathSafe.sanitize(userId);
+        try {
+            var namespace = skillNamespaceFor(safeUserId);
+            final int pageSize = 500;
+            int offset = 0;
+            while (true) {
+                List<io.agentscope.harness.agent.filesystem.remote.store.StoreItem> page =
+                    baseStore.search(namespace, pageSize, offset);
+                if (page == null || page.isEmpty()) {
+                    break;
+                }
+                for (var item : page) {
+                    collectSkillBundleKey(item, bundles);
+                }
+                if (page.size() < pageSize) {
+                    break;
+                }
+                offset += page.size();
+            }
+        } catch (Exception e) {
+            log.warn("read_user_skill_bundle: failed for user {}: {}", safeUserId, e.getMessage());
+            throw new IllegalStateException("枚举技能束失败（KV 搜索不可信）: " + e.getMessage(), e);
+        }
+        // 技能文件按相对路径字典序（KV 枚举顺序不承诺排序，entries 顺序需稳定）
+        bundles.values().forEach(b -> {
+            var sorted = new java.util.TreeMap<>(b.files());
+            b.files().clear();
+            b.files().putAll(sorted);
+        });
+        return bundles;
+    }
+
+    /** 把一个 KV 行归入技能束（文件内容 / {@code .deleted} / {@code .disabled}），规则见 {@link #readUserSkillBundle} */
+    private static void collectSkillBundleKey(io.agentscope.harness.agent.filesystem.remote.store.StoreItem item,
+                                              Map<String, SkillBundle> bundles) {
+        var key = item == null ? null : item.key();
+        if (key == null || key.isBlank()) {
+            return;
+        }
+        var normalized = key.startsWith("/") ? key.substring(1) : key;
+        int slash = normalized.indexOf('/');
+        if (slash <= 0) {
+            return; // 裸键（无技能名/路径段）忽略
+        }
+        var name = normalized.substring(0, slash);
+        var rel = normalized.substring(slash + 1);
+        if (name.isBlank() || rel.isBlank() || isMetadataSegment(name)) {
+            return;
+        }
+        var bundle = bundles.computeIfAbsent(name,
+            k -> new SkillBundle(k, new LinkedHashMap<>(), false, false));
+        if (DELETION_MARKER.equals(rel)) {
+            bundle.deleted = true;
+            return;
+        }
+        if (DISABLED_MARKER.equals(rel)) {
+            bundle.disabled = true;
+            return;
+        }
+        if (isMetadataSegment(rel)) {
+            return; // .admin-override / .revision 等其余元数据键不当技能文件
+        }
+        var content = contentOf(item);
+        if (content != null) {
+            bundle.files().put(rel, content);
+        }
+    }
+
+    /** 单技能束：文件内容（rel → content）+ 删除/禁用栅栏（readUserSkillBundle 产出） */
+    public static final class SkillBundle {
+        private final String name;
+        private final Map<String, String> files;
+        private boolean deleted;
+        private boolean disabled;
+
+        SkillBundle(String name, Map<String, String> files, boolean deleted, boolean disabled) {
+            this.name = name;
+            this.files = files;
+            this.deleted = deleted;
+            this.disabled = disabled;
+        }
+
+        public String name() {
+            return name;
+        }
+
+        public Map<String, String> files() {
+            return files;
+        }
+
+        public boolean deleted() {
+            return deleted;
+        }
+
+        public boolean disabled() {
+            return disabled;
+        }
     }
 
     public void injectToSandbox(com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
