@@ -17,29 +17,28 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 ---
 
-## 基础规则
+## 工程规范
 
-严格按用户需求执行，不擅自加功能、不脑补逻辑、不画蛇添足；只输出可直接运行的完整代码，拒绝伪代码。需求模糊主动提问，输出无多余闲聊，全程对齐项目现有代码风格、目录结构、命名规范。
+通用工程原则与开发前/中/后行为规范（长期主义、SSOT、TDD、worktree 工作流、Commit 携带对话 id、文档命名等）见 [Agents.custome.md](Agents.custome.md)，并行生效。本节仅列项目专属约束：
 
-## 开发流程
+- 严格按用户需求执行，不擅自加功能、不脑补逻辑、不画蛇添足；需求模糊主动提问，输出无多余闲聊，全程对齐项目现有代码风格、目录结构、命名规范
+- 只输出可直接运行的完整代码，拒绝伪代码；代码块标语言、改文件标路径，保留配置原有缩进
+- 命名语义化，禁止魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获
+- 禁止编写注释，存量注释不主动清理
+- 禁止硬编码密钥，敏感信息用占位符（敏感配置在 `.env.secrets`，gitignored）
+- 依赖口径：优先复用项目内现有实现，无则引入成熟第三方库，禁止自造轮子；框架版本升级需先确认
+- 不随意改 Git、Docker 及系统配置；禁用高危删除命令与破坏性操作（删核心文件、清依赖等）；环境报错先给排查方案
+- 「不做兼容」仅约束新代码的设计取向；既有兼容性架构决策（存量服务 env 固化不自动迁移、AUTH_TOKEN 语义保留、Flyway baseline-on-migrate）为刻意设计，不追溯推翻
 
-先看项目目录和现有关联代码，理清逻辑再编码；只修改指定文件与逻辑，不改动无关代码、不整文件重写。
+### 数据库演进（Flyway，红线）
 
-## 代码规范
+**agent-framework 的表结构/数据演进一律新增 Flyway 迁移文件**（`agent-framework/src/main/resources/db/migration/V<N>__<描述>.sql`，启动自动执行、存量库自动基线），**禁止**在 Store 构造器或请求路径里手工 DDL（该模式已移除），禁止修改已合并的 V 文件（checksum 校验会拒绝启动）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（见 docs/design/db-migration-flyway-design.md §7）。
 
-命名语义化，禁止硬编码密钥、魔法数字；网络、IO、数据库操作必做判空、边界校验和异常捕获；优先复用现有工具，不私自升级框架、乱加依赖；复杂逻辑加中文注释。**agent-framework 的表结构/数据演进一律新增 Flyway 迁移文件**（`agent-framework/src/main/resources/db/migration/V<N>__<描述>.sql`，启动自动执行、存量库自动基线），**禁止**在 Store 构造器或请求路径里手工 DDL（该模式已移除），禁止修改已合并的 V 文件（checksum 校验会拒绝启动）；"新机制只写新数据"的改动必须同版本配套存量回填迁移（见 docs/design/db-migration-flyway-design.md §7）。
-
-## 输出格式
-
-代码块标语言、改文件标路径；保留配置原有缩进，不搞多余排版；完工自动清理调试日志、临时测试代码。
-
-## 安全约束
-
-不随意改 Git、Docker 及系统配置；禁用高危删除命令，敏感信息用占位符；不做删核心文件、清依赖等破坏性操作，环境报错先给排查方案。
+---
 
 ## 架构强约束（控制面/业务面分层，强制）
 
-两条平台级设计原则，任何改动不得违反；评审时按此清单逐条核对（细则见 backend/AGENTS.md 与 agent-framework/AGENTS.md）：
+两条平台级设计原则，任何改动不得违反；评审时按此清单逐条核对（细则见 [backend/AGENTS.md](backend/AGENTS.md) 与 [agent-framework/AGENTS.md](agent-framework/AGENTS.md)）：
 
 **原则一：backend 是控制面——重启/升级/扩缩容不得影响任何已发布业务 agent 服务**
 
@@ -52,7 +51,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 - 影响正确性的状态只允许存共享存储（MySQL checkpoint / Redis）；Pod 本地（内存、emptyDir）只允许可丢弃/可重建的缓存
 - 禁止 Service `sessionAffinity`；任意请求必须可落任意副本（`/threads/{sid}/subscribe`、`/status`、confirm 等全部基于共享存储裁决）；e2e-multi / e2e-protocol-multi 双副本门禁必须保持
-- 多服务共享同一 MySQL/Redis 时，隔离靠 per-service checkpoint 库名与 Redis 前缀——表结构/Redis key 无 agent 维度，缺省即共享（`session_user` 会跨服务串列、`sbx:guard` 跨服务互锁）。**Publish 新建服务时平台自动派生这两键**（issue #142：`CHECKPOINT_JDBC_URL` 改写 `{原库}_{k8s 名}` + 自动建库、`AGENT_REDIS_PREFIX={k8s 名}:`，用户显式值优先；前置条件是 MySQL 账号有 `{原库}_%` 模式库授权）。**存量服务 env 已固化不自动迁移**，收敛需显式改 env 后 republish（校验维度仍是缺口：平台不校验用户显式配的共享值）
+- 多服务共享同一 MySQL/Redis 时，隔离靠 per-service checkpoint 库名与 Redis 前缀，表结构/Redis key 无 agent 维度，缺省即共享（`session_user` 跨服务串列、`sbx:guard` 跨服务互锁）。Publish 新建服务时平台自动派生这两键（issue #142：`CHECKPOINT_JDBC_URL` 改写 `{原库}_{k8s 名}` + 自动建库、`AGENT_REDIS_PREFIX={k8s 名}:`，用户显式值优先）；存量服务 env 已固化不自动迁移，收敛需显式改 env 后 republish
 
 ---
 
@@ -82,19 +81,18 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 | platform-backend | svc:8080 / NodePort 30880 | REST + MCP |
 | platform-frontend | NodePort 30881 | Web UI |
 | ingress-nginx | NodePort 30080 | 业务 Agent 入口（router 模式：共享 Ingress /agent → platform-router；host 模式：per-service 域名） |
-| platform-router | svc:80（nginx 1.27.1 ×2） | **router 模式子路径路由器**（manifests/platform-router.yaml 自举：`/agent/{short}` 前缀剥离 + X-Forwarded-Prefix 注入，静态泛化配置、发布链路零写入） |
+| platform-router | svc:80（nginx 1.27.1 ×2） | router 模式子路径路由器（manifests/platform-router.yaml 自举，静态泛化配置、发布链路零写入） |
 | oaf-mysql | svc:3306 | 平台元数据 + checkpoint |
 | oaf-redis | svc:6379 | session_event 事件流存储（Redis Streams，支撑 durable SSE 多副本续传） |
 | 共享 PVC | platform-data (10Gi) | OAF 包存储：`packages/{id}` subPath 只读挂 /config |
 | namespace | agent-platform | 全部平台与业务资源 |
 
-关键约定：
-- 业务 Pod 固定注入 `AGENT_CONFIG_DIR=/config`、`AGENT_WORKSPACE_DIR=/workspace`、`SERVER_HOST/SERVER_PORT`（均为保留键，用户 env 冲突即 400）
-- env 为**全量覆盖**语义（PATCH /services/:id/env），上限 64 键 × 32KB；模板敏感键（LLM_API_KEY/CHECKPOINT_PASSWORD/AGENT_REDIS_URL/OPENSANDBOX_API_KEY 等）自动路由进服务 Secret（`{name}-env-secret`），不落 ConfigMap/env_json
-- 平台默认配置（redis/mysql/llm/sandbox）仅作为「发布新服务 / 编辑 env」时的**表单默认填入**（`/settings` 页维护 → `platform_config` 表 → `GET /platform-config/defaults` 预填）；不经 envFrom 注入，改默认配置不影响任何已发布服务（见 docs/design/platform-default-config-secret-design.md）
-- 业务路由双模式（`INGRESS_HOST_SUFFIX` 唯一开关）：**空（默认）= router 模式**——不构造 per-service Ingress，统一域名 `/agent/{name}` 子路径由集群内 platform-router nginx 承接（原生 rewrite 剥前缀，**不依赖任何 ingress controller 注解**；启动自检 platform-router-svc 存在），Endpoint = `{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`；**非空 = host 模式**——`host={K8sName}{后缀}` + 根路径直出，只保留 ssl-redirect 与 proxy 超时、无 rewrite 注解。`INGRESS_TEMPLATE` overlay 仅 host 模式可用（允许改 TLS/追加注解，host/path 为不变量；Endpoint 自动跟随；不设置=内置构造）。**历史 ingress-nginx 注解 rewrite 的 path 模式已删除**（subpath-routing-design v2 决议），升级窗口见该设计 §4.6
-- 控制台拆分（2026-10，feat/console-user-workspace-split）：backend 新增 `JWT_SECRET`（必填，缺失启动 fail-fast）与 `ADMIN_INIT_USER/PASSWORD`（首个 admin 种子，仅 users 空表时生效）；`/api/v1/auth/*`（login/me/introspect）、`/api/v1/console/*`（JWT）、`/api/v1/admin/*`（JWT-admin 或 AUTH_TOKEN）为新面，存量 `{services,packages,images,platform-config}` 与 `/mcp` 语义不变；数据面网关鉴权三态开关 `ROUTER_AUTH_MODE`（off|report|enforce，router nginx auth_request → `GET /api/v1/auth/introspect`，默认 off）
-- 敏感配置在 `.env.secrets`（gitignored）
+细节约定的真相源在 [backend/AGENTS.md](backend/AGENTS.md)，此处仅索引：
+
+- 业务 Pod 保留键（AGENT_CONFIG_DIR 等）、env 全量覆盖语义（64 键 × 32KB）、敏感键自动路由服务 Secret
+- 平台默认配置仅作发布/编辑 env 时的表单默认填入，不经运行时注入（docs/design/platform-default-config-secret-design.md）
+- 业务路由双模式（`INGRESS_HOST_SUFFIX` 唯一开关：router 子路径 / host 域名；docs/design/subpath-routing-design.md、ingress-host-mode-design.md）
+- 控制台三面（auth/console/admin）与数据面网关鉴权 `ROUTER_AUTH_MODE`（docs/design/console-user-workspace-split-design.md）
 
 ---
 
@@ -114,68 +112,43 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 
 ---
 
-## CI（GitHub Actions）与日常提交流程
+## CI 与提交流程
 
-### 触发规则（按目录过滤，加速无关变更）
+CI 配置真相源在 [.github/workflows/](.github/workflows/)（backend-ci / frontend-ci / agent-framework-ci / charts-ci / platform-e2e-ci）；镜像构建与 tag 派生见各模块 Makefile。核心不变量：
 
-- **push 仅 master**（跑测试 + 发布镜像）；**其余分支只在 PR 时触发**（避免双事件重复跑，门禁只认 PR run）
-- **concurrency 组含 workflow 维度**（`ci-${{ github.workflow }}-<分支名>`，PR #10）：同工作流内同分支新旧 run 互斥（双事件仍只保留最新一次），**跨工作流互不取消**——修复前共享组名导致 master push 三工作流互相取消（无关 job 显示 cancelled 而非 skipped、镜像推送可能被静默取消丢失）
-- **PR / master push** 都会启动各工作流，但 **job 按改动目录过滤**：
-  - `backend/**` → backend-ci 的单测
-  - `frontend/**` → frontend-ci 的单测
-  - `agent-framework/**` → agent-framework-ci 的单测 + E2E 矩阵（核心/多副本/沙箱/协议多副本为必需，其余非必需）
-  - `charts/**` → charts-ci 的 Helm lint + template
-  - 根目录工作流/脚本变更（`.github/**`）→ 相关 job 全跑
-  - **不相关目录的 job 显示 Skipped，门禁视为通过**——这是刻意设计：PR 上工作流必须照常触发，否则必需检查会 pending 卡死 PR；不能在工作流层面用 `paths` 过滤
-- 触发映射：`.github/workflows/<name>.yml` 自身变更也会触发对应工作流（保证 CI 配置改动被验证）
-- master push 的测试 job 同样按目录过滤（无关目录 Skipped），镜像推送仅在相关目录有变更时执行
-- 跨目录改动（如前后端联动）→ 多个工作流并行各自执行，互不干扰
+- **push 仅 master** 出镜像；其余分支只在 PR 时触发，PR run 是唯一门禁口径
+- **job 按改动目录过滤**，不相关目录显示 Skipped、门禁视为通过——刻意设计（PR 上工作流必须照常触发，否则必需检查 pending 卡死 PR），禁止在工作流层面用 `paths` 过滤
+- **concurrency 组含 workflow 维度**（同工作流内同分支互斥、跨工作流互不取消），勿回退为共享组名（曾致 master push 镜像推送被静默取消）
+- **分支保护**：strict（合并前基于最新 master）+ enforce_admins（对 master 直接 push 被拒）+ 禁 force push/删分支，一切变更走 PR
+- **九项必需检查**：三个单测（mvn test / go vet+go test / lint+build）+ agent-framework 四 E2E（核心/多副本/沙箱/协议多副本 P 组）+ `E2E 平台（kind + 控制台全功能）` + `Chart 校验 (helm lint + template)`
+- 新增 job 默认非必需，转必需需管理员在分支保护加勾（job name 与保护规则字符串须完全一致）；`E2E 沙箱生命周期（L 组）` 转必需前须满足观察期（sandbox-pool-opensandbox-design §9.5 十项预案）
 
-| 工作流 | 单测 | E2E | 镜像推送（仅 master push） |
-|--------|------|-----|--------------------------|
-| backend-ci | `go vet ./...` + `go test ./...` | — | `gaoyue1989/agent-manager-backend:{latest, <short-sha>}` |
-| frontend-ci | `npm run lint` + `npm run test` + `npm run build` | — | `gaoyue1989/agent-manager-frontend:{latest, <short-sha>}` |
-| agent-framework-ci | `mvn test`（2026-11-08 实跑 1864 用例 / 0 失败 / 5 跳过）+ `eval-selftest`（评测飞轮离线自检） | E2E 矩阵九 job：核心/多副本/沙箱/协议多副本 P 组（必需）+ 沙箱生命周期 L 组（sandbox-pool-opensandbox-design PR-D，先非必需）/AG-UI/路由 RT/协议 T 组/工具插件（非必需；见 `agent-framework/docs/e2e-ci-plan.md`） | `gaoyue1989/agent-framework:agentscope-{maven 版本}-v{YYYYMMDD}`（如 agentscope-2.1.0-v20260907）；另推评测镜像 `gaoyue1989/eval-collector`、`gaoyue1989/eval-studio`:{vYYYYMMDD, latest} |
-| charts-ci | `helm lint` + `helm template` ×2（oaf-platform 与 oaf-agent 两 chart，CI 占位必填值渲染全量对象） | — | — |
-| platform-e2e-ci | — | `E2E 平台（kind + 控制台全功能）`：kind 集群 + 仓库清单自举 + `platform-e2e.sh`（A/B）+ console-split m0-m12 + `console-ui-e2e.js`（2026-10-22 起纳入必需检查） | — |
-
-### 日常提交流程（必须走 PR 门禁）
+日常提交流程（worktree 工作流，通用规则见 [Agents.custome.md](Agents.custome.md)）：
 
 ```bash
-# 1. 从最新 master 切 feature 分支
+# 0. 主工作区保持在 master，拉取远程
 git checkout master && git pull
-git checkout -b feat/xxx        # 命名：feat/ | fix/ | chore/ | docs/
 
-# 2. 开发提交（推分支即触发 CI 验证，尽早暴露问题）
-git push origin feat/xxx
+# 1. .tmp 下开 worktree + feature 分支（命名：feat/ | fix/ | chore/ | docs/）
+git worktree add .tmp/<名称> -b docs/xxx master
+cd .tmp/<名称>        # 开发；推分支即触发 CI 验证，尽早暴露问题
 
-# 3. 开 PR 到 master（GitHub 网页或 gh pr create）
-#    → 必需检查自动执行：
-#      单测 (mvn test) / 单测 (go vet + go test) / 单测 (lint + build)
-#      E2E 核心（API+UI）/ E2E 多副本（R 组+U9）/ E2E 沙箱（mock OpenSandbox）/ E2E 协议多副本（P 组）
-#      E2E 平台（kind + 控制台全功能）/ Chart 校验 (helm lint + template)
-#    另有一批非必需 job 同步跑（红只告警不挡合并，但应一并修）：
-#      评测自检 / 评测离线回放 / E2E 工具插件 / E2E 路由模式 / E2E 协议（T 组）/ E2E AG-UI 协议面（AG 组）/ E2E 沙箱生命周期（L 组）/ oaf-agent Chart 校验
-
-# 4. 全绿后合并（网页 Merge 按钮）
-#    红了就修：提交会自动重跑检查
+# 2. 开 PR 到 master（gh pr create 或网页）→ 必需检查全绿后合并
+# 3. 合并后清理
+git worktree remove .tmp/<名称> && git branch -d docs/xxx
 ```
 
-### 分支保护（master，强制）
+- 临时提交不慎落在本地 master：切新分支提 PR（`git checkout -b chore/xxx && git push`），不要绕过门禁
+- AI 生成的提交：conventional commit + 尾行 `Chat-Session: <对话id>` trailer
+- 业务镜像更新到 kind 集群是手动流程（`docker save | ctr import` → rollout），CI 只负责测试与镜像分发
 
-- **九项必需状态检查**：上表三个单测 + agent-framework 四个 E2E job（核心/多副本/沙箱/协议多副本 P 组，§18.4）+ `E2E 平台（kind + 控制台全功能）` + `Chart 校验 (helm lint + template)`；未全绿合并请求被拒（`blocked`）
-- **新增 job 默认不是必需检查**：`E2E 工具插件`、`E2E 路由模式`、`E2E 协议（T 组）`、`E2E AG-UI 协议面（AG 组）`、`E2E 沙箱生命周期（L 组）`、`oaf-agent Chart 校验`、`评测自检`、`评测离线回放` 目前只跑不挡合并；要转必需需仓库管理员在分支保护里加勾（`gh api -X PATCH repos/:owner/:repo/branches/master/protection/required_status_checks`）
-- **十项预案（sandbox-pool-opensandbox-design §9.5）**：`E2E 沙箱生命周期（L 组）`随 PR-D 以非必需跑 **≥3 个 PR 观察稳定**后，由管理员转必需（必需检查九项→十项，job name 与保护规则字符串必须完全一致）；该组覆盖配额/TTL 默认开启影响所有服务的语义，转必需不得跳过观察期
-- **strict**：合并前必须基于最新 master（过期需 rebase/update branch 重跑）
-- **enforce_admins**：管理员同样受限——**对 master 的直接 push 被拒绝**（`protected branch hook declined`），一切变更走 PR
-- **禁止 force push / 删除分支**
-- 临时提交不慎直接落在本地 master：切到新分支提 PR（`git checkout -b chore/xxx && git push`），不要绕过门禁
+---
 
-细节：
-- 镜像构建用 buildx + gha 缓存；agent-framework 构建前自动下载 OTel Java Agent（jar 不入库，版本取 Makefile `OTEL_JAVAAGENT_VERSION`）
-- agent-framework 镜像 tag 由 pom `project.version` 动态派生（`mvn help:evaluate`），日期取 UTC
-- PR 与 feature 分支的 CI 只做测试验证，不推镜像（`build-push` 有 `if: master push` 门控）
-- 业务镜像更新到 kind 集群仍是手动流程（`docker save | ctr import` → rollout），CI 只负责测试与镜像分发
+## 文档规范
+
+- 新建文档命名 `文档名-YYMMDD.md`，每更新即改日期（通用规则见 [Agents.custome.md](Agents.custome.md)）；存量文档不重命名，AGENTS.md / README.md 等工具入口名豁免
+- 文档只留索引与唯一信息：不复述代码/设计文档已有的逻辑，一律指向源，防止文档与代码形成两套信息源
+- 设计文档归档与状态约定见 [docs/design/README.md](docs/design/README.md)（新增设计须在其清单补行）；部署指南 docs/deployment.md、OAF 规范 docs/oaf-specification.md、实施记录 docs/implementation/
 
 ---
 
