@@ -12,7 +12,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * 默认值自动获得配额与 TTL 行为，显式 env 覆盖优先（§4.7）。
  *
  * <p>env 对照：SANDBOX_LIFECYCLE_ENABLED / SANDBOX_POOL_REF / SANDBOX_USER_QUOTA /
- * SANDBOX_RENEW_INTERVAL_SECONDS / SANDBOX_CONFIRM_HOLD_MINUTES；TTL 复用既有键
+ * SANDBOX_RENEW_INTERVAL_SECONDS / SANDBOX_CONFIRM_HOLD_MINUTES / SANDBOX_LIFECYCLE_E2E_HOOKS；
+ * TTL 复用既有键
  * {@code SANDBOX_TIMEOUT_MINUTES}（语义升级为生命周期 TTL，默认 30，绑定于
  * {@link SandboxConfig#timeoutMinutes}，不在此重复）。
  */
@@ -35,5 +36,12 @@ public record SandboxLifecycleConfig(
      */
     @DefaultValue("2") int createMaxAttempts,
     /** create 重试退避基数（毫秒）：第 n 次重试等待 backoff × 2^(n-1)，上限 10s */
-    @DefaultValue("1000") long createRetryBackoffMs
+    @DefaultValue("1000") long createRetryBackoffMs,
+    /**
+     * /debug 写钩子门控（issue #293）：POST /debug/sandbox-cleanup（e2e L11 测试钩子，
+     * sandbox-pool-opensandbox-design §9.3）仅在 true 时条件注册（SandboxCleanupHookController），
+     * 默认关闭 = 生产路径不注册该无独立鉴权的写端点（POST 得 404）；
+     * 唯一调用方 e2e L11 组（env-up.sh lifecycle 组注入 SANDBOX_LIFECYCLE_E2E_HOOKS=true）
+     */
+    @DefaultValue("false") boolean e2eHooks
 ) {}

@@ -1047,7 +1047,7 @@ curl -X PUT http://localhost:8100/models/system/fallback   # 清除 DB 覆盖，
 | GET | `/debug/memory` | MEMORY.md / memory/ 内容查看 |
 | GET | `/debug/sandbox` | 沙箱状态（沙箱模式） |
 | GET | `/debug/sandbox-bindings` | 沙箱配额与绑定（sandbox-pool-opensandbox-design §4.8，PR-D）：lifecycle 配置回显（7 项）+ sandbox_binding 绑定表（跨副本聚合，user_key 脱敏、turn_running 由 turn_lease JOIN + updated_at 新鲜度双事实源派生）+ 本副本续期注册表健康 + 事件环形缓冲；lifecycle 未装配 fail-soft 返回 enabled=false（调试页「配额与绑定」区块数据源） |
-| POST | `/debug/sandbox-cleanup?retentionDays=7` | 沙箱绑定过期清理手动触发（retentionDays query 参数默认 7，与 SessionCleanupService.cleanupSandboxBindings 同语义；e2e L11 测试钩子；lifecycle 未装配返回 enabled=false） |
+| POST | `/debug/sandbox-cleanup?retentionDays=N` | e2e L11 测试钩子（沙箱绑定过期清理手动触发，与 SessionCleanupService.cleanupSandboxBindings 同语义）；**仅 `SANDBOX_LIFECYCLE_E2E_HOOKS=true` 时注册**（默认不注册，POST 得 404，issue #293）；retentionDays 合法区间 1~365（默认 7，超界 400 bad_request）；lifecycle 未装配返回 enabled=false |
 | GET | `/debug/workspace` | 工作区文件浏览 |
 | GET | `/debug/logs` | 运行日志（内存 Appender）。query `level`（默认 all）、`limit`（默认 100，上限 500） |
 | GET | `/debug/user-skills` | 用户个人技能（L4）索引：`{count, users[], truncated?}` |
