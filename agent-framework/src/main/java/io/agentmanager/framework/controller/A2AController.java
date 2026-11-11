@@ -3,6 +3,7 @@ package io.agentmanager.framework.controller;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,16 @@ public class A2AController {
 
     private static final Logger log = LoggerFactory.getLogger(A2AController.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * message.metadata 保留键（SDK AgentScopeAgentExecutor 按键读取会话/用户身份，
+     * 值必须保持 String——javap 证实为 containsKey + String.valueOf 读法）。
+     * 仅此两键：其余键 SDK 不消费，不在碰撞防护范围（不擅自扩大）。
+     */
+    private static final Set<String> RESERVED_META_KEYS = Set.of("sessionId", "userId");
+
+    /** 分组键前缀：messageId 与保留键碰撞时（issue #294）给分组键加此前缀避开覆盖 */
+    private static final String GROUP_KEY_PREFIX = "_agentscope_group_";
 
     private final AgentScopeA2aServer agentScopeA2aServer;
     private final SessionUserStore sessionUserStore;
@@ -181,6 +192,9 @@ public class A2AController {
      *   message.metadata = {sessionId, userId, <msgId>: {skills:[...], tools:[...]}}
      *   parts[*].metadata._agentscope_msg_id = <msgId>
      * </pre>
+     * 例外（issue #294）：messageId 恰为保留键 sessionId/userId 时分组键加前缀
+     * {@code _agentscope_group_}（part 标签同步），避免 nested Map 覆盖保留键的
+     * String 值破坏会话路由/多租户身份。
      * skills 与 tools 并存时共用同一 msg id 分组键（后写者 merge 进既有 nested，幂等）；
      * 值支持 List（新客户端）或逗号分隔字符串（A2A 旧客户端，issue #266）——统一归一为
      * List 后回填；空白字符串按未传处理，畸形值不写分组键（= 全量语义）。
@@ -200,6 +214,12 @@ public class A2AController {
             return;
         }
         var msgId = String.valueOf(message.get("messageId"));
+        // issue #294 病态碰撞防护：messageId 恰为保留键（sessionId/userId）时，以其为
+        // 分组键会把 nested Map 覆盖到保留键上，SDK AgentScopeAgentExecutor 读出的
+        // sessionId/userId 劣化为 Map 字符串 → 会话路由/多租户身份被破坏。此时分组键
+        // 加前缀避开保留键；SDK 的组读取完全由 part 标签（_agentscope_msg_id）决定，
+        // 标签同步为前缀键即可（getMsgMetadata 对任意键名均按 Map 取值，键名无约定）。
+        var groupKey = RESERVED_META_KEYS.contains(msgId) ? GROUP_KEY_PREFIX + msgId : msgId;
         if (message.get("parts") instanceof List<?> parts) {
             for (var p : parts) {
                 if (p instanceof Map<?, ?> partMap) {
@@ -210,17 +230,17 @@ public class A2AController {
                         : new java.util.LinkedHashMap<String, Object>();
                     // 强制同一 msg id：多 part 归并为同一条 Msg，白名单对所有 part 生效
                     //（skills/tools 并存时重复打标幂等）
-                    partMeta.put("_agentscope_msg_id", msgId);
+                    partMeta.put("_agentscope_msg_id", groupKey);
                     part.put("metadata", partMeta);
                 }
             }
         }
         var nested = new java.util.LinkedHashMap<String, Object>();
-        if (meta.get(msgId) instanceof Map<?, ?> existingNested) {
+        if (meta.get(groupKey) instanceof Map<?, ?> existingNested) {
             nested.putAll((Map<String, Object>) existingNested);
         }
         nested.put(key, list);
-        meta.put(msgId, nested);
+        meta.put(groupKey, nested);
     }
 
     /**

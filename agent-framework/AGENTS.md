@@ -93,7 +93,7 @@ agent-framework/
 │   │   │       ├── AgentCardController.java     # GET /.well-known/agent-card.json
 │   │   │       ├── UserSkillController.java     # /skills/users 系列（当前用户的读取/写入/zip 上传/下载/删除/从包内下发；身份取网关注入的 X-User-Id 头）
 │   │   │       ├── DebugController.java         # GET /debug
-│   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/monitor（监控概览+跨用户会话）等
+│   │   │       ├── DebugApiController.java      # GET /debug/config、/debug/monitor（监控概览+跨用户会话）等（/debug 面纯只读；写钩子在独立条件注册类 SandboxCleanupHookController）
 │   │   │       ├── MonitorPageController.java   # GET /monitor（运营监控独立页入口，从调试页独立出来）
 │   │   │       ├── ThreadController.java        # GET /threads、/{sid}/history、/{sid}/llm-calls
 │   │   │       ├── ChatStreamController.java    # POST /threads/chat (SSE 单次流, 唯一对话入口)
@@ -386,6 +386,7 @@ Store/Bridge 层把 DB/Redis 异常吞成默认值（catch → `false`/`null`）
 | `SANDBOX_RENEW_INTERVAL_SECONDS` | `60` | | T3 在途续期间隔（守护线程扫注册表：call refcount + turn 注册 + hold 三信号）；启动校验 `< TTL×60/2`；busy 判定 grace = max(3×间隔, 120s) |
 | `SANDBOX_CONFIRM_HOLD_MINUTES` | `20` | | T4 HITL 挂起保留窗：ask 挂起后沙箱持续续期、不可被 LRU 调度（同沙箱恢复保文件），过期停续可调度/自然 GC；每次 ask 重新计窗 |
 | `SANDBOX_POOL_REF` | 空 | | OpenSandbox 服务端池 Pool 名；空 = 不用池（create 不带 extensions.poolRef）；非空时 create 抑制 resourceLimits（由池模板定义；image 受 SDK 客户端强约束必传、上游实测忽略） |
+| `SANDBOX_LIFECYCLE_E2E_HOOKS` | `false` | | /debug 写钩子门控（issue #293）：`POST /debug/sandbox-cleanup`（e2e L11 测试钩子，SandboxCleanupHookController 条件注册）仅在 true 时装配，默认不注册（POST 得 404，生产路径零无鉴权写端点）；retentionDays 合法区间 1~365（默认 7，超界 400）；lifecycle 未装配返回 enabled=false |
 | `AGENT_SERVICE_K8S_NAME` | 空 | | 本服务 k8s 名（create 注入 metadata.service，console 只读页过滤口径 §5.3 = 含 oaf- 前缀）；缺省由 HOST_NAME（Pod 名）剥 `{rs-hash}-{suffix}` 后缀推导，均不可得则不注入 |
 | （JVM 属性）`agent.sandbox.lifecycle.grace-floor-seconds` | `120` | | busy 判定 grace 下限（grace = max(3×RENEW_INTERVAL, 下限)）；e2e 压至 6s 加速 idle 判定（§9.3 环境参数） |
 | （JVM 属性）`agent.sandbox.lifecycle.registry-overage-minutes` | `120` | | 续期注册表 bornAt 超龄剔除下限（剔除阈值 = max(TTL×2, 下限)）；e2e 压至 2min 使 L16 分钟级可测 |
