@@ -104,7 +104,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 - 影响正确性的状态只允许存共享存储（MySQL checkpoint / Redis）；Pod 本地（内存、emptyDir）只允许可丢弃/可重建的缓存
 - 禁止 Service `sessionAffinity`；任意请求必须可落任意副本（`/threads/{sid}/subscribe`、`/status`、confirm 等全部基于共享存储裁决）；e2e-multi / e2e-protocol-multi 双副本门禁必须保持
-- 多服务共享同一 MySQL/Redis 时，隔离靠 per-service checkpoint 库名与 Redis 前缀，表结构/Redis key 无 agent 维度，缺省即共享（`session_user` 跨服务串列、`sbx:guard` 跨服务互锁）。Publish 新建服务时平台自动派生这两键（issue #142：`CHECKPOINT_JDBC_URL` 改写 `{原库}_{k8s 名}` + 自动建库、`AGENT_REDIS_PREFIX={k8s 名}:`，用户显式值优先）；存量服务 env 已固化不自动迁移，收敛需显式改 env 后 republish
+- 多服务共享同一 MySQL/Redis 时，隔离靠 per-service checkpoint 库名与 Redis 前缀，表结构/Redis key 无 agent 维度，缺省即共享（`session_user` 跨服务串列、`sbx:guard` 跨服务互锁）；Publish 自动派生隔离键（issue #142，用户显式值优先，存量不自动迁移）——派生细节与前置授权见 docs/deployment.md 运维备忘 4、agent-framework/AGENTS.md
 
 ---
 
@@ -128,17 +128,7 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 ## 基础设施
 
-| 组件 | 地址 | 用途 |
-|------|------|------|
-| 宿主机 nginx | :8911 | 统一入口（前端/API/MCP/业务 Agent） |
-| platform-backend | svc:8080 / NodePort 30880 | REST + MCP |
-| platform-frontend | NodePort 30881 | Web UI |
-| ingress-nginx | NodePort 30080 | 业务 Agent 入口（router 模式：共享 Ingress /agent → platform-router；host 模式：per-service 域名） |
-| platform-router | svc:80（nginx 1.27.1 ×2） | router 模式子路径路由器（manifests/platform-router.yaml 自举，静态泛化配置、发布链路零写入） |
-| oaf-mysql | svc:3306 | 平台元数据 + checkpoint |
-| oaf-redis | svc:6379 | session_event 事件流存储（Redis Streams，支撑 durable SSE 多副本续传） |
-| 共享 PVC | platform-data (10Gi) | OAF 包存储：`packages/{id}` subPath 只读挂 /config |
-| namespace | agent-platform | 全部平台与业务资源 |
+对外入口与集群内组件地址、凭据见 [docs/deployment.md](docs/deployment.md)「关键端点」「凭据与敏感配置」（宿主 nginx :8911 统一入口、ingress-nginx 30080、前端 30881、oaf-mysql/oaf-redis、共享 PVC platform-data、namespace agent-platform）。
 
 细节约定的真相源在 [backend/AGENTS.md](backend/AGENTS.md)，此处仅索引：
 
@@ -149,19 +139,10 @@ OAF 服务发布平台（v2）：上传符合规范的 **OAF 配置包**，经 K
 
 ---
 
-## 启动服务
+## 开发与部署
 
-```bash
-# 单测 / 本地后端 / 前端热更
-cd backend && make test && make run-dev
-cd frontend && npm run dev
-
-# 镜像构建 → 导入集群 → 部署（全流程见 docs/deployment.md）
-cd backend && make image && make kind-load && kubectl apply -f ../manifests/*.yaml
-
-# 更新镜像后的固定动作：rollout restart 对应 deployment
-kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingress 注解由它下发
-```
+- 本地：`cd backend && make test && make run-dev`（单测/本地后端）、`cd frontend && npm run dev`（前端热更）
+- 构建 → kind 导入 → 部署 → 更新镜像 rollout restart：全流程见 [docs/deployment.md](docs/deployment.md) §一~§三 + 运维备忘
 
 ---
 
@@ -170,25 +151,19 @@ kubectl -n agent-platform rollout restart deployment/platform-backend   # Ingres
 CI 配置真相源在 [.github/workflows/](.github/workflows/)（backend-ci / frontend-ci / agent-framework-ci / charts-ci / platform-e2e-ci）；镜像构建与 tag 派生见各模块 Makefile。核心不变量：
 
 - **push 仅 master** 出镜像；其余分支只在 PR 时触发，PR run 是唯一门禁口径
-- **job 按改动目录过滤**，不相关目录显示 Skipped、门禁视为通过——刻意设计（PR 上工作流必须照常触发，否则必需检查 pending 卡死 PR），禁止在工作流层面用 `paths` 过滤
-- **concurrency 组含 workflow 维度**（同工作流内同分支互斥、跨工作流互不取消），勿回退为共享组名（曾致 master push 镜像推送被静默取消）
+- **job 按改动目录过滤**，不相关目录 Skipped 视为通过（刻意设计：PR 必须照常触发工作流，否则必需检查 pending 卡死），禁止在工作流层面用 `paths` 过滤
+- **concurrency 组含 workflow 维度**，勿回退共享组名（曾致 master push 镜像推送被静默取消）
 - **分支保护**：strict（合并前基于最新 master）+ enforce_admins（对 master 直接 push 被拒）+ 禁 force push/删分支，一切变更走 PR
 - **九项必需检查**：三个单测（mvn test / go vet+go test / lint+build）+ agent-framework 四 E2E（核心/多副本/沙箱/协议多副本 P 组）+ `E2E 平台（kind + 控制台全功能）` + `Chart 校验 (helm lint + template)`
-- 新增 job 默认非必需，转必需需管理员在分支保护加勾（job name 与保护规则字符串须完全一致）；`E2E 沙箱生命周期（L 组）` 转必需前须满足观察期（sandbox-pool-opensandbox-design §9.5 十项预案）
+- 新增 job 默认非必需，转必需由管理员在分支保护加勾（job name 须与保护规则字符串完全一致）；`E2E 沙箱生命周期（L 组）` 转必需前须满足观察期（sandbox-pool-opensandbox-design §9.5）
 
 日常提交流程（worktree 工作流）：
 
 ```bash
-# 0. 主工作区保持在 master，拉取远程
-git checkout master && git pull
-
-# 1. .tmp 下开 worktree + feature 分支（命名：feat/ | fix/ | chore/ | docs/）
-git worktree add .tmp/<名称> -b docs/xxx master
-cd .tmp/<名称>        # 开发；推分支即触发 CI 验证，尽早暴露问题
-
+git checkout master && git pull                                    # 0. 主工作区保持 master
+git worktree add .tmp/<名称> -b docs/xxx master && cd .tmp/<名称>  # 1. 开发分支（feat/|fix/|chore/|docs/），推分支即触发 CI 验证
 # 2. 开 PR 到 master（gh pr create 或网页）→ 必需检查全绿后合并
-# 3. 合并后清理
-git worktree remove .tmp/<名称> && git branch -d docs/xxx
+git worktree remove .tmp/<名称> && git branch -d docs/xxx          # 3. 合并后清理
 ```
 
 - 临时提交不慎落在本地 master：切新分支提 PR（`git checkout -b chore/xxx && git push`），不要绕过门禁
