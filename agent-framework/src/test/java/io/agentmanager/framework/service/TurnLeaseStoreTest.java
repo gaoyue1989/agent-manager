@@ -77,4 +77,49 @@ class TurnLeaseStoreTest {
         assertEquals(Duration.ofSeconds(60), store.ttl(),
             "guard 需要 TTL 来判断「故障已持续超过一个租约周期」");
     }
+
+    @Test
+    void gateAcquireReturnsUpstreamTurnLease() throws Exception {
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var deletePs = mock(java.sql.PreparedStatement.class);
+        when(conn.prepareStatement(contains("INSERT INTO turn_lease"))).thenReturn(insertPs);
+        when(conn.prepareStatement(contains("DELETE FROM turn_lease WHERE session_id = ? AND token = ?")))
+            .thenReturn(deletePs);
+        when(insertPs.executeUpdate()).thenReturn(1);
+
+        var lease = store.acquire("sid-1");
+
+        assertInstanceOf(TurnLeaseGuard.class, lease);
+        assertInstanceOf(io.agentscope.harness.agent.gateway.TurnLease.class, lease);
+        lease.close();
+        verify(deletePs).executeUpdate();
+    }
+
+    /** 上游 SessionTurnGate 契约：slot 被持有时分布式 gate 用 TurnBusyException 而非排队等待 */
+    @Test
+    void gateAcquireThrowsTurnBusyWhenSlotHeld() throws Exception {
+        var insertPs = mock(java.sql.PreparedStatement.class);
+        var deletePs = mock(java.sql.PreparedStatement.class);
+        when(conn.prepareStatement(contains("INSERT INTO turn_lease"))).thenReturn(insertPs);
+        when(conn.prepareStatement(contains("DELETE FROM turn_lease WHERE session_id = ? AND expires_at")))
+            .thenReturn(deletePs);
+        when(insertPs.executeUpdate())
+            .thenThrow(new java.sql.SQLIntegrityConstraintViolationException("dup pk"));
+        when(deletePs.executeUpdate()).thenReturn(0);
+
+        assertThrows(io.agentscope.harness.agent.gateway.TurnBusyException.class,
+            () -> store.acquire("sid-1"));
+    }
+
+    @Test
+    void gateIsRunningMirrorsLeaseState() throws Exception {
+        var selectPs = mock(java.sql.PreparedStatement.class);
+        var rs = mock(java.sql.ResultSet.class);
+        when(conn.prepareStatement(contains("SELECT 1 FROM turn_lease"))).thenReturn(selectPs);
+        when(selectPs.executeQuery()).thenReturn(rs);
+        when(rs.next()).thenReturn(true, false);
+
+        assertTrue(store.isRunning("sid-1"));
+        assertFalse(store.isRunning("sid-1"));
+    }
 }

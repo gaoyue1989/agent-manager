@@ -224,6 +224,20 @@ class TurnLeaseGuardTest {
         verify(store).release("sid", "tok");
     }
 
+    /** 上游 TurnLease 契约（gateway 在 turn 收尾 doFinally 关闭租约）：close 幂等且不抛 */
+    @Test
+    void satisfiesUpstreamTurnLeaseCloseContract() {
+        stubIntervals(Duration.ofMillis(20), Duration.ofSeconds(30));
+        lenient().when(store.renew("sid", "tok")).thenReturn(TurnLeaseStore.RenewOutcome.HELD);
+
+        guard = new TurnLeaseGuard(store, "sid", "tok");
+        assertInstanceOf(io.agentscope.harness.agent.gateway.TurnLease.class, guard);
+
+        assertDoesNotThrow(guard::close);
+        assertDoesNotThrow(guard::close);
+        verify(store, times(1)).release("sid", "tok");
+    }
+
     // ===== 辅助方法 =====
 
     /** 续租线程在另一个线程上追加调用记录，读取时容忍并发写 */

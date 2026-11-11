@@ -8,6 +8,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.agentscope.harness.agent.gateway.TurnLease;
+
 /**
  * Turn 租约守卫（无状态单次流架构共用，见 stateless-single-stream-plan 4.1.3 执行权语义）。
  *
@@ -30,7 +32,7 @@ import org.slf4j.LoggerFactory;
  * confirm 恢复）；挂起期间新消息由 chat 入口预检拒绝；confirm-stream 恢复 = 新执行段需
  * 重新 acquire（带超时排队）。
  */
-public final class TurnLeaseGuard implements AutoCloseable {
+public final class TurnLeaseGuard implements TurnLease {
 
     private static final Logger log = LoggerFactory.getLogger(TurnLeaseGuard.class);
 

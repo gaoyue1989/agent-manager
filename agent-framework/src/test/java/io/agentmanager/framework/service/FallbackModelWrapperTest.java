@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -12,7 +15,9 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import io.agentscope.core.agent.config.FailoverListener;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.ChatUsage;
 import io.agentscope.core.model.Model;
@@ -101,5 +106,74 @@ class FallbackModelWrapperTest {
     void wrapWithNullFallbackReturnsPrimaryDirectly() {
         var primary = model("primary");
         assertSame(primary, FallbackModelWrapper.wrap(primary, null));
+    }
+
+    /** 对齐上游 #3149：primary.stream() 同步抛出（连接池耗尽/DNS 失败等装配期故障）也要走首信号切换 */
+    @Test
+    void shouldSwitchToFallbackWhenPrimaryStreamSetupThrowsSynchronously() {
+        var primary = model("primary");
+        var fallback = model("fallback");
+        var fallbackResp = response("from-fallback");
+        when(primary.stream(any(), any(), any()))
+            .thenThrow(new IllegalStateException("dial tcp: connection refused"));
+        when(fallback.stream(any(), any(), any())).thenReturn(Flux.just(fallbackResp));
+
+        var wrapper = new FallbackModelWrapper(primary, fallback);
+        var result = wrapper.stream(List.of(), List.of(), null).collectList().block();
+
+        assertEquals(1, result.size());
+        assertSame(fallbackResp, result.get(0));
+        verify(fallback).stream(any(), any(), any());
+    }
+
+    @Test
+    void shouldNotifyFailoverListenerAtSwitchSite() {
+        var primary = model("primary");
+        var fallback = model("fallback");
+        when(primary.stream(any(), any(), any()))
+            .thenReturn(Flux.error(new RuntimeException("429 too many requests")));
+        when(fallback.stream(any(), any(), any())).thenReturn(Flux.just(response("from-fallback")));
+        var listener = mock(FailoverListener.class);
+
+        var wrapper = new FallbackModelWrapper(primary, fallback, listener);
+        var result = wrapper.stream(List.of(), List.of(), null).collectList().block();
+
+        assertEquals(1, result.size());
+        var captor = ArgumentCaptor.forClass(Throwable.class);
+        verify(listener).onFailover(same(primary), captor.capture());
+        assertEquals("429 too many requests", captor.getValue().getMessage());
+    }
+
+    @Test
+    void shouldNotNotifyListenerWhenPrimarySucceeds() {
+        var primary = model("primary");
+        var fallback = model("fallback");
+        when(primary.stream(any(), any(), any())).thenReturn(Flux.just(response("primary-ok")));
+        var listener = mock(FailoverListener.class);
+
+        var wrapper = new FallbackModelWrapper(primary, fallback, listener);
+        wrapper.stream(List.of(), List.of(), null).collectList().block();
+
+        verify(listener, never()).onFailover(any(), any());
+    }
+
+    /** 上游 notifyFailover 语义：listener 抛出的异常被吞掉，切换与 fallback 调用不受影响 */
+    @Test
+    void shouldContainListenerExceptionAndProceedWithFallback() {
+        var primary = model("primary");
+        var fallback = model("fallback");
+        var fallbackResp = response("from-fallback");
+        when(primary.stream(any(), any(), any()))
+            .thenReturn(Flux.error(new RuntimeException("429 too many requests")));
+        when(fallback.stream(any(), any(), any())).thenReturn(Flux.just(fallbackResp));
+        var listener = mock(FailoverListener.class);
+        doThrow(new RuntimeException("listener blew up")).when(listener).onFailover(isA(Model.class), isA(Throwable.class));
+
+        var wrapper = new FallbackModelWrapper(primary, fallback, listener);
+        var result = wrapper.stream(List.of(), List.of(), null).collectList().block();
+
+        assertEquals(1, result.size());
+        assertSame(fallbackResp, result.get(0));
+        verify(listener).onFailover(same(primary), isA(Throwable.class));
     }
 }
