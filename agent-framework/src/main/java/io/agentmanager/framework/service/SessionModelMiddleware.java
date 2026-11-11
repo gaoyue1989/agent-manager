@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.agent.config.FailoverListener;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ModelCallInput;
@@ -62,14 +63,23 @@ public class SessionModelMiddleware implements MiddlewareBase {
             if (fallback.isEmpty() || input == null || input.model() == null) {
                 return next.apply(input);
             }
-            Model effective = FallbackModelWrapper.wrap(input.model(), fallback.get());
-            return next.apply(
-                new ModelCallInput(input.messages(), input.tools(), input.options(), effective));
+            return next.apply(new ModelCallInput(input.messages(), input.tools(), input.options(),
+                FallbackModelWrapper.wrap(input.model(), fallback.get(), failoverListener(ctx))));
         }
         // 整体替换 model 后再进链：下游（LLM 记录/OTel span/实际调用）看到的都是生效模型。
         // 会话/默认模型同样套 FallbackModelWrapper（首个信号失败才切换，与 SDK 语义一致）。
-        Model effective = FallbackModelWrapper.wrap(target, fallback.orElse(null));
-        return next.apply(new ModelCallInput(input.messages(), input.tools(), input.options(), effective));
+        return next.apply(new ModelCallInput(input.messages(), input.tools(), input.options(),
+            FallbackModelWrapper.wrap(target, fallback.orElse(null), failoverListener(ctx))));
+    }
+
+    /**
+     * 切换通知（上游 FailoverListener 接线，U6）：fallback 切换发生在中间件缝合线之下，
+     * wrapper 的切换日志无会话归属——此处按会话补一条可定位的记录（debug 页日志面）。
+     */
+    private FailoverListener failoverListener(RuntimeContext ctx) {
+        var sid = ctx != null ? ctx.getSessionId() : null;
+        return (primary, error) -> log.warn("[session-model] model '{}' failed over to fallback (sid={})",
+            primary.getModelName(), sid, error);
     }
 
     /** 按会话解析目标模型；null = 沿用默认模型 */
