@@ -516,27 +516,37 @@ public class OpenSandbox extends AbstractBaseSandbox
      *   <li>① files 请求的实际拓扑：客户端 useServerProxy(true)（OpenSandboxClient.java
      *       :116-117），经 server 代理转发（/v1/sandboxes/{id}/proxy/{n}/...，e2e mock
      *       server.mjs:322-326 对齐录制件形态），并非 execd 容器直连。因此 404 有两个来源，
-     *       需按响应体区分：(a) 代理转发至 execd 的路径判定（活沙箱路径缺失；mock 对
-     *       files/download 与 directories/list 缺失返回<b>空 body</b> 404，
-     *       server.mjs:356/:363）→ 判缺失；(b) 代理自身死沙箱分支（body
-     *       {@code {"message":"sandbox not found"}}，server.mjs:325-326）→ <b>不判缺失</b>，
-     *       向上抛回落真 exec——否则死沙箱（TTL 过期/故障态）的探测被吞成假缺失，且与
-     *       同 turn 真 exec 回落路径的「沙箱不可达」报错矛盾；回落后由 runCommandGuarded
-     *       连续失败熔断收口为一致的故障信号；</li>
-     *   <li>② 仍不采用 SDK ExceptionConverterKt.isFileNotFound（error.code==FILE_NOT_FOUND，
-     *       依赖响应体解析）——空 body 下 code 为 UNEXPECTED_RESPONSE、该判据失配会令
-     *       X 组路径缺失探测回落真 exec，而 read 探测模板 {@code if [ ! -f ...} 不在 mock
-     *       EXEC_WHITELIST（server.mjs:47）→ CommandExecError 126，e2e 回归；</li>
-     *   <li>③ 与 SandboxEnvFile.notFound 同型（sandbox 生命周期 404/410 惯例）——其中的 410
+     *       需按响应体区分：(a) 代理转发至 execd 的路径判定（活沙箱路径缺失）→ 判缺失；
+     *       (b) 代理自身死沙箱分支（TTL 过期/故障态）→ <b>不判缺失</b>，向上抛回落真
+     *       exec——否则死沙箱的探测被吞成假缺失，且与同 turn 真 exec 回落路径的
+     *       「沙箱不可达」报错矛盾；回落后由 runCommandGuarded 连续失败熔断收口为一致的
+     *       故障信号；</li>
+     *   <li>② 两类 404 的响应体形态（2026-11-11 本地双运行时真实 server 探针实证，
+     *       非 mock 推断）：execd 路径缺失 body 为
+     *       {@code {"code":"FILE_NOT_FOUND","message":"file not found. open …"}}；
+     *       server 代理死沙箱 body 的 code 字段带 {@code SANDBOX_NOT_FOUND}——k8s runtime
+     *       （batchsandbox + Pool，业务目标架构）为
+     *       {@code {"code":"KUBERNETES::SANDBOX_NOT_FOUND","message":"Sandbox '<id>' not found"}}，
+     *       docker runtime 为
+     *       {@code {"code":"DOCKER::SANDBOX_NOT_FOUND","message":"Sandbox <id> not found."}}。
+     *       因此判据用 code 字段的 {@code sandbox_not_found}（下划线形）匹配两个真实运行时，
+     *       并保留空格形 {@code sandbox not found} 兼容 e2e mock 旧形态
+     *       （server.mjs:325-326）；mock 对路径缺失返回<b>空 body</b> 404
+     *       （server.mjs:356/:363）→ 空 body 不含任何字样 → 判缺失，e2e 语义不变；</li>
+     *   <li>③ 仍不采用 SDK ExceptionConverterKt.isFileNotFound（error.code==FILE_NOT_FOUND，
+     *       依赖响应体解析）——真实 server 路径缺失虽带 FILE_NOT_FOUND code，但 mock 空 body
+     *       下 code 为 UNEXPECTED_RESPONSE、该判据失配会令 X 组路径缺失探测回落真 exec，
+     *       而 read 探测模板 {@code if [ ! -f ...} 不在 mock EXEC_WHITELIST
+     *       （server.mjs:47）→ CommandExecError 126，e2e 回归；反向仅按 FILE_NOT_FOUND
+     *       正向判缺失也无法排除死沙箱（两者都靠 body 区分，正反判据等价，取排除式）;</li>
+     *   <li>④ 与 SandboxEnvFile.notFound 同型（sandbox 生命周期 404/410 惯例）——其中的 410
      *       是控制面 sandbox 资源态，不纳入。</li>
      * </ul>
      *
-     * <p>残留风险（形态匹配局限）：sandbox-not-found 字样取自 mock 对真实 server 录制件的
-     * 对齐声明（server.mjs:322-326 注释），未在真实 server 上实证。若真实死沙箱 404 的
-     * body 不含该字样，判据退化为「404 即缺失」= 评审前行为（影响有界：下轮 probeAlive
-     * 404/410 → DEAD 重建，OpenSandboxClient.java:312-314）；反向误伤（execd 路径缺失的
-     * 404 body 恰含该字样）仅导致多回落一次真 exec（活沙箱上结果仍正确，只多付一次 exec
-     * 时延）——两个方向的失败模式均安全。
+     * <p>失配方向的失败模式均安全：若未来真实死沙箱 body 变体不含上述字样，判据退化为
+     * 「404 即缺失」= 评审前行为（影响有界：下轮 probeAlive 404/410 → DEAD 重建，
+     * OpenSandboxClient.java:312-314）；反向误伤（路径缺失 body 恰含该字样）仅导致多回落
+     * 一次真 exec（活沙箱上结果仍正确，只多付一次 exec 时延）。
      */
     private static boolean isPathMissing(Throwable e) {
         if (!(e instanceof SandboxApiException api)) {
@@ -546,15 +556,23 @@ public class OpenSandbox extends AbstractBaseSandbox
         if (status == null || status != 404) {
             return false;
         }
-        // server 代理层死沙箱 404（body 命中 "sandbox not found"）不是路径缺失：
+        // server 代理层死沙箱 404（body code 含 SANDBOX_NOT_FOUND，两运行时统一）不是路径缺失：
         // 交调用方向上抛回落真 exec（runCommandGuarded 熔断给出一致故障信号）
         return !isSandboxNotFoundBody(api.getResponseBody());
     }
 
-    /** 404 响应体是否为 server 代理死沙箱形态（{@code {"message":"sandbox not found"}}，大小写不敏感） */
+    /**
+     * 404 响应体是否为 server 代理死沙箱形态（大小写不敏感）：code 字段下划线形
+     * {@code SANDBOX_NOT_FOUND}（docker/k8s 两真实运行时统一）+ 空格形
+     * {@code sandbox not found}（e2e mock 兼容）；空 body 视为 execd 路径缺失
+     * （mock files/download 与 directories/list 的缺失形态）→ 返回 false
+     */
     private static boolean isSandboxNotFoundBody(String responseBody) {
-        return responseBody != null
-            && responseBody.toLowerCase(java.util.Locale.ROOT).contains("sandbox not found");
+        if (responseBody == null || responseBody.isBlank()) {
+            return false;
+        }
+        String lower = responseBody.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("sandbox_not_found") || lower.contains("sandbox not found");
     }
 
     /** read 翻译：缺文件 → __NOT_FOUND__；空文件 → __EMPTY__；否则按 sed '1,Np' 语义取行 */

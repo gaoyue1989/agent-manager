@@ -1274,6 +1274,35 @@ class OpenSandboxTest {
             "{\"message\":\"sandbox not found\"}", false);
     }
 
+    /** 死沙箱 404 真实形态（2026-11-11 本地探针实证）：docker runtime，code 字段下划线形、message 夹 id */
+    private static SandboxApiException dockerRuntimeSandboxNotFound404() {
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("UNEXPECTED_RESPONSE", "dead sandbox"), null,
+            "{\"code\":\"DOCKER::SANDBOX_NOT_FOUND\",\"message\":\"Sandbox "
+                + "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0 not found.\"}", false);
+    }
+
+    /** 死沙箱 404 真实形态（2026-11-11 本地探针实证）：k8s runtime（batchsandbox + Pool，业务目标架构） */
+    private static SandboxApiException kubernetesRuntimeSandboxNotFound404() {
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("UNEXPECTED_RESPONSE", "dead sandbox"), null,
+            "{\"code\":\"KUBERNETES::SANDBOX_NOT_FOUND\",\"message\":\"Sandbox "
+                + "'0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0' not found\"}", false);
+    }
+
+    /** 路径缺失 404 真实形态（2026-11-11 本地探针实证）：execd files API 带 FILE_NOT_FOUND code */
+    private static SandboxApiException fileNotFound404() {
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("FILE_NOT_FOUND", "file not found. open /x: no such file or directory"), null,
+            "{\"code\":\"FILE_NOT_FOUND\",\"message\":\"file not found. open /x: no such file or directory\"}", false);
+    }
+
+    /** 路径缺失 404 mock 形态（server.mjs:356/:363：files/download 与 directories/list 缺失返回空 body） */
+    private static SandboxApiException emptyBody404() {
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("UNEXPECTED_RESPONSE", "not found"), null, null, false);
+    }
+
     @Test
     void readProbeWithProxySandboxNotFound404ShouldFallBackToRealExec() throws Exception {
         // useServerProxy(true)（OpenSandboxClient.java:116-117）下死沙箱（TTL 过期/故障态）
@@ -1292,6 +1321,53 @@ class OpenSandboxTest {
     }
 
     @Test
+    void readProbeWithRealRuntimeSandboxNotFound404ShouldFallBackToRealExec() throws Exception {
+        // 真实 server 探针实证（2026-11-11，双运行时）：死沙箱 404 body 为
+        // {"code":"DOCKER::|KUBERNETES::SANDBOX_NOT_FOUND","message":"Sandbox '<id>' not found"}——
+        // message 里 id 夹在 "Sandbox" 与 "not found" 之间，连续子串 "sandbox not found" 不命中；
+        // 判据必须按 code 字段下划线形 sandbox_not_found 匹配，否则退化为「404 即缺失」（评审 g1 残留风险成真）
+        for (SandboxApiException real404 : List.of(dockerRuntimeSandboxNotFound404(),
+            kubernetesRuntimeSandboxNotFound404())) {
+            var osb = mockOsb(mockExecution(0, "real content", ""));
+            when(osb.files().readByteArray("AGENTS.md")).thenThrow(real404);
+            var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+            var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+            assertTrue(result.ok());
+            assertEquals("real content", result.stdout(), "真实形态死沙箱 404 必须回落真 exec，不得假缺失: " + real404.getResponseBody());
+            verify(osb.commands()).run(READ_PROBE);
+        }
+    }
+
+    @Test
+    void readProbeWithRealFileNotFound404ShouldReturnMissingSentinel() throws Exception {
+        // 真实 execd 路径缺失形态（2026-11-11 探针实证）：body {"code":"FILE_NOT_FOUND",...}
+        // 不含 sandbox_not_found 字样 → 判缺失出哨兵（与死沙箱区分开）
+        var osb = mockOsb(mockExecution(0, "ignored", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(fileNotFound404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertEquals("__NOT_FOUND__", result.stdout(), "真实 FILE_NOT_FOUND 404 须判路径缺失");
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    @Test
+    void readProbeWithEmptyBody404ShouldReturnMissingSentinel() throws Exception {
+        // mock 空 body 404（server.mjs:356/:363）＝ execd 路径缺失 → 判缺失出哨兵（e2e 语义不变）
+        var osb = mockOsb(mockExecution(0, "ignored", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(emptyBody404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertEquals("__NOT_FOUND__", result.stdout(), "空 body 404（mock 缺失形态）须判路径缺失");
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    @Test
     void globProbeWithProxySandboxNotFound404ShouldFallBackToRealFind() throws Exception {
         // 同型：walkFiles 对死沙箱代理 404 不得视作「空目录」输出假空结果
         var osb = mockOsb(mockExecution(0, "tree/x.md\t3\t0", ""));
@@ -1302,6 +1378,20 @@ class OpenSandboxTest {
 
         assertTrue(result.ok());
         assertEquals("tree/x.md\t3\t0", result.stdout(), "死沙箱代理 404 必须回落真 find，不得假空");
+        verify(osb.commands()).run(FIND_PROBE);
+    }
+
+    @Test
+    void globProbeWithRealRuntimeSandboxNotFound404ShouldFallBackToRealFind() throws Exception {
+        // 同型覆盖真实形态：glob 路径的死沙箱代理 404 同样按 code 字段识别
+        var osb = mockOsb(mockExecution(0, "tree/x.md\t3\t0", ""));
+        when(osb.files().listDirectory("tree")).thenThrow(kubernetesRuntimeSandboxNotFound404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("tree/x.md\t3\t0", result.stdout(), "真实形态死沙箱 404 必须回落真 find，不得假空");
         verify(osb.commands()).run(FIND_PROBE);
     }
 }
