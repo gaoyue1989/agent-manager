@@ -84,7 +84,7 @@ test('R5 跨副本并发 confirm 互斥', async () => {
   await pollUntil(async () => history(sid, BASE, U()), (h) => {
     const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
     // 互斥语义 = 工具恰好进入一次终态（success/error 皆可；success 因 H2 同款框架缺陷可能为 error）
-    const terminal = tcs.filter(t => t.name === 'submit_application' && (t.state === 'success' || t.state === 'error')).length;
+    const terminal = tcs.filter(t => t.name === 'mcp__approval__submit_application' && (t.state === 'success' || t.state === 'error')).length;
     return terminal === 1;
   }, 60_000);
 });

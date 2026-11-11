@@ -321,7 +321,8 @@ test('MOD6 托管模型方言矩阵：采样参数在 LLM 请求体中的实际�
     // vllm：合并方言——effort+开关同入一个 chat_template_kwargs，顶层无 effort/thinking
     vllm: { chat_template_kwargs: { enable_thinking: false, reasoning_effort: 'high' }, thinking: null, reasoning_effort: null, frequency_penalty: 0.5 },
     // glm：thinking.type 嵌套对象 + 顶层一等 effort
-    glm: { chat_template_kwargs: null, thinking: { type: 'disabled' }, reasoning_effort: 'high', frequency_penalty: 0.5 },
+    // glm：GLMFormatter（compat 请求整形层）剥离 frequency/presence_penalty，其余同 thinking 嵌套
+    glm: { chat_template_kwargs: null, thinking: { type: 'disabled' }, reasoning_effort: 'high', frequency_penalty: null },
     // deepseek：官方无对应参数——effort/开关均不下发，仅顶层标准项 penalty
     deepseek: { chat_template_kwargs: null, thinking: null, reasoning_effort: null, frequency_penalty: 0.5 },
     // openai：顶层一等 effort，enable_thinking=false 不产生任何附加字段（D8）

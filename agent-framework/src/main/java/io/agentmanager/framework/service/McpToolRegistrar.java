@@ -159,7 +159,7 @@ public class McpToolRegistrar {
             if (forceReadOnly || activeMcpConfig != null || hasAppOnly) {
                 registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping, forceReadOnly);
             } else {
-                toolkit.registerMcpClient(wrapper).block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
+                registerStandard(toolkit, wrapper, mcp.server());
                 recordRegisteredTools(wrapper, mcp.server(), uiMapping);
             }
             registeredWrappers.put(mcp.server(), wrapper);
@@ -239,7 +239,7 @@ public class McpToolRegistrar {
                 // 否则会短路 ask 权限（D6）。
                 registerFiltered(toolkit, wrapper, mcp.server(), activeMcpConfig, uiMapping, forceReadOnly);
             } else {
-                toolkit.registerMcpClient(wrapper).block();
+                registerStandard(toolkit, wrapper, mcp.server());
                 // 标准注册：记录已注册工具信息
                 recordRegisteredTools(wrapper, mcp.server(), uiMapping);
             }
@@ -269,11 +269,12 @@ public class McpToolRegistrar {
     /**
      * 从 Toolkit 与全部 server 级缓存中摘除指定 server（reload 前置步骤）。
      *
-     * <p>SDK 2.0.3 语义（字节码核对）：toolkit.removeMcpClient 只覆盖标准路径注册的连接
+     * <p>SDK 语义（字节码核对）：toolkit.removeMcpClient 只覆盖标准路径注册的连接
      * （McpClientManager.mcpClients 命中才摘工具+close）；registerFiltered 手动路径注册的
-     * 裸名 McpTool 不在其登记里，且 registerAgentTool 的 mcpClientName=null 永不匹配其过滤条件。
-     * 因此本方法对两条路径统一兜底：按 registeredTools 中该 server 的裸名逐个
-     * toolkit.removeTool（幂等），并显式关闭被跟踪的旧 wrapper（防连接/stdio 子进程泄漏）。
+     * McpTool 不在其登记里，且 registerAgentTool 的 mcpClientName=null 永不匹配其过滤条件。
+     * 因此本方法对两条路径统一兜底：按 registeredTools 中该 server 的注册名
+     * （mcp__{server}__{tool}，两路径同口径）逐个 toolkit.removeTool（幂等），
+     * 并显式关闭被跟踪的旧 wrapper（防连接/stdio 子进程泄漏）。
      *
      * @return true 表示该 server 此前已注册
      */
@@ -283,17 +284,17 @@ public class McpToolRegistrar {
         }
         var oldWrapper = registeredWrappers.remove(serverName);
         var had = oldWrapper != null;
-        // ① 手动路径兜底：按裸名逐个摘除（标准路径的工具也是裸名，removeTool 幂等）
-        var bareNames = registeredTools.entrySet().stream()
+        // ① 手动路径兜底：按注册名逐个摘除（标准路径注册名同形态，removeTool 幂等）
+        var registeredNames = registeredTools.entrySet().stream()
             .filter(e -> e.getKey().startsWith(serverName + ":"))
-            .map(e -> e.getValue().name())
+            .map(e -> e.getValue().displayName())
             .toList();
         if (toolkit != null) {
-            for (var bareName : bareNames) {
+            for (var registeredName : registeredNames) {
                 try {
-                    toolkit.removeTool(bareName);
+                    toolkit.removeTool(registeredName);
                 } catch (Exception e) {
-                    log.warn("[MCP] removeTool '{}' failed (continuing cleanup): {}", bareName, e.getMessage());
+                    log.warn("[MCP] removeTool '{}' failed (continuing cleanup): {}", registeredName, e.getMessage());
                 }
             }
         }
@@ -465,7 +466,7 @@ public class McpToolRegistrar {
                 destructiveHints.put(serverName + ":" + toolName,
                     serverTool.annotations() != null && Boolean.TRUE.equals(serverTool.annotations().destructiveHint()));
             }
-            var info = new ToolInfo(toolName, "mcp__" + serverName + "__" + toolName,
+            var info = new ToolInfo(toolName, mcpNamePrefix(serverName) + toolName,
                 description, serverName, uri, "config", true);
             registeredTools.put(serverName + ":" + toolName, info);
             log.info("MCP app-only tool '{}' recorded (display: {}, not registered to Toolkit)",
@@ -478,7 +479,7 @@ public class McpToolRegistrar {
      * app_only 由调用方决定（普通工具注册路径不可能是 app_only）。
      */
     private ToolInfo buildToolInfo(String serverName, McpSchema.Tool tool, UiMapping uiMapping) {
-        var displayName = "mcp__" + serverName + "__" + tool.name();
+        var displayName = mcpNamePrefix(serverName) + tool.name();
         var description = tool.description() != null ? tool.description() : "";
         // 记录 destructiveHint（read_only server 的 UI 调用拒绝写工具用）
         destructiveHints.put(serverName + ":" + tool.name(),
@@ -649,7 +650,8 @@ public class McpToolRegistrar {
     }
 
     /**
-     * 按裸名查询 ui:// 资源 URI（SSE 词表扩展用）。
+     * 按工具名查询 ui:// 资源 URI（SSE 词表扩展用）。入参接受两种形态：注册名
+     * （mcp__{server}__{tool}，SSE 事件携带的模型侧名）或远端裸名（代理等 wire 面）。
      * 跨 server 同名工具（裸名相同）时：多个 ToolInfo 的 uiResourceUri 相同 → 可正常携带；
      * 不同 → 不携带 ui 字段（安全降级为普通工具行，并记 WARN 提示管理员消歧）。
      *
@@ -657,7 +659,8 @@ public class McpToolRegistrar {
      */
     public UiRef resolveUiRef(String toolName) {
         var matches = registeredTools.values().stream()
-            .filter(i -> i.name().equals(toolName) && i.uiResourceUri() != null)
+            .filter(i -> (i.name().equals(toolName) || i.displayName().equals(toolName))
+                && i.uiResourceUri() != null)
             .toList();
         if (matches.isEmpty()) {
             return null;
@@ -740,8 +743,10 @@ public class McpToolRegistrar {
      * 权限装配数据源（AgentScopeConfig 阶段一调用）：
      * - mode：来自 frontmatter config.permission.mode（OafConfig.runtimeConfig().permissionMode()），
      *   非法值回退 DEFAULT 并告警
-     * - tools：各 server permissions.tools 显式声明（仅保留已注册工具；未注册声明告警忽略）
-     * - mcpNames：本次实际注册的 MCP 工具裸名集合（含 ActiveMCP 子集过滤后的结果）
+     * - tools：各 server permissions.tools 显式声明（config 用远端裸名，仅保留已注册工具；
+     *   未注册声明告警忽略），输出键翻译为注册名 mcp__{server}__{tool}——权限引擎按
+     *   模型侧工具名精确匹配（PermissionEngine.rulesFor = map.get(name)）
+     * - mcpNames：本次实际注册的 MCP 工具注册名集合（含 ActiveMCP 子集过滤后的结果）
      *
      * @return {mode, tools, mcpNames}
      */
@@ -751,12 +756,13 @@ public class McpToolRegistrar {
         for (var mcp : oafConfig.mcpServers()) {
             for (var entry : loadToolPermissions(mcp).entrySet()) {
                 var name = entry.getKey();
-                if (!registeredTools.containsKey(mcp.server() + ":" + name)) {
+                var info = registeredTools.get(mcp.server() + ":" + name);
+                if (info == null) {
                     log.warn("MCP {}: permission declared for '{}' but tool not registered (ActiveMCP filtered or server offline), ignored",
                         mcp.server(), name);
                     continue;
                 }
-                var prev = tools.put(name, entry.getValue());
+                var prev = tools.put(info.displayName(), entry.getValue());
                 if (prev != null && !prev.equals(entry.getValue())) {
                     log.warn("MCP tool '{}' declared with conflicting behaviors across servers ({} vs {}), using '{}'",
                         name, prev, entry.getValue(), entry.getValue());
@@ -765,7 +771,7 @@ public class McpToolRegistrar {
         }
         var mcpNames = new LinkedHashSet<String>();
         for (var info : registeredTools.values()) {
-            mcpNames.add(info.name());
+            mcpNames.add(info.displayName());
         }
         return new PermissionRuleResult(mode, tools, mcpNames);
     }
@@ -789,37 +795,61 @@ public class McpToolRegistrar {
     ) {}
 
     /**
-     * 会话级可控（非 app_only）MCP 工具裸名集（session-tool-list-design §4.1）。
-     * registeredTools 派生：两条注册路径同一登记点（标准路径 recordRegisteredTools /
-     * 手动路径 registerFiltered），裸名 = Toolkit 注册名；app_only 工具不注册 Toolkit，
-     * 故排除后与模型侧实际可见 MCP 工具集同口径。reload / clearServer 即时反映。
-     * ToolFilterMiddleware 分类与 /tools sessionTools 汇总共用（单一事实源）。
+     * 会话级可控（非 app_only）MCP 工具注册名集（session-tool-list-design §4.1）。
+     * registeredTools 派生：两条注册路径同一登记点（标准路径 registerStandard /
+     * 手动路径 registerFiltered），注册名 = mcp__{server}__{tool} 模型侧可见名；
+     * app_only 工具不注册 Toolkit，故排除后与模型侧实际可见 MCP 工具集同口径。
+     * reload / clearServer 即时反映。ToolFilterMiddleware 分类与 /tools sessionTools
+     * 汇总共用（单一事实源）。
      */
     public Set<String> getSessionControllableToolNames() {
         var names = new LinkedHashSet<String>();
         for (var info : registeredTools.values()) {
             if (!info.appOnly()) {
-                names.add(info.name());
+                names.add(info.displayName());
             }
         }
         return names;
     }
 
     /**
-     * 按 display 名（{@code mcp__{server}__{tool}}）反查 ToolInfo（session-tool-list-design
-     * §2.1 全名别名解析用）。线性扫描 registeredTools（server/tool 名都可能含下划线，
-     * 按分隔符切分有歧义，比对 displayName 才无歧义）。未注册/被静态摘除的名返回 null。
+     * 远端裸名 → 注册名集（session-tool-list-design §2.1 裸名别名解析用）：
+     * 同名工具跨 server 注册时返回全部条目（调用方无法区分，收敛语义取并集）。
+     * 线性扫描 registeredTools。未注册/被静态摘除的名返回空集。
      */
-    public ToolInfo findByDisplayName(String displayName) {
-        if (displayName == null || displayName.isBlank()) {
-            return null;
+    public List<String> registeredNamesForWireName(String wireName) {
+        if (wireName == null || wireName.isBlank()) {
+            return List.of();
         }
+        var names = new ArrayList<String>();
         for (var info : registeredTools.values()) {
-            if (displayName.equals(info.displayName())) {
-                return info;
+            if (!info.appOnly() && info.name().equals(wireName)) {
+                names.add(info.displayName());
             }
         }
-        return null;
+        return names;
+    }
+
+    /**
+     * 任意形态工具名 → 注册名（mcp__{server}__{tool}）：注册名原样返回，远端裸名
+     * 翻译为注册名（同名跨 server 取先注册者），未知名原样返回。供 SDK 事件里的
+     * wire 形态名（如恢复段 ToolResultEndEvent）归一到模型侧口径。
+     */
+    public String displayNameFor(String name) {
+        if (name == null || name.isBlank()) {
+            return name;
+        }
+        for (var info : registeredTools.values()) {
+            if (info.displayName().equals(name)) {
+                return name;
+            }
+        }
+        for (var info : registeredTools.values()) {
+            if (info.name().equals(name)) {
+                return info.displayName();
+            }
+        }
+        return name;
     }
 
     /** 包内测试桥接：直接登记 ToolInfo（SessionToolScopeServiceTest 用，免起 MCP 连接） */
@@ -833,18 +863,25 @@ public class McpToolRegistrar {
      * 支持 ActiveMCP.json 子集过滤：enabled=false 的工具不注册。
      * 支持 ui.app_only 声明：app_only 工具不注册（对 LLM 隐藏），仅记录 ToolInfo。
      *
-     * 注册名使用远端裸名（tool.name()），确保 McpTool.callAsync 正确执行。
-     * mcp__{server}__{tool} 前缀名仅用于 registeredTools 缓存和 API 展示。
-     *
-     * 注：McpTool.getName() 是 final 字段，callAsync 用它转发给远端 MCP server，
-     * 无法分离 LLM 暴露名和执行名。跨 server 同名工具冲突通过 serverName 字段区分。
-     *
      * @param activeMcpConfig ActiveMCP.json 的 toolName -> enabled 映射；null 表示不限制
      * @param uiMapping       config.yaml ui 段解析结果（app_only 过滤 + UI 元数据）
      */
     private void registerReadOnly(Toolkit toolkit, McpClientWrapper wrapper, String serverName,
                                   Map<String, Boolean> activeMcpConfig, UiMapping uiMapping) {
         registerFiltered(toolkit, wrapper, serverName, activeMcpConfig, uiMapping, true);
+    }
+
+    /** MCP 工具模型侧可见名前缀（{@code mcp__{server}__}，wire 名保持远端裸名） */
+    static String mcpNamePrefix(String serverName) {
+        return "mcp__" + serverName + "__";
+    }
+
+    private void registerStandard(Toolkit toolkit, McpClientWrapper wrapper, String serverName) {
+        wrapper.initialize().block(java.time.Duration.ofSeconds(RELOAD_BLOCK_TIMEOUT_SECONDS));
+        toolkit.registration()
+            .mcpClient(wrapper)
+            .mcpToolNamePrefix(mcpNamePrefix(serverName))
+            .apply();
     }
 
     /**
@@ -878,8 +915,10 @@ public class McpToolRegistrar {
                     continue;
                 }
             }
-            // 使用远端裸名注册，确保 callAsync 正确执行
+            // 双名注册：模型侧可见名 = mcp__{server}__{tool}（跨 server 同名可区分），
+            // callAsync 经 remoteToolName 用远端裸名执行（上游 #3080 双名构造器）
             var agentTool = new io.agentscope.core.tool.mcp.McpTool(
+                mcpNamePrefix(serverName) + tool.name(),
                 tool.name(),
                 tool.description() != null ? tool.description() : "",
                 io.agentscope.core.tool.mcp.McpTool.convertMcpSchemaToParameters(
@@ -891,10 +930,9 @@ public class McpToolRegistrar {
                 readOnlyHint
             );
             toolkit.registerTool(agentTool);
-            // 缓存 key 用原始工具名，API 展示用 mcp__ 前缀名（跨 server 区分）
             registeredTools.put(serverName + ":" + tool.name(), buildToolInfo(serverName, tool, uiMapping));
-            log.info("MCP tool '{}' registered (display: {}, {})", tool.name(),
-                "mcp__" + serverName + "__" + tool.name(), readOnlyHint ? "read-only" : "permission-evaluated");
+            log.info("MCP tool '{}' registered as '{}' ({})", tool.name(),
+                mcpNamePrefix(serverName) + tool.name(), readOnlyHint ? "read-only" : "permission-evaluated");
         }
         // app_only 工具记录 ToolInfo（供代理校验 + /tools 标记）
         recordAppOnlyTools(serverName, uiMapping, tools);

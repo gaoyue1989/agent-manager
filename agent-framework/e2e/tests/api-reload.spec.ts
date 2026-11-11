@@ -77,7 +77,7 @@ test.describe.serial('OAF 动态 reload', () => {
     const stream = chat({ message: '[E2E:tool:mcp_echo](reload-probe)', userId: 'e2e-reload', sessionId: sid });
     await waitTerminal(stream);
     expect(stream.terminal?.type).toBe('done');
-    expect(toolNames(stream.frames)).toContain('bench_echo');
+    expect(toolNames(stream.frames)).toContain('mcp__bench__bench_echo');
   });
 
   test('RL2 auto 识别仅 MCP 文件变化并保持 agent 引用', async ({ request }) => {

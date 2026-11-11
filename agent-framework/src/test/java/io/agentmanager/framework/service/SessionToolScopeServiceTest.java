@@ -2,10 +2,10 @@ package io.agentmanager.framework.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
@@ -15,15 +15,15 @@ import io.agentmanager.framework.service.McpToolRegistrar.ToolInfo;
 
 /**
  * {@link SessionToolScopeService} 单测（session-tool-list-design §2.1/§4.1）：
- * 三分类名单解析——裸名精确（MCP/自定义）、{@code mcp__{server}__{tool}} 全名别名、
- * 内置名 WARN 不生效、未知名忽略；app_only 全名不可解析；空白/重复归一。
- * 三个数据源方法以匿名子类打桩（构造器依赖置 null，覆写后不触碰）。
+ * 三分类名单解析——注册名精确（MCP=mcp__{server}__{tool}/自定义）、远端裸名别名反查
+ * （同名工具跨 server 全保留）、内置名 WARN 不生效、未知名忽略；app_only 不可解析；
+ * 空白/重复归一。三个数据源方法以匿名子类打桩（构造器依赖置 null，覆写后不触碰）。
  */
 class SessionToolScopeServiceTest {
 
-    /** 打桩：mcp/custom 集与全名映射由用例直接给定 */
+    /** 打桩：mcp/custom 集与裸名→注册名映射由用例直接给定 */
     private SessionToolScopeService scope(Set<String> mcp, Set<String> custom,
-                                          Set<String> mcpFullNames) {
+                                          Map<String, List<String>> wireAliases) {
         return new SessionToolScopeService(null, null) {
             @Override
             public Set<String> mcpToolNames() {
@@ -36,74 +36,82 @@ class SessionToolScopeServiceTest {
             }
 
             @Override
-            protected ToolInfo byFullName(String fullName) {
-                return mcpFullNames.contains(fullName)
-                    ? new ToolInfo(fullName.replaceFirst("^mcp__[a-z]+__", ""),
-                        fullName, "d", fullName.split("__")[1])
-                    : null;
+            protected List<String> byWireName(String wireName) {
+                return wireAliases.getOrDefault(wireName, List.of());
             }
         };
     }
 
     @Test
-    void bareNamesShouldResolveDirectly() {
-        var s = scope(Set.of("query", "search"), Set.of("get_order"), Set.of());
-        var r = s.resolve(List.of("query", "get_order"));
-        assertEquals(Set.of("query", "get_order"), r.keepNames());
+    void registeredNamesShouldResolveDirectly() {
+        var s = scope(Set.of("mcp__db__query", "mcp__db__search"), Set.of("get_order"), Map.of());
+        var r = s.resolve(List.of("mcp__db__query", "get_order"));
+        assertEquals(Set.of("mcp__db__query", "get_order"), r.keepNames());
     }
 
     @Test
-    void fullNameAliasShouldResolveToBareName() {
-        var s = scope(Set.of("query"), Set.of(), Set.of("mcp__db__query"));
-        var r = s.resolve(List.of("mcp__db__query"));
-        assertEquals(Set.of("query"), r.keepNames(), "全名别名必须归一为裸名");
+    void wireNameAliasShouldResolveToRegisteredNames() {
+        var s = scope(Set.of("mcp__db__query"), Set.of(),
+            Map.of("query", List.of("mcp__db__query")));
+        var r = s.resolve(List.of("query"));
+        assertEquals(Set.of("mcp__db__query"), r.keepNames(), "裸名别名必须归一为注册名");
     }
 
     @Test
-    void bareNameShouldWinOverFullNameLookup() {
-        // 裸名精确匹配优先：即使全名也能解析，裸名命中先行
-        var s = scope(Set.of("query"), Set.of(), Set.of("mcp__db__query"));
-        assertEquals(Set.of("query"), s.resolve(List.of("query")).keepNames());
+    void wireNameAliasKeepsAllServersWithSameToolName() {
+        var s = scope(Set.of("mcp__db__query", "mcp__dw__query"), Set.of(),
+            Map.of("query", List.of("mcp__db__query", "mcp__dw__query")));
+        var r = s.resolve(List.of("query"));
+        assertEquals(Set.of("mcp__db__query", "mcp__dw__query"), r.keepNames(),
+            "同名工具跨 server：调用方无法区分，别名取并集");
+    }
+
+    @Test
+    void registeredNameShouldWinOverWireAliasLookup() {
+        // 注册名精确匹配优先：即使裸名别名也能解析，注册名命中先行
+        var s = scope(Set.of("mcp__db__query"), Set.of(),
+            Map.of("query", List.of("mcp__db__query")));
+        assertEquals(Set.of("mcp__db__query"), s.resolve(List.of("mcp__db__query")).keepNames());
     }
 
     @Test
     void unknownAndBuiltinNamesShouldBeIgnored() {
-        var s = scope(Set.of("query"), Set.of("get_order"), Set.of());
-        var r = s.resolve(List.of("read_file", "no_such_tool", "query"));
-        assertEquals(Set.of("query"), r.keepNames(),
+        var s = scope(Set.of("mcp__db__query"), Set.of("get_order"), Map.of());
+        var r = s.resolve(List.of("read_file", "no_such_tool", "mcp__db__query"));
+        assertEquals(Set.of("mcp__db__query"), r.keepNames(),
             "内置名（read_file）与未知名都不进 keepNames（内置恒可见、未知名忽略）");
     }
 
     @Test
     void nullBlankAndDuplicatesShouldNormalize() {
-        var s = scope(Set.of("query", "search"), Set.of(), Set.of());
-        var r = s.resolve(java.util.Arrays.asList(" query ", null, "", "query", "search"));
-        assertEquals(Set.of("query", "search"), r.keepNames());
+        var s = scope(Set.of("mcp__db__query", "mcp__db__search"), Set.of(), Map.of());
+        var r = s.resolve(java.util.Arrays.asList(" mcp__db__query ", null, "", "mcp__db__query", "mcp__db__search"));
+        assertEquals(Set.of("mcp__db__query", "mcp__db__search"), r.keepNames());
     }
 
     @Test
-    void fullNamePointingToUnknownRegistrationShouldBeInvalid() {
-        var s = scope(Set.of("query"), Set.of(), Set.of());
-        var r = s.resolve(List.of("mcp__other__tool", "query"));
-        assertEquals(Set.of("query"), r.keepNames(), "未注册全名不解析（自然无效）");
+    void unknownWireNameShouldBeInvalid() {
+        var s = scope(Set.of("mcp__db__query"), Set.of(), Map.of());
+        var r = s.resolve(List.of("no_such_wire_name", "mcp__db__query"));
+        assertEquals(Set.of("mcp__db__query"), r.keepNames(), "未注册裸名不解析（自然无效）");
     }
 
     @Test
     void emptyRequestedShouldYieldEmptyKeepSet() {
-        var s = scope(Set.of("query"), Set.of("get_order"), Set.of());
+        var s = scope(Set.of("mcp__db__query"), Set.of("get_order"), Map.of());
         var r = s.resolve(List.of());
         assertTrue(r.keepNames().isEmpty(), "显式 [] → 空 keepNames（= 仅内置）");
     }
 
     @Test
-    void byFullNameBridgeShouldReturnNullForNullOrBlank() {
+    void wireAliasBridgeShouldReturnEmptyForNullOrBlank() {
         var registrar = new McpToolRegistrarTestBridge();
-        assertNull(registrar.findByDisplayName(null));
-        assertNull(registrar.findByDisplayName("  "));
-        assertNull(registrar.findByDisplayName("mcp__none__tool"));
+        assertTrue(registrar.registeredNamesForWireName(null).isEmpty());
+        assertTrue(registrar.registeredNamesForWireName("  ").isEmpty());
+        assertTrue(registrar.registeredNamesForWireName("mcp__none__tool").isEmpty());
     }
 
-    /** 真实 McpToolRegistrar 桥接：findByDisplayName 空值/未注册防御（不触碰任何注册状态） */
+    /** 真实 McpToolRegistrar 桥接：registeredNamesForWireName 空值/未注册防御（不触碰任何注册状态） */
     private static final class McpToolRegistrarTestBridge extends McpToolRegistrar {
         McpToolRegistrarTestBridge() {
             super(new AgentManagerProperties(
@@ -119,8 +127,8 @@ class SessionToolScopeServiceTest {
     }
 
     @Test
-    void appOnlyFullNameShouldNotLeakIntoKeepSet_viaRealRegistrar() {
-        // 真实 registrar 链路：app_only 工具登记了 ToolInfo，但 resolve 全名解析必须排除
+    void appOnlyToolShouldNotLeakIntoKeepSet_viaRealRegistrar() {
+        // 真实 registrar 链路：app_only 工具登记了 ToolInfo，但注册名集与裸名别名都必须排除
         var registrar = new McpToolRegistrar(props());
         registrar.putToolInfoForTest(new ToolInfo("card_ui", "mcp__ui__card_ui", "d", "ui",
             "ui://x", "config", true));
@@ -134,12 +142,12 @@ class SessionToolScopeServiceTest {
         };
 
         // getSessionControllableToolNames 不含 app_only
-        assertEquals(Set.of("query"), registrar.getSessionControllableToolNames());
-        // 全名解析 app_only 被排除（byFullName 返回 info 但 appOnly → 不进 keepNames）
-        var r = s.resolve(List.of("mcp__ui__card_ui", "query"));
-        assertEquals(Set.of("query"), r.keepNames());
-        assertTrue(registrar.getSessionControllableToolNames().contains("query"));
-        assertFalse(registrar.getSessionControllableToolNames().contains("card_ui"));
+        assertEquals(Set.of("mcp__db__query"), registrar.getSessionControllableToolNames());
+        // 注册名精确解析 app_only 被排除（不在 mcp 集）；裸名别名同样排除（appOnly 过滤）
+        var r = s.resolve(List.of("mcp__ui__card_ui", "card_ui", "mcp__db__query"));
+        assertEquals(Set.of("mcp__db__query"), r.keepNames());
+        assertTrue(registrar.getSessionControllableToolNames().contains("mcp__db__query"));
+        assertFalse(registrar.getSessionControllableToolNames().contains("mcp__ui__card_ui"));
     }
 
     private AgentManagerProperties props() {

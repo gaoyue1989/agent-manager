@@ -134,7 +134,7 @@ test('S5 MCP 只读工具 bench_echo + 用户级 header/_meta 注入', async () 
   const arg = `mcp-${uniq()}`;
   const stream = chat({ message: `[E2E:tool:mcp_echo](${arg})`, userId: U, sessionId: sid });
   await waitTerminal(stream);
-  expect(toolNames(stream.frames)).toContain('bench_echo');
+  expect(toolNames(stream.frames)).toContain('mcp__bench__bench_echo');
   expect(stream.terminal?.type).toBe('done');
   const results = toolResults(stream.frames);
   expect(String((results[0] as Record<string, unknown>).state ?? '')).toBe('SUCCESS');
@@ -163,7 +163,7 @@ test('S5b chat 请求级透传头注入 MCP（reqHeader: 取值源 + _meta 剥�
     headers: { Authorization: `Bearer ${token}` },
   });
   await waitTerminal(stream);
-  expect(toolNames(stream.frames)).toContain('bench_echo');
+  expect(toolNames(stream.frames)).toContain('mcp__bench__bench_echo');
   expect(stream.terminal?.type).toBe('done');
 
   type LastCall = { xUserId?: string | null; authorization?: string | null; meta?: Record<string, unknown> | null };
@@ -192,7 +192,7 @@ test('S5c chat 请求级透传头注入工具参数（arguments 通道）', asyn
     headers: { taskId },
   });
   await waitTerminal(stream);
-  expect(toolNames(stream.frames)).toContain('bench_echo');
+  expect(toolNames(stream.frames)).toContain('mcp__bench__bench_echo');
   expect(stream.terminal?.type).toBe('done');
 
   type LastCall = {
@@ -205,7 +205,8 @@ test('S5c chat 请求级透传头注入工具参数（arguments 通道）', asyn
     async () => (await (await fetch(`${BENCH_MCP}/last-call`)).json()) as LastCall,
     v => v.toolName === 'bench_echo' && v.arguments?.taskId === taskId,
   );
-  // 注入参数原值到达工具入参；既有 userId header/_meta 双通道不受影响
+  // 注入参数原值到达工具入参（toolName 为 wire 裸名——服务器侧观测的是 remoteToolName）；
+  // 既有 userId header/_meta 双通道不受影响
   expect(last.arguments?.taskId).toBe(taskId);
   expect(last.xUserId).toBe(U);
   expect(last.meta?.userId).toBe(U);
@@ -540,7 +541,7 @@ test('H1 ask 挂起与状态', async ({ request }) => {
   const ask = stream.terminal;
   expect(ask?.type).toBe('permission_ask');
   const toolCalls = (ask as Record<string, unknown>).tool_calls as Array<Record<string, unknown>>;
-  expect(toolCalls[0].name).toBe('submit_application');
+  expect(toolCalls[0].name).toBe('mcp__approval__submit_application');
   const st = await status(sid, BASE, U);
   expect(st.state).toBe('waiting_confirm');
   const h = await pollUntil(
@@ -568,22 +569,22 @@ test('H2 批准（confirm-stream）', async () => {
   const results = toolResults(rec.frames);
   expect(String((results[0] as Record<string, unknown>).state ?? '')).toBe('SUCCESS');
   // HITL 恢复流没有 TOOL_CALL_* 重放：RESULT_END 后必须补发调用摘要，再发结果预览
-  const summary = rec.frames.find(f => f.type === 'tool_call_summary' && f.toolName === 'submit_application') as Record<string, unknown> | undefined;
+  const summary = rec.frames.find(f => f.type === 'tool_call_summary' && f.toolName === 'mcp__approval__submit_application') as Record<string, unknown> | undefined;
   expect(summary, 'HITL 恢复流缺少 tool_call_summary 兜底帧').toBeTruthy();
   expect(String(summary!.summary)).toBe('执行 submit_application');
   expect(String(summary!.replyId ?? '')).not.toBe('');
-  const preview = rec.frames.find(f => f.type === 'tool_result_preview' && f.toolName === 'submit_application') as Record<string, unknown> | undefined;
+  const preview = rec.frames.find(f => f.type === 'tool_result_preview' && f.toolName === 'mcp__approval__submit_application') as Record<string, unknown> | undefined;
   expect(preview, 'HITL 恢复流缺少 tool_result_preview').toBeTruthy();
   expect(rec.frames.indexOf(summary!)).toBeLessThan(rec.frames.indexOf(preview!));
   // 兜底摘要走 emitSynthetic 落库：断连续传/刷新回放必须同样可见
   const replay = subscribe(sid, 0, BASE, undefined, U);
   await waitTerminal(replay);
-  expect(replay.frames.some(f => f.type === 'tool_call_summary' && f.toolName === 'submit_application')).toBe(true);
-  expect(replay.frames.some(f => f.type === 'tool_result_preview' && f.toolName === 'submit_application')).toBe(true);
+  expect(replay.frames.some(f => f.type === 'tool_call_summary' && f.toolName === 'mcp__approval__submit_application')).toBe(true);
+  expect(replay.frames.some(f => f.type === 'tool_result_preview' && f.toolName === 'mcp__approval__submit_application')).toBe(true);
   const h = await history(sid, BASE, U);
   expect(h.pendingConfirm ?? null).toBeNull();
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
-  expect(tcs.some(t => t.name === 'submit_application' && t.state === 'success')).toBe(true);
+  expect(tcs.some(t => t.name === 'mcp__approval__submit_application' && t.state === 'success')).toBe(true);
 });
 
 test('H3 拒绝', async () => {
@@ -598,7 +599,7 @@ test('H3 拒绝', async () => {
   expect(rec.terminal?.type).toBe('done');
   const h = await history(sid, BASE, U);
   const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
-  expect(tcs.some(t => t.name === 'submit_application' && t.state === 'denied')).toBe(true);
+  expect(tcs.some(t => t.name === 'mcp__approval__submit_application' && t.state === 'denied')).toBe(true);
 });
 
 test('H4 重复确认 409', async () => {
@@ -625,7 +626,7 @@ const r = await confirmSync(sid, [{ tool_call_id: tcid, confirmed: true }], BASE
   expect(r.status).toBe(200);
   await pollUntil(async () => history(sid, BASE, U), (h) => {
     const tcs = (h.messages as Array<Record<string, unknown>>).flatMap(m => (m.tool_calls ?? []) as Array<Record<string, unknown>>);
-    return tcs.some(t => t.name === 'submit_application' && t.state === 'success');
+    return tcs.some(t => t.name === 'mcp__approval__submit_application' && t.state === 'success');
   }, 60_000);
 });
 
@@ -662,8 +663,8 @@ test('M1 TOOL_CALL_START 携带 ui 元数据', async () => {
   const sid = sessionIdFor(`m1-${uniq()}`);
   const stream = chat({ message: `[E2E:mcpapp:form](${app})`, userId: U, sessionId: sid });
   await waitTerminal(stream);
-  const tc = stream.frames.find(f => f.type === 'TOOL_CALL_START' && f.toolName === 'show_application_form') as Record<string, unknown> | undefined;
-  expect(tc, '未收到 show_application_form TOOL_CALL_START').toBeTruthy();
+  const tc = stream.frames.find(f => f.type === 'TOOL_CALL_START' && f.toolName === 'mcp__approval__show_application_form') as Record<string, unknown> | undefined;
+  expect(tc, '未收到 mcp__approval__show_application_form TOOL_CALL_START').toBeTruthy();
   const ui = tc!.ui as Record<string, string>;
   expect(ui.resourceUri).toBe('ui://approval/application-form.html');
   expect(ui.server).toBe('approval');
@@ -925,7 +926,7 @@ test('SKL-L2 /agui 未开启实例不被服务（缺省关闭装配）', async (
 // 真实残余面 = SDK 运行时集成：收敛后的 schema 是否真达模型调用、被过滤工具的幻觉调用是否真达
 // onActing 合成 DENY、SSE 帧形态与跨轮恢复。观测通道与 SKL-L 同源：GET /threads/{sid}/llm-calls
 // 的 request.tools 即过滤后模型可见 schema 名列表（LlmLoggingMiddleware input.tools().map(getName)）。
-// 工具实名注记：MCP 工具叫 bench_echo（[E2E:tool:mcp_echo] 只是场景 marker 键，不是工具名）；
+// 工具实名注记：MCP 工具注册名是 mcp__bench__bench_echo（wire 名 bench_echo）（[E2E:tool:mcp_echo] 只是场景 marker 键，不是工具名）；
 // 自定义业务工具 echo/get_current_time；白名单传未知名会被「未知名忽略」静默退化——不在此用。
 // 随必需检查「E2E 核心（API+UI）」生效；仓库根 e2e/session-tools-e2e.sh 为手动 kind 脚本不入门禁。
 
@@ -957,7 +958,7 @@ test('TL-L1 会话级工具白名单收敛进模型请求，下一轮恢复全�
   await waitTerminal(r1);
   expect(r1.terminal?.type).toBe('done');
   const tools1 = await visibleToolsOfRound(request, sid, tokenA);
-  expect(tools1, '白名单内 MCP 工具未进模型请求（metadata 传递链路断）').toContain('bench_echo');
+  expect(tools1, '白名单内 MCP 工具未进模型请求（metadata 传递链路断）').toContain('mcp__bench__bench_echo');
   expect(tools1, '自定义工具 echo 应被白名单收敛（不进模型请求）').not.toContain('echo');
   expect(tools1, '自定义工具 get_current_time 应被白名单收敛').not.toContain('get_current_time');
   expect(tools1, '内置工具应恒保留（白名单只收敛 MCP+自定义）').toContain('memory_search');
@@ -968,7 +969,7 @@ test('TL-L1 会话级工具白名单收敛进模型请求，下一轮恢复全�
   expect(r2.terminal?.type).toBe('done');
   const tools2 = await visibleToolsOfRound(request, sid, tokenB);
   expect(tools2, '缺省恢复轮未恢复自定义工具 echo（收敛跨轮泄漏）').toContain('echo');
-  expect(tools2, '缺省恢复轮未恢复 MCP 工具 bench_echo').toContain('bench_echo');
+  expect(tools2, '缺省恢复轮未恢复 MCP 工具 bench_echo').toContain('mcp__bench__bench_echo');
 });
 
 // TL-L2（onActing 负例）：白名单外 MCP 工具的幻觉调用——mock 按 marker 重放 bench_echo 调用
@@ -990,14 +991,14 @@ test('TL-L2 白名单外 MCP 工具调用不被执行，DENIED 结果注入会�
   // 未执行：无终局结果帧（S5 正常执行会发 TOOL_RESULT_END state=SUCCESS；
   // 容许将来 SDK 把 DENIED 帧送达 SSE——只拦「真实执行/报错」类终局态）
   const executed = toolResults(stream.frames).find(r =>
-    String(r.toolCallName ?? '') === 'bench_echo'
+    String(r.toolCallName ?? '') === 'mcp__bench__bench_echo'
     && ['SUCCESS', 'ERROR', 'COMPLETED', 'FAILURE'].includes(String(r.state ?? '')));
   expect(executed, '白名单外 bench_echo 被真实执行了（兜底防线失效）').toBeUndefined();
   // DENIED 结果注入会话归档：tool_calls[].state=denied + deny 文案（前端历史渲染数据源）
   const h = await history(sid, BASE, U);
   const assistantTcs = ((h.messages as Array<Record<string, unknown>>) ?? [])
     .flatMap(m => (m.tool_calls as Array<Record<string, unknown>> | undefined) ?? []);
-  const denied = assistantTcs.find(tc => String(tc.name ?? '') === 'bench_echo');
+  const denied = assistantTcs.find(tc => String(tc.name ?? '') === 'mcp__bench__bench_echo');
   expect(denied, 'bench_echo 调用未出现在会话归档').toBeTruthy();
   expect(String(denied?.state)).toBe('denied');
   expect(String(denied?.output ?? '')).toContain("is not in this turn's allowed tools list");
