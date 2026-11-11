@@ -618,9 +618,10 @@ curl -s -N -X POST "http://localhost:8100/threads/chat" \
 
 ```
 data: {"type":"session_created","session_id":"..."}   ← 仅当请求未传 sessionId
-data: {"type":"waiting"}                    ← 排队等待时每 15s 一帧（防 Nginx 读超时）
-data: {"type":"TEXT_BLOCK_DELTA","delta":"Hello","replyId":"...","blockId":"..."}
-data: {"type":"AGENT_END","replyId":"..."}
+data: {"type":"waiting","session_id":"..."}  ← 排队等待时每 15s 一帧（防 Nginx 读超时）
+data: {"type":"TEXT_BLOCK_DELTA","session_id":"...","delta":"Hello","replyId":"...","blockId":"..."}
+data: {"type":"AGENT_END","session_id":"...","replyId":"..."}
+data: {"type":"turn_finished","state":"completed","usage":{"input_tokens":123,"output_tokens":45,"total_tokens":168,"model_calls":1},"elapsed_ms":4200,"session_id":"...","replyId":"...","turnId":"..."}
 ```
 
 **SSE 事件类型:**
@@ -640,7 +641,10 @@ data: {"type":"AGENT_END","replyId":"..."}
 | `file_ready` | `present_file` / `present_url` 工具产物就绪（含 `file_id`/`file_name`/`mime_type`/`size`/`download_url`，前端渲染下载卡片） |
 | `AGENT_RESULT` | 最终结果聚合（实测于 HITL 恢复段末尾，`AGENT_END` 之前） |
 | `USER_CONFIRM_RESULT` | HITL 确认结果落地（`confirm-stream` 恢复段首个业务事件） |
-| `AGENT_START` / `AGENT_END` | 执行段起止；**`AGENT_END` 之后流直接关闭** |
+| `AGENT_START` | 执行段开始；`created_at` = agent 开始处理的墙钟时刻（ISO-8601 UTC，SDK 原样透传；2026-11-11 新增） |
+| `AGENT_END` | 执行段结束；**该帧之后流关闭前还会发一帧 `turn_finished`** |
+| `turn_finished` | **turn 收尾汇总帧（2026-11-11 新增，落库流最后一帧）**：`state`（completed/waiting_confirm/error/cancelled/interrupted）+ `usage`（`input_tokens`/`output_tokens`/`total_tokens` 求和 + `model_calls`）+ `elapsed_ms`（agent 执行段耗时，不含排队等租约）；终态判据不变（AGENT_END/error/cancelled） |
+| （通用，2026-11-11 新增） | 经 EventBus 的每条 data 帧（含 delta 热路径）顶层恒带 `session_id`；`/subscribe` 回放对升级前存量行由读端兜底补齐，客户端对极旧行仍应容忍缺失 |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 结果返回时发出，snake_case 四字段） |
 | `error` | 错误（如 `turn_in_progress` 排队超时、`turn_pending_confirm`、`unknown_model`） |
 | `done` | **仅由 `/threads/{sid}/subscribe` 补发**——`POST /threads/chat` 不发此帧 |

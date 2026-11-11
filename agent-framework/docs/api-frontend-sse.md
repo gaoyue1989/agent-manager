@@ -126,13 +126,14 @@ Accept: text/event-stream
 | `fileIds` | Array\<String\> | ⚠️ | 上传文件 ID 列表 |
 | `skills` | Array\<String\> | ❌ | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进 `<available_skills>`、不可 `load_skill_through_path` 加载、`/Skill` 不注入；未知技能名忽略、已禁用技能剔除） |
 
-**新会话 SSE 响应示例：**
+**新会话 SSE 响应示例（2026-11-11 起每帧带 `session_id`，末帧 `turn_finished`）：**
 
 ```
 data: {"type":"session_created","session_id":"auto-uuid-xxx"}
-data: {"type":"AGENT_START","replyId":"r1","sessionId":"auto-uuid-xxx",...}
-data: {"type":"TEXT_BLOCK_DELTA","delta":"你好！","replyId":"r1","blockId":"b1",...}
-data: {"type":"AGENT_END","replyId":"r1",...}
+data: {"type":"AGENT_START","session_id":"auto-uuid-xxx","created_at":"2026-11-11T09:27:50.601Z","replyId":"r1","turnId":"r1",...}
+data: {"type":"TEXT_BLOCK_DELTA","session_id":"auto-uuid-xxx","delta":"你好！","replyId":"r1","blockId":"b1",...}
+data: {"type":"AGENT_END","session_id":"auto-uuid-xxx","replyId":"r1",...}
+data: {"type":"turn_finished","state":"completed","usage":{"input_tokens":123,"output_tokens":45,"total_tokens":168,"model_calls":1},"elapsed_ms":4200,"session_id":"auto-uuid-xxx","replyId":"r1","turnId":"r1"}
 ```
 
 **续接已有会话：**
@@ -235,7 +236,7 @@ GET /threads/{sessionId}/status
 |-------|------|----------|
 | `working` | 有活跃租约，或本会话有排队中的 turn（意图行存在），正在执行 | 走 `/subscribe?afterSeq={latest_event_seq}&replyId={reply_id}`（排队中 `reply_id` 即本轮 turn id） |
 | `waiting_confirm` | 挂起等待人工确认 | 渲染确认卡（用 `pending_confirm` 重建） |
-| `completed` | turn 终态（`AGENT_END` / `error` / `cancelled`） | 回放历史（失败原因见 history 的失败留痕；用户停止见 `stopped: true`） |
+| `completed` | turn 终态（`AGENT_END` / `error` / `cancelled` / `turn_finished`——落库流最后一帧） | 回放历史（失败原因见 history 的失败留痕；用户停止见 `stopped: true`） |
 | `interrupted` | 有事件但**无租约、无待确认**——执行副本崩溃或被抢占 | 展示中断态，允许重发 |
 | `idle` | 无事件、无租约、无待确认 | 显示空白输入状态 |
 | `failed` | 排队的 turn 超时或建立失败（无事件可回放；`error` 给原因） | 展示失败提示，不订阅 |
@@ -339,13 +340,14 @@ Accept: text/event-stream
 前端可复用同一渲染逻辑。
 
 ```
-data: {"type":"AGENT_START","replyId":"reply-001",...,"id":"evt-100"}
-data: {"type":"TOOL_RESULT_START","toolCallId":"call-abc","toolCallName":"write_file",...,"id":"evt-101"}
-data: {"type":"TOOL_RESULT_TEXT_DELTA","delta":"File written successfully","toolCallId":"call-abc",...,"id":"evt-102"}
-data: {"type":"TOOL_RESULT_END","state":"SUCCESS","toolCallId":"call-abc",...,"id":"evt-103"}
-data: {"type":"TEXT_BLOCK_START","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-104"}
-data: {"type":"TEXT_BLOCK_DELTA","delta":"文件已写入","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-105"}
-data: {"type":"AGENT_END","replyId":"reply-001","id":"evt-106"}
+data: {"type":"AGENT_START","session_id":"sid-1","created_at":"2026-11-11T09:30:01.120Z","replyId":"reply-001","id":"evt-100"}
+data: {"type":"TOOL_RESULT_START","session_id":"sid-1","toolCallId":"call-abc","toolCallName":"write_file",...,"id":"evt-101"}
+data: {"type":"TOOL_RESULT_TEXT_DELTA","session_id":"sid-1","delta":"File written successfully","toolCallId":"call-abc",...,"id":"evt-102"}
+data: {"type":"TOOL_RESULT_END","session_id":"sid-1","state":"SUCCESS","toolCallId":"call-abc",...,"id":"evt-103"}
+data: {"type":"TEXT_BLOCK_START","session_id":"sid-1","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-104"}
+data: {"type":"TEXT_BLOCK_DELTA","session_id":"sid-1","delta":"文件已写入","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-105"}
+data: {"type":"AGENT_END","session_id":"sid-1","replyId":"reply-001","id":"evt-106"}
+data: {"type":"turn_finished","state":"completed","usage":{"input_tokens":310,"output_tokens":64,"total_tokens":374,"model_calls":1},"elapsed_ms":5100,"session_id":"sid-1","replyId":"reply-001","id":"evt-107"}
 ```
 
 **预检失败时的 error 帧：**
@@ -1177,11 +1179,23 @@ GET /skills/manage
 | type | 触发时机 | 关键字段 |
 |------|---------|---------|
 | `session_created` | `POST /threads/chat` 未传 sessionId 时自动生成（**仅此端点**） | `session_id` |
-| `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role` |
+| `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role`, `created_at`（**agent 开始处理墙钟时刻**，ISO-8601 UTC，SDK 事件构造时生成、原样透传；与 turn_finished.elapsed_ms 联合可拆「排队+准备/执行」两段） |
 | （通用） | 非 delta 事件（里程碑/合成帧） | additive `turnId`：**turn 信封 id**，`GET /subscribe?replyId=` 的过滤口径；delta 帧不注入（token 热路径），可从任一里程碑帧或 `/status.reply_id` 获取 |
 | `AGENT_END` | Agent 执行完成（**流关闭信号**） | `replyId` |
+| `turn_finished` | turn 收尾汇总帧（**AGENT_END/error/cancelled 之后、落库流最后一帧**） | `state`（completed/waiting_confirm/error/cancelled/interrupted）、`usage`（`input_tokens`/`output_tokens`/`total_tokens` 求和 + `model_calls`，usage 为 null 的调用计次不计量）、`elapsed_ms`（agent 执行段耗时，不含排队等租约） |
 | `cancelled` | 用户停止（`POST /threads/{sid}/stop` 生效，排在 `AGENT_END` 前） | `reason:"user_stopped"` |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 在结果返回时发出，snake_case） | `subagent_id`, `agent_id`, `session_id`, `label` |
+
+> **每帧会话归属（2026-11-11 新增，chat-trace-observability-design §3）：**
+> 经 EventBus 的每一条 data 帧（含 delta 热路径）顶层恒带 `session_id`；前置校验失败的
+> error 帧（`/threads/chat` 直发、不经 EventBus）同样携带。存量（升级前落库）事件经
+> `/subscribe` 回放由读端兜底补齐；客户端对 TTL 过渡窗口内极旧的行仍应容忍缺失。
+> 旁路面（工具审计等）不受影响。
+
+> **turn_finished 语义（2026-11-11 新增）：** 与 `AGENT_END` 顺序为 AGENT_END → turn_finished
+> （seq 有序、可回放）；HITL 挂起轮以 `state=waiting_confirm` 收尾，确认恢复轮是独立 turn、
+> 另发自己的 turn_finished（按 `replyId` 区分，两帧 usage 相加为全程）。流结束判据不受影响——
+> AGENT_END/error/cancelled 仍是业务终态，turn_finished 只是汇总。
 
 > **远程转发标注（2026-09-30 新增）：** 远程子 agent 的事件经 SDK 回流 lead 的 SSE 时，
 > 序列化层对转发事件 additive 附 `source`（来源 agent 名，lead 自身事件恒无此字段）、
