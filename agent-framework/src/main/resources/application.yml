@@ -133,6 +133,10 @@ agent:
       # 并发建箱高峰上游排队放大触发 SDK 超时——仅瞬时类按指数退避重试；attempts=1 回退原行为
       create-max-attempts: ${SANDBOX_CREATE_MAX_ATTEMPTS:2}
       create-retry-backoff-ms: ${SANDBOX_CREATE_RETRY_BACKOFF_MS:1000}
+      # /debug 写钩子门控（issue #293）：POST /debug/sandbox-cleanup（e2e L11 测试钩子）仅在
+      # true 时条件注册（SandboxCleanupHookController），默认不注册（POST 得 404，生产路径
+      # 零无鉴权写端点）；唯一调用方 e2e L11 组（env-up.sh lifecycle 组注入）
+      e2e-hooks: ${SANDBOX_LIFECYCLE_E2E_HOOKS:false}
   file:
     upload-enabled: ${FILE_UPLOAD_ENABLED:true}
     upload-max-mb: ${FILE_UPLOAD_MAX_MB:20}
