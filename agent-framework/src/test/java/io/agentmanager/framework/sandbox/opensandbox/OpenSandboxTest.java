@@ -18,9 +18,13 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import com.alibaba.opensandbox.sandbox.Sandbox;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxConnectionException;
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionLogs;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.OutputMessage;
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry;
 import com.alibaba.opensandbox.sandbox.domain.services.Commands;
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem;
@@ -1034,5 +1038,270 @@ class OpenSandboxTest {
         assertEquals(0, captor.getAllValues().stream()
             .filter(c -> c.contains("find ") && !c.contains("tar xzf -")).count(),
             "不得存在 prune-only 的独立 exec");
+    }
+
+    // ---------- exec→execd 翻译异常分型（issue #296）：仅 execd files API 404 = 缺失哨兵，
+    // 其余异常（5xx/连接失败/超时）向上抛、交 tryTranslateExec 外层 catch 回落真 exec ----------
+    // 用例统一经 sandbox.exec(ctx, 探测模板, 30) 走真实 doExec→translate→回落链路。
+
+    /** read 探测模板（P_READ 同形，单空格形态） */
+    private static final String READ_PROBE =
+        "if [ ! -f 'AGENTS.md' ]; then echo '__NOT_FOUND__'; elif [ ! -s 'AGENTS.md' ]; then"
+            + " echo '__EMPTY__'; else sed -n '1,200p' 'AGENTS.md'; fi";
+    /** ls 目录探测模板（P_LS 同形） */
+    private static final String LS_PROBE =
+        "if [ ! -e 'docs' ]; then echo '__NOT_EXISTS__'; elif [ ! -d 'docs' ]; then echo '__NOT_A_DIR__';"
+            + " else for f in 'docs'/*; do if [ -d \"$f\" ]; then mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf 'DIR:%s\\t%s\\n' \"$f\" \"$mtime\"; elif [ -f \"$f\" ]; then"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf 'FILE:%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; fi; done; fi";
+    /** test -e 存在性探测模板（P_TEST_E 同形） */
+    private static final String TEST_E_PROBE = "test -e 'AGENTS.md' && echo yes || echo no";
+    /** 工作区根探测模板（P_TEST_D 同形） */
+    private static final String TEST_D_PROBE = "test -d /workspace";
+    /** glob 探测模板（P_FIND 同形） */
+    private static final String FIND_PROBE =
+        "find 'tree' -type f -name '*.md' 2>/dev/null | sort | while IFS= read -r f; do"
+            + " size=$(stat -c '%s' \"$f\" 2>/dev/null || echo 0);"
+            + " mtime=$(stat -c '%Y' \"$f\" 2>/dev/null || echo 0);"
+            + " printf '%s\\t%s\\t%s\\n' \"$f\" \"$size\" \"$mtime\"; done";
+
+    /** e2e mock 空 body 404 形态：SDK 对空 body 解析出 UNEXPECTED_RESPONSE（非 FILE_NOT_FOUND） */
+    private static SandboxApiException sandboxApi404() {
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("UNEXPECTED_RESPONSE", ""));
+    }
+
+    private static SandboxApiException sandboxApi500() {
+        return new SandboxApiException("500 Internal Server Error", null, 500,
+            new SandboxError("UNEXPECTED_RESPONSE", "execd internal error"));
+    }
+
+    private static SandboxApiException sandboxApi503() {
+        return new SandboxApiException("503 Service Unavailable", null, 503,
+            new SandboxError("UNEXPECTED_RESPONSE", "upstream error"));
+    }
+
+    private static EntryInfo dirEntry(String path) {
+        // EntryInfo（Kotlin）的 modifiedAt/createdAt 非空参数，统一用固定纪元时刻
+        var epoch = java.time.OffsetDateTime.ofInstant(java.time.Instant.EPOCH, java.time.ZoneOffset.UTC);
+        return new EntryInfo(path, 493, "root", "root", 0, epoch, epoch, "directory");
+    }
+
+    private static EntryInfo fileEntry(String path) {
+        var epoch = java.time.OffsetDateTime.ofInstant(java.time.Instant.EPOCH, java.time.ZoneOffset.UTC);
+        return new EntryInfo(path, 644, "root", "root", 3, epoch, epoch, "file");
+    }
+
+    @Test
+    void readProbeWith404EmptyBodyShapeShouldMapToNotFoundSentinel() throws Exception {
+        // a) e2e mock 空 body 404（error.code != FILE_NOT_FOUND）：status==404 判据必须吃下——
+        //    否则缺失探测回落真 exec 会被 mock EXEC_WHITELIST 拒绝（126），X 组回归
+        var osb = mockOsb(mockExecution(0, "unused", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(sandboxApi404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertEquals(0, result.exitCode());
+        assertEquals("__NOT_FOUND__", result.stdout());
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    @Test
+    void readProbeWith404FileNotFoundCodeShouldMapToNotFoundSentinel() throws Exception {
+        // b) FILE_NOT_FOUND code 形态：与判据无关（status==404 即哨兵），两种形态行为一致
+        var osb = mockOsb(mockExecution(0, "unused", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(
+            new SandboxApiException("HTTP 404 Not Found", null, 404,
+                new SandboxError("FILE_NOT_FOUND", "no such file")));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertEquals(0, result.exitCode());
+        assertEquals("__NOT_FOUND__", result.stdout());
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    @Test
+    void readProbeWith5xxShouldFallBackToRealExec() throws Exception {
+        // c) read 探测 + 503：非 404 向上抛 → 回落真 exec，commands.run 收到原探测命令
+        var osb = mockOsb(mockExecution(0, "real content", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(sandboxApi503());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("real content", result.stdout(), "结果必须取自真 exec stub（回落生效）");
+        verify(osb.commands()).run(READ_PROBE);
+    }
+
+    @Test
+    void readProbeWithConnectionFailureShouldFallBackToRealExec() throws Exception {
+        // d) read 探测 + 连接失败：死沙箱形态（SandboxConnectionException，非 HTTP 404）→ 回落真 exec
+        //    （readByteArray 无 checked 异常声明，ConnectException 不能直接桩——SDK 传输层的
+        //    连接失败在本层即 SandboxConnectionException）
+        var osb = mockOsb(mockExecution(0, "real content", ""));
+        when(osb.files().readByteArray("AGENTS.md"))
+            .thenThrow(new SandboxConnectionException("connection refused", null, false));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("real content", result.stdout());
+        verify(osb.commands()).run(READ_PROBE);
+    }
+
+    @Test
+    void lsProbeWith404ShouldMapToNotExistsAnd502ShouldFallBack() throws Exception {
+        // e) ls 探测：404 → __NOT_EXISTS__ 哨兵；502 → 回落真 exec
+        var osb404 = mockOsb(mockExecution(0, "", ""));
+        when(osb404.files().listDirectory("docs")).thenThrow(sandboxApi404());
+        var sandbox404 = new OpenSandbox(state(), osb404, options(), null, null);
+        var r404 = sandbox404.exec(RuntimeContext.builder().userId("u").build(), LS_PROBE, 30);
+
+        assertEquals(0, r404.exitCode());
+        assertEquals("__NOT_EXISTS__", r404.stdout());
+        verify(osb404.commands(), never()).run(anyString());
+
+        var osb = mockOsb(mockExecution(0, "DIR:docs/a\t0", ""));
+        when(osb.files().listDirectory("docs")).thenThrow(gateway502());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+        var r = sandbox.exec(RuntimeContext.builder().userId("u").build(), LS_PROBE, 30);
+
+        assertTrue(r.ok());
+        assertEquals("DIR:docs/a\t0", r.stdout(), "结果必须取自真 exec stub（回落生效）");
+        verify(osb.commands()).run(LS_PROBE);
+    }
+
+    @Test
+    void existsProbeBothLayers404ReturnsNoAnd500FallsBack() throws Exception {
+        // f) test -e 探测：两层均 404 → 确定缺失 "no"（不回落）；readByteArray 500 → 回落真 test
+        var osb404 = mockOsb(mockExecution(0, "", ""));
+        when(osb404.files().readByteArray("AGENTS.md")).thenThrow(sandboxApi404());
+        when(osb404.files().listDirectory("AGENTS.md")).thenThrow(sandboxApi404());
+        var sandbox404 = new OpenSandbox(state(), osb404, options(), null, null);
+        var r404 = sandbox404.exec(RuntimeContext.builder().userId("u").build(), TEST_E_PROBE, 30);
+
+        assertEquals(0, r404.exitCode());
+        assertEquals("no", r404.stdout());
+        verify(osb404.commands(), never()).run(anyString());
+
+        var osb = mockOsb(mockExecution(0, "yes", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(sandboxApi500());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+        var r = sandbox.exec(RuntimeContext.builder().userId("u").build(), TEST_E_PROBE, 30);
+
+        assertTrue(r.ok());
+        assertEquals("yes", r.stdout());
+        verify(osb.commands()).run(TEST_E_PROBE);
+    }
+
+    @Test
+    void testDirProbeWithBothLayers500FallsBackWithRealExitCode() throws Exception {
+        // g) test -d 探测 + 两层 500：回落真 exec 且 exit code 来自真 exec stub
+        var osb = mockOsb(mockExecution(1, "", "not a directory"));
+        when(osb.files().readByteArray("/workspace")).thenThrow(sandboxApi500());
+        when(osb.files().listDirectory("/workspace")).thenThrow(sandboxApi500());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), TEST_D_PROBE, 30);
+
+        assertEquals(1, result.exitCode(), "exit code 必须来自真 exec（回落生效）");
+        assertFalse(result.ok());
+        verify(osb.commands()).run(TEST_D_PROBE);
+    }
+
+    @Test
+    void globProbeRoot404ReturnsEmptyAndSubtree503FallsBack() throws Exception {
+        // h) glob 探测：根目录 404 → 空输出 exit 0（与真 find 对缺失目录行为一致）；
+        //    子目录 503 → 向上抛回落真 find
+        var osb404 = mockOsb(mockExecution(0, "", ""));
+        when(osb404.files().listDirectory("tree")).thenThrow(sandboxApi404());
+        var sandbox404 = new OpenSandbox(state(), osb404, options(), null, null);
+        var r404 = sandbox404.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+
+        assertEquals(0, r404.exitCode());
+        assertEquals("", r404.stdout());
+        verify(osb404.commands(), never()).run(anyString());
+
+        var osb = mockOsb(mockExecution(0, "tree/sub/x.md\t3\t0", ""));
+        when(osb.files().listDirectory("tree")).thenReturn(List.of(dirEntry("/workspace/tree/sub")));
+        when(osb.files().listDirectory("tree/sub")).thenThrow(sandboxApi503());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+        var r = sandbox.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+
+        assertTrue(r.ok());
+        assertEquals("tree/sub/x.md\t3\t0", r.stdout(), "结果必须取自真 exec stub（回落生效）");
+        verify(osb.commands()).run(FIND_PROBE);
+    }
+
+    @Test
+    void globTranslateShouldStopAtDepthLimitWithoutThrowing() throws Exception {
+        // i) 深度>8 截断：结果正确（收集 depth 0..8 共 9 个文件）且不抛；
+        //    截断 WARN 每次 translateGlob 仅一条（仓库无 log appender 惯例，不断言日志）
+        var files = mock(Filesystem.class);
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+        when(osb.commands()).thenReturn(mock(Commands.class));
+        String dir = "tree";
+        for (int i = 0; i < 12; i++) {
+            String next = dir + "/d" + (i + 1);
+            when(files.listDirectory(dir)).thenReturn(List.of(
+                dirEntry("/workspace/" + next), fileEntry("/workspace/" + dir + "/f" + i + ".md")));
+            dir = next;
+        }
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+
+        assertEquals(0, result.exitCode());
+        assertEquals(9, result.stdout().split("\n").length,
+            "depth 0..8 各收集 1 个文件，更深层级截断");
+        verify(osb.commands(), never()).run(anyString());
+    }
+
+    // ---------- 评审 g1：useServerProxy(true) 下死沙箱经 server 代理的 404 不是路径缺失 ----------
+
+    /** server 代理死沙箱 404 形态（body {"message":"sandbox not found"}，对齐 mock server.mjs:325-326 录制件形态） */
+    private static SandboxApiException sandboxNotFound404() {
+        return new SandboxApiException("HTTP 404 Not Found", null, 404,
+            new SandboxError("UNEXPECTED_RESPONSE", "dead sandbox"), null,
+            "{\"message\":\"sandbox not found\"}", false);
+    }
+
+    @Test
+    void readProbeWithProxySandboxNotFound404ShouldFallBackToRealExec() throws Exception {
+        // useServerProxy(true)（OpenSandboxClient.java:116-117）下死沙箱（TTL 过期/故障态）
+        // 经 server 代理得到 404 + "sandbox not found" body——不是 execd 路径缺失，不得吞成
+        // 哨兵与同 turn 真 exec 回落的「沙箱不可达」报错矛盾；须回落真 exec（runCommandGuarded
+        // 连续失败熔断收口为一致故障信号）
+        var osb = mockOsb(mockExecution(0, "real content", ""));
+        when(osb.files().readByteArray("AGENTS.md")).thenThrow(sandboxNotFound404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), READ_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("real content", result.stdout(), "死沙箱代理 404 必须回落真 exec，不得假缺失");
+        verify(osb.commands()).run(READ_PROBE);
+    }
+
+    @Test
+    void globProbeWithProxySandboxNotFound404ShouldFallBackToRealFind() throws Exception {
+        // 同型：walkFiles 对死沙箱代理 404 不得视作「空目录」输出假空结果
+        var osb = mockOsb(mockExecution(0, "tree/x.md\t3\t0", ""));
+        when(osb.files().listDirectory("tree")).thenThrow(sandboxNotFound404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), FIND_PROBE, 30);
+
+        assertTrue(result.ok());
+        assertEquals("tree/x.md\t3\t0", result.stdout(), "死沙箱代理 404 必须回落真 find，不得假空");
+        verify(osb.commands()).run(FIND_PROBE);
     }
 }
