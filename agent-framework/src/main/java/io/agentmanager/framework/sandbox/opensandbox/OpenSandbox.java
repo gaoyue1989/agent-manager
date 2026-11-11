@@ -454,12 +454,6 @@ public class OpenSandbox extends AbstractBaseSandbox
     /** bus 轮询：test -e 'P' && echo yes || echo no */
     private static final java.util.regex.Pattern P_TEST_E = java.util.regex.Pattern.compile(
         "^test -e '([^']+)' && echo yes \\|\\| echo no$");
-    /** 工作区根探测：test -d /workspace（无引号形态） */
-    private static final java.util.regex.Pattern P_TEST_D = java.util.regex.Pattern.compile(
-        "^test -d (\\S+)$");
-    /** 建目录（doSetupWorkspace）：mkdir -p /workspace */
-    private static final java.util.regex.Pattern P_MKDIR = java.util.regex.Pattern.compile(
-        "^mkdir -p (.+)$");
 
     /**
      * 尝试把探测/读取类命令翻译为 execd files API 直读。
@@ -484,17 +478,20 @@ public class OpenSandbox extends AbstractBaseSandbox
             if (mTestE.matches()) {
                 return new ExecResult(0, translateExists(mTestE.group(1)) ? "yes" : "no", "", false);
             }
-            var mTestD = P_TEST_D.matcher(command);
-            if (mTestD.matches()) {
-                return new ExecResult(translateExists(mTestD.group(1)) ? 0 : 1, "", "", false);
+            // 工作区根探测快路径（issue #290 收窄为精确等值）：harness
+            // AbstractBaseSandbox.probeWorkspaceRootForPreservedResume 经 doExec 下发的
+            // 唯一合法形态就是 "test -d " + getWorkspaceRoot()（10s 超时，javap 实证）；
+            // 其余 test -d（含 $VAR 展开/相对路径/任意字面路径）一律回落真 exec，
+            // 不再把语义无关的目录存在性判断误判成工作区根探测
+            if (command.equals("test -d " + getWorkspaceRoot())) {
+                return new ExecResult(translateExists(getWorkspaceRoot()) ? 0 : 1, "", "", false);
             }
-            var mMkdir = P_MKDIR.matcher(command);
-            if (mMkdir.matches()) {
-                osbSandbox.files().createDirectories(List.of(
-                    com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry.builder()
-                        .path(mMkdir.group(1)).mode(493).build()));
-                return new ExecResult(0, "", "", false);
-            }
+            // mkdir 不再翻译（issue #290）：doSetupWorkspace 走 osbSandbox.commands().run
+            // 直连 execd、不经 doExec；harness BaseSandboxFilesystem 仅有的两个 mkdir 形态中
+            // write 模板（if [ -e … 前缀）不匹配锚定正则、move 模板
+            // （mkdir -p $(dirname 'x') && mv 'x' 'x'）此前正落入宽匹配被误翻译成
+            // createDirectories——mv 永不执行、目录名成垃圾字面量、还虚报 exit 0。
+            // 删除后 "mkdir -p ..." 一律回落真 exec，恢复 shell 原生语义
         } catch (Exception e) {
             // 翻译层仅将 execd files API 404 判定为缺失（isPathMissing）；其余异常
             // （瞬时故障/连接失败/超时）回落真 exec = 既定 fail-soft——issue #296 修复后

@@ -1304,4 +1304,46 @@ class OpenSandboxTest {
         assertEquals("tree/x.md\t3\t0", result.stdout(), "死沙箱代理 404 必须回落真 find，不得假空");
         verify(osb.commands()).run(FIND_PROBE);
     }
+
+    // ---------- exec→execd 翻译器（P0-12，issue #290 收窄回归） ----------
+
+    @Test
+    void execTranslateShouldFallbackMkdirAndNonProbeTestD() {
+        // issue #290：删除 P_MKDIR + P_TEST_D 收窄为精确等值——"mkdir -p ..." 与
+        // 非工作区根形态的 "test -d ..." 一律回落真 exec（翻译器返回 null）。
+        // 此前 P_MKDIR 宽匹配（^mkdir -p (.+)$）会把 harness BaseSandboxFilesystem 的
+        // move 模板（mkdir -p $(dirname 'x') && mv 'x' 'x'）误翻译成 createDirectories，
+        // mv 永不执行；SDK doSetupWorkspace 实走 commands().run 直连 execd、不经 doExec，
+        // 模型侧 "mkdir -p a b" 等多目录命令也无需翻译
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertNull(sandbox.translateForProbe("mkdir -p a b"));
+        assertNull(sandbox.translateForProbe("mkdir -p /workspace"));
+        assertNull(sandbox.translateForProbe("test -d $HOME/foo"));
+        assertNull(sandbox.translateForProbe("test -d /opt/other"));
+        verify(osb.files(), never()).createDirectories(anyList());
+    }
+
+    @Test
+    void execTranslateShouldKeepWorkspaceRootProbeFastPath() throws Exception {
+        // issue #290：工作区根探测唯一合法形态（harness
+        // AbstractBaseSandbox.probeWorkspaceRootForPreservedResume 经 doExec 下发
+        // "test -d " + getWorkspaceRoot()，10s 超时）保留 fast path——存在 exit 0、
+        // 缺失 exit 1（translateExists 两级探测：先文件 readByteArray，再目录 listDirectory）。
+        // 必须显式 stub Filesystem：Mockito 默认对 byte[] 返回 null，而 translateExists
+        // 不判 null，null 返回会被误当"文件存在"
+        var osb = mockOsb(mockExecution(0, "", ""));
+        var files = osb.files();
+        // 打桩用 files API 404（issue #296 收窄后仅 404 判缺失）：裸 RuntimeException 会上抛
+        // 回落真 exec、translateForProbe 返回 null
+        when(files.readByteArray(anyString())).thenThrow(sandboxApi404());
+        // 链式打桩：第一路探测命中目录（exist 路径），第二路抛 404（missing 路径）
+        when(files.listDirectory(anyString())).thenReturn(List.of())
+            .thenThrow(sandboxApi404());
+        var sandbox = new OpenSandbox(state(), osb, options(), null, null);
+
+        assertEquals(0, sandbox.translateForProbe("test -d /workspace").exitCode());
+        assertEquals(1, sandbox.translateForProbe("test -d /workspace").exitCode());
+    }
 }
