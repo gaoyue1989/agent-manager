@@ -66,6 +66,7 @@ docs/kind-config.yaml
 tmp/
 temp/
 *.tmp
+.tmp/
 
 # Secrets (keep API keys out of repo)
 !codegen/schema/agent_config.json
