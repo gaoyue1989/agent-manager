@@ -210,6 +210,8 @@ SANDBOX_RENEW_INTERVAL_SECONDS=60     # 在途续期间隔
 
 ## 关键端点
 
+对外入口：
+
 | 入口 | 地址 |
 |------|------|
 | 统一入口（宿主机 nginx） | http://100.66.1.5:8911 |
@@ -217,6 +219,19 @@ SANDBOX_RENEW_INTERVAL_SECONDS=60     # 在途续期间隔
 | REST API | http://localhost:30080/api/v1 |
 | MCP | http://localhost:30080/mcp |
 | 发布助手 Debug 页 | http://172.20.0.3:30080/agent/release-agent/debug |
+
+集群内组件：
+
+| 组件 | 地址 | 用途 |
+|------|------|------|
+| platform-backend | svc:8080 / NodePort 30880 | REST + MCP |
+| platform-frontend | NodePort 30881 | Web UI |
+| ingress-nginx | NodePort 30080 | 业务 Agent 入口（router 模式：共享 Ingress /agent → platform-router；host 模式：per-service 域名） |
+| platform-router | svc:80（nginx 1.27.1 ×2） | router 模式子路径路由器（`/agent/{short}` 前缀剥离 + X-Forwarded-Prefix 注入，静态泛化配置、发布链路零写入；manifests/platform-router.yaml） |
+| oaf-mysql | svc:3306 | 平台元数据 + checkpoint |
+| oaf-redis | svc:6379 | session_event 事件流存储（Redis Streams，支撑 durable SSE 多副本续传） |
+| 共享 PVC | platform-data (10Gi) | OAF 包存储：`packages/{id}` subPath 只读挂 /config |
+| namespace | agent-platform | 全部平台与业务资源 |
 
 ## 凭据与敏感配置
 
