@@ -67,6 +67,35 @@ public class OpenSandbox extends AbstractBaseSandbox
     /** 回写快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true；测试构造可关） */
     private final boolean syncSnapshotDiffEnabled;
     /**
+     * 记忆混合读穿开关（first-reasoning D1，SANDBOX_RUNTIME_READ_THROUGH，默认 false；
+     * 测试构造可开）：true 时跳过预热注入，记忆探测由翻译层 KV 回落应答，真实 exec
+     * 访问记忆路径时补注入（语义与预热注入等价，见 first-reasoning-memory-readthrough-design §3.1）。
+     */
+    private final boolean runtimeReadThroughEnabled;
+    /** 记忆读穿 env 默认值（生产 8 参构造器入口；测试经长构造器显式传参覆盖） */
+    private static final boolean RUNTIME_READ_THROUGH_DEFAULT =
+        "true".equalsIgnoreCase(System.getenv("SANDBOX_RUNTIME_READ_THROUGH"));
+    /**
+     * stop 收尾 scoped .skills-cache 补投开关（first-reasoning D6，
+     * SANDBOX_SKILL_CACHE_STOP_BACKFILL，默认 true = 旧行为）：false 时缓存只在命令
+     * 首次真正访问时投放——代价是 turn 终态容器不含 .skills-cache，X18 探针/快照差分
+     * 基准需一并调整（first-reasoning-memory-readthrough-design §3.6）。
+     */
+    private final boolean skillCacheStopBackfill;
+    /** stop 收尾补投 env 默认值（生产 8 参构造器入口） */
+    private static final boolean SKILL_CACHE_STOP_BACKFILL_DEFAULT =
+        !"false".equalsIgnoreCase(System.getenv("SANDBOX_SKILL_CACHE_STOP_BACKFILL"));
+    /**
+     * 探针直供缓存（first-reasoning D4）：物化写入的内容回填（容器绝对路径 → 内容），
+     * 探测窗口内 translateRead/translateGlob 直接应答，免重复 execd 往返。失效从严：
+     * 任何真实 exec / 投影实际重水合 / stop() 立即失效并清空（§3.4 失效不变量）。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> probeContentCache =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private final AtomicBoolean probeCacheValid = new AtomicBoolean(false);
+    /** 读穿模式下「真实记忆访问补注入」是否已完成（与 runtimeInjected 分离，失败可重试） */
+    private final AtomicBoolean lazyRuntimeInjected = new AtomicBoolean(false);
+    /**
      * exec 命令打点开关（{@code SANDBOX_EXEC_TRACE}，默认 true；{@code false} 不打命令文本）。
      * env 直读而非经 SandboxConfig——打点是纯日志行为，不参与配置绑定语义；
      * 静态而非实例字段——所有实例同一开关（全局诊断工具）。
@@ -163,6 +192,25 @@ public class OpenSandbox extends AbstractBaseSandbox
                        boolean projectionFingerprintCacheEnabled,
                        boolean skillRevisionGateEnabled,
                        boolean syncSnapshotDiffEnabled) {
+        this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
+            filesystemSpec, fileAssetStore, fileStorage,
+            projectionFingerprintCacheEnabled, skillRevisionGateEnabled, syncSnapshotDiffEnabled,
+            RUNTIME_READ_THROUGH_DEFAULT, SKILL_CACHE_STOP_BACKFILL_DEFAULT);
+    }
+
+    public OpenSandbox(OpenSandboxState state,
+                       com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
+                       OpenSandboxClientOptions options,
+                       WorkspaceReader workspaceReader,
+                       WorkspaceSyncService workspaceSyncService,
+                       OpenSandboxFilesystemSpec filesystemSpec,
+                       FileAssetStore fileAssetStore,
+                       FileStorage fileStorage,
+                       boolean projectionFingerprintCacheEnabled,
+                       boolean skillRevisionGateEnabled,
+                       boolean syncSnapshotDiffEnabled,
+                       boolean runtimeReadThroughEnabled,
+                       boolean skillCacheStopBackfill) {
         super(state);
         this.state = state;
         this.osbSandbox = osbSandbox;
@@ -175,6 +223,8 @@ public class OpenSandbox extends AbstractBaseSandbox
         this.projectionFingerprintCacheEnabled = projectionFingerprintCacheEnabled;
         this.skillRevisionGateEnabled = skillRevisionGateEnabled;
         this.syncSnapshotDiffEnabled = syncSnapshotDiffEnabled;
+        this.runtimeReadThroughEnabled = runtimeReadThroughEnabled;
+        this.skillCacheStopBackfill = skillCacheStopBackfill;
     }
 
     /** 绑定用户 key（SandboxUserKeyMiddleware 经 OpenSandboxClient 注入） */
@@ -253,9 +303,14 @@ public class OpenSandbox extends AbstractBaseSandbox
         // 基准依赖它；CAS 保证「延迟投放」整 call 至多一次）
         var scopedRanThisCall = skillCacheRefreshed.get();
         skillCacheRefreshed.set(false);
-        if (!scopedRanThisCall) {
+        if (!scopedRanThisCall && skillCacheStopBackfill) {
+            // 补投开关（first-reasoning D6，SANDBOX_SKILL_CACHE_STOP_BACKFILL，默认 true =
+            // 旧行为）：false 时缓存只在命令首次真正访问时投放，turn 终态容器不含
+            // .skills-cache（X18 探针/下轮快照差分基准需一并调整后再关）
             hydrateScopedSkillCache();
         }
+        // 探针直供窗口按 call 生命周期关闭（first-reasoning D4）：下一 call 由物化重建
+        invalidateProbeCache();
         if (workspaceSyncService != null && userKey != null) {
             try {
                 // 快照差分（SANDBOX_SYNC_SNAPSHOT_DIFF）：把本会话 gate 传给回写侧，
@@ -301,6 +356,8 @@ public class OpenSandbox extends AbstractBaseSandbox
         // 时同步投放（CAS 每 call 一次）；首推理前的探测命令不含 .skills-cache，天然跳过
         if (command.contains(SkillCacheScope.CACHE_DIR)) {
             hydrateScopedSkillCache();
+            // 投放改变容器内容 → 探针直供缓存失效（first-reasoning D4 失效不变量）
+            invalidateProbeCache();
         }
         // P0-12：SDK 探测/读取类命令翻译为 execd files API 直读（免 exec 固定时延与轮询节拍）。
         // 直读容器实时状态 = 与 shell 命令同源，无缓存无失效问题；模板不匹配/翻译异常一律回落真 exec
@@ -310,6 +367,9 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return translated;
             }
         }
+        // 真实 exec 前置（first-reasoning D1/D4）：直供缓存失效 + 读穿模式下真实命令访问
+        // 记忆路径时补注入。翻译命中的探测命令不触发——首推理探测全是模板命令，注入成本保持为零
+        onRealExecBeforeRun(command);
         var execution = osbSandbox.commands().run(command);
         var exitCode = execution.getExitCode() != null ? execution.getExitCode() : -1;
         var stdout = execution.getLogs() != null
@@ -429,7 +489,7 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
             var mTestD = P_TEST_D.matcher(command);
             if (mTestD.matches()) {
-                return new ExecResult(translateExists(mTestD.group(1)) ? 0 : 1, "", "", false);
+                return new ExecResult(directoryExists(mTestD.group(1)) ? 0 : 1, "", "", false);
             }
             var mMkdir = P_MKDIR.matcher(command);
             if (mMkdir.matches()) {
@@ -447,27 +507,47 @@ public class OpenSandbox extends AbstractBaseSandbox
         return null;
     }
 
-    /** read 翻译：缺文件 → __NOT_FOUND__；空文件 → __EMPTY__；否则按 sed '1,Np' 语义取行 */
+    /**
+     * read 翻译：缺文件 → __NOT_FOUND__；空文件 → __EMPTY__；否则按 sed '1,Np' 语义取行。
+     * 容器缺失时记忆路径回落 KV（first-reasoning D1 读穿，开关关闭时行为不变）；
+     * 探针直供缓存命中（D4）时直接应答，免 execd 往返。
+     */
     private ExecResult translateRead(String relPath, int maxLines) throws Exception {
+        if (probeCacheValid.get()) {
+            String content = probeContentCache.get(relPath);
+            if (content != null) {
+                return content.isEmpty()
+                    ? new ExecResult(0, "__EMPTY__", "", false)
+                    : renderSedRead(content, maxLines);
+            }
+        }
         byte[] bytes;
         try {
             bytes = osbSandbox.files().readByteArray(relPath);
         } catch (Exception e) {
-            return new ExecResult(0, "__NOT_FOUND__", "", false);
+            // 容器缺失（404 异常路径）→ 记忆路径回落 KV；非记忆路径维持 __NOT_FOUND__
+            return readThroughMemoryRead(relPath, maxLines);
         }
         if (bytes == null || bytes.length == 0) {
+            // 文件存在但为空（模型清空过）≠ 缺失：必须答 __EMPTY__，不得回落 KV 读到旧内容
             return new ExecResult(0, "__EMPTY__", "", false);
         }
-        String content = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-        // 对齐真实 exec 链路语义：execd 按行切分 stdout 后 joining("\n") 重组——文件末尾的
-        // 单个换行在行切分中丢失，翻译输出必须同样剥掉一个尾随 \n
+        return renderSedRead(new String(bytes, java.nio.charset.StandardCharsets.UTF_8), maxLines);
+    }
+
+    /**
+     * sed '1,Np' 语义渲染（容器读与 KV/缓存回落共用，保证探测应答逐字一致）：
+     * 先剥掉一个尾随 \n（对齐 execd 按行切分 stdout 后 joining("\n") 重组的语义），
+     * 再输出前 N 行（每行含换行；末行无换行则原样）。
+     */
+    private static ExecResult renderSedRead(String raw, int maxLines) {
+        String content = raw;
         if (content.endsWith("\n")) {
             content = content.substring(0, content.length() - 1);
         }
         if (maxLines >= Integer.MAX_VALUE / 2) {
             return new ExecResult(0, content, "", false);
         }
-        // sed '1,Np'：输出前 N 行（每行含换行；末行无换行则原样）
         var sb = new StringBuilder();
         int idx = 0, printed = 0;
         while (printed < maxLines && idx < content.length()) {
@@ -483,10 +563,107 @@ public class OpenSandbox extends AbstractBaseSandbox
         return new ExecResult(0, sb.toString(), "", false);
     }
 
+    /**
+     * D1 读穿回落：容器缺失的记忆文件从 KV 直读（点查）。仅读穿开启 + 记忆路径 + 用户已绑定时生效；
+     * 其余情况维持 __NOT_FOUND__（与不读穿一致）。
+     */
+    private ExecResult readThroughMemoryRead(String absPath, int maxLines) {
+        var content = readThroughMemoryContent(absPath);
+        if (content == null) {
+            return new ExecResult(0, "__NOT_FOUND__", "", false);
+        }
+        if (content.isEmpty()) {
+            return new ExecResult(0, "__EMPTY__", "", false);
+        }
+        return renderSedRead(content, maxLines);
+    }
+
+    /** D1 记忆 KV 内容查找（null = 不适用/不存在）：记忆总开关与用户绑定一并短路 */
+    private String readThroughMemoryContent(String absPath) {
+        if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()) {
+            return null;
+        }
+        var rel = normalizeRel(absPath);
+        if (!isMemoryRelPath(rel)) {
+            return null;
+        }
+        return workspaceReader.readMemoryFile(userKey, rel);
+    }
+
+    /** 记忆路径判定：{@code MEMORY.md} 精确 / {@code memory} 目录 / {@code memory/**} */
+    private static boolean isMemoryRelPath(String rel) {
+        return WorkspaceReader.MEMORY_FILE.equals(rel)
+            || WorkspaceReader.MEMORY_DIR.equals(rel)
+            || (rel != null && rel.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
+    }
+
+    /** D4 探针直供缓存失效（任何容器变更路径都必须调用；失效只损失性能不损失正确性） */
+    private void invalidateProbeCache() {
+        if (probeCacheValid.compareAndSet(true, false)) {
+            probeContentCache.clear();
+        }
+    }
+
+    /**
+     * 真实 exec 前置（doExec 翻译不命中后调用）：①D4 直供缓存失效——真实命令可能改容器；
+     * ②D1 混合触发器——读穿模式下真实命令访问记忆路径时补注入（CAS 一次性，失败可重试），
+     * 此后容器与预热注入形态一致，bash 读/edit 追加/turn 回写全部回到注入语义。
+     */
+    private void onRealExecBeforeRun(String command) {
+        invalidateProbeCache();
+        if (runtimeReadThroughEnabled && looksLikeMemoryAccess(command)
+                && lazyRuntimeInjected.compareAndSet(false, true)) {
+            injectRuntimeFilesLazily();
+        }
+    }
+
+    /**
+     * D1 触发判定：命令文本涉及记忆文件/目录（bash cat/ls、SDK write heredoc 等真实访问形态）。
+     * {@code python3 -c} 前缀单独覆盖：SDK edit_file 模板把路径/old/new 编进 base64 载荷
+     * （字母表不含 {@code .}，contains(MEMORY.md) 永不命中），edit 追加记忆是核心语义，
+     * 宽松触发可接受（补注入一次性、fail-soft、空 KV 零成本）。
+     */
+    private static boolean looksLikeMemoryAccess(String command) {
+        if (command == null) {
+            return false;
+        }
+        return command.contains(WorkspaceReader.MEMORY_FILE)
+            || command.contains(WorkspaceReader.MEMORY_DIR)
+            || command.startsWith("python3 -c");
+    }
+
+    /** D1 补注入：读 KV 运行时文件写入容器（与预热注入同一数据面；失败可重试、不阻塞命令） */
+    private void injectRuntimeFilesLazily() {
+        if (workspaceReader == null || userKey == null || userKey.isBlank()) {
+            lazyRuntimeInjected.set(false); // 用户未绑定（无身份无从注入），保持触发器待命
+            return;
+        }
+        try {
+            var runtimeFiles = workspaceReader.readRuntimeFiles(userKey);
+            workspaceReader.injectToSandbox(osbSandbox, runtimeFiles);
+            log.info("[sandbox-open] runtime files lazily injected on real memory access (user={}, files={})",
+                userKey, runtimeFiles.size());
+        } catch (Exception e) {
+            // 补注入失败：容器仍无记忆文件，下一真实记忆命令重试；本条命令按缺失继续（回落旧行为）
+            lazyRuntimeInjected.set(false);
+            log.warn("[sandbox-open] lazy runtime injection failed (user={}): {}", userKey, e.getMessage());
+        }
+    }
+
     /** glob 翻译：递归列 ROOT 下匹配 PAT 的 regular file，按路径排序，输出 path\tsize\tmtime 行 */
     private ExecResult translateGlob(String root, String pattern) throws Exception {
         var files = new java.util.TreeSet<FileEntry>((a, b) -> a.rel().compareTo(b.rel()));
-        walkFiles(root, pattern, files, 0);
+        var memoryRoot = memoryRelUnder(root);
+        if (memoryRoot != null) {
+            // D1 读穿：memory/ 目录容器为空，从 KV 清单应答（path/size，mtime=0）
+            fillGlobFromMemoryKv(memoryRoot, pattern, files);
+        } else {
+            // D4：SKILL.md 探针模式下缓存已覆盖的技能目录跳过容器遍历、合并缓存条目；
+            // 其余模式照常遍历容器（保持「容器实时状态」语义——物化只写不删，历史残留仍可见）
+            var skipDirs = probeCacheCoveredDirs(root, pattern);
+            walkFilesSkippingDirs(root, pattern, files, 0, skipDirs);
+            fillGlobFromProbeCache(root, pattern, files);
+        }
         var sb = new StringBuilder();
         for (FileEntry e : files) {
             if (!sb.isEmpty()) {
@@ -497,16 +674,87 @@ public class OpenSandbox extends AbstractBaseSandbox
         return new ExecResult(0, sb.toString(), "", false);
     }
 
-    /** ls 目录翻译：__NOT_EXISTS__/__NOT_A_DIR__/DIR:path\tmtime + FILE:path\tsize\tmtime */
+    /** root 归一化后落在 memory/ 子树内则返回其相对形态（如 {@code memory} / {@code memory/sub}），否则 null */
+    private String memoryRelUnder(String root) {
+        var rel = normalizeRel(root);
+        if (!runtimeReadThroughEnabled) {
+            return null;
+        }
+        return isMemoryRelPath(rel) ? rel : null;
+    }
+
+    /** D1 读穿 glob：KV 运行时清单里 root 子树内匹配 pattern 的文件（size=KV 字节数，mtime=0） */
+    private void fillGlobFromMemoryKv(String memoryRoot, String pattern, java.util.TreeSet<FileEntry> out) {
+        if (workspaceReader == null || userKey == null || userKey.isBlank() || out.size() > 5000) {
+            return;
+        }
+        try {
+            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
+                var rel = entry.getKey();
+                if (rel.startsWith(memoryRoot + "/") && globMatch(pattern, leaf(rel))) {
+                    out.add(new FileEntry(rel, entry.getValue() == null ? 0 : entry.getValue(), 0));
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[sandbox-open] read-through memory glob failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * D4 缓存覆盖目录集：仅当缓存有效、模式恰为 SKILL.md（系统提示探针模式）且缓存非空时，
+     * 返回缓存键（容器绝对路径）中位于 root 子树内的技能一级目录（如 {@code skills/<name>}）——
+     * walkFiles 跳过这些目录的 execd 遍历，由 fillGlobFromProbeCache 以缓存条目补齐。
+     */
+    private java.util.Set<String> probeCacheCoveredDirs(String root, String pattern) {
+        if (!probeCacheValid.get() || probeContentCache.isEmpty() || !WorkspaceReader.SKILL_FILE.equals(pattern)) {
+            return java.util.Set.of();
+        }
+        var rootRel = normalizeRel(root);
+        var dirs = new java.util.HashSet<String>();
+        for (var absPath : probeContentCache.keySet()) {
+            var rel = normalizeRel(absPath);
+            if (!rel.startsWith(rootRel + "/") && !(rootRel.isEmpty() || ".".equals(rootRel))) {
+                continue;
+            }
+            int slash = rel.indexOf('/', rootRel.length() + 1);
+            var topDir = slash < 0 ? null : rel.substring(0, slash);
+            if (topDir != null) {
+                dirs.add(topDir);
+            }
+        }
+        return dirs;
+    }
+
+    /** D4 缓存条目补齐 glob 结果（root 子树内 + 模式命中；size=缓存内容字节数，mtime=0） */
+    private void fillGlobFromProbeCache(String root, String pattern, java.util.TreeSet<FileEntry> out) {
+        if (!probeCacheValid.get() || probeContentCache.isEmpty()) {
+            return;
+        }
+        var rootRel = normalizeRel(root);
+        for (var e : probeContentCache.entrySet()) {
+            var rel = normalizeRel(e.getKey());
+            boolean underRoot = rootRel.isEmpty() || ".".equals(rootRel)
+                || rel.equals(rootRel) || rel.startsWith(rootRel + "/");
+            if (underRoot && globMatch(pattern, leaf(rel))) {
+                var size = e.getValue() == null ? 0 : e.getValue().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                out.add(new FileEntry(rel, size, 0));
+            }
+        }
+    }
+
+    /**
+     * ls 目录翻译：__NOT_EXISTS__/__NOT_A_DIR__/DIR:path\tmtime + FILE:path\tsize\tmtime。
+     * 容器缺失的 memory/ 目录在读穿模式下从 KV 清单应答（first-reasoning D1，mtime=0）。
+     */
     private ExecResult translateLs(String dir) throws Exception {
         List<com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo> entries;
         try {
             entries = osbSandbox.files().listDirectory(dir);
         } catch (Exception e) {
-            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+            return readThroughMemoryLs(dir);
         }
         if (entries == null) {
-            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+            return readThroughMemoryLs(dir);
         }
         var sb = new StringBuilder();
         for (var e : entries) {
@@ -529,8 +777,76 @@ public class OpenSandbox extends AbstractBaseSandbox
         return new ExecResult(0, sb.toString(), "", false);
     }
 
-    /** test -e 翻译：readByteArray（文件）/listDirectory（目录）任一成功即存在 */
+    /**
+     * D1 读穿 ls 回落：容器缺失（404/null）且目录为 memory/ 子树时，用 KV 运行时清单
+     * 拼装与容器同构的 FILE: 行（path\tsize\tmtime=0）；其余情况维持 __NOT_EXISTS__。
+     */
+    private ExecResult readThroughMemoryLs(String dir) throws Exception {
+        var rel = normalizeRel(dir);
+        if (!runtimeReadThroughEnabled || workspaceReader == null || userKey == null || userKey.isBlank()
+                || !WorkspaceReader.MEMORY_DIR.equals(rel)) {
+            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+        }
+        var sb = new StringBuilder();
+        try {
+            for (var entry : workspaceReader.listRuntimeFiles(userKey).entrySet()) {
+                if (!entry.getKey().startsWith(WorkspaceReader.MEMORY_DIR + "/")) {
+                    continue;
+                }
+                if (!sb.isEmpty()) {
+                    sb.append('\n');
+                }
+                sb.append("FILE:").append(entry.getKey()).append('\t')
+                    .append(entry.getValue() == null ? 0 : entry.getValue()).append('\t').append(0);
+            }
+        } catch (Exception e) {
+            log.debug("[sandbox-open] read-through memory ls failed: {}", e.getMessage());
+            return new ExecResult(0, "__NOT_EXISTS__", "", false);
+        }
+        return new ExecResult(0, sb.toString(), "", false);
+    }
+
+    /**
+     * test -e 翻译（first-reasoning D5）：一次<b>父目录列举</b>判存在（文件/目录通吃）——
+     * 历史实现「先 readByteArray 再 listDirectory」对目录必付一次 500 异常路径、对不存在
+     * 路径付两次 404；父目录列举异常时回落旧两步实现（边角语义不回退）。
+     * 记忆路径在读穿模式下先查 KV（容器缺失时父列举会误判不存在）。
+     */
     private boolean translateExists(String relPath) {
+        if (runtimeReadThroughEnabled && workspaceReader != null && userKey != null && !userKey.isBlank()) {
+            var rel = normalizeRel(relPath);
+            if (isMemoryRelPath(rel) && WorkspaceReader.MEMORY_DIR.equals(rel)) {
+                return workspaceReader.listRuntimeFiles(userKey).keySet().stream()
+                    .anyMatch(k -> k.startsWith(WorkspaceReader.MEMORY_DIR + "/"));
+            }
+            if (rel != null && rel.startsWith(WorkspaceReader.MEMORY_DIR + "/")
+                    && rel.endsWith(".md") && rel.indexOf('/', WorkspaceReader.MEMORY_DIR.length() + 1) < 0) {
+                // memory/ 一级 .md 文件：容器缺失（未注入）时父列举必误判，先查 KV 点查
+                return workspaceReader.readMemoryFile(userKey, rel) != null;
+            }
+        }
+        var normalized = normalizeRel(relPath);
+        // 父目录列举仅对工作区相对路径/工作区内绝对路径生效：非工作区绝对路径（/etc/hosts 等）
+        // 不得改写成 /workspace 镜像路径判存在，直接回落旧两步实现
+        var workspaceScoped = !relPath.startsWith("/") || relPath.startsWith(getWorkspaceRoot() + "/");
+        int slash = normalized.lastIndexOf('/');
+        var parent = slash <= 0 ? "" : normalized.substring(0, slash);
+        var leafPath = leaf(normalized);
+        if (workspaceScoped && !parent.isEmpty()) {
+            try {
+                var entries = osbSandbox.files().listDirectory(getWorkspaceRoot() + "/" + parent);
+                if (entries != null) {
+                    for (var e : entries) {
+                        if (e.getPath() != null && leaf(normalizeRel(e.getPath())).equals(leafPath)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            } catch (Exception ignoreParent) {
+                // 父目录列举失败（适配器差异等）→ 回落旧两步实现
+            }
+        }
         try {
             osbSandbox.files().readByteArray(relPath);
             return true;
@@ -544,6 +860,17 @@ public class OpenSandbox extends AbstractBaseSandbox
         }
     }
 
+    /** test -d 翻译（first-reasoning D5）：一次 listDirectory 直查目录存在性——不再经
+     * readByteArray 对目录的 500 异常路径；不做 /workspace 特判短路（避免容器根被删后仍答 0） */
+    private boolean directoryExists(String path) {
+        try {
+            var entries = osbSandbox.files().listDirectory(path);
+            return entries != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /** 条目 mtime 秒（对齐 SDK 模板 stat -c '%Y' 口径；entry 自带 modifiedAt，缺失置 0） */
     private static long epochSeconds(com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo e) {
         var at = e.getModifiedAt();
@@ -551,7 +878,18 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /** 递归收集 relPath 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御） */
+    /** 递归收集 relPath 子树内匹配 pattern 的 regular file（含 size/mtime；深度/条目上界防御） */
     private void walkFiles(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth) {
+        walkFilesSkippingDirs(relDir, pattern, out, depth, java.util.Set.of());
+    }
+
+    /**
+     * 同 {@link #walkFiles}，但跳过 skipDirs 中目录的容器遍历（first-reasoning D4）：
+     * 这些目录的内容由探针直供缓存补齐（fillGlobFromProbeCache），跳过免重复 execd 往返。
+     * 跳过目录的隐含约束：其内容与缓存逐字一致（SKILL.md 模式 + 物化后窗口内），由失效不变量保证。
+     */
+    private void walkFilesSkippingDirs(String relDir, String pattern, java.util.TreeSet<FileEntry> out, int depth,
+                                       java.util.Set<String> skipDirs) {
         if (depth > 8 || out.size() > 5000) {
             return;
         }
@@ -574,7 +912,10 @@ public class OpenSandbox extends AbstractBaseSandbox
                 continue;
             }
             if ("directory".equalsIgnoreCase(e.getType()) || "dir".equalsIgnoreCase(e.getType())) {
-                walkFiles(rel, pattern, out, depth + 1);
+                if (skipDirs.contains(rel)) {
+                    continue; // 缓存已覆盖：容器遍历跳过（缓存条目另行补齐）
+                }
+                walkFilesSkippingDirs(rel, pattern, out, depth + 1, skipDirs);
             } else if (globMatch(pattern, leaf(rel))) {
                 out.add(new FileEntry(rel, Math.max(e.getSize(), 0), epochSeconds(e)));
             }
@@ -593,6 +934,16 @@ public class OpenSandbox extends AbstractBaseSandbox
             p = p.substring(1);
         }
         return p;
+    }
+
+    /**
+     * D4 探针直供回填（WorkspaceReader.materializeUserSkills 的 contentSink）：
+     * 仅窗口有效期内写入；容器绝对路径作为缓存键（与翻译层 relPath 原样对齐）。
+     */
+    private void fillProbeCache(String absPath, String content) {
+        if (probeCacheValid.get() && absPath != null && content != null) {
+            probeContentCache.put(absPath, content);
+        }
     }
 
     /** 探针入口（基准/契约对照专用，生产不调用）：直通翻译器 */
@@ -783,6 +1134,17 @@ public class OpenSandbox extends AbstractBaseSandbox
             runtimeInjected.set(true);
             return;
         }
+        if (runtimeReadThroughEnabled) {
+            // 混合读穿（first-reasoning D1）：跳过预热注入（≈24MB KV 读 + 容器写挡在首推理前）。
+            // 记忆探测由翻译层 KV 回落应答；真实 exec 访问记忆路径时经
+            // injectRuntimeFilesLazily 补注入——此后与预热注入形态一致，读/改/回写语义不变
+            runtimeInjected.set(true);
+            if (gate != null) {
+                gate.setLastRuntimeInjected(true);
+            }
+            log.info("[sandbox-open] runtime files read-through enabled, skip eager injection (user={})", userId);
+            return;
+        }
         synchronized (runtimeInjected) {
             if (runtimeInjected.get()) {
                 return;
@@ -843,7 +1205,20 @@ public class OpenSandbox extends AbstractBaseSandbox
                         log.debug("[sandbox-open] L4 revision unknown for user {}, falling back to full materialize", uid);
                     }
                 }
-                int count = workspaceReader.materializeUserSkills(osbSandbox, uid);
+                int count;
+                try {
+                    // 探针直供窗口开启（first-reasoning D4）：物化写入经 sink 回填缓存，
+                    // 同 call 的系统提示探测（sed SKILL.md / find skills -name SKILL.md）
+                    // 直接命中，免 5 次 execd 往返；窗口由失效不变量严格关闭（真实 exec /
+                    // 投影重水合 / .skills-cache 投放 / stop()）
+                    probeContentCache.clear();
+                    probeCacheValid.set(true);
+                    count = workspaceReader.materializeUserSkills(osbSandbox, uid, this::fillProbeCache);
+                } catch (Exception materializeError) {
+                    // 物化异常时窗口作废（容器内容未知，缓存不可信）
+                    invalidateProbeCache();
+                    throw materializeError;
+                }
                 userSkillsMaterialized.set(true);
                 if (gate != null) {
                     // 回填门控：revision 用物化前后各读一次的新值（物化写入已 bump revision）；
@@ -937,6 +1312,8 @@ public class OpenSandbox extends AbstractBaseSandbox
                 try (var in = new java.io.ByteArrayInputStream(payload.tarBytes())) {
                     doHydrateWorkspace(in);
                 }
+                // 投影可能覆盖 skills/ 等容器内容 → 探针直供窗口作废（first-reasoning D4 不变量）
+                invalidateProbeCache();
                 log.info("[sandbox-open] workspace projection refreshed: files={}, hash={}",
                     payload.fileCount(), payload.hash());
             }
@@ -975,8 +1352,10 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 换 scope 必走慢路径：prune 清掉同代容器内其它 scope 残留（池化借出复用时的跨用户防护）。
      *
      * <p>fail-soft：失败仅告警并复位标志，下次 exec 重试。
+     *
+     * <p>包级可见（非 private）：供测试 spy 验证 D6 补投开关行为。
      */
-    private void hydrateScopedSkillCache() {
+    void hydrateScopedSkillCache() {
         if (state == null || !skillCacheRefreshed.compareAndSet(false, true)) {
             return;
         }
