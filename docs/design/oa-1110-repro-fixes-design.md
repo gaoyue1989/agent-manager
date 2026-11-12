@@ -256,3 +256,36 @@ acquire ① 即根治跨 turn 复用坏沙箱，强于事后标记。
 
 **遗留**：`pruneContainerSkillCache` 死代码清理（本次保留不动，避免扩散 diff）；#25 的
 `writeKvFile` 内容不变短路语义维持现状（无变化即无更新，见 §2.5）。
+
+### 6.1 后继修复：归档状态源错位（2026-11-12）
+
+#7 修复上线后其他环境仍复现「压缩前明细缺失」。复盘定位：a7ebead 的中间件 order=2
+外层先执行没有问题（SDK `Builder.build` 按 order 降序排外包、`MiddlewareChain.build`
+列表首为最外层，契约自洽），**错在状态源**——中间件读了 deprecated
+`agent.getAgentState()`：SDK 2.0.4 配置 AgentStateStore 后每次 call 经
+`loadOrCreateAgentStateForSlot` 新建 per-call state 注入 RuntimeContext
+（`ReActAgent.beforeAgentExecution`），deprecated 访问器委托默认槽
+（`getAgentState(null, defaultSessionId)`），与本会话无关、context 恒空 → 归档每步
+静默空转，压缩前明细依旧只随压缩后的 turn 末 write-through 落库（DB 仅剩压缩后行，
+与复现现象吻合）。原单测 mock `getAgentState()` 返回预设 context，恰好掩盖读错状态源。
+
+修复（fix/precompaction-archive-per-call-state）：改经
+`RuntimeContext.resolveAgentState(ctx, agent)` 与 `CompactionMiddleware` 同源解析
+per-call state，rc 未携带时回落 `agent.getAgentState()`（非 ReActAgent 链路边界）；
+单测改为真实链路形态（agent default 槽恒空 + per-call state 挂 ctx）并新增回落覆盖。
+
+**连带暴露同款错误三处**（§6.1 二次修复，同分支）：`ToolFilterMiddleware` /
+`ToolCallValidationMiddleware` / `ProtocolDenyRulesMiddleware` 的 onActing 拦截注入
+（白名单外 DENIED / 畸形参数 / 协议 deny_rules）同样写 deprecated 默认槽——合成
+TOOL 结果从未真正进入当前会话上下文（模型不可感知、write-through 不落库）；此前
+TL-L2 依赖「归档恰好也从默认槽读」的抵消效应保持绿，归档状态源修复后抵消消失即
+暴露（本地复现：归档改对后 TL-L2 红，denied TOOL 行消失）。三处统一改
+resolveAgentState，ToolFilter 单测改真实链路形态并新增 per-call 注入断言。
+
+**验证结果（2026-11-12）**：
+
+| 关卡 | 结果 |
+|---|---|
+| 归档状态源单测 | 先红（4/7 失败证实读默认槽空转）→ 后绿 7/7；ToolFilter 先红（注入 0 条）→ 后绿 31/31 |
+| e2e core 组 | `./scripts/run.sh core`：**100 passed / 0 failed**（含 TL-L2、U15 压缩分隔条回放） |
+| kind 真实 LLM 压缩场景 | 独立实例 `AGENT_HARNESS_COMPACTIONTRIGGERTOKENS=1500` + 真实 glm-5.3-flash：单 turn 8 次 bench_echo，`Compaction triggered: total=11 msgs / 2073 tokens, cutoff=1`（12:33:36.641），session_message 归档轨 13 行——压缩点之前 11 条（USER+2×(ASSISTANT+4×TOOL)）在压缩时刻前已全部落库，`compaction_summary` 一并归档；对照修复前现象（DB 仅剩压缩后行）根因闭环 |
