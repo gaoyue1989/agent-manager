@@ -815,7 +815,10 @@ public class UserSkillService {
         var skipped = new ArrayList<String>();           // 二进制/未知编码被显式跳过的文件
         long totalBytes = 0;                             // 单技能累计字节（含被跳过的二进制文件）
         try (Stream<Path> stream = Files.walk(sourceDir)) {
-            for (var path : stream.filter(Files::isRegularFile).toList()) {
+            for (var path : stream.filter(Files::isRegularFile)
+                    .sorted(java.util.Comparator.comparing(
+                        p -> sourceDir.relativize(p).toString().replace('\\', '/')))
+                    .toList()) {
                 var rel = sourceDir.relativize(path).toString().replace('\\', '/');
                 if (!isValidSkillFilePath(rel) || isMetadataFile(rel)) {
                     continue; // 隐藏/元数据文件（含 .skill-states.json）不参与物化
@@ -917,9 +920,6 @@ public class UserSkillService {
         }
         log.info("materialize_skill: skill {} ({} files, {} skipped) → user {}",
             name, orderedFiles.size(), skipped.size(), userId);
-        // 与 files() 同样按字典序返回：跳过清单源自 Files.walk 的枚举顺序，
-        // 不同文件系统不一致（CI runner 上即出现顺序差异），会给出不确定的对外结果
-        java.util.Collections.sort(skipped);
         return new SyncOutcome(new ArrayList<>(orderedFiles.keySet()), skipped);
     }
 

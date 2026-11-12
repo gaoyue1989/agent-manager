@@ -46,6 +46,16 @@ class OpenSandboxFilesystemSpecTest {
         assertEquals("/ws", options.getWorkspaceRoot());
         assertEquals("/ws", spec.workspaceSpec().getRoot());
         assertEquals(IsolationScope.USER, spec.getIsolationScope());
+
+        var farmSpec = new OpenSandboxFilesystemSpec()
+            .skillsSharedStore("/skills-store")
+            .skillBundleService(new SkillBundleService(null, java.nio.file.Path.of("/tmp/farm-spec-test"),
+                java.time.Duration.ofSeconds(5), java.time.Clock.systemUTC()))
+            .farmMeterRegistry(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+        var farmOptions = farmSpec.clientOptions();
+        assertEquals("/skills-store", farmOptions.getSkillsSharedStore());
+        assertNotNull(farmOptions.getSkillBundleService());
+        assertNotNull(farmOptions.getFarmMeterRegistry());
     }
 
     @Test

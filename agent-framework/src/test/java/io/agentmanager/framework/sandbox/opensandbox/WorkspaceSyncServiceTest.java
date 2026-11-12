@@ -314,6 +314,34 @@ class WorkspaceSyncServiceTest {
         assertEquals(0, store.size(), "元数据与非技能目录不应落库");
     }
 
+    /** 软链条目（skills-syncd §6.3 防御性跳链）不读内容、不递归进目标——防农场库内容被吸回 L4 */
+    @Test
+    void syncBackShouldSkipSymlinkEntries() throws Exception {
+        var store = new InMemoryStore();
+        var skillMd = "---\nname: sbx-skill\n---\n\nSBX-LINK-PROBE\n";
+        var files = mock(Filesystem.class);
+        var skillDir = dirEntry("/workspace/skills/sbx-skill");
+        var skillMdEntry = fileEntry("/workspace/skills/sbx-skill/SKILL.md", skillMd.length());
+        var linkEntry = mock(EntryInfo.class);
+        when(linkEntry.getPath()).thenReturn("/workspace/skills/sbx-skill/store-link");
+        when(linkEntry.getType()).thenReturn("symlink");
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(skillDir));
+        when(files.listDirectory("/workspace/skills/sbx-skill")).thenReturn(List.of(skillMdEntry, linkEntry));
+        when(files.readFile("/workspace/skills/sbx-skill/SKILL.md")).thenReturn(skillMd);
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+
+        service(store, AGENT).syncBack(USER, osb);
+
+        verify(files, never()).readFile("/workspace/skills/sbx-skill/store-link");
+        verify(files, never()).listDirectory("/workspace/skills/sbx-skill/store-link");
+        var fs = new RemoteFilesystem(store, List.of("agents", AGENT, "users", USER, "skills"));
+        var ctx = io.agentscope.core.agent.RuntimeContext.builder().userId(USER).build();
+        assertTrue(fs.read(ctx, "/sbx-skill/SKILL.md", 0, -1).isSuccess(), "真实文件照常回写");
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+        assertNull(reader.readUserSkillFile(USER, "sbx-skill", "store-link"), "软链不得被吸回 L4");
+    }
+
     /** 超过 100KB 上限的单个技能文件跳过，不影响同技能主文件回写（size 预检 + 读回字节双道防线） */
     @Test
     void syncBackShouldSkipOversizedSkillFile() throws Exception {
