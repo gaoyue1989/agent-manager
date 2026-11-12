@@ -208,6 +208,40 @@ SANDBOX_RENEW_INTERVAL_SECONDS=60     # 在途续期间隔
 4. 池/沙箱的 TTL 与 GC 真相在 opensandbox 服务端（expiresAt / ttl_expiry），平台侧仅代理转发与簿记；
    backend 重启不影响任何沙箱与池。
 
+### 4. 技能同步（skills-syncd，可选）
+
+池化沙箱的技能同步：守护协议/软链农场/失败语义见设计
+docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4），此处只记部署前提与回滚：
+
+1. **镜像**：主容器镜像须含 `skills-syncd` 二进制 + launcher/entrypoint-wrap 两脚本（直建路径经
+   ENTRYPOINT 生效、池化路径由池模板 commandWrapper 注入启动点）。构建与 kind 导入一步到位
+   （宿主静态编译 → overlay 镜像 → ctr import；幂等可重跑，基础镜像 12.7GB 导入需数分钟）：
+
+   ```bash
+   ./scripts/build-skillsync-image.sh
+   # 产出: gaoyue1989/code-interpreter-oa:skillsync-331
+   #       （FROM gaoyue1989/code-interpreter-oa:v20260914 overlay）
+   ```
+
+2. **egress 放行**：池 Pod → 本服务 svc 出网须在 OpenSandbox egress 策略放行
+   `oaf-{name}-svc.agent-platform.svc`（或集群内网段），否则守护拉取持续退避、store 无库（fail-open）。
+3. **token Secret 前置**：服务 env 含 `SKILLSYNC_TOKEN` 时发布幂等 ensure `{name}-skillsync-token`
+   （ns `agent-platform`，data 键 `token`）；池模板 secretKeyRef 在池 workload ns **`opensandbox`**
+   内解析——建池前须在该 ns 预建同名 Secret，缺失时池 Pod 卡 `CreateContainerConfigError`。
+   轮换 = 两处同值更新 + 池 Pod 重建（D-8 契约）。
+4. **建池**：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag，extraEnv 带
+   `SKILLSYNC_BASE_URL=http://oaf-{name}-svc.agent-platform.svc:8100`（+ token secretKeyRef），
+   `commandWrapper: true`；镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。
+
+**升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
+须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
+
+**回滚 runbook**（镜像与模板偏斜双向安全，顺序不敏感；清理收尾）：
+
+1. 镜像 tag 回退：池/服务镜像改回上一 tag（如 `opensandbox/code-interpreter:v1.1.0`）后重建池。
+2. 池模板参数摘除：建池/重建池请求去掉 `extraEnv` 与 `commandWrapper`。
+3. 清理：删除两 ns 的 `{name}-skillsync-token` Secret + 回收 egress 放行条目。
+
 ## 关键端点
 
 对外入口：
@@ -264,6 +298,7 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
    未派生的存量默认值（共享 `oaf_checkpoint` 库 + 空 Redis 前缀）多服务沿用仍会互相串数据。
 5. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
 6. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
+7. **skills-syncd（沙箱技能同步，可选）**：镜像构建/导入 `./scripts/build-skillsync-image.sh`；部署前提与回滚见「五之二 → 4. 技能同步」，排障 runbook 见设计文档 §10.4（docs/design/sandbox-skills-syncd-design-261112.md）。
 
 ## 六、业务 Deployment 环境模板（DEPLOYMENT_TEMPLATE，可选）
 

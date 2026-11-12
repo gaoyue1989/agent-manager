@@ -1,0 +1,10 @@
+# Dockerfile.oa-overlay —— code-interpreter-oa 技能同步 overlay（skills-syncd 设计 §5.1）
+# build context 为最小 staging 目录（三件：skills-syncd 二进制 + 两脚本，由
+# scripts/build-skillsync-image.sh 组装）。直建路径经 ENTRYPOINT 生效；池化路径的
+# ENTRYPOINT 被 Pool 模板 command 覆盖（backend preset commandWrapper，设计 §5.2）。
+FROM gaoyue1989/code-interpreter-oa:v20260914
+COPY skills-syncd /usr/local/bin/skills-syncd
+COPY skillsync-launcher.sh /usr/local/bin/skillsync-launcher.sh
+COPY entrypoint-wrap.sh /usr/local/bin/entrypoint-wrap.sh
+RUN chmod 0755 /usr/local/bin/skills-syncd /usr/local/bin/skillsync-launcher.sh /usr/local/bin/entrypoint-wrap.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint-wrap.sh"]
