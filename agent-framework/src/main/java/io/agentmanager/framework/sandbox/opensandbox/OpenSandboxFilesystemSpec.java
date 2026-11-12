@@ -38,6 +38,12 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private io.agentmanager.framework.service.storage.FileStorage fileStorage;
     /** 业务规范键解析器（OpenSandbox.resolveUserKey 与 middleware 同源反查真实用户，issue #52；可空=退化为旧行为） */
     private io.agentmanager.framework.service.SessionKeyResolver userKeyResolver;
+    /** 软链农场开关（skills-syncd §6.4）：沙箱内共享库路径，空 = 农场关闭走现行为 */
+    private String skillsSharedStore;
+    /** 端点指纹服务（skills-syncd §7.2 版本硬校验数据源，D-4 短 TTL）；null = 端点不可达 */
+    private SkillBundleService skillBundleService;
+    /** 农场判定打点（D-5）；null = 不打点 */
+    private volatile io.micrometer.core.instrument.MeterRegistry farmMeterRegistry;
 
     /** 请求级 userId 传递：SandboxUserKeyMiddleware.onAgent 设置，OpenSandboxClient.create/resume 读取 */
     private final ThreadLocal<String> pendingUserKey = new ThreadLocal<>();
@@ -355,7 +361,10 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
             .environment(environment)
             .workspaceRoot(workspaceRoot)
             .skillDisabledChecker(skillDisabledChecker)
-            .requestTimeout(requestTimeout);
+            .requestTimeout(requestTimeout)
+            .skillsSharedStore(skillsSharedStore)
+            .skillBundleService(skillBundleService)
+            .farmMeterRegistry(farmMeterRegistry);
     }
 
     @Override
@@ -400,6 +409,21 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
 
     public OpenSandboxFilesystemSpec workspaceSyncService(WorkspaceSyncService workspaceSyncService) {
         this.workspaceSyncService = workspaceSyncService;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillsSharedStore(String store) {
+        this.skillsSharedStore = store;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec skillBundleService(SkillBundleService service) {
+        this.skillBundleService = service;
+        return this;
+    }
+
+    public OpenSandboxFilesystemSpec farmMeterRegistry(io.micrometer.core.instrument.MeterRegistry registry) {
+        this.farmMeterRegistry = registry;
         return this;
     }
 

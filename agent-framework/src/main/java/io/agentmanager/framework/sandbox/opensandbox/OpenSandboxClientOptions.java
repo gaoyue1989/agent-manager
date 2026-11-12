@@ -26,6 +26,12 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     private String workspaceRoot = "/workspace";
     /** 技能禁用判定（oa-1110-repro-fixes-design §2.1a）：scoped .skills-cache 投放过滤；null = 不过滤 */
     private SkillDisabledChecker skillDisabledChecker;
+    /** 软链农场开关（skills-syncd §6.4）：沙箱内共享库路径，空 = 农场关闭走现行为 */
+    private String skillsSharedStore;
+    /** 端点指纹服务（skills-syncd §7.2 版本硬校验数据源，D-4 短 TTL）；null = 端点不可达 */
+    private SkillBundleService skillBundleService;
+    /** 农场判定打点（D-5）；null = 不打点 */
+    private io.micrometer.core.instrument.MeterRegistry farmMeterRegistry;
 
     @Override
     public String getType() {
@@ -52,6 +58,9 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public Map<String, String> getResource() { return resource; }
     public Map<String, String> getEnvironment() { return environment; }
     public SkillDisabledChecker getSkillDisabledChecker() { return skillDisabledChecker; }
+    public String getSkillsSharedStore() { return skillsSharedStore; }
+    public SkillBundleService getSkillBundleService() { return skillBundleService; }
+    public io.micrometer.core.instrument.MeterRegistry getFarmMeterRegistry() { return farmMeterRegistry; }
 
     // ---- fluent builder methods ----
     public OpenSandboxClientOptions serverUrl(String serverUrl) { this.serverUrl = serverUrl; return this; }
@@ -64,4 +73,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     public OpenSandboxClientOptions environment(Map<String, String> env) { this.environment = env; return this; }
     public OpenSandboxClientOptions workspaceRoot(String workspaceRoot) { this.workspaceRoot = workspaceRoot; return this; }
     public OpenSandboxClientOptions skillDisabledChecker(SkillDisabledChecker checker) { this.skillDisabledChecker = checker; return this; }
+    public OpenSandboxClientOptions skillsSharedStore(String store) { this.skillsSharedStore = store; return this; }
+    public OpenSandboxClientOptions skillBundleService(SkillBundleService service) { this.skillBundleService = service; return this; }
+    public OpenSandboxClientOptions farmMeterRegistry(io.micrometer.core.instrument.MeterRegistry registry) { this.farmMeterRegistry = registry; return this; }
 }

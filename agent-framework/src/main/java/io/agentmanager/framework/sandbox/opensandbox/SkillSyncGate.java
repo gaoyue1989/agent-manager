@@ -35,6 +35,24 @@ public final class SkillSyncGate {
     private volatile boolean lastRuntimeInjected;
     /** 容器 skills/{name}/{relPath} → 字节大小（回写差分快照；只增不删，消失条目由回写遍历收敛） */
     private final ConcurrentHashMap<String, Long> manifest = new ConcurrentHashMap<>();
+    /**
+     * 软链农场会话级二值判定（skills-syncd B-1，§6.2/§6.4）：null = 未判定；farm=false 的
+     * 降级会话不中途翻转，恢复以会话为粒度（新 sandboxId 换新 gate 重新判定）。
+     * l4Names 为判定时刻的用户 L4 技能名集（同名 L4 优先裁决源），农场会话全程复用。
+     */
+    private volatile SkillFarmState skillFarmState;
+
+    public SkillFarmState skillFarmState() {
+        return skillFarmState;
+    }
+
+    public void setSkillFarmState(SkillFarmState state) {
+        this.skillFarmState = state;
+    }
+
+    /** 农场判定记忆（判定结果 + 同名 L4 优先判定源，均为会话级快照） */
+    public record SkillFarmState(boolean farm, java.util.Set<String> l4Names) {
+    }
 
     public String revision() {
         return revision;

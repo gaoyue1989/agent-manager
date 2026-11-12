@@ -491,7 +491,8 @@ class UserSkillServiceTest {
 
         var outcome = service().syncFromPackage(USER, "demo-a").orElseThrow();
 
-        assertEquals(List.of("SKILL.md", "scripts/hello.sh", "gbk.sh"), outcome.files());
+        // files() 顺序 = 相对路径字典序（Files.walk 显式排序；readdir 原始序跨文件系统不可依赖）
+        assertEquals(List.of("SKILL.md", "gbk.sh", "scripts/hello.sh"), outcome.files());
         assertEquals(List.of("logo.png"), outcome.skipped(), "二进制必须显式列入跳过清单");
         assertNull(store.get(skillNs(USER), "/demo-a/logo.png"), "二进制不得静默损坏后落库");
         assertEquals("echo 中文\n", store.get(skillNs(USER), "/demo-a/gbk.sh").value().get("content"),

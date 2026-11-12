@@ -449,7 +449,7 @@ public class WorkspaceSyncService {
         }
         for (var entry : entries) {
             var leaf = leafName(entry.getPath());
-            if (leaf == null || isMetadataSegment(leaf)) {
+            if (leaf == null || isMetadataSegment(leaf) || isSymlinkEntry(entry)) {
                 continue;
             }
             var absPath = dirPath + "/" + leaf;
@@ -493,7 +493,7 @@ public class WorkspaceSyncService {
         }
         for (var entry : entries) {
             var leaf = leafName(entry.getPath());
-            if (leaf == null || isMetadataSegment(leaf)) {
+            if (leaf == null || isMetadataSegment(leaf) || isSymlinkEntry(entry)) {
                 continue;
             }
             var absPath = dirPath + "/" + leaf;
@@ -576,6 +576,16 @@ public class WorkspaceSyncService {
     private static boolean isMetadataSegment(String segment) {
         return segment != null && !segment.isEmpty()
             && (segment.charAt(0) == '.' || segment.charAt(0) == '_');
+    }
+
+    /**
+     * 软链条目判定（skills-syncd §6.3 防御性跳链）：type 标注 symlink/link 的条目整体跳过，
+     * 不读内容也不递归进目标——当前遍历只覆盖 /workspace/skills 不含农场软链区（.skills-cache），
+     * 跳链保证未来遍历范围扩展时不把共享库内容吸回 L4。
+     */
+    private static boolean isSymlinkEntry(EntryInfo entry) {
+        var type = entry.getType();
+        return "symlink".equalsIgnoreCase(type) || "link".equalsIgnoreCase(type);
     }
 
     /** 目录条目判定：优先 type 字段（execd 返回 directory/file），缺失时回落尾斜杠 */

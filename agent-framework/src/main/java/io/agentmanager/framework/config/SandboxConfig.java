@@ -67,6 +67,14 @@ public record SandboxConfig(
     @DefaultValue("500") int sessionAgentCacheMax,
     /** 会话级 agent 空闲过期分钟（{@code SANDBOX_SESSION_AGENT_CACHE_TTL_MINUTES}，默认 30） */
     @DefaultValue("30") int sessionAgentCacheTtlMinutes,
+    /**
+     * skills-syncd 内部端点鉴权 token（{@code SKILLSYNC_TOKEN}，空 = 端点关闭 404）；
+     * bundle 磁盘缓存目录（{@code SKILLSYNC_BUNDLE_CACHE_DIR}，默认 /tmp/skills-bundle-cache）；
+     * 沙箱内共享技能库路径（{@code SANDBOX_SKILLS_SHARED_STORE}，空 = 软链农场整体关闭走现行为）
+     */
+    @DefaultValue("") String skillsSyncToken,
+    @DefaultValue("/tmp/skills-bundle-cache") String skillsBundleCacheDir,
+    @DefaultValue("") String skillsSharedStore,
     OpenSandboxConfig opensandbox
 ) {
     /** 绑定入口消歧：record 出现双构造器时 Binder 要求显式指定（与 AgentManagerProperties 同款） */
@@ -92,7 +100,30 @@ public record SandboxConfig(
             projectionEnabled, guardEnabled, guardLeaseSeconds,
             skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             true, sessionAgentIsolation, sessionAgentCacheMax, sessionAgentCacheTtlMinutes,
-            opensandbox);
+            "", "/tmp/skills-bundle-cache", "", opensandbox);
+    }
+
+    /**
+     * 兼容旧 18 参按位构造（skills-syncd 端点加组件前曾是绑定主构造器，存量测试按此形态传参，
+     * 与 AgentManagerProperties 兼容构造器同源问题）：skills-sync token/缓存目录取默认值
+     * （token 空 = 端点关闭）。
+     */
+    public SandboxConfig(boolean enabled, String image, int timeoutMinutes, int requestTimeoutSeconds,
+                         int memoryMb, int cpuCount,
+                         List<String> entrypoint, Duration execdGraceShutdown,
+                         boolean projectionEnabled, boolean guardEnabled, int guardLeaseSeconds,
+                         boolean skillRevisionGateEnabled,
+                         boolean syncSnapshotDiffEnabled, boolean syncSkipPackageBaselineEnabled,
+                         boolean sessionAgentIsolation,
+                         int sessionAgentCacheMax, int sessionAgentCacheTtlMinutes,
+                         OpenSandboxConfig opensandbox) {
+        this(enabled, image, timeoutMinutes, requestTimeoutSeconds, memoryMb, cpuCount, entrypoint,
+            execdGraceShutdown,
+            projectionEnabled, guardEnabled, guardLeaseSeconds,
+            skillRevisionGateEnabled, syncSnapshotDiffEnabled,
+            syncSkipPackageBaselineEnabled, sessionAgentIsolation, sessionAgentCacheMax,
+            sessionAgentCacheTtlMinutes,
+            "", "/tmp/skills-bundle-cache", "", opensandbox);
     }
 
     public record OpenSandboxConfig(

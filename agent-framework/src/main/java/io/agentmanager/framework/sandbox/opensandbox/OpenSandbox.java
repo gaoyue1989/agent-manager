@@ -1427,6 +1427,15 @@ public class OpenSandbox extends AbstractBaseSandbox
                 return;
             }
             Path scopeDir = Path.of(sourceRoot, SkillCacheScope.CACHE_DIR, scope);
+            if (skillsFarmEnabled()) {
+                var uid = farmSessionUserKey();
+                var gate = filesystemSpec != null
+                    ? filesystemSpec.skillSyncGate(uid, state.getSandboxId()) : null;
+                if (gate != null && acquireSkillsFarmMode(gate, uid)) {
+                    hydrateSkillsFarm(scope, scopeDir, gate);
+                    return;
+                }
+            }
             String fingerprint = scopedSkillCacheFingerprint(scopeDir, spec, sourceRoot, scope);
             String sandboxId = state.getSandboxId();
             // 稳态判定（双层：Pod 级为主、实例级为无 spec 构造兜底）：指纹未变 且 本沙箱代已
@@ -1482,7 +1491,7 @@ public class OpenSandbox extends AbstractBaseSandbox
         String packageFp = "";
         var pkgDir = filesystemSpec != null ? filesystemSpec.packageSkillsDir() : null;
         if (pkgDir != null && Files.isDirectory(pkgDir)) {
-            packageFp = packageSourceFingerprint(pkgDir);
+            packageFp = PackageSourceFingerprint.of(pkgDir);
         }
         String revision = "";
         if (workspaceReader != null && userKey != null && !userKey.isBlank()) {
@@ -1492,44 +1501,192 @@ public class OpenSandbox extends AbstractBaseSandbox
         return packageFp + "|" + revision;
     }
 
-    /** 包内源目录（configDir/skills）的 stat 指纹：relPath|mtime|size 排序摘要（PVC 同挂载跨副本一致） */
-    private static String packageSourceFingerprint(java.nio.file.Path pkgDir) {
+    // ==================== 软链农场（skills-syncd §6.2：会话级二值判定 + 软链农场） ====================
+
+    /** 农场判定打点（D-5）：会话级二值判定结果 Counter，farm 命中率是池漏配/灰度进度的唯一非日志信号 */
+    private static final String FARM_DECISION_METRIC = "skills.farm.decision";
+    /** store 版本目录命名前缀（skills-syncd §4.4 {@code v-<version>}）；版本比对仅做字符串相等（§7.2 SSOT 边界） */
+    private static final String STORE_VERSION_DIR_PREFIX = "v-";
+
+    /** 农场开关（§6.4）：SANDBOX_SKILLS_SHARED_STORE 空 = 农场整体关闭走现行为 */
+    private boolean skillsFarmEnabled() {
+        var store = options != null ? options.getSkillsSharedStore() : null;
+        return store != null && !store.isBlank();
+    }
+
+    /** 农场会话键（与 session_user 规范键同源）：middleware/ctx 已解析的 userKey，缺失时 spec ThreadLocal 兜底 */
+    private String farmSessionUserKey() {
+        if (userKey != null && !userKey.isBlank()) {
+            return userKey;
+        }
+        return filesystemSpec != null ? filesystemSpec.peekPendingUserKey() : null;
+    }
+
+    /**
+     * 会话级二值判定（B-1，§6.2/§7.2）：CAS 首触点执行一次——readlink store/CURRENT 可解析
+     * 且与端点指纹（D-4 短 TTL）目录名字符串相等 → 本会话软链模式；任一失败（store 缺失 /
+     * 端点不可达 / 版本不一致）→ 本会话整体走原 tar 物化。判定按会话键记忆于 gate：
+     * 降级会话不中途翻转，新会话（新 sandboxId 换新 gate）重新判定。
+     */
+    private boolean acquireSkillsFarmMode(SkillSyncGate gate, String uid) {
+        var remembered = gate.skillFarmState();
+        if (remembered != null) {
+            return remembered.farm();
+        }
+        var decision = decideSkillsFarmMode(uid);
+        gate.setSkillFarmState(new SkillSyncGate.SkillFarmState(decision.farm(), decision.l4Names()));
+        recordFarmDecision(decision.result());
+        return decision.farm();
+    }
+
+    private record FarmDecision(boolean farm, String result, java.util.Set<String> l4Names) {}
+
+    private FarmDecision decideSkillsFarmMode(String uid) {
+        String storeVersion = null;
         try {
-            var lines = new java.util.ArrayList<String>();
-            try (var walk = Files.walk(pkgDir)) {
-                walk.filter(Files::isRegularFile).sorted().forEach(p ->
-                    lines.add(pkgDir.relativize(p) + "|" + mtimeOf(p) + "|" + sizeOf(p)));
-            }
-            lines.sort(String::compareTo);
-            var md = java.security.MessageDigest.getInstance("SHA-256");
-            for (var line : lines) {
-                md.update((line + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            }
-            var digest = md.digest();
-            var sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.substring(0, 16);
+            storeVersion = readStoreCurrentVersion(options.getSkillsSharedStore().trim());
         } catch (Exception e) {
-            // 源指纹算不出（目录不可读等）：退化为「每次都不同」的随机值 → 恒走慢路径（安全侧）
-            return "ERR-" + System.nanoTime();
+            log.debug("[sandbox-open] skills farm store probe failed: {}", e.getMessage());
+        }
+        if (storeVersion == null) {
+            return new FarmDecision(false, "degraded_store_missing", java.util.Set.of());
+        }
+        String endpointVersion = null;
+        try {
+            var svc = options.getSkillBundleService();
+            endpointVersion = svc == null ? null : svc.currentVersion().version();
+            if (endpointVersion == null) {
+                throw new IllegalStateException("skill bundle service not wired");
+            }
+        } catch (Exception e) {
+            log.warn("[sandbox-open] skills farm endpoint version unavailable: {}", e.getMessage());
+            return new FarmDecision(false, "degraded_endpoint_down", java.util.Set.of());
+        }
+        if (!(STORE_VERSION_DIR_PREFIX + endpointVersion).equals(storeVersion)) {
+            log.error("[sandbox-open] skills farm version hard-check failed (store={}, endpoint={}): "
+                + "store treated as unusable, session degraded to tar materialization",
+                storeVersion, endpointVersion);
+            return new FarmDecision(false, "degraded_version_mismatch", java.util.Set.of());
+        }
+        return new FarmDecision(true, "farm", captureL4SkillNames(uid));
+    }
+
+    /**
+     * store 版本读取（§7.2 SSOT 边界）：{@code readlink <store>/CURRENT} 的目录名，仅做字符串
+     * 相等比较、禁止在 Java 侧重算 store 内容指纹。store 缺失 / CURRENT 解析失败 / exec 异常
+     * 统一返回 null（= degraded_store_missing）。
+     */
+    private String readStoreCurrentVersion(String store) throws Exception {
+        var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT'");
+        if (execution.getExitCode() == null || execution.getExitCode() != 0) {
+            return null;
+        }
+        var stdout = execution.getLogs() != null && execution.getLogs().getStdout() != null
+            ? execution.getLogs().getStdout().stream()
+                .map(msg -> msg.getText())
+                .collect(Collectors.joining("\n"))
+            : "";
+        var token = stdout.trim();
+        if (token.isEmpty()) {
+            return null;
+        }
+        int slash = token.lastIndexOf('/');
+        return slash >= 0 ? token.substring(slash + 1) : token;
+    }
+
+    /**
+     * 同名 L4 优先的判定源（规则 1）：判定时刻的用户 L4 技能名集，会话级快照（农场会话全程
+     * 复用）。枚举失败按空集 fail-soft——同名裁决最终仍由 SDK 消费层兜底（workspace 优先），
+     * 农场建链只是收敛面收窄。
+     */
+    private java.util.Set<String> captureL4SkillNames(String uid) {
+        if (workspaceReader == null || uid == null || uid.isBlank()) {
+            return java.util.Set.of();
+        }
+        try {
+            return java.util.Set.copyOf(workspaceReader.listUserSkills(uid).keySet());
+        } catch (Exception e) {
+            log.warn("[sandbox-open] skills farm L4 name capture failed (user={}): {}", uid, e.getMessage());
+            return java.util.Set.of();
         }
     }
 
-    private static long mtimeOf(java.nio.file.Path p) {
-        try {
-            return Files.getLastModifiedTime(p).toMillis();
-        } catch (Exception e) {
-            return -1;
+    /** 判定打点（D-5）：Counter skills.farm.decision{result}；每次降级判定同步落一行结构化 WARN */
+    private void recordFarmDecision(String result) {
+        var registry = options != null ? options.getFarmMeterRegistry() : null;
+        if (registry != null) {
+            registry.counter(FARM_DECISION_METRIC, "result", result).increment();
+        }
+        if (!"farm".equals(result)) {
+            log.warn("[sandbox-open] skills farm decision degraded (result={})", result);
         }
     }
 
-    private static long sizeOf(java.nio.file.Path p) {
-        try {
-            return Files.size(p);
-        } catch (Exception e) {
-            return -1;
+    /**
+     * 农场链候选（相对 scopeDir 的 ns/name，排序稳定）：宿主 scope 目录即 SDK stage manifest，
+     * 其内全部为包技能（workspace-native L4 不进 .skills-cache）。禁用名（{@link
+     * #resolveDisabledSkillDirs} 同源，禁止重写过滤规则）与 L4 同名（规则 1 真实文件保护）
+     * 不建链；含单引号/空白/{@code ..} 的相对路径跳过（防御同 {@link #disabledRmCmd}）。
+     */
+    private List<String> farmLinkCandidates(Path scopeDir, java.util.Set<Path> disabledDirs,
+                                            java.util.Set<String> l4Names) throws Exception {
+        if (!Files.isDirectory(scopeDir)) {
+            return List.of();
+        }
+        var candidates = new java.util.TreeSet<String>();
+        try (var nsStream = Files.list(scopeDir)) {
+            for (var ns : nsStream.filter(Files::isDirectory).sorted().toList()) {
+                try (var skillStream = Files.list(ns)) {
+                    for (var skillDir : skillStream.filter(Files::isDirectory).sorted().toList()) {
+                        var rel = scopeDir.relativize(skillDir).toString().replace('\\', '/');
+                        if (!isShellSafeRelPath(rel)
+                                || disabledDirs.contains(scopeDir.relativize(skillDir))
+                                || l4Names.contains(skillDir.getFileName().toString())) {
+                            continue;
+                        }
+                        candidates.add(rel);
+                    }
+                }
+            }
+        }
+        return List.copyOf(candidates);
+    }
+
+    /**
+     * 软链农场投放（规则 1-5，单条 exec 幂等收敛）：对 manifest 内的包技能路径有全权——
+     * 目标态为软链 {@code <store>/CURRENT/<skill>}（B-4 间接寻址不钉版本目录），路径现存任何物
+     * （缺失 / 悬空 / 降级会话 tar 物化残留真实文件）统一 rm 后重建（D-2），每次 CAS 触发都执行
+     * ——容器重启可写层清空、记账未失效的组合由此自愈（H2）。禁用判定复用
+     * {@link #resolveDisabledSkillDirs}：禁用名不建链且随 exec 清理既有软链（B-2，会话中途
+     * 禁用生效）；prune 与禁用清理复用 tar 路径的容器内清理语义。exec 失败上抛（CAS 复位，
+     * 下次触发重试），判定不变。
+     */
+    private void hydrateSkillsFarm(String scope, Path scopeDir, SkillSyncGate gate) throws Exception {
+        var disabledDirs = resolveDisabledSkillDirs(scopeDir);
+        java.util.Set<String> l4Names = gate != null && gate.skillFarmState() != null
+            ? gate.skillFarmState().l4Names()
+            : java.util.Set.of();
+        var linkCmd = new StringBuilder();
+        for (var rel : farmLinkCandidates(scopeDir, disabledDirs, l4Names)) {
+            if (linkCmd.length() > 0) {
+                linkCmd.append(" && ");
+            }
+            String containerPath = getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR + "/" + scope + "/" + rel;
+            String parentDir = containerPath.substring(0, containerPath.lastIndexOf('/'));
+            String target = options.getSkillsSharedStore().trim() + "/CURRENT/" + leaf(rel);
+            linkCmd.append("mkdir -p '").append(parentDir).append("'")
+                .append(" && rm -rf '").append(containerPath).append("'")
+                .append(" && ln -s '").append(target).append("' '").append(containerPath).append("'");
+        }
+        String pruneCmd = "find " + getWorkspaceRoot() + "/" + SkillCacheScope.CACHE_DIR
+            + " -mindepth 1 -maxdepth 1 -type d ! -name '" + scope + "' -exec rm -rf {} + ; true";
+        String rmCmd = disabledRmCmd(scope, disabledDirs);
+        String cleanup = rmCmd.isEmpty() ? pruneCmd : pruneCmd + "; " + rmCmd;
+        String command = linkCmd.length() == 0 ? "{ " + cleanup + "; }" : linkCmd + " && { " + cleanup + "; }";
+        var execution = osbSandbox.commands().run(command);
+        if (execution.getExitCode() != null && execution.getExitCode() != 0) {
+            throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
+                "hydrateSkillsFarm", "skills farm converge failed with exit " + execution.getExitCode(), null);
         }
     }
 
