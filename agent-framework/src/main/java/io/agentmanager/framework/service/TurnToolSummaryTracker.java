@@ -56,13 +56,26 @@ public final class TurnToolSummaryTracker {
     /** 摘要帧的落库/广播回调（由控制器注入 EventBus） */
     private final Emitter emitter;
 
+    /**
+     * 事件名 → 注册名归一器（注入 {@code McpToolRegistrar::displayNameFor}）：
+     * 恢复段没有 TOOL_CALL_* 重放，结果事件携带的是 SDK 侧 wire 形态名，
+     * 归一后摘要帧与模型侧口径一致。
+     */
+    private final java.util.function.UnaryOperator<String> nameNormalizer;
+
     private final String sessionId;
     private final String replyId;
 
     public TurnToolSummaryTracker(String sessionId, String replyId, Emitter emitter) {
+        this(sessionId, replyId, emitter, null);
+    }
+
+    public TurnToolSummaryTracker(String sessionId, String replyId, Emitter emitter,
+                                  java.util.function.UnaryOperator<String> nameNormalizer) {
         this.sessionId = sessionId;
         this.replyId = replyId;
         this.emitter = emitter;
+        this.nameNormalizer = nameNormalizer != null ? nameNormalizer : java.util.function.UnaryOperator.identity();
     }
 
     /** 合成帧的落库出口：对接 {@code SessionEventBus.emitSynthetic} */
@@ -182,10 +195,10 @@ public final class TurnToolSummaryTracker {
 
     private String resolveName(String toolCallId, String eventToolName) {
         if (toolCallId == null) {
-            return eventToolName;
+            return nameNormalizer.apply(eventToolName);
         }
         var registered = toolNames.get(toolCallId);
-        return registered != null ? registered : eventToolName;
+        return registered != null ? registered : nameNormalizer.apply(eventToolName);
     }
 
     private void append(ConcurrentHashMap<String, StringBuilder> buffers, String id,

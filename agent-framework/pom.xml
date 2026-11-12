@@ -19,10 +19,10 @@
 
     <properties>
         <java.version>21</java.version>
-        <!-- agentscope 2.0.3：HITL 挂起态可由 SDK 自行持久化并在下一轮从 AgentState 恢复
+        <!-- agentscope 2.0.4：HITL 挂起态可由 SDK 自行持久化并在下一轮从 AgentState 恢复
              （2.0.3 起 persistPendingRequestReplyId 把 replyId 写入最后一条 assistant 消息的
              metadata，askingToolCalls() 据此在无外部表时也能恢复；2.0.0 缺该能力） -->
-        <agentscope.version>2.0.3</agentscope.version>
+        <agentscope.version>2.0.4</agentscope.version>
         <opentelemetry.version>1.61.0</opentelemetry.version>
         <!-- agentscope-core 传递依赖的是 opentelemetry 1.37.0（SDK 内置
              OtelTracingMiddleware 仅含 API）；必须用 dependencyManagement 统一

@@ -340,7 +340,8 @@ public class ConfirmController {
             // 工具摘要累积器（turn 级）：HITL 批准后的恢复执行段同样要输出「执行 …」人可读摘要，
             // 否则用户批准后看到的又是「🔧 execute 完成」
             var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
-                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
+                mcpToolRegistrar::displayNameFor);
             // 本轮模型用量累积器（chat-trace-observability-design §2.3/§2.5）：恢复段与对话段
             // 同口径，收尾发自己的 turn_finished。turn 闭包局部对象，随 turn 丢弃。
             var usage = new io.agentmanager.framework.service.TurnUsageTracker();

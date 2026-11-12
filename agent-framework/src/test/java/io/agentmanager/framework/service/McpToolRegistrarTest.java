@@ -418,9 +418,11 @@ class McpToolRegistrarTest {
         var result = registrar.collectPermissionRules(oaf);
 
         assertEquals(PermissionMode.DONT_ASK, result.mode());
-        // delete_weather 未注册被忽略；finance 无声明不产生规则
-        assertEquals(Map.of("get_weather", "ask", "update_weather", "allow"), result.tools());
-        assertEquals(Set.of("get_weather", "update_weather", "query_db"), result.mcpNames());
+        // delete_weather 未注册被忽略；finance 无声明不产生规则；规则键 = 注册名（mcp__ 前缀）
+        assertEquals(Map.of("mcp__weather__get_weather", "ask", "mcp__weather__update_weather", "allow"),
+            result.tools());
+        assertEquals(Set.of("mcp__weather__get_weather", "mcp__weather__update_weather", "mcp__finance__query_db"),
+            result.mcpNames());
     }
 
     @Test
@@ -607,9 +609,9 @@ class McpToolRegistrarTest {
             .registerTool(captor.capture());
         var registeredNames = captor.getAllValues().stream()
             .map(io.agentscope.core.tool.AgentTool::getName).toList();
-        assertTrue(registeredNames.contains("get_weather"));
-        assertTrue(registeredNames.contains("delete_weather"));
-        assertFalse(registeredNames.contains("refresh_dashboard"));
+        assertTrue(registeredNames.contains("mcp__app-only-srv__get_weather"));
+        assertTrue(registeredNames.contains("mcp__app-only-srv__delete_weather"));
+        assertFalse(registeredNames.contains("mcp__app-only-srv__refresh_dashboard"));
     }
 
     // ===== D6 回归：app_only / 子集过滤不应强制只读 =====
@@ -635,10 +637,10 @@ class McpToolRegistrarTest {
         var toolkit = org.mockito.Mockito.mock(Toolkit.class);
         registrar.registerFilteredForTest(toolkit, wrapper, "cards-srv", null, mapping, false);
 
-        // app_only 工具仍不注册（隐藏于 LLM），但其余工具以"受权限评估"方式注册
+        // app_only 工具仍不注册（隐藏于 LLM），但其余工具以"受权限评估"方式注册（注册名带 mcp__ 前缀）
         var captor = org.mockito.ArgumentCaptor.forClass(io.agentscope.core.tool.AgentTool.class);
         org.mockito.Mockito.verify(toolkit, org.mockito.Mockito.times(1)).registerTool(captor.capture());
-        assertEquals("submit_application", captor.getValue().getName());
+        assertEquals("mcp__cards-srv__submit_application", captor.getValue().getName());
         // 非只读注册：checkPermissions 不因 readOnly 短路（返回的 Mono 需要权限评估上下文）
         assertFalse(registrar.isAppOnly("cards-srv", "submit_application"));
         assertTrue(registrar.isAppOnly("cards-srv", "hidden_card_tool"));

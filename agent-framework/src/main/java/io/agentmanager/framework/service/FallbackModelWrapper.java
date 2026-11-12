@@ -5,6 +5,7 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.agentscope.core.agent.config.FailoverListener;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
@@ -32,31 +33,53 @@ public class FallbackModelWrapper implements Model {
 
     private final Model primary;
     private final Model fallback;
+    private final FailoverListener failoverListener;
 
     public FallbackModelWrapper(Model primary, Model fallback) {
+        this(primary, fallback, null);
+    }
+
+    public FallbackModelWrapper(Model primary, Model fallback, FailoverListener failoverListener) {
         this.primary = primary;
         this.fallback = fallback;
+        this.failoverListener = failoverListener;
     }
 
     /** 备用模型为空时直接返回主模型，避免无意义的包装。 */
     public static Model wrap(Model primary, Model fallback) {
-        return fallback == null ? primary : new FallbackModelWrapper(primary, fallback);
+        return wrap(primary, fallback, null);
+    }
+
+    public static Model wrap(Model primary, Model fallback, FailoverListener failoverListener) {
+        return fallback == null ? primary : new FallbackModelWrapper(primary, fallback, failoverListener);
     }
 
     @Override
     public Flux<ChatResponse> stream(List<Msg> messages, List<ToolSchema> tools,
                                      GenerateOptions options) {
-        return primary.stream(messages, tools, options)
+        return Flux.defer(() -> primary.stream(messages, tools, options))
             .switchOnFirst((signal, flux) -> {
                 if (signal.isOnError()) {
                     Throwable error = signal.getThrowable();
                     log.warn("Primary model '{}' failed ({}), switching to fallback model '{}'",
                         primary.getModelName(), error != null ? error.getMessage() : "unknown",
                         fallback.getModelName(), error);
+                    notifyFailover(failoverListener, primary, error);
                     return fallback.stream(messages, tools, options);
                 }
                 return flux;
             });
+    }
+
+    private static void notifyFailover(FailoverListener listener, Model primary, Throwable error) {
+        if (listener == null) {
+            return;
+        }
+        try {
+            listener.onFailover(primary, error);
+        } catch (Exception e) {
+            log.warn("Failover listener threw an exception, ignoring", e);
+        }
     }
 
     // ---- 委托主模型的静态元信息（模型名/能力），保持下游 span、日志口径一致 ----

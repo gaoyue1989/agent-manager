@@ -8,6 +8,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import io.agentscope.harness.agent.gateway.SessionTurnGate;
+import io.agentscope.harness.agent.gateway.TurnBusyException;
+import io.agentscope.harness.agent.gateway.TurnLease;
+
 /**
  * Turn 租约存储（turn_lease 表，无状态单次流架构 4.1.3）。
  *
@@ -25,7 +29,7 @@ import org.springframework.stereotype.Service;
  * 轮询为独立短连接，不占用连接池；崩溃由 TTL 过期兜底接管。
  */
 @Service
-public class TurnLeaseStore {
+public class TurnLeaseStore implements SessionTurnGate {
     private static final Logger log = LoggerFactory.getLogger(TurnLeaseStore.class);
 
     /** 轮询间隔：每 500ms 重试获取 */
@@ -239,5 +243,19 @@ public class TurnLeaseStore {
         } catch (Exception e) {
             log.warn("TurnLeaseStore: cleanupExpired failed: {}", e.getMessage());
         }
+    }
+
+    @Override
+    public TurnLease acquire(String key) throws TurnBusyException {
+        var token = tryAcquire(key);
+        if (token == null) {
+            throw new TurnBusyException(key);
+        }
+        return new TurnLeaseGuard(this, key, token);
+    }
+
+    @Override
+    public boolean isRunning(String key) {
+        return isHeld(key);
     }
 }

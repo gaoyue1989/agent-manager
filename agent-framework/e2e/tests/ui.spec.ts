@@ -79,7 +79,7 @@ test('U4 HITL 批准全流程与恢复流工具摘要', async ({ page }) => {
   await send(page, `[E2E:hitl:submit](${app})`);
   const card = page.locator(SEL.confirmCard);
   await expect(card).toBeVisible({ timeout: 120_000 });
-  await expect(card.locator(SEL.confirmToolName)).toContainText('submit_application');
+  await expect(card.locator(SEL.confirmToolName)).toContainText('mcp__approval__submit_application');
   await card.locator(SEL.confirmApprove).click();
   await expect(card).toBeHidden({ timeout: 120_000 });
 

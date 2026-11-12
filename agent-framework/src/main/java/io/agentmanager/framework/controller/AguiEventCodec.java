@@ -15,10 +15,10 @@ import io.agentscope.core.agui.adapter.strategy.AguiStreamContext;
 import io.agentscope.core.agui.encoder.AguiEventEncoder;
 import io.agentscope.core.agui.event.AguiEvent;
 import io.agentscope.core.agui.event.AguiEvent.Interrupt;
-import io.agentscope.core.agui.model.ToolMergeMode;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.RequireUserConfirmEvent;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.tool.ToolMergeMode;
 
 /**
  * AG-UI pa 编码引擎（agui-native-parity-design §4 D2）。

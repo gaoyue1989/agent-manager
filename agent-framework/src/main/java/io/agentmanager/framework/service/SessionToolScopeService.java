@@ -18,16 +18,16 @@ import io.agentmanager.framework.tool.CustomTool;
  *
  * <p>分类口径（作用域分层，§0：会话级接口只作用于 MCP + 自定义，内置恒可见）：
  * <ul>
- *   <li><b>MCP</b>：{@link McpToolRegistrar} 登记集（非 app_only；裸名 = Toolkit 注册名，
- *       两条注册路径同一登记点）；</li>
+ *   <li><b>MCP</b>：{@link McpToolRegistrar} 登记集（非 app_only；注册名 = mcp__{server}__{tool}
+ *       模型侧可见名，两条注册路径同一登记点）；</li>
  *   <li><b>自定义</b>：{@link InternalToolRegistry} 运行时注册集（与 HarnessAgentFactory
  *       同一批 {@link CustomTool} bean，deniedTools 剔除同语义）；</li>
  *   <li><b>内置</b>：其余——SDK 升级漂移新增名默认归内置（不受会话级 tools 影响，
  *       漂移方向安全：宁可不收窄，不误伤框架能力）。</li>
  * </ul>
  *
- * <p>名单解析（§2.1 两级别名）：裸名精确匹配（主口径）优先；未命中再按
- * {@code mcp__{server}__{tool}} 全名反查（displayName → 裸名）；内置名 WARN 提示
+ * <p>名单解析（§2.1 两级别名）：注册名（mcp__{server}__{tool}）精确匹配（主口径）优先；
+ * 未命中再按远端裸名反查（同名工具跨 server 全部保留）；内置名 WARN 提示
  * 「不受会话级控制」；未知名静默忽略（与 skills 白名单同语义）。
  */
 @Service
@@ -44,7 +44,7 @@ public class SessionToolScopeService {
         this.internalToolRegistry = internalToolRegistry;
     }
 
-    /** MCP 可控裸名集（非 app_only；reload 即时反映）。public：ToolController sessionTools 汇总同用 */
+    /** MCP 可控注册名集（非 app_only；reload 即时反映）。public：ToolController sessionTools 汇总同用 */
     public Set<String> mcpToolNames() {
         return mcpToolRegistrar.getSessionControllableToolNames();
     }
@@ -54,13 +54,13 @@ public class SessionToolScopeService {
         return internalToolRegistry.runtimeCustomToolNames();
     }
 
-    /** {@code mcp__{server}__{tool}} 全名反查 ToolInfo；未注册返回 null */
-    protected McpToolRegistrar.ToolInfo byFullName(String fullName) {
-        return mcpToolRegistrar.findByDisplayName(fullName);
+    /** 远端裸名反查注册名集（mcp__{server}__{tool}）；未注册返回空集 */
+    protected List<String> byWireName(String wireName) {
+        return mcpToolRegistrar.registeredNamesForWireName(wireName);
     }
 
     /**
-     * 解析本轮 {@code tools} 名单 → 应保留的已注册名集合（裸名形态，两级别名已归一）。
+     * 解析本轮 {@code tools} 名单 → 应保留的已注册名集合（注册名形态，两级别名已归一）。
      * 名单元素允许 null/空白（跳过）；名单本身 null 视为空名单（Resolution 空集）。
      * 解析纯内存操作，无校验报错（未知名忽略）。
      */
@@ -77,12 +77,12 @@ public class SessionToolScopeService {
                 continue;
             }
             if (custom.contains(name) || mcp.contains(name)) {
-                keep.add(name);   // 裸名精确匹配（主口径）
+                keep.add(name);   // 注册名精确匹配（主口径）
                 continue;
             }
-            var viaFullName = byFullName(name);
-            if (viaFullName != null && !viaFullName.appOnly()) {
-                keep.add(viaFullName.name());   // mcp__{server}__{tool} 全名别名
+            var viaWireName = byWireName(name);
+            if (!viaWireName.isEmpty()) {
+                keep.addAll(viaWireName);   // 远端裸名别名（同名工具跨 server 全保留）
                 continue;
             }
             if (HarnessAgentFactory.BUILT_IN_TOOL_NAMES.contains(name)) {

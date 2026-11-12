@@ -372,138 +372,6 @@ class OpenSandboxTest {
             "application/octet-stream", 1, "local", "upload/x/" + id, "upload", "pending", null);
     }
 
-    // ---------- 工作区投影新鲜度检查（refreshProjectionIfStale）：补齐 stage 晚于 start 的技能目录 ----------
-
-    /**
-     * 构造与 harness 生产路径同构的投影 spec：entry key 固定 __workspace_projection__
-     * （SandboxFilesystemSpec.buildWorkspaceSpecWithProjection 同款），sourceRoot 指向
-     * 临时目录，includeRoots 用 SDK 默认投影根（AGENTS.md/skills/subagents/knowledge/.skills-cache）。
-     */
-    private static OpenSandboxState projectedState(java.nio.file.Path sourceRoot) {
-        var s = new OpenSandboxState();
-        var ws = new io.agentscope.harness.agent.sandbox.WorkspaceSpec();
-        ws.setRoot("/workspace");
-        var entry = new io.agentscope.harness.agent.sandbox.layout.WorkspaceProjectionEntry();
-        entry.setSourceRoot(sourceRoot.toAbsolutePath().normalize().toString());
-        entry.setIncludeRoots(List.of("AGENTS.md", "skills", "subagents", "knowledge", ".skills-cache"));
-        ws.setEntries(Map.of("__workspace_projection__", entry));
-        s.setWorkspaceSpec(ws);
-        return s;
-    }
-
-    @Test
-    void execShouldRefreshProjectionWhenHostDirChangedAfterStart() throws Exception {
-        // E-SKILL-4 回归钉子：技能目录在 sandbox start 之后才 stage（每轮 onSystemPrompt），
-        // 首次 exec 须把它补水合进容器，使 /workspace/.skills-cache/... 在 shell 里真实可见
-        var host = java.nio.file.Files.createTempDirectory("projection-refresh");
-        var osb = mockOsb(mockExecution(0, "", ""));
-        var sandbox = new OpenSandbox(projectedState(host), osb, options(), null, null);
-
-        sandbox.start(); // start 时宿主为空，记录"空投影"hash
-
-        // start 之后 stage 出技能目录（模拟 onSystemPrompt 时序）
-        var skillDir = host.resolve(".skills-cache/u1/oaf-package/demo-skill");
-        java.nio.file.Files.createDirectories(skillDir);
-        java.nio.file.Files.writeString(skillDir.resolve("SKILL.md"), "---\nname: demo\n---\nhi");
-
-        sandbox.exec(RuntimeContext.builder().userId("u1").build(), "ls /workspace", 30);
-
-        // 补水合走 doHydrateWorkspace：base64 写临时 tar + 解压命令
-        verify(osb.files(), atLeastOnce()).write(anyList());
-        verify(osb.commands(), atLeastOnce()).run(contains("tar xzf - -C /workspace"));
-        var state = sandbox.getOsbState();
-        assertNotNull(state.getWorkspaceProjectionHash(), "补水合后须回写 hash");
-        assertFalse(state.getWorkspaceProjectionHash().isEmpty());
-    }
-
-    @Test
-    void execShouldSkipProjectionRefreshWhenUnchanged() throws Exception {
-        // hash 一致（宿主自 start 后无变化）时不得重复水合：
-        // start 走 Branch D 水合一次并记录 hash；本次 exec 比对一致 → 只有 start 那一次
-        var host = java.nio.file.Files.createTempDirectory("projection-same");
-        var skillDir = host.resolve("skills/demo");
-        java.nio.file.Files.createDirectories(skillDir);
-        java.nio.file.Files.writeString(skillDir.resolve("SKILL.md"), "v1");
-        var exec = mockExecution(0, "", "");
-        var osb = mockOsb(exec);
-        var sandbox = new OpenSandbox(projectedState(host), osb, options(), null, null);
-
-        sandbox.start(); // Branch D：宿主非空 → 水合 + 记 hash
-        sandbox.exec(RuntimeContext.builder().userId("u").build(), "ls /workspace", 30);
-
-        verify(osb.commands(), times(1)).run(contains("tar xzf - -C /workspace"));
-    }
-
-    @Test
-    void projectionRefreshFailureShouldNotBlockExec() throws Exception {
-        // fail-soft：水合命令失败仅告警，命令本身照常执行
-        var host = java.nio.file.Files.createTempDirectory("projection-fail");
-        var exec = mockExecution(0, "ok", "");
-        var osb = mockOsb(exec);
-        var sandbox = new OpenSandbox(projectedState(host), osb, options(), null, null);
-        sandbox.start();
-
-        var skillDir = host.resolve("skills/demo");
-        java.nio.file.Files.createDirectories(skillDir);
-        java.nio.file.Files.writeString(skillDir.resolve("SKILL.md"), "v1");
-
-        // 让水合的解压命令失败（exit 1）——先建好返回对象再 stub，避免嵌套 when()
-        var failExec = mockExecution(1, "", "untar fail");
-        var okExec = mockExecution(0, "ok", "");
-        var commands = mock(Commands.class);
-        when(commands.run(contains("tar xzf - -C /workspace"))).thenReturn(failExec);
-        when(commands.run(anyString())).thenReturn(okExec);
-        when(osb.commands()).thenReturn(commands);
-
-        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo ok", 30);
-
-        assertTrue(result.ok());
-        assertEquals("ok", result.stdout());
-    }
-
-    @Test
-    void projectionRefreshShouldRecheckAfterStop() throws Exception {
-        // 每 call 一次：stop 复位后，下一 call 宿主再变化仍会补水合
-        var host = java.nio.file.Files.createTempDirectory("projection-recall");
-        var exec = mockExecution(0, "", "");
-        var osb = mockOsb(exec);
-        var sandbox = new OpenSandbox(projectedState(host), osb, options(), null, null);
-        sandbox.start();
-
-        sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo 1", 30);
-        sandbox.stop();
-
-        // stop 之后 stage 出新目录（下一 call 的 onSystemPrompt 时序）
-        var skillDir = host.resolve(".skills-cache/u2/oaf-package/new-skill");
-        java.nio.file.Files.createDirectories(skillDir);
-        java.nio.file.Files.writeString(skillDir.resolve("SKILL.md"), "new");
-
-        var freshExec = mockExecution(0, "", "");
-        var commands = mock(Commands.class);
-        when(commands.run(anyString())).thenReturn(freshExec);
-        when(osb.commands()).thenReturn(commands);
-
-        sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo 2", 30);
-
-        verify(osb.commands(), atLeastOnce()).run(contains("tar xzf - -C /workspace"));
-    }
-
-    @Test
-    void projectionRefreshShouldSkipWhenSpecMissing() throws Exception {
-        // 投影未启用/未装配（spec 无 entries）：build 返回 null，直接跳过且不报错
-        var s = new OpenSandboxState();
-        var ws = new io.agentscope.harness.agent.sandbox.WorkspaceSpec();
-        ws.setRoot("/workspace");
-        s.setWorkspaceSpec(ws);
-        var osb = mockOsb(mockExecution(0, "ok", ""));
-        var sandbox = new OpenSandbox(s, osb, options(), null, null);
-
-        var result = sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo ok", 30);
-
-        assertTrue(result.ok());
-        verify(osb.commands(), never()).run(contains("tar xzf - -C /workspace"));
-    }
-
     // ---------- scoped .skills-cache 投放（方案 1：只投当前会话 scope + 清理容器内其它 scope） ----------
 
     /** 生产形态投影 spec：投影根不含 .skills-cache（AgentScopeConfig.workspaceProjectionRoots 收窄）。 */
@@ -827,7 +695,7 @@ class OpenSandboxTest {
         var st = state();
         st.setSandboxId("sbx-gate-1"); // 生产由 create 写入；测试显式设置让 gate 生效
         var sandbox = new OpenSandbox(st, osb, options(), reader, null, spec,
-            null, null, true, revisionGate, true);
+            null, null, revisionGate, true);
         sandbox.setUserKey("alice");
         return sandbox;
     }
@@ -905,7 +773,7 @@ class OpenSandboxTest {
         var st = state();
         st.setSandboxId("sbx-diff-1");
         var sandbox = new OpenSandbox(st, osb, options(), null, sync, spec,
-            null, null, true, true, true);
+            null, null, true, true);
         sandbox.exec(RuntimeContext.builder().userId("user-alice").build(), "echo x", 30);
         sandbox.stop();
         verify(sync).syncBack(eq("user-alice"), eq(osb), any(SkillSyncGate.class));
@@ -914,7 +782,7 @@ class OpenSandboxTest {
         var st2 = state();
         st2.setSandboxId("sbx-diff-2");
         var sandbox2 = new OpenSandbox(st2, osb, options(), null, sync2, spec,
-            null, null, true, true, false);
+            null, null, true, false);
         sandbox2.exec(RuntimeContext.builder().userId("user-bob").build(), "echo x", 30);
         sandbox2.stop();
         verify(sync2).syncBack(eq("user-bob"), eq(osb), isNull());
@@ -1555,7 +1423,7 @@ class OpenSandboxTest {
         var st = state();
         st.setSandboxId("sbx-fr-1");
         return new OpenSandbox(st, osb, options(), reader, null, new OpenSandboxFilesystemSpec(),
-            null, null, true, true, true, readThrough, true);
+            null, null, true, true, readThrough, true);
     }
 
     /** P_READ 探测模板（SDK 系统提示探针原样形态） */
@@ -1782,7 +1650,7 @@ class OpenSandboxTest {
         var st = state();
         st.setSandboxId("sbx-backfill-1");
         var sandbox = org.mockito.Mockito.spy(new OpenSandbox(st, osb, options(), null, null,
-            new OpenSandboxFilesystemSpec(), null, null, true, true, true, false, false));
+            new OpenSandboxFilesystemSpec(), null, null, true, true, false, false));
 
         sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo x", 30);
         sandbox.stop();
@@ -1797,7 +1665,7 @@ class OpenSandboxTest {
         var st = state();
         st.setSandboxId("sbx-backfill-2");
         var sandbox = org.mockito.Mockito.spy(new OpenSandbox(st, osb, options(), null, null,
-            new OpenSandboxFilesystemSpec(), null, null, true, true, true, false, true));
+            new OpenSandboxFilesystemSpec(), null, null, true, true, false, true));
 
         sandbox.exec(RuntimeContext.builder().userId("u").build(), "echo x", 30);
         sandbox.stop();

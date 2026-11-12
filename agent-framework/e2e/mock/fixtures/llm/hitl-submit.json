@@ -26,7 +26,7 @@
    },
    "chunks": [
     "{\"id\":\"cec41b33-000f-4ad8-8dd4-c2c27d4d76d7_5aed4d5352584e6b83bb0871f329f249\",\"choices\":[{\"delta\":{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":null,\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789791921,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
-    "{\"id\":\"cec41b33-000f-4ad8-8dd4-c2c27d4d76d7_5aed4d5352584e6b83bb0871f329f249\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_356884a679be489792fc5360\",\"function\":{\"arguments\":\"\",\"name\":\"submit_application\"},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789791921,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
+    "{\"id\":\"cec41b33-000f-4ad8-8dd4-c2c27d4d76d7_5aed4d5352584e6b83bb0871f329f249\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_356884a679be489792fc5360\",\"function\":{\"arguments\":\"\",\"name\":\"mcp__approval__submit_application\"},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789791921,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
     "{\"id\":\"cec41b33-000f-4ad8-8dd4-c2c27d4d76d7_5aed4d5352584e6b83bb0871f329f249\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"{\\\"application_id\\\": \",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789791921,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
     "{\"id\":\"cec41b33-000f-4ad8-8dd4-c2c27d4d76d7_5aed4d5352584e6b83bb0871f329f249\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"\\\"\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789791921,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
     "{\"id\":\"cec41b33-000f-4ad8-8dd4-c2c27d4d76d7_5aed4d5352584e6b83bb0871f329f249\",\"choices\":[{\"delta\":{\"content\":null,\"role\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"arguments\":\"APP-\",\"name\":null},\"type\":\"function\"}],\"reasoning_content\":null},\"finish_reason\":null,\"index\":0}],\"created\":1789791921,\"model\":\"mimo-v2.5\",\"object\":\"chat.completion.chunk\"}",
@@ -91,7 +91,7 @@
         "id": "call_987b46e3e3664fafa3f6ba70",
         "type": "function",
         "function": {
-         "name": "submit_application",
+         "name": "mcp__approval__submit_application",
          "arguments": "{\"application_id\": \"APP-0003\"}"
         }
        }

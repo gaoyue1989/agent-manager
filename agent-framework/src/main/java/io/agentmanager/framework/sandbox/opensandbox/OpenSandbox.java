@@ -61,9 +61,6 @@ public class OpenSandbox extends AbstractBaseSandbox
     /** 本 call 已查过且无 pending 上传（call 粒度短路：实例存活期=单 call，防每 doExec 查 file_asset） */
     private final AtomicBoolean pendingEmptyChecked = new AtomicBoolean(false);
     private final AtomicBoolean userSkillsMaterialized = new AtomicBoolean(false);
-    private final AtomicBoolean projectionRefreshed = new AtomicBoolean(false);
-    /** 投影 stat 指纹缓存开关（SANDBOX_PROJECTION_FINGERPRINT_CACHE，默认 true；测试构造可关） */
-    private final boolean projectionFingerprintCacheEnabled;
     /** L4 物化 revision 门控开关（SANDBOX_SKILL_REVISION_GATE，默认 true；测试构造可关） */
     private final boolean skillRevisionGateEnabled;
     /** 回写快照差分开关（SANDBOX_SYNC_SNAPSHOT_DIFF，默认 true；测试构造可关） */
@@ -163,24 +160,10 @@ public class OpenSandbox extends AbstractBaseSandbox
                        OpenSandboxFilesystemSpec filesystemSpec,
                        FileAssetStore fileAssetStore,
                        FileStorage fileStorage,
-                       boolean projectionFingerprintCacheEnabled) {
-        this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
-            filesystemSpec, fileAssetStore, fileStorage, projectionFingerprintCacheEnabled, true, true);
-    }
-
-    public OpenSandbox(OpenSandboxState state,
-                       com.alibaba.opensandbox.sandbox.Sandbox osbSandbox,
-                       OpenSandboxClientOptions options,
-                       WorkspaceReader workspaceReader,
-                       WorkspaceSyncService workspaceSyncService,
-                       OpenSandboxFilesystemSpec filesystemSpec,
-                       FileAssetStore fileAssetStore,
-                       FileStorage fileStorage,
-                       boolean projectionFingerprintCacheEnabled,
                        boolean skillRevisionGateEnabled) {
         this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage,
-            projectionFingerprintCacheEnabled, skillRevisionGateEnabled, true);
+            skillRevisionGateEnabled, true);
     }
 
     public OpenSandbox(OpenSandboxState state,
@@ -191,12 +174,11 @@ public class OpenSandbox extends AbstractBaseSandbox
                        OpenSandboxFilesystemSpec filesystemSpec,
                        FileAssetStore fileAssetStore,
                        FileStorage fileStorage,
-                       boolean projectionFingerprintCacheEnabled,
                        boolean skillRevisionGateEnabled,
                        boolean syncSnapshotDiffEnabled) {
         this(state, osbSandbox, options, workspaceReader, workspaceSyncService,
             filesystemSpec, fileAssetStore, fileStorage,
-            projectionFingerprintCacheEnabled, skillRevisionGateEnabled, syncSnapshotDiffEnabled,
+            skillRevisionGateEnabled, syncSnapshotDiffEnabled,
             RUNTIME_READ_THROUGH_DEFAULT, SKILL_CACHE_STOP_BACKFILL_DEFAULT);
     }
 
@@ -208,7 +190,6 @@ public class OpenSandbox extends AbstractBaseSandbox
                        OpenSandboxFilesystemSpec filesystemSpec,
                        FileAssetStore fileAssetStore,
                        FileStorage fileStorage,
-                       boolean projectionFingerprintCacheEnabled,
                        boolean skillRevisionGateEnabled,
                        boolean syncSnapshotDiffEnabled,
                        boolean runtimeReadThroughEnabled,
@@ -222,7 +203,6 @@ public class OpenSandbox extends AbstractBaseSandbox
         this.filesystemSpec = filesystemSpec;
         this.fileAssetStore = fileAssetStore;
         this.fileStorage = fileStorage;
-        this.projectionFingerprintCacheEnabled = projectionFingerprintCacheEnabled;
         this.skillRevisionGateEnabled = skillRevisionGateEnabled;
         this.syncSnapshotDiffEnabled = syncSnapshotDiffEnabled;
         this.runtimeReadThroughEnabled = runtimeReadThroughEnabled;
@@ -248,7 +228,7 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 返回 true 走单文件直传（写 4KB 只传 4KB）。
      *
      * <p>技能投影路径（.skills-cache）必须排除：技能目录的进容器语义由受控链路负责
-     * （start 投影 + {@link #refreshProjectionIfStale} 的 hash 一致性检查），若直传绕过，
+     * （start 投影 + scoped 投放），若直传绕过，
      * stage 时序竞态（E-SKILL-4）会重新出现且无 hash 兜底。命中排除即回退 SDK 的
      * archive→hydrate 通道，由 {@link #doHydrateWorkspace} 传输。
      */
@@ -297,9 +277,6 @@ public class OpenSandbox extends AbstractBaseSandbox
             }
         }
         log.info("[sandbox-open] stop() called, userKey={}", userKey);
-        // 投影新鲜度检查按 call 粒度执行：下轮 call 的 onSystemPrompt 可能再 stage 出新
-        // 技能目录（scopeKey 每轮变化），stop 复位后下轮首次 exec 重新比对
-        projectionRefreshed.set(false);
         // scoped .skills-cache 投放同样按 call 粒度复位（下轮 scope 可能变化或新 stage）；
         // 本 call 从未投放过则收尾补投一次（turn 终态容器必含文件——X18 探针/下轮快照差分
         // 基准依赖它；CAS 保证「延迟投放」整 call 至多一次）
@@ -442,9 +419,9 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * 会话水合协调器（设计 ④，纯重构无行为变化）：四步幂等注入统一入口——middleware 主路径
+     * 会话水合协调器（设计 ④，纯重构无行为变化）：三步幂等注入统一入口——middleware 主路径
      * （{@link SandboxUserKeyMiddleware#onAgent}）与 doExec 兜底路径共用。各步自带幂等标志
-     * （runtimeInjected/uploadsInjected/userSkillsMaterialized/projectionRefreshed），协调器本身
+     * （runtimeInjected/uploadsInjected/userSkillsMaterialized），协调器本身
      * 无状态；任一步失败不影响后续步骤（各步内部 fail-soft）。
      *
      * <p>userKey 解析保持旧行为：ctx 非空即按当前 ctx 重新解析（userId 优先、session_user 反查、
@@ -470,7 +447,6 @@ public class OpenSandbox extends AbstractBaseSandbox
         injectRuntimeFilesIfNeeded(ctx);
         injectPendingUploads();
         materializeUserSkills();
-        refreshProjectionIfStale();
         // scoped .skills-cache 投放【不再在此处跑】（first-llm-latency 首推理关键路径优化）：
         // 50MB/2000f 实测 build+gzip+hydrate ≈4-6s 挡在首个 main LLM 请求之前。改为「延迟到
         // 首次真正需要」：①doExec/readWorkspaceFile 命令路径命中 .skills-cache（技能脚本执行/
@@ -1401,95 +1377,6 @@ public class OpenSandbox extends AbstractBaseSandbox
                 // fail-soft：容器内保留 L2 基线/上一代副本，下次 acquire 重试
                 log.warn("[sandbox-open] materialize L4 skills failed for user {}: {}", uid, e.getMessage());
             }
-        }
-    }
-
-    /**
-     * 投影指纹缓存预热（create 后调用一次）：sandbox.start() 的 SDK 投影已把宿主投影内容
-     * hydrate 进容器并把结果 hash 写入 {@code state.workspaceProjectionHash}——此刻「指纹 ↔ hash」
-     * 的对应关系是刚被验证过的真值，直接播种 {@link ProjectionFingerprintCache}，使本代首个
-     * exec 的 {@link #refreshProjectionIfStale} 直接命中短路（省一次冷 build，66MB 实测 ≈0.8s）。
-     * 仅在 start 已验证的前提下播种（resume 不调用：跨 pod 恢复的 state hash 未经验证）。
-     * fail-soft：失败仅回到冷路径（下轮 exec 走 build 慢路径自愈）。
-     */
-    public void prewarmProjectionFingerprintCache() {
-        if (!projectionFingerprintCacheEnabled || state == null) {
-            return;
-        }
-        var hash = state.getWorkspaceProjectionHash();
-        var spec = state.getWorkspaceSpec();
-        if (hash == null || spec == null) {
-            return;
-        }
-        try {
-            ProjectionFingerprintCache.record(spec, hash);
-            log.debug("[sandbox-open] projection fingerprint cache prewarmed (hash={})",
-                hash.substring(0, Math.min(12, hash.length())));
-        } catch (Exception e) {
-            log.debug("[sandbox-open] projection fingerprint prewarm skipped: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * 工作区投影新鲜度检查（幂等，每 call 一次）：比对宿主投影目录当前内容与
-     * sandbox start 时记录的 hash，变化则把投影 tar 补水合进容器。
-     *
-     * <p>背景：技能目录（.skills-cache/{scopeKey}/oaf-package/...）由 SDK
-     * HarnessSkillMiddleware 在每轮推理的 onSystemPrompt 阶段物化到<b>平台本地</b>工作区，
-     * 而 harness 的投影 hydrate 只发生在 sandbox start 时（之后 hash 一致即跳过）——
-     * stage 晚于 start 的目录永远到不了容器 /workspace，模型经
-     * load_skill_through_path 拿到的 /workspace 路径在 shell 里 ls 不到（E-SKILL-4）。
-     *
-     * <p>逻辑对齐 harness 私有 applyWorkspaceProjectionIfChanged：build() 重扫宿主投影根
-     * （含 .skills-cache），hash 相同跳过；不同则 doHydrateWorkspace 后回写
-     * SandboxState.workspaceProjectionHash（空投影同样回写，与 start 路径一致）。
-     * tar 解包只覆盖归档内文件，不删除容器内模型自产文件（outputs/ 等）。
-     *
-     * <p>调用点：doExec（首个命令执行前）。文件工具若完全绕过 exec 则不触发——
-     * 技能消费路径（执行 scripts/*.sh）必然走 exec，已覆盖。
-     * fail-soft：失败仅告警不阻塞命令，复位标志允许下次 exec 重试。
-     */
-    private void refreshProjectionIfStale() {
-        if (state == null || !projectionRefreshed.compareAndSet(false, true)) {
-            return;
-        }
-        try {
-            var spec = state.getWorkspaceSpec();
-            if (spec == null) {
-                // 投影未启用（SANDBOX_PROJECTION_ENABLED=false）或 spec 未装配：无可刷新
-                return;
-            }
-            // stat 指纹短路（SANDBOX_PROJECTION_FINGERPRINT_CACHE，默认 true）：指纹未变
-            // → 宿主投影内容未变 → 直接与 state hash 比对跳过 build（省全量读+sha256+堆内 tar）
-            if (projectionFingerprintCacheEnabled
-                && ProjectionFingerprintCache.skipBuild(spec, state.getWorkspaceProjectionHash())) {
-                log.debug("[sandbox-open] workspace projection unchanged (fingerprint hit), skipping refresh");
-                return;
-            }
-            var payload = WorkspaceProjectionApplier.build(spec);
-            if (payload == null) {
-                return;
-            }
-            if (payload.hash().equals(state.getWorkspaceProjectionHash())) {
-                log.debug("[sandbox-open] workspace projection unchanged, skipping refresh");
-                ProjectionFingerprintCache.record(spec, payload.hash());
-                return;
-            }
-            if (payload.fileCount() > 0) {
-                try (var in = new java.io.ByteArrayInputStream(payload.tarBytes())) {
-                    doHydrateWorkspace(in);
-                }
-                // 投影可能覆盖 skills/ 等容器内容 → 探针直供窗口作废（first-reasoning D4 不变量）
-                invalidateProbeCache();
-                log.info("[sandbox-open] workspace projection refreshed: files={}, hash={}",
-                    payload.fileCount(), payload.hash());
-            }
-            // 与 harness start 路径一致：空投影也回写 hash，避免每 call 重算后反复比对
-            state.setWorkspaceProjectionHash(payload.hash());
-            ProjectionFingerprintCache.record(spec, payload.hash());
-        } catch (Exception e) {
-            projectionRefreshed.set(false);
-            log.warn("[sandbox-open] workspace projection refresh failed: {}", e.getMessage());
         }
     }
 

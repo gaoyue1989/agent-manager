@@ -51,8 +51,8 @@ import reactor.core.publisher.Flux;
  *
  * <p><b>语义</b>（§2.1）：metadata 无该键（未传）→ 全部工具（存量行为，零开销直通）；
  * 显式空数组 → 仅内置（MCP/自定义全部剔除）；非空数组 → 内置 + 名单内（未知名忽略，
- * 解析经 {@link SessionToolScopeService#resolve}：裸名精确 / {@code mcp__{server}__{tool}}
- * 全名别名 / 内置名 WARN 不生效）。
+ * 解析经 {@link SessionToolScopeService#resolve}：注册名 mcp__{server}__{tool} 精确 /
+ * 远端裸名别名 / 内置名 WARN 不生效）。
  *
  * <p><b>HITL 边界</b>：onActing 的白名单来自 onReasoning 在 RuntimeContext 登记的 turn 级
  * 属性。确认恢复轮（confirm/AG-UI resume）重新进入 agent 回路时 onReasoning 会重跑、

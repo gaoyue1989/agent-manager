@@ -617,7 +617,8 @@ public class ChatStreamController {
             // 工具摘要累积器（turn 级）：累积 delta 参数/结果，在 END 事件合成人可读摘要帧。
             // 与 turn 同生命周期——放在订阅回调之外创建，避免被 Reactor 的取消回调连带清理。
             var toolSummary = new TurnToolSummaryTracker(finalSessionId, replyId,
-                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload));
+                (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
+                mcpToolRegistrar::displayNameFor);
 
             // 本轮模型用量累积器（chat-trace-observability-design §2.3）：MODEL_CALL_END 逐次
             // 累加，turn 收尾合成 turn_finished 汇总帧。turn 闭包局部对象，随 turn 丢弃。

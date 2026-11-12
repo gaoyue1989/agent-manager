@@ -285,7 +285,8 @@ public class AguiRunController {
 
             var turnEnded = new AtomicBoolean(false);
             var toolSummary = new TurnToolSummaryTracker(threadId, runId,
-                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
+                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
+                mcpToolRegistrar::displayNameFor);
             // run 级编码上下文：blockId→messageId 映射、token 累计、pending interrupts
             // 都是 run 级状态——必须跨事件复用，不能逐事件新建
             var codecCtx = codec.newContext(threadId, runId);
@@ -409,7 +410,8 @@ public class AguiRunController {
 
             var turnEnded = new AtomicBoolean(false);
             var toolSummary = new TurnToolSummaryTracker(threadId, runId,
-                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload));
+                (type, payload) -> emitSyntheticAgui(threadId, runId, type, payload),
+                mcpToolRegistrar::displayNameFor);
             var codecCtx = codec.newContext(threadId, runId);
             var renderer = new AguiTailRenderer(threadId, runId);
 
