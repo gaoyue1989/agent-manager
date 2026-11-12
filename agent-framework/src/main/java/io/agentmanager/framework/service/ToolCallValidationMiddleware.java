@@ -160,7 +160,11 @@ public class ToolCallValidationMiddleware implements MiddlewareBase {
 
         // --- 处理畸形/参数不可用的 tool calls ---
         List<AgentEvent> syntheticEvents = new ArrayList<>();
-        AgentState state = agent.getAgentState();
+        // per-call slot state（deprecated getAgentState() 是默认槽，注入其中模型不可见）
+        AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
+        if (state == null) {
+            return next.apply(input);
+        }
 
         for (ToolUseBlock tub : malformed) {
             emitRejection(agent, state, syntheticEvents, tub,
