@@ -284,3 +284,26 @@ turn 收尾时（终态帧之后、关流之前）追加一条合成帧，经 Ev
 
 - 工具插件 e2e 组的 HITL 两段 `waiting_confirm`/`completed` 断言（非必需 job，待该组回归时顺带补）；
 - A2A `forwardEvent` Map 词表与 AG-UI 面的对齐（§2.6 非目标）。
+
+---
+
+## 9. 契约演进（2026-11-12，fix/agent-end-turn-summary 分支）
+
+§2 的 `turn_finished` 合成帧**移除**：信息并入 `AGENT_END` 帧，不再新增事件类型。变更后契约：
+
+- `AGENT_END`（仅 lead 自身事件，远程转发的不带）additive 附 `usage`（`input_tokens` /
+  `cached_tokens` / `output_tokens` / `total_tokens` 本 turn 全部模型调用求和 + `model_calls`）
+  与 `elapsed_ms`（agent 执行段耗时，锚点不变：turnStartedAt = 租约到手时刻）；
+- `cached_tokens` 为新增维度（各调用 `ChatUsage.getCachedTokens()` 逐次求和），缓存率由
+  客户端自算（cached_tokens / input_tokens），服务端不下结论；
+- 帧序回归：`AGENT_END` 即落库流最后一帧（error/cancelled 仍为终态帧；error/cancelled 收尾
+  的 turn 不带 usage/elapsed——只有 AGENT_END 携带）；
+- `SessionEventTailer.TERMINAL_TYPES` 回退为 `AGENT_END/error/cancelled`；e2e
+  `lib/sse.ts` last-frame 终态归一回退为只认 AGENT_END；
+- `TurnFinalizer` 的 `TurnOutcome` / `emitTurnFinished` 删除，两侧收尾漏斗恢复 4 参
+  `endTurn` 原状；`TurnUsageTracker` 保留（供 AGENT_END 增强取数，新增 cached_tokens 维度）；
+- HITL 挂起语义不变：挂起由 `permission_ask` 帧表达，挂起轮 AGENT_END 带本段 usage，确认
+  恢复轮是独立 turn、其 AGENT_END 带本段 usage（按 replyId 区分后相加为全程）。
+
+动机：客户端不需要额外处理未知事件类型即可获得 turn 级汇总（增量字段对既有 AGENT_END
+消费方向后兼容），事件词表保持最小。

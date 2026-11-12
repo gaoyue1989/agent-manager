@@ -134,6 +134,7 @@ public final class AgentEventSseSerializer {
             if (mce.getUsage() != null) {
                 payload.put("inputTokens", mce.getUsage().getInputTokens());
                 payload.put("outputTokens", mce.getUsage().getOutputTokens());
+                payload.put("cachedTokens", mce.getUsage().getCachedTokens());
                 payload.put("totalTokens", mce.getUsage().getTotalTokens());
             }
         } else if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent confirm) {
