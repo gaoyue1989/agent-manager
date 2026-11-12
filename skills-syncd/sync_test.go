@@ -652,6 +652,63 @@ func TestPullBackoffDelayBounds(t *testing.T) {
 	})
 }
 
+func TestJitterDelayBounds(t *testing.T) {
+	t.Run("generator within [0, max)", func(t *testing.T) {
+		max := 7 * time.Millisecond
+		for i := 0; i < 500; i++ {
+			got := jitterDelay(max)
+			if got < 0 || got >= max {
+				t.Fatalf("jitter delay %v outside [0, %v)", got, max)
+			}
+		}
+	})
+	t.Run("delays randomized across range", func(t *testing.T) {
+		max := 7 * time.Millisecond
+		var low, high int
+		for i := 0; i < 500; i++ {
+			if jitterDelay(max) < max/2 {
+				low++
+			} else {
+				high++
+			}
+		}
+		if low == 0 || high == 0 {
+			t.Fatalf("jitter delays not spread across [0, %v): low=%d high=%d (fixed-phase regression)", max, low, high)
+		}
+	})
+	t.Run("zero bound disables jitter", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			if got := jitterDelay(0); got != 0 {
+				t.Fatalf("jitter delay with zero bound = %v, want 0", got)
+			}
+		}
+	})
+	t.Run("loop applies per-cycle jitter before each poll", func(t *testing.T) {
+		src := newFakeSource(t)
+		src.setVersion(ver1)
+		src.setBundleFiles(defaultFixture("v1"))
+		d := newTestDaemon(t, src, func(c *config) { c.interval = 30 * time.Millisecond }, nil)
+		d.jitter = 5 * time.Millisecond
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			d.loop(ctx)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("loop did not exit on cancelled context")
+		}
+		stats := src.stats()
+		if stats.versionHits < 4 {
+			t.Fatalf("version hits = %d, want >= 4 with jitter %v + interval 30ms within 300ms (loop must not sleep fixed full jitter)", stats.versionHits, d.jitter)
+		}
+	})
+}
+
 func TestRecentlySeenToleranceWindow(t *testing.T) {
 	src := newFakeSource(t)
 	src.setVersion(ver1)

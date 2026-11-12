@@ -63,7 +63,7 @@ func newDaemon(cfg config, logger *log.Logger) *daemon {
 
 func (d *daemon) loop(ctx context.Context) {
 	for ctx.Err() == nil {
-		d.sleep(ctx, d.jitter)
+		d.sleep(ctx, jitterDelay(d.jitter))
 		if ctx.Err() != nil {
 			return
 		}
@@ -120,6 +120,13 @@ func pullDelay(interval time.Duration) time.Duration {
 		return 0
 	}
 	return time.Duration(rand.Int64N(int64(interval)))
+}
+
+func jitterDelay(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(max)))
 }
 
 func (d *daemon) withinTolerance(ver string) bool {
