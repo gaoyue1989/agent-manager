@@ -105,29 +105,31 @@ skills-syncd/
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SKILLSYNC_BASE_URL` | （必填，无默认即禁用） | 同步源基址，如 `http://oaf-{name}-svc.agent-platform.svc:8100` |
+| `SKILLSYNC_BASE_URL` | （必填，无默认即禁用） | 同步源基址，如 `http://oaf-{name}-svc.agent-platform.svc:8100`；一服务一包，基址本身即标识包 |
 | `SKILLSYNC_TOKEN` | 空 | 端点鉴权 token（只读 scope，`Authorization: Bearer`）；为空则请求不带鉴权（源端点可配置为集群内免鉴权） |
-| `SKILLSYNC_PACKAGE_ID` | （必填） | 包标识（OAF 包 name，用于 version/bundle 查询参数与日志） |
 | `SKILLSYNC_STORE_DIR` | `/skills-store` | 技能库根目录 |
 | `SKILLSYNC_INTERVAL` | `5m` | 轮询周期（Go duration 格式，如 `30s`/`5m`） |
 | `SKILLSYNC_KEEP_VERSIONS` | `3` | 保留最近 N 个版本目录（会话钉版本语义下 GC 安全下界） |
 | `SKILLSYNC_TIMEOUT` | `120s` | 单次 HTTP 请求超时（bundle 可能数十 MB） |
 | `SKILLSYNC_LOG` | `stderr` | 日志输出（stderr 供 execd 采集；可选文件路径） |
 
-`SKILLSYNC_BASE_URL` 或 `SKILLSYNC_PACKAGE_ID` 缺失 → 守护启动即退出（exit 0，日志说明），
+`SKILLSYNC_BASE_URL` 缺失 → 守护启动即退出（exit 0，日志说明），
 沙箱按无同步库运行（acquire 链路自动回退现行为，见 §6.4）。
 
 ### 4.3 版本协商协议
 
 ```
-GET {BASE_URL}/internal/skills/version?package={id}
+GET {BASE_URL}/internal/skills/version
   → 200 {"version": "<sha256[:16]>", "skillCount": 2000, "sizeBytes": 66000000}
-  ← 404 未知包；401 token 无效
+  ← 401 token 无效
 
-GET {BASE_URL}/internal/skills/bundle?package={id}&version=<v>
+GET {BASE_URL}/internal/skills/bundle?version=<v>
   → 200 application/gzip（tar.gz：顶层为各技能目录 <skillName>/...）
   响应头 X-Bundle-Sha256：<完整哈希>（守护校验后才落盘）
 ```
+
+一服务一包：每个 agent-framework 服务实例只承载一个 OAF 包（服务即包身份的单一真相源），
+端点无需 package 参数——`BASE_URL` 已标识请求的是哪个服务/包。
 
 版本指纹由 agent-framework 侧计算：对包技能目录做**内容哈希**（相对路径 + 文件内容，排序遍历），
 非包版本号——防「版本号没变、内容变了」。守护每次轮询只调 version 端点（响应 <200B），
@@ -181,7 +183,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint-wrap.sh"]
 # entrypoint-wrap.sh —— 两条铁律：
 # 1) 守护 setsid 后台化，绝不阻塞 execd 启动；守护退出不连带沙箱
 # 2) 最后 exec 原入口，execd 保持原进程语义（健康检查/探针契约不变）
-if [ -n "$SKILLSYNC_BASE_URL" ] && [ -n "$SKILLSYNC_PACKAGE_ID" ]; then
+if [ -n "$SKILLSYNC_BASE_URL" ]; then
     setsid /usr/local/bin/skills-syncd 2>>/var/log/skills-syncd.log &
 fi
 exec /opt/code-interpreter/code-interpreter.sh "$@"
@@ -196,7 +198,6 @@ OpenSandbox Pool `spec.template.spec` 追加 env（我们自己的清单，非 k
 ```yaml
 env:
   - { name: SKILLSYNC_BASE_URL,   value: "http://oaf-{name}-svc.agent-platform.svc:8100" }
-  - { name: SKILLSYNC_PACKAGE_ID, value: "{packageId}" }
   - { name: SKILLSYNC_TOKEN,      valueFrom: { secretKeyRef: { name: skillsync-token, key: token } } }
   - { name: SKILLSYNC_INTERVAL,   value: "5m" }
 ```
@@ -352,6 +353,7 @@ P0-1/P1-3 机制对用户技能维度继续生效。
 ## 13. 开放问题（评审待定）
 
 1. token 的分发与轮换节奏（平台 Secret 管理，随 PR-3 定）
-2. 多包服务预留：当前 OAF 一服务一包，`package` 查询参数已预留多包扩展，是否需要 store 内多包目录分层
+2. 多包服务：当前 OAF 一服务一包（服务实例即包身份，端点无 package 参数）；若未来出现一服务多包，
+   需端点契约演进与 store 目录分层，届时另立设计
 3. `SKILLSYNC_INTERVAL` 生产推荐值（5m 起步，按版本发布频率调整）
 4. bundle 缓存的进程内 LRU 容量（单包 66MB 常驻是否可接受，或磁盘暂存）
