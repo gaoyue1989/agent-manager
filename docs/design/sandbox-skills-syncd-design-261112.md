@@ -65,7 +65,7 @@
 │                                                              │
 │  /skills-store/                ← 守护维护，root:root 0755      │
 │    CURRENT            (symlink → v-<hash>)                    │
-│    v-<hash>/<skillName>/...      包技能，内容寻址版本目录        │
+│    v-<hash>/<skillName>/...      包技能，仅当前版本，旧版切换后即删│
 │    .staging-<hash>/              下载中，原子 rename 前不可见    │
 │                                                              │
 │  会话开始（agent-framework acquire 链路）：                      │
@@ -109,7 +109,6 @@ skills-syncd/
 | `SKILLSYNC_TOKEN` | 空 | 端点鉴权 token（只读 scope，`Authorization: Bearer`）；为空则请求不带鉴权（源端点可配置为集群内免鉴权） |
 | `SKILLSYNC_STORE_DIR` | `/skills-store` | 技能库根目录 |
 | `SKILLSYNC_INTERVAL` | `5m` | 轮询周期（Go duration 格式，如 `30s`/`5m`） |
-| `SKILLSYNC_KEEP_VERSIONS` | `3` | 保留最近 N 个版本目录（会话钉版本语义下 GC 安全下界） |
 | `SKILLSYNC_TIMEOUT` | `120s` | 单次 HTTP 请求超时（bundle 可能数十 MB） |
 | `SKILLSYNC_LOG` | `stderr` | 日志输出（stderr 供 execd 采集；可选文件路径） |
 
@@ -147,19 +146,21 @@ for {
         chmod -R a+rX, chown root:root
         rename → $STORE/v-<ver>/          // 原子（同目录 rename(2)）
         symlinkSwap($STORE/CURRENT → v-<ver>)  // ln -sfn + rename(TMP symlink)
-        gc(keep = KEEP_VERSIONS)          // 只删不在保留窗口且无 CURRENT 指向的 v-* 目录
+        deleteSuperseded()                // 删除旧 v-* 目录（CURRENT 指向者除外）
     }
     sleep(INTERVAL)
 }
+// 启动时清扫：删除所有非 CURRENT 指向的 v-* 与 .staging-* 残留（上次崩溃幂等自愈）
 ```
 
 一致性不变量：
 
-- **读方（acquire 链路）只经 `CURRENT` 解析版本**，钉住 `v-<hash>` 绝对路径——后台切换对运行中会话零扰动，
-  新会话自动用新版
+- **单版本语义**：store 任一时刻只有一个有效版本（`CURRENT` 指向者），切换后旧版即删
+- **读方一律经 `CURRENT` 间接寻址**（`/skills-store/CURRENT/<skillName>`），不钉 `v-<hash>` 绝对路径——
+  版本切换对读方是原子指针跳变，旧版删除不破坏任何在用链接
 - `.staging-*` 任何时刻崩溃均不影响可用版本；下次轮询重下
-- 并发安全：单守护单循环串行，无并发写；GC 与读方竞争由「保留窗口 ≥ 会话钉版存活期」约束
-  （默认保留 3 版 + 版本间隔 ≥ 轮询周期，覆盖正常会话时长；极端超长会话读已删目录 → acquire 回退重 hydrate，见 §6.4）
+- 切换瞬间的解析竞态（读方刚解析完旧路径、旧目录即将删除）：已打开文件凭 inode 继续可读（Unix 语义）；
+  尚未 open 的解析撞上删除 → §6.4 逐技能降级兜底（窗口为毫秒级）
 
 ### 4.5 失败语义（fail-open）
 
@@ -225,7 +226,8 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 
 1. 解析 `CURRENT` 得 `v-<hash>`（一次 readlink；不存在 → 回退 §6.4）
 2. 按 manifest（现有禁用判定链 `SkillDisabledChecker`）为每个启用的包技能创建
-   `.skills-cache/<scope>/oaf-package/<skillName>` → `/skills-store/v-<hash>/<skillName>` 符号链接
+   `.skills-cache/<scope>/oaf-package/<skillName>` → `/skills-store/CURRENT/<skillName>` 符号链接
+   （经 `CURRENT` 间接寻址，不钉具体版本目录——切换/删除旧版不破坏在用链接）
 3. 用户技能（L4）走原 hydrate 路径物化真实文件（量级几十文件，现有 35ms 稳态机制接管）
 4. 判定与现有「命令触发延迟投放」合并：首个触及 `.skills-cache` 的命令触发一次（CAS 每 call），语义不变
 
@@ -250,26 +252,28 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 ### 7.1 时序保证
 
 - 发布新版 → agent-framework 端点版本指纹变更（即时，随发布事件失效进程内缓存）
-- 沙箱侧最长 `INTERVAL` 后拉到 → 新**会话**用新版；运行中会话钉旧版直到会话结束
-- 与现行为对比：现 per-call 指纹在**下一 call** 即换新版——本设计刻意改为**会话粒度钉版**，
-  避免同会话内技能脚本中途变更（一致性更强，代价是单会话内看不到新版，可接受）
+- 沙箱侧最长 `INTERVAL` 后拉到 → `CURRENT` 原子切换，**下一次路径解析即见新版**（含运行中会话）；
+  已打开的技能脚本/文件凭 inode 继续按旧内容执行完毕（Unix 语义），无中途截断
+- 与现行为对比：现 per-call 指纹在下一 call 换新版——本设计同为「切换即生效」语义，
+  且单文件粒度更平滑（同会话内未重开的文件不受扰动）
 
 ### 7.2 对账观测
 
 agent-framework 在 acquire 创建软链时记录「store 版本 vs 端点版本」；偏差持续超 3×INTERVAL 打 WARN 日志
 （不告警、不阻断）——这是守护失联的唯一可观测面。
 
-### 7.3 GC 安全
+### 7.3 版本切换与删除次序（单版本语义）
 
-保留 `KEEP_VERSIONS=3` 个版本 + `CURRENT` 指向者永不清。会话钉版引用旧版本目录；
-正常会话时长 ≪ 3 × 版本发布间隔。极端情况（超长会话 + 高频发版）读已删目录 → §6.4 逐技能降级。
+固定次序：**先切 `CURRENT`，后删旧版**。读方全部经 `CURRENT` 间接寻址（§6.2），指针跳变原子、
+旧版删除不破坏任何在用链接；已打开文件凭 inode 存活。守护启动时清扫非当前 `v-*` 与 `.staging-*`
+残留（上次崩溃在「已切换未删除」或「下载中」的幂等自愈）。毫秒级解析竞态窗口由 §6.4 逐技能降级兜底。
 
 ## 8. 容量与性能预估
 
 | 项 | 现状 | 本设计 |
 |---|---|---|
 | 会话开始投影 | O(包全量) tar：冷 4.9s / 稳态 35ms（P0-1 优化后） | O(启用技能数) symlink：~10ms 级 |
-| 沙箱内磁盘 | 按需物化 ~66MB | store ≤ 3 版本 × 66MB ≈ 200MB 上限（版本发布稀疏，常态 1-2 版） |
+| 沙箱内磁盘 | 按需物化 ~66MB | 稳态 1 版 ≈ 66MB；切换瞬时峰值 ≈ 2 版 + tar.gz（~200MB），完成后回落 |
 | 网络 | 每次 hydrate 全量 tar（跨 exec 通道） | 每 pod 每版本一次 HTTP 拉取（version 轮询 <200B/5m） |
 | agent-framework | 每次 hydrate CPU（tar+gzip+指纹） | 版本指纹缓存 O(1)；bundle 打包每版本一次 |
 | 每用户复制 | scope staging N 份 | 0（store 服务内共享 per-pod） |
@@ -307,7 +311,7 @@ agent-framework 在 acquire 创建软链时记录「store 版本 vs 端点版本
 
 - 版本协商：version 一致零下载 / 变更触发拉取 / 404 与 401 处理 / 退避重试
 - 原子性：staging 中断（模拟 kill）不留半成品可读态；CURRENT 切换后旧版本仍可读
-- GC：保留窗口、CURRENT 指向者不清、并发读（另一 goroutine 持旧版路径）不失效
+- 单版本切换：swap 后旧版必删、CURRENT 指向者不删、启动清扫非当前 `v-*`/`.staging-*` 残留幂等
 - env 缺失 → 优雅退出
 
 ### 10.2 agent-framework 单测
