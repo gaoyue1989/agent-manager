@@ -49,6 +49,9 @@ public class SkillBundleController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
         var current = bundleService.currentVersion();
+        if (current.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX)) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
         var body = new LinkedHashMap<String, Object>();
         body.put("version", current.version());
         body.put("skillCount", current.skillCount());

@@ -90,6 +90,18 @@ class SkillBundleControllerTest {
     }
 
     @Test
+    void versionShouldReturn503WhenFingerprintUnavailable() throws Exception {
+        // 指纹计算失败（computeVersion 全 catch → ERR-*）= 端点当前不可用：返回 503 让守护
+        // 退避重试，不输出 ERR-* 版本（守护会把它当合法版本装进 store 污染版本空间）
+        when(bundleService.currentVersion())
+            .thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0L));
+
+        mvc.perform(get("/internal/skills/version")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+            .andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
     void bundleShouldStreamGzipWithSha256Header() throws Exception {
         when(bundleService.bundle("abc123")).thenReturn(Optional.of(payload()));
 

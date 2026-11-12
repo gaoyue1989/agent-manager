@@ -217,6 +217,23 @@ class SkillBundleServiceTest {
         assertEquals(first.sha256(), second.sha256());
     }
 
+    @Test
+    void currentVersionShouldReturnErrPrefixWhenFingerprintComputationFails() {
+        // computeVersion 全 catch 输出约定：指纹/bundle 枚举失败 → ERR-<nanos>（非空、非正常指纹），
+        // 供版本端点（503）与农场判定（degraded_endpoint_down）识别「端点不可用」
+        var missing = Path.of("/nonexistent-skills-" + System.nanoTime());
+        var manage = org.mockito.Mockito.mock(SkillManageService.class);
+        org.mockito.Mockito.when(manage.getSkillsDir()).thenReturn(missing);
+        org.mockito.Mockito.when(manage.getDisabledSet()).thenReturn(java.util.Set.of());
+        var service = new SkillBundleService(manage, cacheDir, Duration.ofSeconds(5), clock);
+
+        var version = service.currentVersion();
+
+        assertTrue(version.version().startsWith(SkillBundleService.ERROR_VERSION_PREFIX),
+            "枚举失败必须落 ERR-* 输出约定，实际: " + version.version());
+        assertEquals(0, version.skillCount());
+    }
+
     private SkillBundleService service(Duration ttl) {
         return new SkillBundleService(manageService(), cacheDir, ttl, clock);
     }
