@@ -215,17 +215,31 @@ ENTRYPOINT ["/usr/local/bin/entrypoint-wrap.sh"]
 #!/bin/sh
 # skillsync-launcher.sh —— 通用启动器：watchdog 拉起守护后 exec 传入命令
 # 两条铁律：1) 后台循环绝不阻塞主进程；2) exec 保持主进程语义
+log_file=/var/log/skills-syncd.log
+log_max_bytes=$((1024 * 1024))
 if [ -n "$SKILLSYNC_BASE_URL" ]; then
     (while :; do
-         setsid /usr/local/bin/skills-syncd 2>>/var/log/skills-syncd.log
+         setsid /usr/local/bin/skills-syncd 2>>"$log_file"
          sleep 30
+     done) &
+    (while :; do
+         sleep 30
+         if [ -f "$log_file" ] && [ "$(wc -c <"$log_file")" -gt "$log_max_bytes" ]; then
+             tail -c "$((log_max_bytes / 2))" "$log_file" >"$log_file.tmp" &&
+                 cat "$log_file.tmp" >"$log_file"
+             rm -f "$log_file.tmp"
+         fi
      done) &
 fi
 exec "$@"
 ```
 
 守护由 watchdog 循环拉起（D-6）：正常/异常退出均 ≤30s 重启（sleep 兼任崩溃循环节流阀）；
-stderr 统一重定向 `/var/log/skills-syncd.log`（§4.2 唯一日志落点）。
+stderr 统一重定向 `/var/log/skills-syncd.log`（§4.2 唯一日志落点）。守护正常态不退出
+（`context.Background()` 恒存活），watchdog 重启仅在崩溃后发生，故 §4.2 的上限截断由
+**独立周期循环**（同为 30s 节拍）执行：超 1MiB 触发，就地截断（`cat` 重写而非 `mv`，守护
+O_APPEND fd 不悬空、后续写入继续落原 inode）并保留尾部 512KiB（滞回：回落至半限，再涨
+半限才再触发，避免稳态反复重写）。
 
 ```sh
 #!/bin/sh
