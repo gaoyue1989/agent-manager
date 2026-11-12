@@ -2156,4 +2156,46 @@ class OpenSandboxTest {
         assertEquals(1, farmReadlinkCount(osb), "收敛失败不改判定：会话仍记忆为 farm");
         assertEquals(2, farmConvergeCommands(osb).size(), "收敛失败按投放失败语义复位，下次触发重试");
     }
+
+    @Test
+    void farmUnsafeSkillDirNameShouldSkipLinkAndWarn() throws Exception {
+        // 包技能目录名含空白/单引号：farm 侧 isShellSafeRelPath 不建链，tar 物化却会携带同一
+        // 文件——两模式对同一包行为分叉，跳过必须 WARN 留痕（含 rel 名），否则只表现为
+        // 「该技能缺失」无从排查
+        var host = java.nio.file.Files.createTempDirectory("farm-unsafe-name");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-A", "bad skill");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-unsafe-name-cfg");
+        bundleSkill(cfg, "demo-a");
+        bundleSkill(cfg, "bad skill");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + version);
+
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OpenSandbox.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var sandbox = new OpenSandbox(farmState(host, "sbx-farm-unsafe"), osb,
+                farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+            bindFarmSession(sandbox, "sess-A");
+            sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        var cmd = farmConvergeCommands(osb).get(0);
+        String scopeRoot = "/workspace/.skills-cache/sess-A/oaf-package";
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' '" + scopeRoot + "/demo-a'"),
+            "安全名技能正常建链：" + cmd);
+        assertFalse(cmd.contains("bad skill"), "不安全名不得进入任何引号路径段：" + cmd);
+        var messages = appender.list.stream()
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList();
+        assertTrue(messages.stream().anyMatch(m -> m.contains("rel not shell-safe")
+                && m.contains("oaf-package/bad skill")),
+            "跳过必须 WARN 留痕（含 rel 名）：" + messages);
+    }
 }
