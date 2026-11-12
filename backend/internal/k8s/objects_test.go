@@ -268,8 +268,10 @@ func TestServiceAndRouterEndpoint(t *testing.T) {
 }
 
 // TestIngressHostModeConstruction host 模式（IngressHostSuffix 非空）内置构造：
-// 域名 = {K8sName}{suffix}、path 根路径、pathType Prefix、只留 ssl-redirect 与 SSE
-// 超时注解——不得出现任何 rewrite 相关注解（无前缀可剥离）。
+// 域名 = {K8sName}{suffix}、path 根路径（backend 本服务）+ 内部路径排除表
+// （/internal、/actuator 改道 platform-router 恒 404，保证设计 §6.1「内部端点不经
+// 业务 Ingress 对外暴露」）、pathType Prefix、只留 ssl-redirect 与 SSE 超时注解——
+// 不得出现任何 rewrite 相关注解（无前缀可剥离）。
 func TestIngressHostModeConstruction(t *testing.T) {
 	ing := Ingress(hostModeParams())
 	if ing.Name != "oaf-acme-demo" || ing.Namespace != "agent-platform" {
@@ -285,19 +287,33 @@ func TestIngressHostModeConstruction(t *testing.T) {
 	if rule.Host != "oaf-acme-demo.region-c86-test.test-kzx1.cncb" {
 		t.Fatalf("host wrong: %q", rule.Host)
 	}
-	if len(rule.HTTP.Paths) != 1 {
-		t.Fatalf("want exactly one path, got %d", len(rule.HTTP.Paths))
+	paths := map[string]networkingv1.HTTPIngressPath{}
+	for _, p := range rule.HTTP.Paths {
+		paths[p.Path] = p
 	}
-	path := rule.HTTP.Paths[0]
-	if path.Path != "/" {
-		t.Fatalf("host mode must serve root path, got %q", path.Path)
+	if len(paths) != 1+len(hostModeBlockPathList) {
+		t.Fatalf("want root path + exclusion table, got %+v", rule.HTTP.Paths)
 	}
-	if path.PathType == nil || *path.PathType != networkingv1.PathTypePrefix {
-		t.Fatalf("pathType wrong: %v", path.PathType)
+	root := paths[hostModeRootPath]
+	if root.PathType == nil || *root.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("root pathType wrong: %v", root.PathType)
 	}
-	if path.Backend.Service == nil || path.Backend.Service.Name != "oaf-acme-demo-svc" ||
-		path.Backend.Service.Port.Number != AgentPort {
-		t.Fatalf("backend wrong: %+v", path.Backend.Service)
+	if root.Backend.Service == nil || root.Backend.Service.Name != "oaf-acme-demo-svc" ||
+		root.Backend.Service.Port.Number != AgentPort {
+		t.Fatalf("root backend wrong: %+v", root.Backend.Service)
+	}
+	for _, bp := range hostModeBlockPathList {
+		p, ok := paths[bp]
+		if !ok {
+			t.Fatalf("host mode must exclude internal path %s, got %+v", bp, rule.HTTP.Paths)
+		}
+		if p.PathType == nil || *p.PathType != networkingv1.PathTypePrefix {
+			t.Fatalf("path %s pathType wrong: %v", bp, p.PathType)
+		}
+		if p.Backend.Service == nil || p.Backend.Service.Name != RouterServiceName ||
+			p.Backend.Service.Port.Number != RouterServicePort {
+			t.Fatalf("path %s backend wrong (must route to router 404 sink): %+v", bp, p.Backend.Service)
+		}
 	}
 	wantAnn := map[string]string{
 		annSSLRedirect:      "false",

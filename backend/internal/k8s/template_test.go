@@ -545,8 +545,30 @@ metadata:
 	}
 }
 
+// TestIngressBuilderHostModeFullRulesOverlay 合法整块 rules 替换（hostModeRules：根路径
+// + 内部路径排除表三段齐全）通过校验，排除表与业务路径原样保留。
+func TestIngressBuilderHostModeFullRulesOverlay(t *testing.T) {
+	ing, err := ingressWithOverlay(t, hostModeRules("oaf-acme-demo.region-c86-test.test-kzx1.cncb", "oaf-acme-demo-svc")).Build(hostModeParams())
+	if err != nil {
+		t.Fatalf("complete rules overlay must pass: %v", err)
+	}
+	paths := map[string]networkingv1.HTTPIngressPath{}
+	for _, p := range ing.Spec.Rules[0].HTTP.Paths {
+		paths[p.Path] = p
+	}
+	if paths["/"].Backend.Service.Name != "oaf-acme-demo-svc" {
+		t.Fatalf("business root path must stay: %+v", paths["/"])
+	}
+	for _, bp := range hostModeBlockPathList {
+		if paths[bp].Backend.Service.Name != RouterServiceName {
+			t.Fatalf("path %s must keep the router 404 sink, got %+v", bp, paths[bp])
+		}
+	}
+}
+
 // TestIngressBuilderHostModeRejectsBadOverlay host 模式违规 overlay：改 host、改
-// backend、丢 SSE 超时、丢 pathType、加 defaultBackend 一律拒绝（发布不落库）。
+// backend、丢 SSE 超时、丢 pathType、加 defaultBackend、丢/篡改内部路径排除表一律
+// 拒绝（发布不落库）。
 func TestIngressBuilderHostModeRejectsBadOverlay(t *testing.T) {
 	hostRules := func(host, backend string) string {
 		return fmt.Sprintf(`
@@ -564,6 +586,37 @@ spec:
                   number: 8100
 `, host, backend)
 	}
+	// 排除项 backend 指回本服务：改道 404 的排除形同虚设（/internal 重新可达业务端口）
+	hostRulesWithHijackedExclusion := func(excludedBackend string) string {
+		return fmt.Sprintf(`
+spec:
+  rules:
+    - host: oaf-acme-demo.region-c86-test.test-kzx1.cncb
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oaf-acme-demo-svc
+                port:
+                  number: 8100
+          - path: /internal
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: 8100
+          - path: /actuator
+            pathType: Prefix
+            backend:
+              service:
+                name: platform-router-svc
+                port:
+                  number: 80
+`, excludedBackend)
+	}
 	cases := map[string]string{
 		"host-hijacked":     hostRules("demo.example.com", "oaf-acme-demo-svc"),
 		"host-empty":        hostRules("", "oaf-acme-demo-svc"),
@@ -574,6 +627,11 @@ spec:
 		// path 恒为根：放开会让 Ingress 只服务 /foo，而落库 Endpoint 仍指根 → 404
 		"path-not-root": hostModeRulesWithPath("oaf-acme-demo.region-c86-test.test-kzx1.cncb", "oaf-acme-demo-svc", "/foo"),
 		"rules-dropped": "spec:\n  rules: null\n",
+		// 内部路径排除表整体丢失（整块替换 rules 时漏抄排除项）：/internal、/actuator
+		// 重新暴露到公网，按安全不变量拒绝
+		"block-paths-dropped": hostRules("oaf-acme-demo.region-c86-test.test-kzx1.cncb", "oaf-acme-demo-svc"),
+		// 排除项 backend 指回本服务：排除形同虚设
+		"block-path-backend-hijacked": hostRulesWithHijackedExclusion("oaf-acme-demo-svc"),
 		// rewrite 三项在 host 模式必须为空：x-forwarded-prefix 非空会让 DebugController
 		// 302 到 {该值}/debug/ 直接 404（最常见来源=照抄 path 模式模板）
 		"rewrite-target-set":     hostModeAnn("nginx.ingress.kubernetes.io/rewrite-target", "/$2"),
@@ -651,7 +709,8 @@ func TestIngressBuilderHostModeProbe(t *testing.T) {
 	}
 }
 
-// hostModeRules host 模式的完整 rules overlay（path 根路径、pathType Prefix）。
+// hostModeRules host 模式的完整 rules overlay（path 根路径、pathType Prefix、内部
+// 路径排除表 /internal、/actuator 改道 platform-router——合法整块替换必须三段齐全）。
 func hostModeRules(host, backend string) string {
 	return fmt.Sprintf(`
 spec:
@@ -666,7 +725,21 @@ spec:
                 name: %q
                 port:
                   number: 8100
-`, host, backend)
+          - path: /internal
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: %d
+          - path: /actuator
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: %d
+`, host, backend, RouterServiceName, RouterServicePort, RouterServiceName, RouterServicePort)
 }
 
 // hostModeRulesNoPathType 漏写 pathType 的 host 模式 rules（apiserver 会拒，提前拦）。
@@ -710,7 +783,7 @@ spec:
 }
 
 // fullIngressRules 合法形状的完整 rules overlay（backend 名硬编码，host 钉死探针域名
-// 后缀），供探针用例复用——backend 非 {probe}-svc 即被不变量拒绝。
+// 后缀），供探针用例复用——root backend 非 {probe}-svc 即被不变量拒绝。
 func fullIngressRules(backend string) string {
 	return fmt.Sprintf(`
 spec:
@@ -725,7 +798,21 @@ spec:
                 name: %q
                 port:
                   number: 8100
-`, backend)
+          - path: /internal
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: %d
+          - path: /actuator
+            pathType: Prefix
+            backend:
+              service:
+                name: %q
+                port:
+                  number: %d
+`, backend, RouterServiceName, RouterServicePort, RouterServiceName, RouterServicePort)
 }
 
 // TestIngressEndpointTable Endpoint 派生（host 模式）：规则 host 优先 / 防御回落

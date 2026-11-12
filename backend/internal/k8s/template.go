@@ -332,11 +332,11 @@ const (
 )
 
 // validateIngress overlay 合并后强校验平台不变量，违规拒绝发布（发布期反馈，而非
-// 让坏流量规则上线）。host 模式不变量：对象归属唯一（backend 全部指向本服务）、
-// pathType 必填、SSE 长超时保留、defaultBackend 恒空、host 恒为 {K8sName}{suffix}
-// （根路径直出）、rewrite 三项注解必须为空（子路径路由已收敛 router 模式，残留的
-// path 模式模板注解有真实后果——x-forwarded-prefix 会让 agent-framework DebugController
-// 302 到错误前缀 404）。
+// 让坏流量规则上线）。host 模式不变量：对象归属唯一（业务 backend 指向本服务、内部
+// 路径排除表指向 platform-router 且不得丢失）、pathType 必填、SSE 长超时保留、
+// defaultBackend 恒空、host 恒为 {K8sName}{suffix}（根路径直出）、rewrite 三项注解
+// 必须为空（子路径路由已收敛 router 模式，残留的 path 模式模板注解有真实后果——
+// x-forwarded-prefix 会让 agent-framework DebugController 302 到错误前缀 404）。
 func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 	if ing.Name != p.K8sName || ing.Namespace != p.Namespace {
 		return fmt.Errorf("metadata.name/namespace must stay %s/%s", p.Namespace, p.K8sName)
@@ -394,7 +394,7 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 		}
 	}
 	svcName := p.K8sName + "-svc"
-	found := false
+	found, excluded := false, map[string]bool{}
 	for _, rule := range ing.Spec.Rules {
 		// 域名即服务身份，overlay 不得偏离（空 host 会退化成共享入口 IP 承载根路径，
 		// 流量串服务且无法定位）。遍历全部 rules，不放过无 http 的规则
@@ -405,27 +405,46 @@ func validateIngress(p ObjectParams, ing *networkingv1.Ingress) error {
 			continue
 		}
 		for _, path := range rule.HTTP.Paths {
-			// 归属唯一：Ingress 对象与服务一一对应，backend 必须指向本服务
-			if path.Backend.Service == nil || path.Backend.Service.Name != svcName ||
-				path.Backend.Service.Port.Number != AgentPort {
-				return fmt.Errorf("backend must stay %s:%d (per-service object)", svcName, AgentPort)
-			}
 			// pathType 为 v1 必填：漏写会被 apiserver 拒绝，提前在此反馈
 			if path.PathType == nil {
 				return fmt.Errorf("path %q must set pathType", path.Path)
 			}
-			// host 模式根路径直出：path 是不变量（Endpoint 固定派生为
-			// {scheme}://{K8sName}{suffix}/，若放开 path 会让落库地址与实际服务
-			// 路由错位、前端链接 404）
-			if path.Path != hostModeRootPath {
-				return fmt.Errorf("path %q must stay %s (host mode serves the root path)",
-					path.Path, hostModeRootPath)
+			switch path.Path {
+			case hostModeRootPath:
+				// 归属唯一：Ingress 对象与服务一一对应，业务 backend 必须指向本服务。
+				// host 模式根路径直出：path 是不变量（Endpoint 固定派生为
+				// {scheme}://{K8sName}{suffix}/，若放开 path 会让落库地址与实际服务
+				// 路由错位、前端链接 404）
+				if path.Backend.Service == nil || path.Backend.Service.Name != svcName ||
+					path.Backend.Service.Port.Number != AgentPort {
+					return fmt.Errorf("backend must stay %s:%d (per-service object)", svcName, AgentPort)
+				}
+				found = true
+			case hostModeInternalPath, hostModeActuatorPath:
+				// 内部路径排除表（objects.go hostModeInternalPath）：backend 恒为平台
+				// router（location / 恒 404），指回本服务等于排除形同虚设
+				if path.Backend.Service == nil || path.Backend.Service.Name != RouterServiceName ||
+					path.Backend.Service.Port.Number != RouterServicePort {
+					return fmt.Errorf("path %q backend must stay %s:%d (internal path exclusion)",
+						path.Path, RouterServiceName, RouterServicePort)
+				}
+				excluded[path.Path] = true
+			default:
+				return fmt.Errorf("path %q not allowed (host mode serves %s plus the internal path exclusion %q/%q)",
+					path.Path, hostModeRootPath, hostModeInternalPath, hostModeActuatorPath)
 			}
-			found = true
 		}
 	}
 	if !found {
 		return fmt.Errorf("spec.rules must keep at least one http path")
+	}
+	// 排除表必须完整在位：rules 整体替换时丢掉排除项 = 把 /internal、/actuator 重新
+	// 暴露到公网（内部端点与无鉴权指标），按安全不变量拒绝发布
+	for _, bp := range hostModeBlockPathList {
+		if !excluded[bp] {
+			return fmt.Errorf("path %s must stay (host-mode internal path exclusion routes it to %s, which returns 404)",
+				bp, RouterServiceName)
+		}
 	}
 	return nil
 }

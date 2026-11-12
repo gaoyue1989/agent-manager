@@ -309,6 +309,13 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
 - 路径 `/internal/skills/version`、`/internal/skills/bundle`；token 经 env `SKILLSYNC_TOKEN` 配置
   （空 = 端点关闭，404）。**鉴权关系**：仅 token 校验，不参与 `ROUTER_AUTH_MODE`/业务鉴权链，
   且不经业务 Ingress 对外暴露（仅集群内访问）
+  > 补记（2026-11-13）：该断言在 host 模式（`INGRESS_HOST_SUFFIX` 非空）根路径直出下曾被
+  > 静默穿透（`/internal/skills/**` 与 `/actuator/**` 均经业务域名可达）。已由平台强制实现：
+  > host 模式 per-service Ingress 构造时把 `/internal`、`/actuator` 前缀改道
+  > `platform-router-svc`（router `location /` 恒 404），`validateIngress` 拒绝丢失或改指的
+  > overlay——backend/internal/k8s objects.go `hostModeInternalPath`、template.go
+  > `validateIngress`；运维口径见 docs/deployment.md §七之二/§七之三。router 模式只路由
+  > `/agent/{short}`，天然满足。
 - 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
 - **版本指纹 singleflight + ≤5s TTL 缓存**（D-4，修订 G2 的绝对化表述）：对包技能目录做 stat 指纹
   （relPath|mtime|size 排序遍历，2000 文件 ≈10-50ms）+ 服务级禁用集（B-2）。新鲜度语义由守护侧

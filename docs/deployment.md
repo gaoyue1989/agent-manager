@@ -359,7 +359,7 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 - **不设置 `INGRESS_TEMPLATE` = 纯内置构造**。**模板仅 host 模式可用**（`INGRESS_HOST_SUFFIX` 非空；router 模式无 per-service Ingress，suffix 空 + 模板非空启动即拒）。
 - 占位符发布期按服务替换：`{{K8S_NAME}}`（backend 指向 `{{K8S_NAME}}-svc`）；**不得硬编码服务名/metadata.name**（启动探针即拒绝）。
 - `annotations`/`labels` 按 key 合并（只写新增项即保留内置注解）；**`rules`/`tls` 写了即整体替换**——写 rules 必须抄完整块（host/path 均为不变量，见 §七之三）。
-- 校验不变量（host 模式）：backend 必须指向本服务；每条 path 必须设置 pathType 且恒为 `/`；rule host 恒为 `{K8sName}{后缀}`；SSE 长超时注解必须保留；rewrite-target / use-regex / x-forwarded-prefix 三项必须为空。
+- 校验不变量（host 模式）：`/` 的 backend 必须指向本服务；每条 path 必须设置 pathType；除根路径外仅允许**内部路径排除表** `/internal`、`/actuator`（backend 恒为 `platform-router-svc:80`，两段不得丢失、不得改指本服务）；rule host 恒为 `{K8sName}{后缀}`；SSE 长超时注解必须保留；rewrite-target / use-regex / x-forwarded-prefix 三项必须为空。
 - 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：host 模式取规则 Host 形如 `http(s)://{K8sName}{后缀}/`（不拼端口）。改 host 后 DNS/端口可达性由环境自行保证；环境未终止 TLS 时不要配 TLS。
 - 非法 overlay 启动即失败；发布/republish 期违规直接拒绝（Publish 不落库，Republish 保持原状）。存量服务需 republish 才滚动到新形态。
 
@@ -370,7 +370,7 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 | `INGRESS_HOST_SUFFIX` | 模式 | 形态 |
 |---|---|---|
 | 空（默认） | **router** | 不构造 per-service Ingress；统一域名 `/agent/{short}` 子路径由集群内 **platform-router** nginx 承接（§七之三部署）；Endpoint = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/` |
-| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解 |
+| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解；**内部路径排除表** `/internal`、`/actuator` 改道 `platform-router-svc` 恒 404——agent-framework 的 skills-syncd 内部端点（`SKILLSYNC_TOKEN` 门）与 actuator 健康/指标仅集群内 `oaf-{name}-svc:8100` 可达，不经业务域名对外暴露 |
 
 > ⚠️ **router 模式启动自检**：suffix 空时 backend 启动即检查 `platform-router-svc` 存在，缺失则 CrashLoop（报错指向 §七之三的 manifest）——先 apply platform-router 再升级 backend。**suffix 空 + `INGRESS_TEMPLATE` 非空同样启动即拒**（router 无 per-service Ingress，模板无处生效）。
 
@@ -391,9 +391,9 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_HOST_SUFFIX-
 - **存量服务不做后台批量迁移**：模式切换后经 republish / 重新上线（StartAgain）收敛——host 模式刷 Ingress 形态；router 模式对同名 Ingress「存在即删除」（清理 path 时代残留）——Endpoint 均同步重算落库。残留兜底：`kubectl -n agent-platform delete ingress -l app.kubernetes.io/managed-by=oaf-platform`（排除 `platform-agent-router` 自身）。
 - 展示地址（Endpoint）随模式切换：router = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`（与历史 path 模式同形状，前端零改动）；host = `http(s)://{K8sName}{后缀}/`。
 
-## 七之三、platform-router 部署（router 模式，默认）
+## 七之三、platform-router 部署（router 模式必部署；host 模式承接被排除路径）
 
-router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）：
+router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）。**host 模式同样依赖本 manifest**：per-service Ingress 的内部路径排除表（§七之二）把 `/internal`、`/actuator` 改道 `platform-router-svc`（其 `location /` 恒 404，与 router 模式外部表现一致）——router 缺失时这些路径 503，恒 fail-closed 不暴露内容；切 host 模式前同样先 apply 本 manifest（router 与业务 Service 需同 namespace）。
 
 ```bash
 # kind 环境先导入镜像
