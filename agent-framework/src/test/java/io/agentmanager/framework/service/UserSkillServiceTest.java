@@ -477,11 +477,11 @@ class UserSkillServiceTest {
     }
 
     /**
-     * 非 UTF-8/二进制文件显式跳过（不静默替换成 U+FFFD）：KV 只存字符串，
-     * 静默替换等于下发即损坏数据，且调用方看不到任何异常。
+     * 二进制显式跳过（不静默替换成 U+FFFD），GBK 文本自动转码：KV 只存字符串，
+     * 静默替换等于下发即损坏数据，但 GBK 文本（用户分不清编码）应当转码而非丢弃。
      */
     @Test
-    void syncFromPackageShouldSkipNonUtf8FilesInsteadOfReplacing() throws IOException {
+    void syncFromPackageShouldSkipBinaryFilesAndTranscodeGbkText() throws IOException {
         seedPackageSkill("demo-a", PKG_SKILL_MD, "scripts/hello.sh", "echo hi");
         var dir = skillManageService.getSkillsDir().resolve("demo-a");
         // PNG 头（含 0x89 等非 UTF-8 字节）与 GBK 编码的中文脚本文本
@@ -491,10 +491,11 @@ class UserSkillServiceTest {
 
         var outcome = service().syncFromPackage(USER, "demo-a").orElseThrow();
 
-        assertEquals(List.of("SKILL.md", "scripts/hello.sh"), outcome.files());
-        assertEquals(List.of("gbk.sh", "logo.png"), outcome.skipped(), "跳过清单必须显式返回");
+        assertEquals(List.of("SKILL.md", "scripts/hello.sh", "gbk.sh"), outcome.files());
+        assertEquals(List.of("logo.png"), outcome.skipped(), "二进制必须显式列入跳过清单");
         assertNull(store.get(skillNs(USER), "/demo-a/logo.png"), "二进制不得静默损坏后落库");
-        assertNull(store.get(skillNs(USER), "/demo-a/gbk.sh"), "非 UTF-8 文本不得落库");
+        assertEquals("echo 中文\n", store.get(skillNs(USER), "/demo-a/gbk.sh").value().get("content"),
+            "GBK 文本应转码为 UTF-8 落库，而不是丢弃");
 
         // 主文件本身非 UTF-8 → 明确报错（不能留半份个人版本）
         var broken = skillManageService.getSkillsDir().resolve("broken-md");
@@ -698,7 +699,7 @@ class UserSkillServiceTest {
             zos.write(USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
             zos.closeEntry();
             zos.putNextEntry(new java.util.zip.ZipEntry("技能/scripts/说明.txt"));
-            zos.write("GBK 名字".getBytes(StandardCharsets.UTF_8));
+            zos.write("GBK 内容".getBytes(java.nio.charset.Charset.forName("GBK")));
             zos.closeEntry();
         }
 
@@ -706,7 +707,8 @@ class UserSkillServiceTest {
 
         assertEquals("demo-a", outcome.name());
         assertEquals(List.of("SKILL.md", "scripts/说明.txt"), outcome.files());
-        assertEquals("GBK 名字", store.get(skillNs(USER), "/demo-a/scripts/说明.txt").value().get("content"));
+        assertEquals("GBK 内容", store.get(skillNs(USER), "/demo-a/scripts/说明.txt").value().get("content"),
+            "GBK 文本资源应自动转码为 UTF-8 落库");
     }
 
     /**
@@ -744,35 +746,46 @@ class UserSkillServiceTest {
         assertNotNull(store.get(skillNs(USER), "/demo-a/scripts/bye.sh"));
     }
 
-    /** 含二进制/非 UTF-8 文件 → 拒绝整个包（不是跳过），且不写入任何文件 */
+    /**
+     * 含图片/二进制文件 → 不再拒绝整个包：非文本文件跳过并列入 skipped，
+     * SKILL.md 与文本资源照常落库（KV 只存字符串，图片无法入 KV 但也不该拖垮整包）。
+     */
     @Test
-    void uploadZipShouldRejectBinaryFileAndWriteNothing() throws IOException {
+    void uploadZipShouldSkipBinaryFileAndKeepTextFiles() throws IOException {
         var entries = new java.util.LinkedHashMap<String, byte[]>();
         entries.put(WorkspaceReader.SKILL_FILE, USER_SKILL_MD.getBytes(StandardCharsets.UTF_8));
-        entries.put("logo.png", new byte[] {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, (byte) 0xFF});
+        entries.put("scripts/run.sh", "echo hi".getBytes(StandardCharsets.UTF_8));
+        entries.put("assets/logo.png",
+            new byte[] {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, (byte) 0xFF});
         var zip = zipBytes(entries);
 
-        var e = assertThrows(IllegalArgumentException.class,
-            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+        var outcome = service().uploadSkillZip(USER, bais(zip), "demo-a.zip");
 
-        assertTrue(e.getMessage().contains("UTF-8"), "应说明非 UTF-8 文件被拒: " + e.getMessage());
-        assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝整个包时不得留半份写入");
-        assertNull(store.get(skillNs(USER), "/demo-a/logo.png"));
+        assertEquals(2, outcome.files().size());
+        assertTrue(outcome.files().containsAll(List.of("SKILL.md", "scripts/run.sh")), outcome.files().toString());
+        assertEquals(List.of("assets/logo.png"), outcome.skipped(), "图片必须显式列入 skipped");
+        assertEquals(USER_SKILL_MD, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"));
+        assertEquals("echo hi", store.get(skillNs(USER), "/demo-a/scripts/run.sh").value().get("content"));
+        assertNull(store.get(skillNs(USER), "/demo-a/assets/logo.png"), "二进制不得以损坏文本形式落库");
     }
 
-    /** SKILL.md 本身为非 UTF-8（GBK）→ 拒绝整个包 400（issue #115：此前误报 500 upload_failed） */
+    /**
+     * SKILL.md 本身为 GBK（Windows 记事本 ANSI）→ 自动转码为 UTF-8 落库，
+     * 技能名照常从 GBK frontmatter 解析（用户分不清 UTF-8/GBK，不能要求他们自己转）。
+     */
     @Test
-    void uploadZipShouldRejectNonUtf8SkillMd() throws IOException {
+    void uploadZipShouldTranscodeGbkSkillMd() throws IOException {
         var gbk = java.nio.charset.Charset.forName("GBK");
+        var original = "---\nname: demo-a\ndescription: 中文编码测试\n---\n正文";
         var entries = new java.util.LinkedHashMap<String, byte[]>();
-        entries.put(WorkspaceReader.SKILL_FILE, "---\nname: demo-a\ndescription: 中文编码测试\n---\n正文".getBytes(gbk));
+        entries.put(WorkspaceReader.SKILL_FILE, original.getBytes(gbk));
         var zip = zipBytes(entries);
 
-        var e = assertThrows(IllegalArgumentException.class,
-            () -> service().uploadSkillZip(USER, bais(zip), "demo-a.zip"));
+        var outcome = service().uploadSkillZip(USER, bais(zip), "demo-a.zip");
 
-        assertTrue(e.getMessage().contains("UTF-8"), "应说明 SKILL.md 非 UTF-8 被拒: " + e.getMessage());
-        assertNull(store.get(skillNs(USER), "/demo-a/SKILL.md"), "拒绝时不得留半份写入");
+        assertEquals("demo-a", outcome.name(), "GBK frontmatter 的技能名应正常解析");
+        assertEquals(original, store.get(skillNs(USER), "/demo-a/SKILL.md").value().get("content"),
+            "GBK SKILL.md 必须转成 UTF-8 落库");
     }
 
     /**

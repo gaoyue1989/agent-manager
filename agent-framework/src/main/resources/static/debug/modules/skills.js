@@ -281,7 +281,7 @@ function renderUserSkillsPanel() {
             'title="把包内同名技能整目录下发为该用户个人版本">⬇ 从包内下发</button>' +
           '<input id="userSkillZipInput" type="file" accept=".zip,application/zip" style="display:none">' +
           '<button class="btn small" id="userSkillZipBtn" ' +
-            'title="上传 zip 包作为该用户个人技能（同名覆盖；含二进制/非 UTF-8 文件会拒绝整个包）">' +
+            'title="上传 zip 包作为该用户个人技能（同名覆盖；图片/二进制等非文本文件会跳过并在结果中列出）">' +
             '⬆ 上传 zip</button>' +
         '</div>' +
         '<div id="userSkillList"><div class="empty">选择或输入 userId 后点「加载」。</div></div>' +

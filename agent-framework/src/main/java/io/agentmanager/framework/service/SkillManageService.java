@@ -260,7 +260,12 @@ public class SkillManageService {
         if (!Files.isRegularFile(skillMd)) {
             throw new IllegalArgumentException("Skill '" + name + "' 的 SKILL.md 不存在");
         }
-        return Files.readString(skillMd, StandardCharsets.UTF_8);
+        // 文本 UTF-8 优先、GBK 兜底（兼容历史 GBK 技能）；两者都不是则拒绝而不是返回乱码
+        var text = SkillZipSupport.decodeText(Files.readAllBytes(skillMd));
+        if (text == null) {
+            throw new IllegalArgumentException("Skill '" + name + "' 的 SKILL.md 不是 UTF-8/GBK 文本");
+        }
+        return text;
     }
 
     /** 修改指定 skill 的 SKILL.md 内容 */

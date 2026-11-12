@@ -214,8 +214,10 @@ public class UserSkillController {
      * （想基于公共技能定制走「从包内下发」再编辑）；该用户已有同名个人覆盖时按更新放行。
      *
      * <p>体积上限 {@link UserSkillService#MAX_ZIP_BYTES}（10MB），解压后条目数/总大小由
-     * {@link io.agentmanager.framework.service.SkillZipSupport} 兜底。<b>含二进制/非 UTF-8 文件
-     * 拒绝整个包</b>（400）——KV 只存字符串，静默替换会损坏数据。
+     * {@link io.agentmanager.framework.service.SkillZipSupport} 兜底。<b>文本编码 UTF-8 优先、
+     * GBK 自动转码</b>（Windows 记事本 ANSI 保存的 SKILL.md 可直接上传）；<b>真正的二进制
+     * （图片等）跳过并随响应 {@code skipped} 下发</b>——KV 只存字符串，静默替换会损坏数据，但也
+     * 不该让带配图的技能整体传不上来；UTF-8/GBK 都解不出才 400 拒绝。
      */
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> uploadSkillZip(
@@ -240,10 +242,13 @@ public class UserSkillController {
             resp.put("name", outcome.name());
             resp.put("action", outcome.action());
             resp.put("files", outcome.files());
+            resp.put("skipped", outcome.skipped());
             resp.put("version", outcome.version());
             resp.put("message", "用户技能 '" + outcome.name() + "' 已"
                 + ("created".equals(outcome.action()) ? "创建" : "覆盖更新")
                 + "（" + outcome.files().size() + " 个文件，已写入 agent_fs）"
+                + (outcome.skipped().isEmpty() ? ""
+                    : "；跳过 " + outcome.skipped().size() + " 个非文本文件（图片/二进制不入 KV）")
                 + (sandboxMode()
                     ? "；当前 SANDBOX_ENABLED=true，该用户下一个 turn 开始时物化进容器 /workspace/skills 生效"
                     : "，用户 " + headerUserId + " 下轮会话生效"));
@@ -401,7 +406,7 @@ public class UserSkillController {
     /**
      * 把包内（L2）同名技能整目录下发为当前用户的个人版本（含 scripts 等资源文件）。
      *
-     * <p>以包内清单为准全量替换（差集清理多余旧文件）+ 失败回滚；非 UTF-8/二进制文件显式跳过，
+     * <p>以包内清单为准全量替换（差集清理多余旧文件）+ 失败回滚；文本 UTF-8/GBK 自动转码，二进制显式跳过，
      * 跳过清单在 {@code skipped} 字段返回。
      */
     @PostMapping("/{name}/sync-from-package")
@@ -427,7 +432,7 @@ public class UserSkillController {
             resp.put("files", sync.files());
             resp.put("skipped", sync.skipped());
             resp.put("message", "包内技能 '" + name + "' 已下发为用户 " + headerUserId + " 的个人版本"
-                + (sync.skipped().isEmpty() ? "" : "（跳过 " + sync.skipped().size() + " 个非 UTF-8 文件: "
+                + (sync.skipped().isEmpty() ? "" : "（跳过 " + sync.skipped().size() + " 个非文本文件: "
                     + String.join(", ", sync.skipped()) + "）")
                 + (sandboxMode()
                     ? "；当前 SANDBOX_ENABLED=true，该用户下一个 turn 开始时物化进容器 /workspace/skills 生效"
