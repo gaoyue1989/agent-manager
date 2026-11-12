@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"agent-manager/backend/internal/k8s"
 	"agent-manager/backend/internal/store"
 )
 
@@ -326,9 +327,10 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 		if !strings.Contains(joined, "task-executor -listen-addr=0.0.0.0:5758") {
 			t.Fatalf("main command missing task-executor listener: %s", joined)
 		}
-		// extraEnv/commandWrapper 缺省：模板与历史形态逐字段一致（单 arg 直启 + 三固定 env）
+		// 服务未配 token Secret（no-token 灰度分支，PR-4a 默认开启的前置门不满足）：
+		// 模板与历史形态逐字段一致（单 arg 直启 + 三固定 env）
 		if len(main.Args) != 1 || main.Args[0] != "/opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp" {
-			t.Fatalf("default args must stay exact, got %v", main.Args)
+			t.Fatalf("no-token args must stay exact, got %v", main.Args)
 		}
 		if len(main.Env) != 3 {
 			t.Fatalf("default env must stay 3 fixed entries, got %d", len(main.Env))
@@ -373,25 +375,161 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 	h.mu.Unlock()
 }
 
-// TestSandboxProxyPresetCommandWrapperAndExtraEnv preset 受控参数化（skills-syncd §5.2）：
-// commandWrapper 开启时 args 为 D-1 内联守卫字面（launcher 缺失退化为原命令，防 crashloop）；
-// extraEnv 追加主容器 env（value / secretKeyRef→valueFrom 两种形态）。
-func TestSandboxProxyPresetCommandWrapperAndExtraEnv(t *testing.T) {
+// TestSandboxProxyPoolSyncdDefaultOn 技能同步默认开启三态（PR-4a，skills-syncd §11）：
+// per-service token Secret 在位 → 新建池缺省注入三键 + commandWrapper（新缺省注入断言）；
+// DisableSyncd=true → 模板逐字段与历史形态一致（显式关闭 = 完全旧行为，可回滚）；
+// Secret 缺失（服务未接入 token）→ 旧行为建池不让 secretKeyRef 卡死 warm pod
+// （未接入服务不受默认开启影响），审计 syncd 三态留痕。
+func TestSandboxProxyPoolSyncdDefaultOn(t *testing.T) {
 	core, h, done := newProxyCore(t, nil)
 	defer done()
 	seedWsService(t, core, 1, "oaf-demo")
+	if err := core.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(k8s.ObjectParams{
+		K8sName: "oaf-demo", EnvSecret: map[string]string{k8s.SkillsyncTokenEnvKey: "tok"}})); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+	})
+	capSpec := SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3}
+	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: capSpec}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	parseMain := func(t *testing.T, body string) struct {
+		Name string   `json:"name"`
+		Args []string `json:"args"`
+		Env  []struct {
+			Name      string `json:"name"`
+			Value     string `json:"value"`
+			ValueFrom *struct {
+				SecretKeyRef *struct {
+					Name string `json:"name"`
+					Key  string `json:"key"`
+				} `json:"secretKeyRef"`
+			} `json:"valueFrom"`
+		} `json:"env"`
+	} {
+		t.Helper()
+		var payload struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Name string   `json:"name"`
+						Args []string `json:"args"`
+						Env  []struct {
+							Name      string `json:"name"`
+							Value     string `json:"value"`
+							ValueFrom *struct {
+								SecretKeyRef *struct {
+									Name string `json:"name"`
+									Key  string `json:"key"`
+								} `json:"secretKeyRef"`
+							} `json:"valueFrom"`
+						} `json:"env"`
+					} `json:"containers"`
+				} `json:"spec"`
+			} `json:"template"`
+		}
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatalf("payload not json: %v", err)
+		}
+		if len(payload.Template.Spec.Containers) != 1 {
+			t.Fatalf("containers = %+v", payload.Template.Spec.Containers)
+		}
+		return payload.Template.Spec.Containers[0]
+	}
+	legacyArgs := "/opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
+	wrapperArgs := "W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
+
+	// 1) 新缺省：三键派生 + wrapper
+	main := parseMain(t, h.Reqs[0].Body)
+	if len(main.Args) != 1 || main.Args[0] != wrapperArgs {
+		t.Fatalf("default-on args wrong:\n got %q\nwant %q", main.Args, wrapperArgs)
+	}
+	if len(main.Env) != 6 {
+		t.Fatalf("default-on env = %d, want 3 fixed + 3 derived: %+v", len(main.Env), main.Env)
+	}
+	if e := main.Env[3]; e.Name != "SKILLSYNC_BASE_URL" || e.Value != "http://oaf-demo-svc.test.svc:8100" || e.ValueFrom != nil {
+		t.Fatalf("SKILLSYNC_BASE_URL wrong: %+v", e)
+	}
+	if tok := main.Env[4]; tok.Name != k8s.SkillsyncTokenEnvKey || tok.ValueFrom == nil ||
+		tok.ValueFrom.SecretKeyRef == nil || tok.ValueFrom.SecretKeyRef.Name != k8s.SkillsyncTokenName("oaf-demo") ||
+		tok.ValueFrom.SecretKeyRef.Key != k8s.SkillsyncTokenDataKey {
+		t.Fatalf("SKILLSYNC_TOKEN secretKeyRef wrong: %+v", tok)
+	}
+	if e := main.Env[5]; e.Name != "SKILLSYNC_INTERVAL" || e.Value != "1m" || e.ValueFrom != nil {
+		t.Fatalf("SKILLSYNC_INTERVAL wrong: %+v", e)
+	}
+
+	// 2) 显式关闭：模板逐字段与历史形态一致（旧代码 dormant，可回滚）
+	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: capSpec, DisableSyncd: true}, 0); err != nil {
+		t.Fatal(err)
+	}
+	main = parseMain(t, h.Reqs[1].Body)
+	if len(main.Args) != 1 || main.Args[0] != legacyArgs {
+		t.Fatalf("disabled args must stay exact legacy literal, got %q", main.Args)
+	}
+	if len(main.Env) != 3 {
+		t.Fatalf("disabled env = %d, want 3 fixed only: %+v", len(main.Env), main.Env)
+	}
+
+	// 3) 服务未配 token Secret：默认开启不波及（旧行为 + 审计 no-token）
+	seedWsService(t, core, 1, "oaf-bare")
+	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{Name: "oaf-bare-pool", CapacitySpec: capSpec}, 0); err != nil {
+		t.Fatal(err)
+	}
+	main = parseMain(t, h.Reqs[2].Body)
+	if len(main.Args) != 1 || main.Args[0] != legacyArgs {
+		t.Fatalf("no-token args must stay exact legacy literal, got %q", main.Args)
+	}
+	if len(main.Env) != 3 {
+		t.Fatalf("no-token env = %d, want 3 fixed only: %+v", len(main.Env), main.Env)
+	}
+
+	// 审计 syncd 三态：default / disabled / no-token（灰度观测按 result 维度区分，D-5 口径）
+	var rows []store.ServiceEvent
+	if err := core.DB.Where("service_id = 0").Order("id ASC").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	syncd := []string{}
+	for _, r := range rows {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(r.Reason), &parsed); err != nil {
+			t.Fatalf("audit reason not json: %v", err)
+		}
+		if k, _ := parsed["kind"].(string); k == "sandbox.pool.create" {
+			m, _ := parsed["syncd"].(string)
+			syncd = append(syncd, m)
+		}
+	}
+	if len(syncd) != 3 || syncd[0] != "default" || syncd[1] != "disabled" || syncd[2] != "no-token" {
+		t.Fatalf("audit syncd modes = %v, want [default disabled no-token]", syncd)
+	}
+}
+
+// TestSandboxProxyPresetExtraEnvOverride C-2 手动通道（skills-syncd §5.2）：token Secret
+// 在位（默认开启生效）时手动 extraEnv 键级覆盖缺省派生值（同名后者胜）、其余键追加；
+// value / secretKeyRef→valueFrom 两种形态照常。
+func TestSandboxProxyPresetExtraEnvOverride(t *testing.T) {
+	core, h, done := newProxyCore(t, nil)
+	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	if err := core.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(k8s.ObjectParams{
+		K8sName: "oaf-demo", EnvSecret: map[string]string{k8s.SkillsyncTokenEnvKey: "tok"}})); err != nil {
+		t.Fatal(err)
+	}
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
 	})
 	in := CreateSandboxPoolInput{
-		Name:           "oaf-demo-pool",
-		CapacitySpec:   SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
-		CommandWrapper: true,
+		Name:         "oaf-demo-pool",
+		CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 		ExtraEnv: []SandboxPoolExtraEnv{
-			{Name: "SKILLSYNC_BASE_URL", Value: "http://oaf-demo-svc.agent-platform.svc:8100"},
-			{Name: "SKILLSYNC_TOKEN", SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: "oaf-demo-skillsync-token", Key: "token"}},
-			{Name: "SKILLSYNC_INTERVAL", Value: "1m"},
+			{Name: "SKILLSYNC_INTERVAL", Value: "5m"},
+			{Name: "SKILLSYNC_TIMEOUT", Value: "30s"},
 		},
 	}
 	if _, err := core.AdminCreateSandboxPool(in, 0); err != nil {
@@ -427,34 +565,38 @@ func TestSandboxProxyPresetCommandWrapperAndExtraEnv(t *testing.T) {
 	if main.Name != "sandbox" || len(main.Args) != 1 {
 		t.Fatalf("main container wrong: %+v", payload.Template.Spec.Containers)
 	}
+	// 默认开启：commandWrapper 缺省生效（D-1 内联守卫字面）
 	wantArgs := "W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
 	if main.Args[0] != wantArgs {
 		t.Fatalf("wrapper args literal wrong:\n got %q\nwant %q", main.Args[0], wantArgs)
 	}
-	if len(main.Env) != 6 {
-		t.Fatalf("env = %d entries, want 3 fixed + 3 extra: %+v", len(main.Env), main.Env)
+	if len(main.Env) != 7 {
+		t.Fatalf("env = %d entries, want 3 fixed + 3 default + 1 appended: %+v", len(main.Env), main.Env)
 	}
 	for i, k := range []string{"SANDBOX_MAIN_CONTAINER", "EXECD_ENVS", "EXECD"} {
 		if main.Env[i].Name != k || main.Env[i].Value == "" || main.Env[i].ValueFrom != nil {
 			t.Fatalf("fixed env[%d] altered: %+v", i, main.Env[i])
 		}
 	}
-	if e := main.Env[3]; e.Name != "SKILLSYNC_BASE_URL" || e.Value != "http://oaf-demo-svc.agent-platform.svc:8100" || e.ValueFrom != nil {
-		t.Fatalf("value-form extraEnv wrong: %+v", e)
+	if e := main.Env[3]; e.Name != "SKILLSYNC_BASE_URL" || e.Value != "http://oaf-demo-svc.test.svc:8100" || e.ValueFrom != nil {
+		t.Fatalf("default base url wrong: %+v", e)
 	}
 	tok := main.Env[4]
 	if tok.Name != "SKILLSYNC_TOKEN" || tok.Value != "" || tok.ValueFrom == nil ||
 		tok.ValueFrom.SecretKeyRef == nil || tok.ValueFrom.SecretKeyRef.Name != "oaf-demo-skillsync-token" ||
 		tok.ValueFrom.SecretKeyRef.Key != "token" {
-		t.Fatalf("secretKeyRef-form extraEnv wrong: %+v", tok)
+		t.Fatalf("default token secretKeyRef wrong: %+v", tok)
 	}
-	if e := main.Env[5]; e.Name != "SKILLSYNC_INTERVAL" || e.Value != "1m" || e.ValueFrom != nil {
-		t.Fatalf("interval extraEnv wrong: %+v", e)
+	if e := main.Env[5]; e.Name != "SKILLSYNC_INTERVAL" || e.Value != "5m" || e.ValueFrom != nil {
+		t.Fatalf("manual override must replace default interval in place: %+v", e)
+	}
+	if e := main.Env[6]; e.Name != "SKILLSYNC_TIMEOUT" || e.Value != "30s" || e.ValueFrom != nil {
+		t.Fatalf("appended manual env wrong: %+v", e)
 	}
 }
 
 // TestSandboxProxyValidation createPool 校验矩阵：name DNS label + capacitySpec 四值链 +
-// 池名/服务绑定（C-1/C-2）+ extraEnv 受控白名单（skills-syncd §5.2）。
+// 池名/服务绑定（C-1/C-2）+ extraEnv 受控白名单 + disableSyncd/extraEnv 互斥（skills-syncd §5.2）。
 func TestSandboxProxyValidation(t *testing.T) {
 	core, _, done := newProxyCore(t, nil)
 	defer done()
@@ -490,6 +632,8 @@ func TestSandboxProxyValidation(t *testing.T) {
 		{"extraEnv duplicate key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
 			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL", Value: "1m"}, {Name: "SKILLSYNC_INTERVAL", Value: "2m"}}}},
 		{"extraEnv over limit", overLimit},
+		{"disableSyncd with extraEnv", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			DisableSyncd: true, ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL", Value: "1m"}}}},
 	}
 	for _, tc := range cases {
 		if _, err := core.AdminCreateSandboxPool(tc.in, 0); !errors.Is(err, ErrInvalidForm) {
