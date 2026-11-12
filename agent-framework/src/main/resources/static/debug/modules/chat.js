@@ -48,7 +48,7 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_BASE_DELAY = 1000; // 1s
 
 let refreshTimer = null;
-let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+let usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
 
 // 当前回复构建器（按 replyId 区分多 run）
 let currentReply = null;
@@ -1027,7 +1027,9 @@ function ensureReply(replyId) {
     tailText: '',
     tailTools: null,
     elapsedStart: Date.now(),
-    usage: { input: 0, output: 0 },
+    usage: { input: 0, cached: 0, output: 0 },
+    serverUsage: null,
+    serverElapsedMs: null,
     modelCalls: 0,
     activeThinkingEl: null,
     footerBadge: div.querySelector('[data-footer]'),
@@ -1049,13 +1051,19 @@ function startFooterTimer(r) {
 
 function updateReplyFooter(r, running) {
   if (!r.footerBadge) return;
-  const secs = (Date.now() - r.elapsedStart) / 1000;
+  const useServer = !running && r.serverElapsedMs != null;
+  const u = useServer && r.serverUsage ? r.serverUsage
+    : { input_tokens: r.usage.input, cached_tokens: r.usage.cached, output_tokens: r.usage.output, model_calls: r.modelCalls };
+  const secs = useServer ? r.serverElapsedMs / 1000 : (Date.now() - r.elapsedStart) / 1000;
   r.footerBadge.innerHTML =
     ctx.utils.msgStateIcon(running) +
-    ' <span>' + ctx.utils.formatDuration(secs) + '</span>' +
-    (r.usage.input || r.usage.output
-      ? ' <span>↑' + r.usage.input + ' ↓' + r.usage.output + '</span>' : '') +
-    (r.modelCalls > 0 ? ' · ' + r.modelCalls + ' calls' : '');
+    ' <span' + (useServer ? ' title="服务端计时"' : '') + '>' + ctx.utils.formatDuration(secs) + '</span>' +
+    (u.input_tokens || u.output_tokens
+      ? ' <span>↑' + (u.input_tokens || 0)
+          + (u.cached_tokens ? ' ⚡' + u.cached_tokens + ' 缓存' : '')
+          + ' ↓' + (u.output_tokens || 0) + '</span>' : '') +
+    (u.total_tokens ? ' · ' + u.total_tokens + ' total' : '') +
+    (u.model_calls > 0 ? ' · ' + u.model_calls + ' calls' : '');
 }
 
 function finishReply(replyId) {
@@ -1722,7 +1730,7 @@ function handleEvent(data) {
     Object.keys(remoteToolOwner).forEach((k) => delete remoteToolOwner[k]);
     setConnecting('chatTitle', true);
     enterStreamingUi();
-    usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+    usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
     // MCP Apps：新回合开始 → 清理上一回合卡片（保留当前回合可交互）
     teardownAllAppHosts();
     return;
@@ -1731,6 +1739,10 @@ function handleEvent(data) {
     if (isRemote) {
       remotePanelStatus(activeRemotePanel, '子任务完成', 'done');
       return;
+    }
+    if (currentReply) {
+      if (data.usage) currentReply.serverUsage = data.usage;
+      if (data.elapsed_ms != null) currentReply.serverElapsedMs = data.elapsed_ms;
     }
     finishReply(currentReply ? currentReply.replyId : null);
     currentReply = null;
@@ -1864,11 +1876,13 @@ function handleEvent(data) {
     case 'MODEL_CALL_END': {
       if (data.inputTokens != null || data.outputTokens != null) {
         usageAccumulator.input_tokens += data.inputTokens || 0;
+        usageAccumulator.cached_tokens += data.cachedTokens || 0;
         usageAccumulator.output_tokens += data.outputTokens || 0;
         usageAccumulator.total_tokens += data.totalTokens || 0;
         usageAccumulator.call_count++;
         if (r) {
           r.usage.input = usageAccumulator.input_tokens;
+          r.usage.cached = usageAccumulator.cached_tokens;
           r.usage.output = usageAccumulator.output_tokens;
         }
       }
@@ -2402,7 +2416,7 @@ async function sendA2AStream(text, sid) {
   // 新建一条 A2A 回复（标准帧不携带 replyId，用占位 id）
   const replyId = 'a2a-' + Date.now().toString(36);
   const r = ensureReply(replyId);
-  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 };
+  usageAccumulator = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cached_tokens: 0, call_count: 0 };
 
   try {
     const resp = await fetch(ctx.api.BASE + '/', {
