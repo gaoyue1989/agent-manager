@@ -65,16 +65,31 @@ func SanitizeK8sNameMax(in string, max int) string {
 	return s
 }
 
-// DeriveK8sName slug("vendor/agent") 或自定义名 → "oaf-{sanitized}"，总长 ≤48：
-// 运行时还要派生 Service "{name}-svc" / Secret "{name}-env-secret" 等子对象名
-// （同为 DNS-1123 ≤63，issue #149：k8s 名贴 63 上限时 -svc 后缀拼出 67 被 API 拒绝，
-// 且发布先落库 → 残留 deploying/error 记录），为最长后缀 "-env-secret"(11) 预算。
+// 服务级子对象名后缀（DeriveK8sName 按最长者预留预算，skills-syncd per-service
+// Secret 名同套预算）。
+const (
+	EnvSecretSuffix      = "-env-secret"
+	SkillsyncTokenSuffix = "-skillsync-token"
+)
+
+// SkillsyncTokenEnvKey 技能同步守护端点鉴权 token 的服务 env 键（敏感路由后同值
+// 镜像进 per-service Secret，§5.2/§9.1 sandbox-skills-syncd-design）。
+const SkillsyncTokenEnvKey = "SKILLSYNC_TOKEN"
+
+// SkillsyncTokenDataKey per-service token Secret 的 data 键（池模板 secretKeyRef 引用）。
+const SkillsyncTokenDataKey = "token"
+
+// DeriveK8sName slug("vendor/agent") 或自定义名 → "oaf-{sanitized}"，总长 ≤47：
+// 运行时还要派生 Service "{name}-svc" / Secret "{name}-env-secret" /
+// "{name}-skillsync-token" 等子对象名（同为 DNS-1123 ≤63，issue #149：k8s 名贴 63
+// 上限时 -svc 后缀拼出 67 被 API 拒绝，且发布先落库 → 残留 deploying/error 记录），
+// 为最长后缀 "-skillsync-token"(16) 预算。
 func DeriveK8sName(displayName, slug string) string {
 	base := displayName
 	if base == "" {
 		base = strings.ReplaceAll(slug, "/", "-")
 	}
-	return Prefix + SanitizeK8sNameMax(base, 63-len(Prefix)-len("-env-secret"))
+	return Prefix + SanitizeK8sNameMax(base, 63-len(Prefix)-len(SkillsyncTokenSuffix))
 }
 
 // ShortName 去掉 oaf- 前缀，用于 ingress path /agent/{short}。
@@ -83,7 +98,10 @@ func ShortName(k8sName string) string {
 }
 
 // EnvSecretName 服务级敏感 env Secret 名。
-func EnvSecretName(k8sName string) string { return k8sName + "-env-secret" }
+func EnvSecretName(k8sName string) string { return k8sName + EnvSecretSuffix }
+
+// SkillsyncTokenName 服务级技能同步 token Secret 名（池模板 secretKeyRef 引用）。
+func SkillsyncTokenName(k8sName string) string { return k8sName + SkillsyncTokenSuffix }
 
 type ObjectParams struct {
 	K8sName   string
@@ -129,6 +147,16 @@ func EnvSecret(p ObjectParams) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: EnvSecretName(p.K8sName), Namespace: p.Namespace, Labels: labels(p.K8sName)},
 		Data:       stringMapToBytes(p.EnvSecret),
+	}
+}
+
+// SkillsyncTokenSecret 构造服务级技能同步 token Secret（{k8sName}-skillsync-token，
+// data 键 token；值取自服务敏感 env SKILLSYNC_TOKEN——同值单一真相源，池模板经
+// secretKeyRef 引用。调用方保证键存在且非空）。
+func SkillsyncTokenSecret(p ObjectParams) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: SkillsyncTokenName(p.K8sName), Namespace: p.Namespace, Labels: labels(p.K8sName)},
+		Data:       map[string][]byte{SkillsyncTokenDataKey: []byte(p.EnvSecret[SkillsyncTokenEnvKey])},
 	}
 }
 

@@ -290,6 +290,51 @@ func TestDeleteRemovesServiceSecret(t *testing.T) {
 	}
 }
 
+// TestSkillsyncTokenSecretLifecycle per-service 技能同步 token Secret（skills-syncd D-8）：
+// 发布链路 env 含敏感键 SKILLSYNC_TOKEN 时 Ensure {k8sName}-skillsync-token（同值单一
+// 真相源）；UpdateEnv 轮换 → Secret 同步更新（池 rollout 重启为 D-8 轮换语义）；服务
+// 删除连带清理。
+func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID,
+		map[string]string{"SKILLSYNC_TOKEN": "tok-1", "LOG_LEVEL": "info"}, []string{"SKILLSYNC_TOKEN"})
+
+	secName := k8s.SkillsyncTokenName(svc.K8sName)
+	sec, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal("skillsync token secret must be ensured on publish")
+	}
+	if string(sec.Data["token"]) != "tok-1" {
+		t.Fatalf("token value wrong: %q", sec.Data["token"])
+	}
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, []string{"SKILLSYNC_TOKEN"}); err != nil {
+		t.Fatal(err)
+	}
+	sec, err = fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{})
+	if err != nil || string(sec.Data["token"]) != "tok-2" {
+		t.Fatalf("token rotation not mirrored to secret: err=%v data=%v", err, sec.Data)
+	}
+	if err := core.Delete(svc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+		t.Fatal("skillsync token secret must be deleted with service")
+	}
+}
+
+// TestNoSkillsyncTokenSecretWithoutToken env 无 SKILLSYNC_TOKEN 的服务不产出该 Secret。
+func TestNoSkillsyncTokenSecretWithoutToken(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
+	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.SkillsyncTokenName(svc.K8sName), metav1.GetOptions{}); err == nil {
+		t.Fatal("skillsync token secret must not exist without SKILLSYNC_TOKEN env")
+	}
+}
+
 // TestEnvSecretKeysMasking 掩码视图：值不随 JSON 直出，键集含存量未迁移键。
 func TestEnvSecretKeysMasking(t *testing.T) {
 	core, _, done := newTestCore(t)

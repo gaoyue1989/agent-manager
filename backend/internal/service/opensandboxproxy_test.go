@@ -127,22 +127,23 @@ const sandboxPageJSON = `{"items":[{"id":"sb-1","status":{"state":"Running"},"me
 func TestSandboxProxySevenEndpoints(t *testing.T) {
 	core, h, done := newProxyCore(t, nil)
 	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
 
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/pools":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(poolsJSON))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/pools/oaf-pool":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/pools/oaf-demo-pool":
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"name":"oaf-pool","capacitySpec":{"bufferMin":1,"bufferMax":2,"poolMin":1,"poolMax":3}}`))
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool","capacitySpec":{"bufferMin":1,"bufferMax":2,"poolMin":1,"poolMax":3}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/pools":
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"name":"oaf-pool"}`))
-		case r.Method == http.MethodPut && r.URL.Path == "/v1/pools/oaf-pool":
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/pools/oaf-demo-pool":
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"name":"oaf-pool"}`))
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/pools/oaf-pool":
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/pools/oaf-demo-pool":
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes":
 			w.WriteHeader(http.StatusOK)
@@ -159,23 +160,23 @@ func TestSandboxProxySevenEndpoints(t *testing.T) {
 		t.Fatalf("list pools: %v", err)
 	}
 	// GET /v1/pools/{name}
-	if _, err := core.AdminGetSandboxPool("oaf-pool"); err != nil {
+	if _, err := core.AdminGetSandboxPool("oaf-demo-pool"); err != nil {
 		t.Fatalf("get pool: %v", err)
 	}
 	// POST /v1/pools（显式 image）
 	in := CreateSandboxPoolInput{
-		Name: "oaf-pool", Image: "img-x:1",
+		Name: "oaf-demo-pool", Image: "img-x:1",
 		CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 	}
 	if _, err := core.AdminCreateSandboxPool(in, 7); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	// PUT /v1/pools/{name}（仅 capacitySpec）
-	if _, err := core.AdminUpdateSandboxPool("oaf-pool", SandboxCapacitySpec{BufferMin: 2, BufferMax: 3, PoolMin: 2, PoolMax: 4}, 7); err != nil {
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", SandboxCapacitySpec{BufferMin: 2, BufferMax: 3, PoolMin: 2, PoolMax: 4}, 7); err != nil {
 		t.Fatalf("update pool: %v", err)
 	}
 	// DELETE /v1/pools/{name}
-	if err := core.AdminDeleteSandboxPool("oaf-pool", 7); err != nil {
+	if err := core.AdminDeleteSandboxPool("oaf-demo-pool", 7); err != nil {
 		t.Fatalf("delete pool: %v", err)
 	}
 	// GET /v1/sandboxes?state=&page=&pageSize=
@@ -217,7 +218,7 @@ func TestSandboxProxySevenEndpoints(t *testing.T) {
 	if err := json.Unmarshal([]byte(createBody.Body), &payload); err != nil {
 		t.Fatalf("create body not json: %v", err)
 	}
-	if payload["name"] != "oaf-pool" {
+	if payload["name"] != "oaf-demo-pool" {
 		t.Fatalf("create body name = %v", payload["name"])
 	}
 	if _, ok := payload["recycleStrategy"]; ok {
@@ -248,13 +249,14 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 	{
 		core, h, done := newProxyCore(t, nil)
 		defer done()
+		seedWsService(t, core, 1, "oaf-demo")
 		h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"name":"p-r"}`))
+			_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
 		})
 		for _, strategy := range []string{"", "Delete", "Restart", "Noop"} {
 			if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-				Name: "p-r", RecycleStrategy: strategy,
+				Name: "oaf-demo-pool", RecycleStrategy: strategy,
 				CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 			}, 0); err != nil {
 				t.Fatalf("recycleStrategy %q 应合法: %v", strategy, err)
@@ -265,7 +267,7 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 			t.Fatalf("合法 recycleStrategy 不应透传上游: %s", h.Reqs[0].Body)
 		}
 		if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-			Name: "p-r", RecycleStrategy: "Bogus",
+			Name: "oaf-demo-pool", RecycleStrategy: "Bogus",
 			CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 		}, 0); !errors.Is(err, ErrInvalidForm) {
 			t.Fatalf("recycleStrategy Bogus 应 400 ErrInvalidForm, got %v", err)
@@ -274,12 +276,13 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 	// image 缺省 → 取平台默认 SANDBOX_IMAGE
 	core, h, done := newProxyCore(t, map[string]string{"SANDBOX_IMAGE": "reg.example.com/ci:v9"})
 	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"name":"p1"}`))
+		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
 	})
 	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-		Name: "p1", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 	}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -323,6 +326,13 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 		if !strings.Contains(joined, "task-executor -listen-addr=0.0.0.0:5758") {
 			t.Fatalf("main command missing task-executor listener: %s", joined)
 		}
+		// extraEnv/commandWrapper 缺省：模板与历史形态逐字段一致（单 arg 直启 + 三固定 env）
+		if len(main.Args) != 1 || main.Args[0] != "/opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp" {
+			t.Fatalf("default args must stay exact, got %v", main.Args)
+		}
+		if len(main.Env) != 3 {
+			t.Fatalf("default env must stay 3 fixed entries, got %d", len(main.Env))
+		}
 		envs := map[string]string{}
 		for _, e := range main.Env {
 			envs[e.Name] = e.Value
@@ -351,7 +361,7 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 
 	// 显式 image 优先
 	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-		Name: "p1", Image: "custom:2", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		Name: "oaf-demo-pool", Image: "custom:2", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 	}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -363,10 +373,96 @@ func TestSandboxProxyPresetTemplate(t *testing.T) {
 	h.mu.Unlock()
 }
 
-// TestSandboxProxyValidation createPool 校验矩阵：name DNS label + capacitySpec 四值链。
+// TestSandboxProxyPresetCommandWrapperAndExtraEnv preset 受控参数化（skills-syncd §5.2）：
+// commandWrapper 开启时 args 为 D-1 内联守卫字面（launcher 缺失退化为原命令，防 crashloop）；
+// extraEnv 追加主容器 env（value / secretKeyRef→valueFrom 两种形态）。
+func TestSandboxProxyPresetCommandWrapperAndExtraEnv(t *testing.T) {
+	core, h, done := newProxyCore(t, nil)
+	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
+	})
+	in := CreateSandboxPoolInput{
+		Name:           "oaf-demo-pool",
+		CapacitySpec:   SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		CommandWrapper: true,
+		ExtraEnv: []SandboxPoolExtraEnv{
+			{Name: "SKILLSYNC_BASE_URL", Value: "http://oaf-demo-svc.agent-platform.svc:8100"},
+			{Name: "SKILLSYNC_TOKEN", SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: "oaf-demo-skillsync-token", Key: "token"}},
+			{Name: "SKILLSYNC_INTERVAL", Value: "1m"},
+		},
+	}
+	if _, err := core.AdminCreateSandboxPool(in, 0); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	body := h.Reqs[0].Body
+	h.mu.Unlock()
+	var payload struct {
+		Template struct {
+			Spec struct {
+				Containers []struct {
+					Name string   `json:"name"`
+					Args []string `json:"args"`
+					Env  []struct {
+						Name      string `json:"name"`
+						Value     string `json:"value"`
+						ValueFrom *struct {
+							SecretKeyRef *struct {
+								Name string `json:"name"`
+								Key  string `json:"key"`
+							} `json:"secretKeyRef"`
+						} `json:"valueFrom"`
+					} `json:"env"`
+				} `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("payload not json: %v", err)
+	}
+	main := payload.Template.Spec.Containers[0]
+	if main.Name != "sandbox" || len(main.Args) != 1 {
+		t.Fatalf("main container wrong: %+v", payload.Template.Spec.Containers)
+	}
+	wantArgs := "W=/usr/local/bin/skillsync-launcher.sh; [ -x \"$W\" ] || W=\"\"; exec $W /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"
+	if main.Args[0] != wantArgs {
+		t.Fatalf("wrapper args literal wrong:\n got %q\nwant %q", main.Args[0], wantArgs)
+	}
+	if len(main.Env) != 6 {
+		t.Fatalf("env = %d entries, want 3 fixed + 3 extra: %+v", len(main.Env), main.Env)
+	}
+	for i, k := range []string{"SANDBOX_MAIN_CONTAINER", "EXECD_ENVS", "EXECD"} {
+		if main.Env[i].Name != k || main.Env[i].Value == "" || main.Env[i].ValueFrom != nil {
+			t.Fatalf("fixed env[%d] altered: %+v", i, main.Env[i])
+		}
+	}
+	if e := main.Env[3]; e.Name != "SKILLSYNC_BASE_URL" || e.Value != "http://oaf-demo-svc.agent-platform.svc:8100" || e.ValueFrom != nil {
+		t.Fatalf("value-form extraEnv wrong: %+v", e)
+	}
+	tok := main.Env[4]
+	if tok.Name != "SKILLSYNC_TOKEN" || tok.Value != "" || tok.ValueFrom == nil ||
+		tok.ValueFrom.SecretKeyRef == nil || tok.ValueFrom.SecretKeyRef.Name != "oaf-demo-skillsync-token" ||
+		tok.ValueFrom.SecretKeyRef.Key != "token" {
+		t.Fatalf("secretKeyRef-form extraEnv wrong: %+v", tok)
+	}
+	if e := main.Env[5]; e.Name != "SKILLSYNC_INTERVAL" || e.Value != "1m" || e.ValueFrom != nil {
+		t.Fatalf("interval extraEnv wrong: %+v", e)
+	}
+}
+
+// TestSandboxProxyValidation createPool 校验矩阵：name DNS label + capacitySpec 四值链 +
+// 池名/服务绑定（C-1/C-2）+ extraEnv 受控白名单（skills-syncd §5.2）。
 func TestSandboxProxyValidation(t *testing.T) {
 	core, _, done := newProxyCore(t, nil)
 	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
+	overLimit := CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3}}
+	for i := 0; i < 9; i++ {
+		overLimit.ExtraEnv = append(overLimit.ExtraEnv, SandboxPoolExtraEnv{Name: fmt.Sprintf("SKILLSYNC_K%d", i), Value: "v"})
+	}
 	cases := []struct {
 		desc string
 		in   CreateSandboxPoolInput
@@ -377,10 +473,27 @@ func TestSandboxProxyValidation(t *testing.T) {
 		{"bufferMax below bufferMin", CreateSandboxPoolInput{Name: "p", CapacitySpec: SandboxCapacitySpec{BufferMin: 2, BufferMax: 1, PoolMin: 1, PoolMax: 3}}},
 		{"poolMax below bufferMax", CreateSandboxPoolInput{Name: "p", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 3, PoolMin: 1, PoolMax: 2}}},
 		{"negative value", CreateSandboxPoolInput{Name: "p", CapacitySpec: SandboxCapacitySpec{BufferMin: -1, BufferMax: 2, PoolMin: 0, PoolMax: 3}}},
+		{"pool not bound to existing service", CreateSandboxPoolInput{Name: "oaf-none-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3}}},
+		{"pool name missing -pool suffix", CreateSandboxPoolInput{Name: "oaf-demo", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3}}},
+		{"extraEnv key outside whitelist", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "FOO_BAR", Value: "x"}}}},
+		{"extraEnv lowercase key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "skillsync_foo", Value: "x"}}}},
+		{"extraEnv empty key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "", Value: "x"}}}},
+		{"extraEnv both value and secretKeyRef", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TOKEN", Value: "v", SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: "s", Key: "token"}}}}},
+		{"extraEnv neither value nor secretKeyRef", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TOKEN"}}}},
+		{"extraEnv secretKeyRef missing key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_TOKEN", SecretKeyRef: &SandboxPoolEnvSecretKeyRef{Name: "s"}}}}},
+		{"extraEnv duplicate key", CreateSandboxPoolInput{Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{1, 2, 1, 3},
+			ExtraEnv: []SandboxPoolExtraEnv{{Name: "SKILLSYNC_INTERVAL", Value: "1m"}, {Name: "SKILLSYNC_INTERVAL", Value: "2m"}}}},
+		{"extraEnv over limit", overLimit},
 	}
 	for _, tc := range cases {
-		if _, err := core.AdminCreateSandboxPool(tc.in, 0); err == nil {
-			t.Fatalf("%s: expected 400", tc.desc)
+		if _, err := core.AdminCreateSandboxPool(tc.in, 0); !errors.Is(err, ErrInvalidForm) {
+			t.Fatalf("%s: expected 400 ErrInvalidForm, got %v", tc.desc, err)
 		}
 	}
 	// 容量更新同链
@@ -588,6 +701,7 @@ func TestConsoleSandboxInstancesPagination(t *testing.T) {
 func TestSandboxAdminAuditTrail(t *testing.T) {
 	core, h, done := newProxyCore(t, nil)
 	defer done()
+	seedWsService(t, core, 1, "oaf-demo")
 	h.srv.Config.Handler = h.handle(func(w http.ResponseWriter, r *http.Request, got recReq) {
 		switch r.Method {
 		case http.MethodPost:
@@ -601,14 +715,14 @@ func TestSandboxAdminAuditTrail(t *testing.T) {
 		}
 	})
 	if _, err := core.AdminCreateSandboxPool(CreateSandboxPoolInput{
-		Name: "p1", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
+		Name: "oaf-demo-pool", CapacitySpec: SandboxCapacitySpec{BufferMin: 1, BufferMax: 2, PoolMin: 1, PoolMax: 3},
 	}, 42); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := core.AdminUpdateSandboxPool("p1", SandboxCapacitySpec{BufferMin: 2, BufferMax: 2, PoolMin: 1, PoolMax: 3}, 42); err != nil {
+	if _, err := core.AdminUpdateSandboxPool("oaf-demo-pool", SandboxCapacitySpec{BufferMin: 2, BufferMax: 2, PoolMin: 1, PoolMax: 3}, 42); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.AdminDeleteSandboxPool("p1", 42); err != nil {
+	if err := core.AdminDeleteSandboxPool("oaf-demo-pool", 42); err != nil {
 		t.Fatal(err)
 	}
 	if err := core.AdminDeleteSandbox("sb-9", 42); err != nil {
