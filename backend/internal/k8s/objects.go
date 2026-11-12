@@ -72,8 +72,13 @@ const (
 	SkillsyncTokenSuffix = "-skillsync-token"
 )
 
+// SandboxWorkloadNamespace OpenSandbox 池 workload 命名空间（deploy-opensandbox.sh 服务端
+// config [kubernetes] namespace 固定同值）：per-service skillsync token Secret 的唯一落点——
+// 池模板 secretKeyRef 在 workload ns 内解析，K8s 跨 ns 引用不成立，故 ensure 必须落到消费方。
+const SandboxWorkloadNamespace = "opensandbox"
+
 // SkillsyncTokenEnvKey 技能同步守护端点鉴权 token 的服务 env 键（敏感路由后同值
-// 镜像进 per-service Secret，§5.2/§9.1 sandbox-skills-syncd-design）。
+// 落 per-service Secret 于 SandboxWorkloadNamespace，§5.2/§9.1 sandbox-skills-syncd-design）。
 const SkillsyncTokenEnvKey = "SKILLSYNC_TOKEN"
 
 // SkillsyncTokenDataKey per-service token Secret 的 data 键（池模板 secretKeyRef 引用）。
@@ -150,12 +155,13 @@ func EnvSecret(p ObjectParams) *corev1.Secret {
 	}
 }
 
-// SkillsyncTokenSecret 构造服务级技能同步 token Secret（{k8sName}-skillsync-token，
-// data 键 token；值取自服务敏感 env SKILLSYNC_TOKEN——同值单一真相源，池模板经
-// secretKeyRef 引用。调用方保证键存在且非空）。
+// SkillsyncTokenSecret 构造技能同步 token Secret（{k8sName}-skillsync-token，data 键 token；
+// 值取自服务敏感 env SKILLSYNC_TOKEN——同值单一真相源。落点固定池 workload ns
+// SandboxWorkloadNamespace（消费方）：池模板 secretKeyRef 在该 ns 内解析，服务所在 ns
+// 无消费方。调用方保证键存在且非空）。
 func SkillsyncTokenSecret(p ObjectParams) *corev1.Secret {
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: SkillsyncTokenName(p.K8sName), Namespace: p.Namespace, Labels: labels(p.K8sName)},
+		ObjectMeta: metav1.ObjectMeta{Name: SkillsyncTokenName(p.K8sName), Namespace: SandboxWorkloadNamespace, Labels: labels(p.K8sName)},
 		Data:       map[string][]byte{SkillsyncTokenDataKey: []byte(p.EnvSecret[SkillsyncTokenEnvKey])},
 	}
 }

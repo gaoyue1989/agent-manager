@@ -225,11 +225,15 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 2. **egress 放行**：池 Pod → 本服务 svc 出网须在 OpenSandbox egress 策略放行
    `oaf-{name}-svc.agent-platform.svc`（或集群内网段），否则守护拉取持续退避、store 无库（fail-open）。
-3. **token Secret 前置**：`SKILLSYNC_TOKEN` 是平台 env 模板敏感键（platformconfig/template.go
-   sandbox 组）——服务 env 携带该键即自动路由进服务 Secret（无需显式 `secretKeys`，明文不落
-   CM/env_json），发布幂等 ensure `{name}-skillsync-token`（ns `agent-platform`，data 键 `token`）；
-   池模板 secretKeyRef 在池 workload ns **`opensandbox`** 内解析——建池前须在该 ns 预建同名
-   Secret，缺失时池 Pod 卡 `CreateContainerConfigError`。轮换 = 两处同值更新 + 池 Pod 重建（D-8 契约）。
+3. **token Secret（自动 ensure，消费方落点）**：`SKILLSYNC_TOKEN` 是平台 env 模板敏感键
+   （platformconfig/template.go sandbox 组）——服务 env 携带该键即自动路由进服务 Secret
+   （无需显式 `secretKeys`，明文不落 CM/env_json），发布/改 env 链路幂等 ensure
+   `{name}-skillsync-token`（data 键 `token`）直落池 workload ns **`opensandbox`**——池模板
+   secretKeyRef 在该 ns 内解析，K8s 跨 ns 引用不成立，服务 ns（agent-platform）不产副本。
+   前置：deploy-opensandbox.sh 步骤 4.1 已授予 platform-backend 于该 ns 的 Secret 读写 RBAC
+   （脚本自动，缺授权时发布报错 `skillsync token secret ... forbidden`，重跑脚本即恢复）。
+   轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
+   存量集群 agent-platform ns 的同名 Secret 为无消费方遗留物，可手工删除。
 4. **建池**：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag，extraEnv 带
    `SKILLSYNC_BASE_URL=http://oaf-{name}-svc.agent-platform.svc:8100`（+ token secretKeyRef），
    `commandWrapper: true`；镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。
@@ -241,7 +245,7 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 1. 镜像 tag 回退：池/服务镜像改回上一 tag（如 `opensandbox/code-interpreter:v1.1.0`）后重建池。
 2. 池模板参数摘除：建池/重建池请求去掉 `extraEnv` 与 `commandWrapper`。
-3. 清理：删除两 ns 的 `{name}-skillsync-token` Secret + 回收 egress 放行条目。
+3. 清理：删除 ns `opensandbox` 的 `{name}-skillsync-token` Secret（唯一副本，落点即消费方）+ 回收 egress 放行条目。
 
 ## 关键端点
 

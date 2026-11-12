@@ -293,9 +293,9 @@ func TestDeleteRemovesServiceSecret(t *testing.T) {
 // TestSkillsyncTokenSecretLifecycle per-service 技能同步 token Secret（skills-syncd D-8）。
 // 发布方按普通 env 填 SKILLSYNC_TOKEN（不带 secretKeys——模板敏感键自动路由，评审修复的
 // 陷阱场景：漏路由则 token 明文落 CM 且 per-service Secret 不产出，池 Pod secretKeyRef
-// 解析失败卡 CreateContainerConfigError）→ Ensure {k8sName}-skillsync-token（同值单一
-// 真相源）；UpdateEnv 轮换 → Secret 同步更新（池 rollout 重启为 D-8 轮换语义）；服务
-// 删除连带清理。
+// 解析失败卡 CreateContainerConfigError）→ Ensure {k8sName}-skillsync-token 落池 workload
+// ns（消费方；跨 ns secretKeyRef 不解析，服务 ns 无副本）；UpdateEnv 轮换 → 同 ns Secret
+// 同步更新（池 Pod 重建为 D-8 轮换语义）；服务删除连带清理。
 func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
 	core, fk, done := newTestCore(t)
 	defer done()
@@ -314,24 +314,30 @@ func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
 		t.Fatal("CM must not contain SKILLSYNC_TOKEN (plaintext token)")
 	}
 	secName := k8s.SkillsyncTokenName(svc.K8sName)
-	sec, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{})
+	sec, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
 	if err != nil {
-		t.Fatal("skillsync token secret must be ensured on publish")
+		t.Fatalf("skillsync token secret must be ensured in pool workload ns: %v", err)
 	}
 	if string(sec.Data["token"]) != "tok-1" {
 		t.Fatalf("token value wrong: %q", sec.Data["token"])
 	}
+	if sec.Labels[k8s.LabelKey] != svc.K8sName {
+		t.Fatalf("owner label wrong: %+v", sec.Labels)
+	}
+	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+		t.Fatal("service ns must have no skillsync token copy (cross-ns secretKeyRef is unresolvable)")
+	}
 	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	sec, err = fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{})
+	sec, err = fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
 	if err != nil || string(sec.Data["token"]) != "tok-2" {
 		t.Fatalf("token rotation not mirrored to secret: err=%v data=%v", err, sec.Data)
 	}
 	if err := core.Delete(svc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
 		t.Fatal("skillsync token secret must be deleted with service")
 	}
 }
@@ -342,7 +348,7 @@ func TestNoSkillsyncTokenSecretWithoutToken(t *testing.T) {
 	defer done()
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
-	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), k8s.SkillsyncTokenName(svc.K8sName), metav1.GetOptions{}); err == nil {
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), k8s.SkillsyncTokenName(svc.K8sName), metav1.GetOptions{}); err == nil {
 		t.Fatal("skillsync token secret must not exist without SKILLSYNC_TOKEN env")
 	}
 }

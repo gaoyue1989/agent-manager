@@ -74,7 +74,8 @@ func TestDeriveK8sNameLengthCap(t *testing.T) {
 }
 
 // TestSkillsyncTokenNameAndSecret per-service 技能同步 token Secret（skills-syncd D-8）：
-// 名派生 {k8sName}-skillsync-token、key=token、值取自服务敏感 env SKILLSYNC_TOKEN。
+// 名派生 {k8sName}-skillsync-token、key=token、值取自服务敏感 env SKILLSYNC_TOKEN，
+// 落点固定池 workload ns（消费方，跨 ns secretKeyRef 引用不成立）。
 func TestSkillsyncTokenNameAndSecret(t *testing.T) {
 	if got := SkillsyncTokenName("oaf-demo"); got != "oaf-demo-skillsync-token" {
 		t.Fatalf("name derive: %q", got)
@@ -85,7 +86,7 @@ func TestSkillsyncTokenNameAndSecret(t *testing.T) {
 	p := testParams()
 	p.EnvSecret = map[string]string{"SKILLSYNC_TOKEN": "tok-1"}
 	sec := SkillsyncTokenSecret(p)
-	if sec.Name != SkillsyncTokenName(p.K8sName) || sec.Namespace != p.Namespace {
+	if sec.Name != SkillsyncTokenName(p.K8sName) || sec.Namespace != SandboxWorkloadNamespace {
 		t.Fatalf("meta wrong: %+v", sec.ObjectMeta)
 	}
 	if sec.Labels[LabelKey] != p.K8sName || sec.Labels[ManagedByLabel] != ManagedByValue {

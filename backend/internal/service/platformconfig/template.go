@@ -76,9 +76,10 @@ var template = []Group{
 			{EnvKey: "SANDBOX_RENEW_INTERVAL_SECONDS", Label: "在途续期间隔(秒)", Placeholder: "60"},
 			// SKILLSYNC_TOKEN（skills-syncd 设计 §5.2/§9.1，对齐 protocol 组敏感键先例）：
 			// 进敏感集是 per-service token Secret 的前置——发布/编辑链路据此把该键路由进
-			// 服务 Secret（publish.go applyServiceEnvObjects 同值镜像 Ensure
-			// {k8sName}-skillsync-token，池模板 secretKeyRef 引用）；漏路由则 token 明文落
-			// CM 且 Secret 不产出，池 Pod secretKeyRef 解析失败卡 CreateContainerConfigError。
+			// 服务 Secret（publish.go applyServiceEnvObjects 同值 Ensure
+			// {k8sName}-skillsync-token 于池 workload ns（k8s.SandboxWorkloadNamespace，消费方），
+			// 池模板 secretKeyRef 引用）；漏路由则 token 明文落 CM 且 Secret 不产出，
+			// 池 Pod secretKeyRef 解析失败卡 CreateContainerConfigError。
 			{EnvKey: "SKILLSYNC_TOKEN", Label: "技能同步 Token", Sensitive: true,
 				Placeholder: "池化沙箱 skills-syncd 拉取鉴权（空 = 端点免鉴权）"},
 		},

@@ -343,9 +343,10 @@ func (c *Core) applyAll(p k8s.ObjectParams) (*networkingv1.Ingress, error) {
 }
 
 // applyServiceEnvObjects 幂等写入服务 env 两级对象（CM 非敏感 + Secret 敏感）。
-// env 含敏感键 SKILLSYNC_TOKEN 时同值镜像 Ensure per-service Secret
-// {k8sName}-skillsync-token（D-8：池模板 secretKeyRef 引用，轮换=此处的同值更新 +
-// 池 rollout 重启）；无该键不产出对象。
+// env 含敏感键 SKILLSYNC_TOKEN 时幂等 Ensure 技能同步 token Secret（D-8：池模板
+// secretKeyRef 引用，落点=池 workload ns k8s.SandboxWorkloadNamespace 消费方——跨 ns
+// 引用不成立，服务 ns 无消费方；轮换=本入口同值更新 + 池 Pod 重建，单写入口即服务
+// env 表单）；无该键不产出对象。
 func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 	if err := c.K8s.EnsureConfigMap(k8s.EnvConfigMap(p)); err != nil {
 		return fmt.Errorf("configmap: %w", err)
@@ -355,7 +356,8 @@ func (c *Core) applyServiceEnvObjects(p k8s.ObjectParams) error {
 	}
 	if p.EnvSecret[k8s.SkillsyncTokenEnvKey] != "" {
 		if err := c.K8s.EnsureSecret(k8s.SkillsyncTokenSecret(p)); err != nil {
-			return fmt.Errorf("skillsync token secret: %w", err)
+			return fmt.Errorf("skillsync token secret (ns %s, 部署前提见 docs/deployment.md「技能同步」): %w",
+				k8s.SandboxWorkloadNamespace, err)
 		}
 	}
 	return nil
@@ -631,7 +633,7 @@ func (c *Core) Delete(id uint) error {
 	_ = c.K8s.DeleteDeployment(ns, svc.K8sName)
 	_ = c.K8s.DeleteConfigMap(ns, svc.K8sName+"-env")
 	_ = c.K8s.DeleteSecret(ns, k8s.EnvSecretName(svc.K8sName))
-	_ = c.K8s.DeleteSecret(ns, k8s.SkillsyncTokenName(svc.K8sName))
+	_ = c.K8s.DeleteSecret(k8s.SandboxWorkloadNamespace, k8s.SkillsyncTokenName(svc.K8sName))
 	// 引用计数原子递减（CASE WHEN 防负数，MySQL 8 / SQLite 兼容）。
 	// 旧实现为"事务内 First 读出 refCount 再应用侧减 1 判断归零"，
 	// 并发发布/删除时存在读-改-写竞态：误判归零触发 RemovePackage，
