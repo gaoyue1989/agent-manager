@@ -126,14 +126,13 @@ Accept: text/event-stream
 | `fileIds` | Array\<String\> | ⚠️ | 上传文件 ID 列表 |
 | `skills` | Array\<String\> | ❌ | 本轮可用技能白名单（**缺省 = 全部**；`[]` = 无技能；仅本轮生效，不落库、不跨轮沿用；白名单外技能不进 `<available_skills>`、不可 `load_skill_through_path` 加载、`/Skill` 不注入；未知技能名忽略、已禁用技能剔除） |
 
-**新会话 SSE 响应示例（2026-11-11 起每帧带 `session_id`，末帧 `turn_finished`）：**
+**新会话 SSE 响应示例（2026-11-11 起每帧带 `session_id`；末帧 AGENT_END 带 turn 级汇总）：**
 
 ```
 data: {"type":"session_created","session_id":"auto-uuid-xxx"}
 data: {"type":"AGENT_START","session_id":"auto-uuid-xxx","created_at":"2026-11-11T09:27:50.601Z","replyId":"r1","turnId":"r1",...}
 data: {"type":"TEXT_BLOCK_DELTA","session_id":"auto-uuid-xxx","delta":"你好！","replyId":"r1","blockId":"b1",...}
-data: {"type":"AGENT_END","session_id":"auto-uuid-xxx","replyId":"r1",...}
-data: {"type":"turn_finished","state":"completed","usage":{"input_tokens":123,"output_tokens":45,"total_tokens":168,"model_calls":1},"elapsed_ms":4200,"session_id":"auto-uuid-xxx","replyId":"r1","turnId":"r1"}
+data: {"type":"AGENT_END","session_id":"auto-uuid-xxx","replyId":"r1","usage":{"input_tokens":123,"cached_tokens":98,"output_tokens":45,"total_tokens":168,"model_calls":1},"elapsed_ms":4200}
 ```
 
 **续接已有会话：**
@@ -346,8 +345,7 @@ data: {"type":"TOOL_RESULT_TEXT_DELTA","session_id":"sid-1","delta":"File writte
 data: {"type":"TOOL_RESULT_END","session_id":"sid-1","state":"SUCCESS","toolCallId":"call-abc",...,"id":"evt-103"}
 data: {"type":"TEXT_BLOCK_START","session_id":"sid-1","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-104"}
 data: {"type":"TEXT_BLOCK_DELTA","session_id":"sid-1","delta":"文件已写入","replyId":"reply-001","blockId":"blk-010",...,"id":"evt-105"}
-data: {"type":"AGENT_END","session_id":"sid-1","replyId":"reply-001","id":"evt-106"}
-data: {"type":"turn_finished","state":"completed","usage":{"input_tokens":310,"output_tokens":64,"total_tokens":374,"model_calls":1},"elapsed_ms":5100,"session_id":"sid-1","replyId":"reply-001","id":"evt-107"}
+data: {"type":"AGENT_END","session_id":"sid-1","replyId":"reply-001","usage":{"input_tokens":310,"cached_tokens":260,"output_tokens":64,"total_tokens":374,"model_calls":1},"elapsed_ms":5100,"id":"evt-106"}
 ```
 
 **预检失败时的 error 帧：**
@@ -1179,10 +1177,9 @@ GET /skills/manage
 | type | 触发时机 | 关键字段 |
 |------|---------|---------|
 | `session_created` | `POST /threads/chat` 未传 sessionId 时自动生成（**仅此端点**） | `session_id` |
-| `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role`, `created_at`（**agent 开始处理墙钟时刻**，ISO-8601 UTC，SDK 事件构造时生成、原样透传；与 turn_finished.elapsed_ms 联合可拆「排队+准备/执行」两段） |
+| `AGENT_START` | Agent 执行开始 | `replyId`, `sessionId`, `name`, `role`, `created_at`（**agent 开始处理墙钟时刻**，ISO-8601 UTC，SDK 事件构造时生成、原样透传；与 AGENT_END 的 elapsed_ms 联合可拆「排队+准备/执行」两段） |
 | （通用） | 非 delta 事件（里程碑/合成帧） | additive `turnId`：**turn 信封 id**，`GET /subscribe?replyId=` 的过滤口径；delta 帧不注入（token 热路径），可从任一里程碑帧或 `/status.reply_id` 获取 |
-| `AGENT_END` | Agent 执行完成（**流关闭信号**） | `replyId` |
-| `turn_finished` | turn 收尾汇总帧（**AGENT_END/error/cancelled 之后、落库流最后一帧**） | `state`（completed/waiting_confirm/error/cancelled/interrupted）、`usage`（`input_tokens`/`output_tokens`/`total_tokens` 求和 + `model_calls`，usage 为 null 的调用计次不计量）、`elapsed_ms`（agent 执行段耗时，不含排队等租约） |
+| `AGENT_END` | Agent 执行完成（**流关闭信号**，终态帧） | `replyId`；additive `usage`（`input_tokens`/`cached_tokens`/`output_tokens`/`total_tokens` 本 turn 全部模型调用**求和** + `model_calls`，usage 为 null 的调用计次不计量）与 `elapsed_ms`（agent 执行段耗时，不含排队等租约）——仅 lead 自身 AGENT_END 携带，远程转发的 AGENT_END 不带 |
 | `cancelled` | 用户停止（`POST /threads/{sid}/stop` 生效，排在 `AGENT_END` 前） | `reason:"user_stopped"` |
 | `subagent_exposed` | 子 agent 调用收口（`AgentSpawnTool` 在结果返回时发出，snake_case） | `subagent_id`, `agent_id`, `session_id`, `label` |
 
@@ -1192,10 +1189,6 @@ GET /skills/manage
 > `/subscribe` 回放由读端兜底补齐；客户端对 TTL 过渡窗口内极旧的行仍应容忍缺失。
 > 旁路面（工具审计等）不受影响。
 
-> **turn_finished 语义（2026-11-11 新增）：** 与 `AGENT_END` 顺序为 AGENT_END → turn_finished
-> （seq 有序、可回放）；HITL 挂起轮以 `state=waiting_confirm` 收尾，确认恢复轮是独立 turn、
-> 另发自己的 turn_finished（按 `replyId` 区分，两帧 usage 相加为全程）。流结束判据不受影响——
-> AGENT_END/error/cancelled 仍是业务终态，turn_finished 只是汇总。
 
 > **远程转发标注（2026-09-30 新增）：** 远程子 agent 的事件经 SDK 回流 lead 的 SSE 时，
 > 序列化层对转发事件 additive 附 `source`（来源 agent 名，lead 自身事件恒无此字段）、

@@ -94,13 +94,8 @@ public class SessionEventTailer {
      * 排在 AGENT_END 之前发出，observer 见到它即可判定本轮结束（AGENT_END 紧随其后，
      * 不会再有业务事件）。执行副本崩溃/被抢占仍走 {@code interrupted}（仅观察者补发，
      * 不落库）。
-     *
-     * <p>{@code turn_finished} 为 turn 收尾汇总帧（chat-trace-observability-design §2）：
-     * 在终态帧之后、closeSession 之前发射，是落库流里的**最后一帧**——不加入终态集合的话，
-     * {@code /status} 会把它当非终态，刷新恢复误判 interrupted/idle。
      */
-    private static final Set<String> TERMINAL_TYPES =
-        Set.of("AGENT_END", "error", "cancelled", "turn_finished");
+    private static final Set<String> TERMINAL_TYPES = Set.of("AGENT_END", "error", "cancelled");
 
     /**
      * 该事件类型是否为 turn 终态。

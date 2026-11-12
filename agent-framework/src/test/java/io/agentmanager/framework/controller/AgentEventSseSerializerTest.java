@@ -254,21 +254,4 @@ class AgentEventSseSerializerTest {
         assertEquals("{\"type\":\"x\"}", AgentEventSseSerializer.withSessionContext("{\"type\":\"x\"}", null, null, true));
     }
 
-    @Test
-    void turnFinishedPayloadMapKeepsShape() {
-        // emitTurnFinished 构造的 Map 载荷经 payload(Map) 序列化后字段齐备
-        var map = new java.util.LinkedHashMap<String, Object>();
-        map.put("type", "turn_finished");
-        map.put("state", "completed");
-        var usage = new java.util.LinkedHashMap<String, Object>();
-        usage.put("input_tokens", 1);
-        usage.put("output_tokens", 2);
-        usage.put("total_tokens", 3);
-        usage.put("model_calls", 1);
-        map.put("usage", usage);
-        map.put("elapsed_ms", 100L);
-        String json = AgentEventSseSerializer.payload(map);
-        assertTrue(json.contains("\"turn_finished\"") && json.contains("\"completed\""), json);
-        assertTrue(json.contains("\"input_tokens\":1") && json.contains("\"elapsed_ms\":100"), json);
-    }
 }

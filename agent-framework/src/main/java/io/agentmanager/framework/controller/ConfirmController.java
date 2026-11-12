@@ -1,5 +1,6 @@
 package io.agentmanager.framework.controller;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -343,10 +344,8 @@ public class ConfirmController {
                 (type, payload) -> eventBus.emitSynthetic(finalSessionId, replyId, type, payload),
                 mcpToolRegistrar::displayNameFor);
             // 本轮模型用量累积器（chat-trace-observability-design §2.3/§2.5）：恢复段与对话段
-            // 同口径，收尾发自己的 turn_finished。turn 闭包局部对象，随 turn 丢弃。
+            // 同口径，恢复段 AGENT_END 帧携带本段汇总。turn 闭包局部对象，随 turn 丢弃。
             var usage = new io.agentmanager.framework.service.TurnUsageTracker();
-            // 恢复段再次挂起（二层确认，issue #264）时 turn_finished.state = waiting_confirm
-            var confirmAsked = new java.util.concurrent.atomic.AtomicBoolean(false);
             // 为何本 turn 只收尾一次（同 ChatStreamController，迟到的回调不得重复 closeSession/release）：
             // 见 TurnFinalizer#endTurn 的教训注释
             var turnEnded = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -403,7 +402,7 @@ public class ConfirmController {
                 .subscribe(
                     event -> handleEventAndEmit(event, finalSessionId, replyId, lease, sink,
                         turnEnded, turnStartedAt, sandboxRebuildNotified, toolSummary, turnSkills,
-                        usage, confirmAsked),
+                        usage),
                     e -> {
                         log.warn("confirm-stream agent error (sid={}): {}",
                             finalSessionId, e.getMessage());
@@ -427,12 +426,10 @@ public class ConfirmController {
                                 }
                             }
                         }
-                        endTurnAndLifecycle(eventBus, lease, finalSessionId, replyId, turnEnded,
-                            usage, turnStartedAt, TurnFinalizer.TurnOutcome.ERROR);
+                        endTurnAndLifecycle(eventBus, lease, finalSessionId, replyId, turnEnded);
                     },
                     // 正常完成：幂等兜底（AGENT_END 已在 handleEventAndEmit 中收尾）
-                    () -> endTurnAndLifecycle(eventBus, lease, finalSessionId, replyId, turnEnded,
-                        usage, turnStartedAt, TurnFinalizer.TurnOutcome.COMPLETED));
+                    () -> endTurnAndLifecycle(eventBus, lease, finalSessionId, replyId, turnEnded));
 
             // ===== 6. onCancel：仅取消 SSE 订阅，不 dispose agent 管道 =====
             sink.onCancel(() -> {
@@ -454,8 +451,7 @@ public class ConfirmController {
                                     java.util.concurrent.atomic.AtomicBoolean sandboxRebuildNotified,
                                     TurnToolSummaryTracker toolSummary,
                                     java.util.List<String> turnSkills,
-                                    io.agentmanager.framework.service.TurnUsageTracker usage,
-                                    java.util.concurrent.atomic.AtomicBoolean confirmAsked) {
+                                    io.agentmanager.framework.service.TurnUsageTracker usage) {
         // 为何丢租约必须立刻停写、终态帧为何不落库：见 TurnFinalizer#stopIfLeaseLost
         if (TurnFinalizer.stopIfLeaseLost(eventBus, lease, sessionId, sink, "[confirm]")) {
             return;
@@ -487,8 +483,6 @@ public class ConfirmController {
         // Channel 流程 HITL：permission_ask → 上下文落库 + 释放租约（执行段结束，锁让出）
         if (event instanceof io.agentscope.core.event.RequireUserConfirmEvent) {
             runtimeService.storeConfirmContext(sessionId, event, turnSkills);
-            // turn_finished.state 分叉依据（chat-trace-observability-design §2.5）
-            confirmAsked.set(true);
             lease.release();
             // HITL 暂停点：锁已让出、状态已持久化
             // T4 挂起保留窗（§4.4）：恢复段 ask 挂起同样保留沙箱续期，每次 ask 重新计窗
@@ -500,7 +494,11 @@ public class ConfirmController {
         // ★ 核心变化：事件写入 EventBus（而非直接写入 FluxSink）；
         // TOOL_CALL_START 命中 MCP App ui 映射时携带 ui 元数据（与 ChatStreamController 同一契约，
         // 恢复执行流里再调 UI 工具时卡片才能照常渲染）
-        eventBus.emit(sessionId, event, replyId, payloadForEvent(event, sessionId));
+        String payloadOverride = event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
+                && !AgentEventSseSerializer.isRemoteForwarded(event)
+            ? agentEndPayload(event, sessionId, usage, turnStartedAt.get())
+            : payloadForEvent(event, sessionId);
+        eventBus.emit(sessionId, event, replyId, payloadOverride);
 
         // ★ 工具摘要帧（与 ChatStreamController 同一契约）：HITL 恢复段的工具调用同样要
         // 展示「执行 …」而非「🔧 execute 完成」
@@ -523,11 +521,26 @@ public class ConfirmController {
         // 是 spawn 调用进行中的子任务终点，不终结 turn（同 ChatStreamController 收尾 guard）
         if (event.getType() == io.agentscope.core.event.AgentEventType.AGENT_END
                 && !AgentEventSseSerializer.isRemoteForwarded(event)) {
-            endTurnAndLifecycle(eventBus, lease, sessionId, replyId, turnEnded, usage,
-                turnStartedAt,
-                confirmAsked.get() ? TurnFinalizer.TurnOutcome.WAITING_CONFIRM
-                    : TurnFinalizer.TurnOutcome.COMPLETED);
+            endTurnAndLifecycle(eventBus, lease, sessionId, replyId, turnEnded);
         }
+    }
+
+    private String agentEndPayload(io.agentscope.core.event.AgentEvent event, String sessionId,
+                                   io.agentmanager.framework.service.TurnUsageTracker usage,
+                                   long turnStartedAtMs) {
+        var usagePayload = new LinkedHashMap<String, Object>();
+        usagePayload.put("input_tokens", usage.inputTokens());
+        usagePayload.put("cached_tokens", usage.cachedTokens());
+        usagePayload.put("output_tokens", usage.outputTokens());
+        usagePayload.put("total_tokens", usage.totalTokens());
+        usagePayload.put("model_calls", usage.modelCalls());
+        var payload = new LinkedHashMap<String, Object>();
+        payload.put("type", event.getType().name());
+        payload.put("id", event.getId());
+        payload.put("session_id", sessionId);
+        payload.put("usage", usagePayload);
+        payload.put("elapsed_ms", Math.max(0, System.currentTimeMillis() - turnStartedAtMs));
+        return AgentEventSseSerializer.payload(payload);
     }
 
     /**
@@ -537,20 +550,10 @@ public class ConfirmController {
      */
     private void endTurnAndLifecycle(SessionEventBus eventBus, TurnLeaseGuard lease,
                                      String sessionId, String replyId,
-                                     java.util.concurrent.atomic.AtomicBoolean turnEnded,
-                                     io.agentmanager.framework.service.TurnUsageTracker usage,
-                                     java.util.concurrent.atomic.AtomicLong turnStartedAt,
-                                     TurnFinalizer.TurnOutcome outcome) {
-        // CAS 前移（与 ChatStreamController 收尾漏斗同构）：在 closeSession 刷缓冲之前发射
-        // turn_finished——拿到紧邻终态帧的 seq 且落库可回放；丢锁路径跳过（abandon 禁止再写行）
-        if (!turnEnded.compareAndSet(false, true)) {
+                                     java.util.concurrent.atomic.AtomicBoolean turnEnded) {
+        if (!TurnFinalizer.endTurn(eventBus, lease, sessionId, turnEnded)) {
             return;
         }
-        if (!lease.isLost()) {
-            TurnFinalizer.emitTurnFinished(eventBus, sessionId, replyId, usage,
-                turnStartedAt.get(), outcome);
-        }
-        TurnFinalizer.endTurn(eventBus, lease, sessionId);
         if (turnStopWatcher != null) {
             turnStopWatcher.unregister(sessionId, replyId);
         }

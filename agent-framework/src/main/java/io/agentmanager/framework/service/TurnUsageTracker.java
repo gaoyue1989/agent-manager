@@ -3,8 +3,8 @@ package io.agentmanager.framework.service;
 /**
  * 单个执行段（turn）内模型调用用量的累积器（chat-trace-observability-design §2.3）。
  *
- * <p>每个 {@code MODEL_CALL_END} 累加一次（ReAct 多轮 = 多次模型调用），turn 收尾时由
- * {@code TurnFinalizer#emitTurnFinished} 合成 {@code turn_finished} 汇总帧，客户端无需
+ * <p>每个 {@code MODEL_CALL_END} 累加一次（ReAct 多轮 = 多次模型调用），turn 收尾时
+ * 两侧控制器的 AGENT_END 帧增强合成 turn 级汇总（usage），客户端无需
  * 自己逐帧累加即可拿到「本轮一共用了多少 token」。
  *
  * <p><b>诚实口径</b>：单次 {@code usage} 为 null 的调用（provider 不回用量）按 0 计入
@@ -18,6 +18,7 @@ package io.agentmanager.framework.service;
 public final class TurnUsageTracker {
 
     private long inputTokens;
+    private long cachedTokens;
     private long outputTokens;
     private long totalTokens;
     private int modelCalls;
@@ -30,6 +31,7 @@ public final class TurnUsageTracker {
             return;
         }
         inputTokens += usage.getInputTokens();
+        cachedTokens += usage.getCachedTokens();
         outputTokens += usage.getOutputTokens();
         totalTokens += usage.getTotalTokens();
     }
@@ -37,6 +39,11 @@ public final class TurnUsageTracker {
     /** 本轮输入 token 求和（provider 逐次上报值累加） */
     public long inputTokens() {
         return inputTokens;
+    }
+
+    /** 本轮命中模型缓存的 token 求和（各调用 cached_tokens 逐次累加） */
+    public long cachedTokens() {
+        return cachedTokens;
     }
 
     /** 本轮输出 token 求和 */

@@ -179,16 +179,14 @@ class ChatStreamControllerTest {
     }
 
     @Test
-    void chatShouldEmitTurnFinishedWithUsageSummary() {
-        // chat-trace-observability-design §2：turn 收尾汇总帧——token 求和 + model_calls +
-        // elapsed_ms，排在 AGENT_END 之后（终态帧之后、closeSession 之前发射，seq 有序）
+    void agentEndShouldCarryTurnUsageSummary() {
         var sessionId = "test-user-usage";
         when(turnLeaseStore.tryAcquire(sessionId)).thenReturn("tok-1");
         var start = new io.agentscope.core.event.AgentStartEvent(sessionId, "reply-u1", "assistant");
         var callEnd1 = new io.agentscope.core.event.ModelCallEndEvent("reply-u1",
-            new io.agentscope.core.model.ChatUsage(100, 10, 110, 0.0));
+            new io.agentscope.core.model.ChatUsage(100, 10, 60, 0.0));
         var callEnd2 = new io.agentscope.core.event.ModelCallEndEvent("reply-u1",
-            new io.agentscope.core.model.ChatUsage(200, 20, 220, 0.0));
+            new io.agentscope.core.model.ChatUsage(200, 20, 150, 0.0));
         var end = new AgentEndEvent("reply-u1");
         when(chatChannel.dispatchStream(any(InboundMessage.class)))
             .thenReturn(Flux.just((AgentEvent) start, (AgentEvent) callEnd1,
@@ -196,24 +194,14 @@ class ChatStreamControllerTest {
 
         var frames = collect(sessionId, "hello", "alice");
         var last = frames.get(frames.size() - 1);
-        assertTrue(last.contains("\"type\":\"turn_finished\""),
-            "turn_finished 应为最后一帧: " + frames);
-        assertTrue(last.contains("\"state\":\"completed\""), last);
-        assertTrue(last.contains("\"input_tokens\":300"), "两次模型调用求和: " + last);
+        assertTrue(last.contains("\"type\":\"AGENT_END\""), "AGENT_END 应为最后一帧: " + frames);
+        assertTrue(last.contains("\"usage\":{\"input_tokens\":300"), "两次模型调用求和: " + last);
+        assertTrue(last.contains("\"cached_tokens\":210"), last);
         assertTrue(last.contains("\"output_tokens\":30"), last);
         assertTrue(last.contains("\"total_tokens\":330"), last);
         assertTrue(last.contains("\"model_calls\":2"), last);
         assertTrue(last.contains("\"elapsed_ms\":"), last);
         assertTrue(last.contains("\"session_id\":\"" + sessionId + "\""), last);
-        int endIdx = -1, finishedIdx = -1;
-        for (int i = 0; i < frames.size(); i++) {
-            String f = frames.get(i);
-            if (f == null) continue;
-            if (f.contains("AGENT_END") && endIdx < 0) endIdx = i;
-            if (f.contains("turn_finished")) finishedIdx = i;
-        }
-        assertTrue(endIdx >= 0 && finishedIdx > endIdx,
-            "turn_finished 必须排在 AGENT_END 之后: " + frames);
     }
 
     @Test
@@ -235,7 +223,7 @@ class ChatStreamControllerTest {
             assertTrue(f.contains("\"session_id\":\"" + sessionId + "\""),
                 "每帧恒带 session_id: " + f);
         }
-        assertTrue(dataFrames >= 3, "至少覆盖 delta/AGENT_END/turn_finished 三类帧: " + frames);
+        assertTrue(dataFrames >= 2, "至少覆盖 delta/AGENT_END 两类帧: " + frames);
     }
 
     @Test
@@ -1037,7 +1025,10 @@ class ChatStreamControllerTest {
                 && payloads.get(0).contains("\"resourceUri\":\"ui://approval/form.html\"")
                 && payloads.get(0).contains("\"server\":\"approval\""),
             "TOOL_CALL_START 应携带 ui 元数据: " + payloads.get(0));
-        assertNull(payloads.get(1), "AGENT_END 非 ui 事件不应覆写 payload");
+        var endPayload = payloads.get(1);
+        assertTrue(endPayload != null && endPayload.contains("\"type\":\"AGENT_END\"")
+                && endPayload.contains("\"usage\"") && !endPayload.contains("\"ui\""),
+            "AGENT_END 应携带 turn 汇总且不带 ui 元数据: " + endPayload);
     }
 
     @Test
@@ -1064,8 +1055,12 @@ class ChatStreamControllerTest {
 
         var payloadCap = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(spyBus, times(2)).emit(eq(sessionId), any(AgentEvent.class), anyString(), payloadCap.capture());
-        payloadCap.getAllValues().forEach(p ->
-            assertNull(p, "无 ui 映射的工具不应覆写 payload"));
+        var payloads = payloadCap.getAllValues();
+        assertNull(payloads.get(0), "无 ui 映射的工具不应覆写 TOOL_CALL_START payload");
+        var endPayload = payloads.get(1);
+        assertTrue(endPayload != null && endPayload.contains("\"type\":\"AGENT_END\"")
+                && !endPayload.contains("\"ui\""),
+            "AGENT_END 载荷为 turn 汇总（非 ui 覆写）: " + endPayload);
     }
 
     @Test
