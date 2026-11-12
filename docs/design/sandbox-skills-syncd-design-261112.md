@@ -46,6 +46,12 @@
 - 不在本次启用 OSEP-0018 加固（独立事项，见 §9.3）
 - 不做跨集群交付（oaf-agent charts 场景）——拉取源抽象预留，实施另立项
 
+### 后续演进（不进本次范围）
+
+本设计只接管 `.skills-cache`（包技能）；`AGENTS.md`/`knowledge`/`subagents` 同为服务级共享只读内容，
+仍走原投影。二期方向：store 扩容为「服务级共享只读内容库」，投影机制最终整体退役
+（本次两套机制并存是刻意过渡，不是终态）。
+
 ## 3. 总体架构
 
 ```
@@ -108,7 +114,7 @@ skills-syncd/
 | `SKILLSYNC_BASE_URL` | （必填，无默认即禁用） | 同步源基址，如 `http://oaf-{name}-svc.agent-platform.svc:8100`；一服务一包，基址本身即标识包 |
 | `SKILLSYNC_TOKEN` | 空 | 端点鉴权 token（只读 scope，`Authorization: Bearer`）；为空则请求不带鉴权（源端点可配置为集群内免鉴权） |
 | `SKILLSYNC_STORE_DIR` | `/skills-store` | 技能库根目录 |
-| `SKILLSYNC_INTERVAL` | `5m` | 轮询周期（Go duration 格式，如 `30s`/`5m`） |
+| `SKILLSYNC_INTERVAL` | `1m` | 轮询周期（Go duration 格式，如 `30s`/`1m`/`5m`）；轮询 <200B/次，默认收紧到 1m 把新版生效延迟压到不可感知 |
 | `SKILLSYNC_TIMEOUT` | `120s` | 单次 HTTP 请求超时（bundle 可能数十 MB） |
 | `SKILLSYNC_LOG` | `stderr` | 日志输出（stderr 供 execd 采集；可选文件路径） |
 
@@ -130,6 +136,9 @@ GET {BASE_URL}/internal/skills/bundle?version=<v>
 一服务一包：每个 agent-framework 服务实例只承载一个 OAF 包（服务即包身份的单一真相源），
 端点无需 package 参数——`BASE_URL` 已标识请求的是哪个服务/包。
 
+协议演进约定：新增响应字段一律可选（守护忽略未知字段）；删除或改语义字段须升级路径版本
+（如 `/internal/skills/v2/...`）。守护版本随镜像发布，协议对齐由池滚动升级保证。
+
 版本指纹由 agent-framework 侧计算：对包技能目录做**内容哈希**（相对路径 + 文件内容，排序遍历），
 非包版本号——防「版本号没变、内容变了」。守护每次轮询只调 version 端点（响应 <200B），
 版本一致零流量；变更才拉 bundle。
@@ -138,6 +147,7 @@ GET {BASE_URL}/internal/skills/bundle?version=<v>
 
 ```go
 for {
+    jitterSleep(0~30s 随机)             // 首轮与每轮错峰，防 P pod 同刻拉取风暴
     ver, err := fetchVersion()          // 失败 → 退避重试（1m 起指数，上限 = INTERVAL），fail-open
     if err == nil && ver != currentVersion(storeDir) {
         pullBundle(ver)                  // → $STORE/.staging-<ver>.tar.gz
@@ -194,6 +204,10 @@ env 未注入时零行为变化（非技能同步场景的沙箱镜像可直接�
 
 ### 5.2 池模板注入
 
+**池与服务一一对应（G1 正确性前提）**：池名须按服务派生且全局唯一（发布链路生成 `{k8s名}-pool`，
+不开放手填——现 `SANDBOX_POOL_REF` 为手填池名，若两服务误配同一池，B 服务会认领到持有 A 服务
+技能的 warm pod，造成跨服务技能污染；发布链路改造属 PR-3，运行期由 §7.2 版本硬校验兜底拦截）。
+
 OpenSandbox Pool `spec.template.spec` 追加 env（我们自己的清单，非 kubectl）：
 
 ```yaml
@@ -216,20 +230,25 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 
 - 路径 `/internal/skills/version`、`/internal/skills/bundle`；token 经 env `SKILLSYNC_TOKEN` 配置
   （空 = 端点关闭，404）
-- 数据源 `/config`（PVC 只读 subPath，多副本天然一致）；版本指纹计算复用现有 stat 指纹思路升级为内容哈希，
-  进程内缓存（源只读，指纹稳定）
-- bundle 打包即时 tar.gz（源只读可缓存产物，LRU 1 份）
+- 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
+- **版本指纹实时计算，不做进程内缓存**（G2）：对包技能目录做 stat 指纹（relPath|mtime|size 排序遍历，
+  2000 文件 ≈10-50ms/次轮询可付）。agent-framework 收不到发布事件，「事件失效缓存」的依赖不存在；
+  内容哈希（慢）只在 bundle 打包时使用
+- bundle 打包即时 tar.gz，副本内 singleflight 合并并发请求 + LRU 1 份缓存
 
 ### 6.2 acquire 链路：符号链接农场
 
 `OpenSandbox` scoped 投放路径改造为**包技能 → 软链，用户技能 → 真实文件**：
 
-1. 解析 `CURRENT` 得 `v-<hash>`（一次 readlink；不存在 → 回退 §6.4）
-2. 按 manifest（现有禁用判定链 `SkillDisabledChecker`）为每个启用的包技能创建
-   `.skills-cache/<scope>/oaf-package/<skillName>` → `/skills-store/CURRENT/<skillName>` 符号链接
+1. 前置校验：`CURRENT` 可解析，且（端点可达时）store 版本指纹与端点一致（§7.2 硬校验）；
+   不满足 → 按 §6.4 全量降级
+2. **农场创建次序固定：先 L4 用户技能物化（真实文件），后包技能软链**——同名时 L4 真实文件优先，
+   包技能软链跳过（与现有 L4-enabled 覆盖语义对齐）；软链目标 `/skills-store/CURRENT/<skillName>`
    （经 `CURRENT` 间接寻址，不钉具体版本目录——切换/删除旧版不破坏在用链接）
-3. 用户技能（L4）走原 hydrate 路径物化真实文件（量级几十文件，现有 35ms 稳态机制接管）
-4. 判定与现有「命令触发延迟投放」合并：首个触及 `.skills-cache` 的命令触发一次（CAS 每 call），语义不变
+3. **重建幂等规则（G3 混合状态机）**：目标已是 `CURRENT/` 前缀软链 → 跳过；目标为真实文件
+   （本会话降级物化产物）→ 本会话不替换；目标软链指向非 `CURRENT` → 重建
+4. 用户技能（L4）走原 hydrate 路径物化真实文件（量级几十文件，现有 35ms 稳态机制接管）
+5. 判定与现有「命令触发延迟投放」合并：首个触及 `.skills-cache` 的命令触发一次（CAS 每 call），语义不变
 
 ### 6.3 syncBack 符号链接跳过
 
@@ -244,8 +263,11 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 | `SANDBOX_SKILLS_SHARED_STORE` | 空 | 沙箱内共享库路径（`/skills-store`）；空 = 关闭软链农场，走现行为 |
 | `SKILLSYNC_TOKEN` | 空 | agent-framework 端点鉴权；空 = 端点关闭 |
 
-回退触发条件（任一）：store 目录缺失 / `CURRENT` 解析失败 / 目标技能目录不存在 →
-该技能降级走原 tar 物化路径。**降级是逐技能粒度**，不整场失败。
+回退触发条件（任一）：store 目录缺失 / `CURRENT` 解析失败 / 版本硬校验不一致（§7.2）/
+目标技能目录不存在 → 该技能降级走原 tar 物化路径。**降级是逐技能粒度**，不整场失败。
+
+降级恢复以会话为粒度：本会话降级物化的真实文件保持到会话结束（不中途换软链）；
+新会话按当时 store 状态重新判定。
 
 ## 7. 版本与一致性语义
 
@@ -256,11 +278,17 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
   已打开的技能脚本/文件凭 inode 继续按旧内容执行完毕（Unix 语义），无中途截断
 - 与现行为对比：现 per-call 指纹在下一 call 换新版——本设计同为「切换即生效」语义，
   且单文件粒度更平滑（同会话内未重开的文件不受扰动）
+- **首认领竞态（G4，记录）**：warm pod 创建后首拉完成前若被认领，该会话按 §6.4 全量降级
+  （≈现状体验，无回退）；poolMin 预热在先 + 内网拉取秒级，现实风险低。若观测到高命中率，
+  可加 initContainer 首拉加速（与守护共存不冲突）
 
-### 7.2 对账观测
+### 7.2 版本硬校验与对账观测
 
-agent-framework 在 acquire 创建软链时记录「store 版本 vs 端点版本」；偏差持续超 3×INTERVAL 打 WARN 日志
-（不告警、不阻断）——这是守护失联的唯一可观测面。
+**硬校验（G1 防串服务）**：acquire 创建软链前，取端点版本指纹（复用 §6.1 实时 stat 指纹，可带 ≤INTERVAL
+的短 TTL 缓存）与 store `CURRENT` 版本比对——**不一致视同 store 不可用，逐技能降级 + ERROR 日志**。
+同时拦截两类错误：共享池误配导致 store 内容属于别的服务（池名唯一性约束见 §5.2）、守护长期失联。
+
+纯观测面：acquire 创建软链时记录「store 版本 vs 端点版本」，偏差持续超 3×INTERVAL 打 WARN（不阻断）。
 
 ### 7.3 版本切换与删除次序（单版本语义）
 
@@ -328,6 +356,16 @@ agent-framework 在 acquire 创建软链时记录「store 版本 vs 端点版本
 4. 容器重启（kill 1 Restart 回收路径）→ 守护自愈重拉
 5. `pkill skills-syncd` → 沙箱命令执行不受影响（fail-open 验证）
 6. L 组沙箱生命周期 e2e 全绿（回归门禁）
+
+### 10.4 排障 Runbook
+
+| 现象 | 查法 |
+|---|---|
+| 技能是旧版 | 沙箱内 `readlink /skills-store/CURRENT` + `cat /var/log/skills-syncd.log`（拉取失败/退避原因）；agent-framework 侧 `curl -H "Authorization: Bearer $TOKEN" $BASE_URL/internal/skills/version` 对账 |
+| 技能缺失/降级 | agent-framework 日志查 §7.2 ERROR（版本硬校验失败）与降级 WARN；确认 store 目录与 `CURRENT` 是否存在 |
+| 跨服务技能污染 | 查 §5.2 池名是否被两服务共用；`CURRENT` 版本指纹 vs 本服务端点指纹必然不一致（§7.2 已拦截并降级） |
+| 拉取风暴 | 观察日志 jitter 生效情况的拉取时间分布；必要时调大 `SKILLSYNC_INTERVAL` 或加宽 jitter |
+| 守护未运行 | 沙箱内 `ps` 查 `skills-syncd`；确认 `SKILLSYNC_BASE_URL` env 是否注入（entrypoint 条件拉起） |
 
 ## 11. 分阶段实施（PR 切分）
 
