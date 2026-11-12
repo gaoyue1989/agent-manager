@@ -65,9 +65,11 @@
 ┌──────────────▼──────────────────────────────────────────────┐
 │ 沙箱 Pod（池化 warm pod，镜像 = code-interpreter-oa + 守护）    │
 │                                                              │
-│  entrypoint 包装脚本（镜像内）                                  │
+│  启动点（镜像内 launcher 脚本）                                 │
+│    池化：Pool 模板 command 包 wrapper（backend preset 参数化）  │
+│    直建：镜像 ENTRYPOINT 包装                                  │
 │    setsid /usr/local/bin/skills-syncd &   ← Go 守护，root      │
-│    exec /opt/code-interpreter/code-interpreter.sh "$@"        │
+│    exec <原命令/task-executor> "$@"                            │
 │                                                              │
 │  /skills-store/                ← 守护维护，root:root 0755      │
 │    CURRENT            (symlink → v-<hash>)                    │
@@ -139,9 +141,10 @@ GET {BASE_URL}/internal/skills/bundle?version=<v>
 协议演进约定：新增响应字段一律可选（守护忽略未知字段）；删除或改语义字段须升级路径版本
 （如 `/internal/skills/v2/...`）。守护版本随镜像发布，协议对齐由池滚动升级保证。
 
-版本指纹由 agent-framework 侧计算：对包技能目录做**内容哈希**（相对路径 + 文件内容，排序遍历），
-非包版本号——防「版本号没变、内容变了」。守护每次轮询只调 version 端点（响应 <200B），
-版本一致零流量；变更才拉 bundle。
+版本指纹由 agent-framework 侧计算：对包技能目录做 **stat 指纹**（`relPath|mtime|size` 排序遍历），
+与现有 `packageSourceFingerprint` 同口径——继承其 mtime/size 盲点（PVC tar 发布下稳定，可接受），
+**不宣称**「防版本号没变内容变了」的强保证；内容哈希仅用于 bundle 完整性校验（`X-Bundle-Sha256`）。
+守护每次轮询只调 version 端点（响应 <200B），版本一致零流量；变更才拉 bundle。
 
 ### 4.4 主循环与原子切换
 
@@ -180,44 +183,77 @@ execd/命令执行与守护完全解耦（`setsid` 脱离会话、独立进程�
 
 ## 5. 镜像与 entrypoint 集成
 
-### 5.1 自建镜像变更（复用 code-interpreter-oa 构建链路）
+### 5.1 自建镜像职责（复用 code-interpreter-oa 构建链路）
+
+镜像只承担**载体**职责：提供 `skills-syncd` 二进制与 launcher 脚本；启动点分两态（§5.2）。
 
 ```dockerfile
 # code-interpreter-oa 构建末段追加
 COPY --from=skills-syncd-build /out/skills-syncd /usr/local/bin/skills-syncd
+COPY skillsync-launcher.sh /usr/local/bin/skillsync-launcher.sh
 COPY entrypoint-wrap.sh /usr/local/bin/entrypoint-wrap.sh
+# 直建路径生效；池化路径的 ENTRYPOINT 被 Pool 模板 command 覆盖，见 §5.2
 ENTRYPOINT ["/usr/local/bin/entrypoint-wrap.sh"]
 ```
 
 ```sh
 #!/bin/sh
-# entrypoint-wrap.sh —— 两条铁律：
-# 1) 守护 setsid 后台化，绝不阻塞 execd 启动；守护退出不连带沙箱
-# 2) 最后 exec 原入口，execd 保持原进程语义（健康检查/探针契约不变）
+# skillsync-launcher.sh —— 通用启动器：起守护后 exec 传入命令
+# 两条铁律：1) setsid 后台化，绝不阻塞主进程；2) exec 保持主进程语义
 if [ -n "$SKILLSYNC_BASE_URL" ]; then
     setsid /usr/local/bin/skills-syncd 2>>/var/log/skills-syncd.log &
 fi
-exec /opt/code-interpreter/code-interpreter.sh "$@"
+exec "$@"
+```
+
+```sh
+#!/bin/sh
+# entrypoint-wrap.sh（直建路径）：委托 launcher 后 exec 原入口
+exec /usr/local/bin/skillsync-launcher.sh /opt/code-interpreter/code-interpreter.sh "$@"
 ```
 
 env 未注入时零行为变化（非技能同步场景的沙箱镜像可直接复用）。
 
-### 5.2 池模板注入
+### 5.2 池模板注入：preset 受控参数化（保留手动通道）
 
-**池与服务一一对应（G1 正确性前提）**：池名须按服务派生且全局唯一（发布链路生成 `{k8s名}-pool`，
-不开放手填——现 `SANDBOX_POOL_REF` 为手填池名，若两服务误配同一池，B 服务会认领到持有 A 服务
-技能的 warm pod，造成跨服务技能污染；发布链路改造属 PR-3，运行期由 §7.2 版本硬校验兜底拦截）。
+**启动点事实（评审核实，决定本节的形态）**：池化 warm pod 的主容器 `command` 由 backend preset 固定
+（`/bin/sh -c "/opt/opensandbox/task-executor ..."`，`opensandboxproxy.go:491-545`）——K8s `command`
+覆盖镜像 ENTRYPOINT；且 `/opt/opensandbox` 为 emptyDir 挂载（遮蔽镜像内同路径），task-executor 二进制
+由 initContainer 从固定上游镜像拷入。**结论：镜像 entrypoint 在池化路径无效，守护启动点必须由
+backend preset 参数化提供**；镜像仅提供二进制/launcher（§5.1）。
 
-OpenSandbox Pool `spec.template.spec` 追加 env（我们自己的清单，非 kubectl）：
+**受控参数化字段（`sandboxPresetPodTemplate` 新增两个结构化可选参数，不接受自由 PodSpec）**：
+
+| 参数 | 形态 | 缺省 |
+|---|---|---|
+| `extraEnv` | `[{name, value}` 或 `{name, secretKeyRef}]` 白名单键集（`SKILLSYNC_*`） | 空 = 模板逐字段与现状一致 |
+| `commandWrapper` | 布尔/固定脚本名（`/usr/local/bin/skillsync-launcher.sh`） | off = 现 command 原样 |
+
+**注入来源两态（保留手动实施空间）**：
+
+1. **自动**（常规发布链路）：建池时按服务派生——池名 `{k8s名}-pool`、`SKILLSYNC_BASE_URL` 由服务身份生成、
+   `SKILLSYNC_TOKEN` 引用 per-service Secret `{服务名}-skillsync-token`、`commandWrapper` 开
+2. **手动**（admin API / 运维控制台）：允许手填 `extraEnv`/`commandWrapper` 与池名——覆盖特殊服务、灰度、
+   排障、存量池补配等场景。手填路径校验：池名全局唯一 + 与服务的绑定关系显式（避免 G1 共享池误配）；
+   未通过校验的建池请求拒绝
+
+**池与服务一一对应（G1）**：自动路径保证唯一；手动路径由上述校验 + 运行期 §7.2 版本硬校验双重兜底
+（B 服务认领到 A 服务 store → 指纹不一致 → 逐技能降级 + ERROR）。
+
+示例（自动路径生成的 Pool 模板片段）：
 
 ```yaml
+# backend 在 preset 生成时注入
 env:
   - { name: SKILLSYNC_BASE_URL,   value: "http://oaf-{name}-svc.agent-platform.svc:8100" }
-  - { name: SKILLSYNC_TOKEN,      valueFrom: { secretKeyRef: { name: skillsync-token, key: token } } }
-  - { name: SKILLSYNC_INTERVAL,   value: "5m" }
+  - { name: SKILLSYNC_TOKEN,      valueFrom: { secretKeyRef: { name: "{name}-skillsync-token", key: token } } }
+  - { name: SKILLSYNC_INTERVAL,   value: "1m" }
+command: ["/bin/sh", "-c"]
+args: ["/usr/local/bin/skillsync-launcher.sh /opt/opensandbox/task-executor -listen-addr=0.0.0.0:5758 -log-dir=/tmp"]
 ```
 
-token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent-framework 侧校验）。
+token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；agent-framework 侧校验），
+`§9.1` 的「不接受跨服务枚举能力」由 per-service token 兑现。
 
 ### 5.3 网络前提
 
@@ -245,16 +281,19 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 2. **农场创建次序固定：先 L4 用户技能物化（真实文件），后包技能软链**——同名时 L4 真实文件优先，
    包技能软链跳过（与现有 L4-enabled 覆盖语义对齐）；软链目标 `/skills-store/CURRENT/<skillName>`
    （经 `CURRENT` 间接寻址，不钉具体版本目录——切换/删除旧版不破坏在用链接）
-3. **重建幂等规则（G3 混合状态机）**：目标已是 `CURRENT/` 前缀软链 → 跳过；目标为真实文件
-   （本会话降级物化产物）→ 本会话不替换；目标软链指向非 `CURRENT` → 重建
+3. **重建幂等规则（G3 混合状态机）**：目标已是 `CURRENT/` 前缀软链**且目标可解析** → 跳过；
+   目标为真实文件（本会话降级物化产物）→ 本会话不替换；目标软链指向非 `CURRENT` → 重建；
+   **软链悬空（目标不可达）→ 重建**——覆盖「容器重启后可写层清空、sandboxId 与记账均未变、
+   农场误跳过」的组合（H2），这是技能可用性自愈的必要条件
 4. 用户技能（L4）走原 hydrate 路径物化真实文件（量级几十文件，现有 35ms 稳态机制接管）
 5. 判定与现有「命令触发延迟投放」合并：首个触及 `.skills-cache` 的命令触发一次（CAS 每 call），语义不变
 
-### 6.3 syncBack 符号链接跳过
+### 6.3 syncBack 符号链接跳过（防御性）
 
-`WorkspaceSyncService.syncUserSkills` 遍历时跳过 `Files.isSymbolicLink` 条目——
-否则链接指向的库内容被整份吸回用户 L4 存储（`skipPackageBaseline` 所治问题的翻版）。
-同步在 tar 投影（若仍保留的路径）与 `WorkspaceReader` 列举两侧一致处理。
+`WorkspaceSyncService.syncUserSkills` 遍历时跳过 `Files.isSymbolicLink` 条目。
+核实现状：该遍历只覆盖 `/workspace/skills`（`WorkspaceSyncService.java:216`、`WorkspaceReader.SKILLS_DIR`），
+**不遍历 `.skills-cache`**——因此当前「库内容被吸回 L4」的风险并不成立；跳链保留为防御性约束，
+确保未来遍历范围扩展时不引入吸回。files API 侧的软链透明性验收见 §10.3。
 
 ### 6.4 回退与开关
 
@@ -281,12 +320,21 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 - **首认领竞态（G4，记录）**：warm pod 创建后首拉完成前若被认领，该会话按 §6.4 全量降级
   （≈现状体验，无回退）；poolMin 预热在先 + 内网拉取秒级，现实风险低。若观测到高命中率，
   可加 initContainer 首拉加速（与守护共存不冲突）
+- **发布窗口语义（F1）**：agent-framework 滚动发布期间多副本新旧指纹交替（svc 轮询可能命中不同副本），
+  守护会反复拉取切换、acquire 硬校验可能持续失败。守护侧容忍策略：对「最近已见版本集（当前 + 上一版）」
+  在 2×INTERVAL 内不触发重拉；硬校验以会话级回退吸收（判定失败 → 本会话降级），发布窗口内新会话
+  短暂走旧投影属可接受行为。发布链路应错峰滚动（现有 rollout 语义）
 
 ### 7.2 版本硬校验与对账观测
 
-**硬校验（G1 防串服务）**：acquire 创建软链前，取端点版本指纹（复用 §6.1 实时 stat 指纹，可带 ≤INTERVAL
-的短 TTL 缓存）与 store `CURRENT` 版本比对——**不一致视同 store 不可用，逐技能降级 + ERROR 日志**。
-同时拦截两类错误：共享池误配导致 store 内容属于别的服务（池名唯一性约束见 §5.2）、守护长期失联。
+**硬校验（G1 防串服务）**：acquire 创建软链前，取端点版本指纹（可带 ≤INTERVAL 的短 TTL 缓存——
+只造成假阴性窗口内的多余降级，不造成污染）与 store `CURRENT` 版本比对——**不一致视同 store 不可用，
+逐技能降级 + ERROR 日志**。同时拦截两类错误：共享池误配导致 store 内容属于别的服务（池名唯一性约束见
+§5.2）、守护长期失联。
+
+**store 侧版本读取钉死（SSOT 边界）**：store 版本 = `readlink CURRENT` 得到的目录名，仅做**字符串相等**
+比较；**禁止**在 Java 侧重算 store 内容的 stat 指纹（跨语言 stat 规则——mtime 精度、tar 解包还原、
+排序——必然漂移，会导致永久误报降级）。版本字符串对守护是不透明 token，单向数据流无重复实现。
 
 纯观测面：acquire 创建软链时记录「store 版本 vs 端点版本」，偏差持续超 3×INTERVAL 打 WARN（不阻断）。
 
@@ -300,11 +348,15 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 
 | 项 | 现状 | 本设计 |
 |---|---|---|
-| 会话开始投影 | O(包全量) tar：冷 4.9s / 稳态 35ms（P0-1 优化后） | O(启用技能数) symlink：~10ms 级 |
+| 换代/首触冷路径 | 4.9s（P0-1 前每 call 全量；现仅在换沙箱代或换 scope 时发生，被会话中首个触及技能的命令触发） | O(启用技能数) symlink，~10ms 级 |
+| 稳态 per-call | ≈0.08–0.1s（P0-1 优化后：指纹 35ms + revision 1ms + syncBack 24ms） | ~10ms（农场判定 + 硬校验） |
+| 每用户复制 | scope staging N 份（66MB/用户量级） | 0（store 服务内共享 per-pod） |
 | 沙箱内磁盘 | 按需物化 ~66MB | 稳态 1 版 ≈ 66MB；切换瞬时峰值 ≈ 2 版 + tar.gz（~200MB），完成后回落 |
-| 网络 | 每次 hydrate 全量 tar（跨 exec 通道） | 每 pod 每版本一次 HTTP 拉取（version 轮询 <200B/5m） |
-| agent-framework | 每次 hydrate CPU（tar+gzip+指纹） | 版本指纹缓存 O(1)；bundle 打包每版本一次 |
-| 每用户复制 | scope staging N 份 | 0（store 服务内共享 per-pod） |
+| 网络 | 每次 hydrate 全量 tar（跨 exec 通道） | 每 pod 每版本一次 HTTP 拉取（version 轮询 <200B/1m） |
+| agent-framework | 每次 hydrate CPU（tar+gzip+指纹） | 版本指纹实时算（10–50ms/轮询）；bundle 打包每版本一次 |
+
+收益主体排序（避免误读基线）：①换代冷路径 4.9s→~10ms；②每用户 66MB 级复制消除；③首触中段延迟消除；
+④稳态 per-call 35ms→~10ms（边际，不是主要收益）。
 
 ## 9. 安全设计
 
@@ -355,7 +407,9 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 3. 改包发新版 → ≤INTERVAL+会话粒度 内新会话用新版、旧会话不受扰动
 4. 容器重启（kill 1 Restart 回收路径）→ 守护自愈重拉
 5. `pkill skills-syncd` → 沙箱命令执行不受影响（fail-open 验证）
-6. L 组沙箱生命周期 e2e 全绿（回归门禁）
+6. **容器重启（kill 1 → 池化复用）**：守护自愈重拉 + 农场悬空链重建，技能可用（H2）
+7. **execd files API 软链透明性**：read_file/listDirectory 穿透 `/skills-store/CURRENT/<skill>`（A2）
+8. L 组沙箱生命周期 e2e 全绿（回归门禁）
 
 ### 10.4 排障 Runbook
 
@@ -371,14 +425,16 @@ token 为平台与 agent-framework 共享的只读凭据（Secret 分发；agent
 
 | PR | 内容 | 依赖 |
 |---|---|---|
-| PR-1 | `skills-syncd/` Go 守护 + 单测 + 静态构建（不接线） | 无 |
+| PR-1 | `skills-syncd/` Go 守护 + 单测 + 静态构建（不接线）；**CI 归属**：backend-ci 新增 job（paths 加 `skills-syncd/**`，go vet + go test，Go 1.26） | 无 |
 | PR-2 | agent-framework：内部端点 + acquire 软链农场 + syncBack 跳链 + 开关（默认关） | PR-1 |
-| PR-3 | 镜像集成（code-interpreter-oa 加守护与包装入口）+ 池模板 env + egress 放行 + 真实环境验收 | PR-1/2 |
-| PR-4 | 默认开启 + 退役包技能维度的 scoped staging/指纹/载荷缓存路径（用户技能路径保留） | PR-3 验收通过 |
+| PR-3 | **backend preset 受控参数化**（`extraEnv`/`commandWrapper` + 手动通道 + 池名/绑定校验 + per-service Secret 下发）+ 镜像集成（`skills-syncd` 二进制 + launcher + 直建路径 entrypoint 包装）+ egress 放行 + kind 真实验收 + **回滚 runbook**（镜像 tag 回退、池模板参数摘除、Secret/egress 清理） | PR-1/2 |
+| PR-4a | 默认开启（旧代码 dormant 保留，可回滚） | PR-3 验收通过 |
+| PR-4b | 观察期后退役包技能维度的 scoped staging/指纹/载荷缓存路径（用户技能路径保留；**连带拆分混合指纹函数**，包指纹逻辑整体移交端点侧） | PR-4a 稳定观察 |
 
 PR-4 退役范围在实施时以实际代码为准再定（`OpenSandboxFilesystemSpec` 的包技能分支、
 `.skills-cache` per-user staging 的包部分）；`sandbox-skill-sync-optimization-design.md` 的
-P0-1/P1-3 机制对用户技能维度继续生效。
+P0-1/P1-3 机制对用户技能维度继续生效。**PR-4b 之后的回滚语义**：回滚 = 回滚整个 release，
+不再支持拨开关回退（此时旧投影路径已删）；PR-4a 阶段拨开关仍可完整回退。
 
 ## 12. 备选方案与淘汰理由（决策记录）
 
@@ -398,4 +454,13 @@ P0-1/P1-3 机制对用户技能维度继续生效。
 2. 多包服务：当前 OAF 一服务一包（服务实例即包身份，端点无 package 参数）；若未来出现一服务多包，
    需端点契约演进与 store 目录分层，届时另立设计
 3. `SKILLSYNC_INTERVAL` 生产推荐值（5m 起步，按版本发布频率调整）
-4. bundle 缓存的进程内 LRU 容量（单包 66MB 常驻是否可接受，或磁盘暂存）
+4. bundle 缓存的进程内 LRU 容量（单包 66MB 常驻是否可接受，或磁盘暂存；评审建议改流式转发，见 §6.1）
+5. **降级粒度（评审建议改会话级二值回退）**：逐技能降级是并行第二实现（与 AGENTS.md「禁止过度兜底」冲突，
+   且与 PR-4 退役自相矛盾）。候选：acquire 前置校验一次，通过→全会话软链；不通过→全会话走现行为。
+   待拍板后重写 §6.2/§6.4
+6. **禁用技能可读性（H1）**：共享 store 装全部包技能 + 沙箱全 root → 被禁用技能可被直路径读取
+   （现状为内容不进容器）。候选：接受弱化并写入 §9（禁用=消费路径拦截而非内容隔离）或另立方案
+7. **agent 编辑包技能语义（A1）**：软链 + root 下 edit 会写穿共享 store（池级投毒）或失败。
+   候选：定义「包技能只读」并在命中软链时引导物化为 L4 覆盖；需产品语义拍板
+8. **execd files API 软链透明性（A2）**：agent 的 read_file/listDirectory 走 files API 而非 shell，
+   必须进 §10.3 真实验收；若不穿透则本设计需改为写穿/真实文件方案
