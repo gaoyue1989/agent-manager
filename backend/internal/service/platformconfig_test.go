@@ -290,8 +290,10 @@ func TestDeleteRemovesServiceSecret(t *testing.T) {
 	}
 }
 
-// TestSkillsyncTokenSecretLifecycle per-service 技能同步 token Secret（skills-syncd D-8）：
-// 发布链路 env 含敏感键 SKILLSYNC_TOKEN 时 Ensure {k8sName}-skillsync-token（同值单一
+// TestSkillsyncTokenSecretLifecycle per-service 技能同步 token Secret（skills-syncd D-8）。
+// 发布方按普通 env 填 SKILLSYNC_TOKEN（不带 secretKeys——模板敏感键自动路由，评审修复的
+// 陷阱场景：漏路由则 token 明文落 CM 且 per-service Secret 不产出，池 Pod secretKeyRef
+// 解析失败卡 CreateContainerConfigError）→ Ensure {k8sName}-skillsync-token（同值单一
 // 真相源）；UpdateEnv 轮换 → Secret 同步更新（池 rollout 重启为 D-8 轮换语义）；服务
 // 删除连带清理。
 func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
@@ -299,8 +301,18 @@ func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
 	defer done()
 	pkg := uploadTestPkg(t, core, "")
 	svc := publishWithEnv(t, core, fk, pkg.ID,
-		map[string]string{"SKILLSYNC_TOKEN": "tok-1", "LOG_LEVEL": "info"}, []string{"SKILLSYNC_TOKEN"})
+		map[string]string{"SKILLSYNC_TOKEN": "tok-1", "LOG_LEVEL": "info"}, nil)
 
+	if svc.EnvJSON != `{"LOG_LEVEL":"info"}` {
+		t.Fatalf("template-sensitive key must leave env_json, got %s", svc.EnvJSON)
+	}
+	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cm.Data["SKILLSYNC_TOKEN"]; ok {
+		t.Fatal("CM must not contain SKILLSYNC_TOKEN (plaintext token)")
+	}
 	secName := k8s.SkillsyncTokenName(svc.K8sName)
 	sec, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{})
 	if err != nil {
@@ -309,7 +321,7 @@ func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
 	if string(sec.Data["token"]) != "tok-1" {
 		t.Fatalf("token value wrong: %q", sec.Data["token"])
 	}
-	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, []string{"SKILLSYNC_TOKEN"}); err != nil {
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	sec, err = fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{})

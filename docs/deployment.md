@@ -225,10 +225,11 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 
 2. **egress 放行**：池 Pod → 本服务 svc 出网须在 OpenSandbox egress 策略放行
    `oaf-{name}-svc.agent-platform.svc`（或集群内网段），否则守护拉取持续退避、store 无库（fail-open）。
-3. **token Secret 前置**：服务 env 含 `SKILLSYNC_TOKEN` 时发布幂等 ensure `{name}-skillsync-token`
-   （ns `agent-platform`，data 键 `token`）；池模板 secretKeyRef 在池 workload ns **`opensandbox`**
-   内解析——建池前须在该 ns 预建同名 Secret，缺失时池 Pod 卡 `CreateContainerConfigError`。
-   轮换 = 两处同值更新 + 池 Pod 重建（D-8 契约）。
+3. **token Secret 前置**：`SKILLSYNC_TOKEN` 是平台 env 模板敏感键（platformconfig/template.go
+   sandbox 组）——服务 env 携带该键即自动路由进服务 Secret（无需显式 `secretKeys`，明文不落
+   CM/env_json），发布幂等 ensure `{name}-skillsync-token`（ns `agent-platform`，data 键 `token`）；
+   池模板 secretKeyRef 在池 workload ns **`opensandbox`** 内解析——建池前须在该 ns 预建同名
+   Secret，缺失时池 Pod 卡 `CreateContainerConfigError`。轮换 = 两处同值更新 + 池 Pod 重建（D-8 契约）。
 4. **建池**：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag，extraEnv 带
    `SKILLSYNC_BASE_URL=http://oaf-{name}-svc.agent-platform.svc:8100`（+ token secretKeyRef），
    `commandWrapper: true`；镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。

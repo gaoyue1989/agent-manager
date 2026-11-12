@@ -23,15 +23,15 @@ func newRuntimeCore(t *testing.T) (*Core, func()) {
 	return core, done
 }
 
-// TestRuntimeDefaultsKeySpace 键空间：35 键（27 模板键 − CHECKPOINT_JDBC_URL + 8 导出键，契约 §1.4；
-// sandbox-pool-opensandbox-design §7 沙箱池化 3 键入组）；
-// L3 派生键 / 平台保留键 PUT 均 400 且错误信息点名键名。
+// TestRuntimeDefaultsKeySpace 键空间：36 键（28 模板键 − CHECKPOINT_JDBC_URL + 8 导出键，契约 §1.4；
+// sandbox-pool-opensandbox-design §7 沙箱池化 3 键入组、sandbox-skills-syncd-design §5.2
+// SKILLSYNC_TOKEN 入组）；L3 派生键 / 平台保留键 PUT 均 400 且错误信息点名键名。
 func TestRuntimeDefaultsKeySpace(t *testing.T) {
 	core, done := newRuntimeCore(t)
 	defer done()
 
-	if got := len(runtimeDefaultKeys); got != 35 {
-		t.Fatalf("runtime default key space = %d, want 35 (27 template + 8 export)", got)
+	if got := len(runtimeDefaultKeys); got != 36 {
+		t.Fatalf("runtime default key space = %d, want 36 (28 template + 8 export)", got)
 	}
 	for _, k := range []string{"CHECKPOINT_JDBC_URL", "AGENT_REDIS_PREFIX"} {
 		if _, ok := runtimeDefaultKeys[k]; ok {
@@ -218,7 +218,7 @@ func TestRuntimeDefaultsValueValidation(t *testing.T) {
 	}
 }
 
-// TestRuntimeTemplateGroup 模板组骨架：platformconfig 模板驱动（llm 10 键 / sandbox 6 键），
+// TestRuntimeTemplateGroup 模板组骨架：platformconfig 模板驱动（llm 10 键 / sandbox 10 键），
 // 写入落 runtime-defaults 同一存储，敏感字段掩码；设计 §9 之外的分组 404；跨组键拒绝。
 func TestRuntimeTemplateGroup(t *testing.T) {
 	core, done := newRuntimeCore(t)
@@ -235,8 +235,8 @@ func TestRuntimeTemplateGroup(t *testing.T) {
 		t.Fatalf("llm fields = %d, want 10", len(llm))
 	}
 	sbx, err := core.GetRuntimeTemplateGroup(1, "sandbox")
-	if err != nil || len(sbx) != 9 {
-		t.Fatalf("sandbox fields = %d err=%v, want 9", len(sbx), err)
+	if err != nil || len(sbx) != 10 {
+		t.Fatalf("sandbox fields = %d err=%v, want 10", len(sbx), err)
 	}
 	if _, err := core.UpdateRuntimeTemplateGroup(1, "ops", "llm", map[string]string{
 		"LLM_BASE_URL": "https://llm.example.com/v1",
