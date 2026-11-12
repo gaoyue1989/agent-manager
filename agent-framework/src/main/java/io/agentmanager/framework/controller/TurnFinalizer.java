@@ -1,6 +1,5 @@
 package io.agentmanager.framework.controller;
 
-import java.util.LinkedHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
@@ -9,7 +8,6 @@ import org.springframework.http.codec.ServerSentEvent;
 
 import io.agentmanager.framework.service.SessionEventBus;
 import io.agentmanager.framework.service.TurnLeaseGuard;
-import io.agentmanager.framework.service.TurnUsageTracker;
 import reactor.core.publisher.FluxSink;
 
 /**
@@ -95,75 +93,6 @@ public final class TurnFinalizer {
             lease.release();
         }
         return true;
-    }
-
-    /**
-     * turn 终态分类（{@code turn_finished.state} 词表，chat-trace-observability-design §2.1）。
-     *
-     * <p>同一 turn 的收尾只可能落一个分类：AGENT_END 按「本轮是否见过 permission_ask」
-     * 分叉 completed / waiting_confirm；error 回调、用户停止、孤儿看护强收各有专属分类。
-     */
-    public enum TurnOutcome {
-        /** AGENT_END 正常收尾 */
-        COMPLETED("completed"),
-        /** 本轮 HITL 挂起（permission_ask 后租约让出）；确认恢复轮是独立 turn、另发自己的帧 */
-        WAITING_CONFIRM("waiting_confirm"),
-        /** 源流异常收尾 */
-        ERROR("error"),
-        /** 用户停止（cancelled 帧之后） */
-        CANCELLED("cancelled"),
-        /** 断连后孤儿看护强收（agent 仍在跑，本连接先行收尾） */
-        INTERRUPTED("interrupted");
-
-        private final String value;
-
-        TurnOutcome(String value) {
-            this.value = value;
-        }
-
-        /** 帧内 state 字段值（snake_case，与合成帧词表同风格） */
-        public String value() {
-            return value;
-        }
-    }
-
-    /**
-     * turn 收尾汇总帧 {@code turn_finished}（chat-trace-observability-design §2）：chat 与
-     * confirm 两侧完全相同的帧构造与发射，收口于此（TurnFinalizer「行为完全相同才收口」
-     * 边界）。经 emitSynthetic 落库广播——实时、订阅续传、刷新回放三路同帧；session_id /
-     * replyId / turnId 由写路径注入机制统一附加，本方法不重复构造。
-     *
-     * <p><b>调用时序约束</b>（调用方负责，见两侧收尾漏斗）：必须在终态帧（AGENT_END /
-     * error / cancelled）之后、closeSession 刷缓冲之前调用——拿到紧邻终态帧的 seq 且落库
-     * 可回放；且必须在收尾 CAS 首胜之后（终态只收尾一次）。丢锁路径不得调用（abandon
-     * 语义禁止再写行）。
-     *
-     * @param usage            本轮用量累积器（TurnUsageTracker）
-     * @param turnStartedAtMs  turn 起点墙钟（两侧控制器的 turnStartedAt，租约到手时刻）；
-     *                         elapsed_ms 语义为 agent 执行段耗时，不含排队等租约时间
-     * @param outcome          终态分类（state 字段）
-     */
-    public static void emitTurnFinished(SessionEventBus eventBus, String sessionId, String replyId,
-                                        TurnUsageTracker usage, long turnStartedAtMs,
-                                        TurnOutcome outcome) {
-        var payload = new LinkedHashMap<String, Object>();
-        payload.put("type", "turn_finished");
-        payload.put("state", outcome.value());
-        var usagePayload = new LinkedHashMap<String, Object>();
-        usagePayload.put("input_tokens", usage.inputTokens());
-        usagePayload.put("output_tokens", usage.outputTokens());
-        usagePayload.put("total_tokens", usage.totalTokens());
-        usagePayload.put("model_calls", usage.modelCalls());
-        payload.put("usage", usagePayload);
-        payload.put("elapsed_ms", Math.max(0, System.currentTimeMillis() - turnStartedAtMs));
-        try {
-            eventBus.emitSynthetic(sessionId, replyId, "turn_finished",
-                AgentEventSseSerializer.payload(payload));
-        } catch (Exception e) {
-            // 汇总帧属可观测性增强：失败只记日志，不影响既有收尾次序（closeSession/release）
-            log.debug("turn_finished emit failed (sid={}, rid={}): {}",
-                sessionId, replyId, e.getMessage());
-        }
     }
 
     /** 租约丢失的终态帧：不落库、不占 seq，只给本连接的客户端；带会话归属（§3.2） */

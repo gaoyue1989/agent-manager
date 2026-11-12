@@ -76,9 +76,8 @@ status / confirm / confirm-stream / chat 续聊）先查 `session_user` 归属�
 ```
 
 **前端必须等本轮终态后再发下一条消息。**（终态是 `AGENT_END` / `error` / `permission_ask` / `cancelled`；
-`POST /threads/chat` 收到 `AGENT_END` 后还会有一帧 `turn_finished` 收尾汇总帧（2026-11-11 新增，
-token 求和 + elapsed_ms），随后流直接关闭，**不发 `done` 帧**，`done` 只由 `/subscribe` 补发；
-流结束判据仍取终态帧，`turn_finished` 不改变该判据。）
+`POST /threads/chat` 收到 `AGENT_END`（携带本 turn 的 usage 求和与 elapsed_ms）后流直接关闭，
+**不发 `done` 帧**，`done` 只由 `/subscribe` 补发。）
 
 **ASKING 挂起期限制（e2e 缺陷 D4 的契约澄清）：**
 
