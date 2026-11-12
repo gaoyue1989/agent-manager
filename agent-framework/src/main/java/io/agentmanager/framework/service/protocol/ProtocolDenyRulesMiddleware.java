@@ -75,7 +75,11 @@ public class ProtocolDenyRulesMiddleware implements MiddlewareBase {
             denied.stream().map(ToolUseBlock::getName).toList(), ctx.getSessionId());
 
         var syntheticEvents = new ArrayList<AgentEvent>();
-        AgentState state = agent.getAgentState();
+        // per-call slot state（deprecated getAgentState() 是默认槽，注入其中模型不可见）
+        AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
+        if (state == null) {
+            return next.apply(input);
+        }
         for (var tub : denied) {
             String toolId = tub.getId();
             // replyId 约定与 ToolCallValidationMiddleware 一致：合成事件用随机 id（原调用未执行）

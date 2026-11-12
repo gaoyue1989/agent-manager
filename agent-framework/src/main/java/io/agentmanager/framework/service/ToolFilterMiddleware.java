@@ -164,7 +164,12 @@ public class ToolFilterMiddleware implements MiddlewareBase {
             ctx.getSessionId());
 
         var syntheticEvents = new ArrayList<AgentEvent>();
-        AgentState state = agent.getAgentState();
+        // per-call slot state（CompactionMiddleware 同源）：deprecated getAgentState() 是默认槽，
+        // 注入其中模型不可见、write-through 不落库（曾致 DENIED 结果对模型/归档双不可见）
+        AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
+        if (state == null) {
+            return next.apply(input);
+        }
         for (var tub : denied) {
             String toolId = tub.getId();
             // replyId 约定与 ProtocolDenyRulesMiddleware 一致：合成事件用随机 id（原调用未执行）

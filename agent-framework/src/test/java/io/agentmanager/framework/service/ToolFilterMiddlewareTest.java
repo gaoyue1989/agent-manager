@@ -218,14 +218,33 @@ class ToolFilterMiddlewareTest {
     private Flux<AgentEvent> runActing(RuntimeContext ctx, List<ToolUseBlock> calls,
                                        SessionToolScopeService scope,
                                        AtomicReference<ActingInput> passedRef) {
+        return runActing(ctx, calls, scope, passedRef, null);
+    }
+
+    /**
+     * 真实链路形态：agent.getAgentState() 是 deprecated 默认槽（与本会话无关，恒空），
+     * 当前会话 state 经 ctx 注入（ReActAgent.beforeAgentExecution）——拦截注入必须落
+     * per-call state（模型可感知、turn 末 write-through 可归档），严禁写默认槽。
+     */
+    private Flux<AgentEvent> runActing(RuntimeContext ctx, List<ToolUseBlock> calls,
+                                       SessionToolScopeService scope,
+                                       AtomicReference<ActingInput> passedRef,
+                                       AtomicReference<java.util.List<io.agentscope.core.message.Msg>> injectedRef) {
         Function<ActingInput, Flux<AgentEvent>> next = in -> {
             passedRef.set(in);
             return Flux.empty();
         };
         var agent = mock(Agent.class);
-        var state = mock(io.agentscope.core.state.AgentState.class);
-        when(agent.getAgentState()).thenReturn(state);
-        when(state.contextMutable()).thenReturn(new java.util.ArrayList<>());
+        var defaultState = mock(io.agentscope.core.state.AgentState.class);
+        when(defaultState.contextMutable()).thenReturn(new java.util.ArrayList<io.agentscope.core.message.Msg>());
+        when(agent.getAgentState()).thenReturn(defaultState);
+        var perCall = new java.util.ArrayList<io.agentscope.core.message.Msg>();
+        var perCallState = mock(io.agentscope.core.state.AgentState.class);
+        when(perCallState.contextMutable()).thenReturn(perCall);
+        ctx.setAgentState(perCallState);
+        if (injectedRef != null) {
+            injectedRef.set(perCall);
+        }
         return new ToolFilterMiddleware(scope).onActing(agent, ctx, new ActingInput(calls), next);
     }
 
@@ -235,11 +254,12 @@ class ToolFilterMiddlewareTest {
         // 先 reasoning 登记 [] 白名单（仅内置）
         var run = runReasoning(List.of(userMsg(List.of())), allSchemas(), scope);
         var passedRef = new AtomicReference<ActingInput>();
+        var injectedRef = new AtomicReference<java.util.List<io.agentscope.core.message.Msg>>();
         var events = runActing(run.ctx(), List.of(
                 new ToolUseBlock("t1", "read_file", Map.of()),      // 内置 → 放行
                 new ToolUseBlock("t2", "mcp__db__query", Map.of()), // MCP 白名单外 → DENY
                 new ToolUseBlock("t3", "get_order", Map.of())),     // 自定义白名单外 → DENY
-            scope, passedRef).collectList().block();
+            scope, passedRef, injectedRef).collectList().block();
 
         assertNotNull(passedRef.get(), "白名单内置调用必须放行到 next");
         assertEquals(List.of("read_file"),
@@ -250,6 +270,9 @@ class ToolFilterMiddlewareTest {
         assertEquals(10, events.size());
         var last = (ToolResultEndEvent) events.get(events.size() - 1);
         assertEquals(ToolResultState.DENIED, last.getState());
+        // DENIED TOOL 消息必须注入 per-call state（模型可感知、归档轨可落库），不得写默认槽
+        assertEquals(2, injectedRef.get().size(),
+            "DENIED 合成 TOOL 消息必须注入当前会话 per-call state");
     }
 
     @Test
