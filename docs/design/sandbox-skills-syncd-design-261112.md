@@ -408,7 +408,8 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
 4. 容器重启（kill 1 Restart 回收路径）→ 守护自愈重拉
 5. `pkill skills-syncd` → 沙箱命令执行不受影响（fail-open 验证）
 6. **容器重启（kill 1 → 池化复用）**：守护自愈重拉 + 农场悬空链重建，技能可用（H2）
-7. **execd files API 软链透明性**：read_file/listDirectory 穿透 `/skills-store/CURRENT/<skill>`（A2）
+7. **execd files API 软链透明性**：`read_file`/`listDirectory` 对 `/skills-store/CURRENT/<skill>`
+   实测——穿透则直读；不穿透则验证框架翻译层 exec 兜底读正确（§13-8 决议）
 8. L 组沙箱生命周期 e2e 全绿（回归门禁）
 
 ### 10.4 排障 Runbook
@@ -462,5 +463,9 @@ P0-1/P1-3 机制对用户技能维度继续生效。**PR-4b 之后的回滚语�
    （现状为内容不进容器）。候选：接受弱化并写入 §9（禁用=消费路径拦截而非内容隔离）或另立方案
 7. **agent 编辑包技能语义（A1）**：软链 + root 下 edit 会写穿共享 store（池级投毒）或失败。
    候选：定义「包技能只读」并在命中软链时引导物化为 L4 覆盖；需产品语义拍板
-8. **execd files API 软链透明性（A2）**：agent 的 read_file/listDirectory 走 files API 而非 shell，
-   必须进 §10.3 真实验收；若不穿透则本设计需改为写穿/真实文件方案
+8. **execd files API 软链透明性——已决议（回退 SDK 原生语义）**：若 files API 对软链路径失败，
+   该读回退 exec 策略读取（shell 天然跟随软链）。**契约细节**：SDK `SandboxFileTransfer` 为
+   「失败不自动重试 exec，仅 declined 路径回退」（`SandboxFileTransfer.java:50-52`）——回退须实现
+   在框架 files API 翻译层（捕获软链路径失败 → exec 读），不依赖 SDK 自动兜底。暴露面有限：
+   SKILL.md 注入走宿主内存资源不读容器、技能脚本执行走 shell 本身，仅 agent `read_file`
+   包技能文件可能命中，成本为该次读 ~1s exec 时延。§10.3 验收项保留实测（穿透则零成本）
