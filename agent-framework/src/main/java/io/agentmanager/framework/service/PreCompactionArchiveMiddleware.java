@@ -12,6 +12,7 @@ import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ReasoningInput;
+import io.agentscope.core.state.AgentState;
 import reactor.core.publisher.Flux;
 
 /**
@@ -26,11 +27,16 @@ import reactor.core.publisher.Flux;
  * 路径（归档合并 / state-only）都无从渲染，前端表现为「历史对话部分执行过程缺失」。
  *
  * <p><b>修复</b>：本中间件 {@link #onReasoning} 挂载在每步推理前（{@link #order()}=2，
- * 外层于压缩中间件的默认 order=1），赶在压缩改写上下文前把当前 context 与上次归档集做差量，
- * 经 {@link SessionMessageArchiveStateStore#toRecord} + {@link SessionMessageStore#archiveBatch}
- * 落库。归档键 {@code (session_id, msg_id)} 幂等，与 turn 末 write-through 落同一 id 时按
- * 「文本取长、状态取新」合并，不产生重复；压缩摘要消息（{@code __compaction_summary__}）
- * 同样归档，保证归档轨可渲染压缩分隔条。
+ * 外层于压缩中间件的默认 order=1，Builder.build 按 order 降序排外包），赶在压缩改写上下文前
+ * 把当前 context 与上次归档集做差量，经 {@link SessionMessageArchiveStateStore#toRecord} +
+ * {@link SessionMessageStore#archiveBatch} 落库。归档键 {@code (session_id, msg_id)} 幂等，
+ * 与 turn 末 write-through 落同一 id 时按「文本取长、状态取新」合并，不产生重复；压缩摘要
+ * 消息（{@code __compaction_summary__}）同样归档，保证归档轨可渲染压缩分隔条。
+ *
+ * <p><b>状态源</b>：SDK 2.0.4 配置 AgentStateStore 后每次 call 经 per-call slot 新建
+ * AgentState 注入 RuntimeContext，{@code agent.getAgentState()} 是 deprecated 默认槽访问器
+ * （与当前会话无关、context 恒空——曾致归档静默空转，压缩前明细依旧缺失）——必须经
+ * {@link RuntimeContext#resolveAgentState} 与 CompactionMiddleware 同源解析 per-call state。
  *
  * <p><b>开销</b>：每次推理仅内存遍历 context + id 集合差分 O(n)，只有新消息产生 DB 写。
  * 全程 fail-soft：任何归档异常只告警，绝不影响对话主链路。装配受
@@ -76,7 +82,13 @@ public class PreCompactionArchiveMiddleware implements MiddlewareBase {
             return;
         }
         try {
-            var context = agent.getAgentState().getContext();
+            // per-call slot state（CompactionMiddleware 同源解析）；deprecated 的
+            // agent.getAgentState() 是默认槽，与本会话无关，严禁回退为直接调用
+            AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
+            if (state == null) {
+                return;
+            }
+            var context = state.getContext();
             if (context == null || context.isEmpty()) {
                 return;
             }
