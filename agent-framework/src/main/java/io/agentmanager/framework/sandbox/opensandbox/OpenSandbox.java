@@ -1393,13 +1393,15 @@ public class OpenSandbox extends AbstractBaseSandbox
      * <p>投放内容仅供 shell 执行技能脚本使用（{@code load_skill_through_path} 走内存资源/
      * lazy 仓储，不读容器），因此 doExec（首个命令前）投放即可覆盖消费路径。
      *
-     * <p><b>稳态短路（P0-1）</b>：宿主 scope 目录的 stat 指纹（relPath|mtime|size，不读内容）
-     * 在 Pod 级缓存比对（{@link OpenSandboxFilesystemSpec#scopedSkillCacheFingerprint}）。指纹未变
+     * <p><b>稳态短路（P0-1，tar 与 farm 两路共用同一指纹与记账）</b>：宿主指纹
+     * （{@link #scopedSkillCacheFingerprint}，包内源 stat + L4 revision，不读内容）在 Pod 级
+     * 缓存比对（{@link OpenSandboxFilesystemSpec#scopedSkillCacheFingerprint}）。指纹未变
      * 且本沙箱代已投放过当前 scope → 容器内容即最新 → 跳过 build、prune 与 hydrate
      * （66MB/2000f 实测从每 call ≈4.9s 降到 ≈35ms）。原实现把比对 hash 记在实例字段上，
      * 而 OpenSandbox 包装实例每次 acquire 重建 → 短路条件每 call 失忆 → 每轮全量重投。
-     * 正确性边界与投影指纹缓存一致：容器内文件被模型删除而宿主未变时漏补投，宿主内容
-     * 下次变化点自愈（设计 §3.3 已接受的盲点，不损坏数据）。
+     * 软链农场路径（{@link #hydrateSkillsFarm}）共用同一指纹与记账表（skills-syncd D-10），
+     * 稳态同样 0 exec。正确性边界与投影指纹缓存一致：容器内文件被模型删除而宿主未变时漏补投，
+     * 宿主内容下次变化点自愈（设计 §3.3 已接受的盲点，不损坏数据）。
      *
      * <p>慢路径（换沙箱代/换 scope/内容变更）：优先复用 Pod 级载荷缓存里的 gz（P1-3，省
      * build+gzip ≈1.8s），且把 prune 与解包合并进<b>单条 exec</b>（exec 固定 ≈1s，省一次）。
@@ -1436,7 +1438,7 @@ public class OpenSandbox extends AbstractBaseSandbox
                     return;
                 }
             }
-            String fingerprint = scopedSkillCacheFingerprint(scopeDir, spec, sourceRoot, scope);
+            String fingerprint = scopedSkillCacheFingerprint(scopeDir, scope);
             String sandboxId = state.getSandboxId();
             // 稳态判定（双层：Pod 级为主、实例级为无 spec 构造兜底）：指纹未变 且 本沙箱代已
             // 投放过当前 scope → 容器内容即最新
@@ -1471,12 +1473,12 @@ public class OpenSandbox extends AbstractBaseSandbox
     }
 
     /**
-     * 宿主 scope 目录的 stat 指纹（P0-1）：与投影根指纹同源（relPath|mtime|size 排序摘要），
-     * 目录缺失返回空串（空串也参与比对——空→空即“两侧都无内容”的稳态）。
+     * scoped 投放指纹（P0-1，tar/farm 两路同源）：内容身份组合
+     * {@code hash(包内源目录 stat 指纹) + "|" + L4 revision}，目录缺失返回空串
+     * （空串也参与比对——空→空即“两侧都无内容”的稳态）。
      * stat 失败返回空串以外的随机值会破坏幂等，这里直接抛给上层走慢路径。
      */
-    private String scopedSkillCacheFingerprint(Path scopeDir, WorkspaceSpec spec,
-                                               String sourceRoot, String scope) throws Exception {
+    private String scopedSkillCacheFingerprint(Path scopeDir, String scope) throws Exception {
         // 指纹源（缺口④修正）：stage 副本目录的 mtime 各副本不同（各自 staging 时刻），
         // 直接对它做 stat 指纹则跨副本指纹天然不等、共享层永不命中。改为<b>内容身份</b>组合：
         //   指纹 = hash(包内源目录 stat 指纹 + "|" + L4 revision)
@@ -1675,13 +1677,30 @@ public class OpenSandbox extends AbstractBaseSandbox
     /**
      * 软链农场投放（规则 1-5，单条 exec 幂等收敛）：对 manifest 内的包技能路径有全权——
      * 目标态为软链 {@code <store>/CURRENT/<skill>}（B-4 间接寻址不钉版本目录），路径现存任何物
-     * （缺失 / 悬空 / 降级会话 tar 物化残留真实文件）统一 rm 后重建（D-2），每次 CAS 触发都执行
-     * ——容器重启可写层清空、记账未失效的组合由此自愈（H2）。禁用判定复用
+     * （缺失 / 悬空 / 降级会话 tar 物化残留真实文件）统一 rm 后重建（D-2）。禁用判定复用
      * {@link #resolveDisabledSkillDirs}：禁用名不建链且随 exec 清理既有软链（B-2，会话中途
-     * 禁用生效）；prune 与禁用清理复用 tar 路径的容器内清理语义。exec 失败上抛（CAS 复位，
-     * 下次触发重试），判定不变。
+     * 禁用生效——用户级禁用经 L4 revision bump 进指纹）；prune 与禁用清理复用 tar 路径的
+     * 容器内清理语义。exec 失败上抛（CAS 复位，下次触发重试），判定不变。
+     *
+     * <p><b>稳态短路（D-10，设计修订否决原 H2「每次触发收敛」口径）</b>：与 tar 路径 P0-1 同源——
+     * 宿主指纹（{@link #scopedSkillCacheFingerprint}，包内源 stat + L4 revision）+ sandboxId 代际
+     * 记账（复用 scoped 指纹表，Pod 级 miss 经跨副本共享层兜底）。指纹未变且本沙箱代已收敛过当前
+     * scope → 容器链接即最新（B-4 间接寻址，版本切换经 CURRENT 即见）→ 跳过收敛 exec。收敛触发面 =
+     * 新沙箱代（记账随新 sandboxId 清零）/ 指纹变化 / exec 失败不记账。会话中途容器重启（同
+     * sandboxId resume）软链不重建为已接受盲点——与投影指纹缓存 §3.3 系统性盲点同姿态（同代内
+     * tar 物化/记忆注入同样不重投）；per-call 容器侧标记兜底被否决（观测容器态本身即 1 次 exec RTT）。
      */
     private void hydrateSkillsFarm(String scope, Path scopeDir, SkillSyncGate gate) throws Exception {
+        String fingerprint = scopedSkillCacheFingerprint(scopeDir, scope);
+        String sandboxId = state.getSandboxId();
+        // 稳态判定（D-10）：指纹未变 且 本沙箱代已收敛过当前 scope → 容器链接即最新
+        String podFp = filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope);
+        boolean steady = podFp != null && podFp.equals(fingerprint)
+            && scope.equals(filesystemSpec.hydratedScopedScope(sandboxId));
+        if (steady) {
+            log.debug("[sandbox-open] skills farm fingerprint unchanged ({}), skipping converge", scope);
+            return;
+        }
         var disabledDirs = resolveDisabledSkillDirs(scopeDir);
         java.util.Set<String> l4Names = gate != null && gate.skillFarmState() != null
             ? gate.skillFarmState().l4Names()
@@ -1708,6 +1727,9 @@ public class OpenSandbox extends AbstractBaseSandbox
             throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
                 "hydrateSkillsFarm", "skills farm converge failed with exit " + execution.getExitCode(), null);
         }
+        // 收敛成功才记账（失败不记账：下次触发重收敛），与 tar 慢路径共用 scoped 指纹表
+        filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope, fingerprint);
+        filesystemSpec.markHydratedScopedScope(sandboxId, scope);
     }
 
     /** 用当前 scope 构造投影 spec（includeRoots 只含 {@code .skills-cache/<scope>}）。 */

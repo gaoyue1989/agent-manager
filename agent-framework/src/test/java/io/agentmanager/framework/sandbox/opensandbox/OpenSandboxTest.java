@@ -1951,7 +1951,8 @@ class OpenSandboxTest {
         call3.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
         assertEquals(2, farmReadlinkCount(osb), "同会话记忆一次判定，新会话（新 sandboxId）重新判定");
-        assertEquals(3, farmConvergeCommands(osb).size(), "农场模式每次触发都收敛（幂等，覆盖悬空链重建）");
+        assertEquals(2, farmConvergeCommands(osb).size(),
+            "稳态短路（D-10）：call2 同沙箱代同指纹跳过收敛 exec，call1/call3（新代）各收敛一次");
         assertEquals(2.0, registry.get("skills.farm.decision").tag("result", "farm").counter().count());
     }
 
@@ -1983,8 +1984,13 @@ class OpenSandboxTest {
         };
 
         var spec = new OpenSandboxFilesystemSpec();
+        // 用户级禁用变更经 L4 revision bump 进入指纹（D-10）：短路后指纹不变则不会重收敛，
+        // 会话中途禁用生效依赖 revision 段参与比对（生产 WorkspaceReader 所有 L4 写删漏斗必 bump）
+        var reader = mock(WorkspaceReader.class);
+        var rev = new java.util.concurrent.atomic.AtomicReference<>("rev-1");
+        when(reader.readUserSkillRevision(anyString())).thenAnswer(inv -> rev.get());
         var sandbox = new OpenSandbox(farmState(host, "sbx-farm-7"), osb,
-            farmOptions(svc, registry, checker), null, null, spec);
+            farmOptions(svc, registry, checker), reader, null, spec);
         bindFarmSession(sandbox, "sess-A");
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
@@ -1997,14 +2003,95 @@ class OpenSandboxTest {
         assertTrue(cmd.contains("rm -rf '" + scopeRoot + "/demo-c'"), "用户禁用随农场 exec 清理既有软链：" + cmd);
 
         disabledNames.add("demo-a");
+        rev.set("rev-2");
         var sandbox2 = new OpenSandbox(farmState(host, "sbx-farm-7"), osb,
-            farmOptions(svc, registry, checker), null, null, spec);
+            farmOptions(svc, registry, checker), reader, null, spec);
         bindFarmSession(sandbox2, "sess-A");
         sandbox2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
         var cmd2 = farmConvergeCommands(osb).get(1);
         assertFalse(cmd2.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a'"), "会话中途禁用：不再建链");
         assertTrue(cmd2.contains("rm -rf '" + scopeRoot + "/demo-a'"), "会话中途禁用：删除既有软链");
+    }
+
+    @Test
+    void farmSteadyShouldSkipConvergeExecUntilHostChanges() throws Exception {
+        // D-10：农场稳态 = 与 tar 路径 P0-1 同源的指纹短路——同沙箱代同指纹 0 exec（稳态不劣于
+        // 关闭农场时的指纹开销）；宿主内容变化（包源变更 → 包指纹变化）才重收敛。同代内不再收敛
+        // 同时是「会话中途容器重启（同 sandboxId resume）软链不重建」盲点的代码事实（§6.2-4 已接受）。
+        var host = java.nio.file.Files.createTempDirectory("farm-steady");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-steady-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + svc.currentVersion().version());
+        var spec = new OpenSandboxFilesystemSpec().packageSkillsDir(cfg.resolve("skills"));
+
+        var call1 = new OpenSandbox(farmState(host, "sbx-farm-steady"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        var call2 = new OpenSandbox(farmState(host, "sbx-farm-steady"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call2, "sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(), "同代同指纹稳态：第二次触发不跑收敛 exec（0 exec）");
+        assertEquals(1, farmReadlinkCount(osb), "判定记忆：稳态不重复判定");
+        verify(osb.files(), never()).write(anyList());
+
+        // 宿主包源变更（发布语义）→ 包指纹变化 → 重收敛
+        java.nio.file.Files.writeString(cfg.resolve("skills/demo-a/SKILL.md"), "---\nname: demo-a\n---\nchanged");
+        java.nio.file.Files.setLastModifiedTime(cfg.resolve("skills/demo-a/SKILL.md"),
+            java.nio.file.attribute.FileTime.fromMillis(1777777777777L));
+        var call3 = new OpenSandbox(farmState(host, "sbx-farm-steady"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call3, "sess-A");
+        call3.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(2, farmConvergeCommands(osb).size(), "宿主指纹变化必须重收敛（否则新内容不进链）");
+    }
+
+    @Test
+    void farmConvergeFailureShouldNotRecordAndRetryNextTrigger() throws Exception {
+        // D-10：收敛 exec 失败 → 上抛（CAS 复位）且不记账——失败即记账会让稳态短路跳过重建，
+        // 容器永久缺链；下次触发重收敛，成功后才记账进入稳态。
+        var host = java.nio.file.Files.createTempDirectory("farm-retry");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-retry-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        var attempted = new java.util.concurrent.atomic.AtomicBoolean(false);
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                return mockExecution(0, "v-" + version, "");
+            }
+            if (cmd.contains("ln -s ") && attempted.compareAndSet(false, true)) {
+                return mockExecution(1, "", "converge failed");   // 首次收敛失败
+            }
+            return mockExecution(0, "", "");
+        });
+        var spec = new OpenSandboxFilesystemSpec().packageSkillsDir(cfg.resolve("skills"));
+
+        for (int i = 0; i < 3; i++) {
+            var call = new OpenSandbox(farmState(host, "sbx-farm-retry"), osb,
+                farmOptions(svc, registry, null), null, null, spec);
+            bindFarmSession(call, "sess-A");
+            call.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        }
+
+        assertEquals(2, farmConvergeCommands(osb).size(),
+            "call1 失败不记账、call2 重试成功（2 次收敛），call3 记账命中稳态跳过");
+        assertEquals(1, farmReadlinkCount(osb), "判定记忆不受收敛失败影响");
     }
 
     @Test
