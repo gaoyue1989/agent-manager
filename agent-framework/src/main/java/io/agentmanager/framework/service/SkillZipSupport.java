@@ -51,6 +51,10 @@ public final class SkillZipSupport {
      * 在 GBK 回退轮仍按 UTF-8 解码（JDK 尊重 EFS 标志），因此两类文件名可共存于同一包。
      * 两轮都失败才拒绝。包体先读入内存（HTTP 层已有 10/20MB 上限）以支持重试。
      *
+     * <p><b>内容编码</b>：文件内容也按 {@link #decodeText} 处理——UTF-8 原样落盘，文本嗅探通过
+     * 的 GBK 内容转码为 UTF-8（用户分不清 UTF-8/GBK），二进制原样写盘（L2 保留资源，L4 由
+     * 上层跳过）。
+     *
      * @throws IllegalArgumentException 条目数/总大小超限、含非法（穿越）路径、
      *                                  条目名既非 UTF-8 也非 GBK
      * @throws IOException              解压 IO 失败
@@ -111,7 +115,19 @@ public final class SkillZipSupport {
                         continue;
                     }
                     Files.createDirectories(dest.getParent());
-                    var size = Files.copy(zis, dest, StandardCopyOption.REPLACE_EXISTING);
+                    var bytes = readEntryBytes(zis);
+                    // 文本条目统一落成 UTF-8：GBK 文本（Windows 记事本/ANSI）自动转码，
+                    // 二进制（图片等）原样写盘，由上层决定保留（L2）或跳过（L4）。
+                    var text = decodeText(bytes);
+                    long size;
+                    if (text != null) {
+                        var utf8 = text.getBytes(StandardCharsets.UTF_8);
+                        Files.write(dest, utf8);
+                        size = utf8.length;
+                    } else {
+                        Files.write(dest, bytes);
+                        size = bytes.length;
+                    }
                     totalSize += size;
                     if (totalSize > MAX_EXTRACTED_BYTES) {
                         throw new IllegalArgumentException(
@@ -139,6 +155,76 @@ public final class SkillZipSupport {
             out.write(buf, 0, n);
         }
         return out.toByteArray();
+    }
+
+    /** 读取当前 zip 条目内容（受解压总大小上限约束，防 zip 炸弹单条目撑爆内存） */
+    private static byte[] readEntryBytes(InputStream zis) throws IOException {
+        var out = new java.io.ByteArrayOutputStream();
+        var buf = new byte[8192];
+        long total = 0;
+        int n;
+        while ((n = zis.read(buf)) != -1) {
+            total += n;
+            if (total > MAX_EXTRACTED_BYTES) {
+                throw new IllegalArgumentException(
+                    "解压后单文件超过 " + (MAX_EXTRACTED_BYTES / 1024 / 1024) + "MB，请精简后重试");
+            }
+            out.write(buf, 0, n);
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * 文本解码（UTF-8 优先，GBK 兜底）：用户普遍分不清 UTF-8 与 GBK（Windows 记事本另存 ANSI
+     * 即 GBK），所以文本条目不能只认 UTF-8。顺序：
+     * <ol>
+     *   <li>严格 UTF-8 成功 → 原样返回（不重编码，无损）；</li>
+     *   <li>失败且内容「看起来像文本」（无 NUL、除 \t\n\r\f 外无 C0 控制符）→ 严格 GBK 解码；</li>
+     *   <li>仍失败 → 返回 null（调用方按二进制/未知编码处理：L2 原样保存，L4 跳过）。</li>
+     * </ol>
+     *
+     * <p>先做文本嗅探再试 GBK，是因为 GBK 解码器能接受大量随机字节：不嗅探会把 PNG/JPEG
+     * 等二进制「解码」成乱码文本。图片的压缩数据几乎必然含 NUL 或控制字节，会被挡在这里。
+     */
+    public static String decodeText(byte[] bytes) {
+        if (bytes == null) {
+            return null;
+        }
+        var utf8 = decodeStrict(bytes, StandardCharsets.UTF_8);
+        if (utf8 != null) {
+            return utf8;
+        }
+        if (!looksLikeText(bytes)) {
+            return null;
+        }
+        return decodeStrict(bytes, java.nio.charset.Charset.forName("GBK"));
+    }
+
+    /** 严格解码（非法字节即失败返回 null），不做 U+FFFD 替换 */
+    private static String decodeStrict(byte[] bytes, java.nio.charset.Charset charset) {
+        try {
+            return charset.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes))
+                .toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            return null;
+        }
+    }
+
+    /** 文本嗅探：无 NUL，且控制字符仅允许 \t \n \r \f（二进制通常很快命中 NUL/控制字节） */
+    private static boolean looksLikeText(byte[] bytes) {
+        for (byte b : bytes) {
+            int v = b & 0xFF;
+            if (v == 0) {
+                return false;
+            }
+            if (v < 0x20 && v != '\t' && v != '\n' && v != '\r' && v != '\f') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 清空目录内容但保留目录本身（编码回退重试前使用） */
@@ -208,20 +294,17 @@ public final class SkillZipSupport {
      * 从 SKILL.md frontmatter 提取 name 字段（简单解析：首个 --- 之间的 name: 行）。
      * 无 frontmatter/无 name 返回 null。
      *
-     * <p>SKILL.md 本身非 UTF-8（GBK/二进制）抛 {@link IllegalArgumentException}——zip 上传
-     * 两条路径（L2 全局 / L4 用户）控制器都映射 400，与其它文件的非 UTF-8 拒绝语义一致
+     * <p>SKILL.md 文本解码走 {@link #decodeText}：UTF-8 优先、GBK 兜底（解压阶段已把 GBK 文本
+     * 转成 UTF-8，这里兜底用于直接读目录的场景）。二进制/未知编码抛
+     * {@link IllegalArgumentException}——zip 上传两条路径（L2 全局 / L4 用户）控制器都映射 400
      * （issue #115：此前经 {@code Files.readString} 抛 IOException 被包装成 500 upload_failed）。
      */
     public static String extractSkillName(Path skillMd) throws IOException {
         var bytes = Files.readAllBytes(skillMd);
-        String content;
-        try {
-            var decoder = StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
-            content = decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString();
-        } catch (java.nio.charset.CharacterCodingException e) {
-            throw new IllegalArgumentException("SKILL.md 不是合法的 UTF-8 文本（二进制/非 UTF-8 文件不允许）");
+        var content = decodeText(bytes);
+        if (content == null) {
+            throw new IllegalArgumentException(
+                "SKILL.md 既不是 UTF-8 也不是 GBK 文本（二进制/未知编码文件不允许）");
         }
         if (!content.startsWith("---")) {
             return null;

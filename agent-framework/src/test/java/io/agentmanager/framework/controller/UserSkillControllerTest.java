@@ -379,7 +379,7 @@ class UserSkillControllerTest {
             .andExpect(jsonPath("$.skipped").isEmpty());
     }
 
-    /** 非 UTF-8/二进制文件被显式跳过时必须出现在 skipped 字段（不能静默变形下发） */
+    /** 二进制/未知编码文件被显式跳过时必须出现在 skipped 字段（不能静默变形下发） */
     @Test
     void syncFromPackageShouldReportSkippedFiles() throws Exception {
         when(service.syncFromPackage(USER, NAME))
@@ -430,7 +430,8 @@ class UserSkillControllerTest {
     void uploadZipShouldReturnOutcome() throws Exception {
         when(service.uploadSkillZip(eq(USER), any(java.io.InputStream.class), eq("demo-a.zip")))
             .thenReturn(new UserSkillService.ZipUploadOutcome(
-                NAME, "created", List.of("SKILL.md", "scripts/run.sh"), 3L));
+                NAME, "created", List.of("SKILL.md", "scripts/run.sh"),
+                List.of("assets/logo.png"), 3L));
 
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
                 .multipart("/skills/users/upload").file(zipFile("demo-a.zip", new byte[] {1, 2, 3}))
@@ -439,6 +440,7 @@ class UserSkillControllerTest {
             .andExpect(jsonPath("$.name").value(NAME))
             .andExpect(jsonPath("$.action").value("created"))
             .andExpect(jsonPath("$.files[1]").value("scripts/run.sh"))
+            .andExpect(jsonPath("$.skipped[0]").value("assets/logo.png"))
             .andExpect(jsonPath("$.version").value(3));
     }
 

@@ -37,7 +37,7 @@
 | GET | `/skills/users/{userId}/{name}` | 技能文件内容（`?file=` 相对路径，默认 `SKILL.md`） | L4 优先、无覆盖回落包内基线；`source=user/package` 与 `files`/`version`/`hasUserOverride` **同源**（避免「source=package 却带 L4 文件清单」把包内内容回填成个人覆盖），`userOverrideExists` 单独表达该用户是否另有覆盖；KV 读失败 500，两侧都不存在 404 |
 | PUT | `/skills/users/{userId}/{name}` | 新建/覆盖该用户 `SKILL.md` | 返回 `action=created/updated` + `version`；>100KB → 413；写入同时**置写侧栅栏** `/{name}/.admin-override`（沙箱回写据此跳过同名技能，防止管理面写入被同代容器内旧副本改回）；成功消息按档位区分（沙箱档明确提示不回注容器 + 栅栏代价） |
 | DELETE | `/skills/users/{userId}/{name}` | 删除该用户全部 L4 覆盖文件 | 返回 `deletedFiles` + `hasPackageBaseline` + `tombstone`（标记名 + 清除方式），并清除写侧栅栏；写 tombstone 防回写复活；无覆盖 → 404 |
-| POST | `/skills/users/{userId}/{name}/sync-from-package` | 包内同名技能整目录下发为个人版本 | 全量替换 + 差集清理 + 失败回滚 + 置写侧栅栏；非 UTF-8 文件列入 `skipped`；包内无此技能 → 404 |
+| POST | `/skills/users/{userId}/{name}/sync-from-package` | 包内同名技能整目录下发为个人版本 | 全量替换 + 差集清理 + 失败回滚 + 置写侧栅栏；文本 UTF-8/GBK 自动转码，二进制列入 `skipped`；包内无此技能 → 404 |
 | GET | `/debug/user-skills` | 同上索引（调试页数据源） | `DebugApiController.java:206`，与 `/skills/users` 同一 `listUsers`，带 `truncated`；查询失败同样 500（不返回 200 + 空列表，否则调试页会静默显示 0 user(s)） |
 
 路由消歧（集群实测口径，`UserSkillController.java:32-36`）：`GET /skills/users` 单段字面量不与既有路由冲突（`SkillManageController` 无 `GET /skills/{name}` 映射）；但 `userId` 恰为 `content` 时，`/skills/users/{userId}` 与 `GET /skills/{name}/content` 同时匹配，由更具体的后者命中（返回包内技能内容）。这是既有路由下的窄边界，索引、写入、删除路径不受影响（E2E 3.5 固化了该口径）。
@@ -63,7 +63,7 @@
 3. `SKILL.md` 先写且失败即整体失败，其余文件随后按序写入；
 4. **差集清理**：包内已不存在的旧文件（如换版后删掉的 `scripts/`）从 L4 删除，保证个人目录 = 包内目录（否则旧资源仍被 L4 覆盖可见）；
 5. 任一环节失败 best-effort 回滚（恢复旧内容 / 删除本次新建键 / 还原被清理文件，`rollbackSync`，`UserSkillService.java:537`），不留「有 SKILL.md 缺资源」的半份覆盖；
-6. 非 UTF-8/二进制文件显式跳过并列入响应 `skipped`（KV 只存字符串，静默替换 U+FFFD 等于下发即损坏数据）。
+6. 文本按 UTF-8 优先、GBK 自动转码；真正的二进制（图片等）显式跳过并列入响应 `skipped`（KV 只存字符串，静默替换 U+FFFD 等于下发即损坏数据）。
 
 ## 6. 沙箱写回缺陷与修复（本次核心）
 

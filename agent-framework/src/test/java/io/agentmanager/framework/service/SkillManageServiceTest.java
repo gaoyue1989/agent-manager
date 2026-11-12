@@ -116,23 +116,24 @@ class SkillManageServiceTest {
     }
 
     @Test
-    void uploadZipWithNonUtf8SkillMdShouldFail400() throws IOException {
-        // SKILL.md 本身非 UTF-8（GBK）→ 拒绝上传，不得静默装损坏技能（issue #115：此前误报 500）
+    void uploadZipWithGbkSkillMdShouldTranscodeToUtf8() throws IOException {
+        // SKILL.md 为 GBK（Windows 记事本 ANSI）→ 解压阶段自动转成 UTF-8 安装，技能名正常解析
         var baos = new java.io.ByteArrayOutputStream();
+        var original = "---\nname: gbk-skill\ndescription: 中文编码测试\n---\n正文";
         try (var zos = new ZipOutputStream(baos)) {
-            var gbkMd = "---\nname: gbk-skill\ndescription: 中文编码测试\n---\n正文"
-                .getBytes(java.nio.charset.Charset.forName("GBK"));
+            var gbkMd = original.getBytes(java.nio.charset.Charset.forName("GBK"));
             zos.putNextEntry(new ZipEntry("SKILL.md"));
             zos.write(gbkMd);
             zos.closeEntry();
         }
         var service = createService();
-        var ex = org.junit.jupiter.api.Assertions.assertThrows(
-            IllegalArgumentException.class,
-            () -> service.uploadSkill(new ByteArrayInputStream(baos.toByteArray()), "gbk.zip")
-        );
-        assertTrue(ex.getMessage().contains("UTF-8"), "应说明 SKILL.md 非 UTF-8 被拒: " + ex.getMessage());
-        assertFalse(Files.exists(skillsDir.resolve("gbk-skill")), "拒绝时不得安装技能");
+        var name = service.uploadSkill(new ByteArrayInputStream(baos.toByteArray()), "gbk.zip");
+
+        assertEquals("gbk-skill", name, "GBK frontmatter 的技能名应正常解析");
+        var installed = skillsDir.resolve("gbk-skill").resolve("SKILL.md");
+        assertEquals(original, Files.readString(installed, java.nio.charset.StandardCharsets.UTF_8),
+            "GBK SKILL.md 必须转成 UTF-8 落盘");
+        assertEquals("中文编码测试", readDescription(service, "gbk-skill"));
     }
 
     @Test

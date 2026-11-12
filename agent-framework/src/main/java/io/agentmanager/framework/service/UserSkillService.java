@@ -165,12 +165,16 @@ public class UserSkillService {
      * 从包内下发的执行结果。
      *
      * <p>{@code files}= 已下发（个人版本）的文件；{@code skipped}= 包内存在但无法下发
-     * （非 UTF-8/二进制，KV 只存字符串，静默替换会损坏数据）而被显式跳过的文件。
+     * （图片/二进制等，UTF-8 与 GBK 都解不出文本）而被显式跳过的文件。
      */
     public record SyncOutcome(List<String> files, List<String> skipped) {}
 
-    /** zip 上传结果：name 为从包内解析出的技能名，action = created | updated */
-    public record ZipUploadOutcome(String name, String action, List<String> files, long version) {}
+    /**
+     * zip 上传结果：name 为从包内解析出的技能名，action = created | updated。
+     * {@code skipped} 为未落库的非文本文件（图片/二进制等，KV 只存字符串），调用方须随响应下发。
+     */
+    public record ZipUploadOutcome(String name, String action, List<String> files,
+                                   List<String> skipped, long version) {}
 
     // ==================== 名称校验（集中一处维护，禁止路径穿越） ====================
     // 两条硬约束，违反其一就会“写成功但 SDK 读不到”或直接 500：
@@ -695,8 +699,8 @@ public class UserSkillService {
      * 会被差集清理，保证个人目录与包内目录一致；任一环节失败都做 best-effort 回滚
      * （恢复旧内容、删除本次新建的键），不会留下“有 SKILL.md 缺资源”的半份覆盖。
      *
-     * <p>非 UTF-8/二进制文件显式跳过（KV 只存字符串，替换成 U+FFFD 等于下发即损坏数据），
-     * 跳过清单随 {@link SyncOutcome#skipped()} 返回并打告警日志。
+     * <p>文本 UTF-8 优先、GBK 自动转码；真正的二进制（图片等）显式跳过（KV 只存字符串，
+     * 替换成 U+FFFD 等于下发即损坏数据），跳过清单随 {@link SyncOutcome#skipped()} 返回并打告警日志。
      *
      * @return 下发结果（files / skipped）；包内无此技能返回 empty（调用方映射 404）
      * @throws ContentTooLargeException 单文件超 {@link #MAX_CONTENT_BYTES}（1MB）或
@@ -712,7 +716,7 @@ public class UserSkillService {
         if (!Files.isDirectory(sourceDir)) {
             return Optional.empty();
         }
-        return Optional.of(materializeFromDirectory(userId, name, sourceDir, false));
+        return Optional.of(materializeFromDirectory(userId, name, sourceDir));
     }
 
     /**
@@ -724,17 +728,20 @@ public class UserSkillService {
      *
      * <p>与「从包内下发」({@link #syncFromPackage}) 的差异（产品决策）：
      * <ul>
-     *   <li>非 UTF-8/二进制文件<b>拒绝整个包</b>（不是跳过）——KV 只存字符串，静默替换会损坏数据；</li>
      *   <li>同名技能直接<b>覆盖</b>（{@code action=created|updated}）。</li>
      * </ul>
+     *
+     * <p>编码口径与下发一致：文本按 UTF-8 优先、GBK 自动转码（Windows 记事本 ANSI/GBK 保存的
+     * SKILL.md 可直接上传）；真正的二进制（图片等）<b>跳过并记入 {@code skipped}</b>，不再因此
+     * 拒绝整个包（KV 只存字符串，硬拒绝会让带配图的技能完全传不上来）；两者都不是才拒绝。
      *
      * <p>压缩包体积上限 {@link #MAX_ZIP_BYTES}（10MB）由调用方（控制器）前置校验；
      * 解压后的条目数/总大小上限见 {@link SkillZipSupport}。
      *
      * @param zipStream   zip 输入流
      * @param zipFileName 原始文件名（无 frontmatter name 且非包裹结构时用作技能名）
-     * @return 技能名 + created/updated + 文件清单 + 版本号
-     * @throws IllegalArgumentException 缺 SKILL.md / 名称非法 / 含二进制文件 /
+     * @return 技能名 + created/updated + 文件清单 + 跳过清单 + 版本号
+     * @throws IllegalArgumentException 缺 SKILL.md / SKILL.md 非 UTF-8 且非 GBK / 名称非法 /
      *                                  文件数超限 / key 组合超长
      * @throws SkillNameConflictException 解析出的技能名与包内（L2）公共技能重名，且该用户尚无
      *                                    该技能的 L4 个人覆盖（避免新建即静默覆盖公共技能）
@@ -775,10 +782,12 @@ public class UserSkillService {
                 // 已有个人覆盖时放行（那是更新自己的副本，历史数据与重复上传都必须可走）
                 throw new SkillNameConflictException(name);
             }
-            var sync = materializeFromDirectory(userId, name, located.skillRoot(), true);
+            var sync = materializeFromDirectory(userId, name, located.skillRoot());
             var version = workspaceReader.userSkillFileVersion(userId, name, WorkspaceReader.SKILL_FILE);
-            log.info("upload_skill_zip: skill {} ({} files) → user {}", name, sync.files().size(), userId);
-            return new ZipUploadOutcome(name, existed ? "updated" : "created", sync.files(), version);
+            log.info("upload_skill_zip: skill {} ({} files, {} skipped) → user {}",
+                name, sync.files().size(), sync.skipped().size(), userId);
+            return new ZipUploadOutcome(name, existed ? "updated" : "created",
+                sync.files(), sync.skipped(), version);
         } catch (IOException e) {
             throw new IllegalStateException("Zip 解压失败: " + e.getMessage());
         } finally {
@@ -794,14 +803,16 @@ public class UserSkillService {
      * 会被差集清理，保证个人目录与源目录一致；任一环节失败都做 best-effort 回滚
      * （恢复旧内容、删除本次新建的键），不会留下“有 SKILL.md 缺资源”的半份覆盖。
      *
-     * @param sourceDir     含 SKILL.md 的源目录（包内技能目录 或 zip 解压根目录）
-     * @param rejectNonUtf8 true = 遇非 UTF-8/二进制文件抛异常拒绝整个包；false = 跳过并记入 skipped
+     * <p>文本解码走 {@link SkillZipSupport#decodeText}（UTF-8 优先、GBK 自动转码，用户分不清
+     * 两者）；真正的二进制/未知编码（图片等）跳过并记入 {@code skipped}——KV 只存字符串，
+     * 强行落库会损坏数据；SKILL.md 本身解不出文本必须显式拒绝。
+     *
+     * @param sourceDir 含 SKILL.md 的源目录（包内技能目录 或 zip 解压根目录）
      */
-    private SyncOutcome materializeFromDirectory(String userId, String name, Path sourceDir,
-                                                 boolean rejectNonUtf8) {
+    private SyncOutcome materializeFromDirectory(String userId, String name, Path sourceDir) {
         Map<String, String> sourceFiles = new LinkedHashMap<>();
         var packagePaths = new LinkedHashSet<String>();  // 源文件全集（含跳过项，用于差集清理）
-        var skipped = new ArrayList<String>();           // 非 UTF-8/二进制被显式跳过的文件
+        var skipped = new ArrayList<String>();           // 二进制/未知编码被显式跳过的文件
         long totalBytes = 0;                             // 单技能累计字节（含被跳过的二进制文件）
         try (Stream<Path> stream = Files.walk(sourceDir)) {
             for (var path : stream.filter(Files::isRegularFile).toList()) {
@@ -826,14 +837,12 @@ public class UserSkillService {
                     throw new ContentTooLargeException("技能「" + name + "」所有文件总大小超过 "
                         + (MAX_SKILL_TOTAL_BYTES / 1024 / 1024) + "MB 限制，请精简后重试");
                 }
-                var content = decodeUtf8Strict(bytes);
+                // UTF-8 优先、GBK 兜底（GBK 文本自动转成 UTF-8 落库）；都解不出 = 二进制/未知编码
+                var content = SkillZipSupport.decodeText(bytes);
                 if (content == null) {
-                    if (rejectNonUtf8) {
-                        throw new IllegalArgumentException(
-                            "技能文件 " + rel + " 不是合法的 UTF-8 文本（二进制/非 UTF-8 文件不允许）");
-                    }
+                    // 图片/二进制等非文本资源：KV 只存字符串，跳过并随响应下发（不整体拒绝上传）
                     skipped.add(rel);
-                    log.warn("materialize_skill: 跳过非 UTF-8/二进制文件 {}/{}（{} 字节）",
+                    log.warn("materialize_skill: 跳过非文本/未知编码文件 {}/{}（{} 字节）",
                         name, rel, bytes.length);
                     continue;
                 }
@@ -843,6 +852,11 @@ public class UserSkillService {
             throw e;
         } catch (IOException e) {
             throw new IllegalStateException("读取技能目录失败: " + e.getMessage());
+        }
+        if (skipped.contains(WorkspaceReader.SKILL_FILE)) {
+            // 主文件被跳过只可能是编码问题：给可执行的 400，而不是笼统的「缺少 SKILL.md」
+            throw new IllegalArgumentException(
+                WorkspaceReader.SKILL_FILE + " 既不是 UTF-8 也不是 GBK 文本（二进制/未知编码文件不允许）");
         }
         if (sourceFiles.isEmpty() || !sourceFiles.containsKey(WorkspaceReader.SKILL_FILE)) {
             throw new IllegalArgumentException("技能 '" + name + "' 缺少 " + WorkspaceReader.SKILL_FILE);
@@ -946,20 +960,6 @@ public class UserSkillService {
             userId, name, written.size(), removed.size());
     }
 
-    /**
-     * 严格 UTF-8 解码：非法字节序列（二进制资源 / GBK 等非 UTF-8 文本）返回 null，
-     * 绝不静默替换成 U+FFFD——那样下发即损坏数据，且调用方看不到任何异常。
-     */
-    private static String decodeUtf8Strict(byte[] bytes) {
-        var decoder = StandardCharsets.UTF_8.newDecoder()
-            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
-        try {
-            return decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString();
-        } catch (java.nio.charset.CharacterCodingException e) {
-            return null;
-        }
-    }
 
     // ==================== 包内（L2）基线 ====================
 
@@ -1014,7 +1014,8 @@ public class UserSkillService {
             return null;
         }
         try {
-            return Files.readString(target, StandardCharsets.UTF_8);
+            // 文本 UTF-8 优先、GBK 兜底（兼容历史 GBK 包内技能）；二进制返回 null（调用方跳过）
+            return SkillZipSupport.decodeText(Files.readAllBytes(target));
         } catch (IOException e) {
             log.warn("read_package_skill_file failed for {}/{}: {}", name, relPath, e.getMessage());
             return null;
