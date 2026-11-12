@@ -1542,56 +1542,76 @@ public class OpenSandbox extends AbstractBaseSandbox
     private record FarmDecision(boolean farm, String result, java.util.Set<String> l4Names) {}
 
     private FarmDecision decideSkillsFarmMode(String uid) {
-        String storeVersion = null;
-        try {
-            storeVersion = readStoreCurrentVersion(options.getSkillsSharedStore().trim());
-        } catch (Exception e) {
-            log.debug("[sandbox-open] skills farm store probe failed: {}", e.getMessage());
-        }
-        if (storeVersion == null) {
-            return new FarmDecision(false, "degraded_store_missing", java.util.Set.of());
-        }
         String endpointVersion = null;
         try {
             var svc = options.getSkillBundleService();
             endpointVersion = svc == null ? null : svc.currentVersion().version();
-            if (endpointVersion == null) {
-                throw new IllegalStateException("skill bundle service not wired");
+            if (endpointVersion == null
+                    || endpointVersion.startsWith(SkillBundleService.ERROR_VERSION_PREFIX)) {
+                throw new IllegalStateException("skill bundle endpoint unavailable (version="
+                    + endpointVersion + ")");
             }
         } catch (Exception e) {
             log.warn("[sandbox-open] skills farm endpoint version unavailable: {}", e.getMessage());
             return new FarmDecision(false, "degraded_endpoint_down", java.util.Set.of());
         }
-        if (!(STORE_VERSION_DIR_PREFIX + endpointVersion).equals(storeVersion)) {
+        var store = probeSkillsStore(options.getSkillsSharedStore().trim());
+        if (store.version() == null) {
+            // store 无 CURRENT 二分：store 目录由守护启动时创建——目录存在 = 守护活着但同步
+            // 失败，第一根因即守护→端点链路不可达（token 漂移 401 / 端点关闭 404 / egress
+            // 断网），归 degraded_endpoint_down（runbook 信号直指端点链路）；目录缺失 = 守护
+            // 未装/未跑（或 store 卷未挂），归 degraded_store_missing。exec 探测异常按目录
+            // 缺失保守处理（fail-open 同桶）。
+            if (store.dirPresent()) {
+                return new FarmDecision(false, "degraded_endpoint_down", java.util.Set.of());
+            }
+            return new FarmDecision(false, "degraded_store_missing", java.util.Set.of());
+        }
+        if (!(STORE_VERSION_DIR_PREFIX + endpointVersion).equals(store.version())) {
             log.error("[sandbox-open] skills farm version hard-check failed (store={}, endpoint={}): "
                 + "store treated as unusable, session degraded to tar materialization",
-                storeVersion, endpointVersion);
+                store.version(), endpointVersion);
             return new FarmDecision(false, "degraded_version_mismatch", java.util.Set.of());
         }
         return new FarmDecision(true, "farm", captureL4SkillNames(uid));
     }
 
+    /** store 探测结果：CURRENT 版本目录名（null = 无 CURRENT/readlink 未命中）+ 目录存在性 */
+    private record StoreProbe(String version, boolean dirPresent) {}
+
     /**
-     * store 版本读取（§7.2 SSOT 边界）：{@code readlink <store>/CURRENT} 的目录名，仅做字符串
-     * 相等比较、禁止在 Java 侧重算 store 内容指纹。store 缺失 / CURRENT 解析失败 / exec 异常
-     * 统一返回 null（= degraded_store_missing）。
+     * store 探测（§7.2 SSOT 边界）：{@code readlink <store>/CURRENT} 的目录名，仅做字符串
+     * 相等比较、禁止在 Java 侧重算 store 内容指纹。readlink 未命中（store 无 CURRENT）时以
+     * {@code test -d} 补一次目录存在性探测，区分「守护活着但同步失败」与「守护未装/未跑」——
+     * farm 正常路径（readlink 命中）不跑 test -d，无额外 exec。
      */
-    private String readStoreCurrentVersion(String store) throws Exception {
-        var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT'");
-        if (execution.getExitCode() == null || execution.getExitCode() != 0) {
-            return null;
+    private StoreProbe probeSkillsStore(String store) {
+        try {
+            var execution = osbSandbox.commands().run("readlink '" + store + "/CURRENT'");
+            if (execution.getExitCode() != null && execution.getExitCode() == 0) {
+                var stdout = execution.getLogs() != null && execution.getLogs().getStdout() != null
+                    ? execution.getLogs().getStdout().stream()
+                        .map(msg -> msg.getText())
+                        .collect(Collectors.joining("\n"))
+                    : "";
+                var token = stdout.trim();
+                if (!token.isEmpty()) {
+                    int slash = token.lastIndexOf('/');
+                    return new StoreProbe(slash >= 0 ? token.substring(slash + 1) : token, true);
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[sandbox-open] skills farm store probe failed: {}", e.getMessage());
+            return new StoreProbe(null, false);
         }
-        var stdout = execution.getLogs() != null && execution.getLogs().getStdout() != null
-            ? execution.getLogs().getStdout().stream()
-                .map(msg -> msg.getText())
-                .collect(Collectors.joining("\n"))
-            : "";
-        var token = stdout.trim();
-        if (token.isEmpty()) {
-            return null;
+        boolean dirPresent = false;
+        try {
+            var probe = osbSandbox.commands().run("test -d '" + store + "'");
+            dirPresent = probe.getExitCode() != null && probe.getExitCode() == 0;
+        } catch (Exception e) {
+            log.debug("[sandbox-open] skills farm store dir probe failed: {}", e.getMessage());
         }
-        int slash = token.lastIndexOf('/');
-        return slash >= 0 ? token.substring(slash + 1) : token;
+        return new StoreProbe(null, dirPresent);
     }
 
     /**

@@ -46,6 +46,9 @@ public class SkillBundleService {
 
     private static final Logger log = LoggerFactory.getLogger(SkillBundleService.class);
     static final Duration VERSION_TTL = Duration.ofSeconds(5);
+    /** 指纹/枚举计算失败时的版本前缀（computeVersion 全 catch 输出约定）：版本端点据此 503、
+     * 农场判定据此归 {@code degraded_endpoint_down}——ERR-* 不得作为有效版本流出到守护侧 */
+    public static final String ERROR_VERSION_PREFIX = "ERR-";
 
     private final SkillManageService skillManageService;
     private final SkillBundleCache cache;
@@ -156,7 +159,7 @@ public class SkillBundleService {
             return new SkillVersion(version, files.size(), total);
         } catch (Exception e) {
             log.warn("[skills-bundle] version fingerprint failed: {}", e.getMessage());
-            return new SkillVersion("ERR-" + System.nanoTime(), 0, 0);
+            return new SkillVersion(ERROR_VERSION_PREFIX + System.nanoTime(), 0, 0);
         }
     }
 

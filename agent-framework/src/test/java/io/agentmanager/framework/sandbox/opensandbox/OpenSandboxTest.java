@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
@@ -1704,20 +1705,30 @@ class OpenSandboxTest {
             .farmMeterRegistry(registry);
     }
 
-    /** commands.run 分流桩：readlink 探测按 storeVersion 应答，其余（农场收敛/投放）恒成功 */
-    private static Sandbox farmOsb(String storeVersion) {
+    /** commands.run 分流桩：readlink 探测按 storeVersion 应答（null = 无 CURRENT），test -d 按
+     * storeDirExists 应答（S15：store 目录由守护启动时创建，存在性 = 守护存活信号），其余
+     * （农场收敛/投放）恒成功 */
+    private static Sandbox farmOsb(String storeVersion, boolean storeDirExists) {
         var osb = mock(Sandbox.class);
         var commands = mock(Commands.class);
         when(osb.commands()).thenReturn(commands);
         when(commands.run(anyString())).thenAnswer(inv -> {
             var cmd = inv.getArgument(0, String.class);
-            return cmd.startsWith("readlink ")
-                ? (storeVersion == null ? mockExecution(1, "", "") : mockExecution(0, storeVersion, ""))
-                : mockExecution(0, "", "");
+            if (cmd.startsWith("readlink ")) {
+                return storeVersion == null ? mockExecution(1, "", "") : mockExecution(0, storeVersion, "");
+            }
+            if (cmd.startsWith("test -d ")) {
+                return storeDirExists ? mockExecution(0, "", "") : mockExecution(1, "", "");
+            }
+            return mockExecution(0, "", "");
         });
         var files = mock(Filesystem.class);
         when(osb.files()).thenReturn(files);
         return osb;
+    }
+
+    private static Sandbox farmOsb(String storeVersion) {
+        return farmOsb(storeVersion, storeVersion != null);
     }
 
     /** 捕获农场收敛 exec（含引号容器路径段的命令；tar 物化/readlink/用户命令均不含该形态） */
@@ -1779,6 +1790,7 @@ class OpenSandboxTest {
         sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
 
         verify(osb.commands()).run("readlink '" + FARM_STORE + "/CURRENT'");
+        verify(osb.commands(), never()).run(startsWith("test -d "));
         var converge = farmConvergeCommands(osb);
         assertEquals(1, converge.size(), "农场收敛为单条 exec");
         var cmd = converge.get(0);
@@ -1802,7 +1814,7 @@ class OpenSandboxTest {
         bundleSkill(cfg, "demo-a");
         var svc = bundleService(cfg);
         var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
-        var osb = farmOsb(null);
+        var osb = farmOsb(null, false);
 
         var spec = new OpenSandboxFilesystemSpec();
         var sandbox = new OpenSandbox(farmState(host, "sbx-farm-2"), osb,
@@ -1823,6 +1835,53 @@ class OpenSandboxTest {
         assertEquals(1, farmReadlinkCount(osb), "降级会话记忆：不再重复判定");
         assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_store_missing")
             .counter().count(), "记忆命中不重复打点");
+    }
+
+    @Test
+    void farmDaemonAliveButSyncFailedShouldDegradeAsEndpointDown() throws Exception {
+        // S15：store 目录由守护启动时创建——目录存在但无 CURRENT = 守护活着但同步失败，
+        // 第一根因即守护→端点链路不可达（token 漂移 401 / 端点关闭 404 / egress 断网），
+        // 归 degraded_endpoint_down（runbook 信号直指端点链路），不得归 store_missing
+        var host = java.nio.file.Files.createTempDirectory("farm-dead-endpoint");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-dead-endpoint-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb(null, true);
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-dead-ep"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_endpoint_down")
+            .counter().count(), "D-5：守护活着但同步失败 = 端点链路不可达降级");
+        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话整体走 tar 物化（fail-open 不变）");
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
+    }
+
+    @Test
+    void farmEndpointFingerprintErrorShouldDegradeAsEndpointDown() throws Exception {
+        // 指纹计算失败（computeVersion 全 catch → ERR-*，输出约定见 SkillBundleServiceTest）=
+        // 端点无法提供有效版本：判定与 svc 未装配同类归 degraded_endpoint_down，不得落
+        // version_mismatch（版本端点同时 503，守护退避重试不污染 store）
+        var host = java.nio.file.Files.createTempDirectory("farm-err-endpoint");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var svc = mock(SkillBundleService.class);
+        when(svc.currentVersion()).thenReturn(new SkillBundleService.SkillVersion("ERR-123456", 0, 0L));
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-0123456789abcdef", true);
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-err-ep"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "degraded_endpoint_down")
+            .counter().count(), "D-5：指纹计算失败 = 端点不可用降级");
+        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话整体走 tar 物化");
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
     }
 
     @Test
