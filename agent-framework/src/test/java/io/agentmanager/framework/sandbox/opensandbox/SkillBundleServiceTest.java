@@ -8,6 +8,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
@@ -16,15 +17,19 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import io.agentmanager.framework.config.AgentManagerProperties;
+import io.agentmanager.framework.config.SandboxConfig;
 import io.agentmanager.framework.service.SkillManageService;
 
 class SkillBundleServiceTest {
@@ -160,6 +165,41 @@ class SkillBundleServiceTest {
                 assertEquals(0644, entry.getMode(), entry.getName());
                 assertEquals("# demo a\n", new String(tis.readAllBytes(), StandardCharsets.UTF_8));
             }
+        }
+    }
+
+    @Test
+    void bundleShouldPreserveExecutableBitFromSourceFile() throws Exception {
+        var service = service(Duration.ZERO);
+        skill("demo-a", "# demo a\n", "scripts/run.py", "print(1)\n");
+        Files.setPosixFilePermissions(configDir.resolve("skills/demo-a/scripts/run.py"),
+            PosixFilePermissions.fromString("rwxr-xr-x"));
+        var version = service.currentVersion().version();
+
+        var modes = new LinkedHashMap<String, Integer>();
+        try (var tis = new TarArchiveInputStream(new GzipCompressorInputStream(
+                new ByteArrayInputStream(bundleBytes(service, version))))) {
+            TarArchiveEntry entry;
+            while ((entry = tis.getNextTarEntry()) != null) {
+                modes.put(entry.getName(), entry.getMode());
+            }
+        }
+
+        assertEquals(Map.of("demo-a/SKILL.md", 0644, "demo-a/scripts/run.py", 0755), modes);
+    }
+
+    @Test
+    void springShouldInstantiateThroughAutowiredConstructor() {
+        var config = new SandboxConfig(false, "img", 60, 30, 1024, 1, List.of("/e"),
+            Duration.ofMillis(100), true, true, 900, true, true, true, false, 500, 30,
+            new SandboxConfig.OpenSandboxConfig("server:8090", "key"));
+        try (var ctx = new AnnotationConfigApplicationContext()) {
+            ctx.registerBean("skillManageService", SkillManageService.class, this::manageService);
+            ctx.registerBean("sandboxConfig", SandboxConfig.class, () -> config);
+            ctx.register(SkillBundleService.class);
+            ctx.refresh();
+
+            assertNotNull(ctx.getBean(SkillBundleService.class));
         }
     }
 

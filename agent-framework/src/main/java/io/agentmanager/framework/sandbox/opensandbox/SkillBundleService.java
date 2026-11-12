@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
@@ -22,6 +23,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.apache.commons.compress.compressors.gzip.GzipParameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import io.agentmanager.framework.config.SandboxConfig;
@@ -56,6 +58,7 @@ public class SkillBundleService {
     private final Object buildLock = new Object();
     private volatile CachedVersion cachedVersion;
 
+    @Autowired
     public SkillBundleService(SkillManageService skillManageService, SandboxConfig sandboxConfig) {
         this(skillManageService, Path.of(sandboxConfig.skillsBundleCacheDir()),
             VERSION_TTL, Clock.systemUTC());
@@ -80,7 +83,7 @@ public class SkillBundleService {
         }
     }
 
-    private record BundleFile(Path file, String rel, long size) {
+    private record BundleFile(Path file, String rel, long size, boolean executable) {
     }
 
     private record Packed(byte[] gz, String sha256, int fileCount) {
@@ -181,13 +184,24 @@ public class SkillBundleService {
                 try (var walk = Files.walk(skillDir)) {
                     for (var f : walk.filter(Files::isRegularFile).toList()) {
                         files.add(new BundleFile(f,
-                            dir.relativize(f).toString().replace('\\', '/'), Files.size(f)));
+                            dir.relativize(f).toString().replace('\\', '/'), Files.size(f),
+                            isExecutable(f)));
                     }
                 }
             }
         }
         files.sort(Comparator.comparing(BundleFile::rel));
         return files;
+    }
+
+    // 源文件可执行位（POSIX fs 探测，非 POSIX fs 视为不可执行）：bundle 确定性不变——
+    // /config 只读挂载下 stat 恒定，同版本字节恒一致。
+    private static boolean isExecutable(Path f) {
+        try {
+            return Files.getPosixFilePermissions(f).contains(PosixFilePermission.OWNER_EXECUTE);
+        } catch (IOException | UnsupportedOperationException e) {
+            return false;
+        }
     }
 
     private Packed pack(List<BundleFile> files) throws IOException {
@@ -202,7 +216,7 @@ public class SkillBundleService {
                 var entry = new TarArchiveEntry(f.rel());
                 entry.setSize(f.size());
                 entry.setModTime(0);
-                entry.setMode(0644);
+                entry.setMode(f.executable() ? 0755 : 0644);
                 entry.setUserId(0);
                 entry.setGroupId(0);
                 entry.setUserName("");
