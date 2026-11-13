@@ -373,10 +373,12 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 
 | `INGRESS_HOST_SUFFIX` | 模式 | 形态 |
 |---|---|---|
-| 空（默认） | **router** | 不构造 per-service Ingress；统一域名 `/agent/{short}` 子路径由集群内 **platform-router** nginx 承接（§七之三部署）；Endpoint = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/` |
-| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解；**内部路径排除表** `/internal`、`/actuator` 改道 `platform-router-svc` 恒 404——agent-framework 的 skills-syncd 内部端点（`SKILLSYNC_TOKEN` 门）与 actuator 健康/指标仅集群内 `oaf-{name}-svc:8100` 可达，不经业务域名对外暴露 |
+| 空（默认） | **router** | 不构造 per-service Ingress；统一域名 `/agent/{short}` 子路径由集群内 **platform-router** nginx 承接（§七之三部署），其中 `/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404；Endpoint = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/` |
+| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解；**内部路径排除表** `/internal`、`/actuator` 改道 `platform-router-svc` 恒 404（纵深防御，外部表现与 router 模式一致，见下方安全模型）——skills-syncd 内部端点与 actuator 健康/指标的合法消费仅集群内 `oaf-{name}-svc:8100` 直连，不经业务域名暴露 |
 
 > ⚠️ **router 模式启动自检**：suffix 空时 backend 启动即检查 `platform-router-svc` 存在，缺失则 CrashLoop（报错指向 §七之三的 manifest）——先 apply platform-router 再升级 backend。**suffix 空 + `INGRESS_TEMPLATE` 非空同样启动即拒**（router 无 per-service Ingress，模板无处生效）。
+
+**内部端点安全模型**（skills-syncd 内部端点 `/internal/skills/**` 与 actuator `/actuator/**`）：前者的访问控制以 **token 门为主**——合法消费经 `SKILLSYNC_BASE_URL` 集群内直连 `oaf-{name}-svc:8100` 携带 `SKILLSYNC_TOKEN`，无 token 401、未配 token 端点关闭（404）；actuator 无鉴权，仅限集群内消费（D-5 判定打点直连 svc）。两者不经业务域名暴露由业务入口排除兜底：`/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404——router nginx 内置排除（§七之三 manifest）与 host 模式 Ingress 排除表同语义，为**纵深防御**（两种模式外部表现一致），不是 token 之外的第二套鉴权。
 
 host 模式切换（后缀必须以 `.` 开头、各段 ≤63、叠加最长 K8sName 后总长 ≤253）：
 
@@ -397,7 +399,7 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_HOST_SUFFIX-
 
 ## 七之三、platform-router 部署（router 模式必部署；host 模式承接被排除路径）
 
-router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）。**host 模式同样依赖本 manifest**：per-service Ingress 的内部路径排除表（§七之二）把 `/internal`、`/actuator` 改道 `platform-router-svc`（其 `location /` 恒 404，与 router 模式外部表现一致）——router 缺失时这些路径 503，恒 fail-closed 不暴露内容；切 host 模式前同样先 apply 本 manifest（router 与业务 Service 需同 namespace）。
+router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）。manifest 内置**内部路径排除**：`/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404（§七之二安全模型；升级已有集群 = 重新 apply 本 manifest + rollout restart router）。**host 模式同样依赖本 manifest**：per-service Ingress 的内部路径排除表（§七之二）把 `/internal`、`/actuator` 改道 `platform-router-svc`（其 `location /` 恒 404，与 router 模式外部表现一致）——router 缺失时这些路径 503，恒 fail-closed 不暴露内容；切 host 模式前同样先 apply 本 manifest（router 与业务 Service 需同 namespace）。
 
 ```bash
 # kind 环境先导入镜像

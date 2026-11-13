@@ -78,10 +78,11 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     private final Map<String, SkillSyncGate> skillSyncGates = lruMap(256);
 
     /**
-     * scoped 技能缓存 stat 指纹（pod 本地，P0-1）：sandboxId|scope → 最近一次投放时的
-     * 宿主 scope 目录 stat 指纹。跨 call / 跨 OpenSandbox 包装实例有效——指纹未变即跳过
-     * build+prune+hydrate（原 lastSkillCacheHash 是实例字段，实例每 call 重建导致每轮全量重投）。
-     * Pod 级 miss 时回落 {@link #sharedFingerprintStore}（跨副本共享，缺口④）。
+     * scoped 技能缓存投放记账（pod 本地，P0-1）：sandboxId|scope → {@code mode|指纹}
+     * （投放模式分量 + 宿主指纹，见 {@link #scopedSkillCacheFingerprint}）。跨 call /
+     * 跨 OpenSandbox 包装实例有效——指纹未变即跳过 build+prune+hydrate（原 lastSkillCacheHash
+     * 是实例字段，实例每 call 重建导致每轮全量重投）。Pod 级 miss 时回落
+     * {@link #sharedFingerprintStore}（跨副本共享，缺口④）。
      */
     private final Map<String, String> scopedSkillCacheFingerprints = lruMap(256);
     /** 指纹跨副本共享层（Redis，fail-open；NOOP=未装配，行为回到纯 Pod 级） */
@@ -158,30 +159,47 @@ public class OpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
         }
     }
 
-    /** scoped 缓存指纹读取（P0-1 短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回 null=走慢路径 */
-    public String scopedSkillCacheFingerprint(String sandboxId, String scope) {
-        if (sandboxId == null || sandboxId.isBlank() || scope == null || scope.isBlank()) {
+    /** 投放模式分量（记账值 = {@code mode|指纹}）：tar 物化路径 */
+    public static final String HYDRATE_MODE_TAR = "tar";
+    /** 投放模式分量：软链农场收敛路径（OpenSandbox hydrateSkillsFarm，D-10 稳态短路） */
+    public static final String HYDRATE_MODE_FARM = "farm";
+
+    /**
+     * scoped 缓存指纹读取（P0-1 短路比对值）：Pod 级 miss 时查跨副本共享层（缺口④），均无返回
+     * null=走慢路径。记账值含投放模式分量（{@code mode|指纹}）且只返回同模式记录——同沙箱代
+     * tar↔farm 互转（降级/恢复翻转后 gate 丢失重判定）永不满足对方稳态，翻转后代际必走一次
+     * 重收敛/重物化（否则降级残留真实文件被 farm 稳态误跳过、farm 软链被降级稳态误跳过）。
+     * 模式不符的共享层命中仍回填 Pod 级两表：值即「该沙箱代另一模式已投放」的真实事实，
+     * 稳态正确性由模式比对承担。
+     */
+    public String scopedSkillCacheFingerprint(String sandboxId, String scope, String mode) {
+        if (sandboxId == null || sandboxId.isBlank() || scope == null || scope.isBlank()
+                || mode == null || mode.isBlank()) {
             return null;
         }
         var podLocal = scopedSkillCacheFingerprints.get(sandboxId + "|" + scope);
-        if (podLocal != null) {
-            return podLocal;
+        if (podLocal == null) {
+            // 跨副本：他副本可能已投放过同一沙箱代同 scope（同会话轮转）——共享层命中即免整套慢路径。
+            // 命中同时回填 Pod 级两张表（记账值 + 已投放 scope）：稳态判定要求两表一致命中
+            var shared = sharedFingerprintStore.get(sandboxId, scope);
+            if (shared != null) {
+                podLocal = shared;
+                scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, shared);
+                hydratedScopedScopes.put(sandboxId, scope);
+            }
         }
-        // 跨副本：他副本可能已投放过同一沙箱代同 scope（同会话轮转）——共享层命中即免整套慢路径。
-        // 命中同时回填 Pod 级两张表（指纹 + 已投放 scope）：稳态判定要求两表一致命中
-        var shared = sharedFingerprintStore.get(sandboxId, scope);
-        if (shared != null) {
-            scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, shared);
-            hydratedScopedScopes.put(sandboxId, scope);
-        }
-        return shared;
+        return podLocal != null && podLocal.startsWith(mode + "|")
+            ? podLocal.substring(mode.length() + 1)
+            : null;
     }
 
-    /** scoped 缓存指纹回填（投放成功后记录）：Pod 级 + 共享层双写（共享层失败仅告警） */
-    public void recordScopedSkillCacheFingerprint(String sandboxId, String scope, String statFingerprint) {
-        if (sandboxId != null && scope != null && statFingerprint != null) {
-            scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, statFingerprint);
-            sharedFingerprintStore.put(sandboxId, scope, statFingerprint);
+    /** scoped 缓存投放记账回填（投放成功后记录）：值带投放模式分量，Pod 级 + 共享层双写（共享层失败仅告警） */
+    public void recordScopedSkillCacheFingerprint(String sandboxId, String scope, String mode, String statFingerprint) {
+        if (sandboxId != null && scope != null && statFingerprint != null
+                && mode != null && !mode.isBlank()) {
+            var value = mode + "|" + statFingerprint;
+            scopedSkillCacheFingerprints.put(sandboxId + "|" + scope, value);
+            sharedFingerprintStore.put(sandboxId, scope, value);
         }
     }
 
