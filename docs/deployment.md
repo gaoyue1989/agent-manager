@@ -251,6 +251,10 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 2. 池模板参数摘除（PR-4a）：建池/重建池请求带 `disableSyncd: true`。
 3. 清理：删除 ns `opensandbox` 的 `{name}-skillsync-token` Secret（唯一副本，落点即消费方）+ 回收 egress 放行条目。
 
+**PR-4b 语义**（agent-framework 侧）：tar 物化路径已退役——`SANDBOX_SKILLS_SHARED_STORE` 为总闸
+（空 = 包技能不投放，**不是**「回退旧投影」）；farm 判定降级（端点不可达/版本不一致/store 缺失）=
+降级会话无包技能投放。agent-framework 回滚 = 回滚整个 release（旧投影路径已删，拨开关不可回退）。
+
 ## 关键端点
 
 对外入口：
