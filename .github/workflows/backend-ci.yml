@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      skills-syncd: ${{ steps.filter.outputs.skills-syncd }}
       workflows: ${{ steps.filter.outputs.workflows }}
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +30,8 @@ jobs:
           filters: |
             backend:
               - 'backend/**'
+            skills-syncd:
+              - 'skills-syncd/**'
             workflows:
               - '.github/workflows/backend-ci.yml'
 
@@ -45,6 +48,23 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Run backend tests
         working-directory: backend
+        run: |
+          go vet ./...
+          go test ./...
+
+  test-skills-syncd:
+    name: skills-syncd 单测 (go vet + go test)
+    needs: changes
+    if: needs.changes.outputs.skills-syncd == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+      - name: Run skills-syncd tests
+        working-directory: skills-syncd
         run: |
           go vet ./...
           go test ./...
