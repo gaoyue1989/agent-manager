@@ -342,6 +342,36 @@ class WorkspaceSyncServiceTest {
         assertNull(reader.readUserSkillFile(USER, "sbx-skill", "store-link"), "软链不得被吸回 L4");
     }
 
+    /**
+     * 顶层技能位被软链占据（skills-syncd §6.3 顶层跳链，与技能内递归同规则）：
+     * 不进 syncOneSkill——跳链不依赖 execd 对软链根的拒绝穿透（400），也省掉无谓的
+     * KV 标记读与目标列举；兄弟真实技能照常回写（防过度跳链）。
+     */
+    @Test
+    void syncBackShouldSkipSymlinkedSkillDirEntry() throws Exception {
+        var store = new InMemoryStore();
+        var skillMd = "---\nname: sbx-skill\n---\n\nSBX-TOP-LINK-PROBE\n";
+        var files = mock(Filesystem.class);
+        var skillDir = dirEntry("/workspace/skills/sbx-skill");
+        var skillMdEntry = fileEntry("/workspace/skills/sbx-skill/SKILL.md", skillMd.length());
+        var farmLink = mock(EntryInfo.class);
+        when(farmLink.getPath()).thenReturn("/workspace/skills/farm-skill");
+        when(farmLink.getType()).thenReturn("symlink");
+        when(files.listDirectory("/workspace/skills")).thenReturn(List.of(skillDir, farmLink));
+        when(files.listDirectory("/workspace/skills/sbx-skill")).thenReturn(List.of(skillMdEntry));
+        when(files.readFile("/workspace/skills/sbx-skill/SKILL.md")).thenReturn(skillMd);
+        var osb = mock(Sandbox.class);
+        when(osb.files()).thenReturn(files);
+
+        service(store, AGENT).syncBack(USER, osb);
+
+        verify(files, never()).listDirectory("/workspace/skills/farm-skill");
+        verify(files, never()).readFile("/workspace/skills/farm-skill");
+        var reader = new WorkspaceReader(distributedStore(store), AGENT);
+        assertNull(reader.readUserSkillFile(USER, "farm-skill", "SKILL.md"), "顶层软链技能不得被吸回 L4");
+        assertEquals(skillMd, reader.readUserSkillFile(USER, "sbx-skill", "SKILL.md"), "兄弟真实技能照常回写");
+    }
+
     /** 超过 100KB 上限的单个技能文件跳过，不影响同技能主文件回写（size 预检 + 读回字节双道防线） */
     @Test
     void syncBackShouldSkipOversizedSkillFile() throws Exception {
