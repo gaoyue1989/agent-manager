@@ -98,6 +98,7 @@ backend:
 
 rbac:
   clusterScope: false            # true = ClusterRole/ClusterRoleBinding（跨 namespace 管理）
+  sandboxWorkloadNamespace: opensandbox  # OpenSandbox 池 workload ns（与 backend 常量 k8s.SandboxWorkloadNamespace 同值）：skillsync token Secret ensure/前提门的授权落点
 
 # ---------- platform-frontend ----------
 frontend:

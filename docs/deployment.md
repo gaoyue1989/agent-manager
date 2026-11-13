@@ -234,9 +234,13 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
    （脚本自动，缺授权时发布报错 `skillsync token secret ... forbidden`，重跑脚本即恢复）。
    轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
    存量集群 agent-platform ns 的同名 Secret 为无消费方遗留物，可手工删除。
-4. **建池**：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag，extraEnv 带
-   `SKILLSYNC_BASE_URL=http://oaf-{name}-svc.agent-platform.svc:8100`（+ token secretKeyRef），
-   `commandWrapper: true`；镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。
+4. **建池**（PR-4a 默认开启）：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag——
+   token Secret 在位（服务 env 携带 `SKILLSYNC_TOKEN`）时建池请求缺省即注入三键
+   （`SKILLSYNC_BASE_URL` 按 `{k8s名}-svc.{ns}.svc` 派生 + token secretKeyRef + `SKILLSYNC_INTERVAL=1m`）
+   并开启 commandWrapper，无需手填；`extraEnv` 仅作键级覆盖通道（灰度改 INTERVAL 等）。
+   服务未配 token Secret → 该池按旧行为建（补配后重建池即默认开启）；`disableSyncd: true`
+   显式关闭（与 extraEnv 互斥）。镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不
+   crashloop（D-1）。
 
 **升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
 须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
@@ -244,7 +248,7 @@ docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4
 **回滚 runbook**（镜像与模板偏斜双向安全，顺序不敏感；清理收尾）：
 
 1. 镜像 tag 回退：池/服务镜像改回上一 tag（如 `opensandbox/code-interpreter:v1.1.0`）后重建池。
-2. 池模板参数摘除：建池/重建池请求去掉 `extraEnv` 与 `commandWrapper`。
+2. 池模板参数摘除（PR-4a）：建池/重建池请求带 `disableSyncd: true`。
 3. 清理：删除 ns `opensandbox` 的 `{name}-skillsync-token` Secret（唯一副本，落点即消费方）+ 回收 egress 放行条目。
 
 ## 关键端点

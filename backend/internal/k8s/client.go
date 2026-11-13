@@ -38,6 +38,12 @@ type Client interface {
 	// ServiceExists 查询 Service 对象是否存在（不要求 Ready）——router 模式启动
 	// 自检用（RequireRouter）。
 	ServiceExists(ns, name string) (bool, error)
+
+	// SecretExists 查询 Secret 对象是否存在——建池默认注入 skills-syncd env 的
+	// 前提门（PR-4a）：per-service token Secret 落池 workload ns（SkillsyncTokenSecret
+	// 消费方），缺失则池 Pod secretKeyRef 解析失败卡 CreateContainerConfigError，
+	// 故默认注入前先核对象存在（平台下发与管理员预建两条 §9.1 路径统一以此为准）。
+	SecretExists(ns, name string) (bool, error)
 }
 
 // PodInfo 实时 Pod 状态摘要。
@@ -226,6 +232,17 @@ func (c *RealClient) PodStatuses(ns, labelSelector string) ([]PodInfo, error) {
 
 func (c *RealClient) ServiceExists(ns, name string) (bool, error) {
 	_, err := c.cs.CoreV1().Services(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *RealClient) SecretExists(ns, name string) (bool, error) {
+	_, err := c.cs.CoreV1().Secrets(ns).Get(context.TODO(), name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
