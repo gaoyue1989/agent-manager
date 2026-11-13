@@ -215,17 +215,31 @@ ENTRYPOINT ["/usr/local/bin/entrypoint-wrap.sh"]
 #!/bin/sh
 # skillsync-launcher.sh —— 通用启动器：watchdog 拉起守护后 exec 传入命令
 # 两条铁律：1) 后台循环绝不阻塞主进程；2) exec 保持主进程语义
+log_file=/var/log/skills-syncd.log
+log_max_bytes=$((1024 * 1024))
 if [ -n "$SKILLSYNC_BASE_URL" ]; then
     (while :; do
-         setsid /usr/local/bin/skills-syncd 2>>/var/log/skills-syncd.log
+         setsid /usr/local/bin/skills-syncd 2>>"$log_file"
          sleep 30
+     done) &
+    (while :; do
+         sleep 30
+         if [ -f "$log_file" ] && [ "$(wc -c <"$log_file")" -gt "$log_max_bytes" ]; then
+             tail -c "$((log_max_bytes / 2))" "$log_file" >"$log_file.tmp" &&
+                 cat "$log_file.tmp" >"$log_file"
+             rm -f "$log_file.tmp"
+         fi
      done) &
 fi
 exec "$@"
 ```
 
 守护由 watchdog 循环拉起（D-6）：正常/异常退出均 ≤30s 重启（sleep 兼任崩溃循环节流阀）；
-stderr 统一重定向 `/var/log/skills-syncd.log`（§4.2 唯一日志落点）。
+stderr 统一重定向 `/var/log/skills-syncd.log`（§4.2 唯一日志落点）。守护正常态不退出
+（`context.Background()` 恒存活），watchdog 重启仅在崩溃后发生，故 §4.2 的上限截断由
+**独立周期循环**（同为 30s 节拍）执行：超 1MiB 触发，就地截断（`cat` 重写而非 `mv`，守护
+O_APPEND fd 不悬空、后续写入继续落原 inode）并保留尾部 512KiB（滞回：回落至半限，再涨
+半限才再触发，避免稳态反复重写）。
 
 ```sh
 #!/bin/sh
@@ -295,6 +309,21 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
 - 路径 `/internal/skills/version`、`/internal/skills/bundle`；token 经 env `SKILLSYNC_TOKEN` 配置
   （空 = 端点关闭，404）。**鉴权关系**：仅 token 校验，不参与 `ROUTER_AUTH_MODE`/业务鉴权链，
   且不经业务 Ingress 对外暴露（仅集群内访问）
+  > 补记（2026-11-13）：该断言在 host 模式（`INGRESS_HOST_SUFFIX` 非空）根路径直出下曾被
+  > 静默穿透（`/internal/skills/**` 与 `/actuator/**` 均经业务域名可达）。已由平台强制实现：
+  > host 模式 per-service Ingress 构造时把 `/internal`、`/actuator` 前缀改道
+  > `platform-router-svc`（router `location /` 恒 404），`validateIngress` 拒绝丢失或改指的
+  > overlay——backend/internal/k8s objects.go `hostModeInternalPath`、template.go
+  > `validateIngress`；运维口径见 docs/deployment.md §七之二/§七之三。
+  > 补记二（2026-11-13，评审修正）：「router 模式只路由 `/agent/{short}` 天然满足」不严格
+  > 成立——剥前缀透传任意子路径，`/agent/{short}/internal/skills/version` 与
+  > `/actuator/metrics` 经业务入口可达（守密性由 token 门兜住：无 token 401、未配 token
+  > 404，非漏洞；`ROUTER_AUTH_MODE` 鉴权是仅有的入口层防线）。已按纵深防御补齐：router
+  > nginx 内置段边界排除 `/agent/{short}/(internal|actuator)` 恒 404（manifests/
+  > platform-router.yaml，正则 location 先于泛化声明，守卫测试 backend/internal/k8s/
+  > router_test.go），两种模式外部表现一致。口径修正：**token 门为主控制，业务入口排除
+  > （router 内置 + host Ingress 排除表）为纵深防御**；守护消费经 `SKILLSYNC_BASE_URL`
+  > 集群内直连 svc，不经业务入口，不受排除影响。
 - 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
 - **版本指纹 singleflight + ≤5s TTL 缓存**（D-4，修订 G2 的绝对化表述）：对包技能目录做 stat 指纹
   （relPath|mtime|size 排序遍历，2000 文件 ≈10-50ms）+ 服务级禁用集（B-2）。新鲜度语义由守护侧
@@ -377,7 +406,7 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 7.1 时序保证
 
-- 发布新版 → agent-framework 端点版本指纹变更（即时，随发布事件失效进程内缓存）
+- 发布新版 → agent-framework 端点版本指纹变更（无发布事件失效，≤5s TTL（D-4）内旧值可见）
 - 沙箱侧最长 `2×INTERVAL` 内拉到（轮询 `INTERVAL` + 拉取退避 `INTERVAL`，D-7）→ `CURRENT` 原子切换，**下一次路径解析即见新版**（含运行中会话）；
   已打开的技能脚本/文件凭 inode 继续按旧内容执行完毕（Unix 语义），无中途截断
 - 与现行为对比：现 per-call 指纹在下一 call 换新版——本设计同为「切换即生效」语义，

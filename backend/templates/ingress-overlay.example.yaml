@@ -27,9 +27,13 @@
 #
 # 校验（违规即启动失败/发布失败，错误信息指明违例项）：
 #   - 禁改：metadata.name/namespace、平台 labels、spec.ingressClassName
-#   - 归属唯一：所有 backend 必须指向本服务 {{K8S_NAME}}-svc:8100（发布期替换）
-#   - 每条 path 必须设置 pathType，且恒为根路径 /（平台展示地址固定按根 URL 派生，
-#     放开 path 会让展示地址与实际路由错位）
+#   - 归属唯一：path / 的 backend 必须指向本服务 {{K8S_NAME}}-svc:8100（发布期替换）
+#   - 内部路径排除表（安全不变量）：path /internal 与 /actuator 的 backend 恒为
+#     platform-router-svc:80（router 的 location / 恒 404），且两段不得丢失——
+#     agent-framework 的 skills-syncd 内部端点与 actuator 指标仅集群内 Service 可达，
+#     经业务域名对外暴露属违规（整块替换 rules 时必须带上这两段，见 H3）
+#   - 每条 path 必须设置 pathType；除上述三段外不得新增 path（平台展示地址固定按
+#     根 URL 派生，放开 path 会让展示地址与实际路由错位）
 #   - 每条 rule 的 host 必须等于 {{K8S_NAME}}{{HOST_SUFFIX}}（域名即服务身份，不可
 #     偏离；留空会退化成共享入口 IP 承载根路径，流量串服务）
 #   - spec.defaultBackend 必须保持为空
@@ -66,7 +70,8 @@
 #
 # H3) 完整 rules（host 与 path 均为不变量、不可改；仅在需要显式写出整块时使用，
 #     如改 pathType。host 用 {{K8S_NAME}}{{HOST_SUFFIX}} 组合写出，与 INGRESS_HOST_SUFFIX
-#     自动联动，模板保持环境无关）
+#     自动联动，模板保持环境无关。内部路径排除表 /internal、/actuator 必须带上，
+#     丢段会被校验拒绝）
 # spec:
 #   rules:
 #     - host: "{{K8S_NAME}}{{HOST_SUFFIX}}"   # 不可偏离 {{K8S_NAME}}{{HOST_SUFFIX}}
@@ -79,3 +84,17 @@
 #                 name: "{{K8S_NAME}}-svc"
 #                 port:
 #                   number: 8100
+#           - path: /internal          # 内部路径排除表：改道 router 恒 404，不可丢/改指
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: platform-router-svc
+#                 port:
+#                   number: 80
+#           - path: /actuator          # 同上（actuator 健康/指标仅集群内可达）
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: platform-router-svc
+#                 port:
+#                   number: 80

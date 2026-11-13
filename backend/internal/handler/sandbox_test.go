@@ -83,7 +83,7 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 					return
 				}
 				w.WriteHeader(http.StatusCreated)
-				_, _ = w.Write([]byte(`{"name":"p1"}`))
+				_, _ = w.Write([]byte(`{"name":"oaf-demo-pool"}`))
 				return
 			}
 			w.WriteHeader(http.StatusOK)
@@ -97,11 +97,15 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 	}))
 	defer up.Close()
 
-	r := newSandboxAdminEngine(newSandboxAdminCore(t, strings.TrimPrefix(up.URL, "http://")))
+	core := newSandboxAdminCore(t, strings.TrimPrefix(up.URL, "http://"))
+	if err := core.DB.Create(&store.ServiceEntity{K8sName: "oaf-demo", DisplayName: "oaf-demo"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r := newSandboxAdminEngine(core)
 
 	// 创建成功 → 201（包络 code=0）
 	w, env := doJSON(t, r, http.MethodPost, "/api/v1/admin/sandboxes/pools", map[string]interface{}{
-		"name":         "p1",
+		"name":         "oaf-demo-pool",
 		"capacitySpec": map[string]int32{"bufferMin": 1, "bufferMax": 2, "poolMin": 1, "poolMax": 3},
 	})
 	if w.Code != http.StatusCreated {
@@ -120,17 +124,20 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 
 	// 同名创建 → 上游 409 原样透传（载荷容量合法，仅 name 重复；设计 §5.2「409 = 同名已存在」）
 	dupBody := map[string]interface{}{
-		"name":         "p1",
+		"name":         "oaf-demo-pool",
 		"capacitySpec": map[string]int32{"bufferMin": 1, "bufferMax": 2, "poolMin": 1, "poolMax": 3},
 	}
 	if w, _ := doJSON(t, r, http.MethodPost, "/api/v1/admin/sandboxes/pools", dupBody); w.Code != http.StatusConflict {
 		t.Fatalf("duplicate name passthrough = %d, want 409: %s", w.Code, w.Body.String())
 	}
 
-	// name 非法 → 400；capacitySpec 链破坏 → 400
+	// name 非法 → 400；capacitySpec 链破坏 → 400；池名未绑定服务 / extraEnv 键越界 → 400
 	for _, body := range []map[string]interface{}{
 		{"name": "Bad_Name", "capacitySpec": map[string]int32{"bufferMin": 1, "bufferMax": 2, "poolMin": 1, "poolMax": 3}},
 		{"name": "p2", "capacitySpec": map[string]int32{"bufferMin": 3, "bufferMax": 2, "poolMin": 1, "poolMax": 4}},
+		{"name": "oaf-none-pool", "capacitySpec": map[string]int32{"bufferMin": 1, "bufferMax": 2, "poolMin": 1, "poolMax": 3}},
+		{"name": "oaf-demo-pool", "capacitySpec": map[string]int32{"bufferMin": 1, "bufferMax": 2, "poolMin": 1, "poolMax": 3},
+			"extraEnv": []map[string]string{{"name": "FOO_BAR", "value": "x"}}},
 	} {
 		if w, _ := doJSON(t, r, http.MethodPost, "/api/v1/admin/sandboxes/pools", body); w.Code != http.StatusBadRequest {
 			t.Fatalf("invalid input = %d, want 400: %s", w.Code, w.Body.String())
@@ -155,7 +162,7 @@ func TestAdminSandboxesHTTPMapping(t *testing.T) {
 	mu.Unlock()
 
 	// 未配置 → 503 + 提示 /settings（Required 键走 API 清不掉，直删 DB 行模拟）
-	core := newSandboxAdminCore(t, strings.TrimPrefix(up.URL, "http://"))
+	core = newSandboxAdminCore(t, strings.TrimPrefix(up.URL, "http://"))
 	if err := core.DB.Where("env_key IN ?", []string{"OPENSANDBOX_SERVER_URL", "OPENSANDBOX_API_KEY"}).
 		Delete(&store.PlatformConfigEntity{}).Error; err != nil {
 		t.Fatal(err)

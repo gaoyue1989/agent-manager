@@ -208,6 +208,45 @@ SANDBOX_RENEW_INTERVAL_SECONDS=60     # 在途续期间隔
 4. 池/沙箱的 TTL 与 GC 真相在 opensandbox 服务端（expiresAt / ttl_expiry），平台侧仅代理转发与簿记；
    backend 重启不影响任何沙箱与池。
 
+### 4. 技能同步（skills-syncd，可选）
+
+池化沙箱的技能同步：守护协议/软链农场/失败语义见设计
+docs/design/sandbox-skills-syncd-design-261112.md（排障 runbook 见其 §10.4），此处只记部署前提与回滚：
+
+1. **镜像**：主容器镜像须含 `skills-syncd` 二进制 + launcher/entrypoint-wrap 两脚本（直建路径经
+   ENTRYPOINT 生效、池化路径由池模板 commandWrapper 注入启动点）。构建与 kind 导入一步到位
+   （宿主静态编译 → overlay 镜像 → ctr import；幂等可重跑，基础镜像 12.7GB 导入需数分钟）：
+
+   ```bash
+   ./scripts/build-skillsync-image.sh
+   # 产出: gaoyue1989/code-interpreter-oa:skillsync-331
+   #       （FROM gaoyue1989/code-interpreter-oa:v20260914 overlay）
+   ```
+
+2. **egress 放行**：池 Pod → 本服务 svc 出网须在 OpenSandbox egress 策略放行
+   `oaf-{name}-svc.agent-platform.svc`（或集群内网段），否则守护拉取持续退避、store 无库（fail-open）。
+3. **token Secret（自动 ensure，消费方落点）**：`SKILLSYNC_TOKEN` 是平台 env 模板敏感键
+   （platformconfig/template.go sandbox 组）——服务 env 携带该键即自动路由进服务 Secret
+   （无需显式 `secretKeys`，明文不落 CM/env_json），发布/改 env 链路幂等 ensure
+   `{name}-skillsync-token`（data 键 `token`）直落池 workload ns **`opensandbox`**——池模板
+   secretKeyRef 在该 ns 内解析，K8s 跨 ns 引用不成立，服务 ns（agent-platform）不产副本。
+   前置：deploy-opensandbox.sh 步骤 4.1 已授予 platform-backend 于该 ns 的 Secret 读写 RBAC
+   （脚本自动，缺授权时发布报错 `skillsync token secret ... forbidden`，重跑脚本即恢复）。
+   轮换 = env 表单改 `SKILLSYNC_TOKEN`（单写入口，两处消费自动同值）+ 池 Pod 重建（D-8 契约）；
+   存量集群 agent-platform ns 的同名 Secret 为无消费方遗留物，可手工删除。
+4. **建池**：池名 `{name}-pool`（与服务绑定唯一校验），镜像填上述 tag，extraEnv 带
+   `SKILLSYNC_BASE_URL=http://oaf-{name}-svc.agent-platform.svc:8100`（+ token secretKeyRef），
+   `commandWrapper: true`；镜像/模板任一先行或回退均被偏斜守卫兜底为无守护旧行为，不 crashloop（D-1）。
+
+**升级**：重跑 `./scripts/build-skillsync-image.sh`（同 tag 覆盖）→ 直建新沙箱即用新镜像；池化 Pod
+须重建才换镜像（沙箱管理页销毁 warm 实例，或删池重建——上游改模板必须删池重建）。
+
+**回滚 runbook**（镜像与模板偏斜双向安全，顺序不敏感；清理收尾）：
+
+1. 镜像 tag 回退：池/服务镜像改回上一 tag（如 `opensandbox/code-interpreter:v1.1.0`）后重建池。
+2. 池模板参数摘除：建池/重建池请求去掉 `extraEnv` 与 `commandWrapper`。
+3. 清理：删除 ns `opensandbox` 的 `{name}-skillsync-token` Secret（唯一副本，落点即消费方）+ 回收 egress 放行条目。
+
 ## 关键端点
 
 对外入口：
@@ -264,6 +303,7 @@ jdbc:mysql://oaf-mysql.agent-platform.svc.cluster.local:3306/oaf_checkpoint?useS
    未派生的存量默认值（共享 `oaf_checkpoint` 库 + 空 Redis 前缀）多服务沿用仍会互相串数据。
 5. backend 重启/升级不影响已在跑的业务服务（数据面不经 backend）；唯一边界：发布等待期（`deploying` 状态）重启 backend 会丢后台注册推进，该服务会停在 `deploying`，用 Republish 解救，业务 Pod 不受影响。
 6. **共享 PVC 名可配**：`PLATFORM_PVC_NAME`（默认 `platform-data`）决定业务 Pod 与 backend 共用的平台数据卷名——环境已有 PVC 用别的名字时设它（Helm 部署即 `persistence.existingClaim`）；变更后需 republish 才刷到业务 Deployment。
+7. **skills-syncd（沙箱技能同步，可选）**：镜像构建/导入 `./scripts/build-skillsync-image.sh`；部署前提与回滚见「五之二 → 4. 技能同步」，排障 runbook 见设计文档 §10.4（docs/design/sandbox-skills-syncd-design-261112.md）。
 
 ## 六、业务 Deployment 环境模板（DEPLOYMENT_TEMPLATE，可选）
 
@@ -319,7 +359,7 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 - **不设置 `INGRESS_TEMPLATE` = 纯内置构造**。**模板仅 host 模式可用**（`INGRESS_HOST_SUFFIX` 非空；router 模式无 per-service Ingress，suffix 空 + 模板非空启动即拒）。
 - 占位符发布期按服务替换：`{{K8S_NAME}}`（backend 指向 `{{K8S_NAME}}-svc`）；**不得硬编码服务名/metadata.name**（启动探针即拒绝）。
 - `annotations`/`labels` 按 key 合并（只写新增项即保留内置注解）；**`rules`/`tls` 写了即整体替换**——写 rules 必须抄完整块（host/path 均为不变量，见 §七之三）。
-- 校验不变量（host 模式）：backend 必须指向本服务；每条 path 必须设置 pathType 且恒为 `/`；rule host 恒为 `{K8sName}{后缀}`；SSE 长超时注解必须保留；rewrite-target / use-regex / x-forwarded-prefix 三项必须为空。
+- 校验不变量（host 模式）：`/` 的 backend 必须指向本服务；每条 path 必须设置 pathType；除根路径外仅允许**内部路径排除表** `/internal`、`/actuator`（backend 恒为 `platform-router-svc:80`，两段不得丢失、不得改指本服务）；rule host 恒为 `{K8sName}{后缀}`；SSE 长超时注解必须保留；rewrite-target / use-regex / x-forwarded-prefix 三项必须为空。
 - 服务详情展示的**访问地址（Endpoint）自动跟随合并结果**：host 模式取规则 Host 形如 `http(s)://{K8sName}{后缀}/`（不拼端口）。改 host 后 DNS/端口可达性由环境自行保证；环境未终止 TLS 时不要配 TLS。
 - 非法 overlay 启动即失败；发布/republish 期违规直接拒绝（Publish 不落库，Republish 保持原状）。存量服务需 republish 才滚动到新形态。
 
@@ -329,10 +369,12 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_TEMPLATE-  # �
 
 | `INGRESS_HOST_SUFFIX` | 模式 | 形态 |
 |---|---|---|
-| 空（默认） | **router** | 不构造 per-service Ingress；统一域名 `/agent/{short}` 子路径由集群内 **platform-router** nginx 承接（§七之三部署）；Endpoint = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/` |
-| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解 |
+| 空（默认） | **router** | 不构造 per-service Ingress；统一域名 `/agent/{short}` 子路径由集群内 **platform-router** nginx 承接（§七之三部署），其中 `/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404；Endpoint = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/` |
+| 非空 | **host** | per-service Ingress：`host={K8sName}{后缀}`、`path=/`、pathType Prefix，只保留 ssl-redirect 与 proxy 超时注解；**内部路径排除表** `/internal`、`/actuator` 改道 `platform-router-svc` 恒 404（纵深防御，外部表现与 router 模式一致，见下方安全模型）——skills-syncd 内部端点与 actuator 健康/指标的合法消费仅集群内 `oaf-{name}-svc:8100` 直连，不经业务域名暴露 |
 
 > ⚠️ **router 模式启动自检**：suffix 空时 backend 启动即检查 `platform-router-svc` 存在，缺失则 CrashLoop（报错指向 §七之三的 manifest）——先 apply platform-router 再升级 backend。**suffix 空 + `INGRESS_TEMPLATE` 非空同样启动即拒**（router 无 per-service Ingress，模板无处生效）。
+
+**内部端点安全模型**（skills-syncd 内部端点 `/internal/skills/**` 与 actuator `/actuator/**`）：前者的访问控制以 **token 门为主**——合法消费经 `SKILLSYNC_BASE_URL` 集群内直连 `oaf-{name}-svc:8100` 携带 `SKILLSYNC_TOKEN`，无 token 401、未配 token 端点关闭（404）；actuator 无鉴权，仅限集群内消费（D-5 判定打点直连 svc）。两者不经业务域名暴露由业务入口排除兜底：`/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404——router nginx 内置排除（§七之三 manifest）与 host 模式 Ingress 排除表同语义，为**纵深防御**（两种模式外部表现一致），不是 token 之外的第二套鉴权。
 
 host 模式切换（后缀必须以 `.` 开头、各段 ≤63、叠加最长 K8sName 后总长 ≤253）：
 
@@ -351,9 +393,9 @@ kubectl -n agent-platform set env deploy/platform-backend INGRESS_HOST_SUFFIX-
 - **存量服务不做后台批量迁移**：模式切换后经 republish / 重新上线（StartAgain）收敛——host 模式刷 Ingress 形态；router 模式对同名 Ingress「存在即删除」（清理 path 时代残留）——Endpoint 均同步重算落库。残留兜底：`kubectl -n agent-platform delete ingress -l app.kubernetes.io/managed-by=oaf-platform`（排除 `platform-agent-router` 自身）。
 - 展示地址（Endpoint）随模式切换：router = `http://{INGRESS_HOST}:{INGRESS_PORT}/agent/{short}/`（与历史 path 模式同形状，前端零改动）；host = `http(s)://{K8sName}{后缀}/`。
 
-## 七之三、platform-router 部署（router 模式，默认）
+## 七之三、platform-router 部署（router 模式必部署；host 模式承接被排除路径）
 
-router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）：
+router 模式的集群内子路径路由器（静态泛化 nginx：正则提服务名 + kube-dns 动态解析 + 原生 rewrite 剥前缀 + `X-Forwarded-Prefix` 注入；配置静态，发布链路零写入、无需 reload）。manifest 内置**内部路径排除**：`/agent/{short}/internal`、`/agent/{short}/actuator`（段边界）恒 404（§七之二安全模型；升级已有集群 = 重新 apply 本 manifest + rollout restart router）。**host 模式同样依赖本 manifest**：per-service Ingress 的内部路径排除表（§七之二）把 `/internal`、`/actuator` 改道 `platform-router-svc`（其 `location /` 恒 404，与 router 模式外部表现一致）——router 缺失时这些路径 503，恒 fail-closed 不暴露内容；切 host 模式前同样先 apply 本 manifest（router 与业务 Service 需同 namespace）。
 
 ```bash
 # kind 环境先导入镜像

@@ -46,17 +46,17 @@ func TestDeriveAndShortName(t *testing.T) {
 	}
 }
 
-// 派生名总长必须为最长子对象名（"{name}-env-secret"）预留后缀预算（issue #149：
+// 派生名总长必须为最长子对象名（"{name}-skillsync-token"）预留后缀预算（issue #149：
 // k8s 名贴 63 时 -svc 后缀拼出 67 被 K8s API 拒绝，且发布已落库 → 残留记录）。
 func TestDeriveK8sNameLengthCap(t *testing.T) {
 	long := repeat("z", 100)
 	got := DeriveK8sName(long, "x/y")
-	// oaf-(4) + base(≤52) + "-env-secret"(11) ≤ 67... 实际约束：k8s 名 ≤52，子对象 ≤63
-	if len(got) > 63-len("-env-secret") {
-		t.Fatalf("derived name length %d exceeds %d: %q", len(got), 63-len("-env-secret"), got)
+	// oaf-(4) + base(≤43) + "-skillsync-token"(16) ≤ 63... 实际约束：k8s 名 ≤47，子对象 ≤63
+	if len(got) > 63-len(SkillsyncTokenSuffix) {
+		t.Fatalf("derived name length %d exceeds %d: %q", len(got), 63-len(SkillsyncTokenSuffix), got)
 	}
-	if got != "oaf-"+repeat("z", 48) {
-		t.Fatalf("unexpected truncation: %q (want oaf- + 48 z)", got)
+	if got != "oaf-"+repeat("z", 43) {
+		t.Fatalf("unexpected truncation: %q (want oaf- + 43 z)", got)
 	}
 	if n := len(got + "-svc"); n > 63 {
 		t.Fatalf("svc object name %d exceeds 63", n)
@@ -64,9 +64,36 @@ func TestDeriveK8sNameLengthCap(t *testing.T) {
 	if n := len(got + "-env-secret"); n > 63 {
 		t.Fatalf("secret object name %d exceeds 63", n)
 	}
+	if n := len(got + SkillsyncTokenSuffix); n > 63 {
+		t.Fatalf("skillsync token secret name %d exceeds 63", n)
+	}
 	// 非 ASCII 输入 sanitize 后长度收缩，同样满足上限
-	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got) > 63-len("-env-secret") {
+	if got := DeriveK8sName(repeat("智", 100), "x/y"); len(got) > 63-len(SkillsyncTokenSuffix) {
 		t.Fatalf("cjk derive: %q (%d)", got, len(got))
+	}
+}
+
+// TestSkillsyncTokenNameAndSecret per-service 技能同步 token Secret（skills-syncd D-8）：
+// 名派生 {k8sName}-skillsync-token、key=token、值取自服务敏感 env SKILLSYNC_TOKEN，
+// 落点固定池 workload ns（消费方，跨 ns secretKeyRef 引用不成立）。
+func TestSkillsyncTokenNameAndSecret(t *testing.T) {
+	if got := SkillsyncTokenName("oaf-demo"); got != "oaf-demo-skillsync-token" {
+		t.Fatalf("name derive: %q", got)
+	}
+	if EnvSecretName("oaf-demo") != "oaf-demo-env-secret" {
+		t.Fatal("env secret name must stay")
+	}
+	p := testParams()
+	p.EnvSecret = map[string]string{"SKILLSYNC_TOKEN": "tok-1"}
+	sec := SkillsyncTokenSecret(p)
+	if sec.Name != SkillsyncTokenName(p.K8sName) || sec.Namespace != SandboxWorkloadNamespace {
+		t.Fatalf("meta wrong: %+v", sec.ObjectMeta)
+	}
+	if sec.Labels[LabelKey] != p.K8sName || sec.Labels[ManagedByLabel] != ManagedByValue {
+		t.Fatalf("labels wrong: %+v", sec.Labels)
+	}
+	if string(sec.Data[SkillsyncTokenDataKey]) != "tok-1" {
+		t.Fatalf("data wrong: %+v", sec.Data)
 	}
 }
 
@@ -241,8 +268,10 @@ func TestServiceAndRouterEndpoint(t *testing.T) {
 }
 
 // TestIngressHostModeConstruction host 模式（IngressHostSuffix 非空）内置构造：
-// 域名 = {K8sName}{suffix}、path 根路径、pathType Prefix、只留 ssl-redirect 与 SSE
-// 超时注解——不得出现任何 rewrite 相关注解（无前缀可剥离）。
+// 域名 = {K8sName}{suffix}、path 根路径（backend 本服务）+ 内部路径排除表
+// （/internal、/actuator 改道 platform-router 恒 404，保证设计 §6.1「内部端点不经
+// 业务 Ingress 对外暴露」）、pathType Prefix、只留 ssl-redirect 与 SSE 超时注解——
+// 不得出现任何 rewrite 相关注解（无前缀可剥离）。
 func TestIngressHostModeConstruction(t *testing.T) {
 	ing := Ingress(hostModeParams())
 	if ing.Name != "oaf-acme-demo" || ing.Namespace != "agent-platform" {
@@ -258,19 +287,33 @@ func TestIngressHostModeConstruction(t *testing.T) {
 	if rule.Host != "oaf-acme-demo.region-c86-test.test-kzx1.cncb" {
 		t.Fatalf("host wrong: %q", rule.Host)
 	}
-	if len(rule.HTTP.Paths) != 1 {
-		t.Fatalf("want exactly one path, got %d", len(rule.HTTP.Paths))
+	paths := map[string]networkingv1.HTTPIngressPath{}
+	for _, p := range rule.HTTP.Paths {
+		paths[p.Path] = p
 	}
-	path := rule.HTTP.Paths[0]
-	if path.Path != "/" {
-		t.Fatalf("host mode must serve root path, got %q", path.Path)
+	if len(paths) != 1+len(hostModeBlockPathList) {
+		t.Fatalf("want root path + exclusion table, got %+v", rule.HTTP.Paths)
 	}
-	if path.PathType == nil || *path.PathType != networkingv1.PathTypePrefix {
-		t.Fatalf("pathType wrong: %v", path.PathType)
+	root := paths[hostModeRootPath]
+	if root.PathType == nil || *root.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("root pathType wrong: %v", root.PathType)
 	}
-	if path.Backend.Service == nil || path.Backend.Service.Name != "oaf-acme-demo-svc" ||
-		path.Backend.Service.Port.Number != AgentPort {
-		t.Fatalf("backend wrong: %+v", path.Backend.Service)
+	if root.Backend.Service == nil || root.Backend.Service.Name != "oaf-acme-demo-svc" ||
+		root.Backend.Service.Port.Number != AgentPort {
+		t.Fatalf("root backend wrong: %+v", root.Backend.Service)
+	}
+	for _, bp := range hostModeBlockPathList {
+		p, ok := paths[bp]
+		if !ok {
+			t.Fatalf("host mode must exclude internal path %s, got %+v", bp, rule.HTTP.Paths)
+		}
+		if p.PathType == nil || *p.PathType != networkingv1.PathTypePrefix {
+			t.Fatalf("path %s pathType wrong: %v", bp, p.PathType)
+		}
+		if p.Backend.Service == nil || p.Backend.Service.Name != RouterServiceName ||
+			p.Backend.Service.Port.Number != RouterServicePort {
+			t.Fatalf("path %s backend wrong (must route to router 404 sink): %+v", bp, p.Backend.Service)
+		}
 	}
 	wantAnn := map[string]string{
 		annSSLRedirect:      "false",

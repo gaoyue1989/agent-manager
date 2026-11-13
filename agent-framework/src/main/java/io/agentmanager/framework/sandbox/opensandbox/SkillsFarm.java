@@ -214,8 +214,9 @@ final class SkillsFarm {
      * 农场链候选（相对 scopeDir 的 ns/name，排序稳定）：宿主 scope 目录即 SDK stage manifest，
      * 其内全部为包技能（workspace-native L4 不进 .skills-cache）。禁用名（{@link
      * ScopedSkillCacheSupport#disabledSkillDirs} 同源，禁止重写过滤规则）与 L4 同名（规则 1
-     * 真实文件保护）不建链；含单引号/空白/{@code ..} 的相对路径跳过（防御同
-     * {@link ScopedSkillCacheSupport#disabledRmCmd}）。
+     * 真实文件保护）不建链；含单引号/空白/{@code ..} 的相对路径跳过并 WARN 留痕（防御同
+     * {@link ScopedSkillCacheSupport#disabledRmCmd}）——tar 物化路径会携带这些文件，
+     * farm 侧静默缺失不可观测。
      */
     private List<String> linkCandidates(Path scopeDir, Set<Path> disabledDirs,
                                         Set<String> l4Names) throws Exception {
@@ -228,8 +229,12 @@ final class SkillsFarm {
                 try (var skillStream = Files.list(ns)) {
                     for (var skillDir : skillStream.filter(Files::isDirectory).sorted().toList()) {
                         var rel = scopeDir.relativize(skillDir).toString().replace('\\', '/');
-                        if (!ScopedSkillCacheSupport.isShellSafeRelPath(rel)
-                                || disabledDirs.contains(scopeDir.relativize(skillDir))
+                        if (!ScopedSkillCacheSupport.isShellSafeRelPath(rel)) {
+                            log.warn("[sandbox-open] skills farm link candidate skipped, rel not shell-safe (rel={}): "
+                                + "tar mode materializes it, farm mode drops it", rel);
+                            continue;
+                        }
+                        if (disabledDirs.contains(scopeDir.relativize(skillDir))
                                 || l4Names.contains(skillDir.getFileName().toString())) {
                             continue;
                         }

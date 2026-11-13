@@ -65,16 +65,36 @@ func SanitizeK8sNameMax(in string, max int) string {
 	return s
 }
 
-// DeriveK8sName slug("vendor/agent") 或自定义名 → "oaf-{sanitized}"，总长 ≤48：
-// 运行时还要派生 Service "{name}-svc" / Secret "{name}-env-secret" 等子对象名
-// （同为 DNS-1123 ≤63，issue #149：k8s 名贴 63 上限时 -svc 后缀拼出 67 被 API 拒绝，
-// 且发布先落库 → 残留 deploying/error 记录），为最长后缀 "-env-secret"(11) 预算。
+// 服务级子对象名后缀（DeriveK8sName 按最长者预留预算，skills-syncd per-service
+// Secret 名同套预算）。
+const (
+	EnvSecretSuffix      = "-env-secret"
+	SkillsyncTokenSuffix = "-skillsync-token"
+)
+
+// SandboxWorkloadNamespace OpenSandbox 池 workload 命名空间（deploy-opensandbox.sh 服务端
+// config [kubernetes] namespace 固定同值）：per-service skillsync token Secret 的唯一落点——
+// 池模板 secretKeyRef 在 workload ns 内解析，K8s 跨 ns 引用不成立，故 ensure 必须落到消费方。
+const SandboxWorkloadNamespace = "opensandbox"
+
+// SkillsyncTokenEnvKey 技能同步守护端点鉴权 token 的服务 env 键（敏感路由后同值
+// 落 per-service Secret 于 SandboxWorkloadNamespace，§5.2/§9.1 sandbox-skills-syncd-design）。
+const SkillsyncTokenEnvKey = "SKILLSYNC_TOKEN"
+
+// SkillsyncTokenDataKey per-service token Secret 的 data 键（池模板 secretKeyRef 引用）。
+const SkillsyncTokenDataKey = "token"
+
+// DeriveK8sName slug("vendor/agent") 或自定义名 → "oaf-{sanitized}"，总长 ≤47：
+// 运行时还要派生 Service "{name}-svc" / Secret "{name}-env-secret" /
+// "{name}-skillsync-token" 等子对象名（同为 DNS-1123 ≤63，issue #149：k8s 名贴 63
+// 上限时 -svc 后缀拼出 67 被 API 拒绝，且发布先落库 → 残留 deploying/error 记录），
+// 为最长后缀 "-skillsync-token"(16) 预算。
 func DeriveK8sName(displayName, slug string) string {
 	base := displayName
 	if base == "" {
 		base = strings.ReplaceAll(slug, "/", "-")
 	}
-	return Prefix + SanitizeK8sNameMax(base, 63-len(Prefix)-len("-env-secret"))
+	return Prefix + SanitizeK8sNameMax(base, 63-len(Prefix)-len(SkillsyncTokenSuffix))
 }
 
 // ShortName 去掉 oaf- 前缀，用于 ingress path /agent/{short}。
@@ -83,7 +103,10 @@ func ShortName(k8sName string) string {
 }
 
 // EnvSecretName 服务级敏感 env Secret 名。
-func EnvSecretName(k8sName string) string { return k8sName + "-env-secret" }
+func EnvSecretName(k8sName string) string { return k8sName + EnvSecretSuffix }
+
+// SkillsyncTokenName 服务级技能同步 token Secret 名（池模板 secretKeyRef 引用）。
+func SkillsyncTokenName(k8sName string) string { return k8sName + SkillsyncTokenSuffix }
 
 type ObjectParams struct {
 	K8sName   string
@@ -129,6 +152,17 @@ func EnvSecret(p ObjectParams) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: EnvSecretName(p.K8sName), Namespace: p.Namespace, Labels: labels(p.K8sName)},
 		Data:       stringMapToBytes(p.EnvSecret),
+	}
+}
+
+// SkillsyncTokenSecret 构造技能同步 token Secret（{k8sName}-skillsync-token，data 键 token；
+// 值取自服务敏感 env SKILLSYNC_TOKEN——同值单一真相源。落点固定池 workload ns
+// SandboxWorkloadNamespace（消费方）：池模板 secretKeyRef 在该 ns 内解析，服务所在 ns
+// 无消费方。调用方保证键存在且非空）。
+func SkillsyncTokenSecret(p ObjectParams) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: SkillsyncTokenName(p.K8sName), Namespace: SandboxWorkloadNamespace, Labels: labels(p.K8sName)},
+		Data:       map[string][]byte{SkillsyncTokenDataKey: []byte(p.EnvSecret[SkillsyncTokenEnvKey])},
 	}
 }
 
@@ -266,10 +300,28 @@ const (
 	// hostModeRootPath host 模式的对外路径：根路径直出，overlay 不可改（Endpoint 固定
 	// 派生为 {scheme}://{K8sName}{suffix}/，放开 path 会让展示地址与实际路由错位）。
 	hostModeRootPath = "/"
+	// hostModeInternalPath / hostModeActuatorPath host 模式的内部路径排除表
+	// （sandbox-skills-syncd-design §6.1 补记）：/internal（skills-syncd 端点，
+	// SKILLSYNC_TOKEN 门）与 /actuator（健康 + Micrometer 指标，无鉴权）设计断言
+	// 「不经业务 Ingress 对外暴露（仅集群内访问）」。host 模式根路径 Prefix 直出会把
+	// 它们一并暴露，故构造时改道 platform-router（其 location / 恒 404，见
+	// manifests/platform-router.yaml）——与 router 模式对这些路径的外部表现一致；
+	// router 缺失时这些路径 503，恒 fail-closed。无尾斜杠 Prefix 同时盖住裸
+	// /actuator（Spring 端点发现页）；业务端点无 /internal*/、/actuator* 前缀，
+	// 前缀级过度匹配无副作用。
+	hostModeInternalPath = "/internal"
+	hostModeActuatorPath = "/actuator"
 	// RouterServiceName router 模式的集群内子路径路由器 Service
-	// （manifests/platform-router.yaml 一次性自举；启动自检见 RequireRouter）。
+	// （manifests/platform-router.yaml 一次性自举；启动自检见 RequireRouter）；
+	// host 模式复用它承接被排除的内部路径（见 hostModeInternalPath）。
 	RouterServiceName = "platform-router-svc"
+	// RouterServicePort platform-router-svc 的 Service 端口（targetPort 8080）。
+	RouterServicePort = 80
 )
+
+// hostModeBlockPathList 内部路径排除表的列表形态：Ingress 构造（objects.go）、overlay
+// 不变量校验（template.go validateIngress）与测试共用同一份，防多处漂移。
+var hostModeBlockPathList = []string{hostModeInternalPath, hostModeActuatorPath}
 
 // pathTypePtr 取 PathType 指针（networkingv1.PathType 为值类型，v1 要求非空）。
 func pathTypePtr(t networkingv1.PathType) *networkingv1.PathType { return &t }
@@ -287,22 +339,41 @@ func ingressBackend(p ObjectParams) networkingv1.IngressBackend {
 	}}
 }
 
+// routerBackend 内部路径排除表的 backend 引用：platform-router-svc（router 模式共享
+// 入口与 host 模式被排除路径共用；其 location / 恒 404，对内部路径即 fail-closed）。
+func routerBackend() networkingv1.IngressBackend {
+	return networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
+		Name: RouterServiceName,
+		Port: networkingv1.ServiceBackendPort{Number: RouterServicePort},
+	}}
+}
+
 // Ingress 构造 host 模式 nginx Ingress（host={K8sName}{suffix}、path 根路径 /、
 // pathType Prefix，仅 ssl-redirect 与 SSE 长超时注解，无 rewrite 相关注解）。
+// 内部路径排除表（/internal、/actuator，见 hostModeInternalPath）改道
+// platform-router 恒 404，保证设计断言「内部端点不经业务 Ingress 对外暴露」。
 //
 // 契约：IngressHostSuffix 必须非空——suffix 空 = router 模式，平台不构造任何
 // per-service Ingress（IngressBuilder.Build 对此 fail-fast），子路径路由由集群内
 // platform-router 承担（见 RouterServiceName）。
 func Ingress(p ObjectParams) *networkingv1.Ingress {
+	paths := []networkingv1.HTTPIngressPath{{
+		Path:     hostModeRootPath,
+		PathType: pathTypePtr(networkingv1.PathTypePrefix),
+		Backend:  ingressBackend(p),
+	}}
+	for _, bp := range hostModeBlockPathList {
+		paths = append(paths, networkingv1.HTTPIngressPath{
+			Path:     bp,
+			PathType: pathTypePtr(networkingv1.PathTypePrefix),
+			Backend:  routerBackend(),
+		})
+	}
 	spec := networkingv1.IngressSpec{
 		Rules: []networkingv1.IngressRule{{
 			Host: p.K8sName + p.IngressHostSuffix,
 			IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
-				Paths: []networkingv1.HTTPIngressPath{{
-					Path:     hostModeRootPath,
-					PathType: pathTypePtr(networkingv1.PathTypePrefix),
-					Backend:  ingressBackend(p),
-				}},
+				Paths: paths,
 			}},
 		}},
 	}

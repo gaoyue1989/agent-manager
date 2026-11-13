@@ -1957,6 +1957,53 @@ class OpenSandboxTest {
     }
 
     @Test
+    void farmConvergeShouldRebuildRealFileAndDanglingLink() throws Exception {
+        // D-2/§10.2「悬空链重建 + 降级会话 tar 物化残留真实文件统一收敛为软链」：农场对 manifest
+        // 内包技能路径有全权，路径现存任何物目标态一律 rm -rf + ln -s 重建为软链，不得因「已存在」
+        // 跳过。mock 架构下容器态以存在性探测应答预置：demo-a = 降级会话 tar 物化残留真实文件
+        // （探测默认应答即「存在」），demo-b = 指向已移除版本的悬空链（链接本体在、目标已删，
+        // test -e 失效）——未来「存在即跳过」优化会在此断言处回归。
+        var host = java.nio.file.Files.createTempDirectory("farm-residue");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-A", "demo-b");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-residue-cfg");
+        bundleSkill(cfg, "demo-a");
+        bundleSkill(cfg, "demo-b");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        String scopeRoot = "/workspace/.skills-cache/sess-A/oaf-package";
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                return mockExecution(0, "v-" + version, "");
+            }
+            if (cmd.equals("test -e '" + scopeRoot + "/demo-b'")) {
+                return mockExecution(1, "", "");   // 悬空链：test -e 失效（其余存在性探测恒「存在」）
+            }
+            return mockExecution(0, "", "");
+        });
+
+        var sandbox = new OpenSandbox(farmState(host, "sbx-farm-residue"), osb,
+            farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+        bindFarmSession(sandbox, "sess-A");
+        sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "farm").counter().count(),
+            "前提：会话判定为 farm（残留收敛语义只在 farm 收敛路径生效）");
+        var cmd = farmConvergeCommands(osb).get(0);
+        assertTrue(cmd.contains("rm -rf '" + scopeRoot + "/demo-a'"),
+            "tar 物化残留真实文件统一收敛为软链：" + cmd);
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' '" + scopeRoot + "/demo-a'"), cmd);
+        assertTrue(cmd.contains("rm -rf '" + scopeRoot + "/demo-b'"), "悬空链重建：" + cmd);
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-b' '" + scopeRoot + "/demo-b'"), cmd);
+    }
+
+    @Test
     void farmDisabledSkillsShouldNotLinkAndRemoveResidue() throws Exception {
         var host = java.nio.file.Files.createTempDirectory("farm-disabled");
         writeHostSkill(host, "sess-A", "demo-a");
@@ -2230,5 +2277,48 @@ class OpenSandboxTest {
         assertFalse(cmd.contains("'" + scopeRoot + "/demo-a'"), "同名 L4 用户技能优先：包技能跳过且路径不触碰：" + cmd);
         assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-b' '" + scopeRoot + "/demo-b'"),
             "非同名包技能正常建链（与 L4 共存）：" + cmd);
+    }
+
+    @Test
+    void farmUnsafeSkillDirNameShouldSkipLinkAndWarn() throws Exception {
+        // 包技能目录名含空白/单引号：farm 侧 isShellSafeRelPath 不建链，tar 物化却会携带同一
+        // 文件——两模式对同一包行为分叉，跳过必须 WARN 留痕（含 rel 名），否则只表现为
+        // 「该技能缺失」无从排查
+        var host = java.nio.file.Files.createTempDirectory("farm-unsafe-name");
+        writeHostSkill(host, "sess-A", "demo-a");
+        writeHostSkill(host, "sess-A", "bad skill");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-unsafe-name-cfg");
+        bundleSkill(cfg, "demo-a");
+        bundleSkill(cfg, "bad skill");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var osb = farmOsb("v-" + version);
+
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+            io.agentmanager.framework.sandbox.opensandbox.SkillsFarm.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var sandbox = new OpenSandbox(farmState(host, "sbx-farm-unsafe"), osb,
+                farmOptions(svc, registry, null), null, null, new OpenSandboxFilesystemSpec());
+            bindFarmSession(sandbox, "sess-A");
+            sandbox.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        var cmd = farmConvergeCommands(osb).get(0);
+        String scopeRoot = "/workspace/.skills-cache/sess-A/oaf-package";
+        assertTrue(cmd.contains("ln -s '" + FARM_STORE + "/CURRENT/demo-a' '" + scopeRoot + "/demo-a'"),
+            "安全名技能正常建链：" + cmd);
+        assertFalse(cmd.contains("bad skill"), "不安全名不得进入任何引号路径段：" + cmd);
+        var messages = appender.list.stream()
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList();
+        assertTrue(messages.stream().anyMatch(m -> m.contains("rel not shell-safe")
+                && m.contains("oaf-package/bad skill")),
+            "跳过必须 WARN 留痕（含 rel 名）：" + messages);
     }
 }

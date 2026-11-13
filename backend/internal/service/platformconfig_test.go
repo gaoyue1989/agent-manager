@@ -290,6 +290,69 @@ func TestDeleteRemovesServiceSecret(t *testing.T) {
 	}
 }
 
+// TestSkillsyncTokenSecretLifecycle per-service 技能同步 token Secret（skills-syncd D-8）。
+// 发布方按普通 env 填 SKILLSYNC_TOKEN（不带 secretKeys——模板敏感键自动路由，评审修复的
+// 陷阱场景：漏路由则 token 明文落 CM 且 per-service Secret 不产出，池 Pod secretKeyRef
+// 解析失败卡 CreateContainerConfigError）→ Ensure {k8sName}-skillsync-token 落池 workload
+// ns（消费方；跨 ns secretKeyRef 不解析，服务 ns 无副本）；UpdateEnv 轮换 → 同 ns Secret
+// 同步更新（池 Pod 重建为 D-8 轮换语义）；服务删除连带清理。
+func TestSkillsyncTokenSecretLifecycle(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID,
+		map[string]string{"SKILLSYNC_TOKEN": "tok-1", "LOG_LEVEL": "info"}, nil)
+
+	if svc.EnvJSON != `{"LOG_LEVEL":"info"}` {
+		t.Fatalf("template-sensitive key must leave env_json, got %s", svc.EnvJSON)
+	}
+	cm, err := fk.CS().CoreV1().ConfigMaps("test").Get(t.Context(), "oaf-acme-demo-env", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cm.Data["SKILLSYNC_TOKEN"]; ok {
+		t.Fatal("CM must not contain SKILLSYNC_TOKEN (plaintext token)")
+	}
+	secName := k8s.SkillsyncTokenName(svc.K8sName)
+	sec, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("skillsync token secret must be ensured in pool workload ns: %v", err)
+	}
+	if string(sec.Data["token"]) != "tok-1" {
+		t.Fatalf("token value wrong: %q", sec.Data["token"])
+	}
+	if sec.Labels[k8s.LabelKey] != svc.K8sName {
+		t.Fatalf("owner label wrong: %+v", sec.Labels)
+	}
+	if _, err := fk.CS().CoreV1().Secrets("test").Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+		t.Fatal("service ns must have no skillsync token copy (cross-ns secretKeyRef is unresolvable)")
+	}
+	if _, err := core.UpdateEnv(svc.ID, map[string]string{"SKILLSYNC_TOKEN": "tok-2"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	sec, err = fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{})
+	if err != nil || string(sec.Data["token"]) != "tok-2" {
+		t.Fatalf("token rotation not mirrored to secret: err=%v data=%v", err, sec.Data)
+	}
+	if err := core.Delete(svc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), secName, metav1.GetOptions{}); err == nil {
+		t.Fatal("skillsync token secret must be deleted with service")
+	}
+}
+
+// TestNoSkillsyncTokenSecretWithoutToken env 无 SKILLSYNC_TOKEN 的服务不产出该 Secret。
+func TestNoSkillsyncTokenSecretWithoutToken(t *testing.T) {
+	core, fk, done := newTestCore(t)
+	defer done()
+	pkg := uploadTestPkg(t, core, "")
+	svc := publishWithEnv(t, core, fk, pkg.ID, map[string]string{"LOG_LEVEL": "info"}, nil)
+	if _, err := fk.CS().CoreV1().Secrets(k8s.SandboxWorkloadNamespace).Get(t.Context(), k8s.SkillsyncTokenName(svc.K8sName), metav1.GetOptions{}); err == nil {
+		t.Fatal("skillsync token secret must not exist without SKILLSYNC_TOKEN env")
+	}
+}
+
 // TestEnvSecretKeysMasking 掩码视图：值不随 JSON 直出，键集含存量未迁移键。
 func TestEnvSecretKeysMasking(t *testing.T) {
 	core, _, done := newTestCore(t)
