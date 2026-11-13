@@ -63,7 +63,7 @@ func newDaemon(cfg config, logger *log.Logger) *daemon {
 
 func (d *daemon) loop(ctx context.Context) {
 	for ctx.Err() == nil {
-		d.sleep(ctx, d.jitter)
+		d.sleep(ctx, randomBelow(d.jitter))
 		if ctx.Err() != nil {
 			return
 		}
@@ -111,15 +111,15 @@ func (d *daemon) cycle(ctx context.Context) error {
 		d.log.Printf("ver=%s recently pulled, skipping re-pull within tolerance window", info.Version)
 		return nil
 	}
-	d.sleep(ctx, pullDelay(d.cfg.interval))
+	d.sleep(ctx, randomBelow(d.cfg.interval))
 	return d.pull(info.Version)
 }
 
-func pullDelay(interval time.Duration) time.Duration {
-	if interval <= 0 {
+func randomBelow(max time.Duration) time.Duration {
+	if max <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(interval)))
+	return time.Duration(rand.Int64N(int64(max)))
 }
 
 func (d *daemon) withinTolerance(ver string) bool {

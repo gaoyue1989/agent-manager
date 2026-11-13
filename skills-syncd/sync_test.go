@@ -615,14 +615,23 @@ func TestFetchRetryBackoff(t *testing.T) {
 	})
 }
 
-func TestPullBackoffDelayBounds(t *testing.T) {
-	t.Run("generator within [0, interval)", func(t *testing.T) {
-		interval := 7 * time.Millisecond
-		for i := 0; i < 500; i++ {
-			got := pullDelay(interval)
-			if got < 0 || got >= interval {
-				t.Fatalf("pull delay %v outside [0, %v)", got, interval)
+func TestRandomDelayBounds(t *testing.T) {
+	t.Run("generator within [0, max)", func(t *testing.T) {
+		for _, max := range []time.Duration{7 * time.Millisecond, jitterMax} {
+			for i := 0; i < 500; i++ {
+				got := randomBelow(max)
+				if got < 0 || got >= max {
+					t.Fatalf("random delay %v outside [0, %v)", got, max)
+				}
 			}
+		}
+	})
+	t.Run("zero max yields zero", func(t *testing.T) {
+		if got := randomBelow(0); got != 0 {
+			t.Fatalf("randomBelow(0) = %v, want 0", got)
+		}
+		if got := randomBelow(-time.Second); got != 0 {
+			t.Fatalf("randomBelow(-1s) = %v, want 0", got)
 		}
 	})
 	t.Run("cycle delays bundle request", func(t *testing.T) {
