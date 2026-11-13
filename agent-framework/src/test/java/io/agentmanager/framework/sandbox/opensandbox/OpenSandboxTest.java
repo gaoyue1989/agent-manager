@@ -2055,6 +2055,112 @@ class OpenSandboxTest {
     }
 
     @Test
+    void farmFlipFromDegradedTarToFarmShouldConvergeWithinSameGeneration() throws Exception {
+        // D-11：同沙箱代先降级（tar 物化并记账）→ gate 丢失（框架重启/漂副本/LRU 逐出，Pod 级
+        // 指纹记账与 Redis 共享层存续）→ 守护就绪重判定 farm——farm 稳态不得命中 tar 记账跳过
+        // 收敛，否则降级残留的真实文件副本永久滞留（D-2 失效，发布换版对该会话不可见）
+        var host = java.nio.file.Files.createTempDirectory("farm-flip-f");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-flip-f-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        // store 探测应答可变：首会话无 CURRENT（守护未就绪 → 降级），恢复后切到版本目录（farm）
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        var current = new java.util.concurrent.atomic.AtomicReference<>(null);
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                var v = (String) current.get();
+                return v == null ? mockExecution(1, "", "") : mockExecution(0, v, "");
+            }
+            return mockExecution(0, "", "");
+        });
+
+        var spec = new OpenSandboxFilesystemSpec();
+        var call1 = new OpenSandbox(farmState(host, "sbx-flip-f"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertTrue(countHydrateTarWrites(osb) >= 1, "降级会话走 tar 物化并记账");
+        assertTrue(farmConvergeCommands(osb).isEmpty(), "降级会话不得建软链");
+
+        // gate 丢失而指纹记账存续：移除会话 gate（同 sandboxId），翻转 store 探测为 farm
+        spec.removeSkillSyncGate("sess-A", "sbx-flip-f");
+        current.set("v-" + version);
+        var call2 = new OpenSandbox(farmState(host, "sbx-flip-f"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call2, "sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(),
+            "同代降级(tar)→farm 翻转：tar 记账不得满足 farm 稳态，必须重收敛建链（D-2/§10.3-11）");
+        assertEquals(1.0, registry.get("skills.farm.decision").tag("result", "farm").counter().count(),
+            "重判定按 farm 落打点");
+    }
+
+    @Test
+    void farmFlipFromFarmToDegradedTarShouldMaterializeWithinSameGeneration() throws Exception {
+        // D-11 反向：farm 会话记账后 gate 丢失、重判定降级——降级会话必须走 tar 物化拿新内容
+        // （B-1），farm 记账不得满足降级稳态（否则零动作保留旧版 store 软链，降级语义被架空）
+        var host = java.nio.file.Files.createTempDirectory("farm-flip-t");
+        writeHostSkill(host, "sess-A", "demo-a");
+        var cfg = java.nio.file.Files.createTempDirectory("farm-flip-t-cfg");
+        bundleSkill(cfg, "demo-a");
+        var svc = bundleService(cfg);
+        var version = svc.currentVersion().version();
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        // store 探测应答可变：首会话 farm，翻转后无 CURRENT（降级）
+        var osb = mock(Sandbox.class);
+        var commands = mock(Commands.class);
+        when(osb.commands()).thenReturn(commands);
+        when(osb.files()).thenReturn(mock(Filesystem.class));
+        var current = new java.util.concurrent.atomic.AtomicReference<>("v-" + version);
+        when(commands.run(anyString())).thenAnswer(inv -> {
+            var cmd = inv.getArgument(0, String.class);
+            if (cmd.startsWith("readlink ")) {
+                var v = (String) current.get();
+                return v == null ? mockExecution(1, "", "") : mockExecution(0, v, "");
+            }
+            return mockExecution(0, "", "");
+        });
+
+        var spec = new OpenSandboxFilesystemSpec();
+        var call1 = new OpenSandbox(farmState(host, "sbx-flip-t"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call1, "sess-A");
+        call1.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(), "farm 会话收敛建链并记账");
+
+        spec.removeSkillSyncGate("sess-A", "sbx-flip-t");
+        current.set(null);
+        var call2 = new OpenSandbox(farmState(host, "sbx-flip-t"), osb,
+            farmOptions(svc, registry, null), null, null, spec);
+        bindFarmSession(call2, "sess-A");
+        call2.exec(RuntimeContext.builder().userId("sess-A").build(), "ls /workspace/.skills-cache", 30);
+
+        assertEquals(1, farmConvergeCommands(osb).size(), "降级会话不得建软链（不再追加收敛 exec）");
+        long tarWrites = org.mockito.Mockito.mockingDetails(osb.files()).getInvocations().stream()
+            .filter(inv -> inv.getMethod().getName().equals("write"))
+            .filter(inv -> {
+                var arg = inv.getArgument(0);
+                return arg instanceof java.util.List<?> list && !list.isEmpty()
+                    && ((WriteEntry) list.get(0)).getPath() != null
+                    && ((WriteEntry) list.get(0)).getPath().startsWith("/tmp/workspace.");
+            }).count();
+        assertTrue(tarWrites >= 1,
+            "同代 farm→降级翻转：farm 记账不得满足降级稳态，必须重物化拿新内容（B-1）");
+    }
+
+    @Test
     void farmConvergeFailureShouldNotRecordAndRetryNextTrigger() throws Exception {
         // D-10：收敛 exec 失败 → 上抛（CAS 复位）且不记账——失败即记账会让稳态短路跳过重建，
         // 容器永久缺链；下次触发重收敛，成功后才记账进入稳态。

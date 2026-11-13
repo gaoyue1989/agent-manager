@@ -97,17 +97,34 @@ class OpenSandboxFilesystemSpecTest {
     @Test
     void scopedFingerprintAndHydratedScopeShouldRoundTrip() {
         var spec = new OpenSandboxFilesystemSpec();
-        assertNull(spec.scopedSkillCacheFingerprint("sbx-1", "sess-A"), "未记录=未知走慢路径");
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "未记录=未知走慢路径");
         assertNull(spec.hydratedScopedScope("sbx-1"));
 
-        spec.recordScopedSkillCacheFingerprint("sbx-1", "sess-A", "fp-1");
+        spec.recordScopedSkillCacheFingerprint("sbx-1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR, "fp-1");
         spec.markHydratedScopedScope("sbx-1", "sess-A");
 
-        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-1", "sess-A"));
+        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-1", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR));
         assertEquals("sess-A", spec.hydratedScopedScope("sbx-1"));
         // 换 sandboxId（新沙箱代）= 未知 → 必须走慢路径
-        assertNull(spec.scopedSkillCacheFingerprint("sbx-2", "sess-A"));
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-2", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR));
         assertNull(spec.hydratedScopedScope("sbx-2"));
+    }
+
+    @Test
+    void fingerprintModeMismatchShouldNeverSatisfyOtherModeSteady() {
+        // D-11：记账值带投放模式分量——同沙箱代 tar↔farm 互转永不满足对方稳态，翻转必走慢路径
+        var spec = new OpenSandboxFilesystemSpec();
+        spec.recordScopedSkillCacheFingerprint("sbx-m", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR, "fp-1");
+
+        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-m", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR));
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-m", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "降级 tar 记账不得满足 farm 稳态（否则降级残留真实文件被跳过收敛，D-2 失效）");
+
+        spec.recordScopedSkillCacheFingerprint("sbx-m", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, "fp-1");
+        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-m", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM));
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-m", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "farm 记账不得满足降级稳态（否则降级会话零动作保留旧版软链，B-1 被架空）");
     }
 
     // ==================== 缺口④：scoped 指纹跨副本共享层 ====================
@@ -116,16 +133,34 @@ class OpenSandboxFilesystemSpecTest {
     void sharedFingerprintHitBackfillsPodTablesAndShortCircuits() {
         var spec = new OpenSandboxFilesystemSpec();
         var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
-        org.mockito.Mockito.when(shared.get("sbx-x", "sess-A")).thenReturn("fp-shared");
+        org.mockito.Mockito.when(shared.get("sbx-x", "sess-A"))
+            .thenReturn(OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR + "|fp-shared");
         spec.sharedFingerprintStore(shared);
 
         // Pod 级 miss → 共享层命中（他副本已投放）
-        assertNull(spec.scopedSkillCacheFingerprint("sbx-x", "zz"), "另一 scope 无记录");
-        assertEquals("fp-shared", spec.scopedSkillCacheFingerprint("sbx-x", "sess-A"),
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-x", "zz", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "另一 scope 无记录");
+        assertEquals("fp-shared", spec.scopedSkillCacheFingerprint("sbx-x", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
             "共享层命中返回他副本记录的指纹");
         // 命中同时回填 Pod 两表（稳态判定要求两表一致）
-        assertEquals("fp-shared", spec.scopedSkillCacheFingerprint("sbx-x", "sess-A"), "回填后 Pod 级命中");
+        assertEquals("fp-shared", spec.scopedSkillCacheFingerprint("sbx-x", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "回填后 Pod 级命中");
         assertEquals("sess-A", spec.hydratedScopedScope("sbx-x"), "已投放 scope 一并回填");
+    }
+
+    @Test
+    void sharedFingerprintModeMismatchFromOtherPodShouldMiss() {
+        // 重启/漂副本场景：共享层存续的是 farm 记账，同代降级(tar)稳态必须视为未知走慢路径
+        var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
+        org.mockito.Mockito.when(shared.get("sbx-r", "sess-A"))
+            .thenReturn(OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM + "|fp-9");
+        var spec = new OpenSandboxFilesystemSpec().sharedFingerprintStore(shared);
+
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-r", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "共享层 farm 记账对降级稳态不可见（模式分量跨副本存续，D-11）");
+        assertEquals("fp-9", spec.scopedSkillCacheFingerprint("sbx-r", "sess-A", OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM),
+            "同模式共享层命中照常短路");
+        assertEquals("sess-A", spec.hydratedScopedScope("sbx-r"), "共享层命中照常回填已投放 scope");
     }
 
     @Test
@@ -134,17 +169,19 @@ class OpenSandboxFilesystemSpecTest {
         var shared = org.mockito.Mockito.mock(ScopedFingerprintStore.class);
         spec.sharedFingerprintStore(shared);
 
-        spec.recordScopedSkillCacheFingerprint("sbx-y", "sess-B", "fp-1");
-        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-y", "sess-B"), "Pod 级已写");
-        org.mockito.Mockito.verify(shared).put("sbx-y", "sess-B", "fp-1");
+        spec.recordScopedSkillCacheFingerprint("sbx-y", "sess-B", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR, "fp-1");
+        assertEquals("fp-1", spec.scopedSkillCacheFingerprint("sbx-y", "sess-B", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "Pod 级已写");
+        org.mockito.Mockito.verify(shared).put("sbx-y", "sess-B", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR + "|fp-1");
     }
 
     @Test
     void noopStoreKeepsPurePodLocalBehavior() {
         var spec = new OpenSandboxFilesystemSpec(); // 未注入 → NOOP
-        assertNull(spec.scopedSkillCacheFingerprint("sbx-z", "sess-C"), "无共享层时未知=走慢路径");
-        spec.recordScopedSkillCacheFingerprint("sbx-z", "sess-C", "fp-2");
-        assertEquals("fp-2", spec.scopedSkillCacheFingerprint("sbx-z", "sess-C"));
+        assertNull(spec.scopedSkillCacheFingerprint("sbx-z", "sess-C", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR),
+            "无共享层时未知=走慢路径");
+        spec.recordScopedSkillCacheFingerprint("sbx-z", "sess-C", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR, "fp-2");
+        assertEquals("fp-2", spec.scopedSkillCacheFingerprint("sbx-z", "sess-C", OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR));
     }
 
     @Test

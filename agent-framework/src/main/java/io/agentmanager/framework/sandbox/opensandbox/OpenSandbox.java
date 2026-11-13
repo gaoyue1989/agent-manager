@@ -1399,7 +1399,9 @@ public class OpenSandbox extends AbstractBaseSandbox
      * 且本沙箱代已投放过当前 scope → 容器内容即最新 → 跳过 build、prune 与 hydrate
      * （66MB/2000f 实测从每 call ≈4.9s 降到 ≈35ms）。原实现把比对 hash 记在实例字段上，
      * 而 OpenSandbox 包装实例每次 acquire 重建 → 短路条件每 call 失忆 → 每轮全量重投。
-     * 软链农场路径（{@link #hydrateSkillsFarm}）共用同一指纹与记账表（skills-syncd D-10），
+     * 软链农场路径（{@link #hydrateSkillsFarm}）共用同一记账表（skills-syncd D-10），但记账值
+     * 带<b>投放模式分量</b>（{@link OpenSandboxFilesystemSpec#HYDRATE_MODE_TAR}）——同沙箱代
+     * 降级↔farm 翻转（gate 丢失后重判定）永不满足对方稳态，翻转必走一次重收敛/重物化。
      * 稳态同样 0 exec。正确性边界与投影指纹缓存一致：容器内文件被模型删除而宿主未变时漏补投，
      * 宿主内容下次变化点自愈（设计 §3.3 已接受的盲点，不损坏数据）。
      *
@@ -1441,9 +1443,11 @@ public class OpenSandbox extends AbstractBaseSandbox
             String fingerprint = scopedSkillCacheFingerprint(scopeDir, scope);
             String sandboxId = state.getSandboxId();
             // 稳态判定（双层：Pod 级为主、实例级为无 spec 构造兜底）：指纹未变 且 本沙箱代已
-            // 投放过当前 scope → 容器内容即最新
+            // 投放过当前 scope → 容器内容即最新；记账带 tar 模式分量——本代 farm 收敛的记账
+            // 不满足降级稳态（farm→degraded 翻转必须重物化，B-1）
             String podFp = filesystemSpec != null
-                ? filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope) : null;
+                ? filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope,
+                    OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR) : null;
             String podScope = filesystemSpec != null
                 ? filesystemSpec.hydratedScopedScope(sandboxId) : null;
             boolean steady = (podFp != null && podFp.equals(fingerprint) && scope.equals(podScope))
@@ -1461,7 +1465,8 @@ public class OpenSandbox extends AbstractBaseSandbox
             lastSkillCacheFingerprint.set(fingerprint);
             lastHydratedScope = scope;
             if (filesystemSpec != null) {
-                filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope, fingerprint);
+                filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope,
+                    OpenSandboxFilesystemSpec.HYDRATE_MODE_TAR, fingerprint);
                 filesystemSpec.markHydratedScopedScope(sandboxId, scope);
             }
             log.info("[sandbox-open] .skills-cache scoped to {} ({} payload)",
@@ -1684,17 +1689,20 @@ public class OpenSandbox extends AbstractBaseSandbox
      *
      * <p><b>稳态短路（D-10，设计修订否决原 H2「每次触发收敛」口径）</b>：与 tar 路径 P0-1 同源——
      * 宿主指纹（{@link #scopedSkillCacheFingerprint}，包内源 stat + L4 revision）+ sandboxId 代际
-     * 记账（复用 scoped 指纹表，Pod 级 miss 经跨副本共享层兜底）。指纹未变且本沙箱代已收敛过当前
-     * scope → 容器链接即最新（B-4 间接寻址，版本切换经 CURRENT 即见）→ 跳过收敛 exec。收敛触发面 =
-     * 新沙箱代（记账随新 sandboxId 清零）/ 指纹变化 / exec 失败不记账。会话中途容器重启（同
+     * 记账（复用 scoped 指纹表，Pod 级 miss 经跨副本共享层兜底），记账带 farm 模式分量（D-11：
+     * 本代降级 tar 物化的记账不满足 farm 稳态——降级↔farm 翻转后代际必须重收敛，把降级残留
+     * 真实文件副本替换为软链，D-2/§6.2-4）。指纹未变且本沙箱代已收敛过当前 scope → 容器链接即
+     * 最新（B-4 间接寻址，版本切换经 CURRENT 即见）→ 跳过收敛 exec。收敛触发面 = 新沙箱代（记账
+     * 随新 sandboxId 清零）/ 模式翻转 / 指纹变化 / exec 失败不记账。会话中途容器重启（同
      * sandboxId resume）软链不重建为已接受盲点——与投影指纹缓存 §3.3 系统性盲点同姿态（同代内
      * tar 物化/记忆注入同样不重投）；per-call 容器侧标记兜底被否决（观测容器态本身即 1 次 exec RTT）。
      */
     private void hydrateSkillsFarm(String scope, Path scopeDir, SkillSyncGate gate) throws Exception {
         String fingerprint = scopedSkillCacheFingerprint(scopeDir, scope);
         String sandboxId = state.getSandboxId();
-        // 稳态判定（D-10）：指纹未变 且 本沙箱代已收敛过当前 scope → 容器链接即最新
-        String podFp = filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope);
+        // 稳态判定（D-10 + 模式分量）：指纹未变 且 本沙箱代以 farm 模式收敛过当前 scope → 容器链接即最新
+        String podFp = filesystemSpec.scopedSkillCacheFingerprint(sandboxId, scope,
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM);
         boolean steady = podFp != null && podFp.equals(fingerprint)
             && scope.equals(filesystemSpec.hydratedScopedScope(sandboxId));
         if (steady) {
@@ -1727,8 +1735,9 @@ public class OpenSandbox extends AbstractBaseSandbox
             throw new SandboxException(SandboxErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
                 "hydrateSkillsFarm", "skills farm converge failed with exit " + execution.getExitCode(), null);
         }
-        // 收敛成功才记账（失败不记账：下次触发重收敛），与 tar 慢路径共用 scoped 指纹表
-        filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope, fingerprint);
+        // 收敛成功才记账（失败不记账：下次触发重收敛），带 farm 模式分量与 tar 慢路径共用 scoped 指纹表
+        filesystemSpec.recordScopedSkillCacheFingerprint(sandboxId, scope,
+            OpenSandboxFilesystemSpec.HYDRATE_MODE_FARM, fingerprint);
         filesystemSpec.markHydratedScopedScope(sandboxId, scope);
     }
 
