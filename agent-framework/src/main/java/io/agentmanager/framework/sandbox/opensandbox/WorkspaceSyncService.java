@@ -236,7 +236,12 @@ public class WorkspaceSyncService {
                 log.warn("skills/ sync: skip illegal skill dir name {}", name);
                 continue;
             }
-            // 不按条目类型预筛：目录判定交给 listDirectory 是否成功（execd 的 type 口径不一）
+            // 顶层技能位同样跳链（§6.3 两层同规则）：软链技能目录不列举进目标、不吸回内容
+            if (isSymlinkEntry(entry)) {
+                log.info("skills/ sync: {} 为符号链条目，跳过回写（跳链防御）", name);
+                continue;
+            }
+            // 目录不按条目类型预筛：目录判定交给 listDirectory 是否成功（execd 的 type 口径不一）
             if (syncOneSkill(userId, osbSandbox, skillsRoot + "/" + name, name, snapshotDiff ? gate : null)) {
                 syncedSkills++;
             }
@@ -579,13 +584,18 @@ public class WorkspaceSyncService {
     }
 
     /**
-     * 软链条目判定（skills-syncd §6.3 防御性跳链）：type 标注 symlink/link 的条目整体跳过，
+     * 软链条目判定（skills-syncd §6.3 防御性跳链）：type=symlink 的条目整体跳过，
      * 不读内容也不递归进目标——当前遍历只覆盖 /workspace/skills 不含农场软链区（.skills-cache），
      * 跳链保证未来遍历范围扩展时不把共享库内容吸回 L4。
+     *
+     * <p>type 是唯一可用判据：execd listDirectory 为 Lstat 语义（如实标注软链本体而非穿透后的
+     * 目标类型），而 EntryInfo 无 inode、mode 仅权限位（无类型位）——元数据兜底判据不存在，
+     * 读路径（readFile）对软链穿透。标注真实性由 skills-syncd §10.3-7 镜像实测把关，
+     * 失真时的补救决策规则见设计 §6.3（exec test -L 探测，不做预防性实现）。
+     * SDK 契约仅 file/directory/symlink/other 四值（api 层 FileInfo.Type），无 link。
      */
     private static boolean isSymlinkEntry(EntryInfo entry) {
-        var type = entry.getType();
-        return "symlink".equalsIgnoreCase(type) || "link".equalsIgnoreCase(type);
+        return "symlink".equalsIgnoreCase(entry.getType());
     }
 
     /** 目录条目判定：优先 type 字段（execd 返回 directory/file），缺失时回落尾斜杠 */

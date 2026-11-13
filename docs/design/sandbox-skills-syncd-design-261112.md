@@ -347,10 +347,20 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
 
 ### 6.3 syncBack 符号链接跳过（防御性）
 
-`WorkspaceSyncService.syncUserSkills` 遍历时跳过 `Files.isSymbolicLink` 条目。
-核实现状：该遍历只覆盖 `/workspace/skills`（`WorkspaceSyncService.java:216`、`WorkspaceReader.SKILLS_DIR`），
+`WorkspaceSyncService` 遍历时按条目 type 跳过软链条目（execd files API 无 lstat 面，
+`Files.isSymbolicLink` 不可用）：顶层技能位（syncUserSkills）与技能内递归
+（collectSkillFiles / walkSkillManifest）两层同规则——不读内容也不递归进目标。
+核实现状：该遍历只覆盖 `/workspace/skills`（`WorkspaceReader.SKILLS_DIR`），
 **不遍历 `.skills-cache`**——因此当前「库内容被吸回 L4」的风险并不成立；跳链保留为防御性约束，
-确保未来遍历范围扩展时不引入吸回。files API 侧的软链透明性验收见 §10.3。
+确保未来遍历范围扩展时不引入吸回。
+
+跳链判据 = 条目 `type=symlink`（唯一可用判据：EntryInfo 无 inode、mode 仅权限位无类型位，
+元数据兜底不可行；读路径 readFile 对软链穿透——不跳链即吸回）。契约已按上游源码核实
+（alibaba/OpenSandbox execd `components/execd`：listDirectory 用 `os.ReadDir`+`DirEntry.Info()`
+=Lstat 语义、`fileType` 先判 `ModeSymlink`、对软链根拒绝穿透 400；deployed 镜像版本仍以
+§10.3-7 实测把关）：若实测标注失真（软链被标成 file/directory），补救 = syncUserSkills 对
+可疑条目补 exec `test -L` 探测——per-entry exec 常态化被 D-10 否决，仅在实测失真时启用，
+不做预防性实现。
 
 ### 6.4 回退与开关
 
@@ -490,7 +500,10 @@ uk_session 唯一键），但**沙箱跨会话顺序复用**（池回收再认�
    （原 H2 口径已修订为 D-10 代际收敛）；会话中途容器重启（同 sandboxId resume）软链不重建——与投影
    指纹缓存已接受的容器态盲点同一系统性姿态（§6.2-4），宿主内容下次变化或新沙箱代自愈
 7. **execd files API 软链透明性**：`read_file`/`listDirectory` 对 `/skills-store/CURRENT/<skill>`
-   实测——穿透则直读；不穿透则验证框架翻译层 exec 兜底读正确（§13-8 决议）
+   实测——穿透则直读；不穿透则验证框架翻译层 exec 兜底读正确（§13-8 决议）。同步断言跳链判据
+   （§6.3，跳链有效性前提）：farm 软链在所在目录的 listDirectory 条目中 `type=symlink`、
+   `listDirectory` 对软链路径本身拒绝穿透（不返回目标子树）、`read_file` 对软链的穿透行为记录在案；
+   若 type 被标成 file/directory → 按 §6.3 决策规则补 exec `test -L` 探测兜底
 8. L 组沙箱生命周期 e2e 全绿（回归门禁）
 9. **模板-镜像偏斜（D-1）**：旧镜像 pod + 开 `commandWrapper` 的新模板 → 守卫兜底，
    task-executor 正常启动（无守护、会话降级），不出现 crashloop
