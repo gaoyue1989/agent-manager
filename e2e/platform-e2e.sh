@@ -112,6 +112,13 @@ k8s_res cm $K8S_NAME-env      && ok "A13 env ConfigMap 存在"  || bad "A13 Conf
 
 EXT=$(curl -s "${EP%/}/.well-known/agent-card.json")
 assert_contains "A14 外部经 Ingress/路由拉取 agent-card" "$EXT" '"name"'
+# 内部路径排除（安全不变量，deployment.md §七之二内部端点安全模型）：业务入口对
+# /internal、/actuator 恒 404（段边界）——router 模式由 router nginx 内置排除兜底，
+# host 模式由 Ingress 排除表改道 router 兜底，两种模式同断言、外部表现一致
+EXT_INTERNAL=$(curl -s -o /dev/null -w '%{http_code}' "${EP%/}/internal/skills/version")
+assert_eq "A14a 业务入口对 /internal 恒 404" "$EXT_INTERNAL" "404"
+EXT_ACTUATOR=$(curl -s -o /dev/null -w '%{http_code}' "${EP%/}/actuator/health")
+assert_eq "A14b 业务入口对 /actuator 恒 404" "$EXT_ACTUATOR" "404"
 POD_DIR=$(kubectl -n $NS exec deployment/platform-backend -- ls /data/packages 2>/dev/null | grep -c "^$PKG_ID$")
 assert_eq "A15 PVC 内包目录存在" "$POD_DIR" "1"
 

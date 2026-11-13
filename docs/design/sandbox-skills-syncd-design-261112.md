@@ -314,8 +314,16 @@ token 为 per-service 只读凭据（Secret 由平台下发或管理员预建；
   > host 模式 per-service Ingress 构造时把 `/internal`、`/actuator` 前缀改道
   > `platform-router-svc`（router `location /` 恒 404），`validateIngress` 拒绝丢失或改指的
   > overlay——backend/internal/k8s objects.go `hostModeInternalPath`、template.go
-  > `validateIngress`；运维口径见 docs/deployment.md §七之二/§七之三。router 模式只路由
-  > `/agent/{short}`，天然满足。
+  > `validateIngress`；运维口径见 docs/deployment.md §七之二/§七之三。
+  > 补记二（2026-11-13，评审修正）：「router 模式只路由 `/agent/{short}` 天然满足」不严格
+  > 成立——剥前缀透传任意子路径，`/agent/{short}/internal/skills/version` 与
+  > `/actuator/metrics` 经业务入口可达（守密性由 token 门兜住：无 token 401、未配 token
+  > 404，非漏洞；`ROUTER_AUTH_MODE` 鉴权是仅有的入口层防线）。已按纵深防御补齐：router
+  > nginx 内置段边界排除 `/agent/{short}/(internal|actuator)` 恒 404（manifests/
+  > platform-router.yaml，正则 location 先于泛化声明，守卫测试 backend/internal/k8s/
+  > router_test.go），两种模式外部表现一致。口径修正：**token 门为主控制，业务入口排除
+  > （router 内置 + host Ingress 排除表）为纵深防御**；守护消费经 `SKILLSYNC_BASE_URL`
+  > 集群内直连 svc，不经业务入口，不受排除影响。
 - 数据源 `/config`（PVC 只读 subPath，多副本天然一致）
 - **版本指纹 singleflight + ≤5s TTL 缓存**（D-4，修订 G2 的绝对化表述）：对包技能目录做 stat 指纹
   （relPath|mtime|size 排序遍历，2000 文件 ≈10-50ms）+ 服务级禁用集（B-2）。新鲜度语义由守护侧
