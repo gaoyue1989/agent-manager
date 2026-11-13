@@ -251,35 +251,29 @@ roleRef:
   name: platform-backend
   apiGroup: rbac.authorization.k8s.io
 ---
-# OpenSandbox 池 workload ns（deploy-opensandbox.sh 幂等共建；纯 Namespace 对象无字段冲突）：
-# per-service skillsync token Secret 的消费方落点（k8s.SkillsyncTokenSecret ensure +
-# 建池 SecretExists 前提门，sandbox-skills-syncd-design §5.2/§9.1）
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: opensandbox
----
+# OpenSandbox 池 workload ns（opensandbox，由 deploy-opensandbox.sh 创建）内 per-service
+# skillsync token Secret 的读写授权（k8s.SkillsyncTokenSecret ensure + 建池 SecretExists
+# 前提门）：ns 跨 agent-platform 边界且 CI kind 集群无该 ns（404≠403 走 no-token），
+# 故集群作用域授权仅限 secrets 三动词（chart namespaced 模式等价 Role 见 oaf-platform）
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
   name: platform-backend-skillsync
-  namespace: opensandbox
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get","create","update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: platform-backend-skillsync
-  namespace: opensandbox
 subjects:
   - kind: ServiceAccount
     name: platform-backend
     namespace: agent-platform
 roleRef:
-  kind: Role
+  kind: ClusterRole
   name: platform-backend-skillsync
   apiGroup: rbac.authorization.k8s.io
 ---
