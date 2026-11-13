@@ -15,8 +15,15 @@
 
   <localRepository>/root/.m2/repository</localRepository>
 
-  <!-- 内网 Nexus 示例配置 (注释开启) -->
   <mirrors>
+    <!-- central 缺省经阿里云公共仓库加速; 离线 (-o) 构建不受影响 -->
+    <mirror>
+      <id>aliyun</id>
+      <name>阿里云公共仓库</name>
+      <mirrorOf>central</mirrorOf>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+    <!-- 内网 Nexus 示例配置 (注释开启) -->
     <!--
     <mirror>
       <id>nexus</id>

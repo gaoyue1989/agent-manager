@@ -7,6 +7,9 @@ MVN        ?= mvn
 JAR        ?= target/agent-framework-2.1.0.jar
 IMAGE      ?= agent-framework:latest
 DEV_IMAGE  ?= gaoyue1989/agent-framework:java-dev
+# Maven 发行包下载镜像站 (前缀含 maven 目录层, 与官方 dist/maven 对齐; 构建容器直连;
+# 经代理出网的机器传 https://archive.apache.org/dist/maven 并自行补代理 build-arg)
+MAVEN_MIRROR ?= https://mirrors.huaweicloud.com/apache/maven
 
 .PHONY: help build package run dev test clean docker-build docker-build-dev \
         docker-save docker-load docker-push offline-build offline-cache clean-image \
@@ -66,9 +69,16 @@ otel-agent:
 docker-build: otel-agent
 	docker build -t $(IMAGE) -f Dockerfile .
 
-# 构建离线开发镜像 (有网络或已有 .m2 缓存的机器)
+# 构建离线开发镜像 (有网络或已有 .m2 缓存的机器):
+# m2 上下文预置本地依赖缓存, 缺失部分经 settings 阿里云源直连补齐;
+# 代理置空防止 daemon 代理注入容器 (国内直连即可达)
 docker-build-dev:
-	docker build -t $(DEV_IMAGE) -f Dockerfile.dev .
+	docker build -t $(DEV_IMAGE) -f Dockerfile.dev \
+		--build-context m2=$(HOME)/.m2 \
+		--build-arg MAVEN_MIRROR_URL=$(MAVEN_MIRROR) \
+		--build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= \
+		--build-arg http_proxy= --build-arg https_proxy= \
+		.
 
 # 导出离线镜像 tar.gz (便于传输到内网机器 docker load)
 docker-save: docker-build-dev
